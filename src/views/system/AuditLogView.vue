@@ -279,12 +279,12 @@ onMounted(() => {
     <div class="flex min-w-0 flex-col gap-4">
       <PageToolbarCard content-class="items-start">
         <template #default="{ isPhone, isTablet }">
-          <div class="flex flex-1 flex-wrap items-start gap-2">
+          <div class="flex flex-1 flex-wrap items-start gap-2.5">
             <el-select
               v-model="searchForm.actionType"
               placeholder="操作类型"
               clearable
-              :class="isPhone ? '!w-full' : isTablet ? '!w-[220px]' : '!w-56'"
+              :class="isPhone ? '!w-full' : isTablet ? '!w-[240px]' : '!w-[260px]'"
               @change="handleSearch"
             >
               <el-option v-for="item in actionOptions" :key="item.value" :label="item.label" :value="item.value" />
@@ -293,7 +293,7 @@ onMounted(() => {
               v-model="searchForm.targetType"
               placeholder="目标对象"
               clearable
-              :class="isPhone ? '!w-full' : '!w-40'"
+              :class="isPhone ? '!w-full' : isTablet ? '!w-[176px]' : '!w-[180px]'"
               @change="handleSearch"
             >
               <el-option v-for="item in targetTypeOptions" :key="item.value" :label="item.label" :value="item.value" />
@@ -302,7 +302,7 @@ onMounted(() => {
               v-model="searchForm.targetId"
               placeholder="按目标ID追溯"
               clearable
-              :class="isPhone ? '!w-full' : isTablet ? '!w-[220px]' : '!w-56'"
+              :class="isPhone ? '!w-full' : isTablet ? '!w-[240px]' : '!w-[260px]'"
               @clear="handleSearch"
               @keyup.enter="handleSearch"
             />
@@ -313,7 +313,7 @@ onMounted(() => {
               start-placeholder="开始时间"
               end-placeholder="结束时间"
               clearable
-              :class="isPhone ? '!w-full' : '!w-[340px]'"
+              :class="isPhone ? '!w-full' : isTablet ? '!w-[360px]' : '!w-[420px]'"
               @change="handleSearch"
             />
             <el-button :class="isPhone ? 'w-full' : ''" type="primary" icon="Search" @click="handleSearch">搜索</el-button>
@@ -341,7 +341,7 @@ onMounted(() => {
         <span v-if="canExportAuditLogs">导出按钮会按同一筛选条件导出全部命中结果。</span>
       </div>
 
-      <div class="apple-card flex min-h-0 flex-1 flex-col p-4">
+      <div class="apple-card flex min-h-0 flex-1 flex-col p-3 sm:p-4 xl:p-5">
         <BizResponsiveDataCollectionShell
           :items="cardRecords"
           :loading="listState.loading"
@@ -349,27 +349,27 @@ onMounted(() => {
           empty-min-height="260px"
           :skeleton-rows="8"
           wrapper-class="flex min-h-0 flex-1 flex-col"
-          table-wrapper-class="flex min-h-0 flex-1 flex-col overflow-hidden"
+          table-wrapper-class="flex min-h-0 flex-1 flex-col overflow-hidden px-0"
           card-container-class="pb-4"
         >
           <template #table>
-            <el-table :data="listState.records" stripe class="w-full flex-1" height="100%">
+            <el-table :data="listState.records" stripe class="w-full flex-1" height="100%" table-layout="auto">
               <el-table-column label="时间" width="170">
                 <template #default="{ row }">{{ dayjs(row.createdAt).format('YYYY-MM-DD HH:mm:ss') }}</template>
               </el-table-column>
-              <el-table-column prop="actionLabel" label="动作" min-width="150" />
+              <el-table-column prop="actionLabel" label="动作" min-width="160" show-overflow-tooltip />
               <el-table-column label="结果" width="90">
                 <template #default="{ row }">
                   <el-tag :type="getResultTagType(row.resultStatus)" effect="light">{{ getResultLabel(row.resultStatus) }}</el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="操作人" min-width="130">
+              <el-table-column label="操作人" min-width="148" show-overflow-tooltip>
                 <template #default="{ row }">{{ row.actorDisplayName || row.actorUsername || '-' }}</template>
               </el-table-column>
-              <el-table-column label="目标对象" min-width="180">
+              <el-table-column label="目标对象" min-width="210" show-overflow-tooltip>
                 <template #default="{ row }">{{ row.targetType }}<span v-if="row.targetCode"> / {{ row.targetCode }}</span></template>
               </el-table-column>
-              <el-table-column label="详情" min-width="260" show-overflow-tooltip>
+              <el-table-column label="详情" min-width="420" show-overflow-tooltip>
                 <template #default="{ row }">
                   <pre class="max-h-[92px] overflow-hidden whitespace-pre-wrap break-all text-xs leading-5 text-slate-500 dark:text-slate-400">{{ formatDetail(row.detailJson) }}</pre>
                 </template>

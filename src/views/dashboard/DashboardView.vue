@@ -16,7 +16,6 @@ const loading = ref(false)
 const stats = ref<DashboardStats | null>(null)
 const loadStatus = ref<'idle' | 'success' | 'error' | 'canceled'>('idle')
 const dashboardRequest = useStableRequest()
-const showDashboardSkeleton = computed(() => !stats.value && (loading.value || loadStatus.value === 'idle'))
 
 /**
  * 当前用户可见快捷入口：
@@ -123,7 +122,7 @@ onActivated(() => {
 
 <template>
   <PageContainer title="工作台" description="查看今日出库概览，快速进入常用业务操作。">
-    <div v-if="showDashboardSkeleton" class="dashboard-container mx-auto min-w-0 space-y-5 sm:space-y-6">
+    <div v-if="(loading && !stats) || loadStatus === 'idle'" class="dashboard-container mx-auto min-w-0 space-y-5 sm:space-y-6">
       <section
         :class="[
           'relative overflow-hidden rounded-2xl bg-gradient-to-r from-teal-500 to-teal-400 text-white shadow-sm',

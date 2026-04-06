@@ -630,12 +630,12 @@ onMounted(() => {
     <div class="flex min-w-0 flex-col gap-4">
       <PageToolbarCard content-class="items-start">
         <template #default="{ isPhone, isTablet }">
-          <div class="flex flex-1 flex-wrap items-start gap-2">
+          <div class="flex flex-1 flex-wrap items-start gap-2.5">
             <el-input
               v-model="searchForm.keyword"
               placeholder="搜索账号或姓名"
               clearable
-              :class="isPhone ? '!w-full' : isTablet ? '!w-[220px]' : '!w-60'"
+              :class="isPhone ? '!w-full' : isTablet ? '!w-[240px]' : '!w-[280px]'"
               @clear="handleSearch"
               @keyup.enter="handleSearch"
             />
@@ -643,7 +643,7 @@ onMounted(() => {
               v-model="searchForm.role"
               placeholder="角色"
               clearable
-              :class="isPhone ? '!w-full' : '!w-36'"
+              :class="isPhone ? '!w-full' : isTablet ? '!w-[160px]' : '!w-[168px]'"
               @change="handleSearch"
             >
               <el-option label="管理员" value="admin" />
@@ -653,7 +653,7 @@ onMounted(() => {
               v-model="searchForm.status"
               placeholder="状态"
               clearable
-              :class="isPhone ? '!w-full' : '!w-36'"
+              :class="isPhone ? '!w-full' : isTablet ? '!w-[160px]' : '!w-[168px]'"
               @change="handleSearch"
             >
               <el-option label="启用" value="enabled" />
@@ -681,7 +681,7 @@ onMounted(() => {
         {{ authStore.currentUser ? getGovernancePermissionLabels(authStore.currentUser.permissions).join('、') || '仅查看基础业务页面' : '未登录' }}。
       </div>
 
-      <div class="apple-card flex min-h-0 flex-1 flex-col p-4">
+      <div class="apple-card flex min-h-0 flex-1 flex-col p-3 sm:p-4 xl:p-5">
         <BizResponsiveDataCollectionShell
           :items="listState.records"
           :loading="listState.loading"
@@ -689,13 +689,13 @@ onMounted(() => {
           empty-min-height="260px"
           :skeleton-rows="6"
           wrapper-class="flex min-h-0 flex-1 flex-col"
-          table-wrapper-class="flex min-h-0 flex-1 flex-col overflow-hidden"
+          table-wrapper-class="flex min-h-0 flex-1 flex-col overflow-hidden px-0"
           card-container-class="pb-4"
         >
           <template #table>
-            <el-table :data="listState.records" stripe class="user-manage-table w-full flex-1" height="100%">
-              <el-table-column prop="username" label="账号" min-width="150" />
-              <el-table-column prop="displayName" label="姓名" min-width="120" />
+            <el-table :data="listState.records" stripe class="user-manage-table w-full flex-1" height="100%" table-layout="auto">
+              <el-table-column prop="username" label="账号" min-width="150" show-overflow-tooltip />
+              <el-table-column prop="displayName" label="姓名" min-width="132" show-overflow-tooltip />
               <el-table-column label="角色" width="110">
                 <template #default="{ row }">
                   <el-tag :type="getRoleTagType(row.role)" effect="light">{{ getRoleLabel(row.role) }}</el-tag>
@@ -706,7 +706,7 @@ onMounted(() => {
                   <el-tag :type="getStatusTagType(row.status)" effect="light">{{ getStatusLabel(row.status) }}</el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="关键权限边界" min-width="320" class-name="user-manage__permission-cell">
+              <el-table-column label="关键权限边界" min-width="360" class-name="user-manage__permission-cell">
                 <template #default="{ row }">
                   <div class="flex flex-wrap items-start gap-2 py-1">
                     <el-tag
@@ -723,13 +723,13 @@ onMounted(() => {
                   </div>
                 </template>
               </el-table-column>
-              <el-table-column label="最后登录" min-width="168">
+              <el-table-column label="最后登录" min-width="176">
                 <template #default="{ row }">{{ row.lastLoginAt ? dayjs(row.lastLoginAt).format('YYYY-MM-DD HH:mm') : '-' }}</template>
               </el-table-column>
-              <el-table-column label="创建时间" min-width="168">
+              <el-table-column label="创建时间" min-width="176">
                 <template #default="{ row }">{{ dayjs(row.createdAt).format('YYYY-MM-DD HH:mm') }}</template>
               </el-table-column>
-              <el-table-column v-if="canOperateUsers" label="操作" min-width="260" align="right" class-name="user-manage__action-cell">
+              <el-table-column v-if="canOperateUsers" label="操作" min-width="220" align="right" class-name="user-manage__action-cell">
                 <template #default="{ row }">
                   <div class="flex flex-wrap items-center justify-end gap-x-3 gap-y-2 py-1">
                     <el-button v-if="canShowEditAction(row)" link type="primary" @click="handleOpenEdit(row)">编辑</el-button>

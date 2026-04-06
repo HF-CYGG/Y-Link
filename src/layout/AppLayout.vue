@@ -37,14 +37,14 @@ const menuItems = computed(() => buildAppMenuItems(authStore.currentUser))
  */
 const mainPaddingClass = computed(() => {
   if (appStore.isDesktop) {
-    return 'px-6 py-5'
-  }
-
-  if (appStore.isTablet) {
     return 'px-4 py-4'
   }
 
-  return 'px-3 py-3'
+  if (appStore.isTablet) {
+    return 'px-3 py-3'
+  }
+
+  return 'px-2.5 py-2.5'
 })
 
 /**

@@ -36,7 +36,7 @@ const appStore = useAppStore()
  */
 const containerClass = computed(() => {
   return [
-    'mt-4 flex min-w-0',
+    'mt-4 flex w-full min-w-0',
     appStore.isPhone ? 'justify-center' : 'justify-end',
   ]
 })

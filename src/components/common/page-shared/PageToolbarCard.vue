@@ -42,7 +42,7 @@ const wrapperClass = computed(() => {
 
   return [
     'flex flex-col gap-3',
-    'sm:flex-row sm:items-center sm:justify-between',
+    'sm:flex-row sm:items-start sm:justify-between',
     props.contentClass,
   ]
 })

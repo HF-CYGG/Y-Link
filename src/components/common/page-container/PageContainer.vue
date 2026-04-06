@@ -24,18 +24,18 @@ const appStore = useAppStore()
  */
 const containerClass = computed(() => {
   if (props.narrow) {
-    return appStore.isPhone ? 'max-w-[100%]' : 'max-w-5xl'
+    return appStore.isPhone ? 'w-full max-w-full' : 'mx-auto w-full max-w-5xl'
   }
 
   if (appStore.isDesktop) {
-    return 'max-w-[1360px]'
+    return 'w-full max-w-none'
   }
 
   if (appStore.isTablet) {
-    return 'max-w-[1080px]'
+    return 'w-full max-w-none'
   }
 
-  return 'max-w-full'
+  return 'w-full max-w-full'
 })
 
 /**
@@ -45,11 +45,11 @@ const containerClass = computed(() => {
  */
 const sectionPaddingClass = computed(() => {
   if (appStore.isDesktop) {
-    return 'px-1 py-1'
+    return 'px-0 py-1'
   }
 
   if (appStore.isTablet) {
-    return 'px-0.5 py-0.5'
+    return 'px-0 py-0.5'
   }
 
   return 'px-0 py-0.5'
@@ -57,7 +57,7 @@ const sectionPaddingClass = computed(() => {
 </script>
 
 <template>
-  <section :class="['mx-auto w-full min-w-0', containerClass, sectionPaddingClass]">
+  <section :class="['w-full min-w-0', containerClass, sectionPaddingClass]">
     <header v-if="title || description" class="mb-4 flex min-w-0 flex-col gap-1 sm:mb-5">
       <h1 v-if="title" class="truncate text-xl font-semibold text-slate-900 dark:text-slate-100 sm:text-2xl">
         {{ title }}
