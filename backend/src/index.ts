@@ -23,6 +23,12 @@ async function bootstrap(): Promise<void> {
     console.log(
       `[y-link-backend] default admin username=${adminBootstrap.username} initialized=${adminBootstrap.initialized}`,
     )
+    if (adminBootstrap.initialized) {
+      console.log(
+        `[y-link-backend] default admin credentials username=${adminBootstrap.username} password=${env.INIT_ADMIN_PASSWORD}`,
+      )
+      console.log('[y-link-backend] security notice: please change the default admin password after first login.')
+    }
   })
 }
 
