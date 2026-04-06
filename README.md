@@ -76,6 +76,65 @@ docker compose -f compose.cloud.yml pull
 docker compose -f compose.cloud.yml up -d
 ```
 
+`compose.cloud.yml` 参考内容（可直接粘贴到 1Panel 编排）：
+
+```yaml
+services:
+  backend:
+    image: ${BACKEND_IMAGE:-docker.io/yemiao351/y-link-backend:latest}
+    pull_policy: always
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - LOG_COLOR=${LOG_COLOR:-true}
+      - FORCE_COLOR=${FORCE_COLOR:-1}
+      - DB_TYPE=${DB_TYPE:-sqlite}
+      - SQLITE_DB_PATH=${SQLITE_DB_PATH:-/app/data/y-link.sqlite}
+      - DB_HOST=${DB_HOST:-127.0.0.1}
+      - DB_PORT=${DB_PORT:-3306}
+      - DB_USER=${DB_USER:-root}
+      - DB_PASSWORD=${DB_PASSWORD:-}
+      - DB_NAME=${DB_NAME:-y_link}
+      - DB_SYNC=${DB_SYNC:-false}
+      - INIT_ADMIN_USERNAME=${INIT_ADMIN_USERNAME:-admin}
+      - INIT_ADMIN_DISPLAY_NAME=${INIT_ADMIN_DISPLAY_NAME:-系统管理员}
+      - INIT_ADMIN_PASSWORD=${INIT_ADMIN_PASSWORD:-Admin@123456}
+    ports:
+      - "${BACKEND_PORT:-3001}:3001"
+    volumes:
+      - y_link_cloud_sqlite_data:/app/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null http://127.0.0.1:3001/health || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+
+  frontend:
+    image: ${FRONTEND_IMAGE:-docker.io/yemiao351/y-link-frontend:latest}
+    pull_policy: always
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null http://127.0.0.1/ && wget -q -O /dev/null http://127.0.0.1/health || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  y_link_cloud_sqlite_data:
+```
+
 项目内置一键命令（自动拉起前后端 + 统一日志）：
 
 ```bash
