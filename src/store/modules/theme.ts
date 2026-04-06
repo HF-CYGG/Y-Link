@@ -52,7 +52,7 @@ const THEME_TRANSITION_EASING = 'cubic-bezier(0.22, 1, 0.36, 1)'
  * - Store 可在应用启动前被提前创建；
  * - 因此所有 DOM 能力都必须先做运行环境保护。
  */
-const isClientEnvironment = () => typeof window !== 'undefined' && typeof document !== 'undefined'
+const isClientEnvironment = () => globalThis.window !== undefined && globalThis.document !== undefined
 
 /**
  * 解析动画触发点：
@@ -72,8 +72,8 @@ const resolveTriggerPoint = (event?: MouseEvent): ThemeTriggerPoint => {
     && Number.isFinite(event.clientY)
   ) {
     return {
-      x: Math.min(window.innerWidth, Math.max(0, event.clientX)),
-      y: Math.min(window.innerHeight, Math.max(0, event.clientY)),
+      x: Math.min(globalThis.window.innerWidth, Math.max(0, event.clientX)),
+      y: Math.min(globalThis.window.innerHeight, Math.max(0, event.clientY)),
     }
   }
 
@@ -87,8 +87,8 @@ const resolveTriggerPoint = (event?: MouseEvent): ThemeTriggerPoint => {
   }
 
   return {
-    x: window.innerWidth / 2,
-    y: window.innerHeight / 2,
+    x: globalThis.window.innerWidth / 2,
+    y: globalThis.window.innerHeight / 2,
   }
 }
 
@@ -103,8 +103,8 @@ const resolveTransitionRadius = ({ x, y }: ThemeTriggerPoint) => {
   }
 
   return Math.hypot(
-    Math.max(x, window.innerWidth - x),
-    Math.max(y, window.innerHeight - y),
+    Math.max(x, globalThis.window.innerWidth - x),
+    Math.max(y, globalThis.window.innerHeight - y),
   )
 }
 
@@ -216,7 +216,7 @@ export const useThemeStore = defineStore('theme', () => {
    */
   const clearFallbackTimer = () => {
     if (fallbackTimer !== null && isClientEnvironment()) {
-      window.clearTimeout(fallbackTimer)
+      globalThis.window.clearTimeout(fallbackTimer)
       fallbackTimer = null
     }
   }
@@ -232,18 +232,14 @@ export const useThemeStore = defineStore('theme', () => {
     }
 
     if (!reducedMotionMediaQuery) {
-      reducedMotionMediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)')
+      reducedMotionMediaQuery = globalThis.window.matchMedia('(prefers-reduced-motion: reduce)')
       const updatePreference = (event?: MediaQueryListEvent) => {
         prefersReducedMotion.value = event?.matches ?? reducedMotionMediaQuery?.matches ?? false
       }
 
       updatePreference()
 
-      if (typeof reducedMotionMediaQuery.addEventListener === 'function') {
-        reducedMotionMediaQuery.addEventListener('change', updatePreference)
-      } else if (typeof reducedMotionMediaQuery.addListener === 'function') {
-        reducedMotionMediaQuery.addListener(updatePreference)
-      }
+      reducedMotionMediaQuery.addEventListener('change', updatePreference)
       return
     }
 
@@ -278,7 +274,7 @@ export const useThemeStore = defineStore('theme', () => {
       await nextTick()
 
       clearFallbackTimer()
-      fallbackTimer = window.setTimeout(() => {
+      fallbackTimer = globalThis.window.setTimeout(() => {
         fallbackTimer = null
         finishTransition()
       }, THEME_TRANSITION_DURATION_MS + 80)

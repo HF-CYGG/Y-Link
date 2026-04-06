@@ -100,7 +100,9 @@ export const useAuthStore = defineStore('auth', () => {
     }
 
     currentUser.value = normalizeUserSafeProfile(payload.user)
-    expiresAt.value = payload.expiresAt === undefined ? expiresAt.value : payload.expiresAt
+    if (payload.expiresAt !== undefined) {
+      expiresAt.value = payload.expiresAt
+    }
     initialized.value = true
     syncPersistedState()
   }
@@ -152,7 +154,7 @@ export const useAuthStore = defineStore('auth', () => {
       return isAuthenticated.value
     }
 
-    if (initializePromise) {
+    if (initializePromise !== null) {
       return initializePromise
     }
 

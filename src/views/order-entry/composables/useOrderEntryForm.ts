@@ -8,6 +8,24 @@ import { extractErrorMessage } from '@/utils/error'
 import type { FocusField, OrderEntryDrawerForm, OrderHeaderForm, OrderItemRow } from '../types'
 
 /**
+ * 数值归一化：
+ * - 将 null / NaN / 非有限数字统一归 0；
+ * - 作为 composable 外层纯函数，避免在每次组合函数实例化时重复创建。
+ */
+function normalizeNumber(value: number | null): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+/**
+ * 金额格式化：
+ * - 所有金额统一输出两位小数；
+ * - 作为外层工具函数复用，减少闭包内部重复定义。
+ */
+function toMoney(value: number): string {
+  return value.toFixed(2)
+}
+
+/**
  * 订单录入页业务编排 composable：
  * - 收拢产品加载、明细编辑、键盘流与提交逻辑；
  * - 让页面入口只负责装配头部/明细/汇总展示单元；
@@ -203,11 +221,11 @@ export const useOrderEntryForm = () => {
    * - 仅在浏览器环境且持久化开关就绪后执行，避免初始化阶段把空白态覆盖到草稿。
    */
   const persistDraft = () => {
-    if (!draftPersistenceReady.value || typeof window === 'undefined') {
+    if (!draftPersistenceReady.value || typeof globalThis.window === 'undefined') {
       return
     }
 
-    window.sessionStorage.setItem(ORDER_ENTRY_DRAFT_STORAGE_KEY, JSON.stringify(buildDraftSnapshot()))
+    globalThis.window.sessionStorage.setItem(ORDER_ENTRY_DRAFT_STORAGE_KEY, JSON.stringify(buildDraftSnapshot()))
   }
 
   /**
@@ -216,11 +234,11 @@ export const useOrderEntryForm = () => {
    * - 若草稿不存在或解析失败，则回退为全新空白录入状态。
    */
   const restoreDraft = (): boolean => {
-    if (typeof window === 'undefined') {
+    if (typeof globalThis.window === 'undefined') {
       return false
     }
 
-    const rawDraft = window.sessionStorage.getItem(ORDER_ENTRY_DRAFT_STORAGE_KEY)
+    const rawDraft = globalThis.window.sessionStorage.getItem(ORDER_ENTRY_DRAFT_STORAGE_KEY)
     if (!rawDraft) {
       return false
     }
@@ -256,27 +274,9 @@ export const useOrderEntryForm = () => {
       drawerForm.remark = parsedDraft.drawerForm.remark ?? ''
       return true
     } catch {
-      window.sessionStorage.removeItem(ORDER_ENTRY_DRAFT_STORAGE_KEY)
+      globalThis.window.sessionStorage.removeItem(ORDER_ENTRY_DRAFT_STORAGE_KEY)
       return false
     }
-  }
-
-  /**
-   * 数值归一化：
-   * - 将 null / NaN / 非有限数字统一归 0；
-   * - 供金额、数量与提交参数共用，避免重复判断。
-   */
-  function normalizeNumber(value: number | null): number {
-    return typeof value === 'number' && Number.isFinite(value) ? value : 0
-  }
-
-  /**
-   * 金额格式化：
-   * - 所有金额统一输出两位小数；
-   * - 让桌面表格、卡片与汇总区显示保持一致。
-   */
-  function toMoney(value: number): string {
-    return value.toFixed(2)
   }
 
   /**
@@ -494,7 +494,7 @@ export const useOrderEntryForm = () => {
    */
   const openDrawerForCreate = async () => {
     await appendRow(false)
-    const latest = itemRows.value[itemRows.value.length - 1]
+    const latest = itemRows.value.at(-1)
     if (!latest) {
       return
     }
@@ -589,7 +589,7 @@ export const useOrderEntryForm = () => {
       }
 
       if (rowIndex > 0) {
-        focusField(itemRows.value[rowIndex - 1].uid, focusFieldOrder[focusFieldOrder.length - 1])
+        focusField(itemRows.value[rowIndex - 1].uid, focusFieldOrder.at(-1) ?? 'remark')
       }
       return
     }
