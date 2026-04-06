@@ -10,6 +10,7 @@
 前端基于 Vue 3 + TypeScript，后端基于 Express + TypeORM，支持亮暗双主题、键盘流开单、以及 Docker 一体化与云端镜像化部署。
 
 [查看详细开发与部署文档（Wiki）](https://github.com/HF-CYGG/Y-Link/wiki)
+[在线查看仓库](https://github.com/HF-CYGG/Y-Link)
 
 ---
 
@@ -19,12 +20,14 @@
 - 默认 SQLite 零配置启动，同时支持切换 MySQL。
 - 内置 Docker Compose 与 GitHub Actions，支持自动构建并推送 Docker Hub。
 - 权限、审计链路完善，适合持续迭代的业务系统。
+- 开单录入支持草稿态保留，临时切页返回后可恢复输入内容。
 
 ---
 
 ## 界面预览
-### 登录页
-![Login](./docs/photo/login.png)
+### 登录页（亮色 / 暗色）
+![Login White](./docs/photo/login-white.png)
+![Login Dark](./docs/photo/login-black.png)
 
 ### 工作台
 ![Dashboard](./docs/photo/dashboard.png)
@@ -54,6 +57,12 @@ docker compose up -d --build
 docker compose down
 ```
 
+如果只想本地联调（非 Docker），可执行：
+
+```bash
+npm run local:dev
+```
+
 ---
 
 ## 技术栈
@@ -70,6 +79,8 @@ README 仅保留基础说明，完整开发文档与部署细节统一维护在 
 - [Developer Guide（本地开发）](https://github.com/HF-CYGG/Y-Link/wiki/Developer-Guide)
 - [Deployment（部署指南）](https://github.com/HF-CYGG/Y-Link/wiki/Deployment)
 - [GitHub Actions（自动化与 CI/CD）](https://github.com/HF-CYGG/Y-Link/wiki/GitHub-Actions)
+- [API Reference（接口说明）](https://github.com/HF-CYGG/Y-Link/wiki/API-Reference)
+- [Troubleshooting（故障排查）](https://github.com/HF-CYGG/Y-Link/wiki/Troubleshooting)
 
 ---
 
