@@ -64,6 +64,8 @@ const handleSubmit = async () => {
 
 <template> 
   <div class="login-page"> 
+    <div class="login-grid-layer" aria-hidden="true"></div>
+    <div class="login-ambient-layer" aria-hidden="true"></div>
     <main class="login-shell"> 
       <aside class="visual-panel"> 
         <div class="brand-top"> 
@@ -199,8 +201,10 @@ const handleSubmit = async () => {
   align-items: center; 
   justify-content: center; 
   background-color: var(--bg-primary); 
+  padding: 24px;
   overflow: hidden;
-  z-index: 1;
+  z-index: 0;
+  isolation: isolate;
   transition: background-color 0.5s ease;
 } 
 
@@ -217,45 +221,44 @@ body.dark .login-page {
 } 
 
 /* 动感网格层（极客骨架） */
-.login-page::before {
-  content: '';
+.login-grid-layer {
   position: absolute;
   inset: 0;
-  z-index: -1;
+  z-index: 0;
   pointer-events: none;
   background-image:
-    linear-gradient(to right, rgba(13, 148, 136, 0.04) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(13, 148, 136, 0.04) 1px, transparent 1px);
+    linear-gradient(to right, rgba(13, 148, 136, 0.075) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(13, 148, 136, 0.075) 1px, transparent 1px);
   background-size: 40px 40px;
-  mask-image: radial-gradient(circle at center, black 20%, transparent 75%);
-  -webkit-mask-image: radial-gradient(circle at center, black 20%, transparent 75%);
-  animation: gridDrift 20s linear infinite;
+  mask-image: radial-gradient(circle at center, black 48%, transparent 92%);
+  -webkit-mask-image: radial-gradient(circle at center, black 48%, transparent 92%);
+  animation: gridDrift 12s linear infinite;
+  will-change: background-position;
 }
 
-:global(.dark) .login-page::before {
+:global(.dark) .login-grid-layer {
   background-image:
-    linear-gradient(to right, rgba(20, 184, 166, 0.06) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(20, 184, 166, 0.06) 1px, transparent 1px);
+    linear-gradient(to right, rgba(20, 184, 166, 0.11) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(20, 184, 166, 0.11) 1px, transparent 1px);
 }
 
-/* 底层呼吸氛围光晕（Tech Zen） */
-.login-page::after {
-  content: '';
+.login-ambient-layer {
   position: absolute;
-  width: 50vw;
-  height: 50vh;
+  width: 58vw;
+  height: 58vh;
   top: 50%;
   left: 50%;
   transform: translate(-50%, -50%);
-  z-index: -2;
+  z-index: 0;
   pointer-events: none;
-  background: radial-gradient(circle, rgba(13, 148, 136, 0.06) 0%, transparent 60%);
+  background: radial-gradient(circle, rgba(13, 148, 136, 0.11) 0%, transparent 62%);
   filter: blur(80px);
   animation: ambientBreathe 10s ease-in-out infinite alternate;
+  will-change: transform, opacity;
 }
 
-:global(.dark) .login-page::after {
-  background: radial-gradient(circle, rgba(20, 184, 166, 0.12) 0%, transparent 60%);
+:global(.dark) .login-ambient-layer {
+  background: radial-gradient(circle, rgba(20, 184, 166, 0.17) 0%, transparent 62%);
 }
 
 @keyframes gridDrift {
@@ -263,7 +266,7 @@ body.dark .login-page {
     background-position: 0 0;
   }
   100% {
-    background-position: -40px -40px;
+    background-position: -80px -80px;
   }
 }
 
@@ -279,6 +282,8 @@ body.dark .login-page {
 }
 
 .login-shell { 
+  position: relative;
+  z-index: 2;
   display: flex; 
   width: 100%; 
   max-width: 1000px; 
@@ -695,6 +700,8 @@ body.dark .geo-input :deep(.el-input__wrapper.is-focus) {
 } 
 
 @media (prefers-reduced-motion: reduce) {
+  .login-grid-layer,
+  .login-ambient-layer,
   .form-title,
   .form-subtitle,
   .geo-input-1,
