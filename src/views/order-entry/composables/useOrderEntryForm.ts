@@ -378,6 +378,7 @@ export const useOrderEntryForm = () => {
   const ensureProductId = async (
     rawValue: string,
     createdCache: Map<string, string>,
+    unitPrice: number,
   ): Promise<string> => {
     const normalizedValue = normalizeTextValue(rawValue)
     if (!normalizedValue) {
@@ -402,7 +403,7 @@ export const useOrderEntryForm = () => {
     const created = await productApi.createProduct({
       productName: normalizedValue,
       pinyinAbbr: '',
-      defaultPrice: 0,
+      defaultPrice: unitPrice > 0 ? unitPrice : 0,
       isActive: true,
     })
     products.value = [created, ...products.value]
@@ -425,7 +426,7 @@ export const useOrderEntryForm = () => {
     const submitItems: SubmitOrderPayload['items'] = []
 
     for (const row of rows) {
-      const resolvedProductId = await ensureProductId(row.productId, createdCache)
+      const resolvedProductId = await ensureProductId(row.productId, createdCache, normalizeNumber(row.unitPrice))
       row.productId = resolvedProductId
       submitItems.push({
         productId: resolvedProductId,
@@ -647,6 +648,16 @@ export const useOrderEntryForm = () => {
 
     if (!validSubmitItems.value.length) {
       ElMessage.warning('请至少录入一条有效明细（已选择产品且数量大于 0）')
+      return
+    }
+
+    const hasInvalidPriceRow = itemRows.value.some((row) => {
+      const hasProduct = Boolean(normalizeTextValue(row.productId))
+      const hasQty = normalizeNumber(row.qty) > 0
+      return hasProduct && hasQty && normalizeNumber(row.unitPrice) <= 0
+    })
+    if (hasInvalidPriceRow) {
+      ElMessage.warning('存在单价小于等于 0 的明细，请先修正后再保存')
       return
     }
 

@@ -353,8 +353,11 @@ export class OrderService {
             if (!product) {
               throw new BizError(`产品不存在: ${item.productId}`)
             }
-            if (item.qty <= 0 || item.unitPrice < 0) {
-              throw new BizError(`第 ${index + 1} 行数量或单价非法`)
+            if (item.qty <= 0) {
+              throw new BizError(`第 ${index + 1} 行数量非法`)
+            }
+            if (item.unitPrice <= 0) {
+              throw new BizError(`第 ${index + 1} 行单价必须大于 0`)
             }
 
             const lineAmount = Number((item.qty * item.unitPrice).toFixed(2))

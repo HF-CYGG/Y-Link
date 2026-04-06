@@ -15,7 +15,7 @@ const submitOrderSchema = z.object({
       z.object({
         productId: z.union([z.string().min(1), z.number()]),
         qty: z.number().positive(),
-        unitPrice: z.number().min(0),
+        unitPrice: z.number().positive('单价必须大于 0'),
         remark: z.string().optional(),
       }),
     )
