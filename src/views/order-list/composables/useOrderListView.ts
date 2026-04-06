@@ -1,16 +1,18 @@
 import dayjs from 'dayjs'
 import { computed, onActivated, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useWindowSize } from '@vueuse/core'
 import { useRoute, useRouter } from 'vue-router'
 import {
+  deleteOrderById,
   getOrderDetailById,
   getOrderList,
+  restoreOrderById,
   type OrderDetailResult,
   type OrderListQuery,
   type OrderRecord,
 } from '@/api/modules/order'
-import { useAppStore } from '@/store'
+import { useAppStore, useAuthStore } from '@/store'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
@@ -41,8 +43,10 @@ export const useOrderListView = () => {
   const route = useRoute()
   const router = useRouter()
   const appStore = useAppStore()
+  const authStore = useAuthStore()
   const isPhone = computed(() => appStore.isPhone)
   const isTablet = computed(() => appStore.isTablet)
+  const canDeleteOrder = computed(() => authStore.hasPermission('orders:delete'))
   const { height: windowHeight } = useWindowSize()
   const listRequest = useStableRequest()
   const detailRequest = useStableRequest()
@@ -70,6 +74,7 @@ export const useOrderListView = () => {
   const searchForm = ref({
     showNo: '',
     dateRange: null as [Date, Date] | null,
+    deletionScope: 'active' as 'active' | 'deleted' | 'all',
   })
 
   /**
@@ -189,6 +194,14 @@ export const useOrderListView = () => {
       params.endDate = dayjs(searchForm.value.dateRange[1]).format('YYYY-MM-DD')
     }
 
+    if (canDeleteOrder.value) {
+      if (searchForm.value.deletionScope === 'deleted') {
+        params.onlyDeleted = true
+      } else if (searchForm.value.deletionScope === 'all') {
+        params.includeDeleted = true
+      }
+    }
+
     return params
   }
 
@@ -258,6 +271,7 @@ export const useOrderListView = () => {
     searchForm.value = {
       showNo: '',
       dateRange: null,
+      deletionScope: 'active',
     }
     handleSearch()
   }
@@ -306,6 +320,68 @@ export const useOrderListView = () => {
         drawerLoading.value = false
       },
     })
+  }
+
+  /**
+   * 删除出库单：
+   * - 管理员需输入业务单号完成二次确认；
+   * - 删除采用软删除，后续可在“已删除”筛选下恢复。
+   */
+  const handleDeleteOrder = async (row: OrderRecord, confirmShowNo: string) => {
+    await deleteOrderById(row.id, { confirmShowNo })
+    ElMessage.success(`已删除单据：${row.showNo}`)
+    await loadData()
+  }
+
+  /**
+   * 删除二次确认：
+   * - 管理员需输入完整业务单号，降低误删风险；
+   * - 确认后调用软删除接口，单据可在“已删除”或“全部”筛选下找回。
+   */
+  const handleDeleteOrderWithConfirm = async (row: OrderRecord) => {
+    const result = await ElMessageBox.prompt(
+      `请输入业务单号 ${row.showNo} 以确认删除。删除后可恢复。`,
+      '删除二次确认',
+      {
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+        inputPlaceholder: '请输入完整业务单号',
+        inputValue: '',
+        inputValidator: (value: string) => {
+          if (!String(value || '').trim()) {
+            return '请输入业务单号'
+          }
+          return true
+        },
+        type: 'warning',
+      },
+    )
+    await handleDeleteOrder(row, result.value.trim())
+  }
+
+  /**
+   * 恢复出库单：
+   * - 仅对已删除单据生效；
+   * - 恢复后可在默认列表继续查看详情。
+   */
+  const handleRestoreOrder = async (row: OrderRecord) => {
+    await restoreOrderById(row.id)
+    ElMessage.success(`已恢复单据：${row.showNo}`)
+    await loadData()
+  }
+
+  /**
+   * 恢复确认：
+   * - 防止误触恢复；
+   * - 恢复成功后刷新当前筛选结果。
+   */
+  const handleRestoreOrderWithConfirm = async (row: OrderRecord) => {
+    await ElMessageBox.confirm(`确认恢复出库单 ${row.showNo} 吗？`, '恢复确认', {
+      confirmButtonText: '确认恢复',
+      cancelButtonText: '取消',
+      type: 'info',
+    })
+    await handleRestoreOrder(row)
   }
 
   const refreshForSubmittedOrder = async () => {
@@ -398,10 +474,15 @@ export const useOrderListView = () => {
     drawerVisible,
     drawerLoading,
     currentOrder,
+    canDeleteOrder,
     handleSearch,
     handleReset,
     handleCurrentChange,
     handlePageSizeChange,
     handleViewDetail,
+    handleDeleteOrder,
+    handleDeleteOrderWithConfirm,
+    handleRestoreOrder,
+    handleRestoreOrderWithConfirm,
   }
 }

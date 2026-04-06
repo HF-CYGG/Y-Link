@@ -40,6 +40,23 @@ export class BizOutboundOrder {
   @Column({ name: 'total_amount', type: 'decimal', precision: 14, scale: 2, default: 0, comment: '总金额' })
   totalAmount!: string
 
+  @Index('idx_biz_outbound_is_deleted')
+  @Column({ name: 'is_deleted', type: 'tinyint', width: 1, default: 0, comment: '是否已删除（软删除）' })
+  isDeleted!: boolean
+
+  @Column({ name: 'deleted_at', ...entityColumnOptions.timestamp, nullable: true, comment: '删除时间' })
+  deletedAt!: Date | null
+
+  @Index('idx_biz_outbound_deleted_by_user_id')
+  @Column({ name: 'deleted_by_user_id', ...entityColumnOptions.foreignId, nullable: true, comment: '删除操作用户ID' })
+  deletedByUserId!: string | null
+
+  @Column({ name: 'deleted_by_username', type: 'varchar', length: 64, nullable: true, comment: '删除操作账号快照' })
+  deletedByUsername!: string | null
+
+  @Column({ name: 'deleted_by_display_name', type: 'varchar', length: 64, nullable: true, comment: '删除操作姓名快照' })
+  deletedByDisplayName!: string | null
+
   @Index('idx_biz_outbound_creator_user_id')
   @Column({ name: 'creator_user_id', ...entityColumnOptions.foreignId, nullable: true, comment: '开单用户ID' })
   creatorUserId!: string | null

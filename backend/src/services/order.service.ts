@@ -33,6 +33,8 @@ export interface OrderListQuery {
   showNo?: string
   startDate?: string
   endDate?: string
+  includeDeleted?: boolean
+  onlyDeleted?: boolean
 }
 
 /**
@@ -65,6 +67,11 @@ export interface OrderSummaryView {
   creatorUserId: string | null
   creatorUsername: string | null
   creatorDisplayName: string | null
+  isDeleted: boolean
+  deletedAt: string | null
+  deletedByUserId: string | null
+  deletedByUsername: string | null
+  deletedByDisplayName: string | null
   createdAt: string
 }
 
@@ -133,6 +140,11 @@ export class OrderService {
     if (query.endDate) {
       qb.andWhere('order.createdAt <= :endDate', { endDate: query.endDate + ' 23:59:59' })
     }
+    if (query.onlyDeleted) {
+      qb.andWhere('order.isDeleted = :onlyDeleted', { onlyDeleted: true })
+    } else if (!query.includeDeleted) {
+      qb.andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
+    }
 
     const [list, total] = await qb
       .orderBy('order.id', 'DESC')
@@ -164,6 +176,112 @@ export class OrderService {
     }
     const items = await this.loadDetailItems(order.id)
     return { order: this.buildOrderSummaryView(order), items }
+  }
+
+  /**
+   * 软删除单据：
+   * - 仅标记主单删除态，不物理删除明细，保证可恢复；
+   * - 记录删除操作者快照，满足后续审计追溯。
+   */
+  async softDeleteById(
+    id: string,
+    actor: AuthUserContext,
+    confirmShowNo: string,
+    requestMeta?: RequestMeta,
+  ): Promise<OrderSummaryView> {
+    const normalizedConfirmShowNo = confirmShowNo.trim()
+    if (!normalizedConfirmShowNo) {
+      throw new BizError('请填写业务单号完成二次确认')
+    }
+
+    return AppDataSource.transaction(async (manager) => {
+      const orderRepo = manager.getRepository(BizOutboundOrder)
+      const order = await orderRepo.findOne({ where: { id } })
+      if (!order) {
+        throw new BizError('出库单不存在', 404)
+      }
+
+      if (order.showNo !== normalizedConfirmShowNo) {
+        throw new BizError('二次确认失败：业务单号不匹配', 400)
+      }
+
+      if (order.isDeleted) {
+        throw new BizError('该出库单已删除', 409)
+      }
+
+      order.isDeleted = true
+      order.deletedAt = new Date()
+      order.deletedByUserId = actor.userId
+      order.deletedByUsername = actor.username
+      order.deletedByDisplayName = actor.displayName
+      const savedOrder = await orderRepo.save(order)
+
+      await auditService.record(
+        {
+          actionType: 'order.delete',
+          actionLabel: '删除出库单',
+          targetType: 'order',
+          targetId: savedOrder.id,
+          targetCode: savedOrder.showNo,
+          actor,
+          requestMeta,
+          detail: {
+            customerName: savedOrder.customerName,
+            totalQty: savedOrder.totalQty,
+            totalAmount: savedOrder.totalAmount,
+          },
+        },
+        manager,
+      )
+
+      return this.buildOrderSummaryView(savedOrder)
+    })
+  }
+
+  /**
+   * 恢复单据：
+   * - 清空删除标记与删除人快照；
+   * - 保留主单与明细原始数据，恢复后可继续查询与查看详情。
+   */
+  async restoreById(id: string, actor: AuthUserContext, requestMeta?: RequestMeta): Promise<OrderSummaryView> {
+    return AppDataSource.transaction(async (manager) => {
+      const orderRepo = manager.getRepository(BizOutboundOrder)
+      const order = await orderRepo.findOne({ where: { id } })
+      if (!order) {
+        throw new BizError('出库单不存在', 404)
+      }
+
+      if (!order.isDeleted) {
+        throw new BizError('该出库单未被删除，无需恢复', 409)
+      }
+
+      order.isDeleted = false
+      order.deletedAt = null
+      order.deletedByUserId = null
+      order.deletedByUsername = null
+      order.deletedByDisplayName = null
+      const savedOrder = await orderRepo.save(order)
+
+      await auditService.record(
+        {
+          actionType: 'order.restore',
+          actionLabel: '恢复出库单',
+          targetType: 'order',
+          targetId: savedOrder.id,
+          targetCode: savedOrder.showNo,
+          actor,
+          requestMeta,
+          detail: {
+            customerName: savedOrder.customerName,
+            totalQty: savedOrder.totalQty,
+            totalAmount: savedOrder.totalAmount,
+          },
+        },
+        manager,
+      )
+
+      return this.buildOrderSummaryView(savedOrder)
+    })
   }
 
   /**
@@ -393,6 +511,11 @@ export class OrderService {
       creatorUserId: normalizeNullableEntityId(order.creatorUserId),
       creatorUsername: order.creatorUsername,
       creatorDisplayName: order.creatorDisplayName,
+      isDeleted: Boolean(order.isDeleted),
+      deletedAt: order.deletedAt ? normalizeDateTime(order.deletedAt) : null,
+      deletedByUserId: normalizeNullableEntityId(order.deletedByUserId),
+      deletedByUsername: order.deletedByUsername,
+      deletedByDisplayName: order.deletedByDisplayName,
       createdAt: normalizeDateTime(order.createdAt),
     }
   }

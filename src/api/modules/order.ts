@@ -86,6 +86,8 @@ export interface OrderListQuery extends PaginationQueryInput {
   showNo?: string
   startDate?: string
   endDate?: string
+  includeDeleted?: boolean
+  onlyDeleted?: boolean
 }
 
 /**
@@ -104,6 +106,11 @@ export interface OrderRecord {
   creatorUserId: string | null
   creatorUsername: string | null
   creatorDisplayName: string | null
+  isDeleted: boolean
+  deletedAt: string | null
+  deletedByUserId: string | null
+  deletedByUsername: string | null
+  deletedByDisplayName: string | null
   createdAt: string
 }
 
@@ -127,6 +134,11 @@ interface OrderRecordRaw {
   creatorUserId: PrimitiveTextValue
   creatorUsername: PrimitiveTextValue
   creatorDisplayName: PrimitiveTextValue
+  isDeleted?: boolean | PrimitiveTextValue
+  deletedAt?: PrimitiveTextValue
+  deletedByUserId?: PrimitiveTextValue
+  deletedByUsername?: PrimitiveTextValue
+  deletedByDisplayName?: PrimitiveTextValue
   createdAt: PrimitiveTextValue
 }
 
@@ -183,6 +195,11 @@ const normalizeOrderRecord = (record: OrderRecordRaw): OrderRecord => ({
   creatorUserId: normalizeNullableTextField(record.creatorUserId),
   creatorUsername: normalizeNullableTextField(record.creatorUsername),
   creatorDisplayName: normalizeNullableTextField(record.creatorDisplayName),
+  isDeleted: normalizeBooleanField(record.isDeleted),
+  deletedAt: normalizeNullableTextField(record.deletedAt),
+  deletedByUserId: normalizeNullableTextField(record.deletedByUserId),
+  deletedByUsername: normalizeNullableTextField(record.deletedByUsername),
+  deletedByDisplayName: normalizeNullableTextField(record.deletedByDisplayName),
   createdAt: normalizeTextField(record.createdAt),
 })
 
@@ -247,6 +264,22 @@ const normalizeDecimalField = (value: PrimitiveTextValue, fallback = '0.00'): st
 }
 
 /**
+ * 布尔字段归一化：
+ * - 兼容 boolean / number / string 等多种返回值；
+ * - 用于软删除状态等标记字段的稳定解析。
+ */
+const normalizeBooleanField = (value: unknown): boolean => {
+  if (typeof value === 'boolean') {
+    return value
+  }
+  if (typeof value === 'number') {
+    return value !== 0
+  }
+  const normalizedText = normalizeTextField(value as PrimitiveTextValue).toLowerCase()
+  return normalizedText === '1' || normalizedText === 'true' || normalizedText === 'yes'
+}
+
+/**
  * 归一化订单明细：
  * - 优先读取后端已对齐的新字段；
  * - 对旧接口返回做兜底，避免历史环境或缓存响应导致详情抽屉继续异常；
@@ -301,3 +334,30 @@ export const getOrderDetailByShowNo = async (
 
   return normalizeOrderDetail(result)
 }
+
+export interface DeleteOrderPayload {
+  confirmShowNo: string
+}
+
+/**
+ * 软删除出库单（管理员）：
+ * - 服务端会校验业务单号完成二次确认；
+ * - 删除后单据可通过 restore 接口找回。
+ */
+export const deleteOrderById = (id: string, payload: DeleteOrderPayload) =>
+  request<OrderRecord>({
+    method: 'DELETE',
+    url: `/orders/${id}`,
+    data: payload,
+  }).then(normalizeOrderRecord)
+
+/**
+ * 恢复已删除出库单（管理员）：
+ * - 恢复后该单据会重新进入默认列表；
+ * - 明细与金额等历史信息保持不变。
+ */
+export const restoreOrderById = (id: string) =>
+  request<OrderRecord>({
+    method: 'POST',
+    url: `/orders/${id}/restore`,
+  }).then(normalizeOrderRecord)

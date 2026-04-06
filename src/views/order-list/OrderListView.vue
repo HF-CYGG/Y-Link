@@ -25,11 +25,14 @@ const {
   drawerVisible,
   drawerLoading,
   currentOrder,
+  canDeleteOrder,
   handleSearch,
   handleReset,
   handleCurrentChange,
   handlePageSizeChange,
   handleViewDetail,
+  handleDeleteOrderWithConfirm,
+  handleRestoreOrderWithConfirm,
 } = useOrderListView()
 </script>
 
@@ -53,6 +56,15 @@ const {
               end-placeholder="结束日期"
               :class="isPhone ? '!w-full' : isTablet ? '!w-[340px]' : '!w-[380px]'"
             />
+            <el-select
+              v-if="canDeleteOrder"
+              v-model="searchForm.deletionScope"
+              :class="isPhone ? '!w-full' : isTablet ? '!w-[170px]' : '!w-[180px]'"
+            >
+              <el-option label="仅正常单据" value="active" />
+              <el-option label="仅已删除单据" value="deleted" />
+              <el-option label="全部单据" value="all" />
+            </el-select>
             <div :class="['flex gap-2', isPhone ? 'w-full' : '']">
               <el-button :class="isPhone ? 'flex-1' : ''" type="primary" @click="handleSearch" icon="Search">搜索</el-button>
               <el-button :class="isPhone ? 'flex-1' : ''" @click="handleReset" icon="Refresh">重置</el-button>
@@ -95,9 +107,31 @@ const {
                   {{ dayjs(row.createdAt).format('YYYY-MM-DD HH:mm') }}
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="110" fixed="right" align="right">
+              <el-table-column label="状态" width="98" align="center">
+                <template #default="{ row }">
+                  <el-tag v-if="row.isDeleted" type="danger" effect="light">已删除</el-tag>
+                  <el-tag v-else type="success" effect="light">正常</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="190" fixed="right" align="right">
                 <template #default="{ row }">
                   <el-button link type="primary" @click="handleViewDetail(row)">详情</el-button>
+                  <el-button
+                    v-if="canDeleteOrder && !row.isDeleted"
+                    link
+                    type="danger"
+                    @click="handleDeleteOrderWithConfirm(row).catch(() => undefined)"
+                  >
+                    删除
+                  </el-button>
+                  <el-button
+                    v-if="canDeleteOrder && row.isDeleted"
+                    link
+                    type="warning"
+                    @click="handleRestoreOrderWithConfirm(row).catch(() => undefined)"
+                  >
+                    恢复
+                  </el-button>
                 </template>
               </el-table-column>
             </el-table>
@@ -121,6 +155,25 @@ const {
               <div class="mt-3 flex items-center justify-between gap-4 border-t border-slate-100 pt-3 dark:border-white/10">
                 <span class="text-sm text-slate-500 dark:text-slate-400">数量：{{ item.totalQty }}</span>
                 <span class="font-medium text-red-500">¥{{ Number(item.totalAmount).toFixed(2) }}</span>
+              </div>
+              <div v-if="canDeleteOrder" class="mt-3 flex items-center gap-3">
+                <el-button link type="primary" @click.stop="handleViewDetail(item)">详情</el-button>
+                <el-button
+                  v-if="!item.isDeleted"
+                  link
+                  type="danger"
+                  @click.stop="handleDeleteOrderWithConfirm(item).catch(() => undefined)"
+                >
+                  删除
+                </el-button>
+                <el-button
+                  v-else
+                  link
+                  type="warning"
+                  @click.stop="handleRestoreOrderWithConfirm(item).catch(() => undefined)"
+                >
+                  恢复
+                </el-button>
               </div>
             </div>
           </template>

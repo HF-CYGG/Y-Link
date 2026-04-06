@@ -14,7 +14,16 @@ const SQLITE_REQUIRED_TABLES = [
   'sys_audit_log',
 ]
 
-const SQLITE_REQUIRED_ORDER_COLUMNS = ['creator_user_id', 'creator_username', 'creator_display_name']
+const SQLITE_REQUIRED_ORDER_COLUMNS = [
+  'creator_user_id',
+  'creator_username',
+  'creator_display_name',
+  'is_deleted',
+  'deleted_at',
+  'deleted_by_user_id',
+  'deleted_by_username',
+  'deleted_by_display_name',
+]
 
 export function resolveSqliteDatabasePath(): string {
   return path.isAbsolute(env.SQLITE_DB_PATH)

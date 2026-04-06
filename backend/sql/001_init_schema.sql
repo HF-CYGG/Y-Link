@@ -111,6 +111,11 @@ CREATE TABLE IF NOT EXISTS `biz_outbound_order` (
   `remark` VARCHAR(500) DEFAULT NULL COMMENT '备注',
   `total_qty` DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT '总数量',
   `total_amount` DECIMAL(14,2) NOT NULL DEFAULT 0.00 COMMENT '总金额',
+  `is_deleted` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否已删除（软删除）',
+  `deleted_at` DATETIME(3) DEFAULT NULL COMMENT '删除时间',
+  `deleted_by_user_id` BIGINT UNSIGNED DEFAULT NULL COMMENT '删除操作用户ID',
+  `deleted_by_username` VARCHAR(64) DEFAULT NULL COMMENT '删除操作账号快照',
+  `deleted_by_display_name` VARCHAR(64) DEFAULT NULL COMMENT '删除操作姓名快照',
   `creator_user_id` BIGINT UNSIGNED DEFAULT NULL COMMENT '开单用户ID',
   `creator_username` VARCHAR(64) DEFAULT NULL COMMENT '开单账号快照',
   `creator_display_name` VARCHAR(64) DEFAULT NULL COMMENT '开单姓名快照',
@@ -120,6 +125,8 @@ CREATE TABLE IF NOT EXISTS `biz_outbound_order` (
   UNIQUE KEY `uk_biz_outbound_order_uuid` (`order_uuid`),
   UNIQUE KEY `uk_biz_outbound_show_no` (`show_no`),
   UNIQUE KEY `uk_biz_outbound_idempotency_key` (`idempotency_key`),
+  KEY `idx_biz_outbound_is_deleted` (`is_deleted`),
+  KEY `idx_biz_outbound_deleted_by_user_id` (`deleted_by_user_id`),
   KEY `idx_biz_outbound_creator_user_id` (`creator_user_id`),
   KEY `idx_biz_outbound_created_at` (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='出库主表';
@@ -146,4 +153,9 @@ CREATE TABLE IF NOT EXISTS `biz_outbound_order_item` (
 ALTER TABLE `biz_outbound_order`
   ADD COLUMN IF NOT EXISTS `creator_user_id` BIGINT UNSIGNED DEFAULT NULL COMMENT '开单用户ID',
   ADD COLUMN IF NOT EXISTS `creator_username` VARCHAR(64) DEFAULT NULL COMMENT '开单账号快照',
-  ADD COLUMN IF NOT EXISTS `creator_display_name` VARCHAR(64) DEFAULT NULL COMMENT '开单姓名快照';
+  ADD COLUMN IF NOT EXISTS `creator_display_name` VARCHAR(64) DEFAULT NULL COMMENT '开单姓名快照',
+  ADD COLUMN IF NOT EXISTS `is_deleted` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否已删除（软删除）',
+  ADD COLUMN IF NOT EXISTS `deleted_at` DATETIME(3) DEFAULT NULL COMMENT '删除时间',
+  ADD COLUMN IF NOT EXISTS `deleted_by_user_id` BIGINT UNSIGNED DEFAULT NULL COMMENT '删除操作用户ID',
+  ADD COLUMN IF NOT EXISTS `deleted_by_username` VARCHAR(64) DEFAULT NULL COMMENT '删除操作账号快照',
+  ADD COLUMN IF NOT EXISTS `deleted_by_display_name` VARCHAR(64) DEFAULT NULL COMMENT '删除操作姓名快照';
