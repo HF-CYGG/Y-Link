@@ -42,8 +42,6 @@ services:
     depends_on:
       backend:
         condition: service_healthy
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     ports:
       - "${FRONTEND_PORT:-8080}:80"
     healthcheck:
