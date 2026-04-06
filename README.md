@@ -79,8 +79,9 @@ docker compose -f compose.cloud.yml up -d
 - 不写 `.env` 也可直接启动（默认镜像、默认端口、默认 SQLite）。
 - 首次启动会自动初始化管理员，并在容器日志打印账号密码。
 - 日志默认开启彩色输出，便于在 1Panel 日志面板快速定位关键信息。
+- 前端默认自动回环到宿主机后端地址（`host.docker.internal:3001`），无需手动填写后端容器名。
 
-如果 1Panel 中后端容器主机名不是 `backend`，请在环境变量中设置：
+只有你明确需要改后端目标地址时，才设置：
 
 ```bash
 NGINX_BACKEND_UPSTREAM=你的后端容器地址:3001
