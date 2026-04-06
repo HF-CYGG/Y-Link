@@ -98,7 +98,8 @@ function New-EffectiveBackendEnvFile {
 function Get-DescendantProcessIds {
   param([int]$RootProcessId)
 
-  $allProcesses = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+  # 某些环境中 CIM 查询可能阻塞，设置超时避免启动链路被卡死。
+  $allProcesses = @(Get-CimInstance Win32_Process -OperationTimeoutSec 2 -ErrorAction SilentlyContinue)
   if (-not $allProcesses.Count) {
     return @()
   }
@@ -143,12 +144,28 @@ function Write-Info {
 function Get-ListeningProcessIds {
   param([int]$Port)
 
-  $connections = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue)
-  if (-not $connections.Count) {
+  # 部分 Windows 环境下 Get-NetTCPConnection 可能长时间卡住，改用 netstat 解析提升稳定性。
+  $netstatOutput = & netstat -ano -p tcp 2>$null
+  if (-not $netstatOutput) {
     return @()
   }
 
-  return @($connections | Select-Object -ExpandProperty OwningProcess -Unique)
+  $listeningPidSet = [System.Collections.Generic.HashSet[int]]::new()
+  $portPattern = ":(?:$Port)\s+.+\s+(?:LISTENING|侦听)\s+(\d+)\s*$"
+
+  foreach ($line in $netstatOutput) {
+    if ($line -notmatch $portPattern) {
+      continue
+    }
+
+    $pidText = $Matches[1]
+    [int]$parsedPid = 0
+    if ($pidText -and [int]::TryParse($pidText, [ref]$parsedPid)) {
+      [void]$listeningPidSet.Add($parsedPid)
+    }
+  }
+
+  return @($listeningPidSet)
 }
 
 function Get-RecordedProcessIds {
@@ -401,6 +418,7 @@ if (-not (Test-Path $BackendEnvFile)) {
   throw "Missing local dev env file: $BackendEnvFile"
 }
 
+Write-Info "启动本地联调链路（backend:$BackendPort frontend:$FrontendPort）..."
 Assert-CommandAvailable -CommandName 'npm.cmd'
 $PowerShellExecutablePath = Get-PowerShellExecutablePath
 
