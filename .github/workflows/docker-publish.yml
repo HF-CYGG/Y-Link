@@ -90,3 +90,26 @@ jobs:
           labels: ${{ steps.backend_meta.outputs.labels }}
           cache-from: type=gha,scope=y-link-backend
           cache-to: type=gha,mode=max,scope=y-link-backend
+
+      - name: 生成单镜像一键部署元数据
+        id: onebox_meta
+        uses: docker/metadata-action@v5
+        with:
+          images: docker.io/${{ steps.prepare.outputs.namespace }}/y-link-onebox
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,prefix=sha-
+
+      - name: 构建并推送单镜像一键部署镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.onebox
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.onebox_meta.outputs.tags }}
+          labels: ${{ steps.onebox_meta.outputs.labels }}
+          cache-from: type=gha,scope=y-link-onebox
+          cache-to: type=gha,mode=max,scope=y-link-onebox

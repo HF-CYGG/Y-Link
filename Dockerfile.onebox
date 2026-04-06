@@ -1,0 +1,64 @@
+# syntax=docker/dockerfile:1
+
+# ------------------------------
+# frontend build
+# ------------------------------
+FROM node:20-bookworm-slim AS frontend-build
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY index.html ./
+COPY public ./public
+COPY scripts ./scripts
+COPY src ./src
+COPY tsconfig.json ./
+COPY tsconfig.app.json ./
+COPY tsconfig.node.json ./
+COPY vite.config.ts ./
+COPY tailwind.config.js ./
+COPY postcss.config.js ./
+RUN npm run build
+
+# ------------------------------
+# backend build
+# ------------------------------
+FROM node:20-bookworm-slim AS backend-build
+WORKDIR /backend
+COPY backend/package*.json ./
+RUN npm ci
+COPY backend/tsconfig.json ./
+COPY backend/src ./src
+RUN npm run build
+
+# ------------------------------
+# backend runtime deps
+# ------------------------------
+FROM node:20-bookworm-slim AS backend-prod-deps
+WORKDIR /backend
+COPY backend/package*.json ./
+RUN npm ci --omit=dev
+
+# ------------------------------
+# onebox runtime
+# ------------------------------
+FROM node:20-bookworm-slim AS runtime
+
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends nginx ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY --from=frontend-build /app/dist /usr/share/nginx/html
+COPY docker/nginx/onebox.conf /etc/nginx/conf.d/default.conf
+
+COPY --from=backend-build /backend/dist /app/backend/dist
+COPY --from=backend-prod-deps /backend/node_modules /app/backend/node_modules
+COPY backend/package.json /app/backend/package.json
+
+COPY docker/onebox/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 80 3001
+
+ENTRYPOINT ["/entrypoint.sh"]

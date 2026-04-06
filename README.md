@@ -65,6 +65,7 @@ Docker Hub 镜像地址（可直接拉取）：
 
 - 前端：`docker.io/yemiao351/y-link-frontend:latest`
 - 后端：`docker.io/yemiao351/y-link-backend:latest`
+- 单镜像一键版（前后端同容器）：`docker.io/yemiao351/y-link-onebox:latest`
 
 如果你在 1Panel 使用容器编排，推荐执行：
 
@@ -92,6 +93,18 @@ npm run cloud:logs
 ```bash
 npm run cloud:down
 ```
+
+如果你只想在 1Panel “创建容器”页面输入一个镜像直接跑，请使用：
+
+```bash
+docker.io/yemiao351/y-link-onebox:latest
+```
+
+单镜像模式下建议：
+- 网络：`bridge`
+- 端口映射：`宿主机端口 -> 容器 80`（例如 `9050:80`）
+- 如需直连后端健康检查：可额外映射 `3001:3001`
+- 数据持久化：挂载 `/app/data`（用于 SQLite）
 
 1Panel 部署注意：
 - 推荐使用 **编排 / Compose 项目** 导入 [compose.cloud.yml]，不要只启动单个前端镜像。
