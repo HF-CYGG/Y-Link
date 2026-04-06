@@ -34,7 +34,7 @@ FROM nginx:1.27-alpine AS runtime
 
 # 使用可模板化站点配置：
 # - 处理 Vue Router history 路由回退；
-# - 通过 NGINX_BACKEND_UPSTREAM 在启动时注入后端地址，兼容 1Panel/分体部署。
+# - 默认代理到同编排 backend:3001，并通过延迟解析降低启动阶段 DNS 瞬态失败风险。
 COPY docker/nginx/default.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=build /app/dist /usr/share/nginx/html
 
