@@ -4,6 +4,22 @@ export interface DashboardStats {
   todayOrderCount: number
   todayOrderAmount: string | number
   totalProductCount: number
+  monthOrderCount: number
+  monthOrderAmount: string | number
+  trend7Days: DashboardTrendPoint[]
+  topProducts: DashboardTopProduct[]
+}
+
+export interface DashboardTrendPoint {
+  date: string
+  label: string
+  amount: string | number
+}
+
+export interface DashboardTopProduct {
+  productId: string
+  productName: string
+  totalQty: string | number
 }
 
 /**

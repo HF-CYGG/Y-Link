@@ -2,6 +2,7 @@
 import { computed, onActivated, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { Box, DataAnalysis, Document, Money, More, WarningFilled } from '@element-plus/icons-vue'
 import { PageContainer } from '@/components/common'
 import { getDashboardStats, type DashboardStats } from '@/api/modules/dashboard'
 import { useStableRequest } from '@/composables/useStableRequest'
@@ -16,6 +17,10 @@ const loading = ref(false)
 const stats = ref<DashboardStats | null>(null)
 const loadStatus = ref<'idle' | 'success' | 'error' | 'canceled'>('idle')
 const dashboardRequest = useStableRequest()
+const TREND_VIEWBOX_WIDTH = 640
+const TREND_VIEWBOX_HEIGHT = 240
+const TREND_PADDING_X = 24
+const TREND_PADDING_Y = 24
 
 /**
  * 当前用户可见快捷入口：
@@ -23,27 +28,46 @@ const dashboardRequest = useStableRequest()
  * - 当前用户只会看到自己具备权限的业务与治理入口。
  */
 const shortcutItems = computed(() => buildDashboardShortcutItems(authStore.currentUser))
+
 /**
- * 顶部横幅信息项：
- * - 在宽屏下补充轻量关键信息，提升首页首屏信息密度；
- * - 手机端自动换行为双列，不破坏阅读节奏；
- * - 当统计尚未准备完成时回落为占位符，避免布局跳变。
+ * 精简后的快捷入口：
+ * - 工作台保留“高频入口”，其余入口交给左侧导航；
+ * - 手机端默认展示 2 个入口，桌面端展示 4 个入口。
  */
-const heroMetaItems = computed(() => [
-  { label: '今日单据', value: `${stats.value?.todayOrderCount ?? '--'} 单` },
-  { label: '今日金额', value: `¥${Number(stats.value?.todayOrderAmount ?? 0).toFixed(2)}` },
-  { label: '在库产品', value: `${stats.value?.totalProductCount ?? '--'} 种` },
-])
+const compactShortcutItems = computed(() => {
+  const visibleSize = appStore.isPhone ? 2 : 4
+  return shortcutItems.value.slice(0, visibleSize)
+})
+
+/**
+ * 金额格式化：
+ * - 看板金额统一以两位小数展示，避免模板里重复 Number().toFixed()；
+ * - 兜底 0.00，防止接口波动导致空值显示。
+ */
+const formatAmount = (value: string | number | null | undefined): string => {
+  const normalizedNumber = Number(value ?? 0)
+  return Number.isFinite(normalizedNumber) ? normalizedNumber.toFixed(2) : '0.00'
+}
+
+/**
+ * 数量格式化：
+ * - 业务数量允许出现小数，统一保留两位；
+ * - 排行榜与趋势辅助信息使用同一格式策略。
+ */
+const formatQty = (value: string | number | null | undefined): string => {
+  const normalizedNumber = Number(value ?? 0)
+  return Number.isFinite(normalizedNumber) ? normalizedNumber.toFixed(2) : '0.00'
+}
 
 /**
  * 卡片网格策略：
  * - phone 使用单列，避免数值卡片过窄；
  * - tablet 使用双列；
- * - desktop 使用三列完整展示。
+ * - desktop 使用四列完整展示，形成均衡四宫格。
  */
 const statsGridClass = computed(() => {
   if (appStore.isDesktop) {
-    return 'xl:grid-cols-3 lg:grid-cols-3'
+    return 'xl:grid-cols-4 lg:grid-cols-4'
   }
 
   if (appStore.isTablet) {
@@ -54,21 +78,132 @@ const statsGridClass = computed(() => {
 })
 
 /**
- * 快捷入口网格策略：
- * - phone 改为单列，点击区域更大；
- * - tablet 维持双列；
- * - desktop 提升为三列，提高宽屏首屏利用率。
+ * 核心看板卡片：
+ * - “今日”反映即时状态；
+ * - “本月”补充周期业绩；
+ * - 四宫格统一视觉节奏，避免首屏右侧留白。
  */
-const shortcutGridClass = computed(() => {
-  if (appStore.isDesktop) {
-    return 'xl:grid-cols-3 lg:grid-cols-3'
+const metricCards = computed(() => [
+  {
+    key: 'today-order',
+    title: '今日出库单数',
+    value: `${stats.value?.todayOrderCount ?? 0}`,
+    unit: '单',
+    iconBgClass: 'bg-brand/10 dark:bg-brand/20',
+    iconTextClass: 'text-brand dark:text-teal-400',
+    delay: '0ms',
+    icon: Document,
+  },
+  {
+    key: 'today-amount',
+    title: '今日出库金额',
+    value: formatAmount(stats.value?.todayOrderAmount),
+    unit: '¥',
+    iconBgClass: 'bg-secondary/10 dark:bg-secondary/20',
+    iconTextClass: 'text-secondary dark:text-slate-300',
+    delay: '100ms',
+    icon: Money,
+  },
+  {
+    key: 'product-total',
+    title: '在库产品总数',
+    value: `${stats.value?.totalProductCount ?? 0}`,
+    unit: '种',
+    iconBgClass: 'bg-brand/10 dark:bg-brand/20',
+    iconTextClass: 'text-brand dark:text-teal-400',
+    delay: '200ms',
+    icon: Box,
+  },
+  {
+    key: 'month-amount',
+    title: '本月累计出库',
+    value: formatAmount(stats.value?.monthOrderAmount),
+    unit: '¥',
+    iconBgClass: 'bg-brand/10 dark:bg-brand/20',
+    iconTextClass: 'text-brand dark:text-teal-400',
+    delay: '300ms',
+    icon: DataAnalysis,
+  },
+])
+
+/**
+ * 近 7 日趋势点：
+ * - 接口已保证返回 7 天完整序列（无数据日期为 0）；
+ * - 前端只负责把金额映射到 SVG 坐标系。
+ */
+const trendPoints = computed(() => {
+  const trend = stats.value?.trend7Days ?? []
+  if (!trend.length) {
+    return []
   }
 
-  if (appStore.isTablet) {
-    return 'sm:grid-cols-2'
+  const amounts = trend.map((item) => Number(item.amount ?? 0))
+  const maxAmount = Math.max(...amounts, 0)
+  const minAmount = Math.min(...amounts, 0)
+  const range = Math.max(maxAmount - minAmount, 1)
+  const usableWidth = TREND_VIEWBOX_WIDTH - TREND_PADDING_X * 2
+  const usableHeight = TREND_VIEWBOX_HEIGHT - TREND_PADDING_Y * 2
+
+  return trend.map((item, index) => {
+    const x = TREND_PADDING_X + (usableWidth * index) / Math.max(trend.length - 1, 1)
+    const amount = Number(item.amount ?? 0)
+    const normalizedY = (amount - minAmount) / range
+    const y = TREND_VIEWBOX_HEIGHT - TREND_PADDING_Y - normalizedY * usableHeight
+    return {
+      ...item,
+      amount,
+      x,
+      y,
+    }
+  })
+})
+
+/**
+ * 趋势折线路径：
+ * - 使用平滑二次贝塞尔曲线，避免折线过于生硬；
+ * - 当数据点不足时自动退化为空路径。
+ */
+const trendPath = computed(() => {
+  const points = trendPoints.value
+  if (points.length < 2) {
+    return ''
   }
 
-  return 'grid-cols-1'
+  let path = `M ${points[0].x} ${points[0].y}`
+  for (let index = 1; index < points.length; index += 1) {
+    const prevPoint = points[index - 1]
+    const point = points[index]
+    const controlX = (prevPoint.x + point.x) / 2
+    path += ` Q ${controlX} ${prevPoint.y}, ${point.x} ${point.y}`
+  }
+
+  return path
+})
+
+/**
+ * 趋势面积路径：
+ * - 在折线下方补充渐变填充，提升看板层次感；
+ * - 以图表底部为基线闭合路径。
+ */
+const trendAreaPath = computed(() => {
+  const points = trendPoints.value
+  if (points.length < 2 || !trendPath.value) {
+    return ''
+  }
+
+  const baseY = TREND_VIEWBOX_HEIGHT - TREND_PADDING_Y
+  const firstPoint = points[0]
+  const lastPoint = points[points.length - 1]
+  return `${trendPath.value} L ${lastPoint.x} ${baseY} L ${firstPoint.x} ${baseY} Z`
+})
+
+/**
+ * 趋势最大值：
+ * - 作为图表右上角辅助信息，帮助快速感知峰值。
+ */
+const trendMaxAmount = computed(() => {
+  const maxValue = Math.max(...trendPoints.value.map((point) => point.amount), 0)
+  return formatAmount(maxValue)
 })
 
 /**
@@ -155,9 +290,6 @@ onActivated(() => {
           <div class="h-7 w-44 animate-pulse rounded-full bg-white/30" />
           <div class="h-4 w-full max-w-xl animate-pulse rounded-full bg-white/20" />
           <div class="h-4 w-3/4 max-w-lg animate-pulse rounded-full bg-white/20" />
-          <div class="grid grid-cols-1 gap-2 pt-2 sm:grid-cols-3">
-            <div v-for="index in 3" :key="`hero-meta-skeleton-${index}`" class="h-14 rounded-xl bg-white/18" />
-          </div>
         </div>
         <div
           class="pointer-events-none absolute right-0 top-0 translate-x-1/4 -translate-y-1/4 transform opacity-10"
@@ -168,10 +300,10 @@ onActivated(() => {
       </section>
 
       <section class="space-y-4">
-        <div class="h-6 w-24 animate-pulse rounded-full bg-slate-200 dark:bg-white/10" />
+        <div class="h-6 w-28 animate-pulse rounded-full bg-slate-200 dark:bg-white/10" />
         <div :class="['grid gap-4', statsGridClass]">
           <div
-            v-for="index in 3"
+            v-for="index in 4"
             :key="`stats-skeleton-${index}`"
             class="min-h-[112px] animate-pulse rounded-2xl bg-white/90 p-5 shadow-sm dark:bg-white/5"
           >
@@ -184,30 +316,33 @@ onActivated(() => {
         </div>
       </section>
 
-      <div :class="['grid gap-6 xl:gap-7', appStore.isDesktop ? 'xl:grid-cols-[1.45fr_1fr] lg:grid-cols-[1.2fr_0.9fr]' : 'grid-cols-1']">
+      <section class="space-y-4">
+        <div class="h-6 w-24 animate-pulse rounded-full bg-slate-200 dark:bg-white/10" />
+        <div class="flex flex-wrap gap-3">
+          <div
+            v-for="index in 4"
+            :key="`shortcut-chip-skeleton-${index}`"
+            class="h-10 w-[160px] animate-pulse rounded-xl bg-white/90 shadow-sm dark:bg-white/5"
+          />
+        </div>
+      </section>
+
+      <div :class="['grid gap-6 xl:gap-7', appStore.isDesktop ? 'xl:grid-cols-[1.3fr_1fr] lg:grid-cols-[1.2fr_1fr]' : 'grid-cols-1']">
         <section class="space-y-4">
-          <div class="h-6 w-24 animate-pulse rounded-full bg-slate-200 dark:bg-white/10" />
-          <div :class="['grid gap-4', shortcutGridClass]">
-            <div
-              v-for="index in 4"
-              :key="`shortcut-skeleton-${index}`"
-              :class="[
-                'animate-pulse rounded-2xl bg-white/90 px-4 shadow-sm dark:bg-white/5',
-                appStore.isPhone ? 'min-h-[128px] py-5' : 'min-h-[168px] py-6',
-              ]"
-            >
-              <div class="mx-auto mb-4 h-14 w-14 rounded-2xl bg-slate-200 dark:bg-white/10" />
-              <div class="mx-auto h-4 w-24 rounded-full bg-slate-200 dark:bg-white/10" />
-              <div class="mx-auto mt-3 h-3 w-32 rounded-full bg-slate-200 dark:bg-white/10" />
-            </div>
-          </div>
+          <div class="h-6 w-32 animate-pulse rounded-full bg-slate-200 dark:bg-white/10" />
+          <div class="min-h-[300px] animate-pulse rounded-2xl bg-white/90 p-6 shadow-sm dark:bg-white/5" />
         </section>
 
         <section class="space-y-4">
-          <div class="h-6 w-24 animate-pulse rounded-full bg-slate-200 dark:bg-white/10" />
-          <div class="min-h-[220px] animate-pulse rounded-2xl bg-white/90 p-6 shadow-sm dark:bg-white/5 sm:min-h-[260px]" />
+          <div class="h-6 w-32 animate-pulse rounded-full bg-slate-200 dark:bg-white/10" />
+          <div class="min-h-[300px] animate-pulse rounded-2xl bg-white/90 p-6 shadow-sm dark:bg-white/5" />
         </section>
       </div>
+
+      <section class="space-y-4">
+        <div class="h-6 w-24 animate-pulse rounded-full bg-slate-200 dark:bg-white/10" />
+        <div class="min-h-[220px] animate-pulse rounded-2xl bg-white/90 p-6 shadow-sm dark:bg-white/5 sm:min-h-[260px]" />
+      </section>
     </div>
 
     <div v-else class="dashboard-container min-w-0 space-y-5 sm:space-y-6 lg:space-y-7">
@@ -220,18 +355,8 @@ onActivated(() => {
         <div class="relative z-10 max-w-2xl">
           <h1 :class="['mb-2 font-bold', appStore.isPhone ? 'text-xl' : 'text-2xl']">欢迎回来，开始高效的一天！</h1>
           <p class="text-sm leading-6 text-teal-50/90 sm:text-base">
-            在这里您可以快速查看今日出库数据并进行快捷操作。
+            系统运行稳定，今日出库流程顺畅。您可以在下方快速查看核心指标与趋势变化。
           </p>
-          <div class="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-3">
-            <div
-              v-for="item in heroMetaItems"
-              :key="item.label"
-              class="rounded-xl border border-white/20 bg-white/12 px-3 py-2.5 backdrop-blur-sm"
-            >
-              <div class="text-[11px] tracking-wide text-teal-50/80">{{ item.label }}</div>
-              <div class="mt-1 text-sm font-semibold text-white">{{ item.value }}</div>
-            </div>
-          </div>
 
           <div
             v-if="!stats"
@@ -245,7 +370,7 @@ onActivated(() => {
               <p class="mt-1 text-xs leading-5 text-teal-50/90">
                 {{
                   loadStatus === 'error'
-                    ? '统计数据加载失败，但您仍可继续使用快捷入口进入业务页面。'
+                    ? '统计数据加载失败，但您仍可继续使用高频入口进入业务页面。'
                     : '检测到上次进入时概览尚未准备完成，您仍可继续操作，并可手动恢复统计数据。'
                 }}
               </p>
@@ -268,95 +393,137 @@ onActivated(() => {
       </section>
 
       <section>
-        <h2 class="mb-4 text-lg font-semibold text-slate-800 dark:text-slate-200">今日数据</h2>
+        <h2 class="mb-4 text-lg font-semibold text-slate-800 dark:text-slate-200">核心看板</h2>
 
         <transition-group name="staggered-fade" tag="div" :class="['grid gap-4 xl:gap-5', statsGridClass]" appear>
-          <div key="card-1" class="apple-card-hover min-w-0 p-5 sm:p-6 xl:p-7" style="transition-delay: 0ms">
+          <div
+            v-for="metric in metricCards"
+            :key="metric.key"
+            class="apple-card-hover min-w-0 p-5 sm:p-6 xl:p-7"
+            :style="{ transitionDelay: metric.delay }"
+          >
             <div class="mb-4 flex items-center justify-between gap-3">
-              <div class="text-sm font-medium text-slate-500 dark:text-slate-400">今日出库单数</div>
-              <div class="rounded-xl bg-brand/10 p-2 text-brand dark:bg-brand/20 dark:text-teal-400">
-                <el-icon :size="20"><Document /></el-icon>
-              </div>
-            </div>
-            <div class="text-3xl font-bold text-slate-800 dark:text-slate-100">
-              {{ stats?.todayOrderCount || 0 }}
-              <span class="ml-1 text-sm font-normal text-slate-500 dark:text-slate-400">单</span>
-            </div>
-          </div>
-
-          <div key="card-2" class="apple-card-hover min-w-0 p-5 sm:p-6 xl:p-7" style="transition-delay: 100ms">
-            <div class="mb-4 flex items-center justify-between gap-3">
-              <div class="text-sm font-medium text-slate-500 dark:text-slate-400">今日出库金额</div>
-              <div class="rounded-xl bg-secondary/10 p-2 text-secondary dark:bg-secondary/20 dark:text-slate-300">
-                <el-icon :size="20"><Money /></el-icon>
+              <div class="text-sm font-medium text-slate-500 dark:text-slate-400">{{ metric.title }}</div>
+              <div :class="['rounded-xl p-2', metric.iconBgClass, metric.iconTextClass]">
+                <el-icon :size="20">
+                  <component :is="metric.icon" />
+                </el-icon>
               </div>
             </div>
             <div class="break-all text-3xl font-bold text-slate-800 dark:text-slate-100">
-              <span class="mr-1 text-xl font-normal text-slate-500 dark:text-slate-400">¥</span>
-              {{ Number(stats?.todayOrderAmount || 0).toFixed(2) }}
-            </div>
-          </div>
-
-          <div key="card-3" class="apple-card-hover min-w-0 p-5 sm:p-6 xl:p-7" style="transition-delay: 200ms">
-            <div class="mb-4 flex items-center justify-between gap-3">
-              <div class="text-sm font-medium text-slate-500 dark:text-slate-400">在库产品总数</div>
-              <div class="rounded-xl bg-brand/10 p-2 text-brand dark:bg-brand/20 dark:text-teal-400">
-                <el-icon :size="20"><Box /></el-icon>
-              </div>
-            </div>
-            <div class="text-3xl font-bold text-slate-800 dark:text-slate-100">
-              {{ stats?.totalProductCount || 0 }}
-              <span class="ml-1 text-sm font-normal text-slate-500 dark:text-slate-400">种</span>
+              <span v-if="metric.unit === '¥'" class="mr-1 text-xl font-normal text-slate-500 dark:text-slate-400">¥</span>
+              {{ metric.value }}
+              <span v-if="metric.unit !== '¥'" class="ml-1 text-sm font-normal text-slate-500 dark:text-slate-400">{{ metric.unit }}</span>
             </div>
           </div>
         </transition-group>
       </section>
 
-      <div :class="['grid gap-6 xl:gap-7', appStore.isDesktop ? 'xl:grid-cols-[1.45fr_1fr] lg:grid-cols-[1.2fr_0.9fr]' : 'grid-cols-1']">
-        <section>
-          <h2 class="mb-4 text-lg font-semibold text-slate-800 dark:text-slate-200">快捷操作</h2>
-          <div :class="['grid gap-4 xl:gap-5', shortcutGridClass]">
-            <button
-              v-for="action in shortcutItems"
-              :key="action.path"
-              type="button"
-              :class="[
-                'apple-card-hover group flex min-w-0 cursor-pointer flex-col items-center justify-center gap-3 px-4 text-center xl:px-5',
-                appStore.isPhone ? 'min-h-[128px] py-5' : 'min-h-[168px] py-6 xl:min-h-[176px]',
-              ]"
-              @click="navigateTo(action.path)"
-            >
-              <div :class="['rounded-2xl p-4 transition-colors duration-300', action.bgClass, action.colorClass]">
-                <el-icon :size="28">
-                  <component :is="action.icon" />
-                </el-icon>
-              </div>
-              <span class="text-sm font-medium text-slate-700 transition-colors duration-300 group-hover:text-teal-600 dark:text-slate-300 dark:group-hover:text-teal-400">
-                {{ action.title }}
-              </span>
-              <span class="text-xs leading-5 text-slate-500 dark:text-slate-400">
-                {{ action.description }}
-              </span>
-            </button>
+      <section>
+        <h2 class="mb-4 text-lg font-semibold text-slate-800 dark:text-slate-200">高频入口</h2>
+        <div class="flex flex-wrap gap-3">
+          <button
+            v-for="action in compactShortcutItems"
+            :key="action.path"
+            type="button"
+            class="apple-card-hover inline-flex min-h-[44px] min-w-[150px] items-center gap-2 rounded-xl px-4 text-sm font-medium text-slate-700 dark:text-slate-200"
+            @click="navigateTo(action.path)"
+          >
+            <el-icon :size="16"><component :is="action.icon" /></el-icon>
+            <span class="truncate">{{ action.title }}</span>
+          </button>
+          <button
+            type="button"
+            class="apple-card inline-flex min-h-[44px] min-w-[150px] items-center gap-2 rounded-xl border-dashed px-4 text-sm font-medium text-slate-500 dark:text-slate-400"
+            @click="navigateTo('/order-list')"
+          >
+            <el-icon :size="16"><More /></el-icon>
+            <span>更多入口见左侧导航</span>
+          </button>
+        </div>
+      </section>
 
-            <div
-              :class="[
-                'apple-card flex min-w-0 flex-col items-center justify-center gap-3 border-dashed p-6 opacity-50 xl:p-7',
-                appStore.isPhone ? 'min-h-[128px]' : 'min-h-[168px] xl:min-h-[176px]',
-              ]"
-            >
-              <div class="rounded-2xl bg-slate-100 p-4 text-slate-400 dark:bg-slate-800">
-                <el-icon :size="28"><More /></el-icon>
+      <div :class="['grid gap-6 xl:gap-7', appStore.isDesktop ? 'xl:grid-cols-[1.3fr_1fr] lg:grid-cols-[1.2fr_1fr]' : 'grid-cols-1']">
+        <section>
+          <div class="apple-card p-5 sm:p-6 xl:p-7">
+            <div class="mb-5 flex items-center justify-between">
+              <h2 class="text-lg font-semibold text-slate-800 dark:text-slate-200">近 7 日出库趋势</h2>
+              <div class="text-xs text-slate-500 dark:text-slate-400">
+                峰值：<span class="font-semibold text-slate-700 dark:text-slate-200">¥{{ trendMaxAmount }}</span>
               </div>
-              <span class="text-sm font-medium text-slate-500 dark:text-slate-400">更多功能期待中...</span>
+            </div>
+
+            <div v-if="trendPoints.length > 1" class="space-y-3">
+              <svg class="h-[260px] w-full" :viewBox="`0 0 ${TREND_VIEWBOX_WIDTH} ${TREND_VIEWBOX_HEIGHT}`" preserveAspectRatio="none">
+                <defs>
+                  <linearGradient id="dashboardTrendAreaGradient" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stop-color="rgba(20, 184, 166, 0.45)" />
+                    <stop offset="100%" stop-color="rgba(20, 184, 166, 0.03)" />
+                  </linearGradient>
+                </defs>
+                <line
+                  :x1="TREND_PADDING_X"
+                  :y1="TREND_VIEWBOX_HEIGHT - TREND_PADDING_Y"
+                  :x2="TREND_VIEWBOX_WIDTH - TREND_PADDING_X"
+                  :y2="TREND_VIEWBOX_HEIGHT - TREND_PADDING_Y"
+                  stroke="rgba(148, 163, 184, 0.35)"
+                  stroke-width="1"
+                />
+                <path :d="trendAreaPath" fill="url(#dashboardTrendAreaGradient)" />
+                <path :d="trendPath" fill="none" stroke="rgb(13, 148, 136)" stroke-width="3" stroke-linecap="round" />
+                <circle
+                  v-for="point in trendPoints"
+                  :key="point.date"
+                  :cx="point.x"
+                  :cy="point.y"
+                  r="4"
+                  fill="white"
+                  stroke="rgb(13, 148, 136)"
+                  stroke-width="2"
+                />
+              </svg>
+              <div class="grid grid-cols-7 gap-2 text-center text-xs text-slate-500 dark:text-slate-400">
+                <div v-for="point in trendPoints" :key="`label-${point.date}`">{{ point.label }}</div>
+              </div>
+            </div>
+
+            <div v-else class="flex min-h-[260px] items-center justify-center rounded-xl bg-slate-50 text-slate-400 dark:bg-slate-900/40">
+              <el-empty :image-size="72" description="暂无趋势数据" />
             </div>
           </div>
         </section>
 
-        <section>
-          <h2 class="mb-4 text-lg font-semibold text-slate-800 dark:text-slate-200">近期动态</h2>
-          <div class="apple-card flex min-h-[220px] items-center justify-center p-6 xl:p-7 sm:min-h-[260px] xl:min-h-[100%]">
-            <el-empty :image-size="80" description="暂无最新动态" />
+        <section class="space-y-6">
+          <div class="apple-card p-5 sm:p-6 xl:p-7">
+            <div class="mb-5 flex items-center justify-between">
+              <h2 class="text-lg font-semibold text-slate-800 dark:text-slate-200">热门出库文创榜</h2>
+              <span class="text-xs text-slate-500 dark:text-slate-400">按本月出库数量 Top 5</span>
+            </div>
+            <div v-if="stats?.topProducts?.length" class="space-y-3">
+              <div
+                v-for="(item, index) in stats.topProducts"
+                :key="`${item.productId}-${index}`"
+                class="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2.5 dark:bg-slate-900/40"
+              >
+                <div class="flex min-w-0 items-center gap-3">
+                  <div class="flex h-7 w-7 items-center justify-center rounded-full bg-brand/10 text-xs font-bold text-brand dark:bg-brand/20 dark:text-teal-400">
+                    {{ index + 1 }}
+                  </div>
+                  <div class="truncate text-sm font-medium text-slate-700 dark:text-slate-200">{{ item.productName }}</div>
+                </div>
+                <div class="text-sm font-semibold text-slate-700 dark:text-slate-200">{{ formatQty(item.totalQty) }} 件</div>
+              </div>
+            </div>
+            <div v-else class="flex min-h-[180px] items-center justify-center rounded-xl bg-slate-50 text-slate-400 dark:bg-slate-900/40">
+              <el-empty :image-size="64" description="暂无榜单数据" />
+            </div>
+          </div>
+
+          <div class="apple-card p-5 sm:p-6 xl:p-7">
+            <h2 class="mb-4 text-lg font-semibold text-slate-800 dark:text-slate-200">近期出库动态</h2>
+            <div class="flex min-h-[160px] items-center justify-center">
+              <el-empty :image-size="72" description="暂无最新动态" />
+            </div>
           </div>
         </section>
       </div>
