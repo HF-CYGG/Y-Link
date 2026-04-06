@@ -41,6 +41,7 @@
 ---
 
 ## 快速体验
+### Docker 本地构建体验
 安装 Docker 后，直接执行：
 
 ```bash
@@ -59,16 +60,17 @@ docker compose up -d --build
 docker compose down
 ```
 
-如果只想本地联调（非 Docker），可执行：
-
-```bash
-npm run local:dev
-```
-
 ### 1Panel 一键镜像部署（默认 SQLite，可直接使用）
-如果你在 1Panel 使用容器编排，推荐直接使用云端镜像编排文件：
+Docker Hub 镜像地址（可直接拉取）：
+
+- 前端：`docker.io/yemiao351/y-link-frontend:latest`
+- 后端：`docker.io/yemiao351/y-link-backend:latest`
+
+如果你在 1Panel 使用容器编排，推荐执行：
 
 ```bash
+docker pull docker.io/yemiao351/y-link-frontend:latest
+docker pull docker.io/yemiao351/y-link-backend:latest
 docker compose -f compose.cloud.yml pull
 docker compose -f compose.cloud.yml up -d
 ```
@@ -77,6 +79,12 @@ docker compose -f compose.cloud.yml up -d
 - 不写 `.env` 也可直接启动（默认镜像、默认端口、默认 SQLite）。
 - 首次启动会自动初始化管理员，并在容器日志打印账号密码。
 - 日志默认开启彩色输出，便于在 1Panel 日志面板快速定位关键信息。
+
+### 本地开发（非 Docker）
+
+```bash
+npm run local:dev
+```
 
 ---
 
