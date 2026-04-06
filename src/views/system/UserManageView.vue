@@ -4,6 +4,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { BizCrudDialogShell, BizResponsiveDataCollectionShell, PageContainer, PagePaginationBar, PageToolbarCard } from '@/components/common'
 import {
+  changePassword,
   GOVERNANCE_PERMISSION_CODES,
   PERMISSION_LABEL_MAP,
   ROLE_LABEL_MAP,
@@ -28,6 +29,7 @@ import { useStableRequest } from '@/composables/useStableRequest'
 import { useAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
+import { useRouter } from 'vue-router'
 
 /**
  * 用户管理搜索表单：
@@ -58,6 +60,7 @@ const listState = reactive(createPaginatedListState<UserSafeProfile>({
  * - 避免在页面内硬编码 admin/operator 角色分支。
  */
 const authStore = useAuthStore()
+const router = useRouter()
 const listRequest = useStableRequest()
 
 /**
@@ -84,6 +87,9 @@ const formRef = ref<FormInstance>()
 const resetPasswordVisible = ref(false)
 const resetPasswordSubmitting = ref(false)
 const resetPasswordFormRef = ref<FormInstance>()
+const ownPasswordVisible = ref(false)
+const ownPasswordSubmitting = ref(false)
+const ownPasswordFormRef = ref<FormInstance>()
 
 /**
  * 用户编辑表单：
@@ -108,6 +114,17 @@ const resetPasswordForm = reactive({
   targetUserId: '',
   targetDisplayName: '',
   targetUsername: '',
+  newPassword: '',
+  confirmPassword: '',
+})
+
+/**
+ * 本人修改密码表单：
+ * - 仅用于当前登录用户主动改密；
+ * - 与管理员重置他人密码场景隔离，避免语义混淆。
+ */
+const ownPasswordForm = reactive({
+  currentPassword: '',
   newPassword: '',
   confirmPassword: '',
 })
@@ -165,6 +182,35 @@ const resetPasswordRules: FormRules = {
           return
         }
         if (value !== resetPasswordForm.newPassword) {
+          callback(new Error('两次输入的新密码不一致'))
+          return
+        }
+        callback()
+      },
+      trigger: 'blur',
+    },
+  ],
+}
+
+/**
+ * 本人修改密码校验规则：
+ * - 先校验当前密码，再校验新密码长度与确认一致性；
+ * - 与登录页/顶栏规则保持一致，降低理解成本。
+ */
+const ownPasswordRules: FormRules = {
+  currentPassword: [{ required: true, message: '请输入当前密码', trigger: 'blur' }],
+  newPassword: [
+    { required: true, message: '请输入新密码', trigger: 'blur' },
+    { min: 6, message: '新密码长度至少为 6 位', trigger: 'blur' },
+  ],
+  confirmPassword: [
+    {
+      validator: (_rule, value: string, callback) => {
+        if (!value) {
+          callback(new Error('请再次输入新密码'))
+          return
+        }
+        if (value !== ownPasswordForm.newPassword) {
           callback(new Error('两次输入的新密码不一致'))
           return
         }
@@ -307,6 +353,28 @@ const resetAdminPasswordForm = () => {
 }
 
 /**
+ * 重置本人修改密码表单：
+ * - 每次打开/关闭弹窗都清理输入与校验状态；
+ * - 防止旧输入残留带来误提交。
+ */
+const resetOwnPasswordForm = () => {
+  ownPasswordForm.currentPassword = ''
+  ownPasswordForm.newPassword = ''
+  ownPasswordForm.confirmPassword = ''
+  ownPasswordFormRef.value?.clearValidate()
+}
+
+/**
+ * 打开本人修改密码弹窗：
+ * - 在用户管理页提供显式入口，减少“找不到入口”的使用成本；
+ * - 与顶栏入口并存，二者调用同一后端接口。
+ */
+const handleOpenOwnPasswordDialog = () => {
+  ownPasswordVisible.value = true
+  resetOwnPasswordForm()
+}
+
+/**
  * 打开编辑弹窗：
  * - 账号只读回显；
  * - 密码不在这里修改，避免用户资料编辑与安全操作混在一起。
@@ -443,6 +511,35 @@ const handleSubmitResetPassword = async () => {
 }
 
 /**
+ * 提交本人修改密码：
+ * - 成功后服务端会使当前账号已有会话失效；
+ * - 前端主动退出并跳转登录页，要求用新密码重新登录。
+ */
+const handleSubmitOwnPassword = async () => {
+  const valid = await ownPasswordFormRef.value?.validate().catch(() => false)
+  if (!valid) {
+    return
+  }
+
+  ownPasswordSubmitting.value = true
+  try {
+    await changePassword({
+      currentPassword: ownPasswordForm.currentPassword,
+      newPassword: ownPasswordForm.newPassword,
+    })
+    ownPasswordVisible.value = false
+    resetOwnPasswordForm()
+    await authStore.logout()
+    await router.replace('/login')
+    ElMessage.success('密码修改成功，请使用新密码重新登录')
+  } catch (error) {
+    ElMessage.error(extractErrorMessage(error, '修改密码失败'))
+  } finally {
+    ownPasswordSubmitting.value = false
+  }
+}
+
+/**
  * 切换用户状态：
  * - 启停动作独立于编辑弹窗，提升列表页操作效率；
  * - 危险动作前增加确认提示，降低误操作风险。
@@ -569,6 +666,9 @@ onMounted(() => {
 
         <template #actions="{ isPhone }">
           <div :class="['flex flex-wrap gap-2', isPhone ? 'w-full' : 'justify-end']">
+            <el-button :class="isPhone ? 'w-full' : ''" icon="Lock" @click="handleOpenOwnPasswordDialog">
+              修改我的密码
+            </el-button>
             <el-button v-if="canCreateUser" :class="isPhone ? 'w-full' : ''" type="primary" icon="Plus" @click="handleOpenCreate">
               新增用户
             </el-button>
@@ -794,6 +894,52 @@ onMounted(() => {
             placeholder="请再次输入新密码"
             autocomplete="new-password"
             @keyup.enter="handleSubmitResetPassword"
+          />
+        </el-form-item>
+      </el-form>
+    </BizCrudDialogShell>
+
+    <BizCrudDialogShell
+      v-model="ownPasswordVisible"
+      title="修改我的密码"
+      phone-width="94%"
+      tablet-width="520px"
+      desktop-width="440px"
+      :confirm-loading="ownPasswordSubmitting"
+      confirm-text="确认修改"
+      @confirm="handleSubmitOwnPassword"
+      @closed="resetOwnPasswordForm"
+    >
+      <div class="mb-4 rounded-2xl bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-500 dark:bg-white/5 dark:text-slate-400">
+        修改成功后，当前账号已有登录会话会立即失效，需要使用新密码重新登录系统。
+      </div>
+      <el-form ref="ownPasswordFormRef" :model="ownPasswordForm" :rules="ownPasswordRules" label-position="top">
+        <el-form-item label="当前密码" prop="currentPassword">
+          <el-input
+            v-model="ownPasswordForm.currentPassword"
+            type="password"
+            show-password
+            placeholder="请输入当前密码"
+            autocomplete="current-password"
+          />
+        </el-form-item>
+        <el-form-item label="新密码" prop="newPassword">
+          <el-input
+            v-model="ownPasswordForm.newPassword"
+            type="password"
+            show-password
+            placeholder="请输入新密码"
+            autocomplete="new-password"
+          />
+        </el-form-item>
+        <el-form-item label="确认新密码" prop="confirmPassword">
+          <el-input
+            v-model="ownPasswordForm.confirmPassword"
+            type="password"
+            show-password
+            placeholder="请再次输入新密码"
+            autocomplete="new-password"
+            @keyup.enter="handleSubmitOwnPassword"
           />
         </el-form-item>
       </el-form>
