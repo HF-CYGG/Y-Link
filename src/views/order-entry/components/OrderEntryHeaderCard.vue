@@ -13,9 +13,16 @@ defineProps<{
 </script>
 
 <template>
-  <div class="apple-card p-4">
-    <div class="mb-4 flex items-center rounded-md border-l-4 border-brand bg-slate-50 px-3 py-2 dark:border-teal-400 dark:bg-[#1f1f21]">
-      <span class="ml-2 font-medium text-slate-800 dark:text-slate-100">主单信息</span>
+  <div class="apple-card p-3 sm:p-4 xl:p-5">
+    <div class="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-100 bg-slate-50 px-3 py-2.5 dark:border-white/10 dark:bg-[#1f1f21]">
+      <span class="flex items-center gap-2 font-medium text-slate-800 dark:text-slate-100">
+        <span class="inline-block h-2 w-2 rounded-full bg-brand" />
+        <span>主单信息</span>
+      </span>
+      <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+        <span class="rounded-full bg-white px-2.5 py-1 dark:bg-white/10">支持临时离页草稿保留</span>
+        <span class="rounded-full bg-white px-2.5 py-1 dark:bg-white/10">建议先录客户，再录明细</span>
+      </div>
     </div>
     <el-form :model="model" :label-width="isPhone ? '80px' : '88px'">
       <div class="grid grid-cols-1 gap-3 md:grid-cols-2">

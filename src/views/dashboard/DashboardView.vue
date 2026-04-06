@@ -23,6 +23,17 @@ const dashboardRequest = useStableRequest()
  * - 当前用户只会看到自己具备权限的业务与治理入口。
  */
 const shortcutItems = computed(() => buildDashboardShortcutItems(authStore.currentUser))
+/**
+ * 顶部横幅信息项：
+ * - 在宽屏下补充轻量关键信息，提升首页首屏信息密度；
+ * - 手机端自动换行为双列，不破坏阅读节奏；
+ * - 当统计尚未准备完成时回落为占位符，避免布局跳变。
+ */
+const heroMetaItems = computed(() => [
+  { label: '今日单据', value: `${stats.value?.todayOrderCount ?? '--'} 单` },
+  { label: '今日金额', value: `¥${Number(stats.value?.todayOrderAmount ?? 0).toFixed(2)}` },
+  { label: '在库产品', value: `${stats.value?.totalProductCount ?? '--'} 种` },
+])
 
 /**
  * 卡片网格策略：
@@ -136,14 +147,17 @@ onActivated(() => {
     <div v-if="(loading && !stats) || loadStatus === 'idle'" class="dashboard-container min-w-0 space-y-5 sm:space-y-6 lg:space-y-7">
       <section
         :class="[
-          'relative overflow-hidden rounded-2xl bg-gradient-to-r from-teal-500 to-teal-400 text-white shadow-sm',
-          appStore.isPhone ? 'p-5' : 'p-6 sm:p-8',
+          'relative overflow-hidden rounded-2xl bg-gradient-to-r from-teal-500 via-teal-400 to-cyan-400 text-white shadow-sm',
+          appStore.isPhone ? 'p-5' : 'p-6 sm:p-8 xl:p-9',
         ]"
       >
         <div class="relative z-10 max-w-2xl space-y-3">
           <div class="h-7 w-44 animate-pulse rounded-full bg-white/30" />
           <div class="h-4 w-full max-w-xl animate-pulse rounded-full bg-white/20" />
           <div class="h-4 w-3/4 max-w-lg animate-pulse rounded-full bg-white/20" />
+          <div class="grid grid-cols-1 gap-2 pt-2 sm:grid-cols-3">
+            <div v-for="index in 3" :key="`hero-meta-skeleton-${index}`" class="h-14 rounded-xl bg-white/18" />
+          </div>
         </div>
         <div
           class="pointer-events-none absolute right-0 top-0 translate-x-1/4 -translate-y-1/4 transform opacity-10"
@@ -199,8 +213,8 @@ onActivated(() => {
     <div v-else class="dashboard-container min-w-0 space-y-5 sm:space-y-6 lg:space-y-7">
       <section
         :class="[
-          'relative overflow-hidden rounded-2xl bg-gradient-to-r from-teal-500 to-teal-400 text-white shadow-sm',
-          appStore.isPhone ? 'p-5' : 'p-6 sm:p-8',
+          'relative overflow-hidden rounded-2xl bg-gradient-to-r from-teal-500 via-teal-400 to-cyan-400 text-white shadow-sm',
+          appStore.isPhone ? 'p-5' : 'p-6 sm:p-8 xl:p-9',
         ]"
       >
         <div class="relative z-10 max-w-2xl">
@@ -208,6 +222,16 @@ onActivated(() => {
           <p class="text-sm leading-6 text-teal-50/90 sm:text-base">
             在这里您可以快速查看今日出库数据并进行快捷操作。
           </p>
+          <div class="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-3">
+            <div
+              v-for="item in heroMetaItems"
+              :key="item.label"
+              class="rounded-xl border border-white/20 bg-white/12 px-3 py-2.5 backdrop-blur-sm"
+            >
+              <div class="text-[11px] tracking-wide text-teal-50/80">{{ item.label }}</div>
+              <div class="mt-1 text-sm font-semibold text-white">{{ item.value }}</div>
+            </div>
+          </div>
 
           <div
             v-if="!stats"

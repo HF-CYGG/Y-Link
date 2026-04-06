@@ -70,13 +70,19 @@ const handleAddRow = () => {
 </script>
 
 <template>
-  <div class="apple-card p-4">
-    <div class="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-md border-l-4 border-brand bg-slate-50 px-3 py-2 dark:border-teal-400 dark:bg-[#1f1f21]">
-      <span class="ml-2 flex items-center gap-2 font-medium text-slate-800 dark:text-slate-100">
+  <div class="apple-card p-3 sm:p-4 xl:p-5">
+    <div class="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-100 bg-slate-50 px-3 py-2.5 dark:border-white/10 dark:bg-[#1f1f21]">
+      <span class="flex items-center gap-2 font-medium text-slate-800 dark:text-slate-100">
+        <span class="inline-block h-2 w-2 rounded-full bg-brand" />
         <span>明细录入</span>
         <span class="text-xs font-normal text-slate-500 dark:text-slate-400">（{{ detailModeLabel }}）</span>
       </span>
-      <el-button v-if="!productsLoading" type="primary" plain size="small" @click="handleAddRow">新增明细</el-button>
+      <div class="flex flex-wrap items-center gap-2">
+        <span class="rounded-full bg-white px-2.5 py-1 text-xs text-slate-500 dark:bg-white/10 dark:text-slate-400">
+          共 {{ itemRows.length }} 行
+        </span>
+        <el-button v-if="!productsLoading" type="primary" plain size="small" @click="handleAddRow">新增明细</el-button>
+      </div>
     </div>
 
     <el-skeleton v-if="productsLoading" animated :rows="6">

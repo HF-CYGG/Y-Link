@@ -171,6 +171,17 @@ const {
   transition: transform 0.25s ease, box-shadow 0.25s ease;
 }
 
+.order-detail-content {
+  padding: 14px 14px 18px;
+  background: linear-gradient(180deg, rgba(15, 118, 110, 0.03) 0%, rgba(15, 118, 110, 0) 28%);
+}
+
+@media (min-width: 768px) {
+  .order-detail-content {
+    padding: 16px 18px 20px;
+  }
+}
+
 .order-detail-content :deep(.el-descriptions__label),
 .order-detail-content :deep(.el-descriptions__content) {
   background-color: transparent;
