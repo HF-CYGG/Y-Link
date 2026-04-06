@@ -75,7 +75,10 @@ export class AuthService {
       .getOne()
   }
 
-  async login(input: LoginInput, requestMeta?: RequestMeta): Promise<{ token: string; expiresAt: Date; user: UserSafeProfile }> {
+  async login(
+    input: LoginInput,
+    requestMeta?: RequestMeta,
+  ): Promise<{ token: string; expiresAt: Date; user: UserSafeProfile; securityReminder?: string }> {
     const username = input.username.trim()
     const password = input.password.trim()
 
@@ -147,6 +150,12 @@ export class AuthService {
     const expiresAt = new Date(now.getTime() + env.AUTH_TOKEN_TTL_HOURS * 60 * 60 * 1000)
     const token = generateSessionToken()
 
+    const usingBuiltInBootstrapCredential =
+      user.username === 'admin' &&
+      env.INIT_ADMIN_USERNAME === 'admin' &&
+      env.INIT_ADMIN_PASSWORD === 'Admin@123456' &&
+      password === env.INIT_ADMIN_PASSWORD
+
     const data = await AppDataSource.transaction(async (manager) => {
       const sessionRepo = manager.getRepository(SysUserSession)
       const userRepo = manager.getRepository(SysUser)
@@ -191,6 +200,9 @@ export class AuthService {
         token,
         expiresAt,
         user: toSafeProfile(savedUser),
+        securityReminder: usingBuiltInBootstrapCredential
+          ? '当前仍在使用系统内置默认管理员密码，请尽快修改为你自己的私有密码。'
+          : undefined,
       }
     })
 

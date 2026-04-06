@@ -137,6 +137,7 @@ export interface LoginResult {
   token: string
   expiresAt: string
   user: UserSafeProfile
+  securityReminder?: string
 }
 
 /**

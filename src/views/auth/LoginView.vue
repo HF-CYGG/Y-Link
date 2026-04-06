@@ -1,6 +1,6 @@
 <script setup lang="ts"> 
 import { computed, reactive, ref } from 'vue' 
-import { ElMessage, type FormInstance, type FormRules } from 'element-plus' 
+import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus' 
 import { Lock, User, Right } from '@element-plus/icons-vue' 
 import { useRoute, useRouter } from 'vue-router' 
 import ThemeToggle from '@/layout/components/ThemeToggle.vue' 
@@ -49,6 +49,12 @@ const handleSubmit = async () => {
 
     submitPhase.value = 'success' 
     ElMessage.success(`欢迎回来，${result.user.displayName}`) 
+    if (result.securityReminder) {
+      ElMessageBox.alert(result.securityReminder, '安全提醒', {
+        type: 'warning',
+        confirmButtonText: '我知道了',
+      }).catch(() => undefined)
+    }
     await authStore.warmupPostLoginEntry(redirectPath.value)
     await router.replace(redirectPath.value) 
   } catch (error) { 
