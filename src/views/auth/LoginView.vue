@@ -8,11 +8,9 @@ import { resolveSafeRedirect } from '@/router'
 import { useAuthStore } from '@/store' 
 import { extractErrorMessage } from '@/utils/error' 
 
-const demoPassword = ['Admin', '@', '123456'].join('')
-
 const form = reactive({ 
-  username: 'admin', 
-  password: demoPassword, 
+  username: '', 
+  password: '', 
 }) 
 
 const formRef = ref<FormInstance>() 
@@ -135,6 +133,7 @@ const handleSubmit = async () => {
             :model="form" 
             :rules="rules" 
             class="modern-form" 
+            autocomplete="off"
             @submit.prevent="handleSubmit" 
           > 
             <el-form-item prop="username"> 
@@ -143,6 +142,7 @@ const handleSubmit = async () => {
                 class="geo-input" 
                 placeholder="账号" 
                 :prefix-icon="User" 
+                autocomplete="username"
                 clearable 
                 @keyup.enter="handleSubmit" 
               /> 
@@ -156,6 +156,7 @@ const handleSubmit = async () => {
                 placeholder="密码" 
                 show-password 
                 :prefix-icon="Lock" 
+                autocomplete="current-password"
                 @keyup.enter="handleSubmit" 
               /> 
             </el-form-item> 
