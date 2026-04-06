@@ -208,9 +208,7 @@ const handleSubmit = async () => {
   transition: background-color 0.5s ease;
 } 
 
-.dark .login-page,
-html.dark .login-page,
-body.dark .login-page { 
+:global(.dark) .login-page { 
   --bg-primary: #000000; 
   --bg-panel: #111112; 
   --text-main: #f5f5f7; 
@@ -234,6 +232,7 @@ body.dark .login-page {
   -webkit-mask-image: radial-gradient(circle at center, black 48%, transparent 92%);
   animation: gridDrift 12s linear infinite;
   will-change: background-position;
+  transform: translateZ(0);
 }
 
 :global(.dark) .login-grid-layer {
@@ -255,6 +254,7 @@ body.dark .login-page {
   filter: blur(80px);
   animation: ambientBreathe 10s ease-in-out infinite alternate;
   will-change: transform, opacity;
+  transform-style: preserve-3d;
 }
 
 :global(.dark) .login-ambient-layer {
@@ -293,11 +293,10 @@ body.dark .login-page {
   overflow: hidden; 
   box-shadow: 0 20px 40px rgba(0, 0, 0, 0.04); 
   border: 1px solid var(--border-light); 
+  contain: layout paint;
 } 
 
-.dark .login-shell,
-html.dark .login-shell,
-body.dark .login-shell { 
+:global(.dark) .login-shell { 
   box-shadow: none; 
 } 
 
@@ -373,9 +372,7 @@ body.dark .login-shell {
   transition: all 0.6s cubic-bezier(0.34, 1.56, 0.64, 1); 
 } 
 
-.dark .mockup-card,
-html.dark .mockup-card,
-body.dark .mockup-card { 
+:global(.dark) .mockup-card { 
   box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4); 
 } 
 
@@ -443,9 +440,7 @@ body.dark .mockup-card {
   opacity: 0.15; 
 } 
 
-.dark .sk-line,
-html.dark .sk-line,
-body.dark .sk-line { 
+:global(.dark) .sk-line { 
   opacity: 0.3; 
 } 
 
@@ -453,9 +448,7 @@ body.dark .sk-line {
   opacity: 0.08; 
 } 
 
-.dark .sk-light,
-html.dark .sk-light,
-body.dark .sk-light { 
+:global(.dark) .sk-light { 
   opacity: 0.15; 
 } 
 
@@ -624,9 +617,7 @@ body.dark .sk-light {
   animation: pulseGlow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 } 
 
-.dark .geo-input :deep(.el-input__wrapper.is-focus),
-html.dark .geo-input :deep(.el-input__wrapper.is-focus),
-body.dark .geo-input :deep(.el-input__wrapper.is-focus) { 
+:global(.dark) .geo-input :deep(.el-input__wrapper.is-focus) { 
   box-shadow: 0 0 0 1px #14b8a6, 0 0 20px 0 rgba(20, 184, 166, 0.25) !important;
 } 
 
@@ -685,18 +676,6 @@ body.dark .geo-input :deep(.el-input__wrapper.is-focus) {
 
 .geo-submit:active { 
   transform: scale(0.97); 
-} 
-
-.group:hover .group-hover\:translate-x-1 { 
-  transform: translateX(4px); 
-} 
-
-.demo-account { 
-  margin-top: 24px; 
-  text-align: center; 
-  font-size: 13px; 
-  color: var(--text-sub); 
-  font-family: monospace; 
 } 
 
 @media (prefers-reduced-motion: reduce) {
