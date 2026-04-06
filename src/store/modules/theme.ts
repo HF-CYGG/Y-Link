@@ -46,6 +46,7 @@ type DocumentWithViewTransition = Document & {
 const THEME_STORAGE_KEY = 'y-link-theme-mode'
 export const THEME_TRANSITION_DURATION_MS = 460
 const THEME_TRANSITION_EASING = 'cubic-bezier(0.22, 1, 0.36, 1)'
+const FORCE_FALLBACK_THEME_TRANSITION = true
 
 /**
  * 判定是否处于浏览器端：
@@ -83,7 +84,7 @@ const shouldForceFallbackTransition = () => {
     return false
   }
 
-  return isMobileThemeTransitionContext() || document.visibilityState !== 'visible'
+  return FORCE_FALLBACK_THEME_TRANSITION || isMobileThemeTransitionContext() || document.visibilityState !== 'visible'
 }
 
 /**
