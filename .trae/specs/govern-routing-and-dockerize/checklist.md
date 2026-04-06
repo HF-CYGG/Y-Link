@@ -1,0 +1,16 @@
+- [x] 路由、左侧菜单与 Dashboard 快捷入口已统一由单一配置源派生，不再存在路径漂移
+- [x] 前端未再引入未使用的 Vant 能力，Element Plus 图标注册策略已收敛
+- [x] `AppLayout` 已拆分为更清晰的布局子组件，职责边界明确
+- [x] `OrderListView`、`ProductManager`、`TagManager`、`NotFoundView` 的暗黑模式样式已补齐且视觉一致
+- [x] 全局 transition 不再直接作用于全站所有元素，弹层与表格交互保持稳定
+- [x] 核心后端实体字段与真实数据库列名已显式对齐，不依赖隐式命名猜测
+- [x] 后端支持通过配置切换 SQLite 与 MySQL 两种数据库模式
+- [x] 订单幂等与 `show_no` 编号并发冲突已具备业务化兜底，不再直接暴露底层数据库异常
+- [x] SQLite 模式已实际启动，并通过 `/health` 与 `/api/products` 完成基础请求验证
+- [x] 已确认当前环境无可用 MySQL 实例监听 `127.0.0.1:3306`，MySQL 真连验证受外部环境阻塞
+- [x] 已确认当前环境缺少 Docker CLI，Docker 相关仅完成 Dockerfile / compose / healthcheck / 端口映射静态一致性检查
+- [ ] Docker 默认一体化部署可在无外置数据库前提下启动系统
+- [ ] Docker 分体部署可通过配置连接外置 MySQL 并完成持久化
+- [x] README 已补充本地开发、Docker 一体化、Docker + MySQL 三种运行说明
+- [x] 前后端构建与 SQLite 模式自动化验证已通过
+- [ ] 前后端构建、数据库双模式启动与 Docker 构建均已验证通过

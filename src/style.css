@@ -1,0 +1,410 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 全局根样式：统一字体、文字渲染及应用背景色。 */
+:root {
+  --el-color-primary: #005b52;
+  --el-color-primary-light-3: #4d8c85;
+  --el-color-primary-light-5: #80ada8;
+  --el-color-primary-light-7: #b3cecb;
+  --el-color-primary-light-8: #ccdcdb;
+  --el-color-primary-light-9: #e6efee;
+  --el-color-primary-dark-2: #004942;
+
+  --el-color-info: #6b7a8f;
+  --el-color-info-light-3: #97a2b0;
+  --el-color-info-light-5: #b5bcc7;
+  --el-color-info-light-7: #d2d6dd;
+  --el-color-info-light-8: #e1e4e9;
+  --el-color-info-light-9: #f0f2f4;
+  --el-color-info-dark-2: #566272;
+  --theme-transition-origin-x: 50vw;
+  --theme-transition-origin-y: 50vh;
+  --theme-transition-duration: 460ms;
+  --theme-transition-easing: cubic-bezier(0.22, 1, 0.36, 1);
+
+  font-family:
+    'PingFang SC',
+    'Microsoft YaHei',
+    -apple-system,
+    BlinkMacSystemFont,
+    'Segoe UI',
+    sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color: #1f2937;
+  background-color: #f8fafc;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color-scheme: light;
+  view-transition-name: root;
+}
+
+/*
+ * 全局盒模型与溢出安全网：
+ * - 统一盒模型，减少复杂栅格下的宽度累计误差；
+ * - 为应用根节点提供最小宽度与横向裁剪，避免特殊设备产生整体抖动。
+ */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  min-width: 0;
+}
+
+/* 重置页面基础间距，避免浏览器默认样式影响布局基线。 */
+body {
+  position: relative;
+  margin: 0;
+  min-width: 320px;
+  background-color: #eff1f5;
+  @apply dark:bg-[#0a0a0b];
+}
+
+/* 黑暗模式根变量覆盖：统一暗色背景、卡片与弹层色板。 */
+html.dark {
+  color: #e5e7eb;
+  background-color: #0a0a0b;
+  --el-bg-color: #141415;
+  --el-bg-color-overlay: #141415;
+  --el-fill-color-light: rgba(255, 255, 255, 0.06);
+  --el-fill-color-blank: #141415;
+  --el-border-color: rgba(255, 255, 255, 0.08);
+  --el-border-color-light: rgba(255, 255, 255, 0.08);
+  --el-border-color-lighter: rgba(255, 255, 255, 0.06);
+  --el-text-color-primary: #f1f5f9;
+  --el-text-color-regular: #cbd5e1;
+  --el-text-color-secondary: #94a3b8;
+  --el-mask-color: rgba(0, 0, 0, 0.72);
+}
+
+html.dark,
+body.dark {
+  color-scheme: dark;
+}
+
+/*
+ * 主题过渡门控：
+ * - 仅在 fallback 策略触发时，为应用壳层与大面积表面容器开启颜色过渡；
+ * - 明确排除按钮、菜单项、表格单元格等高频 hover 节点，避免主题切换与交互态 transition 叠加闪烁；
+ * - 保持日常 hover / loading / 弹层动画不额外背负全局 transition。
+ */
+html[data-theme-transition='fallback'] body,
+html[data-theme-transition='fallback'] #app,
+html[data-theme-transition='fallback'] .apple-card,
+html[data-theme-transition='fallback'] .apple-card-hover,
+html[data-theme-transition='fallback'] .el-menu,
+html[data-theme-transition='fallback'] .el-input__wrapper,
+html[data-theme-transition='fallback'] .el-select__wrapper,
+html[data-theme-transition='fallback'] .el-textarea__inner,
+html[data-theme-transition='fallback'] .el-table,
+html[data-theme-transition='fallback'] .el-dialog,
+html[data-theme-transition='fallback'] .el-drawer,
+html[data-theme-transition='fallback'] .el-empty,
+html[data-theme-transition='fallback'] .el-descriptions,
+html[data-theme-transition='fallback'] .el-pagination,
+html[data-theme-transition='fallback'] .el-card {
+  transition:
+    background-color var(--theme-transition-duration) ease,
+    border-color var(--theme-transition-duration) ease,
+    color var(--theme-transition-duration) ease,
+    box-shadow var(--theme-transition-duration) ease;
+}
+
+/*
+ * 表格主题切换隔离：
+ * - Element Plus 的行 hover 依赖行/单元格背景变量联动；
+ * - 若在 fallback 窗口内继续给 cell 附加过渡，会与 hover 态形成双重动画并出现闪烁；
+ * - 因此仅在主题切换窗口内显式关闭表格行与单元格的 transition，保留正常状态下的原生交互。
+ */
+html[data-theme-transition='fallback'] .el-table__row,
+html[data-theme-transition='fallback'] .el-table__cell,
+html[data-theme-transition='fallback'] .el-table__body tr:hover > td.el-table__cell {
+  transition: none !important;
+}
+
+/*
+ * CSS 降级点击点提示：
+ * - 浏览器不支持 View Transition 时，用轻量光晕表达“主题从点击点触发”；
+ * - 不做截图级遮罩，避免兼容实现过重，同时保持企业后台的稳定性。
+ */
+body::after {
+  content: none;
+}
+
+html[data-theme-transition='fallback'] body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2147483646;
+  background:
+    radial-gradient(
+      circle at var(--theme-transition-origin-x) var(--theme-transition-origin-y),
+      rgba(0, 91, 82, 0.18) 0,
+      rgba(0, 91, 82, 0.12) 72px,
+      rgba(0, 91, 82, 0.04) 160px,
+      transparent 260px
+    );
+  opacity: 0;
+  animation: theme-fallback-pulse var(--theme-transition-duration) var(--theme-transition-easing);
+}
+
+html.dark[data-theme-transition='fallback'] body::after {
+  background:
+    radial-gradient(
+      circle at var(--theme-transition-origin-x) var(--theme-transition-origin-y),
+      rgba(123, 224, 213, 0.2) 0,
+      rgba(123, 224, 213, 0.14) 72px,
+      rgba(123, 224, 213, 0.05) 160px,
+      transparent 260px
+    );
+}
+
+/*
+ * View Transition 视图层控制：
+ * - 关闭浏览器默认的淡入淡出，改由 JS 精确驱动 clip-path 圆形揭幕；
+ * - 根据目标主题切换前后栈顺序，保证明暗切换不会出现双层叠影。
+ */
+html[data-theme-transition='view-transition']::view-transition-old(root),
+html[data-theme-transition='view-transition']::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+
+html[data-theme-transition='view-transition']::view-transition-group(root),
+html[data-theme-transition='view-transition']::view-transition-image-pair(root) {
+  isolation: isolate;
+}
+
+html[data-theme-transition='view-transition'] *,
+html[data-theme-transition='view-transition'] *::before,
+html[data-theme-transition='view-transition'] *::after {
+  transition-property: none !important;
+  animation: none !important;
+}
+
+html[data-theme-transition='view-transition']::view-transition-old(root) {
+  z-index: 1;
+}
+
+html[data-theme-transition='view-transition']::view-transition-new(root) {
+  z-index: 2;
+}
+
+@keyframes theme-fallback-pulse {
+  0% {
+    opacity: 0;
+    transform: scale(0.92);
+  }
+
+  18% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1.08);
+  }
+}
+
+html.dark .el-table {
+  --el-table-bg-color: #141415 !important;
+  --el-table-tr-bg-color: #141415 !important;
+  --el-table-header-bg-color: #1b1b1d !important;
+  --el-table-header-text-color: #9ca3af !important;
+  --el-table-border-color: rgba(255, 255, 255, 0.08) !important;
+  --el-table-row-hover-bg-color: rgba(255, 255, 255, 0.04) !important;
+}
+
+html.dark .el-table th.el-table__cell {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08) !important;
+}
+
+html.dark .el-dialog,
+html.dark .el-drawer,
+html.dark .el-empty,
+html.dark .el-descriptions__body,
+html.dark .el-pagination button,
+html.dark .el-pager li {
+  background-color: #141415;
+  color: #e2e8f0;
+}
+
+html.dark .el-dialog,
+html.dark .el-drawer {
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* 原子类：统一卡片背景、边框与悬浮效果。 */
+@layer components {
+  .apple-card {
+    @apply rounded-xl border border-slate-200 bg-white dark:border-white/5 dark:bg-[#141415];
+    box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
+  }
+
+  .apple-card-hover {
+    @apply apple-card;
+    transition: transform 0.28s ease, box-shadow 0.28s ease, background-color 0.28s ease, border-color 0.28s ease;
+  }
+
+  .apple-card-hover:hover {
+    @apply -translate-y-0.5 shadow-md;
+  }
+}
+
+/* 路由切换动画：仅作用于页面级 router-view。 */
+.fade-slide-enter-active,
+.fade-slide-leave-active {
+  transition: opacity 0.26s ease, transform 0.26s ease;
+}
+
+.fade-slide-enter-from {
+  opacity: 0;
+  transform: translateX(12px);
+}
+
+.fade-slide-leave-to {
+  opacity: 0;
+  transform: translateX(-12px);
+}
+
+/* 应用根容器高度占满视口，便于布局组件直接继承。 */
+#app {
+  min-height: 100vh;
+}
+
+/* Element Plus 表格头部样式优化。 */
+.el-table {
+  --el-table-header-bg-color: #f8fafc !important;
+  --el-table-header-text-color: #475569 !important;
+}
+
+.el-table th.el-table__cell {
+  font-weight: 600 !important;
+  background-color: var(--el-table-header-bg-color) !important;
+  border-bottom: 1px solid #e2e8f0 !important;
+}
+
+/*
+ * 日期区间视觉增强：
+ * - 只加深“包含日期”（in-range）的背景色，不改动起止日期圆点主色；
+ * - 通过统一左右两侧背景，避免区间中段出现深浅不一致；
+ * - 暗色模式单独加深，保证夜间对比度与可读性。
+ */
+.el-date-table td.in-range div {
+  background-color: #cfe5df !important;
+}
+
+.el-date-table td.in-range .el-date-table-cell {
+  background-color: #cfe5df !important;
+}
+
+.el-date-table td.in-range .el-date-table-cell__text {
+  color: inherit !important;
+  font-weight: 400;
+}
+
+html.dark .el-date-table td.in-range div {
+  background-color: rgba(0, 91, 82, 0.5) !important;
+}
+
+html.dark .el-date-table td.in-range .el-date-table-cell {
+  background-color: rgba(0, 91, 82, 0.5) !important;
+}
+
+html.dark .el-date-table td.in-range .el-date-table-cell__text {
+  color: inherit !important;
+}
+
+/*
+ * 起始日期对比增强：
+ * - 起始日期使用白底深色字，和中间包含区形成清晰层次；
+ * - 暗色模式下保留白底，确保在深背景中仍然醒目。
+ */
+.el-date-table td.start-date .el-date-table-cell__text {
+  background-color: #ffffff !important;
+  color: #005b52 !important;
+  border: 1px solid #9ecdc1;
+}
+
+html.dark .el-date-table td.start-date .el-date-table-cell__text {
+  background-color: #ffffff !important;
+  color: #005b52 !important;
+  border: 1px solid rgba(0, 91, 82, 0.35);
+}
+
+/*
+ * 通用溢出治理：
+ * - 让 flex / grid 子项默认允许收缩，避免标题、标签、金额撑破容器；
+ * - 为表格、抽屉、分页、描述列表增加安全换行与横向滚动能力。
+ */
+.min-w-0,
+[class*='grid'],
+[class*='flex'] > * {
+  min-width: 0;
+}
+
+img,
+svg,
+canvas {
+  max-width: 100%;
+}
+
+.el-table,
+.el-table__inner-wrapper,
+.el-scrollbar,
+.el-scrollbar__view,
+.el-drawer__body,
+.el-dialog__body {
+  min-width: 0;
+}
+
+.el-table .cell,
+.el-descriptions__content,
+.el-message-box__content,
+.el-drawer__header,
+.el-dialog__header {
+  word-break: break-word;
+}
+
+.el-pagination {
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.el-descriptions__label,
+.el-descriptions__content {
+  white-space: normal;
+}
+
+.el-input,
+.el-select,
+.el-date-editor,
+.el-input-number,
+.el-form-item,
+.el-button {
+  max-width: 100%;
+}
+
+@media (max-width: 767px) {
+  .el-drawer {
+    max-width: 100vw;
+  }
+
+  .el-dialog {
+    margin-top: 6vh !important;
+  }
+
+  .el-pagination {
+    justify-content: center;
+  }
+}

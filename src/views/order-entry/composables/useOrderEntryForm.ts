@@ -1,0 +1,759 @@
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { ElMessage } from 'element-plus'
+import { orderApi, productApi } from '@/api'
+import type { SubmitOrderPayload } from '@/api/modules/order'
+import type { ProductRecord } from '@/api/modules/product'
+import { useAppStore } from '@/store'
+import { extractErrorMessage } from '@/utils/error'
+import type { FocusField, OrderEntryDrawerForm, OrderHeaderForm, OrderItemRow } from '../types'
+
+/**
+ * 订单录入页业务编排 composable：
+ * - 收拢产品加载、明细编辑、键盘流与提交逻辑；
+ * - 让页面入口只负责装配头部/明细/汇总展示单元；
+ * - 保持现有桌面表格、移动端卡片与抽屉编辑体验不变。
+ */
+export const useOrderEntryForm = () => {
+  const appStore = useAppStore()
+  const ORDER_ENTRY_DRAFT_STORAGE_KEY = 'y-link.order-entry.draft.v1'
+
+  interface OrderEntryDraftSnapshot {
+    headerForm: OrderHeaderForm
+    itemRows: OrderItemRow[]
+    drawerVisible: boolean
+    editingRowUid: string
+    drawerForm: OrderEntryDrawerForm
+  }
+
+  /**
+   * 主单信息：
+   * - 仅维护客户名称与整单备注；
+   * - 作为多个展示组件共享的响应式表单模型。
+   */
+  const headerForm = reactive<OrderHeaderForm>({
+    customerName: '',
+    remark: '',
+  })
+
+  /**
+   * 明细与产品数据源：
+   * - itemRows 保存用户当前录入的所有明细；
+   * - products 保存当前启用产品全集，供选择与自动带价使用。
+   */
+  const itemRows = ref<OrderItemRow[]>([])
+  const products = ref<ProductRecord[]>([])
+
+  /**
+   * 交互状态：
+   * - productsLoading 控制产品骨架；
+   * - isSaving 防止重复提交；
+   * - deletingRowUids 用于列表删除过渡动画；
+   * - autoCreatedProductNames 记录本次提交中新建的商品名，供成功提示复用。
+   */
+  const productsLoading = ref(false)
+  const isSaving = ref(false)
+  const deletingRowUids = ref<string[]>([])
+  const autoCreatedProductNames = ref<string[]>([])
+
+  /**
+   * 移动端抽屉编辑状态：
+   * - editingRowUid 指向当前正在编辑的行；
+   * - drawerForm 作为编辑草稿，点击应用后再统一回写。
+   */
+  const drawerVisible = ref(false)
+  const editingRowUid = ref('')
+  const drawerForm = reactive<OrderEntryDrawerForm>({
+    productId: '',
+    qty: null,
+    unitPrice: null,
+    remark: '',
+  })
+
+  /**
+   * 桌面端键盘流缓存：
+   * - 通过 uid + field 组合键保存单元格实例；
+   * - 支持 Enter / Tab 在整张录入网格中顺序跳转。
+   */
+  const fieldRefMap = new Map<string, unknown>()
+  const focusFieldOrder: FocusField[] = ['product', 'qty', 'unitPrice', 'remark']
+  const draftPersistenceReady = ref(false)
+
+  /**
+   * 设备模式：
+   * - desktop 使用表格输入；
+   * - tablet / phone 使用卡片 + 抽屉；
+   * - 保留近期针对平板双列与手机单列的布局差异。
+   */
+  const isPhone = computed(() => appStore.isPhone)
+  const isTablet = computed(() => appStore.isTablet)
+  const isDesktop = computed(() => appStore.isDesktop)
+  const cardListClass = computed(() => (isTablet.value ? 'sm:grid-cols-2' : 'grid-cols-1'))
+  const drawerDirection = computed(() => (isPhone.value ? 'btt' : 'rtl'))
+  const drawerSize = computed(() => {
+    if (isPhone.value) {
+      return '80%'
+    }
+
+    if (isTablet.value) {
+      return '68%'
+    }
+
+    return '560px'
+  })
+  const detailModeLabel = computed(() => {
+    if (isDesktop.value) {
+      return '桌面表格'
+    }
+
+    if (isTablet.value) {
+      return '平板卡片'
+    }
+
+    return '手机卡片'
+  })
+
+  /**
+   * 产品映射：
+   * - 让产品主键到对象的查找保持 O(1)；
+   * - 同时服务默认单价带出与卡片名称展示。
+   */
+  const productMap = computed(() => {
+    return new Map(products.value.map((item) => [item.id, item]))
+  })
+
+  /**
+   * 汇总信息：
+   * - totalQty 汇总所有明细数量；
+   * - totalAmount 汇总所有行金额；
+   * - 始终基于统一数值归一化工具计算，避免 null / NaN 污染。
+   */
+  const totalQty = computed(() => {
+    return itemRows.value.reduce((sum, row) => sum + normalizeNumber(row.qty), 0)
+  })
+  const totalAmount = computed(() => {
+    return itemRows.value.reduce((sum, row) => sum + calcLineAmount(row), 0)
+  })
+
+  /**
+   * 提交前有效明细：
+   * - 仅保留已选择产品且数量大于 0 的行；
+   * - 单价为空时按 0 补齐，保证提交参数结构稳定。
+   */
+  const validSubmitItems = computed<SubmitOrderPayload['items']>(() => {
+    return itemRows.value
+      .filter((row) => row.productId.trim() && normalizeNumber(row.qty) > 0)
+      .map((row) => ({
+        productId: row.productId.trim(),
+        qty: normalizeNumber(row.qty),
+        unitPrice: normalizeNumber(row.unitPrice),
+        remark: row.remark.trim() || undefined,
+      }))
+  })
+
+  /**
+   * 生成前端明细行唯一键：
+   * - 不参与后端提交；
+   * - 仅用于渲染、焦点控制与删除动画定位。
+   */
+  const createRowUid = () => `row-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+
+  /**
+   * 创建空白明细：
+   * - 统一所有新增行与重置后的初始值；
+   * - 避免不同入口创建出的默认结构不一致。
+   */
+  const createBlankRow = (): OrderItemRow => ({
+    uid: createRowUid(),
+    productId: '',
+    qty: null,
+    unitPrice: null,
+    remark: '',
+  })
+
+  /**
+   * 构建当前草稿快照：
+   * - 仅保存录入页真实需要恢复的数据；
+   * - 使用深拷贝后的普通对象，避免把 Vue 响应式代理直接写入 sessionStorage。
+   */
+  const buildDraftSnapshot = (): OrderEntryDraftSnapshot => ({
+    headerForm: {
+      customerName: headerForm.customerName,
+      remark: headerForm.remark,
+    },
+    itemRows: itemRows.value.map((row) => ({
+      uid: row.uid,
+      productId: row.productId,
+      qty: row.qty,
+      unitPrice: row.unitPrice,
+      remark: row.remark,
+    })),
+    drawerVisible: drawerVisible.value,
+    editingRowUid: editingRowUid.value,
+    drawerForm: {
+      productId: drawerForm.productId,
+      qty: drawerForm.qty,
+      unitPrice: drawerForm.unitPrice,
+      remark: drawerForm.remark,
+    },
+  })
+
+  /**
+   * 写入录入草稿：
+   * - 使用 sessionStorage 保留“临时切页后返回”的输入状态；
+   * - 仅在浏览器环境且持久化开关就绪后执行，避免初始化阶段把空白态覆盖到草稿。
+   */
+  const persistDraft = () => {
+    if (!draftPersistenceReady.value || typeof window === 'undefined') {
+      return
+    }
+
+    window.sessionStorage.setItem(ORDER_ENTRY_DRAFT_STORAGE_KEY, JSON.stringify(buildDraftSnapshot()))
+  }
+
+  /**
+   * 读取并恢复录入草稿：
+   * - 只恢复结构完整的草稿，损坏数据直接忽略；
+   * - 若草稿不存在或解析失败，则回退为全新空白录入状态。
+   */
+  const restoreDraft = (): boolean => {
+    if (typeof window === 'undefined') {
+      return false
+    }
+
+    const rawDraft = window.sessionStorage.getItem(ORDER_ENTRY_DRAFT_STORAGE_KEY)
+    if (!rawDraft) {
+      return false
+    }
+
+    try {
+      const parsedDraft = JSON.parse(rawDraft) as Partial<OrderEntryDraftSnapshot> | null
+      if (!parsedDraft || !Array.isArray(parsedDraft.itemRows) || !parsedDraft.headerForm || !parsedDraft.drawerForm) {
+        return false
+      }
+
+      headerForm.customerName = parsedDraft.headerForm.customerName ?? ''
+      headerForm.remark = parsedDraft.headerForm.remark ?? ''
+
+      itemRows.value = parsedDraft.itemRows.length
+        ? parsedDraft.itemRows.map((row) => ({
+            uid: row.uid || createRowUid(),
+            productId: row.productId ?? '',
+            qty: typeof row.qty === 'number' ? row.qty : null,
+            unitPrice: typeof row.unitPrice === 'number' ? row.unitPrice : null,
+            remark: row.remark ?? '',
+          }))
+        : [createBlankRow()]
+
+      editingRowUid.value = parsedDraft.editingRowUid ?? ''
+      const hasEditingRow = itemRows.value.some((row) => row.uid === editingRowUid.value)
+      drawerVisible.value = Boolean(parsedDraft.drawerVisible && hasEditingRow)
+      if (!hasEditingRow) {
+        editingRowUid.value = ''
+      }
+      drawerForm.productId = parsedDraft.drawerForm.productId ?? ''
+      drawerForm.qty = typeof parsedDraft.drawerForm.qty === 'number' ? parsedDraft.drawerForm.qty : null
+      drawerForm.unitPrice = typeof parsedDraft.drawerForm.unitPrice === 'number' ? parsedDraft.drawerForm.unitPrice : null
+      drawerForm.remark = parsedDraft.drawerForm.remark ?? ''
+      return true
+    } catch {
+      window.sessionStorage.removeItem(ORDER_ENTRY_DRAFT_STORAGE_KEY)
+      return false
+    }
+  }
+
+  /**
+   * 数值归一化：
+   * - 将 null / NaN / 非有限数字统一归 0；
+   * - 供金额、数量与提交参数共用，避免重复判断。
+   */
+  function normalizeNumber(value: number | null): number {
+    return typeof value === 'number' && Number.isFinite(value) ? value : 0
+  }
+
+  /**
+   * 金额格式化：
+   * - 所有金额统一输出两位小数；
+   * - 让桌面表格、卡片与汇总区显示保持一致。
+   */
+  function toMoney(value: number): string {
+    return value.toFixed(2)
+  }
+
+  /**
+   * 计算单行金额：
+   * - 采用数量 * 单价；
+   * - 统一固定两位后再转回 number，避免浮点噪音扩散到汇总结果。
+   */
+  function calcLineAmount(row: OrderItemRow): number {
+    return Number((normalizeNumber(row.qty) * normalizeNumber(row.unitPrice)).toFixed(2))
+  }
+
+  /**
+   * 根据产品主键获取展示名称：
+   * - 已存在产品显示产品名；
+   * - allow-create 的临时输入显示“新建商品”；
+   * - 空值场景显示未选择。
+   */
+  const getProductLabelById = (productId: string): string => {
+    const product = productMap.value.get(productId)
+    if (product) {
+      return product.productName
+    }
+    return productId ? `新建商品：${productId}` : '未选择产品'
+  }
+
+  /**
+   * 新增明细行：
+   * - 桌面端支持在新增后直接聚焦到产品列；
+   * - 供工具栏新增按钮与末行键盘流自动增行复用。
+   */
+  const appendRow = async (focusProduct = false) => {
+    const row = createBlankRow()
+    itemRows.value.push(row)
+
+    if (focusProduct) {
+      await nextTick()
+      focusField(row.uid, 'product')
+    }
+  }
+
+  /**
+   * 加载可选产品：
+   * - 仅请求启用产品；
+   * - 失败时给出稳定错误提示，避免页面沉默失败。
+   */
+  const loadProducts = async () => {
+    productsLoading.value = true
+    try {
+      products.value = await productApi.getProductList({
+        isActive: true,
+      })
+    } catch (error) {
+      ElMessage.error(extractErrorMessage(error, '产品加载失败，请稍后重试'))
+    } finally {
+      productsLoading.value = false
+    }
+  }
+
+  /**
+   * 选择产品后自动带出默认单价：
+   * - 清空或非法产品时回退为 null；
+   * - 使用产品默认单价初始化录入，减少重复输入。
+   */
+  const handleProductChange = (row: OrderItemRow) => {
+    const product = productMap.value.get(row.productId)
+    if (!product) {
+      row.unitPrice = null
+      return
+    }
+
+    row.unitPrice = normalizeNumber(Number(product.defaultPrice))
+  }
+
+  /**
+   * 判断输入值是否是现有产品主键：
+   * - allow-create 场景下，现有产品与“待自动建档名称”需要区分处理；
+   * - 若能直接命中主键则无需再自动建档。
+   */
+  const isExistingProductId = (value: string): boolean => {
+    return productMap.value.has(value)
+  }
+
+  /**
+   * 生成自动建档产品编码：
+   * - 保持 AUTO + 时间戳 + 序号 + 随机串格式；
+   * - 降低快速连续建档时的编码冲突概率。
+   */
+  const createAutoProductCode = (sequence: number): string => {
+    const now = new Date()
+    const yyyy = now.getFullYear().toString()
+    const mm = `${now.getMonth() + 1}`.padStart(2, '0')
+    const dd = `${now.getDate()}`.padStart(2, '0')
+    const hh = `${now.getHours()}`.padStart(2, '0')
+    const min = `${now.getMinutes()}`.padStart(2, '0')
+    const sec = `${now.getSeconds()}`.padStart(2, '0')
+    const random = Math.random().toString(36).slice(2, 6).toUpperCase()
+    return `AUTO-${yyyy}${mm}${dd}${hh}${min}${sec}-${sequence.toString().padStart(2, '0')}-${random}`
+  }
+
+  /**
+   * 确保提交使用真实产品主键：
+   * - 允许直接提交现有产品；
+   * - 若用户输入的是新商品名称，则自动建档后回填主键；
+   * - createdCache 避免同一次提交重复创建同名商品。
+   */
+  const ensureProductId = async (
+    rawValue: string,
+    sequence: number,
+    createdCache: Map<string, string>,
+  ): Promise<string> => {
+    const normalizedValue = rawValue.trim()
+    if (!normalizedValue) {
+      throw new Error('产品不能为空')
+    }
+
+    if (isExistingProductId(normalizedValue)) {
+      return normalizedValue
+    }
+
+    const cachedId = createdCache.get(normalizedValue)
+    if (cachedId) {
+      return cachedId
+    }
+
+    const existed = products.value.find((item) => item.productName === normalizedValue)
+    if (existed) {
+      createdCache.set(normalizedValue, existed.id)
+      return existed.id
+    }
+
+    const created = await productApi.createProduct({
+      productCode: createAutoProductCode(sequence),
+      productName: normalizedValue,
+      pinyinAbbr: '',
+      defaultPrice: 0,
+      isActive: true,
+    })
+    products.value = [created, ...products.value]
+    createdCache.set(normalizedValue, created.id)
+    autoCreatedProductNames.value.push(normalizedValue)
+    return created.id
+  }
+
+  /**
+   * 构建最终提交明细：
+   * - 顺序解析所有有效行；
+   * - 在需要时自动建档商品并回写真实 productId；
+   * - 输出结果直接可用于整单提交接口。
+   */
+  const buildSubmitItemsWithAutoProducts = async (): Promise<SubmitOrderPayload['items']> => {
+    const createdCache = new Map<string, string>()
+    autoCreatedProductNames.value = []
+
+    const rows = itemRows.value.filter((row) => row.productId.trim() && normalizeNumber(row.qty) > 0)
+    const submitItems: SubmitOrderPayload['items'] = []
+
+    for (const [index, row] of rows.entries()) {
+      const resolvedProductId = await ensureProductId(row.productId, index + 1, createdCache)
+      row.productId = resolvedProductId
+      submitItems.push({
+        productId: resolvedProductId,
+        qty: normalizeNumber(row.qty),
+        unitPrice: normalizeNumber(row.unitPrice),
+        remark: row.remark.trim() || undefined,
+      })
+    }
+
+    return submitItems
+  }
+
+  /**
+   * 删除明细行：
+   * - 先记录删除标记触发 CSS 过渡；
+   * - 动效完成后再从数据源中真正移除。
+   */
+  const removeRow = (uid: string) => {
+    if (deletingRowUids.value.includes(uid)) {
+      return
+    }
+
+    deletingRowUids.value.push(uid)
+    globalThis.setTimeout(() => {
+      itemRows.value = itemRows.value.filter((row) => row.uid !== uid)
+      deletingRowUids.value = deletingRowUids.value.filter((item) => item !== uid)
+    }, 220)
+  }
+
+  /**
+   * 为桌面表格提供删除样式类：
+   * - 仅在当前行处于删除过渡时返回类名；
+   * - 其余场景保持表格原始样式不变。
+   */
+  const getRowClassName = ({ row }: { row: OrderItemRow }): string => {
+    return deletingRowUids.value.includes(row.uid) ? 'order-row-deleting' : ''
+  }
+
+  /**
+   * 打开移动端抽屉编辑指定明细：
+   * - 先记录当前编辑 uid；
+   * - 再将行数据复制到草稿，避免直接联动原始数据。
+   */
+  const openDrawerByRow = (row: OrderItemRow) => {
+    editingRowUid.value = row.uid
+    drawerForm.productId = row.productId
+    drawerForm.qty = row.qty
+    drawerForm.unitPrice = row.unitPrice
+    drawerForm.remark = row.remark
+    drawerVisible.value = true
+  }
+
+  /**
+   * 以“新增明细”模式打开抽屉：
+   * - 先创建空白行，保证应用时一定有回写目标；
+   * - 再打开抽屉进入编辑流程。
+   */
+  const openDrawerForCreate = async () => {
+    await appendRow(false)
+    const latest = itemRows.value[itemRows.value.length - 1]
+    if (!latest) {
+      return
+    }
+
+    openDrawerByRow(latest)
+  }
+
+  /**
+   * 应用抽屉草稿：
+   * - 按 editingRowUid 找到对应明细；
+   * - 回写后关闭抽屉，结束一次移动端编辑流程。
+   */
+  const applyDrawerEdit = () => {
+    const row = itemRows.value.find((item) => item.uid === editingRowUid.value)
+    if (!row) {
+      drawerVisible.value = false
+      return
+    }
+
+    row.productId = drawerForm.productId
+    row.qty = drawerForm.qty
+    row.unitPrice = drawerForm.unitPrice
+    row.remark = drawerForm.remark
+    drawerVisible.value = false
+  }
+
+  /**
+   * 抽屉产品切换：
+   * - 与桌面端选择行为保持一致；
+   * - 选中现有产品后自动带出默认单价。
+   */
+  const handleDrawerProductChange = () => {
+    const product = productMap.value.get(drawerForm.productId)
+    drawerForm.unitPrice = product ? normalizeNumber(Number(product.defaultPrice)) : null
+  }
+
+  /**
+   * 注册 / 清理桌面端单元格引用：
+   * - 组件卸载时传入空值以清理缓存；
+   * - 避免因为动态增删行导致失效引用残留。
+   */
+  const setFieldRef = (uid: string, field: FocusField, instance: unknown) => {
+    const key = `${uid}:${field}`
+    if (!instance) {
+      fieldRefMap.delete(key)
+      return
+    }
+
+    fieldRefMap.set(key, instance)
+  }
+
+  /**
+   * 聚焦指定单元格：
+   * - 优先调用组件实例自带 focus；
+   * - 否则回退到其内部 input / textarea 节点。
+   */
+  const focusField = (uid: string, field: FocusField) => {
+    const target = fieldRefMap.get(`${uid}:${field}`) as
+      | { focus?: () => void; $el?: HTMLElement }
+      | undefined
+
+    if (!target) {
+      return
+    }
+
+    if (typeof target.focus === 'function') {
+      target.focus()
+      return
+    }
+
+    if (target.$el) {
+      const inner = target.$el.querySelector('input,textarea') as HTMLInputElement | null
+      inner?.focus()
+    }
+  }
+
+  /**
+   * 计算桌面端下一个焦点位置：
+   * - 支持正向 / 反向移动；
+   * - 在末行最后一列继续前进时自动新增明细并聚焦产品列。
+   */
+  const moveFocus = async (rowIndex: number, currentField: FocusField, backward: boolean) => {
+    const fieldIndex = focusFieldOrder.indexOf(currentField)
+    if (fieldIndex < 0) {
+      return
+    }
+
+    if (backward) {
+      if (fieldIndex > 0) {
+        focusField(itemRows.value[rowIndex].uid, focusFieldOrder[fieldIndex - 1])
+        return
+      }
+
+      if (rowIndex > 0) {
+        focusField(itemRows.value[rowIndex - 1].uid, focusFieldOrder[focusFieldOrder.length - 1])
+      }
+      return
+    }
+
+    if (fieldIndex < focusFieldOrder.length - 1) {
+      focusField(itemRows.value[rowIndex].uid, focusFieldOrder[fieldIndex + 1])
+      return
+    }
+
+    if (rowIndex < itemRows.value.length - 1) {
+      focusField(itemRows.value[rowIndex + 1].uid, 'product')
+      return
+    }
+
+    await appendRow(true)
+  }
+
+  /**
+   * 处理桌面端 Tab / Enter 键盘流：
+   * - 仅在桌面模式启用；
+   * - 拦截浏览器默认焦点行为，改走统一录入顺序。
+   */
+  const handleGridKeydown = async (event: KeyboardEvent, rowIndex: number, field: FocusField) => {
+    if (!isDesktop.value) {
+      return
+    }
+
+    if (event.key !== 'Tab' && event.key !== 'Enter') {
+      return
+    }
+
+    event.preventDefault()
+    await moveFocus(rowIndex, field, event.key === 'Tab' && event.shiftKey)
+  }
+
+  /**
+   * 重置页面：
+   * - 清空主单信息；
+   * - 重新初始化为一条空白明细；
+   * - 关闭移动端抽屉并清理编辑上下文。
+   */
+  const resetForm = () => {
+    headerForm.customerName = ''
+    headerForm.remark = ''
+    itemRows.value = [createBlankRow()]
+    editingRowUid.value = ''
+    drawerVisible.value = false
+    drawerForm.productId = ''
+    drawerForm.qty = null
+    drawerForm.unitPrice = null
+    drawerForm.remark = ''
+  }
+
+  /**
+   * 提交整单：
+   * - 先校验至少存在一条有效明细；
+   * - 自动生成幂等键，配合后端防重复；
+   * - 成功后回到初始状态并提示新单号。
+   */
+  const submitOrder = async () => {
+    if (isSaving.value) {
+      return
+    }
+
+    if (!validSubmitItems.value.length) {
+      ElMessage.warning('请至少录入一条有效明细（已选择产品且数量大于 0）')
+      return
+    }
+
+    isSaving.value = true
+    try {
+      const submitItems = await buildSubmitItemsWithAutoProducts()
+      const idempotencyKey = `web-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+      const result = await orderApi.submitOrder({
+        idempotencyKey,
+        customerName: headerForm.customerName.trim() || undefined,
+        remark: headerForm.remark.trim() || undefined,
+        items: submitItems,
+      })
+
+      ElMessage.success(`保存成功，单号：${result.order.showNo}`)
+      if (autoCreatedProductNames.value.length) {
+        ElMessage.success(`已自动建档商品：${[...new Set(autoCreatedProductNames.value)].join('、')}`)
+      }
+
+      resetForm()
+    } catch (error) {
+      ElMessage.error(extractErrorMessage(error, '保存失败，请稍后重试'))
+    } finally {
+      isSaving.value = false
+    }
+  }
+
+  /**
+   * 页面初始化：
+   * - 首屏拉取产品；
+   * - 无论请求是否成功，都确保页面至少有一条可编辑的空白明细。
+   */
+  onMounted(async () => {
+    const restored = restoreDraft()
+    await loadProducts()
+    if (!restored) {
+      itemRows.value = [createBlankRow()]
+    }
+    draftPersistenceReady.value = true
+    persistDraft()
+  })
+
+  /**
+   * 监听录入态变化并实时保存草稿：
+   * - 覆盖主单、明细、抽屉草稿三部分；
+   * - 让用户临时切页后返回时恢复到离开前的输入状态。
+   */
+  watch(
+    [
+      () => headerForm.customerName,
+      () => headerForm.remark,
+      itemRows,
+      drawerVisible,
+      editingRowUid,
+      () => drawerForm.productId,
+      () => drawerForm.qty,
+      () => drawerForm.unitPrice,
+      () => drawerForm.remark,
+    ],
+    () => {
+      persistDraft()
+    },
+    { deep: true },
+  )
+
+  return {
+    headerForm,
+    itemRows,
+    products,
+    productsLoading,
+    isSaving,
+    deletingRowUids,
+    drawerVisible,
+    editingRowUid,
+    drawerForm,
+    isPhone,
+    isTablet,
+    isDesktop,
+    cardListClass,
+    drawerDirection,
+    drawerSize,
+    detailModeLabel,
+    totalQty,
+    totalAmount,
+    appendRow,
+    handleProductChange,
+    getProductLabelById,
+    calcLineAmount,
+    toMoney,
+    normalizeNumber,
+    removeRow,
+    getRowClassName,
+    openDrawerByRow,
+    openDrawerForCreate,
+    applyDrawerEdit,
+    handleDrawerProductChange,
+    setFieldRef,
+    handleGridKeydown,
+    submitOrder,
+  }
+}

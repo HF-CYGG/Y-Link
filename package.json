@@ -1,0 +1,37 @@
+{
+  "name": "y-link",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "local:dev": "node ./scripts/run-local-dev-command.mjs start-local-dev.ps1",
+    "local:dev:status": "node ./scripts/run-local-dev-command.mjs status-local-dev.ps1",
+    "local:dev:stop": "node ./scripts/run-local-dev-command.mjs stop-local-dev.ps1",
+    "build": "node ./scripts/run-frontend-build.mjs",
+    "preview": "vite preview",
+    "verify:performance:budget": "node ./scripts/verify-enterprise-page-performance.mjs",
+    "verify:performance:core-paths": "node ./scripts/verify-enterprise-core-paths.mjs",
+    "verify:performance": "node ./scripts/verify-enterprise-performance-suite.mjs"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.2",
+    "@vueuse/core": "^14.2.1",
+    "axios": "^1.14.0",
+    "element-plus": "^2.13.6",
+    "pinia": "^2.3.1",
+    "vue": "^3.5.30",
+    "vue-router": "^4.6.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.0",
+    "@vitejs/plugin-vue": "^6.0.5",
+    "@vue/tsconfig": "^0.9.0",
+    "autoprefixer": "^10.4.27",
+    "postcss": "^8.5.8",
+    "tailwindcss": "^3.4.17",
+    "typescript": "~5.9.3",
+    "vite": "^8.0.1",
+    "vue-tsc": "^3.2.5"
+  }
+}

@@ -1,0 +1,160 @@
+/**
+ * 前端命名路由集合：
+ * - 统一沉淀到单独文件，便于路由配置、预热策略与验证脚本共用同一命名口径；
+ * - 仅收录实际命名路由，避免预热时误传匿名节点。
+ */
+export type AppRouteName =
+  | 'login'
+  | 'dashboard'
+  | 'order-entry'
+  | 'order-list'
+  | 'base-data'
+  | 'products'
+  | 'tags'
+  | 'system'
+  | 'system-users'
+  | 'system-audit-logs'
+  | 'not-found'
+
+export type RouteWarmupTarget = AppRouteName | 'appLayout'
+
+type RouteViewLoader = () => Promise<unknown>
+
+/**
+ * 路由级异步组件加载器：
+ * - 所有业务页面都从这里统一声明，避免“路由里写一份、预热逻辑再写一份”；
+ * - 让按需加载、预热与构建验证围绕同一套入口展开。
+ */
+export const routeViewLoaders = {
+  login: () => import('@/views/auth/LoginView.vue'),
+  appLayout: () => import('@/layout/AppLayout.vue'),
+  dashboard: () => import('@/views/dashboard/DashboardView.vue'),
+  'order-entry': () => import('@/views/order-entry/OrderEntryView.vue'),
+  'order-list': () => import('@/views/order-list/OrderListView.vue'),
+  products: () => import('@/views/base-data/ProductManageView.vue'),
+  tags: () => import('@/views/base-data/TagManageView.vue'),
+  'system-users': () => import('@/views/system/UserManageView.vue'),
+  'system-audit-logs': () => import('@/views/system/AuditLogView.vue'),
+  'not-found': () => import('@/views/not-found/NotFoundView.vue'),
+} satisfies Record<string, RouteViewLoader>
+
+/**
+ * 允许预热的高频页面组件：
+ * - 仅选择“登录后高频跳转”的业务页，避免把低频页面也提前拉取，反而挤占首屏带宽；
+ * - 父级 redirect 路由与登录页不参与预热。
+ */
+const warmableRouteLoaders: Partial<Record<RouteWarmupTarget, RouteViewLoader>> = {
+  appLayout: routeViewLoaders.appLayout,
+  dashboard: routeViewLoaders.dashboard,
+  'order-entry': routeViewLoaders['order-entry'],
+  'order-list': routeViewLoaders['order-list'],
+  products: routeViewLoaders.products,
+  tags: routeViewLoaders.tags,
+  'system-users': routeViewLoaders['system-users'],
+  'system-audit-logs': routeViewLoaders['system-audit-logs'],
+}
+
+/**
+ * 已经发起过的预热任务：
+ * - 通过 Promise 级缓存避免同一路由被重复 import；
+ * - 即使多个入口同时请求预热，也只会真正加载一次。
+ */
+const warmedRoutePromises = new Map<RouteWarmupTarget, Promise<unknown>>()
+
+/**
+ * 立即预热指定路由组件：
+ * - 适用于登录后进入工作台、首次进入治理页等“高概率下一跳”场景；
+ * - 若某个路由已预热，则直接复用既有 Promise。
+ */
+export const preloadRouteComponents = async (routeNames: RouteWarmupTarget[]) => {
+  const uniqueRouteNames = [...new Set(routeNames)]
+
+  await Promise.allSettled(
+    uniqueRouteNames.map((routeName) => {
+      const loader = warmableRouteLoaders[routeName]
+      if (!loader) {
+        return Promise.resolve()
+      }
+
+      const cachedPromise = warmedRoutePromises.get(routeName)
+      if (cachedPromise !== undefined) {
+        return cachedPromise
+      }
+
+      const warmupPromise = loader()
+      warmedRoutePromises.set(routeName, warmupPromise)
+      return warmupPromise
+    }),
+  )
+}
+
+const resolveWarmupTargetByPath = (redirectPath: string): RouteWarmupTarget | null => {
+  if (redirectPath.startsWith('/dashboard')) {
+    return 'dashboard'
+  }
+
+  if (redirectPath.startsWith('/order-entry')) {
+    return 'order-entry'
+  }
+
+  if (redirectPath.startsWith('/order-list')) {
+    return 'order-list'
+  }
+
+  if (redirectPath.startsWith('/base-data/tags')) {
+    return 'tags'
+  }
+
+  if (redirectPath.startsWith('/base-data/products') || redirectPath.startsWith('/base-data')) {
+    return 'products'
+  }
+
+  if (redirectPath.startsWith('/system/audit-logs')) {
+    return 'system-audit-logs'
+  }
+
+  if (redirectPath.startsWith('/system/users') || redirectPath.startsWith('/system')) {
+    return 'system-users'
+  }
+
+  return null
+}
+
+export const resolvePostLoginWarmupTargets = (redirectPath?: string): RouteWarmupTarget[] => {
+  const targets: RouteWarmupTarget[] = ['appLayout', 'dashboard']
+  const normalizedRedirectPath = typeof redirectPath === 'string' ? redirectPath.trim() : ''
+  const matchedTarget = normalizedRedirectPath ? resolveWarmupTargetByPath(normalizedRedirectPath) : null
+
+  if (matchedTarget) {
+    targets.push(matchedTarget)
+  }
+
+  return [...new Set(targets)]
+}
+
+/**
+ * 将预热任务推迟到空闲片段：
+ * - 避免与当前页面首屏渲染争抢主线程与网络；
+ * - 使用 requestIdleCallback 优先，缺失时回退到短延时 setTimeout。
+ */
+export const scheduleRouteComponentWarmup = (routeNames: AppRouteName[]) => {
+  if (globalThis.window === undefined) {
+    return
+  }
+
+  const uniqueRouteNames = [...new Set(routeNames)]
+  if (!uniqueRouteNames.length) {
+    return
+  }
+
+  const warmupTask = () => {
+    void preloadRouteComponents(uniqueRouteNames)
+  }
+
+  if (typeof globalThis.window.requestIdleCallback === 'function') {
+    globalThis.window.requestIdleCallback(warmupTask, { timeout: 900 })
+    return
+  }
+
+  globalThis.window.setTimeout(warmupTask, 260)
+}

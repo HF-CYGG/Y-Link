@@ -1,0 +1,25 @@
+# 忽略依赖、构建产物与日志，减少前端镜像构建上下文。
+node_modules
+dist
+dist-ssr
+coverage
+*.log
+npm-debug.log*
+
+# 忽略后端本地产物与数据库文件，避免前端镜像打包无关内容。
+backend/node_modules
+backend/dist
+backend/data
+backend/logs
+
+# 忽略本地环境文件与编辑器目录。
+.env
+.env.*
+!.env.docker.mysql.example
+backend/.env
+backend/.env.*
+!.env.example
+.vscode
+.idea
+.git
+.trae

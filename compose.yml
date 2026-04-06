@@ -1,0 +1,52 @@
+# 默认一体化部署：
+# - 前端容器负责静态资源与 API 反向代理；
+# - 后端容器内置 SQLite 文件库；
+# - 通过 volume 持久化 SQLite 数据。
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      DB_TYPE: sqlite
+      SQLITE_DB_PATH: /app/data/y-link.sqlite
+      DB_SYNC: "false"
+    volumes:
+      - y_link_sqlite_data:/app/data
+    ports:
+      - "3001:3001"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3001/health').then((response)=>process.exit(response.ok?0:1)).catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null http://127.0.0.1/ || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  y_link_sqlite_data:

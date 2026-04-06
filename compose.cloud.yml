@@ -1,0 +1,56 @@
+services:
+  backend:
+    image: ${BACKEND_IMAGE}
+    pull_policy: always
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - DB_TYPE=${DB_TYPE:-sqlite}
+      - SQLITE_DB_PATH=${SQLITE_DB_PATH:-/app/data/y-link.sqlite}
+      - DB_HOST=${DB_HOST:-127.0.0.1}
+      - DB_PORT=${DB_PORT:-3306}
+      - DB_USER=${DB_USER:-root}
+      - DB_PASSWORD=${DB_PASSWORD:-}
+      - DB_NAME=${DB_NAME:-y_link}
+      - DB_SYNC=${DB_SYNC:-false}
+      - INIT_ADMIN_USERNAME=${INIT_ADMIN_USERNAME:-admin}
+      - INIT_ADMIN_DISPLAY_NAME=${INIT_ADMIN_DISPLAY_NAME:-系统管理员}
+      - INIT_ADMIN_PASSWORD
+    ports:
+      - "${BACKEND_PORT:-3001}:3001"
+    volumes:
+      - y_link_cloud_sqlite_data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3001/health').then((response)=>process.exit(response.ok?0:1)).catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+
+  frontend:
+    image: ${FRONTEND_IMAGE}
+    pull_policy: always
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - wget -q -O /dev/null http://127.0.0.1/ || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  y_link_cloud_sqlite_data:

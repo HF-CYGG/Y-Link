@@ -1,0 +1,18 @@
+# 忽略本地依赖与构建产物，减少 Docker 构建上下文体积。
+node_modules
+npm-debug.log*
+dist
+coverage
+
+# 忽略本地数据库与运行日志，避免把开发态数据打进镜像。
+data
+logs
+*.log
+
+# 忽略环境文件与编辑器元数据，避免泄露本地配置。
+.env
+.env.*
+!.env.example
+.vscode
+.idea
+.git
