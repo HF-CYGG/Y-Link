@@ -136,7 +136,7 @@ const handleSubmit = async () => {
             autocomplete="off"
             @submit.prevent="handleSubmit" 
           > 
-            <el-form-item prop="username"> 
+            <el-form-item prop="username" class="geo-input-1"> 
               <el-input 
                 v-model.trim="form.username" 
                 class="geo-input" 
@@ -148,7 +148,7 @@ const handleSubmit = async () => {
               /> 
             </el-form-item> 
 
-            <el-form-item prop="password"> 
+            <el-form-item prop="password" class="geo-input-2"> 
               <el-input 
                 v-model="form.password" 
                 class="geo-input" 
@@ -497,6 +497,39 @@ body.dark .sk-light {
   margin: 0; 
 } 
 
+/* 定义极丝滑的入场动画 */
+@keyframes smoothFadeUp {
+  0% {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* 表单侧错落入场（Vercel / Linear 风格） */
+.form-title {
+  animation: smoothFadeUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation-delay: 0.1s;
+}
+
+.form-subtitle {
+  animation: smoothFadeUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation-delay: 0.15s;
+}
+
+.geo-input-1 {
+  animation: smoothFadeUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation-delay: 0.25s;
+}
+
+.geo-input-2 {
+  animation: smoothFadeUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation-delay: 0.3s;
+}
+
 .modern-form :deep(.el-form-item) { 
   margin-bottom: 24px; 
 } 
@@ -518,13 +551,14 @@ body.dark .sk-light {
 .geo-input :deep(.el-input__wrapper.is-focus) { 
   background-color: var(--bg-panel); 
   border-color: var(--accent); 
-  box-shadow: 0 0 0 4px rgba(13, 148, 136, 0.1) !important; 
+  box-shadow: 0 0 0 1px #0d9488, 0 0 20px 0 rgba(13, 148, 136, 0.2) !important;
+  animation: pulseGlow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 } 
 
 .dark .geo-input :deep(.el-input__wrapper.is-focus),
 html.dark .geo-input :deep(.el-input__wrapper.is-focus),
 body.dark .geo-input :deep(.el-input__wrapper.is-focus) { 
-  box-shadow: 0 0 0 4px rgba(20, 184, 166, 0.15) !important; 
+  box-shadow: 0 0 0 1px #14b8a6, 0 0 20px 0 rgba(20, 184, 166, 0.25) !important;
 } 
 
 .geo-input :deep(.el-input__inner) { 
@@ -543,6 +577,8 @@ body.dark .geo-input :deep(.el-input__wrapper.is-focus) {
 } 
 
 .geo-submit { 
+  position: relative;
+  overflow: hidden;
   width: 100%; 
   height: 52px; 
   border-radius: 16px !important; 
@@ -553,12 +589,30 @@ body.dark .geo-input :deep(.el-input__wrapper.is-focus) {
   font-weight: 600 !important; 
   margin-top: 16px; 
   transition: transform 0.1s, background-color 0.2s !important; 
+  animation: smoothFadeUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation-delay: 0.4s;
 } 
 
 .geo-submit:hover { 
   background-color: var(--accent) !important; 
   color: #fff !important; 
 } 
+
+.geo-submit::after {
+  content: '';
+  position: absolute;
+  inset: -40% auto auto -45%;
+  width: 42%;
+  height: 180%;
+  background: linear-gradient(110deg, transparent 0%, rgba(255, 255, 255, 0.26) 45%, transparent 100%);
+  transform: translateX(-120%) rotate(8deg);
+  transition: transform 0.8s cubic-bezier(0.16, 1, 0.3, 1);
+  pointer-events: none;
+}
+
+.geo-submit:hover::after {
+  transform: translateX(340%) rotate(8deg);
+}
 
 .geo-submit:active { 
   transform: scale(0.97); 
@@ -575,6 +629,34 @@ body.dark .geo-input :deep(.el-input__wrapper.is-focus) {
   color: var(--text-sub); 
   font-family: monospace; 
 } 
+
+@media (prefers-reduced-motion: reduce) {
+  .form-title,
+  .form-subtitle,
+  .geo-input-1,
+  .geo-input-2,
+  .geo-submit {
+    animation: none !important;
+  }
+
+  .geo-input :deep(.el-input__wrapper.is-focus) {
+    animation: none !important;
+  }
+
+  .geo-submit::after {
+    display: none;
+  }
+}
+
+@keyframes pulseGlow {
+  0%,
+  100% {
+    box-shadow: 0 0 0 1px #0d9488, 0 0 16px 0 rgba(13, 148, 136, 0.15) !important;
+  }
+  50% {
+    box-shadow: 0 0 0 1px #0d9488, 0 0 24px 2px rgba(13, 148, 136, 0.3) !important;
+  }
+}
 
 @media (max-width: 900px) { 
   .visual-panel { 
