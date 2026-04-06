@@ -2,6 +2,7 @@ import { AppDataSource } from '../config/data-source.js'
 import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
+import { SysAuditLog } from '../entities/sys-audit-log.entity.js'
 
 interface DashboardTrendPoint {
   date: string
@@ -25,6 +26,19 @@ interface DashboardStatsResult {
   monthOrderAmount: string | number
   trend7Days: DashboardTrendPoint[]
   topProducts: DashboardTopProduct[]
+  recentActivities: DashboardRecentActivity[]
+}
+
+interface DashboardRecentActivity {
+  id: string
+  actionType: 'order.create' | 'order.delete' | 'order.restore'
+  actionLabel: string
+  showNo: string
+  actorDisplayName: string
+  customerName: string
+  totalAmount: string
+  totalQty: string
+  createdAt: string
 }
 
 const DATE_MS = 24 * 60 * 60 * 1000
@@ -49,6 +63,29 @@ const normalizeQty = (value: string | number | null | undefined): string => {
   return Number.isFinite(normalizedNumber) ? normalizedNumber.toFixed(2) : '0.00'
 }
 
+const normalizeText = (value: string | null | undefined, fallback = ''): string => {
+  const normalizedText = String(value ?? '').trim()
+  return normalizedText || fallback
+}
+
+/**
+ * 解析审计详情 JSON：
+ * - 审计详情可能为空或损坏，需兜底解析；
+ * - 失败时回退为空对象，避免影响工作台主流程。
+ */
+const parseAuditDetail = (detailJson: string | null): Record<string, unknown> => {
+  if (!detailJson) {
+    return {}
+  }
+
+  try {
+    const parsed = JSON.parse(detailJson) as Record<string, unknown> | null
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
 export const dashboardService = {
   async getStats(): Promise<DashboardStatsResult> {
     const today = new Date()
@@ -60,6 +97,7 @@ export const dashboardService = {
     const orderRepo = AppDataSource.getRepository(BizOutboundOrder)
     const orderItemRepo = AppDataSource.getRepository(BizOutboundOrderItem)
     const productRepo = AppDataSource.getRepository(BaseProduct)
+    const auditLogRepo = AppDataSource.getRepository(SysAuditLog)
 
     // 今日单数（软删除单据不计入看板）。
     const todayOrderCount = await orderRepo
@@ -163,6 +201,34 @@ export const dashboardService = {
       totalQty: normalizeQty(item.totalQty),
     }))
 
+    // 近期出库动态：聚合最近 10 条“新建/删除/恢复”事件，供首页时间流展示。
+    const recentAuditLogs = await auditLogRepo
+      .createQueryBuilder('audit')
+      .where('audit.actionType IN (:...actionTypes)', {
+        actionTypes: ['order.create', 'order.delete', 'order.restore'],
+      })
+      .orderBy('audit.id', 'DESC')
+      .limit(10)
+      .getMany()
+
+    const recentActivities: DashboardRecentActivity[] = recentAuditLogs.map((audit) => {
+      const detail = parseAuditDetail(audit.detailJson)
+      const actionType =
+        audit.actionType === 'order.delete' || audit.actionType === 'order.restore' ? audit.actionType : 'order.create'
+
+      return {
+        id: String(audit.id),
+        actionType,
+        actionLabel: normalizeText(audit.actionLabel, '出库单变更'),
+        showNo: normalizeText(audit.targetCode, '-'),
+        actorDisplayName: normalizeText(audit.actorDisplayName || audit.actorUsername, '系统'),
+        customerName: normalizeText(String(detail.customerName ?? ''), '-'),
+        totalAmount: normalizeAmount(detail.totalAmount as string | number | null | undefined),
+        totalQty: normalizeQty(detail.totalQty as string | number | null | undefined),
+        createdAt: audit.createdAt instanceof Date ? audit.createdAt.toISOString() : String(audit.createdAt),
+      }
+    })
+
     return {
       todayOrderCount,
       todayOrderAmount: normalizeAmount(todayOrderAmountRaw),
@@ -171,6 +237,7 @@ export const dashboardService = {
       monthOrderAmount: normalizeAmount(monthOrderAmountRaw),
       trend7Days,
       topProducts,
+      recentActivities,
     }
   }
 }

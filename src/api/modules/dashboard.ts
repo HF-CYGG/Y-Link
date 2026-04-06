@@ -8,6 +8,7 @@ export interface DashboardStats {
   monthOrderAmount: string | number
   trend7Days: DashboardTrendPoint[]
   topProducts: DashboardTopProduct[]
+  recentActivities: DashboardRecentActivity[]
 }
 
 export interface DashboardTrendPoint {
@@ -22,6 +23,18 @@ export interface DashboardTopProduct {
   productId: string
   productName: string
   totalQty: string | number
+}
+
+export interface DashboardRecentActivity {
+  id: string
+  actionType: 'order.create' | 'order.delete' | 'order.restore'
+  actionLabel: string
+  showNo: string
+  actorDisplayName: string
+  customerName: string
+  totalAmount: string | number
+  totalQty: string | number
+  createdAt: string
 }
 
 /**

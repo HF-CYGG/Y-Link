@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onActivated, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import dayjs from 'dayjs'
 import { ElMessage } from 'element-plus'
 import { Box, DataAnalysis, Document, Money, More, WarningFilled } from '@element-plus/icons-vue'
 import { PageContainer } from '@/components/common'
@@ -268,6 +269,63 @@ const trendMaxAmount = computed(() => {
   const maxValue = Math.max(...trendPoints.value.map((point) => point.amount), 0)
   return formatAmount(maxValue)
 })
+
+/**
+ * 近期出库动态：
+ * - 复用后端审计事件流，仅展示出库相关动作；
+ * - 首页默认展示最近 8 条，避免列表过长挤压首屏。
+ */
+const recentActivities = computed(() => {
+  return (stats.value?.recentActivities ?? []).slice(0, 6)
+})
+
+/**
+ * 动作标签样式：
+ * - 新建强调成功态；
+ * - 删除使用风险态；
+ * - 恢复使用提醒态，帮助管理者快速识别事件类型。
+ */
+const resolveActivityTagType = (actionType: string): 'success' | 'danger' | 'warning' | 'info' => {
+  if (actionType === 'order.create') {
+    return 'success'
+  }
+  if (actionType === 'order.delete') {
+    return 'danger'
+  }
+  if (actionType === 'order.restore') {
+    return 'warning'
+  }
+  return 'info'
+}
+
+/**
+ * 动态时间格式化：
+ * - 同日显示“HH:mm”，便于快速追踪操作时序；
+ * - 跨日显示“MM-DD HH:mm”，保留日期信息避免歧义。
+ */
+const formatActivityTime = (value: string): string => {
+  const targetDate = dayjs(value)
+  if (!targetDate.isValid()) {
+    return '-'
+  }
+  return targetDate.isSame(dayjs(), 'day') ? targetDate.format('HH:mm') : targetDate.format('MM-DD HH:mm')
+}
+
+/**
+ * 动态联动跳转：
+ * - 点击首页动态后跳转到出库列表页；
+ * - 通过 query 透传目标单据信息，复用列表页既有“定位并打开详情抽屉”逻辑。
+ */
+const navigateToActivityOrder = (activity: { id: string; showNo: string }) => {
+  void router.push({
+    path: '/order-list',
+    query: {
+      focusOrderId: activity.id,
+      focusOrderShowNo: activity.showNo,
+      focusRefreshToken: String(Date.now()),
+    },
+  })
+}
 
 /**
  * 加载工作台统计数据：
@@ -610,8 +668,34 @@ onActivated(() => {
 
           <div class="apple-card p-5 sm:p-6 xl:p-7">
             <h2 class="mb-4 text-lg font-semibold text-slate-800 dark:text-slate-200">近期出库动态</h2>
-            <div class="flex min-h-[160px] items-center justify-center">
-              <el-empty :image-size="72" description="暂无最新动态" />
+            <div v-if="recentActivities.length" class="space-y-2">
+              <button
+                v-for="activity in recentActivities"
+                :key="activity.id"
+                type="button"
+                class="w-full rounded-lg border border-slate-100 bg-slate-50/70 px-2.5 py-2 text-left transition hover:border-brand/40 hover:bg-slate-50 dark:border-white/10 dark:bg-slate-900/40 dark:hover:border-brand/40 dark:hover:bg-slate-900/55"
+                @click="navigateToActivityOrder(activity)"
+              >
+                <div class="mb-1 flex items-center justify-between gap-2">
+                  <div class="flex min-w-0 items-center gap-1.5">
+                    <el-tag :type="resolveActivityTagType(activity.actionType)" size="small" effect="light" class="!px-1.5">
+                      {{ activity.actionLabel }}
+                    </el-tag>
+                    <span class="truncate text-xs font-medium text-slate-700 dark:text-slate-200">
+                      {{ activity.showNo }}
+                    </span>
+                  </div>
+                  <span class="shrink-0 text-[11px] text-slate-500 dark:text-slate-400">
+                    {{ formatActivityTime(activity.createdAt) }}
+                  </span>
+                </div>
+                <div class="truncate text-[11px] leading-4 text-slate-600 dark:text-slate-300">
+                  {{ activity.customerName }} ｜ {{ formatQty(activity.totalQty) }} 件 ｜ ¥{{ formatAmount(activity.totalAmount) }} ｜ {{ activity.actorDisplayName }}
+                </div>
+              </button>
+            </div>
+            <div v-else class="flex min-h-[160px] items-center justify-center">
+              <el-empty :image-size="72" description="最近24小时暂无出库变更" />
             </div>
           </div>
         </section>
