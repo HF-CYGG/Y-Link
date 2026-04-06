@@ -7,6 +7,8 @@ interface DashboardTrendPoint {
   date: string
   label: string
   amount: string
+  orderCount: number
+  totalQty: string
 }
 
 interface DashboardTopProduct {
@@ -98,31 +100,45 @@ export const dashboardService = {
     // 近 7 日趋势：先查最近 7 天有效订单，再在服务层按日聚合，避免数据库方言差异。
     const recentOrders = await orderRepo
       .createQueryBuilder('order')
-      .select(['order.createdAt AS createdAt', 'order.totalAmount AS totalAmount'])
+      .select(['order.createdAt AS createdAt', 'order.totalAmount AS totalAmount', 'order.totalQty AS totalQty'])
       .where('order.createdAt >= :trendStart', { trendStart })
       .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
       .orderBy('order.createdAt', 'ASC')
-      .getRawMany<{ createdAt: Date | string; totalAmount: string | number }>()
+      .getRawMany<{ createdAt: Date | string; totalAmount: string | number; totalQty: string | number }>()
 
-    const trendAmountMap = new Map<string, number>()
+    const trendMetricsMap = new Map<string, { amount: number; orderCount: number; totalQty: number }>()
     recentOrders.forEach((order) => {
       const createdAtDate = order.createdAt instanceof Date ? order.createdAt : new Date(order.createdAt)
       if (Number.isNaN(createdAtDate.getTime())) {
         return
       }
       const dateKey = createdAtDate.toISOString().slice(0, 10)
-      const currentAmount = trendAmountMap.get(dateKey) ?? 0
-      trendAmountMap.set(dateKey, currentAmount + Number(order.totalAmount ?? 0))
+      const currentMetrics = trendMetricsMap.get(dateKey) ?? {
+        amount: 0,
+        orderCount: 0,
+        totalQty: 0,
+      }
+      currentMetrics.amount += Number(order.totalAmount ?? 0)
+      currentMetrics.orderCount += 1
+      currentMetrics.totalQty += Number(order.totalQty ?? 0)
+      trendMetricsMap.set(dateKey, currentMetrics)
     })
 
     const trend7Days: DashboardTrendPoint[] = []
     for (let index = 0; index < 7; index += 1) {
       const currentDate = new Date(trendStart.getTime() + index * DATE_MS)
       const dateKey = currentDate.toISOString().slice(0, 10)
+      const currentMetrics = trendMetricsMap.get(dateKey) ?? {
+        amount: 0,
+        orderCount: 0,
+        totalQty: 0,
+      }
       trend7Days.push({
         date: dateKey,
         label: dateKey.slice(5).replace('-', '/'),
-        amount: normalizeAmount(trendAmountMap.get(dateKey) ?? 0),
+        amount: normalizeAmount(currentMetrics.amount),
+        orderCount: currentMetrics.orderCount,
+        totalQty: normalizeQty(currentMetrics.totalQty),
       })
     }
 

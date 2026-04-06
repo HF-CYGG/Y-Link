@@ -14,6 +14,8 @@ export interface DashboardTrendPoint {
   date: string
   label: string
   amount: string | number
+  orderCount: number
+  totalQty: string | number
 }
 
 export interface DashboardTopProduct {

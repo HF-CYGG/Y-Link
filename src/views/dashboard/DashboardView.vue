@@ -21,6 +21,7 @@ const TREND_VIEWBOX_WIDTH = 640
 const TREND_VIEWBOX_HEIGHT = 240
 const TREND_PADDING_X = 24
 const TREND_PADDING_Y = 24
+const activeTrendDate = ref('')
 
 /**
  * 当前用户可见快捷入口：
@@ -157,6 +158,68 @@ const trendPoints = computed(() => {
     }
   })
 })
+
+/**
+ * 趋势悬停热区：
+ * - 为每个日期点生成可命中的透明区域，提升鼠标悬停易用性；
+ * - 热区覆盖整张图的高度，避免用户必须精准命中小圆点。
+ */
+const trendHoverSegments = computed(() => {
+  const points = trendPoints.value
+  if (!points.length) {
+    return []
+  }
+
+  return points.map((point, index) => {
+    const prevX = points[index - 1]?.x ?? TREND_PADDING_X
+    const nextX = points[index + 1]?.x ?? TREND_VIEWBOX_WIDTH - TREND_PADDING_X
+    const startX = index === 0 ? TREND_PADDING_X : (prevX + point.x) / 2
+    const endX = index === points.length - 1 ? TREND_VIEWBOX_WIDTH - TREND_PADDING_X : (point.x + nextX) / 2
+    return {
+      date: point.date,
+      x: startX,
+      width: Math.max(endX - startX, 1),
+    }
+  })
+})
+
+/**
+ * 当前悬停的趋势点：
+ * - 根据日期主键映射具体数据；
+ * - 仅在用户悬停到图表日期点时返回。
+ */
+const activeTrendPoint = computed(() => {
+  if (!activeTrendDate.value) {
+    return null
+  }
+
+  return trendPoints.value.find((point) => point.date === activeTrendDate.value) ?? null
+})
+
+/**
+ * 趋势悬浮卡位置：
+ * - 以悬停点 x 坐标为中心；
+ * - 对边缘位置做裁剪，避免提示框溢出图表区域。
+ */
+const activeTrendTooltipStyle = computed(() => {
+  if (!activeTrendPoint.value) {
+    return {}
+  }
+
+  const xPercent = (activeTrendPoint.value.x / TREND_VIEWBOX_WIDTH) * 100
+  const clampedPercent = Math.max(12, Math.min(88, xPercent))
+  return {
+    left: `${clampedPercent}%`,
+  }
+})
+
+const setActiveTrendPoint = (date: string) => {
+  activeTrendDate.value = date
+}
+
+const clearActiveTrendPoint = () => {
+  activeTrendDate.value = ''
+}
 
 /**
  * 趋势折线路径：
@@ -453,7 +516,18 @@ onActivated(() => {
               </div>
             </div>
 
-            <div v-if="trendPoints.length > 1" class="space-y-3">
+            <div v-if="trendPoints.length > 1" class="relative space-y-3" @mouseleave="clearActiveTrendPoint">
+              <div
+                v-if="activeTrendPoint"
+                class="pointer-events-none absolute top-2 z-10 min-w-[190px] -translate-x-1/2 rounded-xl border border-slate-100 bg-white/96 px-3 py-2 text-xs shadow-md dark:border-white/10 dark:bg-slate-900/95"
+                :style="activeTrendTooltipStyle"
+              >
+                <div class="mb-1 font-semibold text-slate-700 dark:text-slate-200">{{ activeTrendPoint.label }}</div>
+                <div class="text-slate-600 dark:text-slate-300">出库单数：{{ activeTrendPoint.orderCount }} 单</div>
+                <div class="text-slate-600 dark:text-slate-300">出库总额：¥{{ formatAmount(activeTrendPoint.amount) }}</div>
+                <div class="text-slate-600 dark:text-slate-300">出库数量：{{ formatQty(activeTrendPoint.totalQty) }}</div>
+              </div>
+
               <svg class="h-[260px] w-full" :viewBox="`0 0 ${TREND_VIEWBOX_WIDTH} ${TREND_VIEWBOX_HEIGHT}`" preserveAspectRatio="none">
                 <defs>
                   <linearGradient id="dashboardTrendAreaGradient" x1="0" y1="0" x2="0" y2="1">
@@ -471,6 +545,19 @@ onActivated(() => {
                 />
                 <path :d="trendAreaPath" fill="url(#dashboardTrendAreaGradient)" />
                 <path :d="trendPath" fill="none" stroke="rgb(13, 148, 136)" stroke-width="3" stroke-linecap="round" />
+
+                <rect
+                  v-for="segment in trendHoverSegments"
+                  :key="`segment-${segment.date}`"
+                  :x="segment.x"
+                  y="0"
+                  :width="segment.width"
+                  :height="TREND_VIEWBOX_HEIGHT"
+                  fill="transparent"
+                  class="cursor-pointer"
+                  @mouseenter="setActiveTrendPoint(segment.date)"
+                />
+
                 <circle
                   v-for="point in trendPoints"
                   :key="point.date"
@@ -480,6 +567,8 @@ onActivated(() => {
                   fill="white"
                   stroke="rgb(13, 148, 136)"
                   stroke-width="2"
+                  class="cursor-pointer"
+                  @mouseenter="setActiveTrendPoint(point.date)"
                 />
               </svg>
               <div class="grid grid-cols-7 gap-2 text-center text-xs text-slate-500 dark:text-slate-400">
