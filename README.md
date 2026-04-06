@@ -88,6 +88,7 @@ docker.io/yemiao351/y-link-onebox:latest
 - 首次启动会自动初始化管理员账号，并在容器日志打印初始账号密码。
 - 登录后请立即修改默认密码，避免生产环境风险。
 - `y-link-frontend` 是前端静态站点镜像，单独运行无法提供业务 API；若不用 onebox，请务必同时启动 backend。
+- 若访问后出现 “Welcome to nginx!” 而不是登录页：通常是旧容器或旧镜像残留。请删除旧容器后重新 `docker pull docker.io/yemiao351/y-link-onebox:latest` 并重建。
 
 #### 方式 B（进阶）：双容器编排部署（frontend + backend）
 如果你在 1Panel 使用容器编排，推荐执行：
