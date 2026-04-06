@@ -35,6 +35,7 @@ const selectedProductIds = ref<string[]>([])
 
 const searchKeyword = ref('')
 const searchTagId = ref('')
+const productCodeSortOrder = ref<'ascending' | 'descending'>('ascending')
 
 /**
  * 产品表单类型：
@@ -67,6 +68,31 @@ const createDefaultForm = (): ProductForm => ({
 })
 
 const selectedProductCount = computed(() => selectedProductIds.value.length)
+
+/**
+ * 编码排序比较器：
+ * - 统一按字符串字母序比较，兼容 UUID/自动编码等场景；
+ * - 通过 toUpperCase 规避大小写导致的排序抖动。
+ */
+const compareProductCode = (left: string, right: string): number => {
+  const normalizedLeft = String(left ?? '').trim().toUpperCase()
+  const normalizedRight = String(right ?? '').trim().toUpperCase()
+  return normalizedLeft.localeCompare(normalizedRight, 'en')
+}
+
+/**
+ * 产品展示列表：
+ * - 默认按产品编码正序排列；
+ * - 支持正序/倒序切换，移动端卡片与桌面表格共用同一排序结果。
+ */
+const displayProducts = computed(() => {
+  const sortedProducts = [...products.value]
+  sortedProducts.sort((prev, next) => {
+    const compareResult = compareProductCode(prev.productCode, next.productCode)
+    return productCodeSortOrder.value === 'ascending' ? compareResult : -compareResult
+  })
+  return sortedProducts
+})
 
 /**
  * 表单规则：
@@ -196,6 +222,19 @@ const clearSelection = async () => {
 
 const handleTableSelectionChange = (selection: ProductRecord[]) => {
   selectedProductIds.value = selection.map((item) => item.id)
+}
+
+/**
+ * 表格排序切换：
+ * - 仅接管产品编码列；
+ * - 若表格返回空排序（理论上已通过 sort-orders 禁用），兜底回退为正序。
+ */
+const handleTableSortChange = (payload: { prop: string; order: 'ascending' | 'descending' | null }) => {
+  if (payload.prop !== 'productCode') {
+    return
+  }
+
+  productCodeSortOrder.value = payload.order || 'ascending'
 }
 
 const handleCardSelectionChange = async (productId: string, checked: boolean | string | number) => {
@@ -470,7 +509,7 @@ onActivated(() => {
     </PageToolbarCard>
 
     <BizResponsiveDataCollectionShell
-      :items="products"
+      :items="displayProducts"
       :loading="loading"
       empty-description="暂无产品数据"
       :empty-card="true"
@@ -482,15 +521,24 @@ onActivated(() => {
       <template #table>
         <el-table
           ref="productTableRef"
-          :data="products"
+          :data="displayProducts"
           class="h-full w-full"
           stripe
           row-key="id"
           table-layout="auto"
+          :default-sort="{ prop: 'productCode', order: 'ascending' }"
           @selection-change="handleTableSelectionChange"
+          @sort-change="handleTableSortChange"
         >
             <el-table-column type="selection" width="52" reserve-selection />
-            <el-table-column label="产品编码" prop="productCode" min-width="150" show-overflow-tooltip />
+            <el-table-column
+              label="产品编码"
+              prop="productCode"
+              min-width="150"
+              show-overflow-tooltip
+              sortable="custom"
+              :sort-orders="['ascending', 'descending']"
+            />
             <el-table-column label="产品名称" prop="productName" min-width="220" show-overflow-tooltip />
             <el-table-column label="拼音首字母" prop="pinyinAbbr" width="120" show-overflow-tooltip />
             <el-table-column label="默认售价" prop="defaultPrice" width="132">
