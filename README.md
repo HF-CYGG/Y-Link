@@ -65,6 +65,19 @@ docker compose down
 npm run local:dev
 ```
 
+### 1Panel 一键镜像部署（默认 SQLite，可直接使用）
+如果你在 1Panel 使用容器编排，推荐直接使用云端镜像编排文件：
+
+```bash
+docker compose -f compose.cloud.yml pull
+docker compose -f compose.cloud.yml up -d
+```
+
+特点：
+- 不写 `.env` 也可直接启动（默认镜像、默认端口、默认 SQLite）。
+- 首次启动会自动初始化管理员，并在容器日志打印账号密码。
+- 日志默认开启彩色输出，便于在 1Panel 日志面板快速定位关键信息。
+
 ---
 
 ## 技术栈

@@ -1,10 +1,12 @@
 services:
   backend:
-    image: ${BACKEND_IMAGE}
+    image: ${BACKEND_IMAGE:-docker.io/yemiao351/y-link-backend:latest}
     pull_policy: always
     environment:
       - NODE_ENV=production
       - PORT=3001
+      - LOG_COLOR=${LOG_COLOR:-true}
+      - FORCE_COLOR=${FORCE_COLOR:-1}
       - DB_TYPE=${DB_TYPE:-sqlite}
       - SQLITE_DB_PATH=${SQLITE_DB_PATH:-/app/data/y-link.sqlite}
       - DB_HOST=${DB_HOST:-127.0.0.1}
@@ -15,7 +17,7 @@ services:
       - DB_SYNC=${DB_SYNC:-false}
       - INIT_ADMIN_USERNAME=${INIT_ADMIN_USERNAME:-admin}
       - INIT_ADMIN_DISPLAY_NAME=${INIT_ADMIN_DISPLAY_NAME:-系统管理员}
-      - INIT_ADMIN_PASSWORD
+      - INIT_ADMIN_PASSWORD=${INIT_ADMIN_PASSWORD:-Admin@123456}
     ports:
       - "${BACKEND_PORT:-3001}:3001"
     volumes:
@@ -35,7 +37,7 @@ services:
     restart: unless-stopped
 
   frontend:
-    image: ${FRONTEND_IMAGE}
+    image: ${FRONTEND_IMAGE:-docker.io/yemiao351/y-link-frontend:latest}
     pull_policy: always
     depends_on:
       backend:
