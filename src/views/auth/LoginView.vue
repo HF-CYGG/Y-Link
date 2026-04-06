@@ -257,6 +257,18 @@ const handleSubmit = async () => {
   transform-style: preserve-3d;
 }
 
+html[data-theme-transition='fallback'] .login-page .login-grid-layer,
+html[data-theme-transition='view-transition'] .login-page .login-grid-layer {
+  animation-duration: 20s;
+  opacity: 0.5;
+}
+
+html[data-theme-transition='fallback'] .login-page .login-ambient-layer,
+html[data-theme-transition='view-transition'] .login-page .login-ambient-layer {
+  animation-duration: 14s;
+  opacity: 0.42;
+}
+
 :global(.dark) .login-ambient-layer {
   background: radial-gradient(circle, rgba(20, 184, 166, 0.17) 0%, transparent 62%);
 }
@@ -709,6 +721,16 @@ const handleSubmit = async () => {
 }
 
 @media (max-width: 900px) { 
+  html[data-theme-transition='fallback'] .login-page .login-grid-layer,
+  html[data-theme-transition='view-transition'] .login-page .login-grid-layer {
+    opacity: 0.28;
+  }
+
+  html[data-theme-transition='fallback'] .login-page .login-ambient-layer,
+  html[data-theme-transition='view-transition'] .login-page .login-ambient-layer {
+    opacity: 0.2;
+  }
+
   .visual-panel { 
     display: none; 
   } 

@@ -74,6 +74,19 @@ const isMobileThemeTransitionContext = () => {
 }
 
 /**
+ * 是否应强制走降级切换：
+ * - 移动端统一强制 fallback，规避 View Transition 在触控浏览器上的截图层残留；
+ * - 页面不可见时不执行动画，避免后台恢复后门控残留。
+ */
+const shouldForceFallbackTransition = () => {
+  if (!isClientEnvironment()) {
+    return false
+  }
+
+  return isMobileThemeTransitionContext() || document.visibilityState !== 'visible'
+}
+
+/**
  * 解析动画触发点：
  * - 鼠标点击时优先使用真实点击坐标；
  * - 键盘触发或坐标不可用时退回到按钮中心；
@@ -150,7 +163,9 @@ export const useThemeStore = defineStore('theme', () => {
 
   let reducedMotionMediaQuery: MediaQueryList | null = null
   let fallbackTimer: number | null = null
+  let transitionWatchdogTimer: number | null = null
   let stopThemeDomSync: (() => void) | null = null
+  let lifecycleGuardBound = false
 
   /**
    * 同步 DOM 主题态：
@@ -226,6 +241,7 @@ export const useThemeStore = defineStore('theme', () => {
    */
   const finishTransition = () => {
     clearFallbackTimer()
+    clearTransitionWatchdog()
     clearTransitionGate()
     activeTransitionStrategy.value = 'none'
     isTransitioning.value = false
@@ -241,6 +257,30 @@ export const useThemeStore = defineStore('theme', () => {
       globalThis.window.clearTimeout(fallbackTimer)
       fallbackTimer = null
     }
+  }
+
+  /**
+   * 清理主题切换看门狗：
+   * - 防止 Promise 未结束导致门控残留；
+   * - 每次新切换前都会重置，保证一条切换链只存在一个看门狗。
+   */
+  const clearTransitionWatchdog = () => {
+    if (transitionWatchdogTimer !== null && isClientEnvironment()) {
+      globalThis.window.clearTimeout(transitionWatchdogTimer)
+      transitionWatchdogTimer = null
+    }
+  }
+
+  const armTransitionWatchdog = () => {
+    if (!isClientEnvironment()) {
+      return
+    }
+
+    clearTransitionWatchdog()
+    transitionWatchdogTimer = globalThis.window.setTimeout(() => {
+      transitionWatchdogTimer = null
+      finishTransition()
+    }, THEME_TRANSITION_DURATION_MS + 1200)
   }
 
   /**
@@ -290,6 +330,7 @@ export const useThemeStore = defineStore('theme', () => {
     activeTransitionStrategy.value = 'fallback'
     isTransitioning.value = true
     setTransitionGate('fallback', nextMode, point)
+    armTransitionWatchdog()
 
     try {
       commitThemeMode(nextMode)
@@ -313,7 +354,7 @@ export const useThemeStore = defineStore('theme', () => {
    */
   const runViewTransition = async (nextMode: ThemeMode, point: ThemeTriggerPoint) => {
     // 二次门控：即便调用链误入，也在这里直接降级，避免移动端出现裁剪残影。
-    if (isMobileThemeTransitionContext()) {
+    if (shouldForceFallbackTransition()) {
       await runFallbackTransition(nextMode, point)
       return
     }
@@ -335,6 +376,7 @@ export const useThemeStore = defineStore('theme', () => {
     activeTransitionStrategy.value = 'view-transition'
     isTransitioning.value = true
     setTransitionGate('view-transition', nextMode, point)
+    armTransitionWatchdog()
 
     try {
       const transition = startViewTransition(async () => {
@@ -389,6 +431,13 @@ export const useThemeStore = defineStore('theme', () => {
     const point = resolveTriggerPoint(event)
     lastTriggerPoint.value = point
     clearTransitionGate()
+    clearTransitionWatchdog()
+
+    if (document.visibilityState !== 'visible') {
+      commitThemeMode(mode)
+      finishTransition()
+      return
+    }
 
     if (prefersReducedMotion.value) {
       commitThemeMode(mode)
@@ -396,7 +445,7 @@ export const useThemeStore = defineStore('theme', () => {
     }
 
     const supportsViewTransition = typeof (document as DocumentWithViewTransition).startViewTransition === 'function'
-    const shouldPreferFallback = isMobileThemeTransitionContext()
+    const shouldPreferFallback = shouldForceFallbackTransition()
 
     if (supportsViewTransition && !shouldPreferFallback) {
       await runViewTransition(mode, point)
@@ -424,6 +473,19 @@ export const useThemeStore = defineStore('theme', () => {
     syncReducedMotionPreference()
     // 兜底清理上次异常中断遗留的过渡门控，避免首屏出现暗层残留。
     clearTransitionGate()
+    clearTransitionWatchdog()
+
+    if (isClientEnvironment() && !lifecycleGuardBound) {
+      lifecycleGuardBound = true
+      document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState !== 'visible') {
+          finishTransition()
+        }
+      })
+      globalThis.window.addEventListener('pagehide', () => {
+        finishTransition()
+      })
+    }
 
     if (initialized.value) {
       return

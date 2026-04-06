@@ -146,26 +146,28 @@ html[data-theme-transition='fallback'] body::after {
   inset: 0;
   pointer-events: none;
   z-index: 2147483646;
+  mix-blend-mode: normal;
   background:
     radial-gradient(
       circle at var(--theme-transition-origin-x) var(--theme-transition-origin-y),
-      rgba(0, 91, 82, 0.18) 0,
-      rgba(0, 91, 82, 0.12) 72px,
-      rgba(0, 91, 82, 0.04) 160px,
-      transparent 260px
+      rgba(0, 91, 82, 0.12) 0,
+      rgba(0, 91, 82, 0.08) 68px,
+      rgba(0, 91, 82, 0.03) 150px,
+      transparent 240px
     );
   opacity: 0;
   animation: theme-fallback-pulse var(--theme-transition-duration) var(--theme-transition-easing);
+  animation-fill-mode: none;
 }
 
 html.dark[data-theme-transition='fallback'] body::after {
   background:
     radial-gradient(
       circle at var(--theme-transition-origin-x) var(--theme-transition-origin-y),
-      rgba(123, 224, 213, 0.2) 0,
-      rgba(123, 224, 213, 0.14) 72px,
-      rgba(123, 224, 213, 0.05) 160px,
-      transparent 260px
+      rgba(123, 224, 213, 0.12) 0,
+      rgba(123, 224, 213, 0.08) 68px,
+      rgba(123, 224, 213, 0.03) 150px,
+      transparent 240px
     );
 }
 
@@ -213,6 +215,46 @@ html[data-theme-transition='view-transition']::view-transition-new(root) {
   100% {
     opacity: 0;
     transform: scale(1.08);
+  }
+}
+
+@media (hover: none) and (pointer: coarse), (max-width: 1024px) {
+  html[data-theme-transition='fallback'] body::after {
+    animation-duration: 260ms;
+    background:
+      radial-gradient(
+        circle at var(--theme-transition-origin-x) var(--theme-transition-origin-y),
+        rgba(0, 91, 82, 0.08) 0,
+        rgba(0, 91, 82, 0.04) 58px,
+        transparent 180px
+      );
+  }
+
+  html.dark[data-theme-transition='fallback'] body::after {
+    background:
+      radial-gradient(
+        circle at var(--theme-transition-origin-x) var(--theme-transition-origin-y),
+        rgba(123, 224, 213, 0.08) 0,
+        rgba(123, 224, 213, 0.04) 58px,
+        transparent 180px
+      );
+  }
+
+  @keyframes theme-fallback-pulse {
+    0% {
+      opacity: 0;
+      transform: none;
+    }
+
+    30% {
+      opacity: 0.7;
+      transform: none;
+    }
+
+    100% {
+      opacity: 0;
+      transform: none;
+    }
   }
 }
 
