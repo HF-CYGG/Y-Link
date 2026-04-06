@@ -32,7 +32,7 @@ const shortcutItems = computed(() => buildDashboardShortcutItems(authStore.curre
  */
 const statsGridClass = computed(() => {
   if (appStore.isDesktop) {
-    return 'md:grid-cols-3'
+    return 'xl:grid-cols-3 lg:grid-cols-3'
   }
 
   if (appStore.isTablet) {
@@ -45,9 +45,20 @@ const statsGridClass = computed(() => {
 /**
  * 快捷入口网格策略：
  * - phone 改为单列，点击区域更大；
- * - tablet / desktop 维持双列，提高首屏利用率。
+ * - tablet 维持双列；
+ * - desktop 提升为三列，提高宽屏首屏利用率。
  */
-const shortcutGridClass = computed(() => (appStore.isPhone ? 'grid-cols-1' : 'sm:grid-cols-2'))
+const shortcutGridClass = computed(() => {
+  if (appStore.isDesktop) {
+    return 'xl:grid-cols-3 lg:grid-cols-3'
+  }
+
+  if (appStore.isTablet) {
+    return 'sm:grid-cols-2'
+  }
+
+  return 'grid-cols-1'
+})
 
 /**
  * 加载工作台统计数据：
@@ -122,7 +133,7 @@ onActivated(() => {
 
 <template>
   <PageContainer title="工作台" description="查看今日出库概览，快速进入常用业务操作。">
-    <div v-if="(loading && !stats) || loadStatus === 'idle'" class="dashboard-container mx-auto min-w-0 space-y-5 sm:space-y-6">
+    <div v-if="(loading && !stats) || loadStatus === 'idle'" class="dashboard-container min-w-0 space-y-5 sm:space-y-6 lg:space-y-7">
       <section
         :class="[
           'relative overflow-hidden rounded-2xl bg-gradient-to-r from-teal-500 to-teal-400 text-white shadow-sm',
@@ -159,7 +170,7 @@ onActivated(() => {
         </div>
       </section>
 
-      <div :class="['grid gap-6', appStore.isDesktop ? 'lg:grid-cols-2' : 'grid-cols-1']">
+      <div :class="['grid gap-6 xl:gap-7', appStore.isDesktop ? 'xl:grid-cols-[1.45fr_1fr] lg:grid-cols-[1.2fr_0.9fr]' : 'grid-cols-1']">
         <section class="space-y-4">
           <div class="h-6 w-24 animate-pulse rounded-full bg-slate-200 dark:bg-white/10" />
           <div :class="['grid gap-4', shortcutGridClass]">
@@ -185,7 +196,7 @@ onActivated(() => {
       </div>
     </div>
 
-    <div v-else class="dashboard-container mx-auto min-w-0 space-y-5 sm:space-y-6">
+    <div v-else class="dashboard-container min-w-0 space-y-5 sm:space-y-6 lg:space-y-7">
       <section
         :class="[
           'relative overflow-hidden rounded-2xl bg-gradient-to-r from-teal-500 to-teal-400 text-white shadow-sm',
@@ -235,8 +246,8 @@ onActivated(() => {
       <section>
         <h2 class="mb-4 text-lg font-semibold text-slate-800 dark:text-slate-200">今日数据</h2>
 
-        <transition-group name="staggered-fade" tag="div" :class="['grid gap-4', statsGridClass]" appear>
-          <div key="card-1" class="apple-card-hover min-w-0 p-5 sm:p-6" style="transition-delay: 0ms">
+        <transition-group name="staggered-fade" tag="div" :class="['grid gap-4 xl:gap-5', statsGridClass]" appear>
+          <div key="card-1" class="apple-card-hover min-w-0 p-5 sm:p-6 xl:p-7" style="transition-delay: 0ms">
             <div class="mb-4 flex items-center justify-between gap-3">
               <div class="text-sm font-medium text-slate-500 dark:text-slate-400">今日出库单数</div>
               <div class="rounded-xl bg-brand/10 p-2 text-brand dark:bg-brand/20 dark:text-teal-400">
@@ -249,7 +260,7 @@ onActivated(() => {
             </div>
           </div>
 
-          <div key="card-2" class="apple-card-hover min-w-0 p-5 sm:p-6" style="transition-delay: 100ms">
+          <div key="card-2" class="apple-card-hover min-w-0 p-5 sm:p-6 xl:p-7" style="transition-delay: 100ms">
             <div class="mb-4 flex items-center justify-between gap-3">
               <div class="text-sm font-medium text-slate-500 dark:text-slate-400">今日出库金额</div>
               <div class="rounded-xl bg-secondary/10 p-2 text-secondary dark:bg-secondary/20 dark:text-slate-300">
@@ -262,7 +273,7 @@ onActivated(() => {
             </div>
           </div>
 
-          <div key="card-3" class="apple-card-hover min-w-0 p-5 sm:p-6" style="transition-delay: 200ms">
+          <div key="card-3" class="apple-card-hover min-w-0 p-5 sm:p-6 xl:p-7" style="transition-delay: 200ms">
             <div class="mb-4 flex items-center justify-between gap-3">
               <div class="text-sm font-medium text-slate-500 dark:text-slate-400">在库产品总数</div>
               <div class="rounded-xl bg-brand/10 p-2 text-brand dark:bg-brand/20 dark:text-teal-400">
@@ -277,17 +288,17 @@ onActivated(() => {
         </transition-group>
       </section>
 
-      <div :class="['grid gap-6', appStore.isDesktop ? 'lg:grid-cols-2' : 'grid-cols-1']">
+      <div :class="['grid gap-6 xl:gap-7', appStore.isDesktop ? 'xl:grid-cols-[1.45fr_1fr] lg:grid-cols-[1.2fr_0.9fr]' : 'grid-cols-1']">
         <section>
           <h2 class="mb-4 text-lg font-semibold text-slate-800 dark:text-slate-200">快捷操作</h2>
-          <div :class="['grid gap-4', shortcutGridClass]">
+          <div :class="['grid gap-4 xl:gap-5', shortcutGridClass]">
             <button
               v-for="action in shortcutItems"
               :key="action.path"
               type="button"
               :class="[
-                'apple-card-hover group flex min-w-0 cursor-pointer flex-col items-center justify-center gap-3 px-4 text-center',
-                appStore.isPhone ? 'min-h-[128px] py-5' : 'min-h-[168px] py-6',
+                'apple-card-hover group flex min-w-0 cursor-pointer flex-col items-center justify-center gap-3 px-4 text-center xl:px-5',
+                appStore.isPhone ? 'min-h-[128px] py-5' : 'min-h-[168px] py-6 xl:min-h-[176px]',
               ]"
               @click="navigateTo(action.path)"
             >
@@ -306,8 +317,8 @@ onActivated(() => {
 
             <div
               :class="[
-                'apple-card flex min-w-0 flex-col items-center justify-center gap-3 border-dashed p-6 opacity-50',
-                appStore.isPhone ? 'min-h-[128px]' : 'min-h-[168px]',
+                'apple-card flex min-w-0 flex-col items-center justify-center gap-3 border-dashed p-6 opacity-50 xl:p-7',
+                appStore.isPhone ? 'min-h-[128px]' : 'min-h-[168px] xl:min-h-[176px]',
               ]"
             >
               <div class="rounded-2xl bg-slate-100 p-4 text-slate-400 dark:bg-slate-800">
@@ -320,7 +331,7 @@ onActivated(() => {
 
         <section>
           <h2 class="mb-4 text-lg font-semibold text-slate-800 dark:text-slate-200">近期动态</h2>
-          <div class="apple-card flex min-h-[220px] items-center justify-center p-6 sm:min-h-[260px]">
+          <div class="apple-card flex min-h-[220px] items-center justify-center p-6 xl:p-7 sm:min-h-[260px] xl:min-h-[100%]">
             <el-empty :image-size="80" description="暂无最新动态" />
           </div>
         </section>

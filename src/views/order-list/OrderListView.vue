@@ -38,11 +38,11 @@ const {
     <div class="order-list-container flex min-w-0 flex-col gap-4">
       <PageToolbarCard content-class="items-start">
         <template #default="{ isPhone, isTablet }">
-          <div class="flex flex-wrap items-center gap-3">
+          <div class="flex w-full flex-wrap items-center gap-3">
             <el-input
               v-model="searchForm.showNo"
               placeholder="请输入业务单号"
-              :class="isPhone ? '!w-full' : isTablet ? '!w-[220px]' : '!w-56'"
+              :class="isPhone ? '!w-full' : isTablet ? '!w-[240px]' : '!w-[280px]'"
               clearable
             />
             <el-date-picker
@@ -51,7 +51,7 @@ const {
               range-separator="至"
               start-placeholder="开始日期"
               end-placeholder="结束日期"
-              :class="isPhone ? '!w-full' : isTablet ? '!w-[320px]' : '!w-[320px]'"
+              :class="isPhone ? '!w-full' : isTablet ? '!w-[340px]' : '!w-[380px]'"
             />
             <div :class="['flex gap-2', isPhone ? 'w-full' : '']">
               <el-button :class="isPhone ? 'flex-1' : ''" type="primary" @click="handleSearch" icon="Search">搜索</el-button>
@@ -61,7 +61,7 @@ const {
         </template>
       </PageToolbarCard>
 
-      <div class="data-area apple-card flex min-h-0 flex-1 flex-col p-4">
+      <div class="data-area apple-card flex min-h-0 flex-1 flex-col p-3 sm:p-4 xl:p-5">
         <BizResponsiveDataCollectionShell
           :items="listState.records"
           :loading="listState.loading"
@@ -70,32 +70,32 @@ const {
           :skeleton-rows="8"
           card-key="id"
           wrapper-class="flex min-h-0 flex-1 flex-col"
-          table-wrapper-class="flex min-h-0 flex-1 flex-col overflow-hidden"
+          table-wrapper-class="flex min-h-0 flex-1 flex-col overflow-hidden px-0"
           card-container-class="flex-1 content-start pb-4"
         >
           <template #table>
-            <el-table :data="listState.records" stripe class="flex-1 w-full" height="100%">
-              <el-table-column label="业务单号" prop="showNo" min-width="150" />
-              <el-table-column label="客户名称" prop="customerName" min-width="150">
+            <el-table :data="listState.records" stripe class="flex-1 w-full" height="100%" table-layout="auto">
+              <el-table-column label="业务单号" prop="showNo" min-width="180" show-overflow-tooltip />
+              <el-table-column label="客户名称" prop="customerName" min-width="200" show-overflow-tooltip>
                 <template #default="{ row }">{{ row.customerName || '-' }}</template>
               </el-table-column>
-              <el-table-column label="总数量" prop="totalQty" width="100" />
-              <el-table-column label="总金额" prop="totalAmount" width="120">
+              <el-table-column label="总数量" prop="totalQty" width="110" />
+              <el-table-column label="总金额" prop="totalAmount" width="132">
                 <template #default="{ row }">
                   <span class="font-medium text-red-500">¥{{ Number(row.totalAmount).toFixed(2) }}</span>
                 </template>
               </el-table-column>
-              <el-table-column label="开单人" min-width="140">
+              <el-table-column label="开单人" min-width="160" show-overflow-tooltip>
                 <template #default="{ row }">
                   {{ row.creatorDisplayName || row.creatorUsername || '-' }}
                 </template>
               </el-table-column>
-              <el-table-column label="开单时间" prop="createdAt" width="180">
+              <el-table-column label="开单时间" prop="createdAt" width="186">
                 <template #default="{ row }">
                   {{ dayjs(row.createdAt).format('YYYY-MM-DD HH:mm') }}
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="100" fixed="right" align="right">
+              <el-table-column label="操作" width="110" fixed="right" align="right">
                 <template #default="{ row }">
                   <el-button link type="primary" @click="handleViewDetail(row)">详情</el-button>
                 </template>

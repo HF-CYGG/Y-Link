@@ -122,7 +122,7 @@ onMounted(() => {
   <div class="tag-manager flex min-w-0 flex-col gap-4">
     <PageToolbarCard>
       <template #default>
-        <div class="text-sm leading-6 text-slate-500 dark:text-slate-400">统一维护标签名称与颜色，用于产品分类展示。</div>
+        <div class="max-w-3xl text-sm leading-6 text-slate-500 dark:text-slate-400">统一维护标签名称与颜色，用于产品分类展示，并为产品检索、筛选与视觉识别提供稳定标签体系。</div>
       </template>
 
       <template #actions="{ isPhone }">
@@ -137,18 +137,21 @@ onMounted(() => {
       empty-description="暂无标签数据"
       :empty-card="true"
       card-key="id"
+      wrapper-class="flex min-h-0 flex-1 flex-col"
+      table-wrapper-class="apple-card h-full min-w-0 overflow-hidden px-0 py-3 sm:py-4 xl:py-5"
+      card-container-class="pb-4 xl:grid-cols-3"
     >
       <template #table>
-        <el-table :data="tags" class="h-full w-full" stripe row-key="id">
-            <el-table-column label="标签名称" prop="tagName">
+        <el-table :data="tags" class="h-full w-full" stripe row-key="id" table-layout="auto">
+            <el-table-column label="标签名称" prop="tagName" min-width="220" show-overflow-tooltip>
               <template #default="{ row }">
                 <el-tag :color="row.tagCode || '#409EFF'" effect="dark" class="border-none">
                   {{ row.tagName }}
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="颜色编码" prop="tagCode" />
-            <el-table-column label="操作" width="150" align="right">
+            <el-table-column label="颜色编码" prop="tagCode" min-width="220" show-overflow-tooltip />
+            <el-table-column label="操作" width="160" align="right">
               <template #default="{ row }">
                 <el-button link type="primary" @click="handleEdit(row)">编辑</el-button>
                 <el-button link type="danger" @click="handleDelete(row)">删除</el-button>

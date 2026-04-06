@@ -223,11 +223,11 @@ onMounted(() => {
   <div class="product-manager flex min-w-0 flex-col gap-4">
     <PageToolbarCard>
       <template #default="{ isPhone, isTablet }">
-        <div class="flex max-w-3xl flex-1 flex-wrap gap-2">
+        <div class="flex w-full flex-wrap gap-2.5">
           <el-input
             v-model="searchKeyword"
             placeholder="搜索产品名称/拼音/编码"
-            :class="isPhone ? '!w-full' : isTablet ? '!w-[220px]' : '!w-56'"
+            :class="isPhone ? '!w-full' : isTablet ? '!w-[240px]' : '!w-[300px]'"
             clearable
             @clear="handleSearch"
             @keyup.enter="handleSearch"
@@ -236,7 +236,7 @@ onMounted(() => {
             v-model="searchTagId"
             placeholder="按标签筛选"
             clearable
-            :class="isPhone ? '!w-full' : isTablet ? '!w-[180px]' : '!w-40'"
+            :class="isPhone ? '!w-full' : isTablet ? '!w-[200px]' : '!w-[220px]'"
             @change="handleSearch"
           >
             <el-option
@@ -261,25 +261,28 @@ onMounted(() => {
       empty-description="暂无产品数据"
       :empty-card="true"
       card-key="id"
+      wrapper-class="flex min-h-0 flex-1 flex-col"
+      table-wrapper-class="apple-card h-full min-w-0 overflow-hidden px-0 py-3 sm:py-4 xl:py-5"
+      card-container-class="pb-4 xl:grid-cols-3"
     >
       <template #table>
-        <el-table :data="products" class="h-full w-full" stripe row-key="id">
-            <el-table-column label="产品编码" prop="productCode" width="120" />
-            <el-table-column label="产品名称" prop="productName" min-width="150" />
-            <el-table-column label="拼音首字母" prop="pinyinAbbr" width="100" />
-            <el-table-column label="默认售价" prop="defaultPrice" width="120">
+        <el-table :data="products" class="h-full w-full" stripe row-key="id" table-layout="auto">
+            <el-table-column label="产品编码" prop="productCode" min-width="150" show-overflow-tooltip />
+            <el-table-column label="产品名称" prop="productName" min-width="220" show-overflow-tooltip />
+            <el-table-column label="拼音首字母" prop="pinyinAbbr" width="120" show-overflow-tooltip />
+            <el-table-column label="默认售价" prop="defaultPrice" width="132">
               <template #default="{ row }">
                 ¥{{ Number(row.defaultPrice).toFixed(2) }}
               </template>
             </el-table-column>
-            <el-table-column label="状态" prop="isActive" width="80">
+            <el-table-column label="状态" prop="isActive" width="96">
               <template #default="{ row }">
                 <el-tag :type="row.isActive ? 'success' : 'info'" size="small">
                   {{ row.isActive ? '启用' : '停用' }}
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="标签" min-width="150">
+            <el-table-column label="标签" min-width="240">
               <template #default="{ row }">
                 <div class="flex flex-wrap gap-1">
                   <el-tag
@@ -295,7 +298,7 @@ onMounted(() => {
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="120" align="right" fixed="right">
+            <el-table-column label="操作" width="132" align="right" fixed="right">
               <template #default="{ row }">
                 <el-button link type="primary" @click="handleEdit(row)">编辑</el-button>
                 <el-button link type="danger" @click="handleDelete(row)">删除</el-button>
