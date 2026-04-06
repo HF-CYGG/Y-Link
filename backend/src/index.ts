@@ -37,15 +37,66 @@ const logBanner = (title: string) => {
   console.log(paint('='.repeat(72), 'dim'))
 }
 
-const logLine = (label: string, value: string, tone: 'info' | 'success' | 'warn' = 'info') => {
+const logLine = (label: string, value: string, tone: 'info' | 'success' | 'warn' | 'error' = 'info') => {
   const colorByTone = {
     info: 'cyan',
     success: 'green',
     warn: 'yellow',
+    error: 'red',
   } as const
 
   const timestamp = new Date().toISOString()
   console.log(`${paint(timestamp, 'dim')} ${paint(`[${label}]`, colorByTone[tone])} ${value}`)
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const probeHealthEndpoint = async (port: number): Promise<boolean> => {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 3000)
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}/health`, {
+      signal: controller.signal,
+    })
+    return response.ok
+  } catch {
+    return false
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+const runStartupDiagnostics = async (port: number) => {
+  logBanner('启动自检')
+  logLine('RUNTIME', `pid=${process.pid} node=${process.version} platform=${process.platform}/${process.arch}`)
+
+  try {
+    await AppDataSource.query('SELECT 1')
+    logLine('CHECK DB', 'database ping success', 'success')
+  } catch (error) {
+    logLine('CHECK DB', `database ping failed: ${String(error)}`, 'error')
+  }
+
+  let healthOk = false
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    healthOk = await probeHealthEndpoint(port)
+    if (healthOk) {
+      logLine('CHECK HTTP', `/health probe success (attempt=${attempt})`, 'success')
+      break
+    }
+
+    logLine('CHECK HTTP', `/health probe failed (attempt=${attempt})`, 'warn')
+    if (attempt < 3) {
+      await sleep(500)
+    }
+  }
+
+  if (!healthOk) {
+    logLine('CHECK SUMMARY', 'startup checks completed with warnings', 'warn')
+  } else {
+    logLine('CHECK SUMMARY', 'all startup checks passed', 'success')
+  }
+  console.log(paint('='.repeat(72), 'dim'))
 }
 
 async function bootstrap(): Promise<void> {
@@ -92,6 +143,7 @@ async function bootstrap(): Promise<void> {
       logLine('SECURITY', '当前配置仍为内置默认初始化密码，建议改为私有强密码。', 'warn')
     }
     console.log(paint('='.repeat(72), 'dim'))
+    void runStartupDiagnostics(env.PORT)
   })
 }
 
