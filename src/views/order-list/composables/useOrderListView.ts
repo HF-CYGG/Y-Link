@@ -1,7 +1,8 @@
 import dayjs from 'dayjs'
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onActivated, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useWindowSize } from '@vueuse/core'
+import { useRoute, useRouter } from 'vue-router'
 import {
   getOrderDetailById,
   getOrderList,
@@ -14,6 +15,22 @@ import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
 
+const ORDER_LIST_TARGET_ORDER_ID_QUERY_KEY = 'focusOrderId'
+const ORDER_LIST_TARGET_ORDER_SHOW_NO_QUERY_KEY = 'focusOrderShowNo'
+const ORDER_LIST_TARGET_REFRESH_QUERY_KEY = 'focusRefreshToken'
+
+const normalizeRouteQueryValue = (value: unknown): string => {
+  if (Array.isArray(value)) {
+    return String(value[0] ?? '').trim()
+  }
+
+  if (value === null || value === undefined) {
+    return ''
+  }
+
+  return String(value).trim()
+}
+
 /**
  * 订单列表页业务 composable：
  * - 收拢查询条件、分页、自适应 pageSize 与详情抽屉逻辑；
@@ -21,12 +38,17 @@ import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
  * - 让页面入口只负责装配筛选区、列表区与详情展示。
  */
 export const useOrderListView = () => {
+  const route = useRoute()
+  const router = useRouter()
   const appStore = useAppStore()
   const isPhone = computed(() => appStore.isPhone)
   const isTablet = computed(() => appStore.isTablet)
   const { height: windowHeight } = useWindowSize()
   const listRequest = useStableRequest()
   const detailRequest = useStableRequest()
+  const pageReady = ref(false)
+  const keepAliveActivated = ref(false)
+  const processingTargetRefresh = ref(false)
 
   /**
    * 列表分页状态：
@@ -113,6 +135,40 @@ export const useOrderListView = () => {
   const drawerLoading = ref(false)
   const currentOrder = ref<OrderDetailResult | null>(null)
 
+  const getTargetRefreshPayload = () => {
+    const orderId = normalizeRouteQueryValue(route.query[ORDER_LIST_TARGET_ORDER_ID_QUERY_KEY])
+    const showNo = normalizeRouteQueryValue(route.query[ORDER_LIST_TARGET_ORDER_SHOW_NO_QUERY_KEY])
+    const refreshToken = normalizeRouteQueryValue(route.query[ORDER_LIST_TARGET_REFRESH_QUERY_KEY])
+
+    if (!orderId || !refreshToken) {
+      return null
+    }
+
+    return {
+      orderId,
+      showNo,
+      refreshToken,
+    }
+  }
+
+  const clearTargetRefreshQuery = async () => {
+    const hasTargetQuery = [ORDER_LIST_TARGET_ORDER_ID_QUERY_KEY, ORDER_LIST_TARGET_ORDER_SHOW_NO_QUERY_KEY, ORDER_LIST_TARGET_REFRESH_QUERY_KEY]
+      .some((key) => key in route.query)
+
+    if (!hasTargetQuery) {
+      return
+    }
+
+    const nextQuery = { ...route.query }
+    delete nextQuery[ORDER_LIST_TARGET_ORDER_ID_QUERY_KEY]
+    delete nextQuery[ORDER_LIST_TARGET_ORDER_SHOW_NO_QUERY_KEY]
+    delete nextQuery[ORDER_LIST_TARGET_REFRESH_QUERY_KEY]
+
+    await router.replace({
+      query: nextQuery,
+    })
+  }
+
   /**
    * 统一拼装查询参数：
    * - 仅在用户实际填写条件时注入对应字段；
@@ -156,6 +212,31 @@ export const useOrderListView = () => {
         listState.loading = false
       },
     })
+  }
+
+  const loadOrderDetail = async (orderId: string) => {
+    drawerVisible.value = true
+    drawerLoading.value = true
+    currentOrder.value = null
+
+    let detailResult: OrderDetailResult | null = null
+
+    await detailRequest.runLatest({
+      executor: (signal) => getOrderDetailById(orderId, { signal }),
+      onSuccess: (result) => {
+        currentOrder.value = result
+        detailResult = result
+      },
+      onError: (error) => {
+        ElMessage.error(extractErrorMessage(error, '获取单据详情失败'))
+        drawerVisible.value = false
+      },
+      onFinally: () => {
+        drawerLoading.value = false
+      },
+    })
+
+    return detailResult
   }
 
   /**
@@ -227,6 +308,46 @@ export const useOrderListView = () => {
     })
   }
 
+  const refreshForSubmittedOrder = async () => {
+    const payload = getTargetRefreshPayload()
+    if (!payload || processingTargetRefresh.value) {
+      return false
+    }
+
+    processingTargetRefresh.value = true
+
+    try {
+      listState.query.page = 1
+      await loadData()
+
+      const targetOrder = listState.records.find((record) => record.id === payload.orderId || record.showNo === payload.showNo)
+      await loadOrderDetail(targetOrder?.id ?? payload.orderId)
+    } finally {
+      processingTargetRefresh.value = false
+      await clearTargetRefreshQuery()
+    }
+
+    return true
+  }
+
+  const initializePageSize = () => {
+    if (listState.query.pageSize === adaptivePageSize.value) {
+      return
+    }
+
+    listState.query.pageSize = adaptivePageSize.value
+    listState.query.page = 1
+  }
+
+  const refreshListView = async () => {
+    const handledSubmittedOrder = await refreshForSubmittedOrder()
+    if (handledSubmittedOrder) {
+      return
+    }
+
+    await loadData()
+  }
+
   /**
    * 监听自适应 pageSize：
    * - 仅当实际容量发生变化时才刷新；
@@ -235,6 +356,10 @@ export const useOrderListView = () => {
   watch(
     adaptivePageSize,
     (value) => {
+      if (!pageReady.value) {
+        return
+      }
+
       if (listState.query.pageSize === value) {
         return
       }
@@ -243,8 +368,26 @@ export const useOrderListView = () => {
       listState.query.page = 1
       void loadData()
     },
-    { immediate: true },
   )
+
+  onMounted(() => {
+    initializePageSize()
+    pageReady.value = true
+    void refreshListView()
+  })
+
+  onActivated(() => {
+    if (!pageReady.value) {
+      return
+    }
+
+    if (!keepAliveActivated.value) {
+      keepAliveActivated.value = true
+      return
+    }
+
+    void refreshListView()
+  })
 
   return {
     searchForm,

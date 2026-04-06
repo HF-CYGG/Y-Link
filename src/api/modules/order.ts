@@ -7,7 +7,7 @@ import type { PaginationQueryInput, PaginationResult } from '@/types/api'
  * - qty、unitPrice 以 number 传递，后端统一做 decimal 落库与金额计算。
  */
 export interface SubmitOrderItemPayload {
-  productId: string
+  productId: string | number
   qty: number
   unitPrice: number
   remark?: string
@@ -53,10 +53,15 @@ export interface SubmitOrderResult {
 export const submitOrder = async (payload: SubmitOrderPayload): Promise<SubmitOrderResult> => {
   const result = await request<{
     order: {
-      id: string
-      showNo: string
+      id: PrimitiveTextValue
+      showNo: PrimitiveTextValue
     }
-    items: SubmitOrderItemPayload[]
+    items: Array<{
+      productId: PrimitiveTextValue
+      qty: PrimitiveTextValue
+      unitPrice: PrimitiveTextValue
+      remark?: PrimitiveTextValue
+    }>
   }>({
     method: 'POST',
     url: '/orders/submit',
@@ -65,10 +70,15 @@ export const submitOrder = async (payload: SubmitOrderPayload): Promise<SubmitOr
 
   return {
     order: {
-      id: result.order.id,
-      showNo: result.order.showNo,
+      id: normalizeTextField(result.order.id),
+      showNo: normalizeTextField(result.order.showNo),
     },
-    items: result.items,
+    items: result.items.map((item) => ({
+      productId: normalizeTextField(item.productId),
+      qty: Number(normalizeDecimalField(item.qty)),
+      unitPrice: Number(normalizeDecimalField(item.unitPrice)),
+      remark: normalizeTextField(item.remark) || undefined,
+    })),
   }
 }
 
@@ -101,10 +111,24 @@ interface OrderListRawResult {
   page: number
   pageSize: number
   total: number
-  list: OrderRecord[]
+  list: OrderRecordRaw[]
 }
 
 export type OrderListResult = PaginationResult<OrderRecord>
+
+interface OrderRecordRaw {
+  id: PrimitiveTextValue
+  showNo: PrimitiveTextValue
+  customerName: PrimitiveTextValue
+  totalAmount: PrimitiveTextValue
+  totalQty: PrimitiveTextValue
+  status?: PrimitiveTextValue
+  remark: PrimitiveTextValue
+  creatorUserId: PrimitiveTextValue
+  creatorUsername: PrimitiveTextValue
+  creatorDisplayName: PrimitiveTextValue
+  createdAt: PrimitiveTextValue
+}
 
 /**
  * 获取出库单分页列表：
@@ -123,7 +147,7 @@ export const getOrderList = async (params: OrderListQuery, requestConfig: Reques
     page: result.page,
     pageSize: result.pageSize,
     total: result.total,
-    records: result.list,
+    records: result.list.map(normalizeOrderRecord),
   }
 }
 
@@ -143,6 +167,24 @@ export interface OrderDetailResult extends OrderRecord {
 }
 
 type PrimitiveTextValue = string | number | null | undefined
+
+const normalizeNullableTextField = (value: PrimitiveTextValue): string | null => {
+  return normalizeTextField(value) || null
+}
+
+const normalizeOrderRecord = (record: OrderRecordRaw): OrderRecord => ({
+  id: normalizeTextField(record.id),
+  showNo: normalizeTextField(record.showNo),
+  customerName: normalizeNullableTextField(record.customerName),
+  totalAmount: normalizeDecimalField(record.totalAmount),
+  totalQty: normalizeDecimalField(record.totalQty),
+  status: normalizeNullableTextField(record.status),
+  remark: normalizeNullableTextField(record.remark),
+  creatorUserId: normalizeNullableTextField(record.creatorUserId),
+  creatorUsername: normalizeNullableTextField(record.creatorUsername),
+  creatorDisplayName: normalizeNullableTextField(record.creatorDisplayName),
+  createdAt: normalizeTextField(record.createdAt),
+})
 
 /**
  * 订单详情明细原始结构：
@@ -211,9 +253,9 @@ const normalizeDecimalField = (value: PrimitiveTextValue, fallback = '0.00'): st
  * - 当产品编码暂不可得时退化为 productId，至少保证界面可辨识。
  */
 const normalizeOrderItem = (item: OrderItemRawRecord): OrderItemRecord => ({
-  id: item.id,
-  productId: item.productId,
-  productCode: normalizeTextField(item.productCode, item.productId),
+  id: normalizeTextField(item.id),
+  productId: normalizeTextField(item.productId),
+  productCode: normalizeTextField(item.productCode, normalizeTextField(item.productId)),
   productName: normalizeTextField(item.productName, normalizeTextField(item.productNameSnapshot, '-')),
   qty: normalizeDecimalField(item.qty),
   unitPrice: normalizeDecimalField(item.unitPrice),
@@ -227,9 +269,7 @@ const normalizeOrderItem = (item: OrderItemRawRecord): OrderItemRecord => ({
  * - 前端详情组件更适合直接消费扁平主单结构，因此在模块层展开。
  */
 const normalizeOrderDetail = (payload: OrderDetailRawResult): OrderDetailResult => ({
-  ...payload.order,
-  totalAmount: normalizeDecimalField(payload.order.totalAmount),
-  totalQty: normalizeDecimalField(payload.order.totalQty),
+  ...normalizeOrderRecord(payload.order),
   items: payload.items.map(normalizeOrderItem),
 })
 

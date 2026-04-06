@@ -36,14 +36,16 @@ interface CrudManagerMessages {
  * - 页面提供自己的实体类型、表单映射和接口实现；
  * - composable 只编排通用流程，不感知具体字段细节。
  */
+type CrudSubmitSyncMode = 'reload' | 'local'
+
 interface CrudManagerConfig<TEntity extends { id: string }, TForm extends CrudFormModel, TPayload> {
   formRef?: Ref<FormInstance | undefined>
   createDefaultForm: () => TForm
   buildEditForm: (row: TEntity) => TForm
   buildSubmitPayload: (form: TForm) => Promise<TPayload> | TPayload
   loadList: (requestConfig?: RequestConfig) => Promise<TEntity[] | null | undefined>
-  createItem: (payload: TPayload) => Promise<unknown>
-  updateItem: (id: string, payload: TPayload) => Promise<unknown>
+  createItem: (payload: TPayload) => Promise<TEntity>
+  updateItem: (id: string, payload: TPayload) => Promise<TEntity>
   deleteItem: (id: string) => Promise<unknown>
   messages: CrudManagerMessages
   afterSubmit?: (context: {
@@ -51,7 +53,16 @@ interface CrudManagerConfig<TEntity extends { id: string }, TForm extends CrudFo
     rowId: string | undefined
     payload: TPayload
     form: TForm
+    result: TEntity
   }) => Promise<void> | void
+  syncAfterSubmit?: (context: {
+    mode: 'create' | 'update'
+    rowId: string | undefined
+    payload: TPayload
+    form: TForm
+    result: TEntity
+    items: TEntity[]
+  }) => Promise<CrudSubmitSyncMode> | CrudSubmitSyncMode
   afterDelete?: (context: {
     row: TEntity
     items: TEntity[]
@@ -173,24 +184,38 @@ export const useCrudManager = <
       const payload = await config.buildSubmitPayload(currentForm)
       const rowId = currentForm.id
       const isEdit = Boolean(rowId)
+      const mode = isEdit ? 'update' : 'create'
+      let result: TEntity
 
       if (isEdit && rowId) {
-        await config.updateItem(rowId, payload)
+        result = await config.updateItem(rowId, payload)
         ElMessage.success(config.messages.updateSuccess)
       } else {
-        await config.createItem(payload)
+        result = await config.createItem(payload)
         ElMessage.success(config.messages.createSuccess)
       }
 
       await config.afterSubmit?.({
-        mode: isEdit ? 'update' : 'create',
+        mode,
         rowId,
         payload,
         form: currentForm,
+        result,
       })
 
       dialogVisible.value = false
-      void loadData()
+      const syncMode = await config.syncAfterSubmit?.({
+        mode,
+        rowId,
+        payload,
+        form: currentForm,
+        result,
+        items: items.value,
+      })
+
+      if (syncMode !== 'local') {
+        void loadData()
+      }
     } catch (error) {
       ElMessage.error(extractErrorMessage(error, config.messages.saveError))
     } finally {

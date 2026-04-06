@@ -55,6 +55,56 @@ export interface OrderDetailItemView {
   remark: string | null
 }
 
+export interface OrderSummaryView {
+  id: string
+  showNo: string
+  customerName: string | null
+  totalAmount: string
+  totalQty: string
+  remark: string | null
+  creatorUserId: string | null
+  creatorUsername: string | null
+  creatorDisplayName: string | null
+  createdAt: string
+}
+
+export interface SubmittedOrderView {
+  id: string
+  showNo: string
+}
+
+export interface SubmittedOrderItemView {
+  id: string
+  productId: string
+  qty: string
+  unitPrice: string
+  remark: string | null
+}
+
+const normalizeEntityId = (value: string | number): string => String(value).trim()
+
+const normalizeNullableEntityId = (value: string | number | null | undefined): string | null => {
+  if (value === null || value === undefined || value === '') {
+    return null
+  }
+
+  const normalizedValue = normalizeEntityId(value)
+  return normalizedValue || null
+}
+
+const normalizeDecimalText = (value: string | number | null | undefined, fallback = '0.00'): string => {
+  if (value === null || value === undefined || value === '') {
+    return fallback
+  }
+
+  const normalizedNumber = Number(value)
+  return Number.isFinite(normalizedNumber) ? normalizedNumber.toFixed(2) : fallback
+}
+
+const normalizeDateTime = (value: Date | string): string => {
+  return value instanceof Date ? value.toISOString() : String(value)
+}
+
 const IDEMPOTENCY_CONSTRAINT_MATCHER = {
   mysqlConstraint: 'uk_biz_outbound_idempotency_key',
   sqliteColumns: ['biz_outbound_order.idempotency_key'],
@@ -71,7 +121,7 @@ export class OrderService {
   private readonly orderRepo = AppDataSource.getRepository(BizOutboundOrder)
   private readonly itemRepo = AppDataSource.getRepository(BizOutboundOrderItem)
 
-  async list(query: OrderListQuery): Promise<PaginationResult<BizOutboundOrder>> {
+  async list(query: OrderListQuery): Promise<PaginationResult<OrderSummaryView>> {
     const qb = this.orderRepo.createQueryBuilder('order')
     
     if (query.showNo) {
@@ -94,26 +144,26 @@ export class OrderService {
       page: query.page,
       pageSize: query.pageSize,
       total,
-      list,
+      list: list.map((order) => this.buildOrderSummaryView(order)),
     }
   }
 
-  async detailById(id: string): Promise<{ order: BizOutboundOrder; items: OrderDetailItemView[] }> {
+  async detailById(id: string): Promise<{ order: OrderSummaryView; items: OrderDetailItemView[] }> {
     const order = await this.orderRepo.findOne({ where: { id } })
     if (!order) {
       throw new BizError('出库单不存在', 404)
     }
     const items = await this.loadDetailItems(id)
-    return { order, items }
+    return { order: this.buildOrderSummaryView(order), items }
   }
 
-  async detailByShowNo(showNo: string): Promise<{ order: BizOutboundOrder; items: OrderDetailItemView[] }> {
+  async detailByShowNo(showNo: string): Promise<{ order: OrderSummaryView; items: OrderDetailItemView[] }> {
     const order = await this.orderRepo.findOne({ where: { showNo } })
     if (!order) {
       throw new BizError('出库单不存在', 404)
     }
     const items = await this.loadDetailItems(order.id)
-    return { order, items }
+    return { order: this.buildOrderSummaryView(order), items }
   }
 
   /**
@@ -127,7 +177,7 @@ export class OrderService {
     input: SubmitOrderInput,
     actor: AuthUserContext,
     requestMeta?: RequestMeta,
-  ): Promise<{ order: BizOutboundOrder; items: BizOutboundOrderItem[] }> {
+  ): Promise<{ order: SubmittedOrderView; items: SubmittedOrderItemView[] }> {
     if (!input.items.length) {
       throw new BizError('至少需要一条明细')
     }
@@ -154,7 +204,10 @@ export class OrderService {
               where: { orderId: existed.id },
               order: { lineNo: 'ASC' },
             })
-            return { order: existed, items: existedItems }
+            return {
+              order: this.buildSubmittedOrderView(existed),
+              items: existedItems.map((item) => this.buildSubmittedOrderItemView(item)),
+            }
           }
 
           const normalizedProductIds = [...new Set(input.items.map((item) => String(item.productId).trim()))]
@@ -174,6 +227,7 @@ export class OrderService {
           let totalQty = 0
           let totalAmount = 0
           const itemEntities: BizOutboundOrderItem[] = []
+          const latestProductPriceMap = new Map<string, string>()
 
           input.items.forEach((item, index) => {
             const normalizedProductId = String(item.productId).trim()
@@ -188,6 +242,7 @@ export class OrderService {
             const lineAmount = Number((item.qty * item.unitPrice).toFixed(2))
             totalQty += item.qty
             totalAmount += lineAmount
+            latestProductPriceMap.set(normalizedProductId, item.unitPrice.toFixed(2))
 
             itemEntities.push(
               itemRepo.create({
@@ -221,6 +276,14 @@ export class OrderService {
           })
           const savedItems = await itemRepo.save(itemEntities)
 
+          products.forEach((product) => {
+            const latestPrice = latestProductPriceMap.get(String(product.id))
+            if (latestPrice) {
+              product.defaultPrice = latestPrice
+            }
+          })
+          await productRepo.save(products)
+
           await auditService.record(
             {
               actionType: 'order.create',
@@ -240,7 +303,10 @@ export class OrderService {
             manager,
           )
 
-          return { order: savedOrder, items: savedItems }
+          return {
+            order: this.buildSubmittedOrderView(savedOrder),
+            items: savedItems.map((item) => this.buildSubmittedOrderItemView(item)),
+          }
         })
       } catch (error) {
         lastError = error
@@ -271,7 +337,7 @@ export class OrderService {
 
   private async loadOrderByIdempotencyKey(
     idempotencyKey: string,
-  ): Promise<{ order: BizOutboundOrder; items: BizOutboundOrderItem[] }> {
+  ): Promise<{ order: SubmittedOrderView; items: SubmittedOrderItemView[] }> {
     const order = await this.orderRepo.findOne({ where: { idempotencyKey } })
     if (!order) {
       throw new BizError('订单处理中，请稍后重试', 409)
@@ -282,7 +348,10 @@ export class OrderService {
       order: { lineNo: 'ASC' },
     })
 
-    return { order, items }
+    return {
+      order: this.buildSubmittedOrderView(order),
+      items: items.map((item) => this.buildSubmittedOrderItemView(item)),
+    }
   }
 
   /**
@@ -299,18 +368,50 @@ export class OrderService {
     })
 
     return items.map((item) => ({
-      id: item.id,
+      id: normalizeEntityId(item.id),
       lineNo: item.lineNo,
-      productId: item.productId,
+      productId: normalizeEntityId(item.productId),
       productCode: item.product?.productCode ?? '',
       productName: item.productNameSnapshot || item.product?.productName || '',
       productNameSnapshot: item.productNameSnapshot,
-      qty: item.qty,
-      unitPrice: item.unitPrice,
-      subTotal: item.lineAmount,
-      lineAmount: item.lineAmount,
+      qty: normalizeDecimalText(item.qty),
+      unitPrice: normalizeDecimalText(item.unitPrice),
+      subTotal: normalizeDecimalText(item.lineAmount),
+      lineAmount: normalizeDecimalText(item.lineAmount),
       remark: item.remark,
     }))
+  }
+
+  private buildOrderSummaryView(order: BizOutboundOrder): OrderSummaryView {
+    return {
+      id: normalizeEntityId(order.id),
+      showNo: order.showNo,
+      customerName: order.customerName,
+      totalAmount: normalizeDecimalText(order.totalAmount),
+      totalQty: normalizeDecimalText(order.totalQty),
+      remark: order.remark,
+      creatorUserId: normalizeNullableEntityId(order.creatorUserId),
+      creatorUsername: order.creatorUsername,
+      creatorDisplayName: order.creatorDisplayName,
+      createdAt: normalizeDateTime(order.createdAt),
+    }
+  }
+
+  private buildSubmittedOrderView(order: BizOutboundOrder): SubmittedOrderView {
+    return {
+      id: normalizeEntityId(order.id),
+      showNo: order.showNo,
+    }
+  }
+
+  private buildSubmittedOrderItemView(item: BizOutboundOrderItem): SubmittedOrderItemView {
+    return {
+      id: normalizeEntityId(item.id),
+      productId: normalizeEntityId(item.productId),
+      qty: normalizeDecimalText(item.qty),
+      unitPrice: normalizeDecimalText(item.unitPrice),
+      remark: item.remark,
+    }
   }
 }
 

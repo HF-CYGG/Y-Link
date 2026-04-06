@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onActivated, onMounted, ref } from 'vue'
 import { type FormInstance, type FormRules } from 'element-plus'
 import { createTag, deleteTag, getTagList, updateTag, type CreateTagDto, type Tag } from '@/api/modules/tag'
 import {
@@ -10,6 +10,8 @@ import {
 import { useCrudManager } from '@/composables/useCrudManager'
 
 const formRef = ref<FormInstance>()
+const pageReady = ref(false)
+const keepAliveActivated = ref(false)
 
 /**
  * 标签表单类型：
@@ -74,6 +76,17 @@ const buildSubmitPayload = (currentForm: TagForm): CreateTagDto => ({
   tagCode: currentForm.tagCode,
 })
 
+const upsertTag = (tag: Tag) => {
+  const currentIndex = tags.value.findIndex((item) => item.id === tag.id)
+
+  if (currentIndex > -1) {
+    tags.value.splice(currentIndex, 1, tag)
+    return
+  }
+
+  tags.value.unshift(tag)
+}
+
 /**
  * 通用 CRUD 管理：
  * - 收敛标签页的列表加载、弹窗表单、提交保存与删除确认；
@@ -111,10 +124,32 @@ const {
     deleteSuccess: '删除成功',
     deleteError: '删除失败',
   },
+  syncAfterSubmit: ({ result }) => {
+    upsertTag(result)
+    return 'local'
+  },
 })
 
+const refreshTagView = async () => {
+  await loadData()
+}
+
 onMounted(() => {
-  void loadData()
+  pageReady.value = true
+  void refreshTagView()
+})
+
+onActivated(() => {
+  if (!pageReady.value) {
+    return
+  }
+
+  if (!keepAliveActivated.value) {
+    keepAliveActivated.value = true
+    return
+  }
+
+  void refreshTagView()
 })
 </script>
 
@@ -127,7 +162,7 @@ onMounted(() => {
 
       <template #actions="{ isPhone }">
         <el-button :class="isPhone ? 'flex-1' : ''" type="primary" icon="Plus" @click="handleAdd">新增标签</el-button>
-        <el-button :class="isPhone ? 'flex-1' : ''" icon="Refresh" @click="loadData">刷新列表</el-button>
+        <el-button :class="isPhone ? 'flex-1' : ''" icon="Refresh" @click="refreshTagView">刷新列表</el-button>
       </template>
     </PageToolbarCard>
 

@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
-import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
+import { computed, nextTick, onActivated, onMounted, ref } from 'vue'
+import { ElMessage, type FormInstance, type FormRules, type TableInstance } from 'element-plus'
 import type { RequestConfig } from '@/api/http'
 import { createTag, getTagList, type Tag } from '@/api/modules/tag'
 import {
+  batchUpdateProducts,
   type CreateProductDto,
   createProduct,
   deleteProduct,
+  getProductDetail,
   getProductList,
   updateProduct,
   type ProductListQuery,
@@ -18,9 +20,18 @@ import {
   PageToolbarCard,
 } from '@/components/common'
 import { useCrudManager } from '@/composables/useCrudManager'
+import { extractErrorMessage } from '@/utils/error'
 
 const allTags = ref<Tag[]>([])
 const formRef = ref<FormInstance>()
+const productTableRef = ref<TableInstance>()
+const pageReady = ref(false)
+const keepAliveActivated = ref(false)
+const hasAutoCreatedTags = ref(false)
+const editingProductId = ref('')
+const editLoading = ref(false)
+const batchSubmitting = ref(false)
+const selectedProductIds = ref<string[]>([])
 
 const searchKeyword = ref('')
 const searchTagId = ref('')
@@ -55,13 +66,26 @@ const createDefaultForm = (): ProductForm => ({
   tagIds: [] as string[],
 })
 
+const selectedProductCount = computed(() => selectedProductIds.value.length)
+
 /**
  * 表单规则：
  * - 确保关键主数据字段完整；
  * - 录入校验尽量前置到前端完成。
  */
 const rules: FormRules = {
-  productCode: [{ required: true, message: '请输入产品编码', trigger: 'blur' }],
+  productCode: [
+    {
+      validator: (_rule, value, callback) => {
+        if (form.value.id && !String(value ?? '').trim()) {
+          callback(new Error('请输入产品编码'))
+          return
+        }
+        callback()
+      },
+      trigger: 'blur',
+    },
+  ],
   productName: [{ required: true, message: '请输入产品名称', trigger: 'blur' }],
   defaultPrice: [{ required: true, message: '请输入默认售价', trigger: 'blur' }],
 }
@@ -93,7 +117,96 @@ const buildQueryParams = (): ProductListQuery => {
 }
 
 const handleSearch = () => {
-  void loadData()
+  void reloadProducts()
+}
+
+const productMatchesFilters = (product: ProductRecord) => {
+  const normalizedKeyword = searchKeyword.value.trim().toLowerCase()
+  const normalizedTagId = searchTagId.value.trim()
+
+  if (normalizedKeyword) {
+    const searchableText = [product.productName, product.productCode, product.pinyinAbbr]
+      .join(' ')
+      .toLowerCase()
+
+    if (!searchableText.includes(normalizedKeyword)) {
+      return false
+    }
+  }
+
+  if (normalizedTagId && !product.tagIds.includes(normalizedTagId)) {
+    return false
+  }
+
+  return true
+}
+
+const upsertProduct = (product: ProductRecord) => {
+  const currentIndex = products.value.findIndex((item) => item.id === product.id)
+
+  if (!productMatchesFilters(product)) {
+    if (currentIndex > -1) {
+      products.value.splice(currentIndex, 1)
+    }
+    return
+  }
+
+  if (currentIndex > -1) {
+    products.value.splice(currentIndex, 1, product)
+    return
+  }
+
+  products.value.unshift(product)
+}
+
+const normalizeSelectValue = (value: string | number | null | undefined): string => {
+  if (value === null || value === undefined) {
+    return ''
+  }
+
+  return String(value).trim()
+}
+
+const applyTableSelection = async () => {
+  await nextTick()
+  const table = productTableRef.value
+  if (!table) {
+    return
+  }
+
+  table.clearSelection()
+  const selectedIdSet = new Set(selectedProductIds.value)
+  products.value.forEach((product) => {
+    if (selectedIdSet.has(product.id)) {
+      table.toggleRowSelection(product, true)
+    }
+  })
+}
+
+const syncSelectedProductIds = async () => {
+  const visibleIdSet = new Set(products.value.map((product) => product.id))
+  selectedProductIds.value = selectedProductIds.value.filter((id) => visibleIdSet.has(id))
+  await applyTableSelection()
+}
+
+const clearSelection = async () => {
+  selectedProductIds.value = []
+  await applyTableSelection()
+}
+
+const handleTableSelectionChange = (selection: ProductRecord[]) => {
+  selectedProductIds.value = selection.map((item) => item.id)
+}
+
+const handleCardSelectionChange = async (productId: string, checked: boolean | string | number) => {
+  const isChecked = checked === true
+  if (isChecked) {
+    selectedProductIds.value = [...new Set([...selectedProductIds.value, productId])]
+  } else {
+    selectedProductIds.value = selectedProductIds.value.filter((id) => id !== productId)
+  }
+
+  await applyTableSelection()
 }
 
 /**
@@ -108,7 +221,7 @@ const buildEditForm = (row: ProductRecord): ProductForm => ({
   pinyinAbbr: row.pinyinAbbr,
   defaultPrice: Number(row.defaultPrice),
   isActive: row.isActive,
-  tagIds: row.tags ? row.tags.map((tag) => tag.id) : [],
+  tagIds: row.tagIds,
 })
 
 /**
@@ -117,6 +230,7 @@ const buildEditForm = (row: ProductRecord): ProductForm => ({
  * - 输出统一的产品 DTO，供新增与编辑接口共用。
  */
 const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProductDto> => {
+  hasAutoCreatedTags.value = false
   const resolvedTagIds = await resolveTagIds(currentForm.tagIds)
   return {
     productCode: currentForm.productCode,
@@ -141,7 +255,7 @@ const {
   submitting,
   form,
   loadData,
-  handleAdd,
+  handleAdd: openCreateDialog,
   handleEdit,
   handleDelete,
   handleSubmit,
@@ -165,15 +279,52 @@ const {
     deleteSuccess: '删除成功',
     deleteError: '删除失败',
   },
+  afterSubmit: async () => {
+    if (!hasAutoCreatedTags.value) {
+      return
+    }
+
+    hasAutoCreatedTags.value = false
+    await loadTags()
+  },
+  syncAfterSubmit: ({ result }) => {
+    upsertProduct(result)
+    void syncSelectedProductIds()
+    return 'local'
+  },
 })
 
-const resolveTagIds = async (tagValues: string[]): Promise<string[]> => {
+const reloadProducts = async () => {
+  await loadData()
+  await syncSelectedProductIds()
+}
+
+const handleAdd = async () => {
+  await clearSelection()
+  openCreateDialog()
+}
+
+const handleEditProduct = async (row: ProductRecord) => {
+  editingProductId.value = row.id
+  editLoading.value = true
+  try {
+    const detail = await getProductDetail(row.id)
+    handleEdit(detail)
+  } catch (error) {
+    ElMessage.error(extractErrorMessage(error, '获取产品详情失败'))
+  } finally {
+    editingProductId.value = ''
+    editLoading.value = false
+  }
+}
+
+const resolveTagIds = async (tagValues: Array<string | number>): Promise<string[]> => {
   const createdTagNameCache = new Map<string, string>()
   const resolvedIds: string[] = []
   const autoCreatedTagNames: string[] = []
 
   for (const rawValue of tagValues) {
-    const normalizedValue = rawValue.trim()
+    const normalizedValue = normalizeSelectValue(rawValue)
     if (!normalizedValue) {
       continue
     }
@@ -207,15 +358,56 @@ const resolveTagIds = async (tagValues: string[]): Promise<string[]> => {
   }
 
   if (autoCreatedTagNames.length) {
+    hasAutoCreatedTags.value = true
     ElMessage.success(`已自动创建标签：${[...new Set(autoCreatedTagNames)].join('、')}`)
   }
 
   return [...new Set(resolvedIds)]
 }
 
+const refreshProductView = async () => {
+  await Promise.all([loadTags(), reloadProducts()])
+}
+
+const handleBatchUpdateStatus = async (isActive: boolean) => {
+  if (!selectedProductIds.value.length) {
+    ElMessage.warning('请先选择要批量处理的产品')
+    return
+  }
+
+  batchSubmitting.value = true
+  try {
+    const updatedCount = selectedProductIds.value.length
+    await batchUpdateProducts({
+      ids: selectedProductIds.value,
+      isActive,
+    })
+    await clearSelection()
+    await reloadProducts()
+    ElMessage.success(`已批量${isActive ? '启用' : '停用'} ${updatedCount} 个产品`)
+  } catch (error) {
+    ElMessage.error(extractErrorMessage(error, '批量修改失败'))
+  } finally {
+    batchSubmitting.value = false
+  }
+}
+
 onMounted(() => {
-  void loadTags()
-  void loadData()
+  pageReady.value = true
+  void refreshProductView()
+})
+
+onActivated(() => {
+  if (!pageReady.value) {
+    return
+  }
+
+  if (!keepAliveActivated.value) {
+    keepAliveActivated.value = true
+    return
+  }
+
+  void refreshProductView()
 })
 </script>
 
@@ -251,7 +443,29 @@ onMounted(() => {
       </template>
 
       <template #actions="{ isPhone }">
-        <el-button :class="isPhone ? 'w-full' : ''" type="primary" icon="Plus" @click="handleAdd">新增产品</el-button>
+        <div class="flex w-full flex-wrap justify-end gap-2">
+          <el-tag type="info">已选 {{ selectedProductCount }} 项</el-tag>
+          <el-button
+            :class="isPhone ? 'w-full' : ''"
+            :disabled="!selectedProductCount"
+            :loading="batchSubmitting"
+            @click="handleBatchUpdateStatus(true)"
+          >
+            批量启用
+          </el-button>
+          <el-button
+            :class="isPhone ? 'w-full' : ''"
+            :disabled="!selectedProductCount"
+            :loading="batchSubmitting"
+            @click="handleBatchUpdateStatus(false)"
+          >
+            批量停用
+          </el-button>
+          <el-button :class="isPhone ? 'w-full' : ''" :disabled="!selectedProductCount" @click="clearSelection">
+            清空选择
+          </el-button>
+          <el-button :class="isPhone ? 'w-full' : ''" type="primary" icon="Plus" @click="handleAdd">新增产品</el-button>
+        </div>
       </template>
     </PageToolbarCard>
 
@@ -266,7 +480,16 @@ onMounted(() => {
       card-container-class="pb-4 xl:grid-cols-3"
     >
       <template #table>
-        <el-table :data="products" class="h-full w-full" stripe row-key="id" table-layout="auto">
+        <el-table
+          ref="productTableRef"
+          :data="products"
+          class="h-full w-full"
+          stripe
+          row-key="id"
+          table-layout="auto"
+          @selection-change="handleTableSelectionChange"
+        >
+            <el-table-column type="selection" width="52" reserve-selection />
             <el-table-column label="产品编码" prop="productCode" min-width="150" show-overflow-tooltip />
             <el-table-column label="产品名称" prop="productName" min-width="220" show-overflow-tooltip />
             <el-table-column label="拼音首字母" prop="pinyinAbbr" width="120" show-overflow-tooltip />
@@ -300,7 +523,14 @@ onMounted(() => {
             </el-table-column>
             <el-table-column label="操作" width="132" align="right" fixed="right">
               <template #default="{ row }">
-                <el-button link type="primary" @click="handleEdit(row)">编辑</el-button>
+                <el-button
+                  link
+                  type="primary"
+                  :loading="editLoading && editingProductId === row.id"
+                  @click="handleEditProduct(row)"
+                >
+                  编辑
+                </el-button>
                 <el-button link type="danger" @click="handleDelete(row)">删除</el-button>
               </template>
             </el-table-column>
@@ -309,6 +539,17 @@ onMounted(() => {
 
       <template #card="{ item }">
         <div class="apple-card mobile-product-card min-w-0 p-4">
+          <div class="mb-3 flex items-center justify-between">
+            <el-checkbox
+              :model-value="selectedProductIds.includes(item.id)"
+              @change="handleCardSelectionChange(item.id, $event)"
+            >
+              选择产品
+            </el-checkbox>
+            <el-tag :type="item.isActive ? 'success' : 'info'" size="small">
+              {{ item.isActive ? '启用' : '停用' }}
+            </el-tag>
+          </div>
           <div class="flex items-start justify-between gap-3">
             <div class="min-w-0">
               <h4 class="truncate text-base font-semibold text-slate-800 dark:text-slate-100">
@@ -318,11 +559,6 @@ onMounted(() => {
             </div>
             <div class="text-right">
               <span class="font-medium text-red-500">¥{{ Number(item.defaultPrice).toFixed(2) }}</span>
-              <div class="mt-1">
-                <el-tag :type="item.isActive ? 'success' : 'info'" size="small">
-                  {{ item.isActive ? '启用' : '停用' }}
-                </el-tag>
-              </div>
             </div>
           </div>
           <div class="mt-2 text-xs text-slate-500 dark:text-slate-400">
@@ -341,7 +577,9 @@ onMounted(() => {
             </el-tag>
           </div>
           <div class="mt-3 flex flex-wrap justify-end gap-2 border-t border-slate-100 pt-3 dark:border-white/10">
-            <el-button size="small" @click="handleEdit(item)">编辑</el-button>
+            <el-button size="small" :loading="editLoading && editingProductId === item.id" @click="handleEditProduct(item)">
+              编辑
+            </el-button>
             <el-button size="small" type="danger" plain @click="handleDelete(item)">删除</el-button>
           </div>
         </div>
@@ -361,7 +599,7 @@ onMounted(() => {
       <template #default="{ isPhone }">
         <el-form ref="formRef" :model="form" :rules="rules" :label-width="isPhone ? '82px' : '90px'">
           <el-form-item label="产品编码" prop="productCode">
-            <el-input v-model="form.productCode" placeholder="请输入产品编码" />
+            <el-input v-model="form.productCode" :placeholder="form.id ? '请输入产品编码' : '留空则自动生成统一编码'" />
           </el-form-item>
           <el-form-item label="产品名称" prop="productName">
             <el-input v-model="form.productName" placeholder="请输入产品名称" />

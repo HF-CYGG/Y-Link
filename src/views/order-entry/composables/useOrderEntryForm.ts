@@ -1,5 +1,6 @@
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
+import { useRouter } from 'vue-router'
 import { orderApi, productApi } from '@/api'
 import type { SubmitOrderPayload } from '@/api/modules/order'
 import type { ProductRecord } from '@/api/modules/product'
@@ -25,6 +26,14 @@ function toMoney(value: number): string {
   return value.toFixed(2)
 }
 
+function normalizeTextValue(value: string | number | null | undefined): string {
+  if (value === null || value === undefined) {
+    return ''
+  }
+
+  return String(value).trim()
+}
+
 /**
  * 订单录入页业务编排 composable：
  * - 收拢产品加载、明细编辑、键盘流与提交逻辑；
@@ -33,6 +42,7 @@ function toMoney(value: number): string {
  */
 export const useOrderEntryForm = () => {
   const appStore = useAppStore()
+  const router = useRouter()
   const ORDER_ENTRY_DRAFT_STORAGE_KEY = 'y-link.order-entry.draft.v1'
 
   interface OrderEntryDraftSnapshot {
@@ -159,9 +169,9 @@ export const useOrderEntryForm = () => {
    */
   const validSubmitItems = computed<SubmitOrderPayload['items']>(() => {
     return itemRows.value
-      .filter((row) => row.productId.trim() && normalizeNumber(row.qty) > 0)
+      .filter((row) => normalizeTextValue(row.productId) && normalizeNumber(row.qty) > 0)
       .map((row) => ({
-        productId: row.productId.trim(),
+        productId: normalizeTextValue(row.productId),
         qty: normalizeNumber(row.qty),
         unitPrice: normalizeNumber(row.unitPrice),
         remark: row.remark.trim() || undefined,
@@ -360,23 +370,6 @@ export const useOrderEntryForm = () => {
   }
 
   /**
-   * 生成自动建档产品编码：
-   * - 保持 AUTO + 时间戳 + 序号 + 随机串格式；
-   * - 降低快速连续建档时的编码冲突概率。
-   */
-  const createAutoProductCode = (sequence: number): string => {
-    const now = new Date()
-    const yyyy = now.getFullYear().toString()
-    const mm = `${now.getMonth() + 1}`.padStart(2, '0')
-    const dd = `${now.getDate()}`.padStart(2, '0')
-    const hh = `${now.getHours()}`.padStart(2, '0')
-    const min = `${now.getMinutes()}`.padStart(2, '0')
-    const sec = `${now.getSeconds()}`.padStart(2, '0')
-    const random = Math.random().toString(36).slice(2, 6).toUpperCase()
-    return `AUTO-${yyyy}${mm}${dd}${hh}${min}${sec}-${sequence.toString().padStart(2, '0')}-${random}`
-  }
-
-  /**
    * 确保提交使用真实产品主键：
    * - 允许直接提交现有产品；
    * - 若用户输入的是新商品名称，则自动建档后回填主键；
@@ -384,10 +377,9 @@ export const useOrderEntryForm = () => {
    */
   const ensureProductId = async (
     rawValue: string,
-    sequence: number,
     createdCache: Map<string, string>,
   ): Promise<string> => {
-    const normalizedValue = rawValue.trim()
+    const normalizedValue = normalizeTextValue(rawValue)
     if (!normalizedValue) {
       throw new Error('产品不能为空')
     }
@@ -408,7 +400,6 @@ export const useOrderEntryForm = () => {
     }
 
     const created = await productApi.createProduct({
-      productCode: createAutoProductCode(sequence),
       productName: normalizedValue,
       pinyinAbbr: '',
       defaultPrice: 0,
@@ -430,11 +421,11 @@ export const useOrderEntryForm = () => {
     const createdCache = new Map<string, string>()
     autoCreatedProductNames.value = []
 
-    const rows = itemRows.value.filter((row) => row.productId.trim() && normalizeNumber(row.qty) > 0)
+    const rows = itemRows.value.filter((row) => normalizeTextValue(row.productId) && normalizeNumber(row.qty) > 0)
     const submitItems: SubmitOrderPayload['items'] = []
 
-    for (const [index, row] of rows.entries()) {
-      const resolvedProductId = await ensureProductId(row.productId, index + 1, createdCache)
+    for (const row of rows) {
+      const resolvedProductId = await ensureProductId(row.productId, createdCache)
       row.productId = resolvedProductId
       submitItems.push({
         productId: resolvedProductId,
@@ -676,6 +667,15 @@ export const useOrderEntryForm = () => {
       }
 
       resetForm()
+      persistDraft()
+      await router.push({
+        path: '/order-list',
+        query: {
+          focusOrderId: result.order.id,
+          focusOrderShowNo: result.order.showNo,
+          focusRefreshToken: String(Date.now()),
+        },
+      })
     } catch (error) {
       ElMessage.error(extractErrorMessage(error, '保存失败，请稍后重试'))
     } finally {
