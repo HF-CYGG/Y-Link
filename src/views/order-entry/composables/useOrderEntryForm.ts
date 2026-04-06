@@ -221,7 +221,7 @@ export const useOrderEntryForm = () => {
    * - 仅在浏览器环境且持久化开关就绪后执行，避免初始化阶段把空白态覆盖到草稿。
    */
   const persistDraft = () => {
-    if (!draftPersistenceReady.value || typeof globalThis.window === 'undefined') {
+    if (!draftPersistenceReady.value || globalThis.window === undefined) {
       return
     }
 
@@ -234,7 +234,7 @@ export const useOrderEntryForm = () => {
    * - 若草稿不存在或解析失败，则回退为全新空白录入状态。
    */
   const restoreDraft = (): boolean => {
-    if (typeof globalThis.window === 'undefined') {
+    if (globalThis.window === undefined) {
       return false
     }
 
