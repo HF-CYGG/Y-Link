@@ -17,6 +17,7 @@ RUN npm ci
 # 复制前端源码与构建配置后执行生产打包。
 COPY index.html ./
 COPY public ./public
+COPY scripts ./scripts
 COPY src ./src
 COPY tsconfig.json ./
 COPY tsconfig.app.json ./
