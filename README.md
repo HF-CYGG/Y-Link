@@ -75,6 +75,11 @@ docker compose -f compose.cloud.yml pull
 docker compose -f compose.cloud.yml up -d
 ```
 
+1Panel 部署注意：
+- 推荐使用 **编排 / Compose 项目** 导入 [compose.cloud.yml](file:///F:/Y-Link/compose.cloud.yml)，不要只启动单个前端镜像。
+- 不要把前端容器设为 `host` 网络，否则容器内 Nginx 会直接占用宿主机 `80` 端口，容易报 `bind() ... 80 failed (98: Address in use)`。
+- 正确方式是让前后端一起在同一编排网络启动，由 `frontend -> backend:3001` 自动联动。
+
 特点：
 - 不写 `.env` 也可直接启动（默认镜像、默认端口、默认 SQLite）。
 - 首次启动会自动初始化管理员，并在容器日志打印账号密码。
