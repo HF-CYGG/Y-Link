@@ -55,6 +55,25 @@ const THEME_TRANSITION_EASING = 'cubic-bezier(0.22, 1, 0.36, 1)'
 const isClientEnvironment = () => globalThis.window !== undefined && globalThis.document !== undefined
 
 /**
+ * 移动端场景识别：
+ * - 移动端浏览器对 View Transition 的实现差异较大，存在过渡层残留风险；
+ * - 在手机/平板触控优先环境中统一降级到 fallback，确保主题切换稳定。
+ */
+const isMobileThemeTransitionContext = () => {
+  if (!isClientEnvironment()) {
+    return false
+  }
+
+  const userAgent = globalThis.navigator?.userAgent ?? ''
+  const isTouchLikeAgent = /Android|iPhone|iPad|iPod|Mobile|HarmonyOS|MiuiBrowser/i.test(userAgent)
+  const isNarrowViewport = globalThis.window.matchMedia('(max-width: 1024px)').matches
+  const hasFinePointer = globalThis.window.matchMedia('(pointer: fine)').matches
+  const hasTouchEvent = 'ontouchstart' in globalThis.window
+  const hasTouchPoints = (globalThis.navigator?.maxTouchPoints ?? 0) > 0
+  return isTouchLikeAgent || hasTouchEvent || hasTouchPoints || (isNarrowViewport && !hasFinePointer)
+}
+
+/**
  * 解析动画触发点：
  * - 鼠标点击时优先使用真实点击坐标；
  * - 键盘触发或坐标不可用时退回到按钮中心；
@@ -102,10 +121,13 @@ const resolveTransitionRadius = ({ x, y }: ThemeTriggerPoint) => {
     return 0
   }
 
-  return Math.hypot(
+  const baseRadius = Math.hypot(
     Math.max(x, globalThis.window.innerWidth - x),
     Math.max(y, globalThis.window.innerHeight - y),
   )
+
+  // 视口高度在移动端地址栏伸缩时会瞬时变化，额外预留半径避免圆形揭幕漏角。
+  return baseRadius + 180
 }
 
 /**
@@ -290,6 +312,12 @@ export const useThemeStore = defineStore('theme', () => {
    * - 无论亮 -> 暗还是暗 -> 亮，都统一揭示“新视图”，避免旧视图收缩时露出底层黑底。
    */
   const runViewTransition = async (nextMode: ThemeMode, point: ThemeTriggerPoint) => {
+    // 二次门控：即便调用链误入，也在这里直接降级，避免移动端出现裁剪残影。
+    if (isMobileThemeTransitionContext()) {
+      await runFallbackTransition(nextMode, point)
+      return
+    }
+
     const documentWithViewTransition = document as DocumentWithViewTransition
     /**
      * 原生方法绑定修复：
@@ -332,7 +360,10 @@ export const useThemeStore = defineStore('theme', () => {
         },
       )
 
-      await transition.finished
+      const transitionFinishedTimeout = new Promise<void>((resolve) => {
+        globalThis.window.setTimeout(() => resolve(), THEME_TRANSITION_DURATION_MS + 420)
+      })
+      await Promise.race([transition.finished, transitionFinishedTimeout])
     } finally {
       finishTransition()
     }
@@ -357,6 +388,7 @@ export const useThemeStore = defineStore('theme', () => {
 
     const point = resolveTriggerPoint(event)
     lastTriggerPoint.value = point
+    clearTransitionGate()
 
     if (prefersReducedMotion.value) {
       commitThemeMode(mode)
@@ -364,8 +396,9 @@ export const useThemeStore = defineStore('theme', () => {
     }
 
     const supportsViewTransition = typeof (document as DocumentWithViewTransition).startViewTransition === 'function'
+    const shouldPreferFallback = isMobileThemeTransitionContext()
 
-    if (supportsViewTransition) {
+    if (supportsViewTransition && !shouldPreferFallback) {
       await runViewTransition(mode, point)
       return
     }
@@ -389,6 +422,8 @@ export const useThemeStore = defineStore('theme', () => {
    */
   const initializeTheme = () => {
     syncReducedMotionPreference()
+    // 兜底清理上次异常中断遗留的过渡门控，避免首屏出现暗层残留。
+    clearTransitionGate()
 
     if (initialized.value) {
       return
