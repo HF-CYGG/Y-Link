@@ -32,10 +32,10 @@ RUN npm run build
 # ------------------------------
 FROM nginx:1.27-alpine AS runtime
 
-# 使用自定义站点配置：
+# 使用可模板化站点配置：
 # - 处理 Vue Router history 路由回退；
-# - 将 /api 请求转发到 compose 网络内的 backend 服务。
-COPY docker/nginx/default.conf /etc/nginx/conf.d/default.conf
+# - 通过 NGINX_BACKEND_UPSTREAM 在启动时注入后端地址，兼容 1Panel/分体部署。
+COPY docker/nginx/default.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=build /app/dist /usr/share/nginx/html
 
 EXPOSE 80

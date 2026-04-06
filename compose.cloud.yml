@@ -39,6 +39,8 @@ services:
   frontend:
     image: ${FRONTEND_IMAGE:-docker.io/yemiao351/y-link-frontend:latest}
     pull_policy: always
+    environment:
+      - NGINX_BACKEND_UPSTREAM=${NGINX_BACKEND_UPSTREAM:-backend:3001}
     depends_on:
       backend:
         condition: service_healthy

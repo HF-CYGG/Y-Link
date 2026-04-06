@@ -80,6 +80,16 @@ docker compose -f compose.cloud.yml up -d
 - 首次启动会自动初始化管理员，并在容器日志打印账号密码。
 - 日志默认开启彩色输出，便于在 1Panel 日志面板快速定位关键信息。
 
+如果 1Panel 中后端容器主机名不是 `backend`，请在环境变量中设置：
+
+```bash
+NGINX_BACKEND_UPSTREAM=你的后端容器地址:3001
+```
+
+例如：
+- 同编排服务名是 `y-link-backend`：`NGINX_BACKEND_UPSTREAM=y-link-backend:3001`
+- 后端跑在宿主机：`NGINX_BACKEND_UPSTREAM=host.docker.internal:3001`
+
 ### 本地开发（非 Docker）
 
 ```bash
