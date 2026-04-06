@@ -377,7 +377,13 @@ export class AuthService {
     }
   }
 
-  async ensureDefaultAdmin(): Promise<{ initialized: boolean; username: string }> {
+  async ensureDefaultAdmin(): Promise<{
+    initialized: boolean
+    username: string
+    displayName: string
+    usingDefaultBootstrapPassword: boolean
+  }> {
+    const usingDefaultBootstrapPassword = env.INIT_ADMIN_PASSWORD === 'Admin@123456'
     const existedAdmin = await this.userRepo.findOne({
       where: { username: env.INIT_ADMIN_USERNAME },
     })
@@ -386,6 +392,8 @@ export class AuthService {
       return {
         initialized: false,
         username: existedAdmin.username,
+        displayName: existedAdmin.displayName,
+        usingDefaultBootstrapPassword,
       }
     }
 
@@ -419,6 +427,8 @@ export class AuthService {
     return {
       initialized: true,
       username: savedUser.username,
+      displayName: savedUser.displayName,
+      usingDefaultBootstrapPassword,
     }
   }
 }

@@ -46,6 +46,11 @@ export function prepareDatabaseRuntime(): { mode: 'sqlite' | 'mysql'; summary: s
   }
 }
 
+export interface DatabaseSchemaInitResult {
+  action: 'synchronized' | 'skipped'
+  reason: 'forced_by_db_sync' | 'mysql_external' | 'sqlite_schema_ready' | 'sqlite_schema_bootstrap'
+}
+
 async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<boolean> {
   const existingTables: Array<{ name: string }> = await dataSource.query(
     `
@@ -66,22 +71,35 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
   return SQLITE_REQUIRED_ORDER_COLUMNS.some((column) => !orderColumnSet.has(column))
 }
 
-export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): Promise<void> {
+export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): Promise<DatabaseSchemaInitResult> {
   // DB_SYNC=true 时直接走 TypeORM 同步，便于本地快速调试实体结构。
   if (env.DB_SYNC === true) {
     await dataSource.synchronize()
-    return
+    return {
+      action: 'synchronized',
+      reason: 'forced_by_db_sync',
+    }
   }
 
   if (env.DB_TYPE !== 'sqlite') {
-    return
+    return {
+      action: 'skipped',
+      reason: 'mysql_external',
+    }
   }
 
   const needSynchronize = await shouldSynchronizeSqliteSchema(dataSource)
   if (!needSynchronize) {
-    return
+    return {
+      action: 'skipped',
+      reason: 'sqlite_schema_ready',
+    }
   }
 
   // SQLite 现有本地库在认证系统接入后，需要自动补齐新表与开单留痕字段。
   await dataSource.synchronize()
+  return {
+    action: 'synchronized',
+    reason: 'sqlite_schema_bootstrap',
+  }
 }

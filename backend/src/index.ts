@@ -44,13 +44,20 @@ const logLine = (label: string, value: string, tone: 'info' | 'success' | 'warn'
     warn: 'yellow',
   } as const
 
-  console.log(`${paint(`[${label}]`, colorByTone[tone])} ${value}`)
+  const timestamp = new Date().toISOString()
+  console.log(`${paint(timestamp, 'dim')} ${paint(`[${label}]`, colorByTone[tone])} ${value}`)
 }
 
 async function bootstrap(): Promise<void> {
+  logBanner('启动阶段')
+  logLine('STEP', 'prepare runtime context')
   const databaseRuntime = prepareDatabaseRuntime()
+  logLine('STEP', 'initialize datasource')
   await AppDataSource.initialize()
-  await initializeDatabaseSchemaIfNeeded(AppDataSource)
+  logLine('STEP', 'initialize database schema')
+  const schemaInitResult = await initializeDatabaseSchemaIfNeeded(AppDataSource)
+  logLine('SCHEMA', `action=${schemaInitResult.action} reason=${schemaInitResult.reason}`)
+  logLine('STEP', 'ensure default admin')
   const adminBootstrap = await authService.ensureDefaultAdmin()
 
   const app = createApp()
@@ -66,8 +73,13 @@ async function bootstrap(): Promise<void> {
     logLine('DATABASE', `mode=${databaseRuntime.mode} target=${databaseRuntime.summary}`)
     logLine(
       'ADMIN',
-      `username=${adminBootstrap.username} initialized=${adminBootstrap.initialized}`,
+      `username=${adminBootstrap.username} displayName=${adminBootstrap.displayName} initialized=${adminBootstrap.initialized}`,
       adminBootstrap.initialized ? 'success' : 'info',
+    )
+    logLine(
+      'ADMIN BOOTSTRAP',
+      `passwordSource=${adminBootstrap.usingDefaultBootstrapPassword ? 'built-in-default' : 'custom-env'}`,
+      adminBootstrap.usingDefaultBootstrapPassword ? 'warn' : 'success',
     )
     if (adminBootstrap.initialized) {
       logLine(
@@ -76,6 +88,8 @@ async function bootstrap(): Promise<void> {
         'warn',
       )
       logLine('SECURITY', '首次登录后请立即修改默认管理员密码。', 'warn')
+    } else if (adminBootstrap.usingDefaultBootstrapPassword) {
+      logLine('SECURITY', '当前配置仍为内置默认初始化密码，建议改为私有强密码。', 'warn')
     }
     console.log(paint('='.repeat(72), 'dim'))
   })
