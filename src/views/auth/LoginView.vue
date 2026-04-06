@@ -192,14 +192,16 @@ const handleSubmit = async () => {
   --accent: #0d9488; 
   --accent-hover: #0f766e; 
   --border-light: #e5e5ea; 
-  
+
+  position: relative;
   min-height: 100vh; 
   display: flex; 
   align-items: center; 
   justify-content: center; 
   background-color: var(--bg-primary); 
-  padding: 24px; 
-  transition: background-color 0.3s; 
+  overflow: hidden;
+  z-index: 1;
+  transition: background-color 0.5s ease;
 } 
 
 .dark .login-page,
@@ -213,6 +215,68 @@ body.dark .login-page {
   --accent-hover: #0d9488; 
   --border-light: #2c2c2e; 
 } 
+
+/* 动感网格层（极客骨架） */
+.login-page::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, rgba(13, 148, 136, 0.04) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(13, 148, 136, 0.04) 1px, transparent 1px);
+  background-size: 40px 40px;
+  mask-image: radial-gradient(circle at center, black 20%, transparent 75%);
+  -webkit-mask-image: radial-gradient(circle at center, black 20%, transparent 75%);
+  animation: gridDrift 20s linear infinite;
+}
+
+:global(.dark) .login-page::before {
+  background-image:
+    linear-gradient(to right, rgba(20, 184, 166, 0.06) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(20, 184, 166, 0.06) 1px, transparent 1px);
+}
+
+/* 底层呼吸氛围光晕（Tech Zen） */
+.login-page::after {
+  content: '';
+  position: absolute;
+  width: 50vw;
+  height: 50vh;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: -2;
+  pointer-events: none;
+  background: radial-gradient(circle, rgba(13, 148, 136, 0.06) 0%, transparent 60%);
+  filter: blur(80px);
+  animation: ambientBreathe 10s ease-in-out infinite alternate;
+}
+
+:global(.dark) .login-page::after {
+  background: radial-gradient(circle, rgba(20, 184, 166, 0.12) 0%, transparent 60%);
+}
+
+@keyframes gridDrift {
+  0% {
+    background-position: 0 0;
+  }
+  100% {
+    background-position: -40px -40px;
+  }
+}
+
+@keyframes ambientBreathe {
+  0% {
+    transform: translate(-50%, -50%) scale(0.9);
+    opacity: 0.5;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(1.2);
+    opacity: 1;
+  }
+}
 
 .login-shell { 
   display: flex; 
