@@ -85,7 +85,9 @@ const runCloudStack = async () => {
   throw new Error(`不支持的动作：${action}，可选值为 start|logs|stop`)
 }
 
-runCloudStack().catch((error) => {
+try {
+  await runCloudStack()
+} catch (error) {
   console.error(`[cloud-compose] ${error.message}`)
   process.exit(1)
-})
+}

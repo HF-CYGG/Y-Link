@@ -271,8 +271,12 @@ async function verifyOrderTransactionAndNumbering() {
   const committedItems: ItemRecord[] = []
   const committedAuditLogs: AuditLogRecord[] = []
   const products = [{ id: '1001', productName: '电缆', isActive: true }]
-  // 明确补齐 permissions，确保与 AuthUserContext 完整对齐，避免编辑器残留旧诊断。
-  const mockActor: AuthUserContext = {
+  /**
+   * 构建固定的验证操作者上下文：
+   * - 显式声明返回 AuthUserContext，避免编辑器在增量诊断时把对象字面量推断为不完整类型；
+   * - 每次提交复用同一份结构，确保权限字段稳定存在。
+   */
+  const createMockActor = (): AuthUserContext => ({
     userId: '9001',
     username: 'verifier',
     displayName: '验证脚本',
@@ -280,7 +284,8 @@ async function verifyOrderTransactionAndNumbering() {
     status: 'enabled',
     sessionToken: 'task6-verify-session',
     permissions: [],
-  }
+  })
+  const mockActor = createMockActor()
 
   const shouldFailOnItemSaveRef = { value: false }
   let orderSeq = 0

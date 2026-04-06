@@ -66,7 +66,7 @@ function isTruthySwitchValue(value) {
 
 function getEnvironmentValue(envKeys) {
   for (const envKey of envKeys) {
-    if (Object.prototype.hasOwnProperty.call(process.env, envKey)) {
+    if (Object.hasOwn(process.env, envKey)) {
       return process.env[envKey]
     }
   }

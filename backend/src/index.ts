@@ -46,7 +46,8 @@ const logLine = (label: string, value: string, tone: 'info' | 'success' | 'warn'
   } as const
 
   const timestamp = new Date().toISOString()
-  console.log(`${paint(timestamp, 'dim')} ${paint(`[${label}]`, colorByTone[tone])} ${value}`)
+  const logLabel = `[${label}]`
+  console.log(`${paint(timestamp, 'dim')} ${paint(logLabel, colorByTone[tone])} ${value}`)
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
@@ -91,10 +92,10 @@ const runStartupDiagnostics = async (port: number) => {
     }
   }
 
-  if (!healthOk) {
-    logLine('CHECK SUMMARY', 'startup checks completed with warnings', 'warn')
-  } else {
+  if (healthOk) {
     logLine('CHECK SUMMARY', 'all startup checks passed', 'success')
+  } else {
+    logLine('CHECK SUMMARY', 'startup checks completed with warnings', 'warn')
   }
   console.log(paint('='.repeat(72), 'dim'))
 }

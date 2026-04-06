@@ -78,12 +78,16 @@ export const resolveWindowsPowerShellPath = () => {
   const fallbackCandidates = []
 
   if (isNonEmptyString(systemRoot)) {
-    fallbackCandidates.push(path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'))
-    fallbackCandidates.push(path.join(systemRoot, 'SysWOW64', 'WindowsPowerShell', 'v1.0', 'powershell.exe'))
+    fallbackCandidates.push(
+      path.join(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+      path.join(systemRoot, 'SysWOW64', 'WindowsPowerShell', 'v1.0', 'powershell.exe'),
+    )
   }
 
-  fallbackCandidates.push(String.raw`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`)
-  fallbackCandidates.push(String.raw`C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe`)
+  fallbackCandidates.push(
+    String.raw`C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe`,
+    String.raw`C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe`,
+  )
 
   const resolvedPath = resolveFirstExistingPath(fallbackCandidates)
   if (resolvedPath) {
