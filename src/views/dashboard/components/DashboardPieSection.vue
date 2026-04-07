@@ -28,20 +28,23 @@ const pieCards = computed(() => {
       description: '按商品维度统计出库金额占比',
       slices: pieData.value.productPie,
       emptyText: '暂无商品占比数据',
+      valueType: 'amount',
     },
     {
       key: 'customerPie',
       title: '客户金额占比',
-      description: '按客户维度统计出库金额占比',
+      description: '按部门/散客维度统计出库金额占比',
       slices: pieData.value.customerPie,
       emptyText: '暂无客户占比数据',
+      valueType: 'amount',
     },
     {
       key: 'orderTypePie',
-      title: '订单类型占比',
-      description: '散客单与部门单金额占比',
+      title: '散客/部门单数占比',
+      description: '按订单类型统计出库单数占比',
       slices: pieData.value.orderTypePie,
       emptyText: '暂无订单类型占比数据',
+      valueType: 'count',
     },
   ] as const
 })
@@ -49,6 +52,18 @@ const pieCards = computed(() => {
 const formatAmount = (value: string | number | null | undefined): string => {
   const normalizedNumber = Number(value ?? 0)
   return Number.isFinite(normalizedNumber) ? normalizedNumber.toFixed(2) : '0.00'
+}
+
+const formatCount = (value: string | number | null | undefined): string => {
+  const normalizedNumber = Number(value ?? 0)
+  return Number.isFinite(normalizedNumber) ? String(Math.max(0, Math.round(normalizedNumber))) : '0'
+}
+
+const formatSliceValue = (value: string | number | null | undefined, valueType: 'amount' | 'count'): string => {
+  if (valueType === 'count') {
+    return `${formatCount(value)} 单`
+  }
+  return `¥${formatAmount(value)}`
 }
 
 const parseSliceRatio = (value: string | number | null | undefined): number => {
@@ -194,9 +209,13 @@ void loadPieData()
             <div class="relative h-40 w-40 rounded-full" :style="{ background: buildPieGradient(card.slices) }">
               <div class="absolute inset-[24%] flex items-center justify-center rounded-full bg-white text-center dark:bg-slate-900">
                 <div>
-                  <div class="text-xs text-slate-500 dark:text-slate-400">总金额</div>
+                  <div class="text-xs text-slate-500 dark:text-slate-400">{{ card.valueType === 'count' ? '总单数' : '总金额' }}</div>
                   <div class="text-base font-semibold text-slate-800 dark:text-slate-100">
-                    ¥{{ formatAmount(card.slices.reduce((sum, item) => sum + Number(item.value ?? 0), 0)) }}
+                    {{
+                      card.valueType === 'count'
+                        ? `${formatCount(card.slices.reduce((sum, item) => sum + Number(item.value ?? 0), 0))} 单`
+                        : `¥${formatAmount(card.slices.reduce((sum, item) => sum + Number(item.value ?? 0), 0))}`
+                    }}
                   </div>
                 </div>
               </div>
@@ -209,7 +228,7 @@ void loadPieData()
                 <span class="truncate text-slate-700 dark:text-slate-200">{{ slice.label }}</span>
               </div>
               <div class="shrink-0 text-slate-600 dark:text-slate-300">
-                {{ Number(slice.ratio ?? 0).toFixed(2) }}% ｜ ¥{{ formatAmount(slice.value) }}
+                {{ Number(slice.ratio ?? 0).toFixed(2) }}% ｜ {{ formatSliceValue(slice.value, card.valueType) }}
               </div>
             </div>
           </div>

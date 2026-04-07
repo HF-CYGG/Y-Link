@@ -21,6 +21,12 @@ interface DashboardTopProduct {
   totalQty: string
 }
 
+interface DashboardTopCustomer {
+  customerName: string
+  totalAmount: string
+  orderCount: number
+}
+
 interface DashboardStatsResult {
   todayOrderCount: number
   todayOrderAmount: string | number
@@ -29,6 +35,7 @@ interface DashboardStatsResult {
   monthOrderAmount: string | number
   trend7Days: DashboardTrendPoint[]
   topProducts: DashboardTopProduct[]
+  topCustomers: DashboardTopCustomer[]
   recentActivities: DashboardRecentActivity[]
 }
 
@@ -129,6 +136,11 @@ const normalizeAmount = (value: string | number | null | undefined): string => {
 const normalizeQty = (value: string | number | null | undefined): string => {
   const normalizedNumber = Number(value ?? 0)
   return Number.isFinite(normalizedNumber) ? normalizedNumber.toFixed(2) : '0.00'
+}
+
+const normalizeCount = (value: string | number | null | undefined): string => {
+  const normalizedNumber = Number(value ?? 0)
+  return Number.isFinite(normalizedNumber) ? String(Math.max(0, Math.round(normalizedNumber))) : '0'
 }
 
 const normalizeText = (value: string | null | undefined, fallback = ''): string => {
@@ -335,6 +347,25 @@ export const dashboardService = {
       totalQty: normalizeQty(item.totalQty),
     }))
 
+    const customerLabelExpr = `COALESCE(NULLIF(TRIM(order.customerDepartmentName), ''), '散客')`
+    const topCustomersRaw = await orderRepo
+      .createQueryBuilder('order')
+      .select(customerLabelExpr, 'customerName')
+      .addSelect('SUM(order.totalAmount)', 'totalAmount')
+      .addSelect('COUNT(order.id)', 'orderCount')
+      .where('order.createdAt >= :monthStart', { monthStart })
+      .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
+      .groupBy(customerLabelExpr)
+      .orderBy('SUM(order.totalAmount)', 'DESC')
+      .limit(5)
+      .getRawMany<{ customerName: string | null; totalAmount: string | number; orderCount: string | number }>()
+
+    const topCustomers: DashboardTopCustomer[] = topCustomersRaw.map((item) => ({
+      customerName: normalizeText(item.customerName, '散客'),
+      totalAmount: normalizeAmount(item.totalAmount),
+      orderCount: Number(item.orderCount ?? 0),
+    }))
+
     // 近期出库动态：聚合最近 10 条“新建/删除/恢复”事件，供首页时间流展示。
     const recentAuditLogs = await auditLogRepo
       .createQueryBuilder('audit')
@@ -371,6 +402,7 @@ export const dashboardService = {
       monthOrderAmount: normalizeAmount(monthOrderAmountRaw),
       trend7Days,
       topProducts,
+      topCustomers,
       recentActivities,
     }
   },
@@ -589,7 +621,7 @@ export const dashboardService = {
       })),
     )
 
-    const customerLabelExpr = `COALESCE(NULLIF(TRIM(order.customerName), ''), '未填写客户')`
+    const customerLabelExpr = `COALESCE(NULLIF(TRIM(order.customerDepartmentName), ''), '散客')`
     const customerRowsQb = orderRepo
       .createQueryBuilder('order')
       .select(customerLabelExpr, 'label')
@@ -603,8 +635,8 @@ export const dashboardService = {
     const customerRows = await customerRowsQb.getRawMany<{ key: string | null; label: string | null; value: string | number | null }>()
     const customerPie = this.buildPieSlices(
       customerRows.map((row) => ({
-        key: normalizeCustomerName(row.key),
-        label: normalizeCustomerName(row.label),
+        key: normalizeText(row.key, '散客'),
+        label: normalizeText(row.label, '散客'),
         value: Number(row.value ?? 0),
       })),
     )
@@ -612,7 +644,7 @@ export const dashboardService = {
     const orderTypeRowsQb = orderRepo
       .createQueryBuilder('order')
       .select('order.orderType', 'orderType')
-      .addSelect('SUM(order.totalAmount)', 'value')
+      .addSelect('COUNT(order.id)', 'value')
       .where('1=1')
       .groupBy('order.orderType')
     this.applyOrderFilter(orderTypeRowsQb, filter)
@@ -634,6 +666,7 @@ export const dashboardService = {
         label: normalizeOrderTypeLabel(orderType),
         value: orderTypeMap.get(orderType) ?? 0,
       })),
+      normalizeCount,
     )
 
     return {
@@ -657,11 +690,7 @@ export const dashboardService = {
   },
 
   applyCustomerFilter(queryBuilder: { andWhere: (sql: string, parameters?: Record<string, unknown>) => unknown }, customerName: string): void {
-    if (customerName === '未填写客户') {
-      queryBuilder.andWhere(`(order.customerName IS NULL OR TRIM(order.customerName) = '')`)
-      return
-    }
-    queryBuilder.andWhere('order.customerName = :customerName', { customerName })
+    queryBuilder.andWhere(`COALESCE(NULLIF(TRIM(order.customerDepartmentName), ''), '散客') = :customerName`, { customerName })
   },
 
   buildDrilldownOrderRecord(row: {
@@ -690,12 +719,15 @@ export const dashboardService = {
     }
   },
 
-  buildPieSlices(rows: Array<{ key: string; label: string; value: number }>): DashboardPieSlice[] {
+  buildPieSlices(
+    rows: Array<{ key: string; label: string; value: number }>,
+    normalizeValue: (value: number) => string = normalizeAmount,
+  ): DashboardPieSlice[] {
     const totalValue = rows.reduce((sum, row) => sum + (Number.isFinite(row.value) ? row.value : 0), 0)
     return rows.map((row) => ({
       key: row.key,
       label: row.label,
-      value: normalizeAmount(row.value),
+      value: normalizeValue(row.value),
       ratio: normalizeRatio(totalValue > 0 ? (row.value / totalValue) * 100 : 0),
     }))
   }

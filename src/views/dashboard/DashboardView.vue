@@ -25,6 +25,7 @@ const TREND_PADDING_Y = 24
 const activeTrendDate = ref('')
 const DashboardPieSection = defineAsyncComponent(() => import('./components/DashboardPieSection.vue'))
 const TopProductRankCard = defineAsyncComponent(() => import('./components/TopProductRankCard.vue'))
+const TopCustomerRankCard = defineAsyncComponent(() => import('./components/TopCustomerRankCard.vue'))
 
 /**
  * 当前用户可见快捷入口：
@@ -644,6 +645,7 @@ onActivated(() => {
 
         <section class="space-y-6">
           <TopProductRankCard :top-products="stats?.topProducts ?? []" />
+          <TopCustomerRankCard :top-customers="stats?.topCustomers ?? []" />
 
           <div class="apple-card p-5 sm:p-6 xl:p-7">
             <h2 class="mb-4 text-lg font-semibold text-slate-800 dark:text-slate-200">近期出库动态</h2>
