@@ -1,5 +1,5 @@
 <script setup lang="ts"> 
-import { computed, onMounted, reactive, ref } from 'vue' 
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue' 
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus' 
 import { Lock, User, Right } from '@element-plus/icons-vue' 
 import { useRoute, useRouter } from 'vue-router' 
@@ -35,12 +35,17 @@ const submitButtonLabel = computed(() => {
 
 onMounted(() => {
   const root = document.documentElement
+  root.classList.add('route-login')
   delete root.dataset.themeTransition
   delete root.dataset.themeTransitionMode
   root.style.removeProperty('--theme-transition-origin-x')
   root.style.removeProperty('--theme-transition-origin-y')
   root.style.removeProperty('--theme-transition-duration')
   root.style.removeProperty('--theme-transition-easing')
+})
+
+onBeforeUnmount(() => {
+  document.documentElement.classList.remove('route-login')
 })
 
 const handleSubmit = async () => { 
@@ -242,7 +247,6 @@ const handleSubmit = async () => {
   -webkit-mask-image: radial-gradient(circle at center, black 48%, transparent 92%);
   animation: gridDrift 12s linear infinite;
   will-change: background-position;
-  transform: translateZ(0);
 }
 
 :global(.dark) .login-grid-layer {
@@ -264,7 +268,6 @@ const handleSubmit = async () => {
   filter: blur(80px);
   animation: ambientBreathe 10s ease-in-out infinite alternate;
   will-change: transform, opacity;
-  transform-style: preserve-3d;
 }
 
 :global(.dark) .login-ambient-layer {
@@ -303,7 +306,6 @@ const handleSubmit = async () => {
   overflow: hidden; 
   box-shadow: 0 20px 40px rgba(0, 0, 0, 0.04); 
   border: 1px solid var(--border-light); 
-  contain: layout paint;
 } 
 
 :global(.dark) .login-shell { 
@@ -352,7 +354,6 @@ const handleSubmit = async () => {
   display: flex; 
   align-items: center; 
   justify-content: center; 
-  perspective: 1000px; 
 } 
 
 .showcase-glow { 

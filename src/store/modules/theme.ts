@@ -66,15 +66,6 @@ const shouldForceFallbackTransition = () => {
   return document.visibilityState !== 'visible'
 }
 
-const isLoginRouteContext = () => {
-  if (!isClientEnvironment()) {
-    return false
-  }
-
-  const pathname = globalThis.window.location?.pathname ?? ''
-  return pathname === '/login' || pathname.startsWith('/login/')
-}
-
 /**
  * 解析动画触发点：
  * - 鼠标点击时优先使用真实点击坐标；
@@ -123,10 +114,14 @@ const resolveTransitionRadius = ({ x, y }: ThemeTriggerPoint) => {
     return 0
   }
 
+  const w = Math.max(globalThis.window.innerWidth, document.documentElement.clientWidth)
+  const h = Math.max(globalThis.window.innerHeight, document.documentElement.clientHeight)
+
+  // 增加额外的半径缓冲（200px），避免移动端软键盘或浏览器地址栏收缩导致的视口变大而出现裁剪残影
   return Math.hypot(
-    Math.max(x, globalThis.window.innerWidth - x),
-    Math.max(y, globalThis.window.innerHeight - y),
-  )
+    Math.max(x, w - x),
+    Math.max(y, h - y),
+  ) + 200
 }
 
 /**
@@ -364,6 +359,8 @@ export const useThemeStore = defineStore('theme', () => {
     setTransitionGate('view-transition', nextMode, point)
     armTransitionWatchdog()
 
+    let isTransitionSkipped = false
+
     try {
       const transition = startViewTransition(async () => {
         commitThemeMode(nextMode)
@@ -373,19 +370,11 @@ export const useThemeStore = defineStore('theme', () => {
       await transition.ready
 
       const radius = resolveTransitionRadius(point)
-      const isDarkTarget = nextMode === 'dark'
-      const clipPathFrames = isDarkTarget
-        ? [
-            `circle(0px at ${point.x}px ${point.y}px)`,
-            `circle(${radius}px at ${point.x}px ${point.y}px)`,
-          ]
-        : [
-            `circle(${radius}px at ${point.x}px ${point.y}px)`,
-            `circle(0px at ${point.x}px ${point.y}px)`,
-          ]
-      const transitionPseudoElement = isDarkTarget
-        ? '::view-transition-new(root)'
-        : '::view-transition-old(root)'
+      const clipPathFrames = [
+        `circle(0px at ${point.x}px ${point.y}px)`,
+        `circle(${radius}px at ${point.x}px ${point.y}px)`,
+      ]
+
       document.documentElement.animate(
         {
           clipPath: clipPathFrames,
@@ -393,14 +382,22 @@ export const useThemeStore = defineStore('theme', () => {
         {
           duration: THEME_TRANSITION_DURATION_MS,
           easing: THEME_TRANSITION_EASING,
-          pseudoElement: transitionPseudoElement,
+          pseudoElement: '::view-transition-new(root)',
         },
       )
 
       const transitionFinishedTimeout = new Promise<void>((resolve) => {
-        globalThis.window.setTimeout(() => resolve(), THEME_TRANSITION_DURATION_MS + 420)
+        globalThis.window.setTimeout(() => {
+          if (!isTransitionSkipped && transition.skipTransition) {
+            transition.skipTransition()
+            isTransitionSkipped = true
+          }
+          resolve()
+        }, THEME_TRANSITION_DURATION_MS + 420)
       })
+      
       await Promise.race([transition.finished, transitionFinishedTimeout])
+      isTransitionSkipped = true
     } finally {
       finishTransition()
     }
@@ -427,12 +424,6 @@ export const useThemeStore = defineStore('theme', () => {
     lastTriggerPoint.value = point
     clearTransitionGate()
     clearTransitionWatchdog()
-
-    if (isLoginRouteContext()) {
-      commitThemeMode(mode)
-      finishTransition()
-      return
-    }
 
     if (document.visibilityState !== 'visible') {
       commitThemeMode(mode)
