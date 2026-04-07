@@ -141,7 +141,33 @@ body::after {
 }
 
 html[data-theme-transition='fallback'] body::after {
-  content: none;
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 2147483646;
+  background:
+    radial-gradient(
+      circle at var(--theme-transition-origin-x) var(--theme-transition-origin-y),
+      rgba(0, 91, 82, 0.08) 0,
+      rgba(0, 91, 82, 0.04) 64px,
+      rgba(0, 91, 82, 0.02) 140px,
+      transparent 220px
+    );
+  opacity: 0;
+  animation: theme-fallback-pulse var(--theme-transition-duration) var(--theme-transition-easing);
+  animation-fill-mode: none;
+}
+
+html.dark[data-theme-transition='fallback'] body::after {
+  background:
+    radial-gradient(
+      circle at var(--theme-transition-origin-x) var(--theme-transition-origin-y),
+      rgba(123, 224, 213, 0.1) 0,
+      rgba(123, 224, 213, 0.06) 64px,
+      rgba(123, 224, 213, 0.03) 140px,
+      transparent 220px
+    );
 }
 
 /*
@@ -149,14 +175,14 @@ html[data-theme-transition='fallback'] body::after {
  * - 关闭浏览器默认的淡入淡出，改由 JS 精确驱动 clip-path 圆形揭幕；
  * - 根据目标主题切换前后栈顺序，保证明暗切换不会出现双层叠影。
  */
-html[data-theme-transition='view-transition']::view-transition-old(root),
-html[data-theme-transition='view-transition']::view-transition-new(root) {
+::view-transition-old(root),
+::view-transition-new(root) {
   animation: none;
   mix-blend-mode: normal;
 }
 
-html[data-theme-transition='view-transition']::view-transition-group(root),
-html[data-theme-transition='view-transition']::view-transition-image-pair(root) {
+::view-transition-group(root),
+::view-transition-image-pair(root) {
   isolation: isolate;
 }
 
@@ -167,12 +193,36 @@ html[data-theme-transition='view-transition'] *::after {
   animation: none !important;
 }
 
-html[data-theme-transition='view-transition']::view-transition-old(root) {
+html.dark::view-transition-old(root) {
   z-index: 1;
 }
 
-html[data-theme-transition='view-transition']::view-transition-new(root) {
+html.dark::view-transition-new(root) {
   z-index: 2;
+}
+
+html:not(.dark)::view-transition-old(root) {
+  z-index: 2;
+}
+
+html:not(.dark)::view-transition-new(root) {
+  z-index: 1;
+}
+
+@keyframes theme-fallback-pulse {
+  0% {
+    opacity: 0;
+    transform: scale(0.92);
+  }
+
+  18% {
+    opacity: 1;
+  }
+
+  100% {
+    opacity: 0;
+    transform: scale(1.08);
+  }
 }
 
 

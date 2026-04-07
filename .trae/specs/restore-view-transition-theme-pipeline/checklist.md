@@ -1,0 +1,7 @@
+- [x] 已完成 View Transitions API 根因研究，并形成可落地修复结论
+- [x] `runViewTransition` 已实现按目标主题分流：切暗扩散新层、切亮收缩旧层
+- [x] 全局样式已补齐 `::view-transition-*` 层级规则，且不在 scoped 样式中定义
+- [x] 临时强制 fallback / 全局禁用 View Transition 的冲突规则已清理
+- [x] 登录页与主页亮暗切换连续测试通过，无黑幕残留、白屏、弧形残影
+- [x] 桌面端与移动端均保持可接受的动画流畅性与一致性
+- [x] `theme.ts`、`style.css`、`LoginView.vue` 诊断均无错误

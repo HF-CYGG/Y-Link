@@ -1,5 +1,5 @@
 <script setup lang="ts"> 
-import { computed, reactive, ref } from 'vue' 
+import { computed, onMounted, reactive, ref } from 'vue' 
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus' 
 import { Lock, User, Right } from '@element-plus/icons-vue' 
 import { useRoute, useRouter } from 'vue-router' 
@@ -32,6 +32,16 @@ const submitButtonLabel = computed(() => {
   if (submitPhase.value === 'success') return '进入系统' 
   return '继续' 
 }) 
+
+onMounted(() => {
+  const root = document.documentElement
+  delete root.dataset.themeTransition
+  delete root.dataset.themeTransitionMode
+  root.style.removeProperty('--theme-transition-origin-x')
+  root.style.removeProperty('--theme-transition-origin-y')
+  root.style.removeProperty('--theme-transition-duration')
+  root.style.removeProperty('--theme-transition-easing')
+})
 
 const handleSubmit = async () => { 
   const valid = await formRef.value?.validate().catch(() => false) 
@@ -255,18 +265,6 @@ const handleSubmit = async () => {
   animation: ambientBreathe 10s ease-in-out infinite alternate;
   will-change: transform, opacity;
   transform-style: preserve-3d;
-}
-
-html[data-theme-transition='fallback'] .login-page .login-grid-layer,
-html[data-theme-transition='view-transition'] .login-page .login-grid-layer {
-  animation-duration: 20s;
-  opacity: 0.5;
-}
-
-html[data-theme-transition='fallback'] .login-page .login-ambient-layer,
-html[data-theme-transition='view-transition'] .login-page .login-ambient-layer {
-  animation-duration: 14s;
-  opacity: 0.42;
 }
 
 :global(.dark) .login-ambient-layer {
@@ -721,16 +719,6 @@ html[data-theme-transition='view-transition'] .login-page .login-ambient-layer {
 }
 
 @media (max-width: 900px) { 
-  html[data-theme-transition='fallback'] .login-page .login-grid-layer,
-  html[data-theme-transition='view-transition'] .login-page .login-grid-layer {
-    opacity: 0.28;
-  }
-
-  html[data-theme-transition='fallback'] .login-page .login-ambient-layer,
-  html[data-theme-transition='view-transition'] .login-page .login-ambient-layer {
-    opacity: 0.2;
-  }
-
   .visual-panel { 
     display: none; 
   } 

@@ -46,7 +46,6 @@ type DocumentWithViewTransition = Document & {
 const THEME_STORAGE_KEY = 'y-link-theme-mode'
 export const THEME_TRANSITION_DURATION_MS = 460
 const THEME_TRANSITION_EASING = 'cubic-bezier(0.22, 1, 0.36, 1)'
-const FORCE_FALLBACK_THEME_TRANSITION = true
 
 /**
  * 判定是否处于浏览器端：
@@ -56,27 +55,7 @@ const FORCE_FALLBACK_THEME_TRANSITION = true
 const isClientEnvironment = () => globalThis.window !== undefined && globalThis.document !== undefined
 
 /**
- * 移动端场景识别：
- * - 移动端浏览器对 View Transition 的实现差异较大，存在过渡层残留风险；
- * - 在手机/平板触控优先环境中统一降级到 fallback，确保主题切换稳定。
- */
-const isMobileThemeTransitionContext = () => {
-  if (!isClientEnvironment()) {
-    return false
-  }
-
-  const userAgent = globalThis.navigator?.userAgent ?? ''
-  const isTouchLikeAgent = /Android|iPhone|iPad|iPod|Mobile|HarmonyOS|MiuiBrowser/i.test(userAgent)
-  const isNarrowViewport = globalThis.window.matchMedia('(max-width: 1024px)').matches
-  const hasFinePointer = globalThis.window.matchMedia('(pointer: fine)').matches
-  const hasTouchEvent = 'ontouchstart' in globalThis.window
-  const hasTouchPoints = (globalThis.navigator?.maxTouchPoints ?? 0) > 0
-  return isTouchLikeAgent || hasTouchEvent || hasTouchPoints || (isNarrowViewport && !hasFinePointer)
-}
-
-/**
  * 是否应强制走降级切换：
- * - 移动端统一强制 fallback，规避 View Transition 在触控浏览器上的截图层残留；
  * - 页面不可见时不执行动画，避免后台恢复后门控残留。
  */
 const shouldForceFallbackTransition = () => {
@@ -84,7 +63,16 @@ const shouldForceFallbackTransition = () => {
     return false
   }
 
-  return FORCE_FALLBACK_THEME_TRANSITION || isMobileThemeTransitionContext() || document.visibilityState !== 'visible'
+  return document.visibilityState !== 'visible'
+}
+
+const isLoginRouteContext = () => {
+  if (!isClientEnvironment()) {
+    return false
+  }
+
+  const pathname = globalThis.window.location?.pathname ?? ''
+  return pathname === '/login' || pathname.startsWith('/login/')
 }
 
 /**
@@ -135,13 +123,10 @@ const resolveTransitionRadius = ({ x, y }: ThemeTriggerPoint) => {
     return 0
   }
 
-  const baseRadius = Math.hypot(
+  return Math.hypot(
     Math.max(x, globalThis.window.innerWidth - x),
     Math.max(y, globalThis.window.innerHeight - y),
   )
-
-  // 视口高度在移动端地址栏伸缩时会瞬时变化，额外预留半径避免圆形揭幕漏角。
-  return baseRadius + 180
 }
 
 /**
@@ -388,10 +373,19 @@ export const useThemeStore = defineStore('theme', () => {
       await transition.ready
 
       const radius = resolveTransitionRadius(point)
-      const clipPathFrames = [
-        `circle(0px at ${point.x}px ${point.y}px)`,
-        `circle(${radius}px at ${point.x}px ${point.y}px)`,
-      ]
+      const isDarkTarget = nextMode === 'dark'
+      const clipPathFrames = isDarkTarget
+        ? [
+            `circle(0px at ${point.x}px ${point.y}px)`,
+            `circle(${radius}px at ${point.x}px ${point.y}px)`,
+          ]
+        : [
+            `circle(${radius}px at ${point.x}px ${point.y}px)`,
+            `circle(0px at ${point.x}px ${point.y}px)`,
+          ]
+      const transitionPseudoElement = isDarkTarget
+        ? '::view-transition-new(root)'
+        : '::view-transition-old(root)'
       document.documentElement.animate(
         {
           clipPath: clipPathFrames,
@@ -399,7 +393,7 @@ export const useThemeStore = defineStore('theme', () => {
         {
           duration: THEME_TRANSITION_DURATION_MS,
           easing: THEME_TRANSITION_EASING,
-          pseudoElement: '::view-transition-new(root)',
+          pseudoElement: transitionPseudoElement,
         },
       )
 
@@ -433,6 +427,12 @@ export const useThemeStore = defineStore('theme', () => {
     lastTriggerPoint.value = point
     clearTransitionGate()
     clearTransitionWatchdog()
+
+    if (isLoginRouteContext()) {
+      commitThemeMode(mode)
+      finishTransition()
+      return
+    }
 
     if (document.visibilityState !== 'visible') {
       commitThemeMode(mode)
