@@ -4,7 +4,6 @@ import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'elem
 import { useRouter } from 'vue-router'
 import { computed, reactive, ref, useAttrs } from 'vue'
 import QuoteBanner from '@/layout/components/QuoteBanner.vue'
-import ThemeToggle from '@/layout/components/ThemeToggle.vue'
 import { changePassword, ROLE_LABEL_MAP } from '@/api/modules/auth'
 import { useAppStore, useAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
@@ -198,7 +197,6 @@ const handleLogout = async () => {
       >
         平板布局
       </span>
-      <ThemeToggle />
 
       <el-dropdown trigger="click" placement="bottom-end">
         <button

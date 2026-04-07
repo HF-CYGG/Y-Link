@@ -46,6 +46,8 @@ type DocumentWithViewTransition = Document & {
 const THEME_STORAGE_KEY = 'y-link-theme-mode'
 export const THEME_TRANSITION_DURATION_MS = 460
 const THEME_TRANSITION_EASING = 'cubic-bezier(0.22, 1, 0.36, 1)'
+const THEME_SWITCH_ENABLED = false
+const THEME_LOCKED_MODE: ThemeMode = 'light'
 
 /**
  * 判定是否处于浏览器端：
@@ -410,9 +412,17 @@ export const useThemeStore = defineStore('theme', () => {
    */
   const setThemeMode = async (mode: ThemeMode, event?: MouseEvent) => {
     if (!isClientEnvironment()) {
-      if (themeMode.value !== mode) {
-        commitThemeMode(mode)
+      if (themeMode.value !== THEME_LOCKED_MODE) {
+        commitThemeMode(THEME_LOCKED_MODE)
       }
+      return
+    }
+
+    if (!THEME_SWITCH_ENABLED) {
+      if (themeMode.value !== THEME_LOCKED_MODE) {
+        commitThemeMode(THEME_LOCKED_MODE)
+      }
+      finishTransition()
       return
     }
 
@@ -453,7 +463,7 @@ export const useThemeStore = defineStore('theme', () => {
    * - 组件无需关心动画能力与降级策略。
    */
   const toggleTheme = async (event?: MouseEvent) => {
-    await setThemeMode(isDark.value ? 'light' : 'dark', event)
+    await setThemeMode(THEME_LOCKED_MODE, event)
   }
 
   /**
@@ -466,6 +476,10 @@ export const useThemeStore = defineStore('theme', () => {
     // 兜底清理上次异常中断遗留的过渡门控，避免首屏出现暗层残留。
     clearTransitionGate()
     clearTransitionWatchdog()
+    // 临时下线主题切换：初始化时统一锁定为亮色，避免读取历史暗色缓存导致界面不一致。
+    if (themeMode.value !== THEME_LOCKED_MODE) {
+      commitThemeMode(THEME_LOCKED_MODE)
+    }
 
     if (isClientEnvironment() && !lifecycleGuardBound) {
       lifecycleGuardBound = true

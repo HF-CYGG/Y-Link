@@ -3,7 +3,6 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus' 
 import { Lock, User, Right } from '@element-plus/icons-vue' 
 import { useRoute, useRouter } from 'vue-router' 
-import ThemeToggle from '@/layout/components/ThemeToggle.vue' 
 import { resolveSafeRedirect } from '@/router' 
 import { useAuthStore } from '@/store' 
 import { extractErrorMessage } from '@/utils/error' 
@@ -135,9 +134,7 @@ const handleSubmit = async () => {
       </aside> 
 
       <section class="form-panel"> 
-        <div class="action-top"> 
-          <ThemeToggle /> 
-        </div> 
+        <div class="action-top"></div> 
 
         <div class="form-content"> 
           <div class="form-header"> 
