@@ -14,6 +14,8 @@ export const PERMISSION_CODES = [
   'products:manage',
   'tags:view',
   'tags:manage',
+  'system_configs:view',
+  'system_configs:update',
   'users:view',
   'users:create',
   'users:update',
@@ -40,6 +42,8 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, PermissionCode[]> = {
     'products:manage',
     'tags:view',
     'tags:manage',
+    'system_configs:view',
+    'system_configs:update',
     'users:view',
     'users:create',
     'users:update',
@@ -48,7 +52,16 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, PermissionCode[]> = {
     'audit_logs:view',
     'audit_logs:export',
   ],
-  operator: ['dashboard:view', 'orders:create', 'orders:view', 'products:view', 'products:manage', 'tags:view', 'tags:manage'],
+  operator: [
+    'dashboard:view',
+    'orders:create',
+    'orders:view',
+    'products:view',
+    'products:manage',
+    'tags:view',
+    'tags:manage',
+    'system_configs:view',
+  ],
 }
 
 /**

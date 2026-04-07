@@ -37,6 +37,80 @@ export interface DashboardRecentActivity {
   createdAt: string
 }
 
+export interface DashboardDateFilterQuery {
+  dateRange?: [string, string] | null
+  orderType?: 'department' | 'walkin'
+}
+
+export interface DashboardDrilldownOrderRecord {
+  orderId: string
+  showNo: string
+  orderType: 'department' | 'walkin'
+  createdAt: string
+  customerName: string
+  customerDepartmentName: string
+  issuerName: string
+  qty: string | number
+  amount: string | number
+}
+
+export interface ProductDrilldownResult {
+  productId: string
+  productName: string
+  totalQty: string | number
+  totalAmount: string | number
+  orderCount: number
+  records: DashboardDrilldownOrderRecord[]
+}
+
+export interface CustomerDrilldownResult {
+  customerName: string
+  totalQty: string | number
+  totalAmount: string | number
+  orderCount: number
+  records: DashboardDrilldownOrderRecord[]
+}
+
+export interface TagAggregateResult {
+  tagId: string
+  tagName: string
+  totalQuantity: string | number
+  totalAmount: string | number
+  orderCount: number
+  productCount: number
+}
+
+export interface DashboardPieSlice {
+  key: string
+  label: string
+  value: string | number
+  ratio: string | number
+}
+
+export interface DashboardPieDataResult {
+  productPie: DashboardPieSlice[]
+  customerPie: DashboardPieSlice[]
+  orderTypePie: DashboardPieSlice[]
+}
+
+const buildDashboardDateFilterParams = (query: DashboardDateFilterQuery) => {
+  const params: Record<string, string> = {}
+  if (query.orderType) {
+    params.orderType = query.orderType
+  }
+  if (query.dateRange?.length === 2) {
+    const [startDate, endDate] = query.dateRange
+    if (startDate) {
+      params.startDate = startDate
+    }
+    if (endDate) {
+      params.endDate = endDate
+    }
+    params.dateRange = `${startDate},${endDate}`
+  }
+  return params
+}
+
 /**
  * 获取控制台统计数据
  */
@@ -45,5 +119,62 @@ export const getDashboardStats = (requestConfig: RequestConfig = {}) => {
     ...requestConfig,
     url: '/dashboard/stats',
     method: 'GET',
+  })
+}
+
+export const getProductDrilldown = (
+  productId: string,
+  query: DashboardDateFilterQuery = {},
+  requestConfig: RequestConfig = {},
+) => {
+  return request<ProductDrilldownResult>({
+    ...requestConfig,
+    url: '/dashboard/drilldown/products',
+    method: 'GET',
+    params: {
+      productId,
+      ...buildDashboardDateFilterParams(query),
+    },
+  })
+}
+
+export const getCustomerDrilldown = (
+  customerName: string,
+  query: DashboardDateFilterQuery = {},
+  requestConfig: RequestConfig = {},
+) => {
+  return request<CustomerDrilldownResult>({
+    ...requestConfig,
+    url: '/dashboard/drilldown/customers',
+    method: 'GET',
+    params: {
+      customerName,
+      ...buildDashboardDateFilterParams(query),
+    },
+  })
+}
+
+export const getTagAggregate = (
+  tagId: string,
+  query: DashboardDateFilterQuery = {},
+  requestConfig: RequestConfig = {},
+) => {
+  return request<TagAggregateResult>({
+    ...requestConfig,
+    url: '/dashboard/tags/aggregate',
+    method: 'GET',
+    params: {
+      tagId,
+      ...buildDashboardDateFilterParams(query),
+    },
+  })
+}
+
+export const getDashboardPieData = (query: DashboardDateFilterQuery = {}, requestConfig: RequestConfig = {}) => {
+  return request<DashboardPieDataResult>({
+    ...requestConfig,
+    url: '/dashboard/pie',
+    method: 'GET',
+    params: buildDashboardDateFilterParams(query),
   })
 }

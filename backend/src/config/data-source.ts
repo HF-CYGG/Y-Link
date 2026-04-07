@@ -10,6 +10,7 @@ import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity
 import { SysUser } from '../entities/sys-user.entity.js'
 import { SysUserSession } from '../entities/sys-user-session.entity.js'
 import { SysAuditLog } from '../entities/sys-audit-log.entity.js'
+import { SystemConfig } from '../entities/system-config.entity.js'
 
 const entities = [
   BaseProduct,
@@ -20,6 +21,7 @@ const entities = [
   SysUser,
   SysUserSession,
   SysAuditLog,
+  SystemConfig,
 ]
 
 function createDataSourceOptions(): DataSourceOptions {

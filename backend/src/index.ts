@@ -3,6 +3,7 @@ import { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } from './conf
 import { AppDataSource } from './config/data-source.js'
 import { env, envLoadContext } from './config/env.js'
 import { authService } from './services/auth.service.js'
+import { systemConfigService } from './services/system-config.service.js'
 
 const colorPalette = {
   reset: '\u001B[0m',
@@ -111,6 +112,8 @@ async function bootstrap(): Promise<void> {
   logLine('SCHEMA', `action=${schemaInitResult.action} reason=${schemaInitResult.reason}`)
   logLine('STEP', 'ensure default admin')
   const adminBootstrap = await authService.ensureDefaultAdmin()
+  logLine('STEP', 'ensure default system configs')
+  const configBootstrap = await systemConfigService.ensureDefaultConfigs()
 
   const app = createApp()
   app.listen(env.PORT, () => {
@@ -132,6 +135,11 @@ async function bootstrap(): Promise<void> {
       'ADMIN BOOTSTRAP',
       `passwordSource=${adminBootstrap.usingDefaultBootstrapPassword ? 'built-in-default' : 'custom-env'}`,
       adminBootstrap.usingDefaultBootstrapPassword ? 'warn' : 'success',
+    )
+    logLine(
+      'SYSTEM CONFIG',
+      `inserted=${configBootstrap.insertedCount}/${configBootstrap.totalCount}`,
+      configBootstrap.insertedCount > 0 ? 'success' : 'info',
     )
     if (adminBootstrap.initialized) {
       logLine(

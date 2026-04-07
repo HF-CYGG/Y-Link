@@ -1,8 +1,11 @@
 import { AppDataSource } from '../config/data-source.js'
+import { BaseTag } from '../entities/base-tag.entity.js'
 import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
+import { RelProductTag } from '../entities/rel-product-tag.entity.js'
 import { SysAuditLog } from '../entities/sys-audit-log.entity.js'
+import { BizError } from '../utils/errors.js'
 
 interface DashboardTrendPoint {
   date: string
@@ -42,6 +45,71 @@ interface DashboardRecentActivity {
 }
 
 const DATE_MS = 24 * 60 * 60 * 1000
+const ORDER_TYPE_VALUES = ['department', 'walkin'] as const
+type DashboardOrderType = (typeof ORDER_TYPE_VALUES)[number]
+
+interface DashboardFilterInput {
+  startDate?: string
+  endDate?: string
+  orderType?: string
+}
+
+interface DashboardResolvedFilter {
+  startAt?: Date
+  endExclusive?: Date
+  orderType?: DashboardOrderType
+}
+
+interface DashboardDrilldownOrderRecord {
+  orderId: string
+  showNo: string
+  orderType: DashboardOrderType
+  createdAt: string
+  customerName: string
+  customerDepartmentName: string
+  issuerName: string
+  qty: string
+  amount: string
+}
+
+interface DashboardProductRankDrilldownResult {
+  productId: string
+  productName: string
+  totalQty: string
+  totalAmount: string
+  orderCount: number
+  records: DashboardDrilldownOrderRecord[]
+}
+
+interface DashboardCustomerRankDrilldownResult {
+  customerName: string
+  totalQty: string
+  totalAmount: string
+  orderCount: number
+  records: DashboardDrilldownOrderRecord[]
+}
+
+interface DashboardTagAggregateResult {
+  tagId: string
+  tagName: string
+  totalQuantity: string
+  totalAmount: string
+  orderCount: number
+  productCount: number
+}
+
+interface DashboardPieSlice {
+  key: string
+  label: string
+  value: string
+  ratio: string
+}
+
+interface DashboardPiePayload {
+  productPie: DashboardPieSlice[]
+  customerPie: DashboardPieSlice[]
+  orderTypePie: DashboardPieSlice[]
+}
 
 /**
  * 归一化金额文本：
@@ -66,6 +134,72 @@ const normalizeQty = (value: string | number | null | undefined): string => {
 const normalizeText = (value: string | null | undefined, fallback = ''): string => {
   const normalizedText = String(value ?? '').trim()
   return normalizedText || fallback
+}
+
+const normalizeRatio = (value: number): string => {
+  if (!Number.isFinite(value) || value <= 0) {
+    return '0.00'
+  }
+  return value.toFixed(2)
+}
+
+const normalizeOrderTypeLabel = (orderType: DashboardOrderType): string => {
+  if (orderType === 'department') {
+    return '部门单'
+  }
+  return '散客单'
+}
+
+const normalizeCustomerName = (value: string | null | undefined): string => {
+  const normalized = String(value ?? '').trim()
+  return normalized || '未填写客户'
+}
+
+const parseDateOnlyToStart = (value: string, label: string): Date => {
+  const normalized = value.trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    throw new BizError(`${label}格式不正确，应为 YYYY-MM-DD`, 400)
+  }
+  const parsed = new Date(`${normalized}T00:00:00`)
+  if (Number.isNaN(parsed.getTime())) {
+    throw new BizError(`${label}格式不正确，应为 YYYY-MM-DD`, 400)
+  }
+  return parsed
+}
+
+const resolveDashboardFilter = (input: DashboardFilterInput): DashboardResolvedFilter => {
+  const normalizedStartDate = typeof input.startDate === 'string' ? input.startDate.trim() : ''
+  const normalizedEndDate = typeof input.endDate === 'string' ? input.endDate.trim() : ''
+
+  if ((normalizedStartDate && !normalizedEndDate) || (!normalizedStartDate && normalizedEndDate)) {
+    throw new BizError('dateRange 需同时提供开始日期与结束日期', 400)
+  }
+
+  let startAt: Date | undefined
+  let endExclusive: Date | undefined
+  if (normalizedStartDate && normalizedEndDate) {
+    startAt = parseDateOnlyToStart(normalizedStartDate, '开始日期')
+    const endAt = parseDateOnlyToStart(normalizedEndDate, '结束日期')
+    if (startAt.getTime() > endAt.getTime()) {
+      throw new BizError('dateRange 不合法：开始日期不能晚于结束日期', 400)
+    }
+    endExclusive = new Date(endAt.getTime() + DATE_MS)
+  }
+
+  let orderType: DashboardOrderType | undefined
+  if (typeof input.orderType === 'string' && input.orderType.trim()) {
+    const normalizedOrderType = input.orderType.trim().toLowerCase()
+    if (!ORDER_TYPE_VALUES.includes(normalizedOrderType as DashboardOrderType)) {
+      throw new BizError('orderType 非法，仅支持 department 或 walkin', 400)
+    }
+    orderType = normalizedOrderType as DashboardOrderType
+  }
+
+  return {
+    startAt,
+    endExclusive,
+    orderType,
+  }
 }
 
 /**
@@ -239,5 +373,330 @@ export const dashboardService = {
       topProducts,
       recentActivities,
     }
+  },
+
+  async getProductRankDrilldown(
+    input: { productId: string } & DashboardFilterInput,
+  ): Promise<DashboardProductRankDrilldownResult> {
+    const productId = String(input.productId ?? '').trim()
+    if (!productId) {
+      throw new BizError('productId 不能为空', 400)
+    }
+
+    const filter = resolveDashboardFilter(input)
+    const orderItemRepo = AppDataSource.getRepository(BizOutboundOrderItem)
+    const productRepo = AppDataSource.getRepository(BaseProduct)
+
+    const summaryQb = orderItemRepo
+      .createQueryBuilder('item')
+      .innerJoin(BizOutboundOrder, 'order', 'order.id = item.orderId')
+      .select('SUM(item.qty)', 'totalQty')
+      .addSelect('SUM(item.lineAmount)', 'totalAmount')
+      .addSelect('COUNT(DISTINCT order.id)', 'orderCount')
+      .addSelect('MAX(item.productNameSnapshot)', 'productName')
+      .where('item.productId = :productId', { productId })
+
+    this.applyOrderFilter(summaryQb, filter)
+    const summaryRaw = await summaryQb.getRawOne<{
+      totalQty?: string | number | null
+      totalAmount?: string | number | null
+      orderCount?: string | number | null
+      productName?: string | null
+    }>()
+
+    const detailQb = orderItemRepo
+      .createQueryBuilder('item')
+      .innerJoin(BizOutboundOrder, 'order', 'order.id = item.orderId')
+      .select('order.id', 'orderId')
+      .addSelect('order.showNo', 'showNo')
+      .addSelect('order.orderType', 'orderType')
+      .addSelect('order.createdAt', 'createdAt')
+      .addSelect('order.customerName', 'customerName')
+      .addSelect('order.customerDepartmentName', 'customerDepartmentName')
+      .addSelect('order.issuerName', 'issuerName')
+      .addSelect('SUM(item.qty)', 'qty')
+      .addSelect('SUM(item.lineAmount)', 'amount')
+      .where('item.productId = :productId', { productId })
+      .groupBy('order.id')
+      .addGroupBy('order.showNo')
+      .addGroupBy('order.orderType')
+      .addGroupBy('order.createdAt')
+      .addGroupBy('order.customerName')
+      .addGroupBy('order.customerDepartmentName')
+      .addGroupBy('order.issuerName')
+      .orderBy('order.createdAt', 'DESC')
+      .limit(100)
+
+    this.applyOrderFilter(detailQb, filter)
+    const detailRows = await detailQb.getRawMany<{
+      orderId: string | number
+      showNo: string | null
+      orderType: string | null
+      createdAt: Date | string
+      customerName: string | null
+      customerDepartmentName: string | null
+      issuerName: string | null
+      qty: string | number | null
+      amount: string | number | null
+    }>()
+
+    const productEntity = await productRepo.findOne({ where: { id: productId } })
+    const productName =
+      normalizeText(summaryRaw?.productName, '') ||
+      normalizeText(productEntity?.productName, '') ||
+      '未命名文创'
+
+    return {
+      productId,
+      productName,
+      totalQty: normalizeQty(summaryRaw?.totalQty),
+      totalAmount: normalizeAmount(summaryRaw?.totalAmount),
+      orderCount: Number(summaryRaw?.orderCount ?? 0),
+      records: detailRows.map((row) => this.buildDrilldownOrderRecord(row)),
+    }
+  },
+
+  async getCustomerRankDrilldown(
+    input: { customerName: string } & DashboardFilterInput,
+  ): Promise<DashboardCustomerRankDrilldownResult> {
+    const customerName = String(input.customerName ?? '').trim()
+    if (!customerName) {
+      throw new BizError('customerName 不能为空', 400)
+    }
+
+    const filter = resolveDashboardFilter(input)
+    const orderRepo = AppDataSource.getRepository(BizOutboundOrder)
+
+    const summaryQb = orderRepo
+      .createQueryBuilder('order')
+      .select('SUM(order.totalQty)', 'totalQty')
+      .addSelect('SUM(order.totalAmount)', 'totalAmount')
+      .addSelect('COUNT(order.id)', 'orderCount')
+      .where('1=1')
+
+    this.applyCustomerFilter(summaryQb, customerName)
+    this.applyOrderFilter(summaryQb, filter)
+    const summaryRaw = await summaryQb.getRawOne<{
+      totalQty?: string | number | null
+      totalAmount?: string | number | null
+      orderCount?: string | number | null
+    }>()
+
+    const detailQb = orderRepo
+      .createQueryBuilder('order')
+      .select('order.id', 'orderId')
+      .addSelect('order.showNo', 'showNo')
+      .addSelect('order.orderType', 'orderType')
+      .addSelect('order.createdAt', 'createdAt')
+      .addSelect('order.customerName', 'customerName')
+      .addSelect('order.customerDepartmentName', 'customerDepartmentName')
+      .addSelect('order.issuerName', 'issuerName')
+      .addSelect('order.totalQty', 'qty')
+      .addSelect('order.totalAmount', 'amount')
+      .where('1=1')
+      .orderBy('order.createdAt', 'DESC')
+      .limit(100)
+
+    this.applyCustomerFilter(detailQb, customerName)
+    this.applyOrderFilter(detailQb, filter)
+    const detailRows = await detailQb.getRawMany<{
+      orderId: string | number
+      showNo: string | null
+      orderType: string | null
+      createdAt: Date | string
+      customerName: string | null
+      customerDepartmentName: string | null
+      issuerName: string | null
+      qty: string | number | null
+      amount: string | number | null
+    }>()
+
+    return {
+      customerName,
+      totalQty: normalizeQty(summaryRaw?.totalQty),
+      totalAmount: normalizeAmount(summaryRaw?.totalAmount),
+      orderCount: Number(summaryRaw?.orderCount ?? 0),
+      records: detailRows.map((row) => this.buildDrilldownOrderRecord(row)),
+    }
+  },
+
+  async getTagAggregate(input: { tagId: string } & DashboardFilterInput): Promise<DashboardTagAggregateResult> {
+    const tagId = String(input.tagId ?? '').trim()
+    if (!tagId) {
+      throw new BizError('tagId 不能为空', 400)
+    }
+
+    const filter = resolveDashboardFilter(input)
+    const tagRepo = AppDataSource.getRepository(BaseTag)
+    const relationRepo = AppDataSource.getRepository(RelProductTag)
+
+    const tag = await tagRepo.findOne({ where: { id: tagId } })
+    if (!tag) {
+      throw new BizError('标签不存在', 404)
+    }
+
+    const aggregateQb = relationRepo
+      .createQueryBuilder('relation')
+      .innerJoin(BizOutboundOrderItem, 'item', 'item.productId = relation.productId')
+      .innerJoin(BizOutboundOrder, 'order', 'order.id = item.orderId')
+      .select('SUM(item.qty)', 'totalQuantity')
+      .addSelect('SUM(item.lineAmount)', 'totalAmount')
+      .addSelect('COUNT(DISTINCT order.id)', 'orderCount')
+      .addSelect('COUNT(DISTINCT item.productId)', 'productCount')
+      .where('relation.tagId = :tagId', { tagId })
+
+    this.applyOrderFilter(aggregateQb, filter)
+    const aggregateRaw = await aggregateQb.getRawOne<{
+      totalQuantity?: string | number | null
+      totalAmount?: string | number | null
+      orderCount?: string | number | null
+      productCount?: string | number | null
+    }>()
+
+    return {
+      tagId: String(tag.id),
+      tagName: tag.tagName,
+      totalQuantity: normalizeQty(aggregateRaw?.totalQuantity),
+      totalAmount: normalizeAmount(aggregateRaw?.totalAmount),
+      orderCount: Number(aggregateRaw?.orderCount ?? 0),
+      productCount: Number(aggregateRaw?.productCount ?? 0),
+    }
+  },
+
+  async getDashboardPieData(input: DashboardFilterInput): Promise<DashboardPiePayload> {
+    const filter = resolveDashboardFilter(input)
+    const orderRepo = AppDataSource.getRepository(BizOutboundOrder)
+    const itemRepo = AppDataSource.getRepository(BizOutboundOrderItem)
+
+    const productRowsQb = itemRepo
+      .createQueryBuilder('item')
+      .innerJoin(BizOutboundOrder, 'order', 'order.id = item.orderId')
+      .select('item.productId', 'key')
+      .addSelect('item.productNameSnapshot', 'label')
+      .addSelect('SUM(item.lineAmount)', 'value')
+      .where('1=1')
+      .groupBy('item.productId')
+      .addGroupBy('item.productNameSnapshot')
+      .orderBy('SUM(item.lineAmount)', 'DESC')
+      .limit(8)
+    this.applyOrderFilter(productRowsQb, filter)
+    const productRows = await productRowsQb.getRawMany<{ key: string | number; label: string | null; value: string | number | null }>()
+    const productPie = this.buildPieSlices(
+      productRows.map((row) => ({
+        key: String(row.key ?? '').trim(),
+        label: normalizeText(row.label, '未命名文创'),
+        value: Number(row.value ?? 0),
+      })),
+    )
+
+    const customerLabelExpr = `COALESCE(NULLIF(TRIM(order.customerName), ''), '未填写客户')`
+    const customerRowsQb = orderRepo
+      .createQueryBuilder('order')
+      .select(customerLabelExpr, 'label')
+      .addSelect(customerLabelExpr, 'key')
+      .addSelect('SUM(order.totalAmount)', 'value')
+      .where('1=1')
+      .groupBy(customerLabelExpr)
+      .orderBy('SUM(order.totalAmount)', 'DESC')
+      .limit(8)
+    this.applyOrderFilter(customerRowsQb, filter)
+    const customerRows = await customerRowsQb.getRawMany<{ key: string | null; label: string | null; value: string | number | null }>()
+    const customerPie = this.buildPieSlices(
+      customerRows.map((row) => ({
+        key: normalizeCustomerName(row.key),
+        label: normalizeCustomerName(row.label),
+        value: Number(row.value ?? 0),
+      })),
+    )
+
+    const orderTypeRowsQb = orderRepo
+      .createQueryBuilder('order')
+      .select('order.orderType', 'orderType')
+      .addSelect('SUM(order.totalAmount)', 'value')
+      .where('1=1')
+      .groupBy('order.orderType')
+    this.applyOrderFilter(orderTypeRowsQb, filter)
+    const orderTypeRows = await orderTypeRowsQb.getRawMany<{ orderType: string | null; value: string | number | null }>()
+    const orderTypeMap = new Map<DashboardOrderType, number>()
+    ORDER_TYPE_VALUES.forEach((orderType) => {
+      orderTypeMap.set(orderType, 0)
+    })
+    orderTypeRows.forEach((row) => {
+      const orderType = String(row.orderType ?? '').trim().toLowerCase()
+      if (!ORDER_TYPE_VALUES.includes(orderType as DashboardOrderType)) {
+        return
+      }
+      orderTypeMap.set(orderType as DashboardOrderType, Number(row.value ?? 0))
+    })
+    const orderTypePie = this.buildPieSlices(
+      ORDER_TYPE_VALUES.map((orderType) => ({
+        key: orderType,
+        label: normalizeOrderTypeLabel(orderType),
+        value: orderTypeMap.get(orderType) ?? 0,
+      })),
+    )
+
+    return {
+      productPie,
+      customerPie,
+      orderTypePie,
+    }
+  },
+
+  applyOrderFilter(queryBuilder: { andWhere: (sql: string, parameters?: Record<string, unknown>) => unknown }, filter: DashboardResolvedFilter): void {
+    queryBuilder.andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
+    if (filter.startAt) {
+      queryBuilder.andWhere('order.createdAt >= :startAt', { startAt: filter.startAt })
+    }
+    if (filter.endExclusive) {
+      queryBuilder.andWhere('order.createdAt < :endExclusive', { endExclusive: filter.endExclusive })
+    }
+    if (filter.orderType) {
+      queryBuilder.andWhere('order.orderType = :orderType', { orderType: filter.orderType })
+    }
+  },
+
+  applyCustomerFilter(queryBuilder: { andWhere: (sql: string, parameters?: Record<string, unknown>) => unknown }, customerName: string): void {
+    if (customerName === '未填写客户') {
+      queryBuilder.andWhere(`(order.customerName IS NULL OR TRIM(order.customerName) = '')`)
+      return
+    }
+    queryBuilder.andWhere('order.customerName = :customerName', { customerName })
+  },
+
+  buildDrilldownOrderRecord(row: {
+    orderId: string | number
+    showNo: string | null
+    orderType: string | null
+    createdAt: Date | string
+    customerName: string | null
+    customerDepartmentName: string | null
+    issuerName: string | null
+    qty: string | number | null
+    amount: string | number | null
+  }): DashboardDrilldownOrderRecord {
+    const normalizedOrderType = String(row.orderType ?? '').trim().toLowerCase()
+    const orderType: DashboardOrderType = normalizedOrderType === 'department' ? 'department' : 'walkin'
+    return {
+      orderId: String(row.orderId ?? '').trim(),
+      showNo: normalizeText(row.showNo, '-'),
+      orderType,
+      createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : String(row.createdAt),
+      customerName: normalizeCustomerName(row.customerName),
+      customerDepartmentName: normalizeText(row.customerDepartmentName, '-'),
+      issuerName: normalizeText(row.issuerName, '-'),
+      qty: normalizeQty(row.qty),
+      amount: normalizeAmount(row.amount),
+    }
+  },
+
+  buildPieSlices(rows: Array<{ key: string; label: string; value: number }>): DashboardPieSlice[] {
+    const totalValue = rows.reduce((sum, row) => sum + (Number.isFinite(row.value) ? row.value : 0), 0)
+    return rows.map((row) => ({
+      key: row.key,
+      label: row.label,
+      value: normalizeAmount(row.value),
+      ratio: normalizeRatio(totalValue > 0 ? (row.value / totalValue) * 100 : 0),
+    }))
   }
 }

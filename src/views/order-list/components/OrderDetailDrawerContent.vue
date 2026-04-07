@@ -25,6 +25,10 @@ const formatAmount = (value: string | number | null | undefined) => {
   const normalizedValue = Number(value ?? 0)
   return Number.isFinite(normalizedValue) ? normalizedValue.toFixed(2) : '0.00'
 }
+
+const formatOrderType = (value: OrderDetailResult['orderType']) => {
+  return value === 'department' ? '部门单' : '散客单'
+}
 </script>
 
 <template>
@@ -40,8 +44,13 @@ const formatAmount = (value: string | number | null | undefined) => {
     </div>
     <el-descriptions :column="isPhone ? 1 : 2" border size="small">
       <el-descriptions-item label="业务单号">{{ order.showNo }}</el-descriptions-item>
+      <el-descriptions-item label="订单类型">{{ formatOrderType(order.orderType) }}</el-descriptions-item>
       <el-descriptions-item label="开单时间">{{ dayjs(order.createdAt).format('YYYY-MM-DD HH:mm:ss') }}</el-descriptions-item>
       <el-descriptions-item label="客户名称">{{ order.customerName || '-' }}</el-descriptions-item>
+      <el-descriptions-item label="客户部门">{{ order.customerDepartmentName || '-' }}</el-descriptions-item>
+      <el-descriptions-item label="客户订单">{{ order.hasCustomerOrder ? '是' : '否' }}</el-descriptions-item>
+      <el-descriptions-item label="系统申请">{{ order.isSystemApplied ? '是' : '否' }}</el-descriptions-item>
+      <el-descriptions-item label="出单人">{{ order.issuerName || '-' }}</el-descriptions-item>
       <el-descriptions-item label="开单人">{{ order.creatorDisplayName || order.creatorUsername || '-' }}</el-descriptions-item>
       <el-descriptions-item label="总数量">{{ order.totalQty }}</el-descriptions-item>
       <el-descriptions-item label="总金额">

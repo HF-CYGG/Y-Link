@@ -2,10 +2,14 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { initializeDatabaseSchemaIfNeeded } from '../src/config/database-bootstrap.js'
 import { AppDataSource } from '../src/config/data-source.js'
 import { env } from '../src/config/env.js'
+import { dashboardService } from '../src/services/dashboard.service.js'
 import { orderService } from '../src/services/order.service.js'
 import { productService } from '../src/services/product.service.js'
+import { systemConfigService } from '../src/services/system-config.service.js'
+import { tagService } from '../src/services/tag.service.js'
 import type { AuthUserContext } from '../src/types/auth.js'
 
 function pass(title: string) {
@@ -63,12 +67,20 @@ async function main() {
   verifyFrontendSources()
 
   await AppDataSource.initialize()
+  await initializeDatabaseSchemaIfNeeded(AppDataSource)
+  await systemConfigService.ensureDefaultConfigs()
 
   try {
+    const analyticsTag = await tagService.create({
+      tagName: 'Task345统计标签',
+      tagCode: 'T345-STAT',
+    })
+
     const firstProduct = await productService.create({
       productName: '自动编码产品一号',
       defaultPrice: 10,
       isActive: true,
+      tagIds: [analyticsTag.id],
     })
     const secondProduct = await productService.create({
       productName: '自动编码产品二号',
@@ -94,10 +106,15 @@ async function main() {
       isActive: true,
       defaultPrice: 10,
     })
+    await productService.update(secondProduct.id, {
+      isActive: true,
+      defaultPrice: 12,
+    })
 
     const submitResult = await orderService.submit(
       {
         idempotencyKey: `task345-${Date.now()}`,
+        orderType: 'walkin',
         customerName: 'Task345客户',
         remark: '验证默认售价回写',
         items: [
@@ -112,11 +129,72 @@ async function main() {
       mockActor,
     )
 
+    await orderService.submit(
+      {
+        idempotencyKey: `task345-dept-${Date.now()}`,
+        orderType: 'department',
+        customerName: 'Task345部门客户',
+        customerDepartmentName: '行政部',
+        issuerName: '张三',
+        items: [
+          {
+            productId: secondProduct.id,
+            qty: 3,
+            unitPrice: 15.5,
+            remark: '部门单统计验证',
+          },
+        ],
+      },
+      mockActor,
+    )
+
     const productAfterSubmit = await productService.detail(firstProduct.id)
     const orderDetail = await orderService.detailById(submitResult.order.id)
     assert.equal(productAfterSubmit.defaultPrice, '18.80')
     assert.equal(orderDetail.items[0]?.unitPrice, '18.80')
     pass('出库单提交后会将成交单价回写为产品默认售价')
+
+    const today = new Date()
+    const todayText = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`
+
+    const productDrilldown = await dashboardService.getProductRankDrilldown({
+      productId: firstProduct.id,
+      startDate: todayText,
+      endDate: todayText,
+      orderType: 'walkin',
+    })
+    assert.equal(productDrilldown.productId, firstProduct.id)
+    assert.equal(productDrilldown.records.length >= 1, true)
+    assert.equal(Number(productDrilldown.totalQty) > 0, true)
+
+    const customerDrilldown = await dashboardService.getCustomerRankDrilldown({
+      customerName: 'Task345客户',
+      startDate: todayText,
+      endDate: todayText,
+      orderType: 'walkin',
+    })
+    assert.equal(customerDrilldown.records.length >= 1, true)
+    assert.equal(customerDrilldown.records[0]?.orderType, 'walkin')
+
+    const tagAggregate = await dashboardService.getTagAggregate({
+      tagId: analyticsTag.id,
+      startDate: todayText,
+      endDate: todayText,
+      orderType: 'walkin',
+    })
+    assert.equal(tagAggregate.tagId, analyticsTag.id)
+    assert.equal(Number(tagAggregate.totalQuantity) > 0, true)
+    assert.equal(Number(tagAggregate.totalAmount) > 0, true)
+
+    const pieData = await dashboardService.getDashboardPieData({
+      startDate: todayText,
+      endDate: todayText,
+    })
+    assert.equal(pieData.productPie.length >= 1, true)
+    assert.equal(pieData.customerPie.length >= 1, true)
+    assert.equal(pieData.orderTypePie.some((item) => item.key === 'walkin'), true)
+    assert.equal(pieData.orderTypePie.some((item) => item.key === 'department'), true)
+    pass('Task3 统计下钻、标签聚合与三类饼图服务接口可正常返回')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()

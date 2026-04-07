@@ -60,6 +60,7 @@ const actionOptions = [
   { label: '编辑用户', value: 'user.update' },
   { label: '启停用户', value: 'user.update_status' },
   { label: '重置密码', value: 'user.reset_password' },
+  { label: '更新流水配置', value: 'system_config.update_order_serial' },
 ]
 
 /**
@@ -72,6 +73,7 @@ const targetTypeOptions = [
   { label: '出库单', value: 'order' },
   { label: '用户', value: 'user' },
   { label: '会话', value: 'session' },
+  { label: '系统配置', value: 'system_config' },
 ]
 
 /**

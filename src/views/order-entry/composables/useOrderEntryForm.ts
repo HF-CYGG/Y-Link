@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import { orderApi, productApi } from '@/api'
 import type { SubmitOrderPayload } from '@/api/modules/order'
 import type { ProductRecord } from '@/api/modules/product'
-import { useAppStore } from '@/store'
+import { useAppStore, useAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
 import type { FocusField, OrderEntryDrawerForm, OrderHeaderForm, OrderItemRow } from '../types'
 
@@ -42,8 +42,12 @@ function normalizeTextValue(value: string | number | null | undefined): string {
  */
 export const useOrderEntryForm = () => {
   const appStore = useAppStore()
+  const authStore = useAuthStore()
   const router = useRouter()
   const ORDER_ENTRY_DRAFT_STORAGE_KEY = 'y-link.order-entry.draft.v1'
+  const defaultIssuerName = computed(() => {
+    return authStore.currentUser?.displayName || authStore.currentUser?.username || ''
+  })
 
   interface OrderEntryDraftSnapshot {
     headerForm: OrderHeaderForm
@@ -59,6 +63,11 @@ export const useOrderEntryForm = () => {
    * - 作为多个展示组件共享的响应式表单模型。
    */
   const headerForm = reactive<OrderHeaderForm>({
+    orderType: 'walkin',
+    hasCustomerOrder: false,
+    isSystemApplied: false,
+    issuerName: defaultIssuerName.value,
+    customerDepartmentName: '',
     customerName: '',
     remark: '',
   })
@@ -205,6 +214,11 @@ export const useOrderEntryForm = () => {
    */
   const buildDraftSnapshot = (): OrderEntryDraftSnapshot => ({
     headerForm: {
+      orderType: headerForm.orderType,
+      hasCustomerOrder: headerForm.hasCustomerOrder,
+      isSystemApplied: headerForm.isSystemApplied,
+      issuerName: headerForm.issuerName,
+      customerDepartmentName: headerForm.customerDepartmentName,
       customerName: headerForm.customerName,
       remark: headerForm.remark,
     },
@@ -259,6 +273,11 @@ export const useOrderEntryForm = () => {
         return false
       }
 
+      headerForm.orderType = parsedDraft.headerForm.orderType === 'department' ? 'department' : 'walkin'
+      headerForm.hasCustomerOrder = Boolean(parsedDraft.headerForm.hasCustomerOrder)
+      headerForm.isSystemApplied = Boolean(parsedDraft.headerForm.isSystemApplied)
+      headerForm.issuerName = parsedDraft.headerForm.issuerName ?? defaultIssuerName.value
+      headerForm.customerDepartmentName = parsedDraft.headerForm.customerDepartmentName ?? ''
       headerForm.customerName = parsedDraft.headerForm.customerName ?? ''
       headerForm.remark = parsedDraft.headerForm.remark ?? ''
 
@@ -403,7 +422,7 @@ export const useOrderEntryForm = () => {
     const created = await productApi.createProduct({
       productName: normalizedValue,
       pinyinAbbr: '',
-      defaultPrice: unitPrice > 0 ? unitPrice : 0,
+      defaultPrice: Math.max(unitPrice, 0),
       isActive: true,
     })
     products.value = [created, ...products.value]
@@ -624,6 +643,11 @@ export const useOrderEntryForm = () => {
    * - 关闭移动端抽屉并清理编辑上下文。
    */
   const resetForm = () => {
+    headerForm.orderType = 'walkin'
+    headerForm.hasCustomerOrder = false
+    headerForm.isSystemApplied = false
+    headerForm.issuerName = defaultIssuerName.value
+    headerForm.customerDepartmentName = ''
     headerForm.customerName = ''
     headerForm.remark = ''
     itemRows.value = [createBlankRow()]
@@ -660,6 +684,14 @@ export const useOrderEntryForm = () => {
       ElMessage.warning('存在单价小于等于 0 的明细，请先修正后再保存')
       return
     }
+    if (!headerForm.issuerName.trim()) {
+      ElMessage.warning('请填写出单人')
+      return
+    }
+    if (headerForm.orderType === 'department' && !headerForm.customerDepartmentName.trim()) {
+      ElMessage.warning('部门单必须填写客户部门')
+      return
+    }
 
     isSaving.value = true
     try {
@@ -667,10 +699,15 @@ export const useOrderEntryForm = () => {
       const idempotencyKey = `web-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
       const result = await orderApi.submitOrder({
         idempotencyKey,
+        orderType: headerForm.orderType,
+        hasCustomerOrder: headerForm.hasCustomerOrder,
+        isSystemApplied: headerForm.isSystemApplied,
+        issuerName: headerForm.issuerName.trim(),
+        customerDepartmentName: headerForm.customerDepartmentName.trim() || undefined,
         customerName: headerForm.customerName.trim() || undefined,
         remark: headerForm.remark.trim() || undefined,
         items: submitItems,
-      })
+      } as SubmitOrderPayload)
 
       ElMessage.success(`保存成功，单号：${result.order.showNo}`)
       if (autoCreatedProductNames.value.length) {
@@ -700,6 +737,9 @@ export const useOrderEntryForm = () => {
    * - 无论请求是否成功，都确保页面至少有一条可编辑的空白明细。
    */
   onMounted(async () => {
+    if (!headerForm.issuerName) {
+      headerForm.issuerName = defaultIssuerName.value
+    }
     const restored = restoreDraft()
     await loadProducts()
     if (!restored) {
@@ -718,6 +758,11 @@ export const useOrderEntryForm = () => {
     [
       () => headerForm.customerName,
       () => headerForm.remark,
+      () => headerForm.orderType,
+      () => headerForm.hasCustomerOrder,
+      () => headerForm.isSystemApplied,
+      () => headerForm.issuerName,
+      () => headerForm.customerDepartmentName,
       itemRows,
       drawerVisible,
       editingRowUid,
@@ -730,6 +775,15 @@ export const useOrderEntryForm = () => {
       persistDraft()
     },
     { deep: true },
+  )
+
+  watch(
+    () => defaultIssuerName.value,
+    (value) => {
+      if (!headerForm.issuerName.trim()) {
+        headerForm.issuerName = value
+      }
+    },
   )
 
   return {

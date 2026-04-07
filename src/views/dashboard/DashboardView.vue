@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onActivated, onMounted, ref } from 'vue'
+import { computed, defineAsyncComponent, onActivated, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import dayjs from 'dayjs'
 import { ElMessage } from 'element-plus'
@@ -23,6 +23,8 @@ const TREND_VIEWBOX_HEIGHT = 240
 const TREND_PADDING_X = 24
 const TREND_PADDING_Y = 24
 const activeTrendDate = ref('')
+const DashboardPieSection = defineAsyncComponent(() => import('./components/DashboardPieSection.vue'))
+const TopProductRankCard = defineAsyncComponent(() => import('./components/TopProductRankCard.vue'))
 
 /**
  * 当前用户可见快捷入口：
@@ -317,14 +319,14 @@ const formatActivityTime = (value: string): string => {
  * - 通过 query 透传目标单据信息，复用列表页既有“定位并打开详情抽屉”逻辑。
  */
 const navigateToActivityOrder = (activity: { id: string; showNo: string }) => {
-  void router.push({
+  router.push({
     path: '/order-list',
     query: {
       focusOrderId: activity.id,
       focusOrderShowNo: activity.showNo,
       focusRefreshToken: String(Date.now()),
     },
-  })
+  }).catch(() => undefined)
 }
 
 /**
@@ -373,11 +375,9 @@ const navigateTo = (path: string) => {
  * - 因此在 mounted / activated 两个入口都补一次“无数据则拉取”，保证重复进入仍能恢复内容。
  */
 const ensureDashboardReady = () => {
-  if (stats.value || loading.value) {
-    return
+  if (!stats.value && !loading.value) {
+    void loadData()
   }
-
-  void loadData()
 }
 
 /**
@@ -564,6 +564,8 @@ onActivated(() => {
         </div>
       </section>
 
+      <DashboardPieSection />
+
       <div :class="['grid gap-6 xl:gap-7', appStore.isDesktop ? 'xl:grid-cols-[1.3fr_1fr] lg:grid-cols-[1.2fr_1fr]' : 'grid-cols-1']">
         <section>
           <div class="apple-card p-5 sm:p-6 xl:p-7">
@@ -641,30 +643,7 @@ onActivated(() => {
         </section>
 
         <section class="space-y-6">
-          <div class="apple-card p-5 sm:p-6 xl:p-7">
-            <div class="mb-5 flex items-center justify-between">
-              <h2 class="text-lg font-semibold text-slate-800 dark:text-slate-200">热门出库文创榜</h2>
-              <span class="text-xs text-slate-500 dark:text-slate-400">按本月出库数量 Top 5</span>
-            </div>
-            <div v-if="stats?.topProducts?.length" class="space-y-3">
-              <div
-                v-for="(item, index) in stats.topProducts"
-                :key="`${item.productId}-${index}`"
-                class="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2.5 dark:bg-slate-900/40"
-              >
-                <div class="flex min-w-0 items-center gap-3">
-                  <div class="flex h-7 w-7 items-center justify-center rounded-full bg-brand/10 text-xs font-bold text-brand dark:bg-brand/20 dark:text-teal-400">
-                    {{ index + 1 }}
-                  </div>
-                  <div class="truncate text-sm font-medium text-slate-700 dark:text-slate-200">{{ item.productName }}</div>
-                </div>
-                <div class="text-sm font-semibold text-slate-700 dark:text-slate-200">{{ formatQty(item.totalQty) }} 件</div>
-              </div>
-            </div>
-            <div v-else class="flex min-h-[180px] items-center justify-center rounded-xl bg-slate-50 text-slate-400 dark:bg-slate-900/40">
-              <el-empty :image-size="64" description="暂无榜单数据" />
-            </div>
-          </div>
+          <TopProductRankCard :top-products="stats?.topProducts ?? []" />
 
           <div class="apple-card p-5 sm:p-6 xl:p-7">
             <h2 class="mb-4 text-lg font-semibold text-slate-800 dark:text-slate-200">近期出库动态</h2>

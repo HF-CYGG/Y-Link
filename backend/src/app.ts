@@ -7,6 +7,7 @@ import { auditLogRouter } from './routes/audit-log.routes.js'
 import { dashboardRouter } from './routes/dashboard.routes.js'
 import { orderRouter } from './routes/order.routes.js'
 import { productRouter } from './routes/product.routes.js'
+import { systemConfigRouter } from './routes/system-config.routes.js'
 import { tagRouter } from './routes/tag.routes.js'
 import { userRouter } from './routes/user.routes.js'
 import { BizError } from './utils/errors.js'
@@ -39,6 +40,7 @@ export function createApp() {
   // 系统治理接口：由细粒度权限点控制，而不是单纯依赖管理员角色。
   app.use('/api/users', userRouter)
   app.use('/api/audit-logs', auditLogRouter)
+  app.use('/api/system-configs', systemConfigRouter)
 
   // 将 zod 参数校验错误转为业务错误，统一响应格式。
   app.use((err: unknown, _req: express.Request, _res: express.Response, next: express.NextFunction) => {

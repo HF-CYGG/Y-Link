@@ -102,10 +102,28 @@ CREATE TABLE IF NOT EXISTS `sys_audit_log` (
   KEY `idx_sys_audit_log_created_at` (`created_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='系统审计日志表';
 
+CREATE TABLE IF NOT EXISTS `system_configs` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '配置主键',
+  `config_key` VARCHAR(128) NOT NULL COMMENT '配置键',
+  `config_value` VARCHAR(255) NOT NULL COMMENT '配置值',
+  `config_group` VARCHAR(64) NOT NULL DEFAULT 'general' COMMENT '配置分组',
+  `remark` VARCHAR(255) DEFAULT NULL COMMENT '备注',
+  `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '创建时间',
+  `updated_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3) COMMENT '更新时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_system_configs_config_key` (`config_key`),
+  KEY `idx_system_configs_group` (`config_group`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='系统配置表';
+
 CREATE TABLE IF NOT EXISTS `biz_outbound_order` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '出库主单ID',
   `order_uuid` CHAR(36) NOT NULL COMMENT '系统唯一UUID',
   `show_no` VARCHAR(32) NOT NULL COMMENT '业务展示单号（CK-YYYYMMDD-0001）',
+  `order_type` VARCHAR(32) NOT NULL DEFAULT 'walkin' COMMENT '订单类型',
+  `has_customer_order` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否有客户订单',
+  `is_system_applied` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否系统申请',
+  `issuer_name` VARCHAR(64) DEFAULT NULL COMMENT '出单人',
+  `customer_department_name` VARCHAR(128) DEFAULT NULL COMMENT '客户部门名称',
   `idempotency_key` VARCHAR(128) NOT NULL COMMENT '幂等键（防重复提交）',
   `customer_name` VARCHAR(128) DEFAULT NULL COMMENT '客户名称',
   `remark` VARCHAR(500) DEFAULT NULL COMMENT '备注',
@@ -123,8 +141,10 @@ CREATE TABLE IF NOT EXISTS `biz_outbound_order` (
   `updated_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3) COMMENT '更新时间',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_biz_outbound_order_uuid` (`order_uuid`),
-  UNIQUE KEY `uk_biz_outbound_show_no` (`show_no`),
+  UNIQUE KEY `uk_biz_outbound_show_no_is_deleted` (`show_no`, `is_deleted`),
   UNIQUE KEY `uk_biz_outbound_idempotency_key` (`idempotency_key`),
+  KEY `idx_biz_outbound_order_type` (`order_type`),
+  KEY `idx_biz_outbound_order_type_created_at` (`order_type`, `created_at`),
   KEY `idx_biz_outbound_is_deleted` (`is_deleted`),
   KEY `idx_biz_outbound_deleted_by_user_id` (`deleted_by_user_id`),
   KEY `idx_biz_outbound_creator_user_id` (`creator_user_id`),
@@ -158,4 +178,35 @@ ALTER TABLE `biz_outbound_order`
   ADD COLUMN IF NOT EXISTS `deleted_at` DATETIME(3) DEFAULT NULL COMMENT '删除时间',
   ADD COLUMN IF NOT EXISTS `deleted_by_user_id` BIGINT UNSIGNED DEFAULT NULL COMMENT '删除操作用户ID',
   ADD COLUMN IF NOT EXISTS `deleted_by_username` VARCHAR(64) DEFAULT NULL COMMENT '删除操作账号快照',
-  ADD COLUMN IF NOT EXISTS `deleted_by_display_name` VARCHAR(64) DEFAULT NULL COMMENT '删除操作姓名快照';
+  ADD COLUMN IF NOT EXISTS `deleted_by_display_name` VARCHAR(64) DEFAULT NULL COMMENT '删除操作姓名快照',
+  ADD COLUMN IF NOT EXISTS `order_type` VARCHAR(32) NOT NULL DEFAULT 'walkin' COMMENT '订单类型',
+  ADD COLUMN IF NOT EXISTS `has_customer_order` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否有客户订单',
+  ADD COLUMN IF NOT EXISTS `is_system_applied` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否系统申请',
+  ADD COLUMN IF NOT EXISTS `issuer_name` VARCHAR(64) DEFAULT NULL COMMENT '出单人',
+  ADD COLUMN IF NOT EXISTS `customer_department_name` VARCHAR(128) DEFAULT NULL COMMENT '客户部门名称';
+
+CREATE TABLE IF NOT EXISTS `system_configs` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '配置主键',
+  `config_key` VARCHAR(128) NOT NULL COMMENT '配置键',
+  `config_value` VARCHAR(255) NOT NULL COMMENT '配置值',
+  `config_group` VARCHAR(64) NOT NULL DEFAULT 'general' COMMENT '配置分组',
+  `remark` VARCHAR(255) DEFAULT NULL COMMENT '备注',
+  `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '创建时间',
+  `updated_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3) COMMENT '更新时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_system_configs_config_key` (`config_key`),
+  KEY `idx_system_configs_group` (`config_group`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='系统配置表';
+
+INSERT INTO `system_configs` (`config_key`, `config_value`, `config_group`, `remark`)
+VALUES
+  ('order.serial.department.start', '1', 'order_serial', '部门单号起始值'),
+  ('order.serial.department.current', '0', 'order_serial', '部门单号当前值'),
+  ('order.serial.department.width', '6', 'order_serial', '部门单号位宽'),
+  ('order.serial.walkin.start', '1', 'order_serial', '散客单号起始值'),
+  ('order.serial.walkin.current', '0', 'order_serial', '散客单号当前值'),
+  ('order.serial.walkin.width', '6', 'order_serial', '散客单号位宽')
+ON DUPLICATE KEY UPDATE
+  `config_value` = VALUES(`config_value`),
+  `config_group` = VALUES(`config_group`),
+  `remark` = VALUES(`remark`);

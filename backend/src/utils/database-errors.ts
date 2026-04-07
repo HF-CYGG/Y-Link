@@ -9,6 +9,7 @@ interface DriverErrorShape {
 
 export interface UniqueConstraintMatcher {
   mysqlConstraint?: string
+  mysqlConstraints?: readonly string[]
   sqliteColumns?: readonly string[]
 }
 
@@ -57,6 +58,10 @@ export function isUniqueConstraintError(error: unknown, matcher?: UniqueConstrai
   }
 
   if (matcher.mysqlConstraint && message.includes(matcher.mysqlConstraint)) {
+    return true
+  }
+
+  if (matcher.mysqlConstraints?.some((constraint) => message.includes(constraint))) {
     return true
   }
 

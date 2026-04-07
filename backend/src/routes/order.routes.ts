@@ -4,10 +4,16 @@ import { requirePermission } from '../middleware/auth.middleware.js'
 import { orderService } from '../services/order.service.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 import { asyncHandler } from '../utils/async-handler.js'
+import { BizError } from '../utils/errors.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 
 const submitOrderSchema = z.object({
   idempotencyKey: z.string().min(8, 'idempotencyKey 长度至少为 8'),
+  orderType: z.enum(['department', 'walkin']).optional(),
+  hasCustomerOrder: z.boolean().optional(),
+  isSystemApplied: z.boolean().optional(),
+  issuerName: z.string().max(64, '出单人长度不能超过64').optional(),
+  customerDepartmentName: z.string().max(128, '客户部门名称长度不能超过128').optional(),
   customerName: z.string().optional(),
   remark: z.string().optional(),
   items: z
@@ -85,6 +91,10 @@ orderRouter.post(
   '/submit',
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
+    const payloadRaw = req.body as Record<string, unknown> | null | undefined
+    if (payloadRaw && typeof payloadRaw === 'object' && ('showNo' in payloadRaw || 'orderNo' in payloadRaw)) {
+      throw new BizError('禁止指定业务单号，请由系统自动生成', 400)
+    }
     const payload = submitOrderSchema.parse(req.body)
     const data = await orderService.submit(payload, authReq.auth, extractRequestMeta(req))
     res.json({

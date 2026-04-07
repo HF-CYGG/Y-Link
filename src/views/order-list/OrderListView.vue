@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import dayjs from 'dayjs'
+import { ElMessage } from 'element-plus'
+import { ref } from 'vue'
 import {
   BizResponsiveDataCollectionShell,
   BizResponsiveDrawerShell,
@@ -8,7 +10,12 @@ import {
   PageToolbarCard,
 } from '@/components/common'
 import OrderDetailDrawerContent from './components/OrderDetailDrawerContent.vue'
+import OrderVoucherTemplate from './components/OrderVoucherTemplate.vue'
 import { useOrderListView } from './composables/useOrderListView'
+
+const getOrderTypeLabel = (value: 'department' | 'walkin') => {
+  return value === 'department' ? '部门单' : '散客单'
+}
 
 /**
  * 页面入口只负责装配：
@@ -34,6 +41,67 @@ const {
   handleDeleteOrderWithConfirm,
   handleRestoreOrderWithConfirm,
 } = useOrderListView()
+
+type Html2PdfWorker = {
+  set: (options: Record<string, unknown>) => Html2PdfWorker
+  from: (source: HTMLElement) => Html2PdfWorker
+  save: (filename?: string) => Promise<void>
+}
+
+type Html2PdfFactory = () => Html2PdfWorker
+
+const voucherDialogVisible = ref(false)
+const voucherPrintRootRef = ref<HTMLElement | null>(null)
+const enableHtml2pdfExport = import.meta.env.VITE_ORDER_VOUCHER_HTML2PDF_ENABLED === 'true'
+
+const handleOpenVoucherDialog = () => {
+  if (!currentOrder.value) {
+    ElMessage.warning('请先加载单据详情')
+    return
+  }
+
+  voucherDialogVisible.value = true
+}
+
+const handlePrintVoucher = () => {
+  if (!currentOrder.value) {
+    ElMessage.warning('当前无可打印凭证')
+    return
+  }
+
+  globalThis.print()
+}
+
+const handleExportVoucherPdf = async () => {
+  if (!enableHtml2pdfExport) {
+    ElMessage.info('PDF 导出开关未启用，当前仅支持打印')
+    return
+  }
+
+  const html2pdfFactory = (globalThis as unknown as { html2pdf?: Html2PdfFactory }).html2pdf
+  if (typeof html2pdfFactory !== 'function') {
+    ElMessage.warning('未检测到 html2pdf.js，请在启用开关后接入依赖')
+    return
+  }
+
+  const sourceElement = voucherPrintRootRef.value?.querySelector('.voucher-sheet')
+  if (!(sourceElement instanceof HTMLElement)) {
+    ElMessage.warning('凭证模板尚未准备完成，请稍后重试')
+    return
+  }
+
+  const outputFileName = `${currentOrder.value?.showNo || 'order-voucher'}-购物凭证.pdf`
+  await html2pdfFactory()
+    .set({
+      margin: 8,
+      filename: outputFileName,
+      image: { type: 'jpeg', quality: 0.98 },
+      html2canvas: { scale: 2, useCORS: true },
+      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+    })
+    .from(sourceElement)
+    .save(outputFileName)
+}
 </script>
 
 <template>
@@ -90,6 +158,29 @@ const {
               <el-table-column label="业务单号" prop="showNo" min-width="180" show-overflow-tooltip />
               <el-table-column label="客户名称" prop="customerName" min-width="200" show-overflow-tooltip>
                 <template #default="{ row }">{{ row.customerName || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="订单类型" min-width="100">
+                <template #default="{ row }">{{ getOrderTypeLabel(row.orderType) }}</template>
+              </el-table-column>
+              <el-table-column label="客户订单" width="90" align="center">
+                <template #default="{ row }">
+                  <el-tag :type="row.hasCustomerOrder ? 'success' : 'info'" effect="light">
+                    {{ row.hasCustomerOrder ? '是' : '否' }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="系统申请" width="90" align="center">
+                <template #default="{ row }">
+                  <el-tag :type="row.isSystemApplied ? 'warning' : 'info'" effect="light">
+                    {{ row.isSystemApplied ? '是' : '否' }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="出单人" min-width="140" show-overflow-tooltip>
+                <template #default="{ row }">{{ row.issuerName || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="客户部门" min-width="160" show-overflow-tooltip>
+                <template #default="{ row }">{{ row.customerDepartmentName || '-' }}</template>
               </el-table-column>
               <el-table-column label="总数量" prop="totalQty" width="110" />
               <el-table-column label="总金额" prop="totalAmount" width="132">
@@ -150,6 +241,12 @@ const {
                   {{ isTablet ? '平板卡片' : '手机卡片' }}
                 </span>
               </div>
+              <div class="mt-1 text-sm text-slate-600 dark:text-slate-300">类型：{{ getOrderTypeLabel(item.orderType) }}</div>
+              <div class="text-sm text-slate-600 dark:text-slate-300">
+                客户订单：{{ item.hasCustomerOrder ? '是' : '否' }} / 系统申请：{{ item.isSystemApplied ? '是' : '否' }}
+              </div>
+              <div class="text-sm text-slate-600 dark:text-slate-300">出单人：{{ item.issuerName || '-' }}</div>
+              <div class="text-sm text-slate-600 dark:text-slate-300">客户部门：{{ item.customerDepartmentName || '-' }}</div>
               <div class="text-sm text-slate-600 dark:text-slate-300">客户：{{ item.customerName || '-' }}</div>
               <div class="text-sm text-slate-600 dark:text-slate-300">开单人：{{ item.creatorDisplayName || item.creatorUsername || '-' }}</div>
               <div class="mt-3 flex items-center justify-between gap-4 border-t border-slate-100 pt-3 dark:border-white/10">
@@ -203,6 +300,9 @@ const {
       drawer-class="order-detail-drawer"
     >
       <template #default="{ isPhone, isDesktop }">
+        <div v-if="currentOrder" class="mb-3 flex flex-wrap items-center justify-end gap-2">
+          <el-button plain type="primary" @click="handleOpenVoucherDialog">生成凭证</el-button>
+        </div>
         <OrderDetailDrawerContent
           v-if="currentOrder"
           :order="currentOrder"
@@ -212,6 +312,33 @@ const {
         />
       </template>
     </BizResponsiveDrawerShell>
+
+    <el-dialog
+      v-model="voucherDialogVisible"
+      title="购物凭证模板"
+      width="880px"
+      align-center
+      class="order-voucher-dialog"
+    >
+      <div v-if="currentOrder" class="order-voucher-print-scope">
+        <OrderVoucherTemplate :order="currentOrder" />
+      </div>
+      <template #footer>
+        <span class="flex flex-wrap justify-end gap-2">
+          <el-button @click="voucherDialogVisible = false">关闭</el-button>
+          <el-button type="primary" plain @click="handlePrintVoucher">打印</el-button>
+          <el-button type="primary" :disabled="!enableHtml2pdfExport" @click="handleExportVoucherPdf">
+            导出PDF（预留）
+          </el-button>
+        </span>
+      </template>
+    </el-dialog>
+
+    <div v-if="currentOrder && voucherDialogVisible" ref="voucherPrintRootRef" class="order-voucher-print-root" aria-hidden="true">
+      <div class="order-voucher-print-scope">
+        <OrderVoucherTemplate :order="currentOrder" />
+      </div>
+    </div>
   </PageContainer>
 </template>
 
@@ -246,5 +373,51 @@ const {
 
 .dark .order-detail-content :deep(.el-descriptions__content) {
   color: #e2e8f0;
+}
+
+.order-voucher-dialog :deep(.el-dialog) {
+  border-radius: 20px;
+  overflow: hidden;
+}
+
+.order-voucher-dialog :deep(.el-dialog__body) {
+  padding-top: 8px;
+}
+
+.order-voucher-print-scope {
+  background: #ffffff;
+  border-radius: 16px;
+}
+</style>
+
+<style>
+.order-voucher-print-root {
+  display: none;
+}
+
+@media print {
+  body * {
+    visibility: hidden !important;
+  }
+
+  .order-voucher-print-root,
+  .order-voucher-print-root * {
+    visibility: visible !important;
+  }
+
+  .order-voucher-print-root {
+    position: fixed;
+    inset: 0;
+    z-index: 99999;
+    display: block;
+    background: #ffffff;
+    padding: 16px;
+  }
+
+  .order-voucher-print-root .voucher-sheet {
+    border: none;
+    border-radius: 0;
+    padding: 0;
+  }
 }
 </style>

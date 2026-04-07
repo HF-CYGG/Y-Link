@@ -26,6 +26,11 @@ export interface OrderItemRow {
  * - 使用对象模型便于在多个展示组件间共享响应式引用。
  */
 export interface OrderHeaderForm {
+  orderType: 'department' | 'walkin'
+  hasCustomerOrder: boolean
+  isSystemApplied: boolean
+  issuerName: string
+  customerDepartmentName: string
   customerName: string
   remark: string
 }

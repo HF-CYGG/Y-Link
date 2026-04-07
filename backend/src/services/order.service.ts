@@ -8,10 +8,11 @@ import {
   isUniqueConstraintError,
 } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
-import { generateOrderUuid, generateShowNo } from '../utils/id-generator.js'
+import { generateOrderUuid } from '../utils/id-generator.js'
 import type { PaginationResult } from '../types/api.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
+import { orderSerialService, type OrderType } from './order-serial.service.js'
 
 export interface SubmitOrderItemInput {
   productId: string | number
@@ -22,6 +23,11 @@ export interface SubmitOrderItemInput {
 
 export interface SubmitOrderInput {
   idempotencyKey: string
+  orderType?: string
+  hasCustomerOrder?: boolean
+  isSystemApplied?: boolean
+  issuerName?: string
+  customerDepartmentName?: string
   customerName?: string
   remark?: string
   items: SubmitOrderItemInput[]
@@ -60,6 +66,11 @@ export interface OrderDetailItemView {
 export interface OrderSummaryView {
   id: string
   showNo: string
+  orderType: string
+  hasCustomerOrder: boolean
+  isSystemApplied: boolean
+  issuerName: string | null
+  customerDepartmentName: string | null
   customerName: string | null
   totalAmount: string
   totalQty: string
@@ -118,11 +129,12 @@ const IDEMPOTENCY_CONSTRAINT_MATCHER = {
 } as const
 
 const SHOW_NO_CONSTRAINT_MATCHER = {
-  mysqlConstraint: 'uk_biz_outbound_show_no',
-  sqliteColumns: ['biz_outbound_order.show_no'],
+  mysqlConstraints: ['uk_biz_outbound_show_no', 'uk_biz_outbound_show_no_is_deleted', 'uk_orders_order_no'],
+  sqliteColumns: ['biz_outbound_order.show_no', 'orders.order_no'],
 } as const
 
 const ORDER_SUBMIT_MAX_RETRY = 3
+const ORDER_TYPE_SET = new Set<OrderType>(['department', 'walkin'])
 
 export class OrderService {
   private readonly orderRepo = AppDataSource.getRepository(BizOutboundOrder)
@@ -304,6 +316,18 @@ export class OrderService {
     if (!normalizedIdempotencyKey) {
       throw new BizError('幂等键不能为空')
     }
+    const normalizedOrderType = this.normalizeOrderType(input.orderType)
+    if (!normalizedOrderType) {
+      throw new BizError('订单类型非法，仅支持 department 或 walkin', 400)
+    }
+    const normalizedIssuerName = input.issuerName?.trim() || actor.displayName?.trim() || actor.username?.trim()
+    if (!normalizedIssuerName) {
+      throw new BizError('出单人不能为空', 400)
+    }
+    const normalizedCustomerDepartmentName = input.customerDepartmentName?.trim() || null
+    if (normalizedOrderType === 'department' && !normalizedCustomerDepartmentName) {
+      throw new BizError('部门订单必须填写客户部门名称', 400)
+    }
 
     let lastError: unknown
     for (let attempt = 1; attempt <= ORDER_SUBMIT_MAX_RETRY; attempt += 1) {
@@ -340,7 +364,7 @@ export class OrderService {
             throw new BizError('存在无效或停用产品，无法提交')
           }
           const orderUuid = generateOrderUuid()
-          const showNo = await generateShowNo(manager)
+          const showNo = await orderSerialService.generateOrderNo(normalizedOrderType, manager)
 
           let totalQty = 0
           let totalAmount = 0
@@ -381,6 +405,11 @@ export class OrderService {
           const order = orderRepo.create({
             orderUuid,
             showNo,
+            orderType: normalizedOrderType,
+            hasCustomerOrder: Boolean(input.hasCustomerOrder),
+            isSystemApplied: Boolean(input.isSystemApplied),
+            issuerName: normalizedIssuerName,
+            customerDepartmentName: normalizedCustomerDepartmentName,
             idempotencyKey: normalizedIdempotencyKey,
             customerName: input.customerName?.trim() || null,
             remark: input.remark?.trim() || null,
@@ -456,6 +485,14 @@ export class OrderService {
     throw lastError ?? new BizError('订单提交失败，请稍后重试', 500)
   }
 
+  private normalizeOrderType(orderType: string | undefined): OrderType | null {
+    const normalizedOrderType = (orderType ?? 'walkin').trim().toLowerCase()
+    if (!ORDER_TYPE_SET.has(normalizedOrderType as OrderType)) {
+      return null
+    }
+    return normalizedOrderType as OrderType
+  }
+
   private async loadOrderByIdempotencyKey(
     idempotencyKey: string,
   ): Promise<{ order: SubmittedOrderView; items: SubmittedOrderItemView[] }> {
@@ -507,6 +544,11 @@ export class OrderService {
     return {
       id: normalizeEntityId(order.id),
       showNo: order.showNo,
+      orderType: order.orderType,
+      hasCustomerOrder: Boolean(order.hasCustomerOrder),
+      isSystemApplied: Boolean(order.isSystemApplied),
+      issuerName: order.issuerName,
+      customerDepartmentName: order.customerDepartmentName,
       customerName: order.customerName,
       totalAmount: normalizeDecimalText(order.totalAmount),
       totalQty: normalizeDecimalText(order.totalQty),

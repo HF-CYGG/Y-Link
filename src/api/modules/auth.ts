@@ -21,6 +21,8 @@ export const PERMISSION_CODES = [
   'products:manage',
   'tags:view',
   'tags:manage',
+  'system_configs:view',
+  'system_configs:update',
   'users:view',
   'users:create',
   'users:update',
@@ -47,6 +49,8 @@ export const ROLE_DEFAULT_PERMISSION_MAP: Record<UserRole, PermissionCode[]> = {
     'products:manage',
     'tags:view',
     'tags:manage',
+    'system_configs:view',
+    'system_configs:update',
     'users:view',
     'users:create',
     'users:update',
@@ -55,7 +59,16 @@ export const ROLE_DEFAULT_PERMISSION_MAP: Record<UserRole, PermissionCode[]> = {
     'audit_logs:view',
     'audit_logs:export',
   ],
-  operator: ['dashboard:view', 'orders:create', 'orders:view', 'products:view', 'products:manage', 'tags:view', 'tags:manage'],
+  operator: [
+    'dashboard:view',
+    'orders:create',
+    'orders:view',
+    'products:view',
+    'products:manage',
+    'tags:view',
+    'tags:manage',
+    'system_configs:view',
+  ],
 }
 
 /**
@@ -72,6 +85,8 @@ export const PERMISSION_LABEL_MAP: Record<PermissionCode, string> = {
   'products:manage': '维护产品资料',
   'tags:view': '查看标签资料',
   'tags:manage': '维护标签资料',
+  'system_configs:view': '查看系统配置',
+  'system_configs:update': '维护系统配置',
   'users:view': '查看用户',
   'users:create': '新增用户',
   'users:update': '编辑用户',
@@ -87,6 +102,8 @@ export const PERMISSION_LABEL_MAP: Record<PermissionCode, string> = {
  * - 保持顺序稳定，方便表格与卡片模式复用。
  */
 export const GOVERNANCE_PERMISSION_CODES: PermissionCode[] = [
+  'system_configs:view',
+  'system_configs:update',
   'users:view',
   'users:create',
   'users:update',

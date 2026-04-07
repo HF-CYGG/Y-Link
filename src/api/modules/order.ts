@@ -20,6 +20,11 @@ export interface SubmitOrderItemPayload {
  */
 export interface SubmitOrderPayload {
   idempotencyKey: string
+  orderType?: 'department' | 'walkin'
+  hasCustomerOrder?: boolean
+  isSystemApplied?: boolean
+  issuerName?: string
+  customerDepartmentName?: string
   customerName?: string
   remark?: string
   items: SubmitOrderItemPayload[]
@@ -98,6 +103,11 @@ export interface OrderListQuery extends PaginationQueryInput {
 export interface OrderRecord {
   id: string
   showNo: string
+  orderType: 'department' | 'walkin'
+  hasCustomerOrder: boolean
+  isSystemApplied: boolean
+  issuerName: string | null
+  customerDepartmentName: string | null
   customerName: string | null
   totalAmount: string
   totalQty: string
@@ -126,6 +136,11 @@ export type OrderListResult = PaginationResult<OrderRecord>
 interface OrderRecordRaw {
   id: PrimitiveTextValue
   showNo: PrimitiveTextValue
+  orderType?: PrimitiveTextValue
+  hasCustomerOrder?: boolean | PrimitiveTextValue
+  isSystemApplied?: boolean | PrimitiveTextValue
+  issuerName?: PrimitiveTextValue
+  customerDepartmentName?: PrimitiveTextValue
   customerName: PrimitiveTextValue
   totalAmount: PrimitiveTextValue
   totalQty: PrimitiveTextValue
@@ -187,6 +202,11 @@ const normalizeNullableTextField = (value: PrimitiveTextValue): string | null =>
 const normalizeOrderRecord = (record: OrderRecordRaw): OrderRecord => ({
   id: normalizeTextField(record.id),
   showNo: normalizeTextField(record.showNo),
+  orderType: normalizeOrderTypeField(record.orderType),
+  hasCustomerOrder: normalizeBooleanField(record.hasCustomerOrder),
+  isSystemApplied: normalizeBooleanField(record.isSystemApplied),
+  issuerName: normalizeNullableTextField(record.issuerName),
+  customerDepartmentName: normalizeNullableTextField(record.customerDepartmentName),
   customerName: normalizeNullableTextField(record.customerName),
   totalAmount: normalizeDecimalField(record.totalAmount),
   totalQty: normalizeDecimalField(record.totalQty),
@@ -277,6 +297,10 @@ const normalizeBooleanField = (value: unknown): boolean => {
   }
   const normalizedText = normalizeTextField(value as PrimitiveTextValue).toLowerCase()
   return normalizedText === '1' || normalizedText === 'true' || normalizedText === 'yes'
+}
+
+const normalizeOrderTypeField = (value: PrimitiveTextValue): 'department' | 'walkin' => {
+  return normalizeTextField(value).toLowerCase() === 'department' ? 'department' : 'walkin'
 }
 
 /**

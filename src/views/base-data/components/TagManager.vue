@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { onActivated, onMounted, ref } from 'vue'
-import { type FormInstance, type FormRules } from 'element-plus'
+import dayjs from 'dayjs'
+import { computed, onActivated, onMounted, ref } from 'vue'
+import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
+import { getTagAggregate, type TagAggregateResult } from '@/api/modules/dashboard'
 import { createTag, deleteTag, getTagList, updateTag, type CreateTagDto, type Tag } from '@/api/modules/tag'
 import {
   BizCrudDialogShell,
@@ -8,10 +10,21 @@ import {
   PageToolbarCard,
 } from '@/components/common'
 import { useCrudManager } from '@/composables/useCrudManager'
+import { useStableRequest } from '@/composables/useStableRequest'
+import { extractErrorMessage } from '@/utils/error'
 
 const formRef = ref<FormInstance>()
 const pageReady = ref(false)
 const keepAliveActivated = ref(false)
+const aggregateLoading = ref(false)
+const aggregateResult = ref<TagAggregateResult | null>(null)
+const aggregateRequest = useStableRequest()
+const aggregateDateRange = ref<[string, string]>([
+  dayjs().subtract(30, 'day').format('YYYY-MM-DD'),
+  dayjs().format('YYYY-MM-DD'),
+])
+const aggregateTagId = ref('')
+const aggregateOrderType = ref<'' | 'department' | 'walkin'>('')
 
 /**
  * 标签表单类型：
@@ -132,11 +145,81 @@ const {
 
 const refreshTagView = async () => {
   await loadData()
+  if (!aggregateTagId.value && tags.value.length > 0) {
+    aggregateTagId.value = tags.value[0].id
+  }
+}
+
+const aggregateSummary = computed(() => {
+  if (!aggregateResult.value) {
+    return []
+  }
+
+  return [
+    {
+      key: 'totalQuantity',
+      label: '总数量',
+      value: `${Number(aggregateResult.value.totalQuantity ?? 0).toFixed(2)} 件`,
+    },
+    {
+      key: 'totalAmount',
+      label: '总金额',
+      value: `¥${Number(aggregateResult.value.totalAmount ?? 0).toFixed(2)}`,
+    },
+    {
+      key: 'orderCount',
+      label: '订单数',
+      value: `${aggregateResult.value.orderCount} 单`,
+    },
+    {
+      key: 'productCount',
+      label: '产品数',
+      value: `${aggregateResult.value.productCount} 种`,
+    },
+  ]
+})
+
+const handleAggregateSearch = async () => {
+  if (!aggregateTagId.value.trim()) {
+    ElMessage.warning('请选择标签后再查询统计')
+    return
+  }
+
+  aggregateLoading.value = true
+  await aggregateRequest.runLatest({
+    executor: (signal) =>
+      getTagAggregate(
+        aggregateTagId.value,
+        {
+          dateRange: aggregateDateRange.value,
+          orderType: aggregateOrderType.value || undefined,
+        },
+        { signal },
+      ),
+    onSuccess: (result) => {
+      aggregateResult.value = result
+    },
+    onError: (error) => {
+      ElMessage.error(extractErrorMessage(error, '获取标签统计失败'))
+    },
+    onFinally: () => {
+      aggregateLoading.value = false
+    },
+  })
+}
+
+const handleAggregateReset = () => {
+  aggregateOrderType.value = ''
+  aggregateDateRange.value = [dayjs().subtract(30, 'day').format('YYYY-MM-DD'), dayjs().format('YYYY-MM-DD')]
+  if (!aggregateTagId.value && tags.value.length > 0) {
+    aggregateTagId.value = tags.value[0].id
+  }
+  handleAggregateSearch().catch(() => undefined)
 }
 
 onMounted(() => {
   pageReady.value = true
-  void refreshTagView()
+  refreshTagView().then(() => handleAggregateSearch()).catch(() => undefined)
 })
 
 onActivated(() => {
@@ -149,7 +232,7 @@ onActivated(() => {
     return
   }
 
-  void refreshTagView()
+  refreshTagView().then(() => handleAggregateSearch()).catch(() => undefined)
 })
 </script>
 
@@ -165,6 +248,61 @@ onActivated(() => {
         <el-button :class="isPhone ? 'flex-1' : ''" icon="Refresh" @click="refreshTagView">刷新列表</el-button>
       </template>
     </PageToolbarCard>
+
+    <div class="apple-card p-4 sm:p-5 xl:p-6">
+      <div class="flex flex-wrap items-center gap-3">
+        <el-select
+          v-model="aggregateTagId"
+          filterable
+          placeholder="请选择标签"
+          :class="['!w-full', 'sm:!w-[220px]']"
+        >
+          <el-option v-for="item in tags" :key="item.id" :label="item.tagName" :value="item.id" />
+        </el-select>
+        <el-date-picker
+          v-model="aggregateDateRange"
+          type="daterange"
+          unlink-panels
+          value-format="YYYY-MM-DD"
+          range-separator="至"
+          start-placeholder="开始日期"
+          end-placeholder="结束日期"
+          :class="['!w-full', 'sm:!w-[320px]']"
+        />
+        <el-select
+          v-model="aggregateOrderType"
+          clearable
+          placeholder="订单类型（可选）"
+          :class="['!w-full', 'sm:!w-[180px]']"
+        >
+          <el-option label="部门单" value="department" />
+          <el-option label="散客单" value="walkin" />
+        </el-select>
+        <div class="flex w-full gap-2 sm:w-auto">
+          <el-button class="flex-1 sm:flex-none" type="primary" :loading="aggregateLoading" @click="handleAggregateSearch">
+            查询统计
+          </el-button>
+          <el-button class="flex-1 sm:flex-none" :disabled="aggregateLoading" @click="handleAggregateReset">重置</el-button>
+        </div>
+      </div>
+      <div v-if="aggregateLoading" class="mt-4">
+        <el-skeleton animated :rows="4" />
+      </div>
+      <div v-else-if="aggregateResult" class="mt-4 space-y-3">
+        <div class="rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-500 dark:bg-slate-900/40 dark:text-slate-300">
+          {{ aggregateResult.tagName }} ｜ {{ aggregateDateRange[0] }} 至 {{ aggregateDateRange[1] }} ｜ {{ aggregateOrderType ? (aggregateOrderType === 'department' ? '部门单' : '散客单') : '全部订单类型' }}
+        </div>
+        <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div v-for="item in aggregateSummary" :key="item.key" class="rounded-xl bg-slate-50 px-3 py-2.5 dark:bg-slate-900/40">
+            <div class="text-xs text-slate-500 dark:text-slate-400">{{ item.label }}</div>
+            <div class="mt-1 text-sm font-semibold text-slate-800 dark:text-slate-100">{{ item.value }}</div>
+          </div>
+        </div>
+      </div>
+      <div v-else class="mt-4 flex min-h-[110px] items-center justify-center rounded-xl bg-slate-50 text-slate-400 dark:bg-slate-900/40">
+        <el-empty :image-size="56" description="请选择标签并查询统计" />
+      </div>
+    </div>
 
     <BizResponsiveDataCollectionShell
       :items="tags"

@@ -12,6 +12,7 @@ const SQLITE_REQUIRED_TABLES = [
   'sys_user',
   'sys_user_session',
   'sys_audit_log',
+  'system_configs',
 ]
 
 const SQLITE_REQUIRED_ORDER_COLUMNS = [
@@ -23,6 +24,11 @@ const SQLITE_REQUIRED_ORDER_COLUMNS = [
   'deleted_by_user_id',
   'deleted_by_username',
   'deleted_by_display_name',
+  'order_type',
+  'has_customer_order',
+  'is_system_applied',
+  'issuer_name',
+  'customer_department_name',
 ]
 
 export function resolveSqliteDatabasePath(): string {

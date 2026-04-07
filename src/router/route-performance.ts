@@ -12,6 +12,7 @@ export type AppRouteName =
   | 'products'
   | 'tags'
   | 'system'
+  | 'system-configs'
   | 'system-users'
   | 'system-audit-logs'
   | 'not-found'
@@ -33,6 +34,7 @@ export const routeViewLoaders = {
   'order-list': () => import('@/views/order-list/OrderListView.vue'),
   products: () => import('@/views/base-data/ProductManageView.vue'),
   tags: () => import('@/views/base-data/TagManageView.vue'),
+  'system-configs': () => import('@/views/system/SystemConfigViewLoader'),
   'system-users': () => import('@/views/system/UserManageView.vue'),
   'system-audit-logs': () => import('@/views/system/AuditLogView.vue'),
   'not-found': () => import('@/views/not-found/NotFoundView.vue'),
@@ -50,6 +52,7 @@ const warmableRouteLoaders: Partial<Record<RouteWarmupTarget, RouteViewLoader>> 
   'order-list': routeViewLoaders['order-list'],
   products: routeViewLoaders.products,
   tags: routeViewLoaders.tags,
+  'system-configs': routeViewLoaders['system-configs'],
   'system-users': routeViewLoaders['system-users'],
   'system-audit-logs': routeViewLoaders['system-audit-logs'],
 }

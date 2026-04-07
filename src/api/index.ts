@@ -4,6 +4,7 @@
  */
 export * as authApi from '@/api/modules/auth'
 export * as systemApi from '@/api/modules/system'
+export * as systemConfigApi from '@/api/modules/system-config'
 export * as productApi from '@/api/modules/product'
 export * as orderApi from '@/api/modules/order'
 export * as tagApi from '@/api/modules/tag'

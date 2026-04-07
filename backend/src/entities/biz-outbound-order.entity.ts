@@ -11,6 +11,8 @@ import {
 import { BizOutboundOrderItem } from './biz-outbound-order-item.entity.js'
 import { entityColumnOptions } from './entity-column-options.js'
 
+@Index('uk_biz_outbound_show_no_is_deleted', ['showNo', 'isDeleted'], { unique: true })
+@Index('idx_biz_outbound_order_type_created_at', ['orderType', 'createdAt'])
 @Entity({ name: 'biz_outbound_order' })
 export class BizOutboundOrder {
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })
@@ -20,9 +22,30 @@ export class BizOutboundOrder {
   @Column({ name: 'order_uuid', ...entityColumnOptions.uuid, length: 36, comment: '系统唯一UUID' })
   orderUuid!: string
 
-  @Index('uk_biz_outbound_show_no', { unique: true })
   @Column({ name: 'show_no', type: 'varchar', length: 32, comment: '业务展示单号' })
   showNo!: string
+
+  @Index('idx_biz_outbound_order_type')
+  @Column({ name: 'order_type', type: 'varchar', length: 32, default: 'walkin', comment: '订单类型' })
+  orderType!: string
+
+  @Column({ name: 'has_customer_order', ...entityColumnOptions.booleanFlag, default: 0, comment: '是否有客户订单' })
+  hasCustomerOrder!: boolean
+
+  @Column({ name: 'is_system_applied', ...entityColumnOptions.booleanFlag, default: 0, comment: '是否系统申请' })
+  isSystemApplied!: boolean
+
+  @Column({ name: 'issuer_name', type: 'varchar', length: 64, nullable: true, comment: '出单人' })
+  issuerName!: string | null
+
+  @Column({
+    name: 'customer_department_name',
+    type: 'varchar',
+    length: 128,
+    nullable: true,
+    comment: '客户部门名称',
+  })
+  customerDepartmentName!: string | null
 
   @Index('uk_biz_outbound_idempotency_key', { unique: true })
   @Column({ name: 'idempotency_key', type: 'varchar', length: 128, comment: '幂等键' })
