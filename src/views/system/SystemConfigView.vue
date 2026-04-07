@@ -113,7 +113,7 @@ const loadData = async () => {
       applyList(result.list)
     },
     onError: (error) => {
-      ElMessage.error(extractErrorMessage(error))
+      ElMessage.error(extractErrorMessage(error, '加载系统配置失败，请稍后重试'))
     },
     onFinally: () => {
       loading.value = false
@@ -155,7 +155,7 @@ const handleSubmit = async () => {
     applyList(result.list)
     ElMessage.success(result.changed ? '系统配置已保存' : '配置未变更')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error))
+    ElMessage.error(extractErrorMessage(error, '保存系统配置失败，请稍后重试'))
   } finally {
     saving.value = false
   }
