@@ -41,6 +41,22 @@ const initialSnapshot = ref('')
 const canViewConfigs = computed(() => authStore.hasPermission('system_configs:view'))
 const canUpdateConfigs = computed(() => authStore.hasPermission('system_configs:update'))
 
+const formatSerialPreview = (prefix: string | undefined, current: number, width: number) => {
+  const safePrefix = String(prefix ?? '').trim() || '-'
+  const safeCurrent = Math.max(0, Number(current) || 0)
+  const safeWidth = Math.max(1, Number(width) || 1)
+  const nextSerial = String(safeCurrent + 1).padStart(safeWidth, '0')
+  return `${safePrefix}${nextSerial}`
+}
+
+const departmentPreview = computed(() =>
+  formatSerialPreview(configMap.value?.department.prefix, serialForm.department.current, serialForm.department.width),
+)
+
+const walkinPreview = computed(() =>
+  formatSerialPreview(configMap.value?.walkin.prefix, serialForm.walkin.current, serialForm.walkin.width),
+)
+
 const snapshotForm = () =>
   JSON.stringify({
     department: {
@@ -169,6 +185,13 @@ onMounted(() => {
           保存配置
         </el-button>
       </div>
+      <el-alert
+        title="简要说明"
+        type="info"
+        :closable="false"
+        show-icon
+        description="这里用于维护订单编号规则：系统会按“前缀 + 流水号”自动生成下一张单据编号。建议仅在管理员确认后修改，以免影响对账连续性。"
+      />
     </PageToolbarCard>
 
     <el-alert
@@ -188,6 +211,10 @@ onMounted(() => {
           </div>
         </template>
         <div class="grid gap-3">
+          <div class="rounded-lg border border-teal-200 bg-teal-50/60 px-3 py-2 text-xs text-teal-700 dark:border-teal-900/70 dark:bg-teal-900/20 dark:text-teal-300">
+            <div class="font-semibold">订单编号示例（下一单）</div>
+            <div class="mt-1 text-sm font-bold tracking-wide">{{ departmentPreview }}</div>
+          </div>
           <el-form-item label="起始号" prop="department.start">
             <el-input-number v-model="serialForm.department.start" :min="1" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
           </el-form-item>
@@ -209,6 +236,10 @@ onMounted(() => {
           </div>
         </template>
         <div class="grid gap-3">
+          <div class="rounded-lg border border-sky-200 bg-sky-50/60 px-3 py-2 text-xs text-sky-700 dark:border-sky-900/70 dark:bg-sky-900/20 dark:text-sky-300">
+            <div class="font-semibold">订单编号示例（下一单）</div>
+            <div class="mt-1 text-sm font-bold tracking-wide">{{ walkinPreview }}</div>
+          </div>
           <el-form-item label="起始号" prop="walkin.start">
             <el-input-number v-model="serialForm.walkin.start" :min="1" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
           </el-form-item>
