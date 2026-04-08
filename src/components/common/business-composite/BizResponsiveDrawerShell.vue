@@ -74,7 +74,6 @@ const drawerSize = computed(() => {
 <template>
   <el-drawer
     :model-value="props.modelValue"
-    :title="props.title"
     :direction="drawerDirection"
     :size="drawerSize"
     :destroy-on-close="props.destroyOnClose"
@@ -83,6 +82,11 @@ const drawerSize = computed(() => {
     :class="props.drawerClass"
     @update:model-value="emit('update:modelValue', $event)"
   >
+    <template #header>
+      <slot name="header" :is-phone="appStore.isPhone" :is-tablet="appStore.isTablet" :is-desktop="appStore.isDesktop">
+        <span>{{ props.title }}</span>
+      </slot>
+    </template>
     <div v-loading="props.loading" :class="['h-full min-w-0 overflow-y-auto pr-2', props.bodyClass]">
       <slot :is-phone="appStore.isPhone" :is-tablet="appStore.isTablet" :is-desktop="appStore.isDesktop" />
     </div>

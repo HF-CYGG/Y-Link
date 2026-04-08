@@ -299,10 +299,13 @@ const handleExportVoucherPdf = async () => {
       body-class="order-detail-content"
       drawer-class="order-detail-drawer"
     >
-      <template #default="{ isPhone, isDesktop }">
-        <div v-if="currentOrder" class="mb-3 flex flex-wrap items-center justify-end gap-2">
-          <el-button plain type="primary" @click="handleOpenVoucherDialog">生成凭证</el-button>
+      <template #header>
+        <div class="order-detail-drawer-header">
+          <span class="order-detail-drawer-header__title">单据详情</span>
+          <el-button v-if="currentOrder" plain type="primary" @click="handleOpenVoucherDialog">生成凭证</el-button>
         </div>
+      </template>
+      <template #default="{ isPhone, isDesktop }">
         <OrderDetailDrawerContent
           v-if="currentOrder"
           :order="currentOrder"
@@ -315,13 +318,52 @@ const handleExportVoucherPdf = async () => {
 
     <el-dialog
       v-model="voucherDialogVisible"
-      title="购物凭证模板"
-      width="880px"
+      title="确认出库信息"
+      width="640px"
       align-center
       class="order-voucher-dialog"
     >
-      <div v-if="currentOrder" class="order-voucher-print-scope">
-        <OrderVoucherTemplate :order="currentOrder" />
+      <div v-if="currentOrder" class="voucher-confirm-banner">
+        <div class="voucher-confirm-banner__title">请先核对关键信息</div>
+        <div class="voucher-confirm-banner__content">
+          <span>确认无误后再打印凭证。</span>
+        </div>
+      </div>
+      <div v-if="currentOrder" class="voucher-confirm-panel">
+        <div class="voucher-confirm-grid">
+          <div class="voucher-confirm-item">
+            <span class="voucher-confirm-item__label">业务单号</span>
+            <span class="voucher-confirm-item__value">{{ currentOrder.showNo }}</span>
+          </div>
+          <div class="voucher-confirm-item">
+            <span class="voucher-confirm-item__label">订单类型</span>
+            <span class="voucher-confirm-item__value">{{ getOrderTypeLabel(currentOrder.orderType) }}</span>
+          </div>
+          <div class="voucher-confirm-item">
+            <span class="voucher-confirm-item__label">客户部门</span>
+            <span class="voucher-confirm-item__value">{{ currentOrder.customerDepartmentName || '散客' }}</span>
+          </div>
+          <div class="voucher-confirm-item">
+            <span class="voucher-confirm-item__label">领取人</span>
+            <span class="voucher-confirm-item__value">{{ currentOrder.customerName || '-' }}</span>
+          </div>
+          <div class="voucher-confirm-item">
+            <span class="voucher-confirm-item__label">出库人</span>
+            <span class="voucher-confirm-item__value">{{ currentOrder.issuerName || '-' }}</span>
+          </div>
+          <div class="voucher-confirm-item">
+            <span class="voucher-confirm-item__label">开单时间</span>
+            <span class="voucher-confirm-item__value">{{ dayjs(currentOrder.createdAt).format('YYYY-MM-DD HH:mm:ss') }}</span>
+          </div>
+          <div class="voucher-confirm-item">
+            <span class="voucher-confirm-item__label">总数量</span>
+            <span class="voucher-confirm-item__value">{{ currentOrder.totalQty }}</span>
+          </div>
+          <div class="voucher-confirm-item">
+            <span class="voucher-confirm-item__label">总金额</span>
+            <span class="voucher-confirm-item__value voucher-confirm-item__value--accent">¥{{ Number(currentOrder.totalAmount).toFixed(2) }}</span>
+          </div>
+        </div>
       </div>
       <template #footer>
         <span class="flex flex-wrap justify-end gap-2">
@@ -356,10 +398,54 @@ const handleExportVoucherPdf = async () => {
   background: linear-gradient(180deg, rgba(15, 118, 110, 0.03) 0%, rgba(15, 118, 110, 0) 28%);
 }
 
+.order-detail-drawer-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-right: 10px;
+}
+
+.order-detail-drawer-header__title {
+  font-size: 22px;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.dark .order-detail-drawer-header__title {
+  color: #e2e8f0;
+}
+
+.order-detail-drawer-header :deep(.el-button) {
+  flex-shrink: 0;
+}
+
+@media (max-width: 768px) {
+  .order-detail-drawer-header {
+    padding-right: 0;
+  }
+
+  .order-detail-drawer-header__title {
+    font-size: 18px;
+  }
+}
+
+/* 清理旧的内容区吸顶按钮样式 */
+.order-detail-sticky-actions {
+  display: none;
+}
+
 @media (min-width: 768px) {
   .order-detail-content {
     padding: 16px 18px 20px;
   }
+}
+
+/* 保留历史类名，避免潜在外部引用导致布局跳变 */
+.order-detail-sticky-actions {
+  z-index: 5;
+  background: transparent;
 }
 
 .order-detail-content :deep(.el-descriptions__label),
@@ -388,6 +474,73 @@ const handleExportVoucherPdf = async () => {
   background: #ffffff;
   border-radius: 16px;
 }
+
+.voucher-confirm-banner {
+  margin-bottom: 10px;
+  border: 1px solid #c7d2fe;
+  border-radius: 12px;
+  background: #f8faff;
+  padding: 8px 10px;
+}
+
+.voucher-confirm-banner__title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #1e40af;
+}
+
+.voucher-confirm-banner__content {
+  margin-top: 2px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  font-size: 11px;
+  color: #334155;
+}
+
+.voucher-confirm-panel {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #fff;
+  padding: 12px;
+}
+
+.voucher-confirm-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.voucher-confirm-item {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 8px 10px;
+  background: #fcfdff;
+}
+
+.voucher-confirm-item__label {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 11px;
+  color: #64748b;
+}
+
+.voucher-confirm-item__value {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.voucher-confirm-item__value--accent {
+  color: #b91c1c;
+}
+
+@media (max-width: 768px) {
+  .voucher-confirm-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
 </style>
 
 <style>
@@ -396,6 +549,13 @@ const handleExportVoucherPdf = async () => {
 }
 
 @media print {
+  html,
+  body {
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #fff !important;
+  }
+
   body * {
     visibility: hidden !important;
   }
@@ -408,16 +568,21 @@ const handleExportVoucherPdf = async () => {
   .order-voucher-print-root {
     position: fixed;
     inset: 0;
+    width: 100vw;
+    min-height: 100vh;
     z-index: 99999;
-    display: block;
+    display: block !important;
     background: #ffffff;
-    padding: 16px;
+    padding: 0;
+    overflow: visible;
   }
 
-  .order-voucher-print-root .voucher-sheet {
-    border: none;
-    border-radius: 0;
-    padding: 0;
+  .order-voucher-print-root .order-voucher-print-scope {
+    width: 194mm;
+    max-width: 194mm;
+    min-height: 297mm;
+    margin: 0 auto;
+    overflow: hidden;
   }
 }
 </style>
