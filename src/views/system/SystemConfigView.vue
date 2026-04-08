@@ -174,101 +174,111 @@ onMounted(() => {
 
 <template>
   <PageContainer title="系统配置" description="维护部门/散客双流水参数，所有变更会记录审计日志。">
-    <PageToolbarCard class="space-y-3">
-      <div class="flex flex-wrap items-center justify-between gap-3">
-        <div class="text-sm text-slate-600 dark:text-slate-300">
-          {{ canUpdateConfigs ? '当前账号（管理员）可编辑参数并提交保存' : '当前账号仅支持只读查看（仅管理员可修改）' }}
+    <div class="space-y-6">
+      <PageToolbarCard class="space-y-3">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <div class="text-sm text-slate-600 dark:text-slate-300">
+            {{ canUpdateConfigs ? '当前账号（管理员）可编辑参数并提交保存' : '当前账号仅支持只读查看（仅管理员可修改）' }}
+          </div>
+          <el-button v-if="canUpdateConfigs" type="primary" :loading="saving" :disabled="loading || !isDirty" @click="handleSubmit">
+            保存配置
+          </el-button>
         </div>
-        <el-button v-if="canUpdateConfigs" type="primary" :loading="saving" :disabled="loading || !isDirty" @click="handleSubmit">
-          保存配置
-        </el-button>
-      </div>
+        <el-alert
+          title="简要说明"
+          type="info"
+          :closable="false"
+          show-icon
+          description="这里用于维护订单编号规则：系统会按“前缀 + 流水号”自动生成下一张单据编号。建议仅在管理员确认后修改，以免影响对账连续性。"
+        />
+      </PageToolbarCard>
+
       <el-alert
-        title="简要说明"
-        type="info"
+        v-if="!canViewConfigs"
+        title="当前账号暂无系统配置查看权限"
+        type="warning"
         :closable="false"
         show-icon
-        description="这里用于维护订单编号规则：系统会按“前缀 + 流水号”自动生成下一张单据编号。建议仅在管理员确认后修改，以免影响对账连续性。"
       />
-    </PageToolbarCard>
 
-    <el-alert
-      v-if="!canViewConfigs"
-      title="当前账号暂无系统配置查看权限"
-      type="warning"
-      :closable="false"
-      show-icon
-    />
-
-    <el-form v-else ref="formRef" :model="serialForm" :rules="rules" label-position="top" class="grid gap-4 lg:grid-cols-2">
-      <el-card class="border border-slate-200/80 dark:border-white/10" shadow="never">
-        <template #header>
-          <div class="flex items-center justify-between gap-2">
-            <span class="text-sm font-semibold text-slate-800 dark:text-slate-100">部门订单流水</span>
-            <span class="text-xs text-slate-500 dark:text-slate-400">前缀：{{ configMap?.department.prefix || 'hyyzjd' }}</span>
-          </div>
-        </template>
-        <div class="grid gap-3">
-          <div class="rounded-lg border border-teal-200 bg-teal-50/60 px-3 py-2 text-xs text-teal-700 dark:border-teal-900/70 dark:bg-teal-900/20 dark:text-teal-300">
-            <div class="font-semibold">订单编号示例（下一单）</div>
-            <div class="mt-1 text-sm font-bold tracking-wide">{{ departmentPreview }}</div>
-          </div>
-          <el-form-item prop="department.start">
-            <template #label>
-              <span class="field-label">起始号 <span class="field-label__help">首次生效编号起点</span></span>
-            </template>
-            <el-input-number v-model="serialForm.department.start" :min="1" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
-          </el-form-item>
-          <el-form-item prop="department.current">
-            <template #label>
-              <span class="field-label">当前号 <span class="field-label__help">系统自动维护，仅展示不可编辑</span></span>
-            </template>
-            <el-input :model-value="String(serialForm.department.current)" disabled class="!w-full" />
-          </el-form-item>
-          <el-form-item prop="department.width">
-            <template #label>
-              <span class="field-label">位宽 <span class="field-label__help">流水号补零位数（1-12）</span></span>
-            </template>
-            <el-input-number v-model="serialForm.department.width" :min="1" :max="12" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
-          </el-form-item>
+      <el-form v-else ref="formRef" :model="serialForm" :rules="rules" label-position="top" class="grid gap-6 lg:grid-cols-2">
+      <div class="apple-card flex flex-col p-5 sm:p-6 xl:p-7">
+        <div class="mb-5 flex items-center justify-between gap-2 border-b border-slate-100 pb-4 dark:border-white/5">
+          <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">部门订单流水</h2>
+          <span class="rounded-lg bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+            前缀：{{ configMap?.department.prefix || 'hyyzjd' }}
+          </span>
         </div>
-        <div class="mt-2 text-xs text-slate-500 dark:text-slate-400">最近更新时间：{{ getUpdatedAtLabel('department') }}</div>
-      </el-card>
-
-      <el-card class="border border-slate-200/80 dark:border-white/10" shadow="never">
-        <template #header>
-          <div class="flex items-center justify-between gap-2">
-            <span class="text-sm font-semibold text-slate-800 dark:text-slate-100">散客订单流水</span>
-            <span class="text-xs text-slate-500 dark:text-slate-400">前缀：{{ configMap?.walkin.prefix || 'hyyz' }}</span>
+        <div class="grid flex-1 gap-5">
+          <div class="rounded-xl border border-teal-200/60 bg-teal-50/50 p-4 text-teal-800 dark:border-teal-900/40 dark:bg-teal-900/10 dark:text-teal-300">
+            <div class="text-xs font-medium opacity-80">订单编号示例（下一单）</div>
+            <div class="mt-1.5 text-lg font-bold tracking-wide">{{ departmentPreview }}</div>
           </div>
-        </template>
-        <div class="grid gap-3">
-          <div class="rounded-lg border border-sky-200 bg-sky-50/60 px-3 py-2 text-xs text-sky-700 dark:border-sky-900/70 dark:bg-sky-900/20 dark:text-sky-300">
-            <div class="font-semibold">订单编号示例（下一单）</div>
-            <div class="mt-1 text-sm font-bold tracking-wide">{{ walkinPreview }}</div>
+          <div class="space-y-4">
+            <el-form-item prop="department.start" class="!mb-0">
+              <template #label>
+                <span class="field-label">起始号 <span class="field-label__help">首次生效编号起点</span></span>
+              </template>
+              <el-input-number v-model="serialForm.department.start" :min="1" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
+            </el-form-item>
+            <el-form-item prop="department.current" class="!mb-0">
+              <template #label>
+                <span class="field-label">当前号 <span class="field-label__help">系统自动维护，仅展示不可编辑</span></span>
+              </template>
+              <el-input :model-value="String(serialForm.department.current)" disabled class="!w-full" />
+            </el-form-item>
+            <el-form-item prop="department.width" class="!mb-0">
+              <template #label>
+                <span class="field-label">位宽 <span class="field-label__help">流水号补零位数（1-12）</span></span>
+              </template>
+              <el-input-number v-model="serialForm.department.width" :min="1" :max="12" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
+            </el-form-item>
           </div>
-          <el-form-item prop="walkin.start">
-            <template #label>
-              <span class="field-label">起始号 <span class="field-label__help">首次生效编号起点</span></span>
-            </template>
-            <el-input-number v-model="serialForm.walkin.start" :min="1" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
-          </el-form-item>
-          <el-form-item prop="walkin.current">
-            <template #label>
-              <span class="field-label">当前号 <span class="field-label__help">系统自动维护，仅展示不可编辑</span></span>
-            </template>
-            <el-input :model-value="String(serialForm.walkin.current)" disabled class="!w-full" />
-          </el-form-item>
-          <el-form-item prop="walkin.width">
-            <template #label>
-              <span class="field-label">位宽 <span class="field-label__help">流水号补零位数（1-12）</span></span>
-            </template>
-            <el-input-number v-model="serialForm.walkin.width" :min="1" :max="12" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
-          </el-form-item>
         </div>
-        <div class="mt-2 text-xs text-slate-500 dark:text-slate-400">最近更新时间：{{ getUpdatedAtLabel('walkin') }}</div>
-      </el-card>
-    </el-form>
+        <div class="mt-6 border-t border-slate-100 pt-4 text-xs text-slate-400 dark:border-white/5 dark:text-slate-500">
+          最近更新时间：{{ getUpdatedAtLabel('department') }}
+        </div>
+      </div>
+
+      <div class="apple-card flex flex-col p-5 sm:p-6 xl:p-7">
+        <div class="mb-5 flex items-center justify-between gap-2 border-b border-slate-100 pb-4 dark:border-white/5">
+          <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">散客订单流水</h2>
+          <span class="rounded-lg bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+            前缀：{{ configMap?.walkin.prefix || 'hyyz' }}
+          </span>
+        </div>
+        <div class="grid flex-1 gap-5">
+          <div class="rounded-xl border border-sky-200/60 bg-sky-50/50 p-4 text-sky-800 dark:border-sky-900/40 dark:bg-sky-900/10 dark:text-sky-300">
+            <div class="text-xs font-medium opacity-80">订单编号示例（下一单）</div>
+            <div class="mt-1.5 text-lg font-bold tracking-wide">{{ walkinPreview }}</div>
+          </div>
+          <div class="space-y-4">
+            <el-form-item prop="walkin.start" class="!mb-0">
+              <template #label>
+                <span class="field-label">起始号 <span class="field-label__help">首次生效编号起点</span></span>
+              </template>
+              <el-input-number v-model="serialForm.walkin.start" :min="1" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
+            </el-form-item>
+            <el-form-item prop="walkin.current" class="!mb-0">
+              <template #label>
+                <span class="field-label">当前号 <span class="field-label__help">系统自动维护，仅展示不可编辑</span></span>
+              </template>
+              <el-input :model-value="String(serialForm.walkin.current)" disabled class="!w-full" />
+            </el-form-item>
+            <el-form-item prop="walkin.width" class="!mb-0">
+              <template #label>
+                <span class="field-label">位宽 <span class="field-label__help">流水号补零位数（1-12）</span></span>
+              </template>
+              <el-input-number v-model="serialForm.walkin.width" :min="1" :max="12" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
+            </el-form-item>
+          </div>
+        </div>
+        <div class="mt-6 border-t border-slate-100 pt-4 text-xs text-slate-400 dark:border-white/5 dark:text-slate-500">
+          最近更新时间：{{ getUpdatedAtLabel('walkin') }}
+        </div>
+      </div>
+      </el-form>
+    </div>
   </PageContainer>
 </template>
 
