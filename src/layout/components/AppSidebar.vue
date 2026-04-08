@@ -162,7 +162,7 @@ const deviceLabel = computed(() => {
         </p>
 
         <el-menu
-          :key="openedMenuPaths.join('|') || group.groupName"
+          :key="group.groupName"
           :default-active="activePath"
           :default-openeds="openedMenuPaths"
           class="app-sidebar-menu border-none bg-transparent"
