@@ -750,6 +750,37 @@ export const useOrderEntryForm = () => {
   })
 
   /**
+   * 订单类型切换时清理依赖状态：
+   * - 散客单不可有出库单（重置并禁用）；
+   * - 散客单清空客户部门信息。
+   */
+  watch(
+    () => headerForm.orderType,
+    (newType) => {
+      if (newType === 'walkin') {
+        headerForm.hasCustomerOrder = false
+        headerForm.isSystemApplied = false
+        headerForm.customerDepartmentName = ''
+      }
+    },
+  )
+
+  /**
+   * “是否有出库单”与“是否系统申请”联动逻辑：
+   * - 一般情况下两者同步（要有都有）；
+   * - 特殊情况：有出库单但系统没申请通过，所以当开启出库单时，系统申请默认联动开启，但允许用户单独关闭系统申请；
+   * - 若关闭了出库单，通常意味着连最基础的财务单据都没有，则系统申请也联动关闭。
+   */
+  watch(
+    () => headerForm.hasCustomerOrder,
+    (hasOrder) => {
+      if (headerForm.orderType === 'department') {
+        headerForm.isSystemApplied = hasOrder
+      }
+    },
+  )
+
+  /**
    * 监听录入态变化并实时保存草稿：
    * - 覆盖主单、明细、抽屉草稿三部分；
    * - 让用户临时切页后返回时恢复到离开前的输入状态。

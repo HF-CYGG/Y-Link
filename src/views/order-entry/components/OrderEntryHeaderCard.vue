@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { InfoFilled } from '@element-plus/icons-vue'
 import type { OrderHeaderForm } from '../types'
 
 /**
@@ -24,7 +25,7 @@ defineProps<{
         <span class="rounded-full bg-white px-2.5 py-1 dark:bg-white/10">建议先录客户，再录明细</span>
       </div>
     </div>
-    <el-form :model="model" :label-width="isPhone ? '80px' : '88px'">
+    <el-form :model="model" label-width="120px" class="flex-1" :class="{ 'px-2': isPhone }">
       <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
         <el-form-item label="订单类型" class="mb-0">
           <el-radio-group v-model="model.orderType">
@@ -35,11 +36,27 @@ defineProps<{
         <el-form-item label="出单人" class="mb-0">
           <el-input v-model="model.issuerName" maxlength="64" placeholder="必填：出单人姓名" />
         </el-form-item>
-        <el-form-item label="客户订单" class="mb-0">
-          <el-switch v-model="model.hasCustomerOrder" />
+        <el-form-item class="mb-0">
+          <template #label>
+            <div class="flex items-center gap-1">
+              是否有出库单
+              <el-tooltip content="用于标记客户是否携带已走完学校财务流程的出库凭单来取货" placement="top">
+                <el-icon class="text-slate-400"><InfoFilled /></el-icon>
+              </el-tooltip>
+            </div>
+          </template>
+          <el-switch v-model="model.hasCustomerOrder" :disabled="model.orderType === 'walkin'" />
         </el-form-item>
-        <el-form-item label="系统申请" class="mb-0">
-          <el-switch v-model="model.isSystemApplied" />
+        <el-form-item class="mb-0">
+          <template #label>
+            <div class="flex items-center gap-1">
+              是否系统申请
+              <el-tooltip content="用于标记该笔出库是否已在学校/企业系统内完成审批申请" placement="top">
+                <el-icon class="text-slate-400"><InfoFilled /></el-icon>
+              </el-tooltip>
+            </div>
+          </template>
+          <el-switch v-model="model.isSystemApplied" :disabled="model.orderType === 'walkin'" />
         </el-form-item>
         <el-form-item label="客户部门" class="mb-0">
           <el-input

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+
 import dayjs from 'dayjs'
 import { ElMessage } from 'element-plus'
 import { ref } from 'vue'
@@ -161,7 +162,7 @@ const handleExportVoucherPdf = async () => {
               <el-table-column label="订单类型" min-width="100">
                 <template #default="{ row }">{{ getOrderTypeLabel(row.orderType) }}</template>
               </el-table-column>
-              <el-table-column label="客户订单" width="90" align="center">
+              <el-table-column label="是否有出库单" width="116" align="center">
                 <template #default="{ row }">
                   <el-tag :type="row.hasCustomerOrder ? 'success' : 'info'" effect="light">
                     {{ row.hasCustomerOrder ? '是' : '否' }}
@@ -242,7 +243,7 @@ const handleExportVoucherPdf = async () => {
               </div>
               <div class="mt-1 text-sm text-slate-600 dark:text-slate-300">类型：{{ getOrderTypeLabel(item.orderType) }}</div>
               <div class="text-sm text-slate-600 dark:text-slate-300">
-                客户订单：{{ item.hasCustomerOrder ? '是' : '否' }} / 系统申请：{{ item.isSystemApplied ? '是' : '否' }}
+                是否有出库单：{{ item.hasCustomerOrder ? '是' : '否' }} / 系统申请：{{ item.isSystemApplied ? '是' : '否' }}
               </div>
               <div class="text-sm text-slate-600 dark:text-slate-300">出单人：{{ item.issuerName || '-' }}</div>
               <div class="text-sm text-slate-600 dark:text-slate-300">客户部门：{{ item.customerDepartmentName || '-' }}</div>

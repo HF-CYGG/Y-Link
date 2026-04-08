@@ -48,7 +48,7 @@ const formatOrderType = (value: OrderDetailResult['orderType']) => {
       <el-descriptions-item label="开单时间">{{ dayjs(order.createdAt).format('YYYY-MM-DD HH:mm:ss') }}</el-descriptions-item>
       <el-descriptions-item label="客户名称">{{ order.customerName || '-' }}</el-descriptions-item>
       <el-descriptions-item label="客户部门">{{ order.customerDepartmentName || '-' }}</el-descriptions-item>
-      <el-descriptions-item label="客户订单">{{ order.hasCustomerOrder ? '是' : '否' }}</el-descriptions-item>
+      <el-descriptions-item label="是否有出库单">{{ order.hasCustomerOrder ? '是' : '否' }}</el-descriptions-item>
       <el-descriptions-item label="系统申请">{{ order.isSystemApplied ? '是' : '否' }}</el-descriptions-item>
       <el-descriptions-item label="出单人">{{ order.issuerName || '-' }}</el-descriptions-item>
       <el-descriptions-item label="开单人">{{ order.creatorDisplayName || order.creatorUsername || '-' }}</el-descriptions-item>
