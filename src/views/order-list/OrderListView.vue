@@ -9,6 +9,8 @@ import {
   PagePaginationBar,
   PageToolbarCard,
 } from '@/components/common'
+import { extractErrorMessage } from '@/utils/error'
+import { exportVoucherPdf } from '@/utils/pdf/export-voucher-pdf'
 import OrderDetailDrawerContent from './components/OrderDetailDrawerContent.vue'
 import OrderVoucherTemplate from './components/OrderVoucherTemplate.vue'
 import { useOrderListView } from './composables/useOrderListView'
@@ -42,17 +44,10 @@ const {
   handleRestoreOrderWithConfirm,
 } = useOrderListView()
 
-type Html2PdfWorker = {
-  set: (options: Record<string, unknown>) => Html2PdfWorker
-  from: (source: HTMLElement) => Html2PdfWorker
-  save: (filename?: string) => Promise<void>
-}
-
-type Html2PdfFactory = () => Html2PdfWorker
-
 const voucherDialogVisible = ref(false)
 const voucherPrintRootRef = ref<HTMLElement | null>(null)
-const enableHtml2pdfExport = import.meta.env.VITE_ORDER_VOUCHER_HTML2PDF_ENABLED === 'true'
+const enableHtml2pdfExport = import.meta.env.VITE_ORDER_VOUCHER_HTML2PDF_ENABLED !== 'false'
+const exportPdfLoading = ref(false)
 
 const handleOpenVoucherDialog = () => {
   if (!currentOrder.value) {
@@ -78,9 +73,8 @@ const handleExportVoucherPdf = async () => {
     return
   }
 
-  const html2pdfFactory = (globalThis as unknown as { html2pdf?: Html2PdfFactory }).html2pdf
-  if (typeof html2pdfFactory !== 'function') {
-    ElMessage.warning('未检测到 html2pdf.js，请在启用开关后接入依赖')
+  if (!currentOrder.value) {
+    ElMessage.warning('当前无可导出的凭证')
     return
   }
 
@@ -90,17 +84,22 @@ const handleExportVoucherPdf = async () => {
     return
   }
 
-  const outputFileName = `${currentOrder.value?.showNo || 'order-voucher'}-购物凭证.pdf`
-  await html2pdfFactory()
-    .set({
-      margin: 8,
+  const outputFileName = `${currentOrder.value.showNo || 'order-voucher'}-购物凭证.pdf`
+
+  exportPdfLoading.value = true
+  try {
+    await exportVoucherPdf({
+      sourceElement,
       filename: outputFileName,
-      image: { type: 'jpeg', quality: 0.98 },
-      html2canvas: { scale: 2, useCORS: true },
-      jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' },
+      marginMm: 8,
+      scale: 2,
     })
-    .from(sourceElement)
-    .save(outputFileName)
+    ElMessage.success('PDF 导出成功')
+  } catch (error) {
+    ElMessage.error(extractErrorMessage(error, 'PDF 导出失败，请稍后重试'))
+  } finally {
+    exportPdfLoading.value = false
+  }
 }
 </script>
 
@@ -369,8 +368,8 @@ const handleExportVoucherPdf = async () => {
         <span class="flex flex-wrap justify-end gap-2">
           <el-button @click="voucherDialogVisible = false">关闭</el-button>
           <el-button type="primary" plain @click="handlePrintVoucher">打印</el-button>
-          <el-button type="primary" :disabled="!enableHtml2pdfExport" @click="handleExportVoucherPdf">
-            导出PDF（预留）
+          <el-button type="primary" :disabled="!enableHtml2pdfExport" :loading="exportPdfLoading" @click="handleExportVoucherPdf">
+            导出PDF
           </el-button>
         </span>
       </template>
@@ -434,18 +433,14 @@ const handleExportVoucherPdf = async () => {
 /* 清理旧的内容区吸顶按钮样式 */
 .order-detail-sticky-actions {
   display: none;
+  z-index: 5;
+  background: transparent;
 }
 
 @media (min-width: 768px) {
   .order-detail-content {
     padding: 16px 18px 20px;
   }
-}
-
-/* 保留历史类名，避免潜在外部引用导致布局跳变 */
-.order-detail-sticky-actions {
-  z-index: 5;
-  background: transparent;
 }
 
 .order-detail-content :deep(.el-descriptions__label),

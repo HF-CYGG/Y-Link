@@ -27,7 +27,7 @@ const getOrderTypeLabel = (value: OrderDetailResult['orderType']) => {
 }
 
 const getVisualLength = (value: string | null | undefined) => {
-  return Array.from(String(value ?? '')).reduce((total, character) => total + (character.charCodeAt(0) > 255 ? 2 : 1), 0)
+  return Array.from(String(value ?? '')).reduce((total, character) => total + ((character.codePointAt(0) ?? 0) > 255 ? 2 : 1), 0)
 }
 
 const shouldWrapProductName = (value: string | null | undefined) => {
@@ -59,27 +59,27 @@ const getItemRemark = (value: string | null | undefined) => {
       <table class="voucher-table voucher-table--meta">
         <tbody>
           <tr>
-            <th>业务单号</th>
+            <th scope="row">业务单号</th>
             <td colspan="3" class="is-strong">{{ props.order.showNo }}</td>
-            <th>订单类型</th>
+            <th scope="row">订单类型</th>
             <td colspan="3">{{ getOrderTypeLabel(props.order.orderType) }}</td>
           </tr>
           <tr>
-            <th>开单时间</th>
+            <th scope="row">开单时间</th>
             <td colspan="3">{{ dayjs(props.order.createdAt).format('YYYY-MM-DD HH:mm:ss') }}</td>
-            <th>客户部门</th>
+            <th scope="row">客户部门</th>
             <td colspan="3">{{ props.order.customerDepartmentName || '散客' }}</td>
           </tr>
           <tr>
-            <th>领取人</th>
+            <th scope="row">领取人</th>
             <td colspan="2">{{ props.order.customerName || '-' }}</td>
-            <th>出库人</th>
+            <th scope="row">出库人</th>
             <td colspan="2">{{ props.order.issuerName || '-' }}</td>
-            <th>开单人</th>
+            <th scope="row">开单人</th>
             <td>{{ props.order.creatorDisplayName || props.order.creatorUsername || '-' }}</td>
           </tr>
           <tr>
-            <th>备注</th>
+            <th scope="row">备注</th>
             <td colspan="7">{{ props.order.remark || '-' }}</td>
           </tr>
         </tbody>
@@ -90,13 +90,13 @@ const getItemRemark = (value: string | null | undefined) => {
         <table class="voucher-table voucher-table--items">
           <thead>
             <tr>
-              <th>序号</th>
-              <th>产品编码</th>
-              <th>产品名称</th>
-              <th>单价</th>
-              <th>数量</th>
-              <th>小计</th>
-              <th>备注</th>
+              <th scope="col">序号</th>
+              <th scope="col">产品编码</th>
+              <th scope="col">产品名称</th>
+              <th scope="col">单价</th>
+              <th scope="col">数量</th>
+              <th scope="col">小计</th>
+              <th scope="col">备注</th>
             </tr>
           </thead>
           <tbody>
@@ -158,7 +158,7 @@ const getItemRemark = (value: string | null | undefined) => {
 }
 
 .voucher-header {
-  border-bottom: 0.8px solid #d7deea;
+  border-bottom: 1px solid #111;
   padding-bottom: 8px;
 }
 
@@ -168,7 +168,7 @@ const getItemRemark = (value: string | null | undefined) => {
   gap: 12px;
   margin-bottom: 8px;
   font-size: 12px;
-  color: #334155;
+  color: #111;
 }
 
 .voucher-title {
@@ -183,7 +183,7 @@ const getItemRemark = (value: string | null | undefined) => {
   margin: 4px 0 0;
   text-align: center;
   font-size: 12px;
-  color: #64748b;
+  color: #111;
 }
 
 .voucher-body {
@@ -198,16 +198,17 @@ const getItemRemark = (value: string | null | undefined) => {
 
 .voucher-table th,
 .voucher-table td {
-  border: 0.8px solid #d1d9e6;
+  border: 1px solid #111;
   padding: 8px 6px;
   font-size: 13px;
   vertical-align: middle;
+  text-align: center;
   word-break: break-word;
 }
 
 .voucher-table th {
   font-weight: 700;
-  color: #0f172a;
+  color: #111;
 }
 
 .voucher-table--meta th {
@@ -216,7 +217,7 @@ const getItemRemark = (value: string | null | undefined) => {
 }
 
 .voucher-table--meta td {
-  color: #0f172a;
+  color: #111;
   font-weight: 500;
 }
 
@@ -317,13 +318,13 @@ const getItemRemark = (value: string | null | undefined) => {
 
 .voucher-summary__label {
   font-size: 12px;
-  color: #334155;
+  color: #111;
 }
 
 .voucher-summary__value {
   font-size: 14px;
   font-weight: 700;
-  color: #0f172a;
+  color: #111;
 }
 
 .voucher-sign {
@@ -331,7 +332,7 @@ const getItemRemark = (value: string | null | undefined) => {
   display: flex;
   justify-content: space-between;
   gap: 20px;
-  border-top: 0.8px dashed #c7cfdd;
+  border-top: 1px dashed #111;
   padding-top: 10px;
 }
 
@@ -346,7 +347,7 @@ const getItemRemark = (value: string | null | undefined) => {
 .voucher-sign__line {
   flex: 1;
   min-height: 20px;
-  border-bottom: 0.8px solid #b8c5db;
+  border-bottom: 1px solid #111;
 }
 
 @media (max-width: 900px) {
@@ -408,7 +409,7 @@ const getItemRemark = (value: string | null | undefined) => {
 
   .voucher-table th,
   .voucher-table td {
-    border-color: #111;
+    border-color: #000;
     color: #000;
     font-size: 11px;
     padding: 5px 4px;

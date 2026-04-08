@@ -1,0 +1,49 @@
+import type { Html2PdfFactory } from 'html2pdf.js'
+
+export interface ExportVoucherPdfOptions {
+  sourceElement: HTMLElement
+  filename: string
+  marginMm?: number
+  scale?: number
+}
+
+const resolveHtml2PdfFactory = async () => {
+  const module = await import('html2pdf.js')
+  const defaultFactory = module.default as Html2PdfFactory | undefined
+
+  if (typeof defaultFactory === 'function') {
+    return defaultFactory
+  }
+
+  throw new Error('PDF 导出模块加载失败')
+}
+
+export const exportVoucherPdf = async (options: ExportVoucherPdfOptions) => {
+  const factory = await resolveHtml2PdfFactory()
+  const margin = options.marginMm ?? 8
+  const scale = options.scale ?? 2
+
+  await factory()
+    .set({
+      margin,
+      filename: options.filename,
+      image: { type: 'jpeg', quality: 0.98 },
+      html2canvas: {
+        scale,
+        useCORS: true,
+        backgroundColor: '#ffffff',
+        logging: false,
+      },
+      jsPDF: {
+        unit: 'mm',
+        format: 'a4',
+        orientation: 'portrait',
+        compress: true,
+      },
+      pagebreak: {
+        mode: ['css', 'legacy'],
+      },
+    })
+    .from(options.sourceElement)
+    .save(options.filename)
+}
