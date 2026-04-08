@@ -39,7 +39,7 @@ const serialForm = reactive<{
 
 const initialSnapshot = ref('')
 const canViewConfigs = computed(() => authStore.hasPermission('system_configs:view'))
-const canUpdateConfigs = computed(() => authStore.hasPermission('system_configs:update'))
+const canUpdateConfigs = computed(() => authStore.isAdmin && authStore.hasPermission('system_configs:update'))
 
 const formatSerialPreview = (prefix: string | undefined, current: number, width: number) => {
   const safePrefix = String(prefix ?? '').trim() || '-'
@@ -75,10 +75,8 @@ const isDirty = computed(() => snapshotForm() !== initialSnapshot.value)
 
 const rules: FormRules = {
   'department.start': [{ required: true, message: '请输入部门单起始号', trigger: 'blur' }],
-  'department.current': [{ required: true, message: '请输入部门单当前号', trigger: 'blur' }],
   'department.width': [{ required: true, message: '请输入部门单位宽', trigger: 'blur' }],
   'walkin.start': [{ required: true, message: '请输入散客单起始号', trigger: 'blur' }],
-  'walkin.current': [{ required: true, message: '请输入散客单当前号', trigger: 'blur' }],
   'walkin.width': [{ required: true, message: '请输入散客单位宽', trigger: 'blur' }],
 }
 
@@ -142,12 +140,12 @@ const handleSubmit = async () => {
     const result = await updateOrderSerialConfigs({
       department: {
         start: Number(serialForm.department.start),
-        current: Number(serialForm.department.current),
+        current: Number(configMap.value?.department.current ?? serialForm.department.current),
         width: Number(serialForm.department.width),
       },
       walkin: {
         start: Number(serialForm.walkin.start),
-        current: Number(serialForm.walkin.current),
+        current: Number(configMap.value?.walkin.current ?? serialForm.walkin.current),
         width: Number(serialForm.walkin.width),
       },
     })
@@ -179,7 +177,7 @@ onMounted(() => {
     <PageToolbarCard class="space-y-3">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div class="text-sm text-slate-600 dark:text-slate-300">
-          {{ canUpdateConfigs ? '当前账号可编辑参数并提交保存' : '当前账号仅支持只读查看' }}
+          {{ canUpdateConfigs ? '当前账号（管理员）可编辑参数并提交保存' : '当前账号仅支持只读查看（仅管理员可修改）' }}
         </div>
         <el-button v-if="canUpdateConfigs" type="primary" :loading="saving" :disabled="loading || !isDirty" @click="handleSubmit">
           保存配置
@@ -215,13 +213,22 @@ onMounted(() => {
             <div class="font-semibold">订单编号示例（下一单）</div>
             <div class="mt-1 text-sm font-bold tracking-wide">{{ departmentPreview }}</div>
           </div>
-          <el-form-item label="起始号" prop="department.start">
+          <el-form-item prop="department.start">
+            <template #label>
+              <span class="field-label">起始号 <span class="field-label__help">首次生效编号起点</span></span>
+            </template>
             <el-input-number v-model="serialForm.department.start" :min="1" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
           </el-form-item>
-          <el-form-item label="当前号" prop="department.current">
-            <el-input-number v-model="serialForm.department.current" :min="0" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
+          <el-form-item prop="department.current">
+            <template #label>
+              <span class="field-label">当前号 <span class="field-label__help">系统自动维护，仅展示不可编辑</span></span>
+            </template>
+            <el-input :model-value="String(serialForm.department.current)" disabled class="!w-full" />
           </el-form-item>
-          <el-form-item label="位宽" prop="department.width">
+          <el-form-item prop="department.width">
+            <template #label>
+              <span class="field-label">位宽 <span class="field-label__help">流水号补零位数（1-12）</span></span>
+            </template>
             <el-input-number v-model="serialForm.department.width" :min="1" :max="12" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
           </el-form-item>
         </div>
@@ -240,13 +247,22 @@ onMounted(() => {
             <div class="font-semibold">订单编号示例（下一单）</div>
             <div class="mt-1 text-sm font-bold tracking-wide">{{ walkinPreview }}</div>
           </div>
-          <el-form-item label="起始号" prop="walkin.start">
+          <el-form-item prop="walkin.start">
+            <template #label>
+              <span class="field-label">起始号 <span class="field-label__help">首次生效编号起点</span></span>
+            </template>
             <el-input-number v-model="serialForm.walkin.start" :min="1" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
           </el-form-item>
-          <el-form-item label="当前号" prop="walkin.current">
-            <el-input-number v-model="serialForm.walkin.current" :min="0" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
+          <el-form-item prop="walkin.current">
+            <template #label>
+              <span class="field-label">当前号 <span class="field-label__help">系统自动维护，仅展示不可编辑</span></span>
+            </template>
+            <el-input :model-value="String(serialForm.walkin.current)" disabled class="!w-full" />
           </el-form-item>
-          <el-form-item label="位宽" prop="walkin.width">
+          <el-form-item prop="walkin.width">
+            <template #label>
+              <span class="field-label">位宽 <span class="field-label__help">流水号补零位数（1-12）</span></span>
+            </template>
             <el-input-number v-model="serialForm.walkin.width" :min="1" :max="12" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
           </el-form-item>
         </div>
@@ -255,3 +271,17 @@ onMounted(() => {
     </el-form>
   </PageContainer>
 </template>
+
+<style scoped>
+.field-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.field-label__help {
+  font-size: 12px;
+  font-weight: 400;
+  color: #64748b;
+}
+</style>
