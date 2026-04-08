@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue'
-import { Document, Money } from '@element-plus/icons-vue'
 import type { EChartsOption } from 'echarts'
 import { ElMessage } from 'element-plus'
 import BaseEChart from '@/components/charts/BaseEChart.vue'

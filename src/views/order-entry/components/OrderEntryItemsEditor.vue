@@ -67,6 +67,18 @@ const handleAddRow = () => {
 
   void props.openDrawerForCreate()
 }
+
+/**
+ * 判断是否为已录入商品：
+ * - 只要产品 ID 能在产品列表中找到，即说明是已录入商品；
+ * - 用于控制单价是否允许在明细目录内更改。
+ */
+const isExistingProduct = (productId: string | undefined | null) => {
+  if (!productId) {
+    return false
+  }
+  return props.products.some(p => p.id === productId)
+}
 </script>
 
 <template>
@@ -153,6 +165,7 @@ const handleAddRow = () => {
                 :precision="2"
                 :step="1"
                 class="w-full"
+                :disabled="isExistingProduct(row.productId)"
                 @keydown="handleGridKeydown($event, $index, 'unitPrice')"
               />
             </template>
@@ -244,7 +257,7 @@ const handleAddRow = () => {
             <el-input-number v-model="drawerForm.qty" :min="0" :precision="2" class="w-full" />
           </el-form-item>
           <el-form-item label="单价">
-            <el-input-number v-model="drawerForm.unitPrice" :min="0" :precision="2" class="w-full" />
+            <el-input-number v-model="drawerForm.unitPrice" :min="0" :precision="2" class="w-full" :disabled="isExistingProduct(drawerForm.productId)" />
           </el-form-item>
           <el-form-item label="备注">
             <el-input v-model="drawerForm.remark" maxlength="255" placeholder="选填" />
