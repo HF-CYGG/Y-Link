@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue'
+import { Document, Money } from '@element-plus/icons-vue'
+import type { EChartsOption } from 'echarts'
 import { ElMessage } from 'element-plus'
+import BaseEChart from '@/components/charts/BaseEChart.vue'
 import { getDashboardPieData, type DashboardPieDataResult, type DashboardPieSlice } from '@/api/modules/dashboard'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useAppStore } from '@/store'
@@ -19,6 +22,8 @@ const filterForm = reactive({
   orderType: '' as '' | 'department' | 'walkin',
 })
 const piePalette = ['#14b8a6', '#0ea5e9', '#8b5cf6', '#f97316', '#eab308', '#ef4444', '#84cc16', '#06b6d4']
+type PieValueType = 'amount' | 'count'
+type NumericLike = string | number | null | undefined
 
 const pieCards = computed(() => {
   return [
@@ -28,7 +33,7 @@ const pieCards = computed(() => {
       description: '按商品维度统计出库金额占比',
       slices: pieData.value.productPie,
       emptyText: '暂无商品占比数据',
-      valueType: 'amount',
+      valueType: 'amount' as PieValueType,
     },
     {
       key: 'customerPie',
@@ -36,7 +41,7 @@ const pieCards = computed(() => {
       description: '按部门/散客维度统计出库金额占比',
       slices: pieData.value.customerPie,
       emptyText: '暂无客户占比数据',
-      valueType: 'amount',
+      valueType: 'amount' as PieValueType,
     },
     {
       key: 'orderTypePie',
@@ -44,68 +49,93 @@ const pieCards = computed(() => {
       description: '按订单类型统计出库单数占比',
       slices: pieData.value.orderTypePie,
       emptyText: '暂无订单类型占比数据',
-      valueType: 'count',
+      valueType: 'count' as PieValueType,
     },
   ] as const
 })
 
-const formatAmount = (value: string | number | null | undefined): string => {
+const formatAmount = (value: NumericLike): string => {
   const normalizedNumber = Number(value ?? 0)
   return Number.isFinite(normalizedNumber) ? normalizedNumber.toFixed(2) : '0.00'
 }
 
-const formatCount = (value: string | number | null | undefined): string => {
+const formatCount = (value: NumericLike): string => {
   const normalizedNumber = Number(value ?? 0)
   return Number.isFinite(normalizedNumber) ? String(Math.max(0, Math.round(normalizedNumber))) : '0'
 }
 
-const formatSliceValue = (value: string | number | null | undefined, valueType: 'amount' | 'count'): string => {
+const formatSliceValue = (value: NumericLike, valueType: PieValueType): string => {
   if (valueType === 'count') {
     return `${formatCount(value)} 单`
   }
   return `¥${formatAmount(value)}`
 }
 
-const parseSliceRatio = (value: string | number | null | undefined): number => {
-  const ratio = Number(value ?? 0)
-  if (!Number.isFinite(ratio) || ratio <= 0) {
-    return 0
-  }
-  return ratio
-}
-
-const buildPieGradient = (slices: DashboardPieSlice[]): string => {
-  if (!slices.length) {
-    return 'conic-gradient(#e2e8f0 0deg 360deg)'
-  }
-
-  const positiveSlices = slices.filter((slice) => parseSliceRatio(slice.ratio) > 0)
-  if (!positiveSlices.length) {
-    return 'conic-gradient(#e2e8f0 0deg 360deg)'
-  }
-
-  let offset = 0
-  const colorStops = positiveSlices
-    .map((slice, index) => {
-      const ratio = parseSliceRatio(slice.ratio)
-      const start = offset
-      const end = Math.min(100, offset + ratio)
-      offset = end
-      const color = piePalette[index % piePalette.length]
-      return `${color} ${start}% ${end}%`
-    })
-    .filter(Boolean)
-
-  if (offset < 100 && colorStops.length) {
-    const lastColor = piePalette[(colorStops.length - 1) % piePalette.length]
-    colorStops.push(`${lastColor} ${offset}% 100%`)
-  }
-
-  return `conic-gradient(${colorStops.join(', ')})`
-}
-
 const resolvePieLegendColor = (index: number): string => {
   return piePalette[index % piePalette.length]
+}
+
+const getCardTotalValue = (slices: DashboardPieSlice[]) => {
+  return slices.reduce((sum, item) => sum + Number(item.value ?? 0), 0)
+}
+
+const buildPieOption = (slices: DashboardPieSlice[], valueType: PieValueType): EChartsOption => {
+  return {
+    color: piePalette,
+    animationDuration: 400,
+    tooltip: {
+      trigger: 'item',
+      backgroundColor: 'rgba(15, 23, 42, 0.92)',
+      borderWidth: 0,
+      textStyle: {
+        color: '#f8fafc',
+        fontSize: 12,
+      },
+      formatter: (params) => {
+        const normalizedParams = Array.isArray(params) ? params[0] : params
+        if (!normalizedParams) {
+          return ''
+        }
+        const percent = Number(normalizedParams.percent ?? 0).toFixed(2)
+        const rawValue = normalizedParams.value
+        const normalizedValue = typeof rawValue === 'number' || typeof rawValue === 'string' ? rawValue : 0
+        return [
+          `<div style="font-weight:600;margin-bottom:4px;">${normalizedParams.name}</div>`,
+          `<div>占比：${percent}%</div>`,
+          `<div>${valueType === 'count' ? '单数' : '金额'}：${formatSliceValue(normalizedValue, valueType)}</div>`,
+        ].join('')
+      },
+    },
+    series: [
+      {
+        type: 'pie',
+        radius: ['52%', '72%'],
+        center: ['50%', '50%'],
+        avoidLabelOverlap: true,
+        selectedMode: false,
+        stillShowZeroSum: true,
+        label: {
+          show: false,
+        },
+        labelLine: {
+          show: false,
+        },
+        emphasis: {
+          scale: true,
+          scaleSize: 6,
+        },
+        itemStyle: {
+          borderColor: '#ffffff',
+          borderWidth: 3,
+          borderRadius: 6,
+        },
+        data: slices.map((slice) => ({
+          name: slice.label,
+          value: Number(slice.value ?? 0),
+        })),
+      },
+    ],
+  }
 }
 
 const buildQuery = () => {
@@ -197,27 +227,35 @@ void loadPieData()
     </div>
     <div class="grid gap-4 lg:grid-cols-3">
       <div v-for="card in pieCards" :key="card.key" class="apple-card p-5 sm:p-6">
-        <div class="mb-4">
-          <h3 class="text-base font-semibold text-slate-800 dark:text-slate-200">{{ card.title }}</h3>
-          <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ card.description }}</p>
+        <div class="mb-4 flex items-start justify-between gap-3">
+          <div>
+            <h3 class="text-base font-semibold text-slate-800 dark:text-slate-200">{{ card.title }}</h3>
+            <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ card.description }}</p>
+          </div>
+          <div class="shrink-0 text-right">
+            <div class="text-[11px] text-slate-400 dark:text-slate-500">
+              {{ card.valueType === 'count' ? '总单数' : '总金额' }}
+            </div>
+            <div class="text-xs font-semibold text-slate-600 dark:text-slate-300">
+              {{
+                card.valueType === 'count'
+                  ? `${formatCount(getCardTotalValue(card.slices))} 单`
+                  : `¥${formatAmount(getCardTotalValue(card.slices))}`
+              }}
+            </div>
+          </div>
         </div>
         <div v-if="pieLoading" class="flex min-h-[220px] items-center justify-center">
           <el-skeleton animated :rows="6" class="w-full" />
         </div>
         <div v-else-if="card.slices.length" class="space-y-4">
           <div class="mx-auto flex w-full max-w-[240px] items-center justify-center">
-            <div class="relative h-40 w-40 rounded-full" :style="{ background: buildPieGradient(card.slices) }">
-              <div class="absolute inset-[24%] flex items-center justify-center rounded-full bg-white text-center dark:bg-slate-900">
-                <div>
-                  <div class="text-xs text-slate-500 dark:text-slate-400">{{ card.valueType === 'count' ? '总单数' : '总金额' }}</div>
-                  <div class="text-base font-semibold text-slate-800 dark:text-slate-100">
-                    {{
-                      card.valueType === 'count'
-                        ? `${formatCount(card.slices.reduce((sum, item) => sum + Number(item.value ?? 0), 0))} 单`
-                        : `¥${formatAmount(card.slices.reduce((sum, item) => sum + Number(item.value ?? 0), 0))}`
-                    }}
-                  </div>
-                </div>
+            <div class="relative h-44 w-full max-w-[240px]">
+              <BaseEChart :option="buildPieOption(card.slices, card.valueType)" :min-height="176" />
+              <div class="pointer-events-none absolute inset-0 flex items-center justify-center text-center">
+                <el-icon :size="32" class="text-slate-300/80 dark:text-slate-600/80">
+                  <component :is="card.valueType === 'count' ? 'Document' : 'Money'" />
+                </el-icon>
               </div>
             </div>
           </div>
