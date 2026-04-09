@@ -1,0 +1,372 @@
+import { randomUUID } from 'node:crypto'
+import { In, LessThanOrEqual } from 'typeorm'
+import { AppDataSource } from '../config/data-source.js'
+import { BaseProduct } from '../entities/base-product.entity.js'
+import { InventoryLog } from '../entities/inventory-log.entity.js'
+import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
+import { O2oPreorderItem } from '../entities/o2o-preorder-item.entity.js'
+import type { AuthUserContext } from '../types/auth.js'
+import type { ClientAuthContext } from '../types/client-auth.js'
+import { BizError } from '../utils/errors.js'
+import { systemConfigService } from './system-config.service.js'
+
+export interface SubmitPreorderItemInput {
+  productId: string | number
+  qty: number
+}
+
+export interface SubmitPreorderInput {
+  items: SubmitPreorderItemInput[]
+  remark?: string
+}
+
+class O2oPreorderService {
+  private readonly productRepo = AppDataSource.getRepository(BaseProduct)
+  private readonly preorderRepo = AppDataSource.getRepository(O2oPreorder)
+  private readonly preorderItemRepo = AppDataSource.getRepository(O2oPreorderItem)
+  private readonly inventoryLogRepo = AppDataSource.getRepository(InventoryLog)
+
+  async listMallProducts() {
+    const products = await this.productRepo.find({
+      where: { isActive: true, o2oStatus: 'listed' },
+      order: { id: 'DESC' },
+    })
+    return products.map((item) => ({
+      id: String(item.id),
+      productCode: item.productCode,
+      productName: item.productName,
+      defaultPrice: item.defaultPrice,
+      thumbnail: item.thumbnail,
+      detailContent: item.detailContent,
+      limitPerUser: Number(item.limitPerUser ?? 5),
+      currentStock: Number(item.currentStock ?? 0),
+      preOrderedStock: Number(item.preOrderedStock ?? 0),
+      availableStock: Math.max(0, Number(item.currentStock ?? 0) - Number(item.preOrderedStock ?? 0)),
+    }))
+  }
+
+  private async generatePreorderShowNo(manager = AppDataSource.manager): Promise<string> {
+    const dateText = new Date().toISOString().slice(0, 10).replaceAll('-', '')
+    const prefix = `PO${dateText}`
+    const raw = (await manager
+      .getRepository(O2oPreorder)
+      .createQueryBuilder('order')
+      .select('order.showNo', 'showNo')
+      .where('order.showNo LIKE :prefix', { prefix: `${prefix}%` })
+      .orderBy('order.showNo', 'DESC')
+      .getRawOne()) as { showNo?: string } | null
+    const current = raw?.showNo ? Number.parseInt(raw.showNo.slice(prefix.length), 10) || 0 : 0
+    return `${prefix}${String(current + 1).padStart(4, '0')}`
+  }
+
+  async submit(auth: ClientAuthContext, input: SubmitPreorderInput) {
+    if (!Array.isArray(input.items) || !input.items.length) {
+      throw new BizError('至少选择一个商品', 400)
+    }
+    const normalizedItems = input.items.map((item) => ({
+      productId: String(item.productId).trim(),
+      qty: Math.floor(Number(item.qty)),
+    }))
+    normalizedItems.forEach((item) => {
+      if (!item.productId || !Number.isInteger(item.qty) || item.qty <= 0) {
+        throw new BizError('商品数量必须为正整数', 400)
+      }
+    })
+
+    const o2oRules = await systemConfigService.getO2oRuleConfigs()
+    return AppDataSource.transaction(async (manager) => {
+      const productIds = [...new Set(normalizedItems.map((item) => item.productId))]
+      const products = await manager.getRepository(BaseProduct).find({ where: { id: In(productIds) } })
+      if (products.length !== productIds.length) {
+        throw new BizError('存在无效商品', 400)
+      }
+      const productMap = new Map(products.map((item) => [String(item.id), item]))
+      let totalQty = 0
+      for (const row of normalizedItems) {
+        const product = productMap.get(row.productId)!
+        if (!product.isActive || product.o2oStatus !== 'listed') {
+          throw new BizError(`商品「${product.productName}」已下架，不可预订`, 409)
+        }
+        const availableStock = Number(product.currentStock ?? 0) - Number(product.preOrderedStock ?? 0)
+        if (availableStock < row.qty) {
+          throw new BizError(`商品「${product.productName}」库存不足`, 409)
+        }
+        const limitQty = o2oRules.limitEnabled ? Math.min(Number(product.limitPerUser || 5), o2oRules.limitQty) : Number(product.limitPerUser || 5)
+        if (o2oRules.limitEnabled && row.qty > limitQty) {
+          throw new BizError(`商品「${product.productName}」超过限购数量`, 409)
+        }
+        totalQty += row.qty
+      }
+
+      const showNo = await this.generatePreorderShowNo(manager)
+      const timeoutAt = o2oRules.autoCancelEnabled ? new Date(Date.now() + o2oRules.autoCancelHours * 60 * 60 * 1000) : null
+      const savedOrder = await manager.getRepository(O2oPreorder).save(
+        manager.getRepository(O2oPreorder).create({
+          showNo,
+          clientUserId: auth.userId,
+          verifyCode: randomUUID(),
+          status: 'pending',
+          totalQty,
+          remark: input.remark?.trim() || null,
+          timeoutAt,
+        }),
+      )
+      const itemEntities = normalizedItems.map((item) =>
+        manager.getRepository(O2oPreorderItem).create({
+          orderId: savedOrder.id,
+          productId: item.productId,
+          qty: item.qty,
+        }),
+      )
+      await manager.getRepository(O2oPreorderItem).save(itemEntities)
+
+      for (const row of normalizedItems) {
+        const product = productMap.get(row.productId)!
+        const beforeCurrentStock = Number(product.currentStock ?? 0)
+        const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
+        product.preOrderedStock = beforePreOrderedStock + row.qty
+        await manager.getRepository(BaseProduct).save(product)
+        await manager.getRepository(InventoryLog).save(
+          manager.getRepository(InventoryLog).create({
+            productId: product.id,
+            changeType: 'preorder_hold',
+            changeQty: row.qty,
+            beforeCurrentStock,
+            afterCurrentStock: beforeCurrentStock,
+            beforePreorderedStock: beforePreOrderedStock,
+            afterPreorderedStock: product.preOrderedStock,
+            operatorType: 'client',
+            operatorId: auth.userId,
+            operatorName: auth.realName,
+            refType: 'o2o_preorder',
+            refId: savedOrder.id,
+          }),
+        )
+      }
+      return this.detailById(savedOrder.id)
+    })
+  }
+
+  async listMyOrders(auth: ClientAuthContext) {
+    await this.cancelTimeoutOrders()
+    const rows = await this.preorderRepo.find({
+      where: { clientUserId: auth.userId },
+      order: { id: 'DESC' },
+      take: 50,
+    })
+    return rows.map((item) => ({
+      id: String(item.id),
+      showNo: item.showNo,
+      verifyCode: item.verifyCode,
+      status: item.status,
+      totalQty: item.totalQty,
+      timeoutAt: item.timeoutAt,
+      createdAt: item.createdAt,
+    }))
+  }
+
+  async detailById(id: string) {
+    const order = await this.preorderRepo.findOne({ where: { id } })
+    if (!order) {
+      throw new BizError('预订单不存在', 404)
+    }
+    const items = await this.preorderItemRepo.find({ where: { orderId: id }, relations: { product: true } })
+    return {
+      order: {
+        id: String(order.id),
+        showNo: order.showNo,
+        verifyCode: order.verifyCode,
+        status: order.status,
+        totalQty: order.totalQty,
+        timeoutAt: order.timeoutAt,
+        verifiedAt: order.verifiedAt,
+        createdAt: order.createdAt,
+      },
+      items: items.map((item) => ({
+        id: String(item.id),
+        productId: String(item.productId),
+        productCode: item.product?.productCode ?? '',
+        productName: item.product?.productName ?? '',
+        qty: item.qty,
+      })),
+      qrPayload: `y-link://o2o/verify/${order.verifyCode}`,
+    }
+  }
+
+  async verifyByCode(verifyCode: string, actor: AuthUserContext) {
+    await this.cancelTimeoutOrders()
+    return AppDataSource.transaction(async (manager) => {
+      const order = await manager.getRepository(O2oPreorder).findOne({ where: { verifyCode } })
+      if (!order) {
+        throw new BizError('预订单不存在', 404)
+      }
+      if (order.status !== 'pending') {
+        throw new BizError('当前预订单不可核销', 409)
+      }
+      const items = await manager.getRepository(O2oPreorderItem).find({ where: { orderId: order.id } })
+      const productIds = [...new Set(items.map((item) => String(item.productId)))]
+      const products = await manager.getRepository(BaseProduct).find({ where: { id: In(productIds) } })
+      const productMap = new Map(products.map((item) => [String(item.id), item]))
+      for (const row of items) {
+        const product = productMap.get(String(row.productId))
+        if (!product) {
+          throw new BizError('商品不存在，无法核销', 409)
+        }
+        const beforeCurrentStock = Number(product.currentStock ?? 0)
+        const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
+        if (beforeCurrentStock < row.qty || beforePreOrderedStock < row.qty) {
+          throw new BizError(`商品「${product.productName}」库存异常，请先补货后再核销`, 409)
+        }
+        product.currentStock = beforeCurrentStock - row.qty
+        product.preOrderedStock = beforePreOrderedStock - row.qty
+        await manager.getRepository(BaseProduct).save(product)
+        await manager.getRepository(InventoryLog).save(
+          manager.getRepository(InventoryLog).create({
+            productId: product.id,
+            changeType: 'preorder_verify',
+            changeQty: row.qty,
+            beforeCurrentStock,
+            afterCurrentStock: product.currentStock,
+            beforePreorderedStock: beforePreOrderedStock,
+            afterPreorderedStock: product.preOrderedStock,
+            operatorType: 'admin',
+            operatorId: actor.userId,
+            operatorName: actor.displayName,
+            refType: 'o2o_preorder',
+            refId: order.id,
+          }),
+        )
+      }
+      order.status = 'verified'
+      order.verifiedAt = new Date()
+      order.verifiedBy = actor.displayName
+      const savedOrder = await manager.getRepository(O2oPreorder).save(order)
+      return this.detailById(savedOrder.id)
+    })
+  }
+
+  async inboundStock(productId: string, qty: number, actor: AuthUserContext, remark?: string) {
+    const normalizedQty = Math.floor(Number(qty))
+    if (!Number.isInteger(normalizedQty) || normalizedQty <= 0) {
+      throw new BizError('入库数量必须为正整数', 400)
+    }
+    return AppDataSource.transaction(async (manager) => {
+      const product = await manager.getRepository(BaseProduct).findOne({ where: { id: productId } })
+      if (!product) {
+        throw new BizError('商品不存在', 404)
+      }
+      const beforeCurrentStock = Number(product.currentStock ?? 0)
+      const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
+      product.currentStock = beforeCurrentStock + normalizedQty
+      await manager.getRepository(BaseProduct).save(product)
+      await manager.getRepository(InventoryLog).save(
+        manager.getRepository(InventoryLog).create({
+          productId: product.id,
+          changeType: 'inbound',
+          changeQty: normalizedQty,
+          beforeCurrentStock,
+          afterCurrentStock: product.currentStock,
+          beforePreorderedStock: beforePreOrderedStock,
+          afterPreorderedStock: beforePreOrderedStock,
+          operatorType: 'admin',
+          operatorId: actor.userId,
+          operatorName: actor.displayName,
+          refType: 'manual_inbound',
+          refId: String(product.id),
+          remark: remark?.trim() || null,
+        }),
+      )
+      return {
+        id: String(product.id),
+        productName: product.productName,
+        currentStock: product.currentStock,
+        preOrderedStock: product.preOrderedStock,
+      }
+    })
+  }
+
+  async cancelTimeoutOrders() {
+    const config = await systemConfigService.getO2oRuleConfigs()
+    if (!config.autoCancelEnabled) {
+      return { cancelledCount: 0 }
+    }
+    const now = new Date()
+    const timeoutOrders = await this.preorderRepo.find({
+      where: {
+        status: 'pending',
+        timeoutAt: LessThanOrEqual(now),
+      },
+      take: 100,
+    })
+    if (!timeoutOrders.length) {
+      return { cancelledCount: 0 }
+    }
+    await AppDataSource.transaction(async (manager) => {
+      for (const order of timeoutOrders) {
+        const items = await manager.getRepository(O2oPreorderItem).find({ where: { orderId: order.id } })
+        for (const row of items) {
+          const product = await manager.getRepository(BaseProduct).findOne({ where: { id: row.productId } })
+          if (!product) {
+            continue
+          }
+          const beforeCurrentStock = Number(product.currentStock ?? 0)
+          const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
+          product.preOrderedStock = Math.max(0, beforePreOrderedStock - row.qty)
+          await manager.getRepository(BaseProduct).save(product)
+          await manager.getRepository(InventoryLog).save(
+            manager.getRepository(InventoryLog).create({
+              productId: product.id,
+              changeType: 'preorder_release',
+              changeQty: row.qty,
+              beforeCurrentStock,
+              afterCurrentStock: beforeCurrentStock,
+              beforePreorderedStock: beforePreOrderedStock,
+              afterPreorderedStock: product.preOrderedStock,
+              operatorType: 'system',
+              operatorName: 'auto_cancel',
+              refType: 'o2o_preorder',
+              refId: order.id,
+            }),
+          )
+        }
+        order.status = 'cancelled'
+        await manager.getRepository(O2oPreorder).save(order)
+      }
+    })
+    return { cancelledCount: timeoutOrders.length }
+  }
+
+  async getVerifyDetail(verifyCode: string) {
+    const order = await this.preorderRepo.findOne({ where: { verifyCode } })
+    if (!order) {
+      throw new BizError('预订单不存在', 404)
+    }
+    return this.detailById(order.id)
+  }
+
+  async listInventoryLogs(limit = 100) {
+    const rows = await this.inventoryLogRepo.find({
+      order: { id: 'DESC' },
+      take: Math.max(1, Math.min(500, limit)),
+      relations: { product: true },
+    })
+    return rows.map((item) => ({
+      id: String(item.id),
+      productId: String(item.productId),
+      productName: item.product?.productName ?? '',
+      changeType: item.changeType,
+      changeQty: item.changeQty,
+      beforeCurrentStock: item.beforeCurrentStock,
+      afterCurrentStock: item.afterCurrentStock,
+      beforePreorderedStock: item.beforePreorderedStock,
+      afterPreorderedStock: item.afterPreorderedStock,
+      operatorType: item.operatorType,
+      operatorName: item.operatorName,
+      refType: item.refType,
+      refId: item.refId,
+      createdAt: item.createdAt,
+    }))
+  }
+}
+
+export const o2oPreorderService = new O2oPreorderService()

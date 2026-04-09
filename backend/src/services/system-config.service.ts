@@ -42,6 +42,30 @@ const DEFAULT_SYSTEM_CONFIGS = [
     configGroup: 'order_serial',
     remark: '散客单号位宽',
   },
+  {
+    configKey: 'o2o.auto_cancel_enabled',
+    configValue: '1',
+    configGroup: 'o2o',
+    remark: '预订单超时自动取消开关',
+  },
+  {
+    configKey: 'o2o.auto_cancel_hours',
+    configValue: '24',
+    configGroup: 'o2o',
+    remark: '预订单超时自动取消时长（小时）',
+  },
+  {
+    configKey: 'o2o.limit_enabled',
+    configValue: '1',
+    configGroup: 'o2o',
+    remark: '预订单限购开关',
+  },
+  {
+    configKey: 'o2o.limit_qty',
+    configValue: '5',
+    configGroup: 'o2o',
+    remark: '预订单默认限购数量',
+  },
 ] as const
 
 const ORDER_SERIAL_TYPES = ['department', 'walkin'] as const
@@ -78,8 +102,24 @@ export interface UpdateOrderSerialConfigsInput {
   walkin: OrderSerialConfigValue
 }
 
+export interface O2oRuleConfigRecord {
+  autoCancelEnabled: boolean
+  autoCancelHours: number
+  limitEnabled: boolean
+  limitQty: number
+  updatedAt: Date
+}
+
+export interface UpdateO2oRuleConfigsInput {
+  autoCancelEnabled: boolean
+  autoCancelHours: number
+  limitEnabled: boolean
+  limitQty: number
+}
+
 class SystemConfigService {
   private readonly configRepo = AppDataSource.getRepository(SystemConfig)
+  private readonly o2oConfigKeys = ['o2o.auto_cancel_enabled', 'o2o.auto_cancel_hours', 'o2o.limit_enabled', 'o2o.limit_qty'] as const
 
   private getOrderSerialAllKeys(): string[] {
     return ORDER_SERIAL_TYPES.flatMap((orderType) => {
@@ -284,6 +324,110 @@ class SystemConfigService {
         list: afterList,
         changed: changedCount > 0,
       }
+    })
+  }
+
+  async getO2oRuleConfigs(): Promise<O2oRuleConfigRecord> {
+    await this.ensureDefaultConfigs()
+    const rows = await this.configRepo.find({
+      where: this.o2oConfigKeys.map((key) => ({ configKey: key })),
+      select: {
+        configKey: true,
+        configValue: true,
+        updatedAt: true,
+      },
+    })
+
+    if (rows.length !== this.o2oConfigKeys.length) {
+      throw new BizError('线上预订配置缺失，请联系管理员补齐配置', 500)
+    }
+
+    const map = new Map(rows.map((row) => [row.configKey, row]))
+    const autoCancelEnabled = this.parseNonNegativeInteger(map.get('o2o.auto_cancel_enabled')!.configValue, 'o2o.auto_cancel_enabled') > 0
+    const autoCancelHours = this.parsePositiveInteger(map.get('o2o.auto_cancel_hours')!.configValue, 'o2o.auto_cancel_hours')
+    const limitEnabled = this.parseNonNegativeInteger(map.get('o2o.limit_enabled')!.configValue, 'o2o.limit_enabled') > 0
+    const limitQty = this.parsePositiveInteger(map.get('o2o.limit_qty')!.configValue, 'o2o.limit_qty')
+    const updatedAt = rows.map((row) => row.updatedAt).sort((a, b) => b.getTime() - a.getTime())[0]
+
+    return {
+      autoCancelEnabled,
+      autoCancelHours,
+      limitEnabled,
+      limitQty,
+      updatedAt,
+    }
+  }
+
+  async updateO2oRuleConfigs(
+    input: UpdateO2oRuleConfigsInput,
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ): Promise<{ config: O2oRuleConfigRecord; changed: boolean }> {
+    if (!Number.isInteger(input.autoCancelHours) || input.autoCancelHours <= 0 || input.autoCancelHours > 168) {
+      throw new BizError('超时取消时长必须为 1 到 168 小时', 400)
+    }
+    if (!Number.isInteger(input.limitQty) || input.limitQty <= 0 || input.limitQty > 999) {
+      throw new BizError('限购数量必须为 1 到 999 的整数', 400)
+    }
+
+    await this.ensureDefaultConfigs()
+    return AppDataSource.transaction(async (manager) => {
+      const useForUpdate = manager.connection.options.type === 'mysql'
+      const placeholders = this.o2oConfigKeys.map(() => '?').join(', ')
+      const lockedRows = (await manager.query(
+        `
+          SELECT id, config_key AS configKey, config_value AS configValue, updated_at AS updatedAt
+          FROM system_configs
+          WHERE config_key IN (${placeholders})
+          ${useForUpdate ? 'FOR UPDATE' : ''}
+        `,
+        [...this.o2oConfigKeys],
+      )) as Array<{ id: string; configKey: string; configValue: string; updatedAt: string }>
+
+      if (lockedRows.length !== this.o2oConfigKeys.length) {
+        throw new BizError('线上预订配置缺失，请联系管理员补齐配置', 500)
+      }
+
+      const targetMap = new Map<string, string>([
+        ['o2o.auto_cancel_enabled', input.autoCancelEnabled ? '1' : '0'],
+        ['o2o.auto_cancel_hours', String(input.autoCancelHours)],
+        ['o2o.limit_enabled', input.limitEnabled ? '1' : '0'],
+        ['o2o.limit_qty', String(input.limitQty)],
+      ])
+
+      const before = await this.getO2oRuleConfigs()
+      let changed = false
+      const repo = manager.getRepository(SystemConfig)
+      for (const row of lockedRows) {
+        const targetValue = targetMap.get(row.configKey)
+        if (!targetValue || targetValue === row.configValue) {
+          continue
+        }
+        await repo.update({ id: row.id }, { configValue: targetValue })
+        changed = true
+      }
+
+      const config = await this.getO2oRuleConfigs()
+
+      if (changed) {
+        await auditService.record(
+          {
+            actionType: 'system_config.update_o2o_rules',
+            actionLabel: '更新线上预订规则配置',
+            targetType: 'system_config',
+            targetCode: 'o2o_rules',
+            actor,
+            requestMeta,
+            detail: {
+              before,
+              after: config,
+            },
+          },
+          manager,
+        )
+      }
+
+      return { config, changed }
     })
   }
 }

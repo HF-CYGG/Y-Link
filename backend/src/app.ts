@@ -4,7 +4,10 @@ import { requireAuth } from './middleware/auth.middleware.js'
 import { errorHandler, notFoundHandler } from './middleware/error-handler.js'
 import { authRouter } from './routes/auth.routes.js'
 import { auditLogRouter } from './routes/audit-log.routes.js'
+import { clientAuthRouter } from './routes/client-auth.routes.js'
+import { dataMaintenanceRouter } from './routes/data-maintenance.routes.js'
 import { dashboardRouter } from './routes/dashboard.routes.js'
+import { o2oRouter } from './routes/o2o.routes.js'
 import { orderRouter } from './routes/order.routes.js'
 import { productRouter } from './routes/product.routes.js'
 import { systemConfigRouter } from './routes/system-config.routes.js'
@@ -27,6 +30,8 @@ export function createApp() {
 
   // 认证接口允许匿名访问，其中 logout / me 已在子路由内部再次做鉴权。
   app.use('/api/auth', authRouter)
+  app.use('/api/client-auth', clientAuthRouter)
+  app.use('/api/o2o', o2oRouter)
 
   // 业务主系统统一要求先登录再访问，避免接口侧出现“匿名调用”漏洞。
   app.use('/api', requireAuth)
@@ -41,6 +46,7 @@ export function createApp() {
   app.use('/api/users', userRouter)
   app.use('/api/audit-logs', auditLogRouter)
   app.use('/api/system-configs', systemConfigRouter)
+  app.use('/api/data-maintenance', dataMaintenanceRouter)
 
   // 将 zod 参数校验错误转为业务错误，统一响应格式。
   app.use((err: unknown, _req: express.Request, _res: express.Response, next: express.NextFunction) => {

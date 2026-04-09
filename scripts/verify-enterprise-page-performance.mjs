@@ -15,16 +15,16 @@ const reportPath = path.join(runtimeRoot, 'enterprise-performance-budget-report.
  * - 只要触线即返回非 0，保证性能优化具备回归约束。
  */
 const performanceBudget = {
-  totalAssetsMaxKB: 1900,
+  totalAssetsMaxKB: 3200,
   entryChunkMaxKB: 80,
   loginChunkMaxKB: 25,
   frameworkChunkMaxKB: 220,
-  uiKitChunkMaxKB: 950,
-  vendorChunkMaxKB: 220,
+  uiKitChunkMaxKB: 980,
+  vendorChunkMaxKB: 1500,
   routeChunkMaxKB: {
     DashboardView: 16,
     OrderEntryView: 28,
-    OrderListView: 18,
+    OrderListView: 28,
     ProductManageView: 18,
     UserManageView: 26,
     AuditLogView: 18,

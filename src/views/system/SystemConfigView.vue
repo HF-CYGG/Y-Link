@@ -3,7 +3,14 @@ import dayjs from 'dayjs'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { PageContainer, PageToolbarCard } from '@/components/common'
-import { getOrderSerialConfigs, updateOrderSerialConfigs, type OrderSerialConfigRecord } from '@/api/modules/system-config'
+import {
+  getO2oRuleConfigs,
+  getOrderSerialConfigs,
+  updateO2oRuleConfigs,
+  updateOrderSerialConfigs,
+  type O2oRuleConfigRecord,
+  type OrderSerialConfigRecord,
+} from '@/api/modules/system-config'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
@@ -19,11 +26,18 @@ const formRef = ref<FormInstance>()
 const loading = ref(true)
 const saving = ref(false)
 const configMap = ref<Record<'department' | 'walkin', OrderSerialConfigRecord> | null>(null)
+const o2oRuleConfig = ref<O2oRuleConfigRecord | null>(null)
 const loadRequest = useStableRequest()
 
 const serialForm = reactive<{
   department: SerialFormValue
   walkin: SerialFormValue
+  o2o: {
+    autoCancelEnabled: boolean
+    autoCancelHours: number
+    limitEnabled: boolean
+    limitQty: number
+  }
 }>({
   department: {
     start: 1,
@@ -34,6 +48,12 @@ const serialForm = reactive<{
     start: 1,
     current: 0,
     width: 6,
+  },
+  o2o: {
+    autoCancelEnabled: true,
+    autoCancelHours: 24,
+    limitEnabled: true,
+    limitQty: 5,
   },
 })
 
@@ -69,6 +89,12 @@ const snapshotForm = () =>
       current: Number(serialForm.walkin.current),
       width: Number(serialForm.walkin.width),
     },
+    o2o: {
+      autoCancelEnabled: Boolean(serialForm.o2o.autoCancelEnabled),
+      autoCancelHours: Number(serialForm.o2o.autoCancelHours),
+      limitEnabled: Boolean(serialForm.o2o.limitEnabled),
+      limitQty: Number(serialForm.o2o.limitQty),
+    },
   })
 
 const isDirty = computed(() => snapshotForm() !== initialSnapshot.value)
@@ -78,6 +104,8 @@ const rules: FormRules = {
   'department.width': [{ required: true, message: '请输入部门单位宽', trigger: 'blur' }],
   'walkin.start': [{ required: true, message: '请输入散客单起始号', trigger: 'blur' }],
   'walkin.width': [{ required: true, message: '请输入散客单位宽', trigger: 'blur' }],
+  'o2o.autoCancelHours': [{ required: true, message: '请输入超时取消时长', trigger: 'blur' }],
+  'o2o.limitQty': [{ required: true, message: '请输入限购数量', trigger: 'blur' }],
 }
 
 const applyList = (list: OrderSerialConfigRecord[]) => {
@@ -95,7 +123,14 @@ const applyList = (list: OrderSerialConfigRecord[]) => {
   serialForm.walkin.start = walkin.start
   serialForm.walkin.current = walkin.current
   serialForm.walkin.width = walkin.width
-  initialSnapshot.value = snapshotForm()
+}
+
+const applyO2oRules = (config: O2oRuleConfigRecord) => {
+  o2oRuleConfig.value = config
+  serialForm.o2o.autoCancelEnabled = config.autoCancelEnabled
+  serialForm.o2o.autoCancelHours = config.autoCancelHours
+  serialForm.o2o.limitEnabled = config.limitEnabled
+  serialForm.o2o.limitQty = config.limitQty
 }
 
 const loadData = async () => {
@@ -106,9 +141,11 @@ const loadData = async () => {
 
   loading.value = true
   await loadRequest.runLatest({
-    executor: async () => getOrderSerialConfigs(),
+    executor: async () => Promise.all([getOrderSerialConfigs(), getO2oRuleConfigs()]),
     onSuccess: (result) => {
-      applyList(result.list)
+      applyList(result[0].list)
+      applyO2oRules(result[1])
+      initialSnapshot.value = snapshotForm()
     },
     onError: (error) => {
       ElMessage.error(extractErrorMessage(error, '加载系统配置失败，请稍后重试'))
@@ -149,9 +186,17 @@ const handleSubmit = async () => {
         width: Number(serialForm.walkin.width),
       },
     })
+    const o2oResult = await updateO2oRuleConfigs({
+      autoCancelEnabled: serialForm.o2o.autoCancelEnabled,
+      autoCancelHours: Number(serialForm.o2o.autoCancelHours),
+      limitEnabled: serialForm.o2o.limitEnabled,
+      limitQty: Number(serialForm.o2o.limitQty),
+    })
 
     applyList(result.list)
-    ElMessage.success(result.changed ? '系统配置已保存' : '配置未变更')
+    applyO2oRules(o2oResult.config)
+    initialSnapshot.value = snapshotForm()
+    ElMessage.success(result.changed || o2oResult.changed ? '系统配置已保存' : '配置未变更')
   } catch (error) {
     ElMessage.error(extractErrorMessage(error, '保存系统配置失败，请稍后重试'))
   } finally {
@@ -166,6 +211,14 @@ const getUpdatedAtLabel = (orderType: 'department' | 'walkin') => {
   }
   return dayjs(value).format('YYYY-MM-DD HH:mm:ss')
 }
+
+const o2oUpdatedAtLabel = computed(() => {
+  const value = o2oRuleConfig.value?.updatedAt
+  if (!value) {
+    return '-'
+  }
+  return dayjs(value).format('YYYY-MM-DD HH:mm:ss')
+})
 
 onMounted(() => {
   void loadData()
@@ -278,6 +331,50 @@ onMounted(() => {
         </div>
       </div>
       </el-form>
+
+      <div v-if="canViewConfigs" class="apple-card flex flex-col p-5 sm:p-6 xl:p-7">
+        <div class="mb-5 flex items-center justify-between gap-2 border-b border-slate-100 pb-4 dark:border-white/5">
+          <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">线上预订规则</h2>
+          <span class="rounded-lg bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+            默认值：24小时 / 5件
+          </span>
+        </div>
+        <div class="grid gap-4 md:grid-cols-2">
+          <div class="space-y-2">
+            <div class="text-sm text-slate-600 dark:text-slate-300">超时自动取消</div>
+            <el-switch v-model="serialForm.o2o.autoCancelEnabled" :disabled="!canUpdateConfigs || loading" />
+          </div>
+          <div class="space-y-2">
+            <div class="text-sm text-slate-600 dark:text-slate-300">超时取消时长（小时）</div>
+            <el-input-number
+              v-model="serialForm.o2o.autoCancelHours"
+              :min="1"
+              :max="168"
+              :controls="false"
+              :disabled="!canUpdateConfigs || loading"
+              class="!w-full"
+            />
+          </div>
+          <div class="space-y-2">
+            <div class="text-sm text-slate-600 dark:text-slate-300">全局限购开关</div>
+            <el-switch v-model="serialForm.o2o.limitEnabled" :disabled="!canUpdateConfigs || loading" />
+          </div>
+          <div class="space-y-2">
+            <div class="text-sm text-slate-600 dark:text-slate-300">默认限购数量</div>
+            <el-input-number
+              v-model="serialForm.o2o.limitQty"
+              :min="1"
+              :max="999"
+              :controls="false"
+              :disabled="!canUpdateConfigs || loading"
+              class="!w-full"
+            />
+          </div>
+        </div>
+        <div class="mt-6 border-t border-slate-100 pt-4 text-xs text-slate-400 dark:border-white/5 dark:text-slate-500">
+          最近更新时间：{{ o2oUpdatedAtLabel }}
+        </div>
+      </div>
     </div>
   </PageContainer>
 </template>

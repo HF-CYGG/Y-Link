@@ -12,6 +12,13 @@ export interface ProductRecord {
   pinyinAbbr: string
   defaultPrice: string
   isActive: boolean
+  o2oStatus: 'listed' | 'unlisted'
+  thumbnail: string | null
+  detailContent: string | null
+  limitPerUser: number
+  currentStock: number
+  preOrderedStock: number
+  availableStock: number
   tagIds: string[]
   tags: { id: string; tagName: string; tagCode: string | null }[]
 }
@@ -22,6 +29,12 @@ export interface CreateProductDto {
   pinyinAbbr?: string
   defaultPrice?: number
   isActive?: boolean
+  o2oStatus?: 'listed' | 'unlisted'
+  thumbnail?: string | null
+  detailContent?: string | null
+  limitPerUser?: number
+  currentStock?: number
+  preOrderedStock?: number
   tagIds?: Array<string | number>
 }
 
@@ -31,6 +44,12 @@ export interface UpdateProductDto {
   pinyinAbbr?: string
   defaultPrice?: number
   isActive?: boolean
+  o2oStatus?: 'listed' | 'unlisted'
+  thumbnail?: string | null
+  detailContent?: string | null
+  limitPerUser?: number
+  currentStock?: number
+  preOrderedStock?: number
   tagIds?: Array<string | number>
 }
 
@@ -65,6 +84,13 @@ interface ProductRawRecord {
   pinyinAbbr?: PrimitiveValue
   defaultPrice?: PrimitiveValue
   isActive?: PrimitiveValue
+  o2oStatus?: PrimitiveValue
+  thumbnail?: PrimitiveValue
+  detailContent?: PrimitiveValue
+  limitPerUser?: PrimitiveValue
+  currentStock?: PrimitiveValue
+  preOrderedStock?: PrimitiveValue
+  availableStock?: PrimitiveValue
   tagIds?: PrimitiveValue[]
   tags?: ProductTagRawRecord[] | null
 }
@@ -117,6 +143,14 @@ const normalizeDecimal = (value: PrimitiveValue, fallback = '0.00'): string => {
   return Number.isFinite(normalizedNumber) ? normalizedNumber.toFixed(2) : fallback
 }
 
+const normalizeInteger = (value: PrimitiveValue, fallback = 0): number => {
+  const normalized = Number(normalizeText(value))
+  if (!Number.isFinite(normalized)) {
+    return fallback
+  }
+  return Math.floor(normalized)
+}
+
 const normalizeTagRecord = (tag: ProductTagRawRecord) => ({
   id: normalizeId(tag.id),
   tagName: normalizeText(tag.tagName),
@@ -138,6 +172,13 @@ const normalizeProductRecord = (record: ProductRawRecord): ProductRecord => {
     pinyinAbbr: normalizeText(record.pinyinAbbr),
     defaultPrice: normalizeDecimal(record.defaultPrice),
     isActive: normalizeBoolean(record.isActive),
+    o2oStatus: normalizeText(record.o2oStatus, 'unlisted') === 'listed' ? 'listed' : 'unlisted',
+    thumbnail: normalizeText(record.thumbnail) || null,
+    detailContent: normalizeText(record.detailContent) || null,
+    limitPerUser: normalizeInteger(record.limitPerUser, 5),
+    currentStock: normalizeInteger(record.currentStock, 0),
+    preOrderedStock: normalizeInteger(record.preOrderedStock, 0),
+    availableStock: normalizeInteger(record.availableStock, 0),
     tagIds,
     tags,
   }

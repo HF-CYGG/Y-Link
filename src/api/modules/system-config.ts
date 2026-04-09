@@ -32,6 +32,26 @@ export interface UpdateOrderSerialConfigsResult {
   changed: boolean
 }
 
+export interface O2oRuleConfigRecord {
+  autoCancelEnabled: boolean
+  autoCancelHours: number
+  limitEnabled: boolean
+  limitQty: number
+  updatedAt: string
+}
+
+export interface UpdateO2oRuleConfigsPayload {
+  autoCancelEnabled: boolean
+  autoCancelHours: number
+  limitEnabled: boolean
+  limitQty: number
+}
+
+export interface UpdateO2oRuleConfigsResult {
+  config: O2oRuleConfigRecord
+  changed: boolean
+}
+
 export const getOrderSerialConfigs = () =>
   request<OrderSerialConfigsResult>({
     method: 'GET',
@@ -42,5 +62,18 @@ export const updateOrderSerialConfigs = (payload: UpdateOrderSerialConfigsPayloa
   request<UpdateOrderSerialConfigsResult>({
     method: 'PUT',
     url: '/system-configs/order-serial',
+    data: payload,
+  })
+
+export const getO2oRuleConfigs = () =>
+  request<O2oRuleConfigRecord>({
+    method: 'GET',
+    url: '/system-configs/o2o-rules',
+  })
+
+export const updateO2oRuleConfigs = (payload: UpdateO2oRuleConfigsPayload) =>
+  request<UpdateO2oRuleConfigsResult>({
+    method: 'PUT',
+    url: '/system-configs/o2o-rules',
     data: payload,
   })

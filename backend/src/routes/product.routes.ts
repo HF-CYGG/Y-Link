@@ -62,6 +62,12 @@ const createProductSchema = z.object({
   pinyinAbbr: z.string().optional(),
   defaultPrice: optionalNonNegativeNumberSchema,
   isActive: optionalBooleanSchema,
+  o2oStatus: z.enum(['listed', 'unlisted']).optional(),
+  thumbnail: z.string().max(255).nullable().optional(),
+  detailContent: z.string().nullable().optional(),
+  limitPerUser: z.number().int().positive().optional(),
+  currentStock: z.number().int().nonnegative().optional(),
+  preOrderedStock: z.number().int().nonnegative().optional(),
   tagIds: z.array(productTagIdSchema).optional(),
 })
 
@@ -71,6 +77,12 @@ const updateProductSchema = z.object({
   pinyinAbbr: z.string().optional(),
   defaultPrice: optionalNonNegativeNumberSchema,
   isActive: optionalBooleanSchema,
+  o2oStatus: z.enum(['listed', 'unlisted']).optional(),
+  thumbnail: z.string().max(255).nullable().optional(),
+  detailContent: z.string().nullable().optional(),
+  limitPerUser: z.number().int().positive().optional(),
+  currentStock: z.number().int().nonnegative().optional(),
+  preOrderedStock: z.number().int().nonnegative().optional(),
   tagIds: z.array(productTagIdSchema).optional(),
 })
 
@@ -98,6 +110,10 @@ productRouter.get(
       keyword: typeof req.query.keyword === 'string' ? req.query.keyword : undefined,
       tagId: typeof req.query.tagId === 'string' ? req.query.tagId : undefined,
       isActive,
+      o2oStatus:
+        req.query.o2oStatus === 'listed' || req.query.o2oStatus === 'unlisted'
+          ? req.query.o2oStatus
+          : undefined,
     })
 
     res.json({

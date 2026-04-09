@@ -17,6 +17,12 @@
 ## 核心特性
 - Apple 风格极简 UI，支持丝滑亮暗模式切换。
 - 出库开单支持键盘流与实时金额计算，录入效率高。
+- 新增 O2O 线上预订能力：客户端可注册/登录/找回密码、浏览商品大厅并在线下单。
+- 客户端展示实时库存：可见“当前剩余数量（扣除预订后）”与“已被预订数量”。
+- 管理端支持 O2O 商品维护（上/下架、预览图、详情编辑）与扫码核销出库。
+- 管理端支持入库登记与库存流水追踪，形成“预订-核销-入库”闭环。
+- 业务规则可配置：超时自动取消、单人限购支持后台开关与参数调整（默认开启）。
+- 支持 SQLite 物理备份与 JSON 导入导出，便于后续平滑迁移 MySQL。
 - 默认 SQLite 零配置启动，同时支持切换 MySQL。
 - 内置 Docker Compose 与 GitHub Actions，支持自动构建并双路推送到 Docker Hub 与 GitHub Container Registry (ghcr.io)。
 - 权限、审计链路完善，适合持续迭代的业务系统。
@@ -199,6 +205,19 @@ npm run cloud:down
 
 ```bash
 npm run local:dev
+```
+
+后端本地验收（O2O 功能）：
+
+```bash
+cd backend
+npm run o2o:verify
+```
+
+性能与核心路径回归：
+
+```bash
+npm run verify:performance
 ```
 
 ---

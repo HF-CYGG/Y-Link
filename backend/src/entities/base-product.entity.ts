@@ -42,6 +42,25 @@ export class BaseProduct {
   @Column({ name: 'is_active', ...entityColumnOptions.booleanFlag, comment: '是否启用' })
   isActive!: boolean
 
+  @Index('idx_base_product_o2o_status')
+  @Column({ name: 'o2o_status', type: 'varchar', length: 16, default: 'unlisted', comment: '线上预订状态' })
+  o2oStatus!: 'listed' | 'unlisted'
+
+  @Column({ name: 'thumbnail', type: 'varchar', length: 255, nullable: true, comment: '预览图地址' })
+  thumbnail!: string | null
+
+  @Column({ name: 'detail_content', type: 'text', nullable: true, comment: '商品详情' })
+  detailContent!: string | null
+
+  @Column({ name: 'limit_per_user', type: 'int', default: 5, comment: '单人限购数量' })
+  limitPerUser!: number
+
+  @Column({ name: 'current_stock', type: 'int', default: 0, comment: '物理库存' })
+  currentStock!: number
+
+  @Column({ name: 'pre_ordered_stock', type: 'int', default: 0, comment: '已预订库存' })
+  preOrderedStock!: number
+
   @CreateDateColumn({ name: 'created_at', ...entityColumnOptions.timestamp })
   createdAt!: Date
 

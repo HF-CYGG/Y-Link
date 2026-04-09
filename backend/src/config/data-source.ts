@@ -11,6 +11,11 @@ import { SysUser } from '../entities/sys-user.entity.js'
 import { SysUserSession } from '../entities/sys-user-session.entity.js'
 import { SysAuditLog } from '../entities/sys-audit-log.entity.js'
 import { SystemConfig } from '../entities/system-config.entity.js'
+import { ClientUser } from '../entities/client-user.entity.js'
+import { ClientUserSession } from '../entities/client-user-session.entity.js'
+import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
+import { O2oPreorderItem } from '../entities/o2o-preorder-item.entity.js'
+import { InventoryLog } from '../entities/inventory-log.entity.js'
 
 const entities = [
   BaseProduct,
@@ -22,6 +27,11 @@ const entities = [
   SysUserSession,
   SysAuditLog,
   SystemConfig,
+  ClientUser,
+  ClientUserSession,
+  O2oPreorder,
+  O2oPreorderItem,
+  InventoryLog,
 ]
 
 function createDataSourceOptions(): DataSourceOptions {

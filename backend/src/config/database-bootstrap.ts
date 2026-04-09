@@ -13,6 +13,11 @@ const SQLITE_REQUIRED_TABLES = [
   'sys_user_session',
   'sys_audit_log',
   'system_configs',
+  'client_user',
+  'client_user_session',
+  'o2o_preorder',
+  'o2o_preorder_item',
+  'inventory_log',
 ]
 
 const SQLITE_REQUIRED_ORDER_COLUMNS = [
@@ -29,6 +34,15 @@ const SQLITE_REQUIRED_ORDER_COLUMNS = [
   'is_system_applied',
   'issuer_name',
   'customer_department_name',
+]
+
+const SQLITE_REQUIRED_PRODUCT_COLUMNS = [
+  'o2o_status',
+  'thumbnail',
+  'detail_content',
+  'limit_per_user',
+  'current_stock',
+  'pre_ordered_stock',
 ]
 
 export function resolveSqliteDatabasePath(): string {
@@ -83,7 +97,13 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
 
   const orderColumns: Array<{ name: string }> = await dataSource.query(`PRAGMA table_info('biz_outbound_order')`)
   const orderColumnSet = new Set(orderColumns.map((column) => column.name))
-  return SQLITE_REQUIRED_ORDER_COLUMNS.some((column) => !orderColumnSet.has(column))
+  if (SQLITE_REQUIRED_ORDER_COLUMNS.some((column) => !orderColumnSet.has(column))) {
+    return true
+  }
+
+  const productColumns: Array<{ name: string }> = await dataSource.query(`PRAGMA table_info('base_product')`)
+  const productColumnSet = new Set(productColumns.map((column) => column.name))
+  return SQLITE_REQUIRED_PRODUCT_COLUMNS.some((column) => !productColumnSet.has(column))
 }
 
 export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): Promise<DatabaseSchemaInitResult> {

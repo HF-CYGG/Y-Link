@@ -11,6 +11,7 @@ export interface ProductQuery {
   keyword?: string
   tagId?: string
   isActive?: boolean
+  o2oStatus?: 'listed' | 'unlisted'
 }
 
 export interface CreateProductInput {
@@ -19,6 +20,12 @@ export interface CreateProductInput {
   pinyinAbbr?: string
   defaultPrice?: number
   isActive?: boolean
+  o2oStatus?: 'listed' | 'unlisted'
+  thumbnail?: string | null
+  detailContent?: string | null
+  limitPerUser?: number
+  currentStock?: number
+  preOrderedStock?: number
   tagIds?: Array<string | number>
 }
 
@@ -28,6 +35,12 @@ export interface UpdateProductInput {
   pinyinAbbr?: string
   defaultPrice?: number
   isActive?: boolean
+  o2oStatus?: 'listed' | 'unlisted'
+  thumbnail?: string | null
+  detailContent?: string | null
+  limitPerUser?: number
+  currentStock?: number
+  preOrderedStock?: number
   tagIds?: Array<string | number>
 }
 
@@ -49,6 +62,13 @@ export interface ProductView {
   pinyinAbbr: string
   defaultPrice: string
   isActive: boolean
+  o2oStatus: 'listed' | 'unlisted'
+  thumbnail: string | null
+  detailContent: string | null
+  limitPerUser: number
+  currentStock: number
+  preOrderedStock: number
+  availableStock: number
   tagIds: string[]
   tags: ProductTagView[]
 }
@@ -91,6 +111,9 @@ export class ProductService {
 
     if (typeof query.isActive === 'boolean') {
       qb.andWhere('p.is_active = :isActive', { isActive: query.isActive ? 1 : 0 })
+    }
+    if (query.o2oStatus) {
+      qb.andWhere('p.o2o_status = :o2oStatus', { o2oStatus: query.o2oStatus })
     }
 
     if (query.keyword?.trim()) {
@@ -136,6 +159,12 @@ export class ProductService {
             pinyinAbbr: input.pinyinAbbr?.trim() || '',
             defaultPrice: normalizeDecimalText(input.defaultPrice),
             isActive: input.isActive ?? true,
+            o2oStatus: input.o2oStatus ?? 'unlisted',
+            thumbnail: input.thumbnail?.trim() || null,
+            detailContent: input.detailContent?.trim() || null,
+            limitPerUser: Number.isInteger(input.limitPerUser) ? Math.max(1, input.limitPerUser as number) : 5,
+            currentStock: Number.isInteger(input.currentStock) ? Math.max(0, input.currentStock as number) : 0,
+            preOrderedStock: Number.isInteger(input.preOrderedStock) ? Math.max(0, input.preOrderedStock as number) : 0,
           })
 
           const saved = await repo.save(product)
@@ -190,6 +219,24 @@ export class ProductService {
       }
       if (typeof input.isActive === 'boolean') {
         product.isActive = input.isActive
+      }
+      if (input.o2oStatus === 'listed' || input.o2oStatus === 'unlisted') {
+        product.o2oStatus = input.o2oStatus
+      }
+      if (typeof input.thumbnail === 'string' || input.thumbnail === null) {
+        product.thumbnail = typeof input.thumbnail === 'string' ? input.thumbnail.trim() || null : null
+      }
+      if (typeof input.detailContent === 'string' || input.detailContent === null) {
+        product.detailContent = typeof input.detailContent === 'string' ? input.detailContent.trim() || null : null
+      }
+      if (typeof input.limitPerUser === 'number') {
+        product.limitPerUser = Math.max(1, Math.floor(input.limitPerUser))
+      }
+      if (typeof input.currentStock === 'number') {
+        product.currentStock = Math.max(0, Math.floor(input.currentStock))
+      }
+      if (typeof input.preOrderedStock === 'number') {
+        product.preOrderedStock = Math.max(0, Math.floor(input.preOrderedStock))
       }
 
       const saved = await repo.save(product)
@@ -320,6 +367,13 @@ export class ProductService {
         pinyinAbbr: product.pinyinAbbr || '',
         defaultPrice: normalizeDecimalText(product.defaultPrice),
         isActive: Boolean(product.isActive),
+        o2oStatus: product.o2oStatus ?? 'unlisted',
+        thumbnail: product.thumbnail ?? null,
+        detailContent: product.detailContent ?? null,
+        limitPerUser: Number(product.limitPerUser ?? 5),
+        currentStock: Number(product.currentStock ?? 0),
+        preOrderedStock: Number(product.preOrderedStock ?? 0),
+        availableStock: Math.max(0, Number(product.currentStock ?? 0) - Number(product.preOrderedStock ?? 0)),
         tagIds: tags.map((tag) => tag.id),
         tags,
       }
