@@ -559,12 +559,16 @@ const handleSubmit = async () => {
   color: var(--text-main); 
   margin: 0 0 8px; 
   letter-spacing: -0.5px; 
+  animation: smoothFadeUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation-delay: 0.1s;
 } 
 
 .form-subtitle { 
   color: var(--text-sub); 
   font-size: 15px; 
   margin: 0; 
+  animation: smoothFadeUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation-delay: 0.15s;
 } 
 
 /* 定义极丝滑的入场动画 */
@@ -580,16 +584,6 @@ const handleSubmit = async () => {
 }
 
 /* 表单侧错落入场（Vercel / Linear 风格） */
-.form-title {
-  animation: smoothFadeUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) both;
-  animation-delay: 0.1s;
-}
-
-.form-subtitle {
-  animation: smoothFadeUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) both;
-  animation-delay: 0.15s;
-}
-
 .geo-input-1 {
   animation: smoothFadeUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) both;
   animation-delay: 0.25s;
@@ -709,10 +703,10 @@ const handleSubmit = async () => {
 @keyframes pulseGlow {
   0%,
   100% {
-    box-shadow: 0 0 0 1px #0d9488, 0 0 16px 0 rgba(13, 148, 136, 0.15) !important;
+    box-shadow: 0 0 0 1px #0d9488, 0 0 16px 0 rgba(13, 148, 136, 0.15);
   }
   50% {
-    box-shadow: 0 0 0 1px #0d9488, 0 0 24px 2px rgba(13, 148, 136, 0.3) !important;
+    box-shadow: 0 0 0 1px #0d9488, 0 0 24px 2px rgba(13, 148, 136, 0.3);
   }
 }
 
