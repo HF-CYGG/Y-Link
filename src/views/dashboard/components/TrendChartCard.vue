@@ -3,10 +3,12 @@ import { computed } from 'vue'
 import type { EChartsOption } from 'echarts'
 import BaseEChart from '@/components/charts/BaseEChart.vue'
 import type { DashboardTrendPoint } from '@/api/modules/dashboard'
+import { useThemeStore } from '@/store'
 
 const props = defineProps<{
   trend: DashboardTrendPoint[]
 }>()
+const themeStore = useThemeStore()
 
 const formatAmount = (value: string | number | null | undefined): string => {
   const normalizedNumber = Number(value ?? 0)
@@ -24,7 +26,8 @@ const peakAmount = computed(() => {
 })
 
 const trendOption = computed<EChartsOption>(() => ({
-  animationDuration: 400,
+  animationDuration: themeStore.prefersReducedMotion ? 0 : 400,
+  animationDurationUpdate: themeStore.prefersReducedMotion ? 0 : 260,
   color: ['#14b8a6'],
   grid: {
     left: 16,

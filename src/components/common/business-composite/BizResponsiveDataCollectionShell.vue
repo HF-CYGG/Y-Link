@@ -158,4 +158,17 @@ const cardEntries = computed(() => {
 .shared-list-leave-active {
   position: absolute;
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .shared-list-enter-active,
+  .shared-list-leave-active {
+    transition-duration: 0.01ms !important;
+  }
+
+  .shared-list-enter-from,
+  .shared-list-leave-to {
+    opacity: 1;
+    transform: none;
+  }
+}
 </style>

@@ -270,6 +270,9 @@ const verifyFrontendStaticCoverage = () => {
   const dashboardViewPath = path.join(projectRoot, 'src', 'views', 'dashboard', 'DashboardView.vue')
   const appLayoutPath = path.join(projectRoot, 'src', 'layout', 'AppLayout.vue')
   const orderListComposablePath = path.join(projectRoot, 'src', 'views', 'order-list', 'composables', 'useOrderListView.ts')
+  const orderListViewPath = path.join(projectRoot, 'src', 'views', 'order-list', 'OrderListView.vue')
+  const orderVoucherTemplatePath = path.join(projectRoot, 'src', 'views', 'order-list', 'components', 'OrderVoucherTemplate.vue')
+  const systemConfigViewPath = path.join(projectRoot, 'src', 'views', 'system', 'SystemConfigView.vue')
   const userManageViewPath = path.join(projectRoot, 'src', 'views', 'system', 'UserManageView.vue')
   const auditLogViewPath = path.join(projectRoot, 'src', 'views', 'system', 'AuditLogView.vue')
   const productManagerPath = path.join(projectRoot, 'src', 'views', 'base-data', 'components', 'ProductManager.vue')
@@ -284,6 +287,9 @@ const verifyFrontendStaticCoverage = () => {
   const dashboardViewSource = readText(dashboardViewPath)
   const appLayoutSource = readText(appLayoutPath)
   const orderListComposableSource = readText(orderListComposablePath)
+  const orderListViewSource = readText(orderListViewPath)
+  const orderVoucherTemplateSource = readText(orderVoucherTemplatePath)
+  const systemConfigViewSource = readText(systemConfigViewPath)
   const userManageViewSource = readText(userManageViewPath)
   const auditLogViewSource = readText(auditLogViewPath)
   const productManagerSource = readText(productManagerPath)
@@ -316,6 +322,10 @@ const verifyFrontendStaticCoverage = () => {
   assert.match(dashboardViewSource, /executor: \(signal\) => getDashboardStats\(\{ signal \}\)/, '工作台未接入 signal 控制')
   assert.match(orderListComposableSource, /executor: \(signal\) => getOrderList\(buildQueryParams\(\), \{ signal \}\)/, '出库列表未接入 signal 控制')
   assert.match(orderListComposableSource, /executor: \(signal\) => getOrderDetailById\(row\.id, \{ signal \}\)/, '出库详情未接入 signal 控制')
+  assert.match(orderListViewSource, /handlePrintVoucher/, '出库列表页面未接入凭证打印入口')
+  assert.match(orderListViewSource, /handleExportVoucherPdf/, '出库列表页面未接入凭证导出入口')
+  assert.match(orderVoucherTemplateSource, /出库明细/, '凭证模板缺少出库明细核心区块')
+  assert.match(systemConfigViewSource, /系统配置/, '系统配置页面入口异常')
   assert.match(userManageViewSource, /executor: \(signal\) => getUserList\(buildQueryParams\(\), \{ signal \}\)/, '系统用户页未接入 signal 控制')
   assert.match(auditLogViewSource, /executor: \(signal\) => getAuditLogList\(buildQueryParams\(\), \{ signal \}\)/, '审计日志页未接入 signal 控制')
   assert.match(productManagerSource, /loadList: \(requestConfig\) => getProductList\(buildQueryParams\(\), requestConfig\)/, '产品管理未复用统一 CRUD 列表加载入口')
@@ -333,6 +343,9 @@ const verifyFrontendStaticCoverage = () => {
       dashboardViewPath,
       appLayoutPath,
       orderListComposablePath,
+      orderListViewPath,
+      orderVoucherTemplatePath,
+      systemConfigViewPath,
       userManageViewPath,
       auditLogViewPath,
       productManagerPath,
@@ -524,7 +537,7 @@ const verifyOrderListPath = async (token, product) => {
   })
   const createdOrder = submitOrderResult.data.order
   assert.ok(createdOrder.id, '提交订单后未返回 order.id')
-  assert.match(createdOrder.showNo, /^CK-\d{8}-\d{4}$/, '提交订单后 showNo 格式不正确')
+  assert.match(createdOrder.showNo, /^hyyz(?:jd)?\d{1,12}$/i, '提交订单后 showNo 格式不正确')
 
   const orderListResult = await requestApi(`/orders?page=1&pageSize=20&showNo=${encodeURIComponent(createdOrder.showNo)}`, {
     method: 'GET',
@@ -647,6 +660,53 @@ const verifySystemManagementPath = async (token) => {
 }
 
 /**
+ * 系统配置链路验证：
+ * - 拉取双流水配置；
+ * - 使用原值回写，验证保存接口可正常响应（不改变业务数据）。
+ */
+const verifySystemConfigPath = async (token) => {
+  const startedAt = performance.now()
+  const fetchSerialResult = await requestApi('/system-configs/order-serial', {
+    method: 'GET',
+    token,
+  })
+
+  const configs = fetchSerialResult.data.list ?? []
+  assert.ok(configs.length >= 2, '系统配置返回的双流水配置数量异常')
+  const department = configs.find((item) => item.orderType === 'department')
+  const walkin = configs.find((item) => item.orderType === 'walkin')
+  assert.ok(department, '系统配置缺少 department 流水')
+  assert.ok(walkin, '系统配置缺少 walkin 流水')
+
+  const updateResult = await requestApi('/system-configs/order-serial', {
+    method: 'PUT',
+    token,
+    body: {
+      department: {
+        start: Number(department.start),
+        current: Number(department.current),
+        width: Number(department.width),
+      },
+      walkin: {
+        start: Number(walkin.start),
+        current: Number(walkin.current),
+        width: Number(walkin.width),
+      },
+    },
+  })
+  assert.ok(Array.isArray(updateResult.data.list), '系统配置更新后返回数据结构异常')
+
+  const durationMs = performance.now() - startedAt
+  pushStep('系统配置关键参数读取与保存', durationMs, {
+    timings: {
+      fetchSerialMs: Number(fetchSerialResult.durationMs.toFixed(2)),
+      updateSerialMs: Number(updateResult.durationMs.toFixed(2)),
+    },
+  })
+  log('[core-path] 系统配置读取 / 保存验证通过')
+}
+
+/**
  * 审计日志链路验证：
  * - 校验系统治理动作已经沉淀到审计日志；
  * - 同时验证 export 接口能导出当前筛选结果，保证验证结果具备可追溯性。
@@ -724,6 +784,7 @@ const main = async () => {
     const { token } = await verifyLoginAndDashboard()
     const { createdProduct } = await verifyBaseDataPath(token)
     await verifyOrderListPath(token, createdProduct)
+    await verifySystemConfigPath(token)
     const { createdUser } = await verifySystemManagementPath(token)
     await verifyAuditLogPath(token, createdUser)
     writeReport()

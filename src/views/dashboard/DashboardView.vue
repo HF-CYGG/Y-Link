@@ -482,4 +482,16 @@ onActivated(() => {
   opacity: 1;
   transform: translateY(0);
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .staggered-fade-enter-active {
+    transition-duration: 0.01ms !important;
+  }
+
+  .staggered-fade-enter-from,
+  .staggered-fade-enter-to {
+    opacity: 1;
+    transform: none;
+  }
+}
 </style>

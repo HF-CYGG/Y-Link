@@ -23,6 +23,11 @@
   --theme-transition-origin-y: 50vh;
   --theme-transition-duration: 460ms;
   --theme-transition-easing: cubic-bezier(0.22, 1, 0.36, 1);
+  --motion-duration-fast: 160ms;
+  --motion-duration-normal: 240ms;
+  --motion-duration-slow: 320ms;
+  --motion-easing-standard: cubic-bezier(0.2, 0, 0.2, 1);
+  --motion-easing-emphasized: cubic-bezier(0.22, 1, 0.36, 1);
 
   font-family:
     'PingFang SC',
@@ -203,6 +208,62 @@ html.dark .el-drawer {
   border: 1px solid rgba(255, 255, 255, 0.06);
 }
 
+.el-button,
+.el-button [class*='el-icon'],
+.el-switch__core,
+.el-switch__core::after,
+.el-radio-button__inner,
+.el-segmented__item,
+.el-tabs__item,
+.el-collapse-item__header,
+.el-collapse-item__wrap,
+.el-pagination button,
+.el-pager li {
+  transition-duration: var(--motion-duration-fast);
+  transition-timing-function: var(--motion-easing-standard);
+}
+
+.el-button {
+  transition-property: background-color, border-color, color, box-shadow, transform;
+}
+
+.el-button:hover {
+  transform: translateY(-1px);
+}
+
+.el-button:active {
+  transform: translateY(0);
+}
+
+.el-dialog,
+.el-drawer,
+.el-overlay-dialog,
+.el-drawer__body,
+.el-dialog__body,
+.el-loading-mask,
+.el-skeleton,
+.el-skeleton__item {
+  transition-duration: var(--motion-duration-normal);
+  transition-timing-function: var(--motion-easing-emphasized);
+}
+
+.el-dialog,
+.el-drawer,
+.el-overlay-dialog {
+  transition-property: opacity, transform;
+}
+
+.el-table,
+.el-table__row,
+.el-table__body-wrapper,
+.el-table__empty-block,
+.el-pagination,
+.el-empty {
+  transition-property: opacity, background-color, color, border-color;
+  transition-duration: var(--motion-duration-fast);
+  transition-timing-function: var(--motion-easing-standard);
+}
+
 /* 原子类：统一卡片背景、边框与悬浮效果。 */
 @layer components {
   .apple-card {
@@ -352,6 +413,30 @@ canvas {
 .el-form-item,
 .el-button {
   max-width: 100%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --motion-duration-fast: 0.01ms;
+    --motion-duration-normal: 0.01ms;
+    --motion-duration-slow: 0.01ms;
+    --theme-transition-duration: 0.01ms;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  .fade-slide-enter-from,
+  .fade-slide-leave-to {
+    opacity: 1 !important;
+    transform: none !important;
+  }
 }
 
 @media (max-width: 767px) {

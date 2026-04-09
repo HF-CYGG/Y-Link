@@ -5,10 +5,11 @@ import { ElMessage } from 'element-plus'
 import BaseEChart from '@/components/charts/BaseEChart.vue'
 import { getDashboardPieData, type DashboardPieDataResult, type DashboardPieSlice } from '@/api/modules/dashboard'
 import { useStableRequest } from '@/composables/useStableRequest'
-import { useAppStore } from '@/store'
+import { useAppStore, useThemeStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
 
 const appStore = useAppStore()
+const themeStore = useThemeStore()
 const pieRequest = useStableRequest()
 const pieLoading = ref(false)
 const pieData = ref<DashboardPieDataResult>({
@@ -81,7 +82,8 @@ const getCardTotalValue = (slices: DashboardPieSlice[]) => {
 const buildPieOption = (slices: DashboardPieSlice[], valueType: PieValueType): EChartsOption => {
   return {
     color: piePalette,
-    animationDuration: 400,
+    animationDuration: themeStore.prefersReducedMotion ? 0 : 400,
+    animationDurationUpdate: themeStore.prefersReducedMotion ? 0 : 260,
     tooltip: {
       trigger: 'item',
       backgroundColor: 'rgba(15, 23, 42, 0.92)',
@@ -120,8 +122,8 @@ const buildPieOption = (slices: DashboardPieSlice[], valueType: PieValueType): E
           show: false,
         },
         emphasis: {
-          scale: true,
-          scaleSize: 6,
+          scale: !themeStore.prefersReducedMotion,
+          scaleSize: themeStore.prefersReducedMotion ? 0 : 6,
         },
         itemStyle: {
           borderColor: '#ffffff',
