@@ -18,7 +18,7 @@
 - Apple 风格极简 UI，支持丝滑亮暗模式切换。
 - 出库开单支持键盘流与实时金额计算，录入效率高。
 - 默认 SQLite 零配置启动，同时支持切换 MySQL。
-- 内置 Docker Compose 与 GitHub Actions，支持自动构建并推送 Docker Hub。
+- 内置 Docker Compose 与 GitHub Actions，支持自动构建并双路推送到 Docker Hub 与 GitHub Container Registry (ghcr.io)。
 - 权限、审计链路完善，适合持续迭代的业务系统。
 - 开单录入支持草稿态保留，临时切页返回后可恢复输入内容。
 
@@ -61,14 +61,14 @@ docker compose down
 ```
 
 ### 1Panel 一键镜像部署（默认 SQLite，可直接使用）
-Docker Hub 镜像地址（可直接拉取）：
+镜像支持双源（Docker Hub / GHCR），推荐国内网络受限时使用 `ghcr.io`：
 
-- 前端：`docker.io/yemiao351/y-link-frontend:latest`
-- 后端：`docker.io/yemiao351/y-link-backend:latest`
-- 单镜像一键版（前后端同容器）：`docker.io/yemiao351/y-link-onebox:latest`
+- 前端：`docker.io/yemiao351/y-link-frontend:latest` 或 `ghcr.io/hf-cygg/y-link-frontend:latest`
+- 后端：`docker.io/yemiao351/y-link-backend:latest` 或 `ghcr.io/hf-cygg/y-link-backend:latest`
+- 单镜像一键版（前后端同容器）：`docker.io/yemiao351/y-link-onebox:latest` 或 `ghcr.io/hf-cygg/y-link-onebox:latest`
 
 #### 方式 A（优先推荐）：单镜像一键部署（前后端同容器）
-如果你希望在 1Panel 里“只填一个镜像就直接可用”，请优先使用：
+如果你希望在 1Panel 里“只填一个镜像就直接可用”，请优先使用（网络受限请将 `docker.io/yemiao351` 替换为 `ghcr.io/hf-cygg`）：
 
 ```bash
 docker.io/yemiao351/y-link-onebox:latest
@@ -91,7 +91,7 @@ docker.io/yemiao351/y-link-onebox:latest
 - 若访问后出现 “Welcome to nginx!” 而不是登录页：通常是旧容器或旧镜像残留。请删除旧容器后重新 `docker pull docker.io/yemiao351/y-link-onebox:latest` 并重建。
 
 #### 方式 B（进阶）：双容器编排部署（frontend + backend）
-如果你在 1Panel 使用容器编排，推荐执行：
+如果你在 1Panel 使用容器编排，推荐执行（如果拉取失败，可将 `docker.io/yemiao351` 换为 `ghcr.io/hf-cygg`）：
 
 ```bash
 docker pull docker.io/yemiao351/y-link-frontend:latest
