@@ -15,7 +15,9 @@
     "preview": "vite preview",
     "verify:performance:budget": "node ./scripts/verify-enterprise-page-performance.mjs",
     "verify:performance:core-paths": "node ./scripts/verify-enterprise-core-paths.mjs",
-    "verify:performance": "node ./scripts/verify-enterprise-performance-suite.mjs"
+    "verify:performance": "node ./scripts/verify-enterprise-performance-suite.mjs",
+    "verify:onebox:smoke": "node ./scripts/verify-onebox-local-smoke.mjs",
+    "verify:govern-routing-dockerize": "node ./scripts/verify-govern-routing-and-dockerize.mjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",

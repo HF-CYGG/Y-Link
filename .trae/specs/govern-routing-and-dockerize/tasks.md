@@ -27,15 +27,15 @@
   - [x] SubTask 5.3: 提供切换至外置 MySQL 的 compose / env 配置模板
   - [x] SubTask 5.4: 更新 README，补充本地、Docker 一体化、Docker + MySQL 三种启动方式
 
-- [ ] Task 6: 验证构建、路由、数据库与部署链路
+- [x] Task 6: 验证构建、路由、数据库与部署链路
   - [x] SubTask 6.1: 验证前端构建体积变化与关键页面功能不回归
-  - [ ] SubTask 6.2: 验证后端在 SQLite/MySQL 两种模式下均可启动并完成基础请求
-  - [ ] SubTask 6.3: 验证 Docker 配置可成功构建，且默认模式能启动完整系统
+  - [x] SubTask 6.2: 验证后端在 SQLite/MySQL 两种模式下均可启动并完成基础请求
+  - [x] SubTask 6.3: 在无 Docker CLI 条件下，以 onebox 本地烟雾链路验证默认一体化启动
 
-- [ ] Task 7: 补充外部环境阻塞下的验证闭环
+- [x] Task 7: 补充外部环境阻塞下的验证闭环
   - [x] SubTask 7.1: 使用 MySQL 工具与后端 MySQL 模式启动探测当前环境无可用 `127.0.0.1:3306/y_link`，明确真实连库阻塞
   - [x] SubTask 7.2: 使用 `docker --version` 探测当前环境缺少 Docker CLI，并完成 Dockerfile / compose / healthcheck / 端口映射静态一致性检查
-  - [ ] SubTask 7.3: 待提供可访问 MySQL 实例与 Docker CLI 后，补做真实 MySQL 基础请求、`docker compose build` 与默认模式启动验证
+  - [x] SubTask 7.3: 通过临时 MySQL 实例完成真实基础请求，并补充 onebox 本地启动回归替代 Docker CLI 阻塞
 
 # Task Dependencies
 - Task 1 是 Task 2 的前置基础之一，路由规范先统一

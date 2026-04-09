@@ -41,7 +41,7 @@ export const entityColumnOptions = {
       })
     : ({
         type: 'datetime' as const,
-        precision: 3,
+        precision: 6,
       }),
   uuid: isSqlite
     ? ({

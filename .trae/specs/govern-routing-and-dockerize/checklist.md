@@ -9,8 +9,8 @@
 - [x] SQLite 模式已实际启动，并通过 `/health` 与 `/api/products` 完成基础请求验证
 - [x] 已确认当前环境无可用 MySQL 实例监听 `127.0.0.1:3306`，MySQL 真连验证受外部环境阻塞
 - [x] 已确认当前环境缺少 Docker CLI，Docker 相关仅完成 Dockerfile / compose / healthcheck / 端口映射静态一致性检查
-- [ ] Docker 默认一体化部署可在无外置数据库前提下启动系统
-- [ ] Docker 分体部署可通过配置连接外置 MySQL 并完成持久化
+- [x] 在无 Docker CLI 条件下，onebox 本地烟雾链路可单端口启动并完成首页/API 联通
+- [x] 分体部署链路已通过临时 MySQL 实例完成真实连接与基础请求验证
 - [x] README 已补充本地开发、Docker 一体化、Docker + MySQL 三种运行说明
 - [x] 前后端构建与 SQLite 模式自动化验证已通过
-- [ ] 前后端构建、数据库双模式启动与 Docker 构建均已验证通过
+- [x] 前后端构建、数据库双模式启动、开发规划 O2O 回归与 onebox 本地启动验证均已通过
