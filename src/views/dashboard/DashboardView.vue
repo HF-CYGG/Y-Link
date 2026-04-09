@@ -130,10 +130,10 @@ const metricCards = computed(() => [
 /**
  * 近期出库动态：
  * - 复用后端审计事件流，仅展示出库相关动作；
- * - 首页默认展示最近 8 条，避免列表过长挤压首屏。
+ * - 首页默认展示最近 5 条，避免列表过长挤压首屏。
  */
 const recentActivities = computed(() => {
-  return (stats.value?.recentActivities ?? []).slice(0, 6)
+  return (stats.value?.recentActivities ?? []).slice(0, 5)
 })
 
 /**
