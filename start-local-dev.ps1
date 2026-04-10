@@ -22,6 +22,7 @@ $FrontendLog = Join-Path $RuntimeRoot 'frontend.log'
 $FrontendErrorLog = Join-Path $RuntimeRoot 'frontend.error.log'
 $LocalSqlitePath = Join-Path $BackendRoot 'data/local-dev/y-link.local-dev.sqlite'
 $EffectiveBackendEnvFile = Join-Path $RuntimeRoot "backend.$BackendProfile.$BackendPort.env"
+$ChildProcessInputFile = Join-Path $RuntimeRoot 'child-process.stdin.txt'
 
 # 统一的警告输出，方便在正常启动信息中快速识别异常分支。
 function Write-WarnMessage {
@@ -206,6 +207,9 @@ function Stop-RecordedProcesses {
     # 重复启动前一并删除上次生成的临时 env 文件，避免旧状态残留。
     if ($record.effectiveBackendEnvFile -and (Test-Path $record.effectiveBackendEnvFile)) {
       Remove-Item -Path $record.effectiveBackendEnvFile -Force -ErrorAction SilentlyContinue
+    }
+    if ($record.childProcessInputFile -and (Test-Path $record.childProcessInputFile)) {
+      Remove-Item -Path $record.childProcessInputFile -Force -ErrorAction SilentlyContinue
     }
   }
   finally {
@@ -453,6 +457,7 @@ $PowerShellExecutablePath = Get-PowerShellExecutablePath
 New-Item -ItemType Directory -Path $RuntimeRoot -Force | Out-Null
 Ensure-ParentDirectory -Path $LocalSqlitePath
 Ensure-ParentDirectory -Path $EffectiveBackendEnvFile
+Ensure-ParentDirectory -Path $ChildProcessInputFile
 Stop-RecordedProcesses
 Assert-PortAvailable -Port $BackendPort -ServiceName 'backend'
 Assert-PortAvailable -Port $FrontendPort -ServiceName 'frontend'
@@ -460,6 +465,7 @@ if (-not $NoCleanLogs) {
   Remove-Item -Path $BackendLog, $BackendErrorLog, $FrontendLog, $FrontendErrorLog -Force -ErrorAction SilentlyContinue
 }
 New-EffectiveBackendEnvFile -SourceEnvFile $BackendEnvFile -TargetEnvFile $EffectiveBackendEnvFile -TargetPort $BackendPort
+Set-Content -Path $ChildProcessInputFile -Value '' -Encoding UTF8
 
 Write-Info 'Starting backend local profile...'
 $backendCommand = "& { `$env:APP_PROFILE='$BackendProfile'; `$env:ENV_FILE='$EffectiveBackendEnvFile'; `$env:PORT='$BackendPort'; npm.cmd run dev }"
@@ -468,6 +474,7 @@ $backendProcess = Start-Process `
   -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $backendCommand) `
   -WorkingDirectory $BackendRoot `
   -WindowStyle Hidden `
+  -RedirectStandardInput $ChildProcessInputFile `
   -RedirectStandardOutput $BackendLog `
   -RedirectStandardError $BackendErrorLog `
   -PassThru
@@ -479,6 +486,7 @@ $frontendProcess = Start-Process `
   -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $frontendCommand) `
   -WorkingDirectory $ProjectRoot `
   -WindowStyle Hidden `
+  -RedirectStandardInput $ChildProcessInputFile `
   -RedirectStandardOutput $FrontendLog `
   -RedirectStandardError $FrontendErrorLog `
   -PassThru
@@ -500,6 +508,7 @@ try {
     backendProfile = $BackendProfile
     backendEnvFile = $BackendEnvFile
     effectiveBackendEnvFile = $EffectiveBackendEnvFile
+    childProcessInputFile = $ChildProcessInputFile
     backendLog = $BackendLog
     backendErrorLog = $BackendErrorLog
     frontendLog = $FrontendLog
