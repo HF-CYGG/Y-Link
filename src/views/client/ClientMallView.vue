@@ -88,14 +88,29 @@ onMounted(async () => {
   <ClientShell title="商品大厅" subtitle="可直接查看剩余库存、已预订数量，并在线提交预订单">
     <section class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_22rem]">
       <div class="space-y-4">
+        <div class="overflow-hidden rounded-[2rem] bg-white shadow-sm">
+          <div class="client-mall-brand-panel px-5 py-5 text-slate-900">
+            <div class="flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <p class="text-xs font-semibold tracking-[0.16em] text-slate-500">CLIENT MALL</p>
+                <p class="mt-2 text-2xl font-semibold">可预订商品</p>
+                <p class="mt-2 text-sm leading-7 text-slate-600">展示“剩余可用”与“已被预订”，库存变化会在下次刷新后同步。</p>
+              </div>
+              <button class="rounded-full border border-white/70 bg-white/80 px-4 py-2 text-sm text-slate-700 shadow-sm" @click="loadProducts">
+                刷新库存
+              </button>
+            </div>
+          </div>
+        </div>
+
         <div class="flex items-center justify-between rounded-3xl bg-white px-5 py-4 shadow-sm">
           <div>
-            <p class="text-lg font-semibold text-slate-900">可预订商品</p>
-            <p class="text-sm text-slate-500">展示“剩余可用”与“已被预订”，库存变化会在下次刷新后同步</p>
+            <p class="text-lg font-semibold text-slate-900">商品列表</p>
+            <p class="text-sm text-slate-500">选择数量后可直接加入右侧待提交预订单</p>
           </div>
-          <button class="rounded-full border border-slate-200 px-4 py-2 text-sm text-slate-600" @click="loadProducts">
-            刷新库存
-          </button>
+          <span class="rounded-full bg-slate-100 px-4 py-2 text-xs font-medium text-slate-500">
+            共 {{ products.length }} 件上架商品
+          </span>
         </div>
 
         <div v-if="loading" class="rounded-3xl bg-white p-8 text-center text-slate-400 shadow-sm">商品加载中...</div>
@@ -194,6 +209,12 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.client-mall-brand-panel {
+  background:
+    radial-gradient(circle at top right, rgba(44, 196, 196, 0.22), transparent 30%),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(240, 249, 255, 0.94));
+}
+
 .qty-button {
   padding: 0.8rem 1rem;
   color: rgb(71 85 105);

@@ -46,24 +46,25 @@ const handleLogout = async () => {
 </script>
 
 <template>
-  <div class="min-h-screen bg-slate-50 text-slate-900">
-    <header class="sticky top-0 z-20 border-b border-white/60 bg-white/90 backdrop-blur">
+  <div class="client-shell min-h-screen text-slate-900">
+    <header class="sticky top-0 z-20 border-b border-white/60 bg-white/80 backdrop-blur-xl">
       <div class="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-3">
         <div>
-          <p class="text-lg font-semibold text-slate-900">{{ props.title }}</p>
+          <p class="text-xs font-semibold tracking-[0.18em] text-slate-400">Y-LINK CLIENT</p>
+          <p class="mt-1 text-lg font-semibold text-slate-900">{{ props.title }}</p>
           <p v-if="props.subtitle" class="text-sm text-slate-500">{{ props.subtitle }}</p>
         </div>
 
-        <div class="flex items-center gap-2">
+        <div class="flex flex-wrap items-center justify-end gap-2">
           <router-link
             to="/client/mall"
-            class="rounded-full px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"
+            class="rounded-full px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-white/80 hover:text-slate-900"
           >
             商品大厅
           </router-link>
           <router-link
             to="/client/orders"
-            class="rounded-full px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"
+            class="rounded-full px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-white/80 hover:text-slate-900"
           >
             我的订单
           </router-link>
@@ -79,13 +80,31 @@ const handleLogout = async () => {
     </header>
 
     <main class="mx-auto max-w-6xl px-4 py-5">
-      <div class="mb-4 rounded-3xl bg-gradient-to-r from-brand to-cyan-400 px-5 py-4 text-white shadow-sm">
-        <p class="text-sm/6 opacity-90">当前登录</p>
-        <div class="mt-1 flex flex-wrap items-center gap-3">
-          <span class="text-xl font-semibold">{{ displayName }}</span>
-          <span class="rounded-full bg-white/20 px-3 py-1 text-sm">
-            {{ clientAuthStore.currentUser?.departmentName || '未设置部门' }}
-          </span>
+      <div class="client-shell-hero mb-4 rounded-[2rem] px-5 py-5 text-white shadow-sm">
+        <div class="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <p class="text-sm/6 opacity-90">当前登录</p>
+            <div class="mt-1 flex flex-wrap items-center gap-3">
+              <span class="text-2xl font-semibold">{{ displayName }}</span>
+              <span class="rounded-full bg-white/20 px-3 py-1 text-sm">
+                {{ clientAuthStore.currentUser?.departmentName || '未设置部门' }}
+              </span>
+            </div>
+            <p class="mt-3 max-w-2xl text-sm leading-7 text-white/80">
+              在线查看库存、快速提交预订单，到店后出示二维码即可完成核销。
+            </p>
+          </div>
+
+          <div class="grid gap-3 sm:grid-cols-2">
+            <router-link to="/client/mall" class="client-shell-chip">
+              <span class="text-xs text-white/70">进入</span>
+              <span class="mt-1 text-base font-semibold text-white">商品大厅</span>
+            </router-link>
+            <router-link to="/client/orders" class="client-shell-chip">
+              <span class="text-xs text-white/70">查看</span>
+              <span class="mt-1 text-base font-semibold text-white">我的订单</span>
+            </router-link>
+          </div>
         </div>
       </div>
 
@@ -93,3 +112,28 @@ const handleLogout = async () => {
     </main>
   </div>
 </template>
+
+<style scoped>
+.client-shell {
+  background:
+    radial-gradient(circle at top, rgba(44, 196, 196, 0.14), transparent 30%),
+    radial-gradient(circle at bottom right, rgba(15, 23, 42, 0.08), transparent 24%),
+    linear-gradient(180deg, #f8fbfd 0%, #eef4f7 100%);
+}
+
+.client-shell-hero {
+  background:
+    linear-gradient(135deg, rgba(15, 23, 42, 0.92), rgba(13, 148, 136, 0.88)),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0));
+  box-shadow: 0 20px 60px rgba(15, 23, 42, 0.12);
+}
+
+.client-shell-chip {
+  display: block;
+  min-width: 9rem;
+  border-radius: 1.35rem;
+  background: rgba(255, 255, 255, 0.12);
+  padding: 0.9rem 1rem;
+  backdrop-filter: blur(12px);
+}
+</style>

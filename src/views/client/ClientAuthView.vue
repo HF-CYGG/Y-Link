@@ -1,3 +1,62 @@
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -49,6 +108,10 @@ const redirectPath = computed(() => {
   return raw.startsWith('/') && !raw.startsWith('//') ? raw : '/client/mall'
 })
 
+const activeFormKey = computed(() => {
+  return activeTab.value
+})
+
 const applyRegisterRedirectState = () => {
   const registeredMobile = typeof route.query.mobile === 'string' ? route.query.mobile.trim() : ''
   const nextTab = route.query.tab === 'register' ? 'register' : 'login'
@@ -59,6 +122,10 @@ const applyRegisterRedirectState = () => {
   if (registeredMobile) {
     loginForm.mobile = registeredMobile
   }
+}
+
+const handleGoLogin = () => {
+  activeTab.value = 'login'
 }
 
 /**
@@ -226,7 +293,10 @@ watch(
           </div>
 
           <div v-if="successTip" class="client-success-banner">
-            {{ successTip }}
+            <div class="space-y-3">
+              <p>{{ successTip }}</p>
+              <button type="button" class="client-success-action" @click="handleGoLogin">立即去登录</button>
+            </div>
           </div>
 
           <div class="mb-6 flex rounded-full bg-slate-100 p-1">
@@ -248,65 +318,73 @@ watch(
             </button>
           </div>
 
-          <form v-if="activeTab === 'login'" class="space-y-4" @submit.prevent="handleLogin">
-            <label class="client-field">
-              <span class="client-field-label">手机号</span>
-              <input v-model.trim="loginForm.mobile" class="client-input" placeholder="请输入登录手机号" />
-            </label>
-            <label class="client-field">
-              <span class="client-field-label">密码</span>
-              <input v-model="loginForm.password" class="client-input" type="password" placeholder="请输入登录密码" />
-            </label>
-            <div class="grid grid-cols-[1fr_auto] gap-3">
+          <Transition name="auth-panel" mode="out-in">
+            <form v-if="activeTab === 'login'" :key="activeFormKey" class="space-y-4" @submit.prevent="handleLogin">
               <label class="client-field">
-                <span class="client-field-label">图形验证码</span>
-                <input v-model.trim="loginForm.captchaCode" class="client-input" placeholder="请输入验证码" />
+                <span class="client-field-label">手机号</span>
+                <input v-model.trim="loginForm.mobile" class="client-input" placeholder="请输入登录手机号" />
               </label>
-              <button type="button" class="captcha-box" :disabled="captchaLoading" @click="refreshCaptcha">
-                <span v-if="captchaLoading" class="text-xs text-slate-400">加载中</span>
-                <span v-else v-html="captcha.captchaSvg" />
+              <label class="client-field">
+                <span class="client-field-label">密码</span>
+                <input v-model="loginForm.password" class="client-input" type="password" placeholder="请输入登录密码" />
+              </label>
+              <div class="grid gap-3 sm:grid-cols-[minmax(0,1fr)_8.75rem]">
+                <label class="client-field">
+                  <span class="client-field-label">图形验证码</span>
+                  <input v-model.trim="loginForm.captchaCode" class="client-input" placeholder="请输入验证码" />
+                </label>
+                <button type="button" class="captcha-box" :disabled="captchaLoading" @click="refreshCaptcha">
+                  <div class="captcha-box-inner">
+                    <span v-if="captchaLoading" class="text-xs text-slate-400">加载中</span>
+                    <span v-else v-html="captcha.captchaSvg" />
+                  </div>
+                  <span class="captcha-box-tip">{{ captchaLoading ? '正在刷新...' : '点击换一张' }}</span>
+                </button>
+              </div>
+              <div class="flex items-center justify-between text-sm">
+                <span class="text-slate-400">注册后请回到此处登录</span>
+                <router-link class="font-medium text-brand" to="/client/forgot-password">忘记密码</router-link>
+              </div>
+              <button class="client-submit" type="submit" :disabled="loading">
+                {{ loading ? '登录中...' : '登录并进入商品大厅' }}
               </button>
-            </div>
-            <div class="flex items-center justify-between text-sm">
-              <span class="text-slate-400">注册后请回到此处登录</span>
-              <router-link class="font-medium text-brand" to="/client/forgot-password">忘记密码</router-link>
-            </div>
-            <button class="client-submit" type="submit" :disabled="loading">
-              {{ loading ? '登录中...' : '登录并进入商品大厅' }}
-            </button>
-          </form>
+            </form>
 
-          <form v-else class="space-y-4" @submit.prevent="handleRegister">
-            <label class="client-field">
-              <span class="client-field-label">姓名</span>
-              <input v-model.trim="registerForm.realName" class="client-input" placeholder="请输入姓名" />
-            </label>
-            <label class="client-field">
-              <span class="client-field-label">部门</span>
-              <input v-model.trim="registerForm.departmentName" class="client-input" placeholder="请输入部门（选填）" />
-            </label>
-            <label class="client-field">
-              <span class="client-field-label">手机号</span>
-              <input v-model.trim="registerForm.mobile" class="client-input" placeholder="请输入注册手机号" />
-            </label>
-            <label class="client-field">
-              <span class="client-field-label">密码</span>
-              <input v-model="registerForm.password" class="client-input" type="password" placeholder="请设置至少 6 位密码" />
-            </label>
-            <div class="grid grid-cols-[1fr_auto] gap-3">
+            <form v-else :key="activeFormKey" class="space-y-4" @submit.prevent="handleRegister">
               <label class="client-field">
-                <span class="client-field-label">图形验证码</span>
-                <input v-model.trim="registerForm.captchaCode" class="client-input" placeholder="请输入验证码" />
+                <span class="client-field-label">姓名</span>
+                <input v-model.trim="registerForm.realName" class="client-input" placeholder="请输入姓名" />
               </label>
-              <button type="button" class="captcha-box" :disabled="captchaLoading" @click="refreshCaptcha">
-                <span v-if="captchaLoading" class="text-xs text-slate-400">加载中</span>
-                <span v-else v-html="captcha.captchaSvg" />
+              <label class="client-field">
+                <span class="client-field-label">部门</span>
+                <input v-model.trim="registerForm.departmentName" class="client-input" placeholder="请输入部门（选填）" />
+              </label>
+              <label class="client-field">
+                <span class="client-field-label">手机号</span>
+                <input v-model.trim="registerForm.mobile" class="client-input" placeholder="请输入注册手机号" />
+              </label>
+              <label class="client-field">
+                <span class="client-field-label">密码</span>
+                <input v-model="registerForm.password" class="client-input" type="password" placeholder="请设置至少 6 位密码" />
+              </label>
+              <div class="grid gap-3 sm:grid-cols-[minmax(0,1fr)_8.75rem]">
+                <label class="client-field">
+                  <span class="client-field-label">图形验证码</span>
+                  <input v-model.trim="registerForm.captchaCode" class="client-input" placeholder="请输入验证码" />
+                </label>
+                <button type="button" class="captcha-box" :disabled="captchaLoading" @click="refreshCaptcha">
+                  <div class="captcha-box-inner">
+                    <span v-if="captchaLoading" class="text-xs text-slate-400">加载中</span>
+                    <span v-else v-html="captcha.captchaSvg" />
+                  </div>
+                  <span class="captcha-box-tip">{{ captchaLoading ? '正在刷新...' : '点击换一张' }}</span>
+                </button>
+              </div>
+              <button class="client-submit client-submit-register" type="submit" :disabled="loading">
+                {{ loading ? '注册中...' : '注册账号并回到登录' }}
               </button>
-            </div>
-            <button class="client-submit client-submit-register" type="submit" :disabled="loading">
-              {{ loading ? '注册中...' : '注册账号并回到登录' }}
-            </button>
-          </form>
+            </form>
+          </Transition>
         </section>
       </div>
     </div>
@@ -395,6 +473,20 @@ watch(
   line-height: 1.6;
 }
 
+.client-success-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 2.8rem;
+  border-radius: 999px;
+  background: linear-gradient(135deg, rgb(13 148 136), rgb(6 182 212));
+  padding: 0 1.2rem;
+  color: white;
+  font-size: 0.92rem;
+  font-weight: 600;
+  box-shadow: 0 12px 24px rgba(13, 148, 136, 0.18);
+}
+
 .client-field {
   display: block;
 }
@@ -424,12 +516,32 @@ watch(
 }
 
 .captcha-box {
-  min-width: 7.5rem;
+  min-width: 8.75rem;
   border-radius: 1rem;
   border: 1px solid rgb(226 232 240);
   background: white;
-  padding: 0 0.75rem;
+  padding: 0.65rem 0.75rem;
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.5);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 0.35rem;
+  min-height: 5.15rem;
+}
+
+.captcha-box-inner {
+  min-height: 2.6rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.captcha-box-tip {
+  display: block;
+  text-align: center;
+  color: rgb(100 116 139);
+  font-size: 0.74rem;
+  line-height: 1.2;
 }
 
 .client-submit {
@@ -449,6 +561,17 @@ watch(
 .client-submit:disabled {
   cursor: not-allowed;
   opacity: 0.7;
+}
+
+.auth-panel-enter-active,
+.auth-panel-leave-active {
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+
+.auth-panel-enter-from,
+.auth-panel-leave-to {
+  opacity: 0;
+  transform: translateY(10px);
 }
 
 @media (min-width: 768px) {
