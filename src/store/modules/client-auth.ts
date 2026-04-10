@@ -108,8 +108,8 @@ export const useClientAuthStore = defineStore('client-auth', () => {
 
   /**
    * 客户端注册：
-   * - 注册成功后直接写入会话，用户无需再次手动登录；
-   * - 与常见 H5 商城体验保持一致，减少流失。
+   * - 注册动作只负责创建账号本身；
+   * - 注册成功后由页面层引导用户回到登录页完成正式登录。
    */
   const register = async (payload: {
     mobile: string
@@ -120,7 +120,7 @@ export const useClientAuthStore = defineStore('client-auth', () => {
     captchaCode: string
   }) => {
     const result = await clientRegister(payload)
-    applyAuthResult(result)
+    clearAuthState()
     initialized.value = true
     return result
   }
