@@ -599,12 +599,12 @@ onMounted(async () => {
       v-model="detailVisible"
       title="商品详情"
       :direction="isPhone ? 'btt' : 'rtl'"
-      :size="isPhone ? '74%' : '400px'"
+      :size="isPhone ? 'auto' : '400px'"
       append-to-body
       :with-header="false"
       class="client-drawer-responsive"
     >
-      <section v-if="detailProduct" class="space-y-4 pb-2 max-w-[480px] mx-auto h-full flex flex-col">
+      <section v-if="detailProduct" class="space-y-4 pb-2 max-w-[480px] mx-auto h-full max-h-[85vh] flex flex-col">
         <img
           v-if="detailProduct.thumbnail"
           :src="detailProduct.thumbnail"
