@@ -220,6 +220,7 @@ class O2oPreorderService {
         productId: String(item.productId),
         productCode: item.product?.productCode ?? '',
         productName: item.product?.productName ?? '',
+        defaultPrice: String(item.product?.defaultPrice ?? '0'),
         qty: item.qty,
       })),
       qrPayload: `y-link://o2o/verify/${order.verifyCode}`,

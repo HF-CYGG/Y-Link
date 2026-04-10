@@ -35,6 +35,7 @@ export interface O2oPreorderDetailItem {
   productId: string
   productCode: string
   productName: string
+  defaultPrice: string
   qty: number
 }
 

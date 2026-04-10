@@ -94,6 +94,15 @@ const timelineItems = computed(() => {
   ]
 })
 
+const totalAmount = computed(() => {
+  if (!detail.value) {
+    return 0
+  }
+  return detail.value.items.reduce((sum, item) => {
+    return sum + Math.max(0, Number(item.defaultPrice || 0)) * item.qty
+  }, 0)
+})
+
 const displayVerifyCode = computed(() => {
   const rawCode = detail.value?.order.verifyCode ?? ''
   if (!rawCode) {
@@ -219,6 +228,10 @@ onMounted(async () => {
               <p class="mt-1 text-sm text-slate-700">{{ detail.order.totalQty }} 件</p>
             </div>
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <p class="text-sm text-slate-400">总金额</p>
+              <p class="mt-1 text-sm font-semibold text-teal-600">¥{{ totalAmount.toFixed(2) }}</p>
+            </div>
+            <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">超时取消时间</p>
               <p class="mt-1 text-sm text-slate-700">{{ detail.order.timeoutAt || '未开启自动取消' }}</p>
             </div>
@@ -254,12 +267,14 @@ onMounted(async () => {
               <thead class="bg-slate-50 text-slate-500">
                 <tr>
                   <th class="px-4 py-3 text-left font-medium">商品</th>
+                  <th class="px-4 py-3 text-right font-medium">单价</th>
                   <th class="px-4 py-3 text-right font-medium">数量</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-slate-100 bg-white text-slate-700">
                 <tr v-for="item in detail.items" :key="item.id">
                   <td class="px-4 py-3">{{ item.productName }}</td>
+                  <td class="px-4 py-3 text-right">¥{{ Number(item.defaultPrice || 0).toFixed(2) }}</td>
                   <td class="px-4 py-3 text-right font-medium">{{ item.qty }}</td>
                 </tr>
               </tbody>
