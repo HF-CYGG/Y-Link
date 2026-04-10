@@ -8,6 +8,7 @@ export interface ClientCartSnapshotItem {
   productId: string
   productCode: string
   productName: string
+  defaultPrice: string
   thumbnail: string | null
   limitPerUser: number
   availableStock: number
@@ -43,6 +44,7 @@ const normalizeSnapshotItems = (items: unknown): ClientCartSnapshotItem[] => {
       const productId = typeof row.productId === 'string' ? row.productId : ''
       const productCode = typeof row.productCode === 'string' ? row.productCode : ''
       const productName = typeof row.productName === 'string' ? row.productName : ''
+      const defaultPrice = typeof row.defaultPrice === 'string' ? row.defaultPrice : '0.00'
       const thumbnail = typeof row.thumbnail === 'string' ? row.thumbnail : null
       const limitPerUser = Number.isFinite(row.limitPerUser) ? Number(row.limitPerUser) : 0
       const availableStock = Number.isFinite(row.availableStock) ? Number(row.availableStock) : 0
@@ -58,6 +60,7 @@ const normalizeSnapshotItems = (items: unknown): ClientCartSnapshotItem[] => {
         productId,
         productCode,
         productName,
+        defaultPrice,
         thumbnail,
         limitPerUser: Math.max(0, Math.floor(limitPerUser)),
         availableStock: Math.max(0, Math.floor(availableStock)),

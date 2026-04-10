@@ -8,7 +8,6 @@
 
 import { useVirtualList } from '@vueuse/core'
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { ArrowDown, ArrowRight, ShoppingCart } from '@element-plus/icons-vue'
 import { getO2oMallProducts, type O2oMallProduct } from '@/api/modules/o2o'
@@ -18,17 +17,19 @@ import { useClientCartStore, useClientCatalogStore } from '@/store'
 import { normalizeRequestError } from '@/utils/error'
 import { useDevice } from '@/composables/useDevice'
 
+import ClientCartView from './ClientCartView.vue'
+import ClientCheckoutView from './ClientCheckoutView.vue'
+
 interface ProductCategoryGroup {
   key: string
   label: string
   items: O2oMallProduct[]
 }
 
-const router = useRouter()
 const clientCartStore = useClientCartStore()
 const clientCatalogStore = useClientCatalogStore()
 const { runLatest } = useStableRequest()
-const { isPhone, isTablet } = useDevice()
+const { isPhone } = useDevice()
 
 const loading = ref(false)
 const requestError = ref<{ type: 'offline' | 'error'; message: string } | null>(null)
@@ -322,7 +323,15 @@ const handleProductListScroll = () => {
   activeCategoryKey.value = matched
 }
 
-const goToCheckout = async () => {
+const cartDrawerVisible = ref(false)
+const checkoutDrawerVisible = ref(false)
+
+const openCartDrawer = () => {
+  miniCartVisible.value = false
+  cartDrawerVisible.value = true
+}
+
+const goToCheckout = () => {
   if (!clientCartStore.selectedValidItems.length) {
     if (clientCartStore.validItems.length > 0) {
       // 若用户尚未主动勾选，则默认全选有效商品，减少从商城直达结算的操作成本。
@@ -334,7 +343,8 @@ const goToCheckout = async () => {
   }
 
   miniCartVisible.value = false
-  await router.push('/client/checkout')
+  cartDrawerVisible.value = false
+  checkoutDrawerVisible.value = true
 }
 
 onMounted(async () => {
@@ -574,7 +584,7 @@ onMounted(async () => {
               <article v-for="item in clientCartStore.items" :key="item.productId" class="cart-item">
                 <div class="item-main">
                   <p class="item-name">{{ item.productName }}</p>
-                  <p class="item-price">¥{{ (cartProductPriceMap.get(item.productId) ?? 0).toFixed(2) }}</p>
+                  <p class="item-price">¥{{ Number(item.defaultPrice).toFixed(2) }}</p>
                 </div>
                 <div class="item-stepper">
                   <button type="button" class="step-btn" @click="clientCartStore.incrementQty(item.productId, -1)">-</button>
@@ -585,7 +595,7 @@ onMounted(async () => {
             </div>
 
             <div class="expand-footer">
-              <button type="button" class="expand-link-btn" @click="router.push('/client/cart')">进入购物车</button>
+              <button type="button" class="expand-link-btn" @click="openCartDrawer">进入购物车</button>
               <p class="total-price">
                 合计：<span class="price-num">¥{{ miniCartTotalAmount.toFixed(2) }}</span>
               </p>
@@ -635,6 +645,37 @@ onMounted(async () => {
           加入购物车
         </button>
       </section>
+    </ElDrawer>
+
+    <ElDrawer
+      v-model="cartDrawerVisible"
+      title="购物车"
+      direction="btt"
+      size="92%"
+      append-to-body
+      :with-header="false"
+      class="client-drawer-responsive"
+      destroy-on-close
+    >
+      <ClientCartView 
+        @close="cartDrawerVisible = false" 
+        @checkout="goToCheckout" 
+      />
+    </ElDrawer>
+
+    <ElDrawer
+      v-model="checkoutDrawerVisible"
+      title="确认订单"
+      direction="btt"
+      size="92%"
+      append-to-body
+      :with-header="false"
+      class="client-drawer-responsive"
+      destroy-on-close
+    >
+      <ClientCheckoutView 
+        @close="checkoutDrawerVisible = false" 
+      />
     </ElDrawer>
 
   </section>
@@ -793,7 +834,7 @@ onMounted(async () => {
   min-width: 20px;
   border: 2px solid #ffffff;
   border-radius: 9999px;
-  background: #f43f5e;
+  background: #e11d48;
   color: #ffffff;
   font-size: 10px;
   font-weight: 700;
@@ -814,7 +855,7 @@ onMounted(async () => {
 
 .sub-text {
   margin-top: 0.1rem;
-  color: #94a3b8;
+  color: #64748b;
   font-size: 0.72rem;
 }
 

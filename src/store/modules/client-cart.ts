@@ -18,6 +18,7 @@ export interface ClientCartItem {
   productId: string
   productCode: string
   productName: string
+  defaultPrice: string
   thumbnail: string | null
   limitPerUser: number
   availableStock: number
@@ -42,6 +43,7 @@ const createCartItemFromProduct = (product: O2oMallProduct, qty: number): Client
     productId: product.id,
     productCode: product.productCode,
     productName: product.productName,
+    defaultPrice: product.defaultPrice,
     thumbnail: product.thumbnail,
     limitPerUser: Math.max(0, Number(product.limitPerUser ?? 0)),
     availableStock: Math.max(0, Number(product.availableStock ?? 0)),
@@ -80,6 +82,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
       productId: item.productId,
       productCode: item.productCode,
       productName: item.productName,
+      defaultPrice: item.defaultPrice,
       thumbnail: item.thumbnail,
       limitPerUser: item.limitPerUser,
       availableStock: item.availableStock,
@@ -140,6 +143,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
           ...item,
           productCode: latest.productCode,
           productName: latest.productName,
+          defaultPrice: latest.defaultPrice,
           thumbnail: latest.thumbnail,
           availableStock: Math.max(0, Number(latest.availableStock ?? 0)),
           preOrderedStock: Math.max(0, Number(latest.preOrderedStock ?? 0)),
