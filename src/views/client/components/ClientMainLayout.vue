@@ -146,7 +146,7 @@ const handleLogout = async () => {
     </main>
 
     <nav class="client-main-layout__tab fixed bottom-3 left-1/2 z-30 -translate-x-1/2 rounded-[1.4rem] px-2 py-2">
-      <div class="grid grid-cols-4 gap-1">
+      <div class="grid grid-cols-3 gap-1">
         <router-link
           v-for="tab in tabs"
           :key="tab.path"
@@ -155,16 +155,6 @@ const handleLogout = async () => {
           :class="isTabActive(tab.path) ? 'is-active' : ''"
         >
           {{ tab.label }}
-        </router-link>
-        <router-link to="/client/cart" class="client-main-layout__tab-item" :class="route.path === '/client/cart' ? 'is-active' : ''">
-          购物车
-          <span
-            v-if="clientCartStore.totalQty > 0"
-            class="client-main-layout__cart-badge ml-1 inline-flex min-w-5 items-center justify-center rounded-full bg-rose-500 px-1.5 text-[10px] leading-5 text-white"
-            :class="cartBadgeBouncing ? 'is-bouncing' : ''"
-          >
-            {{ clientCartStore.totalQty }}
-          </span>
         </router-link>
       </div>
     </nav>
