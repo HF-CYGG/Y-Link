@@ -18,6 +18,7 @@ export interface ProductRecord {
   pinyinAbbr: string
   defaultPrice: string
   isActive: boolean
+  category: string
   o2oStatus: 'listed' | 'unlisted'
   thumbnail: string | null
   detailContent: string | null
@@ -35,6 +36,7 @@ export interface CreateProductDto {
   pinyinAbbr?: string
   defaultPrice?: number
   isActive?: boolean
+  category?: string
   o2oStatus?: 'listed' | 'unlisted'
   thumbnail?: string | null
   detailContent?: string | null

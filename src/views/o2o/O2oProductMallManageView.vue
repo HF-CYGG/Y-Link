@@ -43,6 +43,7 @@ const form = reactive<O2oProductFormState>({
   productName: '',
   defaultPrice: 0,
   isActive: true,
+  category: '默认分类',
   o2oStatus: 'listed',
   thumbnail: '',
   detailContent: '',
@@ -65,6 +66,7 @@ const resetForm = () => {
   form.productName = ''
   form.defaultPrice = 0
   form.isActive = true
+  form.category = '默认分类'
   form.o2oStatus = 'listed'
   form.thumbnail = ''
   form.detailContent = ''
@@ -97,6 +99,7 @@ const openEditDialog = (product: ProductRecord) => {
   form.productName = product.productName
   form.defaultPrice = Number(product.defaultPrice)
   form.isActive = product.isActive
+  form.category = product.category || '默认分类'
   form.o2oStatus = product.o2oStatus
   form.thumbnail = product.thumbnail ?? ''
   form.detailContent = product.detailContent ?? ''
@@ -133,6 +136,7 @@ const handleSubmit = async () => {
         productName: form.productName.trim(),
         defaultPrice: Number(form.defaultPrice) || 0,
         isActive: form.isActive,
+        category: form.category.trim() || '默认分类',
         o2oStatus: form.o2oStatus,
         thumbnail: form.thumbnail.trim() || null,
         detailContent: form.detailContent.trim() || null,
@@ -147,6 +151,7 @@ const handleSubmit = async () => {
         productName: form.productName.trim(),
         defaultPrice: Number(form.defaultPrice) || 0,
         isActive: form.isActive,
+        category: form.category.trim() || '默认分类',
         o2oStatus: form.o2oStatus,
         thumbnail: form.thumbnail.trim() || null,
         detailContent: form.detailContent.trim() || null,
@@ -244,18 +249,26 @@ onMounted(async () => {
             </el-form-item>
           </el-col>
           <el-col :span="12">
-            <el-form-item label="当前库存">
-              <el-input-number v-model="form.currentStock" :min="0" :step="1" style="width: 100%" />
+            <el-form-item label="商品分类">
+              <el-input v-model="form.category" placeholder="请输入商品分类(如：文创周边)" />
             </el-form-item>
           </el-col>
         </el-row>
 
         <el-row :gutter="16">
           <el-col :span="12">
+            <el-form-item label="当前库存">
+              <el-input-number v-model="form.currentStock" :min="0" :step="1" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
             <el-form-item label="单人限购">
               <el-input-number v-model="form.limitPerUser" :min="1" :step="1" style="width: 100%" />
             </el-form-item>
           </el-col>
+        </el-row>
+
+        <el-row :gutter="16">
           <el-col :span="12">
             <el-form-item label="商品状态">
               <el-space wrap>

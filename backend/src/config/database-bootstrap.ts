@@ -46,6 +46,7 @@ const SQLITE_REQUIRED_PRODUCT_COLUMNS = [
   'o2o_status',
   'thumbnail',
   'detail_content',
+  'category',
   'limit_per_user',
   'current_stock',
   'pre_ordered_stock',

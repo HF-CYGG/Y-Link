@@ -43,6 +43,7 @@ class O2oPreorderService {
       productCode: item.productCode,
       productName: item.productName,
       defaultPrice: item.defaultPrice,
+      category: item.category || '默认分类',
       thumbnail: item.thumbnail,
       detailContent: item.detailContent,
       limitPerUser: Number(item.limitPerUser ?? 5),

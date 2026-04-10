@@ -55,17 +55,8 @@ clientCatalogStore.initialize()
 
 const products = computed(() => clientCatalogStore.products)
 
-// 当前后端未直接返回业务分类字段，因此前端临时根据商品编码前缀做稳定分组。
-// 这样既能满足双栏联动结构，又不会引入额外接口改造。
 const classifyProduct = (product: O2oMallProduct) => {
-  const code = product.productCode.trim()
-  if (code.includes('-')) {
-    return code.split('-')[0] || '默认分组'
-  }
-  if (code.length >= 2) {
-    return code.slice(0, 2)
-  }
-  return '默认分组'
+  return product.category || '默认分类'
 }
 
 const categoryGroups = computed<ProductCategoryGroup[]>(() => {
@@ -445,9 +436,10 @@ onMounted(async () => {
             <div v-else class="client-product-card__cover grid place-content-center text-xs text-slate-400">
               暂无图片
             </div>
-            <div class="min-w-0 flex-1">
+            <div class="min-w-0 flex-1 text-left">
               <p class="truncate text-base font-semibold text-slate-900">{{ product.productName }}</p>
               <p class="mt-1 text-xs text-slate-400">{{ product.productCode }}</p>
+              <p class="mt-1 text-xs text-slate-500 truncate">{{ product.detailContent || '暂无商品描述' }}</p>
               <div class="mt-2 flex flex-wrap gap-2 text-xs">
                 <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">
                   可预订 {{ product.availableStock }}
@@ -463,15 +455,23 @@ onMounted(async () => {
       </div>
     </section>
 
-    <section
-      v-else-if="largeDatasetMode"
-      class="space-y-3 rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-4 shadow-[var(--ylink-shadow-soft)]"
-    >
-      <header class="flex items-center justify-between">
-        <p class="text-sm font-semibold text-slate-700">大数据模式 · 当前展示 {{ activeCategoryItems.length }} 条</p>
-      </header>
-      <div class="max-h-[64vh] overflow-y-auto pr-1" v-bind="virtualContainerProps">
-        <div v-bind="virtualWrapperProps">
+    <section v-else class="grid grid-cols-[88px_minmax(0,1fr)] sm:grid-cols-[140px_minmax(0,1fr)] gap-3 rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-3 sm:p-4 shadow-[var(--ylink-shadow-soft)]">
+      <aside class="max-h-[64vh] overflow-y-auto pr-1 sm:pr-2 hide-scrollbar">
+        <button
+          v-for="category in categoryOptions"
+          :key="category.key"
+          type="button"
+          class="mb-2 w-full rounded-xl px-2 py-2 sm:px-3 sm:py-3 text-left transition-colors duration-200"
+          :class="activeCategoryKey === category.key ? 'bg-[var(--ylink-color-primary-strong)] text-white shadow-md' : 'bg-[var(--ylink-color-surface-muted)] text-slate-500 hover:bg-slate-200'"
+          @click="scrollToCategory(category.key)"
+        >
+          <p class="truncate text-xs sm:text-sm font-medium">{{ category.label }}</p>
+          <p class="mt-0.5 text-[10px] sm:text-xs opacity-75">{{ category.count }} 款</p>
+        </button>
+      </aside>
+
+      <div v-if="largeDatasetMode" class="max-h-[64vh] overflow-y-auto pr-1" v-bind="virtualContainerProps">
+        <div v-bind="virtualWrapperProps" class="client-product-grid">
           <article v-for="row in virtualRows" :key="row.index" class="client-product-card mb-2">
             <button type="button" class="client-product-card__body" @click="openProductDetail(row.data)">
               <img
@@ -483,7 +483,7 @@ onMounted(async () => {
                 decoding="async"
               />
               <div v-else class="client-product-card__cover grid place-content-center text-xs text-slate-400">暂无图片</div>
-              <div class="min-w-0 flex-1">
+              <div class="min-w-0 flex-1 text-left">
                 <p class="truncate text-base font-semibold text-slate-900">{{ row.data.productName }}</p>
                 <p class="mt-1 text-xs text-slate-400">{{ row.data.productCode }}</p>
                 <div class="mt-2 flex flex-wrap gap-2 text-xs">
@@ -496,30 +496,15 @@ onMounted(async () => {
           </article>
         </div>
       </div>
-    </section>
 
-    <section v-else class="grid grid-cols-[88px_minmax(0,1fr)] gap-3 rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-3 shadow-[var(--ylink-shadow-soft)]">
-      <aside class="max-h-[64vh] overflow-y-auto pr-1">
-        <button
-          v-for="category in categoryOptions"
-          :key="category.key"
-          type="button"
-          class="mb-2 w-full rounded-xl px-2 py-2 text-left text-xs text-slate-500"
-          :class="activeCategoryKey === category.key ? 'bg-[var(--ylink-color-primary-strong)] text-white' : 'bg-[var(--ylink-color-surface-muted)]'"
-          @click="scrollToCategory(category.key)"
-        >
-          <p class="truncate font-medium">{{ category.label }}</p>
-          <p class="mt-0.5 opacity-75">{{ category.count }} 款</p>
-        </button>
-      </aside>
-      <div ref="listScrollerRef" class="max-h-[64vh] overflow-y-auto pr-1" @scroll="handleProductListScroll">
+      <div v-else ref="listScrollerRef" class="max-h-[64vh] overflow-y-auto pr-1" @scroll="handleProductListScroll">
         <section
           v-for="group in categoryGroups"
           :key="group.key"
           :ref="(el) => setSectionRef(group.key, el)"
           class="mb-4"
         >
-          <header class="sticky top-0 z-10 mb-2 rounded-lg bg-white/95 px-1 py-1.5 text-sm font-semibold text-slate-700">
+          <header class="sticky top-0 z-10 mb-2 rounded-lg bg-white/95 px-1 py-1.5 text-sm font-semibold text-slate-700 backdrop-blur-sm">
             {{ group.label }}
           </header>
           <div class="client-product-grid">
@@ -534,7 +519,7 @@ onMounted(async () => {
                   decoding="async"
                 />
                 <div v-else class="client-product-card__cover grid place-content-center text-xs text-slate-400">暂无图片</div>
-                <div class="min-w-0 flex-1">
+                <div class="min-w-0 flex-1 text-left">
                   <p class="truncate text-base font-semibold text-slate-900">{{ product.productName }}</p>
                   <p class="mt-1 text-xs text-slate-400">{{ product.productCode }}</p>
                   <div class="mt-2 flex flex-wrap gap-2 text-xs">
@@ -1002,6 +987,13 @@ onMounted(async () => {
 .total-price {
   color: #64748b;
   font-size: 0.88rem;
+}
+
+.hide-scrollbar {
+  scrollbar-width: none;
+}
+.hide-scrollbar::-webkit-scrollbar {
+  display: none;
 }
 
 .price-num {

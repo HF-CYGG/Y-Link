@@ -56,6 +56,7 @@ interface ProductForm {
   pinyinAbbr: string
   defaultPrice: number
   isActive: boolean
+  category: string
   tagIds: string[]
 }
 
@@ -71,6 +72,7 @@ const createDefaultForm = (): ProductForm => ({
   pinyinAbbr: '',
   defaultPrice: 0,
   isActive: true,
+  category: '默认分类',
   tagIds: [] as string[],
 })
 
@@ -267,6 +269,7 @@ const buildEditForm = (row: ProductRecord): ProductForm => ({
   pinyinAbbr: row.pinyinAbbr,
   defaultPrice: Number(row.defaultPrice),
   isActive: row.isActive,
+  category: row.category || '默认分类',
   tagIds: row.tagIds,
 })
 
@@ -284,6 +287,7 @@ const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProdu
     pinyinAbbr: currentForm.pinyinAbbr,
     defaultPrice: currentForm.defaultPrice,
     isActive: currentForm.isActive,
+    category: currentForm.category,
     tagIds: resolvedTagIds,
   }
 }
@@ -547,6 +551,7 @@ onActivated(() => {
               :sort-orders="['ascending', 'descending']"
             />
             <el-table-column label="产品名称" prop="productName" min-width="220" show-overflow-tooltip />
+            <el-table-column label="分类" prop="category" width="100" show-overflow-tooltip />
             <el-table-column label="拼音首字母" prop="pinyinAbbr" width="120" show-overflow-tooltip />
             <el-table-column label="默认售价" prop="defaultPrice" width="132">
               <template #default="{ row }">
@@ -671,6 +676,9 @@ onActivated(() => {
               class="w-full"
               placeholder="请输入售价"
             />
+          </el-form-item>
+          <el-form-item label="产品分类" prop="category">
+            <el-input v-model="form.category" placeholder="请输入分类名称(如：饮品)" />
           </el-form-item>
           <el-form-item label="关联标签" prop="tagIds">
             <el-select

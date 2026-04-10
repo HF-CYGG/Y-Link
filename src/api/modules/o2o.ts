@@ -11,6 +11,7 @@ export interface O2oMallProduct {
   productCode: string
   productName: string
   defaultPrice: string
+  category: string
   thumbnail: string | null
   detailContent: string | null
   limitPerUser: number
