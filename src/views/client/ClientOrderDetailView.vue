@@ -60,6 +60,12 @@ const timelineItems = computed(() => {
     return []
   }
   const timeoutReached = Boolean(detail.value.order.timeoutAt && new Date(detail.value.order.timeoutAt).getTime() <= Date.now())
+  let verifyStepTitle = '待核销'
+  if (detail.value.order.status === 'verified') {
+    verifyStepTitle = '已核销'
+  } else if (timeoutReached) {
+    verifyStepTitle = '已超时'
+  }
   return [
     {
       key: 'created',
@@ -75,7 +81,7 @@ const timelineItems = computed(() => {
     },
     {
       key: 'verified',
-      title: detail.value.order.status === 'verified' ? '已核销' : timeoutReached ? '已超时' : '待核销',
+      title: verifyStepTitle,
       time: detail.value.order.verifiedAt || detail.value.order.timeoutAt || '待完成',
       active: detail.value.order.status !== 'pending',
     },
@@ -88,9 +94,9 @@ const displayVerifyCode = computed(() => {
     return ''
   }
   return rawCode
-    .replace(/-/g, '')
+    .replaceAll('-', '')
     .toUpperCase()
-    .replace(/(.{4})/g, '$1 ')
+    .replaceAll(/(.{4})/g, '$1 ')
     .trim()
 })
 

@@ -100,7 +100,11 @@ const handleLogout = async () => {
       confirmButtonText: '退出',
       cancelButtonText: '取消',
     })
-  } catch (_error) {
+  } catch (error) {
+    // 用户主动取消退出属于预期分支，这里只中止后续流程，不视为异常提示。
+    if (error !== 'cancel' && error !== 'close') {
+      console.warn('退出登录确认框返回了未预期结果。', error)
+    }
     return
   }
 

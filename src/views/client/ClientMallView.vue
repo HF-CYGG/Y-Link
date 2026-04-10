@@ -152,7 +152,7 @@ const triggerSettlePulse = () => {
 }
 
 const warmupProductImages = (items: O2oMallProduct[]) => {
-  if (typeof globalThis.window === 'undefined') {
+  if (globalThis.window === undefined) {
     return
   }
   // 仅预热首屏附近的小批量图片，避免在慢网环境下一次性抢占过多带宽。

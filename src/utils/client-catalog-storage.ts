@@ -17,7 +17,7 @@ export interface ClientCatalogSnapshot {
 const CLIENT_CATALOG_SNAPSHOT_KEY = 'y-link.client-catalog.snapshot'
 
 const getStorage = () => {
-  if (typeof globalThis.window === 'undefined') {
+  if (globalThis.window === undefined) {
     return null
   }
   return globalThis.window.localStorage
@@ -74,7 +74,8 @@ export const readPersistedClientCatalogSnapshot = (): ClientCatalogSnapshot | nu
       keyword: typeof parsed.keyword === 'string' ? parsed.keyword : '',
       updatedAt: Number.isFinite(parsed.updatedAt) ? Number(parsed.updatedAt) : 0,
     }
-  } catch (_error) {
+  } catch (error) {
+    console.warn('读取客户端商品目录缓存失败，已清理损坏快照。', error)
     storage.removeItem(CLIENT_CATALOG_SNAPSHOT_KEY)
     return null
   }

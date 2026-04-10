@@ -199,8 +199,9 @@ const handleLogin = async () => {
     })
     ElMessage.success('登录成功，欢迎来到 Y-Link 客户端')
     await router.replace(redirectPath.value)
-  } catch (_error) {
+  } catch (error) {
     ElMessage.error('登录失败，请检查手机号、密码和验证码后重试')
+    console.warn('客户端登录失败。', error)
     loginForm.captcha = ''
     await refreshCaptcha()
   } finally {
@@ -252,8 +253,9 @@ const handleRegister = async () => {
         notice: successTip.value,
       },
     })
-  } catch (_error) {
+  } catch (error) {
     ElMessage.error('注册失败，请检查信息后重试')
+    console.warn('客户端注册失败。', error)
     registerForm.captcha = ''
     await refreshCaptcha()
   } finally {
@@ -507,8 +509,8 @@ watch(successTip, async () => {
 .brand-tag {
   display: inline-block;
   padding: 6px 14px;
-  background: rgba(13, 148, 136, 0.1);
-  color: #0d9488;
+  background: rgba(13, 148, 136, 0.22);
+  color: #0f172a;
   border-radius: 8px;
   font-size: 12px;
   font-weight: 700;
@@ -609,8 +611,8 @@ watch(successTip, async () => {
 .success-pill {
   margin-bottom: 20px;
   border-radius: 16px;
-  background: rgba(13, 148, 136, 0.08);
-  color: #0f766e;
+  background: rgba(13, 148, 136, 0.18);
+  color: #0f172a;
   padding: 12px 14px;
   font-size: 13px;
   line-height: 1.6;
@@ -726,7 +728,7 @@ watch(successTip, async () => {
   width: 100%;
   height: 52px;
   border-radius: 14px !important;
-  background-color: #0d9488 !important;
+  background-color: #0f766e !important;
   color: #ffffff !important;
   border: none !important;
   font-size: 15px !important;
