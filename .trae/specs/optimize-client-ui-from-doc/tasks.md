@@ -34,9 +34,27 @@
   - [x] SubTask 6.3: 完成关键链路回归（浏览、加购、下单、待提货核销）
   - [x] SubTask 6.4: 完成性能验证与弱网回归，确保改造后稳定上线
 
+- [x] Task 7: 客户端消费端视觉体系二次统一与容器化升级
+  - [x] SubTask 7.1: 在 `src/style.css` 收口客户端品牌色与中性色 Token，统一按钮、输入框、卡片、背景层级
+  - [x] SubTask 7.2: 改造 `ClientMainLayout.vue` 为“移动端全宽 + PC 端居中容器”并实现悬浮胶囊底部导航
+  - [x] SubTask 7.3: 保持“商城 / 订单 / 我的”壳层一致性，统一页面内边距与安全区处理
+
+- [x] Task 8: 商城页面响应式 Grid 升级与双栏逻辑兼容
+  - [x] SubTask 8.1: 在 `ClientMallView.vue` 升级商品区为自适应 Grid（移动端 1 列、平板 2 列、桌面 3 列）
+  - [x] SubTask 8.2: 保留左侧分类与右侧内容联动，不破坏既有搜索独立态与吸顶交互
+  - [x] SubTask 8.3: 统一商品卡片信息密度、库存状态色和按钮视觉层级
+
+- [x] Task 9: 二次改造回归验证
+  - [x] SubTask 9.1: 运行前端构建并修复新增诊断问题
+  - [x] SubTask 9.2: 回归验证客户端关键链路（登录/注册入口、商城浏览、导航切换、购物车入口）
+  - [x] SubTask 9.3: 执行性能门禁校验，确认无新增性能回退
+
 # Task Dependencies
 - Task 2 depends on Task 1
 - Task 3 depends on Task 2
 - Task 4 depends on Task 3
 - Task 5 can run in parallel with Task 4 after Task 2 基础能力完成
 - Task 6 depends on Task 4 and Task 5
+- Task 7 为本轮消费端视觉体系升级起点
+- Task 8 depends on Task 7
+- Task 9 depends on Task 7 and Task 8

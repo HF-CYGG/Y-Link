@@ -115,16 +115,16 @@ const handleLogout = async () => {
 </script>
 
 <template>
-  <div class="client-main-layout min-h-screen pb-24 text-slate-900">
-    <header class="client-main-layout__header sticky top-0 z-30 border-b border-white/55 bg-white/80 backdrop-blur-xl">
-      <div class="mx-auto flex w-full max-w-6xl items-center justify-between gap-3 px-4 py-3">
+  <div class="client-main-layout min-h-screen pb-28 text-slate-900">
+    <header class="client-main-layout__header sticky top-0 z-30">
+      <div class="client-main-layout__container flex items-center justify-between gap-3 px-4 py-3 sm:px-5">
         <div>
           <p class="text-xs font-semibold tracking-[0.16em] text-slate-400">Y-LINK CLIENT</p>
           <p class="text-base font-semibold text-slate-900">{{ displayName }}</p>
         </div>
         <button
           type="button"
-          class="rounded-full border border-slate-200/90 bg-white/80 px-3 py-1.5 text-xs font-medium text-slate-600"
+          class="rounded-full border border-[var(--ylink-color-border)] bg-white/90 px-3 py-1.5 text-xs font-medium text-slate-600"
           @click="handleLogout"
         >
           退出
@@ -132,7 +132,7 @@ const handleLogout = async () => {
       </div>
     </header>
 
-    <main class="mx-auto w-full max-w-6xl px-4 pt-4">
+    <main class="client-main-layout__container px-4 pt-4 sm:px-5">
       <router-view v-slot="{ Component, route: viewRoute }">
         <transition :name="transitionName" mode="out-in">
           <KeepAlive :max="3">
@@ -145,7 +145,7 @@ const handleLogout = async () => {
       </router-view>
     </main>
 
-    <nav class="client-main-layout__tab fixed bottom-3 left-1/2 z-30 w-[min(640px,calc(100vw-1.5rem))] -translate-x-1/2 rounded-[1.5rem] border border-white/60 bg-white/85 px-2 py-2 backdrop-blur-2xl">
+    <nav class="client-main-layout__tab fixed bottom-3 left-1/2 z-30 -translate-x-1/2 rounded-[1.4rem] px-2 py-2">
       <div class="grid grid-cols-4 gap-1">
         <router-link
           v-for="tab in tabs"
@@ -173,13 +173,30 @@ const handleLogout = async () => {
 
 <style scoped>
 .client-main-layout {
+  --client-shell-max: 1100px;
+  --client-shell-inline: clamp(0.85rem, 2.3vw, 1.25rem);
   background:
-    radial-gradient(circle at top, rgba(45, 212, 191, 0.12), transparent 30%),
-    radial-gradient(circle at bottom right, rgba(15, 23, 42, 0.08), transparent 24%),
+    radial-gradient(circle at top, rgba(13, 148, 136, 0.14), transparent 36%),
+    radial-gradient(circle at bottom right, rgba(15, 118, 110, 0.12), transparent 30%),
     var(--ylink-color-bg);
 }
 
+.client-main-layout__container {
+  width: min(var(--client-shell-max), calc(100vw - var(--client-shell-inline) * 2));
+  margin: 0 auto;
+}
+
+.client-main-layout__header {
+  border-bottom: 1px solid color-mix(in srgb, var(--ylink-color-border) 70%, #ffffff 30%);
+  background: var(--ylink-color-overlay);
+  backdrop-filter: blur(18px);
+}
+
 .client-main-layout__tab {
+  width: min(var(--client-shell-max), calc(100vw - var(--client-shell-inline) * 2));
+  border: 1px solid color-mix(in srgb, var(--ylink-color-border) 72%, #ffffff 28%);
+  background: color-mix(in srgb, var(--ylink-color-surface) 86%, #ffffff 14%);
+  backdrop-filter: blur(20px);
   box-shadow: var(--ylink-shadow-floating);
 }
 
@@ -189,13 +206,13 @@ const handleLogout = async () => {
   align-items: center;
   justify-content: center;
   border-radius: 0.9rem;
-  color: #64748b;
+  color: var(--ylink-color-subtext);
   font-size: 0.87rem;
   font-weight: 600;
 }
 
 .client-main-layout__tab-item.is-active {
-  background: rgba(15, 23, 42, 0.92);
+  background: var(--ylink-color-primary-strong);
   color: #ffffff;
 }
 
@@ -212,6 +229,16 @@ const handleLogout = async () => {
   }
   100% {
     transform: scale(1);
+  }
+}
+
+@media (max-width: 768px) {
+  .client-main-layout {
+    --client-shell-inline: 0.75rem;
+  }
+
+  .client-main-layout__tab {
+    bottom: max(0.7rem, env(safe-area-inset-bottom));
   }
 }
 </style>

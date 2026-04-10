@@ -20,6 +20,7 @@ backend/data/
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
+.trae/
 .idea
 .DS_Store
 *.suo

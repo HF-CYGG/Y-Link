@@ -36,10 +36,16 @@
   --motion-easing-emphasized: cubic-bezier(0.22, 1, 0.36, 1);
   --ylink-color-primary: #0d9488;
   --ylink-color-primary-weak: #ccfbf1;
+  --ylink-color-primary-soft: #99f6e4;
+  --ylink-color-primary-strong: #0f766e;
   --ylink-color-bg: #f5f7fa;
   --ylink-color-surface: #ffffff;
+  --ylink-color-surface-muted: #f1f5f9;
+  --ylink-color-surface-soft: #f8fafc;
   --ylink-color-text: #0f172a;
   --ylink-color-subtext: #64748b;
+  --ylink-color-border: #dbe2ea;
+  --ylink-color-overlay: rgba(248, 250, 252, 0.86);
   --ylink-color-warning: #f59e0b;
   --ylink-color-danger: #ef4444;
   --ylink-radius-sm: 12px;
@@ -98,7 +104,7 @@ body {
   position: relative;
   margin: 0;
   min-width: 320px;
-  background-color: #eff1f5;
+  background-color: var(--ylink-color-bg);
   @apply dark:bg-[#0a0a0b];
 }
 

@@ -339,7 +339,7 @@ onMounted(async () => {
 
 <template>
   <section class="space-y-4 pb-20">
-    <div class="overflow-hidden rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
+    <div class="overflow-hidden rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-4 shadow-[var(--ylink-shadow-soft)]">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p class="text-xs font-semibold tracking-[0.16em] text-slate-400">CLIENT MALL</p>
@@ -348,7 +348,7 @@ onMounted(async () => {
         </div>
         <button
           type="button"
-          class="rounded-full border border-slate-200 bg-slate-50 px-4 py-2 text-sm text-slate-600"
+          class="rounded-full border border-[var(--ylink-color-border)] bg-[var(--ylink-color-surface-soft)] px-4 py-2 text-sm text-slate-600"
           :disabled="loading"
           @click="loadProducts(true)"
         >
@@ -356,31 +356,31 @@ onMounted(async () => {
         </button>
       </div>
       <div class="mt-4 grid gap-3 sm:grid-cols-3">
-        <div class="rounded-2xl bg-teal-50 px-3 py-3 text-sm text-teal-700">营业时间：08:30 - 20:30</div>
-        <div class="rounded-2xl bg-slate-100 px-3 py-3 text-sm text-slate-700">提货须知：请在订单有效期内到店核销</div>
+        <div class="rounded-2xl bg-[var(--ylink-color-primary-weak)] px-3 py-3 text-sm text-[var(--ylink-color-primary-strong)]">营业时间：08:30 - 20:30</div>
+        <div class="rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700">提货须知：请在订单有效期内到店核销</div>
         <div class="rounded-2xl bg-amber-50 px-3 py-3 text-sm text-amber-700">公告：库存实时刷新，请以下单结果为准</div>
       </div>
     </div>
 
-    <div class="rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
+    <div class="rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-4 shadow-[var(--ylink-shadow-soft)]">
       <div class="flex items-center gap-3">
         <input
           v-model.trim="keyword"
-          class="h-11 flex-1 rounded-full border border-slate-200 bg-slate-50 px-4 text-sm outline-none focus:border-teal-300"
+          class="h-11 flex-1 rounded-full border border-[var(--ylink-color-border)] bg-[var(--ylink-color-surface-soft)] px-4 text-sm outline-none focus:border-[var(--ylink-color-primary-soft)]"
           placeholder="搜索商品名称 / 编码"
         />
         <button
           type="button"
-          class="h-11 rounded-full border border-slate-200 px-4 text-sm text-slate-600"
+          class="h-11 rounded-full border border-[var(--ylink-color-border)] px-4 text-sm text-slate-600"
           @click="keyword = ''"
         >
           清空
         </button>
       </div>
       <div class="mt-3 flex flex-wrap gap-2">
-        <span class="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-500">推荐：热销</span>
-        <span class="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-500">推荐：新品</span>
-        <span class="rounded-full bg-slate-100 px-3 py-1 text-xs text-slate-500">推荐：低库存优先</span>
+        <span class="rounded-full bg-[var(--ylink-color-surface-muted)] px-3 py-1 text-xs text-slate-500">推荐：热销</span>
+        <span class="rounded-full bg-[var(--ylink-color-surface-muted)] px-3 py-1 text-xs text-slate-500">推荐：新品</span>
+        <span class="rounded-full bg-[var(--ylink-color-surface-muted)] px-3 py-1 text-xs text-slate-500">推荐：低库存优先</span>
       </div>
     </div>
 
@@ -412,11 +412,51 @@ onMounted(async () => {
       @retry="keyword = ''"
     />
 
-    <section v-else-if="searchMode || largeDatasetMode" class="space-y-3 rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
+    <section
+      v-else-if="searchMode"
+      class="space-y-3 rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-4 shadow-[var(--ylink-shadow-soft)]"
+    >
       <header class="flex items-center justify-between">
-        <p class="text-sm font-semibold text-slate-700">
-          {{ searchMode ? `搜索结果 ${searchResults.length} 条` : `大数据模式 · 当前展示 ${activeCategoryItems.length} 条` }}
-        </p>
+        <p class="text-sm font-semibold text-slate-700">搜索结果 {{ searchResults.length }} 条</p>
+      </header>
+      <div class="client-product-grid">
+        <article v-for="product in searchResults" :key="product.id" class="client-product-card">
+          <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
+            <img
+              v-if="product.thumbnail"
+              :src="product.thumbnail"
+              :alt="product.productName"
+              class="client-product-card__cover"
+              loading="lazy"
+              decoding="async"
+            />
+            <div v-else class="client-product-card__cover grid place-content-center text-xs text-slate-400">
+              暂无图片
+            </div>
+            <div class="min-w-0 flex-1">
+              <p class="truncate text-base font-semibold text-slate-900">{{ product.productName }}</p>
+              <p class="mt-1 text-xs text-slate-400">{{ product.productCode }}</p>
+              <div class="mt-2 flex flex-wrap gap-2 text-xs">
+                <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">
+                  可预订 {{ product.availableStock }}
+                </span>
+                <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">
+                  已预订 {{ product.preOrderedStock }}
+                </span>
+              </div>
+            </div>
+          </button>
+          <button type="button" class="client-product-card__add-button" @click="quickAdd(product)">+ 加购</button>
+        </article>
+      </div>
+    </section>
+
+    <section
+      v-else-if="largeDatasetMode"
+      class="space-y-3 rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-4 shadow-[var(--ylink-shadow-soft)]"
+    >
+      <header class="flex items-center justify-between">
+        <p class="text-sm font-semibold text-slate-700">大数据模式 · 当前展示 {{ activeCategoryItems.length }} 条</p>
       </header>
       <div class="max-h-[64vh] overflow-y-auto pr-1" v-bind="virtualContainerProps">
         <div v-bind="virtualWrapperProps">
@@ -435,8 +475,8 @@ onMounted(async () => {
                 <p class="truncate text-base font-semibold text-slate-900">{{ row.data.productName }}</p>
                 <p class="mt-1 text-xs text-slate-400">{{ row.data.productCode }}</p>
                 <div class="mt-2 flex flex-wrap gap-2 text-xs">
-                  <span class="rounded-full bg-emerald-50 px-2 py-1 text-emerald-600">可预订 {{ row.data.availableStock }}</span>
-                  <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-600">已预订 {{ row.data.preOrderedStock }}</span>
+                  <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ row.data.availableStock }}</span>
+                  <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">已预订 {{ row.data.preOrderedStock }}</span>
                 </div>
               </div>
             </button>
@@ -446,14 +486,14 @@ onMounted(async () => {
       </div>
     </section>
 
-    <section v-else class="grid grid-cols-[88px_minmax(0,1fr)] gap-3 rounded-[1.4rem] bg-white p-3 shadow-[var(--ylink-shadow-soft)]">
+    <section v-else class="grid grid-cols-[88px_minmax(0,1fr)] gap-3 rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-3 shadow-[var(--ylink-shadow-soft)]">
       <aside class="max-h-[64vh] overflow-y-auto pr-1">
         <button
           v-for="category in categoryOptions"
           :key="category.key"
           type="button"
           class="mb-2 w-full rounded-xl px-2 py-2 text-left text-xs text-slate-500"
-          :class="activeCategoryKey === category.key ? 'bg-slate-900 text-white' : 'bg-slate-100'"
+          :class="activeCategoryKey === category.key ? 'bg-[var(--ylink-color-primary-strong)] text-white' : 'bg-[var(--ylink-color-surface-muted)]'"
           @click="scrollToCategory(category.key)"
         >
           <p class="truncate font-medium">{{ category.label }}</p>
@@ -470,41 +510,43 @@ onMounted(async () => {
           <header class="sticky top-0 z-10 mb-2 rounded-lg bg-white/95 px-1 py-1.5 text-sm font-semibold text-slate-700">
             {{ group.label }}
           </header>
-          <article v-for="product in group.items" :key="product.id" class="client-product-card mb-2">
-            <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
-              <img
-                v-if="product.thumbnail"
-                :src="product.thumbnail"
-                :alt="product.productName"
-                class="client-product-card__cover"
-                loading="lazy"
-                decoding="async"
-              />
-              <div v-else class="client-product-card__cover grid place-content-center text-xs text-slate-400">暂无图片</div>
-              <div class="min-w-0 flex-1">
-                <p class="truncate text-base font-semibold text-slate-900">{{ product.productName }}</p>
-                <p class="mt-1 text-xs text-slate-400">{{ product.productCode }}</p>
-                <div class="mt-2 flex flex-wrap gap-2 text-xs">
-                  <span class="rounded-full bg-emerald-50 px-2 py-1 text-emerald-600">可预订 {{ product.availableStock }}</span>
-                  <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-600">已预订 {{ product.preOrderedStock }}</span>
+          <div class="client-product-grid">
+            <article v-for="product in group.items" :key="product.id" class="client-product-card">
+              <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
+                <img
+                  v-if="product.thumbnail"
+                  :src="product.thumbnail"
+                  :alt="product.productName"
+                  class="client-product-card__cover"
+                  loading="lazy"
+                  decoding="async"
+                />
+                <div v-else class="client-product-card__cover grid place-content-center text-xs text-slate-400">暂无图片</div>
+                <div class="min-w-0 flex-1">
+                  <p class="truncate text-base font-semibold text-slate-900">{{ product.productName }}</p>
+                  <p class="mt-1 text-xs text-slate-400">{{ product.productCode }}</p>
+                  <div class="mt-2 flex flex-wrap gap-2 text-xs">
+                    <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ product.availableStock }}</span>
+                    <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">已预订 {{ product.preOrderedStock }}</span>
+                  </div>
                 </div>
-              </div>
-            </button>
-            <button type="button" class="client-product-card__add-button" @click="quickAdd(product)">+ 加购</button>
-          </article>
+              </button>
+              <button type="button" class="client-product-card__add-button" @click="quickAdd(product)">+ 加购</button>
+            </article>
+          </div>
         </section>
       </div>
     </section>
 
     <div
-      class="client-mall-settle fixed bottom-[82px] left-1/2 z-20 flex w-[min(640px,calc(100vw-1.5rem))] -translate-x-1/2 items-center justify-between rounded-[1.2rem] border border-white/55 bg-slate-900/90 px-4 py-3 text-white backdrop-blur-2xl"
+      class="client-mall-settle fixed bottom-[82px] left-1/2 z-20 flex w-[min(1100px,calc(100vw-1.7rem))] -translate-x-1/2 items-center justify-between rounded-[1.2rem] border border-[var(--ylink-color-border)] bg-[color:var(--ylink-color-overlay)] px-4 py-3 text-slate-900 backdrop-blur-2xl"
       :class="settlePulsing ? 'is-pulse' : ''"
     >
       <button type="button" class="text-left" @click="miniCartVisible = true">
         <p class="text-sm font-semibold">购物车 {{ bottomSelectedTypeCount }} 种 · {{ bottomSelectedQty }} 件</p>
-        <p class="text-xs text-white/70">点击展开迷你购物车</p>
+        <p class="text-xs text-slate-500">点击展开迷你购物车</p>
       </button>
-      <button type="button" class="rounded-full bg-white px-4 py-2 text-sm font-semibold text-slate-900" @click="goToCheckout">
+      <button type="button" class="rounded-full bg-[var(--ylink-color-primary-strong)] px-4 py-2 text-sm font-semibold text-white" @click="goToCheckout">
         去结算
       </button>
     </div>
@@ -589,12 +631,19 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.client-product-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.65rem;
+}
+
 .client-product-card {
   display: flex;
   align-items: center;
   gap: 0.6rem;
   border-radius: 1rem;
-  background: #f8fafc;
+  border: 1px solid var(--ylink-color-border);
+  background: var(--ylink-color-surface-soft);
   padding: 0.45rem;
 }
 
@@ -623,7 +672,7 @@ onMounted(async () => {
   height: 2.15rem;
   border-radius: 9999px;
   border: none;
-  background: #0f172a;
+  background: var(--ylink-color-primary-strong);
   color: #ffffff;
   font-size: 0.78rem;
   font-weight: 600;
@@ -635,7 +684,7 @@ onMounted(async () => {
   width: 1.85rem;
   border-radius: 9999px;
   border: none;
-  background: #0f172a;
+  background: var(--ylink-color-primary-strong);
   color: #ffffff;
 }
 
@@ -656,6 +705,18 @@ onMounted(async () => {
   }
   100% {
     transform: translate(-50%, 0) scale(1);
+  }
+}
+
+@media (min-width: 768px) {
+  .client-product-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (min-width: 1200px) {
+  .client-product-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 </style>
