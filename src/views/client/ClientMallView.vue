@@ -574,7 +574,7 @@ onMounted(async () => {
               <article v-for="item in clientCartStore.items" :key="item.productId" class="cart-item">
                 <div class="item-main">
                   <p class="item-name">{{ item.productName }}</p>
-                  <p class="item-price">¥{{ ((cartProductPriceMap.get(item.productId) ?? 0) * item.qty).toFixed(2) }}</p>
+                  <p class="item-price">¥{{ (cartProductPriceMap.get(item.productId) ?? 0).toFixed(2) }}</p>
                 </div>
                 <div class="item-stepper">
                   <button type="button" class="step-btn" @click="clientCartStore.incrementQty(item.productId, -1)">-</button>
