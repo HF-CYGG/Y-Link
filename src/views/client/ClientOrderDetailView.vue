@@ -7,7 +7,8 @@
 
 
 import { computed, onMounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
+import { ArrowLeft } from '@element-plus/icons-vue'
 import QRCode from 'qrcode'
 import { getO2oPreorderDetail, type O2oPreorderDetail } from '@/api/modules/o2o'
 import { BaseRequestState } from '@/components/common'
@@ -15,6 +16,7 @@ import { useStableRequest } from '@/composables/useStableRequest'
 import { normalizeRequestError } from '@/utils/error'
 
 const route = useRoute()
+const router = useRouter()
 
 const loading = ref(false)
 const detail = ref<O2oPreorderDetail | null>(null)
@@ -39,6 +41,10 @@ const statusLabel = computed(() => {
   }
   return '待取货'
 })
+
+const handleBack = () => {
+  router.back()
+}
 
 const statusBanner = computed(() => {
   const status = detail.value?.order.status
@@ -158,6 +164,16 @@ onMounted(async () => {
 
 <template>
   <section class="pb-20">
+    <div class="mb-3">
+      <button
+        type="button"
+        class="inline-flex h-9 w-9 items-center justify-center rounded-full bg-white text-slate-700 shadow-[var(--ylink-shadow-soft)]"
+        @click="handleBack"
+      >
+        <el-icon :size="18"><ArrowLeft /></el-icon>
+      </button>
+    </div>
+
     <div v-if="loading" class="grid gap-3 rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
       <div v-for="index in 5" :key="index" class="h-[6.2rem] animate-pulse rounded-2xl bg-slate-100" />
     </div>
