@@ -354,6 +354,7 @@ export const routes: RouteRecordRaw[] = [
   },
   {
     path: '/client',
+    component: routeViewLoaders['client-layout'],
     redirect: '/client/mall',
     meta: {
       title: '客户端入口',
@@ -369,6 +370,7 @@ export const routes: RouteRecordRaw[] = [
           title: '商品大厅',
           menu: false,
           requiresClientAuth: true,
+          keepAlive: true,
         } satisfies AppRouteMeta,
       },
       {
@@ -377,6 +379,36 @@ export const routes: RouteRecordRaw[] = [
         component: routeViewLoaders['client-orders'],
         meta: {
           title: '我的订单',
+          menu: false,
+          requiresClientAuth: true,
+        } satisfies AppRouteMeta,
+      },
+      {
+        path: 'cart',
+        name: 'client-cart',
+        component: routeViewLoaders['client-cart'],
+        meta: {
+          title: '购物车',
+          menu: false,
+          requiresClientAuth: true,
+        } satisfies AppRouteMeta,
+      },
+      {
+        path: 'checkout',
+        name: 'client-checkout',
+        component: routeViewLoaders['client-checkout'],
+        meta: {
+          title: '确认订单',
+          menu: false,
+          requiresClientAuth: true,
+        } satisfies AppRouteMeta,
+      },
+      {
+        path: 'profile',
+        name: 'client-profile',
+        component: routeViewLoaders['client-profile'],
+        meta: {
+          title: '我的',
           menu: false,
           requiresClientAuth: true,
         } satisfies AppRouteMeta,

@@ -1,4 +1,4 @@
-import { request } from '@/api/http'
+import { request, type RequestConfig } from '@/api/http'
 
 export interface O2oMallProduct {
   id: string
@@ -75,10 +75,11 @@ export interface SubmitO2oPreorderPayload {
   items: Array<{ productId: string | number; qty: number }>
 }
 
-export const getO2oMallProducts = () =>
+export const getO2oMallProducts = (config?: RequestConfig) =>
   request<O2oMallProduct[]>({
     method: 'GET',
     url: '/o2o/mall/products',
+    ...config,
   })
 
 export const submitO2oPreorder = (payload: SubmitO2oPreorderPayload) =>
@@ -88,16 +89,18 @@ export const submitO2oPreorder = (payload: SubmitO2oPreorderPayload) =>
     data: payload,
   })
 
-export const getMyO2oPreorders = () =>
+export const getMyO2oPreorders = (config?: RequestConfig) =>
   request<O2oPreorderSummary[]>({
     method: 'GET',
     url: '/o2o/mall/preorders',
+    ...config,
   })
 
-export const getO2oPreorderDetail = (id: string) =>
+export const getO2oPreorderDetail = (id: string, config?: RequestConfig) =>
   request<O2oPreorderDetail>({
     method: 'GET',
     url: `/o2o/mall/preorders/${id}`,
+    ...config,
   })
 
 export const getO2oVerifyDetail = (verifyCode: string) =>

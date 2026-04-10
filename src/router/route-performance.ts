@@ -9,6 +9,9 @@ export type AppRouteName =
   | 'client-forgot-password'
   | 'client-mall'
   | 'client-orders'
+  | 'client-cart'
+  | 'client-checkout'
+  | 'client-profile'
   | 'client-order-detail'
   | 'dashboard'
   | 'order-entry'
@@ -39,8 +42,12 @@ export const routeViewLoaders = {
   login: () => import('@/views/auth/LoginView.vue'),
   'client-login': () => import('@/views/client/ClientAuthView.vue'),
   'client-forgot-password': () => import('@/views/client/ClientForgotPasswordView.vue'),
+  'client-layout': () => import('@/views/client/components/ClientMainLayout.vue'),
   'client-mall': () => import('@/views/client/ClientMallView.vue'),
   'client-orders': () => import('@/views/client/ClientOrdersView.vue'),
+  'client-cart': () => import('@/views/client/ClientCartView.vue'),
+  'client-checkout': () => import('@/views/client/ClientCheckoutView.vue'),
+  'client-profile': () => import('@/views/client/ClientProfileView.vue'),
   'client-order-detail': () => import('@/views/client/ClientOrderDetailView.vue'),
   appLayout: () => import('@/layout/AppLayout.vue'),
   dashboard: () => import('@/views/dashboard/DashboardView.vue'),

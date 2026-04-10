@@ -4,3 +4,4 @@
  * - 页面与组合组件统一从该入口获取基础展示能力。
  */
 export { default as BaseEmptyState } from './BaseEmptyState.vue'
+export { default as BaseRequestState } from './BaseRequestState.vue'

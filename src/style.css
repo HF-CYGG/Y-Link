@@ -28,6 +28,28 @@
   --motion-duration-slow: 320ms;
   --motion-easing-standard: cubic-bezier(0.2, 0, 0.2, 1);
   --motion-easing-emphasized: cubic-bezier(0.22, 1, 0.36, 1);
+  --ylink-color-primary: #0d9488;
+  --ylink-color-primary-weak: #ccfbf1;
+  --ylink-color-bg: #f5f7fa;
+  --ylink-color-surface: #ffffff;
+  --ylink-color-text: #0f172a;
+  --ylink-color-subtext: #64748b;
+  --ylink-color-warning: #f59e0b;
+  --ylink-color-danger: #ef4444;
+  --ylink-radius-sm: 12px;
+  --ylink-radius-md: 16px;
+  --ylink-radius-lg: 20px;
+  --ylink-shadow-soft: 0 8px 24px rgba(15, 23, 42, 0.06);
+  --ylink-shadow-floating: 0 10px 36px rgba(15, 23, 42, 0.12);
+  --ylink-spacing-1: 4px;
+  --ylink-spacing-2: 8px;
+  --ylink-spacing-3: 12px;
+  --ylink-spacing-4: 16px;
+  --ylink-spacing-5: 20px;
+  --ylink-spacing-6: 24px;
+  --ylink-motion-fast: 160ms;
+  --ylink-motion-normal: 260ms;
+  --ylink-motion-ease: cubic-bezier(0.22, 1, 0.36, 1);
 
   font-family:
     'PingFang SC',
@@ -283,16 +305,24 @@ html.dark .el-drawer {
 
 /* 路由切换动画：仅作用于页面级 router-view。 */
 .fade-slide-enter-active,
-.fade-slide-leave-active {
+.fade-slide-leave-active,
+.slide-left-enter-active,
+.slide-left-leave-active,
+.slide-right-enter-active,
+.slide-right-leave-active {
   transition: opacity 0.26s ease, transform 0.26s ease;
 }
 
-.fade-slide-enter-from {
+.fade-slide-enter-from,
+.slide-left-enter-from,
+.slide-right-leave-to {
   opacity: 0;
   transform: translateX(12px);
 }
 
-.fade-slide-leave-to {
+.fade-slide-leave-to,
+.slide-left-leave-to,
+.slide-right-enter-from {
   opacity: 0;
   transform: translateX(-12px);
 }
@@ -433,7 +463,11 @@ canvas {
   }
 
   .fade-slide-enter-from,
-  .fade-slide-leave-to {
+  .fade-slide-leave-to,
+  .slide-left-enter-from,
+  .slide-left-leave-to,
+  .slide-right-enter-from,
+  .slide-right-leave-to {
     opacity: 1 !important;
     transform: none !important;
   }

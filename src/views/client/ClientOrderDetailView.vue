@@ -2,19 +2,30 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import QRCode from 'qrcode'
-import ClientShell from '@/views/client/components/ClientShell.vue'
 import { getO2oPreorderDetail, type O2oPreorderDetail } from '@/api/modules/o2o'
+import { BaseRequestState } from '@/components/common'
+import { useStableRequest } from '@/composables/useStableRequest'
+import { normalizeRequestError } from '@/utils/error'
 
 const route = useRoute()
 
 const loading = ref(false)
 const detail = ref<O2oPreorderDetail | null>(null)
 const qrDataUrl = ref('')
+const requestError = ref<{ type: 'offline' | 'error'; message: string } | null>(null)
+const { runLatest } = useStableRequest()
 
 const statusLabel = computed(() => {
-  const status = detail.value?.order.status
+  if (!detail.value) {
+    return '未知'
+  }
+  const status = detail.value.order.status
+  const timeoutReached = Boolean(detail.value.order.timeoutAt && new Date(detail.value.order.timeoutAt).getTime() <= Date.now())
   if (status === 'verified') {
     return '已核销'
+  }
+  if (status === 'cancelled' && timeoutReached) {
+    return '已超时取消'
   }
   if (status === 'cancelled') {
     return '已取消'
@@ -22,11 +33,60 @@ const statusLabel = computed(() => {
   return '待取货'
 })
 
-/**
- * 生成订单二维码：
- * - 二维码载荷由后端统一生成，前端只负责渲染；
- * - 这样未来扫码枪、手机扫码或小程序接入时都能共用同一协议。
- */
+const statusBanner = computed(() => {
+  const status = detail.value?.order.status
+  const timeoutReached = Boolean(detail.value?.order.timeoutAt && new Date(detail.value.order.timeoutAt).getTime() <= Date.now())
+  if (status === 'verified') {
+    return { className: 'bg-emerald-50 text-emerald-700', text: '订单已核销完成，可在订单列表查看历史记录。' }
+  }
+  if (status === 'cancelled' && timeoutReached) {
+    return { className: 'bg-orange-50 text-orange-700', text: '订单因超时未领取已自动取消，库存已释放。' }
+  }
+  if (status === 'cancelled') {
+    return { className: 'bg-slate-100 text-slate-600', text: '订单已取消，如需取货请重新下单。' }
+  }
+  return { className: 'bg-amber-50 text-amber-700', text: '请在有效时段内到店出示核销码完成领取。' }
+})
+
+const timelineItems = computed(() => {
+  if (!detail.value) {
+    return []
+  }
+  const timeoutReached = Boolean(detail.value.order.timeoutAt && new Date(detail.value.order.timeoutAt).getTime() <= Date.now())
+  return [
+    {
+      key: 'created',
+      title: '已下单',
+      time: detail.value.order.createdAt,
+      active: true,
+    },
+    {
+      key: 'pending',
+      title: '备货中',
+      time: detail.value.order.timeoutAt || '按门店通知准备',
+      active: detail.value.order.status === 'pending',
+    },
+    {
+      key: 'verified',
+      title: detail.value.order.status === 'verified' ? '已核销' : timeoutReached ? '已超时' : '待核销',
+      time: detail.value.order.verifiedAt || detail.value.order.timeoutAt || '待完成',
+      active: detail.value.order.status !== 'pending',
+    },
+  ]
+})
+
+const displayVerifyCode = computed(() => {
+  const rawCode = detail.value?.order.verifyCode ?? ''
+  if (!rawCode) {
+    return ''
+  }
+  return rawCode
+    .replace(/-/g, '')
+    .toUpperCase()
+    .replace(/(.{4})/g, '$1 ')
+    .trim()
+})
+
 const renderQrCode = async () => {
   if (!detail.value?.qrPayload) {
     qrDataUrl.value = ''
@@ -50,12 +110,24 @@ const loadDetail = async () => {
   }
 
   loading.value = true
-  try {
-    detail.value = await getO2oPreorderDetail(orderId)
-    await renderQrCode()
-  } finally {
-    loading.value = false
-  }
+  requestError.value = null
+  await runLatest({
+    executor: (signal) => getO2oPreorderDetail(orderId, { signal }),
+    onSuccess: async (result) => {
+      detail.value = result
+      await renderQrCode()
+    },
+    onError: (error) => {
+      const normalizedError = normalizeRequestError(error, '订单详情加载失败')
+      requestError.value = {
+        type: globalThis.navigator.onLine === false ? 'offline' : 'error',
+        message: normalizedError.message,
+      }
+    },
+    onFinally: () => {
+      loading.value = false
+    },
+  })
 }
 
 watch(
@@ -71,28 +143,41 @@ onMounted(async () => {
 </script>
 
 <template>
-  <ClientShell title="订单详情" subtitle="请在线下取货时向工作人员出示下方二维码">
-    <div v-if="loading" class="rounded-3xl bg-white p-8 text-center text-slate-400 shadow-sm">订单详情加载中...</div>
+  <section class="pb-20">
+    <div v-if="loading" class="grid gap-3 rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
+      <div v-for="index in 5" :key="index" class="h-[6.2rem] animate-pulse rounded-2xl bg-slate-100" />
+    </div>
+    <BaseRequestState
+      v-else-if="requestError"
+      :type="requestError.type"
+      :title="requestError.type === 'offline' ? '网络不可用' : '订单详情加载失败'"
+      :description="requestError.message"
+      action-text="重试"
+      @retry="loadDetail"
+    />
 
-    <section v-else-if="detail" class="grid gap-4 lg:grid-cols-[22rem_minmax(0,1fr)]">
-      <aside class="rounded-3xl bg-white p-5 shadow-sm">
+    <section v-else-if="detail" class="grid gap-4 lg:grid-cols-[24rem_minmax(0,1fr)]">
+      <aside class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)]">
         <p class="text-lg font-semibold text-slate-900">{{ detail.order.showNo }}</p>
         <p class="mt-1 text-sm text-slate-400">状态：{{ statusLabel }}</p>
+        <p class="mt-3 rounded-2xl px-3 py-2 text-sm" :class="statusBanner.className">{{ statusBanner.text }}</p>
 
         <div class="mt-5 rounded-3xl bg-slate-50 p-4 text-center">
-          <img v-if="qrDataUrl" :src="qrDataUrl" alt="预订单二维码" class="mx-auto h-64 w-64 rounded-2xl bg-white p-3" />
-          <p class="mt-3 text-sm text-slate-500">核销码：{{ detail.order.verifyCode }}</p>
+          <img v-if="qrDataUrl" :src="qrDataUrl" alt="预订单二维码" class="mx-auto h-64 w-64 rounded-2xl bg-white p-3 shadow-sm" />
+          <p class="mt-4 text-xs text-slate-400">取货码</p>
+          <p class="mt-1 text-xl font-semibold tracking-[0.18em] text-slate-900">{{ displayVerifyCode }}</p>
         </div>
 
         <div class="mt-4 space-y-2 rounded-2xl bg-amber-50 px-4 py-4 text-sm text-amber-700">
-          <p>1. 领取时请出示此二维码或核销码。</p>
-          <p>2. 工作人员核销后，订单状态会变为“已核销”。</p>
-          <p>3. 若超过保留时长未领取，系统可能自动取消并释放库存。</p>
+          <p>取货地址：A 区一层服务台</p>
+          <p>取货时段：08:30 - 20:30</p>
+          <p>联系人：门店值班人员</p>
+          <p>温馨提示：请在有效时段内到店核销，过期将自动取消。</p>
         </div>
       </aside>
 
       <div class="space-y-4">
-        <div class="rounded-3xl bg-white p-5 shadow-sm">
+        <div class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)]">
           <p class="text-lg font-semibold text-slate-900">订单信息</p>
           <div class="mt-4 grid gap-3 sm:grid-cols-2">
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
@@ -114,7 +199,25 @@ onMounted(async () => {
           </div>
         </div>
 
-        <div class="rounded-3xl bg-white p-5 shadow-sm">
+        <div class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)]">
+          <p class="text-lg font-semibold text-slate-900">订单进度</p>
+          <div class="mt-4 space-y-3">
+            <div
+              v-for="timeline in timelineItems"
+              :key="timeline.key"
+              class="flex items-start gap-3 rounded-2xl px-3 py-2"
+              :class="timeline.active ? 'bg-teal-50' : 'bg-slate-50'"
+            >
+              <span class="mt-1 h-2.5 w-2.5 rounded-full" :class="timeline.active ? 'bg-teal-500' : 'bg-slate-300'" />
+              <div>
+                <p class="text-sm font-semibold text-slate-900">{{ timeline.title }}</p>
+                <p class="text-xs text-slate-500">{{ timeline.time }}</p>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)]">
           <p class="text-lg font-semibold text-slate-900">预订明细</p>
           <div class="mt-4 overflow-hidden rounded-2xl border border-slate-100">
             <table class="min-w-full divide-y divide-slate-100 text-sm">
@@ -137,5 +240,5 @@ onMounted(async () => {
         </div>
       </div>
     </section>
-  </ClientShell>
+  </section>
 </template>
