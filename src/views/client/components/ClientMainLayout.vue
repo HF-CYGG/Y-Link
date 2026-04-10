@@ -30,6 +30,19 @@ const tabs = [
   { path: '/client/profile', label: '我的' },
 ]
 
+const activeTabIndex = computed(() => {
+  const index = tabs.findIndex((tab) => isTabActive(tab.path))
+  return index !== -1 ? index : 0
+})
+
+const indicatorStyle = computed(() => {
+  return {
+    transform: `translateX(${activeTabIndex.value * 100}%)`,
+    // 因为使用了 gap-1，需要在每次位移时加上相应的 gap 偏移
+    marginLeft: `${activeTabIndex.value * 0.25}rem`
+  }
+})
+
 const isTabActive = (path: string) => {
   if (path === '/client/orders') {
     return route.path.startsWith('/client/orders')
@@ -146,12 +159,13 @@ const handleLogout = async () => {
     </main>
 
     <nav class="client-main-layout__tab fixed bottom-3 left-1/2 z-30 -translate-x-1/2 rounded-[1.4rem] px-2 py-2">
-      <div class="grid grid-cols-3 gap-1">
+      <div class="grid grid-cols-3 gap-1 relative">
+        <div class="client-main-layout__tab-indicator" :style="indicatorStyle"></div>
         <router-link
-          v-for="tab in tabs"
+          v-for="(tab, index) in tabs"
           :key="tab.path"
           :to="tab.path"
-          class="client-main-layout__tab-item"
+          class="client-main-layout__tab-item z-10"
           :class="isTabActive(tab.path) ? 'is-active' : ''"
         >
           {{ tab.label }}
@@ -191,6 +205,7 @@ const handleLogout = async () => {
 }
 
 .client-main-layout__tab-item {
+  position: relative;
   display: inline-flex;
   min-height: 44px;
   align-items: center;
@@ -199,11 +214,23 @@ const handleLogout = async () => {
   color: var(--ylink-color-subtext);
   font-size: 0.87rem;
   font-weight: 600;
+  transition: color 0.3s ease;
 }
 
 .client-main-layout__tab-item.is-active {
-  background: var(--ylink-color-primary-strong);
   color: #ffffff;
+}
+
+.client-main-layout__tab-indicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100%;
+  width: calc((100% - 0.5rem) / 3); /* 减去两个 gap 的宽度并平分 */
+  background: var(--ylink-color-primary-strong);
+  border-radius: 0.9rem;
+  transition: transform 0.4s cubic-bezier(0.25, 0.8, 0.25, 1), margin-left 0.4s cubic-bezier(0.25, 0.8, 0.25, 1);
+  z-index: 0;
 }
 
 .client-main-layout__cart-badge.is-bouncing {
