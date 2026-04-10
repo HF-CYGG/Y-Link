@@ -5,6 +5,8 @@
  */
 
 import express from 'express'
+import path from 'path'
+import fs from 'fs'
 import { ZodError } from 'zod'
 import { requireAuth } from './middleware/auth.middleware.js'
 import { errorHandler, notFoundHandler } from './middleware/error-handler.js'
@@ -18,11 +20,20 @@ import { orderRouter } from './routes/order.routes.js'
 import { productRouter } from './routes/product.routes.js'
 import { systemConfigRouter } from './routes/system-config.routes.js'
 import { tagRouter } from './routes/tag.routes.js'
+import { uploadRouter } from './routes/upload.routes.js'
 import { userRouter } from './routes/user.routes.js'
 import { BizError } from './utils/errors.js'
 
 export function createApp() {
   const app = express()
+
+  // 确保 uploads 目录存在
+  const uploadsDir = path.resolve(process.cwd(), 'uploads')
+  if (!fs.existsSync(uploadsDir)) {
+    fs.mkdirSync(uploadsDir, { recursive: true })
+  }
+  // 配置静态文件服务，让前端可以直接访问图片
+  app.use('/uploads', express.static(uploadsDir))
 
   app.use(express.json())
 
@@ -41,6 +52,8 @@ export function createApp() {
 
   // 业务主系统统一要求先登录再访问，避免接口侧出现“匿名调用”漏洞。
   app.use('/api', requireAuth)
+
+  app.use('/api/upload', uploadRouter)
 
   // 日常业务接口：管理员与操作员均可访问。
   app.use('/api/products', productRouter)

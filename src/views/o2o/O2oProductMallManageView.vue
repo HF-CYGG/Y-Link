@@ -8,7 +8,10 @@
 
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import type { UploadRequestOptions } from 'element-plus'
+import { Plus } from '@element-plus/icons-vue'
 import { PageContainer } from '@/components/common'
+import { uploadImage } from '@/api/modules/upload'
 import {
   createProduct,
   getProductList,
@@ -37,6 +40,11 @@ const dialogVisible = ref(false)
 const keyword = ref('')
 const products = ref<ProductRecord[]>([])
 
+const availableCategories = computed(() => {
+  const categories = products.value.map((p) => p.category).filter(Boolean)
+  return [...new Set(categories)]
+})
+
 const form = reactive<O2oProductFormState>({
   id: '',
   productCode: '',
@@ -49,6 +57,13 @@ const form = reactive<O2oProductFormState>({
   detailContent: '',
   limitPerUser: 5,
   currentStock: 0,
+})
+
+const pendingUploadFile = ref<File | null>(null)
+const localPreviewUrl = ref<string>('')
+
+const displayThumbnail = computed(() => {
+  return localPreviewUrl.value || form.thumbnail
 })
 
 const dialogTitle = computed(() => {
@@ -72,6 +87,12 @@ const resetForm = () => {
   form.detailContent = ''
   form.limitPerUser = 5
   form.currentStock = 0
+  
+  if (localPreviewUrl.value) {
+    URL.revokeObjectURL(localPreviewUrl.value)
+  }
+  pendingUploadFile.value = null
+  localPreviewUrl.value = ''
 }
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
@@ -92,8 +113,29 @@ const openCreateDialog = () => {
   dialogVisible.value = true
 }
 
+const handleCustomUpload = async (options: UploadRequestOptions) => {
+  const file = options.file
+  if (!file.type.startsWith('image/')) {
+    ElMessage.error('只能上传图片文件')
+    return
+  }
+
+  if (file.size > 10 * 1024 * 1024) {
+    ElMessage.error('图片大小不能超过 10MB')
+    return
+  }
+
+  // 只记录待上传文件并生成本地预览，不立即请求后端
+  if (localPreviewUrl.value) {
+    URL.revokeObjectURL(localPreviewUrl.value)
+  }
+  pendingUploadFile.value = file
+  localPreviewUrl.value = URL.createObjectURL(file)
+}
+
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const openEditDialog = (product: ProductRecord) => {
+  resetForm()
   form.id = product.id
   form.productCode = product.productCode
   form.productName = product.productName
@@ -130,6 +172,18 @@ const handleSubmit = async () => {
 
   submitting.value = true
   try {
+    let finalThumbnail = form.thumbnail.trim() || null
+
+    if (pendingUploadFile.value) {
+      try {
+        const res = await uploadImage(pendingUploadFile.value)
+        finalThumbnail = res.url
+      } catch (error: any) {
+        ElMessage.error(error.message || '图片上传失败，请重试')
+        return
+      }
+    }
+
     if (form.id) {
       const payload: UpdateProductDto = {
         productCode: form.productCode.trim() || undefined,
@@ -138,7 +192,7 @@ const handleSubmit = async () => {
         isActive: form.isActive,
         category: form.category.trim() || '默认分类',
         o2oStatus: form.o2oStatus,
-        thumbnail: form.thumbnail.trim() || null,
+        thumbnail: finalThumbnail,
         detailContent: form.detailContent.trim() || null,
         limitPerUser: Math.max(1, Math.floor(form.limitPerUser)),
         currentStock: Math.max(0, Math.floor(form.currentStock)),
@@ -153,7 +207,7 @@ const handleSubmit = async () => {
         isActive: form.isActive,
         category: form.category.trim() || '默认分类',
         o2oStatus: form.o2oStatus,
-        thumbnail: form.thumbnail.trim() || null,
+        thumbnail: finalThumbnail,
         detailContent: form.detailContent.trim() || null,
         limitPerUser: Math.max(1, Math.floor(form.limitPerUser)),
         currentStock: Math.max(0, Math.floor(form.currentStock)),
@@ -183,7 +237,7 @@ onMounted(async () => {
       </el-space>
     </template>
 
-    <div class="rounded-3xl bg-white p-4 shadow-sm">
+    <div class="mt-4 rounded-3xl bg-white p-4 shadow-sm">
       <el-table :data="products" :loading="loading" row-key="id">
         <el-table-column prop="productName" label="商品名称" min-width="180" />
         <el-table-column prop="productCode" label="编码" min-width="120" />
@@ -232,12 +286,12 @@ onMounted(async () => {
         <el-row :gutter="16">
           <el-col :span="12">
             <el-form-item label="商品编码">
-              <el-input v-model="form.productCode" placeholder="可选，不填则后端自动生成" />
+              <el-input v-model="form.productCode" placeholder="可选，不填则后端自动生成" :disabled="!!form.id" />
             </el-form-item>
           </el-col>
           <el-col :span="12">
             <el-form-item label="商品名称">
-              <el-input v-model="form.productName" placeholder="请输入商品名称" />
+              <el-input v-model="form.productName" placeholder="请输入商品名称" :disabled="!!form.id" />
             </el-form-item>
           </el-col>
         </el-row>
@@ -245,12 +299,26 @@ onMounted(async () => {
         <el-row :gutter="16">
           <el-col :span="12">
             <el-form-item label="建议单价">
-              <el-input-number v-model="form.defaultPrice" :min="0" :precision="2" style="width: 100%" />
+              <el-input-number v-model="form.defaultPrice" :min="0" :precision="2" style="width: 100%" :disabled="!!form.id" />
             </el-form-item>
           </el-col>
           <el-col :span="12">
             <el-form-item label="商品分类">
-              <el-input v-model="form.category" placeholder="请输入商品分类(如：文创周边)" />
+              <el-select
+                v-model="form.category"
+                filterable
+                allow-create
+                default-first-option
+                placeholder="选择或输入新分类"
+                style="width: 100%"
+              >
+                <el-option
+                  v-for="cat in availableCategories"
+                  :key="cat"
+                  :label="cat"
+                  :value="cat"
+                />
+              </el-select>
             </el-form-item>
           </el-col>
         </el-row>
@@ -268,26 +336,32 @@ onMounted(async () => {
           </el-col>
         </el-row>
 
-        <el-row :gutter="16">
-          <el-col :span="12">
-            <el-form-item label="商品状态">
-              <el-space wrap>
-                <el-switch v-model="form.isActive" inline-prompt active-text="启用" inactive-text="停用" />
-                <el-switch
-                  v-model="form.o2oStatus"
-                  inline-prompt
-                  active-value="listed"
-                  inactive-value="unlisted"
-                  active-text="上架"
-                  inactive-text="下架"
-                />
-              </el-space>
-            </el-form-item>
-          </el-col>
-        </el-row>
+        <el-form-item label="商品状态" class="mb-4">
+          <div class="w-full rounded-xl bg-slate-50 border border-slate-100 p-3">
+            <div class="flex items-center justify-between mb-2">
+              <span class="text-sm font-medium text-slate-700">基础状态</span>
+              <el-switch v-model="form.isActive" active-text="启用" inactive-text="停用" inline-prompt />
+            </div>
+            <div class="flex items-center justify-between">
+              <span class="text-sm font-medium text-slate-700">商城展示</span>
+              <el-switch v-model="form.o2oStatus" active-value="listed" inactive-value="unlisted" active-text="上架" inactive-text="下架" inline-prompt />
+            </div>
+            <p class="mt-2 text-xs text-slate-400">注释：基础状态启用且商城展示上架，商品才会在客户端大厅中展示。</p>
+          </div>
+        </el-form-item>
 
-        <el-form-item label="预览图地址">
-          <el-input v-model="form.thumbnail" placeholder="请输入可访问的图片地址" />
+        <el-form-item label="商品预览图">
+          <el-upload
+            class="avatar-uploader"
+            action=""
+            :http-request="handleCustomUpload"
+            :show-file-list="false"
+            accept="image/*"
+          >
+            <img v-if="displayThumbnail" :src="displayThumbnail" class="avatar" />
+            <el-icon v-else class="avatar-uploader-icon"><Plus /></el-icon>
+          </el-upload>
+          <p class="mt-1 text-xs text-slate-400 w-full">支持点击或拍照上传，推荐 800x800 方形图片。</p>
         </el-form-item>
         <el-form-item label="详情内容">
           <el-input v-model="form.detailContent" type="textarea" :rows="6" placeholder="请输入客户端商品详情说明" />
@@ -303,3 +377,33 @@ onMounted(async () => {
     </el-dialog>
   </PageContainer>
 </template>
+
+<style scoped>
+.avatar-uploader :deep(.el-upload) {
+  border: 1px dashed var(--el-border-color);
+  border-radius: 6px;
+  cursor: pointer;
+  position: relative;
+  overflow: hidden;
+  transition: var(--el-transition-duration-fast);
+}
+
+.avatar-uploader :deep(.el-upload:hover) {
+  border-color: var(--el-color-primary);
+}
+
+.el-icon.avatar-uploader-icon {
+  font-size: 28px;
+  color: #8c939d;
+  width: 140px;
+  height: 140px;
+  text-align: center;
+}
+
+.avatar {
+  width: 140px;
+  height: 140px;
+  display: block;
+  object-fit: cover;
+}
+</style>
