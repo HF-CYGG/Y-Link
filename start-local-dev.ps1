@@ -285,6 +285,21 @@ function Test-ProcessAlive {
   return $null -ne (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
 }
 
+# 判断一组 PID 中是否仍有存活进程：
+# - 启动脚本既会记录外层 shell PID，也会记录真正监听端口的 node PID；
+# - 日志跟随应优先依据“真实服务进程是否还活着”来决定是否继续。
+function Test-AnyProcessAlive {
+  param([int[]]$ProcessIds)
+
+  foreach ($processId in @($ProcessIds)) {
+    if (Test-ProcessAlive -ProcessId ([int]$processId)) {
+      return $true
+    }
+  }
+
+  return $false
+}
+
 function Write-LogLine {
   param(
     [string]$Prefix,
@@ -326,6 +341,8 @@ function Start-CombinedLogRelay {
   param(
     [int]$BackendShellPid,
     [int]$FrontendShellPid,
+    [int[]]$BackendListeningPids = @(),
+    [int[]]$FrontendListeningPids = @(),
     [string]$BackendLogPath,
     [string]$BackendErrorLogPath,
     [string]$FrontendLogPath,
@@ -350,7 +367,12 @@ function Start-CombinedLogRelay {
   Write-Info '按 Ctrl+C 将同时停止日志跟随和本地联调服务。'
   Write-Host ''
 
-  while ((Test-ProcessAlive -ProcessId $BackendShellPid) -or (Test-ProcessAlive -ProcessId $FrontendShellPid)) {
+  while (
+    (Test-ProcessAlive -ProcessId $BackendShellPid) -or
+    (Test-ProcessAlive -ProcessId $FrontendShellPid) -or
+    (Test-AnyProcessAlive -ProcessIds $BackendListeningPids) -or
+    (Test-AnyProcessAlive -ProcessIds $FrontendListeningPids)
+  ) {
     $backendOutResult = Read-NewLogLines -LogPath $BackendLogPath -KnownLineCount $backendState.Out
     $backendState.Out = $backendOutResult.LineCount
     foreach ($line in $backendOutResult.Lines) {
@@ -520,6 +542,8 @@ try {
       Start-CombinedLogRelay `
         -BackendShellPid $backendProcess.Id `
         -FrontendShellPid $frontendProcess.Id `
+        -BackendListeningPids $backendListeningPids `
+        -FrontendListeningPids $frontendListeningPids `
         -BackendLogPath $BackendLog `
         -BackendErrorLogPath $BackendErrorLog `
         -FrontendLogPath $FrontendLog `
@@ -527,8 +551,20 @@ try {
     }
     finally {
       if (Test-Path $PidFile) {
-        Write-WarnMessage '日志跟随已结束，正在停止本地联调服务。'
-        Stop-RecordedProcesses
+        $servicesStillAlive = (
+          (Test-ProcessAlive -ProcessId $backendProcess.Id) -or
+          (Test-ProcessAlive -ProcessId $frontendProcess.Id) -or
+          (Test-AnyProcessAlive -ProcessIds $backendListeningPids) -or
+          (Test-AnyProcessAlive -ProcessIds $frontendListeningPids)
+        )
+
+        if ($servicesStillAlive) {
+          Write-Info '日志跟随已结束，但本地联调服务仍在运行，可继续访问页面或手动执行 .\stop-local-dev.ps1 停止。'
+        }
+        else {
+          Write-WarnMessage '日志跟随已结束，检测到服务已退出，正在清理本地联调记录。'
+          Stop-RecordedProcesses
+        }
       }
     }
   }
