@@ -6,7 +6,7 @@
  */
 
 
-import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { PageContainer } from '@/components/common'
 import {
@@ -30,6 +30,8 @@ let scanStream: MediaStream | null = null
 let scanFrameId: number | null = null
 let scanCanvas: HTMLCanvasElement | null = null
 let barcodeDetector: { detect: (source: CanvasImageSource) => Promise<Array<{ rawValue?: string }>> } | null = null
+const verifyConfirmArmed = ref(false)
+let verifyConfirmTimer: number | null = null
 
 const statusTextMap: Record<O2oPreorderDetail['order']['status'], string> = {
   pending: '待核销',
@@ -45,6 +47,15 @@ const statusClassMap: Record<O2oPreorderDetail['order']['status'], string> = {
 
 const canVerify = computed(() => detail.value?.order.status === 'pending')
 const isShowNo = (value: string) => /^PO\d{8}\d{4}$/i.test(value)
+const verifyButtonText = computed(() => (verifyConfirmArmed.value ? '再次点击确认' : '确认核销出库'))
+
+const resetVerifyConfirm = () => {
+  verifyConfirmArmed.value = false
+  if (verifyConfirmTimer !== null) {
+    globalThis.clearTimeout(verifyConfirmTimer)
+    verifyConfirmTimer = null
+  }
+}
 
 const normalizeVerifyCode = (rawValue: string) => {
   const value = rawValue.trim()
@@ -242,6 +253,14 @@ const handleVerify = async () => {
   if (!detail.value) {
     return
   }
+  if (!verifyConfirmArmed.value) {
+    verifyConfirmArmed.value = true
+    ElMessage.warning('请再次点击“确认核销出库”以完成核销')
+    verifyConfirmTimer = globalThis.setTimeout(() => {
+      resetVerifyConfirm()
+    }, 3500)
+    return
+  }
 
   submitting.value = true
   try {
@@ -249,14 +268,23 @@ const handleVerify = async () => {
     ElMessage.success('核销完成，库存已同步扣减')
     verifyCode.value = ''
     await focusInput()
+    resetVerifyConfirm()
   } finally {
     submitting.value = false
   }
 }
 
 onBeforeUnmount(() => {
+  resetVerifyConfirm()
   stopScanCamera()
 })
+
+watch(
+  () => detail.value?.order?.id,
+  () => {
+    resetVerifyConfirm()
+  },
+)
 </script>
 
 <template>
@@ -311,7 +339,7 @@ onBeforeUnmount(() => {
               :loading="submitting"
               @click="handleVerify"
             >
-              确认核销出库
+              {{ verifyButtonText }}
             </el-button>
           </div>
 
@@ -351,7 +379,7 @@ onBeforeUnmount(() => {
           :loading="submitting"
           @click="handleVerify"
         >
-          确认核销出库
+          {{ verifyButtonText }}
         </el-button>
       </div>
     </Transition>
