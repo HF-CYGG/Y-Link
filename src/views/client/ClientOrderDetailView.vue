@@ -238,14 +238,12 @@ onMounted(async () => {
               <thead class="bg-slate-50 text-slate-500">
                 <tr>
                   <th class="px-4 py-3 text-left font-medium">商品</th>
-                  <th class="px-4 py-3 text-left font-medium">编码</th>
                   <th class="px-4 py-3 text-right font-medium">数量</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-slate-100 bg-white text-slate-700">
                 <tr v-for="item in detail.items" :key="item.id">
                   <td class="px-4 py-3">{{ item.productName }}</td>
-                  <td class="px-4 py-3">{{ item.productCode }}</td>
                   <td class="px-4 py-3 text-right font-medium">{{ item.qty }}</td>
                 </tr>
               </tbody>

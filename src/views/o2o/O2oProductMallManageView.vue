@@ -248,7 +248,7 @@ onMounted(async () => {
   <PageContainer title="线上商品大厅" description="维护客户端可见商品，支持上/下架、预览图、详情文案与库存配置">
     <template #actions>
       <el-space wrap>
-        <el-input v-model="keyword" placeholder="搜索商品名称 / 编码" clearable style="width: 220px" @keyup.enter="loadProducts" />
+        <el-input v-model="keyword" placeholder="搜索商品名称" clearable style="width: 220px" @keyup.enter="loadProducts" />
         <el-button @click="loadProducts">刷新</el-button>
         <el-button type="primary" @click="openCreateDialog">新增商品</el-button>
       </el-space>
@@ -257,7 +257,11 @@ onMounted(async () => {
     <div class="mt-4 rounded-3xl bg-white p-4 shadow-sm">
       <el-table :data="products" :loading="loading" row-key="id">
         <el-table-column prop="productName" label="商品名称" min-width="180" />
-        <el-table-column prop="productCode" label="编码" min-width="120" />
+        <el-table-column label="单价" min-width="120">
+          <template #default="{ row }">
+            <span class="font-semibold text-teal-600">¥{{ Number(row.defaultPrice).toFixed(2) }}</span>
+          </template>
+        </el-table-column>
         <el-table-column label="库存信息" min-width="220">
           <template #default="{ row }">
             <div class="text-sm leading-6 text-slate-600">

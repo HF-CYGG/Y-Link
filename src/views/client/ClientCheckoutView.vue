@@ -119,7 +119,6 @@ const handleSubmit = async () => {
           <div class="min-w-0">
             <p class="truncate text-sm font-semibold text-slate-900">{{ item.productName }}</p>
             <p class="mt-1 text-sm font-bold text-teal-600">¥{{ Number(item.defaultPrice).toFixed(2) }}</p>
-            <p class="text-xs text-slate-400">{{ item.productCode }}</p>
           </div>
           <span class="text-sm font-semibold text-slate-700">x {{ item.qty }}</span>
         </article>

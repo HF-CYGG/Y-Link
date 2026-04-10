@@ -381,7 +381,7 @@ onMounted(async () => {
         <input
           v-model.trim="keyword"
           class="h-11 flex-1 rounded-full border border-[var(--ylink-color-border)] bg-[var(--ylink-color-surface-soft)] px-4 text-sm outline-none focus:border-[var(--ylink-color-primary-soft)]"
-          placeholder="搜索商品名称 / 编码"
+          placeholder="搜索商品名称"
         />
         <button
           type="button"
@@ -450,7 +450,6 @@ onMounted(async () => {
             <div class="min-w-0 flex-1 text-left">
               <p class="truncate text-base font-semibold text-slate-900">{{ product.productName }}</p>
               <p class="mt-1 text-sm font-bold text-[var(--ylink-color-primary-strong)]">¥{{ Number(product.defaultPrice).toFixed(2) }}</p>
-              <p class="mt-1 text-xs text-slate-400">{{ product.productCode }}</p>
               <p class="mt-1 text-xs text-slate-500 truncate">{{ product.detailContent || '暂无商品描述' }}</p>
               <div class="mt-2 flex flex-wrap gap-2 text-xs">
                 <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">
@@ -498,7 +497,6 @@ onMounted(async () => {
               <div class="min-w-0 flex-1 text-left">
                 <p class="truncate text-base font-semibold text-slate-900">{{ row.data.productName }}</p>
                 <p class="mt-1 text-sm font-bold text-[var(--ylink-color-primary-strong)]">¥{{ Number(row.data.defaultPrice).toFixed(2) }}</p>
-                <p class="mt-1 text-xs text-slate-400">{{ row.data.productCode }}</p>
                 <div class="mt-2 flex flex-wrap gap-2 text-xs">
                   <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ row.data.availableStock }}</span>
                   <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">已预订 {{ row.data.preOrderedStock }}</span>
@@ -535,7 +533,6 @@ onMounted(async () => {
                 <div class="min-w-0 flex-1 text-left">
                   <p class="truncate text-base font-semibold text-slate-900">{{ product.productName }}</p>
                   <p class="mt-1 text-sm font-bold text-[var(--ylink-color-primary-strong)]">¥{{ Number(product.defaultPrice).toFixed(2) }}</p>
-                  <p class="mt-1 text-xs text-slate-400">{{ product.productCode }}</p>
                   <div class="mt-2 flex flex-wrap gap-2 text-xs">
                     <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ product.availableStock }}</span>
                     <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">已预订 {{ product.preOrderedStock }}</span>
