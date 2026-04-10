@@ -4,7 +4,7 @@
 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
 #>
 
-﻿$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Stop'
 
 # Stop the processes started by start-local-dev.ps1 using the recorded shell PID file.
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
