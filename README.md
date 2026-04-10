@@ -80,6 +80,20 @@ docker compose down
 docker.io/yemiao351/y-link-onebox:latest
 ```
 
+如需命令行“一键启动”（等价于 1Panel 单镜像部署），可直接执行：
+
+```bash
+docker run -d --name y-link-onebox \
+  -p 9050:80 \
+  -v /opt/1panel/apps/y-link/data:/app/data \
+  --restart unless-stopped \
+  docker.io/yemiao351/y-link-onebox:latest
+```
+
+启动后验证：
+- 页面：`http://服务器IP:9050`
+- 健康检查：`http://服务器IP:9050/health`
+
 建议参数：
 - 网络：`bridge`
 - 端口映射：`宿主机端口 -> 容器 80`（例如 `9050:80`）
