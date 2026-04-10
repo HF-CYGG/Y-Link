@@ -1,5 +1,12 @@
 <script setup lang="ts">
 /**
+ * 模块说明：src/views/order-entry/components/OrderEntrySummaryCard.vue
+ * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
+ * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ */
+
+
+/**
  * 底部汇总卡片：
  * - 负责展示行数、总数量、总金额；
  * - 负责承接保存按钮点击并向父层抛出 submit 事件。

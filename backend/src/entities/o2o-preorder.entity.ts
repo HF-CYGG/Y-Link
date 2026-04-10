@@ -1,3 +1,9 @@
+/**
+ * 模块说明：backend/src/entities/o2o-preorder.entity.ts
+ * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
+ * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ */
+
 import {
   Column,
   CreateDateColumn,
@@ -35,6 +41,7 @@ export class O2oPreorder {
   @Column({ name: 'status', type: 'varchar', length: 16, default: 'pending', comment: '订单状态' })
   status!: O2oPreorderStatus
 
+  // totalQty 记录整单总件数，便于列表快速展示，避免每次都聚合子项。
   @Column({ name: 'total_qty', type: 'int', default: 0, comment: '总件数' })
   totalQty!: number
 
@@ -44,6 +51,7 @@ export class O2oPreorder {
   @Column({ name: 'timeout_at', ...entityColumnOptions.timestamp, nullable: true, comment: '超时取消时间' })
   timeoutAt!: Date | null
 
+  // verifiedAt / verifiedBy 只有在管理端实际核销后才会写入，用于线下履约追踪。
   @Column({ name: 'verified_at', ...entityColumnOptions.timestamp, nullable: true, comment: '核销时间' })
   verifiedAt!: Date | null
 

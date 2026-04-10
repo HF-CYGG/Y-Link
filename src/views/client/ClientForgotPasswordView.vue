@@ -1,4 +1,11 @@
 <script setup lang="ts">
+/**
+ * 模块说明：src/views/client/ClientForgotPasswordView.vue
+ * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
+ * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ */
+
+
 import { onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
@@ -39,6 +46,7 @@ const refreshCaptcha = async () => {
   }
 }
 
+// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const handleVerify = async () => {
   if (!/^1\d{10}$/.test(verifyForm.mobile.trim())) {
     ElMessage.warning('请输入正确的手机号')
@@ -67,6 +75,7 @@ const handleVerify = async () => {
   }
 }
 
+// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const handleReset = async () => {
   if (resetForm.newPassword.trim().length < 6) {
     ElMessage.warning('新密码至少 6 位')

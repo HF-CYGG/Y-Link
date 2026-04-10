@@ -1,3 +1,9 @@
+/**
+ * 模块说明：src/store/modules/client-cart.ts
+ * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
+ * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ */
+
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import type { O2oMallProduct } from '@/api/modules/o2o'
@@ -20,6 +26,8 @@ export interface ClientCartItem {
   selected: boolean
 }
 
+// 购物车单项最大可购买数量由“可预订库存”和“单人限购”共同决定。
+// 该函数是购物车所有增减、初始化、目录同步逻辑的统一约束入口，避免各处重复计算口径不一致。
 const toMaxQty = (item: Pick<ClientCartItem, 'availableStock' | 'limitPerUser'>) => {
   const stock = Math.max(0, item.availableStock)
   const limit = Math.max(0, item.limitPerUser)
@@ -47,6 +55,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
   const items = ref<ClientCartItem[]>([])
   const initialized = ref(false)
 
+  // 这些派生状态尽量只从 items 推导，避免同时维护多份可结算/失效/选中列表造成同步偏差。
   const totalQty = computed(() => items.value.reduce((sum, item) => sum + item.qty, 0))
   const validItems = computed(() => {
     return items.value.filter((item) => toMaxQty(item) > 0)
@@ -65,6 +74,8 @@ export const useClientCartStore = defineStore('client-cart', () => {
   })
 
   const persist = () => {
+    // 本地快照除了数量，还保留库存与限购字段：
+    // 这样页面刷新后仍能先恢复可视状态，再等待目录接口回填最新库存。
     const snapshot: ClientCartSnapshotItem[] = items.value.map((item) => ({
       productId: item.productId,
       productCode: item.productCode,
@@ -81,6 +92,8 @@ export const useClientCartStore = defineStore('client-cart', () => {
   }
 
   const normalizeItem = (item: ClientCartItem) => {
+    // 任何进入 Store 的购物车项都会在这里统一“夹紧”到合法范围，
+    // 包括：负数纠正、超库存回收、失效商品自动取消勾选。
     const maxQty = toMaxQty(item)
     const nextQty = Math.min(Math.max(0, Math.floor(item.qty)), maxQty)
     return {
@@ -101,6 +114,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
     }
 
     const persisted = readPersistedClientCartSnapshot()
+    // 持久化快照读取后仍需再次标准化，避免旧版本缓存或异常值污染当前会话。
     replaceItems(persisted)
     initialized.value = true
   }
@@ -113,6 +127,8 @@ export const useClientCartStore = defineStore('client-cart', () => {
 
   const syncWithCatalog = (products: O2oMallProduct[]) => {
     ensureInitialized()
+    // 目录刷新后，购物车不会直接丢弃原有选择，而是把同 ID 商品映射到最新名称、缩略图、库存与限购规则。
+    // 这样既能保持用户已选状态，又能保证后续结算基于最新库存。
     const productMap = new Map(products.map((product) => [product.id, product]))
     const nextItems = items.value
       .map((item) => {
@@ -154,6 +170,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
     }
 
     const existing = items.value[itemIndex]
+    // 已存在商品时走“合并后再统一裁剪”的路径，保证追加数量也受同一套 maxQty 约束。
     const merged = createCartItemFromProduct(product, existing.qty + targetQty)
     const maxQty = toMaxQty(merged)
     const nextQty = Math.min(existing.qty + targetQty, maxQty)
@@ -179,6 +196,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
     const maxQty = toMaxQty(item)
     const nextQty = Math.min(Math.max(0, Math.floor(qty)), maxQty)
     if (nextQty <= 0) {
+      // 数量归零直接视为移出购物车，避免保留“0 件商品”造成后续统计异常。
       items.value = items.value.filter((entry) => entry.productId !== productId)
       persist()
       return
@@ -208,6 +226,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
 
   const clearSelectedItems = () => {
     ensureInitialized()
+    // 这里按“勾选状态”而非“有效状态”清理，便于购物车页做批量删除操作。
     items.value = items.value.filter((item) => !item.selected)
     persist()
   }
@@ -222,6 +241,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
     ensureInitialized()
     items.value = items.value.map((item) => {
       if (item.productId !== productId || toMaxQty(item) <= 0) {
+        // 失效商品永远不允许被选中结算，只能等待库存恢复或被用户移除。
         return item
       }
       return {

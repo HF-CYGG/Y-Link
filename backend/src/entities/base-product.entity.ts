@@ -1,3 +1,9 @@
+/**
+ * 模块说明：backend/src/entities/base-product.entity.ts
+ * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
+ * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ */
+
 import {
   Column,
   CreateDateColumn,
@@ -13,6 +19,7 @@ import { entityColumnOptions } from './entity-column-options.js'
 import { RelProductTag } from './rel-product-tag.entity.js'
 
 @Entity({ name: 'base_product' })
+// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export class BaseProduct {
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })
   id!: string

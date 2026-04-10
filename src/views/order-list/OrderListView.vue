@@ -1,4 +1,11 @@
 <script setup lang="ts">
+/**
+ * 模块说明：src/views/order-list/OrderListView.vue
+ * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
+ * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ */
+
+
 
 import dayjs from 'dayjs'
 import { ElMessage } from 'element-plus'
@@ -50,6 +57,7 @@ const voucherPrintRootRef = ref<HTMLElement | null>(null)
 const enableHtml2pdfExport = import.meta.env.VITE_ORDER_VOUCHER_HTML2PDF_ENABLED !== 'false'
 const exportPdfLoading = ref(false)
 
+// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const handleOpenVoucherDialog = () => {
   if (!currentOrder.value) {
     ElMessage.warning('请先加载单据详情')
@@ -59,6 +67,7 @@ const handleOpenVoucherDialog = () => {
   voucherDialogVisible.value = true
 }
 
+// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const handlePrintVoucher = () => {
   if (!currentOrder.value) {
     ElMessage.warning('当前无可打印凭证')
@@ -68,6 +77,7 @@ const handlePrintVoucher = () => {
   globalThis.print()
 }
 
+// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const handleExportVoucherPdf = async () => {
   if (!enableHtml2pdfExport) {
     ElMessage.info('PDF 导出开关未启用，当前仅支持打印')

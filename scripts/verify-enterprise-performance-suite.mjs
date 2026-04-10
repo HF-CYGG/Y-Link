@@ -1,3 +1,9 @@
+/**
+ * 模块说明：scripts/verify-enterprise-performance-suite.mjs
+ * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
+ * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ */
+
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runCommand } from './process-runner-utils.mjs'
@@ -38,6 +44,9 @@ const runStep = async (title, command, args, cwd = projectRoot) => {
 const main = async () => {
   // 显式使用当前 Node 进程执行各个脚本，避免 shell=true 在 PowerShell 5 / 受限终端中
   // 因 cmd、COMSPEC 或 PATH 缺失而导致“命令未真正启动就直接退出”。
+  // 执行顺序刻意固定为“构建 -> 预算 -> 核心路径”：
+  // - 预算校验依赖最新产物；
+  // - 核心路径回归应在预算通过后再执行，避免把明显超预算产物继续带入后续验收。
   await runStep('前端构建', process.execPath, [path.join(projectRoot, 'scripts', 'run-frontend-build.mjs')])
   await runStep('构建预算校验', process.execPath, [path.join(projectRoot, 'scripts', 'verify-enterprise-page-performance.mjs')])
   await runStep('核心路径回归校验', process.execPath, [path.join(projectRoot, 'scripts', 'verify-enterprise-core-paths.mjs')])

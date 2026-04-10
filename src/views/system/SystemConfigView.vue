@@ -1,4 +1,11 @@
 <script setup lang="ts">
+/**
+ * 模块说明：src/views/system/SystemConfigView.vue
+ * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
+ * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ */
+
+
 import dayjs from 'dayjs'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
@@ -133,6 +140,7 @@ const applyO2oRules = (config: O2oRuleConfigRecord) => {
   serialForm.o2o.limitQty = config.limitQty
 }
 
+// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const loadData = async () => {
   if (!canViewConfigs.value) {
     loading.value = false
@@ -156,6 +164,7 @@ const loadData = async () => {
   })
 }
 
+// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const handleSubmit = async () => {
   if (!canUpdateConfigs.value) {
     ElMessage.warning('当前账号仅支持只读查看')

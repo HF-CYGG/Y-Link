@@ -1,3 +1,9 @@
+/**
+ * 模块说明：src/utils/client-order-storage.ts
+ * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
+ * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ */
+
 import type { O2oPreorderSummary } from '@/api/modules/o2o'
 
 export interface ClientOrderSnapshot {
@@ -6,6 +12,7 @@ export interface ClientOrderSnapshot {
   updatedAt: number
 }
 
+// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const CLIENT_ORDER_SNAPSHOT_KEY = 'y-link.client-order.snapshot'
 
 const getStorage = () => {
@@ -15,6 +22,7 @@ const getStorage = () => {
   return globalThis.window.localStorage
 }
 
+// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const normalizeOrders = (orders: unknown): O2oPreorderSummary[] => {
   if (!Array.isArray(orders)) {
     return []

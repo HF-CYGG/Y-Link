@@ -1,3 +1,9 @@
+﻿<#
+模块说明：start-local-dev.ps1
+文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
+维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+#>
+
 ﻿param(
   [string]$BackendProfile = 'local-dev',
   [int]$BackendPort = 3001,
@@ -10,7 +16,9 @@
 
 $ErrorActionPreference = 'Stop'
 
-# Resolve all paths from the repository root so the script works from any cwd.
+# 所有运行时路径都从仓库根目录推导：
+# - 避免用户在任意 cwd 执行脚本时出现相对路径失效；
+# - 统一把日志、PID、临时 env 文件收敛到 .local-dev 目录下。
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BackendRoot = Join-Path $ProjectRoot 'backend'
 $BackendEnvFile = Join-Path $BackendRoot '.env.local-dev'
@@ -238,6 +246,8 @@ function Wait-HttpReady {
 
   for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
     try {
+      # 只要能返回 2xx~4xx，就说明目标 HTTP 服务已经真正监听并能处理请求；
+      # 这里不强制要求业务成功，只验证“服务已起来”。
       $response = Invoke-WebRequest -Uri $Uri -UseBasicParsing -TimeoutSec 2
       if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 500) {
         Write-Info "$ServiceName ready: $Uri"
@@ -356,7 +366,7 @@ function Start-CombinedLogRelay {
   # 当前终端统一追踪前后端日志：
   # - 后台服务继续独立运行，但不再弹出额外黑窗；
   # - 当前终端仅负责轮询日志文件并加前缀输出，便于集中观察；
-  # - 按 Ctrl+C 退出日志跟随；服务本身不会被自动杀掉，可随后执行 stop-local-dev.ps1。
+  # - 按 Ctrl+C 退出日志跟随时，会继续检查服务是否仍存活，再决定是保留还是清理记录。
   $backendState = @{
     Out = (Read-NewLogLines -LogPath $BackendLogPath -KnownLineCount 0).LineCount
     Error = (Read-NewLogLines -LogPath $BackendErrorLogPath -KnownLineCount 0).LineCount
@@ -468,6 +478,9 @@ New-EffectiveBackendEnvFile -SourceEnvFile $BackendEnvFile -TargetEnvFile $Effec
 Set-Content -Path $ChildProcessInputFile -Value '' -Encoding UTF8
 
 Write-Info 'Starting backend local profile...'
+# 后端通过“独立 PowerShell + 临时 env 文件”启动：
+# - 避免 npm 与 PowerShell 参数转义互相干扰；
+# - 允许本次启动动态覆盖端口/profile，同时不污染源 env 文件。
 $backendCommand = "& { `$env:APP_PROFILE='$BackendProfile'; `$env:ENV_FILE='$EffectiveBackendEnvFile'; `$env:PORT='$BackendPort'; npm.cmd run dev }"
 $backendProcess = Start-Process `
   -FilePath $PowerShellExecutablePath `
@@ -480,6 +493,8 @@ $backendProcess = Start-Process `
   -PassThru
 
 Write-Info 'Starting frontend dev server (同时承载管理端与客户端页面)...'
+# 前端只启动一个 Vite 开发服务，同时承载管理端与客户端页面，
+# 通过注入本次后端地址，保证本地联调时接口统一指向当前后端端口。
 $frontendCommand = "& { `$env:VITE_LOCAL_BACKEND_URL='http://127.0.0.1:$BackendPort'; npm.cmd run dev -- --host 127.0.0.1 --port $FrontendPort --strictPort }"
 $frontendProcess = Start-Process `
   -FilePath $PowerShellExecutablePath `
@@ -492,6 +507,9 @@ $frontendProcess = Start-Process `
   -PassThru
 
 try {
+  # 就绪校验必须在记录 PID 之前完成：
+  # - 若服务其实未成功拉起，就不写入“假成功”的运行记录；
+  # - 失败时直接进入 catch，输出日志尾部帮助排查。
   Wait-HttpReady -Uri "http://127.0.0.1:$BackendPort/health" -ServiceName 'backend health' -MaxAttempts $MaxReadyAttempts
   Wait-HttpReady -Uri "http://127.0.0.1:$FrontendPort" -ServiceName 'frontend dev server' -MaxAttempts $MaxReadyAttempts
 
@@ -560,6 +578,7 @@ try {
     }
     finally {
       if (Test-Path $PidFile) {
+        # 日志跟随后再次判断真实服务是否仍在，解决“外层 shell 退出但 node 仍在”与相反情况。
         $servicesStillAlive = (
           (Test-ProcessAlive -ProcessId $backendProcess.Id) -or
           (Test-ProcessAlive -ProcessId $frontendProcess.Id) -or
@@ -580,6 +599,7 @@ try {
 }
 catch {
   Write-Info 'Startup failed. Cleaning up spawned processes.'
+  # 启动失败时优先清理进程树，再打印日志尾部，避免失败进程继续占用端口或追加无关日志。
   Stop-ProcessTree -RootProcessId $backendProcess.Id
   Stop-ProcessTree -RootProcessId $frontendProcess.Id
   Remove-Item -Path $PidFile -Force -ErrorAction SilentlyContinue

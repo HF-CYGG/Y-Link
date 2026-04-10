@@ -1,3 +1,9 @@
+/**
+ * 模块说明：backend/src/services/product.service.ts
+ * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
+ * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ */
+
 import { In, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
@@ -73,8 +79,10 @@ export interface ProductView {
   tags: ProductTagView[]
 }
 
+// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const normalizeEntityId = (value: string | number): string => String(value).trim()
 
+// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const normalizeDecimalText = (value: string | number | null | undefined, fallback = '0.00'): string => {
   if (value === null || value === undefined || value === '') {
     return fallback
@@ -84,10 +92,12 @@ const normalizeDecimalText = (value: string | number | null | undefined, fallbac
   return Number.isFinite(normalizedNumber) ? normalizedNumber.toFixed(2) : fallback
 }
 
+// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const normalizeTagIds = (tagIds: Array<string | number>): string[] => {
   return [...new Set(tagIds.map((tagId) => normalizeEntityId(tagId)).filter(Boolean))]
 }
 
+// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const normalizeProductCodeInput = (value: string | null | undefined): string => {
   if (typeof value !== 'string') {
     return ''
@@ -96,13 +106,16 @@ const normalizeProductCodeInput = (value: string | null | undefined): string => 
   return value.trim()
 }
 
+// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const PRODUCT_CODE_CONSTRAINT_MATCHER = {
   mysqlConstraint: 'uk_base_product_code',
   sqliteColumns: ['base_product.product_code'],
 } as const
 
+// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const PRODUCT_CREATE_MAX_RETRY = 3
 
+// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export class ProductService {
   private productRepo = AppDataSource.getRepository(BaseProduct)
 

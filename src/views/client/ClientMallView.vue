@@ -1,4 +1,11 @@
 <script setup lang="ts">
+/**
+ * 模块说明：src/views/client/ClientMallView.vue
+ * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
+ * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ */
+
+
 import { useVirtualList } from '@vueuse/core'
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
@@ -22,6 +29,7 @@ const { runLatest } = useStableRequest()
 
 const loading = ref(false)
 const requestError = ref<{ type: 'offline' | 'error'; message: string } | null>(null)
+// 搜索词与激活分类直接映射到 Store，保证页面切走后仍能恢复到用户上次浏览上下文。
 const keyword = computed({
   get: () => clientCatalogStore.keyword,
   set: (value: string) => clientCatalogStore.setKeyword(value),
@@ -40,11 +48,14 @@ const listScrollerRef = ref<HTMLElement | null>(null)
 const sectionRefMap = reactive<Record<string, HTMLElement | null>>({})
 const scrollingByCategoryClick = ref(false)
 
+// 商城页属于高频返回页面，初始化时优先恢复购物车与目录缓存，避免每次进入都重置上下文。
 clientCartStore.initialize()
 clientCatalogStore.initialize()
 
 const products = computed(() => clientCatalogStore.products)
 
+// 当前后端未直接返回业务分类字段，因此前端临时根据商品编码前缀做稳定分组。
+// 这样既能满足双栏联动结构，又不会引入额外接口改造。
 const classifyProduct = (product: O2oMallProduct) => {
   const code = product.productCode.trim()
   if (code.includes('-')) {
@@ -77,6 +88,9 @@ const categoryGroups = computed<ProductCategoryGroup[]>(() => {
     }))
 })
 
+// 搜索模式与大数据模式互斥：
+// - 有关键字时优先进入搜索结果态，弱化分类导航；
+// - 数据量较大时启用虚拟列表，仅渲染当前分类内的可视区域。
 const searchMode = computed(() => keyword.value.trim().length > 0)
 const largeDatasetMode = computed(() => products.value.length > 100)
 
@@ -97,6 +111,7 @@ const searchResults = computed(() => {
   }
 
   return products.value.filter((product) => {
+    // 搜索同时命中名称、编码与详情文案，兼顾运营配置与用户口语化输入。
     const text = `${product.productName} ${product.productCode} ${product.detailContent ?? ''}`.toLowerCase()
     return text.includes(normalizedKeyword)
   })
@@ -125,6 +140,7 @@ const { list: virtualRows, containerProps: virtualContainerProps, wrapperProps: 
   overscan: 6,
 })
 
+// 结算栏脉冲动效只负责视觉反馈，不参与真实业务状态；通过短暂切换 class 保证重复加购时也能触发。
 const triggerSettlePulse = () => {
   settlePulsing.value = false
   globalThis.window.setTimeout(() => {
@@ -139,6 +155,7 @@ const warmupProductImages = (items: O2oMallProduct[]) => {
   if (typeof globalThis.window === 'undefined') {
     return
   }
+  // 仅预热首屏附近的小批量图片，避免在慢网环境下一次性抢占过多带宽。
   const warmup = () => {
     items
       .filter((item) => Boolean(item.thumbnail))
@@ -159,6 +176,8 @@ const warmupProductImages = (items: O2oMallProduct[]) => {
 }
 
 const loadProducts = async (force = false) => {
+  // 如果缓存仍在有效期内，则直接复用本地目录快照，并只同步购物车库存信息。
+  // 这样从订单页返回商城页时可以“秒开”，同时避免旧库存继续污染购物车状态。
   if (!force && clientCatalogStore.products.length > 0 && clientCatalogStore.isFresh) {
     requestError.value = null
     clientCartStore.syncWithCatalog(clientCatalogStore.products)
@@ -169,6 +188,9 @@ const loadProducts = async (force = false) => {
   await runLatest({
     executor: (signal) => getO2oMallProducts({ signal }),
     onSuccess: async (result) => {
+      // 成功返回后同步更新两个域：
+      // 1. 目录 Store 负责商品列表、分类与搜索上下文；
+      // 2. 购物车 Store 负责把已选商品映射到最新库存/限购规则。
       clientCatalogStore.setProducts(result)
       clientCartStore.syncWithCatalog(result)
       warmupProductImages(result)
@@ -182,6 +204,7 @@ const loadProducts = async (force = false) => {
     onError: (error) => {
       const normalizedError = normalizeRequestError(error, '商品加载失败，请稍后重试')
       requestError.value = {
+        // 网络断开与普通异常拆成两类，便于空态组件输出不同文案与图形提示。
         type: globalThis.navigator.onLine === false ? 'offline' : 'error',
         message: normalizedError.message,
       }
@@ -206,6 +229,7 @@ const changeDetailQty = (delta: number) => {
   if (!detailProduct.value) {
     return
   }
+  // 详情抽屉中的数量调整同时受库存与单人限购约束，避免前端先放出一个后端必定拒绝的数量。
   const maxQty = Math.max(0, Math.min(detailProduct.value.availableStock, detailProduct.value.limitPerUser))
   detailQty.value = Math.min(maxQty, Math.max(1, detailQty.value + delta))
 }
@@ -237,6 +261,7 @@ const quickAdd = (product: O2oMallProduct) => {
 const scrollToCategory = async (categoryKey: string) => {
   activeCategoryKey.value = categoryKey
   if (largeDatasetMode.value) {
+    // 大数据模式下列表按当前分类单独渲染，不再进行 DOM 锚点滚动。
     return
   }
   if (categoryKey === 'all') {
@@ -266,6 +291,7 @@ const scrollToCategory = async (categoryKey: string) => {
 
 const handleProductListScroll = () => {
   if (searchMode.value || scrollingByCategoryClick.value || largeDatasetMode.value) {
+    // 搜索模式、点击触发滚动与虚拟列表模式都不适合反向计算激活分类，直接跳过。
     return
   }
 
@@ -294,6 +320,7 @@ const handleProductListScroll = () => {
 const goToCheckout = async () => {
   if (!clientCartStore.selectedValidItems.length) {
     if (clientCartStore.validItems.length > 0) {
+      // 若用户尚未主动勾选，则默认全选有效商品，减少从商城直达结算的操作成本。
       clientCartStore.toggleAllValidSelected(true)
     } else {
       ElMessage.warning('购物车暂无可结算商品')

@@ -1,4 +1,10 @@
 /**
+ * 模块说明：src/router/route-performance.ts
+ * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
+ * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ */
+
+/**
  * 前端命名路由集合：
  * - 统一沉淀到单独文件，便于路由配置、预热策略与验证脚本共用同一命名口径；
  * - 仅收录实际命名路由，避免预热时误传匿名节点。
@@ -116,6 +122,8 @@ export const preloadRouteComponents = async (routeNames: RouteWarmupTarget[]) =>
 }
 
 const resolveWarmupTargetByPath = (redirectPath: string): RouteWarmupTarget | null => {
+  // 这里按“登录成功后最常见落点”做路径归类，把任意 redirect 路径收口成可预热的核心页面。
+  // 即便用户命中更深层子路径，也尽量先把上层高频页面的代码包拉下来，降低首跳等待感。
   if (redirectPath.startsWith('/dashboard')) {
     return 'dashboard'
   }
@@ -148,6 +156,8 @@ const resolveWarmupTargetByPath = (redirectPath: string): RouteWarmupTarget | nu
 }
 
 export const resolvePostLoginWarmupTargets = (redirectPath?: string): RouteWarmupTarget[] => {
+  // 登录后至少保证 AppLayout 和工作台被预热；
+  // 如果存在明确 redirect，再额外补充一次“下一跳页面”预热。
   const targets: RouteWarmupTarget[] = ['appLayout', 'dashboard']
   const normalizedRedirectPath = typeof redirectPath === 'string' ? redirectPath.trim() : ''
   const matchedTarget = normalizedRedirectPath ? resolveWarmupTargetByPath(normalizedRedirectPath) : null

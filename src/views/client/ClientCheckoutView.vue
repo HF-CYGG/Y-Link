@@ -1,4 +1,11 @@
 <script setup lang="ts">
+/**
+ * 模块说明：src/views/client/ClientCheckoutView.vue
+ * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
+ * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ */
+
+
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
@@ -14,6 +21,8 @@ const submitting = ref(false)
 
 onMounted(() => {
   clientCartStore.initialize()
+  // 从商城页直接进入结算时，用户可能尚未进入购物车页手动勾选；
+  // 这里默认全选“仍有效”的商品，减少结算前的重复操作。
   if (!clientCartStore.selectedValidItems.length && clientCartStore.validItems.length > 0) {
     clientCartStore.toggleAllValidSelected(true)
   }
@@ -29,6 +38,7 @@ const handleSubmit = async () => {
     return
   }
 
+  // 提交锁只防重复点击，不承担真正幂等保障；最终仍以服务端库存与限购校验结果为准。
   submitting.value = true
   try {
     const result = await submitO2oPreorder({
@@ -39,11 +49,13 @@ const handleSubmit = async () => {
       })),
     })
 
+    // 只有服务端创建预订单成功后，才真正从购物车中移除已提交商品，避免前端先删导致状态丢失。
     selectedItems.value.forEach((item) => {
       clientCartStore.removeItem(item.productId)
     })
 
     ElMessage.success('预订单提交成功')
+    // 结算成功后直接跳转订单详情页，帮助用户立即看到核销码与待提货状态。
     await router.replace(`/client/orders/${result.order.id}`)
   } catch (error) {
     ElMessage.error(error instanceof Error ? error.message : '提交失败，请稍后再试')

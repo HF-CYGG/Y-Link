@@ -1,3 +1,9 @@
+/**
+ * 模块说明：backend/src/routes/o2o.routes.ts
+ * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
+ * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ */
+
 import { Router } from 'express'
 import { z } from 'zod'
 import { requireClientAuth } from '../middleware/client-auth.middleware.js'
@@ -24,6 +30,7 @@ const verifySchema = z.object({
 
 export const o2oRouter = Router()
 
+// 商城商品列表：客户端免登录可访问，用于展示当前上架商品与可预订库存。
 o2oRouter.get(
   '/mall/products',
   asyncHandler(async (_req, res) => {
@@ -32,6 +39,7 @@ o2oRouter.get(
   }),
 )
 
+// 提交预订单：必须走客户端独立鉴权，避免与后台管理鉴权体系混用。
 o2oRouter.post(
   '/mall/preorders',
   requireClientAuth,
@@ -42,6 +50,7 @@ o2oRouter.post(
   }),
 )
 
+// 我的订单列表：只返回当前客户端用户自己的预订单。
 o2oRouter.get(
   '/mall/preorders',
   requireClientAuth,
@@ -52,6 +61,7 @@ o2oRouter.get(
   }),
 )
 
+// 订单详情：客户端查看自己的核销码、商品明细与状态。
 o2oRouter.get(
   '/mall/preorders/:id',
   requireClientAuth,
@@ -61,6 +71,7 @@ o2oRouter.get(
   }),
 )
 
+// 管理端扫码前可先读取核销详情，便于展示订单内容与状态确认。
 o2oRouter.get(
   '/verify/:verifyCode',
   requireAuth,
@@ -71,6 +82,7 @@ o2oRouter.get(
   }),
 )
 
+// 核销动作属于后台“出库确认”，因此要求后台登录 + 订单创建权限。
 o2oRouter.post(
   '/verify',
   requireAuth,
@@ -83,6 +95,7 @@ o2oRouter.post(
   }),
 )
 
+// 入库动作由后台工作人员执行，用于补货与库存修正。
 o2oRouter.post(
   '/inbound',
   requireAuth,
@@ -95,6 +108,7 @@ o2oRouter.post(
   }),
 )
 
+// 超时取消入口保留给后台或定时任务触发，统一回收超时订单的预订占用库存。
 o2oRouter.post(
   '/cron/cancel-timeout',
   requireAuth,
@@ -105,6 +119,7 @@ o2oRouter.post(
   }),
 )
 
+// 库存日志用于后台追踪预订占用、核销出库、手工入库与超时释放等变化记录。
 o2oRouter.get(
   '/inventory/logs',
   requireAuth,

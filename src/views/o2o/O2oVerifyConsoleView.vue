@@ -1,4 +1,11 @@
 <script setup lang="ts">
+/**
+ * 模块说明：src/views/o2o/O2oVerifyConsoleView.vue
+ * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
+ * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ */
+
+
 import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { PageContainer } from '@/components/common'
@@ -28,6 +35,7 @@ const handleSearch = async () => {
   }
 }
 
+// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const handleVerify = async () => {
   if (!detail.value) {
     return

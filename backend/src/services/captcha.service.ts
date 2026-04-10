@@ -1,3 +1,9 @@
+/**
+ * 模块说明：backend/src/services/captcha.service.ts
+ * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
+ * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ */
+
 import { randomBytes, randomUUID } from 'node:crypto'
 import { BizError } from '../utils/errors.js'
 
@@ -6,6 +12,7 @@ interface CaptchaTicket {
   expireAt: number
 }
 
+// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const CAPTCHA_TTL_MS = 5 * 60 * 1000
 const captchaStore = new Map<string, CaptchaTicket>()
 
@@ -24,6 +31,7 @@ const randomCaptchaCode = () => {
   return Array.from(buffer).map((item) => alphabet[item % alphabet.length]).join('')
 }
 
+// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const buildCaptchaSvg = (code: string) => {
   const chars = code.split('')
   const labels = chars

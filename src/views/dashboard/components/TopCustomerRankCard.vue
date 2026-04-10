@@ -1,4 +1,11 @@
 <script setup lang="ts">
+/**
+ * 模块说明：src/views/dashboard/components/TopCustomerRankCard.vue
+ * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
+ * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ */
+
+
 import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { DashboardTopCustomer } from '@/api/modules/dashboard'
@@ -16,6 +23,7 @@ const formatAmount = (value: string | number | null | undefined): string => {
   return Number.isFinite(normalizedNumber) ? normalizedNumber.toFixed(2) : '0.00'
 }
 
+// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const openDrilldown = (customerName: string) => {
   if (!customerName.trim()) {
     ElMessage.warning('当前榜单项缺少客户标识')

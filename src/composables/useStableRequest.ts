@@ -1,7 +1,14 @@
+/**
+ * 模块说明：src/composables/useStableRequest.ts
+ * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
+ * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ */
+
 import { onBeforeUnmount, onDeactivated } from 'vue'
 import { isRequestCanceled } from '@/utils/error'
 
 interface RunLatestOptions<T> {
+  // executor 负责真正发起请求，并显式接收 AbortSignal，确保上层能安全取消旧请求。
   executor: (signal: AbortSignal) => Promise<T>
   onSuccess: (result: T) => void | Promise<void>
   onError?: (error: unknown) => void | Promise<void>
@@ -16,6 +23,7 @@ interface RunLatestOptions<T> {
  */
 export const useStableRequest = () => {
   let activeController: AbortController | null = null
+  // 自增请求编号用于解决“旧请求比新请求更晚返回”的乱序问题。
   let latestRequestId = 0
 
   /**
@@ -37,6 +45,7 @@ export const useStableRequest = () => {
     latestRequestId += 1
     const requestId = latestRequestId
 
+    // 发起新请求前先主动终止旧请求，避免相同页面上的多次筛选/切换并发回写。
     activeController?.abort()
     const controller = new AbortController()
     activeController = controller
@@ -46,6 +55,7 @@ export const useStableRequest = () => {
     try {
       const result = await options.executor(controller.signal)
       if (controller.signal.aborted || requestId !== latestRequestId) {
+        // 当前结果已被更新请求淘汰，静默丢弃即可，不再回写页面。
         return
       }
 
@@ -53,6 +63,7 @@ export const useStableRequest = () => {
       await options.onSuccess(result)
     } catch (error) {
       if (controller.signal.aborted || requestId !== latestRequestId || isRequestCanceled(error)) {
+        // 取消类异常不视为真正失败，避免页面误弹错误提示。
         return
       }
 
@@ -60,6 +71,7 @@ export const useStableRequest = () => {
       await options.onError?.(error)
     } finally {
       if (activeController !== controller) {
+        // 如果 activeController 已指向更新请求，说明当前请求已过期，不再执行其 finally 收尾。
         return
       }
 

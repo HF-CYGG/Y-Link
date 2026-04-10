@@ -1,3 +1,9 @@
+/**
+ * 模块说明：backend/src/services/data-maintenance.service.ts
+ * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
+ * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ */
+
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { AppDataSource } from '../config/data-source.js'
@@ -11,6 +17,7 @@ import { O2oPreorderItem } from '../entities/o2o-preorder-item.entity.js'
 import { SystemConfig } from '../entities/system-config.entity.js'
 import { BizError } from '../utils/errors.js'
 
+// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const EXPORT_ENTITY_MAP = {
   systemConfigs: SystemConfig,
   products: BaseProduct,
