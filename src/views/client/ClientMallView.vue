@@ -550,9 +550,8 @@ onMounted(async () => {
       </div>
     </section>
 
+    <div class="mini-cart-backdrop" :class="{ 'is-expanded': miniCartVisible }" @click="miniCartVisible = false"></div>
     <div class="mini-cart-wrapper" :class="{ 'is-expanded': miniCartVisible }">
-      <div class="mini-cart-backdrop" @click="miniCartVisible = false"></div>
-
       <section class="mini-cart-card" :class="{ 'is-pulse': settlePulsing }">
         <div class="cart-summary-bar" @click="miniCartVisible = !miniCartVisible">
           <div class="summary-info">
@@ -715,7 +714,7 @@ onMounted(async () => {
   bottom: calc(82px + 0.75rem);
   left: 50%;
   z-index: 50;
-  width: min(480px, calc(100vw - 2rem));
+  width: min(var(--client-shell-max, 1100px), calc(100vw - var(--client-shell-inline, 1.25rem) * 2));
   transform: translateX(-50%);
   pointer-events: none;
 }
@@ -727,7 +726,7 @@ onMounted(async () => {
 .mini-cart-backdrop {
   position: fixed;
   inset: 0;
-  z-index: -1;
+  z-index: 40;
   background: rgba(15, 23, 42, 0.32);
   backdrop-filter: blur(4px);
   -webkit-backdrop-filter: blur(4px);
@@ -736,7 +735,7 @@ onMounted(async () => {
   transition: opacity 0.4s ease;
 }
 
-.mini-cart-wrapper.is-expanded .mini-cart-backdrop {
+.mini-cart-backdrop.is-expanded {
   opacity: 1;
   pointer-events: auto;
 }
@@ -1031,7 +1030,6 @@ onMounted(async () => {
 @media (max-width: 767px) {
   .mini-cart-wrapper {
     bottom: calc(82px + env(safe-area-inset-bottom));
-    width: calc(100vw - 1rem);
   }
 
   .cart-summary-bar {
