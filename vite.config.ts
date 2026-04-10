@@ -29,6 +29,10 @@ export default defineConfig(({ command, mode }) => {
                 target: localBackendOrigin,
                 changeOrigin: true,
               },
+              '/uploads': {
+                target: localBackendOrigin,
+                changeOrigin: true,
+              },
               '/health': {
                 target: localBackendOrigin,
                 changeOrigin: true,

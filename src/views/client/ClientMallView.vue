@@ -16,6 +16,7 @@ import { BaseRequestState } from '@/components/common'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useClientCartStore, useClientCatalogStore } from '@/store'
 import { normalizeRequestError } from '@/utils/error'
+import { useDevice } from '@/composables/useDevice'
 
 interface ProductCategoryGroup {
   key: string
@@ -27,6 +28,7 @@ const router = useRouter()
 const clientCartStore = useClientCartStore()
 const clientCatalogStore = useClientCatalogStore()
 const { runLatest } = useStableRequest()
+const { isPhone, isTablet } = useDevice()
 
 const loading = ref(false)
 const requestError = ref<{ type: 'offline' | 'error'; message: string } | null>(null)
@@ -596,21 +598,22 @@ onMounted(async () => {
     <ElDrawer
       v-model="detailVisible"
       title="商品详情"
-      direction="btt"
-      size="74%"
+      :direction="isPhone ? 'btt' : 'rtl'"
+      :size="isPhone ? '74%' : '400px'"
       append-to-body
       :with-header="false"
+      class="client-drawer-responsive"
     >
-      <section v-if="detailProduct" class="space-y-4 pb-2">
+      <section v-if="detailProduct" class="space-y-4 pb-2 max-w-[480px] mx-auto h-full flex flex-col">
         <img
           v-if="detailProduct.thumbnail"
           :src="detailProduct.thumbnail"
           :alt="detailProduct.productName"
-          class="h-44 w-full rounded-2xl object-cover"
+          class="h-44 sm:h-56 w-full rounded-2xl object-cover flex-shrink-0"
           loading="lazy"
           decoding="async"
         />
-        <div class="space-y-2">
+        <div class="space-y-2 flex-shrink-0">
           <p class="text-lg font-semibold text-slate-900">{{ detailProduct.productName }}</p>
           <p class="text-sm text-slate-500">{{ detailProduct.detailContent || '暂无商品描述' }}</p>
           <div class="flex flex-wrap gap-2 text-xs">
@@ -619,7 +622,8 @@ onMounted(async () => {
             <span class="rounded-full bg-slate-100 px-3 py-1 text-slate-600">限购 {{ detailProduct.limitPerUser }}</span>
           </div>
         </div>
-        <div class="flex items-center justify-between rounded-2xl bg-slate-100 px-3 py-2">
+        <div class="flex-1 overflow-y-auto"></div>
+        <div class="flex items-center justify-between rounded-2xl bg-slate-100 px-3 py-2 flex-shrink-0 mt-auto">
           <span class="text-sm text-slate-600">数量</span>
           <div class="flex items-center gap-2">
             <button type="button" class="client-qty-button" @click="changeDetailQty(-1)">-</button>
@@ -627,7 +631,7 @@ onMounted(async () => {
             <button type="button" class="client-qty-button" @click="changeDetailQty(1)">+</button>
           </div>
         </div>
-        <button type="button" class="h-11 w-full rounded-full bg-slate-900 text-sm font-semibold text-white" @click="addCurrentDetailToCart">
+        <button type="button" class="h-11 w-full rounded-full bg-slate-900 text-sm font-semibold text-white flex-shrink-0" @click="addCurrentDetailToCart">
           加入购物车
         </button>
       </section>
