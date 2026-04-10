@@ -5,6 +5,7 @@
  */
 export { DEVICE_BREAKPOINTS, useAppStore } from '@/store/modules/app'
 export { useAuthStore } from '@/store/modules/auth'
+export { useClientAuthStore } from '@/store/modules/client-auth'
 export { THEME_TRANSITION_DURATION_MS, useThemeStore } from '@/store/modules/theme'
 export type { DeviceMode } from '@/store/modules/app'
 export type { ThemeMode, ThemeTransitionStrategy } from '@/store/modules/theme'

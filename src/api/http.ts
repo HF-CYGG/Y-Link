@@ -2,6 +2,7 @@ import axios, { type AxiosRequestConfig, type AxiosResponse, type InternalAxiosR
 import type { ApiResponse } from '@/types/api'
 import { useAppStore } from '@/store/modules/app'
 import { clearPersistedAuthState, getPersistedAuthToken } from '@/utils/auth-storage'
+import { clearPersistedClientAuthState, getPersistedClientAuthToken } from '@/utils/client-auth-storage'
 import { normalizeRequestError, unwrapApiResponse } from '@/utils/error'
 
 /**
@@ -30,12 +31,30 @@ const isLoginRequest = (url?: string) => {
 }
 
 /**
+ * 是否为客户端鉴权访客接口：
+ * - 登录、注册、找回密码等接口即使返回 401，也不应触发“会话失效跳转”；
+ * - 否则用户在输入错误验证码时会被莫名其妙重定向。
+ */
+const isClientGuestAuthRequest = (url?: string) => {
+  return /\/client-auth\/(?:captcha|login|register|forgot-password\/verify|forgot-password\/reset)(?:\?|$)/.test(normalizeRequestUrl(url))
+}
+
+/**
+ * 当前请求是否属于客户端链路：
+ * - `/client-auth/*` 与 `/o2o/mall/*` 使用客户端 token；
+ * - 管理端继续沿用原有管理员 token，避免两个端的鉴权头混用。
+ */
+const isClientRequest = (url?: string) => {
+  return /\/(?:client-auth|o2o\/mall)(?:\/|$)/.test(normalizeRequestUrl(url))
+}
+
+/**
  * 判断当前请求是否应注入 Authorization：
  * - 只要本地存在 token，统一走 Bearer 头传递；
  * - 若调用方已手动传入 Authorization，则以调用方配置为准。
  */
 const attachAuthorizationHeader = (config: InternalAxiosRequestConfig) => {
-  const token = getPersistedAuthToken()
+  const token = isClientRequest(config.url) ? getPersistedClientAuthToken() : getPersistedAuthToken()
   if (!token) {
     return config
   }
@@ -53,20 +72,25 @@ const attachAuthorizationHeader = (config: InternalAxiosRequestConfig) => {
  * - 先清空本地登录态，避免刷新后继续带着失效 token；
  * - 使用硬跳转强制重建前端内存态，确保 Pinia 中的旧用户信息同步被清理。
  */
-const redirectToLogin = () => {
+const redirectToLogin = (target: 'admin' | 'client') => {
   if (globalThis.window === undefined) {
     return
   }
 
-  clearPersistedAuthState()
+  if (target === 'client') {
+    clearPersistedClientAuthState()
+  } else {
+    clearPersistedAuthState()
+  }
 
   const currentPath = `${globalThis.window.location.pathname}${globalThis.window.location.search}${globalThis.window.location.hash}`
-  if (currentPath.startsWith('/login')) {
-    globalThis.window.location.replace('/login')
+  const loginPath = target === 'client' ? '/client/login' : '/login'
+  if (currentPath.startsWith(loginPath)) {
+    globalThis.window.location.replace(loginPath)
     return
   }
 
-  const loginUrl = `/login?redirect=${encodeURIComponent(currentPath)}`
+  const loginUrl = `${loginPath}?redirect=${encodeURIComponent(currentPath)}`
   globalThis.window.location.replace(loginUrl)
 }
 
@@ -76,7 +100,7 @@ const redirectToLogin = () => {
  * - 403 中仅处理“账号已停用”场景，普通权限不足交由页面层自行提示。
  */
 const shouldForceRelogin = (error: ReturnType<typeof normalizeRequestError>, requestUrl?: string) => {
-  if (isLoginRequest(requestUrl)) {
+  if (isLoginRequest(requestUrl) || isClientGuestAuthRequest(requestUrl)) {
     return false
   }
 
@@ -134,7 +158,7 @@ http.interceptors.response.use(
     const normalizedError = normalizeRequestError(error)
 
     if (shouldForceRelogin(normalizedError, error?.config?.url)) {
-      redirectToLogin()
+      redirectToLogin(isClientRequest(error?.config?.url) ? 'client' : 'admin')
     }
 
     return Promise.reject(normalizedError)

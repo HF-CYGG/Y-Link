@@ -6,6 +6,22 @@ export interface ClientCaptchaResult {
   expiresInSeconds: number
 }
 
+export interface ClientSafeProfile {
+  id: string
+  mobile: string
+  realName: string
+  departmentName: string | null
+  status: string
+  lastLoginAt: string | null
+}
+
+export interface ClientAuthSuccessResult {
+  token: string
+  expiresAt: string
+  user: ClientSafeProfile
+  verificationChannel: 'captcha' | 'sms'
+}
+
 export const getClientCaptcha = () =>
   request<ClientCaptchaResult>({
     method: 'GET',
@@ -20,14 +36,14 @@ export const clientRegister = (payload: {
   captchaId: string
   captchaCode: string
 }) =>
-  request<unknown>({
+  request<ClientAuthSuccessResult>({
     method: 'POST',
     url: '/client-auth/register',
     data: payload,
   })
 
 export const clientLogin = (payload: { mobile: string; password: string; captchaId: string; captchaCode: string }) =>
-  request<unknown>({
+  request<ClientAuthSuccessResult>({
     method: 'POST',
     url: '/client-auth/login',
     data: payload,
@@ -48,7 +64,7 @@ export const resetClientPassword = (payload: { mobile: string; resetToken: strin
   })
 
 export const getClientMe = () =>
-  request<unknown>({
+  request<ClientSafeProfile>({
     method: 'GET',
     url: '/client-auth/me',
   })

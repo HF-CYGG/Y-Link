@@ -1,7 +1,7 @@
 import { ElMessage } from 'element-plus'
 import { createRouter, createWebHistory } from 'vue-router'
 import { scheduleRouteComponentWarmup, type AppRouteName } from '@/router/route-performance'
-import { useAuthStore } from '@/store'
+import { useAuthStore, useClientAuthStore } from '@/store'
 import { canAccessRoute, routes } from '@/router/routes'
 
 /**
@@ -17,6 +17,24 @@ const resolveSafeRedirect = (value: unknown) => {
   const normalized = value.trim()
   if (!normalized.startsWith('/') || normalized.startsWith('//')) {
     return '/dashboard'
+  }
+
+  return normalized
+}
+
+/**
+ * 客户端回跳路径安全处理：
+ * - 默认回到商品大厅，而不是管理端工作台；
+ * - 同样只允许站内绝对路径，避免被拼接成外部跳转。
+ */
+const resolveSafeClientRedirect = (value: unknown) => {
+  if (typeof value !== 'string') {
+    return '/client/mall'
+  }
+
+  const normalized = value.trim()
+  if (!normalized.startsWith('/') || normalized.startsWith('//')) {
+    return '/client/mall'
   }
 
   return normalized
@@ -39,13 +57,19 @@ const router = createRouter({
  */
 router.beforeEach(async (to) => {
   const authStore = useAuthStore()
+  const clientAuthStore = useClientAuthStore()
 
   if (!authStore.initialized) {
     await authStore.initializeAuth()
   }
+  if (!clientAuthStore.initialized) {
+    await clientAuthStore.initializeAuth()
+  }
 
   const requiresAuth = to.matched.some((record) => record.meta.requiresAuth)
   const isGuestOnly = to.matched.some((record) => record.meta.guestOnly)
+  const requiresClientAuth = to.matched.some((record) => record.meta.requiresClientAuth)
+  const isClientGuestOnly = to.matched.some((record) => record.meta.clientGuestOnly)
 
   if (requiresAuth && !authStore.isAuthenticated) {
     return {
@@ -60,8 +84,21 @@ router.beforeEach(async (to) => {
     return resolveSafeRedirect(to.query.redirect)
   }
 
+  if (requiresClientAuth && !clientAuthStore.isAuthenticated) {
+    return {
+      path: '/client/login',
+      query: {
+        redirect: to.fullPath,
+      },
+    }
+  }
+
+  if (isClientGuestOnly && clientAuthStore.isAuthenticated) {
+    return resolveSafeClientRedirect(to.query.redirect)
+  }
+
   const deniedRecord = to.matched.find((record) => !canAccessRoute(record.meta, authStore.currentUser))
-  if (deniedRecord) {
+  if (requiresAuth && deniedRecord) {
     ElMessage.warning('当前账号无权访问该页面')
     return '/dashboard'
   }

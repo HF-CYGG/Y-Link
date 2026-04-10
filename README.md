@@ -55,7 +55,8 @@ docker compose up -d --build
 ```
 
 启动后访问：
-- 前端：`http://127.0.0.1:8080`
+- 管理端：`http://127.0.0.1:8080/login`
+- 客户端：`http://127.0.0.1:8080/client/login`
 - 后端健康检查：`http://127.0.0.1:3001/health`
 
 首次部署（默认 SQLite）时，后端会在启动日志输出初始化管理员账号与密码，便于在 1Panel 日志中直接查看并登录。首次登录后请立即修改密码。
@@ -91,7 +92,8 @@ docker run -d --name y-link-onebox \
 ```
 
 启动后验证：
-- 页面：`http://服务器IP:9050`
+- 管理端：`http://服务器IP:9050/login`
+- 客户端：`http://服务器IP:9050/client/login`
 - 健康检查：`http://服务器IP:9050/health`
 
 建议参数：
@@ -220,6 +222,17 @@ npm run cloud:down
 ```bash
 npm run local:dev
 ```
+
+本地联调启动后访问：
+- 管理端登录：`http://127.0.0.1:5173/login`
+- 客户端登录：`http://127.0.0.1:5173/client/login`
+- 客户端商品大厅：`http://127.0.0.1:5173/client/mall`
+- 后端健康检查：`http://127.0.0.1:3001/health`
+- 本地 SQLite 文件：`backend/data/local-dev/y-link.local-dev.sqlite`
+
+说明：
+- 当前本地联调由一个前端开发服务器同时承载“管理端页面”和“客户端页面”。
+- 数据库默认使用 SQLite，执行 `start-local-dev.ps1` 后会随后台自动初始化，无需额外手动启动数据库进程。
 
 后端本地验收（O2O 功能）：
 

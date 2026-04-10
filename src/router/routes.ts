@@ -24,7 +24,8 @@ export interface AppShortcutMeta {
  * - menu / menuOrder / menuGroup 用于派生侧边栏结构；
  * - shortcut 用于派生工作台快捷入口；
  * - activeMenu 用于需要时指定菜单高亮归属；
- * - requiresAuth / guestOnly / requiredPermissions 用于前端权限点路由守卫。
+ * - requiresAuth / guestOnly / requiredPermissions 用于管理端权限点路由守卫。
+ * - requiresClientAuth / clientGuestOnly 用于客户端 H5 的登录态路由守卫。
  */
 export interface AppRouteMeta extends RouteMeta {
   title: string
@@ -36,6 +37,8 @@ export interface AppRouteMeta extends RouteMeta {
   shortcut?: AppShortcutMeta
   requiresAuth?: boolean
   guestOnly?: boolean
+  requiresClientAuth?: boolean
+  clientGuestOnly?: boolean
   requiredPermissions?: PermissionCode[]
   requiredAnyPermissions?: PermissionCode[]
   allowedRoles?: UserRole[]
@@ -189,6 +192,67 @@ const layoutChildren: AppRouteRecord[] = [
     ],
   },
   {
+    path: 'o2o-console',
+    name: 'o2o-console',
+    redirect: '/o2o-console/products',
+    meta: {
+      title: '线上预订',
+      icon: 'Shop',
+      menuGroup: '业务操作',
+      menuOrder: 35,
+      requiredAnyPermissions: ['products:view', 'orders:view'],
+      shortcut: {
+        title: '线上预订',
+        description: '维护线上商品、核销预订单与登记入库',
+        order: 25,
+        path: '/o2o-console/products',
+        icon: 'Shop',
+        colorClass: 'text-brand dark:text-teal-300',
+        bgClass: 'bg-brand/10 dark:bg-brand/20',
+      },
+    },
+    children: [
+      {
+        path: 'products',
+        name: 'o2o-console-products',
+        component: routeViewLoaders['o2o-console-products'],
+        meta: {
+          title: '商品大厅',
+          menuOrder: 10,
+          activeMenu: '/o2o-console',
+          requiredPermissions: ['products:view'],
+          keepAlive: true,
+          preloadTargets: ['o2o-console-verify'],
+        },
+      },
+      {
+        path: 'verify',
+        name: 'o2o-console-verify',
+        component: routeViewLoaders['o2o-console-verify'],
+        meta: {
+          title: '预订单核销',
+          menuOrder: 20,
+          activeMenu: '/o2o-console',
+          requiredPermissions: ['orders:view'],
+          keepAlive: true,
+          preloadTargets: ['o2o-console-inbound'],
+        },
+      },
+      {
+        path: 'inbound',
+        name: 'o2o-console-inbound',
+        component: routeViewLoaders['o2o-console-inbound'],
+        meta: {
+          title: '入库管理',
+          menuOrder: 30,
+          activeMenu: '/o2o-console',
+          requiredPermissions: ['products:view'],
+          keepAlive: true,
+        },
+      },
+    ],
+  },
+  {
     path: 'system',
     name: 'system',
     redirect: '/system/configs',
@@ -267,6 +331,67 @@ export const routes: RouteRecordRaw[] = [
       menu: false,
       guestOnly: true,
     } satisfies AppRouteMeta,
+  },
+  {
+    path: '/client/login',
+    name: 'client-login',
+    component: routeViewLoaders['client-login'],
+    meta: {
+      title: '客户端登录',
+      menu: false,
+      clientGuestOnly: true,
+    } satisfies AppRouteMeta,
+  },
+  {
+    path: '/client/forgot-password',
+    name: 'client-forgot-password',
+    component: routeViewLoaders['client-forgot-password'],
+    meta: {
+      title: '找回密码',
+      menu: false,
+      clientGuestOnly: true,
+    } satisfies AppRouteMeta,
+  },
+  {
+    path: '/client',
+    redirect: '/client/mall',
+    meta: {
+      title: '客户端入口',
+      menu: false,
+      requiresClientAuth: true,
+    } satisfies AppRouteMeta,
+    children: [
+      {
+        path: 'mall',
+        name: 'client-mall',
+        component: routeViewLoaders['client-mall'],
+        meta: {
+          title: '商品大厅',
+          menu: false,
+          requiresClientAuth: true,
+        } satisfies AppRouteMeta,
+      },
+      {
+        path: 'orders',
+        name: 'client-orders',
+        component: routeViewLoaders['client-orders'],
+        meta: {
+          title: '我的订单',
+          menu: false,
+          requiresClientAuth: true,
+        } satisfies AppRouteMeta,
+      },
+      {
+        path: 'orders/:id',
+        name: 'client-order-detail',
+        component: routeViewLoaders['client-order-detail'],
+        meta: {
+          title: '订单详情',
+          menu: false,
+          requiresClientAuth: true,
+        } satisfies AppRouteMeta,
+      },
+    ],
   },
   {
     path: '/',

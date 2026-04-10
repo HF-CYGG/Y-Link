@@ -386,16 +386,22 @@ function Start-CombinedLogRelay {
 # - 仅在服务已就绪后执行，避免打开一个尚未可访问的地址；
 # - 失败时只给出警告，不影响本地联调链路本身。
 function Open-FrontendBrowser {
-  param([int]$Port)
+  param(
+    [int]$Port,
+    [string[]]$Paths = @('/')
+  )
 
-  $frontendUrl = "http://127.0.0.1:$Port"
+  foreach ($path in $Paths) {
+    $normalizedPath = if ($path.StartsWith('/')) { $path } else { "/$path" }
+    $frontendUrl = "http://127.0.0.1:$Port$normalizedPath"
 
-  try {
-    Start-Process $frontendUrl | Out-Null
-    Write-Info "Browser opened: $frontendUrl"
-  }
-  catch {
-    Write-WarnMessage "Failed to open browser automatically: $frontendUrl"
+    try {
+      Start-Process $frontendUrl | Out-Null
+      Write-Info "Browser opened: $frontendUrl"
+    }
+    catch {
+      Write-WarnMessage "Failed to open browser automatically: $frontendUrl"
+    }
   }
 }
 
@@ -418,7 +424,7 @@ if (-not (Test-Path $BackendEnvFile)) {
   throw "Missing local dev env file: $BackendEnvFile"
 }
 
-Write-Info "启动本地联调链路（backend:$BackendPort frontend:$FrontendPort）..."
+Write-Info "启动本地联调链路（管理端 + 客户端 + 后端 + SQLite，本地前端端口:$FrontendPort，后端端口:$BackendPort）..."
 Assert-CommandAvailable -CommandName 'npm.cmd'
 $PowerShellExecutablePath = Get-PowerShellExecutablePath
 
@@ -444,7 +450,7 @@ $backendProcess = Start-Process `
   -RedirectStandardError $BackendErrorLog `
   -PassThru
 
-Write-Info 'Starting frontend dev server...'
+Write-Info 'Starting frontend dev server (同时承载管理端与客户端页面)...'
 $frontendCommand = "& { `$env:VITE_LOCAL_BACKEND_URL='http://127.0.0.1:$BackendPort'; npm.cmd run dev -- --host 127.0.0.1 --port $FrontendPort --strictPort }"
 $frontendProcess = Start-Process `
   -FilePath $PowerShellExecutablePath `
@@ -482,14 +488,17 @@ try {
 
   Write-Host ''
   Write-Info 'Local dev chain is ready.'
-  Write-Info "Frontend: http://127.0.0.1:$FrontendPort"
-  Write-Info "Backend:  http://127.0.0.1:$BackendPort"
-  Write-Info "SQLite:   $LocalSqlitePath"
+  Write-Info "管理端登录: http://127.0.0.1:$FrontendPort/login"
+  Write-Info "客户端登录: http://127.0.0.1:$FrontendPort/client/login"
+  Write-Info "客户端首页: http://127.0.0.1:$FrontendPort/client/mall"
+  Write-Info "后端健康:   http://127.0.0.1:$BackendPort/health"
+  Write-Info "SQLite 数据库: $LocalSqlitePath"
   Write-Info "Backend env: $EffectiveBackendEnvFile"
   Write-Info "Backend log:  $BackendLog"
   Write-Info "Backend err:  $BackendErrorLog"
   Write-Info "Frontend log: $FrontendLog"
   Write-Info "Frontend err: $FrontendErrorLog"
+  Write-Info '说明：当前本地链路使用一个 Vite 开发服务器同时提供管理端与客户端页面，数据库为随后台自动初始化的本地 SQLite。'
   if ($backendListeningPids.Count -gt 0) {
     $backendPidDisplayText = Format-ProcessDisplayList -ProcessIds $backendListeningPids
     Write-Info "Backend PID(s): $backendPidDisplayText"
@@ -502,7 +511,7 @@ try {
     Write-WarnMessage 'Log cleanup skipped because -NoCleanLogs was provided.'
   }
   if ($OpenBrowser) {
-    Open-FrontendBrowser -Port $FrontendPort
+    Open-FrontendBrowser -Port $FrontendPort -Paths @('/login', '/client/login')
   }
   Write-Info 'Run .\stop-local-dev.ps1 to stop the recorded processes.'
 

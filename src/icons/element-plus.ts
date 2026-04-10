@@ -11,6 +11,7 @@ import {
   Refresh,
   Search,
   Setting,
+  Shop,
   UserFilled,
   WarningFilled,
 } from '@element-plus/icons-vue'
@@ -33,6 +34,7 @@ export const elementPlusIconWhitelist = {
   Refresh,
   Search,
   Setting,
+  Shop,
   UserFilled,
   WarningFilled,
 } as const

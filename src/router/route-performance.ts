@@ -5,12 +5,21 @@
  */
 export type AppRouteName =
   | 'login'
+  | 'client-login'
+  | 'client-forgot-password'
+  | 'client-mall'
+  | 'client-orders'
+  | 'client-order-detail'
   | 'dashboard'
   | 'order-entry'
   | 'order-list'
   | 'base-data'
   | 'products'
   | 'tags'
+  | 'o2o-console'
+  | 'o2o-console-products'
+  | 'o2o-console-verify'
+  | 'o2o-console-inbound'
   | 'system'
   | 'system-configs'
   | 'system-users'
@@ -28,12 +37,20 @@ type RouteViewLoader = () => Promise<unknown>
  */
 export const routeViewLoaders = {
   login: () => import('@/views/auth/LoginView.vue'),
+  'client-login': () => import('@/views/client/ClientAuthView.vue'),
+  'client-forgot-password': () => import('@/views/client/ClientForgotPasswordView.vue'),
+  'client-mall': () => import('@/views/client/ClientMallView.vue'),
+  'client-orders': () => import('@/views/client/ClientOrdersView.vue'),
+  'client-order-detail': () => import('@/views/client/ClientOrderDetailView.vue'),
   appLayout: () => import('@/layout/AppLayout.vue'),
   dashboard: () => import('@/views/dashboard/DashboardView.vue'),
   'order-entry': () => import('@/views/order-entry/OrderEntryView.vue'),
   'order-list': () => import('@/views/order-list/OrderListView.vue'),
   products: () => import('@/views/base-data/ProductManageView.vue'),
   tags: () => import('@/views/base-data/TagManageView.vue'),
+  'o2o-console-products': () => import('@/views/o2o/O2oProductMallManageView.vue'),
+  'o2o-console-verify': () => import('@/views/o2o/O2oVerifyConsoleView.vue'),
+  'o2o-console-inbound': () => import('@/views/o2o/O2oInboundManageView.vue'),
   'system-configs': () => import('@/views/system/SystemConfigViewLoader'),
   'system-users': () => import('@/views/system/UserManageView.vue'),
   'system-audit-logs': () => import('@/views/system/AuditLogView.vue'),
