@@ -3,6 +3,11 @@ set -e
 
 mkdir -p /app/data /run/nginx
 
+# 让 nginx 默认日志文件也指向容器标准输出，确保 docker logs/1Panel 能看到完整访问日志。
+mkdir -p /var/log/nginx
+ln -sf /dev/stdout /var/log/nginx/access.log
+ln -sf /dev/stderr /var/log/nginx/error.log
+
 export PORT="${PORT:-3001}"
 export LOG_COLOR="${LOG_COLOR:-true}"
 export FORCE_COLOR="${FORCE_COLOR:-1}"
