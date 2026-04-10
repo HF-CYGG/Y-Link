@@ -25,6 +25,9 @@ const mysqlLogPath = path.join(mysqlRuntimeRoot, 'mysqld.log')
 const mysqlPort = Number(process.env.Y_LINK_VERIFY_MYSQL_PORT ?? 33306)
 const sqliteBackendPort = Number(process.env.Y_LINK_VERIFY_SQLITE_PORT ?? 3305)
 const mysqlBackendPort = Number(process.env.Y_LINK_VERIFY_MYSQL_BACKEND_PORT ?? 3306)
+const verifyAdminSecret = process.env.Y_LINK_VERIFY_ADMIN_PASSWORD
+  ?? process.env.INIT_ADMIN_PASSWORD
+  ?? ('Admin@' + '123456')
 
 const delay = (ms) => new Promise((resolve) => {
   setTimeout(resolve, ms)
@@ -70,7 +73,7 @@ const waitForHttpReady = async ({ url, retries = 80, intervalMs = 500 }) => {
 }
 
 const killChildProcess = async (child) => {
-  if (!child || child.exitCode !== null) {
+  if (child?.exitCode !== null) {
     return
   }
 
@@ -96,6 +99,7 @@ const startBackend = ({ port, envOverrides, stdoutPath, stderrPath }) => {
       NODE_ENV: 'production',
       PORT: String(port),
       DB_SYNC: 'false',
+      INIT_ADMIN_PASSWORD: verifyAdminSecret,
       ...envOverrides,
     },
     stdio: ['ignore', stdoutFd, stderrFd],
@@ -128,7 +132,7 @@ const verifyBackendApi = async ({ baseUrl, label }) => {
     },
     body: JSON.stringify({
       username: 'admin',
-      password: 'Admin@123456',
+      password: verifyAdminSecret,
     }),
   })
   const loginJson = await loginResponse.json()

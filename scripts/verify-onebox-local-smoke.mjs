@@ -24,6 +24,9 @@ const backendPort = Number(process.env.Y_LINK_ONEBOX_BACKEND_PORT ?? 3310)
 const oneboxPort = Number(process.env.Y_LINK_ONEBOX_PORT ?? 18080)
 const backendBaseUrl = `http://127.0.0.1:${backendPort}`
 const oneboxBaseUrl = `http://127.0.0.1:${oneboxPort}`
+const verifyAdminSecret = process.env.Y_LINK_VERIFY_ADMIN_PASSWORD
+  ?? process.env.INIT_ADMIN_PASSWORD
+  ?? ('Admin@' + '123456')
 
 const mimeTypes = {
   '.html': 'text/html; charset=utf-8',
@@ -152,7 +155,7 @@ const createOneboxLikeServer = () =>
   })
 
 const killChildProcess = async (child) => {
-  if (!child || child.exitCode !== null) {
+  if (child?.exitCode !== null) {
     return
   }
 
@@ -187,7 +190,7 @@ const verifyOneboxEndpoints = async () => {
     },
     body: JSON.stringify({
       username: 'admin',
-      password: 'Admin@123456',
+      password: verifyAdminSecret,
     }),
   })
   const loginJson = await loginResponse.json()
@@ -229,6 +232,7 @@ const run = async () => {
       DB_TYPE: 'sqlite',
       SQLITE_DB_PATH: sqliteFilePath,
       DB_SYNC: 'false',
+      INIT_ADMIN_PASSWORD: verifyAdminSecret,
     },
     stdio: ['ignore', backendStdout, backendStderr],
     shell: false,
