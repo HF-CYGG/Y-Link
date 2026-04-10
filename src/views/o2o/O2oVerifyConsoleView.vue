@@ -9,7 +9,12 @@
 import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { PageContainer } from '@/components/common'
-import { getO2oVerifyDetail, verifyO2oPreorder, type O2oPreorderDetail } from '@/api/modules/o2o'
+import {
+  getO2oVerifyDetail,
+  getO2oVerifyDetailByShowNo,
+  verifyO2oPreorder,
+  type O2oPreorderDetail,
+} from '@/api/modules/o2o'
 import { useDevice } from '@/composables/useDevice'
 
 const verifyCode = ref('')
@@ -39,6 +44,7 @@ const statusClassMap: Record<O2oPreorderDetail['order']['status'], string> = {
 }
 
 const canVerify = computed(() => detail.value?.order.status === 'pending')
+const isShowNo = (value: string) => /^PO\d{8}\d{4}$/i.test(value)
 
 const normalizeVerifyCode = (rawValue: string) => {
   const value = rawValue.trim()
@@ -192,7 +198,13 @@ const handleSearch = async () => {
 
   loading.value = true
   try {
-    detail.value = await getO2oVerifyDetail(normalizedCode)
+    detail.value = isShowNo(normalizedCode)
+      ? await getO2oVerifyDetailByShowNo(normalizedCode)
+      : await getO2oVerifyDetail(normalizedCode)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '查询失败，请稍后重试'
+    ElMessage.error(message)
+    detail.value = null
   } finally {
     loading.value = false
   }

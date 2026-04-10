@@ -73,6 +73,17 @@ o2oRouter.get(
 
 // 管理端扫码前可先读取核销详情，便于展示订单内容与状态确认。
 o2oRouter.get(
+  '/verify/show-no/:showNo',
+  requireAuth,
+  requirePermission('orders:view'),
+  asyncHandler(async (req, res) => {
+    const data = await o2oPreorderService.getVerifyDetailByShowNo(req.params.showNo)
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+// 管理端扫码前可先读取核销详情，便于展示订单内容与状态确认。
+o2oRouter.get(
   '/verify/:verifyCode',
   requireAuth,
   requirePermission('orders:view'),

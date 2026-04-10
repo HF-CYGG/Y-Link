@@ -369,6 +369,18 @@ class O2oPreorderService {
     return this.detailById(order.id)
   }
 
+  async getVerifyDetailByShowNo(showNo: string) {
+    const normalizedShowNo = showNo.trim()
+    if (!normalizedShowNo) {
+      throw new BizError('预订单号不能为空', 400)
+    }
+    const order = await this.preorderRepo.findOne({ where: { showNo: normalizedShowNo } })
+    if (!order) {
+      throw new BizError('预订单不存在', 404)
+    }
+    return this.detailById(order.id)
+  }
+
   async listInventoryLogs(limit = 100) {
     const rows = await this.inventoryLogRepo.find({
       order: { id: 'DESC' },

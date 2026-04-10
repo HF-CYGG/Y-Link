@@ -116,6 +116,12 @@ export const getO2oVerifyDetail = (verifyCode: string) =>
     url: `/o2o/verify/${encodeURIComponent(verifyCode)}`,
   })
 
+export const getO2oVerifyDetailByShowNo = (showNo: string) =>
+  request<O2oPreorderDetail>({
+    method: 'GET',
+    url: `/o2o/verify/show-no/${encodeURIComponent(showNo)}`,
+  })
+
 export const verifyO2oPreorder = (verifyCode: string) =>
   request<O2oPreorderDetail>({
     method: 'POST',
