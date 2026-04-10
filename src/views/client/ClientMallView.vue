@@ -859,6 +859,12 @@ onMounted(async () => {
   color: #64748b;
 }
 
+@media (max-width: 640px) {
+  .cart-expand-trigger {
+    display: none;
+  }
+}
+
 .cart-expand-trigger .el-icon {
   transition: transform 0.35s ease;
 }
