@@ -10,6 +10,7 @@ import { useVirtualList } from '@vueuse/core'
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { ArrowDown, ArrowRight, ShoppingCart } from '@element-plus/icons-vue'
 import { getO2oMallProducts, type O2oMallProduct } from '@/api/modules/o2o'
 import { BaseRequestState } from '@/components/common'
 import { useStableRequest } from '@/composables/useStableRequest'
@@ -120,6 +121,17 @@ const searchResults = computed(() => {
 const bottomSelectedQty = computed(() => clientCartStore.totalQty)
 const bottomSelectedTypeCount = computed(() => clientCartStore.items.length)
 const isOffline = computed(() => requestError.value?.type === 'offline')
+const cartProductPriceMap = computed(() => {
+  return new Map(
+    products.value.map((product) => [product.id, Math.max(0, Number(product.defaultPrice ?? 0))]),
+  )
+})
+const miniCartTotalAmount = computed(() => {
+  return clientCartStore.items.reduce((sum, item) => {
+    const unitPrice = cartProductPriceMap.value.get(item.productId) ?? 0
+    return sum + unitPrice * item.qty
+  }, 0)
+})
 const activeCategoryItems = computed(() => {
   if (activeCategoryKey.value === 'all') {
     return products.value
@@ -538,17 +550,63 @@ onMounted(async () => {
       </div>
     </section>
 
-    <div
-      class="client-mall-settle fixed bottom-[82px] left-1/2 z-20 flex w-[min(1100px,calc(100vw-1.7rem))] -translate-x-1/2 items-center justify-between rounded-[1.2rem] border border-[var(--ylink-color-border)] bg-[color:var(--ylink-color-overlay)] px-4 py-3 text-slate-900 backdrop-blur-2xl"
-      :class="settlePulsing ? 'is-pulse' : ''"
-    >
-      <button type="button" class="text-left" @click="miniCartVisible = true">
-        <p class="text-sm font-semibold">购物车 {{ bottomSelectedTypeCount }} 种 · {{ bottomSelectedQty }} 件</p>
-        <p class="text-xs text-slate-500">点击展开迷你购物车</p>
-      </button>
-      <button type="button" class="rounded-full bg-[var(--ylink-color-primary-strong)] px-4 py-2 text-sm font-semibold text-white" @click="goToCheckout">
-        去结算
-      </button>
+    <div class="mini-cart-wrapper" :class="{ 'is-expanded': miniCartVisible }">
+      <div class="mini-cart-backdrop" @click="miniCartVisible = false"></div>
+
+      <section class="mini-cart-card" :class="{ 'is-pulse': settlePulsing }">
+        <div class="cart-summary-bar" @click="miniCartVisible = !miniCartVisible">
+          <div class="summary-info">
+            <div class="cart-icon-wrapper">
+              <el-icon><ShoppingCart /></el-icon>
+              <span v-if="bottomSelectedQty > 0" class="badge">{{ bottomSelectedQty }}</span>
+            </div>
+            <div class="text-group">
+              <p class="main-text">购物车 {{ bottomSelectedTypeCount }} 种商品</p>
+              <p class="sub-text">{{ miniCartVisible ? '点击收起明细' : '点击展开明细' }}</p>
+            </div>
+          </div>
+          <div class="summary-actions">
+            <button class="btn-checkout" @click.stop="goToCheckout">
+              去结算
+              <el-icon class="ml-1"><ArrowRight /></el-icon>
+            </button>
+            <button type="button" class="cart-expand-trigger" @click.stop="miniCartVisible = !miniCartVisible">
+              <el-icon :class="miniCartVisible ? 'is-expanded' : ''"><ArrowDown /></el-icon>
+            </button>
+          </div>
+        </div>
+
+        <div class="cart-expand-content">
+          <div class="expand-inner">
+            <header class="expand-header">
+              <span class="title">已选商品</span>
+              <button type="button" class="expand-clear-btn" @click="clientCartStore.clearAll()">清空</button>
+            </header>
+
+            <div class="item-list">
+              <div v-if="clientCartStore.items.length === 0" class="empty-state">购物车还是空的，去挑挑好物吧</div>
+              <article v-for="item in clientCartStore.items" :key="item.productId" class="cart-item">
+                <div class="item-main">
+                  <p class="item-name">{{ item.productName }}</p>
+                  <p class="item-price">¥{{ ((cartProductPriceMap.get(item.productId) ?? 0) * item.qty).toFixed(2) }}</p>
+                </div>
+                <div class="item-stepper">
+                  <button type="button" class="step-btn" @click="clientCartStore.incrementQty(item.productId, -1)">-</button>
+                  <span class="step-val">{{ item.qty }}</span>
+                  <button type="button" class="step-btn" @click="clientCartStore.incrementQty(item.productId, 1)">+</button>
+                </div>
+              </article>
+            </div>
+
+            <div class="expand-footer">
+              <button type="button" class="expand-link-btn" @click="router.push('/client/cart')">进入购物车</button>
+              <p class="total-price">
+                合计：<span class="price-num">¥{{ miniCartTotalAmount.toFixed(2) }}</span>
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
 
     <ElDrawer
@@ -591,42 +649,6 @@ onMounted(async () => {
       </section>
     </ElDrawer>
 
-    <ElDrawer
-      v-model="miniCartVisible"
-      title="迷你购物车"
-      direction="btt"
-      size="62%"
-      append-to-body
-    >
-      <section class="space-y-3">
-        <article v-for="item in clientCartStore.items" :key="item.productId" class="flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2">
-          <div class="min-w-0">
-            <p class="truncate text-sm font-semibold text-slate-800">{{ item.productName }}</p>
-            <p class="text-xs text-slate-400">可预订 {{ item.availableStock }} · 限购 {{ item.limitPerUser }}</p>
-          </div>
-          <div class="ml-3 flex items-center gap-2">
-            <button type="button" class="client-qty-button" @click="clientCartStore.incrementQty(item.productId, -1)">-</button>
-            <span class="min-w-7 text-center text-sm">{{ item.qty }}</span>
-            <button type="button" class="client-qty-button" @click="clientCartStore.incrementQty(item.productId, 1)">+</button>
-          </div>
-        </article>
-        <div v-if="!clientCartStore.items.length" class="rounded-2xl border border-dashed border-slate-200 py-8 text-center text-sm text-slate-400">
-          购物车为空，先挑选商品吧
-        </div>
-        <div class="flex gap-2 pt-2">
-          <button
-            type="button"
-            class="h-10 flex-1 rounded-full border border-slate-200 text-sm text-slate-600"
-            @click="router.push('/client/cart')"
-          >
-            进入购物车
-          </button>
-          <button type="button" class="h-10 flex-1 rounded-full bg-slate-900 text-sm font-semibold text-white" @click="goToCheckout">
-            去结算
-          </button>
-        </div>
-      </section>
-    </ElDrawer>
   </section>
 </template>
 
@@ -688,23 +710,308 @@ onMounted(async () => {
   color: #ffffff;
 }
 
-.client-mall-settle {
-  box-shadow: var(--ylink-shadow-floating);
+.mini-cart-wrapper {
+  position: fixed;
+  bottom: calc(82px + 0.75rem);
+  left: 50%;
+  z-index: 50;
+  width: min(480px, calc(100vw - 2rem));
+  transform: translateX(-50%);
+  pointer-events: none;
 }
 
-.client-mall-settle.is-pulse {
-  animation: settle-pulse 0.36s ease;
+.mini-cart-wrapper.is-expanded {
+  pointer-events: auto;
+}
+
+.mini-cart-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  background: rgba(15, 23, 42, 0.32);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.4s ease;
+}
+
+.mini-cart-wrapper.is-expanded .mini-cart-backdrop {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.mini-cart-card {
+  overflow: hidden;
+  border: 1px solid rgba(226, 232, 240, 0.82);
+  border-radius: 1.5rem;
+  background: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  box-shadow: 0 20px 50px rgba(15, 23, 42, 0.12);
+  pointer-events: auto;
+  transition: transform 0.5s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.mini-cart-card.is-pulse {
+  animation: settle-pulse 0.3s ease;
+}
+
+.cart-summary-bar {
+  display: flex;
+  min-height: 64px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  cursor: pointer;
+  padding: 0.8rem 1.1rem;
+}
+
+.summary-info {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.cart-icon-wrapper {
+  position: relative;
+  display: flex;
+  height: 44px;
+  width: 44px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.85rem;
+  background: var(--ylink-color-primary-strong);
+  color: #ffffff;
+  font-size: 1.1rem;
+}
+
+.badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 20px;
+  border: 2px solid #ffffff;
+  border-radius: 9999px;
+  background: #f43f5e;
+  color: #ffffff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 2px 6px;
+  text-align: center;
+}
+
+.text-group {
+  min-width: 0;
+}
+
+.main-text {
+  color: #1e293b;
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+.sub-text {
+  margin-top: 0.1rem;
+  color: #94a3b8;
+  font-size: 0.72rem;
+}
+
+.summary-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.btn-checkout {
+  display: inline-flex;
+  align-items: center;
+  border: none;
+  border-radius: 0.9rem;
+  background: #0f172a;
+  color: #ffffff;
+  font-size: 0.88rem;
+  font-weight: 600;
+  padding: 0.7rem 1rem;
+}
+
+.cart-expand-trigger {
+  display: inline-flex;
+  height: 40px;
+  width: 40px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  border-radius: 0.85rem;
+  background: #ffffff;
+  color: #64748b;
+}
+
+.cart-expand-trigger .el-icon {
+  transition: transform 0.35s ease;
+}
+
+.cart-expand-trigger .el-icon.is-expanded {
+  transform: rotate(180deg);
+}
+
+.cart-expand-content {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.mini-cart-wrapper.is-expanded .cart-expand-content {
+  grid-template-rows: 1fr;
+}
+
+.expand-inner {
+  overflow: hidden;
+  padding: 0 1.1rem;
+}
+
+.expand-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border-top: 1px dashed #e2e8f0;
+  border-bottom: 1px dashed #e2e8f0;
+  padding: 0.9rem 0;
+}
+
+.expand-header .title {
+  color: #475569;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.expand-clear-btn {
+  border: none;
+  background: transparent;
+  color: #e11d48;
+  font-size: 0.78rem;
+}
+
+.item-list {
+  max-height: 280px;
+  overflow-y: auto;
+  padding: 0.9rem 0;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.6) transparent;
+}
+
+.item-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.item-list::-webkit-scrollbar-thumb {
+  border-radius: 9999px;
+  background: rgba(148, 163, 184, 0.55);
+}
+
+.cart-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.65rem 0;
+}
+
+.item-main {
+  min-width: 0;
+  flex: 1;
+}
+
+.item-name {
+  color: #1e293b;
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+.item-price {
+  margin-top: 0.15rem;
+  color: #0d9488;
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.item-stepper {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  border-radius: 0.8rem;
+  background: #f1f5f9;
+  padding: 0.25rem;
+}
+
+.step-btn {
+  height: 26px;
+  width: 26px;
+  border: none;
+  border-radius: 0.5rem;
+  background: #ffffff;
+  color: #1e293b;
+  font-weight: 700;
+}
+
+.step-val {
+  min-width: 20px;
+  color: #1e293b;
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+.expand-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  border-top: 1px solid #f1f5f9;
+  padding: 1rem 0 1.05rem;
+}
+
+.expand-link-btn {
+  border: 1px solid #e2e8f0;
+  border-radius: 9999px;
+  background: #ffffff;
+  color: #64748b;
+  font-size: 0.82rem;
+  padding: 0.6rem 1rem;
+}
+
+.total-price {
+  color: #64748b;
+  font-size: 0.88rem;
+}
+
+.price-num {
+  margin-left: 0.25rem;
+  color: #0d9488;
+  font-size: 1.08rem;
+  font-weight: 800;
+}
+
+.empty-state {
+  padding: 2.1rem 0;
+  color: #94a3b8;
+  font-size: 0.82rem;
+  text-align: center;
 }
 
 @keyframes settle-pulse {
   0% {
-    transform: translate(-50%, 0) scale(1);
+    transform: scale(1);
   }
   50% {
-    transform: translate(-50%, -2px) scale(1.02);
+    transform: scale(1.03);
   }
   100% {
-    transform: translate(-50%, 0) scale(1);
+    transform: scale(1);
   }
 }
 
@@ -712,11 +1019,56 @@ onMounted(async () => {
   .client-product-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
 }
 
 @media (min-width: 1200px) {
   .client-product-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 767px) {
+  .mini-cart-wrapper {
+    bottom: calc(82px + env(safe-area-inset-bottom));
+    width: calc(100vw - 1rem);
+  }
+
+  .cart-summary-bar {
+    align-items: stretch;
+    padding: 0.75rem 0.85rem;
+  }
+
+  .summary-actions {
+    flex-direction: column;
+    justify-content: center;
+  }
+
+  .btn-checkout {
+    justify-content: center;
+    padding-inline: 0.8rem;
+  }
+
+  .cart-expand-trigger {
+    height: 36px;
+    width: 36px;
+  }
+
+  .expand-inner {
+    padding: 0 0.85rem;
+  }
+
+  .item-list {
+    max-height: 240px;
+  }
+
+  .expand-footer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .expand-link-btn {
+    width: 100%;
   }
 }
 </style>
