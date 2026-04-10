@@ -295,12 +295,13 @@ watch(successTip, async () => {
 
     <main class="auth-shell">
       <aside class="brand-panel">
-        <div class="brand-glow"></div>
+        <div class="geo-decor circle-main"></div>
+        <div class="geo-decor circle-sub"></div>
 
         <div class="brand-content">
           <div class="brand-tag">Y-LINK CLIENT</div>
           <h1 class="brand-title">校园文创<br />极简预订。</h1>
-          <p class="brand-desc">实时库存同步，线下秒级扫码核销。体验极其流畅的 O2O 闭环链路。</p>
+          <p class="brand-desc">实时查看库存，在线预订即锁单。<br />线下出示核销码，即刻带走心仪好物。</p>
         </div>
 
         <div class="brand-footer">&copy; 2026 Y-Link System. All rights reserved.</div>
@@ -419,7 +420,7 @@ watch(successTip, async () => {
   display: flex;
   align-items: center;
   justify-content: center;
-  background-color: #f8fafc;
+  background-color: #f1f5f9;
   position: relative;
   overflow: hidden;
   padding: 24px;
@@ -433,17 +434,17 @@ watch(successTip, async () => {
 }
 
 .shape-1 {
-  width: 50vw;
-  height: 50vw;
-  background: rgba(13, 148, 136, 0.08);
+  width: 60vw;
+  height: 60vw;
+  background: rgba(13, 148, 136, 0.05);
   top: -20%;
-  left: -10%;
+  left: -20%;
   border-radius: 50%;
 }
 
 .shape-2 {
-  width: 40vw;
-  height: 40vw;
+  width: 50vw;
+  height: 50vw;
   background: rgba(56, 189, 248, 0.05);
   bottom: -10%;
   right: -10%;
@@ -456,31 +457,16 @@ watch(successTip, async () => {
   display: flex;
   width: 100%;
   max-width: 960px;
-  min-height: 640px;
+  min-height: 600px;
   background: #ffffff;
   border-radius: 32px;
-  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.08);
+  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.04), 0 1px 3px rgba(0, 0, 0, 0.02);
   overflow: hidden;
-  border: 1px solid rgba(0, 0, 0, 0.02);
-}
-
-.auth-shell::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: calc(47.6% - 18px);
-  width: 36px;
-  pointer-events: none;
-  z-index: 4;
-  background: linear-gradient(90deg, rgba(15, 23, 42, 0.12) 0%, rgba(255, 255, 255, 0.7) 52%, rgba(255, 255, 255, 0.02) 100%);
-  mix-blend-mode: screen;
 }
 
 .brand-panel {
   flex: 1;
-  background: #0f172a;
-  color: #ffffff;
+  background: linear-gradient(135deg, #f0fdfa 0%, #f8fafc 100%);
   padding: 48px;
   display: flex;
   flex-direction: column;
@@ -489,57 +475,66 @@ watch(successTip, async () => {
   overflow: hidden;
 }
 
-.brand-glow {
+.geo-decor {
   position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+.circle-main {
   width: 300px;
   height: 300px;
-  background: #0d9488;
-  filter: blur(120px);
-  opacity: 0.4;
+  background: rgba(13, 148, 136, 0.04);
+  border: 1px solid rgba(13, 148, 136, 0.08);
   top: -50px;
-  right: -50px;
-  border-radius: 50%;
+  right: -80px;
+}
+
+.circle-sub {
+  width: 200px;
+  height: 200px;
+  background: rgba(13, 148, 136, 0.03);
+  bottom: 10%;
+  left: -50px;
 }
 
 .brand-content {
   position: relative;
   z-index: 1;
-  margin-top: 40px;
+  margin-top: 20px;
 }
 
 .brand-tag {
   display: inline-block;
   padding: 6px 14px;
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(13, 148, 136, 0.1);
+  color: #0d9488;
   border-radius: 8px;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 700;
-  letter-spacing: 2px;
+  letter-spacing: 1px;
   margin-bottom: 32px;
-  backdrop-filter: blur(10px);
 }
 
 .brand-title {
-  font-size: 48px;
+  font-size: 44px;
   font-weight: 800;
-  line-height: 1.2;
+  line-height: 1.25;
   letter-spacing: -0.02em;
   margin-bottom: 24px;
-  background: linear-gradient(135deg, #ffffff 0%, #94a3b8 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
+  color: #0f172a;
 }
 
 .brand-desc {
-  font-size: 16px;
+  font-size: 15px;
   line-height: 1.8;
-  color: #94a3b8;
-  max-width: 85%;
+  color: #475569;
+  max-width: 90%;
 }
 
 .brand-footer {
   font-size: 12px;
-  color: #475569;
+  color: #94a3b8;
   position: relative;
   z-index: 1;
 }
@@ -554,19 +549,9 @@ watch(successTip, async () => {
   position: relative;
 }
 
-.form-panel::before {
-  content: '';
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 28px;
-  pointer-events: none;
-  background: linear-gradient(90deg, rgba(248, 250, 252, 0.92) 0%, rgba(255, 255, 255, 0) 100%);
-  z-index: 0;
-}
-
 .form-container {
   width: 100%;
-  max-width: 360px;
+  max-width: 340px;
   position: relative;
   z-index: 1;
 }
@@ -586,20 +571,20 @@ watch(successTip, async () => {
   position: relative;
   display: flex;
   background: #f1f5f9;
-  padding: 6px;
-  border-radius: 20px;
-  margin-bottom: 24px;
+  padding: 5px;
+  border-radius: 16px;
+  margin-bottom: 40px;
 }
 
 .toggle-slider {
   position: absolute;
-  top: 6px;
-  left: 6px;
-  width: calc(50% - 6px);
-  height: calc(100% - 12px);
+  top: 5px;
+  left: 5px;
+  width: calc(50% - 5px);
+  height: calc(100% - 10px);
   background: #ffffff;
-  border-radius: 14px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+  border-radius: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
   transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
@@ -607,8 +592,8 @@ watch(successTip, async () => {
   flex: 1;
   position: relative;
   z-index: 10;
-  padding: 12px 0;
-  font-size: 15px;
+  padding: 10px 0;
+  font-size: 14px;
   font-weight: 600;
   color: #64748b;
   border: none;
@@ -632,22 +617,22 @@ watch(successTip, async () => {
 }
 
 .block-title {
-  font-size: 28px;
+  font-size: 26px;
   font-weight: 700;
   color: #0f172a;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
   letter-spacing: -0.5px;
 }
 
 .block-subtitle {
-  font-size: 14px;
+  font-size: 13px;
   color: #64748b;
   margin-bottom: 24px;
 }
 
 .geo-input :deep(.el-input__wrapper) {
-  height: 54px;
-  border-radius: 16px;
+  height: 52px;
+  border-radius: 14px;
   background-color: #f8fafc;
   border: 1px solid transparent;
   box-shadow: none !important;
@@ -662,13 +647,13 @@ watch(successTip, async () => {
 .geo-input :deep(.el-input__wrapper.is-focus) {
   background-color: #ffffff;
   border-color: #0d9488;
-  box-shadow: 0 0 0 4px rgba(13, 148, 136, 0.1) !important;
+  box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.1) !important;
 }
 
 .geo-input :deep(.el-input__inner) {
   color: #0f172a;
   font-weight: 500;
-  font-size: 15px;
+  font-size: 14px;
 }
 
 .input-icon {
@@ -687,21 +672,21 @@ watch(successTip, async () => {
 
 .captcha-box {
   width: 120px;
-  height: 54px;
-  background: #f1f5f9;
-  border-radius: 16px;
+  height: 52px;
+  background: #f8fafc;
+  border-radius: 14px;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   user-select: none;
   transition: background 0.2s, border-color 0.2s, transform 0.2s;
-  border: 1px dashed #cbd5e1;
+  border: 1px dashed #e2e8f0;
   overflow: hidden;
 }
 
 .captcha-box:hover {
-  background: #e2e8f0;
+  background: #f1f5f9;
   transform: translateY(-1px);
 }
 
@@ -739,20 +724,20 @@ watch(successTip, async () => {
 
 .submit-btn {
   width: 100%;
-  height: 54px;
-  border-radius: 16px !important;
-  background-color: #0f172a !important;
+  height: 52px;
+  border-radius: 14px !important;
+  background-color: #0d9488 !important;
   color: #ffffff !important;
   border: none !important;
-  font-size: 16px !important;
+  font-size: 15px !important;
   font-weight: 600 !important;
   margin-top: 24px;
   transition: all 0.2s !important;
 }
 
 .submit-btn:hover {
-  background-color: #0d9488 !important;
-  box-shadow: 0 8px 20px rgba(13, 148, 136, 0.25) !important;
+  background-color: #0f766e !important;
+  box-shadow: 0 8px 20px rgba(13, 148, 136, 0.2) !important;
   transform: translateY(-1px);
 }
 
@@ -795,7 +780,7 @@ watch(successTip, async () => {
   }
 
   .brand-panel {
-    padding: 32px 24px;
+    padding: 40px 24px;
     flex: none;
   }
 
@@ -808,12 +793,7 @@ watch(successTip, async () => {
   }
 
   .form-panel {
-    padding: 32px 24px;
-  }
-
-  .auth-shell::after,
-  .form-panel::before {
-    display: none;
+    padding: 40px 24px;
   }
 }
 </style>
