@@ -6,10 +6,8 @@
  */
 
 
-import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { ArrowLeft } from '@element-plus/icons-vue'
 import { PageContainer } from '@/components/common'
 import {
   getO2oVerifyDetail,
@@ -28,7 +26,6 @@ const scanDialogVisible = ref(false)
 const scanLoading = ref(false)
 const videoRef = ref<HTMLVideoElement | null>(null)
 const { isPhone } = useDevice()
-const router = useRouter()
 let scanStream: MediaStream | null = null
 let scanFrameId: number | null = null
 let scanCanvas: HTMLCanvasElement | null = null
@@ -48,10 +45,6 @@ const statusClassMap: Record<O2oPreorderDetail['order']['status'], string> = {
 
 const canVerify = computed(() => detail.value?.order.status === 'pending')
 const isShowNo = (value: string) => /^PO\d{8}\d{4}$/i.test(value)
-
-const handleBack = () => {
-  router.back()
-}
 
 const normalizeVerifyCode = (rawValue: string) => {
   const value = rawValue.trim()
@@ -275,14 +268,19 @@ const handleVerify = async () => {
 onBeforeUnmount(() => {
   stopScanCamera()
 })
+
+watch(
+  () => verifyCode.value,
+  (value) => {
+    if (!value.trim()) {
+      detail.value = null
+    }
+  },
+)
 </script>
 
 <template>
   <PageContainer title="预订单核销台" description="支持工作人员录入或扫码核销码，核销后自动扣减实际库存与预订库存">
-    <div class="mb-3">
-      <el-button :icon="ArrowLeft" plain @click="handleBack">返回</el-button>
-    </div>
-
     <div class="verify-console-layout">
       <section class="verify-console-entry rounded-3xl bg-white p-5 shadow-sm">
         <div class="flex items-center justify-between gap-3">
