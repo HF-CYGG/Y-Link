@@ -46,6 +46,7 @@ const normalizeProducts = (products: unknown): O2oMallProduct[] => {
         productCode,
         productName,
         defaultPrice: typeof row.defaultPrice === 'string' ? row.defaultPrice : '0.00',
+        category: typeof row.category === 'string' ? row.category : '默认分类',
         thumbnail: typeof row.thumbnail === 'string' ? row.thumbnail : null,
         detailContent: typeof row.detailContent === 'string' ? row.detailContent : null,
         limitPerUser: Number.isFinite(row.limitPerUser) ? Number(row.limitPerUser) : 0,

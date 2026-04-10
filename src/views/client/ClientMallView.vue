@@ -229,18 +229,24 @@ const changeDetailQty = (delta: number) => {
   if (!detailProduct.value) {
     return
   }
-  // 详情抽屉中的数量调整同时受库存与单人限购约束，避免前端先放出一个后端必定拒绝的数量。
   const maxQty = Math.max(0, Math.min(detailProduct.value.availableStock, detailProduct.value.limitPerUser))
-  detailQty.value = Math.min(maxQty, Math.max(1, detailQty.value + delta))
+  const nextQty = Math.min(maxQty, Math.max(1, detailQty.value + delta))
+  if (detailQty.value === maxQty && delta > 0) {
+    if (maxQty >= detailProduct.value.limitPerUser) {
+      ElMessage.warning('已达单人限购上限')
+    } else {
+      ElMessage.warning('库存不足')
+    }
+  }
+  detailQty.value = nextQty
 }
 
 const addCurrentDetailToCart = () => {
   if (!detailProduct.value) {
     return
   }
-  const finalQty = clientCartStore.addProduct(detailProduct.value, detailQty.value)
-  if (finalQty <= 0) {
-    ElMessage.warning('该商品当前不可预订')
+  const addedQty = clientCartStore.addProduct(detailProduct.value, detailQty.value)
+  if (addedQty <= 0) {
     return
   }
   ElMessage.success('已加入购物车')
@@ -249,9 +255,8 @@ const addCurrentDetailToCart = () => {
 }
 
 const quickAdd = (product: O2oMallProduct) => {
-  const qty = clientCartStore.addProduct(product, 1)
-  if (qty <= 0) {
-    ElMessage.warning('库存不足或已达限购上限')
+  const addedQty = clientCartStore.addProduct(product, 1)
+  if (addedQty <= 0) {
     return
   }
   ElMessage.success('已加入购物车')

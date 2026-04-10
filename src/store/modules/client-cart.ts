@@ -6,6 +6,7 @@
 
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
+import { ElMessage } from 'element-plus'
 import type { O2oMallProduct } from '@/api/modules/o2o'
 import {
   clearPersistedClientCartSnapshot,
@@ -159,25 +160,40 @@ export const useClientCartStore = defineStore('client-cart', () => {
     ensureInitialized()
     const targetQty = Math.max(1, Math.floor(qty))
     const itemIndex = items.value.findIndex((item) => item.productId === product.id)
+    
     if (itemIndex === -1) {
       const draft = createCartItemFromProduct(product, targetQty)
       const maxQty = toMaxQty(draft)
       if (maxQty <= 0) {
+        ElMessage.warning('该商品库存不足或已达单人限购上限')
         return 0
+      }
+      const actualAdd = Math.min(targetQty, maxQty)
+      if (targetQty > maxQty) {
+        ElMessage.warning(`最多只能加购 ${maxQty} 件`)
       }
       items.value.push({
         ...draft,
-        qty: Math.min(targetQty, maxQty),
+        qty: actualAdd,
       })
       persist()
-      return Math.min(targetQty, maxQty)
+      return actualAdd
     }
 
     const existing = items.value[itemIndex]
-    // 已存在商品时走“合并后再统一裁剪”的路径，保证追加数量也受同一套 maxQty 约束。
     const merged = createCartItemFromProduct(product, existing.qty + targetQty)
     const maxQty = toMaxQty(merged)
+    
+    if (existing.qty >= maxQty) {
+      ElMessage.warning('购物车内已达单人限购上限或最大库存')
+      return 0
+    }
+    
     const nextQty = Math.min(existing.qty + targetQty, maxQty)
+    if (existing.qty + targetQty > maxQty) {
+      ElMessage.warning(`最多只能加购至 ${maxQty} 件`)
+    }
+    
     items.value[itemIndex] = {
       ...existing,
       ...merged,
@@ -186,7 +202,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
     }
     items.value = items.value.filter((item) => item.qty > 0)
     persist()
-    return nextQty
+    return nextQty - existing.qty
   }
 
   const updateQty = (productId: string, qty: number) => {
@@ -199,8 +215,13 @@ export const useClientCartStore = defineStore('client-cart', () => {
     const item = items.value[itemIndex]
     const maxQty = toMaxQty(item)
     const nextQty = Math.min(Math.max(0, Math.floor(qty)), maxQty)
+    
+    if (qty > item.qty && item.qty >= maxQty) {
+      ElMessage.warning('购物车内已达单人限购上限或最大库存')
+      return
+    }
+    
     if (nextQty <= 0) {
-      // 数量归零直接视为移出购物车，避免保留“0 件商品”造成后续统计异常。
       items.value = items.value.filter((entry) => entry.productId !== productId)
       persist()
       return
