@@ -9,7 +9,7 @@
 import { useVirtualList } from '@vueuse/core'
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { ArrowDown, ArrowRight, ShoppingCart } from '@element-plus/icons-vue'
+import { ArrowDown, ArrowRight, Search, ShoppingCart } from '@element-plus/icons-vue'
 import { getO2oMallProducts, type O2oMallProduct } from '@/api/modules/o2o'
 import { BaseRequestState } from '@/components/common'
 import { useStableRequest } from '@/composables/useStableRequest'
@@ -47,6 +47,9 @@ const detailQty = ref(1)
 const detailProduct = ref<O2oMallProduct | null>(null)
 const miniCartVisible = ref(false)
 const settlePulsing = ref(false)
+const searchPanelVisible = ref(false)
+const searchDraft = ref('')
+const searchInputRef = ref<HTMLInputElement | null>(null)
 
 const listScrollerRef = ref<HTMLElement | null>(null)
 const sectionRefMap = reactive<Record<string, HTMLElement | null>>({})
@@ -225,6 +228,27 @@ const openProductDetail = (product: O2oMallProduct) => {
   detailVisible.value = true
 }
 
+const openSearchPanel = async () => {
+  searchDraft.value = keyword.value
+  searchPanelVisible.value = true
+  await nextTick()
+  searchInputRef.value?.focus()
+}
+
+const closeSearchPanel = () => {
+  searchPanelVisible.value = false
+}
+
+const applySearch = () => {
+  keyword.value = searchDraft.value
+  searchPanelVisible.value = false
+}
+
+const clearSearch = () => {
+  searchDraft.value = ''
+  keyword.value = ''
+}
+
 const changeDetailQty = (delta: number) => {
   if (!detailProduct.value) {
     return
@@ -353,6 +377,44 @@ onMounted(async () => {
 
 <template>
   <section class="space-y-4 pb-20">
+    <div class="mall-search-launcher-wrap">
+      <button type="button" class="mall-search-launcher" @click="openSearchPanel">
+        <el-icon><Search /></el-icon>
+        搜索商品
+      </button>
+    </div>
+
+    <Teleport to="body">
+      <Transition name="mall-search-overlay">
+        <div v-if="searchPanelVisible" class="mall-search-overlay" @click.self="closeSearchPanel">
+          <section class="mall-search-panel">
+            <header class="mall-search-panel__header">
+              <p class="mall-search-panel__title">搜索商品</p>
+              <button type="button" class="mall-search-panel__close" @click="closeSearchPanel">关闭</button>
+            </header>
+            <div class="mall-search-panel__body">
+              <input
+                ref="searchInputRef"
+                v-model.trim="searchDraft"
+                class="mall-search-panel__input"
+                placeholder="输入商品名称"
+                @keyup.enter="applySearch"
+              />
+              <div class="mall-search-panel__actions">
+                <button type="button" class="mall-search-btn mall-search-btn--ghost" @click="clearSearch">清空</button>
+                <button type="button" class="mall-search-btn mall-search-btn--primary" @click="applySearch">开始搜索</button>
+              </div>
+            </div>
+            <div class="mall-search-panel__chips">
+              <button type="button" class="mall-chip" @click="searchDraft = '热销'">热销</button>
+              <button type="button" class="mall-chip" @click="searchDraft = '新品'">新品</button>
+              <button type="button" class="mall-chip" @click="searchDraft = '低库存'">低库存优先</button>
+            </div>
+          </section>
+        </div>
+      </Transition>
+    </Teleport>
+
     <div class="overflow-hidden rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-4 shadow-[var(--ylink-shadow-soft)]">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div>
@@ -370,31 +432,9 @@ onMounted(async () => {
         </button>
       </div>
       <div class="mt-4 grid gap-3 sm:grid-cols-3">
-        <div class="rounded-2xl bg-[var(--ylink-color-primary-weak)] px-3 py-3 text-sm text-[var(--ylink-color-primary-strong)]">营业时间：08:30 - 20:30</div>
+        <div class="rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700">营业时间：08:30 - 20:30</div>
         <div class="rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700">提货须知：请在订单有效期内到店核销</div>
         <div class="rounded-2xl bg-amber-50 px-3 py-3 text-sm text-amber-700">公告：库存实时刷新，请以下单结果为准</div>
-      </div>
-    </div>
-
-    <div class="rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-4 shadow-[var(--ylink-shadow-soft)]">
-      <div class="flex items-center gap-3">
-        <input
-          v-model.trim="keyword"
-          class="h-11 flex-1 rounded-full border border-[var(--ylink-color-border)] bg-[var(--ylink-color-surface-soft)] px-4 text-sm outline-none focus:border-[var(--ylink-color-primary-soft)]"
-          placeholder="搜索商品名称"
-        />
-        <button
-          type="button"
-          class="h-11 rounded-full border border-[var(--ylink-color-border)] px-4 text-sm text-slate-600"
-          @click="keyword = ''"
-        >
-          清空
-        </button>
-      </div>
-      <div class="mt-3 flex flex-wrap gap-2">
-        <span class="rounded-full bg-[var(--ylink-color-surface-muted)] px-3 py-1 text-xs text-slate-500">推荐：热销</span>
-        <span class="rounded-full bg-[var(--ylink-color-surface-muted)] px-3 py-1 text-xs text-slate-500">推荐：新品</span>
-        <span class="rounded-full bg-[var(--ylink-color-surface-muted)] px-3 py-1 text-xs text-slate-500">推荐：低库存优先</span>
       </div>
     </div>
 
@@ -737,6 +777,164 @@ onMounted(async () => {
   border: none;
   background: var(--ylink-color-primary-strong);
   color: #ffffff;
+}
+
+.mall-search-launcher-wrap {
+  position: fixed;
+  top: max(0.4rem, env(safe-area-inset-top));
+  left: 0;
+  right: 0;
+  z-index: 82;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.mall-search-launcher {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  border: 1px solid var(--ylink-color-border);
+  border-radius: 9999px;
+  background: var(--ylink-color-surface);
+  color: #0f172a;
+  font-size: 0.88rem;
+  font-weight: 600;
+  padding: 0.52rem 1.05rem;
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+  transition: transform 0.25s ease, box-shadow 0.25s ease;
+  pointer-events: auto;
+}
+
+.mall-search-launcher:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 14px 30px rgba(15, 23, 42, 0.12);
+}
+
+.mall-search-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 95;
+  display: grid;
+  place-items: start center;
+  background: rgba(15, 23, 42, 0.36);
+  isolation: isolate;
+  padding: 7vh 1rem 1rem;
+}
+
+.mall-search-panel {
+  width: min(760px, calc(100vw - 2rem));
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  border-radius: 1.25rem;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 22px 44px rgba(15, 23, 42, 0.14);
+  padding: 1rem;
+}
+
+.mall-search-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.mall-search-panel__title {
+  color: #0f172a;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.mall-search-panel__close {
+  border: none;
+  background: transparent;
+  color: #64748b;
+  font-size: 0.82rem;
+}
+
+.mall-search-panel__body {
+  margin-top: 0.8rem;
+  display: grid;
+  gap: 0.65rem;
+}
+
+.mall-search-panel__input {
+  height: 46px;
+  width: 100%;
+  border: 1px solid var(--ylink-color-border);
+  border-radius: 9999px;
+  background: var(--ylink-color-surface-soft);
+  color: #0f172a;
+  font-size: 0.9rem;
+  padding: 0 1rem;
+  outline: none;
+}
+
+.mall-search-panel__input:focus {
+  border-color: var(--ylink-color-primary-soft);
+}
+
+.mall-search-panel__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+
+.mall-search-btn {
+  height: 36px;
+  border-radius: 9999px;
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 0 1rem;
+}
+
+.mall-search-btn--ghost {
+  border: 1px solid var(--ylink-color-border);
+  background: #ffffff;
+  color: #475569;
+}
+
+.mall-search-btn--primary {
+  border: none;
+  background: var(--ylink-color-primary-strong);
+  color: #ffffff;
+}
+
+.mall-search-panel__chips {
+  margin-top: 0.7rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.mall-chip {
+  border: 1px solid rgba(226, 232, 240, 0.95);
+  border-radius: 9999px;
+  background: #f8fafc;
+  color: #64748b;
+  font-size: 0.76rem;
+  font-weight: 600;
+  padding: 0.3rem 0.7rem;
+}
+
+.mall-search-overlay-enter-active,
+.mall-search-overlay-leave-active {
+  transition: opacity 0.26s ease;
+}
+
+.mall-search-overlay-enter-active .mall-search-panel,
+.mall-search-overlay-leave-active .mall-search-panel {
+  transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.3s ease;
+}
+
+.mall-search-overlay-enter-from,
+.mall-search-overlay-leave-to {
+  opacity: 0;
+}
+
+.mall-search-overlay-enter-from .mall-search-panel,
+.mall-search-overlay-leave-to .mall-search-panel {
+  opacity: 0;
+  transform: translateY(-10px) scale(0.98);
 }
 
 .mini-cart-wrapper {
