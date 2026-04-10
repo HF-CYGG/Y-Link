@@ -115,15 +115,9 @@ const searchResults = computed(() => {
 const bottomSelectedQty = computed(() => clientCartStore.totalQty)
 const bottomSelectedTypeCount = computed(() => clientCartStore.items.length)
 const isOffline = computed(() => requestError.value?.type === 'offline')
-const cartProductPriceMap = computed(() => {
-  return new Map(
-    products.value.map((product) => [product.id, Math.max(0, Number(product.defaultPrice ?? 0))]),
-  )
-})
 const miniCartTotalAmount = computed(() => {
   return clientCartStore.items.reduce((sum, item) => {
-    const unitPrice = cartProductPriceMap.value.get(item.productId) ?? 0
-    return sum + unitPrice * item.qty
+    return sum + Math.max(0, Number(item.defaultPrice || 0)) * item.qty
   }, 0)
 })
 const activeCategoryItems = computed(() => {
@@ -450,6 +444,7 @@ onMounted(async () => {
             </div>
             <div class="min-w-0 flex-1 text-left">
               <p class="truncate text-base font-semibold text-slate-900">{{ product.productName }}</p>
+              <p class="mt-1 text-sm font-bold text-[var(--ylink-color-primary-strong)]">¥{{ Number(product.defaultPrice).toFixed(2) }}</p>
               <p class="mt-1 text-xs text-slate-400">{{ product.productCode }}</p>
               <p class="mt-1 text-xs text-slate-500 truncate">{{ product.detailContent || '暂无商品描述' }}</p>
               <div class="mt-2 flex flex-wrap gap-2 text-xs">
@@ -497,6 +492,7 @@ onMounted(async () => {
               <div v-else class="client-product-card__cover grid place-content-center text-xs text-slate-400">暂无图片</div>
               <div class="min-w-0 flex-1 text-left">
                 <p class="truncate text-base font-semibold text-slate-900">{{ row.data.productName }}</p>
+                <p class="mt-1 text-sm font-bold text-[var(--ylink-color-primary-strong)]">¥{{ Number(row.data.defaultPrice).toFixed(2) }}</p>
                 <p class="mt-1 text-xs text-slate-400">{{ row.data.productCode }}</p>
                 <div class="mt-2 flex flex-wrap gap-2 text-xs">
                   <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ row.data.availableStock }}</span>
@@ -533,6 +529,7 @@ onMounted(async () => {
                 <div v-else class="client-product-card__cover grid place-content-center text-xs text-slate-400">暂无图片</div>
                 <div class="min-w-0 flex-1 text-left">
                   <p class="truncate text-base font-semibold text-slate-900">{{ product.productName }}</p>
+                  <p class="mt-1 text-sm font-bold text-[var(--ylink-color-primary-strong)]">¥{{ Number(product.defaultPrice).toFixed(2) }}</p>
                   <p class="mt-1 text-xs text-slate-400">{{ product.productCode }}</p>
                   <div class="mt-2 flex flex-wrap gap-2 text-xs">
                     <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ product.availableStock }}</span>
@@ -625,6 +622,7 @@ onMounted(async () => {
         />
         <div class="space-y-2 flex-shrink-0">
           <p class="text-lg font-semibold text-slate-900">{{ detailProduct.productName }}</p>
+          <p class="text-sm font-bold text-[var(--ylink-color-primary-strong)]">¥{{ Number(detailProduct.defaultPrice).toFixed(2) }}</p>
           <p class="text-sm text-slate-500">{{ detailProduct.detailContent || '暂无商品描述' }}</p>
           <div class="flex flex-wrap gap-2 text-xs">
             <span class="rounded-full bg-emerald-50 px-3 py-1 text-emerald-600">可预订 {{ detailProduct.availableStock }}</span>

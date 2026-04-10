@@ -28,6 +28,7 @@ onMounted(() => {
 })
 
 const selectedCount = computed(() => clientCartStore.selectedValidItems.length)
+const totalAmount = computed(() => clientCartStore.selectedValidItems.reduce((sum, item) => sum + Math.max(0, Number(item.defaultPrice || 0)) * item.qty, 0))
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const removeSelected = () => {
@@ -113,6 +114,7 @@ const handleBack = () => {
                 />
                 <div class="min-w-0">
                   <p class="truncate text-sm font-semibold text-slate-900">{{ item.productName }}</p>
+                  <p class="mt-1 text-sm font-bold text-teal-600">¥{{ Number(item.defaultPrice).toFixed(2) }}</p>
                   <p class="text-xs text-slate-400 mt-1">可预订 {{ item.availableStock }} · 限购 {{ item.limitPerUser }}</p>
                 </div>
               </div>
@@ -148,7 +150,7 @@ const handleBack = () => {
     <div v-if="clientCartStore.items.length" class="client-cart-summary absolute bottom-0 left-0 right-0 z-20 bg-white border-t border-slate-200 px-4 py-3 pb-safe shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
       <div class="flex items-center justify-between w-full max-w-[1100px] mx-auto">
         <div class="flex flex-col">
-          <p class="text-sm text-slate-500">已选 <span class="font-bold text-slate-900">{{ clientCartStore.selectedQty }}</span> 件</p>
+          <p class="text-sm text-slate-500">已选 <span class="font-bold text-slate-900">{{ clientCartStore.selectedQty }}</span> 件，合计 <span class="font-bold text-teal-600">¥{{ totalAmount.toFixed(2) }}</span></p>
           <p class="text-xs text-slate-400 mt-0.5">共 {{ selectedCount }} 种商品</p>
         </div>
         <button type="button" class="rounded-full bg-slate-900 px-8 py-2.5 text-sm font-semibold text-white transition-transform active:scale-95 shadow-md hover:shadow-lg" @click="goCheckout">去结算</button>

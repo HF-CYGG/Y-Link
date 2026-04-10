@@ -39,6 +39,7 @@ onMounted(() => {
 
 const selectedItems = computed(() => clientCartStore.selectedValidItems)
 const totalQty = computed(() => selectedItems.value.reduce((sum, item) => sum + item.qty, 0))
+const totalAmount = computed(() => selectedItems.value.reduce((sum, item) => sum + Math.max(0, Number(item.defaultPrice || 0)) * item.qty, 0))
 const submitDisabled = computed(() => submitting.value || !selectedItems.value.length)
 
 const handleBack = () => {
@@ -117,6 +118,7 @@ const handleSubmit = async () => {
         >
           <div class="min-w-0">
             <p class="truncate text-sm font-semibold text-slate-900">{{ item.productName }}</p>
+            <p class="mt-1 text-sm font-bold text-teal-600">¥{{ Number(item.defaultPrice).toFixed(2) }}</p>
             <p class="text-xs text-slate-400">{{ item.productCode }}</p>
           </div>
           <span class="text-sm font-semibold text-slate-700">x {{ item.qty }}</span>
@@ -137,11 +139,11 @@ const handleSubmit = async () => {
     </section>
 
     <div class="client-cart-summary absolute bottom-0 left-0 right-0 z-20 bg-white border-t border-slate-200 px-4 py-3 pb-safe shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
-      <div class="flex items-center justify-between w-full max-w-[1100px] mx-auto">
-        <div class="flex flex-col">
-          <p class="text-sm text-slate-500">共 <span class="font-bold text-slate-900">{{ totalQty }}</span> 件</p>
-          <p class="text-xs text-slate-400 mt-0.5">提交后进入待提货状态</p>
-        </div>
+        <div class="flex items-center justify-between w-full max-w-[1100px] mx-auto">
+          <div class="flex flex-col">
+            <p class="text-sm text-slate-500">共 <span class="font-bold text-slate-900">{{ totalQty }}</span> 件，合计 <span class="font-bold text-teal-600">¥{{ totalAmount.toFixed(2) }}</span></p>
+            <p class="text-xs text-slate-400 mt-0.5">提交后进入待提货状态</p>
+          </div>
         <button
           type="button"
           class="rounded-full bg-slate-900 px-8 py-2.5 text-sm font-semibold text-white transition-transform active:scale-95 shadow-md hover:shadow-lg disabled:cursor-not-allowed disabled:opacity-60"
