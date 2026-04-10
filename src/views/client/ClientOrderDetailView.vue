@@ -65,31 +65,61 @@ const timelineItems = computed(() => {
   if (!detail.value) {
     return []
   }
-  const timeoutReached = Boolean(detail.value.order.timeoutAt && new Date(detail.value.order.timeoutAt).getTime() <= Date.now())
-  let verifyStepTitle = '待核销'
-  if (detail.value.order.status === 'verified') {
-    verifyStepTitle = '已核销'
-  } else if (timeoutReached) {
-    verifyStepTitle = '已超时'
+  const order = detail.value.order
+  const timeoutAtMs = order.timeoutAt ? new Date(order.timeoutAt).getTime() : null
+  const nowMs = Date.now()
+  const timeoutReached = Boolean(timeoutAtMs && timeoutAtMs <= nowMs)
+  const timeoutSoon = Boolean(timeoutAtMs && timeoutAtMs > nowMs && timeoutAtMs - nowMs <= 2 * 60 * 60 * 1000)
+  // cancelled 场景无法从后端直接区分“人工取消/超时取消”，因此使用 timeoutAt 是否已过期做前端推断。
+  const cancelledByTimeout = order.status === 'cancelled' && timeoutReached
+
+  if (order.status === 'verified') {
+    return [
+      { key: 'created', title: '已下单', time: order.createdAt, active: true },
+      { key: 'prepare', title: '备货完成', time: order.timeoutAt || '门店已备货', active: true },
+      { key: 'verify', title: '已核销', time: order.verifiedAt || '核销成功', active: true },
+      { key: 'done', title: '订单完成', time: order.verifiedAt || '已完成', active: true },
+    ]
   }
+
+  if (order.status === 'cancelled') {
+    return [
+      { key: 'created', title: '已下单', time: order.createdAt, active: true },
+      { key: 'prepare', title: '备货中', time: order.timeoutAt || '门店处理中', active: !cancelledByTimeout },
+      {
+        key: 'cancelled',
+        title: cancelledByTimeout ? '超时自动取消' : '人工取消',
+        time: order.timeoutAt || '已取消',
+        active: true,
+      },
+      {
+        key: 'closed',
+        title: '订单关闭',
+        time: cancelledByTimeout ? '库存已自动释放' : '订单已关闭',
+        active: true,
+      },
+    ]
+  }
+
   return [
+    { key: 'created', title: '已下单', time: order.createdAt, active: true },
     {
-      key: 'created',
-      title: '已下单',
-      time: detail.value.order.createdAt,
+      key: 'prepare',
+      title: timeoutSoon ? '待取货（即将超时）' : '备货中',
+      time: order.timeoutAt || '按门店通知准备',
       active: true,
     },
     {
       key: 'pending',
-      title: '备货中',
-      time: detail.value.order.timeoutAt || '按门店通知准备',
-      active: detail.value.order.status === 'pending',
+      title: timeoutSoon ? '请尽快到店核销' : '待核销',
+      time: order.timeoutAt || '待完成',
+      active: true,
     },
     {
-      key: 'verified',
-      title: verifyStepTitle,
-      time: detail.value.order.verifiedAt || detail.value.order.timeoutAt || '待完成',
-      active: detail.value.order.status !== 'pending',
+      key: 'future',
+      title: '核销后完成订单',
+      time: '待完成',
+      active: false,
     },
   ]
 })
