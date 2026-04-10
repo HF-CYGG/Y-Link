@@ -28,6 +28,7 @@ type O2oProductFormState = {
   productName: string
   defaultPrice: number
   isActive: boolean
+  category: string
   o2oStatus: 'listed' | 'unlisted'
   thumbnail: string
   detailContent: string
@@ -374,7 +375,7 @@ onMounted(async () => {
             :show-file-list="false"
             accept="image/*"
           >
-            <img v-if="displayThumbnail" :src="displayThumbnail" class="avatar" />
+            <img v-if="displayThumbnail" :src="displayThumbnail" class="avatar" alt="预览图" />
             <el-icon v-else class="avatar-uploader-icon"><Plus /></el-icon>
           </el-upload>
           <p class="mt-1 text-xs text-slate-400 w-full">支持点击或拍照上传，推荐 800x800 方形图片。</p>

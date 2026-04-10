@@ -5,8 +5,8 @@
  */
 
 import express from 'express'
-import path from 'path'
-import fs from 'fs'
+import path from 'node:path'
+import fs from 'node:fs'
 import { ZodError } from 'zod'
 import { requireAuth } from './middleware/auth.middleware.js'
 import { errorHandler, notFoundHandler } from './middleware/error-handler.js'

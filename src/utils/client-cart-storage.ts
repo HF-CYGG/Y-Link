@@ -20,7 +20,7 @@ export interface ClientCartSnapshotItem {
 const CLIENT_CART_SNAPSHOT_KEY = 'y-link.client-cart.snapshot'
 
 const getStorage = () => {
-  if (typeof globalThis.window === 'undefined') {
+  if (globalThis.window === undefined) {
     return null
   }
 
@@ -82,7 +82,7 @@ export const readPersistedClientCartSnapshot = () => {
 
   try {
     return normalizeSnapshotItems(JSON.parse(raw))
-  } catch (_error) {
+  } catch {
     storage.removeItem(CLIENT_CART_SNAPSHOT_KEY)
     return [] as ClientCartSnapshotItem[]
   }

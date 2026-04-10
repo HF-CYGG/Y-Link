@@ -32,7 +32,7 @@ const tabs = [
 
 const activeTabIndex = computed(() => {
   const index = tabs.findIndex((tab) => isTabActive(tab.path))
-  return index !== -1 ? index : 0
+  return index === -1 ? 0 : index
 })
 
 const indicatorStyle = computed(() => {
@@ -43,6 +43,7 @@ const indicatorStyle = computed(() => {
   }
 })
 
+// 详细注释：判断指定的 tab 路径是否处于激活状态，订单模块通过前缀匹配以包含详情等子页面
 const isTabActive = (path: string) => {
   if (path === '/client/orders') {
     return route.path.startsWith('/client/orders')
@@ -162,7 +163,7 @@ const handleLogout = async () => {
       <div class="grid grid-cols-3 gap-1 relative">
         <div class="client-main-layout__tab-indicator" :style="indicatorStyle"></div>
         <router-link
-          v-for="(tab, index) in tabs"
+          v-for="tab in tabs"
           :key="tab.path"
           :to="tab.path"
           class="client-main-layout__tab-item z-10"

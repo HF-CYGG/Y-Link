@@ -52,9 +52,3 @@ const iconMap: Record<NonNullable<Props['type']>, string> = {
     </button>
   </section>
 </template>
-
-<style scoped>
-.ylink-request-state {
-  /* 移除原本的 request-state-float 悬浮动画，保持卡片静止 */
-}
-</style>
