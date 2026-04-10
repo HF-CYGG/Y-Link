@@ -4,7 +4,7 @@
 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
 #>
 
-﻿param(
+param(
   [string]$BackendProfile = 'local-dev',
   [int]$BackendPort = 3001,
   [int]$FrontendPort = 5173,
