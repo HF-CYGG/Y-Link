@@ -32,6 +32,19 @@ class O2oPreorderService {
   private readonly preorderItemRepo = AppDataSource.getRepository(O2oPreorderItem)
   private readonly inventoryLogRepo = AppDataSource.getRepository(InventoryLog)
 
+  private normalizeVerifyCode(value: string) {
+    const raw = value.trim()
+    if (!raw) {
+      return ''
+    }
+    const compact = raw.replace(/[^a-zA-Z0-9]/g, '')
+    if (/^[a-fA-F0-9]{32}$/.test(compact)) {
+      const hex = compact.toLowerCase()
+      return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+    }
+    return raw
+  }
+
   async listMallProducts() {
     // 商城端只暴露“可售且已上架”的商品，并把库存口径统一换算成前端直接可用的 availableStock。
     const products = await this.productRepo.find({
@@ -214,9 +227,10 @@ class O2oPreorderService {
   }
 
   async verifyByCode(verifyCode: string, actor: AuthUserContext) {
+    const normalizedVerifyCode = this.normalizeVerifyCode(verifyCode)
     await this.cancelTimeoutOrders()
     return AppDataSource.transaction(async (manager) => {
-      const order = await manager.getRepository(O2oPreorder).findOne({ where: { verifyCode } })
+      const order = await manager.getRepository(O2oPreorder).findOne({ where: { verifyCode: normalizedVerifyCode } })
       if (!order) {
         throw new BizError('预订单不存在', 404)
       }
@@ -362,7 +376,8 @@ class O2oPreorderService {
   }
 
   async getVerifyDetail(verifyCode: string) {
-    const order = await this.preorderRepo.findOne({ where: { verifyCode } })
+    const normalizedVerifyCode = this.normalizeVerifyCode(verifyCode)
+    const order = await this.preorderRepo.findOne({ where: { verifyCode: normalizedVerifyCode } })
     if (!order) {
       throw new BizError('预订单不存在', 404)
     }

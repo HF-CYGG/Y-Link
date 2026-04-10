@@ -70,6 +70,15 @@ const normalizeVerifyCode = (rawValue: string) => {
     // 非 URL 文本按纯核销码处理。
   }
 
+  // 兼容“网页展示码复制”场景：
+  // 例如 "0ECC 885A BDEF 462B B9BC 9C0C ..." 这类带空格分组的文本。
+  // 统一提取字母数字后再归一化为标准 UUID（8-4-4-4-12）。
+  const compact = value.replace(/[^a-zA-Z0-9]/g, '')
+  if (/^[a-fA-F0-9]{32}$/.test(compact)) {
+    const hex = compact.toLowerCase()
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
+  }
+
   return value
 }
 
