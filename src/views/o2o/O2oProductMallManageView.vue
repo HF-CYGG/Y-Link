@@ -10,6 +10,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { UploadRequestOptions } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
+import imageCompression from 'browser-image-compression'
 import { PageContainer } from '@/components/common'
 import { uploadImage } from '@/api/modules/upload'
 import {
@@ -120,17 +121,32 @@ const handleCustomUpload = async (options: UploadRequestOptions) => {
     return
   }
 
-  if (file.size > 10 * 1024 * 1024) {
-    ElMessage.error('图片大小不能超过 10MB')
+  if (file.size > 20 * 1024 * 1024) {
+    ElMessage.error('原图过大，不能超过 20MB')
     return
   }
 
-  // 只记录待上传文件并生成本地预览，不立即请求后端
-  if (localPreviewUrl.value) {
-    URL.revokeObjectURL(localPreviewUrl.value)
+  try {
+    const compressedFile = await imageCompression(file, {
+      maxSizeMB: 0.8, // 压缩到不超过 800KB
+      maxWidthOrHeight: 1200, // 限制最大边长，保证画质同时减小体积
+      useWebWorker: true,
+      initialQuality: 0.85
+    })
+
+    if (localPreviewUrl.value) {
+      URL.revokeObjectURL(localPreviewUrl.value)
+    }
+    // 将压缩后的 Blob 转换为 File 对象，以适配后续上传接口
+    pendingUploadFile.value = new File([compressedFile], file.name, {
+      type: compressedFile.type,
+      lastModified: Date.now(),
+    })
+    localPreviewUrl.value = URL.createObjectURL(compressedFile)
+  } catch (error) {
+    console.error('图片压缩失败:', error)
+    ElMessage.error('图片处理失败，请重试')
   }
-  pendingUploadFile.value = file
-  localPreviewUrl.value = URL.createObjectURL(file)
 }
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
