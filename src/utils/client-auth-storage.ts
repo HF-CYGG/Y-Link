@@ -38,11 +38,11 @@ export interface PersistedClientAuthState {
  * - 保证工具链阶段不会因为 localStorage 不存在而报错。
  */
 const getStorage = (): Storage | null => {
-  if (typeof window === 'undefined') {
+  if (typeof globalThis.window === 'undefined') {
     return null
   }
 
-  return window.localStorage
+  return globalThis.window.localStorage
 }
 
 /**
@@ -57,7 +57,8 @@ const safeParseJson = <T>(value: string | null): T | null => {
 
   try {
     return JSON.parse(value) as T
-  } catch (_error) {
+  } catch (error) {
+    console.warn('[client-auth-storage] 本地客户端登录态解析失败，已忽略损坏缓存。', error)
     return null
   }
 }

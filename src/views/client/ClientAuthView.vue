@@ -108,10 +108,6 @@ const redirectPath = computed(() => {
   return raw.startsWith('/') && !raw.startsWith('//') ? raw : '/client/mall'
 })
 
-const activeFormKey = computed(() => {
-  return activeTab.value
-})
-
 const applyRegisterRedirectState = () => {
   const registeredMobile = typeof route.query.mobile === 'string' ? route.query.mobile.trim() : ''
   const nextTab = route.query.tab === 'register' ? 'register' : 'login'
@@ -177,6 +173,7 @@ const handleLogin = async () => {
     ElMessage.success('登录成功')
     await router.replace(redirectPath.value)
   } catch (_error) {
+    ElMessage.error('登录失败，请检查手机号、密码和验证码后重试')
     await refreshCaptcha()
     loginForm.captchaCode = ''
   } finally {
@@ -226,6 +223,7 @@ const handleRegister = async () => {
       },
     })
   } catch (_error) {
+    ElMessage.error('注册失败，请检查信息后重试')
     await refreshCaptcha()
     registerForm.captchaCode = ''
   } finally {
@@ -319,7 +317,7 @@ watch(
           </div>
 
           <Transition name="auth-panel" mode="out-in">
-            <form v-if="activeTab === 'login'" :key="activeFormKey" class="space-y-4" @submit.prevent="handleLogin">
+            <form v-if="activeTab === 'login'" key="login-form" class="space-y-4" @submit.prevent="handleLogin">
               <label class="client-field">
                 <span class="client-field-label">手机号</span>
                 <input v-model.trim="loginForm.mobile" class="client-input" placeholder="请输入登录手机号" />
@@ -350,7 +348,7 @@ watch(
               </button>
             </form>
 
-            <form v-else :key="activeFormKey" class="space-y-4" @submit.prevent="handleRegister">
+            <form v-else key="register-form" class="space-y-4" @submit.prevent="handleRegister">
               <label class="client-field">
                 <span class="client-field-label">姓名</span>
                 <input v-model.trim="registerForm.realName" class="client-input" placeholder="请输入姓名" />
@@ -417,7 +415,7 @@ watch(
   border-radius: 999px;
   background: rgba(15, 23, 42, 0.06);
   padding: 0.5rem 0.9rem;
-  color: rgb(15 23 42);
+  color: rgb(30 41 59);
   font-size: 0.75rem;
   font-weight: 700;
   letter-spacing: 0.14em;
@@ -468,7 +466,7 @@ watch(
   border-radius: 1.25rem;
   background: linear-gradient(135deg, rgba(16, 185, 129, 0.12), rgba(20, 184, 166, 0.12));
   padding: 0.95rem 1rem;
-  color: rgb(15 118 110);
+  color: rgb(17 94 89);
   font-size: 0.92rem;
   line-height: 1.6;
 }
@@ -539,7 +537,7 @@ watch(
 .captcha-box-tip {
   display: block;
   text-align: center;
-  color: rgb(100 116 139);
+  color: rgb(71 85 105);
   font-size: 0.74rem;
   line-height: 1.2;
 }
