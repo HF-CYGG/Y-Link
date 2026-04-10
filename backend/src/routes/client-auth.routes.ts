@@ -39,6 +39,11 @@ const resetPasswordSchema = z.object({
   newPassword: z.string().min(6),
 })
 
+const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1),
+  newPassword: z.string().min(6),
+})
+
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export const clientAuthRouter = Router()
 
@@ -98,6 +103,16 @@ clientAuthRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     await clientAuthService.logout(authReq.clientAuth)
+    res.json({ code: 0, message: 'ok', data: true })
+  }),
+)
+
+clientAuthRouter.post(
+  '/change-password',
+  requireClientAuth,
+  asyncHandler(async (req, res) => {
+    const authReq = req as ClientAuthenticatedRequest
+    await clientAuthService.changePassword(authReq.clientAuth, changePasswordSchema.parse(req.body))
     res.json({ code: 0, message: 'ok', data: true })
   }),
 )

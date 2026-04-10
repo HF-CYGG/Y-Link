@@ -52,6 +52,11 @@ export interface ClientResetPasswordInput {
   newPassword: string
 }
 
+export interface ClientChangePasswordInput {
+  currentPassword: string
+  newPassword: string
+}
+
 class ClientAuthService {
   private readonly userRepo = AppDataSource.getRepository(ClientUser)
   private readonly sessionRepo = AppDataSource.getRepository(ClientUserSession)
@@ -212,6 +217,34 @@ class ClientAuthService {
 
   async logout(auth: ClientAuthContext) {
     await this.sessionRepo.delete({ sessionToken: auth.sessionToken })
+  }
+
+  async changePassword(auth: ClientAuthContext, input: ClientChangePasswordInput) {
+    const user = await this.userRepo.findOne({ where: { id: auth.userId } })
+    if (!user) {
+      throw new BizError('当前用户不存在', 404)
+    }
+
+    const userWithPwd = await this.findUserWithPasswordByMobile(user.mobile)
+    if (!userWithPwd) {
+      throw new BizError('当前用户不存在', 404)
+    }
+
+    const matched = await verifyPassword(input.currentPassword, userWithPwd.passwordHash)
+    if (!matched) {
+      throw new BizError('原密码错误', 400)
+    }
+
+    const newPassword = input.newPassword.trim()
+    if (newPassword.length < 6) {
+      throw new BizError('新密码至少 6 位', 400)
+    }
+
+    user.passwordHash = await hashPassword(newPassword)
+    await AppDataSource.transaction(async (manager) => {
+      await manager.getRepository(ClientUser).save(user)
+      await manager.getRepository(ClientUserSession).delete({ userId: user.id })
+    })
   }
 }
 

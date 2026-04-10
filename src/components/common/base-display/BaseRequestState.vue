@@ -55,15 +55,6 @@ const iconMap: Record<NonNullable<Props['type']>, string> = {
 
 <style scoped>
 .ylink-request-state {
-  animation: request-state-float 1.6s ease-in-out infinite alternate;
-}
-
-@keyframes request-state-float {
-  0% {
-    transform: translateY(0);
-  }
-  100% {
-    transform: translateY(-3px);
-  }
+  /* 移除原本的 request-state-float 悬浮动画，保持卡片静止 */
 }
 </style>

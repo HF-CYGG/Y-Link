@@ -80,3 +80,10 @@ export const clientLogout = () =>
     method: 'POST',
     url: '/client-auth/logout',
   })
+
+export const clientChangePassword = (data: { currentPassword: string; newPassword: string }) =>
+  request<boolean>({
+    method: 'POST',
+    url: '/client-auth/change-password',
+    data,
+  })

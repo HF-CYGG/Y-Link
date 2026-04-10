@@ -717,6 +717,16 @@ onMounted(async () => {
   width: min(var(--client-shell-max, 1100px), calc(100vw - var(--client-shell-inline, 1.25rem) * 2));
   transform: translateX(-50%);
   pointer-events: none;
+  transition: opacity 0.3s ease, transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+}
+
+/* 当整个页面正在发生进入/离开过渡动画时，强制隐藏固定定位的购物车，避免重叠闪跳 */
+.slide-left-enter-active .mini-cart-wrapper,
+.slide-left-leave-active .mini-cart-wrapper,
+.slide-right-enter-active .mini-cart-wrapper,
+.slide-right-leave-active .mini-cart-wrapper {
+  opacity: 0 !important;
+  pointer-events: none !important;
 }
 
 .mini-cart-wrapper.is-expanded {

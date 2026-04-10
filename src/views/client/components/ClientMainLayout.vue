@@ -46,21 +46,21 @@ const resolveViewKey = (currentRoute: RouteLocationNormalizedLoaded) => {
 
 const resolvePathDepth = (path: string) => {
   if (path.startsWith('/client/orders/')) {
-    return 3
+    return 10
   }
   if (path.startsWith('/client/checkout')) {
-    return 3
+    return 10
   }
   if (path.startsWith('/client/cart')) {
-    return 2
-  }
-  if (path.startsWith('/client/orders')) {
-    return 2
-  }
-  if (path.startsWith('/client/mall')) {
-    return 2
+    return 10
   }
   if (path.startsWith('/client/profile')) {
+    return 4
+  }
+  if (path.startsWith('/client/orders')) {
+    return 3
+  }
+  if (path.startsWith('/client/mall')) {
     return 2
   }
   return 1
@@ -132,15 +132,15 @@ const handleLogout = async () => {
       </div>
     </header>
 
-    <main class="client-main-layout__container px-4 pt-4 sm:px-5">
+    <main class="client-main-layout__container px-4 pt-4 sm:px-5 relative">
       <router-view v-slot="{ Component, route: viewRoute }">
-        <transition :name="transitionName" mode="out-in">
+        <transition :name="transitionName">
           <KeepAlive :max="3">
-            <component :is="Component" v-if="Component && viewRoute.meta.keepAlive" :key="resolveViewKey(viewRoute)" />
+            <component :is="Component" v-if="Component && viewRoute.meta.keepAlive" :key="resolveViewKey(viewRoute)" class="client-page-absolute" />
           </KeepAlive>
         </transition>
-        <transition :name="transitionName" mode="out-in">
-          <component :is="Component" v-if="Component && !viewRoute.meta.keepAlive" :key="resolveViewKey(viewRoute)" />
+        <transition :name="transitionName">
+          <component :is="Component" v-if="Component && !viewRoute.meta.keepAlive" :key="resolveViewKey(viewRoute)" class="client-page-absolute" />
         </transition>
       </router-view>
     </main>
