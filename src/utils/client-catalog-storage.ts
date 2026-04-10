@@ -23,6 +23,19 @@ const getStorage = () => {
   return globalThis.window.localStorage
 }
 
+const normalizePrice = (value: unknown) => {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value.toFixed(2)
+  }
+  if (typeof value === 'string') {
+    const parsed = Number.parseFloat(value)
+    if (Number.isFinite(parsed)) {
+      return parsed.toFixed(2)
+    }
+  }
+  return '0.00'
+}
+
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const normalizeProducts = (products: unknown): O2oMallProduct[] => {
   if (!Array.isArray(products)) {
@@ -45,7 +58,7 @@ const normalizeProducts = (products: unknown): O2oMallProduct[] => {
         id,
         productCode,
         productName,
-        defaultPrice: typeof row.defaultPrice === 'string' ? row.defaultPrice : '0.00',
+        defaultPrice: normalizePrice(row.defaultPrice),
         category: typeof row.category === 'string' ? row.category : '默认分类',
         thumbnail: typeof row.thumbnail === 'string' ? row.thumbnail : null,
         detailContent: typeof row.detailContent === 'string' ? row.detailContent : null,

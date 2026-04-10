@@ -28,6 +28,19 @@ const getStorage = () => {
   return globalThis.window.localStorage
 }
 
+const normalizePrice = (value: unknown) => {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value.toFixed(2)
+  }
+  if (typeof value === 'string') {
+    const parsed = Number.parseFloat(value)
+    if (Number.isFinite(parsed)) {
+      return parsed.toFixed(2)
+    }
+  }
+  return '0.00'
+}
+
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const normalizeSnapshotItems = (items: unknown): ClientCartSnapshotItem[] => {
   if (!Array.isArray(items)) {
@@ -44,7 +57,7 @@ const normalizeSnapshotItems = (items: unknown): ClientCartSnapshotItem[] => {
       const productId = typeof row.productId === 'string' ? row.productId : ''
       const productCode = typeof row.productCode === 'string' ? row.productCode : ''
       const productName = typeof row.productName === 'string' ? row.productName : ''
-      const defaultPrice = typeof row.defaultPrice === 'string' ? row.defaultPrice : '0.00'
+      const defaultPrice = normalizePrice(row.defaultPrice)
       const thumbnail = typeof row.thumbnail === 'string' ? row.thumbnail : null
       const limitPerUser = Number.isFinite(row.limitPerUser) ? Number(row.limitPerUser) : 0
       const availableStock = Number.isFinite(row.availableStock) ? Number(row.availableStock) : 0
