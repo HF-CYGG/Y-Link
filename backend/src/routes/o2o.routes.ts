@@ -28,6 +28,12 @@ const verifySchema = z.object({
   verifyCode: z.string().trim().min(1),
 })
 
+const consoleOrderQuerySchema = z.object({
+  status: z.enum(['pending', 'verified', 'cancelled']).optional(),
+  keyword: z.string().trim().max(64).optional(),
+  limit: z.coerce.number().int().min(1).max(200).optional(),
+})
+
 export const o2oRouter = Router()
 
 // 商城商品列表：客户端免登录可访问，用于展示当前上架商品与可预订库存。
@@ -78,6 +84,29 @@ o2oRouter.get(
   requirePermission('orders:view'),
   asyncHandler(async (req, res) => {
     const data = await o2oPreorderService.getVerifyDetailByShowNo(req.params.showNo)
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+// 管理端订单查询：支持按状态分类与关键字查询，供“订单查询”页面展示。
+o2oRouter.get(
+  '/orders',
+  requireAuth,
+  requirePermission('orders:view'),
+  asyncHandler(async (req, res) => {
+    const query = consoleOrderQuerySchema.parse(req.query)
+    const data = await o2oPreorderService.listConsoleOrders(query)
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+// 管理端订单详情：用于查询页右侧展示订单状态报告与进度。
+o2oRouter.get(
+  '/orders/:id',
+  requireAuth,
+  requirePermission('orders:view'),
+  asyncHandler(async (req, res) => {
+    const data = await o2oPreorderService.detailById(req.params.id)
     res.json({ code: 0, message: 'ok', data })
   }),
 )

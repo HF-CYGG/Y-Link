@@ -243,6 +243,34 @@ class O2oPreorderService {
     }))
   }
 
+  async listConsoleOrders(input: { status?: 'pending' | 'verified' | 'cancelled'; keyword?: string; limit?: number }) {
+    const normalizedKeyword = input.keyword?.trim() ?? ''
+    const normalizedLimit = Math.max(1, Math.min(200, Number(input.limit) || 50))
+    const queryBuilder = this.preorderRepo.createQueryBuilder('order').orderBy('order.id', 'DESC').take(normalizedLimit)
+
+    if (input.status) {
+      queryBuilder.andWhere('order.status = :status', { status: input.status })
+    }
+
+    if (normalizedKeyword) {
+      queryBuilder.andWhere('(order.showNo LIKE :keyword OR order.verifyCode LIKE :keyword)', {
+        keyword: `%${normalizedKeyword}%`,
+      })
+    }
+
+    const rows = await queryBuilder.getMany()
+    return rows.map((item) => ({
+      statusReport: this.resolveOrderStatusReport(item),
+      id: String(item.id),
+      showNo: item.showNo,
+      verifyCode: item.verifyCode,
+      status: item.status,
+      totalQty: item.totalQty,
+      timeoutAt: item.timeoutAt,
+      createdAt: item.createdAt,
+    }))
+  }
+
   async detailById(id: string) {
     const order = await this.preorderRepo.findOne({ where: { id } })
     if (!order) {

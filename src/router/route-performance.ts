@@ -27,6 +27,7 @@ export type AppRouteName =
   | 'tags'
   | 'o2o-console'
   | 'o2o-console-products'
+  | 'o2o-console-orders'
   | 'o2o-console-verify'
   | 'o2o-console-inbound'
   | 'system'
@@ -62,6 +63,7 @@ export const routeViewLoaders = {
   products: () => import('@/views/base-data/ProductManageView.vue'),
   tags: () => import('@/views/base-data/TagManageView.vue'),
   'o2o-console-products': () => import('@/views/o2o/O2oProductMallManageView.vue'),
+  'o2o-console-orders': () => import('@/views/o2o/O2oOrderQueryView.vue'),
   'o2o-console-verify': () => import('@/views/o2o/O2oVerifyConsoleView.vue'),
   'o2o-console-inbound': () => import('@/views/o2o/O2oInboundManageView.vue'),
   'system-configs': () => import('@/views/system/SystemConfigViewLoader'),

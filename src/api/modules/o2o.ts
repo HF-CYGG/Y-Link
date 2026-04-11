@@ -114,10 +114,28 @@ export const getMyO2oPreorders = (config?: RequestConfig) =>
     ...config,
   })
 
+export const getO2oConsoleOrders = (
+  params: { status?: O2oOrderStatus; keyword?: string; limit?: number },
+  config?: RequestConfig,
+) =>
+  request<O2oPreorderSummary[]>({
+    method: 'GET',
+    url: '/o2o/orders',
+    params,
+    ...config,
+  })
+
 export const getO2oPreorderDetail = (id: string, config?: RequestConfig) =>
   request<O2oPreorderDetail>({
     method: 'GET',
     url: `/o2o/mall/preorders/${id}`,
+    ...config,
+  })
+
+export const getO2oConsoleOrderDetail = (id: string, config?: RequestConfig) =>
+  request<O2oPreorderDetail>({
+    method: 'GET',
+    url: `/o2o/orders/${id}`,
     ...config,
   })
 

@@ -232,12 +232,25 @@ const layoutChildren: AppRouteRecord[] = [
         },
       },
       {
+        path: 'orders',
+        name: 'o2o-console-orders',
+        component: routeViewLoaders['o2o-console-orders'],
+        meta: {
+          title: '订单查询',
+          menuOrder: 20,
+          activeMenu: '/o2o-console',
+          requiredPermissions: ['orders:view'],
+          keepAlive: true,
+          preloadTargets: ['o2o-console-verify'],
+        },
+      },
+      {
         path: 'verify',
         name: 'o2o-console-verify',
         component: routeViewLoaders['o2o-console-verify'],
         meta: {
           title: '预订单核销',
-          menuOrder: 20,
+          menuOrder: 30,
           activeMenu: '/o2o-console',
           requiredPermissions: ['orders:view'],
           keepAlive: true,
@@ -250,7 +263,7 @@ const layoutChildren: AppRouteRecord[] = [
         component: routeViewLoaders['o2o-console-inbound'],
         meta: {
           title: '入库管理',
-          menuOrder: 30,
+          menuOrder: 40,
           activeMenu: '/o2o-console',
           requiredPermissions: ['products:view'],
           keepAlive: true,
