@@ -192,15 +192,13 @@ onMounted(async () => {
 
 <template>
   <section class="pb-20">
-    <div class="mb-3">
-      <button
-        type="button"
-        class="inline-flex h-9 w-9 items-center justify-center rounded-full bg-white text-slate-700 shadow-[var(--ylink-shadow-soft)]"
-        @click="handleBack"
-      >
-        <el-icon :size="18"><ArrowLeft /></el-icon>
-      </button>
-    </div>
+    <button
+      type="button"
+      class="order-back-floating inline-flex h-10 w-10 items-center justify-center rounded-full bg-white text-slate-700 shadow-[var(--ylink-shadow-soft)]"
+      @click="handleBack"
+    >
+      <el-icon :size="18"><ArrowLeft /></el-icon>
+    </button>
 
     <div v-if="loading" class="grid gap-3 rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
       <div v-for="index in 5" :key="index" class="h-[6.2rem] animate-pulse rounded-2xl bg-slate-100" />
@@ -307,3 +305,19 @@ onMounted(async () => {
     </section>
   </section>
 </template>
+
+<style scoped>
+.order-back-floating {
+  position: fixed;
+  z-index: 30;
+  left: max(10px, calc((100vw - 1240px) / 2 - 52px));
+  top: calc(env(safe-area-inset-top) + 82px);
+}
+
+@media (max-width: 1023px) {
+  .order-back-floating {
+    left: 12px;
+    top: calc(env(safe-area-inset-top) + 74px);
+  }
+}
+</style>
