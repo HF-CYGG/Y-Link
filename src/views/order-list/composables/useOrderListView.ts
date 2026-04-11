@@ -78,7 +78,8 @@ export const useOrderListView = () => {
    * - dateRange 保持最近日期筛选交互方式不变。
    */
   const searchForm = ref({
-    showNo: '',
+    keyword: '',
+    orderType: 'all' as 'all' | 'department' | 'walkin',
     dateRange: null as [Date, Date] | null,
     deletionScope: 'active' as 'active' | 'deleted' | 'all',
   })
@@ -191,8 +192,12 @@ export const useOrderListView = () => {
       pageSize: listState.query.pageSize,
     }
 
-    if (searchForm.value.showNo) {
-      params.showNo = searchForm.value.showNo
+    if (searchForm.value.keyword) {
+      params.keyword = searchForm.value.keyword
+    }
+
+    if (searchForm.value.orderType !== 'all') {
+      params.orderType = searchForm.value.orderType
     }
 
     if (searchForm.value.dateRange?.length === 2) {
@@ -275,7 +280,8 @@ export const useOrderListView = () => {
    */
   const handleReset = () => {
     searchForm.value = {
-      showNo: '',
+      keyword: '',
+      orderType: 'all',
       dateRange: null,
       deletionScope: 'active',
     }

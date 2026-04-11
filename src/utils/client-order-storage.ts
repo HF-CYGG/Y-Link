@@ -5,6 +5,7 @@
  */
 
 import type { O2oPreorderSummary } from '@/api/modules/o2o'
+import { getClientOrderReportScenario, isO2oOrderStatus } from '@/constants/o2o-order-status'
 
 export interface ClientOrderSnapshot {
   activeStatus: 'all' | O2oPreorderSummary['status']
@@ -27,8 +28,7 @@ const normalizeOrders = (orders: unknown): O2oPreorderSummary[] => {
   if (!Array.isArray(orders)) {
     return []
   }
-  return orders
-    .map((item) => {
+  const normalized = orders.map((item): O2oPreorderSummary | null => {
       if (!item || typeof item !== 'object') {
         return null
       }
@@ -36,7 +36,8 @@ const normalizeOrders = (orders: unknown): O2oPreorderSummary[] => {
       const id = typeof row.id === 'string' ? row.id : ''
       const showNo = typeof row.showNo === 'string' ? row.showNo : ''
       const verifyCode = typeof row.verifyCode === 'string' ? row.verifyCode : ''
-      const status = row.status === 'verified' || row.status === 'cancelled' ? row.status : row.status === 'pending' ? 'pending' : null
+      const status = isO2oOrderStatus(row.status) ? row.status : null
+      const timeoutAt = typeof row.timeoutAt === 'string' ? row.timeoutAt : null
       if (!id || !showNo || !verifyCode || !status) {
         return null
       }
@@ -45,12 +46,18 @@ const normalizeOrders = (orders: unknown): O2oPreorderSummary[] => {
         showNo,
         verifyCode,
         status,
+        statusReport: {
+          scenario: getClientOrderReportScenario(status, timeoutAt),
+          cancelReason: null,
+          timeoutReached: false,
+          timeoutSoon: false,
+        },
         totalQty: Number.isFinite(row.totalQty) ? Number(row.totalQty) : 0,
-        timeoutAt: typeof row.timeoutAt === 'string' ? row.timeoutAt : null,
+        timeoutAt,
         createdAt: typeof row.createdAt === 'string' ? row.createdAt : '',
-      } satisfies O2oPreorderSummary
+      }
     })
-    .filter((item): item is O2oPreorderSummary => item !== null)
+  return normalized.filter((item): item is O2oPreorderSummary => item !== null)
 }
 
 export const readPersistedClientOrderSnapshot = (): ClientOrderSnapshot | null => {
@@ -64,8 +71,7 @@ export const readPersistedClientOrderSnapshot = (): ClientOrderSnapshot | null =
   }
   try {
     const parsed = JSON.parse(raw) as Record<string, unknown>
-    const activeStatus =
-      parsed.activeStatus === 'pending' || parsed.activeStatus === 'verified' || parsed.activeStatus === 'cancelled' ? parsed.activeStatus : 'all'
+    const activeStatus = isO2oOrderStatus(parsed.activeStatus) ? parsed.activeStatus : 'all'
     return {
       activeStatus,
       orders: normalizeOrders(parsed.orders),

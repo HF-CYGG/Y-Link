@@ -5,6 +5,14 @@
  */
 
 import { request, type RequestConfig } from '@/api/http'
+import type { ClientOrderReportScenario, O2oOrderStatus } from '@/constants/o2o-order-status'
+
+export interface O2oOrderStatusReport {
+  scenario: ClientOrderReportScenario
+  cancelReason: 'timeout' | 'manual' | null
+  timeoutReached: boolean
+  timeoutSoon: boolean
+}
 
 export interface O2oMallProduct {
   id: string
@@ -21,10 +29,11 @@ export interface O2oMallProduct {
 }
 
 export interface O2oPreorderSummary {
+  statusReport: O2oOrderStatusReport
   id: string
   showNo: string
   verifyCode: string
-  status: 'pending' | 'verified' | 'cancelled'
+  status: O2oOrderStatus
   totalQty: number
   timeoutAt: string | null
   createdAt: string
@@ -41,10 +50,11 @@ export interface O2oPreorderDetailItem {
 
 export interface O2oPreorderDetail {
   order: {
+    statusReport: O2oOrderStatusReport
     id: string
     showNo: string
     verifyCode: string
-    status: 'pending' | 'verified' | 'cancelled'
+    status: O2oOrderStatus
     totalQty: number
     timeoutAt: string | null
     verifiedAt: string | null

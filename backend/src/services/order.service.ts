@@ -5,6 +5,7 @@
  */
 
 import { AppDataSource } from '../config/data-source.js'
+import { Brackets } from 'typeorm'
 import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
@@ -42,7 +43,9 @@ export interface SubmitOrderInput {
 export interface OrderListQuery {
   page: number
   pageSize: number
+  keyword?: string
   showNo?: string
+  orderType?: string
   startDate?: string
   endDate?: string
   includeDeleted?: boolean
@@ -148,9 +151,27 @@ export class OrderService {
 
   async list(query: OrderListQuery): Promise<PaginationResult<OrderSummaryView>> {
     const qb = this.orderRepo.createQueryBuilder('order')
-    
-    if (query.showNo) {
+
+    const normalizedKeyword = String(query.keyword ?? query.showNo ?? '').trim()
+    if (normalizedKeyword) {
+      qb.andWhere(
+        new Brackets((keywordQb) => {
+          keywordQb
+            .where('order.showNo LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
+            .orWhere('order.customerName LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
+            .orWhere('order.customerDepartmentName LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
+            .orWhere('order.issuerName LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
+            .orWhere('order.creatorDisplayName LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
+            .orWhere('order.creatorUsername LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
+        }),
+      )
+    }
+
+    if (query.showNo && !query.keyword) {
       qb.andWhere('order.showNo LIKE :showNo', { showNo: `%${query.showNo.trim()}%` })
+    }
+    if (query.orderType && ORDER_TYPE_SET.has(query.orderType as OrderType)) {
+      qb.andWhere('order.orderType = :orderType', { orderType: query.orderType })
     }
     if (query.startDate) {
       qb.andWhere('order.createdAt >= :startDate', { startDate: query.startDate })

@@ -94,7 +94,9 @@ export const submitOrder = async (payload: SubmitOrderPayload): Promise<SubmitOr
 }
 
 export interface OrderListQuery extends PaginationQueryInput {
+  keyword?: string
   showNo?: string
+  orderType?: 'department' | 'walkin'
   startDate?: string
   endDate?: string
   includeDeleted?: boolean

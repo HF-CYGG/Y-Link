@@ -26,6 +26,7 @@ type RecordLike = Record<string, unknown>
 interface Props {
   items: any[]
   loading: boolean
+  loadingDescription?: string
   emptyDescription?: string
   skeletonRows?: number
   tableOnDesktop?: boolean
@@ -40,6 +41,7 @@ interface Props {
 
 const props = withDefaults(defineProps<Props>(), {
   emptyDescription: '暂无数据',
+  loadingDescription: '数据加载中，请稍候...',
   skeletonRows: 5,
   tableOnDesktop: true,
   tabletColumns: 2,
@@ -110,7 +112,14 @@ const cardEntries = computed(() => {
       :loading="props.loading"
       animated
       :rows="props.skeletonRows"
-    />
+    >
+      <template #template>
+        <div class="flex flex-col gap-3">
+          <el-skeleton-item v-for="index in props.skeletonRows" :key="`skeleton-${index}`" variant="text" />
+          <p class="pt-1 text-center text-sm text-slate-500">{{ props.loadingDescription }}</p>
+        </div>
+      </template>
+    </el-skeleton>
 
     <template v-else>
       <BaseEmptyState

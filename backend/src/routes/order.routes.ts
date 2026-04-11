@@ -46,7 +46,9 @@ orderRouter.get(
   asyncHandler(async (req, res) => {
     const page = Number(req.query.page ?? 1)
     const pageSize = Number(req.query.pageSize ?? 20)
+    const keyword = typeof req.query.keyword === 'string' ? req.query.keyword : undefined
     const showNo = typeof req.query.showNo === 'string' ? req.query.showNo : undefined
+    const orderType = typeof req.query.orderType === 'string' ? req.query.orderType : undefined
     const startDate = typeof req.query.startDate === 'string' ? req.query.startDate : undefined
     const endDate = typeof req.query.endDate === 'string' ? req.query.endDate : undefined
     const includeDeleted = req.query.includeDeleted === 'true'
@@ -55,7 +57,9 @@ orderRouter.get(
     const data = await orderService.list({
       page: Number.isFinite(page) && page > 0 ? page : 1,
       pageSize: Number.isFinite(pageSize) && pageSize > 0 ? Math.min(pageSize, 100) : 20,
+      keyword,
       showNo,
+      orderType,
       startDate,
       endDate,
       includeDeleted,

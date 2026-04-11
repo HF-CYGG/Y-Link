@@ -10,6 +10,11 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { PageContainer } from '@/components/common'
 import {
+  VERIFY_CONSOLE_O2O_ORDER_STATUS_CLASS_MAP,
+  VERIFY_CONSOLE_O2O_ORDER_STATUS_LABEL_MAP,
+  isO2oOrderPending,
+} from '@/constants/o2o-order-status'
+import {
   getO2oVerifyDetail,
   getO2oVerifyDetailByShowNo,
   verifyO2oPreorder,
@@ -31,19 +36,7 @@ let scanFrameId: number | null = null
 let scanCanvas: HTMLCanvasElement | null = null
 let barcodeDetector: { detect: (source: CanvasImageSource) => Promise<Array<{ rawValue?: string }>> } | null = null
 
-const statusTextMap: Record<O2oPreorderDetail['order']['status'], string> = {
-  pending: '待核销',
-  verified: '已核销',
-  cancelled: '已取消',
-}
-
-const statusClassMap: Record<O2oPreorderDetail['order']['status'], string> = {
-  pending: 'status-chip--pending',
-  verified: 'status-chip--verified',
-  cancelled: 'status-chip--cancelled',
-}
-
-const canVerify = computed(() => detail.value?.order.status === 'pending')
+const canVerify = computed(() => isO2oOrderPending(detail.value?.order.status))
 const isShowNo = (value: string) => /^PO\d{8}\d{4}$/i.test(value)
 
 const normalizeVerifyCode = (rawValue: string) => {
@@ -322,7 +315,7 @@ watch(
               <p class="text-lg font-semibold text-slate-900">{{ detail.order.showNo }}</p>
               <div class="mt-2 flex items-center gap-2">
                 <span class="text-sm text-slate-400">状态</span>
-                <span class="status-chip" :class="statusClassMap[detail.order.status]">{{ statusTextMap[detail.order.status] }}</span>
+                <span class="status-chip" :class="VERIFY_CONSOLE_O2O_ORDER_STATUS_CLASS_MAP[detail.order.status]">{{ VERIFY_CONSOLE_O2O_ORDER_STATUS_LABEL_MAP[detail.order.status] }}</span>
               </div>
             </div>
             <el-button

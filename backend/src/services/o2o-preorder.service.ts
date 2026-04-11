@@ -45,6 +45,50 @@ class O2oPreorderService {
     return raw
   }
 
+  private resolveOrderStatusReport(order: Pick<O2oPreorder, 'status' | 'timeoutAt'>, nowMs = Date.now()) {
+    const timeoutAtMs = order.timeoutAt ? order.timeoutAt.getTime() : null
+    const timeoutReached = Boolean(timeoutAtMs && timeoutAtMs <= nowMs)
+    const timeoutSoon = Boolean(timeoutAtMs && timeoutAtMs > nowMs && timeoutAtMs - nowMs <= 2 * 60 * 60 * 1000)
+    if (order.status === 'verified') {
+      return {
+        scenario: 'verified' as const,
+        cancelReason: null as null,
+        timeoutReached,
+        timeoutSoon: false,
+      }
+    }
+    if (order.status === 'cancelled' && timeoutReached) {
+      return {
+        scenario: 'timeout_cancelled' as const,
+        cancelReason: 'timeout' as const,
+        timeoutReached: true,
+        timeoutSoon: false,
+      }
+    }
+    if (order.status === 'cancelled') {
+      return {
+        scenario: 'cancelled' as const,
+        cancelReason: 'manual' as const,
+        timeoutReached,
+        timeoutSoon: false,
+      }
+    }
+    if (timeoutSoon) {
+      return {
+        scenario: 'timeout_soon' as const,
+        cancelReason: null as null,
+        timeoutReached,
+        timeoutSoon: true,
+      }
+    }
+    return {
+      scenario: 'pending' as const,
+      cancelReason: null as null,
+      timeoutReached,
+      timeoutSoon: false,
+    }
+  }
+
   async listMallProducts() {
     // 商城端只暴露“可售且已上架”的商品，并把库存口径统一换算成前端直接可用的 availableStock。
     const products = await this.productRepo.find({
@@ -188,6 +232,7 @@ class O2oPreorderService {
       take: 50,
     })
     return rows.map((item) => ({
+      statusReport: this.resolveOrderStatusReport(item),
       id: String(item.id),
       showNo: item.showNo,
       verifyCode: item.verifyCode,
@@ -206,6 +251,7 @@ class O2oPreorderService {
     const items = await this.preorderItemRepo.find({ where: { orderId: id }, relations: { product: true } })
     return {
       order: {
+        statusReport: this.resolveOrderStatusReport(order),
         id: String(order.id),
         showNo: order.showNo,
         verifyCode: order.verifyCode,

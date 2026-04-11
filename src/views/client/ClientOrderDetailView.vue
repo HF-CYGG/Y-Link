@@ -13,6 +13,13 @@ import QRCode from 'qrcode'
 import { getO2oPreorderDetail, type O2oPreorderDetail } from '@/api/modules/o2o'
 import { BaseRequestState } from '@/components/common'
 import { useStableRequest } from '@/composables/useStableRequest'
+import {
+  CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG,
+  getClientOrderReportScenario,
+  isO2oOrderCancelled,
+  isO2oOrderTimeoutCancelled,
+  isO2oOrderVerified,
+} from '@/constants/o2o-order-status'
 import { normalizeRequestError } from '@/utils/error'
 
 const route = useRoute()
@@ -24,22 +31,18 @@ const qrDataUrl = ref('')
 const requestError = ref<{ type: 'offline' | 'error'; message: string } | null>(null)
 const { runLatest } = useStableRequest()
 
-const statusLabel = computed(() => {
+const currentReportScenario = computed(() => {
   if (!detail.value) {
-    return '未知'
+    return 'pending'
   }
-  const status = detail.value.order.status
-  const timeoutReached = Boolean(detail.value.order.timeoutAt && new Date(detail.value.order.timeoutAt).getTime() <= Date.now())
-  if (status === 'verified') {
-    return '已核销'
+  if (detail.value.order.statusReport?.scenario) {
+    return detail.value.order.statusReport.scenario
   }
-  if (status === 'cancelled' && timeoutReached) {
-    return '已超时取消'
-  }
-  if (status === 'cancelled') {
-    return '已取消'
-  }
-  return '待取货'
+  return getClientOrderReportScenario(detail.value.order.status, detail.value.order.timeoutAt)
+})
+
+const statusLabel = computed(() => {
+  return CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG[currentReportScenario.value].statusLabel
 })
 
 const handleBack = () => {
@@ -47,18 +50,8 @@ const handleBack = () => {
 }
 
 const statusBanner = computed(() => {
-  const status = detail.value?.order.status
-  const timeoutReached = Boolean(detail.value?.order.timeoutAt && new Date(detail.value.order.timeoutAt).getTime() <= Date.now())
-  if (status === 'verified') {
-    return { className: 'bg-emerald-50 text-emerald-700', text: '订单已核销完成，可在订单列表查看历史记录。' }
-  }
-  if (status === 'cancelled' && timeoutReached) {
-    return { className: 'bg-orange-50 text-orange-700', text: '订单因超时未领取已自动取消，库存已释放。' }
-  }
-  if (status === 'cancelled') {
-    return { className: 'bg-slate-100 text-slate-600', text: '订单已取消，如需取货请重新下单。' }
-  }
-  return { className: 'bg-amber-50 text-amber-700', text: '请在有效时段内到店出示核销码完成领取。' }
+  const report = CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG[currentReportScenario.value]
+  return { className: report.cardClassName, title: report.cardTitle, description: report.cardDescription }
 })
 
 const timelineItems = computed(() => {
@@ -66,14 +59,11 @@ const timelineItems = computed(() => {
     return []
   }
   const order = detail.value.order
-  const timeoutAtMs = order.timeoutAt ? new Date(order.timeoutAt).getTime() : null
   const nowMs = Date.now()
-  const timeoutReached = Boolean(timeoutAtMs && timeoutAtMs <= nowMs)
-  const timeoutSoon = Boolean(timeoutAtMs && timeoutAtMs > nowMs && timeoutAtMs - nowMs <= 2 * 60 * 60 * 1000)
-  // cancelled 场景无法从后端直接区分“人工取消/超时取消”，因此使用 timeoutAt 是否已过期做前端推断。
-  const cancelledByTimeout = order.status === 'cancelled' && timeoutReached
+  const report = CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG[currentReportScenario.value]
+  const cancelledByTimeout = isO2oOrderTimeoutCancelled(order.status, order.timeoutAt, nowMs)
 
-  if (order.status === 'verified') {
+  if (isO2oOrderVerified(order.status)) {
     return [
       { key: 'created', title: '已下单', time: order.createdAt, active: true },
       { key: 'prepare', title: '备货完成', time: order.timeoutAt || '门店已备货', active: true },
@@ -82,20 +72,20 @@ const timelineItems = computed(() => {
     ]
   }
 
-  if (order.status === 'cancelled') {
+  if (isO2oOrderCancelled(order.status)) {
     return [
       { key: 'created', title: '已下单', time: order.createdAt, active: true },
       { key: 'prepare', title: '备货中', time: order.timeoutAt || '门店处理中', active: !cancelledByTimeout },
       {
         key: 'cancelled',
-        title: cancelledByTimeout ? '超时自动取消' : '人工取消',
+        title: report.timelineCurrentTitle,
         time: order.timeoutAt || '已取消',
         active: true,
       },
       {
         key: 'closed',
         title: '订单关闭',
-        time: cancelledByTimeout ? '库存已自动释放' : '订单已关闭',
+        time: report.timelineCurrentHint,
         active: true,
       },
     ]
@@ -105,14 +95,14 @@ const timelineItems = computed(() => {
     { key: 'created', title: '已下单', time: order.createdAt, active: true },
     {
       key: 'prepare',
-      title: timeoutSoon ? '待取货（即将超时）' : '备货中',
+      title: '备货中',
       time: order.timeoutAt || '按门店通知准备',
       active: true,
     },
     {
       key: 'pending',
-      title: timeoutSoon ? '请尽快到店核销' : '待核销',
-      time: order.timeoutAt || '待完成',
+      title: report.timelineCurrentTitle,
+      time: order.timeoutAt || report.timelineCurrentHint,
       active: true,
     },
     {
@@ -161,7 +151,6 @@ const renderQrCode = async () => {
   })
 }
 
-// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const loadDetail = async () => {
   const orderId = String(route.params.id ?? '').trim()
   if (!orderId) {
@@ -229,7 +218,10 @@ onMounted(async () => {
       <aside class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)]">
         <p class="text-lg font-semibold text-slate-900">{{ detail.order.showNo }}</p>
         <p class="mt-1 text-sm text-slate-400">状态：{{ statusLabel }}</p>
-        <p class="mt-3 rounded-2xl px-3 py-2 text-sm" :class="statusBanner.className">{{ statusBanner.text }}</p>
+        <div class="mt-3 rounded-2xl px-3 py-2" :class="statusBanner.className">
+          <p class="text-sm font-semibold">{{ statusBanner.title }}</p>
+          <p class="mt-1 text-xs">{{ statusBanner.description }}</p>
+        </div>
 
         <div class="mt-5 rounded-3xl bg-slate-50 p-4 text-center">
           <img v-if="qrDataUrl" :src="qrDataUrl" alt="预订单二维码" class="mx-auto h-64 w-64 rounded-2xl bg-white p-3 shadow-sm" />

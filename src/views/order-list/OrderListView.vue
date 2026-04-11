@@ -9,7 +9,7 @@
 
 import dayjs from 'dayjs'
 import { ElMessage } from 'element-plus'
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import {
   BizResponsiveDataCollectionShell,
   BizResponsiveDrawerShell,
@@ -56,6 +56,12 @@ const voucherDialogVisible = ref(false)
 const voucherPrintRootRef = ref<HTMLElement | null>(null)
 const enableHtml2pdfExport = import.meta.env.VITE_ORDER_VOUCHER_HTML2PDF_ENABLED !== 'false'
 const exportPdfLoading = ref(false)
+const hasActiveFilter = computed(() => {
+  return Boolean(searchForm.value.keyword || searchForm.value.orderType !== 'all' || searchForm.value.dateRange)
+})
+const emptyDescription = computed(() => {
+  return hasActiveFilter.value ? '未匹配到符合条件的订单，请调整筛选条件后重试' : '暂无订单数据，稍后可通过开单后回来查看'
+})
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const handleOpenVoucherDialog = () => {
@@ -121,11 +127,20 @@ const handleExportVoucherPdf = async () => {
         <template #default="{ isPhone, isTablet }">
           <div class="flex w-full flex-wrap items-center gap-3">
             <el-input
-              v-model="searchForm.showNo"
-              placeholder="请输入业务单号"
+              v-model="searchForm.keyword"
+              placeholder="输入业务单号/客户/部门/出单人关键词"
               :class="isPhone ? '!w-full' : isTablet ? '!w-[240px]' : '!w-[280px]'"
               clearable
             />
+            <el-select
+              v-model="searchForm.orderType"
+              placeholder="订单分类"
+              :class="isPhone ? '!w-full' : isTablet ? '!w-[160px]' : '!w-[170px]'"
+            >
+              <el-option label="全部分类" value="all" />
+              <el-option label="部门单" value="department" />
+              <el-option label="散客单" value="walkin" />
+            </el-select>
             <el-date-picker
               v-model="searchForm.dateRange"
               type="daterange"
@@ -155,7 +170,8 @@ const handleExportVoucherPdf = async () => {
         <BizResponsiveDataCollectionShell
           :items="listState.records"
           :loading="listState.loading"
-          empty-description="暂无出库单数据"
+          :empty-description="emptyDescription"
+          loading-description="正在加载订单列表，请稍候..."
           empty-min-height="260px"
           :skeleton-rows="8"
           card-key="id"
@@ -164,7 +180,15 @@ const handleExportVoucherPdf = async () => {
           card-container-class="flex-1 content-start pb-4"
         >
           <template #table>
-            <el-table :data="listState.records" stripe class="flex-1 w-full" height="100%" table-layout="auto">
+            <el-table
+              :data="listState.records"
+              stripe
+              class="flex-1 w-full"
+              height="100%"
+              table-layout="auto"
+              v-loading="listState.loading"
+              element-loading-text="正在刷新订单数据，请稍候..."
+            >
               <el-table-column label="业务单号" prop="showNo" min-width="180" show-overflow-tooltip />
               <el-table-column label="客户名称" prop="customerName" min-width="200" show-overflow-tooltip>
                 <template #default="{ row }">{{ row.customerName || '-' }}</template>
