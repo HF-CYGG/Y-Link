@@ -31,6 +31,8 @@ const verifySchema = z.object({
 const consoleOrderQuerySchema = z.object({
   status: z.enum(['pending', 'verified', 'cancelled']).optional(),
   keyword: z.string().trim().max(64).optional(),
+  startTime: z.string().trim().max(32).optional(),
+  endTime: z.string().trim().max(32).optional(),
   limit: z.coerce.number().int().min(1).max(200).optional(),
 })
 

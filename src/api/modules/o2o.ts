@@ -30,6 +30,8 @@ export interface O2oMallProduct {
 
 export interface O2oPreorderSummary {
   statusReport: O2oOrderStatusReport
+  totalAmount?: string
+  expireInSeconds?: number
   id: string
   showNo: string
   verifyCode: string
@@ -46,11 +48,14 @@ export interface O2oPreorderDetailItem {
   productName: string
   defaultPrice: string
   qty: number
+  subTotal?: string
 }
 
 export interface O2oPreorderDetail {
   order: {
     statusReport: O2oOrderStatusReport
+    totalAmount?: string
+    expireInSeconds?: number
     id: string
     showNo: string
     verifyCode: string
@@ -61,6 +66,11 @@ export interface O2oPreorderDetail {
     createdAt: string
   }
   items: O2oPreorderDetailItem[]
+  amountSummary?: {
+    totalAmount: string
+    totalQty: number
+    totalItemCount: number
+  }
   qrPayload: string
 }
 

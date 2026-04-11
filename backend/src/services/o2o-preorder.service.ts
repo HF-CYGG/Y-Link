@@ -5,9 +5,10 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { In, LessThanOrEqual } from 'typeorm'
+import { Brackets, In, LessThanOrEqual } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
+import { ClientUser } from '../entities/client-user.entity.js'
 import { InventoryLog } from '../entities/inventory-log.entity.js'
 import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
 import { O2oPreorderItem } from '../entities/o2o-preorder-item.entity.js'
@@ -87,6 +88,49 @@ class O2oPreorderService {
       timeoutReached,
       timeoutSoon: false,
     }
+  }
+
+  private normalizeDecimalText(value: string | number | null | undefined, fallback = '0.00') {
+    if (value === null || value === undefined || value === '') {
+      return fallback
+    }
+    const normalizedNumber = Number(value)
+    return Number.isFinite(normalizedNumber) ? normalizedNumber.toFixed(2) : fallback
+  }
+
+  private resolveExpireInSeconds(order: Pick<O2oPreorder, 'status' | 'timeoutAt'>, nowMs = Date.now()) {
+    if (order.status !== 'pending' || !order.timeoutAt) {
+      return 0
+    }
+    const remainMs = order.timeoutAt.getTime() - nowMs
+    return remainMs > 0 ? Math.floor(remainMs / 1000) : 0
+  }
+
+  private parseTimeFilter(value: string | undefined, fieldName: '开始时间' | '结束时间') {
+    const normalizedValue = value?.trim()
+    if (!normalizedValue) {
+      return null
+    }
+    const parsed = new Date(normalizedValue)
+    if (Number.isNaN(parsed.getTime())) {
+      throw new BizError(`${fieldName}格式不正确`, 400)
+    }
+    return parsed
+  }
+
+  private async resolveOrderTotalAmountMap(orderIds: string[]) {
+    if (!orderIds.length) {
+      return new Map<string, string>()
+    }
+    const rows = await this.preorderItemRepo
+      .createQueryBuilder('item')
+      .leftJoin('item.product', 'product')
+      .select('item.orderId', 'orderId')
+      .addSelect('SUM(item.qty * COALESCE(product.defaultPrice, 0))', 'totalAmount')
+      .where('item.orderId IN (:...orderIds)', { orderIds })
+      .groupBy('item.orderId')
+      .getRawMany<{ orderId: string; totalAmount: string | number | null }>()
+    return new Map(rows.map((item) => [String(item.orderId), this.normalizeDecimalText(item.totalAmount)]))
   }
 
   async listMallProducts() {
@@ -231,8 +275,12 @@ class O2oPreorderService {
       order: { id: 'DESC' },
       take: 50,
     })
+    const nowMs = Date.now()
+    const totalAmountMap = await this.resolveOrderTotalAmountMap(rows.map((item) => String(item.id)))
     return rows.map((item) => ({
-      statusReport: this.resolveOrderStatusReport(item),
+      statusReport: this.resolveOrderStatusReport(item, nowMs),
+      totalAmount: totalAmountMap.get(String(item.id)) ?? '0.00',
+      expireInSeconds: this.resolveExpireInSeconds(item, nowMs),
       id: String(item.id),
       showNo: item.showNo,
       verifyCode: item.verifyCode,
@@ -243,24 +291,75 @@ class O2oPreorderService {
     }))
   }
 
-  async listConsoleOrders(input: { status?: 'pending' | 'verified' | 'cancelled'; keyword?: string; limit?: number }) {
+  async listConsoleOrders(input: {
+    status?: 'pending' | 'verified' | 'cancelled'
+    keyword?: string
+    startTime?: string
+    endTime?: string
+    limit?: number
+  }) {
     const normalizedKeyword = input.keyword?.trim() ?? ''
     const normalizedLimit = Math.max(1, Math.min(200, Number(input.limit) || 50))
+    const startTime = this.parseTimeFilter(input.startTime, '开始时间')
+    const endTime = this.parseTimeFilter(input.endTime, '结束时间')
+    if (startTime && endTime && startTime.getTime() > endTime.getTime()) {
+      throw new BizError('开始时间不能晚于结束时间', 400)
+    }
+    await this.cancelTimeoutOrders()
     const queryBuilder = this.preorderRepo.createQueryBuilder('order').orderBy('order.id', 'DESC').take(normalizedLimit)
 
     if (input.status) {
       queryBuilder.andWhere('order.status = :status', { status: input.status })
     }
 
+    if (startTime) {
+      queryBuilder.andWhere('order.createdAt >= :startTime', { startTime })
+    }
+    if (endTime) {
+      queryBuilder.andWhere('order.createdAt <= :endTime', { endTime })
+    }
+
     if (normalizedKeyword) {
-      queryBuilder.andWhere('(order.showNo LIKE :keyword OR order.verifyCode LIKE :keyword)', {
-        keyword: `%${normalizedKeyword}%`,
-      })
+      const keyword = `%${normalizedKeyword}%`
+      const clientKeywordSubQuery = this.preorderRepo
+        .createQueryBuilder('order_keyword_client')
+        .subQuery()
+        .select('1')
+        .from(ClientUser, 'clientUser')
+        .where('clientUser.id = order.clientUserId')
+        .andWhere(
+          '(clientUser.realName LIKE :keyword OR clientUser.mobile LIKE :keyword OR clientUser.departmentName LIKE :keyword)',
+        )
+        .getQuery()
+      const itemKeywordSubQuery = this.preorderRepo
+        .createQueryBuilder('order_keyword_item')
+        .subQuery()
+        .select('1')
+        .from(O2oPreorderItem, 'item')
+        .leftJoin(BaseProduct, 'product', 'product.id = item.productId')
+        .where('item.orderId = order.id')
+        .andWhere('(product.productName LIKE :keyword OR product.productCode LIKE :keyword)')
+        .getQuery()
+      queryBuilder.andWhere(
+        new Brackets((keywordQb) => {
+          keywordQb
+            .where('order.showNo LIKE :keyword', { keyword })
+            .orWhere('order.verifyCode LIKE :keyword', { keyword })
+            .orWhere('order.remark LIKE :keyword', { keyword })
+            .orWhere('order.verifiedBy LIKE :keyword', { keyword })
+            .orWhere(`EXISTS ${clientKeywordSubQuery}`, { keyword })
+            .orWhere(`EXISTS ${itemKeywordSubQuery}`, { keyword })
+        }),
+      )
     }
 
     const rows = await queryBuilder.getMany()
+    const nowMs = Date.now()
+    const totalAmountMap = await this.resolveOrderTotalAmountMap(rows.map((item) => String(item.id)))
     return rows.map((item) => ({
-      statusReport: this.resolveOrderStatusReport(item),
+      statusReport: this.resolveOrderStatusReport(item, nowMs),
+      totalAmount: totalAmountMap.get(String(item.id)) ?? '0.00',
+      expireInSeconds: this.resolveExpireInSeconds(item, nowMs),
       id: String(item.id),
       showNo: item.showNo,
       verifyCode: item.verifyCode,
@@ -272,14 +371,34 @@ class O2oPreorderService {
   }
 
   async detailById(id: string) {
+    await this.cancelTimeoutOrders()
     const order = await this.preorderRepo.findOne({ where: { id } })
     if (!order) {
       throw new BizError('预订单不存在', 404)
     }
     const items = await this.preorderItemRepo.find({ where: { orderId: id }, relations: { product: true } })
+    let totalAmountNumber = 0
+    const normalizedItems = items.map((item) => {
+      const unitPrice = Number(item.product?.defaultPrice ?? 0)
+      const lineAmount = unitPrice * Number(item.qty ?? 0)
+      totalAmountNumber += lineAmount
+      return {
+        id: String(item.id),
+        productId: String(item.productId),
+        productCode: item.product?.productCode ?? '',
+        productName: item.product?.productName ?? '',
+        defaultPrice: this.normalizeDecimalText(unitPrice),
+        qty: item.qty,
+        subTotal: this.normalizeDecimalText(lineAmount),
+      }
+    })
+    const nowMs = Date.now()
+    const totalAmount = this.normalizeDecimalText(totalAmountNumber)
     return {
       order: {
-        statusReport: this.resolveOrderStatusReport(order),
+        statusReport: this.resolveOrderStatusReport(order, nowMs),
+        totalAmount,
+        expireInSeconds: this.resolveExpireInSeconds(order, nowMs),
         id: String(order.id),
         showNo: order.showNo,
         verifyCode: order.verifyCode,
@@ -289,14 +408,12 @@ class O2oPreorderService {
         verifiedAt: order.verifiedAt,
         createdAt: order.createdAt,
       },
-      items: items.map((item) => ({
-        id: String(item.id),
-        productId: String(item.productId),
-        productCode: item.product?.productCode ?? '',
-        productName: item.product?.productName ?? '',
-        defaultPrice: String(item.product?.defaultPrice ?? '0'),
-        qty: item.qty,
-      })),
+      items: normalizedItems,
+      amountSummary: {
+        totalAmount,
+        totalQty: order.totalQty,
+        totalItemCount: normalizedItems.length,
+      },
       qrPayload: `y-link://o2o/verify/${order.verifyCode}`,
     }
   }
@@ -452,6 +569,7 @@ class O2oPreorderService {
 
   async getVerifyDetail(verifyCode: string) {
     const normalizedVerifyCode = this.normalizeVerifyCode(verifyCode)
+    await this.cancelTimeoutOrders()
     const order = await this.preorderRepo.findOne({ where: { verifyCode: normalizedVerifyCode } })
     if (!order) {
       throw new BizError('预订单不存在', 404)
@@ -464,6 +582,7 @@ class O2oPreorderService {
     if (!normalizedShowNo) {
       throw new BizError('预订单号不能为空', 400)
     }
+    await this.cancelTimeoutOrders()
     const order = await this.preorderRepo.findOne({ where: { showNo: normalizedShowNo } })
     if (!order) {
       throw new BizError('预订单不存在', 404)

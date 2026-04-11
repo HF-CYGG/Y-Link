@@ -6,8 +6,9 @@
  */
 
 
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { useRoute } from 'vue-router'
 import { PageContainer } from '@/components/common'
 import {
   VERIFY_CONSOLE_O2O_ORDER_STATUS_CLASS_MAP,
@@ -31,6 +32,8 @@ const scanDialogVisible = ref(false)
 const scanLoading = ref(false)
 const videoRef = ref<HTMLVideoElement | null>(null)
 const { isPhone } = useDevice()
+const route = useRoute()
+const lastRouteVerifyKey = ref('')
 let scanStream: MediaStream | null = null
 let scanFrameId: number | null = null
 let scanCanvas: HTMLCanvasElement | null = null
@@ -230,6 +233,24 @@ const handlePasteAndSearch = async () => {
   }
 }
 
+const applyVerifyCodeFromRoute = async () => {
+  const routeVerifyCode = typeof route.query.verifyCode === 'string' ? route.query.verifyCode : ''
+  const normalizedCode = normalizeVerifyCode(routeVerifyCode)
+  if (!normalizedCode) {
+    return
+  }
+  const autoSearch = route.query.autoSearch === '1'
+  const routeVerifyKey = `${normalizedCode}__${autoSearch ? '1' : '0'}`
+  if (routeVerifyKey === lastRouteVerifyKey.value) {
+    return
+  }
+  lastRouteVerifyKey.value = routeVerifyKey
+  verifyCode.value = normalizedCode
+  if (autoSearch) {
+    await handleSearch()
+  }
+}
+
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const handleVerify = async () => {
   if (!detail.value) {
@@ -262,12 +283,24 @@ onBeforeUnmount(() => {
   stopScanCamera()
 })
 
+onMounted(async () => {
+  await focusInput()
+  await applyVerifyCodeFromRoute()
+})
+
 watch(
   () => verifyCode.value,
   (value) => {
     if (!value.trim()) {
       detail.value = null
     }
+  },
+)
+
+watch(
+  () => [route.query.verifyCode, route.query.autoSearch],
+  async () => {
+    await applyVerifyCodeFromRoute()
   },
 )
 </script>
