@@ -37,6 +37,31 @@ class O2oPreorderService {
   private readonly preorderItemRepo = AppDataSource.getRepository(O2oPreorderItem)
   private readonly inventoryLogRepo = AppDataSource.getRepository(InventoryLog)
 
+  // 货币金额统一按“分”做整数运算，避免 0.1 + 0.2、19.9 * 3 之类的浮点误差。
+  // 当前商品单价字段是 scale=2 的 decimal，因此这里按两位小数解析即可满足业务口径。
+  private parseMoneyToCents(value: string | number | null | undefined) {
+    if (value === null || value === undefined || value === '') {
+      return 0
+    }
+    const raw = String(value).trim()
+    const matched = raw.match(/^([+-]?)(\d+)(?:\.(\d{1,2}))?$/)
+    if (!matched) {
+      return 0
+    }
+    const sign = matched[1] === '-' ? -1 : 1
+    const integerPart = Number(matched[2] ?? '0')
+    const decimalPart = (matched[3] ?? '').padEnd(2, '0')
+    return sign * (integerPart * 100 + Number(decimalPart))
+  }
+
+  private formatCentsToMoney(cents: number) {
+    const sign = cents < 0 ? '-' : ''
+    const absoluteCents = Math.abs(cents)
+    const integerPart = Math.floor(absoluteCents / 100)
+    const decimalPart = String(absoluteCents % 100).padStart(2, '0')
+    return `${sign}${integerPart}.${decimalPart}`
+  }
+
   private normalizeVerifyCode(value: string) {
     const raw = value.trim()
     if (!raw) {
@@ -126,7 +151,7 @@ class O2oPreorderService {
     const showNo = await orderSerialService.generateOrderNo('walkin', manager)
 
     let totalQty = 0
-    let totalAmount = 0
+    let totalAmountCents = 0
     const itemEntities: BizOutboundOrderItem[] = []
 
     input.items.forEach((row, index) => {
@@ -135,18 +160,18 @@ class O2oPreorderService {
         throw new BizError('商品不存在，无法生成对应出库单', 409)
       }
       const qty = Number(row.qty ?? 0)
-      const unitPrice = Number(product.defaultPrice ?? 0)
-      const lineAmount = Number((qty * unitPrice).toFixed(2))
+      const unitPriceCents = this.parseMoneyToCents(product.defaultPrice)
+      const lineAmountCents = qty * unitPriceCents
       totalQty += qty
-      totalAmount += lineAmount
+      totalAmountCents += lineAmountCents
       itemEntities.push(
         itemRepo.create({
           lineNo: index + 1,
           productId: product.id,
           productNameSnapshot: product.productName,
           qty: qty.toFixed(2),
-          unitPrice: unitPrice.toFixed(2),
-          lineAmount: lineAmount.toFixed(2),
+          unitPrice: this.formatCentsToMoney(unitPriceCents),
+          lineAmount: this.formatCentsToMoney(lineAmountCents),
           remark: `线上预订核销，预订单号：${input.preorder.showNo}`,
         }),
       )
@@ -164,7 +189,7 @@ class O2oPreorderService {
       customerName: clientUser?.realName?.trim() || null,
       remark: `线上预订核销出库，预订单号：${input.preorder.showNo}`,
       totalQty: totalQty.toFixed(2),
-      totalAmount: totalAmount.toFixed(2),
+      totalAmount: this.formatCentsToMoney(totalAmountCents),
       creatorUserId: input.actor.userId,
       creatorUsername: input.actor.username,
       creatorDisplayName: input.actor.displayName,
