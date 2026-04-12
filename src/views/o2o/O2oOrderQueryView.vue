@@ -152,6 +152,15 @@ const poolOrderMap = computed(() => {
 })
 
 const currentPoolOrders = computed(() => poolOrderMap.value[activePool.value])
+const detailEmptyText = computed(() => {
+  if (listLoading.value) {
+    return '订单加载中...'
+  }
+  if (!currentPoolOrders.value.length) {
+    return '当前分类无符合条件的订单'
+  }
+  return '请选择左侧订单查看状态报告与进度节点'
+})
 const activeNewOrderNotice = computed(() => {
   if (!latestNewOrderNotice.value) {
     return null
@@ -357,16 +366,12 @@ const mergeOrderSummaryFromDetail = (detail: O2oPreorderDetail) => {
 const syncActiveOrder = async () => {
   const currentOrders = currentPoolOrders.value
   if (currentOrders.length === 0) {
-    // 当当前分类下没有订单时，自动回退到第一个有数据的分类。
-    // 这样用户不会因为停留在“空分类”里而看不到已有订单详情。
-    const firstNonEmptyPool = ORDER_POOL_TABS.find((tab) => poolOrderMap.value[tab.key].length > 0)
-    if (firstNonEmptyPool) {
-      activePool.value = firstNonEmptyPool.key
-    } else {
-      activeOrderId.value = ''
-      activeOrderDetail.value = null
-      return
-    }
+    // 用户主动点进空分类时，不自动跳走。
+    // 这样左侧“新订单/临近超时/已完成”等空分类也能正常进入，
+    // 右侧只展示空态说明即可。
+    activeOrderId.value = ''
+    activeOrderDetail.value = null
+    return
   }
   const latestCurrentOrders = poolOrderMap.value[activePool.value]
   const exists = latestCurrentOrders.find((item) => item.id === activeOrderId.value)
@@ -720,7 +725,7 @@ onBeforeUnmount(() => {
         </template>
 
         <div v-else class="flex min-h-64 items-center justify-center rounded-2xl border border-dashed border-slate-200 text-sm text-slate-400">
-          {{ listLoading ? '订单加载中...' : '请选择左侧订单查看状态报告与进度节点' }}
+          {{ detailEmptyText }}
         </div>
       </section>
     </div>
