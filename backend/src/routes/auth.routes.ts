@@ -11,6 +11,7 @@ import { requireAuth } from '../middleware/auth.middleware.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 import { authService } from '../services/auth.service.js'
+import { authSecurityService } from '../services/auth-security.service.js'
 
 const loginSchema = z.object({
   username: z.string().min(1, '账号不能为空'),
@@ -29,7 +30,10 @@ authRouter.post(
   '/login',
   asyncHandler(async (req, res) => {
     const payload = loginSchema.parse(req.body)
-    const data = await authService.login(payload, extractRequestMeta(req))
+    const requestMeta = extractRequestMeta(req)
+    // 管理端登录先经过频控与锁定校验，再进入账号密码校验。
+    await authSecurityService.guardAdminLoginRequest(requestMeta, payload.username)
+    const data = await authService.login(payload, requestMeta)
     res.json({
       code: 0,
       message: 'ok',

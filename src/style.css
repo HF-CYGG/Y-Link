@@ -355,7 +355,9 @@ html.dark .el-drawer {
 
 /* 应用根容器高度占满视口，便于布局组件直接继承。 */
 #app {
-  min-height: 100vh;
+  min-height: 100dvh;
+  width: 100%;
+  min-width: 0;
 }
 
 /* Element Plus 表格头部样式优化。 */

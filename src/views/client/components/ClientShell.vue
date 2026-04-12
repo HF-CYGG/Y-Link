@@ -53,13 +53,13 @@ const handleLogout = async () => {
 </script>
 
 <template>
-  <div class="client-shell min-h-screen text-slate-900">
+  <div class="client-shell min-h-[100dvh] text-slate-900">
     <header class="sticky top-0 z-20 border-b border-white/60 bg-white/80 backdrop-blur-xl">
       <div class="mx-auto flex max-w-6xl items-center justify-between gap-4 px-4 py-3">
         <div>
           <p class="text-xs font-semibold tracking-[0.18em] text-slate-400">Y-LINK CLIENT</p>
-          <p class="mt-1 text-lg font-semibold text-slate-900">{{ props.title }}</p>
-          <p v-if="props.subtitle" class="text-sm text-slate-500">{{ props.subtitle }}</p>
+          <p class="mt-1 break-words text-lg font-semibold text-slate-900">{{ props.title }}</p>
+          <p v-if="props.subtitle" class="break-words text-sm text-slate-500">{{ props.subtitle }}</p>
         </div>
 
         <div class="flex flex-wrap items-center justify-end gap-2">

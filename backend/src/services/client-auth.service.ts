@@ -11,8 +11,11 @@ import { ClientUser } from '../entities/client-user.entity.js'
 import { ClientUserSession } from '../entities/client-user-session.entity.js'
 import type { ClientAuthContext } from '../types/client-auth.js'
 import { BizError } from '../utils/errors.js'
+import type { RequestMeta } from '../utils/request-meta.js'
 import { hashPassword, verifyPassword } from '../utils/password.js'
 import { generateSessionToken } from '../utils/token.js'
+import { auditService } from './audit.service.js'
+import { authSecurityService } from './auth-security.service.js'
 import { captchaService } from './captcha.service.js'
 
 interface ResetTicket {
@@ -84,11 +87,12 @@ class ClientAuthService {
     return normalized
   }
 
-  async createCaptcha() {
+  async createCaptcha(requestMeta?: RequestMeta) {
+    await authSecurityService.guardClientCaptchaRequest(requestMeta)
     return captchaService.createCaptcha()
   }
 
-  async register(input: ClientRegisterInput) {
+  async register(input: ClientRegisterInput, requestMeta?: RequestMeta) {
     const mobile = this.normalizeMobile(input.mobile)
     const password = input.password.trim()
     if (password.length < 6) {
@@ -111,12 +115,22 @@ class ClientAuthService {
     return this.toClientProfile(user)
   }
 
-  async login(input: ClientLoginInput) {
+  async login(input: ClientLoginInput, requestMeta?: RequestMeta) {
     const mobile = this.normalizeMobile(input.mobile)
     const password = input.password.trim()
     captchaService.verifyCaptcha(input.captchaId, input.captchaCode)
     const user = await this.findUserWithPasswordByMobile(mobile)
     if (!user) {
+      await authSecurityService.recordClientLoginFailure(requestMeta, mobile)
+      await auditService.safeRecord({
+        actionType: 'client.auth.login',
+        actionLabel: '客户端登录',
+        targetType: 'client_session',
+        targetCode: mobile,
+        resultStatus: 'failed',
+        requestMeta,
+        detail: { reason: 'user_not_found' },
+      })
       throw new BizError('手机号或密码错误', 401)
     }
     if (user.status !== 'enabled') {
@@ -124,6 +138,17 @@ class ClientAuthService {
     }
     const matched = await verifyPassword(password, user.passwordHash)
     if (!matched) {
+      await authSecurityService.recordClientLoginFailure(requestMeta, mobile)
+      await auditService.safeRecord({
+        actionType: 'client.auth.login',
+        actionLabel: '客户端登录',
+        targetType: 'client_session',
+        targetId: user.id,
+        targetCode: user.mobile,
+        resultStatus: 'failed',
+        requestMeta,
+        detail: { reason: 'password_mismatch' },
+      })
       throw new BizError('手机号或密码错误', 401)
     }
     const now = new Date()
@@ -142,6 +167,7 @@ class ClientAuthService {
         }),
       )
     })
+    authSecurityService.clearClientLoginFailures(requestMeta, mobile)
     return {
       token,
       expiresAt,
@@ -150,12 +176,13 @@ class ClientAuthService {
     }
   }
 
-  async verifyForgotPassword(input: ClientForgotVerifyInput) {
+  async verifyForgotPassword(input: ClientForgotVerifyInput, requestMeta?: RequestMeta) {
     const mobile = this.normalizeMobile(input.mobile)
     captchaService.verifyCaptcha(input.captchaId, input.captchaCode)
     const user = await this.userRepo.findOne({ where: { mobile } })
     if (!user) {
-      throw new BizError('手机号未注册', 404)
+      // 找回密码不直接暴露“手机号是否已注册”，降低批量枚举账号的风险。
+      throw new BizError('身份校验失败，请确认手机号和验证码后重试', 400)
     }
     const resetToken = generateSessionToken()
     resetTicketStore.set(resetToken, { userId: user.id, expireAt: Date.now() + RESET_TICKET_TTL_MS })
@@ -165,7 +192,7 @@ class ClientAuthService {
     }
   }
 
-  async resetPassword(input: ClientResetPasswordInput) {
+  async resetPassword(input: ClientResetPasswordInput, requestMeta?: RequestMeta) {
     const mobile = this.normalizeMobile(input.mobile)
     const newPassword = input.newPassword.trim()
     if (newPassword.length < 6) {

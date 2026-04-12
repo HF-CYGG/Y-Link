@@ -16,6 +16,7 @@ import type { RequestMeta } from '../utils/request-meta.js'
 import { hashPassword, verifyPassword } from '../utils/password.js'
 import { generateSessionToken } from '../utils/token.js'
 import { auditService } from './audit.service.js'
+import { authSecurityService } from './auth-security.service.js'
 
 export interface LoginInput {
   username: string
@@ -95,6 +96,7 @@ export class AuthService {
     const user = await this.findUserWithPasswordByUsername(username)
 
     if (!user) {
+      await authSecurityService.recordAdminLoginFailure(requestMeta, username)
       await auditService.safeRecord({
         actionType: 'auth.login',
         actionLabel: '用户登录',
@@ -132,6 +134,7 @@ export class AuthService {
 
     const passwordMatched = await verifyPassword(password, user.passwordHash)
     if (!passwordMatched) {
+      await authSecurityService.recordAdminLoginFailure(requestMeta, user.username)
       await auditService.safeRecord({
         actionType: 'auth.login',
         actionLabel: '用户登录',
@@ -212,6 +215,8 @@ export class AuthService {
       }
     })
 
+    // 登录成功后清空该来源与该账号的失败计数，避免历史失败导致后续误锁。
+    authSecurityService.clearAdminLoginFailures(requestMeta, username)
     return data
   }
 

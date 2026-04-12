@@ -9,7 +9,9 @@ import { z } from 'zod'
 import { requireClientAuth } from '../middleware/client-auth.middleware.js'
 import type { ClientAuthenticatedRequest } from '../types/client-auth.js'
 import { asyncHandler } from '../utils/async-handler.js'
+import { extractRequestMeta } from '../utils/request-meta.js'
 import { clientAuthService } from '../services/client-auth.service.js'
+import { authSecurityService } from '../services/auth-security.service.js'
 
 const registerSchema = z.object({
   mobile: z.string().trim().min(1),
@@ -49,8 +51,8 @@ export const clientAuthRouter = Router()
 
 clientAuthRouter.get(
   '/captcha',
-  asyncHandler(async (_req, res) => {
-    const data = await clientAuthService.createCaptcha()
+  asyncHandler(async (req, res) => {
+    const data = await clientAuthService.createCaptcha(extractRequestMeta(req))
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -58,7 +60,10 @@ clientAuthRouter.get(
 clientAuthRouter.post(
   '/register',
   asyncHandler(async (req, res) => {
-    const data = await clientAuthService.register(registerSchema.parse(req.body))
+    const payload = registerSchema.parse(req.body)
+    const requestMeta = extractRequestMeta(req)
+    await authSecurityService.guardClientRegisterRequest(requestMeta, payload.mobile)
+    const data = await clientAuthService.register(payload, requestMeta)
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -66,7 +71,10 @@ clientAuthRouter.post(
 clientAuthRouter.post(
   '/login',
   asyncHandler(async (req, res) => {
-    const data = await clientAuthService.login(loginSchema.parse(req.body))
+    const payload = loginSchema.parse(req.body)
+    const requestMeta = extractRequestMeta(req)
+    await authSecurityService.guardClientLoginRequest(requestMeta, payload.mobile)
+    const data = await clientAuthService.login(payload, requestMeta)
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -74,7 +82,10 @@ clientAuthRouter.post(
 clientAuthRouter.post(
   '/forgot-password/verify',
   asyncHandler(async (req, res) => {
-    const data = await clientAuthService.verifyForgotPassword(forgotVerifySchema.parse(req.body))
+    const payload = forgotVerifySchema.parse(req.body)
+    const requestMeta = extractRequestMeta(req)
+    await authSecurityService.guardClientForgotVerifyRequest(requestMeta, payload.mobile)
+    const data = await clientAuthService.verifyForgotPassword(payload, requestMeta)
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -82,7 +93,10 @@ clientAuthRouter.post(
 clientAuthRouter.post(
   '/forgot-password/reset',
   asyncHandler(async (req, res) => {
-    await clientAuthService.resetPassword(resetPasswordSchema.parse(req.body))
+    const payload = resetPasswordSchema.parse(req.body)
+    const requestMeta = extractRequestMeta(req)
+    await authSecurityService.guardClientForgotResetRequest(requestMeta, payload.mobile)
+    await clientAuthService.resetPassword(payload, requestMeta)
     res.json({ code: 0, message: 'ok', data: true })
   }),
 )

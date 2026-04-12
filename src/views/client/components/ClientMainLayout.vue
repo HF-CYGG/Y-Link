@@ -129,7 +129,7 @@ const handleLogout = async () => {
 </script>
 
 <template>
-  <div class="client-main-layout min-h-screen pb-28 text-slate-900">
+  <div class="client-main-layout min-h-[100dvh] pb-28 text-slate-900">
     <header class="client-main-layout__header sticky top-0 z-30">
       <div class="client-main-layout__container flex items-center justify-between gap-3 px-4 py-3 sm:px-5">
         <div>
@@ -146,7 +146,7 @@ const handleLogout = async () => {
       </div>
     </header>
 
-    <main class="client-main-layout__container px-4 pt-4 sm:px-5 relative">
+    <main class="client-main-layout__container relative min-w-0 px-4 pt-4 sm:px-5">
       <router-view v-slot="{ Component, route: viewRoute }">
         <transition :name="transitionName">
           <KeepAlive :max="3">

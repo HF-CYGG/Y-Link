@@ -66,10 +66,10 @@ const sectionPaddingClass = computed(() => {
 <template>
   <section :class="['w-full min-w-0', containerClass, sectionPaddingClass]">
     <header v-if="title || description" class="mb-4 flex min-w-0 flex-col gap-1 sm:mb-5">
-      <h1 v-if="title" class="truncate text-xl font-semibold text-slate-900 dark:text-slate-100 sm:text-2xl">
+      <h1 v-if="title" class="break-words text-xl font-semibold text-slate-900 dark:text-slate-100 sm:text-2xl">
         {{ title }}
       </h1>
-      <p v-if="description" class="text-sm leading-6 text-slate-500 dark:text-slate-400">
+      <p v-if="description" class="break-words text-sm leading-6 text-slate-500 dark:text-slate-400">
         {{ description }}
       </p>
     </header>

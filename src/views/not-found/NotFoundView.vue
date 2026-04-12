@@ -21,7 +21,7 @@ const goHome = () => {
 </script>
 
 <template>
-  <div class="flex min-h-screen items-center justify-center bg-[#eff1f5] px-4 dark:bg-[#0a0a0b]">
+  <div class="flex min-h-[100dvh] items-center justify-center bg-[#eff1f5] px-4 dark:bg-[#0a0a0b]">
     <div class="apple-card max-w-md p-8 text-center">
       <p class="text-sm font-semibold uppercase tracking-[0.2em] text-brand dark:text-teal-300">Not Found</p>
       <h1 class="mt-3 text-4xl font-semibold text-slate-800 dark:text-slate-100">404</h1>

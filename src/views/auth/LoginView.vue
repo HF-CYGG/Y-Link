@@ -25,6 +25,7 @@ const router = useRouter()
 const authStore = useAuthStore() 
 
 const submitPhase = ref<'idle' | 'submitting' | 'success'>('idle') 
+const securityHint = ref('') 
 
 const rules: FormRules = { 
   username:[{ required: true, message: '请输入账号', trigger: 'blur' }], 
@@ -38,6 +39,12 @@ const submitButtonLabel = computed(() => {
   if (submitPhase.value === 'success') return '进入系统' 
   return '继续' 
 }) 
+
+// 当后端风控触发限流/锁定时，把提示固定显示在表单顶部，
+// 避免用户只看到一闪而过的消息后不知道当前该等多久。
+const applySecurityHintFromMessage = (message: string) => {
+  securityHint.value = /频繁|锁定|稍后|重试/.test(message) ? message : ''
+}
 
 onMounted(() => {
   const root = document.documentElement
@@ -78,7 +85,9 @@ const handleSubmit = async () => {
     await router.replace(redirectPath.value) 
   } catch (error) { 
     submitPhase.value = 'idle' 
-    ElMessage.error(extractErrorMessage(error, '登录失败，请稍后重试')) 
+    const message = extractErrorMessage(error, '登录失败，请稍后重试')
+    applySecurityHintFromMessage(message)
+    ElMessage.error(message) 
   } 
 } 
 </script> 
@@ -149,6 +158,15 @@ const handleSubmit = async () => {
             <p class="form-subtitle">请输入您的访问凭证</p> 
           </div> 
 
+          <el-alert
+            v-if="securityHint"
+            class="mb-4"
+            type="warning"
+            :closable="false"
+            show-icon
+            :title="securityHint"
+          />
+
           <el-form 
             ref="formRef" 
             :model="form" 
@@ -215,7 +233,7 @@ const handleSubmit = async () => {
   --border-light: #e5e5ea; 
 
   position: relative;
-  min-height: 100vh; 
+  min-height: 100dvh; 
   display: flex; 
   align-items: center; 
   justify-content: center; 

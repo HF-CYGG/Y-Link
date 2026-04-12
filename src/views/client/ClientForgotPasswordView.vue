@@ -11,6 +11,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { getClientCaptcha } from '@/api/modules/client-auth'
 import { useClientAuthStore } from '@/store'
+import { extractErrorMessage } from '@/utils/error'
 
 const router = useRouter()
 const clientAuthStore = useClientAuthStore()
@@ -19,6 +20,7 @@ const step = ref<1 | 2>(1)
 const submitting = ref(false)
 const captchaLoading = ref(false)
 const resetToken = ref('')
+const securityHint = ref('')
 
 const captcha = reactive({
   captchaId: '',
@@ -46,6 +48,10 @@ const refreshCaptcha = async () => {
   }
 }
 
+const applySecurityHintFromMessage = (message: string) => {
+  securityHint.value = /频繁|锁定|稍后|重试/.test(message) ? message : ''
+}
+
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const handleVerify = async () => {
   if (!/^1\d{10}$/.test(verifyForm.mobile.trim())) {
@@ -67,7 +73,10 @@ const handleVerify = async () => {
     resetToken.value = result.resetToken
     step.value = 2
     ElMessage.success('身份校验通过，请设置新密码')
-  } catch (_error) {
+  } catch (error) {
+    const message = extractErrorMessage(error, '身份校验失败，请稍后重试')
+    applySecurityHintFromMessage(message)
+    ElMessage.error(message)
     verifyForm.captchaCode = ''
     await refreshCaptcha()
   } finally {
@@ -95,6 +104,10 @@ const handleReset = async () => {
     })
     ElMessage.success('密码已重置，请重新登录')
     await router.replace('/client/login')
+  } catch (error) {
+    const message = extractErrorMessage(error, '重置密码失败，请稍后重试')
+    applySecurityHintFromMessage(message)
+    ElMessage.error(message)
   } finally {
     submitting.value = false
   }
@@ -106,12 +119,21 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="min-h-screen bg-slate-50 px-4 py-8">
+  <div class="min-h-[100dvh] bg-slate-50 px-4 py-8">
     <div class="mx-auto max-w-md rounded-[2rem] bg-white p-6 shadow-[0_20px_60px_rgba(15,23,42,0.08)]">
       <div class="mb-6">
         <p class="text-2xl font-semibold text-slate-900">找回密码</p>
         <p class="mt-2 text-sm text-slate-500">先完成身份验证，再设置新的登录密码</p>
       </div>
+
+      <el-alert
+        v-if="securityHint"
+        class="mb-4"
+        type="warning"
+        :closable="false"
+        show-icon
+        :title="securityHint"
+      />
 
       <div class="mb-6 flex items-center gap-3 text-sm">
         <span class="rounded-full px-3 py-1" :class="step === 1 ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-400'">

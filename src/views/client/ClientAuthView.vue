@@ -70,6 +70,7 @@ import { ElMessage } from 'element-plus'
 import { Key, Lock, OfficeBuilding, Phone, User } from '@element-plus/icons-vue'
 import { getClientCaptcha } from '@/api/modules/client-auth'
 import { useClientAuthStore } from '@/store'
+import { extractErrorMessage } from '@/utils/error'
 
 type AuthMode = 'login' | 'register'
 
@@ -89,6 +90,7 @@ const activeMode = ref<AuthMode>('login')
 const isLoading = ref(false)
 const captchaLoading = ref(false)
 const successTip = ref('')
+const securityHint = ref('')
 const formBlockRef = ref<HTMLElement | null>(null)
 const formWrapperHeight = ref('auto')
 const formAnimating = ref(false)
@@ -175,6 +177,10 @@ const refreshCaptcha = async () => {
 const validateMobile = (mobile: string) => /^1\d{10}$/.test(mobile.trim())
 const validatePassword = (password: string) => password.trim().length >= 6
 
+const applySecurityHintFromMessage = (message: string) => {
+  securityHint.value = /频繁|锁定|稍后|重试/.test(message) ? message : ''
+}
+
 const handleLogin = async () => {
   if (!validateMobile(loginForm.phone)) {
     ElMessage.warning('请输入正确的手机号')
@@ -200,7 +206,9 @@ const handleLogin = async () => {
     ElMessage.success('登录成功，欢迎来到 Y-Link 客户端')
     await router.replace(redirectPath.value)
   } catch (error) {
-    ElMessage.error('登录失败，请检查手机号、密码和验证码后重试')
+    const message = extractErrorMessage(error, '登录失败，请检查手机号、密码和验证码后重试')
+    applySecurityHintFromMessage(message)
+    ElMessage.error(message)
     console.warn('客户端登录失败。', error)
     loginForm.captcha = ''
     await refreshCaptcha()
@@ -254,7 +262,9 @@ const handleRegister = async () => {
       },
     })
   } catch (error) {
-    ElMessage.error('注册失败，请检查信息后重试')
+    const message = extractErrorMessage(error, '注册失败，请检查信息后重试')
+    applySecurityHintFromMessage(message)
+    ElMessage.error(message)
     console.warn('客户端注册失败。', error)
     registerForm.captcha = ''
     await refreshCaptcha()
@@ -322,6 +332,15 @@ watch(successTip, async () => {
           <div v-if="successTip" class="success-pill">
             <span>{{ successTip }}</span>
           </div>
+
+          <el-alert
+            v-if="securityHint"
+            class="mb-4"
+            type="warning"
+            :closable="false"
+            show-icon
+            :title="securityHint"
+          />
 
           <div class="form-wrapper" :style="{ height: formWrapperHeight }">
             <transition name="fade-slide">
@@ -418,7 +437,7 @@ watch(successTip, async () => {
 
 <style scoped>
 .client-auth-page {
-  min-height: 100vh;
+  min-height: 100dvh;
   display: flex;
   align-items: center;
   justify-content: center;

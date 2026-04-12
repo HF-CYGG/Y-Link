@@ -420,7 +420,7 @@ const handleExportVoucherPdf = async () => {
 
 <style scoped>
 .order-list-container {
-  min-height: calc(100vh - 190px);
+  min-height: calc(100dvh - 190px);
 }
 
 .mobile-order-card {
@@ -599,7 +599,7 @@ const handleExportVoucherPdf = async () => {
     position: fixed;
     inset: 0;
     width: 100vw;
-    min-height: 100vh;
+    min-height: 100dvh;
     z-index: 99999;
     display: block !important;
     background: #ffffff;
