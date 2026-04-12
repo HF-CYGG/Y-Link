@@ -6,6 +6,7 @@ import { PageContainer } from '@/components/common'
 import {
   CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG,
   getClientOrderReportScenario,
+  isO2oOrderPending,
   type O2oOrderStatus,
 } from '@/constants/o2o-order-status'
 import {
@@ -51,6 +52,11 @@ let reminderAudioContext: AudioContext | null = null
 const query = reactive({
   keyword: '',
 })
+
+// “去核销”只允许真正处于 pending 的订单进入核销台。
+// 已超时取消、人工取消、已核销都不允许再进入核销流程，避免操作员误判。
+const canGoVerify = computed(() => isO2oOrderPending(activeOrderDetail.value?.order.status))
+const goVerifyButtonText = computed(() => (canGoVerify.value ? '去核销' : '不可核销'))
 
 const formatCurrency = (value: string | number | null | undefined) => {
   return Number(value ?? 0).toFixed(2)
@@ -417,6 +423,10 @@ const handleRefreshCurrentOrder = async () => {
 }
 
 const handleGoVerify = async () => {
+  if (!canGoVerify.value) {
+    ElMessage.warning('当前订单已取消或已核销，不可继续核销')
+    return
+  }
   const verifyCode = activeOrderDetail.value?.order.verifyCode?.trim()
   if (!verifyCode) {
     ElMessage.warning('当前订单缺少核销码，无法前往核销台')
@@ -613,7 +623,7 @@ onBeforeUnmount(() => {
               <p class="mt-1 text-sm text-slate-400">核销码：{{ activeOrderDetail.order.verifyCode }}</p>
             </div>
             <div class="flex flex-wrap items-center gap-2">
-              <el-button type="primary" plain @click="handleGoVerify">去核销</el-button>
+              <el-button type="primary" plain :disabled="!canGoVerify" @click="handleGoVerify">{{ goVerifyButtonText }}</el-button>
               <el-button :loading="detailLoading" @click="handleRefreshCurrentOrder">刷新状态</el-button>
               <el-button @click="handleCopyVerifyCode">复制核销码</el-button>
             </div>

@@ -118,6 +118,54 @@ class O2oPreorderService {
     return parsed
   }
 
+  // 订单是否已达到超时点：
+  // 这里只判断“时间是否过期”，不直接关心当前状态，
+  // 便于在查询、核销事务、定时回收等多个入口复用同一口径。
+  private isOrderTimeoutReached(order: Pick<O2oPreorder, 'timeoutAt'>, nowMs = Date.now()) {
+    return Boolean(order.timeoutAt && order.timeoutAt.getTime() <= nowMs)
+  }
+
+  // 在事务内执行“单笔超时取消 + 释放预订库存”。
+  // 这个方法用于两类场景：
+  // 1. 定时/查询前的批量回收；
+  // 2. 核销事务里兜底发现订单刚好超时，立即回收并阻断核销。
+  private async cancelTimedOutOrderInManager(manager: typeof AppDataSource.manager, order: O2oPreorder) {
+    if (order.status !== 'pending' || !this.isOrderTimeoutReached(order)) {
+      return false
+    }
+    // 超时取消只释放“预订占用库存”，不回滚现货库存。
+    // 因为 pending 阶段尚未真正出库，currentStock 理论上从未减少过。
+    const items = await manager.getRepository(O2oPreorderItem).find({ where: { orderId: order.id } })
+    for (const row of items) {
+      const product = await manager.getRepository(BaseProduct).findOne({ where: { id: row.productId } })
+      if (!product) {
+        continue
+      }
+      const beforeCurrentStock = Number(product.currentStock ?? 0)
+      const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
+      product.preOrderedStock = Math.max(0, beforePreOrderedStock - row.qty)
+      await manager.getRepository(BaseProduct).save(product)
+      await manager.getRepository(InventoryLog).save(
+        manager.getRepository(InventoryLog).create({
+          productId: product.id,
+          changeType: 'preorder_release',
+          changeQty: row.qty,
+          beforeCurrentStock,
+          afterCurrentStock: beforeCurrentStock,
+          beforePreorderedStock: beforePreOrderedStock,
+          afterPreorderedStock: product.preOrderedStock,
+          operatorType: 'system',
+          operatorName: 'auto_cancel',
+          refType: 'o2o_preorder',
+          refId: order.id,
+        }),
+      )
+    }
+    order.status = 'cancelled'
+    await manager.getRepository(O2oPreorder).save(order)
+    return true
+  }
+
   private async resolveOrderTotalAmountMap(orderIds: string[]) {
     if (!orderIds.length) {
       return new Map<string, string>()
@@ -426,6 +474,11 @@ class O2oPreorderService {
       if (!order) {
         throw new BizError('预订单不存在', 404)
       }
+      // 这里在事务内部再次兜底校验一次超时：
+      // 防止订单在“外层 cancelTimeoutOrders 执行完成后、事务真正扣库存前”刚好跨过超时点。
+      if (await this.cancelTimedOutOrderInManager(manager, order)) {
+        throw new BizError('预订单已超时取消，库存已释放，不可继续核销', 409)
+      }
       if (order.status !== 'pending') {
         throw new BizError('当前预订单不可核销', 409)
       }
@@ -519,52 +572,33 @@ class O2oPreorderService {
     if (!config.autoCancelEnabled) {
       return { cancelledCount: 0 }
     }
-    const now = new Date()
-    const timeoutOrders = await this.preorderRepo.find({
-      where: {
-        status: 'pending',
-        timeoutAt: LessThanOrEqual(now),
-      },
-      take: 100,
-    })
-    if (!timeoutOrders.length) {
-      return { cancelledCount: 0 }
-    }
-    await AppDataSource.transaction(async (manager) => {
-      // 超时取消的核心是“释放预订占用库存”而非回滚现货库存，
-      // 因为 pending 订单尚未发生真实出库，currentStock 理论上没有减少过。
-      for (const order of timeoutOrders) {
-        const items = await manager.getRepository(O2oPreorderItem).find({ where: { orderId: order.id } })
-        for (const row of items) {
-          const product = await manager.getRepository(BaseProduct).findOne({ where: { id: row.productId } })
-          if (!product) {
-            continue
-          }
-          const beforeCurrentStock = Number(product.currentStock ?? 0)
-          const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
-          product.preOrderedStock = Math.max(0, beforePreOrderedStock - row.qty)
-          await manager.getRepository(BaseProduct).save(product)
-          await manager.getRepository(InventoryLog).save(
-            manager.getRepository(InventoryLog).create({
-              productId: product.id,
-              changeType: 'preorder_release',
-              changeQty: row.qty,
-              beforeCurrentStock,
-              afterCurrentStock: beforeCurrentStock,
-              beforePreorderedStock: beforePreOrderedStock,
-              afterPreorderedStock: product.preOrderedStock,
-              operatorType: 'system',
-              operatorName: 'auto_cancel',
-              refType: 'o2o_preorder',
-              refId: order.id,
-            }),
-          )
-        }
-        order.status = 'cancelled'
-        await manager.getRepository(O2oPreorder).save(order)
+    let cancelledCount = 0
+    // 分批循环回收，避免单次只处理 100 条导致仍有超时订单残留。
+    // 这样即使门店长时间未触发查询，也能在下一次入口访问时尽量回收完整。
+    while (true) {
+      const timeoutOrders = await this.preorderRepo.find({
+        where: {
+          status: 'pending',
+          timeoutAt: LessThanOrEqual(new Date()),
+        },
+        take: 100,
+      })
+      if (!timeoutOrders.length) {
+        break
       }
-    })
-    return { cancelledCount: timeoutOrders.length }
+      await AppDataSource.transaction(async (manager) => {
+        for (const order of timeoutOrders) {
+          const cancelled = await this.cancelTimedOutOrderInManager(manager, order)
+          if (cancelled) {
+            cancelledCount += 1
+          }
+        }
+      })
+      if (timeoutOrders.length < 100) {
+        break
+      }
+    }
+    return { cancelledCount }
   }
 
   async getVerifyDetail(verifyCode: string) {

@@ -256,6 +256,13 @@ const handleVerify = async () => {
   if (!detail.value) {
     return
   }
+  // canVerify 只在 pending 时为 true。
+  // 一旦订单因超时被自动取消，前端按钮会变灰，后端事务内也会再次兜底校验，
+  // 从而保证“超时订单绝不能被核销”。
+  if (!canVerify.value) {
+    ElMessage.warning('当前订单已取消或已核销，不可继续核销')
+    return
+  }
 
   try {
     await ElMessageBox.confirm('确认执行核销出库吗？该操作会同步扣减库存且不可撤销。', '核销确认', {
