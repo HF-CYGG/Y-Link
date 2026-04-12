@@ -58,6 +58,40 @@ export interface UpdateO2oRuleConfigsResult {
   changed: boolean
 }
 
+export interface VerificationProviderChannelConfig {
+  enabled: boolean
+  httpMethod: 'POST' | 'GET'
+  apiUrl: string
+  headersTemplate: string
+  bodyTemplate: string
+  successMatch: string
+  updatedAt: string
+}
+
+export interface VerificationProviderConfigsResult {
+  mobile: VerificationProviderChannelConfig
+  email: VerificationProviderChannelConfig
+}
+
+export interface VerificationProviderChannelInput {
+  enabled: boolean
+  httpMethod: 'POST' | 'GET'
+  apiUrl: string
+  headersTemplate: string
+  bodyTemplate: string
+  successMatch: string
+}
+
+export interface UpdateVerificationProviderConfigsPayload {
+  mobile: VerificationProviderChannelInput
+  email: VerificationProviderChannelInput
+}
+
+export interface UpdateVerificationProviderConfigsResult {
+  config: VerificationProviderConfigsResult
+  changed: boolean
+}
+
 export const getOrderSerialConfigs = () =>
   request<OrderSerialConfigsResult>({
     method: 'GET',
@@ -81,5 +115,18 @@ export const updateO2oRuleConfigs = (payload: UpdateO2oRuleConfigsPayload) =>
   request<UpdateO2oRuleConfigsResult>({
     method: 'PUT',
     url: '/system-configs/o2o-rules',
+    data: payload,
+  })
+
+export const getVerificationProviderConfigs = () =>
+  request<VerificationProviderConfigsResult>({
+    method: 'GET',
+    url: '/system-configs/verification-providers',
+  })
+
+export const updateVerificationProviderConfigs = (payload: UpdateVerificationProviderConfigsPayload) =>
+  request<UpdateVerificationProviderConfigsResult>({
+    method: 'PUT',
+    url: '/system-configs/verification-providers',
     data: payload,
   })

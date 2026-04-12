@@ -64,10 +64,10 @@
  * 维护说明：当前页面已切换为 Split-Card 一体化布局，视觉可继续调整，但登录/注册/验证码链路需保持可用。
  */
 
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Key, Lock, OfficeBuilding, Phone, User } from '@element-plus/icons-vue'
+import { Key, Lock, Message, OfficeBuilding, User } from '@element-plus/icons-vue'
 import { getClientCaptcha } from '@/api/modules/client-auth'
 import { useClientAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
@@ -91,6 +91,9 @@ const isLoading = ref(false)
 const captchaLoading = ref(false)
 const successTip = ref('')
 const securityHint = ref('')
+const verificationSending = ref(false)
+const registerVerificationCountdown = ref(0)
+let registerVerificationTimer: ReturnType<typeof globalThis.setInterval> | null = null
 const formBlockRef = ref<HTMLElement | null>(null)
 const formWrapperHeight = ref('auto')
 const formAnimating = ref(false)
@@ -100,16 +103,16 @@ const captcha = reactive<ClientCaptchaState>({
 })
 
 const loginForm = reactive({
-  phone: '',
+  account: '',
   password: '',
   captcha: '',
 })
 
 const registerForm = reactive({
-  name: '',
+  account: '',
   department: '',
-  phone: '',
   password: '',
+  verificationCode: '',
   captcha: '',
 })
 
@@ -152,16 +155,16 @@ const switchMode = async (nextMode: AuthMode) => {
 }
 
 const applyRouteState = () => {
-  const registeredMobile = typeof route.query.mobile === 'string' ? route.query.mobile.trim() : ''
+  const registeredAccount = typeof route.query.account === 'string' ? route.query.account.trim() : ''
   activeMode.value = route.query.tab === 'register' ? 'register' : 'login'
   successTip.value = typeof route.query.notice === 'string' ? route.query.notice : ''
 
-  if (registeredMobile) {
-    loginForm.phone = registeredMobile
+  if (registeredAccount) {
+    loginForm.account = registeredAccount
   }
 }
 
-// 当前项目尚未接入短信验证码，因此登录与注册都依赖图形验证码完成防刷。
+// 登录仍使用图形验证码防刷，注册则在图形验证码之外追加手机/邮箱验证码双重校验。
 const refreshCaptcha = async () => {
   captchaLoading.value = true
   try {
@@ -175,15 +178,68 @@ const refreshCaptcha = async () => {
 }
 
 const validateMobile = (mobile: string) => /^1\d{10}$/.test(mobile.trim())
+const validateEmail = (email: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
 const validatePassword = (password: string) => password.trim().length >= 6
+const resolveAccountChannel = (account: string): 'mobile' | 'email' | null => {
+  const normalized = account.trim()
+  if (!normalized) return null
+  if (normalized.includes('@')) {
+    return validateEmail(normalized) ? 'email' : null
+  }
+  return validateMobile(normalized) ? 'mobile' : null
+}
 
 const applySecurityHintFromMessage = (message: string) => {
   securityHint.value = /频繁|锁定|稍后|重试/.test(message) ? message : ''
 }
 
+const resetRegisterVerificationTimer = () => {
+  if (registerVerificationTimer) {
+    globalThis.clearInterval(registerVerificationTimer)
+    registerVerificationTimer = null
+  }
+  registerVerificationCountdown.value = 0
+}
+
+const startRegisterVerificationCountdown = (seconds: number) => {
+  resetRegisterVerificationTimer()
+  registerVerificationCountdown.value = seconds
+  registerVerificationTimer = globalThis.setInterval(() => {
+    if (registerVerificationCountdown.value <= 1) {
+      resetRegisterVerificationTimer()
+      return
+    }
+    registerVerificationCountdown.value -= 1
+  }, 1000)
+}
+
+const handleSendRegisterVerificationCode = async () => {
+  const channel = resolveAccountChannel(registerForm.account)
+  if (!channel) {
+    ElMessage.warning('请输入正确的手机号或邮箱')
+    return
+  }
+  verificationSending.value = true
+  try {
+    const result = await clientAuthStore.sendVerificationCode({
+      channel,
+      target: registerForm.account.trim(),
+      scene: 'register',
+    })
+    ElMessage.success(`${channel === 'email' ? '邮箱' : '手机'}验证码已发送`)
+    startRegisterVerificationCountdown(result.expireSeconds)
+  } catch (error) {
+    const message = extractErrorMessage(error, '验证码发送失败，请稍后重试')
+    applySecurityHintFromMessage(message)
+    ElMessage.error(message)
+  } finally {
+    verificationSending.value = false
+  }
+}
+
 const handleLogin = async () => {
-  if (!validateMobile(loginForm.phone)) {
-    ElMessage.warning('请输入正确的手机号')
+  if (!resolveAccountChannel(loginForm.account)) {
+    ElMessage.warning('请输入正确的手机号或邮箱')
     return
   }
   if (!validatePassword(loginForm.password)) {
@@ -198,7 +254,7 @@ const handleLogin = async () => {
   isLoading.value = true
   try {
     await clientAuthStore.login({
-      mobile: loginForm.phone.trim(),
+      account: loginForm.account.trim(),
       password: loginForm.password,
       captchaId: captcha.captchaId,
       captchaCode: loginForm.captcha.trim(),
@@ -218,12 +274,9 @@ const handleLogin = async () => {
 }
 
 const handleRegister = async () => {
-  if (!registerForm.name.trim()) {
-    ElMessage.warning('请填写真实姓名')
-    return
-  }
-  if (!validateMobile(registerForm.phone)) {
-    ElMessage.warning('请输入正确的手机号')
+  const accountChannel = resolveAccountChannel(registerForm.account)
+  if (!accountChannel) {
+    ElMessage.warning('请输入正确的手机号或邮箱作为用户名')
     return
   }
   if (!validatePassword(registerForm.password)) {
@@ -234,30 +287,36 @@ const handleRegister = async () => {
     ElMessage.warning('请输入图形验证码')
     return
   }
+  if (!registerForm.verificationCode.trim()) {
+    ElMessage.warning('请输入手机/邮箱验证码')
+    return
+  }
 
   isLoading.value = true
   try {
+    const registeredAccount = registerForm.account.trim()
     await clientAuthStore.register({
-      mobile: registerForm.phone.trim(),
+      account: registeredAccount,
       password: registerForm.password,
-      realName: registerForm.name.trim(),
       departmentName: registerForm.department.trim() || undefined,
+      verificationCode: registerForm.verificationCode.trim(),
       captchaId: captcha.captchaId,
       captchaCode: registerForm.captcha.trim(),
     })
     ElMessage.success('注册成功，请登录')
     activeMode.value = 'login'
-    loginForm.phone = registerForm.phone.trim()
+    loginForm.account = registeredAccount
     loginForm.password = ''
     loginForm.captcha = ''
-    successTip.value = '账号已创建成功，请使用手机号与密码登录。'
+    successTip.value = `账号已创建成功，请使用${accountChannel === 'email' ? '邮箱' : '手机号'}用户名与密码登录。`
     registerForm.captcha = ''
+    registerForm.verificationCode = ''
     await refreshCaptcha()
     await router.replace({
       path: '/client/login',
       query: {
         tab: 'login',
-        mobile: registerForm.phone.trim(),
+        account: registeredAccount,
         notice: successTip.value,
       },
     })
@@ -282,6 +341,7 @@ onMounted(async () => {
   await refreshCaptcha()
   await nextTick()
   syncWrapperHeight()
+  resetRegisterVerificationTimer()
 })
 
 watch(
@@ -297,6 +357,11 @@ watch(successTip, async () => {
   requestAnimationFrame(() => {
     syncWrapperHeight()
   })
+})
+
+onUnmounted(() => {
+  // 页面离开时主动清理倒计时，避免重复进入后产生多个定时器。
+  resetRegisterVerificationTimer()
 })
 </script>
 
@@ -346,12 +411,12 @@ watch(successTip, async () => {
             <transition name="fade-slide">
               <div v-if="activeMode === 'login'" ref="formBlockRef" key="login" class="form-block">
                 <h2 class="block-title">欢迎回来</h2>
-                <p class="block-subtitle">请输入手机号与密码登录客户端</p>
+                <p class="block-subtitle">请输入用户名（手机号或邮箱）与密码登录客户端</p>
 
                 <el-form @submit.prevent="handleLogin" class="space-y-4 mt-6">
-                  <el-input v-model="loginForm.phone" placeholder="手机号" class="geo-input" size="large" clearable>
+                  <el-input v-model="loginForm.account" placeholder="用户名（手机号或邮箱）" class="geo-input" size="large" clearable>
                     <template #prefix>
-                      <el-icon class="input-icon"><Phone /></el-icon>
+                      <el-icon class="input-icon"><User /></el-icon>
                     </template>
                   </el-input>
 
@@ -387,23 +452,38 @@ watch(successTip, async () => {
                 <p class="block-subtitle">只需几步，开启极速预订体验</p>
 
                 <el-form @submit.prevent="handleRegister" class="space-y-4 mt-6">
-                  <el-input v-model="registerForm.name" placeholder="真实姓名" class="geo-input" size="large" clearable>
+                  <el-input v-model="registerForm.account" placeholder="用户名（手机号或邮箱）" class="geo-input" size="large" clearable>
                     <template #prefix>
                       <el-icon class="input-icon"><User /></el-icon>
                     </template>
                   </el-input>
 
-                  <el-input v-model="registerForm.department" placeholder="所属部门 (选填)" class="geo-input" size="large" clearable>
+                  <el-input v-model="registerForm.department" placeholder="所属部门（选填）" class="geo-input" size="large" clearable>
                     <template #prefix>
                       <el-icon class="input-icon"><OfficeBuilding /></el-icon>
                     </template>
                   </el-input>
 
-                  <el-input v-model="registerForm.phone" placeholder="手机号" class="geo-input" size="large" clearable>
-                    <template #prefix>
-                      <el-icon class="input-icon"><Phone /></el-icon>
-                    </template>
-                  </el-input>
+                  <div class="captcha-row">
+                    <el-input v-model="registerForm.verificationCode" placeholder="手机/邮箱验证码" class="geo-input flex-1" size="large" clearable>
+                      <template #prefix>
+                        <el-icon class="input-icon"><Message /></el-icon>
+                      </template>
+                    </el-input>
+                    <el-button
+                      class="verification-code-button"
+                      :disabled="verificationSending || registerVerificationCountdown > 0"
+                      @click="handleSendRegisterVerificationCode"
+                    >
+                      {{
+                        registerVerificationCountdown > 0
+                          ? `${registerVerificationCountdown}s 后重发`
+                          : verificationSending
+                            ? '发送中'
+                            : '发送验证码'
+                      }}
+                    </el-button>
+                  </div>
 
                   <el-input v-model="registerForm.password" placeholder="设置至少 6 位密码" type="password" class="geo-input" size="large" show-password>
                     <template #prefix>

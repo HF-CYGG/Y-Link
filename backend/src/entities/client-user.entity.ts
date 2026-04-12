@@ -18,13 +18,18 @@ export class ClientUser {
   id!: string
 
   @Index('uk_client_user_mobile', { unique: true })
-  @Column({ name: 'mobile', type: 'varchar', length: 20, comment: '手机号' })
-  mobile!: string
+  @Column({ name: 'mobile', type: 'varchar', length: 20, nullable: true, comment: '手机号（手机号注册时必填）' })
+  mobile!: string | null
+
+  @Index('uk_client_user_email', { unique: true })
+  @Column({ name: 'email', type: 'varchar', length: 128, nullable: true, comment: '邮箱（邮箱注册时必填）' })
+  email!: string | null
 
   @Column({ name: 'password_hash', type: 'varchar', length: 255, select: false, comment: '密码哈希' })
   passwordHash!: string
 
-  @Column({ name: 'real_name', type: 'varchar', length: 64, comment: '真实姓名' })
+  // 兼容历史字段名：数据库列仍叫 real_name，但业务上已作为“用户名/展示名”使用。
+  @Column({ name: 'real_name', type: 'varchar', length: 128, comment: '用户名（兼容历史 real_name 列）' })
   realName!: string
 
   @Column({ name: 'department_name', type: 'varchar', length: 128, default: '', comment: '所属部门' })

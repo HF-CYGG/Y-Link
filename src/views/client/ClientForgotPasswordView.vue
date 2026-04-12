@@ -6,7 +6,7 @@
  */
 
 
-import { onMounted, reactive, ref } from 'vue'
+import { onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { getClientCaptcha } from '@/api/modules/client-auth'
@@ -21,6 +21,9 @@ const submitting = ref(false)
 const captchaLoading = ref(false)
 const resetToken = ref('')
 const securityHint = ref('')
+const verificationSending = ref(false)
+const verificationCountdown = ref(0)
+let verificationTimer: ReturnType<typeof globalThis.setInterval> | null = null
 
 const captcha = reactive({
   captchaId: '',
@@ -28,7 +31,8 @@ const captcha = reactive({
 })
 
 const verifyForm = reactive({
-  mobile: '',
+  account: '',
+  verificationCode: '',
   captchaCode: '',
 })
 
@@ -52,10 +56,77 @@ const applySecurityHintFromMessage = (message: string) => {
   securityHint.value = /频繁|锁定|稍后|重试/.test(message) ? message : ''
 }
 
+const validateAccount = (account: string) => {
+  const normalized = account.trim()
+  if (!normalized) {
+    return false
+  }
+  if (normalized.includes('@')) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)
+  }
+  return /^1\d{10}$/.test(normalized)
+}
+
+const resolveChannel = (account: string): 'mobile' | 'email' | null => {
+  const normalized = account.trim()
+  if (!normalized) {
+    return null
+  }
+  return normalized.includes('@') ? (validateAccount(normalized) ? 'email' : null) : (validateAccount(normalized) ? 'mobile' : null)
+}
+
+const resetVerificationTimer = () => {
+  if (verificationTimer) {
+    globalThis.clearInterval(verificationTimer)
+    verificationTimer = null
+  }
+  verificationCountdown.value = 0
+}
+
+const startVerificationCountdown = (seconds: number) => {
+  resetVerificationTimer()
+  verificationCountdown.value = seconds
+  verificationTimer = globalThis.setInterval(() => {
+    if (verificationCountdown.value <= 1) {
+      resetVerificationTimer()
+      return
+    }
+    verificationCountdown.value -= 1
+  }, 1000)
+}
+
+const handleSendVerificationCode = async () => {
+  const channel = resolveChannel(verifyForm.account)
+  if (!channel) {
+    ElMessage.warning('请输入正确的用户名（手机号或邮箱）')
+    return
+  }
+  verificationSending.value = true
+  try {
+    const result = await clientAuthStore.sendVerificationCode({
+      channel,
+      target: verifyForm.account.trim(),
+      scene: 'forgot_password',
+    })
+    ElMessage.success(`${channel === 'email' ? '邮箱' : '手机'}验证码已发送`)
+    startVerificationCountdown(result.expireSeconds)
+  } catch (error) {
+    const message = extractErrorMessage(error, '验证码发送失败，请稍后重试')
+    applySecurityHintFromMessage(message)
+    ElMessage.error(message)
+  } finally {
+    verificationSending.value = false
+  }
+}
+
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const handleVerify = async () => {
-  if (!/^1\d{10}$/.test(verifyForm.mobile.trim())) {
-    ElMessage.warning('请输入正确的手机号')
+  if (!validateAccount(verifyForm.account)) {
+    ElMessage.warning('请输入正确的用户名（手机号或邮箱）')
+    return
+  }
+  if (!verifyForm.verificationCode.trim()) {
+    ElMessage.warning('请输入手机/邮箱验证码')
     return
   }
   if (!verifyForm.captchaCode.trim()) {
@@ -66,7 +137,8 @@ const handleVerify = async () => {
   submitting.value = true
   try {
     const result = await clientAuthStore.requestPasswordResetToken({
-      mobile: verifyForm.mobile.trim(),
+      account: verifyForm.account.trim(),
+      verificationCode: verifyForm.verificationCode.trim(),
       captchaId: captcha.captchaId,
       captchaCode: verifyForm.captchaCode.trim(),
     })
@@ -98,7 +170,7 @@ const handleReset = async () => {
   submitting.value = true
   try {
     await clientAuthStore.confirmPasswordReset({
-      mobile: verifyForm.mobile.trim(),
+      account: verifyForm.account.trim(),
       resetToken: resetToken.value,
       newPassword: resetForm.newPassword,
     })
@@ -115,6 +187,10 @@ const handleReset = async () => {
 
 onMounted(async () => {
   await refreshCaptcha()
+})
+
+onUnmounted(() => {
+  resetVerificationTimer()
 })
 </script>
 
@@ -145,7 +221,15 @@ onMounted(async () => {
       </div>
 
       <form v-if="step === 1" class="space-y-4" @submit.prevent="handleVerify">
-        <input v-model.trim="verifyForm.mobile" class="client-input" placeholder="请输入注册手机号" />
+        <input v-model.trim="verifyForm.account" class="client-input" placeholder="请输入用户名（手机号或邮箱）" />
+        <div class="grid grid-cols-[1fr_auto] gap-3">
+          <input v-model.trim="verifyForm.verificationCode" class="client-input" placeholder="请输入手机/邮箱验证码" />
+          <button type="button" class="captcha-box" :disabled="verificationSending || verificationCountdown > 0" @click="handleSendVerificationCode">
+            <span class="text-xs text-slate-500">
+              {{ verificationCountdown > 0 ? `${verificationCountdown}s 后重发` : verificationSending ? '发送中' : '发送验证码' }}
+            </span>
+          </button>
+        </div>
         <div class="grid grid-cols-[1fr_auto] gap-3">
           <input v-model.trim="verifyForm.captchaCode" class="client-input" placeholder="图形验证码" />
           <button type="button" class="captcha-box" :disabled="captchaLoading" @click="refreshCaptcha">

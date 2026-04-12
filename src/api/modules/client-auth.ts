@@ -14,7 +14,9 @@ export interface ClientCaptchaResult {
 
 export interface ClientSafeProfile {
   id: string
+  account: string
   mobile: string
+  email: string
   realName: string
   departmentName: string | null
   status: string
@@ -25,7 +27,13 @@ export interface ClientAuthSuccessResult {
   token: string
   expiresAt: string
   user: ClientSafeProfile
-  verificationChannel: 'captcha' | 'sms'
+  verificationChannel: 'captcha' | 'sms' | 'email'
+}
+
+export type ClientRegisterResult = ClientSafeProfile
+
+export interface ClientVerificationCodeSendResult {
+  expireSeconds: number
 }
 
 export const getClientCaptcha = () =>
@@ -34,35 +42,51 @@ export const getClientCaptcha = () =>
     url: '/client-auth/captcha',
   })
 
+export const sendClientVerificationCode = (payload: {
+  channel: 'mobile' | 'email'
+  target: string
+  scene: 'register' | 'forgot_password'
+}) =>
+  request<ClientVerificationCodeSendResult>({
+    method: 'POST',
+    url: '/client-auth/verification-code/send',
+    data: payload,
+  })
+
 export const clientRegister = (payload: {
-  mobile: string
+  account: string
   password: string
-  realName: string
   departmentName?: string
+  verificationCode: string
   captchaId: string
   captchaCode: string
 }) =>
-  request<ClientAuthSuccessResult>({
+  request<ClientRegisterResult>({
     method: 'POST',
     url: '/client-auth/register',
     data: payload,
   })
 
-export const clientLogin = (payload: { mobile: string; password: string; captchaId: string; captchaCode: string }) =>
+export const clientLogin = (payload: { account: string; password: string; captchaId: string; captchaCode: string }) =>
   request<ClientAuthSuccessResult>({
     method: 'POST',
     url: '/client-auth/login',
     data: payload,
   })
 
-export const verifyClientForgotPassword = (payload: { mobile: string; captchaId: string; captchaCode: string }) =>
+export const verifyClientForgotPassword = (payload: {
+  account: string
+  verificationCode: string
+  captchaId: string
+  captchaCode: string
+}) =>
   request<{ resetToken: string; expiresInSeconds: number }>({
     method: 'POST',
     url: '/client-auth/forgot-password/verify',
     data: payload,
   })
 
-export const resetClientPassword = (payload: { mobile: string; resetToken: string; newPassword: string }) =>
+export const resetClientPassword = (payload: { account: string; resetToken: string; newPassword: string }) =>
   request<boolean>({
     method: 'POST',
     url: '/client-auth/forgot-password/reset',

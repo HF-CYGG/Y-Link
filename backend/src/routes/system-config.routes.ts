@@ -30,6 +30,20 @@ const updateO2oRuleConfigsSchema = z.object({
   limitQty: z.number().int().min(1).max(999),
 })
 
+const verificationProviderChannelSchema = z.object({
+  enabled: z.boolean(),
+  httpMethod: z.enum(['POST', 'GET']),
+  apiUrl: z.string().max(500),
+  headersTemplate: z.string().max(5000),
+  bodyTemplate: z.string().max(10000),
+  successMatch: z.string().max(500),
+})
+
+const updateVerificationProviderConfigsSchema = z.object({
+  mobile: verificationProviderChannelSchema,
+  email: verificationProviderChannelSchema,
+})
+
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export const systemConfigRouter = Router()
 
@@ -81,6 +95,34 @@ systemConfigRouter.put(
     const authReq = req as AuthenticatedRequest
     const payload = updateO2oRuleConfigsSchema.parse(req.body)
     const data = await systemConfigService.updateO2oRuleConfigs(payload, authReq.auth, extractRequestMeta(req))
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+systemConfigRouter.get(
+  '/verification-providers',
+  requirePermission('system_configs:view'),
+  asyncHandler(async (_req, res) => {
+    const data = await systemConfigService.getVerificationProviderConfigs()
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+systemConfigRouter.put(
+  '/verification-providers',
+  requirePermission('system_configs:update'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = updateVerificationProviderConfigsSchema.parse(req.body)
+    const data = await systemConfigService.updateVerificationProviderConfigs(payload, authReq.auth, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',

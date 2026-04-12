@@ -21,7 +21,7 @@ const transitionName = ref<'slide-left' | 'slide-right'>('slide-left')
 const cartBadgeBouncing = ref(false)
 
 const displayName = computed(() => {
-  return clientAuthStore.currentUser?.realName || clientAuthStore.currentUser?.mobile || '访客'
+  return clientAuthStore.currentUser?.account || clientAuthStore.currentUser?.realName || clientAuthStore.currentUser?.mobile || '访客'
 })
 
 const tabs = [

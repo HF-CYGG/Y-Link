@@ -67,6 +67,16 @@ const RATE_LIMIT_RULES = {
     windowMs: 10 * 60 * 1000,
     blockMessage: '验证码请求过于频繁，请稍后再试',
   },
+  verificationCodeSendByIp: {
+    maxRequests: 10,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '验证码发送过于频繁，请稍后再试',
+  },
+  verificationCodeSendByTarget: {
+    maxRequests: 5,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '该账号验证码发送过于频繁，请稍后再试',
+  },
 } as const satisfies Record<string, RateLimitRule>
 
 const FAILURE_LOCK_THRESHOLD = {
@@ -278,6 +288,24 @@ export class AuthSecurityService {
       actionLabel: '客户端验证码频控',
       requestMeta,
       detail: { source },
+    })
+  }
+
+  async guardVerificationCodeSendRequest(requestMeta: RequestMeta | undefined, target: string, channel: 'mobile' | 'email') {
+    const source = normalizeRiskSource(requestMeta)
+    await this.consumeRateLimit(`verification-send:ip:${source}`, RATE_LIMIT_RULES.verificationCodeSendByIp, {
+      actionType: 'client.auth.guard.verification_send',
+      actionLabel: '验证码发送频控',
+      targetCode: target,
+      requestMeta,
+      detail: { source, channel },
+    })
+    await this.consumeRateLimit(`verification-send:${channel}:${target}`, RATE_LIMIT_RULES.verificationCodeSendByTarget, {
+      actionType: 'client.auth.guard.verification_send',
+      actionLabel: '验证码发送频控',
+      targetCode: target,
+      requestMeta,
+      detail: { source, channel, dimension: 'target' },
     })
   }
 

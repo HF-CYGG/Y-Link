@@ -14,6 +14,7 @@ import {
   clientRegister,
   getClientMe,
   resetClientPassword,
+  sendClientVerificationCode,
   verifyClientForgotPassword,
 } from '@/api/modules/client-auth'
 import {
@@ -118,10 +119,10 @@ export const useClientAuthStore = defineStore('client-auth', () => {
    * - 注册成功后由页面层引导用户回到登录页完成正式登录。
    */
   const register = async (payload: {
-    mobile: string
+    account: string
     password: string
-    realName: string
     departmentName?: string
+    verificationCode: string
     captchaId: string
     captchaCode: string
   }) => {
@@ -137,7 +138,7 @@ export const useClientAuthStore = defineStore('client-auth', () => {
    * - 供登录页提交后直接跳转商城首页。
    */
   const login = async (payload: {
-    mobile: string
+    account: string
     password: string
     captchaId: string
     captchaCode: string
@@ -146,6 +147,19 @@ export const useClientAuthStore = defineStore('client-auth', () => {
     applyAuthResult(result)
     initialized.value = true
     return result
+  }
+
+  /**
+   * 发送手机/邮箱验证码：
+   * - 注册与找回密码都复用同一接口；
+   * - 具体走短信还是邮箱平台，由 payload.channel 决定。
+   */
+  const sendVerificationCode = async (payload: {
+    channel: 'mobile' | 'email'
+    target: string
+    scene: 'register' | 'forgot_password'
+  }) => {
+    return sendClientVerificationCode(payload)
   }
 
   /**
@@ -170,7 +184,8 @@ export const useClientAuthStore = defineStore('client-auth', () => {
    * - resetToken 仅在短时间内有效，避免被长期滥用。
    */
   const requestPasswordResetToken = async (payload: {
-    mobile: string
+    account: string
+    verificationCode: string
     captchaId: string
     captchaCode: string
   }) => {
@@ -183,7 +198,7 @@ export const useClientAuthStore = defineStore('client-auth', () => {
    * - 成功后要求用户重新登录，确保会话链路清晰。
    */
   const confirmPasswordReset = async (payload: {
-    mobile: string
+    account: string
     resetToken: string
     newPassword: string
   }) => {
@@ -201,6 +216,7 @@ export const useClientAuthStore = defineStore('client-auth', () => {
     register,
     login,
     logout,
+    sendVerificationCode,
     requestPasswordResetToken,
     confirmPasswordReset,
     clearAuthState,

@@ -52,6 +52,8 @@ const SQLITE_REQUIRED_PRODUCT_COLUMNS = [
   'pre_ordered_stock',
 ]
 
+const SQLITE_REQUIRED_CLIENT_USER_COLUMNS = ['mobile', 'email', 'real_name', 'department_name', 'status', 'last_login_at']
+
 export function resolveSqliteDatabasePath(): string {
   return path.isAbsolute(env.SQLITE_DB_PATH)
     ? env.SQLITE_DB_PATH
@@ -110,7 +112,13 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
 
   const productColumns: Array<{ name: string }> = await dataSource.query(`PRAGMA table_info('base_product')`)
   const productColumnSet = new Set(productColumns.map((column) => column.name))
-  return SQLITE_REQUIRED_PRODUCT_COLUMNS.some((column) => !productColumnSet.has(column))
+  if (SQLITE_REQUIRED_PRODUCT_COLUMNS.some((column) => !productColumnSet.has(column))) {
+    return true
+  }
+
+  const clientUserColumns: Array<{ name: string }> = await dataSource.query(`PRAGMA table_info('client_user')`)
+  const clientUserColumnSet = new Set(clientUserColumns.map((column) => column.name))
+  return SQLITE_REQUIRED_CLIENT_USER_COLUMNS.some((column) => !clientUserColumnSet.has(column))
 }
 
 export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): Promise<DatabaseSchemaInitResult> {

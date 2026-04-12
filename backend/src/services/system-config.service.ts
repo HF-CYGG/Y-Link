@@ -73,6 +73,78 @@ const DEFAULT_SYSTEM_CONFIGS = [
     configGroup: 'o2o',
     remark: '预订单默认限购数量',
   },
+  {
+    configKey: 'verification.mobile.enabled',
+    configValue: '0',
+    configGroup: 'verification',
+    remark: '短信验证码平台启用开关',
+  },
+  {
+    configKey: 'verification.mobile.http_method',
+    configValue: 'POST',
+    configGroup: 'verification',
+    remark: '短信验证码平台请求方法',
+  },
+  {
+    configKey: 'verification.mobile.api_url',
+    configValue: '',
+    configGroup: 'verification',
+    remark: '短信验证码平台请求地址',
+  },
+  {
+    configKey: 'verification.mobile.headers_template',
+    configValue: '{"Content-Type":"application/json"}',
+    configGroup: 'verification',
+    remark: '短信验证码平台请求头模板(JSON)',
+  },
+  {
+    configKey: 'verification.mobile.body_template',
+    configValue: '{"mobile":"{{target}}","code":"{{code}}","scene":"{{scene}}"}',
+    configGroup: 'verification',
+    remark: '短信验证码平台请求体模板(JSON)',
+  },
+  {
+    configKey: 'verification.mobile.success_match',
+    configValue: '',
+    configGroup: 'verification',
+    remark: '短信验证码平台成功关键字（可选）',
+  },
+  {
+    configKey: 'verification.email.enabled',
+    configValue: '0',
+    configGroup: 'verification',
+    remark: '邮箱验证码平台启用开关',
+  },
+  {
+    configKey: 'verification.email.http_method',
+    configValue: 'POST',
+    configGroup: 'verification',
+    remark: '邮箱验证码平台请求方法',
+  },
+  {
+    configKey: 'verification.email.api_url',
+    configValue: '',
+    configGroup: 'verification',
+    remark: '邮箱验证码平台请求地址',
+  },
+  {
+    configKey: 'verification.email.headers_template',
+    configValue: '{"Content-Type":"application/json"}',
+    configGroup: 'verification',
+    remark: '邮箱验证码平台请求头模板(JSON)',
+  },
+  {
+    configKey: 'verification.email.body_template',
+    configValue: '{"email":"{{target}}","subject":"Y-Link 验证码","content":"您的验证码为 {{code }}，场景：{{scene}}。5 分钟内有效。"}',
+    configGroup: 'verification',
+    remark: '邮箱验证码平台请求体模板(JSON)',
+  },
+  {
+    configKey: 'verification.email.success_match',
+    configValue: '',
+    configGroup: 'verification',
+    remark: '邮箱验证码平台成功关键字（可选）',
+  },
 ] as const
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
@@ -125,9 +197,54 @@ export interface UpdateO2oRuleConfigsInput {
   limitQty: number
 }
 
+export type VerificationChannelType = 'mobile' | 'email'
+
+export interface VerificationProviderConfigRecord {
+  enabled: boolean
+  httpMethod: 'POST' | 'GET'
+  apiUrl: string
+  headersTemplate: string
+  bodyTemplate: string
+  successMatch: string
+  updatedAt: Date
+}
+
+export interface VerificationProviderConfigsResult {
+  mobile: VerificationProviderConfigRecord
+  email: VerificationProviderConfigRecord
+}
+
+export interface VerificationProviderConfigInput {
+  enabled: boolean
+  httpMethod: 'POST' | 'GET'
+  apiUrl: string
+  headersTemplate: string
+  bodyTemplate: string
+  successMatch: string
+}
+
+export interface UpdateVerificationProviderConfigsInput {
+  mobile: VerificationProviderConfigInput
+  email: VerificationProviderConfigInput
+}
+
 class SystemConfigService {
   private readonly configRepo = AppDataSource.getRepository(SystemConfig)
   private readonly o2oConfigKeys = ['o2o.auto_cancel_enabled', 'o2o.auto_cancel_hours', 'o2o.limit_enabled', 'o2o.limit_qty'] as const
+  private readonly verificationConfigKeys = [
+    'verification.mobile.enabled',
+    'verification.mobile.http_method',
+    'verification.mobile.api_url',
+    'verification.mobile.headers_template',
+    'verification.mobile.body_template',
+    'verification.mobile.success_match',
+    'verification.email.enabled',
+    'verification.email.http_method',
+    'verification.email.api_url',
+    'verification.email.headers_template',
+    'verification.email.body_template',
+    'verification.email.success_match',
+  ] as const
 
   private getOrderSerialAllKeys(): string[] {
     return ORDER_SERIAL_TYPES.flatMap((orderType) => {
@@ -170,6 +287,42 @@ class SystemConfigService {
     const maxValue = 10 ** value.width - 1
     if (value.start > maxValue || value.current > maxValue) {
       throw new BizError(`${ORDER_SERIAL_META[orderType].label}起始号或当前号超过位宽上限`, 400)
+    }
+  }
+
+  private formatVerificationProviderConfig(
+    channel: VerificationChannelType,
+    configMap: Map<string, Pick<SystemConfig, 'configValue' | 'updatedAt'>>,
+  ): VerificationProviderConfigRecord {
+    const keyPrefix = `verification.${channel}`
+    const enabledConfig = configMap.get(`${keyPrefix}.enabled`)
+    const methodConfig = configMap.get(`${keyPrefix}.http_method`)
+    const urlConfig = configMap.get(`${keyPrefix}.api_url`)
+    const headersConfig = configMap.get(`${keyPrefix}.headers_template`)
+    const bodyConfig = configMap.get(`${keyPrefix}.body_template`)
+    const successConfig = configMap.get(`${keyPrefix}.success_match`)
+    if (!enabledConfig || !methodConfig || !urlConfig || !headersConfig || !bodyConfig || !successConfig) {
+      throw new BizError('验证码平台配置缺失，请联系管理员补齐配置', 500)
+    }
+
+    const httpMethod = methodConfig.configValue === 'GET' ? 'GET' : 'POST'
+    const updatedAt = [
+      enabledConfig.updatedAt,
+      methodConfig.updatedAt,
+      urlConfig.updatedAt,
+      headersConfig.updatedAt,
+      bodyConfig.updatedAt,
+      successConfig.updatedAt,
+    ].sort((a, b) => b.getTime() - a.getTime())[0]
+
+    return {
+      enabled: this.parseNonNegativeInteger(enabledConfig.configValue, `${keyPrefix}.enabled`) > 0,
+      httpMethod,
+      apiUrl: urlConfig.configValue,
+      headersTemplate: headersConfig.configValue,
+      bodyTemplate: bodyConfig.configValue,
+      successMatch: successConfig.configValue,
+      updatedAt,
     }
   }
 
@@ -424,6 +577,117 @@ class SystemConfigService {
             actionLabel: '更新线上预订规则配置',
             targetType: 'system_config',
             targetCode: 'o2o_rules',
+            actor,
+            requestMeta,
+            detail: {
+              before,
+              after: config,
+            },
+          },
+          manager,
+        )
+      }
+
+      return { config, changed }
+    })
+  }
+
+  async getVerificationProviderConfigs(): Promise<VerificationProviderConfigsResult> {
+    await this.ensureDefaultConfigs()
+    const rows = await this.configRepo.find({
+      where: this.verificationConfigKeys.map((key) => ({ configKey: key })),
+      select: {
+        configKey: true,
+        configValue: true,
+        updatedAt: true,
+      },
+    })
+    if (rows.length !== this.verificationConfigKeys.length) {
+      throw new BizError('验证码平台配置缺失，请联系管理员补齐配置', 500)
+    }
+    const map = new Map(rows.map((row) => [row.configKey, row]))
+    return {
+      mobile: this.formatVerificationProviderConfig('mobile', map),
+      email: this.formatVerificationProviderConfig('email', map),
+    }
+  }
+
+  async updateVerificationProviderConfigs(
+    input: UpdateVerificationProviderConfigsInput,
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ): Promise<{ config: VerificationProviderConfigsResult; changed: boolean }> {
+    const normalizeChannelInput = (channel: VerificationProviderConfigInput, channelLabel: string) => {
+      const method = channel.httpMethod === 'GET' ? 'GET' : 'POST'
+      if (channel.enabled && !channel.apiUrl.trim()) {
+        throw new BizError(`${channelLabel}已启用时必须填写 API 地址`, 400)
+      }
+      return {
+        enabled: channel.enabled ? '1' : '0',
+        httpMethod: method,
+        apiUrl: channel.apiUrl.trim(),
+        headersTemplate: channel.headersTemplate.trim(),
+        bodyTemplate: channel.bodyTemplate.trim(),
+        successMatch: channel.successMatch.trim(),
+      }
+    }
+
+    const normalizedMobile = normalizeChannelInput(input.mobile, '短信验证码平台')
+    const normalizedEmail = normalizeChannelInput(input.email, '邮箱验证码平台')
+
+    await this.ensureDefaultConfigs()
+    return AppDataSource.transaction(async (manager) => {
+      const useForUpdate = manager.connection.options.type === 'mysql'
+      const placeholders = this.verificationConfigKeys.map(() => '?').join(', ')
+      const lockedRows = (await manager.query(
+        `
+          SELECT id, config_key AS configKey, config_value AS configValue, updated_at AS updatedAt
+          FROM system_configs
+          WHERE config_key IN (${placeholders})
+          ${useForUpdate ? 'FOR UPDATE' : ''}
+        `,
+        [...this.verificationConfigKeys],
+      )) as Array<{ id: string; configKey: string; configValue: string; updatedAt: string }>
+
+      if (lockedRows.length !== this.verificationConfigKeys.length) {
+        throw new BizError('验证码平台配置缺失，请联系管理员补齐配置', 500)
+      }
+
+      const targetMap = new Map<string, string>([
+        ['verification.mobile.enabled', normalizedMobile.enabled],
+        ['verification.mobile.http_method', normalizedMobile.httpMethod],
+        ['verification.mobile.api_url', normalizedMobile.apiUrl],
+        ['verification.mobile.headers_template', normalizedMobile.headersTemplate],
+        ['verification.mobile.body_template', normalizedMobile.bodyTemplate],
+        ['verification.mobile.success_match', normalizedMobile.successMatch],
+        ['verification.email.enabled', normalizedEmail.enabled],
+        ['verification.email.http_method', normalizedEmail.httpMethod],
+        ['verification.email.api_url', normalizedEmail.apiUrl],
+        ['verification.email.headers_template', normalizedEmail.headersTemplate],
+        ['verification.email.body_template', normalizedEmail.bodyTemplate],
+        ['verification.email.success_match', normalizedEmail.successMatch],
+      ])
+
+      const before = await this.getVerificationProviderConfigs()
+      let changed = false
+      const repo = manager.getRepository(SystemConfig)
+      for (const row of lockedRows) {
+        const targetValue = targetMap.get(row.configKey)
+        if (targetValue == null || targetValue === row.configValue) {
+          continue
+        }
+        await repo.update({ id: row.id }, { configValue: targetValue })
+        changed = true
+      }
+
+      const config = await this.getVerificationProviderConfigs()
+      if (changed) {
+        await auditService.record(
+          {
+            actionType: 'system_config.update_verification_providers',
+            actionLabel: '更新验证码平台配置',
+            targetType: 'system_config',
+            targetCode: 'verification_providers',
             actor,
             requestMeta,
             detail: {

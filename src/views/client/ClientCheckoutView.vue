@@ -105,7 +105,9 @@ const handleSubmit = async () => {
 
       <div class="mb-4 rounded-[1.2rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
         <p class="text-sm text-slate-500">提货人</p>
-        <p class="mt-1 text-base font-semibold text-slate-900">{{ clientAuthStore.currentUser?.realName || clientAuthStore.currentUser?.mobile }}</p>
+        <p class="mt-1 text-base font-semibold text-slate-900">
+          {{ clientAuthStore.currentUser?.account || clientAuthStore.currentUser?.realName || clientAuthStore.currentUser?.mobile }}
+        </p>
         <p class="text-xs text-slate-400">{{ clientAuthStore.currentUser?.departmentName || '未设置部门' }}</p>
       </div>
 

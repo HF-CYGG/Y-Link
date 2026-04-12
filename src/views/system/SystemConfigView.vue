@@ -13,10 +13,13 @@ import { PageContainer, PageToolbarCard } from '@/components/common'
 import {
   getO2oRuleConfigs,
   getOrderSerialConfigs,
+  getVerificationProviderConfigs,
   updateO2oRuleConfigs,
   updateOrderSerialConfigs,
+  updateVerificationProviderConfigs,
   type O2oRuleConfigRecord,
   type OrderSerialConfigRecord,
+  type VerificationProviderConfigsResult,
 } from '@/api/modules/system-config'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useAuthStore } from '@/store'
@@ -28,12 +31,22 @@ type SerialFormValue = {
   width: number
 }
 
+type VerificationFormValue = {
+  enabled: boolean
+  httpMethod: 'POST' | 'GET'
+  apiUrl: string
+  headersTemplate: string
+  bodyTemplate: string
+  successMatch: string
+}
+
 const authStore = useAuthStore()
 const formRef = ref<FormInstance>()
 const loading = ref(true)
 const saving = ref(false)
 const configMap = ref<Record<'department' | 'walkin', OrderSerialConfigRecord> | null>(null)
 const o2oRuleConfig = ref<O2oRuleConfigRecord | null>(null)
+const verificationConfigMap = ref<VerificationProviderConfigsResult | null>(null)
 const loadRequest = useStableRequest()
 
 const serialForm = reactive<{
@@ -44,6 +57,10 @@ const serialForm = reactive<{
     autoCancelHours: number
     limitEnabled: boolean
     limitQty: number
+  }
+  verification: {
+    mobile: VerificationFormValue
+    email: VerificationFormValue
   }
 }>({
   department: {
@@ -61,6 +78,24 @@ const serialForm = reactive<{
     autoCancelHours: 24,
     limitEnabled: true,
     limitQty: 5,
+  },
+  verification: {
+    mobile: {
+      enabled: false,
+      httpMethod: 'POST',
+      apiUrl: '',
+      headersTemplate: '{"Content-Type":"application/json"}',
+      bodyTemplate: '{"mobile":"{{target}}","code":"{{code}}","scene":"{{scene}}"}',
+      successMatch: '',
+    },
+    email: {
+      enabled: false,
+      httpMethod: 'POST',
+      apiUrl: '',
+      headersTemplate: '{"Content-Type":"application/json"}',
+      bodyTemplate: '{"email":"{{target}}","subject":"Y-Link 验证码","content":"您的验证码为 {{code}}，场景：{{scene}}。5 分钟内有效。"}',
+      successMatch: '',
+    },
   },
 })
 
@@ -102,6 +137,24 @@ const snapshotForm = () =>
       limitEnabled: Boolean(serialForm.o2o.limitEnabled),
       limitQty: Number(serialForm.o2o.limitQty),
     },
+    verification: {
+      mobile: {
+        enabled: Boolean(serialForm.verification.mobile.enabled),
+        httpMethod: serialForm.verification.mobile.httpMethod,
+        apiUrl: serialForm.verification.mobile.apiUrl.trim(),
+        headersTemplate: serialForm.verification.mobile.headersTemplate.trim(),
+        bodyTemplate: serialForm.verification.mobile.bodyTemplate.trim(),
+        successMatch: serialForm.verification.mobile.successMatch.trim(),
+      },
+      email: {
+        enabled: Boolean(serialForm.verification.email.enabled),
+        httpMethod: serialForm.verification.email.httpMethod,
+        apiUrl: serialForm.verification.email.apiUrl.trim(),
+        headersTemplate: serialForm.verification.email.headersTemplate.trim(),
+        bodyTemplate: serialForm.verification.email.bodyTemplate.trim(),
+        successMatch: serialForm.verification.email.successMatch.trim(),
+      },
+    },
   })
 
 const isDirty = computed(() => snapshotForm() !== initialSnapshot.value)
@@ -140,6 +193,46 @@ const applyO2oRules = (config: O2oRuleConfigRecord) => {
   serialForm.o2o.limitQty = config.limitQty
 }
 
+const applyVerificationConfigs = (config: VerificationProviderConfigsResult) => {
+  verificationConfigMap.value = config
+  serialForm.verification.mobile.enabled = config.mobile.enabled
+  serialForm.verification.mobile.httpMethod = config.mobile.httpMethod
+  serialForm.verification.mobile.apiUrl = config.mobile.apiUrl
+  serialForm.verification.mobile.headersTemplate = config.mobile.headersTemplate
+  serialForm.verification.mobile.bodyTemplate = config.mobile.bodyTemplate
+  serialForm.verification.mobile.successMatch = config.mobile.successMatch
+
+  serialForm.verification.email.enabled = config.email.enabled
+  serialForm.verification.email.httpMethod = config.email.httpMethod
+  serialForm.verification.email.apiUrl = config.email.apiUrl
+  serialForm.verification.email.headersTemplate = config.email.headersTemplate
+  serialForm.verification.email.bodyTemplate = config.email.bodyTemplate
+  serialForm.verification.email.successMatch = config.email.successMatch
+}
+
+const getVerificationChannelLabel = (channel: 'mobile' | 'email') => {
+  return channel === 'mobile' ? '短信验证码平台' : '邮箱验证码平台'
+}
+
+const validateVerificationConfigs = () => {
+  const channels: Array<'mobile' | 'email'> = ['mobile', 'email']
+  for (const channel of channels) {
+    const label = getVerificationChannelLabel(channel)
+    const config = serialForm.verification[channel]
+    if (config.enabled && !config.apiUrl.trim()) {
+      ElMessage.warning(`${label}已启用时必须填写 API 地址`)
+      return false
+    }
+    try {
+      JSON.parse(config.headersTemplate.trim() || '{}')
+    } catch {
+      ElMessage.warning(`${label}请求头模板必须是合法 JSON`)
+      return false
+    }
+  }
+  return true
+}
+
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const loadData = async () => {
   if (!canViewConfigs.value) {
@@ -149,10 +242,11 @@ const loadData = async () => {
 
   loading.value = true
   await loadRequest.runLatest({
-    executor: async () => Promise.all([getOrderSerialConfigs(), getO2oRuleConfigs()]),
+    executor: async () => Promise.all([getOrderSerialConfigs(), getO2oRuleConfigs(), getVerificationProviderConfigs()]),
     onSuccess: (result) => {
       applyList(result[0].list)
       applyO2oRules(result[1])
+      applyVerificationConfigs(result[2])
       initialSnapshot.value = snapshotForm()
     },
     onError: (error) => {
@@ -180,32 +274,56 @@ const handleSubmit = async () => {
   if (!valid) {
     return
   }
+  if (!validateVerificationConfigs()) {
+    return
+  }
 
   saving.value = true
   try {
-    const result = await updateOrderSerialConfigs({
-      department: {
-        start: Number(serialForm.department.start),
-        current: Number(configMap.value?.department.current ?? serialForm.department.current),
-        width: Number(serialForm.department.width),
-      },
-      walkin: {
-        start: Number(serialForm.walkin.start),
-        current: Number(configMap.value?.walkin.current ?? serialForm.walkin.current),
-        width: Number(serialForm.walkin.width),
-      },
-    })
-    const o2oResult = await updateO2oRuleConfigs({
-      autoCancelEnabled: serialForm.o2o.autoCancelEnabled,
-      autoCancelHours: Number(serialForm.o2o.autoCancelHours),
-      limitEnabled: serialForm.o2o.limitEnabled,
-      limitQty: Number(serialForm.o2o.limitQty),
-    })
+    const [result, o2oResult, verificationResult] = await Promise.all([
+      updateOrderSerialConfigs({
+        department: {
+          start: Number(serialForm.department.start),
+          current: Number(configMap.value?.department.current ?? serialForm.department.current),
+          width: Number(serialForm.department.width),
+        },
+        walkin: {
+          start: Number(serialForm.walkin.start),
+          current: Number(configMap.value?.walkin.current ?? serialForm.walkin.current),
+          width: Number(serialForm.walkin.width),
+        },
+      }),
+      updateO2oRuleConfigs({
+        autoCancelEnabled: serialForm.o2o.autoCancelEnabled,
+        autoCancelHours: Number(serialForm.o2o.autoCancelHours),
+        limitEnabled: serialForm.o2o.limitEnabled,
+        limitQty: Number(serialForm.o2o.limitQty),
+      }),
+      updateVerificationProviderConfigs({
+        mobile: {
+          enabled: serialForm.verification.mobile.enabled,
+          httpMethod: serialForm.verification.mobile.httpMethod,
+          apiUrl: serialForm.verification.mobile.apiUrl.trim(),
+          headersTemplate: serialForm.verification.mobile.headersTemplate.trim(),
+          bodyTemplate: serialForm.verification.mobile.bodyTemplate.trim(),
+          successMatch: serialForm.verification.mobile.successMatch.trim(),
+        },
+        email: {
+          enabled: serialForm.verification.email.enabled,
+          httpMethod: serialForm.verification.email.httpMethod,
+          apiUrl: serialForm.verification.email.apiUrl.trim(),
+          headersTemplate: serialForm.verification.email.headersTemplate.trim(),
+          bodyTemplate: serialForm.verification.email.bodyTemplate.trim(),
+          successMatch: serialForm.verification.email.successMatch.trim(),
+        },
+      }),
+    ])
 
     applyList(result.list)
     applyO2oRules(o2oResult.config)
+    applyVerificationConfigs(verificationResult.config)
     initialSnapshot.value = snapshotForm()
-    ElMessage.success(result.changed || o2oResult.changed ? '系统配置已保存' : '配置未变更')
+    ElMessage.success(result.changed || o2oResult.changed || verificationResult.changed ? '系统配置已保存' : '配置未变更')
   } catch (error) {
     ElMessage.error(extractErrorMessage(error, '保存系统配置失败，请稍后重试'))
   } finally {
@@ -229,13 +347,21 @@ const o2oUpdatedAtLabel = computed(() => {
   return dayjs(value).format('YYYY-MM-DD HH:mm:ss')
 })
 
+const getVerificationUpdatedAtLabel = (channel: 'mobile' | 'email') => {
+  const value = verificationConfigMap.value?.[channel]?.updatedAt
+  if (!value) {
+    return '-'
+  }
+  return dayjs(value).format('YYYY-MM-DD HH:mm:ss')
+}
+
 onMounted(() => {
   void loadData()
 })
 </script>
 
 <template>
-  <PageContainer title="系统配置" description="维护部门/散客双流水参数，所有变更会记录审计日志。">
+  <PageContainer title="系统配置" description="维护流水号、线上预订规则与短信/邮箱验证码平台参数，所有变更会记录审计日志。">
     <div class="space-y-6">
       <PageToolbarCard class="space-y-3">
         <div class="flex flex-wrap items-center justify-between gap-3">
@@ -251,7 +377,7 @@ onMounted(() => {
           type="info"
           :closable="false"
           show-icon
-          description="这里用于维护订单编号规则：系统会按“前缀 + 流水号”自动生成下一张单据编号。建议仅在管理员确认后修改，以免影响对账连续性。"
+          description="这里用于维护订单编号规则、线上预订规则，以及客户端注册/找回密码依赖的短信与邮箱验证码平台。建议仅在管理员确认后修改，以免影响业务连续性。"
         />
       </PageToolbarCard>
 
@@ -263,127 +389,281 @@ onMounted(() => {
         show-icon
       />
 
-      <el-form v-else ref="formRef" :model="serialForm" :rules="rules" label-position="top" class="grid gap-6 lg:grid-cols-2">
-      <div class="apple-card flex flex-col p-5 sm:p-6 xl:p-7">
-        <div class="mb-5 flex items-center justify-between gap-2 border-b border-slate-100 pb-4 dark:border-white/5">
-          <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">部门订单流水</h2>
-          <span class="rounded-lg bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-            前缀：{{ configMap?.department.prefix || 'hyyzjd' }}
-          </span>
-        </div>
-        <div class="grid flex-1 gap-5">
-          <div class="rounded-xl border border-teal-200/60 bg-teal-50/50 p-4 text-teal-800 dark:border-teal-900/40 dark:bg-teal-900/10 dark:text-teal-300">
-            <div class="text-xs font-medium opacity-80">订单编号示例（下一单）</div>
-            <div class="mt-1.5 text-lg font-bold tracking-wide">{{ departmentPreview }}</div>
+      <el-form v-else ref="formRef" :model="serialForm" :rules="rules" label-position="top" class="space-y-6">
+        <div class="grid gap-6 lg:grid-cols-2">
+          <div class="apple-card flex flex-col p-5 sm:p-6 xl:p-7">
+            <div class="mb-5 flex items-center justify-between gap-2 border-b border-slate-100 pb-4 dark:border-white/5">
+              <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">部门订单流水</h2>
+              <span class="rounded-lg bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+                前缀：{{ configMap?.department.prefix || 'hyyzjd' }}
+              </span>
+            </div>
+            <div class="grid flex-1 gap-5">
+              <div class="rounded-xl border border-teal-200/60 bg-teal-50/50 p-4 text-teal-800 dark:border-teal-900/40 dark:bg-teal-900/10 dark:text-teal-300">
+                <div class="text-xs font-medium opacity-80">订单编号示例（下一单）</div>
+                <div class="mt-1.5 text-lg font-bold tracking-wide">{{ departmentPreview }}</div>
+              </div>
+              <div class="space-y-4">
+                <el-form-item prop="department.start" class="!mb-0">
+                  <template #label>
+                    <span class="field-label">起始号 <span class="field-label__help">首次生效编号起点</span></span>
+                  </template>
+                  <el-input-number v-model="serialForm.department.start" :min="1" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
+                </el-form-item>
+                <el-form-item prop="department.current" class="!mb-0">
+                  <template #label>
+                    <span class="field-label">当前号 <span class="field-label__help">系统自动维护，仅展示不可编辑</span></span>
+                  </template>
+                  <el-input :model-value="String(serialForm.department.current)" disabled class="!w-full" />
+                </el-form-item>
+                <el-form-item prop="department.width" class="!mb-0">
+                  <template #label>
+                    <span class="field-label">位宽 <span class="field-label__help">流水号补零位数（1-12）</span></span>
+                  </template>
+                  <el-input-number v-model="serialForm.department.width" :min="1" :max="12" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
+                </el-form-item>
+              </div>
+            </div>
+            <div class="mt-6 border-t border-slate-100 pt-4 text-xs text-slate-400 dark:border-white/5 dark:text-slate-500">
+              最近更新时间：{{ getUpdatedAtLabel('department') }}
+            </div>
           </div>
-          <div class="space-y-4">
-            <el-form-item prop="department.start" class="!mb-0">
-              <template #label>
-                <span class="field-label">起始号 <span class="field-label__help">首次生效编号起点</span></span>
-              </template>
-              <el-input-number v-model="serialForm.department.start" :min="1" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
-            </el-form-item>
-            <el-form-item prop="department.current" class="!mb-0">
-              <template #label>
-                <span class="field-label">当前号 <span class="field-label__help">系统自动维护，仅展示不可编辑</span></span>
-              </template>
-              <el-input :model-value="String(serialForm.department.current)" disabled class="!w-full" />
-            </el-form-item>
-            <el-form-item prop="department.width" class="!mb-0">
-              <template #label>
-                <span class="field-label">位宽 <span class="field-label__help">流水号补零位数（1-12）</span></span>
-              </template>
-              <el-input-number v-model="serialForm.department.width" :min="1" :max="12" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
-            </el-form-item>
-          </div>
-        </div>
-        <div class="mt-6 border-t border-slate-100 pt-4 text-xs text-slate-400 dark:border-white/5 dark:text-slate-500">
-          最近更新时间：{{ getUpdatedAtLabel('department') }}
-        </div>
-      </div>
 
-      <div class="apple-card flex flex-col p-5 sm:p-6 xl:p-7">
-        <div class="mb-5 flex items-center justify-between gap-2 border-b border-slate-100 pb-4 dark:border-white/5">
-          <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">散客订单流水</h2>
-          <span class="rounded-lg bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-            前缀：{{ configMap?.walkin.prefix || 'hyyz' }}
-          </span>
-        </div>
-        <div class="grid flex-1 gap-5">
-          <div class="rounded-xl border border-sky-200/60 bg-sky-50/50 p-4 text-sky-800 dark:border-sky-900/40 dark:bg-sky-900/10 dark:text-sky-300">
-            <div class="text-xs font-medium opacity-80">订单编号示例（下一单）</div>
-            <div class="mt-1.5 text-lg font-bold tracking-wide">{{ walkinPreview }}</div>
+          <div class="apple-card flex flex-col p-5 sm:p-6 xl:p-7">
+            <div class="mb-5 flex items-center justify-between gap-2 border-b border-slate-100 pb-4 dark:border-white/5">
+              <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">散客订单流水</h2>
+              <span class="rounded-lg bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+                前缀：{{ configMap?.walkin.prefix || 'hyyz' }}
+              </span>
+            </div>
+            <div class="grid flex-1 gap-5">
+              <div class="rounded-xl border border-sky-200/60 bg-sky-50/50 p-4 text-sky-800 dark:border-sky-900/40 dark:bg-sky-900/10 dark:text-sky-300">
+                <div class="text-xs font-medium opacity-80">订单编号示例（下一单）</div>
+                <div class="mt-1.5 text-lg font-bold tracking-wide">{{ walkinPreview }}</div>
+              </div>
+              <div class="space-y-4">
+                <el-form-item prop="walkin.start" class="!mb-0">
+                  <template #label>
+                    <span class="field-label">起始号 <span class="field-label__help">首次生效编号起点</span></span>
+                  </template>
+                  <el-input-number v-model="serialForm.walkin.start" :min="1" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
+                </el-form-item>
+                <el-form-item prop="walkin.current" class="!mb-0">
+                  <template #label>
+                    <span class="field-label">当前号 <span class="field-label__help">系统自动维护，仅展示不可编辑</span></span>
+                  </template>
+                  <el-input :model-value="String(serialForm.walkin.current)" disabled class="!w-full" />
+                </el-form-item>
+                <el-form-item prop="walkin.width" class="!mb-0">
+                  <template #label>
+                    <span class="field-label">位宽 <span class="field-label__help">流水号补零位数（1-12）</span></span>
+                  </template>
+                  <el-input-number v-model="serialForm.walkin.width" :min="1" :max="12" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
+                </el-form-item>
+              </div>
+            </div>
+            <div class="mt-6 border-t border-slate-100 pt-4 text-xs text-slate-400 dark:border-white/5 dark:text-slate-500">
+              最近更新时间：{{ getUpdatedAtLabel('walkin') }}
+            </div>
           </div>
-          <div class="space-y-4">
-            <el-form-item prop="walkin.start" class="!mb-0">
-              <template #label>
-                <span class="field-label">起始号 <span class="field-label__help">首次生效编号起点</span></span>
-              </template>
-              <el-input-number v-model="serialForm.walkin.start" :min="1" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
-            </el-form-item>
-            <el-form-item prop="walkin.current" class="!mb-0">
-              <template #label>
-                <span class="field-label">当前号 <span class="field-label__help">系统自动维护，仅展示不可编辑</span></span>
-              </template>
-              <el-input :model-value="String(serialForm.walkin.current)" disabled class="!w-full" />
-            </el-form-item>
-            <el-form-item prop="walkin.width" class="!mb-0">
-              <template #label>
-                <span class="field-label">位宽 <span class="field-label__help">流水号补零位数（1-12）</span></span>
-              </template>
-              <el-input-number v-model="serialForm.walkin.width" :min="1" :max="12" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
-            </el-form-item>
+        </div>
+
+        <div class="apple-card flex flex-col p-5 sm:p-6 xl:p-7">
+          <div class="mb-5 flex items-center justify-between gap-2 border-b border-slate-100 pb-4 dark:border-white/5">
+            <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">线上预订规则</h2>
+            <span class="rounded-lg bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+              默认值：24小时 / 5件
+            </span>
+          </div>
+          <div class="grid gap-4 md:grid-cols-2">
+            <div class="space-y-2">
+              <div class="text-sm text-slate-600 dark:text-slate-300">超时自动取消</div>
+              <el-switch v-model="serialForm.o2o.autoCancelEnabled" :disabled="!canUpdateConfigs || loading" />
+            </div>
+            <div class="space-y-2">
+              <div class="text-sm text-slate-600 dark:text-slate-300">超时取消时长（小时）</div>
+              <el-input-number
+                v-model="serialForm.o2o.autoCancelHours"
+                :min="1"
+                :max="168"
+                :controls="false"
+                :disabled="!canUpdateConfigs || loading"
+                class="!w-full"
+              />
+            </div>
+            <div class="space-y-2">
+              <div class="text-sm text-slate-600 dark:text-slate-300">全局限购开关</div>
+              <el-switch v-model="serialForm.o2o.limitEnabled" :disabled="!canUpdateConfigs || loading" />
+            </div>
+            <div class="space-y-2">
+              <div class="text-sm text-slate-600 dark:text-slate-300">默认限购数量</div>
+              <el-input-number
+                v-model="serialForm.o2o.limitQty"
+                :min="1"
+                :max="999"
+                :controls="false"
+                :disabled="!canUpdateConfigs || loading"
+                class="!w-full"
+              />
+            </div>
+          </div>
+          <div class="mt-6 border-t border-slate-100 pt-4 text-xs text-slate-400 dark:border-white/5 dark:text-slate-500">
+            最近更新时间：{{ o2oUpdatedAtLabel }}
           </div>
         </div>
-        <div class="mt-6 border-t border-slate-100 pt-4 text-xs text-slate-400 dark:border-white/5 dark:text-slate-500">
-          最近更新时间：{{ getUpdatedAtLabel('walkin') }}
+
+        <div class="apple-card flex flex-col gap-5 p-5 sm:p-6 xl:p-7">
+          <div class="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-4 dark:border-white/5">
+            <div>
+              <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">验证码平台配置</h2>
+              <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                管理客户端注册与找回密码所需的短信、邮箱验证码发送平台。支持模板变量：
+                <span v-pre class="font-mono">{{target}}</span>、
+                <span v-pre class="font-mono">{{code}}</span>、
+                <span v-pre class="font-mono">{{scene}}</span>、
+                <span v-pre class="font-mono">{{ip}}</span>。
+              </p>
+            </div>
+            <span class="rounded-lg bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+              保存后立即生效
+            </span>
+          </div>
+
+          <el-alert
+            title="模板填写说明"
+            type="info"
+            :closable="false"
+            show-icon
+            description="请求头模板需填写合法 JSON；请求体模板会原样发送给目标平台。若配置成功关键字，系统会在第三方返回文本中匹配该内容来判断发送成功。"
+          />
+
+          <div class="grid gap-6 xl:grid-cols-2">
+            <div class="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-5 dark:border-white/10 dark:bg-slate-900/30">
+              <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100">短信验证码平台</h3>
+                  <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">用于手机号注册、手机号找回密码。</p>
+                </div>
+                <el-switch v-model="serialForm.verification.mobile.enabled" :disabled="!canUpdateConfigs || loading" />
+              </div>
+
+              <div class="grid gap-4">
+                <div class="grid gap-4 md:grid-cols-[140px_minmax(0,1fr)]">
+                  <div class="space-y-2">
+                    <div class="text-sm text-slate-600 dark:text-slate-300">请求方法</div>
+                    <el-select v-model="serialForm.verification.mobile.httpMethod" :disabled="!canUpdateConfigs || loading">
+                      <el-option label="POST" value="POST" />
+                      <el-option label="GET" value="GET" />
+                    </el-select>
+                  </div>
+                  <div class="space-y-2">
+                    <div class="text-sm text-slate-600 dark:text-slate-300">API 地址</div>
+                    <el-input v-model="serialForm.verification.mobile.apiUrl" :disabled="!canUpdateConfigs || loading" placeholder="https://example.com/send-sms" clearable />
+                  </div>
+                </div>
+
+                <div class="space-y-2">
+                  <div class="text-sm text-slate-600 dark:text-slate-300">请求头模板（JSON）</div>
+                  <el-input
+                    v-model="serialForm.verification.mobile.headersTemplate"
+                    type="textarea"
+                    :rows="4"
+                    :disabled="!canUpdateConfigs || loading"
+                    placeholder='{"Content-Type":"application/json","Authorization":"Bearer xxx"}'
+                  />
+                </div>
+
+                <div class="space-y-2">
+                  <div class="text-sm text-slate-600 dark:text-slate-300">请求体模板</div>
+                  <el-input
+                    v-model="serialForm.verification.mobile.bodyTemplate"
+                    type="textarea"
+                    :rows="6"
+                    :disabled="!canUpdateConfigs || loading"
+                    placeholder='{"mobile":"{{target}}","code":"{{code}}","scene":"{{scene}}"}'
+                  />
+                </div>
+
+                <div class="space-y-2">
+                  <div class="text-sm text-slate-600 dark:text-slate-300">成功关键字（可选）</div>
+                  <el-input
+                    v-model="serialForm.verification.mobile.successMatch"
+                    :disabled="!canUpdateConfigs || loading"
+                    placeholder="如：success"
+                    clearable
+                  />
+                </div>
+              </div>
+
+              <div class="mt-5 border-t border-slate-200/80 pt-4 text-xs text-slate-400 dark:border-white/10 dark:text-slate-500">
+                最近更新时间：{{ getVerificationUpdatedAtLabel('mobile') }}
+              </div>
+            </div>
+
+            <div class="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-5 dark:border-white/10 dark:bg-slate-900/30">
+              <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100">邮箱验证码平台</h3>
+                  <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">用于邮箱注册、邮箱找回密码。</p>
+                </div>
+                <el-switch v-model="serialForm.verification.email.enabled" :disabled="!canUpdateConfigs || loading" />
+              </div>
+
+              <div class="grid gap-4">
+                <div class="grid gap-4 md:grid-cols-[140px_minmax(0,1fr)]">
+                  <div class="space-y-2">
+                    <div class="text-sm text-slate-600 dark:text-slate-300">请求方法</div>
+                    <el-select v-model="serialForm.verification.email.httpMethod" :disabled="!canUpdateConfigs || loading">
+                      <el-option label="POST" value="POST" />
+                      <el-option label="GET" value="GET" />
+                    </el-select>
+                  </div>
+                  <div class="space-y-2">
+                    <div class="text-sm text-slate-600 dark:text-slate-300">API 地址</div>
+                    <el-input v-model="serialForm.verification.email.apiUrl" :disabled="!canUpdateConfigs || loading" placeholder="https://example.com/send-mail" clearable />
+                  </div>
+                </div>
+
+                <div class="space-y-2">
+                  <div class="text-sm text-slate-600 dark:text-slate-300">请求头模板（JSON）</div>
+                  <el-input
+                    v-model="serialForm.verification.email.headersTemplate"
+                    type="textarea"
+                    :rows="4"
+                    :disabled="!canUpdateConfigs || loading"
+                    placeholder='{"Content-Type":"application/json","Authorization":"Bearer xxx"}'
+                  />
+                </div>
+
+                <div class="space-y-2">
+                  <div class="text-sm text-slate-600 dark:text-slate-300">请求体模板</div>
+                  <el-input
+                    v-model="serialForm.verification.email.bodyTemplate"
+                    type="textarea"
+                    :rows="6"
+                    :disabled="!canUpdateConfigs || loading"
+                    placeholder='{"email":"{{target}}","subject":"Y-Link 验证码","content":"您的验证码为 {{code}}"}'
+                  />
+                </div>
+
+                <div class="space-y-2">
+                  <div class="text-sm text-slate-600 dark:text-slate-300">成功关键字（可选）</div>
+                  <el-input
+                    v-model="serialForm.verification.email.successMatch"
+                    :disabled="!canUpdateConfigs || loading"
+                    placeholder="如：accepted"
+                    clearable
+                  />
+                </div>
+              </div>
+
+              <div class="mt-5 border-t border-slate-200/80 pt-4 text-xs text-slate-400 dark:border-white/10 dark:text-slate-500">
+                最近更新时间：{{ getVerificationUpdatedAtLabel('email') }}
+              </div>
+            </div>
+          </div>
         </div>
-      </div>
       </el-form>
-
-      <div v-if="canViewConfigs" class="apple-card flex flex-col p-5 sm:p-6 xl:p-7">
-        <div class="mb-5 flex items-center justify-between gap-2 border-b border-slate-100 pb-4 dark:border-white/5">
-          <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">线上预订规则</h2>
-          <span class="rounded-lg bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-            默认值：24小时 / 5件
-          </span>
-        </div>
-        <div class="grid gap-4 md:grid-cols-2">
-          <div class="space-y-2">
-            <div class="text-sm text-slate-600 dark:text-slate-300">超时自动取消</div>
-            <el-switch v-model="serialForm.o2o.autoCancelEnabled" :disabled="!canUpdateConfigs || loading" />
-          </div>
-          <div class="space-y-2">
-            <div class="text-sm text-slate-600 dark:text-slate-300">超时取消时长（小时）</div>
-            <el-input-number
-              v-model="serialForm.o2o.autoCancelHours"
-              :min="1"
-              :max="168"
-              :controls="false"
-              :disabled="!canUpdateConfigs || loading"
-              class="!w-full"
-            />
-          </div>
-          <div class="space-y-2">
-            <div class="text-sm text-slate-600 dark:text-slate-300">全局限购开关</div>
-            <el-switch v-model="serialForm.o2o.limitEnabled" :disabled="!canUpdateConfigs || loading" />
-          </div>
-          <div class="space-y-2">
-            <div class="text-sm text-slate-600 dark:text-slate-300">默认限购数量</div>
-            <el-input-number
-              v-model="serialForm.o2o.limitQty"
-              :min="1"
-              :max="999"
-              :controls="false"
-              :disabled="!canUpdateConfigs || loading"
-              class="!w-full"
-            />
-          </div>
-        </div>
-        <div class="mt-6 border-t border-slate-100 pt-4 text-xs text-slate-400 dark:border-white/5 dark:text-slate-500">
-          最近更新时间：{{ o2oUpdatedAtLabel }}
-        </div>
-      </div>
     </div>
   </PageContainer>
 </template>

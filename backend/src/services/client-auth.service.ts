@@ -17,6 +17,7 @@ import { generateSessionToken } from '../utils/token.js'
 import { auditService } from './audit.service.js'
 import { authSecurityService } from './auth-security.service.js'
 import { captchaService } from './captcha.service.js'
+import { verificationCodeService } from './verification-code.service.js'
 
 interface ResetTicket {
   userId: string
@@ -28,29 +29,30 @@ const RESET_TICKET_TTL_MS = 10 * 60 * 1000
 const resetTicketStore = new Map<string, ResetTicket>()
 
 export interface ClientRegisterInput {
-  mobile: string
+  account: string
   password: string
-  realName: string
   departmentName?: string
+  verificationCode: string
   captchaId: string
   captchaCode: string
 }
 
 export interface ClientLoginInput {
-  mobile: string
+  account: string
   password: string
   captchaId: string
   captchaCode: string
 }
 
 export interface ClientForgotVerifyInput {
-  mobile: string
+  account: string
+  verificationCode: string
   captchaId: string
   captchaCode: string
 }
 
 export interface ClientResetPasswordInput {
-  mobile: string
+  account: string
   resetToken: string
   newPassword: string
 }
@@ -64,19 +66,33 @@ class ClientAuthService {
   private readonly userRepo = AppDataSource.getRepository(ClientUser)
   private readonly sessionRepo = AppDataSource.getRepository(ClientUserSession)
 
-  private async findUserWithPasswordByMobile(mobile: string) {
-    return this.userRepo.createQueryBuilder('user').addSelect('user.passwordHash').where('user.mobile = :mobile', { mobile }).getOne()
+  private async findUserWithPasswordByAccount(account: string) {
+    return this.userRepo
+      .createQueryBuilder('user')
+      .addSelect('user.passwordHash')
+      .where('user.mobile = :account OR user.email = :account', { account })
+      .getOne()
   }
 
   private toClientProfile(user: ClientUser) {
     return {
       id: user.id,
-      mobile: user.mobile,
+      account: user.email ?? user.mobile ?? user.realName,
+      mobile: user.mobile ?? '',
+      email: user.email ?? '',
       realName: user.realName,
       departmentName: user.departmentName ?? '',
       status: user.status,
       lastLoginAt: user.lastLoginAt,
     }
+  }
+
+  private normalizeEmail(email: string) {
+    const normalized = email.trim().toLowerCase()
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
+      throw new BizError('邮箱格式不正确', 400)
+    }
+    return normalized
   }
 
   private normalizeMobile(mobile: string) {
@@ -87,27 +103,61 @@ class ClientAuthService {
     return normalized
   }
 
+  private resolveAccount(account: string) {
+    const normalized = account.trim()
+    if (!normalized) {
+      throw new BizError('账号不能为空', 400)
+    }
+    if (normalized.includes('@')) {
+      const email = this.normalizeEmail(normalized)
+      return {
+        channel: 'email' as const,
+        account: email,
+        mobile: null,
+        email,
+      }
+    }
+    const mobile = this.normalizeMobile(normalized)
+    return {
+      channel: 'mobile' as const,
+      account: mobile,
+      mobile,
+      email: null,
+    }
+  }
+
   async createCaptcha(requestMeta?: RequestMeta) {
     await authSecurityService.guardClientCaptchaRequest(requestMeta)
     return captchaService.createCaptcha()
   }
 
   async register(input: ClientRegisterInput, requestMeta?: RequestMeta) {
-    const mobile = this.normalizeMobile(input.mobile)
+    const account = this.resolveAccount(input.account)
     const password = input.password.trim()
     if (password.length < 6) {
       throw new BizError('密码至少 6 位', 400)
     }
     captchaService.verifyCaptcha(input.captchaId, input.captchaCode)
-    const existed = await this.userRepo.findOne({ where: { mobile } })
+    verificationCodeService.verifyCode({
+      channel: account.channel,
+      target: account.account,
+      scene: 'register',
+      code: input.verificationCode,
+    })
+    const existed = await this.userRepo
+      .createQueryBuilder('user')
+      .where('user.mobile = :account OR user.email = :account', { account: account.account })
+      .getOne()
     if (existed) {
-      throw new BizError('手机号已注册', 409)
+      throw new BizError('该用户名已注册', 409)
     }
     const user = await this.userRepo.save(
       this.userRepo.create({
-        mobile,
+        mobile: account.mobile,
+        email: account.email,
         passwordHash: await hashPassword(password),
-        realName: input.realName.trim() || mobile,
+        // 当前账号体系下，“用户名”直接使用注册时填写的手机号或邮箱。
+        realName: account.account,
         departmentName: input.departmentName?.trim() || '',
         status: 'enabled',
       }),
@@ -116,40 +166,40 @@ class ClientAuthService {
   }
 
   async login(input: ClientLoginInput, requestMeta?: RequestMeta) {
-    const mobile = this.normalizeMobile(input.mobile)
+    const account = this.resolveAccount(input.account)
     const password = input.password.trim()
     captchaService.verifyCaptcha(input.captchaId, input.captchaCode)
-    const user = await this.findUserWithPasswordByMobile(mobile)
+    const user = await this.findUserWithPasswordByAccount(account.account)
     if (!user) {
-      await authSecurityService.recordClientLoginFailure(requestMeta, mobile)
+      await authSecurityService.recordClientLoginFailure(requestMeta, account.account)
       await auditService.safeRecord({
         actionType: 'client.auth.login',
         actionLabel: '客户端登录',
         targetType: 'client_session',
-        targetCode: mobile,
+        targetCode: account.account,
         resultStatus: 'failed',
         requestMeta,
         detail: { reason: 'user_not_found' },
       })
-      throw new BizError('手机号或密码错误', 401)
+      throw new BizError('用户名或密码错误', 401)
     }
     if (user.status !== 'enabled') {
       throw new BizError('当前账号已停用', 403)
     }
     const matched = await verifyPassword(password, user.passwordHash)
     if (!matched) {
-      await authSecurityService.recordClientLoginFailure(requestMeta, mobile)
+      await authSecurityService.recordClientLoginFailure(requestMeta, account.account)
       await auditService.safeRecord({
         actionType: 'client.auth.login',
         actionLabel: '客户端登录',
         targetType: 'client_session',
         targetId: user.id,
-        targetCode: user.mobile,
+        targetCode: user.email ?? user.mobile ?? user.realName,
         resultStatus: 'failed',
         requestMeta,
         detail: { reason: 'password_mismatch' },
       })
-      throw new BizError('手机号或密码错误', 401)
+      throw new BizError('用户名或密码错误', 401)
     }
     const now = new Date()
     const expiresAt = new Date(now.getTime() + env.AUTH_TOKEN_TTL_HOURS * 60 * 60 * 1000)
@@ -167,7 +217,7 @@ class ClientAuthService {
         }),
       )
     })
-    authSecurityService.clearClientLoginFailures(requestMeta, mobile)
+    authSecurityService.clearClientLoginFailures(requestMeta, account.account)
     return {
       token,
       expiresAt,
@@ -177,12 +227,21 @@ class ClientAuthService {
   }
 
   async verifyForgotPassword(input: ClientForgotVerifyInput, requestMeta?: RequestMeta) {
-    const mobile = this.normalizeMobile(input.mobile)
+    const account = this.resolveAccount(input.account)
     captchaService.verifyCaptcha(input.captchaId, input.captchaCode)
-    const user = await this.userRepo.findOne({ where: { mobile } })
+    verificationCodeService.verifyCode({
+      channel: account.channel,
+      target: account.account,
+      scene: 'forgot_password',
+      code: input.verificationCode,
+    })
+    const user = await this.userRepo
+      .createQueryBuilder('user')
+      .where('user.mobile = :account OR user.email = :account', { account: account.account })
+      .getOne()
     if (!user) {
-      // 找回密码不直接暴露“手机号是否已注册”，降低批量枚举账号的风险。
-      throw new BizError('身份校验失败，请确认手机号和验证码后重试', 400)
+      // 找回密码不直接暴露“账号是否已注册”，降低批量枚举账号的风险。
+      throw new BizError('身份校验失败，请确认用户名、验证码后重试', 400)
     }
     const resetToken = generateSessionToken()
     resetTicketStore.set(resetToken, { userId: user.id, expireAt: Date.now() + RESET_TICKET_TTL_MS })
@@ -193,7 +252,7 @@ class ClientAuthService {
   }
 
   async resetPassword(input: ClientResetPasswordInput, requestMeta?: RequestMeta) {
-    const mobile = this.normalizeMobile(input.mobile)
+    const account = this.resolveAccount(input.account)
     const newPassword = input.newPassword.trim()
     if (newPassword.length < 6) {
       throw new BizError('新密码至少 6 位', 400)
@@ -203,7 +262,11 @@ class ClientAuthService {
       resetTicketStore.delete(input.resetToken)
       throw new BizError('重置凭证已失效', 400)
     }
-    const user = await this.userRepo.findOne({ where: { id: ticket.userId, mobile } })
+    const user = await this.userRepo
+      .createQueryBuilder('user')
+      .where('user.id = :userId', { userId: ticket.userId })
+      .andWhere('(user.mobile = :account OR user.email = :account)', { account: account.account })
+      .getOne()
     if (!user) {
       throw new BizError('用户不存在', 404)
     }
@@ -228,7 +291,9 @@ class ClientAuthService {
     await this.sessionRepo.save(session)
     return {
       userId: session.user.id,
-      mobile: session.user.mobile,
+      mobile: session.user.mobile ?? '',
+      email: session.user.email ?? '',
+      account: session.user.email ?? session.user.mobile ?? session.user.realName,
       realName: session.user.realName,
       sessionToken: session.sessionToken,
     }
@@ -252,7 +317,8 @@ class ClientAuthService {
       throw new BizError('当前用户不存在', 404)
     }
 
-    const userWithPwd = await this.findUserWithPasswordByMobile(user.mobile)
+    const account = user.email ?? user.mobile ?? user.realName
+    const userWithPwd = await this.findUserWithPasswordByAccount(account)
     if (!userWithPwd) {
       throw new BizError('当前用户不存在', 404)
     }

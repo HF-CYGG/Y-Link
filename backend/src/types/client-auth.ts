@@ -8,7 +8,9 @@ import type { Request } from 'express'
 
 export interface ClientAuthContext {
   userId: string
+  account: string
   mobile: string
+  email: string
   realName: string
   sessionToken: string
 }

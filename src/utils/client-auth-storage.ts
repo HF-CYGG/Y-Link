@@ -20,7 +20,9 @@ const CLIENT_AUTH_EXPIRES_AT_KEY = 'y-link.client-auth.expiresAt'
  */
 export interface ClientAuthUserSnapshot {
   id: string
+  account: string
   mobile: string
+  email: string
   realName: string
   departmentName: string | null
   status: string

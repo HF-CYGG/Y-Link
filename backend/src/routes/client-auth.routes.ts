@@ -12,33 +12,41 @@ import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 import { clientAuthService } from '../services/client-auth.service.js'
 import { authSecurityService } from '../services/auth-security.service.js'
+import { verificationCodeService } from '../services/verification-code.service.js'
 
 const registerSchema = z.object({
-  mobile: z.string().trim().min(1),
+  account: z.string().trim().min(1),
   password: z.string().min(6),
-  realName: z.string().trim().min(1),
   departmentName: z.string().optional(),
+  verificationCode: z.string().trim().min(4).max(8),
   captchaId: z.string().trim().min(1),
   captchaCode: z.string().trim().min(1),
 })
 
 const loginSchema = z.object({
-  mobile: z.string().trim().min(1),
+  account: z.string().trim().min(1),
   password: z.string().min(1),
   captchaId: z.string().trim().min(1),
   captchaCode: z.string().trim().min(1),
 })
 
 const forgotVerifySchema = z.object({
-  mobile: z.string().trim().min(1),
+  account: z.string().trim().min(1),
+  verificationCode: z.string().trim().min(4).max(8),
   captchaId: z.string().trim().min(1),
   captchaCode: z.string().trim().min(1),
 })
 
 const resetPasswordSchema = z.object({
-  mobile: z.string().trim().min(1),
+  account: z.string().trim().min(1),
   resetToken: z.string().trim().min(1),
   newPassword: z.string().min(6),
+})
+
+const verificationCodeSendSchema = z.object({
+  channel: z.enum(['mobile', 'email']),
+  target: z.string().trim().min(1),
+  scene: z.enum(['register', 'forgot_password']),
 })
 
 const changePasswordSchema = z.object({
@@ -58,11 +66,27 @@ clientAuthRouter.get(
 )
 
 clientAuthRouter.post(
+  '/verification-code/send',
+  asyncHandler(async (req, res) => {
+    const payload = verificationCodeSendSchema.parse(req.body)
+    const requestMeta = extractRequestMeta(req)
+    await authSecurityService.guardVerificationCodeSendRequest(requestMeta, payload.target, payload.channel)
+    const data = await verificationCodeService.sendCode({
+      channel: payload.channel,
+      target: payload.target,
+      scene: payload.scene,
+      requestMeta,
+    })
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+clientAuthRouter.post(
   '/register',
   asyncHandler(async (req, res) => {
     const payload = registerSchema.parse(req.body)
     const requestMeta = extractRequestMeta(req)
-    await authSecurityService.guardClientRegisterRequest(requestMeta, payload.mobile)
+    await authSecurityService.guardClientRegisterRequest(requestMeta, payload.account)
     const data = await clientAuthService.register(payload, requestMeta)
     res.json({ code: 0, message: 'ok', data })
   }),
@@ -73,7 +97,7 @@ clientAuthRouter.post(
   asyncHandler(async (req, res) => {
     const payload = loginSchema.parse(req.body)
     const requestMeta = extractRequestMeta(req)
-    await authSecurityService.guardClientLoginRequest(requestMeta, payload.mobile)
+    await authSecurityService.guardClientLoginRequest(requestMeta, payload.account)
     const data = await clientAuthService.login(payload, requestMeta)
     res.json({ code: 0, message: 'ok', data })
   }),
@@ -84,7 +108,7 @@ clientAuthRouter.post(
   asyncHandler(async (req, res) => {
     const payload = forgotVerifySchema.parse(req.body)
     const requestMeta = extractRequestMeta(req)
-    await authSecurityService.guardClientForgotVerifyRequest(requestMeta, payload.mobile)
+    await authSecurityService.guardClientForgotVerifyRequest(requestMeta, payload.account)
     const data = await clientAuthService.verifyForgotPassword(payload, requestMeta)
     res.json({ code: 0, message: 'ok', data })
   }),
@@ -95,7 +119,7 @@ clientAuthRouter.post(
   asyncHandler(async (req, res) => {
     const payload = resetPasswordSchema.parse(req.body)
     const requestMeta = extractRequestMeta(req)
-    await authSecurityService.guardClientForgotResetRequest(requestMeta, payload.mobile)
+    await authSecurityService.guardClientForgotResetRequest(requestMeta, payload.account)
     await clientAuthService.resetPassword(payload, requestMeta)
     res.json({ code: 0, message: 'ok', data: true })
   }),
