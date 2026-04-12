@@ -123,12 +123,12 @@ const submitUpdateProfile = async () => {
   if (!valid) return
 
   const normalizedUsername = profileForm.username.trim()
-  const normalizedMobile = profileForm.mobile.trim()
-  const normalizedEmail = profileForm.email.trim().toLowerCase()
-  if (normalizedUsername !== normalizedMobile && normalizedUsername !== normalizedEmail) {
-    ElMessage.warning('用户名必须与手机号或邮箱保持一致')
+  if (!normalizedUsername) {
+    ElMessage.warning('请输入用户名')
     return
   }
+  const normalizedMobile = profileForm.mobile.trim()
+  const normalizedEmail = profileForm.email.trim().toLowerCase()
 
   try {
     profileSubmitting.value = true
@@ -159,7 +159,7 @@ const submitUpdateProfile = async () => {
       <div class="mb-4 flex items-center justify-between">
         <div>
           <p class="text-base font-semibold text-slate-900">资料信息</p>
-          <p class="mt-1 text-xs text-slate-400">可修改用户名、手机号、邮箱与部门信息</p>
+          <p class="mt-1 text-xs text-slate-400">可修改用户名、手机号、邮箱与部门信息，后续可用三者任一登录</p>
         </div>
         <button
           type="button"
@@ -219,7 +219,7 @@ const submitUpdateProfile = async () => {
     <el-dialog v-model="profileDialogVisible" title="编辑资料" width="90%" style="max-width: 420px" append-to-body>
       <el-form ref="profileFormRef" :model="profileForm" :rules="profileRules" label-position="top" @submit.prevent>
         <el-form-item label="用户名" prop="username">
-          <el-input v-model="profileForm.username" placeholder="请输入用户名（需与手机号或邮箱一致）" />
+          <el-input v-model="profileForm.username" placeholder="请输入用户名" />
         </el-form-item>
         <el-form-item label="手机号" prop="mobile">
           <el-input v-model="profileForm.mobile" placeholder="请输入手机号" />

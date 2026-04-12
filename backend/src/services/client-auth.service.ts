@@ -30,6 +30,7 @@ const RESET_TICKET_TTL_MS = 10 * 60 * 1000
 const resetTicketStore = new Map<string, ResetTicket>()
 
 export interface ClientRegisterInput {
+  username: string
   account: string
   password: string
   departmentName?: string
@@ -139,14 +140,21 @@ class ClientAuthService {
     return this.userRepo
       .createQueryBuilder('user')
       .addSelect('user.passwordHash')
-      .where('user.mobile = :account OR user.email = :account', { account })
+      .where('user.mobile = :account OR user.email = :account OR user.realName = :account', { account })
+      .getOne()
+  }
+
+  private async findUserByAnyIdentifier(account: string) {
+    return this.userRepo
+      .createQueryBuilder('user')
+      .where('user.mobile = :account OR user.email = :account OR user.realName = :account', { account })
       .getOne()
   }
 
   private toClientProfile(user: ClientUser) {
     return {
       id: user.id,
-      account: user.email ?? user.mobile ?? user.realName,
+      account: user.realName || user.email || user.mobile,
       mobile: user.mobile ?? '',
       email: user.email ?? '',
       realName: user.realName,
@@ -195,6 +203,14 @@ class ClientAuthService {
     }
   }
 
+  private resolveLoginAccount(account: string) {
+    const normalized = account.trim()
+    if (!normalized) {
+      throw new BizError('账号不能为空', 400)
+    }
+    return normalized.includes('@') ? normalized.toLowerCase() : normalized
+  }
+
   async createCaptcha(requestMeta?: RequestMeta) {
     await authSecurityService.guardClientCaptchaRequest(requestMeta)
     return captchaService.createCaptcha()
@@ -206,7 +222,11 @@ class ClientAuthService {
 
   async register(input: ClientRegisterInput, requestMeta?: RequestMeta) {
     const account = this.resolveAccount(input.account)
+    const username = input.username.trim()
     const password = input.password.trim()
+    if (!username) {
+      throw new BizError('用户名不能为空', 400)
+    }
     if (password.length < 6) {
       throw new BizError('密码至少 6 位', 400)
     }
@@ -227,20 +247,21 @@ class ClientAuthService {
       this.verifyCaptchaIfRequired(input)
     }
 
-    const existed = await this.userRepo
-      .createQueryBuilder('user')
-      .where('user.mobile = :account OR user.email = :account', { account: account.account })
-      .getOne()
-    if (existed) {
-      throw new BizError('该用户名已注册', 409)
+    const existedByAccount = await this.findUserByAnyIdentifier(account.account)
+    if (existedByAccount) {
+      throw new BizError('该手机号或邮箱已被占用', 409)
+    }
+    const existedByUsername = await this.findUserByAnyIdentifier(username)
+    if (existedByUsername) {
+      throw new BizError('该用户名已被占用', 409)
     }
     const user = await this.userRepo.save(
       this.userRepo.create({
         mobile: account.mobile,
         email: account.email,
         passwordHash: await hashPassword(password),
-        // 当前账号体系下，“用户名”直接使用注册时填写的手机号或邮箱。
-        realName: account.account,
+        // 当前账号体系下，用户名与登录账号分离，支持用户自定义用户名。
+        realName: username,
         departmentName: input.departmentName?.trim() || '',
         status: 'enabled',
       }),
@@ -249,19 +270,19 @@ class ClientAuthService {
   }
 
   async login(input: ClientLoginInput, requestMeta?: RequestMeta) {
-    const account = this.resolveAccount(input.account)
+    const account = this.resolveLoginAccount(input.account)
     const password = input.password.trim()
-    if (authSecurityService.isClientLoginCaptchaRequired(requestMeta, account.account)) {
+    if (authSecurityService.isClientLoginCaptchaRequired(requestMeta, account)) {
       this.verifyCaptchaIfRequired(input)
     }
-    const user = await this.findUserWithPasswordByAccount(account.account)
+    const user = await this.findUserWithPasswordByAccount(account)
     if (!user) {
-      await authSecurityService.recordClientLoginFailure(requestMeta, account.account)
+      await authSecurityService.recordClientLoginFailure(requestMeta, account)
       await auditService.safeRecord({
         actionType: 'client.auth.login',
         actionLabel: '客户端登录',
         targetType: 'client_session',
-        targetCode: account.account,
+        targetCode: account,
         resultStatus: 'failed',
         requestMeta,
         detail: { reason: 'user_not_found' },
@@ -273,7 +294,7 @@ class ClientAuthService {
     }
     const matched = await verifyPassword(password, user.passwordHash)
     if (!matched) {
-      await authSecurityService.recordClientLoginFailure(requestMeta, account.account)
+      await authSecurityService.recordClientLoginFailure(requestMeta, account)
       await auditService.safeRecord({
         actionType: 'client.auth.login',
         actionLabel: '客户端登录',
@@ -302,7 +323,7 @@ class ClientAuthService {
         }),
       )
     })
-    authSecurityService.clearClientLoginFailures(requestMeta, account.account)
+    authSecurityService.clearClientLoginFailures(requestMeta, account)
     return {
       token,
       expiresAt,
@@ -385,7 +406,7 @@ class ClientAuthService {
       userId: session.user.id,
       mobile: session.user.mobile ?? '',
       email: session.user.email ?? '',
-      account: session.user.email ?? session.user.mobile ?? session.user.realName,
+      account: session.user.realName || session.user.email || session.user.mobile || '',
       realName: session.user.realName,
       sessionToken: session.sessionToken,
     }
@@ -450,18 +471,19 @@ class ClientAuthService {
     if (!mobile && !email) {
       throw new BizError('手机号和邮箱至少保留一项', 400)
     }
-    if (username !== mobile && username !== email) {
-      throw new BizError('用户名必须与手机号或邮箱保持一致', 400)
+    const existedByUsername = await this.findUserByAnyIdentifier(username)
+    if (existedByUsername && existedByUsername.id !== user.id) {
+      throw new BizError('该用户名已被其他用户使用', 409)
     }
 
     if (mobile) {
-      const existedByMobile = await this.userRepo.findOne({ where: { mobile } })
+      const existedByMobile = await this.findUserByAnyIdentifier(mobile)
       if (existedByMobile && existedByMobile.id !== user.id) {
         throw new BizError('该手机号已被其他用户使用', 409)
       }
     }
     if (email) {
-      const existedByEmail = await this.userRepo.findOne({ where: { email } })
+      const existedByEmail = await this.findUserByAnyIdentifier(email)
       if (existedByEmail && existedByEmail.id !== user.id) {
         throw new BizError('该邮箱已被其他用户使用', 409)
       }

@@ -120,6 +120,7 @@ export const useClientAuthStore = defineStore('client-auth', () => {
    * - 注册成功后由页面层引导用户回到登录页完成正式登录。
    */
   const register = async (payload: {
+    username: string
     account: string
     password: string
     departmentName?: string

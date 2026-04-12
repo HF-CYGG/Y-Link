@@ -74,6 +74,7 @@ export const sendClientVerificationCode = (payload: {
   })
 
 export const clientRegister = (payload: {
+  username: string
   account: string
   password: string
   departmentName?: string

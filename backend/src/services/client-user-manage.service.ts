@@ -68,6 +68,13 @@ const sanitizeClientUserProfile = (user: ClientUser): ClientUserManageSafeProfil
 export class ClientUserManageService {
   private readonly userRepo = AppDataSource.getRepository(ClientUser)
 
+  private async findUserByAnyIdentifier(account: string) {
+    return this.userRepo
+      .createQueryBuilder('user')
+      .where('user.mobile = :account OR user.email = :account OR user.realName = :account', { account })
+      .getOne()
+  }
+
   private normalizeMobile(mobile: string | undefined) {
     const normalized = mobile?.trim() || ''
     if (!normalized) {
@@ -207,9 +214,6 @@ export class ClientUserManageService {
     if (!mobile && !email) {
       throw new BizError('手机号和邮箱至少保留一项', 400)
     }
-    if (username !== mobile && username !== email) {
-      throw new BizError('用户名必须与手机号或邮箱保持一致', 400)
-    }
 
     return AppDataSource.transaction(async (manager) => {
       const userRepo = manager.getRepository(ClientUser)
@@ -219,14 +223,19 @@ export class ClientUserManageService {
         throw new BizError('客户端用户不存在', 404)
       }
 
+      const duplicatedUsernameUser = await this.findUserByAnyIdentifier(username)
+      if (duplicatedUsernameUser && duplicatedUsernameUser.id !== user.id) {
+        throw new BizError('该用户名已被其他客户端用户使用', 409)
+      }
+
       if (mobile) {
-        const duplicatedMobileUser = await userRepo.findOne({ where: { mobile } })
+        const duplicatedMobileUser = await this.findUserByAnyIdentifier(mobile)
         if (duplicatedMobileUser && duplicatedMobileUser.id !== user.id) {
           throw new BizError('该手机号已被其他客户端用户使用', 409)
         }
       }
       if (email) {
-        const duplicatedEmailUser = await userRepo.findOne({ where: { email } })
+        const duplicatedEmailUser = await this.findUserByAnyIdentifier(email)
         if (duplicatedEmailUser && duplicatedEmailUser.id !== user.id) {
           throw new BizError('该邮箱已被其他客户端用户使用', 409)
         }

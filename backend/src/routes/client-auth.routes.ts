@@ -16,6 +16,7 @@ import { authSecurityService } from '../services/auth-security.service.js'
 import { verificationCodeService } from '../services/verification-code.service.js'
 
 const registerSchema = z.object({
+  username: z.string().trim().min(1).max(128),
   account: z.string().trim().min(1),
   password: z.string().min(6),
   departmentName: z.string().optional(),

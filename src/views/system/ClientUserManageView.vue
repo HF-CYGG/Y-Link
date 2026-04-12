@@ -233,12 +233,12 @@ const handleSubmitEdit = async () => {
   }
 
   const normalizedUsername = editForm.username.trim()
-  const normalizedMobile = editForm.mobile.trim()
-  const normalizedEmail = editForm.email.trim().toLowerCase()
-  if (normalizedUsername !== normalizedMobile && normalizedUsername !== normalizedEmail) {
-    ElMessage.warning('用户名必须与手机号或邮箱保持一致')
+  if (!normalizedUsername) {
+    ElMessage.warning('请输入用户名')
     return
   }
+  const normalizedMobile = editForm.mobile.trim()
+  const normalizedEmail = editForm.email.trim().toLowerCase()
 
   editSubmitting.value = true
   try {
@@ -517,11 +517,11 @@ onMounted(() => {
       @closed="resetEditForm"
     >
       <div class="mb-4 rounded-2xl bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-500 dark:bg-white/5 dark:text-slate-400">
-        用户名必须与手机号或邮箱保持一致，且手机号、邮箱至少保留一项。
+        用户名支持自定义，手机号、邮箱至少保留一项，三类标识在系统内均不可与其他客户端用户重复。
       </div>
       <el-form ref="editFormRef" :model="editForm" :rules="editRules" label-position="top">
         <el-form-item label="用户名" prop="username">
-          <el-input v-model.trim="editForm.username" placeholder="请输入用户名（需与手机号或邮箱一致）" />
+          <el-input v-model.trim="editForm.username" placeholder="请输入用户名" />
         </el-form-item>
         <div class="grid gap-4 md:grid-cols-2">
           <el-form-item label="手机号" prop="mobile">

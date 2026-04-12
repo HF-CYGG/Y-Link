@@ -114,6 +114,7 @@ const loginForm = reactive({
 })
 
 const registerForm = reactive({
+  username: '',
   account: '',
   department: '',
   password: '',
@@ -262,6 +263,8 @@ const loadAuthCapabilities = async () => {
 const validateMobile = (mobile: string) => /^1\d{10}$/.test(mobile.trim())
 const validateEmail = (email: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
 const validatePassword = (password: string) => password.trim().length >= 6
+const validateUsername = (username: string) => username.trim().length > 0
+const validateLoginAccount = (account: string) => account.trim().length > 0
 const resolveAccountChannel = (account: string): 'mobile' | 'email' | null => {
   const normalized = account.trim()
   if (!normalized) return null
@@ -324,8 +327,8 @@ const handleSendRegisterVerificationCode = async () => {
 }
 
 const handleLogin = async () => {
-  if (!resolveAccountChannel(loginForm.account)) {
-    ElMessage.warning('请输入正确的手机号或邮箱')
+  if (!validateLoginAccount(loginForm.account)) {
+    ElMessage.warning('请输入用户名、手机号或邮箱')
     return
   }
   if (!validatePassword(loginForm.password)) {
@@ -353,7 +356,7 @@ const handleLogin = async () => {
     ElMessage.success('登录成功，欢迎来到 Y-Link 客户端')
     await router.replace(redirectPath.value)
   } catch (error) {
-    const message = extractErrorMessage(error, '登录失败，请检查手机号、密码和验证码后重试')
+    const message = extractErrorMessage(error, '登录失败，请检查用户名、手机号、邮箱、密码和验证码后重试')
     applySecurityHintFromMessage(message)
     ElMessage.error(message)
     console.warn('客户端登录失败。', error)
@@ -369,8 +372,12 @@ const handleLogin = async () => {
 
 const handleRegister = async () => {
   const accountChannel = resolveAccountChannel(registerForm.account)
+  if (!validateUsername(registerForm.username)) {
+    ElMessage.warning('请输入用户名')
+    return
+  }
   if (!accountChannel) {
-    ElMessage.warning('请输入正确的手机号或邮箱作为用户名')
+    ElMessage.warning('请输入正确的手机号或邮箱作为登录账号')
     return
   }
   if (!validatePassword(registerForm.password)) {
@@ -390,7 +397,9 @@ const handleRegister = async () => {
   isLoading.value = true
   try {
     const registeredAccount = registerForm.account.trim()
+    const registeredUsername = registerForm.username.trim()
     await clientAuthStore.register({
+      username: registeredUsername,
       account: registeredAccount,
       password: registerForm.password,
       departmentName: registerForm.department.trim() || undefined,
@@ -400,18 +409,19 @@ const handleRegister = async () => {
     })
     ElMessage.success('注册成功，请登录')
     activeMode.value = 'login'
-    loginForm.account = registeredAccount
+    loginForm.account = registeredUsername
     loginForm.password = ''
     loginForm.captcha = ''
-    successTip.value = `账号已创建成功，请使用${accountChannel === 'email' ? '邮箱' : '手机号'}用户名与密码登录。`
+    successTip.value = '账号已创建成功，请使用用户名、手机号或邮箱与密码登录。'
     registerForm.captcha = ''
     registerForm.verificationCode = ''
+    registerForm.username = ''
     await refreshCaptcha()
     await router.replace({
       path: '/client/login',
       query: {
         tab: 'login',
-        account: registeredAccount,
+      account: registeredUsername,
         notice: successTip.value,
       },
     })
@@ -541,14 +551,14 @@ onUnmounted(() => {
                 :class="{ 'form-block--login-compact': isCompactLoginLayout }"
               >
                 <h2 class="block-title">欢迎回来</h2>
-                <p class="block-subtitle">请输入用户名（手机号或邮箱）与密码登录客户端</p>
+                <p class="block-subtitle">请输入用户名、手机号或邮箱与密码登录客户端</p>
 
                 <el-form
                   @submit.prevent="handleLogin"
                   class="mt-6 space-y-4"
                   :class="{ 'login-form--compact': isCompactLoginLayout }"
                 >
-                  <el-input v-model="loginForm.account" placeholder="用户名（手机号或邮箱）" class="geo-input" size="large" clearable>
+                  <el-input v-model="loginForm.account" placeholder="用户名 / 手机号 / 邮箱" class="geo-input" size="large" clearable>
                     <template #prefix>
                       <el-icon class="input-icon"><User /></el-icon>
                     </template>
@@ -592,13 +602,19 @@ onUnmounted(() => {
 
               <div v-else ref="formBlockRef" key="register" class="form-block">
                 <h2 class="block-title">创建账号</h2>
-                <p class="block-subtitle">只需几步，开启极速预订体验</p>
+                <p class="block-subtitle">只需几步，创建用户名并绑定手机号或邮箱账号</p>
                 <div class="auth-hint-card">
                   {{ capabilityLoading ? '正在加载当前注册校验策略...' : registerValidationHint }}
                 </div>
 
                 <el-form @submit.prevent="handleRegister" class="space-y-4 mt-6">
-                  <el-input v-model="registerForm.account" placeholder="用户名（手机号或邮箱）" class="geo-input" size="large" clearable>
+                  <el-input v-model="registerForm.username" placeholder="用户名（可自定义）" class="geo-input" size="large" clearable>
+                    <template #prefix>
+                      <el-icon class="input-icon"><User /></el-icon>
+                    </template>
+                  </el-input>
+
+                  <el-input v-model="registerForm.account" placeholder="登录账号（手机号或邮箱）" class="geo-input" size="large" clearable>
                     <template #prefix>
                       <el-icon class="input-icon"><User /></el-icon>
                     </template>
