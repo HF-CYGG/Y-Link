@@ -524,19 +524,20 @@ onBeforeUnmount(() => {
 
 <template>
   <PageContainer title="入库管理工作台" description="支持扫码录入、本次入库清单确认与库存流水联动追踪">
-    <div class="grid gap-4 xl:grid-cols-[24rem_minmax(0,1fr)_minmax(0,1fr)]">
-      <section class="rounded-3xl bg-white p-5 shadow-sm">
-        <div class="flex items-center justify-between gap-3">
-          <p class="text-lg font-semibold text-slate-900">扫码录入区</p>
+    <div class="inbound-workbench-root grid gap-4 xl:grid-cols-[24rem_minmax(0,1fr)_minmax(0,1fr)]">
+      <section class="min-w-0 overflow-hidden rounded-3xl bg-white p-5 shadow-sm">
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <p class="break-words text-lg font-semibold text-slate-900">扫码录入区</p>
           <el-segmented
             v-model="scanMode"
+            class="scan-mode-segmented"
             :options="[
               { label: '扫码即 +1', value: 'scan_plus_one' },
               { label: '扫码后输入数量', value: 'scan_input_qty' },
             ]"
           />
         </div>
-        <p class="mt-2 text-sm text-slate-500">扫码枪输入后按回车可直接识别商品编码，未识别将阻止写入清单。</p>
+        <p class="mt-2 break-words text-sm text-slate-500">扫码枪输入后按回车可直接识别商品编码，未识别将阻止写入清单。</p>
 
         <el-input
           ref="scanInputRef"
@@ -551,7 +552,7 @@ onBeforeUnmount(() => {
           </template>
         </el-input>
 
-        <div class="mt-3 grid grid-cols-2 gap-2">
+        <div class="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
           <el-button @click="handleScanSubmit">识别并录入</el-button>
           <el-button @click="openCameraScanDialog">摄像头扫码</el-button>
         </div>
@@ -562,7 +563,7 @@ onBeforeUnmount(() => {
 
         <div class="mt-3 rounded-2xl border border-slate-100 bg-slate-50 p-3">
           <p class="text-xs text-slate-500">快捷数量</p>
-          <div class="mt-2 grid grid-cols-3 gap-2">
+          <div class="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-3">
             <el-button @click="increaseQuickQty(1)">+1</el-button>
             <el-button @click="increaseQuickQty(5)">+5</el-button>
             <el-button @click="increaseQuickQty(10)">+10</el-button>
@@ -590,7 +591,7 @@ onBeforeUnmount(() => {
 
         <div class="mt-4 rounded-2xl border border-dashed border-slate-200 p-3">
           <p class="text-sm font-semibold text-slate-800">手动入库兼容入口</p>
-          <el-form class="mt-3" label-width="70px">
+          <el-form class="mt-3 inbound-mobile-form" label-width="70px" label-position="top">
             <el-form-item label="商品">
               <el-select
                 v-model="manualForm.productId"
@@ -619,7 +620,7 @@ onBeforeUnmount(() => {
               />
             </el-form-item>
           </el-form>
-          <div class="grid grid-cols-2 gap-2">
+          <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
             <el-button @click="addManualToInboundList">加入本次清单</el-button>
             <el-button type="success" :loading="submittingSingle" @click="handleSingleInbound">单笔立即入库</el-button>
           </div>
@@ -630,39 +631,41 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <section class="rounded-3xl bg-white p-5 shadow-sm">
-        <div class="flex flex-wrap items-center justify-between gap-3">
+      <section class="min-w-0 overflow-hidden rounded-3xl bg-white p-5 shadow-sm">
+        <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <p class="text-lg font-semibold text-slate-900">本次入库清单</p>
-            <p class="text-sm text-slate-500">支持多商品连续录入、数量编辑、删除、清空和批量确认入库</p>
+            <p class="break-words text-lg font-semibold text-slate-900">本次入库清单</p>
+            <p class="break-words text-sm text-slate-500">支持多商品连续录入、数量编辑、删除、清空和批量确认入库</p>
           </div>
-          <div class="flex items-center gap-2">
+          <div class="flex flex-wrap items-center gap-2">
             <el-tag type="info">商品种类 {{ totalSkuCount }}</el-tag>
             <el-tag type="success">总件数 {{ totalQtyCount }}</el-tag>
           </div>
         </div>
 
-        <el-table class="mt-4" :data="inboundList" row-key="productId" empty-text="请先扫码或手动加入商品">
-          <el-table-column prop="productCode" label="商品编码" min-width="130" />
-          <el-table-column prop="productName" label="商品名称" min-width="150" />
-          <el-table-column label="数量" width="160">
-            <template #default="{ row }">
-              <el-input-number
-                :model-value="row.qty"
-                :min="1"
-                :step="1"
-                size="small"
-                style="width: 120px"
-                @change="(value: number | undefined) => updateInboundListItemQty(row.productId, Number(value ?? 1))"
-              />
-            </template>
-          </el-table-column>
-          <el-table-column label="操作" width="100" fixed="right">
-            <template #default="{ row }">
-              <el-button type="danger" link @click="removeInboundListItem(row.productId)">删除</el-button>
-            </template>
-          </el-table-column>
-        </el-table>
+        <div class="table-scroll-wrap mt-4">
+          <el-table :data="inboundList" row-key="productId" empty-text="请先扫码或手动加入商品">
+            <el-table-column prop="productCode" label="商品编码" min-width="130" />
+            <el-table-column prop="productName" label="商品名称" min-width="150" />
+            <el-table-column label="数量" width="160">
+              <template #default="{ row }">
+                <el-input-number
+                  :model-value="row.qty"
+                  :min="1"
+                  :step="1"
+                  size="small"
+                  style="width: 120px"
+                  @change="(value: number | undefined) => updateInboundListItemQty(row.productId, Number(value ?? 1))"
+                />
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="100" fixed="right">
+              <template #default="{ row }">
+                <el-button type="danger" link @click="removeInboundListItem(row.productId)">删除</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
 
         <el-input
           v-model="listRemark"
@@ -672,7 +675,7 @@ onBeforeUnmount(() => {
           placeholder="本次清单备注（将写入每条入库记录）"
         />
 
-        <div class="mt-3 grid grid-cols-3 gap-2">
+        <div class="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
           <el-button :disabled="!inboundList.length" @click="clearInboundList">清空清单</el-button>
           <el-button :disabled="!inboundList.length" @click="loadProducts">刷新商品库存</el-button>
           <el-button
@@ -695,36 +698,39 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <section class="rounded-3xl bg-white p-5 shadow-sm">
-        <div class="mb-4 flex items-center justify-between">
+      <section class="min-w-0 overflow-hidden rounded-3xl bg-white p-5 shadow-sm">
+        <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <p class="text-lg font-semibold text-slate-900">库存流水区</p>
-            <p class="text-sm text-slate-500">可追踪预订占用、核销出库、手动入库等变化</p>
+            <p class="break-words text-lg font-semibold text-slate-900">库存流水区</p>
+            <p class="break-words text-sm text-slate-500">可追踪预订占用、核销出库、手动入库等变化</p>
           </div>
           <el-button @click="loadLogs">刷新流水</el-button>
         </div>
 
-        <el-table :data="logs" :loading="logLoading" row-key="id">
-          <el-table-column prop="createdAt" label="时间" min-width="160" />
-          <el-table-column prop="productName" label="商品" min-width="160" />
-          <el-table-column prop="changeType" label="类型" width="140" />
-          <el-table-column prop="changeQty" label="数量" width="90" align="right" />
-          <el-table-column label="库存变化" min-width="220">
-            <template #default="{ row }">
-              <div class="text-sm leading-6 text-slate-600">
-                <div>物理库存：{{ row.beforeCurrentStock }} -> {{ row.afterCurrentStock }}</div>
-                <div>预订库存：{{ row.beforePreorderedStock }} -> {{ row.afterPreorderedStock }}</div>
-              </div>
-            </template>
-          </el-table-column>
-          <el-table-column prop="operatorName" label="操作人" width="110" />
-        </el-table>
+        <div class="table-scroll-wrap">
+          <el-table :data="logs" :loading="logLoading" row-key="id">
+            <el-table-column prop="createdAt" label="时间" min-width="160" />
+            <el-table-column prop="productName" label="商品" min-width="160" />
+            <el-table-column prop="changeType" label="类型" width="140" />
+            <el-table-column prop="changeQty" label="数量" width="90" align="right" />
+            <el-table-column label="库存变化" min-width="220">
+              <template #default="{ row }">
+                <div class="text-sm leading-6 text-slate-600">
+                  <div>物理库存：{{ row.beforeCurrentStock }} -> {{ row.afterCurrentStock }}</div>
+                  <div>预订库存：{{ row.beforePreorderedStock }} -> {{ row.afterPreorderedStock }}</div>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column prop="operatorName" label="操作人" width="110" />
+          </el-table>
+        </div>
       </section>
     </div>
 
     <el-dialog
       v-model="cameraScanVisible"
       title="摄像头扫码录入"
+      class="camera-scan-dialog"
       width="520px"
       :close-on-click-modal="false"
       @closed="stopCameraScan"
@@ -744,6 +750,61 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.inbound-workbench-root {
+  width: 100%;
+  min-width: 0;
+  overflow-x: clip;
+}
+
+.table-scroll-wrap {
+  overflow-x: auto;
+  max-width: 100%;
+  -webkit-overflow-scrolling: touch;
+}
+
+.scan-mode-segmented {
+  width: 100%;
+  min-width: 0;
+}
+
+.scan-mode-segmented :deep(.el-segmented) {
+  width: 100%;
+  max-width: 100%;
+}
+
+.scan-mode-segmented :deep(.el-segmented__group) {
+  width: 100%;
+  min-width: 0;
+}
+
+.scan-mode-segmented :deep(.el-segmented__item) {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.scan-mode-segmented :deep(.el-segmented__item-label) {
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.25;
+}
+
+.inbound-workbench-root :deep(.el-button) {
+  max-width: 100%;
+}
+
+.inbound-workbench-root :deep(.el-button > span) {
+  white-space: normal;
+  word-break: break-word;
+  text-align: center;
+}
+
+.inbound-workbench-root :deep(.el-input__wrapper),
+.inbound-workbench-root :deep(.el-textarea__inner),
+.inbound-workbench-root :deep(.el-select__wrapper),
+.inbound-workbench-root :deep(.el-input-number) {
+  max-width: 100%;
+}
+
 .scan-preview-wrap {
   position: relative;
   overflow: hidden;
@@ -766,5 +827,56 @@ onBeforeUnmount(() => {
   background: rgba(15, 23, 42, 0.55);
   color: #ffffff;
   font-size: 0.9rem;
+}
+
+@media (max-width: 767px) {
+  .inbound-workbench-root {
+    gap: 12px;
+  }
+
+  .inbound-workbench-root :deep(.el-card),
+  .inbound-workbench-root > section {
+    border-radius: 20px;
+  }
+
+  .inbound-mobile-form :deep(.el-form-item) {
+    margin-bottom: 14px;
+  }
+
+  .inbound-mobile-form :deep(.el-form-item__label) {
+    padding-bottom: 6px;
+    line-height: 1.2;
+  }
+
+  .table-scroll-wrap :deep(.el-table) {
+    min-width: 520px;
+  }
+
+  .inbound-workbench-root :deep(.el-button) {
+    min-height: 42px;
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  .inbound-workbench-root :deep(.el-input__wrapper),
+  .inbound-workbench-root :deep(.el-select__wrapper),
+  .inbound-workbench-root :deep(.el-input-number),
+  .inbound-workbench-root :deep(.el-textarea__inner) {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .inbound-workbench-root :deep(.el-input-number .el-input__wrapper) {
+    min-width: 0;
+  }
+
+  .camera-scan-dialog :deep(.el-dialog) {
+    width: calc(100vw - 24px) !important;
+    margin-top: 8vh;
+  }
+
+  .camera-scan-dialog :deep(.el-dialog__body) {
+    padding: 14px;
+  }
 }
 </style>
