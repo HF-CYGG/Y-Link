@@ -150,17 +150,6 @@ o2oRouter.post(
   }),
 )
 
-// 超时取消入口保留给后台或定时任务触发，统一回收超时订单的预订占用库存。
-o2oRouter.post(
-  '/cron/cancel-timeout',
-  requireAuth,
-  requirePermission('system_configs:update'),
-  asyncHandler(async (_req, res) => {
-    const data = await o2oPreorderService.cancelTimeoutOrders()
-    res.json({ code: 0, message: 'ok', data })
-  }),
-)
-
 // 库存日志用于后台追踪预订占用、核销出库、手工入库与超时释放等变化记录。
 o2oRouter.get(
   '/inventory/logs',
