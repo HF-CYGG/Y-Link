@@ -96,9 +96,11 @@ const verificationSending = ref(false)
 const capabilityLoading = ref(false)
 const registerVerificationCountdown = ref(0)
 let registerVerificationTimer: ReturnType<typeof globalThis.setInterval> | null = null
+const formWrapperRef = ref<HTMLElement | null>(null)
 const formBlockRef = ref<HTMLElement | null>(null)
 const formWrapperHeight = ref('auto')
 const formAnimating = ref(false)
+const formTransitionName = ref<'slide-left' | 'slide-right'>('slide-right')
 const authCapabilities = ref<ClientAuthCapabilities | null>(null)
 const captcha = reactive<ClientCaptchaState>({
   captchaId: '',
@@ -145,11 +147,24 @@ const registerValidationHint = computed(() => {
   return `${channel === 'email' ? '当前邮箱通道未启用邮箱验证码' : '当前手机通道未启用短信验证码'}，注册时将改用图片验证码校验。`
 })
 
-const syncWrapperHeight = (heightMode: 'auto' | 'measured' = 'auto') => {
-  if (!formBlockRef.value) {
+const isCompactLoginLayout = computed(() => {
+  return activeMode.value === 'login' && !loginCaptchaVisible.value && !successTip.value && !securityHint.value
+})
+
+const getElementHeight = (element: Element | HTMLElement | null | undefined) => {
+  return element instanceof HTMLElement ? element.offsetHeight : 0
+}
+
+const syncWrapperHeight = (heightMode: 'auto' | 'measured' = 'auto', element?: Element | HTMLElement | null) => {
+  const targetElement = element ?? formBlockRef.value
+  if (heightMode === 'auto') {
+    formWrapperHeight.value = 'auto'
     return
   }
-  formWrapperHeight.value = heightMode === 'auto' ? 'auto' : `${formBlockRef.value.offsetHeight}px`
+  const nextHeight = getElementHeight(targetElement)
+  if (nextHeight > 0) {
+    formWrapperHeight.value = `${nextHeight}px`
+  }
 }
 
 const switchMode = async (nextMode: AuthMode) => {
@@ -157,24 +172,36 @@ const switchMode = async (nextMode: AuthMode) => {
     return
   }
 
-  const currentHeight = formBlockRef.value?.offsetHeight ?? 0
-  if (currentHeight > 0) {
-    formWrapperHeight.value = `${currentHeight}px`
-  }
-
+  formTransitionName.value = nextMode === 'register' ? 'slide-left' : 'slide-right'
   formAnimating.value = true
+  syncWrapperHeight('measured')
   activeMode.value = nextMode
-  await nextTick()
+}
 
-  const nextHeight = formBlockRef.value?.offsetHeight ?? currentHeight
+const handleFormBeforeLeave = () => {
+  syncWrapperHeight('measured', formWrapperRef.value)
+  // 强制浏览器确认当前高度帧，避免切换起始时出现跳帧或闪现。
+  void formWrapperRef.value?.offsetHeight
+}
+
+const handleFormBeforeEnter = () => {
+  syncWrapperHeight('measured', formWrapperRef.value)
+}
+
+const handleFormEnter = (element: Element) => {
   requestAnimationFrame(() => {
-    formWrapperHeight.value = `${nextHeight}px`
+    syncWrapperHeight('measured', element)
   })
+}
 
-  globalThis.window?.setTimeout(() => {
-    formAnimating.value = false
-    formWrapperHeight.value = 'auto'
-  }, 520)
+const handleFormAfterEnter = () => {
+  formAnimating.value = false
+  syncWrapperHeight('auto')
+}
+
+const handleFormTransitionCancelled = () => {
+  formAnimating.value = false
+  syncWrapperHeight('auto')
 }
 
 const applyRouteState = () => {
@@ -444,7 +471,7 @@ watch(successTip, async () => {
   await nextTick()
   syncWrapperHeight('measured')
   requestAnimationFrame(() => {
-    syncWrapperHeight()
+    syncWrapperHeight('auto')
   })
 })
 
@@ -496,13 +523,31 @@ onUnmounted(() => {
             :title="securityHint"
           />
 
-          <div class="form-wrapper" :style="{ height: formWrapperHeight }">
-            <transition name="fade-slide">
-              <div v-if="activeMode === 'login'" ref="formBlockRef" key="login" class="form-block">
+          <div ref="formWrapperRef" class="form-wrapper" :style="{ height: formWrapperHeight }">
+            <transition
+              :name="formTransitionName"
+              @before-enter="handleFormBeforeEnter"
+              @before-leave="handleFormBeforeLeave"
+              @enter="handleFormEnter"
+              @after-enter="handleFormAfterEnter"
+              @enter-cancelled="handleFormTransitionCancelled"
+              @leave-cancelled="handleFormTransitionCancelled"
+            >
+              <div
+                v-if="activeMode === 'login'"
+                ref="formBlockRef"
+                key="login"
+                class="form-block"
+                :class="{ 'form-block--login-compact': isCompactLoginLayout }"
+              >
                 <h2 class="block-title">欢迎回来</h2>
                 <p class="block-subtitle">请输入用户名（手机号或邮箱）与密码登录客户端</p>
 
-                <el-form @submit.prevent="handleLogin" class="space-y-4 mt-6">
+                <el-form
+                  @submit.prevent="handleLogin"
+                  class="mt-6 space-y-4"
+                  :class="{ 'login-form--compact': isCompactLoginLayout }"
+                >
                   <el-input v-model="loginForm.account" placeholder="用户名（手机号或邮箱）" class="geo-input" size="large" clearable>
                     <template #prefix>
                       <el-icon class="input-icon"><User /></el-icon>
@@ -527,8 +572,17 @@ onUnmounted(() => {
                       <span v-else class="captcha-render" v-html="captcha.captchaSvg" />
                     </button>
                   </div>
+                  <div
+                    v-else
+                    class="captcha-row captcha-row--placeholder"
+                    :class="{ 'captcha-row--compact-placeholder': isCompactLoginLayout }"
+                    aria-hidden="true"
+                  >
+                    <div class="captcha-placeholder flex-1"></div>
+                    <div class="captcha-box captcha-box--placeholder"></div>
+                  </div>
 
-                  <div class="flex justify-end mt-2">
+                  <div v-if="!capabilityLoading && authCapabilities?.forgotPasswordEnabled" class="flex justify-end mt-2">
                     <router-link to="/client/forgot-password" class="forgot-link">忘记密码？</router-link>
                   </div>
 
@@ -751,13 +805,17 @@ onUnmounted(() => {
 
 .form-wrapper {
   overflow: hidden;
-  transition: height 0.52s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: height 0.45s cubic-bezier(0.4, 0, 0.2, 1);
   will-change: height;
   position: relative;
 }
 
 .form-block {
   width: 100%;
+}
+
+.form-block--login-compact {
+  padding-top: 18px;
 }
 
 .mode-toggle {
@@ -778,7 +836,7 @@ onUnmounted(() => {
   background: #ffffff;
   border-radius: 12px;
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
-  transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
 .toggle-btn {
@@ -873,6 +931,20 @@ onUnmounted(() => {
   gap: 12px;
 }
 
+.captcha-row--placeholder {
+  pointer-events: none;
+}
+
+.captcha-row--compact-placeholder {
+  margin-bottom: -36px;
+}
+
+.captcha-placeholder {
+  height: 52px;
+  border-radius: 14px;
+  background: transparent;
+}
+
 .captcha-box {
   width: 120px;
   height: 52px;
@@ -886,6 +958,11 @@ onUnmounted(() => {
   transition: background 0.2s, border-color 0.2s, transform 0.2s;
   border: 1px dashed #e2e8f0;
   overflow: hidden;
+}
+
+.captcha-box--placeholder {
+  border-color: transparent;
+  background: transparent;
 }
 
 .captcha-box:hover {
@@ -925,6 +1002,10 @@ onUnmounted(() => {
   color: #0d9488;
 }
 
+.login-form--compact {
+  padding-top: 12px;
+}
+
 .submit-btn {
   width: 100%;
   height: 52px;
@@ -948,32 +1029,48 @@ onUnmounted(() => {
   transform: translateY(1px);
 }
 
-.fade-slide-enter-active,
-.fade-slide-leave-active {
-  transition: opacity 0.34s ease, transform 0.42s cubic-bezier(0.22, 1, 0.36, 1), filter 0.34s ease;
+.slide-right-enter-active,
+.slide-right-leave-active,
+.slide-left-enter-active,
+.slide-left-leave-active {
+  transition:
+    opacity 0.2s ease,
+    transform 0.32s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.fade-slide-enter-from {
+.slide-right-enter-from {
   opacity: 0;
-  transform: translateX(18px) scale(0.985);
-  filter: blur(4px);
+  transform: translateX(-10px);
 }
 
-.fade-slide-enter-active {
+.slide-right-leave-to {
+  opacity: 0;
+  transform: translateX(6px);
+}
+
+.slide-left-enter-from {
+  opacity: 0;
+  transform: translateX(10px);
+}
+
+.slide-left-leave-to {
+  opacity: 0;
+  transform: translateX(-6px);
+}
+
+.slide-right-enter-active,
+.slide-left-enter-active {
   position: relative;
   z-index: 2;
 }
 
-.fade-slide-leave-to {
-  opacity: 0;
-  transform: translateX(-12px) scale(0.992);
-  filter: blur(6px);
-}
-
-.fade-slide-leave-active {
+.slide-right-leave-active,
+.slide-left-leave-active {
   position: absolute;
   inset: 0;
+  width: 100%;
   z-index: 1;
+  pointer-events: none;
 }
 
 @media (max-width: 860px) {
