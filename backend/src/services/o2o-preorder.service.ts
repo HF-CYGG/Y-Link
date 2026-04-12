@@ -8,6 +8,8 @@ import { randomUUID } from 'node:crypto'
 import { Brackets, In, LessThanOrEqual } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
+import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
+import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
 import { ClientUser } from '../entities/client-user.entity.js'
 import { InventoryLog } from '../entities/inventory-log.entity.js'
 import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
@@ -15,6 +17,8 @@ import { O2oPreorderItem } from '../entities/o2o-preorder-item.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import type { ClientAuthContext } from '../types/client-auth.js'
 import { BizError } from '../utils/errors.js'
+import { generateOrderUuid } from '../utils/id-generator.js'
+import { orderSerialService } from './order-serial.service.js'
 import { systemConfigService } from './system-config.service.js'
 
 export interface SubmitPreorderItemInput {
@@ -88,6 +92,85 @@ class O2oPreorderService {
       timeoutReached,
       timeoutSoon: false,
     }
+  }
+
+  // 线上预订核销成功后，同步沉淀为一张“散客出库单”：
+  // - showNo 使用散客流水单号，满足出库单列表“业务单号”展示要求；
+  // - orderType 固定为 walkin，确保归类到“散客单”；
+  // - 通过 idempotencyKey 绑定预订单ID，防止重复核销或重试时重复落单。
+  private async createWalkInOutboundOrderFromVerifiedPreorder(
+    manager: typeof AppDataSource.manager,
+    input: {
+      preorder: O2oPreorder
+      items: O2oPreorderItem[]
+      productMap: Map<string, BaseProduct>
+      actor: AuthUserContext
+    },
+  ) {
+    const orderRepo = manager.getRepository(BizOutboundOrder)
+    const itemRepo = manager.getRepository(BizOutboundOrderItem)
+    const clientUserRepo = manager.getRepository(ClientUser)
+    const idempotencyKey = `o2o-preorder-verify:${input.preorder.id}`
+
+    const existed = await orderRepo.findOne({ where: { idempotencyKey } })
+    if (existed) {
+      return existed
+    }
+
+    const clientUser = await clientUserRepo.findOne({ where: { id: input.preorder.clientUserId } })
+    const showNo = await orderSerialService.generateOrderNo('walkin', manager)
+
+    let totalQty = 0
+    let totalAmount = 0
+    const itemEntities: BizOutboundOrderItem[] = []
+
+    input.items.forEach((row, index) => {
+      const product = input.productMap.get(String(row.productId))
+      if (!product) {
+        throw new BizError('商品不存在，无法生成对应出库单', 409)
+      }
+      const qty = Number(row.qty ?? 0)
+      const unitPrice = Number(product.defaultPrice ?? 0)
+      const lineAmount = Number((qty * unitPrice).toFixed(2))
+      totalQty += qty
+      totalAmount += lineAmount
+      itemEntities.push(
+        itemRepo.create({
+          lineNo: index + 1,
+          productId: product.id,
+          productNameSnapshot: product.productName,
+          qty: qty.toFixed(2),
+          unitPrice: unitPrice.toFixed(2),
+          lineAmount: lineAmount.toFixed(2),
+          remark: `线上预订核销，预订单号：${input.preorder.showNo}`,
+        }),
+      )
+    })
+
+    const outboundOrder = orderRepo.create({
+      orderUuid: generateOrderUuid(),
+      showNo,
+      orderType: 'walkin',
+      hasCustomerOrder: false,
+      isSystemApplied: true,
+      issuerName: input.actor.displayName || input.actor.username,
+      customerDepartmentName: clientUser?.departmentName?.trim() || null,
+      idempotencyKey,
+      customerName: clientUser?.realName?.trim() || null,
+      remark: `线上预订核销出库，预订单号：${input.preorder.showNo}`,
+      totalQty: totalQty.toFixed(2),
+      totalAmount: totalAmount.toFixed(2),
+      creatorUserId: input.actor.userId,
+      creatorUsername: input.actor.username,
+      creatorDisplayName: input.actor.displayName,
+    })
+
+    const savedOrder = await orderRepo.save(outboundOrder)
+    itemEntities.forEach((item) => {
+      item.orderId = savedOrder.id
+    })
+    await itemRepo.save(itemEntities)
+    return savedOrder
   }
 
   private normalizeDecimalText(value: string | number | null | undefined, fallback = '0.00') {
@@ -522,6 +605,15 @@ class O2oPreorderService {
       order.verifiedAt = new Date()
       order.verifiedBy = actor.displayName
       const savedOrder = await manager.getRepository(O2oPreorder).save(order)
+      // 同事务生成一张散客出库单：
+      // 这样“线上预订并成功核销”的订单会自然进入出库单列表，
+      // 且业务单号展示为散客流水单号，而不是预订单号。
+      await this.createWalkInOutboundOrderFromVerifiedPreorder(manager, {
+        preorder: savedOrder,
+        items,
+        productMap,
+        actor,
+      })
       return this.detailById(savedOrder.id)
     })
   }
