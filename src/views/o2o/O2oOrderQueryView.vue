@@ -516,11 +516,11 @@ onBeforeUnmount(() => {
 
 <template>
   <PageContainer title="订单池工作台" description="左侧订单池实时分栏，右侧工作台查看状态报告、商品明细、金额汇总与进度节点">
-    <div class="grid gap-4 xl:grid-cols-[26rem_minmax(0,1fr)]">
-      <section class="rounded-3xl bg-white p-5 shadow-sm">
-        <div class="flex flex-wrap items-center justify-between gap-2">
-          <p class="text-lg font-semibold text-slate-900">订单池</p>
-          <div class="flex flex-wrap items-center gap-2">
+    <div class="order-workbench-root grid gap-4 xl:grid-cols-[26rem_minmax(0,1fr)]">
+      <section class="min-w-0 overflow-hidden rounded-3xl bg-white p-5 shadow-sm">
+        <div class="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+          <p class="break-words text-lg font-semibold text-slate-900">订单池</p>
+          <div class="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
             <el-switch
               v-model="autoRefreshEnabled"
               size="small"
@@ -532,7 +532,7 @@ onBeforeUnmount(() => {
             <el-select
               v-model="pollIntervalSeconds"
               size="small"
-              class="w-28"
+              class="poll-interval-select w-full sm:w-28"
               :disabled="!autoRefreshEnabled"
               @change="handlePollIntervalChange"
             >
@@ -549,36 +549,37 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="mt-3 grid grid-cols-2 gap-2">
+        <div class="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-2">
           <button
             v-for="tab in ORDER_POOL_TABS"
             :key="tab.key"
             type="button"
-            class="flex items-center justify-between rounded-2xl px-3 py-2 text-left text-xs transition"
+            class="order-pool-tab flex min-w-0 items-center justify-between rounded-2xl px-3 py-2 text-left text-xs transition"
             :class="activePool === tab.key ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'"
             @click="handlePoolChange(tab.key)"
           >
-            <span>{{ tab.label }}</span>
-            <span class="rounded-full px-2 py-0.5 text-[11px]" :class="activePool === tab.key ? 'bg-white/20 text-white' : 'bg-white text-slate-500'">
+            <span class="order-pool-tab__label">{{ tab.label }}</span>
+            <span class="order-pool-tab__count rounded-full px-2 py-0.5 text-[11px]" :class="activePool === tab.key ? 'bg-white/20 text-white' : 'bg-white text-slate-500'">
               {{ poolCountMap[tab.key] }}
             </span>
           </button>
         </div>
 
-        <div class="mt-3 flex items-center gap-2">
+        <div class="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
           <el-input
             v-model.trim="query.keyword"
+            class="min-w-0"
             placeholder="搜索订单号或核销码"
             clearable
             @keyup.enter="handleSearch"
           />
-          <el-button type="primary" @click="handleSearch">查询</el-button>
+          <el-button class="w-full sm:w-auto" type="primary" @click="handleSearch">查询</el-button>
         </div>
 
         <Transition name="new-order-notice">
           <div v-if="activeNewOrderNotice" class="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700">
-            <div class="flex items-center justify-between gap-2">
-              <p>新单提醒：新增 {{ activeNewOrderNotice.count }} 笔，已自动置顶并高亮 6 秒</p>
+            <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+              <p class="break-words">新单提醒：新增 {{ activeNewOrderNotice.count }} 笔，已自动置顶并高亮 6 秒</p>
               <el-button link type="warning" @click="dismissNewOrderNotice">知道了</el-button>
             </div>
           </div>
@@ -596,14 +597,14 @@ onBeforeUnmount(() => {
             ]"
             @click="handlePickOrder(order.id)"
           >
-            <div class="flex items-start justify-between gap-2">
-              <p class="text-sm font-semibold text-slate-900">{{ order.showNo }}</p>
-              <span class="rounded-full px-2 py-0.5 text-[11px] font-medium" :class="CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG[getOrderScenario(order)].cardClassName">
+            <div class="flex min-w-0 items-start justify-between gap-2">
+              <p class="min-w-0 break-words text-sm font-semibold text-slate-900">{{ order.showNo }}</p>
+              <span class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium" :class="CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG[getOrderScenario(order)].cardClassName">
                 {{ CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG[getOrderScenario(order)].statusLabel }}
               </span>
             </div>
             <div class="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500">
-              <p>时间：{{ order.createdAt }}</p>
+              <p class="break-words">时间：{{ order.createdAt }}</p>
               <p class="text-right">件数：{{ order.totalQty }}</p>
               <p>应付总额：¥{{ formatCurrency(order.totalAmount) }}</p>
               <p class="text-right">倒计时：{{ formatCountdown(order) }}</p>
@@ -615,23 +616,23 @@ onBeforeUnmount(() => {
         </div>
       </section>
 
-      <section class="rounded-3xl bg-white p-5 shadow-sm">
+      <section class="min-w-0 overflow-hidden rounded-3xl bg-white p-5 shadow-sm">
         <template v-if="activeOrderDetail">
-          <div class="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <p class="text-lg font-semibold text-slate-900">{{ activeOrderDetail.order.showNo }}</p>
-              <p class="mt-1 text-sm text-slate-400">核销码：{{ activeOrderDetail.order.verifyCode }}</p>
+          <div class="flex flex-col gap-3 lg:flex-row lg:flex-wrap lg:items-start lg:justify-between">
+            <div class="min-w-0">
+              <p class="break-words text-lg font-semibold text-slate-900">{{ activeOrderDetail.order.showNo }}</p>
+              <p class="mt-1 break-all text-sm text-slate-400">核销码：{{ activeOrderDetail.order.verifyCode }}</p>
             </div>
-            <div class="flex flex-wrap items-center gap-2">
-              <el-button type="primary" plain :disabled="!canGoVerify" @click="handleGoVerify">{{ goVerifyButtonText }}</el-button>
-              <el-button :loading="detailLoading" @click="handleRefreshCurrentOrder">刷新状态</el-button>
-              <el-button @click="handleCopyVerifyCode">复制核销码</el-button>
+            <div class="grid grid-cols-1 gap-2 sm:grid-cols-3 lg:w-auto">
+              <el-button class="w-full" type="primary" plain :disabled="!canGoVerify" @click="handleGoVerify">{{ goVerifyButtonText }}</el-button>
+              <el-button class="w-full" :loading="detailLoading" @click="handleRefreshCurrentOrder">刷新状态</el-button>
+              <el-button class="w-full" @click="handleCopyVerifyCode">复制核销码</el-button>
             </div>
           </div>
 
           <div class="mt-4 rounded-2xl px-4 py-3" :class="reportConfig.cardClassName">
             <p class="text-sm font-semibold">状态报告：{{ reportConfig.cardTitle }}</p>
-            <p class="mt-1 text-xs">{{ reportConfig.cardDescription }}</p>
+            <p class="mt-1 break-words text-xs">{{ reportConfig.cardDescription }}</p>
           </div>
 
           <div class="mt-4 grid gap-3 sm:grid-cols-4">
@@ -664,27 +665,47 @@ onBeforeUnmount(() => {
               <span class="mt-1 h-2.5 w-2.5 rounded-full" :class="step.active ? 'bg-teal-500' : 'bg-slate-300'" />
               <div>
                 <p class="text-sm font-semibold text-slate-900">{{ step.title }}</p>
-                <p class="text-xs text-slate-500">{{ step.time }}</p>
+                <p class="break-words text-xs text-slate-500">{{ step.time }}</p>
               </div>
             </div>
           </div>
 
           <div class="mt-4">
             <p class="mb-2 text-base font-semibold text-slate-900">商品明细</p>
-            <el-table :data="activeOrderDetail.items" row-key="id" :loading="detailLoading">
-              <el-table-column prop="productName" label="商品名称" min-width="180" />
-              <el-table-column prop="defaultPrice" label="单价" width="120">
-                <template #default="{ row }">
-                  <span>¥{{ formatCurrency(row.defaultPrice) }}</span>
-                </template>
-              </el-table-column>
-              <el-table-column prop="qty" label="数量" width="90" align="right" />
-              <el-table-column label="小计" width="120" align="right">
-                <template #default="{ row }">
-                  <span>¥{{ formatCurrency(row.subTotal ?? Number(row.defaultPrice || 0) * Number(row.qty || 0)) }}</span>
-                </template>
-              </el-table-column>
-            </el-table>
+            <div class="hidden sm:block">
+              <div class="table-scroll-wrap">
+                <el-table :data="activeOrderDetail.items" row-key="id" :loading="detailLoading">
+                  <el-table-column prop="productName" label="商品名称" min-width="180" />
+                  <el-table-column prop="defaultPrice" label="单价" width="120">
+                    <template #default="{ row }">
+                      <span>¥{{ formatCurrency(row.defaultPrice) }}</span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="qty" label="数量" width="90" align="right" />
+                  <el-table-column label="小计" width="120" align="right">
+                    <template #default="{ row }">
+                      <span>¥{{ formatCurrency(row.subTotal ?? Number(row.defaultPrice || 0) * Number(row.qty || 0)) }}</span>
+                    </template>
+                  </el-table-column>
+                </el-table>
+              </div>
+            </div>
+            <div class="space-y-2 sm:hidden">
+              <div
+                v-for="item in activeOrderDetail.items"
+                :key="item.id"
+                class="rounded-2xl border border-slate-100 bg-slate-50 px-3 py-3"
+              >
+                <p class="break-words text-sm font-semibold text-slate-900">{{ item.productName }}</p>
+                <div class="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500">
+                  <p>单价：¥{{ formatCurrency(item.defaultPrice) }}</p>
+                  <p class="text-right">数量：{{ item.qty }}</p>
+                  <p class="col-span-2 text-right font-semibold text-slate-700">
+                    小计：¥{{ formatCurrency(item.subTotal ?? Number(item.defaultPrice || 0) * Number(item.qty || 0)) }}
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
         </template>
 
@@ -697,6 +718,48 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.order-workbench-root {
+  width: 100%;
+  min-width: 0;
+  overflow-x: clip;
+}
+
+.table-scroll-wrap {
+  overflow-x: auto;
+  max-width: 100%;
+  -webkit-overflow-scrolling: touch;
+}
+
+.order-pool-tab {
+  min-width: 0;
+}
+
+.order-pool-tab__label {
+  min-width: 0;
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.25;
+}
+
+.order-pool-tab__count {
+  flex-shrink: 0;
+}
+
+.order-workbench-root :deep(.el-button) {
+  max-width: 100%;
+}
+
+.order-workbench-root :deep(.el-button > span) {
+  white-space: normal;
+  word-break: break-word;
+  text-align: center;
+}
+
+.order-workbench-root :deep(.el-input__wrapper),
+.order-workbench-root :deep(.el-select__wrapper) {
+  max-width: 100%;
+}
+
 .order-card--new {
   border-color: rgba(251, 146, 60, 0.48);
   box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.22);
@@ -723,6 +786,34 @@ onBeforeUnmount(() => {
   }
   100% {
     box-shadow: 0 0 0 0 rgba(251, 191, 36, 0);
+  }
+}
+
+@media (max-width: 767px) {
+  .order-workbench-root {
+    gap: 12px;
+  }
+
+  .order-workbench-root > section {
+    min-width: 0;
+    border-radius: 20px;
+    padding: 16px;
+  }
+
+  .order-workbench-root :deep(.el-switch),
+  .order-workbench-root :deep(.el-select),
+  .poll-interval-select {
+    width: 100%;
+  }
+
+  .order-workbench-root :deep(.el-button) {
+    min-height: 42px;
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+
+  .table-scroll-wrap :deep(.el-table) {
+    min-width: 520px;
   }
 }
 </style>
