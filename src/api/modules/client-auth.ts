@@ -131,3 +131,15 @@ export const clientChangePassword = (data: { currentPassword: string; newPasswor
     url: '/client-auth/change-password',
     data,
   })
+
+export const clientUpdateProfile = (data: {
+  username: string
+  mobile?: string
+  email?: string
+  departmentName?: string
+}) =>
+  request<ClientSafeProfile>({
+    method: 'PATCH',
+    url: '/client-auth/profile',
+    data,
+  })

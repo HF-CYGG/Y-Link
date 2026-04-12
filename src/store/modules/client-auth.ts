@@ -12,6 +12,7 @@ import {
   clientLogin,
   clientLogout,
   clientRegister,
+  clientUpdateProfile,
   getClientMe,
   resetClientPassword,
   sendClientVerificationCode,
@@ -205,6 +206,24 @@ export const useClientAuthStore = defineStore('client-auth', () => {
     return resetClientPassword(payload)
   }
 
+  const updateProfile = async (payload: {
+    username: string
+    mobile?: string
+    email?: string
+    departmentName?: string
+  }) => {
+    const profile = await clientUpdateProfile(payload)
+    currentUser.value = profile
+    if (token.value && expiresAt.value) {
+      persistClientAuthState({
+        token: token.value,
+        user: profile,
+        expiresAt: expiresAt.value,
+      })
+    }
+    return profile
+  }
+
   return {
     token,
     currentUser,
@@ -219,6 +238,7 @@ export const useClientAuthStore = defineStore('client-auth', () => {
     sendVerificationCode,
     requestPasswordResetToken,
     confirmPasswordReset,
+    updateProfile,
     clearAuthState,
   }
 })

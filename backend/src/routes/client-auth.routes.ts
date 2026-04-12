@@ -55,6 +55,13 @@ const changePasswordSchema = z.object({
   newPassword: z.string().min(6),
 })
 
+const updateProfileSchema = z.object({
+  username: z.string().trim().min(1).max(128),
+  mobile: z.string().trim().max(20).optional(),
+  email: z.string().trim().max(128).optional(),
+  departmentName: z.string().trim().max(128).optional(),
+})
+
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export const clientAuthRouter = Router()
 
@@ -167,5 +174,15 @@ clientAuthRouter.post(
     const authReq = req as ClientAuthenticatedRequest
     await clientAuthService.changePassword(authReq.clientAuth, changePasswordSchema.parse(req.body))
     res.json({ code: 0, message: 'ok', data: true })
+  }),
+)
+
+clientAuthRouter.patch(
+  '/profile',
+  requireClientAuth,
+  asyncHandler(async (req, res) => {
+    const authReq = req as ClientAuthenticatedRequest
+    const data = await clientAuthService.updateProfile(authReq.clientAuth, updateProfileSchema.parse(req.body))
+    res.json({ code: 0, message: 'ok', data })
   }),
 )

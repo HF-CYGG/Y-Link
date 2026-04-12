@@ -63,6 +63,13 @@ export interface ClientChangePasswordInput {
   newPassword: string
 }
 
+export interface ClientUpdateProfileInput {
+  username: string
+  mobile?: string
+  email?: string
+  departmentName?: string
+}
+
 export type ClientValidationMode = 'captcha' | 'verification_code'
 
 export interface ClientAuthCapabilities {
@@ -423,6 +430,50 @@ class ClientAuthService {
       await manager.getRepository(ClientUser).save(user)
       await manager.getRepository(ClientUserSession).delete({ userId: user.id })
     })
+  }
+
+  async updateProfile(auth: ClientAuthContext, input: ClientUpdateProfileInput) {
+    const user = await this.userRepo.findOne({ where: { id: auth.userId } })
+    if (!user) {
+      throw new BizError('当前用户不存在', 404)
+    }
+
+    const username = input.username.trim()
+    if (!username) {
+      throw new BizError('用户名不能为空', 400)
+    }
+
+    const mobile = input.mobile?.trim() ? this.normalizeMobile(input.mobile) : null
+    const email = input.email?.trim() ? this.normalizeEmail(input.email) : null
+    const departmentName = input.departmentName?.trim() || ''
+
+    if (!mobile && !email) {
+      throw new BizError('手机号和邮箱至少保留一项', 400)
+    }
+    if (username !== mobile && username !== email) {
+      throw new BizError('用户名必须与手机号或邮箱保持一致', 400)
+    }
+
+    if (mobile) {
+      const existedByMobile = await this.userRepo.findOne({ where: { mobile } })
+      if (existedByMobile && existedByMobile.id !== user.id) {
+        throw new BizError('该手机号已被其他用户使用', 409)
+      }
+    }
+    if (email) {
+      const existedByEmail = await this.userRepo.findOne({ where: { email } })
+      if (existedByEmail && existedByEmail.id !== user.id) {
+        throw new BizError('该邮箱已被其他用户使用', 409)
+      }
+    }
+
+    user.realName = username
+    user.mobile = mobile
+    user.email = email
+    user.departmentName = departmentName
+
+    const savedUser = await this.userRepo.save(user)
+    return this.toClientProfile(savedUser)
   }
 }
 
