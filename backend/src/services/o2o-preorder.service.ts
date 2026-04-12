@@ -42,6 +42,11 @@ class O2oPreorderService {
     if (!raw) {
       return ''
     }
+    // 标准 UUID 形态直接统一转成小写，保证带连字符输入也能稳定命中数据库中的核销码。
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(raw)) {
+      return raw.toLowerCase()
+    }
+    // 兼容“扫码器或外部系统只传 32 位十六进制”的紧凑形态，补齐为标准 UUID。
     const compact = raw.replace(/[^a-zA-Z0-9]/g, '')
     if (/^[a-fA-F0-9]{32}$/.test(compact)) {
       const hex = compact.toLowerCase()
