@@ -36,10 +36,30 @@ export interface ClientVerificationCodeSendResult {
   expireSeconds: number
 }
 
+export type ClientValidationMode = 'captcha' | 'verification_code'
+
+export interface ClientAuthCapabilities {
+  channels: {
+    mobile: boolean
+    email: boolean
+  }
+  registerValidationModes: {
+    mobile: ClientValidationMode
+    email: ClientValidationMode
+  }
+  forgotPasswordEnabled: boolean
+}
+
 export const getClientCaptcha = () =>
   request<ClientCaptchaResult>({
     method: 'GET',
     url: '/client-auth/captcha',
+  })
+
+export const getClientAuthCapabilities = () =>
+  request<ClientAuthCapabilities>({
+    method: 'GET',
+    url: '/client-auth/capabilities',
   })
 
 export const sendClientVerificationCode = (payload: {
@@ -57,9 +77,9 @@ export const clientRegister = (payload: {
   account: string
   password: string
   departmentName?: string
-  verificationCode: string
-  captchaId: string
-  captchaCode: string
+  verificationCode?: string
+  captchaId?: string
+  captchaCode?: string
 }) =>
   request<ClientRegisterResult>({
     method: 'POST',
@@ -76,9 +96,9 @@ export const clientLogin = (payload: { account: string; password: string; captch
 
 export const verifyClientForgotPassword = (payload: {
   account: string
-  verificationCode: string
-  captchaId: string
-  captchaCode: string
+  verificationCode?: string
+  captchaId?: string
+  captchaCode?: string
 }) =>
   request<{ resetToken: string; expiresInSeconds: number }>({
     method: 'POST',

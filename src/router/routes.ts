@@ -302,7 +302,7 @@ const layoutChildren: AppRouteRecord[] = [
           activeMenu: '/system',
           requiredPermissions: ['system_configs:view'],
           keepAlive: true,
-          preloadTargets: ['system-users'],
+          preloadTargets: ['system-users', 'system-client-users'],
         },
       },
       {
@@ -310,8 +310,21 @@ const layoutChildren: AppRouteRecord[] = [
         name: 'system-users',
         component: routeViewLoaders['system-users'],
         meta: {
-          title: '用户管理',
+          title: '管理端用户',
           menuOrder: 20,
+          activeMenu: '/system',
+          requiredPermissions: ['users:view'],
+          keepAlive: true,
+          preloadTargets: ['system-client-users', 'system-audit-logs'],
+        },
+      },
+      {
+        path: 'client-users',
+        name: 'system-client-users',
+        component: routeViewLoaders['system-client-users'],
+        meta: {
+          title: '客户端用户',
+          menuOrder: 30,
           activeMenu: '/system',
           requiredPermissions: ['users:view'],
           keepAlive: true,
@@ -324,7 +337,7 @@ const layoutChildren: AppRouteRecord[] = [
         component: routeViewLoaders['system-audit-logs'],
         meta: {
           title: '审计日志',
-          menuOrder: 30,
+          menuOrder: 40,
           activeMenu: '/system',
           requiredPermissions: ['audit_logs:view'],
           keepAlive: true,

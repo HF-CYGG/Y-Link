@@ -33,6 +33,7 @@ export type AppRouteName =
   | 'system'
   | 'system-configs'
   | 'system-users'
+  | 'system-client-users'
   | 'system-audit-logs'
   | 'not-found'
 
@@ -68,6 +69,7 @@ export const routeViewLoaders = {
   'o2o-console-inbound': () => import('@/views/o2o/O2oInboundManageView.vue'),
   'system-configs': () => import('@/views/system/SystemConfigViewLoader'),
   'system-users': () => import('@/views/system/UserManageView.vue'),
+  'system-client-users': () => import('@/views/system/ClientUserManageView.vue'),
   'system-audit-logs': () => import('@/views/system/AuditLogView.vue'),
   'not-found': () => import('@/views/not-found/NotFoundView.vue'),
 } satisfies Record<string, RouteViewLoader>
@@ -86,6 +88,7 @@ const warmableRouteLoaders: Partial<Record<RouteWarmupTarget, RouteViewLoader>> 
   tags: routeViewLoaders.tags,
   'system-configs': routeViewLoaders['system-configs'],
   'system-users': routeViewLoaders['system-users'],
+  'system-client-users': routeViewLoaders['system-client-users'],
   'system-audit-logs': routeViewLoaders['system-audit-logs'],
 }
 
@@ -148,6 +151,10 @@ const resolveWarmupTargetByPath = (redirectPath: string): RouteWarmupTarget | nu
 
   if (redirectPath.startsWith('/system/audit-logs')) {
     return 'system-audit-logs'
+  }
+
+  if (redirectPath.startsWith('/system/client-users')) {
+    return 'system-client-users'
   }
 
   if (redirectPath.startsWith('/system/users') || redirectPath.startsWith('/system')) {

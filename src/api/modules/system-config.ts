@@ -92,6 +92,18 @@ export interface UpdateVerificationProviderConfigsResult {
   changed: boolean
 }
 
+export interface TestVerificationProviderPayload {
+  channel: 'mobile' | 'email'
+  target: string
+  config: VerificationProviderChannelInput
+}
+
+export interface TestVerificationProviderResult {
+  channel: 'mobile' | 'email'
+  target: string
+  code: string
+}
+
 export const getOrderSerialConfigs = () =>
   request<OrderSerialConfigsResult>({
     method: 'GET',
@@ -128,5 +140,12 @@ export const updateVerificationProviderConfigs = (payload: UpdateVerificationPro
   request<UpdateVerificationProviderConfigsResult>({
     method: 'PUT',
     url: '/system-configs/verification-providers',
+    data: payload,
+  })
+
+export const testVerificationProviderSend = (payload: TestVerificationProviderPayload) =>
+  request<TestVerificationProviderResult>({
+    method: 'POST',
+    url: '/system-configs/verification-providers/test-send',
     data: payload,
   })

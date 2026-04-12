@@ -122,9 +122,9 @@ export const useClientAuthStore = defineStore('client-auth', () => {
     account: string
     password: string
     departmentName?: string
-    verificationCode: string
-    captchaId: string
-    captchaCode: string
+    verificationCode?: string
+    captchaId?: string
+    captchaCode?: string
   }) => {
     const result = await clientRegister(payload)
     clearAuthState()
@@ -185,9 +185,9 @@ export const useClientAuthStore = defineStore('client-auth', () => {
    */
   const requestPasswordResetToken = async (payload: {
     account: string
-    verificationCode: string
-    captchaId: string
-    captchaCode: string
+    verificationCode?: string
+    captchaId?: string
+    captchaCode?: string
   }) => {
     return verifyClientForgotPassword(payload)
   }

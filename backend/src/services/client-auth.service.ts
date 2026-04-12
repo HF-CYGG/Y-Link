@@ -17,6 +17,7 @@ import { generateSessionToken } from '../utils/token.js'
 import { auditService } from './audit.service.js'
 import { authSecurityService } from './auth-security.service.js'
 import { captchaService } from './captcha.service.js'
+import { systemConfigService } from './system-config.service.js'
 import { verificationCodeService } from './verification-code.service.js'
 
 interface ResetTicket {
@@ -32,9 +33,9 @@ export interface ClientRegisterInput {
   account: string
   password: string
   departmentName?: string
-  verificationCode: string
-  captchaId: string
-  captchaCode: string
+  verificationCode?: string
+  captchaId?: string
+  captchaCode?: string
 }
 
 export interface ClientLoginInput {
@@ -46,9 +47,9 @@ export interface ClientLoginInput {
 
 export interface ClientForgotVerifyInput {
   account: string
-  verificationCode: string
-  captchaId: string
-  captchaCode: string
+  verificationCode?: string
+  captchaId?: string
+  captchaCode?: string
 }
 
 export interface ClientResetPasswordInput {
@@ -62,9 +63,70 @@ export interface ClientChangePasswordInput {
   newPassword: string
 }
 
+export type ClientValidationMode = 'captcha' | 'verification_code'
+
+export interface ClientAuthCapabilities {
+  channels: {
+    mobile: boolean
+    email: boolean
+  }
+  registerValidationModes: {
+    mobile: ClientValidationMode
+    email: ClientValidationMode
+  }
+  forgotPasswordEnabled: boolean
+}
+
 class ClientAuthService {
   private readonly userRepo = AppDataSource.getRepository(ClientUser)
   private readonly sessionRepo = AppDataSource.getRepository(ClientUserSession)
+
+  private async getVerificationCapabilities(): Promise<ClientAuthCapabilities> {
+    const configs = await systemConfigService.getVerificationProviderConfigs()
+    const mobileEnabled = configs.mobile.enabled
+    const emailEnabled = configs.email.enabled
+
+    return {
+      channels: {
+        mobile: mobileEnabled,
+        email: emailEnabled,
+      },
+      registerValidationModes: {
+        mobile: mobileEnabled ? 'verification_code' : 'captcha',
+        email: emailEnabled ? 'verification_code' : 'captcha',
+      },
+      forgotPasswordEnabled: mobileEnabled && emailEnabled,
+    }
+  }
+
+  private verifyCaptchaIfRequired(input: { captchaId?: string; captchaCode?: string }, message = '请输入图形验证码') {
+    if (!input.captchaId?.trim() || !input.captchaCode?.trim()) {
+      throw new BizError(message, 400)
+    }
+    captchaService.verifyCaptcha(input.captchaId, input.captchaCode)
+  }
+
+  private verifyCodeIfRequired(
+    input: {
+      verificationCode?: string
+    },
+    payload: {
+      channel: 'mobile' | 'email'
+      target: string
+      scene: 'register' | 'forgot_password'
+    },
+    message = '请输入验证码',
+  ) {
+    if (!input.verificationCode?.trim()) {
+      throw new BizError(message, 400)
+    }
+    verificationCodeService.verifyCode({
+      channel: payload.channel,
+      target: payload.target,
+      scene: payload.scene,
+      code: input.verificationCode,
+    })
+  }
 
   private async findUserWithPasswordByAccount(account: string) {
     return this.userRepo
@@ -131,19 +193,33 @@ class ClientAuthService {
     return captchaService.createCaptcha()
   }
 
+  async getCapabilities(): Promise<ClientAuthCapabilities> {
+    return this.getVerificationCapabilities()
+  }
+
   async register(input: ClientRegisterInput, requestMeta?: RequestMeta) {
     const account = this.resolveAccount(input.account)
     const password = input.password.trim()
     if (password.length < 6) {
       throw new BizError('密码至少 6 位', 400)
     }
-    captchaService.verifyCaptcha(input.captchaId, input.captchaCode)
-    verificationCodeService.verifyCode({
-      channel: account.channel,
-      target: account.account,
-      scene: 'register',
-      code: input.verificationCode,
-    })
+    const capabilities = await this.getVerificationCapabilities()
+    const validationMode = capabilities.registerValidationModes[account.channel]
+
+    if (validationMode === 'verification_code') {
+      this.verifyCodeIfRequired(
+        input,
+        {
+          channel: account.channel,
+          target: account.account,
+          scene: 'register',
+        },
+        `请输入${account.channel === 'email' ? '邮箱' : '手机'}验证码`,
+      )
+    } else {
+      this.verifyCaptchaIfRequired(input)
+    }
+
     const existed = await this.userRepo
       .createQueryBuilder('user')
       .where('user.mobile = :account OR user.email = :account', { account: account.account })
@@ -168,7 +244,7 @@ class ClientAuthService {
   async login(input: ClientLoginInput, requestMeta?: RequestMeta) {
     const account = this.resolveAccount(input.account)
     const password = input.password.trim()
-    captchaService.verifyCaptcha(input.captchaId, input.captchaCode)
+    this.verifyCaptchaIfRequired(input)
     const user = await this.findUserWithPasswordByAccount(account.account)
     if (!user) {
       await authSecurityService.recordClientLoginFailure(requestMeta, account.account)
@@ -227,14 +303,21 @@ class ClientAuthService {
   }
 
   async verifyForgotPassword(input: ClientForgotVerifyInput, requestMeta?: RequestMeta) {
+    const capabilities = await this.getVerificationCapabilities()
+    if (!capabilities.forgotPasswordEnabled) {
+      throw new BizError('当前系统未同时启用手机与邮箱验证码，暂不支持自助找回密码，请联系管理员手动修改密码', 400)
+    }
+
     const account = this.resolveAccount(input.account)
-    captchaService.verifyCaptcha(input.captchaId, input.captchaCode)
-    verificationCodeService.verifyCode({
-      channel: account.channel,
-      target: account.account,
-      scene: 'forgot_password',
-      code: input.verificationCode,
-    })
+    this.verifyCodeIfRequired(
+      input,
+      {
+        channel: account.channel,
+        target: account.account,
+        scene: 'forgot_password',
+      },
+      `请输入${account.channel === 'email' ? '邮箱' : '手机'}验证码`,
+    )
     const user = await this.userRepo
       .createQueryBuilder('user')
       .where('user.mobile = :account OR user.email = :account', { account: account.account })

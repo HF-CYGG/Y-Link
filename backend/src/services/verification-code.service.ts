@@ -12,11 +12,12 @@ import type { RequestMeta } from '../utils/request-meta.js'
 import { BizError } from '../utils/errors.js'
 import {
   systemConfigService,
+  type VerificationProviderConfigInput,
   type VerificationChannelType,
   type VerificationProviderConfigRecord,
 } from './system-config.service.js'
 
-type VerificationScene = 'register' | 'forgot_password'
+type VerificationScene = 'register' | 'forgot_password' | 'test'
 
 interface VerificationCodeTicket {
   channel: VerificationChannelType
@@ -37,6 +38,18 @@ const normalizeTarget = (channel: VerificationChannelType, target: string) =>
 export class VerificationCodeService {
   private buildCode() {
     return String(randomInt(100000, 1000000))
+  }
+
+  private normalizeProviderConfig(config: VerificationProviderConfigInput): VerificationProviderConfigRecord {
+    return {
+      enabled: Boolean(config.enabled),
+      httpMethod: config.httpMethod === 'GET' ? 'GET' : 'POST',
+      apiUrl: config.apiUrl.trim(),
+      headersTemplate: config.headersTemplate.trim(),
+      bodyTemplate: config.bodyTemplate.trim(),
+      successMatch: config.successMatch.trim(),
+      updatedAt: new Date(),
+    }
   }
 
   private renderTemplate(template: string, context: Record<string, string>) {
@@ -108,6 +121,27 @@ export class VerificationCodeService {
     })
     return {
       expireSeconds: Math.floor(CODE_EXPIRE_MS / 1000),
+    }
+  }
+
+  async sendTest(input: {
+    channel: VerificationChannelType
+    target: string
+    config: VerificationProviderConfigInput
+    requestMeta?: RequestMeta
+  }) {
+    const normalizedTarget = normalizeTarget(input.channel, input.target)
+    const code = this.buildCode()
+    await this.sendByProvider(this.normalizeProviderConfig(input.config), {
+      target: normalizedTarget,
+      code,
+      scene: 'test',
+      ip: input.requestMeta?.ipAddress?.trim() || '',
+    })
+    return {
+      channel: input.channel,
+      target: normalizedTarget,
+      code,
     }
   }
 

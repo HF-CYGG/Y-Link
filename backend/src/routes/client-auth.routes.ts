@@ -9,6 +9,7 @@ import { z } from 'zod'
 import { requireClientAuth } from '../middleware/client-auth.middleware.js'
 import type { ClientAuthenticatedRequest } from '../types/client-auth.js'
 import { asyncHandler } from '../utils/async-handler.js'
+import { BizError } from '../utils/errors.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 import { clientAuthService } from '../services/client-auth.service.js'
 import { authSecurityService } from '../services/auth-security.service.js'
@@ -18,9 +19,9 @@ const registerSchema = z.object({
   account: z.string().trim().min(1),
   password: z.string().min(6),
   departmentName: z.string().optional(),
-  verificationCode: z.string().trim().min(4).max(8),
-  captchaId: z.string().trim().min(1),
-  captchaCode: z.string().trim().min(1),
+  verificationCode: z.string().trim().min(4).max(8).optional(),
+  captchaId: z.string().trim().min(1).optional(),
+  captchaCode: z.string().trim().min(1).optional(),
 })
 
 const loginSchema = z.object({
@@ -32,9 +33,9 @@ const loginSchema = z.object({
 
 const forgotVerifySchema = z.object({
   account: z.string().trim().min(1),
-  verificationCode: z.string().trim().min(4).max(8),
-  captchaId: z.string().trim().min(1),
-  captchaCode: z.string().trim().min(1),
+  verificationCode: z.string().trim().min(4).max(8).optional(),
+  captchaId: z.string().trim().min(1).optional(),
+  captchaCode: z.string().trim().min(1).optional(),
 })
 
 const resetPasswordSchema = z.object({
@@ -65,11 +66,25 @@ clientAuthRouter.get(
   }),
 )
 
+clientAuthRouter.get(
+  '/capabilities',
+  asyncHandler(async (_req, res) => {
+    const data = await clientAuthService.getCapabilities()
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
 clientAuthRouter.post(
   '/verification-code/send',
   asyncHandler(async (req, res) => {
     const payload = verificationCodeSendSchema.parse(req.body)
     const requestMeta = extractRequestMeta(req)
+    if (payload.scene === 'forgot_password') {
+      const capabilities = await clientAuthService.getCapabilities()
+      if (!capabilities.forgotPasswordEnabled) {
+        throw new BizError('当前系统未同时启用手机与邮箱验证码，暂不支持自助找回密码，请联系管理员手动修改密码', 400)
+      }
+    }
     await authSecurityService.guardVerificationCodeSendRequest(requestMeta, payload.target, payload.channel)
     const data = await verificationCodeService.sendCode({
       channel: payload.channel,

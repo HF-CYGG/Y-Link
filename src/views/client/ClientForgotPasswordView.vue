@@ -9,7 +9,7 @@
 import { onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { getClientCaptcha } from '@/api/modules/client-auth'
+import { getClientAuthCapabilities, type ClientAuthCapabilities } from '@/api/modules/client-auth'
 import { useClientAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
 
@@ -18,22 +18,17 @@ const clientAuthStore = useClientAuthStore()
 
 const step = ref<1 | 2>(1)
 const submitting = ref(false)
-const captchaLoading = ref(false)
 const resetToken = ref('')
 const securityHint = ref('')
 const verificationSending = ref(false)
 const verificationCountdown = ref(0)
 let verificationTimer: ReturnType<typeof globalThis.setInterval> | null = null
-
-const captcha = reactive({
-  captchaId: '',
-  captchaSvg: '',
-})
+const capabilityLoading = ref(false)
+const authCapabilities = ref<ClientAuthCapabilities | null>(null)
 
 const verifyForm = reactive({
   account: '',
   verificationCode: '',
-  captchaCode: '',
 })
 
 const resetForm = reactive({
@@ -41,14 +36,16 @@ const resetForm = reactive({
   confirmPassword: '',
 })
 
-const refreshCaptcha = async () => {
-  captchaLoading.value = true
+const forgotPasswordAvailable = ref(false)
+
+const loadAuthCapabilities = async () => {
+  capabilityLoading.value = true
   try {
-    const result = await getClientCaptcha()
-    captcha.captchaId = result.captchaId
-    captcha.captchaSvg = result.captchaSvg
+    const result = await getClientAuthCapabilities()
+    authCapabilities.value = result
+    forgotPasswordAvailable.value = result.forgotPasswordEnabled
   } finally {
-    captchaLoading.value = false
+    capabilityLoading.value = false
   }
 }
 
@@ -121,6 +118,10 @@ const handleSendVerificationCode = async () => {
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const handleVerify = async () => {
+  if (!forgotPasswordAvailable.value) {
+    ElMessage.warning('当前系统未同时启用手机与邮箱验证码，请联系管理员手动修改密码')
+    return
+  }
   if (!validateAccount(verifyForm.account)) {
     ElMessage.warning('请输入正确的用户名（手机号或邮箱）')
     return
@@ -129,18 +130,12 @@ const handleVerify = async () => {
     ElMessage.warning('请输入手机/邮箱验证码')
     return
   }
-  if (!verifyForm.captchaCode.trim()) {
-    ElMessage.warning('请输入图形验证码')
-    return
-  }
 
   submitting.value = true
   try {
     const result = await clientAuthStore.requestPasswordResetToken({
       account: verifyForm.account.trim(),
       verificationCode: verifyForm.verificationCode.trim(),
-      captchaId: captcha.captchaId,
-      captchaCode: verifyForm.captchaCode.trim(),
     })
     resetToken.value = result.resetToken
     step.value = 2
@@ -149,8 +144,6 @@ const handleVerify = async () => {
     const message = extractErrorMessage(error, '身份校验失败，请稍后重试')
     applySecurityHintFromMessage(message)
     ElMessage.error(message)
-    verifyForm.captchaCode = ''
-    await refreshCaptcha()
   } finally {
     submitting.value = false
   }
@@ -186,7 +179,7 @@ const handleReset = async () => {
 }
 
 onMounted(async () => {
-  await refreshCaptcha()
+  await loadAuthCapabilities()
 })
 
 onUnmounted(() => {
@@ -199,7 +192,7 @@ onUnmounted(() => {
     <div class="mx-auto max-w-md rounded-[2rem] bg-white p-6 shadow-[0_20px_60px_rgba(15,23,42,0.08)]">
       <div class="mb-6">
         <p class="text-2xl font-semibold text-slate-900">找回密码</p>
-        <p class="mt-2 text-sm text-slate-500">先完成身份验证，再设置新的登录密码</p>
+        <p class="mt-2 text-sm text-slate-500">仅在系统同时启用手机与邮箱验证码时支持自助找回</p>
       </div>
 
       <el-alert
@@ -211,6 +204,15 @@ onUnmounted(() => {
         :title="securityHint"
       />
 
+      <el-alert
+        v-if="!capabilityLoading && !forgotPasswordAvailable"
+        class="mb-4"
+        type="warning"
+        :closable="false"
+        show-icon
+        title="当前系统未同时启用手机与邮箱验证码，暂不支持自助找回密码，请联系管理员手动修改密码。"
+      />
+
       <div class="mb-6 flex items-center gap-3 text-sm">
         <span class="rounded-full px-3 py-1" :class="step === 1 ? 'bg-slate-900 text-white' : 'bg-slate-100 text-slate-400'">
           1. 身份验证
@@ -220,7 +222,7 @@ onUnmounted(() => {
         </span>
       </div>
 
-      <form v-if="step === 1" class="space-y-4" @submit.prevent="handleVerify">
+      <form v-if="step === 1 && forgotPasswordAvailable" class="space-y-4" @submit.prevent="handleVerify">
         <input v-model.trim="verifyForm.account" class="client-input" placeholder="请输入用户名（手机号或邮箱）" />
         <div class="grid grid-cols-[1fr_auto] gap-3">
           <input v-model.trim="verifyForm.verificationCode" class="client-input" placeholder="请输入手机/邮箱验证码" />
@@ -230,19 +232,12 @@ onUnmounted(() => {
             </span>
           </button>
         </div>
-        <div class="grid grid-cols-[1fr_auto] gap-3">
-          <input v-model.trim="verifyForm.captchaCode" class="client-input" placeholder="图形验证码" />
-          <button type="button" class="captcha-box" :disabled="captchaLoading" @click="refreshCaptcha">
-            <span v-if="captchaLoading" class="text-xs text-slate-400">加载中</span>
-            <span v-else v-html="captcha.captchaSvg" />
-          </button>
-        </div>
         <button class="client-submit" type="submit" :disabled="submitting">
           {{ submitting ? '校验中...' : '下一步' }}
         </button>
       </form>
 
-      <form v-else class="space-y-4" @submit.prevent="handleReset">
+      <form v-else-if="step === 2" class="space-y-4" @submit.prevent="handleReset">
         <input v-model="resetForm.newPassword" class="client-input" type="password" placeholder="请输入新密码" />
         <input v-model="resetForm.confirmPassword" class="client-input" type="password" placeholder="请再次输入新密码" />
         <button class="client-submit" type="submit" :disabled="submitting">

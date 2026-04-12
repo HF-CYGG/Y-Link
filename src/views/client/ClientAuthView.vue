@@ -68,7 +68,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Key, Lock, Message, OfficeBuilding, User } from '@element-plus/icons-vue'
-import { getClientCaptcha } from '@/api/modules/client-auth'
+import { getClientAuthCapabilities, getClientCaptcha, type ClientAuthCapabilities, type ClientValidationMode } from '@/api/modules/client-auth'
 import { useClientAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
 
@@ -92,11 +92,13 @@ const captchaLoading = ref(false)
 const successTip = ref('')
 const securityHint = ref('')
 const verificationSending = ref(false)
+const capabilityLoading = ref(false)
 const registerVerificationCountdown = ref(0)
 let registerVerificationTimer: ReturnType<typeof globalThis.setInterval> | null = null
 const formBlockRef = ref<HTMLElement | null>(null)
 const formWrapperHeight = ref('auto')
 const formAnimating = ref(false)
+const authCapabilities = ref<ClientAuthCapabilities | null>(null)
 const captcha = reactive<ClientCaptchaState>({
   captchaId: '',
   captchaSvg: '',
@@ -120,6 +122,26 @@ const registerForm = reactive({
 const redirectPath = computed(() => {
   const raw = typeof route.query.redirect === 'string' ? route.query.redirect : ''
   return raw.startsWith('/') && !raw.startsWith('//') ? raw : '/client/mall'
+})
+
+const registerAccountChannel = computed(() => resolveAccountChannel(registerForm.account))
+const registerValidationMode = computed<ClientValidationMode>(() => {
+  const channel = registerAccountChannel.value
+  if (!channel) {
+    return 'captcha'
+  }
+  return authCapabilities.value?.registerValidationModes[channel] ?? 'captcha'
+})
+const registerUsesVerificationCode = computed(() => registerValidationMode.value === 'verification_code')
+const registerValidationHint = computed(() => {
+  const channel = registerAccountChannel.value
+  if (!channel) {
+    return '请输入手机号或邮箱，系统会自动选择当前可用的注册校验方式。'
+  }
+  if (registerUsesVerificationCode.value) {
+    return `${channel === 'email' ? '当前邮箱通道已启用邮箱验证码' : '当前手机通道已启用短信验证码'}，注册时将使用验证码校验。`
+  }
+  return `${channel === 'email' ? '当前邮箱通道未启用邮箱验证码' : '当前手机通道未启用短信验证码'}，注册时将改用图片验证码校验。`
 })
 
 const syncWrapperHeight = (heightMode: 'auto' | 'measured' = 'auto') => {
@@ -177,6 +199,18 @@ const refreshCaptcha = async () => {
   }
 }
 
+const loadAuthCapabilities = async () => {
+  capabilityLoading.value = true
+  try {
+    authCapabilities.value = await getClientAuthCapabilities()
+  } catch (error) {
+    const message = extractErrorMessage(error, '加载客户端校验策略失败，请稍后重试')
+    ElMessage.error(message)
+  } finally {
+    capabilityLoading.value = false
+  }
+}
+
 const validateMobile = (mobile: string) => /^1\d{10}$/.test(mobile.trim())
 const validateEmail = (email: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
 const validatePassword = (password: string) => password.trim().length >= 6
@@ -214,6 +248,10 @@ const startRegisterVerificationCountdown = (seconds: number) => {
 }
 
 const handleSendRegisterVerificationCode = async () => {
+  if (!registerUsesVerificationCode.value) {
+    ElMessage.warning('当前账号类型未启用验证码注册，请根据页面提示使用图片验证码完成注册')
+    return
+  }
   const channel = resolveAccountChannel(registerForm.account)
   if (!channel) {
     ElMessage.warning('请输入正确的手机号或邮箱')
@@ -283,12 +321,13 @@ const handleRegister = async () => {
     ElMessage.warning('密码至少 6 位')
     return
   }
-  if (!captcha.captchaId || !registerForm.captcha.trim()) {
+  if (registerUsesVerificationCode.value) {
+    if (!registerForm.verificationCode.trim()) {
+      ElMessage.warning('请输入手机/邮箱验证码')
+      return
+    }
+  } else if (!captcha.captchaId || !registerForm.captcha.trim()) {
     ElMessage.warning('请输入图形验证码')
-    return
-  }
-  if (!registerForm.verificationCode.trim()) {
-    ElMessage.warning('请输入手机/邮箱验证码')
     return
   }
 
@@ -299,9 +338,9 @@ const handleRegister = async () => {
       account: registeredAccount,
       password: registerForm.password,
       departmentName: registerForm.department.trim() || undefined,
-      verificationCode: registerForm.verificationCode.trim(),
-      captchaId: captcha.captchaId,
-      captchaCode: registerForm.captcha.trim(),
+      verificationCode: registerUsesVerificationCode.value ? registerForm.verificationCode.trim() : undefined,
+      captchaId: registerUsesVerificationCode.value ? undefined : captcha.captchaId,
+      captchaCode: registerUsesVerificationCode.value ? undefined : registerForm.captcha.trim(),
     })
     ElMessage.success('注册成功，请登录')
     activeMode.value = 'login'
@@ -338,6 +377,7 @@ onMounted(async () => {
     return
   }
   applyRouteState()
+  await loadAuthCapabilities()
   await refreshCaptcha()
   await nextTick()
   syncWrapperHeight()
@@ -350,6 +390,15 @@ watch(
     applyRouteState()
   },
 )
+
+watch(registerValidationMode, (mode) => {
+  if (mode !== 'verification_code') {
+    resetRegisterVerificationTimer()
+    registerForm.verificationCode = ''
+  } else {
+    registerForm.captcha = ''
+  }
+})
 
 watch(successTip, async () => {
   await nextTick()
@@ -450,6 +499,9 @@ onUnmounted(() => {
               <div v-else ref="formBlockRef" key="register" class="form-block">
                 <h2 class="block-title">创建账号</h2>
                 <p class="block-subtitle">只需几步，开启极速预订体验</p>
+                <div class="auth-hint-card">
+                  {{ capabilityLoading ? '正在加载当前注册校验策略...' : registerValidationHint }}
+                </div>
 
                 <el-form @submit.prevent="handleRegister" class="space-y-4 mt-6">
                   <el-input v-model="registerForm.account" placeholder="用户名（手机号或邮箱）" class="geo-input" size="large" clearable>
@@ -464,7 +516,7 @@ onUnmounted(() => {
                     </template>
                   </el-input>
 
-                  <div class="captcha-row">
+                  <div v-if="registerUsesVerificationCode" class="captcha-row">
                     <el-input v-model="registerForm.verificationCode" placeholder="手机/邮箱验证码" class="geo-input flex-1" size="large" clearable>
                       <template #prefix>
                         <el-icon class="input-icon"><Message /></el-icon>
@@ -491,7 +543,7 @@ onUnmounted(() => {
                     </template>
                   </el-input>
 
-                  <div class="captcha-row">
+                  <div v-if="!registerUsesVerificationCode" class="captcha-row">
                     <el-input v-model="registerForm.captcha" placeholder="图形验证码" class="geo-input flex-1" size="large" clearable>
                       <template #prefix>
                         <el-icon class="input-icon"><Key /></el-icon>
@@ -715,6 +767,16 @@ onUnmounted(() => {
   padding: 12px 14px;
   font-size: 13px;
   line-height: 1.6;
+}
+
+.auth-hint-card {
+  margin-top: 16px;
+  border-radius: 16px;
+  background: rgba(15, 118, 110, 0.08);
+  color: #0f766e;
+  padding: 12px 14px;
+  font-size: 13px;
+  line-height: 1.7;
 }
 
 .block-title {

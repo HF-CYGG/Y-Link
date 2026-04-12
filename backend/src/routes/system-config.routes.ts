@@ -9,6 +9,7 @@ import { z } from 'zod'
 import { requirePermission } from '../middleware/auth.middleware.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 import { systemConfigService } from '../services/system-config.service.js'
+import { verificationCodeService } from '../services/verification-code.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 
@@ -42,6 +43,12 @@ const verificationProviderChannelSchema = z.object({
 const updateVerificationProviderConfigsSchema = z.object({
   mobile: verificationProviderChannelSchema,
   email: verificationProviderChannelSchema,
+})
+
+const testVerificationProviderSchema = z.object({
+  channel: z.enum(['mobile', 'email']),
+  target: z.string().trim().min(1).max(200),
+  config: verificationProviderChannelSchema,
 })
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
@@ -123,6 +130,25 @@ systemConfigRouter.put(
     const authReq = req as AuthenticatedRequest
     const payload = updateVerificationProviderConfigsSchema.parse(req.body)
     const data = await systemConfigService.updateVerificationProviderConfigs(payload, authReq.auth, extractRequestMeta(req))
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+systemConfigRouter.post(
+  '/verification-providers/test-send',
+  requirePermission('system_configs:update'),
+  asyncHandler(async (req, res) => {
+    const payload = testVerificationProviderSchema.parse(req.body)
+    const data = await verificationCodeService.sendTest({
+      channel: payload.channel,
+      target: payload.target,
+      config: payload.config,
+      requestMeta: extractRequestMeta(req),
+    })
     res.json({
       code: 0,
       message: 'ok',

@@ -13,6 +13,7 @@ import { errorHandler, notFoundHandler } from './middleware/error-handler.js'
 import { authRouter } from './routes/auth.routes.js'
 import { auditLogRouter } from './routes/audit-log.routes.js'
 import { clientAuthRouter } from './routes/client-auth.routes.js'
+import { clientUserManageRouter } from './routes/client-user-manage.routes.js'
 import { dataMaintenanceRouter } from './routes/data-maintenance.routes.js'
 import { dashboardRouter } from './routes/dashboard.routes.js'
 import { o2oRouter } from './routes/o2o.routes.js'
@@ -63,6 +64,7 @@ export function createApp() {
 
   // 系统治理接口：由细粒度权限点控制，而不是单纯依赖管理员角色。
   app.use('/api/users', userRouter)
+  app.use('/api/client-users', clientUserManageRouter)
   app.use('/api/audit-logs', auditLogRouter)
   app.use('/api/system-configs', systemConfigRouter)
   app.use('/api/data-maintenance', dataMaintenanceRouter)

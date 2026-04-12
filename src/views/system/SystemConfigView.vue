@@ -8,12 +8,13 @@
 
 import dayjs from 'dayjs'
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
+import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { PageContainer, PageToolbarCard } from '@/components/common'
 import {
   getO2oRuleConfigs,
   getOrderSerialConfigs,
   getVerificationProviderConfigs,
+  testVerificationProviderSend,
   updateO2oRuleConfigs,
   updateOrderSerialConfigs,
   updateVerificationProviderConfigs,
@@ -44,6 +45,7 @@ const authStore = useAuthStore()
 const formRef = ref<FormInstance>()
 const loading = ref(true)
 const saving = ref(false)
+const testSendingChannel = ref<'mobile' | 'email' | ''>('')
 const configMap = ref<Record<'department' | 'walkin', OrderSerialConfigRecord> | null>(null)
 const o2oRuleConfig = ref<O2oRuleConfigRecord | null>(null)
 const verificationConfigMap = ref<VerificationProviderConfigsResult | null>(null)
@@ -231,6 +233,76 @@ const validateVerificationConfigs = () => {
     }
   }
   return true
+}
+
+const validateSingleVerificationConfig = (channel: 'mobile' | 'email') => {
+  const label = getVerificationChannelLabel(channel)
+  const config = serialForm.verification[channel]
+  if (!config.enabled) {
+    ElMessage.warning(`${label}未启用，无法发送测试消息`)
+    return false
+  }
+  if (!config.apiUrl.trim()) {
+    ElMessage.warning(`${label}未填写 API 地址，无法发送测试消息`)
+    return false
+  }
+  try {
+    JSON.parse(config.headersTemplate.trim() || '{}')
+  } catch {
+    ElMessage.warning(`${label}请求头模板必须是合法 JSON`)
+    return false
+  }
+  return true
+}
+
+const buildVerificationChannelPayload = (channel: 'mobile' | 'email') => {
+  return {
+    enabled: serialForm.verification[channel].enabled,
+    httpMethod: serialForm.verification[channel].httpMethod,
+    apiUrl: serialForm.verification[channel].apiUrl.trim(),
+    headersTemplate: serialForm.verification[channel].headersTemplate.trim(),
+    bodyTemplate: serialForm.verification[channel].bodyTemplate.trim(),
+    successMatch: serialForm.verification[channel].successMatch.trim(),
+  }
+}
+
+const handleTestVerificationSend = async (channel: 'mobile' | 'email') => {
+  if (!canUpdateConfigs.value) {
+    ElMessage.warning('当前账号仅支持只读查看')
+    return
+  }
+  if (!validateSingleVerificationConfig(channel)) {
+    return
+  }
+
+  try {
+    const promptResult = await ElMessageBox.prompt(
+      channel === 'mobile' ? '请输入用于接收测试短信的手机号' : '请输入用于接收测试邮件的邮箱',
+      channel === 'mobile' ? '发送测试短信' : '发送测试邮件',
+      {
+        inputPlaceholder: channel === 'mobile' ? '例如：13800138000' : '例如：demo@example.com',
+        inputPattern: channel === 'mobile' ? /^1\d{10}$/ : /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
+        inputErrorMessage: channel === 'mobile' ? '请输入正确的手机号' : '请输入正确的邮箱地址',
+        confirmButtonText: '立即发送',
+        cancelButtonText: '取消',
+      },
+    )
+
+    testSendingChannel.value = channel
+    const result = await testVerificationProviderSend({
+      channel,
+      target: promptResult.value.trim(),
+      config: buildVerificationChannelPayload(channel),
+    })
+    ElMessage.success(`${channel === 'mobile' ? '测试短信' : '测试邮件'}已发送至 ${result.target}`)
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') {
+      return
+    }
+    ElMessage.error(extractErrorMessage(error, '测试发送失败，请检查平台配置后重试'))
+  } finally {
+    testSendingChannel.value = ''
+  }
 }
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
@@ -534,7 +606,7 @@ onMounted(() => {
             type="info"
             :closable="false"
             show-icon
-            description="请求头模板需填写合法 JSON；请求体模板会原样发送给目标平台。若配置成功关键字，系统会在第三方返回文本中匹配该内容来判断发送成功。"
+            description="请求头模板需填写合法 JSON；请求体模板会原样发送给目标平台。若配置成功关键字，系统会在第三方返回文本中匹配该内容来判断发送成功。客户端找回密码仅在手机与邮箱验证码平台同时启用时开放。"
           />
 
           <div class="grid gap-6 xl:grid-cols-2">
@@ -544,7 +616,17 @@ onMounted(() => {
                   <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100">短信验证码平台</h3>
                   <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">用于手机号注册、手机号找回密码。</p>
                 </div>
-                <el-switch v-model="serialForm.verification.mobile.enabled" :disabled="!canUpdateConfigs || loading" />
+                <div class="flex items-center gap-3">
+                  <el-button
+                    size="small"
+                    :loading="testSendingChannel === 'mobile'"
+                    :disabled="!canUpdateConfigs || loading || saving"
+                    @click="handleTestVerificationSend('mobile')"
+                  >
+                    发送测试短信
+                  </el-button>
+                  <el-switch v-model="serialForm.verification.mobile.enabled" :disabled="!canUpdateConfigs || loading" />
+                </div>
               </div>
 
               <div class="grid gap-4">
@@ -606,7 +688,17 @@ onMounted(() => {
                   <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100">邮箱验证码平台</h3>
                   <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">用于邮箱注册、邮箱找回密码。</p>
                 </div>
-                <el-switch v-model="serialForm.verification.email.enabled" :disabled="!canUpdateConfigs || loading" />
+                <div class="flex items-center gap-3">
+                  <el-button
+                    size="small"
+                    :loading="testSendingChannel === 'email'"
+                    :disabled="!canUpdateConfigs || loading || saving"
+                    @click="handleTestVerificationSend('email')"
+                  >
+                    发送测试邮件
+                  </el-button>
+                  <el-switch v-model="serialForm.verification.email.enabled" :disabled="!canUpdateConfigs || loading" />
+                </div>
               </div>
 
               <div class="grid gap-4">

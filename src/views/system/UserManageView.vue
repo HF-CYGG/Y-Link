@@ -633,7 +633,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <PageContainer title="用户管理" description="管理系统账号、角色、状态与关键权限边界，所有变更均自动进入审计链路。">
+  <PageContainer title="管理端用户" description="管理系统后台账号、角色、状态与关键权限边界，所有变更均自动进入审计链路。">
     <div class="flex min-w-0 flex-col gap-4">
       <PageToolbarCard content-class="items-start">
         <template #default="{ isPhone, isTablet }">
