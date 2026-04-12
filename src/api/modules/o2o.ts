@@ -178,6 +178,6 @@ export const inboundO2oStock = (payload: { productId: string; qty: number; remar
 export const getO2oInventoryLogs = (limit = 50) =>
   request<O2oInventoryLog[]>({
     method: 'GET',
-    url: '/o2o/inventory-logs',
+    url: '/o2o/inventory/logs',
     params: { limit },
   })
