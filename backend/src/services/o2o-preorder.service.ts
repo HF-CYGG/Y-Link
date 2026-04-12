@@ -250,7 +250,10 @@ class O2oPreorderService {
     // 因为 pending 阶段尚未真正出库，currentStock 理论上从未减少过。
     const items = await manager.getRepository(O2oPreorderItem).find({ where: { orderId: order.id } })
     for (const row of items) {
-      const product = await manager.getRepository(BaseProduct).findOne({ where: { id: row.productId } })
+      const product = await manager.getRepository(BaseProduct).findOne({
+        where: { id: row.productId },
+        lock: { mode: 'pessimistic_write' },
+      })
       if (!product) {
         continue
       }
@@ -352,7 +355,10 @@ class O2oPreorderService {
       // 事务内完成“查商品 -> 校验库存/限购 -> 写订单 -> 占用预订库存 -> 记录库存日志”，
       // 确保任一步失败都能整体回滚，避免只生成订单或只扣预订库存的脏状态。
       const productIds = [...new Set(normalizedItems.map((item) => item.productId))]
-      const products = await manager.getRepository(BaseProduct).find({ where: { id: In(productIds) } })
+      const products = await manager.getRepository(BaseProduct).find({
+        where: { id: In(productIds) },
+        lock: { mode: 'pessimistic_write' },
+      })
       if (products.length !== productIds.length) {
         throw new BizError('存在无效商品', 400)
       }
@@ -597,7 +603,10 @@ class O2oPreorderService {
       }
       const items = await manager.getRepository(O2oPreorderItem).find({ where: { orderId: order.id } })
       const productIds = [...new Set(items.map((item) => String(item.productId)))]
-      const products = await manager.getRepository(BaseProduct).find({ where: { id: In(productIds) } })
+      const products = await manager.getRepository(BaseProduct).find({
+        where: { id: In(productIds) },
+        lock: { mode: 'pessimistic_write' },
+      })
       const productMap = new Map(products.map((item) => [String(item.id), item]))
       for (const row of items) {
         const product = productMap.get(String(row.productId))
@@ -654,7 +663,10 @@ class O2oPreorderService {
       throw new BizError('入库数量必须为正整数', 400)
     }
     return AppDataSource.transaction(async (manager) => {
-      const product = await manager.getRepository(BaseProduct).findOne({ where: { id: productId } })
+      const product = await manager.getRepository(BaseProduct).findOne({
+        where: { id: productId },
+        lock: { mode: 'pessimistic_write' },
+      })
       if (!product) {
         throw new BizError('商品不存在', 404)
       }
