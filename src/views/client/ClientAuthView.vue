@@ -182,7 +182,7 @@ const switchMode = async (nextMode: AuthMode) => {
 const handleFormBeforeLeave = () => {
   syncWrapperHeight('measured', formWrapperRef.value)
   // 强制浏览器确认当前高度帧，避免切换起始时出现跳帧或闪现。
-  void formWrapperRef.value?.offsetHeight
+  const _forceReflow = formWrapperRef.value?.offsetHeight
 }
 
 const handleFormBeforeEnter = () => {
@@ -469,10 +469,9 @@ watch(
   [activeMode, loginCaptchaVisible, registerUsesVerificationCode],
   async ([mode, shouldShowLoginCaptcha, usesVerificationCode]) => {
     const shouldShowCaptcha = (mode === 'login' && shouldShowLoginCaptcha) || (mode === 'register' && !usesVerificationCode)
-    if (!shouldShowCaptcha) {
-      return
+    if (shouldShowCaptcha) {
+      await ensureCaptchaReady()
     }
-    await ensureCaptchaReady()
   },
   { immediate: true },
 )
@@ -903,7 +902,7 @@ onUnmounted(() => {
 
 .block-subtitle {
   font-size: 13px;
-  color: #64748b;
+  color: #475569;
   margin-bottom: 24px;
 }
 

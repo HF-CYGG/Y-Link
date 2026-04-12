@@ -44,7 +44,7 @@ class O2oPreorderService {
       return 0
     }
     const raw = String(value).trim()
-    const matched = raw.match(/^([+-]?)(\d+)(?:\.(\d{1,2}))?$/)
+    const matched = /^([+-]?)(\d+)(?:\.(\d{1,2}))?$/.exec(raw)
     if (!matched) {
       return 0
     }
@@ -72,7 +72,7 @@ class O2oPreorderService {
       return raw.toLowerCase()
     }
     // 兼容“扫码器或外部系统只传 32 位十六进制”的紧凑形态，补齐为标准 UUID。
-    const compact = raw.replace(/[^a-zA-Z0-9]/g, '')
+    const compact = raw.replaceAll(/[^a-zA-Z0-9]/g, '')
     if (/^[a-fA-F0-9]{32}$/.test(compact)) {
       const hex = compact.toLowerCase()
       return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
@@ -87,7 +87,7 @@ class O2oPreorderService {
     if (order.status === 'verified') {
       return {
         scenario: 'verified' as const,
-        cancelReason: null as null,
+        cancelReason: null,
         timeoutReached,
         timeoutSoon: false,
       }
@@ -111,14 +111,14 @@ class O2oPreorderService {
     if (timeoutSoon) {
       return {
         scenario: 'timeout_soon' as const,
-        cancelReason: null as null,
+        cancelReason: null,
         timeoutReached,
         timeoutSoon: true,
       }
     }
     return {
       scenario: 'pending' as const,
-      cancelReason: null as null,
+      cancelReason: null,
       timeoutReached,
       timeoutSoon: false,
     }

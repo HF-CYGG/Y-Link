@@ -471,21 +471,19 @@ class ClientAuthService {
     if (!mobile && !email) {
       throw new BizError('手机号和邮箱至少保留一项', 400)
     }
-    const existedByUsername = await this.findUserByAnyIdentifier(username)
-    if (existedByUsername && existedByUsername.id !== user.id) {
-      throw new BizError('该用户名已被其他用户使用', 409)
-    }
 
-    if (mobile) {
-      const existedByMobile = await this.findUserByAnyIdentifier(mobile)
-      if (existedByMobile && existedByMobile.id !== user.id) {
-        throw new BizError('该手机号已被其他用户使用', 409)
-      }
-    }
-    if (email) {
-      const existedByEmail = await this.findUserByAnyIdentifier(email)
-      if (existedByEmail && existedByEmail.id !== user.id) {
-        throw new BizError('该邮箱已被其他用户使用', 409)
+    const checks = [
+      { value: username, message: '该用户名已被其他用户使用' },
+      { value: mobile, message: '该手机号已被其他用户使用' },
+      { value: email, message: '该邮箱已被其他用户使用' },
+    ]
+
+    for (const check of checks) {
+      if (check.value) {
+        const existed = await this.findUserByAnyIdentifier(check.value)
+        if (existed && existed.id !== user.id) {
+          throw new BizError(check.message, 409)
+        }
       }
     }
 
