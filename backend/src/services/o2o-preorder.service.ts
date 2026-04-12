@@ -252,7 +252,7 @@ class O2oPreorderService {
     for (const row of items) {
       const product = await manager.getRepository(BaseProduct).findOne({
         where: { id: row.productId },
-        lock: { mode: 'pessimistic_write' },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
       if (!product) {
         continue
@@ -357,7 +357,7 @@ class O2oPreorderService {
       const productIds = [...new Set(normalizedItems.map((item) => item.productId))]
       const products = await manager.getRepository(BaseProduct).find({
         where: { id: In(productIds) },
-        lock: { mode: 'pessimistic_write' },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
       if (products.length !== productIds.length) {
         throw new BizError('存在无效商品', 400)
@@ -605,7 +605,7 @@ class O2oPreorderService {
       const productIds = [...new Set(items.map((item) => String(item.productId)))]
       const products = await manager.getRepository(BaseProduct).find({
         where: { id: In(productIds) },
-        lock: { mode: 'pessimistic_write' },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
       const productMap = new Map(products.map((item) => [String(item.id), item]))
       for (const row of items) {
@@ -665,7 +665,7 @@ class O2oPreorderService {
     return AppDataSource.transaction(async (manager) => {
       const product = await manager.getRepository(BaseProduct).findOne({
         where: { id: productId },
-        lock: { mode: 'pessimistic_write' },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
       if (!product) {
         throw new BizError('商品不存在', 404)

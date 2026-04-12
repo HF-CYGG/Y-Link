@@ -28,31 +28,29 @@ const run = async () => {
 
   const captchaA = await clientAuthService.createCaptcha()
   const registerResult = await clientAuthService.register({
-    mobile: `1${String(Date.now()).slice(-10)}`,
+    account: `1${String(Date.now()).slice(-10)}`,
+    username: `test_user_${String(Date.now()).slice(-4)}`,
     password: 'Client@123',
-    realName: '预订用户',
-    departmentName: '测试部',
     captchaId: captchaA.captchaId,
     captchaCode: (captchaA.captchaSvg.match(/[A-Z0-9]{6}/)?.[0] ?? '').slice(0, 6),
   }).catch(async () => {
     const captchaRetry = await clientAuthService.createCaptcha()
     const code = captchaRetry.captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6)
     return clientAuthService.register({
-      mobile: `1${String(Date.now() + 1).slice(-10)}`,
+      account: `1${String(Date.now() + 1).slice(-10)}`,
+      username: `test_user_${String(Date.now() + 1).slice(-4)}`,
       password: 'Client@123',
-      realName: '预订用户',
-      departmentName: '测试部',
       captchaId: captchaRetry.captchaId,
       captchaCode: code,
     })
   })
-  assert.equal(registerResult.realName, '预订用户')
+  assert.ok(registerResult.id)
   log('客户端注册流程通过')
 
   const loginCaptcha = await clientAuthService.createCaptcha()
   const loginCode = loginCaptcha.captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6)
   const loginResult = await clientAuthService.login({
-    mobile: registerResult.mobile,
+    account: registerResult.mobile,
     password: 'Client@123',
     captchaId: loginCaptcha.captchaId,
     captchaCode: loginCode,
