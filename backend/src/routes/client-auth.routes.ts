@@ -27,8 +27,8 @@ const registerSchema = z.object({
 const loginSchema = z.object({
   account: z.string().trim().min(1),
   password: z.string().min(1),
-  captchaId: z.string().trim().min(1),
-  captchaCode: z.string().trim().min(1),
+  captchaId: z.string().trim().min(1).optional(),
+  captchaCode: z.string().trim().min(1).optional(),
 })
 
 const forgotVerifySchema = z.object({

@@ -140,8 +140,8 @@ export const useClientAuthStore = defineStore('client-auth', () => {
   const login = async (payload: {
     account: string
     password: string
-    captchaId: string
-    captchaCode: string
+    captchaId?: string
+    captchaCode?: string
   }) => {
     const result = await clientLogin(payload)
     applyAuthResult(result)

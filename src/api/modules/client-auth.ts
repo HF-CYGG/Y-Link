@@ -87,7 +87,7 @@ export const clientRegister = (payload: {
     data: payload,
   })
 
-export const clientLogin = (payload: { account: string; password: string; captchaId: string; captchaCode: string }) =>
+export const clientLogin = (payload: { account: string; password: string; captchaId?: string; captchaCode?: string }) =>
   request<ClientAuthSuccessResult>({
     method: 'POST',
     url: '/client-auth/login',

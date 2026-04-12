@@ -89,6 +89,7 @@ const clientAuthStore = useClientAuthStore()
 const activeMode = ref<AuthMode>('login')
 const isLoading = ref(false)
 const captchaLoading = ref(false)
+const loginCaptchaVisible = ref(false)
 const successTip = ref('')
 const securityHint = ref('')
 const verificationSending = ref(false)
@@ -186,17 +187,37 @@ const applyRouteState = () => {
   }
 }
 
-// 登录仍使用图形验证码防刷，注册则在图形验证码之外追加手机/邮箱验证码双重校验。
-const refreshCaptcha = async () => {
+// 图形验证码按需拉取：
+// - 登录页仅在首轮失败后展示；
+// - 注册页在当前通道走图片验证码时展示。
+const refreshCaptcha = async (silent = false) => {
   captchaLoading.value = true
   try {
     const result = await getClientCaptcha()
     captcha.captchaId = result.captchaId
     captcha.captchaSvg = result.captchaSvg
-    ElMessage.success('已刷新验证码')
+    if (!silent) {
+      ElMessage.success('已刷新验证码')
+    }
   } finally {
     captchaLoading.value = false
   }
+}
+
+const clearCaptcha = () => {
+  captcha.captchaId = ''
+  captcha.captchaSvg = ''
+}
+
+const ensureCaptchaReady = async () => {
+  if (captcha.captchaId && captcha.captchaSvg) {
+    return
+  }
+  await refreshCaptcha(true)
+}
+
+const handleManualRefreshCaptcha = async () => {
+  await refreshCaptcha()
 }
 
 const loadAuthCapabilities = async () => {
@@ -284,9 +305,11 @@ const handleLogin = async () => {
     ElMessage.warning('密码至少 6 位')
     return
   }
-  if (!captcha.captchaId || !loginForm.captcha.trim()) {
-    ElMessage.warning('请输入图形验证码')
-    return
+  if (loginCaptchaVisible.value) {
+    if (!captcha.captchaId || !loginForm.captcha.trim()) {
+      ElMessage.warning('请输入图形验证码')
+      return
+    }
   }
 
   isLoading.value = true
@@ -294,9 +317,12 @@ const handleLogin = async () => {
     await clientAuthStore.login({
       account: loginForm.account.trim(),
       password: loginForm.password,
-      captchaId: captcha.captchaId,
-      captchaCode: loginForm.captcha.trim(),
+      captchaId: loginCaptchaVisible.value ? captcha.captchaId : undefined,
+      captchaCode: loginCaptchaVisible.value ? loginForm.captcha.trim() : undefined,
     })
+    loginCaptchaVisible.value = false
+    loginForm.captcha = ''
+    clearCaptcha()
     ElMessage.success('登录成功，欢迎来到 Y-Link 客户端')
     await router.replace(redirectPath.value)
   } catch (error) {
@@ -304,8 +330,11 @@ const handleLogin = async () => {
     applySecurityHintFromMessage(message)
     ElMessage.error(message)
     console.warn('客户端登录失败。', error)
-    loginForm.captcha = ''
-    await refreshCaptcha()
+    if (/用户名或密码错误|图形验证码|锁定|稍后|重试/.test(message)) {
+      loginCaptchaVisible.value = true
+      loginForm.captcha = ''
+      await refreshCaptcha(true)
+    }
   } finally {
     isLoading.value = false
   }
@@ -378,7 +407,6 @@ onMounted(async () => {
   }
   applyRouteState()
   await loadAuthCapabilities()
-  await refreshCaptcha()
   await nextTick()
   syncWrapperHeight()
   resetRegisterVerificationTimer()
@@ -399,6 +427,18 @@ watch(registerValidationMode, (mode) => {
     registerForm.captcha = ''
   }
 })
+
+watch(
+  [activeMode, loginCaptchaVisible, registerUsesVerificationCode],
+  async ([mode, shouldShowLoginCaptcha, usesVerificationCode]) => {
+    const shouldShowCaptcha = (mode === 'login' && shouldShowLoginCaptcha) || (mode === 'register' && !usesVerificationCode)
+    if (!shouldShowCaptcha) {
+      return
+    }
+    await ensureCaptchaReady()
+  },
+  { immediate: true },
+)
 
 watch(successTip, async () => {
   await nextTick()
@@ -475,14 +515,14 @@ onUnmounted(() => {
                     </template>
                   </el-input>
 
-                  <div class="captcha-row">
+                  <div v-if="loginCaptchaVisible" class="captcha-row">
                     <el-input v-model="loginForm.captcha" placeholder="图形验证码" class="geo-input flex-1" size="large" clearable>
                       <template #prefix>
                         <el-icon class="input-icon"><Key /></el-icon>
                       </template>
                     </el-input>
 
-                    <button type="button" class="captcha-box" :disabled="captchaLoading" @click="refreshCaptcha">
+                    <button type="button" class="captcha-box" :disabled="captchaLoading" @click="handleManualRefreshCaptcha">
                       <span v-if="captchaLoading" class="captcha-loading">刷新中</span>
                       <span v-else class="captcha-render" v-html="captcha.captchaSvg" />
                     </button>
@@ -550,7 +590,7 @@ onUnmounted(() => {
                       </template>
                     </el-input>
 
-                    <button type="button" class="captcha-box" :disabled="captchaLoading" @click="refreshCaptcha">
+                    <button type="button" class="captcha-box" :disabled="captchaLoading" @click="handleManualRefreshCaptcha">
                       <span v-if="captchaLoading" class="captcha-loading">刷新中</span>
                       <span v-else class="captcha-render" v-html="captcha.captchaSvg" />
                     </button>

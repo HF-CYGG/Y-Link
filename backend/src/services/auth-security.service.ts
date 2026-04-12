@@ -249,6 +249,12 @@ export class AuthSecurityService {
     failureStateStore.delete(subjectKey)
   }
 
+  private hasActiveFailures(scope: FailureScope, storeKey: string) {
+    const nowMs = Date.now()
+    const state = this.getFailureState(storeKey, scope, nowMs)
+    return Boolean(state && state.count > 0)
+  }
+
   async guardAdminLoginRequest(requestMeta: RequestMeta | undefined, username: string) {
     const source = normalizeRiskSource(requestMeta)
     const normalizedUsername = username.trim().toLowerCase()
@@ -367,6 +373,14 @@ export class AuthSecurityService {
     })
     await this.assertFailureNotLocked('client-login', `client-login:ip:${source}`, requestMeta, mobile)
     await this.assertFailureNotLocked('client-login', `client-login:mobile:${mobile}`, requestMeta, mobile)
+  }
+
+  isClientLoginCaptchaRequired(requestMeta: RequestMeta | undefined, mobile: string) {
+    const source = normalizeRiskSource(requestMeta)
+    return (
+      this.hasActiveFailures('client-login', `client-login:ip:${source}`) ||
+      this.hasActiveFailures('client-login', `client-login:mobile:${mobile}`)
+    )
   }
 
   async recordClientLoginFailure(requestMeta: RequestMeta | undefined, mobile: string) {

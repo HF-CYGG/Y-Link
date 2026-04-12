@@ -41,8 +41,8 @@ export interface ClientRegisterInput {
 export interface ClientLoginInput {
   account: string
   password: string
-  captchaId: string
-  captchaCode: string
+  captchaId?: string
+  captchaCode?: string
 }
 
 export interface ClientForgotVerifyInput {
@@ -244,7 +244,9 @@ class ClientAuthService {
   async login(input: ClientLoginInput, requestMeta?: RequestMeta) {
     const account = this.resolveAccount(input.account)
     const password = input.password.trim()
-    this.verifyCaptchaIfRequired(input)
+    if (authSecurityService.isClientLoginCaptchaRequired(requestMeta, account.account)) {
+      this.verifyCaptchaIfRequired(input)
+    }
     const user = await this.findUserWithPasswordByAccount(account.account)
     if (!user) {
       await authSecurityService.recordClientLoginFailure(requestMeta, account.account)
