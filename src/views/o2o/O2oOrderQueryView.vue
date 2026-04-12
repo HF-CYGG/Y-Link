@@ -17,9 +17,10 @@ import {
   type O2oOrderStatusReport,
 } from '@/api/modules/o2o'
 
-type OrderPoolKey = 'new' | 'pending' | 'timeout_soon' | 'completed' | 'cancelled'
+type OrderPoolKey = 'all' | 'new' | 'pending' | 'timeout_soon' | 'completed' | 'cancelled'
 
 const ORDER_POOL_TABS: Array<{ key: OrderPoolKey; label: string }> = [
+  { key: 'all', label: '全部订单' },
   { key: 'new', label: '新订单' },
   { key: 'pending', label: '待核销' },
   { key: 'timeout_soon', label: '临近超时' },
@@ -108,6 +109,7 @@ const resolvePoolKey = (order: O2oPreorderSummary): OrderPoolKey => {
 
 const poolCountMap = computed(() => {
   const map: Record<OrderPoolKey, number> = {
+    all: orders.value.length,
     new: 0,
     pending: 0,
     timeout_soon: 0,
@@ -122,6 +124,7 @@ const poolCountMap = computed(() => {
 
 const poolOrderMap = computed(() => {
   const map: Record<OrderPoolKey, O2oPreorderSummary[]> = {
+    all: [],
     new: [],
     pending: [],
     timeout_soon: [],
@@ -129,6 +132,7 @@ const poolOrderMap = computed(() => {
     cancelled: [],
   }
   for (const order of orders.value) {
+    map.all.push(order)
     map[resolvePoolKey(order)].push(order)
   }
   for (const tab of ORDER_POOL_TABS) {
@@ -353,9 +357,15 @@ const mergeOrderSummaryFromDetail = (detail: O2oPreorderDetail) => {
 const syncActiveOrder = async () => {
   const currentOrders = currentPoolOrders.value
   if (currentOrders.length === 0) {
+    // 当当前分类下没有订单时，自动回退到第一个有数据的分类。
+    // 这样用户不会因为停留在“空分类”里而看不到已有订单详情。
     const firstNonEmptyPool = ORDER_POOL_TABS.find((tab) => poolOrderMap.value[tab.key].length > 0)
     if (firstNonEmptyPool) {
       activePool.value = firstNonEmptyPool.key
+    } else {
+      activeOrderId.value = ''
+      activeOrderDetail.value = null
+      return
     }
   }
   const latestCurrentOrders = poolOrderMap.value[activePool.value]
