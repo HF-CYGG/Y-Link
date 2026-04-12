@@ -588,7 +588,7 @@ onBeforeUnmount(() => {
             clearable
             @keyup.enter="handleSearch"
           />
-          <el-button class="w-full sm:w-auto" type="primary" @click="handleSearch">查询</el-button>
+          <el-button class="search-action-button w-full sm:w-auto" type="primary" @click="handleSearch">查询</el-button>
         </div>
 
         <Transition name="new-order-notice">
@@ -765,9 +765,13 @@ onBeforeUnmount(() => {
 }
 
 .order-workbench-root :deep(.el-button > span) {
-  white-space: normal;
-  word-break: break-word;
+  white-space: nowrap;
+  word-break: normal;
   text-align: center;
+}
+
+.search-action-button {
+  min-width: 88px;
 }
 
 .order-workbench-root :deep(.el-input__wrapper),
@@ -825,6 +829,11 @@ onBeforeUnmount(() => {
     min-height: 42px;
     padding-left: 12px;
     padding-right: 12px;
+  }
+
+  .order-workbench-root :deep(.el-button > span) {
+    white-space: normal;
+    word-break: break-word;
   }
 
   .table-scroll-wrap :deep(.el-table) {
