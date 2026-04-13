@@ -558,6 +558,14 @@ onActivated(() => {
                 ¥{{ Number(row.defaultPrice).toFixed(2) }}
               </template>
             </el-table-column>
+            <el-table-column label="库存数量" min-width="170">
+              <template #default="{ row }">
+                <div class="leading-5">
+                  <div>当前库存：{{ row.currentStock }}</div>
+                  <div class="text-xs text-slate-500 dark:text-slate-400">可用库存：{{ row.availableStock }}</div>
+                </div>
+              </template>
+            </el-table-column>
             <el-table-column label="状态" prop="isActive" width="96">
               <template #default="{ row }">
                 <el-tag :type="row.isActive ? 'success' : 'info'" size="small">
@@ -623,6 +631,9 @@ onActivated(() => {
           </div>
           <div class="mt-2 text-xs text-slate-500 dark:text-slate-400">
             拼音简写：{{ item.pinyinAbbr || '-' }}
+          </div>
+          <div class="mt-1 text-xs text-slate-500 dark:text-slate-400">
+            库存：当前 {{ item.currentStock }} / 可用 {{ item.availableStock }}
           </div>
           <div class="mt-3 flex flex-wrap gap-1">
             <el-tag
