@@ -26,6 +26,7 @@ export type AppRouteName =
   | 'products'
   | 'tags'
   | 'supplier-delivery'
+  | 'supplier-history'
   | 'inbound-scan'
   | 'o2o-console'
   | 'o2o-console-products'
@@ -68,6 +69,7 @@ export const routeViewLoaders = {
 
   // 送货单与扫码入库模块
   'supplier-delivery': () => import('@/views/inbound/SupplierDeliveryView.vue'),
+  'supplier-history': () => import('@/views/inbound/SupplierHistoryView.vue'),
   'inbound-scan': () => import('@/views/inbound/InboundScanView.vue'),
 
   'o2o-console-products': () => import('@/views/o2o/O2oProductMallManageView.vue'),
@@ -94,6 +96,7 @@ const warmableRouteLoaders: Partial<Record<RouteWarmupTarget, RouteViewLoader>> 
   products: routeViewLoaders.products,
   tags: routeViewLoaders.tags,
   'supplier-delivery': routeViewLoaders['supplier-delivery'],
+  'supplier-history': routeViewLoaders['supplier-history'],
   'system-configs': routeViewLoaders['system-configs'],
   'system-users': routeViewLoaders['system-users'],
   'system-client-users': routeViewLoaders['system-client-users'],

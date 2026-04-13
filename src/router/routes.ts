@@ -166,6 +166,20 @@ const layoutChildren: AppRouteRecord[] = [
     },
   },
   {
+    path: 'supplier-history',
+    name: 'supplier-history',
+    component: routeViewLoaders['supplier-history'],
+    meta: {
+      title: '历史送货单',
+      icon: 'List',
+      menuGroup: '供货管理',
+      menuOrder: 20,
+      requiredPermissions: ['inbound:view'],
+      allowedRoles: ['supplier'],
+      keepAlive: true,
+    },
+  },
+  {
     path: 'inbound-scan',
     name: 'inbound-scan',
     component: routeViewLoaders['inbound-scan'],
