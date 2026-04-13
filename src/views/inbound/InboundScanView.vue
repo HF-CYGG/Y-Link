@@ -248,7 +248,7 @@ onBeforeUnmount(() => {
 
 <template>
   <PageContainer title="一键扫码入库" description="扫码识别送货单、核对明细并确认入库，支持快捷键连续作业。">
-    <div class="grid grid-cols-1 xl:grid-cols-[360px_minmax(0,1fr)] gap-6 min-h-[calc(100vh-160px)]">
+    <div class="grid grid-cols-1 xl:grid-cols-[400px_minmax(0,1fr)] gap-6 min-h-[calc(100vh-160px)]">
       <!-- 左侧：扫码区 + 快捷指引 + 最近扫码 -->
       <section class="bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-100 dark:border-slate-700 flex flex-col overflow-hidden">
         <div class="p-5 border-b border-slate-100 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-900/40">
@@ -256,23 +256,31 @@ onBeforeUnmount(() => {
             <el-icon class="text-brand"><Search /></el-icon>
             扫码作业区
           </h2>
-          <el-input
-            ref="scanInputRef"
-            v-model="scanCode"
-            placeholder="请用扫码枪扫描送货单二维码"
-            size="large"
-            clearable
-            class="scan-input"
-          >
-            <template #prefix>
-              <el-icon><Picture /></el-icon>
-            </template>
-            <template #append>
-              <el-button :loading="loading" :disabled="!canQuery" @click="handleScan">
-                {{ loading ? '识别中...' : '查询' }}
-              </el-button>
-            </template>
-          </el-input>
+          <div class="flex gap-3">
+            <el-input
+              ref="scanInputRef"
+              v-model="scanCode"
+              placeholder="扫描或输入送货单号/二维码"
+              size="large"
+              clearable
+              class="scan-input flex-1 min-w-0"
+              @keyup.enter="handleScan"
+            >
+              <template #prefix>
+                <el-icon><Picture /></el-icon>
+              </template>
+            </el-input>
+            <el-button 
+              type="primary" 
+              size="large" 
+              class="!rounded-xl px-6 flex-none"
+              :loading="loading" 
+              :disabled="!canQuery" 
+              @click="handleScan"
+            >
+              {{ loading ? '识别中' : '查询' }}
+            </el-button>
+          </div>
           <div class="mt-4 rounded-xl bg-brand/5 dark:bg-brand/15 border border-brand/20 p-3 text-xs leading-6 text-slate-600 dark:text-slate-300">
             <p>快捷键：Enter 查询，Ctrl+Enter 确认入库，Esc 重置页面</p>
             <p>提示：连续作业时无需手动点击，系统会自动回焦扫码框。</p>
@@ -443,15 +451,7 @@ onBeforeUnmount(() => {
   height: 48px;
   font-size: 16px;
 }
-.scan-input :deep(.el-input-group__append) {
-  padding: 0;
-}
-.scan-input :deep(.el-input-group__append .el-button) {
-  min-width: 78px;
-  height: 48px;
-  padding: 0 16px;
-  border-radius: 0 12px 12px 0;
-}
+
 
 /* 最近查询项：卡片化并提供轻微 hover 提示可点击。 */
 .recent-item {
