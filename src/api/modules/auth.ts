@@ -9,9 +9,10 @@ import { request } from '@/api/http'
 /**
  * 前端用户角色类型：
  * - admin：系统管理员，默认拥有完整治理权限；
- * - operator：普通操作员，聚焦日常业务处理。
+ * - operator：普通操作员，聚焦日常业务处理；
+ * - supplier：供货方，仅可访问送货单录入等专属页面。
  */
-export type UserRole = 'admin' | 'operator'
+export type UserRole = 'admin' | 'operator' | 'supplier'
 
 /**
  * 前端权限点：
@@ -36,6 +37,9 @@ export const PERMISSION_CODES = [
   'users:reset_password',
   'audit_logs:view',
   'audit_logs:export',
+  'inbound:create',
+  'inbound:view',
+  'inbound:verify',
 ] as const
 
 export type PermissionCode = (typeof PERMISSION_CODES)[number]
@@ -64,6 +68,8 @@ export const ROLE_DEFAULT_PERMISSION_MAP: Record<UserRole, PermissionCode[]> = {
     'users:reset_password',
     'audit_logs:view',
     'audit_logs:export',
+    'inbound:view',
+    'inbound:verify',
   ],
   operator: [
     'dashboard:view',
@@ -74,6 +80,13 @@ export const ROLE_DEFAULT_PERMISSION_MAP: Record<UserRole, PermissionCode[]> = {
     'tags:view',
     'tags:manage',
     'system_configs:view',
+    'inbound:view',
+    'inbound:verify',
+  ],
+  supplier: [
+    'products:view',
+    'inbound:create',
+    'inbound:view',
   ],
 }
 
@@ -100,6 +113,9 @@ export const PERMISSION_LABEL_MAP: Record<PermissionCode, string> = {
   'users:reset_password': '重置密码',
   'audit_logs:view': '查看审计日志',
   'audit_logs:export': '导出审计日志',
+  'inbound:create': '创建送货单',
+  'inbound:view': '查看送货单',
+  'inbound:verify': '核销入库',
 }
 
 /**
@@ -264,6 +280,7 @@ export const changePassword = (payload: ChangePasswordPayload) =>
 export const ROLE_LABEL_MAP: Record<UserRole, string> = {
   admin: '管理员',
   operator: '操作员',
+  supplier: '供货方',
 }
 
 /**

@@ -1,0 +1,103 @@
+import { Router } from 'express'
+import { z } from 'zod'
+import { requirePermission } from '../middleware/auth.middleware.js'
+import { inboundService } from '../services/inbound.service.js'
+import { asyncHandler } from '../utils/async-handler.js'
+import type { AuthenticatedRequest } from '../types/auth.js'
+
+export const inboundRouter = Router()
+
+// ----------------------------------------------------------------------
+// 供货方接口
+// ----------------------------------------------------------------------
+
+// 供货方：提交送货单
+const submitInboundSchema = z.object({
+  remark: z.string().max(255).optional(),
+  items: z.array(
+    z.object({
+      productId: z.string().min(1),
+      qty: z.number().int().positive(),
+    }),
+  ).min(1, '至少选择一个商品'),
+})
+
+inboundRouter.post(
+  '/supplier/submit',
+  requirePermission('inbound:create'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const input = submitInboundSchema.parse(req.body)
+    const result = await inboundService.submitSupplierDelivery(authReq.auth, input)
+    res.json({
+      code: 0,
+      message: 'ok',
+      data: result,
+    })
+  }),
+)
+
+// 供货方：查看历史送货单
+inboundRouter.get(
+  '/supplier/list',
+  requirePermission('inbound:create'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const result = await inboundService.listSupplierDeliveries(authReq.auth)
+    res.json({
+      code: 0,
+      message: 'ok',
+      data: result,
+    })
+  }),
+)
+
+// 供货方/管理端：通过 verifyCode 查看详情 (扫码后查询或供货方自己查看二维码详情)
+inboundRouter.get(
+  '/detail/:verifyCode',
+  requirePermission('inbound:view'),
+  asyncHandler(async (req, res) => {
+    const result = await inboundService.detailByVerifyCode(req.params.verifyCode)
+    res.json({
+      code: 0,
+      message: 'ok',
+      data: result,
+    })
+  }),
+)
+
+// ----------------------------------------------------------------------
+// 库管员接口
+// ----------------------------------------------------------------------
+
+// 库管员：核销入库
+inboundRouter.post(
+  '/admin/verify',
+  requirePermission('inbound:verify'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const input = z.object({ verifyCode: z.string().min(1) }).parse(req.body)
+    const result = await inboundService.verifyInbound(input.verifyCode, authReq.auth)
+    res.json({
+      code: 0,
+      message: '核销入库成功',
+      data: result,
+    })
+  }),
+)
+
+// 库管员：查看所有送货单/入库单
+inboundRouter.get(
+  '/admin/list',
+  requirePermission('inbound:view'),
+  asyncHandler(async (req, res) => {
+    const status = typeof req.query.status === 'string' ? req.query.status : undefined
+    const limit = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : 50
+    const result = await inboundService.listAllInboundOrders({ status, limit })
+    res.json({
+      code: 0,
+      message: 'ok',
+      data: result,
+    })
+  }),
+)

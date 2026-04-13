@@ -20,6 +20,8 @@ import {
   Shop,
   UserFilled,
   WarningFilled,
+  Picture,
+  Check,
 } from '@element-plus/icons-vue'
 
 /**
@@ -43,6 +45,8 @@ export const elementPlusIconWhitelist = {
   Shop,
   UserFilled,
   WarningFilled,
+  Picture,
+  Check,
 } as const
 
 /**

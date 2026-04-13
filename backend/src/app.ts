@@ -23,6 +23,7 @@ import { systemConfigRouter } from './routes/system-config.routes.js'
 import { tagRouter } from './routes/tag.routes.js'
 import { uploadRouter } from './routes/upload.routes.js'
 import { userRouter } from './routes/user.routes.js'
+import { inboundRouter } from './routes/inbound.routes.js'
 import { BizError } from './utils/errors.js'
 
 export function createApp() {
@@ -61,6 +62,7 @@ export function createApp() {
   app.use('/api/tags', tagRouter)
   app.use('/api/orders', orderRouter)
   app.use('/api/dashboard', dashboardRouter)
+  app.use('/api/inbound', inboundRouter)
 
   // 系统治理接口：由细粒度权限点控制，而不是单纯依赖管理员角色。
   app.use('/api/users', userRouter)

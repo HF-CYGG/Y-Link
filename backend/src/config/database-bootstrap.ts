@@ -24,6 +24,8 @@ const SQLITE_REQUIRED_TABLES = [
   'o2o_preorder',
   'o2o_preorder_item',
   'inventory_log',
+  'biz_inbound_order',
+  'biz_inbound_order_item',
 ]
 
 const SQLITE_REQUIRED_ORDER_COLUMNS = [

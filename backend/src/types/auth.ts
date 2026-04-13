@@ -10,9 +10,10 @@ import type { PermissionCode } from '../constants/auth-permissions.js'
 /**
  * 系统用户角色：
  * - admin：管理员，可访问用户管理、审计日志等系统治理能力；
- * - operator：普通操作员，聚焦日常业务操作。
+ * - operator：普通操作员，聚焦日常业务操作；
+ * - supplier：供货方，仅可访问送货单录入等专属页面。
  */
-export const USER_ROLES = ['admin', 'operator'] as const
+export const USER_ROLES = ['admin', 'operator', 'supplier'] as const
 export type UserRole = (typeof USER_ROLES)[number]
 
 /**

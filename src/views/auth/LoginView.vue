@@ -10,7 +10,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus' 
 import { Lock, User, Right } from '@element-plus/icons-vue' 
 import { useRoute, useRouter } from 'vue-router' 
-import { resolveSafeRedirect } from '@/router' 
+import { resolveDefaultManagementRedirect, resolveSafeRedirect } from '@/router' 
 import { useAuthStore } from '@/store' 
 import { extractErrorMessage } from '@/utils/error' 
 
@@ -32,7 +32,7 @@ const rules: FormRules = {
   password:[{ required: true, message: '请输入密码', trigger: 'blur' }], 
 } 
 
-const redirectPath = computed(() => resolveSafeRedirect(route.query.redirect)) 
+const redirectPath = computed(() => resolveSafeRedirect(route.query.redirect, authStore.currentUser)) 
 
 const submitButtonLabel = computed(() => { 
   if (submitPhase.value === 'submitting') return '验证中...' 
@@ -81,8 +81,11 @@ const handleSubmit = async () => {
         confirmButtonText: '我知道了',
       }).catch(() => undefined)
     }
-    await authStore.warmupPostLoginEntry(redirectPath.value)
-    await router.replace(redirectPath.value) 
+    const targetPath = typeof route.query.redirect === 'string'
+      ? resolveSafeRedirect(route.query.redirect, result.user)
+      : resolveDefaultManagementRedirect(result.user)
+    await authStore.warmupPostLoginEntry(targetPath)
+    await router.replace(targetPath) 
   } catch (error) { 
     submitPhase.value = 'idle' 
     const message = extractErrorMessage(error, '登录失败，请稍后重试')

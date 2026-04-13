@@ -171,7 +171,7 @@ export class UserService {
       }
 
       if (actor.userId === user.id && input.role && input.role !== 'admin') {
-        throw new BizError('不能将当前登录管理员降级为普通操作员', 400)
+        throw new BizError('不能将当前登录管理员降级为非管理员角色', 400)
       }
 
       const changeSummary: Record<string, string | null> = {}

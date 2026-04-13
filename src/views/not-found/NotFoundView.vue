@@ -7,8 +7,11 @@
 
 
 import { useRouter } from 'vue-router'
+import { resolveDefaultManagementRedirect } from '@/router'
+import { useAuthStore } from '@/store'
 
 const router = useRouter()
+const authStore = useAuthStore()
 
 /**
  * 返回首页动作：
@@ -16,7 +19,7 @@ const router = useRouter()
  * - 使用 replace 避免无效路径继续留在历史栈中。
  */
 const goHome = () => {
-  void router.replace('/dashboard')
+  void router.replace(resolveDefaultManagementRedirect(authStore.currentUser))
 }
 </script>
 
@@ -26,9 +29,9 @@ const goHome = () => {
       <p class="text-sm font-semibold uppercase tracking-[0.2em] text-brand dark:text-teal-300">Not Found</p>
       <h1 class="mt-3 text-4xl font-semibold text-slate-800 dark:text-slate-100">404</h1>
       <p class="mt-3 text-sm leading-6 text-slate-500 dark:text-slate-400">
-        抱歉，当前页面不存在或已被迁移，请返回工作台继续操作。
+        抱歉，当前页面不存在或已被迁移，请返回首页继续操作。
       </p>
-      <el-button class="mt-6" type="primary" @click="goHome">返回工作台</el-button>
+      <el-button class="mt-6" type="primary" @click="goHome">返回首页</el-button>
     </div>
   </div>
 </template>

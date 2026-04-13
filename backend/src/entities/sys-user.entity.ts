@@ -25,7 +25,7 @@ export class SysUser {
   displayName!: string
 
   @Index('idx_sys_user_role')
-  @Column({ name: 'role', type: 'varchar', length: 32, default: 'operator', comment: '用户角色：admin/operator' })
+  @Column({ name: 'role', type: 'varchar', length: 32, default: 'operator', comment: '用户角色：admin/operator/supplier' })
   role!: UserRole
 
   @Index('idx_sys_user_status')

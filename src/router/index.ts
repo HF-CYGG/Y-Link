@@ -9,20 +9,25 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { scheduleRouteComponentWarmup, type AppRouteName } from '@/router/route-performance'
 import { useAuthStore, useClientAuthStore } from '@/store'
 import { canAccessRoute, routes } from '@/router/routes'
+import type { UserSafeProfile } from '@/api/modules/auth'
+
+export const resolveDefaultManagementRedirect = (user?: Pick<UserSafeProfile, 'role'> | null) => {
+  return user?.role === 'supplier' ? '/supplier-delivery' : '/dashboard'
+}
 
 /**
  * 登录回跳路径安全处理：
  * - 仅允许站内绝对路径，以防 query 被篡改后跳转到外部地址；
  * - 非法值统一回退到工作台首页。
  */
-const resolveSafeRedirect = (value: unknown) => {
+const resolveSafeRedirect = (value: unknown, user?: Pick<UserSafeProfile, 'role'> | null) => {
   if (typeof value !== 'string') {
-    return '/dashboard'
+    return resolveDefaultManagementRedirect(user)
   }
 
   const normalized = value.trim()
   if (!normalized.startsWith('/') || normalized.startsWith('//')) {
-    return '/dashboard'
+    return resolveDefaultManagementRedirect(user)
   }
 
   return normalized
@@ -87,7 +92,7 @@ router.beforeEach(async (to) => {
   }
 
   if (isGuestOnly && authStore.isAuthenticated) {
-    return resolveSafeRedirect(to.query.redirect)
+    return resolveSafeRedirect(to.query.redirect, authStore.currentUser)
   }
 
   if (requiresClientAuth && !clientAuthStore.isAuthenticated) {
@@ -106,7 +111,7 @@ router.beforeEach(async (to) => {
   const deniedRecord = to.matched.find((record) => !canAccessRoute(record.meta, authStore.currentUser))
   if (requiresAuth && deniedRecord) {
     ElMessage.warning('当前账号无权访问该页面')
-    return '/dashboard'
+    return resolveDefaultManagementRedirect(authStore.currentUser)
   }
 
   return true

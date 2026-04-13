@@ -25,6 +25,8 @@ export type AppRouteName =
   | 'base-data'
   | 'products'
   | 'tags'
+  | 'supplier-delivery'
+  | 'inbound-scan'
   | 'o2o-console'
   | 'o2o-console-products'
   | 'o2o-console-orders'
@@ -63,6 +65,11 @@ export const routeViewLoaders = {
   'order-list': () => import('@/views/order-list/OrderListView.vue'),
   products: () => import('@/views/base-data/ProductManageView.vue'),
   tags: () => import('@/views/base-data/TagManageView.vue'),
+
+  // 送货单与扫码入库模块
+  'supplier-delivery': () => import('@/views/inbound/SupplierDeliveryView.vue'),
+  'inbound-scan': () => import('@/views/inbound/InboundScanView.vue'),
+
   'o2o-console-products': () => import('@/views/o2o/O2oProductMallManageView.vue'),
   'o2o-console-orders': () => import('@/views/o2o/O2oOrderQueryView.vue'),
   'o2o-console-verify': () => import('@/views/o2o/O2oVerifyConsoleView.vue'),
@@ -86,6 +93,7 @@ const warmableRouteLoaders: Partial<Record<RouteWarmupTarget, RouteViewLoader>> 
   'order-list': routeViewLoaders['order-list'],
   products: routeViewLoaders.products,
   tags: routeViewLoaders.tags,
+  'supplier-delivery': routeViewLoaders['supplier-delivery'],
   'system-configs': routeViewLoaders['system-configs'],
   'system-users': routeViewLoaders['system-users'],
   'system-client-users': routeViewLoaders['system-client-users'],
@@ -147,6 +155,10 @@ const resolveWarmupTargetByPath = (redirectPath: string): RouteWarmupTarget | nu
 
   if (redirectPath.startsWith('/base-data/products') || redirectPath.startsWith('/base-data')) {
     return 'products'
+  }
+
+  if (redirectPath.startsWith('/supplier-delivery')) {
+    return 'supplier-delivery'
   }
 
   if (redirectPath.startsWith('/system/audit-logs')) {

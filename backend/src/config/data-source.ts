@@ -22,6 +22,8 @@ import { ClientUserSession } from '../entities/client-user-session.entity.js'
 import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
 import { O2oPreorderItem } from '../entities/o2o-preorder-item.entity.js'
 import { InventoryLog } from '../entities/inventory-log.entity.js'
+import { BizInboundOrder } from '../entities/biz-inbound-order.entity.js'
+import { BizInboundOrderItem } from '../entities/biz-inbound-order-item.entity.js'
 
 const entities = [
   BaseProduct,
@@ -38,6 +40,8 @@ const entities = [
   O2oPreorder,
   O2oPreorderItem,
   InventoryLog,
+  BizInboundOrder,
+  BizInboundOrderItem,
 ]
 
 function createDataSourceOptions(): DataSourceOptions {

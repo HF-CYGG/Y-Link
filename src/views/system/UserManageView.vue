@@ -247,11 +247,68 @@ const getStatusTagType = (status: UserStatus) => {
 /**
  * 角色标签样式：
  * - 管理员使用品牌主色，突出系统治理职责；
- * - 普通操作员保持中性色。
+ * - 供货方使用成功色，和内部操作员区分开。
  */
 const getRoleTagType = (role: UserRole) => {
-  return role === 'admin' ? 'primary' : 'info'
+  if (role === 'admin') {
+    return 'primary'
+  }
+  if (role === 'supplier') {
+    return 'success'
+  }
+  return 'info'
 }
+
+/**
+ * 角色选项：
+ * - 用户管理页的筛选、创建与编辑统一复用同一份角色来源；
+ * - 供货方账号在这里正式纳入治理入口，避免页面继续硬编码两种角色。
+ */
+const roleOptions: Array<{ label: string; value: UserRole }> = [
+  { label: '管理员', value: 'admin' },
+  { label: '操作员', value: 'operator' },
+  { label: '供货方', value: 'supplier' },
+]
+
+/**
+ * 账号类型说明：
+ * - 管理员在创建账号前可快速理解三类账号的落点与职责；
+ * - 文案集中在这里，便于后续继续补充能力边界说明。
+ */
+const accountTypeDescriptions: Array<{
+  role: UserRole
+  title: string
+  description: string
+  badgeClass: string
+}> = [
+  {
+    role: 'admin',
+    title: '管理员账号',
+    description: '进入工作台与系统治理页，可管理用户、审计日志和系统配置。',
+    badgeClass: 'border-brand/20 bg-brand/8 text-brand dark:border-brand/25 dark:bg-brand/10 dark:text-teal-300',
+  },
+  {
+    role: 'operator',
+    title: '操作员账号',
+    description: '进入日常业务页面，聚焦开单、查询、基础资料和扫码入库。',
+    badgeClass: 'border-slate-200 bg-slate-50 text-slate-600 dark:border-white/10 dark:bg-white/5 dark:text-slate-300',
+  },
+  {
+    role: 'supplier',
+    title: '供货方账号',
+    description: '登录后直接进入送货单录入页，仅使用供货方专属送货功能。',
+    badgeClass: 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-300',
+  },
+]
+
+/**
+ * 当前表单账号类型提示：
+ * - 当管理员切换角色时，右侧提示同步变化；
+ * - 重点强调供货方账号的专属落点，降低创建后“为什么没进工作台”的疑惑。
+ */
+const currentRoleDescription = computed(() => {
+  return accountTypeDescriptions.find((item) => item.role === userForm.role) ?? accountTypeDescriptions[1]
+})
 
 /**
  * 角色与状态文案辅助：
@@ -260,6 +317,9 @@ const getRoleTagType = (role: UserRole) => {
  */
 const getRoleLabel = (role: UserRole) => ROLE_LABEL_MAP[role]
 const getStatusLabel = (status: UserStatus) => STATUS_LABEL_MAP[status]
+const getAccountTypeDescription = (role: UserRole) => {
+  return accountTypeDescriptions.find((item) => item.role === role)?.description ?? '默认业务账号'
+}
 
 /**
  * 关键治理权限文案：
@@ -340,7 +400,7 @@ const handleOpenCreate = () => {
   userForm.username = ''
   userForm.password = ''
   userForm.displayName = ''
-  userForm.role = 'operator'
+  userForm.role = 'supplier'
   userForm.status = 'enabled'
   formRef.value?.clearValidate()
 }
@@ -452,7 +512,11 @@ const handleSubmit = async () => {
         status: userForm.status,
       }
       await createUser(payload)
-      ElMessage.success('用户创建成功')
+      ElMessage.success(
+        userForm.role === 'supplier'
+          ? '供货方账号创建成功，该账号登录后将进入送货单录入页'
+          : '用户创建成功',
+      )
     } else {
       const originalStatus = listState.records.find((item) => item.id === userForm.id)?.status
       if (userForm.status !== originalStatus && !canToggleUser.value) {
@@ -653,8 +717,12 @@ onMounted(() => {
               :class="isPhone ? '!w-full' : isTablet ? '!w-[160px]' : '!w-[168px]'"
               @change="handleSearch"
             >
-              <el-option label="管理员" value="admin" />
-              <el-option label="操作员" value="operator" />
+              <el-option
+                v-for="roleOption in roleOptions"
+                :key="roleOption.value"
+                :label="roleOption.label"
+                :value="roleOption.value"
+              />
             </el-select>
             <el-select
               v-model="searchForm.status"
@@ -688,6 +756,22 @@ onMounted(() => {
         {{ authStore.currentUser ? getGovernancePermissionLabels(authStore.currentUser.permissions).join('、') || '仅查看基础业务页面' : '未登录' }}。
       </div>
 
+      <div class="grid gap-3 xl:grid-cols-3">
+        <div
+          v-for="accountType in accountTypeDescriptions"
+          :key="accountType.role"
+          :class="['rounded-2xl border px-4 py-3', accountType.badgeClass]"
+        >
+          <div class="flex items-center gap-2">
+            <span class="inline-flex h-2.5 w-2.5 rounded-full bg-current opacity-80" />
+            <span class="text-sm font-semibold">{{ accountType.title }}</span>
+          </div>
+          <div class="mt-2 text-sm leading-6 opacity-90">
+            {{ accountType.description }}
+          </div>
+        </div>
+      </div>
+
       <div class="apple-card flex min-h-0 flex-1 flex-col p-3 sm:p-4 xl:p-5">
         <BizResponsiveDataCollectionShell
           :items="listState.records"
@@ -706,6 +790,29 @@ onMounted(() => {
               <el-table-column label="角色" width="110">
                 <template #default="{ row }">
                   <el-tag :type="getRoleTagType(row.role)" effect="light">{{ getRoleLabel(row.role) }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="账号类型" min-width="240">
+                <template #default="{ row }">
+                  <div class="flex flex-col gap-1 py-1">
+                    <div class="flex items-center gap-2">
+                      <span
+                        :class="[
+                          'inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium',
+                          row.role === 'supplier'
+                            ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300'
+                            : row.role === 'admin'
+                              ? 'bg-brand/10 text-brand dark:bg-brand/15 dark:text-teal-300'
+                              : 'bg-slate-100 text-slate-600 dark:bg-white/10 dark:text-slate-300',
+                        ]"
+                      >
+                        {{ row.role === 'supplier' ? '供货方专用入口' : row.role === 'admin' ? '治理账号' : '业务操作账号' }}
+                      </span>
+                    </div>
+                    <span class="text-xs leading-5 text-slate-500 dark:text-slate-400">
+                      {{ getAccountTypeDescription(row.role) }}
+                    </span>
+                  </div>
                 </template>
               </el-table-column>
               <el-table-column label="状态" width="110">
@@ -769,6 +876,12 @@ onMounted(() => {
                 <div class="flex items-center justify-between gap-3">
                   <span class="text-slate-400">角色</span>
                   <el-tag size="small" :type="getRoleTagType(item.role)" effect="light">{{ getRoleLabel(item.role) }}</el-tag>
+                </div>
+                <div class="flex items-start justify-between gap-3">
+                  <span class="text-slate-400">账号类型</span>
+                  <div class="max-w-[70%] text-right text-xs leading-5 text-slate-500 dark:text-slate-400">
+                    {{ getAccountTypeDescription(item.role) }}
+                  </div>
                 </div>
                 <div class="flex items-start justify-between gap-3">
                   <span class="text-slate-400">治理权限</span>
@@ -855,8 +968,12 @@ onMounted(() => {
         <div class="grid gap-3 sm:grid-cols-2">
           <el-form-item label="角色" prop="role">
             <el-select v-model="userForm.role" class="w-full">
-              <el-option label="管理员" value="admin" />
-              <el-option label="操作员" value="operator" />
+              <el-option
+                v-for="roleOption in roleOptions"
+                :key="roleOption.value"
+                :label="roleOption.label"
+                :value="roleOption.value"
+              />
             </el-select>
           </el-form-item>
           <el-form-item label="状态" prop="status">
@@ -865,6 +982,26 @@ onMounted(() => {
               <el-option label="停用" value="disabled" />
             </el-select>
           </el-form-item>
+        </div>
+        <div
+          :class="[
+            'rounded-2xl border px-4 py-3 text-sm leading-6',
+            currentRoleDescription.role === 'supplier'
+              ? 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-300'
+              : currentRoleDescription.role === 'admin'
+                ? 'border-brand/20 bg-brand/5 text-slate-600 dark:border-brand/20 dark:bg-brand/10 dark:text-slate-300'
+                : 'border-slate-200 bg-slate-50 text-slate-500 dark:border-white/10 dark:bg-white/5 dark:text-slate-400',
+          ]"
+        >
+          <div class="font-medium">
+            {{ currentRoleDescription.title }}
+          </div>
+          <div class="mt-1">
+            {{ currentRoleDescription.description }}
+          </div>
+          <div v-if="currentRoleDescription.role === 'supplier'" class="mt-2 text-xs opacity-90">
+            创建成功后，系统会提示“该账号登录后将进入送货单录入页”。
+          </div>
         </div>
       </el-form>
     </BizCrudDialogShell>
