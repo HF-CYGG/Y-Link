@@ -250,6 +250,8 @@ const layoutChildren: AppRouteRecord[] = [
       menuGroup: '业务操作',
       menuOrder: 35,
       requiredAnyPermissions: ['products:view', 'orders:view'],
+      // 线上预订仅面向管理端与操作员，供货方账号禁止访问
+      allowedRoles: ['admin', 'operator'],
       shortcut: {
         title: '线上预订',
         description: '维护线上商品、核销预订单与登记入库',
