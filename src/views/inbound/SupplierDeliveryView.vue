@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import QRCode from 'qrcode'
 import { PageContainer } from '@/components/common'
 import { getProductList, type ProductRecord } from '@/api/modules/product'
@@ -60,6 +60,16 @@ const handleSubmit = async () => {
   const validItems = items.value.filter((i) => i.productId && i.qty > 0)
   if (!validItems.length) {
     ElMessage.warning('请至少添加一件有效的送货商品')
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm('送货单生成后不可修改，确认提交吗？', '确认生成', {
+      confirmButtonText: '确认生成',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+  } catch {
     return
   }
 
