@@ -52,6 +52,20 @@ inboundRouter.get(
   }),
 )
 
+// 供货方/管理端：通过 showNo 查看详情（人工输入单号时兜底）
+inboundRouter.get(
+  '/detail/show-no/:showNo',
+  requirePermission('inbound:view'),
+  asyncHandler(async (req, res) => {
+    const result = await inboundService.detailByShowNo(req.params.showNo)
+    res.json({
+      code: 0,
+      message: 'ok',
+      data: result,
+    })
+  }),
+)
+
 // 供货方/管理端：通过 verifyCode 查看详情 (扫码后查询或供货方自己查看二维码详情)
 inboundRouter.get(
   '/detail/:verifyCode',

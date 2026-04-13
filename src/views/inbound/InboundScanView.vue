@@ -2,7 +2,12 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { PageContainer } from '@/components/common'
-import { getInboundDetail, verifyInboundOrder, type InboundOrderDetail } from '@/api/modules/inbound'
+import {
+  getInboundDetail,
+  getInboundDetailByShowNo,
+  verifyInboundOrder,
+  type InboundOrderDetail,
+} from '@/api/modules/inbound'
 import { extractErrorMessage } from '@/utils/error'
 import dayjs from 'dayjs'
 
@@ -106,6 +111,8 @@ const focusScanInput = () => {
   })
 }
 
+const isShowNoPattern = (code: string) => /^IN\d{12}$/i.test(code.trim())
+
 const handleScan = async () => {
   const code = scanCode.value.trim()
   if (!code) {
@@ -124,7 +131,17 @@ const handleScan = async () => {
 
   loading.value = true
   try {
-    const result = await getInboundDetail(code)
+    let result: InboundOrderDetail
+    try {
+      result = await getInboundDetail(code)
+    } catch (firstError) {
+      // 当输入的是送货单号（IN+日期+流水）时，自动回退到按 showNo 查询接口。
+      if (!isShowNoPattern(code)) {
+        throw firstError
+      }
+      result = await getInboundDetailByShowNo(code.trim().toUpperCase())
+    }
+
     currentOrder.value = result
     appendRecentScan(result)
     scanCode.value = ''
@@ -425,6 +442,15 @@ onBeforeUnmount(() => {
 .scan-input :deep(.el-input__inner) {
   height: 48px;
   font-size: 16px;
+}
+.scan-input :deep(.el-input-group__append) {
+  padding: 0;
+}
+.scan-input :deep(.el-input-group__append .el-button) {
+  min-width: 78px;
+  height: 48px;
+  padding: 0 16px;
+  border-radius: 0 12px 12px 0;
 }
 
 /* 最近查询项：卡片化并提供轻微 hover 提示可点击。 */

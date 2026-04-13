@@ -128,6 +128,17 @@ class InboundService {
     return { order, items }
   }
 
+  // 供货方/管理端：通过 showNo 查看详情（兼容人工输入单号查询）
+  async detailByShowNo(showNo: string) {
+    const normalizedShowNo = showNo.trim().toUpperCase()
+    const order = await this.inboundRepo.findOne({ where: { showNo: normalizedShowNo } })
+    if (!order) {
+      throw new BizError('送货单号无效或送货单不存在', 404)
+    }
+    const items = await this.inboundItemRepo.find({ where: { orderId: order.id } })
+    return { order, items }
+  }
+
   // 库管员核销入库
   async verifyInbound(verifyCode: string, actor: AuthUserContext) {
     const normalizedCode = verifyCode.trim().toLowerCase()

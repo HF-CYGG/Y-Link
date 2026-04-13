@@ -58,6 +58,13 @@ export const getInboundDetail = (verifyCode: string) =>
     url: `/inbound/detail/${verifyCode}`,
   })
 
+// 按送货单号查看详情（用于扫码失败后的人工录入兜底）
+export const getInboundDetailByShowNo = (showNo: string) =>
+  request<InboundOrderDetail>({
+    method: 'GET',
+    url: `/inbound/detail/show-no/${showNo}`,
+  })
+
 // 管理端核销入库
 export const verifyInboundOrder = (verifyCode: string) =>
   request<InboundOrderDetail>({
