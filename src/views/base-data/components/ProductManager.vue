@@ -55,6 +55,7 @@ interface ProductForm {
   productName: string
   pinyinAbbr: string
   defaultPrice: number
+  currentStock: number
   isActive: boolean
   category: string
   tagIds: string[]
@@ -71,6 +72,7 @@ const createDefaultForm = (): ProductForm => ({
   productName: '',
   pinyinAbbr: '',
   defaultPrice: 0,
+  currentStock: 0,
   isActive: true,
   category: '默认分类',
   tagIds: [] as string[],
@@ -268,6 +270,7 @@ const buildEditForm = (row: ProductRecord): ProductForm => ({
   productName: row.productName,
   pinyinAbbr: row.pinyinAbbr,
   defaultPrice: Number(row.defaultPrice),
+  currentStock: Number(row.currentStock) || 0,
   isActive: row.isActive,
   category: row.category || '默认分类',
   tagIds: row.tagIds,
@@ -286,6 +289,7 @@ const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProdu
     productName: currentForm.productName,
     pinyinAbbr: currentForm.pinyinAbbr,
     defaultPrice: currentForm.defaultPrice,
+    currentStock: currentForm.currentStock,
     isActive: currentForm.isActive,
     category: currentForm.category,
     tagIds: resolvedTagIds,
@@ -686,6 +690,15 @@ onActivated(() => {
               :step="1"
               class="w-full"
               placeholder="请输入售价"
+            />
+          </el-form-item>
+          <el-form-item label="当前库存" prop="currentStock">
+            <el-input-number
+              v-model="form.currentStock"
+              :min="0"
+              :step="1"
+              class="w-full"
+              placeholder="请输入当前库存"
             />
           </el-form-item>
           <el-form-item label="产品分类" prop="category">

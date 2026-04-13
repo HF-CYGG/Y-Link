@@ -212,7 +212,6 @@ const handleSubmit = async () => {
         thumbnail: finalThumbnail,
         detailContent: form.detailContent.trim() || null,
         limitPerUser: Math.max(1, Math.floor(form.limitPerUser)),
-        currentStock: Math.max(0, Math.floor(form.currentStock)),
       }
       await updateProduct(form.id, payload)
       ElMessage.success('商品已更新')
@@ -227,7 +226,6 @@ const handleSubmit = async () => {
         thumbnail: finalThumbnail,
         detailContent: form.detailContent.trim() || null,
         limitPerUser: Math.max(1, Math.floor(form.limitPerUser)),
-        currentStock: Math.max(0, Math.floor(form.currentStock)),
       }
       await createProduct(payload)
       ElMessage.success('商品已创建')
@@ -347,7 +345,8 @@ onMounted(async () => {
         <el-row :gutter="16">
           <el-col :span="12">
             <el-form-item label="当前库存">
-              <el-input-number v-model="form.currentStock" :min="0" :step="1" style="width: 100%" />
+              <el-input-number v-model="form.currentStock" :min="0" :step="1" style="width: 100%" disabled />
+              <div class="mt-1 text-xs text-slate-400">请在“基础资料-产品管理”中编辑库存</div>
             </el-form-item>
           </el-col>
           <el-col :span="12">
