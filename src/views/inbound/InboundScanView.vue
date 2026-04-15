@@ -238,11 +238,11 @@ const handleReuseRecentScan = (verifyCode: string) => {
 
 onMounted(() => {
   focusScanInput()
-  window.addEventListener('keydown', handleGlobalKeydown)
+  globalThis.addEventListener('keydown', handleGlobalKeydown)
 })
 
 onBeforeUnmount(() => {
-  window.removeEventListener('keydown', handleGlobalKeydown)
+  globalThis.removeEventListener('keydown', handleGlobalKeydown)
 })
 </script>
 

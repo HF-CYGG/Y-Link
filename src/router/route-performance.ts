@@ -64,21 +64,21 @@ export const routeViewLoaders = {
   dashboard: () => import('@/views/dashboard/DashboardView.vue'),
   'order-entry': () => import('@/views/order-entry/OrderEntryView.vue'),
   'order-list': () => import('@/views/order-list/OrderListView.vue'),
-  products: () => import('@/views/base-data/ProductManageView.vue'),
+  products: () => import('@/views/product-center/ProductCenterView.vue'),
   tags: () => import('@/views/base-data/TagManageView.vue'),
 
   // 送货单与扫码入库模块
-  'supplier-delivery': () => import('@/views/inbound/SupplierDeliveryView.vue'),
-  'supplier-history': () => import('@/views/inbound/SupplierHistoryView.vue'),
+  'supplier-delivery': () => import('@/views/inbound/SupplierWorkbenchView.vue'),
+  'supplier-history': () => import('@/views/inbound/SupplierWorkbenchView.vue'),
   'inbound-scan': () => import('@/views/inbound/InboundScanView.vue'),
 
-  'o2o-console-products': () => import('@/views/o2o/O2oProductMallManageView.vue'),
+  'o2o-console-products': () => import('@/views/product-center/ProductCenterView.vue'),
   'o2o-console-orders': () => import('@/views/o2o/O2oOrderQueryView.vue'),
   'o2o-console-verify': () => import('@/views/o2o/O2oVerifyConsoleView.vue'),
   'o2o-console-inbound': () => import('@/views/o2o/O2oInboundManageView.vue'),
   'system-configs': () => import('@/views/system/SystemConfigViewLoader'),
-  'system-users': () => import('@/views/system/UserManageView.vue'),
-  'system-client-users': () => import('@/views/system/ClientUserManageView.vue'),
+  'system-users': () => import('@/views/system/UserCenterView.vue'),
+  'system-client-users': () => import('@/views/system/UserCenterView.vue'),
   'system-audit-logs': () => import('@/views/system/AuditLogView.vue'),
   'not-found': () => import('@/views/not-found/NotFoundView.vue'),
 } satisfies Record<string, RouteViewLoader>

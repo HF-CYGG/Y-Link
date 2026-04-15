@@ -25,13 +25,13 @@ class InboundService {
   private async generateShowNo(manager = AppDataSource.manager): Promise<string> {
     const dateText = new Date().toISOString().slice(0, 10).replaceAll('-', '')
     const prefix = `IN${dateText}`
-    const raw = (await manager
+    const raw = await manager
       .getRepository(BizInboundOrder)
       .createQueryBuilder('order')
       .select('order.showNo', 'showNo')
       .where('order.showNo LIKE :prefix', { prefix: `${prefix}%` })
       .orderBy('order.showNo', 'DESC')
-      .getRawOne()) as { showNo?: string } | null
+      .getRawOne<{ showNo?: string }>()
     const current = raw?.showNo ? Number.parseInt(raw.showNo.slice(prefix.length), 10) || 0 : 0
     return `${prefix}${String(current + 1).padStart(4, '0')}`
   }
@@ -86,14 +86,19 @@ class InboundService {
         }),
       )
 
-      const itemEntities = normalizedItems.map((item) =>
-        manager.getRepository(BizInboundOrderItem).create({
+      const itemEntities = normalizedItems.map((item) => {
+        const product = productMap.get(item.productId)
+        if (!product) {
+          throw new BizError('存在无效或停用商品', 400)
+        }
+
+        return manager.getRepository(BizInboundOrderItem).create({
           orderId: savedOrder.id,
           productId: item.productId,
-          productNameSnapshot: productMap.get(item.productId)!.productName,
+          productNameSnapshot: product.productName,
           qty: String(item.qty),
-        }),
-      )
+        })
+      })
       await manager.getRepository(BizInboundOrderItem).save(itemEntities)
 
       return this.detailById(savedOrder.id)
