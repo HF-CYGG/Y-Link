@@ -196,6 +196,20 @@ const layoutChildren: AppRouteRecord[] = [
     },
   },
   {
+    path: 'inbound-manage',
+    name: 'o2o-console-inbound',
+    component: routeViewLoaders['o2o-console-inbound'],
+    meta: {
+      title: '入库管理',
+      icon: 'Box',
+      menuGroup: '业务操作',
+      menuOrder: 36,
+      requiredPermissions: ['products:view'],
+      allowedRoles: ['admin', 'operator'],
+      keepAlive: true,
+    },
+  },
+  {
     path: 'base-data',
     name: 'base-data',
     redirect: '/base-data/products',
@@ -256,7 +270,7 @@ const layoutChildren: AppRouteRecord[] = [
       allowedRoles: ['admin', 'operator'],
       shortcut: {
         title: '线上预订',
-        description: '维护线上商品、核销预订单与登记入库',
+        description: '维护线上商品并处理预订单查询、核销',
         order: 25,
         path: '/o2o-console/orders',
         icon: 'Shop',
@@ -307,12 +321,12 @@ const layoutChildren: AppRouteRecord[] = [
       },
       {
         path: 'inbound',
-        name: 'o2o-console-inbound',
-        component: routeViewLoaders['o2o-console-inbound'],
+        redirect: '/inbound-manage',
         meta: {
           title: '入库管理',
+          menu: false,
           menuOrder: 40,
-          activeMenu: '/o2o-console',
+          activeMenu: '/inbound-manage',
           requiredPermissions: ['products:view'],
           keepAlive: true,
         },

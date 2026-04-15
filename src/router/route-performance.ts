@@ -164,6 +164,10 @@ const resolveWarmupTargetByPath = (redirectPath: string): RouteWarmupTarget | nu
     return 'supplier-delivery'
   }
 
+  if (redirectPath.startsWith('/inbound-manage') || redirectPath.startsWith('/o2o-console/inbound')) {
+    return 'o2o-console-inbound'
+  }
+
   if (redirectPath.startsWith('/system/audit-logs')) {
     return 'system-audit-logs'
   }
