@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS `o2o_preorder` (
   `client_user_id` BIGINT UNSIGNED NOT NULL,
   `verify_code` VARCHAR(64) NOT NULL,
   `status` VARCHAR(16) NOT NULL DEFAULT 'pending',
+  `cancel_reason` VARCHAR(16) NULL,
   `total_qty` INT NOT NULL DEFAULT 0,
   `remark` VARCHAR(255) NULL,
   `timeout_at` DATETIME(3) NULL,

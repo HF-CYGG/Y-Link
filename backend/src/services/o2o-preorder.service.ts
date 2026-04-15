@@ -12,7 +12,7 @@ import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
 import { ClientUser } from '../entities/client-user.entity.js'
 import { InventoryLog } from '../entities/inventory-log.entity.js'
-import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
+import { O2oPreorder, type O2oPreorderCancelReason } from '../entities/o2o-preorder.entity.js'
 import { O2oPreorderItem } from '../entities/o2o-preorder-item.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import type { ClientAuthContext } from '../types/client-auth.js'
@@ -80,10 +80,27 @@ class O2oPreorderService {
     return raw
   }
 
-  private resolveOrderStatusReport(order: Pick<O2oPreorder, 'status' | 'timeoutAt'>, nowMs = Date.now()) {
+  private resolveCancelledOrderReason(
+    order: Pick<O2oPreorder, 'status' | 'timeoutAt' | 'cancelReason'>,
+    nowMs = Date.now(),
+  ): O2oPreorderCancelReason | null {
+    if (order.status !== 'cancelled') {
+      return null
+    }
+    if (order.cancelReason === 'manual' || order.cancelReason === 'timeout') {
+      return order.cancelReason
+    }
+    return this.isOrderTimeoutReached(order, nowMs) ? 'timeout' : 'manual'
+  }
+
+  private resolveOrderStatusReport(
+    order: Pick<O2oPreorder, 'status' | 'timeoutAt' | 'cancelReason'>,
+    nowMs = Date.now(),
+  ) {
     const timeoutAtMs = order.timeoutAt ? order.timeoutAt.getTime() : null
     const timeoutReached = Boolean(timeoutAtMs && timeoutAtMs <= nowMs)
     const timeoutSoon = Boolean(timeoutAtMs && timeoutAtMs > nowMs && timeoutAtMs - nowMs <= 2 * 60 * 60 * 1000)
+    const cancelReason = this.resolveCancelledOrderReason(order, nowMs)
     if (order.status === 'verified') {
       return {
         scenario: 'verified' as const,
@@ -92,18 +109,18 @@ class O2oPreorderService {
         timeoutSoon: false,
       }
     }
-    if (order.status === 'cancelled' && timeoutReached) {
+    if (order.status === 'cancelled' && cancelReason === 'timeout') {
       return {
         scenario: 'timeout_cancelled' as const,
         cancelReason: 'timeout' as const,
-        timeoutReached: true,
+        timeoutReached,
         timeoutSoon: false,
       }
     }
     if (order.status === 'cancelled') {
       return {
         scenario: 'cancelled' as const,
-        cancelReason: 'manual' as const,
+        cancelReason: cancelReason ?? 'manual',
         timeoutReached,
         timeoutSoon: false,
       }
@@ -238,17 +255,25 @@ class O2oPreorderService {
     return Boolean(order.timeoutAt && order.timeoutAt.getTime() <= nowMs)
   }
 
-  // 在事务内执行“单笔超时取消 + 释放预订库存”。
-  // 这个方法用于两类场景：
-  // 1. 定时/查询前的批量回收；
-  // 2. 核销事务里兜底发现订单刚好超时，立即回收并阻断核销。
-  private async cancelTimedOutOrderInManager(manager: typeof AppDataSource.manager, order: O2oPreorder) {
-    if (order.status !== 'pending' || !this.isOrderTimeoutReached(order)) {
+  // 统一执行“预订单取消 + 释放预订库存”：
+  // - 超时自动取消与客户端主动撤回都复用这一套逻辑；
+  // - 只回滚 preOrderedStock，不触碰 currentStock，因为 pending 阶段尚未实际出库；
+  // - 返回 false 表示订单已经不是 pending，调用方可按各自语义决定提示文案。
+  private async cancelOrderInManager(
+    manager: typeof AppDataSource.manager,
+    input: {
+      order: O2oPreorder
+      cancelReason: O2oPreorderCancelReason
+      operatorType: 'system' | 'client' | 'admin'
+      operatorId?: string | null
+      operatorName?: string | null
+      logRemark?: string | null
+    },
+  ) {
+    if (input.order.status !== 'pending') {
       return false
     }
-    // 超时取消只释放“预订占用库存”，不回滚现货库存。
-    // 因为 pending 阶段尚未真正出库，currentStock 理论上从未减少过。
-    const items = await manager.getRepository(O2oPreorderItem).find({ where: { orderId: order.id } })
+    const items = await manager.getRepository(O2oPreorderItem).find({ where: { orderId: input.order.id } })
     for (const row of items) {
       const product = await manager.getRepository(BaseProduct).findOne({
         where: { id: row.productId },
@@ -270,16 +295,84 @@ class O2oPreorderService {
           afterCurrentStock: beforeCurrentStock,
           beforePreorderedStock: beforePreOrderedStock,
           afterPreorderedStock: product.preOrderedStock,
-          operatorType: 'system',
-          operatorName: 'auto_cancel',
+          operatorType: input.operatorType,
+          operatorId: input.operatorId ?? null,
+          operatorName: input.operatorName ?? null,
           refType: 'o2o_preorder',
-          refId: order.id,
+          refId: input.order.id,
+          remark: input.logRemark ?? null,
         }),
       )
     }
-    order.status = 'cancelled'
-    await manager.getRepository(O2oPreorder).save(order)
+    input.order.status = 'cancelled'
+    input.order.cancelReason = input.cancelReason
+    await manager.getRepository(O2oPreorder).save(input.order)
     return true
+  }
+
+  // 在事务内执行“单笔超时取消 + 释放预订库存”。
+  // 这个方法用于两类场景：
+  // 1. 定时/查询前的批量回收；
+  // 2. 核销事务里兜底发现订单刚好超时，立即回收并阻断核销。
+  private async cancelTimedOutOrderInManager(manager: typeof AppDataSource.manager, order: O2oPreorder) {
+    if (order.status !== 'pending' || !this.isOrderTimeoutReached(order)) {
+      return false
+    }
+    const cancelled = await this.cancelOrderInManager(manager, {
+      order,
+      cancelReason: 'timeout',
+      operatorType: 'system',
+      operatorName: 'auto_cancel',
+      logRemark: '订单超时自动取消，释放预订库存',
+    })
+    if (!cancelled) {
+      return false
+    }
+    return true
+  }
+
+  private async buildOrderDetail(order: O2oPreorder) {
+    const id = String(order.id)
+    const items = await this.preorderItemRepo.find({ where: { orderId: id }, relations: { product: true } })
+    let totalAmountNumber = 0
+    const normalizedItems = items.map((item) => {
+      const unitPrice = Number(item.product?.defaultPrice ?? 0)
+      const lineAmount = unitPrice * Number(item.qty ?? 0)
+      totalAmountNumber += lineAmount
+      return {
+        id: String(item.id),
+        productId: String(item.productId),
+        productCode: item.product?.productCode ?? '',
+        productName: item.product?.productName ?? '',
+        defaultPrice: this.normalizeDecimalText(unitPrice),
+        qty: item.qty,
+        subTotal: this.normalizeDecimalText(lineAmount),
+      }
+    })
+    const nowMs = Date.now()
+    const totalAmount = this.normalizeDecimalText(totalAmountNumber)
+    return {
+      order: {
+        statusReport: this.resolveOrderStatusReport(order, nowMs),
+        totalAmount,
+        expireInSeconds: this.resolveExpireInSeconds(order, nowMs),
+        id,
+        showNo: order.showNo,
+        verifyCode: order.verifyCode,
+        status: order.status,
+        totalQty: order.totalQty,
+        timeoutAt: order.timeoutAt,
+        verifiedAt: order.verifiedAt,
+        createdAt: order.createdAt,
+      },
+      items: normalizedItems,
+      amountSummary: {
+        totalAmount,
+        totalQty: order.totalQty,
+        totalItemCount: normalizedItems.length,
+      },
+      qrPayload: `y-link://o2o/verify/${order.verifyCode}`,
+    }
   }
 
   private async resolveOrderTotalAmountMap(orderIds: string[]) {
@@ -458,6 +551,15 @@ class O2oPreorderService {
     }))
   }
 
+  async getMyOrderDetail(auth: ClientAuthContext, id: string) {
+    await this.cancelTimeoutOrders()
+    const order = await this.preorderRepo.findOne({ where: { id, clientUserId: auth.userId } })
+    if (!order) {
+      throw new BizError('预订单不存在', 404)
+    }
+    return this.buildOrderDetail(order)
+  }
+
   async listConsoleOrders(input: {
     status?: 'pending' | 'verified' | 'cancelled'
     keyword?: string
@@ -543,46 +645,45 @@ class O2oPreorderService {
     if (!order) {
       throw new BizError('预订单不存在', 404)
     }
-    const items = await this.preorderItemRepo.find({ where: { orderId: id }, relations: { product: true } })
-    let totalAmountNumber = 0
-    const normalizedItems = items.map((item) => {
-      const unitPrice = Number(item.product?.defaultPrice ?? 0)
-      const lineAmount = unitPrice * Number(item.qty ?? 0)
-      totalAmountNumber += lineAmount
-      return {
-        id: String(item.id),
-        productId: String(item.productId),
-        productCode: item.product?.productCode ?? '',
-        productName: item.product?.productName ?? '',
-        defaultPrice: this.normalizeDecimalText(unitPrice),
-        qty: item.qty,
-        subTotal: this.normalizeDecimalText(lineAmount),
+    return this.buildOrderDetail(order)
+  }
+
+  async cancelMyOrder(auth: ClientAuthContext, id: string) {
+    await this.cancelTimeoutOrders()
+    await AppDataSource.transaction(async (manager) => {
+      const order = await manager.getRepository(O2oPreorder).findOne({
+        where: { id },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
+      if (!order) {
+        throw new BizError('预订单不存在', 404)
+      }
+      if (String(order.clientUserId) !== String(auth.userId)) {
+        throw new BizError('无权撤回他人订单', 403)
+      }
+      if (await this.cancelTimedOutOrderInManager(manager, order)) {
+        throw new BizError('订单已超时取消，无法撤回', 409)
+      }
+      if (order.status === 'verified') {
+        throw new BizError('订单已核销，无法撤回', 409)
+      }
+      if (order.status === 'cancelled') {
+        const cancelReason = this.resolveCancelledOrderReason(order)
+        throw new BizError(cancelReason === 'timeout' ? '订单已超时取消，无法重复撤回' : '订单已撤回，请勿重复操作', 409)
+      }
+      const cancelled = await this.cancelOrderInManager(manager, {
+        order,
+        cancelReason: 'manual',
+        operatorType: 'client',
+        operatorId: String(auth.userId),
+        operatorName: auth.realName || auth.mobile,
+        logRemark: '客户端主动撤回订单，释放预订库存',
+      })
+      if (!cancelled) {
+        throw new BizError('当前预订单不可撤回', 409)
       }
     })
-    const nowMs = Date.now()
-    const totalAmount = this.normalizeDecimalText(totalAmountNumber)
-    return {
-      order: {
-        statusReport: this.resolveOrderStatusReport(order, nowMs),
-        totalAmount,
-        expireInSeconds: this.resolveExpireInSeconds(order, nowMs),
-        id: String(order.id),
-        showNo: order.showNo,
-        verifyCode: order.verifyCode,
-        status: order.status,
-        totalQty: order.totalQty,
-        timeoutAt: order.timeoutAt,
-        verifiedAt: order.verifiedAt,
-        createdAt: order.createdAt,
-      },
-      items: normalizedItems,
-      amountSummary: {
-        totalAmount,
-        totalQty: order.totalQty,
-        totalItemCount: normalizedItems.length,
-      },
-      qrPayload: `y-link://o2o/verify/${order.verifyCode}`,
-    }
+    return this.getMyOrderDetail(auth, id)
   }
 
   async verifyByCode(verifyCode: string, actor: AuthUserContext) {

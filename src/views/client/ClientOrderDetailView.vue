@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/client/ClientOrderDetailView.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
+ * 文件职责：承载客户端订单详情展示、进度查看、二维码展示与订单撤回。
  * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
  */
 
@@ -9,27 +9,32 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import QRCode from 'qrcode'
-import { getO2oPreorderDetail, type O2oPreorderDetail } from '@/api/modules/o2o'
+import { cancelMyO2oPreorder, getO2oPreorderDetail, type O2oPreorderDetail, type O2oPreorderSummary } from '@/api/modules/o2o'
 import { BaseRequestState } from '@/components/common'
 import { useStableRequest } from '@/composables/useStableRequest'
 import {
-  CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG,
+  getClientOrderStatusReportConfig,
   getClientOrderReportScenario,
   isO2oOrderCancelled,
-  isO2oOrderTimeoutCancelled,
+  isO2oOrderPending,
   isO2oOrderVerified,
 } from '@/constants/o2o-order-status'
+import { useClientOrderStore } from '@/store'
 import { normalizeRequestError } from '@/utils/error'
 
 const route = useRoute()
 const router = useRouter()
 
 const loading = ref(false)
+const recalling = ref(false)
 const detail = ref<O2oPreorderDetail | null>(null)
 const qrDataUrl = ref('')
 const requestError = ref<{ type: 'offline' | 'error'; message: string } | null>(null)
 const { runLatest } = useStableRequest()
+const clientOrderStore = useClientOrderStore()
+clientOrderStore.initialize()
 
 const currentReportScenario = computed(() => {
   if (!detail.value) {
@@ -42,7 +47,14 @@ const currentReportScenario = computed(() => {
 })
 
 const statusLabel = computed(() => {
-  return CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG[currentReportScenario.value].statusLabel
+  if (!detail.value) {
+    return '待取货'
+  }
+  return getClientOrderStatusReportConfig({
+    statusReport: detail.value.order.statusReport,
+    status: detail.value.order.status,
+    timeoutAt: detail.value.order.timeoutAt,
+  }).statusLabel
 })
 
 const handleBack = () => {
@@ -50,7 +62,16 @@ const handleBack = () => {
 }
 
 const statusBanner = computed(() => {
-  const report = CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG[currentReportScenario.value]
+  const report = !detail.value
+    ? getClientOrderStatusReportConfig({
+        status: 'pending',
+        timeoutAt: null,
+      })
+    : getClientOrderStatusReportConfig({
+        statusReport: detail.value.order.statusReport,
+        status: detail.value.order.status,
+        timeoutAt: detail.value.order.timeoutAt,
+      })
   return { className: report.cardClassName, title: report.cardTitle, description: report.cardDescription }
 })
 
@@ -60,8 +81,12 @@ const timelineItems = computed(() => {
   }
   const order = detail.value.order
   const nowMs = Date.now()
-  const report = CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG[currentReportScenario.value]
-  const cancelledByTimeout = isO2oOrderTimeoutCancelled(order.status, order.timeoutAt, nowMs)
+  const report = getClientOrderStatusReportConfig({
+    statusReport: order.statusReport,
+    status: order.status,
+    timeoutAt: order.timeoutAt,
+  }, nowMs)
+  const cancelledByTimeout = currentReportScenario.value === 'timeout_cancelled'
 
   if (isO2oOrderVerified(order.status)) {
     return [
@@ -124,6 +149,9 @@ const totalAmount = computed(() => {
 })
 
 const displayVerifyCode = computed(() => {
+  if (!canUseQrCode.value) {
+    return '已停用'
+  }
   const rawCode = detail.value?.order.verifyCode ?? ''
   if (!rawCode) {
     return ''
@@ -135,8 +163,49 @@ const displayVerifyCode = computed(() => {
     .trim()
 })
 
+const canRecallOrder = computed(() => {
+  return isO2oOrderPending(detail.value?.order.status)
+})
+
+const canUseQrCode = computed(() => {
+  return isO2oOrderPending(detail.value?.order.status)
+})
+
+const qrDisabledHint = computed(() => {
+  if (!detail.value) {
+    return '当前订单二维码暂不可用'
+  }
+  if (detail.value.order.status === 'verified') {
+    return '订单已核销完成，二维码与取货码已停用'
+  }
+  if (detail.value.order.statusReport?.cancelReason === 'manual') {
+    return '订单已撤回，二维码与取货码已停用'
+  }
+  if (currentReportScenario.value === 'timeout_cancelled') {
+    return '订单已超时取消，二维码与取货码已停用'
+  }
+  return '当前订单二维码暂不可用'
+})
+
+const buildOrderSummaryFromDetail = (nextDetail: O2oPreorderDetail): O2oPreorderSummary => {
+  const { order } = nextDetail
+  return {
+    id: order.id,
+    showNo: order.showNo,
+    verifyCode: order.verifyCode,
+    status: order.status,
+    statusReport: order.statusReport,
+    totalAmount: order.totalAmount,
+    expireInSeconds: order.expireInSeconds,
+    totalQty: order.totalQty,
+    timeoutAt: order.timeoutAt,
+    createdAt: order.createdAt,
+  }
+}
+
 const renderQrCode = async () => {
-  if (!detail.value?.qrPayload) {
+  // 二维码仅允许待提货订单展示，撤回、超时取消、已核销后立即切换为禁用态。
+  if (!detail.value?.qrPayload || !canUseQrCode.value) {
     qrDataUrl.value = ''
     return
   }
@@ -151,6 +220,10 @@ const renderQrCode = async () => {
   })
 }
 
+const syncOrderStoreFromDetail = (nextDetail: O2oPreorderDetail) => {
+  clientOrderStore.upsertOrder(buildOrderSummaryFromDetail(nextDetail))
+}
+
 const loadDetail = async () => {
   const orderId = String(route.params.id ?? '').trim()
   if (!orderId) {
@@ -163,6 +236,7 @@ const loadDetail = async () => {
     executor: (signal) => getO2oPreorderDetail(orderId, { signal }),
     onSuccess: async (result) => {
       detail.value = result
+      syncOrderStoreFromDetail(result)
       await renderQrCode()
     },
     onError: (error) => {
@@ -176,6 +250,49 @@ const loadDetail = async () => {
       loading.value = false
     },
   })
+}
+
+const handleRecallOrder = async () => {
+  if (!detail.value) {
+    return
+  }
+  if (!canRecallOrder.value) {
+    ElMessage.warning('当前订单状态不可撤回')
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      `确认撤回订单“${detail.value.order.showNo}”吗？撤回后将释放预订库存，二维码会立即失效。`,
+      '撤回订单',
+      {
+        type: 'warning',
+        confirmButtonText: '确认撤回',
+        cancelButtonText: '再想想',
+        closeOnClickModal: false,
+      },
+    )
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') {
+      return
+    }
+    ElMessage.error('撤回确认失败，请稍后重试')
+    return
+  }
+
+  recalling.value = true
+  try {
+    const nextDetail = await cancelMyO2oPreorder(detail.value.order.id)
+    detail.value = nextDetail
+    syncOrderStoreFromDetail(nextDetail)
+    await renderQrCode()
+    ElMessage.success('订单已撤回')
+  } catch (error) {
+    const normalizedError = normalizeRequestError(error, '撤回订单失败')
+    ElMessage.error(normalizedError.message)
+  } finally {
+    recalling.value = false
+  }
 }
 
 watch(
@@ -214,17 +331,44 @@ onMounted(async () => {
 
     <section v-else-if="detail" class="grid gap-4 lg:grid-cols-[24rem_minmax(0,1fr)]">
       <aside class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)]">
-        <p class="text-lg font-semibold text-slate-900">{{ detail.order.showNo }}</p>
-        <p class="mt-1 text-sm text-slate-400">状态：{{ statusLabel }}</p>
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p class="text-lg font-semibold text-slate-900">{{ detail.order.showNo }}</p>
+            <p class="mt-1 text-sm text-slate-400">状态：{{ statusLabel }}</p>
+          </div>
+          <button
+            v-if="canRecallOrder"
+            type="button"
+            class="rounded-full border border-rose-200 px-4 py-2 text-sm font-medium text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
+            :disabled="recalling"
+            @click="handleRecallOrder"
+          >
+            {{ recalling ? '撤回中...' : '撤回订单' }}
+          </button>
+        </div>
         <div class="mt-3 rounded-2xl px-3 py-2" :class="statusBanner.className">
           <p class="text-sm font-semibold">{{ statusBanner.title }}</p>
           <p class="mt-1 text-xs">{{ statusBanner.description }}</p>
         </div>
 
         <div class="mt-5 rounded-3xl bg-slate-50 p-4 text-center">
-          <img v-if="qrDataUrl" :src="qrDataUrl" alt="预订单二维码" class="mx-auto h-64 w-64 rounded-2xl bg-white p-3 shadow-sm" />
+          <img
+            v-if="canUseQrCode && qrDataUrl"
+            :src="qrDataUrl"
+            alt="预订单二维码"
+            class="mx-auto h-64 w-64 rounded-2xl bg-white p-3 shadow-sm"
+          />
+          <div
+            v-else
+            class="mx-auto flex h-64 w-64 flex-col items-center justify-center rounded-2xl border border-dashed border-slate-200 bg-white px-6 text-center"
+          >
+            <p class="text-sm font-semibold text-slate-700">二维码已停用</p>
+            <p class="mt-2 text-xs leading-5 text-slate-400">{{ qrDisabledHint }}</p>
+          </div>
           <p class="mt-4 text-xs text-slate-400">取货码</p>
-          <p class="mt-1 text-xl font-semibold tracking-[0.18em] text-slate-900">{{ displayVerifyCode }}</p>
+          <p class="mt-1 text-xl font-semibold tracking-[0.18em]" :class="canUseQrCode ? 'text-slate-900' : 'text-slate-400'">
+            {{ displayVerifyCode }}
+          </p>
         </div>
 
         <div class="mt-4 space-y-2 rounded-2xl bg-amber-50 px-4 py-4 text-sm text-amber-700">

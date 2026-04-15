@@ -1,18 +1,19 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/client/ClientOrdersView.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
+ * 文件职责：承载客户端“我的订单”列表展示、筛选、刷新与撤回动作。
  * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
  */
 
 
 import { computed, onMounted, ref } from 'vue'
-import { getMyO2oPreorders, type O2oPreorderSummary } from '@/api/modules/o2o'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { cancelMyO2oPreorder, getMyO2oPreorders, type O2oPreorderDetail, type O2oPreorderSummary } from '@/api/modules/o2o'
 import { BaseRequestState } from '@/components/common'
 import { useStableRequest } from '@/composables/useStableRequest'
 import {
-  CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG,
   CLIENT_O2O_ORDER_STATUS_CLASS_MAP,
+  getClientOrderStatusReportConfig,
   getClientOrderReportScenario,
   O2O_ORDER_STATUS_TABS,
 } from '@/constants/o2o-order-status'
@@ -20,6 +21,7 @@ import { useClientOrderStore } from '@/store'
 import { normalizeRequestError } from '@/utils/error'
 
 const loading = ref(false)
+const recallingOrderId = ref('')
 const requestError = ref<{ type: 'offline' | 'error'; message: string } | null>(null)
 const clientOrderStore = useClientOrderStore()
 const { runLatest } = useStableRequest()
@@ -47,8 +49,11 @@ const filteredOrders = computed(() => {
 })
 
 const getOrderStatusReport = (order: O2oPreorderSummary) => {
-  const scenario = order.statusReport?.scenario ?? getClientOrderReportScenario(order.status, order.timeoutAt)
-  return CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG[scenario]
+  return getClientOrderStatusReportConfig({
+    statusReport: order.statusReport,
+    status: order.status,
+    timeoutAt: order.timeoutAt,
+  })
 }
 
 const getOrderStatusClassName = (order: O2oPreorderSummary) => {
@@ -64,6 +69,22 @@ const getOrderStatusClassName = (order: O2oPreorderSummary) => {
 
 const handleStatusChange = (value: 'all' | O2oPreorderSummary['status']) => {
   activeStatus.value = value
+}
+
+const buildOrderSummaryFromDetail = (detail: O2oPreorderDetail): O2oPreorderSummary => {
+  const { order } = detail
+  return {
+    id: order.id,
+    showNo: order.showNo,
+    verifyCode: order.verifyCode,
+    status: order.status,
+    statusReport: order.statusReport,
+    totalAmount: order.totalAmount,
+    expireInSeconds: order.expireInSeconds,
+    totalQty: order.totalQty,
+    timeoutAt: order.timeoutAt,
+    createdAt: order.createdAt,
+  }
 }
 
 const loadOrders = async (force = false) => {
@@ -89,6 +110,44 @@ const loadOrders = async (force = false) => {
       loading.value = false
     },
   })
+}
+
+const handleRecallOrder = async (order: O2oPreorderSummary) => {
+  if (order.status !== 'pending') {
+    ElMessage.warning('当前订单状态不可撤回')
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      `确认撤回订单“${order.showNo}”吗？撤回后将释放预订库存，二维码会立即失效。`,
+      '撤回订单',
+      {
+        type: 'warning',
+        confirmButtonText: '确认撤回',
+        cancelButtonText: '再想想',
+        closeOnClickModal: false,
+      },
+    )
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') {
+      return
+    }
+    ElMessage.error('撤回确认失败，请稍后重试')
+    return
+  }
+
+  recallingOrderId.value = order.id
+  try {
+    const detail = await cancelMyO2oPreorder(order.id)
+    clientOrderStore.upsertOrder(buildOrderSummaryFromDetail(detail))
+    ElMessage.success('订单已撤回')
+  } catch (error) {
+    const normalizedError = normalizeRequestError(error, '撤回订单失败')
+    ElMessage.error(normalizedError.message)
+  } finally {
+    recallingOrderId.value = ''
+  }
 }
 
 onMounted(async () => {
@@ -162,6 +221,15 @@ onMounted(async () => {
             <span class="rounded-full px-2.5 py-1 text-xs font-semibold" :class="getOrderStatusClassName(order)">
               {{ getOrderStatusReport(order).statusLabel }}
             </span>
+            <button
+              v-if="order.status === 'pending'"
+              type="button"
+              class="rounded-full border border-rose-200 px-3 py-1.5 text-xs text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
+              :disabled="recallingOrderId === order.id"
+              @click="handleRecallOrder(order)"
+            >
+              {{ recallingOrderId === order.id ? '撤回中...' : '撤回订单' }}
+            </button>
             <router-link :to="`/client/orders/${order.id}`" class="rounded-full bg-slate-900 px-3 py-1.5 text-xs text-white">详情</router-link>
           </div>
         </div>

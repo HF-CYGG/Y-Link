@@ -20,6 +20,8 @@ import { entityColumnOptions } from './entity-column-options.js'
 
 export const O2O_PREORDER_STATUSES = ['pending', 'verified', 'cancelled'] as const
 export type O2oPreorderStatus = (typeof O2O_PREORDER_STATUSES)[number]
+export const O2O_PREORDER_CANCEL_REASONS = ['manual', 'timeout'] as const
+export type O2oPreorderCancelReason = (typeof O2O_PREORDER_CANCEL_REASONS)[number]
 
 @Entity({ name: 'o2o_preorder' })
 export class O2oPreorder {
@@ -40,6 +42,11 @@ export class O2oPreorder {
 
   @Column({ name: 'status', type: 'varchar', length: 16, default: 'pending', comment: '订单状态' })
   status!: O2oPreorderStatus
+
+  // cancelReason 用于稳定区分“用户主动撤回/人工取消”和“系统超时取消”，
+  // 不能再依赖 timeoutAt 与当前时间推断，否则主动撤回单在过了超时点后会被误判成超时取消。
+  @Column({ name: 'cancel_reason', type: 'varchar', length: 16, nullable: true, comment: '取消原因' })
+  cancelReason!: O2oPreorderCancelReason | null
 
   // totalQty 记录整单总件数，便于列表快速展示，避免每次都聚合子项。
   @Column({ name: 'total_qty', type: 'int', default: 0, comment: '总件数' })

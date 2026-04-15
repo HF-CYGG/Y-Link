@@ -5,7 +5,7 @@
  */
 
 import type { O2oPreorderSummary } from '@/api/modules/o2o'
-import { getClientOrderReportScenario, isO2oOrderStatus } from '@/constants/o2o-order-status'
+import { getClientOrderReportScenario, isO2oOrderStatus, type ClientOrderReportScenario, type O2oOrderCancelReason } from '@/constants/o2o-order-status'
 
 export interface ClientOrderSnapshot {
   activeStatus: 'all' | O2oPreorderSummary['status']
@@ -38,6 +38,15 @@ const normalizeOrders = (orders: unknown): O2oPreorderSummary[] => {
       const verifyCode = typeof row.verifyCode === 'string' ? row.verifyCode : ''
       const status = isO2oOrderStatus(row.status) ? row.status : null
       const timeoutAt = typeof row.timeoutAt === 'string' ? row.timeoutAt : null
+      const rawStatusReport = row.statusReport && typeof row.statusReport === 'object'
+        ? (row.statusReport as Record<string, unknown>)
+        : null
+      const scenario = typeof rawStatusReport?.scenario === 'string'
+        ? rawStatusReport.scenario
+        : getClientOrderReportScenario(status, timeoutAt)
+      const cancelReason = rawStatusReport?.cancelReason === 'manual' || rawStatusReport?.cancelReason === 'timeout'
+        ? (rawStatusReport.cancelReason as O2oOrderCancelReason)
+        : null
       if (!id || !showNo || !verifyCode || !status) {
         return null
       }
@@ -47,12 +56,15 @@ const normalizeOrders = (orders: unknown): O2oPreorderSummary[] => {
         verifyCode,
         status,
         statusReport: {
-          scenario: getClientOrderReportScenario(status, timeoutAt),
-          cancelReason: null,
-          timeoutReached: false,
-          timeoutSoon: false,
+          // 缓存恢复时尽量沿用服务端原始状态报告，确保“已撤回/超时取消”文案不会在刷新后退化。
+          scenario: (scenario as ClientOrderReportScenario) ?? getClientOrderReportScenario(status, timeoutAt),
+          cancelReason,
+          timeoutReached: rawStatusReport?.timeoutReached === true,
+          timeoutSoon: rawStatusReport?.timeoutSoon === true,
         },
         totalQty: Number.isFinite(row.totalQty) ? Number(row.totalQty) : 0,
+        totalAmount: typeof row.totalAmount === 'string' ? row.totalAmount : undefined,
+        expireInSeconds: Number.isFinite(row.expireInSeconds) ? Number(row.expireInSeconds) : undefined,
         timeoutAt,
         createdAt: typeof row.createdAt === 'string' ? row.createdAt : '',
       }

@@ -55,6 +55,7 @@ const SQLITE_REQUIRED_PRODUCT_COLUMNS = [
 ]
 
 const SQLITE_REQUIRED_CLIENT_USER_COLUMNS = ['mobile', 'email', 'real_name', 'department_name', 'status', 'last_login_at']
+const SQLITE_REQUIRED_O2O_PREORDER_COLUMNS = ['cancel_reason']
 
 export function resolveSqliteDatabasePath(): string {
   return path.isAbsolute(env.SQLITE_DB_PATH)
@@ -120,7 +121,13 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
 
   const clientUserColumns: Array<{ name: string }> = await dataSource.query(`PRAGMA table_info('client_user')`)
   const clientUserColumnSet = new Set(clientUserColumns.map((column) => column.name))
-  return SQLITE_REQUIRED_CLIENT_USER_COLUMNS.some((column) => !clientUserColumnSet.has(column))
+  if (SQLITE_REQUIRED_CLIENT_USER_COLUMNS.some((column) => !clientUserColumnSet.has(column))) {
+    return true
+  }
+
+  const o2oPreorderColumns: Array<{ name: string }> = await dataSource.query(`PRAGMA table_info('o2o_preorder')`)
+  const o2oPreorderColumnSet = new Set(o2oPreorderColumns.map((column) => column.name))
+  return SQLITE_REQUIRED_O2O_PREORDER_COLUMNS.some((column) => !o2oPreorderColumnSet.has(column))
 }
 
 export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): Promise<DatabaseSchemaInitResult> {

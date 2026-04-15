@@ -74,7 +74,19 @@ o2oRouter.get(
   '/mall/preorders/:id',
   requireClientAuth,
   asyncHandler(async (req, res) => {
-    const data = await o2oPreorderService.detailById(req.params.id)
+    const authReq = req as ClientAuthenticatedRequest
+    const data = await o2oPreorderService.getMyOrderDetail(authReq.clientAuth, req.params.id)
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+// 客户端主动撤回待核销订单：仅允许撤回本人订单，并在事务内释放预订库存。
+o2oRouter.post(
+  '/mall/preorders/:id/cancel',
+  requireClientAuth,
+  asyncHandler(async (req, res) => {
+    const authReq = req as ClientAuthenticatedRequest
+    const data = await o2oPreorderService.cancelMyOrder(authReq.clientAuth, req.params.id)
     res.json({ code: 0, message: 'ok', data })
   }),
 )

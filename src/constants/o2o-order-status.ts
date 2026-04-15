@@ -3,6 +3,12 @@ export const O2O_ORDER_TIMEOUT_SOON_WINDOW_MS = 2 * 60 * 60 * 1000
 
 export type O2oOrderStatus = (typeof O2O_ORDER_STATUSES)[number]
 export type ClientOrderReportScenario = 'pending' | 'timeout_soon' | 'cancelled' | 'timeout_cancelled' | 'verified'
+export type O2oOrderCancelReason = 'timeout' | 'manual'
+
+export interface ClientOrderStatusReportLike {
+  scenario?: ClientOrderReportScenario
+  cancelReason?: O2oOrderCancelReason | null
+}
 
 export const CLIENT_O2O_ORDER_STATUS_LABEL_MAP: Record<O2oOrderStatus, string> = {
   pending: '待取货',
@@ -147,4 +153,33 @@ export const CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG: Record<
     timelineCurrentTitle: '已核销',
     timelineCurrentHint: '订单已完成',
   },
+}
+
+/**
+ * 客户端状态展示文案解析：
+ * - 默认沿用场景配置表，保持列表页、详情页、状态卡片展示一致；
+ * - 当后端明确返回 manual 时，客户端统一展示“已撤回”，避免与系统超时取消混淆；
+ * - 超时取消仍走 timeout_cancelled，保持风险提示更明确。
+ */
+export const getClientOrderStatusReportConfig = (
+  input: {
+    statusReport?: ClientOrderStatusReportLike | null
+    status: O2oOrderStatus | null | undefined
+    timeoutAt: string | null | undefined
+  },
+  nowMs = Date.now(),
+) => {
+  const scenario = input.statusReport?.scenario ?? getClientOrderReportScenario(input.status, input.timeoutAt, nowMs)
+  const baseConfig = CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG[scenario]
+  if (scenario === 'cancelled' && input.statusReport?.cancelReason === 'manual') {
+    return {
+      ...baseConfig,
+      statusLabel: '已撤回',
+      cardTitle: '订单已撤回',
+      cardDescription: '订单已由你主动撤回，预订库存已释放。',
+      timelineCurrentTitle: '订单已撤回',
+      timelineCurrentHint: '订单已关闭',
+    }
+  }
+  return baseConfig
 }

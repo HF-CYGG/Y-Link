@@ -56,6 +56,23 @@ export const useClientOrderStore = defineStore('client-order', () => {
     persist()
   }
 
+  const upsertOrder = (nextOrder: O2oPreorderSummary) => {
+    const index = orders.value.findIndex((item) => item.id === nextOrder.id)
+    if (index < 0) {
+      // 新订单或详情页首次打开后同步回列表缓存，统一插入顶部便于用户立即看到结果。
+      orders.value = [nextOrder, ...orders.value]
+    } else {
+      const nextOrders = orders.value.slice()
+      nextOrders[index] = {
+        ...nextOrders[index],
+        ...nextOrder,
+      }
+      orders.value = nextOrders
+    }
+    updatedAt.value = Date.now()
+    persist()
+  }
+
   return {
     orders,
     activeStatus,
@@ -65,5 +82,6 @@ export const useClientOrderStore = defineStore('client-order', () => {
     initialize,
     setOrders,
     setActiveStatus,
+    upsertOrder,
   }
 })

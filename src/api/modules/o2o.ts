@@ -142,6 +142,19 @@ export const getO2oPreorderDetail = (id: string, config?: RequestConfig) =>
     ...config,
   })
 
+/**
+ * 客户端主动撤回自己的预订单：
+ * - 仅待核销订单允许撤回；
+ * - 服务端会在同一事务内释放预订库存并返回最新详情；
+ * - 页面层可直接用返回结果刷新列表与详情视图。
+ */
+export const cancelMyO2oPreorder = (id: string, config?: RequestConfig) =>
+  request<O2oPreorderDetail>({
+    method: 'POST',
+    url: `/o2o/mall/preorders/${id}/cancel`,
+    ...config,
+  })
+
 export const getO2oConsoleOrderDetail = (id: string, config?: RequestConfig) =>
   request<O2oPreorderDetail>({
     method: 'GET',
