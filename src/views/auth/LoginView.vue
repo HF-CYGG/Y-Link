@@ -32,8 +32,6 @@ const rules: FormRules = {
   password:[{ required: true, message: '请输入密码', trigger: 'blur' }], 
 } 
 
-const redirectPath = computed(() => resolveSafeRedirect(route.query.redirect, authStore.currentUser)) 
-
 const submitButtonLabel = computed(() => { 
   if (submitPhase.value === 'submitting') return '验证中...' 
   if (submitPhase.value === 'success') return '进入系统' 

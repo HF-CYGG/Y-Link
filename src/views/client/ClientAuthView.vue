@@ -182,7 +182,7 @@ const switchMode = async (nextMode: AuthMode) => {
 const handleFormBeforeLeave = () => {
   syncWrapperHeight('measured', formWrapperRef.value)
   // 强制浏览器确认当前高度帧，避免切换起始时出现跳帧或闪现。
-  const _forceReflow = formWrapperRef.value?.offsetHeight
+  void formWrapperRef.value?.offsetHeight
 }
 
 const handleFormBeforeEnter = () => {
