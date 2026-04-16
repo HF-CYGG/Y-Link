@@ -6,10 +6,11 @@
  */
 
 
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute } from 'vue-router'
-import { PageContainer } from '@/components/common'
+import { CameraFilled, DocumentCopy, Search } from '@element-plus/icons-vue'
+import { PageContainer, UnifiedScanDialog } from '@/components/common'
 import {
   VERIFY_CONSOLE_O2O_ORDER_STATUS_CLASS_MAP,
   VERIFY_CONSOLE_O2O_ORDER_STATUS_LABEL_MAP,
@@ -21,6 +22,7 @@ import {
   verifyO2oPreorder,
   type O2oPreorderDetail,
 } from '@/api/modules/o2o'
+import { useCameraQrScanner } from '@/composables/useCameraQrScanner'
 import { useDevice } from '@/composables/useDevice'
 
 const verifyCode = ref('')
@@ -28,19 +30,17 @@ const detail = ref<O2oPreorderDetail | null>(null)
 const loading = ref(false)
 const submitting = ref(false)
 const inputRef = ref<{ focus: () => void } | null>(null)
-const scanDialogVisible = ref(false)
-const scanLoading = ref(false)
-const videoRef = ref<HTMLVideoElement | null>(null)
 const { isPhone } = useDevice()
 const route = useRoute()
 const lastRouteVerifyKey = ref('')
-let scanStream: MediaStream | null = null
-let scanFrameId: number | null = null
-let scanCanvas: HTMLCanvasElement | null = null
-let barcodeDetector: { detect: (source: CanvasImageSource) => Promise<Array<{ rawValue?: string }>> } | null = null
 
 const canVerify = computed(() => isO2oOrderPending(detail.value?.order.status))
 const isShowNo = (value: string) => /^PO\d{8}\d{4}$/i.test(value)
+const scanActionHint = computed(() => {
+  return canUseCamera.value
+    ? '轻触相机图标即可打开实时扫码，识别成功后会自动查询订单。'
+    : '当前环境将自动切换为拍照识别模式，点相机图标即可拍照识别二维码。'
+})
 
 const normalizeVerifyCode = (rawValue: string) => {
   const value = rawValue.trim()
@@ -83,110 +83,29 @@ const focusInput = async () => {
   inputRef.value?.focus()
 }
 
-const stopScanLoop = () => {
-  if (scanFrameId !== null) {
-    globalThis.cancelAnimationFrame(scanFrameId)
-    scanFrameId = null
-  }
-}
+const {
+  canUseCamera,
+  imageInputRef,
+  bindVideoElement,
+  scanButtonTitle,
+  scanDialogVisible,
+  scanLoading,
+  scanStatusText,
+  videoRef,
+  closeScanDialog,
+  handleImageInputChange,
+  openScanDialog,
+} = useCameraQrScanner({
+  normalizeCode: normalizeVerifyCode,
+  onDetected: async (code) => {
+    verifyCode.value = code
+    await handleSearch()
+  },
+})
 
-const stopScanCamera = () => {
-  stopScanLoop()
-  if (scanStream) {
-    scanStream.getTracks().forEach((track) => track.stop())
-    scanStream = null
-  }
-  if (videoRef.value) {
-    videoRef.value.srcObject = null
-  }
-}
-
-const closeScanDialog = () => {
-  scanDialogVisible.value = false
-  scanLoading.value = false
-  stopScanCamera()
-}
-
-const startDetectLoop = () => {
-  const video = videoRef.value
-  if (!video || !barcodeDetector) {
-    return
-  }
-
-  if (!scanCanvas) {
-    scanCanvas = globalThis.document.createElement('canvas')
-  }
-  const canvas = scanCanvas
-  const ctx = canvas.getContext('2d', { willReadFrequently: true })
-  if (!ctx) {
-    ElMessage.error('扫码初始化失败，请改用手动输入')
-    return
-  }
-
-  const loop = async () => {
-    if (!scanDialogVisible.value || !videoRef.value || !barcodeDetector) {
-      return
-    }
-    if (video.videoWidth > 0 && video.videoHeight > 0) {
-      canvas.width = video.videoWidth
-      canvas.height = video.videoHeight
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
-      try {
-        const codes = await barcodeDetector.detect(canvas)
-        if (codes.length > 0) {
-          const raw = codes[0]?.rawValue?.trim() ?? ''
-          const normalized = normalizeVerifyCode(raw)
-          if (normalized) {
-            verifyCode.value = normalized
-            closeScanDialog()
-            await handleSearch()
-            return
-          }
-        }
-      } catch {
-        // 忽略单帧识别异常，继续下一帧。
-      }
-    }
-    scanFrameId = globalThis.requestAnimationFrame(() => {
-      void loop()
-    })
-  }
-
-  void loop()
-}
-
-const openScanDialog = async () => {
-  const BarcodeDetectorCtor = (globalThis.window as any).BarcodeDetector
-  if (!BarcodeDetectorCtor) {
-    ElMessage.warning('当前浏览器不支持摄像头二维码识别，请使用粘贴并查询')
-    return
-  }
-
-  scanDialogVisible.value = true
-  scanLoading.value = true
-  await nextTick()
-
-  try {
-    barcodeDetector = new BarcodeDetectorCtor({ formats: ['qr_code'] })
-    const stream = await globalThis.navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: { ideal: 'environment' },
-      },
-      audio: false,
-    })
-    scanStream = stream
-    if (!videoRef.value) {
-      throw new Error('预览组件初始化失败')
-    }
-    videoRef.value.srcObject = stream
-    await videoRef.value.play()
-    scanLoading.value = false
-    startDetectLoop()
-  } catch (error) {
-    closeScanDialog()
-    ElMessage.error(error instanceof Error ? error.message : '无法打开摄像头，请检查权限')
-  }
-}
+// 这两个 ref 由模板中的 DOM 绑定消费，显式保留一份脚本侧引用以通过严格类型构建。
+void imageInputRef
+void videoRef
 
 /**
  * 查询核销信息：
@@ -286,10 +205,6 @@ const handleVerify = async () => {
   }
 }
 
-onBeforeUnmount(() => {
-  stopScanCamera()
-})
-
 onMounted(async () => {
   await focusInput()
   await applyVerifyCodeFromRoute()
@@ -318,7 +233,9 @@ watch(
       <section class="verify-console-entry rounded-3xl bg-white p-5 shadow-sm">
         <div class="flex items-center justify-between gap-3">
           <p class="text-lg font-semibold text-slate-900">扫码 / 输入核销码</p>
-          <span class="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-500">移动端优先</span>
+          <span class="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-500">
+            {{ canUseCamera ? '实时扫码' : '拍照识别' }}
+          </span>
         </div>
         <p class="mt-2 text-sm text-slate-500">支持手机扫码后自动填入；也支持直接粘贴二维码链接，系统会自动识别核销码。</p>
 
@@ -335,16 +252,36 @@ watch(
               <span class="text-xs text-slate-400">回车即查</span>
             </template>
           </el-input>
-        </div>
-
-        <div class="mt-3 grid grid-cols-3 gap-2">
-          <el-button :loading="scanLoading" @click="openScanDialog">扫码识别</el-button>
-          <el-button :loading="loading" @click="handlePasteAndSearch">粘贴并查询</el-button>
-          <el-button type="primary" :loading="loading" @click="handleSearch">查询订单</el-button>
+          <div class="mt-3 verify-console-toolbar">
+            <div class="verify-console-icon-group">
+              <el-tooltip :content="scanButtonTitle" placement="top">
+                <el-button
+                  class="verify-console-icon-btn"
+                  :loading="scanLoading"
+                  @click="openScanDialog"
+                >
+                  <el-icon :size="18"><CameraFilled /></el-icon>
+                </el-button>
+              </el-tooltip>
+              <el-tooltip content="读取剪贴板并查询" placement="top">
+                <el-button
+                  class="verify-console-icon-btn"
+                  :loading="loading"
+                  @click="handlePasteAndSearch"
+                >
+                  <el-icon :size="18"><DocumentCopy /></el-icon>
+                </el-button>
+              </el-tooltip>
+            </div>
+            <el-button type="primary" class="verify-console-search-btn" :loading="loading" @click="handleSearch">
+              <el-icon class="mr-1.5"><Search /></el-icon>
+              查询订单
+            </el-button>
+          </div>
         </div>
 
         <div class="mt-3 rounded-2xl border border-slate-100 bg-slate-50 px-3 py-2 text-xs text-slate-500">
-          操作建议：手机扫码后若未自动查询，请轻触“查询订单”。
+          {{ scanActionHint }}
         </div>
       </section>
 
@@ -409,22 +346,25 @@ watch(
       </div>
     </Transition>
 
-    <el-dialog
+    <input
+      ref="imageInputRef"
+      type="file"
+      accept="image/*"
+      capture="environment"
+      class="hidden"
+      @change="handleImageInputChange"
+    />
+
+    <UnifiedScanDialog
       v-model="scanDialogVisible"
-      title="摄像头扫码"
-      width="520px"
-      :close-on-click-modal="false"
-      @closed="stopScanCamera"
-    >
-      <div class="scan-preview-wrap">
-        <video ref="videoRef" class="scan-preview-video" autoplay muted playsinline />
-        <div v-if="scanLoading" class="scan-preview-mask">正在启动摄像头...</div>
-      </div>
-      <p class="mt-3 text-xs text-slate-500">请将二维码置于取景框中，识别成功后会自动查询订单。</p>
-      <template #footer>
-        <el-button @click="closeScanDialog">取消</el-button>
-      </template>
-    </el-dialog>
+      title="预订单扫码核销"
+      mode-label="核销识别"
+      :loading="scanLoading"
+      :status-text="scanStatusText"
+      hint-text="请将预订单二维码置于取景框中央，识别成功后会自动查询待核销订单。"
+      :bind-video-element="bindVideoElement"
+      @closed="closeScanDialog"
+    />
   </PageContainer>
 </template>
 
@@ -439,6 +379,32 @@ watch(
   min-height: 48px;
   border-radius: 14px;
   box-shadow: 0 0 0 1px rgba(226, 232, 240, 0.95) inset;
+}
+
+.verify-console-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.verify-console-icon-group {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.verify-console-search-btn {
+  border-radius: 14px;
+  min-width: 8.5rem;
+  padding-inline: 1.2rem;
+}
+
+.verify-console-icon-btn {
+  border-radius: 14px;
+  flex: 0 0 48px;
+  min-height: 48px;
+  padding: 0;
 }
 
 .status-chip {
@@ -488,33 +454,25 @@ watch(
   transform: translateY(8px);
 }
 
-.scan-preview-wrap {
-  position: relative;
-  overflow: hidden;
-  border-radius: 14px;
-  background: #0f172a;
-}
-
-.scan-preview-video {
-  display: block;
-  width: 100%;
-  min-height: 260px;
-  object-fit: cover;
-}
-
-.scan-preview-mask {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  background: rgba(15, 23, 42, 0.55);
-  color: #ffffff;
-  font-size: 0.9rem;
-}
-
 @media (min-width: 1024px) {
   .verify-console-layout {
     grid-template-columns: 22rem minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 767px) {
+  .verify-console-toolbar {
+    gap: 0.75rem;
+  }
+
+  .verify-console-icon-group {
+    gap: 0.5rem;
+  }
+
+  .verify-console-search-btn {
+    min-width: 0;
+    flex: 1 1 auto;
+    padding-inline: 1rem;
   }
 }
 </style>

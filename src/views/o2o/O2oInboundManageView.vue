@@ -8,11 +8,13 @@
  * 页面核心目标不是一次只处理一个商品，
  * 而是尽量贴近仓管/PDA 的实际工作流：连续扫、随时改、最后统一确认。
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { PageContainer } from '@/components/common'
+import { CameraFilled } from '@element-plus/icons-vue'
+import { PageContainer, UnifiedScanDialog } from '@/components/common'
 import { getProductList, type ProductRecord } from '@/api/modules/product'
 import { getO2oInventoryLogs, inboundO2oStock, type O2oInventoryLog } from '@/api/modules/o2o'
+import { useCameraQrScanner } from '@/composables/useCameraQrScanner'
 import { extractErrorMessage } from '@/utils/error'
 
 // 两种扫码模式：
@@ -51,27 +53,12 @@ const scanMode = ref<InboundScanMode>('scan_plus_one')
 const recognizedProductId = ref('')
 const pendingManualQty = ref(1)
 const scanInputRef = ref<{ focus: () => void } | null>(null)
-// 摄像头扫码相关状态：
-// - Visible/Loading 控制弹窗与启动状态；
-// - videoRef 用于显示实时预览画面。
-const cameraScanVisible = ref(false)
-const cameraScanLoading = ref(false)
-const cameraVideoRef = ref<HTMLVideoElement | null>(null)
 const listRemark = ref('')
 const batchInboundResult = ref<{
   successCount: number
   failedCount: number
   details: BatchInboundResultItem[]
 } | null>(null)
-// 这些变量用于摄像头扫码的底层循环控制：
-// - stream：保存当前摄像头流，关闭弹窗/离开页面时需要释放；
-// - frameId：保存 requestAnimationFrame 的句柄，避免形成悬空循环；
-// - canvas：把视频帧绘制到 canvas 后交给 BarcodeDetector 识别；
-// - detector：浏览器原生条码识别器实例。
-let cameraScanStream: MediaStream | null = null
-let cameraScanFrameId: number | null = null
-let cameraScanCanvas: HTMLCanvasElement | null = null
-let cameraBarcodeDetector: { detect: (source: CanvasImageSource) => Promise<Array<{ rawValue?: string }>> } | null = null
 
 const manualForm = reactive({
   productId: '',
@@ -122,6 +109,11 @@ const manualSelectedProduct = computed(() => {
 // - totalQtyCount：总件数
 const totalSkuCount = computed(() => inboundList.value.length)
 const totalQtyCount = computed(() => inboundList.value.reduce((sum, item) => sum + item.qty, 0))
+const scanCapabilityHint = computed(() => {
+  return canUseCamera.value
+    ? '轻触相机图标即可扫码；在 HTTP 或摄像头受限环境下，会自动切换为拍照识别。'
+    : '当前环境将自动切换为拍照识别，请轻触相机图标拍照扫描商品条码或二维码。'
+})
 
 const setRecognizedProduct = (product: ProductRecord | null) => {
   recognizedProductId.value = product?.id ?? ''
@@ -211,127 +203,6 @@ const focusScanInput = () => {
   scanInputRef.value?.focus()
 }
 
-// 停止摄像头识别循环。
-// 不只是关闭弹窗时用到，离开页面时也必须停掉，避免后台持续占用资源。
-const stopCameraScanLoop = () => {
-  if (cameraScanFrameId !== null) {
-    globalThis.cancelAnimationFrame(cameraScanFrameId)
-    cameraScanFrameId = null
-  }
-}
-
-// 停止摄像头流并清理 video 绑定。
-const stopCameraScan = () => {
-  stopCameraScanLoop()
-  if (cameraScanStream) {
-    cameraScanStream.getTracks().forEach((track) => track.stop())
-    cameraScanStream = null
-  }
-  if (cameraVideoRef.value) {
-    cameraVideoRef.value.srcObject = null
-  }
-}
-
-// 统一关闭摄像头扫码弹窗及其附属状态。
-const closeCameraScanDialog = () => {
-  cameraScanVisible.value = false
-  cameraScanLoading.value = false
-  stopCameraScan()
-}
-
-// 持续读取视频帧并交给 BarcodeDetector。
-// 一旦识别到编码，就直接回填到 scanCode 并复用现有 handleScanSubmit 逻辑，
-// 这样可以确保“扫码枪输入”和“摄像头扫码”走同一套录入规则。
-const startCameraDetectLoop = () => {
-  const video = cameraVideoRef.value
-  if (!video || !cameraBarcodeDetector) {
-    return
-  }
-  if (!cameraScanCanvas) {
-    cameraScanCanvas = globalThis.document.createElement('canvas')
-  }
-  const canvas = cameraScanCanvas
-  const ctx = canvas.getContext('2d', { willReadFrequently: true })
-  if (!ctx) {
-    ElMessage.error('摄像头扫码初始化失败，请改用扫码枪或手动输入')
-    return
-  }
-
-  const loop = async () => {
-    if (!cameraScanVisible.value || !cameraVideoRef.value || !cameraBarcodeDetector) {
-      return
-    }
-    // 必须等视频真实出帧后才能开始识别，否则 canvas 宽高会是 0。
-    if (video.videoWidth > 0 && video.videoHeight > 0) {
-      canvas.width = video.videoWidth
-      canvas.height = video.videoHeight
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
-      try {
-        const codes = await cameraBarcodeDetector.detect(canvas)
-        if (codes.length > 0) {
-          const detectedCode = normalizeProductCode(codes[0]?.rawValue?.trim() ?? '')
-          if (detectedCode) {
-            scanCode.value = detectedCode
-            closeCameraScanDialog()
-            handleScanSubmit()
-            return
-          }
-        }
-      } catch {
-        // 忽略单帧识别异常，继续下一帧。
-      }
-    }
-    cameraScanFrameId = globalThis.requestAnimationFrame(() => {
-      void loop()
-    })
-  }
-
-  void loop()
-}
-
-// 打开摄像头扫码弹窗：
-// 1. 先检查浏览器是否支持 BarcodeDetector；
-// 2. 再请求后置摄像头；
-// 3. 成功后开始视频帧循环识别。
-const openCameraScanDialog = async () => {
-  const BarcodeDetectorCtor = (globalThis.window as Window & {
-    BarcodeDetector?: new (options?: { formats?: string[] }) => {
-      detect: (source: CanvasImageSource) => Promise<Array<{ rawValue?: string }>>
-    }
-  }).BarcodeDetector
-  if (!BarcodeDetectorCtor) {
-    ElMessage.warning('当前浏览器不支持摄像头扫码，请改用扫码枪或手动输入')
-    return
-  }
-
-  cameraScanVisible.value = true
-  cameraScanLoading.value = true
-  await nextTick()
-
-  try {
-    cameraBarcodeDetector = new BarcodeDetectorCtor({
-      formats: ['qr_code', 'code_128', 'ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_39', 'itf', 'codabar'],
-    })
-    const stream = await globalThis.navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: { ideal: 'environment' },
-      },
-      audio: false,
-    })
-    cameraScanStream = stream
-    if (!cameraVideoRef.value) {
-      throw new Error('摄像头预览初始化失败')
-    }
-    cameraVideoRef.value.srcObject = stream
-    await cameraVideoRef.value.play()
-    cameraScanLoading.value = false
-    startCameraDetectLoop()
-  } catch (error) {
-    closeCameraScanDialog()
-    ElMessage.error(error instanceof Error ? error.message : '无法打开摄像头，请检查权限')
-  }
-}
-
 // 识别商品编码：
 // - 先做编码标准化；
 // - 再在商品映射表里查找；
@@ -372,6 +243,30 @@ const handleScanSubmit = () => {
   scanCode.value = ''
   focusScanInput()
 }
+
+const {
+  bindVideoElement,
+  canUseCamera,
+  imageInputRef,
+  scanButtonTitle,
+  scanDialogVisible: cameraScanVisible,
+  scanLoading: cameraScanLoading,
+  scanStatusText,
+  videoRef: cameraVideoRef,
+  closeScanDialog: closeCameraScanDialog,
+  handleImageInputChange,
+  openScanDialog: openCameraScanDialog,
+} = useCameraQrScanner({
+  normalizeCode: normalizeProductCode,
+  formats: ['qr_code', 'code_128', 'ean_13', 'ean_8', 'upc_a', 'upc_e', 'code_39', 'itf', 'codabar'],
+  onDetected: async (code) => {
+    scanCode.value = code
+    handleScanSubmit()
+  },
+})
+
+void imageInputRef
+void cameraVideoRef
 
 // 快捷数量按钮的行为依赖当前模式：
 // - 扫码即+1：对当前识别商品直接累计；
@@ -515,11 +410,6 @@ onMounted(async () => {
   // 页面初始化后把焦点放到扫码框，保证扫码枪/键盘可直接开始录入。
   focusScanInput()
 })
-
-onBeforeUnmount(() => {
-  // 组件卸载时释放摄像头，避免离开页面后仍占用设备资源。
-  stopCameraScan()
-})
 </script>
 
 <template>
@@ -539,26 +429,35 @@ onBeforeUnmount(() => {
         </div>
         <p class="mt-2 break-words text-sm text-slate-500">扫码枪输入后按回车可直接识别商品编码，未识别将阻止写入清单。</p>
 
-        <el-input
-          ref="scanInputRef"
-          v-model="scanCode"
-          class="mt-4"
-          clearable
-          placeholder="请扫描商品编码并回车"
-          @keyup.enter="handleScanSubmit"
-        >
-          <template #suffix>
-            <span class="text-xs text-slate-400">回车识别</span>
-          </template>
-        </el-input>
+        <div class="mt-4">
+          <el-input
+            ref="scanInputRef"
+            v-model="scanCode"
+            class="scan-entry-input"
+            clearable
+            placeholder="请扫描商品编码或输入后回车"
+            @keyup.enter="handleScanSubmit"
+          >
+            <template #suffix>
+              <span class="text-xs text-slate-400">回车识别</span>
+            </template>
+          </el-input>
 
-        <div class="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
-          <el-button @click="handleScanSubmit">识别并录入</el-button>
-          <el-button @click="openCameraScanDialog">摄像头扫码</el-button>
+          <div class="mt-3 inbound-scan-toolbar">
+            <div class="inbound-scan-icon-group">
+              <el-tooltip :content="scanButtonTitle" placement="top">
+                <el-button class="inbound-camera-btn" @click="openCameraScanDialog">
+                  <el-icon :size="18"><CameraFilled /></el-icon>
+                </el-button>
+              </el-tooltip>
+              <el-button class="inbound-focus-btn" plain @click="focusScanInput">聚焦扫码框</el-button>
+            </div>
+            <el-button type="primary" class="inbound-recognize-btn" @click="handleScanSubmit">识别并录入</el-button>
+          </div>
         </div>
 
-        <div class="mt-2">
-          <el-button class="w-full" plain @click="focusScanInput">聚焦扫码框</el-button>
+        <div class="mt-3 rounded-2xl border border-emerald-100 bg-emerald-50/70 p-3 text-xs leading-6 text-slate-600">
+          <p>{{ scanCapabilityHint }}</p>
         </div>
 
         <div class="mt-3 rounded-2xl border border-slate-100 bg-slate-50 p-3">
@@ -727,25 +626,25 @@ onBeforeUnmount(() => {
       </section>
     </div>
 
-    <el-dialog
+    <input
+      ref="imageInputRef"
+      type="file"
+      accept="image/*"
+      capture="environment"
+      class="hidden"
+      @change="handleImageInputChange"
+    />
+
+    <UnifiedScanDialog
       v-model="cameraScanVisible"
-      title="摄像头扫码录入"
-      class="camera-scan-dialog"
-      width="520px"
-      :close-on-click-modal="false"
-      @closed="stopCameraScan"
-    >
-      <div class="scan-preview-wrap">
-        <video ref="cameraVideoRef" class="scan-preview-video" autoplay muted playsinline />
-        <div v-if="cameraScanLoading" class="scan-preview-mask">正在启动摄像头...</div>
-      </div>
-      <p class="mt-3 text-xs text-slate-500">
-        请将商品条码或二维码对准取景框，识别成功后会自动按当前录入模式加入流程。
-      </p>
-      <template #footer>
-        <el-button @click="closeCameraScanDialog">取消</el-button>
-      </template>
-    </el-dialog>
+      title="商品扫码录入"
+      mode-label="库存录入"
+      :loading="cameraScanLoading"
+      :status-text="scanStatusText"
+      hint-text="请将商品条码或二维码对准取景框中央，识别成功后会自动按当前录入模式加入流程。"
+      :bind-video-element="bindVideoElement"
+      @closed="closeCameraScanDialog"
+    />
   </PageContainer>
 </template>
 
@@ -805,28 +704,40 @@ onBeforeUnmount(() => {
   max-width: 100%;
 }
 
-.scan-preview-wrap {
-  position: relative;
-  overflow: hidden;
+.scan-entry-input :deep(.el-input__wrapper) {
+  min-height: 48px;
   border-radius: 14px;
-  background: #0f172a;
 }
 
-.scan-preview-video {
-  display: block;
-  width: 100%;
-  min-height: 260px;
-  object-fit: cover;
+.inbound-scan-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
 }
 
-.scan-preview-mask {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  background: rgba(15, 23, 42, 0.55);
-  color: #ffffff;
-  font-size: 0.9rem;
+.inbound-scan-icon-group {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.inbound-camera-btn {
+  border-radius: 14px;
+  flex: 0 0 48px;
+  min-height: 48px;
+  padding: 0;
+}
+
+.inbound-focus-btn {
+  min-height: 48px;
+  border-radius: 14px;
+}
+
+.inbound-recognize-btn {
+  min-height: 48px;
+  min-width: 8.5rem;
+  border-radius: 14px;
 }
 
 @media (max-width: 767px) {
@@ -837,6 +748,23 @@ onBeforeUnmount(() => {
   .inbound-workbench-root :deep(.el-card),
   .inbound-workbench-root > section {
     border-radius: 20px;
+  }
+
+  .inbound-scan-toolbar {
+    gap: 0.75rem;
+  }
+
+  .inbound-scan-icon-group {
+    gap: 0.5rem;
+  }
+
+  .inbound-focus-btn {
+    display: none;
+  }
+
+  .inbound-recognize-btn {
+    min-width: 0;
+    flex: 1 1 auto;
   }
 
   .inbound-mobile-form :deep(.el-form-item) {
@@ -870,13 +798,5 @@ onBeforeUnmount(() => {
     min-width: 0;
   }
 
-  .camera-scan-dialog :deep(.el-dialog) {
-    width: calc(100vw - 24px) !important;
-    margin-top: 8vh;
-  }
-
-  .camera-scan-dialog :deep(.el-dialog__body) {
-    padding: 14px;
-  }
 }
 </style>

@@ -8,6 +8,10 @@ import {
   verifyInboundOrder,
   type InboundOrderDetail,
 } from '@/api/modules/inbound'
+import { UnifiedScanDialog } from '@/components/common'
+import { CameraFilled, DocumentCopy, Search } from '@element-plus/icons-vue'
+import { useCameraQrScanner } from '@/composables/useCameraQrScanner'
+import { useDevice } from '@/composables/useDevice'
 import { extractErrorMessage } from '@/utils/error'
 import dayjs from 'dayjs'
 
@@ -16,6 +20,7 @@ const scanInputRef = ref<{ focus: () => void } | null>(null)
 const loading = ref(false)
 const verifying = ref(false)
 const successToastVisible = ref(false)
+const { isPhone } = useDevice()
 
 const currentOrder = ref<InboundOrderDetail | null>(null)
 const recentScans = ref<Array<{ verifyCode: string; showNo: string; status: InboundOrderDetail['order']['status']; scannedAt: string }>>([])
@@ -41,6 +46,12 @@ const canQuery = computed(() => {
 // 确认入库按钮可用状态：仅待入库单据允许操作，其他状态禁止。
 const canVerify = computed(() => {
   return Boolean(currentOrder.value && currentOrder.value.order.status === 'pending' && !verifying.value)
+})
+
+const scanActionHint = computed(() => {
+  return canUseCamera.value
+    ? '轻触相机图标即可实时扫码，识别成功后会自动查询送货单。'
+    : '当前环境将自动切换为拍照识别模式，轻触相机图标即可拍照识别二维码。'
 })
 
 // 详情摘要卡数据，统一模板渲染，避免重复写格式化逻辑。
@@ -111,6 +122,30 @@ const focusScanInput = () => {
   })
 }
 
+const {
+  canUseCamera,
+  bindVideoElement,
+  imageInputRef,
+  scanButtonTitle,
+  scanDialogVisible,
+  scanLoading,
+  scanStatusText,
+  videoRef,
+  closeScanDialog,
+  handleImageInputChange,
+  openScanDialog,
+} = useCameraQrScanner({
+  normalizeCode: (rawValue) => rawValue.trim(),
+  onDetected: async (code) => {
+    scanCode.value = code
+    await handleScan()
+  },
+})
+
+// 这两个 ref 由模板中的 DOM 绑定消费，显式保留一份脚本侧引用以通过严格类型构建。
+void imageInputRef
+void videoRef
+
 const isShowNoPattern = (code: string) => /^IN\d{12}$/i.test(code.trim())
 
 const handleScan = async () => {
@@ -153,6 +188,24 @@ const handleScan = async () => {
     focusScanInput()
   } finally {
     loading.value = false
+  }
+}
+
+const handlePasteAndSearch = async () => {
+  if (!globalThis.navigator?.clipboard?.readText) {
+    ElMessage.warning('当前环境不支持读取剪贴板，请手动粘贴')
+    return
+  }
+  try {
+    const text = await globalThis.navigator.clipboard.readText()
+    scanCode.value = text.trim()
+    if (!scanCode.value) {
+      ElMessage.warning('剪贴板中未读取到送货单号或二维码内容')
+      return
+    }
+    await handleScan()
+  } catch {
+    ElMessage.warning('读取剪贴板失败，请检查浏览器权限')
   }
 }
 
@@ -256,7 +309,7 @@ onBeforeUnmount(() => {
             <el-icon class="text-brand"><Search /></el-icon>
             扫码作业区
           </h2>
-          <div class="flex gap-3">
+          <div class="mt-4">
             <el-input
               ref="scanInputRef"
               v-model="scanCode"
@@ -270,20 +323,43 @@ onBeforeUnmount(() => {
                 <el-icon><Picture /></el-icon>
               </template>
             </el-input>
-            <el-button 
-              type="primary" 
-              size="large" 
-              class="!rounded-xl px-6 flex-none"
-              :loading="loading" 
-              :disabled="!canQuery" 
-              @click="handleScan"
-            >
-              {{ loading ? '识别中' : '查询' }}
-            </el-button>
+            <div class="mt-3 scan-toolbar">
+              <div class="scan-icon-group">
+                <el-tooltip :content="scanButtonTitle" placement="top">
+                  <el-button
+                    class="scan-icon-btn"
+                    :loading="scanLoading"
+                    @click="openScanDialog"
+                  >
+                    <el-icon :size="18"><CameraFilled /></el-icon>
+                  </el-button>
+                </el-tooltip>
+                <el-tooltip content="读取剪贴板并查询" placement="top">
+                  <el-button
+                    class="scan-icon-btn"
+                    :loading="loading"
+                    @click="handlePasteAndSearch"
+                  >
+                    <el-icon :size="18"><DocumentCopy /></el-icon>
+                  </el-button>
+                </el-tooltip>
+              </div>
+              <el-button
+                type="primary"
+                size="large"
+                class="scan-query-btn"
+                :loading="loading"
+                :disabled="!canQuery"
+                @click="handleScan"
+              >
+                <el-icon class="mr-1.5"><Search /></el-icon>
+                {{ loading ? '识别中' : isPhone ? '查询' : '查询送货单' }}
+              </el-button>
+            </div>
           </div>
           <div class="mt-4 rounded-xl bg-brand/5 dark:bg-brand/15 border border-brand/20 p-3 text-xs leading-6 text-slate-600 dark:text-slate-300">
             <p>快捷键：Enter 查询，Ctrl+Enter 确认入库，Esc 重置页面</p>
-            <p>提示：连续作业时无需手动点击，系统会自动回焦扫码框。</p>
+            <p>{{ scanActionHint }}</p>
           </div>
         </div>
 
@@ -434,10 +510,43 @@ onBeforeUnmount(() => {
         </transition>
       </section>
     </div>
+
+    <input
+      ref="imageInputRef"
+      type="file"
+      accept="image/*"
+      capture="environment"
+      class="hidden"
+      @change="handleImageInputChange"
+    />
+
+    <UnifiedScanDialog
+      v-model="scanDialogVisible"
+      title="送货单扫码识别"
+      mode-label="入库识别"
+      :loading="scanLoading"
+      :status-text="scanStatusText"
+      hint-text="请将送货单二维码置于取景框中央，识别成功后会自动查询并回填当前送货单。"
+      :bind-video-element="bindVideoElement"
+      @closed="closeScanDialog"
+    />
   </PageContainer>
 </template>
 
 <style scoped>
+.scan-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.scan-icon-group {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
 /* 扫码输入框增强：聚焦时边框强调，便于扫码枪连续作业时快速确认焦点位置。 */
 .scan-input :deep(.el-input__wrapper) {
   border-radius: 12px;
@@ -452,6 +561,20 @@ onBeforeUnmount(() => {
   font-size: 16px;
 }
 
+.scan-icon-btn {
+  border-radius: 12px;
+  flex: 0 0 48px;
+  min-height: 48px;
+  padding: 0;
+}
+
+.scan-query-btn {
+  border-radius: 12px;
+  flex: 0 0 auto;
+  min-height: 48px;
+  min-width: 8.5rem;
+  padding-inline: 1.15rem;
+}
 
 /* 最近查询项：卡片化并提供轻微 hover 提示可点击。 */
 .recent-item {
@@ -489,6 +612,22 @@ onBeforeUnmount(() => {
   to {
     opacity: 1;
     transform: translateY(0) scale(1);
+  }
+}
+
+@media (max-width: 767px) {
+  .scan-toolbar {
+    gap: 0.75rem;
+  }
+
+  .scan-icon-group {
+    gap: 0.5rem;
+  }
+
+  .scan-query-btn {
+    min-width: 0;
+    flex: 1 1 auto;
+    padding-inline: 0.95rem;
   }
 }
 </style>
