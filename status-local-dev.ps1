@@ -1,15 +1,11 @@
 ﻿<#
 模块说明：status-local-dev.ps1
-文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
-维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+文件职责：查看由 start-local-dev.ps1 维护的本地联调运行状态。
+维护说明：优先观察 shell 存活、端口监听和健康检查三类信号。
 #>
 
-﻿$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Stop'
 
-# 查看由 start-local-dev.ps1 管理的本地联调状态：
-# - 优先读取 .local-dev/processes.json 中的记录；
-# - 同时检查 shell PID、监听 PID 与 health 接口，帮助快速判断“是否真的还在运行”；
-# - 仅做状态查看，不修改任何进程。
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RuntimeRoot = Join-Path $ProjectRoot '.local-dev'
 $PidFile = Join-Path $RuntimeRoot 'processes.json'
@@ -35,19 +31,10 @@ function Get-LanIPv4Addresses {
   $lanIpSet = [System.Collections.Generic.HashSet[string]]::new()
   foreach ($ipConfig in $ipConfigs) {
     $ipAddress = $ipConfig.IPAddress
-    if (-not $ipAddress) {
-      continue
-    }
-    if ($ipAddress -eq '127.0.0.1') {
-      continue
-    }
-    if ($ipAddress.StartsWith('169.254.')) {
-      continue
-    }
-    if ($ipConfig.SkipAsSource) {
-      continue
-    }
-
+    if (-not $ipAddress) { continue }
+    if ($ipAddress -eq '127.0.0.1') { continue }
+    if ($ipAddress.StartsWith('169.254.')) { continue }
+    if ($ipConfig.SkipAsSource) { continue }
     [void]$lanIpSet.Add($ipAddress)
   }
 
@@ -76,11 +63,24 @@ function Get-ListeningProcessIds {
 }
 
 function Test-HttpReady {
-  param([string]$Uri)
+  param(
+    [string]$Uri,
+    [switch]$IgnoreTlsCertificateError
+  )
 
   try {
-    $response = Invoke-WebRequest -Uri $Uri -UseBasicParsing -TimeoutSec 2
-    return $response.StatusCode -ge 200 -and $response.StatusCode -lt 500
+    $previousCertificateValidationCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+    if ($IgnoreTlsCertificateError) {
+      [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+    }
+
+    try {
+      $response = Invoke-WebRequest -Uri $Uri -UseBasicParsing -TimeoutSec 2
+      return $response.StatusCode -ge 200 -and $response.StatusCode -lt 500
+    }
+    finally {
+      [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $previousCertificateValidationCallback
+    }
   }
   catch {
     return $false
@@ -93,17 +93,24 @@ if (-not (Test-Path $PidFile)) {
 }
 
 $record = Get-Content -Path $PidFile -Raw | ConvertFrom-Json
-$frontendUrl = "http://127.0.0.1:$($record.frontendPort)"
+$frontendScheme = if ($record.frontendScheme) { [string]$record.frontendScheme } elseif ($record.frontendHttps) { 'https' } else { 'http' }
+$frontendLocalHostForHealthCheck = if ($frontendScheme -eq 'https') { 'localhost' } else { '127.0.0.1' }
+$frontendUrl = "${frontendScheme}://$frontendLocalHostForHealthCheck`:$($record.frontendPort)"
 $backendUrl = "http://127.0.0.1:$($record.backendPort)"
 $backendHealthUrl = "$backendUrl/health"
 $frontendHost = if ($record.frontendHost) { [string]$record.frontendHost } else { '127.0.0.1' }
+$frontendHttps = $frontendScheme -eq 'https'
 
 $backendShellAlive = Test-ProcessAlive -ProcessId ([int]$record.backendShellPid)
 $frontendShellAlive = Test-ProcessAlive -ProcessId ([int]$record.frontendShellPid)
 $backendListeningPids = @(Get-ListeningProcessIds -Port ([int]$record.backendPort))
 $frontendListeningPids = @(Get-ListeningProcessIds -Port ([int]$record.frontendPort))
 $backendHealthReady = Test-HttpReady -Uri $backendHealthUrl
-$frontendReady = Test-HttpReady -Uri $frontendUrl
+$frontendReady = $frontendListeningPids.Count -gt 0
+if (-not $frontendReady -and -not $frontendHttps) {
+  # HTTP 场景可补充一次应用层探测，避免仅靠端口监听误判。
+  $frontendReady = Test-HttpReady -Uri $frontendUrl
+}
 
 Write-Info '本地联调状态如下：'
 Write-Info "StartedAt: $($record.startedAt)"
@@ -123,8 +130,8 @@ if ($frontendHost -eq '0.0.0.0' -or $frontendHost -eq '*') {
   if ($lanIpAddresses.Count -gt 0) {
     Write-Info '局域网访问地址：'
     foreach ($lanIpAddress in $lanIpAddresses) {
-      Write-Info "  管理端: http://$lanIpAddress`:$($record.frontendPort)/login"
-      Write-Info "  客户端: http://$lanIpAddress`:$($record.frontendPort)/client/login"
+      Write-Info "  管理端: ${frontendScheme}://$lanIpAddress`:$($record.frontendPort)/login"
+      Write-Info "  客户端: ${frontendScheme}://$lanIpAddress`:$($record.frontendPort)/client/login"
     }
   }
 }

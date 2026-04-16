@@ -1,27 +1,12 @@
-import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
+﻿import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
-  BarcodeFormat,
-  BinaryBitmap,
-  DecodeHintType,
-  HybridBinarizer,
-  MultiFormatReader,
-  NotFoundException,
-  RGBLuminanceSource,
-} from '@zxing/library'
-import jsQR from 'jsqr'
-
-interface BarcodeDetectorResult {
-  rawValue?: string
-}
-
-interface BarcodeDetectorInstance {
-  detect: (source: CanvasImageSource) => Promise<BarcodeDetectorResult[]>
-}
-
-interface BarcodeDetectorConstructor {
-  new (options?: { formats?: string[] }): BarcodeDetectorInstance
-}
+  Html5Qrcode,
+  Html5QrcodeSupportedFormats,
+  type Html5QrcodeCameraScanConfig,
+  type Html5QrcodeFullConfig,
+  type Html5QrcodeResult,
+} from 'html5-qrcode'
 
 interface UseCameraQrScannerOptions {
   onDetected: (code: string) => Promise<void> | void
@@ -29,284 +14,240 @@ interface UseCameraQrScannerOptions {
   formats?: string[]
 }
 
-const LIVE_SCAN_INTERVAL = 180
-const ZXING_FORMAT_MAP: Record<string, BarcodeFormat> = {
-  qr_code: BarcodeFormat.QR_CODE,
-  code_128: BarcodeFormat.CODE_128,
-  ean_13: BarcodeFormat.EAN_13,
-  ean_8: BarcodeFormat.EAN_8,
-  upc_a: BarcodeFormat.UPC_A,
-  upc_e: BarcodeFormat.UPC_E,
-  code_39: BarcodeFormat.CODE_39,
-  itf: BarcodeFormat.ITF,
-  codabar: BarcodeFormat.CODABAR,
+type SupportedBarcodeFormat =
+  | 'qr_code'
+  | 'code_128'
+  | 'ean_13'
+  | 'ean_8'
+  | 'upc_a'
+  | 'upc_e'
+  | 'code_39'
+  | 'itf'
+  | 'codabar'
+  | 'pdf_417'
+  | 'data_matrix'
+  | 'aztec'
+
+const HTML5_QRCODE_FORMAT_MAP: Record<SupportedBarcodeFormat, Html5QrcodeSupportedFormats> = {
+  qr_code: Html5QrcodeSupportedFormats.QR_CODE,
+  code_128: Html5QrcodeSupportedFormats.CODE_128,
+  ean_13: Html5QrcodeSupportedFormats.EAN_13,
+  ean_8: Html5QrcodeSupportedFormats.EAN_8,
+  upc_a: Html5QrcodeSupportedFormats.UPC_A,
+  upc_e: Html5QrcodeSupportedFormats.UPC_E,
+  code_39: Html5QrcodeSupportedFormats.CODE_39,
+  itf: Html5QrcodeSupportedFormats.ITF,
+  codabar: Html5QrcodeSupportedFormats.CODABAR,
+  pdf_417: Html5QrcodeSupportedFormats.PDF_417,
+  data_matrix: Html5QrcodeSupportedFormats.DATA_MATRIX,
+  aztec: Html5QrcodeSupportedFormats.AZTEC,
 }
 
-// 通用二维码扫码能力：
-// - 优先使用浏览器原生 BarcodeDetector；
-// - 若浏览器不支持，则自动降级为 jsQR 纯前端识别；
-// - 若摄像头不可用，则回退到“拍照/选图识别”。
+const SCAN_HOST_ID_PREFIX = 'html5-qrcode-host'
+const DEFAULT_SCAN_STATUS = '请将条码或二维码置于取景框中央，识别成功后会自动回填'
+
+// 通用扫码能力改为 html5-qrcode：
+// 1. HTTPS / localhost 下优先实时摄像头扫码；
+// 2. 非安全上下文自动降级为拍照或选图识别；
+// 3. 页面层继续只关心“打开扫码、关闭扫码、识别结果回填”这组统一接口。
 export const useCameraQrScanner = (options: UseCameraQrScannerOptions) => {
   const scanDialogVisible = ref(false)
   const scanLoading = ref(false)
-  const scanStatusText = ref('请将二维码置于取景框中央，识别成功后会自动回填')
-  const videoRef = ref<HTMLVideoElement | null>(null)
+  const scanStatusText = ref(DEFAULT_SCAN_STATUS)
+  const scannerContainerRef = ref<HTMLDivElement | null>(null)
   const imageInputRef = ref<HTMLInputElement | null>(null)
+  const cameraPermissionRequested = ref(false)
+
+  const hasCameraApi = computed(() => {
+    return Boolean(globalThis.navigator?.mediaDevices?.getUserMedia)
+  })
+
+  const isSecureCameraContext = computed(() => {
+    return Boolean(globalThis.isSecureContext)
+  })
+
   const supportsLiveCamera = computed(() => {
-    return Boolean(globalThis.isSecureContext && globalThis.navigator?.mediaDevices?.getUserMedia)
+    return Boolean(isSecureCameraContext.value && hasCameraApi.value)
   })
 
   const canUseCamera = computed(() => {
-    return Boolean(globalThis.navigator?.mediaDevices?.getUserMedia || imageInputRef.value || globalThis.FileReader)
+    return Boolean(imageInputRef.value || globalThis.FileReader)
   })
 
-  const scanButtonTitle = computed(() => {
+  const scanModeLabel = computed(() => {
     return supportsLiveCamera.value ? '实时扫码' : '拍照识别'
   })
 
-  let scanStream: MediaStream | null = null
-  let scanFrameId: number | null = null
-  let scanCanvas: HTMLCanvasElement | null = null
-  let barcodeDetector: BarcodeDetectorInstance | null = null
-  let lastDetectAt = 0
-  const zxingReader = new MultiFormatReader()
+  const scanButtonTitle = computed(() => {
+    return supportsLiveCamera.value ? '打开摄像头扫码' : '打开拍照识别'
+  })
 
-  const buildPossibleFormats = () => {
-    const sourceFormats = options.formats?.length ? options.formats : ['qr_code']
-    return sourceFormats
-      .map((format) => ZXING_FORMAT_MAP[format])
-      .filter((format): format is BarcodeFormat => Boolean(format))
-  }
-
-  const ensureDecodeEngines = () => {
-    const BarcodeDetectorCtor = getBarcodeDetectorConstructor()
-    barcodeDetector = BarcodeDetectorCtor
-      ? new BarcodeDetectorCtor({ formats: options.formats ?? ['qr_code'] })
-      : null
-
-    const hints = new Map()
-    const possibleFormats = buildPossibleFormats()
-    if (possibleFormats.length) {
-      hints.set(DecodeHintType.POSSIBLE_FORMATS, possibleFormats)
-    }
-    zxingReader.setHints(hints)
-  }
-
-  const getBarcodeDetectorConstructor = (): BarcodeDetectorConstructor | null => {
-    return (globalThis as typeof globalThis & { BarcodeDetector?: BarcodeDetectorConstructor }).BarcodeDetector ?? null
-  }
-
-  const stopScanLoop = () => {
-    if (scanFrameId !== null) {
-      globalThis.cancelAnimationFrame(scanFrameId)
-      scanFrameId = null
-    }
-  }
-
-  const stopScanCamera = () => {
-    stopScanLoop()
-    if (scanStream) {
-      scanStream.getTracks().forEach((track) => track.stop())
-      scanStream = null
-    }
-    if (videoRef.value) {
-      videoRef.value.srcObject = null
-    }
-  }
-
-  const closeScanDialog = () => {
-    scanDialogVisible.value = false
-    scanLoading.value = false
-    stopScanCamera()
-  }
+  let html5Qrcode: Html5Qrcode | null = null
+  let activeSessionId = 0
+  let tempScanHost: HTMLDivElement | null = null
+  let detectionLocked = false
 
   const normalizeDetectedCode = (rawValue: string) => {
     return options.normalizeCode(rawValue).trim()
   }
 
-  const bindVideoElement = (element: HTMLVideoElement | null) => {
-    videoRef.value = element
+  const buildFormatsToSupport = () => {
+    const sourceFormats = options.formats?.length ? options.formats : ['qr_code']
+    const mappedFormats = sourceFormats
+      .map((format) => HTML5_QRCODE_FORMAT_MAP[format as SupportedBarcodeFormat])
+      .filter((format): format is Html5QrcodeSupportedFormats => typeof format === 'number')
+
+    return mappedFormats.length ? mappedFormats : [Html5QrcodeSupportedFormats.QR_CODE]
   }
 
-  const tryDetectWithJsQr = (ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement) => {
-    const width = canvas.width
-    const height = canvas.height
-    if (width <= 0 || height <= 0) {
-      return ''
+  const buildScannerConfig = (): Html5QrcodeFullConfig => {
+    return {
+      verbose: false,
+      formatsToSupport: buildFormatsToSupport(),
+      useBarCodeDetectorIfSupported: true,
     }
-
-    // 优先识别中间区域，减少背景干扰；若失败，再回退到整帧识别。
-    const cropWidth = Math.floor(width * 0.72)
-    const cropHeight = Math.floor(height * 0.72)
-    const offsetX = Math.floor((width - cropWidth) / 2)
-    const offsetY = Math.floor((height - cropHeight) / 2)
-
-    const tryDecode = (x: number, y: number, targetWidth: number, targetHeight: number) => {
-      const imageData = ctx.getImageData(x, y, targetWidth, targetHeight)
-      const result = jsQR(imageData.data, targetWidth, targetHeight, {
-        inversionAttempts: 'attemptBoth',
-      })
-      return result?.data ? normalizeDetectedCode(result.data) : ''
-    }
-
-    return (
-      tryDecode(offsetX, offsetY, cropWidth, cropHeight) ||
-      tryDecode(0, 0, width, height)
-    )
   }
 
-  const tryDetectWithZxing = (ctx: CanvasRenderingContext2D, x: number, y: number, targetWidth: number, targetHeight: number) => {
+  const buildCameraScanConfig = (): Html5QrcodeCameraScanConfig => {
+    // 取景框与统一扫码卡片的视觉舞台保持一致：
+    // - 移动端使用更紧凑的正方形识别区，减少“扫码框顶到边界”的拥挤感；
+    // - PC 端适度放大，兼顾远距离识别与视觉留白。
+    const adaptiveQrBox = (
+      viewfinderWidth: number,
+      viewfinderHeight: number,
+    ): { width: number, height: number } => {
+      const shortestEdge = Math.min(viewfinderWidth, viewfinderHeight)
+      const isMobileViewport = viewfinderWidth <= 420
+      const scaleFactor = isMobileViewport ? 0.7 : 0.68
+      const minSize = isMobileViewport ? 180 : 190
+      const maxSize = isMobileViewport ? 260 : 300
+      const baseSize = Math.floor(shortestEdge * scaleFactor)
+      const boundedSize = Math.max(minSize, Math.min(baseSize, maxSize))
+      return {
+        width: boundedSize,
+        height: boundedSize,
+      }
+    }
+
+    return {
+      fps: 10,
+      qrbox: adaptiveQrBox,
+      aspectRatio: globalThis.matchMedia?.('(max-width: 767px)')?.matches ? 1 : 1.333334,
+      disableFlip: false,
+      videoConstraints: {
+        facingMode: { ideal: 'environment' },
+      },
+    }
+  }
+
+  const bindScannerContainer = (element: HTMLDivElement | null) => {
+    scannerContainerRef.value = element
+  }
+
+  const ensureScanHostId = (element: HTMLDivElement) => {
+    if (!element.id) {
+      element.id = `${SCAN_HOST_ID_PREFIX}-${Math.random().toString(36).slice(2, 10)}`
+    }
+    return element.id
+  }
+
+  const ensureTempScanHost = () => {
+    if (!globalThis.document) {
+      throw new Error('当前环境不支持创建扫码容器')
+    }
+
+    if (!tempScanHost) {
+      tempScanHost = globalThis.document.createElement('div')
+      tempScanHost.id = `${SCAN_HOST_ID_PREFIX}-temp`
+      tempScanHost.style.position = 'fixed'
+      tempScanHost.style.left = '-99999px'
+      tempScanHost.style.top = '-99999px'
+      tempScanHost.style.width = '1px'
+      tempScanHost.style.height = '1px'
+      tempScanHost.style.opacity = '0'
+      tempScanHost.style.pointerEvents = 'none'
+      globalThis.document.body.append(tempScanHost)
+    }
+
+    return tempScanHost
+  }
+
+  const removeTempScanHost = () => {
+    tempScanHost?.remove()
+    tempScanHost = null
+  }
+
+  const disposeScanner = async () => {
+    if (!html5Qrcode) {
+      removeTempScanHost()
+      return
+    }
+
+    const currentScanner = html5Qrcode
+    html5Qrcode = null
+
     try {
-      const imageData = ctx.getImageData(x, y, targetWidth, targetHeight)
-      const luminanceSource = new RGBLuminanceSource(imageData.data, targetWidth, targetHeight)
-      const binaryBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource))
-      const result = zxingReader.decode(binaryBitmap)
-      return result.getText() ? normalizeDetectedCode(result.getText()) : ''
-    } catch (error) {
-      if (error instanceof NotFoundException) {
-        return ''
+      if (currentScanner.isScanning) {
+        await currentScanner.stop()
       }
-      return ''
-    } finally {
-      zxingReader.reset()
+    } catch {
+      // 某些浏览器在停止已中断流时会抛错，这里只做兜底清理，不阻断关闭流程。
     }
+
+    try {
+      currentScanner.clear()
+    } catch {
+      // clear 失败不影响主流程，避免在关闭弹窗时额外打断用户。
+    }
+
+    removeTempScanHost()
   }
 
-  const detectCurrentFrame = async (ctx: CanvasRenderingContext2D, canvas: HTMLCanvasElement) => {
-    const width = canvas.width
-    const height = canvas.height
-    const cropWidth = Math.floor(width * 0.72)
-    const cropHeight = Math.floor(height * 0.72)
-    const offsetX = Math.floor((width - cropWidth) / 2)
-    const offsetY = Math.floor((height - cropHeight) / 2)
-
-    if (barcodeDetector) {
-      try {
-        const codes = await barcodeDetector.detect(canvas)
-        const rawValue = codes[0]?.rawValue?.trim() ?? ''
-        const normalized = rawValue ? normalizeDetectedCode(rawValue) : ''
-        if (normalized) {
-          return normalized
-        }
-      } catch {
-        // 原生识别单帧失败时，继续回退到 jsQR，避免直接中断扫码。
-      }
-    }
-
-    return (
-      tryDetectWithZxing(ctx, offsetX, offsetY, cropWidth, cropHeight) ||
-      tryDetectWithZxing(ctx, 0, 0, width, height) ||
-      tryDetectWithJsQr(ctx, canvas)
-    )
+  const closeScanDialog = () => {
+    activeSessionId += 1
+    detectionLocked = false
+    scanDialogVisible.value = false
+    scanLoading.value = false
+    scanStatusText.value = DEFAULT_SCAN_STATUS
+    void disposeScanner()
   }
 
   const finalizeDetectedCode = async (code: string) => {
+    detectionLocked = true
     closeScanDialog()
     await options.onDetected(code)
   }
 
-  const startDetectLoop = () => {
-    const video = videoRef.value
-    if (!video) {
-      return
-    }
-
-    if (!scanCanvas) {
-      scanCanvas = globalThis.document.createElement('canvas')
-    }
-    const canvas = scanCanvas
-    const ctx = canvas.getContext('2d', { willReadFrequently: true })
-    if (!ctx) {
-      ElMessage.error('扫码初始化失败，请改用手动输入')
-      return
-    }
-
-    const loop = async () => {
-      if (!scanDialogVisible.value || !videoRef.value) {
-        return
-      }
-
-      const now = globalThis.performance.now()
-      if (now - lastDetectAt < LIVE_SCAN_INTERVAL) {
-        scanFrameId = globalThis.requestAnimationFrame(() => {
-          void loop()
-        })
-        return
-      }
-      lastDetectAt = now
-
-      if (video.videoWidth > 0 && video.videoHeight > 0) {
-        const maxWidth = 960
-        const scale = video.videoWidth > maxWidth ? maxWidth / video.videoWidth : 1
-        canvas.width = Math.floor(video.videoWidth * scale)
-        canvas.height = Math.floor(video.videoHeight * scale)
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
-        const detectedCode = await detectCurrentFrame(ctx, canvas)
-        if (detectedCode) {
-          await finalizeDetectedCode(detectedCode)
-          return
-        }
-      }
-
-      scanFrameId = globalThis.requestAnimationFrame(() => {
-        void loop()
-      })
-    }
-
-    void loop()
+  const createScanner = (element: HTMLDivElement) => {
+    const elementId = ensureScanHostId(element)
+    html5Qrcode = new Html5Qrcode(elementId, buildScannerConfig())
+    return html5Qrcode
   }
 
-  const triggerImagePick = async () => {
-    await nextTick()
+  const triggerImagePick = () => {
+    // 这里必须同步触发 click，避免 iOS Safari 丢失用户手势上下文，导致无法弹出拍照或相册面板。
     imageInputRef.value?.click()
   }
 
   const processImageFile = async (file: File) => {
     scanLoading.value = true
-    scanStatusText.value = '正在识别图片中的二维码...'
+    scanStatusText.value = '正在识别图片中的条码或二维码...'
+
     try {
-      if (!scanCanvas) {
-        scanCanvas = globalThis.document.createElement('canvas')
-      }
-      const canvas = scanCanvas
-      const ctx = canvas.getContext('2d', { willReadFrequently: true })
-      if (!ctx) {
-        throw new Error('图片识别初始化失败')
-      }
-
-      if (typeof globalThis.createImageBitmap === 'function') {
-        const bitmap = await globalThis.createImageBitmap(file)
-        canvas.width = bitmap.width
-        canvas.height = bitmap.height
-        ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
-        bitmap.close()
-      } else {
-        const imageUrl = globalThis.URL.createObjectURL(file)
-        try {
-          const image = await new Promise<HTMLImageElement>((resolve, reject) => {
-            const nextImage = new Image()
-            nextImage.onload = () => resolve(nextImage)
-            nextImage.onerror = () => reject(new Error('无法解析所选图片'))
-            nextImage.src = imageUrl
-          })
-          canvas.width = image.naturalWidth || image.width
-          canvas.height = image.naturalHeight || image.height
-          ctx.drawImage(image, 0, 0, canvas.width, canvas.height)
-        } finally {
-          globalThis.URL.revokeObjectURL(imageUrl)
-        }
-      }
-
-      const detectedCode = await detectCurrentFrame(ctx, canvas)
+      const scanHost = ensureTempScanHost()
+      const scanner = createScanner(scanHost)
+      const detectedCode = normalizeDetectedCode(await scanner.scanFile(file, false))
       if (!detectedCode) {
-        throw new Error('未识别到二维码，请调整拍摄角度或光线后重试')
+        throw new Error('未识别到条码或二维码，请调整拍摄角度、清晰度或光线后重试')
       }
 
       await finalizeDetectedCode(detectedCode)
     } catch (error) {
       scanLoading.value = false
-      scanStatusText.value = '图片识别失败，请重试'
+      scanStatusText.value = '图片识别失败，请重新拍摄或改用手动输入'
       ElMessage.warning(error instanceof Error ? error.message : '图片识别失败，请重试')
+    } finally {
+      await disposeScanner()
     }
   }
 
@@ -316,70 +257,120 @@ export const useCameraQrScanner = (options: UseCameraQrScannerOptions) => {
     if (target) {
       target.value = ''
     }
+
     if (!file) {
       return
     }
+
+    if (!file.type.startsWith('image/')) {
+      ElMessage.warning('请选择图片文件后再尝试识别')
+      return
+    }
+
     await processImageFile(file)
   }
 
-  const openScanDialog = async () => {
-    ensureDecodeEngines()
+  const handleLaunchFailure = (error: unknown) => {
+    closeScanDialog()
+    const errorMessage = error instanceof Error ? error.message : ''
+    const normalizedMessage = errorMessage.toLowerCase()
 
+    if (normalizedMessage.includes('denied') || normalizedMessage.includes('permission')) {
+      ElMessage.warning('浏览器未授予摄像头权限，请重新点击相机按钮并改用拍照识别')
+      return
+    }
+
+    if (!globalThis.isSecureContext) {
+      ElMessage.warning('当前为 HTTP 环境，实时摄像头不可用，请重新点击相机按钮并改用拍照识别')
+      return
+    }
+
+    ElMessage.warning(
+      errorMessage
+        ? `${errorMessage}，请改用拍照识别`
+        : '无法打开摄像头，请改用拍照识别',
+    )
+  }
+
+  const handleScanSuccess = async (sessionId: number, decodedText: string, result: Html5QrcodeResult) => {
+    if (sessionId !== activeSessionId || detectionLocked) {
+      return
+    }
+
+    const detectedCode = normalizeDetectedCode(decodedText || result.decodedText || '')
+    if (!detectedCode) {
+      return
+    }
+
+    await finalizeDetectedCode(detectedCode)
+  }
+
+  const openScanDialog = async () => {
     if (!supportsLiveCamera.value) {
-      await triggerImagePick()
+      triggerImagePick()
       return
     }
 
     scanDialogVisible.value = true
     scanLoading.value = true
     scanStatusText.value = '正在启动摄像头，请稍候...'
+    detectionLocked = false
     await nextTick()
 
-    try {
-      const stream = await globalThis.navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: { ideal: 'environment' },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-        },
-        audio: false,
-      })
-      scanStream = stream
-      if (!videoRef.value) {
-        throw new Error('摄像头预览初始化失败')
-      }
-      videoRef.value.srcObject = stream
-      await videoRef.value.play()
-      lastDetectAt = 0
-      scanLoading.value = false
-      scanStatusText.value = barcodeDetector
-        ? '识别中，请将二维码对准取景框中央'
-        : '浏览器已切换到兼容识别模式，请将二维码对准取景框中央'
-      startDetectLoop()
-    } catch (error) {
+    if (!scannerContainerRef.value) {
       closeScanDialog()
-      if (canUseCamera.value) {
-        ElMessage.warning('摄像头不可用，已切换为拍照识别')
-        await triggerImagePick()
+      ElMessage.error('扫码容器初始化失败，请刷新页面后重试')
+      return
+    }
+
+    const sessionId = activeSessionId + 1
+    activeSessionId = sessionId
+    cameraPermissionRequested.value = true
+
+    try {
+      await disposeScanner()
+      const scanner = createScanner(scannerContainerRef.value)
+      await scanner.start(
+        { facingMode: { ideal: 'environment' } },
+        buildCameraScanConfig(),
+        async (decodedText, result) => {
+          await handleScanSuccess(sessionId, decodedText, result)
+        },
+        () => {
+          // 未识别到码是正常扫描过程，不做弹窗提示，避免刷屏。
+        },
+      )
+
+      if (sessionId !== activeSessionId) {
+        await disposeScanner()
         return
       }
-      ElMessage.error(error instanceof Error ? error.message : '无法打开摄像头，请检查权限')
+
+      scanLoading.value = false
+      scanStatusText.value = '摄像头已打开，请将条码或二维码对准中央区域'
+    } catch (error) {
+      if (sessionId !== activeSessionId) {
+        return
+      }
+      handleLaunchFailure(error)
     }
   }
 
   onBeforeUnmount(() => {
-    stopScanCamera()
+    closeScanDialog()
   })
 
   return {
-    bindVideoElement,
+    bindScannerContainer,
     canUseCamera,
+    cameraPermissionRequested,
     imageInputRef,
+    isSecureCameraContext,
+    scanModeLabel,
     scanButtonTitle,
     scanDialogVisible,
     scanLoading,
     scanStatusText,
-    videoRef,
     closeScanDialog,
     handleImageInputChange,
     openScanDialog,

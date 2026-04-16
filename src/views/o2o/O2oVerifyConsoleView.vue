@@ -37,9 +37,11 @@ const lastRouteVerifyKey = ref('')
 const canVerify = computed(() => isO2oOrderPending(detail.value?.order.status))
 const isShowNo = (value: string) => /^PO\d{8}\d{4}$/i.test(value)
 const scanActionHint = computed(() => {
-  return canUseCamera.value
+  return scanModeLabel.value === '实时扫码'
     ? '轻触相机图标即可打开实时扫码，识别成功后会自动查询订单。'
-    : '当前环境将自动切换为拍照识别模式，点相机图标即可拍照识别二维码。'
+    : isSecureCameraContext.value
+      ? '当前浏览器已切换为拍照识别模式，点相机图标即可拍照识别二维码。'
+      : '当前为 HTTP 环境，已切换为拍照识别模式，点相机图标即可拍照识别二维码。'
 })
 
 const normalizeVerifyCode = (rawValue: string) => {
@@ -84,14 +86,14 @@ const focusInput = async () => {
 }
 
 const {
-  canUseCamera,
   imageInputRef,
-  bindVideoElement,
+  bindScannerContainer,
+  isSecureCameraContext,
+  scanModeLabel,
   scanButtonTitle,
   scanDialogVisible,
   scanLoading,
   scanStatusText,
-  videoRef,
   closeScanDialog,
   handleImageInputChange,
   openScanDialog,
@@ -105,7 +107,7 @@ const {
 
 // 这两个 ref 由模板中的 DOM 绑定消费，显式保留一份脚本侧引用以通过严格类型构建。
 void imageInputRef
-void videoRef
+void bindScannerContainer
 
 /**
  * 查询核销信息：
@@ -234,7 +236,7 @@ watch(
         <div class="flex items-center justify-between gap-3">
           <p class="text-lg font-semibold text-slate-900">扫码 / 输入核销码</p>
           <span class="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-500">
-            {{ canUseCamera ? '实时扫码' : '拍照识别' }}
+            {{ scanModeLabel }}
           </span>
         </div>
         <p class="mt-2 text-sm text-slate-500">支持手机扫码后自动填入；也支持直接粘贴二维码链接，系统会自动识别核销码。</p>
@@ -362,7 +364,7 @@ watch(
       :loading="scanLoading"
       :status-text="scanStatusText"
       hint-text="请将预订单二维码置于取景框中央，识别成功后会自动查询待核销订单。"
-      :bind-video-element="bindVideoElement"
+      :bind-scanner-container="bindScannerContainer"
       @closed="closeScanDialog"
     />
   </PageContainer>

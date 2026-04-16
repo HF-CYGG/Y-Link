@@ -110,9 +110,11 @@ const manualSelectedProduct = computed(() => {
 const totalSkuCount = computed(() => inboundList.value.length)
 const totalQtyCount = computed(() => inboundList.value.reduce((sum, item) => sum + item.qty, 0))
 const scanCapabilityHint = computed(() => {
-  return canUseCamera.value
+  return scanModeLabel.value === '实时扫码'
     ? '轻触相机图标即可扫码；在 HTTP 或摄像头受限环境下，会自动切换为拍照识别。'
-    : '当前环境将自动切换为拍照识别，请轻触相机图标拍照扫描商品条码或二维码。'
+    : isSecureCameraContext.value
+      ? '当前浏览器已切换为拍照识别，请轻触相机图标拍照扫描商品条码或二维码。'
+      : '当前为 HTTP 环境，已切换为拍照识别，请轻触相机图标拍照扫描商品条码或二维码。'
 })
 
 const setRecognizedProduct = (product: ProductRecord | null) => {
@@ -245,14 +247,14 @@ const handleScanSubmit = () => {
 }
 
 const {
-  bindVideoElement,
-  canUseCamera,
+  bindScannerContainer,
   imageInputRef,
+  isSecureCameraContext,
+  scanModeLabel,
   scanButtonTitle,
   scanDialogVisible: cameraScanVisible,
   scanLoading: cameraScanLoading,
   scanStatusText,
-  videoRef: cameraVideoRef,
   closeScanDialog: closeCameraScanDialog,
   handleImageInputChange,
   openScanDialog: openCameraScanDialog,
@@ -266,7 +268,7 @@ const {
 })
 
 void imageInputRef
-void cameraVideoRef
+void bindScannerContainer
 
 // 快捷数量按钮的行为依赖当前模式：
 // - 扫码即+1：对当前识别商品直接累计；
@@ -642,7 +644,7 @@ onMounted(async () => {
       :loading="cameraScanLoading"
       :status-text="scanStatusText"
       hint-text="请将商品条码或二维码对准取景框中央，识别成功后会自动按当前录入模式加入流程。"
-      :bind-video-element="bindVideoElement"
+      :bind-scanner-container="bindScannerContainer"
       @closed="closeCameraScanDialog"
     />
   </PageContainer>

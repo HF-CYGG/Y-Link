@@ -49,9 +49,11 @@ const canVerify = computed(() => {
 })
 
 const scanActionHint = computed(() => {
-  return canUseCamera.value
+  return scanModeLabel.value === '实时扫码'
     ? '轻触相机图标即可实时扫码，识别成功后会自动查询送货单。'
-    : '当前环境将自动切换为拍照识别模式，轻触相机图标即可拍照识别二维码。'
+    : isSecureCameraContext.value
+      ? '当前浏览器已切换为拍照识别模式，轻触相机图标即可拍照识别二维码。'
+      : '当前为 HTTP 环境，已切换为拍照识别模式，轻触相机图标即可拍照识别二维码。'
 })
 
 // 详情摘要卡数据，统一模板渲染，避免重复写格式化逻辑。
@@ -123,14 +125,14 @@ const focusScanInput = () => {
 }
 
 const {
-  canUseCamera,
-  bindVideoElement,
+  bindScannerContainer,
   imageInputRef,
+  isSecureCameraContext,
+  scanModeLabel,
   scanButtonTitle,
   scanDialogVisible,
   scanLoading,
   scanStatusText,
-  videoRef,
   closeScanDialog,
   handleImageInputChange,
   openScanDialog,
@@ -144,7 +146,7 @@ const {
 
 // 这两个 ref 由模板中的 DOM 绑定消费，显式保留一份脚本侧引用以通过严格类型构建。
 void imageInputRef
-void videoRef
+void bindScannerContainer
 
 const isShowNoPattern = (code: string) => /^IN\d{12}$/i.test(code.trim())
 
@@ -527,7 +529,7 @@ onBeforeUnmount(() => {
       :loading="scanLoading"
       :status-text="scanStatusText"
       hint-text="请将送货单二维码置于取景框中央，识别成功后会自动查询并回填当前送货单。"
-      :bind-video-element="bindVideoElement"
+      :bind-scanner-container="bindScannerContainer"
       @closed="closeScanDialog"
     />
   </PageContainer>

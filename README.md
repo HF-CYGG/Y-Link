@@ -251,16 +251,22 @@ npm run local:dev
 ```
 
 本地联调启动后访问：
-- 管理端登录：`http://127.0.0.1:5173/login`
-- 客户端登录：`http://127.0.0.1:5173/client/login`
-- 客户端商品大厅：`http://127.0.0.1:5173/client/mall`
+- 管理端登录：`https://localhost:5173/login`
+- 客户端登录：`https://localhost:5173/client/login`
+- 客户端商品大厅：`https://localhost:5173/client/mall`
 - 后端健康检查：`http://127.0.0.1:3001/health`
 - 本地 SQLite 文件：`backend/data/local-dev/y-link.local-dev.sqlite`
 
 说明：
 - 当前本地联调由一个前端开发服务器同时承载“管理端页面”和“客户端页面”。
+- 前端默认启用自签名 HTTPS（`VITE_DEV_SERVER_HTTPS=true`），首次访问需在浏览器手动信任证书。
 - 数据库默认使用 SQLite，执行 `start-local-dev.ps1` 后会随后台自动初始化，无需额外手动启动数据库进程。
 - 若 Docker / CI 构建在前端阶段失败，可先本地执行 `npm run build` 定位 `vue-tsc` 类型或未使用变量问题，再进入镜像构建排查。
+
+扫码能力说明（html5-qrcode）：
+- `HTTPS` / `localhost` 下支持实时摄像头扫码。
+- `HTTP` 或非安全上下文下自动回退为图片识别，不承诺实时摄像头能力。
+- 手机通过局域网访问时，需先在浏览器中信任本地自签名证书，再使用摄像头扫码。
 
 后端本地验收（O2O 功能）：
 
