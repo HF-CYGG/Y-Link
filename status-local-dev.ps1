@@ -24,6 +24,36 @@ function Write-WarnMessage {
   Write-Host "[local-dev][warn] $Message" -ForegroundColor Yellow
 }
 
+function Get-LanIPv4Addresses {
+  try {
+    $ipConfigs = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop
+  }
+  catch {
+    return @()
+  }
+
+  $lanIpSet = [System.Collections.Generic.HashSet[string]]::new()
+  foreach ($ipConfig in $ipConfigs) {
+    $ipAddress = $ipConfig.IPAddress
+    if (-not $ipAddress) {
+      continue
+    }
+    if ($ipAddress -eq '127.0.0.1') {
+      continue
+    }
+    if ($ipAddress.StartsWith('169.254.')) {
+      continue
+    }
+    if ($ipConfig.SkipAsSource) {
+      continue
+    }
+
+    [void]$lanIpSet.Add($ipAddress)
+  }
+
+  return @($lanIpSet | Sort-Object)
+}
+
 function Test-ProcessAlive {
   param([int]$ProcessId)
 
@@ -66,6 +96,7 @@ $record = Get-Content -Path $PidFile -Raw | ConvertFrom-Json
 $frontendUrl = "http://127.0.0.1:$($record.frontendPort)"
 $backendUrl = "http://127.0.0.1:$($record.backendPort)"
 $backendHealthUrl = "$backendUrl/health"
+$frontendHost = if ($record.frontendHost) { [string]$record.frontendHost } else { '127.0.0.1' }
 
 $backendShellAlive = Test-ProcessAlive -ProcessId ([int]$record.backendShellPid)
 $frontendShellAlive = Test-ProcessAlive -ProcessId ([int]$record.frontendShellPid)
@@ -78,6 +109,7 @@ Write-Info '本地联调状态如下：'
 Write-Info "StartedAt: $($record.startedAt)"
 Write-Info "Frontend: $frontendUrl"
 Write-Info "Backend:  $backendUrl"
+Write-Info "Frontend host: $frontendHost"
 Write-Info "SQLite:   $($record.sqlitePath)"
 Write-Info "Backend shell alive: $backendShellAlive"
 Write-Info "Frontend shell alive: $frontendShellAlive"
@@ -85,6 +117,17 @@ Write-Info "Backend listening PIDs: $($(if ($backendListeningPids.Count) { $back
 Write-Info "Frontend listening PIDs: $($(if ($frontendListeningPids.Count) { $frontendListeningPids -join ', ' } else { 'none' }))"
 Write-Info "Backend health ready: $backendHealthReady"
 Write-Info "Frontend ready: $frontendReady"
+
+if ($frontendHost -eq '0.0.0.0' -or $frontendHost -eq '*') {
+  $lanIpAddresses = @(Get-LanIPv4Addresses)
+  if ($lanIpAddresses.Count -gt 0) {
+    Write-Info '局域网访问地址：'
+    foreach ($lanIpAddress in $lanIpAddresses) {
+      Write-Info "  管理端: http://$lanIpAddress`:$($record.frontendPort)/login"
+      Write-Info "  客户端: http://$lanIpAddress`:$($record.frontendPort)/client/login"
+    }
+  }
+}
 
 if (-not $backendShellAlive -and -not $frontendShellAlive -and -not $backendListeningPids.Count -and -not $frontendListeningPids.Count) {
   Write-WarnMessage '记录文件存在，但本地联调进程似乎已不在运行，可执行 .\stop-local-dev.ps1 做清理。'

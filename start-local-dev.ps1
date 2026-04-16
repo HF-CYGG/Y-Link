@@ -1,4 +1,4 @@
-﻿<#
+<#
 模块说明：start-local-dev.ps1
 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
@@ -8,6 +8,7 @@ param(
   [string]$BackendProfile = 'local-dev',
   [int]$BackendPort = 3001,
   [int]$FrontendPort = 5173,
+  [string]$FrontendHost = '0.0.0.0',
   [int]$MaxReadyAttempts = 60,
   [switch]$NoCleanLogs,
   [switch]$NoAttachLogs,
@@ -273,6 +274,39 @@ function Get-ProcessDisplayName {
   }
 }
 
+# 收集当前机器可用于局域网访问的 IPv4 地址：
+# - 过滤 loopback、APIPA(169.254.x.x) 与无效地址；
+# - 启动成功后直接打印可访问链接，便于手机/平板联调。
+function Get-LanIPv4Addresses {
+  try {
+    $ipConfigs = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop
+  }
+  catch {
+    return @()
+  }
+
+  $lanIpSet = [System.Collections.Generic.HashSet[string]]::new()
+  foreach ($ipConfig in $ipConfigs) {
+    $ipAddress = $ipConfig.IPAddress
+    if (-not $ipAddress) {
+      continue
+    }
+    if ($ipAddress -eq '127.0.0.1') {
+      continue
+    }
+    if ($ipAddress.StartsWith('169.254.')) {
+      continue
+    }
+    if ($ipConfig.SkipAsSource) {
+      continue
+    }
+
+    [void]$lanIpSet.Add($ipAddress)
+  }
+
+  return @($lanIpSet | Sort-Object)
+}
+
 function Format-ProcessDisplayList {
   param([int[]]$ProcessIds)
 
@@ -495,7 +529,8 @@ $backendProcess = Start-Process `
 Write-Info 'Starting frontend dev server (同时承载管理端与客户端页面)...'
 # 前端只启动一个 Vite 开发服务，同时承载管理端与客户端页面，
 # 通过注入本次后端地址，保证本地联调时接口统一指向当前后端端口。
-$frontendCommand = "& { `$env:VITE_LOCAL_BACKEND_URL='http://127.0.0.1:$BackendPort'; npm.cmd run dev -- --host 127.0.0.1 --port $FrontendPort --strictPort }"
+# 默认监听 0.0.0.0，这样局域网内其他设备也能直接访问当前调试页。
+$frontendCommand = "& { `$env:VITE_LOCAL_BACKEND_URL='http://127.0.0.1:$BackendPort'; npm.cmd run dev -- --host $FrontendHost --port $FrontendPort --strictPort }"
 $frontendProcess = Start-Process `
   -FilePath $PowerShellExecutablePath `
   -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $frontendCommand) `
@@ -523,6 +558,7 @@ try {
     frontendListeningPids = $frontendListeningPids
     backendPort = $BackendPort
     frontendPort = $FrontendPort
+    frontendHost = $FrontendHost
     backendProfile = $BackendProfile
     backendEnvFile = $BackendEnvFile
     effectiveBackendEnvFile = $EffectiveBackendEnvFile
@@ -548,6 +584,19 @@ try {
   Write-Info "Frontend log: $FrontendLog"
   Write-Info "Frontend err: $FrontendErrorLog"
   Write-Info '说明：当前本地链路使用一个 Vite 开发服务器同时提供管理端与客户端页面，数据库为随后台自动初始化的本地 SQLite。'
+  if ($FrontendHost -eq '0.0.0.0' -or $FrontendHost -eq '*') {
+    $lanIpAddresses = @(Get-LanIPv4Addresses)
+    if ($lanIpAddresses.Count -gt 0) {
+      Write-Info '局域网访问地址（确保防火墙已放行前端端口）：'
+      foreach ($lanIpAddress in $lanIpAddresses) {
+        Write-Info "  管理端: http://$lanIpAddress`:$FrontendPort/login"
+        Write-Info "  客户端: http://$lanIpAddress`:$FrontendPort/client/login"
+      }
+    }
+    else {
+      Write-WarnMessage '未检测到可用的局域网 IPv4 地址，若需局域网访问请检查当前网络连接。'
+    }
+  }
   if ($backendListeningPids.Count -gt 0) {
     $backendPidDisplayText = Format-ProcessDisplayList -ProcessIds $backendListeningPids
     Write-Info "Backend PID(s): $backendPidDisplayText"
