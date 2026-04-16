@@ -12,7 +12,12 @@ import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
 import { ClientUser } from '../entities/client-user.entity.js'
 import { InventoryLog } from '../entities/inventory-log.entity.js'
-import { O2oPreorder, type O2oPreorderCancelReason } from '../entities/o2o-preorder.entity.js'
+import {
+  O2O_PREORDER_BUSINESS_STATUSES,
+  O2oPreorder,
+  type O2oPreorderBusinessStatus,
+  type O2oPreorderCancelReason,
+} from '../entities/o2o-preorder.entity.js'
 import { O2oPreorderItem } from '../entities/o2o-preorder-item.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import type { ClientAuthContext } from '../types/client-auth.js'
@@ -29,6 +34,11 @@ export interface SubmitPreorderItemInput {
 export interface SubmitPreorderInput {
   items: SubmitPreorderItemInput[]
   remark?: string
+}
+
+export interface UpdateOrderBusinessStatusInput {
+  orderId: string
+  businessStatus: O2oPreorderBusinessStatus | null
 }
 
 class O2oPreorderService {
@@ -78,6 +88,17 @@ class O2oPreorderService {
       return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
     }
     return raw
+  }
+
+  private normalizeBusinessStatus(value: string | null | undefined) {
+    const normalizedValue = value?.trim()
+    if (!normalizedValue) {
+      return null
+    }
+    if (O2O_PREORDER_BUSINESS_STATUSES.includes(normalizedValue as O2oPreorderBusinessStatus)) {
+      return normalizedValue as O2oPreorderBusinessStatus
+    }
+    throw new BizError('商家状态不受支持', 400)
   }
 
   private resolveCancelledOrderReason(
@@ -360,6 +381,7 @@ class O2oPreorderService {
         showNo: order.showNo,
         verifyCode: order.verifyCode,
         status: order.status,
+        businessStatus: order.businessStatus ?? null,
         totalQty: order.totalQty,
         timeoutAt: order.timeoutAt,
         verifiedAt: order.verifiedAt,
@@ -545,6 +567,7 @@ class O2oPreorderService {
       showNo: item.showNo,
       verifyCode: item.verifyCode,
       status: item.status,
+      businessStatus: item.businessStatus ?? null,
       totalQty: item.totalQty,
       timeoutAt: item.timeoutAt,
       createdAt: item.createdAt,
@@ -633,6 +656,7 @@ class O2oPreorderService {
       showNo: item.showNo,
       verifyCode: item.verifyCode,
       status: item.status,
+      businessStatus: item.businessStatus ?? null,
       totalQty: item.totalQty,
       timeoutAt: item.timeoutAt,
       createdAt: item.createdAt,
@@ -646,6 +670,16 @@ class O2oPreorderService {
       throw new BizError('预订单不存在', 404)
     }
     return this.buildOrderDetail(order)
+  }
+
+  async updateBusinessStatus(input: UpdateOrderBusinessStatusInput) {
+    const order = await this.preorderRepo.findOne({ where: { id: input.orderId } })
+    if (!order) {
+      throw new BizError('预订单不存在', 404)
+    }
+    order.businessStatus = this.normalizeBusinessStatus(input.businessStatus)
+    await this.preorderRepo.save(order)
+    return this.detailById(order.id)
   }
 
   async cancelMyOrder(auth: ClientAuthContext, id: string) {

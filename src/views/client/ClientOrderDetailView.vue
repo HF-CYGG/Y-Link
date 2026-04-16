@@ -15,6 +15,7 @@ import { cancelMyO2oPreorder, getO2oPreorderDetail, type O2oPreorderDetail, type
 import { BaseRequestState } from '@/components/common'
 import { useStableRequest } from '@/composables/useStableRequest'
 import {
+  getO2oOrderBusinessStatusMeta,
   getClientOrderStatusReportConfig,
   getClientOrderReportScenario,
   isO2oOrderCancelled,
@@ -73,6 +74,10 @@ const statusBanner = computed(() => {
         timeoutAt: detail.value.order.timeoutAt,
       })
   return { className: report.cardClassName, title: report.cardTitle, description: report.cardDescription }
+})
+
+const businessStatusMeta = computed(() => {
+  return getO2oOrderBusinessStatusMeta(detail.value?.order.businessStatus)
 })
 
 const timelineItems = computed(() => {
@@ -194,6 +199,7 @@ const buildOrderSummaryFromDetail = (nextDetail: O2oPreorderDetail): O2oPreorder
     showNo: order.showNo,
     verifyCode: order.verifyCode,
     status: order.status,
+    businessStatus: order.businessStatus,
     statusReport: order.statusReport,
     totalAmount: order.totalAmount,
     expireInSeconds: order.expireInSeconds,
@@ -350,6 +356,10 @@ onMounted(async () => {
           <p class="text-sm font-semibold">{{ statusBanner.title }}</p>
           <p class="mt-1 text-xs">{{ statusBanner.description }}</p>
         </div>
+        <div v-if="businessStatusMeta" class="mt-3 rounded-2xl px-3 py-2" :class="businessStatusMeta.className">
+          <p class="text-sm font-semibold">商家状态：{{ businessStatusMeta.label }}</p>
+          <p class="mt-1 text-xs">{{ businessStatusMeta.clientDescription }}</p>
+        </div>
 
         <div class="mt-5 rounded-3xl bg-slate-50 p-4 text-center">
           <img
@@ -402,6 +412,10 @@ onMounted(async () => {
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">核销时间</p>
               <p class="mt-1 text-sm text-slate-700">{{ detail.order.verifiedAt || '尚未核销' }}</p>
+            </div>
+            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <p class="text-sm text-slate-400">商家状态</p>
+              <p class="mt-1 text-sm text-slate-700">{{ businessStatusMeta?.label ?? '未设置' }}</p>
             </div>
           </div>
         </div>

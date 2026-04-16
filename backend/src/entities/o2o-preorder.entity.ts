@@ -22,6 +22,19 @@ export const O2O_PREORDER_STATUSES = ['pending', 'verified', 'cancelled'] as con
 export type O2oPreorderStatus = (typeof O2O_PREORDER_STATUSES)[number]
 export const O2O_PREORDER_CANCEL_REASONS = ['manual', 'timeout'] as const
 export type O2oPreorderCancelReason = (typeof O2O_PREORDER_CANCEL_REASONS)[number]
+export const O2O_PREORDER_BUSINESS_STATUSES = [
+  'preparing',
+  'ready',
+  'awaiting_shipment',
+  'shipped',
+  'partially_shipped',
+  'closed',
+  'after_sale',
+  'after_sale_done',
+  'verifying',
+  'verify_failed',
+] as const
+export type O2oPreorderBusinessStatus = (typeof O2O_PREORDER_BUSINESS_STATUSES)[number]
 
 @Entity({ name: 'o2o_preorder' })
 export class O2oPreorder {
@@ -47,6 +60,9 @@ export class O2oPreorder {
   // 不能再依赖 timeoutAt 与当前时间推断，否则主动撤回单在过了超时点后会被误判成超时取消。
   @Column({ name: 'cancel_reason', type: 'varchar', length: 16, nullable: true, comment: '取消原因' })
   cancelReason!: O2oPreorderCancelReason | null
+
+  @Column({ name: 'business_status', type: 'varchar', length: 32, nullable: true, comment: '商家特殊状态' })
+  businessStatus!: O2oPreorderBusinessStatus | null
 
   // totalQty 记录整单总件数，便于列表快速展示，避免每次都聚合子项。
   @Column({ name: 'total_qty', type: 'int', default: 0, comment: '总件数' })

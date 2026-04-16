@@ -13,6 +13,7 @@ import { BaseRequestState } from '@/components/common'
 import { useStableRequest } from '@/composables/useStableRequest'
 import {
   CLIENT_O2O_ORDER_STATUS_CLASS_MAP,
+  getO2oOrderBusinessStatusMeta,
   getClientOrderStatusReportConfig,
   getClientOrderReportScenario,
   O2O_ORDER_STATUS_TABS,
@@ -78,6 +79,7 @@ const buildOrderSummaryFromDetail = (detail: O2oPreorderDetail): O2oPreorderSumm
     showNo: order.showNo,
     verifyCode: order.verifyCode,
     status: order.status,
+    businessStatus: order.businessStatus,
     statusReport: order.statusReport,
     totalAmount: order.totalAmount,
     expireInSeconds: order.expireInSeconds,
@@ -85,6 +87,10 @@ const buildOrderSummaryFromDetail = (detail: O2oPreorderDetail): O2oPreorderSumm
     timeoutAt: order.timeoutAt,
     createdAt: order.createdAt,
   }
+}
+
+const getBusinessStatusMeta = (order: O2oPreorderSummary) => {
+  return getO2oOrderBusinessStatusMeta(order.businessStatus)
 }
 
 const loadOrders = async (force = false) => {
@@ -236,6 +242,14 @@ onMounted(async () => {
         <div class="mt-3 rounded-2xl px-3 py-2" :class="getOrderStatusReport(order).cardClassName">
           <p class="text-sm font-semibold">{{ getOrderStatusReport(order).cardTitle }}</p>
           <p class="mt-1 text-xs">{{ getOrderStatusReport(order).cardDescription }}</p>
+        </div>
+        <div
+          v-if="getBusinessStatusMeta(order)"
+          class="mt-3 rounded-2xl px-3 py-2"
+          :class="getBusinessStatusMeta(order)?.className"
+        >
+          <p class="text-sm font-semibold">商家状态：{{ getBusinessStatusMeta(order)?.label }}</p>
+          <p class="mt-1 text-xs">{{ getBusinessStatusMeta(order)?.clientDescription }}</p>
         </div>
       </article>
     </div>

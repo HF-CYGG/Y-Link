@@ -1,17 +1,21 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { PageContainer } from '@/components/common'
 import {
   CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG,
+  getO2oOrderBusinessStatusMeta,
   getClientOrderReportScenario,
   isO2oOrderPending,
+  O2O_ORDER_BUSINESS_STATUS_META,
+  type O2oOrderBusinessStatus,
   type O2oOrderStatus,
 } from '@/constants/o2o-order-status'
 import {
   getO2oConsoleOrderDetail,
   getO2oConsoleOrders,
+  updateO2oOrderBusinessStatus,
   type O2oPreorderDetail,
   type O2oPreorderSummary,
   type O2oOrderStatusReport,
@@ -203,6 +207,27 @@ const detailAmountSummary = computed(() => {
   }
 })
 
+const businessStatusOptions = Object.entries(O2O_ORDER_BUSINESS_STATUS_META).map(([value, meta]) => ({
+  value: value as O2oOrderBusinessStatus,
+  label: meta.label,
+  description: meta.consoleDescription,
+}))
+
+const activeBusinessStatus = computed(() => activeOrderDetail.value?.order.businessStatus ?? null)
+const draftBusinessStatus = ref<O2oOrderBusinessStatus | null>(null)
+
+const activeBusinessStatusMeta = computed(() => {
+  return getO2oOrderBusinessStatusMeta(activeBusinessStatus.value)
+})
+
+watch(
+  () => activeOrderDetail.value?.order.businessStatus ?? null,
+  (value) => {
+    draftBusinessStatus.value = value
+  },
+  { immediate: true },
+)
+
 const timelineItems = computed(() => {
   if (!activeOrderDetail.value) {
     return []
@@ -343,6 +368,7 @@ const mergeOrderSummaryFromDetail = (detail: O2oPreorderDetail) => {
     showNo: nextOrder.showNo,
     verifyCode: nextOrder.verifyCode,
     status: nextOrder.status,
+    businessStatus: nextOrder.businessStatus,
     totalQty: nextOrder.totalQty,
     timeoutAt: nextOrder.timeoutAt,
     createdAt: nextOrder.createdAt,
@@ -471,6 +497,47 @@ const handleCopyVerifyCode = async () => {
     ElMessage.success('核销码复制成功')
   } catch {
     ElMessage.error('复制失败，请检查浏览器权限后重试')
+  }
+}
+
+const handleBusinessStatusChange = async (value: O2oOrderBusinessStatus | null) => {
+  if (!activeOrderDetail.value?.order.id) {
+    return
+  }
+  const previousValue = activeBusinessStatus.value
+  if (value === previousValue) {
+    return
+  }
+
+  const nextMeta = getO2oOrderBusinessStatusMeta(value)
+  const confirmMessage = value
+    ? `确认将订单“${activeOrderDetail.value.order.showNo}”的商家特殊状态更新为“${nextMeta?.label ?? value}”吗？`
+    : `确认清除订单“${activeOrderDetail.value.order.showNo}”的商家特殊状态吗？`
+
+  try {
+    await ElMessageBox.confirm(confirmMessage, '确认更新特殊状态', {
+      type: 'warning',
+      confirmButtonText: '确认生效',
+      cancelButtonText: '取消',
+      closeOnClickModal: false,
+    })
+  } catch {
+    draftBusinessStatus.value = previousValue
+    return
+  }
+
+  detailLoading.value = true
+  try {
+    const latestDetail = await updateO2oOrderBusinessStatus(activeOrderDetail.value.order.id, value)
+    activeOrderDetail.value = latestDetail
+    mergeOrderSummaryFromDetail(latestDetail)
+    draftBusinessStatus.value = latestDetail.order.businessStatus
+    ElMessage.success(value ? '商家特殊状态已更新' : '商家特殊状态已清除')
+  } catch (error) {
+    draftBusinessStatus.value = previousValue
+    ElMessage.error(error instanceof Error ? error.message : '更新商家状态失败，请稍后重试')
+  } finally {
+    detailLoading.value = false
   }
 }
 
@@ -650,10 +717,47 @@ onBeforeUnmount(() => {
             <p class="mt-1 break-words text-xs">{{ reportConfig.cardDescription }}</p>
           </div>
 
+          <div class="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
+            <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+              <div class="min-w-0">
+                <p class="text-sm font-semibold text-slate-900">商家特殊状态</p>
+                <p class="mt-1 text-xs leading-5 text-slate-500">
+                  用于通知用户当前订单所处的特殊进度，不改变待核销、已核销、已取消等核心状态。
+                </p>
+              </div>
+              <el-select
+                v-model="draftBusinessStatus"
+                clearable
+                placeholder="选择特殊状态"
+                class="w-full lg:w-72"
+                :disabled="detailLoading"
+                @change="handleBusinessStatusChange"
+              >
+                <el-option
+                  v-for="option in businessStatusOptions"
+                  :key="option.value"
+                  :label="option.label"
+                  :value="option.value"
+                />
+              </el-select>
+            </div>
+            <p v-if="activeBusinessStatusMeta" class="mt-2 text-xs leading-5 text-slate-500">
+              {{ activeBusinessStatusMeta.consoleDescription }}
+            </p>
+            <div v-if="activeBusinessStatusMeta" class="mt-3 rounded-2xl px-3 py-2" :class="activeBusinessStatusMeta.className">
+              <p class="text-sm font-semibold">当前商家状态：{{ activeBusinessStatusMeta.label }}</p>
+              <p class="mt-1 text-xs">{{ activeBusinessStatusMeta.consoleDescription }}</p>
+            </div>
+          </div>
+
           <div class="mt-4 grid gap-3 sm:grid-cols-4">
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">状态</p>
               <p class="mt-1 text-sm font-semibold text-slate-900">{{ reportConfig.statusLabel }}</p>
+            </div>
+            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <p class="text-sm text-slate-400">商家状态</p>
+              <p class="mt-1 text-sm font-semibold text-slate-900">{{ activeBusinessStatusMeta?.label ?? '未设置' }}</p>
             </div>
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">应付总额</p>

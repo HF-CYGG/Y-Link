@@ -5,7 +5,11 @@
  */
 
 import { request, type RequestConfig } from '@/api/http'
-import type { ClientOrderReportScenario, O2oOrderStatus } from '@/constants/o2o-order-status'
+import type {
+  ClientOrderReportScenario,
+  O2oOrderBusinessStatus,
+  O2oOrderStatus,
+} from '@/constants/o2o-order-status'
 
 export interface O2oOrderStatusReport {
   scenario: ClientOrderReportScenario
@@ -36,6 +40,7 @@ export interface O2oPreorderSummary {
   showNo: string
   verifyCode: string
   status: O2oOrderStatus
+  businessStatus: O2oOrderBusinessStatus | null
   totalQty: number
   timeoutAt: string | null
   createdAt: string
@@ -60,6 +65,7 @@ export interface O2oPreorderDetail {
     showNo: string
     verifyCode: string
     status: O2oOrderStatus
+    businessStatus: O2oOrderBusinessStatus | null
     totalQty: number
     timeoutAt: string | null
     verifiedAt: string | null
@@ -159,6 +165,18 @@ export const getO2oConsoleOrderDetail = (id: string, config?: RequestConfig) =>
   request<O2oPreorderDetail>({
     method: 'GET',
     url: `/o2o/orders/${id}`,
+    ...config,
+  })
+
+export const updateO2oOrderBusinessStatus = (
+  id: string,
+  businessStatus: O2oOrderBusinessStatus | null,
+  config?: RequestConfig,
+) =>
+  request<O2oPreorderDetail>({
+    method: 'PATCH',
+    url: `/o2o/orders/${id}/business-status`,
+    data: { businessStatus },
     ...config,
   })
 

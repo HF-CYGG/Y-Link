@@ -1,13 +1,104 @@
 export const O2O_ORDER_STATUSES = ['pending', 'verified', 'cancelled'] as const
+export const O2O_ORDER_BUSINESS_STATUSES = [
+  'preparing',
+  'ready',
+  'awaiting_shipment',
+  'shipped',
+  'partially_shipped',
+  'closed',
+  'after_sale',
+  'after_sale_done',
+  'verifying',
+  'verify_failed',
+] as const
 export const O2O_ORDER_TIMEOUT_SOON_WINDOW_MS = 2 * 60 * 60 * 1000
 
 export type O2oOrderStatus = (typeof O2O_ORDER_STATUSES)[number]
+export type O2oOrderBusinessStatus = (typeof O2O_ORDER_BUSINESS_STATUSES)[number]
 export type ClientOrderReportScenario = 'pending' | 'timeout_soon' | 'cancelled' | 'timeout_cancelled' | 'verified'
 export type O2oOrderCancelReason = 'timeout' | 'manual'
 
 export interface ClientOrderStatusReportLike {
   scenario?: ClientOrderReportScenario
   cancelReason?: O2oOrderCancelReason | null
+}
+
+export const O2O_ORDER_BUSINESS_STATUS_META: Record<
+  O2oOrderBusinessStatus,
+  {
+    label: string
+    clientDescription: string
+    consoleDescription: string
+    className: string
+  }
+> = {
+  preparing: {
+    label: '备货中',
+    clientDescription: '商家正在备货，请耐心等待。',
+    consoleDescription: '商家正在处理货品与拣货准备。',
+    className: 'bg-sky-50 text-sky-700',
+  },
+  ready: {
+    label: '待发货',
+    clientDescription: '商家已备货完成，待安排发货或通知取货。',
+    consoleDescription: '货品已备妥，可继续发货或安排交付。',
+    className: 'bg-cyan-50 text-cyan-700',
+  },
+  awaiting_shipment: {
+    label: '待发货',
+    clientDescription: '订单已确认，待仓配处理。',
+    consoleDescription: '订单待仓配处理。',
+    className: 'bg-blue-50 text-blue-700',
+  },
+  shipped: {
+    label: '已发货',
+    clientDescription: '订单已发货，请留意收货或到店通知。',
+    consoleDescription: '订单已完成发货处理。',
+    className: 'bg-indigo-50 text-indigo-700',
+  },
+  partially_shipped: {
+    label: '部分发货',
+    clientDescription: '订单部分商品已发出，其余商品待继续处理。',
+    consoleDescription: '订单存在部分发货，需继续跟进剩余商品。',
+    className: 'bg-violet-50 text-violet-700',
+  },
+  closed: {
+    label: '已关闭',
+    clientDescription: '商家已关闭该订单，请联系门店了解详情。',
+    consoleDescription: '订单已被商家关闭。',
+    className: 'bg-slate-100 text-slate-600',
+  },
+  after_sale: {
+    label: '售后中',
+    clientDescription: '订单已进入售后处理，请等待商家处理结果。',
+    consoleDescription: '订单正在售后处理中。',
+    className: 'bg-amber-50 text-amber-700',
+  },
+  after_sale_done: {
+    label: '售后完成',
+    clientDescription: '售后处理已完成，可查看最新结果。',
+    consoleDescription: '订单售后处理已完成。',
+    className: 'bg-emerald-50 text-emerald-700',
+  },
+  verifying: {
+    label: '核销中',
+    clientDescription: '门店正在处理核销，请稍候确认结果。',
+    consoleDescription: '订单正在核销流程中。',
+    className: 'bg-teal-50 text-teal-700',
+  },
+  verify_failed: {
+    label: '核销失败',
+    clientDescription: '本次核销失败，请联系门店重新处理。',
+    consoleDescription: '订单核销失败，需人工介入处理。',
+    className: 'bg-rose-50 text-rose-700',
+  },
+}
+
+export const getO2oOrderBusinessStatusMeta = (status: O2oOrderBusinessStatus | null | undefined) => {
+  if (!status) {
+    return null
+  }
+  return O2O_ORDER_BUSINESS_STATUS_META[status] ?? null
 }
 
 export const CLIENT_O2O_ORDER_STATUS_LABEL_MAP: Record<O2oOrderStatus, string> = {

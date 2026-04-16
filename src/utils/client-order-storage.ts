@@ -5,7 +5,14 @@
  */
 
 import type { O2oPreorderSummary } from '@/api/modules/o2o'
-import { getClientOrderReportScenario, isO2oOrderStatus, type ClientOrderReportScenario, type O2oOrderCancelReason } from '@/constants/o2o-order-status'
+import {
+  getClientOrderReportScenario,
+  isO2oOrderStatus,
+  O2O_ORDER_BUSINESS_STATUSES,
+  type ClientOrderReportScenario,
+  type O2oOrderBusinessStatus,
+  type O2oOrderCancelReason,
+} from '@/constants/o2o-order-status'
 
 export interface ClientOrderSnapshot {
   activeStatus: 'all' | O2oPreorderSummary['status']
@@ -38,6 +45,9 @@ const normalizeOrders = (orders: unknown): O2oPreorderSummary[] => {
       const verifyCode = typeof row.verifyCode === 'string' ? row.verifyCode : ''
       const status = isO2oOrderStatus(row.status) ? row.status : null
       const timeoutAt = typeof row.timeoutAt === 'string' ? row.timeoutAt : null
+      const businessStatus = O2O_ORDER_BUSINESS_STATUSES.includes(row.businessStatus as O2oOrderBusinessStatus)
+        ? (row.businessStatus as O2oOrderBusinessStatus)
+        : null
       const rawStatusReport = row.statusReport && typeof row.statusReport === 'object'
         ? (row.statusReport as Record<string, unknown>)
         : null
@@ -55,6 +65,7 @@ const normalizeOrders = (orders: unknown): O2oPreorderSummary[] => {
         showNo,
         verifyCode,
         status,
+        businessStatus,
         statusReport: {
           // 缓存恢复时尽量沿用服务端原始状态报告，确保“已撤回/超时取消”文案不会在刷新后退化。
           scenario: (scenario as ClientOrderReportScenario) ?? getClientOrderReportScenario(status, timeoutAt),

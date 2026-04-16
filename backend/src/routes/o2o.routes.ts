@@ -10,8 +10,10 @@ import { requireClientAuth } from '../middleware/client-auth.middleware.js'
 import { requireAuth, requirePermission } from '../middleware/auth.middleware.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 import type { ClientAuthenticatedRequest } from '../types/client-auth.js'
+import { auditService } from '../services/audit.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { o2oPreorderService } from '../services/o2o-preorder.service.js'
+import { extractRequestMeta } from '../utils/request-meta.js'
 
 const submitPreorderSchema = z.object({
   remark: z.string().max(255).optional(),
@@ -35,6 +37,36 @@ const consoleOrderQuerySchema = z.object({
   endTime: z.string().trim().max(32).optional(),
   limit: z.coerce.number().int().min(1).max(200).optional(),
 })
+
+const businessStatusSchema = z.object({
+  businessStatus: z
+    .enum([
+      'preparing',
+      'ready',
+      'awaiting_shipment',
+      'shipped',
+      'partially_shipped',
+      'closed',
+      'after_sale',
+      'after_sale_done',
+      'verifying',
+      'verify_failed',
+    ])
+    .nullable(),
+})
+
+const BUSINESS_STATUS_LABEL_MAP = {
+  preparing: '备货中',
+  ready: '待发货',
+  awaiting_shipment: '待发货（仓配处理中）',
+  shipped: '已发货',
+  partially_shipped: '部分发货',
+  closed: '已关闭',
+  after_sale: '售后中',
+  after_sale_done: '售后完成',
+  verifying: '核销中',
+  verify_failed: '核销失败',
+} as const
 
 export const o2oRouter = Router()
 
@@ -121,6 +153,53 @@ o2oRouter.get(
   requirePermission('orders:view'),
   asyncHandler(async (req, res) => {
     const data = await o2oPreorderService.detailById(req.params.id)
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+// 管理端更新订单“商家特殊状态”，用于向用户同步特殊进度，不改变核心核销主状态。
+o2oRouter.patch(
+  '/orders/:id/business-status',
+  requireAuth,
+  requirePermission('orders:update'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = businessStatusSchema.parse(req.body)
+    const previous = await o2oPreorderService.detailById(req.params.id)
+    const data = await o2oPreorderService.updateBusinessStatus({
+      orderId: req.params.id,
+      businessStatus: payload.businessStatus,
+    })
+
+    const previousStatus = previous.order.businessStatus
+    const nextStatus = data.order.businessStatus
+    const actionType = !previousStatus && nextStatus
+      ? 'o2o.order.business_status.set'
+      : previousStatus && !nextStatus
+        ? 'o2o.order.business_status.clear'
+        : 'o2o.order.business_status.change'
+    const actionLabel = !previousStatus && nextStatus
+      ? '设置订单商家特殊状态'
+      : previousStatus && !nextStatus
+        ? '清除订单商家特殊状态'
+        : '变更订单商家特殊状态'
+
+    await auditService.record({
+      actionType,
+      actionLabel,
+      targetType: 'o2o_order',
+      targetId: data.order.id,
+      targetCode: data.order.showNo,
+      actor: authReq.auth,
+      requestMeta: extractRequestMeta(req),
+      detail: {
+        previousBusinessStatus: previousStatus,
+        previousBusinessStatusLabel: previousStatus ? BUSINESS_STATUS_LABEL_MAP[previousStatus] : null,
+        nextBusinessStatus: nextStatus,
+        nextBusinessStatusLabel: nextStatus ? BUSINESS_STATUS_LABEL_MAP[nextStatus] : null,
+      },
+    })
+
     res.json({ code: 0, message: 'ok', data })
   }),
 )
