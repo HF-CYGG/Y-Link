@@ -331,7 +331,7 @@ const {
     loadError: '获取产品失败',
     deleteConfirm: '确定要删除该产品吗？',
     deleteSuccess: '删除成功',
-    deleteError: '删除失败',
+    deleteError: '删除失败：该产品可能已被历史业务数据引用',
   },
   afterSubmit: async () => {
     if (!hasAutoCreatedTags.value) {

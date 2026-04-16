@@ -9,6 +9,10 @@ import { AppDataSource } from '../config/data-source.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { RelProductTag } from '../entities/rel-product-tag.entity.js'
 import { BaseTag } from '../entities/base-tag.entity.js'
+import { BizInboundOrderItem } from '../entities/biz-inbound-order-item.entity.js'
+import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
+import { InventoryLog } from '../entities/inventory-log.entity.js'
+import { O2oPreorderItem } from '../entities/o2o-preorder-item.entity.js'
 import { isRetryableSqliteLockError, isUniqueConstraintError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
 import { generateProductCode } from '../utils/id-generator.js'
@@ -117,6 +121,13 @@ const PRODUCT_CODE_CONSTRAINT_MATCHER = {
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const PRODUCT_CREATE_MAX_RETRY = 3
+
+const PRODUCT_REFERENCE_LABELS = [
+  { repoEntity: BizInboundOrderItem, label: '入库明细' },
+  { repoEntity: BizOutboundOrderItem, label: '出库明细' },
+  { repoEntity: InventoryLog, label: '库存流水' },
+  { repoEntity: O2oPreorderItem, label: '线上预订单明细' },
+] as const
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export class ProductService {
@@ -297,8 +308,40 @@ export class ProductService {
 
   async delete(id: string): Promise<void> {
     await AppDataSource.transaction(async (manager) => {
+      const productRepo = manager.getRepository(BaseProduct)
+      const product = await productRepo.findOne({
+        where: { id },
+        select: ['id', 'productName'],
+      })
+      if (!product) {
+        throw new BizError('产品不存在', 404)
+      }
+
+      const referenceResults = await Promise.all(
+        PRODUCT_REFERENCE_LABELS.map(async ({ repoEntity, label }) => {
+          const count = await manager.getRepository(repoEntity).count({
+            where: { productId: id },
+          })
+          return {
+            label,
+            count,
+          }
+        }),
+      )
+
+      const referencedLabels = referenceResults
+        .filter((item) => item.count > 0)
+        .map((item) => item.label)
+
+      if (referencedLabels.length) {
+        throw new BizError(
+          `产品“${product.productName}”已被${referencedLabels.join('、')}引用，无法删除；如不再使用，建议改为停用。`,
+          409,
+        )
+      }
+
       await manager.getRepository(RelProductTag).delete({ productId: id })
-      const result = await manager.getRepository(BaseProduct).delete({ id })
+      const result = await productRepo.delete({ id })
       if (!result.affected) {
         throw new BizError('产品不存在', 404)
       }
