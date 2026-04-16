@@ -109,7 +109,8 @@ const {
   },
 })
 
-// 这两个响应式引用由模板直接消费，无需额外占位语句。 
+// 这里显式监听模板侧 input ref，避免严格构建下将其误判为“仅声明未读取”。
+watch(imageInputRef, () => undefined, { flush: 'post' })
 
 /**
  * 查询核销信息：
