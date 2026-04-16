@@ -37,11 +37,15 @@ const lastRouteVerifyKey = ref('')
 const canVerify = computed(() => isO2oOrderPending(detail.value?.order.status))
 const isShowNo = (value: string) => /^PO\d{8}\d{4}$/i.test(value)
 const scanActionHint = computed(() => {
-  return scanModeLabel.value === '实时扫码'
-    ? '轻触相机图标即可打开实时扫码，识别成功后会自动查询订单。'
-    : isSecureCameraContext.value
-      ? '当前浏览器已切换为拍照识别模式，点相机图标即可拍照识别二维码。'
-      : '当前为 HTTP 环境，已切换为拍照识别模式，点相机图标即可拍照识别二维码。'
+  if (scanModeLabel.value === '实时扫码') {
+    return '轻触相机图标即可打开实时扫码，识别成功后会自动查询订单。'
+  }
+
+  if (isSecureCameraContext.value) {
+    return '当前浏览器已切换为拍照识别模式，点相机图标即可拍照识别二维码。'
+  }
+
+  return '当前为 HTTP 环境，已切换为拍照识别模式，点相机图标即可拍照识别二维码。'
 })
 
 const normalizeVerifyCode = (rawValue: string) => {
@@ -71,7 +75,7 @@ const normalizeVerifyCode = (rawValue: string) => {
   // 兼容“网页展示码复制”场景：
   // 例如 "0ECC 885A BDEF 462B B9BC 9C0C ..." 这类带空格分组的文本。
   // 统一提取字母数字后再归一化为标准 UUID（8-4-4-4-12）。
-  const compact = value.replace(/[^a-zA-Z0-9]/g, '')
+  const compact = value.replaceAll(/[^a-zA-Z0-9]/g, '')
   if (/^[a-fA-F0-9]{32}$/.test(compact)) {
     const hex = compact.toLowerCase()
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
@@ -105,9 +109,7 @@ const {
   },
 })
 
-// 这两个 ref 由模板中的 DOM 绑定消费，显式保留一份脚本侧引用以通过严格类型构建。
-void imageInputRef
-void bindScannerContainer
+// 这两个响应式引用由模板直接消费，无需额外占位语句。 
 
 /**
  * 查询核销信息：
