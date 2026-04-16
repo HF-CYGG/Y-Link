@@ -725,6 +725,9 @@ onActivated(() => {
           </el-form-item>
           <el-form-item label="状态" prop="isActive">
             <el-switch v-model="form.isActive" active-text="启用" inactive-text="停用" />
+            <p class="mt-2 text-xs leading-5 text-slate-400">
+              商品停用后会自动从线上预订中下架；重新启用后仍需人工重新上架，避免误恢复到客户端大厅。
+            </p>
           </el-form-item>
         </el-form>
       </template>

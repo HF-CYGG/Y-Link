@@ -129,6 +129,22 @@ const PRODUCT_REFERENCE_LABELS = [
   { repoEntity: O2oPreorderItem, label: '线上预订单明细' },
 ] as const
 
+const resolveEffectiveO2oStatus = (
+  isActive: boolean,
+  requestedStatus: 'listed' | 'unlisted' | undefined,
+  currentStatus: 'listed' | 'unlisted' = 'unlisted',
+): 'listed' | 'unlisted' => {
+  if (!isActive) {
+    return 'unlisted'
+  }
+
+  if (requestedStatus === 'listed' || requestedStatus === 'unlisted') {
+    return requestedStatus
+  }
+
+  return currentStatus
+}
+
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export class ProductService {
   private productRepo = AppDataSource.getRepository(BaseProduct)
@@ -180,14 +196,15 @@ export class ProductService {
       try {
         return await AppDataSource.transaction(async (manager) => {
           const repo = manager.getRepository(BaseProduct)
+          const isActive = input.isActive ?? true
           const product = repo.create({
             productCode: shouldGenerateProductCode ? await generateProductCode(manager) : normalizedProductCode,
             productName: input.productName.trim(),
             pinyinAbbr: input.pinyinAbbr?.trim() || '',
             defaultPrice: normalizeDecimalText(input.defaultPrice),
-            isActive: input.isActive ?? true,
+            isActive,
             category: input.category?.trim() || '默认分类',
-            o2oStatus: input.o2oStatus ?? 'unlisted',
+            o2oStatus: resolveEffectiveO2oStatus(isActive, input.o2oStatus),
             thumbnail: input.thumbnail?.trim() || null,
             detailContent: input.detailContent?.trim() || null,
             limitPerUser: Number.isInteger(input.limitPerUser) ? Math.max(1, input.limitPerUser as number) : 5,
@@ -252,7 +269,9 @@ export class ProductService {
         product.category = input.category.trim() || '默认分类'
       }
       if (input.o2oStatus === 'listed' || input.o2oStatus === 'unlisted') {
-        product.o2oStatus = input.o2oStatus
+        product.o2oStatus = resolveEffectiveO2oStatus(product.isActive, input.o2oStatus, product.o2oStatus)
+      } else if (typeof input.isActive === 'boolean') {
+        product.o2oStatus = resolveEffectiveO2oStatus(product.isActive, undefined, product.o2oStatus)
       }
       if (typeof input.thumbnail === 'string' || input.thumbnail === null) {
         product.thumbnail = typeof input.thumbnail === 'string' ? input.thumbnail.trim() || null : null
@@ -299,6 +318,7 @@ export class ProductService {
 
       products.forEach((product) => {
         product.isActive = input.isActive as boolean
+        product.o2oStatus = resolveEffectiveO2oStatus(product.isActive, undefined, product.o2oStatus)
       })
 
       const saved = await repo.save(products)

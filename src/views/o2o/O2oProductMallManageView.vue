@@ -6,7 +6,7 @@
  */
 
 
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { UploadRequestOptions } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
@@ -71,6 +71,15 @@ const displayThumbnail = computed(() => {
 const dialogTitle = computed(() => {
   return form.id ? '编辑线上商品' : '新增线上商品'
 })
+
+watch(
+  () => form.isActive,
+  (isActive) => {
+    if (!isActive) {
+      form.o2oStatus = 'unlisted'
+    }
+  },
+)
 
 /**
  * 重置编辑表单：
@@ -173,6 +182,11 @@ const openEditDialog = (product: ProductRecord) => {
  * - 这里直接只更新 O2O 状态，操作完成后刷新列表。
  */
 const toggleListed = async (product: ProductRecord, nextStatus: 'listed' | 'unlisted') => {
+  if (!product.isActive && nextStatus === 'listed') {
+    ElMessage.warning('请先启用商品，再手动上架到线上商城')
+    return
+  }
+
   await updateProduct(product.id, {
     o2oStatus: nextStatus,
   })
@@ -276,6 +290,7 @@ onMounted(async () => {
               inline-prompt
               active-text="上架"
               inactive-text="下架"
+              :disabled="!row.isActive"
               @change="toggleListed(row, $event ? 'listed' : 'unlisted')"
             />
           </template>
@@ -364,9 +379,17 @@ onMounted(async () => {
             </div>
             <div class="flex items-center justify-between">
               <span class="text-sm font-medium text-slate-700">商城展示</span>
-              <el-switch v-model="form.o2oStatus" active-value="listed" inactive-value="unlisted" active-text="上架" inactive-text="下架" inline-prompt />
+              <el-switch
+                v-model="form.o2oStatus"
+                active-value="listed"
+                inactive-value="unlisted"
+                active-text="上架"
+                inactive-text="下架"
+                inline-prompt
+                :disabled="!form.isActive"
+              />
             </div>
-            <p class="mt-2 text-xs text-slate-400">注释：基础状态启用且商城展示上架，商品才会在客户端大厅中展示。</p>
+            <p class="mt-2 text-xs text-slate-400">注释：基础状态启用且商城展示上架，商品才会在客户端大厅中展示；重新启用后仍需人工重新上架。</p>
           </div>
         </el-form-item>
 
