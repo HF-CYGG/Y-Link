@@ -341,16 +341,12 @@ html.dark .el-drawer {
 
 .client-page-absolute {
   position: absolute;
-  top: 1rem;
+  top: 0;
   left: 0;
   right: 0;
   width: 100%;
-}
-
-@media (min-width: 640px) {
-  .client-page-absolute {
-    top: 1.25rem;
-  }
+  min-width: 0;
+  will-change: transform, opacity;
 }
 
 /* 应用根容器高度占满视口，便于布局组件直接继承。 */

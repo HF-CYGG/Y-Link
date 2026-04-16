@@ -146,20 +146,32 @@ const handleLogout = async () => {
       </div>
     </header>
 
-    <main class="client-main-layout__container relative min-w-0 px-4 pt-4 sm:px-5">
-      <router-view v-slot="{ Component, route: viewRoute }">
-        <transition :name="transitionName">
-          <KeepAlive :max="3">
-            <component :is="Component" v-if="Component && viewRoute.meta.keepAlive" :key="resolveViewKey(viewRoute)" class="client-page-absolute" />
-          </KeepAlive>
-        </transition>
-        <transition :name="transitionName">
-          <component :is="Component" v-if="Component && !viewRoute.meta.keepAlive" :key="resolveViewKey(viewRoute)" class="client-page-absolute" />
-        </transition>
-      </router-view>
+    <main class="client-main-layout__container min-w-0 px-4 pt-4 sm:px-5">
+      <div class="client-main-layout__viewport">
+        <router-view v-slot="{ Component, route: viewRoute }">
+          <transition :name="transitionName">
+            <KeepAlive :max="3">
+              <component
+                :is="Component"
+                v-if="Component && viewRoute.meta.keepAlive"
+                :key="resolveViewKey(viewRoute)"
+                class="client-page-absolute"
+              />
+            </KeepAlive>
+          </transition>
+          <transition :name="transitionName">
+            <component
+              :is="Component"
+              v-if="Component && !viewRoute.meta.keepAlive"
+              :key="resolveViewKey(viewRoute)"
+              class="client-page-absolute"
+            />
+          </transition>
+        </router-view>
+      </div>
     </main>
 
-    <nav class="client-main-layout__tab fixed bottom-3 left-1/2 z-30 -translate-x-1/2 rounded-[1.4rem] px-2 py-2">
+    <nav class="client-main-layout__tab fixed bottom-3 left-1/2 z-50 -translate-x-1/2 rounded-[1.4rem] px-2 py-2">
       <div class="grid grid-cols-3 gap-1 relative">
         <div class="client-main-layout__tab-indicator" :style="indicatorStyle"></div>
         <router-link
@@ -195,6 +207,14 @@ const handleLogout = async () => {
   border-bottom: 1px solid color-mix(in srgb, var(--ylink-color-border) 70%, #ffffff 30%);
   background: var(--ylink-color-overlay);
   backdrop-filter: blur(18px);
+}
+
+.client-main-layout__viewport {
+  position: relative;
+  min-height: calc(100dvh - 7.5rem);
+  overflow: clip;
+  isolation: isolate;
+  padding-top: 1rem;
 }
 
 .client-main-layout__tab {
@@ -253,6 +273,11 @@ const handleLogout = async () => {
 @media (max-width: 768px) {
   .client-main-layout {
     --client-shell-inline: 0.75rem;
+  }
+
+  .client-main-layout__viewport {
+    min-height: calc(100dvh - 7rem);
+    padding-top: 0.75rem;
   }
 
   .client-main-layout__tab {
