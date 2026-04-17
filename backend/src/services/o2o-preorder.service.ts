@@ -91,13 +91,21 @@ class O2oPreorderService {
     return raw
   }
 
-  private normalizeBusinessStatus(value: string | null | undefined) {
+  /**
+   * 使用类型守卫判断输入值是否属于允许的商家业务状态，
+   * 避免在业务入口处通过 as 进行强制类型断言导致的“假安全”。
+   */
+  private isBusinessStatus(value: string): value is O2oPreorderBusinessStatus {
+    return O2O_PREORDER_BUSINESS_STATUSES.some((status) => status === value)
+  }
+
+  private normalizeBusinessStatus(value: string | null | undefined): O2oPreorderBusinessStatus | null {
     const normalizedValue = value?.trim()
     if (!normalizedValue) {
       return null
     }
-    if (O2O_PREORDER_BUSINESS_STATUSES.includes(normalizedValue as O2oPreorderBusinessStatus)) {
-      return normalizedValue as O2oPreorderBusinessStatus
+    if (this.isBusinessStatus(normalizedValue)) {
+      return normalizedValue
     }
     throw new BizError('商家状态不受支持', 400)
   }
