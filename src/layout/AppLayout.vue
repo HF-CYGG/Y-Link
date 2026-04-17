@@ -7,7 +7,7 @@
 
 
 import { computed } from 'vue'
-import type { RouteLocationNormalizedLoaded } from 'vue-router'
+import { useRoute, type RouteLocationNormalizedLoaded } from 'vue-router'
 import AppHeader from '@/layout/components/AppHeader.vue'
 import AppSidebar from '@/layout/components/AppSidebar.vue'
 import { useDevice } from '@/composables/useDevice'
@@ -28,6 +28,7 @@ useDevice()
  */
 const appStore = useAppStore()
 const authStore = useAuthStore()
+const route = useRoute()
 
 /**
  * 当前用户可见菜单：
@@ -55,11 +56,27 @@ const mainPaddingClass = computed(() => {
 })
 
 /**
+ * 全局进度条展示策略：
+ * - 默认保持原有行为：存在请求时显示顶部进度条；
+ * - 对“工作台内右侧标签页切换”这类局部切换场景可按路由 meta 抑制，避免产生“整页刷新”错觉。
+ */
+const shouldShowGlobalLoadingBar = computed(() => {
+  if (!appStore.isGlobalLoading) {
+    return false
+  }
+  return route.meta.suppressGlobalLoadingBar !== true
+})
+
+/**
  * 路由缓存键：
  * - keep-alive 页面优先按命名路由缓存，保证返回时直接复用原组件实例与筛选状态；
  * - 非缓存页面保留 fullPath 级粒度，避免不同查询串互相串状态。
  */
 const resolveViewKey = (route: RouteLocationNormalizedLoaded) => {
+  if (typeof route.meta.viewKey === 'string' && route.meta.viewKey.trim()) {
+    return route.meta.viewKey
+  }
+
   if (route.meta.keepAlive && typeof route.name === 'string') {
     return route.name
   }
@@ -75,7 +92,7 @@ const resolveViewKey = (route: RouteLocationNormalizedLoaded) => {
     <div class="relative flex min-w-0 flex-1 flex-col overflow-hidden">
       <AppHeader class="z-20" />
 
-      <div v-if="appStore.isGlobalLoading" class="absolute left-0 top-16 z-30 h-1 w-full bg-brand/20">
+      <div v-if="shouldShowGlobalLoadingBar" class="absolute left-0 top-16 z-30 h-1 w-full bg-brand/20">
         <div class="h-full w-1/3 animate-pulse bg-brand" />
       </div>
 

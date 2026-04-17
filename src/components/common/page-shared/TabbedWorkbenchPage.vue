@@ -54,16 +54,64 @@ const handleTabChange = (value: string | number) => {
       </el-tabs>
 
       <div :class="['embedded-page', props.contentClass]">
-        <keep-alive v-if="props.keepAlive">
-          <component :is="props.activeComponent" />
-        </keep-alive>
-        <component :is="props.activeComponent" v-else />
+        <transition name="workbench-horizontal-slide">
+          <keep-alive v-if="props.keepAlive">
+            <component :is="props.activeComponent" :key="props.activeTab" class="workbench-horizontal-slide__panel" />
+          </keep-alive>
+          <component
+            :is="props.activeComponent"
+            v-else
+            :key="props.activeTab"
+            class="workbench-horizontal-slide__panel"
+          />
+        </transition>
       </div>
     </div>
   </PageContainer>
 </template>
 
 <style scoped>
+.embedded-page {
+  position: relative;
+  overflow: hidden;
+}
+
+.workbench-horizontal-slide__panel {
+  width: 100%;
+  backface-visibility: hidden;
+  transform: translateZ(0);
+}
+
+.workbench-horizontal-slide-enter-active {
+  transition:
+    transform 0.32s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform, opacity;
+  position: relative;
+  z-index: 2;
+}
+
+.workbench-horizontal-slide-leave-active {
+  transition:
+    transform 0.24s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: transform, opacity;
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.workbench-horizontal-slide-enter-from {
+  transform: translate3d(28px, 0, 0);
+  opacity: 0;
+}
+
+.workbench-horizontal-slide-leave-to {
+  transform: translate3d(-20px, 0, 0);
+  opacity: 0;
+}
+
 /* 工作台内部承载的是“已存在的完整页面”，
    这里统一隐藏子页面原本自带的标题头，避免页面套页面后双标题重复。 */
 .embedded-page :deep(section > header) {

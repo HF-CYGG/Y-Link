@@ -1,14 +1,13 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { PageContainer } from '@/components/common'
+import { PageContainer, UnifiedScanDialog } from '@/components/common'
 import {
   getInboundDetail,
   getInboundDetailByShowNo,
   verifyInboundOrder,
   type InboundOrderDetail,
 } from '@/api/modules/inbound'
-import { UnifiedScanDialog } from '@/components/common'
 import { CameraFilled, DocumentCopy, Search } from '@element-plus/icons-vue'
 import { useCameraQrScanner } from '@/composables/useCameraQrScanner'
 import { useDevice } from '@/composables/useDevice'
@@ -49,11 +48,13 @@ const canVerify = computed(() => {
 })
 
 const scanActionHint = computed(() => {
-  return scanModeLabel.value === '实时扫码'
-    ? '轻触相机图标即可实时扫码，识别成功后会自动查询送货单。'
-    : isSecureCameraContext.value
-      ? '当前浏览器已切换为拍照识别模式，轻触相机图标即可拍照识别二维码。'
-      : '当前为 HTTP 环境，已切换为拍照识别模式，轻触相机图标即可拍照识别二维码。'
+  if (scanModeLabel.value === '实时扫码') {
+    return '轻触相机图标即可实时扫码，识别成功后会自动查询送货单。'
+  }
+  if (isSecureCameraContext.value) {
+    return '当前浏览器已切换为拍照识别模式，轻触相机图标即可拍照识别二维码。'
+  }
+  return '当前为 HTTP 环境，已切换为拍照识别模式，轻触相机图标即可拍照识别二维码。'
 })
 
 // 详情摘要卡数据，统一模板渲染，避免重复写格式化逻辑。
@@ -143,10 +144,6 @@ const {
     await handleScan()
   },
 })
-
-// 这两个 ref 由模板中的 DOM 绑定消费，显式保留一份脚本侧引用以通过严格类型构建。
-void imageInputRef
-void bindScannerContainer
 
 const isShowNoPattern = (code: string) => /^IN\d{12}$/i.test(code.trim())
 
@@ -293,6 +290,10 @@ const handleReuseRecentScan = (verifyCode: string) => {
 
 onMounted(() => {
   focusScanInput()
+  // 模板会把文件输入框回填到此 ref，这里显式读取一次，避免类型检查误判为“未使用”。
+  if (imageInputRef.value) {
+    imageInputRef.value.dataset.scanInputReady = 'true'
+  }
   globalThis.addEventListener('keydown', handleGlobalKeydown)
 })
 
@@ -411,7 +412,7 @@ onBeforeUnmount(() => {
           <el-icon class="is-loading text-brand text-4xl"><Loading /></el-icon>
         </div>
 
-        <transition name="fade-slide" mode="out-in">
+        <transition name="inbound-detail-switch" mode="out-in">
           <div v-if="currentOrder" key="order-detail" class="flex flex-col min-h-0 h-full">
             <!-- 顶部状态条 -->
             <div class="h-1.5" :class="statusToneClassMap[currentOrder.order.status]" />
@@ -505,7 +506,7 @@ onBeforeUnmount(() => {
           </div>
         </transition>
 
-        <transition name="fade-slide" mode="out-in">
+        <transition name="inbound-detail-switch" mode="out-in">
           <div v-if="!currentOrder" key="empty-detail" class="flex-1 flex items-center justify-center">
             <el-empty description="请先在左侧扫码或输入二维码" :image-size="200" />
           </div>
@@ -591,15 +592,17 @@ onBeforeUnmount(() => {
   background: rgba(240, 253, 250, 0.9);
 }
 
-/* 详情区切换动效：扫码成功后右侧信息平滑入场。 */
-.fade-slide-enter-active,
-.fade-slide-leave-active {
-  transition: all 0.2s ease;
+/* 详情区切换动效：避免复用全局 fade-slide 导致与路由动画样式串扰。 */
+.inbound-detail-switch-enter-active,
+.inbound-detail-switch-leave-active {
+  transition:
+    transform 0.24s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.18s cubic-bezier(0.22, 1, 0.36, 1);
 }
-.fade-slide-enter-from,
-.fade-slide-leave-to {
+.inbound-detail-switch-enter-from,
+.inbound-detail-switch-leave-to {
   opacity: 0;
-  transform: translateY(6px);
+  transform: translateY(4px);
 }
 
 /* 成功提示条使用轻量浮现动效，避免视觉突兀。 */

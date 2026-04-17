@@ -50,6 +50,8 @@ export interface AppRouteMeta extends RouteMeta {
   allowedRoles?: UserRole[]
   keepAlive?: boolean
   preloadTargets?: AppRouteName[]
+  viewKey?: string
+  suppressGlobalLoadingBar?: boolean
 }
 
 /**
@@ -163,6 +165,8 @@ const layoutChildren: AppRouteRecord[] = [
       requiredPermissions: ['inbound:create'],
       allowedRoles: ['supplier'],
       keepAlive: true,
+      viewKey: 'supplier-workbench',
+      suppressGlobalLoadingBar: true,
     },
   },
   {
@@ -179,6 +183,8 @@ const layoutChildren: AppRouteRecord[] = [
       requiredPermissions: ['inbound:view'],
       allowedRoles: ['supplier'],
       keepAlive: true,
+      viewKey: 'supplier-workbench',
+      suppressGlobalLoadingBar: true,
     },
   },
   {
@@ -239,6 +245,8 @@ const layoutChildren: AppRouteRecord[] = [
           activeMenu: '/base-data',
           requiredPermissions: ['products:view'],
           keepAlive: true,
+          viewKey: 'product-center',
+          suppressGlobalLoadingBar: true,
           preloadTargets: ['tags', 'o2o-console-products'],
         },
       },
@@ -290,6 +298,8 @@ const layoutChildren: AppRouteRecord[] = [
           activeMenu: '/base-data/products',
           requiredPermissions: ['products:view'],
           keepAlive: true,
+          viewKey: 'product-center',
+          suppressGlobalLoadingBar: true,
           preloadTargets: ['o2o-console-verify'],
         },
       },
@@ -377,6 +387,8 @@ const layoutChildren: AppRouteRecord[] = [
           activeMenu: '/system',
           requiredPermissions: ['users:view'],
           keepAlive: true,
+          viewKey: 'user-center',
+          suppressGlobalLoadingBar: true,
           preloadTargets: ['system-client-users', 'system-audit-logs'],
         },
       },
@@ -391,6 +403,8 @@ const layoutChildren: AppRouteRecord[] = [
           activeMenu: '/system/users',
           requiredPermissions: ['users:view'],
           keepAlive: true,
+          viewKey: 'user-center',
+          suppressGlobalLoadingBar: true,
           preloadTargets: ['system-audit-logs'],
         },
       },

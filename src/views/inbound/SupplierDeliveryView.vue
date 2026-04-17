@@ -139,7 +139,7 @@ onMounted(() => {
   <PageContainer title="送货单录入">
     <div class="max-w-6xl mx-auto">
       <!-- 录入态与成功态使用同一过渡，降低视图切换突兀感 -->
-      <transition name="fade-scale" mode="out-in">
+      <transition name="supplier-form-switch" mode="out-in">
         <div
           v-if="!isSuccess"
           key="delivery-form"
@@ -317,13 +317,15 @@ onMounted(() => {
   transition: transform 0.28s ease;
 }
 
-/* 页面状态切换动画：录入态与成功态之间采用轻缩放淡入 */
-.fade-scale-enter-active,
-.fade-scale-leave-active {
-  transition: all 0.24s ease;
+/* 页面状态切换动画：使用局部命名，避免与全局样式重名引发切换串扰。 */
+.supplier-form-switch-enter-active,
+.supplier-form-switch-leave-active {
+  transition:
+    transform 0.24s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.2s cubic-bezier(0.22, 1, 0.36, 1);
 }
-.fade-scale-enter-from,
-.fade-scale-leave-to {
+.supplier-form-switch-enter-from,
+.supplier-form-switch-leave-to {
   opacity: 0;
   transform: scale(0.985);
 }
