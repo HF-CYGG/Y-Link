@@ -6,6 +6,7 @@
 
 import { Router } from 'express'
 import { z } from 'zod'
+import { requirePermission } from '../middleware/auth.middleware.js'
 import { productService } from '../services/product.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 
@@ -106,6 +107,8 @@ export const productRouter = Router()
 
 productRouter.get(
   '/',
+  // 商品列表/筛选属于读取能力，统一要求 products:view。
+  requirePermission('products:view'),
   asyncHandler(async (req, res) => {
     const isActiveRaw = req.query.isActive
     const isActive =
@@ -133,6 +136,8 @@ productRouter.get(
 
 productRouter.post(
   '/batch',
+  // 批量更新商品状态属于管理操作，需要 products:manage。
+  requirePermission('products:manage'),
   asyncHandler(async (req, res) => {
     const payload = batchUpdateProductSchema.parse(req.body)
     const data = await productService.batchUpdate(payload)
@@ -146,6 +151,8 @@ productRouter.post(
 
 productRouter.get(
   '/:id',
+  // 查看商品详情属于读取能力，需要 products:view。
+  requirePermission('products:view'),
   asyncHandler(async (req, res) => {
     const data = await productService.detail(req.params.id)
     res.json({
@@ -158,6 +165,8 @@ productRouter.get(
 
 productRouter.post(
   '/',
+  // 新增商品属于管理操作，需要 products:manage。
+  requirePermission('products:manage'),
   asyncHandler(async (req, res) => {
     const payload = createProductSchema.parse(req.body)
     const data = await productService.create(payload)
@@ -171,6 +180,8 @@ productRouter.post(
 
 productRouter.put(
   '/:id',
+  // 编辑商品属于管理操作，需要 products:manage。
+  requirePermission('products:manage'),
   asyncHandler(async (req, res) => {
     const payload = updateProductSchema.parse(req.body)
     const data = await productService.update(req.params.id, payload)
@@ -184,6 +195,8 @@ productRouter.put(
 
 productRouter.delete(
   '/:id',
+  // 删除商品属于高风险管理操作，需要 products:manage。
+  requirePermission('products:manage'),
   asyncHandler(async (req, res) => {
     await productService.delete(req.params.id)
     res.json({

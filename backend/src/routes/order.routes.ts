@@ -43,6 +43,8 @@ export const orderRouter = Router()
 
 orderRouter.get(
   '/',
+  // 订单列表属于业务数据查询，需要具备 orders:view 权限才可访问。
+  requirePermission('orders:view'),
   asyncHandler(async (req, res) => {
     const page = Number(req.query.page ?? 1)
     const pageSize = Number(req.query.pageSize ?? 20)
@@ -76,6 +78,8 @@ orderRouter.get(
 
 orderRouter.get(
   '/show-no/:showNo',
+  // 通过业务单号查询明细同样属于订单查看能力，统一纳入 orders:view 控制。
+  requirePermission('orders:view'),
   asyncHandler(async (req, res) => {
     const data = await orderService.detailByShowNo(req.params.showNo)
     res.json({
@@ -88,6 +92,8 @@ orderRouter.get(
 
 orderRouter.get(
   '/:id',
+  // 通过主键查询明细也必须满足订单查看权限，避免越权探测订单数据。
+  requirePermission('orders:view'),
   asyncHandler(async (req, res) => {
     const data = await orderService.detailById(req.params.id)
     res.json({
@@ -100,6 +106,8 @@ orderRouter.get(
 
 orderRouter.post(
   '/submit',
+  // 创建订单是写操作，必须具备 orders:create 权限。
+  requirePermission('orders:create'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payloadRaw = req.body as Record<string, unknown> | null | undefined

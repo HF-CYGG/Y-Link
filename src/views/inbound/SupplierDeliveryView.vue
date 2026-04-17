@@ -11,8 +11,23 @@ const loading = ref(false)
 const submitting = ref(false)
 const products = ref<ProductRecord[]>([])
 
+// 单行录入项结构：使用稳定 uid 作为 transition-group key，避免按索引 key 在删除中间项时触发错位过渡。
+interface DeliveryItemRow {
+  uid: string
+  productId: string
+  qty: number
+}
+
+// 自增序号用于生成局部唯一 uid；页面生命周期内无需全局 UUID，保证轻量且可预测。
+const itemUidSeed = ref(0)
+const createDeliveryItemRow = (): DeliveryItemRow => ({
+  uid: `delivery-item-${itemUidSeed.value++}`,
+  productId: '',
+  qty: 1,
+})
+
 // 供货单明细
-const items = ref<Array<{ productId: string; qty: number }>>([])
+const items = ref<DeliveryItemRow[]>([])
 const remark = ref('')
 
 // 二维码与成功状态
@@ -54,7 +69,7 @@ const loadProducts = async () => {
 }
 
 const handleAddItem = () => {
-  items.value.push({ productId: '', qty: 1 })
+  items.value.push(createDeliveryItemRow())
 }
 
 const handleRemoveItem = (index: number) => {
@@ -161,7 +176,7 @@ onMounted(() => {
               <transition-group name="item-list" tag="div" class="space-y-3">
                 <div
                   v-for="(item, index) in items"
-                  :key="`delivery-item-${index}`"
+                  :key="item.uid"
                   class="flex items-start gap-4 p-4 bg-slate-50 dark:bg-slate-900/50 rounded-xl border border-slate-100 dark:border-slate-700"
                 >
                   <div class="w-8 h-8 shrink-0 rounded-full bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-600 text-slate-500 text-sm flex items-center justify-center font-medium">

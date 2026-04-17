@@ -678,3 +678,40 @@ const deriveShortcutItems = (
 export const buildAppMenuItems = (user?: Pick<UserSafeProfile, 'role' | 'permissions'> | null) => deriveMenuItems(layoutChildren, user)
 export const buildDashboardShortcutItems = (user?: Pick<UserSafeProfile, 'role' | 'permissions'> | null) =>
   deriveShortcutItems(layoutChildren, user)
+
+/**
+ * 解析“首个可访问管理端路由”：
+ * - 按菜单顺序遍历，确保回退目标稳定、可预期；
+ * - 优先返回首个可访问子路由，避免父路由 redirect 指向无权限页面导致循环告警；
+ * - 仅返回菜单可见页面，保证回退后用户能在侧栏找到当前位置。
+ */
+const findFirstAccessibleManagementPath = (
+  records: AppRouteRecord[],
+  user?: Pick<UserSafeProfile, 'role' | 'permissions'> | null,
+  parentPath = '/',
+): string | null => {
+  const sortedRecords = sortByMenuOrder(records)
+  for (const record of sortedRecords) {
+    if (!canAccessRoute(record.meta, user)) {
+      continue
+    }
+
+    const fullPath = resolveRoutePath(parentPath, record.path)
+    if (record.children?.length) {
+      const firstAccessibleChildPath = findFirstAccessibleManagementPath(record.children, user, fullPath)
+      if (firstAccessibleChildPath) {
+        return firstAccessibleChildPath
+      }
+    }
+
+    if (record.meta.menu !== false) {
+      return fullPath
+    }
+  }
+
+  return null
+}
+
+export const resolveFirstAccessibleManagementPath = (user?: Pick<UserSafeProfile, 'role' | 'permissions'> | null) => {
+  return findFirstAccessibleManagementPath(layoutChildren, user)
+}

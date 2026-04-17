@@ -8,7 +8,7 @@ import { ElMessage } from 'element-plus'
 import { createRouter, createWebHistory } from 'vue-router'
 import { scheduleRouteComponentWarmup, type AppRouteName } from '@/router/route-performance'
 import { useAuthStore, useClientAuthStore } from '@/store'
-import { canAccessRoute, routes } from '@/router/routes'
+import { canAccessRoute, resolveFirstAccessibleManagementPath, routes } from '@/router/routes'
 import type { UserSafeProfile } from '@/api/modules/auth'
 
 export const resolveDefaultManagementRedirect = (user?: Pick<UserSafeProfile, 'role'> | null) => {
@@ -110,8 +110,19 @@ router.beforeEach(async (to) => {
 
   const deniedRecord = to.matched.find((record) => !canAccessRoute(record.meta, authStore.currentUser))
   if (requiresAuth && deniedRecord) {
+    /**
+     * 无权限回退策略：
+     * - 优先回退到“首个可访问管理端路由”，避免默认回退到 dashboard 触发二次拒绝；
+     * - 若当前账号没有任何可访问管理页，则统一跳转 404，避免重复弹告警与路由循环。
+     */
+    const firstAccessiblePath = resolveFirstAccessibleManagementPath(authStore.currentUser)
+    if (firstAccessiblePath && firstAccessiblePath !== to.fullPath) {
+      ElMessage.warning('当前账号无权访问该页面，已为你切换到可访问页面')
+      return firstAccessiblePath
+    }
+
     ElMessage.warning('当前账号无权访问该页面')
-    return resolveDefaultManagementRedirect(authStore.currentUser)
+    return '/404'
   }
 
   return true

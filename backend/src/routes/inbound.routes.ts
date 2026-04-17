@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import { z } from 'zod'
-import { requirePermission } from '../middleware/auth.middleware.js'
+import { requirePermission, requireRole } from '../middleware/auth.middleware.js'
 import { inboundService } from '../services/inbound.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
@@ -57,7 +57,9 @@ inboundRouter.get(
   '/detail/show-no/:showNo',
   requirePermission('inbound:view'),
   asyncHandler(async (req, res) => {
-    const result = await inboundService.detailByShowNo(req.params.showNo)
+    const authReq = req as AuthenticatedRequest
+    // 服务层二次兜底：supplier 仅可查询本人单据，防止参数探测导致越权读取。
+    const result = await inboundService.detailByShowNo(req.params.showNo, authReq.auth)
     res.json({
       code: 0,
       message: 'ok',
@@ -71,7 +73,9 @@ inboundRouter.get(
   '/detail/:verifyCode',
   requirePermission('inbound:view'),
   asyncHandler(async (req, res) => {
-    const result = await inboundService.detailByVerifyCode(req.params.verifyCode)
+    const authReq = req as AuthenticatedRequest
+    // 即使具备 inbound:view，也需在服务层按角色做可见范围控制。
+    const result = await inboundService.detailByVerifyCode(req.params.verifyCode, authReq.auth)
     res.json({
       code: 0,
       message: 'ok',
@@ -104,10 +108,14 @@ inboundRouter.post(
 inboundRouter.get(
   '/admin/list',
   requirePermission('inbound:view'),
+  // admin/list 明确禁止 supplier 角色访问，避免“同权限不同职责”造成横向越权。
+  requireRole('admin', 'operator'),
   asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
     const status = typeof req.query.status === 'string' ? req.query.status : undefined
     const limit = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : 50
-    const result = await inboundService.listAllInboundOrders({ status, limit })
+    // 服务层会继续按角色收口数据范围，这里传入 actor 用于二次校验。
+    const result = await inboundService.listAllInboundOrders(authReq.auth, { status, limit })
     res.json({
       code: 0,
       message: 'ok',

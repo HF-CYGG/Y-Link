@@ -412,6 +412,7 @@ onBeforeUnmount(() => {
           <el-icon class="is-loading text-brand text-4xl"><Loading /></el-icon>
         </div>
 
+        <!-- 详情态与空态合并到同一个 transition 中，避免双 transition 同时参与切换导致闪动。 -->
         <transition name="inbound-detail-switch" mode="out-in">
           <div v-if="currentOrder" key="order-detail" class="flex flex-col min-h-0 h-full">
             <!-- 顶部状态条 -->
@@ -504,10 +505,7 @@ onBeforeUnmount(() => {
               入库成功，已准备下一单扫码
             </div>
           </div>
-        </transition>
-
-        <transition name="inbound-detail-switch" mode="out-in">
-          <div v-if="!currentOrder" key="empty-detail" class="flex-1 flex items-center justify-center">
+          <div v-else key="empty-detail" class="flex-1 flex items-center justify-center">
             <el-empty description="请先在左侧扫码或输入二维码" :image-size="200" />
           </div>
         </transition>

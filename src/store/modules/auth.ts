@@ -56,6 +56,19 @@ export const useAuthStore = defineStore('auth', () => {
   let transitionTimer: ReturnType<typeof setTimeout> | null = null
 
   /**
+   * 复位登录过渡态：
+   * - 清理尚未触发的过渡定时器，避免退出后仍然异步改写 enteringSystem；
+   * - 统一把 enteringSystem 拉回 false，保证壳层状态与认证态一致。
+   */
+  const resetPostLoginTransition = () => {
+    if (transitionTimer) {
+      clearTimeout(transitionTimer)
+      transitionTimer = null
+    }
+    enteringSystem.value = false
+  }
+
+  /**
    * 是否已登录：
    * - token 与 currentUser 同时存在才视为“前端已确认登录”；
    * - 可避免仅有本地 token 但尚未校验成功时误判为已登录。
@@ -119,6 +132,8 @@ export const useAuthStore = defineStore('auth', () => {
    * - resetInitialized 可控制是否要求下次重新执行初始化流程。
    */
   const clearAuthState = (options?: { resetInitialized?: boolean }) => {
+    // 清理登录态前先终止过渡副作用，防止退出后出现“仍在进入系统中”的假状态。
+    resetPostLoginTransition()
     token.value = null
     currentUser.value = null
     expiresAt.value = null
@@ -134,11 +149,9 @@ export const useAuthStore = defineStore('auth', () => {
    * - 用“短、轻、稳”的方式强化企业系统进入感。
    */
   const startPostLoginTransition = () => {
+    // 每次启动过渡前先彻底复位，确保定时器始终只有一份。
+    resetPostLoginTransition()
     enteringSystem.value = true
-
-    if (transitionTimer) {
-      clearTimeout(transitionTimer)
-    }
 
     transitionTimer = setTimeout(() => {
       enteringSystem.value = false

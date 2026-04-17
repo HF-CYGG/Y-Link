@@ -6,6 +6,7 @@
 
 import { Router } from 'express'
 import { z } from 'zod'
+import { requirePermission } from '../middleware/auth.middleware.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { dashboardService } from '../services/dashboard.service.js'
 import { BizError } from '../utils/errors.js'
@@ -67,6 +68,8 @@ const resolveDateRangeQuery = (query: z.infer<typeof dashboardFilterQuerySchema>
 
 dashboardRouter.get(
   '/stats',
+  // 看板统计数据属于 dashboard:view 范围，避免低权限账户直接读取经营指标。
+  requirePermission('dashboard:view'),
   asyncHandler(async (_req, res) => {
     const data = await dashboardService.getStats()
     res.json({
@@ -79,6 +82,8 @@ dashboardRouter.get(
 
 dashboardRouter.get(
   '/drilldown/products',
+  // 商品下钻会暴露细粒度经营数据，统一纳入 dashboard:view。
+  requirePermission('dashboard:view'),
   asyncHandler(async (req, res) => {
     const query = productDrilldownQuerySchema.parse(req.query)
     const filter = resolveDateRangeQuery(query)
@@ -96,6 +101,8 @@ dashboardRouter.get(
 
 dashboardRouter.get(
   '/drilldown/customers',
+  // 客户下钻与统计同属看板能力，需要 dashboard:view。
+  requirePermission('dashboard:view'),
   asyncHandler(async (req, res) => {
     const query = customerDrilldownQuerySchema.parse(req.query)
     const filter = resolveDateRangeQuery(query)
@@ -113,6 +120,8 @@ dashboardRouter.get(
 
 dashboardRouter.get(
   '/tags/aggregate',
+  // 标签聚合统计属于看板查询能力，需要 dashboard:view。
+  requirePermission('dashboard:view'),
   asyncHandler(async (req, res) => {
     const query = tagAggregateQuerySchema.parse(req.query)
     const filter = resolveDateRangeQuery(query)
@@ -130,6 +139,8 @@ dashboardRouter.get(
 
 dashboardRouter.get(
   '/pie',
+  // 饼图统计与其它看板接口保持同一权限口径，统一要求 dashboard:view。
+  requirePermission('dashboard:view'),
   asyncHandler(async (req, res) => {
     const query = dashboardFilterQuerySchema.parse(req.query)
     const filter = resolveDateRangeQuery(query)

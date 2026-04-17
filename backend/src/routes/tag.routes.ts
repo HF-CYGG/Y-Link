@@ -6,6 +6,7 @@
 
 import { Router } from 'express'
 import { z } from 'zod'
+import { requirePermission } from '../middleware/auth.middleware.js'
 import { tagService } from '../services/tag.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 
@@ -21,6 +22,8 @@ export const tagRouter = Router()
 
 tagRouter.get(
   '/',
+  // 标签列表属于读取能力，需要 tags:view。
+  requirePermission('tags:view'),
   asyncHandler(async (_req, res) => {
     const list = await tagService.listAll()
     res.json({
@@ -33,6 +36,8 @@ tagRouter.get(
 
 tagRouter.post(
   '/',
+  // 新增标签属于管理操作，需要 tags:manage。
+  requirePermission('tags:manage'),
   asyncHandler(async (req, res) => {
     const payload = createTagSchema.parse(req.body)
     const data = await tagService.create(payload)
@@ -46,6 +51,8 @@ tagRouter.post(
 
 tagRouter.put(
   '/:id',
+  // 编辑标签属于管理操作，需要 tags:manage。
+  requirePermission('tags:manage'),
   asyncHandler(async (req, res) => {
     const payload = updateTagSchema.parse(req.body)
     const data = await tagService.update(req.params.id, payload)
@@ -59,6 +66,8 @@ tagRouter.put(
 
 tagRouter.delete(
   '/:id',
+  // 删除标签属于管理操作，需要 tags:manage。
+  requirePermission('tags:manage'),
   asyncHandler(async (req, res) => {
     await tagService.delete(req.params.id)
     res.json({

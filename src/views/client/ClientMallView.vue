@@ -7,7 +7,8 @@
 
 
 import { useVirtualList } from '@vueuse/core'
-import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { ArrowDown, ArrowRight, Search, ShoppingCart } from '@element-plus/icons-vue'
 import { getO2oMallProducts, type O2oMallProduct } from '@/api/modules/o2o'
@@ -30,6 +31,7 @@ const clientCartStore = useClientCartStore()
 const clientCatalogStore = useClientCatalogStore()
 const { runLatest } = useStableRequest()
 const { isPhone } = useDevice()
+const route = useRoute()
 
 const loading = ref(false)
 const requestError = ref<{ type: 'offline' | 'error'; message: string } | null>(null)
@@ -371,6 +373,18 @@ const goToCheckout = () => {
   cartDrawerVisible.value = false
   checkoutDrawerVisible.value = true
 }
+
+// 切离商城路由时立即收拢 mini-cart：
+// 1. 防止 fixed 全屏遮罩在切页过渡阶段覆盖下一页；
+// 2. 避免用户返回商城时误看到“上一次展开状态”。
+watch(
+  () => route.path,
+  (nextPath) => {
+    if (!nextPath.startsWith('/client/mall')) {
+      miniCartVisible.value = false
+    }
+  },
+)
 
 onMounted(async () => {
   await loadProducts()
@@ -955,6 +969,15 @@ onMounted(async () => {
 .slide-left-leave-active .mini-cart-wrapper,
 .slide-right-enter-active .mini-cart-wrapper,
 .slide-right-leave-active .mini-cart-wrapper {
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+/* 与购物车卡片同策略：切页中禁用 backdrop，避免遮罩拦截下一页点击。 */
+.slide-left-enter-active .mini-cart-backdrop,
+.slide-left-leave-active .mini-cart-backdrop,
+.slide-right-enter-active .mini-cart-backdrop,
+.slide-right-leave-active .mini-cart-backdrop {
   opacity: 0 !important;
   pointer-events: none !important;
 }

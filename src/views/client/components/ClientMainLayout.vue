@@ -149,20 +149,18 @@ const handleLogout = async () => {
     <main class="client-main-layout__container min-w-0 px-4 pt-4 sm:px-5">
       <div class="client-main-layout__viewport">
         <router-view v-slot="{ Component, route: viewRoute }">
-          <transition :name="transitionName">
-            <KeepAlive :max="3">
+          <!-- 统一使用单一 transition：保证 keepAlive 与非 keepAlive 走同一动画上下文，避免双过渡叠加。 -->
+          <transition :name="transitionName" mode="out-in">
+            <KeepAlive v-if="Component && viewRoute.meta.keepAlive" :max="3">
               <component
                 :is="Component"
-                v-if="Component && viewRoute.meta.keepAlive"
                 :key="resolveViewKey(viewRoute)"
                 class="client-page-absolute"
               />
             </KeepAlive>
-          </transition>
-          <transition :name="transitionName">
             <component
               :is="Component"
-              v-if="Component && !viewRoute.meta.keepAlive"
+              v-else-if="Component"
               :key="resolveViewKey(viewRoute)"
               class="client-page-absolute"
             />

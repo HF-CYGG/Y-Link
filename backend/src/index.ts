@@ -148,11 +148,8 @@ async function bootstrap(): Promise<void> {
       configBootstrap.insertedCount > 0 ? 'success' : 'info',
     )
     if (adminBootstrap.initialized) {
-      logLine(
-        'INIT CREDENTIAL',
-        `username=${adminBootstrap.username} password=${env.INIT_ADMIN_PASSWORD}`,
-        'warn',
-      )
+      // 安全加固：禁止在启动日志输出明文密码，避免被日志采集系统或终端历史泄露。
+      logLine('INIT CREDENTIAL', `username=${adminBootstrap.username} password=***`, 'warn')
       logLine('SECURITY', '首次登录后请立即修改默认管理员密码。', 'warn')
     } else if (adminBootstrap.usingDefaultBootstrapPassword) {
       logLine('SECURITY', '当前配置仍为内置默认初始化密码，建议改为私有强密码。', 'warn')

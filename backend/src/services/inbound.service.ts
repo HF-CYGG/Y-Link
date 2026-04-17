@@ -106,6 +106,10 @@ class InboundService {
   }
 
   async listSupplierDeliveries(actor: AuthUserContext) {
+    if (actor.role !== 'supplier') {
+      throw new BizError('仅供货方账号可查看送货单历史', 403)
+    }
+
     const rows = await this.inboundRepo.find({
       where: { supplierId: actor.userId },
       order: { id: 'DESC' },
@@ -123,9 +127,16 @@ class InboundService {
     return { order, items }
   }
 
-  async detailByVerifyCode(verifyCode: string) {
+  async detailByVerifyCode(verifyCode: string, actor: AuthUserContext) {
     const normalizedCode = verifyCode.trim().toLowerCase()
-    const order = await this.inboundRepo.findOne({ where: { verifyCode: normalizedCode } })
+    const qb = this.inboundRepo.createQueryBuilder('order').where('order.verifyCode = :verifyCode', {
+      verifyCode: normalizedCode,
+    })
+    // 核心安全兜底：supplier 只能查询自己创建的单据，避免通过核销码横向读取他人数据。
+    if (actor.role === 'supplier') {
+      qb.andWhere('order.supplierId = :supplierId', { supplierId: actor.userId })
+    }
+    const order = await qb.getOne()
     if (!order) {
       throw new BizError('核销码无效或送货单不存在', 404)
     }
@@ -134,9 +145,16 @@ class InboundService {
   }
 
   // 供货方/管理端：通过 showNo 查看详情（兼容人工输入单号查询）
-  async detailByShowNo(showNo: string) {
+  async detailByShowNo(showNo: string, actor: AuthUserContext) {
     const normalizedShowNo = showNo.trim().toUpperCase()
-    const order = await this.inboundRepo.findOne({ where: { showNo: normalizedShowNo } })
+    const qb = this.inboundRepo.createQueryBuilder('order').where('order.showNo = :showNo', {
+      showNo: normalizedShowNo,
+    })
+    // 与 detailByVerifyCode 保持同一权限口径：supplier 仅读取本人送货单。
+    if (actor.role === 'supplier') {
+      qb.andWhere('order.supplierId = :supplierId', { supplierId: actor.userId })
+    }
+    const order = await qb.getOne()
     if (!order) {
       throw new BizError('送货单号无效或送货单不存在', 404)
     }
@@ -207,9 +225,13 @@ class InboundService {
   }
 
   // 管理端查看所有入库单
-  async listAllInboundOrders(query: { limit?: number, status?: string }) {
+  async listAllInboundOrders(actor: AuthUserContext, query: { limit?: number, status?: string }) {
     const limit = Math.min(200, Math.max(1, query.limit || 50))
     const qb = this.inboundRepo.createQueryBuilder('order').orderBy('order.id', 'DESC').take(limit)
+    // 服务层角色兜底：即便路由层误放开，supplier 也只能看到本人数据。
+    if (actor.role === 'supplier') {
+      qb.andWhere('order.supplierId = :supplierId', { supplierId: actor.userId })
+    }
     if (query.status) {
       qb.andWhere('order.status = :status', { status: query.status })
     }
