@@ -1,3 +1,9 @@
+/**
+ * 模块说明：src/api/modules/upload.ts
+ * 文件职责：提供全局文件上传能力。
+ * 维护说明：目前仅包含图片上传逻辑。
+ */
+
 import { request, type RequestConfig } from '@/api/http'
 
 /**

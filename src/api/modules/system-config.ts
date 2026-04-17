@@ -104,12 +104,20 @@ export interface TestVerificationProviderResult {
   code: string
 }
 
+/**
+ * 获取流水号生成配置：
+ * - 区分“部门”和“散客”开单类型。
+ */
 export const getOrderSerialConfigs = () =>
   request<OrderSerialConfigsResult>({
     method: 'GET',
     url: '/system-configs/order-serial',
   })
 
+/**
+ * 更新流水号生成配置：
+ * - 提交后影响全局订单的自动编号规则。
+ */
 export const updateOrderSerialConfigs = (payload: UpdateOrderSerialConfigsPayload) =>
   request<UpdateOrderSerialConfigsResult>({
     method: 'PUT',
@@ -117,12 +125,19 @@ export const updateOrderSerialConfigs = (payload: UpdateOrderSerialConfigsPayloa
     data: payload,
   })
 
+/**
+ * 获取线上预订全局规则：
+ * - 包括超时自动取消时长与单用户库存限购数配置。
+ */
 export const getO2oRuleConfigs = () =>
   request<O2oRuleConfigRecord>({
     method: 'GET',
     url: '/system-configs/o2o-rules',
   })
 
+/**
+ * 更新线上预订规则：
+ */
 export const updateO2oRuleConfigs = (payload: UpdateO2oRuleConfigsPayload) =>
   request<UpdateO2oRuleConfigsResult>({
     method: 'PUT',
@@ -130,12 +145,19 @@ export const updateO2oRuleConfigs = (payload: UpdateO2oRuleConfigsPayload) =>
     data: payload,
   })
 
+/**
+ * 获取验证码网关服务配置：
+ * - 包括短信(mobile)与邮件(email)通道的 HTTP 发送接口模板。
+ */
 export const getVerificationProviderConfigs = () =>
   request<VerificationProviderConfigsResult>({
     method: 'GET',
     url: '/system-configs/verification-providers',
   })
 
+/**
+ * 保存验证码网关服务配置：
+ */
 export const updateVerificationProviderConfigs = (payload: UpdateVerificationProviderConfigsPayload) =>
   request<UpdateVerificationProviderConfigsResult>({
     method: 'PUT',
@@ -143,6 +165,10 @@ export const updateVerificationProviderConfigs = (payload: UpdateVerificationPro
     data: payload,
   })
 
+/**
+ * 测试验证码发送通道：
+ * - 后端会使用传入的未保存配置实时发起请求，协助调试配置的准确性。
+ */
 export const testVerificationProviderSend = (payload: TestVerificationProviderPayload) =>
   request<TestVerificationProviderResult>({
     method: 'POST',

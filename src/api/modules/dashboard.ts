@@ -126,7 +126,8 @@ const buildDashboardDateFilterParams = (query: DashboardDateFilterQuery) => {
 }
 
 /**
- * 获取控制台统计数据
+ * 获取工作台数据看板的核心统计指标与图表数据：
+ * - 包含今日/本月订单量、销售额、七日趋势、商品与客户排行及最近活动。
  */
 export const getDashboardStats = (requestConfig: RequestConfig = {}) => {
   return request<DashboardStats>({
@@ -136,6 +137,10 @@ export const getDashboardStats = (requestConfig: RequestConfig = {}) => {
   })
 }
 
+/**
+ * 下钻查询商品维度的订单详情：
+ * - 用户在点击商品排行榜某一项时触发。
+ */
 export const getProductDrilldown = (
   productId: string,
   query: DashboardDateFilterQuery = {},
@@ -152,6 +157,10 @@ export const getProductDrilldown = (
   })
 }
 
+/**
+ * 下钻查询客户维度的订单详情：
+ * - 用户在点击客户排行榜某一项时触发。
+ */
 export const getCustomerDrilldown = (
   customerName: string,
   query: DashboardDateFilterQuery = {},
@@ -168,6 +177,10 @@ export const getCustomerDrilldown = (
   })
 }
 
+/**
+ * 获取工作台各标签类型的订单与销售聚合数据：
+ * - 用于渲染标签分布饼图或聚合卡片。
+ */
 export const getTagAggregate = (
   tagId: string,
   query: DashboardDateFilterQuery = {},
@@ -184,6 +197,10 @@ export const getTagAggregate = (
   })
 }
 
+/**
+ * 获取基于各标签类型的饼图数据：
+ * - 由后端直接返回格式化后的 PieSlice 结构，供 ECharts 消费。
+ */
 export const getDashboardPieData = (query: DashboardDateFilterQuery = {}, requestConfig: RequestConfig = {}) => {
   return request<DashboardPieDataResult>({
     ...requestConfig,
