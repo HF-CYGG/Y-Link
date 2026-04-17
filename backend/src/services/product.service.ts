@@ -30,7 +30,6 @@ export interface CreateProductInput {
   pinyinAbbr?: string
   defaultPrice?: number
   isActive?: boolean
-  category?: string
   o2oStatus?: 'listed' | 'unlisted'
   thumbnail?: string | null
   detailContent?: string | null
@@ -46,7 +45,6 @@ export interface UpdateProductInput {
   pinyinAbbr?: string
   defaultPrice?: number
   isActive?: boolean
-  category?: string
   o2oStatus?: 'listed' | 'unlisted'
   thumbnail?: string | null
   detailContent?: string | null
@@ -74,7 +72,6 @@ export interface ProductView {
   pinyinAbbr: string
   defaultPrice: string
   isActive: boolean
-  category: string
   o2oStatus: 'listed' | 'unlisted'
   thumbnail: string | null
   detailContent: string | null
@@ -203,7 +200,6 @@ export class ProductService {
             pinyinAbbr: input.pinyinAbbr?.trim() || '',
             defaultPrice: normalizeDecimalText(input.defaultPrice),
             isActive,
-            category: input.category?.trim() || '默认分类',
             o2oStatus: resolveEffectiveO2oStatus(isActive, input.o2oStatus),
             thumbnail: input.thumbnail?.trim() || null,
             detailContent: input.detailContent?.trim() || null,
@@ -264,9 +260,6 @@ export class ProductService {
       }
       if (typeof input.isActive === 'boolean') {
         product.isActive = input.isActive
-      }
-      if (typeof input.category === 'string') {
-        product.category = input.category.trim() || '默认分类'
       }
       if (input.o2oStatus === 'listed' || input.o2oStatus === 'unlisted') {
         product.o2oStatus = resolveEffectiveO2oStatus(product.isActive, input.o2oStatus, product.o2oStatus)
@@ -450,7 +443,6 @@ export class ProductService {
         pinyinAbbr: product.pinyinAbbr || '',
         defaultPrice: normalizeDecimalText(product.defaultPrice),
         isActive: Boolean(product.isActive),
-        category: product.category || '默认分类',
         o2oStatus: product.o2oStatus ?? 'unlisted',
         thumbnail: product.thumbnail ?? null,
         detailContent: product.detailContent ?? null,

@@ -197,13 +197,13 @@ const handleDialogModelValueChange = (value: boolean) => {
 }
 
 .scan-shell__mode {
-  background: rgba(13, 148, 136, 0.16);
-  color: rgb(17, 94, 89);
+  background: #d1fae5;
+  color: #065f46;
 }
 
 .scan-shell__status {
-  background: rgba(15, 23, 42, 0.12);
-  color: rgb(51, 65, 85);
+  background: #e2e8f0;
+  color: #0f172a;
 }
 
 .scan-shell__preview {
@@ -304,8 +304,8 @@ const handleDialogModelValueChange = (value: boolean) => {
   min-height: 32px;
   border-radius: 999px;
   padding: 0 12px;
-  background: rgba(15, 23, 42, 0.08);
-  color: rgb(30, 41, 59);
+  background: #e2e8f0;
+  color: #0f172a;
   font-size: 12px;
   font-weight: 600;
 }

@@ -8,6 +8,7 @@ import { randomUUID } from 'node:crypto'
 import { Brackets, In, LessThanOrEqual } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
+import { RelProductTag } from '../entities/rel-product-tag.entity.js'
 import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
 import { ClientUser } from '../entities/client-user.entity.js'
@@ -418,12 +419,31 @@ class O2oPreorderService {
       where: { isActive: true, o2oStatus: 'listed' },
       order: { id: 'DESC' },
     })
+
+    if (!products.length) return []
+
+    const productIds = products.map((p) => String(p.id))
+    const relations = await AppDataSource.manager.getRepository(RelProductTag).find({
+      where: { productId: In(productIds) },
+      relations: { tag: true },
+    })
+
+    const productTagMap = new Map<string, string[]>()
+    relations.forEach((relation) => {
+      const productId = String(relation.productId)
+      const currentTags = productTagMap.get(productId) ?? []
+      if (relation.tag?.tagName) {
+        currentTags.push(relation.tag.tagName)
+      }
+      productTagMap.set(productId, currentTags)
+    })
+
     return products.map((item) => ({
       id: String(item.id),
       productCode: item.productCode,
       productName: item.productName,
       defaultPrice: item.defaultPrice,
-      category: item.category || '默认分类',
+      tags: productTagMap.get(String(item.id)) ?? [],
       thumbnail: item.thumbnail,
       detailContent: item.detailContent,
       limitPerUser: Number(item.limitPerUser ?? 5),

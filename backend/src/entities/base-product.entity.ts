@@ -45,9 +45,6 @@ export class BaseProduct {
   @Column({ name: 'default_price', type: 'decimal', precision: 12, scale: 2, default: 0, comment: '默认单价' })
   defaultPrice!: string
 
-  @Column({ name: 'category', type: 'varchar', length: 64, default: '默认分类', comment: '商品分类' })
-  category!: string
-
   @Index('idx_base_product_is_active')
   @Column({ name: 'is_active', ...entityColumnOptions.booleanFlag, comment: '是否启用' })
   isActive!: boolean

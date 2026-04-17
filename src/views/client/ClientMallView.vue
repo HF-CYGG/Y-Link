@@ -62,19 +62,21 @@ clientCatalogStore.initialize()
 const products = computed(() => clientCatalogStore.products)
 
 const classifyProduct = (product: O2oMallProduct) => {
-  return product.category || '默认分类'
+  return product.tags && product.tags.length > 0 ? product.tags : ['默认标签']
 }
 
 const categoryGroups = computed<ProductCategoryGroup[]>(() => {
   const groupMap = new Map<string, O2oMallProduct[]>()
   products.value.forEach((product) => {
-    const key = classifyProduct(product)
-    const grouped = groupMap.get(key)
-    if (grouped) {
-      grouped.push(product)
-      return
-    }
-    groupMap.set(key, [product])
+    const keys = classifyProduct(product)
+    keys.forEach(key => {
+      const grouped = groupMap.get(key)
+      if (grouped) {
+        grouped.push(product)
+      } else {
+        groupMap.set(key, [product])
+      }
+    })
   })
 
   return [...groupMap.entries()]
@@ -87,8 +89,8 @@ const categoryGroups = computed<ProductCategoryGroup[]>(() => {
 })
 
 // 搜索模式与大数据模式互斥：
-// - 有关键字时优先进入搜索结果态，弱化分类导航；
-// - 数据量较大时启用虚拟列表，仅渲染当前分类内的可视区域。
+// - 有关键字时优先进入搜索结果态，弱化标签导航；
+// - 数据量较大时启用虚拟列表，仅渲染当前标签内的可视区域。
 const searchMode = computed(() => keyword.value.trim().length > 0)
 const largeDatasetMode = computed(() => products.value.length > 100)
 
@@ -420,7 +422,7 @@ onMounted(async () => {
         <div>
           <p class="text-xs font-semibold tracking-[0.16em] text-slate-400">CLIENT MALL</p>
           <p class="mt-1 text-xl font-semibold text-slate-900">商城</p>
-          <p class="mt-1 text-sm text-slate-500">浏览分类、查看库存并快速加入购物车</p>
+          <p class="mt-1 text-sm text-slate-500">浏览标签、查看库存并快速加入购物车</p>
         </div>
         <button
           type="button"

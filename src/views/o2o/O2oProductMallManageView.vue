@@ -28,7 +28,6 @@ type O2oProductFormState = {
   productName: string
   defaultPrice: number
   isActive: boolean
-  category: string
   o2oStatus: 'listed' | 'unlisted'
   thumbnail: string
   detailContent: string
@@ -42,18 +41,12 @@ const dialogVisible = ref(false)
 const keyword = ref('')
 const products = ref<ProductRecord[]>([])
 
-const availableCategories = computed(() => {
-  const categories = products.value.map((p) => p.category).filter(Boolean)
-  return [...new Set(categories)]
-})
-
 const form = reactive<O2oProductFormState>({
   id: '',
   productCode: '',
   productName: '',
   defaultPrice: 0,
   isActive: true,
-  category: '默认分类',
   o2oStatus: 'listed',
   thumbnail: '',
   detailContent: '',
@@ -92,7 +85,6 @@ const resetForm = () => {
   form.productName = ''
   form.defaultPrice = 0
   form.isActive = true
-  form.category = '默认分类'
   form.o2oStatus = 'listed'
   form.thumbnail = ''
   form.detailContent = ''
@@ -167,7 +159,6 @@ const openEditDialog = (product: ProductRecord) => {
   form.productName = product.productName
   form.defaultPrice = Number(product.defaultPrice)
   form.isActive = product.isActive
-  form.category = product.category || '默认分类'
   form.o2oStatus = product.o2oStatus
   form.thumbnail = product.thumbnail ?? ''
   form.detailContent = product.detailContent ?? ''
@@ -221,7 +212,6 @@ const handleSubmit = async () => {
         productName: form.productName.trim(),
         defaultPrice: Number(form.defaultPrice) || 0,
         isActive: form.isActive,
-        category: form.category.trim() || '默认分类',
         o2oStatus: form.o2oStatus,
         thumbnail: finalThumbnail,
         detailContent: form.detailContent.trim() || null,
@@ -235,7 +225,6 @@ const handleSubmit = async () => {
         productName: form.productName.trim(),
         defaultPrice: Number(form.defaultPrice) || 0,
         isActive: form.isActive,
-        category: form.category.trim() || '默认分类',
         o2oStatus: form.o2oStatus,
         thumbnail: finalThumbnail,
         detailContent: form.detailContent.trim() || null,
@@ -334,25 +323,6 @@ onMounted(async () => {
           <el-col :span="12">
             <el-form-item label="建议单价">
               <el-input-number v-model="form.defaultPrice" :min="0" :precision="2" style="width: 100%" :disabled="!!form.id" />
-            </el-form-item>
-          </el-col>
-          <el-col :span="12">
-            <el-form-item label="商品分类">
-              <el-select
-                v-model="form.category"
-                filterable
-                allow-create
-                default-first-option
-                placeholder="选择或输入新分类"
-                style="width: 100%"
-              >
-                <el-option
-                  v-for="cat in availableCategories"
-                  :key="cat"
-                  :label="cat"
-                  :value="cat"
-                />
-              </el-select>
             </el-form-item>
           </el-col>
         </el-row>

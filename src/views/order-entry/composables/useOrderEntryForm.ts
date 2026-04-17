@@ -427,6 +427,7 @@ export const useOrderEntryForm = () => {
     }
 
     const created = await productApi.createProduct({
+      productCode: `Auto-${globalThis.crypto.randomUUID().slice(0, 8)}`,
       productName: normalizedValue,
       pinyinAbbr: '',
       defaultPrice: Math.max(unitPrice, 0),
