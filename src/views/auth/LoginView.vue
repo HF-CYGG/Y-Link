@@ -79,11 +79,10 @@ const handleSubmit = async () => {
         confirmButtonText: '我知道了',
       }).catch(() => undefined)
     }
-    const targetPath = typeof route.query.redirect === 'string'
-      ? resolveSafeRedirect(route.query.redirect, result.user)
-      : resolveDefaultManagementRedirect(result.user)
-    await authStore.warmupPostLoginEntry(targetPath)
-    await router.replace(targetPath) 
+    const redirectPath = ref(typeof route.query.redirect === 'string' ? resolveSafeRedirect(route.query.redirect, result.user) : resolveDefaultManagementRedirect(result.user))
+    
+    await authStore.warmupPostLoginEntry(redirectPath.value)
+    await router.replace(redirectPath.value) 
   } catch (error) { 
     submitPhase.value = 'idle' 
     const message = extractErrorMessage(error, '登录失败，请稍后重试')

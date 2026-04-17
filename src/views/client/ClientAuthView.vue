@@ -182,7 +182,9 @@ const switchMode = async (nextMode: AuthMode) => {
 const handleFormBeforeLeave = () => {
   syncWrapperHeight('measured', formWrapperRef.value)
   // 强制浏览器确认当前高度帧，避免切换起始时出现跳帧或闪现。
-  void formWrapperRef.value?.offsetHeight
+  if (formWrapperRef.value) {
+    formWrapperRef.value.getBoundingClientRect()
+  }
 }
 
 const handleFormBeforeEnter = () => {
@@ -326,6 +328,7 @@ const handleSendRegisterVerificationCode = async () => {
   }
 }
 
+// 详细注释：提交登录表单。首先进行基础校验，然后调用 auth store 登录，成功后跳转至原页面或大厅。
 const handleLogin = async () => {
   if (!validateLoginAccount(loginForm.account)) {
     ElMessage.warning('请输入用户名、手机号或邮箱')
@@ -457,11 +460,11 @@ watch(
 )
 
 watch(registerValidationMode, (mode) => {
-  if (mode !== 'verification_code') {
+  if (mode === 'verification_code') {
+    registerForm.captcha = ''
+  } else {
     resetRegisterVerificationTimer()
     registerForm.verificationCode = ''
-  } else {
-    registerForm.captcha = ''
   }
 })
 
@@ -885,8 +888,8 @@ onUnmounted(() => {
 .auth-hint-card {
   margin-top: 16px;
   border-radius: 16px;
-  background: rgba(15, 118, 110, 0.08);
-  color: #0f766e;
+  background: rgba(13, 148, 136, 0.16);
+  color: #0f172a;
   padding: 12px 14px;
   font-size: 13px;
   line-height: 1.7;

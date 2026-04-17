@@ -52,7 +52,16 @@ const log = (message) => {
   console.log(message)
 }
 
-const readText = (filePath) => fs.readFileSync(filePath, 'utf8')
+const readText = (filePath) => {
+  try {
+    return fs.readFileSync(filePath, 'utf8')
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      throw new Error(`文件未找到：${filePath}，请检查当前是否在正确的项目根目录下执行脚本`)
+    }
+    throw error
+  }
+}
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
@@ -190,6 +199,11 @@ const stopIsolatedBackend = async (backendProcess) => {
       return
     }
     await sleep(100)
+  }
+  
+  // 兜底强制杀死
+  if (backendProcess.exitCode === null) {
+    backendProcess.kill('SIGKILL')
   }
 }
 

@@ -82,37 +82,33 @@ function getEnvironmentValue(envKeys) {
 
 function normalizeForwardedArgs(rawArgs) {
   const resolvedArgs = []
+  let index = 0
 
-  for (let index = 0; index < rawArgs.length; index += 1) {
+  while (index < rawArgs.length) {
     const currentArg = rawArgs[index]
-    let matchedDefinition = null
-    let matchedAlias = null
+    const matched = findMatchedDefinition(currentArg)
 
-    for (const definition of parameterDefinitions) {
-      matchedAlias = definition.aliases.find((alias) => {
-        const loweredArg = currentArg.toLowerCase()
-        return loweredArg === alias.toLowerCase() || loweredArg.startsWith(`${alias.toLowerCase()}=`)
-      })
-
-      if (matchedAlias) {
-        matchedDefinition = definition
-        break
-      }
-    }
-
-    if (!matchedDefinition || !matchedAlias) {
+    if (!matched) {
       resolvedArgs.push(currentArg)
+      index += 1
       continue
     }
+
+    const { definition: matchedDefinition, alias: matchedAlias } = matched
+    const isInlineAssignment = currentArg.includes('=')
+    const inlineValue = isInlineAssignment ? currentArg.slice(matchedAlias.length + 1) : ''
 
     if (matchedDefinition.kind === 'switch') {
-      resolvedArgs.push(matchedDefinition.powerShellName)
+      if (!isInlineAssignment || isTruthySwitchValue(inlineValue)) {
+        resolvedArgs.push(matchedDefinition.powerShellName)
+      }
+      index += 1
       continue
     }
 
-    const inlineValue = currentArg.slice(matchedAlias.length + 1)
-    if (inlineValue) {
+    if (isInlineAssignment && inlineValue) {
       resolvedArgs.push(matchedDefinition.powerShellName, inlineValue)
+      index += 1
       continue
     }
 
@@ -122,10 +118,24 @@ function normalizeForwardedArgs(rawArgs) {
     }
 
     resolvedArgs.push(matchedDefinition.powerShellName, nextArg)
-    index += 1
+    index += 2
   }
 
   return resolvedArgs
+}
+
+function findMatchedDefinition(currentArg) {
+  for (const definition of parameterDefinitions) {
+    const matchedAlias = definition.aliases.find((alias) => {
+      const loweredArg = currentArg.toLowerCase()
+      return loweredArg === alias.toLowerCase() || loweredArg.startsWith(`${alias.toLowerCase()}=`)
+    })
+
+    if (matchedAlias) {
+      return { definition, alias: matchedAlias }
+    }
+  }
+  return null
 }
 
 function hasResolvedArgument(resolvedArgs, powerShellName) {
@@ -166,8 +176,17 @@ const currentFilePath = fileURLToPath(import.meta.url)
 const scriptsDirectory = path.dirname(currentFilePath)
 const projectRoot = path.resolve(scriptsDirectory, '..')
 const targetScriptPath = path.resolve(projectRoot, scriptName)
-const resolvedPowerShellArgs = buildPowerShellArguments(forwardedArgs)
-const powerShellExecutablePath = resolveWindowsPowerShellPath()
+
+let resolvedPowerShellArgs
+let powerShellExecutablePath
+
+try {
+  resolvedPowerShellArgs = buildPowerShellArguments(forwardedArgs)
+  powerShellExecutablePath = resolveWindowsPowerShellPath()
+} catch (error) {
+  console.error(`[local-dev] 初始化参数或环境失败: ${error.message}`)
+  process.exit(1)
+}
 
 const child = spawn(
   powerShellExecutablePath,

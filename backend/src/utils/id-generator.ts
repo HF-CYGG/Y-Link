@@ -23,22 +23,27 @@ const queryLatestCode = async (
   columnName: string,
   prefix: string,
 ): Promise<string | undefined> => {
+  // 增加标识符正则校验，防范潜在的内部方法滥用导致的 SQL 注入风险
+  if (!/^\w+$/.test(tableName) || !/^\w+$/.test(columnName)) {
+    throw new BizError('表名或列名不合法，存在注入风险', 500)
+  }
+
   const databaseType = resolveDatabaseType(manager)
   const rows = await manager.query(
     databaseType === 'mysql'
       ? `
-          SELECT ${columnName}
-          FROM ${tableName}
-          WHERE ${columnName} LIKE ?
-          ORDER BY ${columnName} DESC
+          SELECT \`${columnName}\`
+          FROM \`${tableName}\`
+          WHERE \`${columnName}\` LIKE ?
+          ORDER BY \`${columnName}\` DESC
           LIMIT 1
           FOR UPDATE
         `
       : `
-          SELECT ${columnName}
-          FROM ${tableName}
-          WHERE ${columnName} LIKE ?
-          ORDER BY ${columnName} DESC
+          SELECT "${columnName}"
+          FROM "${tableName}"
+          WHERE "${columnName}" LIKE ?
+          ORDER BY "${columnName}" DESC
           LIMIT 1
         `,
     [`${prefix}%`],

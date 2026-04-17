@@ -58,20 +58,21 @@ const statusLabel = computed(() => {
   }).statusLabel
 })
 
+// 详细注释：返回上一页。使用 vue-router 的 back 方法，如果不支持则由浏览器处理回退历史。
 const handleBack = () => {
   router.back()
 }
 
 const statusBanner = computed(() => {
-  const report = !detail.value
+  const report = detail.value
     ? getClientOrderStatusReportConfig({
-        status: 'pending',
-        timeoutAt: null,
-      })
-    : getClientOrderStatusReportConfig({
         statusReport: detail.value.order.statusReport,
         status: detail.value.order.status,
         timeoutAt: detail.value.order.timeoutAt,
+      })
+    : getClientOrderStatusReportConfig({
+        status: 'pending',
+        timeoutAt: null,
       })
   return { className: report.cardClassName, title: report.cardTitle, description: report.cardDescription }
 })
@@ -258,6 +259,7 @@ const loadDetail = async () => {
   })
 }
 
+// 详细注释：撤回订单操作，弹出二次确认，调用接口后刷新本地状态及二维码。
 const handleRecallOrder = async () => {
   if (!detail.value) {
     return

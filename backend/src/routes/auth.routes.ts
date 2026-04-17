@@ -23,7 +23,11 @@ const changePasswordSchema = z.object({
   newPassword: z.string().min(6, '新密码长度至少为 6 位').max(50, '新密码长度不能超过 50 位'),
 })
 
-// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
+/**
+ * 管理端鉴权路由模块：
+ * - 提供管理员与后台用户的登录、登出、改密等核心账号生命周期管理接口。
+ * - 结合 Zod 进行输入参数结构化校验，配合 authSecurityService 阻挡暴力破解。
+ */
 export const authRouter = Router()
 
 authRouter.post(

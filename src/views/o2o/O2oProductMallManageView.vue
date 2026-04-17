@@ -106,7 +106,7 @@ const resetForm = () => {
   localPreviewUrl.value = ''
 }
 
-// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
+// 详细注释：加载商品列表，支持按名称关键词进行模糊搜索，刷新商城大厅商品数据。
 const loadProducts = async () => {
   loading.value = true
   try {
@@ -118,7 +118,7 @@ const loadProducts = async () => {
   }
 }
 
-// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
+// 详细注释：打开新增商品弹窗，执行表单重置，确保表单为干净状态。
 const openCreateDialog = () => {
   resetForm()
   dialogVisible.value = true
@@ -159,7 +159,7 @@ const handleCustomUpload = async (options: UploadRequestOptions) => {
   }
 }
 
-// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
+// 详细注释：打开编辑商品弹窗，将商品记录字段回显到表单模型中。
 const openEditDialog = (product: ProductRecord) => {
   resetForm()
   form.id = product.id
@@ -194,7 +194,7 @@ const toggleListed = async (product: ProductRecord, nextStatus: 'listed' | 'unli
   await loadProducts()
 }
 
-// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
+// 详细注释：提交商品表单（新增/编辑），处理图片上传逻辑并构造对应 payload 发起请求。
 const handleSubmit = async () => {
   if (!form.productName.trim()) {
     ElMessage.warning('请输入商品名称')

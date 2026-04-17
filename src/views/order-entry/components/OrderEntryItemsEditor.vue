@@ -44,7 +44,7 @@ const props = defineProps<{
   getProductLabelById: (productId: string) => string
   calcLineAmount: (row: OrderItemRow) => number
   toMoney: (value: number) => string
-  normalizeNumber: (value: number | null) => number
+  normalizeNumber: (value: number | string | null | undefined) => number
 }>()
 
 const emit = defineEmits<{
@@ -68,11 +68,11 @@ const drawerVisibleModel = computed({
  */
 const handleAddRow = () => {
   if (props.isDesktop) {
-    void props.appendRow(true)
+    props.appendRow(true).catch(() => undefined)
     return
   }
 
-  void props.openDrawerForCreate()
+  props.openDrawerForCreate().catch(() => undefined)
 }
 
 /**

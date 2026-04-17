@@ -72,9 +72,14 @@ const parseTimeMs = (value: string | null | undefined) => {
     return 0
   }
   const timestamp = new Date(value).getTime()
+  // 处理可能产生的 NaN 时间戳，避免排序时出错
   return Number.isFinite(timestamp) ? timestamp : 0
 }
 
+/**
+ * 确定订单的排序时间戳：
+ * 优先使用创建时间，若缺失则使用超时时间作为兜底。
+ */
 const resolveOrderSortTimestamp = (order: O2oPreorderSummary) => {
   return parseTimeMs(order.createdAt) || parseTimeMs(order.timeoutAt)
 }
@@ -83,6 +88,10 @@ const getOrderScenario = (order: { statusReport?: O2oOrderStatusReport; status: 
   return order.statusReport?.scenario ?? getClientOrderReportScenario(order.status, order.timeoutAt, nowMs.value)
 }
 
+/**
+ * 判断是否为新订单：
+ * 仅 pending 状态且在设定时间窗口（NEW_ORDER_WINDOW_MS）内的订单判定为新订单。
+ */
 const isNewOrder = (order: O2oPreorderSummary) => {
   if (order.status !== 'pending') {
     return false
@@ -311,7 +320,7 @@ const playNewOrderReminderSound = () => {
     reminderAudioContext = new AudioContextCtor()
   }
   if (reminderAudioContext.state === 'suspended') {
-    void reminderAudioContext.resume()
+    reminderAudioContext.resume().catch(() => undefined)
   }
   const oscillator = reminderAudioContext.createOscillator()
   const gainNode = reminderAudioContext.createGain()
@@ -589,8 +598,9 @@ onBeforeUnmount(() => {
     globalThis.clearInterval(secondTickTimer)
     secondTickTimer = null
   }
-  if (reminderAudioContext) {
-    void reminderAudioContext.close()
+  // 清理音频上下文，避免内存泄漏
+  if (reminderAudioContext && reminderAudioContext.state !== 'closed') {
+    reminderAudioContext.close().catch(() => undefined)
     reminderAudioContext = null
   }
 })

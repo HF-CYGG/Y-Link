@@ -15,6 +15,8 @@ const composeFilePath = path.join(projectRoot, 'compose.cloud.yml')
 
 const run = ({ title, args, blocking = true }) =>
   new Promise((resolve, reject) => {
+    if (!Array.isArray(args)) return reject(new TypeError(`${title} 启动失败：args 必须是数组`))
+
     const child = spawn('docker', args, {
       cwd: projectRoot,
       stdio: 'inherit',
@@ -23,7 +25,11 @@ const run = ({ title, args, blocking = true }) =>
     })
 
     child.on('error', (error) => {
-      reject(new Error(`${title} 启动失败：${error.message}`))
+      if (error.code === 'ENOENT') {
+        reject(new Error(`${title} 启动失败：未找到 docker 命令，请检查 Docker 是否已安装并配置到环境变量 PATH 中。`))
+      } else {
+        reject(new Error(`${title} 启动失败：${error.message}`))
+      }
     })
 
     child.on('exit', (code, signal) => {

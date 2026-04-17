@@ -1,4 +1,9 @@
 <script setup lang="ts">
+/**
+ * 模块说明：src/components/common/page-shared/UnifiedScanDialog.vue
+ * 文件职责：提供统一的扫码弹窗 UI 壳，内部通过插槽和 ref 回传对接不同的扫码引擎。
+ * 维护说明：只负责扫码弹窗的视觉交互与多端适配，不包含具体的扫码硬件调用逻辑。
+ */
 import { ref, watch } from 'vue'
 
 interface Props {

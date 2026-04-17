@@ -175,7 +175,7 @@ const applyVerifyCodeFromRoute = async () => {
   }
 }
 
-// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
+// 详细注释：处理核销操作，先弹窗二次确认，成功后请求核销接口并刷新状态。
 const handleVerify = async () => {
   if (!detail.value) {
     return

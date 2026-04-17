@@ -1,4 +1,9 @@
 <script setup lang="ts">
+/**
+ * 模块说明：src/components/common/page-shared/TabbedWorkbenchPage.vue
+ * 文件职责：提供基于 Tab 切换的页面容器壳，支持页面级组件的 Keep-Alive 缓存。
+ * 维护说明：用于将多个功能页面聚合在一个标签页工作台中，同时避免嵌套页面的双标题。
+ */
 import type { Component } from 'vue'
 import { PageContainer } from '@/components/common'
 

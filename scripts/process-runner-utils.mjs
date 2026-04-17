@@ -17,7 +17,10 @@ import { spawn } from 'node:child_process'
 
 const isNonEmptyString = (value) => typeof value === 'string' && value.trim() !== ''
 
-const normalizePath = (candidatePath) => path.normalize(candidatePath)
+const normalizePath = (candidatePath) => {
+  if (!isNonEmptyString(candidatePath)) return ''
+  return path.normalize(candidatePath)
+}
 
 const fileExists = (candidatePath) => {
   if (!isNonEmptyString(candidatePath)) {
@@ -32,6 +35,8 @@ const fileExists = (candidatePath) => {
 }
 
 const resolveFirstExistingPath = (candidates) => {
+  if (!Array.isArray(candidates)) return null
+
   for (const candidate of candidates) {
     if (fileExists(candidate)) {
       return normalizePath(candidate)
@@ -144,6 +149,7 @@ export const resolveNpmCommand = () => {
  * - 对 PowerShell 5、受限 PATH 终端以及 CI 壳层都更稳定。
  */
 export const resolveVueTscCliPath = (projectRoot) => {
+  if (!isNonEmptyString(projectRoot)) throw new Error('解析 vue-tsc 路径失败：未提供项目根目录')
   const resolvedPath = path.join(projectRoot, 'node_modules', 'vue-tsc', 'bin', 'vue-tsc.js')
   if (!fileExists(resolvedPath)) {
     throw new Error(`未找到 vue-tsc CLI：${resolvedPath}`)
@@ -153,6 +159,7 @@ export const resolveVueTscCliPath = (projectRoot) => {
 }
 
 export const resolveViteCliPath = (projectRoot) => {
+  if (!isNonEmptyString(projectRoot)) throw new Error('解析 Vite 路径失败：未提供项目根目录')
   const resolvedPath = path.join(projectRoot, 'node_modules', 'vite', 'bin', 'vite.js')
   if (!fileExists(resolvedPath)) {
     throw new Error(`未找到 Vite CLI：${resolvedPath}`)
@@ -162,6 +169,7 @@ export const resolveViteCliPath = (projectRoot) => {
 }
 
 export const resolveTsxCliPath = (backendRoot) => {
+  if (!isNonEmptyString(backendRoot)) throw new Error('解析 tsx 路径失败：未提供后端根目录')
   const resolvedPath = path.join(backendRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs')
   if (!fileExists(resolvedPath)) {
     throw new Error(`未找到 tsx CLI：${resolvedPath}`)
@@ -188,6 +196,10 @@ export const runCommand = ({
   windowsHide = true,
 }) =>
   new Promise((resolve, reject) => {
+    if (!isNonEmptyString(title)) return reject(new TypeError('启动失败：必须提供有效的 title 参数'))
+    if (!isNonEmptyString(command)) return reject(new TypeError(`${title} 启动失败：必须提供有效的 command 参数`))
+    if (!Array.isArray(args)) return reject(new TypeError(`${title} 启动失败：args 必须是数组`))
+
     const child = spawn(command, args, {
       cwd,
       env,

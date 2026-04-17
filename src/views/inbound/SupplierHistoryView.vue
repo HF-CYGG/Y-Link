@@ -43,7 +43,7 @@ const filteredList = computed(() => {
   return list.value.filter((item) => {
     const statusMatched = statusFilter.value === 'all' ? true : item.status === statusFilter.value
     const keywordMatched = keywordText
-      ? item.showNo.toLowerCase().includes(keywordText) || item.supplierName.toLowerCase().includes(keywordText)
+      ? item.showNo?.toLowerCase().includes(keywordText) || item.supplierName?.toLowerCase().includes(keywordText)
       : true
     return statusMatched && keywordMatched
   })

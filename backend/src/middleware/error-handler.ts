@@ -8,6 +8,10 @@ import type { NextFunction, Request, Response } from 'express'
 import { mapDatabaseErrorToBizError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
 
+/**
+ * 全局 404 处理中间件：
+ * - 拦截所有未匹配到的前端路由请求，返回标准化的错误响应，防止浏览器收到不可解析的 HTML 或超时。
+ */
 export function notFoundHandler(_req: Request, res: Response): void {
   res.status(404).json({
     code: 404,
@@ -16,6 +20,13 @@ export function notFoundHandler(_req: Request, res: Response): void {
   })
 }
 
+/**
+ * 全局异常处理中间件：
+ * - 捕获控制器与服务层抛出的所有同步/异步异常。
+ * - 优先处理已知的业务异常 (BizError)；
+ * - 针对数据库级别的约束异常（如外键或唯一性冲突），通过映射器转换为对用户友好的错误提示，并掩盖底层 SQL 细节；
+ * - 其他未知异常统一返回 500 状态码，并在控制台记录堆栈。
+ */
 export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction): void {
   if (err instanceof BizError) {
     res.status(err.statusCode).json({

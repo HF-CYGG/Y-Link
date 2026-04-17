@@ -18,25 +18,31 @@ import { resolveViteCliPath, resolveVueTscCliPath, runCommand } from './process-
 const currentFilePath = fileURLToPath(import.meta.url)
 const scriptsDirectory = path.dirname(currentFilePath)
 const projectRoot = path.resolve(scriptsDirectory, '..')
-const vueTscCliPath = resolveVueTscCliPath(projectRoot)
-const viteCliPath = resolveViteCliPath(projectRoot)
 
-console.log('[build] 开始执行前端类型构建')
-await runCommand({
-  title: '前端类型构建',
-  command: process.execPath,
-  args: [vueTscCliPath, '-b'],
-  cwd: projectRoot,
-  windowsHide: false,
-})
+try {
+  const vueTscCliPath = resolveVueTscCliPath(projectRoot)
+  const viteCliPath = resolveViteCliPath(projectRoot)
 
-console.log('[build] 开始执行 Vite 打包')
-await runCommand({
-  title: 'Vite 打包',
-  command: process.execPath,
-  args: [viteCliPath, 'build'],
-  cwd: projectRoot,
-  windowsHide: false,
-})
+  console.log('[build] 开始执行前端类型构建')
+  await runCommand({
+    title: '前端类型构建',
+    command: process.execPath,
+    args: [vueTscCliPath, '-b'],
+    cwd: projectRoot,
+    windowsHide: false,
+  })
 
-console.log('[build] 前端构建完成')
+  console.log('[build] 开始执行 Vite 打包')
+  await runCommand({
+    title: 'Vite 打包',
+    command: process.execPath,
+    args: [viteCliPath, 'build'],
+    cwd: projectRoot,
+    windowsHide: false,
+  })
+
+  console.log('[build] 前端构建完成')
+} catch (error) {
+  console.error(`[build] 构建过程中出现错误:`, error)
+  process.exit(1)
+}

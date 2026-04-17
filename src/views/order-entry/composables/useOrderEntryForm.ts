@@ -19,8 +19,9 @@ import type { FocusField, OrderEntryDrawerForm, OrderHeaderForm, OrderItemRow } 
  * - 将 null / NaN / 非有限数字统一归 0；
  * - 作为 composable 外层纯函数，避免在每次组合函数实例化时重复创建。
  */
-function normalizeNumber(value: number | null): number {
-  return typeof value === 'number' && Number.isFinite(value) ? value : 0
+function normalizeNumber(value: number | string | null | undefined): number {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : 0
 }
 
 /**

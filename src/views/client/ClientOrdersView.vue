@@ -118,6 +118,7 @@ const loadOrders = async (force = false) => {
   })
 }
 
+// 详细注释：执行撤回订单，二次确认后请求撤回，并更新 Store 中的订单状态。
 const handleRecallOrder = async (order: O2oPreorderSummary) => {
   if (order.status !== 'pending') {
     ElMessage.warning('当前订单状态不可撤回')

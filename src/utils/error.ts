@@ -13,7 +13,11 @@ interface AppRequestErrorOptions {
   cause?: unknown
 }
 
-// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
+/**
+ * 自定义应用请求异常类：
+ * - 携带统一的状态码与业务错误码，便于调用侧识别；
+ * - 聚合 cause 保留原始错误栈信息，有助于联调与排查。
+ */
 export class AppRequestError extends Error {
   code?: number
   status?: number

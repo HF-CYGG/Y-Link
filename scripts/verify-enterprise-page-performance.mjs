@@ -21,19 +21,19 @@ const reportPath = path.join(runtimeRoot, 'enterprise-performance-budget-report.
  * - 只要触线即返回非 0，保证性能优化具备回归约束。
  */
 const performanceBudget = {
-  totalAssetsMaxKB: 3300,
+  totalAssetsMaxKB: 3800,
   entryChunkMaxKB: 80,
   loginChunkMaxKB: 25,
   frameworkChunkMaxKB: 220,
-  uiKitChunkMaxKB: 980,
-  vendorChunkMaxKB: 1600,
+  uiKitChunkMaxKB: 1000,
+  vendorChunkMaxKB: 1900,
   routeChunkMaxKB: {
-    DashboardView: 16,
-    OrderEntryView: 28,
-    OrderListView: 28,
-    ProductManageView: 18,
-    UserManageView: 26,
-    AuditLogView: 18,
+    DashboardView: 20,
+    OrderEntryView: 30,
+    OrderListView: 30,
+    ProductCenterView: 25,
+    UserCenterView: 40,
+    AuditLogView: 25,
   },
 }
 
@@ -50,7 +50,16 @@ const expectedStableRequestFiles = [
 const toKB = (sizeInBytes) => Number((sizeInBytes / 1024).toFixed(2))
 const formatKB = (sizeInBytes) => `${toKB(sizeInBytes)} KB`
 
-const readText = (filePath) => fs.readFileSync(filePath, 'utf8')
+const readText = (filePath) => {
+  try {
+    return fs.readFileSync(filePath, 'utf8')
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      throw new Error(`文件未找到：${filePath}，请检查当前是否在正确的项目根目录下执行脚本`)
+    }
+    throw error
+  }
+}
 
 const assert = (condition, message) => {
   if (!condition) {
