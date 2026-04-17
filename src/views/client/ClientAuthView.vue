@@ -505,7 +505,7 @@ onUnmounted(() => {
 
         <div class="brand-content">
           <div class="brand-tag">Y-LINK CLIENT</div>
-          <h1 class="brand-title">野辙文创<br />极简预订。</h1>
+          <h1 class="brand-title">野辙文创<br />极简预订</h1>
           <p class="brand-desc">实时查看库存，在线预订即锁单。<br />线下出示核销码，即刻带走心仪好物。</p>
         </div>
 
