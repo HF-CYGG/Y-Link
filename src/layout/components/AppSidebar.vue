@@ -214,10 +214,22 @@ const deviceLabel = computed(() => {
   background-color: transparent !important;
 }
 
+:deep(.app-sidebar-menu .el-menu) {
+  background-color: transparent !important;
+}
+
+:deep(.app-sidebar-menu .el-sub-menu .el-menu) {
+  background-color: transparent !important;
+}
+
 :deep(.app-sidebar-menu .el-menu-item),
 :deep(.app-sidebar-menu .el-sub-menu__title) {
   min-height: 44px;
   border-radius: 12px;
+}
+
+:deep(.app-sidebar-menu .el-sub-menu .el-menu-item) {
+  background-color: transparent !important;
 }
 
 :deep(.app-sidebar-menu--compact .el-menu-item),
