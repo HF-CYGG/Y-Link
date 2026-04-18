@@ -1,4 +1,6 @@
 /** @type {import('tailwindcss').Config} */
+// 文件说明：Tailwind CSS 主题与扫描范围配置。
+// 实现逻辑：限定内容扫描范围、定义业务色板，并通过 class 模式切换暗色主题。
 export default {
   darkMode: 'class',
   // 扫描 Vue 页面与入口 HTML，确保仅生成真实使用到的原子类

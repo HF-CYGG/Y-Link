@@ -1,12 +1,13 @@
 <#
 模块说明：stop-local-dev.ps1
-文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
-维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+  文件职责：停止由 `start-local-dev.ps1` 记录的本地联调前后端进程，并清理临时运行文件。
+  实现逻辑：从 `.local-dev/processes.json` 读取 shell PID 与监听 PID，递归终止进程树后再删除启动时生成的临时文件。
 #>
 
 $ErrorActionPreference = 'Stop'
 
-# Stop the processes started by start-local-dev.ps1 using the recorded shell PID file.
+# 所有运行态信息都从仓库根目录下的 `.local-dev` 目录读取，
+# 这样无论用户当前在哪个 PowerShell 工作目录执行停止脚本，清理目标都保持一致。
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RuntimeRoot = Join-Path $ProjectRoot '.local-dev'
 $PidFile = Join-Path $RuntimeRoot 'processes.json'
@@ -84,7 +85,7 @@ function Get-RecordedProcessIds {
 }
 
 if (-not (Test-Path $PidFile)) {
-  Write-Info 'No local dev process record found.'
+  Write-Info '未找到本地联调进程记录，无需停止。'
   exit 0
 }
 
@@ -93,7 +94,7 @@ $record = Get-Content -Path $PidFile -Raw | ConvertFrom-Json
 $processIds = @(Get-RecordedProcessIds -Record $record)
 
 if (-not $processIds.Count) {
-  Write-WarnMessage 'Process record exists, but no PID information was found.'
+  Write-WarnMessage '检测到本地联调记录文件，但其中没有可用的 PID 信息。'
 }
 
 foreach ($processId in $processIds) {
@@ -105,5 +106,11 @@ if ($effectiveBackendEnvFile -and (Test-Path $effectiveBackendEnvFile)) {
   Remove-Item -Path $effectiveBackendEnvFile -Force -ErrorAction SilentlyContinue
 }
 
+$childProcessInputFile = $record.childProcessInputFile
+if ($childProcessInputFile -and (Test-Path $childProcessInputFile)) {
+  # 启动脚本会创建一个空 stdin 文件给隐藏子进程复用，这里同步清理，避免 `.local-dev` 目录残留噪声文件。
+  Remove-Item -Path $childProcessInputFile -Force -ErrorAction SilentlyContinue
+}
+
 Remove-Item -Path $PidFile -Force -ErrorAction SilentlyContinue
-Write-Info 'Recorded local dev processes have been stopped.'
+Write-Info '已停止记录中的本地联调进程，并完成运行痕迹清理。'

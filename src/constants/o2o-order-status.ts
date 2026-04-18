@@ -1,3 +1,11 @@
+/**
+ * 模块说明：src/constants/o2o-order-status.ts
+ * 文件职责：集中维护 O2O 订单状态枚举、展示文案和客户端状态报告推导规则。
+ * 维护说明：
+ * - 客户端列表、详情、核销台等页面都依赖这里的状态语义，修改时必须统一校验前后端口径；
+ * - 若新增状态，需同步补全 type、label、class、report config 与判定函数，避免页面出现空文案。
+ */
+
 export const O2O_ORDER_STATUSES = ['pending', 'verified', 'cancelled'] as const
 export const O2O_ORDER_BUSINESS_STATUSES = [
   'preparing',
@@ -94,6 +102,7 @@ export const O2O_ORDER_BUSINESS_STATUS_META: Record<
   },
 }
 
+// 统一提供业务状态元数据读取入口，页面无需直接访问底层映射表。
 export const getO2oOrderBusinessStatusMeta = (status: O2oOrderBusinessStatus | null | undefined) => {
   if (!status) {
     return null
@@ -173,6 +182,7 @@ export const isO2oOrderTimeoutSoon = (
   return timeoutAtMs > nowMs && timeoutAtMs - nowMs <= soonWindowMs
 }
 
+// 客户端状态报告场景需要优先区分“超时取消”和“主动撤回”，避免用户误解。
 export const getClientOrderReportScenario = (
   status: O2oOrderStatus | null | undefined,
   timeoutAt: string | null | undefined,

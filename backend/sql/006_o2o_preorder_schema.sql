@@ -1,3 +1,9 @@
+-- =============================================
+-- 文件说明：backend/sql/006_o2o_preorder_schema.sql
+-- 文件职责：为 O2O 预订场景补齐商品扩展字段、客户端账号、预订单与库存流水表结构。
+-- 维护说明：若调整 O2O 商品字段或预订单实体，请同步更新本脚本与 SQLite bootstrap 检查项。
+-- =============================================
+
 ALTER TABLE `base_product`
   ADD COLUMN `o2o_status` VARCHAR(16) NOT NULL DEFAULT 'unlisted' COMMENT '线上预订状态',
   ADD COLUMN `thumbnail` VARCHAR(255) NULL COMMENT '预览图地址',

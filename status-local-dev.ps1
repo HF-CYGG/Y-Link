@@ -1,7 +1,7 @@
 ﻿<#
 模块说明：status-local-dev.ps1
-文件职责：查看由 start-local-dev.ps1 维护的本地联调运行状态。
-维护说明：优先观察 shell 存活、端口监听和健康检查三类信号。
+  文件职责：读取 `.local-dev/processes.json`，汇总前后端本地联调的运行状态、端口监听和访问地址。
+  实现逻辑：优先根据记录文件恢复上下文，再结合进程存活、端口监听与健康检查输出可直接排障的信息。
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -54,12 +54,30 @@ function Test-ProcessAlive {
 function Get-ListeningProcessIds {
   param([int]$Port)
 
-  $connections = @(Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue)
-  if (-not $connections.Count) {
+  # 与启动脚本保持一致，统一使用 netstat 解析监听端口：
+  # - 避免 Get-NetTCPConnection 在部分 Windows 环境下卡顿或权限受限；
+  # - 这样状态查看和启动校验会基于同一套端口探测逻辑，结果更稳定。
+  $netstatOutput = & netstat -ano -p tcp 2>$null
+  if (-not $netstatOutput) {
     return @()
   }
 
-  return @($connections | Select-Object -ExpandProperty OwningProcess -Unique)
+  $listeningPidSet = [System.Collections.Generic.HashSet[int]]::new()
+  $portPattern = ":(?:$Port)\s+.+\s+(?:LISTENING|侦听)\s+(\d+)\s*$"
+
+  foreach ($line in $netstatOutput) {
+    if ($line -notmatch $portPattern) {
+      continue
+    }
+
+    $pidText = $Matches[1]
+    [int]$parsedPid = 0
+    if ($pidText -and [int]::TryParse($pidText, [ref]$parsedPid)) {
+      [void]$listeningPidSet.Add($parsedPid)
+    }
+  }
+
+  return @($listeningPidSet)
 }
 
 function Test-HttpReady {

@@ -33,6 +33,8 @@ export interface ChangeOwnPasswordInput {
   newPassword: string
 }
 
+const LEGACY_DEFAULT_BOOTSTRAP_PASSWORD = 'Admin@123456'
+
 function toSafeProfile(user: SysUser): UserSafeProfile {
   return {
     id: user.id,
@@ -159,12 +161,6 @@ export class AuthService {
     const expiresAt = new Date(now.getTime() + env.AUTH_TOKEN_TTL_HOURS * 60 * 60 * 1000)
     const token = generateSessionToken()
 
-    const usingBuiltInBootstrapCredential =
-      user.username === 'admin' &&
-      env.INIT_ADMIN_USERNAME === 'admin' &&
-      env.INIT_ADMIN_PASSWORD === 'Admin@123456' &&
-      password === env.INIT_ADMIN_PASSWORD
-
     const data = await AppDataSource.transaction(async (manager) => {
       const sessionRepo = manager.getRepository(SysUserSession)
       const userRepo = manager.getRepository(SysUser)
@@ -209,9 +205,6 @@ export class AuthService {
         token,
         expiresAt,
         user: toSafeProfile(savedUser),
-        securityReminder: usingBuiltInBootstrapCredential
-          ? '当前仍在使用系统内置默认管理员密码，请尽快修改为你自己的私有密码。'
-          : undefined,
       }
     })
 
@@ -392,23 +385,56 @@ export class AuthService {
     initialized: boolean
     username: string
     displayName: string
-    usingDefaultBootstrapPassword: boolean
+    usedPrivateBootstrapPassword: boolean
+    rotatedLegacyDefaultPassword: boolean
   }> {
-    const usingDefaultBootstrapPassword = env.INIT_ADMIN_PASSWORD === 'Admin@123456'
-    const existedAdmin = await this.userRepo.findOne({
-      where: { username: env.INIT_ADMIN_USERNAME },
-    })
+    const existedAdmin = await this.findUserWithPasswordByUsername(env.INIT_ADMIN_USERNAME)
 
     if (existedAdmin) {
+      const stillUsingLegacyDefaultPassword = await verifyPassword(
+        LEGACY_DEFAULT_BOOTSTRAP_PASSWORD,
+        existedAdmin.passwordHash,
+      )
+
+      if (stillUsingLegacyDefaultPassword) {
+        const privateBootstrapPassword = this.resolvePrivateBootstrapPassword()
+        existedAdmin.passwordHash = await hashPassword(privateBootstrapPassword)
+        const savedUser = await this.userRepo.save(existedAdmin)
+        await auditService.safeRecord({
+          actionType: 'user.bootstrap_admin.rotate_legacy_password',
+          actionLabel: '迁移默认管理员历史默认口令',
+          targetType: 'user',
+          targetId: savedUser.id,
+          targetCode: savedUser.username,
+          actor: {
+            userId: savedUser.id,
+            username: savedUser.username,
+            displayName: savedUser.displayName,
+          },
+          detail: {
+            reason: 'legacy_default_password_detected',
+          },
+        })
+        return {
+          initialized: false,
+          username: savedUser.username,
+          displayName: savedUser.displayName,
+          usedPrivateBootstrapPassword: true,
+          rotatedLegacyDefaultPassword: true,
+        }
+      }
+
       return {
         initialized: false,
         username: existedAdmin.username,
         displayName: existedAdmin.displayName,
-        usingDefaultBootstrapPassword,
+        usedPrivateBootstrapPassword: false,
+        rotatedLegacyDefaultPassword: false,
       }
     }
 
-    const passwordHash = await hashPassword(env.INIT_ADMIN_PASSWORD)
+    const privateBootstrapPassword = this.resolvePrivateBootstrapPassword()
+    const passwordHash = await hashPassword(privateBootstrapPassword)
     const user = this.userRepo.create({
       username: env.INIT_ADMIN_USERNAME,
       passwordHash,
@@ -439,8 +465,25 @@ export class AuthService {
       initialized: true,
       username: savedUser.username,
       displayName: savedUser.displayName,
-      usingDefaultBootstrapPassword,
+      usedPrivateBootstrapPassword: true,
+      rotatedLegacyDefaultPassword: false,
     }
+  }
+
+  /**
+   * 解析管理员初始化私有密码：
+   * - 未配置时，不再回退到任何内置默认密码；
+   * - 若仍配置历史默认口令，启动阶段直接拒绝，避免再次写入弱凭证。
+   */
+  private resolvePrivateBootstrapPassword(): string {
+    const configuredPassword = env.INIT_ADMIN_PASSWORD?.trim()
+    if (!configuredPassword) {
+      throw new Error('管理员初始化需要私有配置 `INIT_ADMIN_PASSWORD`，当前未检测到可用值。')
+    }
+    if (configuredPassword === LEGACY_DEFAULT_BOOTSTRAP_PASSWORD) {
+      throw new Error('禁止继续使用历史默认管理员口令，请将 `INIT_ADMIN_PASSWORD` 设置为私有强密码。')
+    }
+    return configuredPassword
   }
 }
 

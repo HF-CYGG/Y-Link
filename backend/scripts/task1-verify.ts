@@ -1,3 +1,9 @@
+/**
+ * 文件说明：backend/scripts/task1-verify.ts
+ * 文件职责：验证订单字段扩展、系统默认配置初始化与软删除兼容唯一索引是否正确落库。
+ * 维护说明：若调整出库单字段或系统配置初始化逻辑，请同步更新本脚本断言。
+ */
+
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'

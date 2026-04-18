@@ -1,7 +1,10 @@
-# 外置 MySQL 分体部署模板：
-# - 仅启动前端与后端应用容器；
-# - MySQL 由外部环境提供；
-# - 推荐结合 `docker compose --env-file .env.docker.mysql` 使用。
+#
+# 文件说明：外置 MySQL 分体部署编排模板。
+# 实现逻辑：
+# 1. 仅启动前端与后端应用容器，数据库由外部 MySQL 提供；
+# 2. 推荐搭配 `.env.docker.mysql` 注入连接信息，避免把真实库配置写死在编排文件中；
+# 3. 前端健康检查同时覆盖静态资源与后端代理链路，便于部署平台正确识别可用状态。
+#
 services:
   backend:
     build:
@@ -46,7 +49,8 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - wget -q -O /dev/null http://127.0.0.1/ || exit 1
+        # 前端容器只有在页面与后端代理都可用时才视为健康。
+        - wget -q -O /dev/null http://127.0.0.1/ && wget -q -O /dev/null http://127.0.0.1/health || exit 1
       interval: 10s
       timeout: 5s
       retries: 6

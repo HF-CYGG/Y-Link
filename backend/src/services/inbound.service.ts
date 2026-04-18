@@ -1,3 +1,9 @@
+/**
+ * 模块说明：backend/src/services/inbound.service.ts
+ * 文件职责：封装供货方送货单提交、库管核销入库、入库单查询与库存回写流程。
+ * 维护说明：修改入库流程时需同步关注单号生成、权限边界、库存日志与幂等性约束。
+ */
+
 import { randomUUID } from 'node:crypto'
 import { AppDataSource } from '../config/data-source.js'
 import { BaseProduct } from '../entities/base-product.entity.js'

@@ -11,6 +11,12 @@ import { ClientUser } from '../entities/client-user.entity.js'
 import { ClientUserSession } from '../entities/client-user-session.entity.js'
 import type { ClientAuthContext } from '../types/client-auth.js'
 import { BizError } from '../utils/errors.js'
+import {
+  type NormalizedClientAccount,
+  normalizeClientAccount,
+  normalizeClientVerificationTarget,
+  normalizeClientUsername,
+} from '../utils/client-auth-account.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { hashPassword, verifyPassword } from '../utils/password.js'
 import { generateSessionToken } from '../utils/token.js'
@@ -136,19 +142,30 @@ class ClientAuthService {
     })
   }
 
-  private async findUserWithPasswordByAccount(account: string) {
-    return this.userRepo
-      .createQueryBuilder('user')
-      .addSelect('user.passwordHash')
-      .where('user.mobile = :account OR user.email = :account OR user.realName = :account', { account })
-      .getOne()
+  /**
+   * 统一按归一化账号查找用户：
+   * - 手机号、邮箱使用精确匹配；
+   * - 用户名统一按小写键比较，避免 `Alice` / `alice` 形成大小写绕过。
+   */
+  private buildUserIdentifierQuery(identifier: NormalizedClientAccount, includePasswordHash = false) {
+    const query = this.userRepo.createQueryBuilder('user')
+    if (includePasswordHash) {
+      query.addSelect('user.passwordHash')
+    }
+    if (identifier.channel === 'username') {
+      query.where('LOWER(user.realName) = :account', { account: identifier.normalizedValue })
+      return query
+    }
+    query.where(`user.${identifier.channel} = :account`, { account: identifier.normalizedValue })
+    return query
   }
 
-  private async findUserByAnyIdentifier(account: string) {
-    return this.userRepo
-      .createQueryBuilder('user')
-      .where('user.mobile = :account OR user.email = :account OR user.realName = :account', { account })
-      .getOne()
+  private async findUserWithPasswordByAccount(identifier: NormalizedClientAccount) {
+    return this.buildUserIdentifierQuery(identifier, true).getOne()
+  }
+
+  private async findUserByAnyIdentifier(identifier: NormalizedClientAccount) {
+    return this.buildUserIdentifierQuery(identifier).getOne()
   }
 
   private toClientProfile(user: ClientUser) {
@@ -164,51 +181,34 @@ class ClientAuthService {
     }
   }
 
-  private normalizeEmail(email: string) {
-    const normalized = email.trim().toLowerCase()
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) {
-      throw new BizError('邮箱格式不正确', 400)
+  private resolveAccount(account: string): {
+    channel: 'mobile' | 'email'
+    account: string
+    mobile: string | null
+    email: string | null
+  } {
+    const normalizedAccount = normalizeClientAccount(account, {
+      allowUsername: false,
+      fieldLabel: '账号',
+    })
+    if (normalizedAccount.channel === 'username') {
+      throw new BizError('账号格式不正确，请输入手机号或邮箱', 400)
     }
-    return normalized
-  }
-
-  private normalizeMobile(mobile: string) {
-    const normalized = mobile.trim()
-    if (!/^1\d{10}$/.test(normalized)) {
-      throw new BizError('手机号格式不正确', 400)
-    }
-    return normalized
-  }
-
-  private resolveAccount(account: string) {
-    const normalized = account.trim()
-    if (!normalized) {
-      throw new BizError('账号不能为空', 400)
-    }
-    if (normalized.includes('@')) {
-      const email = this.normalizeEmail(normalized)
-      return {
-        channel: 'email' as const,
-        account: email,
-        mobile: null,
-        email,
-      }
-    }
-    const mobile = this.normalizeMobile(normalized)
+    const mobile = normalizedAccount.channel === 'mobile' ? normalizedAccount.normalizedValue : null
+    const email = normalizedAccount.channel === 'email' ? normalizedAccount.normalizedValue : null
     return {
-      channel: 'mobile' as const,
-      account: mobile,
+      channel: normalizedAccount.channel,
+      account: normalizedAccount.normalizedValue,
       mobile,
-      email: null,
+      email,
     }
   }
 
   private resolveLoginAccount(account: string) {
-    const normalized = account.trim()
-    if (!normalized) {
-      throw new BizError('账号不能为空', 400)
-    }
-    return normalized.includes('@') ? normalized.toLowerCase() : normalized
+    return normalizeClientAccount(account, {
+      allowUsername: true,
+      fieldLabel: '账号',
+    })
   }
 
   async createCaptcha(requestMeta?: RequestMeta) {
@@ -222,11 +222,8 @@ class ClientAuthService {
 
   async register(input: ClientRegisterInput, requestMeta?: RequestMeta) {
     const account = this.resolveAccount(input.account)
-    const username = input.username.trim()
+    const username = normalizeClientUsername(input.username)
     const password = input.password.trim()
-    if (!username) {
-      throw new BizError('用户名不能为空', 400)
-    }
     if (password.length < 6) {
       throw new BizError('密码至少 6 位', 400)
     }
@@ -247,11 +244,19 @@ class ClientAuthService {
       this.verifyCaptchaIfRequired(input)
     }
 
-    const existedByAccount = await this.findUserByAnyIdentifier(account.account)
+    const existedByAccount = await this.findUserByAnyIdentifier({
+      channel: account.channel,
+      rawValue: account.account,
+      normalizedValue: account.account,
+    })
     if (existedByAccount) {
       throw new BizError('该手机号或邮箱已被占用', 409)
     }
-    const existedByUsername = await this.findUserByAnyIdentifier(username)
+    const existedByUsername = await this.findUserByAnyIdentifier({
+      channel: 'username',
+      rawValue: username.value,
+      normalizedValue: username.normalizedValue,
+    })
     if (existedByUsername) {
       throw new BizError('该用户名已被占用', 409)
     }
@@ -261,7 +266,7 @@ class ClientAuthService {
         email: account.email,
         passwordHash: await hashPassword(password),
         // 当前账号体系下，用户名与登录账号分离，支持用户自定义用户名。
-        realName: username,
+        realName: username.value,
         departmentName: input.departmentName?.trim() || '',
         status: 'enabled',
       }),
@@ -272,17 +277,17 @@ class ClientAuthService {
   async login(input: ClientLoginInput, requestMeta?: RequestMeta) {
     const account = this.resolveLoginAccount(input.account)
     const password = input.password.trim()
-    if (authSecurityService.isClientLoginCaptchaRequired(requestMeta, account)) {
+    if (authSecurityService.isClientLoginCaptchaRequired(requestMeta, account.normalizedValue)) {
       this.verifyCaptchaIfRequired(input)
     }
     const user = await this.findUserWithPasswordByAccount(account)
     if (!user) {
-      await authSecurityService.recordClientLoginFailure(requestMeta, account)
+      await authSecurityService.recordClientLoginFailure(requestMeta, account.normalizedValue)
       await auditService.safeRecord({
         actionType: 'client.auth.login',
         actionLabel: '客户端登录',
         targetType: 'client_session',
-        targetCode: account,
+        targetCode: account.normalizedValue,
         resultStatus: 'failed',
         requestMeta,
         detail: { reason: 'user_not_found' },
@@ -294,7 +299,7 @@ class ClientAuthService {
     }
     const matched = await verifyPassword(password, user.passwordHash)
     if (!matched) {
-      await authSecurityService.recordClientLoginFailure(requestMeta, account)
+      await authSecurityService.recordClientLoginFailure(requestMeta, account.normalizedValue)
       await auditService.safeRecord({
         actionType: 'client.auth.login',
         actionLabel: '客户端登录',
@@ -323,7 +328,7 @@ class ClientAuthService {
         }),
       )
     })
-    authSecurityService.clearClientLoginFailures(requestMeta, account)
+    authSecurityService.clearClientLoginFailures(requestMeta, account.normalizedValue)
     return {
       token,
       expiresAt,
@@ -430,7 +435,10 @@ class ClientAuthService {
       throw new BizError('当前用户不存在', 404)
     }
 
-    const account = user.email ?? user.mobile ?? user.realName
+    const account = normalizeClientAccount(user.email ?? user.mobile ?? user.realName, {
+      allowUsername: true,
+      fieldLabel: '账号',
+    })
     const userWithPwd = await this.findUserWithPasswordByAccount(account)
     if (!userWithPwd) {
       throw new BizError('当前用户不存在', 404)
@@ -459,13 +467,13 @@ class ClientAuthService {
       throw new BizError('当前用户不存在', 404)
     }
 
-    const username = input.username.trim()
-    if (!username) {
-      throw new BizError('用户名不能为空', 400)
-    }
-
-    const mobile = input.mobile?.trim() ? this.normalizeMobile(input.mobile) : null
-    const email = input.email?.trim() ? this.normalizeEmail(input.email) : null
+    const username = normalizeClientUsername(input.username)
+    const mobile = input.mobile?.trim()
+      ? normalizeClientVerificationTarget('mobile', input.mobile)
+      : null
+    const email = input.email?.trim()
+      ? normalizeClientVerificationTarget('email', input.email)
+      : null
     const departmentName = input.departmentName?.trim() || ''
 
     if (!mobile && !email) {
@@ -473,21 +481,35 @@ class ClientAuthService {
     }
 
     const checks = [
-      { value: username, message: '该用户名已被其他用户使用' },
+      {
+        value: {
+          channel: 'username' as const,
+          rawValue: username.value,
+          normalizedValue: username.normalizedValue,
+        },
+        message: '该用户名已被其他用户使用',
+      },
       { value: mobile, message: '该手机号已被其他用户使用' },
       { value: email, message: '该邮箱已被其他用户使用' },
     ]
 
     for (const check of checks) {
       if (check.value) {
-        const existed = await this.findUserByAnyIdentifier(check.value)
+        const existed =
+          typeof check.value === 'string'
+            ? await this.findUserByAnyIdentifier({
+                channel: check.value.includes('@') ? 'email' : 'mobile',
+                rawValue: check.value,
+                normalizedValue: check.value,
+              })
+            : await this.findUserByAnyIdentifier(check.value)
         if (existed && existed.id !== user.id) {
           throw new BizError(check.message, 409)
         }
       }
     }
 
-    user.realName = username
+    user.realName = username.value
     user.mobile = mobile
     user.email = email
     user.departmentName = departmentName

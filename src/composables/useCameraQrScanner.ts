@@ -1,4 +1,12 @@
-﻿import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
+﻿/**
+ * 模块说明：src/composables/useCameraQrScanner.ts
+ * 文件职责：封装统一的摄像头扫码与拍照识别能力，供入库、核销等多页面复用。
+ * 维护说明：
+ * - 优先走实时摄像头扫码，非安全上下文或权限受限时自动回退到拍照识别；
+ * - 页面层只应消费暴露出的状态与动作，不要再自行管理 html5-qrcode 实例。
+ */
+
+import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   Html5Qrcode,
@@ -43,6 +51,7 @@ const HTML5_QRCODE_FORMAT_MAP: Record<SupportedBarcodeFormat, Html5QrcodeSupport
   aztec: Html5QrcodeSupportedFormats.AZTEC,
 }
 
+// 扫码容器统一使用固定前缀，方便排查 DOM 遗留节点。
 const SCAN_HOST_ID_PREFIX = 'html5-qrcode-host'
 const DEFAULT_SCAN_STATUS = '请将条码或二维码置于取景框中央，识别成功后会自动回填'
 
@@ -70,6 +79,7 @@ export const useCameraQrScanner = (options: UseCameraQrScannerOptions) => {
     return Boolean(isSecureCameraContext.value && hasCameraApi.value)
   })
 
+  // “可使用扫码能力”既包括实时摄像头，也包括拍照选图识别。
   const canUseCamera = computed(() => {
     return Boolean(imageInputRef.value || globalThis.FileReader)
   })
@@ -140,6 +150,7 @@ export const useCameraQrScanner = (options: UseCameraQrScannerOptions) => {
     }
   }
 
+  // 扫码弹窗中的宿主容器由页面模板回填；实例启动前必须先绑定。
   const bindScannerContainer = (element: HTMLDivElement | null) => {
     scannerContainerRef.value = element
   }
@@ -203,6 +214,7 @@ export const useCameraQrScanner = (options: UseCameraQrScannerOptions) => {
     removeTempScanHost()
   }
 
+  // 关闭弹窗时同步失效当前会话，避免旧实例的异步回调回写到新会话。
   const closeScanDialog = () => {
     activeSessionId += 1
     detectionLocked = false
@@ -212,6 +224,7 @@ export const useCameraQrScanner = (options: UseCameraQrScannerOptions) => {
     void disposeScanner()
   }
 
+  // 识别成功后先关闭扫描器，再把结果交给业务页面处理，避免重复触发 onDetected。
   const finalizeDetectedCode = async (code: string) => {
     detectionLocked = true
     closeScanDialog()

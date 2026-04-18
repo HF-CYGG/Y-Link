@@ -10,6 +10,10 @@ import { requireClientAuth } from '../middleware/client-auth.middleware.js'
 import type { ClientAuthenticatedRequest } from '../types/client-auth.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
+import {
+  normalizeClientAccount,
+  normalizeClientVerificationTarget,
+} from '../utils/client-auth-account.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 import { clientAuthService } from '../services/client-auth.service.js'
 import { authSecurityService } from '../services/auth-security.service.js'
@@ -87,16 +91,18 @@ clientAuthRouter.post(
   asyncHandler(async (req, res) => {
     const payload = verificationCodeSendSchema.parse(req.body)
     const requestMeta = extractRequestMeta(req)
+    const normalizedTarget = normalizeClientVerificationTarget(payload.channel, payload.target)
     if (payload.scene === 'forgot_password') {
       const capabilities = await clientAuthService.getCapabilities()
       if (!capabilities.forgotPasswordEnabled) {
         throw new BizError('当前系统未同时启用手机与邮箱验证码，暂不支持自助找回密码，请联系管理员手动修改密码', 400)
       }
     }
-    await authSecurityService.guardVerificationCodeSendRequest(requestMeta, payload.target, payload.channel)
+    // 发送频控与验证码落库统一使用归一化目标，避免邮箱大小写被拆成多个风控桶。
+    await authSecurityService.guardVerificationCodeSendRequest(requestMeta, normalizedTarget, payload.channel)
     const data = await verificationCodeService.sendCode({
       channel: payload.channel,
-      target: payload.target,
+      target: normalizedTarget,
       scene: payload.scene,
       requestMeta,
     })
@@ -109,7 +115,11 @@ clientAuthRouter.post(
   asyncHandler(async (req, res) => {
     const payload = registerSchema.parse(req.body)
     const requestMeta = extractRequestMeta(req)
-    await authSecurityService.guardClientRegisterRequest(requestMeta, payload.account)
+    const normalizedAccount = normalizeClientAccount(payload.account, {
+      allowUsername: false,
+      fieldLabel: '账号',
+    }).normalizedValue
+    await authSecurityService.guardClientRegisterRequest(requestMeta, normalizedAccount)
     const data = await clientAuthService.register(payload, requestMeta)
     res.json({ code: 0, message: 'ok', data })
   }),
@@ -120,7 +130,11 @@ clientAuthRouter.post(
   asyncHandler(async (req, res) => {
     const payload = loginSchema.parse(req.body)
     const requestMeta = extractRequestMeta(req)
-    await authSecurityService.guardClientLoginRequest(requestMeta, payload.account)
+    const normalizedAccount = normalizeClientAccount(payload.account, {
+      allowUsername: true,
+      fieldLabel: '账号',
+    }).normalizedValue
+    await authSecurityService.guardClientLoginRequest(requestMeta, normalizedAccount)
     const data = await clientAuthService.login(payload, requestMeta)
     res.json({ code: 0, message: 'ok', data })
   }),
@@ -131,7 +145,11 @@ clientAuthRouter.post(
   asyncHandler(async (req, res) => {
     const payload = forgotVerifySchema.parse(req.body)
     const requestMeta = extractRequestMeta(req)
-    await authSecurityService.guardClientForgotVerifyRequest(requestMeta, payload.account)
+    const normalizedAccount = normalizeClientAccount(payload.account, {
+      allowUsername: false,
+      fieldLabel: '账号',
+    }).normalizedValue
+    await authSecurityService.guardClientForgotVerifyRequest(requestMeta, normalizedAccount)
     const data = await clientAuthService.verifyForgotPassword(payload, requestMeta)
     res.json({ code: 0, message: 'ok', data })
   }),
@@ -142,7 +160,11 @@ clientAuthRouter.post(
   asyncHandler(async (req, res) => {
     const payload = resetPasswordSchema.parse(req.body)
     const requestMeta = extractRequestMeta(req)
-    await authSecurityService.guardClientForgotResetRequest(requestMeta, payload.account)
+    const normalizedAccount = normalizeClientAccount(payload.account, {
+      allowUsername: false,
+      fieldLabel: '账号',
+    }).normalizedValue
+    await authSecurityService.guardClientForgotResetRequest(requestMeta, normalizedAccount)
     await clientAuthService.resetPassword(payload, requestMeta)
     res.json({ code: 0, message: 'ok', data: true })
   }),

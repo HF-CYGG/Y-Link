@@ -1,3 +1,10 @@
+#
+# 文件说明：前端分体部署容器的模板化 Nginx 配置。
+# 实现逻辑：
+# 1. 与固定版 `default.conf` 保持同样的静态托管与 API 代理行为；
+# 2. 通过 `resolver` + 变量 upstream 实现延迟解析，降低编排刚启动时的 DNS 瞬态失败；
+# 3. 供官方前端镜像在运行阶段由 `/etc/nginx/templates` 自动渲染。
+#
 server {
     listen 80;
     server_name _;

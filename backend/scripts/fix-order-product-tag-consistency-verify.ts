@@ -1,3 +1,9 @@
+/**
+ * 文件说明：backend/scripts/fix-order-product-tag-consistency-verify.ts
+ * 文件职责：验证订单详情、商品标签一致性与隔离后端联调流程是否符合预期。
+ * 维护说明：若调整商品标签、订单详情字段或隔离验证启动流程，请同步更新本脚本。
+ */
+
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'

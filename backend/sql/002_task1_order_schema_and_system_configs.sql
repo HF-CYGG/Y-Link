@@ -1,3 +1,9 @@
+-- =============================================
+-- 文件说明：backend/sql/002_task1_order_schema_and_system_configs.sql
+-- 文件职责：为既有 MySQL 数据库补齐订单类型字段、软删除联合唯一索引与单双流水系统配置。
+-- 维护说明：适用于增量升级场景；若调整单号配置键名或订单字段，请同步更新本脚本。
+-- =============================================
+
 ALTER TABLE `biz_outbound_order`
   ADD COLUMN IF NOT EXISTS `order_type` VARCHAR(32) NOT NULL DEFAULT 'walkin' COMMENT '订单类型',
   ADD COLUMN IF NOT EXISTS `has_customer_order` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否有客户订单',

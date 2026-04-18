@@ -1,4 +1,12 @@
 <script setup lang="ts">
+/**
+ * 模块说明：src/views/inbound/InboundScanView.vue
+ * 文件职责：提供送货单扫码查询、明细核对、一键确认入库与最近查询回查能力。
+ * 维护说明：
+ * - 页面同时兼容核销码与送货单号两种输入方式，调整查询逻辑时要保留双通道兜底；
+ * - 快捷键、扫码弹窗和最近查询列表属于连续作业链路，修改交互时需避免打断回焦节奏。
+ */
+
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { PageContainer, UnifiedScanDialog } from '@/components/common'
@@ -145,8 +153,10 @@ const {
   },
 })
 
+// 送货单号模式：兼容人工复制单号场景，查询失败时可自动切到 showNo 接口。
 const isShowNoPattern = (code: string) => /^IN\d{12}$/i.test(code.trim())
 
+// 核心查询入口：优先按二维码查，若识别到送货单号格式则自动回退到 showNo 查询。
 const handleScan = async () => {
   const code = scanCode.value.trim()
   if (!code) {
@@ -283,6 +293,7 @@ const handleGlobalKeydown = (event: KeyboardEvent) => {
   }
 }
 
+// 最近查询允许一键回填，减少仓管在连续作业时重复扫码。
 const handleReuseRecentScan = (verifyCode: string) => {
   scanCode.value = verifyCode
   void handleScan()

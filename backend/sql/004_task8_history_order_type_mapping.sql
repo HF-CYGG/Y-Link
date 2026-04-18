@@ -1,3 +1,9 @@
+-- =============================================
+-- 文件说明：backend/sql/004_task8_history_order_type_mapping.sql
+-- 文件职责：根据历史订单数据回填 order_type，并为回滚保存映射前快照。
+-- 维护说明：批量执行前建议先在测试库核验 CASE 规则是否符合历史数据口径。
+-- =============================================
+
 CREATE TABLE IF NOT EXISTS `task8_order_type_mapping_backup` (
   `order_id` BIGINT UNSIGNED NOT NULL,
   `order_type` VARCHAR(32) DEFAULT NULL,

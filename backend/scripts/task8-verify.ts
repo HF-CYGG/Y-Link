@@ -1,3 +1,9 @@
+/**
+ * 文件说明：backend/scripts/task8-verify.ts
+ * 文件职责：验证双流水单号、历史迁移脚本、凭证打印关键实现与统计接口回归。
+ * 维护说明：若调整 Task8 迁移 SQL、单号前缀或前端凭证模板，请同步更新本脚本。
+ */
+
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'

@@ -1,3 +1,10 @@
+#
+# 文件说明：GitHub Actions Docker 发布流水线。
+# 实现逻辑：
+# 1. 在主分支推送、版本标签推送或手动触发时执行；
+# 2. 始终发布 GHCR 镜像，若配置了 Docker Hub 凭据则额外发布 Docker Hub 镜像；
+# 3. 分别构建前端、后端与 onebox 三类镜像，并复用 GHA 构建缓存。
+#
 name: docker-publish
 
 on:
@@ -37,6 +44,30 @@ jobs:
           gh_owner="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
           echo "gh_owner=$gh_owner" >> "$GITHUB_OUTPUT"
 
+          frontend_images="ghcr.io/${gh_owner}/y-link-frontend"
+          backend_images="ghcr.io/${gh_owner}/y-link-backend"
+          onebox_images="ghcr.io/${gh_owner}/y-link-onebox"
+
+          # 仅在 Docker Hub 凭据完整时追加 Docker Hub 镜像地址，
+          # 避免“登录允许失败但推送仍强制包含 docker.io 标签”导致整条流水线失败。
+          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+            frontend_images="docker.io/${namespace}/y-link-frontend"$'\n'"${frontend_images}"
+            backend_images="docker.io/${namespace}/y-link-backend"$'\n'"${backend_images}"
+            onebox_images="docker.io/${namespace}/y-link-onebox"$'\n'"${onebox_images}"
+          fi
+
+          {
+            echo "frontend_images<<EOF"
+            echo "$frontend_images"
+            echo "EOF"
+            echo "backend_images<<EOF"
+            echo "$backend_images"
+            echo "EOF"
+            echo "onebox_images<<EOF"
+            echo "$onebox_images"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
       - name: 启用 QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -44,8 +75,8 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: 登录 Docker Hub
+        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
         uses: docker/login-action@v3
-        continue-on-error: true
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -61,9 +92,7 @@ jobs:
         id: frontend_meta
         uses: docker/metadata-action@v5
         with:
-          images: |
-            docker.io/${{ steps.prepare.outputs.namespace }}/y-link-frontend
-            ghcr.io/${{ steps.prepare.outputs.gh_owner }}/y-link-frontend
+          images: ${{ steps.prepare.outputs.frontend_images }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch
@@ -86,9 +115,7 @@ jobs:
         id: backend_meta
         uses: docker/metadata-action@v5
         with:
-          images: |
-            docker.io/${{ steps.prepare.outputs.namespace }}/y-link-backend
-            ghcr.io/${{ steps.prepare.outputs.gh_owner }}/y-link-backend
+          images: ${{ steps.prepare.outputs.backend_images }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch
@@ -111,9 +138,7 @@ jobs:
         id: onebox_meta
         uses: docker/metadata-action@v5
         with:
-          images: |
-            docker.io/${{ steps.prepare.outputs.namespace }}/y-link-onebox
-            ghcr.io/${{ steps.prepare.outputs.gh_owner }}/y-link-onebox
+          images: ${{ steps.prepare.outputs.onebox_images }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch

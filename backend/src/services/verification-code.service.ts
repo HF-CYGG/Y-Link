@@ -8,8 +8,10 @@
  */
 
 import { randomInt } from 'node:crypto'
+import { env } from '../config/env.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { BizError } from '../utils/errors.js'
+import { normalizeClientVerificationTarget } from '../utils/client-auth-account.js'
 import {
   systemConfigService,
   type VerificationProviderConfigInput,
@@ -31,9 +33,6 @@ const CODE_EXPIRE_MS = 5 * 60 * 1000
 const verificationTicketStore = new Map<string, VerificationCodeTicket>()
 
 const buildTicketKey = (channel: VerificationChannelType, target: string, scene: VerificationScene) => `${channel}:${scene}:${target}`
-
-const normalizeTarget = (channel: VerificationChannelType, target: string) =>
-  channel === 'email' ? target.trim().toLowerCase() : target.trim()
 
 export class VerificationCodeService {
   private buildCode() {
@@ -86,8 +85,25 @@ export class VerificationCodeService {
       requestInit.body = renderedBodyText
     }
 
-    const response = await fetch(config.apiUrl, requestInit)
-    const responseText = await response.text()
+    const controller = new AbortController()
+    const timeout = setTimeout(() => controller.abort(), env.VERIFICATION_CODE_REQUEST_TIMEOUT_MS)
+
+    requestInit.signal = controller.signal
+
+    let response: Response
+    let responseText: string
+    try {
+      response = await fetch(config.apiUrl, requestInit)
+      responseText = await response.text()
+    } catch (error) {
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new BizError(`验证码平台请求超时（>${env.VERIFICATION_CODE_REQUEST_TIMEOUT_MS}ms）`, 504)
+      }
+      throw new BizError('验证码平台请求失败，请稍后重试', 502)
+    } finally {
+      clearTimeout(timeout)
+    }
+
     if (!response.ok) {
       throw new BizError(`验证码平台请求失败（HTTP ${response.status}）`, 502)
     }
@@ -102,7 +118,7 @@ export class VerificationCodeService {
     scene: VerificationScene
     requestMeta?: RequestMeta
   }) {
-    const normalizedTarget = normalizeTarget(input.channel, input.target)
+    const normalizedTarget = normalizeClientVerificationTarget(input.channel, input.target)
     const configs = await systemConfigService.getVerificationProviderConfigs()
     const provider = configs[input.channel]
     const code = this.buildCode()
@@ -130,7 +146,7 @@ export class VerificationCodeService {
     config: VerificationProviderConfigInput
     requestMeta?: RequestMeta
   }) {
-    const normalizedTarget = normalizeTarget(input.channel, input.target)
+    const normalizedTarget = normalizeClientVerificationTarget(input.channel, input.target)
     const code = this.buildCode()
     await this.sendByProvider(this.normalizeProviderConfig(input.config), {
       target: normalizedTarget,
@@ -151,7 +167,7 @@ export class VerificationCodeService {
     scene: VerificationScene
     code: string
   }) {
-    const normalizedTarget = normalizeTarget(input.channel, input.target)
+    const normalizedTarget = normalizeClientVerificationTarget(input.channel, input.target)
     const key = buildTicketKey(input.channel, normalizedTarget, input.scene)
     const ticket = verificationTicketStore.get(key)
     if (!ticket) {

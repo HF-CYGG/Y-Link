@@ -1,10 +1,18 @@
 <script setup lang="ts">
+/**
+ * 模块说明：src/views/o2o/O2oOrderQueryView.vue
+ * 文件职责：管理端集中查看 O2O 订单池、详情进度、超时状态与业务状态流转。
+ * 维护说明：
+ * - 左侧订单池分组依赖统一状态推导，修改分组规则时要同步校验高亮、新订单提醒与详情联动；
+ * - 详情区的状态文案必须复用共享状态配置，避免“主动撤回”被错误展示成普通取消。
+ */
+
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { PageContainer } from '@/components/common'
 import {
-  CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG,
+  getClientOrderStatusReportConfig,
   getO2oOrderBusinessStatusMeta,
   getClientOrderReportScenario,
   isO2oOrderPending,
@@ -86,6 +94,14 @@ const resolveOrderSortTimestamp = (order: O2oPreorderSummary) => {
 
 const getOrderScenario = (order: { statusReport?: O2oOrderStatusReport; status: O2oOrderStatus; timeoutAt: string | null }) => {
   return order.statusReport?.scenario ?? getClientOrderReportScenario(order.status, order.timeoutAt, nowMs.value)
+}
+
+const getOrderReportConfig = (order: { statusReport?: O2oOrderStatusReport; status: O2oOrderStatus; timeoutAt: string | null }) => {
+  return getClientOrderStatusReportConfig({
+    statusReport: order.statusReport,
+    status: order.status,
+    timeoutAt: order.timeoutAt,
+  }, nowMs.value)
 }
 
 /**
@@ -192,7 +208,21 @@ const activeScenario = computed(() => {
     ?? getClientOrderReportScenario(activeOrderDetail.value.order.status, activeOrderDetail.value.order.timeoutAt, nowMs.value)
 })
 
-const reportConfig = computed(() => CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG[activeScenario.value])
+// 详情状态卡复用共享配置解析，确保“主动撤回”和“超时取消”展示口径一致。
+const reportConfig = computed(() => {
+  if (!activeOrderDetail.value) {
+    return getClientOrderStatusReportConfig({
+      status: 'pending',
+      timeoutAt: null,
+    })
+  }
+
+  return getClientOrderStatusReportConfig({
+    statusReport: activeOrderDetail.value.order.statusReport,
+    status: activeOrderDetail.value.order.status,
+    timeoutAt: activeOrderDetail.value.order.timeoutAt,
+  }, nowMs.value)
+})
 
 const detailAmountSummary = computed(() => {
   if (!activeOrderDetail.value) {
@@ -691,8 +721,8 @@ onBeforeUnmount(() => {
           >
             <div class="flex min-w-0 items-start justify-between gap-2">
               <p class="min-w-0 break-words text-sm font-semibold text-slate-900">{{ order.showNo }}</p>
-              <span class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium" :class="CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG[getOrderScenario(order)].cardClassName">
-                {{ CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG[getOrderScenario(order)].statusLabel }}
+              <span class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium" :class="getOrderReportConfig(order).cardClassName">
+                {{ getOrderReportConfig(order).statusLabel }}
               </span>
             </div>
             <div class="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500">

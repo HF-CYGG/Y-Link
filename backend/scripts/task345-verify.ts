@@ -1,3 +1,9 @@
+/**
+ * 文件说明：backend/scripts/task345-verify.ts
+ * 文件职责：验证商品自动编码、批量启停、成交价回写以及看板统计下钻链路。
+ * 维护说明：若调整商品管理、订单提交流程或前端静态实现约束，请同步更新本脚本断言。
+ */
+
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'

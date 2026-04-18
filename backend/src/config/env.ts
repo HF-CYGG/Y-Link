@@ -132,8 +132,10 @@ const envSchema = z.object({
   DB_SYNC: z.string().optional().transform(parseBoolean),
   AUTH_TOKEN_TTL_HOURS: z.coerce.number().int().positive().default(168),
   INIT_ADMIN_USERNAME: z.string().trim().min(1).default('admin'),
-  INIT_ADMIN_PASSWORD: z.string().min(6).default('Admin@123456'),
+  // 管理员初始化密码不再提供内置默认值，必须在需要时由私有配置显式提供。
+  INIT_ADMIN_PASSWORD: z.string().min(6).optional().transform(normalizeOptionalString),
   INIT_ADMIN_DISPLAY_NAME: z.string().trim().min(1).default('系统管理员'),
+  VERIFICATION_CODE_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(8000),
 })
 
 const parsed = envSchema.safeParse(process.env)

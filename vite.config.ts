@@ -1,3 +1,10 @@
+/**
+ * 文件说明：前端 Vite 构建与开发服务器配置。
+ * 实现逻辑：
+ * 1. 统一注册 Vue、HTTPS 与路径别名；
+ * 2. 在本地开发阶段代理 `/api`、`/uploads`、`/health` 到后端；
+ * 3. 在生产构建阶段执行手工拆包，优化首屏缓存与路由切换体验。
+ */
 import { defineConfig, loadEnv } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import basicSsl from '@vitejs/plugin-basic-ssl'

@@ -1,10 +1,10 @@
 # syntax=docker/dockerfile:1
 
 # ------------------------------
-# 构建阶段：安装完整依赖并编译 TypeScript
-# 说明：
-# - 使用 Debian slim 变体，兼容 sqlite3 原生模块；
-# - 安装 python3 / make / g++，确保 npm 在需要时可编译原生扩展。
+# 文件说明：Y-Link 后端镜像构建文件。
+# 实现逻辑：
+# - 构建阶段安装完整依赖并编译 TypeScript；
+# - 运行阶段仅保留生产依赖、编译产物与 SQL 模板，兼顾体积与 sqlite3 兼容性。
 # ------------------------------
 FROM node:20-bookworm-slim AS build
 

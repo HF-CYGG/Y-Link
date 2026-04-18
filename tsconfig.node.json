@@ -1,4 +1,6 @@
 {
+  // 文件说明：Node 侧工具脚本与构建配置的 TypeScript 配置。
+  // 实现逻辑：面向 Vite 配置等 Node 环境文件启用 ES2023、Bundler 解析与严格类型检查。
   "compilerOptions": {
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo",
     "target": "ES2023",

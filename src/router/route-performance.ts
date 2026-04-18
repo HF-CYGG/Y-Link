@@ -1,7 +1,9 @@
 /**
  * 模块说明：src/router/route-performance.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：统一维护路由异步加载器、页面预热目标和登录后首跳预热策略。
+ * 维护说明：
+ * - 路由表与预热表必须保持同一命名口径，否则 preloadTargets 会静默失效；
+ * - 新增业务页面时，除了补 routes，还要同步评估是否需要纳入这里的预热范围。
  */
 
 /**
@@ -97,6 +99,10 @@ const warmableRouteLoaders: Partial<Record<RouteWarmupTarget, RouteViewLoader>> 
   tags: routeViewLoaders.tags,
   'supplier-delivery': routeViewLoaders['supplier-delivery'],
   'supplier-history': routeViewLoaders['supplier-history'],
+  'o2o-console-products': routeViewLoaders['o2o-console-products'],
+  'o2o-console-orders': routeViewLoaders['o2o-console-orders'],
+  'o2o-console-verify': routeViewLoaders['o2o-console-verify'],
+  'o2o-console-inbound': routeViewLoaders['o2o-console-inbound'],
   'system-configs': routeViewLoaders['system-configs'],
   'system-users': routeViewLoaders['system-users'],
   'system-client-users': routeViewLoaders['system-client-users'],
@@ -162,6 +168,22 @@ const resolveWarmupTargetByPath = (redirectPath: string): RouteWarmupTarget | nu
 
   if (redirectPath.startsWith('/supplier-delivery')) {
     return 'supplier-delivery'
+  }
+
+  if (redirectPath.startsWith('/supplier-history')) {
+    return 'supplier-history'
+  }
+
+  if (redirectPath.startsWith('/o2o-console/products')) {
+    return 'o2o-console-products'
+  }
+
+  if (redirectPath.startsWith('/o2o-console/orders')) {
+    return 'o2o-console-orders'
+  }
+
+  if (redirectPath.startsWith('/o2o-console/verify')) {
+    return 'o2o-console-verify'
   }
 
   if (redirectPath.startsWith('/inbound-manage') || redirectPath.startsWith('/o2o-console/inbound')) {

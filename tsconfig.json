@@ -1,4 +1,6 @@
 {
+  // 文件说明：前端工程 TypeScript 顶层入口配置。
+  // 实现逻辑：自身不直接声明编译选项，只负责把应用端与 Node 侧配置拆分引用给 `vue-tsc` 与 Vite 使用。
   "files": [],
   "references": [
     { "path": "./tsconfig.app.json" },

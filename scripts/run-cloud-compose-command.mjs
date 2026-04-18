@@ -1,7 +1,7 @@
 /**
  * 模块说明：scripts/run-cloud-compose-command.mjs
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：封装 `compose.cloud.yml` 的启动、日志跟随与停止命令，作为 npm script 的稳定入口。
+ * 实现逻辑：统一在项目根目录执行 Docker Compose，先完成拉取或启动，再按动作附加日志或执行下线。
  */
 
 import { spawn } from 'node:child_process'

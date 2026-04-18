@@ -1,3 +1,9 @@
+-- =============================================
+-- 文件说明：backend/sql/003_task8_dual_order_serial_migration.sql
+-- 文件职责：为 Task8 升级补齐双流水单号所需字段、索引与系统配置。
+-- 维护说明：执行前请确认目标库已具备基础出库表结构，避免在空库环境与初始化脚本重复执行。
+-- =============================================
+
 ALTER TABLE `biz_outbound_order`
   ADD COLUMN IF NOT EXISTS `order_type` VARCHAR(32) NOT NULL DEFAULT 'walkin' COMMENT '订单类型',
   ADD COLUMN IF NOT EXISTS `has_customer_order` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否有客户订单',

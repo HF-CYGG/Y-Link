@@ -139,8 +139,8 @@ async function bootstrap(): Promise<void> {
     )
     logLine(
       'ADMIN BOOTSTRAP',
-      `passwordSource=${adminBootstrap.usingDefaultBootstrapPassword ? 'built-in-default' : 'custom-env'}`,
-      adminBootstrap.usingDefaultBootstrapPassword ? 'warn' : 'success',
+      `privatePasswordApplied=${adminBootstrap.usedPrivateBootstrapPassword} rotatedLegacyDefault=${adminBootstrap.rotatedLegacyDefaultPassword}`,
+      adminBootstrap.usedPrivateBootstrapPassword ? 'success' : 'info',
     )
     logLine(
       'SYSTEM CONFIG',
@@ -150,9 +150,10 @@ async function bootstrap(): Promise<void> {
     if (adminBootstrap.initialized) {
       // 安全加固：禁止在启动日志输出明文密码，避免被日志采集系统或终端历史泄露。
       logLine('INIT CREDENTIAL', `username=${adminBootstrap.username} password=***`, 'warn')
-      logLine('SECURITY', '首次登录后请立即修改默认管理员密码。', 'warn')
-    } else if (adminBootstrap.usingDefaultBootstrapPassword) {
-      logLine('SECURITY', '当前配置仍为内置默认初始化密码，建议改为私有强密码。', 'warn')
+      logLine('SECURITY', '管理员初始化已要求使用私有密码，首次登录后仍建议立即改密。', 'warn')
+    }
+    if (adminBootstrap.rotatedLegacyDefaultPassword) {
+      logLine('SECURITY', '已检测并迁移历史默认管理员口令，请改用私有初始化密码重新登录。', 'warn')
     }
     console.log(paint('='.repeat(72), 'dim'))
     void runStartupDiagnostics(env.PORT)

@@ -1,3 +1,10 @@
+#
+# 文件说明：基于预构建镜像的云端部署编排文件。
+# 实现逻辑：
+# 1. 直接拉取前端与后端镜像，适合服务器或 1Panel 上的镜像化发布；
+# 2. 默认仍可使用 SQLite 落盘，也支持通过环境变量切换到外置 MySQL；
+# 3. 前端容器健康检查覆盖静态资源与后端代理，保证平台探活结果更接近真实可用性。
+#
 services:
   backend:
     image: ${BACKEND_IMAGE:-docker.io/yemiao351/y-link-backend:latest}

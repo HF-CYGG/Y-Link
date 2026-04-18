@@ -1,10 +1,11 @@
 -- =============================================
--- Y-Link 出库系统 MySQL 初始化脚本（认证 / 用户 / 审计增强版）
--- 功能：
--- 1) 创建基础资料、出库业务、用户认证、审计日志共 8 张核心表
--- 2) 创建查询索引与唯一约束
--- 3) 为出库单增加开单用户关联字段
--- 4) 兼容全新初始化场景；历史 MySQL 库建议在测试环境先执行验证
+-- 文件说明：backend/sql/001_init_schema.sql
+-- 文件职责：用于全新 MySQL 数据库初始化，创建后端运行所需的核心业务表、索引与默认配置。
+-- 实现逻辑：
+-- 1) 初始化商品、标签、用户、会话、审计、系统配置、出库、入库等基础表；
+-- 2) 补齐常用索引与唯一约束，保证查询性能与业务唯一性；
+-- 3) 初始化单双流水号相关系统配置，满足后续单号生成能力。
+-- 维护说明：历史数据库升级请优先走增量迁移脚本，不建议直接对存量库重复执行全量初始化脚本。
 -- =============================================
 
 CREATE TABLE IF NOT EXISTS `base_product` (
@@ -170,6 +171,41 @@ CREATE TABLE IF NOT EXISTS `biz_outbound_order_item` (
   CONSTRAINT `fk_biz_outbound_item_product_id` FOREIGN KEY (`product_id`) REFERENCES `base_product` (`id`) ON DELETE RESTRICT ON UPDATE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='出库明细表';
 
+CREATE TABLE IF NOT EXISTS `biz_inbound_order` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '入库主单ID',
+  `show_no` VARCHAR(48) NOT NULL COMMENT '业务展示单号（INYYYYMMDD0001）',
+  `verify_code` VARCHAR(64) NOT NULL COMMENT '二维码核销码',
+  `supplier_id` BIGINT UNSIGNED NOT NULL COMMENT '供货方用户ID',
+  `supplier_name` VARCHAR(128) DEFAULT NULL COMMENT '供货方名称快照',
+  `status` VARCHAR(32) NOT NULL DEFAULT 'pending' COMMENT '单据状态：pending/verified/cancelled',
+  `total_qty` DECIMAL(10,2) NOT NULL DEFAULT 0.00 COMMENT '总数量',
+  `remark` VARCHAR(255) DEFAULT NULL COMMENT '供货方备注',
+  `verified_at` DATETIME(3) DEFAULT NULL COMMENT '核销入库时间',
+  `verified_by_user_id` BIGINT UNSIGNED DEFAULT NULL COMMENT '核销操作人ID',
+  `verified_by_username` VARCHAR(64) DEFAULT NULL COMMENT '核销操作人账号快照',
+  `verified_by_display_name` VARCHAR(128) DEFAULT NULL COMMENT '核销操作人姓名快照',
+  `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '创建时间',
+  `updated_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3) COMMENT '更新时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_biz_inbound_show_no` (`show_no`),
+  UNIQUE KEY `uk_biz_inbound_verify_code` (`verify_code`),
+  KEY `idx_biz_inbound_supplier_id` (`supplier_id`),
+  KEY `idx_biz_inbound_status` (`status`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='入库主表';
+
+CREATE TABLE IF NOT EXISTS `biz_inbound_order_item` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '入库明细ID',
+  `order_id` BIGINT UNSIGNED NOT NULL COMMENT '入库主单ID',
+  `product_id` BIGINT UNSIGNED NOT NULL COMMENT '商品ID',
+  `product_name_snapshot` VARCHAR(255) NOT NULL COMMENT '商品名称快照',
+  `qty` DECIMAL(10,2) NOT NULL DEFAULT 0.00 COMMENT '入库数量',
+  PRIMARY KEY (`id`),
+  KEY `idx_biz_inbound_item_order_id` (`order_id`),
+  KEY `idx_biz_inbound_item_product_id` (`product_id`),
+  CONSTRAINT `fk_biz_inbound_item_order_id` FOREIGN KEY (`order_id`) REFERENCES `biz_inbound_order` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT,
+  CONSTRAINT `fk_biz_inbound_item_product_id` FOREIGN KEY (`product_id`) REFERENCES `base_product` (`id`) ON DELETE RESTRICT ON UPDATE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='入库明细表';
+
 ALTER TABLE `biz_outbound_order`
   ADD COLUMN IF NOT EXISTS `creator_user_id` BIGINT UNSIGNED DEFAULT NULL COMMENT '开单用户ID',
   ADD COLUMN IF NOT EXISTS `creator_username` VARCHAR(64) DEFAULT NULL COMMENT '开单账号快照',
@@ -184,19 +220,6 @@ ALTER TABLE `biz_outbound_order`
   ADD COLUMN IF NOT EXISTS `is_system_applied` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否系统申请',
   ADD COLUMN IF NOT EXISTS `issuer_name` VARCHAR(64) DEFAULT NULL COMMENT '出单人',
   ADD COLUMN IF NOT EXISTS `customer_department_name` VARCHAR(128) DEFAULT NULL COMMENT '客户部门名称';
-
-CREATE TABLE IF NOT EXISTS `system_configs` (
-  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '配置主键',
-  `config_key` VARCHAR(128) NOT NULL COMMENT '配置键',
-  `config_value` VARCHAR(255) NOT NULL COMMENT '配置值',
-  `config_group` VARCHAR(64) NOT NULL DEFAULT 'general' COMMENT '配置分组',
-  `remark` VARCHAR(255) DEFAULT NULL COMMENT '备注',
-  `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '创建时间',
-  `updated_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3) COMMENT '更新时间',
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `uk_system_configs_config_key` (`config_key`),
-  KEY `idx_system_configs_group` (`config_group`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='系统配置表';
 
 INSERT INTO `system_configs` (`config_key`, `config_value`, `config_group`, `remark`)
 VALUES

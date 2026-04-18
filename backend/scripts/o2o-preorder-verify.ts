@@ -1,3 +1,9 @@
+/**
+ * 文件说明：backend/scripts/o2o-preorder-verify.ts
+ * 文件职责：验证 O2O 预订的注册、下单、撤回、超时取消、核销与备份导出链路。
+ * 维护说明：若调整 O2O 预订状态机、库存占用规则或默认业务配置，请同步更新本脚本。
+ */
+
 import assert from 'node:assert/strict'
 import { AppDataSource } from '../src/config/data-source.js'
 import { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } from '../src/config/database-bootstrap.js'

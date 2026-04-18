@@ -1,3 +1,9 @@
+/**
+ * 模块说明：backend/src/routes/inbound.routes.ts
+ * 文件职责：定义送货单提交、详情查询与核销入库接口，并在路由层收口权限与参数校验。
+ * 维护说明：新增入库接口时请保持路由权限、服务层角色兜底与响应结构一致。
+ */
+
 import { Router } from 'express'
 import { z } from 'zod'
 import { requirePermission, requireRole } from '../middleware/auth.middleware.js'

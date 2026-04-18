@@ -1,4 +1,12 @@
 <script setup lang="ts">
+/**
+ * 模块说明：src/views/inbound/SupplierDeliveryView.vue
+ * 文件职责：供货方录入本次送货明细，提交后生成唯一送货单与核销二维码。
+ * 维护说明：
+ * - 页面允许同一商品多行录入，提交前会自动合并数量，调整提交流程时需保留该兼容；
+ * - 二维码生成失败不代表送货单创建失败，因此必须保留“订单已生成但二维码缺失”的友好提示。
+ */
+
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import QRCode from 'qrcode'
@@ -76,6 +84,7 @@ const handleRemoveItem = (index: number) => {
   items.value.splice(index, 1)
 }
 
+// 送货单创建成功后立即生成二维码；若失败，只提醒二维码渲染失败，不回滚已创建单据。
 const generateQRCode = async (verifyCode: string) => {
   try {
     qrCodeDataUrl.value = await QRCode.toDataURL(verifyCode, {
@@ -87,7 +96,8 @@ const generateQRCode = async (verifyCode: string) => {
       },
     })
   } catch (err) {
-    console.error('Failed to generate QR code', err)
+    qrCodeDataUrl.value = ''
+    ElMessage.warning(extractErrorMessage(err, '送货单已生成，但二维码渲染失败，请刷新后到历史单据查看'))
   }
 }
 
@@ -135,6 +145,7 @@ const handleSubmit = async () => {
   }
 }
 
+// 重置时恢复为首行可编辑状态，方便供应商连续录入下一单。
 const handleReset = () => {
   items.value = []
   remark.value = ''

@@ -1,3 +1,9 @@
+/**
+ * 文件说明：backend/scripts/task2-verify.ts
+ * 文件职责：验证单双流水号、订单类型校验、默认出单人逻辑与流水配置异常处理。
+ * 维护说明：若调整单号生成规则、出库提交入参或系统配置键名，请同步更新本脚本。
+ */
+
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'

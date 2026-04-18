@@ -1,3 +1,9 @@
+/**
+ * 模块说明：backend/src/routes/upload.routes.ts
+ * 文件职责：提供图片上传接口，统一完成文件过滤、随机命名与静态访问 URL 返回。
+ * 维护说明：调整上传规则时需同时评估磁盘占用、文件安全与前端访问路径兼容性。
+ */
+
 import { Router } from 'express'
 import multer from 'multer'
 import path from 'node:path'

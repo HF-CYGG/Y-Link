@@ -45,7 +45,7 @@ const RATE_LIMIT_RULES = {
   clientRegisterByMobile: {
     maxRequests: 3,
     windowMs: 24 * 60 * 60 * 1000,
-    blockMessage: '该手机号注册尝试过于频繁，请明天再试',
+    blockMessage: '该账号注册尝试过于频繁，请明天再试',
   },
   clientForgotVerifyByIp: {
     maxRequests: 6,
@@ -55,7 +55,7 @@ const RATE_LIMIT_RULES = {
   clientForgotVerifyByMobile: {
     maxRequests: 3,
     windowMs: 30 * 60 * 1000,
-    blockMessage: '该手机号找回密码尝试过于频繁，请稍后再试',
+    blockMessage: '该账号找回密码尝试过于频繁，请稍后再试',
   },
   clientForgotResetByIp: {
     maxRequests: 6,
@@ -315,88 +315,93 @@ export class AuthSecurityService {
     })
   }
 
-  async guardClientRegisterRequest(requestMeta: RequestMeta | undefined, mobile: string) {
+  /**
+   * 客户端注册频控：
+   * - 这里接收的 accountKey 必须是路由层先做过归一化后的账号键；
+   * - 这样同一个邮箱的大小写变体会落到同一风控桶内。
+   */
+  async guardClientRegisterRequest(requestMeta: RequestMeta | undefined, accountKey: string) {
     const source = normalizeRiskSource(requestMeta)
     await this.consumeRateLimit(`client-register:ip:${source}`, RATE_LIMIT_RULES.clientRegisterByIp, {
       actionType: 'client.auth.guard.register',
       actionLabel: '客户端注册频控',
-      targetCode: mobile,
+      targetCode: accountKey,
       requestMeta,
       detail: { source },
     })
-    await this.consumeRateLimit(`client-register:mobile:${mobile}`, RATE_LIMIT_RULES.clientRegisterByMobile, {
+    await this.consumeRateLimit(`client-register:account:${accountKey}`, RATE_LIMIT_RULES.clientRegisterByMobile, {
       actionType: 'client.auth.guard.register',
       actionLabel: '客户端注册频控',
-      targetCode: mobile,
+      targetCode: accountKey,
       requestMeta,
-      detail: { source, dimension: 'mobile' },
+      detail: { source, dimension: 'account' },
     })
   }
 
-  async guardClientForgotVerifyRequest(requestMeta: RequestMeta | undefined, mobile: string) {
+  async guardClientForgotVerifyRequest(requestMeta: RequestMeta | undefined, accountKey: string) {
     const source = normalizeRiskSource(requestMeta)
     await this.consumeRateLimit(`client-forgot-verify:ip:${source}`, RATE_LIMIT_RULES.clientForgotVerifyByIp, {
       actionType: 'client.auth.guard.forgot_verify',
       actionLabel: '客户端找回密码校验频控',
-      targetCode: mobile,
+      targetCode: accountKey,
       requestMeta,
       detail: { source },
     })
-    await this.consumeRateLimit(`client-forgot-verify:mobile:${mobile}`, RATE_LIMIT_RULES.clientForgotVerifyByMobile, {
+    await this.consumeRateLimit(`client-forgot-verify:account:${accountKey}`, RATE_LIMIT_RULES.clientForgotVerifyByMobile, {
       actionType: 'client.auth.guard.forgot_verify',
       actionLabel: '客户端找回密码校验频控',
-      targetCode: mobile,
+      targetCode: accountKey,
       requestMeta,
-      detail: { source, dimension: 'mobile' },
+      detail: { source, dimension: 'account' },
     })
   }
 
-  async guardClientForgotResetRequest(requestMeta: RequestMeta | undefined, mobile: string) {
+  async guardClientForgotResetRequest(requestMeta: RequestMeta | undefined, accountKey: string) {
     const source = normalizeRiskSource(requestMeta)
     await this.consumeRateLimit(`client-forgot-reset:ip:${source}`, RATE_LIMIT_RULES.clientForgotResetByIp, {
       actionType: 'client.auth.guard.forgot_reset',
       actionLabel: '客户端重置密码频控',
-      targetCode: mobile,
+      targetCode: accountKey,
       requestMeta,
       detail: { source },
     })
   }
 
-  async guardClientLoginRequest(requestMeta: RequestMeta | undefined, mobile: string) {
+  async guardClientLoginRequest(requestMeta: RequestMeta | undefined, accountKey: string) {
     const source = normalizeRiskSource(requestMeta)
     await this.consumeRateLimit(`client-login:ip:${source}`, RATE_LIMIT_RULES.clientLoginByIp, {
       actionType: 'client.auth.guard.login',
       actionLabel: '客户端登录频控',
-      targetCode: mobile,
+      targetCode: accountKey,
       requestMeta,
       detail: { source },
     })
-    await this.assertFailureNotLocked('client-login', `client-login:ip:${source}`, requestMeta, mobile)
-    await this.assertFailureNotLocked('client-login', `client-login:mobile:${mobile}`, requestMeta, mobile)
+    await this.assertFailureNotLocked('client-login', `client-login:ip:${source}`, requestMeta, accountKey)
+    await this.assertFailureNotLocked('client-login', `client-login:account:${accountKey}`, requestMeta, accountKey)
   }
 
-  isClientLoginCaptchaRequired(requestMeta: RequestMeta | undefined, mobile: string) {
+  isClientLoginCaptchaRequired(requestMeta: RequestMeta | undefined, accountKey: string) {
     const source = normalizeRiskSource(requestMeta)
     return (
       this.hasActiveFailures('client-login', `client-login:ip:${source}`) ||
-      this.hasActiveFailures('client-login', `client-login:mobile:${mobile}`)
+      this.hasActiveFailures('client-login', `client-login:account:${accountKey}`)
     )
   }
 
-  async recordClientLoginFailure(requestMeta: RequestMeta | undefined, mobile: string) {
+  async recordClientLoginFailure(requestMeta: RequestMeta | undefined, accountKey: string) {
     const source = normalizeRiskSource(requestMeta)
     await this.recordLoginFailure(
       'client-login',
       requestMeta,
-      mobile,
+      accountKey,
       `client-login:ip:${source}`,
-      `client-login:mobile:${mobile}`,
+      `client-login:account:${accountKey}`,
     )
   }
 
-  clearClientLoginFailures(requestMeta: RequestMeta | undefined, mobile: string) {
+  clearClientLoginFailures(requestMeta: RequestMeta | undefined, accountKey: string) {
     const source = normalizeRiskSource(requestMeta)
-    this.clearLoginFailures(`client-login:ip:${source}`, `client-login:mobile:${mobile}`)
+    this.clearLoginFailures(`client-login:ip:${source}`, `client-login:account:${accountKey}`)
   }
 }
 

@@ -1,7 +1,11 @@
 # syntax=docker/dockerfile:1
 
 # ------------------------------
-# frontend build
+# 文件说明：Y-Link 单镜像 onebox 构建文件。
+# 实现逻辑：
+# 1. 先分别构建前端静态资源与后端 TypeScript 产物；
+# 2. 再把前端、后端、Nginx 与入口脚本组装进同一运行镜像；
+# 3. 容器启动后由 `entrypoint.sh` 同时拉起 Node 后端与 Nginx 反向代理。
 # ------------------------------
 FROM node:20-bookworm-slim AS frontend-build
 WORKDIR /app
@@ -20,7 +24,7 @@ COPY postcss.config.js ./
 RUN npm run build
 
 # ------------------------------
-# backend build
+# 后端构建阶段：编译服务端 TypeScript 代码。
 # ------------------------------
 FROM node:20-bookworm-slim AS backend-build
 WORKDIR /backend
@@ -31,7 +35,7 @@ COPY backend/src ./src
 RUN npm run build
 
 # ------------------------------
-# backend runtime deps
+# 后端运行时依赖阶段：仅保留生产依赖，减小最终镜像体积。
 # ------------------------------
 FROM node:20-bookworm-slim AS backend-prod-deps
 WORKDIR /backend
@@ -39,7 +43,7 @@ COPY backend/package*.json ./
 RUN npm ci --omit=dev
 
 # ------------------------------
-# onebox runtime
+# onebox 运行阶段：在同一容器中组合 Node 后端与 Nginx。
 # ------------------------------
 FROM node:20-bookworm-slim AS runtime
 

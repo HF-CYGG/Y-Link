@@ -1,4 +1,12 @@
 <script setup lang="ts">
+/**
+ * 模块说明：src/views/inbound/SupplierHistoryView.vue
+ * 文件职责：展示供货方历史送货单列表，并支持筛选、查看详情和待入库二维码回查。
+ * 维护说明：
+ * - 历史页走“先拉全量、再做前端轻筛选”的策略，适合当前供应商侧数据量级；
+ * - 二维码生成失败时不能静默吞掉，否则用户只会看到空白占位而不知道单据本身已存在。
+ */
+
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import QRCode from 'qrcode'
@@ -60,6 +68,7 @@ const loadData = async () => {
   }
 }
 
+// 历史详情中仅对待入库单据补生成二维码，已入库单据无需重复展示核销码。
 const generateQRCode = async (verifyCode: string) => {
   try {
     qrCodeDataUrl.value = await QRCode.toDataURL(verifyCode, {
@@ -68,10 +77,12 @@ const generateQRCode = async (verifyCode: string) => {
       color: { dark: '#000000', light: '#ffffff' },
     })
   } catch (err) {
-    console.error('QR code generation failed', err)
+    qrCodeDataUrl.value = ''
+    ElMessage.warning(extractErrorMessage(err, '详情已加载，但二维码生成失败，请稍后重试'))
   }
 }
 
+// 查看详情时重置上一次弹窗状态，避免旧二维码或旧详情短暂闪现。
 const handleViewDetail = async (row: InboundOrder) => {
   detailVisible.value = true
   detailLoading.value = true

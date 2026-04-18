@@ -1,7 +1,10 @@
-# 默认一体化部署：
-# - 前端容器负责静态资源与 API 反向代理；
-# - 后端容器内置 SQLite 文件库；
-# - 通过 volume 持久化 SQLite 数据。
+#
+# 文件说明：本地/服务器默认分体部署编排文件。
+# 实现逻辑：
+# 1. `backend` 使用 SQLite 落盘，适合快速部署与小规模一体化场景；
+# 2. `frontend` 负责托管静态资源，并通过 Nginx 反向代理后端 API；
+# 3. 通过 volume 持久化 SQLite 数据，并通过健康检查串联前后端启动顺序。
+#
 services:
   backend:
     build:
@@ -41,7 +44,8 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - wget -q -O /dev/null http://127.0.0.1/ || exit 1
+        # 既校验前端静态页可访问，也校验 Nginx 到后端的 /health 代理链路可用。
+        - wget -q -O /dev/null http://127.0.0.1/ && wget -q -O /dev/null http://127.0.0.1/health || exit 1
       interval: 10s
       timeout: 5s
       retries: 6

@@ -1,3 +1,9 @@
+/**
+ * 模块说明：backend/src/entities/biz-inbound-order-item.entity.ts
+ * 文件职责：定义入库明细实体，记录入库单与商品之间的数量快照关系。
+ * 维护说明：若新增明细字段，请同步更新入库 SQL、服务层保存逻辑与前端详情展示字段。
+ */
+
 import { Column, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn, type Relation } from 'typeorm'
 import { BizInboundOrder } from './biz-inbound-order.entity.js'
 import { BaseProduct } from './base-product.entity.js'

@@ -33,8 +33,9 @@ const backendPort = Number(process.env.Y_LINK_PERF_VERIFY_BACKEND_PORT ?? 3301)
 const backendBaseUrl = `http://127.0.0.1:${backendPort}`
 const apiBaseUrl = `${backendBaseUrl}/api`
 const tsxCliPath = resolveTsxCliPath(backendRoot)
-const defaultVerifyPassword = ['Admin', '@', '123456'].join('')
-const defaultSystemUserPassword = ['Perf', '@', '123456'].join('')
+// 性能验证使用隔离数据库，不应继续依赖历史默认弱口令，避免被后端安全策略直接拒绝。
+const defaultVerifyPassword = ['PerfVerify', '@', '2026', 'Core'].join('')
+const defaultSystemUserPassword = ['PerfSystem', '@', '2026', 'Flow'].join('')
 const verifyCredentials = {
   username: process.env.Y_LINK_VERIFY_USERNAME ?? 'admin',
   password: process.env.Y_LINK_VERIFY_PASSWORD ?? defaultVerifyPassword,
