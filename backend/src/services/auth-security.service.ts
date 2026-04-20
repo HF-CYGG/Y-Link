@@ -149,13 +149,16 @@ export class AuthSecurityService {
     const activeWindow = this.trimRateLimitWindow(existing, rule.windowMs, nowMs)
     if (activeWindow.length >= rule.maxRequests) {
       const waitMs = rule.windowMs - (nowMs - activeWindow[0])
+      const riskDetail: Record<string, unknown> = {
+        reason: 'rate_limit',
+        waitSeconds: Math.max(1, Math.ceil(waitMs / 1000)),
+      }
+      if (auditInput.detail) {
+        Object.assign(riskDetail, auditInput.detail)
+      }
       await this.recordRiskEvent({
         ...auditInput,
-        detail: {
-          ...(auditInput.detail ?? {}),
-          reason: 'rate_limit',
-          waitSeconds: Math.max(1, Math.ceil(waitMs / 1000)),
-        },
+        detail: riskDetail,
       })
       throw new BizError(`${rule.blockMessage}（约 ${Math.max(1, Math.ceil(waitMs / 1000))} 秒后重试）`, 429)
     }

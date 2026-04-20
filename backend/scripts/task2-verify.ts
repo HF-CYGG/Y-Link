@@ -36,7 +36,7 @@ async function expectBizError(
   runner: () => Promise<unknown>,
   statusCode: number,
   keyword: string,
-  BizErrorCtor: typeof Error,
+  BizErrorCtor: new (...args: any[]) => Error,
 ) {
   try {
     await runner()

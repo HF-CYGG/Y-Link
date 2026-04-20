@@ -220,7 +220,7 @@ class ClientAuthService {
     return this.getVerificationCapabilities()
   }
 
-  async register(input: ClientRegisterInput, requestMeta?: RequestMeta) {
+  async register(input: ClientRegisterInput, _requestMeta?: RequestMeta) {
     const account = this.resolveAccount(input.account)
     const username = normalizeClientUsername(input.username)
     const password = input.password.trim()
@@ -337,7 +337,7 @@ class ClientAuthService {
     }
   }
 
-  async verifyForgotPassword(input: ClientForgotVerifyInput, requestMeta?: RequestMeta) {
+  async verifyForgotPassword(input: ClientForgotVerifyInput, _requestMeta?: RequestMeta) {
     const capabilities = await this.getVerificationCapabilities()
     if (!capabilities.forgotPasswordEnabled) {
       throw new BizError('当前系统未同时启用手机与邮箱验证码，暂不支持自助找回密码，请联系管理员手动修改密码', 400)
@@ -369,7 +369,7 @@ class ClientAuthService {
     }
   }
 
-  async resetPassword(input: ClientResetPasswordInput, requestMeta?: RequestMeta) {
+  async resetPassword(input: ClientResetPasswordInput, _requestMeta?: RequestMeta) {
     const account = this.resolveAccount(input.account)
     const newPassword = input.newPassword.trim()
     if (newPassword.length < 6) {
@@ -461,6 +461,43 @@ class ClientAuthService {
     })
   }
 
+  private buildProfileUniquenessChecks(username: ReturnType<typeof normalizeClientUsername>, mobile: string | null, email: string | null) {
+    return [
+      {
+        value: {
+          channel: 'username' as const,
+          rawValue: username.value,
+          normalizedValue: username.normalizedValue,
+        },
+        message: '该用户名已被其他用户使用',
+      },
+      { value: mobile, message: '该手机号已被其他用户使用' },
+      { value: email, message: '该邮箱已被其他用户使用' },
+    ]
+  }
+
+  private async ensureProfileIdentifiersUnique(
+    checks: ReturnType<ClientAuthService['buildProfileUniquenessChecks']>,
+    currentUserId: string,
+  ) {
+    for (const check of checks) {
+      if (!check.value) {
+        continue
+      }
+      const existed =
+        typeof check.value === 'string'
+          ? await this.findUserByAnyIdentifier({
+              channel: check.value.includes('@') ? 'email' : 'mobile',
+              rawValue: check.value,
+              normalizedValue: check.value,
+            })
+          : await this.findUserByAnyIdentifier(check.value)
+      if (existed && existed.id !== currentUserId) {
+        throw new BizError(check.message, 409)
+      }
+    }
+  }
+
   async updateProfile(auth: ClientAuthContext, input: ClientUpdateProfileInput) {
     const user = await this.userRepo.findOne({ where: { id: auth.userId } })
     if (!user) {
@@ -480,34 +517,8 @@ class ClientAuthService {
       throw new BizError('手机号和邮箱至少保留一项', 400)
     }
 
-    const checks = [
-      {
-        value: {
-          channel: 'username' as const,
-          rawValue: username.value,
-          normalizedValue: username.normalizedValue,
-        },
-        message: '该用户名已被其他用户使用',
-      },
-      { value: mobile, message: '该手机号已被其他用户使用' },
-      { value: email, message: '该邮箱已被其他用户使用' },
-    ]
-
-    for (const check of checks) {
-      if (check.value) {
-        const existed =
-          typeof check.value === 'string'
-            ? await this.findUserByAnyIdentifier({
-                channel: check.value.includes('@') ? 'email' : 'mobile',
-                rawValue: check.value,
-                normalizedValue: check.value,
-              })
-            : await this.findUserByAnyIdentifier(check.value)
-        if (existed && existed.id !== user.id) {
-          throw new BizError(check.message, 409)
-        }
-      }
-    }
+    const checks = this.buildProfileUniquenessChecks(username, mobile, email)
+    await this.ensureProfileIdentifiersUnique(checks, user.id)
 
     user.realName = username.value
     user.mobile = mobile

@@ -53,7 +53,7 @@ export class VerificationCodeService {
 
   private renderTemplate(template: string, context: Record<string, string>) {
     return Object.entries(context).reduce((result, [key, value]) => {
-      const pattern = new RegExp(`\\{\\{\\s*${key}\\s*\\}\\}`, 'g')
+      const pattern = new RegExp(String.raw`\{\{\s*${key}\s*\}\}`, 'g')
       return result.replace(pattern, value)
     }, template)
   }

@@ -49,7 +49,7 @@ const registerAndLoginClient = async (seed: number): Promise<ClientAuthContext> 
   const registerCaptcha = await clientAuthService.createCaptcha()
   const account = `1${String(seed).slice(-10)}`
   const username = `test_user_${String(seed).slice(-6)}`
-  const password = 'Client@123'
+  const password = process.env.Y_LINK_VERIFY_CLIENT_PASSWORD ?? `Client@${String(seed).slice(-6)}`
 
   const registerResult = await clientAuthService.register({
     account,
@@ -154,7 +154,11 @@ const run = async () => {
   assert.equal(timeoutDetail.order.statusReport.scenario, 'timeout_cancelled')
   log('超时自动取消原因输出通过')
 
-  const adminLogin = await authService.login({ username: 'admin', password: 'Admin@123456' }).catch(() => null)
+  const adminPassword = process.env.Y_LINK_VERIFY_ADMIN_PASSWORD?.trim()
+  const adminLogin =
+    adminPassword && adminPassword.length > 0
+      ? await authService.login({ username: 'admin', password: adminPassword }).catch(() => null)
+      : null
   let adminAuth: AuthUserContext | null = null
   if (adminLogin) {
     adminAuth = await authService.resolveAuthUserByToken(adminLogin.token)
@@ -191,18 +195,15 @@ const run = async () => {
   log('SQLite/MySQL 驱动兼容配置通过')
 }
 
-run()
-  .then(async () => {
-    if (AppDataSource.isInitialized) {
-      await AppDataSource.destroy()
-    }
-    console.log('\nO2O 预订验收脚本通过')
-  })
-  .catch(async (error) => {
-    if (AppDataSource.isInitialized) {
-      await AppDataSource.destroy()
-    }
-    console.error('\nO2O 预订验收脚本失败')
-    console.error(error)
-    process.exit(1)
-  })
+try {
+  await run()
+  console.log('\nO2O 预订验收脚本通过')
+} catch (error) {
+  console.error('\nO2O 预订验收脚本失败')
+  console.error(error)
+  process.exit(1)
+} finally {
+  if (AppDataSource.isInitialized) {
+    await AppDataSource.destroy()
+  }
+}

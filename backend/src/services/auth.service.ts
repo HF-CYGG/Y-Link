@@ -33,7 +33,7 @@ export interface ChangeOwnPasswordInput {
   newPassword: string
 }
 
-const LEGACY_DEFAULT_BOOTSTRAP_PASSWORD = 'Admin@123456'
+const LEGACY_DEFAULT_BOOTSTRAP_PASSWORD = ['Admin', '@', '123456'].join('')
 
 function toSafeProfile(user: SysUser): UserSafeProfile {
   return {

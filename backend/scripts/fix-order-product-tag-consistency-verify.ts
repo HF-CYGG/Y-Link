@@ -42,7 +42,7 @@ const backendBaseUrl = `http://127.0.0.1:${backendPort}`
 const apiBaseUrl = `${backendBaseUrl}/api`
 const verifyCredentials = {
   username: 'admin',
-  password: ['Admin', '@', '123456'].join(''),
+  password: process.env.Y_LINK_SPEC_VERIFY_PASSWORD ?? `SpecVerify@${Date.now()}`,
 }
 
 const verificationItems: VerificationItem[] = []
@@ -173,7 +173,10 @@ const startIsolatedBackend = async () => {
 }
 
 const stopIsolatedBackend = async (backendProcess?: ChildProcess) => {
-  if (!backendProcess || backendProcess.exitCode !== null) {
+  if (!backendProcess) {
+    return
+  }
+  if (backendProcess.exitCode !== null) {
     return
   }
 
@@ -258,6 +261,12 @@ const assertTagView = (payload: Record<string, unknown>, label: string) => {
   assert.equal(typeof payload.id, 'string', `${label} 缺少 string id`)
   assert.equal(typeof payload.tagName, 'string', `${label} 缺少 string tagName`)
   assert.ok(typeof payload.tagCode === 'string' || payload.tagCode === null, `${label} 缺少 tagCode`)
+}
+
+const requireStringField = (payload: Record<string, unknown>, fieldName: string, label: string): string => {
+  const value = payload[fieldName]
+  assert.equal(typeof value, 'string', `${label} 缺少 string ${fieldName}`)
+  return value as string
 }
 
 const assertOrderDetailShape = (payload: Record<string, unknown>) => {
@@ -355,8 +364,9 @@ const verifyChecklistFlow = async (token: string) => {
   })
   assertTagView(createdTagAResult.data, '创建标签A返回')
   assert.equal(createdTagAResult.data.tagName, `验收标签A-${suffix}`)
+  const createdTagAId = requireStringField(createdTagAResult.data, 'id', '创建标签A返回')
 
-  const updatedTagAResult = await requestApi<Record<string, unknown>>(`/tags/${createdTagAResult.data.id}`, {
+  const updatedTagAResult = await requestApi<Record<string, unknown>>(`/tags/${createdTagAId}`, {
     method: 'PUT',
     token,
     body: {
@@ -366,6 +376,7 @@ const verifyChecklistFlow = async (token: string) => {
   })
   assertTagView(updatedTagAResult.data, '更新标签A返回')
   assert.equal(updatedTagAResult.data.tagName, `验收标签A已更新-${suffix}`)
+  const updatedTagAId = requireStringField(updatedTagAResult.data, 'id', '更新标签A返回')
 
   const createdTagBResult = await requestApi<Record<string, unknown>>('/tags', {
     method: 'POST',
@@ -376,6 +387,7 @@ const verifyChecklistFlow = async (token: string) => {
     },
   })
   assertTagView(createdTagBResult.data, '创建标签B返回')
+  const createdTagBId = requireStringField(createdTagBResult.data, 'id', '创建标签B返回')
 
   const createdProductAResult = await requestApi<Record<string, unknown>>('/products', {
     method: 'POST',
@@ -385,7 +397,7 @@ const verifyChecklistFlow = async (token: string) => {
       pinyinAbbr: 'YSCPA',
       defaultPrice: 10,
       isActive: true,
-      tagIds: [Number(createdTagAResult.data.id)],
+      tagIds: [Number(createdTagAId)],
     },
   })
   const createdProductBResult = await requestApi<Record<string, unknown>>('/products', {
@@ -396,29 +408,35 @@ const verifyChecklistFlow = async (token: string) => {
       pinyinAbbr: 'YSCPB',
       defaultPrice: 12.5,
       isActive: true,
-      tagIds: [createdTagBResult.data.id],
+      tagIds: [createdTagBId],
     },
   })
 
   assertProductView(createdProductAResult.data, '创建产品A返回')
   assertProductView(createdProductBResult.data, '创建产品B返回')
-  assert.match(String(createdProductAResult.data.productCode), /^P-\d{6}-0001$/)
-  assert.match(String(createdProductBResult.data.productCode), /^P-\d{6}-0002$/)
+  const createdProductAId = requireStringField(createdProductAResult.data, 'id', '创建产品A返回')
+  const createdProductBId = requireStringField(createdProductBResult.data, 'id', '创建产品B返回')
+  const createdProductAName = requireStringField(createdProductAResult.data, 'productName', '创建产品A返回')
+  const createdProductACode = requireStringField(createdProductAResult.data, 'productCode', '创建产品A返回')
+  const createdProductBCode = requireStringField(createdProductBResult.data, 'productCode', '创建产品B返回')
+
+  assert.match(createdProductACode, /^P-\d{6}-0001$/)
+  assert.match(createdProductBCode, /^P-\d{6}-0002$/)
 
   const productListBeforeBatchResult = await requestApi<Array<Record<string, unknown>>>('/products', {
     method: 'GET',
     token,
   })
-  const createdProductAInList = productListBeforeBatchResult.data.find((item) => item.id === createdProductAResult.data.id)
+  const createdProductAInList = productListBeforeBatchResult.data.find((item) => item.id === createdProductAId)
   assert.ok(createdProductAInList, '产品列表未返回产品A')
-  assertProductView(createdProductAInList as Record<string, unknown>, '产品列表产品A')
+  assertProductView(createdProductAInList, '产品列表产品A')
   assert.equal((createdProductAInList?.isActive as boolean) ?? null, true)
 
   const batchUpdateResult = await requestApi<Array<Record<string, unknown>>>('/products/batch', {
     method: 'POST',
     token,
     body: {
-      ids: [createdProductAResult.data.id, createdProductBResult.data.id],
+      ids: [createdProductAId, createdProductBId],
       isActive: false,
     },
   })
@@ -428,29 +446,29 @@ const verifyChecklistFlow = async (token: string) => {
     assert.equal(item.isActive, false)
   })
 
-  const productADetailAfterBatchResult = await requestApi<Record<string, unknown>>(`/products/${createdProductAResult.data.id}`, {
+  const productADetailAfterBatchResult = await requestApi<Record<string, unknown>>(`/products/${createdProductAId}`, {
     method: 'GET',
     token,
   })
   assertProductView(productADetailAfterBatchResult.data, '批量后产品A详情')
   assert.equal(productADetailAfterBatchResult.data.isActive, false)
 
-  const productAUpdatedResult = await requestApi<Record<string, unknown>>(`/products/${createdProductAResult.data.id}`, {
+  const productAUpdatedResult = await requestApi<Record<string, unknown>>(`/products/${createdProductAId}`, {
     method: 'PUT',
     token,
     body: {
       isActive: true,
       defaultPrice: 10,
-      tagIds: [updatedTagAResult.data.id, Number(createdTagBResult.data.id)],
+      tagIds: [updatedTagAId, Number(createdTagBId)],
     },
   })
   assertProductView(productAUpdatedResult.data, '更新产品A返回')
   assert.equal(productAUpdatedResult.data.isActive, true)
-  assert.deepEqual(productAUpdatedResult.data.tagIds, [String(updatedTagAResult.data.id), String(createdTagBResult.data.id)])
+  assert.deepEqual(productAUpdatedResult.data.tagIds, [updatedTagAId, createdTagBId])
   assert.equal(Array.isArray(productAUpdatedResult.data.tags), true)
   assert.equal((productAUpdatedResult.data.tags as Array<unknown>).length, 2)
 
-  const productADetailBeforeOrderResult = await requestApi<Record<string, unknown>>(`/products/${createdProductAResult.data.id}`, {
+  const productADetailBeforeOrderResult = await requestApi<Record<string, unknown>>(`/products/${createdProductAId}`, {
     method: 'GET',
     token,
   })
@@ -472,7 +490,7 @@ const verifyChecklistFlow = async (token: string) => {
       remark: 'Task7系统化验收',
       items: [
         {
-          productId: createdProductAResult.data.id,
+          productId: createdProductAId,
           qty: 2,
           unitPrice: 18.8,
           remark: '回写默认售价',
@@ -511,7 +529,7 @@ const verifyChecklistFlow = async (token: string) => {
   assertOrderDetailShape(orderDetailByShowNoResult.data)
   assert.equal((orderDetailByShowNoResult.data.order as Record<string, unknown>).showNo, submitOrderResult.data.order.showNo)
 
-  const productADetailAfterOrderResult = await requestApi<Record<string, unknown>>(`/products/${createdProductAResult.data.id}`, {
+  const productADetailAfterOrderResult = await requestApi<Record<string, unknown>>(`/products/${createdProductAId}`, {
     method: 'GET',
     token,
   })
@@ -519,13 +537,13 @@ const verifyChecklistFlow = async (token: string) => {
   assert.equal(productADetailAfterOrderResult.data.isActive, true)
 
   const productListAfterOrderResult = await requestApi<Array<Record<string, unknown>>>(
-    `/products?keyword=${encodeURIComponent(String(createdProductAResult.data.productName))}`,
+    `/products?keyword=${encodeURIComponent(createdProductAName)}`,
     {
       method: 'GET',
       token,
     },
   )
-  const productAAfterOrderInList = productListAfterOrderResult.data.find((item) => item.id === createdProductAResult.data.id)
+  const productAAfterOrderInList = productListAfterOrderResult.data.find((item) => item.id === createdProductAId)
   assert.ok(productAAfterOrderInList, '订单提交后产品列表未返回产品A')
   assert.equal(productAAfterOrderInList?.defaultPrice, '18.80')
   assert.equal(productAAfterOrderInList?.isActive, true)
@@ -544,18 +562,18 @@ const verifyChecklistFlow = async (token: string) => {
         tagName: updatedTagAResult.data.tagName,
       },
       {
-        id: createdTagBResult.data.id,
+        id: createdTagBId,
         tagName: createdTagBResult.data.tagName,
       },
     ],
     createdProducts: [
       {
-        id: createdProductAResult.data.id,
-        productCode: createdProductAResult.data.productCode,
+        id: createdProductAId,
+        productCode: createdProductACode,
       },
       {
-        id: createdProductBResult.data.id,
-        productCode: createdProductBResult.data.productCode,
+        id: createdProductBId,
+        productCode: createdProductBCode,
       },
     ],
     submittedOrder: submitOrderResult.data.order,
