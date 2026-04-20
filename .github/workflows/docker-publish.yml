@@ -26,6 +26,9 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -50,7 +53,7 @@ jobs:
 
           # 仅在 Docker Hub 凭据完整时追加 Docker Hub 镜像地址，
           # 避免“登录允许失败但推送仍强制包含 docker.io 标签”导致整条流水线失败。
-          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ] && [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ]; then
+          if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
             frontend_images="docker.io/${namespace}/y-link-frontend"$'\n'"${frontend_images}"
             backend_images="docker.io/${namespace}/y-link-backend"$'\n'"${backend_images}"
             onebox_images="docker.io/${namespace}/y-link-onebox"$'\n'"${onebox_images}"
@@ -75,11 +78,11 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       - name: 登录 Docker Hub
-        if: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          username: ${{ env.DOCKERHUB_USERNAME }}
+          password: ${{ env.DOCKERHUB_TOKEN }}
 
       - name: 登录 GitHub Container Registry
         uses: docker/login-action@v3
