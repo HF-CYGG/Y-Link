@@ -346,7 +346,7 @@ html.dark .el-drawer {
   right: 0;
   width: 100%;
   min-width: 0;
-  will-change: transform, opacity;
+  /* 避免把 fixed 子元素（如商城迷你购物车）锚定到页面容器而不是视口。 */
 }
 
 /* 应用根容器高度占满视口，便于布局组件直接继承。 */
