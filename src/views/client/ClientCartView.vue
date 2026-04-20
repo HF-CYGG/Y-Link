@@ -99,32 +99,38 @@ const handleBack = () => {
             <button type="button" class="self-start text-xs text-rose-500 sm:self-auto hover:text-rose-600" @click="removeSelected">批量删除</button>
           </div>
 
-          <article
-            v-for="item in clientCartStore.validItems"
-            :key="item.productId"
-            class="mb-3 rounded-xl bg-[var(--ylink-color-surface-soft)] px-3 py-3 border border-slate-100"
-          >
-            <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <div class="flex min-w-0 items-start gap-3">
-                <input
-                  type="checkbox"
-                  :checked="item.selected"
-                  class="mt-1 w-4 h-4 rounded text-teal-600 focus:ring-teal-500 cursor-pointer"
-                  @change="clientCartStore.toggleItemSelected(item.productId, ($event.target as HTMLInputElement).checked)"
-                />
-                <div class="min-w-0">
-                  <p class="truncate text-sm font-semibold text-slate-900">{{ item.productName }}</p>
-                  <p class="mt-1 text-sm font-bold text-teal-600">¥{{ Number(item.defaultPrice).toFixed(2) }}</p>
-                  <p class="text-xs text-slate-400 mt-1">可预订 {{ item.availableStock }} · 限购 {{ item.limitPerUser }}</p>
+          <TransitionGroup name="cart-list-flow" tag="div" class="space-y-3">
+            <article
+              v-for="item in clientCartStore.validItems"
+              :key="`valid-${item.productId}`"
+              class="rounded-xl bg-[var(--ylink-color-surface-soft)] px-3 py-3 border border-slate-100"
+            >
+              <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div class="flex min-w-0 items-start gap-3">
+                  <input
+                    type="checkbox"
+                    :checked="item.selected"
+                    class="mt-1 w-4 h-4 rounded text-teal-600 focus:ring-teal-500 cursor-pointer"
+                    @change="clientCartStore.toggleItemSelected(item.productId, ($event.target as HTMLInputElement).checked)"
+                  />
+                  <div class="min-w-0">
+                    <p class="truncate text-sm font-semibold text-slate-900">{{ item.productName }}</p>
+                    <p class="mt-1 text-sm font-bold text-teal-600">¥{{ Number(item.defaultPrice).toFixed(2) }}</p>
+                    <p class="text-xs text-slate-400 mt-1">可预订 {{ item.availableStock }} · 限购 {{ item.limitPerUser }}</p>
+                  </div>
+                </div>
+                <div class="flex items-center justify-end gap-3 sm:w-auto w-full">
+                  <button type="button" class="client-cart-qty-btn" @click="clientCartStore.incrementQty(item.productId, -1)">-</button>
+                  <span class="min-w-8 text-center text-sm font-medium">
+                    <Transition name="cart-qty-pop" mode="out-in">
+                      <span :key="`drawer-qty-${item.productId}-${item.qty}`">{{ item.qty }}</span>
+                    </Transition>
+                  </span>
+                  <button type="button" class="client-cart-qty-btn" @click="clientCartStore.incrementQty(item.productId, 1)">+</button>
                 </div>
               </div>
-              <div class="flex items-center justify-end gap-3 sm:w-auto w-full">
-                <button type="button" class="client-cart-qty-btn" @click="clientCartStore.incrementQty(item.productId, -1)">-</button>
-                <span class="min-w-8 text-center text-sm font-medium">{{ item.qty }}</span>
-                <button type="button" class="client-cart-qty-btn" @click="clientCartStore.incrementQty(item.productId, 1)">+</button>
-              </div>
-            </div>
-          </article>
+            </article>
+          </TransitionGroup>
         </div>
 
         <div
@@ -132,17 +138,19 @@ const handleBack = () => {
           class="rounded-[1.2rem] bg-[var(--ylink-color-surface)] p-4 shadow-[var(--ylink-shadow-soft)]"
         >
           <p class="mb-3 text-sm font-semibold text-slate-700">失效商品</p>
-          <article
-            v-for="item in clientCartStore.invalidItems"
-            :key="item.productId"
-            class="mb-2 flex flex-col gap-3 rounded-xl bg-rose-50 px-3 py-3 border border-rose-100 sm:flex-row sm:items-center sm:justify-between"
-          >
-            <div class="min-w-0">
-              <p class="text-sm font-semibold text-rose-700">{{ item.productName }}</p>
-              <p class="text-xs text-rose-500 mt-1">当前不可预订，请移除后继续</p>
-            </div>
-            <button type="button" class="self-end text-xs font-medium text-rose-600 bg-white px-3 py-1.5 rounded-full border border-rose-200 hover:bg-rose-50 sm:self-auto" @click="clientCartStore.removeItem(item.productId)">移除</button>
-          </article>
+          <TransitionGroup name="cart-list-flow" tag="div" class="space-y-2">
+            <article
+              v-for="item in clientCartStore.invalidItems"
+              :key="`invalid-${item.productId}`"
+              class="flex flex-col gap-3 rounded-xl bg-rose-50 px-3 py-3 border border-rose-100 sm:flex-row sm:items-center sm:justify-between"
+            >
+              <div class="min-w-0">
+                <p class="text-sm font-semibold text-rose-700">{{ item.productName }}</p>
+                <p class="text-xs text-rose-500 mt-1">当前不可预订，请移除后继续</p>
+              </div>
+              <button type="button" class="self-end text-xs font-medium text-rose-600 bg-white px-3 py-1.5 rounded-full border border-rose-200 hover:bg-rose-50 sm:self-auto" @click="clientCartStore.removeItem(item.productId)">移除</button>
+            </article>
+          </TransitionGroup>
         </div>
       </section>
     </section>
@@ -150,8 +158,23 @@ const handleBack = () => {
     <div v-if="clientCartStore.items.length" class="client-cart-summary absolute bottom-0 left-0 right-0 z-20 bg-white border-t border-slate-200 px-4 py-3 pb-safe shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
       <div class="flex items-center justify-between w-full max-w-[1100px] mx-auto">
         <div class="flex flex-col">
-          <p class="text-sm text-slate-500">已选 <span class="font-bold text-slate-900">{{ clientCartStore.selectedQty }}</span> 件，合计 <span class="font-bold text-teal-600">¥{{ totalAmount.toFixed(2) }}</span></p>
-          <p class="text-xs text-slate-400 mt-0.5">共 {{ selectedCount }} 种商品</p>
+          <p class="text-sm text-slate-500">
+            已选
+            <Transition name="cart-qty-pop" mode="out-in">
+              <span :key="`summary-selected-${clientCartStore.selectedQty}`" class="font-bold text-slate-900">{{ clientCartStore.selectedQty }}</span>
+            </Transition>
+            件，合计
+            <Transition name="cart-qty-pop" mode="out-in">
+              <span :key="`summary-total-${totalAmount.toFixed(2)}`" class="font-bold text-teal-600">¥{{ totalAmount.toFixed(2) }}</span>
+            </Transition>
+          </p>
+          <p class="text-xs text-slate-400 mt-0.5">
+            共
+            <Transition name="cart-qty-pop" mode="out-in">
+              <span :key="`summary-count-${selectedCount}`">{{ selectedCount }}</span>
+            </Transition>
+            种商品
+          </p>
         </div>
         <button type="button" class="rounded-full bg-slate-900 px-8 py-2.5 text-sm font-semibold text-white transition-transform active:scale-95 shadow-md hover:shadow-lg" @click="goCheckout">去结算</button>
       </div>
@@ -178,5 +201,35 @@ const handleBack = () => {
 
 .pb-safe {
   padding-bottom: max(0.75rem, env(safe-area-inset-bottom));
+}
+
+.cart-list-flow-enter-active,
+.cart-list-flow-leave-active {
+  transition:
+    transform 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.24s ease;
+}
+
+.cart-list-flow-enter-from,
+.cart-list-flow-leave-to {
+  opacity: 0;
+  transform: translateY(10px) scale(0.98);
+}
+
+.cart-list-flow-move {
+  transition: transform 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.cart-qty-pop-enter-active,
+.cart-qty-pop-leave-active {
+  transition:
+    transform 0.2s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.2s ease;
+}
+
+.cart-qty-pop-enter-from,
+.cart-qty-pop-leave-to {
+  opacity: 0;
+  transform: translateY(-5px) scale(0.92);
 }
 </style>

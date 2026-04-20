@@ -636,7 +636,9 @@ onMounted(async () => {
           <div class="summary-info">
             <div class="cart-icon-wrapper">
               <el-icon><ShoppingCart /></el-icon>
-              <span v-if="bottomSelectedQty > 0" class="badge">{{ bottomSelectedQty }}</span>
+              <Transition name="qty-pop" mode="out-in">
+                <span v-if="bottomSelectedQty > 0" :key="`mini-badge-${bottomSelectedQty}`" class="badge">{{ bottomSelectedQty }}</span>
+              </Transition>
             </div>
             <div class="text-group">
               <p class="main-text">购物车 {{ bottomSelectedTypeCount }} 种商品</p>
@@ -661,25 +663,32 @@ onMounted(async () => {
               <button type="button" class="expand-clear-btn" @click="clientCartStore.clearAll()">清空</button>
             </header>
 
-            <div class="item-list">
-              <div v-if="clientCartStore.items.length === 0" class="empty-state">购物车还是空的，去挑挑好物吧</div>
-              <article v-for="item in clientCartStore.items" :key="item.productId" class="cart-item">
+            <TransitionGroup name="cart-item-flow" tag="div" class="item-list">
+              <div v-if="clientCartStore.items.length === 0" key="mini-empty" class="empty-state">购物车还是空的，去挑挑好物吧</div>
+              <article v-for="item in clientCartStore.items" :key="`mini-${item.productId}`" class="cart-item">
                 <div class="item-main">
                   <p class="item-name">{{ item.productName }}</p>
                   <p class="item-price">¥{{ Number(item.defaultPrice).toFixed(2) }}</p>
                 </div>
                 <div class="item-stepper">
                   <button type="button" class="step-btn" @click="clientCartStore.incrementQty(item.productId, -1)">-</button>
-                  <span class="step-val">{{ item.qty }}</span>
+                  <span class="step-val">
+                    <Transition name="qty-pop" mode="out-in">
+                      <span :key="`mini-qty-${item.productId}-${item.qty}`" class="step-val__num">{{ item.qty }}</span>
+                    </Transition>
+                  </span>
                   <button type="button" class="step-btn" @click="clientCartStore.incrementQty(item.productId, 1)">+</button>
                 </div>
               </article>
-            </div>
+            </TransitionGroup>
 
             <div class="expand-footer">
               <button type="button" class="expand-link-btn" @click="openCartDrawer">进入购物车</button>
               <p class="total-price">
-                合计：<span class="price-num">¥{{ miniCartTotalAmount.toFixed(2) }}</span>
+                合计：
+                <Transition name="qty-pop" mode="out-in">
+                  <span :key="`mini-total-${miniCartTotalAmount.toFixed(2)}`" class="price-num">¥{{ miniCartTotalAmount.toFixed(2) }}</span>
+                </Transition>
               </p>
             </div>
           </div>
@@ -1197,6 +1206,42 @@ onMounted(async () => {
   padding: 0.9rem 0;
   scrollbar-width: thin;
   scrollbar-color: rgba(148, 163, 184, 0.6) transparent;
+}
+
+.cart-item-flow-enter-active,
+.cart-item-flow-leave-active {
+  transition:
+    transform 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.24s ease;
+}
+
+.cart-item-flow-enter-from,
+.cart-item-flow-leave-to {
+  opacity: 0;
+  transform: translateY(8px) scale(0.98);
+}
+
+.cart-item-flow-move {
+  transition: transform 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.qty-pop-enter-active,
+.qty-pop-leave-active {
+  transition:
+    transform 0.2s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.2s ease;
+}
+
+.qty-pop-enter-from,
+.qty-pop-leave-to {
+  opacity: 0;
+  transform: translateY(-6px) scale(0.92);
+}
+
+.step-val__num {
+  display: inline-block;
+  min-width: 20px;
+  text-align: center;
 }
 
 .item-list::-webkit-scrollbar {
