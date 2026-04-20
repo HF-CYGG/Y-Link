@@ -56,6 +56,8 @@ const searchInputRef = ref<HTMLInputElement | null>(null)
 const listScrollerRef = ref<HTMLElement | null>(null)
 const sectionRefMap = reactive<Record<string, HTMLElement | null>>({})
 const scrollingByCategoryClick = ref(false)
+const pendingCategoryKey = ref<string | null>(null)
+const categoryScrollUnlockTimer = ref<number | null>(null)
 
 // 商城页属于高频返回页面，初始化时优先恢复购物车与目录缓存，避免每次进入都重置上下文。
 clientCartStore.initialize()
@@ -293,8 +295,14 @@ const quickAdd = (product: O2oMallProduct) => {
 
 const scrollToCategory = async (categoryKey: string) => {
   activeCategoryKey.value = categoryKey
+  pendingCategoryKey.value = categoryKey
+  if (categoryScrollUnlockTimer.value !== null) {
+    globalThis.window.clearTimeout(categoryScrollUnlockTimer.value)
+    categoryScrollUnlockTimer.value = null
+  }
   if (largeDatasetMode.value) {
     // 大数据模式下列表按当前分类单独渲染，不再进行 DOM 锚点滚动。
+    pendingCategoryKey.value = null
     return
   }
   if (categoryKey === 'all') {
@@ -302,6 +310,7 @@ const scrollToCategory = async (categoryKey: string) => {
       top: 0,
       behavior: 'smooth',
     })
+    pendingCategoryKey.value = null
     return
   }
 
@@ -317,9 +326,14 @@ const scrollToCategory = async (categoryKey: string) => {
     behavior: 'smooth',
     block: 'start',
   })
-  globalThis.window.setTimeout(() => {
+  // 平滑滚动时长在不同浏览器/设备上差异较大，
+  // 如果太早解锁会被 scroll 监听回写成上一个分类。
+  categoryScrollUnlockTimer.value = globalThis.window.setTimeout(() => {
     scrollingByCategoryClick.value = false
-  }, 320)
+    pendingCategoryKey.value = null
+    categoryScrollUnlockTimer.value = null
+    handleProductListScroll()
+  }, 900)
 }
 
 const handleProductListScroll = () => {
@@ -331,6 +345,19 @@ const handleProductListScroll = () => {
   const scroller = listScrollerRef.value
   if (!scroller) {
     return
+  }
+
+  // 用户点击分类后，在滚动抵达目标分组前锁定激活项，
+  // 防止“先跳到目标后又瞬间回到上一个分类”的回写抖动。
+  if (pendingCategoryKey.value && pendingCategoryKey.value !== 'all') {
+    const pendingSection = sectionRefMap[pendingCategoryKey.value]
+    if (pendingSection) {
+      const distanceToTarget = Math.abs(pendingSection.offsetTop - scroller.scrollTop)
+      if (distanceToTarget > 56) {
+        activeCategoryKey.value = pendingCategoryKey.value
+        return
+      }
+    }
   }
 
   const top = scroller.scrollTop + 24
