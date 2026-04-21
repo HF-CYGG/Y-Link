@@ -441,6 +441,9 @@ class O2oPreorderService {
         relations: { product: true },
       })
     }
+    if (!items.length && Number(order.totalQty ?? 0) > 0) {
+      items = await this.buildFallbackOrderItemsFromInventoryLog(id)
+    }
     let totalAmountNumber = 0
     const normalizedItems = items.map((item) => {
       const unitPrice = Number(item.product?.defaultPrice ?? 0)
@@ -482,6 +485,45 @@ class O2oPreorderService {
       },
       qrPayload: `y-link://o2o/verify/${order.verifyCode}`,
     }
+  }
+
+  private async buildFallbackOrderItemsFromInventoryLog(orderId: string): Promise<O2oPreorderItem[]> {
+    // 历史异常数据中可能出现“主订单存在、totalQty>0，但明细表丢失”的情况。
+    // 这里使用 preorder_hold 库存流水回填最小可展示明细，确保客户端详情可读。
+    const logs = await this.inventoryLogRepo.find({
+      where: {
+        refType: 'o2o_preorder',
+        refId: orderId,
+        changeType: 'preorder_hold',
+      },
+      order: {
+        id: 'ASC',
+      },
+    })
+    if (!logs.length) {
+      return []
+    }
+    const groupedQtyByProductId = new Map<string, number>()
+    logs.forEach((log) => {
+      const productId = String(log.productId)
+      const currentQty = groupedQtyByProductId.get(productId) ?? 0
+      groupedQtyByProductId.set(productId, currentQty + Math.max(0, Number(log.changeQty ?? 0)))
+    })
+    const productIds = [...groupedQtyByProductId.keys()]
+    const products = await this.productRepo.find({
+      where: { id: In(productIds) },
+    })
+    const productMap = new Map(products.map((product) => [String(product.id), product]))
+    return productIds.map((productId, index) => {
+      const product = productMap.get(productId)
+      const fallbackItem = new O2oPreorderItem()
+      fallbackItem.id = `fallback-${orderId}-${index + 1}`
+      fallbackItem.orderId = orderId
+      fallbackItem.productId = productId
+      fallbackItem.qty = groupedQtyByProductId.get(productId) ?? 0
+      fallbackItem.product = product
+      return fallbackItem
+    })
   }
 
   private async resolveOrderTotalAmountMap(orderIds: string[]) {

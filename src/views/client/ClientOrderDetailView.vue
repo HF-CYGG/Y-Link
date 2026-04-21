@@ -432,24 +432,6 @@ onMounted(async () => {
           </div>
         </div>
 
-        <div class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)]">
-          <p class="text-lg font-semibold text-slate-900">订单进度</p>
-          <div class="mt-4 space-y-3">
-            <div
-              v-for="timeline in timelineItems"
-              :key="timeline.key"
-              class="flex items-start gap-3 rounded-2xl px-3 py-2"
-              :class="timeline.active ? 'bg-teal-50' : 'bg-slate-50'"
-            >
-              <span class="mt-1 h-2.5 w-2.5 rounded-full" :class="timeline.active ? 'bg-teal-500' : 'bg-slate-300'" />
-              <div>
-                <p class="text-sm font-semibold text-slate-900">{{ timeline.title }}</p>
-                <p class="text-xs text-slate-500">{{ timeline.time }}</p>
-              </div>
-            </div>
-          </div>
-        </div>
-
         <div v-if="merchantMessageContent" class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)]">
           <p class="text-lg font-semibold text-slate-900">商家留言</p>
           <p class="mt-3 whitespace-pre-wrap break-words rounded-2xl bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800">
@@ -479,6 +461,24 @@ onMounted(async () => {
                 </tr>
               </tbody>
             </table>
+          </div>
+        </div>
+
+        <div class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)]">
+          <p class="text-lg font-semibold text-slate-900">订单进度</p>
+          <div class="mt-4 space-y-3">
+            <div
+              v-for="timeline in timelineItems"
+              :key="timeline.key"
+              class="flex items-start gap-3 rounded-2xl px-3 py-2"
+              :class="timeline.active ? 'bg-teal-50' : 'bg-slate-50'"
+            >
+              <span class="mt-1 h-2.5 w-2.5 rounded-full" :class="timeline.active ? 'bg-teal-500' : 'bg-slate-300'" />
+              <div>
+                <p class="text-sm font-semibold text-slate-900">{{ timeline.title }}</p>
+                <p class="text-xs text-slate-500">{{ timeline.time }}</p>
+              </div>
+            </div>
           </div>
         </div>
       </div>
