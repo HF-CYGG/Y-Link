@@ -843,7 +843,14 @@ onMounted(() => {
               <el-table-column label="创建时间" min-width="176">
                 <template #default="{ row }">{{ dayjs(row.createdAt).format('YYYY-MM-DD HH:mm') }}</template>
               </el-table-column>
-              <el-table-column v-if="canOperateUsers" label="操作" min-width="220" align="right" class-name="user-manage__action-cell">
+              <el-table-column
+                v-if="canOperateUsers"
+                label="操作"
+                fixed="right"
+                width="220"
+                align="right"
+                class-name="user-manage__action-cell"
+              >
                 <template #default="{ row }">
                   <div class="flex flex-wrap items-center justify-end gap-x-3 gap-y-2 py-1">
                     <el-button v-if="canShowEditAction(row)" link type="primary" @click="handleOpenEdit(row)">编辑</el-button>
