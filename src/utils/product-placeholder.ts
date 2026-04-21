@@ -4,24 +4,28 @@
  */
 
 /**
- * 统一占位图（几何风）：
- * - 使用低饱和青灰色，贴合当前系统主色与卡片背景；
- * - 使用固定图形，避免不同商品出现风格跳变。
+ * 统一占位图（极简风）：
+ * - 采用接近 Apple 风格的低对比中性色与大圆角，减少视觉噪声；
+ * - 只保留“相片”语义的极简轮廓，不再使用复杂几何图形与大段文案；
+ * - 让无图商品在列表中更克制，不抢占商品名称与价格信息焦点。
  */
 const UNIFIED_PRODUCT_PLACEHOLDER = `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(`
 <svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240">
   <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="#eef5f7"/>
-      <stop offset="100%" stop-color="#d8e8ec"/>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f7f8fa"/>
+      <stop offset="100%" stop-color="#eef1f5"/>
+    </linearGradient>
+    <linearGradient id="surface" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0.72"/>
+      <stop offset="100%" stop-color="#f3f5f8" stop-opacity="0.94"/>
     </linearGradient>
   </defs>
-  <rect width="240" height="240" rx="28" fill="url(#bg)"/>
-  <rect x="30" y="30" width="180" height="180" rx="20" fill="rgba(13,148,136,0.08)"/>
-  <circle cx="168" cy="82" r="24" fill="rgba(13,148,136,0.22)"/>
-  <path d="M54 150 L100 102 L130 132 L176 88" stroke="rgba(13,148,136,0.42)" stroke-width="10" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-  <rect x="54" y="146" width="132" height="40" rx="10" fill="rgba(13,148,136,0.18)"/>
-  <text x="120" y="206" text-anchor="middle" fill="rgba(71,85,105,0.78)" font-size="20" font-family="Arial, PingFang SC, Microsoft YaHei, sans-serif">暂无图片</text>
+  <rect width="240" height="240" rx="34" fill="url(#panel)"/>
+  <rect x="44" y="44" width="152" height="152" rx="28" fill="url(#surface)"/>
+  <rect x="76" y="80" width="88" height="80" rx="18" fill="none" stroke="#c8cfd8" stroke-width="5"/>
+  <circle cx="146" cy="98" r="8" fill="#c8cfd8"/>
+  <path d="M88 144 L110 122 L126 138 L152 114" fill="none" stroke="#b8c1cb" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>
 `)}`;
 
@@ -29,4 +33,3 @@ export const resolveProductPlaceholder = (thumbnail?: string | null) => {
   const normalizedThumbnail = thumbnail?.trim()
   return normalizedThumbnail || UNIFIED_PRODUCT_PLACEHOLDER
 }
-
