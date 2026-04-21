@@ -11,7 +11,9 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { submitO2oPreorder } from '@/api/modules/o2o'
+import { useIdempotentAction } from '@/composables/useIdempotentAction'
 import { useClientAuthStore, useClientCartStore } from '@/store'
+import { normalizeRequestError } from '@/utils/error'
 
 const props = defineProps<{
   standalone?: boolean
@@ -24,6 +26,7 @@ const emit = defineEmits<{
 const router = useRouter()
 const clientAuthStore = useClientAuthStore()
 const clientCartStore = useClientCartStore()
+const { runWithGate } = useIdempotentAction()
 
 const remark = ref('')
 const submitting = ref(false)
@@ -56,35 +59,47 @@ const handleSubmit = async () => {
     return
   }
 
-  // 提交锁只防重复点击，不承担真正幂等保障；最终仍以服务端库存与限购校验结果为准。
-  submitting.value = true
-  try {
-    const result = await submitO2oPreorder({
-      remark: remark.value.trim() || undefined,
-      items: selectedItems.value.map((item) => ({
-        productId: item.productId,
-        qty: item.qty,
-      })),
-    })
+  const runResult = await runWithGate({
+    actionKey: 'client-checkout-submit',
+    onDuplicated: () => {
+      ElMessage.info('订单提交中，请勿重复点击')
+    },
+    executor: async () => {
+      // 提交锁只防重复点击，不承担真正幂等保障；最终仍以服务端库存与限购校验结果为准。
+      submitting.value = true
+      try {
+        const result = await submitO2oPreorder({
+          remark: remark.value.trim() || undefined,
+          items: selectedItems.value.map((item) => ({
+            productId: item.productId,
+            qty: item.qty,
+          })),
+        })
 
-    // 只有服务端创建预订单成功后，才真正从购物车中移除已提交商品，避免前端先删导致状态丢失。
-    selectedItems.value.forEach((item) => {
-      clientCartStore.removeItem(item.productId)
-    })
+        // 只有服务端创建预订单成功后，才真正从购物车中移除已提交商品，避免前端先删导致状态丢失。
+        selectedItems.value.forEach((item) => {
+          clientCartStore.removeItem(item.productId)
+        })
 
-    ElMessage.success('预订单提交成功')
-    
-    // 如果是内嵌抽屉模式，先关闭弹窗
-    if (!props.standalone) {
-      emit('close')
-    }
-    
-    // 结算成功后直接跳转订单详情页，帮助用户立即看到核销码与待提货状态。
-    await router.replace(`/client/orders/${result.order.id}`)
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '提交失败，请稍后再试')
-  } finally {
-    submitting.value = false
+        ElMessage.success('预订单提交成功')
+
+        // 如果是内嵌抽屉模式，先关闭弹窗
+        if (!props.standalone) {
+          emit('close')
+        }
+
+        // 结算成功后直接跳转订单详情页，帮助用户立即看到核销码与待提货状态。
+        await router.replace(`/client/orders/${result.order.id}`)
+      } catch (error) {
+        const normalizedError = normalizeRequestError(error, '提交失败，请稍后再试')
+        ElMessage.error(normalizedError.message)
+      } finally {
+        submitting.value = false
+      }
+    },
+  })
+  if (runResult === null) {
+    return
   }
 }
 </script>

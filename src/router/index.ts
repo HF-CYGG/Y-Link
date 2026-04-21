@@ -130,11 +130,12 @@ router.beforeEach(async (to) => {
 
 router.afterEach((to) => {
   const authStore = useAuthStore()
+  const clientAuthStore = useClientAuthStore()
   const metaTitle = typeof to.meta.title === 'string' ? to.meta.title : ''
   const title = metaTitle ? `Y-Link · ${metaTitle}` : 'Y-Link'
   document.title = title
 
-  if (!authStore.isAuthenticated) {
+  if (!authStore.isAuthenticated && !clientAuthStore.isAuthenticated) {
     return
   }
 

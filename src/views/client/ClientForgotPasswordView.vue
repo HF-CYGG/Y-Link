@@ -10,11 +10,16 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { getClientAuthCapabilities, getClientCaptcha, type ClientAuthCapabilities } from '@/api/modules/client-auth'
+import { useStableRequest } from '@/composables/useStableRequest'
+import { useIdempotentAction } from '@/composables/useIdempotentAction'
 import { useClientAuthStore } from '@/store'
-import { extractErrorMessage } from '@/utils/error'
+import { normalizeRequestError } from '@/utils/error'
 
 const router = useRouter()
 const clientAuthStore = useClientAuthStore()
+const { runLatest: runLatestCaptchaRequest, cancel: cancelCaptchaRequest } = useStableRequest()
+const { runLatest: runLatestCapabilityRequest, cancel: cancelCapabilityRequest } = useStableRequest()
+const { runWithGate } = useIdempotentAction()
 
 const step = ref<1 | 2>(1)
 const submitting = ref(false)
@@ -55,13 +60,20 @@ const captchaHintText = computed(() => {
 
 const loadAuthCapabilities = async () => {
   capabilityLoading.value = true
-  try {
-    const result = await getClientAuthCapabilities()
-    authCapabilities.value = result
-    forgotPasswordAvailable.value = result.forgotPasswordEnabled
-  } finally {
-    capabilityLoading.value = false
-  }
+  await runLatestCapabilityRequest({
+    executor: (signal) => getClientAuthCapabilities({ signal }),
+    onSuccess: (result) => {
+      authCapabilities.value = result
+      forgotPasswordAvailable.value = result.forgotPasswordEnabled
+    },
+    onError: (error) => {
+      const normalizedError = normalizeRequestError(error, '加载找回密码能力失败，请稍后重试')
+      ElMessage.error(normalizedError.message)
+    },
+    onFinally: () => {
+      capabilityLoading.value = false
+    },
+  })
 }
 
 const applySecurityHintFromMessage = (message: string) => {
@@ -70,31 +82,40 @@ const applySecurityHintFromMessage = (message: string) => {
 
 const refreshCaptcha = async (silent = false) => {
   captchaLoading.value = true
-  try {
-    const result = await getClientCaptcha()
-    captcha.captchaId = result.captchaId
-    captcha.captchaSvg = result.captchaSvg
-    captcha.expiresInSeconds = result.expiresInSeconds
-    if (captchaExpireTimer) {
-      globalThis.clearInterval(captchaExpireTimer)
-    }
-    captchaExpireTimer = globalThis.setInterval(() => {
-      if (captcha.expiresInSeconds <= 1) {
-        captcha.expiresInSeconds = 0
-        if (captchaExpireTimer) {
-          globalThis.clearInterval(captchaExpireTimer)
-          captchaExpireTimer = null
-        }
-        return
+  await runLatestCaptchaRequest({
+    executor: (signal) => getClientCaptcha({ signal }),
+    onSuccess: (result) => {
+      captcha.captchaId = result.captchaId
+      captcha.captchaSvg = result.captchaSvg
+      captcha.expiresInSeconds = result.expiresInSeconds
+      if (captchaExpireTimer) {
+        globalThis.clearInterval(captchaExpireTimer)
       }
-      captcha.expiresInSeconds -= 1
-    }, 1000)
-    if (!silent) {
-      ElMessage.success('已刷新验证码')
-    }
-  } finally {
-    captchaLoading.value = false
-  }
+      captchaExpireTimer = globalThis.setInterval(() => {
+        if (captcha.expiresInSeconds <= 1) {
+          captcha.expiresInSeconds = 0
+          if (captchaExpireTimer) {
+            globalThis.clearInterval(captchaExpireTimer)
+            captchaExpireTimer = null
+          }
+          return
+        }
+        captcha.expiresInSeconds -= 1
+      }, 1000)
+      if (!silent) {
+        ElMessage.success('已刷新验证码')
+      }
+    },
+    onError: (error) => {
+      const normalizedError = normalizeRequestError(error, '验证码刷新失败，请稍后重试')
+      if (!silent) {
+        ElMessage.error(normalizedError.message)
+      }
+    },
+    onFinally: () => {
+      captchaLoading.value = false
+    },
+  })
 }
 
 const clearCaptcha = () => {
@@ -134,6 +155,10 @@ const validatePassword = (password: string) => {
   return normalized.length >= 8 && /[A-Za-z]/.test(normalized) && /\d/.test(normalized)
 }
 
+const normalizeInputText = (value: string) => {
+  return value.replaceAll(/\s+/g, ' ').trim()
+}
+
 const resetVerificationTimer = () => {
   if (verificationTimer) {
     globalThis.clearInterval(verificationTimer)
@@ -165,27 +190,38 @@ const handleSendVerificationCode = async () => {
     await refreshCaptcha(true)
     return
   }
-  verificationSending.value = true
-  try {
-    const result = await clientAuthStore.sendVerificationCode({
-      channel,
-      target: verifyForm.account.trim(),
-      scene: 'forgot_password',
-      captchaId: captcha.captchaId,
-      captchaCode: verifyForm.captcha.trim(),
-    })
-    ElMessage.success(`${channel === 'email' ? '邮箱' : '手机'}验证码已发送`)
-    verifyForm.captcha = ''
-    await refreshCaptcha(true)
-    startVerificationCountdown(result.expireSeconds)
-  } catch (error) {
-    const message = extractErrorMessage(error, '验证码发送失败，请稍后重试')
-    applySecurityHintFromMessage(message)
-    ElMessage.error(message)
-    verifyForm.captcha = ''
-    await refreshCaptcha(true)
-  } finally {
-    verificationSending.value = false
+  const runResult = await runWithGate({
+    actionKey: 'client-forgot-password-send-verification-code',
+    onDuplicated: () => {
+      ElMessage.info('验证码发送中，请勿重复点击')
+    },
+    executor: async () => {
+      verificationSending.value = true
+      try {
+        const result = await clientAuthStore.sendVerificationCode({
+          channel,
+          target: normalizeInputText(verifyForm.account),
+          scene: 'forgot_password',
+          captchaId: captcha.captchaId,
+          captchaCode: normalizeInputText(verifyForm.captcha),
+        })
+        ElMessage.success(`${channel === 'email' ? '邮箱' : '手机'}验证码已发送`)
+        verifyForm.captcha = ''
+        await refreshCaptcha(true)
+        startVerificationCountdown(result.expireSeconds)
+      } catch (error) {
+        const normalizedError = normalizeRequestError(error, '验证码发送失败，请稍后重试')
+        applySecurityHintFromMessage(normalizedError.message)
+        ElMessage.error(normalizedError.message)
+        verifyForm.captcha = ''
+        await refreshCaptcha(true)
+      } finally {
+        verificationSending.value = false
+      }
+    },
+  })
+  if (runResult === null) {
+    return
   }
 }
 
@@ -204,21 +240,32 @@ const handleVerify = async () => {
     return
   }
 
-  submitting.value = true
-  try {
-    const result = await clientAuthStore.requestPasswordResetToken({
-      account: verifyForm.account.trim(),
-      verificationCode: verifyForm.verificationCode.trim(),
-    })
-    resetToken.value = result.resetToken
-    step.value = 2
-    ElMessage.success('身份校验通过，请设置新密码')
-  } catch (error) {
-    const message = extractErrorMessage(error, '身份校验失败，请稍后重试')
-    applySecurityHintFromMessage(message)
-    ElMessage.error(message)
-  } finally {
-    submitting.value = false
+  const runResult = await runWithGate({
+    actionKey: 'client-forgot-password-verify',
+    onDuplicated: () => {
+      ElMessage.info('身份校验中，请勿重复提交')
+    },
+    executor: async () => {
+      submitting.value = true
+      try {
+        const result = await clientAuthStore.requestPasswordResetToken({
+          account: normalizeInputText(verifyForm.account),
+          verificationCode: normalizeInputText(verifyForm.verificationCode),
+        })
+        resetToken.value = result.resetToken
+        step.value = 2
+        ElMessage.success('身份校验通过，请设置新密码')
+      } catch (error) {
+        const normalizedError = normalizeRequestError(error, '身份校验失败，请稍后重试')
+        applySecurityHintFromMessage(normalizedError.message)
+        ElMessage.error(normalizedError.message)
+      } finally {
+        submitting.value = false
+      }
+    },
+  })
+  if (runResult === null) {
+    return
   }
 }
 
@@ -233,30 +280,42 @@ const handleReset = async () => {
     return
   }
 
-  submitting.value = true
-  try {
-    await clientAuthStore.confirmPasswordReset({
-      account: verifyForm.account.trim(),
-      resetToken: resetToken.value,
-      newPassword: resetForm.newPassword,
-    })
-    ElMessage.success('密码已重置，请重新登录')
-    await router.replace('/client/login')
-  } catch (error) {
-    const message = extractErrorMessage(error, '重置密码失败，请稍后重试')
-    applySecurityHintFromMessage(message)
-    ElMessage.error(message)
-  } finally {
-    submitting.value = false
+  const runResult = await runWithGate({
+    actionKey: 'client-forgot-password-reset',
+    onDuplicated: () => {
+      ElMessage.info('重置请求处理中，请勿重复提交')
+    },
+    executor: async () => {
+      submitting.value = true
+      try {
+        await clientAuthStore.confirmPasswordReset({
+          account: normalizeInputText(verifyForm.account),
+          resetToken: resetToken.value,
+          newPassword: resetForm.newPassword,
+        })
+        ElMessage.success('密码已重置，请重新登录')
+        await router.replace('/client/login')
+      } catch (error) {
+        const normalizedError = normalizeRequestError(error, '重置密码失败，请稍后重试')
+        applySecurityHintFromMessage(normalizedError.message)
+        ElMessage.error(normalizedError.message)
+      } finally {
+        submitting.value = false
+      }
+    },
+  })
+  if (runResult === null) {
+    return
   }
 }
 
 onMounted(async () => {
-  await loadAuthCapabilities()
-  await refreshCaptcha(true)
+  await Promise.allSettled([loadAuthCapabilities(), refreshCaptcha(true)])
 })
 
 onUnmounted(() => {
+  cancelCapabilityRequest()
+  cancelCaptchaRequest()
   resetVerificationTimer()
   clearCaptcha()
 })

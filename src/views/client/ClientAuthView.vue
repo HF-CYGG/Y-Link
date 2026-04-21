@@ -69,8 +69,11 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Key, Lock, Message, User } from '@element-plus/icons-vue'
 import { getClientAuthCapabilities, getClientCaptcha, type ClientAuthCapabilities, type ClientValidationMode } from '@/api/modules/client-auth'
+import { preloadRouteComponents, resolveClientPostLoginWarmupTargets } from '@/router/route-performance'
 import { useClientAuthStore } from '@/store'
-import { extractErrorMessage } from '@/utils/error'
+import { useStableRequest } from '@/composables/useStableRequest'
+import { useIdempotentAction } from '@/composables/useIdempotentAction'
+import { normalizeRequestError } from '@/utils/error'
 
 type AuthMode = 'login' | 'register'
 
@@ -83,6 +86,9 @@ interface ClientCaptchaState {
 const router = useRouter()
 const route = useRoute()
 const clientAuthStore = useClientAuthStore()
+const { runLatest: runLatestCaptchaRequest, cancel: cancelCaptchaRequest } = useStableRequest()
+const { runLatest: runLatestCapabilityRequest, cancel: cancelCapabilityRequest } = useStableRequest()
+const { runWithGate } = useIdempotentAction()
 
 // 登录 / 注册模式切换：
 // - UI 上通过胶囊滑块展示；
@@ -218,31 +224,40 @@ const applyRouteState = () => {
 // - 注册页在当前通道走图片验证码时展示。
 const refreshCaptcha = async (silent = false) => {
   captchaLoading.value = true
-  try {
-    const result = await getClientCaptcha()
-    captcha.captchaId = result.captchaId
-    captcha.captchaSvg = result.captchaSvg
-    captcha.expiresInSeconds = result.expiresInSeconds
-    if (captchaExpireTimer) {
-      globalThis.clearInterval(captchaExpireTimer)
-    }
-    captchaExpireTimer = globalThis.setInterval(() => {
-      if (captcha.expiresInSeconds <= 1) {
-        captcha.expiresInSeconds = 0
-        if (captchaExpireTimer) {
-          globalThis.clearInterval(captchaExpireTimer)
-          captchaExpireTimer = null
-        }
-        return
+  await runLatestCaptchaRequest({
+    executor: (signal) => getClientCaptcha({ signal }),
+    onSuccess: (result) => {
+      captcha.captchaId = result.captchaId
+      captcha.captchaSvg = result.captchaSvg
+      captcha.expiresInSeconds = result.expiresInSeconds
+      if (captchaExpireTimer) {
+        globalThis.clearInterval(captchaExpireTimer)
       }
-      captcha.expiresInSeconds -= 1
-    }, 1000)
-    if (!silent) {
-      ElMessage.success('已刷新验证码')
-    }
-  } finally {
-    captchaLoading.value = false
-  }
+      captchaExpireTimer = globalThis.setInterval(() => {
+        if (captcha.expiresInSeconds <= 1) {
+          captcha.expiresInSeconds = 0
+          if (captchaExpireTimer) {
+            globalThis.clearInterval(captchaExpireTimer)
+            captchaExpireTimer = null
+          }
+          return
+        }
+        captcha.expiresInSeconds -= 1
+      }, 1000)
+      if (!silent) {
+        ElMessage.success('已刷新验证码')
+      }
+    },
+    onError: (error) => {
+      const normalizedError = normalizeRequestError(error, '验证码刷新失败，请稍后重试')
+      if (!silent) {
+        ElMessage.error(normalizedError.message)
+      }
+    },
+    onFinally: () => {
+      captchaLoading.value = false
+    },
+  })
 }
 
 const clearCaptcha = () => {
@@ -268,14 +283,19 @@ const handleManualRefreshCaptcha = async () => {
 
 const loadAuthCapabilities = async () => {
   capabilityLoading.value = true
-  try {
-    authCapabilities.value = await getClientAuthCapabilities()
-  } catch (error) {
-    const message = extractErrorMessage(error, '加载客户端校验策略失败，请稍后重试')
-    ElMessage.error(message)
-  } finally {
-    capabilityLoading.value = false
-  }
+  await runLatestCapabilityRequest({
+    executor: (signal) => getClientAuthCapabilities({ signal }),
+    onSuccess: (result) => {
+      authCapabilities.value = result
+    },
+    onError: (error) => {
+      const normalizedError = normalizeRequestError(error, '加载客户端校验策略失败，请稍后重试')
+      ElMessage.error(normalizedError.message)
+    },
+    onFinally: () => {
+      capabilityLoading.value = false
+    },
+  })
 }
 
 const validateMobile = (mobile: string) => /^1\d{10}$/.test(mobile.trim())
@@ -293,6 +313,10 @@ const resolveAccountChannel = (account: string): 'mobile' | 'email' | null => {
     return validateEmail(normalized) ? 'email' : null
   }
   return validateMobile(normalized) ? 'mobile' : null
+}
+
+const normalizeInputText = (value: string) => {
+  return value.replaceAll(/\s+/g, ' ').trim()
 }
 
 const applySecurityHintFromMessage = (message: string) => {
@@ -334,27 +358,38 @@ const handleSendRegisterVerificationCode = async () => {
     await ensureCaptchaReady()
     return
   }
-  verificationSending.value = true
-  try {
-    const result = await clientAuthStore.sendVerificationCode({
-      channel,
-      target: registerForm.account.trim(),
-      scene: 'register',
-      captchaId: captcha.captchaId,
-      captchaCode: registerForm.captcha.trim(),
-    })
-    ElMessage.success(`${channel === 'email' ? '邮箱' : '手机'}验证码已发送`)
-    registerForm.captcha = ''
-    await refreshCaptcha(true)
-    startRegisterVerificationCountdown(result.expireSeconds)
-  } catch (error) {
-    const message = extractErrorMessage(error, '验证码发送失败，请稍后重试')
-    applySecurityHintFromMessage(message)
-    ElMessage.error(message)
-    registerForm.captcha = ''
-    await refreshCaptcha(true)
-  } finally {
-    verificationSending.value = false
+  const runResult = await runWithGate({
+    actionKey: 'client-auth-register-send-verification-code',
+    onDuplicated: () => {
+      ElMessage.info('验证码发送中，请勿重复点击')
+    },
+    executor: async () => {
+      verificationSending.value = true
+      try {
+        const result = await clientAuthStore.sendVerificationCode({
+          channel,
+          target: normalizeInputText(registerForm.account),
+          scene: 'register',
+          captchaId: captcha.captchaId,
+          captchaCode: normalizeInputText(registerForm.captcha),
+        })
+        ElMessage.success(`${channel === 'email' ? '邮箱' : '手机'}验证码已发送`)
+        registerForm.captcha = ''
+        await refreshCaptcha(true)
+        startRegisterVerificationCountdown(result.expireSeconds)
+      } catch (error) {
+        const normalizedError = normalizeRequestError(error, '验证码发送失败，请稍后重试')
+        applySecurityHintFromMessage(normalizedError.message)
+        ElMessage.error(normalizedError.message)
+        registerForm.captcha = ''
+        await refreshCaptcha(true)
+      } finally {
+        verificationSending.value = false
+      }
+    },
+  })
+  if (runResult === null) {
+    return
   }
 }
 
@@ -375,30 +410,42 @@ const handleLogin = async () => {
     }
   }
 
-  isLoading.value = true
-  try {
-    await clientAuthStore.login({
-      account: loginForm.account.trim(),
-      password: loginForm.password,
-      captchaId: loginCaptchaVisible.value ? captcha.captchaId : undefined,
-      captchaCode: loginCaptchaVisible.value ? loginForm.captcha.trim() : undefined,
-    })
-    loginCaptchaVisible.value = false
-    loginForm.captcha = ''
-    clearCaptcha()
-    ElMessage.success('登录成功，欢迎来到 Y-Link 客户端')
-    await router.replace(redirectPath.value)
-  } catch (error) {
-    const message = extractErrorMessage(error, '登录失败，请检查用户名、手机号、邮箱、密码和验证码后重试')
-    applySecurityHintFromMessage(message)
-    ElMessage.error(message)
-    if (/用户名或密码错误|图形验证码|锁定|稍后|重试/.test(message)) {
-      loginCaptchaVisible.value = true
-      loginForm.captcha = ''
-      await refreshCaptcha(true)
-    }
-  } finally {
-    isLoading.value = false
+  const runResult = await runWithGate({
+    actionKey: 'client-auth-login',
+    onDuplicated: () => {
+      ElMessage.info('登录请求处理中，请勿重复提交')
+    },
+    executor: async () => {
+      isLoading.value = true
+      try {
+        await clientAuthStore.login({
+          account: normalizeInputText(loginForm.account),
+          password: loginForm.password,
+          captchaId: loginCaptchaVisible.value ? captcha.captchaId : undefined,
+          captchaCode: loginCaptchaVisible.value ? normalizeInputText(loginForm.captcha) : undefined,
+        })
+        loginCaptchaVisible.value = false
+        loginForm.captcha = ''
+        clearCaptcha()
+        await preloadRouteComponents(resolveClientPostLoginWarmupTargets(redirectPath.value))
+        ElMessage.success('登录成功，欢迎来到 Y-Link 客户端')
+        await router.replace(redirectPath.value)
+      } catch (error) {
+        const normalizedError = normalizeRequestError(error, '登录失败，请检查用户名、手机号、邮箱、密码和验证码后重试')
+        applySecurityHintFromMessage(normalizedError.message)
+        ElMessage.error(normalizedError.message)
+        if (/用户名或密码错误|图形验证码|锁定|稍后|重试/.test(normalizedError.message)) {
+          loginCaptchaVisible.value = true
+          loginForm.captcha = ''
+          await refreshCaptcha(true)
+        }
+      } finally {
+        isLoading.value = false
+      }
+    },
+  })
+  if (runResult === null) {
+    return
   }
 }
 
@@ -434,48 +481,59 @@ const handleRegister = async () => {
     return
   }
 
-  isLoading.value = true
-  try {
-    const registeredAccount = registerForm.account.trim()
-    const registeredUsername = registerForm.username.trim()
-    await clientAuthStore.register({
-      username: registeredUsername,
-      account: registeredAccount,
-      password: registerForm.password,
-      departmentName: registerForm.department.trim() || undefined,
-      verificationCode: registerUsesVerificationCode.value ? registerForm.verificationCode.trim() : undefined,
-      captchaId: registerUsesVerificationCode.value ? undefined : captcha.captchaId,
-      captchaCode: registerUsesVerificationCode.value ? undefined : registerForm.captcha.trim(),
-    })
-    ElMessage.success('注册成功，请登录')
-    activeMode.value = 'login'
-    loginForm.account = registeredAccount
-    loginForm.password = ''
-    loginForm.captcha = ''
-    successTip.value = '账号已创建成功，请使用用户名、手机号或邮箱与密码登录。'
-    registerForm.captcha = ''
-    registerForm.verificationCode = ''
-    registerForm.username = ''
-    registerForm.password = ''
-    registerForm.confirmPassword = ''
-    registerForm.department = ''
-    await refreshCaptcha(true)
-    await router.replace({
-      path: '/client/login',
-      query: {
-        tab: 'login',
-        account: registeredAccount,
-        notice: successTip.value,
-      },
-    })
-  } catch (error) {
-    const message = extractErrorMessage(error, '注册失败，请检查信息后重试')
-    applySecurityHintFromMessage(message)
-    ElMessage.error(message)
-    registerForm.captcha = ''
-    await refreshCaptcha(true)
-  } finally {
-    isLoading.value = false
+  const runResult = await runWithGate({
+    actionKey: 'client-auth-register',
+    onDuplicated: () => {
+      ElMessage.info('注册请求处理中，请勿重复提交')
+    },
+    executor: async () => {
+      isLoading.value = true
+      try {
+        const registeredAccount = normalizeInputText(registerForm.account)
+        const registeredUsername = normalizeInputText(registerForm.username)
+        await clientAuthStore.register({
+          username: registeredUsername,
+          account: registeredAccount,
+          password: registerForm.password,
+          departmentName: normalizeInputText(registerForm.department) || undefined,
+          verificationCode: registerUsesVerificationCode.value ? normalizeInputText(registerForm.verificationCode) : undefined,
+          captchaId: registerUsesVerificationCode.value ? undefined : captcha.captchaId,
+          captchaCode: registerUsesVerificationCode.value ? undefined : normalizeInputText(registerForm.captcha),
+        })
+        ElMessage.success('注册成功，请登录')
+        activeMode.value = 'login'
+        loginForm.account = registeredAccount
+        loginForm.password = ''
+        loginForm.captcha = ''
+        successTip.value = '账号已创建成功，请使用用户名、手机号或邮箱与密码登录。'
+        registerForm.captcha = ''
+        registerForm.verificationCode = ''
+        registerForm.username = ''
+        registerForm.password = ''
+        registerForm.confirmPassword = ''
+        registerForm.department = ''
+        await refreshCaptcha(true)
+        await router.replace({
+          path: '/client/login',
+          query: {
+            tab: 'login',
+            account: registeredAccount,
+            notice: successTip.value,
+          },
+        })
+      } catch (error) {
+        const normalizedError = normalizeRequestError(error, '注册失败，请检查信息后重试')
+        applySecurityHintFromMessage(normalizedError.message)
+        ElMessage.error(normalizedError.message)
+        registerForm.captcha = ''
+        await refreshCaptcha(true)
+      } finally {
+        isLoading.value = false
+      }
+    },
+  })
+  if (runResult === null) {
+    return
   }
 }
 
@@ -485,7 +543,7 @@ onMounted(async () => {
     return
   }
   applyRouteState()
-  await loadAuthCapabilities()
+  await Promise.allSettled([loadAuthCapabilities(), ensureCaptchaReady()])
   await nextTick()
   syncWrapperHeight()
   resetRegisterVerificationTimer()
@@ -527,6 +585,8 @@ watch(successTip, async () => {
 
 onUnmounted(() => {
   // 页面离开时主动清理倒计时，避免重复进入后产生多个定时器。
+  cancelCapabilityRequest()
+  cancelCaptchaRequest()
   resetRegisterVerificationTimer()
   clearCaptcha()
 })

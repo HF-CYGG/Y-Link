@@ -92,6 +92,12 @@ export const routeViewLoaders = {
  */
 const warmableRouteLoaders: Partial<Record<RouteWarmupTarget, RouteViewLoader>> = {
   appLayout: routeViewLoaders.appLayout,
+  'client-mall': routeViewLoaders['client-mall'],
+  'client-orders': routeViewLoaders['client-orders'],
+  'client-cart': routeViewLoaders['client-cart'],
+  'client-checkout': routeViewLoaders['client-checkout'],
+  'client-profile': routeViewLoaders['client-profile'],
+  'client-order-detail': routeViewLoaders['client-order-detail'],
   dashboard: routeViewLoaders.dashboard,
   'order-entry': routeViewLoaders['order-entry'],
   'order-list': routeViewLoaders['order-list'],
@@ -107,6 +113,28 @@ const warmableRouteLoaders: Partial<Record<RouteWarmupTarget, RouteViewLoader>> 
   'system-users': routeViewLoaders['system-users'],
   'system-client-users': routeViewLoaders['system-client-users'],
   'system-audit-logs': routeViewLoaders['system-audit-logs'],
+}
+
+const resolveClientWarmupTargetByPath = (redirectPath: string): AppRouteName | null => {
+  if (redirectPath.startsWith('/client/orders/')) {
+    return 'client-order-detail'
+  }
+  if (redirectPath.startsWith('/client/orders')) {
+    return 'client-orders'
+  }
+  if (redirectPath.startsWith('/client/cart')) {
+    return 'client-cart'
+  }
+  if (redirectPath.startsWith('/client/checkout')) {
+    return 'client-checkout'
+  }
+  if (redirectPath.startsWith('/client/profile')) {
+    return 'client-profile'
+  }
+  if (redirectPath.startsWith('/client/mall') || redirectPath.startsWith('/client')) {
+    return 'client-mall'
+  }
+  return null
 }
 
 /**
@@ -216,6 +244,21 @@ export const resolvePostLoginWarmupTargets = (redirectPath?: string): RouteWarmu
     targets.push(matchedTarget)
   }
 
+  return [...new Set(targets)]
+}
+
+/**
+ * 客户端登录后预热目标：
+ * - 默认预热商城 + 订单 + 购物车三个高频路径；
+ * - 若 redirect 指向具体客户端页，则补充目标页面预热，减少登录后首跳等待。
+ */
+export const resolveClientPostLoginWarmupTargets = (redirectPath?: string): AppRouteName[] => {
+  const targets: AppRouteName[] = ['client-mall', 'client-orders', 'client-cart']
+  const normalizedRedirectPath = typeof redirectPath === 'string' ? redirectPath.trim() : ''
+  const matchedTarget = normalizedRedirectPath ? resolveClientWarmupTargetByPath(normalizedRedirectPath) : null
+  if (matchedTarget) {
+    targets.push(matchedTarget)
+  }
   return [...new Set(targets)]
 }
 

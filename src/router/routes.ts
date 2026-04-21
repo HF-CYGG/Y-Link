@@ -480,6 +480,7 @@ export const routes: RouteRecordRaw[] = [
           menu: false,
           requiresClientAuth: true,
           keepAlive: true,
+          preloadTargets: ['client-orders', 'client-cart', 'client-profile'],
         } satisfies AppRouteMeta,
       },
       {
@@ -490,6 +491,8 @@ export const routes: RouteRecordRaw[] = [
           title: '我的订单',
           menu: false,
           requiresClientAuth: true,
+          keepAlive: true,
+          preloadTargets: ['client-order-detail', 'client-mall'],
         } satisfies AppRouteMeta,
       },
       {
@@ -500,6 +503,8 @@ export const routes: RouteRecordRaw[] = [
           title: '购物车',
           menu: false,
           requiresClientAuth: true,
+          keepAlive: true,
+          preloadTargets: ['client-checkout', 'client-mall'],
         } satisfies AppRouteMeta,
       },
       {
@@ -510,6 +515,7 @@ export const routes: RouteRecordRaw[] = [
           title: '确认订单',
           menu: false,
           requiresClientAuth: true,
+          preloadTargets: ['client-orders', 'client-order-detail'],
         } satisfies AppRouteMeta,
       },
       {
@@ -520,6 +526,8 @@ export const routes: RouteRecordRaw[] = [
           title: '我的',
           menu: false,
           requiresClientAuth: true,
+          keepAlive: true,
+          preloadTargets: ['client-orders'],
         } satisfies AppRouteMeta,
       },
       {
@@ -530,6 +538,7 @@ export const routes: RouteRecordRaw[] = [
           title: '订单详情',
           menu: false,
           requiresClientAuth: true,
+          preloadTargets: ['client-orders'],
         } satisfies AppRouteMeta,
       },
     ],

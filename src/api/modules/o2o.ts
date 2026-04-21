@@ -131,11 +131,12 @@ export const getO2oMallProducts = (config?: RequestConfig) =>
     ...config,
   })
 
-export const submitO2oPreorder = (payload: SubmitO2oPreorderPayload) =>
+export const submitO2oPreorder = (payload: SubmitO2oPreorderPayload, config?: RequestConfig) =>
   request<O2oPreorderDetail>({
     method: 'POST',
     url: '/o2o/mall/preorders',
     data: payload,
+    ...config,
   })
 
 export const getMyO2oPreorders = async (

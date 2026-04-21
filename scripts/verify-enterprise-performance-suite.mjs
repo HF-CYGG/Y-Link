@@ -50,6 +50,7 @@ const main = async () => {
   await runStep('前端构建', process.execPath, [path.join(projectRoot, 'scripts', 'run-frontend-build.mjs')])
   await runStep('构建预算校验', process.execPath, [path.join(projectRoot, 'scripts', 'verify-enterprise-page-performance.mjs')])
   await runStep('核心路径回归校验', process.execPath, [path.join(projectRoot, 'scripts', 'verify-enterprise-core-paths.mjs')])
+  await runStep('客户端并发与性能基线校验', process.execPath, [path.join(projectRoot, 'scripts', 'verify-client-concurrency-performance.mjs')])
 
   log('\n[suite] 企业页面性能统一验证入口执行完成')
 }
