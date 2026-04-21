@@ -114,20 +114,6 @@ const cloneDepartmentTree = (tree: ClientDepartmentOptionNode[]): ClientDepartme
   return JSON.parse(JSON.stringify(rawTree)) as ClientDepartmentOptionNode[]
 }
 
-const flattenDepartmentLabels = (tree: ClientDepartmentOptionNode[]): string[] => {
-  const labels: string[] = []
-  const walk = (nodes: ClientDepartmentOptionNode[]) => {
-    nodes.forEach((node) => {
-      labels.push(node.label)
-      if (node.children.length > 0) {
-        walk(node.children)
-      }
-    })
-  }
-  walk(tree)
-  return labels
-}
-
 const buildDepartmentPathLookup = (tree: ClientDepartmentOptionNode[]) => {
   const pathMap: Record<string, string> = {}
   const labelPathMap = new Map<string, string[]>()
