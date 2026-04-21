@@ -4,7 +4,7 @@
  * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
  */
 
-import { In, type EntityManager } from 'typeorm'
+import { In, type EntityManager, type Repository } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { RelProductTag } from '../entities/rel-product-tag.entity.js'
@@ -145,7 +145,7 @@ const resolveEffectiveO2oStatus = (
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export class ProductService {
-  private productRepo = AppDataSource.getRepository(BaseProduct)
+  private readonly productRepo = AppDataSource.getRepository(BaseProduct)
 
   async list(query: ProductQuery): Promise<ProductView[]> {
     const qb = this.productRepo.createQueryBuilder('p')
@@ -227,45 +227,7 @@ export class ProductService {
         throw new BizError('产品不存在', 404)
       }
 
-      if (typeof input.productCode === 'string') {
-        const normalizedProductCode = input.productCode.trim()
-        if (!normalizedProductCode) {
-          throw new BizError('产品编码不能为空')
-        }
-        product.productCode = normalizedProductCode
-      }
-      if (typeof input.productName === 'string') {
-        product.productName = input.productName.trim()
-      }
-      if (typeof input.pinyinAbbr === 'string') {
-        product.pinyinAbbr = input.pinyinAbbr.trim()
-      }
-      if (typeof input.defaultPrice === 'number') {
-        product.defaultPrice = normalizeDecimalText(input.defaultPrice)
-      }
-      if (typeof input.isActive === 'boolean') {
-        product.isActive = input.isActive
-      }
-      if (input.o2oStatus === 'listed' || input.o2oStatus === 'unlisted') {
-        product.o2oStatus = resolveEffectiveO2oStatus(product.isActive, input.o2oStatus, product.o2oStatus)
-      } else if (typeof input.isActive === 'boolean') {
-        product.o2oStatus = resolveEffectiveO2oStatus(product.isActive, undefined, product.o2oStatus)
-      }
-      if (typeof input.thumbnail === 'string' || input.thumbnail === null) {
-        product.thumbnail = typeof input.thumbnail === 'string' ? input.thumbnail.trim() || null : null
-      }
-      if (typeof input.detailContent === 'string' || input.detailContent === null) {
-        product.detailContent = typeof input.detailContent === 'string' ? input.detailContent.trim() || null : null
-      }
-      if (typeof input.limitPerUser === 'number') {
-        product.limitPerUser = Math.max(1, Math.floor(input.limitPerUser))
-      }
-      if (typeof input.currentStock === 'number') {
-        product.currentStock = Math.max(0, Math.floor(input.currentStock))
-      }
-      if (typeof input.preOrderedStock === 'number') {
-        product.preOrderedStock = Math.max(0, Math.floor(input.preOrderedStock))
-      }
+      this.applyUpdateInputToProduct(product, input)
 
       const saved = await repo.save(product)
       if (Array.isArray(input.tagIds)) {
@@ -466,20 +428,8 @@ export class ProductService {
     for (let attempt = 1; attempt <= PRODUCT_CREATE_MAX_RETRY; attempt += 1) {
       try {
         const repo = manager.getRepository(BaseProduct)
-        const isActive = input.isActive ?? true
-        const product = repo.create({
-          productCode: shouldGenerateProductCode ? await generateProductCode(manager) : normalizedProductCode,
-          productName: input.productName.trim(),
-          pinyinAbbr: input.pinyinAbbr?.trim() || '',
-          defaultPrice: normalizeDecimalText(input.defaultPrice),
-          isActive,
-          o2oStatus: resolveEffectiveO2oStatus(isActive, input.o2oStatus),
-          thumbnail: input.thumbnail?.trim() || null,
-          detailContent: input.detailContent?.trim() || null,
-          limitPerUser: Number.isInteger(input.limitPerUser) ? Math.max(1, input.limitPerUser as number) : 5,
-          currentStock: Number.isInteger(input.currentStock) ? Math.max(0, input.currentStock as number) : 0,
-          preOrderedStock: Number.isInteger(input.preOrderedStock) ? Math.max(0, input.preOrderedStock as number) : 0,
-        })
+        const productCode = shouldGenerateProductCode ? await generateProductCode(manager) : normalizedProductCode
+        const product = this.buildProductEntityForCreate(repo, input, productCode)
 
         const saved = await repo.save(product)
         await this.replaceProductTags(saved.id, input.tagIds ?? [], manager)
@@ -487,24 +437,114 @@ export class ProductService {
       } catch (error) {
         lastError = error
 
-        if (
-          shouldGenerateProductCode &&
-          attempt < PRODUCT_CREATE_MAX_RETRY &&
-          (isUniqueConstraintError(error, PRODUCT_CODE_CONSTRAINT_MATCHER) || isRetryableSqliteLockError(error))
-        ) {
+        if (this.shouldRetryCreateAttempt(error, attempt, shouldGenerateProductCode)) {
           continue
         }
 
-        if (isUniqueConstraintError(error, PRODUCT_CODE_CONSTRAINT_MATCHER)) {
-          throw new BizError('产品编码已存在，请调整后重试', 409)
-        }
-
-        throw error
+        this.throwCreateError(error)
       }
     }
 
     throw lastError ?? new BizError('产品创建失败，请稍后重试', 500)
   }
+
+  private applyUpdateInputToProduct(product: BaseProduct, input: UpdateProductInput): void {
+    if (typeof input.productCode === 'string') {
+      const normalizedProductCode = input.productCode.trim()
+      if (!normalizedProductCode) {
+        throw new BizError('产品编码不能为空')
+      }
+      product.productCode = normalizedProductCode
+    }
+    if (typeof input.productName === 'string') {
+      product.productName = input.productName.trim()
+    }
+    if (typeof input.pinyinAbbr === 'string') {
+      product.pinyinAbbr = input.pinyinAbbr.trim()
+    }
+    if (typeof input.defaultPrice === 'number') {
+      product.defaultPrice = normalizeDecimalText(input.defaultPrice)
+    }
+    if (typeof input.isActive === 'boolean') {
+      product.isActive = input.isActive
+    }
+    this.applyO2oStatusUpdate(product, input)
+    this.applyContentUpdate(product, input)
+    this.applyStockAndLimitUpdate(product, input)
+  }
+
+  private applyO2oStatusUpdate(product: BaseProduct, input: UpdateProductInput): void {
+    if (input.o2oStatus === 'listed' || input.o2oStatus === 'unlisted') {
+      product.o2oStatus = resolveEffectiveO2oStatus(product.isActive, input.o2oStatus, product.o2oStatus)
+      return
+    }
+    if (typeof input.isActive === 'boolean') {
+      product.o2oStatus = resolveEffectiveO2oStatus(product.isActive, undefined, product.o2oStatus)
+    }
+  }
+
+  private applyContentUpdate(product: BaseProduct, input: UpdateProductInput): void {
+    if (typeof input.thumbnail === 'string' || input.thumbnail === null) {
+      product.thumbnail = typeof input.thumbnail === 'string' ? input.thumbnail.trim() || null : null
+    }
+    if (typeof input.detailContent === 'string' || input.detailContent === null) {
+      product.detailContent = typeof input.detailContent === 'string' ? input.detailContent.trim() || null : null
+    }
+  }
+
+  private applyStockAndLimitUpdate(product: BaseProduct, input: UpdateProductInput): void {
+    if (typeof input.limitPerUser === 'number') {
+      product.limitPerUser = Math.max(1, Math.floor(input.limitPerUser))
+    }
+    if (typeof input.currentStock === 'number') {
+      product.currentStock = Math.max(0, Math.floor(input.currentStock))
+    }
+    if (typeof input.preOrderedStock === 'number') {
+      product.preOrderedStock = Math.max(0, Math.floor(input.preOrderedStock))
+    }
+  }
+
+  private buildProductEntityForCreate(
+    repo: Repository<BaseProduct>,
+    input: CreateProductInput,
+    productCode: string,
+  ): BaseProduct {
+    const isActive = input.isActive ?? true
+    return repo.create({
+      productCode,
+      productName: input.productName.trim(),
+      pinyinAbbr: input.pinyinAbbr?.trim() || '',
+      defaultPrice: normalizeDecimalText(input.defaultPrice),
+      isActive,
+      o2oStatus: resolveEffectiveO2oStatus(isActive, input.o2oStatus),
+      thumbnail: input.thumbnail?.trim() || null,
+      detailContent: input.detailContent?.trim() || null,
+      limitPerUser: Number.isInteger(input.limitPerUser) ? Math.max(1, input.limitPerUser as number) : 5,
+      currentStock: Number.isInteger(input.currentStock) ? Math.max(0, input.currentStock as number) : 0,
+      preOrderedStock: Number.isInteger(input.preOrderedStock) ? Math.max(0, input.preOrderedStock as number) : 0,
+    })
+  }
+
+  private shouldRetryCreateAttempt(error: unknown, attempt: number, shouldGenerateProductCode: boolean): boolean {
+    return (
+      shouldGenerateProductCode &&
+      attempt < PRODUCT_CREATE_MAX_RETRY &&
+      (isUniqueConstraintError(error, PRODUCT_CODE_CONSTRAINT_MATCHER) || isRetryableSqliteLockError(error))
+    )
+  }
+
+  private throwCreateError(error: unknown): never {
+    if (isUniqueConstraintError(error, PRODUCT_CODE_CONSTRAINT_MATCHER)) {
+      throw new BizError('产品编码已存在，请调整后重试', 409)
+    }
+    throw error
+  }
 }
 
 export const productService = new ProductService()
+
+/**
+ * 批量新增产品（函数导出）：
+ * - 供路由层按函数形式调用，减少类型服务对类实例成员增量感知不一致导致的误报。
+ */
+export const batchCreateProducts = (inputs: CreateProductInput[]) => productService.batchCreate(inputs)

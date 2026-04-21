@@ -181,16 +181,15 @@ o2oRouter.patch(
 
     const previousStatus = previous.order.businessStatus
     const nextStatus = data.order.businessStatus
-    const actionType = !previousStatus && nextStatus
-      ? 'o2o.order.business_status.set'
-      : previousStatus && !nextStatus
-        ? 'o2o.order.business_status.clear'
-        : 'o2o.order.business_status.change'
-    const actionLabel = !previousStatus && nextStatus
-      ? '设置订单商家特殊状态'
-      : previousStatus && !nextStatus
-        ? '清除订单商家特殊状态'
-        : '变更订单商家特殊状态'
+    let actionType = 'o2o.order.business_status.change'
+    let actionLabel = '变更订单商家特殊状态'
+    if (!previousStatus && nextStatus) {
+      actionType = 'o2o.order.business_status.set'
+      actionLabel = '设置订单商家特殊状态'
+    } else if (previousStatus && !nextStatus) {
+      actionType = 'o2o.order.business_status.clear'
+      actionLabel = '清除订单商家特殊状态'
+    }
 
     await auditService.record({
       actionType,

@@ -7,7 +7,7 @@
 import { Router } from 'express'
 import { z } from 'zod'
 import { requirePermission } from '../middleware/auth.middleware.js'
-import { productService } from '../services/product.service.js'
+import { batchCreateProducts, productService } from '../services/product.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 
 const productTagIdSchema = z.union([z.string(), z.number()])
@@ -159,7 +159,7 @@ productRouter.post(
   requirePermission('products:manage'),
   asyncHandler(async (req, res) => {
     const payload = batchCreateProductSchema.parse(req.body)
-    const data = await productService.batchCreate(payload.products)
+    const data = await batchCreateProducts(payload.products)
     res.json({
       code: 0,
       message: 'ok',

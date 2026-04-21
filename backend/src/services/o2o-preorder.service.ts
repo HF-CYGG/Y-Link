@@ -69,6 +69,9 @@ export interface O2oPreorderSummaryView {
   createdAt: Date
 }
 
+const LIKE_ESCAPE_CHAR = String.raw`\\`
+const LIKE_SPECIAL_CHAR_PATTERN = /[%_\\]/g
+
 class O2oPreorderService {
   private readonly productRepo = AppDataSource.getRepository(BaseProduct)
   private readonly preorderRepo = AppDataSource.getRepository(O2oPreorder)
@@ -310,7 +313,7 @@ class O2oPreorderService {
    * 这里使用 ESCAPE '\'，可同时兼容 MySQL 与 SQLite。
    */
   private escapeLikeKeyword(value: string) {
-    return value.replaceAll(/[%_\\]/g, '\\$&')
+    return value.replaceAll(LIKE_SPECIAL_CHAR_PATTERN, `${LIKE_ESCAPE_CHAR}$&`)
   }
 
   // 订单是否已达到超时点：
@@ -645,8 +648,8 @@ class O2oPreorderService {
             .where('order.showNo = :showNoExact', { showNoExact: normalizedKeyword })
             .orWhere('order.verifyCode = :verifyCodeExact', { verifyCodeExact: normalizedVerifyCodeKeyword })
             // 前缀匹配在输入单号前几位时仍可利用 B-Tree 索引。
-            .orWhere("order.showNo LIKE :showNoPrefix ESCAPE '\\'", { showNoPrefix: keywordPrefix })
-            .orWhere("order.verifyCode LIKE :verifyCodePrefix ESCAPE '\\'", {
+            .orWhere(String.raw`order.showNo LIKE :showNoPrefix ESCAPE '\'`, { showNoPrefix: keywordPrefix })
+            .orWhere(String.raw`order.verifyCode LIKE :verifyCodePrefix ESCAPE '\'`, {
               verifyCodePrefix: `${escapedVerifyKeyword}%`,
             })
         }),
