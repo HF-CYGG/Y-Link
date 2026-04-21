@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS `o2o_preorder` (
   UNIQUE KEY `uk_o2o_preorder_show_no` (`show_no`),
   UNIQUE KEY `uk_o2o_preorder_verify_code` (`verify_code`),
   KEY `idx_o2o_preorder_client_user_id` (`client_user_id`),
+  KEY `idx_o2o_preorder_client_id` (`client_user_id`, `id`),
   KEY `idx_o2o_preorder_client_status_id` (`client_user_id`, `status`, `id`),
   KEY `idx_o2o_preorder_status_timeout_at` (`status`, `timeout_at`)
 );

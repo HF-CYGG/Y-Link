@@ -5,5 +5,6 @@
 -- =============================================
 
 ALTER TABLE `o2o_preorder`
+  ADD INDEX `idx_o2o_preorder_client_id` (`client_user_id`, `id`),
   ADD INDEX `idx_o2o_preorder_client_status_id` (`client_user_id`, `status`, `id`),
   ADD INDEX `idx_o2o_preorder_status_timeout_at` (`status`, `timeout_at`);

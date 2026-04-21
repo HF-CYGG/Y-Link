@@ -706,6 +706,9 @@ class O2oPreorderService {
     const normalizedKeyword = query?.keyword?.trim() ?? ''
     const normalizedStatus = query?.status
 
+    // 索引命中策略说明：
+    // 1. status 有值时：优先命中 idx_o2o_preorder_client_status_id(client_user_id, status, id)；
+    // 2. status 为空时：优先命中 idx_o2o_preorder_client_id(client_user_id, id)。
     const queryBuilder = this.preorderRepo
       .createQueryBuilder('order')
       .where('order.clientUserId = :clientUserId', { clientUserId: auth.userId })
