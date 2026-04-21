@@ -16,6 +16,49 @@
 
 ---
 
+## 5 分钟快速了解
+
+### 你将得到什么
+- 一个同时包含 **管理端** 与 **客户端** 的完整业务系统。
+- 一个默认可直接启动的 **SQLite 零配置方案**，适合本地联调与轻量部署。
+- 一套已经内置 **性能回归、质量验证、并发稳定性验证** 的工程化脚本体系。
+- 一套支持 **Docker / Onebox / 1Panel / 本地 HTTPS 联调** 的多环境运行方式。
+
+### 最适合哪些场景
+- 文创、非遗、展会、门店等需要“线上预订 + 线下核销 + 出入库追踪”的团队。
+- 希望先快速上线，再逐步平滑切换到 MySQL 与容器化部署的团队。
+- 需要同时管理后台运营人员、供货人员与终端用户三类角色的业务系统。
+
+### 仓库结构一览
+```text
+f:\Y-Link
+├─ src/                    前端源码（管理端 + 客户端）
+├─ backend/                后端源码、SQL、校验脚本
+├─ scripts/                构建、性能、质量与部署辅助脚本
+├─ docs/                   使用说明、迁移文档、界面截图
+├─ docker/                 Nginx 与 onebox 相关配置
+├─ compose.yml             本地 Docker 编排
+├─ compose.cloud.yml       云端/1Panel 编排
+└─ README.md               项目入口说明
+```
+
+### 命令速查
+| 场景 | 命令 | 说明 |
+| --- | --- | --- |
+| 本地联调启动 | `npm run local:dev` | 启动前后端联调环境（默认 HTTPS 前端 + 本地后端） |
+| 本地联调状态 | `npm run local:dev:status` | 查看本地联调状态 |
+| 本地联调停止 | `npm run local:dev:stop` | 停止本地联调 |
+| 前端构建 | `npm run build` | 执行前端构建与打包前校验 |
+| 单元功能验证 | `npm run verify:unit:functional` | 执行前后端类型与关键功能验证 |
+| 核心性能回归 | `npm run verify:performance` | 执行页面预算、核心路径与企业性能套件 |
+| 全量性能验证 | `npm run verify:performance:all` | 执行前后端联合性能验证 |
+| 全量质量总控 | `npm run verify:all` | 串联单元功能 + 全量性能，失败即停并输出报告 |
+| 云端编排启动 | `npm run cloud:up` | 使用云端 compose 拉起编排 |
+| 云端编排日志 | `npm run cloud:logs` | 查看统一日志 |
+| 云端编排停止 | `npm run cloud:down` | 停止云端编排 |
+
+---
+
 ## 核心特性
 - 🍏 **极简视觉体验**：Apple 风格极简 UI，支持丝滑的亮暗模式切换与过渡动画。
 - ⚡ **极致开单效率**：出库开单支持全键盘流操作与实时金额计算，录入效率极高；支持草稿态保留。
@@ -280,6 +323,67 @@ npm run o2o:verify
 ```bash
 npm run verify:performance
 ```
+
+全量质量回归（推荐在较大改动后执行）：
+
+```bash
+npm run verify:all
+```
+
+客户端并发与稳态验证（适合验证 20 人左右同时注册/登录/查询/下单场景）：
+
+```bash
+npm run verify:performance:client-concurrency
+```
+
+说明：
+- `npm run verify:performance`：偏重页面预算、核心路径与企业性能回归。
+- `npm run verify:performance:all`：在前端性能基础上继续联动后端性能基线验证。
+- `npm run verify:all`：质量总控入口，串联单元功能验证与全量性能验证，适合提交前使用。
+- 所有质量脚本的报告默认输出到 `.local-dev/`，便于回归对比与留档。
+
+---
+
+## 测试与质量保障
+
+### 当前质量脚本体系
+- `verify:unit:functional`：前端类型、后端类型、O2O 关键功能回归。
+- `verify:performance:budget`：页面分包预算与体积校验。
+- `verify:performance:core-paths`：核心路径自动化回归。
+- `verify:performance:client-concurrency`：客户端并发与稳态断言。
+- `verify:quality:all` / `verify:all`：总控入口，失败即停并写入 JSON 报告。
+
+### 推荐使用顺序
+1. 日常改动后先执行 `npm run build`
+2. 业务链路改动后执行 `npm run verify:unit:functional`
+3. 核心页面或路由结构改动后执行 `npm run verify:performance`
+4. 提交前执行 `npm run verify:all`
+
+### 报告位置
+- 并发与稳态报告：`.local-dev/client-concurrency-performance.report.json`
+- 质量总控报告：`.local-dev/verify-quality-full-suite.report.json`
+- 其它性能与核心路径报告：`.local-dev/*.report.json`
+
+---
+
+## 代码规模参考
+
+如果你想快速了解当前项目规模，推荐使用 `cloc` 统计：
+
+```powershell
+& "$env:LOCALAPPDATA\Microsoft\WinGet\Links\cloc.exe" . --exclude-dir=node_modules,dist,.git,.trae,.local-dev
+```
+
+按最近一次统计口径（排除 `node_modules`、`dist`、`.git`、`.trae`、`.local-dev`）：
+- 有效文件数：`258`
+- 空行：`5333`
+- 注释行：`5173`
+- 代码行：`49215`
+
+更细分的统计建议：
+- 前端：`src` + `scripts`
+- 后端：`backend/src` + `backend/scripts` + `backend/sql`
+- 总仓：整个项目根目录统一排除依赖与构建产物
 
 ---
 
