@@ -96,17 +96,19 @@ export const getClientAuthCapabilities = (config?: RequestConfig) =>
     ...config,
   })
 
-/**
- * 发送验证码（短信/邮件）：
- * - 用于注册或找回密码时的身份验证。
- */
-export const sendClientVerificationCode = (payload: {
+export interface ClientVerificationCodeSendInput {
   channel: 'mobile' | 'email'
   target: string
   scene: 'register' | 'forgot_password'
   captchaId: string
   captchaCode: string
-}, config?: RequestConfig) =>
+}
+
+/**
+ * 发送验证码（短信/邮件）：
+ * - 用于注册或找回密码时的身份验证。
+ */
+export const sendClientVerificationCode = (payload: ClientVerificationCodeSendInput, config?: RequestConfig) =>
   request<ClientVerificationCodeSendResult>({
     method: 'POST',
     url: '/client-auth/verification-code/send',
