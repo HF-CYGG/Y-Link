@@ -257,6 +257,8 @@ const businessStatusOptions = Object.entries(O2O_ORDER_BUSINESS_STATUS_META).map
 const activeBusinessStatus = computed(() => activeOrderDetail.value?.order.businessStatus ?? null)
 const draftBusinessStatus = ref<O2oOrderBusinessStatus | null>(null)
 const draftMerchantMessage = ref('')
+// 详情辅助面板折叠状态：默认空数组表示“商家特殊状态/商家留言”均收起，不占页面空间。
+const detailAssistPanels = ref<string[]>([])
 
 const activeBusinessStatusMeta = computed(() => {
   return getO2oOrderBusinessStatusMeta(activeBusinessStatus.value)
@@ -833,79 +835,94 @@ onBeforeUnmount(() => {
             <p class="mt-1 break-words text-xs">{{ reportConfig.cardDescription }}</p>
           </div>
 
-          <div class="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
-            <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-              <div class="min-w-0">
-                <p class="text-sm font-semibold text-slate-900">商家特殊状态</p>
-                <p class="mt-1 text-xs leading-5 text-slate-500">
-                  用于通知用户当前订单所处的特殊进度，不改变待核销、已核销、已取消等核心状态。
-                </p>
-              </div>
-              <el-select
-                v-model="draftBusinessStatus"
-                clearable
-                placeholder="选择特殊状态"
-                class="w-full lg:w-72"
-                :disabled="detailLoading"
-                @change="handleBusinessStatusChange"
-              >
-                <el-option
-                  v-for="option in businessStatusOptions"
-                  :key="option.value"
-                  :label="option.label"
-                  :value="option.value"
-                />
-              </el-select>
-            </div>
-            <p v-if="activeBusinessStatusMeta" class="mt-2 text-xs leading-5 text-slate-500">
-              {{ activeBusinessStatusMeta.consoleDescription }}
-            </p>
-            <div v-if="activeBusinessStatusMeta" class="mt-3 rounded-2xl px-3 py-2" :class="activeBusinessStatusMeta.className">
-              <p class="text-sm font-semibold">当前商家状态：{{ activeBusinessStatusMeta.label }}</p>
-              <p class="mt-1 text-xs">{{ activeBusinessStatusMeta.consoleDescription }}</p>
-            </div>
-          </div>
-
-          <div class="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
-            <div class="flex flex-col gap-3">
-              <div class="min-w-0">
-                <p class="text-sm font-semibold text-slate-900">商家留言</p>
-                <p class="mt-1 text-xs leading-5 text-slate-500">
-                  用于补充特殊订单说明；保存后客户端详情页可见，清空后客户端不再显示该模块。
-                </p>
-              </div>
-              <el-input
-                v-model="draftMerchantMessage"
-                type="textarea"
-                :rows="3"
-                maxlength="500"
-                show-word-limit
-                resize="none"
-                placeholder="请输入商家留言（最多 500 字）"
-                :disabled="detailLoading"
-              />
-              <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                <p class="text-xs text-slate-500">
-                  {{ merchantMessageChanged ? '留言有变更，点击保存后生效' : '留言与当前已保存内容一致' }}
-                </p>
-                <div class="flex gap-2">
-                  <el-button :disabled="detailLoading || !merchantMessageChanged" @click="handleSaveMerchantMessage">
-                    保存留言
-                  </el-button>
-                  <el-button
-                    :disabled="detailLoading || !normalizedDraftMerchantMessage"
-                    @click="draftMerchantMessage = ''"
-                  >
-                    清空输入
-                  </el-button>
+          <div class="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2">
+            <el-collapse v-model="detailAssistPanels" class="order-detail-assist-collapse">
+              <el-collapse-item name="business-status">
+                <template #title>
+                  <div class="flex min-w-0 flex-col py-2">
+                    <p class="text-sm font-semibold text-slate-900">商家特殊状态</p>
+                    <p class="mt-1 text-xs leading-5 text-slate-500">
+                      用于通知用户当前订单所处的特殊进度，不改变待核销、已核销、已取消等核心状态。
+                    </p>
+                  </div>
+                </template>
+                <div class="pb-3">
+                  <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                    <div class="min-w-0">
+                      <p class="text-xs leading-5 text-slate-500">请选择需要展示给用户的特殊状态（可清空）。</p>
+                    </div>
+                    <el-select
+                      v-model="draftBusinessStatus"
+                      clearable
+                      placeholder="选择特殊状态"
+                      class="w-full lg:w-72"
+                      :disabled="detailLoading"
+                      @change="handleBusinessStatusChange"
+                    >
+                      <el-option
+                        v-for="option in businessStatusOptions"
+                        :key="option.value"
+                        :label="option.label"
+                        :value="option.value"
+                      />
+                    </el-select>
+                  </div>
+                  <p v-if="activeBusinessStatusMeta" class="mt-2 text-xs leading-5 text-slate-500">
+                    {{ activeBusinessStatusMeta.consoleDescription }}
+                  </p>
+                  <div v-if="activeBusinessStatusMeta" class="mt-3 rounded-2xl px-3 py-2" :class="activeBusinessStatusMeta.className">
+                    <p class="text-sm font-semibold">当前商家状态：{{ activeBusinessStatusMeta.label }}</p>
+                    <p class="mt-1 text-xs">{{ activeBusinessStatusMeta.consoleDescription }}</p>
+                  </div>
                 </div>
-              </div>
-              <div v-if="activeMerchantMessage" class="rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-                <p class="text-xs text-amber-700">当前已生效留言</p>
-                <p class="mt-1 whitespace-pre-wrap break-words">{{ activeMerchantMessage }}</p>
-              </div>
-              <p v-else class="text-xs text-slate-500">当前未设置商家留言</p>
-            </div>
+              </el-collapse-item>
+
+              <el-collapse-item name="merchant-message">
+                <template #title>
+                  <div class="flex min-w-0 flex-col py-2">
+                    <p class="text-sm font-semibold text-slate-900">商家留言</p>
+                    <p class="mt-1 text-xs leading-5 text-slate-500">
+                      用于补充特殊订单说明；保存后客户端详情页可见，清空后客户端不再显示该模块。
+                    </p>
+                  </div>
+                </template>
+                <div class="pb-3">
+                  <div class="flex flex-col gap-3">
+                    <el-input
+                      v-model="draftMerchantMessage"
+                      type="textarea"
+                      :rows="3"
+                      maxlength="500"
+                      show-word-limit
+                      resize="none"
+                      placeholder="请输入商家留言（最多 500 字）"
+                      :disabled="detailLoading"
+                    />
+                    <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <p class="text-xs text-slate-500">
+                        {{ merchantMessageChanged ? '留言有变更，点击保存后生效' : '留言与当前已保存内容一致' }}
+                      </p>
+                      <div class="flex gap-2">
+                        <el-button :disabled="detailLoading || !merchantMessageChanged" @click="handleSaveMerchantMessage">
+                          保存留言
+                        </el-button>
+                        <el-button
+                          :disabled="detailLoading || !normalizedDraftMerchantMessage"
+                          @click="draftMerchantMessage = ''"
+                        >
+                          清空输入
+                        </el-button>
+                      </div>
+                    </div>
+                    <div v-if="activeMerchantMessage" class="rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                      <p class="text-xs text-amber-700">当前已生效留言</p>
+                      <p class="mt-1 whitespace-pre-wrap break-words">{{ activeMerchantMessage }}</p>
+                    </div>
+                    <p v-else class="text-xs text-slate-500">当前未设置商家留言</p>
+                  </div>
+                </div>
+              </el-collapse-item>
+            </el-collapse>
           </div>
 
           <div class="mt-4 grid gap-3 sm:grid-cols-4">
@@ -999,6 +1016,31 @@ onBeforeUnmount(() => {
   width: 100%;
   min-width: 0;
   overflow-x: clip;
+}
+
+.order-detail-assist-collapse {
+  --el-collapse-border-color: transparent;
+  border-top: none;
+  border-bottom: none;
+}
+
+.order-detail-assist-collapse :deep(.el-collapse-item__header) {
+  min-height: 56px;
+  border-bottom: 1px solid #e2e8f0;
+  background: transparent;
+}
+
+.order-detail-assist-collapse :deep(.el-collapse-item:last-child .el-collapse-item__header) {
+  border-bottom: none;
+}
+
+.order-detail-assist-collapse :deep(.el-collapse-item__wrap) {
+  border-bottom: none;
+  background: transparent;
+}
+
+.order-detail-assist-collapse :deep(.el-collapse-item__content) {
+  padding-bottom: 0;
 }
 
 .table-scroll-wrap {
