@@ -9,10 +9,10 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { UploadRequestOptions } from 'element-plus'
-import { Plus } from '@element-plus/icons-vue'
 import imageCompression from 'browser-image-compression'
 import { PageContainer } from '@/components/common'
 import { uploadImage } from '@/api/modules/upload'
+import { resolveProductPlaceholder } from '@/utils/product-placeholder'
 import {
   createProduct,
   getProductList,
@@ -58,7 +58,11 @@ const pendingUploadFile = ref<File | null>(null)
 const localPreviewUrl = ref<string>('')
 
 const displayThumbnail = computed(() => {
-  return localPreviewUrl.value || form.thumbnail
+  return resolveProductPlaceholder(localPreviewUrl.value || form.thumbnail)
+})
+
+const hasConfiguredThumbnail = computed(() => {
+  return Boolean(localPreviewUrl.value || form.thumbnail.trim())
 })
 
 const dialogTitle = computed(() => {
@@ -149,6 +153,16 @@ const handleCustomUpload = async (options: UploadRequestOptions) => {
     console.error('图片压缩失败:', error)
     ElMessage.error('图片处理失败，请重试')
   }
+}
+
+const handleRemoveThumbnail = () => {
+  if (localPreviewUrl.value) {
+    URL.revokeObjectURL(localPreviewUrl.value)
+  }
+  localPreviewUrl.value = ''
+  pendingUploadFile.value = null
+  form.thumbnail = ''
+  ElMessage.success('已移除商品预览图')
 }
 
 // 详细注释：打开编辑商品弹窗，将商品记录字段回显到表单模型中。
@@ -287,12 +301,10 @@ onMounted(async () => {
         <el-table-column label="预览图" min-width="150">
           <template #default="{ row }">
             <el-image
-              v-if="row.thumbnail"
-              :src="row.thumbnail"
+              :src="resolveProductPlaceholder(row.thumbnail)"
               fit="cover"
               style="width: 72px; height: 72px; border-radius: 16px"
             />
-            <span v-else class="text-sm text-slate-400">未设置</span>
           </template>
         </el-table-column>
         <el-table-column prop="limitPerUser" label="单人限购" width="110" align="center" />
@@ -378,9 +390,11 @@ onMounted(async () => {
             :show-file-list="false"
             accept="image/*"
           >
-            <img v-if="displayThumbnail" :src="displayThumbnail" class="avatar" alt="预览图" />
-            <el-icon v-else class="avatar-uploader-icon"><Plus /></el-icon>
+            <img :src="displayThumbnail" class="avatar" alt="预览图" />
           </el-upload>
+          <div class="mt-2 w-full">
+            <el-button v-if="hasConfiguredThumbnail" link type="danger" @click="handleRemoveThumbnail">删除当前预览图</el-button>
+          </div>
           <p class="mt-1 text-xs text-slate-400 w-full">支持点击或拍照上传，推荐 800x800 方形图片。</p>
         </el-form-item>
         <el-form-item label="详情内容">

@@ -17,6 +17,7 @@ import { useStableRequest } from '@/composables/useStableRequest'
 import { useClientCartStore, useClientCatalogStore } from '@/store'
 import { normalizeRequestError } from '@/utils/error'
 import { useDevice } from '@/composables/useDevice'
+import { resolveProductPlaceholder } from '@/utils/product-placeholder'
 
 import ClientCartView from './ClientCartView.vue'
 import ClientCheckoutView from './ClientCheckoutView.vue'
@@ -67,6 +68,10 @@ const products = computed(() => clientCatalogStore.products)
 
 const classifyProduct = (product: O2oMallProduct) => {
   return product.tags && product.tags.length > 0 ? product.tags : ['默认标签']
+}
+
+const resolveProductThumbnail = (product: Pick<O2oMallProduct, 'productName' | 'productCode' | 'thumbnail'>) => {
+  return resolveProductPlaceholder(product.thumbnail)
 }
 
 const categoryGroups = computed<ProductCategoryGroup[]>(() => {
@@ -546,16 +551,12 @@ onMounted(async () => {
         <article v-for="product in searchResults" :key="product.id" class="client-product-card">
           <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
             <img
-              v-if="product.thumbnail"
-              :src="product.thumbnail"
+              :src="resolveProductThumbnail(product)"
               :alt="product.productName"
               class="client-product-card__cover"
               loading="lazy"
               decoding="async"
             />
-            <div v-else class="client-product-card__cover grid place-content-center text-xs text-slate-400">
-              暂无图片
-            </div>
             <div class="min-w-0 flex-1 text-left">
               <p class="truncate text-base font-semibold text-slate-900">{{ product.productName }}</p>
               <p class="mt-1 text-sm font-bold text-[var(--ylink-color-primary-strong)]">¥{{ Number(product.defaultPrice).toFixed(2) }}</p>
@@ -595,14 +596,12 @@ onMounted(async () => {
           <article v-for="row in virtualRows" :key="row.index" class="client-product-card mb-2">
             <button type="button" class="client-product-card__body" @click="openProductDetail(row.data)">
               <img
-                v-if="row.data.thumbnail"
-                :src="row.data.thumbnail"
+                :src="resolveProductThumbnail(row.data)"
                 :alt="row.data.productName"
                 class="client-product-card__cover"
                 loading="lazy"
                 decoding="async"
               />
-              <div v-else class="client-product-card__cover grid place-content-center text-xs text-slate-400">暂无图片</div>
               <div class="min-w-0 flex-1 text-left">
                 <p class="truncate text-base font-semibold text-slate-900">{{ row.data.productName }}</p>
                 <p class="mt-1 text-sm font-bold text-[var(--ylink-color-primary-strong)]">¥{{ Number(row.data.defaultPrice).toFixed(2) }}</p>
@@ -631,14 +630,12 @@ onMounted(async () => {
             <article v-for="product in group.items" :key="product.id" class="client-product-card">
               <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
                 <img
-                  v-if="product.thumbnail"
-                  :src="product.thumbnail"
+                  :src="resolveProductThumbnail(product)"
                   :alt="product.productName"
                   class="client-product-card__cover"
                   loading="lazy"
                   decoding="async"
                 />
-                <div v-else class="client-product-card__cover grid place-content-center text-xs text-slate-400">暂无图片</div>
                 <div class="min-w-0 flex-1 text-left">
                   <p class="truncate text-base font-semibold text-slate-900">{{ product.productName }}</p>
                   <p class="mt-1 text-sm font-bold text-[var(--ylink-color-primary-strong)]">¥{{ Number(product.defaultPrice).toFixed(2) }}</p>
@@ -733,8 +730,7 @@ onMounted(async () => {
     >
       <section v-if="detailProduct" class="space-y-4 pb-2 max-w-[480px] mx-auto h-full max-h-[85vh] flex flex-col">
         <img
-          v-if="detailProduct.thumbnail"
-          :src="detailProduct.thumbnail"
+          :src="resolveProductThumbnail(detailProduct)"
           :alt="detailProduct.productName"
           class="h-44 sm:h-56 w-full rounded-2xl object-cover flex-shrink-0"
           loading="lazy"
