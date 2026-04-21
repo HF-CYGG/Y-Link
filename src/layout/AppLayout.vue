@@ -168,6 +168,11 @@ const resolveViewKey = (route: RouteLocationNormalizedLoaded) => {
   position: relative;
   min-height: 100%;
   overflow: hidden;
+  background-color: #eff1f5;
+}
+
+.dark .route-stage {
+  background-color: #0a0a0b;
 }
 
 .route-panel {
@@ -175,12 +180,16 @@ const resolveViewKey = (route: RouteLocationNormalizedLoaded) => {
   min-height: 100%;
   backface-visibility: hidden;
   transform: translateZ(0);
+  will-change: transform, opacity, filter;
 }
 
 /* 路由切页稳定舞台：离场页绝对定位，避免新旧页面同时占位造成瞬间布局抖动。 */
 .route-stage :deep(.fade-slide-enter-active) {
   position: relative;
   z-index: 2;
+  transition:
+    transform 0.22s cubic-bezier(0.22, 1, 0.36, 1),
+    clip-path 0.22s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .route-stage :deep(.fade-slide-leave-active) {
@@ -188,6 +197,36 @@ const resolveViewKey = (route: RouteLocationNormalizedLoaded) => {
   inset: 0;
   z-index: 1;
   pointer-events: none;
+  transition: opacity 0.06s linear;
+}
+
+/* 管理端右侧内容区切页动画：
+ * - 入场页采用“轻微上浮 + 清晰化”动画，减少突兀感；
+ * - 离场页采用“轻微下沉 + 虚化”动画，避免旧页残影；
+ * - 位移控制在小范围内，确保信息密集后台也保持稳定阅读体验。
+ */
+.route-stage :deep(.fade-slide-enter-from) {
+  opacity: 1;
+  transform: translate3d(0, 10px, 0);
+  clip-path: inset(0 0 14% 0 round 20px);
+}
+
+.route-stage :deep(.fade-slide-enter-to) {
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scale(1);
+  clip-path: inset(0 0 0 0 round 20px);
+}
+
+.route-stage :deep(.fade-slide-leave-from) {
+  opacity: 1;
+  transform: none;
+  clip-path: none;
+}
+
+.route-stage :deep(.fade-slide-leave-to) {
+  opacity: 0;
+  transform: none;
+  clip-path: none;
 }
 
 .route-loading-shell {
