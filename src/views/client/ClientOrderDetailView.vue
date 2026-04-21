@@ -326,7 +326,7 @@ onMounted(async () => {
 </script>
 
 <template>
-  <section class="pb-20">
+  <section class="order-detail-page">
     <button
       type="button"
       class="order-back-floating inline-flex h-10 w-10 items-center justify-center rounded-full bg-white text-slate-700 shadow-[var(--ylink-shadow-soft)]"
@@ -487,6 +487,19 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+/* 订单详情页根容器：为固定底部导航与安全区预留空间，避免末尾卡片被遮挡。 */
+.order-detail-page {
+  padding-bottom: calc(7.5rem + env(safe-area-inset-bottom));
+}
+
+/*
+ * 局部覆盖全局 client-page-absolute：
+ * 仅订单详情页恢复到常规文档流，让页面高度随内容增长，从而可以滚动到最下方完整显示卡片。
+ */
+:global(.client-page-absolute.order-detail-page) {
+  position: relative;
+}
+
 .order-back-floating {
   position: fixed;
   z-index: 30;
