@@ -118,22 +118,11 @@ const resolveViewKey = (route: RouteLocationNormalizedLoaded) => {
           <Suspense timeout="120">
             <template #default>
               <div class="min-h-full">
-                <transition name="fade-slide" mode="out-in">
-                  <KeepAlive :max="8">
-                    <component
-                      :is="Component"
-                      v-if="Component && route.meta.keepAlive"
-                      :key="resolveViewKey(route)"
-                    />
+                <transition name="fade-slide">
+                  <KeepAlive v-if="route.meta.keepAlive" :max="8">
+                    <component :is="Component" v-if="Component" :key="resolveViewKey(route)" />
                   </KeepAlive>
-                </transition>
-
-                <transition name="fade-slide" mode="out-in">
-                  <component
-                    :is="Component"
-                    v-if="Component && !route.meta.keepAlive"
-                    :key="resolveViewKey(route)"
-                  />
+                  <component :is="Component" v-else-if="Component" :key="resolveViewKey(route)" />
                 </transition>
               </div>
             </template>

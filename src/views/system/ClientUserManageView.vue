@@ -22,6 +22,7 @@ import {
   type ClientUserListQuery,
   type UpdateClientUserPayload,
 } from '@/api/modules/client-user-manage'
+import { getClientDepartmentConfigs } from '@/api/modules/system-config'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
@@ -49,6 +50,8 @@ const canEditUser = computed(() => authStore.hasPermission('users:update'))
 const canToggleUser = computed(() => authStore.hasPermission('users:status'))
 const canResetUserPassword = computed(() => authStore.hasPermission('users:reset_password'))
 const canOperateUsers = computed(() => canEditUser.value || canToggleUser.value || canResetUserPassword.value)
+const departmentOptions = ref<string[]>([])
+const departmentOptionsLoading = ref(false)
 
 const editVisible = ref(false)
 const editSubmitting = ref(false)
@@ -191,6 +194,18 @@ const loadData = async () => {
   })
 }
 
+const loadDepartmentOptions = async () => {
+  departmentOptionsLoading.value = true
+  try {
+    const result = await getClientDepartmentConfigs()
+    departmentOptions.value = result.options
+  } catch (error) {
+    ElMessage.error(extractErrorMessage(error, '加载部门配置失败'))
+  } finally {
+    departmentOptionsLoading.value = false
+  }
+}
+
 const handleSearch = () => {
   listState.query.page = 1
   void loadData()
@@ -239,6 +254,10 @@ const handleSubmitEdit = async () => {
   }
   const normalizedMobile = editForm.mobile.trim()
   const normalizedEmail = editForm.email.trim().toLowerCase()
+  if (editForm.departmentName.trim() && !departmentOptions.value.includes(editForm.departmentName.trim())) {
+    ElMessage.warning('请选择系统配置中的部门选项')
+    return
+  }
 
   editSubmitting.value = true
   try {
@@ -360,6 +379,7 @@ const handleToggleStatus = async (row: ClientUserManageProfile) => {
 }
 
 onMounted(() => {
+  void loadDepartmentOptions()
   void loadData()
 })
 </script>
@@ -532,7 +552,16 @@ onMounted(() => {
           </el-form-item>
         </div>
         <el-form-item label="所属部门" prop="departmentName">
-          <el-input v-model.trim="editForm.departmentName" placeholder="请输入所属部门（选填）" />
+          <el-select
+            v-model="editForm.departmentName"
+            placeholder="请选择所属部门（选填）"
+            class="w-full"
+            clearable
+            filterable
+            :loading="departmentOptionsLoading"
+          >
+            <el-option v-for="department in departmentOptions" :key="department" :label="department" :value="department" />
+          </el-select>
         </el-form-item>
         <el-form-item label="账号状态" prop="status">
           <el-select v-model="editForm.status" class="w-full">

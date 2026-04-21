@@ -62,6 +62,7 @@ export interface ClientAuthCapabilities {
     email: ClientValidationMode
   }
   forgotPasswordEnabled: boolean
+  departmentOptions: string[]
 }
 
 /**

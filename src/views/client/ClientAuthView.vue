@@ -67,7 +67,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Key, Lock, Message, OfficeBuilding, User } from '@element-plus/icons-vue'
+import { Key, Lock, Message, User } from '@element-plus/icons-vue'
 import { getClientAuthCapabilities, getClientCaptcha, type ClientAuthCapabilities, type ClientValidationMode } from '@/api/modules/client-auth'
 import { useClientAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
@@ -137,6 +137,7 @@ const registerValidationMode = computed<ClientValidationMode>(() => {
   return authCapabilities.value?.registerValidationModes[channel] ?? 'captcha'
 })
 const registerUsesVerificationCode = computed(() => registerValidationMode.value === 'verification_code')
+const registerDepartmentOptions = computed(() => authCapabilities.value?.departmentOptions ?? [])
 const registerValidationHint = computed(() => {
   const channel = registerAccountChannel.value
   if (!channel) {
@@ -387,6 +388,10 @@ const handleRegister = async () => {
     ElMessage.warning('密码至少 6 位')
     return
   }
+  if (registerForm.department.trim() && !registerDepartmentOptions.value.includes(registerForm.department.trim())) {
+    ElMessage.warning('请选择系统配置中的部门选项')
+    return
+  }
   if (registerUsesVerificationCode.value) {
     if (!registerForm.verificationCode.trim()) {
       ElMessage.warning('请输入手机/邮箱验证码')
@@ -622,12 +627,22 @@ onUnmounted(() => {
                     </template>
                   </el-input>
 
-                  <el-input v-model="registerForm.department" placeholder="所属部门（选填）" class="geo-input" size="large" clearable>
-                    <template #prefix>
-                      <el-icon class="input-icon"><OfficeBuilding /></el-icon>
-                    </template>
-                  </el-input>
-
+                  <el-select
+                    v-model="registerForm.department"
+                    placeholder="所属部门（选填）"
+                    class="geo-input-select"
+                    size="large"
+                    clearable
+                    filterable
+                  >
+                    <el-option
+                      v-for="department in registerDepartmentOptions"
+                      :key="department"
+                      :label="department"
+                      :value="department"
+                    />
+                  </el-select>
+                  <p v-if="registerDepartmentOptions.length === 0" class="mt-1 text-xs text-slate-400">暂无可选部门，请联系管理员配置</p>
                   <div v-if="registerUsesVerificationCode" class="captcha-row">
                     <el-input v-model="registerForm.verificationCode" placeholder="手机/邮箱验证码" class="geo-input flex-1" size="large" clearable>
                       <template #prefix>
@@ -933,6 +948,25 @@ onUnmounted(() => {
   color: #0f172a;
   font-weight: 500;
   font-size: 14px;
+}
+
+.geo-input-select :deep(.el-select__wrapper) {
+  min-height: 52px;
+  border-radius: 14px;
+  background-color: #f8fafc;
+  border: 1px solid transparent;
+  box-shadow: none !important;
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.geo-input-select :deep(.el-select__wrapper:hover) {
+  background-color: #f1f5f9;
+}
+
+.geo-input-select :deep(.el-select__wrapper.is-focused) {
+  background-color: #ffffff;
+  border-color: #0d9488;
+  box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.1) !important;
 }
 
 .input-icon {

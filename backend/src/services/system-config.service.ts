@@ -50,6 +50,12 @@ const DEFAULT_SYSTEM_CONFIGS = [
     remark: '散客单号位宽',
   },
   {
+    configKey: 'client.department.options',
+    configValue: '[]',
+    configGroup: 'client',
+    remark: '客户端可选部门列表(JSON数组)',
+  },
+  {
     configKey: 'o2o.auto_cancel_enabled',
     configValue: '1',
     configGroup: 'o2o',
@@ -228,9 +234,19 @@ export interface UpdateVerificationProviderConfigsInput {
   email: VerificationProviderConfigInput
 }
 
+export interface ClientDepartmentConfigRecord {
+  options: string[]
+  updatedAt: Date
+}
+
+export interface UpdateClientDepartmentConfigsInput {
+  options: string[]
+}
+
 class SystemConfigService {
   private readonly configRepo = AppDataSource.getRepository(SystemConfig)
   private readonly o2oConfigKeys = ['o2o.auto_cancel_enabled', 'o2o.auto_cancel_hours', 'o2o.limit_enabled', 'o2o.limit_qty'] as const
+  private readonly clientDepartmentConfigKey = 'client.department.options'
   private readonly verificationConfigKeys = [
     'verification.mobile.enabled',
     'verification.mobile.http_method',
@@ -267,6 +283,46 @@ class SystemConfigService {
       throw new BizError(`${field} 配置值非法`, 500)
     }
     return parsed
+  }
+
+  private parseClientDepartmentOptions(rawValue: string): string[] {
+    const raw = rawValue.trim()
+    if (!raw) {
+      return []
+    }
+    try {
+      const parsed = JSON.parse(raw)
+      if (!Array.isArray(parsed)) {
+        throw new BizError('客户端部门配置格式非法', 500)
+      }
+      return parsed
+        .map((item) => String(item ?? '').trim())
+        .filter((item) => item.length > 0)
+    } catch {
+      throw new BizError('客户端部门配置格式非法', 500)
+    }
+  }
+
+  private normalizeClientDepartmentOptions(options: string[]): string[] {
+    const normalizedList = options
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0)
+
+    if (normalizedList.length > 50) {
+      throw new BizError('部门选项最多保留 50 个', 400)
+    }
+
+    const uniqueSet = new Set<string>()
+    for (const item of normalizedList) {
+      if (item.length > 32) {
+        throw new BizError('部门名称长度不能超过 32 个字符', 400)
+      }
+      if (uniqueSet.has(item)) {
+        throw new BizError(`部门“${item}”重复，请去重后保存`, 400)
+      }
+      uniqueSet.add(item)
+    }
+    return [...uniqueSet]
   }
 
   private validateInputValue(orderType: OrderSerialType, value: OrderSerialConfigValue) {
@@ -610,6 +666,99 @@ class SystemConfigService {
       mobile: this.formatVerificationProviderConfig('mobile', map),
       email: this.formatVerificationProviderConfig('email', map),
     }
+  }
+
+  async getClientDepartmentConfigs(): Promise<ClientDepartmentConfigRecord> {
+    await this.ensureDefaultConfigs()
+    const row = await this.configRepo.findOne({
+      where: { configKey: this.clientDepartmentConfigKey },
+      select: {
+        id: true,
+        configValue: true,
+        updatedAt: true,
+      },
+    })
+    if (!row) {
+      throw new BizError('客户端部门配置缺失，请联系管理员补齐配置', 500)
+    }
+    return {
+      options: this.parseClientDepartmentOptions(row.configValue),
+      updatedAt: row.updatedAt,
+    }
+  }
+
+  async updateClientDepartmentConfigs(
+    input: UpdateClientDepartmentConfigsInput,
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ): Promise<{ config: ClientDepartmentConfigRecord; changed: boolean }> {
+    const normalizedOptions = this.normalizeClientDepartmentOptions(input.options)
+    await this.ensureDefaultConfigs()
+    return AppDataSource.transaction(async (manager) => {
+      const useForUpdate = manager.connection.options.type === 'mysql'
+      const lockedRows = (await manager.query(
+        `
+          SELECT id, config_key AS configKey, config_value AS configValue, updated_at AS updatedAt
+          FROM system_configs
+          WHERE config_key = ?
+          ${useForUpdate ? 'FOR UPDATE' : ''}
+        `,
+        [this.clientDepartmentConfigKey],
+      )) as Array<{ id: string; configKey: string; configValue: string; updatedAt: string }>
+
+      const row = lockedRows[0]
+      if (!row) {
+        throw new BizError('客户端部门配置缺失，请联系管理员补齐配置', 500)
+      }
+
+      const before: ClientDepartmentConfigRecord = {
+        options: this.parseClientDepartmentOptions(row.configValue),
+        updatedAt: new Date(row.updatedAt),
+      }
+
+      const targetValue = JSON.stringify(normalizedOptions)
+      let changed = false
+      if (row.configValue !== targetValue) {
+        await manager.getRepository(SystemConfig).update({ id: row.id }, { configValue: targetValue })
+        changed = true
+      }
+
+      const config: ClientDepartmentConfigRecord = {
+        options: normalizedOptions,
+        updatedAt: changed ? new Date() : new Date(row.updatedAt),
+      }
+      if (changed) {
+        await auditService.record(
+          {
+            actionType: 'system_config.update_client_departments',
+            actionLabel: '更新客户端部门配置',
+            targetType: 'system_config',
+            targetCode: 'client_departments',
+            actor,
+            requestMeta,
+            detail: {
+              before,
+              after: config,
+            },
+          },
+          manager,
+        )
+      }
+
+      return { config, changed }
+    })
+  }
+
+  async assertClientDepartmentOption(departmentName?: string) {
+    const normalizedDepartment = departmentName?.trim() || ''
+    if (!normalizedDepartment) {
+      return ''
+    }
+    const config = await this.getClientDepartmentConfigs()
+    if (!config.options.includes(normalizedDepartment)) {
+      throw new BizError(`部门“${normalizedDepartment}”不在可选范围内，请重新选择`, 400)
+    }
+    return normalizedDepartment
   }
 
   async updateVerificationProviderConfigs(

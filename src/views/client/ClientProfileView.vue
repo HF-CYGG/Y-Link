@@ -5,12 +5,13 @@
  * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
  */
 
-import { reactive, ref } from 'vue'
+import { onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { useClientAuthStore } from '@/store'
-import { clientChangePassword } from '@/api/modules/client-auth'
+import { clientChangePassword, getClientAuthCapabilities } from '@/api/modules/client-auth'
+import { extractErrorMessage } from '@/utils/error'
 
 const router = useRouter()
 const clientAuthStore = useClientAuthStore()
@@ -19,6 +20,8 @@ const passwordDialogVisible = ref(false)
 const profileDialogVisible = ref(false)
 const submitting = ref(false)
 const profileSubmitting = ref(false)
+const departmentOptionsLoading = ref(false)
+const departmentOptions = ref<string[]>([])
 const formRef = ref<FormInstance>()
 const profileFormRef = ref<FormInstance>()
 const form = reactive({
@@ -85,6 +88,18 @@ const openProfileDialog = () => {
   profileFormRef.value?.clearValidate()
 }
 
+const loadDepartmentOptions = async () => {
+  departmentOptionsLoading.value = true
+  try {
+    const capabilities = await getClientAuthCapabilities()
+    departmentOptions.value = capabilities.departmentOptions
+  } catch (error) {
+    ElMessage.error(extractErrorMessage(error, '加载部门配置失败'))
+  } finally {
+    departmentOptionsLoading.value = false
+  }
+}
+
 const openPasswordDialog = () => {
   form.currentPassword = ''
   form.newPassword = ''
@@ -129,6 +144,10 @@ const submitUpdateProfile = async () => {
   }
   const normalizedMobile = profileForm.mobile.trim()
   const normalizedEmail = profileForm.email.trim().toLowerCase()
+  if (profileForm.departmentName.trim() && !departmentOptions.value.includes(profileForm.departmentName.trim())) {
+    ElMessage.warning('请选择系统配置中的部门选项')
+    return
+  }
 
   try {
     profileSubmitting.value = true
@@ -146,6 +165,10 @@ const submitUpdateProfile = async () => {
     profileSubmitting.value = false
   }
 }
+
+onMounted(() => {
+  void loadDepartmentOptions()
+})
 </script>
 
 <template>
@@ -228,7 +251,16 @@ const submitUpdateProfile = async () => {
           <el-input v-model="profileForm.email" placeholder="请输入邮箱" />
         </el-form-item>
         <el-form-item label="部门" prop="departmentName">
-          <el-input v-model="profileForm.departmentName" placeholder="请输入部门（选填）" />
+          <el-select
+            v-model="profileForm.departmentName"
+            placeholder="请选择部门（选填）"
+            class="w-full"
+            clearable
+            filterable
+            :loading="departmentOptionsLoading"
+          >
+            <el-option v-for="department in departmentOptions" :key="department" :label="department" :value="department" />
+          </el-select>
         </el-form-item>
       </el-form>
       <template #footer>

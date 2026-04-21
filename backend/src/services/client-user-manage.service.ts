@@ -14,6 +14,7 @@ import { BizError } from '../utils/errors.js'
 import { hashPassword } from '../utils/password.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
+import { systemConfigService } from './system-config.service.js'
 
 export interface ClientUserListQuery {
   page: number
@@ -209,7 +210,7 @@ export class ClientUserManageService {
     const username = this.normalizeUsername(input.username)
     const mobile = this.normalizeMobile(input.mobile)
     const email = this.normalizeEmail(input.email)
-    const departmentName = input.departmentName?.trim() || ''
+    const departmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName)
 
     if (!mobile && !email) {
       throw new BizError('手机号和邮箱至少保留一项', 400)

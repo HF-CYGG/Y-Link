@@ -45,6 +45,10 @@ const updateVerificationProviderConfigsSchema = z.object({
   email: verificationProviderChannelSchema,
 })
 
+const updateClientDepartmentConfigsSchema = z.object({
+  options: z.array(z.string().trim().min(1).max(32)).max(50),
+})
+
 const testVerificationProviderSchema = z.object({
   channel: z.enum(['mobile', 'email']),
   target: z.string().trim().min(1).max(200),
@@ -149,6 +153,34 @@ systemConfigRouter.post(
       config: payload.config,
       requestMeta: extractRequestMeta(req),
     })
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+systemConfigRouter.get(
+  '/client-departments',
+  requirePermission('system_configs:view'),
+  asyncHandler(async (_req, res) => {
+    const data = await systemConfigService.getClientDepartmentConfigs()
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+systemConfigRouter.put(
+  '/client-departments',
+  requirePermission('system_configs:update'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = updateClientDepartmentConfigsSchema.parse(req.body)
+    const data = await systemConfigService.updateClientDepartmentConfigs(payload, authReq.auth, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',

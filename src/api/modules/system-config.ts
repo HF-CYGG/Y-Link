@@ -104,6 +104,20 @@ export interface TestVerificationProviderResult {
   code: string
 }
 
+export interface ClientDepartmentConfigRecord {
+  options: string[]
+  updatedAt: string
+}
+
+export interface UpdateClientDepartmentConfigsPayload {
+  options: string[]
+}
+
+export interface UpdateClientDepartmentConfigsResult {
+  config: ClientDepartmentConfigRecord
+  changed: boolean
+}
+
 /**
  * 获取流水号生成配置：
  * - 区分“部门”和“散客”开单类型。
@@ -173,5 +187,26 @@ export const testVerificationProviderSend = (payload: TestVerificationProviderPa
   request<TestVerificationProviderResult>({
     method: 'POST',
     url: '/system-configs/verification-providers/test-send',
+    data: payload,
+  })
+
+/**
+ * 获取客户端部门配置：
+ * - 返回可供客户端账号选择的部门列表。
+ */
+export const getClientDepartmentConfigs = () =>
+  request<ClientDepartmentConfigRecord>({
+    method: 'GET',
+    url: '/system-configs/client-departments',
+  })
+
+/**
+ * 保存客户端部门配置：
+ * - 提交后客户端注册、资料编辑和后台编辑会统一按该列表约束。
+ */
+export const updateClientDepartmentConfigs = (payload: UpdateClientDepartmentConfigsPayload) =>
+  request<UpdateClientDepartmentConfigsResult>({
+    method: 'PUT',
+    url: '/system-configs/client-departments',
     data: payload,
   })

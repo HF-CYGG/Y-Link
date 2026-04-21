@@ -89,6 +89,7 @@ export interface ClientAuthCapabilities {
     email: ClientValidationMode
   }
   forgotPasswordEnabled: boolean
+  departmentOptions: string[]
 }
 
 class ClientAuthService {
@@ -96,7 +97,10 @@ class ClientAuthService {
   private readonly sessionRepo = AppDataSource.getRepository(ClientUserSession)
 
   private async getVerificationCapabilities(): Promise<ClientAuthCapabilities> {
-    const configs = await systemConfigService.getVerificationProviderConfigs()
+    const [configs, departmentConfigs] = await Promise.all([
+      systemConfigService.getVerificationProviderConfigs(),
+      systemConfigService.getClientDepartmentConfigs(),
+    ])
     const mobileEnabled = configs.mobile.enabled
     const emailEnabled = configs.email.enabled
 
@@ -110,6 +114,7 @@ class ClientAuthService {
         email: emailEnabled ? 'verification_code' : 'captcha',
       },
       forgotPasswordEnabled: mobileEnabled && emailEnabled,
+      departmentOptions: departmentConfigs.options,
     }
   }
 
@@ -260,6 +265,7 @@ class ClientAuthService {
     if (existedByUsername) {
       throw new BizError('该用户名已被占用', 409)
     }
+    const selectedDepartmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName)
     const user = await this.userRepo.save(
       this.userRepo.create({
         mobile: account.mobile,
@@ -267,7 +273,7 @@ class ClientAuthService {
         passwordHash: await hashPassword(password),
         // 当前账号体系下，用户名与登录账号分离，支持用户自定义用户名。
         realName: username.value,
-        departmentName: input.departmentName?.trim() || '',
+        departmentName: selectedDepartmentName,
         status: 'enabled',
       }),
     )
@@ -511,7 +517,7 @@ class ClientAuthService {
     const email = input.email?.trim()
       ? normalizeClientVerificationTarget('email', input.email)
       : null
-    const departmentName = input.departmentName?.trim() || ''
+    const departmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName)
 
     if (!mobile && !email) {
       throw new BizError('手机号和邮箱至少保留一项', 400)
