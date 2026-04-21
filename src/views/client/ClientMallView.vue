@@ -1,8 +1,8 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/client/ClientMallView.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：承载客户端商城的商品浏览、标签联动、加购与结算入口能力。
+ * 维护说明：重点维护“左侧标签高亮 <-> 右侧分组定位”一致性，避免快速切换时出现错位与回跳。
  */
 
 
@@ -59,6 +59,12 @@ const sectionRefMap = reactive<Record<string, HTMLElement | null>>({})
 const scrollingByCategoryClick = ref(false)
 const pendingCategoryKey = ref<string | null>(null)
 const categoryScrollUnlockTimer = ref<number | null>(null)
+const categoryScrollSessionId = ref(0)
+const currentLockedSessionId = ref(0)
+const pendingCategoryTargetTop = ref<number | null>(null)
+
+const CATEGORY_SCROLL_HIT_THRESHOLD = 12
+const CATEGORY_SCROLL_FALLBACK_MS = 420
 
 // 商城页属于高频返回页面，初始化时优先恢复购物车与目录缓存，避免每次进入都重置上下文。
 clientCartStore.initialize()
@@ -298,77 +304,100 @@ const quickAdd = (product: O2oMallProduct) => {
   triggerSettlePulse()
 }
 
-const scrollToCategory = async (categoryKey: string) => {
-  activeCategoryKey.value = categoryKey
-  pendingCategoryKey.value = categoryKey
+const clearCategoryUnlockTimer = () => {
   if (categoryScrollUnlockTimer.value !== null) {
     globalThis.window.clearTimeout(categoryScrollUnlockTimer.value)
     categoryScrollUnlockTimer.value = null
   }
-  if (largeDatasetMode.value) {
-    // 大数据模式下列表按当前分类单独渲染，不再进行 DOM 锚点滚动。
-    pendingCategoryKey.value = null
-    return
-  }
-  if (categoryKey === 'all') {
-    scrollingByCategoryClick.value = true
-    listScrollerRef.value?.scrollTo({
-      top: 0,
-      behavior: 'smooth',
-    })
-    categoryScrollUnlockTimer.value = globalThis.window.setTimeout(() => {
-      scrollingByCategoryClick.value = false
-      pendingCategoryKey.value = null
-      categoryScrollUnlockTimer.value = null
-      handleProductListScroll()
-    }, 600)
-    return
-  }
-
-  scrollingByCategoryClick.value = true
-  await nextTick()
-  const scroller = listScrollerRef.value
-  const section = sectionRefMap[categoryKey]
-  if (!section || !scroller) {
-    scrollingByCategoryClick.value = false
-    pendingCategoryKey.value = null
-    return
-  }
-
-  // 只驱动右侧滚动容器，避免 scrollIntoView 在不同浏览器下误触发页面级滚动或无滚动。
-  const targetTop = Math.max(0, section.offsetTop - 6)
-  scroller.scrollTo({
-    top: targetTop,
-    behavior: 'smooth',
-  })
-  // 平滑滚动时长在不同浏览器/设备上差异较大，
-  // 如果太早解锁会被 scroll 监听回写成上一个分类。
-  categoryScrollUnlockTimer.value = globalThis.window.setTimeout(() => {
-    scrollingByCategoryClick.value = false
-    pendingCategoryKey.value = null
-    categoryScrollUnlockTimer.value = null
-    handleProductListScroll()
-  }, 900)
 }
 
-const handleProductListScroll = () => {
-  if (isCategorySyncTemporarilyBlocked()) {
-    // 搜索模式、点击触发滚动与虚拟列表模式都不适合反向计算激活分类，直接跳过。
+const releaseCategoryScrollLock = () => {
+  clearCategoryUnlockTimer()
+  scrollingByCategoryClick.value = false
+  pendingCategoryKey.value = null
+  pendingCategoryTargetTop.value = null
+}
+
+const resolveCategoryScrollTop = (categoryKey: string) => {
+  if (categoryKey === 'all') {
+    return 0
+  }
+  const section = sectionRefMap[categoryKey]
+  if (!section) {
+    return null
+  }
+  // 目标语义是“分组标题吸顶对齐”，保留极小缓冲避免视觉贴边。
+  return Math.max(0, section.offsetTop - 4)
+}
+
+const lockCategoryScrollSession = (categoryKey: string, targetTop: number) => {
+  const nextSessionId = categoryScrollSessionId.value + 1
+  categoryScrollSessionId.value = nextSessionId
+  currentLockedSessionId.value = nextSessionId
+  scrollingByCategoryClick.value = true
+  pendingCategoryKey.value = categoryKey
+  pendingCategoryTargetTop.value = targetTop
+  clearCategoryUnlockTimer()
+  categoryScrollUnlockTimer.value = globalThis.window.setTimeout(() => {
+    // 只允许最后一次标签点击会话解锁，避免旧回调覆盖新状态。
+    if (currentLockedSessionId.value !== nextSessionId) {
+      return
+    }
+    releaseCategoryScrollLock()
+    handleProductListScroll()
+  }, CATEGORY_SCROLL_FALLBACK_MS)
+}
+
+const scrollToCategory = async (categoryKey: string) => {
+  activeCategoryKey.value = categoryKey
+  releaseCategoryScrollLock()
+  if (largeDatasetMode.value) {
+    // 大数据模式下列表按当前分类单独渲染，不再进行 DOM 锚点滚动。
     return
   }
-
+  await nextTick()
   const scroller = listScrollerRef.value
   if (!scroller) {
     return
   }
 
-  if (pendingCategoryKey.value && !scrollingByCategoryClick.value) {
-    pendingCategoryKey.value = null
+  const targetTop = resolveCategoryScrollTop(categoryKey)
+  if (targetTop === null) {
+    return
+  }
+  lockCategoryScrollSession(categoryKey, targetTop)
+  // 只驱动右侧滚动容器，避免 scrollIntoView 在不同浏览器下误触发页面级滚动或无滚动。
+  scroller.scrollTo({
+    top: targetTop,
+    behavior: 'smooth',
+  })
+}
+
+const handleCategoryManualInterrupt = () => {
+  if (!scrollingByCategoryClick.value) {
+    return
+  }
+  releaseCategoryScrollLock()
+  handleProductListScroll()
+}
+
+const handleProductListScroll = () => {
+  const scroller = listScrollerRef.value
+  if (!scroller) {
+    return
   }
 
-  const lockedCategory = getPendingLockedCategory(scroller.scrollTop)
-  if (lockedCategory) {
-    activeCategoryKey.value = lockedCategory
+  const lockHit = getPendingLockedCategory(scroller.scrollTop)
+  if (lockHit === 'target-hit') {
+    releaseCategoryScrollLock()
+  } else if (lockHit) {
+    activeCategoryKey.value = lockHit
+    // 搜索模式、点击触发滚动与虚拟列表模式都不适合反向计算激活分类，直接跳过。
+    return
+  }
+
+  if (isCategorySyncTemporarilyBlocked()) {
+    // 搜索模式与虚拟列表模式都不适合反向计算激活分类，直接跳过。
     return
   }
 
@@ -390,22 +419,22 @@ const handleProductListScroll = () => {
 }
 
 const isCategorySyncTemporarilyBlocked = () => {
-  return searchMode.value || scrollingByCategoryClick.value || largeDatasetMode.value
+  return searchMode.value || largeDatasetMode.value || scrollingByCategoryClick.value
 }
 
-const getPendingLockedCategory = (scrollTop: number): string | null => {
+const getPendingLockedCategory = (scrollTop: number): string | 'target-hit' | null => {
   // 用户点击分类后，在滚动抵达目标分组前锁定激活项，
   // 防止“先跳到目标后又瞬间回到上一个分类”的回写抖动。
   const pendingKey = pendingCategoryKey.value
-  if (!pendingKey || pendingKey === 'all' || !scrollingByCategoryClick.value) {
+  if (!pendingKey || !scrollingByCategoryClick.value) {
     return null
   }
-  const pendingSection = sectionRefMap[pendingKey]
-  if (!pendingSection) {
+  const targetTop = pendingCategoryTargetTop.value
+  if (targetTop === null) {
     return null
   }
-  const distanceToTarget = Math.abs(pendingSection.offsetTop - scrollTop)
-  return distanceToTarget > 56 ? pendingKey : null
+  const distanceToTarget = Math.abs(targetTop - scrollTop)
+  return distanceToTarget <= CATEGORY_SCROLL_HIT_THRESHOLD ? 'target-hit' : pendingKey
 }
 
 const cartDrawerVisible = ref(false)
@@ -616,7 +645,14 @@ onMounted(async () => {
         </div>
       </div>
 
-      <div v-else ref="listScrollerRef" class="max-h-[64vh] overflow-y-auto pr-1" @scroll="handleProductListScroll">
+      <div
+        v-else
+        ref="listScrollerRef"
+        class="max-h-[64vh] overflow-y-auto pr-1"
+        @scroll="handleProductListScroll"
+        @wheel.passive="handleCategoryManualInterrupt"
+        @touchstart.passive="handleCategoryManualInterrupt"
+      >
         <section
           v-for="group in categoryGroups"
           :key="group.key"
