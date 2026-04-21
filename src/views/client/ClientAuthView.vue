@@ -102,7 +102,6 @@ const formWrapperRef = ref<HTMLElement | null>(null)
 const formBlockRef = ref<HTMLElement | null>(null)
 const formWrapperHeight = ref('auto')
 const formAnimating = ref(false)
-const formTransitionName = ref<'slide-left' | 'slide-right'>('slide-right')
 const authCapabilities = ref<ClientAuthCapabilities | null>(null)
 const captcha = reactive<ClientCaptchaState>({
   captchaId: '',
@@ -142,16 +141,6 @@ const registerValidationMode = computed<ClientValidationMode>(() => {
 })
 const registerUsesVerificationCode = computed(() => registerValidationMode.value === 'verification_code')
 const registerDepartmentOptions = computed(() => authCapabilities.value?.departmentOptions ?? [])
-const registerValidationHint = computed(() => {
-  const channel = registerAccountChannel.value
-  if (!channel) {
-    return '请输入手机号或邮箱，系统会自动选择当前可用的注册校验方式。'
-  }
-  if (registerUsesVerificationCode.value) {
-    return `${channel === 'email' ? '当前邮箱通道已启用邮箱验证码' : '当前手机通道已启用短信验证码'}，发送验证码前仍需先通过图形验证码校验。`
-  }
-  return `${channel === 'email' ? '当前邮箱通道未启用邮箱验证码' : '当前手机通道未启用短信验证码'}，注册时将改用图片验证码校验。`
-})
 
 const captchaHintText = computed(() => {
   if (captcha.expiresInSeconds <= 0) {
@@ -185,7 +174,6 @@ const switchMode = async (nextMode: AuthMode) => {
     return
   }
 
-  formTransitionName.value = nextMode === 'register' ? 'slide-left' : 'slide-right'
   formAnimating.value = true
   syncWrapperHeight('measured')
   activeMode.value = nextMode
@@ -193,10 +181,6 @@ const switchMode = async (nextMode: AuthMode) => {
 
 const handleFormBeforeLeave = () => {
   syncWrapperHeight('measured', formWrapperRef.value)
-  // 强制浏览器确认当前高度帧，避免切换起始时出现跳帧或闪现。
-  if (formWrapperRef.value) {
-    formWrapperRef.value.getBoundingClientRect()
-  }
 }
 
 const handleFormBeforeEnter = () => {
@@ -532,6 +516,7 @@ watch(
   { immediate: true },
 )
 
+// 提示变化不再强制重算高度
 watch(successTip, async () => {
   await nextTick()
   syncWrapperHeight('measured')
@@ -591,7 +576,7 @@ onUnmounted(() => {
 
           <div ref="formWrapperRef" class="form-wrapper" :style="{ height: formWrapperHeight }">
             <transition
-              :name="formTransitionName"
+              name="auth-fade"
               @before-enter="handleFormBeforeEnter"
               @before-leave="handleFormBeforeLeave"
               @enter="handleFormEnter"
@@ -660,9 +645,6 @@ onUnmounted(() => {
               <div v-else ref="formBlockRef" key="register" class="form-block">
                 <h2 class="block-title">创建账号</h2>
                 <p class="block-subtitle">只需几步，创建用户名并绑定手机号或邮箱账号</p>
-                <div class="auth-hint-card">
-                  {{ capabilityLoading ? '正在加载当前注册校验策略...' : registerValidationHint }}
-                </div>
 
                 <el-form @submit.prevent="handleRegister" class="space-y-4 mt-6">
                   <el-input v-model="registerForm.username" placeholder="用户名（可自定义）" class="geo-input" size="large" clearable>
@@ -919,7 +901,7 @@ onUnmounted(() => {
 
 .form-wrapper {
   overflow: hidden;
-  transition: height 0.45s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: height 0.35s cubic-bezier(0.25, 1, 0.5, 1);
   will-change: height;
   position: relative;
 }
@@ -979,16 +961,6 @@ onUnmounted(() => {
   padding: 12px 14px;
   font-size: 13px;
   line-height: 1.6;
-}
-
-.auth-hint-card {
-  margin-top: 16px;
-  border-radius: 16px;
-  background: rgba(13, 148, 136, 0.16);
-  color: #0f172a;
-  padding: 12px 14px;
-  font-size: 13px;
-  line-height: 1.7;
 }
 
 .block-title {
@@ -1179,48 +1151,27 @@ onUnmounted(() => {
   transform: translateY(1px);
 }
 
-.slide-right-enter-active,
-.slide-right-leave-active,
-.slide-left-enter-active,
-.slide-left-leave-active {
-  transition:
-    opacity 0.2s ease,
-    transform 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+.auth-fade-enter-active,
+.auth-fade-leave-active {
+  transition: opacity 0.35s ease;
 }
 
-.slide-right-enter-from {
-  opacity: 0;
-  transform: translateX(-10px);
-}
-
-.slide-right-leave-to {
-  opacity: 0;
-  transform: translateX(6px);
-}
-
-.slide-left-enter-from {
-  opacity: 0;
-  transform: translateX(10px);
-}
-
-.slide-left-leave-to {
-  opacity: 0;
-  transform: translateX(-6px);
-}
-
-.slide-right-enter-active,
-.slide-left-enter-active {
+.auth-fade-enter-active {
   position: relative;
   z-index: 2;
 }
 
-.slide-right-leave-active,
-.slide-left-leave-active {
+.auth-fade-leave-active {
   position: absolute;
   inset: 0;
   width: 100%;
   z-index: 1;
   pointer-events: none;
+}
+
+.auth-fade-enter-from,
+.auth-fade-leave-to {
+  opacity: 0;
 }
 
 @media (max-width: 860px) {
