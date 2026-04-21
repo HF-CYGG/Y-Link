@@ -102,6 +102,10 @@ const batchUpdateProductSchema = z
     message: '至少提供一个可更新字段',
   })
 
+const batchCreateProductSchema = z.object({
+  products: z.array(createProductSchema).min(1, '至少新增一个产品').max(50, '单次最多新增 50 个产品'),
+})
+
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export const productRouter = Router()
 
@@ -141,6 +145,21 @@ productRouter.post(
   asyncHandler(async (req, res) => {
     const payload = batchUpdateProductSchema.parse(req.body)
     const data = await productService.batchUpdate(payload)
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+productRouter.post(
+  '/batch-create',
+  // 批量新增商品属于管理操作，需要 products:manage。
+  requirePermission('products:manage'),
+  asyncHandler(async (req, res) => {
+    const payload = batchCreateProductSchema.parse(req.body)
+    const data = await productService.batchCreate(payload.products)
     res.json({
       code: 0,
       message: 'ok',

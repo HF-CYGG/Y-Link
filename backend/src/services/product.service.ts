@@ -118,6 +118,7 @@ const PRODUCT_CODE_CONSTRAINT_MATCHER = {
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const PRODUCT_CREATE_MAX_RETRY = 3
+const PRODUCT_BATCH_CREATE_LIMIT = 50
 
 const PRODUCT_REFERENCE_LABELS = [
   { repoEntity: BizInboundOrderItem, label: '入库明细' },
@@ -185,53 +186,37 @@ export class ProductService {
   }
 
   async create(input: CreateProductInput): Promise<ProductView> {
-    const normalizedProductCode = normalizeProductCodeInput(input.productCode)
-    const shouldGenerateProductCode = !normalizedProductCode
-    let lastError: unknown
+    return AppDataSource.transaction((manager) => this.createWithManager(input, manager))
+  }
 
-    for (let attempt = 1; attempt <= PRODUCT_CREATE_MAX_RETRY; attempt += 1) {
-      try {
-        return await AppDataSource.transaction(async (manager) => {
-          const repo = manager.getRepository(BaseProduct)
-          const isActive = input.isActive ?? true
-          const product = repo.create({
-            productCode: shouldGenerateProductCode ? await generateProductCode(manager) : normalizedProductCode,
-            productName: input.productName.trim(),
-            pinyinAbbr: input.pinyinAbbr?.trim() || '',
-            defaultPrice: normalizeDecimalText(input.defaultPrice),
-            isActive,
-            o2oStatus: resolveEffectiveO2oStatus(isActive, input.o2oStatus),
-            thumbnail: input.thumbnail?.trim() || null,
-            detailContent: input.detailContent?.trim() || null,
-            limitPerUser: Number.isInteger(input.limitPerUser) ? Math.max(1, input.limitPerUser as number) : 5,
-            currentStock: Number.isInteger(input.currentStock) ? Math.max(0, input.currentStock as number) : 0,
-            preOrderedStock: Number.isInteger(input.preOrderedStock) ? Math.max(0, input.preOrderedStock as number) : 0,
-          })
-
-          const saved = await repo.save(product)
-          await this.replaceProductTags(saved.id, input.tagIds ?? [], manager)
-          return this.buildProductView(saved, manager)
-        })
-      } catch (error) {
-        lastError = error
-
-        if (
-          shouldGenerateProductCode &&
-          attempt < PRODUCT_CREATE_MAX_RETRY &&
-          (isUniqueConstraintError(error, PRODUCT_CODE_CONSTRAINT_MATCHER) || isRetryableSqliteLockError(error))
-        ) {
-          continue
-        }
-
-        if (isUniqueConstraintError(error, PRODUCT_CODE_CONSTRAINT_MATCHER)) {
-          throw new BizError('产品编码已存在，请调整后重试', 409)
-        }
-
-        throw error
-      }
+  async batchCreate(inputs: CreateProductInput[]): Promise<ProductView[]> {
+    if (!Array.isArray(inputs) || !inputs.length) {
+      throw new BizError('至少新增一个产品')
+    }
+    if (inputs.length > PRODUCT_BATCH_CREATE_LIMIT) {
+      throw new BizError(`单次最多新增 ${PRODUCT_BATCH_CREATE_LIMIT} 个产品`)
     }
 
-    throw lastError ?? new BizError('产品创建失败，请稍后重试', 500)
+    this.assertNoDuplicateProductCodesInBatch(inputs)
+
+    return AppDataSource.transaction(async (manager) => {
+      const createdProducts: ProductView[] = []
+
+      for (let index = 0; index < inputs.length; index += 1) {
+        const currentInput = inputs[index]
+        try {
+          const createdProduct = await this.createWithManager(currentInput, manager)
+          createdProducts.push(createdProduct)
+        } catch (error) {
+          if (error instanceof BizError) {
+            throw new BizError(`第 ${index + 1} 行创建失败：${error.message}`, error.statusCode)
+          }
+          throw new BizError(`第 ${index + 1} 行创建失败，请检查输入后重试`)
+        }
+      }
+
+      return createdProducts
+    })
   }
 
   async update(id: string, input: UpdateProductInput): Promise<ProductView> {
@@ -454,6 +439,71 @@ export class ProductService {
         tags,
       }
     })
+  }
+
+  private assertNoDuplicateProductCodesInBatch(inputs: CreateProductInput[]): void {
+    const productCodeRowMap = new Map<string, number>()
+
+    inputs.forEach((input, rowIndex) => {
+      const normalizedProductCode = normalizeProductCodeInput(input.productCode)
+      if (!normalizedProductCode) {
+        return
+      }
+
+      const duplicatedRow = productCodeRowMap.get(normalizedProductCode)
+      if (duplicatedRow !== undefined) {
+        throw new BizError(`第 ${rowIndex + 1} 行产品编码与第 ${duplicatedRow + 1} 行重复`, 409)
+      }
+      productCodeRowMap.set(normalizedProductCode, rowIndex)
+    })
+  }
+
+  private async createWithManager(input: CreateProductInput, manager: EntityManager): Promise<ProductView> {
+    const normalizedProductCode = normalizeProductCodeInput(input.productCode)
+    const shouldGenerateProductCode = !normalizedProductCode
+    let lastError: unknown
+
+    for (let attempt = 1; attempt <= PRODUCT_CREATE_MAX_RETRY; attempt += 1) {
+      try {
+        const repo = manager.getRepository(BaseProduct)
+        const isActive = input.isActive ?? true
+        const product = repo.create({
+          productCode: shouldGenerateProductCode ? await generateProductCode(manager) : normalizedProductCode,
+          productName: input.productName.trim(),
+          pinyinAbbr: input.pinyinAbbr?.trim() || '',
+          defaultPrice: normalizeDecimalText(input.defaultPrice),
+          isActive,
+          o2oStatus: resolveEffectiveO2oStatus(isActive, input.o2oStatus),
+          thumbnail: input.thumbnail?.trim() || null,
+          detailContent: input.detailContent?.trim() || null,
+          limitPerUser: Number.isInteger(input.limitPerUser) ? Math.max(1, input.limitPerUser as number) : 5,
+          currentStock: Number.isInteger(input.currentStock) ? Math.max(0, input.currentStock as number) : 0,
+          preOrderedStock: Number.isInteger(input.preOrderedStock) ? Math.max(0, input.preOrderedStock as number) : 0,
+        })
+
+        const saved = await repo.save(product)
+        await this.replaceProductTags(saved.id, input.tagIds ?? [], manager)
+        return this.buildProductView(saved, manager)
+      } catch (error) {
+        lastError = error
+
+        if (
+          shouldGenerateProductCode &&
+          attempt < PRODUCT_CREATE_MAX_RETRY &&
+          (isUniqueConstraintError(error, PRODUCT_CODE_CONSTRAINT_MATCHER) || isRetryableSqliteLockError(error))
+        ) {
+          continue
+        }
+
+        if (isUniqueConstraintError(error, PRODUCT_CODE_CONSTRAINT_MATCHER)) {
+          throw new BizError('产品编码已存在，请调整后重试', 409)
+        }
+
+        throw error
+      }
+    }
+
+    throw lastError ?? new BizError('产品创建失败，请稍后重试', 500)
   }
 }
 

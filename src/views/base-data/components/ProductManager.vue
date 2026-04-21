@@ -11,6 +11,7 @@ import { ElMessage, type FormInstance, type FormRules, type TableInstance } from
 import type { RequestConfig } from '@/api/http'
 import { createTag, getTagList, type Tag } from '@/api/modules/tag'
 import {
+  batchCreateProducts,
   batchUpdateProducts,
   type CreateProductDto,
   createProduct,
@@ -38,6 +39,8 @@ const hasAutoCreatedTags = ref(false)
 const editingProductId = ref('')
 const editLoading = ref(false)
 const batchSubmitting = ref(false)
+const batchCreateDialogVisible = ref(false)
+const batchCreateSubmitting = ref(false)
 const selectedProductIds = ref<string[]>([])
 
 const searchKeyword = ref('')
@@ -60,6 +63,21 @@ interface ProductForm {
   tagIds: string[]
 }
 
+interface BatchCreateProductFormRow {
+  rowId: string
+  productCode: string
+  productName: string
+  pinyinAbbr: string
+  defaultPrice: number
+  currentStock: number
+  isActive: boolean
+  tagIds: Array<string | number>
+}
+
+const BATCH_CREATE_MAX_ROWS = 50
+const batchCreateRowSeed = ref(0)
+const batchCreateRows = ref<BatchCreateProductFormRow[]>([])
+
 /**
  * 产品表单模型：
  * - 通过工厂函数统一创建初始值，避免新增与重置逻辑散落；
@@ -77,6 +95,21 @@ const createDefaultForm = (): ProductForm => ({
 })
 
 const selectedProductCount = computed(() => selectedProductIds.value.length)
+const batchCreateRowCount = computed(() => batchCreateRows.value.length)
+
+const createBatchCreateRow = (): BatchCreateProductFormRow => {
+  batchCreateRowSeed.value += 1
+  return {
+    rowId: `batch-row-${Date.now()}-${batchCreateRowSeed.value}`,
+    productCode: '',
+    productName: '',
+    pinyinAbbr: '',
+    defaultPrice: 0,
+    currentStock: 0,
+    isActive: true,
+    tagIds: [],
+  }
+}
 
 /**
  * 编码排序比较器：
@@ -368,7 +401,7 @@ const handleEditProduct = async (row: ProductRecord) => {
   }
 }
 
-const resolveTagIds = async (tagValues: Array<string | number>): Promise<string[]> => {
+const resolveTagIds = async (tagValues: Array<string | number>, silent = false): Promise<string[]> => {
   const createdTagNameCache = new Map<string, string>()
   const resolvedIds: string[] = []
   const autoCreatedTagNames: string[] = []
@@ -409,7 +442,9 @@ const resolveTagIds = async (tagValues: Array<string | number>): Promise<string[
 
   if (autoCreatedTagNames.length) {
     hasAutoCreatedTags.value = true
-    ElMessage.success(`已自动创建标签：${[...new Set(autoCreatedTagNames)].join('、')}`)
+    if (!silent) {
+      ElMessage.success(`已自动创建标签：${[...new Set(autoCreatedTagNames)].join('、')}`)
+    }
   }
 
   return [...new Set(resolvedIds)]
@@ -439,6 +474,107 @@ const handleBatchUpdateStatus = async (isActive: boolean) => {
     ElMessage.error(extractErrorMessage(error, '批量修改失败'))
   } finally {
     batchSubmitting.value = false
+  }
+}
+
+const openBatchCreateDialog = () => {
+  batchCreateRows.value = [createBatchCreateRow()]
+  batchCreateDialogVisible.value = true
+}
+
+const resetBatchCreateRows = () => {
+  batchCreateRows.value = [createBatchCreateRow()]
+}
+
+const addBatchCreateRow = () => {
+  if (batchCreateRows.value.length >= BATCH_CREATE_MAX_ROWS) {
+    ElMessage.warning(`单次最多新增 ${BATCH_CREATE_MAX_ROWS} 行`)
+    return
+  }
+  batchCreateRows.value.push(createBatchCreateRow())
+}
+
+const removeBatchCreateRow = (rowId: string) => {
+  if (batchCreateRows.value.length <= 1) {
+    ElMessage.warning('至少保留一行产品')
+    return
+  }
+  batchCreateRows.value = batchCreateRows.value.filter((row) => row.rowId !== rowId)
+}
+
+const validateBatchCreateRows = (): string | null => {
+  if (!batchCreateRows.value.length) {
+    return '请至少添加一行产品'
+  }
+
+  const explicitProductCodeRowMap = new Map<string, number>()
+  for (let index = 0; index < batchCreateRows.value.length; index += 1) {
+    const row = batchCreateRows.value[index]
+    if (!row.productName.trim()) {
+      return `第 ${index + 1} 行产品名称不能为空`
+    }
+
+    if (!Number.isFinite(row.defaultPrice) || row.defaultPrice < 0) {
+      return `第 ${index + 1} 行默认售价必须大于等于 0`
+    }
+
+    if (!Number.isFinite(row.currentStock) || row.currentStock < 0 || !Number.isInteger(row.currentStock)) {
+      return `第 ${index + 1} 行当前库存必须是大于等于 0 的整数`
+    }
+
+    const normalizedProductCode = row.productCode.trim()
+    if (!normalizedProductCode) {
+      continue
+    }
+    const duplicatedRow = explicitProductCodeRowMap.get(normalizedProductCode)
+    if (duplicatedRow !== undefined) {
+      return `第 ${index + 1} 行产品编码与第 ${duplicatedRow + 1} 行重复`
+    }
+    explicitProductCodeRowMap.set(normalizedProductCode, index)
+  }
+
+  return null
+}
+
+const handleBatchCreate = async () => {
+  const validationError = validateBatchCreateRows()
+  if (validationError) {
+    ElMessage.warning(validationError)
+    return
+  }
+
+  batchCreateSubmitting.value = true
+  hasAutoCreatedTags.value = false
+  try {
+    const productsPayload: CreateProductDto[] = []
+    for (const row of batchCreateRows.value) {
+      const tagIds = await resolveTagIds(row.tagIds, true)
+      productsPayload.push({
+        productCode: row.productCode.trim() || undefined,
+        productName: row.productName.trim(),
+        pinyinAbbr: row.pinyinAbbr.trim(),
+        defaultPrice: Number(row.defaultPrice),
+        currentStock: Math.max(0, Math.floor(row.currentStock)),
+        isActive: row.isActive,
+        tagIds,
+      })
+    }
+
+    const createdProducts = await batchCreateProducts({
+      products: productsPayload,
+    })
+    if (hasAutoCreatedTags.value) {
+      await loadTags()
+      ElMessage.success('已自动创建并关联缺失标签')
+    }
+    await clearSelection()
+    await reloadProducts()
+    batchCreateDialogVisible.value = false
+    ElMessage.success(`已批量新增 ${createdProducts.length} 个产品`)
+  } catch (error) {
+    ElMessage.error(extractErrorMessage(error, '批量新增失败'))
+  } finally {
+    batchCreateSubmitting.value = false
   }
 }
 
@@ -513,6 +649,9 @@ onActivated(() => {
           </el-button>
           <el-button :class="isPhone ? 'w-full' : ''" :disabled="!selectedProductCount" @click="clearSelection">
             清空选择
+          </el-button>
+          <el-button :class="isPhone ? 'w-full' : ''" type="primary" plain @click="openBatchCreateDialog">
+            批量新增
           </el-button>
           <el-button :class="isPhone ? 'w-full' : ''" type="primary" icon="Plus" @click="handleAdd">新增产品</el-button>
         </div>
@@ -655,6 +794,110 @@ onActivated(() => {
         </div>
       </template>
     </BizResponsiveDataCollectionShell>
+
+    <BizCrudDialogShell
+      v-model="batchCreateDialogVisible"
+      title="批量新增产品"
+      phone-width="96%"
+      tablet-width="920px"
+      desktop-width="1080px"
+      :confirm-loading="batchCreateSubmitting"
+      confirm-text="批量提交"
+      dialog-class="product-dialog product-batch-dialog"
+      @confirm="handleBatchCreate"
+    >
+      <template #default="{ isPhone }">
+        <section class="flex flex-col gap-3">
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <p class="text-xs text-slate-500">
+              当前 {{ batchCreateRowCount }} 行 / 上限 {{ BATCH_CREATE_MAX_ROWS }} 行
+            </p>
+            <div class="flex flex-wrap items-center gap-2">
+              <el-button size="small" @click="resetBatchCreateRows">重置</el-button>
+              <el-button size="small" type="primary" plain @click="addBatchCreateRow">新增一行</el-button>
+            </div>
+          </div>
+          <div class="rounded-xl border border-slate-200">
+            <el-table :data="batchCreateRows" size="small" max-height="460">
+              <el-table-column label="#" width="56" align="center">
+                <template #default="{ $index }">
+                  {{ $index + 1 }}
+                </template>
+              </el-table-column>
+              <el-table-column label="产品编码" min-width="160">
+                <template #default="{ row }">
+                  <el-input v-model="row.productCode" placeholder="留空自动生成统一编码" />
+                </template>
+              </el-table-column>
+              <el-table-column label="产品名称" min-width="180">
+                <template #default="{ row }">
+                  <el-input v-model="row.productName" placeholder="请输入产品名称" />
+                </template>
+              </el-table-column>
+              <el-table-column label="拼音简写" min-width="160">
+                <template #default="{ row }">
+                  <el-input v-model="row.pinyinAbbr" placeholder="可选" />
+                </template>
+              </el-table-column>
+              <el-table-column label="默认售价" min-width="150">
+                <template #default="{ row }">
+                  <el-input-number v-model="row.defaultPrice" :min="0" :precision="2" :step="1" class="w-full" />
+                </template>
+              </el-table-column>
+              <el-table-column label="当前库存" min-width="150">
+                <template #default="{ row }">
+                  <el-input-number v-model="row.currentStock" :min="0" :step="1" :precision="0" class="w-full" />
+                </template>
+              </el-table-column>
+              <el-table-column label="关联标签" min-width="220">
+                <template #default="{ row }">
+                  <el-select
+                    v-model="row.tagIds"
+                    multiple
+                    filterable
+                    allow-create
+                    default-first-option
+                    :reserve-keyword="false"
+                    placeholder="请选择关联标签"
+                    class="w-full"
+                  >
+                    <el-option
+                      v-for="tag in allTags"
+                      :key="tag.id"
+                      :label="tag.tagName"
+                      :value="tag.id"
+                    />
+                  </el-select>
+                </template>
+              </el-table-column>
+              <el-table-column label="状态" width="108">
+                <template #default="{ row }">
+                  <el-switch v-model="row.isActive" inline-prompt active-text="启用" inactive-text="停用" />
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="86" fixed="right" align="center">
+                <template #default="{ row }">
+                  <el-button
+                    link
+                    type="danger"
+                    :disabled="batchCreateRows.length <= 1"
+                    @click="removeBatchCreateRow(row.rowId)"
+                  >
+                    删除
+                  </el-button>
+                </template>
+              </el-table-column>
+            </el-table>
+          </div>
+          <p class="text-xs leading-5 text-slate-400">
+            提示：批量提交采用整批回滚策略；任一行校验失败会整体失败。不存在标签会自动创建后再关联。
+          </p>
+          <p v-if="isPhone" class="text-xs text-slate-400">
+            移动端建议分批录入，单次最多 50 行。
+          </p>
+        </section>
+      </template>
+    </BizCrudDialogShell>
 
     <BizCrudDialogShell
       v-model="dialogVisible"

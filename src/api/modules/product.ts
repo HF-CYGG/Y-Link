@@ -64,6 +64,10 @@ export interface BatchUpdateProductDto {
   isActive?: boolean
 }
 
+export interface BatchCreateProductDto {
+  products: CreateProductDto[]
+}
+
 /**
  * 产品查询参数：
  * - keyword 支持名称/拼音首字母模糊检索；
@@ -263,6 +267,19 @@ export const batchUpdateProducts = async (data: BatchUpdateProductDto): Promise<
   const result = await request<ProductRawRecord[]>({
     method: 'POST',
     url: '/products/batch',
+    data,
+  })
+
+  return result.map(normalizeProductRecord)
+}
+
+/**
+ * 批量新增产品
+ */
+export const batchCreateProducts = async (data: BatchCreateProductDto): Promise<ProductRecord[]> => {
+  const result = await request<ProductRawRecord[]>({
+    method: 'POST',
+    url: '/products/batch-create',
     data,
   })
 
