@@ -394,7 +394,7 @@ onMounted(async () => {
         </div>
 
         <div class="mt-4 space-y-2 rounded-2xl bg-amber-50 px-4 py-4 text-sm text-amber-700">
-          <p>取货地址：A 区一层服务台</p>
+          <p>取货地址：海右书院111</p>
           <p>取货时段：08:30 - 20:30</p>
           <p>联系人：门店值班人员</p>
           <p>温馨提示：请在有效时段内到店核销，过期将自动取消。</p>
