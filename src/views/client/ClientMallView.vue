@@ -7,7 +7,7 @@
 
 
 import { useVirtualList } from '@vueuse/core'
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { ArrowDown, ArrowRight, Search, ShoppingCart } from '@element-plus/icons-vue'
@@ -62,9 +62,12 @@ const categoryScrollUnlockTimer = ref<number | null>(null)
 const categoryScrollSessionId = ref(0)
 const currentLockedSessionId = ref(0)
 const pendingCategoryTargetTop = ref<number | null>(null)
+const listViewportBottomSpacer = ref(220)
 
 const CATEGORY_SCROLL_HIT_THRESHOLD = 12
 const CATEGORY_SCROLL_FALLBACK_MS = 420
+const CATEGORY_VIEWPORT_ACTIVATE_OFFSET = 28
+const CATEGORY_BOTTOM_VISIBLE_PADDING = 56
 
 // 商城页属于高频返回页面，初始化时优先恢复购物车与目录缓存，避免每次进入都重置上下文。
 clientCartStore.initialize()
@@ -318,16 +321,44 @@ const releaseCategoryScrollLock = () => {
   pendingCategoryTargetTop.value = null
 }
 
-const resolveCategoryScrollTop = (categoryKey: string) => {
+const syncListViewportBottomSpacer = () => {
+  const scroller = listScrollerRef.value
+  if (!scroller) {
+    listViewportBottomSpacer.value = 220
+    return
+  }
+  // 为右侧分组列表补一个“可滚动缓冲尾部”，确保尾部标签也有足够空间滚动到可视定位线附近。
+  listViewportBottomSpacer.value = Math.max(180, Math.floor(scroller.clientHeight * 0.58))
+}
+
+const resolveCategoryScrollMetrics = (categoryKey: string, scroller: HTMLElement) => {
   if (categoryKey === 'all') {
-    return 0
+    return {
+      rawTargetTop: 0,
+      reachableTargetTop: 0,
+      maxScrollTop: Math.max(0, scroller.scrollHeight - scroller.clientHeight),
+      relativeTop: 0,
+      relativeBottom: 0,
+    }
   }
   const section = sectionRefMap[categoryKey]
   if (!section) {
     return null
   }
-  // 目标语义是“分组标题吸顶对齐”，保留极小缓冲避免视觉贴边。
-  return Math.max(0, section.offsetTop - 4)
+  const maxScrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight)
+  // 统一以分组容器起点作为锚点：
+  // 1. 点击标签时，分组标题与第一行商品一起进入顶部视口；
+  // 2. “全部”和第一个标签天然对应同一顶部位置，不会再点击首标签后异常下滑。
+  const rawTargetTop = Math.max(0, section.offsetTop)
+  const relativeTop = section.offsetTop - scroller.scrollTop
+  const relativeBottom = section.offsetTop + section.offsetHeight - scroller.scrollTop
+  return {
+    rawTargetTop,
+    reachableTargetTop: Math.min(rawTargetTop, maxScrollTop),
+    maxScrollTop,
+    relativeTop,
+    relativeBottom,
+  }
 }
 
 const lockCategoryScrollSession = (categoryKey: string, targetTop: number) => {
@@ -361,14 +392,21 @@ const scrollToCategory = async (categoryKey: string) => {
     return
   }
 
-  const targetTop = resolveCategoryScrollTop(categoryKey)
-  if (targetTop === null) {
+  syncListViewportBottomSpacer()
+  await nextTick()
+  const nextScroller = listScrollerRef.value
+  if (!nextScroller) {
     return
   }
-  lockCategoryScrollSession(categoryKey, targetTop)
+
+  const targetMetrics = resolveCategoryScrollMetrics(categoryKey, nextScroller)
+  if (!targetMetrics) {
+    return
+  }
+  lockCategoryScrollSession(categoryKey, targetMetrics.reachableTargetTop)
   // 只驱动右侧滚动容器，避免 scrollIntoView 在不同浏览器下误触发页面级滚动或无滚动。
-  scroller.scrollTo({
-    top: targetTop,
+  nextScroller.scrollTo({
+    top: targetMetrics.reachableTargetTop,
     behavior: 'smooth',
   })
 }
@@ -381,13 +419,55 @@ const handleCategoryManualInterrupt = () => {
   handleProductListScroll()
 }
 
+const resolveActiveCategoryByViewport = (scroller: HTMLElement) => {
+  const firstCategoryKey = categoryGroups.value[0]?.key ?? 'all'
+  if (scroller.scrollTop <= CATEGORY_SCROLL_HIT_THRESHOLD) {
+    // 顶部位置允许“全部”和首个标签共用同一滚动位置：
+    // - 用户主动点“全部”时保留“全部”高亮；
+    // - 其余情况下顶部默认归属第一个真实分类。
+    return activeCategoryKey.value === 'all' ? 'all' : firstCategoryKey
+  }
+  const anchorLine = Math.min(
+    CATEGORY_VIEWPORT_ACTIVATE_OFFSET,
+    Math.max(18, Math.floor(scroller.clientHeight * 0.12)),
+  )
+  const maxScrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight)
+  let passedCategoryKey = 'all'
+  let visibleCategoryKey = 'all'
+
+  for (const group of categoryGroups.value) {
+    const section = sectionRefMap[group.key]
+    if (!section) {
+      continue
+    }
+    const relativeTop = section.offsetTop - scroller.scrollTop
+    const relativeBottom = section.offsetTop + section.offsetHeight - scroller.scrollTop
+
+    if (relativeTop <= anchorLine) {
+      passedCategoryKey = group.key
+    }
+    if (relativeBottom > 0 && relativeTop < scroller.clientHeight - CATEGORY_BOTTOM_VISIBLE_PADDING) {
+      visibleCategoryKey = group.key
+    }
+    if (relativeTop <= anchorLine && relativeBottom > anchorLine) {
+      return group.key
+    }
+  }
+
+  // 当列表接近底部时，后续分组可能无法再顶到顶部，此时优先采用“最后一个清晰可见分组”。
+  if (maxScrollTop - scroller.scrollTop <= CATEGORY_SCROLL_HIT_THRESHOLD) {
+    return visibleCategoryKey
+  }
+  return passedCategoryKey
+}
+
 const handleProductListScroll = () => {
   const scroller = listScrollerRef.value
   if (!scroller) {
     return
   }
 
-  const lockHit = getPendingLockedCategory(scroller.scrollTop)
+  const lockHit = getPendingLockedCategory(scroller)
   if (lockHit === 'target-hit') {
     releaseCategoryScrollLock()
   } else if (lockHit) {
@@ -401,40 +481,36 @@ const handleProductListScroll = () => {
     return
   }
 
-  const top = scroller.scrollTop + 24
-  let matched = 'all'
-  for (const group of categoryGroups.value) {
-    const element = sectionRefMap[group.key]
-    if (!element) {
-      continue
-    }
-    const sectionTop = element.offsetTop
-    if (sectionTop <= top) {
-      matched = group.key
-    } else {
-      break
-    }
-  }
-  activeCategoryKey.value = matched
+  activeCategoryKey.value = resolveActiveCategoryByViewport(scroller)
 }
 
 const isCategorySyncTemporarilyBlocked = () => {
   return searchMode.value || largeDatasetMode.value || scrollingByCategoryClick.value
 }
 
-const getPendingLockedCategory = (scrollTop: number): string | 'target-hit' | null => {
+const getPendingLockedCategory = (scroller: HTMLElement): string | 'target-hit' | null => {
   // 用户点击分类后，在滚动抵达目标分组前锁定激活项，
   // 防止“先跳到目标后又瞬间回到上一个分类”的回写抖动。
   const pendingKey = pendingCategoryKey.value
   if (!pendingKey || !scrollingByCategoryClick.value) {
     return null
   }
-  const targetTop = pendingCategoryTargetTop.value
-  if (targetTop === null) {
+  const targetMetrics = resolveCategoryScrollMetrics(pendingKey, scroller)
+  if (!targetMetrics) {
     return null
   }
-  const distanceToTarget = Math.abs(targetTop - scrollTop)
-  return distanceToTarget <= CATEGORY_SCROLL_HIT_THRESHOLD ? 'target-hit' : pendingKey
+  const distanceToTarget = Math.abs(targetMetrics.reachableTargetTop - scroller.scrollTop)
+  const nearBottom = targetMetrics.maxScrollTop - scroller.scrollTop <= CATEGORY_SCROLL_HIT_THRESHOLD
+  const sectionReachedViewport = targetMetrics.relativeTop <= CATEGORY_VIEWPORT_ACTIVATE_OFFSET
+    || (nearBottom
+      && targetMetrics.relativeBottom > CATEGORY_VIEWPORT_ACTIVATE_OFFSET
+      && targetMetrics.relativeTop < scroller.clientHeight - CATEGORY_BOTTOM_VISIBLE_PADDING)
+  return distanceToTarget <= CATEGORY_SCROLL_HIT_THRESHOLD || sectionReachedViewport ? 'target-hit' : pendingKey
+}
+
+const handleMallViewportResize = () => {
+  syncListViewportBottomSpacer()
+  handleProductListScroll()
 }
 
 const cartDrawerVisible = ref(false)
@@ -475,6 +551,15 @@ watch(
 
 onMounted(async () => {
   await loadProducts()
+  await nextTick()
+  syncListViewportBottomSpacer()
+  handleProductListScroll()
+  globalThis.window.addEventListener('resize', handleMallViewportResize, { passive: true })
+})
+
+onBeforeUnmount(() => {
+  clearCategoryUnlockTimer()
+  globalThis.window.removeEventListener('resize', handleMallViewportResize)
 })
 </script>
 
@@ -685,6 +770,7 @@ onMounted(async () => {
             </article>
           </div>
         </section>
+        <div class="mall-category-bottom-spacer" :style="{ height: `${listViewportBottomSpacer}px` }" aria-hidden="true"></div>
       </div>
     </section>
 
@@ -836,6 +922,11 @@ onMounted(async () => {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   gap: 0.65rem;
+}
+
+.mall-category-bottom-spacer {
+  width: 100%;
+  pointer-events: none;
 }
 
 .client-product-card {
