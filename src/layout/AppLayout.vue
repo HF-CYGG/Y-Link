@@ -117,12 +117,12 @@ const resolveViewKey = (route: RouteLocationNormalizedLoaded) => {
         <router-view v-slot="{ Component, route }">
           <Suspense timeout="120">
             <template #default>
-              <div class="min-h-full">
+              <div class="route-stage min-h-full">
                 <transition name="fade-slide">
                   <KeepAlive v-if="route.meta.keepAlive" :max="8">
-                    <component :is="Component" v-if="Component" :key="resolveViewKey(route)" />
+                    <component :is="Component" v-if="Component" :key="resolveViewKey(route)" class="route-panel" />
                   </KeepAlive>
-                  <component :is="Component" v-else-if="Component" :key="resolveViewKey(route)" />
+                  <component :is="Component" v-else-if="Component" :key="resolveViewKey(route)" class="route-panel" />
                 </transition>
               </div>
             </template>
@@ -162,6 +162,32 @@ const resolveViewKey = (route: RouteLocationNormalizedLoaded) => {
 .system-entry-fade-enter-from,
 .system-entry-fade-leave-to {
   opacity: 0;
+}
+
+.route-stage {
+  position: relative;
+  min-height: 100%;
+  overflow: hidden;
+}
+
+.route-panel {
+  width: 100%;
+  min-height: 100%;
+  backface-visibility: hidden;
+  transform: translateZ(0);
+}
+
+/* 路由切页稳定舞台：离场页绝对定位，避免新旧页面同时占位造成瞬间布局抖动。 */
+.route-stage :deep(.fade-slide-enter-active) {
+  position: relative;
+  z-index: 2;
+}
+
+.route-stage :deep(.fade-slide-leave-active) {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
 }
 
 .route-loading-shell {

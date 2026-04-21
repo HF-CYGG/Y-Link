@@ -174,6 +174,7 @@ const deviceLabel = computed(() => {
           :default-openeds="openedMenuPaths"
           class="app-sidebar-menu border-none bg-transparent"
           :class="appStore.isTablet ? 'app-sidebar-menu--compact' : ''"
+          :collapse-transition="false"
           router
           @select="handleMenuSelect"
         >
@@ -226,6 +227,8 @@ const deviceLabel = computed(() => {
 :deep(.app-sidebar-menu .el-sub-menu__title) {
   min-height: 44px;
   border-radius: 12px;
+  position: relative;
+  overflow: hidden;
 }
 
 :deep(.app-sidebar-menu .el-sub-menu .el-menu-item) {
@@ -261,5 +264,10 @@ const deviceLabel = computed(() => {
   background-color: rgba(77, 140, 133, 0.2) !important;
   border-right: 3px solid #7be0d5;
   color: #7be0d5 !important;
+}
+
+/* 侧栏切页时抑制子菜单箭头过渡抖动，避免出现右侧短暂残影。 */
+:deep(.app-sidebar-menu .el-sub-menu__icon-arrow) {
+  transition: none !important;
 }
 </style>
