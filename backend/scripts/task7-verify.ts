@@ -1,3 +1,8 @@
+/**
+ * 模块说明：Task7 自动化验证脚本
+ * 文件职责：验证登录退出、角色限制、用户管理与开单审计链路
+ * 维护说明：认证守卫、用户管理或审计行为发生变更时需同步维护本脚本断言
+ */
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'

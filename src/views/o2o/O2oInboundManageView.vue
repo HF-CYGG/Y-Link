@@ -1,12 +1,8 @@
 <script setup lang="ts">
 /**
- * 入库管理工作台：
- * 1. 左侧负责“识别商品”与“录入策略”；
- * 2. 中间维护“本次入库清单”，支持多商品连续录入后统一确认；
- * 3. 右侧展示最近库存流水，便于提交后即时核对结果。
- *
- * 页面核心目标不是一次只处理一个商品，
- * 而是尽量贴近仓管/PDA 的实际工作流：连续扫、随时改、最后统一确认。
+ * 模块说明：线上预订入库管理工作台页面
+ * 文件职责：提供扫码识别、批量入库清单确认与库存流水联动追踪的一体化入库操作界面
+ * 维护说明：调整入库流程时需同步维护“识别→入清单→批量确认→流水核对”四段式状态链路，避免库存口径不一致
  */
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -110,11 +106,15 @@ const manualSelectedProduct = computed(() => {
 const totalSkuCount = computed(() => inboundList.value.length)
 const totalQtyCount = computed(() => inboundList.value.reduce((sum, item) => sum + item.qty, 0))
 const scanCapabilityHint = computed(() => {
-  return scanModeLabel.value === '实时扫码'
-    ? '轻触相机图标即可扫码；在 HTTP 或摄像头受限环境下，会自动切换为拍照识别。'
-    : isSecureCameraContext.value
-      ? '当前浏览器已切换为拍照识别，请轻触相机图标拍照扫描商品条码或二维码。'
-      : '当前为 HTTP 环境，已切换为拍照识别，请轻触相机图标拍照扫描商品条码或二维码。'
+  if (scanModeLabel.value === '实时扫码') {
+    return '轻触相机图标即可扫码；在 HTTP 或摄像头受限环境下，会自动切换为拍照识别。'
+  }
+
+  if (isSecureCameraContext.value) {
+    return '当前浏览器已切换为拍照识别，请轻触相机图标拍照扫描商品条码或二维码。'
+  }
+
+  return '当前为 HTTP 环境，已切换为拍照识别，请轻触相机图标拍照扫描商品条码或二维码。'
 })
 
 const setRecognizedProduct = (product: ProductRecord | null) => {
@@ -267,8 +267,13 @@ const {
   },
 })
 
-void imageInputRef
-void bindScannerContainer
+const handleOpenCameraScanDialog = () => {
+  if (imageInputRef.value) {
+    // 每次重新打开前清空文件输入值，确保连续拍照选择同一文件也能触发 change 事件。
+    imageInputRef.value.value = ''
+  }
+  openCameraScanDialog()
+}
 
 // 快捷数量按钮的行为依赖当前模式：
 // - 扫码即+1：对当前识别商品直接累计；
@@ -448,7 +453,7 @@ onMounted(async () => {
           <div class="mt-3 inbound-scan-toolbar">
             <div class="inbound-scan-icon-group">
               <el-tooltip :content="scanButtonTitle" placement="top">
-                <el-button class="inbound-camera-btn" @click="openCameraScanDialog">
+                <el-button class="inbound-camera-btn" @click="handleOpenCameraScanDialog">
                   <el-icon :size="18"><CameraFilled /></el-icon>
                 </el-button>
               </el-tooltip>

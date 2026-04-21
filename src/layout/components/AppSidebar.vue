@@ -261,9 +261,9 @@ const deviceLabel = computed(() => {
 }
 
 .dark :deep(.app-sidebar-menu .el-menu-item.is-active) {
-  background-color: rgba(77, 140, 133, 0.2) !important;
-  border-right: 3px solid #7be0d5;
-  color: #7be0d5 !important;
+  background-color: #2f5f5a !important;
+  border-right: 3px solid #b8fff5;
+  color: #ffffff !important;
 }
 
 /* 侧栏切页时抑制子菜单箭头过渡抖动，避免出现右侧短暂残影。 */

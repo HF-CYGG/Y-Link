@@ -1,3 +1,8 @@
+/**
+ * 模块说明：认证治理自动化验证脚本（Task1/Task2）
+ * 文件职责：验证管理员初始化、本人改密、管理员重置密码与审计留痕链路
+ * 维护说明：扩展认证安全能力时需同步补充断言，确保核心鉴权流程可回归验证
+ */
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'

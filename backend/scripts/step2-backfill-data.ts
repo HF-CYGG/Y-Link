@@ -1,3 +1,8 @@
+/**
+ * 模块说明：大表回填脚本（第二步）
+ * 文件职责：按游标分批回填 base_product 的历史空字段，降低全表更新风险
+ * 维护说明：若新增需要回填的字段，需同步更新查询条件、回填语句与批处理节流策略
+ */
 import { AppDataSource } from '../src/config/data-source.js'
 
 /**
@@ -67,4 +72,4 @@ async function runBackfill() {
   }
 }
 
-runBackfill()
+await runBackfill()

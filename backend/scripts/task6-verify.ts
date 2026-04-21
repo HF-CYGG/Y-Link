@@ -1,3 +1,8 @@
+/**
+ * 模块说明：Task6 自动化验证脚本
+ * 文件职责：验证开单事务原子性、单号递增规则、检索条件与多端交互实现存在性
+ * 维护说明：涉及开单事务、检索或多端交互改造时，需同步更新此脚本断言
+ */
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
