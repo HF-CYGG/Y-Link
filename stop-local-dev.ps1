@@ -1,18 +1,18 @@
-<#
-模块说明：stop-local-dev.ps1
-  文件职责：停止由 `start-local-dev.ps1` 记录的本地联调前后端进程，并清理临时运行文件。
-  实现逻辑：从 `.local-dev/processes.json` 读取 shell PID 与监听 PID，递归终止进程树后再删除启动时生成的临时文件。
+﻿<#
+妯″潡璇存槑锛歴top-local-dev.ps1
+  鏂囦欢鑱岃矗锛氬仠姝㈢敱 `start-local-dev.ps1` 璁板綍鐨勬湰鍦拌仈璋冨墠鍚庣杩涚▼锛屽苟娓呯悊涓存椂杩愯鏂囦欢銆?
+  瀹炵幇閫昏緫锛氫粠 `.local-dev/processes.json` 璇诲彇 shell PID 涓庣洃鍚?PID锛岄€掑綊缁堟杩涚▼鏍戝悗鍐嶅垹闄ゅ惎鍔ㄦ椂鐢熸垚鐨勪复鏃舵枃浠躲€?
 #>
 
 $ErrorActionPreference = 'Stop'
 
-# 所有运行态信息都从仓库根目录下的 `.local-dev` 目录读取，
-# 这样无论用户当前在哪个 PowerShell 工作目录执行停止脚本，清理目标都保持一致。
+# 鎵€鏈夎繍琛屾€佷俊鎭兘浠庝粨搴撴牴鐩綍涓嬬殑 `.local-dev` 鐩綍璇诲彇锛?
+# 杩欐牱鏃犺鐢ㄦ埛褰撳墠鍦ㄥ摢涓?PowerShell 宸ヤ綔鐩綍鎵ц鍋滄鑴氭湰锛屾竻鐞嗙洰鏍囬兘淇濇寔涓€鑷淬€?
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RuntimeRoot = Join-Path $ProjectRoot '.local-dev'
 $PidFile = Join-Path $RuntimeRoot 'processes.json'
 
-# 在“有记录但清理信息不完整”时输出提醒，便于快速判断当前停止链路是否完整。
+# 鍦ㄢ€滄湁璁板綍浣嗘竻鐞嗕俊鎭笉瀹屾暣鈥濇椂杈撳嚭鎻愰啋锛屼究浜庡揩閫熷垽鏂綋鍓嶅仠姝㈤摼璺槸鍚﹀畬鏁淬€?
 function Write-WarnMessage {
   param([string]$Message)
   Write-Host "[local-dev][warn] $Message" -ForegroundColor Yellow
@@ -23,7 +23,7 @@ function Write-Info {
   Write-Host "[local-dev] $Message"
 }
 
-# 递归收集所有子孙进程，防止只关闭父进程后残留 npm/node 监听。
+# 閫掑綊鏀堕泦鎵€鏈夊瓙瀛欒繘绋嬶紝闃叉鍙叧闂埗杩涚▼鍚庢畫鐣?npm/node 鐩戝惉銆?
 function Get-DescendantProcessIds {
   param([int]$RootProcessId)
 
@@ -48,7 +48,7 @@ function Get-DescendantProcessIds {
   return @($visited)
 }
 
-# 停止顺序与启动脚本一致：优先子进程，再停止根进程。
+# 鍋滄椤哄簭涓庡惎鍔ㄨ剼鏈竴鑷达細浼樺厛瀛愯繘绋嬶紝鍐嶅仠姝㈡牴杩涚▼銆?
 function Stop-ProcessTree {
   param([int]$RootProcessId)
 
@@ -85,16 +85,16 @@ function Get-RecordedProcessIds {
 }
 
 if (-not (Test-Path $PidFile)) {
-  Write-Info '未找到本地联调进程记录，无需停止。'
+  Write-Info '鏈壘鍒版湰鍦拌仈璋冭繘绋嬭褰曪紝鏃犻渶鍋滄銆?
   exit 0
 }
 
 $record = Get-Content -Path $PidFile -Raw | ConvertFrom-Json
-# 同时兼容旧记录中的 shell PID 和新记录中的监听 PID。
+# 鍚屾椂鍏煎鏃ц褰曚腑鐨?shell PID 鍜屾柊璁板綍涓殑鐩戝惉 PID銆?
 $processIds = @(Get-RecordedProcessIds -Record $record)
 
 if (-not $processIds.Count) {
-  Write-WarnMessage '检测到本地联调记录文件，但其中没有可用的 PID 信息。'
+  Write-WarnMessage '妫€娴嬪埌鏈湴鑱旇皟璁板綍鏂囦欢锛屼絾鍏朵腑娌℃湁鍙敤鐨?PID 淇℃伅銆?
 }
 
 foreach ($processId in $processIds) {
@@ -108,9 +108,10 @@ if ($effectiveBackendEnvFile -and (Test-Path $effectiveBackendEnvFile)) {
 
 $childProcessInputFile = $record.childProcessInputFile
 if ($childProcessInputFile -and (Test-Path $childProcessInputFile)) {
-  # 启动脚本会创建一个空 stdin 文件给隐藏子进程复用，这里同步清理，避免 `.local-dev` 目录残留噪声文件。
+  # 鍚姩鑴氭湰浼氬垱寤轰竴涓┖ stdin 鏂囦欢缁欓殣钘忓瓙杩涚▼澶嶇敤锛岃繖閲屽悓姝ユ竻鐞嗭紝閬垮厤 `.local-dev` 鐩綍娈嬬暀鍣０鏂囦欢銆?
   Remove-Item -Path $childProcessInputFile -Force -ErrorAction SilentlyContinue
 }
 
+# 先删除 PID 记录文件，再输出完成提示，避免下次启动时误判为仍有旧运行态残留。
 Remove-Item -Path $PidFile -Force -ErrorAction SilentlyContinue
 Write-Info '已停止记录中的本地联调进程，并完成运行痕迹清理。'
