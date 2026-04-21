@@ -306,25 +306,35 @@ const scrollToCategory = async (categoryKey: string) => {
     return
   }
   if (categoryKey === 'all') {
+    scrollingByCategoryClick.value = true
     listScrollerRef.value?.scrollTo({
       top: 0,
       behavior: 'smooth',
     })
-    pendingCategoryKey.value = null
+    categoryScrollUnlockTimer.value = globalThis.window.setTimeout(() => {
+      scrollingByCategoryClick.value = false
+      pendingCategoryKey.value = null
+      categoryScrollUnlockTimer.value = null
+      handleProductListScroll()
+    }, 600)
     return
   }
 
   scrollingByCategoryClick.value = true
   await nextTick()
+  const scroller = listScrollerRef.value
   const section = sectionRefMap[categoryKey]
-  if (!section) {
+  if (!section || !scroller) {
     scrollingByCategoryClick.value = false
+    pendingCategoryKey.value = null
     return
   }
 
-  section.scrollIntoView({
+  // 只驱动右侧滚动容器，避免 scrollIntoView 在不同浏览器下误触发页面级滚动或无滚动。
+  const targetTop = Math.max(0, section.offsetTop - 6)
+  scroller.scrollTo({
+    top: targetTop,
     behavior: 'smooth',
-    block: 'start',
   })
   // 平滑滚动时长在不同浏览器/设备上差异较大，
   // 如果太早解锁会被 scroll 监听回写成上一个分类。
@@ -347,9 +357,13 @@ const handleProductListScroll = () => {
     return
   }
 
+  if (pendingCategoryKey.value && !scrollingByCategoryClick.value) {
+    pendingCategoryKey.value = null
+  }
+
   // 用户点击分类后，在滚动抵达目标分组前锁定激活项，
   // 防止“先跳到目标后又瞬间回到上一个分类”的回写抖动。
-  if (pendingCategoryKey.value && pendingCategoryKey.value !== 'all') {
+  if (pendingCategoryKey.value && pendingCategoryKey.value !== 'all' && scrollingByCategoryClick.value) {
     const pendingSection = sectionRefMap[pendingCategoryKey.value]
     if (pendingSection) {
       const distanceToTarget = Math.abs(pendingSection.offsetTop - scroller.scrollTop)
