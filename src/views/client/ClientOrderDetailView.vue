@@ -87,7 +87,7 @@ const merchantMessageContent = computed(() => {
     return null
   }
   const normalizedValue = value.trim()
-  return normalizedValue ? normalizedValue : null
+  return normalizedValue || null
 })
 
 const timelineItems = computed(() => {

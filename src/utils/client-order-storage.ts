@@ -24,10 +24,69 @@ export interface ClientOrderSnapshot {
 const CLIENT_ORDER_SNAPSHOT_KEY = 'y-link.client-order.snapshot'
 
 const getStorage = () => {
-  if (typeof globalThis.window === 'undefined') {
+  if (globalThis.window === undefined) {
     return null
   }
   return globalThis.window.localStorage
+}
+
+const normalizeStatusReport = (
+  row: Record<string, unknown>,
+  status: O2oPreorderSummary['status'],
+  timeoutAt: string | null,
+) => {
+  const rawStatusReport = row.statusReport && typeof row.statusReport === 'object'
+    ? (row.statusReport as Record<string, unknown>)
+    : null
+  const fallbackScenario = getClientOrderReportScenario(status, timeoutAt)
+  const scenario = typeof rawStatusReport?.scenario === 'string'
+    ? (rawStatusReport.scenario as ClientOrderReportScenario)
+    : fallbackScenario
+  const cancelReason = rawStatusReport?.cancelReason === 'manual' || rawStatusReport?.cancelReason === 'timeout'
+    ? (rawStatusReport.cancelReason as O2oOrderCancelReason)
+    : null
+  return {
+    scenario,
+    cancelReason,
+    timeoutReached: rawStatusReport?.timeoutReached === true,
+    timeoutSoon: rawStatusReport?.timeoutSoon === true,
+  }
+}
+
+const normalizeOrderRow = (item: unknown): O2oPreorderSummary | null => {
+  if (!item || typeof item !== 'object') {
+    return null
+  }
+  const row = item as Record<string, unknown>
+  const id = typeof row.id === 'string' ? row.id : ''
+  const showNo = typeof row.showNo === 'string' ? row.showNo : ''
+  const verifyCode = typeof row.verifyCode === 'string' ? row.verifyCode : ''
+  const status = isO2oOrderStatus(row.status) ? row.status : null
+  if (!id || !showNo || !verifyCode || !status) {
+    return null
+  }
+  const timeoutAt = typeof row.timeoutAt === 'string' ? row.timeoutAt : null
+  const businessStatus = O2O_ORDER_BUSINESS_STATUSES.includes(row.businessStatus as O2oOrderBusinessStatus)
+    ? (row.businessStatus as O2oOrderBusinessStatus)
+    : null
+  const merchantMessage = typeof row.merchantMessage === 'string' && row.merchantMessage.trim()
+    ? row.merchantMessage.trim()
+    : null
+  return {
+    id,
+    showNo,
+    verifyCode,
+    status,
+    businessStatus,
+    merchantMessage,
+    // 缓存恢复时尽量沿用服务端原始状态报告，确保“已撤回/超时取消”文案不会在刷新后退化。
+    statusReport: normalizeStatusReport(row, status, timeoutAt),
+    totalQty: Number.isFinite(row.totalQty) ? Number(row.totalQty) : 0,
+    totalAmount: typeof row.totalAmount === 'string' ? row.totalAmount : undefined,
+    expireInSeconds: Number.isFinite(row.expireInSeconds) ? Number(row.expireInSeconds) : undefined,
+    timeoutAt,
+    createdAt: typeof row.createdAt === 'string' ? row.createdAt : '',
+  }
 }
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
@@ -35,55 +94,7 @@ const normalizeOrders = (orders: unknown): O2oPreorderSummary[] => {
   if (!Array.isArray(orders)) {
     return []
   }
-  const normalized = orders.map((item): O2oPreorderSummary | null => {
-      if (!item || typeof item !== 'object') {
-        return null
-      }
-      const row = item as Record<string, unknown>
-      const id = typeof row.id === 'string' ? row.id : ''
-      const showNo = typeof row.showNo === 'string' ? row.showNo : ''
-      const verifyCode = typeof row.verifyCode === 'string' ? row.verifyCode : ''
-      const status = isO2oOrderStatus(row.status) ? row.status : null
-      const timeoutAt = typeof row.timeoutAt === 'string' ? row.timeoutAt : null
-      const businessStatus = O2O_ORDER_BUSINESS_STATUSES.includes(row.businessStatus as O2oOrderBusinessStatus)
-        ? (row.businessStatus as O2oOrderBusinessStatus)
-        : null
-      const rawStatusReport = row.statusReport && typeof row.statusReport === 'object'
-        ? (row.statusReport as Record<string, unknown>)
-        : null
-      const scenario = typeof rawStatusReport?.scenario === 'string'
-        ? rawStatusReport.scenario
-        : getClientOrderReportScenario(status, timeoutAt)
-      const cancelReason = rawStatusReport?.cancelReason === 'manual' || rawStatusReport?.cancelReason === 'timeout'
-        ? (rawStatusReport.cancelReason as O2oOrderCancelReason)
-        : null
-      if (!id || !showNo || !verifyCode || !status) {
-        return null
-      }
-      return {
-        id,
-        showNo,
-        verifyCode,
-        status,
-        businessStatus,
-        merchantMessage: typeof row.merchantMessage === 'string' && row.merchantMessage.trim()
-          ? row.merchantMessage.trim()
-          : null,
-        statusReport: {
-          // 缓存恢复时尽量沿用服务端原始状态报告，确保“已撤回/超时取消”文案不会在刷新后退化。
-          scenario: (scenario as ClientOrderReportScenario) ?? getClientOrderReportScenario(status, timeoutAt),
-          cancelReason,
-          timeoutReached: rawStatusReport?.timeoutReached === true,
-          timeoutSoon: rawStatusReport?.timeoutSoon === true,
-        },
-        totalQty: Number.isFinite(row.totalQty) ? Number(row.totalQty) : 0,
-        totalAmount: typeof row.totalAmount === 'string' ? row.totalAmount : undefined,
-        expireInSeconds: Number.isFinite(row.expireInSeconds) ? Number(row.expireInSeconds) : undefined,
-        timeoutAt,
-        createdAt: typeof row.createdAt === 'string' ? row.createdAt : '',
-      }
-    })
-  return normalized.filter((item): item is O2oPreorderSummary => item !== null)
+  return orders.map(normalizeOrderRow).filter((item): item is O2oPreorderSummary => item !== null)
 }
 
 export const readPersistedClientOrderSnapshot = (): ClientOrderSnapshot | null => {
@@ -103,7 +114,10 @@ export const readPersistedClientOrderSnapshot = (): ClientOrderSnapshot | null =
       orders: normalizeOrders(parsed.orders),
       updatedAt: Number.isFinite(parsed.updatedAt) ? Number(parsed.updatedAt) : 0,
     }
-  } catch (_error) {
+  } catch (error) {
+    if (!(error instanceof Error)) {
+      return null
+    }
     storage.removeItem(CLIENT_ORDER_SNAPSHOT_KEY)
     return null
   }

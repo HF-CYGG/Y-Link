@@ -286,7 +286,7 @@ const activeMerchantMessage = computed(() => {
 
 const normalizedDraftMerchantMessage = computed(() => {
   const value = draftMerchantMessage.value.trim()
-  return value ? value : null
+  return value || null
 })
 
 const merchantMessageChanged = computed(() => {
@@ -624,11 +624,12 @@ const handleSaveMerchantMessage = async () => {
     return
   }
 
-  const confirmMessage = nextValue
-    ? (previousValue
+  let confirmMessage = `确认清空订单“${activeOrderDetail.value.order.showNo}”的商家留言吗？`
+  if (nextValue) {
+    confirmMessage = previousValue
       ? `确认更新订单“${activeOrderDetail.value.order.showNo}”的商家留言吗？`
-      : `确认设置订单“${activeOrderDetail.value.order.showNo}”的商家留言吗？`)
-    : `确认清空订单“${activeOrderDetail.value.order.showNo}”的商家留言吗？`
+      : `确认设置订单“${activeOrderDetail.value.order.showNo}”的商家留言吗？`
+  }
 
   try {
     await ElMessageBox.confirm(confirmMessage, '确认提交商家留言', {
