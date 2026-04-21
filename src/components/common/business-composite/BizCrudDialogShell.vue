@@ -25,6 +25,8 @@ interface Props {
   cancelText?: string
   dialogClass?: string
   destroyOnClose?: boolean
+  appendToBody?: boolean
+  alignCenter?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -36,6 +38,8 @@ const props = withDefaults(defineProps<Props>(), {
   cancelText: '取消',
   dialogClass: '',
   destroyOnClose: true,
+  appendToBody: true,
+  alignCenter: true,
 })
 
 const emit = defineEmits<{
@@ -79,6 +83,8 @@ const handleClose = () => {
     :title="props.title"
     :width="dialogWidth"
     :destroy-on-close="props.destroyOnClose"
+    :append-to-body="props.appendToBody"
+    :align-center="props.alignCenter"
     :class="props.dialogClass"
     @update:model-value="emit('update:modelValue', $event)"
   >

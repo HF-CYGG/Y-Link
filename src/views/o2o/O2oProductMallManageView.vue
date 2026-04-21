@@ -304,7 +304,14 @@ onMounted(async () => {
       </el-table>
     </div>
 
-    <el-dialog v-model="dialogVisible" :title="dialogTitle" width="720px">
+    <el-dialog
+      v-model="dialogVisible"
+      :title="dialogTitle"
+      width="720px"
+      append-to-body
+      align-center
+      destroy-on-close
+    >
       <el-form label-width="110px">
         <el-row :gutter="16">
           <el-col :span="12">
