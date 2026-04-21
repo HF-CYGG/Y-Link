@@ -51,6 +51,7 @@ const canToggleUser = computed(() => authStore.hasPermission('users:status'))
 const canResetUserPassword = computed(() => authStore.hasPermission('users:reset_password'))
 const canOperateUsers = computed(() => canEditUser.value || canToggleUser.value || canResetUserPassword.value)
 const departmentOptions = ref<string[]>([])
+const departmentPathLookup = ref<Record<string, string>>({})
 const departmentOptionsLoading = ref(false)
 
 const editVisible = ref(false)
@@ -154,6 +155,40 @@ const resetEditForm = () => {
   editFormRef.value?.clearValidate()
 }
 
+const normalizeOptionalText = (value: unknown) => (typeof value === 'string' ? value.trim() : '')
+
+const buildDepartmentPathLookup = (tree: Array<{ label: string; children: Array<{ label: string; children: unknown[] }> }>) => {
+  const pathMap: Record<string, string> = {}
+  const labelPathMap = new Map<string, string[]>()
+  const walk = (nodes: Array<{ label: string; children: unknown[] }>, parentPath = '') => {
+    nodes.forEach((node) => {
+      const currentPath = parentPath ? `${parentPath}-${node.label}` : node.label
+      pathMap[currentPath] = currentPath
+      const paths = labelPathMap.get(node.label) ?? []
+      paths.push(currentPath)
+      labelPathMap.set(node.label, paths)
+      if (Array.isArray(node.children) && node.children.length > 0) {
+        walk(node.children as Array<{ label: string; children: unknown[] }>, currentPath)
+      }
+    })
+  }
+  walk(tree)
+  labelPathMap.forEach((paths, label) => {
+    if (paths.length === 1) {
+      pathMap[label] = paths[0]
+    }
+  })
+  return pathMap
+}
+
+const resolveDepartmentPathDisplay = (value: unknown) => {
+  const normalized = normalizeOptionalText(value)
+  if (!normalized) {
+    return ''
+  }
+  return departmentPathLookup.value[normalized] ?? normalized
+}
+
 const buildQueryParams = (): ClientUserListQuery => {
   const params: ClientUserListQuery = {
     page: listState.query.page,
@@ -199,6 +234,7 @@ const loadDepartmentOptions = async () => {
   try {
     const result = await getClientDepartmentConfigs()
     departmentOptions.value = result.options
+    departmentPathLookup.value = buildDepartmentPathLookup(result.tree)
   } catch (error) {
     ElMessage.error(extractErrorMessage(error, '加载部门配置失败'))
   } finally {
@@ -233,7 +269,7 @@ const handleOpenEdit = (row: ClientUserManageProfile) => {
   editForm.username = row.username
   editForm.mobile = row.mobile || ''
   editForm.email = row.email || ''
-  editForm.departmentName = row.departmentName || ''
+  editForm.departmentName = resolveDepartmentPathDisplay(row.departmentName)
   editForm.status = row.status
 }
 
@@ -254,7 +290,8 @@ const handleSubmitEdit = async () => {
   }
   const normalizedMobile = editForm.mobile.trim()
   const normalizedEmail = editForm.email.trim().toLowerCase()
-  if (editForm.departmentName.trim() && !departmentOptions.value.includes(editForm.departmentName.trim())) {
+  const normalizedDepartmentName = normalizeOptionalText(editForm.departmentName)
+  if (normalizedDepartmentName && !departmentOptions.value.includes(normalizedDepartmentName)) {
     ElMessage.warning('请选择系统配置中的部门选项')
     return
   }
@@ -265,7 +302,7 @@ const handleSubmitEdit = async () => {
       username: normalizedUsername,
       mobile: normalizedMobile || undefined,
       email: normalizedEmail || undefined,
-      departmentName: editForm.departmentName.trim() || undefined,
+      departmentName: normalizedDepartmentName || undefined,
       status: editForm.status,
     }
     await updateClientUser(editForm.id, payload)
@@ -304,7 +341,7 @@ const handleOpenResetPassword = (row: ClientUserManageProfile) => {
   resetClientPasswordForm()
   resetPasswordForm.targetUserId = row.id
   resetPasswordForm.targetUsername = row.username
-  resetPasswordForm.targetDepartmentName = row.departmentName
+  resetPasswordForm.targetDepartmentName = resolveDepartmentPathDisplay(row.departmentName)
 }
 
 const handleSubmitResetPassword = async () => {
@@ -435,7 +472,7 @@ onMounted(() => {
               <el-table-column prop="mobile" label="手机号" min-width="140" show-overflow-tooltip />
               <el-table-column prop="email" label="邮箱" min-width="220" show-overflow-tooltip />
               <el-table-column prop="departmentName" label="部门" min-width="160" show-overflow-tooltip>
-                <template #default="{ row }">{{ row.departmentName || '-' }}</template>
+                <template #default="{ row }">{{ resolveDepartmentPathDisplay(row.departmentName) || '-' }}</template>
               </el-table-column>
               <el-table-column label="状态" width="110">
                 <template #default="{ row }">
@@ -472,7 +509,9 @@ onMounted(() => {
               <div class="flex items-start justify-between gap-3">
                 <div class="min-w-0">
                   <div class="truncate text-base font-semibold text-slate-800 dark:text-slate-100">{{ item.username }}</div>
-                  <div class="truncate text-sm text-slate-500 dark:text-slate-400">{{ item.departmentName || '未设置部门' }}</div>
+                  <div class="truncate text-sm text-slate-500 dark:text-slate-400">
+                    {{ resolveDepartmentPathDisplay(item.departmentName) || '未设置部门' }}
+                  </div>
                 </div>
                 <el-tag :type="getStatusTagType(item.status)" effect="light">{{ getStatusLabel(item.status) }}</el-tag>
               </div>

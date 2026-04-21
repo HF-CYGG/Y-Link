@@ -319,16 +319,34 @@ class SystemConfigService {
 
   private flattenDepartmentTree(tree: ClientDepartmentTreeNode[]): string[] {
     const labels: string[] = []
-    const walk = (nodes: ClientDepartmentTreeNode[]) => {
+    const walk = (nodes: ClientDepartmentTreeNode[], parentPath = '') => {
       nodes.forEach((node) => {
-        labels.push(node.label)
+        const currentPath = parentPath ? `${parentPath}-${node.label}` : node.label
+        labels.push(currentPath)
         if (node.children.length > 0) {
-          walk(node.children)
+          walk(node.children, currentPath)
         }
       })
     }
     walk(tree)
     return labels
+  }
+
+  private findDepartmentPathsByLabel(tree: ClientDepartmentTreeNode[], targetLabel: string): string[] {
+    const paths: string[] = []
+    const walk = (nodes: ClientDepartmentTreeNode[], parentPath = '') => {
+      nodes.forEach((node) => {
+        const currentPath = parentPath ? `${parentPath}-${node.label}` : node.label
+        if (node.label === targetLabel) {
+          paths.push(currentPath)
+        }
+        if (node.children.length > 0) {
+          walk(node.children, currentPath)
+        }
+      })
+    }
+    walk(tree)
+    return paths
   }
 
   private normalizeClientDepartmentOptions(options: string[]): string[] {
@@ -847,6 +865,11 @@ class SystemConfigService {
     }
     const config = await this.getClientDepartmentConfigs()
     if (!config.options.includes(normalizedDepartment)) {
+      // 兼容历史数据：若用户提交的是旧版“叶子部门名”，且能唯一定位到路径，则自动转换为路径值。
+      const matchedPaths = this.findDepartmentPathsByLabel(config.tree, normalizedDepartment)
+      if (matchedPaths.length === 1) {
+        return matchedPaths[0]
+      }
       throw new BizError(`部门“${normalizedDepartment}”不在可选范围内，请重新选择`, 400)
     }
     return normalizedDepartment

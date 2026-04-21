@@ -5,7 +5,7 @@
  * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
  */
 
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, toRaw } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { useRouter } from 'vue-router'
@@ -26,6 +26,8 @@ const submitting = ref(false)
 const profileSubmitting = ref(false)
 const departmentOptionsLoading = ref(false)
 const departmentTree = ref<ClientDepartmentOptionNode[]>([])
+const departmentOptions = ref<string[]>([])
+const departmentPathLookup = ref<Record<string, string>>({})
 const formRef = ref<FormInstance>()
 const profileFormRef = ref<FormInstance>()
 const form = reactive({
@@ -87,7 +89,7 @@ const openProfileDialog = () => {
   profileForm.username = clientAuthStore.currentUser?.account || clientAuthStore.currentUser?.realName || ''
   profileForm.mobile = clientAuthStore.currentUser?.mobile || ''
   profileForm.email = clientAuthStore.currentUser?.email || ''
-  profileForm.departmentName = clientAuthStore.currentUser?.departmentName || ''
+  profileForm.departmentName = resolveDepartmentPathDisplay(clientAuthStore.currentUser?.departmentName || '')
   void loadDepartmentOptions()
   profileDialogVisible.value = true
   profileFormRef.value?.clearValidate()
@@ -99,7 +101,18 @@ const dedupeDepartmentOptions = (list: string[]) => {
 
 const normalizeOptionalText = (value: unknown) => (typeof value === 'string' ? value.trim() : '')
 
-const cloneDepartmentTree = (tree: ClientDepartmentOptionNode[]): ClientDepartmentOptionNode[] => structuredClone(tree)
+const cloneDepartmentTree = (tree: ClientDepartmentOptionNode[]): ClientDepartmentOptionNode[] => {
+  const rawTree = toRaw(tree)
+  if (typeof globalThis.structuredClone === 'function') {
+    try {
+      return globalThis.structuredClone(rawTree)
+    } catch {
+      // 某些浏览器在 structuredClone 遇到代理对象/非可克隆值时会抛错，转入 JSON 兜底。
+    }
+  }
+  // 兼容旧浏览器：structuredClone 不可用时回退到 JSON 深拷贝。
+  return JSON.parse(JSON.stringify(rawTree)) as ClientDepartmentOptionNode[]
+}
 
 const flattenDepartmentLabels = (tree: ClientDepartmentOptionNode[]): string[] => {
   const labels: string[] = []
@@ -115,19 +128,67 @@ const flattenDepartmentLabels = (tree: ClientDepartmentOptionNode[]): string[] =
   return labels
 }
 
+const buildDepartmentPathLookup = (tree: ClientDepartmentOptionNode[]) => {
+  const pathMap: Record<string, string> = {}
+  const labelPathMap = new Map<string, string[]>()
+  const walk = (nodes: ClientDepartmentOptionNode[], parentPath = '') => {
+    nodes.forEach((node) => {
+      const currentPath = parentPath ? `${parentPath}-${node.label}` : node.label
+      pathMap[currentPath] = currentPath
+      const paths = labelPathMap.get(node.label) ?? []
+      paths.push(currentPath)
+      labelPathMap.set(node.label, paths)
+      if (node.children.length > 0) {
+        walk(node.children, currentPath)
+      }
+    })
+  }
+  walk(tree)
+  labelPathMap.forEach((paths, label) => {
+    if (paths.length === 1) {
+      pathMap[label] = paths[0]
+    }
+  })
+  return pathMap
+}
+
+const resolveDepartmentPathDisplay = (value: unknown) => {
+  const normalized = normalizeOptionalText(value)
+  if (!normalized) {
+    return ''
+  }
+  return departmentPathLookup.value[normalized] ?? normalized
+}
+
+const buildDepartmentTreeSelectData = (tree: ClientDepartmentOptionNode[], parentPath = ''): ClientDepartmentOptionNode[] => {
+  return tree.map((node) => {
+    const currentPath = parentPath ? `${parentPath}-${node.label}` : node.label
+    return {
+      id: node.id,
+      label: currentPath,
+      children: buildDepartmentTreeSelectData(node.children, currentPath),
+    }
+  })
+}
+
 const loadDepartmentOptions = async () => {
   departmentOptionsLoading.value = true
   try {
     const capabilities = await getClientAuthCapabilities()
     departmentTree.value = cloneDepartmentTree(capabilities.departmentTree)
+    departmentOptions.value = dedupeDepartmentOptions(capabilities.departmentOptions)
+    departmentPathLookup.value = buildDepartmentPathLookup(departmentTree.value)
     const currentDepartment = normalizeOptionalText(profileForm.departmentName)
-    if (currentDepartment && !flattenDepartmentLabels(departmentTree.value).includes(currentDepartment)) {
+    if (currentDepartment && !departmentOptions.value.includes(currentDepartment) && !departmentPathLookup.value[currentDepartment]) {
       departmentTree.value.push({
         id: `legacy_${currentDepartment}`,
         label: currentDepartment,
         children: [],
       })
+      departmentOptions.value = dedupeDepartmentOptions([...departmentOptions.value, currentDepartment])
     }
+    departmentPathLookup.value = buildDepartmentPathLookup(departmentTree.value)
+    profileForm.departmentName = resolveDepartmentPathDisplay(profileForm.departmentName)
   } catch (error) {
     ElMessage.error(extractErrorMessage(error, '加载部门配置失败'))
   } finally {
@@ -136,8 +197,10 @@ const loadDepartmentOptions = async () => {
 }
 
 const selectableDepartmentOptions = computed(() => {
-  return dedupeDepartmentOptions(flattenDepartmentLabels(departmentTree.value))
+  return departmentOptions.value
 })
+
+const departmentTreeSelectData = computed(() => buildDepartmentTreeSelectData(departmentTree.value))
 
 const openPasswordDialog = () => {
   form.currentPassword = ''
@@ -243,7 +306,9 @@ onMounted(() => {
       <p class="mt-1 text-base font-semibold text-slate-900">{{ clientAuthStore.currentUser?.email || '-' }}</p>
 
       <p class="mt-4 text-xs text-slate-400">部门</p>
-      <p class="mt-1 text-base font-semibold text-slate-900">{{ clientAuthStore.currentUser?.departmentName || '未设置' }}</p>
+      <p class="mt-1 text-base font-semibold text-slate-900">
+        {{ resolveDepartmentPathDisplay(clientAuthStore.currentUser?.departmentName) || '未设置' }}
+      </p>
     </div>
 
     <div class="rounded-[1.2rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
@@ -293,7 +358,7 @@ onMounted(() => {
         <el-form-item label="部门" prop="departmentName">
           <el-tree-select
             v-model="profileForm.departmentName"
-            :data="departmentTree"
+            :data="departmentTreeSelectData"
             node-key="id"
             :props="{ label: 'label', value: 'label', children: 'children' }"
             check-strictly

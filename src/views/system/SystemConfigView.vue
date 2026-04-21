@@ -7,7 +7,7 @@
 
 
 import dayjs from 'dayjs'
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, toRaw } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { PageContainer, PageToolbarCard } from '@/components/common'
 import {
@@ -152,11 +152,12 @@ const createDepartmentNodeId = (prefix: string) => {
 
 const flattenDepartmentTreeLabels = (tree: DepartmentTreeNode[]): string[] => {
   const labels: string[] = []
-  const walk = (nodes: DepartmentTreeNode[]) => {
+  const walk = (nodes: DepartmentTreeNode[], parentPath = '') => {
     nodes.forEach((node) => {
-      labels.push(node.label)
+      const currentPath = parentPath ? `${parentPath}-${node.label}` : node.label
+      labels.push(currentPath)
       if (node.children.length > 0) {
-        walk(node.children)
+        walk(node.children, currentPath)
       }
     })
   }
@@ -164,8 +165,41 @@ const flattenDepartmentTreeLabels = (tree: DepartmentTreeNode[]): string[] => {
   return labels
 }
 
+const getDepartmentPathLabel = (targetId: string) => {
+  if (!targetId) {
+    return ''
+  }
+  let matchedPath = ''
+  const walk = (nodes: DepartmentTreeNode[], parentPath = '') => {
+    nodes.forEach((node) => {
+      if (matchedPath) {
+        return
+      }
+      const currentPath = parentPath ? `${parentPath}-${node.label}` : node.label
+      if (node.id === targetId) {
+        matchedPath = currentPath
+        return
+      }
+      if (node.children.length > 0) {
+        walk(node.children, currentPath)
+      }
+    })
+  }
+  walk(serialForm.clientDepartmentTree)
+  return matchedPath
+}
+
 const cloneDepartmentTree = (tree: DepartmentTreeNode[]): DepartmentTreeNode[] => {
-  return structuredClone(tree)
+  const rawTree = toRaw(tree)
+  if (typeof globalThis.structuredClone === 'function') {
+    try {
+      return globalThis.structuredClone(rawTree)
+    } catch {
+      // 某些浏览器在 structuredClone 遇到代理对象/非可克隆值时会抛错，转入 JSON 兜底。
+    }
+  }
+  // 兼容旧浏览器：structuredClone 不可用时回退到 JSON 深拷贝。
+  return JSON.parse(JSON.stringify(rawTree)) as DepartmentTreeNode[]
 }
 
 const clientDepartmentPreviewOptions = computed(() => flattenDepartmentTreeLabels(serialForm.clientDepartmentTree))
@@ -643,47 +677,46 @@ const handleSubmit = async () => {
 
   saving.value = true
   try {
-    const [result, o2oResult, verificationResult, departmentResult] = await Promise.all([
-      updateOrderSerialConfigs({
-        department: {
-          start: Number(serialForm.department.start),
-          current: Number(configMap.value?.department.current ?? serialForm.department.current),
-          width: Number(serialForm.department.width),
-        },
-        walkin: {
-          start: Number(serialForm.walkin.start),
-          current: Number(configMap.value?.walkin.current ?? serialForm.walkin.current),
-          width: Number(serialForm.walkin.width),
-        },
-      }),
-      updateO2oRuleConfigs({
-        autoCancelEnabled: serialForm.o2o.autoCancelEnabled,
-        autoCancelHours: Number(serialForm.o2o.autoCancelHours),
-        limitEnabled: serialForm.o2o.limitEnabled,
-        limitQty: Number(serialForm.o2o.limitQty),
-      }),
-      updateVerificationProviderConfigs({
-        mobile: {
-          enabled: serialForm.verification.mobile.enabled,
-          httpMethod: serialForm.verification.mobile.httpMethod,
-          apiUrl: serialForm.verification.mobile.apiUrl.trim(),
-          headersTemplate: serialForm.verification.mobile.headersTemplate.trim(),
-          bodyTemplate: serialForm.verification.mobile.bodyTemplate.trim(),
-          successMatch: serialForm.verification.mobile.successMatch.trim(),
-        },
-        email: {
-          enabled: serialForm.verification.email.enabled,
-          httpMethod: serialForm.verification.email.httpMethod,
-          apiUrl: serialForm.verification.email.apiUrl.trim(),
-          headersTemplate: serialForm.verification.email.headersTemplate.trim(),
-          bodyTemplate: serialForm.verification.email.bodyTemplate.trim(),
-          successMatch: serialForm.verification.email.successMatch.trim(),
-        },
-      }),
-      updateClientDepartmentConfigs({
-        tree: normalizedDepartmentTree,
-      }),
-    ])
+    // SQLite 单连接下并发写事务会互相冲突，这里改为串行提交，避免 “cannot start a transaction within a transaction”。
+    const result = await updateOrderSerialConfigs({
+      department: {
+        start: Number(serialForm.department.start),
+        current: Number(configMap.value?.department.current ?? serialForm.department.current),
+        width: Number(serialForm.department.width),
+      },
+      walkin: {
+        start: Number(serialForm.walkin.start),
+        current: Number(configMap.value?.walkin.current ?? serialForm.walkin.current),
+        width: Number(serialForm.walkin.width),
+      },
+    })
+    const o2oResult = await updateO2oRuleConfigs({
+      autoCancelEnabled: serialForm.o2o.autoCancelEnabled,
+      autoCancelHours: Number(serialForm.o2o.autoCancelHours),
+      limitEnabled: serialForm.o2o.limitEnabled,
+      limitQty: Number(serialForm.o2o.limitQty),
+    })
+    const verificationResult = await updateVerificationProviderConfigs({
+      mobile: {
+        enabled: serialForm.verification.mobile.enabled,
+        httpMethod: serialForm.verification.mobile.httpMethod,
+        apiUrl: serialForm.verification.mobile.apiUrl.trim(),
+        headersTemplate: serialForm.verification.mobile.headersTemplate.trim(),
+        bodyTemplate: serialForm.verification.mobile.bodyTemplate.trim(),
+        successMatch: serialForm.verification.mobile.successMatch.trim(),
+      },
+      email: {
+        enabled: serialForm.verification.email.enabled,
+        httpMethod: serialForm.verification.email.httpMethod,
+        apiUrl: serialForm.verification.email.apiUrl.trim(),
+        headersTemplate: serialForm.verification.email.headersTemplate.trim(),
+        bodyTemplate: serialForm.verification.email.bodyTemplate.trim(),
+        successMatch: serialForm.verification.email.successMatch.trim(),
+      },
+    })
+    const departmentResult = await updateClientDepartmentConfigs({
+      tree: normalizedDepartmentTree,
+    })
 
     applyList(result.list)
     applyO2oRules(o2oResult.config)
@@ -1103,7 +1136,7 @@ onMounted(() => {
               >
                 <template #default="{ data }">
                   <div class="flex w-full items-center justify-between gap-2 py-1">
-                    <span class="truncate text-sm text-slate-700 dark:text-slate-200">{{ data.label }}</span>
+                    <span class="truncate text-sm text-slate-700 dark:text-slate-200">{{ getDepartmentPathLabel(data.id) || data.label }}</span>
                     <div class="flex items-center gap-1">
                       <el-button
                         size="small"
