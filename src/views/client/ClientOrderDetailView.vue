@@ -474,6 +474,9 @@ onMounted(async () => {
                   <td class="px-4 py-3 text-right">¥{{ Number(item.defaultPrice || 0).toFixed(2) }}</td>
                   <td class="px-4 py-3 text-right font-medium">{{ item.qty }}</td>
                 </tr>
+                <tr v-if="!detail.items.length">
+                  <td colspan="3" class="px-4 py-6 text-center text-slate-400">暂无预订商品明细，请稍后刷新重试</td>
+                </tr>
               </tbody>
             </table>
           </div>

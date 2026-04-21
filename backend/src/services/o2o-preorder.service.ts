@@ -429,7 +429,18 @@ class O2oPreorderService {
 
   private async buildOrderDetail(order: O2oPreorder) {
     const id = String(order.id)
-    const items = await this.preorderItemRepo.find({ where: { orderId: id }, relations: { product: true } })
+    // 历史库与不同驱动下 order_id 参数类型可能出现 number/string 混用，
+    // 这里做双口径兼容查询，避免订单详情“总件数存在但明细为空”。
+    let items = await this.preorderItemRepo.find({
+      where: { orderId: order.id as unknown as string },
+      relations: { product: true },
+    })
+    if (!items.length) {
+      items = await this.preorderItemRepo.find({
+        where: { orderId: id },
+        relations: { product: true },
+      })
+    }
     let totalAmountNumber = 0
     const normalizedItems = items.map((item) => {
       const unitPrice = Number(item.product?.defaultPrice ?? 0)
