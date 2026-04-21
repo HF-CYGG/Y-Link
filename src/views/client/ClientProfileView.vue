@@ -97,6 +97,8 @@ const dedupeDepartmentOptions = (list: string[]) => {
   return [...new Set(list.map((item) => item.trim()).filter((item) => item.length > 0))]
 }
 
+const normalizeOptionalText = (value: unknown) => (typeof value === 'string' ? value.trim() : '')
+
 const cloneDepartmentTree = (tree: ClientDepartmentOptionNode[]): ClientDepartmentOptionNode[] => structuredClone(tree)
 
 const flattenDepartmentLabels = (tree: ClientDepartmentOptionNode[]): string[] => {
@@ -118,7 +120,7 @@ const loadDepartmentOptions = async () => {
   try {
     const capabilities = await getClientAuthCapabilities()
     departmentTree.value = cloneDepartmentTree(capabilities.departmentTree)
-    const currentDepartment = profileForm.departmentName.trim()
+    const currentDepartment = normalizeOptionalText(profileForm.departmentName)
     if (currentDepartment && !flattenDepartmentLabels(departmentTree.value).includes(currentDepartment)) {
       departmentTree.value.push({
         id: `legacy_${currentDepartment}`,
@@ -181,7 +183,8 @@ const submitUpdateProfile = async () => {
   }
   const normalizedMobile = profileForm.mobile.trim()
   const normalizedEmail = profileForm.email.trim().toLowerCase()
-  if (profileForm.departmentName.trim() && !selectableDepartmentOptions.value.includes(profileForm.departmentName.trim())) {
+  const normalizedDepartmentName = normalizeOptionalText(profileForm.departmentName)
+  if (normalizedDepartmentName && !selectableDepartmentOptions.value.includes(normalizedDepartmentName)) {
     ElMessage.warning('请选择系统配置中的部门选项')
     return
   }
@@ -192,7 +195,7 @@ const submitUpdateProfile = async () => {
       username: normalizedUsername,
       mobile: normalizedMobile || undefined,
       email: normalizedEmail || undefined,
-      departmentName: profileForm.departmentName.trim() || undefined,
+      departmentName: normalizedDepartmentName || undefined,
     })
     ElMessage.success('资料更新成功')
     profileDialogVisible.value = false
