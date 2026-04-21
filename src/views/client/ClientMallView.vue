@@ -347,7 +347,7 @@ const scrollToCategory = async (categoryKey: string) => {
 }
 
 const handleProductListScroll = () => {
-  if (searchMode.value || scrollingByCategoryClick.value || largeDatasetMode.value) {
+  if (isCategorySyncTemporarilyBlocked()) {
     // 搜索模式、点击触发滚动与虚拟列表模式都不适合反向计算激活分类，直接跳过。
     return
   }
@@ -361,17 +361,10 @@ const handleProductListScroll = () => {
     pendingCategoryKey.value = null
   }
 
-  // 用户点击分类后，在滚动抵达目标分组前锁定激活项，
-  // 防止“先跳到目标后又瞬间回到上一个分类”的回写抖动。
-  if (pendingCategoryKey.value && pendingCategoryKey.value !== 'all' && scrollingByCategoryClick.value) {
-    const pendingSection = sectionRefMap[pendingCategoryKey.value]
-    if (pendingSection) {
-      const distanceToTarget = Math.abs(pendingSection.offsetTop - scroller.scrollTop)
-      if (distanceToTarget > 56) {
-        activeCategoryKey.value = pendingCategoryKey.value
-        return
-      }
-    }
+  const lockedCategory = getPendingLockedCategory(scroller.scrollTop)
+  if (lockedCategory) {
+    activeCategoryKey.value = lockedCategory
+    return
   }
 
   const top = scroller.scrollTop + 24
@@ -389,6 +382,25 @@ const handleProductListScroll = () => {
     }
   }
   activeCategoryKey.value = matched
+}
+
+const isCategorySyncTemporarilyBlocked = () => {
+  return searchMode.value || scrollingByCategoryClick.value || largeDatasetMode.value
+}
+
+const getPendingLockedCategory = (scrollTop: number): string | null => {
+  // 用户点击分类后，在滚动抵达目标分组前锁定激活项，
+  // 防止“先跳到目标后又瞬间回到上一个分类”的回写抖动。
+  const pendingKey = pendingCategoryKey.value
+  if (!pendingKey || pendingKey === 'all' || !scrollingByCategoryClick.value) {
+    return null
+  }
+  const pendingSection = sectionRefMap[pendingKey]
+  if (!pendingSection) {
+    return null
+  }
+  const distanceToTarget = Math.abs(pendingSection.offsetTop - scrollTop)
+  return distanceToTarget > 56 ? pendingKey : null
 }
 
 const cartDrawerVisible = ref(false)

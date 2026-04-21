@@ -9,6 +9,7 @@ import { z } from 'zod'
 import { requirePermission } from '../middleware/auth.middleware.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 import { systemConfigService } from '../services/system-config.service.js'
+import type { UpdateClientDepartmentConfigsInput } from '../services/system-config.service.js'
 import { verificationCodeService } from '../services/verification-code.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
@@ -45,9 +46,38 @@ const updateVerificationProviderConfigsSchema = z.object({
   email: verificationProviderChannelSchema,
 })
 
-const updateClientDepartmentConfigsSchema = z.object({
-  options: z.array(z.string().trim().min(1).max(32)).max(50),
-})
+const clientDepartmentTreeNodeSchema: z.ZodType<{
+  id?: string
+  label: string
+  children?: Array<{ id?: string; label: string; children?: unknown[] }>
+}> = z.lazy(() =>
+  z.object({
+    id: z.string().trim().max(128).optional(),
+    label: z.string().trim().min(1).max(32),
+    children: z.array(clientDepartmentTreeNodeSchema).max(50).optional(),
+  }),
+)
+
+const updateClientDepartmentConfigsSchema = z
+  .object({
+    tree: z.array(clientDepartmentTreeNodeSchema).max(50).optional(),
+    options: z.array(z.string().trim().min(1).max(32)).max(50).optional(),
+  })
+  .refine((value) => Array.isArray(value.tree) || Array.isArray(value.options), {
+    message: '部门配置参数缺失',
+  })
+
+const normalizeClientDepartmentTreePayload = (
+  tree: Array<{ id?: string; label: string; children?: unknown[] }>,
+): NonNullable<UpdateClientDepartmentConfigsInput['tree']> => {
+  return tree.map((node) => ({
+    id: node.id?.trim() || '',
+    label: node.label,
+    children: Array.isArray(node.children)
+      ? normalizeClientDepartmentTreePayload(node.children as Array<{ id?: string; label: string; children?: unknown[] }>)
+      : [],
+  }))
+}
 
 const testVerificationProviderSchema = z.object({
   channel: z.enum(['mobile', 'email']),
@@ -180,7 +210,11 @@ systemConfigRouter.put(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = updateClientDepartmentConfigsSchema.parse(req.body)
-    const data = await systemConfigService.updateClientDepartmentConfigs(payload, authReq.auth, extractRequestMeta(req))
+    const normalizedPayload: UpdateClientDepartmentConfigsInput = {
+      options: payload.options,
+      tree: payload.tree ? normalizeClientDepartmentTreePayload(payload.tree) : undefined,
+    }
+    const data = await systemConfigService.updateClientDepartmentConfigs(normalizedPayload, authReq.auth, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',

@@ -105,12 +105,20 @@ export interface TestVerificationProviderResult {
 }
 
 export interface ClientDepartmentConfigRecord {
+  tree: ClientDepartmentTreeNode[]
   options: string[]
   updatedAt: string
 }
 
+export interface ClientDepartmentTreeNode {
+  id: string
+  label: string
+  children: ClientDepartmentTreeNode[]
+}
+
 export interface UpdateClientDepartmentConfigsPayload {
-  options: string[]
+  tree?: ClientDepartmentTreeNode[]
+  options?: string[]
 }
 
 export interface UpdateClientDepartmentConfigsResult {

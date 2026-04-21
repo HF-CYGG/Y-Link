@@ -21,6 +21,7 @@ import {
   updateOrderSerialConfigs,
   updateVerificationProviderConfigs,
   type ClientDepartmentConfigRecord,
+  type ClientDepartmentTreeNode,
   type O2oRuleConfigRecord,
   type OrderSerialConfigRecord,
   type VerificationProviderConfigsResult,
@@ -45,6 +46,7 @@ type VerificationFormValue = {
 }
 
 type ConfigSectionKey = 'order_serial' | 'o2o_rules' | 'verification' | 'department'
+type DepartmentTreeNode = ClientDepartmentTreeNode
 
 const authStore = useAuthStore()
 const formRef = ref<FormInstance>()
@@ -53,6 +55,7 @@ const saving = ref(false)
 const loadError = ref('')
 const testSendingChannel = ref<'mobile' | 'email' | ''>('')
 const activeSection = ref<ConfigSectionKey>('order_serial')
+const selectedDepartmentNodeId = ref('')
 const configMap = ref<Record<'department' | 'walkin', OrderSerialConfigRecord> | null>(null)
 const o2oRuleConfig = ref<O2oRuleConfigRecord | null>(null)
 const verificationConfigMap = ref<VerificationProviderConfigsResult | null>(null)
@@ -83,7 +86,7 @@ const serialForm = reactive<{
     mobile: VerificationFormValue
     email: VerificationFormValue
   }
-  clientDepartmentsText: string
+  clientDepartmentTree: DepartmentTreeNode[]
 }>({
   department: {
     start: 1,
@@ -119,7 +122,7 @@ const serialForm = reactive<{
       successMatch: '',
     },
   },
-  clientDepartmentsText: '',
+  clientDepartmentTree: [],
 })
 
 const initialSnapshot = ref('')
@@ -142,11 +145,48 @@ const walkinPreview = computed(() =>
   formatSerialPreview(configMap.value?.walkin.prefix, serialForm.walkin.current, serialForm.walkin.width),
 )
 
-const clientDepartmentPreviewOptions = computed(() => {
-  return serialForm.clientDepartmentsText
-    .split('\n')
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0)
+const createDepartmentNodeId = (prefix: string) => {
+  const normalizedPrefix = prefix.trim().replaceAll(/\s+/g, '-').slice(0, 16)
+  return `dept_${normalizedPrefix || 'node'}_${Math.random().toString(36).slice(2, 8)}`
+}
+
+const flattenDepartmentTreeLabels = (tree: DepartmentTreeNode[]): string[] => {
+  const labels: string[] = []
+  const walk = (nodes: DepartmentTreeNode[]) => {
+    nodes.forEach((node) => {
+      labels.push(node.label)
+      if (node.children.length > 0) {
+        walk(node.children)
+      }
+    })
+  }
+  walk(tree)
+  return labels
+}
+
+const cloneDepartmentTree = (tree: DepartmentTreeNode[]): DepartmentTreeNode[] => {
+  return structuredClone(tree)
+}
+
+const clientDepartmentPreviewOptions = computed(() => flattenDepartmentTreeLabels(serialForm.clientDepartmentTree))
+const selectedDepartmentNode = computed(() => {
+  const targetId = selectedDepartmentNodeId.value
+  if (!targetId) {
+    return null
+  }
+  const walk = (nodes: DepartmentTreeNode[]): DepartmentTreeNode | null => {
+    for (const node of nodes) {
+      if (node.id === targetId) {
+        return node
+      }
+      const child = walk(node.children)
+      if (child) {
+        return child
+      }
+    }
+    return null
+  }
+  return walk(serialForm.clientDepartmentTree)
 })
 
 const snapshotForm = () =>
@@ -185,10 +225,7 @@ const snapshotForm = () =>
         successMatch: serialForm.verification.email.successMatch.trim(),
       },
     },
-    clientDepartments: serialForm.clientDepartmentsText
-      .split('\n')
-      .map((item) => item.trim())
-      .filter((item) => item.length > 0),
+    clientDepartmentTree: serialForm.clientDepartmentTree,
   })
 
 const isDirty = computed(() => snapshotForm() !== initialSnapshot.value)
@@ -246,7 +283,8 @@ const applyVerificationConfigs = (config: VerificationProviderConfigsResult) => 
 
 const applyClientDepartmentConfigs = (config: ClientDepartmentConfigRecord) => {
   clientDepartmentConfig.value = config
-  serialForm.clientDepartmentsText = config.options.join('\n')
+  serialForm.clientDepartmentTree = cloneDepartmentTree(config.tree)
+  selectedDepartmentNodeId.value = ''
 }
 
 const getVerificationChannelLabel = (channel: 'mobile' | 'email') => {
@@ -272,25 +310,172 @@ const validateVerificationConfigs = () => {
   return true
 }
 
-const parseClientDepartmentOptions = () => {
-  const options = serialForm.clientDepartmentsText
-    .split('\n')
-    .map((item) => item.trim())
-    .filter((item) => item.length > 0)
-  const duplicateSet = new Set<string>()
-  for (const option of options) {
-    if (option.length > 32) {
-      throw new Error('部门名称长度不能超过 32 个字符')
-    }
-    if (duplicateSet.has(option)) {
-      throw new Error(`部门“${option}”重复，请去重后保存`)
-    }
-    duplicateSet.add(option)
+const normalizeDepartmentLabel = (label: string) => {
+  const normalized = label.trim()
+  if (!normalized) {
+    throw new Error('部门名称不能为空')
   }
-  if (options.length > 50) {
-    throw new Error('部门选项最多保留 50 个')
+  if (normalized.length > 32) {
+    throw new Error('部门名称长度不能超过 32 个字符')
   }
-  return options
+  return normalized
+}
+
+const normalizeDepartmentTreeForSubmit = (tree: DepartmentTreeNode[], depth = 1): DepartmentTreeNode[] => {
+  if (depth > 8) {
+    throw new Error('部门层级最多支持 8 级')
+  }
+  return tree.map((node, index) => {
+    const label = normalizeDepartmentLabel(node.label)
+    const id = String(node.id ?? '').trim() || createDepartmentNodeId(`${label}-${depth}-${index + 1}`)
+    const children = Array.isArray(node.children) ? normalizeDepartmentTreeForSubmit(node.children, depth + 1) : []
+    return {
+      id,
+      label,
+      children,
+    }
+  })
+}
+
+const validateDepartmentTree = (tree: DepartmentTreeNode[]) => {
+  const labels = flattenDepartmentTreeLabels(tree)
+  if (labels.length > 50) {
+    throw new Error('部门节点总数最多保留 50 个')
+  }
+  const uniqueSet = new Set<string>()
+  labels.forEach((label) => {
+    if (uniqueSet.has(label)) {
+      throw new Error(`部门“${label}”重复，请去重后保存`)
+    }
+    uniqueSet.add(label)
+  })
+}
+
+const createDepartmentNodeWithPrompt = async (title: string, placeholder: string) => {
+  const promptResult = await ElMessageBox.prompt('请输入部门名称', title, {
+    inputPlaceholder: placeholder,
+    confirmButtonText: '确认',
+    cancelButtonText: '取消',
+    inputValidator: (value: string) => {
+      try {
+        normalizeDepartmentLabel(value)
+        return true
+      } catch (error) {
+        return extractErrorMessage(error, '部门名称不合法')
+      }
+    },
+  })
+  const label = normalizeDepartmentLabel(promptResult.value)
+  return {
+    id: createDepartmentNodeId(label),
+    label,
+    children: [] as DepartmentTreeNode[],
+  }
+}
+
+const findDepartmentNodeById = (nodes: DepartmentTreeNode[], id: string): DepartmentTreeNode | null => {
+  for (const node of nodes) {
+    if (node.id === id) {
+      return node
+    }
+    const childNode = findDepartmentNodeById(node.children, id)
+    if (childNode) {
+      return childNode
+    }
+  }
+  return null
+}
+
+const removeDepartmentNodeById = (nodes: DepartmentTreeNode[], id: string): boolean => {
+  const index = nodes.findIndex((node) => node.id === id)
+  if (index >= 0) {
+    nodes.splice(index, 1)
+    return true
+  }
+  return nodes.some((node) => removeDepartmentNodeById(node.children, id))
+}
+
+const handleAddRootDepartment = async () => {
+  try {
+    const node = await createDepartmentNodeWithPrompt('新增一级部门', '例如：市场部')
+    serialForm.clientDepartmentTree.push(node)
+    selectedDepartmentNodeId.value = node.id
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') {
+      return
+    }
+    ElMessage.warning(extractErrorMessage(error, '新增一级部门失败'))
+  }
+}
+
+const handleAddChildDepartment = async (parentNode?: DepartmentTreeNode) => {
+  const targetParent = parentNode ?? selectedDepartmentNode.value
+  if (!targetParent) {
+    ElMessage.warning('请先选择父级部门，再新增子部门')
+    return
+  }
+  try {
+    const node = await createDepartmentNodeWithPrompt('新增子部门', '例如：华南组')
+    targetParent.children.push(node)
+    selectedDepartmentNodeId.value = node.id
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') {
+      return
+    }
+    ElMessage.warning(extractErrorMessage(error, '新增子部门失败'))
+  }
+}
+
+const handleEditDepartment = async (node: DepartmentTreeNode) => {
+  try {
+    const promptResult = await ElMessageBox.prompt('请输入新的部门名称', '编辑部门', {
+      inputValue: node.label,
+      inputPlaceholder: '请输入部门名称',
+      confirmButtonText: '保存',
+      cancelButtonText: '取消',
+      inputValidator: (value: string) => {
+        try {
+          normalizeDepartmentLabel(value)
+          return true
+        } catch (error) {
+          return extractErrorMessage(error, '部门名称不合法')
+        }
+      },
+    })
+    node.label = normalizeDepartmentLabel(promptResult.value)
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') {
+      return
+    }
+    ElMessage.warning(extractErrorMessage(error, '编辑部门失败'))
+  }
+}
+
+const handleDeleteDepartment = async (node: DepartmentTreeNode) => {
+  try {
+    await ElMessageBox.confirm(`确认删除部门“${node.label}”及其下级部门吗？`, '删除确认', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+    })
+    removeDepartmentNodeById(serialForm.clientDepartmentTree, node.id)
+    if (selectedDepartmentNodeId.value === node.id) {
+      selectedDepartmentNodeId.value = ''
+    }
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') {
+      return
+    }
+    ElMessage.warning(extractErrorMessage(error, '删除部门失败'))
+  }
+}
+
+const handleDepartmentNodeClick = (data: DepartmentTreeNode) => {
+  selectedDepartmentNodeId.value = data.id
+}
+
+const handleAllowDepartmentDrop = (_draggingNode: unknown, _dropNode: unknown, type: 'prev' | 'inner' | 'next') => {
+  return type === 'prev' || type === 'inner' || type === 'next'
 }
 
 const validateSingleVerificationConfig = (channel: 'mobile' | 'email') => {
@@ -447,9 +632,10 @@ const handleSubmit = async () => {
   if (!validateVerificationConfigs()) {
     return
   }
-  let departmentOptions: string[] = []
+  let normalizedDepartmentTree: DepartmentTreeNode[] = []
   try {
-    departmentOptions = parseClientDepartmentOptions()
+    normalizedDepartmentTree = normalizeDepartmentTreeForSubmit(cloneDepartmentTree(serialForm.clientDepartmentTree))
+    validateDepartmentTree(normalizedDepartmentTree)
   } catch (error) {
     ElMessage.warning(extractErrorMessage(error, '部门配置格式不正确'))
     return
@@ -495,7 +681,7 @@ const handleSubmit = async () => {
         },
       }),
       updateClientDepartmentConfigs({
-        options: departmentOptions,
+        tree: normalizedDepartmentTree,
       }),
     ])
 
@@ -887,30 +1073,73 @@ onMounted(() => {
             <div>
               <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">部门配置</h2>
               <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                维护客户端账号可选部门。客户端注册、资料编辑和后台用户编辑都只能从该列表中选择。
+                维护客户端可选部门树，支持子部门编排。客户端注册、资料编辑和后台用户编辑会从树中提取可选项。
               </p>
             </div>
-            <span class="rounded-lg bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-              每行一个部门
-            </span>
+            <div class="flex flex-wrap items-center gap-2">
+              <el-button size="small" :disabled="!canUpdateConfigs || loading || saving" @click="handleAddRootDepartment">新增一级部门</el-button>
+              <el-button size="small" :disabled="!canUpdateConfigs || loading || saving" @click="handleAddChildDepartment()">
+                新增子部门
+              </el-button>
+            </div>
           </div>
           <el-alert
             title="填写规范"
             type="info"
             :closable="false"
             show-icon
-            description="请按“一行一个部门”填写，系统会自动去除前后空格并校验重复项。单个部门名称最多 32 个字符，总条目不超过 50 个。"
+            description="可通过拖拽调整部门层级与排序。部门名称最多 32 个字符，部门节点总数不超过 50 个，且全局不能重名。"
           />
-          <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_280px]">
-            <el-input
-              v-model="serialForm.clientDepartmentsText"
-              type="textarea"
-              :rows="12"
-              :disabled="!canUpdateConfigs || loading"
-              placeholder="示例：&#10;市场部&#10;运营部&#10;财务部"
-            />
+          <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
+            <div class="rounded-2xl border border-slate-200/80 bg-slate-50/60 p-4 dark:border-white/10 dark:bg-slate-900/20">
+              <el-tree
+                :data="serialForm.clientDepartmentTree"
+                node-key="id"
+                default-expand-all
+                draggable
+                :expand-on-click-node="false"
+                :allow-drop="handleAllowDepartmentDrop"
+                @node-click="handleDepartmentNodeClick"
+              >
+                <template #default="{ data }">
+                  <div class="flex w-full items-center justify-between gap-2 py-1">
+                    <span class="truncate text-sm text-slate-700 dark:text-slate-200">{{ data.label }}</span>
+                    <div class="flex items-center gap-1">
+                      <el-button
+                        size="small"
+                        text
+                        :disabled="!canUpdateConfigs || loading || saving"
+                        @click.stop="handleAddChildDepartment(data)"
+                      >
+                        子级
+                      </el-button>
+                      <el-button
+                        size="small"
+                        text
+                        :disabled="!canUpdateConfigs || loading || saving"
+                        @click.stop="handleEditDepartment(data)"
+                      >
+                        编辑
+                      </el-button>
+                      <el-button
+                        size="small"
+                        text
+                        type="danger"
+                        :disabled="!canUpdateConfigs || loading || saving"
+                        @click.stop="handleDeleteDepartment(data)"
+                      >
+                        删除
+                      </el-button>
+                    </div>
+                  </div>
+                </template>
+              </el-tree>
+            </div>
             <div class="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-4 text-sm dark:border-white/10 dark:bg-slate-900/30">
               <div class="mb-2 font-medium text-slate-700 dark:text-slate-200">当前预览</div>
+              <div class="mb-3 text-xs text-slate-500 dark:text-slate-400">
+                当前选择：{{ selectedDepartmentNode?.label || '未选择节点' }}
+              </div>
               <div class="flex flex-wrap gap-2">
                 <el-tag
                   v-for="department in clientDepartmentPreviewOptions"

@@ -235,12 +235,20 @@ export interface UpdateVerificationProviderConfigsInput {
 }
 
 export interface ClientDepartmentConfigRecord {
+  tree: ClientDepartmentTreeNode[]
   options: string[]
   updatedAt: Date
 }
 
+export interface ClientDepartmentTreeNode {
+  id: string
+  label: string
+  children: ClientDepartmentTreeNode[]
+}
+
 export interface UpdateClientDepartmentConfigsInput {
-  options: string[]
+  tree?: ClientDepartmentTreeNode[]
+  options?: string[]
 }
 
 class SystemConfigService {
@@ -285,44 +293,119 @@ class SystemConfigService {
     return parsed
   }
 
-  private parseClientDepartmentOptions(rawValue: string): string[] {
-    const raw = rawValue.trim()
-    if (!raw) {
-      return []
+  private createDepartmentNodeId(seed: string) {
+    const normalizedSeed = seed.trim().replaceAll(/\s+/g, '-').slice(0, 24)
+    return `dept_${normalizedSeed || 'node'}_${Math.random().toString(36).slice(2, 8)}`
+  }
+
+  private normalizeDepartmentLabel(value: unknown) {
+    const label = typeof value === 'string' ? value.trim() : ''
+    if (!label) {
+      throw new BizError('部门名称不能为空', 400)
     }
-    try {
-      const parsed = JSON.parse(raw)
-      if (!Array.isArray(parsed)) {
-        throw new BizError('客户端部门配置格式非法', 500)
-      }
-      return parsed
-        .map((item) => String(item ?? '').trim())
-        .filter((item) => item.length > 0)
-    } catch {
-      throw new BizError('客户端部门配置格式非法', 500)
+    if (label.length > 32) {
+      throw new BizError('部门名称长度不能超过 32 个字符', 400)
     }
+    return label
+  }
+
+  private buildTreeFromOptions(options: string[]): ClientDepartmentTreeNode[] {
+    return options.map((label, index) => ({
+      id: this.createDepartmentNodeId(`${label}-${index + 1}`),
+      label,
+      children: [],
+    }))
+  }
+
+  private flattenDepartmentTree(tree: ClientDepartmentTreeNode[]): string[] {
+    const labels: string[] = []
+    const walk = (nodes: ClientDepartmentTreeNode[]) => {
+      nodes.forEach((node) => {
+        labels.push(node.label)
+        if (node.children.length > 0) {
+          walk(node.children)
+        }
+      })
+    }
+    walk(tree)
+    return labels
   }
 
   private normalizeClientDepartmentOptions(options: string[]): string[] {
     const normalizedList = options
-      .map((item) => item.trim())
+      .map((item) => this.normalizeDepartmentLabel(item))
       .filter((item) => item.length > 0)
 
     if (normalizedList.length > 50) {
-      throw new BizError('部门选项最多保留 50 个', 400)
+      throw new BizError('部门节点总数最多保留 50 个', 400)
     }
 
     const uniqueSet = new Set<string>()
     for (const item of normalizedList) {
-      if (item.length > 32) {
-        throw new BizError('部门名称长度不能超过 32 个字符', 400)
-      }
       if (uniqueSet.has(item)) {
         throw new BizError(`部门“${item}”重复，请去重后保存`, 400)
       }
       uniqueSet.add(item)
     }
     return [...uniqueSet]
+  }
+
+  private normalizeClientDepartmentTree(tree: ClientDepartmentTreeNode[], depth = 1): ClientDepartmentTreeNode[] {
+    if (depth > 8) {
+      throw new BizError('部门层级最多支持 8 级', 400)
+    }
+    return tree.map((node, index) => {
+      const label = this.normalizeDepartmentLabel(node.label)
+      const id = String(node.id ?? '').trim() || this.createDepartmentNodeId(`${label}-${depth}-${index + 1}`)
+      const children = Array.isArray(node.children) ? this.normalizeClientDepartmentTree(node.children, depth + 1) : []
+      return {
+        id,
+        label,
+        children,
+      }
+    })
+  }
+
+  private parseClientDepartmentConfig(rawValue: string): { tree: ClientDepartmentTreeNode[]; options: string[] } {
+    const raw = rawValue.trim()
+    if (!raw) {
+      return { tree: [], options: [] }
+    }
+    try {
+      const parsed = JSON.parse(raw)
+      if (Array.isArray(parsed) && parsed.every((item) => typeof item === 'string')) {
+        const options = this.normalizeClientDepartmentOptions(parsed)
+        return {
+          tree: this.buildTreeFromOptions(options),
+          options,
+        }
+      }
+
+      let rawTree: unknown[] | null = null
+      if (Array.isArray(parsed)) {
+        rawTree = parsed
+      } else if (parsed && typeof parsed === 'object' && Array.isArray((parsed as { tree?: unknown[] }).tree)) {
+        rawTree = (parsed as { tree: unknown[] }).tree
+      }
+      if (!rawTree) {
+        throw new BizError('客户端部门配置格式非法', 500)
+      }
+
+      const tree = this.normalizeClientDepartmentTree(
+        rawTree.map((item) => {
+          const node = item as Partial<ClientDepartmentTreeNode> & { name?: string; title?: string }
+          return {
+            id: String(node.id ?? '').trim(),
+            label: String(node.label ?? node.name ?? node.title ?? '').trim(),
+            children: Array.isArray(node.children) ? node.children : [],
+          }
+        }),
+      )
+      const options = this.normalizeClientDepartmentOptions(this.flattenDepartmentTree(tree))
+      return { tree, options }
+    } catch {
+      throw new BizError('客户端部门配置格式非法', 500)
+    }
   }
 
   private validateInputValue(orderType: OrderSerialType, value: OrderSerialConfigValue) {
@@ -467,7 +550,7 @@ class SystemConfigService {
       const keys = this.getOrderSerialAllKeys()
       const placeholders = keys.map(() => '?').join(', ')
       const useForUpdate = manager.connection.options.type === 'mysql'
-      const lockedRows = (await manager.query(
+      const lockedRows: Array<{ id: string; configKey: string; configValue: string; updatedAt: string }> = await manager.query(
         `
           SELECT id, config_key AS configKey, config_value AS configValue, updated_at AS updatedAt
           FROM system_configs
@@ -475,7 +558,7 @@ class SystemConfigService {
           ${useForUpdate ? 'FOR UPDATE' : ''}
         `,
         keys,
-      )) as Array<{ id: string; configKey: string; configValue: string; updatedAt: string }>
+      )
 
       if (lockedRows.length !== keys.length) {
         throw new BizError('订单流水配置缺失，请联系管理员补齐配置', 500)
@@ -591,7 +674,7 @@ class SystemConfigService {
     return AppDataSource.transaction(async (manager) => {
       const useForUpdate = manager.connection.options.type === 'mysql'
       const placeholders = this.o2oConfigKeys.map(() => '?').join(', ')
-      const lockedRows = (await manager.query(
+      const lockedRows: Array<{ id: string; configKey: string; configValue: string; updatedAt: string }> = await manager.query(
         `
           SELECT id, config_key AS configKey, config_value AS configValue, updated_at AS updatedAt
           FROM system_configs
@@ -599,7 +682,7 @@ class SystemConfigService {
           ${useForUpdate ? 'FOR UPDATE' : ''}
         `,
         [...this.o2oConfigKeys],
-      )) as Array<{ id: string; configKey: string; configValue: string; updatedAt: string }>
+      )
 
       if (lockedRows.length !== this.o2oConfigKeys.length) {
         throw new BizError('线上预订配置缺失，请联系管理员补齐配置', 500)
@@ -681,8 +764,10 @@ class SystemConfigService {
     if (!row) {
       throw new BizError('客户端部门配置缺失，请联系管理员补齐配置', 500)
     }
+    const parsedConfig = this.parseClientDepartmentConfig(row.configValue)
     return {
-      options: this.parseClientDepartmentOptions(row.configValue),
+      tree: parsedConfig.tree,
+      options: parsedConfig.options,
       updatedAt: row.updatedAt,
     }
   }
@@ -692,11 +777,14 @@ class SystemConfigService {
     actor: AuthUserContext,
     requestMeta?: RequestMeta,
   ): Promise<{ config: ClientDepartmentConfigRecord; changed: boolean }> {
-    const normalizedOptions = this.normalizeClientDepartmentOptions(input.options)
+    const normalizedTree = Array.isArray(input.tree)
+      ? this.normalizeClientDepartmentTree(input.tree)
+      : this.buildTreeFromOptions(this.normalizeClientDepartmentOptions(input.options ?? []))
+    const normalizedOptions = this.normalizeClientDepartmentOptions(this.flattenDepartmentTree(normalizedTree))
     await this.ensureDefaultConfigs()
     return AppDataSource.transaction(async (manager) => {
       const useForUpdate = manager.connection.options.type === 'mysql'
-      const lockedRows = (await manager.query(
+      const lockedRows: Array<{ id: string; configKey: string; configValue: string; updatedAt: string }> = await manager.query(
         `
           SELECT id, config_key AS configKey, config_value AS configValue, updated_at AS updatedAt
           FROM system_configs
@@ -704,7 +792,7 @@ class SystemConfigService {
           ${useForUpdate ? 'FOR UPDATE' : ''}
         `,
         [this.clientDepartmentConfigKey],
-      )) as Array<{ id: string; configKey: string; configValue: string; updatedAt: string }>
+      )
 
       const row = lockedRows[0]
       if (!row) {
@@ -712,11 +800,13 @@ class SystemConfigService {
       }
 
       const before: ClientDepartmentConfigRecord = {
-        options: this.parseClientDepartmentOptions(row.configValue),
+        ...this.parseClientDepartmentConfig(row.configValue),
         updatedAt: new Date(row.updatedAt),
       }
 
-      const targetValue = JSON.stringify(normalizedOptions)
+      const targetValue = JSON.stringify({
+        tree: normalizedTree,
+      })
       let changed = false
       if (row.configValue !== targetValue) {
         await manager.getRepository(SystemConfig).update({ id: row.id }, { configValue: targetValue })
@@ -724,6 +814,7 @@ class SystemConfigService {
       }
 
       const config: ClientDepartmentConfigRecord = {
+        tree: normalizedTree,
         options: normalizedOptions,
         updatedAt: changed ? new Date() : new Date(row.updatedAt),
       }
@@ -788,7 +879,7 @@ class SystemConfigService {
     return AppDataSource.transaction(async (manager) => {
       const useForUpdate = manager.connection.options.type === 'mysql'
       const placeholders = this.verificationConfigKeys.map(() => '?').join(', ')
-      const lockedRows = (await manager.query(
+      const lockedRows: Array<{ id: string; configKey: string; configValue: string; updatedAt: string }> = await manager.query(
         `
           SELECT id, config_key AS configKey, config_value AS configValue, updated_at AS updatedAt
           FROM system_configs
@@ -796,7 +887,7 @@ class SystemConfigService {
           ${useForUpdate ? 'FOR UPDATE' : ''}
         `,
         [...this.verificationConfigKeys],
-      )) as Array<{ id: string; configKey: string; configValue: string; updatedAt: string }>
+      )
 
       if (lockedRows.length !== this.verificationConfigKeys.length) {
         throw new BizError('验证码平台配置缺失，请联系管理员补齐配置', 500)
