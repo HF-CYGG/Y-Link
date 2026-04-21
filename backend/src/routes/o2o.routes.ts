@@ -30,6 +30,13 @@ const verifySchema = z.object({
   verifyCode: z.string().trim().min(1),
 })
 
+const myOrderQuerySchema = z.object({
+  status: z.enum(['pending', 'verified', 'cancelled']).optional(),
+  keyword: z.string().trim().max(64).optional(),
+  page: z.coerce.number().int().min(1).optional(),
+  pageSize: z.coerce.number().int().min(1).max(50).optional(),
+})
+
 const consoleOrderQuerySchema = z.object({
   status: z.enum(['pending', 'verified', 'cancelled']).optional(),
   keyword: z.string().trim().max(64).optional(),
@@ -96,7 +103,8 @@ o2oRouter.get(
   requireClientAuth,
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
-    const data = await o2oPreorderService.listMyOrders(authReq.clientAuth)
+    const query = myOrderQuerySchema.parse(req.query)
+    const data = await o2oPreorderService.listMyOrders(authReq.clientAuth, query)
     res.json({ code: 0, message: 'ok', data })
   }),
 )

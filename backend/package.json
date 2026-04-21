@@ -15,7 +15,8 @@
     "task6:verify": "tsx scripts/task6-verify.ts",
     "task7:verify": "tsx scripts/task7-verify.ts",
     "task8:verify": "tsx scripts/task8-verify.ts",
-    "o2o:verify": "tsx scripts/o2o-preorder-verify.ts"
+    "o2o:verify": "tsx scripts/o2o-preorder-verify.ts",
+    "order-query:baseline:verify": "tsx scripts/order-query-baseline-verify.ts"
   },
   "dependencies": {
     "dotenv": "^16.6.1",

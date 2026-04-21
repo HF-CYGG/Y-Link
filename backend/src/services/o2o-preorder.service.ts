@@ -26,6 +26,7 @@ import { BizError } from '../utils/errors.js'
 import { generateOrderUuid } from '../utils/id-generator.js'
 import { orderSerialService } from './order-serial.service.js'
 import { systemConfigService } from './system-config.service.js'
+import type { PaginationResult } from '../types/api.js'
 
 export interface SubmitPreorderItemInput {
   productId: string | number
@@ -40,6 +41,32 @@ export interface SubmitPreorderInput {
 export interface UpdateOrderBusinessStatusInput {
   orderId: string
   businessStatus: O2oPreorderBusinessStatus | null
+}
+
+export interface MyOrderListQuery {
+  status?: 'pending' | 'verified' | 'cancelled'
+  keyword?: string
+  page: number
+  pageSize: number
+}
+
+export interface O2oPreorderSummaryView {
+  statusReport: {
+    scenario: 'pending' | 'verified' | 'cancelled' | 'timeout_soon' | 'timeout_cancelled'
+    cancelReason: 'timeout' | 'manual' | null
+    timeoutReached: boolean
+    timeoutSoon: boolean
+  }
+  totalAmount: string
+  expireInSeconds: number
+  id: string
+  showNo: string
+  verifyCode: string
+  status: O2oPreorder['status']
+  businessStatus: O2oPreorder['businessStatus']
+  totalQty: number
+  timeoutAt: Date | null
+  createdAt: Date
 }
 
 class O2oPreorderService {
@@ -276,6 +303,14 @@ class O2oPreorderService {
       throw new BizError(`${fieldName}格式不正确`, 400)
     }
     return parsed
+  }
+
+  /**
+   * 对 LIKE 条件中的关键字做转义，避免把用户输入的 % / _ 误解为通配符。
+   * 这里使用 ESCAPE '\'，可同时兼容 MySQL 与 SQLite。
+   */
+  private escapeLikeKeyword(value: string) {
+    return value.replaceAll(/[%_\\]/g, '\\$&')
   }
 
   // 订单是否已达到超时点：
@@ -577,29 +612,68 @@ class O2oPreorderService {
     })
   }
 
-  async listMyOrders(auth: ClientAuthContext) {
+  async listMyOrders(auth: ClientAuthContext, query?: Partial<MyOrderListQuery>): Promise<PaginationResult<O2oPreorderSummaryView>> {
     // 先做一次超时回收，保证用户看到的订单状态尽量接近当前真实状态。
     await this.cancelTimeoutOrders()
-    const rows = await this.preorderRepo.find({
-      where: { clientUserId: auth.userId },
-      order: { id: 'DESC' },
-      take: 50,
-    })
+
+    const normalizedPage = Math.max(1, Number(query?.page) || 1)
+    const normalizedPageSize = Math.max(1, Math.min(50, Number(query?.pageSize) || 20))
+    const normalizedKeyword = query?.keyword?.trim() ?? ''
+    const normalizedStatus = query?.status
+
+    const queryBuilder = this.preorderRepo
+      .createQueryBuilder('order')
+      .where('order.clientUserId = :clientUserId', { clientUserId: auth.userId })
+      .orderBy('order.id', 'DESC')
+      .skip((normalizedPage - 1) * normalizedPageSize)
+      .take(normalizedPageSize)
+
+    if (normalizedStatus) {
+      queryBuilder.andWhere('order.status = :status', { status: normalizedStatus })
+    }
+
+    if (normalizedKeyword) {
+      const escapedKeyword = this.escapeLikeKeyword(normalizedKeyword)
+      const keywordPrefix = `${escapedKeyword}%`
+      const normalizedVerifyCodeKeyword = this.normalizeVerifyCode(normalizedKeyword)
+      const escapedVerifyKeyword = this.escapeLikeKeyword(normalizedVerifyCodeKeyword)
+
+      queryBuilder.andWhere(
+        new Brackets((keywordQb) => {
+          keywordQb
+            // 等值匹配优先命中 show_no / verify_code 唯一索引。
+            .where('order.showNo = :showNoExact', { showNoExact: normalizedKeyword })
+            .orWhere('order.verifyCode = :verifyCodeExact', { verifyCodeExact: normalizedVerifyCodeKeyword })
+            // 前缀匹配在输入单号前几位时仍可利用 B-Tree 索引。
+            .orWhere("order.showNo LIKE :showNoPrefix ESCAPE '\\'", { showNoPrefix: keywordPrefix })
+            .orWhere("order.verifyCode LIKE :verifyCodePrefix ESCAPE '\\'", {
+              verifyCodePrefix: `${escapedVerifyKeyword}%`,
+            })
+        }),
+      )
+    }
+
+    const [rows, total] = await queryBuilder.getManyAndCount()
     const nowMs = Date.now()
     const totalAmountMap = await this.resolveOrderTotalAmountMap(rows.map((item) => String(item.id)))
-    return rows.map((item) => ({
-      statusReport: this.resolveOrderStatusReport(item, nowMs),
-      totalAmount: totalAmountMap.get(String(item.id)) ?? '0.00',
-      expireInSeconds: this.resolveExpireInSeconds(item, nowMs),
-      id: String(item.id),
-      showNo: item.showNo,
-      verifyCode: item.verifyCode,
-      status: item.status,
-      businessStatus: item.businessStatus ?? null,
-      totalQty: item.totalQty,
-      timeoutAt: item.timeoutAt,
-      createdAt: item.createdAt,
-    }))
+    return {
+      page: normalizedPage,
+      pageSize: normalizedPageSize,
+      total,
+      list: rows.map((item) => ({
+        statusReport: this.resolveOrderStatusReport(item, nowMs),
+        totalAmount: totalAmountMap.get(String(item.id)) ?? '0.00',
+        expireInSeconds: this.resolveExpireInSeconds(item, nowMs),
+        id: String(item.id),
+        showNo: item.showNo,
+        verifyCode: item.verifyCode,
+        status: item.status,
+        businessStatus: item.businessStatus ?? null,
+        totalQty: item.totalQty,
+        timeoutAt: item.timeoutAt,
+        createdAt: item.createdAt,
+      })),
+    }
   }
 
   async getMyOrderDetail(auth: ClientAuthContext, id: string) {

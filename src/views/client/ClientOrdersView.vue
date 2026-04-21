@@ -1,12 +1,12 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/client/ClientOrdersView.vue
- * 文件职责：承载客户端“我的订单”列表展示、筛选、刷新与撤回动作。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：承载客户端“我的订单”列表展示、筛选、查询防抖与刷新反馈能力。
+ * 维护说明：本文件重点治理“输入触发策略 + 请求最新生效 + 加载反馈节奏”，减少移动端抖动。
  */
 
 
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { cancelMyO2oPreorder, getMyO2oPreorders, type O2oPreorderDetail, type O2oPreorderSummary } from '@/api/modules/o2o'
 import { BaseRequestState } from '@/components/common'
@@ -21,7 +21,10 @@ import {
 import { useClientOrderStore } from '@/store'
 import { normalizeRequestError } from '@/utils/error'
 
-const loading = ref(false)
+// 关键词防抖窗口：连续输入时只在停顿后更新筛选词，避免每次按键都触发大列表过滤。
+const KEYWORD_DEBOUNCE_MS = 260
+const firstScreenLoading = ref(false)
+const refreshing = ref(false)
 const recallingOrderId = ref('')
 const requestError = ref<{ type: 'offline' | 'error'; message: string } | null>(null)
 const clientOrderStore = useClientOrderStore()
@@ -29,14 +32,47 @@ const { runLatest } = useStableRequest()
 clientOrderStore.initialize()
 
 const orders = computed(() => clientOrderStore.orders)
-const keyword = ref('')
+const keywordInput = ref('')
+const effectiveKeyword = ref('')
+const keywordDebounceTimer = ref<ReturnType<typeof globalThis.setTimeout> | null>(null)
+const keywordDebouncing = ref(false)
 const activeStatus = computed({
   get: () => clientOrderStore.activeStatus,
   set: (value: 'all' | O2oPreorderSummary['status']) => clientOrderStore.setActiveStatus(value),
 })
 
+// 关键词采用“输入词 + 生效词”双状态：
+// - 输入词实时绑定输入框，保证打字流畅；
+// - 生效词由防抖定时器更新，避免短时间重复计算导致列表抖动。
+watch(
+  () => keywordInput.value,
+  (nextKeyword) => {
+    if (keywordDebounceTimer.value !== null) {
+      globalThis.clearTimeout(keywordDebounceTimer.value)
+      keywordDebounceTimer.value = null
+    }
+    if (nextKeyword.trim() === effectiveKeyword.value.trim()) {
+      keywordDebouncing.value = false
+      return
+    }
+    keywordDebouncing.value = true
+    keywordDebounceTimer.value = globalThis.setTimeout(() => {
+      effectiveKeyword.value = nextKeyword.trim()
+      keywordDebouncing.value = false
+      keywordDebounceTimer.value = null
+    }, KEYWORD_DEBOUNCE_MS)
+  },
+)
+
+onBeforeUnmount(() => {
+  if (keywordDebounceTimer.value !== null) {
+    globalThis.clearTimeout(keywordDebounceTimer.value)
+    keywordDebounceTimer.value = null
+  }
+})
+
 const filteredOrders = computed(() => {
-  const normalizedKeyword = keyword.value.trim().toLowerCase()
+  const normalizedKeyword = effectiveKeyword.value.toLowerCase()
   return orders.value.filter((order) => {
     if (activeStatus.value !== 'all' && order.status !== activeStatus.value) {
       return false
@@ -98,24 +134,49 @@ const loadOrders = async (force = false) => {
     requestError.value = null
     return
   }
-  loading.value = clientOrderStore.orders.length === 0
+  const hasCachedOrders = clientOrderStore.orders.length > 0
+  firstScreenLoading.value = !hasCachedOrders
+  refreshing.value = hasCachedOrders
   requestError.value = null
   await runLatest({
-    executor: (signal) => getMyO2oPreorders({ signal }),
+    executor: (signal) =>
+      getMyO2oPreorders(
+        {
+          page: 1,
+          pageSize: 50,
+        },
+        { signal },
+      ),
     onSuccess: (result) => {
-      clientOrderStore.setOrders(result)
+      clientOrderStore.setOrders(result.records)
     },
     onError: (error) => {
       const normalizedError = normalizeRequestError(error, '订单加载失败')
+      if (hasCachedOrders) {
+        // 已有列表时不切到整页错误态，避免“刷新失败导致内容闪退”。
+        ElMessage.warning(`订单刷新失败：${normalizedError.message}`)
+        return
+      }
       requestError.value = {
         type: globalThis.navigator.onLine === false ? 'offline' : 'error',
         message: normalizedError.message,
       }
     },
     onFinally: () => {
-      loading.value = false
+      firstScreenLoading.value = false
+      refreshing.value = false
     },
   })
+}
+
+const clearKeyword = () => {
+  if (keywordDebounceTimer.value !== null) {
+    globalThis.clearTimeout(keywordDebounceTimer.value)
+    keywordDebounceTimer.value = null
+  }
+  keywordInput.value = ''
+  effectiveKeyword.value = ''
+  keywordDebouncing.value = false
 }
 
 // 详细注释：执行撤回订单，二次确认后请求撤回，并更新 Store 中的订单状态。
@@ -170,8 +231,12 @@ onMounted(async () => {
           <p class="text-xl font-semibold text-slate-900">我的订单</p>
           <p class="text-sm text-slate-500">查看待提货、已核销与已取消订单</p>
         </div>
-        <button class="rounded-full border border-slate-200 bg-slate-50 px-4 py-2 text-sm text-slate-600" @click="loadOrders(true)">
-          刷新订单
+        <button
+          class="rounded-full border border-slate-200 bg-slate-50 px-4 py-2 text-sm text-slate-600 disabled:cursor-not-allowed disabled:opacity-60"
+          :disabled="refreshing"
+          @click="loadOrders(true)"
+        >
+          {{ refreshing ? '刷新中...' : '刷新订单' }}
         </button>
       </div>
       <div class="mt-3 flex flex-wrap gap-2">
@@ -188,15 +253,18 @@ onMounted(async () => {
       </div>
       <div class="mt-3 flex items-center gap-2">
         <input
-          v-model.trim="keyword"
+          v-model="keywordInput"
           class="h-10 flex-1 rounded-full border border-slate-200 bg-slate-50 px-4 text-sm outline-none focus:border-slate-300"
           placeholder="搜索订单号或核销码"
         />
-        <button type="button" class="h-10 rounded-full border border-slate-200 px-4 text-sm text-slate-600" @click="keyword = ''">清空</button>
+        <button type="button" class="h-10 rounded-full border border-slate-200 px-4 text-sm text-slate-600" @click="clearKeyword">清空</button>
       </div>
+      <p v-if="keywordDebouncing || refreshing" class="mt-2 text-xs text-slate-400">
+        {{ keywordDebouncing ? '正在更新关键词结果...' : '正在刷新订单，当前列表可继续浏览' }}
+      </p>
     </div>
 
-    <div v-if="loading" class="grid gap-3 rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
+    <div v-if="firstScreenLoading" class="grid gap-3 rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
       <div v-for="index in 4" :key="index" class="h-[4.6rem] animate-pulse rounded-2xl bg-slate-100" />
     </div>
     <BaseRequestState
@@ -211,7 +279,7 @@ onMounted(async () => {
       v-else-if="!filteredOrders.length"
       type="empty"
       title="暂无订单"
-      :description="keyword ? '未匹配到符合关键词的订单，请调整关键词后重试' : '当前筛选下没有订单记录'"
+      :description="effectiveKeyword ? '未匹配到符合关键词的订单，请调整关键词后重试' : '当前筛选下没有订单记录'"
       action-text="刷新订单"
       @retry="loadOrders(true)"
     />

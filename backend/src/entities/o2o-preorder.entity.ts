@@ -37,6 +37,8 @@ export const O2O_PREORDER_BUSINESS_STATUSES = [
 export type O2oPreorderBusinessStatus = (typeof O2O_PREORDER_BUSINESS_STATUSES)[number]
 
 @Entity({ name: 'o2o_preorder' })
+@Index('idx_o2o_preorder_client_status_id', ['clientUserId', 'status', 'id'])
+@Index('idx_o2o_preorder_status_timeout_at', ['status', 'timeoutAt'])
 export class O2oPreorder {
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })
   id!: string

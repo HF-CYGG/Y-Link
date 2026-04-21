@@ -10,6 +10,7 @@ import type {
   O2oOrderBusinessStatus,
   O2oOrderStatus,
 } from '@/constants/o2o-order-status'
+import type { PaginationQueryInput, PaginationResult } from '@/types/api'
 
 export interface O2oOrderStatusReport {
   scenario: ClientOrderReportScenario
@@ -44,6 +45,18 @@ export interface O2oPreorderSummary {
   totalQty: number
   timeoutAt: string | null
   createdAt: string
+}
+
+export interface O2oMyOrderListQuery extends PaginationQueryInput {
+  status?: O2oOrderStatus
+  keyword?: string
+}
+
+interface O2oMyOrderListRawResult {
+  page: number
+  pageSize: number
+  total: number
+  list: O2oPreorderSummary[]
 }
 
 export interface O2oPreorderDetailItem {
@@ -123,12 +136,23 @@ export const submitO2oPreorder = (payload: SubmitO2oPreorderPayload) =>
     data: payload,
   })
 
-export const getMyO2oPreorders = (config?: RequestConfig) =>
-  request<O2oPreorderSummary[]>({
+export const getMyO2oPreorders = async (
+  params: O2oMyOrderListQuery = {},
+  config?: RequestConfig,
+): Promise<PaginationResult<O2oPreorderSummary>> => {
+  const result = await request<O2oMyOrderListRawResult>({
     method: 'GET',
     url: '/o2o/mall/preorders',
+    params,
     ...config,
   })
+  return {
+    page: result.page,
+    pageSize: result.pageSize,
+    total: result.total,
+    records: result.list,
+  }
+}
 
 export const getO2oConsoleOrders = (
   params: { status?: O2oOrderStatus; keyword?: string; limit?: number },
