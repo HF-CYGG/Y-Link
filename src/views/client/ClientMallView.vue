@@ -328,7 +328,14 @@ const syncListViewportBottomSpacer = () => {
     return
   }
   // 为右侧分组列表补一个“可滚动缓冲尾部”，确保尾部标签也有足够空间滚动到可视定位线附近。
-  listViewportBottomSpacer.value = Math.max(180, Math.floor(scroller.clientHeight * 0.58))
+  listViewportBottomSpacer.value = Math.max(180, Math.floor(scroller.clientHeight * 0.75))
+}
+
+const resolveSectionTopWithinScroller = (section: HTMLElement, scroller: HTMLElement) => {
+  const sectionRect = section.getBoundingClientRect()
+  const scrollerRect = scroller.getBoundingClientRect()
+  // 统一转换为“相对于滚动容器内容区”的坐标，避免 offsetTop 因 offsetParent 不一致而计算失真。
+  return Math.max(0, sectionRect.top - scrollerRect.top + scroller.scrollTop)
 }
 
 const resolveCategoryScrollMetrics = (categoryKey: string, scroller: HTMLElement) => {
@@ -346,12 +353,13 @@ const resolveCategoryScrollMetrics = (categoryKey: string, scroller: HTMLElement
     return null
   }
   const maxScrollTop = Math.max(0, scroller.scrollHeight - scroller.clientHeight)
+  const sectionTopWithinScroller = resolveSectionTopWithinScroller(section, scroller)
   // 统一以分组容器起点作为锚点：
   // 1. 点击标签时，分组标题与第一行商品一起进入顶部视口；
   // 2. “全部”和第一个标签天然对应同一顶部位置，不会再点击首标签后异常下滑。
-  const rawTargetTop = Math.max(0, section.offsetTop)
-  const relativeTop = section.offsetTop - scroller.scrollTop
-  const relativeBottom = section.offsetTop + section.offsetHeight - scroller.scrollTop
+  const rawTargetTop = sectionTopWithinScroller
+  const relativeTop = sectionTopWithinScroller - scroller.scrollTop
+  const relativeBottom = sectionTopWithinScroller + section.offsetHeight - scroller.scrollTop
   return {
     rawTargetTop,
     reachableTargetTop: Math.min(rawTargetTop, maxScrollTop),
@@ -440,8 +448,9 @@ const resolveActiveCategoryByViewport = (scroller: HTMLElement) => {
     if (!section) {
       continue
     }
-    const relativeTop = section.offsetTop - scroller.scrollTop
-    const relativeBottom = section.offsetTop + section.offsetHeight - scroller.scrollTop
+    const sectionTopWithinScroller = resolveSectionTopWithinScroller(section, scroller)
+    const relativeTop = sectionTopWithinScroller - scroller.scrollTop
+    const relativeBottom = sectionTopWithinScroller + section.offsetHeight - scroller.scrollTop
 
     if (relativeTop <= anchorLine) {
       passedCategoryKey = group.key
