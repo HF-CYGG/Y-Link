@@ -5,12 +5,16 @@
  * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
  */
 
-import { onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { useClientAuthStore } from '@/store'
-import { clientChangePassword, getClientAuthCapabilities } from '@/api/modules/client-auth'
+import {
+  clientChangePassword,
+  getClientAuthCapabilities,
+  type ClientDepartmentOptionNode,
+} from '@/api/modules/client-auth'
 import { extractErrorMessage } from '@/utils/error'
 
 const router = useRouter()
@@ -21,7 +25,7 @@ const profileDialogVisible = ref(false)
 const submitting = ref(false)
 const profileSubmitting = ref(false)
 const departmentOptionsLoading = ref(false)
-const departmentOptions = ref<string[]>([])
+const departmentTree = ref<ClientDepartmentOptionNode[]>([])
 const formRef = ref<FormInstance>()
 const profileFormRef = ref<FormInstance>()
 const form = reactive({
@@ -84,21 +88,54 @@ const openProfileDialog = () => {
   profileForm.mobile = clientAuthStore.currentUser?.mobile || ''
   profileForm.email = clientAuthStore.currentUser?.email || ''
   profileForm.departmentName = clientAuthStore.currentUser?.departmentName || ''
+  void loadDepartmentOptions()
   profileDialogVisible.value = true
   profileFormRef.value?.clearValidate()
+}
+
+const dedupeDepartmentOptions = (list: string[]) => {
+  return [...new Set(list.map((item) => item.trim()).filter((item) => item.length > 0))]
+}
+
+const cloneDepartmentTree = (tree: ClientDepartmentOptionNode[]): ClientDepartmentOptionNode[] => structuredClone(tree)
+
+const flattenDepartmentLabels = (tree: ClientDepartmentOptionNode[]): string[] => {
+  const labels: string[] = []
+  const walk = (nodes: ClientDepartmentOptionNode[]) => {
+    nodes.forEach((node) => {
+      labels.push(node.label)
+      if (node.children.length > 0) {
+        walk(node.children)
+      }
+    })
+  }
+  walk(tree)
+  return labels
 }
 
 const loadDepartmentOptions = async () => {
   departmentOptionsLoading.value = true
   try {
     const capabilities = await getClientAuthCapabilities()
-    departmentOptions.value = capabilities.departmentOptions
+    departmentTree.value = cloneDepartmentTree(capabilities.departmentTree)
+    const currentDepartment = profileForm.departmentName.trim()
+    if (currentDepartment && !flattenDepartmentLabels(departmentTree.value).includes(currentDepartment)) {
+      departmentTree.value.push({
+        id: `legacy_${currentDepartment}`,
+        label: currentDepartment,
+        children: [],
+      })
+    }
   } catch (error) {
     ElMessage.error(extractErrorMessage(error, '加载部门配置失败'))
   } finally {
     departmentOptionsLoading.value = false
   }
 }
+
+const selectableDepartmentOptions = computed(() => {
+  return dedupeDepartmentOptions(flattenDepartmentLabels(departmentTree.value))
+})
 
 const openPasswordDialog = () => {
   form.currentPassword = ''
@@ -144,7 +181,7 @@ const submitUpdateProfile = async () => {
   }
   const normalizedMobile = profileForm.mobile.trim()
   const normalizedEmail = profileForm.email.trim().toLowerCase()
-  if (profileForm.departmentName.trim() && !departmentOptions.value.includes(profileForm.departmentName.trim())) {
+  if (profileForm.departmentName.trim() && !selectableDepartmentOptions.value.includes(profileForm.departmentName.trim())) {
     ElMessage.warning('请选择系统配置中的部门选项')
     return
   }
@@ -251,16 +288,27 @@ onMounted(() => {
           <el-input v-model="profileForm.email" placeholder="请输入邮箱" />
         </el-form-item>
         <el-form-item label="部门" prop="departmentName">
-          <el-select
+          <el-tree-select
             v-model="profileForm.departmentName"
-            placeholder="请选择部门（选填）"
+            :data="departmentTree"
+            node-key="id"
+            :props="{ label: 'label', value: 'label', children: 'children' }"
+            check-strictly
+            default-expand-all
+            :expand-on-click-node="false"
+            :render-after-expand="false"
+            placeholder="请选择部门（支持一/二/三级，选填）"
             class="w-full"
             clearable
             filterable
+            reserve-keyword
             :loading="departmentOptionsLoading"
-          >
-            <el-option v-for="department in departmentOptions" :key="department" :label="department" :value="department" />
-          </el-select>
+            @visible-change="
+              (visible: boolean) => {
+                if (visible) void loadDepartmentOptions()
+              }
+            "
+          />
         </el-form-item>
       </el-form>
       <template #footer>

@@ -48,6 +48,12 @@ export interface ClientVerificationCodeSendResult {
 
 export type ClientValidationMode = 'captcha' | 'verification_code'
 
+export interface ClientDepartmentOptionNode {
+  id: string
+  label: string
+  children: ClientDepartmentOptionNode[]
+}
+
 /**
  * 客户端认证能力配置：
  * - 动态下发当前系统支持的注册、登录和找回密码验证方式。
@@ -62,6 +68,8 @@ export interface ClientAuthCapabilities {
     email: ClientValidationMode
   }
   forgotPasswordEnabled: boolean
+  departmentTree: ClientDepartmentOptionNode[]
+  departmentRootOptions: string[]
   departmentOptions: string[]
 }
 

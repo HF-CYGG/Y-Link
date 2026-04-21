@@ -79,6 +79,12 @@ export interface ClientUpdateProfileInput {
 
 export type ClientValidationMode = 'captcha' | 'verification_code'
 
+export interface ClientDepartmentOptionNode {
+  id: string
+  label: string
+  children: ClientDepartmentOptionNode[]
+}
+
 export interface ClientAuthCapabilities {
   channels: {
     mobile: boolean
@@ -89,6 +95,8 @@ export interface ClientAuthCapabilities {
     email: ClientValidationMode
   }
   forgotPasswordEnabled: boolean
+  departmentTree: ClientDepartmentOptionNode[]
+  departmentRootOptions: string[]
   departmentOptions: string[]
 }
 
@@ -114,6 +122,8 @@ class ClientAuthService {
         email: emailEnabled ? 'verification_code' : 'captcha',
       },
       forgotPasswordEnabled: mobileEnabled && emailEnabled,
+      departmentTree: departmentConfigs.tree,
+      departmentRootOptions: departmentConfigs.tree.map((node) => node.label),
       departmentOptions: departmentConfigs.options,
     }
   }
