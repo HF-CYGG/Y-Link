@@ -101,6 +101,8 @@ export const sendClientVerificationCode = (payload: {
   channel: 'mobile' | 'email'
   target: string
   scene: 'register' | 'forgot_password'
+  captchaId: string
+  captchaCode: string
 }) =>
   request<ClientVerificationCodeSendResult>({
     method: 'POST',

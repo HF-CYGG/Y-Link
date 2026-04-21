@@ -6,10 +6,10 @@
  */
 
 
-import { onMounted, onUnmounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { getClientAuthCapabilities, type ClientAuthCapabilities } from '@/api/modules/client-auth'
+import { getClientAuthCapabilities, getClientCaptcha, type ClientAuthCapabilities } from '@/api/modules/client-auth'
 import { useClientAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
 
@@ -23,11 +23,19 @@ const securityHint = ref('')
 const verificationSending = ref(false)
 const verificationCountdown = ref(0)
 let verificationTimer: ReturnType<typeof globalThis.setInterval> | null = null
+let captchaExpireTimer: ReturnType<typeof globalThis.setInterval> | null = null
 const capabilityLoading = ref(false)
 const authCapabilities = ref<ClientAuthCapabilities | null>(null)
+const captchaLoading = ref(false)
+const captcha = reactive({
+  captchaId: '',
+  captchaSvg: '',
+  expiresInSeconds: 0,
+})
 
 const verifyForm = reactive({
   account: '',
+  captcha: '',
   verificationCode: '',
 })
 
@@ -37,6 +45,13 @@ const resetForm = reactive({
 })
 
 const forgotPasswordAvailable = ref(false)
+const passwordStrengthHint = '密码至少 8 位，且需同时包含字母和数字。'
+const captchaHintText = computed(() => {
+  if (captcha.expiresInSeconds <= 0) {
+    return '发送验证码前请先输入图形验证码，点击图片可立即刷新。'
+  }
+  return `发送验证码前请先输入图形验证码，约 ${captcha.expiresInSeconds}s 后失效。`
+})
 
 const loadAuthCapabilities = async () => {
   capabilityLoading.value = true
@@ -51,6 +66,45 @@ const loadAuthCapabilities = async () => {
 
 const applySecurityHintFromMessage = (message: string) => {
   securityHint.value = /频繁|锁定|稍后|重试/.test(message) ? message : ''
+}
+
+const refreshCaptcha = async (silent = false) => {
+  captchaLoading.value = true
+  try {
+    const result = await getClientCaptcha()
+    captcha.captchaId = result.captchaId
+    captcha.captchaSvg = result.captchaSvg
+    captcha.expiresInSeconds = result.expiresInSeconds
+    if (captchaExpireTimer) {
+      globalThis.clearInterval(captchaExpireTimer)
+    }
+    captchaExpireTimer = globalThis.setInterval(() => {
+      if (captcha.expiresInSeconds <= 1) {
+        captcha.expiresInSeconds = 0
+        if (captchaExpireTimer) {
+          globalThis.clearInterval(captchaExpireTimer)
+          captchaExpireTimer = null
+        }
+        return
+      }
+      captcha.expiresInSeconds -= 1
+    }, 1000)
+    if (!silent) {
+      ElMessage.success('已刷新验证码')
+    }
+  } finally {
+    captchaLoading.value = false
+  }
+}
+
+const clearCaptcha = () => {
+  captcha.captchaId = ''
+  captcha.captchaSvg = ''
+  captcha.expiresInSeconds = 0
+  if (captchaExpireTimer) {
+    globalThis.clearInterval(captchaExpireTimer)
+    captchaExpireTimer = null
+  }
 }
 
 const validateAccount = (account: string) => {
@@ -69,7 +123,15 @@ const resolveChannel = (account: string): 'mobile' | 'email' | null => {
   if (!normalized) {
     return null
   }
-  return normalized.includes('@') ? (validateAccount(normalized) ? 'email' : null) : (validateAccount(normalized) ? 'mobile' : null)
+  if (normalized.includes('@')) {
+    return validateAccount(normalized) ? 'email' : null
+  }
+  return validateAccount(normalized) ? 'mobile' : null
+}
+
+const validatePassword = (password: string) => {
+  const normalized = password.trim()
+  return normalized.length >= 8 && /[A-Za-z]/.test(normalized) && /\d/.test(normalized)
 }
 
 const resetVerificationTimer = () => {
@@ -98,19 +160,30 @@ const handleSendVerificationCode = async () => {
     ElMessage.warning('请输入正确的用户名（手机号或邮箱）')
     return
   }
+  if (!captcha.captchaId || !verifyForm.captcha.trim()) {
+    ElMessage.warning('发送验证码前请先输入图形验证码')
+    await refreshCaptcha(true)
+    return
+  }
   verificationSending.value = true
   try {
     const result = await clientAuthStore.sendVerificationCode({
       channel,
       target: verifyForm.account.trim(),
       scene: 'forgot_password',
+      captchaId: captcha.captchaId,
+      captchaCode: verifyForm.captcha.trim(),
     })
     ElMessage.success(`${channel === 'email' ? '邮箱' : '手机'}验证码已发送`)
+    verifyForm.captcha = ''
+    await refreshCaptcha(true)
     startVerificationCountdown(result.expireSeconds)
   } catch (error) {
     const message = extractErrorMessage(error, '验证码发送失败，请稍后重试')
     applySecurityHintFromMessage(message)
     ElMessage.error(message)
+    verifyForm.captcha = ''
+    await refreshCaptcha(true)
   } finally {
     verificationSending.value = false
   }
@@ -151,8 +224,8 @@ const handleVerify = async () => {
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const handleReset = async () => {
-  if (resetForm.newPassword.trim().length < 6) {
-    ElMessage.warning('新密码至少 6 位')
+  if (!validatePassword(resetForm.newPassword)) {
+    ElMessage.warning(passwordStrengthHint)
     return
   }
   if (resetForm.newPassword !== resetForm.confirmPassword) {
@@ -180,10 +253,12 @@ const handleReset = async () => {
 
 onMounted(async () => {
   await loadAuthCapabilities()
+  await refreshCaptcha(true)
 })
 
 onUnmounted(() => {
   resetVerificationTimer()
+  clearCaptcha()
 })
 </script>
 
@@ -225,6 +300,14 @@ onUnmounted(() => {
       <form v-if="step === 1 && forgotPasswordAvailable" class="space-y-4" @submit.prevent="handleVerify">
         <input v-model.trim="verifyForm.account" class="client-input" placeholder="请输入用户名（手机号或邮箱）" />
         <div class="grid grid-cols-[1fr_auto] gap-3">
+          <input v-model.trim="verifyForm.captcha" class="client-input" placeholder="先输入图形验证码，再发送手机/邮箱验证码" />
+          <button type="button" class="captcha-image-box" :disabled="captchaLoading" @click="refreshCaptcha()">
+            <span v-if="captchaLoading" class="text-xs text-slate-500">刷新中</span>
+            <span v-else class="captcha-render" v-html="captcha.captchaSvg"></span>
+          </button>
+        </div>
+        <p class="text-xs leading-6 text-slate-500">{{ captchaHintText }}</p>
+        <div class="grid grid-cols-[1fr_auto] gap-3">
           <input v-model.trim="verifyForm.verificationCode" class="client-input" placeholder="请输入手机/邮箱验证码" />
           <button type="button" class="captcha-box" :disabled="verificationSending || verificationCountdown > 0" @click="handleSendVerificationCode">
             <span class="text-xs text-slate-500">
@@ -240,6 +323,7 @@ onUnmounted(() => {
       <form v-else-if="step === 2" class="space-y-4" @submit.prevent="handleReset">
         <input v-model="resetForm.newPassword" class="client-input" type="password" placeholder="请输入新密码" />
         <input v-model="resetForm.confirmPassword" class="client-input" type="password" placeholder="请再次输入新密码" />
+        <p class="text-xs leading-6 text-slate-500">{{ passwordStrengthHint }}</p>
         <button class="client-submit" type="submit" :disabled="submitting">
           {{ submitting ? '提交中...' : '确认重置密码' }}
         </button>
@@ -269,6 +353,23 @@ onUnmounted(() => {
   border: 1px solid rgb(226 232 240);
   background: white;
   padding: 0 0.75rem;
+}
+
+.captcha-image-box {
+  width: 7.5rem;
+  min-height: 3.5rem;
+  border-radius: 1rem;
+  border: 1px dashed rgb(203 213 225);
+  background: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.captcha-render :deep(svg) {
+  width: 100px;
+  height: 36px;
 }
 
 .client-submit {

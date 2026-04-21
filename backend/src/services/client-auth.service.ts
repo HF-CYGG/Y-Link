@@ -59,6 +59,14 @@ export interface ClientForgotVerifyInput {
   captchaCode?: string
 }
 
+export interface ClientVerificationCodeSendInput {
+  channel: 'mobile' | 'email'
+  target: string
+  scene: 'register' | 'forgot_password'
+  captchaId: string
+  captchaCode: string
+}
+
 export interface ClientResetPasswordInput {
   account: string
   resetToken: string
@@ -104,6 +112,19 @@ class ClientAuthService {
   private readonly userRepo = AppDataSource.getRepository(ClientUser)
   private readonly sessionRepo = AppDataSource.getRepository(ClientUserSession)
 
+  /**
+   * 客户端密码强度统一约束：
+   * - 至少 8 位；
+   * - 必须同时包含字母与数字；
+   * - 登录不限制展示字符，但注册、重置和改密都必须走同一套强度校验。
+   */
+  private assertClientPasswordStrength(password: string, fieldLabel = '密码') {
+    const normalizedPassword = password.trim()
+    if (normalizedPassword.length < 8 || !/[A-Za-z]/.test(normalizedPassword) || !/\d/.test(normalizedPassword)) {
+      throw new BizError(`${fieldLabel}至少 8 位，且需包含字母和数字`, 400)
+    }
+  }
+
   private async getVerificationCapabilities(): Promise<ClientAuthCapabilities> {
     const [configs, departmentConfigs] = await Promise.all([
       systemConfigService.getVerificationProviderConfigs(),
@@ -133,6 +154,15 @@ class ClientAuthService {
       throw new BizError(message, 400)
     }
     captchaService.verifyCaptcha(input.captchaId, input.captchaCode)
+  }
+
+  /**
+   * 发送短信/邮箱验证码前强制校验图形验证码：
+   * - 避免验证码发送接口被脚本直接滥刷；
+   * - 图形验证码校验成功后即作废，减少重放空间。
+   */
+  verifyCaptchaBeforeVerificationSend(input: ClientVerificationCodeSendInput) {
+    this.verifyCaptchaIfRequired(input, '发送验证码前请先输入图形验证码')
   }
 
   private verifyCodeIfRequired(
@@ -239,9 +269,7 @@ class ClientAuthService {
     const account = this.resolveAccount(input.account)
     const username = normalizeClientUsername(input.username)
     const password = input.password.trim()
-    if (password.length < 6) {
-      throw new BizError('密码至少 6 位', 400)
-    }
+    this.assertClientPasswordStrength(password)
     const capabilities = await this.getVerificationCapabilities()
     const validationMode = capabilities.registerValidationModes[account.channel]
 
@@ -388,9 +416,7 @@ class ClientAuthService {
   async resetPassword(input: ClientResetPasswordInput, _requestMeta?: RequestMeta) {
     const account = this.resolveAccount(input.account)
     const newPassword = input.newPassword.trim()
-    if (newPassword.length < 6) {
-      throw new BizError('新密码至少 6 位', 400)
-    }
+    this.assertClientPasswordStrength(newPassword, '新密码')
     const ticket = resetTicketStore.get(input.resetToken)
     if (!ticket || ticket.expireAt <= Date.now()) {
       resetTicketStore.delete(input.resetToken)
@@ -466,9 +492,7 @@ class ClientAuthService {
     }
 
     const newPassword = input.newPassword.trim()
-    if (newPassword.length < 6) {
-      throw new BizError('新密码至少 6 位', 400)
-    }
+    this.assertClientPasswordStrength(newPassword, '新密码')
 
     user.passwordHash = await hashPassword(newPassword)
     await AppDataSource.transaction(async (manager) => {

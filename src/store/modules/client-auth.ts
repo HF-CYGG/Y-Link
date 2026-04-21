@@ -160,6 +160,8 @@ export const useClientAuthStore = defineStore('client-auth', () => {
     channel: 'mobile' | 'email'
     target: string
     scene: 'register' | 'forgot_password'
+    captchaId: string
+    captchaCode: string
   }) => {
     return sendClientVerificationCode(payload)
   }

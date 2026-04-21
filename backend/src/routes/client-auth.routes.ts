@@ -53,6 +53,8 @@ const verificationCodeSendSchema = z.object({
   channel: z.enum(['mobile', 'email']),
   target: z.string().trim().min(1),
   scene: z.enum(['register', 'forgot_password']),
+  captchaId: z.string().trim().min(1),
+  captchaCode: z.string().trim().min(1),
 })
 
 const changePasswordSchema = z.object({
@@ -92,6 +94,8 @@ clientAuthRouter.post(
     const payload = verificationCodeSendSchema.parse(req.body)
     const requestMeta = extractRequestMeta(req)
     const normalizedTarget = normalizeClientVerificationTarget(payload.channel, payload.target)
+    // 发短信/邮箱验证码前先校验图形验证码，降低接口被批量滥用的风险。
+    clientAuthService.verifyCaptchaBeforeVerificationSend(payload)
     if (payload.scene === 'forgot_password') {
       const capabilities = await clientAuthService.getCapabilities()
       if (!capabilities.forgotPasswordEnabled) {

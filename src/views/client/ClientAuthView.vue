@@ -77,6 +77,7 @@ type AuthMode = 'login' | 'register'
 interface ClientCaptchaState {
   captchaId: string
   captchaSvg: string
+  expiresInSeconds: number
 }
 
 const router = useRouter()
@@ -96,6 +97,7 @@ const verificationSending = ref(false)
 const capabilityLoading = ref(false)
 const registerVerificationCountdown = ref(0)
 let registerVerificationTimer: ReturnType<typeof globalThis.setInterval> | null = null
+let captchaExpireTimer: ReturnType<typeof globalThis.setInterval> | null = null
 const formWrapperRef = ref<HTMLElement | null>(null)
 const formBlockRef = ref<HTMLElement | null>(null)
 const formWrapperHeight = ref('auto')
@@ -105,6 +107,7 @@ const authCapabilities = ref<ClientAuthCapabilities | null>(null)
 const captcha = reactive<ClientCaptchaState>({
   captchaId: '',
   captchaSvg: '',
+  expiresInSeconds: 0,
 })
 
 const loginForm = reactive({
@@ -118,6 +121,7 @@ const registerForm = reactive({
   account: '',
   department: '',
   password: '',
+  confirmPassword: '',
   verificationCode: '',
   captcha: '',
 })
@@ -144,9 +148,16 @@ const registerValidationHint = computed(() => {
     return '请输入手机号或邮箱，系统会自动选择当前可用的注册校验方式。'
   }
   if (registerUsesVerificationCode.value) {
-    return `${channel === 'email' ? '当前邮箱通道已启用邮箱验证码' : '当前手机通道已启用短信验证码'}，注册时将使用验证码校验。`
+    return `${channel === 'email' ? '当前邮箱通道已启用邮箱验证码' : '当前手机通道已启用短信验证码'}，发送验证码前仍需先通过图形验证码校验。`
   }
   return `${channel === 'email' ? '当前邮箱通道未启用邮箱验证码' : '当前手机通道未启用短信验证码'}，注册时将改用图片验证码校验。`
+})
+
+const captchaHintText = computed(() => {
+  if (captcha.expiresInSeconds <= 0) {
+    return '点击右侧验证码图片可立即刷新。'
+  }
+  return `图形验证码约 ${captcha.expiresInSeconds}s 后失效，点击图片可立即刷新。`
 })
 
 const isCompactLoginLayout = computed(() => {
@@ -227,6 +238,21 @@ const refreshCaptcha = async (silent = false) => {
     const result = await getClientCaptcha()
     captcha.captchaId = result.captchaId
     captcha.captchaSvg = result.captchaSvg
+    captcha.expiresInSeconds = result.expiresInSeconds
+    if (captchaExpireTimer) {
+      globalThis.clearInterval(captchaExpireTimer)
+    }
+    captchaExpireTimer = globalThis.setInterval(() => {
+      if (captcha.expiresInSeconds <= 1) {
+        captcha.expiresInSeconds = 0
+        if (captchaExpireTimer) {
+          globalThis.clearInterval(captchaExpireTimer)
+          captchaExpireTimer = null
+        }
+        return
+      }
+      captcha.expiresInSeconds -= 1
+    }, 1000)
     if (!silent) {
       ElMessage.success('已刷新验证码')
     }
@@ -238,6 +264,11 @@ const refreshCaptcha = async (silent = false) => {
 const clearCaptcha = () => {
   captcha.captchaId = ''
   captcha.captchaSvg = ''
+  captcha.expiresInSeconds = 0
+  if (captchaExpireTimer) {
+    globalThis.clearInterval(captchaExpireTimer)
+    captchaExpireTimer = null
+  }
 }
 
 const ensureCaptchaReady = async () => {
@@ -265,8 +296,11 @@ const loadAuthCapabilities = async () => {
 
 const validateMobile = (mobile: string) => /^1\d{10}$/.test(mobile.trim())
 const validateEmail = (email: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
-const validatePassword = (password: string) => password.trim().length >= 6
-const validateUsername = (username: string) => username.trim().length > 0
+const validatePassword = (password: string) => {
+  const normalized = password.trim()
+  return normalized.length >= 8 && /[A-Za-z]/.test(normalized) && /\d/.test(normalized)
+}
+const validateUsername = (username: string) => username.trim().length >= 2
 const validateLoginAccount = (account: string) => account.trim().length > 0
 const resolveAccountChannel = (account: string): 'mobile' | 'email' | null => {
   const normalized = account.trim()
@@ -311,19 +345,30 @@ const handleSendRegisterVerificationCode = async () => {
     ElMessage.warning('请输入正确的手机号或邮箱')
     return
   }
+  if (!captcha.captchaId || !registerForm.captcha.trim()) {
+    ElMessage.warning('发送验证码前请先输入图形验证码')
+    await ensureCaptchaReady()
+    return
+  }
   verificationSending.value = true
   try {
     const result = await clientAuthStore.sendVerificationCode({
       channel,
       target: registerForm.account.trim(),
       scene: 'register',
+      captchaId: captcha.captchaId,
+      captchaCode: registerForm.captcha.trim(),
     })
     ElMessage.success(`${channel === 'email' ? '邮箱' : '手机'}验证码已发送`)
+    registerForm.captcha = ''
+    await refreshCaptcha(true)
     startRegisterVerificationCountdown(result.expireSeconds)
   } catch (error) {
     const message = extractErrorMessage(error, '验证码发送失败，请稍后重试')
     applySecurityHintFromMessage(message)
     ElMessage.error(message)
+    registerForm.captcha = ''
+    await refreshCaptcha(true)
   } finally {
     verificationSending.value = false
   }
@@ -336,7 +381,7 @@ const handleLogin = async () => {
     return
   }
   if (!validatePassword(loginForm.password)) {
-    ElMessage.warning('密码至少 6 位')
+    ElMessage.warning('密码至少 8 位，且需包含字母和数字')
     return
   }
   if (loginCaptchaVisible.value) {
@@ -363,7 +408,6 @@ const handleLogin = async () => {
     const message = extractErrorMessage(error, '登录失败，请检查用户名、手机号、邮箱、密码和验证码后重试')
     applySecurityHintFromMessage(message)
     ElMessage.error(message)
-    console.warn('客户端登录失败。', error)
     if (/用户名或密码错误|图形验证码|锁定|稍后|重试/.test(message)) {
       loginCaptchaVisible.value = true
       loginForm.captcha = ''
@@ -377,7 +421,7 @@ const handleLogin = async () => {
 const handleRegister = async () => {
   const accountChannel = resolveAccountChannel(registerForm.account)
   if (!validateUsername(registerForm.username)) {
-    ElMessage.warning('请输入用户名')
+    ElMessage.warning('用户名至少 2 位')
     return
   }
   if (!accountChannel) {
@@ -385,7 +429,11 @@ const handleRegister = async () => {
     return
   }
   if (!validatePassword(registerForm.password)) {
-    ElMessage.warning('密码至少 6 位')
+    ElMessage.warning('密码至少 8 位，且需包含字母和数字')
+    return
+  }
+  if (registerForm.password !== registerForm.confirmPassword) {
+    ElMessage.warning('两次输入的密码不一致')
     return
   }
   if (registerForm.department.trim() && !registerDepartmentOptions.value.includes(registerForm.department.trim())) {
@@ -417,19 +465,22 @@ const handleRegister = async () => {
     })
     ElMessage.success('注册成功，请登录')
     activeMode.value = 'login'
-    loginForm.account = registeredUsername
+    loginForm.account = registeredAccount
     loginForm.password = ''
     loginForm.captcha = ''
     successTip.value = '账号已创建成功，请使用用户名、手机号或邮箱与密码登录。'
     registerForm.captcha = ''
     registerForm.verificationCode = ''
     registerForm.username = ''
-    await refreshCaptcha()
+    registerForm.password = ''
+    registerForm.confirmPassword = ''
+    registerForm.department = ''
+    await refreshCaptcha(true)
     await router.replace({
       path: '/client/login',
       query: {
         tab: 'login',
-      account: registeredUsername,
+        account: registeredAccount,
         notice: successTip.value,
       },
     })
@@ -437,9 +488,8 @@ const handleRegister = async () => {
     const message = extractErrorMessage(error, '注册失败，请检查信息后重试')
     applySecurityHintFromMessage(message)
     ElMessage.error(message)
-    console.warn('客户端注册失败。', error)
     registerForm.captcha = ''
-    await refreshCaptcha()
+    await refreshCaptcha(true)
   } finally {
     isLoading.value = false
   }
@@ -465,9 +515,7 @@ watch(
 )
 
 watch(registerValidationMode, (mode) => {
-  if (mode === 'verification_code') {
-    registerForm.captcha = ''
-  } else {
+  if (mode !== 'verification_code') {
     resetRegisterVerificationTimer()
     registerForm.verificationCode = ''
   }
@@ -476,7 +524,7 @@ watch(registerValidationMode, (mode) => {
 watch(
   [activeMode, loginCaptchaVisible, registerUsesVerificationCode],
   async ([mode, shouldShowLoginCaptcha, usesVerificationCode]) => {
-    const shouldShowCaptcha = (mode === 'login' && shouldShowLoginCaptcha) || (mode === 'register' && !usesVerificationCode)
+    const shouldShowCaptcha = (mode === 'login' && shouldShowLoginCaptcha) || mode === 'register' || !usesVerificationCode
     if (shouldShowCaptcha) {
       await ensureCaptchaReady()
     }
@@ -495,6 +543,7 @@ watch(successTip, async () => {
 onUnmounted(() => {
   // 页面离开时主动清理倒计时，避免重复进入后产生多个定时器。
   resetRegisterVerificationTimer()
+  clearCaptcha()
 })
 </script>
 
@@ -589,6 +638,7 @@ onUnmounted(() => {
                       <span v-else class="captcha-render" v-html="captcha.captchaSvg" />
                     </button>
                   </div>
+                  <p v-if="loginCaptchaVisible" class="captcha-hint-text">{{ captchaHintText }}</p>
                   <div
                     v-else
                     class="captcha-row captcha-row--placeholder"
@@ -643,6 +693,25 @@ onUnmounted(() => {
                     />
                   </el-select>
                   <p v-if="registerDepartmentOptions.length === 0" class="mt-1 text-xs text-slate-400">暂无可选部门，请联系管理员配置</p>
+                  <div class="captcha-row">
+                    <el-input
+                      v-model="registerForm.captcha"
+                      :placeholder="registerUsesVerificationCode ? '先输入图形验证码，再发送手机/邮箱验证码' : '图形验证码'"
+                      class="geo-input flex-1"
+                      size="large"
+                      clearable
+                    >
+                      <template #prefix>
+                        <el-icon class="input-icon"><Key /></el-icon>
+                      </template>
+                    </el-input>
+
+                    <button type="button" class="captcha-box" :disabled="captchaLoading" @click="handleManualRefreshCaptcha">
+                      <span v-if="captchaLoading" class="captcha-loading">刷新中</span>
+                      <span v-else class="captcha-render" v-html="captcha.captchaSvg" />
+                    </button>
+                  </div>
+                  <p class="captcha-hint-text">{{ captchaHintText }}</p>
                   <div v-if="registerUsesVerificationCode" class="captcha-row">
                     <el-input v-model="registerForm.verificationCode" placeholder="手机/邮箱验证码" class="geo-input flex-1" size="large" clearable>
                       <template #prefix>
@@ -669,8 +738,21 @@ onUnmounted(() => {
                       <el-icon class="input-icon"><Lock /></el-icon>
                     </template>
                   </el-input>
+                  <el-input
+                    v-model="registerForm.confirmPassword"
+                    placeholder="再次输入密码"
+                    type="password"
+                    class="geo-input"
+                    size="large"
+                    show-password
+                  >
+                    <template #prefix>
+                      <el-icon class="input-icon"><Lock /></el-icon>
+                    </template>
+                  </el-input>
+                  <p class="password-hint-text">密码至少 8 位，且需同时包含字母和数字。</p>
 
-                  <div v-if="!registerUsesVerificationCode" class="captcha-row">
+                  <div v-if="!registerUsesVerificationCode" class="captcha-row sr-only">
                     <el-input v-model="registerForm.captcha" placeholder="图形验证码" class="geo-input flex-1" size="large" clearable>
                       <template #prefix>
                         <el-icon class="input-icon"><Key /></el-icon>
@@ -682,7 +764,6 @@ onUnmounted(() => {
                       <span v-else class="captcha-render" v-html="captcha.captchaSvg" />
                     </button>
                   </div>
-
                   <el-button class="submit-btn" :loading="isLoading" @click="handleRegister">立即注册</el-button>
                 </el-form>
               </div>
@@ -1041,6 +1122,23 @@ onUnmounted(() => {
 .captcha-render :deep(svg) {
   width: 100px;
   height: 36px;
+}
+
+.captcha-hint-text,
+.password-hint-text {
+  margin-top: -6px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #64748b;
+}
+
+.verification-code-button {
+  min-width: 120px;
+  border-radius: 14px;
+}
+
+.sr-only {
+  display: none;
 }
 
 .forgot-link {
