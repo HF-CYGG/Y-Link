@@ -43,6 +43,11 @@ export interface UpdateOrderBusinessStatusInput {
   businessStatus: O2oPreorderBusinessStatus | null
 }
 
+export interface UpdateOrderMerchantMessageInput {
+  orderId: string
+  merchantMessage: string | null
+}
+
 export interface MyOrderListQuery {
   status?: 'pending' | 'verified' | 'cancelled'
   keyword?: string
@@ -64,10 +69,13 @@ export interface O2oPreorderSummaryView {
   verifyCode: string
   status: O2oPreorder['status']
   businessStatus: O2oPreorder['businessStatus']
+  merchantMessage: string | null
   totalQty: number
   timeoutAt: Date | null
   createdAt: Date
 }
+
+export const O2O_MERCHANT_MESSAGE_MAX_LENGTH = 500
 
 const LIKE_ESCAPE_CHAR = String.raw`\\`
 const LIKE_SPECIAL_CHAR_PATTERN = /[%_\\]/g
@@ -138,6 +146,26 @@ class O2oPreorderService {
       return normalizedValue
     }
     throw new BizError('商家状态不受支持', 400)
+  }
+
+  /**
+   * 统一商家留言口径：
+   * - 入参去首尾空格；
+   * - 空字符串按“清空留言”处理并统一回写 null；
+   * - 超长直接拦截，避免数据库层报错影响可读性。
+   */
+  private normalizeMerchantMessage(value: string | null | undefined): string | null {
+    if (value === null || value === undefined) {
+      return null
+    }
+    const normalizedValue = value.trim()
+    if (!normalizedValue) {
+      return null
+    }
+    if (normalizedValue.length > O2O_MERCHANT_MESSAGE_MAX_LENGTH) {
+      throw new BizError(`商家留言长度不能超过${O2O_MERCHANT_MESSAGE_MAX_LENGTH}个字符`, 400)
+    }
+    return normalizedValue
   }
 
   private resolveCancelledOrderReason(
@@ -429,6 +457,7 @@ class O2oPreorderService {
         verifyCode: order.verifyCode,
         status: order.status,
         businessStatus: order.businessStatus ?? null,
+        merchantMessage: order.merchantMessage ?? null,
         totalQty: order.totalQty,
         timeoutAt: order.timeoutAt,
         verifiedAt: order.verifiedAt,
@@ -672,6 +701,7 @@ class O2oPreorderService {
         verifyCode: item.verifyCode,
         status: item.status,
         businessStatus: item.businessStatus ?? null,
+        merchantMessage: item.merchantMessage ?? null,
         totalQty: item.totalQty,
         timeoutAt: item.timeoutAt,
         createdAt: item.createdAt,
@@ -762,6 +792,7 @@ class O2oPreorderService {
       verifyCode: item.verifyCode,
       status: item.status,
       businessStatus: item.businessStatus ?? null,
+      merchantMessage: item.merchantMessage ?? null,
       totalQty: item.totalQty,
       timeoutAt: item.timeoutAt,
       createdAt: item.createdAt,
@@ -783,6 +814,16 @@ class O2oPreorderService {
       throw new BizError('预订单不存在', 404)
     }
     order.businessStatus = this.normalizeBusinessStatus(input.businessStatus)
+    await this.preorderRepo.save(order)
+    return this.detailById(order.id)
+  }
+
+  async updateMerchantMessage(input: UpdateOrderMerchantMessageInput) {
+    const order = await this.preorderRepo.findOne({ where: { id: input.orderId } })
+    if (!order) {
+      throw new BizError('预订单不存在', 404)
+    }
+    order.merchantMessage = this.normalizeMerchantMessage(input.merchantMessage)
     await this.preorderRepo.save(order)
     return this.detailById(order.id)
   }

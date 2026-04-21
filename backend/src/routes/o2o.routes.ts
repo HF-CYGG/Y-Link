@@ -12,7 +12,7 @@ import type { AuthenticatedRequest } from '../types/auth.js'
 import type { ClientAuthenticatedRequest } from '../types/client-auth.js'
 import { auditService } from '../services/audit.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
-import { o2oPreorderService } from '../services/o2o-preorder.service.js'
+import { O2O_MERCHANT_MESSAGE_MAX_LENGTH, o2oPreorderService } from '../services/o2o-preorder.service.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 
 const submitPreorderSchema = z.object({
@@ -60,6 +60,10 @@ const businessStatusSchema = z.object({
       'verify_failed',
     ])
     .nullable(),
+})
+
+const merchantMessageSchema = z.object({
+  merchantMessage: z.string().trim().max(O2O_MERCHANT_MESSAGE_MAX_LENGTH).nullable(),
 })
 
 const BUSINESS_STATUS_LABEL_MAP = {
@@ -206,6 +210,52 @@ o2oRouter.patch(
         nextBusinessStatusLabel: nextStatus ? BUSINESS_STATUS_LABEL_MAP[nextStatus] : null,
       },
     })
+
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+// 管理端更新订单“商家留言”，用于补充特殊场景说明并在客户端详情可见。
+o2oRouter.patch(
+  '/orders/:id/merchant-message',
+  requireAuth,
+  requirePermission('orders:update'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = merchantMessageSchema.parse(req.body)
+    const previous = await o2oPreorderService.detailById(req.params.id)
+    const data = await o2oPreorderService.updateMerchantMessage({
+      orderId: req.params.id,
+      merchantMessage: payload.merchantMessage,
+    })
+
+    const previousMessage = previous.order.merchantMessage ?? null
+    const nextMessage = data.order.merchantMessage ?? null
+    if (previousMessage !== nextMessage) {
+      let actionType = 'o2o.order.merchant_message.change'
+      let actionLabel = '修改订单商家留言'
+      if (!previousMessage && nextMessage) {
+        actionType = 'o2o.order.merchant_message.set'
+        actionLabel = '设置订单商家留言'
+      } else if (previousMessage && !nextMessage) {
+        actionType = 'o2o.order.merchant_message.clear'
+        actionLabel = '清空订单商家留言'
+      }
+
+      await auditService.record({
+        actionType,
+        actionLabel,
+        targetType: 'o2o_order',
+        targetId: data.order.id,
+        targetCode: data.order.showNo,
+        actor: authReq.auth,
+        requestMeta: extractRequestMeta(req),
+        detail: {
+          previousMerchantMessage: previousMessage,
+          nextMerchantMessage: nextMessage,
+        },
+      })
+    }
 
     res.json({ code: 0, message: 'ok', data })
   }),

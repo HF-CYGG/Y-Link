@@ -66,6 +66,9 @@ const normalizeOrders = (orders: unknown): O2oPreorderSummary[] => {
         verifyCode,
         status,
         businessStatus,
+        merchantMessage: typeof row.merchantMessage === 'string' && row.merchantMessage.trim()
+          ? row.merchantMessage.trim()
+          : null,
         statusReport: {
           // 缓存恢复时尽量沿用服务端原始状态报告，确保“已撤回/超时取消”文案不会在刷新后退化。
           scenario: (scenario as ClientOrderReportScenario) ?? getClientOrderReportScenario(status, timeoutAt),

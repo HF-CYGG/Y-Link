@@ -42,6 +42,7 @@ export interface O2oPreorderSummary {
   verifyCode: string
   status: O2oOrderStatus
   businessStatus: O2oOrderBusinessStatus | null
+  merchantMessage: string | null
   totalQty: number
   timeoutAt: string | null
   createdAt: string
@@ -79,6 +80,7 @@ export interface O2oPreorderDetail {
     verifyCode: string
     status: O2oOrderStatus
     businessStatus: O2oOrderBusinessStatus | null
+    merchantMessage: string | null
     totalQty: number
     timeoutAt: string | null
     verifiedAt: string | null
@@ -201,6 +203,14 @@ export const updateO2oOrderBusinessStatus = (
     method: 'PATCH',
     url: `/o2o/orders/${id}/business-status`,
     data: { businessStatus },
+    ...config,
+  })
+
+export const updateO2oOrderMerchantMessage = (id: string, merchantMessage: string | null, config?: RequestConfig) =>
+  request<O2oPreorderDetail>({
+    method: 'PATCH',
+    url: `/o2o/orders/${id}/merchant-message`,
+    data: { merchantMessage },
     ...config,
   })
 

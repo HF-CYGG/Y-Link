@@ -24,6 +24,7 @@ import {
   getO2oConsoleOrderDetail,
   getO2oConsoleOrders,
   updateO2oOrderBusinessStatus,
+  updateO2oOrderMerchantMessage,
   type O2oPreorderDetail,
   type O2oPreorderSummary,
   type O2oOrderStatusReport,
@@ -42,6 +43,7 @@ const ORDER_POOL_TABS: Array<{ key: OrderPoolKey; label: string }> = [
 
 const NEW_ORDER_WINDOW_MS = 30 * 60 * 1000
 const NEW_ORDER_HIGHLIGHT_MS = 6000
+const MERCHANT_MESSAGE_MAX_LENGTH = 500
 const POLL_INTERVAL_OPTIONS = [10, 15] as const
 const listLoading = ref(false)
 const detailLoading = ref(false)
@@ -254,6 +256,7 @@ const businessStatusOptions = Object.entries(O2O_ORDER_BUSINESS_STATUS_META).map
 
 const activeBusinessStatus = computed(() => activeOrderDetail.value?.order.businessStatus ?? null)
 const draftBusinessStatus = ref<O2oOrderBusinessStatus | null>(null)
+const draftMerchantMessage = ref('')
 
 const activeBusinessStatusMeta = computed(() => {
   return getO2oOrderBusinessStatusMeta(activeBusinessStatus.value)
@@ -266,6 +269,29 @@ watch(
   },
   { immediate: true },
 )
+
+watch(
+  () => activeOrderDetail.value?.order.merchantMessage ?? null,
+  (value) => {
+    // 订单切换或详情刷新时，保持留言草稿与服务端最新值一致，避免误提交旧内容。
+    draftMerchantMessage.value = value ?? ''
+  },
+  { immediate: true },
+)
+
+const activeMerchantMessage = computed(() => {
+  const value = activeOrderDetail.value?.order.merchantMessage ?? null
+  return value?.trim() ? value.trim() : null
+})
+
+const normalizedDraftMerchantMessage = computed(() => {
+  const value = draftMerchantMessage.value.trim()
+  return value ? value : null
+})
+
+const merchantMessageChanged = computed(() => {
+  return normalizedDraftMerchantMessage.value !== activeMerchantMessage.value
+})
 
 const timelineItems = computed(() => {
   if (!activeOrderDetail.value) {
@@ -408,6 +434,7 @@ const mergeOrderSummaryFromDetail = (detail: O2oPreorderDetail) => {
     verifyCode: nextOrder.verifyCode,
     status: nextOrder.status,
     businessStatus: nextOrder.businessStatus,
+    merchantMessage: nextOrder.merchantMessage,
     totalQty: nextOrder.totalQty,
     timeoutAt: nextOrder.timeoutAt,
     createdAt: nextOrder.createdAt,
@@ -575,6 +602,54 @@ const handleBusinessStatusChange = async (value: O2oOrderBusinessStatus | null) 
   } catch (error) {
     draftBusinessStatus.value = previousValue
     ElMessage.error(error instanceof Error ? error.message : '更新商家状态失败，请稍后重试')
+  } finally {
+    detailLoading.value = false
+  }
+}
+
+const handleSaveMerchantMessage = async () => {
+  if (!activeOrderDetail.value?.order.id) {
+    return
+  }
+  if (!merchantMessageChanged.value) {
+    ElMessage.info('留言内容未变化，无需保存')
+    return
+  }
+
+  const previousValue = activeMerchantMessage.value
+  const nextValue = normalizedDraftMerchantMessage.value
+  const nextLength = nextValue?.length ?? 0
+  if (nextLength > MERCHANT_MESSAGE_MAX_LENGTH) {
+    ElMessage.warning(`商家留言最多 ${MERCHANT_MESSAGE_MAX_LENGTH} 个字符`)
+    return
+  }
+
+  const confirmMessage = nextValue
+    ? (previousValue
+      ? `确认更新订单“${activeOrderDetail.value.order.showNo}”的商家留言吗？`
+      : `确认设置订单“${activeOrderDetail.value.order.showNo}”的商家留言吗？`)
+    : `确认清空订单“${activeOrderDetail.value.order.showNo}”的商家留言吗？`
+
+  try {
+    await ElMessageBox.confirm(confirmMessage, '确认提交商家留言', {
+      type: 'warning',
+      confirmButtonText: '确认提交',
+      cancelButtonText: '取消',
+      closeOnClickModal: false,
+    })
+  } catch {
+    return
+  }
+
+  detailLoading.value = true
+  try {
+    const latestDetail = await updateO2oOrderMerchantMessage(activeOrderDetail.value.order.id, nextValue)
+    activeOrderDetail.value = latestDetail
+    mergeOrderSummaryFromDetail(latestDetail)
+    draftMerchantMessage.value = latestDetail.order.merchantMessage ?? ''
+    ElMessage.success(nextValue ? '商家留言已保存' : '商家留言已清空')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '保存商家留言失败，请稍后重试')
   } finally {
     detailLoading.value = false
   }
@@ -787,6 +862,48 @@ onBeforeUnmount(() => {
             <div v-if="activeBusinessStatusMeta" class="mt-3 rounded-2xl px-3 py-2" :class="activeBusinessStatusMeta.className">
               <p class="text-sm font-semibold">当前商家状态：{{ activeBusinessStatusMeta.label }}</p>
               <p class="mt-1 text-xs">{{ activeBusinessStatusMeta.consoleDescription }}</p>
+            </div>
+          </div>
+
+          <div class="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
+            <div class="flex flex-col gap-3">
+              <div class="min-w-0">
+                <p class="text-sm font-semibold text-slate-900">商家留言</p>
+                <p class="mt-1 text-xs leading-5 text-slate-500">
+                  用于补充特殊订单说明；保存后客户端详情页可见，清空后客户端不再显示该模块。
+                </p>
+              </div>
+              <el-input
+                v-model="draftMerchantMessage"
+                type="textarea"
+                :rows="3"
+                maxlength="500"
+                show-word-limit
+                resize="none"
+                placeholder="请输入商家留言（最多 500 字）"
+                :disabled="detailLoading"
+              />
+              <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                <p class="text-xs text-slate-500">
+                  {{ merchantMessageChanged ? '留言有变更，点击保存后生效' : '留言与当前已保存内容一致' }}
+                </p>
+                <div class="flex gap-2">
+                  <el-button :disabled="detailLoading || !merchantMessageChanged" @click="handleSaveMerchantMessage">
+                    保存留言
+                  </el-button>
+                  <el-button
+                    :disabled="detailLoading || !normalizedDraftMerchantMessage"
+                    @click="draftMerchantMessage = ''"
+                  >
+                    清空输入
+                  </el-button>
+                </div>
+              </div>
+              <div v-if="activeMerchantMessage" class="rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                <p class="text-xs text-amber-700">当前已生效留言</p>
+                <p class="mt-1 whitespace-pre-wrap break-words">{{ activeMerchantMessage }}</p>
+              </div>
+              <p v-else class="text-xs text-slate-500">当前未设置商家留言</p>
             </div>
           </div>
 

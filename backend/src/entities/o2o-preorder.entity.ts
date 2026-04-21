@@ -66,6 +66,9 @@ export class O2oPreorder {
   @Column({ name: 'business_status', type: 'varchar', length: 32, nullable: true, comment: '商家特殊状态' })
   businessStatus!: O2oPreorderBusinessStatus | null
 
+  @Column({ name: 'merchant_message', type: 'varchar', length: 500, nullable: true, comment: '商家留言' })
+  merchantMessage!: string | null
+
   // totalQty 记录整单总件数，便于列表快速展示，避免每次都聚合子项。
   @Column({ name: 'total_qty', type: 'int', default: 0, comment: '总件数' })
   totalQty!: number

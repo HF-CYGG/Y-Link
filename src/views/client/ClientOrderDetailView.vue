@@ -81,6 +81,15 @@ const businessStatusMeta = computed(() => {
   return getO2oOrderBusinessStatusMeta(detail.value?.order.businessStatus)
 })
 
+const merchantMessageContent = computed(() => {
+  const value = detail.value?.order.merchantMessage ?? null
+  if (!value) {
+    return null
+  }
+  const normalizedValue = value.trim()
+  return normalizedValue ? normalizedValue : null
+})
+
 const timelineItems = computed(() => {
   if (!detail.value) {
     return []
@@ -201,6 +210,7 @@ const buildOrderSummaryFromDetail = (nextDetail: O2oPreorderDetail): O2oPreorder
     verifyCode: order.verifyCode,
     status: order.status,
     businessStatus: order.businessStatus,
+    merchantMessage: order.merchantMessage,
     statusReport: order.statusReport,
     totalAmount: order.totalAmount,
     expireInSeconds: order.expireInSeconds,
@@ -438,6 +448,13 @@ onMounted(async () => {
               </div>
             </div>
           </div>
+        </div>
+
+        <div v-if="merchantMessageContent" class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)]">
+          <p class="text-lg font-semibold text-slate-900">商家留言</p>
+          <p class="mt-3 whitespace-pre-wrap break-words rounded-2xl bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-800">
+            {{ merchantMessageContent }}
+          </p>
         </div>
 
         <div class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)]">

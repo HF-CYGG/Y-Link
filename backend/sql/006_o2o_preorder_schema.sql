@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS `o2o_preorder` (
   `verify_code` VARCHAR(64) NOT NULL,
   `status` VARCHAR(16) NOT NULL DEFAULT 'pending',
   `cancel_reason` VARCHAR(16) NULL,
+  `merchant_message` VARCHAR(500) NULL COMMENT '商家留言',
   `total_qty` INT NOT NULL DEFAULT 0,
   `remark` VARCHAR(255) NULL,
   `timeout_at` DATETIME(3) NULL,
