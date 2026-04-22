@@ -18,8 +18,15 @@ import {
   O2oPreorder,
   type O2oPreorderBusinessStatus,
   type O2oPreorderCancelReason,
+  type O2oPreorderStatus,
 } from '../entities/o2o-preorder.entity.js'
 import { O2oPreorderItem } from '../entities/o2o-preorder-item.entity.js'
+import {
+  O2oReturnRequest,
+  O2O_RETURN_REQUEST_STATUSES,
+  type O2oReturnRequestStatus,
+} from '../entities/o2o-return-request.entity.js'
+import { O2oReturnRequestItem } from '../entities/o2o-return-request-item.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import type { ClientAuthContext } from '../types/client-auth.js'
 import { BizError } from '../utils/errors.js'
@@ -46,6 +53,16 @@ export interface UpdateOrderBusinessStatusInput {
 export interface UpdateOrderMerchantMessageInput {
   orderId: string
   merchantMessage: string | null
+}
+
+export interface SubmitReturnRequestItemInput {
+  productId: string | number
+  qty: number
+}
+
+export interface SubmitReturnRequestInput {
+  reason: string
+  items: SubmitReturnRequestItemInput[]
 }
 
 export interface MyOrderListQuery {
@@ -75,7 +92,78 @@ export interface O2oPreorderSummaryView {
   createdAt: Date
 }
 
+export interface O2oPreorderDetailItemView {
+  id: string
+  productId: string
+  productCode: string
+  productName: string
+  defaultPrice: string
+  qty: number
+  returnedQty: number
+  availableReturnQty: number
+  subTotal: string
+}
+
+export interface O2oPreorderDetailView {
+  order: {
+    statusReport: O2oPreorderSummaryView['statusReport']
+    totalAmount: string
+    expireInSeconds: number
+    id: string
+    showNo: string
+    verifyCode: string
+    status: O2oPreorder['status']
+    businessStatus: O2oPreorder['businessStatus']
+    merchantMessage: string | null
+    totalQty: number
+    timeoutAt: Date | null
+    verifiedAt: Date | null
+    createdAt: Date
+  }
+  items: O2oPreorderDetailItemView[]
+  returnRequests: O2oReturnRequestView[]
+  amountSummary: {
+    totalAmount: string
+    totalQty: number
+    totalItemCount: number
+  }
+  qrPayload: string
+}
+
+export interface O2oReturnRequestItemView {
+  id: string
+  productId: string
+  productCode: string
+  productName: string
+  qty: number
+}
+
+export interface O2oReturnRequestView {
+  id: string
+  returnNo: string
+  verifyCode: string
+  status: O2oReturnRequestStatus
+  sourceOrderStatus: O2oPreorderStatus
+  reason: string
+  totalQty: number
+  createdAt: Date
+  verifiedAt: Date | null
+  verifiedBy: string | null
+  qrPayload: string
+  items: O2oReturnRequestItemView[]
+}
+
+export interface O2oVerifyDetailView {
+  verifyTargetType: 'preorder' | 'return_request'
+  detail: O2oPreorderDetailView | O2oReturnRequestView
+}
+
+export interface O2oVerifyResultView extends O2oVerifyDetailView {
+  operationType: 'preorder_verify' | 'return_verify'
+}
+
 export const O2O_MERCHANT_MESSAGE_MAX_LENGTH = 500
+export const O2O_RETURN_REASON_MAX_LENGTH = 500
 
 const LIKE_ESCAPE_CHAR = String.raw`\\`
 const LIKE_SPECIAL_CHAR_PATTERN = /[%_\\]/g
@@ -84,6 +172,8 @@ class O2oPreorderService {
   private readonly productRepo = AppDataSource.getRepository(BaseProduct)
   private readonly preorderRepo = AppDataSource.getRepository(O2oPreorder)
   private readonly preorderItemRepo = AppDataSource.getRepository(O2oPreorderItem)
+  private readonly returnRequestRepo = AppDataSource.getRepository(O2oReturnRequest)
+  private readonly returnRequestItemRepo = AppDataSource.getRepository(O2oReturnRequestItem)
   private readonly inventoryLogRepo = AppDataSource.getRepository(InventoryLog)
 
   // 货币金额统一按“分”做整数运算，避免 0.1 + 0.2、19.9 * 3 之类的浮点误差。
@@ -166,6 +256,43 @@ class O2oPreorderService {
       throw new BizError(`商家留言长度不能超过${O2O_MERCHANT_MESSAGE_MAX_LENGTH}个字符`, 400)
     }
     return normalizedValue
+  }
+
+  private normalizeReturnReason(value: string | null | undefined): string {
+    const normalizedValue = value?.trim() ?? ''
+    if (!normalizedValue) {
+      throw new BizError('请填写退货原因', 400)
+    }
+    if (normalizedValue.length > O2O_RETURN_REASON_MAX_LENGTH) {
+      throw new BizError(`退货原因长度不能超过${O2O_RETURN_REASON_MAX_LENGTH}个字符`, 400)
+    }
+    return normalizedValue
+  }
+
+  private isReturnRequestStatus(value: string): value is O2oReturnRequestStatus {
+    return (O2O_RETURN_REQUEST_STATUSES as readonly string[]).includes(value)
+  }
+
+  private normalizeReturnRequestStatus(value: string) {
+    if (this.isReturnRequestStatus(value)) {
+      return value
+    }
+    throw new BizError('退货申请状态不受支持', 400)
+  }
+
+  private async generateReturnRequestNo(manager = AppDataSource.manager): Promise<string> {
+    // 退货申请单号采用独立前缀，便于核销台与线下门店快速区分“取货码 / 退货码”。
+    const dateText = new Date().toISOString().slice(0, 10).replaceAll('-', '')
+    const prefix = `RO${dateText}`
+    const raw = (await manager
+      .getRepository(O2oReturnRequest)
+      .createQueryBuilder('returnRequest')
+      .select('returnRequest.returnNo', 'returnNo')
+      .where('returnRequest.returnNo LIKE :prefix', { prefix: `${prefix}%` })
+      .orderBy('returnRequest.returnNo', 'DESC')
+      .getRawOne()) as { returnNo?: string } | null
+    const current = raw?.returnNo ? Number.parseInt(raw.returnNo.slice(prefix.length), 10) || 0 : 0
+    return `${prefix}${String(current + 1).padStart(4, '0')}`
   }
 
   private resolveCancelledOrderReason(
@@ -427,7 +554,90 @@ class O2oPreorderService {
     return true
   }
 
-  private async buildOrderDetail(order: O2oPreorder) {
+  private async listReturnRequestsByOrder(orderId: string) {
+    const rows = await this.returnRequestRepo.find({
+      where: { orderId },
+      order: { id: 'DESC' },
+    })
+    if (rows.length) {
+      return rows
+    }
+    return this.returnRequestRepo.find({
+      where: { orderId: orderId as unknown as number },
+      order: { id: 'DESC' },
+    })
+  }
+
+  private async listReturnRequestItemsByRequestIds(requestIds: string[]) {
+    if (!requestIds.length) {
+      return []
+    }
+    let items = await this.returnRequestItemRepo.find({
+      where: { returnRequestId: In(requestIds) },
+      relations: { product: true },
+      order: { id: 'ASC' },
+    })
+    if (items.length) {
+      return items
+    }
+    return this.returnRequestItemRepo.find({
+      where: { returnRequestId: In(requestIds as unknown as number[]) },
+      relations: { product: true },
+      order: { id: 'ASC' },
+    })
+  }
+
+  private async resolveReturnedQtyMapByOrder(orderId: string) {
+    const returnRequests = await this.listReturnRequestsByOrder(orderId)
+    const requestIds = returnRequests.map((item) => String(item.id))
+    const requestItemRows = await this.listReturnRequestItemsByRequestIds(requestIds)
+    const pendingRequestIdSet = new Set(
+      returnRequests.filter((item) => item.status === 'pending').map((item) => String(item.id)),
+    )
+    const returnedQtyMap = new Map<string, number>()
+    requestItemRows.forEach((item) => {
+      if (!pendingRequestIdSet.has(String(item.returnRequestId))) {
+        return
+      }
+      const productId = String(item.productId)
+      const currentQty = returnedQtyMap.get(productId) ?? 0
+      returnedQtyMap.set(productId, currentQty + Math.max(0, Number(item.qty ?? 0)))
+    })
+    return { returnRequests, returnedQtyMap, requestItemRows }
+  }
+
+  private buildReturnRequestView(
+    returnRequest: O2oReturnRequest,
+    requestItems: O2oReturnRequestItem[],
+  ): O2oReturnRequestView {
+    return {
+      id: String(returnRequest.id),
+      returnNo: returnRequest.returnNo,
+      verifyCode: returnRequest.verifyCode,
+      status: returnRequest.status,
+      sourceOrderStatus: returnRequest.sourceOrderStatus,
+      reason: returnRequest.reason,
+      totalQty: Number(returnRequest.totalQty ?? 0),
+      createdAt: returnRequest.createdAt,
+      verifiedAt: returnRequest.verifiedAt,
+      verifiedBy: returnRequest.verifiedBy ?? null,
+      qrPayload: `y-link://o2o/return/${returnRequest.verifyCode}`,
+      items: requestItems.map((item) => ({
+        id: String(item.id),
+        productId: String(item.productId),
+        productCode: item.product?.productCode ?? '',
+        productName: item.product?.productName ?? '',
+        qty: Number(item.qty ?? 0),
+      })),
+    }
+  }
+
+  private async buildReturnRequestDetail(returnRequest: O2oReturnRequest): Promise<O2oReturnRequestView> {
+    const requestItems = await this.listReturnRequestItemsByRequestIds([String(returnRequest.id)])
+    return this.buildReturnRequestView(returnRequest, requestItems)
+  }
+
+  private async buildOrderDetail(order: O2oPreorder): Promise<O2oPreorderDetailView> {
     const id = String(order.id)
     // 历史库与不同驱动下 order_id 参数类型可能出现 number/string 混用，
     // 这里做双口径兼容查询，避免订单详情“总件数存在但明细为空”。
@@ -444,10 +654,20 @@ class O2oPreorderService {
     if (!items.length && Number(order.totalQty ?? 0) > 0) {
       items = await this.buildFallbackOrderItemsFromInventoryLog(id)
     }
+    const { returnRequests, returnedQtyMap, requestItemRows } = await this.resolveReturnedQtyMapByOrder(id)
+    const requestItemsByRequestId = new Map<string, O2oReturnRequestItem[]>()
+    requestItemRows.forEach((item) => {
+      const requestId = String(item.returnRequestId)
+      const currentItems = requestItemsByRequestId.get(requestId) ?? []
+      currentItems.push(item)
+      requestItemsByRequestId.set(requestId, currentItems)
+    })
     let totalAmountNumber = 0
     const normalizedItems = items.map((item) => {
       const unitPrice = Number(item.product?.defaultPrice ?? 0)
       const lineAmount = unitPrice * Number(item.qty ?? 0)
+      const totalQty = Math.max(0, Number(item.qty ?? 0))
+      const returnedQty = Math.min(totalQty, Math.max(0, Number(returnedQtyMap.get(String(item.productId)) ?? 0)))
       totalAmountNumber += lineAmount
       return {
         id: String(item.id),
@@ -455,7 +675,9 @@ class O2oPreorderService {
         productCode: item.product?.productCode ?? '',
         productName: item.product?.productName ?? '',
         defaultPrice: this.normalizeDecimalText(unitPrice),
-        qty: item.qty,
+        qty: totalQty,
+        returnedQty,
+        availableReturnQty: Math.max(0, totalQty - returnedQty),
         subTotal: this.normalizeDecimalText(lineAmount),
       }
     })
@@ -478,6 +700,9 @@ class O2oPreorderService {
         createdAt: order.createdAt,
       },
       items: normalizedItems,
+      returnRequests: returnRequests.map((item) =>
+        this.buildReturnRequestView(item, requestItemsByRequestId.get(String(item.id)) ?? []),
+      ),
       amountSummary: {
         totalAmount,
         totalQty: order.totalQty,
@@ -774,6 +999,129 @@ class O2oPreorderService {
     return this.buildOrderDetail(order)
   }
 
+  async createReturnRequest(auth: ClientAuthContext, orderId: string, input: SubmitReturnRequestInput) {
+    await this.cancelTimeoutOrders()
+    const normalizedReason = this.normalizeReturnReason(input.reason)
+    if (!Array.isArray(input.items) || !input.items.length) {
+      throw new BizError('至少选择一个商品申请退货', 400)
+    }
+    const normalizedItems = input.items.map((item) => ({
+      productId: String(item.productId).trim(),
+      qty: Math.floor(Number(item.qty)),
+    }))
+    normalizedItems.forEach((item) => {
+      if (!item.productId || !Number.isInteger(item.qty) || item.qty <= 0) {
+        throw new BizError('退货数量必须为正整数', 400)
+      }
+    })
+    return AppDataSource.transaction(async (manager) => {
+      const orderRepo = manager.getRepository(O2oPreorder)
+      const order = await orderRepo.findOne({
+        where: { id: orderId, clientUserId: auth.userId },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
+      if (!order) {
+        throw new BizError('预订单不存在', 404)
+      }
+      if (await this.cancelTimedOutOrderInManager(manager, order)) {
+        throw new BizError('订单已超时取消，无法申请退货', 409)
+      }
+      if (order.status === 'cancelled') {
+        throw new BizError('已取消订单不可申请退货', 409)
+      }
+      if (order.status !== 'pending' && order.status !== 'verified') {
+        throw new BizError('当前订单状态不可申请退货', 409)
+      }
+
+      let orderItems = await manager.getRepository(O2oPreorderItem).find({
+        where: { orderId: String(order.id) },
+        relations: { product: true },
+      })
+      if (!orderItems.length) {
+        orderItems = await manager.getRepository(O2oPreorderItem).find({
+          where: { orderId: order.id as unknown as string },
+          relations: { product: true },
+        })
+      }
+      if (!orderItems.length && Number(order.totalQty ?? 0) > 0) {
+        orderItems = await this.buildFallbackOrderItemsFromInventoryLog(String(order.id))
+      }
+      if (!orderItems.length) {
+        throw new BizError('订单无可退商品', 409)
+      }
+
+      const pendingReturnRequests = await manager.getRepository(O2oReturnRequest).find({
+        where: { orderId: String(order.id), status: 'pending' },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_read' },
+      })
+      const pendingRequestIds = pendingReturnRequests.map((item) => String(item.id))
+      const pendingReturnItems = pendingRequestIds.length
+        ? await manager.getRepository(O2oReturnRequestItem).find({
+            where: { returnRequestId: In(pendingRequestIds) },
+          })
+        : []
+      const pendingQtyMap = new Map<string, number>()
+      pendingReturnItems.forEach((item) => {
+        const productId = String(item.productId)
+        const currentQty = pendingQtyMap.get(productId) ?? 0
+        pendingQtyMap.set(productId, currentQty + Math.max(0, Number(item.qty ?? 0)))
+      })
+
+      const orderItemMap = new Map(orderItems.map((item) => [String(item.productId), item]))
+      const mergedRequestQtyMap = new Map<string, number>()
+      normalizedItems.forEach((item) => {
+        const currentQty = mergedRequestQtyMap.get(item.productId) ?? 0
+        mergedRequestQtyMap.set(item.productId, currentQty + item.qty)
+      })
+
+      let totalQty = 0
+      for (const [productId, requestQty] of mergedRequestQtyMap) {
+        const orderItem = orderItemMap.get(productId)
+        if (!orderItem) {
+          throw new BizError('存在不属于当前订单的商品，无法申请退货', 409)
+        }
+        const orderQty = Math.max(0, Number(orderItem.qty ?? 0))
+        const pendingQty = Math.max(0, Number(pendingQtyMap.get(productId) ?? 0))
+        const availableReturnQty = Math.max(0, orderQty - pendingQty)
+        if (availableReturnQty <= 0) {
+          throw new BizError(`商品「${orderItem.product?.productName ?? productId}」暂无可退数量`, 409)
+        }
+        if (requestQty > availableReturnQty) {
+          throw new BizError(`商品「${orderItem.product?.productName ?? productId}」最多可退 ${availableReturnQty} 件`, 409)
+        }
+        totalQty += requestQty
+      }
+
+      const returnRequestRepo = manager.getRepository(O2oReturnRequest)
+      const returnRequestItemRepo = manager.getRepository(O2oReturnRequestItem)
+      const savedRequest = await returnRequestRepo.save(
+        returnRequestRepo.create({
+          returnNo: await this.generateReturnRequestNo(manager),
+          orderId: String(order.id),
+          clientUserId: String(auth.userId),
+          verifyCode: randomUUID(),
+          status: 'pending',
+          sourceOrderStatus: order.status,
+          reason: normalizedReason,
+          totalQty,
+        }),
+      )
+      const requestItemEntities = [...mergedRequestQtyMap.entries()].map(([productId, qty]) =>
+        returnRequestItemRepo.create({
+          returnRequestId: String(savedRequest.id),
+          productId,
+          qty,
+        }),
+      )
+      await returnRequestItemRepo.save(requestItemEntities)
+      if (order.businessStatus !== 'after_sale') {
+        order.businessStatus = 'after_sale'
+        await orderRepo.save(order)
+      }
+      return this.buildReturnRequestDetail(savedRequest)
+    })
+  }
+
   async listConsoleOrders(input: {
     status?: 'pending' | 'verified' | 'cancelled'
     keyword?: string
@@ -922,75 +1270,241 @@ class O2oPreorderService {
     return this.getMyOrderDetail(auth, id)
   }
 
-  async verifyByCode(verifyCode: string, actor: AuthUserContext) {
-    const normalizedVerifyCode = this.normalizeVerifyCode(verifyCode)
-    await this.cancelTimeoutOrders()
-    return AppDataSource.transaction(async (manager) => {
-      const order = await manager.getRepository(O2oPreorder).findOne({ where: { verifyCode: normalizedVerifyCode } })
-      if (!order) {
-        throw new BizError('预订单不存在', 404)
+  private async markOrderAfterSaleStageInManager(
+    manager: typeof AppDataSource.manager,
+    order: O2oPreorder,
+    excludeReturnRequestId?: string,
+  ) {
+    const pendingCount = await manager.getRepository(O2oReturnRequest).count({
+      where: {
+        orderId: String(order.id),
+        status: 'pending',
+        ...(excludeReturnRequestId ? { id: Not(excludeReturnRequestId) } : {}),
+      },
+    })
+    order.businessStatus = pendingCount > 0 ? 'after_sale' : 'after_sale_done'
+    await manager.getRepository(O2oPreorder).save(order)
+  }
+
+  private async verifyReturnRequestInManager(
+    manager: typeof AppDataSource.manager,
+    returnRequest: O2oReturnRequest,
+    actor: AuthUserContext,
+  ): Promise<O2oVerifyResultView> {
+    if (returnRequest.status !== 'pending') {
+      throw new BizError('当前退货申请不可重复核销', 409)
+    }
+    const order = await manager.getRepository(O2oPreorder).findOne({
+      where: { id: String(returnRequest.orderId) },
+      lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+    })
+    if (!order) {
+      throw new BizError('原预订单不存在，无法核销退货', 404)
+    }
+    if (returnRequest.sourceOrderStatus === 'pending' && await this.cancelTimedOutOrderInManager(manager, order)) {
+      throw new BizError('原订单已超时取消，退货申请无需再核销', 409)
+    }
+    if (returnRequest.sourceOrderStatus === 'pending' && order.status !== 'pending') {
+      throw new BizError('原订单状态已变化，请重新确认后再处理该退货申请', 409)
+    }
+    if (returnRequest.sourceOrderStatus === 'verified' && order.status !== 'verified') {
+      throw new BizError('原订单未处于已取货状态，当前退货申请不可核销', 409)
+    }
+
+    const requestItems = await manager.getRepository(O2oReturnRequestItem).find({
+      where: { returnRequestId: String(returnRequest.id) },
+      relations: { product: true },
+      order: { id: 'ASC' },
+    })
+    if (!requestItems.length) {
+      throw new BizError('退货申请明细为空，无法核销', 409)
+    }
+
+    const orderItems = await manager.getRepository(O2oPreorderItem).find({
+      where: { orderId: String(order.id) },
+      lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+    })
+    const orderItemMap = new Map(orderItems.map((item) => [String(item.productId), item]))
+    const productIds = [...new Set(requestItems.map((item) => String(item.productId)))]
+    const products = await manager.getRepository(BaseProduct).find({
+      where: { id: In(productIds) },
+      lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+    })
+    const productMap = new Map(products.map((item) => [String(item.id), item]))
+
+    for (const requestItem of requestItems) {
+      const product = productMap.get(String(requestItem.productId))
+      const orderItem = orderItemMap.get(String(requestItem.productId))
+      if (!product || !orderItem) {
+        throw new BizError('存在已失效商品，无法核销退货', 409)
       }
-      // 这里在事务内部再次兜底校验一次超时：
-      // 防止订单在“外层 cancelTimeoutOrders 执行完成后、事务真正扣库存前”刚好跨过超时点。
-      if (await this.cancelTimedOutOrderInManager(manager, order)) {
-        throw new BizError('预订单已超时取消，库存已释放，不可继续核销', 409)
+      const requestQty = Math.max(0, Number(requestItem.qty ?? 0))
+      const currentOrderQty = Math.max(0, Number(orderItem.qty ?? 0))
+      if (currentOrderQty < requestQty) {
+        throw new BizError(`商品「${product.productName}」可退数量不足，无法核销`, 409)
       }
-      if (order.status !== 'pending') {
-        throw new BizError('当前预订单不可核销', 409)
-      }
-      const items = await manager.getRepository(O2oPreorderItem).find({ where: { orderId: order.id } })
-      const productIds = [...new Set(items.map((item) => String(item.productId)))]
-      const products = await manager.getRepository(BaseProduct).find({
-        where: { id: In(productIds) },
-        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
-      })
-      const productMap = new Map(products.map((item) => [String(item.id), item]))
-      for (const row of items) {
-        const product = productMap.get(String(row.productId))
-        if (!product) {
-          throw new BizError('商品不存在，无法核销', 409)
-        }
-        const beforeCurrentStock = Number(product.currentStock ?? 0)
-        const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
-        if (beforeCurrentStock < row.qty || beforePreOrderedStock < row.qty) {
-          throw new BizError(`商品「${product.productName}」库存异常，请先补货后再核销`, 409)
-        }
-        // 核销时同步减少“现货库存”和“预订占用库存”，表示货品真正离库。
-        product.currentStock = beforeCurrentStock - row.qty
-        product.preOrderedStock = beforePreOrderedStock - row.qty
+      const beforeCurrentStock = Math.max(0, Number(product.currentStock ?? 0))
+      const beforePreOrderedStock = Math.max(0, Number(product.preOrderedStock ?? 0))
+      if (returnRequest.sourceOrderStatus === 'pending') {
+        product.preOrderedStock = Math.max(0, beforePreOrderedStock - requestQty)
         await manager.getRepository(BaseProduct).save(product)
         await manager.getRepository(InventoryLog).save(
           manager.getRepository(InventoryLog).create({
             productId: product.id,
-            changeType: 'preorder_verify',
-            changeQty: row.qty,
+            changeType: 'preorder_release',
+            changeQty: requestQty,
             beforeCurrentStock,
-            afterCurrentStock: product.currentStock,
+            afterCurrentStock: beforeCurrentStock,
             beforePreorderedStock: beforePreOrderedStock,
             afterPreorderedStock: product.preOrderedStock,
             operatorType: 'admin',
             operatorId: actor.userId,
             operatorName: actor.displayName,
-            refType: 'o2o_preorder',
-            refId: order.id,
+            refType: 'o2o_return_request',
+            refId: String(returnRequest.id),
+            remark: `退货核销释放预订库存，退货单号：${returnRequest.returnNo}`,
+          }),
+        )
+      } else {
+        product.currentStock = beforeCurrentStock + requestQty
+        await manager.getRepository(BaseProduct).save(product)
+        await manager.getRepository(InventoryLog).save(
+          manager.getRepository(InventoryLog).create({
+            productId: product.id,
+            changeType: 'preorder_return_inbound',
+            changeQty: requestQty,
+            beforeCurrentStock,
+            afterCurrentStock: product.currentStock,
+            beforePreorderedStock: beforePreOrderedStock,
+            afterPreorderedStock: beforePreOrderedStock,
+            operatorType: 'admin',
+            operatorId: actor.userId,
+            operatorName: actor.displayName,
+            refType: 'o2o_return_request',
+            refId: String(returnRequest.id),
+            remark: `退货核销重新入库，退货单号：${returnRequest.returnNo}`,
           }),
         )
       }
-      // 只有所有商品都成功扣减后，订单状态才更新为 verified，避免部分核销成功的中间态。
-      order.status = 'verified'
-      order.verifiedAt = new Date()
-      order.verifiedBy = actor.displayName
-      const savedOrder = await manager.getRepository(O2oPreorder).save(order)
-      // 同事务生成一张散客出库单：
-      // 这样“线上预订并成功核销”的订单会自然进入出库单列表，
-      // 且业务单号展示为散客流水单号，而不是预订单号。
-      await this.createWalkInOutboundOrderFromVerifiedPreorder(manager, {
-        preorder: savedOrder,
-        items,
-        productMap,
-        actor,
+      orderItem.qty = currentOrderQty - requestQty
+      await manager.getRepository(O2oPreorderItem).save(orderItem)
+    }
+
+    order.totalQty = Math.max(0, Number(order.totalQty ?? 0) - Number(returnRequest.totalQty ?? 0))
+    if (returnRequest.sourceOrderStatus === 'pending' && order.totalQty <= 0) {
+      order.status = 'cancelled'
+      order.cancelReason = 'manual'
+    }
+    await this.markOrderAfterSaleStageInManager(manager, order, String(returnRequest.id))
+
+    returnRequest.status = 'verified'
+    returnRequest.verifiedAt = new Date()
+    returnRequest.verifiedBy = actor.displayName
+    const savedReturnRequest = await manager.getRepository(O2oReturnRequest).save(returnRequest)
+    return {
+      operationType: 'return_verify',
+      verifyTargetType: 'return_request',
+      detail: await this.buildReturnRequestDetail(savedReturnRequest),
+    }
+  }
+
+  private async verifyPreorderInManager(
+    manager: typeof AppDataSource.manager,
+    order: O2oPreorder,
+    actor: AuthUserContext,
+  ): Promise<O2oVerifyResultView> {
+    if (await this.cancelTimedOutOrderInManager(manager, order)) {
+      throw new BizError('预订单已超时取消，库存已释放，不可继续核销', 409)
+    }
+    if (order.status !== 'pending') {
+      throw new BizError('当前预订单不可核销', 409)
+    }
+    const pendingReturnCount = await manager.getRepository(O2oReturnRequest).count({
+      where: { orderId: String(order.id), status: 'pending' },
+    })
+    if (pendingReturnCount > 0) {
+      throw new BizError('该订单存在待处理退货申请，请先完成退货核销后再执行取货核销', 409)
+    }
+    const items = await manager.getRepository(O2oPreorderItem).find({ where: { orderId: String(order.id) } })
+    if (!items.length || items.every((item) => Number(item.qty ?? 0) <= 0)) {
+      throw new BizError('当前订单已无可核销商品', 409)
+    }
+    const productIds = [...new Set(items.map((item) => String(item.productId)))]
+    const products = await manager.getRepository(BaseProduct).find({
+      where: { id: In(productIds) },
+      lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+    })
+    const productMap = new Map(products.map((item) => [String(item.id), item]))
+    for (const row of items) {
+      const verifyQty = Math.max(0, Number(row.qty ?? 0))
+      if (verifyQty <= 0) {
+        continue
+      }
+      const product = productMap.get(String(row.productId))
+      if (!product) {
+        throw new BizError('商品不存在，无法核销', 409)
+      }
+      const beforeCurrentStock = Number(product.currentStock ?? 0)
+      const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
+      if (beforeCurrentStock < verifyQty || beforePreOrderedStock < verifyQty) {
+        throw new BizError(`商品「${product.productName}」库存异常，请先补货后再核销`, 409)
+      }
+      product.currentStock = beforeCurrentStock - verifyQty
+      product.preOrderedStock = beforePreOrderedStock - verifyQty
+      await manager.getRepository(BaseProduct).save(product)
+      await manager.getRepository(InventoryLog).save(
+        manager.getRepository(InventoryLog).create({
+          productId: product.id,
+          changeType: 'preorder_verify',
+          changeQty: verifyQty,
+          beforeCurrentStock,
+          afterCurrentStock: product.currentStock,
+          beforePreorderedStock: beforePreOrderedStock,
+          afterPreorderedStock: product.preOrderedStock,
+          operatorType: 'admin',
+          operatorId: actor.userId,
+          operatorName: actor.displayName,
+          refType: 'o2o_preorder',
+          refId: order.id,
+        }),
+      )
+    }
+    order.status = 'verified'
+    order.verifiedAt = new Date()
+    order.verifiedBy = actor.displayName
+    const savedOrder = await manager.getRepository(O2oPreorder).save(order)
+    await this.createWalkInOutboundOrderFromVerifiedPreorder(manager, {
+      preorder: savedOrder,
+      items,
+      productMap,
+      actor,
+    })
+    return {
+      operationType: 'preorder_verify',
+      verifyTargetType: 'preorder',
+      detail: await this.detailById(savedOrder.id),
+    }
+  }
+
+  async verifyByCode(verifyCode: string, actor: AuthUserContext) {
+    const normalizedVerifyCode = this.normalizeVerifyCode(verifyCode)
+    await this.cancelTimeoutOrders()
+    return AppDataSource.transaction(async (manager) => {
+      const returnRequest = await manager.getRepository(O2oReturnRequest).findOne({
+        where: { verifyCode: normalizedVerifyCode },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
-      return this.detailById(savedOrder.id)
+      if (returnRequest) {
+        return this.verifyReturnRequestInManager(manager, returnRequest, actor)
+      }
+      const order = await manager.getRepository(O2oPreorder).findOne({
+        where: { verifyCode: normalizedVerifyCode },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
+      if (!order) {
+        throw new BizError('核销单不存在', 404)
+      }
+      return this.verifyPreorderInManager(manager, order, actor)
     })
   }
 
@@ -1075,24 +1589,44 @@ class O2oPreorderService {
   async getVerifyDetail(verifyCode: string) {
     const normalizedVerifyCode = this.normalizeVerifyCode(verifyCode)
     await this.cancelTimeoutOrders()
+    const returnRequest = await this.returnRequestRepo.findOne({ where: { verifyCode: normalizedVerifyCode } })
+    if (returnRequest) {
+      return {
+        verifyTargetType: 'return_request',
+        detail: await this.buildReturnRequestDetail(returnRequest),
+      } satisfies O2oVerifyDetailView
+    }
     const order = await this.preorderRepo.findOne({ where: { verifyCode: normalizedVerifyCode } })
     if (!order) {
-      throw new BizError('预订单不存在', 404)
+      throw new BizError('核销单不存在', 404)
     }
-    return this.detailById(order.id)
+    return {
+      verifyTargetType: 'preorder',
+      detail: await this.detailById(order.id),
+    } satisfies O2oVerifyDetailView
   }
 
   async getVerifyDetailByShowNo(showNo: string) {
     const normalizedShowNo = showNo.trim()
     if (!normalizedShowNo) {
-      throw new BizError('预订单号不能为空', 400)
+      throw new BizError('单号不能为空', 400)
     }
     await this.cancelTimeoutOrders()
+    const returnRequest = await this.returnRequestRepo.findOne({ where: { returnNo: normalizedShowNo } })
+    if (returnRequest) {
+      return {
+        verifyTargetType: 'return_request',
+        detail: await this.buildReturnRequestDetail(returnRequest),
+      } satisfies O2oVerifyDetailView
+    }
     const order = await this.preorderRepo.findOne({ where: { showNo: normalizedShowNo } })
     if (!order) {
-      throw new BizError('预订单不存在', 404)
+      throw new BizError('单据不存在', 404)
     }
-    return this.detailById(order.id)
+    return {
+      verifyTargetType: 'preorder',
+      detail: await this.detailById(order.id),
+    } satisfies O2oVerifyDetailView
   }
 
   async listInventoryLogs(limit = 100) {

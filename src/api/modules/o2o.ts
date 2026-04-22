@@ -67,7 +67,32 @@ export interface O2oPreorderDetailItem {
   productName: string
   defaultPrice: string
   qty: number
+  returnedQty: number
+  availableReturnQty: number
   subTotal?: string
+}
+
+export interface O2oReturnRequestItem {
+  id: string
+  productId: string
+  productCode: string
+  productName: string
+  qty: number
+}
+
+export interface O2oReturnRequestDetail {
+  id: string
+  returnNo: string
+  verifyCode: string
+  status: 'pending' | 'verified' | 'rejected'
+  sourceOrderStatus: O2oOrderStatus
+  reason: string
+  totalQty: number
+  createdAt: string
+  verifiedAt: string | null
+  verifiedBy: string | null
+  qrPayload: string
+  items: O2oReturnRequestItem[]
 }
 
 export interface O2oPreorderDetail {
@@ -87,12 +112,22 @@ export interface O2oPreorderDetail {
     createdAt: string
   }
   items: O2oPreorderDetailItem[]
+  returnRequests: O2oReturnRequestDetail[]
   amountSummary?: {
     totalAmount: string
     totalQty: number
     totalItemCount: number
   }
   qrPayload: string
+}
+
+export interface O2oVerifyDetailResult {
+  verifyTargetType: 'preorder' | 'return_request'
+  detail: O2oPreorderDetail | O2oReturnRequestDetail
+}
+
+export interface O2oVerifyResult extends O2oVerifyDetailResult {
+  operationType: 'preorder_verify' | 'return_verify'
 }
 
 export interface O2oInboundResult {
@@ -121,6 +156,11 @@ export interface O2oInventoryLog {
 
 export interface SubmitO2oPreorderPayload {
   remark?: string
+  items: Array<{ productId: string | number; qty: number }>
+}
+
+export interface SubmitO2oReturnRequestPayload {
+  reason: string
   items: Array<{ productId: string | number; qty: number }>
 }
 
@@ -188,6 +228,14 @@ export const cancelMyO2oPreorder = (id: string, config?: RequestConfig) =>
     ...config,
   })
 
+export const submitO2oReturnRequest = (id: string, payload: SubmitO2oReturnRequestPayload, config?: RequestConfig) =>
+  request<O2oReturnRequestDetail>({
+    method: 'POST',
+    url: `/o2o/mall/preorders/${id}/returns`,
+    data: payload,
+    ...config,
+  })
+
 export const getO2oConsoleOrderDetail = (id: string, config?: RequestConfig) =>
   request<O2oPreorderDetail>({
     method: 'GET',
@@ -216,19 +264,19 @@ export const updateO2oOrderMerchantMessage = (id: string, merchantMessage: strin
   })
 
 export const getO2oVerifyDetail = (verifyCode: string) =>
-  request<O2oPreorderDetail>({
+  request<O2oVerifyDetailResult>({
     method: 'GET',
     url: `/o2o/verify/${encodeURIComponent(verifyCode)}`,
   })
 
 export const getO2oVerifyDetailByShowNo = (showNo: string) =>
-  request<O2oPreorderDetail>({
+  request<O2oVerifyDetailResult>({
     method: 'GET',
     url: `/o2o/verify/show-no/${encodeURIComponent(showNo)}`,
   })
 
 export const verifyO2oPreorder = (verifyCode: string) =>
-  request<O2oPreorderDetail>({
+  request<O2oVerifyResult>({
     method: 'POST',
     url: '/o2o/verify',
     data: { verifyCode },

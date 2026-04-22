@@ -72,6 +72,39 @@ CREATE TABLE IF NOT EXISTS `o2o_preorder_item` (
   KEY `idx_o2o_preorder_item_product_id` (`product_id`)
 );
 
+CREATE TABLE IF NOT EXISTS `o2o_return_request` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `return_no` VARCHAR(48) NOT NULL COMMENT '退货申请单号',
+  `order_id` BIGINT UNSIGNED NOT NULL COMMENT '关联预订单ID',
+  `client_user_id` BIGINT UNSIGNED NOT NULL COMMENT '申请客户端用户ID',
+  `verify_code` VARCHAR(64) NOT NULL COMMENT '退货核销码',
+  `status` VARCHAR(16) NOT NULL DEFAULT 'pending' COMMENT '退货申请状态',
+  `source_order_status` VARCHAR(16) NOT NULL COMMENT '申请时订单主状态快照',
+  `reason` VARCHAR(500) NOT NULL COMMENT '退货原因',
+  `total_qty` INT NOT NULL DEFAULT 0 COMMENT '退货总件数',
+  `verified_at` DATETIME(3) NULL COMMENT '退货核销时间',
+  `verified_by` VARCHAR(64) NULL COMMENT '退货核销操作人',
+  `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  `updated_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_o2o_return_request_return_no` (`return_no`),
+  UNIQUE KEY `uk_o2o_return_request_verify_code` (`verify_code`),
+  KEY `idx_o2o_return_request_order_fk` (`order_id`),
+  KEY `idx_o2o_return_request_client_user_id` (`client_user_id`),
+  KEY `idx_o2o_return_request_order_id` (`order_id`, `id`),
+  KEY `idx_o2o_return_request_order_status_id` (`order_id`, `status`, `id`)
+);
+
+CREATE TABLE IF NOT EXISTS `o2o_return_request_item` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  `return_request_id` BIGINT UNSIGNED NOT NULL COMMENT '退货申请ID',
+  `product_id` BIGINT UNSIGNED NOT NULL COMMENT '商品ID',
+  `qty` INT NOT NULL DEFAULT 0 COMMENT '退货数量',
+  PRIMARY KEY (`id`),
+  KEY `idx_o2o_return_request_item_request_id` (`return_request_id`),
+  KEY `idx_o2o_return_request_item_product_id` (`product_id`)
+);
+
 CREATE TABLE IF NOT EXISTS `inventory_log` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   `product_id` BIGINT UNSIGNED NOT NULL,

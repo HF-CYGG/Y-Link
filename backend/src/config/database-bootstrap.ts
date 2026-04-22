@@ -23,6 +23,8 @@ const SQLITE_REQUIRED_TABLES = [
   'client_user_session',
   'o2o_preorder',
   'o2o_preorder_item',
+  'o2o_return_request',
+  'o2o_return_request_item',
   'inventory_log',
   'biz_inbound_order',
   'biz_inbound_order_item',

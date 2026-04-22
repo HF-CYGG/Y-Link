@@ -11,7 +11,14 @@ import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import QRCode from 'qrcode'
-import { cancelMyO2oPreorder, getO2oPreorderDetail, type O2oPreorderDetail, type O2oPreorderSummary } from '@/api/modules/o2o'
+import {
+  cancelMyO2oPreorder,
+  getO2oPreorderDetail,
+  submitO2oReturnRequest,
+  type O2oPreorderDetail,
+  type O2oPreorderSummary,
+  type O2oReturnRequestDetail,
+} from '@/api/modules/o2o'
 import { BaseRequestState } from '@/components/common'
 import { useStableRequest } from '@/composables/useStableRequest'
 import {
@@ -30,8 +37,13 @@ const router = useRouter()
 
 const loading = ref(false)
 const recalling = ref(false)
+const returnDialogVisible = ref(false)
+const returnSubmitting = ref(false)
 const detail = ref<O2oPreorderDetail | null>(null)
 const qrDataUrl = ref('')
+const returnQrMap = ref<Record<string, string>>({})
+const returnReason = ref('')
+const returnQtyMap = ref<Record<string, number>>({})
 const requestError = ref<{ type: 'offline' | 'error'; message: string } | null>(null)
 const { runLatest } = useStableRequest()
 const clientOrderStore = useClientOrderStore()
@@ -178,8 +190,50 @@ const displayVerifyCode = computed(() => {
     .trim()
 })
 
+const formatDisplayCode = (rawCode: string) => {
+  return rawCode
+    .replaceAll('-', '')
+    .toUpperCase()
+    .replaceAll(/(.{4})/g, '$1 ')
+    .trim()
+}
+
 const canRecallOrder = computed(() => {
   return isO2oOrderPending(detail.value?.order.status)
+})
+
+const canApplyReturn = computed(() => {
+  if (!detail.value) {
+    return false
+  }
+  if (isO2oOrderCancelled(detail.value.order.status)) {
+    return false
+  }
+  return detail.value.items.some((item) => item.availableReturnQty > 0)
+})
+
+const pendingReturnRequests = computed(() => {
+  return (detail.value?.returnRequests ?? []).filter((item) => item.status === 'pending')
+})
+
+const hasReturnRequests = computed(() => {
+  return (detail.value?.returnRequests?.length ?? 0) > 0
+})
+
+const selectedReturnItems = computed(() => {
+  if (!detail.value) {
+    return []
+  }
+  return detail.value.items
+    .map((item) => ({
+      ...item,
+      selectedQty: Math.max(0, Math.min(item.availableReturnQty, Number(returnQtyMap.value[item.productId] ?? 0))),
+    }))
+    .filter((item) => item.selectedQty > 0)
+})
+
+const selectedReturnTotalQty = computed(() => {
+  return selectedReturnItems.value.reduce((sum, item) => sum + item.selectedQty, 0)
 })
 
 const canUseQrCode = computed(() => {
@@ -220,6 +274,11 @@ const buildOrderSummaryFromDetail = (nextDetail: O2oPreorderDetail): O2oPreorder
   }
 }
 
+const resetReturnForm = () => {
+  returnReason.value = ''
+  returnQtyMap.value = {}
+}
+
 const renderQrCode = async () => {
   // 二维码仅允许待提货订单展示，撤回、超时取消、已核销后立即切换为禁用态。
   if (!detail.value?.qrPayload || !canUseQrCode.value) {
@@ -235,6 +294,25 @@ const renderQrCode = async () => {
       light: '#ffffff',
     },
   })
+}
+
+const renderReturnRequestQrs = async () => {
+  const nextQrMap: Record<string, string> = {}
+  const returnRequests = detail.value?.returnRequests ?? []
+  for (const request of returnRequests) {
+    if (request.status !== 'pending' || !request.qrPayload) {
+      continue
+    }
+    nextQrMap[request.id] = await QRCode.toDataURL(request.qrPayload, {
+      width: 220,
+      margin: 1,
+      color: {
+        dark: '#0f172a',
+        light: '#ffffff',
+      },
+    })
+  }
+  returnQrMap.value = nextQrMap
 }
 
 const syncOrderStoreFromDetail = (nextDetail: O2oPreorderDetail) => {
@@ -255,6 +333,7 @@ const loadDetail = async () => {
       detail.value = result
       syncOrderStoreFromDetail(result)
       await renderQrCode()
+      await renderReturnRequestQrs()
     },
     onError: (error) => {
       const normalizedError = normalizeRequestError(error, '订单详情加载失败')
@@ -304,12 +383,83 @@ const handleRecallOrder = async () => {
     detail.value = nextDetail
     syncOrderStoreFromDetail(nextDetail)
     await renderQrCode()
+    await renderReturnRequestQrs()
     ElMessage.success('订单已撤回')
   } catch (error) {
     const normalizedError = normalizeRequestError(error, '撤回订单失败')
     ElMessage.error(normalizedError.message)
   } finally {
     recalling.value = false
+  }
+}
+
+const openReturnDialog = () => {
+  if (!canApplyReturn.value) {
+    ElMessage.warning('当前订单暂无可申请退货的商品')
+    return
+  }
+  resetReturnForm()
+  returnDialogVisible.value = true
+}
+
+const handleReturnDialogClosed = () => {
+  resetReturnForm()
+}
+
+const handleSubmitReturnRequest = async () => {
+  if (!detail.value) {
+    return
+  }
+  if (!canApplyReturn.value) {
+    ElMessage.warning('当前订单不可申请退货')
+    return
+  }
+  if (!selectedReturnItems.value.length) {
+    ElMessage.warning('请至少选择一件商品并填写退货数量')
+    return
+  }
+  const normalizedReason = returnReason.value.trim()
+  if (!normalizedReason) {
+    ElMessage.warning('请填写退货原因')
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      `确认提交退货申请吗？本次共申请 ${selectedReturnTotalQty.value} 件商品退货，提交后会生成门店核销二维码。`,
+      '提交退货申请',
+      {
+        type: 'warning',
+        confirmButtonText: '确认提交',
+        cancelButtonText: '取消',
+        closeOnClickModal: false,
+      },
+    )
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') {
+      return
+    }
+    ElMessage.error('退货申请确认失败，请稍后重试')
+    return
+  }
+
+  returnSubmitting.value = true
+  try {
+    const createdReturnRequest = await submitO2oReturnRequest(detail.value.order.id, {
+      reason: normalizedReason,
+      items: selectedReturnItems.value.map((item) => ({
+        productId: item.productId,
+        qty: item.selectedQty,
+      })),
+    })
+    await loadDetail()
+    returnDialogVisible.value = false
+    ElMessage.success(`退货申请已提交，退货单号：${createdReturnRequest.returnNo}`)
+  } catch (error) {
+    const normalizedError = normalizeRequestError(error, '提交退货申请失败')
+    ElMessage.error(normalizedError.message)
+  } finally {
+    returnSubmitting.value = false
   }
 }
 

@@ -12,7 +12,11 @@ import type { AuthenticatedRequest } from '../types/auth.js'
 import type { ClientAuthenticatedRequest } from '../types/client-auth.js'
 import { auditService } from '../services/audit.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
-import { O2O_MERCHANT_MESSAGE_MAX_LENGTH, o2oPreorderService } from '../services/o2o-preorder.service.js'
+import {
+  O2O_MERCHANT_MESSAGE_MAX_LENGTH,
+  O2O_RETURN_REASON_MAX_LENGTH,
+  o2oPreorderService,
+} from '../services/o2o-preorder.service.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 
 const submitPreorderSchema = z.object({
@@ -64,6 +68,11 @@ const businessStatusSchema = z.object({
 
 const merchantMessageSchema = z.object({
   merchantMessage: z.string().trim().max(O2O_MERCHANT_MESSAGE_MAX_LENGTH).nullable(),
+})
+
+const submitReturnRequestSchema = z.object({
+  reason: z.string().trim().min(1).max(O2O_RETURN_REASON_MAX_LENGTH),
+  items: z.array(z.object({ productId: z.union([z.string(), z.number()]), qty: z.number().int().positive() })).min(1),
 })
 
 const BUSINESS_STATUS_LABEL_MAP = {
@@ -131,6 +140,39 @@ o2oRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const data = await o2oPreorderService.cancelMyOrder(authReq.clientAuth, req.params.id)
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+// 客户端申请退货：支持同一订单多次申请、部分商品退货与退货原因留痕。
+o2oRouter.post(
+  '/mall/preorders/:id/returns',
+  requireClientAuth,
+  asyncHandler(async (req, res) => {
+    const authReq = req as ClientAuthenticatedRequest
+    const payload = submitReturnRequestSchema.parse(req.body)
+    const data = await o2oPreorderService.createReturnRequest(authReq.clientAuth, req.params.id, payload)
+
+    await auditService.safeRecord({
+      actionType: 'o2o.return_request.create',
+      actionLabel: '客户端提交退货申请',
+      targetType: 'o2o_return_request',
+      targetId: data.id,
+      targetCode: data.returnNo,
+      actor: {
+        userId: authReq.clientAuth.userId,
+        username: authReq.clientAuth.account,
+        displayName: authReq.clientAuth.realName || authReq.clientAuth.mobile,
+      },
+      requestMeta: extractRequestMeta(req),
+      detail: {
+        orderId: req.params.id,
+        totalQty: data.totalQty,
+        reason: data.reason,
+        itemCount: data.items.length,
+      },
+    })
+
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -281,6 +323,24 @@ o2oRouter.post(
     const authReq = req as AuthenticatedRequest
     const payload = verifySchema.parse(req.body)
     const data = await o2oPreorderService.verifyByCode(payload.verifyCode, authReq.auth)
+    const isReturnVerify = data.operationType === 'return_verify'
+    const targetDetail = data.detail
+
+    await auditService.record({
+      actionType: isReturnVerify ? 'o2o.return_request.verify' : 'o2o.preorder.verify',
+      actionLabel: isReturnVerify ? '核销退货申请并回库' : '核销预订单并出库',
+      targetType: isReturnVerify ? 'o2o_return_request' : 'o2o_order',
+      targetId: targetDetail.id,
+      targetCode: 'returnNo' in targetDetail ? targetDetail.returnNo : targetDetail.order.showNo,
+      actor: authReq.auth,
+      requestMeta: extractRequestMeta(req),
+      detail: {
+        verifyCode: payload.verifyCode,
+        operationType: data.operationType,
+        verifyTargetType: data.verifyTargetType,
+      },
+    })
+
     res.json({ code: 0, message: 'ok', data })
   }),
 )
