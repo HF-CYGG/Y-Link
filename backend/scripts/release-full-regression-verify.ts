@@ -17,7 +17,12 @@ const uploadsRoot = path.resolve(backendRoot, 'uploads')
 
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
 const sqlitePath = path.resolve(sqliteRoot, `release-full-regression-${verifySeed}.sqlite`)
-const adminPassword = process.env.Y_LINK_VERIFY_ADMIN_PASSWORD?.trim() || 'Release@123456'
+const adminPassword = process.env.Y_LINK_VERIFY_ADMIN_PASSWORD?.trim() || `Admin_${verifySeed}_Zz9!`
+const operatorPassword = process.env.Y_LINK_VERIFY_OPERATOR_PASSWORD?.trim() || `Op_${verifySeed}_Aa1!`
+const operatorResetPassword = process.env.Y_LINK_VERIFY_OPERATOR_RESET_PASSWORD?.trim() || `OpReset_${verifySeed}_Bb2!`
+const supplierPassword = process.env.Y_LINK_VERIFY_SUPPLIER_PASSWORD?.trim() || `Sp_${verifySeed}_Cc3!`
+const clientPassword = process.env.Y_LINK_VERIFY_CLIENT_PASSWORD?.trim() || `Cl_${verifySeed}_Dd4!`
+const clientResetPassword = process.env.Y_LINK_VERIFY_CLIENT_RESET_PASSWORD?.trim() || `ClReset_${verifySeed}_Ee5!`
 
 process.env.APP_PROFILE = `release-full-regression-${verifySeed}`
 process.env.DB_TYPE = 'sqlite'
@@ -171,7 +176,7 @@ async function main() {
           },
           body: JSON.stringify({
             username: `release_operator_${verifySeed}`,
-            password: 'Operator1234',
+            password: operatorPassword,
             displayName: '发布回归操作员',
             role: 'operator',
             status: 'enabled',
@@ -200,7 +205,7 @@ async function main() {
           },
           body: JSON.stringify({
             username: `release_supplier_${verifySeed}`,
-            password: 'Supplier1234',
+            password: supplierPassword,
             displayName: '发布回归供货方',
             role: 'supplier',
             status: 'enabled',
@@ -242,7 +247,7 @@ async function main() {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            newPassword: 'Operator5678',
+            newPassword: operatorResetPassword,
           }),
         }),
       '管理端重置操作员密码',
@@ -601,7 +606,7 @@ async function main() {
           },
           body: JSON.stringify({
             username: createdSupplier.username,
-            password: 'Supplier1234',
+            password: supplierPassword,
           }),
         }),
       '供货方登录',
@@ -838,7 +843,6 @@ async function main() {
       '客户端注册图形验证码获取',
     )
     const clientAccount = `13${String(Date.now()).slice(-9)}`
-    const clientPassword = 'Client1234'
     const clientUsername = `回归用户${String(Date.now()).slice(-6)}`
     const clientRegister = await expectJsonOk<{
       data: {
@@ -1062,6 +1066,7 @@ async function main() {
     )
     const managedClientUser = managedClientUsers.list.find((item) => item.mobile === clientAccount)
     assert.ok(managedClientUser, '管理端未检索到刚注册的客户端用户')
+    const managedClientUserId = managedClientUser.id
     pass('管理端客户端用户列表读取通过')
 
     const updatedClientUser = await expectJsonOk<{
@@ -1073,7 +1078,7 @@ async function main() {
       }
     }>(
       () =>
-        fetch(`${baseUrl}/api/client-users/${managedClientUser!.id}`, {
+        fetch(`${baseUrl}/api/client-users/${managedClientUserId}`, {
           method: 'PATCH',
           headers: {
             Authorization: `Bearer ${adminToken}`,
@@ -1098,19 +1103,19 @@ async function main() {
       }
     }>(
       () =>
-        fetch(`${baseUrl}/api/client-users/${managedClientUser!.id}/reset-password`, {
+        fetch(`${baseUrl}/api/client-users/${managedClientUserId}/reset-password`, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${adminToken}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            newPassword: 'Client5678',
+            newPassword: clientResetPassword,
           }),
         }),
       '管理端重置客户端用户密码',
     )
-    assert.equal(resetClientUserPassword.id, managedClientUser!.id)
+    assert.equal(resetClientUserPassword.id, managedClientUserId)
     pass('管理端重置客户端用户密码通过')
 
     const disabledClientUser = await expectJsonOk<{
@@ -1120,7 +1125,7 @@ async function main() {
       }
     }>(
       () =>
-        fetch(`${baseUrl}/api/client-users/${managedClientUser!.id}/status`, {
+        fetch(`${baseUrl}/api/client-users/${managedClientUserId}/status`, {
           method: 'PATCH',
           headers: {
             Authorization: `Bearer ${adminToken}`,
@@ -1142,7 +1147,7 @@ async function main() {
       }
     }>(
       () =>
-        fetch(`${baseUrl}/api/client-users/${managedClientUser!.id}/status`, {
+        fetch(`${baseUrl}/api/client-users/${managedClientUserId}/status`, {
           method: 'PATCH',
           headers: {
             Authorization: `Bearer ${adminToken}`,

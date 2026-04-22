@@ -659,20 +659,23 @@ const deriveShortcutItems = (
   return sortByMenuOrder(records)
     .filter((record) => Boolean(record.meta.shortcut))
     .filter((record) => canAccessRoute(record.meta, user))
-    .map((record) => {
+    .flatMap((record) => {
       const fullPath = resolveRoutePath(parentPath, record.path)
-      const shortcut = record.meta.shortcut!
-
+      const shortcut = record.meta.shortcut
+      if (!shortcut) {
+        return []
+      }
+      const item: DashboardShortcutItem = {
+        title: shortcut.title ?? record.meta.title,
+        description: shortcut.description,
+        path: shortcut.path ?? fullPath,
+        icon: shortcut.icon ?? record.meta.icon,
+        colorClass: shortcut.colorClass ?? 'text-brand dark:text-teal-300',
+        bgClass: shortcut.bgClass ?? 'bg-brand/10 dark:bg-brand/20',
+      }
       return {
         order: shortcut.order ?? record.meta.menuOrder ?? Number.MAX_SAFE_INTEGER,
-        item: {
-          title: shortcut.title ?? record.meta.title,
-          description: shortcut.description,
-          path: shortcut.path ?? fullPath,
-          icon: shortcut.icon ?? record.meta.icon,
-          colorClass: shortcut.colorClass ?? 'text-brand dark:text-teal-300',
-          bgClass: shortcut.bgClass ?? 'bg-brand/10 dark:bg-brand/20',
-        },
+        item,
       }
     })
     .sort((prev, next) => prev.order - next.order)

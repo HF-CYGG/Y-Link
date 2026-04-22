@@ -243,7 +243,6 @@ export class ClientUserManageService {
       }
 
       const before = sanitizeClientUserProfile(user)
-      const previousStatus = user.status
       user.realName = username
       user.mobile = mobile
       user.email = email
@@ -252,9 +251,7 @@ export class ClientUserManageService {
       const savedUser = await userRepo.save(user)
 
       let revokedSessionCount = 0
-      if (previousStatus !== 'enabled' && savedUser.status === 'enabled') {
-        revokedSessionCount = 0
-      } else if (savedUser.status !== 'enabled') {
+      if (savedUser.status !== 'enabled') {
         const deletedSessions = await sessionRepo.delete({ userId: savedUser.id })
         revokedSessionCount = deletedSessions.affected ?? 0
       }
