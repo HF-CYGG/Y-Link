@@ -41,21 +41,21 @@ export const O2O_ORDER_BUSINESS_STATUS_META: Record<
   }
 > = {
   preparing: {
-    label: '备货中',
-    clientDescription: '商家正在备货，请耐心等待。',
-    consoleDescription: '商家正在处理货品与拣货准备。',
+    label: '备货中（已接单）',
+    clientDescription: '门店已接单，正在备货，请耐心等待。',
+    consoleDescription: '订单已接单，门店正在处理货品与备货。',
     className: 'bg-sky-50 text-sky-700',
   },
   ready: {
-    label: '待发货',
-    clientDescription: '商家已备货完成，待安排发货或通知取货。',
-    consoleDescription: '货品已备妥，可继续发货或安排交付。',
+    label: '请取货（等待取货）',
+    clientDescription: '货品已备妥，请尽快携带二维码到店核销取货。',
+    consoleDescription: '货品已备妥，等待用户到店取货。',
     className: 'bg-cyan-50 text-cyan-700',
   },
   awaiting_shipment: {
-    label: '待发货',
-    clientDescription: '订单已确认，待仓配处理。',
-    consoleDescription: '订单待仓配处理。',
+    label: '待发货（等待接单）',
+    clientDescription: '订单已提交，等待门店接单处理。',
+    consoleDescription: '订单已提交，等待门店确认接单。',
     className: 'bg-blue-50 text-blue-700',
   },
   shipped: {
@@ -77,9 +77,9 @@ export const O2O_ORDER_BUSINESS_STATUS_META: Record<
     className: 'bg-slate-100 text-slate-600',
   },
   after_sale: {
-    label: '售后中',
-    clientDescription: '订单已进入售后处理，请等待商家处理结果。',
-    consoleDescription: '订单正在售后处理中。',
+    label: '其他（售后）',
+    clientDescription: '订单已进入售后处理，请等待门店进一步处理。',
+    consoleDescription: '订单当前处于售后处理场景。',
     className: 'bg-amber-50 text-amber-700',
   },
   after_sale_done: {

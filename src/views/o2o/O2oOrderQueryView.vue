@@ -248,11 +248,17 @@ const detailAmountSummary = computed(() => {
   }
 })
 
-const businessStatusOptions = Object.entries(O2O_ORDER_BUSINESS_STATUS_META).map(([value, meta]) => ({
-  value: value as O2oOrderBusinessStatus,
-  label: meta.label,
-  description: meta.consoleDescription,
-}))
+// 管理端状态选择只保留当前门店对外使用的四个核心业务状态，避免误选运输类历史状态。
+const BUSINESS_STATUS_PICKER_ORDER: O2oOrderBusinessStatus[] = ['awaiting_shipment', 'preparing', 'ready', 'after_sale']
+
+const businessStatusOptions = BUSINESS_STATUS_PICKER_ORDER.map((value) => {
+  const meta = O2O_ORDER_BUSINESS_STATUS_META[value]
+  return {
+    value,
+    label: meta.label,
+    description: meta.consoleDescription,
+  }
+})
 
 const activeBusinessStatus = computed(() => activeOrderDetail.value?.order.businessStatus ?? null)
 const draftBusinessStatus = ref<O2oOrderBusinessStatus | null>(null)

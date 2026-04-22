@@ -67,13 +67,13 @@ const merchantMessageSchema = z.object({
 })
 
 const BUSINESS_STATUS_LABEL_MAP = {
-  preparing: '备货中',
-  ready: '待发货',
-  awaiting_shipment: '待发货（仓配处理中）',
+  preparing: '备货中（已接单）',
+  ready: '请取货（等待取货）',
+  awaiting_shipment: '待发货（等待接单）',
   shipped: '已发货',
   partially_shipped: '部分发货',
   closed: '已关闭',
-  after_sale: '售后中',
+  after_sale: '其他（售后）',
   after_sale_done: '售后完成',
   verifying: '核销中',
   verify_failed: '核销失败',
