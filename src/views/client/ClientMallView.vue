@@ -629,7 +629,7 @@ onBeforeUnmount(() => {
         </button>
       </div>
       <div class="mt-4 grid gap-3 sm:grid-cols-3">
-        <div class="rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700">营业时间：08:30 - 20:30</div>
+        <div class="rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700">营业时间：10:00 - 22:00</div>
         <div class="rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700">提货须知：请在订单有效期内到店核销</div>
         <div class="rounded-2xl bg-amber-50 px-3 py-3 text-sm text-amber-700">公告：库存实时刷新，请以下单结果为准</div>
       </div>
