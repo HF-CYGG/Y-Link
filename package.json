@@ -13,6 +13,8 @@
     "cloud:down": "node ./scripts/run-cloud-compose-command.mjs stop",
     "build": "node ./scripts/run-frontend-build.mjs",
     "preview": "vite preview",
+    "verify:release:functional": "node ./scripts/verify-release-functional-suite.mjs",
+    "verify:release": "node ./scripts/verify-release-full-suite.mjs",
     "verify:unit:functional": "node ./scripts/verify-unit-functional-suite.mjs",
     "verify:performance:budget": "node ./scripts/verify-enterprise-page-performance.mjs",
     "verify:performance:core-paths": "node ./scripts/verify-enterprise-core-paths.mjs",

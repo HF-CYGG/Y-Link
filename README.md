@@ -340,6 +340,8 @@ npm run verify:performance:client-concurrency
 - `npm run verify:performance`：偏重页面预算、核心路径与企业性能回归。
 - `npm run verify:performance:all`：在前端性能基础上继续联动后端性能基线验证。
 - `npm run verify:all`：质量总控入口，串联单元功能验证与全量性能验证，适合提交前使用。
+- `npm run verify:release:functional`：发布前功能回归入口，串联前端构建、后端构建、后端全功能 HTTP 回归与 onebox 冒烟验证。
+- `npm run verify:release`：发布前总控入口，先执行 `verify:release:functional`，再执行强制性能验证。
 - 所有质量脚本的报告默认输出到 `.local-dev/`，便于回归对比与留档。
 
 ---
@@ -352,16 +354,22 @@ npm run verify:performance:client-concurrency
 - `verify:performance:core-paths`：核心路径自动化回归。
 - `verify:performance:client-concurrency`：客户端并发与稳态断言。
 - `verify:quality:all` / `verify:all`：总控入口，失败即停并写入 JSON 报告。
+- `verify:release:functional`：发布前功能回归入口，覆盖管理端、客户端、上传与 onebox 关键冒烟。
+- `verify:release`：发布前总控入口，在功能回归基础上叠加强制性能验证。
 
 ### 推荐使用顺序
 1. 日常改动后先执行 `npm run build`
 2. 业务链路改动后执行 `npm run verify:unit:functional`
 3. 核心页面或路由结构改动后执行 `npm run verify:performance`
 4. 提交前执行 `npm run verify:all`
+5. 发布前先执行 `npm run verify:release:functional`
+6. 正式上线前执行 `npm run verify:release`
 
 ### 报告位置
 - 并发与稳态报告：`.local-dev/client-concurrency-performance.report.json`
 - 质量总控报告：`.local-dev/verify-quality-full-suite.report.json`
+- 发布前功能回归报告：`.local-dev/verify-release-functional-suite.report.json`
+- 发布前聚合报告：`.local-dev/verify-release-full-suite.report.json`
 - 其它性能与核心路径报告：`.local-dev/*.report.json`
 
 ---

@@ -32,7 +32,7 @@ const backendBaseUrl = `http://127.0.0.1:${backendPort}`
 const oneboxBaseUrl = `http://127.0.0.1:${oneboxPort}`
 const verifyAdminSecret = process.env.Y_LINK_VERIFY_ADMIN_PASSWORD
   ?? process.env.INIT_ADMIN_PASSWORD
-  ?? ('Admin@' + '123456')
+  ?? ('Release@' + '123456')
 
 const mimeTypes = {
   '.html': 'text/html; charset=utf-8',
