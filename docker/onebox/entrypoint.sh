@@ -3,11 +3,13 @@ set -e
 
 # 文件说明：onebox 单镜像容器入口脚本。
 # 实现逻辑：
-# 1. 统一准备数据目录、日志输出与运行时环境变量；
+# 1. 统一准备数据目录、上传目录、日志输出与运行时环境变量；
 # 2. 按实际后端端口渲染 Nginx 配置；
 # 3. 同时拉起 Node 后端与 Nginx，并在任一关键进程异常退出时让容器整体失败重启。
 
-mkdir -p /app/data /run/nginx
+# onebox 模式下商品图片会写入 `/app/uploads`，
+# 这里启动前先确保目录存在，避免首次上传时依赖运行期隐式创建。
+mkdir -p /app/data /app/uploads /run/nginx
 
 # 让 nginx 默认日志文件也指向容器标准输出，确保 docker logs/1Panel 能看到完整访问日志。
 mkdir -p /var/log/nginx

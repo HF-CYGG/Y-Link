@@ -2,8 +2,8 @@
 # 文件说明：本地/服务器默认分体部署编排文件。
 # 实现逻辑：
 # 1. `backend` 使用 SQLite 落盘，适合快速部署与小规模一体化场景；
-# 2. `frontend` 负责托管静态资源，并通过 Nginx 反向代理后端 API；
-# 3. 通过 volume 持久化 SQLite 数据，并通过健康检查串联前后端启动顺序。
+# 2. `frontend` 负责托管静态资源，并通过 Nginx 反向代理后端 API 与上传文件；
+# 3. 通过 volume 持久化 SQLite 数据与商品图片，并通过健康检查串联前后端启动顺序。
 #
 services:
   backend:
@@ -18,6 +18,8 @@ services:
       DB_SYNC: "false"
     volumes:
       - y_link_sqlite_data:/app/data
+      # 上传图片默认落在 `/app/uploads`，这里显式持久化，避免容器重建后商品图丢失。
+      - y_link_uploads_data:/app/uploads
     ports:
       - "3001:3001"
     healthcheck:
@@ -54,3 +56,4 @@ services:
 
 volumes:
   y_link_sqlite_data:
+  y_link_uploads_data:

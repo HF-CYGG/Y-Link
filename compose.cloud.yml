@@ -3,6 +3,7 @@
 # 实现逻辑：
 # 1. 直接拉取前端与后端镜像，适合服务器或 1Panel 上的镜像化发布；
 # 2. 默认仍可使用 SQLite 落盘，也支持通过环境变量切换到外置 MySQL；
+# 3. 后端图片上传目录与数据库目录都要持久化，避免容器更新后商品图丢失；
 # 3. 前端容器健康检查覆盖静态资源与后端代理，保证平台探活结果更接近真实可用性。
 #
 services:
@@ -29,6 +30,8 @@ services:
       - "${BACKEND_PORT:-3001}:3001"
     volumes:
       - y_link_cloud_sqlite_data:/app/data
+      # 云端镜像部署同样需要持久化 `/app/uploads`，否则图片只存在于容器临时层。
+      - y_link_cloud_uploads_data:/app/uploads
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
@@ -63,3 +66,4 @@ services:
 
 volumes:
   y_link_cloud_sqlite_data:
+  y_link_cloud_uploads_data:

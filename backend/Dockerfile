@@ -29,7 +29,7 @@ RUN npm run build \
 # 运行阶段：仅保留生产依赖与编译产物
 # 说明：
 # - 继续使用相同发行版，避免 sqlite3 二进制兼容问题；
-# - 默认将 SQLite 数据落到 /app/data，便于通过 volume 持久化。
+# - 默认将 SQLite 数据落到 /app/data、上传图片落到 /app/uploads，便于通过 volume 持久化。
 # ------------------------------
 FROM node:20-bookworm-slim AS runtime
 
@@ -40,7 +40,8 @@ ENV NODE_ENV=production \
   SQLITE_DB_PATH=/app/data/y-link.sqlite
 
 # 创建运行目录并提前授权给 node 用户，降低容器默认 root 运行风险。
-RUN mkdir -p /app/data \
+# 这里同时预创建 uploads 目录，确保首次上传前容器内就具备稳定的落盘路径。
+RUN mkdir -p /app/data /app/uploads \
   && chown -R node:node /app
 
 # 复制运行所需文件：package 信息、生产依赖、编译产物、SQL 模板。
