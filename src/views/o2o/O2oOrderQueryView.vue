@@ -75,6 +75,38 @@ const formatCurrency = (value: string | number | null | undefined) => {
   return Number(value ?? 0).toFixed(2)
 }
 
+/**
+ * 订单时间格式化：
+ * - 接口返回的时间字段可能是 ISO 字符串，这里统一转为本地时间展示；
+ * - 列表卡片默认展示到“分钟”，详情进度节点展示到“秒”，兼顾紧凑性与可追溯性；
+ * - 若时间值为空或解析失败，则返回兜底文案，避免页面直接暴露原始异常字符串。
+ */
+const formatOrderDateTime = (
+  value: string | null | undefined,
+  options?: {
+    includeSeconds?: boolean
+    fallback?: string
+  },
+) => {
+  const fallbackText = options?.fallback ?? '--'
+  if (!value) {
+    return fallbackText
+  }
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return fallbackText
+  }
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  const hours = String(date.getHours()).padStart(2, '0')
+  const minutes = String(date.getMinutes()).padStart(2, '0')
+  const seconds = String(date.getSeconds()).padStart(2, '0')
+  return options?.includeSeconds === false
+    ? `${year}-${month}-${day} ${hours}:${minutes}`
+    : `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`
+}
+
 const parseTimeMs = (value: string | null | undefined) => {
   if (!value) {
     return 0
@@ -313,24 +345,24 @@ const timelineItems = computed(() => {
   const order = activeOrderDetail.value.order
   if (activeScenario.value === 'verified') {
     return [
-      { key: 'created', title: '已下单', time: order.createdAt, active: true },
-      { key: 'prepare', title: '备货完成', time: order.timeoutAt || '门店已备货', active: true },
-      { key: 'verify', title: '已核销', time: order.verifiedAt || '核销成功', active: true },
-      { key: 'done', title: '订单完成', time: order.verifiedAt || '已完成', active: true },
+      { key: 'created', title: '已下单', time: formatOrderDateTime(order.createdAt), active: true },
+      { key: 'prepare', title: '备货完成', time: formatOrderDateTime(order.timeoutAt, { fallback: '门店已备货' }), active: true },
+      { key: 'verify', title: '已核销', time: formatOrderDateTime(order.verifiedAt, { fallback: '核销成功' }), active: true },
+      { key: 'done', title: '订单完成', time: formatOrderDateTime(order.verifiedAt, { fallback: '已完成' }), active: true },
     ]
   }
   if (activeScenario.value === 'cancelled' || activeScenario.value === 'timeout_cancelled') {
     return [
-      { key: 'created', title: '已下单', time: order.createdAt, active: true },
-      { key: 'prepare', title: '备货中', time: order.timeoutAt || '门店处理中', active: true },
-      { key: 'cancel', title: reportConfig.value.timelineCurrentTitle, time: order.timeoutAt || '已取消', active: true },
+      { key: 'created', title: '已下单', time: formatOrderDateTime(order.createdAt), active: true },
+      { key: 'prepare', title: '备货中', time: formatOrderDateTime(order.timeoutAt, { fallback: '门店处理中' }), active: true },
+      { key: 'cancel', title: reportConfig.value.timelineCurrentTitle, time: formatOrderDateTime(order.timeoutAt, { fallback: '已取消' }), active: true },
       { key: 'closed', title: '订单关闭', time: reportConfig.value.timelineCurrentHint, active: true },
     ]
   }
   return [
-    { key: 'created', title: '已下单', time: order.createdAt, active: true },
-    { key: 'prepare', title: '备货中', time: order.timeoutAt || '按门店通知准备', active: true },
-    { key: 'pending', title: reportConfig.value.timelineCurrentTitle, time: order.timeoutAt || '待完成', active: true },
+    { key: 'created', title: '已下单', time: formatOrderDateTime(order.createdAt), active: true },
+    { key: 'prepare', title: '备货中', time: formatOrderDateTime(order.timeoutAt, { fallback: '按门店通知准备' }), active: true },
+    { key: 'pending', title: reportConfig.value.timelineCurrentTitle, time: formatOrderDateTime(order.timeoutAt, { fallback: '待完成' }), active: true },
     { key: 'future', title: '核销后完成订单', time: '待完成', active: false },
   ]
 })
@@ -813,7 +845,7 @@ onBeforeUnmount(() => {
               </span>
             </div>
             <div class="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500">
-              <p class="break-words">时间：{{ order.createdAt }}</p>
+              <p class="break-words">时间：{{ formatOrderDateTime(order.createdAt, { includeSeconds: false }) }}</p>
               <p class="text-right">件数：{{ order.totalQty }}</p>
               <p>应付总额：¥{{ formatCurrency(order.totalAmount) }}</p>
               <p class="text-right">倒计时：{{ formatCountdown(order) }}</p>
