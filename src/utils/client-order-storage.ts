@@ -1,7 +1,9 @@
 /**
  * 模块说明：src/utils/client-order-storage.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：负责客户端订单列表快照的本地持久化与恢复，保证返回列表页时筛选状态和订单摘要口径一致。
+ * 维护说明：
+ * - 订单详情页、订单列表页、退货提交后的售后态刷新都会读写这里的快照；
+ * - 若后端新增订单摘要字段，需要同步补齐恢复逻辑，避免刷新后退化成旧口径。
  */
 
 import type { O2oPreorderSummary } from '@/api/modules/o2o'
@@ -53,6 +55,21 @@ const normalizeStatusReport = (
   }
 }
 
+// 详细注释：退货申请提交后订单可能进入 after_sale / after_sale_done 等售后态，
+// 本地缓存恢复时必须继续保留该字段，避免用户刷新后列表页状态提示退化。
+const normalizeBusinessStatus = (value: unknown): O2oOrderBusinessStatus | null => {
+  return O2O_ORDER_BUSINESS_STATUSES.includes(value as O2oOrderBusinessStatus)
+    ? (value as O2oOrderBusinessStatus)
+    : null
+}
+
+// 详细注释：商家留言用于补充退货、异常处理等上下文，缓存恢复时统一裁剪空白并将空串视为 null。
+const normalizeMerchantMessage = (value: unknown) => {
+  return typeof value === 'string' && value.trim()
+    ? value.trim()
+    : null
+}
+
 const normalizeOrderRow = (item: unknown): O2oPreorderSummary | null => {
   if (!item || typeof item !== 'object') {
     return null
@@ -66,19 +83,13 @@ const normalizeOrderRow = (item: unknown): O2oPreorderSummary | null => {
     return null
   }
   const timeoutAt = typeof row.timeoutAt === 'string' ? row.timeoutAt : null
-  const businessStatus = O2O_ORDER_BUSINESS_STATUSES.includes(row.businessStatus as O2oOrderBusinessStatus)
-    ? (row.businessStatus as O2oOrderBusinessStatus)
-    : null
-  const merchantMessage = typeof row.merchantMessage === 'string' && row.merchantMessage.trim()
-    ? row.merchantMessage.trim()
-    : null
   return {
     id,
     showNo,
     verifyCode,
     status,
-    businessStatus,
-    merchantMessage,
+    businessStatus: normalizeBusinessStatus(row.businessStatus),
+    merchantMessage: normalizeMerchantMessage(row.merchantMessage),
     // 缓存恢复时尽量沿用服务端原始状态报告，确保“已撤回/超时取消”文案不会在刷新后退化。
     statusReport: normalizeStatusReport(row, status, timeoutAt),
     totalQty: Number.isFinite(row.totalQty) ? Number(row.totalQty) : 0,

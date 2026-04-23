@@ -68,7 +68,13 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Key, Lock, Message, User } from '@element-plus/icons-vue'
-import { getClientAuthCapabilities, getClientCaptcha, type ClientAuthCapabilities, type ClientValidationMode } from '@/api/modules/client-auth'
+import {
+  getClientAuthCapabilities,
+  getClientCaptcha,
+  type ClientAuthCapabilities,
+  type ClientDepartmentOptionNode,
+  type ClientValidationMode,
+} from '@/api/modules/client-auth'
 import { preloadRouteComponents, resolveClientPostLoginWarmupTargets } from '@/router/route-performance'
 import { useClientAuthStore } from '@/store'
 import { useStableRequest } from '@/composables/useStableRequest'
@@ -147,6 +153,9 @@ const registerValidationMode = computed<ClientValidationMode>(() => {
 })
 const registerUsesVerificationCode = computed(() => registerValidationMode.value === 'verification_code')
 const registerDepartmentOptions = computed(() => authCapabilities.value?.departmentOptions ?? [])
+const registerDepartmentTreeSelectData = computed(() => {
+  return buildDepartmentTreeSelectData(authCapabilities.value?.departmentTree ?? [])
+})
 
 const captchaHintText = computed(() => {
   if (captcha.expiresInSeconds <= 0) {
@@ -317,6 +326,31 @@ const resolveAccountChannel = (account: string): 'mobile' | 'email' | null => {
 
 const normalizeInputText = (value: string) => {
   return value.replaceAll(/\s+/g, ' ').trim()
+}
+
+interface RegisterDepartmentTreeSelectNode {
+  id: string
+  label: string
+  value: string
+  children: RegisterDepartmentTreeSelectNode[]
+}
+
+// 部门树下拉数据转换：
+// - 下拉面板显示当前层级名称，保持类似“图 2”的紧凑树菜单；
+// - 实际提交值仍保存为完整路径，继续兼容后端现有 departmentOptions 校验口径。
+const buildDepartmentTreeSelectData = (
+  tree: ClientDepartmentOptionNode[],
+  parentPath = '',
+): RegisterDepartmentTreeSelectNode[] => {
+  return tree.map((node) => {
+    const currentPath = parentPath ? `${parentPath}-${node.label}` : node.label
+    return {
+      id: node.id,
+      label: node.label,
+      value: currentPath,
+      children: buildDepartmentTreeSelectData(node.children, currentPath),
+    }
+  })
 }
 
 const applySecurityHintFromMessage = (message: string) => {
@@ -719,21 +753,21 @@ onUnmounted(() => {
                     </template>
                   </el-input>
 
-                  <el-select
+                  <el-tree-select
                     v-model="registerForm.department"
+                    :data="registerDepartmentTreeSelectData"
+                    node-key="id"
+                    :props="{ label: 'label', value: 'value', children: 'children' }"
+                    check-strictly
+                    :expand-on-click-node="false"
+                    :render-after-expand="false"
                     placeholder="所属部门（选填）"
                     class="geo-input-select"
                     size="large"
                     clearable
                     filterable
-                  >
-                    <el-option
-                      v-for="department in registerDepartmentOptions"
-                      :key="department"
-                      :label="department"
-                      :value="department"
-                    />
-                  </el-select>
+                    popper-class="client-auth-department-popper"
+                  />
                   <p v-if="registerDepartmentOptions.length === 0" class="mt-1 text-xs text-slate-400">暂无可选部门，请联系管理员配置</p>
                   <div class="captcha-row">
                     <el-input
@@ -1063,7 +1097,8 @@ onUnmounted(() => {
   font-size: 14px;
 }
 
-.geo-input-select :deep(.el-select__wrapper) {
+.geo-input-select :deep(.el-select__wrapper),
+.geo-input-select :deep(.el-tree-select__wrapper) {
   min-height: 52px;
   border-radius: 14px;
   background-color: #f8fafc;
@@ -1072,14 +1107,54 @@ onUnmounted(() => {
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
-.geo-input-select :deep(.el-select__wrapper:hover) {
+.geo-input-select :deep(.el-select__wrapper:hover),
+.geo-input-select :deep(.el-tree-select__wrapper:hover) {
   background-color: #f1f5f9;
 }
 
-.geo-input-select :deep(.el-select__wrapper.is-focused) {
+.geo-input-select :deep(.el-select__wrapper.is-focused),
+.geo-input-select :deep(.el-tree-select__wrapper.is-focused) {
   background-color: #ffffff;
   border-color: #0d9488;
   box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.1) !important;
+}
+
+.geo-input-select :deep(.el-select__placeholder),
+.geo-input-select :deep(.el-input__inner) {
+  font-size: 14px;
+  font-weight: 500;
+}
+
+:global(.client-auth-department-popper.el-select__popper) {
+  border-radius: 16px;
+  padding: 6px;
+}
+
+:global(.client-auth-department-popper .el-scrollbar__view) {
+  padding: 4px 0;
+}
+
+:global(.client-auth-department-popper .el-tree) {
+  --el-tree-node-hover-bg-color: #f1f5f9;
+  background: transparent;
+}
+
+:global(.client-auth-department-popper .el-tree-node__content) {
+  height: 40px;
+  border-radius: 12px;
+  margin: 2px 6px;
+  color: #334155;
+  font-size: 14px;
+}
+
+:global(.client-auth-department-popper .el-tree-node.is-current > .el-tree-node__content) {
+  background: #eef2f7;
+  color: #0f172a;
+  font-weight: 600;
+}
+
+:global(.client-auth-department-popper .el-tree-node__expand-icon) {
+  color: #94a3b8;
 }
 
 .input-icon {

@@ -1,7 +1,13 @@
 /**
  * 模块说明：O2O 预购业务 API 模块。
- * 文件职责：封装商城商品、预订单提交、我的订单分页与详情、取消与核销等 O2O 客户端核心接口与类型。
- * 维护说明：维护时重点核对订单状态枚举映射、状态报告字段以及分页结果结构与后端口径一致性。
+ * 文件职责：封装商城商品、预订单、退货申请、核销台查询与门店核销等 O2O 前端共享接口与类型。
+ * 实现逻辑：
+ * - 统一沉淀预订单详情、退货申请详情、核销结果等跨页面复用的数据结构；
+ * - 让客户端订单页、管理端订单页、核销台都复用同一份类型定义，减少状态口径漂移；
+ * - 核销接口虽然共用一个入口，但会通过 `verifyTargetType` 和 `operationType` 明确区分取货核销与退货回库。
+ * 维护说明：
+ * - 本文件的枚举必须与后端实体、服务返回结构保持严格一致；
+ * - 若后端新增或删减退货申请状态，需优先修改本文件，再同步消费这些类型的页面分支。
  */
 
 import { request, type RequestConfig } from '@/api/http'
@@ -80,11 +86,14 @@ export interface O2oReturnRequestItem {
   qty: number
 }
 
+// 退货申请当前仅存在“待核销 / 已核销”两种真实状态，前端不再保留不存在的 rejected 分支。
+export type O2oReturnRequestStatus = 'pending' | 'verified'
+
 export interface O2oReturnRequestDetail {
   id: string
   returnNo: string
   verifyCode: string
-  status: 'pending' | 'verified' | 'rejected'
+  status: O2oReturnRequestStatus
   sourceOrderStatus: O2oOrderStatus
   reason: string
   totalQty: number
