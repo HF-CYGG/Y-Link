@@ -131,6 +131,13 @@ export interface O2oPreorderDetailView {
     verifiedAt: Date | null
     createdAt: Date
   }
+  customerProfile: {
+    id: string
+    username: string
+    mobile: string | null
+    email: string | null
+    departmentName: string | null
+  } | null
   items: O2oPreorderDetailItemView[]
   returnRequests: O2oReturnRequestView[]
   amountSummary: {
@@ -186,6 +193,7 @@ class O2oPreorderService {
   private readonly preorderItemRepo = AppDataSource.getRepository(O2oPreorderItem)
   private readonly returnRequestRepo = AppDataSource.getRepository(O2oReturnRequest)
   private readonly returnRequestItemRepo = AppDataSource.getRepository(O2oReturnRequestItem)
+  private readonly clientUserRepo = AppDataSource.getRepository(ClientUser)
   private readonly inventoryLogRepo = AppDataSource.getRepository(InventoryLog)
 
   // 货币金额统一按“分”做整数运算，避免 0.1 + 0.2、19.9 * 3 之类的浮点误差。
@@ -665,6 +673,10 @@ class O2oPreorderService {
 
   private async buildOrderDetail(order: O2oPreorder): Promise<O2oPreorderDetailView> {
     const id = String(order.id)
+    const clientUser = await this.clientUserRepo.findOne({
+      where: { id: String(order.clientUserId) },
+      select: ['id', 'realName', 'mobile', 'email', 'departmentName'],
+    })
     // 历史库与不同驱动下 order_id 参数类型可能出现 number/string 混用，
     // 这里做双口径兼容查询，避免订单详情“总件数存在但明细为空”。
     let items = await this.preorderItemRepo.find({
@@ -730,6 +742,15 @@ class O2oPreorderService {
         verifiedAt: order.verifiedAt,
         createdAt: order.createdAt,
       },
+      customerProfile: clientUser
+        ? {
+            id: String(clientUser.id),
+            username: clientUser.realName?.trim() || '未命名用户',
+            mobile: clientUser.mobile?.trim() || null,
+            email: clientUser.email?.trim() || null,
+            departmentName: clientUser.departmentName?.trim() || null,
+          }
+        : null,
       items: normalizedItems,
       returnRequests: returnRequests.map((item) =>
         this.buildReturnRequestView(item, requestItemsByRequestId.get(String(item.id)) ?? []),

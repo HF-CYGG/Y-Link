@@ -232,6 +232,27 @@ const detailAmountSummary = computed(() => {
   }
 })
 
+// 预定用户信息摘要：
+// - 统一收敛详情接口返回的用户名、手机号、邮箱、部门字段；
+// - 模板仅消费这里的展示值，避免散落空值判断导致显示口径不一致。
+const orderCustomerProfile = computed(() => {
+  const profile = activeOrderDetail.value?.customerProfile
+  if (!profile) {
+    return {
+      username: '未查询到预定用户',
+      mobile: '未留手机号',
+      email: '未留邮箱',
+      departmentName: '未填写部门',
+    }
+  }
+  return {
+    username: profile.username?.trim() || '未命名用户',
+    mobile: profile.mobile?.trim() || '未留手机号',
+    email: profile.email?.trim() || '未留邮箱',
+    departmentName: profile.departmentName?.trim() || '未填写部门',
+  }
+})
+
 // 管理端状态选择只保留当前门店对外使用的四个核心业务状态，避免误选运输类历史状态。
 const BUSINESS_STATUS_PICKER_ORDER: O2oOrderBusinessStatus[] = ['awaiting_shipment', 'preparing', 'ready', 'after_sale']
 
@@ -933,6 +954,33 @@ onBeforeUnmount(() => {
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">商品条目</p>
               <p class="mt-1 text-sm font-semibold text-slate-900">{{ detailAmountSummary.totalItemCount }} 项</p>
+            </div>
+          </div>
+
+          <div class="mt-4 rounded-2xl border border-slate-200 bg-white px-4 py-4">
+            <div>
+              <p class="text-base font-semibold text-slate-900">预定用户信息</p>
+              <p class="mt-1 text-xs leading-5 text-slate-500">
+                便于门店在特殊情况下通过电话、邮件等方式及时联系客户并同步订单变化。
+              </p>
+            </div>
+            <div class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              <div class="rounded-2xl bg-slate-50 px-4 py-3">
+                <p class="text-sm text-slate-400">用户名</p>
+                <p class="mt-1 break-words text-sm font-semibold text-slate-900">{{ orderCustomerProfile.username }}</p>
+              </div>
+              <div class="rounded-2xl bg-slate-50 px-4 py-3">
+                <p class="text-sm text-slate-400">手机号</p>
+                <p class="mt-1 break-all text-sm font-semibold text-slate-900">{{ orderCustomerProfile.mobile }}</p>
+              </div>
+              <div class="rounded-2xl bg-slate-50 px-4 py-3">
+                <p class="text-sm text-slate-400">邮箱</p>
+                <p class="mt-1 break-all text-sm font-semibold text-slate-900">{{ orderCustomerProfile.email }}</p>
+              </div>
+              <div class="rounded-2xl bg-slate-50 px-4 py-3">
+                <p class="text-sm text-slate-400">所属部门</p>
+                <p class="mt-1 break-words text-sm font-semibold text-slate-900">{{ orderCustomerProfile.departmentName }}</p>
+              </div>
             </div>
           </div>
 

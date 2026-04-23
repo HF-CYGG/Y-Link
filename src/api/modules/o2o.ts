@@ -124,6 +124,13 @@ export interface O2oPreorderDetail {
     verifiedAt: string | null
     createdAt: string
   }
+  customerProfile: {
+    id: string
+    username: string
+    mobile: string | null
+    email: string | null
+    departmentName: string | null
+  } | null
   items: O2oPreorderDetailItem[]
   returnRequests: O2oReturnRequestDetail[]
   amountSummary?: {
