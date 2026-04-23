@@ -82,12 +82,6 @@ const handleTabChange = (value: string | number) => {
       </div>
 
       <div :class="['embedded-page px-3 pb-3 pt-3 sm:px-4 sm:pb-4 sm:pt-4', props.contentClass]">
-        <!--
-          切页防闪烁说明：
-          - 这里不使用 `mode="out-in"`，避免离场面板先被移除后出现一帧空白；
-          - 现有 leave 态已经是绝对定位覆盖，因此允许新旧面板短暂重叠能显著降低闪烁感；
-          - 同时去掉 `appear`，避免首次进入工作台时也触发一次内容淡入造成“首屏闪一下”。
-        -->
         <transition name="workbench-horizontal-slide">
           <keep-alive v-if="props.keepAlive">
             <component :is="props.activeComponent" :key="props.activeTab" class="workbench-horizontal-slide__panel" />
