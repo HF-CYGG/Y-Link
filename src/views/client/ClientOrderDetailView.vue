@@ -340,6 +340,16 @@ const updateReturnQty = (productId: string, value: number | undefined, maxQty: n
   }
 }
 
+// 详细注释：Element Plus 的数字输入框在清空、回填和边界切换时可能抛出 undefined / null，
+// 这里统一先做一次前置归一化，再复用既有数量更新逻辑，避免模板事件参数退化成隐式 any。
+const handleReturnQtyChange = (
+  productId: string,
+  maxQty: number,
+  value: number | null | undefined,
+) => {
+  updateReturnQty(productId, value ?? undefined, maxQty)
+}
+
 const renderQrCode = async () => {
   // 二维码仅允许待提货订单展示，撤回、超时取消、已核销后立即切换为禁用态。
   if (!detail.value?.qrPayload || !canUseQrCode.value) {
@@ -891,7 +901,7 @@ onMounted(async () => {
                   :step="1"
                   :precision="0"
                   class="w-full"
-                  @update:model-value="(value) => updateReturnQty(item.productId, value, item.availableReturnQty)"
+                  @update:model-value="handleReturnQtyChange(item.productId, item.availableReturnQty, $event)"
                 />
               </div>
             </div>
