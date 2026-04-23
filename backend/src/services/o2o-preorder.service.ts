@@ -216,7 +216,7 @@ class O2oPreorderService {
       parsedCount = Number.parseInt(rawUpdateCount, 10)
     } else {
       // 非 number/string 的异常类型（如 object/boolean）统一回退为 0，避免隐式字符串化污染解析结果。
-      parsedCount = 0
+      // parsedCount 已以 0 初始化，这里无需重复赋值。
     }
     if (!Number.isFinite(parsedCount)) {
       return 0
