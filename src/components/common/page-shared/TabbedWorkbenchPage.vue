@@ -56,10 +56,10 @@ const handleTabChange = (value: string | number) => {
       ]"
     >
       <div class="supplier-workbench-shell__hero border-b border-slate-200/70 px-5 py-4 sm:px-6 sm:py-5 dark:border-slate-700/80">
-        <div class="flex flex-col gap-4 xl:flex-row xl:items-end xl:justify-between">
-          <div v-if="props.title || props.description" class="min-w-0 space-y-1 xl:flex-none xl:pr-4">
+        <div class="flex flex-col gap-3">
+          <div v-if="props.title || props.description" class="min-w-0 space-y-1">
             <div class="space-y-1">
-              <h2 class="text-lg font-semibold leading-tight tracking-tight text-slate-900 dark:text-slate-100 sm:text-xl xl:whitespace-nowrap">
+              <h2 class="text-lg font-semibold leading-tight tracking-tight text-slate-900 dark:text-slate-100 sm:text-xl">
                 {{ props.title }}
               </h2>
               <p v-if="props.description" class="max-w-3xl text-sm leading-6 text-slate-500 dark:text-slate-400">
@@ -82,7 +82,13 @@ const handleTabChange = (value: string | number) => {
       </div>
 
       <div :class="['embedded-page px-3 pb-3 pt-3 sm:px-4 sm:pb-4 sm:pt-4', props.contentClass]">
-        <transition name="workbench-horizontal-slide" mode="out-in" appear>
+        <!--
+          切页防闪烁说明：
+          - 这里不使用 `mode="out-in"`，避免离场面板先被移除后出现一帧空白；
+          - 现有 leave 态已经是绝对定位覆盖，因此允许新旧面板短暂重叠能显著降低闪烁感；
+          - 同时去掉 `appear`，避免首次进入工作台时也触发一次内容淡入造成“首屏闪一下”。
+        -->
+        <transition name="workbench-horizontal-slide">
           <keep-alive v-if="props.keepAlive">
             <component :is="props.activeComponent" :key="props.activeTab" class="workbench-horizontal-slide__panel" />
           </keep-alive>
@@ -111,6 +117,8 @@ const handleTabChange = (value: string | number) => {
 .supplier-workbench-shell__tab-wrap {
   width: 100%;
   min-width: 0;
+  display: flex;
+  justify-content: flex-start;
 }
 
 .embedded-page {
@@ -162,57 +170,47 @@ const handleTabChange = (value: string | number) => {
 }
 
 /* 统一工作台标签视觉：
- * - 让标签像工作台模式切换按钮，而不是默认的细线标签；
- * - 同时保留 Element Plus 原有交互与键盘可访问性。
+ * - 改为与系统配置页一致的下划线标签风格，避免同站点里出现两套切换语言；
+ * - 保留 Element Plus 原生 active bar 与键盘可访问性，仅做轻量收口。
  */
 .supplier-workbench-shell :deep(.el-tabs__header) {
   margin: 0;
 }
 
-.supplier-workbench-shell :deep(.el-tabs__nav-wrap::after) {
-  display: none;
-}
-
 .supplier-workbench-shell :deep(.el-tabs__nav-scroll) {
   overflow: auto;
-  padding-bottom: 2px;
+  padding-bottom: 0;
 }
 
 .supplier-workbench-shell :deep(.el-tabs__nav) {
   display: inline-flex;
-  gap: 0.5rem;
-  border-radius: 999px;
-  border: 1px solid rgba(203, 213, 225, 0.9);
-  background: rgba(248, 250, 252, 0.96);
-  padding: 0.35rem;
-}
-
-.supplier-workbench-shell :deep(.el-tabs__active-bar) {
-  display: none;
+  gap: 0;
+  padding: 0;
 }
 
 .supplier-workbench-shell :deep(.el-tabs__item) {
   height: auto;
-  border-radius: 999px;
-  padding: 0.68rem 1.05rem;
+  border-radius: 0;
+  padding: 0.85rem 1.15rem;
   color: rgb(51 65 85);
   font-weight: 600;
   line-height: 1.2;
   transition:
     color 0.16s ease,
-    background-color 0.16s ease,
-    box-shadow 0.16s ease;
+    opacity 0.16s ease;
 }
 
 .supplier-workbench-shell :deep(.el-tabs__item:hover) {
   color: rgb(15 23 42);
-  background: rgba(241, 245, 249, 0.88);
 }
 
 .supplier-workbench-shell :deep(.el-tabs__item.is-active) {
   color: rgb(15 118 110);
-  background: rgba(204, 251, 241, 0.72);
-  box-shadow: inset 0 0 0 1px rgba(94, 234, 212, 0.4);
+}
+
+.supplier-workbench-shell :deep(.el-tabs__active-bar) {
+  background-color: rgb(13 148 136);
+  height: 2px;
 }
 
 .supplier-workbench-shell :deep(.el-tabs__content) {
@@ -225,16 +223,8 @@ const handleTabChange = (value: string | number) => {
   }
 
   .supplier-workbench-shell :deep(.el-tabs__item) {
-    padding: 0.62rem 0.9rem;
+    padding: 0.78rem 0.82rem;
     font-size: 0.92rem;
-  }
-}
-
-@media (min-width: 1280px) {
-  /* 横向布局下让标签区按内容宽度占位，避免挤压标题导致中文断行。 */
-  .supplier-workbench-shell__tab-wrap {
-    width: auto;
-    flex-shrink: 0;
   }
 }
 
