@@ -1,8 +1,13 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/components/common/business-composite/BizCrudDialogShell.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：提供后台通用 CRUD 弹窗壳，统一封装宽度策略、关闭回传、底部按钮与低高度视口下的结构稳定性。
+ * 实现逻辑：
+ * - 根据手机、平板、桌面三端状态自动计算弹窗宽度；
+ * - 对外统一透传 `update:modelValue`、`confirm` 与 `closed` 事件，页面层只维护业务状态；
+ * - 通过统一类名挂接全局弹窗纵向安全网，避免长表单弹窗在低高度视口下出现底部按钮被挤掉的问题。
+ * 维护说明：
+ * - 若后续需要扩展“只读弹窗”“无底部按钮弹窗”等能力，应优先在此处扩展，而不是各业务页重复拼装 `el-dialog`。
  */
 
 
@@ -45,6 +50,7 @@ const props = withDefaults(defineProps<Props>(), {
 const emit = defineEmits<{
   'update:modelValue': [value: boolean]
   confirm: []
+  closed: []
 }>()
 
 const appStore = useAppStore()
@@ -68,12 +74,30 @@ const dialogWidth = computed(() => {
 })
 
 /**
+ * 统一弹窗类名：
+ * - 固定挂载公共壳类名，便于全局样式精准命中；
+ * - 若页面另传业务类名，则与公共类名一起生效，不覆盖业务侧视觉定制。
+ */
+const dialogClassName = computed(() => {
+  return ['ylink-crud-dialog-shell', props.dialogClass].filter(Boolean).join(' ')
+})
+
+/**
  * 关闭弹窗：
  * - 统一通过 update:modelValue 回传给父组件；
  * - 让页面层只维护单一 visible 状态源。
  */
 const handleClose = () => {
   emit('update:modelValue', false)
+}
+
+/**
+ * 关闭完成回调：
+ * - 与 Element Plus 的 `closed` 语义保持一致；
+ * - 供页面在动画结束后安全重置表单、清理校验与临时状态。
+ */
+const handleClosed = () => {
+  emit('closed')
 }
 </script>
 
@@ -85,8 +109,9 @@ const handleClose = () => {
     :destroy-on-close="props.destroyOnClose"
     :append-to-body="props.appendToBody"
     :align-center="props.alignCenter"
-    :class="props.dialogClass"
+    :class="dialogClassName"
     @update:model-value="emit('update:modelValue', $event)"
+    @closed="handleClosed"
   >
     <div class="min-w-0">
       <slot :is-phone="appStore.isPhone" :is-tablet="appStore.isTablet" :is-desktop="appStore.isDesktop" />

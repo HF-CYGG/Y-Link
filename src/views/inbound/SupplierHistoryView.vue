@@ -194,6 +194,9 @@ onMounted(() => {
       width="500px"
       destroy-on-close
       class="!rounded-2xl"
+      append-to-body
+      :modal-append-to-body="true"
+      :lock-scroll="true"
     >
       <div v-loading="detailLoading" class="min-h-[200px]">
         <transition name="fade-up" appear>

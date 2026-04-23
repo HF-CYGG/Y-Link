@@ -72,6 +72,11 @@ const handleDialogModelValueChange = (value: boolean) => {
     :title="props.title"
     :width="props.width"
     class="unified-scan-dialog"
+    modal-class="unified-scan-dialog-overlay"
+    :teleported="true"
+    :append-to-body="true"
+    :modal-append-to-body="true"
+    :lock-scroll="true"
     :close-on-click-modal="false"
     @update:model-value="handleDialogModelValueChange"
     @closed="handleDialogClosed"
@@ -147,17 +152,47 @@ const handleDialogModelValueChange = (value: boolean) => {
 </template>
 
 <style scoped>
+.unified-scan-dialog-overlay {
+  position: fixed !important;
+  inset: 0;
+}
+
+.unified-scan-dialog-overlay :deep(.el-overlay-dialog) {
+  position: fixed;
+  inset: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  padding: 12px;
+}
+
 .unified-scan-dialog:deep(.el-dialog) {
   width: min(96vw, 1120px) !important;
-  max-height: 94vh;
+  display: flex;
+  flex-direction: column;
+  max-height: min(94vh, calc(100dvh - 24px));
+  margin: 12px auto !important;
   border-radius: 24px;
   overflow: hidden;
 }
 
+.unified-scan-dialog:deep(.el-dialog__header) {
+  flex: 0 0 auto;
+}
+
 .unified-scan-dialog:deep(.el-dialog__body) {
+  flex: 1 1 auto;
+  min-height: 0;
   padding-top: 10px;
-  max-height: calc(94vh - 112px);
   overflow: auto;
+}
+
+.unified-scan-dialog:deep(.el-dialog__footer) {
+  flex: 0 0 auto;
+  padding-top: 12px;
 }
 
 .scan-shell {
@@ -357,6 +392,12 @@ const handleDialogModelValueChange = (value: boolean) => {
 }
 
 @media (max-width: 767px) {
+  .unified-scan-dialog-overlay :deep(.el-overlay-dialog) {
+    align-items: stretch;
+    justify-content: stretch;
+    padding: 0;
+  }
+
   .unified-scan-dialog:deep(.el-dialog) {
     width: 100dvw !important;
     max-width: 100vw !important;
@@ -366,7 +407,6 @@ const handleDialogModelValueChange = (value: boolean) => {
   }
 
   .unified-scan-dialog:deep(.el-dialog__body) {
-    max-height: calc(100dvh - 112px);
     padding-top: 6px;
     padding-left: 10px;
     padding-right: 10px;

@@ -469,6 +469,37 @@ canvas {
   max-width: 100%;
 }
 
+/*
+ * 全局弹窗纵向安全网：
+ * - 统一让普通 el-dialog 在视口内按纵向弹性布局工作；
+ * - header / body / footer 共享同一个最大高度约束，正文区负责滚动；
+ * - 解决长表单、详情弹窗、确认弹窗在低高度视口下底部按钮被挤掉或正文被截断的问题。
+ */
+.el-overlay-dialog {
+  overflow: auto;
+  padding: 12px;
+}
+
+.el-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(var(--el-dialog-width, 100%), calc(100vw - 24px));
+  max-width: calc(100vw - 24px);
+  max-height: min(94vh, calc(100dvh - 24px));
+  margin: 0 auto !important;
+}
+
+.el-dialog__header,
+.el-dialog__footer {
+  flex: 0 0 auto;
+}
+
+.el-dialog__body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
 @media (prefers-reduced-motion: reduce) {
   :root {
     --motion-duration-fast: 0.01ms;
@@ -502,8 +533,13 @@ canvas {
     max-width: 100vw;
   }
 
+  .el-overlay-dialog {
+    padding: 0;
+  }
+
   .el-dialog {
-    margin-top: 6vh !important;
+    max-width: 100vw;
+    max-height: 100dvh;
   }
 
   .el-pagination {

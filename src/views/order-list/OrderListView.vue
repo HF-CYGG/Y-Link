@@ -356,6 +356,9 @@ const handleExportVoucherPdf = async () => {
       width="640px"
       align-center
       class="order-voucher-dialog"
+      append-to-body
+      :modal-append-to-body="true"
+      :lock-scroll="true"
     >
       <div v-if="currentOrder" class="voucher-confirm-banner">
         <div class="voucher-confirm-banner__title">请先核对关键信息</div>

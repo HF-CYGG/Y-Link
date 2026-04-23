@@ -250,6 +250,9 @@ const handleLogout = async () => {
     title="修改密码"
     width="420px"
     destroy-on-close
+    append-to-body
+    :modal-append-to-body="true"
+    :lock-scroll="true"
     @closed="resetPasswordForm"
   >
     <div class="mb-4 rounded-2xl bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-500 dark:bg-white/5 dark:text-slate-400">
