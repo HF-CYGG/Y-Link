@@ -48,6 +48,9 @@ const activeCategoryKey = computed({
 const detailVisible = ref(false)
 const detailQty = ref(1)
 const detailProduct = ref<O2oMallProduct | null>(null)
+const imagePreviewVisible = ref(false)
+const previewImageUrl = ref('')
+const previewImageAlt = ref('')
 const miniCartVisible = ref(false)
 const settlePulsing = ref(false)
 const searchPanelVisible = ref(false)
@@ -81,6 +84,17 @@ const classifyProduct = (product: O2oMallProduct) => {
 
 const resolveProductThumbnail = (product: Pick<O2oMallProduct, 'productName' | 'productCode' | 'thumbnail'>) => {
   return resolveProductPlaceholder(product.thumbnail)
+}
+
+// 商城图片预览统一走同一套状态，避免商品卡和详情抽屉各自维护一套弹层开关。
+const openProductImagePreview = (product: Pick<O2oMallProduct, 'productName' | 'productCode' | 'thumbnail'>) => {
+  previewImageUrl.value = resolveProductThumbnail(product)
+  previewImageAlt.value = product.productName || product.productCode || '商品'
+  imagePreviewVisible.value = true
+}
+
+const closeProductImagePreview = () => {
+  imagePreviewVisible.value = false
 }
 
 const categoryGroups = computed<ProductCategoryGroup[]>(() => {
@@ -612,6 +626,17 @@ onBeforeUnmount(() => {
       </Transition>
     </Teleport>
 
+    <Teleport to="body">
+      <Transition name="mall-image-preview">
+        <div v-if="imagePreviewVisible" class="mall-image-preview-overlay" @click.self="closeProductImagePreview">
+          <section class="mall-image-preview-panel">
+            <button type="button" class="mall-image-preview-close" @click="closeProductImagePreview">关闭</button>
+            <img :src="previewImageUrl" :alt="previewImageAlt" class="mall-image-preview-photo" />
+          </section>
+        </div>
+      </Transition>
+    </Teleport>
+
     <div class="overflow-hidden rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-4 shadow-[var(--ylink-shadow-soft)]">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div>
@@ -672,7 +697,7 @@ onBeforeUnmount(() => {
       </header>
       <div class="client-product-grid">
         <article v-for="product in searchResults" :key="product.id" class="client-product-card">
-          <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
+          <button type="button" class="client-product-card__image-button" @click="openProductImagePreview(product)">
             <img
               :src="resolveProductThumbnail(product)"
               :alt="product.productName"
@@ -680,6 +705,8 @@ onBeforeUnmount(() => {
               loading="lazy"
               decoding="async"
             />
+          </button>
+          <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
             <div class="min-w-0 flex-1 text-left">
               <p class="truncate text-base font-semibold text-slate-900">{{ product.productName }}</p>
               <p class="mt-1 text-sm font-bold text-[var(--ylink-color-primary-strong)]">¥{{ Number(product.defaultPrice).toFixed(2) }}</p>
@@ -717,7 +744,7 @@ onBeforeUnmount(() => {
       <div v-if="largeDatasetMode" class="max-h-[64vh] overflow-y-auto pr-1" v-bind="virtualContainerProps">
         <div v-bind="virtualWrapperProps" class="client-product-grid">
           <article v-for="row in virtualRows" :key="row.index" class="client-product-card mb-2">
-            <button type="button" class="client-product-card__body" @click="openProductDetail(row.data)">
+            <button type="button" class="client-product-card__image-button" @click="openProductImagePreview(row.data)">
               <img
                 :src="resolveProductThumbnail(row.data)"
                 :alt="row.data.productName"
@@ -725,6 +752,8 @@ onBeforeUnmount(() => {
                 loading="lazy"
                 decoding="async"
               />
+            </button>
+            <button type="button" class="client-product-card__body" @click="openProductDetail(row.data)">
               <div class="min-w-0 flex-1 text-left">
                 <p class="truncate text-base font-semibold text-slate-900">{{ row.data.productName }}</p>
                 <p class="mt-1 text-sm font-bold text-[var(--ylink-color-primary-strong)]">¥{{ Number(row.data.defaultPrice).toFixed(2) }}</p>
@@ -758,7 +787,7 @@ onBeforeUnmount(() => {
           </header>
           <div class="client-product-grid">
             <article v-for="product in group.items" :key="product.id" class="client-product-card">
-              <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
+              <button type="button" class="client-product-card__image-button" @click="openProductImagePreview(product)">
                 <img
                   :src="resolveProductThumbnail(product)"
                   :alt="product.productName"
@@ -766,6 +795,8 @@ onBeforeUnmount(() => {
                   loading="lazy"
                   decoding="async"
                 />
+              </button>
+              <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
                 <div class="min-w-0 flex-1 text-left">
                   <p class="truncate text-base font-semibold text-slate-900">{{ product.productName }}</p>
                   <p class="mt-1 text-sm font-bold text-[var(--ylink-color-primary-strong)]">¥{{ Number(product.defaultPrice).toFixed(2) }}</p>
@@ -860,13 +891,16 @@ onBeforeUnmount(() => {
       class="client-drawer-responsive"
     >
       <section v-if="detailProduct" class="space-y-4 pb-2 max-w-[480px] mx-auto h-full max-h-[85vh] flex flex-col">
-        <img
-          :src="resolveProductThumbnail(detailProduct)"
-          :alt="detailProduct.productName"
-          class="h-44 sm:h-56 w-full rounded-2xl object-cover flex-shrink-0"
-          loading="lazy"
-          decoding="async"
-        />
+        <button type="button" class="client-detail-image-button" @click="openProductImagePreview(detailProduct)">
+          <img
+            :src="resolveProductThumbnail(detailProduct)"
+            :alt="detailProduct.productName"
+            class="h-44 sm:h-56 w-full rounded-2xl object-cover flex-shrink-0"
+            loading="lazy"
+            decoding="async"
+          />
+          <span class="client-detail-image-button__hint">点击查看大图</span>
+        </button>
         <div class="space-y-2 flex-shrink-0">
           <p class="text-lg font-semibold text-slate-900">{{ detailProduct.productName }}</p>
           <p class="text-sm font-bold text-[var(--ylink-color-primary-strong)]">¥{{ Number(detailProduct.defaultPrice).toFixed(2) }}</p>
@@ -948,12 +982,21 @@ onBeforeUnmount(() => {
   padding: 0.45rem;
 }
 
+.client-product-card__image-button {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  background: transparent;
+  padding: 0;
+}
+
 .client-product-card__body {
   display: flex;
   min-width: 0;
   flex: 1;
   align-items: center;
-  gap: 0.7rem;
   border: none;
   background: transparent;
   text-align: left;
@@ -967,6 +1010,99 @@ onBeforeUnmount(() => {
   border-radius: 0.9rem;
   background: #e2e8f0;
   object-fit: cover;
+}
+
+.client-detail-image-button {
+  position: relative;
+  display: block;
+  overflow: hidden;
+  border: none;
+  border-radius: 1rem;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+}
+
+.client-detail-image-button__hint {
+  position: absolute;
+  right: 0.75rem;
+  bottom: 0.75rem;
+  border-radius: 9999px;
+  background: rgba(15, 23, 42, 0.72);
+  color: #ffffff;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1;
+  padding: 0.4rem 0.68rem;
+}
+
+.mall-image-preview-overlay {
+  position: fixed;
+  inset: 0;
+  /* 预览层必须高于 Element Plus 抽屉/遮罩层，避免从详情页触发时被右侧抽屉覆盖。 */
+  z-index: 4000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.82);
+  padding: 1rem;
+}
+
+.mall-image-preview-panel {
+  position: relative;
+  display: flex;
+  max-height: 100%;
+  max-width: min(1100px, 100%);
+  align-items: center;
+  justify-content: center;
+}
+
+.mall-image-preview-close {
+  position: absolute;
+  top: 0.25rem;
+  right: 0.25rem;
+  z-index: 1;
+  border: none;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.94);
+  color: #0f172a;
+  font-size: 0.82rem;
+  font-weight: 600;
+  line-height: 1;
+  padding: 0.65rem 0.9rem;
+}
+
+.mall-image-preview-photo {
+  display: block;
+  max-height: min(88vh, 100%);
+  max-width: min(94vw, 1100px);
+  border-radius: 1.25rem;
+  background: #ffffff;
+  object-fit: contain;
+  box-shadow: 0 24px 56px rgba(15, 23, 42, 0.28);
+}
+
+.mall-image-preview-enter-active,
+.mall-image-preview-leave-active {
+  transition: opacity 0.18s ease;
+}
+
+.mall-image-preview-enter-active .mall-image-preview-photo,
+.mall-image-preview-leave-active .mall-image-preview-photo {
+  transition:
+    transform 0.2s ease,
+    opacity 0.2s ease;
+}
+
+.mall-image-preview-enter-from,
+.mall-image-preview-leave-to {
+  opacity: 0;
+}
+
+.mall-image-preview-enter-from .mall-image-preview-photo,
+.mall-image-preview-leave-to .mall-image-preview-photo {
+  opacity: 0;
+  transform: scale(0.97);
 }
 
 .client-product-card__add-button {
