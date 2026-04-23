@@ -3,6 +3,7 @@
   该文件用于承载供货方共享工作台页面。
   页面把“送货单录入”和“历史单据”两个入口整合到同一个工作台中，
   通过共享路由绑定标签逻辑完成入口兼容与页面切换。
+  本次同时负责统一供货工作台的页头文案，避免子页面切换时出现重复说明。
 -->
 <script setup lang="ts">
 import { TabbedWorkbenchPage } from '@/components/common'
@@ -45,10 +46,11 @@ const { activeTab, activeComponent, handleTabChange } = useRouteBoundWorkbenchTa
   <!-- 共享工作台组件负责输出统一页头与标签栏，并渲染当前选中的业务页面。 -->
   <TabbedWorkbenchPage
     title="供货工作台"
-    description="统一处理送货单录入与历史单据查询，供货方只需记住一个入口。"
     :tabs="tabs"
     :active-tab="activeTab"
     :active-component="activeComponent"
+    card-class="supplier-workbench-page"
+    content-class="supplier-workbench-page__content"
     @tab-change="handleTabChange"
   />
 </template>
