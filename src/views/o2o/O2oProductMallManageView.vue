@@ -63,13 +63,19 @@ const localPreviewUrl = ref<string>('')
 const imagePreviewVisible = ref(false)
 const uploadingThumbnail = ref(false)
 const uploadProgress = ref(0)
+const uploadProgressVisible = ref(false)
+const thumbnailDragActive = ref(false)
+
+const configuredThumbnailUrl = computed(() => {
+  return localPreviewUrl.value || form.thumbnail.trim()
+})
 
 const displayThumbnail = computed(() => {
-  return resolveProductPlaceholder(localPreviewUrl.value || form.thumbnail)
+  return configuredThumbnailUrl.value ? resolveProductPlaceholder(configuredThumbnailUrl.value) : ''
 })
 
 const hasConfiguredThumbnail = computed(() => {
-  return Boolean(localPreviewUrl.value || form.thumbnail.trim())
+  return Boolean(configuredThumbnailUrl.value)
 })
 
 const uploadProgressStatus = computed(() => {
@@ -113,6 +119,7 @@ const resetForm = () => {
   imagePreviewVisible.value = false
   uploadingThumbnail.value = false
   uploadProgress.value = 0
+  uploadProgressVisible.value = false
 }
 
 // 详细注释：加载商品列表，支持按名称关键词进行模糊搜索，刷新商城大厅商品数据。
@@ -134,6 +141,7 @@ const openCreateDialog = () => {
 }
 
 const handleCustomUpload = async (options: UploadRequestOptions) => {
+  thumbnailDragActive.value = false
   const file = options.file
   if (!file.type.startsWith('image/')) {
     ElMessage.error('只能上传图片文件')
@@ -147,6 +155,7 @@ const handleCustomUpload = async (options: UploadRequestOptions) => {
 
   uploadingThumbnail.value = true
   uploadProgress.value = 0
+  uploadProgressVisible.value = true
 
   try {
     const compressedFile = await imageCompression(file, {
@@ -181,13 +190,37 @@ const handleCustomUpload = async (options: UploadRequestOptions) => {
     uploadProgress.value = 100
     options.onSuccess?.(uploadResult)
     ElMessage.success('图片上传完成')
+    globalThis.window.setTimeout(() => {
+      uploadProgressVisible.value = false
+      uploadProgress.value = 0
+    }, 520)
   } catch (error) {
     console.error('图片压缩失败:', error)
     ElMessage.error('图片处理失败，请重试')
     uploadProgress.value = 0
+    uploadProgressVisible.value = false
   } finally {
     uploadingThumbnail.value = false
   }
+}
+
+const handleThumbnailDragEnter = () => {
+  if (uploadingThumbnail.value) {
+    return
+  }
+  thumbnailDragActive.value = true
+}
+
+const handleThumbnailDragLeave = (event: DragEvent) => {
+  const nextTarget = event.relatedTarget
+  if (nextTarget instanceof Node && event.currentTarget instanceof Node && event.currentTarget.contains(nextTarget)) {
+    return
+  }
+  thumbnailDragActive.value = false
+}
+
+const handleThumbnailDrop = () => {
+  thumbnailDragActive.value = false
 }
 
 const handleRemoveThumbnail = () => {
@@ -201,6 +234,7 @@ const handleRemoveThumbnail = () => {
   localPreviewUrl.value = ''
   form.thumbnail = ''
   uploadProgress.value = 0
+  uploadProgressVisible.value = false
   ElMessage.success('已移除商品预览图')
 }
 
@@ -420,29 +454,47 @@ onMounted(async () => {
         </el-form-item>
 
         <el-form-item label="商品预览图">
-          <el-upload
-            class="avatar-uploader"
-            drag
-            action=""
-            :http-request="handleCustomUpload"
-            :show-file-list="false"
-            accept="image/*"
-            :disabled="uploadingThumbnail"
+          <div
+            class="avatar-uploader-wrap"
+            :class="{ 'is-drag-active': thumbnailDragActive }"
+            @dragenter.prevent="handleThumbnailDragEnter"
+            @dragover.prevent="handleThumbnailDragEnter"
+            @dragleave.prevent="handleThumbnailDragLeave"
+            @drop.prevent="handleThumbnailDrop"
           >
-            <div class="avatar-uploader__content">
-              <img :src="displayThumbnail" class="avatar" alt="商品预览" />
-              <div class="avatar-uploader__text">
-                <el-icon class="avatar-uploader__icon"><UploadFilled /></el-icon>
-                <p class="avatar-uploader__title">{{ uploadingThumbnail ? '图片上传中，请稍候…' : '拖拽图片到此处，或点击上传' }}</p>
-                <p class="avatar-uploader__hint">推荐 800x800 方形图，系统会自动压缩并上传。</p>
+            <el-upload
+              class="avatar-uploader"
+              drag
+              action=""
+              :http-request="handleCustomUpload"
+              :show-file-list="false"
+              accept="image/*"
+              :disabled="uploadingThumbnail"
+            >
+              <div
+                class="avatar-uploader__content"
+                :class="{ 'has-image': hasConfiguredThumbnail, 'is-empty': !hasConfiguredThumbnail }"
+              >
+                <img v-if="hasConfiguredThumbnail" :src="displayThumbnail" class="avatar avatar--full" alt="商品预览" />
+                <div v-else class="avatar-uploader__empty-state">
+                  <div class="avatar-uploader__preview-shell" :class="{ 'is-empty': !hasConfiguredThumbnail }">
+                    <el-icon class="avatar-uploader__empty-icon"><UploadFilled /></el-icon>
+                  </div>
+                  <div class="avatar-uploader__text">
+                    <p class="avatar-uploader__title">{{ uploadingThumbnail ? '正在上传图片' : thumbnailDragActive ? '松手即可上传' : '拖拽或点击上传' }}</p>
+                    <p class="avatar-uploader__hint">{{ thumbnailDragActive ? '已识别到图片拖入' : '推荐 800x800 方形图' }}</p>
+                  </div>
+                </div>
               </div>
-            </div>
-          </el-upload>
-          <div v-if="uploadingThumbnail || uploadProgress > 0" class="mt-3 w-full">
-            <el-progress :percentage="uploadProgress" :stroke-width="10" :status="uploadProgressStatus" />
+            </el-upload>
           </div>
-          <div class="mt-3 flex w-full flex-wrap items-center gap-2">
-            <el-button type="primary" plain :icon="ZoomIn" :disabled="!hasConfiguredThumbnail" @click="openThumbnailPreview">
+          <Transition name="thumbnail-progress-fade">
+            <div v-if="uploadProgressVisible" class="mt-3 w-full">
+              <el-progress :percentage="uploadProgress" :stroke-width="6" :status="uploadProgressStatus" :show-text="false" />
+            </div>
+          </Transition>
+          <div class="thumbnail-actions mt-3 w-full">
+            <el-button plain :icon="ZoomIn" :disabled="!hasConfiguredThumbnail" @click="openThumbnailPreview">
               查看大图
             </el-button>
             <el-popconfirm
@@ -454,7 +506,6 @@ onMounted(async () => {
             >
               <template #reference>
                 <el-button
-                  type="danger"
                   plain
                   :icon="Delete"
                   :disabled="!hasConfiguredThumbnail || uploadingThumbnail"
@@ -465,7 +516,7 @@ onMounted(async () => {
               </template>
             </el-popconfirm>
           </div>
-          <p class="mt-2 w-full text-xs text-slate-400">支持拖拽上传，上传完成后可点击“查看大图”进行清晰预览。</p>
+          <p class="mt-2 w-full text-xs text-slate-400">上传完成后可点击“查看大图”。</p>
         </el-form-item>
         <el-form-item label="详情内容">
           <el-input v-model="form.detailContent" type="textarea" :rows="6" placeholder="请输入客户端商品详情说明" />
@@ -495,19 +546,25 @@ onMounted(async () => {
 
 <style scoped>
 .avatar-uploader :deep(.el-upload) {
-  border: 1px dashed rgba(148, 163, 184, 0.5);
-  border-radius: 16px;
+  width: 100%;
+  border: 1px solid rgba(203, 213, 225, 0.88);
+  border-radius: 22px;
   cursor: pointer;
   position: relative;
   overflow: hidden;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
-  background: linear-gradient(180deg, rgba(248, 250, 252, 0.78), rgba(255, 255, 255, 0.96));
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
+  background: rgba(255, 255, 255, 0.98);
 }
 
+.avatar-uploader-wrap.is-drag-active :deep(.el-upload),
 .avatar-uploader :deep(.el-upload:hover) {
-  border-color: var(--el-color-primary);
-  box-shadow: 0 10px 24px -18px rgba(15, 23, 42, 0.45);
-  transform: translateY(-1px);
+  border-color: rgba(148, 163, 184, 0.95);
+  box-shadow: 0 18px 36px -28px rgba(15, 23, 42, 0.24);
+}
+
+.avatar-uploader-wrap.is-drag-active :deep(.el-upload) {
+  background: rgba(240, 249, 255, 0.96);
+  box-shadow: 0 0 0 4px rgba(14, 165, 233, 0.08);
 }
 
 .avatar-uploader :deep(.el-upload-dragger) {
@@ -517,34 +574,57 @@ onMounted(async () => {
 }
 
 .avatar-uploader__content {
-  display: flex;
+  display: block;
   width: 100%;
-  min-height: 190px;
+  min-height: 172px;
+  padding: 0;
+}
+
+.avatar-uploader__content.has-image {
+  min-height: 240px;
+}
+
+.avatar-uploader__content.is-empty {
+  padding: 1.1rem 1.2rem;
+}
+
+.avatar-uploader__empty-state {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr);
   align-items: center;
-  gap: 1rem;
-  padding: 1rem;
+  gap: 1.1rem;
+}
+
+.avatar-uploader__preview-shell {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 132px;
+  height: 132px;
+  border-radius: 28px;
+  background: linear-gradient(180deg, rgb(248 250 252), rgb(241 245 249));
+}
+
+.avatar-uploader__preview-shell.is-empty {
+  background: linear-gradient(180deg, rgb(249 250 251), rgb(244 246 248));
 }
 
 .avatar-uploader__text {
   display: flex;
   flex-direction: column;
-  gap: 0.3rem;
+  gap: 0.22rem;
   min-width: 0;
 }
 
-.avatar-uploader__icon {
-  font-size: 1.4rem;
-  color: rgb(14 116 144);
-}
-
 .avatar-uploader__title {
-  font-size: 0.9rem;
+  font-size: 1rem;
   font-weight: 600;
-  color: rgb(30 41 59);
+  letter-spacing: -0.01em;
+  color: rgb(15 23 42);
 }
 
 .avatar-uploader__hint {
-  font-size: 0.76rem;
+  font-size: 0.82rem;
   color: rgb(100 116 139);
 }
 
@@ -557,16 +637,46 @@ onMounted(async () => {
 }
 
 .avatar {
-  width: 140px;
-  height: 140px;
+  width: 100px;
+  height: 100px;
   display: block;
   object-fit: cover;
-  border-radius: 14px;
-  background: #f8fafc;
+  border-radius: 24px;
+  background: transparent;
+}
+
+.avatar--full {
+  width: 100%;
+  height: 240px;
+  border-radius: 22px;
+  object-fit: cover;
+}
+
+.avatar-uploader__empty-icon {
+  font-size: 1.55rem;
+  color: rgb(148 163 184);
+}
+
+.thumbnail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+}
+
+.thumbnail-actions :deep(.el-button) {
+  min-height: 38px;
+  border-radius: 999px;
+  border-color: rgba(203, 213, 225, 0.96);
+  background: rgba(255, 255, 255, 0.96);
+  color: rgb(51 65 85);
+  font-weight: 500;
+  padding-inline: 1rem;
 }
 
 .thumbnail-remove-button {
-  border-radius: 999px;
+  color: rgb(185 28 28) !important;
+  border-color: rgba(254, 205, 211, 0.92) !important;
+  background: rgba(255, 255, 255, 0.96) !important;
 }
 
 .thumbnail-preview-dialog-image {
@@ -578,15 +688,37 @@ onMounted(async () => {
   background: #f8fafc;
 }
 
+.thumbnail-progress-fade-enter-active,
+.thumbnail-progress-fade-leave-active {
+  transition:
+    opacity 0.26s ease,
+    transform 0.32s ease;
+}
+
+.thumbnail-progress-fade-enter-from,
+.thumbnail-progress-fade-leave-to {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+
 @media (max-width: 767px) {
-  .avatar-uploader__content {
-    flex-direction: column;
-    align-items: flex-start;
+  .avatar-uploader__empty-state {
+    grid-template-columns: 1fr;
+    align-items: start;
+  }
+
+  .avatar-uploader__preview-shell {
+    width: 120px;
+    height: 120px;
   }
 
   .avatar {
-    width: 124px;
-    height: 124px;
+    width: 88px;
+    height: 88px;
+  }
+
+  .avatar--full {
+    height: 220px;
   }
 }
 </style>
