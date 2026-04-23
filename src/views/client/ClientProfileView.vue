@@ -10,8 +10,8 @@
 import { computed, onMounted, reactive, ref, toRaw } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
-import { useRouter } from 'vue-router'
 import { useClientAuthStore } from '@/store'
+import { redirectToClientLogin } from '@/utils/client-auth-navigation'
 import {
   clientChangePassword,
   getClientAuthCapabilities,
@@ -26,7 +26,6 @@ import {
 } from '@/utils/client-password-policy'
 import { extractErrorMessage } from '@/utils/error'
 
-const router = useRouter()
 const clientAuthStore = useClientAuthStore()
 
 const passwordDialogVisible = ref(false)
@@ -245,7 +244,8 @@ const submitChangePassword = async () => {
     ElMessage.success('密码修改成功，请重新登录')
     passwordDialogVisible.value = false
     clientAuthStore.clearAuthState()
-    await router.replace('/client/login')
+    // 改密后强制重建客户端页面树，避免旧登录态壳层残留。
+    redirectToClientLogin()
   } catch (error: any) {
     ElMessage.error(error.message || '修改密码失败')
   } finally {

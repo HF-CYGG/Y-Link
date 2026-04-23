@@ -7,9 +7,9 @@
 
 
 import { computed } from 'vue'
-import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useClientAuthStore } from '@/store'
+import { redirectToClientLogin } from '@/utils/client-auth-navigation'
 
 interface Props {
   title: string
@@ -18,7 +18,6 @@ interface Props {
 
 const props = defineProps<Props>()
 
-const router = useRouter()
 const clientAuthStore = useClientAuthStore()
 
 /**
@@ -48,7 +47,8 @@ const handleLogout = async () => {
 
   await clientAuthStore.logout()
   ElMessage.success('已退出登录')
-  await router.replace('/client/login')
+  // 退出后使用硬跳转重建页面，避免旧壳层在极端情况下残留成白屏。
+  redirectToClientLogin()
 }
 </script>
 

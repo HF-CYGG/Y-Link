@@ -7,12 +7,12 @@
 
 
 import { computed, ref, watch } from 'vue'
-import { useRoute, useRouter, type RouteLocationNormalizedLoaded } from 'vue-router'
+import { useRoute, type RouteLocationNormalizedLoaded } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 import { useClientAuthStore, useClientCartStore } from '@/store'
+import { redirectToClientLogin } from '@/utils/client-auth-navigation'
 
 const route = useRoute()
-const router = useRouter()
 const clientAuthStore = useClientAuthStore()
 const clientCartStore = useClientCartStore()
 
@@ -124,7 +124,8 @@ const handleLogout = async () => {
 
   await clientAuthStore.logout()
   clientCartStore.clearAll()
-  await router.replace('/client/login')
+  // 退出后改为硬跳转登录页，避免旧客户端布局残留导致偶发白屏。
+  redirectToClientLogin()
 }
 </script>
 
