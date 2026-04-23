@@ -23,7 +23,7 @@ export const CLIENT_NEW_PASSWORD_PLACEHOLDER = '请输入新密码'
 export const CLIENT_CONFIRM_NEW_PASSWORD_PLACEHOLDER = '请再次输入新密码'
 export const CLIENT_NEW_PASSWORD_REQUIRED_MESSAGE = '请输入新密码'
 export const CLIENT_CONFIRM_NEW_PASSWORD_REQUIRED_MESSAGE = '请再次输入新密码'
-export const CLIENT_CONFIRM_NEW_PASSWORD_MISMATCH_MESSAGE = '两次输入的新密码不一致'
+export const CLIENT_CONFIRM_INPUT_MISMATCH_MESSAGE = '两次输入内容不一致，请重新确认'
 
 type ValidatorCallback = (error?: Error) => void
 
@@ -71,7 +71,7 @@ export const validateClientConfirmNewPassword = (
     return
   }
   if (confirmPassword !== newPassword) {
-    callback(new Error(CLIENT_CONFIRM_NEW_PASSWORD_MISMATCH_MESSAGE))
+    callback(new Error(CLIENT_CONFIRM_INPUT_MISMATCH_MESSAGE))
     return
   }
   callback()

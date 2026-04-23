@@ -14,7 +14,7 @@ import { useStableRequest } from '@/composables/useStableRequest'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
 import { useClientAuthStore } from '@/store'
 import {
-  CLIENT_CONFIRM_NEW_PASSWORD_MISMATCH_MESSAGE,
+  CLIENT_CONFIRM_INPUT_MISMATCH_MESSAGE,
   CLIENT_CONFIRM_NEW_PASSWORD_PLACEHOLDER,
   CLIENT_NEW_PASSWORD_PLACEHOLDER,
   CLIENT_NEW_PASSWORD_RULE_HINT,
@@ -282,7 +282,7 @@ const handleReset = async () => {
     return
   }
   if (resetForm.newPassword !== resetForm.confirmPassword) {
-    ElMessage.warning(CLIENT_CONFIRM_NEW_PASSWORD_MISMATCH_MESSAGE)
+    ElMessage.warning(CLIENT_CONFIRM_INPUT_MISMATCH_MESSAGE)
     return
   }
 

@@ -123,6 +123,12 @@ const dedupeDepartmentOptions = (list: string[]) => {
 
 const normalizeOptionalText = (value: unknown) => (typeof value === 'string' ? value.trim() : '')
 
+/**
+ * 深拷贝部门树：
+ * - 仅处理当前接口返回的纯树形结构字段；
+ * - 优先使用浏览器原生 structuredClone；
+ * - 旧环境下改为显式递归克隆，避免 JSON 深拷贝带来的序列化告警。
+ */
 const cloneDepartmentTree = (tree: ClientDepartmentOptionNode[]): ClientDepartmentOptionNode[] => {
   const rawTree = toRaw(tree)
   if (typeof globalThis.structuredClone === 'function') {
@@ -132,8 +138,12 @@ const cloneDepartmentTree = (tree: ClientDepartmentOptionNode[]): ClientDepartme
       // 某些浏览器在 structuredClone 遇到代理对象/非可克隆值时会抛错，转入 JSON 兜底。
     }
   }
-  // 兼容旧浏览器：structuredClone 不可用时回退到 JSON 深拷贝。
-  return JSON.parse(JSON.stringify(rawTree)) as ClientDepartmentOptionNode[]
+  // 兼容旧浏览器：部门树节点结构固定，使用递归方式稳定克隆。
+  return rawTree.map((node) => ({
+    id: node.id,
+    label: node.label,
+    children: cloneDepartmentTree(node.children),
+  }))
 }
 
 const buildDepartmentPathLookup = (tree: ClientDepartmentOptionNode[]) => {

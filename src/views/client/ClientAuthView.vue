@@ -80,7 +80,7 @@ import { useClientAuthStore } from '@/store'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
 import {
-  CLIENT_CONFIRM_NEW_PASSWORD_MISMATCH_MESSAGE,
+  CLIENT_CONFIRM_INPUT_MISMATCH_MESSAGE,
   CLIENT_CONFIRM_NEW_PASSWORD_PLACEHOLDER,
   CLIENT_NEW_PASSWORD_PLACEHOLDER,
   CLIENT_NEW_PASSWORD_RULE_HINT,
@@ -514,7 +514,7 @@ const handleRegister = async () => {
     return
   }
   if (registerForm.password !== registerForm.confirmPassword) {
-    ElMessage.warning(CLIENT_CONFIRM_NEW_PASSWORD_MISMATCH_MESSAGE)
+    ElMessage.warning(CLIENT_CONFIRM_INPUT_MISMATCH_MESSAGE)
     return
   }
   if (registerForm.department.trim() && !registerDepartmentOptions.value.includes(registerForm.department.trim())) {
