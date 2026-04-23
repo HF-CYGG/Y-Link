@@ -203,6 +203,25 @@ class O2oPreorderService {
     return config.clientPreorderUpdateLimit
   }
 
+  // 详细注释：订单 updateCount 在历史数据或跨库同步场景下可能出现 string/null/异常值，
+  // 这里统一做“十进制整数解析 + 非负兜底”，避免 Number(...) 导致 NaN 传播到权限与剩余次数计算。
+  private normalizeOrderUpdateCount(rawUpdateCount: unknown) {
+    if (rawUpdateCount === null || rawUpdateCount === undefined) {
+      return 0
+    }
+    const parsedCount =
+      typeof rawUpdateCount === 'number'
+        ? Math.trunc(rawUpdateCount)
+        : typeof rawUpdateCount === 'string'
+          ? Number.parseInt(rawUpdateCount, 10)
+          : // 非 number/string 的异常类型（如 object/boolean）统一回退为 0，避免隐式字符串化污染解析结果。
+            0
+    if (!Number.isFinite(parsedCount)) {
+      return 0
+    }
+    return Math.max(0, parsedCount)
+  }
+
   // 货币金额统一按“分”做整数运算，避免 0.1 + 0.2、19.9 * 3 之类的浮点误差。
   // 当前商品单价字段是 scale=2 的 decimal，因此这里按两位小数解析即可满足业务口径。
   private parseMoneyToCents(value: string | number | null | undefined) {
@@ -729,7 +748,7 @@ class O2oPreorderService {
     })
     const nowMs = Date.now()
     const totalAmount = this.normalizeDecimalText(totalAmountNumber)
-    const updateCount = Math.max(0, Number(order.updateCount ?? 0))
+    const updateCount = this.normalizeOrderUpdateCount(order.updateCount)
     return {
       order: {
         statusReport: this.resolveOrderStatusReport(order, nowMs),
@@ -1082,7 +1101,8 @@ class O2oPreorderService {
       throw new BizError('当前订单状态不可修改', 409)
     }
     const clientPreorderUpdateLimit = await this.getClientPreorderUpdateLimit()
-    if (Math.max(0, Number(order.updateCount ?? 0)) >= clientPreorderUpdateLimit) {
+    const currentUpdateCount = this.normalizeOrderUpdateCount(order.updateCount)
+    if (currentUpdateCount >= clientPreorderUpdateLimit) {
       throw new BizError(`订单最多仅可修改 ${clientPreorderUpdateLimit} 次`, 409)
     }
 
@@ -1273,7 +1293,7 @@ class O2oPreorderService {
 
       order.totalQty = totalQty
       order.remark = normalizedRemark
-      order.updateCount = Math.max(0, Number(order.updateCount ?? 0)) + 1
+      order.updateCount = this.normalizeOrderUpdateCount(order.updateCount) + 1
       await orderRepo.save(order)
       return this.buildOrderDetail(order)
     })
