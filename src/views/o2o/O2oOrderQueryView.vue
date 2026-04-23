@@ -30,13 +30,11 @@ import {
   type O2oOrderStatusReport,
 } from '@/api/modules/o2o'
 
-type OrderPoolKey = 'all' | 'new' | 'pending' | 'timeout_soon' | 'completed' | 'cancelled'
+type OrderPoolKey = 'all' | 'pending' | 'completed' | 'cancelled'
 
 const ORDER_POOL_TABS: Array<{ key: OrderPoolKey; label: string }> = [
   { key: 'all', label: '全部订单' },
-  { key: 'new', label: '新订单' },
   { key: 'pending', label: '待核销' },
-  { key: 'timeout_soon', label: '临近超时' },
   { key: 'completed', label: '已完成' },
   { key: 'cancelled', label: '已取消' },
 ]
@@ -48,7 +46,7 @@ const POLL_INTERVAL_OPTIONS = [10, 15] as const
 const listLoading = ref(false)
 const detailLoading = ref(false)
 const orders = ref<O2oPreorderSummary[]>([])
-const activePool = ref<OrderPoolKey>('new')
+const activePool = ref<OrderPoolKey>('all')
 const activeOrderId = ref('')
 const activeOrderDetail = ref<O2oPreorderDetail | null>(null)
 const autoRefreshEnabled = ref(true)
@@ -129,21 +127,13 @@ const resolvePoolKey = (order: O2oPreorderSummary): OrderPoolKey => {
   if (scenario === 'cancelled' || scenario === 'timeout_cancelled') {
     return 'cancelled'
   }
-  if (scenario === 'timeout_soon') {
-    return 'timeout_soon'
-  }
-  if (isNewOrder(order)) {
-    return 'new'
-  }
   return 'pending'
 }
 
 const poolCountMap = computed(() => {
   const map: Record<OrderPoolKey, number> = {
     all: orders.value.length,
-    new: 0,
     pending: 0,
-    timeout_soon: 0,
     completed: 0,
     cancelled: 0,
   }
@@ -156,9 +146,7 @@ const poolCountMap = computed(() => {
 const poolOrderMap = computed(() => {
   const map: Record<OrderPoolKey, O2oPreorderSummary[]> = {
     all: [],
-    new: [],
     pending: [],
-    timeout_soon: [],
     completed: [],
     cancelled: [],
   }
@@ -168,10 +156,6 @@ const poolOrderMap = computed(() => {
   }
   for (const tab of ORDER_POOL_TABS) {
     map[tab.key] = map[tab.key].slice().sort((prev, next) => {
-      const highlightDiff = Number(isOrderHighlighted(next.id)) - Number(isOrderHighlighted(prev.id))
-      if (highlightDiff !== 0) {
-        return highlightDiff
-      }
       const timeDiff = resolveOrderSortTimestamp(next) - resolveOrderSortTimestamp(prev)
       if (timeDiff !== 0) {
         return timeDiff
@@ -466,9 +450,7 @@ const mergeOrderSummaryFromDetail = (detail: O2oPreorderDetail) => {
 const syncActiveOrder = async () => {
   const currentOrders = currentPoolOrders.value
   if (currentOrders.length === 0) {
-    // 用户主动点进空分类时，不自动跳走。
-    // 这样左侧“新订单/临近超时/已完成”等空分类也能正常进入，
-    // 右侧只展示空态说明即可。
+    // 用户主动点进空分类时，不自动跳走，右侧保留空态说明即可。
     activeOrderId.value = ''
     activeOrderDetail.value = null
     return
@@ -495,7 +477,7 @@ const loadOrders = async (silent = false) => {
       limit: 200,
     })
     if (orderSnapshotReady.value) {
-      const incrementalNewOrders = latestOrders.filter((item) => !previousOrderIds.has(item.id) && resolvePoolKey(item) === 'new')
+      const incrementalNewOrders = latestOrders.filter((item) => !previousOrderIds.has(item.id) && isNewOrder(item))
       markIncrementalNewOrders(incrementalNewOrders)
     }
     orders.value = latestOrders
@@ -785,7 +767,7 @@ onBeforeUnmount(() => {
         <Transition name="new-order-notice">
           <div v-if="activeNewOrderNotice" class="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-700">
             <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-              <p class="break-words">新单提醒：新增 {{ activeNewOrderNotice.count }} 笔，已自动置顶并高亮 6 秒</p>
+              <p class="break-words">新单提醒：新增 {{ activeNewOrderNotice.count }} 笔，已高亮 6 秒</p>
               <el-button link type="warning" @click="dismissNewOrderNotice">知道了</el-button>
             </div>
           </div>
