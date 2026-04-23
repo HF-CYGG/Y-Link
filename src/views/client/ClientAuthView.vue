@@ -748,7 +748,7 @@ onUnmounted(() => {
                     <router-link to="/client/forgot-password" class="forgot-link">忘记密码？</router-link>
                   </div>
 
-                  <el-button class="submit-btn" :loading="isLoading" @click="handleLogin">进入商品大厅</el-button>
+                  <el-button class="submit-btn" native-type="submit" :loading="isLoading">进入商品大厅</el-button>
                 </el-form>
               </div>
 
