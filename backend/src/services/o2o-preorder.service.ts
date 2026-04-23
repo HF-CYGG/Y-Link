@@ -209,13 +209,15 @@ class O2oPreorderService {
     if (rawUpdateCount === null || rawUpdateCount === undefined) {
       return 0
     }
-    const parsedCount =
-      typeof rawUpdateCount === 'number'
-        ? Math.trunc(rawUpdateCount)
-        : typeof rawUpdateCount === 'string'
-          ? Number.parseInt(rawUpdateCount, 10)
-          : // 非 number/string 的异常类型（如 object/boolean）统一回退为 0，避免隐式字符串化污染解析结果。
-            0
+    let parsedCount = 0
+    if (typeof rawUpdateCount === 'number') {
+      parsedCount = Math.trunc(rawUpdateCount)
+    } else if (typeof rawUpdateCount === 'string') {
+      parsedCount = Number.parseInt(rawUpdateCount, 10)
+    } else {
+      // 非 number/string 的异常类型（如 object/boolean）统一回退为 0，避免隐式字符串化污染解析结果。
+      parsedCount = 0
+    }
     if (!Number.isFinite(parsedCount)) {
       return 0
     }
