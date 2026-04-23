@@ -13,6 +13,7 @@ import type { ClientAuthenticatedRequest } from '../types/client-auth.js'
 import { auditService } from '../services/audit.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import {
+  O2O_PREORDER_REMARK_MAX_LENGTH,
   O2O_MERCHANT_MESSAGE_MAX_LENGTH,
   O2O_RETURN_REASON_MAX_LENGTH,
   o2oPreorderService,
@@ -20,7 +21,12 @@ import {
 import { extractRequestMeta } from '../utils/request-meta.js'
 
 const submitPreorderSchema = z.object({
-  remark: z.string().max(255).optional(),
+  remark: z.string().max(O2O_PREORDER_REMARK_MAX_LENGTH).optional(),
+  items: z.array(z.object({ productId: z.union([z.string(), z.number()]), qty: z.number().int().positive() })).min(1),
+})
+
+const updateMyPreorderSchema = z.object({
+  remark: z.string().max(O2O_PREORDER_REMARK_MAX_LENGTH).optional(),
   items: z.array(z.object({ productId: z.union([z.string(), z.number()]), qty: z.number().int().positive() })).min(1),
 })
 
@@ -144,7 +150,54 @@ o2oRouter.post(
   }),
 )
 
-// 客户端申请退货：支持同一订单多次申请、部分商品退货与退货原因留痕。
+// 客户端修改待取货订单：允许本人在未核销前直接调整商品、数量与备注。
+o2oRouter.patch(
+  '/mall/preorders/:id',
+  requireClientAuth,
+  asyncHandler(async (req, res) => {
+    const authReq = req as ClientAuthenticatedRequest
+    const payload = updateMyPreorderSchema.parse(req.body)
+    const previous = await o2oPreorderService.getMyOrderDetail(authReq.clientAuth, req.params.id)
+    const data = await o2oPreorderService.updateMyOrder(authReq.clientAuth, req.params.id, payload)
+
+    await auditService.safeRecord({
+      actionType: 'o2o.preorder.update_by_client',
+      actionLabel: '客户端修改订单',
+      targetType: 'o2o_order',
+      targetId: data.order.id,
+      targetCode: data.order.showNo,
+      actor: {
+        userId: authReq.clientAuth.userId,
+        username: authReq.clientAuth.account,
+        displayName: authReq.clientAuth.realName || authReq.clientAuth.mobile,
+      },
+      requestMeta: extractRequestMeta(req),
+      detail: {
+        previousRemark: previous.order.remark,
+        nextRemark: data.order.remark,
+        previousUpdateCount: previous.order.updateCount,
+        nextUpdateCount: data.order.updateCount,
+        remainingUpdateCount: data.order.remainingUpdateCount,
+        previousTotalQty: previous.order.totalQty,
+        nextTotalQty: data.order.totalQty,
+        previousItems: previous.items.map((item) => ({
+          productId: item.productId,
+          productName: item.productName,
+          qty: item.qty,
+        })),
+        nextItems: data.items.map((item) => ({
+          productId: item.productId,
+          productName: item.productName,
+          qty: item.qty,
+        })),
+      },
+    })
+
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+// 客户端申请退货：仅已核销订单允许发起，支持多次申请、部分商品退货与退货原因留痕。
 o2oRouter.post(
   '/mall/preorders/:id/returns',
   requireClientAuth,

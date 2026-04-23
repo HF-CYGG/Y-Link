@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS `o2o_preorder` (
   `merchant_message` VARCHAR(500) NULL COMMENT '商家留言',
   `total_qty` INT NOT NULL DEFAULT 0,
   `remark` VARCHAR(255) NULL,
+  `update_count` INT NOT NULL DEFAULT 0 COMMENT '客户端修改次数',
   `timeout_at` DATETIME(3) NULL,
   `verified_at` DATETIME(3) NULL,
   `verified_by` VARCHAR(64) NULL,

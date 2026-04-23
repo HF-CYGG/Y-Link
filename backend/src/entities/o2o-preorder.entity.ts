@@ -77,6 +77,10 @@ export class O2oPreorder {
   @Column({ name: 'remark', type: 'varchar', length: 255, nullable: true, comment: '备注' })
   remark!: string | null
 
+  // updateCount 用于约束客户端改单次数，避免待取货订单被无限次改写导致库存预占频繁抖动。
+  @Column({ name: 'update_count', type: 'int', default: 0, comment: '客户端修改次数' })
+  updateCount!: number
+
   @Column({ name: 'timeout_at', ...entityColumnOptions.timestamp, nullable: true, comment: '超时取消时间' })
   timeoutAt!: Date | null
 

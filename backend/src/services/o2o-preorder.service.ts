@@ -5,7 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { Brackets, In, LessThanOrEqual, Not } from 'typeorm'
+import { Brackets, type EntityManager, In, LessThanOrEqual, Not } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { RelProductTag } from '../entities/rel-product-tag.entity.js'
@@ -34,12 +34,20 @@ import { orderSerialService } from './order-serial.service.js'
 import { systemConfigService } from './system-config.service.js'
 import type { PaginationResult } from '../types/api.js'
 
+// 单笔待取货订单最多只允许客户端成功改 3 次，避免频繁改单导致库存预占反复抖动。
+const MAX_CLIENT_PREORDER_UPDATE_COUNT = 3
+
 export interface SubmitPreorderItemInput {
   productId: string | number
   qty: number
 }
 
 export interface SubmitPreorderInput {
+  items: SubmitPreorderItemInput[]
+  remark?: string
+}
+
+export interface UpdateMyPreorderInput {
   items: SubmitPreorderItemInput[]
   remark?: string
 }
@@ -114,6 +122,10 @@ export interface O2oPreorderDetailView {
     status: O2oPreorder['status']
     businessStatus: O2oPreorder['businessStatus']
     merchantMessage: string | null
+    remark: string | null
+    updateCount: number
+    remainingUpdateCount: number
+    maxUpdateCount: number
     totalQty: number
     timeoutAt: Date | null
     verifiedAt: Date | null
@@ -161,6 +173,7 @@ export interface O2oVerifyResultView extends O2oVerifyDetailView {
   operationType: 'preorder_verify' | 'return_verify'
 }
 
+export const O2O_PREORDER_REMARK_MAX_LENGTH = 255
 export const O2O_MERCHANT_MESSAGE_MAX_LENGTH = 500
 export const O2O_RETURN_REASON_MAX_LENGTH = 500
 
@@ -266,6 +279,46 @@ class O2oPreorderService {
       throw new BizError(`退货原因长度不能超过${O2O_RETURN_REASON_MAX_LENGTH}个字符`, 400)
     }
     return normalizedValue
+  }
+
+  private normalizePreorderRemark(value: string | null | undefined): string | null {
+    const normalizedValue = value?.trim() ?? ''
+    if (!normalizedValue) {
+      return null
+    }
+    if (normalizedValue.length > O2O_PREORDER_REMARK_MAX_LENGTH) {
+      throw new BizError(`订单备注长度不能超过${O2O_PREORDER_REMARK_MAX_LENGTH}个字符`, 400)
+    }
+    return normalizedValue
+  }
+
+  /**
+   * 统一整理客户端传入的预订单商品明细：
+   * - 商品 ID 转成字符串并去空格；
+   * - 数量统一收敛为正整数；
+   * - 同一商品若被前端重复传入，则自动合并数量，避免后续库存校验口径分叉。
+   */
+  private normalizePreorderItems(items: SubmitPreorderItemInput[]) {
+    if (!Array.isArray(items) || !items.length) {
+      throw new BizError('至少选择一个商品', 400)
+    }
+    const mergedQtyMap = new Map<string, number>()
+    items.forEach((item) => {
+      const productId = String(item.productId).trim()
+      const qty = Math.floor(Number(item.qty))
+      if (!productId || !Number.isInteger(qty) || qty <= 0) {
+        throw new BizError('商品数量必须为正整数', 400)
+      }
+      const currentQty = mergedQtyMap.get(productId) ?? 0
+      mergedQtyMap.set(productId, currentQty + qty)
+    })
+    return [...mergedQtyMap.entries()].map(([productId, qty]) => ({ productId, qty }))
+  }
+
+  private resolveProductLimitQty(product: BaseProduct, o2oRules: Awaited<ReturnType<typeof systemConfigService.getO2oRuleConfigs>>) {
+    return o2oRules.limitEnabled
+      ? Math.min(Number(product.limitPerUser || 5), o2oRules.limitQty)
+      : Number(product.limitPerUser || 5)
   }
 
   private async generateReturnRequestNo(manager = AppDataSource.manager): Promise<string> {
@@ -656,6 +709,7 @@ class O2oPreorderService {
     })
     const nowMs = Date.now()
     const totalAmount = this.normalizeDecimalText(totalAmountNumber)
+    const updateCount = Math.max(0, Number(order.updateCount ?? 0))
     return {
       order: {
         statusReport: this.resolveOrderStatusReport(order, nowMs),
@@ -667,6 +721,10 @@ class O2oPreorderService {
         status: order.status,
         businessStatus: order.businessStatus ?? null,
         merchantMessage: order.merchantMessage ?? null,
+        remark: order.remark ?? null,
+        updateCount,
+        remainingUpdateCount: Math.max(0, MAX_CLIENT_PREORDER_UPDATE_COUNT - updateCount),
+        maxUpdateCount: MAX_CLIENT_PREORDER_UPDATE_COUNT,
         totalQty: order.totalQty,
         timeoutAt: order.timeoutAt,
         verifiedAt: order.verifiedAt,
@@ -808,7 +866,10 @@ class O2oPreorderService {
     if (order.status === 'cancelled') {
       throw new BizError('已取消订单不可申请退货', 409)
     }
-    if (order.status !== 'pending' && order.status !== 'verified') {
+    if (order.status === 'pending') {
+      throw new BizError('订单未核销前请使用修改订单，不支持直接申请退货', 409)
+    }
+    if (order.status !== 'verified') {
       throw new BizError('当前订单状态不可申请退货', 409)
     }
   }
@@ -891,19 +952,8 @@ class O2oPreorderService {
   }
 
   async submit(auth: ClientAuthContext, input: SubmitPreorderInput) {
-    if (!Array.isArray(input.items) || !input.items.length) {
-      throw new BizError('至少选择一个商品', 400)
-    }
-    // 先把商品 ID 和数量做一次标准化，避免事务中混入空值、浮点数或前端字符串残留。
-    const normalizedItems = input.items.map((item) => ({
-      productId: String(item.productId).trim(),
-      qty: Math.floor(Number(item.qty)),
-    }))
-    normalizedItems.forEach((item) => {
-      if (!item.productId || !Number.isInteger(item.qty) || item.qty <= 0) {
-        throw new BizError('商品数量必须为正整数', 400)
-      }
-    })
+    const normalizedItems = this.normalizePreorderItems(input.items)
+    const normalizedRemark = this.normalizePreorderRemark(input.remark)
 
     const o2oRules = await systemConfigService.getO2oRuleConfigs()
     return AppDataSource.transaction(async (manager) => {
@@ -930,7 +980,7 @@ class O2oPreorderService {
         if (availableStock < row.qty) {
           throw new BizError(`商品「${product.productName}」库存不足`, 409)
         }
-        const limitQty = o2oRules.limitEnabled ? Math.min(Number(product.limitPerUser || 5), o2oRules.limitQty) : Number(product.limitPerUser || 5)
+        const limitQty = this.resolveProductLimitQty(product, o2oRules)
         if (o2oRules.limitEnabled && row.qty > limitQty) {
           throw new BizError(`商品「${product.productName}」超过限购数量`, 409)
         }
@@ -947,7 +997,7 @@ class O2oPreorderService {
           verifyCode: randomUUID(),
           status: 'pending',
           totalQty,
-          remark: input.remark?.trim() || null,
+          remark: normalizedRemark,
           timeoutAt,
         }),
       )
@@ -986,6 +1036,216 @@ class O2oPreorderService {
         )
       }
       return this.detailById(savedOrder.id)
+    })
+  }
+
+  private async assertCanUpdateOrderInManager(manager: EntityManager, order: O2oPreorder) {
+    if (await this.cancelTimedOutOrderInManager(manager, order)) {
+      throw new BizError('订单已超时取消，无法修改', 409)
+    }
+    if (order.status === 'verified') {
+      throw new BizError('订单已核销，无法修改', 409)
+    }
+    if (order.status === 'cancelled') {
+      throw new BizError('订单已取消，无法修改', 409)
+    }
+    if (order.status !== 'pending') {
+      throw new BizError('当前订单状态不可修改', 409)
+    }
+    if (Math.max(0, Number(order.updateCount ?? 0)) >= MAX_CLIENT_PREORDER_UPDATE_COUNT) {
+      throw new BizError(`订单最多仅可修改 ${MAX_CLIENT_PREORDER_UPDATE_COUNT} 次`, 409)
+    }
+
+    const returnRequestCount = await manager.getRepository(O2oReturnRequest).count({
+      where: { orderId: String(order.id) },
+    })
+    if (returnRequestCount > 0) {
+      throw new BizError('当前订单已存在退货申请记录，暂不支持修改订单', 409)
+    }
+  }
+
+  private async loadEditableOrderProductsInManager(
+    manager: EntityManager,
+    productIds: string[],
+  ): Promise<Map<string, BaseProduct>> {
+    const productRepo = manager.getRepository(BaseProduct)
+    const products = await productRepo.find({
+      where: { id: In(productIds) },
+      lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+    })
+    if (products.length !== productIds.length) {
+      throw new BizError('存在无效商品，无法修改订单', 400)
+    }
+    return new Map<string, BaseProduct>(products.map((item: BaseProduct) => [String(item.id), item]))
+  }
+
+  private validateUpdatedPreorderItems(
+    normalizedItems: Array<{ productId: string; qty: number }>,
+    existingQtyMap: Map<string, number>,
+    productMap: Map<string, BaseProduct>,
+    o2oRules: Awaited<ReturnType<typeof systemConfigService.getO2oRuleConfigs>>,
+  ) {
+    let totalQty = 0
+    normalizedItems.forEach((row) => {
+      const product = productMap.get(row.productId)
+      if (!product) {
+        throw new BizError('存在无效商品，无法修改订单', 400)
+      }
+      const originalQty = existingQtyMap.get(row.productId) ?? 0
+      if (!product.isActive || product.o2oStatus !== 'listed') {
+        if (originalQty <= 0) {
+          throw new BizError(`商品「${product.productName}」已下架，不可加入订单`, 409)
+        }
+        if (row.qty > originalQty) {
+          throw new BizError(`商品「${product.productName}」已下架，当前只能维持或减少原有数量`, 409)
+        }
+      }
+
+      const effectiveAvailableStock = Math.max(
+        0,
+        Number(product.currentStock ?? 0) - Number(product.preOrderedStock ?? 0) + originalQty,
+      )
+      if (effectiveAvailableStock < row.qty) {
+        throw new BizError(`商品「${product.productName}」库存不足，当前最多可保留 ${effectiveAvailableStock} 件`, 409)
+      }
+
+      const limitQty = this.resolveProductLimitQty(product, o2oRules)
+      if (o2oRules.limitEnabled && row.qty > limitQty) {
+        throw new BizError(`商品「${product.productName}」超过限购数量`, 409)
+      }
+      totalQty += row.qty
+    })
+
+    if (totalQty <= 0) {
+      throw new BizError('订单至少保留一件商品', 400)
+    }
+    return totalQty
+  }
+
+  private async applyPreorderItemStockDeltaInManager(
+    manager: EntityManager,
+    auth: ClientAuthContext,
+    order: O2oPreorder,
+    existingQtyMap: Map<string, number>,
+    nextQtyMap: Map<string, number>,
+    productMap: Map<string, BaseProduct>,
+  ) {
+    const productRepo = manager.getRepository(BaseProduct)
+    const inventoryLogRepo = manager.getRepository(InventoryLog)
+    const changedProductIds = [...new Set([...existingQtyMap.keys(), ...nextQtyMap.keys()])]
+
+    for (const productId of changedProductIds) {
+      const previousQty = existingQtyMap.get(productId) ?? 0
+      const nextQty = nextQtyMap.get(productId) ?? 0
+      const deltaQty = nextQty - previousQty
+      if (deltaQty === 0) {
+        continue
+      }
+
+      const product = productMap.get(productId)
+        ?? await productRepo.findOne({
+          where: { id: productId },
+          lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+        })
+      if (!product) {
+        throw new BizError('存在已失效商品，无法修改订单', 409)
+      }
+
+      const beforeCurrentStock = Number(product.currentStock ?? 0)
+      const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
+      const changeQty = Math.abs(deltaQty)
+      product.preOrderedStock = deltaQty > 0
+        ? beforePreOrderedStock + deltaQty
+        : Math.max(0, beforePreOrderedStock - changeQty)
+
+      await productRepo.save(product)
+      await inventoryLogRepo.save(
+        inventoryLogRepo.create({
+          productId: product.id,
+          changeType: deltaQty > 0 ? 'preorder_hold' : 'preorder_release',
+          changeQty,
+          beforeCurrentStock,
+          afterCurrentStock: beforeCurrentStock,
+          beforePreorderedStock: beforePreOrderedStock,
+          afterPreorderedStock: product.preOrderedStock,
+          operatorType: 'client',
+          operatorId: auth.userId,
+          operatorName: auth.realName || auth.mobile,
+          refType: 'o2o_preorder',
+          refId: String(order.id),
+          remark: `客户端修改订单，订单号：${order.showNo}`,
+        }),
+      )
+    }
+  }
+
+  private async saveUpdatedPreorderItemsInManager(
+    manager: EntityManager,
+    order: O2oPreorder,
+    existingItems: O2oPreorderItem[],
+    normalizedItems: Array<{ productId: string; qty: number }>,
+    nextQtyMap: Map<string, number>,
+  ) {
+    const orderItemRepo = manager.getRepository(O2oPreorderItem)
+    const existingItemMap = new Map(existingItems.map((item) => [String(item.productId), item]))
+    const nextItemEntities = normalizedItems.map((item) => {
+      const existedItem = existingItemMap.get(item.productId)
+      if (existedItem) {
+        existedItem.qty = item.qty
+        return existedItem
+      }
+      return orderItemRepo.create({
+        orderId: String(order.id),
+        productId: item.productId,
+        qty: item.qty,
+      })
+    })
+    await orderItemRepo.save(nextItemEntities)
+
+    const removedItems = existingItems.filter((item) => !nextQtyMap.has(String(item.productId)))
+    if (removedItems.length) {
+      await orderItemRepo.remove(removedItems)
+    }
+  }
+
+  async updateMyOrder(auth: ClientAuthContext, orderId: string, input: UpdateMyPreorderInput) {
+    await this.cancelTimeoutOrders()
+    const normalizedItems = this.normalizePreorderItems(input.items)
+    const normalizedRemark = this.normalizePreorderRemark(input.remark)
+    const o2oRules = await systemConfigService.getO2oRuleConfigs()
+
+    return AppDataSource.transaction(async (manager) => {
+      const orderRepo = manager.getRepository(O2oPreorder)
+      const orderItemRepo = manager.getRepository(O2oPreorderItem)
+
+      const order = await orderRepo.findOne({
+        where: { id: orderId, clientUserId: auth.userId },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
+      if (!order) {
+        throw new BizError('预订单不存在', 404)
+      }
+      await this.assertCanUpdateOrderInManager(manager, order)
+
+      const existingItems = await orderItemRepo.find({
+        where: { orderId: String(order.id) },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
+      const existingQtyMap = new Map(existingItems.map((item) => [String(item.productId), Math.max(0, Number(item.qty ?? 0))]))
+
+      const productIds = [...new Set(normalizedItems.map((item) => item.productId))]
+      const productMap = await this.loadEditableOrderProductsInManager(manager, productIds)
+      const totalQty = this.validateUpdatedPreorderItems(normalizedItems, existingQtyMap, productMap, o2oRules)
+
+      const nextQtyMap = new Map(normalizedItems.map((item) => [item.productId, item.qty]))
+      await this.applyPreorderItemStockDeltaInManager(manager, auth, order, existingQtyMap, nextQtyMap, productMap)
+      await this.saveUpdatedPreorderItemsInManager(manager, order, existingItems, normalizedItems, nextQtyMap)
+
+      order.totalQty = totalQty
+      order.remark = normalizedRemark
+      order.updateCount = Math.max(0, Number(order.updateCount ?? 0)) + 1
+      await orderRepo.save(order)
+      return this.buildOrderDetail(order)
     })
   }
 

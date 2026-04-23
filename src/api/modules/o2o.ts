@@ -115,6 +115,10 @@ export interface O2oPreorderDetail {
     status: O2oOrderStatus
     businessStatus: O2oOrderBusinessStatus | null
     merchantMessage: string | null
+    remark: string | null
+    updateCount: number
+    remainingUpdateCount: number
+    maxUpdateCount: number
     totalQty: number
     timeoutAt: string | null
     verifiedAt: string | null
@@ -170,6 +174,11 @@ export interface SubmitO2oPreorderPayload {
 
 export interface SubmitO2oReturnRequestPayload {
   reason: string
+  items: Array<{ productId: string | number; qty: number }>
+}
+
+export interface UpdateMyO2oPreorderPayload {
+  remark?: string
   items: Array<{ productId: string | number; qty: number }>
 }
 
@@ -234,6 +243,21 @@ export const cancelMyO2oPreorder = (id: string, config?: RequestConfig) =>
   request<O2oPreorderDetail>({
     method: 'POST',
     url: `/o2o/mall/preorders/${id}/cancel`,
+    ...config,
+  })
+
+/**
+ * 客户端修改待取货预订单：
+ * - 仅订单本人且订单尚未核销时允许调用；
+ * - 单个订单最多允许成功修改 3 次；
+ * - 支持修改商品、数量与备注；
+ * - 服务端会按明细差值同步预订库存并返回最新详情。
+ */
+export const updateMyO2oPreorder = (id: string, payload: UpdateMyO2oPreorderPayload, config?: RequestConfig) =>
+  request<O2oPreorderDetail>({
+    method: 'PATCH',
+    url: `/o2o/mall/preorders/${id}`,
+    data: payload,
     ...config,
   })
 

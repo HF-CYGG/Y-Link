@@ -13,8 +13,11 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import QRCode from 'qrcode'
 import {
   cancelMyO2oPreorder,
+  getO2oMallProducts,
   getO2oPreorderDetail,
   submitO2oReturnRequest,
+  updateMyO2oPreorder,
+  type O2oMallProduct,
   type O2oPreorderDetail,
   type O2oPreorderSummary,
   type O2oReturnRequestDetail,
@@ -34,17 +37,36 @@ import { useClientOrderStore } from '@/store'
 import { normalizeRequestError } from '@/utils/error'
 
 const O2O_RETURN_REASON_MAX_LENGTH = 500
+const O2O_PREORDER_REMARK_MAX_LENGTH = 255
+
+interface EditableOrderItem {
+  productId: string
+  productCode: string
+  productName: string
+  defaultPrice: string
+  qty: number
+  originalQty: number
+  maxQty: number
+  unavailableReason: string | null
+}
 
 const route = useRoute()
 const router = useRouter()
 
 const loading = ref(false)
 const recalling = ref(false)
+const editDialogVisible = ref(false)
+const editSubmitting = ref(false)
+const editProductsLoading = ref(false)
 const returnDialogVisible = ref(false)
 const returnSubmitting = ref(false)
 const detail = ref<O2oPreorderDetail | null>(null)
 const qrDataUrl = ref('')
 const returnQrMap = ref<Record<string, string>>({})
+const mallProducts = ref<O2oMallProduct[]>([])
+const editOrderItems = ref<EditableOrderItem[]>([])
+const editRemark = ref('')
+const editAddProductId = ref('')
 const returnReason = ref('')
 const returnQtyMap = ref<Record<string, number>>({})
 const requestError = ref<{ type: 'offline' | 'error'; message: string } | null>(null)
@@ -228,8 +250,43 @@ const canRecallOrder = computed(() => {
   return isO2oOrderPending(detail.value?.order.status)
 })
 
-const canApplyReturn = computed(() => {
+const shouldShowModifyOrderButton = computed(() => {
+  return isO2oOrderPending(detail.value?.order.status)
+})
+
+const canModifyOrder = computed(() => {
+  if (!detail.value || !isO2oOrderPending(detail.value.order.status)) {
+    return false
+  }
+  return Math.max(0, Number(detail.value.order.remainingUpdateCount ?? 0)) > 0
+})
+
+const modifyOrderQuotaText = computed(() => {
   if (!detail.value) {
+    return '订单最多可修改 3 次'
+  }
+  return `已修改 ${detail.value.order.updateCount} / ${detail.value.order.maxUpdateCount} 次，剩余 ${detail.value.order.remainingUpdateCount} 次`
+})
+
+const modifyOrderDisabledHint = computed(() => {
+  if (!detail.value) {
+    return '当前订单不可修改'
+  }
+  if (!isO2oOrderPending(detail.value.order.status)) {
+    return '当前订单状态不可修改'
+  }
+  if (detail.value.order.remainingUpdateCount <= 0) {
+    return `本订单最多仅可修改 ${detail.value.order.maxUpdateCount} 次`
+  }
+  return ''
+})
+
+const shouldShowReturnSection = computed(() => {
+  return isO2oOrderVerified(detail.value?.order.status)
+})
+
+const canApplyReturn = computed(() => {
+  if (!detail.value || !shouldShowReturnSection.value) {
     return false
   }
   if (isO2oOrderCancelled(detail.value.order.status)) {
@@ -283,6 +340,23 @@ const canSubmitReturnRequest = computed(() => {
   return selectedReturnItems.value.length > 0 && returnReason.value.trim().length > 0
 })
 
+const editableOrderTotalQty = computed(() => {
+  return editOrderItems.value.reduce((sum, item) => sum + item.qty, 0)
+})
+
+const editableOrderTotalAmount = computed(() => {
+  return editOrderItems.value.reduce((sum, item) => sum + Math.max(0, Number(item.defaultPrice || 0)) * item.qty, 0)
+})
+
+const editableProductOptions = computed(() => {
+  const selectedProductIdSet = new Set(editOrderItems.value.map((item) => item.productId))
+  return mallProducts.value.filter((item) => !selectedProductIdSet.has(item.id))
+})
+
+const canSubmitOrderEdit = computed(() => {
+  return editableOrderTotalQty.value > 0 && canModifyOrder.value && !editSubmitting.value
+})
+
 const canUseQrCode = computed(() => {
   return isO2oOrderPending(detail.value?.order.status)
 })
@@ -321,9 +395,93 @@ const buildOrderSummaryFromDetail = (nextDetail: O2oPreorderDetail): O2oPreorder
   }
 }
 
+const toEditableItemMaxQty = (product: O2oMallProduct, originalQty = 0) => {
+  return Math.max(0, Number(product.availableStock ?? 0) + originalQty)
+}
+
+const buildEditableItemsFromDetail = (nextDetail: O2oPreorderDetail) => {
+  const productMap = new Map(mallProducts.value.map((item) => [item.id, item]))
+  return nextDetail.items.map((item) => {
+    const product = productMap.get(item.productId)
+    const maxQty = product ? toEditableItemMaxQty(product, item.qty) : item.qty
+    const unavailableReason = product
+      ? null
+      : '当前商品已不在可售目录中，仅支持减少或删除原有数量'
+    return {
+      productId: item.productId,
+      productCode: item.productCode,
+      productName: item.productName,
+      defaultPrice: item.defaultPrice,
+      qty: item.qty,
+      originalQty: item.qty,
+      maxQty,
+      unavailableReason,
+    } satisfies EditableOrderItem
+  })
+}
+
+const resetEditForm = () => {
+  editRemark.value = detail.value?.order.remark ?? ''
+  editAddProductId.value = ''
+  editOrderItems.value = detail.value ? buildEditableItemsFromDetail(detail.value) : []
+}
+
 const resetReturnForm = () => {
   returnReason.value = ''
   returnQtyMap.value = {}
+}
+
+const updateEditItemQty = (productId: string, value: number | null | undefined) => {
+  editOrderItems.value = editOrderItems.value.map((item) => {
+    if (item.productId !== productId) {
+      return item
+    }
+    const normalizedQty = Math.max(0, Math.min(item.maxQty, Math.floor(Number(value ?? 0))))
+    return {
+      ...item,
+      qty: normalizedQty,
+    }
+  })
+}
+
+const removeEditItem = (productId: string) => {
+  editOrderItems.value = editOrderItems.value.filter((item) => item.productId !== productId)
+}
+
+const addEditProduct = () => {
+  const productId = editAddProductId.value.trim()
+  if (!productId) {
+    ElMessage.warning('请先选择要加入订单的商品')
+    return
+  }
+  if (editOrderItems.value.some((item) => item.productId === productId)) {
+    ElMessage.warning('该商品已在当前订单中')
+    return
+  }
+  const product = mallProducts.value.find((item) => item.id === productId)
+  if (!product) {
+    ElMessage.warning('未找到可加入的商品')
+    return
+  }
+  const maxQty = toEditableItemMaxQty(product, 0)
+  if (maxQty <= 0) {
+    ElMessage.warning('该商品当前库存不足，暂不可加入订单')
+    return
+  }
+  editOrderItems.value = [
+    ...editOrderItems.value,
+    {
+      productId: product.id,
+      productCode: product.productCode,
+      productName: product.productName,
+      defaultPrice: product.defaultPrice,
+      qty: 1,
+      originalQty: 0,
+      maxQty,
+      unavailableReason: null,
+    },
+  ]
+  editAddProductId.value = ''
 }
 
 const updateReturnQty = (productId: string, value: number | undefined, maxQty: number) => {
@@ -385,6 +543,21 @@ const renderReturnRequestQrs = async () => {
     })
   }
   returnQrMap.value = nextQrMap
+}
+
+const loadMallProducts = async () => {
+  if (mallProducts.value.length || editProductsLoading.value) {
+    return
+  }
+  editProductsLoading.value = true
+  try {
+    mallProducts.value = await getO2oMallProducts()
+  } catch (error) {
+    const normalizedError = normalizeRequestError(error, '可修改商品加载失败')
+    ElMessage.error(normalizedError.message)
+  } finally {
+    editProductsLoading.value = false
+  }
 }
 
 const syncOrderStoreFromDetail = (nextDetail: O2oPreorderDetail) => {
@@ -462,6 +635,90 @@ const handleRecallOrder = async () => {
     ElMessage.error(normalizedError.message)
   } finally {
     recalling.value = false
+  }
+}
+
+const openEditDialog = async () => {
+  if (!detail.value) {
+    ElMessage.warning('当前订单不可修改')
+    return
+  }
+  if (!canModifyOrder.value) {
+    ElMessage.warning(modifyOrderDisabledHint.value || '当前订单不可修改')
+    return
+  }
+  await loadMallProducts()
+  resetEditForm()
+  editDialogVisible.value = true
+}
+
+const handleEditDialogClosed = () => {
+  resetEditForm()
+}
+
+const handleSubmitOrderEdit = async () => {
+  if (!detail.value) {
+    return
+  }
+  if (!canModifyOrder.value) {
+    ElMessage.warning(modifyOrderDisabledHint.value || '当前订单不可修改')
+    return
+  }
+  const normalizedItems = editOrderItems.value
+    .map((item) => ({
+      productId: item.productId,
+      productName: item.productName,
+      qty: Math.max(0, Math.floor(Number(item.qty ?? 0))),
+    }))
+    .filter((item) => item.qty > 0)
+  if (!normalizedItems.length) {
+    ElMessage.warning('订单至少保留一件商品')
+    return
+  }
+  if (editRemark.value.trim().length > O2O_PREORDER_REMARK_MAX_LENGTH) {
+    ElMessage.warning(`订单备注最多 ${O2O_PREORDER_REMARK_MAX_LENGTH} 个字符`)
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      `确认修改订单“${detail.value.order.showNo}”吗？保存后将按最新商品和数量重算预订库存。`,
+      '修改订单',
+      {
+        type: 'warning',
+        confirmButtonText: '确认保存',
+        cancelButtonText: '取消',
+        closeOnClickModal: false,
+      },
+    )
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') {
+      return
+    }
+    ElMessage.error('改单确认失败，请稍后重试')
+    return
+  }
+
+  editSubmitting.value = true
+  try {
+    const nextDetail = await updateMyO2oPreorder(detail.value.order.id, {
+      remark: editRemark.value.trim() || undefined,
+      items: normalizedItems.map((item) => ({
+        productId: item.productId,
+        qty: item.qty,
+      })),
+    })
+    detail.value = nextDetail
+    syncOrderStoreFromDetail(nextDetail)
+    await renderQrCode()
+    await renderReturnRequestQrs()
+    editDialogVisible.value = false
+    ElMessage.success('订单修改成功')
+  } catch (error) {
+    const normalizedError = normalizeRequestError(error, '订单修改失败')
+    ElMessage.error(normalizedError.message)
+  } finally {
+    editSubmitting.value = false
   }
 }
 
@@ -576,16 +833,34 @@ onMounted(async () => {
             <p class="text-lg font-semibold text-slate-900">{{ detail.order.showNo }}</p>
             <p class="mt-1 text-sm text-slate-400">状态：{{ statusLabel }}</p>
           </div>
-          <button
-            v-if="canRecallOrder"
-            type="button"
-            class="rounded-full border border-rose-200 px-4 py-2 text-sm font-medium text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
-            :disabled="recalling"
-            @click="handleRecallOrder"
-          >
-            {{ recalling ? '撤回中...' : '撤回订单' }}
-          </button>
+          <div v-if="shouldShowModifyOrderButton || canRecallOrder" class="flex flex-wrap gap-2">
+            <button
+              v-if="shouldShowModifyOrderButton"
+              type="button"
+              class="rounded-full border border-teal-200 px-4 py-2 text-sm font-medium text-teal-700 transition hover:bg-teal-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
+              :disabled="editSubmitting || !canModifyOrder"
+              @click="openEditDialog"
+            >
+              {{ editSubmitting ? '保存中...' : canModifyOrder ? '修改订单' : '修改次数已用完' }}
+            </button>
+            <button
+              v-if="canRecallOrder"
+              type="button"
+              class="rounded-full border border-rose-200 px-4 py-2 text-sm font-medium text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
+              :disabled="recalling"
+              @click="handleRecallOrder"
+            >
+              {{ recalling ? '撤回中...' : '撤回订单' }}
+            </button>
+          </div>
         </div>
+        <p
+          v-if="shouldShowModifyOrderButton"
+          class="mt-3 text-xs"
+          :class="canModifyOrder ? 'text-slate-400' : 'text-amber-600'"
+        >
+          {{ canModifyOrder ? modifyOrderQuotaText : modifyOrderDisabledHint }}
+        </p>
         <div class="mt-3 rounded-2xl px-3 py-2" :class="statusBanner.className">
           <p class="text-sm font-semibold">{{ statusBanner.title }}</p>
           <p class="mt-1 text-xs">{{ statusBanner.description }}</p>
@@ -651,6 +926,10 @@ onMounted(async () => {
               <p class="text-sm text-slate-400">商家状态</p>
               <p class="mt-1 text-sm text-slate-700">{{ businessStatusMeta?.label ?? '未设置' }}</p>
             </div>
+            <div class="rounded-2xl bg-slate-50 px-4 py-3 sm:col-span-2">
+              <p class="text-sm text-slate-400">订单备注</p>
+              <p class="mt-1 whitespace-pre-wrap break-words text-sm text-slate-700">{{ detail.order.remark || '未填写' }}</p>
+            </div>
           </div>
         </div>
 
@@ -661,7 +940,7 @@ onMounted(async () => {
           </p>
         </div>
 
-        <div class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)]">
+        <div v-if="shouldShowReturnSection" class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)]">
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div>
               <p class="text-lg font-semibold text-slate-900">退货服务</p>
@@ -717,8 +996,8 @@ onMounted(async () => {
                   <th class="px-4 py-3 text-left font-medium">商品</th>
                   <th class="px-4 py-3 text-right font-medium">单价</th>
                   <th class="px-4 py-3 text-right font-medium">数量</th>
-                  <th class="px-4 py-3 text-right font-medium">待退数量</th>
-                  <th class="px-4 py-3 text-right font-medium">可退数量</th>
+                  <th v-if="shouldShowReturnSection" class="px-4 py-3 text-right font-medium">待退数量</th>
+                  <th v-if="shouldShowReturnSection" class="px-4 py-3 text-right font-medium">可退数量</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-slate-100 bg-white text-slate-700">
@@ -726,18 +1005,18 @@ onMounted(async () => {
                   <td class="px-4 py-3">{{ item.productName }}</td>
                   <td class="px-4 py-3 text-right">¥{{ Number(item.defaultPrice || 0).toFixed(2) }}</td>
                   <td class="px-4 py-3 text-right font-medium">{{ item.qty }}</td>
-                  <td class="px-4 py-3 text-right text-amber-700">{{ item.returnedQty }}</td>
-                  <td class="px-4 py-3 text-right font-medium text-teal-700">{{ item.availableReturnQty }}</td>
+                  <td v-if="shouldShowReturnSection" class="px-4 py-3 text-right text-amber-700">{{ item.returnedQty }}</td>
+                  <td v-if="shouldShowReturnSection" class="px-4 py-3 text-right font-medium text-teal-700">{{ item.availableReturnQty }}</td>
                 </tr>
                 <tr v-if="!detail.items.length">
-                  <td colspan="5" class="px-4 py-6 text-center text-slate-400">暂无预订商品明细，请稍后刷新重试</td>
+                  <td :colspan="shouldShowReturnSection ? 5 : 3" class="px-4 py-6 text-center text-slate-400">暂无预订商品明细，请稍后刷新重试</td>
                 </tr>
               </tbody>
             </table>
           </div>
         </div>
 
-        <div class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)]">
+        <div v-if="shouldShowReturnSection" class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)]">
           <div class="flex flex-wrap items-start justify-between gap-3">
             <div>
               <p class="text-lg font-semibold text-slate-900">退货记录</p>
@@ -865,6 +1144,115 @@ onMounted(async () => {
 
     <el-dialog
       v-if="detail"
+      v-model="editDialogVisible"
+      title="修改订单"
+      width="92%"
+      style="max-width: 860px"
+      append-to-body
+      @closed="handleEditDialogClosed"
+    >
+      <div class="space-y-4">
+        <div class="rounded-2xl bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-600">
+          待取货订单支持直接修改商品、数量和备注。保存后系统会按最新内容重算预订库存，原取货码保持不变。
+          <p class="mt-2 text-xs text-slate-500">{{ modifyOrderQuotaText }}</p>
+        </div>
+
+        <div class="rounded-3xl border border-slate-100 bg-white px-4 py-4">
+          <div class="flex flex-col gap-3 lg:flex-row lg:items-end">
+            <div class="flex-1">
+              <p class="text-sm font-semibold text-slate-900">添加商品</p>
+              <el-select
+                v-model="editAddProductId"
+                class="mt-3 w-full"
+                placeholder="请选择要加入订单的商品"
+                filterable
+                :loading="editProductsLoading"
+              >
+                <el-option
+                  v-for="product in editableProductOptions"
+                  :key="product.id"
+                  :label="`${product.productName}（剩余 ${product.availableStock} 件）`"
+                  :value="product.id"
+                />
+              </el-select>
+            </div>
+            <el-button type="primary" plain :disabled="!editableProductOptions.length" @click="addEditProduct">加入订单</el-button>
+          </div>
+          <p v-if="!editableProductOptions.length" class="mt-3 text-xs text-slate-400">当前没有可追加到本单的在售商品。</p>
+        </div>
+
+        <div class="space-y-3">
+          <div
+            v-for="item in editOrderItems"
+            :key="item.productId"
+            class="rounded-3xl border border-slate-100 bg-white px-4 py-4"
+          >
+            <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div class="min-w-0 flex-1">
+                <p class="text-sm font-semibold text-slate-900">{{ item.productName }}</p>
+                <p class="mt-1 text-xs leading-5 text-slate-400">
+                  原数量 {{ item.originalQty }} 件，当前最多可改为 {{ item.maxQty }} 件
+                </p>
+                <p v-if="item.unavailableReason" class="mt-2 text-xs leading-5 text-amber-600">
+                  {{ item.unavailableReason }}
+                </p>
+              </div>
+              <div class="flex flex-col gap-3 sm:flex-row sm:items-center">
+                <div class="w-full sm:w-44">
+                  <p class="mb-2 text-xs text-slate-400">修改后数量</p>
+                  <el-input-number
+                    :model-value="item.qty"
+                    :min="0"
+                    :max="item.maxQty"
+                    :step="1"
+                    :precision="0"
+                    class="w-full"
+                    @update:model-value="updateEditItemQty(item.productId, $event)"
+                  />
+                </div>
+                <el-button text type="danger" @click="removeEditItem(item.productId)">移除</el-button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="rounded-3xl border border-slate-100 bg-white px-4 py-4">
+          <p class="text-sm font-semibold text-slate-900">订单备注</p>
+          <el-input
+            v-model="editRemark"
+            type="textarea"
+            :rows="4"
+            :maxlength="O2O_PREORDER_REMARK_MAX_LENGTH"
+            show-word-limit
+            resize="none"
+            class="mt-3"
+            placeholder="选填：例如领取时间、特殊说明"
+          />
+        </div>
+
+        <div class="rounded-2xl bg-amber-50 px-4 py-3 text-sm text-amber-700">
+          修改后共 {{ editableOrderTotalQty }} 件商品，合计 ¥{{ editableOrderTotalAmount.toFixed(2) }}。
+          <p class="mt-2 text-xs text-amber-700">保存成功后将占用 1 次改单机会。</p>
+        </div>
+      </div>
+
+      <template v-slot:footer>
+        <div class="flex flex-wrap justify-end gap-3">
+          <el-button @click="editDialogVisible = false">取消</el-button>
+          <el-button
+            type="primary"
+            :loading="editSubmitting"
+            :disabled="!canSubmitOrderEdit"
+            @click="handleSubmitOrderEdit"
+          >
+            保存修改
+          </el-button>
+        </div>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-if="detail"
       v-model="returnDialogVisible"
       title="申请退货"
       width="92%"
@@ -928,7 +1316,7 @@ onMounted(async () => {
         </div>
       </div>
 
-      <template #footer>
+      <template v-slot:footer>
         <div class="flex flex-wrap justify-end gap-3">
           <el-button @click="returnDialogVisible = false">取消</el-button>
           <el-button
