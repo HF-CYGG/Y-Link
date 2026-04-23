@@ -79,6 +79,14 @@ import { preloadRouteComponents, resolveClientPostLoginWarmupTargets } from '@/r
 import { useClientAuthStore } from '@/store'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
+import {
+  CLIENT_CONFIRM_NEW_PASSWORD_MISMATCH_MESSAGE,
+  CLIENT_CONFIRM_NEW_PASSWORD_PLACEHOLDER,
+  CLIENT_NEW_PASSWORD_PLACEHOLDER,
+  CLIENT_NEW_PASSWORD_RULE_HINT,
+  CLIENT_NEW_PASSWORD_RULE_TEXT,
+  isClientNewPasswordValid,
+} from '@/utils/client-password-policy'
 import { normalizeRequestError } from '@/utils/error'
 
 type AuthMode = 'login' | 'register'
@@ -309,10 +317,18 @@ const loadAuthCapabilities = async () => {
 
 const validateMobile = (mobile: string) => /^1\d{10}$/.test(mobile.trim())
 const validateEmail = (email: string) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())
-const validatePassword = (password: string) => {
-  const normalized = password.trim()
-  return normalized.length >= 8 && /[A-Za-z]/.test(normalized) && /\d/.test(normalized)
-}
+/**
+ * 登录密码前端校验：
+ * - 登录阶段只校验是否已输入密码，不在前端拦截历史弱密码账号；
+ * - 真实密码正确性、是否需要验证码、是否被锁定，统一以后端返回为准。
+ */
+const validateLoginPassword = (password: string) => password.trim().length > 0
+/**
+ * 注册密码前端校验：
+ * - 仅用于“创建新密码”的场景；
+ * - 继续复用共享的新密码强度规则，保证注册与改密口径一致。
+ */
+const validateRegisterPassword = (password: string) => isClientNewPasswordValid(password)
 const validateUsername = (username: string) => username.trim().length >= 2
 const validateLoginAccount = (account: string) => account.trim().length > 0
 const resolveAccountChannel = (account: string): 'mobile' | 'email' | null => {
@@ -433,8 +449,8 @@ const handleLogin = async () => {
     ElMessage.warning('请输入用户名、手机号或邮箱')
     return
   }
-  if (!validatePassword(loginForm.password)) {
-    ElMessage.warning('密码至少 8 位，且需包含字母和数字')
+  if (!validateLoginPassword(loginForm.password)) {
+    ElMessage.warning('请输入密码')
     return
   }
   if (loginCaptchaVisible.value) {
@@ -493,12 +509,12 @@ const handleRegister = async () => {
     ElMessage.warning('请输入正确的手机号或邮箱作为登录账号')
     return
   }
-  if (!validatePassword(registerForm.password)) {
-    ElMessage.warning('密码至少 8 位，且需包含字母和数字')
+  if (!validateRegisterPassword(registerForm.password)) {
+    ElMessage.warning(CLIENT_NEW_PASSWORD_RULE_TEXT)
     return
   }
   if (registerForm.password !== registerForm.confirmPassword) {
-    ElMessage.warning('两次输入的密码不一致')
+    ElMessage.warning(CLIENT_CONFIRM_NEW_PASSWORD_MISMATCH_MESSAGE)
     return
   }
   if (registerForm.department.trim() && !registerDepartmentOptions.value.includes(registerForm.department.trim())) {
@@ -809,14 +825,9 @@ onUnmounted(() => {
                     </el-button>
                   </div>
 
-                  <el-input v-model="registerForm.password" placeholder="设置至少 6 位密码" type="password" class="geo-input" size="large" show-password>
-                    <template #prefix>
-                      <el-icon class="input-icon"><Lock /></el-icon>
-                    </template>
-                  </el-input>
                   <el-input
-                    v-model="registerForm.confirmPassword"
-                    placeholder="再次输入密码"
+                    v-model="registerForm.password"
+                    :placeholder="CLIENT_NEW_PASSWORD_PLACEHOLDER"
                     type="password"
                     class="geo-input"
                     size="large"
@@ -826,7 +837,19 @@ onUnmounted(() => {
                       <el-icon class="input-icon"><Lock /></el-icon>
                     </template>
                   </el-input>
-                  <p class="password-hint-text">密码至少 8 位，且需同时包含字母和数字。</p>
+                  <el-input
+                    v-model="registerForm.confirmPassword"
+                    :placeholder="CLIENT_CONFIRM_NEW_PASSWORD_PLACEHOLDER"
+                    type="password"
+                    class="geo-input"
+                    size="large"
+                    show-password
+                  >
+                    <template #prefix>
+                      <el-icon class="input-icon"><Lock /></el-icon>
+                    </template>
+                  </el-input>
+                  <p class="password-hint-text">{{ CLIENT_NEW_PASSWORD_RULE_HINT }}</p>
 
                   <div v-if="!registerUsesVerificationCode" class="captcha-row sr-only">
                     <el-input v-model="registerForm.captcha" placeholder="图形验证码" class="geo-input flex-1" size="large" clearable>

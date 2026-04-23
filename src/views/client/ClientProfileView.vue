@@ -1,8 +1,10 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/client/ClientProfileView.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：客户端个人中心页面，负责展示资料信息、编辑资料以及用户本人修改登录密码。
+ * 维护说明：
+ * - 资料编辑与改密都属于当前登录用户自助操作；
+ * - 本次改密口径需与客户端注册、找回密码保持一致，避免用户在不同入口看到不同规则。
  */
 
 import { computed, onMounted, reactive, ref, toRaw } from 'vue'
@@ -15,6 +17,13 @@ import {
   getClientAuthCapabilities,
   type ClientDepartmentOptionNode,
 } from '@/api/modules/client-auth'
+import {
+  CLIENT_CONFIRM_NEW_PASSWORD_PLACEHOLDER,
+  CLIENT_NEW_PASSWORD_PLACEHOLDER,
+  CLIENT_NEW_PASSWORD_RULE_HINT,
+  validateClientConfirmNewPassword,
+  validateClientNewPassword,
+} from '@/utils/client-password-policy'
 import { extractErrorMessage } from '@/utils/error'
 
 const router = useRouter()
@@ -33,6 +42,7 @@ const profileFormRef = ref<FormInstance>()
 const form = reactive({
   currentPassword: '',
   newPassword: '',
+  confirmPassword: '',
 })
 const profileForm = reactive({
   username: '',
@@ -44,8 +54,20 @@ const profileForm = reactive({
 const rules: FormRules = {
   currentPassword: [{ required: true, message: '请输入原密码', trigger: 'blur' }],
   newPassword: [
-    { required: true, message: '请输入新密码', trigger: 'blur' },
-    { min: 6, message: '新密码至少6位', trigger: 'blur' },
+    {
+      validator: (_rule, value: string, callback) => {
+        validateClientNewPassword(value, callback)
+      },
+      trigger: 'blur',
+    },
+  ],
+  confirmPassword: [
+    {
+      validator: (_rule, value: string, callback) => {
+        validateClientConfirmNewPassword(value, form.newPassword, callback)
+      },
+      trigger: 'blur',
+    },
   ],
 }
 
@@ -191,6 +213,7 @@ const departmentTreeSelectData = computed(() => buildDepartmentTreeSelectData(de
 const openPasswordDialog = () => {
   form.currentPassword = ''
   form.newPassword = ''
+  form.confirmPassword = ''
   passwordDialogVisible.value = true
   // Reset fields if formRef exists
   if (formRef.value) {
@@ -319,8 +342,17 @@ onMounted(() => {
           <el-input v-model="form.currentPassword" type="password" show-password placeholder="请输入原密码" />
         </el-form-item>
         <el-form-item label="新密码" prop="newPassword">
-          <el-input v-model="form.newPassword" type="password" show-password placeholder="请输入新密码（至少6位）" />
+          <el-input v-model="form.newPassword" type="password" show-password :placeholder="CLIENT_NEW_PASSWORD_PLACEHOLDER" />
         </el-form-item>
+        <el-form-item label="确认新密码" prop="confirmPassword">
+          <el-input
+            v-model="form.confirmPassword"
+            type="password"
+            show-password
+            :placeholder="CLIENT_CONFIRM_NEW_PASSWORD_PLACEHOLDER"
+          />
+        </el-form-item>
+        <p class="mt-1 text-xs leading-6 text-slate-500">{{ CLIENT_NEW_PASSWORD_RULE_HINT }}</p>
       </el-form>
       <template #footer>
         <div class="flex justify-end gap-3">

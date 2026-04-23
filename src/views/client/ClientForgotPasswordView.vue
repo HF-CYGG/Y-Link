@@ -13,6 +13,13 @@ import { getClientAuthCapabilities, getClientCaptcha, type ClientAuthCapabilitie
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
 import { useClientAuthStore } from '@/store'
+import {
+  CLIENT_CONFIRM_NEW_PASSWORD_MISMATCH_MESSAGE,
+  CLIENT_CONFIRM_NEW_PASSWORD_PLACEHOLDER,
+  CLIENT_NEW_PASSWORD_PLACEHOLDER,
+  CLIENT_NEW_PASSWORD_RULE_HINT,
+  isClientNewPasswordValid,
+} from '@/utils/client-password-policy'
 import { normalizeRequestError } from '@/utils/error'
 
 const router = useRouter()
@@ -50,7 +57,7 @@ const resetForm = reactive({
 })
 
 const forgotPasswordAvailable = ref(false)
-const passwordStrengthHint = '密码至少 8 位，且需同时包含字母和数字。'
+const passwordStrengthHint = CLIENT_NEW_PASSWORD_RULE_HINT
 const captchaHintText = computed(() => {
   if (captcha.expiresInSeconds <= 0) {
     return '发送验证码前请先输入图形验证码，点击图片可立即刷新。'
@@ -151,8 +158,7 @@ const resolveChannel = (account: string): 'mobile' | 'email' | null => {
 }
 
 const validatePassword = (password: string) => {
-  const normalized = password.trim()
-  return normalized.length >= 8 && /[A-Za-z]/.test(normalized) && /\d/.test(normalized)
+  return isClientNewPasswordValid(password)
 }
 
 const normalizeInputText = (value: string) => {
@@ -276,7 +282,7 @@ const handleReset = async () => {
     return
   }
   if (resetForm.newPassword !== resetForm.confirmPassword) {
-    ElMessage.warning('两次输入的新密码不一致')
+    ElMessage.warning(CLIENT_CONFIRM_NEW_PASSWORD_MISMATCH_MESSAGE)
     return
   }
 
@@ -380,8 +386,13 @@ onUnmounted(() => {
       </form>
 
       <form v-else-if="step === 2" class="space-y-4" @submit.prevent="handleReset">
-        <input v-model="resetForm.newPassword" class="client-input" type="password" placeholder="请输入新密码" />
-        <input v-model="resetForm.confirmPassword" class="client-input" type="password" placeholder="请再次输入新密码" />
+        <input v-model="resetForm.newPassword" class="client-input" type="password" :placeholder="CLIENT_NEW_PASSWORD_PLACEHOLDER" />
+        <input
+          v-model="resetForm.confirmPassword"
+          class="client-input"
+          type="password"
+          :placeholder="CLIENT_CONFIRM_NEW_PASSWORD_PLACEHOLDER"
+        />
         <p class="text-xs leading-6 text-slate-500">{{ passwordStrengthHint }}</p>
         <button class="client-submit" type="submit" :disabled="submitting">
           {{ submitting ? '提交中...' : '确认重置密码' }}

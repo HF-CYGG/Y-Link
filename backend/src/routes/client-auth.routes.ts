@@ -14,15 +14,31 @@ import {
   normalizeClientAccount,
   normalizeClientVerificationTarget,
 } from '../utils/client-auth-account.js'
+import {
+  CLIENT_PASSWORD_POLICY_MIN_LENGTH,
+  getClientPasswordPolicyMessage,
+  isClientPasswordPolicySatisfied,
+} from '../utils/password.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 import { clientAuthService } from '../services/client-auth.service.js'
 import { authSecurityService } from '../services/auth-security.service.js'
 import { verificationCodeService } from '../services/verification-code.service.js'
 
+/**
+ * 客户端密码字段统一请求校验：
+ * - 路由层先做基础拦截，尽早给出明确提示；
+ * - 服务层仍会再次执行断言，防止绕过 HTTP 入口时失去约束。
+ */
+const clientPasswordSchema = (fieldLabel = '密码') =>
+  z
+    .string()
+    .min(CLIENT_PASSWORD_POLICY_MIN_LENGTH, getClientPasswordPolicyMessage(fieldLabel))
+    .refine((value) => isClientPasswordPolicySatisfied(value), getClientPasswordPolicyMessage(fieldLabel))
+
 const registerSchema = z.object({
   username: z.string().trim().min(1).max(128),
   account: z.string().trim().min(1),
-  password: z.string().min(6),
+  password: clientPasswordSchema('密码'),
   departmentName: z.string().optional(),
   verificationCode: z.string().trim().min(4).max(8).optional(),
   captchaId: z.string().trim().min(1).optional(),
@@ -46,7 +62,7 @@ const forgotVerifySchema = z.object({
 const resetPasswordSchema = z.object({
   account: z.string().trim().min(1),
   resetToken: z.string().trim().min(1),
-  newPassword: z.string().min(6),
+  newPassword: clientPasswordSchema('新密码'),
 })
 
 const verificationCodeSendSchema = z.object({
@@ -59,7 +75,7 @@ const verificationCodeSendSchema = z.object({
 
 const changePasswordSchema = z.object({
   currentPassword: z.string().min(1),
-  newPassword: z.string().min(6),
+  newPassword: clientPasswordSchema('新密码'),
 })
 
 const updateProfileSchema = z.object({

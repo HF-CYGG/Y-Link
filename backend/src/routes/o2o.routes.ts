@@ -325,13 +325,19 @@ o2oRouter.post(
     const data = await o2oPreorderService.verifyByCode(payload.verifyCode, authReq.auth)
     const isReturnVerify = data.operationType === 'return_verify'
     const targetDetail = data.detail
+    // 核销结果详情存在“预订单详情”和“退货申请详情”两种结构：
+    // - 退货申请详情的主键位于顶层 `id`
+    // - 预订单详情的主键位于 `order.id`
+    // 这里通过返回单号字段做类型守卫，统一提取审计日志所需的目标主键与展示编号。
+    const targetId = 'returnNo' in targetDetail ? targetDetail.id : targetDetail.order.id
+    const targetCode = 'returnNo' in targetDetail ? targetDetail.returnNo : targetDetail.order.showNo
 
     await auditService.record({
       actionType: isReturnVerify ? 'o2o.return_request.verify' : 'o2o.preorder.verify',
       actionLabel: isReturnVerify ? '核销退货申请并回库' : '核销预订单并出库',
       targetType: isReturnVerify ? 'o2o_return_request' : 'o2o_order',
-      targetId: targetDetail.id,
-      targetCode: 'returnNo' in targetDetail ? targetDetail.returnNo : targetDetail.order.showNo,
+      targetId,
+      targetCode,
       actor: authReq.auth,
       requestMeta: extractRequestMeta(req),
       detail: {

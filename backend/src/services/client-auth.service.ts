@@ -18,7 +18,7 @@ import {
   normalizeClientUsername,
 } from '../utils/client-auth-account.js'
 import type { RequestMeta } from '../utils/request-meta.js'
-import { hashPassword, verifyPassword } from '../utils/password.js'
+import { assertClientPasswordPolicy, hashPassword, verifyPassword } from '../utils/password.js'
 import { generateSessionToken } from '../utils/token.js'
 import { auditService } from './audit.service.js'
 import { authSecurityService } from './auth-security.service.js'
@@ -111,19 +111,6 @@ export interface ClientAuthCapabilities {
 class ClientAuthService {
   private readonly userRepo = AppDataSource.getRepository(ClientUser)
   private readonly sessionRepo = AppDataSource.getRepository(ClientUserSession)
-
-  /**
-   * 客户端密码强度统一约束：
-   * - 至少 8 位；
-   * - 必须同时包含字母与数字；
-   * - 登录不限制展示字符，但注册、重置和改密都必须走同一套强度校验。
-   */
-  private assertClientPasswordStrength(password: string, fieldLabel = '密码') {
-    const normalizedPassword = password.trim()
-    if (normalizedPassword.length < 8 || !/[A-Za-z]/.test(normalizedPassword) || !/\d/.test(normalizedPassword)) {
-      throw new BizError(`${fieldLabel}至少 8 位，且需包含字母和数字`, 400)
-    }
-  }
 
   private async getVerificationCapabilities(): Promise<ClientAuthCapabilities> {
     const [configs, departmentConfigs] = await Promise.all([
@@ -268,8 +255,7 @@ class ClientAuthService {
   async register(input: ClientRegisterInput, _requestMeta?: RequestMeta) {
     const account = this.resolveAccount(input.account)
     const username = normalizeClientUsername(input.username)
-    const password = input.password.trim()
-    this.assertClientPasswordStrength(password)
+    const password = assertClientPasswordPolicy(input.password)
     const capabilities = await this.getVerificationCapabilities()
     const validationMode = capabilities.registerValidationModes[account.channel]
 
@@ -415,8 +401,7 @@ class ClientAuthService {
 
   async resetPassword(input: ClientResetPasswordInput, _requestMeta?: RequestMeta) {
     const account = this.resolveAccount(input.account)
-    const newPassword = input.newPassword.trim()
-    this.assertClientPasswordStrength(newPassword, '新密码')
+    const newPassword = assertClientPasswordPolicy(input.newPassword, '新密码')
     const ticket = resetTicketStore.get(input.resetToken)
     if (!ticket || ticket.expireAt <= Date.now()) {
       resetTicketStore.delete(input.resetToken)
@@ -491,8 +476,7 @@ class ClientAuthService {
       throw new BizError('原密码错误', 400)
     }
 
-    const newPassword = input.newPassword.trim()
-    this.assertClientPasswordStrength(newPassword, '新密码')
+    const newPassword = assertClientPasswordPolicy(input.newPassword, '新密码')
 
     user.passwordHash = await hashPassword(newPassword)
     await AppDataSource.transaction(async (manager) => {
