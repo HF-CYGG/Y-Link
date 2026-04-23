@@ -50,7 +50,6 @@ const detailQty = ref(1)
 const detailProduct = ref<O2oMallProduct | null>(null)
 const imagePreviewVisible = ref(false)
 const previewImageUrl = ref('')
-const previewImageAlt = ref('')
 const miniCartVisible = ref(false)
 const settlePulsing = ref(false)
 const searchPanelVisible = ref(false)
@@ -89,7 +88,6 @@ const resolveProductThumbnail = (product: Pick<O2oMallProduct, 'productName' | '
 // 商城图片预览统一走同一套状态，避免商品卡和详情抽屉各自维护一套弹层开关。
 const openProductImagePreview = (product: Pick<O2oMallProduct, 'productName' | 'productCode' | 'thumbnail'>) => {
   previewImageUrl.value = resolveProductThumbnail(product)
-  previewImageAlt.value = product.productName || product.productCode || '商品'
   imagePreviewVisible.value = true
 }
 
@@ -631,7 +629,7 @@ onBeforeUnmount(() => {
         <div v-if="imagePreviewVisible" class="mall-image-preview-overlay" @click.self="closeProductImagePreview">
           <section class="mall-image-preview-panel">
             <button type="button" class="mall-image-preview-close" @click="closeProductImagePreview">关闭</button>
-            <img :src="previewImageUrl" :alt="previewImageAlt" class="mall-image-preview-photo" />
+            <img :src="previewImageUrl" alt="商品" class="mall-image-preview-photo" />
           </section>
         </div>
       </Transition>
