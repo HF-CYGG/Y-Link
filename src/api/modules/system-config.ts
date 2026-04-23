@@ -43,6 +43,7 @@ export interface O2oRuleConfigRecord {
   autoCancelHours: number
   limitEnabled: boolean
   limitQty: number
+  clientPreorderUpdateLimit: number
   updatedAt: string
 }
 
@@ -51,6 +52,7 @@ export interface UpdateO2oRuleConfigsPayload {
   autoCancelHours: number
   limitEnabled: boolean
   limitQty: number
+  clientPreorderUpdateLimit: number
 }
 
 export interface UpdateO2oRuleConfigsResult {

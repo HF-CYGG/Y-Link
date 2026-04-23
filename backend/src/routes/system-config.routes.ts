@@ -30,6 +30,7 @@ const updateO2oRuleConfigsSchema = z.object({
   autoCancelHours: z.number().int().min(1).max(168),
   limitEnabled: z.boolean(),
   limitQty: z.number().int().min(1).max(999),
+  clientPreorderUpdateLimit: z.number().int().min(1).max(999).optional(),
 })
 
 const verificationProviderChannelSchema = z.object({

@@ -34,9 +34,6 @@ import { orderSerialService } from './order-serial.service.js'
 import { systemConfigService } from './system-config.service.js'
 import type { PaginationResult } from '../types/api.js'
 
-// 单笔待取货订单最多只允许客户端成功改 3 次，避免频繁改单导致库存预占反复抖动。
-const MAX_CLIENT_PREORDER_UPDATE_COUNT = 3
-
 export interface SubmitPreorderItemInput {
   productId: string | number
   qty: number
@@ -195,6 +192,16 @@ class O2oPreorderService {
   private readonly returnRequestItemRepo = AppDataSource.getRepository(O2oReturnRequestItem)
   private readonly clientUserRepo = AppDataSource.getRepository(ClientUser)
   private readonly inventoryLogRepo = AppDataSource.getRepository(InventoryLog)
+
+  /**
+   * 客户端改单次数上限：
+   * - 统一从系统配置读取，避免业务规则硬编码在服务常量中；
+   * - 便于后续通过系统配置调整，不需要再次发版。
+   */
+  private async getClientPreorderUpdateLimit() {
+    const config = await systemConfigService.getO2oRuleConfigs()
+    return config.clientPreorderUpdateLimit
+  }
 
   // 货币金额统一按“分”做整数运算，避免 0.1 + 0.2、19.9 * 3 之类的浮点误差。
   // 当前商品单价字段是 scale=2 的 decimal，因此这里按两位小数解析即可满足业务口径。
@@ -673,6 +680,7 @@ class O2oPreorderService {
 
   private async buildOrderDetail(order: O2oPreorder): Promise<O2oPreorderDetailView> {
     const id = String(order.id)
+    const clientPreorderUpdateLimit = await this.getClientPreorderUpdateLimit()
     const clientUser = await this.clientUserRepo.findOne({
       where: { id: String(order.clientUserId) },
       select: ['id', 'realName', 'mobile', 'email', 'departmentName'],
@@ -735,8 +743,8 @@ class O2oPreorderService {
         merchantMessage: order.merchantMessage ?? null,
         remark: order.remark ?? null,
         updateCount,
-        remainingUpdateCount: Math.max(0, MAX_CLIENT_PREORDER_UPDATE_COUNT - updateCount),
-        maxUpdateCount: MAX_CLIENT_PREORDER_UPDATE_COUNT,
+        remainingUpdateCount: Math.max(0, clientPreorderUpdateLimit - updateCount),
+        maxUpdateCount: clientPreorderUpdateLimit,
         totalQty: order.totalQty,
         timeoutAt: order.timeoutAt,
         verifiedAt: order.verifiedAt,
@@ -1073,8 +1081,9 @@ class O2oPreorderService {
     if (order.status !== 'pending') {
       throw new BizError('当前订单状态不可修改', 409)
     }
-    if (Math.max(0, Number(order.updateCount ?? 0)) >= MAX_CLIENT_PREORDER_UPDATE_COUNT) {
-      throw new BizError(`订单最多仅可修改 ${MAX_CLIENT_PREORDER_UPDATE_COUNT} 次`, 409)
+    const clientPreorderUpdateLimit = await this.getClientPreorderUpdateLimit()
+    if (Math.max(0, Number(order.updateCount ?? 0)) >= clientPreorderUpdateLimit) {
+      throw new BizError(`订单最多仅可修改 ${clientPreorderUpdateLimit} 次`, 409)
     }
 
     const returnRequestCount = await manager.getRepository(O2oReturnRequest).count({

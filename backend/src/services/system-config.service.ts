@@ -80,6 +80,12 @@ const DEFAULT_SYSTEM_CONFIGS = [
     remark: '预订单默认限购数量',
   },
   {
+    configKey: 'o2o.client_preorder_update_limit',
+    configValue: '3',
+    configGroup: 'o2o',
+    remark: '客户端单笔预订单最大可修改次数',
+  },
+  {
     configKey: 'verification.mobile.enabled',
     configValue: '0',
     configGroup: 'verification',
@@ -193,6 +199,7 @@ export interface O2oRuleConfigRecord {
   autoCancelHours: number
   limitEnabled: boolean
   limitQty: number
+  clientPreorderUpdateLimit: number
   updatedAt: Date
 }
 
@@ -201,6 +208,7 @@ export interface UpdateO2oRuleConfigsInput {
   autoCancelHours: number
   limitEnabled: boolean
   limitQty: number
+  clientPreorderUpdateLimit?: number
 }
 
 export type VerificationChannelType = 'mobile' | 'email'
@@ -253,7 +261,13 @@ export interface UpdateClientDepartmentConfigsInput {
 
 class SystemConfigService {
   private readonly configRepo = AppDataSource.getRepository(SystemConfig)
-  private readonly o2oConfigKeys = ['o2o.auto_cancel_enabled', 'o2o.auto_cancel_hours', 'o2o.limit_enabled', 'o2o.limit_qty'] as const
+  private readonly o2oConfigKeys = [
+    'o2o.auto_cancel_enabled',
+    'o2o.auto_cancel_hours',
+    'o2o.limit_enabled',
+    'o2o.limit_qty',
+    'o2o.client_preorder_update_limit',
+  ] as const
   private readonly clientDepartmentConfigKey = 'client.department.options'
   private readonly verificationConfigKeys = [
     'verification.mobile.enabled',
@@ -665,6 +679,10 @@ class SystemConfigService {
     const autoCancelHours = this.parsePositiveInteger(map.get('o2o.auto_cancel_hours')!.configValue, 'o2o.auto_cancel_hours')
     const limitEnabled = this.parseNonNegativeInteger(map.get('o2o.limit_enabled')!.configValue, 'o2o.limit_enabled') > 0
     const limitQty = this.parsePositiveInteger(map.get('o2o.limit_qty')!.configValue, 'o2o.limit_qty')
+    const clientPreorderUpdateLimit = this.parsePositiveInteger(
+      map.get('o2o.client_preorder_update_limit')!.configValue,
+      'o2o.client_preorder_update_limit',
+    )
     const updatedAt = rows.map((row) => row.updatedAt).sort((a, b) => b.getTime() - a.getTime())[0]
 
     return {
@@ -672,6 +690,7 @@ class SystemConfigService {
       autoCancelHours,
       limitEnabled,
       limitQty,
+      clientPreorderUpdateLimit,
       updatedAt,
     }
   }
@@ -686,6 +705,16 @@ class SystemConfigService {
     }
     if (!Number.isInteger(input.limitQty) || input.limitQty <= 0 || input.limitQty > 999) {
       throw new BizError('限购数量必须为 1 到 999 的整数', 400)
+    }
+    if (
+      input.clientPreorderUpdateLimit !== undefined
+      && (
+        !Number.isInteger(input.clientPreorderUpdateLimit)
+        || input.clientPreorderUpdateLimit <= 0
+        || input.clientPreorderUpdateLimit > 999
+      )
+    ) {
+      throw new BizError('客户端改单次数上限必须为 1 到 999 的整数', 400)
     }
 
     await this.ensureDefaultConfigs()
@@ -712,6 +741,9 @@ class SystemConfigService {
         ['o2o.limit_enabled', input.limitEnabled ? '1' : '0'],
         ['o2o.limit_qty', String(input.limitQty)],
       ])
+      if (input.clientPreorderUpdateLimit !== undefined) {
+        targetMap.set('o2o.client_preorder_update_limit', String(input.clientPreorderUpdateLimit))
+      }
 
       const before = await this.getO2oRuleConfigs()
       let changed = false

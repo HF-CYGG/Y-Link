@@ -81,6 +81,7 @@ const serialForm = reactive<{
     autoCancelHours: number
     limitEnabled: boolean
     limitQty: number
+    clientPreorderUpdateLimit: number
   }
   verification: {
     mobile: VerificationFormValue
@@ -103,6 +104,8 @@ const serialForm = reactive<{
     autoCancelHours: 24,
     limitEnabled: true,
     limitQty: 5,
+    // 客户端改单次数上限默认值，与后端默认配置保持一致，避免页面首屏空值。
+    clientPreorderUpdateLimit: 3,
   },
   verification: {
     mobile: {
@@ -240,6 +243,7 @@ const snapshotForm = () =>
       autoCancelHours: Number(serialForm.o2o.autoCancelHours),
       limitEnabled: Boolean(serialForm.o2o.limitEnabled),
       limitQty: Number(serialForm.o2o.limitQty),
+      clientPreorderUpdateLimit: Number(serialForm.o2o.clientPreorderUpdateLimit),
     },
     verification: {
       mobile: {
@@ -271,6 +275,7 @@ const rules: FormRules = {
   'walkin.width': [{ required: true, message: '请输入散客单位宽', trigger: 'blur' }],
   'o2o.autoCancelHours': [{ required: true, message: '请输入超时取消时长', trigger: 'blur' }],
   'o2o.limitQty': [{ required: true, message: '请输入限购数量', trigger: 'blur' }],
+  'o2o.clientPreorderUpdateLimit': [{ required: true, message: '请输入改单次数上限', trigger: 'blur' }],
 }
 
 const applyList = (list: OrderSerialConfigRecord[]) => {
@@ -296,6 +301,7 @@ const applyO2oRules = (config: O2oRuleConfigRecord) => {
   serialForm.o2o.autoCancelHours = config.autoCancelHours
   serialForm.o2o.limitEnabled = config.limitEnabled
   serialForm.o2o.limitQty = config.limitQty
+  serialForm.o2o.clientPreorderUpdateLimit = config.clientPreorderUpdateLimit
 }
 
 const applyVerificationConfigs = (config: VerificationProviderConfigsResult) => {
@@ -695,6 +701,7 @@ const handleSubmit = async () => {
       autoCancelHours: Number(serialForm.o2o.autoCancelHours),
       limitEnabled: serialForm.o2o.limitEnabled,
       limitQty: Number(serialForm.o2o.limitQty),
+      clientPreorderUpdateLimit: Number(serialForm.o2o.clientPreorderUpdateLimit),
     })
     const verificationResult = await updateVerificationProviderConfigs({
       mobile: {
@@ -885,7 +892,7 @@ onMounted(() => {
           <div class="mb-5 flex items-center justify-between gap-2 border-b border-slate-100 pb-4 dark:border-white/5">
             <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">线上预订规则</h2>
             <span class="rounded-lg bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-              默认值：24小时 / 5件
+              默认值：24小时 / 5件 / 3次
             </span>
           </div>
           <div class="grid gap-4 md:grid-cols-2">
@@ -912,6 +919,17 @@ onMounted(() => {
               <div class="text-sm text-slate-600 dark:text-slate-300">默认限购数量</div>
               <el-input-number
                 v-model="serialForm.o2o.limitQty"
+                :min="1"
+                :max="999"
+                :controls="false"
+                :disabled="!canUpdateConfigs || loading"
+                class="!w-full"
+              />
+            </div>
+            <div class="space-y-2">
+              <div class="text-sm text-slate-600 dark:text-slate-300">客户端改单次数上限</div>
+              <el-input-number
+                v-model="serialForm.o2o.clientPreorderUpdateLimit"
                 :min="1"
                 :max="999"
                 :controls="false"
