@@ -13,10 +13,12 @@ import QRCode from 'qrcode'
 import { useRouter } from 'vue-router'
 import { PageContainer } from '@/components/common'
 import { getSupplierDeliveries, getInboundDetail, type InboundOrder, type InboundOrderDetail } from '@/api/modules/inbound'
+import { useAppStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
 import dayjs from 'dayjs'
 
 const router = useRouter()
+const appStore = useAppStore()
 const loading = ref(false)
 const list = ref<InboundOrder[]>([])
 const detailVisible = ref(false)
@@ -43,6 +45,21 @@ const summary = computed(() => {
   const pending = list.value.filter((item) => item.status === 'pending').length
   const verified = list.value.filter((item) => item.status === 'verified').length
   return { total, pending, verified }
+})
+
+// 详情面板尺寸策略：
+// - 手机端使用全屏宽度，保证二维码与明细都能完整展示；
+// - 平板与桌面端使用接近半屏的阅读宽度，兼顾列表上下文与详情查看。
+const detailDrawerSize = computed(() => {
+  if (appStore.isPhone) {
+    return '100vw'
+  }
+
+  if (appStore.isTablet) {
+    return '52vw'
+  }
+
+  return '48vw'
 })
 
 // 前端轻筛选：按状态+关键字过滤，避免每次操作都触发后端请求
@@ -187,18 +204,20 @@ onMounted(() => {
       </el-table>
     </div>
 
-    <!-- 详情弹窗 -->
-    <el-dialog
+    <!-- 详情面板：改为右侧滑入，保留原有详情、二维码与异常处理逻辑 -->
+    <el-drawer
       v-model="detailVisible"
       title="送货单详情"
-      width="500px"
+      direction="rtl"
+      :size="detailDrawerSize"
       destroy-on-close
-      class="!rounded-2xl"
+      class="supplier-history-detail-drawer"
       append-to-body
       :modal-append-to-body="true"
       :lock-scroll="true"
+      :close-on-click-modal="true"
     >
-      <div v-loading="detailLoading" class="min-h-[200px]">
+      <div v-loading="detailLoading" class="supplier-history-detail-panel min-h-[200px]">
         <transition name="fade-up" appear>
           <div v-if="currentDetail">
             <div class="bg-slate-50 dark:bg-slate-900/50 p-4 rounded-xl mb-4">
@@ -245,11 +264,21 @@ onMounted(() => {
           </div>
         </transition>
       </div>
-    </el-dialog>
+    </el-drawer>
   </PageContainer>
 </template>
 
 <style scoped>
+/* 当前页详情抽屉样式：
+ * - 用于在不同设备下控制内容可视高度；
+ * - 手机端抽屉铺满屏幕，平板与桌面保持舒适留白。
+ */
+.supplier-history-detail-panel {
+  height: calc(100vh - 132px);
+  overflow-y: auto;
+  padding-right: 0.5rem;
+}
+
 /* 详情弹窗内容分段入场动效，避免信息一次性突兀出现 */
 .fade-up-enter-active,
 .fade-up-leave-active {
@@ -259,5 +288,12 @@ onMounted(() => {
 .fade-up-leave-to {
   opacity: 0;
   transform: translateY(6px);
+}
+
+@media (max-width: 767px) {
+  .supplier-history-detail-panel {
+    height: calc(100vh - 104px);
+    padding-right: 0;
+  }
 }
 </style>
