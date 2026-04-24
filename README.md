@@ -287,6 +287,81 @@ npm run cloud:down
 - 前端默认联动同编排后端服务（`backend:3001`），并启用延迟解析，避免启动阶段因 DNS 瞬态异常直接退出。
 - 前端健康检查已联动后端可达性（`/health`），后端异常时可在 1Panel 直接看到前端健康状态变更。
 
+### 如何切换到 MySQL（外置数据库）
+如果你希望把默认 SQLite 切换为外置 MySQL，推荐按下面两种方式之一处理。
+
+#### 方式 A：Docker / 服务器部署时切换到 MySQL（推荐）
+项目已经内置了专门的外置 MySQL 编排文件 [compose.mysql.yml](./compose.mysql.yml) 和环境变量模板 [`.env.docker.mysql.example`](./.env.docker.mysql.example)。
+
+步骤如下：
+
+1. 复制环境变量模板：
+
+```bash
+cp .env.docker.mysql.example .env.docker.mysql
+```
+
+2. 编辑 `.env.docker.mysql`，至少填写以下字段：
+
+```env
+DB_HOST=你的MySQL地址
+DB_PORT=3306
+DB_USER=你的MySQL账号
+DB_PASSWORD=你的MySQL密码
+DB_NAME=y_link
+DB_SYNC=false
+```
+
+填写建议：
+- `DB_HOST`：如果 MySQL 部署在宿主机本机，Docker Desktop 环境可优先尝试 `host.docker.internal`。
+- `DB_NAME`：建议提前创建独立库，例如 `y_link`。
+- `DB_SYNC`：生产环境推荐 `false`；仅本地临时调试才建议改为 `true`。
+
+3. 初始化数据库结构：
+- 开发调试场景：可临时设置 `DB_SYNC=true`，首次启动由 TypeORM 自动建表。
+- 生产/正式环境：推荐先手动执行 [001_init_schema.sql](file:///f:/Y-Link/backend/sql/001_init_schema.sql)，如是从旧版本逐步升级，再按 `backend/sql/` 中脚本顺序补齐增量脚本。
+
+4. 使用外置 MySQL 编排启动：
+
+```bash
+docker compose --env-file .env.docker.mysql -f compose.mysql.yml up -d --build
+```
+
+5. 启动后访问：
+- 管理端：`http://服务器IP:8080/login`
+- 客户端：`http://服务器IP:8080/client/login`
+- 后端健康检查：`http://服务器IP:3001/health`
+
+常见误填项：
+- 不要只把 `DB_HOST/DB_USER/DB_PASSWORD` 填进 `compose.cloud.yml`，却仍然保留 `DB_TYPE=sqlite`。
+- 不要在生产环境直接长期使用 `DB_SYNC=true`，否则后续实体调整时风险不可控。
+- 不要忘记提前为 MySQL 创建数据库实例和账号权限。
+
+#### 方式 B：非 Docker 直连 MySQL 运行后端
+如果你是在本地或服务器直接运行后端进程，而不是走 Docker，也可以把后端环境变量改为 MySQL 模式。
+
+以 `backend/.env` 或你自己的 `backend/.env.<profile>` 为例：
+
+```env
+DB_TYPE=mysql
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_USER=root
+DB_PASSWORD=你的密码
+DB_NAME=y_link
+DB_SYNC=true
+```
+
+说明：
+- `DB_TYPE=mysql` 是切换成功的关键开关。
+- `DB_SYNC=true` 更适合本地开发新库初始化；正式环境请优先手工建表后改为 `false`。
+- 环境变量解析规则可参考 [backend/.env.example](./backend/.env.example)。
+
+验证方法：
+- 启动后访问 `http://127.0.0.1:3001/health`，确认后端可用。
+- 登录系统后新增一条测试数据，确认 MySQL 中对应表已有落库记录。
+- 若启动失败，优先检查 `DB_TYPE`、`DB_HOST`、数据库权限和防火墙放行情况。
+
 ### 本地开发（非 Docker）
 
 ```bash
