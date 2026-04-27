@@ -29,6 +29,7 @@ export const O2O_PREORDER_BUSINESS_STATUSES = [
   'shipped',
   'partially_shipped',
   'closed',
+  'completed',
   'after_sale',
   'after_sale_done',
   'verifying',

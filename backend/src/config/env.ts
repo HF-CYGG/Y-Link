@@ -1,7 +1,7 @@
 /**
  * 模块说明：backend/src/config/env.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：统一装载后端运行环境，支持基础 env、profile env、自定义 env 与数据库运行时覆盖配置四级合并。
+ * 维护说明：数据库切换后的“应用生效”依赖本文件在启动阶段读取覆盖配置，因此修改优先级时必须同步检查切换/回退接口。
  */
 
 import fs from 'node:fs'
@@ -9,6 +9,11 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import dotenv from 'dotenv'
 import { z } from 'zod'
+import {
+  getDatabaseRuntimeOverrideFilePath,
+  loadDatabaseRuntimeOverrideEnvValues,
+  readDatabaseRuntimeOverride,
+} from './database-runtime-override.js'
 
 /**
  * 后端根目录：
@@ -85,6 +90,7 @@ function bootstrapEnvFiles(): {
   requestedProfile: string | undefined
   requestedEnvFile: string | undefined
   loadedFiles: string[]
+  runtimeDatabaseOverrideLoaded: boolean
 } {
   const loadedFiles: string[] = []
 
@@ -107,10 +113,26 @@ function bootstrapEnvFiles(): {
     })
   }
 
+  /**
+   * 最后加载数据库运行时覆盖配置：
+   * - 用于“SQLite -> MySQL”切换后的下次重启生效；
+   * - 只覆盖数据库相关字段，不污染其他业务配置；
+   * - 优先级最高，保证切换/回退动作具备确定性。
+   */
+  const runtimeDatabaseOverrideEnvValues = loadDatabaseRuntimeOverrideEnvValues()
+  const runtimeDatabaseOverrideLoaded = Boolean(runtimeDatabaseOverrideEnvValues)
+  if (runtimeDatabaseOverrideEnvValues) {
+    Object.entries(runtimeDatabaseOverrideEnvValues).forEach(([key, value]) => {
+      process.env[key] = value
+    })
+    loadedFiles.push(getDatabaseRuntimeOverrideFilePath())
+  }
+
   return {
     requestedProfile,
     requestedEnvFile,
     loadedFiles,
+    runtimeDatabaseOverrideLoaded,
   }
 }
 
@@ -163,11 +185,21 @@ export const env = {
 } as const
 
 // 额外导出环境加载上下文，便于启动日志说明当前究竟加载了哪些配置来源。
+const runtimeDatabaseOverride = readDatabaseRuntimeOverride()
+
 export const envLoadContext = {
   backendRootDir,
   loadedFiles: envBootstrap.loadedFiles,
   requestedProfile: envBootstrap.requestedProfile,
   requestedEnvFile: envBootstrap.requestedEnvFile
     ? resolveEnvFilePath(envBootstrap.requestedEnvFile)
+    : undefined,
+  runtimeDatabaseOverrideLoaded: envBootstrap.runtimeDatabaseOverrideLoaded,
+  runtimeDatabaseOverride: runtimeDatabaseOverride
+    ? {
+        filePath: getDatabaseRuntimeOverrideFilePath(),
+        updatedAt: runtimeDatabaseOverride.updatedAt,
+        dbType: runtimeDatabaseOverride.config.DB_TYPE,
+      }
     : undefined,
 } as const

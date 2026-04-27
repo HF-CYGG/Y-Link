@@ -1,6 +1,6 @@
 /**
  * 模块说明：src/router/route-performance.ts
- * 文件职责：统一维护路由异步加载器、页面预热目标和登录后首跳预热策略。
+ * 文件职责：统一维护路由异步加载器、页面预热目标和登录后首跳预热策略，本次补入系统治理下的数据库迁移助手懒加载与预热映射。
  * 维护说明：
  * - 路由表与预热表必须保持同一命名口径，否则 preloadTargets 会静默失效；
  * - 新增业务页面时，除了补 routes，还要同步评估是否需要纳入这里的预热范围。
@@ -37,6 +37,7 @@ export type AppRouteName =
   | 'o2o-console-inbound'
   | 'system'
   | 'system-configs'
+  | 'system-db-migration'
   | 'system-users'
   | 'system-client-users'
   | 'system-audit-logs'
@@ -79,6 +80,7 @@ export const routeViewLoaders = {
   'o2o-console-verify': () => import('@/views/o2o/O2oVerifyConsoleView.vue'),
   'o2o-console-inbound': () => import('@/views/o2o/O2oInboundManageView.vue'),
   'system-configs': () => import('@/views/system/SystemConfigViewLoader'),
+  'system-db-migration': () => import('@/views/system/DatabaseMigrationView.vue'),
   'system-users': () => import('@/views/system/UserCenterView.vue'),
   'system-client-users': () => import('@/views/system/UserCenterView.vue'),
   'system-audit-logs': () => import('@/views/system/AuditLogView.vue'),
@@ -110,6 +112,7 @@ const warmableRouteLoaders: Partial<Record<RouteWarmupTarget, RouteViewLoader>> 
   'o2o-console-verify': routeViewLoaders['o2o-console-verify'],
   'o2o-console-inbound': routeViewLoaders['o2o-console-inbound'],
   'system-configs': routeViewLoaders['system-configs'],
+  'system-db-migration': routeViewLoaders['system-db-migration'],
   'system-users': routeViewLoaders['system-users'],
   'system-client-users': routeViewLoaders['system-client-users'],
   'system-audit-logs': routeViewLoaders['system-audit-logs'],
@@ -220,6 +223,10 @@ const resolveWarmupTargetByPath = (redirectPath: string): RouteWarmupTarget | nu
 
   if (redirectPath.startsWith('/system/audit-logs')) {
     return 'system-audit-logs'
+  }
+
+  if (redirectPath.startsWith('/system/db-migration')) {
+    return 'system-db-migration'
   }
 
   if (redirectPath.startsWith('/system/client-users')) {

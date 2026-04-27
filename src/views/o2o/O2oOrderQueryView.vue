@@ -285,8 +285,9 @@ const orderCustomerProfile = computed(() => {
   }
 })
 
-// 管理端状态选择只保留当前门店对外使用的四个核心业务状态，避免误选运输类历史状态。
-const BUSINESS_STATUS_PICKER_ORDER: O2oOrderBusinessStatus[] = ['awaiting_shipment', 'preparing', 'ready', 'after_sale']
+// 管理端状态选择保留门店当前对外使用的核心业务状态，并新增“已完结（交易结束）”。
+// 这样门店既能表达待接单/备货/售后，也能在不改动主状态的前提下补充交易收尾完成。
+const BUSINESS_STATUS_PICKER_ORDER: O2oOrderBusinessStatus[] = ['awaiting_shipment', 'preparing', 'ready', 'completed', 'after_sale']
 
 const businessStatusOptions = BUSINESS_STATUS_PICKER_ORDER.map((value) => {
   const meta = O2O_ORDER_BUSINESS_STATUS_META[value]

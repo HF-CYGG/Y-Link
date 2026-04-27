@@ -14,6 +14,7 @@ export const O2O_ORDER_BUSINESS_STATUSES = [
   'shipped',
   'partially_shipped',
   'closed',
+  'completed',
   'after_sale',
   'after_sale_done',
   'verifying',
@@ -75,6 +76,12 @@ export const O2O_ORDER_BUSINESS_STATUS_META: Record<
     clientDescription: '商家已关闭该订单，请联系门店了解详情。',
     consoleDescription: '订单已被商家关闭。',
     className: 'bg-slate-100 text-slate-600',
+  },
+  completed: {
+    label: '已完结（交易结束）',
+    clientDescription: '订单交易已收尾完成，如有疑问可联系门店进一步确认。',
+    consoleDescription: '订单交易已结束，用于补充表达门店侧收尾完成，但不替代主状态。',
+    className: 'bg-emerald-50 text-emerald-700',
   },
   after_sale: {
     label: '其他（售后）',

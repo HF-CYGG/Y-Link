@@ -86,8 +86,8 @@ export interface O2oReturnRequestItem {
   qty: number
 }
 
-// 退货申请当前仅存在“待核销 / 已核销”两种真实状态，前端不再保留不存在的 rejected 分支。
-export type O2oReturnRequestStatus = 'pending' | 'verified'
+// 退货申请已扩展为“待核销 / 已核销 / 已拒绝”三态，所有消费端都必须按真实状态分支展示。
+export type O2oReturnRequestStatus = 'pending' | 'verified' | 'rejected'
 
 export interface O2oReturnRequestDetail {
   id: string
@@ -98,8 +98,11 @@ export interface O2oReturnRequestDetail {
   reason: string
   totalQty: number
   createdAt: string
+  handledAt: string | null
+  handledBy: string | null
   verifiedAt: string | null
   verifiedBy: string | null
+  rejectedReason: string | null
   qrPayload: string
   items: O2oReturnRequestItem[]
 }
@@ -185,6 +188,11 @@ export interface SubmitO2oReturnRequestPayload {
 }
 
 export interface UpdateMyO2oPreorderPayload {
+  remark?: string
+  items: Array<{ productId: string | number; qty: number }>
+}
+
+export interface UpdateConsoleO2oPreorderPayload {
   remark?: string
   items: Array<{ productId: string | number; qty: number }>
 }
@@ -300,6 +308,38 @@ export const updateO2oOrderMerchantMessage = (id: string, merchantMessage: strin
     method: 'PATCH',
     url: `/o2o/orders/${id}/merchant-message`,
     data: { merchantMessage },
+    ...config,
+  })
+
+/**
+ * 门店现场改单：
+ * - 仅管理端工作人员可调用；
+ * - 仅待核销且满足后端校验的订单允许修改；
+ * - 保存后返回最新订单详情，供核销台原位刷新核销依据。
+ */
+export const updateO2oOrderOnsite = (
+  id: string,
+  payload: UpdateConsoleO2oPreorderPayload,
+  config?: RequestConfig,
+) =>
+  request<O2oPreorderDetail>({
+    method: 'PATCH',
+    url: `/o2o/orders/${id}/onsite-adjust`,
+    data: payload,
+    ...config,
+  })
+
+/**
+ * 门店拒绝退货申请：
+ * - 仅待处理退货申请允许拒绝；
+ * - 必须填写拒绝原因；
+ * - 返回最新退货申请详情，供核销台立即展示结果。
+ */
+export const rejectO2oReturnRequest = (id: string, rejectReason: string, config?: RequestConfig) =>
+  request<O2oReturnRequestDetail>({
+    method: 'POST',
+    url: `/o2o/return-requests/${id}/reject`,
+    data: { rejectReason },
     ...config,
   })
 

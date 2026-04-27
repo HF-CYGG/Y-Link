@@ -19,7 +19,7 @@ import { ClientUser } from './client-user.entity.js'
 import { O2oPreorder, type O2oPreorderStatus } from './o2o-preorder.entity.js'
 import { entityColumnOptions } from './entity-column-options.js'
 
-export const O2O_RETURN_REQUEST_STATUSES = ['pending', 'verified'] as const
+export const O2O_RETURN_REQUEST_STATUSES = ['pending', 'verified', 'rejected'] as const
 export type O2oReturnRequestStatus = (typeof O2O_RETURN_REQUEST_STATUSES)[number]
 
 @Entity({ name: 'o2o_return_request' })
@@ -56,6 +56,17 @@ export class O2oReturnRequest {
 
   @Column({ name: 'total_qty', type: 'int', default: 0, comment: '退货总件数' })
   totalQty!: number
+
+  // handledAt / handledBy 统一记录“本次退货申请的最终处理结果时间与处理人”，
+  // 这样拒绝与回库核销都能复用同一套追踪口径；verifiedAt / verifiedBy 仍专用于回库成功场景。
+  @Column({ name: 'handled_at', ...entityColumnOptions.timestamp, nullable: true, comment: '处理时间' })
+  handledAt!: Date | null
+
+  @Column({ name: 'handled_by', type: 'varchar', length: 64, nullable: true, comment: '处理人' })
+  handledBy!: string | null
+
+  @Column({ name: 'rejected_reason', type: 'varchar', length: 500, nullable: true, comment: '拒绝原因' })
+  rejectedReason!: string | null
 
   @Column({ name: 'verified_at', ...entityColumnOptions.timestamp, nullable: true, comment: '退货核销时间' })
   verifiedAt!: Date | null

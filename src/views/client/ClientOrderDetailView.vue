@@ -99,8 +99,8 @@ const getOrderStatusLabel = (status: O2oPreorderSummary['status']) => {
   return CLIENT_O2O_ORDER_STATUS_LABEL_MAP[status] ?? '未知状态'
 }
 
-// 详细注释：退货申请当前仅向客户端暴露 pending、verified 两种状态。
-// pending 表示门店尚未核销，verified 表示门店已完成核销；不存在 rejected 分支。
+// 详细注释：退货申请已扩展为 pending、verified、rejected 三态。
+// pending 表示门店尚未处理，verified 表示门店已完成回库核销，rejected 表示门店已明确拒绝并记录原因。
 const getReturnRequestStatusMeta = (request: O2oReturnRequestDetail) => {
   if (request.status === 'verified') {
     return {
@@ -108,6 +108,14 @@ const getReturnRequestStatusMeta = (request: O2oReturnRequestDetail) => {
       className: 'bg-emerald-50 text-emerald-700',
       description: '门店已完成退货核销，本次退货流程已闭环。',
       qrHint: '退货二维码已完成核销，仅保留记录供你查询。',
+    }
+  }
+  if (request.status === 'rejected') {
+    return {
+      label: '退货已拒绝',
+      className: 'bg-rose-50 text-rose-700',
+      description: '门店已拒绝本次退货申请，请查看拒绝原因后再决定是否联系门店处理。',
+      qrHint: '退货申请已被拒绝，退货二维码已停用。',
     }
   }
   return {
@@ -1060,16 +1068,25 @@ onMounted(async () => {
                     </div>
                     <div class="rounded-2xl bg-white px-4 py-3">
                       <p class="text-sm text-slate-400">处理时间</p>
-                      <p class="mt-1 text-sm text-slate-700">{{ request.verifiedAt || '等待门店处理' }}</p>
+                      <p class="mt-1 text-sm text-slate-700">{{ request.handledAt || '等待门店处理' }}</p>
                     </div>
                     <div class="rounded-2xl bg-white px-4 py-3">
                       <p class="text-sm text-slate-400">处理人</p>
-                      <p class="mt-1 text-sm text-slate-700">{{ request.verifiedBy || '门店待处理' }}</p>
+                      <p class="mt-1 text-sm text-slate-700">{{ request.handledBy || '门店待处理' }}</p>
                     </div>
                   </div>
                   <div class="rounded-2xl bg-white px-4 py-3">
                     <p class="text-sm text-slate-400">退货原因</p>
                     <p class="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-slate-700">{{ request.reason }}</p>
+                  </div>
+                  <div
+                    v-if="request.rejectedReason"
+                    class="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3"
+                  >
+                    <p class="text-sm text-rose-500">拒绝原因</p>
+                    <p class="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-rose-700">
+                      {{ request.rejectedReason }}
+                    </p>
                   </div>
                   <div class="overflow-hidden rounded-2xl border border-white/80 bg-white">
                     <table class="min-w-full divide-y divide-slate-100 text-sm">

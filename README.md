@@ -70,7 +70,7 @@ f:\Y-Link
 - 📥 **入库链路独立化**：`扫码入库` 与 `入库管理` 已从 `线上预订` 分类中解耦，作为独立业务入口存在。
 - ⚙️ **灵活的系统配置**：后台可自由配置 O2O 单人限购规则、图片/短信/邮件验证码开关，甚至支持智能降级。
 - 🐳 **一键私有化部署**：内置 Docker Compose，支持单镜像（Onebox）或双镜像极速部署，1Panel 完美兼容。
-- 🗄️ **零配置数据库**：默认 SQLite 零配置启动，支持物理备份与 JSON 导入导出，同时支持平滑切换至 MySQL。
+- 🗄️ **零配置数据库**：默认 SQLite 零配置启动，支持物理备份与 JSON 导入导出，并推荐通过数据库迁移向导平滑切换至 MySQL。
 - 🔒 **安全与审计**：权限控制、操作审计链路完善，适合持续迭代的企业级业务系统。
 
 ---
@@ -288,9 +288,27 @@ npm run cloud:down
 - 前端健康检查已联动后端可达性（`/health`），后端异常时可在 1Panel 直接看到前端健康状态变更。
 
 ### 如何切换到 MySQL（外置数据库）
-如果你希望把默认 SQLite 切换为外置 MySQL，推荐按下面两种方式之一处理。
+如果你希望把默认 SQLite 切换为外置 MySQL，优先推荐使用管理端的`数据库迁移向导`，由系统完成预检、任务创建、迁移执行、切换写入与 SQLite 回退。只有在“新库初始化”或“高级运维手工接管”场景下，才建议继续使用下方命令行方式。
 
-#### 方式 A：Docker / 服务器部署时切换到 MySQL（推荐）
+#### 方式 A：使用管理端数据库迁移向导（首选）
+适用场景：
+- 当前系统已经在 SQLite 上稳定运行，且希望平滑迁移现有业务数据到 MySQL。
+- 需要在切换前完成源库存在性、目标库连通性、目标表风险、运行时覆盖状态等预检。
+- 需要保留 SQLite 物理备份，并在切换异常时可直接从管理端发起回退。
+
+推荐步骤：
+1. 先完成一次 SQLite 文件物理备份，并准备好目标 MySQL 空库、账号与授权。
+2. 使用具备系统配置更新权限的账号登录管理端，进入`系统管理 -> 数据库迁移助手`。
+3. 填写目标 MySQL 连接信息，先点击`执行预检`，确认页面未出现阻断错误。
+4. 点击`创建迁移任务`，确认任务配置后再执行迁移；建议保持`初始化目标表结构`和`执行前创建 SQLite 物理备份`开启。
+5. 迁移成功后，优先通过向导内的`切换`能力写入运行时覆盖配置，并按页面提示在约定窗口重启后端服务。
+6. 切换后按本文末尾的验收建议检查登录、商品、订单、核销等关键链路；如发现异常，优先使用向导内的`回退到 SQLite`能力恢复。
+
+配套文档：
+- [数据库迁移向导演练与验收手册](./docs/Y-Link数据库迁移向导演练与验收手册.md)
+- [企业级维护与二开白皮书](./docs/Y-Link企业级维护与二开白皮书.md)
+
+#### 方式 B：Docker / 服务器部署时切换到 MySQL（适合新库初始化或高级运维）
 项目已经内置了专门的外置 MySQL 编排文件 [compose.mysql.yml](./compose.mysql.yml) 和环境变量模板 [`.env.docker.mysql.example`](./.env.docker.mysql.example)。
 
 步骤如下：
@@ -319,7 +337,7 @@ DB_SYNC=false
 
 3. 初始化数据库结构：
 - 开发调试场景：可临时设置 `DB_SYNC=true`，首次启动由 TypeORM 自动建表。
-- 生产/正式环境：推荐先手动执行 [001_init_schema.sql](file:///f:/Y-Link/backend/sql/001_init_schema.sql)，如是从旧版本逐步升级，再按 `backend/sql/` 中脚本顺序补齐增量脚本。
+- 生产/正式环境：若是“全新空库上线”，可先手动执行 [001_init_schema.sql](file:///f:/Y-Link/backend/sql/001_init_schema.sql)；若是“已有 SQLite 业务数据迁移到 MySQL”，请优先改用管理端`数据库迁移向导`，不要再手工拼接导入与切换步骤。
 
 4. 使用外置 MySQL 编排启动：
 
@@ -337,7 +355,7 @@ docker compose --env-file .env.docker.mysql -f compose.mysql.yml up -d --build
 - 不要在生产环境直接长期使用 `DB_SYNC=true`，否则后续实体调整时风险不可控。
 - 不要忘记提前为 MySQL 创建数据库实例和账号权限。
 
-#### 方式 B：非 Docker 直连 MySQL 运行后端
+#### 方式 C：非 Docker 直连 MySQL 运行后端
 如果你是在本地或服务器直接运行后端进程，而不是走 Docker，也可以把后端环境变量改为 MySQL 模式。
 
 以 `backend/.env` 或你自己的 `backend/.env.<profile>` 为例：
@@ -495,6 +513,7 @@ README 仅保留基础说明，完整开发文档与部署细节统一维护在 
 - [GitHub Actions（自动化与 CI/CD）](https://github.com/HF-CYGG/Y-Link/wiki/GitHub-Actions)
 - [API Reference（接口说明）](https://github.com/HF-CYGG/Y-Link/wiki/API-Reference)
 - [Troubleshooting（故障排查）](https://github.com/HF-CYGG/Y-Link/wiki/Troubleshooting)
+- [数据库迁移向导演练与验收手册](./docs/Y-Link数据库迁移向导演练与验收手册.md)
 
 ---
 

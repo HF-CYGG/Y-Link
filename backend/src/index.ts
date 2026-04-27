@@ -1,7 +1,7 @@
 /**
  * 模块说明：backend/src/index.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：作为后端启动入口，负责初始化数据库、默认数据、自检日志以及运行时配置回显。
+ * 维护说明：数据库切换/回退依赖启动阶段读取覆盖配置，因此启动日志必须明确打印当前是否命中了运行时覆盖。
  */
 
 import { createApp } from './app.js'
@@ -131,6 +131,13 @@ async function bootstrap(): Promise<void> {
         envLoadContext.loadedFiles.length ? envLoadContext.loadedFiles.join(', ') : '(none)'
       })`,
     )
+    if (envLoadContext.runtimeDatabaseOverride) {
+      logLine(
+        'DB OVERRIDE',
+        `loaded=${envLoadContext.runtimeDatabaseOverride.filePath} dbType=${envLoadContext.runtimeDatabaseOverride.dbType} updatedAt=${envLoadContext.runtimeDatabaseOverride.updatedAt}`,
+        'warn',
+      )
+    }
     logLine('DATABASE', `mode=${databaseRuntime.mode} target=${databaseRuntime.summary}`)
     logLine(
       'ADMIN',

@@ -1,7 +1,11 @@
 /**
  * 模块说明：src/router/routes.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：统一维护管理端与客户端的路由、菜单、快捷入口和权限元信息，本次新增系统治理下的数据库迁移助手页面入口。
+ * 实现逻辑：
+ * - 所有业务页面都通过 routeViewLoaders 做懒加载，保证路由、预热和权限入口保持同源；
+ * - 系统治理分组下新增数据库迁移助手子路由，并把预热目标同步纳入系统配置页；
+ * - 菜单、快捷入口和首个可访问路由仍然完全由本文件派生，避免出现多份配置源。
+ * 维护说明：新增或调整业务页面时，需要同步检查路由名称、权限码、菜单顺序和预热目标是否一致。
  */
 
 import type { RouteMeta, RouteRecordRaw } from 'vue-router'
@@ -374,7 +378,20 @@ const layoutChildren: AppRouteRecord[] = [
           activeMenu: '/system',
           requiredPermissions: ['system_configs:view'],
           keepAlive: true,
-          preloadTargets: ['system-users', 'system-client-users'],
+          preloadTargets: ['system-db-migration', 'system-users', 'system-client-users'],
+        },
+      },
+      {
+        path: 'db-migration',
+        name: 'system-db-migration',
+        component: routeViewLoaders['system-db-migration'],
+        meta: {
+          title: '数据库迁移助手',
+          menuOrder: 15,
+          activeMenu: '/system',
+          requiredPermissions: ['system_configs:view'],
+          keepAlive: true,
+          preloadTargets: ['system-configs', 'system-audit-logs'],
         },
       },
       {
