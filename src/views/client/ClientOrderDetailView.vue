@@ -38,6 +38,10 @@ import { normalizeRequestError } from '@/utils/error'
 
 const O2O_RETURN_REASON_MAX_LENGTH = 500
 const O2O_PREORDER_REMARK_MAX_LENGTH = 255
+const ORDER_TYPE_LABEL_MAP = {
+  department: '部门订',
+  walkin: '散客',
+} as const
 
 interface EditableOrderItem {
   productId: string
@@ -156,6 +160,10 @@ const merchantMessageContent = computed(() => {
   }
   const normalizedValue = value.trim()
   return normalizedValue || null
+})
+
+const orderTypeLabel = computed(() => {
+  return detail.value ? ORDER_TYPE_LABEL_MAP[detail.value.order.clientOrderType] : '散客'
 })
 
 const timelineItems = computed(() => {
@@ -394,6 +402,8 @@ const buildOrderSummaryFromDetail = (nextDetail: O2oPreorderDetail): O2oPreorder
     status: order.status,
     businessStatus: order.businessStatus,
     merchantMessage: order.merchantMessage,
+    clientOrderType: order.clientOrderType,
+    departmentNameSnapshot: order.departmentNameSnapshot,
     statusReport: order.statusReport,
     totalAmount: order.totalAmount,
     expireInSeconds: order.expireInSeconds,
@@ -838,7 +848,10 @@ onMounted(async () => {
       <aside class="rounded-[1.3rem] bg-white p-5 shadow-[var(--ylink-shadow-soft)]">
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <p class="text-lg font-semibold text-slate-900">{{ detail.order.showNo }}</p>
+            <div class="flex flex-wrap items-center gap-2">
+              <p class="text-lg font-semibold text-slate-900">{{ detail.order.showNo }}</p>
+              <span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">{{ orderTypeLabel }}</span>
+            </div>
             <p class="mt-1 text-sm text-slate-400">状态：{{ statusLabel }}</p>
           </div>
           <div v-if="shouldShowModifyOrderButton || canRecallOrder" class="flex flex-wrap gap-2">
@@ -913,6 +926,12 @@ onMounted(async () => {
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">创建时间</p>
               <p class="mt-1 text-sm text-slate-700">{{ detail.order.createdAt }}</p>
+            </div>
+            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <p class="text-sm text-slate-400">下单归属</p>
+              <p class="mt-1 text-sm text-slate-700">
+                {{ orderTypeLabel }}{{ detail.order.departmentNameSnapshot ? ` / ${detail.order.departmentNameSnapshot}` : '' }}
+              </p>
             </div>
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">总件数</p>

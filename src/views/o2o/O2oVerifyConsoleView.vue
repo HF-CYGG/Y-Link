@@ -38,6 +38,10 @@ import { useDevice } from '@/composables/useDevice'
 
 const O2O_RETURN_REJECT_REASON_MAX_LENGTH = 500
 const O2O_PREORDER_REMARK_MAX_LENGTH = 255
+const ORDER_TYPE_LABEL_MAP = {
+  department: '部门订',
+  walkin: '散客',
+} as const
 
 interface EditableOnsiteOrderItem {
   productId: string
@@ -180,6 +184,14 @@ const currentStatusClassName = computed(() => {
     return 'status-chip--rejected'
   }
   return ''
+})
+
+const preorderOwnershipLabel = computed(() => {
+  if (!preorderDetail.value) {
+    return ''
+  }
+  const order = preorderDetail.value.order
+  return `${ORDER_TYPE_LABEL_MAP[order.clientOrderType]}${order.departmentNameSnapshot ? ` / ${order.departmentNameSnapshot}` : ''}`
 })
 
 const returnRequestResultHint = computed(() => {
@@ -806,6 +818,10 @@ watch(
           </div>
 
           <div v-if="preorderDetail" class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <p class="text-sm text-slate-400">下单归属</p>
+              <p class="mt-1 text-base font-semibold text-slate-900">{{ preorderOwnershipLabel }}</p>
+            </div>
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">总件数</p>
               <p class="mt-1 text-base font-semibold text-slate-900">{{ preorderDetail.order.totalQty }} 件</p>

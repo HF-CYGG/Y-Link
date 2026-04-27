@@ -56,7 +56,14 @@ const SQLITE_REQUIRED_PRODUCT_COLUMNS = [
 ]
 
 const SQLITE_REQUIRED_CLIENT_USER_COLUMNS = ['mobile', 'email', 'real_name', 'department_name', 'status', 'last_login_at']
-const SQLITE_REQUIRED_O2O_PREORDER_COLUMNS = ['cancel_reason', 'business_status', 'merchant_message', 'update_count']
+const SQLITE_REQUIRED_O2O_PREORDER_COLUMNS = [
+  'cancel_reason',
+  'business_status',
+  'merchant_message',
+  'client_order_type',
+  'department_name_snapshot',
+  'update_count',
+]
 const SQLITE_REQUIRED_O2O_RETURN_REQUEST_COLUMNS = ['handled_at', 'handled_by', 'rejected_reason']
 
 export function resolveSqliteDatabasePath(sqliteDbPath = env.SQLITE_DB_PATH): string {

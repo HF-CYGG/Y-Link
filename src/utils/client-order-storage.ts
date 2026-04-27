@@ -70,6 +70,16 @@ const normalizeMerchantMessage = (value: unknown) => {
     : null
 }
 
+const normalizeClientOrderType = (value: unknown): O2oPreorderSummary['clientOrderType'] => {
+  return value === 'department' ? 'department' : 'walkin'
+}
+
+const normalizeDepartmentNameSnapshot = (value: unknown) => {
+  return typeof value === 'string' && value.trim()
+    ? value.trim()
+    : null
+}
+
 const normalizeOrderRow = (item: unknown): O2oPreorderSummary | null => {
   if (!item || typeof item !== 'object') {
     return null
@@ -90,6 +100,8 @@ const normalizeOrderRow = (item: unknown): O2oPreorderSummary | null => {
     status,
     businessStatus: normalizeBusinessStatus(row.businessStatus),
     merchantMessage: normalizeMerchantMessage(row.merchantMessage),
+    clientOrderType: normalizeClientOrderType(row.clientOrderType),
+    departmentNameSnapshot: normalizeDepartmentNameSnapshot(row.departmentNameSnapshot),
     // 缓存恢复时尽量沿用服务端原始状态报告，确保“已撤回/超时取消”文案不会在刷新后退化。
     statusReport: normalizeStatusReport(row, status, timeoutAt),
     totalQty: Number.isFinite(row.totalQty) ? Number(row.totalQty) : 0,

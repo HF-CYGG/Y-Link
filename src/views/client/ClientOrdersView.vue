@@ -21,6 +21,11 @@ import {
 import { useClientOrderStore } from '@/store'
 import { normalizeRequestError } from '@/utils/error'
 
+const ORDER_TYPE_LABEL_MAP = {
+  department: '部门订',
+  walkin: '散客',
+} as const
+
 // 关键词防抖窗口：连续输入时只在停顿后更新筛选词，避免每次按键都触发大列表过滤。
 const KEYWORD_DEBOUNCE_MS = 260
 const firstScreenLoading = ref(false)
@@ -80,10 +85,14 @@ const filteredOrders = computed(() => {
     if (!normalizedKeyword) {
       return true
     }
-    const searchText = `${order.showNo} ${order.verifyCode}`.toLowerCase()
+    const searchText = `${order.showNo} ${order.verifyCode} ${ORDER_TYPE_LABEL_MAP[order.clientOrderType]} ${order.departmentNameSnapshot || ''}`.toLowerCase()
     return searchText.includes(normalizedKeyword)
   })
 })
+
+const getClientOrderTypeLabel = (order: Pick<O2oPreorderSummary, 'clientOrderType'>) => {
+  return ORDER_TYPE_LABEL_MAP[order.clientOrderType]
+}
 
 const getOrderStatusReport = (order: O2oPreorderSummary) => {
   return getClientOrderStatusReportConfig({
@@ -117,6 +126,8 @@ const buildOrderSummaryFromDetail = (detail: O2oPreorderDetail): O2oPreorderSumm
     status: order.status,
     businessStatus: order.businessStatus,
     merchantMessage: order.merchantMessage,
+    clientOrderType: order.clientOrderType,
+    departmentNameSnapshot: order.departmentNameSnapshot,
     statusReport: order.statusReport,
     totalAmount: order.totalAmount,
     expireInSeconds: order.expireInSeconds,
@@ -230,7 +241,7 @@ onMounted(async () => {
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p class="text-xl font-semibold text-slate-900">我的订单</p>
-          <p class="text-sm text-slate-500">查看待提货、已核销与已取消订单</p>
+          <p class="text-sm text-slate-500">查看待提货、已核销与已取消订单，并区分部门订与散客</p>
         </div>
         <button
           class="rounded-full border border-slate-200 bg-slate-50 px-4 py-2 text-sm text-slate-600 disabled:cursor-not-allowed disabled:opacity-60"
@@ -256,7 +267,7 @@ onMounted(async () => {
         <input
           v-model="keywordInput"
           class="h-10 flex-1 rounded-full border border-slate-200 bg-slate-50 px-4 text-sm outline-none focus:border-slate-300"
-          placeholder="搜索订单号或核销码"
+          placeholder="搜索订单号、核销码、部门或归属"
         />
         <button type="button" class="h-10 rounded-full border border-slate-200 px-4 text-sm text-slate-600" @click="clearKeyword">清空</button>
       </div>
@@ -289,8 +300,16 @@ onMounted(async () => {
       <article v-for="order in filteredOrders" :key="order.id" class="rounded-[1.2rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <p class="text-base font-semibold text-slate-900">{{ order.showNo }}</p>
+            <div class="flex flex-wrap items-center gap-2">
+              <p class="text-base font-semibold text-slate-900">{{ order.showNo }}</p>
+              <span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">
+                {{ getClientOrderTypeLabel(order) }}
+              </span>
+            </div>
             <p class="mt-1 text-xs text-slate-400">下单时间：{{ order.createdAt }}</p>
+            <p class="mt-1 text-xs text-slate-400">
+              归属：{{ getClientOrderTypeLabel(order) }}{{ order.departmentNameSnapshot ? ` / ${order.departmentNameSnapshot}` : '' }}
+            </p>
             <p v-if="order.timeoutAt" class="mt-1 text-xs text-slate-400">超时释放：{{ order.timeoutAt }}</p>
           </div>
           <div class="flex items-center gap-2">

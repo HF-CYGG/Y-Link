@@ -47,6 +47,8 @@ CREATE TABLE IF NOT EXISTS `o2o_preorder` (
   `cancel_reason` VARCHAR(16) NULL,
   `business_status` VARCHAR(32) NULL COMMENT '商家特殊状态',
   `merchant_message` VARCHAR(500) NULL COMMENT '商家留言',
+  `client_order_type` VARCHAR(16) NOT NULL DEFAULT 'walkin' COMMENT '客户端下单归属类型',
+  `department_name_snapshot` VARCHAR(128) NULL COMMENT '下单时部门名称快照',
   `total_qty` INT NOT NULL DEFAULT 0,
   `remark` VARCHAR(255) NULL,
   `update_count` INT NOT NULL DEFAULT 0 COMMENT '客户端修改次数',

@@ -10,7 +10,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { ArrowLeft } from '@element-plus/icons-vue'
-import { submitO2oPreorder } from '@/api/modules/o2o'
+import { submitO2oPreorder, type O2oClientOrderType } from '@/api/modules/o2o'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
 import { useClientAuthStore, useClientCartStore } from '@/store'
 import { normalizeRequestError } from '@/utils/error'
@@ -29,6 +29,7 @@ const clientCartStore = useClientCartStore()
 const { runWithGate } = useIdempotentAction()
 
 const remark = ref('')
+const clientOrderType = ref<O2oClientOrderType>(clientAuthStore.currentUser?.departmentName?.trim() ? 'department' : 'walkin')
 const submitting = ref(false)
 
 onMounted(() => {
@@ -44,6 +45,16 @@ const selectedItems = computed(() => clientCartStore.selectedValidItems)
 const totalQty = computed(() => selectedItems.value.reduce((sum, item) => sum + item.qty, 0))
 const totalAmount = computed(() => selectedItems.value.reduce((sum, item) => sum + Math.max(0, Number(item.defaultPrice || 0)) * item.qty, 0))
 const submitDisabled = computed(() => submitting.value || !selectedItems.value.length)
+const currentDepartmentName = computed(() => clientAuthStore.currentUser?.departmentName?.trim() || '')
+const isDepartmentOrder = computed(() => clientOrderType.value === 'department')
+const orderTypeDescription = computed(() => {
+  if (isDepartmentOrder.value) {
+    return currentDepartmentName.value
+      ? `将按部门单处理，核销后会归入部门出库单：${currentDepartmentName.value}`
+      : '部门订需要先在个人资料中完善部门信息'
+  }
+  return '将按散客单处理，不会归入任何部门'
+})
 
 const handleBack = () => {
   if (props.standalone) {
@@ -58,6 +69,10 @@ const handleSubmit = async () => {
     ElMessage.warning('请先选择可结算商品')
     return
   }
+  if (isDepartmentOrder.value && !currentDepartmentName.value) {
+    ElMessage.warning('部门订需要先完善账号部门信息')
+    return
+  }
 
   const runResult = await runWithGate({
     actionKey: 'client-checkout-submit',
@@ -69,6 +84,7 @@ const handleSubmit = async () => {
       submitting.value = true
       try {
         const result = await submitO2oPreorder({
+          clientOrderType: clientOrderType.value,
           remark: remark.value.trim() || undefined,
           items: selectedItems.value.map((item) => ({
             productId: item.productId,
@@ -124,6 +140,33 @@ const handleSubmit = async () => {
           {{ clientAuthStore.currentUser?.account || clientAuthStore.currentUser?.realName || clientAuthStore.currentUser?.mobile }}
         </p>
         <p class="text-xs text-slate-400">{{ clientAuthStore.currentUser?.departmentName || '未设置部门' }}</p>
+      </div>
+
+      <div class="mb-4 rounded-[1.2rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
+        <p class="mb-3 text-sm font-semibold text-slate-700">下单归属</p>
+        <div class="grid grid-cols-2 gap-3">
+          <button
+            type="button"
+            class="rounded-[1.2rem] border px-4 py-3 text-left transition"
+            :class="clientOrderType === 'department' ? 'border-teal-300 bg-teal-50 text-teal-700' : 'border-slate-200 bg-slate-50 text-slate-600'"
+            @click="clientOrderType = 'department'"
+          >
+            <p class="text-sm font-semibold">部门订</p>
+            <p class="mt-1 text-xs leading-5">适用于代表部门统一领取物资</p>
+          </button>
+          <button
+            type="button"
+            class="rounded-[1.2rem] border px-4 py-3 text-left transition"
+            :class="clientOrderType === 'walkin' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-slate-50 text-slate-600'"
+            @click="clientOrderType = 'walkin'"
+          >
+            <p class="text-sm font-semibold">散客</p>
+            <p class="mt-1 text-xs leading-5">适用于个人临时领取，不归入部门</p>
+          </button>
+        </div>
+        <p class="mt-3 text-xs leading-5" :class="isDepartmentOrder && !currentDepartmentName ? 'text-amber-600' : 'text-slate-500'">
+          {{ orderTypeDescription }}
+        </p>
       </div>
 
       <div class="mb-4 rounded-[1.2rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">

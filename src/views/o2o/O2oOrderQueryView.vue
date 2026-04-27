@@ -43,6 +43,10 @@ const NEW_ORDER_WINDOW_MS = 30 * 60 * 1000
 const NEW_ORDER_HIGHLIGHT_MS = 6000
 const MERCHANT_MESSAGE_MAX_LENGTH = 500
 const POLL_INTERVAL_OPTIONS = [10, 15] as const
+const ORDER_TYPE_LABEL_MAP = {
+  department: '部门订',
+  walkin: '散客',
+} as const
 const listLoading = ref(false)
 const detailLoading = ref(false)
 const orders = ref<O2oPreorderSummary[]>([])
@@ -285,6 +289,18 @@ const orderCustomerProfile = computed(() => {
   }
 })
 
+const getOrderTypeLabel = (orderType: O2oPreorderSummary['clientOrderType']) => {
+  return ORDER_TYPE_LABEL_MAP[orderType]
+}
+
+const activeOrderOwnership = computed(() => {
+  const order = activeOrderDetail.value?.order
+  if (!order) {
+    return '未选择订单'
+  }
+  return `${getOrderTypeLabel(order.clientOrderType)}${order.departmentNameSnapshot ? ` / ${order.departmentNameSnapshot}` : ''}`
+})
+
 // 管理端状态选择保留门店当前对外使用的核心业务状态，并新增“已完结（交易结束）”。
 // 这样门店既能表达待接单/备货/售后，也能在不改动主状态的前提下补充交易收尾完成。
 const BUSINESS_STATUS_PICKER_ORDER: O2oOrderBusinessStatus[] = ['awaiting_shipment', 'preparing', 'ready', 'completed', 'after_sale']
@@ -481,6 +497,8 @@ const mergeOrderSummaryFromDetail = (detail: O2oPreorderDetail) => {
     status: nextOrder.status,
     businessStatus: nextOrder.businessStatus,
     merchantMessage: nextOrder.merchantMessage,
+    clientOrderType: nextOrder.clientOrderType,
+    departmentNameSnapshot: nextOrder.departmentNameSnapshot,
     totalQty: nextOrder.totalQty,
     timeoutAt: nextOrder.timeoutAt,
     createdAt: nextOrder.createdAt,
@@ -840,7 +858,14 @@ onBeforeUnmount(() => {
             @click="handlePickOrder(order.id)"
           >
             <div class="flex min-w-0 items-start justify-between gap-2">
-              <p class="min-w-0 break-words text-sm font-semibold text-slate-900">{{ order.showNo }}</p>
+              <div class="min-w-0">
+                <div class="flex min-w-0 flex-wrap items-center gap-2">
+                  <p class="min-w-0 break-words text-sm font-semibold text-slate-900">{{ order.showNo }}</p>
+                  <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">
+                    {{ getOrderTypeLabel(order.clientOrderType) }}
+                  </span>
+                </div>
+              </div>
               <span class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium" :class="getOrderReportConfig(order).cardClassName">
                 {{ getOrderReportConfig(order).statusLabel }}
               </span>
@@ -848,6 +873,7 @@ onBeforeUnmount(() => {
             <div class="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500">
               <p class="break-words">时间：{{ formatOrderDateTime(order.createdAt, { includeSeconds: false }) }}</p>
               <p class="text-right">件数：{{ order.totalQty }}</p>
+              <p class="break-words">归属：{{ getOrderTypeLabel(order.clientOrderType) }}{{ order.departmentNameSnapshot ? ` / ${order.departmentNameSnapshot}` : '' }}</p>
               <p>应付总额：¥{{ formatCurrency(order.totalAmount) }}</p>
               <p class="text-right">倒计时：{{ formatCountdown(order) }}</p>
             </div>
@@ -968,6 +994,10 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="mt-4 grid gap-3 sm:grid-cols-4">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <p class="text-sm text-slate-400">下单归属</p>
+              <p class="mt-1 text-sm font-semibold text-slate-900">{{ activeOrderOwnership }}</p>
+            </div>
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">状态</p>
               <p class="mt-1 text-sm font-semibold text-slate-900">{{ reportConfig.statusLabel }}</p>

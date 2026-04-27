@@ -22,6 +22,7 @@ import {
 import { extractRequestMeta } from '../utils/request-meta.js'
 
 const submitPreorderSchema = z.object({
+  clientOrderType: z.enum(['department', 'walkin']),
   remark: z.string().max(O2O_PREORDER_REMARK_MAX_LENGTH).optional(),
   items: z.array(z.object({ productId: z.union([z.string(), z.number()]), qty: z.number().int().positive() })).min(1),
 })

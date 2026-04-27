@@ -14,7 +14,9 @@ import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity
 import { ClientUser } from '../entities/client-user.entity.js'
 import { InventoryLog } from '../entities/inventory-log.entity.js'
 import {
+  O2O_CLIENT_ORDER_TYPES,
   O2O_PREORDER_BUSINESS_STATUSES,
+  type O2oClientOrderType,
   O2oPreorder,
   type O2oPreorderBusinessStatus,
   type O2oPreorderCancelReason,
@@ -42,6 +44,7 @@ export interface SubmitPreorderItemInput {
 export interface SubmitPreorderInput {
   items: SubmitPreorderItemInput[]
   remark?: string
+  clientOrderType: O2oClientOrderType
 }
 
 export interface UpdateMyPreorderInput {
@@ -102,6 +105,8 @@ export interface O2oPreorderSummaryView {
   status: O2oPreorder['status']
   businessStatus: O2oPreorder['businessStatus']
   merchantMessage: string | null
+  clientOrderType: O2oPreorder['clientOrderType']
+  departmentNameSnapshot: string | null
   totalQty: number
   timeoutAt: Date | null
   createdAt: Date
@@ -130,6 +135,8 @@ export interface O2oPreorderDetailView {
     status: O2oPreorder['status']
     businessStatus: O2oPreorder['businessStatus']
     merchantMessage: string | null
+    clientOrderType: O2oPreorder['clientOrderType']
+    departmentNameSnapshot: string | null
     remark: string | null
     updateCount: number
     remainingUpdateCount: number
@@ -354,6 +361,32 @@ class O2oPreorderService {
     return normalizedValue
   }
 
+  // 客户端下单归属类型必须显式传入，只允许“部门订 / 散客”两种固定枚举值。
+  private normalizeClientOrderType(value: string | null | undefined): O2oClientOrderType {
+    const normalizedValue = value?.trim().toLowerCase() ?? ''
+    if (!O2O_CLIENT_ORDER_TYPES.includes(normalizedValue as O2oClientOrderType)) {
+      throw new BizError('下单类型非法，仅支持部门订或散客', 400)
+    }
+    return normalizedValue as O2oClientOrderType
+  }
+
+  // 订单归属必须按“下单时快照”固化：
+  // - 散客单不保留部门快照；
+  // - 部门订单强制要求当前账号存在部门名称。
+  private resolveDepartmentNameSnapshot(
+    clientOrderType: O2oClientOrderType,
+    clientUser: Pick<ClientUser, 'departmentName'> | null,
+  ): string | null {
+    if (clientOrderType !== 'department') {
+      return null
+    }
+    const departmentName = clientUser?.departmentName?.trim() ?? ''
+    if (!departmentName) {
+      throw new BizError('部门订必须先完善账号部门信息', 400)
+    }
+    return departmentName
+  }
+
   /**
    * 统一整理客户端传入的预订单商品明细：
    * - 商品 ID 转成字符串并去空格；
@@ -459,11 +492,11 @@ class O2oPreorderService {
     }
   }
 
-  // 线上预订核销成功后，同步沉淀为一张“散客出库单”：
-  // - showNo 使用散客流水单号，满足出库单列表“业务单号”展示要求；
-  // - orderType 固定为 walkin，确保归类到“散客单”；
+  // 线上预订核销成功后，同步沉淀为出库单：
+  // - 订单类型严格取预订单下单快照，避免“有部门账号的散客单”被误归类；
+  // - 部门单继续沿用部门流水号，散客单沿用散客流水号；
   // - 通过 idempotencyKey 绑定预订单ID，防止重复核销或重试时重复落单。
-  private async createWalkInOutboundOrderFromVerifiedPreorder(
+  private async createOutboundOrderFromVerifiedPreorder(
     manager: typeof AppDataSource.manager,
     input: {
       preorder: O2oPreorder
@@ -483,7 +516,9 @@ class O2oPreorderService {
     }
 
     const clientUser = await clientUserRepo.findOne({ where: { id: input.preorder.clientUserId } })
-    const showNo = await orderSerialService.generateOrderNo('walkin', manager)
+    const outboundOrderType = input.preorder.clientOrderType === 'department' ? 'department' : 'walkin'
+    const departmentNameSnapshot = this.resolveDepartmentNameSnapshot(outboundOrderType, clientUser)
+    const showNo = await orderSerialService.generateOrderNo(outboundOrderType, manager)
 
     let totalQty = 0
     let totalAmountCents = 0
@@ -515,11 +550,11 @@ class O2oPreorderService {
     const outboundOrder = orderRepo.create({
       orderUuid: generateOrderUuid(),
       showNo,
-      orderType: 'walkin',
+      orderType: outboundOrderType,
       hasCustomerOrder: false,
       isSystemApplied: true,
       issuerName: input.actor.displayName || input.actor.username,
-      customerDepartmentName: clientUser?.departmentName?.trim() || null,
+      customerDepartmentName: departmentNameSnapshot,
       idempotencyKey,
       customerName: clientUser?.realName?.trim() || null,
       remark: `线上预订核销出库，预订单号：${input.preorder.showNo}`,
@@ -799,6 +834,8 @@ class O2oPreorderService {
         status: order.status,
         businessStatus: order.businessStatus ?? null,
         merchantMessage: order.merchantMessage ?? null,
+        clientOrderType: order.clientOrderType === 'department' ? 'department' : 'walkin',
+        departmentNameSnapshot: order.departmentNameSnapshot?.trim() || null,
         remark: order.remark ?? null,
         updateCount,
         remainingUpdateCount: Math.max(0, clientPreorderUpdateLimit - updateCount),
@@ -1041,6 +1078,7 @@ class O2oPreorderService {
   async submit(auth: ClientAuthContext, input: SubmitPreorderInput) {
     const normalizedItems = this.normalizePreorderItems(input.items)
     const normalizedRemark = this.normalizePreorderRemark(input.remark)
+    const normalizedClientOrderType = this.normalizeClientOrderType(input.clientOrderType)
 
     const o2oRules = await systemConfigService.getO2oRuleConfigs()
     return AppDataSource.transaction(async (manager) => {
@@ -1074,6 +1112,15 @@ class O2oPreorderService {
         totalQty += row.qty
       }
 
+      const clientUser = await manager.getRepository(ClientUser).findOne({
+        where: { id: auth.userId },
+        select: ['id', 'departmentName'],
+      })
+      if (!clientUser) {
+        throw new BizError('客户端账号不存在，请重新登录后再试', 401)
+      }
+      const departmentNameSnapshot = this.resolveDepartmentNameSnapshot(normalizedClientOrderType, clientUser)
+
       // verifyCode 既用于用户端展示二维码，也作为管理端核销入口的核心识别码。
       const showNo = await this.generatePreorderShowNo(manager)
       const timeoutAt = o2oRules.autoCancelEnabled ? new Date(Date.now() + o2oRules.autoCancelHours * 60 * 60 * 1000) : null
@@ -1083,6 +1130,8 @@ class O2oPreorderService {
           clientUserId: auth.userId,
           verifyCode: randomUUID(),
           status: 'pending',
+          clientOrderType: normalizedClientOrderType,
+          departmentNameSnapshot,
           totalQty,
           remark: normalizedRemark,
           timeoutAt,
@@ -1488,6 +1537,8 @@ class O2oPreorderService {
         status: item.status,
         businessStatus: item.businessStatus ?? null,
         merchantMessage: item.merchantMessage ?? null,
+        clientOrderType: item.clientOrderType === 'department' ? 'department' : 'walkin',
+        departmentNameSnapshot: item.departmentNameSnapshot?.trim() || null,
         totalQty: item.totalQty,
         timeoutAt: item.timeoutAt,
         createdAt: item.createdAt,
@@ -1651,6 +1702,8 @@ class O2oPreorderService {
       status: item.status,
       businessStatus: item.businessStatus ?? null,
       merchantMessage: item.merchantMessage ?? null,
+      clientOrderType: item.clientOrderType === 'department' ? 'department' : 'walkin',
+      departmentNameSnapshot: item.departmentNameSnapshot?.trim() || null,
       totalQty: item.totalQty,
       timeoutAt: item.timeoutAt,
       createdAt: item.createdAt,
@@ -2023,7 +2076,7 @@ class O2oPreorderService {
     order.verifiedAt = new Date()
     order.verifiedBy = actor.displayName
     const savedOrder = await manager.getRepository(O2oPreorder).save(order)
-    await this.createWalkInOutboundOrderFromVerifiedPreorder(manager, {
+    await this.createOutboundOrderFromVerifiedPreorder(manager, {
       preorder: savedOrder,
       items,
       productMap,

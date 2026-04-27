@@ -18,6 +18,8 @@ import type {
 } from '@/constants/o2o-order-status'
 import type { PaginationQueryInput, PaginationResult } from '@/types/api'
 
+export type O2oClientOrderType = 'department' | 'walkin'
+
 export interface O2oOrderStatusReport {
   scenario: ClientOrderReportScenario
   cancelReason: 'timeout' | 'manual' | null
@@ -49,6 +51,8 @@ export interface O2oPreorderSummary {
   status: O2oOrderStatus
   businessStatus: O2oOrderBusinessStatus | null
   merchantMessage: string | null
+  clientOrderType: O2oClientOrderType
+  departmentNameSnapshot: string | null
   totalQty: number
   timeoutAt: string | null
   createdAt: string
@@ -118,6 +122,8 @@ export interface O2oPreorderDetail {
     status: O2oOrderStatus
     businessStatus: O2oOrderBusinessStatus | null
     merchantMessage: string | null
+    clientOrderType: O2oClientOrderType
+    departmentNameSnapshot: string | null
     remark: string | null
     updateCount: number
     remainingUpdateCount: number
@@ -178,6 +184,7 @@ export interface O2oInventoryLog {
 }
 
 export interface SubmitO2oPreorderPayload {
+  clientOrderType: O2oClientOrderType
   remark?: string
   items: Array<{ productId: string | number; qty: number }>
 }
