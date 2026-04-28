@@ -18,7 +18,7 @@ import {
   type DatabaseRuntimeOverrideFile,
 } from '../config/database-runtime-override.js'
 import { AppDataSource, appEntities, createDataSourceOptions } from '../config/data-source.js'
-import { env } from '../config/env.js'
+import { env, envLoadContext } from '../config/env.js'
 import type { AuthUserContext } from '../types/auth.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { BizError } from '../utils/errors.js'
@@ -175,6 +175,20 @@ export interface SQLiteToMySqlTaskRecord {
 export interface DatabaseRuntimeOverrideStateResult {
   filePath: string
   activeOverride: ReturnType<typeof maskDatabaseRuntimeOverride>
+  effectiveDatabase: {
+    dbType: 'sqlite' | 'mysql'
+    displayName: string
+    summary: string
+    source: 'environment' | 'runtime_override'
+    sourceLabel: string
+    description: string
+  }
+  beginnerGuide: {
+    headline: string
+    recommendedAction: string
+    nextStep: string
+    riskTip: string
+  }
 }
 
 type InternalMigrationTaskRecord = SQLiteToMySqlTaskRecord
@@ -276,6 +290,76 @@ function buildMysqlTargetConfig(input: MySqlMigrationTargetInput): DatabaseRunti
     DB_PASSWORD: input.password,
     DB_NAME: normalizeText(input.database),
     DB_SYNC: input.dbSync ?? false,
+  }
+}
+
+/**
+ * 当前实际生效数据库摘要：
+ * - 统一基于服务启动后已经装载完成的 env 结果判断，避免前端误把“默认配置”当成“实际运行配置”；
+ * - 若存在运行时覆盖，则明确标记来源为 runtime_override；
+ * - 若不存在运行时覆盖，则回落为 profile/env 文件决定的默认环境配置。
+ */
+function buildEffectiveDatabaseSummary(
+  activeOverride: ReturnType<typeof maskDatabaseRuntimeOverride>,
+): DatabaseRuntimeOverrideStateResult['effectiveDatabase'] {
+  const dbType = env.DB_TYPE
+  const usingRuntimeOverride = Boolean(activeOverride?.config)
+  const summary = dbType === 'mysql'
+    ? `${env.DB_HOST}:${env.DB_PORT}/${env.DB_NAME}`
+    : resolveSqliteDatabasePath()
+
+  const runtimeOverrideLabel = activeOverride?.updatedAt
+    ? `更新于 ${activeOverride.updatedAt}`
+    : '已启用'
+  let sourceLabel = `默认环境配置（APP_PROFILE：${envLoadContext.requestedProfile ?? env.APP_PROFILE}）`
+  if (usingRuntimeOverride) {
+    sourceLabel = `运行时覆盖配置（${runtimeOverrideLabel}）`
+  } else if (envLoadContext.requestedEnvFile) {
+    sourceLabel = `默认环境配置（ENV_FILE：${envLoadContext.requestedEnvFile}）`
+  }
+
+  let description = '当前服务按默认环境配置使用 SQLite，适合先完成预检再迁移到 MySQL。'
+  if (dbType === 'mysql' && usingRuntimeOverride) {
+    description = '当前服务已经按运行时覆盖配置连接到 MySQL，可继续核对连接信息或在异常时执行回退。'
+  } else if (dbType === 'mysql') {
+    description = '当前服务按默认环境配置连接到 MySQL，一般不需要再次执行 SQLite -> MySQL 迁移。'
+  } else if (usingRuntimeOverride) {
+    description = '当前服务已经按运行时覆盖配置回退到 SQLite，可继续检查数据后决定是否再次迁移。'
+  }
+
+  return {
+    dbType,
+    displayName: dbType === 'mysql' ? 'MySQL' : 'SQLite',
+    summary,
+    source: usingRuntimeOverride ? 'runtime_override' : 'environment',
+    sourceLabel,
+    description,
+  }
+}
+
+/**
+ * 面向小白用户的操作建议：
+ * - 当前若已运行在 MySQL，重点提示“无需重复迁移”；
+ * - 当前若仍运行在 SQLite，重点提示“先预检，再迁移，再切换”；
+ * - 所有文案都尽量避免底层数据库术语堆叠，直接给动作建议。
+ */
+function buildBeginnerGuide(
+  effectiveDatabase: DatabaseRuntimeOverrideStateResult['effectiveDatabase'],
+): DatabaseRuntimeOverrideStateResult['beginnerGuide'] {
+  if (effectiveDatabase.dbType === 'mysql') {
+    return {
+      headline: '当前系统已经运行在 MySQL',
+      recommendedAction: '通常无需重复执行 SQLite -> MySQL 迁移，建议先确认当前连接信息是否符合预期。',
+      nextStep: '如果只是想核对状态，请查看下方当前运行状态；如果发现目标库不对，再使用回退或重新创建迁移任务。',
+      riskTip: '重复迁移或误切换可能覆盖目标库原有数据，执行前请先确认是否真的需要再次迁移。',
+    }
+  }
+
+  return {
+    headline: '当前系统仍在使用 SQLite',
+    recommendedAction: '建议先填写目标 MySQL 信息并执行预检，确认连接与权限无误后再创建迁移任务。',
+    nextStep: '按“执行预检 -> 创建迁移任务 -> 执行迁移 -> 校验结果 -> 写入切换配置 -> 重启后端”的顺序操作最安全。',
+    riskTip: '不要跳过预检，也不要先手工改配置文件；迁移前请确认 SQLite 备份与 JSON 快照都已保留。',
   }
 }
 
@@ -1436,9 +1520,13 @@ export class DatabaseMigrationService {
   }
 
   async getRuntimeOverrideState(): Promise<DatabaseRuntimeOverrideStateResult> {
+    const activeOverride = maskDatabaseRuntimeOverride(readDatabaseRuntimeOverride())
+    const effectiveDatabase = buildEffectiveDatabaseSummary(activeOverride)
     return {
       filePath: path.resolve(backendRootDir, 'data', 'runtime', 'database-runtime-override.json'),
-      activeOverride: maskDatabaseRuntimeOverride(readDatabaseRuntimeOverride()),
+      activeOverride,
+      effectiveDatabase,
+      beginnerGuide: buildBeginnerGuide(effectiveDatabase),
     }
   }
 

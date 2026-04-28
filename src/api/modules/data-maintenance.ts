@@ -265,6 +265,20 @@ export interface DatabaseRuntimeOverrideFile {
 export interface DatabaseRuntimeOverrideStateResult {
   filePath: string
   activeOverride: DatabaseRuntimeOverrideFile | null
+  effectiveDatabase: {
+    dbType: 'sqlite' | 'mysql'
+    displayName: string
+    summary: string
+    source: 'environment' | 'runtime_override'
+    sourceLabel: string
+    description: string
+  }
+  beginnerGuide: {
+    headline: string
+    recommendedAction: string
+    nextStep: string
+    riskTip: string
+  }
 }
 
 /**

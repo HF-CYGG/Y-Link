@@ -126,6 +126,27 @@ const activeRuntimeModeLabel = computed(() => {
 })
 
 /**
+ * 面向小白用户的当前数据库摘要：
+ * - 所有“我现在到底在用什么库”的判断统一取后端返回的 effectiveDatabase；
+ * - 页面不再仅依赖覆盖文件是否存在来猜测当前模式。
+ */
+const effectiveDatabaseSummary = computed(() => {
+  return runtimeState.value?.effectiveDatabase ?? null
+})
+
+const beginnerGuide = computed(() => {
+  return runtimeState.value?.beginnerGuide ?? null
+})
+
+const migrationRecommendationTag = computed(() => {
+  return effectiveDatabaseSummary.value?.dbType === 'mysql' ? 'success' : 'warning'
+})
+
+const migrationRecommendationLabel = computed(() => {
+  return effectiveDatabaseSummary.value?.dbType === 'mysql' ? '当前无需重复迁移' : '建议先执行预检'
+})
+
+/**
  * 任务执行进度百分比：
  * - 以已完成表数 / SQLite 源表数估算；
  * - 若后端尚未开始回填表结果，则显示 0。
@@ -598,6 +619,34 @@ const getRuntimeModeTagType = (override: DatabaseRuntimeOverrideFile | null) => 
   return override.config.DB_TYPE === 'mysql' ? 'success' : 'warning'
 }
 
+const getIssuePlainLanguage = (issue: DatabaseMigrationIssue) => {
+  if (issue.code === 'source_sqlite_missing') {
+    return '系统没有找到当前 SQLite 数据文件，先确认后端是否已正常启动并生成本地数据库。'
+  }
+  if (issue.code === 'target_unreachable') {
+    return '目标 MySQL 无法连接，请检查主机、端口、防火墙和数据库服务是否已启动。'
+  }
+  if (issue.code === 'target_auth_failed') {
+    return 'MySQL 账号或密码不正确，请重新核对登录信息。'
+  }
+  if (issue.code === 'target_database_missing') {
+    return '目标数据库还不存在，需要先在 MySQL 中创建同名数据库。'
+  }
+  if (issue.code === 'target_write_denied') {
+    return '当前 MySQL 账号没有写入权限，迁移时无法建表或导入数据。'
+  }
+  if (issue.code === 'runtime_override_exists') {
+    return '系统当前已经启用了运行时数据库覆盖，请先确认当前正在使用哪个数据库，再决定是否继续迁移。'
+  }
+  if (issue.level === 'warning') {
+    return '这是一条风险提示，通常还能继续，但建议先处理后再迁移。'
+  }
+  if (issue.level === 'error') {
+    return '这是阻断问题，处理完成前不建议继续创建或执行迁移任务。'
+  }
+  return '这是环境说明信息，可帮助你理解当前迁移上下文。'
+}
+
 /**
  * 时间格式化：
  * - 统一治理页内的时间显示口径；
@@ -781,6 +830,112 @@ onMounted(() => {
           <section class="apple-card space-y-4 p-5 sm:p-6">
             <div class="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-4 dark:border-white/5">
               <div>
+                <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">先看当前数据库</h2>
+                <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                  先确认系统此刻实际使用的是 SQLite 还是 MySQL，再决定是否继续迁移、切换或回退。
+                </p>
+              </div>
+              <el-tag :type="migrationRecommendationTag" effect="light">
+                {{ migrationRecommendationLabel }}
+              </el-tag>
+            </div>
+
+            <div class="grid gap-4 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+              <div class="rounded-2xl border border-slate-200/80 bg-slate-50/80 p-4 dark:border-white/10 dark:bg-slate-900/20">
+                <p class="text-sm text-slate-500 dark:text-slate-400">当前实际生效数据库</p>
+                <div class="mt-2 flex flex-wrap items-center gap-2">
+                  <p class="text-2xl font-semibold text-slate-900 dark:text-slate-100">
+                    {{ effectiveDatabaseSummary?.displayName || '-' }}
+                  </p>
+                  <el-tag :type="effectiveDatabaseSummary?.dbType === 'mysql' ? 'success' : 'warning'" effect="light">
+                    {{ effectiveDatabaseSummary?.source === 'runtime_override' ? '运行时覆盖生效' : '默认环境生效' }}
+                  </el-tag>
+                </div>
+                <p class="mt-3 text-sm leading-6 text-slate-600 dark:text-slate-300">
+                  {{ effectiveDatabaseSummary?.description || '正在读取当前数据库状态...' }}
+                </p>
+                <div class="mt-4 grid gap-3 sm:grid-cols-2">
+                  <div class="rounded-2xl bg-white px-4 py-3 dark:bg-slate-950/40">
+                    <p class="text-xs text-slate-400">当前连接摘要</p>
+                    <p class="mt-1 break-all text-sm font-medium text-slate-700 dark:text-slate-200">
+                      {{ effectiveDatabaseSummary?.summary || '-' }}
+                    </p>
+                  </div>
+                  <div class="rounded-2xl bg-white px-4 py-3 dark:bg-slate-950/40">
+                    <p class="text-xs text-slate-400">配置来源</p>
+                    <p class="mt-1 text-sm font-medium text-slate-700 dark:text-slate-200">
+                      {{ effectiveDatabaseSummary?.sourceLabel || '-' }}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div class="rounded-2xl border border-slate-200/80 bg-white p-4 dark:border-white/10 dark:bg-slate-950/30">
+                <p class="text-sm font-semibold text-slate-700 dark:text-slate-200">给小白的推荐操作</p>
+                <div class="mt-3 space-y-3 text-sm leading-6 text-slate-600 dark:text-slate-300">
+                  <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-slate-900/40">
+                    <p class="text-xs text-slate-400">现在是什么情况</p>
+                    <p class="mt-1 font-medium text-slate-700 dark:text-slate-200">{{ beginnerGuide?.headline || '-' }}</p>
+                  </div>
+                  <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-slate-900/40">
+                    <p class="text-xs text-slate-400">推荐你现在做什么</p>
+                    <p class="mt-1">{{ beginnerGuide?.recommendedAction || '-' }}</p>
+                  </div>
+                  <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-slate-900/40">
+                    <p class="text-xs text-slate-400">下一步怎么走</p>
+                    <p class="mt-1">{{ beginnerGuide?.nextStep || '-' }}</p>
+                  </div>
+                  <div class="rounded-2xl bg-amber-50 px-4 py-3 text-amber-700 dark:bg-amber-500/10 dark:text-amber-200">
+                    <p class="text-xs opacity-80">风险提醒</p>
+                    <p class="mt-1">{{ beginnerGuide?.riskTip || '-' }}</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section class="apple-card space-y-4 p-5 sm:p-6">
+            <div class="border-b border-slate-100 pb-4 dark:border-white/5">
+              <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">迁移步骤说明</h2>
+              <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                如果你不熟悉数据库，只要按下面顺序操作即可，不建议跳步。
+              </p>
+            </div>
+            <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              <div class="rounded-2xl border border-slate-200/80 bg-slate-50/80 p-4 dark:border-white/10 dark:bg-slate-900/20">
+                <p class="text-xs font-semibold text-slate-400">第 1 步</p>
+                <p class="mt-2 text-sm font-semibold text-slate-800 dark:text-slate-100">确认当前数据库</p>
+                <p class="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">
+                  先看上方“当前实际生效数据库”，确认系统现在到底运行在 SQLite 还是 MySQL。
+                </p>
+              </div>
+              <div class="rounded-2xl border border-slate-200/80 bg-slate-50/80 p-4 dark:border-white/10 dark:bg-slate-900/20">
+                <p class="text-xs font-semibold text-slate-400">第 2 步</p>
+                <p class="mt-2 text-sm font-semibold text-slate-800 dark:text-slate-100">填写 MySQL 信息并预检</p>
+                <p class="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">
+                  把目标 MySQL 的主机、端口、账号、密码、库名填好，先执行预检，不要直接迁移。
+                </p>
+              </div>
+              <div class="rounded-2xl border border-slate-200/80 bg-slate-50/80 p-4 dark:border-white/10 dark:bg-slate-900/20">
+                <p class="text-xs font-semibold text-slate-400">第 3 步</p>
+                <p class="mt-2 text-sm font-semibold text-slate-800 dark:text-slate-100">创建并执行迁移任务</p>
+                <p class="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">
+                  预检通过后再创建任务并执行，系统会先备份 SQLite，再导入到 MySQL。
+                </p>
+              </div>
+              <div class="rounded-2xl border border-slate-200/80 bg-slate-50/80 p-4 dark:border-white/10 dark:bg-slate-900/20">
+                <p class="text-xs font-semibold text-slate-400">第 4 步</p>
+                <p class="mt-2 text-sm font-semibold text-slate-800 dark:text-slate-100">确认结果后切换或回退</p>
+                <p class="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">
+                  迁移成功后再切换到 MySQL；若发现异常，先回退到 SQLite，并按提示重启后端。
+                </p>
+              </div>
+            </div>
+          </section>
+
+          <section class="apple-card space-y-4 p-5 sm:p-6">
+            <div class="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-4 dark:border-white/5">
+              <div>
                 <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">当前运行状态</h2>
                 <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
                   展示数据库运行时覆盖文件、当前模式与可回退目标，帮助管理员确认此刻应用实际使用的数据库来源，并避免在线下手工改配置后与页面状态不一致。
@@ -792,6 +947,12 @@ onMounted(() => {
             </div>
 
             <el-descriptions :column="2" border>
+                <el-descriptions-item label="实际生效数据库">
+                  {{ runtimeState?.effectiveDatabase?.displayName || '-' }}
+                </el-descriptions-item>
+                <el-descriptions-item label="当前建议动作">
+                  {{ runtimeState?.beginnerGuide?.recommendedAction || '-' }}
+                </el-descriptions-item>
               <el-descriptions-item label="覆盖文件路径">
                 {{ runtimeState?.filePath || '-' }}
               </el-descriptions-item>
@@ -928,6 +1089,7 @@ onMounted(() => {
                     v-for="issue in precheckResult.issues"
                     :key="`${issue.code}-${issue.message}`"
                     :title="issue.message"
+                    :description="getIssuePlainLanguage(issue)"
                     :type="issue.level === 'error' ? 'error' : issue.level === 'warning' ? 'warning' : 'info'"
                     :closable="false"
                     show-icon

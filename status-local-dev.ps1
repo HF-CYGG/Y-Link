@@ -9,6 +9,8 @@ $ErrorActionPreference = 'Stop'
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RuntimeRoot = Join-Path $ProjectRoot '.local-dev'
 $PidFile = Join-Path $RuntimeRoot 'processes.json'
+$BackendRoot = Join-Path $ProjectRoot 'backend'
+$RuntimeOverrideFile = Join-Path $BackendRoot 'data\runtime\database-runtime-override.json'
 
 function Write-Info {
   param([string]$Message)
@@ -105,12 +107,63 @@ function Test-HttpReady {
   }
 }
 
+# 读取数据库运行时覆盖文件：
+# - 用于判断当前本地后端是否已经切换到 MySQL；
+# - 读取失败时按“未启用覆盖”处理，避免状态脚本因单个文件异常中断。
+function Get-RuntimeOverrideState {
+  if (-not (Test-Path $RuntimeOverrideFile)) {
+    return $null
+  }
+
+  try {
+    return Get-Content -Path $RuntimeOverrideFile -Raw | ConvertFrom-Json
+  }
+  catch {
+    return $null
+  }
+}
+
+# 输出统一的当前数据库摘要：
+# - 若存在 MySQL 覆盖，则优先展示 MySQL；
+# - 若存在 SQLite 覆盖，则展示回退后的 SQLite；
+# - 若不存在覆盖，则回落为本地默认 SQLite 记录。
+function Get-EffectiveDatabaseSummary {
+  param($Record)
+
+  $runtimeOverride = Get-RuntimeOverrideState
+  if ($runtimeOverride -and $runtimeOverride.config -and $runtimeOverride.config.DB_TYPE -eq 'mysql') {
+    return @{
+      mode = 'mysql'
+      displayName = 'MySQL'
+      summary = "$($runtimeOverride.config.DB_HOST):$($runtimeOverride.config.DB_PORT)/$($runtimeOverride.config.DB_NAME)"
+      source = '运行时覆盖配置'
+    }
+  }
+
+  if ($runtimeOverride -and $runtimeOverride.config -and $runtimeOverride.config.DB_TYPE -eq 'sqlite' -and $runtimeOverride.config.SQLITE_DB_PATH) {
+    return @{
+      mode = 'sqlite'
+      displayName = 'SQLite'
+      summary = [string]$runtimeOverride.config.SQLITE_DB_PATH
+      source = '运行时覆盖配置'
+    }
+  }
+
+  return @{
+    mode = 'sqlite'
+    displayName = 'SQLite'
+    summary = [string]$Record.sqlitePath
+    source = '默认本地环境配置'
+  }
+}
+
 if (-not (Test-Path $PidFile)) {
   Write-Info '本地联调当前未记录为运行中。'
   exit 0
 }
 
 $record = Get-Content -Path $PidFile -Raw | ConvertFrom-Json
+$effectiveDatabase = Get-EffectiveDatabaseSummary -Record $record
 $frontendScheme = if ($record.frontendScheme) { [string]$record.frontendScheme } elseif ($record.frontendHttps) { 'https' } else { 'http' }
 $frontendLocalHostForHealthCheck = if ($frontendScheme -eq 'https') { 'localhost' } else { '127.0.0.1' }
 $frontendUrl = "${frontendScheme}://$frontendLocalHostForHealthCheck`:$($record.frontendPort)"
@@ -135,7 +188,9 @@ Write-Info "StartedAt: $($record.startedAt)"
 Write-Info "Frontend: $frontendUrl"
 Write-Info "Backend:  $backendUrl"
 Write-Info "Frontend host: $frontendHost"
-Write-Info "SQLite:   $($record.sqlitePath)"
+Write-Info "当前数据库: $($effectiveDatabase.displayName)"
+Write-Info "数据库来源: $($effectiveDatabase.source)"
+Write-Info "数据库摘要: $($effectiveDatabase.summary)"
 Write-Info "Backend shell alive: $backendShellAlive"
 Write-Info "Frontend shell alive: $frontendShellAlive"
 Write-Info "Backend listening PIDs: $($(if ($backendListeningPids.Count) { $backendListeningPids -join ', ' } else { 'none' }))"

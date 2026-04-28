@@ -191,7 +191,9 @@ const preorderOwnershipLabel = computed(() => {
     return ''
   }
   const order = preorderDetail.value.order
-  return `${ORDER_TYPE_LABEL_MAP[order.clientOrderType]}${order.departmentNameSnapshot ? ` / ${order.departmentNameSnapshot}` : ''}`
+  const orderTypeLabel = ORDER_TYPE_LABEL_MAP[order.clientOrderType]
+  const departmentLabel = order.departmentNameSnapshot ? ` / ${order.departmentNameSnapshot}` : ''
+  return `${orderTypeLabel}${departmentLabel}`
 })
 
 const returnRequestResultHint = computed(() => {

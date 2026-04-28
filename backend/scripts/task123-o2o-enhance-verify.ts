@@ -23,6 +23,7 @@ import { productService } from '../src/services/product.service.js'
 import { systemConfigService } from '../src/services/system-config.service.js'
 import type { AuthUserContext } from '../src/types/auth.js'
 import type { ClientAuthContext } from '../src/types/client-auth.js'
+import type { O2oPreorderDetailView } from '../src/services/o2o-preorder.service.js'
 
 const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
@@ -138,6 +139,7 @@ async function main() {
   const onsiteOrder = await o2oPreorderService.submit(clientAuth, {
     items: [{ productId: adjustBaseProduct.id, qty: 2 }],
     remark: '待现场改单',
+    clientOrderType: 'walkin',
   })
   const onsiteAdjusted = await o2oPreorderService.updateOrderOnsite(adminActor, {
     orderId: onsiteOrder.order.id,
@@ -169,9 +171,10 @@ async function main() {
   assert.equal(onsiteAdjustLogs.length >= 2, true)
   pass('门店现场改单会回写订单明细、备注与预订库存')
 
-  const onsiteVerified = await o2oPreorderService.verifyByCode(onsiteAdjusted.order.verifyCode, adminActor)
-  assert.equal(onsiteVerified.verifyTargetType, 'preorder')
-  assert.equal(onsiteVerified.detail.order.status, 'verified')
+  const onsiteVerifiedResult = await o2oPreorderService.verifyByCode(onsiteAdjusted.order.verifyCode, adminActor)
+  assert.equal(onsiteVerifiedResult.verifyTargetType, 'preorder')
+  const onsiteVerifiedDetail = onsiteVerifiedResult.detail as O2oPreorderDetailView
+  assert.equal(onsiteVerifiedDetail.order.status, 'verified')
   const verifiedBaseProduct = await productRepo.findOneByOrFail({ id: adjustBaseProduct.id })
   const verifiedExtraProduct = await productRepo.findOneByOrFail({ id: adjustExtraProduct.id })
   assert.equal(verifiedBaseProduct.currentStock, 19)
@@ -191,11 +194,13 @@ async function main() {
   const returnOrder = await o2oPreorderService.submit(clientAuth, {
     items: [{ productId: returnProduct.id, qty: 2 }],
     remark: '待退货拒绝验证',
+    clientOrderType: 'walkin',
   })
-  const verifiedReturnOrder = await o2oPreorderService.verifyByCode(returnOrder.order.verifyCode, adminActor)
-  assert.equal(verifiedReturnOrder.verifyTargetType, 'preorder')
-  assert.equal(verifiedReturnOrder.detail.order.status, 'verified')
-  const returnRequest = await o2oPreorderService.createReturnRequest(clientAuth, verifiedReturnOrder.detail.order.id, {
+  const verifiedReturnOrderResult = await o2oPreorderService.verifyByCode(returnOrder.order.verifyCode, adminActor)
+  assert.equal(verifiedReturnOrderResult.verifyTargetType, 'preorder')
+  const verifiedReturnOrderDetail = verifiedReturnOrderResult.detail as O2oPreorderDetailView
+  assert.equal(verifiedReturnOrderDetail.order.status, 'verified')
+  const returnRequest = await o2oPreorderService.createReturnRequest(clientAuth, verifiedReturnOrderDetail.order.id, {
     reason: '尺码不符',
     items: [{ productId: returnProduct.id, qty: 1 }],
   })
@@ -232,7 +237,7 @@ async function main() {
   pass('退货拒绝会强制校验原因、保留处理轨迹，并阻止后续回库核销')
 
   const completedOrder = await o2oPreorderService.updateBusinessStatus({
-    orderId: verifiedReturnOrder.detail.order.id,
+    orderId: verifiedReturnOrderDetail.order.id,
     businessStatus: 'completed',
   })
   assert.equal(completedOrder.order.businessStatus, 'completed')

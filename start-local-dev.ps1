@@ -33,6 +33,7 @@ $FrontendErrorLog = Join-Path $RuntimeRoot 'frontend.error.log'
 $LocalSqlitePath = Join-Path $BackendRoot 'data/local-dev/y-link.local-dev.sqlite'
 $EffectiveBackendEnvFile = Join-Path $RuntimeRoot "backend.$BackendProfile.$BackendPort.env"
 $ChildProcessInputFile = Join-Path $RuntimeRoot 'child-process.stdin.txt'
+$RuntimeOverrideFile = Join-Path $BackendRoot 'data\runtime\database-runtime-override.json'
 $FrontendScheme = if ($FrontendHttps) { 'https' } else { 'http' }
 $FrontendLocalHostForHealthCheck = if ($FrontendHttps) { 'localhost' } else { '127.0.0.1' }
 
@@ -152,6 +153,54 @@ function Stop-ProcessTree {
 function Write-Info {
   param([string]$Message)
   Write-Host "[local-dev] $Message"
+}
+
+# 读取数据库运行时覆盖文件：
+# - 若本地环境此前已经通过迁移助手切换到 MySQL，这里可直接识别；
+# - 启动脚本只做“读取并展示”，不修改任何覆盖配置。
+function Get-RuntimeOverrideState {
+  if (-not (Test-Path $RuntimeOverrideFile)) {
+    return $null
+  }
+
+  try {
+    return Get-Content -Path $RuntimeOverrideFile -Raw | ConvertFrom-Json
+  }
+  catch {
+    return $null
+  }
+}
+
+# 统一输出“当前实际生效数据库”摘要：
+# - 有运行时覆盖时，以覆盖配置为准；
+# - 没有覆盖时，回退为本地默认 SQLite；
+# - 这样启动脚本和管理端迁移页面的判断口径保持一致。
+function Get-EffectiveDatabaseSummary {
+  $runtimeOverride = Get-RuntimeOverrideState
+  if ($runtimeOverride -and $runtimeOverride.config -and $runtimeOverride.config.DB_TYPE -eq 'mysql') {
+    return @{
+      mode = 'mysql'
+      displayName = 'MySQL'
+      summary = "$($runtimeOverride.config.DB_HOST):$($runtimeOverride.config.DB_PORT)/$($runtimeOverride.config.DB_NAME)"
+      source = '运行时覆盖配置'
+    }
+  }
+
+  if ($runtimeOverride -and $runtimeOverride.config -and $runtimeOverride.config.DB_TYPE -eq 'sqlite' -and $runtimeOverride.config.SQLITE_DB_PATH) {
+    return @{
+      mode = 'sqlite'
+      displayName = 'SQLite'
+      summary = [string]$runtimeOverride.config.SQLITE_DB_PATH
+      source = '运行时覆盖配置'
+    }
+  }
+
+  return @{
+    mode = 'sqlite'
+    displayName = 'SQLite'
+    summary = $LocalSqlitePath
+    source = '默认本地环境配置'
+  }
 }
 
 function Get-ListeningProcessIds {
@@ -588,6 +637,7 @@ try {
 
   $backendListeningPids = @(Get-ListeningProcessIds -Port $BackendPort)
   $frontendListeningPids = @(Get-ListeningProcessIds -Port $FrontendPort)
+  $effectiveDatabase = Get-EffectiveDatabaseSummary
 
   @{
     backendShellPid = $backendProcess.Id
@@ -617,13 +667,15 @@ try {
   Write-Info "客户端登录: ${FrontendScheme}://$FrontendLocalHostForHealthCheck`:$FrontendPort/client/login"
   Write-Info "客户端首页: ${FrontendScheme}://$FrontendLocalHostForHealthCheck`:$FrontendPort/client/mall"
   Write-Info "后端健康:   http://127.0.0.1:$BackendPort/health"
-  Write-Info "SQLite 数据库: $LocalSqlitePath"
+  Write-Info "当前数据库: $($effectiveDatabase.displayName)"
+  Write-Info "数据库来源: $($effectiveDatabase.source)"
+  Write-Info "数据库摘要: $($effectiveDatabase.summary)"
   Write-Info "Backend env: $EffectiveBackendEnvFile"
   Write-Info "Backend log:  $BackendLog"
   Write-Info "Backend err:  $BackendErrorLog"
   Write-Info "Frontend log: $FrontendLog"
   Write-Info "Frontend err: $FrontendErrorLog"
-  Write-Info "说明：当前本地链路使用一个 Vite 开发服务器同时提供管理端与客户端页面，数据库为随后台自动初始化的本地 SQLite，前端协议为 $FrontendScheme。"
+  Write-Info "说明：当前本地链路使用一个 Vite 开发服务器同时提供管理端与客户端页面；数据库优先以运行时覆盖配置为准，若未启用覆盖则使用本地默认 SQLite；前端协议为 $FrontendScheme。"
   if ($FrontendHost -eq '0.0.0.0' -or $FrontendHost -eq '*') {
     $lanIpAddresses = @(Get-LanIPv4Addresses)
     if ($lanIpAddresses.Count -gt 0) {

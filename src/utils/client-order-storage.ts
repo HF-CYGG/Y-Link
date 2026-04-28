@@ -65,9 +65,7 @@ const normalizeBusinessStatus = (value: unknown): O2oOrderBusinessStatus | null 
 
 // 详细注释：商家留言用于补充退货、异常处理等上下文，缓存恢复时统一裁剪空白并将空串视为 null。
 const normalizeMerchantMessage = (value: unknown) => {
-  return typeof value === 'string' && value.trim()
-    ? value.trim()
-    : null
+  return normalizeOptionalTrimmedText(value)
 }
 
 const normalizeClientOrderType = (value: unknown): O2oPreorderSummary['clientOrderType'] => {
@@ -75,6 +73,11 @@ const normalizeClientOrderType = (value: unknown): O2oPreorderSummary['clientOrd
 }
 
 const normalizeDepartmentNameSnapshot = (value: unknown) => {
+  return normalizeOptionalTrimmedText(value)
+}
+
+// 详细注释：统一收敛“可为空的文本快照”恢复规则，避免多个字段各自复制相同的裁剪与空值判断逻辑。
+const normalizeOptionalTrimmedText = (value: unknown) => {
   return typeof value === 'string' && value.trim()
     ? value.trim()
     : null

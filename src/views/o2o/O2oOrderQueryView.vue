@@ -293,12 +293,18 @@ const getOrderTypeLabel = (orderType: O2oPreorderSummary['clientOrderType']) => 
   return ORDER_TYPE_LABEL_MAP[orderType]
 }
 
+const buildOwnershipLabel = (orderType: O2oPreorderSummary['clientOrderType'], departmentNameSnapshot: string | null) => {
+  const orderTypeLabel = getOrderTypeLabel(orderType)
+  const departmentLabel = departmentNameSnapshot ? ` / ${departmentNameSnapshot}` : ''
+  return `${orderTypeLabel}${departmentLabel}`
+}
+
 const activeOrderOwnership = computed(() => {
   const order = activeOrderDetail.value?.order
   if (!order) {
     return '未选择订单'
   }
-  return `${getOrderTypeLabel(order.clientOrderType)}${order.departmentNameSnapshot ? ` / ${order.departmentNameSnapshot}` : ''}`
+  return buildOwnershipLabel(order.clientOrderType, order.departmentNameSnapshot)
 })
 
 // 管理端状态选择保留门店当前对外使用的核心业务状态，并新增“已完结（交易结束）”。

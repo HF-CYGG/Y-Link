@@ -416,6 +416,14 @@ class O2oPreorderService {
       : Number(product.limitPerUser || 5)
   }
 
+  private getRequiredProduct(productMap: Map<string, BaseProduct>, productId: string) {
+    const product = productMap.get(productId)
+    if (!product) {
+      throw new BizError('存在无效商品', 400)
+    }
+    return product
+  }
+
   private async generateReturnRequestNo(manager = AppDataSource.manager): Promise<string> {
     // 退货申请单号采用独立前缀，便于核销台与线下门店快速区分“取货码 / 退货码”。
     const dateText = new Date().toISOString().slice(0, 10).replaceAll('-', '')
@@ -1095,7 +1103,7 @@ class O2oPreorderService {
       const productMap = new Map(products.map((item) => [String(item.id), item]))
       let totalQty = 0
       for (const row of normalizedItems) {
-        const product = productMap.get(row.productId)!
+        const product = this.getRequiredProduct(productMap, row.productId)
         if (!product.isActive || product.o2oStatus !== 'listed') {
           throw new BizError(`商品「${product.productName}」已下架，不可预订`, 409)
         }
@@ -1147,7 +1155,7 @@ class O2oPreorderService {
       await manager.getRepository(O2oPreorderItem).save(itemEntities)
 
       for (const row of normalizedItems) {
-        const product = productMap.get(row.productId)!
+        const product = this.getRequiredProduct(productMap, row.productId)
         const beforeCurrentStock = Number(product.currentStock ?? 0)
         const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
         // 下单成功后只增加预订占用库存，不减少现货库存；
