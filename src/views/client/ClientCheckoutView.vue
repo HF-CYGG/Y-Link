@@ -1,14 +1,20 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/client/ClientCheckoutView.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：负责客户端确认订单页的下单归属选择、商品清单确认、备注填写与预订单提交。
+ * 实现逻辑：
+ * - 结算页默认按“散客”下单，避免系统根据账号资料自动推断成部门单，减少误下单；
+ * - 用户若主动切换为“部门订”，提交前必须再次确认，确保其明确知晓订单会归入部门出库；
+ * - 真正提交成功后再清理购物车并跳转订单详情页，避免前端先删数据导致状态丢失。
+ * 维护说明：
+ * - 若后续继续扩展下单归属类型，需要同步调整本页选项卡、提交校验和确认文案；
+ * - 若后端修改预订单入参结构，需要同步检查 `submitO2oPreorder` 的 payload 拼装逻辑。
  */
 
 
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { submitO2oPreorder, type O2oClientOrderType } from '@/api/modules/o2o'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
@@ -29,7 +35,9 @@ const clientCartStore = useClientCartStore()
 const { runWithGate } = useIdempotentAction()
 
 const remark = ref('')
-const clientOrderType = ref<O2oClientOrderType>(clientAuthStore.currentUser?.departmentName?.trim() ? 'department' : 'walkin')
+// 详细注释：结算页始终默认走“散客”模式，只有用户主动点选“部门订”才切换，
+// 这样可以避免因为账号资料里恰好有部门信息，导致用户未感知地提交成部门单。
+const clientOrderType = ref<O2oClientOrderType>('walkin')
 const submitting = ref(false)
 
 onMounted(() => {
@@ -50,10 +58,10 @@ const isDepartmentOrder = computed(() => clientOrderType.value === 'department')
 const orderTypeDescription = computed(() => {
   if (isDepartmentOrder.value) {
     return currentDepartmentName.value
-      ? `将按部门单处理，核销后会归入部门出库单：${currentDepartmentName.value}`
+      ? `已切换为部门订，提交时还需再次确认，核销后会归入部门出库单：${currentDepartmentName.value}`
       : '部门订需要先在个人资料中完善部门信息'
   }
-  return '将按散客单处理，不会归入任何部门'
+  return '当前默认按散客下单，如需归入部门，请主动切换为部门订'
 })
 
 const handleBack = () => {
@@ -72,6 +80,24 @@ const handleSubmit = async () => {
   if (isDepartmentOrder.value && !currentDepartmentName.value) {
     ElMessage.warning('部门订需要先完善账号部门信息')
     return
+  }
+  if (isDepartmentOrder.value) {
+    try {
+      // 详细注释：部门单会影响后续门店出库归属，因此在真正提交前增加一次显式确认，
+      // 防止用户误触了“部门订”卡片后直接下单。
+      await ElMessageBox.confirm(
+        `当前将按“部门订”提交，核销后会归入部门：${currentDepartmentName.value}。请确认是否继续提交？`,
+        '确认提交部门订单',
+        {
+          confirmButtonText: '确认提交',
+          cancelButtonText: '返回检查',
+          type: 'warning',
+          distinguishCancelAndClose: true,
+        },
+      )
+    } catch {
+      return
+    }
   }
 
   const runResult = await runWithGate({
@@ -144,6 +170,7 @@ const handleSubmit = async () => {
 
       <div class="mb-4 rounded-[1.2rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
         <p class="mb-3 text-sm font-semibold text-slate-700">下单归属</p>
+        <p class="mb-3 text-xs leading-5 text-slate-400">默认按散客下单，如需归入部门，请主动选择“部门订”并在提交前再次确认。</p>
         <div class="grid grid-cols-2 gap-3">
           <button
             type="button"
