@@ -58,7 +58,7 @@ const props = withDefaults(
  */
 const resolvedEditableFields = computed<OrderVoucherEditableFields>(() => ({
   ...createEmptyEditableFields(),
-  ...(props.editableFields ?? {}),
+  ...props.editableFields,
 }))
 
 /**
@@ -159,18 +159,18 @@ const printTimestamp = formatDateTime(new Date())
         </colgroup>
         <tbody>
           <tr>
-            <th colspan="6" class="voucher-title-cell">野辙文创出库单（一式两份）</th>
+            <th colspan="6" scope="colgroup" class="voucher-title-cell">野辙文创出库单（一式两份）</th>
           </tr>
           <tr>
-            <th>申请部门</th>
+            <th scope="row">申请部门</th>
             <td>{{ props.order.customerDepartmentName || '散客' }}</td>
-            <th>部门经办人</th>
+            <th scope="row">部门经办人</th>
             <td class="is-editable-cell">
               <span class="editable-line" :class="{ 'is-empty': !resolvedEditableFields.departmentOperator.trim() }">
                 {{ getEditableFieldDisplay(resolvedEditableFields.departmentOperator) }}
               </span>
             </td>
-            <th>金蝶单据编号</th>
+            <th scope="row">金蝶单据编号</th>
             <td class="is-editable-cell">
               <span class="editable-line" :class="{ 'is-empty': !resolvedEditableFields.kingdeeVoucherNo.trim() }">
                 {{ getEditableFieldDisplay(resolvedEditableFields.kingdeeVoucherNo) }}
@@ -178,19 +178,19 @@ const printTimestamp = formatDateTime(new Date())
             </td>
           </tr>
           <tr>
-            <th>业务单号</th>
+            <th scope="row">业务单号</th>
             <td>{{ props.order.showNo }}</td>
-            <th>出库人</th>
+            <th scope="row">出库人</th>
             <td>{{ props.order.issuerName || '-' }}</td>
-            <th>开单时间</th>
+            <th scope="row">开单时间</th>
             <td>{{ formatDateTime(props.order.createdAt) }}</td>
           </tr>
           <tr>
-            <th colspan="2">产品名称</th>
-            <th>单价</th>
-            <th>数量</th>
-            <th>总价</th>
-            <th>备注</th>
+            <th colspan="2" scope="colgroup">产品名称</th>
+            <th scope="col">单价</th>
+            <th scope="col">数量</th>
+            <th scope="col">总价</th>
+            <th scope="col">备注</th>
           </tr>
           <tr v-for="item in props.order.items" :key="item.id">
             <td colspan="2" class="text-left" :class="{ 'is-wrap': shouldWrapProductName(item.productName) }">
@@ -209,14 +209,14 @@ const printTimestamp = formatDateTime(new Date())
             <td>&nbsp;</td>
           </tr>
           <tr class="voucher-total-row">
-            <th colspan="4">总计</th>
+            <th colspan="4" scope="rowgroup">总计</th>
             <td>{{ formatAmount(props.order.totalAmount) }}</td>
             <td>{{ props.order.remark || '' }}</td>
           </tr>
           <tr class="voucher-sign-label-row">
-            <th colspan="2">领取人签字</th>
-            <th colspan="2">出库人签字</th>
-            <th colspan="2">完成日期/签字</th>
+            <th colspan="2" scope="colgroup">领取人签字</th>
+            <th colspan="2" scope="colgroup">出库人签字</th>
+            <th colspan="2" scope="colgroup">完成日期/签字</th>
           </tr>
           <tr class="voucher-sign-value-row">
             <td colspan="2" class="is-editable-cell">

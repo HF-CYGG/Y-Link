@@ -23,7 +23,7 @@ import { productService } from '../src/services/product.service.js'
 import { systemConfigService } from '../src/services/system-config.service.js'
 import type { AuthUserContext } from '../src/types/auth.js'
 import type { ClientAuthContext } from '../src/types/client-auth.js'
-import type { O2oPreorderDetailView } from '../src/services/o2o-preorder.service.js'
+import type { O2oPreorderDetailView, O2oVerifyDetailView, O2oVerifyResultView } from '../src/services/o2o-preorder.service.js'
 
 const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
@@ -88,6 +88,19 @@ async function registerAndLoginClient(seed: number): Promise<ClientAuthContext> 
     captchaCode: readCaptchaCode(loginCaptcha.captchaSvg),
   })
   return clientAuthService.resolveClientByToken(loginResult.token)
+}
+
+/**
+ * 校验并收窄核销详情类型：
+ * - `verifyByCode` 与 `getVerifyDetail` 返回的是“预订单/退货单”联合类型；
+ * - 当前脚本这几段断言只接受预订单详情，因此在读取 `detail.order` 前先做显式守卫；
+ * - 这样既能消除 TypeScript 报错，也能让脚本在接口返回异常类型时第一时间失败。
+ */
+function assertPreorderVerifyDetail(
+  verifyResult: O2oVerifyResultView | O2oVerifyDetailView,
+): O2oPreorderDetailView {
+  assert.equal(verifyResult.verifyTargetType, 'preorder')
+  return verifyResult.detail as O2oPreorderDetailView
 }
 
 async function ensureReady() {
@@ -172,8 +185,7 @@ async function main() {
   pass('门店现场改单会回写订单明细、备注与预订库存')
 
   const onsiteVerifiedResult = await o2oPreorderService.verifyByCode(onsiteAdjusted.order.verifyCode, adminActor)
-  assert.equal(onsiteVerifiedResult.verifyTargetType, 'preorder')
-  const onsiteVerifiedDetail = onsiteVerifiedResult.detail as O2oPreorderDetailView
+  const onsiteVerifiedDetail = assertPreorderVerifyDetail(onsiteVerifiedResult)
   assert.equal(onsiteVerifiedDetail.order.status, 'verified')
   const verifiedBaseProduct = await productRepo.findOneByOrFail({ id: adjustBaseProduct.id })
   const verifiedExtraProduct = await productRepo.findOneByOrFail({ id: adjustExtraProduct.id })
@@ -197,8 +209,7 @@ async function main() {
     clientOrderType: 'walkin',
   })
   const verifiedReturnOrderResult = await o2oPreorderService.verifyByCode(returnOrder.order.verifyCode, adminActor)
-  assert.equal(verifiedReturnOrderResult.verifyTargetType, 'preorder')
-  const verifiedReturnOrderDetail = verifiedReturnOrderResult.detail as O2oPreorderDetailView
+  const verifiedReturnOrderDetail = assertPreorderVerifyDetail(verifiedReturnOrderResult)
   assert.equal(verifiedReturnOrderDetail.order.status, 'verified')
   const returnRequest = await o2oPreorderService.createReturnRequest(clientAuth, verifiedReturnOrderDetail.order.id, {
     reason: '尺码不符',

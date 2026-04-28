@@ -887,16 +887,13 @@ const handleExportVoucherPdf = async () => {
   .order-voucher-print-root .order-voucher-print-scope.is-landscape {
     width: 281mm;
     max-width: 281mm;
+    min-height: 194mm;
   }
 
   .order-voucher-print-root .order-voucher-print-scope.is-portrait {
     width: 194mm;
     max-width: 194mm;
     min-height: 279mm;
-  }
-
-  .order-voucher-print-root .order-voucher-print-scope.is-landscape {
-    min-height: 194mm;
   }
 }
 </style>
