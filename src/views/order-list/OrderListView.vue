@@ -5,7 +5,8 @@
  * 实现逻辑：
  * 1. 复用列表 composable 提供的详情查询结果，不新增服务端接口；
  * 2. 在页面层维护正式出库单的临时补填字段，切换单据时自动重置，不写回数据库；
- * 3. 预览区与打印区共用同一个模板组件，确保用户看到什么、打印出来就是什么。
+ * 3. 预览区与打印区共用同一个模板组件，确保用户看到什么、打印出来就是什么；
+ * 4. 正式出库单仅对部门单开放，散客单不显示入口，也不能通过事件绕过直接打开。
  */
 
 import dayjs from 'dayjs'
@@ -88,6 +89,7 @@ const exportPdfLoading = ref(false)
 const voucherEditableForm = reactive<OrderVoucherEditableFields>(createEmptyVoucherEditableFields())
 const voucherOrientation = ref<VoucherOrientation>('landscape')
 const voucherOrientationLabel = computed(() => (voucherOrientation.value === 'landscape' ? '横版' : '竖版'))
+const canUseOrderVoucher = computed(() => currentOrder.value?.orderType === 'department')
 const hasActiveFilter = computed(() => {
   return Boolean(searchForm.value.keyword || searchForm.value.orderType !== 'all' || searchForm.value.dateRange)
 })
@@ -111,14 +113,30 @@ watch(
   },
 )
 
+watch(
+  () => currentOrder.value?.orderType ?? 'walkin',
+  (orderType) => {
+    // 详细注释：正式出库单现在只服务“部门单”，当用户切换到散客单详情时，
+    // 需要立即关闭弹窗并清空打印态，避免继续保留上一张部门单的模板界面造成误解。
+    if (orderType !== 'department') {
+      voucherDialogVisible.value = false
+    }
+  },
+)
+
 /**
  * 打开正式出库单弹窗：
  * - 前提是详情数据已经加载完成；
+ * - 仅部门单允许打开；
  * - 弹窗内提供补填表单与正式模板预览，供用户核对后打印。
  */
 const handleOpenVoucherDialog = () => {
   if (!currentOrder.value) {
     ElMessage.warning('请先加载单据详情')
+    return
+  }
+  if (currentOrder.value.orderType !== 'department') {
+    ElMessage.info('正式出库单仅适用于部门单，散客单无需生成')
     return
   }
 
@@ -426,7 +444,7 @@ const handleExportVoucherPdf = async () => {
       <template #header>
         <div class="order-detail-drawer-header">
           <span class="order-detail-drawer-header__title">单据详情</span>
-          <el-button v-if="currentOrder" plain type="primary" @click="handleOpenVoucherDialog">正式出库单</el-button>
+          <el-button v-if="canUseOrderVoucher" plain type="primary" @click="handleOpenVoucherDialog">正式出库单</el-button>
         </div>
       </template>
       <template #default="{ isPhone, isDesktop }">
@@ -441,6 +459,7 @@ const handleExportVoucherPdf = async () => {
     </BizResponsiveDrawerShell>
 
     <el-dialog
+      v-if="canUseOrderVoucher && currentOrder"
       v-model="voucherDialogVisible"
       title="正式出库单"
       width="1100px"
@@ -450,7 +469,7 @@ const handleExportVoucherPdf = async () => {
       :modal-append-to-body="true"
       :lock-scroll="true"
     >
-      <div v-if="currentOrder" class="voucher-editor-banner">
+      <div class="voucher-editor-banner">
         <div class="voucher-editor-banner__title">正式出库单字段说明</div>
         <div class="voucher-editor-banner__content">
           <span>{{ ORDER_VOUCHER_FIXED_FIELDS_TEXT }}</span>
@@ -459,7 +478,7 @@ const handleExportVoucherPdf = async () => {
           <span>本期补填内容仅在当前页面临时生效，不回写数据库。</span>
         </div>
       </div>
-      <div v-if="currentOrder" class="voucher-workbench">
+      <div class="voucher-workbench">
         <section class="voucher-editor-panel">
           <div class="voucher-editor-panel__header">
             <div>
@@ -539,7 +558,12 @@ const handleExportVoucherPdf = async () => {
     </el-dialog>
 
     <Teleport to="body">
-      <div v-if="currentOrder && voucherDialogVisible" ref="voucherPrintRootRef" class="order-voucher-print-root" aria-hidden="true">
+      <div
+        v-if="canUseOrderVoucher && currentOrder && voucherDialogVisible"
+        ref="voucherPrintRootRef"
+        class="order-voucher-print-root"
+        aria-hidden="true"
+      >
         <div class="order-voucher-print-scope" :class="`is-${voucherOrientation}`">
           <OrderVoucherTemplate
             :order="currentOrder"
