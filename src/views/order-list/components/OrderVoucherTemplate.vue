@@ -1,17 +1,89 @@
 <script setup lang="ts">
 /**
- * 模块说明：src/views/order-list/components/OrderVoucherTemplate.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：`src/views/order-list/components/OrderVoucherTemplate.vue`
+ * 文件职责：渲染正式出库单打印模板，统一承接详情自动填充字段、前端临时补填字段、横竖版版芯以及分页输出。
+ * 实现逻辑：
+ * 1. 模板改为与用户参考图同类的“单主表格”结构，避免导出时多段布局被压缩变形；
+ * 2. 所有联次共享一份数据模型，但每联强制独立分页，保证每页只放一份；
+ * 3. 横版和竖版共用同一模板，通过方向 props 切换列宽、字体和空白补齐行数；
+ * 4. 部门经办人、金蝶单据编号与底部签字字段继续由父层传入，仅在当前页面临时生效。
  */
 
-
+import { computed } from 'vue'
 import dayjs from 'dayjs'
 import type { OrderDetailResult } from '@/api/modules/order'
 
-const props = defineProps<{
-  order: OrderDetailResult
-}>()
+interface OrderVoucherEditableFields {
+  departmentOperator: string
+  kingdeeVoucherNo: string
+  receiverSignature: string
+  issuerSignature: string
+  completionSignature: string
+}
+
+type VoucherOrientation = 'portrait' | 'landscape'
+
+const createEmptyEditableFields = (): OrderVoucherEditableFields => ({
+  departmentOperator: '',
+  kingdeeVoucherNo: '',
+  receiverSignature: '',
+  issuerSignature: '',
+  completionSignature: '',
+})
+
+const props = withDefaults(
+  defineProps<{
+    order: OrderDetailResult
+    editableFields?: OrderVoucherEditableFields
+    copyLabels?: string[]
+    orientation?: VoucherOrientation
+  }>(),
+  {
+    editableFields: () => ({
+      departmentOperator: '',
+      kingdeeVoucherNo: '',
+      receiverSignature: '',
+      issuerSignature: '',
+      completionSignature: '',
+    }),
+    copyLabels: () => ['第一联（部门留存）', '第二联（财务留存）'],
+    orientation: 'landscape',
+  },
+)
+
+/**
+ * 统一归并补填字段：
+ * - 先给出空白默认值，避免父组件漏传时模板渲染异常；
+ * - 这样模板内部始终只消费结构稳定的对象，不需要到处判空。
+ */
+const resolvedEditableFields = computed<OrderVoucherEditableFields>(() => ({
+  ...createEmptyEditableFields(),
+  ...(props.editableFields ?? {}),
+}))
+
+/**
+ * 复制联次配置：
+ * - 正式出库单默认一式两份；
+ * - 保留 props 能力，便于后续按业务场景调整联次文案。
+ */
+const voucherCopies = computed(() => {
+  return props.copyLabels.map((label, index) => ({
+    key: `${props.order.id}-${index}`,
+    label,
+  }))
+})
+
+const isLandscape = computed(() => props.orientation === 'landscape')
+
+// 详细注释：图 2 版式的底部签字区要求位置稳定，因此在明细不足时需要补齐空白行，
+// 否则导出 PDF 时会出现签字区上浮、两联高度不一致的问题。
+const minimumRowCount = computed(() => {
+  return isLandscape.value ? 12 : 16
+})
+
+const fillerRowCount = computed(() => {
+  return Math.max(0, minimumRowCount.value - props.order.items.length)
+})
 
 const formatAmount = (value: string | number | null | undefined) => {
   const normalizedValue = Number(value ?? 0)
@@ -29,434 +101,344 @@ const formatQty = (value: string | number | null | undefined) => {
   return normalizedValue.toFixed(2)
 }
 
-const getOrderTypeLabel = (value: OrderDetailResult['orderType']) => {
-  return value === 'department' ? '部门单' : '散客单'
-}
-
 const getVisualLength = (value: string | null | undefined) => {
   return Array.from(String(value ?? '')).reduce((total, character) => total + ((character.codePointAt(0) ?? 0) > 255 ? 2 : 1), 0)
 }
 
 const shouldWrapProductName = (value: string | null | undefined) => {
-  return getVisualLength(value) > 20
+  return getVisualLength(value) > (isLandscape.value ? 30 : 18)
 }
 
 const shouldWrapRemark = (value: string | null | undefined) => {
-  return getVisualLength(value) > 24
+  return getVisualLength(value) > (isLandscape.value ? 18 : 12)
 }
 
+/**
+ * 规范明细备注展示：
+ * - 明细备注为空时统一展示短横线；
+ * - 保持纸质单据中“有值展示、无值留痕”的可读性。
+ */
 const getItemRemark = (value: string | null | undefined) => {
   const normalizedValue = String(value ?? '').trim()
   return normalizedValue || '-'
 }
+
+const getEditableFieldDisplay = (value: string | null | undefined) => {
+  const normalizedValue = String(value ?? '').trim()
+  return normalizedValue || ' '
+}
+
+const formatDateTime = (value: string | number | Date | null | undefined) => {
+  return dayjs(value).format('YYYY-MM-DD HH:mm:ss')
+}
+
+const printTimestamp = formatDateTime(new Date())
 </script>
 
 <template>
-  <article class="voucher-sheet">
-    <header class="voucher-header">
-      <div class="voucher-header__meta">
-        <span>店铺：海右野辙文创店</span>
-        <span>打印时间：{{ dayjs().format('YYYY-MM-DD HH:mm:ss') }}</span>
-      </div>
-      <h3 class="voucher-title">野辙文创出库单</h3>
-      <p class="voucher-subtitle">信息核对留存联 · 一式两份</p>
-    </header>
+  <section class="voucher-print-document" :class="[`is-${props.orientation}`]">
+    <article
+      v-for="copy in voucherCopies"
+      :key="copy.key"
+      class="voucher-sheet"
+      :class="[`voucher-sheet--${props.orientation}`]"
+    >
+      <header class="voucher-sheet__meta">
+        <span class="voucher-copy-label">{{ copy.label }}</span>
+        <span>打印时间：{{ printTimestamp }}</span>
+      </header>
 
-    <section class="voucher-body">
-      <table class="voucher-table voucher-table--meta">
+      <table class="voucher-master-table" :class="[`voucher-master-table--${props.orientation}`]">
+        <colgroup>
+          <col class="col-label" />
+          <col class="col-value-wide" />
+          <col class="col-label" />
+          <col class="col-value-wide" />
+          <col class="col-label" />
+          <col class="col-value-wide" />
+        </colgroup>
         <tbody>
           <tr>
-            <th scope="row">业务单号</th>
-            <td colspan="3" class="is-strong">{{ props.order.showNo }}</td>
-            <th scope="row">订单类型</th>
-            <td colspan="3">{{ getOrderTypeLabel(props.order.orderType) }}</td>
+            <th colspan="6" class="voucher-title-cell">野辙文创出库单（一式两份）</th>
           </tr>
           <tr>
-            <th scope="row">开单时间</th>
-            <td colspan="3">{{ dayjs(props.order.createdAt).format('YYYY-MM-DD HH:mm:ss') }}</td>
-            <th scope="row">客户部门</th>
-            <td colspan="3">{{ props.order.customerDepartmentName || '散客' }}</td>
+            <th>申请部门</th>
+            <td>{{ props.order.customerDepartmentName || '散客' }}</td>
+            <th>部门经办人</th>
+            <td class="is-editable-cell">
+              <span class="editable-line" :class="{ 'is-empty': !resolvedEditableFields.departmentOperator.trim() }">
+                {{ getEditableFieldDisplay(resolvedEditableFields.departmentOperator) }}
+              </span>
+            </td>
+            <th>金蝶单据编号</th>
+            <td class="is-editable-cell">
+              <span class="editable-line" :class="{ 'is-empty': !resolvedEditableFields.kingdeeVoucherNo.trim() }">
+                {{ getEditableFieldDisplay(resolvedEditableFields.kingdeeVoucherNo) }}
+              </span>
+            </td>
           </tr>
           <tr>
-            <th scope="row">领取人</th>
-            <td colspan="2">{{ props.order.customerName || '-' }}</td>
-            <th scope="row">出库人</th>
-            <td colspan="2">{{ props.order.issuerName || '-' }}</td>
-            <th scope="row">开单人</th>
-            <td>{{ props.order.creatorDisplayName || props.order.creatorUsername || '-' }}</td>
+            <th>业务单号</th>
+            <td>{{ props.order.showNo }}</td>
+            <th>出库人</th>
+            <td>{{ props.order.issuerName || '-' }}</td>
+            <th>开单时间</th>
+            <td>{{ formatDateTime(props.order.createdAt) }}</td>
           </tr>
           <tr>
-            <th scope="row">备注</th>
-            <td colspan="7">{{ props.order.remark || '-' }}</td>
+            <th colspan="2">产品名称</th>
+            <th>单价</th>
+            <th>数量</th>
+            <th>总价</th>
+            <th>备注</th>
+          </tr>
+          <tr v-for="item in props.order.items" :key="item.id">
+            <td colspan="2" class="text-left" :class="{ 'is-wrap': shouldWrapProductName(item.productName) }">
+              {{ item.productName || '-' }}
+            </td>
+            <td>{{ formatAmount(item.unitPrice) }}</td>
+            <td>{{ formatQty(item.qty) }}</td>
+            <td>{{ formatAmount(item.subTotal) }}</td>
+            <td :class="{ 'is-wrap': shouldWrapRemark(item.remark) }">{{ getItemRemark(item.remark) }}</td>
+          </tr>
+          <tr v-for="index in fillerRowCount" :key="`filler-${copy.key}-${index}`" class="voucher-filler-row">
+            <td colspan="2">&nbsp;</td>
+            <td>&nbsp;</td>
+            <td>&nbsp;</td>
+            <td>&nbsp;</td>
+            <td>&nbsp;</td>
+          </tr>
+          <tr class="voucher-total-row">
+            <th colspan="4">总计</th>
+            <td>{{ formatAmount(props.order.totalAmount) }}</td>
+            <td>{{ props.order.remark || '' }}</td>
+          </tr>
+          <tr class="voucher-sign-label-row">
+            <th colspan="2">领取人签字</th>
+            <th colspan="2">出库人签字</th>
+            <th colspan="2">完成日期/签字</th>
+          </tr>
+          <tr class="voucher-sign-value-row">
+            <td colspan="2" class="is-editable-cell">
+              <span class="editable-line" :class="{ 'is-empty': !resolvedEditableFields.receiverSignature.trim() }">
+                {{ getEditableFieldDisplay(resolvedEditableFields.receiverSignature) }}
+              </span>
+            </td>
+            <td colspan="2" class="is-editable-cell">
+              <span class="editable-line" :class="{ 'is-empty': !resolvedEditableFields.issuerSignature.trim() }">
+                {{ getEditableFieldDisplay(resolvedEditableFields.issuerSignature) }}
+              </span>
+            </td>
+            <td colspan="2" class="is-editable-cell">
+              <span class="editable-line" :class="{ 'is-empty': !resolvedEditableFields.completionSignature.trim() }">
+                {{ getEditableFieldDisplay(resolvedEditableFields.completionSignature) }}
+              </span>
+            </td>
           </tr>
         </tbody>
       </table>
-
-      <section class="voucher-items">
-        <h4 class="voucher-items__title">出库明细</h4>
-        <table class="voucher-table voucher-table--items">
-          <thead>
-            <tr>
-              <th scope="col">序号</th>
-              <th scope="col">产品编码</th>
-              <th scope="col">产品名称</th>
-              <th scope="col">单价</th>
-              <th scope="col">数量</th>
-              <th scope="col">小计</th>
-              <th scope="col">备注</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr v-for="(item, index) in props.order.items" :key="item.id">
-              <td>{{ index + 1 }}</td>
-              <td>{{ item.productCode || '-' }}</td>
-              <td :class="{ 'is-wrap': shouldWrapProductName(item.productName) }">{{ item.productName || '-' }}</td>
-              <td>¥{{ formatAmount(item.unitPrice) }}</td>
-              <td>{{ formatQty(item.qty) }}</td>
-              <td>¥{{ formatAmount(item.subTotal) }}</td>
-              <td :class="{ 'is-wrap': shouldWrapRemark(item.remark) }">{{ getItemRemark(item.remark) }}</td>
-            </tr>
-          </tbody>
-        </table>
-      </section>
-
-      <section class="voucher-summary">
-        <div class="voucher-summary__item">
-          <span class="voucher-summary__label">商品行数</span>
-          <span class="voucher-summary__value">{{ props.order.items.length }}</span>
-        </div>
-        <div class="voucher-summary__item">
-          <span class="voucher-summary__label">总数量</span>
-          <span class="voucher-summary__value">{{ formatQty(props.order.totalQty) }}</span>
-        </div>
-        <div class="voucher-summary__item voucher-summary__item--amount">
-          <span class="voucher-summary__label">总金额</span>
-          <span class="voucher-summary__value">¥{{ formatAmount(props.order.totalAmount) }}</span>
-        </div>
-      </section>
-
-      <footer class="voucher-sign">
-        <div class="voucher-sign__item">
-          <span>制单人</span>
-          <span class="voucher-sign__line"></span>
-        </div>
-        <div class="voucher-sign__item">
-          <span>领取人</span>
-          <span class="voucher-sign__line"></span>
-        </div>
-        <div class="voucher-sign__item">
-          <span>审核人</span>
-          <span class="voucher-sign__line"></span>
-        </div>
-      </footer>
-    </section>
-  </article>
+    </article>
+  </section>
 </template>
 
 <style scoped>
-.voucher-sheet {
-  border: 0;
-  border-radius: 0;
-  background: #fff;
-  padding: 12px 10px;
-  color: #0f172a;
-  width: 100%;
-  box-sizing: border-box;
-}
-
-.voucher-header {
-  border-bottom: 1px solid #111;
-  padding-bottom: 8px;
-}
-
-.voucher-header__meta {
+.voucher-print-document {
   display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: fit-content;
+  min-width: 100%;
+}
+
+.voucher-sheet {
+  background: #fff;
+  padding: 0;
+  color: #0f172a;
+  box-sizing: border-box;
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+.voucher-sheet--landscape {
+  width: 281mm;
+}
+
+.voucher-sheet--portrait {
+  width: 194mm;
+}
+
+.voucher-sheet__meta {
+  display: flex;
+  align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
   font-size: 12px;
-  color: #111;
+  color: #334155;
 }
 
-.voucher-title {
-  margin: 0;
-  text-align: center;
-  font-size: 26px;
+.voucher-copy-label {
   font-weight: 700;
-  letter-spacing: 0.03em;
+  color: #111827;
 }
 
-.voucher-subtitle {
-  margin: 4px 0 0;
-  text-align: center;
-  font-size: 12px;
-  color: #111;
-}
-
-.voucher-body {
-  margin-top: 10px;
-}
-
-.voucher-table {
+.voucher-master-table {
   width: 100%;
   border-collapse: collapse;
-  table-layout: auto;
+  table-layout: fixed;
 }
 
-.voucher-table th,
-.voucher-table td {
+.voucher-master-table th,
+.voucher-master-table td {
   border: 1px solid #111;
-  padding: 8px 6px;
+  padding: 6px 4px;
   font-size: 13px;
+  line-height: 1.45;
   vertical-align: middle;
   text-align: center;
   word-break: break-word;
 }
 
-.voucher-table th {
+.voucher-master-table th {
   font-weight: 700;
+  background: #f3f4f6;
   color: #111;
 }
 
-.voucher-table--meta th {
-  width: 12%;
-  background: transparent;
+.voucher-title-cell {
+  background: #fff !important;
+  font-size: 24px !important;
+  letter-spacing: 0.06em;
+  padding: 10px 8px !important;
 }
 
-.voucher-table--meta td {
-  color: #111;
-  font-weight: 500;
+.voucher-master-table .col-label {
+  width: 11%;
 }
 
-.voucher-table--meta .is-strong {
-  font-weight: 700;
-  letter-spacing: 0.02em;
+.voucher-master-table .col-value-wide {
+  width: 22.3333%;
 }
 
-.voucher-items {
-  margin-top: 10px;
+.voucher-master-table td.text-left {
+  text-align: left;
+  padding-left: 8px;
+  padding-right: 8px;
 }
 
-.voucher-items__title {
-  margin: 0 0 8px;
-  font-size: 20px;
-  font-weight: 700;
-}
-
-.voucher-table--items th {
-  background: transparent;
-  text-align: center;
-}
-
-.voucher-table--items {
-  table-layout: auto;
-  width: 100%;
-  max-width: 100%;
-}
-
-.voucher-table--items th,
-.voucher-table--items td {
-  box-sizing: border-box;
-  padding-left: 10px;
-  padding-right: 10px;
-  text-align: center;
-}
-
-.voucher-table--items th:nth-child(1),
-.voucher-table--items td:nth-child(1) {
-  width: 1%;
-  white-space: nowrap;
-}
-
-.voucher-table--items th:nth-child(2),
-.voucher-table--items td:nth-child(2) {
-  width: 1%;
-  white-space: nowrap;
-}
-
-.voucher-table--items th:nth-child(3),
-.voucher-table--items td:nth-child(3) {
-  width: 1%;
-  min-width: 12ch;
-  white-space: nowrap;
-}
-
-.voucher-table--items th:nth-child(4),
-.voucher-table--items td:nth-child(4),
-.voucher-table--items th:nth-child(5),
-.voucher-table--items td:nth-child(5),
-.voucher-table--items th:nth-child(6),
-.voucher-table--items td:nth-child(6) {
-  width: 1%;
-  white-space: nowrap;
-}
-
-.voucher-table--items th:nth-child(7),
-.voucher-table--items td:nth-child(7) {
-  width: auto;
-  min-width: 18ch;
-  white-space: nowrap;
-}
-
-.voucher-table--items td.is-wrap {
-  white-space: normal !important;
+.voucher-master-table td.is-wrap {
+  white-space: normal;
   overflow-wrap: anywhere;
 }
 
-.voucher-summary {
-  margin-top: 8px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-}
-
-.voucher-summary__item {
-  min-width: 0;
-  border: 0;
-  padding: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  flex: 1 1 0;
-  white-space: nowrap;
-}
-
-.voucher-summary__label {
-  font-size: 12px;
-  color: #111;
-}
-
-.voucher-summary__value {
-  font-size: 14px;
+.voucher-total-row th,
+.voucher-total-row td,
+.voucher-sign-label-row th {
   font-weight: 700;
-  color: #111;
 }
 
-.voucher-sign {
-  margin-top: 10px;
-  display: flex;
-  justify-content: space-between;
-  gap: 20px;
-  border-top: 1px dashed #111;
-  padding-top: 10px;
+.voucher-filler-row td {
+  height: 28px;
 }
 
-.voucher-sign__item {
-  flex: 1;
-  display: flex;
+.voucher-sheet--portrait .voucher-filler-row td {
+  height: 24px;
+}
+
+.is-editable-cell {
+  background: #fcfcfc;
+}
+
+.editable-line {
+  min-height: 24px;
+  width: 100%;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  font-size: 13px;
+  justify-content: flex-start;
+  padding: 0 4px;
+  box-sizing: border-box;
+  white-space: pre-wrap;
 }
 
-.voucher-sign__line {
-  flex: 1;
-  min-height: 20px;
-  border-bottom: 1px solid #111;
+.editable-line.is-empty {
+  color: transparent;
+}
+
+@media (max-width: 1200px) {
+  .voucher-sheet--landscape,
+  .voucher-sheet--portrait {
+    width: 100%;
+  }
 }
 
 @media (max-width: 900px) {
   .voucher-sheet {
-    padding: 10px 8px;
+    width: 100%;
   }
 
-  .voucher-header__meta {
+  .voucher-sheet__meta {
     flex-direction: column;
-    gap: 4px;
+    align-items: flex-start;
   }
 
-  .voucher-title {
-    font-size: 22px;
-  }
-
-  .voucher-items__title {
-    font-size: 18px;
-  }
-
-  .voucher-summary {
-    flex-direction: row;
-    gap: 8px;
-  }
-
-  .voucher-table th,
-  .voucher-table td {
-    padding: 8px 6px;
-    font-size: 13px;
-  }
-
-  .voucher-table--items th,
-  .voucher-table--items td {
-    padding-left: 8px;
-    padding-right: 8px;
+  .voucher-master-table th,
+  .voucher-master-table td {
+    font-size: 12px;
+    padding: 5px 4px;
   }
 }
 
 @media print {
-  @page {
-    size: A4 portrait;
-    margin: 8mm;
+  .voucher-print-document {
+    gap: 0;
+    min-width: auto;
   }
 
   .voucher-sheet {
-    border: 0;
-    border-radius: 0;
-    box-shadow: none;
-    padding: 5mm 4mm;
     color: #000;
-    page-break-inside: auto;
-    break-inside: auto;
   }
 
-  .voucher-header,
-  .voucher-sign {
-    border-color: #000;
+  .voucher-sheet:not(:last-child) {
+    page-break-after: always;
+    break-after: page;
   }
 
-  .voucher-table th,
-  .voucher-table td {
+  .voucher-sheet__meta,
+  .voucher-copy-label {
+    color: #000;
+  }
+
+  .voucher-master-table th,
+  .voucher-master-table td,
+  .editable-line {
     border-color: #000;
     color: #000;
+  }
+
+  .voucher-master-table th,
+  .voucher-master-table td {
     font-size: 11px;
-    padding: 5px 4px;
+    padding: 4px 3px;
   }
 
-  .voucher-table--items th,
-  .voucher-table--items td {
-    padding-left: 7px;
-    padding-right: 7px;
+  .voucher-title-cell {
+    font-size: 20px !important;
   }
 
-  .voucher-table--meta th,
-  .voucher-table--items th {
-    background: transparent;
+  .voucher-sheet--landscape {
+    width: 281mm;
   }
 
-  .voucher-summary {
-    justify-content: space-between;
-    flex-direction: row;
-    gap: 8px;
+  .voucher-sheet--portrait {
+    width: 194mm;
   }
 
-  .voucher-summary__label,
-  .voucher-summary__value {
-    color: #000;
+  .voucher-filler-row td {
+    height: 20px;
   }
 
-  .voucher-table thead {
-    display: table-header-group;
-  }
-
-  .voucher-table--items tbody tr {
-    page-break-inside: avoid;
-    break-inside: avoid;
-  }
-
-  .voucher-summary,
-  .voucher-sign {
-    page-break-inside: avoid;
-    break-inside: avoid;
+  .voucher-sheet--portrait .voucher-filler-row td {
+    height: 18px;
   }
 }
 </style>

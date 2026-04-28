@@ -11,6 +11,7 @@ export interface ExportVoucherPdfOptions {
   filename: string
   marginMm?: number
   scale?: number
+  orientation?: 'portrait' | 'landscape'
 }
 
 const resolveHtml2PdfFactory = async () => {
@@ -28,6 +29,7 @@ export const exportVoucherPdf = async (options: ExportVoucherPdfOptions) => {
   const factory = await resolveHtml2PdfFactory()
   const margin = options.marginMm ?? 8
   const scale = options.scale ?? 2
+  const orientation = options.orientation ?? 'portrait'
 
   await factory()
     .set({
@@ -43,7 +45,7 @@ export const exportVoucherPdf = async (options: ExportVoucherPdfOptions) => {
       jsPDF: {
         unit: 'mm',
         format: 'a4',
-        orientation: 'portrait',
+        orientation,
         compress: true,
       },
       pagebreak: {
