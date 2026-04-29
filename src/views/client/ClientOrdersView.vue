@@ -25,6 +25,23 @@ const ORDER_TYPE_LABEL_MAP = {
   department: '部门订',
   walkin: '散客',
 } as const
+const RETURN_REQUEST_STATUS_META = {
+  pending: {
+    label: '待门店核销',
+    className: 'bg-amber-50 text-amber-700',
+    description: '退货申请已提交，请携带商品与退货码到店处理。',
+  },
+  verified: {
+    label: '退货已完成',
+    className: 'bg-emerald-50 text-emerald-700',
+    description: '门店已完成退货核销，可在订单详情中查看本次退货记录。',
+  },
+  rejected: {
+    label: '退货已拒绝',
+    className: 'bg-rose-50 text-rose-700',
+    description: '门店已拒绝本次退货申请，请查看拒绝原因后再决定是否联系门店。',
+  },
+} as const
 
 // 关键词防抖窗口：连续输入时只在停顿后更新筛选词，避免每次按键都触发大列表过滤。
 const KEYWORD_DEBOUNCE_MS = 260
@@ -119,6 +136,9 @@ const handleStatusChange = (value: 'all' | O2oPreorderSummary['status']) => {
 
 const buildOrderSummaryFromDetail = (detail: O2oPreorderDetail): O2oPreorderSummary => {
   const { order } = detail
+  const latestReturnRequest = detail.returnRequests
+    .slice()
+    .sort((prev, next) => new Date(next.createdAt).getTime() - new Date(prev.createdAt).getTime())[0] ?? null
   return {
     id: order.id,
     showNo: order.showNo,
@@ -130,6 +150,16 @@ const buildOrderSummaryFromDetail = (detail: O2oPreorderDetail): O2oPreorderSumm
     departmentNameSnapshot: order.departmentNameSnapshot,
     returnRequestCount: detail.returnRequests.length,
     pendingReturnRequestCount: detail.returnRequests.filter((item) => item.status === 'pending').length,
+    latestReturnRequest: latestReturnRequest
+      ? {
+          id: latestReturnRequest.id,
+          returnNo: latestReturnRequest.returnNo,
+          status: latestReturnRequest.status,
+          createdAt: latestReturnRequest.createdAt,
+          handledAt: latestReturnRequest.handledAt,
+          rejectedReason: latestReturnRequest.rejectedReason,
+        }
+      : null,
     statusReport: order.statusReport,
     totalAmount: order.totalAmount,
     expireInSeconds: order.expireInSeconds,
@@ -141,6 +171,13 @@ const buildOrderSummaryFromDetail = (detail: O2oPreorderDetail): O2oPreorderSumm
 
 const getBusinessStatusMeta = (order: O2oPreorderSummary) => {
   return getO2oOrderBusinessStatusMeta(order.businessStatus)
+}
+
+const getLatestReturnRequestMeta = (order: O2oPreorderSummary) => {
+  if (!order.latestReturnRequest) {
+    return null
+  }
+  return RETURN_REQUEST_STATUS_META[order.latestReturnRequest.status]
 }
 
 const loadOrders = async (force = false) => {
@@ -333,6 +370,21 @@ onMounted(async () => {
         <div class="mt-3 rounded-2xl px-3 py-2" :class="getOrderStatusReport(order).cardClassName">
           <p class="text-sm font-semibold">{{ getOrderStatusReport(order).cardTitle }}</p>
           <p class="mt-1 text-xs">{{ getOrderStatusReport(order).cardDescription }}</p>
+        </div>
+        <div
+          v-if="getLatestReturnRequestMeta(order)"
+          class="mt-3 rounded-2xl px-3 py-2"
+          :class="getLatestReturnRequestMeta(order)?.className"
+        >
+          <p class="text-sm font-semibold">
+            退货状态：{{ getLatestReturnRequestMeta(order)?.label }}
+          </p>
+          <p class="mt-1 text-xs">
+            {{ getLatestReturnRequestMeta(order)?.description }}
+          </p>
+          <p class="mt-1 text-[11px] opacity-80">
+            退货单号：{{ order.latestReturnRequest?.returnNo }}
+          </p>
         </div>
         <div
           v-if="getBusinessStatusMeta(order)"

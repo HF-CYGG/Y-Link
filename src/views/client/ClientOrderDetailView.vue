@@ -406,6 +406,11 @@ const buildOrderSummaryFromDetail = (nextDetail: O2oPreorderDetail): O2oPreorder
     departmentNameSnapshot: order.departmentNameSnapshot,
     returnRequestCount: nextDetail.returnRequests.length,
     pendingReturnRequestCount: nextDetail.returnRequests.filter((item) => item.status === 'pending').length,
+    latestReturnRequest: nextDetail.returnRequests.length
+      ? nextDetail.returnRequests
+          .slice()
+          .sort((prev, next) => new Date(next.createdAt).getTime() - new Date(prev.createdAt).getTime())[0]
+      : null,
     statusReport: order.statusReport,
     totalAmount: order.totalAmount,
     expireInSeconds: order.expireInSeconds,

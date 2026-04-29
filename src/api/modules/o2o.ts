@@ -55,6 +55,14 @@ export interface O2oPreorderSummary {
   departmentNameSnapshot: string | null
   returnRequestCount: number
   pendingReturnRequestCount: number
+  latestReturnRequest: {
+    id: string
+    returnNo: string
+    status: O2oReturnRequestStatus
+    createdAt: string
+    handledAt: string | null
+    rejectedReason: string | null
+  } | null
   totalQty: number
   timeoutAt: string | null
   createdAt: string

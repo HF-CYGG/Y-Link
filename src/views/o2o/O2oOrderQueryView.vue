@@ -559,6 +559,9 @@ const loadOrderDetail = async (id: string) => {
 
 const mergeOrderSummaryFromDetail = (detail: O2oPreorderDetail) => {
   const nextOrder = detail.order
+  const latestReturnRequest = detail.returnRequests
+    .slice()
+    .sort((prev, next) => parseTimeMs(next.createdAt) - parseTimeMs(prev.createdAt))[0] ?? null
   const nextSummary: O2oPreorderSummary = {
     id: nextOrder.id,
     showNo: nextOrder.showNo,
@@ -570,6 +573,16 @@ const mergeOrderSummaryFromDetail = (detail: O2oPreorderDetail) => {
     departmentNameSnapshot: nextOrder.departmentNameSnapshot,
     returnRequestCount: detail.returnRequests.length,
     pendingReturnRequestCount: detail.returnRequests.filter((item) => item.status === 'pending').length,
+    latestReturnRequest: latestReturnRequest
+      ? {
+          id: latestReturnRequest.id,
+          returnNo: latestReturnRequest.returnNo,
+          status: latestReturnRequest.status,
+          createdAt: latestReturnRequest.createdAt,
+          handledAt: latestReturnRequest.handledAt,
+          rejectedReason: latestReturnRequest.rejectedReason,
+        }
+      : null,
     totalQty: nextOrder.totalQty,
     timeoutAt: nextOrder.timeoutAt,
     createdAt: nextOrder.createdAt,

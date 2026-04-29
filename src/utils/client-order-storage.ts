@@ -96,6 +96,10 @@ const normalizeOrderRow = (item: unknown): O2oPreorderSummary | null => {
     return null
   }
   const timeoutAt = typeof row.timeoutAt === 'string' ? row.timeoutAt : null
+  const latestReturnRequest =
+    row.latestReturnRequest && typeof row.latestReturnRequest === 'object'
+      ? (row.latestReturnRequest as Record<string, unknown>)
+      : null
   return {
     id,
     showNo,
@@ -109,6 +113,20 @@ const normalizeOrderRow = (item: unknown): O2oPreorderSummary | null => {
     statusReport: normalizeStatusReport(row, status, timeoutAt),
     returnRequestCount: Number.isFinite(row.returnRequestCount) ? Number(row.returnRequestCount) : 0,
     pendingReturnRequestCount: Number.isFinite(row.pendingReturnRequestCount) ? Number(row.pendingReturnRequestCount) : 0,
+    latestReturnRequest: latestReturnRequest
+      ? {
+          id: String(latestReturnRequest.id ?? ''),
+          returnNo: String(latestReturnRequest.returnNo ?? ''),
+          status:
+            latestReturnRequest.status === 'verified' || latestReturnRequest.status === 'rejected'
+              ? latestReturnRequest.status
+              : 'pending',
+          createdAt: typeof latestReturnRequest.createdAt === 'string' ? latestReturnRequest.createdAt : '',
+          handledAt: typeof latestReturnRequest.handledAt === 'string' ? latestReturnRequest.handledAt : null,
+          rejectedReason:
+            typeof latestReturnRequest.rejectedReason === 'string' ? latestReturnRequest.rejectedReason : null,
+        }
+      : null,
     totalQty: Number.isFinite(row.totalQty) ? Number(row.totalQty) : 0,
     totalAmount: typeof row.totalAmount === 'string' ? row.totalAmount : undefined,
     expireInSeconds: Number.isFinite(row.expireInSeconds) ? Number(row.expireInSeconds) : undefined,

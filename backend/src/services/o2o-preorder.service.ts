@@ -109,6 +109,14 @@ export interface O2oPreorderSummaryView {
   departmentNameSnapshot: string | null
   returnRequestCount: number
   pendingReturnRequestCount: number
+  latestReturnRequest: {
+    id: string
+    returnNo: string
+    status: O2oReturnRequestStatus
+    createdAt: Date
+    handledAt: Date | null
+    rejectedReason: string | null
+  } | null
   totalQty: number
   timeoutAt: Date | null
   createdAt: Date
@@ -959,6 +967,57 @@ class O2oPreorderService {
     )
   }
 
+  /**
+   * 汇总订单最近一笔退货申请摘要：
+   * - 客户端订单列表只需要展示“最新退货状态”，无需把完整退货商品明细都塞进列表接口；
+   * - 这里按 createdAt / id 倒序取每个订单的第一笔，保证多笔退货时仍能优先看到最新进度。
+   */
+  private async resolveLatestReturnRequestSummaryMap(orderIds: string[]) {
+    if (!orderIds.length) {
+      return new Map<
+        string,
+        {
+          id: string
+          returnNo: string
+          status: O2oReturnRequestStatus
+          createdAt: Date
+          handledAt: Date | null
+          rejectedReason: string | null
+        }
+      >()
+    }
+    const rows = await this.returnRequestRepo.find({
+      where: { orderId: In(orderIds) },
+      order: { createdAt: 'DESC', id: 'DESC' },
+    })
+    const summaryMap = new Map<
+      string,
+      {
+        id: string
+        returnNo: string
+        status: O2oReturnRequestStatus
+        createdAt: Date
+        handledAt: Date | null
+        rejectedReason: string | null
+      }
+    >()
+    rows.forEach((item) => {
+      const orderId = String(item.orderId)
+      if (summaryMap.has(orderId)) {
+        return
+      }
+      summaryMap.set(orderId, {
+        id: String(item.id),
+        returnNo: item.returnNo,
+        status: item.status,
+        createdAt: item.createdAt,
+        handledAt: item.handledAt,
+        rejectedReason: item.rejectedReason ?? null,
+      })
+    })
+    return summaryMap
+  }
+
   async listMallProducts() {
     // 商城端只暴露“可售且已上架”的商品，并把库存口径统一换算成前端直接可用的 availableStock。
     const products = await this.productRepo.find({
@@ -1562,6 +1621,7 @@ class O2oPreorderService {
     const nowMs = Date.now()
     const totalAmountMap = await this.resolveOrderTotalAmountMap(rows.map((item) => String(item.id)))
     const returnRequestCountMap = await this.resolveOrderReturnRequestCountMap(rows.map((item) => String(item.id)))
+    const latestReturnRequestMap = await this.resolveLatestReturnRequestSummaryMap(rows.map((item) => String(item.id)))
     return {
       page: normalizedPage,
       pageSize: normalizedPageSize,
@@ -1580,6 +1640,7 @@ class O2oPreorderService {
         departmentNameSnapshot: item.departmentNameSnapshot?.trim() || null,
         returnRequestCount: returnRequestCountMap.get(String(item.id))?.total ?? 0,
         pendingReturnRequestCount: returnRequestCountMap.get(String(item.id))?.pending ?? 0,
+        latestReturnRequest: latestReturnRequestMap.get(String(item.id)) ?? null,
         totalQty: item.totalQty,
         timeoutAt: item.timeoutAt,
         createdAt: item.createdAt,
@@ -1734,6 +1795,7 @@ class O2oPreorderService {
     const nowMs = Date.now()
     const totalAmountMap = await this.resolveOrderTotalAmountMap(rows.map((item) => String(item.id)))
     const returnRequestCountMap = await this.resolveOrderReturnRequestCountMap(rows.map((item) => String(item.id)))
+    const latestReturnRequestMap = await this.resolveLatestReturnRequestSummaryMap(rows.map((item) => String(item.id)))
     return rows.map((item) => ({
       statusReport: this.resolveOrderStatusReport(item, nowMs),
       totalAmount: totalAmountMap.get(String(item.id)) ?? '0.00',
@@ -1748,6 +1810,7 @@ class O2oPreorderService {
       departmentNameSnapshot: item.departmentNameSnapshot?.trim() || null,
       returnRequestCount: returnRequestCountMap.get(String(item.id))?.total ?? 0,
       pendingReturnRequestCount: returnRequestCountMap.get(String(item.id))?.pending ?? 0,
+      latestReturnRequest: latestReturnRequestMap.get(String(item.id)) ?? null,
       totalQty: item.totalQty,
       timeoutAt: item.timeoutAt,
       createdAt: item.createdAt,
