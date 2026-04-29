@@ -1,8 +1,11 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/order-entry/components/OrderEntryHeaderCard.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：负责渲染出库开单页的主单信息录入区域，包括订单类型、客户信息与部门单专属字段。
+ * 实现逻辑：
+ * 1. 订单类型始终由父层表单驱动，本组件只负责展示与输入；
+ * 2. “是否有出库单 / 是否系统申请”属于部门单专属概念，散客单场景不再展示，避免误导；
+ * 3. 当切回部门单时，继续展示这两项开关，由父层联动业务规则。
  */
 
 
@@ -43,7 +46,7 @@ defineProps<{
         <el-form-item label="出单人" class="mb-0">
           <el-input v-model="model.issuerName" maxlength="64" placeholder="必填：出单人姓名" />
         </el-form-item>
-        <el-form-item class="mb-0">
+        <el-form-item v-if="model.orderType === 'department'" class="mb-0">
           <template #label>
             <div class="flex items-center gap-1">
               是否有出库单
@@ -52,9 +55,9 @@ defineProps<{
               </el-tooltip>
             </div>
           </template>
-          <el-switch v-model="model.hasCustomerOrder" :disabled="model.orderType === 'walkin'" />
+          <el-switch v-model="model.hasCustomerOrder" />
         </el-form-item>
-        <el-form-item class="mb-0">
+        <el-form-item v-if="model.orderType === 'department'" class="mb-0">
           <template #label>
             <div class="flex items-center gap-1">
               是否系统申请
@@ -63,7 +66,20 @@ defineProps<{
               </el-tooltip>
             </div>
           </template>
-          <el-switch v-model="model.isSystemApplied" :disabled="model.orderType === 'walkin'" />
+          <el-switch v-model="model.isSystemApplied" />
+        </el-form-item>
+        <el-form-item v-else class="mb-0">
+          <template #label>
+            <div class="flex items-center gap-1">
+              出库单说明
+              <el-tooltip content="散客单不需要正式出库单，也不需要填写财务/系统申请状态" placement="top">
+                <el-icon class="text-slate-400"><InfoFilled /></el-icon>
+              </el-tooltip>
+            </div>
+          </template>
+          <div class="w-full rounded-xl border border-dashed border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-500">
+            当前为散客单，无需维护正式出库单相关状态。
+          </div>
         </el-form-item>
         <el-form-item label="客户部门" class="mb-0">
           <el-input

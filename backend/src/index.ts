@@ -1,15 +1,20 @@
 /**
  * 模块说明：backend/src/index.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：作为后端启动入口，负责初始化数据库、默认数据、自检日志以及运行时配置回显。
+ * 维护说明：数据库切换/回退依赖启动阶段读取覆盖配置，因此启动日志必须明确打印当前是否命中了运行时覆盖。
  */
 
 import { createApp } from './app.js'
 import { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } from './config/database-bootstrap.js'
 import { AppDataSource } from './config/data-source.js'
+import { maskDatabaseRuntimeOverride, readDatabaseRuntimeOverride } from './config/database-runtime-override.js'
 import { env, envLoadContext } from './config/env.js'
 import { authService } from './services/auth.service.js'
 import { systemConfigService } from './services/system-config.service.js'
+import {
+  buildEffectiveDatabaseSummary,
+  buildRuntimeOverrideStatusSummary,
+} from './utils/effective-database.js'
 
 const colorPalette = {
   reset: '\u001B[0m',
@@ -110,7 +115,7 @@ const runStartupDiagnostics = async (port: number) => {
 async function bootstrap(): Promise<void> {
   logBanner('启动阶段')
   logLine('STEP', 'prepare runtime context')
-  const databaseRuntime = prepareDatabaseRuntime()
+  prepareDatabaseRuntime()
   logLine('STEP', 'initialize datasource')
   await AppDataSource.initialize()
   logLine('STEP', 'initialize database schema')
@@ -123,6 +128,9 @@ async function bootstrap(): Promise<void> {
 
   const app = createApp()
   app.listen(env.PORT, () => {
+    const activeOverride = maskDatabaseRuntimeOverride(readDatabaseRuntimeOverride())
+    const effectiveDatabase = buildEffectiveDatabaseSummary(activeOverride)
+    const runtimeOverrideStatus = buildRuntimeOverrideStatusSummary(activeOverride)
     logBanner('服务启动完成')
     logLine('LISTEN', `http://127.0.0.1:${env.PORT}`, 'success')
     logLine(
@@ -131,7 +139,22 @@ async function bootstrap(): Promise<void> {
         envLoadContext.loadedFiles.length ? envLoadContext.loadedFiles.join(', ') : '(none)'
       })`,
     )
-    logLine('DATABASE', `mode=${databaseRuntime.mode} target=${databaseRuntime.summary}`)
+    if (envLoadContext.runtimeDatabaseOverride) {
+      logLine(
+        'DB OVERRIDE',
+        `loaded=${envLoadContext.runtimeDatabaseOverride.filePath} dbType=${envLoadContext.runtimeDatabaseOverride.dbType} updatedAt=${envLoadContext.runtimeDatabaseOverride.updatedAt}`,
+        'warn',
+      )
+    }
+    logLine(
+      'DATABASE',
+      `actual=${effectiveDatabase.displayName} target=${effectiveDatabase.summary} source=${effectiveDatabase.sourceLabel}`,
+    )
+    logLine(
+      'DB OVERRIDE STATUS',
+      `${runtimeOverrideStatus.statusLabel}（pendingRestart=${runtimeOverrideStatus.pendingRestart}）`,
+      runtimeOverrideStatus.pendingRestart ? 'warn' : 'info',
+    )
     logLine(
       'ADMIN',
       `username=${adminBootstrap.username} displayName=${adminBootstrap.displayName} initialized=${adminBootstrap.initialized}`,

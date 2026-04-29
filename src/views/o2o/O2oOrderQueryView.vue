@@ -43,6 +43,10 @@ const NEW_ORDER_WINDOW_MS = 30 * 60 * 1000
 const NEW_ORDER_HIGHLIGHT_MS = 6000
 const MERCHANT_MESSAGE_MAX_LENGTH = 500
 const POLL_INTERVAL_OPTIONS = [10, 15] as const
+const ORDER_TYPE_LABEL_MAP = {
+  department: '部门订',
+  walkin: '散客',
+} as const
 const listLoading = ref(false)
 const detailLoading = ref(false)
 const orders = ref<O2oPreorderSummary[]>([])
@@ -285,8 +289,27 @@ const orderCustomerProfile = computed(() => {
   }
 })
 
-// 管理端状态选择只保留当前门店对外使用的四个核心业务状态，避免误选运输类历史状态。
-const BUSINESS_STATUS_PICKER_ORDER: O2oOrderBusinessStatus[] = ['awaiting_shipment', 'preparing', 'ready', 'after_sale']
+const getOrderTypeLabel = (orderType: O2oPreorderSummary['clientOrderType']) => {
+  return ORDER_TYPE_LABEL_MAP[orderType]
+}
+
+const buildOwnershipLabel = (orderType: O2oPreorderSummary['clientOrderType'], departmentNameSnapshot: string | null) => {
+  const orderTypeLabel = getOrderTypeLabel(orderType)
+  const departmentLabel = departmentNameSnapshot ? ` / ${departmentNameSnapshot}` : ''
+  return `${orderTypeLabel}${departmentLabel}`
+}
+
+const activeOrderOwnership = computed(() => {
+  const order = activeOrderDetail.value?.order
+  if (!order) {
+    return '未选择订单'
+  }
+  return buildOwnershipLabel(order.clientOrderType, order.departmentNameSnapshot)
+})
+
+// 管理端状态选择保留门店当前对外使用的核心业务状态，并新增“已完结（交易结束）”。
+// 这样门店既能表达待接单/备货/售后，也能在不改动主状态的前提下补充交易收尾完成。
+const BUSINESS_STATUS_PICKER_ORDER: O2oOrderBusinessStatus[] = ['awaiting_shipment', 'preparing', 'ready', 'completed', 'after_sale']
 
 const businessStatusOptions = BUSINESS_STATUS_PICKER_ORDER.map((value) => {
   const meta = O2O_ORDER_BUSINESS_STATUS_META[value]
@@ -395,6 +418,20 @@ const formatCountdown = (order: { status: O2oOrderStatus; expireInSeconds?: numb
   return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:${String(second).padStart(2, '0')}`
 }
 
+/**
+ * 订单池卡片倒计时文案：
+ * - 仅待核销订单且存在有效剩余时间时展示；
+ * - 将倒计时提升到卡片头部状态区，避免与金额/件数信息混排后视觉重心下坠；
+ * - 已超时、已取消、已核销统一不再在列表卡片重复展示倒计时，状态标签本身已足够表达结果。
+ */
+const getOrderCountdownText = (order: { status: O2oOrderStatus; expireInSeconds?: number; timeoutAt: string | null }) => {
+  const remainSeconds = resolveRemainSeconds(order)
+  if (remainSeconds === null || remainSeconds <= 0) {
+    return ''
+  }
+  return `剩余 ${formatCountdown(order)}`
+}
+
 const isOrderHighlighted = (orderId: string) => {
   return (orderHighlightExpiresAtMap.value[orderId] ?? 0) > nowMs.value
 }
@@ -480,6 +517,8 @@ const mergeOrderSummaryFromDetail = (detail: O2oPreorderDetail) => {
     status: nextOrder.status,
     businessStatus: nextOrder.businessStatus,
     merchantMessage: nextOrder.merchantMessage,
+    clientOrderType: nextOrder.clientOrderType,
+    departmentNameSnapshot: nextOrder.departmentNameSnapshot,
     totalQty: nextOrder.totalQty,
     timeoutAt: nextOrder.timeoutAt,
     createdAt: nextOrder.createdAt,
@@ -839,16 +878,31 @@ onBeforeUnmount(() => {
             @click="handlePickOrder(order.id)"
           >
             <div class="flex min-w-0 items-start justify-between gap-2">
-              <p class="min-w-0 break-words text-sm font-semibold text-slate-900">{{ order.showNo }}</p>
-              <span class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium" :class="getOrderReportConfig(order).cardClassName">
-                {{ getOrderReportConfig(order).statusLabel }}
-              </span>
+              <div class="min-w-0">
+                <div class="flex min-w-0 flex-wrap items-center gap-2">
+                  <p class="min-w-0 break-words text-sm font-semibold text-slate-900">{{ order.showNo }}</p>
+                  <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">
+                    {{ getOrderTypeLabel(order.clientOrderType) }}
+                  </span>
+                </div>
+              </div>
+              <div class="flex shrink-0 flex-col items-end gap-1 text-right">
+                <span class="rounded-full px-2 py-0.5 text-[11px] font-medium" :class="getOrderReportConfig(order).cardClassName">
+                  {{ getOrderReportConfig(order).statusLabel }}
+                </span>
+                <span
+                  v-if="getOrderCountdownText(order)"
+                  class="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700"
+                >
+                  {{ getOrderCountdownText(order) }}
+                </span>
+              </div>
             </div>
             <div class="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500">
               <p class="break-words">时间：{{ formatOrderDateTime(order.createdAt, { includeSeconds: false }) }}</p>
               <p class="text-right">件数：{{ order.totalQty }}</p>
+              <p class="break-words">归属：{{ getOrderTypeLabel(order.clientOrderType) }}{{ order.departmentNameSnapshot ? ` / ${order.departmentNameSnapshot}` : '' }}</p>
               <p>应付总额：¥{{ formatCurrency(order.totalAmount) }}</p>
-              <p class="text-right">倒计时：{{ formatCountdown(order) }}</p>
             </div>
           </button>
           <div v-if="!listLoading && !currentPoolOrders.length" class="rounded-2xl border border-dashed border-slate-200 px-3 py-8 text-center text-sm text-slate-400">
@@ -967,6 +1021,10 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="mt-4 grid gap-3 sm:grid-cols-4">
+            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <p class="text-sm text-slate-400">下单归属</p>
+              <p class="mt-1 text-sm font-semibold text-slate-900">{{ activeOrderOwnership }}</p>
+            </div>
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">状态</p>
               <p class="mt-1 text-sm font-semibold text-slate-900">{{ reportConfig.statusLabel }}</p>

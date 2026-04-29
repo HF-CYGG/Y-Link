@@ -1,7 +1,7 @@
 /**
  * 模块说明：backend/src/config/database-bootstrap.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：负责数据库启动准备、SQLite 自举补齐与统一数据库路径解析。
+ * 维护说明：迁移服务与主应用都依赖这里的 SQLite 路径解析规则，修改时必须保持两侧口径一致。
  */
 
 import fs from 'node:fs'
@@ -56,12 +56,20 @@ const SQLITE_REQUIRED_PRODUCT_COLUMNS = [
 ]
 
 const SQLITE_REQUIRED_CLIENT_USER_COLUMNS = ['mobile', 'email', 'real_name', 'department_name', 'status', 'last_login_at']
-const SQLITE_REQUIRED_O2O_PREORDER_COLUMNS = ['cancel_reason', 'business_status', 'merchant_message', 'update_count']
+const SQLITE_REQUIRED_O2O_PREORDER_COLUMNS = [
+  'cancel_reason',
+  'business_status',
+  'merchant_message',
+  'client_order_type',
+  'department_name_snapshot',
+  'update_count',
+]
+const SQLITE_REQUIRED_O2O_RETURN_REQUEST_COLUMNS = ['handled_at', 'handled_by', 'rejected_reason']
 
-export function resolveSqliteDatabasePath(): string {
-  return path.isAbsolute(env.SQLITE_DB_PATH)
-    ? env.SQLITE_DB_PATH
-    : path.resolve(process.cwd(), env.SQLITE_DB_PATH)
+export function resolveSqliteDatabasePath(sqliteDbPath = env.SQLITE_DB_PATH): string {
+  return path.isAbsolute(sqliteDbPath)
+    ? sqliteDbPath
+    : path.resolve(process.cwd(), sqliteDbPath)
 }
 
 /**
@@ -128,7 +136,13 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
 
   const o2oPreorderColumns: Array<{ name: string }> = await dataSource.query(`PRAGMA table_info('o2o_preorder')`)
   const o2oPreorderColumnSet = new Set(o2oPreorderColumns.map((column) => column.name))
-  return SQLITE_REQUIRED_O2O_PREORDER_COLUMNS.some((column) => !o2oPreorderColumnSet.has(column))
+  if (SQLITE_REQUIRED_O2O_PREORDER_COLUMNS.some((column) => !o2oPreorderColumnSet.has(column))) {
+    return true
+  }
+
+  const o2oReturnRequestColumns: Array<{ name: string }> = await dataSource.query(`PRAGMA table_info('o2o_return_request')`)
+  const o2oReturnRequestColumnSet = new Set(o2oReturnRequestColumns.map((column) => column.name))
+  return SQLITE_REQUIRED_O2O_RETURN_REQUEST_COLUMNS.some((column) => !o2oReturnRequestColumnSet.has(column))
 }
 
 export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): Promise<DatabaseSchemaInitResult> {

@@ -1,7 +1,11 @@
 /**
  * 模块说明：src/router/routes.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：统一维护管理端与客户端的路由、菜单、快捷入口和权限元信息，本次新增系统治理下的数据库迁移助手页面入口。
+ * 实现逻辑：
+ * - 所有业务页面都通过 routeViewLoaders 做懒加载，保证路由、预热和权限入口保持同源；
+ * - 系统治理分组下新增数据库迁移助手子路由，并把预热目标同步纳入系统配置页；
+ * - 菜单、快捷入口和首个可访问路由仍然完全由本文件派生，避免出现多份配置源。
+ * 维护说明：新增或调整业务页面时，需要同步检查路由名称、权限码、菜单顺序和预热目标是否一致。
  */
 
 import type { RouteMeta, RouteRecordRaw } from 'vue-router'
@@ -374,7 +378,29 @@ const layoutChildren: AppRouteRecord[] = [
           activeMenu: '/system',
           requiredPermissions: ['system_configs:view'],
           keepAlive: true,
-          preloadTargets: ['system-users', 'system-client-users'],
+          preloadTargets: ['system-db-migration', 'system-users', 'system-client-users'],
+        },
+      },
+      {
+        path: 'db-migration',
+        name: 'system-db-migration',
+        component: routeViewLoaders['system-db-migration'],
+        meta: {
+          title: '数据库迁移助手',
+          menuOrder: 15,
+          activeMenu: '/system',
+          requiredPermissions: ['system_configs:view'],
+          shortcut: {
+            title: '数据库迁移',
+            description: '进入数据库迁移助手，完成预检、迁移、切换与回退',
+            order: 27,
+            path: '/system/db-migration',
+            icon: 'Refresh',
+            colorClass: 'text-secondary dark:text-slate-200',
+            bgClass: 'bg-secondary/10 dark:bg-secondary/20',
+          },
+          keepAlive: true,
+          preloadTargets: ['system-configs', 'system-audit-logs'],
         },
       },
       {
@@ -656,30 +682,43 @@ const deriveShortcutItems = (
   user?: Pick<UserSafeProfile, 'role' | 'permissions'> | null,
   parentPath = '/',
 ): DashboardShortcutItem[] => {
-  return sortByMenuOrder(records)
-    .filter((record) => Boolean(record.meta.shortcut))
-    .filter((record) => canAccessRoute(record.meta, user))
-    .flatMap((record) => {
-      const fullPath = resolveRoutePath(parentPath, record.path)
-      const shortcut = record.meta.shortcut
-      if (!shortcut) {
-        return []
-      }
-      const item: DashboardShortcutItem = {
-        title: shortcut.title ?? record.meta.title,
-        description: shortcut.description,
-        path: shortcut.path ?? fullPath,
-        icon: shortcut.icon ?? record.meta.icon,
-        colorClass: shortcut.colorClass ?? 'text-brand dark:text-teal-300',
-        bgClass: shortcut.bgClass ?? 'bg-brand/10 dark:bg-brand/20',
-      }
-      return {
-        order: shortcut.order ?? record.meta.menuOrder ?? Number.MAX_SAFE_INTEGER,
-        item,
-      }
-    })
-    .sort((prev, next) => prev.order - next.order)
-    .map((entry) => entry.item)
+  /**
+   * 递归收集快捷入口：
+   * - 既支持顶层业务路由，也支持系统治理等子路由自行声明快捷入口；
+   * - 让“数据库迁移助手”这类深层页面也能直接出现在工作台，减少菜单查找成本。
+   */
+  const collectedEntries: Array<{ order: number; item: DashboardShortcutItem }> = []
+
+  const collectFromRecords = (sourceRecords: AppRouteRecord[], currentParentPath: string) => {
+    sortByMenuOrder(sourceRecords)
+      .filter((record) => canAccessRoute(record.meta, user))
+      .forEach((record) => {
+        const fullPath = resolveRoutePath(currentParentPath, record.path)
+        const shortcut = record.meta.shortcut
+        if (shortcut) {
+          collectedEntries.push({
+            order: shortcut.order ?? record.meta.menuOrder ?? Number.MAX_SAFE_INTEGER,
+            item: {
+              title: shortcut.title ?? record.meta.title,
+              description: shortcut.description,
+              path: shortcut.path ?? fullPath,
+              icon: shortcut.icon ?? record.meta.icon,
+              colorClass: shortcut.colorClass ?? 'text-brand dark:text-teal-300',
+              bgClass: shortcut.bgClass ?? 'bg-brand/10 dark:bg-brand/20',
+            },
+          })
+        }
+
+        if (record.children?.length) {
+          collectFromRecords(record.children, fullPath)
+        }
+      })
+  }
+
+  collectFromRecords(records, parentPath)
+
+  const sortedEntries = [...collectedEntries].sort((prev, next) => prev.order - next.order)
+  return sortedEntries.map((entry) => entry.item)
 }
 
 /**

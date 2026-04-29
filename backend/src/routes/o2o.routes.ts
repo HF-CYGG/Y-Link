@@ -16,16 +16,23 @@ import {
   O2O_PREORDER_REMARK_MAX_LENGTH,
   O2O_MERCHANT_MESSAGE_MAX_LENGTH,
   O2O_RETURN_REASON_MAX_LENGTH,
+  O2O_RETURN_REJECT_REASON_MAX_LENGTH,
   o2oPreorderService,
 } from '../services/o2o-preorder.service.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 
 const submitPreorderSchema = z.object({
+  clientOrderType: z.enum(['department', 'walkin']),
   remark: z.string().max(O2O_PREORDER_REMARK_MAX_LENGTH).optional(),
   items: z.array(z.object({ productId: z.union([z.string(), z.number()]), qty: z.number().int().positive() })).min(1),
 })
 
 const updateMyPreorderSchema = z.object({
+  remark: z.string().max(O2O_PREORDER_REMARK_MAX_LENGTH).optional(),
+  items: z.array(z.object({ productId: z.union([z.string(), z.number()]), qty: z.number().int().positive() })).min(1),
+})
+
+const onsiteAdjustPreorderSchema = z.object({
   remark: z.string().max(O2O_PREORDER_REMARK_MAX_LENGTH).optional(),
   items: z.array(z.object({ productId: z.union([z.string(), z.number()]), qty: z.number().int().positive() })).min(1),
 })
@@ -64,6 +71,7 @@ const businessStatusSchema = z.object({
       'shipped',
       'partially_shipped',
       'closed',
+      'completed',
       'after_sale',
       'after_sale_done',
       'verifying',
@@ -81,6 +89,10 @@ const submitReturnRequestSchema = z.object({
   items: z.array(z.object({ productId: z.union([z.string(), z.number()]), qty: z.number().int().positive() })).min(1),
 })
 
+const rejectReturnRequestSchema = z.object({
+  rejectReason: z.string().trim().min(1).max(O2O_RETURN_REJECT_REASON_MAX_LENGTH),
+})
+
 const BUSINESS_STATUS_LABEL_MAP = {
   preparing: '备货中（已接单）',
   ready: '请取货（等待取货）',
@@ -88,6 +100,7 @@ const BUSINESS_STATUS_LABEL_MAP = {
   shipped: '已发货',
   partially_shipped: '部分发货',
   closed: '已关闭',
+  completed: '已完结（交易结束）',
   after_sale: '其他（售后）',
   after_sale_done: '售后完成',
   verifying: '核销中',
@@ -310,6 +323,51 @@ o2oRouter.patch(
   }),
 )
 
+// 门店现场改单：仅允许后台工作人员对待核销订单按实际领取情况调整商品、数量与备注。
+o2oRouter.patch(
+  '/orders/:id/onsite-adjust',
+  requireAuth,
+  requirePermission('orders:update'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = onsiteAdjustPreorderSchema.parse(req.body)
+    const previous = await o2oPreorderService.detailById(req.params.id)
+    const data = await o2oPreorderService.updateOrderOnsite(authReq.auth, {
+      orderId: req.params.id,
+      items: payload.items,
+      remark: payload.remark,
+    })
+
+    await auditService.record({
+      actionType: 'o2o.preorder.onsite_adjust',
+      actionLabel: '门店现场改单',
+      targetType: 'o2o_order',
+      targetId: data.order.id,
+      targetCode: data.order.showNo,
+      actor: authReq.auth,
+      requestMeta: extractRequestMeta(req),
+      detail: {
+        previousRemark: previous.order.remark,
+        nextRemark: data.order.remark,
+        previousTotalQty: previous.order.totalQty,
+        nextTotalQty: data.order.totalQty,
+        previousItems: previous.items.map((item) => ({
+          productId: item.productId,
+          productName: item.productName,
+          qty: item.qty,
+        })),
+        nextItems: data.items.map((item) => ({
+          productId: item.productId,
+          productName: item.productName,
+          qty: item.qty,
+        })),
+      },
+    })
+
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
 // 管理端更新订单“商家留言”，用于补充特殊场景说明并在客户端详情可见。
 o2oRouter.patch(
   '/orders/:id/merchant-message',
@@ -363,6 +421,44 @@ o2oRouter.get(
   requirePermission('orders:view'),
   asyncHandler(async (req, res) => {
     const data = await o2oPreorderService.getVerifyDetail(req.params.verifyCode)
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+// 管理端可拒绝待处理退货申请，并强制记录拒绝原因供后续查询与审计追溯。
+o2oRouter.post(
+  '/return-requests/:id/reject',
+  requireAuth,
+  requirePermission('orders:update'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = rejectReturnRequestSchema.parse(req.body)
+    const previous = await o2oPreorderService.getReturnRequestDetailById(req.params.id)
+    const data = await o2oPreorderService.rejectReturnRequest(
+      {
+        returnRequestId: req.params.id,
+        rejectReason: payload.rejectReason,
+      },
+      authReq.auth,
+    )
+
+    await auditService.record({
+      actionType: 'o2o.return_request.reject',
+      actionLabel: '拒绝退货申请',
+      targetType: 'o2o_return_request',
+      targetId: data.id,
+      targetCode: data.returnNo,
+      actor: authReq.auth,
+      requestMeta: extractRequestMeta(req),
+      detail: {
+        previousStatus: previous.status,
+        nextStatus: data.status,
+        rejectReason: data.rejectedReason,
+        handledAt: data.handledAt,
+        handledBy: data.handledBy,
+      },
+    })
+
     res.json({ code: 0, message: 'ok', data })
   }),
 )

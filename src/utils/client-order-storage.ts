@@ -65,6 +65,19 @@ const normalizeBusinessStatus = (value: unknown): O2oOrderBusinessStatus | null 
 
 // 详细注释：商家留言用于补充退货、异常处理等上下文，缓存恢复时统一裁剪空白并将空串视为 null。
 const normalizeMerchantMessage = (value: unknown) => {
+  return normalizeOptionalTrimmedText(value)
+}
+
+const normalizeClientOrderType = (value: unknown): O2oPreorderSummary['clientOrderType'] => {
+  return value === 'department' ? 'department' : 'walkin'
+}
+
+const normalizeDepartmentNameSnapshot = (value: unknown) => {
+  return normalizeOptionalTrimmedText(value)
+}
+
+// 详细注释：统一收敛“可为空的文本快照”恢复规则，避免多个字段各自复制相同的裁剪与空值判断逻辑。
+const normalizeOptionalTrimmedText = (value: unknown) => {
   return typeof value === 'string' && value.trim()
     ? value.trim()
     : null
@@ -90,6 +103,8 @@ const normalizeOrderRow = (item: unknown): O2oPreorderSummary | null => {
     status,
     businessStatus: normalizeBusinessStatus(row.businessStatus),
     merchantMessage: normalizeMerchantMessage(row.merchantMessage),
+    clientOrderType: normalizeClientOrderType(row.clientOrderType),
+    departmentNameSnapshot: normalizeDepartmentNameSnapshot(row.departmentNameSnapshot),
     // 缓存恢复时尽量沿用服务端原始状态报告，确保“已撤回/超时取消”文案不会在刷新后退化。
     statusReport: normalizeStatusReport(row, status, timeoutAt),
     totalQty: Number.isFinite(row.totalQty) ? Number(row.totalQty) : 0,

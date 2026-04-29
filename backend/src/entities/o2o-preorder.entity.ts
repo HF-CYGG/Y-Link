@@ -29,12 +29,15 @@ export const O2O_PREORDER_BUSINESS_STATUSES = [
   'shipped',
   'partially_shipped',
   'closed',
+  'completed',
   'after_sale',
   'after_sale_done',
   'verifying',
   'verify_failed',
 ] as const
 export type O2oPreorderBusinessStatus = (typeof O2O_PREORDER_BUSINESS_STATUSES)[number]
+export const O2O_CLIENT_ORDER_TYPES = ['department', 'walkin'] as const
+export type O2oClientOrderType = (typeof O2O_CLIENT_ORDER_TYPES)[number]
 
 @Entity({ name: 'o2o_preorder' })
 @Index('idx_o2o_preorder_client_id', ['clientUserId', 'id'])
@@ -69,6 +72,16 @@ export class O2oPreorder {
 
   @Column({ name: 'merchant_message', type: 'varchar', length: 500, nullable: true, comment: '商家留言' })
   merchantMessage!: string | null
+
+  // clientOrderType 记录用户本次下单时明确选择的归属类型，
+  // 后续核销沉淀出库单、管理端筛选展示都必须以这个“订单快照”而不是当前用户资料为准。
+  @Column({ name: 'client_order_type', type: 'varchar', length: 16, default: 'walkin', comment: '客户端下单归属类型' })
+  clientOrderType!: O2oClientOrderType
+
+  // departmentNameSnapshot 只在“部门订”时记录下单当时的部门名称，
+  // 避免用户之后修改个人资料导致历史订单归属被串改。
+  @Column({ name: 'department_name_snapshot', type: 'varchar', length: 128, nullable: true, comment: '下单时部门名称快照' })
+  departmentNameSnapshot!: string | null
 
   // totalQty 记录整单总件数，便于列表快速展示，避免每次都聚合子项。
   @Column({ name: 'total_qty', type: 'int', default: 0, comment: '总件数' })

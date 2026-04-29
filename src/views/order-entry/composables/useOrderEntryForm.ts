@@ -1,7 +1,10 @@
 /**
  * 模块说明：src/views/order-entry/composables/useOrderEntryForm.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：集中管理出库开单页的主单、明细、草稿恢复与提交逻辑。
+ * 实现逻辑：
+ * 1. 使用一个组合式函数统一管理页面全部响应式状态，避免多个组件重复维护业务字段；
+ * 2. 提交前在这里完成校验、数据清洗与接口参数组装；
+ * 3. 针对“正式出库单只给部门单”规则，在此做最终提交兜底，确保散客单不会误传相关状态。
  */
 
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
@@ -705,13 +708,16 @@ export const useOrderEntryForm = () => {
     try {
       const submitItems = await buildSubmitItemsWithAutoProducts()
       const idempotencyKey = `web-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+      const isDepartmentOrder = headerForm.orderType === 'department'
       const result = await orderApi.submitOrder({
         idempotencyKey,
         orderType: headerForm.orderType,
-        hasCustomerOrder: headerForm.hasCustomerOrder,
-        isSystemApplied: headerForm.isSystemApplied,
+        // 详细注释：正式出库单、系统申请等概念只属于部门单。
+        // 即便未来界面状态被草稿恢复或异常交互影响，这里仍统一按订单类型做一次最终兜底。
+        hasCustomerOrder: isDepartmentOrder ? headerForm.hasCustomerOrder : false,
+        isSystemApplied: isDepartmentOrder ? headerForm.isSystemApplied : false,
         issuerName: headerForm.issuerName.trim(),
-        customerDepartmentName: headerForm.customerDepartmentName.trim() || undefined,
+        customerDepartmentName: isDepartmentOrder ? headerForm.customerDepartmentName.trim() || undefined : undefined,
         customerName: headerForm.customerName.trim() || undefined,
         remark: headerForm.remark.trim() || undefined,
         items: submitItems,
