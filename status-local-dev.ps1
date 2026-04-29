@@ -123,11 +123,82 @@ function Get-RuntimeOverrideState {
   }
 }
 
-# 输出统一的当前数据库摘要：
-# - 若存在 MySQL 覆盖，则优先展示 MySQL；
-# - 若存在 SQLite 覆盖，则展示回退后的 SQLite；
-# - 若不存在覆盖，则回落为本地默认 SQLite 记录。
-function Get-EffectiveDatabaseSummary {
+# 读取简单 env 文件中的键值对：
+# - 仅用于状态脚本在后端暂时不可读时做兜底推断；
+# - 不尝试完整模拟 dotenv，只解析最常见的 `KEY=VALUE` 行。
+function Read-EnvFileMap {
+  param([string]$EnvFilePath)
+
+  $envMap = @{}
+  if (-not $EnvFilePath -or -not (Test-Path $EnvFilePath)) {
+    return $envMap
+  }
+
+  foreach ($line in @(Get-Content -Path $EnvFilePath)) {
+    if ([string]::IsNullOrWhiteSpace($line)) {
+      continue
+    }
+    if ($line -match '^\s*#') {
+      continue
+    }
+    if ($line -notmatch '^\s*([^=]+?)\s*=(.*)$') {
+      continue
+    }
+
+    $key = $Matches[1].Trim()
+    $value = $Matches[2]
+    $envMap[$key] = $value
+  }
+
+  return $envMap
+}
+
+# 把相对 backend 路径补齐为绝对路径，保证状态输出可直接定位到真实文件。
+function Resolve-BackendRelativePath {
+  param([string]$TargetPath)
+
+  if (-not $TargetPath) {
+    return $null
+  }
+  if ([System.IO.Path]::IsPathRooted($TargetPath)) {
+    return $TargetPath
+  }
+  return [System.IO.Path]::GetFullPath((Join-Path $BackendRoot $TargetPath))
+}
+
+# 优先读取后端健康检查中的数据库状态：
+# - 这里返回的是“当前进程实际已生效”的数据库；
+# - 只要后端还能正常响应，就不再靠覆盖文件或本地记录猜测。
+function Get-BackendDatabaseSummary {
+  param([string]$HealthUrl)
+
+  try {
+    $response = Invoke-WebRequest -Uri $HealthUrl -UseBasicParsing -TimeoutSec 3
+    $payload = $response.Content | ConvertFrom-Json
+    $databaseState = $payload.data.database
+    if (-not $databaseState -or -not $databaseState.effectiveDatabase) {
+      return $null
+    }
+
+    return @{
+      mode = [string]$databaseState.effectiveDatabase.dbType
+      displayName = [string]$databaseState.effectiveDatabase.displayName
+      summary = [string]$databaseState.effectiveDatabase.summary
+      source = if ($databaseState.effectiveDatabase.sourceLabel) { [string]$databaseState.effectiveDatabase.sourceLabel } else { [string]$databaseState.effectiveDatabase.source }
+      overrideStatus = if ($databaseState.runtimeOverrideStatus.statusLabel) { [string]$databaseState.runtimeOverrideStatus.statusLabel } else { '未知' }
+      description = [string]$databaseState.effectiveDatabase.description
+      fromBackendHealth = $true
+    }
+  }
+  catch {
+    return $null
+  }
+}
+
+# 后端健康检查不可读时，基于记录文件与本地配置做降级推断：
+# - 若存在运行时覆盖文件，则提示“按覆盖文件推断”，避免误报为当前已生效；
+# - 若不存在覆盖文件，则读取本次启动使用的 env 文件，兼容默认环境本身就是 MySQL 的情况。
+function Get-FallbackEffectiveDatabaseSummary {
   param($Record)
 
   $runtimeOverride = Get-RuntimeOverrideState
@@ -136,7 +207,10 @@ function Get-EffectiveDatabaseSummary {
       mode = 'mysql'
       displayName = 'MySQL'
       summary = "$($runtimeOverride.config.DB_HOST):$($runtimeOverride.config.DB_PORT)/$($runtimeOverride.config.DB_NAME)"
-      source = '运行时覆盖配置'
+      source = '本地文件推断：运行时覆盖配置'
+      overrideStatus = '覆盖文件已写入，需以后端实际状态为准'
+      description = '当前后端健康检查不可读，因此这里只能按覆盖文件推断 MySQL 目标。'
+      fromBackendHealth = $false
     }
   }
 
@@ -144,16 +218,45 @@ function Get-EffectiveDatabaseSummary {
     return @{
       mode = 'sqlite'
       displayName = 'SQLite'
-      summary = [string]$runtimeOverride.config.SQLITE_DB_PATH
-      source = '运行时覆盖配置'
+      summary = [string](Resolve-BackendRelativePath -TargetPath ([string]$runtimeOverride.config.SQLITE_DB_PATH))
+      source = '本地文件推断：运行时覆盖配置'
+      overrideStatus = '覆盖文件已写入，需以后端实际状态为准'
+      description = '当前后端健康检查不可读，因此这里只能按覆盖文件推断 SQLite 目标。'
+      fromBackendHealth = $false
     }
+  }
+
+  $effectiveBackendEnvFile = if ($Record.effectiveBackendEnvFile) { [string]$Record.effectiveBackendEnvFile } else { '' }
+  $envMap = Read-EnvFileMap -EnvFilePath $effectiveBackendEnvFile
+  $dbType = if ($envMap.ContainsKey('DB_TYPE') -and $envMap['DB_TYPE']) { [string]$envMap['DB_TYPE'] } else { 'sqlite' }
+  if ($dbType -eq 'mysql') {
+    return @{
+      mode = 'mysql'
+      displayName = 'MySQL'
+      summary = "$($envMap['DB_HOST']):$($envMap['DB_PORT'])/$($envMap['DB_NAME'])"
+      source = '本地文件推断：默认环境配置'
+      overrideStatus = '未启用运行时覆盖'
+      description = '当前后端健康检查不可读，因此这里只能按本次启动 env 文件推断默认 MySQL。'
+      fromBackendHealth = $false
+    }
+  }
+
+  $sqlitePath = if ($envMap.ContainsKey('SQLITE_DB_PATH') -and $envMap['SQLITE_DB_PATH']) {
+    Resolve-BackendRelativePath -TargetPath ([string]$envMap['SQLITE_DB_PATH'])
+  } elseif ($Record.sqlitePath) {
+    [string]$Record.sqlitePath
+  } else {
+    ''
   }
 
   return @{
     mode = 'sqlite'
     displayName = 'SQLite'
-    summary = [string]$Record.sqlitePath
-    source = '默认本地环境配置'
+    summary = [string]$sqlitePath
+    source = '本地文件推断：默认环境配置'
+    overrideStatus = '未启用运行时覆盖'
+    description = '当前后端健康检查不可读，因此这里只能按本次启动 env 文件推断默认 SQLite。'
+    fromBackendHealth = $false
   }
 }
 
@@ -163,7 +266,6 @@ if (-not (Test-Path $PidFile)) {
 }
 
 $record = Get-Content -Path $PidFile -Raw | ConvertFrom-Json
-$effectiveDatabase = Get-EffectiveDatabaseSummary -Record $record
 $frontendScheme = if ($record.frontendScheme) { [string]$record.frontendScheme } elseif ($record.frontendHttps) { 'https' } else { 'http' }
 $frontendLocalHostForHealthCheck = if ($frontendScheme -eq 'https') { 'localhost' } else { '127.0.0.1' }
 $frontendUrl = "${frontendScheme}://$frontendLocalHostForHealthCheck`:$($record.frontendPort)"
@@ -177,6 +279,14 @@ $frontendShellAlive = Test-ProcessAlive -ProcessId ([int]$record.frontendShellPi
 $backendListeningPids = @(Get-ListeningProcessIds -Port ([int]$record.backendPort))
 $frontendListeningPids = @(Get-ListeningProcessIds -Port ([int]$record.frontendPort))
 $backendHealthReady = Test-HttpReady -Uri $backendHealthUrl
+$effectiveDatabase = if ($backendHealthReady) {
+  Get-BackendDatabaseSummary -HealthUrl $backendHealthUrl
+} else {
+  $null
+}
+if (-not $effectiveDatabase) {
+  $effectiveDatabase = Get-FallbackEffectiveDatabaseSummary -Record $record
+}
 $frontendReady = $frontendListeningPids.Count -gt 0
 if (-not $frontendReady -and -not $frontendHttps) {
   # HTTP 场景可补充一次应用层探测，避免仅靠端口监听误判。
@@ -190,7 +300,9 @@ Write-Info "Backend:  $backendUrl"
 Write-Info "Frontend host: $frontendHost"
 Write-Info "当前数据库: $($effectiveDatabase.displayName)"
 Write-Info "数据库来源: $($effectiveDatabase.source)"
+Write-Info "覆盖状态: $($effectiveDatabase.overrideStatus)"
 Write-Info "数据库摘要: $($effectiveDatabase.summary)"
+Write-Info "数据库说明: $($effectiveDatabase.description)"
 Write-Info "Backend shell alive: $backendShellAlive"
 Write-Info "Frontend shell alive: $frontendShellAlive"
 Write-Info "Backend listening PIDs: $($(if ($backendListeningPids.Count) { $backendListeningPids -join ', ' } else { 'none' }))"

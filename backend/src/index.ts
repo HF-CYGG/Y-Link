@@ -7,9 +7,14 @@
 import { createApp } from './app.js'
 import { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } from './config/database-bootstrap.js'
 import { AppDataSource } from './config/data-source.js'
+import { maskDatabaseRuntimeOverride, readDatabaseRuntimeOverride } from './config/database-runtime-override.js'
 import { env, envLoadContext } from './config/env.js'
 import { authService } from './services/auth.service.js'
 import { systemConfigService } from './services/system-config.service.js'
+import {
+  buildEffectiveDatabaseSummary,
+  buildRuntimeOverrideStatusSummary,
+} from './utils/effective-database.js'
 
 const colorPalette = {
   reset: '\u001B[0m',
@@ -123,6 +128,9 @@ async function bootstrap(): Promise<void> {
 
   const app = createApp()
   app.listen(env.PORT, () => {
+    const activeOverride = maskDatabaseRuntimeOverride(readDatabaseRuntimeOverride())
+    const effectiveDatabase = buildEffectiveDatabaseSummary(activeOverride)
+    const runtimeOverrideStatus = buildRuntimeOverrideStatusSummary(activeOverride)
     logBanner('服务启动完成')
     logLine('LISTEN', `http://127.0.0.1:${env.PORT}`, 'success')
     logLine(
@@ -138,7 +146,15 @@ async function bootstrap(): Promise<void> {
         'warn',
       )
     }
-    logLine('DATABASE', `mode=${databaseRuntime.mode} target=${databaseRuntime.summary}`)
+    logLine(
+      'DATABASE',
+      `actual=${effectiveDatabase.displayName} target=${effectiveDatabase.summary} source=${effectiveDatabase.sourceLabel}`,
+    )
+    logLine(
+      'DB OVERRIDE STATUS',
+      `${runtimeOverrideStatus.statusLabel}（pendingRestart=${runtimeOverrideStatus.pendingRestart}）`,
+      runtimeOverrideStatus.pendingRestart ? 'warn' : 'info',
+    )
     logLine(
       'ADMIN',
       `username=${adminBootstrap.username} displayName=${adminBootstrap.displayName} initialized=${adminBootstrap.initialized}`,

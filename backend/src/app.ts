@@ -24,6 +24,11 @@ import { tagRouter } from './routes/tag.routes.js'
 import { uploadRouter } from './routes/upload.routes.js'
 import { userRouter } from './routes/user.routes.js'
 import { inboundRouter } from './routes/inbound.routes.js'
+import { maskDatabaseRuntimeOverride, readDatabaseRuntimeOverride } from './config/database-runtime-override.js'
+import {
+  buildEffectiveDatabaseSummary,
+  buildRuntimeOverrideStatusSummary,
+} from './utils/effective-database.js'
 import { BizError } from './utils/errors.js'
 
 export function createApp() {
@@ -40,10 +45,19 @@ export function createApp() {
   app.use(express.json())
 
   app.get('/health', (_req, res) => {
+    const activeOverride = maskDatabaseRuntimeOverride(readDatabaseRuntimeOverride())
+    const effectiveDatabase = buildEffectiveDatabaseSummary(activeOverride)
+    const runtimeOverrideStatus = buildRuntimeOverrideStatusSummary(activeOverride)
     res.json({
       code: 0,
       message: 'ok',
-      data: { status: 'UP' },
+      data: {
+        status: 'UP',
+        database: {
+          effectiveDatabase,
+          runtimeOverrideStatus,
+        },
+      },
     })
   })
 

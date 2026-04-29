@@ -390,6 +390,15 @@ const layoutChildren: AppRouteRecord[] = [
           menuOrder: 15,
           activeMenu: '/system',
           requiredPermissions: ['system_configs:view'],
+          shortcut: {
+            title: '数据库迁移',
+            description: '进入数据库迁移助手，完成预检、迁移、切换与回退',
+            order: 27,
+            path: '/system/db-migration',
+            icon: 'Refresh',
+            colorClass: 'text-secondary dark:text-slate-200',
+            bgClass: 'bg-secondary/10 dark:bg-secondary/20',
+          },
           keepAlive: true,
           preloadTargets: ['system-configs', 'system-audit-logs'],
         },
@@ -673,30 +682,42 @@ const deriveShortcutItems = (
   user?: Pick<UserSafeProfile, 'role' | 'permissions'> | null,
   parentPath = '/',
 ): DashboardShortcutItem[] => {
-  return sortByMenuOrder(records)
-    .filter((record) => Boolean(record.meta.shortcut))
-    .filter((record) => canAccessRoute(record.meta, user))
-    .flatMap((record) => {
-      const fullPath = resolveRoutePath(parentPath, record.path)
-      const shortcut = record.meta.shortcut
-      if (!shortcut) {
-        return []
-      }
-      const item: DashboardShortcutItem = {
-        title: shortcut.title ?? record.meta.title,
-        description: shortcut.description,
-        path: shortcut.path ?? fullPath,
-        icon: shortcut.icon ?? record.meta.icon,
-        colorClass: shortcut.colorClass ?? 'text-brand dark:text-teal-300',
-        bgClass: shortcut.bgClass ?? 'bg-brand/10 dark:bg-brand/20',
-      }
-      return {
-        order: shortcut.order ?? record.meta.menuOrder ?? Number.MAX_SAFE_INTEGER,
-        item,
-      }
-    })
-    .sort((prev, next) => prev.order - next.order)
-    .map((entry) => entry.item)
+  /**
+   * 递归收集快捷入口：
+   * - 既支持顶层业务路由，也支持系统治理等子路由自行声明快捷入口；
+   * - 让“数据库迁移助手”这类深层页面也能直接出现在工作台，减少菜单查找成本。
+   */
+  const collectedEntries: Array<{ order: number; item: DashboardShortcutItem }> = []
+
+  const collectFromRecords = (sourceRecords: AppRouteRecord[], currentParentPath: string) => {
+    sortByMenuOrder(sourceRecords)
+      .filter((record) => canAccessRoute(record.meta, user))
+      .forEach((record) => {
+        const fullPath = resolveRoutePath(currentParentPath, record.path)
+        const shortcut = record.meta.shortcut
+        if (shortcut) {
+          collectedEntries.push({
+            order: shortcut.order ?? record.meta.menuOrder ?? Number.MAX_SAFE_INTEGER,
+            item: {
+              title: shortcut.title ?? record.meta.title,
+              description: shortcut.description,
+              path: shortcut.path ?? fullPath,
+              icon: shortcut.icon ?? record.meta.icon,
+              colorClass: shortcut.colorClass ?? 'text-brand dark:text-teal-300',
+              bgClass: shortcut.bgClass ?? 'bg-brand/10 dark:bg-brand/20',
+            },
+          })
+        }
+
+        if (record.children?.length) {
+          collectFromRecords(record.children, fullPath)
+        }
+      })
+  }
+
+  collectFromRecords(records, parentPath)
+
+  return collectedEntries.sort((prev, next) => prev.order - next.order).map((entry) => entry.item)
 }
 
 /**

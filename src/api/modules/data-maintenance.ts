@@ -273,6 +273,13 @@ export interface DatabaseRuntimeOverrideStateResult {
     sourceLabel: string
     description: string
   }
+  runtimeOverrideStatus: {
+    hasOverrideFile: boolean
+    loadedByCurrentProcess: boolean
+    pendingRestart: boolean
+    statusLabel: string
+    description: string
+  }
   beginnerGuide: {
     headline: string
     recommendedAction: string
