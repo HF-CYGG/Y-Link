@@ -158,10 +158,10 @@ const printTimestamp = formatDateTime(new Date())
           <col class="col-value-wide" />
         </colgroup>
         <tbody>
-          <tr>
+          <tr class="voucher-title-row">
             <th colspan="6" scope="colgroup" class="voucher-title-cell">野辙文创出库单（一式两份）</th>
           </tr>
-          <tr>
+          <tr class="voucher-meta-row voucher-meta-row--primary">
             <th scope="row">申请部门</th>
             <td>{{ props.order.customerDepartmentName || '散客' }}</td>
             <th scope="row">部门经办人</th>
@@ -177,7 +177,7 @@ const printTimestamp = formatDateTime(new Date())
               </span>
             </td>
           </tr>
-          <tr>
+          <tr class="voucher-meta-row voucher-meta-row--secondary">
             <th scope="row">业务单号</th>
             <td>{{ props.order.showNo }}</td>
             <th scope="row">出库人</th>
@@ -185,7 +185,7 @@ const printTimestamp = formatDateTime(new Date())
             <th scope="row">开单时间</th>
             <td>{{ formatDateTime(props.order.createdAt) }}</td>
           </tr>
-          <tr>
+          <tr class="voucher-detail-header-row">
             <th colspan="2" scope="colgroup">产品名称</th>
             <th scope="col">单价</th>
             <th scope="col">数量</th>
@@ -248,6 +248,8 @@ const printTimestamp = formatDateTime(new Date())
   gap: 16px;
   width: fit-content;
   min-width: 100%;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
 }
 
 .voucher-sheet {
@@ -286,30 +288,67 @@ const printTimestamp = formatDateTime(new Date())
   width: 100%;
   border-collapse: collapse;
   table-layout: fixed;
+  border: 2.2px solid #2f2f2f;
+  background: #efefef;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
 }
 
 .voucher-master-table th,
 .voucher-master-table td {
-  border: 1px solid #111;
-  padding: 6px 4px;
+  border: 0.8px solid #575757;
+  padding: 6px 5px;
   font-size: 13px;
   line-height: 1.45;
   vertical-align: middle;
   text-align: center;
   word-break: break-word;
+  background: #f8f8f8;
+  color: #111827;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
 }
 
 .voucher-master-table th {
   font-weight: 700;
-  background: #f3f4f6;
-  color: #111;
+  background: #d9d9d9;
+  color: #111111;
 }
 
 .voucher-title-cell {
-  background: #fff !important;
+  background: #ffffff !important;
+  border-bottom: 2px solid #303030 !important;
   font-size: 24px !important;
   letter-spacing: 0.06em;
-  padding: 10px 8px !important;
+  padding: 12px 8px !important;
+}
+
+.voucher-title-row th {
+  border-top: 2px solid #303030;
+}
+
+.voucher-meta-row--primary th,
+.voucher-meta-row--primary td {
+  border-top: 1.6px solid #404040;
+}
+
+.voucher-meta-row--primary th {
+  background: #d3d3d3;
+}
+
+.voucher-meta-row--secondary th,
+.voucher-meta-row--secondary td {
+  border-bottom: 1.6px solid #404040;
+}
+
+.voucher-meta-row--secondary th {
+  background: #e1e1e1;
+}
+
+.voucher-detail-header-row th {
+  background: #d0d0d0;
+  border-top: 1.8px solid #3a3a3a;
+  border-bottom: 1.8px solid #3a3a3a;
 }
 
 .voucher-master-table .col-label {
@@ -326,6 +365,10 @@ const printTimestamp = formatDateTime(new Date())
   padding-right: 8px;
 }
 
+.voucher-master-table tbody tr:not(.voucher-title-row):not(.voucher-detail-header-row):not(.voucher-sign-label-row) td {
+  background: #fcfcfc;
+}
+
 .voucher-master-table td.is-wrap {
   white-space: normal;
   overflow-wrap: anywhere;
@@ -337,6 +380,25 @@ const printTimestamp = formatDateTime(new Date())
   font-weight: 700;
 }
 
+.voucher-total-row th,
+.voucher-total-row td {
+  background: #f1f1f1;
+  border-top: 1.8px solid #3b3b3b;
+}
+
+.voucher-total-row td:nth-child(2) {
+  font-weight: 700;
+}
+
+.voucher-sign-label-row th {
+  background: #d0d0d0;
+  border-top: 2px solid #303030;
+}
+
+.voucher-sign-value-row td {
+  background: #fafafa;
+}
+
 .voucher-filler-row td {
   height: 28px;
 }
@@ -346,7 +408,7 @@ const printTimestamp = formatDateTime(new Date())
 }
 
 .is-editable-cell {
-  background: #fcfcfc;
+  background: #ffffff !important;
 }
 
 .editable-line {
@@ -389,6 +451,17 @@ const printTimestamp = formatDateTime(new Date())
 }
 
 @media print {
+  .voucher-print-document,
+  .voucher-sheet,
+  .voucher-master-table,
+  .voucher-master-table th,
+  .voucher-master-table td,
+  .is-editable-cell,
+  .editable-line {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
   .voucher-print-document {
     gap: 0;
     min-width: auto;
@@ -413,6 +486,46 @@ const printTimestamp = formatDateTime(new Date())
   .editable-line {
     border-color: #000;
     color: #000;
+  }
+
+  .voucher-master-table {
+    border-color: #000;
+    background: #ededed;
+  }
+
+  .voucher-master-table th {
+    background: #d9d9d9 !important;
+  }
+
+  .voucher-title-cell {
+    background: #ffffff !important;
+  }
+
+  .voucher-meta-row--primary th {
+    background: #d3d3d3 !important;
+  }
+
+  .voucher-meta-row--secondary th {
+    background: #e1e1e1 !important;
+  }
+
+  .voucher-detail-header-row th,
+  .voucher-sign-label-row th {
+    background: #d0d0d0 !important;
+  }
+
+  .voucher-total-row th,
+  .voucher-total-row td {
+    background: #f1f1f1 !important;
+  }
+
+  .voucher-master-table tbody tr:not(.voucher-title-row):not(.voucher-detail-header-row):not(.voucher-sign-label-row) td {
+    background: #fcfcfc !important;
+  }
+
+  .voucher-sign-value-row td,
+  .is-editable-cell {
+    background: #ffffff !important;
   }
 
   .voucher-master-table th,
