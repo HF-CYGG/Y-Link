@@ -53,6 +53,8 @@ export interface O2oPreorderSummary {
   merchantMessage: string | null
   clientOrderType: O2oClientOrderType
   departmentNameSnapshot: string | null
+  returnRequestCount: number
+  pendingReturnRequestCount: number
   totalQty: number
   timeoutAt: string | null
   createdAt: string

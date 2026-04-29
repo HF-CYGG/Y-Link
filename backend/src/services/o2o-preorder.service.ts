@@ -107,6 +107,8 @@ export interface O2oPreorderSummaryView {
   merchantMessage: string | null
   clientOrderType: O2oPreorder['clientOrderType']
   departmentNameSnapshot: string | null
+  returnRequestCount: number
+  pendingReturnRequestCount: number
   totalQty: number
   timeoutAt: Date | null
   createdAt: Date
@@ -929,6 +931,34 @@ class O2oPreorderService {
     return new Map(rows.map((item) => [String(item.orderId), this.normalizeDecimalText(item.totalAmount)]))
   }
 
+  /**
+   * 汇总订单关联的退货申请数量：
+   * - 订单池列表只需要知道“该订单是否存在退货记录、是否还有待处理退货”；
+   * - 统一在后端按订单聚合，避免前端为分类筛选逐单拉详情。
+   */
+  private async resolveOrderReturnRequestCountMap(orderIds: string[]) {
+    if (!orderIds.length) {
+      return new Map<string, { total: number; pending: number }>()
+    }
+    const rows = await this.returnRequestRepo
+      .createQueryBuilder('returnRequest')
+      .select('returnRequest.orderId', 'orderId')
+      .addSelect('COUNT(1)', 'totalCount')
+      .addSelect("SUM(CASE WHEN returnRequest.status = 'pending' THEN 1 ELSE 0 END)", 'pendingCount')
+      .where('returnRequest.orderId IN (:...orderIds)', { orderIds })
+      .groupBy('returnRequest.orderId')
+      .getRawMany<{ orderId: string; totalCount: string | number | null; pendingCount: string | number | null }>()
+    return new Map(
+      rows.map((item) => [
+        String(item.orderId),
+        {
+          total: Number(item.totalCount ?? 0),
+          pending: Number(item.pendingCount ?? 0),
+        },
+      ]),
+    )
+  }
+
   async listMallProducts() {
     // 商城端只暴露“可售且已上架”的商品，并把库存口径统一换算成前端直接可用的 availableStock。
     const products = await this.productRepo.find({
@@ -1531,6 +1561,7 @@ class O2oPreorderService {
     const [rows, total] = await queryBuilder.getManyAndCount()
     const nowMs = Date.now()
     const totalAmountMap = await this.resolveOrderTotalAmountMap(rows.map((item) => String(item.id)))
+    const returnRequestCountMap = await this.resolveOrderReturnRequestCountMap(rows.map((item) => String(item.id)))
     return {
       page: normalizedPage,
       pageSize: normalizedPageSize,
@@ -1547,6 +1578,8 @@ class O2oPreorderService {
         merchantMessage: item.merchantMessage ?? null,
         clientOrderType: item.clientOrderType === 'department' ? 'department' : 'walkin',
         departmentNameSnapshot: item.departmentNameSnapshot?.trim() || null,
+        returnRequestCount: returnRequestCountMap.get(String(item.id))?.total ?? 0,
+        pendingReturnRequestCount: returnRequestCountMap.get(String(item.id))?.pending ?? 0,
         totalQty: item.totalQty,
         timeoutAt: item.timeoutAt,
         createdAt: item.createdAt,
@@ -1700,6 +1733,7 @@ class O2oPreorderService {
     const rows = await queryBuilder.getMany()
     const nowMs = Date.now()
     const totalAmountMap = await this.resolveOrderTotalAmountMap(rows.map((item) => String(item.id)))
+    const returnRequestCountMap = await this.resolveOrderReturnRequestCountMap(rows.map((item) => String(item.id)))
     return rows.map((item) => ({
       statusReport: this.resolveOrderStatusReport(item, nowMs),
       totalAmount: totalAmountMap.get(String(item.id)) ?? '0.00',
@@ -1712,6 +1746,8 @@ class O2oPreorderService {
       merchantMessage: item.merchantMessage ?? null,
       clientOrderType: item.clientOrderType === 'department' ? 'department' : 'walkin',
       departmentNameSnapshot: item.departmentNameSnapshot?.trim() || null,
+      returnRequestCount: returnRequestCountMap.get(String(item.id))?.total ?? 0,
+      pendingReturnRequestCount: returnRequestCountMap.get(String(item.id))?.pending ?? 0,
       totalQty: item.totalQty,
       timeoutAt: item.timeoutAt,
       createdAt: item.createdAt,

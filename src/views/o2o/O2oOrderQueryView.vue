@@ -17,6 +17,7 @@ import {
   getClientOrderReportScenario,
   isO2oOrderPending,
   O2O_ORDER_BUSINESS_STATUS_META,
+  VERIFY_CONSOLE_O2O_ORDER_STATUS_LABEL_MAP,
   type O2oOrderBusinessStatus,
   type O2oOrderStatus,
 } from '@/constants/o2o-order-status'
@@ -28,15 +29,17 @@ import {
   type O2oPreorderDetail,
   type O2oPreorderSummary,
   type O2oOrderStatusReport,
+  type O2oReturnRequestDetail,
 } from '@/api/modules/o2o'
 
-type OrderPoolKey = 'all' | 'pending' | 'completed' | 'cancelled'
+type OrderPoolKey = 'all' | 'pending' | 'completed' | 'cancelled' | 'returns'
 
 const ORDER_POOL_TABS: Array<{ key: OrderPoolKey; label: string }> = [
   { key: 'all', label: '全部订单' },
   { key: 'pending', label: '待核销' },
   { key: 'completed', label: '已完成' },
   { key: 'cancelled', label: '已取消' },
+  { key: 'returns', label: '退货订单' },
 ]
 
 const NEW_ORDER_WINDOW_MS = 30 * 60 * 1000
@@ -46,6 +49,23 @@ const POLL_INTERVAL_OPTIONS = [10, 15] as const
 const ORDER_TYPE_LABEL_MAP = {
   department: '部门订',
   walkin: '散客',
+} as const
+const RETURN_REQUEST_STATUS_META = {
+  pending: {
+    label: '待门店核销',
+    className: 'bg-amber-50 text-amber-700',
+    description: '用户已提交退货申请，请门店核对商品后扫码完成退货核销。',
+  },
+  verified: {
+    label: '退货已完成',
+    className: 'bg-emerald-50 text-emerald-700',
+    description: '门店已完成退货回库核销，本次退货流程已闭环。',
+  },
+  rejected: {
+    label: '退货已拒绝',
+    className: 'bg-rose-50 text-rose-700',
+    description: '门店已拒绝本次退货申请，请结合拒绝原因继续沟通处理。',
+  },
 } as const
 const listLoading = ref(false)
 const detailLoading = ref(false)
@@ -166,15 +186,23 @@ const resolvePoolKey = (order: O2oPreorderSummary): OrderPoolKey => {
   return 'pending'
 }
 
+const hasReturnRequests = (order: Pick<O2oPreorderSummary, 'returnRequestCount'>) => {
+  return Number(order.returnRequestCount ?? 0) > 0
+}
+
 const poolCountMap = computed(() => {
   const map: Record<OrderPoolKey, number> = {
     all: orders.value.length,
     pending: 0,
     completed: 0,
     cancelled: 0,
+    returns: 0,
   }
   for (const order of orders.value) {
     map[resolvePoolKey(order)] += 1
+    if (hasReturnRequests(order)) {
+      map.returns += 1
+    }
   }
   return map
 })
@@ -185,10 +213,14 @@ const poolOrderMap = computed(() => {
     pending: [],
     completed: [],
     cancelled: [],
+    returns: [],
   }
   for (const order of orders.value) {
     map.all.push(order)
     map[resolvePoolKey(order)].push(order)
+    if (hasReturnRequests(order)) {
+      map.returns.push(order)
+    }
   }
   for (const tab of ORDER_POOL_TABS) {
     map[tab.key] = map[tab.key].slice().sort((prev, next) => {
@@ -306,6 +338,23 @@ const activeOrderOwnership = computed(() => {
   }
   return buildOwnershipLabel(order.clientOrderType, order.departmentNameSnapshot)
 })
+
+const activeReturnRequests = computed(() => {
+  const requests = activeOrderDetail.value?.returnRequests ?? []
+  return requests.slice().sort((prev, next) => parseTimeMs(next.createdAt) - parseTimeMs(prev.createdAt))
+})
+
+const activeReturnSummary = computed(() => {
+  const requests = activeReturnRequests.value
+  return {
+    totalCount: requests.length,
+    pendingCount: requests.filter((item) => item.status === 'pending').length,
+  }
+})
+
+const getReturnRequestStatusMeta = (request: O2oReturnRequestDetail) => {
+  return RETURN_REQUEST_STATUS_META[request.status]
+}
 
 // 管理端状态选择保留门店当前对外使用的核心业务状态，并新增“已完结（交易结束）”。
 // 这样门店既能表达待接单/备货/售后，也能在不改动主状态的前提下补充交易收尾完成。
@@ -519,6 +568,8 @@ const mergeOrderSummaryFromDetail = (detail: O2oPreorderDetail) => {
     merchantMessage: nextOrder.merchantMessage,
     clientOrderType: nextOrder.clientOrderType,
     departmentNameSnapshot: nextOrder.departmentNameSnapshot,
+    returnRequestCount: detail.returnRequests.length,
+    pendingReturnRequestCount: detail.returnRequests.filter((item) => item.status === 'pending').length,
     totalQty: nextOrder.totalQty,
     timeoutAt: nextOrder.timeoutAt,
     createdAt: nextOrder.createdAt,
@@ -884,6 +935,12 @@ onBeforeUnmount(() => {
                   <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">
                     {{ getOrderTypeLabel(order.clientOrderType) }}
                   </span>
+                  <span
+                    v-if="order.returnRequestCount > 0"
+                    class="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700"
+                  >
+                    退货 {{ order.returnRequestCount }} 笔
+                  </span>
                 </div>
               </div>
               <div class="flex shrink-0 flex-col items-end gap-1 text-right">
@@ -903,6 +960,9 @@ onBeforeUnmount(() => {
               <p class="text-right">件数：{{ order.totalQty }}</p>
               <p class="break-words">归属：{{ getOrderTypeLabel(order.clientOrderType) }}{{ order.departmentNameSnapshot ? ` / ${order.departmentNameSnapshot}` : '' }}</p>
               <p>应付总额：¥{{ formatCurrency(order.totalAmount) }}</p>
+              <p class="break-words" :class="order.returnRequestCount > 0 ? 'text-amber-700' : 'text-slate-400'">
+                退货记录：{{ order.returnRequestCount > 0 ? `共 ${order.returnRequestCount} 笔${order.pendingReturnRequestCount > 0 ? `，待处理 ${order.pendingReturnRequestCount} 笔` : ''}` : '暂无' }}
+              </p>
             </div>
           </button>
           <div v-if="!listLoading && !currentPoolOrders.length" class="rounded-2xl border border-dashed border-slate-200 px-3 py-8 text-center text-sm text-slate-400">
@@ -1045,6 +1105,14 @@ onBeforeUnmount(() => {
               <p class="text-sm text-slate-400">商品条目</p>
               <p class="mt-1 text-sm font-semibold text-slate-900">{{ detailAmountSummary.totalItemCount }} 项</p>
             </div>
+            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <p class="text-sm text-slate-400">退货记录</p>
+              <p class="mt-1 text-sm font-semibold text-slate-900">{{ activeReturnSummary.totalCount }} 笔</p>
+            </div>
+            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <p class="text-sm text-slate-400">待处理退货</p>
+              <p class="mt-1 text-sm font-semibold text-slate-900">{{ activeReturnSummary.pendingCount }} 笔</p>
+            </div>
           </div>
 
           <div class="mt-4 rounded-2xl border border-slate-200 bg-white px-4 py-4">
@@ -1087,6 +1155,108 @@ onBeforeUnmount(() => {
                 <p class="text-sm font-semibold text-slate-900">{{ step.title }}</p>
                 <p class="break-words text-xs text-slate-500">{{ step.time }}</p>
               </div>
+            </div>
+          </div>
+
+          <div class="mt-4 rounded-2xl border border-slate-200 bg-white px-4 py-4">
+            <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <p class="text-base font-semibold text-slate-900">退货记录</p>
+                <p class="mt-1 text-xs leading-5 text-slate-500">
+                  展示当前订单全部退货申请、处理状态、退货原因与门店扫码码，便于门店统一查看售后历史。
+                </p>
+              </div>
+              <span
+                class="inline-flex w-fit rounded-full px-2.5 py-1 text-xs font-medium"
+                :class="activeReturnSummary.pendingCount > 0 ? 'bg-amber-50 text-amber-700' : 'bg-slate-100 text-slate-600'"
+              >
+                {{ activeReturnSummary.pendingCount > 0 ? `待处理 ${activeReturnSummary.pendingCount} 笔` : '暂无待处理退货' }}
+              </span>
+            </div>
+
+            <div v-if="activeReturnRequests.length" class="mt-4 space-y-3">
+              <article
+                v-for="request in activeReturnRequests"
+                :key="request.id"
+                class="rounded-2xl border border-slate-200 bg-slate-50 p-4"
+              >
+                <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                  <div class="min-w-0">
+                    <div class="flex min-w-0 flex-wrap items-center gap-2">
+                      <p class="break-words text-base font-semibold text-slate-900">{{ request.returnNo }}</p>
+                      <span class="rounded-full px-2 py-0.5 text-[11px] font-medium" :class="getReturnRequestStatusMeta(request).className">
+                        {{ getReturnRequestStatusMeta(request).label }}
+                      </span>
+                    </div>
+                    <p class="mt-1 break-words text-xs leading-5 text-slate-500">
+                      {{ getReturnRequestStatusMeta(request).description }}
+                    </p>
+                  </div>
+                  <div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:w-[26rem]">
+                    <div class="rounded-2xl bg-white px-3 py-2">
+                      <p class="text-xs text-slate-400">申请时间</p>
+                      <p class="mt-1 text-sm font-semibold text-slate-900">{{ formatOrderDateTime(request.createdAt) }}</p>
+                    </div>
+                    <div class="rounded-2xl bg-white px-3 py-2">
+                      <p class="text-xs text-slate-400">退货件数</p>
+                      <p class="mt-1 text-sm font-semibold text-slate-900">{{ request.totalQty }} 件</p>
+                    </div>
+                    <div class="rounded-2xl bg-white px-3 py-2">
+                      <p class="text-xs text-slate-400">原订单状态</p>
+                      <p class="mt-1 text-sm font-semibold text-slate-900">{{ VERIFY_CONSOLE_O2O_ORDER_STATUS_LABEL_MAP[request.sourceOrderStatus] }}</p>
+                    </div>
+                    <div class="rounded-2xl bg-white px-3 py-2">
+                      <p class="text-xs text-slate-400">处理时间</p>
+                      <p class="mt-1 text-sm font-semibold text-slate-900">{{ formatOrderDateTime(request.handledAt ?? request.verifiedAt, { fallback: '等待门店处理' }) }}</p>
+                    </div>
+                    <div class="rounded-2xl bg-white px-3 py-2">
+                      <p class="text-xs text-slate-400">处理人</p>
+                      <p class="mt-1 text-sm font-semibold text-slate-900">{{ request.handledBy || request.verifiedBy || '门店待处理' }}</p>
+                    </div>
+                    <div class="rounded-2xl bg-white px-3 py-2">
+                      <p class="text-xs text-slate-400">退货码</p>
+                      <p class="mt-1 break-all text-sm font-semibold text-slate-900">{{ request.verifyCode }}</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="mt-3 rounded-2xl border border-slate-200 bg-white px-3 py-3">
+                  <p class="text-xs text-slate-400">退货原因</p>
+                  <p class="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-slate-700">{{ request.reason }}</p>
+                </div>
+
+                <div
+                  v-if="request.rejectedReason"
+                  class="mt-3 rounded-2xl border border-rose-200 bg-rose-50 px-3 py-3"
+                >
+                  <p class="text-xs text-rose-500">拒绝原因</p>
+                  <p class="mt-1 whitespace-pre-wrap break-words text-sm leading-6 text-rose-700">{{ request.rejectedReason }}</p>
+                </div>
+
+                <div class="mt-3">
+                  <p class="mb-2 text-sm font-semibold text-slate-900">退货商品</p>
+                  <div class="space-y-2">
+                    <div
+                      v-for="item in request.items"
+                      :key="item.id"
+                      class="flex items-start justify-between gap-3 rounded-2xl border border-slate-100 bg-white px-3 py-2"
+                    >
+                      <div class="min-w-0">
+                        <p class="break-words text-sm font-semibold text-slate-900">{{ item.productName }}</p>
+                        <p class="mt-1 text-xs text-slate-400">{{ item.productCode }}</p>
+                      </div>
+                      <p class="shrink-0 text-sm font-semibold text-slate-700">x {{ item.qty }}</p>
+                    </div>
+                  </div>
+                </div>
+              </article>
+            </div>
+
+            <div
+              v-else
+              class="mt-4 rounded-2xl border border-dashed border-slate-200 px-3 py-8 text-center text-sm text-slate-400"
+            >
+              当前订单暂无退货申请记录
             </div>
           </div>
 

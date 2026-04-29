@@ -404,6 +404,8 @@ const buildOrderSummaryFromDetail = (nextDetail: O2oPreorderDetail): O2oPreorder
     merchantMessage: order.merchantMessage,
     clientOrderType: order.clientOrderType,
     departmentNameSnapshot: order.departmentNameSnapshot,
+    returnRequestCount: nextDetail.returnRequests.length,
+    pendingReturnRequestCount: nextDetail.returnRequests.filter((item) => item.status === 'pending').length,
     statusReport: order.statusReport,
     totalAmount: order.totalAmount,
     expireInSeconds: order.expireInSeconds,

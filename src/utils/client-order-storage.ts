@@ -107,6 +107,8 @@ const normalizeOrderRow = (item: unknown): O2oPreorderSummary | null => {
     departmentNameSnapshot: normalizeDepartmentNameSnapshot(row.departmentNameSnapshot),
     // 缓存恢复时尽量沿用服务端原始状态报告，确保“已撤回/超时取消”文案不会在刷新后退化。
     statusReport: normalizeStatusReport(row, status, timeoutAt),
+    returnRequestCount: Number.isFinite(row.returnRequestCount) ? Number(row.returnRequestCount) : 0,
+    pendingReturnRequestCount: Number.isFinite(row.pendingReturnRequestCount) ? Number(row.pendingReturnRequestCount) : 0,
     totalQty: Number.isFinite(row.totalQty) ? Number(row.totalQty) : 0,
     totalAmount: typeof row.totalAmount === 'string' ? row.totalAmount : undefined,
     expireInSeconds: Number.isFinite(row.expireInSeconds) ? Number(row.expireInSeconds) : undefined,
