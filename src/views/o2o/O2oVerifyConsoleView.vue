@@ -6,6 +6,7 @@
  * - 输入框既支持直接录入核销码，也支持粘贴二维码链接、扫码枪文本和业务单号；
  * - 查询接口返回“预订单 / 退货申请”联合结果后，页面按真实单据类型切换展示卡片、表格与按钮文案；
  * - 对待处理退货申请开放“拒绝”弹窗，对待核销预订单开放“现场改单”面板，并在成功后原位刷新当前单据详情；
+ * - 预订单详情区同步展示总金额、总件数等关键统计，便于门店核对改单后的最终出库金额；
  * - 所有前端提示文案都与后端实际业务含义保持一致，避免门店误把退货码当取货码处理。
  * 维护说明：
  * - 若后端扩展新的核销目标类型，必须同步补充本文件的类型守卫、状态映射和模板分支；
@@ -194,6 +195,19 @@ const preorderOwnershipLabel = computed(() => {
   const orderTypeLabel = ORDER_TYPE_LABEL_MAP[order.clientOrderType]
   const departmentLabel = order.departmentNameSnapshot ? ` / ${order.departmentNameSnapshot}` : ''
   return `${orderTypeLabel}${departmentLabel}`
+})
+
+/**
+ * 预订单总金额展示文案：
+ * - 后端详情已经返回订单汇总金额，这里统一格式化为金额文本；
+ * - 现场改单后重新查询详情时，该值会自动刷新为最新总额。
+ */
+const preorderTotalAmountText = computed(() => {
+  if (!preorderDetail.value) {
+    return '0.00'
+  }
+  const normalizedAmount = Number(preorderDetail.value.order.totalAmount ?? 0)
+  return Number.isFinite(normalizedAmount) ? normalizedAmount.toFixed(2) : '0.00'
 })
 
 const returnRequestResultHint = computed(() => {
@@ -816,13 +830,17 @@ watch(
 
           <div v-if="preorderDetail" class="mt-4 rounded-2xl border border-teal-100 bg-teal-50 px-4 py-3 text-sm text-teal-700">
             <p class="font-semibold">核销依据说明</p>
-            <p class="mt-1 leading-6">当前页面支持待核销预订单现场改单。保存后，商品明细、总件数和后续核销出库都会以最新结果为准。</p>
+            <p class="mt-1 leading-6">当前页面支持待核销预订单现场改单。保存后，商品明细、总金额、总件数和后续核销出库都会以最新结果为准。</p>
           </div>
 
           <div v-if="preorderDetail" class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">下单归属</p>
               <p class="mt-1 text-base font-semibold text-slate-900">{{ preorderOwnershipLabel }}</p>
+            </div>
+            <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <p class="text-sm text-slate-400">总金额</p>
+              <p class="mt-1 text-base font-semibold text-slate-900">¥{{ preorderTotalAmountText }}</p>
             </div>
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">总件数</p>
