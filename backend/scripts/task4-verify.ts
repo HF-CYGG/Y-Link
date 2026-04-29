@@ -211,6 +211,11 @@ function verifyMysqlEffectiveGuidance() {
       updatedAt: simulatedUpdatedAt,
       config: {
         DB_TYPE: 'mysql' as const,
+        DB_HOST: '127.0.0.1',
+        DB_PORT: 3307,
+        DB_USER: env.DB_USER,
+        DB_NAME: 'task4_effective_mysql',
+        DB_SYNC: env.DB_SYNC,
       },
     }
     const effectiveDatabase = buildEffectiveDatabaseSummary(activeOverride)
@@ -236,12 +241,80 @@ function verifyMysqlEffectiveGuidance() {
   }
 }
 
+/**
+ * 验证“时间戳与库类型相同，但连接参数不同”时不会误判为已对齐：
+ * - 这是对运行时覆盖比对缺陷的专项回归保护；
+ * - 如果磁盘覆盖文件中的 MySQL 连接参数已经变化，状态摘要必须提示等待重启切换到新配置。
+ */
+function verifyMysqlOverrideMismatchByConnectionFields() {
+  const envMutable = env as Record<string, unknown>
+  const envLoadContextMutable = envLoadContext as Record<string, unknown>
+  const originalEnvSnapshot = {
+    DB_TYPE: env.DB_TYPE,
+    DB_HOST: env.DB_HOST,
+    DB_PORT: env.DB_PORT,
+    DB_USER: env.DB_USER,
+    DB_NAME: env.DB_NAME,
+    DB_SYNC: env.DB_SYNC,
+  }
+  const originalEnvLoadContextSnapshot = {
+    runtimeDatabaseOverrideLoaded: envLoadContext.runtimeDatabaseOverrideLoaded,
+    runtimeDatabaseOverride: envLoadContext.runtimeDatabaseOverride,
+  }
+  const simulatedUpdatedAt = '2026-04-29T13:00:00.000Z'
+
+  try {
+    envMutable.DB_TYPE = 'mysql'
+    envMutable.DB_HOST = '127.0.0.1'
+    envMutable.DB_PORT = 3306
+    envMutable.DB_USER = 'task4_runtime_user'
+    envMutable.DB_NAME = 'task4_runtime_db'
+    envMutable.DB_SYNC = false
+    envLoadContextMutable.runtimeDatabaseOverrideLoaded = true
+    envLoadContextMutable.runtimeDatabaseOverride = {
+      filePath: 'memory://task4-mismatch',
+      updatedAt: simulatedUpdatedAt,
+      dbType: 'mysql',
+    }
+
+    const activeOverride = {
+      updatedAt: simulatedUpdatedAt,
+      config: {
+        DB_TYPE: 'mysql' as const,
+        DB_HOST: '192.168.1.50',
+        DB_PORT: 3306,
+        DB_USER: 'task4_runtime_user',
+        DB_NAME: 'task4_runtime_db',
+        DB_SYNC: false,
+      },
+    }
+
+    const effectiveDatabase = buildEffectiveDatabaseSummary(activeOverride)
+    const runtimeOverrideStatus = buildRuntimeOverrideStatusSummary(activeOverride)
+    assert.equal(effectiveDatabase.dbType, 'mysql')
+    assert.equal(runtimeOverrideStatus.pendingRestart, true)
+    assert.match(runtimeOverrideStatus.statusLabel, /等待重启切换到新配置/)
+    assert.match(effectiveDatabase.description, /磁盘上的覆盖文件已发生变化/)
+    pass('即使更新时间与库类型相同，只要连接参数变化也会识别为覆盖文件未对齐')
+  } finally {
+    envMutable.DB_TYPE = originalEnvSnapshot.DB_TYPE
+    envMutable.DB_HOST = originalEnvSnapshot.DB_HOST
+    envMutable.DB_PORT = originalEnvSnapshot.DB_PORT
+    envMutable.DB_USER = originalEnvSnapshot.DB_USER
+    envMutable.DB_NAME = originalEnvSnapshot.DB_NAME
+    envMutable.DB_SYNC = originalEnvSnapshot.DB_SYNC
+    envLoadContextMutable.runtimeDatabaseOverrideLoaded = originalEnvLoadContextSnapshot.runtimeDatabaseOverrideLoaded
+    envLoadContextMutable.runtimeDatabaseOverride = originalEnvLoadContextSnapshot.runtimeDatabaseOverride
+  }
+}
+
 async function main() {
   verifyQuickEntrySources()
   verifyStepUnlockAndButtonBlockingSources()
   await verifySqliteRuntimeState()
   await verifyPendingRestartRuntimeState()
   verifyMysqlEffectiveGuidance()
+  verifyMysqlOverrideMismatchByConnectionFields()
 }
 
 try {

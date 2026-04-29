@@ -22,6 +22,12 @@ type RuntimeOverrideDisplay = {
   updatedAt?: string
   config?: {
     DB_TYPE: 'sqlite' | 'mysql'
+    DB_HOST?: string
+    DB_PORT?: number
+    DB_USER?: string
+    DB_NAME?: string
+    SQLITE_DB_PATH?: string
+    DB_SYNC?: boolean
   } | null
 } | null
 
@@ -57,14 +63,28 @@ function isRuntimeOverrideLoadedByCurrentProcess(): boolean {
  * - 不一致：通常表示有人刚写入/清理了覆盖文件，但后端还没有重启。
  */
 function isCurrentOverrideFileAlignedWithRunningProcess(activeOverride: RuntimeOverrideDisplay): boolean {
-  const loadedOverride = envLoadContext.runtimeDatabaseOverride
-  if (!loadedOverride) {
+  if (!envLoadContext.runtimeDatabaseOverride) {
     return !activeOverride?.config
   }
   if (!activeOverride?.config) {
     return false
   }
-  return loadedOverride.updatedAt === activeOverride.updatedAt && loadedOverride.dbType === activeOverride.config.DB_TYPE
+  if (activeOverride.config.DB_TYPE !== env.DB_TYPE) {
+    return false
+  }
+  if (activeOverride.config.DB_TYPE === 'mysql') {
+    return (
+      activeOverride.config.DB_HOST === env.DB_HOST
+      && activeOverride.config.DB_PORT === env.DB_PORT
+      && activeOverride.config.DB_USER === env.DB_USER
+      && activeOverride.config.DB_NAME === env.DB_NAME
+      && activeOverride.config.DB_SYNC === env.DB_SYNC
+    )
+  }
+  return (
+    activeOverride.config.SQLITE_DB_PATH === env.SQLITE_DB_PATH
+    && activeOverride.config.DB_SYNC === env.DB_SYNC
+  )
 }
 
 /**
