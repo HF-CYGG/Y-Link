@@ -499,6 +499,7 @@ const printTimestamp = formatDateTime(new Date())
 
   .voucher-title-cell {
     background: #ffffff !important;
+    font-size: 20px !important;
   }
 
   .voucher-meta-row--primary th {
@@ -532,10 +533,6 @@ const printTimestamp = formatDateTime(new Date())
   .voucher-master-table td {
     font-size: 11px;
     padding: 4px 3px;
-  }
-
-  .voucher-title-cell {
-    font-size: 20px !important;
   }
 
   .voucher-sheet--landscape {
