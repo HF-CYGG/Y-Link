@@ -418,6 +418,20 @@ const formatCountdown = (order: { status: O2oOrderStatus; expireInSeconds?: numb
   return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:${String(second).padStart(2, '0')}`
 }
 
+/**
+ * 订单池卡片倒计时文案：
+ * - 仅待核销订单且存在有效剩余时间时展示；
+ * - 将倒计时提升到卡片头部状态区，避免与金额/件数信息混排后视觉重心下坠；
+ * - 已超时、已取消、已核销统一不再在列表卡片重复展示倒计时，状态标签本身已足够表达结果。
+ */
+const getOrderCountdownText = (order: { status: O2oOrderStatus; expireInSeconds?: number; timeoutAt: string | null }) => {
+  const remainSeconds = resolveRemainSeconds(order)
+  if (remainSeconds === null || remainSeconds <= 0) {
+    return ''
+  }
+  return `剩余 ${formatCountdown(order)}`
+}
+
 const isOrderHighlighted = (orderId: string) => {
   return (orderHighlightExpiresAtMap.value[orderId] ?? 0) > nowMs.value
 }
@@ -872,16 +886,23 @@ onBeforeUnmount(() => {
                   </span>
                 </div>
               </div>
-              <span class="shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium" :class="getOrderReportConfig(order).cardClassName">
-                {{ getOrderReportConfig(order).statusLabel }}
-              </span>
+              <div class="flex shrink-0 flex-col items-end gap-1 text-right">
+                <span class="rounded-full px-2 py-0.5 text-[11px] font-medium" :class="getOrderReportConfig(order).cardClassName">
+                  {{ getOrderReportConfig(order).statusLabel }}
+                </span>
+                <span
+                  v-if="getOrderCountdownText(order)"
+                  class="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700"
+                >
+                  {{ getOrderCountdownText(order) }}
+                </span>
+              </div>
             </div>
             <div class="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500">
               <p class="break-words">时间：{{ formatOrderDateTime(order.createdAt, { includeSeconds: false }) }}</p>
               <p class="text-right">件数：{{ order.totalQty }}</p>
               <p class="break-words">归属：{{ getOrderTypeLabel(order.clientOrderType) }}{{ order.departmentNameSnapshot ? ` / ${order.departmentNameSnapshot}` : '' }}</p>
               <p>应付总额：¥{{ formatCurrency(order.totalAmount) }}</p>
-              <p class="text-right">倒计时：{{ formatCountdown(order) }}</p>
             </div>
           </button>
           <div v-if="!listLoading && !currentPoolOrders.length" class="rounded-2xl border border-dashed border-slate-200 px-3 py-8 text-center text-sm text-slate-400">
