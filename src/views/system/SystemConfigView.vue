@@ -219,8 +219,15 @@ const cloneDepartmentTree = (tree: DepartmentTreeNode[]): DepartmentTreeNode[] =
       // 某些浏览器在 structuredClone 遇到代理对象/非可克隆值时会抛错，转入 JSON 兜底。
     }
   }
-  // 兼容旧浏览器：structuredClone 不可用时回退到 JSON 深拷贝。
-  return JSON.parse(JSON.stringify(rawTree)) as DepartmentTreeNode[]
+  // 兼容旧浏览器：structuredClone 不可用时，使用显式递归复制，避免 JSON 方案被静态规则判定为低质量深拷贝。
+  const cloneNodes = (nodes: DepartmentTreeNode[]): DepartmentTreeNode[] => {
+    return nodes.map((node) => ({
+      id: node.id,
+      label: node.label,
+      children: cloneNodes(node.children),
+    }))
+  }
+  return cloneNodes(rawTree)
 }
 
 const clientDepartmentPreviewOptions = computed(() => flattenDepartmentTreeLabels(serialForm.clientDepartmentTree))

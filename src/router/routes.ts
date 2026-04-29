@@ -717,7 +717,8 @@ const deriveShortcutItems = (
 
   collectFromRecords(records, parentPath)
 
-  return collectedEntries.sort((prev, next) => prev.order - next.order).map((entry) => entry.item)
+  const sortedEntries = [...collectedEntries].sort((prev, next) => prev.order - next.order)
+  return sortedEntries.map((entry) => entry.item)
 }
 
 /**

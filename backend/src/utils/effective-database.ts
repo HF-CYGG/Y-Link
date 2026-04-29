@@ -68,6 +68,62 @@ function isCurrentOverrideFileAlignedWithRunningProcess(activeOverride: RuntimeO
 }
 
 /**
+ * 生成当前连接摘要：
+ * - MySQL 展示主机、端口和库名；
+ * - SQLite 展示解析后的数据库文件绝对路径。
+ */
+function buildDatabaseConnectionSummary(dbType: 'sqlite' | 'mysql'): string {
+  if (dbType === 'mysql') {
+    return `${env.DB_HOST}:${env.DB_PORT}/${env.DB_NAME}`
+  }
+  return resolveSqliteDatabasePath()
+}
+
+/**
+ * 生成数据库来源标签：
+ * - 默认优先说明当前 env 文件；
+ * - 若当前进程启动时已加载运行时覆盖，则明确标注覆盖来源和更新时间。
+ */
+function buildEffectiveDatabaseSourceLabel(loadedByCurrentProcess: boolean): string {
+  if (loadedByCurrentProcess && envLoadContext.runtimeDatabaseOverride) {
+    return `运行时覆盖配置（启动时已加载，更新时间：${envLoadContext.runtimeDatabaseOverride.updatedAt}）`
+  }
+  if (envLoadContext.requestedEnvFile) {
+    return `默认环境配置（ENV_FILE：${envLoadContext.requestedEnvFile}）`
+  }
+  return `默认环境配置（APP_PROFILE：${envLoadContext.requestedProfile ?? env.APP_PROFILE}）`
+}
+
+/**
+ * 生成“当前实际生效数据库”说明文案：
+ * - 先给出稳定基础文案；
+ * - 再用“待重启 / 覆盖文件已变化”两类过渡态覆盖，确保用户不会误读当前真实连接。
+ */
+function buildEffectiveDatabaseDescription(input: {
+  dbType: 'sqlite' | 'mysql'
+  loadedByCurrentProcess: boolean
+  hasOverrideFile: boolean
+  overrideFileAligned: boolean
+}): string {
+  const { dbType, loadedByCurrentProcess, hasOverrideFile, overrideFileAligned } = input
+  if (hasOverrideFile && !loadedByCurrentProcess) {
+    return `已检测到新的运行时覆盖文件，但当前进程尚未重启，当前仍实际运行在 ${dbType === 'mysql' ? 'MySQL' : 'SQLite'}。`
+  }
+  if (loadedByCurrentProcess && !overrideFileAligned) {
+    return '当前进程仍按启动时已加载的运行时覆盖运行，但磁盘上的覆盖文件已发生变化；需重启后端后才会切换到新配置。'
+  }
+  if (dbType === 'mysql') {
+    return loadedByCurrentProcess
+      ? '当前服务已经按运行时覆盖配置连接到 MySQL，可继续核对连接信息或在异常时执行回退。'
+      : '当前服务按默认环境配置连接到 MySQL，一般不需要再次执行 SQLite -> MySQL 迁移。'
+  }
+  if (loadedByCurrentProcess) {
+    return '当前服务已经按运行时覆盖配置回退到 SQLite，可继续检查数据后决定是否再次迁移。'
+  }
+  return '当前服务按默认环境配置使用 SQLite，适合先完成预检再迁移到 MySQL。'
+}
+
+/**
  * 构造“当前实际生效数据库”摘要：
  * - 真实数据库类型与连接目标一律来自当前进程已加载的 `env`；
  * - 若管理员刚写入覆盖文件但还没重启，这里仍明确显示当前旧数据库，避免把“计划切换”误看成“已经切换”。
@@ -77,32 +133,14 @@ export function buildEffectiveDatabaseSummary(activeOverride: RuntimeOverrideDis
   const loadedByCurrentProcess = isRuntimeOverrideLoadedByCurrentProcess()
   const hasOverrideFile = Boolean(activeOverride?.config)
   const overrideFileAligned = isCurrentOverrideFileAlignedWithRunningProcess(activeOverride)
-  const summary = dbType === 'mysql'
-    ? `${env.DB_HOST}:${env.DB_PORT}/${env.DB_NAME}`
-    : resolveSqliteDatabasePath()
-
-  let sourceLabel = `默认环境配置（APP_PROFILE：${envLoadContext.requestedProfile ?? env.APP_PROFILE}）`
-  if (envLoadContext.requestedEnvFile) {
-    sourceLabel = `默认环境配置（ENV_FILE：${envLoadContext.requestedEnvFile}）`
-  }
-  if (loadedByCurrentProcess && envLoadContext.runtimeDatabaseOverride) {
-    sourceLabel = `运行时覆盖配置（启动时已加载，更新时间：${envLoadContext.runtimeDatabaseOverride.updatedAt}）`
-  }
-
-  let description = '当前服务按默认环境配置使用 SQLite，适合先完成预检再迁移到 MySQL。'
-  if (dbType === 'mysql') {
-    description = loadedByCurrentProcess
-      ? '当前服务已经按运行时覆盖配置连接到 MySQL，可继续核对连接信息或在异常时执行回退。'
-      : '当前服务按默认环境配置连接到 MySQL，一般不需要再次执行 SQLite -> MySQL 迁移。'
-  } else if (loadedByCurrentProcess) {
-    description = '当前服务已经按运行时覆盖配置回退到 SQLite，可继续检查数据后决定是否再次迁移。'
-  }
-
-  if (hasOverrideFile && !loadedByCurrentProcess) {
-    description = `已检测到新的运行时覆盖文件，但当前进程尚未重启，当前仍实际运行在 ${dbType === 'mysql' ? 'MySQL' : 'SQLite'}。`
-  } else if (loadedByCurrentProcess && !overrideFileAligned) {
-    description = `当前进程仍按启动时已加载的运行时覆盖运行，但磁盘上的覆盖文件已发生变化；需重启后端后才会切换到新配置。`
-  }
+  const summary = buildDatabaseConnectionSummary(dbType)
+  const sourceLabel = buildEffectiveDatabaseSourceLabel(loadedByCurrentProcess)
+  const description = buildEffectiveDatabaseDescription({
+    dbType,
+    loadedByCurrentProcess,
+    hasOverrideFile,
+    overrideFileAligned,
+  })
 
   return {
     dbType,

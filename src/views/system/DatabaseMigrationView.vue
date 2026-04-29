@@ -245,52 +245,135 @@ const getRecommendedStepKey = (): MigrationStepKey => {
 }
 
 /**
+ * 步骤卡片标签类型：
+ * - 已完成统一显示成功态；
+ * - 已解锁但未完成时，根据当前步骤风险提示决定展示信息态或提醒态；
+ * - 未解锁统一保持信息态，避免过度制造紧张感。
+ */
+const resolveStepTagType = (completed: boolean, unlocked: boolean, unlockedPendingType: 'info' | 'warning'): 'success' | 'info' | 'warning' => {
+  if (completed) {
+    return 'success'
+  }
+  if (!unlocked) {
+    return 'info'
+  }
+  return unlockedPendingType
+}
+
+/**
+ * 步骤卡片状态文案：
+ * - 把原本模板层里多处三元表达式收口成可复用函数；
+ * - 既降低认知复杂度，也避免不同步骤出现相同条件却不同文案的问题。
+ */
+const resolveStepStatusLabel = (
+  completed: boolean,
+  unlocked: boolean,
+  completedLabel: string,
+  unlockedLabel: string,
+  lockedLabel: string,
+): string => {
+  if (completed) {
+    return completedLabel
+  }
+  return unlocked ? unlockedLabel : lockedLabel
+}
+
+type MigrationStepCard = {
+  key: MigrationStepKey
+  order: string
+  title: string
+  description: string
+  unlocked: boolean
+  completed: boolean
+  statusLabel: string
+  tagType: 'success' | 'info' | 'warning'
+}
+
+const createStepFlowCard = (input: {
+  key: MigrationStepKey
+  order: string
+  title: string
+  description: string
+  unlocked: boolean
+  completed: boolean
+  completedLabel: string
+  unlockedLabel: string
+  lockedLabel: string
+  unlockedPendingType: 'info' | 'warning'
+}): MigrationStepCard => {
+  return {
+    key: input.key,
+    order: input.order,
+    title: input.title,
+    description: input.description,
+    unlocked: input.unlocked,
+    completed: input.completed,
+    statusLabel: resolveStepStatusLabel(
+      input.completed,
+      input.unlocked,
+      input.completedLabel,
+      input.unlockedLabel,
+      input.lockedLabel,
+    ),
+    tagType: resolveStepTagType(input.completed, input.unlocked, input.unlockedPendingType),
+  }
+}
+
+/**
  * 步骤导航卡片：
  * - 把“是否解锁、是否完成、当前状态标签”统一收口；
  * - 模板只负责渲染，不再在多个位置散落条件判断。
  */
 const stepFlowCards = computed(() => {
   return [
-    {
-      key: 'precheck' as const,
+    createStepFlowCard({
+      key: 'precheck',
       order: '第 1 步',
       title: '填写目标库并执行预检',
       description: '先校验 SQLite 源文件、MySQL 连通性和目标库风险，再决定是否继续。',
       unlocked: true,
       completed: hasPrecheckPassed.value,
-      statusLabel: hasPrecheckPassed.value ? '已完成' : precheckResult.value ? '待处理问题' : '待开始',
-      tagType: hasPrecheckPassed.value ? 'success' : precheckResult.value ? 'warning' : 'info',
-    },
-    {
-      key: 'create' as const,
+      completedLabel: '已完成',
+      unlockedLabel: precheckResult.value ? '待处理问题' : '待开始',
+      lockedLabel: '未解锁',
+      unlockedPendingType: precheckResult.value ? 'warning' : 'info',
+    }),
+    createStepFlowCard({
+      key: 'create',
       order: '第 2 步',
       title: '创建迁移任务',
       description: '基于预检通过的配置落盘任务，准备进入正式迁移。',
       unlocked: hasPrecheckPassed.value,
       completed: hasCreatedTask.value,
-      statusLabel: hasCreatedTask.value ? '已创建任务' : hasPrecheckPassed.value ? '待创建' : '未解锁',
-      tagType: hasCreatedTask.value ? 'success' : hasPrecheckPassed.value ? 'info' : 'info',
-    },
-    {
-      key: 'run' as const,
+      completedLabel: '已创建任务',
+      unlockedLabel: '待创建',
+      lockedLabel: '未解锁',
+      unlockedPendingType: 'info',
+    }),
+    createStepFlowCard({
+      key: 'run',
       order: '第 3 步',
       title: '执行迁移并核验结果',
       description: '运行任务、查看迁移进度、确认导入结果和迁后校验。',
       unlocked: hasCreatedTask.value,
       completed: hasSucceededTask.value,
-      statusLabel: hasSucceededTask.value ? '已有成功任务' : hasCreatedTask.value ? '可执行' : '未解锁',
-      tagType: hasSucceededTask.value ? 'success' : hasCreatedTask.value ? 'warning' : 'info',
-    },
-    {
-      key: 'switch' as const,
+      completedLabel: '已有成功任务',
+      unlockedLabel: '可执行',
+      lockedLabel: '未解锁',
+      unlockedPendingType: 'warning',
+    }),
+    createStepFlowCard({
+      key: 'switch',
       order: '第 4 步',
       title: '切换到 MySQL 或回退 SQLite',
       description: '仅在成功任务确认无误后操作，并结合重启完成数据库切换闭环。',
       unlocked: hasSucceededTask.value,
       completed: hasPreparedMysqlSwitch.value,
-      statusLabel: hasPreparedMysqlSwitch.value ? '已准备切换' : hasSucceededTask.value ? '待最终操作' : '未解锁',
-      tagType: hasPreparedMysqlSwitch.value ? 'success' : hasSucceededTask.value ? 'warning' : 'info',
-    },
+      completedLabel: '已准备切换',
+      unlockedLabel: '待最终操作',
+      lockedLabel: '未解锁',
+      unlockedPendingType: 'warning',
+    }),
   ]
 })
 

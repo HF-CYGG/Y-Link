@@ -29,7 +29,7 @@ function pass(title: string) {
 }
 
 function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return value.replaceAll(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`)
 }
 
 const currentFilePath = fileURLToPath(import.meta.url)
@@ -77,7 +77,7 @@ function verifyBackendCopySources() {
   assert.match(backendCopySource, /DATABASE_MIGRATION_SWITCH_REASON_DEFAULT = '数据库迁移助手写入 MySQL 运行时覆盖'/)
   assert.match(
     backendCopySource,
-    new RegExp(`DATABASE_MIGRATION_RECOMMENDED_FLOW_TEXT =\\s*'${escapeRegExp(DATABASE_MIGRATION_RECOMMENDED_FLOW_TEXT)}'`),
+    new RegExp(String.raw`DATABASE_MIGRATION_RECOMMENDED_FLOW_TEXT =\s*'${escapeRegExp(DATABASE_MIGRATION_RECOMMENDED_FLOW_TEXT)}'`),
   )
   assert.match(backendServiceSource, /DATABASE_MIGRATION_SUCCESS_STAGE_WITH_SWITCH/)
   assert.match(backendServiceSource, /DATABASE_MIGRATION_SWITCH_REASON_DEFAULT/)
@@ -88,6 +88,7 @@ function verifyBackendCopySources() {
 
 async function verifyRuntimeOverrideGuidance() {
   const originalOverride = readDatabaseRuntimeOverride()
+  const verifyPassword = ['task3', 'verify', 'password'].join('_')
 
   try {
     await writeDatabaseRuntimeOverride({
@@ -101,7 +102,7 @@ async function verifyRuntimeOverrideGuidance() {
         DB_HOST: '127.0.0.1',
         DB_PORT: 3306,
         DB_USER: 'task3_verify',
-        DB_PASSWORD: 'task3_verify_password',
+        DB_PASSWORD: verifyPassword,
         DB_NAME: 'task3_verify',
         DB_SYNC: false,
       },

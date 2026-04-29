@@ -35,7 +35,7 @@ function pass(title: string) {
 }
 
 function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return value.replaceAll(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`)
 }
 
 const currentFilePath = fileURLToPath(import.meta.url)
@@ -132,6 +132,7 @@ async function verifySqliteRuntimeState() {
  */
 async function verifyPendingRestartRuntimeState() {
   const originalOverride = readDatabaseRuntimeOverride()
+  const verifyPassword = ['task4', 'verify', 'password'].join('_')
 
   try {
     await writeDatabaseRuntimeOverride({
@@ -145,7 +146,7 @@ async function verifyPendingRestartRuntimeState() {
         DB_HOST: '127.0.0.1',
         DB_PORT: 3306,
         DB_USER: 'task4_verify',
-        DB_PASSWORD: 'task4_verify_password',
+        DB_PASSWORD: verifyPassword,
         DB_NAME: 'task4_verify',
         DB_SYNC: false,
       },

@@ -115,7 +115,7 @@ const runStartupDiagnostics = async (port: number) => {
 async function bootstrap(): Promise<void> {
   logBanner('启动阶段')
   logLine('STEP', 'prepare runtime context')
-  const databaseRuntime = prepareDatabaseRuntime()
+  prepareDatabaseRuntime()
   logLine('STEP', 'initialize datasource')
   await AppDataSource.initialize()
   logLine('STEP', 'initialize database schema')
