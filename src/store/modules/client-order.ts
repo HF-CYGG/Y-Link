@@ -24,15 +24,25 @@ import {
 const CLIENT_ORDER_CACHE_TTL_MS = 3 * 60 * 1000
 let hasWarnedUnexpectedClientUserIdType = false
 
+const isSupportedClientUserIdType = (value: unknown): boolean => {
+  return typeof value === 'string' || (typeof value === 'number' && Number.isFinite(value))
+}
+
 const normalizeClientUserId = (value: unknown): string => {
   if (typeof value === 'string') {
     return value.trim()
   }
   // 防御性日志：
-  // 订单缓存初始化理论上应接收字符串 userId；若上游传入非字符串，记录一次告警便于追源。
-  if (value !== null && value !== undefined && !hasWarnedUnexpectedClientUserIdType) {
+  // 订单缓存初始化允许 string 与 number 两种 userId 形态；
+  // 仅当出现“非空且不在兼容范围内”的值时，记录一次告警便于追源。
+  if (
+    value !== null &&
+    value !== undefined &&
+    !isSupportedClientUserIdType(value) &&
+    !hasWarnedUnexpectedClientUserIdType
+  ) {
     hasWarnedUnexpectedClientUserIdType = true
-    console.warn('[client-order] initialize 收到非字符串 clientUserId，已按兼容逻辑归一化处理。', {
+    console.warn('[client-order] initialize 收到异常类型 clientUserId，已按兼容逻辑归一化处理。', {
       value,
       valueType: typeof value,
     })
