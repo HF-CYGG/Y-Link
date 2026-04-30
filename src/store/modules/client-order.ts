@@ -22,6 +22,26 @@ import {
 // 订单列表缓存时间比商品目录更短：
 // 用户对“待提货 / 已核销 / 已取消”状态变化更敏感，需要更快看到最新状态。
 const CLIENT_ORDER_CACHE_TTL_MS = 3 * 60 * 1000
+let hasWarnedUnexpectedClientUserIdType = false
+
+const normalizeClientUserId = (value: unknown): string => {
+  if (typeof value === 'string') {
+    return value.trim()
+  }
+  // 防御性日志：
+  // 订单缓存初始化理论上应接收字符串 userId；若上游传入非字符串，记录一次告警便于追源。
+  if (value !== null && value !== undefined && !hasWarnedUnexpectedClientUserIdType) {
+    hasWarnedUnexpectedClientUserIdType = true
+    console.warn('[client-order] initialize 收到非字符串 clientUserId，已按兼容逻辑归一化处理。', {
+      value,
+      valueType: typeof value,
+    })
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(value).trim()
+  }
+  return ''
+}
 
 export const useClientOrderStore = defineStore('client-order', () => {
   const clientUserId = ref('')
@@ -66,8 +86,8 @@ export const useClientOrderStore = defineStore('client-order', () => {
   // - 订单缓存需要显式绑定当前 clientUserId；
   // - 同一浏览器切换账号时，先清空旧内存态，再尝试恢复新账号自己的快照；
   // - 若未传账号，直接回到空态，防止未登录状态还残留上一个账号的订单。
-  const initialize = (nextClientUserId: string | null | undefined) => {
-    const normalizedClientUserId = nextClientUserId?.trim() ?? ''
+  const initialize = (nextClientUserId: string | number | null | undefined) => {
+    const normalizedClientUserId = normalizeClientUserId(nextClientUserId)
     if (!normalizedClientUserId) {
       clientUserId.value = ''
       resetState()
