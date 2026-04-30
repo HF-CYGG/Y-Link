@@ -46,8 +46,18 @@ const DEFAULT_SCAN_STATUS = '请将条码或二维码置于取景框中央，识
 let html5QrcodeModulePromise: Promise<Html5QrcodeModule> | null = null
 
 const loadHtml5QrcodeModule = async (): Promise<Html5QrcodeModule> => {
-  html5QrcodeModulePromise ??= import('html5-qrcode')
-  return html5QrcodeModulePromise
+  try {
+    // 详细注释：
+    // - 首次进入时创建动态导入 Promise，后续复用同一个实例，避免重复拉取扫码库；
+    // - 这里必须 `await`，这样导入失败会进入 catch，便于统一兜底与恢复重试能力。
+    html5QrcodeModulePromise ??= import('html5-qrcode')
+    return await html5QrcodeModulePromise
+  } catch {
+    // 导入失败后清空缓存 Promise：
+    // 若不置空，后续会一直复用“已 reject 的 Promise”，导致页面无法再次尝试加载扫码库。
+    html5QrcodeModulePromise = null
+    throw new Error('扫码库加载失败')
+  }
 }
 
 // 通用扫码能力改为 html5-qrcode：

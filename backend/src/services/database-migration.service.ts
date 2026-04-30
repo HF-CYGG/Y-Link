@@ -735,6 +735,14 @@ export class DatabaseMigrationService {
       // 文件状态读取失败时退回当前时间，不再额外阻断损坏占位返回。
     }
 
+    // 防御性日志：
+    // 一旦进入损坏占位分支，说明任务文件已不可直接执行；记录关键信息便于运维快速定位与巡检告警。
+    console.warn('[database-migration] 检测到损坏任务文件，已返回占位记录。', {
+      taskId,
+      filePath,
+      errorMessage,
+    })
+
     return {
       id: taskId,
       status: 'failed',
@@ -852,7 +860,11 @@ export class DatabaseMigrationService {
   private async readTaskRecord(taskId: string, actionLabel: string): Promise<InternalMigrationTaskRecord> {
     const result = await this.readTaskRecordResult(taskId)
     if (result.readState === 'corrupted') {
-      throw new BizError(`${result.errorMessage}，请先修复或删除该任务文件后再${actionLabel}`, 409)
+      const filePath = result.responseTask.recordFilePath ?? path.resolve(migrationTaskDir, `${taskId}.json`)
+      throw new BizError(
+        `${result.errorMessage}。任务文件：${filePath}。请先尝试以下步骤：1）打开该 JSON 文件修复语法或结构；2）若无法修复可删除该文件并重新创建任务；完成后再${actionLabel}。`,
+        409,
+      )
     }
     return result.task
   }

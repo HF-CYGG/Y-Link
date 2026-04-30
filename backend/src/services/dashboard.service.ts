@@ -2,10 +2,9 @@
  * 模块说明：`backend/src/services/dashboard.service.ts`
  * 文件职责：负责聚合管理端工作台所需的统计、排行、近期动态与下钻数据。
  * 实现逻辑：
- * 1. 看板统计直接从订单、明细、产品和审计日志表聚合，统一在服务层做金额/数量格式化；
- * 2. 近期动态从审计日志抽取出库相关事件，并补齐真实订单ID与“部门优先、客户兜底”的展示名称；
- * 3. 排行、饼图和下钻查询共享筛选解析逻辑，确保各模块筛选口径一致；
- * 4. 服务层尽量把前端展示所需兜底文案准备好，降低页面层判空分支复杂度。
+ * 1. 统计指标直接从订单、明细、产品和审计日志聚合，并统一做金额/数量格式化；
+ * 2. 近期动态补齐真实订单ID与展示名称，保持“部门优先、客户兜底”的口径一致；
+ * 3. 排行、饼图和下钻共享筛选解析与兜底文案，降低前端判空分支复杂度。
  */
 
 import { AppDataSource } from '../config/data-source.js'
@@ -15,6 +14,17 @@ import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { RelProductTag } from '../entities/rel-product-tag.entity.js'
 import { SysAuditLog } from '../entities/sys-audit-log.entity.js'
+import type {
+  DashboardCustomerDetailRaw,
+  DashboardCustomerSummaryRaw,
+  DashboardNumericLike,
+  DashboardOptionalNumericLike,
+  DashboardPieCustomerRowRaw,
+  DashboardPieOrderTypeRowRaw,
+  DashboardPieProductRowRaw,
+  DashboardProductDetailRaw,
+  DashboardTagAggregateRaw,
+} from '../types/dashboard.js'
 import { BizError } from '../utils/errors.js'
 
 interface DashboardTrendPoint {
@@ -128,63 +138,6 @@ interface DashboardPiePayload {
   productPie: DashboardPieSlice[]
   customerPie: DashboardPieSlice[]
   orderTypePie: DashboardPieSlice[]
-}
-
-type DashboardOptionalNumericLike = string | number | null | undefined
-type DashboardNumericLike = string | number | null
-
-interface DashboardProductDetailRaw {
-  orderId: string | number
-  showNo: string | null
-  orderType: string | null
-  createdAt: Date | string
-  customerName: string | null
-  customerDepartmentName: string | null
-  issuerName: string | null
-  qty: DashboardNumericLike
-  amount: DashboardNumericLike
-}
-
-interface DashboardCustomerSummaryRaw {
-  totalQty?: DashboardNumericLike
-  totalAmount?: DashboardNumericLike
-  orderCount?: DashboardNumericLike
-}
-
-interface DashboardCustomerDetailRaw {
-  orderId: string | number
-  showNo: string | null
-  orderType: string | null
-  createdAt: Date | string
-  customerName: string | null
-  customerDepartmentName: string | null
-  issuerName: string | null
-  qty: DashboardNumericLike
-  amount: DashboardNumericLike
-}
-
-interface DashboardTagAggregateRaw {
-  totalQuantity?: DashboardNumericLike
-  totalAmount?: DashboardNumericLike
-  orderCount?: DashboardNumericLike
-  productCount?: DashboardNumericLike
-}
-
-interface DashboardPieProductRowRaw {
-  key: string | number
-  label: string | null
-  value: DashboardNumericLike
-}
-
-interface DashboardPieCustomerRowRaw {
-  key: string | null
-  label: string | null
-  value: DashboardNumericLike
-}
-
-interface DashboardPieOrderTypeRowRaw {
-  orderType: string | null
-  value: DashboardNumericLike
 }
 
 /**
