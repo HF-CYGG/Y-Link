@@ -1,7 +1,13 @@
 /**
  * 模块说明：src/store/modules/client-auth.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：维护客户端登录态、资料快照，并在账号切换或退出时联动清理客户端业务缓存。
+ * 实现逻辑：
+ * - 登录、注册、启动恢复都统一通过本 Store 落盘和清理会话；
+ * - 当账号切换、退出登录或 token 失效时，同步清空订单缓存等与用户强相关的本地状态，避免串号；
+ * - 若服务端校验发现本地 token 已失效，会自动回退到未登录空态，确保页面口径与服务端一致。
+ * 维护说明：
+ * - 新增“按用户隔离”的本地业务缓存时，应优先从 `clearAuthState()` 统一挂接清理逻辑；
+ * - 若登录成功结果结构变更，需要同时检查 `applyAuthResult()` 与本地持久化字段兼容性。
  */
 
 import { computed, ref } from 'vue'
@@ -23,6 +29,7 @@ import {
   persistClientAuthState,
   readPersistedClientAuthState,
 } from '@/utils/client-auth-storage'
+import { useClientOrderStore } from './client-order'
 
 /**
  * 客户端鉴权 Store：
@@ -35,6 +42,11 @@ export const useClientAuthStore = defineStore('client-auth', () => {
   const expiresAt = ref<string | null>(null)
   const initialized = ref(false)
   const initializing = ref(false)
+
+  const clearClientScopedStores = () => {
+    const clientOrderStore = useClientOrderStore()
+    clientOrderStore.clearAll()
+  }
 
   /**
    * 是否已登录：
@@ -51,6 +63,10 @@ export const useClientAuthStore = defineStore('client-auth', () => {
    * - 保证刷新页面后仍能恢复客户端登录态。
    */
   const applyAuthResult = (result: ClientAuthSuccessResult) => {
+    const previousClientUserId = currentUser.value?.id ?? null
+    if (previousClientUserId && previousClientUserId !== result.user.id) {
+      clearClientScopedStores()
+    }
     token.value = result.token
     currentUser.value = result.user
     expiresAt.value = result.expiresAt
@@ -68,6 +84,7 @@ export const useClientAuthStore = defineStore('client-auth', () => {
    * - 同步清掉本地持久化内容，避免刷新后回填旧用户。
    */
   const clearAuthState = () => {
+    clearClientScopedStores()
     token.value = null
     currentUser.value = null
     expiresAt.value = null

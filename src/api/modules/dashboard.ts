@@ -1,7 +1,10 @@
 /**
- * 模块说明：经营看板统计 API 模块。
- * 文件职责：封装首页统计、趋势、排行与钻取明细查询接口，统一看板数据结构与筛选参数。
- * 维护说明：维护时重点核对日期筛选口径、金额数量字段类型以及钻取记录分页/列表兼容性。
+ * 模块说明：`src/api/modules/dashboard.ts`
+ * 文件职责：封装管理端工作台统计、排行、近期动态与下钻查询接口。
+ * 实现逻辑：
+ * 1. 统一声明看板接口返回结构，保证页面与组件消费同一份类型契约；
+ * 2. 最近动态字段显式包含真实订单ID与展示名称，供工作台点击跳单与文案展示复用；
+ * 3. 日期范围与订单类型筛选统一在模块内组装，避免页面层重复处理查询参数。
  */
 
 import { request, type RequestConfig } from '@/api/http'
@@ -40,10 +43,12 @@ export interface DashboardTopCustomer {
 
 export interface DashboardRecentActivity {
   id: string
+  orderId: string
   actionType: 'order.create' | 'order.delete' | 'order.restore'
   actionLabel: string
   showNo: string
   actorDisplayName: string
+  displayName: string
   customerName: string
   totalAmount: string | number
   totalQty: string | number

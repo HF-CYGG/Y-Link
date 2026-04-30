@@ -1,7 +1,11 @@
 /**
- * 模块说明：backend/src/services/order.service.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：`backend/src/services/order.service.ts`
+ * 文件职责：负责出库单列表、详情、提交、删除恢复与相关审计留痕。
+ * 实现逻辑：
+ * 1. 服务层统一处理分页筛选、详情字段归一化与金额文本格式化；
+ * 2. 提交流程在事务内完成主单、明细、编号与审计日志写入，保证整单原子性；
+ * 3. 删除、恢复和创建时同步写入订单相关快照，供工作台近期动态与审计追溯复用；
+ * 4. 兼容幂等重试、编号冲突与 SQLite 锁冲突，减少并发下的重复单与失败单。
  */
 
 import { AppDataSource } from '../config/data-source.js'
@@ -265,6 +269,8 @@ export class OrderService {
           actor,
           requestMeta,
           detail: {
+                // 记录部门与客户双快照，供工作台近期动态按“部门优先、客户兜底”展示。
+                customerDepartmentName: savedOrder.customerDepartmentName,
             customerName: savedOrder.customerName,
             totalQty: savedOrder.totalQty,
             totalAmount: savedOrder.totalAmount,
@@ -311,6 +317,8 @@ export class OrderService {
           actor,
           requestMeta,
           detail: {
+                // 记录部门与客户双快照，供工作台近期动态按“部门优先、客户兜底”展示。
+                customerDepartmentName: savedOrder.customerDepartmentName,
             customerName: savedOrder.customerName,
             totalQty: savedOrder.totalQty,
             totalAmount: savedOrder.totalAmount,
@@ -471,6 +479,8 @@ export class OrderService {
               actor,
               requestMeta,
               detail: {
+                // 创建时同步写入部门快照，避免首页近期动态只能看到客户名而丢失部门语义。
+                customerDepartmentName: savedOrder.customerDepartmentName,
                 customerName: savedOrder.customerName,
                 totalQty: savedOrder.totalQty,
                 totalAmount: savedOrder.totalAmount,

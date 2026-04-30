@@ -182,6 +182,30 @@ export interface SQLiteToMySqlTaskRecord {
     validation: DatabaseMigrationValidationResult
   }
   errorMessage?: string
+  /**
+   * 任务文件读取状态：
+   * - healthy 表示任务文件可正常解析；
+   * - corrupted 表示任务文件存在 JSON 语法或结构损坏，当前返回的是占位记录。
+   */
+  readState: 'healthy' | 'corrupted'
+  /**
+   * 任务源文件名：
+   * - 便于管理员快速定位 backend/data/migration-tasks 下的具体文件；
+   * - 损坏占位记录会优先回传该字段，方便人工修复。
+   */
+  recordFileName?: string
+  /**
+   * 任务源文件绝对路径：
+   * - 主要用于系统治理场景排查损坏任务文件；
+   * - 正常任务也会透传，保持列表与详情展示口径一致。
+   */
+  recordFilePath?: string
+  /**
+   * 读取任务文件时的错误说明：
+   * - 正常任务为空；
+   * - 损坏任务会回传明确原因，供前端区分“不存在”和“已损坏”。
+   */
+  recordErrorMessage?: string
 }
 
 export interface DatabaseRuntimeOverrideStateResult {
@@ -204,7 +228,22 @@ export interface DatabaseRuntimeOverrideStateResult {
   }
 }
 
-type InternalMigrationTaskRecord = SQLiteToMySqlTaskRecord
+type InternalMigrationTaskRecord = Omit<
+  SQLiteToMySqlTaskRecord,
+  'readState' | 'recordFileName' | 'recordFilePath' | 'recordErrorMessage'
+>
+
+type TaskRecordReadResult =
+  | {
+      readState: 'healthy'
+      task: InternalMigrationTaskRecord
+      responseTask: SQLiteToMySqlTaskRecord
+    }
+  | {
+      readState: 'corrupted'
+      errorMessage: string
+      responseTask: SQLiteToMySqlTaskRecord
+    }
 
 interface SourcePrecheckSummary {
   sqlitePath: string
@@ -329,6 +368,22 @@ function toNumber(value: unknown): number {
 
 function createTableStatMap(tableStats: DatabaseMigrationTableStat[]): Map<string, number> {
   return new Map(tableStats.map((item) => [item.tableName, item.rowCount]))
+}
+
+/**
+ * 区分“任务文件不存在”和“文件内容损坏”：
+ * - 列表接口遇到损坏文件要继续返回其他任务；
+ * - 详情与执行接口仍需对不存在给出 404，避免误导管理员。
+ */
+function isFileNotFoundError(error: unknown): boolean {
+  return Boolean(
+    error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      (error as {
+        code?: unknown
+      }).code === 'ENOENT',
+  )
 }
 
 export class DatabaseMigrationService {
@@ -650,6 +705,10 @@ export class DatabaseMigrationService {
     return {
       ...task,
       target: sanitizeMysqlTarget(task.target),
+      readState: 'healthy',
+      recordFileName: `${task.id}.json`,
+      recordFilePath: path.resolve(migrationTaskDir, `${task.id}.json`),
+      recordErrorMessage: undefined,
     }
   }
 
@@ -658,14 +717,144 @@ export class DatabaseMigrationService {
     return path.resolve(migrationTaskDir, `${taskId}.json`)
   }
 
-  private async readTaskRecord(taskId: string): Promise<InternalMigrationTaskRecord> {
-    const filePath = await this.getTaskFilePath(taskId)
+  /**
+   * 为损坏任务文件构造“可展示但不可执行”的占位记录：
+   * - 保证列表页还能继续打开，不会因为单个 JSON 坏掉整页报错；
+   * - 同时把损坏原因和源文件路径带回前端，方便管理员人工处理。
+   */
+  private async buildCorruptedTaskRecord(
+    taskId: string,
+    filePath: string,
+    errorMessage: string,
+  ): Promise<SQLiteToMySqlTaskRecord> {
+    let fallbackTimestamp = new Date().toISOString()
     try {
-      const raw = await fs.readFile(filePath, 'utf8')
-      return JSON.parse(raw) as InternalMigrationTaskRecord
+      const fileStat = await fs.stat(filePath)
+      fallbackTimestamp = fileStat.mtime.toISOString()
     } catch {
-      throw new BizError('迁移任务不存在', 404)
+      // 文件状态读取失败时退回当前时间，不再额外阻断损坏占位返回。
     }
+
+    return {
+      id: taskId,
+      status: 'failed',
+      createdAt: fallbackTimestamp,
+      updatedAt: fallbackTimestamp,
+      finishedAt: fallbackTimestamp,
+      note: '迁移任务文件已损坏，系统当前返回的是占位记录，请先修复或删除该任务文件。',
+      source: {
+        sqlitePath: '任务文件损坏，原始 SQLite 路径不可读',
+      },
+      target: {
+        host: '',
+        port: 0,
+        user: '',
+        password: '',
+        database: '',
+        dbSync: false,
+      },
+      options: {
+        allowTargetWithData: false,
+        initializeSchema: false,
+        clearTargetBeforeImport: false,
+        switchAfterSuccess: false,
+        createSqliteBackup: false,
+      },
+      precheck: {
+        canProceed: false,
+        checkedAt: fallbackTimestamp,
+        source: {
+          dbType: 'sqlite',
+          sqlitePath: '任务文件损坏，无法读取源库信息',
+          sqliteFileExists: false,
+          sqliteFileSizeBytes: 0,
+          expectedTables: [],
+          existingTables: [],
+          missingTables: [],
+          tables: [],
+          totalRows: 0,
+        },
+        target: {
+          dbType: 'mysql',
+          host: '',
+          port: 0,
+          user: '',
+          database: '',
+          version: null,
+          reachable: false,
+          databaseExists: false,
+          existingAppTables: [],
+          missingAppTables: [],
+          schemaReady: false,
+          needsSchemaInitialization: false,
+          totalRows: 0,
+        },
+        issues: [
+          {
+            level: 'error',
+            code: 'task_record_corrupted',
+            message: errorMessage,
+          },
+        ],
+        activeRuntimeOverride: null,
+      },
+      progress: {
+        currentStage: '迁移任务文件已损坏，当前仅展示占位信息',
+        tableResults: [],
+      },
+      errorMessage,
+      readState: 'corrupted',
+      recordFileName: path.basename(filePath),
+      recordFilePath: filePath,
+      recordErrorMessage: errorMessage,
+    }
+  }
+
+  /**
+   * 统一读取任务文件：
+   * - 不存在时抛 404，明确告诉调用方“任务不存在”；
+   * - 内容损坏时返回占位记录，由列表/详情接口继续容错展示。
+   */
+  private async readTaskRecordResult(taskId: string): Promise<TaskRecordReadResult> {
+    const filePath = await this.getTaskFilePath(taskId)
+    let raw = ''
+    try {
+      raw = await fs.readFile(filePath, 'utf8')
+    } catch (error) {
+      if (isFileNotFoundError(error)) {
+        throw new BizError('迁移任务不存在', 404)
+      }
+      throw new BizError(`读取迁移任务失败：${formatUnknownErrorMessage(error)}`, 500)
+    }
+
+    try {
+      const parsed = JSON.parse(raw) as InternalMigrationTaskRecord
+      return {
+        readState: 'healthy',
+        task: parsed,
+        responseTask: this.sanitizeTaskRecord(parsed),
+      }
+    } catch (error) {
+      const errorMessage = `迁移任务文件已损坏，无法读取完整内容：${formatUnknownErrorMessage(error)}`
+      return {
+        readState: 'corrupted',
+        errorMessage,
+        responseTask: await this.buildCorruptedTaskRecord(taskId, filePath, errorMessage),
+      }
+    }
+  }
+
+  /**
+   * 将“可容错读取”与“必须可执行”两个场景分开：
+   * - 列表/详情可以消费损坏占位记录；
+   * - 执行、切换、回退等写操作必须阻断损坏任务，避免风险扩大。
+   */
+  private async readTaskRecord(taskId: string, actionLabel: string): Promise<InternalMigrationTaskRecord> {
+    const result = await this.readTaskRecordResult(taskId)
+    if (result.readState === 'corrupted') {
+      throw new BizError(`${result.errorMessage}，请先修复或删除该任务文件后再${actionLabel}`, 409)
+    }
+    return result.task
   }
 
   private async writeTaskRecord(task: InternalMigrationTaskRecord): Promise<InternalMigrationTaskRecord> {
@@ -1174,19 +1363,27 @@ export class DatabaseMigrationService {
   async listSQLiteToMySqlTasks(): Promise<SQLiteToMySqlTaskRecord[]> {
     await this.ensureMigrationDirectories()
     const fileNames = await fs.readdir(migrationTaskDir)
-    const tasks: InternalMigrationTaskRecord[] = []
+    const tasks: SQLiteToMySqlTaskRecord[] = []
     for (const fileName of fileNames.filter((name) => name.endsWith('.json'))) {
-      const content = await fs.readFile(path.resolve(migrationTaskDir, fileName), 'utf8')
-      tasks.push(JSON.parse(content) as InternalMigrationTaskRecord)
+      const taskId = fileName.replace(/\.json$/i, '')
+      try {
+        const taskResult = await this.readTaskRecordResult(taskId)
+        tasks.push(taskResult.responseTask)
+      } catch (error) {
+        if (error instanceof BizError && error.statusCode === 404) {
+          continue
+        }
+        throw error
+      }
     }
     const sortedTasks = [...tasks]
     sortedTasks.sort((prev, next) => next.updatedAt.localeCompare(prev.updatedAt))
-    return sortedTasks.map((task) => this.sanitizeTaskRecord(task))
+    return sortedTasks
   }
 
   async getSQLiteToMySqlTask(taskId: string): Promise<SQLiteToMySqlTaskRecord> {
-    const task = await this.readTaskRecord(taskId)
-    return this.sanitizeTaskRecord(task)
+    const taskResult = await this.readTaskRecordResult(taskId)
+    return taskResult.responseTask
   }
 
   /**
@@ -1323,7 +1520,7 @@ export class DatabaseMigrationService {
     actor?: AuthUserContext,
     requestMeta?: RequestMeta,
   ): Promise<SQLiteToMySqlTaskRecord> {
-    const existingTask = await this.readTaskRecord(taskId)
+    const existingTask = await this.readTaskRecord(taskId, '执行迁移任务')
     this.assertTaskCanRun(existingTask)
 
     const latestPrecheck = await this.buildPrecheck({
@@ -1486,7 +1683,7 @@ export class DatabaseMigrationService {
     activeOverride: ReturnType<typeof maskDatabaseRuntimeOverride>
     sourceTaskId?: string
   }> {
-    const task = input.taskId ? await this.readTaskRecord(input.taskId) : null
+    const task = input.taskId ? await this.readTaskRecord(input.taskId, '切换到目标 MySQL') : null
     if (task) {
       this.ensureTaskValidationPassed(task)
     }
@@ -1534,7 +1731,22 @@ export class DatabaseMigrationService {
     const currentOverride = readDatabaseRuntimeOverride()
 
     if (input.clearOnly) {
-      await clearDatabaseRuntimeOverride()
+      const cleared = await clearDatabaseRuntimeOverride()
+
+      await auditService.safeRecord({
+        actionType: 'database_migration.rollback_switch',
+        actionLabel: '回退数据库切换覆盖配置（仅清理覆盖文件）',
+        targetType: 'database_runtime_override',
+        targetCode: input.taskId ?? 'clear',
+        actor,
+        requestMeta,
+        detail: {
+          clearOnly: true,
+          cleared,
+          sourceTaskId: input.taskId,
+        },
+      })
+
       return {
         restartRequired: true,
         rollbackMode: 'clear',
@@ -1544,7 +1756,7 @@ export class DatabaseMigrationService {
 
     let sqlitePath = input.sqlitePath?.trim()
     if (!sqlitePath && input.taskId) {
-      const task = await this.readTaskRecord(input.taskId)
+      const task = await this.readTaskRecord(input.taskId, '回退到指定 SQLite')
       sqlitePath = task.source.sqlitePath
     }
     if (!sqlitePath) {

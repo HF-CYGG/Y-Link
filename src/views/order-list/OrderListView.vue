@@ -6,7 +6,8 @@
  * 1. 复用列表 composable 提供的详情查询结果，不新增服务端接口；
  * 2. 在页面层维护正式出库单的临时补填字段，切换单据时自动重置，不写回数据库；
  * 3. 预览区与打印区共用同一个模板组件，确保用户看到什么、打印出来就是什么；
- * 4. 正式出库单仅对部门单开放，散客单不显示入口，也不能通过事件绕过直接打开。
+ * 4. 列表与移动端卡片按订单类型收口展示字段，部门单展示部门流程字段，散客单隐藏不适用信息；
+ * 5. 清理早期设备调试文案，避免把“手机卡片 / 平板卡片”等开发态信息暴露给最终用户。
  */
 
 import dayjs from 'dayjs'
@@ -27,6 +28,23 @@ import { useOrderListView } from './composables/useOrderListView'
 
 const getOrderTypeLabel = (value: 'department' | 'walkin') => {
   return value === 'department' ? '部门单' : '散客单'
+}
+
+/**
+ * 列表主显示名称：
+ * - 部门单优先显示部门名，更符合后台检索与识别习惯；
+ * - 散客单或部门缺失时回退客户名；
+ * - 最终兜底为短横线，避免表格留空。
+ */
+const getOrderDisplayName = (order: {
+  orderType: 'department' | 'walkin'
+  customerDepartmentName?: string | null
+  customerName?: string | null
+}) => {
+  if (order.orderType === 'department') {
+    return order.customerDepartmentName || order.customerName || '-'
+  }
+  return order.customerName || order.customerDepartmentName || '-'
 }
 
 interface OrderVoucherEditableFields {
@@ -298,23 +316,23 @@ const handleExportVoucherPdf = async () => {
               element-loading-text="正在刷新订单数据，请稍候..."
             >
               <el-table-column label="业务单号" prop="showNo" min-width="180" show-overflow-tooltip />
-              <el-table-column label="客户名称" prop="customerName" min-width="200" show-overflow-tooltip>
-                <template #default="{ row }">{{ row.customerName || '-' }}</template>
+              <el-table-column label="领用对象" min-width="200" show-overflow-tooltip>
+                <template #default="{ row }">{{ getOrderDisplayName(row) }}</template>
               </el-table-column>
               <el-table-column label="订单类型" min-width="100">
                 <template #default="{ row }">{{ getOrderTypeLabel(row.orderType) }}</template>
               </el-table-column>
-              <el-table-column label="是否有出库单" width="116" align="center">
+              <el-table-column label="出库单状态" width="116" align="center">
                 <template #default="{ row }">
-                  <el-tag :type="row.hasCustomerOrder ? 'success' : 'info'" effect="light">
-                    {{ row.hasCustomerOrder ? '是' : '否' }}
+                  <el-tag :type="row.orderType === 'department' && row.hasCustomerOrder ? 'success' : 'info'" effect="light">
+                    {{ row.orderType === 'department' ? (row.hasCustomerOrder ? '已带单' : '未带单') : '不适用' }}
                   </el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="系统申请" width="90" align="center">
+              <el-table-column label="系统申请" width="96" align="center">
                 <template #default="{ row }">
-                  <el-tag :type="row.isSystemApplied ? 'warning' : 'info'" effect="light">
-                    {{ row.isSystemApplied ? '是' : '否' }}
+                  <el-tag :type="row.orderType === 'department' && row.isSystemApplied ? 'warning' : 'info'" effect="light">
+                    {{ row.orderType === 'department' ? (row.isSystemApplied ? '已申请' : '未申请') : '不适用' }}
                   </el-tag>
                 </template>
               </el-table-column>
@@ -322,7 +340,7 @@ const handleExportVoucherPdf = async () => {
                 <template #default="{ row }">{{ row.issuerName || '-' }}</template>
               </el-table-column>
               <el-table-column label="客户部门" min-width="160" show-overflow-tooltip>
-                <template #default="{ row }">{{ row.customerDepartmentName || '-' }}</template>
+                <template #default="{ row }">{{ row.orderType === 'department' ? row.customerDepartmentName || '-' : '不适用' }}</template>
               </el-table-column>
               <el-table-column label="总数量" prop="totalQty" width="110" />
               <el-table-column label="总金额" prop="totalAmount" width="132">
@@ -370,7 +388,7 @@ const handleExportVoucherPdf = async () => {
             </el-table>
           </template>
 
-          <template #card="{ item, isTablet }">
+          <template #card="{ item }">
             <div class="apple-card mobile-order-card min-w-0 p-4 active:scale-[0.99]" @click="handleViewDetail(item)">
               <div class="mb-3 flex items-start justify-between gap-3">
                 <div class="min-w-0">
@@ -380,16 +398,21 @@ const handleExportVoucherPdf = async () => {
                   </div>
                 </div>
                 <span class="rounded-full bg-brand/10 px-2 py-1 text-xs font-medium text-brand dark:bg-brand/20 dark:text-teal-300">
-                  {{ isTablet ? '平板卡片' : '手机卡片' }}
+                  {{ getOrderTypeLabel(item.orderType) }}
                 </span>
               </div>
-              <div class="mt-1 text-sm text-slate-600 dark:text-slate-300">类型：{{ getOrderTypeLabel(item.orderType) }}</div>
+              <div class="mt-1 text-sm text-slate-600 dark:text-slate-300">领用对象：{{ getOrderDisplayName(item) }}</div>
               <div class="text-sm text-slate-600 dark:text-slate-300">
-                是否有出库单：{{ item.hasCustomerOrder ? '是' : '否' }} / 系统申请：{{ item.isSystemApplied ? '是' : '否' }}
+                出库单状态：{{ item.orderType === 'department' ? (item.hasCustomerOrder ? '已带单' : '未带单') : '不适用' }}
+              </div>
+              <div class="text-sm text-slate-600 dark:text-slate-300">
+                系统申请：{{ item.orderType === 'department' ? (item.isSystemApplied ? '已申请' : '未申请') : '不适用' }}
               </div>
               <div class="text-sm text-slate-600 dark:text-slate-300">出单人：{{ item.issuerName || '-' }}</div>
-              <div class="text-sm text-slate-600 dark:text-slate-300">客户部门：{{ item.customerDepartmentName || '-' }}</div>
-              <div class="text-sm text-slate-600 dark:text-slate-300">客户：{{ item.customerName || '-' }}</div>
+              <div v-if="item.orderType === 'department'" class="text-sm text-slate-600 dark:text-slate-300">
+                客户部门：{{ item.customerDepartmentName || '-' }}
+              </div>
+              <div v-if="item.customerName" class="text-sm text-slate-600 dark:text-slate-300">客户名称：{{ item.customerName }}</div>
               <div class="text-sm text-slate-600 dark:text-slate-300">开单人：{{ item.creatorDisplayName || item.creatorUsername || '-' }}</div>
               <div class="mt-3 flex items-center justify-between gap-4 border-t border-slate-100 pt-3 dark:border-white/10">
                 <span class="text-sm text-slate-500 dark:text-slate-400">数量：{{ item.totalQty }}</span>

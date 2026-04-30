@@ -2,6 +2,9 @@
 /**
  * 模块说明：src/views/client/ClientOrderDetailView.vue
  * 文件职责：承载客户端订单详情展示、进度查看、二维码展示、订单撤回与退货申请。
+ * 实现逻辑：
+ * - 详情页加载成功后会同步刷新订单摘要缓存，方便返回列表页时立即看到最新状态；
+ * - 订单 Store 初始化按当前客户端账号执行，避免共享终端切换账号后把旧订单摘要带入新账号上下文。
  * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
  */
 
@@ -33,7 +36,7 @@ import {
   isO2oOrderPending,
   isO2oOrderVerified,
 } from '@/constants/o2o-order-status'
-import { useClientOrderStore } from '@/store'
+import { useClientAuthStore, useClientOrderStore } from '@/store'
 import { normalizeRequestError } from '@/utils/error'
 
 const O2O_RETURN_REASON_MAX_LENGTH = 500
@@ -75,8 +78,9 @@ const returnReason = ref('')
 const returnQtyMap = ref<Record<string, number>>({})
 const requestError = ref<{ type: 'offline' | 'error'; message: string } | null>(null)
 const { runLatest } = useStableRequest()
+const clientAuthStore = useClientAuthStore()
 const clientOrderStore = useClientOrderStore()
-clientOrderStore.initialize()
+clientOrderStore.initialize(clientAuthStore.currentUser?.id)
 
 const currentReportScenario = computed(() => {
   if (!detail.value) {

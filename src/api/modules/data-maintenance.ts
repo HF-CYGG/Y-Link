@@ -144,6 +144,13 @@ export interface SQLiteToMySqlPrecheckResult {
 export type DatabaseMigrationTaskStatus = 'prechecked' | 'running' | 'succeeded' | 'failed'
 
 /**
+ * 迁移任务文件读取状态：
+ * - healthy 表示后端成功读取并脱敏了真实任务记录；
+ * - corrupted 表示任务 JSON 已损坏，当前返回的是占位记录而不是完整任务内容。
+ */
+export type DatabaseMigrationTaskReadState = 'healthy' | 'corrupted'
+
+/**
  * 迁移任务记录：
  * - 列表接口与详情接口都返回该结构；
  * - progress.currentStage 用于给管理员展示当前所处阶段。
@@ -202,6 +209,10 @@ export interface SQLiteToMySqlTaskRecord {
     }
   }
   errorMessage?: string
+  readState: DatabaseMigrationTaskReadState
+  recordFileName?: string
+  recordFilePath?: string
+  recordErrorMessage?: string
 }
 
 /**
@@ -289,6 +300,16 @@ export interface DatabaseRuntimeOverrideStateResult {
 }
 
 /**
+ * 清空运行时覆盖返回结果：
+ * - cleared 表示本次是否真的删除了覆盖文件；
+ * - restartRequired 继续沿用后端约定，提醒页面必须提示重启。
+ */
+export interface ClearDatabaseMigrationRuntimeOverrideResult {
+  cleared: boolean
+  restartRequired: true
+}
+
+/**
  * 创建 SQLite 数据库备份：
  * - 仅适用于本地 SQLite 运行环境，供系统管理员做数据快照兜底。
  */
@@ -348,7 +369,7 @@ export const precheckSQLiteToMySqlMigration = (
 /**
  * 获取全部数据库迁移任务：
  * - 后端已按更新时间倒序返回；
- * - 页面可直接用于任务表格与选中详情展示。
+ * - 若某个任务 JSON 损坏，也会降级返回占位记录，避免整个任务列表读取失败。
  */
 export const getSQLiteToMySqlMigrationTasks = (requestConfig: RequestConfig = {}) =>
   request<SQLiteToMySqlTaskRecord[]>({
@@ -360,7 +381,7 @@ export const getSQLiteToMySqlMigrationTasks = (requestConfig: RequestConfig = {}
 /**
  * 获取单个数据库迁移任务详情：
  * - 供需要单独刷新某个任务状态时调用；
- * - 当前页面可在用户手动刷新或查看指定任务时复用。
+ * - 不存在会由后端返回 404，损坏任务则会返回带 readState=corrupted 的占位记录。
  */
 export const getSQLiteToMySqlMigrationTaskDetail = (taskId: string, requestConfig: RequestConfig = {}) =>
   request<SQLiteToMySqlTaskRecord>({
@@ -442,7 +463,7 @@ export const rollbackDatabaseMigrationSwitch = (payload: RollbackDatabaseSwitchP
  * - 仍需重启后端服务后才会完全生效。
  */
 export const clearDatabaseMigrationRuntimeOverride = () =>
-  request<boolean>({
+  request<ClearDatabaseMigrationRuntimeOverrideResult>({
     method: 'DELETE',
     url: '/data-maintenance/db-migration/runtime-override',
   })

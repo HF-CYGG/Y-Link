@@ -627,6 +627,30 @@ class O2oPreorderService {
     return value.replaceAll(LIKE_SPECIAL_CHAR_PATTERN, `${LIKE_ESCAPE_CHAR}$&`)
   }
 
+  // 详细注释：客户端订单列表的“归属关键词”允许用户输入中文或英文习惯称呼。
+  // 这里统一把关键词映射为订单归属枚举，保证“部门订 / 散客 / department / walkin”等输入都能命中服务端查询。
+  private resolveClientOrderTypeByKeyword(keyword: string): O2oClientOrderType | null {
+    const normalizedKeyword = keyword.trim().toLowerCase()
+    if (!normalizedKeyword) {
+      return null
+    }
+    if (
+      normalizedKeyword.includes('department')
+      || normalizedKeyword.includes('部门')
+      || normalizedKeyword.includes('部门订')
+    ) {
+      return 'department'
+    }
+    if (
+      normalizedKeyword.includes('walkin')
+      || normalizedKeyword.includes('walk in')
+      || normalizedKeyword.includes('散客')
+    ) {
+      return 'walkin'
+    }
+    return null
+  }
+
   // 订单是否已达到超时点：
   // 这里只判断“时间是否过期”，不直接关心当前状态，
   // 便于在查询、核销事务、定时回收等多个入口复用同一口径。
@@ -1601,6 +1625,8 @@ class O2oPreorderService {
       const keywordPrefix = `${escapedKeyword}%`
       const normalizedVerifyCodeKeyword = this.normalizeVerifyCode(normalizedKeyword)
       const escapedVerifyKeyword = this.escapeLikeKeyword(normalizedVerifyCodeKeyword)
+      const matchedClientOrderType = this.resolveClientOrderTypeByKeyword(normalizedKeyword)
+      const keywordContains = `%${escapedKeyword}%`
 
       queryBuilder.andWhere(
         new Brackets((keywordQb) => {
@@ -1613,6 +1639,15 @@ class O2oPreorderService {
             .orWhere(String.raw`order.verifyCode LIKE :verifyCodePrefix ESCAPE '\'`, {
               verifyCodePrefix: `${escapedVerifyKeyword}%`,
             })
+            // 部门名称是用户端“归属”常见搜索入口，允许做包含匹配覆盖历史使用习惯。
+            .orWhere(String.raw`order.departmentNameSnapshot LIKE :departmentKeyword ESCAPE '\'`, {
+              departmentKeyword: keywordContains,
+            })
+          if (matchedClientOrderType) {
+            keywordQb.orWhere('order.clientOrderType = :clientOrderType', {
+              clientOrderType: matchedClientOrderType,
+            })
+          }
         }),
       )
     }

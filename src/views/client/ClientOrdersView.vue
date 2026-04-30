@@ -1,8 +1,14 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/client/ClientOrdersView.vue
- * 文件职责：承载客户端“我的订单”列表展示、筛选、查询防抖与刷新反馈能力。
- * 维护说明：本文件重点治理“输入触发策略 + 请求最新生效 + 加载反馈节奏”，减少移动端抖动。
+ * 文件职责：承载客户端“我的订单”列表展示、服务端筛选查询、分页加载与刷新反馈能力。
+ * 实现逻辑：
+ * - 状态筛选与关键词查询统一走服务端接口，不再只对第一页缓存做本地过滤，避免遗漏更多历史订单；
+ * - 订单列表支持“加载更多”，并把当前筛选条件、关键词、页码和已加载结果缓存到按账号隔离的 Store 中；
+ * - 页面层继续使用 `useStableRequest` 保证只有最新一次查询结果生效，减少频繁切换筛选时的闪烁与覆盖。
+ * 维护说明：
+ * - 若后续新增列表查询条件，需要同步修改 `buildListQuery()`、Store 快照字段与空态文案；
+ * - 订单撤回等会改变服务端筛选结果的操作，要优先考虑当前列表是否需要局部剔除或整页刷新。
  */
 
 
@@ -18,7 +24,7 @@ import {
   getClientOrderReportScenario,
   O2O_ORDER_STATUS_TABS,
 } from '@/constants/o2o-order-status'
-import { useClientOrderStore } from '@/store'
+import { useClientAuthStore, useClientOrderStore } from '@/store'
 import { normalizeRequestError } from '@/utils/error'
 
 const ORDER_TYPE_LABEL_MAP = {
@@ -45,17 +51,22 @@ const RETURN_REQUEST_STATUS_META = {
 
 // 关键词防抖窗口：连续输入时只在停顿后更新筛选词，避免每次按键都触发大列表过滤。
 const KEYWORD_DEBOUNCE_MS = 260
+const DEFAULT_ORDER_PAGE_SIZE = 20
 const firstScreenLoading = ref(false)
 const refreshing = ref(false)
+const loadingMore = ref(false)
 const recallingOrderId = ref('')
 const requestError = ref<{ type: 'offline' | 'error'; message: string } | null>(null)
+const clientAuthStore = useClientAuthStore()
 const clientOrderStore = useClientOrderStore()
 const { runLatest } = useStableRequest()
-clientOrderStore.initialize()
+clientOrderStore.initialize(clientAuthStore.currentUser?.id)
 
 const orders = computed(() => clientOrderStore.orders)
-const keywordInput = ref('')
-const effectiveKeyword = ref('')
+const total = computed(() => clientOrderStore.total)
+const hasMoreOrders = computed(() => orders.value.length < total.value)
+const keywordInput = ref(clientOrderStore.keyword)
+const effectiveKeyword = ref(clientOrderStore.keyword)
 const keywordDebounceTimer = ref<ReturnType<typeof globalThis.setTimeout> | null>(null)
 const keywordDebouncing = ref(false)
 const activeStatus = computed({
@@ -93,20 +104,6 @@ onBeforeUnmount(() => {
   }
 })
 
-const filteredOrders = computed(() => {
-  const normalizedKeyword = effectiveKeyword.value.toLowerCase()
-  return orders.value.filter((order) => {
-    if (activeStatus.value !== 'all' && order.status !== activeStatus.value) {
-      return false
-    }
-    if (!normalizedKeyword) {
-      return true
-    }
-    const searchText = `${order.showNo} ${order.verifyCode} ${ORDER_TYPE_LABEL_MAP[order.clientOrderType]} ${order.departmentNameSnapshot || ''}`.toLowerCase()
-    return searchText.includes(normalizedKeyword)
-  })
-})
-
 const getClientOrderTypeLabel = (order: Pick<O2oPreorderSummary, 'clientOrderType'>) => {
   return ORDER_TYPE_LABEL_MAP[order.clientOrderType]
 }
@@ -131,7 +128,11 @@ const getOrderStatusClassName = (order: O2oPreorderSummary) => {
 }
 
 const handleStatusChange = (value: 'all' | O2oPreorderSummary['status']) => {
+  if (activeStatus.value === value) {
+    return
+  }
   activeStatus.value = value
+  void loadOrders(true)
 }
 
 const buildOrderSummaryFromDetail = (detail: O2oPreorderDetail): O2oPreorderSummary => {
@@ -180,29 +181,63 @@ const getLatestReturnRequestMeta = (order: O2oPreorderSummary) => {
   return RETURN_REQUEST_STATUS_META[order.latestReturnRequest.status]
 }
 
-const loadOrders = async (force = false) => {
-  if (!force && clientOrderStore.orders.length > 0 && clientOrderStore.isFresh) {
+// 详细注释：统一根据当前页面状态拼出服务端查询条件，保证刷新、筛选、加载更多共用同一口径。
+const buildListQuery = (targetPage: number) => {
+  return {
+    page: targetPage,
+    pageSize: clientOrderStore.pageSize || DEFAULT_ORDER_PAGE_SIZE,
+    status: activeStatus.value === 'all' ? undefined : activeStatus.value,
+    keyword: effectiveKeyword.value || undefined,
+  }
+}
+
+const syncStoreWithCurrentUser = () => {
+  clientOrderStore.initialize(clientAuthStore.currentUser?.id)
+  keywordInput.value = clientOrderStore.keyword
+  effectiveKeyword.value = clientOrderStore.keyword
+}
+
+const loadOrders = async (force = false, options?: { append?: boolean }) => {
+  const append = options?.append === true
+  if (!append && !force && clientOrderStore.orders.length > 0 && clientOrderStore.isFresh) {
     requestError.value = null
     return
   }
   const hasCachedOrders = clientOrderStore.orders.length > 0
-  firstScreenLoading.value = !hasCachedOrders
-  refreshing.value = hasCachedOrders
-  requestError.value = null
+  const targetPage = append ? clientOrderStore.page + 1 : 1
+  firstScreenLoading.value = !hasCachedOrders && !append
+  refreshing.value = hasCachedOrders && !append
+  loadingMore.value = append
+  if (!append) {
+    requestError.value = null
+  }
   await runLatest({
     executor: (signal) =>
       getMyO2oPreorders(
-        {
-          page: 1,
-          pageSize: 50,
-        },
+        buildListQuery(targetPage),
         { signal },
       ),
     onSuccess: (result) => {
-      clientOrderStore.setOrders(result.records)
+      if (append) {
+        clientOrderStore.appendOrders(result.records, {
+          page: result.page,
+          pageSize: result.pageSize,
+          total: result.total,
+        })
+        return
+      }
+      clientOrderStore.setOrders(result.records, {
+        page: result.page,
+        pageSize: result.pageSize,
+        total: result.total,
+      })
     },
     onError: (error) => {
       const normalizedError = normalizeRequestError(error, '订单加载失败')
+      if (append) {
+        ElMessage.warning(`加载更多失败：${normalizedError.message}`)
+        return
+      }
       if (hasCachedOrders) {
         // 已有列表时不切到整页错误态，避免“刷新失败导致内容闪退”。
         ElMessage.warning(`订单刷新失败：${normalizedError.message}`)
@@ -216,11 +251,13 @@ const loadOrders = async (force = false) => {
     onFinally: () => {
       firstScreenLoading.value = false
       refreshing.value = false
+      loadingMore.value = false
     },
   })
 }
 
 const clearKeyword = () => {
+  const hadKeyword = Boolean(keywordInput.value.trim() || effectiveKeyword.value.trim())
   if (keywordDebounceTimer.value !== null) {
     globalThis.clearTimeout(keywordDebounceTimer.value)
     keywordDebounceTimer.value = null
@@ -228,6 +265,10 @@ const clearKeyword = () => {
   keywordInput.value = ''
   effectiveKeyword.value = ''
   keywordDebouncing.value = false
+  clientOrderStore.setKeyword('')
+  if (hadKeyword) {
+    void loadOrders(true)
+  }
 }
 
 // 详细注释：执行撤回订单，二次确认后请求撤回，并更新 Store 中的订单状态。
@@ -260,6 +301,8 @@ const handleRecallOrder = async (order: O2oPreorderSummary) => {
   try {
     const detail = await cancelMyO2oPreorder(order.id)
     clientOrderStore.upsertOrder(buildOrderSummaryFromDetail(detail))
+    // 撤回后订单可能不再属于当前筛选结果，这里主动以当前服务端查询条件刷新列表。
+    await loadOrders(true)
     ElMessage.success('订单已撤回')
   } catch (error) {
     const normalizedError = normalizeRequestError(error, '撤回订单失败')
@@ -269,7 +312,32 @@ const handleRecallOrder = async (order: O2oPreorderSummary) => {
   }
 }
 
+watch(
+  () => effectiveKeyword.value,
+  (nextKeyword, previousKeyword) => {
+    if (nextKeyword === previousKeyword) {
+      return
+    }
+    clientOrderStore.setKeyword(nextKeyword)
+    void loadOrders(true)
+  },
+)
+
+watch(
+  () => clientAuthStore.currentUser?.id ?? '',
+  (nextUserId, previousUserId) => {
+    if (nextUserId === previousUserId) {
+      return
+    }
+    syncStoreWithCurrentUser()
+    if (nextUserId) {
+      void loadOrders(true)
+    }
+  },
+)
+
 onMounted(async () => {
+  syncStoreWithCurrentUser()
   await loadOrders()
 })
 </script>
@@ -310,8 +378,17 @@ onMounted(async () => {
         />
         <button type="button" class="h-10 rounded-full border border-slate-200 px-4 text-sm text-slate-600" @click="clearKeyword">清空</button>
       </div>
-      <p v-if="keywordDebouncing || refreshing" class="mt-2 text-xs text-slate-400">
-        {{ keywordDebouncing ? '正在更新关键词结果...' : '正在刷新订单，当前列表可继续浏览' }}
+      <p v-if="keywordDebouncing || refreshing || loadingMore" class="mt-2 text-xs text-slate-400">
+        {{
+          keywordDebouncing
+            ? '正在更新关键词结果...'
+            : loadingMore
+              ? '正在加载更多订单...'
+              : '正在刷新订单，当前列表可继续浏览'
+        }}
+      </p>
+      <p v-if="orders.length" class="mt-2 text-xs text-slate-400">
+        已加载 {{ orders.length }} 条，服务端共命中 {{ total }} 条订单
       </p>
     </div>
 
@@ -327,7 +404,7 @@ onMounted(async () => {
       @retry="loadOrders(true)"
     />
     <BaseRequestState
-      v-else-if="!filteredOrders.length"
+      v-else-if="!orders.length"
       type="empty"
       title="暂无订单"
       :description="effectiveKeyword ? '未匹配到符合关键词的订单，请调整关键词后重试' : '当前筛选下没有订单记录'"
@@ -336,7 +413,7 @@ onMounted(async () => {
     />
 
     <div v-else class="space-y-3">
-      <article v-for="order in filteredOrders" :key="order.id" class="rounded-[1.2rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
+      <article v-for="order in orders" :key="order.id" class="rounded-[1.2rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div class="flex flex-wrap items-center gap-2">
@@ -395,6 +472,18 @@ onMounted(async () => {
           <p class="mt-1 text-xs">{{ getBusinessStatusMeta(order)?.clientDescription }}</p>
         </div>
       </article>
+      <div class="flex justify-center pt-1">
+        <button
+          v-if="hasMoreOrders"
+          type="button"
+          class="rounded-full border border-slate-200 bg-white px-5 py-2 text-sm text-slate-600 disabled:cursor-not-allowed disabled:opacity-60"
+          :disabled="loadingMore"
+          @click="loadOrders(true, { append: true })"
+        >
+          {{ loadingMore ? '加载中...' : '加载更多' }}
+        </button>
+        <p v-else class="text-xs text-slate-400">已加载全部符合条件的订单</p>
+      </div>
     </div>
   </section>
 </template>

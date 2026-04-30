@@ -1,8 +1,12 @@
 <script setup lang="ts">
 /**
- * 模块说明：src/views/dashboard/DashboardView.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：`src/views/dashboard/DashboardView.vue`
+ * 文件职责：负责装配管理端工作台首页，包括核心统计、高频入口、排行与近期出库动态。
+ * 实现逻辑：
+ * 1. 页面通过看板聚合接口一次性拉取首屏所需统计、排行和近期动态，减少首屏碎片请求；
+ * 2. 近期动态点击后会把真实订单ID与单号透传给出库单列表页，复用列表页既有“定位并打开详情抽屉”流程；
+ * 3. 动态副标题优先展示部门名称，散客或历史日志缺部门信息时再回退客户名称；
+ * 4. 页面保留 keep-alive 场景下的可恢复加载逻辑，避免请求取消后再次进入出现空白首页。
  */
 
 
@@ -180,11 +184,11 @@ const formatActivityTime = (value: string): string => {
  * - 点击首页动态后跳转到出库列表页；
  * - 通过 query 透传目标单据信息，复用列表页既有“定位并打开详情抽屉”逻辑。
  */
-const navigateToActivityOrder = (activity: { id: string; showNo: string }) => {
+const navigateToActivityOrder = (activity: { orderId: string; showNo: string }) => {
   router.push({
     path: '/order-list',
     query: {
-      focusOrderId: activity.id,
+      focusOrderId: activity.orderId,
       focusOrderShowNo: activity.showNo,
       focusRefreshToken: String(Date.now()),
     },
@@ -461,7 +465,7 @@ onActivated(() => {
                   </span>
                 </div>
                 <div class="truncate text-[11px] leading-4 text-slate-600 dark:text-slate-300">
-                  {{ activity.customerName }} ｜ {{ formatQty(activity.totalQty) }} 件 ｜ ¥{{ formatAmount(activity.totalAmount) }} ｜ {{ activity.actorDisplayName }}
+                  {{ activity.displayName }} ｜ {{ formatQty(activity.totalQty) }} 件 ｜ ¥{{ formatAmount(activity.totalAmount) }} ｜ {{ activity.actorDisplayName }}
                 </div>
               </button>
             </div>

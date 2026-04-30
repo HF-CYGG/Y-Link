@@ -1,7 +1,11 @@
 /**
- * 模块说明：backend/src/services/dashboard.service.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：`backend/src/services/dashboard.service.ts`
+ * 文件职责：负责聚合管理端工作台所需的统计、排行、近期动态与下钻数据。
+ * 实现逻辑：
+ * 1. 看板统计直接从订单、明细、产品和审计日志表聚合，统一在服务层做金额/数量格式化；
+ * 2. 近期动态从审计日志抽取出库相关事件，并补齐真实订单ID与“部门优先、客户兜底”的展示名称；
+ * 3. 排行、饼图和下钻查询共享筛选解析逻辑，确保各模块筛选口径一致；
+ * 4. 服务层尽量把前端展示所需兜底文案准备好，降低页面层判空分支复杂度。
  */
 
 import { AppDataSource } from '../config/data-source.js'
@@ -47,10 +51,12 @@ interface DashboardStatsResult {
 
 interface DashboardRecentActivity {
   id: string
+  orderId: string
   actionType: 'order.create' | 'order.delete' | 'order.restore'
   actionLabel: string
   showNo: string
   actorDisplayName: string
+  displayName: string
   customerName: string
   totalAmount: string
   totalQty: string
@@ -171,6 +177,22 @@ const normalizeOrderTypeLabel = (orderType: DashboardOrderType): string => {
 const normalizeCustomerName = (value: string | null | undefined): string => {
   const normalized = String(value ?? '').trim()
   return normalized || '未填写客户'
+}
+
+/**
+ * 近期动态对象名称：
+ * - 部门单优先展示部门名，保证首页语义更贴近实际领用主体；
+ * - 散客单或历史日志缺少部门信息时，再回退到客户名；
+ * - 最终仍为空时展示统一兜底文案，避免界面出现空白字段。
+ */
+const normalizeRecentActivityDisplayName = (detail: Record<string, unknown>): string => {
+  const departmentName = normalizeText(String(detail.customerDepartmentName ?? ''), '')
+  if (departmentName) {
+    return departmentName
+  }
+
+  const customerName = normalizeText(String(detail.customerName ?? ''), '')
+  return customerName || '未填写客户'
 }
 
 const parseDateOnlyToStart = (value: string, label: string): Date => {
@@ -389,10 +411,12 @@ export const dashboardService = {
 
       return {
         id: String(audit.id),
+        orderId: normalizeText(audit.targetId, String(audit.id)),
         actionType,
         actionLabel: normalizeText(audit.actionLabel, '出库单变更'),
         showNo: normalizeText(audit.targetCode, '-'),
         actorDisplayName: normalizeText(audit.actorDisplayName || audit.actorUsername, '系统'),
+        displayName: normalizeRecentActivityDisplayName(detail),
         customerName: normalizeText(String(detail.customerName ?? ''), '-'),
         totalAmount: normalizeAmount(detail.totalAmount as string | number | null | undefined),
         totalQty: normalizeQty(detail.totalQty as string | number | null | undefined),

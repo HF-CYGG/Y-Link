@@ -501,7 +501,7 @@ const upsertTaskRecord = (task: SQLiteToMySqlTaskRecord) => {
 /**
  * 刷新任务详情：
  * - 列表接口已经带完整任务结构，但详情刷新可确保当前选中任务拿到最新状态；
- * - 仅在存在选中任务时才触发，避免多余请求。
+ * - 若任务 JSON 已损坏，详情接口会返回占位记录而不是直接让页面报错。
  */
 const refreshSelectedTaskDetail = async () => {
   if (!selectedTaskId.value) {
@@ -638,6 +638,10 @@ const handleCreateTask = async () => {
 const handleRunTask = async (task: SQLiteToMySqlTaskRecord) => {
   if (!canOperateMigration.value) {
     ElMessage.warning('当前账号暂无数据库迁移操作权限')
+    return
+  }
+  if (task.readState === 'corrupted') {
+    ElMessage.warning('该迁移任务文件已损坏，请先修复或删除该任务文件后再尝试执行')
     return
   }
 
@@ -797,9 +801,19 @@ const handleClearRuntimeOverride = async () => {
 
   clearOverrideLoading.value = true
   try {
-    await clearDatabaseMigrationRuntimeOverride()
+    const result = await clearDatabaseMigrationRuntimeOverride()
+    if (runtimeState.value) {
+      runtimeState.value = {
+        ...runtimeState.value,
+        activeOverride: null,
+      }
+    }
     enterStepFlow('switch')
-    ElMessage.success(DATABASE_MIGRATION_CLEAR_OVERRIDE_SUCCESS)
+    ElMessage.success(
+      result.cleared
+        ? DATABASE_MIGRATION_CLEAR_OVERRIDE_SUCCESS
+        : `当前未检测到数据库运行时覆盖文件。${DATABASE_MIGRATION_RESTART_EFFECT_TEXT}`,
+    )
     await loadOverview()
   } catch (error) {
     ElMessage.error(extractErrorMessage(error, '清空运行时覆盖失败'))
@@ -866,6 +880,19 @@ const getTaskStatusTagType = (status: SQLiteToMySqlTaskRecord['status']) => {
 }
 
 /**
+ * 任务文件读取状态标签：
+ * - healthy 表示可按正常任务处理；
+ * - corrupted 表示后端仅返回了损坏占位记录，页面要醒目提醒且禁用高风险动作。
+ */
+const getTaskReadStateLabel = (readState: SQLiteToMySqlTaskRecord['readState']) => {
+  return readState === 'corrupted' ? '文件已损坏' : '文件正常'
+}
+
+const getTaskReadStateTagType = (readState: SQLiteToMySqlTaskRecord['readState']) => {
+  return readState === 'corrupted' ? 'danger' : 'success'
+}
+
+/**
  * 运行时状态标签：
  * - 有“待重启”过渡态时统一高亮提醒；
  * - 其余场景再按当前实际数据库类型给颜色。
@@ -887,17 +914,20 @@ const getIssuePlainLanguage = (issue: DatabaseMigrationIssue) => {
   if (issue.code === 'target_unreachable') {
     return '目标 MySQL 无法连接，请检查主机、端口、防火墙和数据库服务是否已启动。'
   }
-  if (issue.code === 'target_auth_failed') {
+  if (issue.code === 'target_auth_failed' || issue.code === 'target_access_denied') {
     return 'MySQL 账号或密码不正确，请重新核对登录信息。'
   }
   if (issue.code === 'target_database_missing') {
     return '目标数据库还不存在，需要先在 MySQL 中创建同名数据库。'
   }
-  if (issue.code === 'target_write_denied') {
+  if (issue.code === 'target_write_denied' || issue.code === 'target_write_permission_denied') {
     return '当前 MySQL 账号没有写入权限，迁移时无法建表或导入数据。'
   }
   if (issue.code === 'runtime_override_exists') {
     return '系统当前已经启用了运行时数据库覆盖，请先确认当前正在使用哪个数据库，再决定是否继续迁移。'
+  }
+  if (issue.code === 'task_record_corrupted') {
+    return '该迁移任务文件已经损坏，系统只能返回占位信息。建议根据文件路径定位原始 JSON，修复或删除后再继续治理。'
   }
   if (issue.level === 'warning') {
     return '这是一条风险提示，通常还能继续，但建议先处理后再迁移。'
@@ -1449,6 +1479,13 @@ onMounted(() => {
                     </el-tag>
                   </template>
                 </el-table-column>
+                <el-table-column label="文件状态" width="110" align="center">
+                  <template #default="{ row }">
+                    <el-tag :type="getTaskReadStateTagType(row.readState)" effect="light">
+                      {{ getTaskReadStateLabel(row.readState) }}
+                    </el-tag>
+                  </template>
+                </el-table-column>
                 <el-table-column label="当前阶段" min-width="220" show-overflow-tooltip>
                   <template #default="{ row }">{{ row.progress.currentStage || '-' }}</template>
                 </el-table-column>
@@ -1465,7 +1502,7 @@ onMounted(() => {
                         size="small"
                         type="primary"
                         :loading="taskRunningId === row.id"
-                        :disabled="!canOperateMigration || row.status === 'running' || row.status === 'succeeded'"
+                        :disabled="!canOperateMigration || row.readState === 'corrupted' || row.status === 'running' || row.status === 'succeeded'"
                         @click.stop="handleRunTask(row)"
                       >
                         执行
@@ -1492,6 +1529,15 @@ onMounted(() => {
                 </div>
 
                 <div class="mt-4 space-y-4">
+                  <el-alert
+                    v-if="selectedTask.readState === 'corrupted'"
+                    title="当前任务文件已损坏"
+                    type="error"
+                    :closable="false"
+                    show-icon
+                    :description="`系统当前展示的是占位记录。文件：${selectedTask.recordFilePath || selectedTask.recordFileName || '-'}；原因：${selectedTask.recordErrorMessage || selectedTask.errorMessage || '未知错误'}`"
+                  />
+
                   <el-progress
                     :percentage="selectedTaskProgressPercent"
                     :status="selectedTask.status === 'failed' ? 'exception' : selectedTask.status === 'succeeded' ? 'success' : undefined"
@@ -1543,6 +1589,14 @@ onMounted(() => {
                     </el-descriptions-item>
                     <el-descriptions-item label="失败原因">
                       {{ selectedTask.errorMessage || '-' }}
+                    </el-descriptions-item>
+                    <el-descriptions-item label="任务文件状态">
+                      <el-tag :type="getTaskReadStateTagType(selectedTask.readState)" effect="light">
+                        {{ getTaskReadStateLabel(selectedTask.readState) }}
+                      </el-tag>
+                    </el-descriptions-item>
+                    <el-descriptions-item label="任务文件路径">
+                      {{ selectedTask.recordFilePath || '-' }}
                     </el-descriptions-item>
                   </el-descriptions>
 

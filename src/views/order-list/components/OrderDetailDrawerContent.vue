@@ -1,8 +1,11 @@
 <script setup lang="ts">
 /**
- * 模块说明：src/views/order-list/components/OrderDetailDrawerContent.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：`src/views/order-list/components/OrderDetailDrawerContent.vue`
+ * 文件职责：负责渲染出库单详情抽屉中的主单信息与明细列表。
+ * 实现逻辑：
+ * 1. 主单信息按订单类型做条件化展示，部门单保留部门流程字段，散客单直接显示“不适用”或隐藏冗余项；
+ * 2. 详情组件只负责展示，不参与数据请求与状态管理；
+ * 3. 金额与订单类型在组件内统一格式化，确保表格端与移动端展示口径一致。
  */
 
 
@@ -36,6 +39,19 @@ const formatAmount = (value: string | number | null | undefined) => {
 const formatOrderType = (value: OrderDetailResult['orderType']) => {
   return value === 'department' ? '部门单' : '散客单'
 }
+
+/**
+ * 详情主显示名称：
+ * - 部门单优先使用客户部门名称；
+ * - 散客单回退客户名称；
+ * - 兼容历史数据缺失时的兜底展示。
+ */
+const getOrderDisplayName = (order: OrderDetailResult) => {
+  if (order.orderType === 'department') {
+    return order.customerDepartmentName || order.customerName || '-'
+  }
+  return order.customerName || order.customerDepartmentName || '-'
+}
 </script>
 
 <template>
@@ -53,10 +69,15 @@ const formatOrderType = (value: OrderDetailResult['orderType']) => {
       <el-descriptions-item label="业务单号">{{ order.showNo }}</el-descriptions-item>
       <el-descriptions-item label="订单类型">{{ formatOrderType(order.orderType) }}</el-descriptions-item>
       <el-descriptions-item label="开单时间">{{ dayjs(order.createdAt).format('YYYY-MM-DD HH:mm:ss') }}</el-descriptions-item>
-      <el-descriptions-item label="客户名称">{{ order.customerName || '-' }}</el-descriptions-item>
-      <el-descriptions-item label="客户部门">{{ order.customerDepartmentName || '-' }}</el-descriptions-item>
-      <el-descriptions-item label="是否有出库单">{{ order.hasCustomerOrder ? '是' : '否' }}</el-descriptions-item>
-      <el-descriptions-item label="系统申请">{{ order.isSystemApplied ? '是' : '否' }}</el-descriptions-item>
+      <el-descriptions-item label="领用对象">{{ getOrderDisplayName(order) }}</el-descriptions-item>
+      <el-descriptions-item label="客户部门">{{ order.orderType === 'department' ? order.customerDepartmentName || '-' : '不适用' }}</el-descriptions-item>
+      <el-descriptions-item label="出库单状态">
+        {{ order.orderType === 'department' ? (order.hasCustomerOrder ? '已带单' : '未带单') : '不适用' }}
+      </el-descriptions-item>
+      <el-descriptions-item label="系统申请">
+        {{ order.orderType === 'department' ? (order.isSystemApplied ? '已申请' : '未申请') : '不适用' }}
+      </el-descriptions-item>
+      <el-descriptions-item v-if="order.customerName" label="客户名称">{{ order.customerName }}</el-descriptions-item>
       <el-descriptions-item label="出单人">{{ order.issuerName || '-' }}</el-descriptions-item>
       <el-descriptions-item label="开单人">{{ order.creatorDisplayName || order.creatorUsername || '-' }}</el-descriptions-item>
       <el-descriptions-item label="总数量">{{ order.totalQty }}</el-descriptions-item>
