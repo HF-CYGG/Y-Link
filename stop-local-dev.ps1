@@ -1,18 +1,23 @@
 ﻿<#
-妯″潡璇存槑锛歴top-local-dev.ps1
-  鏂囦欢鑱岃矗锛氬仠姝㈢敱 `start-local-dev.ps1` 璁板綍鐨勬湰鍦拌仈璋冨墠鍚庣杩涚▼锛屽苟娓呯悊涓存椂杩愯鏂囦欢銆?
-  瀹炵幇閫昏緫锛氫粠 `.local-dev/processes.json` 璇诲彇 shell PID 涓庣洃鍚?PID锛岄€掑綊缁堟杩涚▼鏍戝悗鍐嶅垹闄ゅ惎鍔ㄦ椂鐢熸垚鐨勪复鏃舵枃浠躲€?
+模块说明：stop-local-dev.ps1
+  文件职责：停止本地联调相关进程并清理 `.local-dev` 运行时文件，避免端口与 stdin 文件占用残留。
+  实现逻辑：
+  1) 优先停止 `processes.json` 中记录的 shell PID 与监听 PID；
+  2) 兜底扫描默认联调端口（3001/5173）并强制释放；
+  3) 额外清理占用 `child-process.stdin.txt` 的残留进程，杜绝启动时文件被占用。
 #>
+
+param(
+  [int[]]$KnownPorts = @(3001, 5173)
+)
 
 $ErrorActionPreference = 'Stop'
 
-# 鎵€鏈夎繍琛屾€佷俊鎭兘浠庝粨搴撴牴鐩綍涓嬬殑 `.local-dev` 鐩綍璇诲彇锛?
-# 杩欐牱鏃犺鐢ㄦ埛褰撳墠鍦ㄥ摢涓?PowerShell 宸ヤ綔鐩綍鎵ц鍋滄鑴氭湰锛屾竻鐞嗙洰鏍囬兘淇濇寔涓€鑷淬€?
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RuntimeRoot = Join-Path $ProjectRoot '.local-dev'
 $PidFile = Join-Path $RuntimeRoot 'processes.json'
+$DefaultChildProcessInputFile = Join-Path $RuntimeRoot 'child-process.stdin.txt'
 
-# 鍦ㄢ€滄湁璁板綍浣嗘竻鐞嗕俊鎭笉瀹屾暣鈥濇椂杈撳嚭鎻愰啋锛屼究浜庡揩閫熷垽鏂綋鍓嶅仠姝㈤摼璺槸鍚﹀畬鏁淬€?
 function Write-WarnMessage {
   param([string]$Message)
   Write-Host "[local-dev][warn] $Message" -ForegroundColor Yellow
@@ -23,11 +28,10 @@ function Write-Info {
   Write-Host "[local-dev] $Message"
 }
 
-# 閫掑綊鏀堕泦鎵€鏈夊瓙瀛欒繘绋嬶紝闃叉鍙叧闂埗杩涚▼鍚庢畫鐣?npm/node 鐩戝惉銆?
 function Get-DescendantProcessIds {
   param([int]$RootProcessId)
 
-  $allProcesses = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+  $allProcesses = @(Get-CimInstance Win32_Process -OperationTimeoutSec 2 -ErrorAction SilentlyContinue)
   if (-not $allProcesses.Count) {
     return @()
   }
@@ -48,11 +52,10 @@ function Get-DescendantProcessIds {
   return @($visited)
 }
 
-# 鍋滄椤哄簭涓庡惎鍔ㄨ剼鏈竴鑷达細浼樺厛瀛愯繘绋嬶紝鍐嶅仠姝㈡牴杩涚▼銆?
 function Stop-ProcessTree {
   param([int]$RootProcessId)
 
-  if (-not $RootProcessId) {
+  if (-not $RootProcessId -or $RootProcessId -eq $PID) {
     return
   }
 
@@ -62,6 +65,28 @@ function Stop-ProcessTree {
   }
 
   Stop-Process -Id $RootProcessId -Force -ErrorAction SilentlyContinue
+}
+
+function Get-ListeningProcessIds {
+  param([int]$Port)
+
+  $netstatOutput = & netstat -ano -p tcp 2>$null
+  if (-not $netstatOutput) {
+    return @()
+  }
+
+  $pidSet = [System.Collections.Generic.HashSet[int]]::new()
+  $portPattern = ":(?:$Port)\s+.+\s+(?:LISTENING|侦听)\s+(\d+)\s*$"
+  foreach ($line in $netstatOutput) {
+    if ($line -notmatch $portPattern) {
+      continue
+    }
+    [int]$parsedPid = 0
+    if ([int]::TryParse($Matches[1], [ref]$parsedPid)) {
+      [void]$pidSet.Add($parsedPid)
+    }
+  }
+  return @($pidSet)
 }
 
 function Get-RecordedProcessIds {
@@ -84,34 +109,116 @@ function Get-RecordedProcessIds {
   return @($collectedProcessIds | Select-Object -Unique)
 }
 
-if (-not (Test-Path $PidFile)) {
-  Write-Info '鏈壘鍒版湰鍦拌仈璋冭繘绋嬭褰曪紝鏃犻渶鍋滄銆?
-  exit 0
+function Get-ProcessIdsByCommandLineKeyword {
+  param([string]$Keyword)
+
+  if (-not $Keyword) {
+    return @()
+  }
+
+  $allProcesses = @(Get-CimInstance Win32_Process -OperationTimeoutSec 2 -ErrorAction SilentlyContinue)
+  if (-not $allProcesses.Count) {
+    return @()
+  }
+
+  $pidSet = [System.Collections.Generic.HashSet[int]]::new()
+  foreach ($process in $allProcesses) {
+    $commandLine = [string]$process.CommandLine
+    if (-not $commandLine) {
+      continue
+    }
+    if ($commandLine -like "*$Keyword*") {
+      [void]$pidSet.Add([int]$process.ProcessId)
+    }
+  }
+  return @($pidSet)
 }
 
-$record = Get-Content -Path $PidFile -Raw | ConvertFrom-Json
-# 鍚屾椂鍏煎鏃ц褰曚腑鐨?shell PID 鍜屾柊璁板綍涓殑鐩戝惉 PID銆?
-$processIds = @(Get-RecordedProcessIds -Record $record)
+function Try-RemoveFileWithWarning {
+  param([string]$Path)
 
-if (-not $processIds.Count) {
-  Write-WarnMessage '妫€娴嬪埌鏈湴鑱旇皟璁板綍鏂囦欢锛屼絾鍏朵腑娌℃湁鍙敤鐨?PID 淇℃伅銆?
+  if (-not $Path -or -not (Test-Path $Path)) {
+    return
+  }
+
+  try {
+    Remove-Item -Path $Path -Force -ErrorAction Stop
+  }
+  catch {
+    Write-WarnMessage "清理文件失败（可能仍被占用）：$Path"
+  }
 }
 
-foreach ($processId in $processIds) {
-  Stop-ProcessTree -RootProcessId ([int]$processId)
+$record = $null
+if (Test-Path $PidFile) {
+  try {
+    $record = Get-Content -Path $PidFile -Raw | ConvertFrom-Json
+  }
+  catch {
+    Write-WarnMessage 'processes.json 解析失败，将按兜底策略清理。'
+  }
 }
 
-$effectiveBackendEnvFile = $record.effectiveBackendEnvFile
-if ($effectiveBackendEnvFile -and (Test-Path $effectiveBackendEnvFile)) {
-  Remove-Item -Path $effectiveBackendEnvFile -Force -ErrorAction SilentlyContinue
+$processIdsToStop = [System.Collections.Generic.HashSet[int]]::new()
+
+if ($record) {
+  foreach ($processId in @(Get-RecordedProcessIds -Record $record)) {
+    [void]$processIdsToStop.Add([int]$processId)
+  }
 }
 
-$childProcessInputFile = $record.childProcessInputFile
-if ($childProcessInputFile -and (Test-Path $childProcessInputFile)) {
-  # 鍚姩鑴氭湰浼氬垱寤轰竴涓┖ stdin 鏂囦欢缁欓殣钘忓瓙杩涚▼澶嶇敤锛岃繖閲屽悓姝ユ竻鐞嗭紝閬垮厤 `.local-dev` 鐩綍娈嬬暀鍣０鏂囦欢銆?
-  Remove-Item -Path $childProcessInputFile -Force -ErrorAction SilentlyContinue
+foreach ($port in @($KnownPorts)) {
+  foreach ($processId in @(Get-ListeningProcessIds -Port ([int]$port))) {
+    [void]$processIdsToStop.Add([int]$processId)
+  }
 }
 
-# 先删除 PID 记录文件，再输出完成提示，避免下次启动时误判为仍有旧运行态残留。
-Remove-Item -Path $PidFile -Force -ErrorAction SilentlyContinue
-Write-Info '已停止记录中的本地联调进程，并完成运行痕迹清理。'
+$childInputFileCandidates = @($DefaultChildProcessInputFile)
+if ($record -and $record.childProcessInputFile) {
+  $childInputFileCandidates += [string]$record.childProcessInputFile
+}
+$childInputFileCandidates = @($childInputFileCandidates | Select-Object -Unique)
+
+foreach ($childInputFilePath in $childInputFileCandidates) {
+  foreach ($processId in @(Get-ProcessIdsByCommandLineKeyword -Keyword $childInputFilePath)) {
+    [void]$processIdsToStop.Add([int]$processId)
+  }
+}
+
+if ($processIdsToStop.Count -eq 0) {
+  Write-Info '未发现需要停止的本地联调进程，继续执行运行痕迹清理。'
+}
+else {
+  Write-Info "准备停止本地联调相关进程：$(@($processIdsToStop) -join ', ')"
+  foreach ($processId in @($processIdsToStop)) {
+    Stop-ProcessTree -RootProcessId ([int]$processId)
+  }
+}
+
+if ($record -and $record.effectiveBackendEnvFile) {
+  Try-RemoveFileWithWarning -Path ([string]$record.effectiveBackendEnvFile)
+}
+
+foreach ($childInputFilePath in $childInputFileCandidates) {
+  Try-RemoveFileWithWarning -Path $childInputFilePath
+}
+
+# 二次兜底：若 child-process.stdin.txt 仍被占用，再扫一次占用进程并重试删除。
+foreach ($childInputFilePath in $childInputFileCandidates) {
+  if (-not (Test-Path $childInputFilePath)) {
+    continue
+  }
+
+  $holderPids = @(Get-ProcessIdsByCommandLineKeyword -Keyword $childInputFilePath)
+  if ($holderPids.Count -gt 0) {
+    Write-WarnMessage "检测到 stdin 文件仍可能被占用，继续强制停止相关进程：$($holderPids -join ', ')"
+    foreach ($holderPid in $holderPids) {
+      Stop-ProcessTree -RootProcessId ([int]$holderPid)
+    }
+    Start-Sleep -Milliseconds 300
+    Try-RemoveFileWithWarning -Path $childInputFilePath
+  }
+}
+
+Try-RemoveFileWithWarning -Path $PidFile
+Write-Info '本地联调进程已停止，并完成运行痕迹清理。'

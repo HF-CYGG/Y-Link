@@ -45,6 +45,7 @@ export interface SubmitPreorderInput {
   items: SubmitPreorderItemInput[]
   remark?: string
   clientOrderType: O2oClientOrderType
+  isSystemApplied: boolean
 }
 
 export interface UpdateMyPreorderInput {
@@ -106,6 +107,7 @@ export interface O2oPreorderSummaryView {
   verifyCode: string
   status: O2oPreorder['status']
   businessStatus: O2oPreorder['businessStatus']
+  isSystemApplied: boolean
   merchantMessage: string | null
   clientOrderType: O2oPreorder['clientOrderType']
   departmentNameSnapshot: string | null
@@ -146,6 +148,7 @@ export interface O2oPreorderDetailView {
     verifyCode: string
     status: O2oPreorder['status']
     businessStatus: O2oPreorder['businessStatus']
+    isSystemApplied: boolean
     merchantMessage: string | null
     clientOrderType: O2oPreorder['clientOrderType']
     departmentNameSnapshot: string | null
@@ -572,7 +575,7 @@ class O2oPreorderService {
       showNo,
       orderType: outboundOrderType,
       hasCustomerOrder: false,
-      isSystemApplied: true,
+      isSystemApplied: Boolean(input.preorder.isSystemApplied),
       issuerName: input.actor.displayName || input.actor.username,
       customerDepartmentName: departmentNameSnapshot,
       idempotencyKey,
@@ -877,6 +880,7 @@ class O2oPreorderService {
         verifyCode: order.verifyCode,
         status: order.status,
         businessStatus: order.businessStatus ?? null,
+        isSystemApplied: Boolean(order.isSystemApplied),
         merchantMessage: order.merchantMessage ?? null,
         clientOrderType: order.clientOrderType === 'department' ? 'department' : 'walkin',
         departmentNameSnapshot: order.departmentNameSnapshot?.trim() || null,
@@ -1202,6 +1206,8 @@ class O2oPreorderService {
     const normalizedItems = this.normalizePreorderItems(input.items)
     const normalizedRemark = this.normalizePreorderRemark(input.remark)
     const normalizedClientOrderType = this.normalizeClientOrderType(input.clientOrderType)
+    // 详细注释：是否系统申请必须以客户端本次明确选择为准，不再使用服务端默认兜底。
+    const normalizedIsSystemApplied = Boolean(input.isSystemApplied)
 
     const o2oRules = await systemConfigService.getO2oRuleConfigs()
     return AppDataSource.transaction(async (manager) => {
@@ -1255,6 +1261,7 @@ class O2oPreorderService {
           status: 'pending',
           clientOrderType: normalizedClientOrderType,
           departmentNameSnapshot,
+          isSystemApplied: normalizedIsSystemApplied,
           totalQty,
           remark: normalizedRemark,
           timeoutAt,
@@ -1672,6 +1679,7 @@ class O2oPreorderService {
         verifyCode: item.verifyCode,
         status: item.status,
         businessStatus: item.businessStatus ?? null,
+        isSystemApplied: Boolean(item.isSystemApplied),
         merchantMessage: item.merchantMessage ?? null,
         clientOrderType: item.clientOrderType === 'department' ? 'department' : 'walkin',
         departmentNameSnapshot: item.departmentNameSnapshot?.trim() || null,
@@ -1842,6 +1850,7 @@ class O2oPreorderService {
       verifyCode: item.verifyCode,
       status: item.status,
       businessStatus: item.businessStatus ?? null,
+      isSystemApplied: Boolean(item.isSystemApplied),
       merchantMessage: item.merchantMessage ?? null,
       clientOrderType: item.clientOrderType === 'department' ? 'department' : 'walkin',
       departmentNameSnapshot: item.departmentNameSnapshot?.trim() || null,

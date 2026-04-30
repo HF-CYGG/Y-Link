@@ -50,6 +50,7 @@ export interface O2oPreorderSummary {
   verifyCode: string
   status: O2oOrderStatus
   businessStatus: O2oOrderBusinessStatus | null
+  isSystemApplied: boolean
   merchantMessage: string | null
   clientOrderType: O2oClientOrderType
   departmentNameSnapshot: string | null
@@ -131,6 +132,7 @@ export interface O2oPreorderDetail {
     verifyCode: string
     status: O2oOrderStatus
     businessStatus: O2oOrderBusinessStatus | null
+    isSystemApplied: boolean
     merchantMessage: string | null
     clientOrderType: O2oClientOrderType
     departmentNameSnapshot: string | null
@@ -195,6 +197,7 @@ export interface O2oInventoryLog {
 
 export interface SubmitO2oPreorderPayload {
   clientOrderType: O2oClientOrderType
+  isSystemApplied: boolean
   remark?: string
   items: Array<{ productId: string | number; qty: number }>
 }

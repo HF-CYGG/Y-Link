@@ -23,6 +23,8 @@ import { extractRequestMeta } from '../utils/request-meta.js'
 
 const submitPreorderSchema = z.object({
   clientOrderType: z.enum(['department', 'walkin']),
+  // 详细注释：客户端必须显式传入“是否系统申请”，避免服务端继续使用默认值导致语义失真。
+  isSystemApplied: z.boolean(),
   remark: z.string().max(O2O_PREORDER_REMARK_MAX_LENGTH).optional(),
   items: z.array(z.object({ productId: z.union([z.string(), z.number()]), qty: z.number().int().positive() })).min(1),
 })

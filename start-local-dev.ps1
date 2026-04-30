@@ -17,10 +17,12 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# 禁用 Web 请求进度输出，避免终端反复出现“正在读取 Web 响应”噪声。
+$ProgressPreference = 'SilentlyContinue'
 
-# 所有运行时路径都从仓库根目录推导：
-# - 避免用户在任意 cwd 执行脚本时出现相对路径失效；
-# - 统一把日志、PID、临时 env 文件收敛到 .local-dev 目录下。
+# 鎵€鏈夎繍琛屾椂璺緞閮戒粠浠撳簱鏍圭洰褰曟帹瀵硷細
+# - 閬垮厤鐢ㄦ埛鍦ㄤ换鎰?cwd 鎵ц鑴氭湰鏃跺嚭鐜扮浉瀵硅矾寰勫け鏁堬紱
+# - 缁熶竴鎶婃棩蹇椼€丳ID銆佷复鏃?env 鏂囦欢鏀舵暃鍒?.local-dev 鐩綍涓嬨€?
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BackendRoot = Join-Path $ProjectRoot 'backend'
 $BackendEnvFile = Join-Path $BackendRoot '.env.local-dev'
@@ -37,13 +39,13 @@ $RuntimeOverrideFile = Join-Path $BackendRoot 'data\runtime\database-runtime-ove
 $FrontendScheme = if ($FrontendHttps) { 'https' } else { 'http' }
 $FrontendLocalHostForHealthCheck = if ($FrontendHttps) { 'localhost' } else { '127.0.0.1' }
 
-# 统一的警告输出，方便在正常启动信息中快速识别异常分支。
+# 缁熶竴鐨勮鍛婅緭鍑猴紝鏂逛究鍦ㄦ甯稿惎鍔ㄤ俊鎭腑蹇€熻瘑鍒紓甯稿垎鏀€?
 function Write-WarnMessage {
   param([string]$Message)
   Write-Host "[local-dev][warn] $Message" -ForegroundColor Yellow
 }
 
-# 启动前检查关键命令是否存在，避免脚本走到一半才因环境缺失失败。
+# 鍚姩鍓嶆鏌ュ叧閿懡浠ゆ槸鍚﹀瓨鍦紝閬垮厤鑴氭湰璧板埌涓€鍗婃墠鍥犵幆澧冪己澶卞け璐ャ€?
 function Assert-CommandAvailable {
   param([string]$CommandName)
 
@@ -52,10 +54,10 @@ function Assert-CommandAvailable {
   }
 }
 
-# 解析当前系统中的 PowerShell 5 可执行文件绝对路径：
-# - 优先复用当前 PowerShell 进程所在安装目录；
-# - 避免 Start-Process 再次依赖 PATH 查找 powershell.exe；
-# - 在受限终端或 PATH 不完整的环境下仍能稳定拉起前后端子进程。
+# 瑙ｆ瀽褰撳墠绯荤粺涓殑 PowerShell 5 鍙墽琛屾枃浠剁粷瀵硅矾寰勶細
+# - 浼樺厛澶嶇敤褰撳墠 PowerShell 杩涚▼鎵€鍦ㄥ畨瑁呯洰褰曪紱
+# - 閬垮厤 Start-Process 鍐嶆渚濊禆 PATH 鏌ユ壘 powershell.exe锛?
+# - 鍦ㄥ彈闄愮粓绔垨 PATH 涓嶅畬鏁寸殑鐜涓嬩粛鑳界ǔ瀹氭媺璧峰墠鍚庣瀛愯繘绋嬨€?
 function Get-PowerShellExecutablePath {
   $candidatePaths = @()
 
@@ -76,7 +78,7 @@ function Get-PowerShellExecutablePath {
   throw '未找到可用的 Windows PowerShell 5 可执行文件。'
 }
 
-# 确保目标文件的父目录存在，避免 SQLite 路径或临时 env 文件写入失败。
+# 纭繚鐩爣鏂囦欢鐨勭埗鐩綍瀛樺湪锛岄伩鍏?SQLite 璺緞鎴栦复鏃?env 鏂囦欢鍐欏叆澶辫触銆?
 function Ensure-ParentDirectory {
   param([string]$Path)
 
@@ -86,8 +88,8 @@ function Ensure-ParentDirectory {
   }
 }
 
-# 基于固定 env 模板生成一份“本次启动专用”的临时 env 文件，
-# 这样脚本传入的端口等覆盖值不会被 .env.local-dev 重新压回默认值。
+# 鍩轰簬鍥哄畾 env 妯℃澘鐢熸垚涓€浠解€滄湰娆″惎鍔ㄤ笓鐢ㄢ€濈殑涓存椂 env 鏂囦欢锛?
+# 杩欐牱鑴氭湰浼犲叆鐨勭鍙ｇ瓑瑕嗙洊鍊间笉浼氳 .env.local-dev 閲嶆柊鍘嬪洖榛樿鍊笺€?
 function New-EffectiveBackendEnvFile {
   param(
     [string]$SourceEnvFile,
@@ -101,18 +103,18 @@ function New-EffectiveBackendEnvFile {
   }
 
   $filteredLines = @(
-    $lines | Where-Object { $_ -notmatch '^\s*PORT\s*=' }
+    $lines | Where-Object { $_ -notmatch "^\\s*PORT\\s*=" }
   )
 
   $effectiveLines = @($filteredLines + "PORT=$TargetPort")
   Set-Content -Path $TargetEnvFile -Value $effectiveLines -Encoding UTF8
 }
 
-# 递归收集某个进程的所有子孙进程 PID，保证停止时不会留下 npm/node 孤儿进程。
+# 閫掑綊鏀堕泦鏌愪釜杩涚▼鐨勬墍鏈夊瓙瀛欒繘绋?PID锛屼繚璇佸仠姝㈡椂涓嶄細鐣欎笅 npm/node 瀛ゅ効杩涚▼銆?
 function Get-DescendantProcessIds {
   param([int]$RootProcessId)
 
-  # 某些环境中 CIM 查询可能阻塞，设置超时避免启动链路被卡死。
+  # 鏌愪簺鐜涓?CIM 鏌ヨ鍙兘闃诲锛岃缃秴鏃堕伩鍏嶅惎鍔ㄩ摼璺鍗℃銆?
   $allProcesses = @(Get-CimInstance Win32_Process -OperationTimeoutSec 2 -ErrorAction SilentlyContinue)
   if (-not $allProcesses.Count) {
     return @()
@@ -134,7 +136,7 @@ function Get-DescendantProcessIds {
   return @($visited)
 }
 
-# 先停子进程再停根进程，避免仅杀外层 PowerShell 导致监听端口残留。
+# 鍏堝仠瀛愯繘绋嬪啀鍋滄牴杩涚▼锛岄伩鍏嶄粎鏉€澶栧眰 PowerShell 瀵艰嚧鐩戝惉绔彛娈嬬暀銆?
 function Stop-ProcessTree {
   param([int]$RootProcessId)
 
@@ -155,9 +157,9 @@ function Write-Info {
   Write-Host "[local-dev] $Message"
 }
 
-# 读取数据库运行时覆盖文件：
-# - 若本地环境此前已经通过迁移助手切换到 MySQL，这里可直接识别；
-# - 启动脚本只做“读取并展示”，不修改任何覆盖配置。
+# 璇诲彇鏁版嵁搴撹繍琛屾椂瑕嗙洊鏂囦欢锛?
+# - 鑻ユ湰鍦扮幆澧冩鍓嶅凡缁忛€氳繃杩佺Щ鍔╂墜鍒囨崲鍒?MySQL锛岃繖閲屽彲鐩存帴璇嗗埆锛?
+# - 鍚姩鑴氭湰鍙仛鈥滆鍙栧苟灞曠ず鈥濓紝涓嶄慨鏀逛换浣曡鐩栭厤缃€?
 function Get-RuntimeOverrideState {
   if (-not (Test-Path $RuntimeOverrideFile)) {
     return $null
@@ -171,9 +173,9 @@ function Get-RuntimeOverrideState {
   }
 }
 
-# 读取简单 env 文件中的键值对：
-# - 仅处理 `KEY=VALUE` 结构，忽略空行和注释；
-# - 本地脚本只用它兜底推断数据库目标，不承担完整 dotenv 解析职责。
+# 璇诲彇绠€鍗?env 鏂囦欢涓殑閿€煎锛?
+# - 浠呭鐞?`KEY=VALUE` 缁撴瀯锛屽拷鐣ョ┖琛屽拰娉ㄩ噴锛?
+# - 鏈湴鑴氭湰鍙敤瀹冨厹搴曟帹鏂暟鎹簱鐩爣锛屼笉鎵挎媴瀹屾暣 dotenv 瑙ｆ瀽鑱岃矗銆?
 function Read-EnvFileMap {
   param([string]$EnvFilePath)
 
@@ -186,10 +188,10 @@ function Read-EnvFileMap {
     if ([string]::IsNullOrWhiteSpace($line)) {
       continue
     }
-    if ($line -match '^\s*#') {
+    if ($line -match "^\\s*#") {
       continue
     }
-    if ($line -notmatch '^\s*([^=]+?)\s*=(.*)$') {
+    if ($line -notmatch "^\\s*([^=]+?)\\s*=(.*)$") {
       continue
     }
 
@@ -201,9 +203,9 @@ function Read-EnvFileMap {
   return $envMap
 }
 
-# 把后端 env 文件里的 SQLite 路径补齐为绝对路径：
-# - 相对路径统一相对 backend 根目录解析；
-# - 与后端默认运行方式保持一致，便于脚本输出可直接定位的真实文件地址。
+# 鎶婂悗绔?env 鏂囦欢閲岀殑 SQLite 璺緞琛ラ綈涓虹粷瀵硅矾寰勶細
+# - 鐩稿璺緞缁熶竴鐩稿 backend 鏍圭洰褰曡В鏋愶紱
+# - 涓庡悗绔粯璁よ繍琛屾柟寮忎繚鎸佷竴鑷达紝渚夸簬鑴氭湰杈撳嚭鍙洿鎺ュ畾浣嶇殑鐪熷疄鏂囦欢鍦板潃銆?
 function Resolve-BackendRelativePath {
   param([string]$TargetPath)
 
@@ -216,9 +218,9 @@ function Resolve-BackendRelativePath {
   return [System.IO.Path]::GetFullPath((Join-Path $BackendRoot $TargetPath))
 }
 
-# 直接读取后端健康检查中的数据库摘要：
-# - 该接口返回的是“当前进程已经实际生效”的数据库状态；
-# - 启动脚本优先信任它，避免再靠本地文件猜测当前数据库。
+# 鐩存帴璇诲彇鍚庣鍋ュ悍妫€鏌ヤ腑鐨勬暟鎹簱鎽樿锛?
+# - 璇ユ帴鍙ｈ繑鍥炵殑鏄€滃綋鍓嶈繘绋嬪凡缁忓疄闄呯敓鏁堚€濈殑鏁版嵁搴撶姸鎬侊紱
+# - 鍚姩鑴氭湰浼樺厛淇′换瀹冿紝閬垮厤鍐嶉潬鏈湴鏂囦欢鐚滄祴褰撳墠鏁版嵁搴撱€?
 function Get-BackendDatabaseSummary {
   param([string]$HealthUrl)
 
@@ -245,9 +247,9 @@ function Get-BackendDatabaseSummary {
   }
 }
 
-# 当后端健康检查暂时不可读时，脚本仍可基于本地文件做兜底推断：
-# - 若当前存在运行时覆盖文件，优先按覆盖目标推断“重启后将采用什么库”；
-# - 若不存在覆盖文件，则读取本次启动使用的临时 env 文件，而不是硬编码为 SQLite。
+# 褰撳悗绔仴搴锋鏌ユ殏鏃朵笉鍙鏃讹紝鑴氭湰浠嶅彲鍩轰簬鏈湴鏂囦欢鍋氬厹搴曟帹鏂細
+# - 鑻ュ綋鍓嶅瓨鍦ㄨ繍琛屾椂瑕嗙洊鏂囦欢锛屼紭鍏堟寜瑕嗙洊鐩爣鎺ㄦ柇鈥滈噸鍚悗灏嗛噰鐢ㄤ粈涔堝簱鈥濓紱
+# - 鑻ヤ笉瀛樺湪瑕嗙洊鏂囦欢锛屽垯璇诲彇鏈鍚姩浣跨敤鐨勪复鏃?env 鏂囦欢锛岃€屼笉鏄‖缂栫爜涓?SQLite銆?
 function Get-FallbackEffectiveDatabaseSummary {
   param([string]$BackendEnvFilePath)
 
@@ -310,14 +312,14 @@ function Get-FallbackEffectiveDatabaseSummary {
 function Get-ListeningProcessIds {
   param([int]$Port)
 
-  # 部分 Windows 环境下 Get-NetTCPConnection 可能长时间卡住，改用 netstat 解析提升稳定性。
+  # 閮ㄥ垎 Windows 鐜涓?Get-NetTCPConnection 鍙兘闀挎椂闂村崱浣忥紝鏀圭敤 netstat 瑙ｆ瀽鎻愬崌绋冲畾鎬с€?
   $netstatOutput = & netstat -ano -p tcp 2>$null
   if (-not $netstatOutput) {
     return @()
   }
 
   $listeningPidSet = [System.Collections.Generic.HashSet[int]]::new()
-  $portPattern = ":(?:$Port)\s+.+\s+(?:LISTENING|侦听)\s+(\d+)\s*$"
+  $portPattern = ":(?:$Port)\s+.+\s+(?:LISTENING|渚﹀惉)\s+(\d+)\s*$"
 
   foreach ($line in $netstatOutput) {
     if ($line -notmatch $portPattern) {
@@ -354,6 +356,31 @@ function Get-RecordedProcessIds {
   return @($collectedProcessIds | Select-Object -Unique)
 }
 
+function Get-ProcessIdsByCommandLineKeyword {
+  param([string]$Keyword)
+
+  if (-not $Keyword) {
+    return @()
+  }
+
+  $allProcesses = @(Get-CimInstance Win32_Process -OperationTimeoutSec 2 -ErrorAction SilentlyContinue)
+  if (-not $allProcesses.Count) {
+    return @()
+  }
+
+  $pidSet = [System.Collections.Generic.HashSet[int]]::new()
+  foreach ($process in $allProcesses) {
+    $commandLine = [string]$process.CommandLine
+    if (-not $commandLine) {
+      continue
+    }
+    if ($commandLine -like "*$Keyword*") {
+      [void]$pidSet.Add([int]$process.ProcessId)
+    }
+  }
+  return @($pidSet)
+}
+
 function Stop-RecordedProcesses {
   if (-not (Test-Path $PidFile)) {
     return
@@ -361,7 +388,7 @@ function Stop-RecordedProcesses {
 
   try {
     $record = Get-Content -Path $PidFile -Raw | ConvertFrom-Json
-    # 同时清理外层 shell PID 和真正监听端口的进程 PID，容错更强。
+    # 鍚屾椂娓呯悊澶栧眰 shell PID 鍜岀湡姝ｇ洃鍚鍙ｇ殑杩涚▼ PID锛屽閿欐洿寮恒€?
     $processIds = @(Get-RecordedProcessIds -Record $record)
     foreach ($processId in $processIds) {
       if ($processId) {
@@ -369,7 +396,7 @@ function Stop-RecordedProcesses {
       }
     }
 
-    # 重复启动前一并删除上次生成的临时 env 文件，避免旧状态残留。
+    # 閲嶅鍚姩鍓嶄竴骞跺垹闄や笂娆＄敓鎴愮殑涓存椂 env 鏂囦欢锛岄伩鍏嶆棫鐘舵€佹畫鐣欍€?
     if ($record.effectiveBackendEnvFile -and (Test-Path $record.effectiveBackendEnvFile)) {
       Remove-Item -Path $record.effectiveBackendEnvFile -Force -ErrorAction SilentlyContinue
     }
@@ -388,9 +415,69 @@ function Assert-PortAvailable {
     [string]$ServiceName
   )
 
-  $listeningProcessIds = Get-ListeningProcessIds -Port $Port
-  if ($listeningProcessIds.Count -gt 0) {
-    throw "$ServiceName port $Port is already in use by PID(s): $($listeningProcessIds -join ', ')."
+  $listeningProcessIds = @(Get-ListeningProcessIds -Port $Port)
+  if ($listeningProcessIds.Count -eq 0) {
+    return
+  }
+
+  # 鍚姩鍓嶇/鍚庣鍓嶅己鍒跺洖鏀跺啿绐佺鍙ｏ細
+  # - 绔彛鑻ヨ鍘嗗彶娈嬬暀杩涚▼鍗犵敤锛岀洿鎺ョ粓姝㈠搴旇繘绋嬫爲锛岄伩鍏嶆墜宸ユ帓闅滐紱
+  # - 浠呭鐩爣绔彛涓婄殑鐩戝惉杩涚▼鐢熸晥锛屼笉浼氭棤宸埆娓呯悊绯荤粺鍏跺畠杩涚▼銆?
+  Write-WarnMessage "$ServiceName port $Port 琚崰鐢紝鍑嗗寮哄埗缁撴潫鍐茬獊杩涚▼锛?($listeningProcessIds -join ', ')"
+  foreach ($processId in $listeningProcessIds) {
+    if ([int]$processId -eq [int]$PID) {
+      continue
+    }
+    Stop-ProcessTree -RootProcessId ([int]$processId)
+  }
+
+  for ($attempt = 1; $attempt -le 10; $attempt++) {
+    Start-Sleep -Milliseconds 500
+    $remainingProcessIds = @(Get-ListeningProcessIds -Port $Port)
+    if ($remainingProcessIds.Count -eq 0) {
+      Write-Info "$ServiceName port $Port 已释放，继续启动。"
+      return
+    }
+  }
+
+  $remainingProcessIds = @(Get-ListeningProcessIds -Port $Port)
+  throw "$ServiceName port $Port is still in use by PID(s): $($remainingProcessIds -join ', ')."
+}
+
+function Initialize-ChildProcessInputFile {
+  param([string]$InputFilePath)
+
+  $ensureInputFile = {
+    param([string]$TargetPath)
+    Set-Content -Path $TargetPath -Value '' -Encoding UTF8
+  }
+
+  try {
+    & $ensureInputFile -TargetPath $InputFilePath
+    return $InputFilePath
+  }
+  catch {
+    Write-WarnMessage "妫€娴嬪埌 stdin 鏂囦欢琚崰鐢紝鍑嗗寮哄埗娓呯悊鍗犵敤杩涚▼锛?InputFilePath"
+    $holderPids = @(Get-ProcessIdsByCommandLineKeyword -Keyword $InputFilePath)
+    foreach ($holderPid in $holderPids) {
+      if ([int]$holderPid -eq [int]$PID) {
+        continue
+      }
+      Stop-ProcessTree -RootProcessId ([int]$holderPid)
+    }
+
+    Start-Sleep -Milliseconds 300
+    try {
+      & $ensureInputFile -TargetPath $InputFilePath
+      Write-Info "stdin 鏂囦欢鍗犵敤宸叉竻鐞嗭細$InputFilePath"
+      return $InputFilePath
+    }
+    catch {
+      $fallbackPath = Join-Path $RuntimeRoot ("child-process.stdin.{0}.txt" -f (Get-Date -Format 'yyyyMMddHHmmssfff'))
+      Set-Content -Path $fallbackPath -Value '' -Encoding UTF8
+      Write-WarnMessage "鍘?stdin 鏂囦欢浠嶄笉鍙啓锛屽凡鍒囨崲涓烘湰娆′細璇濅笓鐢ㄦ枃浠讹細$fallbackPath"
+      return $fallbackPath
+    }
   }
 }
 
@@ -409,8 +496,8 @@ function Wait-HttpReady {
         [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
       }
 
-      # 只要能返回 2xx~4xx，就说明目标 HTTP 服务已经真正监听并能处理请求；
-      # 这里不强制要求业务成功，只验证“服务已起来”。
+      # 鍙鑳借繑鍥?2xx~4xx锛屽氨璇存槑鐩爣 HTTP 鏈嶅姟宸茬粡鐪熸鐩戝惉骞惰兘澶勭悊璇锋眰锛?
+      # 杩欓噷涓嶅己鍒惰姹備笟鍔℃垚鍔燂紝鍙獙璇佲€滄湇鍔″凡璧锋潵鈥濄€?
       try {
         $response = Invoke-WebRequest -Uri $Uri -UseBasicParsing -TimeoutSec 2
         if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 500) {
@@ -460,9 +547,9 @@ function Get-ProcessDisplayName {
   }
 }
 
-# 收集当前机器可用于局域网访问的 IPv4 地址：
-# - 过滤 loopback、APIPA(169.254.x.x) 与无效地址；
-# - 启动成功后直接打印可访问链接，便于手机/平板联调。
+# 鏀堕泦褰撳墠鏈哄櫒鍙敤浜庡眬鍩熺綉璁块棶鐨?IPv4 鍦板潃锛?
+# - 杩囨护 loopback銆丄PIPA(169.254.x.x) 涓庢棤鏁堝湴鍧€锛?
+# - 鍚姩鎴愬姛鍚庣洿鎺ユ墦鍗板彲璁块棶閾炬帴锛屼究浜庢墜鏈?骞虫澘鑱旇皟銆?
 function Get-LanIPv4Addresses {
   try {
     $ipConfigs = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction Stop
@@ -500,7 +587,7 @@ function Format-ProcessDisplayList {
     return 'none'
   }
 
-  # 使用格式化字符串替代双引号内的复杂插值，避免 PowerShell 5 在启动摘要阶段出现解析歧义。
+  # 浣跨敤鏍煎紡鍖栧瓧绗︿覆鏇夸唬鍙屽紩鍙峰唴鐨勫鏉傛彃鍊硷紝閬垮厤 PowerShell 5 鍦ㄥ惎鍔ㄦ憳瑕侀樁娈靛嚭鐜拌В鏋愭涔夈€?
   return (
     $ProcessIds |
       ForEach-Object {
@@ -519,9 +606,9 @@ function Test-ProcessAlive {
   return $null -ne (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
 }
 
-# 判断一组 PID 中是否仍有存活进程：
-# - 启动脚本既会记录外层 shell PID，也会记录真正监听端口的 node PID；
-# - 日志跟随应优先依据“真实服务进程是否还活着”来决定是否继续。
+# 鍒ゆ柇涓€缁?PID 涓槸鍚︿粛鏈夊瓨娲昏繘绋嬶細
+# - 鍚姩鑴氭湰鏃細璁板綍澶栧眰 shell PID锛屼篃浼氳褰曠湡姝ｇ洃鍚鍙ｇ殑 node PID锛?
+# - 鏃ュ織璺熼殢搴斾紭鍏堜緷鎹€滅湡瀹炴湇鍔¤繘绋嬫槸鍚﹁繕娲荤潃鈥濇潵鍐冲畾鏄惁缁х画銆?
 function Test-AnyProcessAlive {
   param([int[]]$ProcessIds)
 
@@ -583,10 +670,10 @@ function Start-CombinedLogRelay {
     [string]$FrontendErrorLogPath
   )
 
-  # 当前终端统一追踪前后端日志：
-  # - 后台服务继续独立运行，但不再弹出额外黑窗；
-  # - 当前终端仅负责轮询日志文件并加前缀输出，便于集中观察；
-  # - 按 Ctrl+C 退出日志跟随时，会继续检查服务是否仍存活，再决定是保留还是清理记录。
+  # 褰撳墠缁堢缁熶竴杩借釜鍓嶅悗绔棩蹇楋細
+  # - 鍚庡彴鏈嶅姟缁х画鐙珛杩愯锛屼絾涓嶅啀寮瑰嚭棰濆榛戠獥锛?
+  # - 褰撳墠缁堢浠呰礋璐ｈ疆璇㈡棩蹇楁枃浠跺苟鍔犲墠缂€杈撳嚭锛屼究浜庨泦涓瀵燂紱
+  # - 鎸?Ctrl+C 閫€鍑烘棩蹇楄窡闅忔椂锛屼細缁х画妫€鏌ユ湇鍔℃槸鍚︿粛瀛樻椿锛屽啀鍐冲畾鏄繚鐣欒繕鏄竻鐞嗚褰曘€?
   $backendState = @{
     Out = (Read-NewLogLines -LogPath $BackendLogPath -KnownLineCount 0).LineCount
     Error = (Read-NewLogLines -LogPath $BackendErrorLogPath -KnownLineCount 0).LineCount
@@ -638,9 +725,9 @@ function Start-CombinedLogRelay {
   Write-Info '后台服务进程已退出，日志跟随结束。'
 }
 
-# 浏览器自动打开属于可选增强：
-# - 仅在服务已就绪后执行，避免打开一个尚未可访问的地址；
-# - 失败时只给出警告，不影响本地联调链路本身。
+# 娴忚鍣ㄨ嚜鍔ㄦ墦寮€灞炰簬鍙€夊寮猴細
+# - 浠呭湪鏈嶅姟宸插氨缁悗鎵ц锛岄伩鍏嶆墦寮€涓€涓皻鏈彲璁块棶鐨勫湴鍧€锛?
+# - 澶辫触鏃跺彧缁欏嚭璀﹀憡锛屼笉褰卞搷鏈湴鑱旇皟閾捐矾鏈韩銆?
 function Open-FrontendBrowser {
   param(
     [int]$Port,
@@ -696,12 +783,12 @@ if (-not $NoCleanLogs) {
   Remove-Item -Path $BackendLog, $BackendErrorLog, $FrontendLog, $FrontendErrorLog -Force -ErrorAction SilentlyContinue
 }
 New-EffectiveBackendEnvFile -SourceEnvFile $BackendEnvFile -TargetEnvFile $EffectiveBackendEnvFile -TargetPort $BackendPort
-Set-Content -Path $ChildProcessInputFile -Value '' -Encoding UTF8
+$ChildProcessInputFile = Initialize-ChildProcessInputFile -InputFilePath $ChildProcessInputFile
 
 Write-Info 'Starting backend local profile...'
-# 后端通过“独立 PowerShell + 临时 env 文件”启动：
-# - 避免 npm 与 PowerShell 参数转义互相干扰；
-# - 允许本次启动动态覆盖端口/profile，同时不污染源 env 文件。
+# 鍚庣閫氳繃鈥滅嫭绔?PowerShell + 涓存椂 env 鏂囦欢鈥濆惎鍔細
+# - 閬垮厤 npm 涓?PowerShell 鍙傛暟杞箟浜掔浉骞叉壈锛?
+# - 鍏佽鏈鍚姩鍔ㄦ€佽鐩栫鍙?profile锛屽悓鏃朵笉姹℃煋婧?env 鏂囦欢銆?
 $backendCommand = "& { `$env:APP_PROFILE='$BackendProfile'; `$env:ENV_FILE='$EffectiveBackendEnvFile'; `$env:PORT='$BackendPort'; npm.cmd run dev }"
 $backendProcess = Start-Process `
   -FilePath $PowerShellExecutablePath `
@@ -714,10 +801,10 @@ $backendProcess = Start-Process `
   -PassThru
 
 Write-Info 'Starting frontend dev server (同时承载管理端与客户端页面)...'
-# 前端只启动一个 Vite 开发服务，同时承载管理端与客户端页面，
-# 通过注入本次后端地址，保证本地联调时接口统一指向当前后端端口。
-# 默认监听 0.0.0.0，这样局域网内其他设备也能直接访问当前调试页。
-# 同时默认启用自签名 HTTPS，保证手机真机联调时可使用浏览器摄像头能力。
+# 鍓嶇鍙惎鍔ㄤ竴涓?Vite 寮€鍙戞湇鍔★紝鍚屾椂鎵胯浇绠＄悊绔笌瀹㈡埛绔〉闈紝
+# 閫氳繃娉ㄥ叆鏈鍚庣鍦板潃锛屼繚璇佹湰鍦拌仈璋冩椂鎺ュ彛缁熶竴鎸囧悜褰撳墠鍚庣绔彛銆?
+# 榛樿鐩戝惉 0.0.0.0锛岃繖鏍峰眬鍩熺綉鍐呭叾浠栬澶囦篃鑳界洿鎺ヨ闂綋鍓嶈皟璇曢〉銆?
+# 鍚屾椂榛樿鍚敤鑷鍚?HTTPS锛屼繚璇佹墜鏈虹湡鏈鸿仈璋冩椂鍙娇鐢ㄦ祻瑙堝櫒鎽勫儚澶磋兘鍔涖€?
 $frontendCommand = "& { `$env:VITE_LOCAL_BACKEND_URL='http://127.0.0.1:$BackendPort'; `$env:VITE_DEV_SERVER_HTTPS='$($FrontendHttps.ToString().ToLower())'; npm.cmd run dev -- --host $FrontendHost --port $FrontendPort --strictPort }"
 $frontendProcess = Start-Process `
   -FilePath $PowerShellExecutablePath `
@@ -730,13 +817,13 @@ $frontendProcess = Start-Process `
   -PassThru
 
 try {
-  # 就绪校验必须在记录 PID 之前完成：
-  # - 若服务其实未成功拉起，就不写入“假成功”的运行记录；
-  # - 失败时直接进入 catch，输出日志尾部帮助排查。
+  # 灏辩华鏍￠獙蹇呴』鍦ㄨ褰?PID 涔嬪墠瀹屾垚锛?
+  # - 鑻ユ湇鍔″叾瀹炴湭鎴愬姛鎷夎捣锛屽氨涓嶅啓鍏モ€滃亣鎴愬姛鈥濈殑杩愯璁板綍锛?
+  # - 澶辫触鏃剁洿鎺ヨ繘鍏?catch锛岃緭鍑烘棩蹇楀熬閮ㄥ府鍔╂帓鏌ャ€?
   Wait-HttpReady -Uri "http://127.0.0.1:$BackendPort/health" -ServiceName 'backend health' -MaxAttempts $MaxReadyAttempts
-  # 前端就绪改为端口监听探测：
-  # 在 PowerShell 5 + 自签名 HTTPS 场景下，Invoke-WebRequest 可能因为 TLS 握手或证书策略反复失败，
-  # 但 dev server 实际已经可用，使用端口探测更稳。
+  # 鍓嶇灏辩华鏀逛负绔彛鐩戝惉鎺㈡祴锛?
+  # 鍦?PowerShell 5 + 鑷鍚?HTTPS 鍦烘櫙涓嬶紝Invoke-WebRequest 鍙兘鍥犱负 TLS 鎻℃墜鎴栬瘉涔︾瓥鐣ュ弽澶嶅け璐ワ紝
+  # 浣?dev server 瀹為檯宸茬粡鍙敤锛屼娇鐢ㄧ鍙ｆ帰娴嬫洿绋炽€?
   Wait-PortReady -Port $FrontendPort -ServiceName 'frontend dev server' -MaxAttempts $MaxReadyAttempts
 
   $backendListeningPids = @(Get-ListeningProcessIds -Port $BackendPort)
@@ -828,7 +915,7 @@ try {
     }
     finally {
       if (Test-Path $PidFile) {
-        # 日志跟随后再次判断真实服务是否仍在，解决“外层 shell 退出但 node 仍在”与相反情况。
+        # 鏃ュ織璺熼殢鍚庡啀娆″垽鏂湡瀹炴湇鍔℃槸鍚︿粛鍦紝瑙ｅ喅鈥滃灞?shell 閫€鍑轰絾 node 浠嶅湪鈥濅笌鐩稿弽鎯呭喌銆?
         $servicesStillAlive = (
           (Test-ProcessAlive -ProcessId $backendProcess.Id) -or
           (Test-ProcessAlive -ProcessId $frontendProcess.Id) -or
@@ -837,7 +924,7 @@ try {
         )
 
         if ($servicesStillAlive) {
-          Write-Info '日志跟随已结束，但本地联调服务仍在运行，可继续访问页面或手动执行 .\stop-local-dev.ps1 停止。'
+          Write-Info '日志跟随已结束，但本地联调服务仍在运行，可继续访问页面或手动执行 .\\stop-local-dev.ps1 停止。'
         }
         else {
           Write-WarnMessage '日志跟随已结束，检测到服务已退出，正在清理本地联调记录。'
@@ -849,7 +936,7 @@ try {
 }
 catch {
   Write-Info 'Startup failed. Cleaning up spawned processes.'
-  # 启动失败时优先清理进程树，再打印日志尾部，避免失败进程继续占用端口或追加无关日志。
+  # 鍚姩澶辫触鏃朵紭鍏堟竻鐞嗚繘绋嬫爲锛屽啀鎵撳嵃鏃ュ織灏鹃儴锛岄伩鍏嶅け璐ヨ繘绋嬬户缁崰鐢ㄧ鍙ｆ垨杩藉姞鏃犲叧鏃ュ織銆?
   Stop-ProcessTree -RootProcessId $backendProcess.Id
   Stop-ProcessTree -RootProcessId $frontendProcess.Id
   Remove-Item -Path $PidFile -Force -ErrorAction SilentlyContinue
@@ -859,3 +946,4 @@ catch {
   Show-LogTail -Title 'frontend.error.log' -LogPath $FrontendErrorLog
   throw
 }
+

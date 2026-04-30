@@ -102,6 +102,11 @@ const normalizeDepartmentNameSnapshot = (value: unknown) => {
   return normalizeOptionalTrimmedText(value)
 }
 
+// 详细注释：系统申请快照在历史缓存里可能缺失或被污染，这里统一回落为 false，确保恢复流程稳定。
+const normalizeIsSystemApplied = (value: unknown) => {
+  return value === true
+}
+
 // 详细注释：分页相关字段只允许回填为有效整数，避免 localStorage 被污染后把负数或 NaN 带回页面状态。
 const normalizePositiveInteger = (value: unknown, fallback: number) => {
   const normalizedValue = Number(value)
@@ -174,6 +179,7 @@ const normalizeOrderRow = (item: unknown): O2oPreorderSummary | null => {
     verifyCode,
     status,
     businessStatus: normalizeBusinessStatus(row.businessStatus),
+    isSystemApplied: normalizeIsSystemApplied(row.isSystemApplied),
     merchantMessage: normalizeMerchantMessage(row.merchantMessage),
     clientOrderType: normalizeClientOrderType(row.clientOrderType),
     departmentNameSnapshot: normalizeDepartmentNameSnapshot(row.departmentNameSnapshot),

@@ -39,6 +39,10 @@ const remark = ref('')
 // 这样可以避免因为账号资料里恰好有部门信息，导致用户未感知地提交成部门单。
 const clientOrderType = ref<O2oClientOrderType>('walkin')
 const submitting = ref(false)
+// 详细注释：“金蝶系统是否已申请”改为“用户主动选择”的必填项。
+// - `null` 表示用户尚未做出选择（仅部门订会出现该状态）；
+// - `true/false` 分别表示“金蝶已申请/金蝶未申请”。
+const departmentSystemApplyChoice = ref<boolean | null>(null)
 
 onMounted(() => {
   clientCartStore.initialize()
@@ -58,10 +62,23 @@ const isDepartmentOrder = computed(() => clientOrderType.value === 'department')
 const orderTypeDescription = computed(() => {
   if (isDepartmentOrder.value) {
     return currentDepartmentName.value
-      ? `已切换为部门订，提交时还需再次确认，核销后会归入部门出库单：${currentDepartmentName.value}`
+      ? `已切换为部门订，请先选择“金蝶系统是否已申请”后再提交；核销后会归入部门出库单：${currentDepartmentName.value}`
       : '部门订需要先在个人资料中完善部门信息'
   }
   return '当前默认按散客下单，如需归入部门，请主动切换为部门订'
+})
+
+const systemApplyStatusText = computed(() => {
+  if (!isDepartmentOrder.value) {
+    return '散客单不要求填写金蝶系统申请状态'
+  }
+  if (departmentSystemApplyChoice.value === true) {
+    return '已选择：金蝶系统内已完成审批申请'
+  }
+  if (departmentSystemApplyChoice.value === false) {
+    return '已选择：金蝶系统内未完成审批申请'
+  }
+  return '必填：请先选择金蝶系统是否已申请'
 })
 
 const handleBack = () => {
@@ -79,6 +96,10 @@ const handleSubmit = async () => {
   }
   if (isDepartmentOrder.value && !currentDepartmentName.value) {
     ElMessage.warning('部门订需要先完善账号部门信息')
+    return
+  }
+  if (isDepartmentOrder.value && departmentSystemApplyChoice.value === null) {
+    ElMessage.warning('请先选择金蝶系统是否已申请')
     return
   }
   if (isDepartmentOrder.value) {
@@ -111,6 +132,7 @@ const handleSubmit = async () => {
       try {
         const result = await submitO2oPreorder({
           clientOrderType: clientOrderType.value,
+          isSystemApplied: isDepartmentOrder.value ? Boolean(departmentSystemApplyChoice.value) : false,
           remark: remark.value.trim() || undefined,
           items: selectedItems.value.map((item) => ({
             productId: item.productId,
@@ -170,13 +192,13 @@ const handleSubmit = async () => {
 
       <div class="mb-4 rounded-[1.2rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
         <p class="mb-3 text-sm font-semibold text-slate-700">下单归属</p>
-        <p class="mb-3 text-xs leading-5 text-slate-400">默认按散客下单，如需归入部门，请主动选择“部门订”并在提交前再次确认。</p>
+        <p class="mb-3 text-xs leading-5 text-slate-400">默认按散客下单，如需归入部门，请主动选择“部门订”并在提交前完成必填项确认。</p>
         <div class="grid grid-cols-2 gap-3">
           <button
             type="button"
             class="rounded-[1.2rem] border px-4 py-3 text-left transition"
             :class="clientOrderType === 'department' ? 'border-teal-300 bg-teal-50 text-teal-700' : 'border-slate-200 bg-slate-50 text-slate-600'"
-            @click="clientOrderType = 'department'"
+            @click="clientOrderType = 'department'; departmentSystemApplyChoice = null"
           >
             <p class="text-sm font-semibold">部门订</p>
             <p class="mt-1 text-xs leading-5">适用于代表部门统一领取物资</p>
@@ -185,11 +207,47 @@ const handleSubmit = async () => {
             type="button"
             class="rounded-[1.2rem] border px-4 py-3 text-left transition"
             :class="clientOrderType === 'walkin' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-slate-50 text-slate-600'"
-            @click="clientOrderType = 'walkin'"
+            @click="clientOrderType = 'walkin'; departmentSystemApplyChoice = null"
           >
             <p class="text-sm font-semibold">散客</p>
             <p class="mt-1 text-xs leading-5">适用于个人临时领取，不归入部门</p>
           </button>
+        </div>
+        <div v-if="isDepartmentOrder" class="mt-4 rounded-[1rem] border border-slate-200 bg-slate-50 px-3 py-3">
+          <div class="flex flex-wrap items-center gap-2">
+            <p class="text-sm font-semibold text-slate-700">金蝶系统是否已申请</p>
+            <span class="rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-semibold text-rose-600">必填</span>
+          </div>
+          <p class="mt-1 text-xs text-slate-500">用于标记该笔出库是否已在金蝶系统内完成审批申请。</p>
+          <div class="mt-3 grid grid-cols-2 gap-3">
+            <button
+              type="button"
+              class="rounded-[0.9rem] border px-3 py-2 text-sm font-medium transition"
+              :class="
+                departmentSystemApplyChoice === true
+                  ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
+                  : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
+              "
+              @click="departmentSystemApplyChoice = true"
+            >
+              金蝶已申请
+            </button>
+            <button
+              type="button"
+              class="rounded-[0.9rem] border px-3 py-2 text-sm font-medium transition"
+              :class="
+                departmentSystemApplyChoice === false
+                  ? 'border-amber-300 bg-amber-50 text-amber-700'
+                  : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'
+              "
+              @click="departmentSystemApplyChoice = false"
+            >
+              金蝶未申请
+            </button>
+          </div>
+          <p class="mt-2 text-xs" :class="departmentSystemApplyChoice === null ? 'text-rose-600' : 'text-slate-500'">
+            {{ systemApplyStatusText }}
+          </p>
         </div>
         <p class="mt-3 text-xs leading-5" :class="isDepartmentOrder && !currentDepartmentName ? 'text-amber-600' : 'text-slate-500'">
           {{ orderTypeDescription }}

@@ -83,6 +83,11 @@ export class O2oPreorder {
   @Column({ name: 'department_name_snapshot', type: 'varchar', length: 128, nullable: true, comment: '下单时部门名称快照' })
   departmentNameSnapshot!: string | null
 
+  // isSystemApplied 记录客户端下单时对“是否已在学校/企业系统申请”的明确选择，
+  // 后续核销生成出库单时直接复用这个快照，避免被服务端默认值覆盖。
+  @Column({ name: 'is_system_applied', ...entityColumnOptions.booleanFlag, default: 0, comment: '是否系统申请（客户端选择快照）' })
+  isSystemApplied!: boolean
+
   // totalQty 记录整单总件数，便于列表快速展示，避免每次都聚合子项。
   @Column({ name: 'total_qty', type: 'int', default: 0, comment: '总件数' })
   totalQty!: number
