@@ -31,6 +31,55 @@ const getOrderTypeLabel = (value: 'department' | 'walkin') => {
 }
 
 /**
+ * 卡片状态展示文案：
+ * - 将“出库单状态 / 系统申请 / 记录状态”统一收敛到结构化方法，避免模板中重复三元表达式；
+ * - 同时输出语义化样式类别，便于在平板卡片中建立主次层级。
+ */
+const getShipmentStatusMeta = (order: {
+  orderType: 'department' | 'walkin'
+  hasCustomerOrder?: boolean
+}) => {
+  if (order.orderType !== 'department') {
+    return {
+      label: '不适用',
+      toneClass: 'is-neutral',
+    }
+  }
+  return {
+    label: order.hasCustomerOrder ? '已带单' : '未带单',
+    toneClass: order.hasCustomerOrder ? 'is-positive' : 'is-warning',
+  }
+}
+
+const getSystemApplyStatusMeta = (order: {
+  orderType: 'department' | 'walkin'
+  isSystemApplied?: boolean
+}) => {
+  if (order.orderType !== 'department') {
+    return {
+      label: '不适用',
+      toneClass: 'is-neutral',
+    }
+  }
+  return {
+    label: order.isSystemApplied ? '已申请' : '未申请',
+    toneClass: order.isSystemApplied ? 'is-warning' : 'is-neutral',
+  }
+}
+
+const getRecordStatusMeta = (order: { isDeleted?: boolean }) => {
+  return order.isDeleted
+    ? {
+        label: '已删除',
+        toneClass: 'is-danger',
+      }
+    : {
+        label: '正常',
+        toneClass: 'is-positive',
+      }
+}
+
+/**
  * 列表主显示名称：
  * - 部门单优先显示部门名，更符合后台检索与识别习惯；
  * - 散客单或部门缺失时回退客户名；
@@ -388,37 +437,67 @@ const handleExportVoucherPdf = async () => {
             </el-table>
           </template>
 
-          <template #card="{ item }">
+          <template #card="{ item, isTablet }">
             <div class="apple-card mobile-order-card min-w-0 p-4 active:scale-[0.99]" @click="handleViewDetail(item)">
-              <div class="mb-3 flex items-start justify-between gap-3">
+              <div class="mobile-order-card__head">
                 <div class="min-w-0">
-                  <div class="truncate font-semibold text-slate-800 dark:text-slate-100">{{ item.showNo }}</div>
-                  <div class="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                  <div class="mobile-order-card__show-no">{{ item.showNo }}</div>
+                  <div class="mobile-order-card__time">
                     {{ dayjs(item.createdAt).format('YYYY-MM-DD HH:mm') }}
                   </div>
                 </div>
-                <span class="rounded-full bg-brand/10 px-2 py-1 text-xs font-medium text-brand dark:bg-brand/20 dark:text-teal-300">
-                  {{ getOrderTypeLabel(item.orderType) }}
-                </span>
+                <div class="mobile-order-card__head-tags">
+                  <span class="mobile-order-card__chip is-brand">
+                    {{ getRecordStatusMeta(item).label }}
+                  </span>
+                  <span class="mobile-order-card__chip is-brand-soft">
+                    {{ getOrderTypeLabel(item.orderType) }}
+                  </span>
+                </div>
               </div>
-              <div class="mt-1 text-sm text-slate-600 dark:text-slate-300">领用对象：{{ getOrderDisplayName(item) }}</div>
-              <div class="text-sm text-slate-600 dark:text-slate-300">
-                出库单状态：{{ item.orderType === 'department' ? (item.hasCustomerOrder ? '已带单' : '未带单') : '不适用' }}
+
+              <div class="mobile-order-card__primary">
+                <p class="mobile-order-card__primary-label">领用对象</p>
+                <p class="mobile-order-card__primary-value">{{ getOrderDisplayName(item) }}</p>
               </div>
-              <div class="text-sm text-slate-600 dark:text-slate-300">
-                系统申请：{{ item.orderType === 'department' ? (item.isSystemApplied ? '已申请' : '未申请') : '不适用' }}
+
+              <div class="mobile-order-card__metrics">
+                <span class="mobile-order-card__metric-qty">数量：{{ Number(item.totalQty).toFixed(2) }}</span>
+                <span class="mobile-order-card__metric-amount">¥{{ Number(item.totalAmount).toFixed(2) }}</span>
               </div>
-              <div class="text-sm text-slate-600 dark:text-slate-300">出单人：{{ item.issuerName || '-' }}</div>
-              <div v-if="item.orderType === 'department'" class="text-sm text-slate-600 dark:text-slate-300">
-                客户部门：{{ item.customerDepartmentName || '-' }}
+
+              <div class="mobile-order-card__meta" :class="isTablet ? 'is-tablet' : ''">
+                <div class="mobile-order-card__meta-item">
+                  <span class="mobile-order-card__meta-label">出库单状态</span>
+                  <span class="mobile-order-card__meta-value" :class="getShipmentStatusMeta(item).toneClass">
+                    {{ getShipmentStatusMeta(item).label }}
+                  </span>
+                </div>
+                <div class="mobile-order-card__meta-item">
+                  <span class="mobile-order-card__meta-label">系统申请</span>
+                  <span class="mobile-order-card__meta-value" :class="getSystemApplyStatusMeta(item).toneClass">
+                    {{ getSystemApplyStatusMeta(item).label }}
+                  </span>
+                </div>
+                <div class="mobile-order-card__meta-item">
+                  <span class="mobile-order-card__meta-label">出单人</span>
+                  <span class="mobile-order-card__meta-value">{{ item.issuerName || '-' }}</span>
+                </div>
+                <div class="mobile-order-card__meta-item">
+                  <span class="mobile-order-card__meta-label">开单人</span>
+                  <span class="mobile-order-card__meta-value">{{ item.creatorDisplayName || item.creatorUsername || '-' }}</span>
+                </div>
+                <div v-if="item.orderType === 'department'" class="mobile-order-card__meta-item">
+                  <span class="mobile-order-card__meta-label">客户部门</span>
+                  <span class="mobile-order-card__meta-value">{{ item.customerDepartmentName || '-' }}</span>
+                </div>
+                <div v-if="item.customerName" class="mobile-order-card__meta-item">
+                  <span class="mobile-order-card__meta-label">客户名称</span>
+                  <span class="mobile-order-card__meta-value">{{ item.customerName }}</span>
+                </div>
               </div>
-              <div v-if="item.customerName" class="text-sm text-slate-600 dark:text-slate-300">客户名称：{{ item.customerName }}</div>
-              <div class="text-sm text-slate-600 dark:text-slate-300">开单人：{{ item.creatorDisplayName || item.creatorUsername || '-' }}</div>
-              <div class="mt-3 flex items-center justify-between gap-4 border-t border-slate-100 pt-3 dark:border-white/10">
-                <span class="text-sm text-slate-500 dark:text-slate-400">数量：{{ item.totalQty }}</span>
-                <span class="font-medium text-red-500">¥{{ Number(item.totalAmount).toFixed(2) }}</span>
-              </div>
-              <div v-if="canDeleteOrder" class="mt-3 flex items-center gap-3">
+
+              <div v-if="canDeleteOrder" class="mobile-order-card__actions">
                 <el-button link type="primary" @click.stop="handleViewDetail(item)">详情</el-button>
                 <el-button
                   v-if="!item.isDeleted"
@@ -436,6 +515,9 @@ const handleExportVoucherPdf = async () => {
                 >
                   恢复
                 </el-button>
+              </div>
+              <div v-else class="mobile-order-card__actions">
+                <el-button link type="primary" @click.stop="handleViewDetail(item)">详情</el-button>
               </div>
             </div>
           </template>
@@ -606,6 +688,174 @@ const handleExportVoucherPdf = async () => {
 
 .mobile-order-card {
   transition: transform 0.25s ease, box-shadow 0.25s ease;
+}
+
+.mobile-order-card__head {
+  margin-bottom: 10px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mobile-order-card__show-no {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 20px;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.mobile-order-card__time {
+  margin-top: 2px;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.mobile-order-card__head-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.mobile-order-card__chip {
+  border-radius: 9999px;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.mobile-order-card__chip.is-brand {
+  background: #ecfdf5;
+  color: #0f766e;
+}
+
+.mobile-order-card__chip.is-brand-soft {
+  background: #ccfbf1;
+  color: #134e4a;
+}
+
+.mobile-order-card__primary {
+  border-radius: 12px;
+  background: #f8fafc;
+  padding: 10px 12px;
+}
+
+.mobile-order-card__primary-label {
+  margin: 0;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.mobile-order-card__primary-value {
+  margin: 4px 0 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #0f172a;
+  line-height: 1.45;
+  word-break: break-all;
+}
+
+.mobile-order-card__metrics {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.mobile-order-card__metric-qty {
+  color: #475569;
+  font-size: 14px;
+}
+
+.mobile-order-card__metric-amount {
+  font-size: 18px;
+  font-weight: 700;
+  color: #ef4444;
+}
+
+.mobile-order-card__meta {
+  margin-top: 10px;
+  display: grid;
+  gap: 6px 12px;
+}
+
+.mobile-order-card__meta.is-tablet {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.mobile-order-card__meta-item {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mobile-order-card__meta-label {
+  color: #64748b;
+  font-size: 13px;
+  flex-shrink: 0;
+}
+
+.mobile-order-card__meta-value {
+  color: #334155;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: right;
+  word-break: break-all;
+}
+
+.mobile-order-card__meta-value.is-positive {
+  color: #15803d;
+}
+
+.mobile-order-card__meta-value.is-warning {
+  color: #b45309;
+}
+
+.mobile-order-card__meta-value.is-danger {
+  color: #b91c1c;
+}
+
+.mobile-order-card__meta-value.is-neutral {
+  color: #64748b;
+}
+
+.mobile-order-card__actions {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #e2e8f0;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.dark .mobile-order-card__show-no {
+  color: #e2e8f0;
+}
+
+.dark .mobile-order-card__time,
+.dark .mobile-order-card__primary-label,
+.dark .mobile-order-card__meta-label {
+  color: #94a3b8;
+}
+
+.dark .mobile-order-card__primary {
+  background: rgba(30, 41, 59, 0.65);
+}
+
+.dark .mobile-order-card__primary-value,
+.dark .mobile-order-card__meta-value {
+  color: #e2e8f0;
+}
+
+.dark .mobile-order-card__actions {
+  border-top-color: rgba(148, 163, 184, 0.28);
 }
 
 .order-detail-content {
