@@ -83,6 +83,8 @@ export interface RejectReturnRequestInput {
   rejectReason: string
 }
 
+type O2oNumericLike = string | number | null
+
 export interface MyOrderListQuery {
   status?: 'pending' | 'verified' | 'cancelled'
   keyword?: string
@@ -959,7 +961,7 @@ class O2oPreorderService {
       .addSelect('SUM(item.qty * COALESCE(product.defaultPrice, 0))', 'totalAmount')
       .where('item.orderId IN (:...orderIds)', { orderIds })
       .groupBy('item.orderId')
-      .getRawMany<{ orderId: string; totalAmount: string | number | null }>()
+      .getRawMany<{ orderId: string; totalAmount: O2oNumericLike }>()
     return new Map(rows.map((item) => [String(item.orderId), this.normalizeDecimalText(item.totalAmount)]))
   }
 
@@ -979,7 +981,7 @@ class O2oPreorderService {
       .addSelect("SUM(CASE WHEN returnRequest.status = 'pending' THEN 1 ELSE 0 END)", 'pendingCount')
       .where('returnRequest.orderId IN (:...orderIds)', { orderIds })
       .groupBy('returnRequest.orderId')
-      .getRawMany<{ orderId: string; totalCount: string | number | null; pendingCount: string | number | null }>()
+      .getRawMany<{ orderId: string; totalCount: O2oNumericLike; pendingCount: O2oNumericLike }>()
     return new Map(
       rows.map((item) => [
         String(item.orderId),

@@ -130,12 +130,69 @@ interface DashboardPiePayload {
   orderTypePie: DashboardPieSlice[]
 }
 
+type DashboardOptionalNumericLike = string | number | null | undefined
+type DashboardNumericLike = string | number | null
+
+interface DashboardProductDetailRaw {
+  orderId: string | number
+  showNo: string | null
+  orderType: string | null
+  createdAt: Date | string
+  customerName: string | null
+  customerDepartmentName: string | null
+  issuerName: string | null
+  qty: DashboardNumericLike
+  amount: DashboardNumericLike
+}
+
+interface DashboardCustomerSummaryRaw {
+  totalQty?: DashboardNumericLike
+  totalAmount?: DashboardNumericLike
+  orderCount?: DashboardNumericLike
+}
+
+interface DashboardCustomerDetailRaw {
+  orderId: string | number
+  showNo: string | null
+  orderType: string | null
+  createdAt: Date | string
+  customerName: string | null
+  customerDepartmentName: string | null
+  issuerName: string | null
+  qty: DashboardNumericLike
+  amount: DashboardNumericLike
+}
+
+interface DashboardTagAggregateRaw {
+  totalQuantity?: DashboardNumericLike
+  totalAmount?: DashboardNumericLike
+  orderCount?: DashboardNumericLike
+  productCount?: DashboardNumericLike
+}
+
+interface DashboardPieProductRowRaw {
+  key: string | number
+  label: string | null
+  value: DashboardNumericLike
+}
+
+interface DashboardPieCustomerRowRaw {
+  key: string | null
+  label: string | null
+  value: DashboardNumericLike
+}
+
+interface DashboardPieOrderTypeRowRaw {
+  orderType: string | null
+  value: DashboardNumericLike
+}
+
 /**
  * 归一化金额文本：
  * - 仪表盘统一返回两位小数字符串，避免前端在不同组件重复格式化；
  * - 兼容数据库聚合后返回的 string / number / null。
  */
-const normalizeAmount = (value: string | number | null | undefined): string => {
+const normalizeAmount = (value: DashboardOptionalNumericLike): string => {
   const normalizedNumber = Number(value ?? 0)
   return Number.isFinite(normalizedNumber) ? normalizedNumber.toFixed(2) : '0.00'
 }
@@ -145,18 +202,18 @@ const normalizeAmount = (value: string | number | null | undefined): string => {
  * - 排行榜数量允许保留两位小数，适配非整数数量场景；
  * - 非法值统一回落为 0.00，避免前端出现 NaN。
  */
-const normalizeQty = (value: string | number | null | undefined): string => {
+const normalizeQty = (value: DashboardOptionalNumericLike): string => {
   const normalizedNumber = Number(value ?? 0)
   return Number.isFinite(normalizedNumber) ? normalizedNumber.toFixed(2) : '0.00'
 }
 
-const normalizeCount = (value: string | number | null | undefined): string => {
+const normalizeCount = (value: DashboardOptionalNumericLike): string => {
   const normalizedNumber = Number(value ?? 0)
   return Number.isFinite(normalizedNumber) ? String(Math.max(0, Math.round(normalizedNumber))) : '0'
 }
 
 const normalizeText = (value: string | null | undefined, fallback = ''): string => {
-  const normalizedText = String(value ?? '').trim()
+  const normalizedText = typeof value === 'string' ? value.trim() : ''
   return normalizedText || fallback
 }
 
@@ -186,12 +243,12 @@ const normalizeCustomerName = (value: string | null | undefined): string => {
  * - 最终仍为空时展示统一兜底文案，避免界面出现空白字段。
  */
 const normalizeRecentActivityDisplayName = (detail: Record<string, unknown>): string => {
-  const departmentName = normalizeText(String(detail.customerDepartmentName ?? ''), '')
+  const departmentName = normalizeText(typeof detail.customerDepartmentName === 'string' ? detail.customerDepartmentName : null, '')
   if (departmentName) {
     return departmentName
   }
 
-  const customerName = normalizeText(String(detail.customerName ?? ''), '')
+  const customerName = normalizeText(typeof detail.customerName === 'string' ? detail.customerName : null, '')
   return customerName || '未填写客户'
 }
 
@@ -417,7 +474,7 @@ export const dashboardService = {
         showNo: normalizeText(audit.targetCode, '-'),
         actorDisplayName: normalizeText(audit.actorDisplayName || audit.actorUsername, '系统'),
         displayName: normalizeRecentActivityDisplayName(detail),
-        customerName: normalizeText(String(detail.customerName ?? ''), '-'),
+        customerName: normalizeText(typeof detail.customerName === 'string' ? detail.customerName : null, '-'),
         totalAmount: normalizeAmount(detail.totalAmount as string | number | null | undefined),
         totalQty: normalizeQty(detail.totalQty as string | number | null | undefined),
         createdAt: audit.createdAt instanceof Date ? audit.createdAt.toISOString() : String(audit.createdAt),
@@ -459,12 +516,13 @@ export const dashboardService = {
       .where('item.productId = :productId', { productId })
 
     this.applyOrderFilter(summaryQb, filter)
-    const summaryRaw = await summaryQb.getRawOne<{
-      totalQty?: string | number | null
-      totalAmount?: string | number | null
-      orderCount?: string | number | null
+    type DashboardProductSummaryRaw = {
+      totalQty?: DashboardNumericLike
+      totalAmount?: DashboardNumericLike
+      orderCount?: DashboardNumericLike
       productName?: string | null
-    }>()
+    }
+    const summaryRaw = await summaryQb.getRawOne<DashboardProductSummaryRaw>()
 
     const detailQb = orderItemRepo
       .createQueryBuilder('item')
@@ -490,17 +548,7 @@ export const dashboardService = {
       .limit(100)
 
     this.applyOrderFilter(detailQb, filter)
-    const detailRows = await detailQb.getRawMany<{
-      orderId: string | number
-      showNo: string | null
-      orderType: string | null
-      createdAt: Date | string
-      customerName: string | null
-      customerDepartmentName: string | null
-      issuerName: string | null
-      qty: string | number | null
-      amount: string | number | null
-    }>()
+    const detailRows = await detailQb.getRawMany<DashboardProductDetailRaw>()
 
     const productEntity = await productRepo.findOne({ where: { id: productId } })
     const productName =
@@ -538,11 +586,7 @@ export const dashboardService = {
 
     this.applyCustomerFilter(summaryQb, customerName)
     this.applyOrderFilter(summaryQb, filter)
-    const summaryRaw = await summaryQb.getRawOne<{
-      totalQty?: string | number | null
-      totalAmount?: string | number | null
-      orderCount?: string | number | null
-    }>()
+    const summaryRaw = await summaryQb.getRawOne<DashboardCustomerSummaryRaw>()
 
     const detailQb = orderRepo
       .createQueryBuilder('order')
@@ -561,17 +605,7 @@ export const dashboardService = {
 
     this.applyCustomerFilter(detailQb, customerName)
     this.applyOrderFilter(detailQb, filter)
-    const detailRows = await detailQb.getRawMany<{
-      orderId: string | number
-      showNo: string | null
-      orderType: string | null
-      createdAt: Date | string
-      customerName: string | null
-      customerDepartmentName: string | null
-      issuerName: string | null
-      qty: string | number | null
-      amount: string | number | null
-    }>()
+    const detailRows = await detailQb.getRawMany<DashboardCustomerDetailRaw>()
 
     return {
       customerName,
@@ -608,12 +642,7 @@ export const dashboardService = {
       .where('relation.tagId = :tagId', { tagId })
 
     this.applyOrderFilter(aggregateQb, filter)
-    const aggregateRaw = await aggregateQb.getRawOne<{
-      totalQuantity?: string | number | null
-      totalAmount?: string | number | null
-      orderCount?: string | number | null
-      productCount?: string | number | null
-    }>()
+    const aggregateRaw = await aggregateQb.getRawOne<DashboardTagAggregateRaw>()
 
     return {
       tagId: String(tag.id),
@@ -642,7 +671,7 @@ export const dashboardService = {
       .orderBy('SUM(item.lineAmount)', 'DESC')
       .limit(8)
     this.applyOrderFilter(productRowsQb, filter)
-    const productRows = await productRowsQb.getRawMany<{ key: string | number; label: string | null; value: string | number | null }>()
+    const productRows = await productRowsQb.getRawMany<DashboardPieProductRowRaw>()
     const productPie = this.buildPieSlices(
       productRows.map((row) => ({
         key: String(row.key ?? '').trim(),
@@ -662,7 +691,7 @@ export const dashboardService = {
       .orderBy('SUM(order.totalAmount)', 'DESC')
       .limit(8)
     this.applyOrderFilter(customerRowsQb, filter)
-    const customerRows = await customerRowsQb.getRawMany<{ key: string | null; label: string | null; value: string | number | null }>()
+    const customerRows = await customerRowsQb.getRawMany<DashboardPieCustomerRowRaw>()
     const customerPie = this.buildPieSlices(
       customerRows.map((row) => ({
         key: normalizeText(row.key, '散客'),
@@ -678,7 +707,7 @@ export const dashboardService = {
       .where('1=1')
       .groupBy('order.orderType')
     this.applyOrderFilter(orderTypeRowsQb, filter)
-    const orderTypeRows = await orderTypeRowsQb.getRawMany<{ orderType: string | null; value: string | number | null }>()
+    const orderTypeRows = await orderTypeRowsQb.getRawMany<DashboardPieOrderTypeRowRaw>()
     const orderTypeMap = new Map<DashboardOrderType, number>()
     ORDER_TYPE_VALUES.forEach((orderType) => {
       orderTypeMap.set(orderType, 0)

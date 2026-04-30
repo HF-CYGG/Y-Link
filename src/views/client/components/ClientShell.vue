@@ -13,6 +13,7 @@ import { computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useClientAuthStore } from '@/store'
 import { redirectToClientLogin } from '@/utils/client-auth-navigation'
+import { normalizeRequestError } from '@/utils/error'
 
 interface Props {
   title: string
@@ -44,7 +45,11 @@ const handleLogout = async () => {
       confirmButtonText: '退出',
       cancelButtonText: '取消',
     })
-  } catch (_error) {
+  } catch (error) {
+    const normalizedError = normalizeRequestError(error, '退出已取消')
+    if (normalizedError.message === 'cancel' || normalizedError.message === 'close') {
+      return
+    }
     return
   }
 

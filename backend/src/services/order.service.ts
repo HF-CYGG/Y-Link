@@ -112,6 +112,20 @@ export interface SubmittedOrderItemView {
   remark: string | null
 }
 
+interface SubmitOrderContext {
+  normalizedIdempotencyKey: string
+  normalizedOrderType: OrderType
+  normalizedIssuerName: string
+  normalizedCustomerDepartmentName: string | null
+}
+
+interface PreparedSubmitItemsResult {
+  totalQty: number
+  totalAmount: number
+  itemEntities: BizOutboundOrderItem[]
+  latestProductPriceMap: Map<string, string>
+}
+
 const normalizeEntityId = (value: string | number): string => String(value).trim()
 
 const normalizeNullableEntityId = (value: string | number | null | undefined): string | null => {
@@ -346,23 +360,7 @@ export class OrderService {
     if (!input.items.length) {
       throw new BizError('至少需要一条明细')
     }
-
-    const normalizedIdempotencyKey = input.idempotencyKey.trim()
-    if (!normalizedIdempotencyKey) {
-      throw new BizError('幂等键不能为空')
-    }
-    const normalizedOrderType = this.normalizeOrderType(input.orderType)
-    if (!normalizedOrderType) {
-      throw new BizError('订单类型非法，仅支持 department 或 walkin', 400)
-    }
-    const normalizedIssuerName = input.issuerName?.trim() || actor.displayName?.trim() || actor.username?.trim()
-    if (!normalizedIssuerName) {
-      throw new BizError('出单人不能为空', 400)
-    }
-    const normalizedCustomerDepartmentName = input.customerDepartmentName?.trim() || null
-    if (normalizedOrderType === 'department' && !normalizedCustomerDepartmentName) {
-      throw new BizError('部门订单必须填写客户部门名称', 400)
-    }
+    const submitContext = this.buildSubmitOrderContext(input, actor)
 
     let lastError: unknown
     for (let attempt = 1; attempt <= ORDER_SUBMIT_MAX_RETRY; attempt += 1) {
@@ -374,7 +372,7 @@ export class OrderService {
 
           // 使用幂等键实现重复提交防重，客户端重试会返回同一单据。
           const existed = await orderRepo.findOne({
-            where: { idempotencyKey: normalizedIdempotencyKey },
+            where: { idempotencyKey: submitContext.normalizedIdempotencyKey },
           })
           if (existed) {
             const existedItems = await itemRepo.find({
@@ -399,70 +397,35 @@ export class OrderService {
             throw new BizError('存在无效或停用产品，无法提交')
           }
           const orderUuid = generateOrderUuid()
-          const showNo = await orderSerialService.generateOrderNo(normalizedOrderType, manager)
-
-          let totalQty = 0
-          let totalAmount = 0
-          const itemEntities: BizOutboundOrderItem[] = []
-          const latestProductPriceMap = new Map<string, string>()
-
-          input.items.forEach((item, index) => {
-            const normalizedProductId = String(item.productId).trim()
-            const product = productMap.get(normalizedProductId)
-            if (!product) {
-              throw new BizError(`产品不存在: ${item.productId}`)
-            }
-            if (item.qty <= 0) {
-              throw new BizError(`第 ${index + 1} 行数量非法`)
-            }
-            if (item.unitPrice <= 0) {
-              throw new BizError(`第 ${index + 1} 行单价必须大于 0`)
-            }
-
-            const lineAmount = Number((item.qty * item.unitPrice).toFixed(2))
-            totalQty += item.qty
-            totalAmount += lineAmount
-            latestProductPriceMap.set(normalizedProductId, item.unitPrice.toFixed(2))
-
-            itemEntities.push(
-              itemRepo.create({
-                lineNo: index + 1,
-                productId: product.id,
-                productNameSnapshot: product.productName,
-                qty: item.qty.toFixed(2),
-                unitPrice: item.unitPrice.toFixed(2),
-                lineAmount: lineAmount.toFixed(2),
-                remark: item.remark?.trim() || null,
-              }),
-            )
-          })
+          const showNo = await orderSerialService.generateOrderNo(submitContext.normalizedOrderType, manager)
+          const preparedItems = this.prepareSubmitItems(input.items, productMap, itemRepo)
 
           const order = orderRepo.create({
             orderUuid,
             showNo,
-            orderType: normalizedOrderType,
+            orderType: submitContext.normalizedOrderType,
             hasCustomerOrder: Boolean(input.hasCustomerOrder),
             isSystemApplied: Boolean(input.isSystemApplied),
-            issuerName: normalizedIssuerName,
-            customerDepartmentName: normalizedCustomerDepartmentName,
-            idempotencyKey: normalizedIdempotencyKey,
+            issuerName: submitContext.normalizedIssuerName,
+            customerDepartmentName: submitContext.normalizedCustomerDepartmentName,
+            idempotencyKey: submitContext.normalizedIdempotencyKey,
             customerName: input.customerName?.trim() || null,
             remark: input.remark?.trim() || null,
-            totalQty: totalQty.toFixed(2),
-            totalAmount: totalAmount.toFixed(2),
+            totalQty: preparedItems.totalQty.toFixed(2),
+            totalAmount: preparedItems.totalAmount.toFixed(2),
             creatorUserId: actor.userId,
             creatorUsername: actor.username,
             creatorDisplayName: actor.displayName,
           })
 
           const savedOrder = await orderRepo.save(order)
-          itemEntities.forEach((item) => {
+          preparedItems.itemEntities.forEach((item) => {
             item.orderId = savedOrder.id
           })
-          const savedItems = await itemRepo.save(itemEntities)
+          const savedItems = await itemRepo.save(preparedItems.itemEntities)
 
           products.forEach((product) => {
-            const latestPrice = latestProductPriceMap.get(String(product.id))
+            const latestPrice = preparedItems.latestProductPriceMap.get(String(product.id))
             if (latestPrice) {
               product.defaultPrice = latestPrice
             }
@@ -500,14 +463,10 @@ export class OrderService {
 
         // 并发下若另一请求已成功落库同一幂等键，则直接回查既有单据返回。
         if (isUniqueConstraintError(error, IDEMPOTENCY_CONSTRAINT_MATCHER)) {
-          return this.loadOrderByIdempotencyKey(normalizedIdempotencyKey)
+          return this.loadOrderByIdempotencyKey(submitContext.normalizedIdempotencyKey)
         }
 
-        // show_no 抢号冲突或 SQLite 锁冲突时，重试整个事务重新申请编号。
-        if (
-          attempt < ORDER_SUBMIT_MAX_RETRY &&
-          (isUniqueConstraintError(error, SHOW_NO_CONSTRAINT_MATCHER) || isRetryableSqliteLockError(error))
-        ) {
+        if (this.shouldRetrySubmitError(error, attempt)) {
           continue
         }
 
@@ -520,6 +479,87 @@ export class OrderService {
     }
 
     throw lastError ?? new BizError('订单提交失败，请稍后重试', 500)
+  }
+
+  private buildSubmitOrderContext(input: SubmitOrderInput, actor: AuthUserContext): SubmitOrderContext {
+    const normalizedIdempotencyKey = input.idempotencyKey.trim()
+    if (!normalizedIdempotencyKey) {
+      throw new BizError('幂等键不能为空')
+    }
+    const normalizedOrderType = this.normalizeOrderType(input.orderType)
+    if (!normalizedOrderType) {
+      throw new BizError('订单类型非法，仅支持 department 或 walkin', 400)
+    }
+    const normalizedIssuerName = input.issuerName?.trim() || actor.displayName?.trim() || actor.username?.trim()
+    if (!normalizedIssuerName) {
+      throw new BizError('出单人不能为空', 400)
+    }
+    const normalizedCustomerDepartmentName = input.customerDepartmentName?.trim() || null
+    if (normalizedOrderType === 'department' && !normalizedCustomerDepartmentName) {
+      throw new BizError('部门订单必须填写客户部门名称', 400)
+    }
+    return {
+      normalizedIdempotencyKey,
+      normalizedOrderType,
+      normalizedIssuerName,
+      normalizedCustomerDepartmentName,
+    }
+  }
+
+  private prepareSubmitItems(
+    inputItems: SubmitOrderItemInput[],
+    productMap: Map<string, BaseProduct>,
+    itemRepo: ReturnType<typeof AppDataSource.getRepository<BizOutboundOrderItem>>,
+  ): PreparedSubmitItemsResult {
+    let totalQty = 0
+    let totalAmount = 0
+    const itemEntities: BizOutboundOrderItem[] = []
+    const latestProductPriceMap = new Map<string, string>()
+
+    inputItems.forEach((item, index) => {
+      const normalizedProductId = String(item.productId).trim()
+      const product = productMap.get(normalizedProductId)
+      if (!product) {
+        throw new BizError(`产品不存在: ${item.productId}`)
+      }
+      if (item.qty <= 0) {
+        throw new BizError(`第 ${index + 1} 行数量非法`)
+      }
+      if (item.unitPrice <= 0) {
+        throw new BizError(`第 ${index + 1} 行单价必须大于 0`)
+      }
+
+      const lineAmount = Number((item.qty * item.unitPrice).toFixed(2))
+      totalQty += item.qty
+      totalAmount += lineAmount
+      latestProductPriceMap.set(normalizedProductId, item.unitPrice.toFixed(2))
+
+      itemEntities.push(
+        itemRepo.create({
+          lineNo: index + 1,
+          productId: product.id,
+          productNameSnapshot: product.productName,
+          qty: item.qty.toFixed(2),
+          unitPrice: item.unitPrice.toFixed(2),
+          lineAmount: lineAmount.toFixed(2),
+          remark: item.remark?.trim() || null,
+        }),
+      )
+    })
+
+    return {
+      totalQty,
+      totalAmount,
+      itemEntities,
+      latestProductPriceMap,
+    }
+  }
+
+  private shouldRetrySubmitError(error: unknown, attempt: number) {
+    return (
+      attempt < ORDER_SUBMIT_MAX_RETRY
+      && (isUniqueConstraintError(error, SHOW_NO_CONSTRAINT_MATCHER) || isRetryableSqliteLockError(error))
+    )
   }
 
   private normalizeOrderType(orderType: string | undefined): OrderType | null {

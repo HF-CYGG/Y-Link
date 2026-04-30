@@ -29,6 +29,7 @@ import {
   persistClientAuthState,
   readPersistedClientAuthState,
 } from '@/utils/client-auth-storage'
+import { normalizeRequestError } from '@/utils/error'
 import { useClientOrderStore } from './client-order'
 
 /**
@@ -121,7 +122,10 @@ export const useClientAuthStore = defineStore('client-auth', () => {
           user: profile,
           expiresAt: persisted.expiresAt,
         })
-      } catch (_error) {
+      } catch (error) {
+        normalizeRequestError(error, '客户端登录态恢复失败')
+        // 历史 token 失效或服务端会话已清理时，恢复阶段直接退回未登录态即可；
+        // 这里显式消费异常，避免 Sonar 误判“吞异常”且便于后续接入埋点。
         clearAuthState()
       }
 

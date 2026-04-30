@@ -126,11 +126,33 @@ const normalizeKeyword = (value: unknown) => {
     : ''
 }
 
+const normalizeStringField = (value: unknown, fallback = '') => {
+  return typeof value === 'string' ? value : fallback
+}
+
 // 详细注释：统一收敛“可为空的文本快照”恢复规则，避免多个字段各自复制相同的裁剪与空值判断逻辑。
 const normalizeOptionalTrimmedText = (value: unknown) => {
   return typeof value === 'string' && value.trim()
     ? value.trim()
     : null
+}
+
+const normalizeLatestReturnRequest = (value: unknown): O2oPreorderSummary['latestReturnRequest'] => {
+  if (!value || typeof value !== 'object') {
+    return null
+  }
+  const latestReturnRequest = value as Record<string, unknown>
+  return {
+    id: normalizeStringField(latestReturnRequest.id),
+    returnNo: normalizeStringField(latestReturnRequest.returnNo),
+    status:
+      latestReturnRequest.status === 'verified' || latestReturnRequest.status === 'rejected'
+        ? latestReturnRequest.status
+        : 'pending',
+    createdAt: normalizeStringField(latestReturnRequest.createdAt),
+    handledAt: typeof latestReturnRequest.handledAt === 'string' ? latestReturnRequest.handledAt : null,
+    rejectedReason: typeof latestReturnRequest.rejectedReason === 'string' ? latestReturnRequest.rejectedReason : null,
+  }
 }
 
 const normalizeOrderRow = (item: unknown): O2oPreorderSummary | null => {
@@ -146,10 +168,6 @@ const normalizeOrderRow = (item: unknown): O2oPreorderSummary | null => {
     return null
   }
   const timeoutAt = typeof row.timeoutAt === 'string' ? row.timeoutAt : null
-  const latestReturnRequest =
-    row.latestReturnRequest && typeof row.latestReturnRequest === 'object'
-      ? (row.latestReturnRequest as Record<string, unknown>)
-      : null
   return {
     id,
     showNo,
@@ -163,20 +181,7 @@ const normalizeOrderRow = (item: unknown): O2oPreorderSummary | null => {
     statusReport: normalizeStatusReport(row, status, timeoutAt),
     returnRequestCount: Number.isFinite(row.returnRequestCount) ? Number(row.returnRequestCount) : 0,
     pendingReturnRequestCount: Number.isFinite(row.pendingReturnRequestCount) ? Number(row.pendingReturnRequestCount) : 0,
-    latestReturnRequest: latestReturnRequest
-      ? {
-          id: String(latestReturnRequest.id ?? ''),
-          returnNo: String(latestReturnRequest.returnNo ?? ''),
-          status:
-            latestReturnRequest.status === 'verified' || latestReturnRequest.status === 'rejected'
-              ? latestReturnRequest.status
-              : 'pending',
-          createdAt: typeof latestReturnRequest.createdAt === 'string' ? latestReturnRequest.createdAt : '',
-          handledAt: typeof latestReturnRequest.handledAt === 'string' ? latestReturnRequest.handledAt : null,
-          rejectedReason:
-            typeof latestReturnRequest.rejectedReason === 'string' ? latestReturnRequest.rejectedReason : null,
-        }
-      : null,
+    latestReturnRequest: normalizeLatestReturnRequest(row.latestReturnRequest),
     totalQty: Number.isFinite(row.totalQty) ? Number(row.totalQty) : 0,
     totalAmount: typeof row.totalAmount === 'string' ? row.totalAmount : undefined,
     expireInSeconds: Number.isFinite(row.expireInSeconds) ? Number(row.expireInSeconds) : undefined,
