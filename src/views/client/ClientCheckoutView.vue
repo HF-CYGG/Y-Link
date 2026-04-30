@@ -12,7 +12,7 @@
  */
 
 
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft } from '@element-plus/icons-vue'
@@ -35,6 +35,11 @@ const clientCartStore = useClientCartStore()
 const { runWithGate } = useIdempotentAction()
 
 const remark = ref('')
+// 详细注释：提货人输入框支持“默认用户名 + 用户自定义记忆”。
+// - 未编辑过时：默认回填当前登录用户名（优先 account）；
+// - 编辑过时：按当前客户端账号维度写入 localStorage，并在下次进入自动回填；
+// - 记忆值可反复修改，始终以用户最后一次输入为准。
+const pickupContact = ref('')
 // 详细注释：结算页始终默认走“散客”模式，只有用户主动点选“部门订”才切换，
 // 这样可以避免因为账号资料里恰好有部门信息，导致用户未感知地提交成部门单。
 const clientOrderType = ref<O2oClientOrderType>('walkin')
@@ -44,6 +49,68 @@ const submitting = ref(false)
 // - `true/false` 分别表示“金蝶已申请/金蝶未申请”。
 const departmentSystemApplyChoice = ref<boolean | null>(null)
 
+const PICKUP_CONTACT_STORAGE_KEY_PREFIX = 'ylink:client:checkout:pickup-contact:'
+
+const resolveDefaultPickupContact = (): string => {
+  const currentUser = clientAuthStore.currentUser
+  const username = currentUser?.account?.trim()
+  if (username) {
+    return username
+  }
+  return currentUser?.realName?.trim() || currentUser?.mobile?.trim() || ''
+}
+
+const resolvePickupContactStorageKey = (): string => {
+  const currentUser = clientAuthStore.currentUser
+  const userIdentity = `${currentUser?.id ?? currentUser?.account ?? ''}`.trim()
+  return `${PICKUP_CONTACT_STORAGE_KEY_PREFIX}${userIdentity || 'anonymous'}`
+}
+
+const restorePickupContactDraft = () => {
+  const storageKey = resolvePickupContactStorageKey()
+  const defaultPickupContact = resolveDefaultPickupContact()
+  if (typeof window === 'undefined') {
+    pickupContact.value = defaultPickupContact
+    return
+  }
+  try {
+    const cachedPickupContact = window.localStorage.getItem(storageKey)?.trim() || ''
+    pickupContact.value = cachedPickupContact || defaultPickupContact
+  } catch {
+    pickupContact.value = defaultPickupContact
+  }
+}
+
+const persistPickupContactDraft = () => {
+  if (typeof window === 'undefined') {
+    return
+  }
+  const storageKey = resolvePickupContactStorageKey()
+  const normalizedPickupContact = pickupContact.value.trim()
+  try {
+    if (normalizedPickupContact) {
+      window.localStorage.setItem(storageKey, normalizedPickupContact)
+      return
+    }
+    window.localStorage.removeItem(storageKey)
+  } catch {
+    // 详细注释：本地存储失败不阻断下单流程，仅降级为本次会话内输入有效。
+  }
+}
+
+const handlePickupContactBlur = () => {
+  const normalizedPickupContact = pickupContact.value.trim()
+  if (normalizedPickupContact) {
+    pickupContact.value = normalizedPickupContact
+    persistPickupContactDraft()
+    return
+  }
+
+  // 详细注释：若用户清空输入，回退到默认用户名，避免“提货人”显示为空。
+  pickupContact.value = resolveDefaultPickupContact()
+  persistPickupContactDraft()
+}
+
 onMounted(() => {
   clientCartStore.initialize()
   // 从商城页直接进入结算时，用户可能尚未进入购物车页手动勾选；
@@ -51,7 +118,15 @@ onMounted(() => {
   if (!clientCartStore.selectedValidItems.length && clientCartStore.validItems.length > 0) {
     clientCartStore.toggleAllValidSelected(true)
   }
+  restorePickupContactDraft()
 })
+
+watch(
+  () => clientAuthStore.currentUser?.id,
+  () => {
+    restorePickupContactDraft()
+  },
+)
 
 const selectedItems = computed(() => clientCartStore.selectedValidItems)
 const totalQty = computed(() => selectedItems.value.reduce((sum, item) => sum + item.qty, 0))
@@ -90,6 +165,14 @@ const handleBack = () => {
 }
 
 const handleSubmit = async () => {
+  const normalizedPickupContact = pickupContact.value.trim() || resolveDefaultPickupContact()
+  if (!normalizedPickupContact) {
+    ElMessage.warning('请填写提货人')
+    return
+  }
+  pickupContact.value = normalizedPickupContact
+  persistPickupContactDraft()
+
   if (!selectedItems.value.length) {
     ElMessage.warning('请先选择可结算商品')
     return
@@ -182,12 +265,29 @@ const handleSubmit = async () => {
         <p class="text-sm text-slate-500">提交前将以服务端库存与限购规则为准</p>
       </div>
 
-      <div class="mb-4 rounded-[1.2rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
-        <p class="text-sm text-slate-500">提货人</p>
-        <p class="mt-1 text-base font-semibold text-slate-900">
-          {{ clientAuthStore.currentUser?.account || clientAuthStore.currentUser?.realName || clientAuthStore.currentUser?.mobile }}
-        </p>
-        <p class="text-xs text-slate-400">{{ clientAuthStore.currentUser?.departmentName || '未设置部门' }}</p>
+      <div class="mb-4 rounded-[1.2rem] border border-slate-100 bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <span class="inline-flex h-6 items-center rounded-full bg-teal-50 px-2 text-xs font-semibold text-teal-700">提货信息</span>
+            <p class="text-sm font-semibold text-slate-800">提货人</p>
+          </div>
+          <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-500">可编辑并自动记忆</span>
+        </div>
+        <div class="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 focus-within:border-teal-300 focus-within:bg-white">
+          <p class="text-[11px] text-slate-400">提货姓名</p>
+          <input
+            v-model.trim="pickupContact"
+            type="text"
+            maxlength="32"
+            class="mt-1 w-full border-0 bg-transparent p-0 text-base font-semibold text-slate-900 outline-none"
+            placeholder="请输入提货人（默认用户名）"
+            @blur="handlePickupContactBlur"
+          />
+        </div>
+        <div class="mt-3 flex items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
+          <span class="font-medium text-slate-600">所属部门</span>
+          <span class="truncate">{{ clientAuthStore.currentUser?.departmentName || '未设置部门' }}</span>
+        </div>
       </div>
 
       <div class="mb-4 rounded-[1.2rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
