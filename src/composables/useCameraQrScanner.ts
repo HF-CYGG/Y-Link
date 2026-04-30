@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 模块说明：src/composables/useCameraQrScanner.ts
  * 文件职责：封装统一的摄像头扫码与拍照识别能力，供入库、核销等多页面复用。
  * 维护说明：
@@ -8,13 +8,13 @@
 
 import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import {
-  Html5Qrcode,
-  Html5QrcodeSupportedFormats,
-  type Html5QrcodeCameraScanConfig,
-  type Html5QrcodeFullConfig,
-  type Html5QrcodeResult,
-} from 'html5-qrcode'
+
+type Html5QrcodeModule = typeof import('html5-qrcode')
+type Html5QrcodeScannerInstance = import('html5-qrcode').Html5Qrcode
+type Html5QrcodeSupportedFormatsEnum = Html5QrcodeModule['Html5QrcodeSupportedFormats']
+type Html5QrcodeCameraScanConfig = import('html5-qrcode').Html5QrcodeCameraScanConfig
+type Html5QrcodeFullConfig = import('html5-qrcode').Html5QrcodeFullConfig
+type Html5QrcodeResult = import('html5-qrcode').Html5QrcodeResult
 
 interface UseCameraQrScannerOptions {
   onDetected: (code: string) => Promise<void> | void
@@ -36,24 +36,19 @@ type SupportedBarcodeFormat =
   | 'data_matrix'
   | 'aztec'
 
-const HTML5_QRCODE_FORMAT_MAP: Record<SupportedBarcodeFormat, Html5QrcodeSupportedFormats> = {
-  qr_code: Html5QrcodeSupportedFormats.QR_CODE,
-  code_128: Html5QrcodeSupportedFormats.CODE_128,
-  ean_13: Html5QrcodeSupportedFormats.EAN_13,
-  ean_8: Html5QrcodeSupportedFormats.EAN_8,
-  upc_a: Html5QrcodeSupportedFormats.UPC_A,
-  upc_e: Html5QrcodeSupportedFormats.UPC_E,
-  code_39: Html5QrcodeSupportedFormats.CODE_39,
-  itf: Html5QrcodeSupportedFormats.ITF,
-  codabar: Html5QrcodeSupportedFormats.CODABAR,
-  pdf_417: Html5QrcodeSupportedFormats.PDF_417,
-  data_matrix: Html5QrcodeSupportedFormats.DATA_MATRIX,
-  aztec: Html5QrcodeSupportedFormats.AZTEC,
-}
-
 // 扫码容器统一使用固定前缀，方便排查 DOM 遗留节点。
 const SCAN_HOST_ID_PREFIX = 'html5-qrcode-host'
 const DEFAULT_SCAN_STATUS = '请将条码或二维码置于取景框中央，识别成功后会自动回填'
+
+// 性能优化：
+// 扫码库体积较大，改为“用户触发扫码/识图时”再动态加载，
+// 避免核销台首屏把 html5-qrcode 打进关键渲染路径，拖慢 LCP。
+let html5QrcodeModulePromise: Promise<Html5QrcodeModule> | null = null
+
+const loadHtml5QrcodeModule = async (): Promise<Html5QrcodeModule> => {
+  html5QrcodeModulePromise ??= import('html5-qrcode')
+  return html5QrcodeModulePromise
+}
 
 // 通用扫码能力改为 html5-qrcode：
 // 1. HTTPS / localhost 下优先实时摄像头扫码；
@@ -92,7 +87,7 @@ export const useCameraQrScanner = (options: UseCameraQrScannerOptions) => {
     return supportsLiveCamera.value ? '打开摄像头扫码' : '打开拍照识别'
   })
 
-  let html5Qrcode: Html5Qrcode | null = null
+  let html5Qrcode: Html5QrcodeScannerInstance | null = null
   let activeSessionId = 0
   let tempScanHost: HTMLDivElement | null = null
   let detectionLocked = false
@@ -101,19 +96,33 @@ export const useCameraQrScanner = (options: UseCameraQrScannerOptions) => {
     return options.normalizeCode(rawValue).trim()
   }
 
-  const buildFormatsToSupport = () => {
+  const buildFormatsToSupport = (supportedFormats: Html5QrcodeSupportedFormatsEnum) => {
+    const HTML5_QRCODE_FORMAT_MAP: Record<SupportedBarcodeFormat, number> = {
+      qr_code: supportedFormats.QR_CODE,
+      code_128: supportedFormats.CODE_128,
+      ean_13: supportedFormats.EAN_13,
+      ean_8: supportedFormats.EAN_8,
+      upc_a: supportedFormats.UPC_A,
+      upc_e: supportedFormats.UPC_E,
+      code_39: supportedFormats.CODE_39,
+      itf: supportedFormats.ITF,
+      codabar: supportedFormats.CODABAR,
+      pdf_417: supportedFormats.PDF_417,
+      data_matrix: supportedFormats.DATA_MATRIX,
+      aztec: supportedFormats.AZTEC,
+    }
     const sourceFormats = options.formats?.length ? options.formats : ['qr_code']
     const mappedFormats = sourceFormats
       .map((format) => HTML5_QRCODE_FORMAT_MAP[format as SupportedBarcodeFormat])
-      .filter((format): format is Html5QrcodeSupportedFormats => typeof format === 'number')
+      .filter((format): format is number => typeof format === 'number')
 
-    return mappedFormats.length ? mappedFormats : [Html5QrcodeSupportedFormats.QR_CODE]
+    return mappedFormats.length ? mappedFormats : [supportedFormats.QR_CODE]
   }
 
-  const buildScannerConfig = (): Html5QrcodeFullConfig => {
+  const buildScannerConfig = (supportedFormats: Html5QrcodeSupportedFormatsEnum): Html5QrcodeFullConfig => {
     return {
       verbose: false,
-      formatsToSupport: buildFormatsToSupport(),
+      formatsToSupport: buildFormatsToSupport(supportedFormats),
       useBarCodeDetectorIfSupported: true,
     }
   }
@@ -231,9 +240,13 @@ export const useCameraQrScanner = (options: UseCameraQrScannerOptions) => {
     await options.onDetected(code)
   }
 
-  const createScanner = (element: HTMLDivElement) => {
+  const createScanner = async (element: HTMLDivElement) => {
+    const html5QrcodeModule = await loadHtml5QrcodeModule()
     const elementId = ensureScanHostId(element)
-    html5Qrcode = new Html5Qrcode(elementId, buildScannerConfig())
+    html5Qrcode = new html5QrcodeModule.Html5Qrcode(
+      elementId,
+      buildScannerConfig(html5QrcodeModule.Html5QrcodeSupportedFormats),
+    )
     return html5Qrcode
   }
 
@@ -248,7 +261,7 @@ export const useCameraQrScanner = (options: UseCameraQrScannerOptions) => {
 
     try {
       const scanHost = ensureTempScanHost()
-      const scanner = createScanner(scanHost)
+      const scanner = await createScanner(scanHost)
       const detectedCode = normalizeDetectedCode(await scanner.scanFile(file, false))
       if (!detectedCode) {
         throw new Error('未识别到条码或二维码，请调整拍摄角度、清晰度或光线后重试')
@@ -342,7 +355,7 @@ export const useCameraQrScanner = (options: UseCameraQrScannerOptions) => {
 
     try {
       await disposeScanner()
-      const scanner = createScanner(scannerContainerRef.value)
+      const scanner = await createScanner(scannerContainerRef.value)
       await scanner.start(
         { facingMode: { ideal: 'environment' } },
         buildCameraScanConfig(),
