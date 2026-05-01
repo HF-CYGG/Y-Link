@@ -1817,17 +1817,6 @@ onMounted(async () => {
   width: 194mm;
 }
 
-.order-voucher-print-root {
-  position: fixed;
-  left: -20000px;
-  top: 0;
-  width: 0;
-  height: 0;
-  overflow: hidden;
-  pointer-events: none;
-  opacity: 0;
-}
-
 @media (max-width: 900px) {
   .voucher-editor-form__grid {
     grid-template-columns: 1fr;
@@ -1843,6 +1832,55 @@ onMounted(async () => {
   .order-back-floating {
     left: 12px;
     top: calc(env(safe-area-inset-top) + 74px);
+  }
+}
+</style>
+
+<style>
+.order-voucher-print-root {
+  display: none;
+}
+
+@media print {
+  html,
+  body {
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #fff !important;
+  }
+
+  body > *:not(.order-voucher-print-root) {
+    display: none !important;
+  }
+
+  .order-voucher-print-root {
+    display: block !important;
+    background: #ffffff;
+    width: auto;
+    min-height: auto;
+    margin: 0;
+    padding: 0 !important;
+    overflow: visible;
+  }
+
+  .order-voucher-print-root .order-voucher-print-scope {
+    width: fit-content;
+    margin: 0 auto;
+    overflow: visible;
+    break-inside: auto;
+    page-break-inside: auto;
+  }
+
+  .order-voucher-print-root .order-voucher-print-scope.is-landscape {
+    width: 281mm;
+    max-width: 281mm;
+    min-height: 194mm;
+  }
+
+  .order-voucher-print-root .order-voucher-print-scope.is-portrait {
+    width: 194mm;
+    max-width: 194mm;
+    min-height: 279mm;
   }
 }
 </style>
