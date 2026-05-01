@@ -1543,7 +1543,6 @@ onBeforeUnmount(() => {
     padding: 16px;
   }
 
-  .order-workbench-root :deep(.el-switch),
   .order-workbench-root :deep(.el-select),
   .poll-interval-select {
     width: 100%;
