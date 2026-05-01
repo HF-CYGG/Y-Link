@@ -376,7 +376,7 @@ onMounted(() => {
           card-container-class="pb-4"
         >
           <template #table>
-            <el-table :data="listState.records" stripe class="w-full flex-1" height="100%" table-layout="auto">
+            <el-table native-scrollbar :data="listState.records" stripe class="w-full flex-1" height="100%" table-layout="auto">
               <el-table-column label="时间" width="170">
                 <template #default="{ row }">{{ dayjs(row.createdAt).format('YYYY-MM-DD HH:mm:ss') }}</template>
               </el-table-column>

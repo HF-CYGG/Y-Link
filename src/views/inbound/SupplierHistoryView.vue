@@ -247,7 +247,7 @@ onMounted(() => {
         </div>
 
         <div class="history-table-shell__body flex min-h-[520px] flex-col">
-          <el-table v-loading="listState.loading" :data="listState.records" stripe class="history-table-shell__table w-full flex-1">
+          <el-table native-scrollbar v-loading="listState.loading" :data="listState.records" stripe class="history-table-shell__table w-full flex-1">
             <el-table-column prop="showNo" label="送货单号" min-width="180" />
             <el-table-column prop="totalQty" label="总数量" min-width="110">
               <template #default="{ row }">

@@ -337,7 +337,7 @@ onMounted(async () => {
     </template>
 
     <div class="mt-4 rounded-3xl bg-white p-4 shadow-sm">
-      <el-table :data="products" :loading="loading" row-key="id">
+      <el-table native-scrollbar :data="products" :loading="loading" row-key="id">
         <el-table-column prop="productName" label="商品名称" min-width="180" />
         <el-table-column label="单价" min-width="120">
           <template #default="{ row }">

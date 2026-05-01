@@ -48,7 +48,7 @@ const emit = defineEmits<{
 
     <div class="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(340px,0.9fr)]">
       <div class="min-w-0">
-        <el-table
+        <el-table native-scrollbar
           :data="taskList"
           stripe
           border
@@ -191,7 +191,7 @@ const emit = defineEmits<{
 
             <div class="space-y-2">
               <div class="text-sm font-medium text-slate-700 dark:text-slate-200">迁移表结果</div>
-              <el-table :data="selectedTask.result?.importedTables || selectedTask.progress.tableResults" size="small" border empty-text="暂无表级结果">
+              <el-table native-scrollbar :data="selectedTask.result?.importedTables || selectedTask.progress.tableResults" size="small" border empty-text="暂无表级结果">
                 <el-table-column label="表名" prop="tableName" min-width="150" show-overflow-tooltip />
                 <el-table-column label="行数" prop="rowCount" width="100" align="right" />
               </el-table>
@@ -214,7 +214,7 @@ const emit = defineEmits<{
                 :closable="false"
                 show-icon
               />
-              <el-table :data="selectedTask.result.validation.items" size="small" border max-height="240">
+              <el-table native-scrollbar :data="selectedTask.result.validation.items" size="small" border max-height="240">
                 <el-table-column label="表名" prop="tableName" min-width="150" show-overflow-tooltip />
                 <el-table-column label="源行数" prop="sourceRowCount" width="96" align="right" />
                 <el-table-column label="目标行数" prop="targetRowCount" width="96" align="right" />

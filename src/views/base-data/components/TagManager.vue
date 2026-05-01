@@ -354,7 +354,7 @@ onActivated(() => {
       card-container-class="pb-4 xl:grid-cols-3"
     >
       <template #table>
-        <el-table :data="tags" class="h-full w-full" stripe row-key="id" table-layout="auto">
+        <el-table native-scrollbar :data="tags" class="h-full w-full" stripe row-key="id" table-layout="auto">
             <el-table-column label="标签名称" prop="tagName" min-width="220" show-overflow-tooltip>
               <template #default="{ row }">
                 <el-tag :color="row.tagCode || '#409EFF'" effect="dark" class="border-none">

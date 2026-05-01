@@ -550,7 +550,7 @@ onMounted(async () => {
         </div>
 
         <div class="table-scroll-wrap mt-4">
-          <el-table :data="inboundList" row-key="productId" empty-text="请先扫码或手动加入商品">
+          <el-table native-scrollbar :data="inboundList" row-key="productId" empty-text="请先扫码或手动加入商品">
             <el-table-column prop="productCode" label="商品编码" min-width="130" />
             <el-table-column prop="productName" label="商品名称" min-width="150" />
             <el-table-column label="数量" width="160">
@@ -614,7 +614,7 @@ onMounted(async () => {
         </div>
 
         <div class="table-scroll-wrap">
-          <el-table :data="logs" :loading="logLoading" row-key="id">
+          <el-table native-scrollbar :data="logs" :loading="logLoading" row-key="id">
             <el-table-column prop="createdAt" label="时间" min-width="160" />
             <el-table-column prop="productName" label="商品" min-width="160" />
             <el-table-column prop="changeType" label="类型" width="140" />

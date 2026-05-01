@@ -637,7 +637,7 @@ onActivated(() => {
       card-container-class="pb-4 xl:grid-cols-3"
     >
       <template #table>
-        <el-table
+        <el-table native-scrollbar
           ref="productTableRef"
           :data="displayProducts"
           class="h-full w-full"
@@ -789,7 +789,7 @@ onActivated(() => {
             </div>
           </div>
           <div class="rounded-xl border border-slate-200">
-            <el-table :data="batchCreateRows" size="small" max-height="460">
+            <el-table native-scrollbar :data="batchCreateRows" size="small" max-height="460">
               <el-table-column label="#" width="56" align="center">
                 <template #default="{ $index }">
                   {{ $index + 1 }}

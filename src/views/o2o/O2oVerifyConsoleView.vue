@@ -904,7 +904,7 @@ watch(
           </div>
 
           <template v-if="preorderDetail">
-            <el-table class="mt-4" :data="preorderDetail.items" row-key="id">
+            <el-table native-scrollbar class="mt-4" :data="preorderDetail.items" row-key="id">
               <el-table-column prop="productName" label="商品名称" min-width="180" />
               <el-table-column prop="productCode" label="商品编码" min-width="140" />
               <el-table-column prop="defaultPrice" label="单价" width="120">
@@ -965,7 +965,7 @@ watch(
               </p>
             </div>
 
-            <el-table class="mt-4" :data="returnRequestDetail.items" row-key="id">
+            <el-table native-scrollbar class="mt-4" :data="returnRequestDetail.items" row-key="id">
               <el-table-column prop="productName" label="商品名称" min-width="180" />
               <el-table-column prop="productCode" label="商品编码" min-width="140" />
               <el-table-column prop="qty" label="退货数量" width="110" align="right" />

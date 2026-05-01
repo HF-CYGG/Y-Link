@@ -127,7 +127,7 @@ const isExistingProduct = (productId: string | undefined | null) => {
       </div>
 
       <div v-else-if="isDesktop" class="space-y-3">
-        <el-table :data="itemRows" border :row-class-name="getRowClassName" class="order-grid-table w-full">
+        <el-table native-scrollbar :data="itemRows" border :row-class-name="getRowClassName" class="order-grid-table w-full">
           <el-table-column type="index" label="#" width="56" align="center" />
           <el-table-column label="产品（支持拼音首字母）" min-width="300">
             <template #default="{ row, $index }">

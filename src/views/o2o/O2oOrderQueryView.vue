@@ -1386,7 +1386,7 @@ onBeforeUnmount(() => {
             <p class="mb-2 text-base font-semibold text-slate-900">商品明细</p>
             <div class="hidden sm:block">
               <div class="table-scroll-wrap">
-                <el-table :data="activeOrderDetail.items" row-key="id" :loading="detailLoading">
+                <el-table native-scrollbar :data="activeOrderDetail.items" row-key="id" :loading="detailLoading">
                   <el-table-column prop="productName" label="商品名称" min-width="180" />
                   <el-table-column prop="defaultPrice" label="单价" width="120">
                     <template #default="{ row }">

@@ -703,7 +703,7 @@ onMounted(() => {
           card-container-class="pb-4"
         >
           <template #table>
-            <el-table :data="listState.records" stripe class="user-manage-table w-full flex-1" height="100%" table-layout="auto">
+            <el-table native-scrollbar :data="listState.records" stripe class="user-manage-table w-full flex-1" height="100%" table-layout="auto">
               <el-table-column prop="username" label="账号" min-width="150" show-overflow-tooltip />
               <el-table-column prop="displayName" label="姓名" min-width="132" show-overflow-tooltip />
               <el-table-column label="角色" width="110">

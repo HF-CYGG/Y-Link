@@ -289,7 +289,7 @@ const handleSaveComplianceFlags = async () => {
           card-container-class="flex-1 content-start pb-4"
         >
           <template #table>
-            <el-table
+            <el-table native-scrollbar
               :data="listState.records"
               stripe
               class="flex-1 w-full"
