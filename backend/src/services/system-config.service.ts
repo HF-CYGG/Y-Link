@@ -702,12 +702,20 @@ class SystemConfigService {
     }
 
     const map = new Map(rows.map((row) => [row.configKey, row]))
-    const autoCancelEnabled = this.parseNonNegativeInteger(map.get('o2o.auto_cancel_enabled')!.configValue, 'o2o.auto_cancel_enabled') > 0
-    const autoCancelHours = this.parsePositiveInteger(map.get('o2o.auto_cancel_hours')!.configValue, 'o2o.auto_cancel_hours')
-    const limitEnabled = this.parseNonNegativeInteger(map.get('o2o.limit_enabled')!.configValue, 'o2o.limit_enabled') > 0
-    const limitQty = this.parsePositiveInteger(map.get('o2o.limit_qty')!.configValue, 'o2o.limit_qty')
+    // 统一从已加载配置中读取必填项，避免散落的非空断言掩盖真实缺配置问题。
+    const getRequiredConfigValue = (configKey: string) => {
+      const row = map.get(configKey)
+      if (!row) {
+        throw new BizError(`线上预订配置缺失：${configKey}`, 500)
+      }
+      return row.configValue
+    }
+    const autoCancelEnabled = this.parseNonNegativeInteger(getRequiredConfigValue('o2o.auto_cancel_enabled'), 'o2o.auto_cancel_enabled') > 0
+    const autoCancelHours = this.parsePositiveInteger(getRequiredConfigValue('o2o.auto_cancel_hours'), 'o2o.auto_cancel_hours')
+    const limitEnabled = this.parseNonNegativeInteger(getRequiredConfigValue('o2o.limit_enabled'), 'o2o.limit_enabled') > 0
+    const limitQty = this.parsePositiveInteger(getRequiredConfigValue('o2o.limit_qty'), 'o2o.limit_qty')
     const clientPreorderUpdateLimit = this.parsePositiveInteger(
-      map.get('o2o.client_preorder_update_limit')!.configValue,
+      getRequiredConfigValue('o2o.client_preorder_update_limit'),
       'o2o.client_preorder_update_limit',
     )
     const updatedAt = rows.map((row) => row.updatedAt).sort((a, b) => b.getTime() - a.getTime())[0]
