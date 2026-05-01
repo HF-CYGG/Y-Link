@@ -948,6 +948,7 @@ onMounted(() => {
     <BizCrudDialogShell
       v-model="dialogVisible"
       :title="dialogTitle"
+      height-mode="auto"
       :confirm-loading="submitting"
       confirm-text="保存"
       @confirm="handleSubmit"
@@ -1017,6 +1018,7 @@ onMounted(() => {
     <BizCrudDialogShell
       v-model="resetPasswordVisible"
       title="重置密码"
+      height-mode="auto"
       phone-width="94%"
       tablet-width="520px"
       desktop-width="440px"
@@ -1054,6 +1056,7 @@ onMounted(() => {
     <BizCrudDialogShell
       v-model="ownPasswordVisible"
       title="修改我的密码"
+      height-mode="auto"
       phone-width="94%"
       tablet-width="520px"
       desktop-width="440px"
@@ -1115,4 +1118,5 @@ onMounted(() => {
   white-space: normal;
   line-height: 1.25rem;
 }
+
 </style>

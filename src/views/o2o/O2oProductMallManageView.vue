@@ -394,6 +394,8 @@ onMounted(async () => {
       append-to-body
       align-center
       destroy-on-close
+      dialog-class="ylink-dialog-height-mode--auto o2o-mall-product-edit-dialog"
+      modal-class="o2o-mall-product-edit-dialog-overlay"
     >
       <el-form label-width="110px">
         <el-row :gutter="16">

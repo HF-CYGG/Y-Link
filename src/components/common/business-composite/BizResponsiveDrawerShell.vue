@@ -1,8 +1,11 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/components/common/business-composite/BizResponsiveDrawerShell.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：提供后台通用响应式抽屉壳，统一三端尺寸、方向，以及“短内容自适应 / 长内容滚动”两套正文高度模式。
+ * 实现逻辑：
+ * - 根据设备类型自动切换抽屉方向与尺寸；
+ * - 通过抽屉根类名与正文模式类名，把滚动职责统一收敛到壳层；
+ * - 页面层只表达业务内容，不再默认继承固定的 `h-full + overflow-y-auto` 行为。
  */
 
 
@@ -17,6 +20,7 @@ import { useAppStore } from '@/store'
 interface Props {
   modelValue: boolean
   title: string
+  heightMode?: 'auto' | 'scroll'
   phoneSize?: string
   tabletSize?: string
   desktopSize?: string
@@ -31,6 +35,7 @@ interface Props {
 }
 
 const props = withDefaults(defineProps<Props>(), {
+  heightMode: 'scroll',
   phoneSize: '88%',
   tabletSize: '72%',
   desktopSize: '600px',
@@ -76,6 +81,29 @@ const drawerSize = computed(() => {
 
   return props.desktopSize
 })
+
+/**
+ * 抽屉根类名：
+ * - 固定挂接共享抽屉壳类名，便于在全局样式中统一治理高度与滚动；
+ * - 将高度模式映射为显式类名，减少页面继续通过业务类名“猜测式”覆写。
+ */
+const drawerClassName = computed(() => {
+  return ['ylink-responsive-drawer-shell', `ylink-drawer-height-mode--${props.heightMode}`, props.drawerClass].filter(Boolean).join(' ')
+})
+
+/**
+ * 抽屉正文容器类名：
+ * - `scroll` 模式让壳层自身成为唯一主滚动容器；
+ * - `auto` 模式保持内容自然生长，供短内容说明抽屉或轻量确认抽屉使用。
+ */
+const bodyWrapperClassName = computed(() => {
+  return [
+    'ylink-responsive-drawer-shell__body',
+    `ylink-responsive-drawer-shell__body--${props.heightMode}`,
+    'min-w-0',
+    props.bodyClass,
+  ].filter(Boolean).join(' ')
+})
 </script>
 
 <template>
@@ -86,7 +114,7 @@ const drawerSize = computed(() => {
     :destroy-on-close="props.destroyOnClose"
     :modal="props.modal"
     :close-on-click-modal="props.closeOnClickModal"
-    :class="props.drawerClass"
+    :class="drawerClassName"
     @update:model-value="emit('update:modelValue', $event)"
   >
     <template #header>
@@ -94,7 +122,7 @@ const drawerSize = computed(() => {
         <span>{{ props.title }}</span>
       </slot>
     </template>
-    <div v-loading="props.loading" :class="['h-full min-w-0 overflow-y-auto pr-2', props.bodyClass]">
+    <div v-loading="props.loading" :class="bodyWrapperClassName">
       <slot :is-phone="appStore.isPhone" :is-tablet="appStore.isTablet" :is-desktop="appStore.isDesktop" />
     </div>
   </el-drawer>

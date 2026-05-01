@@ -15,14 +15,12 @@ import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import QRCode from 'qrcode'
 import { useRouter } from 'vue-router'
-import { PageContainer } from '@/components/common'
+import { BizResponsiveDrawerShell, PageContainer } from '@/components/common'
 import { getSupplierDeliveries, getInboundDetail, type InboundOrder, type InboundOrderDetail } from '@/api/modules/inbound'
-import { useAppStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
 import dayjs from 'dayjs'
 
 const router = useRouter()
-const appStore = useAppStore()
 const loading = ref(false)
 const list = ref<InboundOrder[]>([])
 const detailVisible = ref(false)
@@ -82,21 +80,6 @@ const summaryCards = computed(() => {
       accentClass: 'bg-slate-100 text-slate-600 dark:bg-slate-700/60 dark:text-slate-300',
     },
   ]
-})
-
-// 详情面板尺寸策略：
-// - 手机端使用全屏宽度，保证二维码与明细都能完整展示；
-// - 平板与桌面端使用接近半屏的阅读宽度，兼顾列表上下文与详情查看。
-const detailDrawerSize = computed(() => {
-  if (appStore.isPhone) {
-    return '100vw'
-  }
-
-  if (appStore.isTablet) {
-    return '52vw'
-  }
-
-  return '48vw'
 })
 
 // 前端轻筛选：按状态 + 关键字过滤，避免每次操作都触发后端请求。
@@ -272,20 +255,24 @@ onMounted(() => {
         </div>
       </div>
 
-      <!-- 详情面板：保留原有详情与二维码逻辑，仅增强信息分区与过渡反馈。 -->
-      <el-drawer
+      <!-- 详情面板：
+       - 统一交给响应式抽屉壳承接滚动责任，避免页面内部继续用 100vh 差值硬编码高度；
+       - 手机、平板、桌面分别走稳定尺寸，保证长内容只保留一层主滚动。
+      -->
+      <BizResponsiveDrawerShell
         v-model="detailVisible"
         title="送货单详情"
-        direction="rtl"
-        :size="detailDrawerSize"
-        destroy-on-close
-        class="supplier-history-detail-drawer"
-        append-to-body
-        :modal-append-to-body="true"
-        :lock-scroll="true"
-        :close-on-click-modal="true"
+        height-mode="scroll"
+        phone-size="100vw"
+        tablet-size="52vw"
+        desktop-size="48vw"
+        phone-direction="rtl"
+        default-direction="rtl"
+        drawer-class="supplier-history-detail-drawer"
+        body-class="pr-0"
+        :loading="detailLoading"
       >
-        <div v-loading="detailLoading" class="supplier-history-detail-panel min-h-[200px]">
+        <div class="supplier-history-detail-panel min-h-[200px]">
           <transition name="history-detail-fade" appear>
             <div v-if="currentDetail" class="space-y-4">
               <div class="history-detail-hero rounded-[26px] border border-slate-200/70 bg-white/95 p-5 shadow-[0_14px_32px_-32px_rgba(15,23,42,0.16)] dark:border-slate-700/80 dark:bg-slate-800/95">
@@ -358,7 +345,7 @@ onMounted(() => {
             </div>
           </transition>
         </div>
-      </el-drawer>
+      </BizResponsiveDrawerShell>
     </div>
   </PageContainer>
 </template>
@@ -414,13 +401,11 @@ onMounted(() => {
 }
 
 /* 当前页详情抽屉样式：
- * - 控制抽屉内容可视高度与留白；
- * - 手机端抽屉铺满屏幕，平板与桌面保持舒适阅读宽度。
+ * - 页面内部不再负责主滚动，只保留最小高度与内容分区视觉；
+ * - 真正的滚动职责已收敛到通用抽屉壳，避免再次形成双滚动。
  */
 .supplier-history-detail-panel {
-  height: calc(100vh - 132px);
-  overflow-y: auto;
-  padding-right: 0.5rem;
+  min-height: 200px;
 }
 
 .history-detail-hero {
@@ -463,11 +448,6 @@ onMounted(() => {
   .history-filter-card,
   .history-table-shell {
     border-radius: 1.5rem;
-  }
-
-  .supplier-history-detail-panel {
-    height: calc(100vh - 104px);
-    padding-right: 0;
   }
 }
 

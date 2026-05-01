@@ -397,6 +397,7 @@ onActivated(() => {
       v-if="canManageTags"
       v-model="dialogVisible"
       :title="dialogTitle"
+      height-mode="auto"
       phone-width="92%"
       tablet-width="640px"
       desktop-width="500px"

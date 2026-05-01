@@ -593,6 +593,7 @@ const handleExportVoucherPdf = async () => {
     <BizResponsiveDrawerShell
       v-model="drawerVisible"
       title="单据详情"
+      height-mode="scroll"
       tablet-size="50vw"
       desktop-size="50vw"
       :loading="drawerLoading"

@@ -568,6 +568,7 @@ onMounted(() => {
     <BizCrudDialogShell
       v-model="editVisible"
       title="编辑客户端用户"
+      height-mode="auto"
       phone-width="94%"
       tablet-width="560px"
       desktop-width="520px"
@@ -615,6 +616,7 @@ onMounted(() => {
     <BizCrudDialogShell
       v-model="resetPasswordVisible"
       title="修改客户端用户密码"
+      height-mode="auto"
       phone-width="94%"
       tablet-width="520px"
       desktop-width="440px"

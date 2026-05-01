@@ -1,7 +1,9 @@
 /*
 模块说明：src/style.css
-文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
-维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+文件职责：承载 Y-Link 全站共享样式、Element Plus 结构安全网，以及弹窗/抽屉/卡片等跨页面布局基线。
+维护说明：
+- 通用弹层的高度模式优先通过共享壳组件类名控制，不再继续在这里追加业务白名单；
+- 若后续新增跨页面布局规范，应尽量收敛成语义类名，避免让具体页面类名长期沉淀到全局样式。
 */
 
 @tailwind base;
@@ -470,10 +472,10 @@ canvas {
 }
 
 /*
- * 全局弹窗纵向安全网：
- * - 统一让普通 el-dialog 在视口内按纵向弹性布局工作；
- * - header / body / footer 共享同一个最大高度约束，正文区负责滚动；
- * - 解决长表单、详情弹窗、确认弹窗在低高度视口下底部按钮被挤掉或正文被截断的问题。
+ * 全局弹窗高度安全网：
+ * - 统一让普通 el-dialog 在视口内按纵向结构工作，避免长内容把底部操作区挤出可视区；
+ * - 默认仍按“滚动型正文”兜底，兼容尚未迁移到通用壳的原生弹窗；
+ * - 通用壳通过 `ylink-dialog-height-mode--auto / scroll` 显式切换短内容与长内容的高度行为。
  */
 .el-overlay-dialog {
   overflow: auto;
@@ -495,9 +497,102 @@ canvas {
 }
 
 .el-dialog__body {
+  min-height: 0;
+  flex: 0 1 auto;
+}
+
+.ylink-crud-dialog-shell__body {
+  min-height: 0;
+}
+
+.ylink-crud-dialog-shell__body--scroll {
+  flex: 1 1 auto;
+  overflow: auto;
+}
+
+.ylink-crud-dialog-shell__body--auto {
+  flex: 0 0 auto !important;
+  overflow: visible !important;
+}
+
+.el-dialog:not(.ylink-dialog-height-mode--auto) .el-dialog__body,
+.ylink-dialog-height-mode--scroll .el-dialog__body {
+  flex: 1 1 auto;
+  overflow: auto;
+}
+
+.ylink-dialog-height-mode--auto .el-dialog__body {
+  overflow: visible;
+}
+
+/*
+ * 通用 CRUD 弹窗遮罩层对齐修复：
+ * - `BizCrudDialogShell` 默认传入 `align-center`，Element Plus 会把 `.el-overlay-dialog` 变成 `display:flex`；
+ * - 若只调整 `.el-dialog__body` 的滚动策略，而不补齐外层 flex 对齐语义，短内容弹窗会出现“footer 上移了，但白色主体卡片仍保持大高度”的假性修复；
+ * - 因此由共享壳专用遮罩层统一声明主轴/交叉轴居中，并把弹窗根节点交回自然高度，确保卡片本体真正随内容缩回。
+ */
+.ylink-crud-dialog-shell-overlay .el-overlay-dialog {
+  align-items: center;
+  justify-content: center;
+}
+
+.ylink-crud-dialog-shell-overlay .ylink-crud-dialog-shell {
+  margin: 0 !important;
+  align-self: center;
+}
+
+/*
+ * 线上商品编辑弹窗仍使用原生 el-dialog：
+ * - 桌面端需要显式接入 auto 模式，否则会继续落入全局“滚动型正文”兜底，导致白色卡片接近整屏高度；
+ * - 该弹窗同样使用 `align-center + append-to-body`，因此需要像共享壳一样从 overlay 层补齐居中语义，确保桌面端白卡本体真正按内容收紧。
+ */
+.o2o-mall-product-edit-dialog-overlay .el-overlay-dialog {
+  align-items: center;
+  justify-content: center;
+}
+
+.o2o-mall-product-edit-dialog-overlay .o2o-mall-product-edit-dialog {
+  margin: 0 !important;
+  align-self: center;
+}
+
+/*
+ * 通用抽屉高度模式：
+ * - 抽屉壳默认采用 `scroll`，让正文区承担唯一主滚动责任；
+ * - `auto` 模式供短说明、轻量确认等抽屉使用，避免正文被强制撑满；
+ * - 抽屉根节点与正文包装器都通过通用类名表达模式，不再让业务页面硬编码 `h-full + overflow`。
+ */
+.ylink-responsive-drawer-shell .el-drawer__body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding-top: 0;
+}
+
+.ylink-responsive-drawer-shell__body {
+  min-width: 0;
+  padding-right: 8px;
+}
+
+.ylink-responsive-drawer-shell__body--scroll {
   flex: 1 1 auto;
   min-height: 0;
-  overflow: auto;
+  overflow-y: auto;
+}
+
+.ylink-responsive-drawer-shell__body--auto {
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
+/*
+ * 响应式数据卡片网格：
+ * - 卡片列表默认按内容高度对齐，避免平板双列下短卡被同排长卡强行拉高；
+ * - 该规则服务于“内容卡”语义，不影响真正需要定高的工作台型容器。
+ */
+.ylink-mixed-content-card-grid {
+  align-items: start;
+  align-content: start;
 }
 
 @media (prefers-reduced-motion: reduce) {

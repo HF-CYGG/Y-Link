@@ -1,8 +1,11 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/components/common/business-composite/BizResponsiveDataCollectionShell.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：提供列表表格 / 卡片双视图壳，统一管理加载态、空状态、桌面表格与移动端卡片切换，并为混合内容卡片提供稳定的高度对齐基线。
+ * 实现逻辑：
+ * - 桌面端默认输出表格，手机与平板自动切换到卡片布局；
+ * - 通过统一响应式网格类名，避免内容长短不一的卡片在同一行被互相拉伸；
+ * - 页面只关注表格列与卡片内容，不再重复处理空态和骨架屏。
  */
 
 
@@ -78,7 +81,7 @@ const responsiveCardContainerClass = computed(() => {
   const tabletGridClass = props.tabletColumns === 2 ? 'sm:grid-cols-2' : 'sm:grid-cols-1'
 
   return [
-    'grid gap-3 min-w-0',
+    'ylink-mixed-content-card-grid grid gap-3 min-w-0',
     appStore.isTablet ? tabletGridClass : 'grid-cols-1',
     props.cardContainerClass,
   ]
