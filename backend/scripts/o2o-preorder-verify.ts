@@ -1,6 +1,10 @@
 /**
  * 文件说明：backend/scripts/o2o-preorder-verify.ts
  * 文件职责：验证 O2O 预订的注册、下单、撤回、超时取消、核销与备份导出链路。
+ * 实现逻辑：
+ * 1. 初始化数据库、默认管理员与系统配置，确保脚本在独立环境中可重复执行；
+ * 2. 通过客户端注册登录、商品创建、下单撤回、超时取消与管理端核销，覆盖预订主流程；
+ * 3. 最后验证 O2O 默认规则、JSON 导出与 SQLite 物理备份，确认治理能力仍可用。
  * 维护说明：若调整 O2O 预订状态机、库存占用规则或默认业务配置，请同步更新本脚本。
  */
 
@@ -18,6 +22,7 @@ import { productService } from '../src/services/product.service.js'
 import { systemConfigService } from '../src/services/system-config.service.js'
 import type { AuthUserContext } from '../src/types/auth.js'
 import type { ClientAuthContext } from '../src/types/client-auth.js'
+import type { O2oPreorderDetailView, O2oVerifyResultView } from '../src/services/o2o-preorder.service.js'
 
 const log = (text: string) => {
   console.log(`✅ ${text}`)
@@ -29,7 +34,25 @@ const ensureReady = async () => {
     await AppDataSource.initialize()
   }
   await initializeDatabaseSchemaIfNeeded(AppDataSource)
-  await authService.ensureDefaultAdmin()
+  return authService.ensureDefaultAdmin()
+}
+
+const buildScriptAdminActor = (bootstrapAdmin: Awaited<ReturnType<typeof authService.ensureDefaultAdmin>>): AuthUserContext => {
+  // 详细注释：数据导出、SQLite 备份与核销服务当前统一收口到 AuthUserContext，
+  // 脚本场景下即使没有走真实登录会话，也需要构造一个稳定的管理员操作者上下文，
+  // 以满足权限校验与审计留痕签名，避免校验脚本再依赖外部手工传密码。
+  return {
+    userId: 'o2o-preorder-verify-admin',
+    username: bootstrapAdmin.username,
+    displayName: bootstrapAdmin.displayName,
+    role: 'admin',
+    permissions: [],
+    status: 'enabled',
+    sessionToken: 'o2o-preorder-verify-session',
+  }
+}
+
+const ensureSystemConfigs = async () => {
   await systemConfigService.ensureDefaultConfigs()
 }
 
@@ -43,6 +66,14 @@ const expectBizError = async (executor: () => Promise<unknown>, expectedMessage:
     assert.ok(error instanceof Error)
     assert.ok(error.message.includes(expectedMessage))
   }
+}
+
+const assertPreorderVerifyDetail = (verifyResult: O2oVerifyResultView): O2oPreorderDetailView => {
+  // 详细注释：核销接口已升级为“预订单/退货单”联合返回，
+  // 当前脚本这里只接受预订单核销结果，因此先做显式类型收窄，
+  // 避免继续沿用旧版 `verified.order` 口径造成运行期空指针。
+  assert.equal(verifyResult.verifyTargetType, 'preorder')
+  return verifyResult.detail as O2oPreorderDetailView
 }
 
 const registerAndLoginClient = async (seed: number): Promise<ClientAuthContext> => {
@@ -72,7 +103,9 @@ const registerAndLoginClient = async (seed: number): Promise<ClientAuthContext> 
 }
 
 const run = async () => {
-  await ensureReady()
+  const bootstrapAdmin = await ensureReady()
+  await ensureSystemConfigs()
+  const scriptAdminActor = buildScriptAdminActor(bootstrapAdmin)
 
   const clientAuth = await registerAndLoginClient(Date.now())
   log('客户端注册流程通过')
@@ -101,6 +134,8 @@ const run = async () => {
   const preorderResult = await o2oPreorderService.submit(clientAuth, {
     items: [{ productId: product.id, qty: 2 }],
     remark: '自动化验证',
+    clientOrderType: 'walkin',
+    isSystemApplied: false,
   })
   assert.equal(preorderResult.order.status, 'pending')
   const heldProduct = await productRepo.findOneByOrFail({ id: product.id })
@@ -139,6 +174,8 @@ const run = async () => {
   const timeoutPreorder = await o2oPreorderService.submit(clientAuth, {
     items: [{ productId: product.id, qty: 1 }],
     remark: '超时取消验证',
+    clientOrderType: 'walkin',
+    isSystemApplied: false,
   })
   await preorderRepo.update(
     { id: timeoutPreorder.order.id },
@@ -163,29 +200,31 @@ const run = async () => {
   if (adminLogin) {
     adminAuth = await authService.resolveAuthUserByToken(adminLogin.token)
   }
-  if (adminAuth) {
-    const verifiedPreorder = await o2oPreorderService.submit(clientAuth, {
-      items: [{ productId: product.id, qty: 2 }],
-      remark: '核销后不可撤回验证',
-    })
-    const verified = await o2oPreorderService.verifyByCode(verifiedPreorder.order.verifyCode, adminAuth)
-    assert.equal(verified.order.status, 'verified')
-    await expectBizError(() => o2oPreorderService.cancelMyOrder(clientAuth, verifiedPreorder.order.id), '订单已核销，无法撤回')
-    await o2oPreorderService.inboundStock(product.id, 3, adminAuth, '自动化补货')
-    log('管理端核销、已核销不可撤回与入库流程通过')
-  }
+  const verifyActor = adminAuth ?? scriptAdminActor
+  const verifiedPreorder = await o2oPreorderService.submit(clientAuth, {
+    items: [{ productId: product.id, qty: 2 }],
+    remark: '核销后不可撤回验证',
+    clientOrderType: 'walkin',
+    isSystemApplied: false,
+  })
+  const verified = await o2oPreorderService.verifyByCode(verifiedPreorder.order.verifyCode, verifyActor)
+  const verifiedDetail = assertPreorderVerifyDetail(verified)
+  assert.equal(verifiedDetail.order.status, 'verified')
+  await expectBizError(() => o2oPreorderService.cancelMyOrder(clientAuth, verifiedPreorder.order.id), '订单已核销，无法撤回')
+  await o2oPreorderService.inboundStock(product.id, 3, verifyActor, '自动化补货')
+  log('管理端核销、已核销不可撤回与入库流程通过')
 
   const o2oRules = await systemConfigService.getO2oRuleConfigs()
   assert.equal(o2oRules.autoCancelHours, 24)
   assert.equal(o2oRules.limitQty, 5)
   log('O2O 默认业务规则通过')
 
-  const exported = await dataMaintenanceService.exportJson()
+  const exported = await dataMaintenanceService.exportJson(scriptAdminActor)
   assert.ok(exported.tables.products.length > 0)
   log('JSON 导出能力通过')
 
   if (AppDataSource.options.type === 'sqlite') {
-    const backup = await dataMaintenanceService.createSqliteBackup()
+    const backup = await dataMaintenanceService.createSqliteBackup(scriptAdminActor)
     assert.ok(backup.filePath.endsWith('.sqlite'))
     log('SQLite 物理备份能力通过')
   }

@@ -9,7 +9,7 @@
  */
 
 
-import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -70,6 +70,7 @@ interface OrderVoucherEditableFields {
 }
 
 type VoucherOrientation = 'portrait' | 'landscape'
+const DEFAULT_VOUCHER_ORIENTATION: VoucherOrientation = 'landscape'
 
 const createEmptyVoucherEditableFields = (): OrderVoucherEditableFields => ({
   departmentOperator: '',
@@ -102,7 +103,7 @@ const requestError = ref<{ type: 'offline' | 'error'; message: string } | null>(
 const voucherDialogVisible = ref(false)
 const voucherPrintRootRef = ref<HTMLElement | null>(null)
 const exportPdfLoading = ref(false)
-const voucherOrientation = ref<VoucherOrientation>('landscape')
+const voucherOrientation = ref<VoucherOrientation>(DEFAULT_VOUCHER_ORIENTATION)
 const enableHtml2pdfExport = import.meta.env.VITE_ORDER_VOUCHER_HTML2PDF_ENABLED !== 'false'
 const voucherEditableForm = reactive<OrderVoucherEditableFields>(createEmptyVoucherEditableFields())
 const { runLatest } = useStableRequest()
@@ -547,6 +548,12 @@ const resetReturnForm = () => {
   returnQtyMap.value = {}
 }
 
+// 详细注释：正式出库单的补填字段仅服务于当前弹层会话，关闭或切换订单时都必须回到初始值，
+// 避免上一单的手工补填信息误带入下一次打印、导出或补打流程。
+const resetVoucherEditableForm = () => {
+  Object.assign(voucherEditableForm, createEmptyVoucherEditableFields())
+}
+
 const updateEditItemQty = (productId: string, value: number | null | undefined) => {
   editOrderItems.value = editOrderItems.value.map((item) => {
     if (item.productId !== productId) {
@@ -712,13 +719,51 @@ const clearVoucherPrintPageStyle = () => {
   styleElement?.remove()
 }
 
+let voucherPrintCleanupTimer: ReturnType<typeof globalThis.setTimeout> | null = null
+
+// 详细注释：打印会向 document.head 注入临时 @page 样式，并注册 afterprint 事件；
+// 若弹层关闭、路由切换或组件卸载时不统一清理，旧样式可能污染后续打印，旧监听也会重复触发。
+const cleanupVoucherPrintSideEffects = () => {
+  clearVoucherPrintPageStyle()
+  globalThis.removeEventListener('afterprint', cleanupVoucherPrintSideEffects)
+  if (voucherPrintCleanupTimer !== null) {
+    globalThis.clearTimeout(voucherPrintCleanupTimer)
+    voucherPrintCleanupTimer = null
+  }
+}
+
+// 详细注释：复杂弹层的临时状态统一在这里归位，确保切换订单、返回列表或卸载页面时不会残留旧表单、
+// 旧打印方向或未清除的滚动型弹层可见状态。
+const resetDialogTransientState = () => {
+  editDialogVisible.value = false
+  returnDialogVisible.value = false
+  voucherDialogVisible.value = false
+  editSubmitting.value = false
+  returnSubmitting.value = false
+  exportPdfLoading.value = false
+  resetEditForm()
+  resetReturnForm()
+  resetVoucherEditableForm()
+  voucherOrientation.value = DEFAULT_VOUCHER_ORIENTATION
+  cleanupVoucherPrintSideEffects()
+}
+
 const handleOpenVoucherDialog = () => {
   if (!voucherOrder.value) {
     ElMessage.warning('当前订单暂无可打印内容')
     return
   }
-  voucherOrientation.value = 'landscape'
+  resetVoucherEditableForm()
+  voucherOrientation.value = DEFAULT_VOUCHER_ORIENTATION
   voucherDialogVisible.value = true
+}
+
+// 详细注释：正式出库单弹层关闭后，需要把补填字段、打印方向和临时打印副作用统一清空，
+// 这样下次打开始终从干净状态开始，避免“上一次补填内容仍显示在当前订单”。
+const handleVoucherDialogClosed = () => {
+  resetVoucherEditableForm()
+  voucherOrientation.value = DEFAULT_VOUCHER_ORIENTATION
+  cleanupVoucherPrintSideEffects()
 }
 
 const handlePrintVoucher = async () => {
@@ -726,16 +771,15 @@ const handlePrintVoucher = async () => {
     ElMessage.warning('当前订单暂无可打印内容')
     return
   }
+  cleanupVoucherPrintSideEffects()
   applyVoucherPrintPageStyle(voucherOrientation.value)
   await markCustomerOrderPrintedIfNeeded()
-  const cleanup = () => {
-    clearVoucherPrintPageStyle()
-    globalThis.removeEventListener('afterprint', cleanup)
-  }
-  globalThis.addEventListener('afterprint', cleanup)
+  globalThis.addEventListener('afterprint', cleanupVoucherPrintSideEffects)
   await nextTick()
   globalThis.print()
-  globalThis.setTimeout(cleanup, 1500)
+  voucherPrintCleanupTimer = globalThis.setTimeout(() => {
+    cleanupVoucherPrintSideEffects()
+  }, 1500)
 }
 
 const handleExportVoucherPdf = async () => {
@@ -1001,13 +1045,20 @@ const handleSubmitReturnRequest = async () => {
 
 watch(
   () => route.params.id,
-  async () => {
+  async (nextOrderId, previousOrderId) => {
+    if (nextOrderId !== previousOrderId) {
+      resetDialogTransientState()
+    }
     await loadDetail()
   },
 )
 
 onMounted(async () => {
   await loadDetail()
+})
+
+onBeforeUnmount(() => {
+  resetDialogTransientState()
 })
 </script>
 
@@ -1380,10 +1431,18 @@ onMounted(async () => {
       title="修改订单"
       width="92%"
       style="max-width: 860px"
+      class="client-order-detail-dialog ylink-dialog-height-mode--scroll client-order-detail-dialog--form"
+      body-class="client-order-detail-dialog__body client-order-detail-dialog__body--scroll"
+      modal-class="client-order-detail-dialog-overlay"
+      :close-on-click-modal="!editSubmitting"
+      :close-on-press-escape="!editSubmitting"
+      destroy-on-close
       append-to-body
+      align-center
+      :lock-scroll="true"
       @closed="handleEditDialogClosed"
     >
-      <div class="space-y-4">
+      <div class="client-order-detail-dialog__content space-y-4">
         <div class="rounded-2xl bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-600">
           待取货订单支持直接修改商品、数量和备注。保存后系统会按最新内容重算预订库存，原取货码保持不变。
           <p class="mt-2 text-xs text-slate-500">{{ modifyOrderQuotaText }}</p>
@@ -1489,10 +1548,16 @@ onMounted(async () => {
       title="正式出库单"
       width="1100px"
       align-center
-      class="order-voucher-dialog"
+      class="client-order-detail-dialog client-order-detail-dialog--voucher order-voucher-dialog"
+      body-class="client-order-detail-dialog__body client-order-detail-dialog__body--voucher"
+      modal-class="client-order-detail-dialog-overlay"
       append-to-body
+      destroy-on-close
       :modal-append-to-body="true"
       :lock-scroll="true"
+      :close-on-click-modal="!exportPdfLoading"
+      :close-on-press-escape="!exportPdfLoading"
+      @closed="handleVoucherDialogClosed"
     >
       <div class="voucher-editor-banner">
         <div class="voucher-editor-banner__title">正式出库单字段说明</div>
@@ -1604,10 +1669,18 @@ onMounted(async () => {
       title="申请退货"
       width="92%"
       style="max-width: 760px"
+      class="client-order-detail-dialog ylink-dialog-height-mode--scroll client-order-detail-dialog--form"
+      body-class="client-order-detail-dialog__body client-order-detail-dialog__body--scroll"
+      modal-class="client-order-detail-dialog-overlay"
+      :close-on-click-modal="!returnSubmitting"
+      :close-on-press-escape="!returnSubmitting"
+      destroy-on-close
       append-to-body
+      align-center
+      :lock-scroll="true"
       @closed="handleReturnDialogClosed"
     >
-      <div class="space-y-4">
+      <div class="client-order-detail-dialog__content space-y-4">
         <div class="rounded-2xl bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-600">
           请按商品填写退货数量并说明原因。提交后系统会生成门店退货二维码，门店扫码核销后完成退货处理。
         </div>
@@ -1701,6 +1774,64 @@ onMounted(async () => {
   top: calc(env(safe-area-inset-top) + 82px);
 }
 
+/*
+ * 订单详情页弹层统一治理：
+ * - overlay 固定占满视口，并在桌面端负责居中、移动端负责拉伸为全屏；
+ * - 所有业务弹层共用同一套 dialog/body/footer 结构约束，避免正文区和遮罩层同时滚动；
+ * - 移动端额外为 header/footer 预留安全区，防止底部操作按钮贴边或被系统手势区遮挡。
+ */
+:global(.client-order-detail-dialog-overlay) {
+  position: fixed !important;
+  inset: 0;
+}
+
+:global(.client-order-detail-dialog-overlay .el-overlay-dialog) {
+  position: fixed;
+  inset: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  padding: 12px;
+}
+
+.client-order-detail-dialog:deep(.el-dialog) {
+  margin: 12px auto !important;
+  border-radius: 24px;
+  overflow: hidden;
+}
+
+.client-order-detail-dialog:deep(.el-dialog__header) {
+  flex: 0 0 auto;
+  padding-bottom: 8px;
+}
+
+.client-order-detail-dialog:deep(.el-dialog__body) {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.client-order-detail-dialog:deep(.el-dialog__footer) {
+  flex: 0 0 auto;
+  padding-top: 12px;
+}
+
+.client-order-detail-dialog:deep(.client-order-detail-dialog__body--scroll) {
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.client-order-detail-dialog:deep(.client-order-detail-dialog__body--voucher) {
+  overflow: hidden;
+}
+
+.client-order-detail-dialog__content {
+  min-height: 0;
+}
+
 .voucher-editor-banner {
   margin-bottom: 12px;
   border-radius: 14px;
@@ -1727,6 +1858,8 @@ onMounted(async () => {
 .voucher-workbench {
   display: grid;
   gap: 12px;
+  min-height: 0;
+  align-items: start;
 }
 
 .voucher-editor-panel,
@@ -1735,6 +1868,12 @@ onMounted(async () => {
   border: 1px solid #e2e8f0;
   background: #fff;
   padding: 14px;
+}
+
+.voucher-preview-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .voucher-editor-panel__header,
@@ -1817,6 +1956,12 @@ onMounted(async () => {
   width: 194mm;
 }
 
+@media (min-width: 1024px) {
+  .voucher-workbench {
+    grid-template-columns: minmax(320px, 360px) minmax(0, 1fr);
+  }
+}
+
 @media (max-width: 900px) {
   .voucher-editor-form__grid {
     grid-template-columns: 1fr;
@@ -1832,6 +1977,45 @@ onMounted(async () => {
   .order-back-floating {
     left: 12px;
     top: calc(env(safe-area-inset-top) + 74px);
+  }
+}
+
+@media (max-width: 767px) {
+  :global(.client-order-detail-dialog-overlay .el-overlay-dialog) {
+    align-items: stretch;
+    justify-content: stretch;
+    padding: 0;
+  }
+
+  .client-order-detail-dialog:deep(.el-dialog) {
+    width: 100dvw !important;
+    max-width: 100vw !important;
+    max-height: 100dvh;
+    margin: 0 !important;
+    border-radius: 0;
+  }
+
+  .client-order-detail-dialog:deep(.el-dialog__header) {
+    padding: calc(18px + env(safe-area-inset-top, 0px)) 16px 10px;
+  }
+
+  .client-order-detail-dialog:deep(.el-dialog__body) {
+    padding-left: 16px;
+    padding-right: 16px;
+    padding-bottom: 12px;
+  }
+
+  .client-order-detail-dialog:deep(.el-dialog__footer) {
+    padding: 10px 16px calc(16px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .voucher-editor-panel,
+  .voucher-preview-panel {
+    padding: 12px;
+  }
+
+  .voucher-preview-panel__body {
+    max-height: min(42vh, 360px);
   }
 }
 </style>

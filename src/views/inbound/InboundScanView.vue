@@ -315,9 +315,12 @@ onBeforeUnmount(() => {
 
 <template>
   <PageContainer title="一键扫码入库" description="扫码识别送货单、核对明细并确认入库，支持快捷键连续作业。">
-    <div class="grid grid-cols-1 xl:grid-cols-[400px_minmax(0,1fr)] gap-6 min-h-[calc(100vh-160px)]">
+    <!-- 扫码工作台统一采用 dvh + flex 高度口径：
+         - 桌面端锁定工作区高度，左右面板各自只保留一个主滚动区；
+         - 窄屏端回退为自然流，避免把手机页面切成多个难以操作的内层滚动容器。 -->
+    <div class="inbound-scan-workbench">
       <!-- 左侧：扫码区 + 快捷指引 + 最近扫码 -->
-      <section class="bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-100 dark:border-slate-700 flex flex-col overflow-hidden">
+      <section class="inbound-scan-side bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-100 dark:border-slate-700 flex flex-col overflow-hidden">
         <div class="p-5 border-b border-slate-100 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-900/40">
           <h2 class="text-lg font-semibold text-slate-800 dark:text-slate-100 mb-3 flex items-center gap-2">
             <el-icon class="text-brand"><Search /></el-icon>
@@ -386,12 +389,12 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <div class="p-5 flex-1">
+        <div class="inbound-scan-side__recent p-5">
           <div class="flex items-center justify-between mb-3">
             <h3 class="text-sm font-semibold text-slate-700 dark:text-slate-200">最近查询</h3>
             <el-button link type="primary" @click="recentScans = []">清空</el-button>
           </div>
-          <div v-if="recentScans.length" class="space-y-2">
+          <div v-if="recentScans.length" class="inbound-scan-side__recent-list space-y-2">
             <button
               v-for="record in recentScans"
               :key="record.verifyCode"
@@ -408,7 +411,7 @@ onBeforeUnmount(() => {
               <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">查询时间：{{ record.scannedAt }}</p>
             </button>
           </div>
-          <div v-else class="h-full flex items-center justify-center text-center text-slate-400 dark:text-slate-500">
+          <div v-else class="inbound-scan-side__empty flex items-center justify-center text-center text-slate-400 dark:text-slate-500">
             <div>
               <el-icon :size="48" class="mb-2"><Document /></el-icon>
               <p>暂无最近查询记录</p>
@@ -418,14 +421,14 @@ onBeforeUnmount(() => {
       </section>
 
       <!-- 右侧：详情区 -->
-      <section class="bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-100 dark:border-slate-700 flex flex-col overflow-hidden relative">
+      <section class="inbound-scan-detail bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-100 dark:border-slate-700 flex flex-col overflow-hidden relative">
         <div v-if="loading" class="absolute inset-0 z-10 bg-white/80 dark:bg-slate-800/80 backdrop-blur-sm flex items-center justify-center">
           <el-icon class="is-loading text-brand text-4xl"><Loading /></el-icon>
         </div>
 
         <!-- 详情态与空态合并到同一个 transition 中，避免双 transition 同时参与切换导致闪动。 -->
         <transition name="inbound-detail-switch" mode="out-in">
-          <div v-if="currentOrder" key="order-detail" class="flex flex-col min-h-0 h-full">
+          <div v-if="currentOrder" key="order-detail" class="inbound-scan-detail__content">
             <!-- 顶部状态条 -->
             <div class="h-1.5" :class="statusToneClassMap[currentOrder.order.status]" />
 
@@ -463,7 +466,7 @@ onBeforeUnmount(() => {
             </div>
 
             <!-- 明细区 -->
-            <div class="flex-1 min-h-0 overflow-auto px-5 py-4">
+            <div class="inbound-scan-detail__main px-5 py-4">
               <h3 class="text-base font-medium text-slate-800 dark:text-slate-200 mb-3">送货明细核对</h3>
               <div class="space-y-3">
                 <div
@@ -487,7 +490,7 @@ onBeforeUnmount(() => {
             </div>
 
             <!-- 底部操作栏 -->
-            <div class="sticky bottom-0 p-5 border-t border-slate-100 dark:border-slate-700 bg-white/95 dark:bg-slate-800/95 backdrop-blur-sm flex flex-wrap gap-3 justify-between items-center">
+            <div class="inbound-scan-detail__footer p-5 border-t border-slate-100 dark:border-slate-700 bg-white/95 dark:bg-slate-800/95 backdrop-blur-sm flex flex-wrap gap-3 justify-between items-center">
               <el-button plain size="large" @click="handleReset" class="!rounded-xl px-8">
                 重置并扫码下一单
               </el-button>
@@ -516,7 +519,7 @@ onBeforeUnmount(() => {
               入库成功，已准备下一单扫码
             </div>
           </div>
-          <div v-else key="empty-detail" class="flex-1 flex items-center justify-center">
+          <div v-else key="empty-detail" class="inbound-scan-detail__empty flex-1 flex items-center justify-center">
             <el-empty description="请先在左侧扫码或输入二维码" :image-size="200" />
           </div>
         </transition>
@@ -546,6 +549,63 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.inbound-scan-workbench {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1.5rem;
+  min-height: calc(100dvh - 160px);
+}
+
+/* 扫码工作台左右两栏统一声明最小高度语义，避免子级滚动区被内容重新撑开。 */
+.inbound-scan-side,
+.inbound-scan-detail {
+  min-width: 0;
+  min-height: 0;
+}
+
+/* 左侧面板把“最近查询”收敛为唯一主滚动区，顶部输入和指引保持稳定可见。 */
+.inbound-scan-side__recent {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.inbound-scan-side__recent-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 0.25rem;
+}
+
+.inbound-scan-side__empty {
+  flex: 1 1 auto;
+  min-height: 180px;
+}
+
+/* 右侧详情区改为“头部固定 + 明细主滚动 + 底部操作固定”的稳定结构。 */
+.inbound-scan-detail__content {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.inbound-scan-detail__main {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.inbound-scan-detail__footer {
+  flex: 0 0 auto;
+}
+
+.inbound-scan-detail__empty {
+  min-height: 360px;
+}
+
 .scan-toolbar {
   display: flex;
   align-items: center;
@@ -634,6 +694,16 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 767px) {
+  .inbound-scan-workbench {
+    min-height: auto;
+  }
+
+  .inbound-scan-side__recent-list,
+  .inbound-scan-detail__main {
+    overflow: visible;
+    padding-right: 0;
+  }
+
   .scan-toolbar {
     gap: 0.75rem;
   }
@@ -646,6 +716,14 @@ onBeforeUnmount(() => {
     min-width: 0;
     flex: 1 1 auto;
     padding-inline: 0.95rem;
+  }
+}
+
+@media (min-width: 1280px) {
+  .inbound-scan-workbench {
+    grid-template-columns: 400px minmax(0, 1fr);
+    height: calc(100dvh - 160px);
+    max-height: calc(100dvh - 160px);
   }
 }
 </style>

@@ -93,24 +93,27 @@ const handleDialogModelValueChange = (value: boolean) => {
         </div>
       </div>
 
-      <div class="scan-shell__layout">
-        <section class="scan-shell__stage-card">
-          <div class="scan-shell__preview">
-            <div ref="localScannerContainerRef" class="scan-shell__scanner-host" />
-            <div class="scan-shell__guide-frame" />
-            <div v-if="props.loading" class="scan-shell__mask">正在启动摄像头...</div>
-          </div>
-        </section>
+      <!-- 桌面端把滚动职责收敛到主内容区，避免遮罩层与正文同时参与纵向滚动。 -->
+      <div class="scan-shell__main">
+        <div class="scan-shell__layout">
+          <section class="scan-shell__stage-card">
+            <div class="scan-shell__preview">
+              <div ref="localScannerContainerRef" class="scan-shell__scanner-host" />
+              <div class="scan-shell__guide-frame" />
+              <div v-if="props.loading" class="scan-shell__mask">正在启动摄像头...</div>
+            </div>
+          </section>
 
-        <aside class="scan-shell__info-card" aria-label="扫码提示信息">
-          <p class="scan-shell__status-text">{{ props.statusText }}</p>
-          <p class="scan-shell__hint-text">{{ props.hintText }}</p>
-          <div class="scan-shell__tips">
-            <span class="scan-shell__tip">保持设备稳定</span>
-            <span class="scan-shell__tip">二维码尽量铺满中央框体</span>
-            <span class="scan-shell__tip">反光或模糊时改用拍照识别</span>
-          </div>
-        </aside>
+          <aside class="scan-shell__info-card" aria-label="扫码提示信息">
+            <p class="scan-shell__status-text">{{ props.statusText }}</p>
+            <p class="scan-shell__hint-text">{{ props.hintText }}</p>
+            <div class="scan-shell__tips">
+              <span class="scan-shell__tip">保持设备稳定</span>
+              <span class="scan-shell__tip">二维码尽量铺满中央框体</span>
+              <span class="scan-shell__tip">反光或模糊时改用拍照识别</span>
+            </div>
+          </aside>
+        </div>
       </div>
     </div>
 
@@ -126,23 +129,26 @@ const handleDialogModelValueChange = (value: boolean) => {
         </div>
       </div>
 
-      <section class="scan-shell-mobile__stage-card">
-        <div class="scan-shell-mobile__preview">
-          <div ref="localScannerContainerRef" class="scan-shell-mobile__scanner-host" />
-          <div class="scan-shell-mobile__guide-frame" />
-          <div v-if="props.loading" class="scan-shell-mobile__mask">正在启动摄像头...</div>
-        </div>
-      </section>
+      <!-- 移动端同样只保留一个主滚动层，避免全屏弹窗出现双滚动竞争。 -->
+      <div class="scan-shell-mobile__main">
+        <section class="scan-shell-mobile__stage-card">
+          <div class="scan-shell-mobile__preview">
+            <div ref="localScannerContainerRef" class="scan-shell-mobile__scanner-host" />
+            <div class="scan-shell-mobile__guide-frame" />
+            <div v-if="props.loading" class="scan-shell-mobile__mask">正在启动摄像头...</div>
+          </div>
+        </section>
 
-      <aside class="scan-shell-mobile__info-card" aria-label="扫码提示信息">
-        <p class="scan-shell-mobile__status-text">{{ props.statusText }}</p>
-        <p class="scan-shell-mobile__hint-text">{{ props.hintText }}</p>
-        <div class="scan-shell-mobile__tips">
-          <span class="scan-shell-mobile__tip">保持设备稳定</span>
-          <span class="scan-shell-mobile__tip">二维码尽量铺满中央框体</span>
-          <span class="scan-shell-mobile__tip">反光或模糊时改用拍照识别</span>
-        </div>
-      </aside>
+        <aside class="scan-shell-mobile__info-card" aria-label="扫码提示信息">
+          <p class="scan-shell-mobile__status-text">{{ props.statusText }}</p>
+          <p class="scan-shell-mobile__hint-text">{{ props.hintText }}</p>
+          <div class="scan-shell-mobile__tips">
+            <span class="scan-shell-mobile__tip">保持设备稳定</span>
+            <span class="scan-shell-mobile__tip">二维码尽量铺满中央框体</span>
+            <span class="scan-shell-mobile__tip">反光或模糊时改用拍照识别</span>
+          </div>
+        </aside>
+      </div>
     </div>
 
     <template #footer>
@@ -165,7 +171,7 @@ const handleDialogModelValueChange = (value: boolean) => {
   display: flex;
   align-items: center;
   justify-content: center;
-  overflow: auto;
+  overflow: hidden;
   padding: 12px;
 }
 
@@ -173,7 +179,7 @@ const handleDialogModelValueChange = (value: boolean) => {
   width: min(96vw, 1120px) !important;
   display: flex;
   flex-direction: column;
-  max-height: min(94vh, calc(100dvh - 24px));
+  max-height: calc(100dvh - 24px);
   margin: 12px auto !important;
   border-radius: 24px;
   overflow: hidden;
@@ -185,9 +191,11 @@ const handleDialogModelValueChange = (value: boolean) => {
 
 .unified-scan-dialog:deep(.el-dialog__body) {
   flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
   padding-top: 10px;
-  overflow: auto;
+  overflow: hidden;
 }
 
 .unified-scan-dialog:deep(.el-dialog__footer) {
@@ -196,6 +204,10 @@ const handleDialogModelValueChange = (value: boolean) => {
 }
 
 .scan-shell {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
   border-radius: 24px;
   background:
     radial-gradient(circle at top right, rgba(45, 212, 191, 0.12), transparent 36%),
@@ -205,10 +217,11 @@ const handleDialogModelValueChange = (value: boolean) => {
 }
 
 .scan-shell--desktop {
-  min-height: 0;
+  height: 100%;
 }
 
 .scan-shell__topbar {
+  flex: 0 0 auto;
   display: flex;
   justify-content: space-between;
   gap: 0.75rem;
@@ -248,6 +261,14 @@ const handleDialogModelValueChange = (value: boolean) => {
   grid-template-columns: minmax(0, 2fr) minmax(260px, 0.82fr);
   gap: 14px;
   align-items: stretch;
+  min-height: 100%;
+}
+
+.scan-shell__main {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .scan-shell__stage-card,
@@ -257,6 +278,8 @@ const handleDialogModelValueChange = (value: boolean) => {
 }
 
 .scan-shell__stage-card {
+  display: flex;
+  flex-direction: column;
   background:
     linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(2, 6, 23, 1));
   box-shadow:
@@ -287,12 +310,14 @@ const handleDialogModelValueChange = (value: boolean) => {
 
 .scan-shell__preview {
   position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: hidden;
   width: 100%;
   max-width: none;
   margin: 0 auto;
   aspect-ratio: 16 / 10;
-  max-height: min(66vh, 720px);
+  max-height: min(66dvh, 720px);
   padding: 14px;
   box-sizing: border-box;
 }
@@ -353,6 +378,7 @@ const handleDialogModelValueChange = (value: boolean) => {
 
 .scan-shell__info-card {
   display: flex;
+  align-self: stretch;
   flex-direction: column;
   gap: 12px;
   background: rgba(255, 255, 255, 0.82);
@@ -401,27 +427,42 @@ const handleDialogModelValueChange = (value: boolean) => {
   .unified-scan-dialog:deep(.el-dialog) {
     width: 100dvw !important;
     max-width: 100vw !important;
+    height: 100dvh;
     max-height: 100dvh;
     margin: 0 !important;
     border-radius: 0;
   }
 
   .unified-scan-dialog:deep(.el-dialog__body) {
+    flex: 1 1 auto;
+    min-height: 0;
     padding-top: 6px;
     padding-left: 10px;
     padding-right: 10px;
   }
 
   .scan-shell-mobile {
-    display: grid;
-    gap: 10px;
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
     min-height: 0;
     padding-bottom: 4px;
   }
 
   .scan-shell-mobile__topbar {
+    flex: 0 0 auto;
     display: grid;
     gap: 8px;
+  }
+
+  .scan-shell-mobile__main {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+    gap: 10px;
+    overflow-y: auto;
+    overflow-x: hidden;
   }
 
   .scan-shell-mobile__intro {
@@ -471,6 +512,9 @@ const handleDialogModelValueChange = (value: boolean) => {
   }
 
   .scan-shell-mobile__stage-card {
+    display: flex;
+    flex: 0 0 auto;
+    flex-direction: column;
     border-radius: 18px;
     overflow: hidden;
     background: linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(2, 6, 23, 1));
@@ -538,6 +582,7 @@ const handleDialogModelValueChange = (value: boolean) => {
 
   .scan-shell-mobile__info-card {
     display: grid;
+    flex: 0 0 auto;
     gap: 8px;
     border-radius: 16px;
     padding: 12px 10px;
@@ -560,9 +605,8 @@ const handleDialogModelValueChange = (value: boolean) => {
 
   .scan-shell-mobile__tips {
     display: flex;
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
     gap: 6px;
-    overflow-x: auto;
     padding-bottom: 2px;
   }
 
