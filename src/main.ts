@@ -26,6 +26,24 @@ const app = createApp(App)
 dayjs.locale('zh-cn')
 
 /**
+ * 固定 Element Plus 品牌色：
+ * - Vite 开发态按需注入组件样式时，默认色板可能在后续样式注入中覆盖主色变量；
+ * - 入口阶段用内联变量强制写回品牌色，确保管理端始终使用深绿色主色。
+ */
+const applyElementBrandPalette = () => {
+  const root = document.documentElement
+  root.style.setProperty('--el-color-primary', '#005b52')
+  root.style.setProperty('--el-color-primary-light-3', '#4d8c85')
+  root.style.setProperty('--el-color-primary-light-5', '#80ada8')
+  root.style.setProperty('--el-color-primary-light-7', '#b3cecb')
+  root.style.setProperty('--el-color-primary-light-8', '#ccdcdb')
+  root.style.setProperty('--el-color-primary-light-9', '#e6efee')
+  root.style.setProperty('--el-color-primary-dark-2', '#004942')
+}
+
+applyElementBrandPalette()
+
+/**
  * 注册 Element Plus 图标白名单：
  * - 仅注册当前项目实际用到的图标组件；
  * - 避免整包图标注入，收敛前端打包体积。
