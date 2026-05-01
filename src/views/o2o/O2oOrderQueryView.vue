@@ -914,9 +914,9 @@ onBeforeUnmount(() => {
   <PageContainer title="订单池工作台" description="左侧订单池实时分栏，右侧工作台查看状态报告、商品明细、金额汇总与进度节点">
     <div class="order-workbench-root grid gap-4 xl:grid-cols-[26rem_minmax(0,1fr)]">
       <section class="min-w-0 overflow-hidden rounded-3xl bg-white p-5 shadow-sm">
-        <div class="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+        <div class="order-pool-header">
           <p class="break-words text-lg font-semibold text-slate-900">订单池</p>
-          <div class="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+          <div class="order-pool-header__controls">
             <el-switch
               v-model="autoRefreshEnabled"
               size="small"
@@ -928,7 +928,7 @@ onBeforeUnmount(() => {
             <el-select
               v-model="pollIntervalSeconds"
               size="small"
-              class="poll-interval-select w-full sm:w-28"
+              class="poll-interval-select"
               :disabled="!autoRefreshEnabled"
               @change="handlePollIntervalChange"
             >
@@ -1467,6 +1467,22 @@ onBeforeUnmount(() => {
   -webkit-overflow-scrolling: touch;
 }
 
+.order-pool-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.order-pool-header__controls {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: fit-content;
+}
+
 .order-pool-tab {
   min-width: 0;
 }
@@ -1494,6 +1510,10 @@ onBeforeUnmount(() => {
 
 .search-action-button {
   min-width: 88px;
+}
+
+.poll-interval-select {
+  width: 112px;
 }
 
 .order-workbench-root :deep(.el-input__wrapper),
@@ -1543,9 +1563,24 @@ onBeforeUnmount(() => {
     padding: 16px;
   }
 
-  .order-workbench-root :deep(.el-select),
+  .order-pool-header {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+  }
+
+  .order-pool-header__controls {
+    flex-wrap: nowrap;
+    align-items: center;
+    justify-content: flex-end;
+  }
+
   .poll-interval-select {
-    width: 100%;
+    width: 112px;
+  }
+
+  .order-workbench-root :deep(.el-input__wrapper),
+  .order-workbench-root :deep(.el-select__wrapper) {
+    max-width: 100%;
   }
 
   .order-workbench-root :deep(.el-button) {
