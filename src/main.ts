@@ -1,16 +1,17 @@
 /**
  * 模块说明：src/main.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：负责初始化前端应用实例，并挂载全局状态、路由、主题、图标与少量全局指令。
+ * 实现逻辑：
+ * 1. 统一创建 Vue 应用与 Pinia，保证主题、权限、路由都从同一入口初始化；
+ * 2. 仅注册项目真实使用到的 Element Plus 图标与加载指令，避免入口整包注入 UI 组件；
+ * 3. Element Plus 组件本体与样式改由 Vite 编译期按需引入，降低 `ui-kit` 与总产物体积。
  */
 
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
-import ElementPlus from 'element-plus'
-import zhCn from 'element-plus/es/locale/lang/zh-cn'
+import { ElLoadingDirective } from 'element-plus'
 import dayjs from 'dayjs'
 import 'dayjs/locale/zh-cn'
-import 'element-plus/dist/index.css'
 import 'element-plus/theme-chalk/dark/css-vars.css'
 import './style.css'
 import App from './App.vue'
@@ -47,10 +48,12 @@ useThemeStore(pinia).initializeTheme()
 // 注册 Vue Router：管理页面级路由与跳转守卫。
 app.use(router)
 
-// 注册 Element Plus：提供 PC 端高密度业务组件。
-app.use(ElementPlus, {
-  locale: zhCn,
-})
+/**
+ * 注册 Element Plus 全局加载指令：
+ * - 项目中的 `v-loading` 属于少量跨页面通用能力，继续在入口统一挂载；
+ * - 其余 UI 组件改由编译期按需引入，避免运行时整包注册。
+ */
+app.directive('loading', ElLoadingDirective)
 
 // 挂载到根节点，启动 SPA 应用。
 app.mount('#app')

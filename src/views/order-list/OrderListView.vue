@@ -1,18 +1,24 @@
+<!--
+  文件说明：
+  该文件用于承载出库单列表主页面。
+  页面聚焦列表筛选、移动端卡片、详情抽屉与正式出库单入口装配，
+  其中低频的正式出库单工作台已拆到异步子组件，避免列表主分包携带整套打印模板与导出逻辑。
+-->
 <script setup lang="ts">
 /**
  * 模块说明：`src/views/order-list/OrderListView.vue`
- * 文件职责：装配出库单列表、详情抽屉、正式出库单预览弹窗，以及在线补填后打印/导出 PDF 的完整流程。
+ * 文件职责：装配出库单列表、详情抽屉、合规状态编辑，以及正式出库单低频入口。
  * 实现逻辑：
  * 1. 复用列表 composable 提供的详情查询结果，不新增服务端接口；
- * 2. 在页面层维护正式出库单的临时补填字段，切换单据时自动重置，不写回数据库；
- * 3. 预览区与打印区共用同一个模板组件，确保用户看到什么、打印出来就是什么；
+ * 2. 将正式出库单编辑、预览、打印、导出整体拆到异步工作台组件，降低 `OrderListView` 主分包体积；
+ * 3. 页面层仅保留低频入口控制，确保高频“列表 -> 详情”路径不被打印模板拖重；
  * 4. 列表与移动端卡片按订单类型收口展示字段，部门单展示部门流程字段，散客单隐藏不适用信息；
  * 5. 清理早期设备调试文案，避免把“手机卡片 / 平板卡片”等开发态信息暴露给最终用户。
  */
 
 import dayjs from 'dayjs'
 import { ElMessage } from 'element-plus'
-import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, ref, watch } from 'vue'
 import { updateOrderComplianceFlags } from '@/api/modules/order'
 import {
   BizResponsiveDataCollectionShell,
@@ -23,9 +29,7 @@ import {
 } from '@/components/common'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { extractErrorMessage } from '@/utils/error'
-import { exportVoucherPdf } from '@/utils/pdf/export-voucher-pdf'
 import OrderDetailDrawerContent from './components/OrderDetailDrawerContent.vue'
-import OrderVoucherTemplate from './components/OrderVoucherTemplate.vue'
 import { useOrderListView } from './composables/useOrderListView'
 
 const getOrderTypeLabel = (value: 'department' | 'walkin') => {
@@ -98,34 +102,6 @@ const getOrderDisplayName = (order: {
   return order.customerName || order.customerDepartmentName || '-'
 }
 
-interface OrderVoucherEditableFields {
-  departmentOperator: string
-  kingdeeVoucherNo: string
-  receiverSignature: string
-  issuerSignature: string
-  completionSignature: string
-}
-
-type VoucherOrientation = 'portrait' | 'landscape'
-
-/**
- * 字段映射说明：
- * - 固定字段只由模板结构决定，不需要用户维护；
- * - 自动填充字段直接取当前详情数据；
- * - 在线补填字段仅保存在当前页面内存中，关闭或切换单据后重新初始化。
- */
-const ORDER_VOUCHER_FIXED_FIELDS_TEXT = '固定版式字段：标题区、基础信息区、明细区、汇总区与签字区'
-const ORDER_VOUCHER_AUTO_FIELDS_TEXT = '自动填充字段：申请部门、商品名称、产品编码、单价、数量、小计、总计、业务单号'
-const ORDER_VOUCHER_EDITABLE_FIELDS_TEXT = '在线补填字段：部门经办人、金蝶单据编号、领取人签字、出库人签字、完成日期/签字'
-
-const createEmptyVoucherEditableFields = (): OrderVoucherEditableFields => ({
-  departmentOperator: '',
-  kingdeeVoucherNo: '',
-  receiverSignature: '',
-  issuerSignature: '',
-  completionSignature: '',
-})
-
 /**
  * 页面入口只负责装配：
  * - 查询、分页、自适应容量与详情抽屉逻辑都迁移到 composable；
@@ -151,14 +127,10 @@ const {
   handleRestoreOrderWithConfirm,
 } = useOrderListView()
 const { hasPermission, ensurePermission } = usePermissionAction()
+const OrderVoucherWorkbenchDialog = defineAsyncComponent(() => import('./components/OrderVoucherWorkbenchDialog.vue'))
 
 const voucherDialogVisible = ref(false)
-const voucherPrintRootRef = ref<HTMLElement | null>(null)
 const enableHtml2pdfExport = import.meta.env.VITE_ORDER_VOUCHER_HTML2PDF_ENABLED !== 'false'
-const exportPdfLoading = ref(false)
-const voucherEditableForm = reactive<OrderVoucherEditableFields>(createEmptyVoucherEditableFields())
-const voucherOrientation = ref<VoucherOrientation>('landscape')
-const voucherOrientationLabel = computed(() => (voucherOrientation.value === 'landscape' ? '横版' : '竖版'))
 const canUseOrderVoucher = computed(() => currentOrder.value?.orderType === 'department')
 const canEditComplianceFlags = computed(() => hasPermission('orders:update'))
 const complianceSaving = ref(false)
@@ -173,15 +145,6 @@ const emptyDescription = computed(() => {
   return hasActiveFilter.value ? '未匹配到符合条件的订单，请调整筛选条件后重试' : '暂无订单数据，稍后可通过开单后回来查看'
 })
 
-/**
- * 重置临时补填字段：
- * - 当用户切换到另一张单据时，上一张单据的手工录入内容必须清空；
- * - 这样可以防止部门经办人、签字信息串单打印。
- */
-const resetVoucherEditableForm = () => {
-  Object.assign(voucherEditableForm, createEmptyVoucherEditableFields())
-}
-
 const syncComplianceFormFromCurrentOrder = () => {
   complianceForm.value = {
     hasCustomerOrder: Boolean(currentOrder.value?.hasCustomerOrder),
@@ -192,7 +155,6 @@ const syncComplianceFormFromCurrentOrder = () => {
 watch(
   () => currentOrder.value?.id ?? '',
   () => {
-    resetVoucherEditableForm()
     syncComplianceFormFromCurrentOrder()
   },
 )
@@ -224,7 +186,6 @@ const handleOpenVoucherDialog = () => {
     return
   }
 
-  voucherOrientation.value = 'landscape'
   voucherDialogVisible.value = true
 }
 
@@ -266,88 +227,6 @@ const handleSaveComplianceFlags = async () => {
   }
 }
 
-const VOUCHER_PRINT_STYLE_ID = 'y-link-order-voucher-print-page-style'
-
-// 详细注释：浏览器打印无法稳定从组件局部样式中动态切换 @page 方向，
-// 因此在点击打印前按当前选择临时注入全局打印页样式，打印结束后再清理。
-const applyVoucherPrintPageStyle = (orientation: VoucherOrientation) => {
-  const styleContent = `@media print { @page { size: A4 ${orientation}; margin: 8mm; } }`
-  let styleElement = document.getElementById(VOUCHER_PRINT_STYLE_ID) as HTMLStyleElement | null
-  if (!styleElement) {
-    styleElement = document.createElement('style')
-    styleElement.id = VOUCHER_PRINT_STYLE_ID
-    document.head.appendChild(styleElement)
-  }
-  styleElement.textContent = styleContent
-}
-
-const clearVoucherPrintPageStyle = () => {
-  const styleElement = document.getElementById(VOUCHER_PRINT_STYLE_ID)
-  styleElement?.remove()
-}
-
-/**
- * 打印正式出库单：
- * - 直接调用浏览器打印；
- * - 打印区使用隐藏的专用根节点，只输出正式模板内容。
- */
-const handlePrintVoucher = async () => {
-  if (!currentOrder.value) {
-    ElMessage.warning('当前无可打印凭证')
-    return
-  }
-
-  applyVoucherPrintPageStyle(voucherOrientation.value)
-  const cleanup = () => {
-    clearVoucherPrintPageStyle()
-    globalThis.removeEventListener('afterprint', cleanup)
-  }
-  globalThis.addEventListener('afterprint', cleanup)
-  await nextTick()
-  globalThis.print()
-  globalThis.setTimeout(cleanup, 1500)
-}
-
-/**
- * 导出 PDF：
- * - 与打印共用同一份正式模板 DOM；
- * - 这样导出的内容能完整带上当前补填后的预览结果。
- */
-const handleExportVoucherPdf = async () => {
-  if (!enableHtml2pdfExport) {
-    ElMessage.info('PDF 导出开关未启用，当前仅支持打印')
-    return
-  }
-
-  if (!currentOrder.value) {
-    ElMessage.warning('当前无可导出的凭证')
-    return
-  }
-
-  const sourceElement = voucherPrintRootRef.value?.querySelector('.voucher-print-document')
-  if (!(sourceElement instanceof HTMLElement)) {
-    ElMessage.warning('凭证模板尚未准备完成，请稍后重试')
-    return
-  }
-
-  const outputFileName = `${currentOrder.value.showNo || 'order-voucher'}-正式出库单.pdf`
-
-  exportPdfLoading.value = true
-  try {
-    await exportVoucherPdf({
-      sourceElement,
-      filename: outputFileName,
-      marginMm: 8,
-      scale: 2,
-      orientation: voucherOrientation.value,
-    })
-    ElMessage.success('PDF 导出成功')
-  } catch (error) {
-    ElMessage.error(extractErrorMessage(error, 'PDF 导出失败，请稍后重试'))
-  } finally {
-    exportPdfLoading.value = false
-  }
-}
 </script>
 
 <template>
@@ -671,121 +550,12 @@ const handleExportVoucherPdf = async () => {
       </template>
     </BizResponsiveDrawerShell>
 
-    <el-dialog
+    <OrderVoucherWorkbenchDialog
       v-if="canUseOrderVoucher && currentOrder"
       v-model="voucherDialogVisible"
-      title="正式出库单"
-      width="1100px"
-      align-center
-      class="order-voucher-dialog"
-      append-to-body
-      :modal-append-to-body="true"
-      :lock-scroll="true"
-    >
-      <div class="voucher-editor-banner">
-        <div class="voucher-editor-banner__title">正式出库单字段说明</div>
-        <div class="voucher-editor-banner__content">
-          <span>{{ ORDER_VOUCHER_FIXED_FIELDS_TEXT }}</span>
-          <span>{{ ORDER_VOUCHER_AUTO_FIELDS_TEXT }}</span>
-          <span>{{ ORDER_VOUCHER_EDITABLE_FIELDS_TEXT }}</span>
-          <span>本期补填内容仅在当前页面临时生效，不回写数据库。</span>
-        </div>
-      </div>
-      <div class="voucher-workbench">
-        <section class="voucher-editor-panel">
-          <div class="voucher-editor-panel__header">
-            <div>
-              <h3 class="voucher-editor-panel__title">在线补填</h3>
-              <p class="voucher-editor-panel__desc">填写后会立即同步到下方正式出库单预览与打印结果。</p>
-            </div>
-            <div class="voucher-editor-panel__meta">
-              <span>业务单号：{{ currentOrder.showNo }}</span>
-              <span>开单时间：{{ dayjs(currentOrder.createdAt).format('YYYY-MM-DD HH:mm:ss') }}</span>
-            </div>
-          </div>
-          <div class="voucher-orientation-toolbar">
-            <span class="voucher-orientation-toolbar__label">页面方向</span>
-            <el-radio-group v-model="voucherOrientation" size="small">
-              <el-radio-button label="landscape">横版</el-radio-button>
-              <el-radio-button label="portrait">竖版</el-radio-button>
-            </el-radio-group>
-          </div>
-          <el-form label-position="top" class="voucher-editor-form">
-            <div class="voucher-editor-form__grid">
-              <el-form-item label="部门经办人">
-                <el-input v-model="voucherEditableForm.departmentOperator" placeholder="请输入部门经办人" clearable />
-              </el-form-item>
-              <el-form-item label="金蝶单据编号">
-                <el-input v-model="voucherEditableForm.kingdeeVoucherNo" placeholder="请输入金蝶单据编号" clearable />
-              </el-form-item>
-              <el-form-item label="领取人签字">
-                <el-input v-model="voucherEditableForm.receiverSignature" placeholder="请输入领取人签字" clearable />
-              </el-form-item>
-              <el-form-item label="出库人签字">
-                <el-input v-model="voucherEditableForm.issuerSignature" placeholder="请输入出库人签字" clearable />
-              </el-form-item>
-              <el-form-item class="voucher-editor-form__item--full" label="完成日期/签字">
-                <el-input
-                  v-model="voucherEditableForm.completionSignature"
-                  placeholder="请输入完成日期或签字说明，例如：2026-04-28 已完成"
-                  clearable
-                />
-              </el-form-item>
-            </div>
-          </el-form>
-        </section>
-
-        <section class="voucher-preview-panel">
-          <div class="voucher-preview-panel__header">
-            <div>
-              <h3 class="voucher-preview-panel__title">正式出库单预览</h3>
-              <p class="voucher-preview-panel__desc">
-                当前方向：{{ voucherOrientationLabel }}，共 2 页，每页 1 联；申请部门：{{ currentOrder.customerDepartmentName || '散客' }}
-              </p>
-            </div>
-            <div class="voucher-preview-panel__summary">
-              <span>商品 {{ currentOrder.items.length }} 行</span>
-              <span>总金额 ¥{{ Number(currentOrder.totalAmount).toFixed(2) }}</span>
-            </div>
-          </div>
-          <div class="voucher-preview-panel__body">
-            <div class="order-voucher-preview-scope" :class="`is-${voucherOrientation}`">
-              <OrderVoucherTemplate
-                :order="currentOrder"
-                :editable-fields="voucherEditableForm"
-                :orientation="voucherOrientation"
-              />
-            </div>
-          </div>
-        </section>
-      </div>
-      <template #footer>
-        <span class="flex flex-wrap justify-end gap-2">
-          <el-button @click="voucherDialogVisible = false">关闭</el-button>
-          <el-button type="primary" plain @click="handlePrintVoucher">打印</el-button>
-          <el-button type="primary" :disabled="!enableHtml2pdfExport" :loading="exportPdfLoading" @click="handleExportVoucherPdf">
-            导出PDF
-          </el-button>
-        </span>
-      </template>
-    </el-dialog>
-
-    <Teleport to="body">
-      <div
-        v-if="canUseOrderVoucher && currentOrder && voucherDialogVisible"
-        ref="voucherPrintRootRef"
-        class="order-voucher-print-root"
-        aria-hidden="true"
-      >
-        <div class="order-voucher-print-scope" :class="`is-${voucherOrientation}`">
-          <OrderVoucherTemplate
-            :order="currentOrder"
-            :editable-fields="voucherEditableForm"
-            :orientation="voucherOrientation"
-          />
-        </div>
-      </div>
-    </Teleport>
+      :order="currentOrder"
+      :enable-html2pdf-export="enableHtml2pdfExport"
+    />
   </PageContainer>
 </template>
 
@@ -1030,264 +800,4 @@ const handleExportVoucherPdf = async () => {
   color: #e2e8f0;
 }
 
-.order-voucher-dialog :deep(.el-dialog) {
-  border-radius: 20px;
-  overflow: hidden;
-  max-width: calc(100vw - 24px);
-  max-height: calc(100dvh - 24px);
-  display: flex;
-  flex-direction: column;
-}
-
-.order-voucher-dialog :deep(.el-dialog__body) {
-  padding-top: 10px;
-  display: flex;
-  flex: 1;
-  min-height: 0;
-  overflow: hidden;
-}
-
-.order-voucher-print-scope {
-  background: #ffffff;
-  border-radius: 16px;
-}
-
-.voucher-editor-banner {
-  margin-bottom: 12px;
-  border: 1px solid #c7d2fe;
-  border-radius: 14px;
-  background: linear-gradient(135deg, #f8faff 0%, #eef4ff 100%);
-  padding: 10px 12px;
-}
-
-.voucher-editor-banner__title {
-  font-size: 13px;
-  font-weight: 700;
-  color: #1e40af;
-}
-
-.voucher-editor-banner__content {
-  margin-top: 6px;
-  display: grid;
-  gap: 4px;
-  font-size: 12px;
-  color: #334155;
-}
-
-.voucher-workbench {
-  display: grid;
-  grid-template-columns: minmax(300px, 340px) minmax(0, 1fr);
-  gap: 14px;
-  align-items: start;
-  flex: 1;
-  min-height: 0;
-}
-
-.voucher-editor-panel,
-.voucher-preview-panel {
-  border: 1px solid #e2e8f0;
-  border-radius: 16px;
-  background: #fff;
-}
-
-.voucher-editor-panel {
-  padding: 14px;
-  position: sticky;
-  top: 0;
-}
-
-.voucher-editor-panel__header,
-.voucher-preview-panel__header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.voucher-editor-panel__title,
-.voucher-preview-panel__title {
-  margin: 0;
-  font-size: 18px;
-  font-weight: 700;
-  color: #0f172a;
-}
-
-.voucher-editor-panel__desc,
-.voucher-preview-panel__desc {
-  margin: 4px 0 0;
-  font-size: 12px;
-  color: #64748b;
-  line-height: 1.6;
-}
-
-.voucher-editor-panel__meta,
-.voucher-preview-panel__summary {
-  display: grid;
-  gap: 4px;
-  font-size: 12px;
-  color: #475569;
-  text-align: right;
-}
-
-.voucher-editor-form {
-  margin-top: 14px;
-}
-
-.voucher-orientation-toolbar {
-  margin-top: 14px;
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  border: 1px dashed #cbd5e1;
-  border-radius: 12px;
-  background: #f8fafc;
-  padding: 10px 12px;
-}
-
-.voucher-orientation-toolbar__label {
-  font-size: 13px;
-  font-weight: 600;
-  color: #334155;
-}
-
-.voucher-editor-form__grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px 12px;
-}
-
-.voucher-editor-form__item--full {
-  grid-column: 1 / -1;
-}
-
-.voucher-editor-form :deep(.el-form-item) {
-  margin-bottom: 0;
-}
-
-.voucher-preview-panel {
-  min-width: 0;
-  overflow: hidden;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-
-.voucher-preview-panel__header {
-  padding: 14px 16px;
-  border-bottom: 1px solid #e2e8f0;
-  background: #f8fafc;
-}
-
-.voucher-preview-panel__body {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  padding: 14px;
-  background: #f8fafc;
-}
-
-.order-voucher-preview-scope {
-  margin: 0 auto;
-}
-
-.order-voucher-preview-scope.is-landscape {
-  width: 281mm;
-  min-width: 281mm;
-}
-
-.order-voucher-preview-scope.is-portrait {
-  width: 194mm;
-  min-width: 194mm;
-}
-
-@media (max-width: 768px) {
-  .voucher-workbench {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .voucher-editor-panel {
-    position: static;
-  }
-
-  .voucher-editor-panel__header,
-  .voucher-preview-panel__header {
-    flex-direction: column;
-  }
-
-  .voucher-editor-panel__meta,
-  .voucher-preview-panel__summary {
-    width: 100%;
-    text-align: left;
-  }
-
-  .voucher-editor-form__grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
-  .voucher-orientation-toolbar {
-    align-items: flex-start;
-  }
-
-  .voucher-preview-panel__body {
-    max-height: none;
-    padding: 10px;
-  }
-
-  .order-voucher-preview-scope.is-landscape,
-  .order-voucher-preview-scope.is-portrait {
-    width: 100%;
-    min-width: 100%;
-  }
-}
-</style>
-
-<style>
-.order-voucher-print-root {
-  display: none;
-}
-
-@media print {
-  html,
-  body {
-    margin: 0 !important;
-    padding: 0 !important;
-    background: #fff !important;
-  }
-
-  body > *:not(.order-voucher-print-root) {
-    display: none !important;
-  }
-
-  .order-voucher-print-root {
-    display: block !important;
-    background: #ffffff;
-    width: auto;
-    min-height: auto;
-    margin: 0;
-    padding: 0 !important;
-    overflow: visible;
-  }
-
-  .order-voucher-print-root .order-voucher-print-scope {
-    width: fit-content;
-    margin: 0 auto;
-    overflow: visible;
-    break-inside: auto;
-    page-break-inside: auto;
-  }
-
-  .order-voucher-print-root .order-voucher-print-scope.is-landscape {
-    width: 281mm;
-    max-width: 281mm;
-    min-height: 194mm;
-  }
-
-  .order-voucher-print-root .order-voucher-print-scope.is-portrait {
-    width: 194mm;
-    max-width: 194mm;
-    min-height: 279mm;
-  }
-}
 </style>

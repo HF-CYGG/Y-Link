@@ -37,7 +37,7 @@ export const preloadProductCenterTabs = async (tabKeys: ProductCenterTabKey[]) =
   await Promise.allSettled(
     uniqueTabKeys.map((tabKey) => {
       const cachedPromise = warmedProductCenterTabPromises.get(tabKey)
-      if (cachedPromise) {
+      if (cachedPromise !== undefined) {
         return cachedPromise
       }
 

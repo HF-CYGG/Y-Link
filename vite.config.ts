@@ -5,10 +5,63 @@
  * 2. 在本地开发阶段代理 `/api`、`/uploads`、`/health` 到后端；
  * 3. 在生产构建阶段执行手工拆包，优化首屏缓存与路由切换体验。
  */
+/// <reference path="./src/types/unplugin-vue-components-vite.d.ts" />
 import { defineConfig, loadEnv } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import basicSsl from '@vitejs/plugin-basic-ssl'
+import Components from 'unplugin-vue-components/vite'
+import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 import { fileURLToPath, URL } from 'node:url'
+
+type VendorChunkRule = {
+  chunkName: string
+  packageNames: string[]
+}
+
+// 手工拆包匹配工具：
+// - 统一按 node_modules 下的“包名目录”判断归属，避免在 manualChunks 中堆叠大量 if；
+// - 低频重库单独成块后，只有真正触发扫码、导出、图表等场景时才会加载对应 chunk；
+// - html2pdf 依赖的 html2canvas/jspdf 一并归组，避免再次回落到共享 vendor。
+const VENDOR_CHUNK_RULES: VendorChunkRule[] = [
+  {
+    chunkName: 'framework',
+    packageNames: ['vue', 'vue-router', 'pinia'],
+  },
+  {
+    chunkName: 'ui-kit',
+    packageNames: ['element-plus', '@element-plus', '@vueuse', 'dayjs'],
+  },
+  {
+    chunkName: 'charting',
+    packageNames: ['echarts', 'vue-echarts', 'zrender'],
+  },
+  {
+    chunkName: 'pdf-export',
+    packageNames: ['html2pdf.js', 'html2canvas', 'jspdf'],
+  },
+  {
+    chunkName: 'qr-scanner',
+    packageNames: ['html5-qrcode'],
+  },
+  {
+    chunkName: 'qr-code',
+    packageNames: ['qrcode'],
+  },
+  {
+    chunkName: 'image-tools',
+    packageNames: ['browser-image-compression'],
+  },
+]
+
+const resolveVendorChunk = (normalizedId: string) => {
+  for (const rule of VENDOR_CHUNK_RULES) {
+    if (rule.packageNames.some((packageName) => normalizedId.includes(`/node_modules/${packageName}/`))) {
+      return rule.chunkName
+    }
+  }
+
+  return 'vendor'
+}
 
 // https://vite.dev/config/
 export default defineConfig(({ command, mode }) => {
@@ -19,6 +72,20 @@ export default defineConfig(({ command, mode }) => {
   return {
     plugins: [
       vue(),
+      /**
+       * Element Plus 编译期按需引入：
+       * - 仅为模板中真实使用到的组件生成 import；
+       * - 同步按组件粒度注入 CSS，替代入口文件的整包样式；
+       * - 让低频治理页使用到的表格、树、日期等能力不再常驻主公共块。
+       */
+      Components({
+        dts: false,
+        resolvers: [
+          ElementPlusResolver({
+            importStyle: 'css',
+          }),
+        ],
+      }),
       ...(command === 'serve' && enableHttps ? [basicSsl()] : []),
     ],
     resolve: {
@@ -56,9 +123,9 @@ export default defineConfig(({ command, mode }) => {
         : undefined,
     /**
      * 构建拆包策略：
-     * - 将 Vue 运行时、Element Plus 与其余第三方依赖拆成独立缓存块；
-     * - 避免单个超大共享包拖慢登录页与首屏进入速度；
-     * - 配合业务路由懒加载，让高频页面切换优先命中浏览器缓存。
+     * - 将 Vue 运行时、UI 基础库、兜底 vendor 与低频重库拆成独立缓存块；
+     * - 让扫码、二维码生成、PDF 导出、图片压缩、图表等能力按需加载；
+     * - 配合业务路由懒加载，避免低频功能污染高频首屏共享缓存。
      */
     build: {
       rollupOptions: {
@@ -70,24 +137,7 @@ export default defineConfig(({ command, mode }) => {
               return
             }
 
-            if (
-              normalizedId.includes('/node_modules/vue/')
-              || normalizedId.includes('/node_modules/vue-router/')
-              || normalizedId.includes('/node_modules/pinia/')
-            ) {
-              return 'framework'
-            }
-
-            if (
-              normalizedId.includes('/node_modules/element-plus/')
-              || normalizedId.includes('/node_modules/@element-plus/')
-              || normalizedId.includes('/node_modules/@vueuse/')
-              || normalizedId.includes('/node_modules/dayjs/')
-            ) {
-              return 'ui-kit'
-            }
-
-            return 'vendor'
+            return resolveVendorChunk(normalizedId)
           },
         },
       },

@@ -6,6 +6,7 @@
  * - 新增业务页面时，除了补 routes，还要同步评估是否需要纳入这里的预热范围。
  */
 import { preloadProductCenterTabs, resolveProductCenterWarmupTargets } from '@/views/product-center/product-center-performance'
+import { preloadUserCenterTabs } from '@/views/system/user-center-performance'
 
 /**
  * 前端命名路由集合：
@@ -125,8 +126,18 @@ const warmableRouteLoaders: Partial<Record<RouteWarmupTarget, RouteViewLoader>> 
   'o2o-console-inbound': routeViewLoaders['o2o-console-inbound'],
   'system-configs': routeViewLoaders['system-configs'],
   'system-db-migration': routeViewLoaders['system-db-migration'],
-  'system-users': routeViewLoaders['system-users'],
-  'system-client-users': routeViewLoaders['system-client-users'],
+  // 用户中心改为共享壳层 + 异步标签页后，预热阶段继续补齐默认标签，
+  // 避免从系统菜单首跳进入时还要额外等待标签子包下载。
+  'system-users': () =>
+    Promise.all([
+      routeViewLoaders['system-users'](),
+      preloadUserCenterTabs(['management']),
+    ]),
+  'system-client-users': () =>
+    Promise.all([
+      routeViewLoaders['system-client-users'](),
+      preloadUserCenterTabs(['client']),
+    ]),
   'system-audit-logs': routeViewLoaders['system-audit-logs'],
 }
 
