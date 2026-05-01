@@ -13,6 +13,7 @@ import { computed, ref, watch } from 'vue'
 import { useRoute, type RouteLocationNormalizedLoaded } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 import { useClientAuthStore, useClientCartStore } from '@/store'
+import { buildClientNavigationItems } from '@/router/routes'
 import { redirectToClientLogin } from '@/utils/client-auth-navigation'
 
 const route = useRoute()
@@ -27,22 +28,31 @@ const displayName = computed(() => {
   return clientAuthStore.currentUser?.account || clientAuthStore.currentUser?.realName || clientAuthStore.currentUser?.mobile || '访客'
 })
 
-const tabs = [
-  { path: '/client/mall', label: '商城' },
-  { path: '/client/orders', label: '订单' },
-  { path: '/client/profile', label: '我的' },
-]
+/**
+ * 客户端底部导航：
+ * - 导航项统一由路由元信息派生，不再在布局层手写固定常量；
+ * - 登录、退出、会话恢复后会随鉴权状态与路由权限即时重算，保证“可见即可达”。
+ */
+const tabs = computed(() => {
+  return buildClientNavigationItems({
+    isAuthenticated: clientAuthStore.isAuthenticated,
+  }).map((item) => ({
+    path: item.path,
+    label: item.title,
+  }))
+})
 
 const activeTabIndex = computed(() => {
-  const index = tabs.findIndex((tab) => isTabActive(tab.path))
+  const index = tabs.value.findIndex((tab) => isTabActive(tab.path))
   return index === -1 ? 0 : index
 })
 
+const tabCount = computed(() => Math.max(tabs.value.length, 1))
+
 const indicatorStyle = computed(() => {
   return {
-    transform: `translateX(${activeTabIndex.value * 100}%)`,
-    // 因为使用了 gap-1，需要在每次位移时加上相应的 gap 偏移
-    marginLeft: `${activeTabIndex.value * 0.25}rem`
+    width: `calc((100% - ${(tabCount.value - 1) * 0.25}rem) / ${tabCount.value})`,
+    transform: `translateX(calc(${activeTabIndex.value * 100}% + ${activeTabIndex.value * 0.25}rem))`,
   }
 })
 
@@ -173,8 +183,11 @@ const handleLogout = async () => {
       </div>
     </main>
 
-    <nav class="client-main-layout__tab fixed bottom-3 left-1/2 z-50 -translate-x-1/2 rounded-[1.4rem] px-2 py-2">
-      <div class="grid grid-cols-3 gap-1 relative">
+    <nav
+      v-if="tabs.length"
+      class="client-main-layout__tab fixed bottom-3 left-1/2 z-50 -translate-x-1/2 rounded-[1.4rem] px-2 py-2"
+    >
+      <div class="grid relative gap-1" :style="{ gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))` }">
         <div class="client-main-layout__tab-indicator" :style="indicatorStyle"></div>
         <router-link
           v-for="tab in tabs"
@@ -249,12 +262,11 @@ const handleLogout = async () => {
   top: 0;
   left: 0;
   height: 100%;
-  width: calc((100% - 0.5rem) / 3); /* 减去两个 gap 的宽度并平分 */
   background: var(--ylink-color-primary-strong);
   border-radius: 0.9rem;
   transition:
     transform var(--ylink-motion-normal) var(--ylink-motion-ease),
-    margin-left var(--ylink-motion-normal) var(--ylink-motion-ease);
+    width var(--ylink-motion-normal) var(--ylink-motion-ease);
   z-index: 0;
 }
 

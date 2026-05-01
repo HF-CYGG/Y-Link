@@ -15,6 +15,7 @@
     "task2:verify": "tsx scripts/task2-verify.ts",
     "task3:verify": "tsx scripts/task3-verify.ts",
     "task4:verify": "tsx scripts/task4-verify.ts",
+    "task4:role-nav:verify": "tsx --tsconfig ../tsconfig.app.json scripts/task4-role-navigation-verify.ts",
     "task345:verify": "tsx scripts/task345-verify.ts",
     "task123:o2o-enhance:verify": "tsx scripts/task123-o2o-enhance-verify.ts",
     "task6:verify": "tsx scripts/task6-verify.ts",

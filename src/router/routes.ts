@@ -43,6 +43,8 @@ export interface AppRouteMeta extends RouteMeta {
   menu?: boolean
   menuOrder?: number
   menuGroup?: string
+  clientNav?: boolean
+  clientNavOrder?: number
   activeMenu?: string
   shortcut?: AppShortcutMeta
   requiresAuth?: boolean
@@ -85,6 +87,17 @@ export interface DashboardShortcutItem {
   bgClass: string
 }
 
+/**
+ * 客户端导航项：
+ * - 与管理端菜单同样由路由元信息派生；
+ * - 仅用于客户端底部导航，不参与管理端侧栏渲染。
+ */
+export interface ClientNavigationItem {
+  title: string
+  path: string
+  children?: ClientNavigationItem[]
+}
+
 interface AppRouteRecord {
   path: string
   name?: AppRouteName
@@ -125,6 +138,7 @@ const layoutChildren: AppRouteRecord[] = [
       menuGroup: '业务操作',
       menuOrder: 20,
       requiredPermissions: ['orders:create'],
+      allowedRoles: ['admin', 'operator'],
       shortcut: {
         title: '新增开单',
         description: '快速录入新的出库单据',
@@ -146,6 +160,7 @@ const layoutChildren: AppRouteRecord[] = [
       menuGroup: '业务操作',
       menuOrder: 30,
       requiredPermissions: ['orders:view'],
+      allowedRoles: ['admin', 'operator'],
       shortcut: {
         title: '出库单列表',
         description: '查看历史开单记录与单据详情',
@@ -229,6 +244,7 @@ const layoutChildren: AppRouteRecord[] = [
       menuGroup: '基础资料',
       menuOrder: 40,
       requiredAnyPermissions: ['products:view', 'tags:view'],
+      allowedRoles: ['admin', 'operator'],
       shortcut: {
         title: '基础资料',
         description: '维护产品与标签等基础信息',
@@ -357,6 +373,7 @@ const layoutChildren: AppRouteRecord[] = [
       menuGroup: '系统管理',
       menuOrder: 50,
       requiredAnyPermissions: ['system_configs:view', 'users:view', 'audit_logs:view'],
+      allowedRoles: ['admin', 'operator'],
       shortcut: {
         title: '系统配置',
         description: '维护双流水参数与审计留痕',
@@ -504,6 +521,8 @@ export const routes: RouteRecordRaw[] = [
         meta: {
           title: '商品大厅',
           menu: false,
+          clientNav: true,
+          clientNavOrder: 10,
           requiresClientAuth: true,
           keepAlive: true,
           preloadTargets: ['client-orders', 'client-cart', 'client-profile'],
@@ -516,6 +535,8 @@ export const routes: RouteRecordRaw[] = [
         meta: {
           title: '我的订单',
           menu: false,
+          clientNav: true,
+          clientNavOrder: 20,
           requiresClientAuth: true,
           keepAlive: true,
           preloadTargets: ['client-order-detail', 'client-mall'],
@@ -551,6 +572,8 @@ export const routes: RouteRecordRaw[] = [
         meta: {
           title: '我的',
           menu: false,
+          clientNav: true,
+          clientNavOrder: 30,
           requiresClientAuth: true,
           keepAlive: true,
           preloadTargets: ['client-orders'],
@@ -655,21 +678,102 @@ export const canAccessRoute = (
  * - 父级路由保留子节点结构，用于渲染展开菜单。
  */
 const deriveMenuItems = (records: AppRouteRecord[], user?: Pick<UserSafeProfile, 'role' | 'permissions'> | null, parentPath = '/'): AppMenuItem[] => {
-  return sortByMenuOrder(records)
-    .filter((record) => record.meta.menu !== false)
-    .filter((record) => canAccessRoute(record.meta, user))
-    .map((record) => {
-      const fullPath = resolveRoutePath(parentPath, record.path)
-      const children = record.children ? deriveMenuItems(record.children, user, fullPath) : []
+  const collectedItems: AppMenuItem[] = []
 
-      return {
-        title: record.meta.title,
-        path: fullPath,
-        icon: record.meta.icon,
-        group: record.meta.menuGroup,
-        children: children.length > 0 ? children : undefined,
-      }
+  sortByMenuOrder(records).forEach((record) => {
+    if (record.meta.menu === false || !canAccessRoute(record.meta, user)) {
+      return
+    }
+
+    const fullPath = resolveRoutePath(parentPath, record.path)
+    const hasConfiguredChildren = Boolean(record.children?.length)
+    const children = record.children ? deriveMenuItems(record.children, user, fullPath) : []
+
+    /**
+     * 父级自动隐藏策略：
+     * - 当父节点声明了子路由，但当前用户对所有子节点都无访问权限时，父级不再降级成“空壳可点菜单”；
+     * - 避免出现点击父级后立即触发路由守卫拦截的割裂体验。
+     */
+    if (hasConfiguredChildren && children.length === 0) {
+      return
+    }
+
+    collectedItems.push({
+      title: record.meta.title,
+      path: fullPath,
+      icon: record.meta.icon,
+      group: record.meta.menuGroup,
+      children: children.length > 0 ? children : undefined,
     })
+  })
+
+  return collectedItems
+}
+
+const canAccessClientRoute = (
+  meta: Pick<AppRouteMeta, 'requiresClientAuth' | 'clientGuestOnly'>,
+  context: { isAuthenticated: boolean },
+) => {
+  if (meta.requiresClientAuth && !context.isAuthenticated) {
+    return false
+  }
+
+  if (meta.clientGuestOnly && context.isAuthenticated) {
+    return false
+  }
+
+  return true
+}
+
+const sortByClientNavOrder = <T extends { meta?: RouteMeta }>(records: T[]) => {
+  return [...records].sort((prev, next) => {
+    const prevMeta = (prev.meta ?? {}) as AppRouteMeta
+    const nextMeta = (next.meta ?? {}) as AppRouteMeta
+    const prevOrder = prevMeta.clientNavOrder ?? prevMeta.menuOrder ?? Number.MAX_SAFE_INTEGER
+    const nextOrder = nextMeta.clientNavOrder ?? nextMeta.menuOrder ?? Number.MAX_SAFE_INTEGER
+    return prevOrder - nextOrder
+  })
+}
+
+const deriveClientNavigationItems = (
+  records: RouteRecordRaw[],
+  context: { isAuthenticated: boolean },
+  parentPath: string,
+): ClientNavigationItem[] => {
+  const collectedItems: ClientNavigationItem[] = []
+
+  sortByClientNavOrder(records).forEach((record) => {
+    if (typeof record.path !== 'string') {
+      return
+    }
+
+    const meta = (record.meta ?? {}) as AppRouteMeta
+    if (!canAccessClientRoute(meta, context)) {
+      return
+    }
+
+    const fullPath = resolveRoutePath(parentPath, record.path)
+    const childRecords = Array.isArray(record.children) ? record.children : []
+    const children = childRecords.length ? deriveClientNavigationItems(childRecords, context, fullPath) : []
+    const hasConfiguredChildren = childRecords.length > 0
+    const includeSelf = meta.clientNav === true
+
+    if (hasConfiguredChildren && children.length === 0) {
+      return
+    }
+
+    if (!includeSelf && children.length === 0) {
+      return
+    }
+
+    collectedItems.push({
+      title: typeof meta.title === 'string' && meta.title.trim() ? meta.title : fullPath,
+      path: fullPath,
+      children: children.length > 0 ? children : undefined,
+    })
+  })
+
+  return collectedItems
 }
 
 /**
@@ -729,6 +833,11 @@ const deriveShortcutItems = (
 export const buildAppMenuItems = (user?: Pick<UserSafeProfile, 'role' | 'permissions'> | null) => deriveMenuItems(layoutChildren, user)
 export const buildDashboardShortcutItems = (user?: Pick<UserSafeProfile, 'role' | 'permissions'> | null) =>
   deriveShortcutItems(layoutChildren, user)
+export const buildClientNavigationItems = (context: { isAuthenticated: boolean }): ClientNavigationItem[] => {
+  const clientRootRoute = routes.find((record) => record.path === '/client')
+  const clientChildren = Array.isArray(clientRootRoute?.children) ? clientRootRoute.children : []
+  return deriveClientNavigationItems(clientChildren, context, '/client')
+}
 
 /**
  * 解析“首个可访问管理端路由”：
