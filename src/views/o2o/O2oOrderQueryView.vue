@@ -1501,12 +1501,14 @@ onBeforeUnmount(() => {
 .order-card--new {
   border-color: rgba(251, 146, 60, 0.48);
   box-shadow: 0 0 0 2px rgba(251, 191, 36, 0.22);
-  animation: new-order-pulse 0.9s ease-in-out infinite;
+  animation: new-order-pulse 0.9s var(--ylink-motion-ease) 2;
 }
 
 .new-order-notice-enter-active,
 .new-order-notice-leave-active {
-  transition: opacity 0.18s ease, transform 0.18s ease;
+  transition:
+    opacity var(--ylink-motion-normal) var(--ylink-motion-ease),
+    transform var(--ylink-motion-normal) var(--ylink-motion-ease);
 }
 
 .new-order-notice-enter-from,

@@ -402,7 +402,10 @@ const handleSubmit = async () => {
   border-radius: 24px; 
   border: 1px solid var(--border-light); 
   box-shadow: 0 20px 40px rgba(0, 0, 0, 0.05); 
-  transition: all 0.6s cubic-bezier(0.34, 1.56, 0.64, 1); 
+  transition:
+    transform var(--theme-transition-duration) var(--ylink-motion-ease),
+    opacity var(--theme-transition-duration) var(--ylink-motion-ease),
+    box-shadow var(--theme-transition-duration) var(--ylink-motion-ease);
 } 
 
 :global(.dark) .mockup-card { 
@@ -630,7 +633,10 @@ const handleSubmit = async () => {
   border: 1px solid transparent; 
   box-shadow: none !important; 
   padding: 0 16px; 
-  transition: all 0.2s ease; 
+  transition:
+    background-color var(--motion-duration-fast) var(--ylink-motion-ease),
+    border-color var(--motion-duration-fast) var(--ylink-motion-ease),
+    box-shadow var(--motion-duration-fast) var(--ylink-motion-ease);
 } 
 
 .geo-input :deep(.el-input__wrapper:hover) { 

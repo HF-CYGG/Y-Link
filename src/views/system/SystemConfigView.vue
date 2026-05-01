@@ -845,8 +845,9 @@ onMounted(() => {
             </el-tabs>
           </div>
 
+          <div class="config-stage">
           <transition name="workbench-horizontal-slide">
-            <div v-if="activeSection === 'order_serial'" class="grid gap-6 lg:grid-cols-2">
+            <div v-if="activeSection === 'order_serial'" class="config-stage__panel grid gap-6 lg:grid-cols-2">
           <div class="apple-card flex flex-col p-5 sm:p-6 xl:p-7">
             <div class="mb-5 flex items-center justify-between gap-2 border-b border-slate-100 pb-4 dark:border-white/5">
               <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">部门订单流水</h2>
@@ -926,7 +927,7 @@ onMounted(() => {
           </transition>
 
           <transition name="workbench-horizontal-slide">
-            <div v-if="activeSection === 'o2o_rules'" class="space-y-4">
+            <div v-if="activeSection === 'o2o_rules'" class="config-stage__panel space-y-4">
           <div class="mb-5 flex items-center justify-between gap-2 border-b border-slate-100 pb-4 dark:border-white/5">
             <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">线上预订规则</h2>
             <span class="rounded-lg bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
@@ -983,7 +984,7 @@ onMounted(() => {
           </transition>
 
           <transition name="workbench-horizontal-slide">
-            <div v-if="activeSection === 'verification'" class="space-y-5">
+            <div v-if="activeSection === 'verification'" class="config-stage__panel space-y-5">
           <div class="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-4 dark:border-white/5">
             <div>
               <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">验证码平台配置</h2>
@@ -1157,7 +1158,7 @@ onMounted(() => {
           </transition>
 
           <transition name="workbench-horizontal-slide">
-            <div v-if="activeSection === 'department'" class="space-y-5">
+            <div v-if="activeSection === 'department'" class="config-stage__panel space-y-5">
           <div class="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-4 dark:border-white/5">
             <div>
               <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">部门配置</h2>
@@ -1249,6 +1250,7 @@ onMounted(() => {
           </div>
         </div>
           </transition>
+          </div>
         </div>
       </el-form>
     </div>
@@ -1256,6 +1258,15 @@ onMounted(() => {
 </template>
 
 <style scoped>
+.config-stage {
+  position: relative;
+  min-height: 420px;
+}
+
+.config-stage__panel {
+  position: relative;
+}
+
 .field-label {
   display: inline-flex;
   align-items: center;
@@ -1270,8 +1281,8 @@ onMounted(() => {
 
 .workbench-horizontal-slide-enter-active {
   transition:
-    transform 0.32s cubic-bezier(0.22, 1, 0.36, 1),
-    opacity 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+    transform var(--ylink-motion-normal) var(--ylink-motion-ease),
+    opacity var(--ylink-motion-normal) var(--ylink-motion-ease);
   will-change: transform, opacity;
   position: relative;
   z-index: 2;
@@ -1279,10 +1290,13 @@ onMounted(() => {
 
 .workbench-horizontal-slide-leave-active {
   transition:
-    transform 0.24s cubic-bezier(0.22, 1, 0.36, 1),
-    opacity 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+    transform var(--motion-duration-fast) var(--ylink-motion-ease),
+    opacity var(--motion-duration-fast) var(--ylink-motion-ease);
   will-change: transform, opacity;
-  position: relative;
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
 }
 
 .workbench-horizontal-slide-enter-from {

@@ -1101,7 +1101,10 @@ onUnmounted(() => {
   border: 1px solid transparent;
   box-shadow: none !important;
   padding: 0 16px;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  transition:
+    background-color var(--ylink-motion-normal) var(--ylink-motion-ease),
+    border-color var(--ylink-motion-normal) var(--ylink-motion-ease),
+    box-shadow var(--ylink-motion-normal) var(--ylink-motion-ease);
 }
 
 .geo-input :deep(.el-input__wrapper:hover) {
@@ -1127,7 +1130,10 @@ onUnmounted(() => {
   background-color: #f8fafc;
   border: 1px solid transparent;
   box-shadow: none !important;
-  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  transition:
+    background-color var(--ylink-motion-normal) var(--ylink-motion-ease),
+    border-color var(--ylink-motion-normal) var(--ylink-motion-ease),
+    box-shadow var(--ylink-motion-normal) var(--ylink-motion-ease);
 }
 
 .geo-input-select :deep(.el-select__wrapper:hover),
@@ -1296,7 +1302,10 @@ onUnmounted(() => {
   font-size: 15px !important;
   font-weight: 600 !important;
   margin-top: 24px;
-  transition: all 0.2s !important;
+  transition:
+    background-color var(--motion-duration-fast) var(--ylink-motion-ease),
+    box-shadow var(--motion-duration-fast) var(--ylink-motion-ease),
+    transform var(--motion-duration-fast) var(--ylink-motion-ease) !important;
 }
 
 .submit-btn:hover {

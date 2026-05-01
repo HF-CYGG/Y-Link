@@ -285,12 +285,16 @@ const isExistingProduct = (productId: string | undefined | null) => {
 .order-grid-table :deep(.order-row-deleting) {
   opacity: 0;
   transform: translateX(10px);
-  transition: all 0.2s ease;
+  transition:
+    opacity var(--motion-duration-fast) var(--ylink-motion-ease),
+    transform var(--motion-duration-fast) var(--ylink-motion-ease);
 }
 
 .row-fade-enter-active,
 .row-fade-leave-active {
-  transition: all 0.2s ease;
+  transition:
+    opacity var(--motion-duration-fast) var(--ylink-motion-ease),
+    transform var(--motion-duration-fast) var(--ylink-motion-ease);
 }
 
 .row-fade-enter-from,

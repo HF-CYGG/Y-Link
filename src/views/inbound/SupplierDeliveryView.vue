@@ -484,7 +484,9 @@ onMounted(() => {
 /* 列表项入场/离场动画：让新增和删除反馈更柔和。 */
 .item-list-enter-active,
 .item-list-leave-active {
-  transition: all 0.18s ease;
+  transition:
+    opacity var(--motion-duration-fast) var(--ylink-motion-ease),
+    transform var(--motion-duration-fast) var(--ylink-motion-ease);
 }
 
 .item-list-enter-from,

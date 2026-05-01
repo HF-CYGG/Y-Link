@@ -191,7 +191,9 @@ const handleBack = () => {
   background: #f1f5f9;
   color: #334155;
   font-weight: bold;
-  transition: all 0.2s;
+  transition:
+    background-color var(--motion-duration-fast) var(--ylink-motion-ease),
+    transform var(--motion-duration-fast) var(--ylink-motion-ease);
 }
 
 .client-cart-qty-btn:active {

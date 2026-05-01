@@ -237,7 +237,7 @@ const handleLogout = async () => {
   color: var(--ylink-color-subtext);
   font-size: 0.87rem;
   font-weight: 600;
-  transition: color 0.3s ease;
+  transition: color var(--ylink-motion-normal) var(--ylink-motion-ease);
 }
 
 .client-main-layout__tab-item.is-active {
@@ -252,12 +252,14 @@ const handleLogout = async () => {
   width: calc((100% - 0.5rem) / 3); /* 减去两个 gap 的宽度并平分 */
   background: var(--ylink-color-primary-strong);
   border-radius: 0.9rem;
-  transition: transform 0.4s cubic-bezier(0.25, 0.8, 0.25, 1), margin-left 0.4s cubic-bezier(0.25, 0.8, 0.25, 1);
+  transition:
+    transform var(--ylink-motion-normal) var(--ylink-motion-ease),
+    margin-left var(--ylink-motion-normal) var(--ylink-motion-ease);
   z-index: 0;
 }
 
 .client-main-layout__cart-badge.is-bouncing {
-  animation: cart-badge-bounce 0.36s ease;
+  animation: cart-badge-bounce var(--ylink-motion-normal) var(--ylink-motion-ease);
 }
 
 @keyframes cart-badge-bounce {
@@ -270,6 +272,28 @@ const handleLogout = async () => {
   100% {
     transform: scale(1);
   }
+}
+
+/* 客户端主布局动画降级：仅做轻量位移+透明度，避免低性能设备切页抖动。 */
+.client-main-layout__viewport :deep(.slide-left-enter-active),
+.client-main-layout__viewport :deep(.slide-left-leave-active),
+.client-main-layout__viewport :deep(.slide-right-enter-active),
+.client-main-layout__viewport :deep(.slide-right-leave-active) {
+  transition:
+    opacity var(--ylink-motion-normal) var(--ylink-motion-ease),
+    transform var(--ylink-motion-normal) var(--ylink-motion-ease);
+}
+
+.client-main-layout__viewport :deep(.slide-left-enter-from),
+.client-main-layout__viewport :deep(.slide-right-enter-from) {
+  opacity: 0;
+  transform: translate3d(0, 8px, 0);
+}
+
+.client-main-layout__viewport :deep(.slide-left-leave-to),
+.client-main-layout__viewport :deep(.slide-right-leave-to) {
+  opacity: 0;
+  transform: translate3d(0, -6px, 0);
 }
 
 @media (max-width: 768px) {

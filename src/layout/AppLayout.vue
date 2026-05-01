@@ -156,7 +156,7 @@ const resolveViewKey = (route: RouteLocationNormalizedLoaded) => {
 <style scoped>
 .system-entry-fade-enter-active,
 .system-entry-fade-leave-active {
-  transition: opacity 0.22s ease;
+  transition: opacity var(--motion-duration-normal) var(--ylink-motion-ease);
 }
 
 .system-entry-fade-enter-from,
@@ -180,7 +180,7 @@ const resolveViewKey = (route: RouteLocationNormalizedLoaded) => {
   min-height: 100%;
   backface-visibility: hidden;
   transform: translateZ(0);
-  will-change: transform, opacity, filter;
+  will-change: transform, opacity;
 }
 
 /* 路由切页稳定舞台：离场页绝对定位，避免新旧页面同时占位造成瞬间布局抖动。 */
@@ -188,8 +188,8 @@ const resolveViewKey = (route: RouteLocationNormalizedLoaded) => {
   position: relative;
   z-index: 2;
   transition:
-    transform 0.22s cubic-bezier(0.22, 1, 0.36, 1),
-    clip-path 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+    transform var(--ylink-motion-normal) var(--ylink-motion-ease),
+    opacity var(--ylink-motion-normal) var(--ylink-motion-ease);
 }
 
 .route-stage :deep(.fade-slide-leave-active) {
@@ -197,7 +197,7 @@ const resolveViewKey = (route: RouteLocationNormalizedLoaded) => {
   inset: 0;
   z-index: 1;
   pointer-events: none;
-  transition: opacity 0.06s linear;
+  transition: opacity var(--motion-duration-fast) var(--ylink-motion-ease);
 }
 
 /* 管理端右侧内容区切页动画：
@@ -206,27 +206,23 @@ const resolveViewKey = (route: RouteLocationNormalizedLoaded) => {
  * - 位移控制在小范围内，确保信息密集后台也保持稳定阅读体验。
  */
 .route-stage :deep(.fade-slide-enter-from) {
-  opacity: 1;
-  transform: translate3d(0, 10px, 0);
-  clip-path: inset(0 0 14% 0 round 20px);
+  opacity: 0;
+  transform: translate3d(0, 8px, 0);
 }
 
 .route-stage :deep(.fade-slide-enter-to) {
   opacity: 1;
-  transform: translate3d(0, 0, 0) scale(1);
-  clip-path: inset(0 0 0 0 round 20px);
+  transform: translate3d(0, 0, 0);
 }
 
 .route-stage :deep(.fade-slide-leave-from) {
   opacity: 1;
   transform: none;
-  clip-path: none;
 }
 
 .route-stage :deep(.fade-slide-leave-to) {
   opacity: 0;
   transform: none;
-  clip-path: none;
 }
 
 .route-loading-shell {

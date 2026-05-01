@@ -563,7 +563,9 @@ onBeforeUnmount(() => {
 .scan-input :deep(.el-input__wrapper) {
   border-radius: 12px;
   box-shadow: 0 0 0 1px var(--el-border-color) inset;
-  transition: all 0.3s;
+  transition:
+    box-shadow var(--ylink-motion-normal) var(--ylink-motion-ease),
+    border-color var(--ylink-motion-normal) var(--ylink-motion-ease);
 }
 .scan-input :deep(.el-input__wrapper.is-focus) {
   box-shadow: 0 0 0 2px var(--el-color-primary) inset;
@@ -594,7 +596,9 @@ onBeforeUnmount(() => {
   border-radius: 12px;
   padding: 10px 12px;
   background: rgba(248, 250, 252, 0.9);
-  transition: all 0.2s ease;
+  transition:
+    border-color var(--motion-duration-fast) var(--ylink-motion-ease),
+    background-color var(--motion-duration-fast) var(--ylink-motion-ease);
 }
 .recent-item:hover {
   border-color: rgba(20, 184, 166, 0.4);

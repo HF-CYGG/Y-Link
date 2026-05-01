@@ -1082,14 +1082,14 @@ onBeforeUnmount(() => {
 
 .mall-image-preview-enter-active,
 .mall-image-preview-leave-active {
-  transition: opacity 0.18s ease;
+  transition: opacity var(--ylink-motion-normal) var(--ylink-motion-ease);
 }
 
 .mall-image-preview-enter-active .mall-image-preview-photo,
 .mall-image-preview-leave-active .mall-image-preview-photo {
   transition:
-    transform 0.2s ease,
-    opacity 0.2s ease;
+    transform var(--ylink-motion-normal) var(--ylink-motion-ease),
+    opacity var(--ylink-motion-normal) var(--ylink-motion-ease);
 }
 
 .mall-image-preview-enter-from,
@@ -1146,7 +1146,9 @@ onBeforeUnmount(() => {
   font-weight: 600;
   padding: 0.52rem 1.05rem;
   box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
-  transition: transform 0.25s ease, box-shadow 0.25s ease;
+  transition:
+    transform var(--ylink-motion-normal) var(--ylink-motion-ease),
+    box-shadow var(--ylink-motion-normal) var(--ylink-motion-ease);
   pointer-events: auto;
 }
 
@@ -1262,12 +1264,14 @@ onBeforeUnmount(() => {
 
 .mall-search-overlay-enter-active,
 .mall-search-overlay-leave-active {
-  transition: opacity 0.26s ease;
+  transition: opacity var(--ylink-motion-normal) var(--ylink-motion-ease);
 }
 
 .mall-search-overlay-enter-active .mall-search-panel,
 .mall-search-overlay-leave-active .mall-search-panel {
-  transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.3s ease;
+  transition:
+    transform var(--ylink-motion-normal) var(--ylink-motion-ease),
+    opacity var(--ylink-motion-normal) var(--ylink-motion-ease);
 }
 
 .mall-search-overlay-enter-from,
@@ -1289,7 +1293,9 @@ onBeforeUnmount(() => {
   width: min(var(--client-shell-max, 1100px), calc(100vw - var(--client-shell-inline, 1.25rem) * 2));
   transform: translateX(-50%);
   pointer-events: none;
-  transition: opacity 0.3s ease, transform 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
+  transition:
+    opacity var(--ylink-motion-normal) var(--ylink-motion-ease),
+    transform var(--ylink-motion-normal) var(--ylink-motion-ease);
 }
 
 /* 当整个页面正在发生进入/离开过渡动画时，强制隐藏固定定位的购物车，避免重叠闪跳 */
@@ -1323,7 +1329,7 @@ onBeforeUnmount(() => {
   -webkit-backdrop-filter: blur(4px);
   opacity: 0;
   pointer-events: none;
-  transition: opacity 0.4s ease;
+  transition: opacity var(--ylink-motion-normal) var(--ylink-motion-ease);
 }
 
 .mini-cart-backdrop.is-expanded {
@@ -1340,11 +1346,13 @@ onBeforeUnmount(() => {
   -webkit-backdrop-filter: blur(20px);
   box-shadow: 0 20px 50px rgba(15, 23, 42, 0.12);
   pointer-events: auto;
-  transition: transform 0.5s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+  transition:
+    transform var(--ylink-motion-normal) var(--ylink-motion-ease),
+    box-shadow var(--ylink-motion-normal) var(--ylink-motion-ease);
 }
 
 .mini-cart-card.is-pulse {
-  animation: settle-pulse 0.3s ease;
+  animation: settle-pulse var(--ylink-motion-normal) var(--ylink-motion-ease);
 }
 
 .cart-summary-bar {
@@ -1447,7 +1455,7 @@ onBeforeUnmount(() => {
 }
 
 .cart-expand-trigger .el-icon {
-  transition: transform 0.35s ease;
+  transition: transform var(--ylink-motion-normal) var(--ylink-motion-ease);
 }
 
 .cart-expand-trigger .el-icon.is-expanded {
@@ -1457,7 +1465,7 @@ onBeforeUnmount(() => {
 .cart-expand-content {
   display: grid;
   grid-template-rows: 0fr;
-  transition: grid-template-rows 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  transition: grid-template-rows var(--ylink-motion-normal) var(--ylink-motion-ease);
 }
 
 .mini-cart-wrapper.is-expanded .cart-expand-content {
@@ -1503,8 +1511,8 @@ onBeforeUnmount(() => {
 .cart-item-flow-enter-active,
 .cart-item-flow-leave-active {
   transition:
-    transform 0.28s cubic-bezier(0.22, 1, 0.36, 1),
-    opacity 0.24s ease;
+    transform var(--ylink-motion-normal) var(--ylink-motion-ease),
+    opacity var(--ylink-motion-normal) var(--ylink-motion-ease);
 }
 
 .cart-item-flow-enter-from,
@@ -1514,14 +1522,14 @@ onBeforeUnmount(() => {
 }
 
 .cart-item-flow-move {
-  transition: transform 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: transform var(--ylink-motion-normal) var(--ylink-motion-ease);
 }
 
 .qty-pop-enter-active,
 .qty-pop-leave-active {
   transition:
-    transform 0.2s cubic-bezier(0.22, 1, 0.36, 1),
-    opacity 0.2s ease;
+    transform var(--ylink-motion-normal) var(--ylink-motion-ease),
+    opacity var(--ylink-motion-normal) var(--ylink-motion-ease);
 }
 
 .qty-pop-enter-from,
