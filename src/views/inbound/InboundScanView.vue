@@ -16,7 +16,7 @@ import {
   verifyInboundOrder,
   type InboundOrderDetail,
 } from '@/api/modules/inbound'
-import { CameraFilled, DocumentCopy, Search } from '@element-plus/icons-vue'
+import { CameraFilled, DocumentCopy, Loading, Search } from '@element-plus/icons-vue'
 import { useCameraQrScanner } from '@/composables/useCameraQrScanner'
 import { useDevice } from '@/composables/useDevice'
 import { extractErrorMessage } from '@/utils/error'
