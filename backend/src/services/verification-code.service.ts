@@ -20,6 +20,7 @@ import {
   type VerificationProviderConfigRecord,
 } from './system-config.service.js'
 import { auditService } from './audit.service.js'
+import { EphemeralTicketStore } from '../utils/ephemeral-ticket-store.js'
 
 type VerificationScene = 'register' | 'forgot_password' | 'test'
 
@@ -32,7 +33,10 @@ interface VerificationCodeTicket {
 }
 
 const CODE_EXPIRE_MS = 5 * 60 * 1000
-const verificationTicketStore = new Map<string, VerificationCodeTicket>()
+const verificationTicketStore = new EphemeralTicketStore<VerificationCodeTicket>({
+  maxSize: 6000,
+  resolveExpiresAt: (ticket) => ticket.expiresAt,
+})
 
 const buildTicketKey = (channel: VerificationChannelType, target: string, scene: VerificationScene) => `${channel}:${scene}:${target}`
 
@@ -225,10 +229,6 @@ export class VerificationCodeService {
     const ticket = verificationTicketStore.get(key)
     if (!ticket) {
       throw new BizError('验证码不存在或已过期，请重新获取', 400)
-    }
-    if (ticket.expiresAt <= Date.now()) {
-      verificationTicketStore.delete(key)
-      throw new BizError('验证码已过期，请重新获取', 400)
     }
     if (ticket.code !== input.code.trim()) {
       throw new BizError('验证码错误，请重新输入', 400)

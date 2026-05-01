@@ -46,6 +46,7 @@ export interface SubmitPreorderInput {
   remark?: string
   clientOrderType: O2oClientOrderType
   isSystemApplied: boolean
+  pickupContact: string
 }
 
 export interface UpdateMyPreorderInput {
@@ -157,6 +158,7 @@ export interface O2oPreorderDetailView {
     businessStatus: O2oPreorder['businessStatus']
     hasCustomerOrder: boolean
     isSystemApplied: boolean
+    pickupContact: string | null
     merchantMessage: string | null
     clientOrderType: O2oPreorder['clientOrderType']
     departmentNameSnapshot: string | null
@@ -172,6 +174,7 @@ export interface O2oPreorderDetailView {
   customerProfile: {
     id: string
     username: string
+    realName: string | null
     mobile: string | null
     email: string | null
     departmentName: string | null
@@ -225,6 +228,7 @@ export const O2O_PREORDER_REMARK_MAX_LENGTH = 255
 export const O2O_MERCHANT_MESSAGE_MAX_LENGTH = 500
 export const O2O_RETURN_REASON_MAX_LENGTH = 500
 export const O2O_RETURN_REJECT_REASON_MAX_LENGTH = 500
+export const O2O_PICKUP_CONTACT_MAX_LENGTH = 32
 
 const LIKE_ESCAPE_CHAR = String.raw`\\`
 const LIKE_SPECIAL_CHAR_PATTERN = /[%_\\]/g
@@ -380,6 +384,20 @@ class O2oPreorderService {
     }
     if (normalizedValue.length > O2O_PREORDER_REMARK_MAX_LENGTH) {
       throw new BizError(`订单备注长度不能超过${O2O_PREORDER_REMARK_MAX_LENGTH}个字符`, 400)
+    }
+    return normalizedValue
+  }
+
+  // 提货人必须按客户端本次填写结果落单：
+  // - 统一去首尾空格并校验长度；
+  // - 不允许继续由服务端静默回退成账号名，否则无法区分“本人账号”和“实际提货人”。
+  private normalizePickupContact(value: string | null | undefined): string {
+    const normalizedValue = value?.trim() ?? ''
+    if (!normalizedValue) {
+      throw new BizError('请填写提货人', 400)
+    }
+    if (normalizedValue.length > O2O_PICKUP_CONTACT_MAX_LENGTH) {
+      throw new BizError(`提货人长度不能超过${O2O_PICKUP_CONTACT_MAX_LENGTH}个字符`, 400)
     }
     return normalizedValue
   }
@@ -587,7 +605,9 @@ class O2oPreorderService {
       issuerName: input.actor.displayName || input.actor.username,
       customerDepartmentName: departmentNameSnapshot,
       idempotencyKey,
-      customerName: clientUser?.realName?.trim() || null,
+      // 正式出库单上的客户名称应优先使用下单时填写的提货人，
+      // 这样线下打印/核销后回看单据时，仍能还原真实领取人而不是账号用户名。
+      customerName: input.preorder.pickupContact?.trim() || clientUser?.realName?.trim() || null,
       remark: `线上预订核销出库，预订单号：${input.preorder.showNo}`,
       totalQty: totalQty.toFixed(2),
       totalAmount: this.formatCentsToMoney(totalAmountCents),
@@ -901,6 +921,7 @@ class O2oPreorderService {
     const nowMs = Date.now()
     const totalAmount = this.normalizeDecimalText(totalAmountNumber)
     const updateCount = this.normalizeOrderUpdateCount(order.updateCount)
+    const resolvedPickupContact = order.pickupContact?.trim() || clientUser?.realName?.trim() || clientUser?.mobile?.trim() || null
     return {
       order: {
         statusReport: this.resolveOrderStatusReport(order, nowMs),
@@ -913,6 +934,7 @@ class O2oPreorderService {
         businessStatus: order.businessStatus ?? null,
         hasCustomerOrder: Boolean(order.hasCustomerOrder),
         isSystemApplied: Boolean(order.isSystemApplied),
+        pickupContact: resolvedPickupContact,
         merchantMessage: order.merchantMessage ?? null,
         clientOrderType: order.clientOrderType === 'department' ? 'department' : 'walkin',
         departmentNameSnapshot: order.departmentNameSnapshot?.trim() || null,
@@ -926,13 +948,19 @@ class O2oPreorderService {
         createdAt: order.createdAt,
       },
       customerProfile: clientUser
-        ? {
-            id: String(clientUser.id),
-            username: clientUser.realName?.trim() || '未命名用户',
-            mobile: clientUser.mobile?.trim() || null,
-            email: clientUser.email?.trim() || null,
-            departmentName: clientUser.departmentName?.trim() || null,
-          }
+        ? (() => {
+            const normalizedUsername = clientUser.realName?.trim() || '未命名用户'
+            return {
+              id: String(clientUser.id),
+              // `username` 是当前前端应优先消费的字段；
+              // `realName` 先作为兼容别名返回，避免旧页面与新页面出现字段理解分叉。
+              username: normalizedUsername,
+              realName: normalizedUsername,
+              mobile: clientUser.mobile?.trim() || null,
+              email: clientUser.email?.trim() || null,
+              departmentName: clientUser.departmentName?.trim() || null,
+            }
+          })()
         : null,
       items: normalizedItems,
       returnRequests: returnRequests.map((item) =>
@@ -1240,6 +1268,7 @@ class O2oPreorderService {
     const normalizedClientOrderType = this.normalizeClientOrderType(input.clientOrderType)
     // 详细注释：是否系统申请必须以客户端本次明确选择为准，不再使用服务端默认兜底。
     const normalizedIsSystemApplied = Boolean(input.isSystemApplied)
+    const normalizedPickupContact = this.normalizePickupContact(input.pickupContact)
 
     const o2oRules = await systemConfigService.getO2oRuleConfigs()
     return AppDataSource.transaction(async (manager) => {
@@ -1295,6 +1324,7 @@ class O2oPreorderService {
           departmentNameSnapshot,
           isSystemApplied: normalizedIsSystemApplied,
           hasCustomerOrder: false,
+          pickupContact: normalizedPickupContact,
           totalQty,
           remark: normalizedRemark,
           timeoutAt,

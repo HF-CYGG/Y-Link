@@ -74,7 +74,7 @@ export const routeViewLoaders = {
 
   // 送货单与扫码入库模块
   'supplier-delivery': () => import('@/views/inbound/SupplierWorkbenchView.vue'),
-  'supplier-history': () => import('@/views/inbound/SupplierWorkbenchView.vue'),
+  'supplier-history': () => import('@/views/inbound/SupplierHistoryView.vue'),
   'inbound-scan': () => import('@/views/inbound/InboundScanView.vue'),
 
   'o2o-console-products': () => import('@/views/product-center/ProductCenterView.vue'),
@@ -299,6 +299,18 @@ export const resolveClientPostLoginWarmupTargets = (redirectPath?: string): AppR
  */
 export const scheduleRouteComponentWarmup = (routeNames: AppRouteName[]) => {
   if (globalThis.window === undefined) {
+    return
+  }
+
+  /**
+   * 弱网与省流场景下收缩预热：
+   * - `saveData` 打开或命中 2G/slow-2g 时，优先把带宽留给当前页面；
+   * - 正常网络仍保持现有空闲预热策略，不影响高频路径体验。
+   */
+  const networkConnection = 'connection' in globalThis.navigator
+    ? (globalThis.navigator.connection as { saveData?: boolean; effectiveType?: string } | undefined)
+    : undefined
+  if (networkConnection?.saveData || /(?:^|-)2g$/i.test(networkConnection?.effectiveType ?? '')) {
     return
   }
 

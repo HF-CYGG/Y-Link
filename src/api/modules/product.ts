@@ -77,6 +77,15 @@ export interface ProductListQuery {
   keyword?: string
   isActive?: boolean
   tagId?: string
+  page?: number
+  pageSize?: number
+}
+
+export interface ProductPagedResult {
+  page: number
+  pageSize: number
+  total: number
+  list: ProductRecord[]
 }
 
 type PrimitiveValue = string | number | boolean | null | undefined
@@ -222,11 +231,38 @@ export const getProductList = async (params: ProductListQuery, requestConfig: Re
   return result.map(normalizeProductRecord)
 }
 
+export const getProductListPaged = async (
+  params: ProductListQuery,
+  requestConfig: RequestConfig = {},
+): Promise<ProductPagedResult> => {
+  const result = await request<{
+    page: number
+    pageSize: number
+    total: number
+    list: ProductRawRecord[]
+  }>({
+    ...requestConfig,
+    method: 'GET',
+    url: '/products/paged',
+    params,
+  })
+
+  return {
+    page: result.page,
+    pageSize: result.pageSize,
+    total: result.total,
+    list: result.list.map(normalizeProductRecord),
+  }
+}
+
 /**
- * 获取产品详情
+ * 获取产品详情：
+ * - 支持透传 signal，供编辑弹窗等高频详情入口取消旧请求；
+ * - 返回值统一归一化为前端可直接消费的产品实体。
  */
-export const getProductDetail = async (id: string): Promise<ProductRecord> => {
+export const getProductDetail = async (id: string, requestConfig: RequestConfig = {}): Promise<ProductRecord> => {
   const result = await request<ProductRawRecord | ProductDetailRawResult>({
+    ...requestConfig,
     method: 'GET',
     url: `/products/${id}`,
   })

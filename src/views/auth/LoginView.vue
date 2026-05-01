@@ -72,6 +72,7 @@ const handleSubmit = async () => {
     }) 
 
     submitPhase.value = 'success' 
+    securityHint.value = ''
     ElMessage.success(`欢迎回来，${result.user.displayName}`) 
     if (result.securityReminder) {
       ElMessageBox.alert(result.securityReminder, '安全提醒', {
@@ -79,8 +80,12 @@ const handleSubmit = async () => {
         confirmButtonText: '我知道了',
       }).catch(() => undefined)
     }
-    const redirectPath = ref(typeof route.query.redirect === 'string' ? resolveSafeRedirect(route.query.redirect, result.user) : resolveDefaultManagementRedirect(result.user))
-    
+    const redirectPath = ref(
+      typeof route.query.redirect === 'string'
+        ? resolveSafeRedirect(route.query.redirect, result.user)
+        : resolveDefaultManagementRedirect(result.user),
+    )
+
     await authStore.warmupPostLoginEntry(redirectPath.value)
     await router.replace(redirectPath.value) 
   } catch (error) { 

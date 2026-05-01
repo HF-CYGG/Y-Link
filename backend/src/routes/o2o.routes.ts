@@ -25,6 +25,8 @@ const submitPreorderSchema = z.object({
   clientOrderType: z.enum(['department', 'walkin']),
   // 详细注释：客户端必须显式传入“是否系统申请”，避免服务端继续使用默认值导致语义失真。
   isSystemApplied: z.boolean(),
+  // 详细注释：提货人由客户端显式填写后传入服务端，避免继续退回为账号默认名导致代领场景失真。
+  pickupContact: z.string().trim().min(1).max(32),
   remark: z.string().max(O2O_PREORDER_REMARK_MAX_LENGTH).optional(),
   items: z.array(z.object({ productId: z.union([z.string(), z.number()]), qty: z.number().int().positive() })).min(1),
 })

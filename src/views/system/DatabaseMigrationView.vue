@@ -11,6 +11,11 @@ import dayjs from 'dayjs'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { PageContainer, PageToolbarCard } from '@/components/common'
+import DatabaseMigrationOverviewSection from '@/views/system/components/DatabaseMigrationOverviewSection.vue'
+import DatabaseMigrationPrecheckSection from '@/views/system/components/DatabaseMigrationPrecheckSection.vue'
+import DatabaseMigrationRunSection from '@/views/system/components/DatabaseMigrationRunSection.vue'
+import DatabaseMigrationStepFlowSection from '@/views/system/components/DatabaseMigrationStepFlowSection.vue'
+import DatabaseMigrationSwitchSection from '@/views/system/components/DatabaseMigrationSwitchSection.vue'
 import {
   applyDatabaseMigrationSwitch,
   clearDatabaseMigrationRuntimeOverride,
@@ -998,344 +1003,37 @@ onMounted(() => {
       <el-alert v-else-if="loadError" :title="loadError" type="error" :closable="false" show-icon />
 
       <template v-if="canViewMigration">
-        <section class="apple-card space-y-5 p-5 sm:p-6">
-          <div class="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-4 dark:border-white/5">
-            <div>
-              <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">当前数据库状态总览</h2>
-              <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                先确认系统当前真正连接的数据库，再决定是否进入数据库迁移助手，避免在错误环境中直接创建任务。
-              </p>
-            </div>
-            <el-tag :type="migrationRecommendationTag" effect="light">
-              {{ migrationRecommendationLabel }}
-            </el-tag>
-          </div>
+        <DatabaseMigrationOverviewSection
+          :effective-database-summary="effectiveDatabaseSummary"
+          :beginner-guide="beginnerGuide"
+          :migration-recommendation-tag="migrationRecommendationTag"
+          :migration-recommendation-label="migrationRecommendationLabel"
+          :active-runtime-mode-label="activeRuntimeModeLabel"
+          :get-runtime-mode-tag-type="getRuntimeModeTagType"
+          :page-loading="pageLoading"
+          @enter-flow="handleEnterStepFlow"
+        />
 
-          <div class="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(320px,0.9fr)]">
-            <div class="rounded-3xl border border-slate-200/80 bg-slate-50/80 p-5 dark:border-white/10 dark:bg-slate-900/20">
-              <p class="text-sm text-slate-500 dark:text-slate-400">当前实际生效数据库</p>
-              <div class="mt-3 flex flex-wrap items-center gap-2">
-                <p class="text-2xl font-semibold text-slate-900 dark:text-slate-100">
-                  {{ effectiveDatabaseSummary?.displayName || '-' }}
-                </p>
-                <el-tag :type="getRuntimeModeTagType()" effect="light">
-                  {{ activeRuntimeModeLabel }}
-                </el-tag>
-              </div>
-              <p class="mt-3 text-sm leading-6 text-slate-600 dark:text-slate-300">
-                {{ effectiveDatabaseSummary?.description || '正在读取当前数据库状态...' }}
-              </p>
-              <div class="mt-4 grid gap-3 sm:grid-cols-2">
-                <div class="rounded-2xl bg-white px-4 py-3 dark:bg-slate-950/40">
-                  <p class="text-xs text-slate-400">当前连接摘要</p>
-                  <p class="mt-1 break-all text-sm font-medium text-slate-700 dark:text-slate-200">
-                    {{ effectiveDatabaseSummary?.summary || '-' }}
-                  </p>
-                </div>
-                <div class="rounded-2xl bg-white px-4 py-3 dark:bg-slate-950/40">
-                  <p class="text-xs text-slate-400">配置来源</p>
-                  <p class="mt-1 text-sm font-medium text-slate-700 dark:text-slate-200">
-                    {{ effectiveDatabaseSummary?.sourceLabel || '-' }}
-                  </p>
-                </div>
-              </div>
-            </div>
+        <DatabaseMigrationStepFlowSection
+          :has-entered-step-flow="hasEnteredStepFlow"
+          :active-step-key="activeStepKey"
+          :step-flow-cards="stepFlowCards"
+          @open-step="handleOpenStep($event.stepKey, $event.unlocked)"
+        />
 
-            <div class="rounded-3xl border border-slate-200/80 bg-white p-5 dark:border-white/10 dark:bg-slate-950/30">
-              <p class="text-sm font-semibold text-slate-700 dark:text-slate-200">系统推荐动作</p>
-              <div class="mt-3 space-y-3 text-sm leading-6 text-slate-600 dark:text-slate-300">
-                <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-slate-900/40">
-                  <p class="text-xs text-slate-400">当前情况</p>
-                  <p class="mt-1 font-medium text-slate-700 dark:text-slate-200">{{ beginnerGuide?.headline || '-' }}</p>
-                </div>
-                <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-slate-900/40">
-                  <p class="text-xs text-slate-400">建议动作</p>
-                  <p class="mt-1">{{ beginnerGuide?.recommendedAction || '-' }}</p>
-                </div>
-                <div class="rounded-2xl bg-slate-50 px-4 py-3 dark:bg-slate-900/40">
-                  <p class="text-xs text-slate-400">下一步提醒</p>
-                  <p class="mt-1">{{ beginnerGuide?.nextStep || '准备好目标 MySQL 信息后，再进入数据库迁移助手开始预检。' }}</p>
-                </div>
-                <div class="rounded-2xl bg-amber-50 px-4 py-3 text-amber-700 dark:bg-amber-500/10 dark:text-amber-200">
-                  <p class="text-xs opacity-80">风险提醒</p>
-                  <p class="mt-1">{{ beginnerGuide?.riskTip || '数据库切换涉及运行环境，请先核对重启窗口与回退方案。' }}</p>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div class="rounded-3xl border border-dashed border-slate-300/80 bg-slate-50/70 p-5 dark:border-white/10 dark:bg-slate-900/20">
-            <div class="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <p class="text-sm font-semibold text-slate-800 dark:text-slate-100">第一步入口</p>
-                <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                  从预检开始最安全。数据库迁移助手会在每一步完成后自动解锁下一块功能区。
-                </p>
-              </div>
-              <el-button type="primary" :disabled="pageLoading" @click="handleEnterStepFlow">
-                进入第 1 步：预检目标 MySQL
-              </el-button>
-            </div>
-          </div>
-        </section>
-
-        <section v-if="hasEnteredStepFlow" class="apple-card space-y-4 p-5 sm:p-6">
-          <div class="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-4 dark:border-white/5">
-            <div>
-              <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">迁移步骤助手</h2>
-              <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                仅开放已完成前置步骤后的功能区。你也可以点击已解锁步骤，回看或调整之前的操作；推荐顺序与自动脚本提示保持一致。
-              </p>
-            </div>
-            <el-tag effect="light" type="info">
-              当前步骤：{{ stepFlowCards.find((item) => item.key === activeStepKey)?.title || '-' }}
-            </el-tag>
-          </div>
-
-          <div class="grid gap-3 lg:grid-cols-4">
-            <button
-              v-for="step in stepFlowCards"
-              :key="step.key"
-              type="button"
-              class="rounded-3xl border p-4 text-left transition"
-              :class="[
-                step.unlocked
-                  ? activeStepKey === step.key
-                    ? 'border-blue-300 bg-blue-50/80 shadow-sm dark:border-blue-400/40 dark:bg-blue-500/10'
-                    : 'border-slate-200/80 bg-slate-50/80 hover:border-blue-200 hover:bg-blue-50/50 dark:border-white/10 dark:bg-slate-900/20'
-                  : 'cursor-not-allowed border-slate-200/60 bg-slate-100/70 opacity-65 dark:border-white/10 dark:bg-slate-900/10',
-              ]"
-              :disabled="!step.unlocked"
-              @click="handleOpenStep(step.key, step.unlocked)"
-            >
-              <div class="flex items-start justify-between gap-3">
-                <div>
-                  <p class="text-xs font-semibold text-slate-400">{{ step.order }}</p>
-                  <p class="mt-2 text-sm font-semibold text-slate-800 dark:text-slate-100">{{ step.title }}</p>
-                </div>
-                <el-tag :type="step.tagType" effect="light">
-                  {{ step.statusLabel }}
-                </el-tag>
-              </div>
-              <p class="mt-3 text-sm leading-6 text-slate-500 dark:text-slate-400">
-                {{ step.description }}
-              </p>
-            </button>
-          </div>
-        </section>
-
-        <section v-if="hasEnteredStepFlow && activeStepKey === 'precheck'" class="apple-card space-y-5 p-5 sm:p-6">
-          <div class="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-4 dark:border-white/5">
-            <div>
-              <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">第 1 步：填写目标 MySQL 并执行预检</h2>
-              <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                先用真实目标库信息做预检。只有预检通过后，系统才会解锁任务创建与执行区。
-              </p>
-            </div>
-            <el-tag v-if="precheckResult" :type="precheckResult.canProceed ? 'success' : 'danger'" effect="light">
-              {{ precheckResult.canProceed ? '预检通过' : '存在阻断问题' }}
-            </el-tag>
-          </div>
-
-          <div class="grid gap-4 xl:grid-cols-[minmax(0,420px)_minmax(0,1fr)]">
-            <div class="space-y-5">
-              <div class="grid gap-4 sm:grid-cols-2">
-                <div class="space-y-2 sm:col-span-2">
-                  <div class="text-sm text-slate-600 dark:text-slate-300">主机地址</div>
-                  <el-input v-model="migrationForm.target.host" placeholder="例如：127.0.0.1 或 mysql.internal" />
-                </div>
-                <div class="space-y-2">
-                  <div class="text-sm text-slate-600 dark:text-slate-300">端口</div>
-                  <el-input-number v-model="migrationForm.target.port" :min="1" :max="65535" :controls="false" class="!w-full" />
-                </div>
-                <div class="space-y-2">
-                  <div class="text-sm text-slate-600 dark:text-slate-300">用户名</div>
-                  <el-input v-model="migrationForm.target.user" placeholder="请输入 MySQL 用户名" />
-                </div>
-                <div class="space-y-2">
-                  <div class="text-sm text-slate-600 dark:text-slate-300">密码</div>
-                  <el-input v-model="migrationForm.target.password" type="password" show-password placeholder="请输入 MySQL 密码" />
-                </div>
-                <div class="space-y-2">
-                  <div class="text-sm text-slate-600 dark:text-slate-300">数据库名</div>
-                  <el-input v-model="migrationForm.target.database" placeholder="请输入目标库名称" />
-                </div>
-              </div>
-
-              <div class="grid gap-3 rounded-2xl border border-slate-200/80 bg-slate-50/70 p-4 dark:border-white/10 dark:bg-slate-900/20">
-                <div class="flex items-center justify-between gap-3">
-                  <div>
-                    <div class="text-sm font-medium text-slate-700 dark:text-slate-200">允许目标库已有业务数据</div>
-                    <div class="mt-1 text-xs text-slate-500 dark:text-slate-400">若目标 MySQL 中已有业务表数据，预检会转为高风险提示</div>
-                  </div>
-                  <el-switch v-model="migrationForm.allowTargetWithData" />
-                </div>
-                <div class="flex items-center justify-between gap-3">
-                  <div>
-                    <div class="text-sm font-medium text-slate-700 dark:text-slate-200">初始化目标表结构</div>
-                    <div class="mt-1 text-xs text-slate-500 dark:text-slate-400">推荐开启，让后端按实体结构初始化目标 MySQL</div>
-                  </div>
-                  <el-switch v-model="migrationForm.initializeSchema" />
-                </div>
-                <div class="flex items-center justify-between gap-3">
-                  <div>
-                    <div class="text-sm font-medium text-slate-700 dark:text-slate-200">导入前清空目标业务表</div>
-                    <div class="mt-1 text-xs text-slate-500 dark:text-slate-400">仅在确认目标库可覆盖时开启，避免残留旧数据</div>
-                  </div>
-                  <el-switch v-model="migrationForm.clearTargetBeforeImport" />
-                </div>
-                <div class="flex items-center justify-between gap-3">
-                  <div>
-                    <div class="text-sm font-medium text-slate-700 dark:text-slate-200">执行前创建 SQLite 物理备份</div>
-                    <div class="mt-1 text-xs text-slate-500 dark:text-slate-400">该项为固定开启，用于与 JSON 快照组成双重备份，保障回退安全</div>
-                  </div>
-                  <el-switch v-model="migrationForm.createSqliteBackup" disabled />
-                </div>
-                <div class="flex items-center justify-between gap-3">
-                  <div>
-                    <div class="text-sm font-medium text-slate-700 dark:text-slate-200">迁移成功后自动切换到 MySQL</div>
-                    <div class="mt-1 text-xs text-slate-500 dark:text-slate-400">{{ DATABASE_MIGRATION_RESTART_EFFECT_TEXT }}</div>
-                  </div>
-                  <el-switch v-model="migrationForm.switchAfterSuccess" />
-                </div>
-                <div class="flex items-center justify-between gap-3">
-                  <div>
-                    <div class="text-sm font-medium text-slate-700 dark:text-slate-200">目标库启用 Schema 同步</div>
-                    <div class="mt-1 text-xs text-slate-500 dark:text-slate-400">仅在你明确知道该环境允许自动同步结构时再开启</div>
-                  </div>
-                  <el-switch v-model="migrationForm.target.dbSync" />
-                </div>
-              </div>
-
-              <div class="space-y-2">
-                <div class="text-sm text-slate-600 dark:text-slate-300">迁移备注</div>
-                <el-input
-                  v-model="migrationForm.note"
-                  type="textarea"
-                  :rows="3"
-                  maxlength="500"
-                  show-word-limit
-                  placeholder="例如：测试环境切换到 4 月份新建 MySQL，用于验证订单与商品数据"
-                />
-              </div>
-
-              <div class="flex flex-wrap gap-2">
-                <el-button type="primary" :loading="precheckLoading" :disabled="pageLoading" @click="handlePrecheck">
-                  执行预检
-                </el-button>
-              </div>
-            </div>
-
-            <div class="space-y-4">
-              <div class="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-4 dark:border-white/10 dark:bg-slate-900/20">
-                <div class="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100">最近一次预检结果</h3>
-                    <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                      预检会同时校验 SQLite 源文件、MySQL 连通性、目标业务表状态与当前运行时覆盖风险。
-                    </p>
-                  </div>
-                  <el-tag v-if="precheckResult" :type="precheckResult.canProceed ? 'success' : 'danger'" effect="light">
-                    {{ precheckResult.canProceed ? '允许继续' : '需先处理问题' }}
-                  </el-tag>
-                </div>
-
-                <div v-if="precheckResult" class="mt-4 space-y-4">
-                  <el-descriptions :column="2" border>
-                    <el-descriptions-item label="预检时间">
-                      {{ formatDateTime(precheckResult.checkedAt) }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="SQLite 文件存在">
-                      {{ precheckResult.source.sqliteFileExists ? '是' : '否' }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="SQLite 路径">
-                      {{ precheckResult.source.sqlitePath }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="SQLite 文件大小">
-                      {{ precheckResult.source.sqliteFileSizeBytes }} Bytes
-                    </el-descriptions-item>
-                    <el-descriptions-item label="SQLite 数据量">
-                      {{ formatTableSummary(precheckResult.source.tables) }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="MySQL 连通性">
-                      {{ precheckResult.target.reachable ? '可连接' : '不可连接' }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="MySQL 版本">
-                      {{ precheckResult.target.version || '-' }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="目标库">
-                      {{ precheckResult.target.host }}:{{ precheckResult.target.port }} / {{ precheckResult.target.database }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="数据库已存在">
-                      {{ precheckResult.target.databaseExists ? '是' : '否' }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="目标表结构状态">
-                      {{
-                        precheckResult.target.schemaReady
-                          ? '已齐全'
-                          : precheckResult.target.needsSchemaInitialization
-                            ? '缺表，可由迁移任务初始化'
-                            : '待确认'
-                      }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="目标业务表">
-                      {{ formatTableSummary(precheckResult.target.existingAppTables) }}
-                    </el-descriptions-item>
-                  </el-descriptions>
-
-                  <div class="space-y-2">
-                    <div class="text-sm font-medium text-slate-700 dark:text-slate-200">预检问题</div>
-                    <div class="flex flex-wrap gap-2">
-                      <el-tag
-                        v-for="issue in precheckResult.issues"
-                        :key="`${issue.level}-${issue.code}-${issue.message}`"
-                        :type="getIssueTagType(issue.level)"
-                        effect="light"
-                      >
-                        {{ issue.code }}
-                      </el-tag>
-                      <span v-if="precheckResult.issues.length === 0" class="text-sm text-slate-500 dark:text-slate-400">
-                        未发现额外风险项
-                      </span>
-                    </div>
-                    <div
-                      v-if="precheckResult.source.missingTables.length || precheckResult.target.missingAppTables.length"
-                      class="grid gap-3 md:grid-cols-2"
-                    >
-                      <el-alert
-                        v-if="precheckResult.source.missingTables.length"
-                        :title="`SQLite 缺少业务表：${precheckResult.source.missingTables.join('、')}`"
-                        type="error"
-                        :closable="false"
-                        show-icon
-                      />
-                      <el-alert
-                        v-if="precheckResult.target.missingAppTables.length"
-                        :title="`目标 MySQL 缺少业务表：${precheckResult.target.missingAppTables.join('、')}`"
-                        :type="precheckResult.target.schemaReady ? 'success' : 'info'"
-                        :closable="false"
-                        show-icon
-                      />
-                    </div>
-                    <div class="space-y-2">
-                      <el-alert
-                        v-for="issue in precheckResult.issues"
-                        :key="`${issue.code}-${issue.message}`"
-                        :title="issue.message"
-                        :description="getIssuePlainLanguage(issue)"
-                        :type="issue.level === 'error' ? 'error' : issue.level === 'warning' ? 'warning' : 'info'"
-                        :closable="false"
-                        show-icon
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                <el-empty v-else description="尚未执行预检，请先填写目标 MySQL 信息并点击“执行预检”" />
-              </div>
-            </div>
-          </div>
-        </section>
+        <DatabaseMigrationPrecheckSection
+          :has-entered-step-flow="hasEnteredStepFlow"
+          :active-step-key="activeStepKey"
+          :page-loading="pageLoading"
+          :precheck-loading="precheckLoading"
+          :precheck-result="precheckResult"
+          :migration-form="migrationForm"
+          :format-date-time="formatDateTime"
+          :format-table-summary="formatTableSummary"
+          :get-issue-tag-type="getIssueTagType"
+          :get-issue-plain-language="getIssuePlainLanguage"
+          @precheck="handlePrecheck"
+        />
 
         <section v-if="hasEnteredStepFlow && activeStepKey === 'create'" class="apple-card space-y-5 p-5 sm:p-6">
           <div class="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-4 dark:border-white/5">
@@ -1440,369 +1138,43 @@ onMounted(() => {
           </div>
         </section>
 
-        <section v-if="hasEnteredStepFlow && activeStepKey === 'run'" class="apple-card space-y-5 p-5 sm:p-6">
-          <div class="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-4 dark:border-white/5">
-            <div>
-              <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">第 3 步：执行迁移并核验结果</h2>
-              <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                先执行任务，再确认进度、导入行数和迁后校验结果。只有成功任务才会解锁最后一步的切换动作。
-              </p>
-            </div>
-            <div class="text-sm text-slate-500 dark:text-slate-400">
-              共 {{ taskList.length }} 条任务记录
-            </div>
-          </div>
+        <DatabaseMigrationRunSection
+          :has-entered-step-flow="hasEnteredStepFlow"
+          :active-step-key="activeStepKey"
+          :task-list="taskList"
+          :selected-task="selectedTask"
+          :can-operate-migration="canOperateMigration"
+          :task-running-id="taskRunningId"
+          :selected-task-progress-percent="selectedTaskProgressPercent"
+          :has-succeeded-task="hasSucceededTask"
+          :format-date-time="formatDateTime"
+          :get-task-status-label="getTaskStatusLabel"
+          :get-task-status-tag-type="getTaskStatusTagType"
+          :get-task-read-state-label="getTaskReadStateLabel"
+          :get-task-read-state-tag-type="getTaskReadStateTagType"
+          @select-task="handleSelectTask"
+          @run-task="handleRunTask"
+        />
 
-          <div class="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(340px,0.9fr)]">
-            <div class="min-w-0">
-              <el-table
-                :data="taskList"
-                stripe
-                border
-                table-layout="auto"
-                empty-text="暂无迁移任务"
-                @row-click="handleSelectTask"
-              >
-                <el-table-column label="任务 ID" min-width="220" show-overflow-tooltip>
-                  <template #default="{ row }">
-                    <span class="font-mono text-xs">{{ row.id }}</span>
-                  </template>
-                </el-table-column>
-                <el-table-column label="状态" width="100" align="center">
-                  <template #default="{ row }">
-                    <el-tag :type="getTaskStatusTagType(row.status)" effect="light">
-                      {{ getTaskStatusLabel(row.status) }}
-                    </el-tag>
-                  </template>
-                </el-table-column>
-                <el-table-column label="文件状态" width="110" align="center">
-                  <template #default="{ row }">
-                    <el-tag :type="getTaskReadStateTagType(row.readState)" effect="light">
-                      {{ getTaskReadStateLabel(row.readState) }}
-                    </el-tag>
-                  </template>
-                </el-table-column>
-                <el-table-column label="当前阶段" min-width="220" show-overflow-tooltip>
-                  <template #default="{ row }">{{ row.progress.currentStage || '-' }}</template>
-                </el-table-column>
-                <el-table-column label="目标库" min-width="180" show-overflow-tooltip>
-                  <template #default="{ row }">{{ row.target.host }}:{{ row.target.port }}/{{ row.target.database }}</template>
-                </el-table-column>
-                <el-table-column label="更新时间" min-width="168">
-                  <template #default="{ row }">{{ formatDateTime(row.updatedAt) }}</template>
-                </el-table-column>
-                <el-table-column label="操作" min-width="180" fixed="right">
-                  <template #default="{ row }">
-                    <div class="flex flex-wrap gap-2">
-                      <el-button
-                        size="small"
-                        type="primary"
-                        :loading="taskRunningId === row.id"
-                        :disabled="!canOperateMigration || row.readState === 'corrupted' || row.status === 'running' || row.status === 'succeeded'"
-                        @click.stop="handleRunTask(row)"
-                      >
-                        执行
-                      </el-button>
-                      <el-button size="small" @click.stop="handleSelectTask(row)">详情</el-button>
-                    </div>
-                  </template>
-                </el-table-column>
-              </el-table>
-            </div>
-
-            <div class="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-4 dark:border-white/10 dark:bg-slate-900/20">
-              <template v-if="selectedTask">
-                <div class="border-b border-slate-200/80 pb-4 dark:border-white/10">
-                  <div class="flex flex-wrap items-start justify-between gap-3">
-                    <div>
-                      <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100">任务详情</h3>
-                      <div class="mt-1 font-mono text-xs text-slate-500 dark:text-slate-400">{{ selectedTask.id }}</div>
-                    </div>
-                    <el-tag :type="getTaskStatusTagType(selectedTask.status)" effect="light">
-                      {{ getTaskStatusLabel(selectedTask.status) }}
-                    </el-tag>
-                  </div>
-                </div>
-
-                <div class="mt-4 space-y-4">
-                  <el-alert
-                    v-if="selectedTask.readState === 'corrupted'"
-                    title="当前任务文件已损坏"
-                    type="error"
-                    :closable="false"
-                    show-icon
-                    :description="`系统当前展示的是占位记录。文件：${selectedTask.recordFilePath || selectedTask.recordFileName || '-'}；原因：${selectedTask.recordErrorMessage || selectedTask.errorMessage || '未知错误'}`"
-                  />
-
-                  <el-progress
-                    :percentage="selectedTaskProgressPercent"
-                    :status="selectedTask.status === 'failed' ? 'exception' : selectedTask.status === 'succeeded' ? 'success' : undefined"
-                  />
-
-                  <el-descriptions :column="1" border>
-                    <el-descriptions-item label="当前阶段">
-                      {{ selectedTask.progress.currentStage || '-' }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="SQLite 源路径">
-                      {{ selectedTask.source.sqlitePath }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="目标 MySQL">
-                      {{ selectedTask.target.host }}:{{ selectedTask.target.port }}/{{ selectedTask.target.database }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="创建时间">
-                      {{ formatDateTime(selectedTask.createdAt) }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="开始时间">
-                      {{ formatDateTime(selectedTask.startedAt) }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="完成时间">
-                      {{ formatDateTime(selectedTask.finishedAt) }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="备注">
-                      {{ selectedTask.note || '-' }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="执行选项">
-                      <div class="flex flex-wrap gap-2">
-                        <el-tag :type="selectedTask.options.initializeSchema ? 'success' : 'info'" effect="light">
-                          {{ selectedTask.options.initializeSchema ? '初始化表结构' : '不初始化表结构' }}
-                        </el-tag>
-                        <el-tag :type="selectedTask.options.clearTargetBeforeImport ? 'warning' : 'info'" effect="light">
-                          {{ selectedTask.options.clearTargetBeforeImport ? '导入前清空目标表' : '保留目标表原数据' }}
-                        </el-tag>
-                        <el-tag :type="selectedTask.options.createSqliteBackup ? 'success' : 'info'" effect="light">
-                          {{ selectedTask.options.createSqliteBackup ? '执行前备份 SQLite' : '不创建 SQLite 备份' }}
-                        </el-tag>
-                        <el-tag :type="selectedTask.options.switchAfterSuccess ? 'warning' : 'info'" effect="light">
-                          {{ selectedTask.options.switchAfterSuccess ? '成功后自动切换' : '成功后不自动切换' }}
-                        </el-tag>
-                      </div>
-                    </el-descriptions-item>
-                    <el-descriptions-item label="SQLite 备份文件">
-                      {{ selectedTask.backupFile?.filePath || '-' }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="JSON 快照文件">
-                      {{ selectedTask.jsonSnapshotFile?.filePath || '-' }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="失败原因">
-                      {{ selectedTask.errorMessage || '-' }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="任务文件状态">
-                      <el-tag :type="getTaskReadStateTagType(selectedTask.readState)" effect="light">
-                        {{ getTaskReadStateLabel(selectedTask.readState) }}
-                      </el-tag>
-                    </el-descriptions-item>
-                    <el-descriptions-item label="任务文件路径">
-                      {{ selectedTask.recordFilePath || '-' }}
-                    </el-descriptions-item>
-                  </el-descriptions>
-
-                  <div class="space-y-2">
-                    <div class="text-sm font-medium text-slate-700 dark:text-slate-200">迁移表结果</div>
-                    <el-table :data="selectedTask.result?.importedTables || selectedTask.progress.tableResults" size="small" border empty-text="暂无表级结果">
-                      <el-table-column label="表名" prop="tableName" min-width="150" show-overflow-tooltip />
-                      <el-table-column label="行数" prop="rowCount" width="100" align="right" />
-                    </el-table>
-                  </div>
-
-                  <el-alert
-                    v-if="selectedTask.result"
-                    :title="`共导入 ${selectedTask.result.importedRows} 行数据，运行时覆盖状态：${selectedTask.result.runtimeOverrideApplied ? '已写入 MySQL 运行时覆盖，重启后端服务后生效' : '未自动写入运行时覆盖'}`"
-                    :type="selectedTask.status === 'succeeded' ? 'success' : 'info'"
-                    :closable="false"
-                    show-icon
-                  />
-
-                  <div v-if="selectedTask.result?.validation" class="space-y-2">
-                    <div class="text-sm font-medium text-slate-700 dark:text-slate-200">迁后校验结果</div>
-                    <el-alert
-                      :title="selectedTask.result.validation.passed ? '迁后关键数据校验通过' : '迁后关键数据校验未通过'"
-                      :description="`源库 ${selectedTask.result.validation.sourceTotalRows} 行，目标库 ${selectedTask.result.validation.targetTotalRows} 行；校验时间：${formatDateTime(selectedTask.result.validation.checkedAt)}`"
-                      :type="selectedTask.result.validation.passed ? 'success' : 'error'"
-                      :closable="false"
-                      show-icon
-                    />
-                    <el-table :data="selectedTask.result.validation.items" size="small" border max-height="240">
-                      <el-table-column label="表名" prop="tableName" min-width="150" show-overflow-tooltip />
-                      <el-table-column label="源行数" prop="sourceRowCount" width="96" align="right" />
-                      <el-table-column label="目标行数" prop="targetRowCount" width="96" align="right" />
-                      <el-table-column label="关键表" width="88" align="center">
-                        <template #default="{ row }">
-                          <el-tag :type="row.blocking ? 'danger' : 'info'" effect="light">
-                            {{ row.blocking ? '是' : '否' }}
-                          </el-tag>
-                        </template>
-                      </el-table-column>
-                      <el-table-column label="结果" width="88" align="center">
-                        <template #default="{ row }">
-                          <el-tag :type="row.matched ? 'success' : 'danger'" effect="light">
-                            {{ row.matched ? '一致' : '异常' }}
-                          </el-tag>
-                        </template>
-                      </el-table-column>
-                    </el-table>
-                  </div>
-
-                  <el-alert
-                    v-if="hasSucceededTask"
-                    title="已解锁最后一步"
-                    type="success"
-                    :closable="false"
-                    show-icon
-                    description="至少存在一条成功任务，可以进入第 4 步写入切换配置，或根据结果决定回退。"
-                  />
-                </div>
-              </template>
-              <el-empty v-else description="点击左侧任务行后，可在这里查看迁移详情" />
-            </div>
-          </div>
-        </section>
-
-        <section v-if="hasEnteredStepFlow && activeStepKey === 'switch'" class="apple-card space-y-5 p-5 sm:p-6">
-          <div class="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-4 dark:border-white/5">
-            <div>
-              <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">第 4 步：切换到 MySQL 或回退 SQLite</h2>
-              <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                只有成功任务才建议执行切换。无论写入的是切换配置、回退配置还是清空覆盖，都应把“写入运行时覆盖”和“重启后端服务”视为同一次变更动作。
-              </p>
-            </div>
-            <el-tag :type="hasPreparedMysqlSwitch ? 'success' : 'warning'" effect="light">
-              {{ hasPreparedMysqlSwitch ? '已写入 MySQL 相关配置' : '等待最终操作' }}
-            </el-tag>
-          </div>
-
-          <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(320px,0.95fr)]">
-            <div class="space-y-4">
-              <div class="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-4 dark:border-white/10 dark:bg-slate-900/20">
-                <div class="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100">当前运行状态</h3>
-                    <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                      这里同时展示“当前进程实际连接的数据库”和“运行时覆盖文件的状态”，避免把待重启状态误判为已经生效。
-                    </p>
-                  </div>
-                  <el-tag :type="getRuntimeModeTagType()" effect="light">
-                    {{ activeRuntimeModeLabel }}
-                  </el-tag>
-                </div>
-
-                <div class="mt-4">
-                  <el-descriptions :column="2" border>
-                    <el-descriptions-item label="实际生效数据库">
-                      {{ runtimeState?.effectiveDatabase?.displayName || '-' }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="当前建议动作">
-                      {{ runtimeState?.beginnerGuide?.recommendedAction || '-' }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="覆盖文件路径">
-                      {{ runtimeState?.filePath || '-' }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="覆盖文件状态">
-                      {{ runtimeOverrideStatus?.statusLabel || '-' }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="当前模式来源">
-                      {{ runtimeState?.effectiveDatabase?.sourceLabel || '-' }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="覆盖更新时间">
-                      {{ formatDateTime(runtimeState?.activeOverride?.updatedAt) }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="来源任务">
-                      {{ runtimeState?.activeOverride?.sourceTaskId || '-' }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="切换原因">
-                      {{ runtimeState?.activeOverride?.reason || '-' }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="执行人">
-                      {{ runtimeState?.activeOverride?.updatedBy?.displayName || runtimeState?.activeOverride?.updatedBy?.username || '-' }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="可回退 SQLite">
-                      {{ runtimeState?.activeOverride?.rollbackConfig?.SQLITE_DB_PATH || '-' }}
-                    </el-descriptions-item>
-                    <el-descriptions-item label="覆盖目标库">
-                      <template v-if="runtimeState?.activeOverride?.config?.DB_TYPE === 'mysql'">
-                        {{ runtimeState.activeOverride.config.DB_HOST }}:{{ runtimeState.activeOverride.config.DB_PORT }} /
-                        {{ runtimeState.activeOverride.config.DB_NAME }}
-                      </template>
-                      <template v-else>
-                        {{ runtimeState?.activeOverride?.config?.SQLITE_DB_PATH || '-' }}
-                      </template>
-                    </el-descriptions-item>
-                  </el-descriptions>
-                </div>
-
-                <div class="mt-4 space-y-3">
-                  <el-alert
-                    :title="runtimeOverrideStatus?.statusLabel || '运行时覆盖状态'"
-                    type="info"
-                    :closable="false"
-                    show-icon
-                    :description="runtimeOverrideStatus?.description || '正在读取运行时覆盖状态...'"
-                  />
-                  <el-alert
-                    title="重启提示"
-                    type="warning"
-                    :closable="false"
-                    show-icon
-                    :description="`${DATABASE_MIGRATION_RESTART_EFFECT_TEXT}若只写入配置但未重启，页面会继续显示待重启提醒。`"
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div class="space-y-4">
-              <div class="rounded-2xl border border-slate-200/80 bg-white p-4 dark:border-white/10 dark:bg-slate-950/30">
-                <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100">最终操作面板</h3>
-                <p class="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">
-                  优先确认已选任务是否成功、迁后校验是否正常，再执行切换。若验证异常，可直接写入回退配置恢复到 SQLite。
-                </p>
-
-                <div class="mt-4 rounded-2xl bg-slate-50 px-4 py-3 dark:bg-slate-900/40">
-                  <p class="text-xs text-slate-400">当前用于切换的任务</p>
-                  <p class="mt-1 break-all text-sm font-medium text-slate-700 dark:text-slate-200">
-                    {{ selectedSucceededTask?.id || '请先在第 3 步选中一条成功任务' }}
-                  </p>
-                </div>
-
-                <div class="mt-4 flex flex-wrap gap-2">
-                  <el-button
-                    type="success"
-                    :loading="switchingTaskId === selectedSucceededTask?.id"
-                    :disabled="!canOperateMigration || !selectedSucceededTask"
-                    @click="selectedSucceededTask && handleSwitchToTask(selectedSucceededTask)"
-                  >
-                    切换到所选成功任务
-                  </el-button>
-                  <el-button
-                    type="warning"
-                    :loading="rollbackLoading"
-                    :disabled="!canOperateMigration || pageLoading"
-                    @click="handleRollbackToSqlite"
-                  >
-                    回退到 SQLite
-                  </el-button>
-                  <el-button
-                    type="danger"
-                    plain
-                    :loading="clearOverrideLoading"
-                    :disabled="!canOperateMigration || pageLoading"
-                    @click="handleClearRuntimeOverride"
-                  >
-                    清空运行时覆盖
-                  </el-button>
-                </div>
-
-                <el-alert
-                  v-if="!selectedSucceededTask"
-                  class="mt-4"
-                  title="还没有可切换的成功任务"
-                  type="warning"
-                  :closable="false"
-                  show-icon
-                  description="请先回到第 3 步执行任务，并确认至少一条任务迁移成功后，再执行切换到 MySQL。"
-                />
-              </div>
-            </div>
-          </div>
-        </section>
+        <DatabaseMigrationSwitchSection
+          :has-entered-step-flow="hasEnteredStepFlow"
+          :active-step-key="activeStepKey"
+          :has-prepared-mysql-switch="hasPreparedMysqlSwitch"
+          :active-runtime-mode-label="activeRuntimeModeLabel"
+          :runtime-state="runtimeState"
+          :runtime-override-status="runtimeOverrideStatus"
+          :selected-succeeded-task="selectedSucceededTask"
+          :switching-task-id="switchingTaskId"
+          :rollback-loading="rollbackLoading"
+          :clear-override-loading="clearOverrideLoading"
+          :can-operate-migration="canOperateMigration"
+          :page-loading="pageLoading"
+          :format-date-time="formatDateTime"
+          :get-runtime-mode-tag-type="getRuntimeModeTagType"
+          @switch-task="handleSwitchToTask"
+          @rollback="handleRollbackToSqlite"
+          @clear-override="handleClearRuntimeOverride"
+        />
       </template>
     </div>
   </PageContainer>

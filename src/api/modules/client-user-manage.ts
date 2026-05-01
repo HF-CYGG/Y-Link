@@ -23,6 +23,8 @@ export type ClientUserStatus = 'enabled' | 'disabled'
 export interface ClientUserManageProfile {
   id: string
   account: string
+  // `username` 是治理页应优先展示和编辑的用户名字段；
+  // `realName` 仅作为历史兼容别名保留，当前与 username 保持同值。
   username: string
   mobile: string
   email: string

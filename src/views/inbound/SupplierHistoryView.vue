@@ -1,28 +1,49 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/inbound/SupplierHistoryView.vue
- * 文件职责：展示供货方历史送货单列表，并支持筛选、查看详情和待入库二维码回查。
+ * 文件职责：展示供货方历史送货单列表，并支持服务端筛选分页、详情查看和待入库二维码回查。
  * 实现逻辑：
  * - 页面采用“统计卡 + 筛选工具栏 + 列表容器 + 详情抽屉”的工作台布局，与录入页形成统一视觉语言；
- * - 历史页继续走“先拉全量、再做前端轻筛选”的策略，避免每次筛选都触发额外请求；
+ * - 历史页改为服务端筛选与分页，只返回当前页数据，降低首屏等待与前端内存占用；
+ * - 列表请求与详情请求都接入稳定请求工具，避免快速切换筛选或连点详情时旧结果覆盖新状态；
  * - 详情抽屉保留原有查询与二维码逻辑，仅增强打开反馈与信息层级，不改动任何业务接口。
  * 维护说明：
- * - 历史页走“先拉全量、再做前端轻筛选”的策略，适合当前供应商侧数据量级；
+ * - 若后续要增加更多筛选维度，优先继续扩展服务端查询参数，而不是回退到前端全量筛选；
  * - 二维码生成失败时不能静默吞掉，否则用户只会看到空白占位而不知道单据本身已存在。
  */
 
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import QRCode from 'qrcode'
 import { useRouter } from 'vue-router'
-import { BizResponsiveDrawerShell, PageContainer } from '@/components/common'
-import { getSupplierDeliveries, getInboundDetail, type InboundOrder, type InboundOrderDetail } from '@/api/modules/inbound'
+import { BizResponsiveDrawerShell, PageContainer, PagePaginationBar } from '@/components/common'
+import {
+  getSupplierDeliveries,
+  getInboundDetail,
+  type InboundOrder,
+  type InboundOrderDetail,
+  type SupplierDeliverySummary,
+} from '@/api/modules/inbound'
+import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
+import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
 import dayjs from 'dayjs'
 
 const router = useRouter()
-const loading = ref(false)
-const list = ref<InboundOrder[]>([])
+const listRequest = useStableRequest()
+const detailRequest = useStableRequest()
+const listState = reactive(createPaginatedListState<InboundOrder>({
+  loading: false,
+  query: {
+    pageSize: 10,
+  },
+}))
+const summary = ref<SupplierDeliverySummary>({
+  total: 0,
+  pending: 0,
+  verified: 0,
+  cancelled: 0,
+})
 const detailVisible = ref(false)
 const detailLoading = ref(false)
 const currentDetail = ref<InboundOrderDetail | null>(null)
@@ -41,16 +62,6 @@ const statusMap = {
 const getStatusMeta = (status: InboundOrder['status']) => {
   return statusMap[status]
 }
-
-// 顶部统计条：帮助供应商快速掌握送货单总体进度。
-const summary = computed(() => {
-  const total = list.value.length
-  const pending = list.value.filter((item) => item.status === 'pending').length
-  const verified = list.value.filter((item) => item.status === 'verified').length
-  const cancelled = list.value.filter((item) => item.status === 'cancelled').length
-
-  return { total, pending, verified, cancelled }
-})
 
 // 统计卡配置：让模板结构稳定，同时便于后续按业务继续扩展指标卡。
 const summaryCards = computed(() => {
@@ -82,20 +93,6 @@ const summaryCards = computed(() => {
   ]
 })
 
-// 前端轻筛选：按状态 + 关键字过滤，避免每次操作都触发后端请求。
-const filteredList = computed(() => {
-  const keywordText = keyword.value.trim().toLowerCase()
-
-  return list.value.filter((item) => {
-    const statusMatched = statusFilter.value === 'all' ? true : item.status === statusFilter.value
-    const keywordMatched = keywordText
-      ? item.showNo?.toLowerCase().includes(keywordText) || item.supplierName?.toLowerCase().includes(keywordText)
-      : true
-
-    return statusMatched && keywordMatched
-  })
-})
-
 // 当前是否处于筛选态：用于空态文案与局部提示收口，避免同一信息在多个区域重复出现。
 const isFiltering = computed(() => {
   return statusFilter.value !== 'all' || Boolean(keyword.value.trim())
@@ -103,7 +100,7 @@ const isFiltering = computed(() => {
 
 // 列表头仅保留简短结果说明，避免再次重复展示完整筛选摘要。
 const tableSummaryText = computed(() => {
-  return isFiltering.value ? `当前结果 ${filteredList.value.length} 条` : `共 ${list.value.length} 条记录`
+  return isFiltering.value ? `当前结果 ${listState.total} 条` : `共 ${summary.value.total} 条记录`
 })
 
 // 空态文案按“全量为空 / 当前筛选为空”区分，减少误导。
@@ -111,15 +108,30 @@ const emptyDescription = computed(() => {
   return isFiltering.value ? '当前筛选下暂无单据' : '暂无历史送货记录'
 })
 
-const loadData = async () => {
-  loading.value = true
-  try {
-    list.value = await getSupplierDeliveries()
-  } catch (err) {
-    ElMessage.error(extractErrorMessage(err, '获取历史记录失败'))
-  } finally {
-    loading.value = false
+const buildListQuery = () => {
+  return {
+    page: listState.query.page,
+    pageSize: listState.query.pageSize,
+    keyword: keyword.value.trim() || undefined,
+    status: statusFilter.value === 'all' ? undefined : statusFilter.value,
   }
+}
+
+const loadData = async () => {
+  listState.loading = true
+  await listRequest.runLatest({
+    executor: (signal) => getSupplierDeliveries(buildListQuery(), { signal }),
+    onSuccess: (result) => {
+      applyPaginatedResult(listState, result)
+      summary.value = result.summary
+    },
+    onError: (err) => {
+      ElMessage.error(extractErrorMessage(err, '获取历史记录失败'))
+    },
+    onFinally: () => {
+      listState.loading = false
+    },
+  })
 }
 
 // 历史详情中仅对待入库单据补生成二维码，已入库单据无需重复展示核销码。
@@ -146,27 +158,47 @@ const handleViewDetail = async (row: InboundOrder) => {
   qrCodeUnavailable.value = false
   currentDetail.value = null
 
-  try {
-    const detail = await getInboundDetail(row.verifyCode)
-    currentDetail.value = detail
+  await detailRequest.runLatest({
+    executor: (signal) => getInboundDetail(row.verifyCode, { signal }),
+    onSuccess: async (detail) => {
+      currentDetail.value = detail
 
-    if (detail.order.status === 'pending') {
-      await generateQRCode(detail.order.verifyCode)
-    }
-  } catch (err) {
-    ElMessage.error(extractErrorMessage(err, '获取详情失败'))
-    detailVisible.value = false
-  } finally {
-    detailLoading.value = false
-  }
+      if (detail.order.status === 'pending') {
+        await generateQRCode(detail.order.verifyCode)
+      }
+    },
+    onError: (err) => {
+      ElMessage.error(extractErrorMessage(err, '获取详情失败'))
+      detailVisible.value = false
+    },
+    onFinally: () => {
+      detailLoading.value = false
+    },
+  })
 }
 
 const goToDelivery = () => {
   router.push('/supplier-delivery')
 }
 
+const handleSearch = () => {
+  listState.query.page = 1
+  void loadData()
+}
+
+const handleCurrentChange = (page: number) => {
+  listState.query.page = page
+  void loadData()
+}
+
+const handlePageSizeChange = (pageSize: number) => {
+  listState.query.pageSize = pageSize
+  listState.query.page = 1
+  void loadData()
+}
+
 onMounted(() => {
-  loadData()
+  void loadData()
 })
 </script>
 
@@ -195,13 +227,16 @@ onMounted(() => {
             clearable
             placeholder="按送货单号或供货方搜索"
             class="history-filter-card__input lg:max-w-xs"
+            @clear="handleSearch"
+            @keyup.enter="handleSearch"
           />
-          <el-radio-group v-model="statusFilter" size="default" class="history-filter-card__tabs">
+          <el-radio-group v-model="statusFilter" size="default" class="history-filter-card__tabs" @change="handleSearch">
             <el-radio-button label="all">全部状态</el-radio-button>
             <el-radio-button label="pending">待入库</el-radio-button>
             <el-radio-button label="verified">已入库</el-radio-button>
             <el-radio-button label="cancelled">已取消</el-radio-button>
           </el-radio-group>
+          <el-button type="primary" @click="handleSearch">搜索</el-button>
         </div>
       </div>
 
@@ -212,7 +247,7 @@ onMounted(() => {
         </div>
 
         <div class="history-table-shell__body flex min-h-[520px] flex-col">
-          <el-table v-loading="loading" :data="filteredList" stripe class="history-table-shell__table w-full flex-1">
+          <el-table v-loading="listState.loading" :data="listState.records" stripe class="history-table-shell__table w-full flex-1">
             <el-table-column prop="showNo" label="送货单号" min-width="180" />
             <el-table-column prop="totalQty" label="总数量" min-width="110">
               <template #default="{ row }">
@@ -254,6 +289,16 @@ onMounted(() => {
           </el-table>
         </div>
       </div>
+      <PagePaginationBar
+        v-if="listState.total > 0"
+        v-model:current-page="listState.query.page"
+        v-model:page-size="listState.query.pageSize"
+        layout="total, sizes, prev, pager, next, jumper"
+        :page-sizes="[10, 20, 50]"
+        :total="listState.total"
+        @current-change="handleCurrentChange"
+        @size-change="handlePageSizeChange"
+      />
 
       <!-- 详情面板：
        - 统一交给响应式抽屉壳承接滚动责任，避免页面内部继续用 100vh 差值硬编码高度；

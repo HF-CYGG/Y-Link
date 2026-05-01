@@ -136,8 +136,10 @@ const run = async () => {
     remark: '自动化验证',
     clientOrderType: 'walkin',
     isSystemApplied: false,
+    pickupContact: '脚本提货人-A',
   })
   assert.equal(preorderResult.order.status, 'pending')
+  assert.equal(preorderResult.order.pickupContact, '脚本提货人-A')
   const heldProduct = await productRepo.findOneByOrFail({ id: product.id })
   assert.equal(heldProduct.preOrderedStock, 2)
   log('客户端下单与库存预占通过')
@@ -176,6 +178,7 @@ const run = async () => {
     remark: '超时取消验证',
     clientOrderType: 'walkin',
     isSystemApplied: false,
+    pickupContact: '脚本提货人-B',
   })
   await preorderRepo.update(
     { id: timeoutPreorder.order.id },
@@ -206,6 +209,7 @@ const run = async () => {
     remark: '核销后不可撤回验证',
     clientOrderType: 'walkin',
     isSystemApplied: false,
+    pickupContact: '脚本提货人-C',
   })
   const verified = await o2oPreorderService.verifyByCode(verifiedPreorder.order.verifyCode, verifyActor)
   const verifiedDetail = assertPreorderVerifyDetail(verified)

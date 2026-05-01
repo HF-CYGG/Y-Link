@@ -215,6 +215,8 @@ clientAuthRouter.post(
   requireClientAuth,
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
+    const requestMeta = extractRequestMeta(req)
+    await authSecurityService.guardClientChangePasswordRequest(requestMeta, authReq.clientAuth.userId)
     await clientAuthService.changePassword(authReq.clientAuth, changePasswordSchema.parse(req.body))
     res.json({ code: 0, message: 'ok', data: true })
   }),
@@ -225,6 +227,8 @@ clientAuthRouter.patch(
   requireClientAuth,
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
+    const requestMeta = extractRequestMeta(req)
+    await authSecurityService.guardClientProfileUpdateRequest(requestMeta, authReq.clientAuth.userId)
     const data = await clientAuthService.updateProfile(authReq.clientAuth, updateProfileSchema.parse(req.body))
     res.json({ code: 0, message: 'ok', data })
   }),

@@ -317,7 +317,7 @@ const orderCustomerProfile = computed(() => {
     }
   }
   return {
-    username: profile.username?.trim() || '未命名用户',
+    username: profile.username?.trim() || profile.realName?.trim() || '未命名用户',
     mobile: profile.mobile?.trim() || '未留手机号',
     email: profile.email?.trim() || '未留邮箱',
     departmentName: profile.departmentName?.trim() || '未填写部门',

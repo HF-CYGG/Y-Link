@@ -189,10 +189,12 @@ export class OrderService {
 
     const normalizedKeyword = String(query.keyword ?? query.showNo ?? '').trim()
     if (normalizedKeyword) {
+      const isLikelyShowNo = /^[A-Za-z0-9-]+$/.test(normalizedKeyword)
       qb.andWhere(
         new Brackets((keywordQb) => {
           keywordQb
             .where('order.showNo LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
+            .orWhere(isLikelyShowNo ? 'order.showNo = :exactShowNo' : '1 = 0', { exactShowNo: normalizedKeyword })
             .orWhere('order.customerName LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
             .orWhere('order.customerDepartmentName LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
             .orWhere('order.issuerName LIKE :keyword', { keyword: `%${normalizedKeyword}%` })

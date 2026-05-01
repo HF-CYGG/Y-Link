@@ -277,6 +277,11 @@ const handleVerify = async () => {
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const handleReset = async () => {
+  if (!resetToken.value.trim()) {
+    ElMessage.warning('身份校验凭证已失效，请重新验证账号')
+    step.value = 1
+    return
+  }
   if (!validatePassword(resetForm.newPassword)) {
     ElMessage.warning(passwordStrengthHint)
     return

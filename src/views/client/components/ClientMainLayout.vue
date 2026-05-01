@@ -22,10 +22,13 @@ const clientCartStore = useClientCartStore()
 
 clientCartStore.initialize()
 const transitionName = ref<'slide-left' | 'slide-right'>('slide-left')
-const cartBadgeBouncing = ref(false)
 
 const displayName = computed(() => {
-  return clientAuthStore.currentUser?.account || clientAuthStore.currentUser?.realName || clientAuthStore.currentUser?.mobile || '访客'
+  return clientAuthStore.currentUser?.username
+    || clientAuthStore.currentUser?.account
+    || clientAuthStore.currentUser?.realName
+    || clientAuthStore.currentUser?.mobile
+    || '访客'
 })
 
 /**
@@ -101,22 +104,6 @@ watch(
     transitionName.value = nextDepth >= previousDepth ? 'slide-left' : 'slide-right'
   },
   { immediate: true },
-)
-
-watch(
-  () => clientCartStore.totalQty,
-  (nextQty, previousQty) => {
-    if (nextQty <= previousQty || nextQty <= 0) {
-      return
-    }
-    cartBadgeBouncing.value = false
-    globalThis.window.setTimeout(() => {
-      cartBadgeBouncing.value = true
-      globalThis.window.setTimeout(() => {
-        cartBadgeBouncing.value = false
-      }, 360)
-    }, 16)
-  },
 )
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。

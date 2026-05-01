@@ -109,7 +109,7 @@ const profileRules: FormRules = {
 }
 
 const openProfileDialog = () => {
-  profileForm.username = clientAuthStore.currentUser?.account || clientAuthStore.currentUser?.realName || ''
+  profileForm.username = clientAuthStore.currentUser?.username || clientAuthStore.currentUser?.account || clientAuthStore.currentUser?.realName || ''
   profileForm.mobile = clientAuthStore.currentUser?.mobile || ''
   profileForm.email = clientAuthStore.currentUser?.email || ''
   profileForm.departmentName = resolveDepartmentPathDisplay(clientAuthStore.currentUser?.departmentName || '')
@@ -318,7 +318,9 @@ onMounted(() => {
       </div>
 
       <p class="text-xs text-slate-400">用户名</p>
-      <p class="mt-1 text-base font-semibold text-slate-900">{{ clientAuthStore.currentUser?.account || clientAuthStore.currentUser?.realName || '-' }}</p>
+      <p class="mt-1 text-base font-semibold text-slate-900">
+        {{ clientAuthStore.currentUser?.username || clientAuthStore.currentUser?.account || clientAuthStore.currentUser?.realName || '-' }}
+      </p>
 
       <p class="mt-4 text-xs text-slate-400">手机号</p>
       <p class="mt-1 text-base font-semibold text-slate-900">{{ clientAuthStore.currentUser?.mobile || '-' }}</p>

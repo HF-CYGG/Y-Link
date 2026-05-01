@@ -50,14 +50,19 @@ export interface ClientUserManageSafeProfile {
 }
 
 const sanitizeClientUserProfile = (user: ClientUser): ClientUserManageSafeProfile => {
-  const account = user.realName || user.email || user.mobile || ''
+  const normalizedUsername = user.realName?.trim() || ''
+  const account = normalizedUsername || user.email || user.mobile || ''
   return {
     id: user.id,
     account,
-    username: account,
+    // 字段口径说明：
+    // - `username` 代表客户端用户名，是管理端编辑与展示应优先使用的字段；
+    // - `realName` 暂保留为历史兼容别名，当前与 username 保持同值；
+    // - `account` 继续保留旧字段，避免旧页面或旧缓存直接断裂。
+    username: normalizedUsername,
     mobile: user.mobile ?? '',
     email: user.email ?? '',
-    realName: user.realName,
+    realName: normalizedUsername,
     departmentName: user.departmentName ?? '',
     status: user.status,
     lastLoginAt: user.lastLoginAt,

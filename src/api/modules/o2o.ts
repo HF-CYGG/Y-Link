@@ -135,6 +135,7 @@ export interface O2oPreorderDetail {
     businessStatus: O2oOrderBusinessStatus | null
     hasCustomerOrder: boolean
     isSystemApplied: boolean
+    pickupContact: string | null
     merchantMessage: string | null
     clientOrderType: O2oClientOrderType
     departmentNameSnapshot: string | null
@@ -150,6 +151,7 @@ export interface O2oPreorderDetail {
   customerProfile: {
     id: string
     username: string
+    realName: string | null
     mobile: string | null
     email: string | null
     departmentName: string | null
@@ -200,6 +202,7 @@ export interface O2oInventoryLog {
 export interface SubmitO2oPreorderPayload {
   clientOrderType: O2oClientOrderType
   isSystemApplied: boolean
+  pickupContact: string
   remark?: string
   items: Array<{ productId: string | number; qty: number }>
 }
@@ -222,6 +225,19 @@ export interface UpdateConsoleO2oPreorderPayload {
 export interface UpdateO2oComplianceFlagsPayload {
   hasCustomerOrder?: boolean
   isSystemApplied?: boolean
+}
+
+/**
+ * 管理端订单池查询参数：
+ * - 与后端 `/o2o/orders` 路由保持一致；
+ * - 补齐时间筛选字段，避免页面后续接入筛选时再次出现契约漂移。
+ */
+export interface O2oConsoleOrderListQuery {
+  status?: O2oOrderStatus
+  keyword?: string
+  startTime?: string
+  endTime?: string
+  limit?: number
 }
 
 export const getO2oMallProducts = (config?: RequestConfig) =>
@@ -258,7 +274,7 @@ export const getMyO2oPreorders = async (
 }
 
 export const getO2oConsoleOrders = (
-  params: { status?: O2oOrderStatus; keyword?: string; limit?: number },
+  params: O2oConsoleOrderListQuery,
   config?: RequestConfig,
 ) =>
   request<O2oPreorderSummary[]>({

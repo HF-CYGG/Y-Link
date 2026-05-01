@@ -5,6 +5,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
+import { Brackets } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { BizInboundOrder } from '../entities/biz-inbound-order.entity.js'
@@ -23,10 +24,42 @@ export interface SubmitInboundInput {
   items: SubmitInboundItemInput[]
 }
 
+export interface SupplierDeliveryListQuery {
+  keyword?: string
+  status?: string
+  page?: number
+  pageSize?: number
+}
+
+export interface SupplierDeliverySummaryResult {
+  total: number
+  pending: number
+  verified: number
+  cancelled: number
+}
+
+export interface SupplierDeliveryListResult {
+  page: number
+  pageSize: number
+  total: number
+  records: BizInboundOrder[]
+  summary: SupplierDeliverySummaryResult
+}
+
 class InboundService {
   private readonly inboundRepo = AppDataSource.getRepository(BizInboundOrder)
   private readonly inboundItemRepo = AppDataSource.getRepository(BizInboundOrderItem)
   private readonly productRepo = AppDataSource.getRepository(BaseProduct)
+
+  // 核销入库属于后台库管职责：
+  // - 即便路由层误配权限，服务层也只允许 admin / operator 执行最终入库动作；
+  // - 这样可以避免 supplier 账号拿到权限点后直接越权完成库存落账。
+  private assertCanVerifyInbound(actor: AuthUserContext) {
+    if (actor.role !== 'admin' && actor.role !== 'operator') {
+      throw new BizError('仅后台库管人员可执行核销入库', 403)
+    }
+  }
+  private readonly supplierInboundStatuses = new Set<BizInboundOrder['status']>(['pending', 'verified', 'cancelled'])
 
   private async generateShowNo(manager = AppDataSource.manager): Promise<string> {
     const dateText = new Date().toISOString().slice(0, 10).replaceAll('-', '')
@@ -111,17 +144,73 @@ class InboundService {
     })
   }
 
-  async listSupplierDeliveries(actor: AuthUserContext) {
+  private async buildSupplierDeliverySummary(supplierId: string): Promise<SupplierDeliverySummaryResult> {
+    const rows = await this.inboundRepo
+      .createQueryBuilder('order')
+      .select('order.status', 'status')
+      .addSelect('COUNT(1)', 'count')
+      .where('order.supplierId = :supplierId', { supplierId })
+      .groupBy('order.status')
+      .getRawMany<{ status: BizInboundOrder['status']; count: string }>()
+
+    const summary: SupplierDeliverySummaryResult = {
+      total: 0,
+      pending: 0,
+      verified: 0,
+      cancelled: 0,
+    }
+    rows.forEach((row) => {
+      const count = Number(row.count || 0)
+      summary.total += count
+      if (row.status in summary) {
+        summary[row.status] = count
+      }
+    })
+    return summary
+  }
+
+  async listSupplierDeliveries(actor: AuthUserContext, query: SupplierDeliveryListQuery = {}): Promise<SupplierDeliveryListResult> {
     if (actor.role !== 'supplier') {
       throw new BizError('仅供货方账号可查看送货单历史', 403)
     }
 
-    const rows = await this.inboundRepo.find({
-      where: { supplierId: actor.userId },
-      order: { id: 'DESC' },
-      take: 50,
-    })
-    return rows
+    const page = Math.max(1, Math.floor(Number(query.page || 1)))
+    const pageSize = Math.min(50, Math.max(10, Math.floor(Number(query.pageSize || 10))))
+    const normalizedKeyword = String(query.keyword || '').trim()
+    const normalizedStatus = String(query.status || '').trim() as BizInboundOrder['status'] | ''
+
+    const baseQueryBuilder = this.inboundRepo
+      .createQueryBuilder('order')
+      .where('order.supplierId = :supplierId', { supplierId: actor.userId })
+      .orderBy('order.createdAt', 'DESC')
+
+    if (normalizedStatus && this.supplierInboundStatuses.has(normalizedStatus)) {
+      baseQueryBuilder.andWhere('order.status = :status', { status: normalizedStatus })
+    }
+
+    if (normalizedKeyword) {
+      baseQueryBuilder.andWhere(
+        new Brackets((keywordBuilder) => {
+          keywordBuilder
+            .where('order.showNo LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
+            .orWhere('order.supplierName LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
+        }),
+      )
+    }
+
+    const [records, total, summary] = await Promise.all([
+      baseQueryBuilder.clone().skip((page - 1) * pageSize).take(pageSize).getMany(),
+      baseQueryBuilder.clone().getCount(),
+      this.buildSupplierDeliverySummary(actor.userId),
+    ])
+
+    return {
+      page,
+      pageSize,
+      total,
+      records,
+      summary,
+    }
   }
 
   async detailById(id: string) {
@@ -170,7 +259,11 @@ class InboundService {
 
   // 库管员核销入库
   async verifyInbound(verifyCode: string, actor: AuthUserContext) {
+    this.assertCanVerifyInbound(actor)
     const normalizedCode = verifyCode.trim().toLowerCase()
+    if (!normalizedCode) {
+      throw new BizError('核销码不能为空', 400)
+    }
     return AppDataSource.transaction(async (manager) => {
       const order = await manager.getRepository(BizInboundOrder).findOne({
         where: { verifyCode: normalizedCode },

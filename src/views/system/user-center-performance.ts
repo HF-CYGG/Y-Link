@@ -18,6 +18,8 @@ export const userCenterTabLoaders = {
   client: () => import('@/views/system/ClientUserManageView.vue'),
 } as const satisfies Record<UserCenterTabKey, () => Promise<unknown>>
 
+const warmedUserCenterTabPromises = new Map<UserCenterTabKey, Promise<unknown>>()
+
 /**
  * 预热用户中心标签页：
  * - 仅在需要时加载对应治理子页，避免把两套表格/表单能力强行并入壳层；
@@ -25,5 +27,16 @@ export const userCenterTabLoaders = {
  */
 export const preloadUserCenterTabs = async (tabs: UserCenterTabKey[]) => {
   const uniqueTabs = [...new Set(tabs)]
-  await Promise.allSettled(uniqueTabs.map((tab) => userCenterTabLoaders[tab]()))
+  await Promise.allSettled(
+    uniqueTabs.map((tab) => {
+      const cachedPromise = warmedUserCenterTabPromises.get(tab)
+      if (cachedPromise !== undefined) {
+        return cachedPromise
+      }
+
+      const warmupPromise = userCenterTabLoaders[tab]()
+      warmedUserCenterTabPromises.set(tab, warmupPromise)
+      return warmupPromise
+    }),
+  )
 }

@@ -26,11 +26,15 @@ const clientAuthStore = useClientAuthStore()
 
 /**
  * 顶部展示名称：
- * - 当前客户端账号体系以“用户名”作为主展示字段，优先展示 account；
- * - 若旧缓存尚未补齐 account，则回退到 realName / mobile，避免出现空标题。
+ * - 当前客户端账号体系以“用户名”作为主展示字段，优先展示 username；
+ * - 若旧缓存尚未补齐 username，则回退到 account / realName / mobile，避免出现空标题。
  */
 const displayName = computed(() => {
-  return clientAuthStore.currentUser?.account || clientAuthStore.currentUser?.realName || clientAuthStore.currentUser?.mobile || '未登录用户'
+  return clientAuthStore.currentUser?.username
+    || clientAuthStore.currentUser?.account
+    || clientAuthStore.currentUser?.realName
+    || clientAuthStore.currentUser?.mobile
+    || '未登录用户'
 })
 
 /**

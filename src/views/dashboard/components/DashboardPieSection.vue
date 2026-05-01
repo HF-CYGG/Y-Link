@@ -9,6 +9,7 @@
 import { computed, reactive, ref } from 'vue'
 import type { EChartsOption } from 'echarts'
 import { ElMessage } from 'element-plus'
+import { Document, Money } from '@element-plus/icons-vue'
 import BaseEChart from '@/components/charts/BaseEChart.vue'
 import { getDashboardPieData, type DashboardPieDataResult, type DashboardPieSlice } from '@/api/modules/dashboard'
 import { useStableRequest } from '@/composables/useStableRequest'
@@ -267,7 +268,7 @@ void loadPieData()
               <BaseEChart :option="buildPieOption(card.slices, card.valueType)" :min-height="176" />
               <div class="pointer-events-none absolute inset-0 flex items-center justify-center text-center">
                 <el-icon :size="32" class="text-slate-300/80 dark:text-slate-600/80">
-                  <component :is="card.valueType === 'count' ? 'Document' : 'Money'" />
+                  <component :is="card.valueType === 'count' ? Document : Money" />
                 </el-icon>
               </div>
             </div>

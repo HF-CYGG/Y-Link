@@ -12,11 +12,8 @@ import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'elem
 import { BizCrudDialogShell, BizResponsiveDataCollectionShell, PageContainer, PagePaginationBar, PageToolbarCard } from '@/components/common'
 import {
   changePassword,
-  GOVERNANCE_PERMISSION_CODES,
-  PERMISSION_LABEL_MAP,
   ROLE_LABEL_MAP,
   STATUS_LABEL_MAP,
-  type PermissionCode,
   type UserRole,
   type UserSafeProfile,
   type UserStatus,
@@ -38,6 +35,14 @@ import { useAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
 import { useRouter } from 'vue-router'
+import {
+  accountTypeDescriptions,
+  getAccountTypeDescription,
+  getGovernancePermissionLabels,
+  getRoleTagType,
+  getStatusTagType,
+  roleOptions,
+} from '@/views/system/user-governance.helpers'
 
 /**
  * 用户管理搜索表单：
@@ -237,72 +242,6 @@ const ownPasswordRules: FormRules = {
 const usernameDisabled = computed(() => dialogMode.value === 'edit')
 
 /**
- * 状态标签样式：
- * - enabled 用成功色，disabled 用警告色；
- * - 统一应用于表格与卡片模式。
- */
-const getStatusTagType = (status: UserStatus) => {
-  return status === 'enabled' ? 'success' : 'warning'
-}
-
-/**
- * 角色标签样式：
- * - 管理员使用品牌主色，突出系统治理职责；
- * - 供货方使用成功色，和内部操作员区分开。
- */
-const getRoleTagType = (role: UserRole) => {
-  if (role === 'admin') {
-    return 'primary'
-  }
-  if (role === 'supplier') {
-    return 'success'
-  }
-  return 'info'
-}
-
-/**
- * 角色选项：
- * - 用户管理页的筛选、创建与编辑统一复用同一份角色来源；
- * - 供货方账号在这里正式纳入治理入口，避免页面继续硬编码两种角色。
- */
-const roleOptions: Array<{ label: string; value: UserRole }> = [
-  { label: '管理员', value: 'admin' },
-  { label: '操作员', value: 'operator' },
-  { label: '供货方', value: 'supplier' },
-]
-
-/**
- * 账号类型说明：
- * - 管理员在创建账号前可快速理解三类账号的落点与职责；
- * - 文案集中在这里，便于后续继续补充能力边界说明。
- */
-const accountTypeDescriptions: Array<{
-  role: UserRole
-  title: string
-  description: string
-  badgeClass: string
-}> = [
-  {
-    role: 'admin',
-    title: '管理员账号',
-    description: '进入工作台与系统治理页，可管理用户、审计日志和系统配置。',
-    badgeClass: 'border-brand/20 bg-brand/8 text-brand dark:border-brand/25 dark:bg-brand/10 dark:text-teal-300',
-  },
-  {
-    role: 'operator',
-    title: '操作员账号',
-    description: '进入日常业务页面，聚焦开单、查询、基础资料和扫码入库。',
-    badgeClass: 'border-slate-200 bg-slate-50 text-slate-600 dark:border-white/10 dark:bg-white/5 dark:text-slate-300',
-  },
-  {
-    role: 'supplier',
-    title: '供货方账号',
-    description: '登录后直接进入送货单录入页，仅使用供货方专属送货功能。',
-    badgeClass: 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-300',
-  },
-]
-
-/**
  * 当前表单账号类型提示：
  * - 当管理员切换角色时，右侧提示同步变化；
  * - 重点强调供货方账号的专属落点，降低创建后“为什么没进工作台”的疑惑。
@@ -318,18 +257,6 @@ const currentRoleDescription = computed(() => {
  */
 const getRoleLabel = (role: UserRole) => ROLE_LABEL_MAP[role]
 const getStatusLabel = (status: UserStatus) => STATUS_LABEL_MAP[status]
-const getAccountTypeDescription = (role: UserRole) => {
-  return accountTypeDescriptions.find((item) => item.role === role)?.description ?? '默认业务账号'
-}
-
-/**
- * 关键治理权限文案：
- * - 只展示用户治理与审计相关能力，避免在用户列表中塞入全部业务权限；
- * - 用于明确展示每个角色当前边界。
- */
-const getGovernancePermissionLabels = (permissions: PermissionCode[]) => {
-  return GOVERNANCE_PERMISSION_CODES.filter((permission) => permissions.includes(permission)).map((permission) => PERMISSION_LABEL_MAP[permission])
-}
 
 /**
  * 将搜索条件转换为接口参数：

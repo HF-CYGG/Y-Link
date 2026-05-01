@@ -18,6 +18,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute } from 'vue-router'
 import { CameraFilled, DocumentCopy, Search } from '@element-plus/icons-vue'
 import { BizCrudDialogShell, PageContainer, UnifiedScanDialog } from '@/components/common'
+import { useStableRequest } from '@/composables/useStableRequest'
 import {
   VERIFY_CONSOLE_O2O_ORDER_STATUS_CLASS_MAP,
   VERIFY_CONSOLE_O2O_ORDER_STATUS_LABEL_MAP,
@@ -38,24 +39,18 @@ import { getProductList, type ProductRecord } from '@/api/modules/product'
 import { useCameraQrScanner } from '@/composables/useCameraQrScanner'
 import { useDevice } from '@/composables/useDevice'
 import { usePermissionAction } from '@/composables/usePermissionAction'
-
-const O2O_RETURN_REJECT_REASON_MAX_LENGTH = 500
-const O2O_PREORDER_REMARK_MAX_LENGTH = 255
-const ORDER_TYPE_LABEL_MAP = {
-  department: '部门订',
-  walkin: '散客',
-} as const
-
-interface EditableOnsiteOrderItem {
-  productId: string
-  productCode: string
-  productName: string
-  defaultPrice: string
-  qty: number
-  originalQty: number
-  maxQty: number
-  unavailableReason: string | null
-}
+import {
+  buildOnsiteEditableItemsFromDetail,
+  isBizShowNo,
+  isPreorderDetail,
+  isReturnRequestDetail,
+  normalizeVerifyCode,
+  O2O_PREORDER_REMARK_MAX_LENGTH,
+  O2O_RETURN_REJECT_REASON_MAX_LENGTH,
+  ORDER_TYPE_LABEL_MAP,
+  resolveEditableItemMaxQty,
+  type EditableOnsiteOrderItem,
+} from '@/views/o2o/o2o-verify-console.helpers'
 
 const verifyCode = ref('')
 const verifyResult = ref<O2oVerifyDetailResult | null>(null)
@@ -65,6 +60,8 @@ const inputRef = ref<{ focus: () => void } | null>(null)
 const { isPhone } = useDevice()
 const route = useRoute()
 const { hasPermission, ensurePermission } = usePermissionAction()
+const verifyDetailRequest = useStableRequest()
+const productCatalogRequest = useStableRequest()
 const lastRouteVerifyKey = ref('')
 
 const productCatalog = ref<ProductRecord[]>([])
@@ -85,22 +82,6 @@ const complianceForm = ref({
   isSystemApplied: false,
 })
 
-// 查询接口会返回联合结构，这里先做类型守卫，后续模板与按钮逻辑都复用同一份收窄结果。
-const isPreorderDetail = (
-  detail: O2oVerifyDetailResult['detail'] | null | undefined,
-): detail is O2oPreorderDetail => {
-  return Boolean(detail && 'order' in detail)
-}
-
-const isReturnRequestDetail = (
-  detail: O2oVerifyDetailResult['detail'] | null | undefined,
-): detail is O2oReturnRequestDetail => {
-  return Boolean(detail && 'returnNo' in detail)
-}
-
-// 核销台兼容预订单号 `PO...` 与退货申请单号 `RO...` 两类单据编号。
-const isBizShowNo = (value: string) => /^(PO|RO)\d{8}\d{4}$/i.test(value)
-
 const preorderDetail = computed(() => {
   const detail = verifyResult.value?.detail
   return isPreorderDetail(detail) ? detail : null
@@ -113,7 +94,7 @@ const returnRequestDetail = computed(() => {
 
 const isReturnVerifyMode = computed(() => verifyResult.value?.verifyTargetType === 'return_request')
 
-const canVerify = computed(() => {
+const canVerifyStatus = computed(() => {
   if (preorderDetail.value) {
     return isO2oOrderPending(preorderDetail.value.order.status)
   }
@@ -124,22 +105,23 @@ const canVerify = computed(() => {
 })
 
 const canRejectReturnRequest = computed(() => {
-  return returnRequestDetail.value?.status === 'pending'
+  return returnRequestDetail.value?.status === 'pending' && hasPermission('orders:update')
 })
 
 // 现场改单严格只对待核销预订单开放，已取消/已核销/有退货记录时后端也会继续兜底阻断。
 const canOpenOnsiteAdjust = computed(() => {
-  return Boolean(preorderDetail.value && isO2oOrderPending(preorderDetail.value.order.status))
+  return Boolean(preorderDetail.value && isO2oOrderPending(preorderDetail.value.order.status) && hasPermission('orders:update'))
 })
 
 const canEditComplianceFlags = computed(() => hasPermission('orders:update'))
 const isDepartmentPreorder = computed(() => preorderDetail.value?.order.clientOrderType === 'department')
+const canVerifyAction = computed(() => canVerifyStatus.value && hasPermission('orders:create'))
 
 const showVerifyActionButton = computed(() => {
   if (preorderDetail.value) {
-    return true
+    return hasPermission('orders:create')
   }
-  return returnRequestDetail.value?.status === 'pending'
+  return returnRequestDetail.value?.status === 'pending' && hasPermission('orders:create')
 })
 
 const currentDocumentTitle = computed(() => {
@@ -275,42 +257,6 @@ const canSubmitOnsiteAdjust = computed(() => {
   return onsiteTotalQty.value > 0 && canOpenOnsiteAdjust.value && !onsiteAdjustSubmitting.value
 })
 
-const normalizeVerifyCode = (rawValue: string) => {
-  const value = rawValue.trim()
-  if (!value) {
-    return ''
-  }
-
-  // 兼容多种扫码结果：
-  // 1. 纯核销码（UUID）；
-  // 2. 带 verifyCode 参数的 URL；
-  // 3. /verify/{code} 路径形式的 URL。
-  try {
-    const parsedUrl = new URL(value)
-    const fromQuery = parsedUrl.searchParams.get('verifyCode')
-    if (fromQuery?.trim()) {
-      return fromQuery.trim()
-    }
-    const matched = parsedUrl.pathname.match(/\/verify\/([^/?#]+)/i)
-    if (matched?.[1]) {
-      return decodeURIComponent(matched[1]).trim()
-    }
-  } catch {
-    // 非 URL 文本按纯核销码处理。
-  }
-
-  // 兼容“网页展示码复制”场景：
-  // 例如 "0ECC 885A BDEF 462B B9BC 9C0C ..." 这类带空格分组的文本。
-  // 统一提取字母数字后再归一化为标准 UUID（8-4-4-4-12）。
-  const compact = value.replaceAll(/[^a-zA-Z0-9]/g, '')
-  if (/^[a-fA-F0-9]{32}$/.test(compact)) {
-    const hex = compact.toLowerCase()
-    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
-  }
-
-  return value
-}
-
 const focusInput = async () => {
   await nextTick()
   inputRef.value?.focus()
@@ -330,33 +276,6 @@ const replaceReturnRequestDetail = (detail: O2oReturnRequestDetail) => {
   }
 }
 
-const resolveEditableItemMaxQty = (product: ProductRecord, originalQty = 0) => {
-  return Math.max(0, Number(product.availableStock ?? 0) + originalQty)
-}
-
-// 现场改单候选商品来自后台产品列表，但页面仍需兼容“订单已有商品已不在可售目录中”的历史情况。
-// 因此缺失商品会保留在列表里，仅允许减少或删除，不允许超出原数量。
-const buildOnsiteEditableItemsFromDetail = (detail: O2oPreorderDetail) => {
-  const productMap = new Map(productCatalog.value.map((item) => [item.id, item]))
-  return detail.items.map((item) => {
-    const product = productMap.get(item.productId)
-    const maxQty = product ? resolveEditableItemMaxQty(product, item.qty) : item.qty
-    const unavailableReason = product
-      ? null
-      : '当前商品已不在可售目录中，仅支持减少或删除原有数量'
-    return {
-      productId: item.productId,
-      productCode: item.productCode,
-      productName: item.productName,
-      defaultPrice: item.defaultPrice,
-      qty: item.qty,
-      originalQty: item.qty,
-      maxQty,
-      unavailableReason,
-    } satisfies EditableOnsiteOrderItem
-  })
-}
-
 const resetRejectForm = () => {
   rejectReason.value = ''
 }
@@ -364,7 +283,9 @@ const resetRejectForm = () => {
 const resetOnsiteAdjustForm = () => {
   onsiteAddProductId.value = ''
   onsiteRemark.value = preorderDetail.value?.order.remark ?? ''
-  onsiteOrderItems.value = preorderDetail.value ? buildOnsiteEditableItemsFromDetail(preorderDetail.value) : []
+  onsiteOrderItems.value = preorderDetail.value
+    ? buildOnsiteEditableItemsFromDetail(preorderDetail.value, productCatalog.value)
+    : []
 }
 
 const {
@@ -404,17 +325,23 @@ const handleSearch = async () => {
   verifyCode.value = normalizedCode
 
   loading.value = true
-  try {
-    verifyResult.value = isBizShowNo(normalizedCode)
-      ? await getO2oVerifyDetailByShowNo(normalizedCode)
-      : await getO2oVerifyDetail(normalizedCode)
-  } catch (error) {
-    const message = error instanceof Error ? error.message : '查询失败，请稍后重试'
-    ElMessage.error(message)
-    verifyResult.value = null
-  } finally {
-    loading.value = false
-  }
+  await verifyDetailRequest.runLatest({
+    executor: () =>
+      isBizShowNo(normalizedCode)
+        ? getO2oVerifyDetailByShowNo(normalizedCode)
+        : getO2oVerifyDetail(normalizedCode),
+    onSuccess: (result) => {
+      verifyResult.value = result
+    },
+    onError: (error) => {
+      const message = error instanceof Error ? error.message : '查询失败，请稍后重试'
+      ElMessage.error(message)
+      verifyResult.value = null
+    },
+    onFinally: () => {
+      loading.value = false
+    },
+  })
 }
 
 const handlePasteAndSearch = async () => {
@@ -458,19 +385,26 @@ const loadProductCatalog = async () => {
     return
   }
   productCatalogLoading.value = true
-  try {
-    const result = await getProductList({ isActive: true })
-    // 现场改单只允许加入仍在 O2O 商城上架的商品，避免门店把线下禁售商品加入线上预订单。
-    productCatalog.value = result.filter((item) => item.o2oStatus === 'listed')
-  } catch (error) {
-    const message = error instanceof Error ? error.message : '可改单商品加载失败，请稍后重试'
-    ElMessage.error(message)
-  } finally {
-    productCatalogLoading.value = false
-  }
+  await productCatalogRequest.runLatest({
+    executor: (signal) => getProductList({ isActive: true }, { signal }),
+    onSuccess: (result) => {
+      // 现场改单只允许加入仍在 O2O 商城上架的商品，避免门店把线下禁售商品加入线上预订单。
+      productCatalog.value = result.filter((item) => item.o2oStatus === 'listed')
+    },
+    onError: (error) => {
+      const message = error instanceof Error ? error.message : '可改单商品加载失败，请稍后重试'
+      ElMessage.error(message)
+    },
+    onFinally: () => {
+      productCatalogLoading.value = false
+    },
+  })
 }
 
 const openRejectDialog = () => {
+  if (!ensurePermission('orders:update', '退货拒绝')) {
+    return
+  }
   if (!canRejectReturnRequest.value) {
     ElMessage.warning('当前退货申请不可拒绝')
     return
@@ -591,6 +525,9 @@ const openOnsiteAdjustDialog = async () => {
   if (!preorderDetail.value) {
     return
   }
+  if (!ensurePermission('orders:update', '现场改单')) {
+    return
+  }
   if (!canOpenOnsiteAdjust.value) {
     ElMessage.warning('当前订单不可现场改单')
     return
@@ -707,10 +644,14 @@ const handleVerify = async () => {
   const isReturnVerify = isReturnVerifyMode.value
   const activeVerifyCode = currentVerifyCode.value
 
+  if (!ensurePermission('orders:create', isReturnVerify ? '退货回库核销' : '预订单核销')) {
+    return
+  }
+
   // 只有“待处理”单据才允许继续核销。
   // 预订单要求主状态仍为 pending，退货申请要求自身状态仍为 pending，
   // 后端事务内也会再次兜底校验，防止多终端重复核销。
-  if (!canVerify.value) {
+  if (!canVerifyStatus.value) {
     ElMessage.warning(isReturnVerify ? '当前退货申请已处理，不可继续回库' : '当前订单已取消或已核销，不可继续核销')
     return
   }
@@ -871,7 +812,7 @@ watch(
               <el-button
                 v-if="showVerifyActionButton"
                 type="success"
-                :disabled="!canVerify"
+                :disabled="!canVerifyAction"
                 :loading="submitting"
                 @click="handleVerify"
               >
@@ -1065,7 +1006,7 @@ watch(
             v-if="showVerifyActionButton"
             type="success"
             class="w-full"
-            :disabled="!canVerify"
+                :disabled="!canVerifyAction"
             :loading="submitting"
             @click="handleVerify"
           >

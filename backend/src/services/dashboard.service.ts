@@ -47,6 +47,8 @@ interface DashboardTopCustomer {
   orderCount: number
 }
 
+type DashboardAmountAggregateRaw = { totalAmount: string | number | null }
+
 interface DashboardStatsResult {
   todayOrderCount: number
   todayOrderAmount: string | number
@@ -283,50 +285,56 @@ export const dashboardService = {
     const productRepo = AppDataSource.getRepository(BaseProduct)
     const auditLogRepo = AppDataSource.getRepository(SysAuditLog)
 
-    // 今日单数（软删除单据不计入看板）。
-    const todayOrderCount = await orderRepo
-      .createQueryBuilder('order')
-      .where('order.createdAt >= :today', { today })
-      .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
-      .getCount()
-
-    // 今日总金额（软删除单据不计入看板）。
-    const { totalAmount: todayOrderAmountRaw } = await orderRepo
-      .createQueryBuilder('order')
-      .select('SUM(order.totalAmount)', 'totalAmount')
-      .where('order.createdAt >= :today', { today })
-      .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
-      .getRawOne()
-
-    // 本月累计单据数（用于补充周期维度）。
-    const monthOrderCount = await orderRepo
-      .createQueryBuilder('order')
-      .where('order.createdAt >= :monthStart', { monthStart })
-      .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
-      .getCount()
-
-    // 本月累计出库金额（用于核心四宫格）。
-    const { totalAmount: monthOrderAmountRaw } = await orderRepo
-      .createQueryBuilder('order')
-      .select('SUM(order.totalAmount)', 'totalAmount')
-      .where('order.createdAt >= :monthStart', { monthStart })
-      .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
-      .getRawOne()
-
-    // 产品总数（仅统计启用产品）。
-    const totalProductCount = await productRepo
-      .createQueryBuilder('product')
-      .where('product.isActive = :isActive', { isActive: true })
-      .getCount()
-
-    // 近 7 日趋势：先查最近 7 天有效订单，再在服务层按日聚合，避免数据库方言差异。
-    const recentOrders = await orderRepo
-      .createQueryBuilder('order')
-      .select(['order.createdAt AS createdAt', 'order.totalAmount AS totalAmount', 'order.totalQty AS totalQty'])
-      .where('order.createdAt >= :trendStart', { trendStart })
-      .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
-      .orderBy('order.createdAt', 'ASC')
-      .getRawMany<{ createdAt: Date | string; totalAmount: string | number; totalQty: string | number }>()
+    const [
+      todayOrderCount,
+      todayOrderAmountResult,
+      monthOrderCount,
+      monthOrderAmountResult,
+      totalProductCount,
+      recentOrders,
+    ] = await Promise.all([
+      // 今日单数（软删除单据不计入看板）。
+      orderRepo
+        .createQueryBuilder('order')
+        .where('order.createdAt >= :today', { today })
+        .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
+        .getCount(),
+      // 今日总金额（软删除单据不计入看板）。
+      orderRepo
+        .createQueryBuilder('order')
+        .select('SUM(order.totalAmount)', 'totalAmount')
+        .where('order.createdAt >= :today', { today })
+        .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
+        .getRawOne<DashboardAmountAggregateRaw>(),
+      // 本月累计单据数（用于补充周期维度）。
+      orderRepo
+        .createQueryBuilder('order')
+        .where('order.createdAt >= :monthStart', { monthStart })
+        .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
+        .getCount(),
+      // 本月累计出库金额（用于核心四宫格）。
+      orderRepo
+        .createQueryBuilder('order')
+        .select('SUM(order.totalAmount)', 'totalAmount')
+        .where('order.createdAt >= :monthStart', { monthStart })
+        .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
+        .getRawOne<DashboardAmountAggregateRaw>(),
+      // 产品总数（仅统计启用产品）。
+      productRepo
+        .createQueryBuilder('product')
+        .where('product.isActive = :isActive', { isActive: true })
+        .getCount(),
+      // 近 7 日趋势：先查最近 7 天有效订单，再在服务层按日聚合，避免数据库方言差异。
+      orderRepo
+        .createQueryBuilder('order')
+        .select(['order.createdAt AS createdAt', 'order.totalAmount AS totalAmount', 'order.totalQty AS totalQty'])
+        .where('order.createdAt >= :trendStart', { trendStart })
+        .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
+        .orderBy('order.createdAt', 'ASC')
+        .getRawMany<{ createdAt: Date | string; totalAmount: string | number; totalQty: string | number }>(),
+    ])
+    const todayOrderAmountRaw = todayOrderAmountResult?.totalAmount
+    const monthOrderAmountRaw = monthOrderAmountResult?.totalAmount
 
     const trendMetricsMap = new Map<string, { amount: number; orderCount: number; totalQty: number }>()
     recentOrders.forEach((order) => {
@@ -364,20 +372,43 @@ export const dashboardService = {
       })
     }
 
-    // 热门文创榜：统计本月有效出库的产品数量 Top5。
-    const topProductsRaw = await orderItemRepo
-      .createQueryBuilder('item')
-      .innerJoin(BizOutboundOrder, 'order', 'order.id = item.orderId')
-      .select('item.productId', 'productId')
-      .addSelect('item.productNameSnapshot', 'productName')
-      .addSelect('SUM(item.qty)', 'totalQty')
-      .where('order.createdAt >= :monthStart', { monthStart })
-      .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
-      .groupBy('item.productId')
-      .addGroupBy('item.productNameSnapshot')
-      .orderBy('SUM(item.qty)', 'DESC')
-      .limit(5)
-      .getRawMany<{ productId: string; productName: string; totalQty: string | number }>()
+    const customerLabelExpr = `COALESCE(NULLIF(TRIM(order.customerDepartmentName), ''), '散客')`
+    const [topProductsRaw, topCustomersRaw, recentAuditLogs] = await Promise.all([
+      // 热门文创榜：统计本月有效出库的产品数量 Top5。
+      orderItemRepo
+        .createQueryBuilder('item')
+        .innerJoin(BizOutboundOrder, 'order', 'order.id = item.orderId')
+        .select('item.productId', 'productId')
+        .addSelect('item.productNameSnapshot', 'productName')
+        .addSelect('SUM(item.qty)', 'totalQty')
+        .where('order.createdAt >= :monthStart', { monthStart })
+        .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
+        .groupBy('item.productId')
+        .addGroupBy('item.productNameSnapshot')
+        .orderBy('SUM(item.qty)', 'DESC')
+        .limit(5)
+        .getRawMany<{ productId: string; productName: string; totalQty: string | number }>(),
+      orderRepo
+        .createQueryBuilder('order')
+        .select(customerLabelExpr, 'customerName')
+        .addSelect('SUM(order.totalAmount)', 'totalAmount')
+        .addSelect('COUNT(order.id)', 'orderCount')
+        .where('order.createdAt >= :monthStart', { monthStart })
+        .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
+        .groupBy(customerLabelExpr)
+        .orderBy('SUM(order.totalAmount)', 'DESC')
+        .limit(5)
+        .getRawMany<{ customerName: string | null; totalAmount: string | number; orderCount: string | number }>(),
+      // 近期出库动态：聚合最近 10 条“新建/删除/恢复”事件，供首页时间流展示。
+      auditLogRepo
+        .createQueryBuilder('audit')
+        .where('audit.actionType IN (:...actionTypes)', {
+          actionTypes: ['order.create', 'order.delete', 'order.restore'],
+        })
+        .orderBy('audit.id', 'DESC')
+        .limit(10)
+        .getMany(),
+    ])
 
     const topProducts: DashboardTopProduct[] = topProductsRaw.map((item) => ({
       productId: String(item.productId ?? '').trim(),
@@ -385,34 +416,11 @@ export const dashboardService = {
       totalQty: normalizeQty(item.totalQty),
     }))
 
-    const customerLabelExpr = `COALESCE(NULLIF(TRIM(order.customerDepartmentName), ''), '散客')`
-    const topCustomersRaw = await orderRepo
-      .createQueryBuilder('order')
-      .select(customerLabelExpr, 'customerName')
-      .addSelect('SUM(order.totalAmount)', 'totalAmount')
-      .addSelect('COUNT(order.id)', 'orderCount')
-      .where('order.createdAt >= :monthStart', { monthStart })
-      .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
-      .groupBy(customerLabelExpr)
-      .orderBy('SUM(order.totalAmount)', 'DESC')
-      .limit(5)
-      .getRawMany<{ customerName: string | null; totalAmount: string | number; orderCount: string | number }>()
-
     const topCustomers: DashboardTopCustomer[] = topCustomersRaw.map((item) => ({
       customerName: normalizeText(item.customerName, '散客'),
       totalAmount: normalizeAmount(item.totalAmount),
       orderCount: Number(item.orderCount ?? 0),
     }))
-
-    // 近期出库动态：聚合最近 10 条“新建/删除/恢复”事件，供首页时间流展示。
-    const recentAuditLogs = await auditLogRepo
-      .createQueryBuilder('audit')
-      .where('audit.actionType IN (:...actionTypes)', {
-        actionTypes: ['order.create', 'order.delete', 'order.restore'],
-      })
-      .orderBy('audit.id', 'DESC')
-      .limit(10)
-      .getMany()
 
     const recentActivities: DashboardRecentActivity[] = recentAuditLogs.map((audit) => {
       const detail = parseAuditDetail(audit.detailJson)

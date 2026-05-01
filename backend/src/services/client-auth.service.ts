@@ -25,6 +25,7 @@ import { authSecurityService } from './auth-security.service.js'
 import { captchaService } from './captcha.service.js'
 import { systemConfigService } from './system-config.service.js'
 import { verificationCodeService } from './verification-code.service.js'
+import { EphemeralTicketStore } from '../utils/ephemeral-ticket-store.js'
 
 interface ResetTicket {
   userId: string
@@ -33,7 +34,10 @@ interface ResetTicket {
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const RESET_TICKET_TTL_MS = 10 * 60 * 1000
-const resetTicketStore = new Map<string, ResetTicket>()
+const resetTicketStore = new EphemeralTicketStore<ResetTicket>({
+  maxSize: 3000,
+  resolveExpiresAt: (ticket) => ticket.expireAt,
+})
 
 export interface ClientRegisterInput {
   username: string
@@ -201,12 +205,18 @@ class ClientAuthService {
   }
 
   private toClientProfile(user: ClientUser) {
+    const normalizedUsername = user.realName?.trim() || ''
     return {
       id: user.id,
-      account: user.realName || user.email || user.mobile,
+      // 兼容口径说明：
+      // - `username` 是客户端前端应优先消费的用户名字段；
+      // - `realName` 仍保留给历史调用方做兼容别名，当前值与 username 保持一致；
+      // - `account` 继续保留旧字段，避免旧缓存或旧页面因字段缺失直接失效。
+      account: normalizedUsername || user.email || user.mobile,
+      username: normalizedUsername,
       mobile: user.mobile ?? '',
       email: user.email ?? '',
-      realName: user.realName,
+      realName: normalizedUsername,
       departmentName: user.departmentName ?? '',
       status: user.status,
       lastLoginAt: user.lastLoginAt,
@@ -403,7 +413,7 @@ class ClientAuthService {
     const account = this.resolveAccount(input.account)
     const newPassword = assertClientPasswordPolicy(input.newPassword, '新密码')
     const ticket = resetTicketStore.get(input.resetToken)
-    if (!ticket || ticket.expireAt <= Date.now()) {
+    if (!ticket) {
       resetTicketStore.delete(input.resetToken)
       throw new BizError('重置凭证已失效', 400)
     }

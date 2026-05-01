@@ -21,6 +21,8 @@ const CLIENT_AUTH_EXPIRES_AT_KEY = 'y-link.client-auth.expiresAt'
 export interface ClientAuthUserSnapshot {
   id: string
   account: string
+  // 兼容历史缓存：旧快照可能没有该字段，因此这里允许缺省。
+  username?: string
   mobile: string
   email: string
   realName: string

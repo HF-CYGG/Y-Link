@@ -8,6 +8,7 @@ import { Router } from 'express'
 import multer from 'multer'
 import path from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { requirePermission } from '../middleware/auth.middleware.js'
 import { BizError } from '../utils/errors.js'
 
 export const uploadRouter = Router()
@@ -39,15 +40,23 @@ const upload = multer({
     fileSize: 10 * 1024 * 1024, // 限制最大 10MB
   },
   fileFilter: (req, file, cb) => {
-    if (file.mimetype.startsWith('image/')) {
+    const normalizedMime = file.mimetype.toLowerCase()
+    const normalizedExt = path.extname(file.originalname).toLowerCase()
+    const allowedMimes = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
+    const allowedExts = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif'])
+    if (allowedMimes.has(normalizedMime) && allowedExts.has(normalizedExt)) {
       cb(null, true)
     } else {
-      cb(new BizError('只允许上传图片文件', 400))
+      cb(new BizError('仅支持上传 JPG/PNG/WEBP/GIF 图片', 400))
     }
   },
 })
 
-uploadRouter.post('/', upload.single('file'), (req, res) => {
+uploadRouter.post(
+  '/',
+  requirePermission('products:manage'),
+  upload.single('file'),
+  (req, res) => {
   if (!req.file) {
     throw new BizError('文件上传失败', 400)
   }
@@ -57,4 +66,5 @@ uploadRouter.post('/', upload.single('file'), (req, res) => {
   // 拼接得到可供前端直接访问的静态资源 URL
   const url = `/uploads/${req.file.filename}`
   res.json({ code: 0, message: 'ok', data: { url } })
-})
+  },
+)

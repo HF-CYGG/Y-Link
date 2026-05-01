@@ -85,6 +85,8 @@ const loadProducts = async () => {
   loading.value = true
   try {
     products.value = await getProductList({})
+  } catch (error) {
+    ElMessage.error(extractErrorMessage(error, '加载商品列表失败，请稍后重试'))
   } finally {
     loading.value = false
   }

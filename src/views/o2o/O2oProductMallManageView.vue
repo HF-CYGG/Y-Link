@@ -159,6 +159,7 @@ const handleCustomUpload = async (options: UploadRequestOptions) => {
   uploadProgress.value = 0
   uploadProgressVisible.value = true
 
+  let uploadStage: 'compress' | 'upload' = 'compress'
   try {
     const compressedFile = await imageCompression(file, {
       maxSizeMB: 0.8, // 压缩到不超过 800KB
@@ -177,6 +178,7 @@ const handleCustomUpload = async (options: UploadRequestOptions) => {
     }
     localPreviewUrl.value = URL.createObjectURL(compressedUploadFile)
 
+    uploadStage = 'upload'
     const uploadResult = await uploadImage(compressedUploadFile, {
       onUploadProgress: (event) => {
         if (!event.total || event.total <= 0) {
@@ -197,8 +199,8 @@ const handleCustomUpload = async (options: UploadRequestOptions) => {
       uploadProgress.value = 0
     }, 520)
   } catch (error) {
-    console.error('图片压缩失败:', error)
-    ElMessage.error('图片处理失败，请重试')
+    console.error(uploadStage === 'compress' ? '图片压缩失败:' : '图片上传失败:', error)
+    ElMessage.error(uploadStage === 'compress' ? '图片压缩失败，请重试' : '图片上传失败，请重试')
     uploadProgress.value = 0
     uploadProgressVisible.value = false
   } finally {

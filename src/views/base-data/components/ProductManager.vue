@@ -29,7 +29,15 @@ import {
 } from '@/components/common'
 import { useCrudManager } from '@/composables/useCrudManager'
 import { usePermissionAction } from '@/composables/usePermissionAction'
+import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
+import {
+  compareProductCode,
+  createBatchCreateRow,
+  normalizeSelectValue,
+  validateBatchCreateRows,
+  type BatchCreateProductFormRow,
+} from '@/views/base-data/components/product-manager.helpers'
 
 const allTags = ref<Tag[]>([])
 const formRef = ref<FormInstance>()
@@ -39,6 +47,7 @@ const keepAliveActivated = ref(false)
 const hasAutoCreatedTags = ref(false)
 const editingProductId = ref('')
 const editLoading = ref(false)
+const productDetailRequest = useStableRequest()
 const batchSubmitting = ref(false)
 const batchCreateDialogVisible = ref(false)
 const batchCreateSubmitting = ref(false)
@@ -62,17 +71,6 @@ interface ProductForm {
   currentStock: number
   isActive: boolean
   tagIds: string[]
-}
-
-interface BatchCreateProductFormRow {
-  rowId: string
-  productCode: string
-  productName: string
-  pinyinAbbr: string
-  defaultPrice: number
-  currentStock: number
-  isActive: boolean
-  tagIds: Array<string | number>
 }
 
 const BATCH_CREATE_MAX_ROWS = 50
@@ -100,29 +98,9 @@ const batchCreateRowCount = computed(() => batchCreateRows.value.length)
 const { hasPermission, ensurePermission } = usePermissionAction()
 const canManageProducts = computed(() => hasPermission('products:manage'))
 
-const createBatchCreateRow = (): BatchCreateProductFormRow => {
+const createBatchCreateFormRow = (): BatchCreateProductFormRow => {
   batchCreateRowSeed.value += 1
-  return {
-    rowId: `batch-row-${Date.now()}-${batchCreateRowSeed.value}`,
-    productCode: '',
-    productName: '',
-    pinyinAbbr: '',
-    defaultPrice: 0,
-    currentStock: 0,
-    isActive: true,
-    tagIds: [],
-  }
-}
-
-/**
- * 编码排序比较器：
- * - 统一按字符串字母序比较，兼容 UUID/自动编码等场景；
- * - 通过 toUpperCase 规避大小写导致的排序抖动。
- */
-const compareProductCode = (left: string, right: string): number => {
-  const normalizedLeft = String(left ?? '').trim().toUpperCase()
-  const normalizedRight = String(right ?? '').trim().toUpperCase()
-  return normalizedLeft.localeCompare(normalizedRight, 'en')
+  return createBatchCreateRow(`batch-row-${Date.now()}-${batchCreateRowSeed.value}`)
 }
 
 /**
@@ -228,14 +206,6 @@ const upsertProduct = (product: ProductRecord) => {
   }
 
   products.value.unshift(product)
-}
-
-const normalizeSelectValue = (value: string | number | null | undefined): string => {
-  if (value === null || value === undefined) {
-    return ''
-  }
-
-  return String(value).trim()
 }
 
 const applyTableSelection = async () => {
@@ -399,15 +369,19 @@ const handleEditProduct = async (row: ProductRecord) => {
   }
   editingProductId.value = row.id
   editLoading.value = true
-  try {
-    const detail = await getProductDetail(row.id)
-    handleEdit(detail)
-  } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '获取产品详情失败'))
-  } finally {
-    editingProductId.value = ''
-    editLoading.value = false
-  }
+  await productDetailRequest.runLatest({
+    executor: (signal) => getProductDetail(row.id, { signal }),
+    onSuccess: (detail) => {
+      handleEdit(detail)
+    },
+    onError: (error) => {
+      ElMessage.error(extractErrorMessage(error, '获取产品详情失败'))
+    },
+    onFinally: () => {
+      editingProductId.value = ''
+      editLoading.value = false
+    },
+  })
 }
 
 const handleDeleteProduct = async (row: ProductRecord) => {
@@ -500,12 +474,12 @@ const openBatchCreateDialog = () => {
   if (!ensurePermission('products:manage', '批量新增产品')) {
     return
   }
-  batchCreateRows.value = [createBatchCreateRow()]
+  batchCreateRows.value = [createBatchCreateFormRow()]
   batchCreateDialogVisible.value = true
 }
 
 const resetBatchCreateRows = () => {
-  batchCreateRows.value = [createBatchCreateRow()]
+  batchCreateRows.value = [createBatchCreateFormRow()]
 }
 
 const addBatchCreateRow = () => {
@@ -513,7 +487,7 @@ const addBatchCreateRow = () => {
     ElMessage.warning(`单次最多新增 ${BATCH_CREATE_MAX_ROWS} 行`)
     return
   }
-  batchCreateRows.value.push(createBatchCreateRow())
+  batchCreateRows.value.push(createBatchCreateFormRow())
 }
 
 const removeBatchCreateRow = (rowId: string) => {
@@ -524,45 +498,11 @@ const removeBatchCreateRow = (rowId: string) => {
   batchCreateRows.value = batchCreateRows.value.filter((row) => row.rowId !== rowId)
 }
 
-const validateBatchCreateRows = (): string | null => {
-  if (!batchCreateRows.value.length) {
-    return '请至少添加一行产品'
-  }
-
-  const explicitProductCodeRowMap = new Map<string, number>()
-  for (let index = 0; index < batchCreateRows.value.length; index += 1) {
-    const row = batchCreateRows.value[index]
-    if (!row.productName.trim()) {
-      return `第 ${index + 1} 行产品名称不能为空`
-    }
-
-    if (!Number.isFinite(row.defaultPrice) || row.defaultPrice < 0) {
-      return `第 ${index + 1} 行默认售价必须大于等于 0`
-    }
-
-    if (!Number.isFinite(row.currentStock) || row.currentStock < 0 || !Number.isInteger(row.currentStock)) {
-      return `第 ${index + 1} 行当前库存必须是大于等于 0 的整数`
-    }
-
-    const normalizedProductCode = row.productCode.trim()
-    if (!normalizedProductCode) {
-      continue
-    }
-    const duplicatedRow = explicitProductCodeRowMap.get(normalizedProductCode)
-    if (duplicatedRow !== undefined) {
-      return `第 ${index + 1} 行产品编码与第 ${duplicatedRow + 1} 行重复`
-    }
-    explicitProductCodeRowMap.set(normalizedProductCode, index)
-  }
-
-  return null
-}
-
 const handleBatchCreate = async () => {
   if (!ensurePermission('products:manage', '批量新增产品')) {
     return
   }
-  const validationError = validateBatchCreateRows()
+  const validationError = validateBatchCreateRows(batchCreateRows.value)
   if (validationError) {
     ElMessage.warning(validationError)
     return

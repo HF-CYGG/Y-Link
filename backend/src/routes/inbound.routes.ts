@@ -28,6 +28,13 @@ const submitInboundSchema = z.object({
   ).min(1, '至少选择一个商品'),
 })
 
+const supplierListQuerySchema = z.object({
+  keyword: z.string().trim().max(64).optional(),
+  status: z.enum(['pending', 'verified', 'cancelled']).optional(),
+  page: z.coerce.number().int().min(1).optional(),
+  pageSize: z.coerce.number().int().min(1).max(50).optional(),
+})
+
 inboundRouter.post(
   '/supplier/submit',
   requirePermission('inbound:create'),
@@ -49,7 +56,8 @@ inboundRouter.get(
   requirePermission('inbound:view'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
-    const result = await inboundService.listSupplierDeliveries(authReq.auth)
+    const query = supplierListQuerySchema.parse(req.query)
+    const result = await inboundService.listSupplierDeliveries(authReq.auth, query)
     res.json({
       code: 0,
       message: 'ok',

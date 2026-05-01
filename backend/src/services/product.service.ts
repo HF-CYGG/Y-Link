@@ -13,6 +13,7 @@ import { BizInboundOrderItem } from '../entities/biz-inbound-order-item.entity.j
 import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
 import { InventoryLog } from '../entities/inventory-log.entity.js'
 import { O2oPreorderItem } from '../entities/o2o-preorder-item.entity.js'
+import type { PaginationResult } from '../types/api.js'
 import { isRetryableSqliteLockError, isUniqueConstraintError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
 import { generateProductCode } from '../utils/id-generator.js'
@@ -22,6 +23,8 @@ export interface ProductQuery {
   tagId?: string
   isActive?: boolean
   o2oStatus?: 'listed' | 'unlisted'
+  page?: number
+  pageSize?: number
 }
 
 export interface CreateProductInput {
@@ -182,8 +185,42 @@ export class ProductService {
     }
 
     qb.orderBy('p.id', 'DESC')
+
+    if (Number.isFinite(query.page) && Number.isFinite(query.pageSize) && (query.page ?? 0) > 0 && (query.pageSize ?? 0) > 0) {
+      qb.skip(((query.page as number) - 1) * (query.pageSize as number)).take(query.pageSize as number)
+    }
+
     const products = await qb.getMany()
     return this.buildProductViews(products)
+  }
+
+  async listPaged(query: ProductQuery): Promise<PaginationResult<ProductView>> {
+    const page = Math.max(1, Math.floor(Number(query.page || 1)))
+    const pageSize = Math.min(100, Math.max(10, Math.floor(Number(query.pageSize || 20))))
+    const list = await this.list({
+      ...query,
+      page,
+      pageSize,
+    })
+    const total = await this.count(query)
+    return { page, pageSize, total, list }
+  }
+
+  private async count(query: ProductQuery): Promise<number> {
+    const qb = this.productRepo.createQueryBuilder('p')
+    if (typeof query.isActive === 'boolean') {
+      qb.andWhere('p.is_active = :isActive', { isActive: query.isActive ? 1 : 0 })
+    }
+    if (query.o2oStatus) {
+      qb.andWhere('p.o2o_status = :o2oStatus', { o2oStatus: query.o2oStatus })
+    }
+    if (query.keyword?.trim()) {
+      qb.andWhere('(p.product_name LIKE :keyword OR p.pinyin_abbr LIKE :keyword)', { keyword: `%${query.keyword.trim()}%` })
+    }
+    if (query.tagId) {
+      qb.innerJoin('rel_product_tag', 'rpt', 'rpt.product_id = p.id AND rpt.tag_id = :tagId', { tagId: query.tagId })
+    }
+    return qb.getCount()
   }
 
   async detail(id: string): Promise<ProductView> {

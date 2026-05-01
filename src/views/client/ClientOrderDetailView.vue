@@ -41,44 +41,24 @@ import {
 import { useClientAuthStore, useClientOrderStore } from '@/store'
 import { normalizeRequestError } from '@/utils/error'
 import { exportVoucherPdf } from '@/utils/pdf/export-voucher-pdf'
+import ClientOrderEditDialog from '@/views/client/components/ClientOrderEditDialog.vue'
+import ClientOrderReturnDialog from '@/views/client/components/ClientOrderReturnDialog.vue'
+import ClientOrderVoucherDialog from '@/views/client/components/ClientOrderVoucherDialog.vue'
+import {
+  DEFAULT_VOUCHER_ORIENTATION,
+  O2O_PREORDER_REMARK_MAX_LENGTH,
+  O2O_RETURN_REASON_MAX_LENGTH,
+  createEmptyVoucherEditableFields,
+  type EditableOrderItem,
+  type OrderVoucherEditableFields,
+  type VoucherOrientation,
+} from '@/views/client/client-order-detail-types'
 import OrderVoucherTemplate from '@/views/order-list/components/OrderVoucherTemplate.vue'
 
-const O2O_RETURN_REASON_MAX_LENGTH = 500
-const O2O_PREORDER_REMARK_MAX_LENGTH = 255
 const ORDER_TYPE_LABEL_MAP = {
   department: '部门订',
   walkin: '散客',
 } as const
-
-interface EditableOrderItem {
-  productId: string
-  productCode: string
-  productName: string
-  defaultPrice: string
-  qty: number
-  originalQty: number
-  maxQty: number
-  unavailableReason: string | null
-}
-
-interface OrderVoucherEditableFields {
-  departmentOperator: string
-  kingdeeVoucherNo: string
-  receiverSignature: string
-  issuerSignature: string
-  completionSignature: string
-}
-
-type VoucherOrientation = 'portrait' | 'landscape'
-const DEFAULT_VOUCHER_ORIENTATION: VoucherOrientation = 'landscape'
-
-const createEmptyVoucherEditableFields = (): OrderVoucherEditableFields => ({
-  departmentOperator: '',
-  kingdeeVoucherNo: '',
-  receiverSignature: '',
-  issuerSignature: '',
-  completionSignature: '',
-})
 
 const route = useRoute()
 const router = useRouter()
@@ -216,6 +196,7 @@ const voucherOrder = computed<OrderDetailResult | null>(() => {
     return null
   }
   const { order, items, customerProfile } = detail.value
+  const customerDisplayName = customerProfile?.realName || customerProfile?.username || null
   const normalizedTotalAmount = toVoucherMoneyText(order.totalAmount ?? totalAmount.value)
   return {
     id: order.id,
@@ -225,14 +206,15 @@ const voucherOrder = computed<OrderDetailResult | null>(() => {
     isSystemApplied: Boolean(order.isSystemApplied),
     issuerName: '门店值班人员',
     customerDepartmentName: order.departmentNameSnapshot || customerProfile?.departmentName || null,
-    customerName: customerProfile?.username || null,
+    // 详细注释：正式出库单优先展示下单时填写的提货人，历史订单再回退到用户资料中的展示名。
+    customerName: order.pickupContact || customerDisplayName,
     totalAmount: normalizedTotalAmount,
     totalQty: String(order.totalQty ?? 0),
     status: order.status,
     remark: order.remark,
     creatorUserId: customerProfile?.id || null,
     creatorUsername: customerProfile?.username || null,
-    creatorDisplayName: customerProfile?.username || null,
+    creatorDisplayName: customerDisplayName,
     isDeleted: false,
     deletedAt: null,
     deletedByUserId: null,
@@ -552,6 +534,19 @@ const resetReturnForm = () => {
 // 避免上一单的手工补填信息误带入下一次打印、导出或补打流程。
 const resetVoucherEditableForm = () => {
   Object.assign(voucherEditableForm, createEmptyVoucherEditableFields())
+}
+
+// 详细注释：正式出库单补填字段下沉到子组件后，统一通过键值补丁回写，
+// 避免父页面暴露大量单字段 setter，同时保持字段更新入口集中可追踪。
+const handleVoucherEditableFieldUpdate = <TKey extends keyof OrderVoucherEditableFields>(
+  key: TKey,
+  value: OrderVoucherEditableFields[TKey],
+) => {
+  voucherEditableForm[key] = value
+}
+
+const handleVoucherOrientationChange = (value: VoucherOrientation) => {
+  voucherOrientation.value = value
 }
 
 const updateEditItemQty = (productId: string, value: number | null | undefined) => {
@@ -1185,6 +1180,10 @@ onBeforeUnmount(() => {
               <p class="mt-1 text-sm text-slate-700">{{ detail.order.totalQty }} 件</p>
             </div>
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <p class="text-sm text-slate-400">提货人</p>
+              <p class="mt-1 text-sm text-slate-700">{{ detail.order.pickupContact || '未填写' }}</p>
+            </div>
+            <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">总金额</p>
               <p class="mt-1 text-sm font-semibold text-teal-600">¥{{ totalAmount.toFixed(2) }}</p>
             </div>
@@ -1425,226 +1424,46 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
-    <el-dialog
-      v-if="detail"
-      v-model="editDialogVisible"
-      title="修改订单"
-      width="92%"
-      style="max-width: 860px"
-      class="client-order-detail-dialog ylink-dialog-height-mode--scroll client-order-detail-dialog--form"
-      body-class="client-order-detail-dialog__body client-order-detail-dialog__body--scroll"
-      modal-class="client-order-detail-dialog-overlay"
-      :close-on-click-modal="!editSubmitting"
-      :close-on-press-escape="!editSubmitting"
-      destroy-on-close
-      append-to-body
-      align-center
-      :lock-scroll="true"
+    <ClientOrderEditDialog
+      :visible="editDialogVisible"
+      :detail="detail"
+      :submitting="editSubmitting"
+      :products-loading="editProductsLoading"
+      :can-modify-order="canModifyOrder"
+      :modify-order-quota-text="modifyOrderQuotaText"
+      :remark-max-length="O2O_PREORDER_REMARK_MAX_LENGTH"
+      :edit-remark="editRemark"
+      :edit-add-product-id="editAddProductId"
+      :edit-order-items="editOrderItems"
+      :editable-product-options="editableProductOptions"
+      :editable-order-total-qty="editableOrderTotalQty"
+      :editable-order-total-amount="editableOrderTotalAmount"
+      :can-submit-order-edit="canSubmitOrderEdit"
+      @update:visible="editDialogVisible = $event"
+      @update:edit-remark="editRemark = $event"
+      @update:edit-add-product-id="editAddProductId = $event"
+      @update:item-qty="updateEditItemQty($event.productId, $event.value)"
+      @remove-item="removeEditItem"
+      @add-product="addEditProduct"
+      @submit="handleSubmitOrderEdit"
       @closed="handleEditDialogClosed"
-    >
-      <div class="client-order-detail-dialog__content space-y-4">
-        <div class="rounded-2xl bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-600">
-          待取货订单支持直接修改商品、数量和备注。保存后系统会按最新内容重算预订库存，原取货码保持不变。
-          <p class="mt-2 text-xs text-slate-500">{{ modifyOrderQuotaText }}</p>
-        </div>
+    />
 
-        <div class="rounded-3xl border border-slate-100 bg-white px-4 py-4">
-          <div class="flex flex-col gap-3 lg:flex-row lg:items-end">
-            <div class="flex-1">
-              <p class="text-sm font-semibold text-slate-900">添加商品</p>
-              <el-select
-                v-model="editAddProductId"
-                class="mt-3 w-full"
-                placeholder="请选择要加入订单的商品"
-                filterable
-                :loading="editProductsLoading"
-              >
-                <el-option
-                  v-for="product in editableProductOptions"
-                  :key="product.id"
-                  :label="`${product.productName}（剩余 ${product.availableStock} 件）`"
-                  :value="product.id"
-                />
-              </el-select>
-            </div>
-            <el-button type="primary" plain :disabled="!editableProductOptions.length" @click="addEditProduct">加入订单</el-button>
-          </div>
-          <p v-if="!editableProductOptions.length" class="mt-3 text-xs text-slate-400">当前没有可追加到本单的在售商品。</p>
-        </div>
-
-        <div class="space-y-3">
-          <div
-            v-for="item in editOrderItems"
-            :key="item.productId"
-            class="rounded-3xl border border-slate-100 bg-white px-4 py-4"
-          >
-            <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-              <div class="min-w-0 flex-1">
-                <p class="text-sm font-semibold text-slate-900">{{ item.productName }}</p>
-                <p class="mt-1 text-xs leading-5 text-slate-400">
-                  原数量 {{ item.originalQty }} 件，当前最多可改为 {{ item.maxQty }} 件
-                </p>
-                <p v-if="item.unavailableReason" class="mt-2 text-xs leading-5 text-amber-600">
-                  {{ item.unavailableReason }}
-                </p>
-              </div>
-              <div class="flex flex-col gap-3 sm:flex-row sm:items-center">
-                <div class="w-full sm:w-44">
-                  <p class="mb-2 text-xs text-slate-400">修改后数量</p>
-                  <el-input-number
-                    :model-value="item.qty"
-                    :min="0"
-                    :max="item.maxQty"
-                    :step="1"
-                    :precision="0"
-                    class="w-full"
-                    @update:model-value="updateEditItemQty(item.productId, $event)"
-                  />
-                </div>
-                <el-button text type="danger" @click="removeEditItem(item.productId)">移除</el-button>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="rounded-3xl border border-slate-100 bg-white px-4 py-4">
-          <p class="text-sm font-semibold text-slate-900">订单备注</p>
-          <el-input
-            v-model="editRemark"
-            type="textarea"
-            :rows="4"
-            :maxlength="O2O_PREORDER_REMARK_MAX_LENGTH"
-            show-word-limit
-            resize="none"
-            class="mt-3"
-            placeholder="选填：例如领取时间、特殊说明"
-          />
-        </div>
-
-        <div class="rounded-2xl bg-amber-50 px-4 py-3 text-sm text-amber-700">
-          修改后共 {{ editableOrderTotalQty }} 件商品，合计 ¥{{ editableOrderTotalAmount.toFixed(2) }}。
-          <p class="mt-2 text-xs text-amber-700">保存成功后将占用 1 次改单机会。</p>
-        </div>
-      </div>
-
-      <template v-slot:footer>
-        <div class="flex flex-wrap justify-end gap-3">
-          <el-button @click="editDialogVisible = false">取消</el-button>
-          <el-button
-            type="primary"
-            :loading="editSubmitting"
-            :disabled="!canSubmitOrderEdit"
-            @click="handleSubmitOrderEdit"
-          >
-            保存修改
-          </el-button>
-        </div>
-      </template>
-    </el-dialog>
-
-    <el-dialog
-      v-if="voucherOrder"
-      v-model="voucherDialogVisible"
-      title="正式出库单"
-      width="1100px"
-      align-center
-      class="client-order-detail-dialog client-order-detail-dialog--voucher order-voucher-dialog"
-      body-class="client-order-detail-dialog__body client-order-detail-dialog__body--voucher"
-      modal-class="client-order-detail-dialog-overlay"
-      append-to-body
-      destroy-on-close
-      :modal-append-to-body="true"
-      :lock-scroll="true"
-      :close-on-click-modal="!exportPdfLoading"
-      :close-on-press-escape="!exportPdfLoading"
+    <ClientOrderVoucherDialog
+      :visible="voucherDialogVisible"
+      :voucher-order="voucherOrder"
+      :editable-fields="voucherEditableForm"
+      :orientation="voucherOrientation"
+      :orientation-label="voucherOrientationLabel"
+      :enable-html2pdf-export="enableHtml2pdfExport"
+      :export-pdf-loading="exportPdfLoading"
+      @update:visible="voucherDialogVisible = $event"
+      @update:orientation="handleVoucherOrientationChange"
+      @update:editable-field="handleVoucherEditableFieldUpdate($event.key, $event.value)"
+      @print="handlePrintVoucher"
+      @export-pdf="handleExportVoucherPdf"
       @closed="handleVoucherDialogClosed"
-    >
-      <div class="voucher-editor-banner">
-        <div class="voucher-editor-banner__title">正式出库单字段说明</div>
-        <div class="voucher-editor-banner__content">
-          <span>固定字段由系统按订单数据自动带出，联次默认为一式两份。</span>
-          <span>可补填字段仅用于当前页面预览与打印，不会写回数据库。</span>
-          <span>订单全流程均可打印，核销与否不影响出库单补打。</span>
-        </div>
-      </div>
-      <div class="voucher-workbench">
-        <section class="voucher-editor-panel">
-          <div class="voucher-editor-panel__header">
-            <div>
-              <h3 class="voucher-editor-panel__title">在线补填</h3>
-              <p class="voucher-editor-panel__desc">填写后会立即同步到下方正式出库单预览与打印结果。</p>
-            </div>
-            <div class="voucher-editor-panel__meta">
-              <span>业务单号：{{ voucherOrder.showNo }}</span>
-              <span>下单时间：{{ voucherOrder.createdAt }}</span>
-            </div>
-          </div>
-          <div class="voucher-orientation-toolbar">
-            <span class="voucher-orientation-toolbar__label">页面方向</span>
-            <el-radio-group v-model="voucherOrientation" size="small">
-              <el-radio-button label="landscape">横版</el-radio-button>
-              <el-radio-button label="portrait">竖版</el-radio-button>
-            </el-radio-group>
-          </div>
-          <el-form label-position="top" class="voucher-editor-form">
-            <div class="voucher-editor-form__grid">
-              <el-form-item label="部门经办人">
-                <el-input v-model="voucherEditableForm.departmentOperator" placeholder="请输入部门经办人" clearable />
-              </el-form-item>
-              <el-form-item label="金蝶单据编号">
-                <el-input v-model="voucherEditableForm.kingdeeVoucherNo" placeholder="请输入金蝶单据编号" clearable />
-              </el-form-item>
-              <el-form-item label="领取人签字">
-                <el-input v-model="voucherEditableForm.receiverSignature" placeholder="请输入领取人签字" clearable />
-              </el-form-item>
-              <el-form-item label="出库人签字">
-                <el-input v-model="voucherEditableForm.issuerSignature" placeholder="请输入出库人签字" clearable />
-              </el-form-item>
-              <el-form-item class="voucher-editor-form__item--full" label="完成日期/签字">
-                <el-input
-                  v-model="voucherEditableForm.completionSignature"
-                  placeholder="请输入完成日期或签字说明，例如：2026-04-30 已完成"
-                  clearable
-                />
-              </el-form-item>
-            </div>
-          </el-form>
-        </section>
-
-        <section class="voucher-preview-panel">
-          <div class="voucher-preview-panel__header">
-            <div>
-              <h3 class="voucher-preview-panel__title">正式出库单预览</h3>
-              <p class="voucher-preview-panel__desc">
-                当前方向：{{ voucherOrientationLabel }}，共 2 页，每页 1 联；申请部门：{{ voucherOrder.customerDepartmentName || '散客' }}
-              </p>
-            </div>
-            <div class="voucher-preview-panel__summary">
-              <span>商品 {{ voucherOrder.items.length }} 行</span>
-              <span>总金额 ¥{{ Number(voucherOrder.totalAmount).toFixed(2) }}</span>
-            </div>
-          </div>
-          <div class="voucher-preview-panel__body">
-            <div class="order-voucher-preview-scope" :class="`is-${voucherOrientation}`">
-              <OrderVoucherTemplate
-                :order="voucherOrder"
-                :editable-fields="voucherEditableForm"
-                :orientation="voucherOrientation"
-              />
-            </div>
-          </div>
-        </section>
-      </div>
-      <template #footer>
-        <span class="flex flex-wrap justify-end gap-2">
-          <el-button @click="voucherDialogVisible = false">关闭</el-button>
-          <el-button type="primary" plain @click="handlePrintVoucher">打印</el-button>
-          <el-button type="primary" :disabled="!enableHtml2pdfExport" :loading="exportPdfLoading" @click="handleExportVoucherPdf">
-            导出PDF
-          </el-button>
-        </span>
-      </template>
-    </el-dialog>
+    />
 
     <Teleport to="body">
       <div
@@ -1663,93 +1482,22 @@ onBeforeUnmount(() => {
       </div>
     </Teleport>
 
-    <el-dialog
-      v-if="detail"
-      v-model="returnDialogVisible"
-      title="申请退货"
-      width="92%"
-      style="max-width: 760px"
-      class="client-order-detail-dialog ylink-dialog-height-mode--scroll client-order-detail-dialog--form"
-      body-class="client-order-detail-dialog__body client-order-detail-dialog__body--scroll"
-      modal-class="client-order-detail-dialog-overlay"
-      :close-on-click-modal="!returnSubmitting"
-      :close-on-press-escape="!returnSubmitting"
-      destroy-on-close
-      append-to-body
-      align-center
-      :lock-scroll="true"
+    <ClientOrderReturnDialog
+      :visible="returnDialogVisible"
+      :detail="detail"
+      :submitting="returnSubmitting"
+      :return-reason="returnReason"
+      :return-qty-map="returnQtyMap"
+      :reason-max-length="O2O_RETURN_REASON_MAX_LENGTH"
+      :selected-return-item-count="selectedReturnItems.length"
+      :selected-return-total-qty="selectedReturnTotalQty"
+      :can-submit-return-request="canSubmitReturnRequest"
+      @update:visible="returnDialogVisible = $event"
+      @update:return-reason="returnReason = $event"
+      @update:return-qty="handleReturnQtyChange($event.productId, $event.maxQty, $event.value)"
+      @submit="handleSubmitReturnRequest"
       @closed="handleReturnDialogClosed"
-    >
-      <div class="client-order-detail-dialog__content space-y-4">
-        <div class="rounded-2xl bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-600">
-          请按商品填写退货数量并说明原因。提交后系统会生成门店退货二维码，门店扫码核销后完成退货处理。
-        </div>
-        <div class="space-y-3">
-          <div
-            v-for="item in detail.items"
-            :key="item.id"
-            class="rounded-3xl border border-slate-100 bg-white px-4 py-4"
-          >
-            <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-              <div>
-                <p class="text-sm font-semibold text-slate-900">{{ item.productName }}</p>
-                <p class="mt-1 text-xs leading-5 text-slate-400">
-                  原订 {{ item.qty }} 件，当前可退 {{ item.availableReturnQty }} 件
-                </p>
-                <p v-if="item.returnedQty > 0" class="mt-2 text-xs leading-5 text-amber-600">
-                  已有 {{ item.returnedQty }} 件处于待退处理中，门店核销完成前不可重复申请。
-                </p>
-              </div>
-              <div class="w-full md:w-44">
-                <p class="mb-2 text-xs text-slate-400">本次退货数量</p>
-                <el-input-number
-                  :model-value="Number(returnQtyMap[item.productId] ?? 0)"
-                  :min="0"
-                  :max="item.availableReturnQty"
-                  :step="1"
-                  :precision="0"
-                  class="w-full"
-                  @update:model-value="handleReturnQtyChange(item.productId, item.availableReturnQty, $event)"
-                />
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="rounded-3xl border border-slate-100 bg-white px-4 py-4">
-          <p class="text-sm font-semibold text-slate-900">退货原因</p>
-          <el-input
-            v-model="returnReason"
-            type="textarea"
-            :rows="4"
-            :maxlength="O2O_RETURN_REASON_MAX_LENGTH"
-            show-word-limit
-            resize="none"
-            class="mt-3"
-            placeholder="请说明退货原因，便于门店快速处理。"
-          />
-          <p class="mt-2 text-xs text-slate-400">最多输入 {{ O2O_RETURN_REASON_MAX_LENGTH }} 个字符。</p>
-        </div>
-
-        <div class="rounded-2xl bg-amber-50 px-4 py-3 text-sm text-amber-700">
-          已选择 {{ selectedReturnItems.length }} 种商品，共 {{ selectedReturnTotalQty }} 件商品申请退货。
-        </div>
-      </div>
-
-      <template v-slot:footer>
-        <div class="flex flex-wrap justify-end gap-3">
-          <el-button @click="returnDialogVisible = false">取消</el-button>
-          <el-button
-            type="primary"
-            :loading="returnSubmitting"
-            :disabled="!canSubmitReturnRequest"
-            @click="handleSubmitReturnRequest"
-          >
-            提交退货申请
-          </el-button>
-        </div>
-      </template>
-    </el-dialog>
+    />
   </section>
 </template>
 
