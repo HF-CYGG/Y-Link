@@ -371,6 +371,11 @@ export interface DeleteOrderPayload {
   confirmShowNo: string
 }
 
+export interface UpdateOrderComplianceFlagsPayload {
+  hasCustomerOrder?: boolean
+  isSystemApplied?: boolean
+}
+
 /**
  * 软删除出库单（管理员）：
  * - 服务端会校验业务单号完成二次确认；
@@ -393,3 +398,10 @@ export const restoreOrderById = (id: string) =>
     method: 'POST',
     url: `/orders/${id}/restore`,
   }).then(normalizeOrderRecord)
+
+export const updateOrderComplianceFlags = (id: string, payload: UpdateOrderComplianceFlagsPayload) =>
+  request<OrderDetailRawResult>({
+    method: 'PATCH',
+    url: `/orders/${id}/compliance-flags`,
+    data: payload,
+  }).then(normalizeOrderDetail)

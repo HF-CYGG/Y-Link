@@ -27,6 +27,7 @@ import {
   getO2oVerifyDetail,
   getO2oVerifyDetailByShowNo,
   rejectO2oReturnRequest,
+  updateO2oOrderComplianceFlags,
   updateO2oOrderOnsite,
   verifyO2oPreorder,
   type O2oPreorderDetail,
@@ -36,6 +37,7 @@ import {
 import { getProductList, type ProductRecord } from '@/api/modules/product'
 import { useCameraQrScanner } from '@/composables/useCameraQrScanner'
 import { useDevice } from '@/composables/useDevice'
+import { useAuthStore } from '@/store'
 
 const O2O_RETURN_REJECT_REASON_MAX_LENGTH = 500
 const O2O_PREORDER_REMARK_MAX_LENGTH = 255
@@ -62,6 +64,7 @@ const submitting = ref(false)
 const inputRef = ref<{ focus: () => void } | null>(null)
 const { isPhone } = useDevice()
 const route = useRoute()
+const authStore = useAuthStore()
 const lastRouteVerifyKey = ref('')
 
 const productCatalog = ref<ProductRecord[]>([])
@@ -76,6 +79,11 @@ const onsiteAdjustSubmitting = ref(false)
 const onsiteAddProductId = ref('')
 const onsiteRemark = ref('')
 const onsiteOrderItems = ref<EditableOnsiteOrderItem[]>([])
+const complianceSaving = ref(false)
+const complianceForm = ref({
+  hasCustomerOrder: false,
+  isSystemApplied: false,
+})
 
 // 查询接口会返回联合结构，这里先做类型守卫，后续模板与按钮逻辑都复用同一份收窄结果。
 const isPreorderDetail = (
@@ -123,6 +131,9 @@ const canRejectReturnRequest = computed(() => {
 const canOpenOnsiteAdjust = computed(() => {
   return Boolean(preorderDetail.value && isO2oOrderPending(preorderDetail.value.order.status))
 })
+
+const canEditComplianceFlags = computed(() => authStore.hasPermission('orders:update'))
+const isDepartmentPreorder = computed(() => preorderDetail.value?.order.clientOrderType === 'department')
 
 const showVerifyActionButton = computed(() => {
   if (preorderDetail.value) {
@@ -654,6 +665,34 @@ const handleSubmitOnsiteAdjust = async () => {
   }
 }
 
+const syncComplianceFormFromDetail = (detail: O2oPreorderDetail | null) => {
+  complianceForm.value = {
+    hasCustomerOrder: Boolean(detail?.order.hasCustomerOrder),
+    isSystemApplied: Boolean(detail?.order.isSystemApplied),
+  }
+}
+
+const handleSaveComplianceFlags = async () => {
+  if (!preorderDetail.value?.order.id || !isDepartmentPreorder.value) {
+    return
+  }
+  complianceSaving.value = true
+  try {
+    const nextDetail = await updateO2oOrderComplianceFlags(preorderDetail.value.order.id, {
+      hasCustomerOrder: complianceForm.value.hasCustomerOrder,
+      isSystemApplied: complianceForm.value.isSystemApplied,
+    })
+    replacePreorderDetail(nextDetail)
+    syncComplianceFormFromDetail(nextDetail)
+    ElMessage.success('状态已更新')
+  } catch (error) {
+    const message = error instanceof Error ? error.message : '状态更新失败，请稍后重试'
+    ElMessage.error(message)
+  } finally {
+    complianceSaving.value = false
+  }
+}
+
 // 详细注释：处理核销操作，先弹窗二次确认，成功后请求核销接口并刷新状态。
 const handleVerify = async () => {
   if (!verifyResult.value) {
@@ -706,6 +745,13 @@ onMounted(async () => {
   await focusInput()
   await applyVerifyCodeFromRoute()
 })
+
+watch(
+  () => preorderDetail.value?.order.id ?? '',
+  () => {
+    syncComplianceFormFromDetail(preorderDetail.value)
+  },
+)
 
 watch(
   () => verifyCode.value,
@@ -857,6 +903,56 @@ watch(
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">订单备注</p>
               <p class="mt-1 whitespace-pre-wrap break-words text-sm text-slate-700">{{ preorderDetail.order.remark || '未填写' }}</p>
+            </div>
+          </div>
+
+          <div v-if="preorderDetail" class="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
+            <div class="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p class="text-sm font-semibold text-slate-900">合规状态确认</p>
+                <p class="mt-1 text-xs text-slate-500">仅部门单可编辑“是否有出库单”和“系统申请”状态。</p>
+              </div>
+              <el-button
+                v-if="canEditComplianceFlags && isDepartmentPreorder"
+                type="primary"
+                size="small"
+                :loading="complianceSaving"
+                @click="handleSaveComplianceFlags"
+              >
+                保存状态
+              </el-button>
+            </div>
+            <div class="mt-3 grid gap-3 sm:grid-cols-2">
+              <div class="rounded-xl bg-white px-3 py-3">
+                <p class="text-xs text-slate-500">是否有出库单</p>
+                <div class="mt-2">
+                  <el-switch
+                    v-if="canEditComplianceFlags && isDepartmentPreorder"
+                    v-model="complianceForm.hasCustomerOrder"
+                    inline-prompt
+                    active-text="是"
+                    inactive-text="否"
+                  />
+                  <span v-else class="text-sm font-medium text-slate-700">
+                    {{ isDepartmentPreorder ? (preorderDetail.order.hasCustomerOrder ? '是' : '否') : '不适用' }}
+                  </span>
+                </div>
+              </div>
+              <div class="rounded-xl bg-white px-3 py-3">
+                <p class="text-xs text-slate-500">系统申请</p>
+                <div class="mt-2">
+                  <el-switch
+                    v-if="canEditComplianceFlags && isDepartmentPreorder"
+                    v-model="complianceForm.isSystemApplied"
+                    inline-prompt
+                    active-text="已申请"
+                    inactive-text="未申请"
+                  />
+                  <span v-else class="text-sm font-medium text-slate-700">
+                    {{ isDepartmentPreorder ? (preorderDetail.order.isSystemApplied ? '已申请' : '未申请') : '不适用' }}
+                  </span>
+                </div>
+              </div>
             </div>
           </div>
 

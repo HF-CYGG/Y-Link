@@ -568,6 +568,8 @@ const mergeOrderSummaryFromDetail = (detail: O2oPreorderDetail) => {
     verifyCode: nextOrder.verifyCode,
     status: nextOrder.status,
     businessStatus: nextOrder.businessStatus,
+    hasCustomerOrder: Boolean(nextOrder.hasCustomerOrder),
+    isSystemApplied: Boolean(nextOrder.isSystemApplied),
     merchantMessage: nextOrder.merchantMessage,
     clientOrderType: nextOrder.clientOrderType,
     departmentNameSnapshot: nextOrder.departmentNameSnapshot,

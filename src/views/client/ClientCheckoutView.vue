@@ -69,12 +69,12 @@ const resolvePickupContactStorageKey = (): string => {
 const restorePickupContactDraft = () => {
   const storageKey = resolvePickupContactStorageKey()
   const defaultPickupContact = resolveDefaultPickupContact()
-  if (typeof window === 'undefined') {
+  if (globalThis.window === undefined) {
     pickupContact.value = defaultPickupContact
     return
   }
   try {
-    const cachedPickupContact = window.localStorage.getItem(storageKey)?.trim() || ''
+    const cachedPickupContact = globalThis.window.localStorage.getItem(storageKey)?.trim() || ''
     pickupContact.value = cachedPickupContact || defaultPickupContact
   } catch {
     pickupContact.value = defaultPickupContact
@@ -82,17 +82,17 @@ const restorePickupContactDraft = () => {
 }
 
 const persistPickupContactDraft = () => {
-  if (typeof window === 'undefined') {
+  if (globalThis.window === undefined) {
     return
   }
   const storageKey = resolvePickupContactStorageKey()
   const normalizedPickupContact = pickupContact.value.trim()
   try {
     if (normalizedPickupContact) {
-      window.localStorage.setItem(storageKey, normalizedPickupContact)
+      globalThis.window.localStorage.setItem(storageKey, normalizedPickupContact)
       return
     }
-    window.localStorage.removeItem(storageKey)
+    globalThis.window.localStorage.removeItem(storageKey)
   } catch {
     // 详细注释：本地存储失败不阻断下单流程，仅降级为本次会话内输入有效。
   }

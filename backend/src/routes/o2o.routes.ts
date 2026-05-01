@@ -86,6 +86,15 @@ const merchantMessageSchema = z.object({
   merchantMessage: z.string().trim().max(O2O_MERCHANT_MESSAGE_MAX_LENGTH).nullable(),
 })
 
+const complianceFlagsSchema = z
+  .object({
+    hasCustomerOrder: z.boolean().optional(),
+    isSystemApplied: z.boolean().optional(),
+  })
+  .refine((payload) => payload.hasCustomerOrder !== undefined || payload.isSystemApplied !== undefined, {
+    message: '至少传入一个可更新字段',
+  })
+
 const submitReturnRequestSchema = z.object({
   reason: z.string().trim().min(1).max(O2O_RETURN_REASON_MAX_LENGTH),
   items: z.array(z.object({ productId: z.union([z.string(), z.number()]), qty: z.number().int().positive() })).min(1),
@@ -150,6 +159,17 @@ o2oRouter.get(
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const data = await o2oPreorderService.getMyOrderDetail(authReq.clientAuth, req.params.id)
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+// 客户端触发正式出库单打印/导出后上报：用于把“是否有出库单”从默认否更新为是。
+o2oRouter.post(
+  '/mall/preorders/:id/customer-order-print',
+  requireClientAuth,
+  asyncHandler(async (req, res) => {
+    const authReq = req as ClientAuthenticatedRequest
+    const data = await o2oPreorderService.markCustomerOrderPrintedByClient(authReq.clientAuth, req.params.id)
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -412,6 +432,22 @@ o2oRouter.patch(
       })
     }
 
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+// 管理端可在核销台编辑“是否有出库单/系统申请”，仅部门单适用。
+o2oRouter.patch(
+  '/orders/:id/compliance-flags',
+  requireAuth,
+  requirePermission('orders:update'),
+  asyncHandler(async (req, res) => {
+    const payload = complianceFlagsSchema.parse(req.body)
+    const data = await o2oPreorderService.updateComplianceFlagsByAdmin({
+      orderId: req.params.id,
+      hasCustomerOrder: payload.hasCustomerOrder,
+      isSystemApplied: payload.isSystemApplied,
+    })
     res.json({ code: 0, message: 'ok', data })
   }),
 )

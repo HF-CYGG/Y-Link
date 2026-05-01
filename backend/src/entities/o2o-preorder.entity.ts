@@ -88,6 +88,11 @@ export class O2oPreorder {
   @Column({ name: 'is_system_applied', ...entityColumnOptions.booleanFlag, default: 0, comment: '是否系统申请（客户端选择快照）' })
   isSystemApplied!: boolean
 
+  // hasCustomerOrder 用于记录客户端是否触发过“正式出库单打印/导出”，
+  // 核销生成后台出库单时将作为 hasCustomerOrder 的来源快照，避免继续写死为 false。
+  @Column({ name: 'has_customer_order', ...entityColumnOptions.booleanFlag, default: 0, comment: '是否已触发正式出库单打印/导出（客户端快照）' })
+  hasCustomerOrder!: boolean
+
   // totalQty 记录整单总件数，便于列表快速展示，避免每次都聚合子项。
   @Column({ name: 'total_qty', type: 'int', default: 0, comment: '总件数' })
   totalQty!: number

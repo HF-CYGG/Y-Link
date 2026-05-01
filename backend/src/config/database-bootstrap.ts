@@ -63,6 +63,7 @@ const SQLITE_REQUIRED_O2O_PREORDER_COLUMNS = [
   'client_order_type',
   'department_name_snapshot',
   'is_system_applied',
+  'has_customer_order',
   'update_count',
 ]
 const SQLITE_REQUIRED_O2O_RETURN_REQUEST_COLUMNS = ['handled_at', 'handled_by', 'rejected_reason']

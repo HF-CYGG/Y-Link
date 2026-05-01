@@ -50,6 +50,7 @@ export interface O2oPreorderSummary {
   verifyCode: string
   status: O2oOrderStatus
   businessStatus: O2oOrderBusinessStatus | null
+  hasCustomerOrder: boolean
   isSystemApplied: boolean
   merchantMessage: string | null
   clientOrderType: O2oClientOrderType
@@ -132,6 +133,7 @@ export interface O2oPreorderDetail {
     verifyCode: string
     status: O2oOrderStatus
     businessStatus: O2oOrderBusinessStatus | null
+    hasCustomerOrder: boolean
     isSystemApplied: boolean
     merchantMessage: string | null
     clientOrderType: O2oClientOrderType
@@ -217,6 +219,11 @@ export interface UpdateConsoleO2oPreorderPayload {
   items: Array<{ productId: string | number; qty: number }>
 }
 
+export interface UpdateO2oComplianceFlagsPayload {
+  hasCustomerOrder?: boolean
+  isSystemApplied?: boolean
+}
+
 export const getO2oMallProducts = (config?: RequestConfig) =>
   request<O2oMallProduct[]>({
     method: 'GET',
@@ -265,6 +272,13 @@ export const getO2oPreorderDetail = (id: string, config?: RequestConfig) =>
   request<O2oPreorderDetail>({
     method: 'GET',
     url: `/o2o/mall/preorders/${id}`,
+    ...config,
+  })
+
+export const markMyO2oPreorderCustomerOrderPrinted = (id: string, config?: RequestConfig) =>
+  request<O2oPreorderDetail>({
+    method: 'POST',
+    url: `/o2o/mall/preorders/${id}/customer-order-print`,
     ...config,
   })
 
@@ -328,6 +342,18 @@ export const updateO2oOrderMerchantMessage = (id: string, merchantMessage: strin
     method: 'PATCH',
     url: `/o2o/orders/${id}/merchant-message`,
     data: { merchantMessage },
+    ...config,
+  })
+
+export const updateO2oOrderComplianceFlags = (
+  id: string,
+  payload: UpdateO2oComplianceFlagsPayload,
+  config?: RequestConfig,
+) =>
+  request<O2oPreorderDetail>({
+    method: 'PATCH',
+    url: `/o2o/orders/${id}/compliance-flags`,
+    data: payload,
     ...config,
   })
 

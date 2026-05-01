@@ -13,6 +13,7 @@
 import dayjs from 'dayjs'
 import { ElMessage } from 'element-plus'
 import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { updateOrderComplianceFlags } from '@/api/modules/order'
 import {
   BizResponsiveDataCollectionShell,
   BizResponsiveDrawerShell,
@@ -20,6 +21,7 @@ import {
   PagePaginationBar,
   PageToolbarCard,
 } from '@/components/common'
+import { useAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
 import { exportVoucherPdf } from '@/utils/pdf/export-voucher-pdf'
 import OrderDetailDrawerContent from './components/OrderDetailDrawerContent.vue'
@@ -148,6 +150,7 @@ const {
   handleDeleteOrderWithConfirm,
   handleRestoreOrderWithConfirm,
 } = useOrderListView()
+const authStore = useAuthStore()
 
 const voucherDialogVisible = ref(false)
 const voucherPrintRootRef = ref<HTMLElement | null>(null)
@@ -157,6 +160,12 @@ const voucherEditableForm = reactive<OrderVoucherEditableFields>(createEmptyVouc
 const voucherOrientation = ref<VoucherOrientation>('landscape')
 const voucherOrientationLabel = computed(() => (voucherOrientation.value === 'landscape' ? '横版' : '竖版'))
 const canUseOrderVoucher = computed(() => currentOrder.value?.orderType === 'department')
+const canEditComplianceFlags = computed(() => authStore.hasPermission('orders:update'))
+const complianceSaving = ref(false)
+const complianceForm = ref({
+  hasCustomerOrder: false,
+  isSystemApplied: false,
+})
 const hasActiveFilter = computed(() => {
   return Boolean(searchForm.value.keyword || searchForm.value.orderType !== 'all' || searchForm.value.dateRange)
 })
@@ -173,10 +182,18 @@ const resetVoucherEditableForm = () => {
   Object.assign(voucherEditableForm, createEmptyVoucherEditableFields())
 }
 
+const syncComplianceFormFromCurrentOrder = () => {
+  complianceForm.value = {
+    hasCustomerOrder: Boolean(currentOrder.value?.hasCustomerOrder),
+    isSystemApplied: Boolean(currentOrder.value?.isSystemApplied),
+  }
+}
+
 watch(
   () => currentOrder.value?.id ?? '',
   () => {
     resetVoucherEditableForm()
+    syncComplianceFormFromCurrentOrder()
   },
 )
 
@@ -209,6 +226,38 @@ const handleOpenVoucherDialog = () => {
 
   voucherOrientation.value = 'landscape'
   voucherDialogVisible.value = true
+}
+
+const handleSaveComplianceFlags = async () => {
+  if (!currentOrder.value) {
+    return
+  }
+  if (currentOrder.value.orderType !== 'department') {
+    ElMessage.info('散客单不适用该状态编辑')
+    return
+  }
+  complianceSaving.value = true
+  try {
+    const nextDetail = await updateOrderComplianceFlags(currentOrder.value.id, {
+      hasCustomerOrder: complianceForm.value.hasCustomerOrder,
+      isSystemApplied: complianceForm.value.isSystemApplied,
+    })
+    currentOrder.value = nextDetail
+    listState.records = listState.records.map((item) =>
+      item.id === nextDetail.id
+        ? {
+            ...item,
+            hasCustomerOrder: nextDetail.hasCustomerOrder,
+            isSystemApplied: nextDetail.isSystemApplied,
+          }
+        : item,
+    )
+    ElMessage.success('状态已更新')
+  } catch (error) {
+    ElMessage.error(extractErrorMessage(error, '状态更新失败，请稍后重试'))
+  } finally {
+    complianceSaving.value = false
+  }
 }
 
 const VOUCHER_PRINT_STYLE_ID = 'y-link-order-voucher-print-page-style'
@@ -553,6 +602,58 @@ const handleExportVoucherPdf = async () => {
         </div>
       </template>
       <template #default="{ isPhone, isDesktop }">
+        <div
+          v-if="currentOrder"
+          class="mb-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3"
+        >
+          <div class="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <p class="text-sm font-semibold text-slate-900">合规状态确认</p>
+              <p class="mt-1 text-xs text-slate-500">仅部门单可编辑“是否有出库单”和“系统申请”。</p>
+            </div>
+            <el-button
+              v-if="canEditComplianceFlags && currentOrder.orderType === 'department'"
+              size="small"
+              type="primary"
+              :loading="complianceSaving"
+              @click="handleSaveComplianceFlags"
+            >
+              保存状态
+            </el-button>
+          </div>
+          <div class="mt-3 grid gap-3 sm:grid-cols-2">
+            <div class="rounded-xl bg-white px-3 py-3">
+              <p class="text-xs text-slate-500">是否有出库单</p>
+              <div class="mt-2">
+                <el-switch
+                  v-if="canEditComplianceFlags && currentOrder.orderType === 'department'"
+                  v-model="complianceForm.hasCustomerOrder"
+                  inline-prompt
+                  active-text="是"
+                  inactive-text="否"
+                />
+                <span v-else class="text-sm font-medium text-slate-700">
+                  {{ currentOrder.orderType === 'department' ? (currentOrder.hasCustomerOrder ? '是' : '否') : '不适用' }}
+                </span>
+              </div>
+            </div>
+            <div class="rounded-xl bg-white px-3 py-3">
+              <p class="text-xs text-slate-500">系统申请</p>
+              <div class="mt-2">
+                <el-switch
+                  v-if="canEditComplianceFlags && currentOrder.orderType === 'department'"
+                  v-model="complianceForm.isSystemApplied"
+                  inline-prompt
+                  active-text="已申请"
+                  inactive-text="未申请"
+                />
+                <span v-else class="text-sm font-medium text-slate-700">
+                  {{ currentOrder.orderType === 'department' ? (currentOrder.isSystemApplied ? '已申请' : '未申请') : '不适用' }}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
         <OrderDetailDrawerContent
           v-if="currentOrder"
           :order="currentOrder"

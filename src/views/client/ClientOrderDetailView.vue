@@ -18,6 +18,7 @@ import {
   cancelMyO2oPreorder,
   getO2oMallProducts,
   getO2oPreorderDetail,
+  markMyO2oPreorderCustomerOrderPrinted,
   submitO2oReturnRequest,
   updateMyO2oPreorder,
   type O2oMallProduct,
@@ -219,7 +220,7 @@ const voucherOrder = computed<OrderDetailResult | null>(() => {
     id: order.id,
     showNo: order.showNo,
     orderType: order.clientOrderType,
-    hasCustomerOrder: order.clientOrderType === 'department',
+    hasCustomerOrder: Boolean(order.hasCustomerOrder),
     isSystemApplied: Boolean(order.isSystemApplied),
     issuerName: '门店值班人员',
     customerDepartmentName: order.departmentNameSnapshot || customerProfile?.departmentName || null,
@@ -489,6 +490,7 @@ const buildOrderSummaryFromDetail = (nextDetail: O2oPreorderDetail): O2oPreorder
     verifyCode: order.verifyCode,
     status: order.status,
     businessStatus: order.businessStatus,
+    hasCustomerOrder: Boolean(order.hasCustomerOrder),
     isSystemApplied: order.isSystemApplied,
     merchantMessage: order.merchantMessage,
     clientOrderType: order.clientOrderType,
@@ -678,6 +680,20 @@ const syncOrderStoreFromDetail = (nextDetail: O2oPreorderDetail) => {
   clientOrderStore.upsertOrder(buildOrderSummaryFromDetail(nextDetail))
 }
 
+const markCustomerOrderPrintedIfNeeded = async () => {
+  if (!detail.value || detail.value.order.clientOrderType !== 'department' || detail.value.order.hasCustomerOrder) {
+    return
+  }
+  try {
+    const nextDetail = await markMyO2oPreorderCustomerOrderPrinted(detail.value.order.id)
+    detail.value = nextDetail
+    syncOrderStoreFromDetail(nextDetail)
+  } catch (error) {
+    const normalizedError = normalizeRequestError(error, '已完成打印/导出，但出库单状态上报失败')
+    ElMessage.warning(normalizedError.message)
+  }
+}
+
 const VOUCHER_PRINT_STYLE_ID = 'y-link-client-order-voucher-print-page-style'
 
 const applyVoucherPrintPageStyle = (orientation: VoucherOrientation) => {
@@ -711,6 +727,7 @@ const handlePrintVoucher = async () => {
     return
   }
   applyVoucherPrintPageStyle(voucherOrientation.value)
+  await markCustomerOrderPrintedIfNeeded()
   const cleanup = () => {
     clearVoucherPrintPageStyle()
     globalThis.removeEventListener('afterprint', cleanup)
@@ -744,6 +761,7 @@ const handleExportVoucherPdf = async () => {
       scale: 2,
       orientation: voucherOrientation.value,
     })
+    await markCustomerOrderPrintedIfNeeded()
     ElMessage.success('PDF 导出成功')
   } catch (error) {
     const normalizedError = normalizeRequestError(error, 'PDF 导出失败，请稍后重试')

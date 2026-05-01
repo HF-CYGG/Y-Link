@@ -56,6 +56,12 @@ export interface OrderListQuery {
   onlyDeleted?: boolean
 }
 
+export interface UpdateOrderComplianceFlagsInput {
+  orderId: string
+  hasCustomerOrder?: boolean
+  isSystemApplied?: boolean
+}
+
 /**
  * 订单详情明细视图：
  * - productCode / productName / subTotal 对齐前端详情抽屉既有契约；
@@ -233,6 +239,28 @@ export class OrderService {
     }
     const items = await this.loadDetailItems(order.id)
     return { order: this.buildOrderSummaryView(order), items }
+  }
+
+  async updateComplianceFlags(input: UpdateOrderComplianceFlagsInput): Promise<{ order: OrderSummaryView; items: OrderDetailItemView[] }> {
+    if (typeof input.hasCustomerOrder !== 'boolean' && typeof input.isSystemApplied !== 'boolean') {
+      throw new BizError('请至少传入一个可更新字段', 400)
+    }
+
+    const order = await this.orderRepo.findOne({ where: { id: input.orderId } })
+    if (!order) {
+      throw new BizError('出库单不存在', 404)
+    }
+    if (order.orderType !== 'department') {
+      throw new BizError('散客单不适用该状态编辑', 409)
+    }
+    if (typeof input.hasCustomerOrder === 'boolean') {
+      order.hasCustomerOrder = input.hasCustomerOrder
+    }
+    if (typeof input.isSystemApplied === 'boolean') {
+      order.isSystemApplied = input.isSystemApplied
+    }
+    await this.orderRepo.save(order)
+    return this.detailById(String(order.id))
   }
 
   /**

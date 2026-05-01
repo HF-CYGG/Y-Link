@@ -63,6 +63,12 @@ export interface UpdateOrderMerchantMessageInput {
   merchantMessage: string | null
 }
 
+export interface UpdateOrderComplianceFlagsInput {
+  orderId: string
+  hasCustomerOrder?: boolean
+  isSystemApplied?: boolean
+}
+
 export interface UpdateOnsitePreorderInput {
   orderId: string
   items: SubmitPreorderItemInput[]
@@ -107,6 +113,7 @@ export interface O2oPreorderSummaryView {
   verifyCode: string
   status: O2oPreorder['status']
   businessStatus: O2oPreorder['businessStatus']
+  hasCustomerOrder: boolean
   isSystemApplied: boolean
   merchantMessage: string | null
   clientOrderType: O2oPreorder['clientOrderType']
@@ -148,6 +155,7 @@ export interface O2oPreorderDetailView {
     verifyCode: string
     status: O2oPreorder['status']
     businessStatus: O2oPreorder['businessStatus']
+    hasCustomerOrder: boolean
     isSystemApplied: boolean
     merchantMessage: string | null
     clientOrderType: O2oPreorder['clientOrderType']
@@ -574,7 +582,7 @@ class O2oPreorderService {
       orderUuid: generateOrderUuid(),
       showNo,
       orderType: outboundOrderType,
-      hasCustomerOrder: false,
+      hasCustomerOrder: Boolean(input.preorder.hasCustomerOrder),
       isSystemApplied: Boolean(input.preorder.isSystemApplied),
       issuerName: input.actor.displayName || input.actor.username,
       customerDepartmentName: departmentNameSnapshot,
@@ -602,6 +610,29 @@ class O2oPreorderService {
     }
     const normalizedNumber = Number(value)
     return Number.isFinite(normalizedNumber) ? normalizedNumber.toFixed(2) : fallback
+  }
+
+  private async syncOutboundOrderComplianceFlags(
+    manager: EntityManager,
+    preorderId: string,
+    payload: {
+      hasCustomerOrder?: boolean
+      isSystemApplied?: boolean
+    },
+  ) {
+    const idempotencyKey = `o2o-preorder-verify:${preorderId}`
+    const outboundOrderRepo = manager.getRepository(BizOutboundOrder)
+    const outboundOrder = await outboundOrderRepo.findOne({ where: { idempotencyKey } })
+    if (!outboundOrder) {
+      return
+    }
+    if (typeof payload.hasCustomerOrder === 'boolean') {
+      outboundOrder.hasCustomerOrder = payload.hasCustomerOrder
+    }
+    if (typeof payload.isSystemApplied === 'boolean') {
+      outboundOrder.isSystemApplied = payload.isSystemApplied
+    }
+    await outboundOrderRepo.save(outboundOrder)
   }
 
   private resolveExpireInSeconds(order: Pick<O2oPreorder, 'status' | 'timeoutAt'>, nowMs = Date.now()) {
@@ -880,6 +911,7 @@ class O2oPreorderService {
         verifyCode: order.verifyCode,
         status: order.status,
         businessStatus: order.businessStatus ?? null,
+        hasCustomerOrder: Boolean(order.hasCustomerOrder),
         isSystemApplied: Boolean(order.isSystemApplied),
         merchantMessage: order.merchantMessage ?? null,
         clientOrderType: order.clientOrderType === 'department' ? 'department' : 'walkin',
@@ -1262,6 +1294,7 @@ class O2oPreorderService {
           clientOrderType: normalizedClientOrderType,
           departmentNameSnapshot,
           isSystemApplied: normalizedIsSystemApplied,
+          hasCustomerOrder: false,
           totalQty,
           remark: normalizedRemark,
           timeoutAt,
@@ -1679,6 +1712,7 @@ class O2oPreorderService {
         verifyCode: item.verifyCode,
         status: item.status,
         businessStatus: item.businessStatus ?? null,
+        hasCustomerOrder: Boolean(item.hasCustomerOrder),
         isSystemApplied: Boolean(item.isSystemApplied),
         merchantMessage: item.merchantMessage ?? null,
         clientOrderType: item.clientOrderType === 'department' ? 'department' : 'walkin',
@@ -1850,6 +1884,7 @@ class O2oPreorderService {
       verifyCode: item.verifyCode,
       status: item.status,
       businessStatus: item.businessStatus ?? null,
+      hasCustomerOrder: Boolean(item.hasCustomerOrder),
       isSystemApplied: Boolean(item.isSystemApplied),
       merchantMessage: item.merchantMessage ?? null,
       clientOrderType: item.clientOrderType === 'department' ? 'department' : 'walkin',
@@ -1890,6 +1925,60 @@ class O2oPreorderService {
     order.merchantMessage = this.normalizeMerchantMessage(input.merchantMessage)
     await this.preorderRepo.save(order)
     return this.detailById(order.id)
+  }
+
+  async markCustomerOrderPrintedByClient(auth: ClientAuthContext, orderId: string) {
+    await this.cancelTimeoutOrders()
+    return AppDataSource.transaction(async (manager) => {
+      const orderRepo = manager.getRepository(O2oPreorder)
+      const order = await orderRepo.findOne({
+        where: { id: orderId, clientUserId: auth.userId },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
+      if (!order) {
+        throw new BizError('预订单不存在', 404)
+      }
+      if (order.clientOrderType !== 'department') {
+        throw new BizError('散客单不适用出库单打印状态', 409)
+      }
+      if (!order.hasCustomerOrder) {
+        order.hasCustomerOrder = true
+        await orderRepo.save(order)
+      }
+      await this.syncOutboundOrderComplianceFlags(manager, String(order.id), { hasCustomerOrder: true })
+      return this.buildOrderDetail(order)
+    })
+  }
+
+  async updateComplianceFlagsByAdmin(input: UpdateOrderComplianceFlagsInput) {
+    if (typeof input.hasCustomerOrder !== 'boolean' && typeof input.isSystemApplied !== 'boolean') {
+      throw new BizError('请至少传入一个可更新字段', 400)
+    }
+    return AppDataSource.transaction(async (manager) => {
+      const orderRepo = manager.getRepository(O2oPreorder)
+      const order = await orderRepo.findOne({
+        where: { id: input.orderId },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
+      if (!order) {
+        throw new BizError('预订单不存在', 404)
+      }
+      if (order.clientOrderType !== 'department') {
+        throw new BizError('散客单不适用该状态编辑', 409)
+      }
+      if (typeof input.hasCustomerOrder === 'boolean') {
+        order.hasCustomerOrder = input.hasCustomerOrder
+      }
+      if (typeof input.isSystemApplied === 'boolean') {
+        order.isSystemApplied = input.isSystemApplied
+      }
+      await orderRepo.save(order)
+      await this.syncOutboundOrderComplianceFlags(manager, String(order.id), {
+        hasCustomerOrder: input.hasCustomerOrder,
+        isSystemApplied: input.isSystemApplied,
+      })
+      return this.buildOrderDetail(order)
+    })
   }
 
   async cancelMyOrder(auth: ClientAuthContext, id: string) {

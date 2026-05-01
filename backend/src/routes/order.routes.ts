@@ -38,6 +38,15 @@ const deleteOrderSchema = z.object({
   confirmShowNo: z.string().trim().min(1, '请填写业务单号完成二次确认'),
 })
 
+const updateComplianceFlagsSchema = z
+  .object({
+    hasCustomerOrder: z.boolean().optional(),
+    isSystemApplied: z.boolean().optional(),
+  })
+  .refine((payload) => payload.hasCustomerOrder !== undefined || payload.isSystemApplied !== undefined, {
+    message: '至少传入一个可更新字段',
+  })
+
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export const orderRouter = Router()
 
@@ -145,6 +154,24 @@ orderRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const data = await orderService.restoreById(req.params.id, authReq.auth, extractRequestMeta(req))
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+orderRouter.patch(
+  '/:id/compliance-flags',
+  requirePermission('orders:update'),
+  asyncHandler(async (req, res) => {
+    const payload = updateComplianceFlagsSchema.parse(req.body ?? {})
+    const data = await orderService.updateComplianceFlags({
+      orderId: req.params.id,
+      hasCustomerOrder: payload.hasCustomerOrder,
+      isSystemApplied: payload.isSystemApplied,
+    })
     res.json({
       code: 0,
       message: 'ok',

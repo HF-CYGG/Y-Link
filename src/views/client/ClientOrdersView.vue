@@ -146,6 +146,7 @@ const buildOrderSummaryFromDetail = (detail: O2oPreorderDetail): O2oPreorderSumm
     verifyCode: order.verifyCode,
     status: order.status,
     businessStatus: order.businessStatus,
+    hasCustomerOrder: Boolean(order.hasCustomerOrder),
     isSystemApplied: order.isSystemApplied,
     merchantMessage: order.merchantMessage,
     clientOrderType: order.clientOrderType,
