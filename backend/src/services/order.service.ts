@@ -168,6 +168,17 @@ const SHOW_NO_CONSTRAINT_MATCHER = {
 
 const ORDER_SUBMIT_MAX_RETRY = 3
 const ORDER_TYPE_SET = new Set<OrderType>(['department', 'walkin'])
+const ORDER_FIELD_LIMITS = {
+  idempotencyKey: 128,
+  issuerName: 64,
+  customerDepartmentName: 128,
+  customerName: 128,
+  orderRemark: 500,
+  itemRemark: 200,
+  maxItemCount: 200,
+  maxQty: 999999999.99,
+  maxUnitPrice: 9999999999.99,
+} as const
 
 export class OrderService {
   private readonly orderRepo = AppDataSource.getRepository(BizOutboundOrder)
@@ -385,9 +396,17 @@ export class OrderService {
     actor: AuthUserContext,
     requestMeta?: RequestMeta,
   ): Promise<{ order: SubmittedOrderView; items: SubmittedOrderItemView[] }> {
-    if (!input.items.length) {
-      throw new BizError('至少需要一条明细')
-    }
+    const normalizedItems = this.normalizeSubmitItemsInput(input.items)
+    const normalizedCustomerName = this.readLimitedText(
+      input.customerName,
+      '客户名称',
+      ORDER_FIELD_LIMITS.customerName,
+    )
+    const normalizedRemark = this.readLimitedText(
+      input.remark,
+      '订单备注',
+      ORDER_FIELD_LIMITS.orderRemark,
+    )
     const submitContext = this.buildSubmitOrderContext(input, actor)
 
     let lastError: unknown
@@ -413,7 +432,7 @@ export class OrderService {
             }
           }
 
-          const normalizedProductIds = [...new Set(input.items.map((item) => String(item.productId).trim()))]
+          const normalizedProductIds = normalizedItems.map((item) => String(item.productId).trim())
           const products = await productRepo
             .createQueryBuilder('product')
             .where('product.id IN (:...productIds)', { productIds: normalizedProductIds })
@@ -426,7 +445,7 @@ export class OrderService {
           }
           const orderUuid = generateOrderUuid()
           const showNo = await orderSerialService.generateOrderNo(submitContext.normalizedOrderType, manager)
-          const preparedItems = this.prepareSubmitItems(input.items, productMap, itemRepo)
+          const preparedItems = this.prepareSubmitItems(normalizedItems, productMap, itemRepo)
 
           const order = orderRepo.create({
             orderUuid,
@@ -437,8 +456,8 @@ export class OrderService {
             issuerName: submitContext.normalizedIssuerName,
             customerDepartmentName: submitContext.normalizedCustomerDepartmentName,
             idempotencyKey: submitContext.normalizedIdempotencyKey,
-            customerName: input.customerName?.trim() || null,
-            remark: input.remark?.trim() || null,
+            customerName: normalizedCustomerName,
+            remark: normalizedRemark,
             totalQty: preparedItems.totalQty.toFixed(2),
             totalAmount: preparedItems.totalAmount.toFixed(2),
             creatorUserId: actor.userId,
@@ -509,27 +528,99 @@ export class OrderService {
     throw lastError ?? new BizError('订单提交失败，请稍后重试', 500)
   }
 
-  private buildSubmitOrderContext(input: SubmitOrderInput, actor: AuthUserContext): SubmitOrderContext {
-    const normalizedIdempotencyKey = input.idempotencyKey.trim()
-    if (!normalizedIdempotencyKey) {
-      throw new BizError('幂等键不能为空')
+  /**
+   * 统一读取订单文本字段：
+   * - 订单主表、明细备注共用同一套边界约束；
+   * - 服务层直接阻断空白文本与超长内容，避免数据库截断后才暴露问题。
+   */
+  private readLimitedText(
+    value: string | undefined,
+    label: string,
+    maxLength: number,
+    options: { required?: boolean } = {},
+  ): string | null {
+    const normalizedValue = value?.trim() ?? ''
+    if (!normalizedValue) {
+      if (options.required) {
+        throw new BizError(`${label}不能为空`, 400)
+      }
+      return null
     }
+    if (normalizedValue.length > maxLength) {
+      throw new BizError(`${label}长度不能超过 ${maxLength} 个字符`, 400)
+    }
+    return normalizedValue
+  }
+
+  private readPositiveDecimal(value: number, label: string, maxValue: number, rowIndex?: number): number {
+    const rowPrefix = rowIndex ? `第 ${rowIndex} 行` : ''
+    if (!Number.isFinite(value) || value <= 0) {
+      throw new BizError(`${rowPrefix}${label}必须大于 0`, 400)
+    }
+    if (value > maxValue) {
+      throw new BizError(`${rowPrefix}${label}不能超过 ${maxValue}`, 400)
+    }
+    return Number(value.toFixed(2))
+  }
+
+  private normalizeSubmitItemsInput(inputItems: SubmitOrderItemInput[]): SubmitOrderItemInput[] {
+    if (!inputItems.length) {
+      throw new BizError('至少需要一条明细', 400)
+    }
+    if (inputItems.length > ORDER_FIELD_LIMITS.maxItemCount) {
+      throw new BizError(`单次最多提交 ${ORDER_FIELD_LIMITS.maxItemCount} 条明细`, 400)
+    }
+
+    const productIdSet = new Set<string>()
+    return inputItems.map((item, index) => {
+      const rowIndex = index + 1
+      const normalizedProductId = String(item.productId ?? '').trim()
+      if (!normalizedProductId) {
+        throw new BizError(`第 ${rowIndex} 行产品ID不能为空`, 400)
+      }
+      if (productIdSet.has(normalizedProductId)) {
+        throw new BizError(`第 ${rowIndex} 行产品与前面明细重复，请合并数量后再提交`, 400)
+      }
+      productIdSet.add(normalizedProductId)
+
+      return {
+        productId: normalizedProductId,
+        qty: this.readPositiveDecimal(item.qty, '数量', ORDER_FIELD_LIMITS.maxQty, rowIndex),
+        unitPrice: this.readPositiveDecimal(item.unitPrice, '单价', ORDER_FIELD_LIMITS.maxUnitPrice, rowIndex),
+        remark: this.readLimitedText(item.remark, '明细备注', ORDER_FIELD_LIMITS.itemRemark) ?? undefined,
+      }
+    })
+  }
+
+  private buildSubmitOrderContext(input: SubmitOrderInput, actor: AuthUserContext): SubmitOrderContext {
+    const normalizedIdempotencyKey = this.readLimitedText(
+      input.idempotencyKey,
+      '幂等键',
+      ORDER_FIELD_LIMITS.idempotencyKey,
+      { required: true },
+    )
     const normalizedOrderType = this.normalizeOrderType(input.orderType)
     if (!normalizedOrderType) {
       throw new BizError('订单类型非法，仅支持 department 或 walkin', 400)
     }
-    const normalizedIssuerName = input.issuerName?.trim() || actor.displayName?.trim() || actor.username?.trim()
-    if (!normalizedIssuerName) {
-      throw new BizError('出单人不能为空', 400)
-    }
-    const normalizedCustomerDepartmentName = input.customerDepartmentName?.trim() || null
+    const normalizedIssuerName = this.readLimitedText(
+      input.issuerName ?? actor.displayName ?? actor.username,
+      '出单人',
+      ORDER_FIELD_LIMITS.issuerName,
+      { required: true },
+    )
+    const normalizedCustomerDepartmentName = this.readLimitedText(
+      input.customerDepartmentName,
+      '客户部门名称',
+      ORDER_FIELD_LIMITS.customerDepartmentName,
+    )
     if (normalizedOrderType === 'department' && !normalizedCustomerDepartmentName) {
       throw new BizError('部门订单必须填写客户部门名称', 400)
     }
     return {
-      normalizedIdempotencyKey,
+      normalizedIdempotencyKey: normalizedIdempotencyKey as string,
       normalizedOrderType,
-      normalizedIssuerName,
+      normalizedIssuerName: normalizedIssuerName as string,
       normalizedCustomerDepartmentName,
     }
   }
@@ -549,12 +640,6 @@ export class OrderService {
       const product = productMap.get(normalizedProductId)
       if (!product) {
         throw new BizError(`产品不存在: ${item.productId}`)
-      }
-      if (item.qty <= 0) {
-        throw new BizError(`第 ${index + 1} 行数量非法`)
-      }
-      if (item.unitPrice <= 0) {
-        throw new BizError(`第 ${index + 1} 行单价必须大于 0`)
       }
 
       const lineAmount = Number((item.qty * item.unitPrice).toFixed(2))

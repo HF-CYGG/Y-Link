@@ -91,7 +91,11 @@ function verifyStepUnlockAndButtonBlockingSources() {
   assert.match(databaseMigrationViewSource, /const hasPrecheckBlockingError = computed\(\(\) =>/)
   assert.match(databaseMigrationViewSource, /issue\.level === 'error'/)
   assert.match(databaseMigrationViewSource, /当前预检存在阻断错误，请修复后再创建迁移任务/)
-  assert.match(databaseMigrationViewSource, /:disabled="!canOperateMigration \|\| row\.status === 'running' \|\| row\.status === 'succeeded'"/)
+  assert.match(databaseMigrationViewSource, /row\.readState === 'corrupted'/)
+  assert.match(
+    databaseMigrationViewSource,
+    /:disabled="!canOperateMigration \|\| row\.readState === 'corrupted' \|\| row\.status === 'running' \|\| row\.status === 'succeeded'"/,
+  )
   assert.match(databaseMigrationViewSource, /:disabled="!canOperateMigration \|\| !selectedSucceededTask"/)
   assert.match(databaseMigrationViewSource, /请先在第 3 步选中一条成功任务/)
   pass('数据库迁移页面已具备步骤解锁顺序与关键按钮阻断保护')
@@ -173,6 +177,36 @@ async function verifyPendingRestartRuntimeState() {
       await clearDatabaseRuntimeOverride()
     }
   }
+}
+
+/**
+ * 验证运行时覆盖写入的底层安全保护：
+ * - 非法端口、非法时间戳等脏数据不应被写入磁盘；
+ * - 避免上层接口未来回退后，底层工具仍放行风险配置。
+ */
+async function verifyInvalidRuntimeOverridePayloadRejected() {
+  const verifyPassword = ['task4', 'verify', 'password', 'invalid'].join('_')
+  await assert.rejects(
+    () =>
+      writeDatabaseRuntimeOverride({
+        version: 1,
+        updatedAt: 'invalid-date-time',
+        reason: 'Task4 非法覆盖写入校验',
+        sourceTaskId: 'task4-invalid-runtime-override',
+        updatedBy: null,
+        config: {
+          DB_TYPE: 'mysql',
+          DB_HOST: '127.0.0.1',
+          DB_PORT: 70000,
+          DB_USER: 'task4_verify',
+          DB_PASSWORD: verifyPassword,
+          DB_NAME: 'task4_verify',
+          DB_SYNC: false,
+        },
+      }),
+    /不合法/,
+  )
+  pass('非法运行时覆盖配置会被底层工具拒绝写入磁盘')
 }
 
 /**
@@ -313,6 +347,7 @@ async function main() {
   verifyStepUnlockAndButtonBlockingSources()
   await verifySqliteRuntimeState()
   await verifyPendingRestartRuntimeState()
+  await verifyInvalidRuntimeOverridePayloadRejected()
   verifyMysqlEffectiveGuidance()
   verifyMysqlOverrideMismatchByConnectionFields()
 }

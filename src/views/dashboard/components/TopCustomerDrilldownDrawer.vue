@@ -9,6 +9,7 @@
 import { ref, watch } from 'vue'
 import dayjs from 'dayjs'
 import { ElMessage } from 'element-plus'
+import { BizResponsiveDrawerShell } from '@/components/common'
 import { getCustomerDrilldown, type CustomerDrilldownResult } from '@/api/modules/dashboard'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
@@ -77,7 +78,15 @@ watch(
 </script>
 
 <template>
-  <el-drawer :model-value="props.modelValue" size="720px" :destroy-on-close="true" @update:model-value="emit('update:modelValue', $event)">
+  <BizResponsiveDrawerShell
+    :model-value="props.modelValue"
+    title="客户榜明细下钻"
+    height-mode="scroll"
+    phone-size="92%"
+    tablet-size="720px"
+    desktop-size="720px"
+    @update:model-value="emit('update:modelValue', $event)"
+  >
     <template #header>
       <div class="min-w-0">
         <div class="truncate text-base font-semibold text-slate-800 dark:text-slate-100">
@@ -104,7 +113,8 @@ watch(
             <div class="mt-1 text-sm font-semibold text-slate-700 dark:text-slate-200">{{ data.orderCount }} 单</div>
           </div>
         </div>
-        <div v-if="data.records.length" class="max-h-[55vh] overflow-auto">
+        <!-- 明细表滚动职责统一交给共享抽屉壳，避免页面内部再次叠加局部滚动区。 -->
+        <div v-if="data.records.length">
           <el-table :data="data.records" stripe table-layout="auto">
             <el-table-column prop="showNo" label="业务单号" min-width="150" show-overflow-tooltip />
             <el-table-column label="订单类型" width="100">
@@ -127,5 +137,5 @@ watch(
         </div>
       </template>
     </div>
-  </el-drawer>
+  </BizResponsiveDrawerShell>
 </template>

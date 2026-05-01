@@ -170,6 +170,18 @@ async function main() {
     assert.ok(Array.isArray(adminAuditLogs.list), '管理员审计日志列表结构异常')
     pass('管理员可读取审计日志（正向）')
 
+    const adminMigrationRuntime = await expectJsonOk<{
+      effectiveDatabase: { dbType: string }
+    }>(
+      () =>
+        fetch(`${baseUrl}/api/data-maintenance/db-migration/runtime-override`, {
+          headers: { Authorization: `Bearer ${adminToken}` },
+        }),
+      '管理员读取数据库迁移运行时状态',
+    )
+    assert.equal(adminMigrationRuntime.effectiveDatabase.dbType, 'sqlite')
+    pass('管理员可读取数据库迁移运行时状态（正向）')
+
     const operatorLogin = await expectJsonOk<{
       token: string
       user: { username: string; role: string }
@@ -227,6 +239,50 @@ async function main() {
     )
     pass('操作员越权读取审计日志被拦截')
 
+    await expectJsonForbidden(
+      () =>
+        fetch(`${baseUrl}/api/data-maintenance/db-migration/runtime-override`, {
+          headers: { Authorization: `Bearer ${operatorToken}` },
+        }),
+      '操作员越权读取数据库迁移运行时状态',
+    )
+    pass('操作员越权读取数据库迁移运行时状态被拦截')
+
+    await expectJsonForbidden(
+      () =>
+        fetch(`${baseUrl}/api/data-maintenance/backup/sqlite`, {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${operatorToken}` },
+        }),
+      '操作员越权创建 SQLite 备份',
+    )
+    pass('操作员越权创建 SQLite 备份被拦截')
+
+    await expectJsonForbidden(
+      () =>
+        fetch(`${baseUrl}/api/system-configs/verification-providers/test-send`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${operatorToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            channel: 'mobile',
+            target: '13800138000',
+            config: {
+              enabled: true,
+              httpMethod: 'POST',
+              apiUrl: 'https://example.com/send-sms',
+              headersTemplate: '{"Content-Type":"application/json"}',
+              bodyTemplate: '{"mobile":"{{target}}","code":"{{code}}","scene":"{{scene}}"}',
+              successMatch: '',
+            },
+          }),
+        }),
+      '操作员越权测试验证码平台发送',
+    )
+    pass('操作员越权测试验证码平台发送被拦截')
+
     const deniedLogs = await expectJsonOk<{
       list: Array<{
         actionType: string
@@ -245,7 +301,7 @@ async function main() {
     )
 
     const operatorDeniedLogs = deniedLogs.list.filter((item) => item.actorUserId === createdOperator.id)
-    assert.ok(operatorDeniedLogs.length >= 3, '操作员越权拦截审计日志数量不足，期望至少 3 条')
+    assert.ok(operatorDeniedLogs.length >= 6, '操作员越权拦截审计日志数量不足，期望至少 6 条')
 
     const deniedTargets = operatorDeniedLogs.map((item) => item.targetCode ?? '')
     assert.ok(
@@ -259,6 +315,18 @@ async function main() {
     assert.ok(
       deniedTargets.some((target) => target.includes('GET /api/audit-logs')),
       '缺少操作员越权读取审计日志的审计记录',
+    )
+    assert.ok(
+      deniedTargets.some((target) => target.includes('GET /api/data-maintenance/db-migration/runtime-override')),
+      '缺少操作员越权读取数据库迁移运行时状态的审计记录',
+    )
+    assert.ok(
+      deniedTargets.some((target) => target.includes('POST /api/data-maintenance/backup/sqlite')),
+      '缺少操作员越权创建 SQLite 备份的审计记录',
+    )
+    assert.ok(
+      deniedTargets.some((target) => target.includes('POST /api/system-configs/verification-providers/test-send')),
+      '缺少操作员越权测试验证码平台发送的审计记录',
     )
     pass('接口越权拦截会写入审计日志（security.access_denied）')
   } finally {

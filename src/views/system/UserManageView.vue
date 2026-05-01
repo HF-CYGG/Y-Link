@@ -32,11 +32,11 @@ import {
   type UpdateUserPayload,
   type UserListQuery,
 } from '@/api/modules/user'
+import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
-import { showPermissionDenied } from '@/utils/permission'
 import { useRouter } from 'vue-router'
 
 /**
@@ -70,18 +70,18 @@ const listState = reactive(createPaginatedListState<UserSafeProfile>({
 const authStore = useAuthStore()
 const router = useRouter()
 const listRequest = useStableRequest()
+const { hasPermission, ensurePermission } = usePermissionAction()
 
 /**
  * 页面权限能力：
  * - 查看权限控制整页是否允许加载用户数据；
  * - 新增/编辑/启停/重置密码分别映射到对应按钮和提交动作。
  */
-const canViewUsers = computed(() => authStore.hasPermission('users:view'))
-const canCreateUser = computed(() => authStore.hasPermission('users:create'))
-const canEditUser = computed(() => authStore.hasPermission('users:update'))
-const canToggleUser = computed(() => authStore.hasPermission('users:status'))
-const canResetUserPassword = computed(() => authStore.hasPermission('users:reset_password'))
-const canOperateUsers = computed(() => authStore.hasAnyPermission(['users:update', 'users:status', 'users:reset_password']))
+const canCreateUser = computed(() => hasPermission('users:create'))
+const canEditUser = computed(() => hasPermission('users:update'))
+const canToggleUser = computed(() => hasPermission('users:status'))
+const canResetUserPassword = computed(() => hasPermission('users:reset_password'))
+const canOperateUsers = computed(() => canEditUser.value || canToggleUser.value || canResetUserPassword.value)
 
 /**
  * 弹窗状态：
@@ -361,11 +361,10 @@ const buildQueryParams = (): UserListQuery => {
  * - 成功后统一回填到 listState。
  */
 const loadData = async () => {
-  if (!canViewUsers.value) {
+  if (!ensurePermission('users:view', '用户列表查看')) {
     listState.loading = false
     listState.records = []
     listState.total = 0
-    showPermissionDenied()
     return
   }
 
@@ -390,8 +389,7 @@ const loadData = async () => {
  * - 默认创建启用状态的普通操作员。
  */
 const handleOpenCreate = () => {
-  if (!canCreateUser.value) {
-    showPermissionDenied()
+  if (!ensurePermission('users:create', '新增用户')) {
     return
   }
 
@@ -448,8 +446,7 @@ const handleOpenOwnPasswordDialog = () => {
  * - 密码不在这里修改，避免用户资料编辑与安全操作混在一起。
  */
 const handleOpenEdit = (row: UserSafeProfile) => {
-  if (!canEditUser.value) {
-    showPermissionDenied()
+  if (!ensurePermission('users:update', '编辑用户')) {
     return
   }
 
@@ -470,8 +467,7 @@ const handleOpenEdit = (row: UserSafeProfile) => {
  * - 弹窗中明确展示目标账号，降低误操作概率。
  */
 const handleOpenResetPassword = (row: UserSafeProfile) => {
-  if (!canResetUserPassword.value) {
-    showPermissionDenied()
+  if (!ensurePermission('users:reset_password', '重置用户密码')) {
     return
   }
 
@@ -493,12 +489,10 @@ const handleSubmit = async () => {
     return
   }
 
-  if (dialogMode.value === 'create' && !canCreateUser.value) {
-    showPermissionDenied()
+  if (dialogMode.value === 'create' && !ensurePermission('users:create', '新增用户')) {
     return
   }
-  if (dialogMode.value === 'edit' && !canEditUser.value) {
-    showPermissionDenied()
+  if (dialogMode.value === 'edit' && !ensurePermission('users:update', '编辑用户')) {
     return
   }
 
@@ -520,8 +514,7 @@ const handleSubmit = async () => {
       )
     } else {
       const originalStatus = listState.records.find((item) => item.id === userForm.id)?.status
-      if (userForm.status !== originalStatus && !canToggleUser.value) {
-        showPermissionDenied()
+      if (userForm.status !== originalStatus && !ensurePermission('users:status', '启停用户')) {
         return
       }
 
@@ -559,8 +552,7 @@ const handleSubmitResetPassword = async () => {
     return
   }
 
-  if (!canResetUserPassword.value) {
-    showPermissionDenied()
+  if (!ensurePermission('users:reset_password', '重置用户密码')) {
     return
   }
 
@@ -617,8 +609,7 @@ const handleSubmitOwnPassword = async () => {
  * - 危险动作前增加确认提示，降低误操作风险。
  */
 const handleToggleStatus = async (row: UserSafeProfile) => {
-  if (!canToggleUser.value) {
-    showPermissionDenied()
+  if (!ensurePermission('users:status', '启停用户')) {
     return
   }
 

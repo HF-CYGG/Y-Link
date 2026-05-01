@@ -23,14 +23,13 @@ import {
   type UpdateClientUserPayload,
 } from '@/api/modules/client-user-manage'
 import { getClientDepartmentConfigs } from '@/api/modules/system-config'
+import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
-import { useAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
-import { showPermissionDenied } from '@/utils/permission'
 
-const authStore = useAuthStore()
 const listRequest = useStableRequest()
+const { hasPermission, ensurePermission } = usePermissionAction()
 
 const searchForm = reactive({
   keyword: '',
@@ -46,10 +45,9 @@ const listState = reactive(
   }),
 )
 
-const canViewUsers = computed(() => authStore.hasPermission('users:view'))
-const canEditUser = computed(() => authStore.hasPermission('users:update'))
-const canToggleUser = computed(() => authStore.hasPermission('users:status'))
-const canResetUserPassword = computed(() => authStore.hasPermission('users:reset_password'))
+const canEditUser = computed(() => hasPermission('users:update'))
+const canToggleUser = computed(() => hasPermission('users:status'))
+const canResetUserPassword = computed(() => hasPermission('users:reset_password'))
 const canOperateUsers = computed(() => canEditUser.value || canToggleUser.value || canResetUserPassword.value)
 const departmentOptions = ref<string[]>([])
 const departmentPathLookup = ref<Record<string, string>>({})
@@ -207,11 +205,10 @@ const buildQueryParams = (): ClientUserListQuery => {
 }
 
 const loadData = async () => {
-  if (!canViewUsers.value) {
+  if (!ensurePermission('users:view', '客户端用户查看')) {
     listState.loading = false
     listState.records = []
     listState.total = 0
-    showPermissionDenied()
     return
   }
 
@@ -260,8 +257,7 @@ const handleCurrentChange = (page: number) => {
 }
 
 const handleOpenEdit = (row: ClientUserManageProfile) => {
-  if (!canEditUser.value) {
-    showPermissionDenied()
+  if (!ensurePermission('users:update', '编辑客户端用户')) {
     return
   }
   editVisible.value = true
@@ -279,8 +275,7 @@ const handleSubmitEdit = async () => {
   if (!valid) {
     return
   }
-  if (!canEditUser.value) {
-    showPermissionDenied()
+  if (!ensurePermission('users:update', '编辑客户端用户')) {
     return
   }
 
@@ -334,8 +329,7 @@ const resetClientPasswordForm = () => {
 }
 
 const handleOpenResetPassword = (row: ClientUserManageProfile) => {
-  if (!canResetUserPassword.value) {
-    showPermissionDenied()
+  if (!ensurePermission('users:reset_password', '重置客户端用户密码')) {
     return
   }
   resetPasswordVisible.value = true
@@ -350,8 +344,7 @@ const handleSubmitResetPassword = async () => {
   if (!valid) {
     return
   }
-  if (!canResetUserPassword.value) {
-    showPermissionDenied()
+  if (!ensurePermission('users:reset_password', '重置客户端用户密码')) {
     return
   }
 
@@ -391,8 +384,7 @@ const handleSubmitResetPassword = async () => {
 }
 
 const handleToggleStatus = async (row: ClientUserManageProfile) => {
-  if (!canToggleUser.value) {
-    showPermissionDenied()
+  if (!ensurePermission('users:status', '启停客户端用户')) {
     return
   }
 

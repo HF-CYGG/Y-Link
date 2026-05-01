@@ -8,8 +8,11 @@
 
 import { computed } from 'vue'
 import type { ProductRecord } from '@/api/modules/product'
+import { BizResponsiveDrawerShell } from '@/components/common'
 import type { FocusField, OrderEntryDrawerForm, OrderItemRow } from '../types'
 import { getProductOptionLabel } from '../types'
+
+type DrawerDirection = 'ltr' | 'rtl' | 'ttb' | 'btt'
 
 /**
  * 明细录入展示组件：
@@ -28,7 +31,7 @@ const props = defineProps<{
   deletingRowUids: string[]
   drawerVisible: boolean
   editingRowUid: string
-  drawerDirection: string
+  drawerDirection: DrawerDirection
   drawerSize: string
   drawerForm: OrderEntryDrawerForm
   getRowClassName: (payload: { row: OrderItemRow }) => string
@@ -231,15 +234,23 @@ const isExistingProduct = (productId: string | undefined | null) => {
         </transition-group>
       </div>
 
-      <el-drawer
+      <!-- 移动端明细编辑统一切到共享抽屉壳：
+       - 方向、尺寸继续复用父层传入值，避免改变现有手机/平板交互口径；
+       - 将底部操作区并入正文尾部，统一由共享壳承接滚动与高度模式。
+      -->
+      <BizResponsiveDrawerShell
         v-if="!isDesktop"
         v-model="drawerVisibleModel"
         :title="editingRowUid ? '编辑明细' : '新增明细'"
-        :direction="drawerDirection"
-        :size="drawerSize"
-        :append-to-body="true"
+        height-mode="scroll"
+        :phone-size="drawerSize"
+        :tablet-size="drawerSize"
+        :desktop-size="drawerSize"
+        :phone-direction="drawerDirection"
+        :default-direction="drawerDirection"
+        body-class="pr-2"
       >
-        <el-form :label-width="isPhone ? '72px' : '80px'" class="pr-2">
+        <el-form :label-width="isPhone ? '72px' : '80px'">
           <el-form-item label="产品">
             <el-select
               v-model="drawerForm.productId"
@@ -270,13 +281,11 @@ const isExistingProduct = (productId: string | undefined | null) => {
             <el-input v-model="drawerForm.remark" maxlength="255" placeholder="选填" />
           </el-form-item>
         </el-form>
-        <template #footer>
-          <div class="flex justify-end gap-2">
-            <el-button @click="drawerVisibleModel = false">取消</el-button>
-            <el-button type="primary" @click="applyDrawerEdit">应用</el-button>
-          </div>
-        </template>
-      </el-drawer>
+        <div class="mt-4 flex justify-end gap-2 border-t border-slate-200 pt-4 dark:border-white/10">
+          <el-button @click="drawerVisibleModel = false">取消</el-button>
+          <el-button type="primary" @click="applyDrawerEdit">应用</el-button>
+        </div>
+      </BizResponsiveDrawerShell>
     </template>
   </div>
 </template>

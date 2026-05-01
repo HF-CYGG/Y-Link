@@ -11,7 +11,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { PageContainer } from '@/components/common'
-import { useAuthStore } from '@/store'
+import { usePermissionAction } from '@/composables/usePermissionAction'
 import {
   getClientOrderStatusReportConfig,
   getO2oOrderBusinessStatusMeta,
@@ -33,7 +33,6 @@ import {
   type O2oOrderStatusReport,
   type O2oReturnRequestDetail,
 } from '@/api/modules/o2o'
-import { showPermissionDenied } from '@/utils/permission'
 
 type OrderPoolKey = 'all' | 'pending' | 'completed' | 'cancelled' | 'returns'
 
@@ -84,7 +83,7 @@ const orderHighlightExpiresAtMap = ref<Record<string, number>>({})
 const latestNewOrderNotice = ref<{ count: number; expiresAt: number } | null>(null)
 const orderSnapshotReady = ref(false)
 const router = useRouter()
-const authStore = useAuthStore()
+const { hasPermission, ensurePermission } = usePermissionAction()
 
 let autoRefreshTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let secondTickTimer: ReturnType<typeof globalThis.setInterval> | null = null
@@ -385,7 +384,7 @@ const complianceForm = ref({
 // - 默认展开“合规状态确认”，保证工作台打开详情后即可看到关键合规开关；
 // - 其他辅助项按需展开，避免挤占主信息区域。
 const detailAssistPanels = ref<string[]>(['compliance-flags'])
-const canEditComplianceFlags = computed(() => authStore.hasPermission('orders:update'))
+const canEditComplianceFlags = computed(() => hasPermission('orders:update'))
 
 const activeBusinessStatusMeta = computed(() => {
   return getO2oOrderBusinessStatusMeta(activeBusinessStatus.value)
@@ -832,8 +831,7 @@ const handleSaveComplianceFlags = async () => {
   if (!activeOrderDetail.value?.order.id) {
     return
   }
-  if (!canEditComplianceFlags.value) {
-    showPermissionDenied()
+  if (!ensurePermission('orders:update', '合规状态编辑')) {
     return
   }
   if (activeOrderDetail.value.order.clientOrderType !== 'department') {

@@ -178,14 +178,16 @@ systemConfigRouter.put(
 
 systemConfigRouter.post(
   '/verification-providers/test-send',
-  requirePermission('system_configs:update'),
+  requirePermission('verification_providers:test'),
   requireRole('admin'),
   asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
     const payload = testVerificationProviderSchema.parse(req.body)
     const data = await verificationCodeService.sendTest({
       channel: payload.channel,
       target: payload.target,
       config: payload.config,
+      actor: authReq.auth,
       requestMeta: extractRequestMeta(req),
     })
     res.json({

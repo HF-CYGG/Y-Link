@@ -11,11 +11,10 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { BizResponsiveDataCollectionShell, PageContainer, PagePaginationBar, PageToolbarCard } from '@/components/common'
 import { exportAuditLogs, getAuditLogList, type AuditLogListQuery, type AuditLogRecord } from '@/api/modules/audit'
+import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
-import { useAuthStore } from '@/store'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
 import { extractErrorMessage } from '@/utils/error'
-import { showPermissionDenied } from '@/utils/permission'
 
 /**
  * 审计日志筛选表单：
@@ -48,10 +47,9 @@ const listState = reactive(createPaginatedListState<AuditLogRecord>({
  * - audit_logs:view 控制列表查看；
  * - audit_logs:export 控制导出当前筛选结果按钮。
  */
-const authStore = useAuthStore()
 const listRequest = useStableRequest()
-const canViewAuditLogs = computed(() => authStore.hasPermission('audit_logs:view'))
-const canExportAuditLogs = computed(() => authStore.hasPermission('audit_logs:export'))
+const { hasPermission, ensurePermission } = usePermissionAction()
+const canExportAuditLogs = computed(() => hasPermission('audit_logs:export'))
 const exportLoading = ref(false)
 
 /**
@@ -69,6 +67,14 @@ const actionOptions = [
   { label: '启停用户', value: 'user.update_status' },
   { label: '重置密码', value: 'user.reset_password' },
   { label: '更新流水配置', value: 'system_config.update_order_serial' },
+  { label: '测试验证码平台发送', value: 'system_config.test_verification_provider' },
+  { label: '创建 SQLite 备份', value: 'data_maintenance.backup_sqlite' },
+  { label: '导入 JSON 数据', value: 'data_maintenance.import_json' },
+  { label: '创建迁移任务', value: 'database_migration.create_task' },
+  { label: '执行迁移任务', value: 'database_migration.run_task' },
+  { label: '切换到 MySQL', value: 'database_migration.apply_switch' },
+  { label: '回退 SQLite', value: 'database_migration.rollback_switch' },
+  { label: '清理运行时覆盖', value: 'database_migration.clear_override' },
 ]
 
 /**
@@ -82,6 +88,11 @@ const targetTypeOptions = [
   { label: '用户', value: 'user' },
   { label: '会话', value: 'session' },
   { label: '系统配置', value: 'system_config' },
+  { label: '数据维护', value: 'data_maintenance' },
+  { label: '数据库迁移', value: 'database_migration' },
+  { label: '运行时覆盖', value: 'database_runtime_override' },
+  { label: '验证码平台', value: 'verification_provider' },
+  { label: '接口路由', value: 'api_route' },
 ]
 
 /**
@@ -179,11 +190,13 @@ const buildQueryParams = (): AuditLogListQuery => {
  * - 若当前账号无查看权限，则保持空列表并给出稳定提示。
  */
 const loadData = async () => {
-  if (!canViewAuditLogs.value) {
+  // 统一走共享权限动作工具：
+  // - 页面首屏加载与手动刷新共用同一套越权提示口径；
+  // - 无权限时仍清空列表状态，避免保留上一位用户的旧数据视图。
+  if (!ensurePermission('audit_logs:view', '审计日志查看')) {
     listState.loading = false
     listState.records = []
     listState.total = 0
-    showPermissionDenied()
     return
   }
 
@@ -208,8 +221,8 @@ const loadData = async () => {
  * - 导出范围覆盖当前筛选命中的全部结果，而不是仅当前分页。
  */
 const handleExport = async () => {
-  if (!canExportAuditLogs.value) {
-    showPermissionDenied()
+  // 导出动作改为共享门禁，避免页面继续散落独立提示逻辑。
+  if (!ensurePermission('audit_logs:export', '审计日志导出')) {
     return
   }
 

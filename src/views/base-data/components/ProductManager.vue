@@ -28,9 +28,8 @@ import {
   PageToolbarCard,
 } from '@/components/common'
 import { useCrudManager } from '@/composables/useCrudManager'
-import { useAuthStore } from '@/store'
+import { usePermissionAction } from '@/composables/usePermissionAction'
 import { extractErrorMessage } from '@/utils/error'
-import { showPermissionDenied } from '@/utils/permission'
 
 const allTags = ref<Tag[]>([])
 const formRef = ref<FormInstance>()
@@ -98,8 +97,8 @@ const createDefaultForm = (): ProductForm => ({
 
 const selectedProductCount = computed(() => selectedProductIds.value.length)
 const batchCreateRowCount = computed(() => batchCreateRows.value.length)
-const authStore = useAuthStore()
-const canManageProducts = computed(() => authStore.currentUser?.role === 'admin' && authStore.hasPermission('products:manage'))
+const { hasPermission, ensurePermission } = usePermissionAction()
+const canManageProducts = computed(() => hasPermission('products:manage'))
 
 const createBatchCreateRow = (): BatchCreateProductFormRow => {
   batchCreateRowSeed.value += 1
@@ -387,8 +386,7 @@ const reloadProducts = async () => {
 }
 
 const handleAdd = async () => {
-  if (!canManageProducts.value) {
-    showPermissionDenied()
+  if (!ensurePermission('products:manage', '新增产品')) {
     return
   }
   await clearSelection()
@@ -396,8 +394,7 @@ const handleAdd = async () => {
 }
 
 const handleEditProduct = async (row: ProductRecord) => {
-  if (!canManageProducts.value) {
-    showPermissionDenied()
+  if (!ensurePermission('products:manage', '编辑产品')) {
     return
   }
   editingProductId.value = row.id
@@ -414,8 +411,7 @@ const handleEditProduct = async (row: ProductRecord) => {
 }
 
 const handleDeleteProduct = async (row: ProductRecord) => {
-  if (!canManageProducts.value) {
-    showPermissionDenied()
+  if (!ensurePermission('products:manage', '删除产品')) {
     return
   }
   await handleDelete(row)
@@ -475,8 +471,7 @@ const refreshProductView = async () => {
 }
 
 const handleBatchUpdateStatus = async (isActive: boolean) => {
-  if (!canManageProducts.value) {
-    showPermissionDenied()
+  if (!ensurePermission('products:manage', isActive ? '批量启用产品' : '批量停用产品')) {
     return
   }
   if (!selectedProductIds.value.length) {
@@ -502,8 +497,7 @@ const handleBatchUpdateStatus = async (isActive: boolean) => {
 }
 
 const openBatchCreateDialog = () => {
-  if (!canManageProducts.value) {
-    showPermissionDenied()
+  if (!ensurePermission('products:manage', '批量新增产品')) {
     return
   }
   batchCreateRows.value = [createBatchCreateRow()]
@@ -565,8 +559,7 @@ const validateBatchCreateRows = (): string | null => {
 }
 
 const handleBatchCreate = async () => {
-  if (!canManageProducts.value) {
-    showPermissionDenied()
+  if (!ensurePermission('products:manage', '批量新增产品')) {
     return
   }
   const validationError = validateBatchCreateRows()

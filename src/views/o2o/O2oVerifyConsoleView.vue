@@ -17,7 +17,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute } from 'vue-router'
 import { CameraFilled, DocumentCopy, Search } from '@element-plus/icons-vue'
-import { PageContainer, UnifiedScanDialog } from '@/components/common'
+import { BizCrudDialogShell, PageContainer, UnifiedScanDialog } from '@/components/common'
 import {
   VERIFY_CONSOLE_O2O_ORDER_STATUS_CLASS_MAP,
   VERIFY_CONSOLE_O2O_ORDER_STATUS_LABEL_MAP,
@@ -37,7 +37,7 @@ import {
 import { getProductList, type ProductRecord } from '@/api/modules/product'
 import { useCameraQrScanner } from '@/composables/useCameraQrScanner'
 import { useDevice } from '@/composables/useDevice'
-import { useAuthStore } from '@/store'
+import { usePermissionAction } from '@/composables/usePermissionAction'
 
 const O2O_RETURN_REJECT_REASON_MAX_LENGTH = 500
 const O2O_PREORDER_REMARK_MAX_LENGTH = 255
@@ -64,7 +64,7 @@ const submitting = ref(false)
 const inputRef = ref<{ focus: () => void } | null>(null)
 const { isPhone } = useDevice()
 const route = useRoute()
-const authStore = useAuthStore()
+const { hasPermission, ensurePermission } = usePermissionAction()
 const lastRouteVerifyKey = ref('')
 
 const productCatalog = ref<ProductRecord[]>([])
@@ -132,7 +132,7 @@ const canOpenOnsiteAdjust = computed(() => {
   return Boolean(preorderDetail.value && isO2oOrderPending(preorderDetail.value.order.status))
 })
 
-const canEditComplianceFlags = computed(() => authStore.hasPermission('orders:update'))
+const canEditComplianceFlags = computed(() => hasPermission('orders:update'))
 const isDepartmentPreorder = computed(() => preorderDetail.value?.order.clientOrderType === 'department')
 
 const showVerifyActionButton = computed(() => {
@@ -676,6 +676,12 @@ const handleSaveComplianceFlags = async () => {
   if (!preorderDetail.value?.order.id || !isDepartmentPreorder.value) {
     return
   }
+  // 核销台属于现场高频修改入口，统一复用共享权限动作工具：
+  // - 保持按钮显隐与点击保存时的门禁口径一致；
+  // - 避免继续散落页面级 hasPermission / 提示调用。
+  if (!ensurePermission('orders:update', '合规状态编辑')) {
+    return
+  }
   complianceSaving.value = true
   try {
     const nextDetail = await updateO2oOrderComplianceFlags(preorderDetail.value.order.id, {
@@ -1069,13 +1075,19 @@ watch(
       </div>
     </Transition>
 
-    <el-dialog
+    <!-- 两个现场处理弹窗统一切到共享 CRUD 壳：
+     - 拒绝退货属于短内容确认表单，使用 auto 模式；
+     - 现场改单内容较长，使用 scroll 模式，由共享壳统一接管正文滚动。
+    -->
+    <BizCrudDialogShell
       v-if="returnRequestDetail"
       v-model="rejectDialogVisible"
       title="拒绝退货申请"
-      width="92%"
-      style="max-width: 640px"
-      append-to-body
+      height-mode="auto"
+      phone-width="92%"
+      tablet-width="640px"
+      desktop-width="640px"
+      :confirm-loading="rejectSubmitting"
       @closed="handleRejectDialogClosed"
     >
       <div class="space-y-4">
@@ -1098,9 +1110,9 @@ watch(
         </div>
       </div>
 
-      <template v-slot:footer>
+      <template #footer="{ close }">
         <div class="flex flex-wrap justify-end gap-3">
-          <el-button @click="rejectDialogVisible = false">取消</el-button>
+          <el-button @click="close()">取消</el-button>
           <el-button
             type="danger"
             :loading="rejectSubmitting"
@@ -1110,15 +1122,17 @@ watch(
           </el-button>
         </div>
       </template>
-    </el-dialog>
+    </BizCrudDialogShell>
 
-    <el-dialog
+    <BizCrudDialogShell
       v-if="preorderDetail"
       v-model="onsiteAdjustDialogVisible"
       title="现场改单"
-      width="92%"
-      style="max-width: 860px"
-      append-to-body
+      height-mode="scroll"
+      phone-width="92%"
+      tablet-width="860px"
+      desktop-width="860px"
+      :confirm-loading="onsiteAdjustSubmitting"
       @closed="handleOnsiteAdjustDialogClosed"
     >
       <div class="space-y-4">
@@ -1205,9 +1219,9 @@ watch(
         </div>
       </div>
 
-      <template v-slot:footer>
+      <template #footer="{ close }">
         <div class="flex flex-wrap justify-end gap-3">
-          <el-button @click="onsiteAdjustDialogVisible = false">取消</el-button>
+          <el-button @click="close()">取消</el-button>
           <el-button
             type="primary"
             :loading="onsiteAdjustSubmitting"
@@ -1218,7 +1232,7 @@ watch(
           </el-button>
         </div>
       </template>
-    </el-dialog>
+    </BizCrudDialogShell>
 
     <input
       ref="imageInputRef"

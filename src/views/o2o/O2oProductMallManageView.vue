@@ -13,9 +13,9 @@
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { UploadRequestOptions } from 'element-plus'
-import { Delete, UploadFilled, ZoomIn } from '@element-plus/icons-vue'
+import { Delete, UploadFilled } from '@element-plus/icons-vue'
 import imageCompression from 'browser-image-compression'
-import { PageContainer } from '@/components/common'
+import { BizCrudDialogShell, PageContainer } from '@/components/common'
 import { uploadImage } from '@/api/modules/upload'
 import { resolveProductPlaceholder } from '@/utils/product-placeholder'
 import {
@@ -60,7 +60,6 @@ const form = reactive<O2oProductFormState>({
 })
 
 const localPreviewUrl = ref<string>('')
-const imagePreviewVisible = ref(false)
 const uploadingThumbnail = ref(false)
 const uploadProgress = ref(0)
 const uploadProgressVisible = ref(false)
@@ -76,6 +75,10 @@ const displayThumbnail = computed(() => {
 
 const hasConfiguredThumbnail = computed(() => {
   return Boolean(configuredThumbnailUrl.value)
+})
+
+const currentPreviewImageList = computed(() => {
+  return displayThumbnail.value ? [displayThumbnail.value] : []
 })
 
 const uploadProgressStatus = computed(() => {
@@ -116,7 +119,6 @@ const resetForm = () => {
     URL.revokeObjectURL(localPreviewUrl.value)
   }
   localPreviewUrl.value = ''
-  imagePreviewVisible.value = false
   uploadingThumbnail.value = false
   uploadProgress.value = 0
   uploadProgressVisible.value = false
@@ -236,14 +238,6 @@ const handleRemoveThumbnail = () => {
   uploadProgress.value = 0
   uploadProgressVisible.value = false
   ElMessage.success('已移除商品预览图')
-}
-
-const openThumbnailPreview = () => {
-  if (!hasConfiguredThumbnail.value) {
-    ElMessage.warning('当前没有可预览的图片')
-    return
-  }
-  imagePreviewVisible.value = true
 }
 
 // 详细注释：打开编辑商品弹窗，将商品记录字段回显到表单模型中。
@@ -373,6 +367,8 @@ onMounted(async () => {
           <template #default="{ row }">
             <el-image
               :src="resolveProductPlaceholder(row.thumbnail)"
+              :preview-src-list="row.thumbnail ? [resolveProductPlaceholder(row.thumbnail)] : []"
+              preview-teleported
               fit="cover"
               style="width: 72px; height: 72px; border-radius: 16px"
             />
@@ -387,24 +383,27 @@ onMounted(async () => {
       </el-table>
     </div>
 
-    <el-dialog
+    <BizCrudDialogShell
       v-model="dialogVisible"
       :title="dialogTitle"
-      width="720px"
-      append-to-body
-      align-center
-      destroy-on-close
-      dialog-class="ylink-dialog-height-mode--auto o2o-mall-product-edit-dialog"
-      modal-class="o2o-mall-product-edit-dialog-overlay"
+      height-mode="auto"
+      phone-width="94%"
+      tablet-width="720px"
+      desktop-width="720px"
+      :confirm-loading="submitting"
+      confirm-text="保存"
+      dialog-class="o2o-mall-product-edit-dialog"
+      @confirm="handleSubmit"
     >
-      <el-form label-width="110px">
+      <template #default="{ isPhone }">
+      <el-form :label-width="isPhone ? '92px' : '110px'">
         <el-row :gutter="16">
-          <el-col :span="12">
+          <el-col :span="isPhone ? 24 : 12">
             <el-form-item label="商品编码">
               <el-input v-model="form.productCode" placeholder="可选，不填则后端自动生成" :disabled="!!form.id" />
             </el-form-item>
           </el-col>
-          <el-col :span="12">
+          <el-col :span="isPhone ? 24 : 12">
             <el-form-item label="商品名称">
               <el-input v-model="form.productName" placeholder="请输入商品名称" :disabled="!!form.id" />
             </el-form-item>
@@ -412,7 +411,7 @@ onMounted(async () => {
         </el-row>
 
         <el-row :gutter="16">
-          <el-col :span="12">
+          <el-col :span="isPhone ? 24 : 12">
             <el-form-item label="建议单价">
               <el-input-number v-model="form.defaultPrice" :min="0" :precision="2" style="width: 100%" :disabled="!!form.id" />
             </el-form-item>
@@ -420,13 +419,13 @@ onMounted(async () => {
         </el-row>
 
         <el-row :gutter="16">
-          <el-col :span="12">
+          <el-col :span="isPhone ? 24 : 12">
             <el-form-item label="当前库存">
               <el-input-number v-model="form.currentStock" :min="0" :step="1" style="width: 100%" disabled />
               <div class="mt-1 text-xs text-slate-400">请在“基础资料-产品管理”中编辑库存</div>
             </el-form-item>
           </el-col>
-          <el-col :span="12">
+          <el-col :span="isPhone ? 24 : 12">
             <el-form-item label="单人限购">
               <el-input-number v-model="form.limitPerUser" :min="1" :step="1" style="width: 100%" />
             </el-form-item>
@@ -477,7 +476,15 @@ onMounted(async () => {
                 class="avatar-uploader__content"
                 :class="{ 'has-image': hasConfiguredThumbnail, 'is-empty': !hasConfiguredThumbnail }"
               >
-                <img v-if="hasConfiguredThumbnail" :src="displayThumbnail" class="avatar avatar--full" alt="商品预览" />
+                <el-image
+                  v-if="hasConfiguredThumbnail"
+                  :src="displayThumbnail"
+                  :preview-src-list="currentPreviewImageList"
+                  preview-teleported
+                  fit="cover"
+                  class="avatar avatar--full"
+                  alt="商品预览"
+                />
                 <div v-else class="avatar-uploader__empty-state">
                   <div class="avatar-uploader__preview-shell" :class="{ 'is-empty': !hasConfiguredThumbnail }">
                     <el-icon class="avatar-uploader__empty-icon"><UploadFilled /></el-icon>
@@ -496,9 +503,9 @@ onMounted(async () => {
             </div>
           </Transition>
           <div class="thumbnail-actions mt-3 w-full">
-            <el-button plain :icon="ZoomIn" :disabled="!hasConfiguredThumbnail" @click="openThumbnailPreview">
-              查看大图
-            </el-button>
+            <span class="thumbnail-actions__hint">
+              {{ hasConfiguredThumbnail ? '点击图片可查看大图' : '上传完成后可点击图片查看大图' }}
+            </span>
             <el-popconfirm
               width="240"
               title="确认删除当前预览图吗？"
@@ -518,31 +525,15 @@ onMounted(async () => {
               </template>
             </el-popconfirm>
           </div>
-          <p class="mt-2 w-full text-xs text-slate-400">上传完成后可点击“查看大图”。</p>
+          <p class="mt-2 w-full text-xs text-slate-400">列表缩略图与编辑区预览图都已统一接入系统图片预览器。</p>
         </el-form-item>
         <el-form-item label="详情内容">
           <el-input v-model="form.detailContent" type="textarea" :rows="6" placeholder="请输入客户端商品详情说明" />
         </el-form-item>
       </el-form>
-
-      <template #footer>
-        <el-space>
-          <el-button @click="dialogVisible = false">取消</el-button>
-          <el-button type="primary" :loading="submitting" @click="handleSubmit">保存</el-button>
-        </el-space>
       </template>
-    </el-dialog>
+    </BizCrudDialogShell>
 
-    <el-dialog
-      v-model="imagePreviewVisible"
-      title="商品预览图"
-      width="min(92vw, 900px)"
-      append-to-body
-      align-center
-      destroy-on-close
-    >
-      <img :src="displayThumbnail" alt="商品预览图大图" class="thumbnail-preview-dialog-image" />
-    </el-dialog>
   </PageContainer>
 </template>
 
@@ -616,6 +607,12 @@ onMounted(async () => {
   flex-direction: column;
   gap: 0.22rem;
   min-width: 0;
+}
+
+.thumbnail-actions__hint {
+  font-size: 13px;
+  color: #64748b;
+  line-height: 1.6;
 }
 
 .avatar-uploader__title {

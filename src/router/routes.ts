@@ -372,7 +372,7 @@ const layoutChildren: AppRouteRecord[] = [
       icon: 'UserFilled',
       menuGroup: '系统管理',
       menuOrder: 50,
-      requiredAnyPermissions: ['system_configs:view', 'users:view', 'audit_logs:view'],
+      requiredAnyPermissions: ['system_configs:view', 'db_migration:view', 'users:view', 'audit_logs:view'],
       allowedRoles: ['admin', 'operator'],
       shortcut: {
         title: '系统配置',
@@ -406,7 +406,7 @@ const layoutChildren: AppRouteRecord[] = [
           title: '数据库迁移助手',
           menuOrder: 15,
           activeMenu: '/system',
-          requiredPermissions: ['system_configs:view'],
+          requiredPermissions: ['db_migration:view'],
           shortcut: {
             title: '数据库迁移',
             description: '进入数据库迁移助手，完成预检、迁移、切换与回退',

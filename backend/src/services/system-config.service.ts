@@ -221,6 +221,8 @@ export interface VerificationProviderConfigRecord {
   bodyTemplate: string
   successMatch: string
   updatedAt: Date
+  headersTemplateMasked?: boolean
+  bodyTemplateMasked?: boolean
 }
 
 export interface VerificationProviderConfigsResult {
@@ -241,6 +243,8 @@ export interface UpdateVerificationProviderConfigsInput {
   mobile: VerificationProviderConfigInput
   email: VerificationProviderConfigInput
 }
+
+export const VERIFICATION_SENSITIVE_VALUE_PLACEHOLDER = '[已隐藏敏感内容，保存时保留原值]'
 
 export interface ClientDepartmentConfigRecord {
   tree: ClientDepartmentTreeNode[]
@@ -283,7 +287,6 @@ class SystemConfigService {
     'verification.email.body_template',
     'verification.email.success_match',
   ] as const
-
   /**
    * 系统治理配置写操作强制管理员：
    * - 与路由层 requireRole('admin') 形成双重门禁；
@@ -331,6 +334,148 @@ class SystemConfigService {
       throw new BizError(`${field} 配置值非法`, 500)
     }
     return parsed
+  }
+
+  /**
+   * 敏感配置展示口径：
+   * - 管理页读取时不直接回传真实模板内容，避免浏览器、日志或抓包中泄露第三方密钥；
+   * - 若管理员未修改该字段直接保存，后端会识别占位文本并保留数据库原值。
+   */
+  private maskSensitiveConfigValue(value: string) {
+    return value.trim() ? VERIFICATION_SENSITIVE_VALUE_PLACEHOLDER : ''
+  }
+
+  private isSensitivePlaceholder(value: string | undefined) {
+    return (value?.trim() || '') === VERIFICATION_SENSITIVE_VALUE_PLACEHOLDER
+  }
+
+  private sanitizeVerificationConfigForAudit(config: VerificationProviderConfigRecord): VerificationProviderConfigRecord {
+    return {
+      ...config,
+      headersTemplate: this.maskSensitiveConfigValue(config.headersTemplate),
+      bodyTemplate: this.maskSensitiveConfigValue(config.bodyTemplate),
+      headersTemplateMasked: Boolean(config.headersTemplate.trim()),
+      bodyTemplateMasked: Boolean(config.bodyTemplate.trim()),
+    }
+  }
+
+  private validateVerificationApiUrl(apiUrl: string, channelLabel: string) {
+    if (!apiUrl) {
+      return
+    }
+    let url: URL
+    try {
+      url = new URL(apiUrl)
+    } catch {
+      throw new BizError(`${channelLabel}API 地址格式不正确`, 400)
+    }
+    if (!['http:', 'https:'].includes(url.protocol)) {
+      throw new BizError(`${channelLabel}API 地址仅支持 http 或 https 协议`, 400)
+    }
+  }
+
+  private normalizeVerificationHeadersTemplate(rawValue: string, channelLabel: string) {
+    const text = rawValue.trim() || '{}'
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(text)
+    } catch {
+      throw new BizError(`${channelLabel}请求头模板必须是合法 JSON 对象`, 400)
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new BizError(`${channelLabel}请求头模板必须是 JSON 对象`, 400)
+    }
+    for (const [headerName, headerValue] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!headerName.trim()) {
+        throw new BizError(`${channelLabel}请求头名称不能为空`, 400)
+      }
+      if (headerValue === null || typeof headerValue === 'object') {
+        throw new BizError(`${channelLabel}请求头值仅支持字符串、数字或布尔值`, 400)
+      }
+    }
+    return text
+  }
+
+  private normalizeVerificationBodyTemplate(rawValue: string, channelLabel: string) {
+    const text = rawValue.trim()
+    if (text.length > 10000) {
+      throw new BizError(`${channelLabel}请求体模板长度不能超过 10000 个字符`, 400)
+    }
+    return text
+  }
+
+  private buildVerificationConfigMap(rows: Array<Pick<SystemConfig, 'configKey' | 'configValue' | 'updatedAt'>>) {
+    return new Map(rows.map((row) => [row.configKey, row]))
+  }
+
+  private async loadVerificationConfigMap() {
+    await this.ensureDefaultConfigs()
+    const rows = await this.configRepo.find({
+      where: this.verificationConfigKeys.map((key) => ({ configKey: key })),
+      select: {
+        configKey: true,
+        configValue: true,
+        updatedAt: true,
+      },
+    })
+    if (rows.length !== this.verificationConfigKeys.length) {
+      throw new BizError('验证码平台配置缺失，请联系管理员补齐配置', 500)
+    }
+    return this.buildVerificationConfigMap(rows)
+  }
+
+  private resolveSensitiveVerificationFieldValue(
+    nextValue: string,
+    persistedValue: string,
+    channelLabel: string,
+    fieldLabel: string,
+  ) {
+    if (this.isSensitivePlaceholder(nextValue)) {
+      if (!persistedValue.trim()) {
+        throw new BizError(`${channelLabel}${fieldLabel}当前没有可保留的历史值，请重新填写真实内容`, 400)
+      }
+      return persistedValue
+    }
+    return nextValue.trim()
+  }
+
+  private normalizeVerificationProviderInput(
+    channelType: VerificationChannelType,
+    channel: VerificationProviderConfigInput,
+    existingConfig: VerificationProviderConfigRecord,
+  ): VerificationProviderConfigInput {
+    const channelLabel = channelType === 'mobile' ? '短信验证码平台' : '邮箱验证码平台'
+    const method = channel.httpMethod === 'GET' ? 'GET' : 'POST'
+    const apiUrl = channel.apiUrl.trim()
+    if (channel.enabled && !apiUrl) {
+      throw new BizError(`${channelLabel}已启用时必须填写 API 地址`, 400)
+    }
+    this.validateVerificationApiUrl(apiUrl, channelLabel)
+
+    return {
+      enabled: channel.enabled,
+      httpMethod: method,
+      apiUrl,
+      headersTemplate: this.normalizeVerificationHeadersTemplate(
+        this.resolveSensitiveVerificationFieldValue(
+          channel.headersTemplate,
+          existingConfig.headersTemplate,
+          channelLabel,
+          '请求头模板',
+        ),
+        channelLabel,
+      ),
+      bodyTemplate: this.normalizeVerificationBodyTemplate(
+        this.resolveSensitiveVerificationFieldValue(
+          channel.bodyTemplate,
+          existingConfig.bodyTemplate,
+          channelLabel,
+          '请求体模板',
+        ),
+        channelLabel,
+      ),
+      successMatch: channel.successMatch.trim(),
+    }
   }
 
   private createDepartmentNodeId(seed: string) {
@@ -490,6 +635,7 @@ class SystemConfigService {
   private formatVerificationProviderConfig(
     channel: VerificationChannelType,
     configMap: Map<string, Pick<SystemConfig, 'configValue' | 'updatedAt'>>,
+    options: { maskSensitiveValues?: boolean } = {},
   ): VerificationProviderConfigRecord {
     const keyPrefix = `verification.${channel}`
     const enabledConfig = configMap.get(`${keyPrefix}.enabled`)
@@ -516,10 +662,12 @@ class SystemConfigService {
       enabled: this.parseNonNegativeInteger(enabledConfig.configValue, `${keyPrefix}.enabled`) > 0,
       httpMethod,
       apiUrl: urlConfig.configValue,
-      headersTemplate: headersConfig.configValue,
-      bodyTemplate: bodyConfig.configValue,
+      headersTemplate: options.maskSensitiveValues ? this.maskSensitiveConfigValue(headersConfig.configValue) : headersConfig.configValue,
+      bodyTemplate: options.maskSensitiveValues ? this.maskSensitiveConfigValue(bodyConfig.configValue) : bodyConfig.configValue,
       successMatch: successConfig.configValue,
       updatedAt,
+      headersTemplateMasked: options.maskSensitiveValues ? Boolean(headersConfig.configValue.trim()) : false,
+      bodyTemplateMasked: options.maskSensitiveValues ? Boolean(bodyConfig.configValue.trim()) : false,
     }
   }
 
@@ -817,23 +965,30 @@ class SystemConfigService {
     })
   }
 
-  async getVerificationProviderConfigs(): Promise<VerificationProviderConfigsResult> {
-    await this.ensureDefaultConfigs()
-    const rows = await this.configRepo.find({
-      where: this.verificationConfigKeys.map((key) => ({ configKey: key })),
-      select: {
-        configKey: true,
-        configValue: true,
-        updatedAt: true,
-      },
-    })
-    if (rows.length !== this.verificationConfigKeys.length) {
-      throw new BizError('验证码平台配置缺失，请联系管理员补齐配置', 500)
-    }
-    const map = new Map(rows.map((row) => [row.configKey, row]))
+  async getVerificationProviderConfigs(options: { maskSensitiveValues?: boolean } = {}): Promise<VerificationProviderConfigsResult> {
+    const map = await this.loadVerificationConfigMap()
     return {
-      mobile: this.formatVerificationProviderConfig('mobile', map),
-      email: this.formatVerificationProviderConfig('email', map),
+      mobile: this.formatVerificationProviderConfig('mobile', map, options),
+      email: this.formatVerificationProviderConfig('email', map, options),
+    }
+  }
+
+  async resolveVerificationProviderConfigInput(
+    channelType: VerificationChannelType,
+    input: VerificationProviderConfigInput,
+  ): Promise<VerificationProviderConfigRecord> {
+    const currentConfigs = await this.getVerificationProviderConfigs({ maskSensitiveValues: false })
+    const normalizedInput = this.normalizeVerificationProviderInput(channelType, input, currentConfigs[channelType])
+    return {
+      enabled: normalizedInput.enabled,
+      httpMethod: normalizedInput.httpMethod,
+      apiUrl: normalizedInput.apiUrl,
+      headersTemplate: normalizedInput.headersTemplate,
+      bodyTemplate: normalizedInput.bodyTemplate,
+      successMatch: normalizedInput.successMatch,
+      updatedAt: new Date(),
+      headersTemplateMasked: false,
+      bodyTemplateMasked: false,
     }
   }
 
@@ -950,25 +1105,10 @@ class SystemConfigService {
     requestMeta?: RequestMeta,
   ): Promise<{ config: VerificationProviderConfigsResult; changed: boolean }> {
     await this.assertAdminActor(actor, requestMeta, 'system_config.update_verification_providers', '更新验证码平台配置')
-    const normalizeChannelInput = (channel: VerificationProviderConfigInput, channelLabel: string) => {
-      const method = channel.httpMethod === 'GET' ? 'GET' : 'POST'
-      if (channel.enabled && !channel.apiUrl.trim()) {
-        throw new BizError(`${channelLabel}已启用时必须填写 API 地址`, 400)
-      }
-      return {
-        enabled: channel.enabled ? '1' : '0',
-        httpMethod: method,
-        apiUrl: channel.apiUrl.trim(),
-        headersTemplate: channel.headersTemplate.trim(),
-        bodyTemplate: channel.bodyTemplate.trim(),
-        successMatch: channel.successMatch.trim(),
-      }
-    }
+    const persistedConfigs = await this.getVerificationProviderConfigs({ maskSensitiveValues: false })
+    const normalizedMobile = this.normalizeVerificationProviderInput('mobile', input.mobile, persistedConfigs.mobile)
+    const normalizedEmail = this.normalizeVerificationProviderInput('email', input.email, persistedConfigs.email)
 
-    const normalizedMobile = normalizeChannelInput(input.mobile, '短信验证码平台')
-    const normalizedEmail = normalizeChannelInput(input.email, '邮箱验证码平台')
-
-    await this.ensureDefaultConfigs()
     return AppDataSource.transaction(async (manager) => {
       const useForUpdate = manager.connection.options.type === 'mysql'
       const placeholders = this.verificationConfigKeys.map(() => '?').join(', ')
@@ -987,13 +1127,13 @@ class SystemConfigService {
       }
 
       const targetMap = new Map<string, string>([
-        ['verification.mobile.enabled', normalizedMobile.enabled],
+        ['verification.mobile.enabled', normalizedMobile.enabled ? '1' : '0'],
         ['verification.mobile.http_method', normalizedMobile.httpMethod],
         ['verification.mobile.api_url', normalizedMobile.apiUrl],
         ['verification.mobile.headers_template', normalizedMobile.headersTemplate],
         ['verification.mobile.body_template', normalizedMobile.bodyTemplate],
         ['verification.mobile.success_match', normalizedMobile.successMatch],
-        ['verification.email.enabled', normalizedEmail.enabled],
+        ['verification.email.enabled', normalizedEmail.enabled ? '1' : '0'],
         ['verification.email.http_method', normalizedEmail.httpMethod],
         ['verification.email.api_url', normalizedEmail.apiUrl],
         ['verification.email.headers_template', normalizedEmail.headersTemplate],
@@ -1001,7 +1141,7 @@ class SystemConfigService {
         ['verification.email.success_match', normalizedEmail.successMatch],
       ])
 
-      const before = await this.getVerificationProviderConfigs()
+      const before = await this.getVerificationProviderConfigs({ maskSensitiveValues: false })
       let changed = false
       const repo = manager.getRepository(SystemConfig)
       for (const row of lockedRows) {
@@ -1013,7 +1153,7 @@ class SystemConfigService {
         changed = true
       }
 
-      const config = await this.getVerificationProviderConfigs()
+      const config = await this.getVerificationProviderConfigs({ maskSensitiveValues: true })
       if (changed) {
         await auditService.record(
           {
@@ -1024,8 +1164,22 @@ class SystemConfigService {
             actor,
             requestMeta,
             detail: {
-              before,
-              after: config,
+              before: {
+                mobile: this.sanitizeVerificationConfigForAudit(before.mobile),
+                email: this.sanitizeVerificationConfigForAudit(before.email),
+              },
+              after: {
+                mobile: this.sanitizeVerificationConfigForAudit({
+                  ...config.mobile,
+                  headersTemplateMasked: false,
+                  bodyTemplateMasked: false,
+                }),
+                email: this.sanitizeVerificationConfigForAudit({
+                  ...config.email,
+                  headersTemplateMasked: false,
+                  bodyTemplateMasked: false,
+                }),
+              },
             },
           },
           manager,

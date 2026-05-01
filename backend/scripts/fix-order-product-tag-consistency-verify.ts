@@ -499,7 +499,7 @@ const verifyChecklistFlow = async (token: string) => {
     },
   })
   assert.ok(submitOrderResult.data.order.id)
-  assert.match(submitOrderResult.data.order.showNo, /^CK-\d{8}-\d{4}$/)
+  assert.match(submitOrderResult.data.order.showNo, /^hyyz(?:jd)?\d{1,12}$/i)
 
   const orderListResult = await requestApi<{
     list: Array<Record<string, unknown>>

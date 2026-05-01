@@ -17,7 +17,8 @@ export class SystemConfig {
   @Column({ name: 'config_key', type: 'varchar', length: 128 })
   configKey!: string
 
-  @Column({ name: 'config_value', type: 'varchar', length: 255 })
+  // 配置值需要承载验证码模板等长文本，因此统一提升为 text，避免前端已通过校验但数据库写入截断。
+  @Column({ name: 'config_value', type: 'text' })
   configValue!: string
 
   @Column({ name: 'config_group', type: 'varchar', length: 64, default: 'general' })

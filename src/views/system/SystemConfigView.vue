@@ -27,10 +27,9 @@ import {
   type OrderSerialConfigRecord,
   type VerificationProviderConfigsResult,
 } from '@/api/modules/system-config'
+import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
-import { useAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
-import { showPermissionDenied } from '@/utils/permission'
 import {
   DATABASE_MIGRATION_ASSISTANT_NAME,
   DATABASE_MIGRATION_ENTRY_DESCRIPTION,
@@ -56,7 +55,7 @@ type VerificationFormValue = {
 type ConfigSectionKey = 'order_serial' | 'o2o_rules' | 'verification' | 'department'
 type DepartmentTreeNode = ClientDepartmentTreeNode
 
-const authStore = useAuthStore()
+const { hasPermission, ensurePermission } = usePermissionAction()
 const router = useRouter()
 const formRef = ref<FormInstance>()
 const loading = ref(true)
@@ -138,9 +137,10 @@ const serialForm = reactive<{
 })
 
 const initialSnapshot = ref('')
-const canViewConfigs = computed(() => authStore.hasPermission('system_configs:view'))
-const canUpdateConfigs = computed(() => authStore.isAdmin && authStore.hasPermission('system_configs:update'))
-const canViewMigrationAssistant = computed(() => authStore.hasPermission('system_configs:view'))
+const canViewConfigs = computed(() => hasPermission('system_configs:view'))
+const canUpdateConfigs = computed(() => hasPermission('system_configs:update'))
+const canTestVerificationProviders = computed(() => hasPermission('verification_providers:test'))
+const canViewMigrationAssistant = computed(() => hasPermission('db_migration:view'))
 
 /**
  * 进入数据库迁移助手：
@@ -576,8 +576,7 @@ const buildVerificationChannelPayload = (channel: 'mobile' | 'email') => {
 }
 
 const handleTestVerificationSend = async (channel: 'mobile' | 'email') => {
-  if (!canUpdateConfigs.value) {
-    showPermissionDenied()
+  if (!ensurePermission('verification_providers:test', '测试验证码平台发送')) {
     return
   }
   if (!validateSingleVerificationConfig(channel)) {
@@ -681,8 +680,7 @@ const loadData = async () => {
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const handleSubmit = async () => {
-  if (!canUpdateConfigs.value) {
-    showPermissionDenied()
+  if (!ensurePermission('system_configs:update')) {
     return
   }
 
@@ -801,7 +799,7 @@ onMounted(() => {
       <PageToolbarCard class="space-y-3">
         <div class="flex flex-wrap items-center justify-between gap-3">
           <div class="text-sm text-slate-600 dark:text-slate-300">
-            {{ canUpdateConfigs ? '当前账号（管理员）可编辑参数并提交保存' : '当前账号仅支持只读查看（仅管理员可修改）' }}
+            {{ canUpdateConfigs ? '当前账号具备系统配置维护权限，可编辑参数并提交保存' : '当前账号仅支持只读查看' }}
           </div>
           <el-button v-if="canUpdateConfigs" type="primary" :loading="saving" :disabled="loading || !isDirty" @click="handleSubmit">
             保存配置
@@ -1021,7 +1019,7 @@ onMounted(() => {
                   <el-button
                     size="small"
                     :loading="testSendingChannel === 'mobile'"
-                    :disabled="!canUpdateConfigs || loading || saving"
+                    :disabled="!canTestVerificationProviders || loading || saving"
                     @click="handleTestVerificationSend('mobile')"
                   >
                     发送测试短信
@@ -1093,7 +1091,7 @@ onMounted(() => {
                   <el-button
                     size="small"
                     :loading="testSendingChannel === 'email'"
-                    :disabled="!canUpdateConfigs || loading || saving"
+                    :disabled="!canTestVerificationProviders || loading || saving"
                     @click="handleTestVerificationSend('email')"
                   >
                     发送测试邮件

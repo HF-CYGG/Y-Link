@@ -21,7 +21,14 @@ CREATE TABLE IF NOT EXISTS `base_product` (
   UNIQUE KEY `uk_base_product_code` (`product_code`),
   KEY `idx_base_product_name` (`product_name`),
   KEY `idx_base_product_pinyin_abbr` (`pinyin_abbr`),
-  KEY `idx_base_product_is_active` (`is_active`)
+  KEY `idx_base_product_is_active` (`is_active`),
+  CONSTRAINT `ck_base_product_non_negative` CHECK (
+    `default_price` >= 0
+    AND `limit_per_user` >= 1
+    AND `current_stock` >= 0
+    AND `pre_ordered_stock` >= 0
+    AND `pre_ordered_stock` <= `current_stock`
+  )
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='基础资料-产品表';
 
 CREATE TABLE IF NOT EXISTS `base_tag` (
@@ -106,7 +113,7 @@ CREATE TABLE IF NOT EXISTS `sys_audit_log` (
 CREATE TABLE IF NOT EXISTS `system_configs` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '配置主键',
   `config_key` VARCHAR(128) NOT NULL COMMENT '配置键',
-  `config_value` VARCHAR(255) NOT NULL COMMENT '配置值',
+  `config_value` TEXT NOT NULL COMMENT '配置值',
   `config_group` VARCHAR(64) NOT NULL DEFAULT 'general' COMMENT '配置分组',
   `remark` VARCHAR(255) DEFAULT NULL COMMENT '备注',
   `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '创建时间',
@@ -149,7 +156,12 @@ CREATE TABLE IF NOT EXISTS `biz_outbound_order` (
   KEY `idx_biz_outbound_is_deleted` (`is_deleted`),
   KEY `idx_biz_outbound_deleted_by_user_id` (`deleted_by_user_id`),
   KEY `idx_biz_outbound_creator_user_id` (`creator_user_id`),
-  KEY `idx_biz_outbound_created_at` (`created_at`)
+  KEY `idx_biz_outbound_created_at` (`created_at`),
+  CONSTRAINT `ck_biz_outbound_order_amounts` CHECK (
+    `total_qty` >= 0
+    AND `total_amount` >= 0
+    AND CHAR_LENGTH(TRIM(`idempotency_key`)) > 0
+  )
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='出库主表';
 
 CREATE TABLE IF NOT EXISTS `biz_outbound_order_item` (
@@ -167,6 +179,12 @@ CREATE TABLE IF NOT EXISTS `biz_outbound_order_item` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_biz_outbound_order_line` (`order_id`, `line_no`),
   KEY `idx_biz_outbound_item_product_id` (`product_id`),
+  CONSTRAINT `ck_biz_outbound_order_item_positive` CHECK (
+    `line_no` >= 1
+    AND `qty` > 0
+    AND `unit_price` > 0
+    AND `line_amount` >= 0
+  ),
   CONSTRAINT `fk_biz_outbound_item_order_id` FOREIGN KEY (`order_id`) REFERENCES `biz_outbound_order` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT,
   CONSTRAINT `fk_biz_outbound_item_product_id` FOREIGN KEY (`product_id`) REFERENCES `base_product` (`id`) ON DELETE RESTRICT ON UPDATE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='出库明细表';

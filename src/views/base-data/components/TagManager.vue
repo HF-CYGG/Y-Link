@@ -17,14 +17,13 @@ import {
   PageToolbarCard,
 } from '@/components/common'
 import { useCrudManager } from '@/composables/useCrudManager'
+import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
-import { useAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
-import { showPermissionDenied } from '@/utils/permission'
 
 const formRef = ref<FormInstance>()
-const authStore = useAuthStore()
-const canManageTags = computed(() => authStore.currentUser?.role === 'admin' && authStore.hasPermission('tags:manage'))
+const { hasPermission, ensurePermission } = usePermissionAction()
+const canManageTags = computed(() => hasPermission('tags:manage'))
 const pageReady = ref(false)
 const keepAliveActivated = ref(false)
 const aggregateLoading = ref(false)
@@ -229,32 +228,28 @@ const handleAggregateReset = () => {
 }
 
 const handleAddTag = () => {
-  if (!canManageTags.value) {
-    showPermissionDenied()
+  if (!ensurePermission('tags:manage', '新增标签')) {
     return
   }
   handleAdd()
 }
 
 const handleEditTag = (row: Tag) => {
-  if (!canManageTags.value) {
-    showPermissionDenied()
+  if (!ensurePermission('tags:manage', '编辑标签')) {
     return
   }
   handleEdit(row)
 }
 
 const handleDeleteTag = async (row: Tag) => {
-  if (!canManageTags.value) {
-    showPermissionDenied()
+  if (!ensurePermission('tags:manage', '删除标签')) {
     return
   }
   await handleDelete(row)
 }
 
 const handleSubmitTag = async () => {
-  if (!canManageTags.value) {
-    showPermissionDenied()
+  if (!ensurePermission('tags:manage', '保存标签')) {
     return
   }
   await handleSubmit()

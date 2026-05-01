@@ -119,6 +119,16 @@ const PRODUCT_CODE_CONSTRAINT_MATCHER = {
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const PRODUCT_CREATE_MAX_RETRY = 3
 const PRODUCT_BATCH_CREATE_LIMIT = 50
+const PRODUCT_FIELD_LIMITS = {
+  code: 64,
+  name: 128,
+  pinyinAbbr: 64,
+  thumbnail: 255,
+  detailContent: 20000,
+  priceMax: 9999999999.99,
+  maxLimitPerUser: 999999,
+  maxStock: 999999999,
+} as const
 
 const PRODUCT_REFERENCE_LABELS = [
   { repoEntity: BizInboundOrderItem, label: '入库明细' },
@@ -423,16 +433,17 @@ export class ProductService {
   private async createWithManager(input: CreateProductInput, manager: EntityManager): Promise<ProductView> {
     const normalizedProductCode = normalizeProductCodeInput(input.productCode)
     const shouldGenerateProductCode = !normalizedProductCode
+    const normalizedCreateInput = this.normalizeCreateInput(input)
     let lastError: unknown
 
     for (let attempt = 1; attempt <= PRODUCT_CREATE_MAX_RETRY; attempt += 1) {
       try {
         const repo = manager.getRepository(BaseProduct)
         const productCode = shouldGenerateProductCode ? await generateProductCode(manager) : normalizedProductCode
-        const product = this.buildProductEntityForCreate(repo, input, productCode)
+        const product = this.buildProductEntityForCreate(repo, normalizedCreateInput, productCode)
 
         const saved = await repo.save(product)
-        await this.replaceProductTags(saved.id, input.tagIds ?? [], manager)
+        await this.replaceProductTags(saved.id, normalizedCreateInput.tagIds ?? [], manager)
         return this.buildProductView(saved, manager)
       } catch (error) {
         lastError = error
@@ -448,22 +459,189 @@ export class ProductService {
     throw lastError ?? new BizError('产品创建失败，请稍后重试', 500)
   }
 
-  private applyUpdateInputToProduct(product: BaseProduct, input: UpdateProductInput): void {
-    if (typeof input.productCode === 'string') {
-      const normalizedProductCode = input.productCode.trim()
-      if (!normalizedProductCode) {
-        throw new BizError('产品编码不能为空')
+  /**
+   * 统一收敛商品文本字段：
+   * - 创建和更新共用同一套长度与必填规则；
+   * - 避免前端绕过页面校验后把超长或空白文本直接写入数据库。
+   */
+  private readLimitedText(
+    value: string | null | undefined,
+    label: string,
+    maxLength: number,
+    options: { required?: boolean; allowNull?: boolean } = {},
+  ): string | null | undefined {
+    if (value === null) {
+      if (options.allowNull) {
+        return null
       }
-      product.productCode = normalizedProductCode
+      throw new BizError(`${label}不能为空`, 400)
     }
-    if (typeof input.productName === 'string') {
-      product.productName = input.productName.trim()
+    if (value === undefined) {
+      if (options.required) {
+        throw new BizError(`${label}不能为空`, 400)
+      }
+      return undefined
+    }
+
+    const normalizedValue = value.trim()
+    if (!normalizedValue) {
+      if (options.allowNull) {
+        return null
+      }
+      throw new BizError(`${label}不能为空`, 400)
+    }
+    if (normalizedValue.length > maxLength) {
+      throw new BizError(`${label}长度不能超过 ${maxLength} 个字符`, 400)
+    }
+    return normalizedValue
+  }
+
+  private readOptionalPrice(value: number | undefined, label: string): string | undefined {
+    if (value === undefined) {
+      return undefined
+    }
+    if (!Number.isFinite(value) || value < 0) {
+      throw new BizError(`${label}不能小于 0`, 400)
+    }
+    if (value > PRODUCT_FIELD_LIMITS.priceMax) {
+      throw new BizError(`${label}不能超过 ${PRODUCT_FIELD_LIMITS.priceMax}`, 400)
+    }
+    return normalizeDecimalText(value)
+  }
+
+  private readOptionalInteger(
+    value: number | undefined,
+    label: string,
+    minimum: number,
+    maximum: number,
+  ): number | undefined {
+    if (value === undefined) {
+      return undefined
+    }
+    if (!Number.isInteger(value)) {
+      throw new BizError(`${label}必须为整数`, 400)
+    }
+    if (value < minimum) {
+      throw new BizError(`${label}不能小于 ${minimum}`, 400)
+    }
+    if (value > maximum) {
+      throw new BizError(`${label}不能超过 ${maximum}`, 400)
+    }
+    return value
+  }
+
+  private assertStockRelation(currentStock: number, preOrderedStock: number): void {
+    if (preOrderedStock > currentStock) {
+      throw new BizError('预订库存不能超过物理库存', 400)
+    }
+  }
+
+  private normalizeCreateInput(input: CreateProductInput): CreateProductInput {
+    const normalizedInput: CreateProductInput = {
+      ...input,
+      productName: this.readLimitedText(
+        input.productName,
+        '产品名称',
+        PRODUCT_FIELD_LIMITS.name,
+        { required: true },
+      ) as string,
+    }
+
+    if (typeof input.productCode === 'string') {
+      normalizedInput.productCode = this.readLimitedText(
+        input.productCode,
+        '产品编码',
+        PRODUCT_FIELD_LIMITS.code,
+      ) as string
     }
     if (typeof input.pinyinAbbr === 'string') {
-      product.pinyinAbbr = input.pinyinAbbr.trim()
+      normalizedInput.pinyinAbbr = (this.readLimitedText(
+        input.pinyinAbbr,
+        '拼音首字母',
+        PRODUCT_FIELD_LIMITS.pinyinAbbr,
+      ) ?? '')
+    }
+    if (typeof input.thumbnail === 'string' || input.thumbnail === null) {
+      normalizedInput.thumbnail = this.readLimitedText(
+        input.thumbnail,
+        '商品缩略图地址',
+        PRODUCT_FIELD_LIMITS.thumbnail,
+        { allowNull: true },
+      )
+    }
+    if (typeof input.detailContent === 'string' || input.detailContent === null) {
+      normalizedInput.detailContent = this.readLimitedText(
+        input.detailContent,
+        '商品详情',
+        PRODUCT_FIELD_LIMITS.detailContent,
+        { allowNull: true },
+      )
+    }
+
+    const normalizedPrice = this.readOptionalPrice(input.defaultPrice, '默认单价')
+    if (normalizedPrice !== undefined) {
+      normalizedInput.defaultPrice = Number(normalizedPrice)
+    }
+
+    const normalizedLimitPerUser = this.readOptionalInteger(
+      input.limitPerUser,
+      '单人限购数量',
+      1,
+      PRODUCT_FIELD_LIMITS.maxLimitPerUser,
+    )
+    if (normalizedLimitPerUser !== undefined) {
+      normalizedInput.limitPerUser = normalizedLimitPerUser
+    }
+
+    const normalizedCurrentStock = this.readOptionalInteger(
+      input.currentStock,
+      '物理库存',
+      0,
+      PRODUCT_FIELD_LIMITS.maxStock,
+    )
+    const normalizedPreOrderedStock = this.readOptionalInteger(
+      input.preOrderedStock,
+      '预订库存',
+      0,
+      PRODUCT_FIELD_LIMITS.maxStock,
+    )
+    if (normalizedCurrentStock !== undefined) {
+      normalizedInput.currentStock = normalizedCurrentStock
+    }
+    if (normalizedPreOrderedStock !== undefined) {
+      normalizedInput.preOrderedStock = normalizedPreOrderedStock
+    }
+    this.assertStockRelation(normalizedInput.currentStock ?? 0, normalizedInput.preOrderedStock ?? 0)
+    return normalizedInput
+  }
+
+  private applyUpdateInputToProduct(product: BaseProduct, input: UpdateProductInput): void {
+    if (typeof input.productCode === 'string') {
+      const normalizedProductCode = this.readLimitedText(
+        input.productCode,
+        '产品编码',
+        PRODUCT_FIELD_LIMITS.code,
+        { required: true },
+      )
+      product.productCode = normalizedProductCode as string
+    }
+    if (typeof input.productName === 'string') {
+      product.productName = this.readLimitedText(
+        input.productName,
+        '产品名称',
+        PRODUCT_FIELD_LIMITS.name,
+        { required: true },
+      ) as string
+    }
+    if (typeof input.pinyinAbbr === 'string') {
+      product.pinyinAbbr = (this.readLimitedText(
+        input.pinyinAbbr,
+        '拼音首字母',
+        PRODUCT_FIELD_LIMITS.pinyinAbbr,
+      ) ?? '')
     }
     if (typeof input.defaultPrice === 'number') {
-      product.defaultPrice = normalizeDecimalText(input.defaultPrice)
+      product.defaultPrice = this.readOptionalPrice(input.defaultPrice, '默认单价') as string
     }
     if (typeof input.isActive === 'boolean') {
       product.isActive = input.isActive
@@ -485,23 +663,49 @@ export class ProductService {
 
   private applyContentUpdate(product: BaseProduct, input: UpdateProductInput): void {
     if (typeof input.thumbnail === 'string' || input.thumbnail === null) {
-      product.thumbnail = typeof input.thumbnail === 'string' ? input.thumbnail.trim() || null : null
+      product.thumbnail = this.readLimitedText(
+        input.thumbnail,
+        '商品缩略图地址',
+        PRODUCT_FIELD_LIMITS.thumbnail,
+        { allowNull: true },
+      ) ?? null
     }
     if (typeof input.detailContent === 'string' || input.detailContent === null) {
-      product.detailContent = typeof input.detailContent === 'string' ? input.detailContent.trim() || null : null
+      product.detailContent = this.readLimitedText(
+        input.detailContent,
+        '商品详情',
+        PRODUCT_FIELD_LIMITS.detailContent,
+        { allowNull: true },
+      ) ?? null
     }
   }
 
   private applyStockAndLimitUpdate(product: BaseProduct, input: UpdateProductInput): void {
     if (typeof input.limitPerUser === 'number') {
-      product.limitPerUser = Math.max(1, Math.floor(input.limitPerUser))
+      product.limitPerUser = this.readOptionalInteger(
+        input.limitPerUser,
+        '单人限购数量',
+        1,
+        PRODUCT_FIELD_LIMITS.maxLimitPerUser,
+      ) as number
     }
     if (typeof input.currentStock === 'number') {
-      product.currentStock = Math.max(0, Math.floor(input.currentStock))
+      product.currentStock = this.readOptionalInteger(
+        input.currentStock,
+        '物理库存',
+        0,
+        PRODUCT_FIELD_LIMITS.maxStock,
+      ) as number
     }
     if (typeof input.preOrderedStock === 'number') {
-      product.preOrderedStock = Math.max(0, Math.floor(input.preOrderedStock))
+      product.preOrderedStock = this.readOptionalInteger(
+        input.preOrderedStock,
+        '预订库存',
+        0,
+        PRODUCT_FIELD_LIMITS.maxStock,
+      ) as number
     }
+    this.assertStockRelation(product.currentStock, product.preOrderedStock)
   }
 
   private buildProductEntityForCreate(
@@ -510,18 +714,24 @@ export class ProductService {
     productCode: string,
   ): BaseProduct {
     const isActive = input.isActive ?? true
-    return repo.create({
+    const normalizedProductCode = this.readLimitedText(
       productCode,
-      productName: input.productName.trim(),
-      pinyinAbbr: input.pinyinAbbr?.trim() || '',
-      defaultPrice: normalizeDecimalText(input.defaultPrice),
+      '产品编码',
+      PRODUCT_FIELD_LIMITS.code,
+      { required: true },
+    ) as string
+    return repo.create({
+      productCode: normalizedProductCode,
+      productName: input.productName,
+      pinyinAbbr: input.pinyinAbbr ?? '',
+      defaultPrice: this.readOptionalPrice(input.defaultPrice, '默认单价') ?? '0.00',
       isActive,
       o2oStatus: resolveEffectiveO2oStatus(isActive, input.o2oStatus),
-      thumbnail: input.thumbnail?.trim() || null,
-      detailContent: input.detailContent?.trim() || null,
-      limitPerUser: Number.isInteger(input.limitPerUser) ? Math.max(1, input.limitPerUser as number) : 5,
-      currentStock: Number.isInteger(input.currentStock) ? Math.max(0, input.currentStock as number) : 0,
-      preOrderedStock: Number.isInteger(input.preOrderedStock) ? Math.max(0, input.preOrderedStock as number) : 0,
+      thumbnail: input.thumbnail ?? null,
+      detailContent: input.detailContent ?? null,
+      limitPerUser: input.limitPerUser ?? 5,
+      currentStock: input.currentStock ?? 0,
+      preOrderedStock: input.preOrderedStock ?? 0,
     })
   }
 

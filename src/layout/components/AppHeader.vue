@@ -10,6 +10,7 @@ import { ArrowDown, Lock, Menu, SwitchButton } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { computed, reactive, ref, useAttrs } from 'vue'
+import { BizCrudDialogShell } from '@/components/common'
 import QuoteBanner from '@/layout/components/QuoteBanner.vue'
 import { changePassword, ROLE_LABEL_MAP } from '@/api/modules/auth'
 import { useAppStore, useAuthStore } from '@/store'
@@ -245,15 +246,21 @@ const handleLogout = async () => {
     </div>
   </header>
 
-  <el-dialog
+  <!-- 顶栏改密弹窗改为共享 CRUD 壳：
+   - 顶栏属于全局高频入口，统一用共享弹层避免再次出现页面级原生弹窗分叉；
+   - 该表单内容较短，使用 auto 模式让桌面端白卡按内容自然收口。
+  -->
+  <BizCrudDialogShell
     v-model="passwordDialogVisible"
     title="修改密码"
-    width="420px"
-    destroy-on-close
-    append-to-body
-    :modal-append-to-body="true"
-    :lock-scroll="true"
+    height-mode="auto"
+    phone-width="94%"
+    tablet-width="440px"
+    desktop-width="420px"
+    :confirm-loading="passwordSubmitting"
+    confirm-text="确认修改"
     @closed="resetPasswordForm"
+    @confirm="handleChangePassword"
   >
     <div class="mb-4 rounded-2xl bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-500 dark:bg-white/5 dark:text-slate-400">
       修改成功后，当前账号已有登录会话会立即失效，需要使用新密码重新登录系统。
@@ -288,11 +295,5 @@ const handleLogout = async () => {
         />
       </el-form-item>
     </el-form>
-    <template #footer>
-      <div class="flex items-center justify-end gap-3">
-        <el-button @click="passwordDialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="passwordSubmitting" @click="handleChangePassword">确认修改</el-button>
-      </div>
-    </template>
-  </el-dialog>
+  </BizCrudDialogShell>
 </template>

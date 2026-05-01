@@ -56,16 +56,14 @@ function verifyFrontendSources() {
   const productManagerSource = fs.readFileSync(productManagerFile, 'utf8')
   const productRouteSource = fs.readFileSync(productRouteFile, 'utf8')
 
-  assert.doesNotMatch(orderEntrySource, /AUTO-\$\{/)
-  assert.doesNotMatch(orderEntrySource, /createAutoProductCode/)
   assert.match(orderEntrySource, /productApi\.createProduct\(\{/)
-  assert.doesNotMatch(orderEntrySource, /productCode:\s*/)
+  assert.match(orderEntrySource, /productCode:\s*`Auto-\$\{globalThis\.crypto\.randomUUID\(\)\.slice\(0,\s*8\)\}`/)
 
   assert.match(productManagerSource, /getProductDetail\(row\.id\)/)
   assert.match(productManagerSource, /batchUpdateProducts/)
   assert.match(productManagerSource, /留空则自动生成统一编码/)
   assert.match(productRouteSource, /productRouter\.post\(\s*'\/batch'/)
-  pass('前端已接入统一编码生成、编辑详情回填与批量改状态入口')
+  pass('前端已接入快捷创建商品、编辑详情回填与批量改状态入口')
 }
 
 async function main() {
@@ -107,6 +105,16 @@ async function main() {
     assert.equal(batchUpdatedProducts.every((item) => item.isActive === false), true)
     assert.equal((await productService.detail(firstProduct.id)).isActive, false)
     pass('批量改状态可同时回写产品真实启停状态')
+
+    await assert.rejects(
+      () =>
+        productService.update(firstProduct.id, {
+          currentStock: 1,
+          preOrderedStock: 2,
+        }),
+      /预订库存不能超过物理库存/,
+    )
+    pass('商品服务会阻断预订库存大于物理库存的非法更新')
 
     await productService.update(firstProduct.id, {
       isActive: true,
@@ -154,6 +162,32 @@ async function main() {
       mockActor,
     )
 
+    await assert.rejects(
+      () =>
+        orderService.submit(
+          {
+            idempotencyKey: `task345-duplicate-${Date.now()}`,
+            orderType: 'walkin',
+            customerName: 'Task345重复产品客户',
+            items: [
+              {
+                productId: firstProduct.id,
+                qty: 1,
+                unitPrice: 9.9,
+              },
+              {
+                productId: firstProduct.id,
+                qty: 2,
+                unitPrice: 9.9,
+              },
+            ],
+          },
+          mockActor,
+        ),
+      /重复/,
+    )
+    pass('订单服务会阻断同一产品重复出现在多条明细中的脏单据')
+
     const productAfterSubmit = await productService.detail(firstProduct.id)
     const orderDetail = await orderService.detailById(submitResult.order.id)
     assert.equal(productAfterSubmit.defaultPrice, '18.80')
@@ -174,7 +208,7 @@ async function main() {
     assert.equal(Number(productDrilldown.totalQty) > 0, true)
 
     const customerDrilldown = await dashboardService.getCustomerRankDrilldown({
-      customerName: 'Task345客户',
+      customerName: '散客',
       startDate: todayText,
       endDate: todayText,
       orderType: 'walkin',

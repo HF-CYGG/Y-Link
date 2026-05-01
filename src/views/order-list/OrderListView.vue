@@ -21,10 +21,9 @@ import {
   PagePaginationBar,
   PageToolbarCard,
 } from '@/components/common'
-import { useAuthStore } from '@/store'
+import { usePermissionAction } from '@/composables/usePermissionAction'
 import { extractErrorMessage } from '@/utils/error'
 import { exportVoucherPdf } from '@/utils/pdf/export-voucher-pdf'
-import { showPermissionDenied } from '@/utils/permission'
 import OrderDetailDrawerContent from './components/OrderDetailDrawerContent.vue'
 import OrderVoucherTemplate from './components/OrderVoucherTemplate.vue'
 import { useOrderListView } from './composables/useOrderListView'
@@ -151,7 +150,7 @@ const {
   handleDeleteOrderWithConfirm,
   handleRestoreOrderWithConfirm,
 } = useOrderListView()
-const authStore = useAuthStore()
+const { hasPermission, ensurePermission } = usePermissionAction()
 
 const voucherDialogVisible = ref(false)
 const voucherPrintRootRef = ref<HTMLElement | null>(null)
@@ -161,7 +160,7 @@ const voucherEditableForm = reactive<OrderVoucherEditableFields>(createEmptyVouc
 const voucherOrientation = ref<VoucherOrientation>('landscape')
 const voucherOrientationLabel = computed(() => (voucherOrientation.value === 'landscape' ? '横版' : '竖版'))
 const canUseOrderVoucher = computed(() => currentOrder.value?.orderType === 'department')
-const canEditComplianceFlags = computed(() => authStore.hasPermission('orders:update'))
+const canEditComplianceFlags = computed(() => hasPermission('orders:update'))
 const complianceSaving = ref(false)
 const complianceForm = ref({
   hasCustomerOrder: false,
@@ -233,8 +232,10 @@ const handleSaveComplianceFlags = async () => {
   if (!currentOrder.value) {
     return
   }
-  if (!canEditComplianceFlags.value) {
-    showPermissionDenied()
+  // 状态编辑属于高频越权入口，统一收口到共享权限动作工具：
+  // - 保持按钮显隐与点击后二次拦截一致；
+  // - 避免订单页继续维护散点 showPermissionDenied 调用。
+  if (!ensurePermission('orders:update', '合规状态编辑')) {
     return
   }
   if (currentOrder.value.orderType !== 'department') {
@@ -1033,10 +1034,17 @@ const handleExportVoucherPdf = async () => {
   border-radius: 20px;
   overflow: hidden;
   max-width: calc(100vw - 24px);
+  max-height: calc(100dvh - 24px);
+  display: flex;
+  flex-direction: column;
 }
 
 .order-voucher-dialog :deep(.el-dialog__body) {
   padding-top: 10px;
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .order-voucher-print-scope {
@@ -1071,6 +1079,8 @@ const handleExportVoucherPdf = async () => {
   grid-template-columns: minmax(300px, 340px) minmax(0, 1fr);
   gap: 14px;
   align-items: start;
+  flex: 1;
+  min-height: 0;
 }
 
 .voucher-editor-panel,
@@ -1159,6 +1169,9 @@ const handleExportVoucherPdf = async () => {
 .voucher-preview-panel {
   min-width: 0;
   overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .voucher-preview-panel__header {
@@ -1168,7 +1181,8 @@ const handleExportVoucherPdf = async () => {
 }
 
 .voucher-preview-panel__body {
-  max-height: calc(100vh - 260px);
+  flex: 1;
+  min-height: 0;
   overflow: auto;
   padding: 14px;
   background: #f8fafc;

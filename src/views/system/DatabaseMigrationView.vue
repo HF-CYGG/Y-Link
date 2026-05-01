@@ -29,8 +29,8 @@ import {
   type SQLiteToMySqlPrecheckResult,
   type SQLiteToMySqlTaskRecord,
 } from '@/api/modules/data-maintenance'
+import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
-import { useAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
 import {
   DATABASE_MIGRATION_ASSISTANT_NAME,
@@ -64,7 +64,7 @@ type MigrationFormState = {
  */
 type MigrationStepKey = 'precheck' | 'create' | 'run' | 'switch'
 
-const authStore = useAuthStore()
+const { hasPermission, ensurePermission } = usePermissionAction()
 const overviewRequest = useStableRequest()
 const taskDetailRequest = useStableRequest()
 
@@ -115,9 +115,9 @@ const selectedTaskId = ref('')
  * - 查看权限用于控制整页展示；
  * - 更新权限控制预检之外的高风险动作按钮。
  */
-const canViewMigration = computed(() => authStore.hasPermission('system_configs:view'))
-// 与后端门禁保持一致：迁移类高危写操作仅允许管理员执行。
-const canOperateMigration = computed(() => authStore.isAdmin && authStore.hasPermission('system_configs:update'))
+const canViewMigration = computed(() => hasPermission('db_migration:view'))
+// 与后端权限点口径保持一致：迁移类高危写操作统一收口到 db_migration:operate。
+const canOperateMigration = computed(() => hasPermission('db_migration:operate'))
 
 /**
  * 当前选中的迁移任务：
@@ -604,8 +604,7 @@ const handlePrecheck = async () => {
  * - 若预检已有阻断错误，则先拦截，避免把明显无法执行的任务落盘。
  */
 const handleCreateTask = async () => {
-  if (!canOperateMigration.value) {
-    ElMessage.warning('当前账号暂无数据库迁移操作权限')
+  if (!ensurePermission('db_migration:operate', '数据库迁移操作')) {
     return
   }
   if (!validateTargetForm()) {
@@ -637,8 +636,7 @@ const handleCreateTask = async () => {
  * - 成功后刷新任务列表与运行时覆盖状态。
  */
 const handleRunTask = async (task: SQLiteToMySqlTaskRecord) => {
-  if (!canOperateMigration.value) {
-    ElMessage.warning('当前账号暂无数据库迁移操作权限')
+  if (!ensurePermission('db_migration:operate', '数据库迁移操作')) {
     return
   }
   if (task.readState === 'corrupted') {
@@ -683,8 +681,7 @@ const handleRunTask = async (task: SQLiteToMySqlTaskRecord) => {
  * - 返回后会提示“需重启后端服务”这一关键动作。
  */
 const handleSwitchToTask = async (task: SQLiteToMySqlTaskRecord) => {
-  if (!canOperateMigration.value) {
-    ElMessage.warning('当前账号暂无数据库迁移操作权限')
+  if (!ensurePermission('db_migration:operate', '数据库迁移操作')) {
     return
   }
   if (task.status !== 'succeeded') {
@@ -733,8 +730,7 @@ const handleSwitchToTask = async (task: SQLiteToMySqlTaskRecord) => {
  * - 若无选中任务，后端会使用当前覆盖配置中的 rollbackConfig 或默认 SQLite 路径。
  */
 const handleRollbackToSqlite = async () => {
-  if (!canOperateMigration.value) {
-    ElMessage.warning('当前账号暂无数据库迁移操作权限')
+  if (!ensurePermission('db_migration:operate', '数据库迁移操作')) {
     return
   }
 
@@ -779,8 +775,7 @@ const handleRollbackToSqlite = async () => {
  * - 页面会同步提醒管理员，仍需重启后端服务。
  */
 const handleClearRuntimeOverride = async () => {
-  if (!canOperateMigration.value) {
-    ElMessage.warning('当前账号暂无数据库迁移操作权限')
+  if (!ensurePermission('db_migration:operate', '数据库迁移操作')) {
     return
   }
 

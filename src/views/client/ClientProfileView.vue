@@ -11,6 +11,7 @@
 import { computed, onMounted, reactive, ref, toRaw } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
+import { BizCrudDialogShell } from '@/components/common'
 import { useClientAuthStore } from '@/store'
 import { redirectToClientLogin } from '@/utils/client-auth-navigation'
 import {
@@ -347,7 +348,21 @@ onMounted(() => {
       </div>
     </div>
 
-    <el-dialog v-model="passwordDialogVisible" title="修改密码" width="90%" style="max-width: 400px" append-to-body>
+    <!-- 共享弹窗壳承接轻量表单弹层：
+     - 改密与资料编辑都属于短内容 CRUD 场景，统一切到 auto 模式避免继续使用原生弹窗散点宽高配置；
+     - 后续若客户端个人中心还要补充更多资料项，可直接沿用同一接入方式。
+    -->
+    <BizCrudDialogShell
+      v-model="passwordDialogVisible"
+      title="修改密码"
+      height-mode="auto"
+      phone-width="94%"
+      tablet-width="420px"
+      desktop-width="400px"
+      :confirm-loading="submitting"
+      confirm-text="确认"
+      @confirm="submitChangePassword"
+    >
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top" @submit.prevent>
         <el-form-item label="原密码" prop="currentPassword">
           <el-input v-model="form.currentPassword" type="password" show-password placeholder="请输入原密码" />
@@ -365,15 +380,19 @@ onMounted(() => {
         </el-form-item>
         <p class="mt-1 text-xs leading-6 text-slate-500">{{ CLIENT_NEW_PASSWORD_RULE_HINT }}</p>
       </el-form>
-      <template #footer>
-        <div class="flex justify-end gap-3">
-          <el-button @click="passwordDialogVisible = false">取消</el-button>
-          <el-button type="primary" :loading="submitting" @click="submitChangePassword">确认</el-button>
-        </div>
-      </template>
-    </el-dialog>
+    </BizCrudDialogShell>
 
-    <el-dialog v-model="profileDialogVisible" title="编辑资料" width="90%" style="max-width: 420px" append-to-body>
+    <BizCrudDialogShell
+      v-model="profileDialogVisible"
+      title="编辑资料"
+      height-mode="auto"
+      phone-width="94%"
+      tablet-width="440px"
+      desktop-width="420px"
+      :confirm-loading="profileSubmitting"
+      confirm-text="保存"
+      @confirm="submitUpdateProfile"
+    >
       <el-form ref="profileFormRef" :model="profileForm" :rules="profileRules" label-position="top" @submit.prevent>
         <el-form-item label="用户名" prop="username">
           <el-input v-model="profileForm.username" placeholder="请输入用户名" />
@@ -408,12 +427,6 @@ onMounted(() => {
           />
         </el-form-item>
       </el-form>
-      <template #footer>
-        <div class="flex justify-end gap-3">
-          <el-button @click="profileDialogVisible = false">取消</el-button>
-          <el-button type="primary" :loading="profileSubmitting" @click="submitUpdateProfile">保存</el-button>
-        </div>
-      </template>
-    </el-dialog>
+    </BizCrudDialogShell>
   </section>
 </template>

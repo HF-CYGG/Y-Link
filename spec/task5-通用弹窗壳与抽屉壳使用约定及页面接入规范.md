@@ -144,6 +144,13 @@
 | `src/views/base-data/components/ProductManager.vue` | `BizCrudDialogShell` | `auto / scroll` | 单产品编辑已通过本体真实收紧核验，批量新增继续保持 `scroll` 长内容模式 |
 | `src/views/inbound/SupplierHistoryView.vue` | `BizResponsiveDrawerShell` | `scroll` | 已移除历史 `100vh` 差值写法，由共享抽屉壳承接主滚动 |
 | `src/views/order-list/OrderListView.vue` | `BizResponsiveDrawerShell` | `scroll` | 单据详情抽屉已接入共享壳，详情主滚动职责已收口 |
+| `src/layout/components/AppHeader.vue` | `BizCrudDialogShell` | `auto` | 顶栏修改密码弹窗已统一到管理端共享弹窗壳 |
+| `src/views/client/ClientProfileView.vue` | `BizCrudDialogShell` | `auto` | 客户端个人中心的修改密码与编辑资料已改为共享 CRUD 壳 |
+| `src/views/o2o/O2oVerifyConsoleView.vue` | `BizCrudDialogShell` | `auto / scroll` | 拒绝退货与现场改单已分别按短内容/长内容模式接入共享壳 |
+| `src/views/o2o/O2oProductMallManageView.vue` | `BizCrudDialogShell` | `auto` | 商品编辑弹窗已接入共享壳，图片预览改为 `el-image` 系统预览链路 |
+| `src/views/dashboard/components/TopProductDrilldownDrawer.vue` | `BizResponsiveDrawerShell` | `scroll` | 商品下钻抽屉已接入共享壳，内部主滚动已移除重复容器 |
+| `src/views/dashboard/components/TopCustomerDrilldownDrawer.vue` | `BizResponsiveDrawerShell` | `scroll` | 客户下钻抽屉已接入共享壳，滚动职责统一回收至壳层 |
+| `src/views/order-entry/components/OrderEntryItemsEditor.vue` | `BizResponsiveDrawerShell` | `scroll` | 移动端明细编辑已切换到共享抽屉壳 |
 
 ## 7. 剩余特殊场景台账
 
@@ -151,10 +158,6 @@
 
 | 页面/组件 | 当前实现 | 保留原生原因 | 当前风险或后续建议 |
 |---|---|---|---|
-| `src/layout/components/AppHeader.vue` | 原生 `el-dialog` 修改密码弹窗 | 位于布局头部，当前复用路径单一，迁移收益有限 | 仍属后台短内容弹窗，后续可直接切到 `BizCrudDialogShell + auto`，进一步统一管理端密码类弹窗 |
-| `src/views/client/ClientProfileView.vue` | 原生 `el-dialog` 修改密码/编辑资料 | 客户端弹层视觉语言与后台不同，当前更偏移动端品牌化卡片体验 | 需继续关注短内容空白感；若客户端后续出现更多同类弹窗，可抽客户端专用壳而不是直接复用后台壳 |
-| `src/views/o2o/O2oProductMallManageView.vue` | 原生 `el-dialog` 商品编辑/图片预览 | 编辑弹窗包含上传、预览图、状态区、详情文本，多块布局与客户端商城语义耦合较深 | 商品编辑弹窗具备共享潜力，后续可评估迁移到 `BizCrudDialogShell + scroll`；图片预览属于轻专用场景，可继续保留 |
-| `src/views/o2o/O2oVerifyConsoleView.vue` | 原生 `el-dialog` 退货拒绝/现场改单 | 当前核销台弹窗与扫码、订单重算逻辑紧耦合 | 拒绝退货弹窗偏短内容，可先行迁移；现场改单属于复杂长内容，需先梳理主滚动责任再迁移 |
 | `src/views/client/ClientOrderDetailView.vue` | 原生 `el-dialog` 修改订单/正式出库单/申请退货 | 客户端场景，且含工作台式预览与多块编辑内容 | `修改订单` 与 `申请退货` 可评估抽客户端专用壳；正式出库单预览继续作为专用工作台处理 |
 | `src/views/order-list/OrderListView.vue` | 原生 `el-dialog` 正式出库单工作台 | 内部为典型“编辑区 + 预览区 + 打印导出”舞台式结构 | 不建议直接替换为通用弹窗壳，应在专用工作台规范下继续治理双滚动 |
 
@@ -162,9 +165,7 @@
 
 | 页面/组件 | 当前实现 | 保留原生原因 | 当前风险或后续建议 |
 |---|---|---|---|
-| `src/views/dashboard/components/TopProductDrilldownDrawer.vue` | 原生 `el-drawer` | 仪表盘下钻体量较小，历史实现简单 | 当前抽屉体与内部表格区都可能形成滚动，后续应优先迁移到 `BizResponsiveDrawerShell` |
-| `src/views/dashboard/components/TopCustomerDrilldownDrawer.vue` | 原生 `el-drawer` | 与商品下钻抽屉同类，历史实现沿用同一模式 | 建议与商品下钻一起成对迁移，统一仪表盘下钻抽屉规范 |
-| `src/views/order-entry/components/OrderEntryItemsEditor.vue` | 原生 `el-drawer` | 仅服务订单录入页移动端明细编辑，属于组件内局部私有抽屉 | 暂可保留，但若后续出现第二个同类“移动端局部明细编辑抽屉”，应抽成共享壳或共享模式 |
+| 无 | - | 当前高频后台详情与移动端明细编辑抽屉已收敛至共享壳 | 后续新增抽屉页面默认直接接入 `BizResponsiveDrawerShell` |
 
 ### 7.3 已备案但应继续保留专用壳的特殊场景
 
@@ -177,17 +178,16 @@
 ## 8. Task5 后续接入优先级
 
 ### P0：低成本统一后台短内容弹窗
-- `src/layout/components/AppHeader.vue`
-- `src/views/o2o/O2oVerifyConsoleView.vue` 的“拒绝退货申请”弹窗
+- `src/views/client/ClientOrderDetailView.vue` 的短内容客户端弹窗
+- `src/views/order-list/OrderListView.vue` 正式出库单工作台的单一主滚动治理
 
 ### P1：统一仪表盘下钻抽屉
-- `src/views/dashboard/components/TopProductDrilldownDrawer.vue`
-- `src/views/dashboard/components/TopCustomerDrilldownDrawer.vue`
+- `src/components/common/page-shared/UnifiedScanDialog.vue`
+- `src/views/client/ClientOrderDetailView.vue` 正式出库单工作台
 
 ### P2：收口复杂长内容场景
-- `src/views/o2o/O2oProductMallManageView.vue`
-- `src/views/o2o/O2oVerifyConsoleView.vue` 的“现场改单”弹窗
 - `src/views/client/ClientOrderDetailView.vue` 的长内容客户端弹窗
+- `src/views/order-list/OrderListView.vue` 正式出库单工作台的 `dvh / flex` 高度口径继续收敛
 
 ### P3：整理专用工作台弹窗规范
 - `src/views/order-list/OrderListView.vue` 正式出库单

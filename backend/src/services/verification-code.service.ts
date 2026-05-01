@@ -9,6 +9,7 @@
 
 import { randomInt } from 'node:crypto'
 import { env } from '../config/env.js'
+import type { AuthUserContext } from '../types/auth.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { BizError } from '../utils/errors.js'
 import { normalizeClientVerificationTarget } from '../utils/client-auth-account.js'
@@ -18,6 +19,7 @@ import {
   type VerificationChannelType,
   type VerificationProviderConfigRecord,
 } from './system-config.service.js'
+import { auditService } from './audit.service.js'
 
 type VerificationScene = 'register' | 'forgot_password' | 'test'
 
@@ -35,6 +37,22 @@ const verificationTicketStore = new Map<string, VerificationCodeTicket>()
 const buildTicketKey = (channel: VerificationChannelType, target: string, scene: VerificationScene) => `${channel}:${scene}:${target}`
 
 export class VerificationCodeService {
+  /**
+   * 提炼测试发送审计摘要：
+   * - 审计日志仅保留通道、地址和模板是否配置等治理信息；
+   * - 不记录完整请求头/请求体模板，避免把敏感第三方凭证写入审计表。
+   */
+  private buildProviderAuditSummary(config: VerificationProviderConfigRecord) {
+    return {
+      enabled: config.enabled,
+      httpMethod: config.httpMethod,
+      apiUrl: config.apiUrl,
+      hasHeadersTemplate: Boolean(config.headersTemplate.trim()),
+      hasBodyTemplate: Boolean(config.bodyTemplate.trim()),
+      hasSuccessMatch: Boolean(config.successMatch.trim()),
+    }
+  }
+
   private buildCode() {
     return String(randomInt(100000, 1000000))
   }
@@ -119,7 +137,7 @@ export class VerificationCodeService {
     requestMeta?: RequestMeta
   }) {
     const normalizedTarget = normalizeClientVerificationTarget(input.channel, input.target)
-    const configs = await systemConfigService.getVerificationProviderConfigs()
+    const configs = await systemConfigService.getVerificationProviderConfigs({ maskSensitiveValues: false })
     const provider = configs[input.channel]
     const code = this.buildCode()
     await this.sendByProvider(provider, {
@@ -144,20 +162,55 @@ export class VerificationCodeService {
     channel: VerificationChannelType
     target: string
     config: VerificationProviderConfigInput
+    actor?: Pick<AuthUserContext, 'userId' | 'username' | 'displayName'> | null
     requestMeta?: RequestMeta
   }) {
     const normalizedTarget = normalizeClientVerificationTarget(input.channel, input.target)
     const code = this.buildCode()
-    await this.sendByProvider(this.normalizeProviderConfig(input.config), {
-      target: normalizedTarget,
-      code,
-      scene: 'test',
-      ip: input.requestMeta?.ipAddress?.trim() || '',
-    })
-    return {
-      channel: input.channel,
-      target: normalizedTarget,
-      code,
+    const resolvedConfig = await systemConfigService.resolveVerificationProviderConfigInput(input.channel, input.config)
+    const normalizedConfig = this.normalizeProviderConfig(resolvedConfig)
+    try {
+      await this.sendByProvider(normalizedConfig, {
+        target: normalizedTarget,
+        code,
+        scene: 'test',
+        ip: input.requestMeta?.ipAddress?.trim() || '',
+      })
+      await auditService.safeRecord({
+        actionType: 'system_config.test_verification_provider',
+        actionLabel: '测试验证码平台发送',
+        targetType: 'verification_provider',
+        targetCode: input.channel,
+        actor: input.actor,
+        requestMeta: input.requestMeta,
+        detail: {
+          channel: input.channel,
+          target: normalizedTarget,
+          provider: this.buildProviderAuditSummary(normalizedConfig),
+        },
+      })
+      return {
+        channel: input.channel,
+        target: normalizedTarget,
+        code,
+      }
+    } catch (error) {
+      await auditService.safeRecord({
+        actionType: 'system_config.test_verification_provider',
+        actionLabel: '测试验证码平台发送',
+        targetType: 'verification_provider',
+        targetCode: input.channel,
+        actor: input.actor,
+        requestMeta: input.requestMeta,
+        resultStatus: 'failed',
+        detail: {
+          channel: input.channel,
+          target: normalizedTarget,
+          provider: this.buildProviderAuditSummary(normalizedConfig),
+          errorMessage: error instanceof Error ? error.message : String(error),
+        },
+      })
+      throw error
     }
   }
 

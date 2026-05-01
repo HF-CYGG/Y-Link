@@ -13,6 +13,7 @@
     "spec:fix-order-product-tag-consistency:verify": "tsx scripts/fix-order-product-tag-consistency-verify.ts",
     "task1:verify": "tsx scripts/task1-verify.ts",
     "task2:verify": "tsx scripts/task2-verify.ts",
+    "task2:governance:verify": "tsx scripts/task2-governance-verify.ts",
     "task3:verify": "tsx scripts/task3-verify.ts",
     "task4:verify": "tsx scripts/task4-verify.ts",
     "task4:role-nav:verify": "tsx --tsconfig ../tsconfig.app.json scripts/task4-role-navigation-verify.ts",
