@@ -128,8 +128,8 @@ function canAccessManagementPath(path: string, user: RoleUser, chainMap: Map<str
  */
 function verifyMenuVisibility(role: UserRole, expectedVisiblePaths: string[]) {
   const user = createRoleUser(role)
-  const visiblePaths = flattenMenuPaths(buildAppMenuItems(user)).sort()
-  const expected = [...expectedVisiblePaths].sort()
+  const visiblePaths = flattenMenuPaths(buildAppMenuItems(user)).sort((left, right) => left.localeCompare(right))
+  const expected = [...expectedVisiblePaths].sort((left, right) => left.localeCompare(right))
   assert.deepEqual(visiblePaths, expected, `${role} 菜单可见性不符合预期`)
   pass(`${role} 菜单可见性符合预期`)
 }
@@ -165,9 +165,9 @@ function verifyAccessAndFallbackConsistency(chainMap: Map<string, AppRouteMeta[]
       const fallbackPath = resolveFirstAccessibleManagementPath(item.user)
       assert.ok(fallbackPath, `${item.scene} 未找到回退路径`)
       const menuPaths = flattenMenuPaths(buildAppMenuItems(item.user))
-      assert.equal(menuPaths.includes(fallbackPath as string), true, `${item.scene} 回退路径不在可见菜单内`)
+      assert.equal(menuPaths.includes(fallbackPath), true, `${item.scene} 回退路径不在可见菜单内`)
       assert.equal(
-        canAccessManagementPath(fallbackPath as string, item.user, chainMap),
+        canAccessManagementPath(fallbackPath, item.user, chainMap),
         true,
         `${item.scene} 回退路径本身不可访问`,
       )

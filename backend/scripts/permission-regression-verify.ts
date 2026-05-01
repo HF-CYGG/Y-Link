@@ -20,6 +20,7 @@ const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
 const sqlitePath = path.resolve(sqliteRoot, `permission-regression-${verifySeed}.sqlite`)
 const adminPassword = process.env.Y_LINK_VERIFY_ADMIN_PASSWORD?.trim() || `Admin_${verifySeed}_Zz9!`
 const operatorPassword = process.env.Y_LINK_VERIFY_OPERATOR_PASSWORD?.trim() || `Op_${verifySeed}_Aa1!`
+const forbiddenUserPassword = process.env.Y_LINK_VERIFY_FORBIDDEN_PASSWORD?.trim() || `Forbidden_${verifySeed}_Bb2!`
 
 process.env.APP_PROFILE = `permission-regression-${verifySeed}`
 process.env.DB_TYPE = 'sqlite'
@@ -207,7 +208,7 @@ async function main() {
           },
           body: JSON.stringify({
             username: `forbidden_user_${verifySeed}`,
-            password: 'Abcd@1234',
+            password: forbiddenUserPassword,
             displayName: '越权用户',
             role: 'operator',
             status: 'enabled',

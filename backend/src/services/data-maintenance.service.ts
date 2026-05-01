@@ -87,7 +87,7 @@ class DataMaintenanceService {
       [keyof typeof EXPORT_ENTITY_MAP, (typeof EXPORT_ENTITY_MAP)[keyof typeof EXPORT_ENTITY_MAP]]
     >) {
       const rows = await AppDataSource.getRepository(entity).find()
-      tables[key] = rows.map((item) => JSON.parse(JSON.stringify(item)))
+      tables[key] = rows.map((item) => structuredClone(item) as unknown as Record<string, unknown>)
     }
     return {
       exportedAt: new Date().toISOString(),
