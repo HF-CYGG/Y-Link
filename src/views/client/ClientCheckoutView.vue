@@ -19,6 +19,7 @@ import { ArrowLeft } from '@element-plus/icons-vue'
 import { submitO2oPreorder, type O2oClientOrderType } from '@/api/modules/o2o'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
 import { useClientAuthStore, useClientCartStore } from '@/store'
+import pinia from '@/store/pinia'
 import { normalizeRequestError } from '@/utils/error'
 
 const props = defineProps<{
@@ -30,8 +31,8 @@ const emit = defineEmits<{
 }>()
 
 const router = useRouter()
-const clientAuthStore = useClientAuthStore()
-const clientCartStore = useClientCartStore()
+const clientAuthStore = useClientAuthStore(pinia)
+const clientCartStore = useClientCartStore(pinia)
 const { runWithGate } = useIdempotentAction()
 
 const remark = ref('')

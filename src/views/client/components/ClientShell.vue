@@ -12,6 +12,7 @@
 import { computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useClientAuthStore } from '@/store'
+import pinia from '@/store/pinia'
 import { redirectToClientLogin } from '@/utils/client-auth-navigation'
 import { normalizeRequestError } from '@/utils/error'
 
@@ -22,7 +23,7 @@ interface Props {
 
 const props = defineProps<Props>()
 
-const clientAuthStore = useClientAuthStore()
+const clientAuthStore = useClientAuthStore(pinia)
 
 /**
  * 顶部展示名称：

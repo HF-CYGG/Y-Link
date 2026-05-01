@@ -31,6 +31,7 @@ import {
   type ClientAuthUserSnapshot,
 } from '@/utils/client-auth-storage'
 import { normalizeRequestError } from '@/utils/error'
+import pinia from '@/store/pinia'
 import { useClientOrderStore } from './client-order'
 
 /**
@@ -46,7 +47,7 @@ export const useClientAuthStore = defineStore('client-auth', () => {
   const initializing = ref(false)
 
   const clearClientScopedStores = () => {
-    const clientOrderStore = useClientOrderStore()
+    const clientOrderStore = useClientOrderStore(pinia)
     clientOrderStore.clearAll()
   }
 

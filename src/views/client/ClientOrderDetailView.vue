@@ -39,6 +39,7 @@ import {
   isO2oOrderVerified,
 } from '@/constants/o2o-order-status'
 import { useClientAuthStore, useClientOrderStore } from '@/store'
+import pinia from '@/store/pinia'
 import { normalizeRequestError } from '@/utils/error'
 import { exportVoucherPdf } from '@/utils/pdf/export-voucher-pdf'
 import ClientOrderEditDialog from '@/views/client/components/ClientOrderEditDialog.vue'
@@ -87,8 +88,8 @@ const voucherOrientation = ref<VoucherOrientation>(DEFAULT_VOUCHER_ORIENTATION)
 const enableHtml2pdfExport = import.meta.env.VITE_ORDER_VOUCHER_HTML2PDF_ENABLED !== 'false'
 const voucherEditableForm = reactive<OrderVoucherEditableFields>(createEmptyVoucherEditableFields())
 const { runLatest } = useStableRequest()
-const clientAuthStore = useClientAuthStore()
-const clientOrderStore = useClientOrderStore()
+const clientAuthStore = useClientAuthStore(pinia)
+const clientOrderStore = useClientOrderStore(pinia)
 clientOrderStore.initialize(clientAuthStore.currentUser?.id)
 
 const currentReportScenario = computed(() => {

@@ -15,10 +15,11 @@ import { ElMessageBox } from 'element-plus'
 import { useClientAuthStore, useClientCartStore } from '@/store'
 import { buildClientNavigationItems } from '@/router/routes'
 import { redirectToClientLogin } from '@/utils/client-auth-navigation'
+import pinia from '@/store/pinia'
 
 const route = useRoute()
-const clientAuthStore = useClientAuthStore()
-const clientCartStore = useClientCartStore()
+const clientAuthStore = useClientAuthStore(pinia)
+const clientCartStore = useClientCartStore(pinia)
 
 clientCartStore.initialize()
 const transitionName = ref<'slide-left' | 'slide-right'>('slide-left')

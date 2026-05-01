@@ -13,6 +13,7 @@ import { getClientAuthCapabilities, getClientCaptcha, type ClientAuthCapabilitie
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
 import { useClientAuthStore } from '@/store'
+import pinia from '@/store/pinia'
 import {
   CLIENT_CONFIRM_INPUT_MISMATCH_MESSAGE,
   CLIENT_CONFIRM_NEW_PASSWORD_PLACEHOLDER,
@@ -23,7 +24,7 @@ import {
 import { normalizeRequestError } from '@/utils/error'
 
 const router = useRouter()
-const clientAuthStore = useClientAuthStore()
+const clientAuthStore = useClientAuthStore(pinia)
 const { runLatest: runLatestCaptchaRequest, cancel: cancelCaptchaRequest } = useStableRequest()
 const { runLatest: runLatestCapabilityRequest, cancel: cancelCapabilityRequest } = useStableRequest()
 const { runWithGate } = useIdempotentAction()

@@ -15,6 +15,7 @@ import { getO2oMallProducts, type O2oMallProduct } from '@/api/modules/o2o'
 import { BaseRequestState } from '@/components/common'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useClientCartStore, useClientCatalogStore } from '@/store'
+import pinia from '@/store/pinia'
 import { normalizeRequestError } from '@/utils/error'
 import { useDevice } from '@/composables/useDevice'
 import { resolveProductPlaceholder } from '@/utils/product-placeholder'
@@ -28,8 +29,8 @@ interface ProductCategoryGroup {
   items: O2oMallProduct[]
 }
 
-const clientCartStore = useClientCartStore()
-const clientCatalogStore = useClientCatalogStore()
+const clientCartStore = useClientCartStore(pinia)
+const clientCatalogStore = useClientCatalogStore(pinia)
 const { runLatest } = useStableRequest()
 const { isPhone } = useDevice()
 const route = useRoute()

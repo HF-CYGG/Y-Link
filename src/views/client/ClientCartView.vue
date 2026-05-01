@@ -10,6 +10,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { useClientCartStore } from '@/store'
+import pinia from '@/store/pinia'
 
 const props = defineProps<{
   standalone?: boolean
@@ -21,7 +22,7 @@ const emit = defineEmits<{
 }>()
 
 const router = useRouter()
-const clientCartStore = useClientCartStore()
+const clientCartStore = useClientCartStore(pinia)
 
 onMounted(() => {
   clientCartStore.initialize()

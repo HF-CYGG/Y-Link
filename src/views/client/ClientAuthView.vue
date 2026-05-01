@@ -77,6 +77,7 @@ import {
 } from '@/api/modules/client-auth'
 import { preloadRouteComponents, resolveClientPostLoginWarmupTargets } from '@/router/route-performance'
 import { useClientAuthStore } from '@/store'
+import pinia from '@/store/pinia'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
 import {
@@ -99,7 +100,7 @@ interface ClientCaptchaState {
 
 const router = useRouter()
 const route = useRoute()
-const clientAuthStore = useClientAuthStore()
+const clientAuthStore = useClientAuthStore(pinia)
 const { runLatest: runLatestCaptchaRequest, cancel: cancelCaptchaRequest } = useStableRequest()
 const { runLatest: runLatestCapabilityRequest, cancel: cancelCapabilityRequest } = useStableRequest()
 const { runWithGate } = useIdempotentAction()

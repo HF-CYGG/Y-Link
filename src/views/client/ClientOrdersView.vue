@@ -25,6 +25,7 @@ import {
   O2O_ORDER_STATUS_TABS,
 } from '@/constants/o2o-order-status'
 import { useClientAuthStore, useClientOrderStore } from '@/store'
+import pinia from '@/store/pinia'
 import { normalizeRequestError } from '@/utils/error'
 
 const ORDER_TYPE_LABEL_MAP = {
@@ -57,8 +58,8 @@ const refreshing = ref(false)
 const loadingMore = ref(false)
 const recallingOrderId = ref('')
 const requestError = ref<{ type: 'offline' | 'error'; message: string } | null>(null)
-const clientAuthStore = useClientAuthStore()
-const clientOrderStore = useClientOrderStore()
+const clientAuthStore = useClientAuthStore(pinia)
+const clientOrderStore = useClientOrderStore(pinia)
 const { runLatest } = useStableRequest()
 clientOrderStore.initialize(clientAuthStore.currentUser?.id)
 
