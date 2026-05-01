@@ -11,6 +11,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { PageContainer } from '@/components/common'
+import { useAuthStore } from '@/store'
 import {
   getClientOrderStatusReportConfig,
   getO2oOrderBusinessStatusMeta,
@@ -24,6 +25,7 @@ import {
 import {
   getO2oConsoleOrderDetail,
   getO2oConsoleOrders,
+  updateO2oOrderComplianceFlags,
   updateO2oOrderBusinessStatus,
   updateO2oOrderMerchantMessage,
   type O2oPreorderDetail,
@@ -81,6 +83,7 @@ const orderHighlightExpiresAtMap = ref<Record<string, number>>({})
 const latestNewOrderNotice = ref<{ count: number; expiresAt: number } | null>(null)
 const orderSnapshotReady = ref(false)
 const router = useRouter()
+const authStore = useAuthStore()
 
 let autoRefreshTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let secondTickTimer: ReturnType<typeof globalThis.setInterval> | null = null
@@ -372,12 +375,32 @@ const businessStatusOptions = BUSINESS_STATUS_PICKER_ORDER.map((value) => {
 const activeBusinessStatus = computed(() => activeOrderDetail.value?.order.businessStatus ?? null)
 const draftBusinessStatus = ref<O2oOrderBusinessStatus | null>(null)
 const draftMerchantMessage = ref('')
-// 详情辅助面板折叠状态：默认空数组表示“商家特殊状态/商家留言”均收起，不占页面空间。
-const detailAssistPanels = ref<string[]>([])
+const complianceSaving = ref(false)
+const complianceForm = ref({
+  hasCustomerOrder: false,
+  isSystemApplied: false,
+})
+// 详情辅助面板折叠状态：
+// - 默认展开“合规状态确认”，保证工作台打开详情后即可看到关键合规开关；
+// - 其他辅助项按需展开，避免挤占主信息区域。
+const detailAssistPanels = ref<string[]>(['compliance-flags'])
+const canEditComplianceFlags = computed(() => authStore.hasPermission('orders:update'))
 
 const activeBusinessStatusMeta = computed(() => {
   return getO2oOrderBusinessStatusMeta(activeBusinessStatus.value)
 })
+
+watch(
+  () => activeOrderDetail.value?.order.id ?? '',
+  () => {
+    // 详细注释：切换订单时同步合规状态编辑表单，避免上一单的开关状态残留到下一单。
+    complianceForm.value = {
+      hasCustomerOrder: Boolean(activeOrderDetail.value?.order.hasCustomerOrder),
+      isSystemApplied: Boolean(activeOrderDetail.value?.order.isSystemApplied),
+    }
+  },
+  { immediate: true },
+)
 
 watch(
   () => activeOrderDetail.value?.order.businessStatus ?? null,
@@ -804,6 +827,30 @@ const handleSaveMerchantMessage = async () => {
   }
 }
 
+const handleSaveComplianceFlags = async () => {
+  if (!activeOrderDetail.value?.order.id) {
+    return
+  }
+  if (activeOrderDetail.value.order.clientOrderType !== 'department') {
+    ElMessage.info('散客单不适用该状态编辑')
+    return
+  }
+  complianceSaving.value = true
+  try {
+    const latestDetail = await updateO2oOrderComplianceFlags(activeOrderDetail.value.order.id, {
+      hasCustomerOrder: complianceForm.value.hasCustomerOrder,
+      isSystemApplied: complianceForm.value.isSystemApplied,
+    })
+    activeOrderDetail.value = latestDetail
+    mergeOrderSummaryFromDetail(latestDetail)
+    ElMessage.success('合规状态已更新')
+  } catch (error) {
+    ElMessage.error(error instanceof Error ? error.message : '合规状态更新失败，请稍后重试')
+  } finally {
+    complianceSaving.value = false
+  }
+}
+
 const scheduleAutoRefresh = () => {
   if (autoRefreshTimer !== null) {
     globalThis.clearInterval(autoRefreshTimer)
@@ -1007,6 +1054,63 @@ onBeforeUnmount(() => {
 
           <div class="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2">
             <el-collapse v-model="detailAssistPanels" class="order-detail-assist-collapse">
+              <el-collapse-item name="compliance-flags">
+                <template #title>
+                  <div class="flex min-w-0 flex-col py-2">
+                    <p class="text-sm font-semibold text-slate-900">合规状态确认</p>
+                    <p class="mt-1 text-xs leading-5 text-slate-500">
+                      仅部门单可编辑“是否有出库单”和“系统申请”状态。
+                    </p>
+                  </div>
+                </template>
+                <div class="pb-3">
+                  <div class="flex flex-wrap items-start justify-between gap-2">
+                    <div class="text-xs text-slate-500">用于门店现场确认并更新该订单合规状态。</div>
+                    <el-button
+                      v-if="canEditComplianceFlags && activeOrderDetail.order.clientOrderType === 'department'"
+                      size="small"
+                      type="primary"
+                      :loading="complianceSaving"
+                      @click="handleSaveComplianceFlags"
+                    >
+                      保存状态
+                    </el-button>
+                  </div>
+                  <div class="mt-3 grid gap-3 sm:grid-cols-2">
+                    <div class="rounded-xl border border-slate-100 bg-white px-3 py-3">
+                      <p class="text-xs text-slate-500">是否有出库单</p>
+                      <div class="mt-2">
+                        <el-switch
+                          v-if="canEditComplianceFlags && activeOrderDetail.order.clientOrderType === 'department'"
+                          v-model="complianceForm.hasCustomerOrder"
+                          inline-prompt
+                          active-text="是"
+                          inactive-text="否"
+                        />
+                        <span v-else class="text-sm font-medium text-slate-700">
+                          {{ activeOrderDetail.order.clientOrderType === 'department' ? (activeOrderDetail.order.hasCustomerOrder ? '是' : '否') : '不适用' }}
+                        </span>
+                      </div>
+                    </div>
+                    <div class="rounded-xl border border-slate-100 bg-white px-3 py-3">
+                      <p class="text-xs text-slate-500">系统申请</p>
+                      <div class="mt-2">
+                        <el-switch
+                          v-if="canEditComplianceFlags && activeOrderDetail.order.clientOrderType === 'department'"
+                          v-model="complianceForm.isSystemApplied"
+                          inline-prompt
+                          active-text="已申请"
+                          inactive-text="未申请"
+                        />
+                        <span v-else class="text-sm font-medium text-slate-700">
+                          {{ activeOrderDetail.order.clientOrderType === 'department' ? (activeOrderDetail.order.isSystemApplied ? '已申请' : '未申请') : '不适用' }}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </el-collapse-item>
+
               <el-collapse-item name="business-status">
                 <template #title>
                   <div class="flex min-w-0 flex-col py-2">
