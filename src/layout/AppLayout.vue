@@ -13,6 +13,7 @@ import AppSidebar from '@/layout/components/AppSidebar.vue'
 import { useDevice } from '@/composables/useDevice'
 import { buildAppMenuItems } from '@/router/routes'
 import { useAppStore, useAuthStore } from '@/store'
+import pinia from '@/store/pinia'
 
 /**
  * 初始化设备监听：
@@ -26,8 +27,8 @@ useDevice()
  * - appStore 负责页面级加载条与布局间距；
  * - authStore 负责根据当前角色派生菜单与登录过渡蒙层。
  */
-const appStore = useAppStore()
-const authStore = useAuthStore()
+const appStore = useAppStore(pinia)
+const authStore = useAuthStore(pinia)
 const route = useRoute()
 
 /**

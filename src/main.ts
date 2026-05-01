@@ -8,7 +8,6 @@
  */
 
 import { createApp } from 'vue'
-import { createPinia } from 'pinia'
 import { ElLoadingDirective } from 'element-plus'
 import dayjs from 'dayjs'
 import 'dayjs/locale/zh-cn'
@@ -18,10 +17,10 @@ import App from './App.vue'
 import router from '@/router'
 import { elementPlusIconWhitelist } from '@/icons/element-plus'
 import { useThemeStore } from '@/store'
+import pinia from '@/store/pinia'
 
 // 创建应用实例，作为全局能力挂载入口。
 const app = createApp(App)
-const pinia = createPinia()
 
 // 统一日期/时间中文化，避免日期面板出现英文月份与星期。
 dayjs.locale('zh-cn')

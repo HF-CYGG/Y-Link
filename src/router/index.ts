@@ -10,6 +10,7 @@ import { useAuthStore, useClientAuthStore } from '@/store'
 import { canAccessRoute, resolveFirstAccessibleManagementPath, routes } from '@/router/routes'
 import type { UserSafeProfile } from '@/api/modules/auth'
 import { showPermissionDenied } from '@/utils/permission'
+import pinia from '@/store/pinia'
 
 export const resolveDefaultManagementRedirect = (user?: Pick<UserSafeProfile, 'role'> | null) => {
   return user?.role === 'supplier' ? '/supplier-delivery' : '/dashboard'
@@ -67,8 +68,8 @@ const router = createRouter({
  * - 负责未登录拦截、登录页回跳与权限点路由校验。
  */
 router.beforeEach(async (to) => {
-  const authStore = useAuthStore()
-  const clientAuthStore = useClientAuthStore()
+  const authStore = useAuthStore(pinia)
+  const clientAuthStore = useClientAuthStore(pinia)
 
   if (!authStore.initialized) {
     await authStore.initializeAuth()
@@ -129,8 +130,8 @@ router.beforeEach(async (to) => {
 })
 
 router.afterEach((to) => {
-  const authStore = useAuthStore()
-  const clientAuthStore = useClientAuthStore()
+  const authStore = useAuthStore(pinia)
+  const clientAuthStore = useClientAuthStore(pinia)
   const metaTitle = typeof to.meta.title === 'string' ? to.meta.title : ''
   const title = metaTitle ? `Y-Link · ${metaTitle}` : 'Y-Link'
   document.title = title
