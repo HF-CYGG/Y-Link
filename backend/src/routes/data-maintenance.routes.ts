@@ -6,7 +6,7 @@
 
 import { Router } from 'express'
 import { z } from 'zod'
-import { requirePermission } from '../middleware/auth.middleware.js'
+import { requirePermission, requireRole } from '../middleware/auth.middleware.js'
 import { databaseMigrationService } from '../services/database-migration.service.js'
 import { dataMaintenanceService } from '../services/data-maintenance.service.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
@@ -75,8 +75,10 @@ export const dataMaintenanceRouter = Router()
 dataMaintenanceRouter.post(
   '/backup/sqlite',
   requirePermission('system_configs:update'),
-  asyncHandler(async (_req, res) => {
-    const data = await dataMaintenanceService.createSqliteBackup()
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const data = await dataMaintenanceService.createSqliteBackup(authReq.auth, extractRequestMeta(req))
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -93,9 +95,11 @@ dataMaintenanceRouter.get(
 dataMaintenanceRouter.post(
   '/import/json',
   requirePermission('system_configs:update'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
     const payload = importPayloadSchema.parse(req.body)
-    const data = await dataMaintenanceService.importJson(payload as any)
+    const data = await dataMaintenanceService.importJson(payload as any, authReq.auth, extractRequestMeta(req))
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -131,6 +135,7 @@ dataMaintenanceRouter.get(
 dataMaintenanceRouter.post(
   '/db-migration/tasks',
   requirePermission('system_configs:update'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = createSqliteToMysqlTaskSchema.parse(req.body)
@@ -146,6 +151,7 @@ dataMaintenanceRouter.post(
 dataMaintenanceRouter.post(
   '/db-migration/tasks/:taskId/run',
   requirePermission('system_configs:update'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const data = await databaseMigrationService.runSQLiteToMySqlTask(
@@ -169,6 +175,7 @@ dataMaintenanceRouter.get(
 dataMaintenanceRouter.post(
   '/db-migration/switch',
   requirePermission('system_configs:update'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = applyDatabaseSwitchSchema.parse(req.body)
@@ -180,6 +187,7 @@ dataMaintenanceRouter.post(
 dataMaintenanceRouter.post(
   '/db-migration/rollback',
   requirePermission('system_configs:update'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = rollbackDatabaseSwitchSchema.parse(req.body)
@@ -191,6 +199,7 @@ dataMaintenanceRouter.post(
 dataMaintenanceRouter.delete(
   '/db-migration/runtime-override',
   requirePermission('system_configs:update'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const data = await databaseMigrationService.clearRuntimeOverride(authReq.auth, extractRequestMeta(req))

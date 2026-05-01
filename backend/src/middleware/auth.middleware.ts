@@ -6,9 +6,43 @@
 
 import type { NextFunction, Request, Response } from 'express'
 import type { PermissionCode } from '../constants/auth-permissions.js'
+import { auditService } from '../services/audit.service.js'
 import type { AuthenticatedRequest, UserRole } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
+import { extractRequestMeta } from '../utils/request-meta.js'
 import { authService } from '../services/auth.service.js'
+
+const FORBIDDEN_MESSAGE = '当前账号无权执行该操作'
+
+/**
+ * 统一记录越权访问审计：
+ * - 由权限中间件在拦截时写入失败审计，覆盖“角色不匹配”和“权限点缺失”两类场景；
+ * - 采用 safeRecord 保证即使审计写入失败也不会影响主流程响应。
+ */
+function recordForbiddenAudit(req: Request, reason: string, requiredRules: Record<string, unknown>) {
+  const auth = (req as AuthenticatedRequest).auth
+  void auditService.safeRecord({
+    actionType: 'security.access_denied',
+    actionLabel: '接口越权访问拦截',
+    targetType: 'api_route',
+    targetCode: `${req.method.toUpperCase()} ${req.originalUrl || req.url}`,
+    actor: auth
+      ? {
+          userId: auth.userId,
+          username: auth.username,
+          displayName: auth.displayName,
+        }
+      : null,
+    requestMeta: extractRequestMeta(req),
+    resultStatus: 'failed',
+    detail: {
+      reason,
+      requiredRules,
+      actorRole: auth?.role ?? null,
+      actorPermissions: auth?.permissions ?? [],
+    },
+  })
+}
 
 function parseBearerToken(req: Request): string | null {
   const authorization = req.headers.authorization
@@ -58,7 +92,8 @@ export function requireRole(...roles: UserRole[]) {
     }
 
     if (!roles.includes(auth.role)) {
-      next(new BizError('当前账号无权访问该接口', 403))
+      recordForbiddenAudit(req, 'role_mismatch', { requiredRoles: roles })
+      next(new BizError(FORBIDDEN_MESSAGE, 403))
       return
     }
 
@@ -81,7 +116,11 @@ export function requirePermission(...permissions: PermissionCode[]) {
 
     const missingPermissions = permissions.filter((permission) => !auth.permissions.includes(permission))
     if (missingPermissions.length > 0) {
-      next(new BizError('当前账号无权访问该接口', 403))
+      recordForbiddenAudit(req, 'permission_missing', {
+        requiredPermissions: permissions,
+        missingPermissions,
+      })
+      next(new BizError(FORBIDDEN_MESSAGE, 403))
       return
     }
 

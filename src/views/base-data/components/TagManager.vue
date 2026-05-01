@@ -18,9 +18,13 @@ import {
 } from '@/components/common'
 import { useCrudManager } from '@/composables/useCrudManager'
 import { useStableRequest } from '@/composables/useStableRequest'
+import { useAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
+import { showPermissionDenied } from '@/utils/permission'
 
 const formRef = ref<FormInstance>()
+const authStore = useAuthStore()
+const canManageTags = computed(() => authStore.currentUser?.role === 'admin' && authStore.hasPermission('tags:manage'))
 const pageReady = ref(false)
 const keepAliveActivated = ref(false)
 const aggregateLoading = ref(false)
@@ -224,6 +228,38 @@ const handleAggregateReset = () => {
   handleAggregateSearch().catch(() => undefined)
 }
 
+const handleAddTag = () => {
+  if (!canManageTags.value) {
+    showPermissionDenied()
+    return
+  }
+  handleAdd()
+}
+
+const handleEditTag = (row: Tag) => {
+  if (!canManageTags.value) {
+    showPermissionDenied()
+    return
+  }
+  handleEdit(row)
+}
+
+const handleDeleteTag = async (row: Tag) => {
+  if (!canManageTags.value) {
+    showPermissionDenied()
+    return
+  }
+  await handleDelete(row)
+}
+
+const handleSubmitTag = async () => {
+  if (!canManageTags.value) {
+    showPermissionDenied()
+    return
+  }
+  await handleSubmit()
+}
+
 onMounted(() => {
   pageReady.value = true
   refreshTagView().then(() => handleAggregateSearch()).catch(() => undefined)
@@ -251,7 +287,8 @@ onActivated(() => {
       </template>
 
       <template #actions="{ isPhone }">
-        <el-button :class="isPhone ? 'flex-1' : ''" type="primary" icon="Plus" @click="handleAdd">新增标签</el-button>
+        <el-tag v-if="!canManageTags" type="info">当前为只读模式</el-tag>
+        <el-button v-if="canManageTags" :class="isPhone ? 'flex-1' : ''" type="primary" icon="Plus" @click="handleAddTag">新增标签</el-button>
         <el-button :class="isPhone ? 'flex-1' : ''" icon="Refresh" @click="refreshTagView">刷新列表</el-button>
       </template>
     </PageToolbarCard>
@@ -331,10 +368,10 @@ onActivated(() => {
               </template>
             </el-table-column>
             <el-table-column label="颜色编码" prop="tagCode" min-width="220" show-overflow-tooltip />
-            <el-table-column label="操作" width="160" fixed="right" align="right">
+            <el-table-column v-if="canManageTags" label="操作" width="160" fixed="right" align="right">
               <template #default="{ row }">
-                <el-button link type="primary" @click="handleEdit(row)">编辑</el-button>
-                <el-button link type="danger" @click="handleDelete(row)">删除</el-button>
+                <el-button link type="primary" @click="handleEditTag(row)">编辑</el-button>
+                <el-button link type="danger" @click="handleDeleteTag(row)">删除</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -348,15 +385,16 @@ onActivated(() => {
             </el-tag>
             <div class="mt-3 break-all text-xs text-slate-500 dark:text-slate-400">{{ item.tagCode || '#409EFF' }}</div>
           </div>
-          <div class="flex flex-wrap justify-end gap-2 border-t border-slate-100 pt-3 dark:border-white/10">
-            <el-button size="small" @click="handleEdit(item)">编辑</el-button>
-            <el-button size="small" type="danger" plain @click="handleDelete(item)">删除</el-button>
+          <div v-if="canManageTags" class="flex flex-wrap justify-end gap-2 border-t border-slate-100 pt-3 dark:border-white/10">
+            <el-button size="small" @click="handleEditTag(item)">编辑</el-button>
+            <el-button size="small" type="danger" plain @click="handleDeleteTag(item)">删除</el-button>
           </div>
         </div>
       </template>
     </BizResponsiveDataCollectionShell>
 
     <BizCrudDialogShell
+      v-if="canManageTags"
       v-model="dialogVisible"
       :title="dialogTitle"
       phone-width="92%"
@@ -364,7 +402,7 @@ onActivated(() => {
       desktop-width="500px"
       :confirm-loading="submitting"
       dialog-class="tag-dialog"
-      @confirm="handleSubmit"
+      @confirm="handleSubmitTag"
     >
       <template #default="{ isPhone }">
         <el-form ref="formRef" :model="form" :rules="rules" :label-width="isPhone ? '82px' : '80px'">

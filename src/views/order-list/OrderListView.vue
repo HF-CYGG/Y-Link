@@ -24,6 +24,7 @@ import {
 import { useAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
 import { exportVoucherPdf } from '@/utils/pdf/export-voucher-pdf'
+import { showPermissionDenied } from '@/utils/permission'
 import OrderDetailDrawerContent from './components/OrderDetailDrawerContent.vue'
 import OrderVoucherTemplate from './components/OrderVoucherTemplate.vue'
 import { useOrderListView } from './composables/useOrderListView'
@@ -230,6 +231,10 @@ const handleOpenVoucherDialog = () => {
 
 const handleSaveComplianceFlags = async () => {
   if (!currentOrder.value) {
+    return
+  }
+  if (!canEditComplianceFlags.value) {
+    showPermissionDenied()
     return
   }
   if (currentOrder.value.orderType !== 'department') {

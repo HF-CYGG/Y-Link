@@ -36,6 +36,7 @@ import { useStableRequest } from '@/composables/useStableRequest'
 import { useAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
+import { showPermissionDenied } from '@/utils/permission'
 import { useRouter } from 'vue-router'
 
 /**
@@ -364,7 +365,7 @@ const loadData = async () => {
     listState.loading = false
     listState.records = []
     listState.total = 0
-    ElMessage.warning('当前账号无权查看用户列表')
+    showPermissionDenied()
     return
   }
 
@@ -390,7 +391,7 @@ const loadData = async () => {
  */
 const handleOpenCreate = () => {
   if (!canCreateUser.value) {
-    ElMessage.warning('当前账号无权新增用户')
+    showPermissionDenied()
     return
   }
 
@@ -448,7 +449,7 @@ const handleOpenOwnPasswordDialog = () => {
  */
 const handleOpenEdit = (row: UserSafeProfile) => {
   if (!canEditUser.value) {
-    ElMessage.warning('当前账号无权编辑用户')
+    showPermissionDenied()
     return
   }
 
@@ -470,7 +471,7 @@ const handleOpenEdit = (row: UserSafeProfile) => {
  */
 const handleOpenResetPassword = (row: UserSafeProfile) => {
   if (!canResetUserPassword.value) {
-    ElMessage.warning('当前账号无权重置他人密码')
+    showPermissionDenied()
     return
   }
 
@@ -493,11 +494,11 @@ const handleSubmit = async () => {
   }
 
   if (dialogMode.value === 'create' && !canCreateUser.value) {
-    ElMessage.warning('当前账号无权新增用户')
+    showPermissionDenied()
     return
   }
   if (dialogMode.value === 'edit' && !canEditUser.value) {
-    ElMessage.warning('当前账号无权编辑用户')
+    showPermissionDenied()
     return
   }
 
@@ -520,7 +521,7 @@ const handleSubmit = async () => {
     } else {
       const originalStatus = listState.records.find((item) => item.id === userForm.id)?.status
       if (userForm.status !== originalStatus && !canToggleUser.value) {
-        ElMessage.warning('当前账号无权调整用户状态')
+        showPermissionDenied()
         return
       }
 
@@ -559,7 +560,7 @@ const handleSubmitResetPassword = async () => {
   }
 
   if (!canResetUserPassword.value) {
-    ElMessage.warning('当前账号无权重置他人密码')
+    showPermissionDenied()
     return
   }
 
@@ -617,7 +618,7 @@ const handleSubmitOwnPassword = async () => {
  */
 const handleToggleStatus = async (row: UserSafeProfile) => {
   if (!canToggleUser.value) {
-    ElMessage.warning('当前账号无权启停用户')
+    showPermissionDenied()
     return
   }
 

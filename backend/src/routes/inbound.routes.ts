@@ -46,7 +46,7 @@ inboundRouter.post(
 // 供货方：查看历史送货单
 inboundRouter.get(
   '/supplier/list',
-  requirePermission('inbound:create'),
+  requirePermission('inbound:view'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const result = await inboundService.listSupplierDeliveries(authReq.auth)

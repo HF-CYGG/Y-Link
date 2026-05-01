@@ -15,6 +15,7 @@ import { useStableRequest } from '@/composables/useStableRequest'
 import { useAuthStore } from '@/store'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
 import { extractErrorMessage } from '@/utils/error'
+import { showPermissionDenied } from '@/utils/permission'
 
 /**
  * 审计日志筛选表单：
@@ -182,7 +183,7 @@ const loadData = async () => {
     listState.loading = false
     listState.records = []
     listState.total = 0
-    ElMessage.warning('当前账号无权查看审计日志')
+    showPermissionDenied()
     return
   }
 
@@ -208,7 +209,7 @@ const loadData = async () => {
  */
 const handleExport = async () => {
   if (!canExportAuditLogs.value) {
-    ElMessage.warning('当前账号无权导出审计日志')
+    showPermissionDenied()
     return
   }
 

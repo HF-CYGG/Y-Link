@@ -27,6 +27,7 @@ import { useStableRequest } from '@/composables/useStableRequest'
 import { useAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
+import { showPermissionDenied } from '@/utils/permission'
 
 const authStore = useAuthStore()
 const listRequest = useStableRequest()
@@ -210,7 +211,7 @@ const loadData = async () => {
     listState.loading = false
     listState.records = []
     listState.total = 0
-    ElMessage.warning('当前账号无权查看客户端用户列表')
+    showPermissionDenied()
     return
   }
 
@@ -260,7 +261,7 @@ const handleCurrentChange = (page: number) => {
 
 const handleOpenEdit = (row: ClientUserManageProfile) => {
   if (!canEditUser.value) {
-    ElMessage.warning('当前账号无权编辑客户端用户')
+    showPermissionDenied()
     return
   }
   editVisible.value = true
@@ -279,7 +280,7 @@ const handleSubmitEdit = async () => {
     return
   }
   if (!canEditUser.value) {
-    ElMessage.warning('当前账号无权编辑客户端用户')
+    showPermissionDenied()
     return
   }
 
@@ -334,7 +335,7 @@ const resetClientPasswordForm = () => {
 
 const handleOpenResetPassword = (row: ClientUserManageProfile) => {
   if (!canResetUserPassword.value) {
-    ElMessage.warning('当前账号无权修改客户端用户密码')
+    showPermissionDenied()
     return
   }
   resetPasswordVisible.value = true
@@ -350,7 +351,7 @@ const handleSubmitResetPassword = async () => {
     return
   }
   if (!canResetUserPassword.value) {
-    ElMessage.warning('当前账号无权修改客户端用户密码')
+    showPermissionDenied()
     return
   }
 
@@ -391,7 +392,7 @@ const handleSubmitResetPassword = async () => {
 
 const handleToggleStatus = async (row: ClientUserManageProfile) => {
   if (!canToggleUser.value) {
-    ElMessage.warning('当前账号无权启停客户端用户')
+    showPermissionDenied()
     return
   }
 

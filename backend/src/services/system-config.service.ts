@@ -284,6 +284,32 @@ class SystemConfigService {
     'verification.email.success_match',
   ] as const
 
+  /**
+   * 系统治理配置写操作强制管理员：
+   * - 与路由层 requireRole('admin') 形成双重门禁；
+   * - 若发生越权调用，统一记录失败审计，便于后续排查权限绕过或路由误配。
+   */
+  private async assertAdminActor(actor: AuthUserContext, requestMeta: RequestMeta | undefined, actionType: string, actionLabel: string) {
+    if (actor.role === 'admin') {
+      return
+    }
+    await auditService.safeRecord({
+      actionType,
+      actionLabel: `${actionLabel}（越权拦截）`,
+      targetType: 'system_config',
+      targetCode: actionType,
+      actor,
+      requestMeta,
+      resultStatus: 'failed',
+      detail: {
+        reason: 'role_mismatch',
+        requiredRole: 'admin',
+        actualRole: actor.role,
+      },
+    })
+    throw new BizError('当前账号无权执行该操作', 403)
+  }
+
   private getOrderSerialAllKeys(): string[] {
     return ORDER_SERIAL_TYPES.flatMap((orderType) => {
       const keyPrefix = ORDER_SERIAL_META[orderType].keyPrefix
@@ -574,6 +600,7 @@ class SystemConfigService {
     actor: AuthUserContext,
     requestMeta?: RequestMeta,
   ): Promise<{ list: OrderSerialConfigRecord[]; changed: boolean }> {
+    await this.assertAdminActor(actor, requestMeta, 'system_config.update_order_serial', '更新订单流水配置')
     this.validateInputValue('department', input.department)
     this.validateInputValue('walkin', input.walkin)
     await this.ensureDefaultConfigs()
@@ -700,6 +727,7 @@ class SystemConfigService {
     actor: AuthUserContext,
     requestMeta?: RequestMeta,
   ): Promise<{ config: O2oRuleConfigRecord; changed: boolean }> {
+    await this.assertAdminActor(actor, requestMeta, 'system_config.update_o2o_rules', '更新线上预订规则配置')
     if (!Number.isInteger(input.autoCancelHours) || input.autoCancelHours <= 0 || input.autoCancelHours > 168) {
       throw new BizError('超时取消时长必须为 1 到 168 小时', 400)
     }
@@ -827,6 +855,7 @@ class SystemConfigService {
     actor: AuthUserContext,
     requestMeta?: RequestMeta,
   ): Promise<{ config: ClientDepartmentConfigRecord; changed: boolean }> {
+    await this.assertAdminActor(actor, requestMeta, 'system_config.update_client_departments', '更新客户端部门配置')
     const normalizedTree = Array.isArray(input.tree)
       ? this.normalizeClientDepartmentTree(input.tree)
       : this.buildTreeFromOptions(this.normalizeClientDepartmentOptions(input.options ?? []))
@@ -912,6 +941,7 @@ class SystemConfigService {
     actor: AuthUserContext,
     requestMeta?: RequestMeta,
   ): Promise<{ config: VerificationProviderConfigsResult; changed: boolean }> {
+    await this.assertAdminActor(actor, requestMeta, 'system_config.update_verification_providers', '更新验证码平台配置')
     const normalizeChannelInput = (channel: VerificationProviderConfigInput, channelLabel: string) => {
       const method = channel.httpMethod === 'GET' ? 'GET' : 'POST'
       if (channel.enabled && !channel.apiUrl.trim()) {

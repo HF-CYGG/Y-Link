@@ -15,7 +15,10 @@ import { InventoryLog } from '../entities/inventory-log.entity.js'
 import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
 import { O2oPreorderItem } from '../entities/o2o-preorder-item.entity.js'
 import { SystemConfig } from '../entities/system-config.entity.js'
+import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
+import type { RequestMeta } from '../utils/request-meta.js'
+import { auditService } from './audit.service.js'
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const EXPORT_ENTITY_MAP = {
@@ -34,7 +37,35 @@ type ExportPayload = {
 }
 
 class DataMaintenanceService {
-  async createSqliteBackup() {
+  /**
+   * 管理员兜底校验：
+   * - 路由层门禁之外，服务层再次校验角色，避免后续路由误配导致高危写操作被绕过；
+   * - 拒绝时写入越权审计，保留访问者身份和请求元信息。
+   */
+  private async assertAdminActor(actor: AuthUserContext, requestMeta: RequestMeta | undefined, actionType: string, actionLabel: string) {
+    if (actor.role === 'admin') {
+      return
+    }
+
+    await auditService.safeRecord({
+      actionType,
+      actionLabel: `${actionLabel}（越权拦截）`,
+      targetType: 'data_maintenance',
+      targetCode: actionType,
+      actor,
+      requestMeta,
+      resultStatus: 'failed',
+      detail: {
+        reason: 'role_mismatch',
+        requiredRole: 'admin',
+        actualRole: actor.role,
+      },
+    })
+    throw new BizError('当前账号无权执行该操作', 403)
+  }
+
+  async createSqliteBackup(actor: AuthUserContext, requestMeta?: RequestMeta) {
+    await this.assertAdminActor(actor, requestMeta, 'data_maintenance.backup_sqlite', '创建 SQLite 物理备份')
     if (env.DB_TYPE !== 'sqlite') {
       throw new BizError('当前环境不是 SQLite，无法执行物理备份', 400)
     }
@@ -65,7 +96,8 @@ class DataMaintenanceService {
     }
   }
 
-  async importJson(payload: ExportPayload) {
+  async importJson(payload: ExportPayload, actor: AuthUserContext, requestMeta?: RequestMeta) {
+    await this.assertAdminActor(actor, requestMeta, 'data_maintenance.import_json', '导入 JSON 数据')
     if (!payload?.tables) {
       throw new BizError('导入数据格式错误', 400)
     }

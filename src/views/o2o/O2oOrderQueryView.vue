@@ -33,6 +33,7 @@ import {
   type O2oOrderStatusReport,
   type O2oReturnRequestDetail,
 } from '@/api/modules/o2o'
+import { showPermissionDenied } from '@/utils/permission'
 
 type OrderPoolKey = 'all' | 'pending' | 'completed' | 'cancelled' | 'returns'
 
@@ -829,6 +830,10 @@ const handleSaveMerchantMessage = async () => {
 
 const handleSaveComplianceFlags = async () => {
   if (!activeOrderDetail.value?.order.id) {
+    return
+  }
+  if (!canEditComplianceFlags.value) {
+    showPermissionDenied()
     return
   }
   if (activeOrderDetail.value.order.clientOrderType !== 'department') {

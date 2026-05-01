@@ -400,6 +400,38 @@ export class DatabaseMigrationService {
   }
 
   /**
+   * 数据库迁移高危写操作管理员兜底：
+   * - 除路由门禁外，服务层统一再校验一次 admin 身份；
+   * - 若越权触发，统一写入失败审计，确保 P0 场景可追踪。
+   */
+  private async assertAdminActor(
+    actor: AuthUserContext | undefined,
+    requestMeta: RequestMeta | undefined,
+    actionType: string,
+    actionLabel: string,
+  ): Promise<AuthUserContext> {
+    if (actor?.role === 'admin') {
+      return actor
+    }
+
+    await auditService.safeRecord({
+      actionType,
+      actionLabel: `${actionLabel}（越权拦截）`,
+      targetType: 'database_migration',
+      targetCode: actionType,
+      actor,
+      requestMeta,
+      resultStatus: 'failed',
+      detail: {
+        reason: 'role_mismatch',
+        requiredRole: 'admin',
+        actualRole: actor?.role ?? null,
+      },
+    })
+    throw new BizError('当前账号无权执行该操作', 403)
+  }
+
+  /**
    * 读取查询结果中的字符串字段：
    * - 对缺失字段返回 `undefined`，由调用方决定是否过滤；
    * - 对非字符串值统一转为字符串，减少数据库驱动差异影响。
@@ -1318,6 +1350,7 @@ export class DatabaseMigrationService {
     actor?: AuthUserContext,
     requestMeta?: RequestMeta,
   ): Promise<SQLiteToMySqlTaskRecord> {
+    const adminActor = await this.assertAdminActor(actor, requestMeta, 'database_migration.create_task', '创建 SQLite 转 MySQL 迁移任务')
     const precheck = await this.buildPrecheck({
       target: input.target,
       allowTargetWithData: input.allowTargetWithData ?? false,
@@ -1360,7 +1393,7 @@ export class DatabaseMigrationService {
       targetType: 'database_migration',
       targetId: task.id,
       targetCode: task.id,
-      actor,
+      actor: adminActor,
       requestMeta,
       detail: {
         target: sanitizeMysqlTarget(task.target),
@@ -1532,6 +1565,7 @@ export class DatabaseMigrationService {
     actor?: AuthUserContext,
     requestMeta?: RequestMeta,
   ): Promise<SQLiteToMySqlTaskRecord> {
+    const adminActor = await this.assertAdminActor(actor, requestMeta, 'database_migration.run_task', '执行 SQLite 转 MySQL 迁移任务')
     const existingTask = await this.readTaskRecord(taskId, '执行迁移任务')
     this.assertTaskCanRun(existingTask)
 
@@ -1561,7 +1595,7 @@ export class DatabaseMigrationService {
     let validationResult: DatabaseMigrationValidationResult | undefined
     let runtimeOverrideApplied = false
     try {
-      const executionResult = await this.executeSQLiteToMySqlMigration(runningTask, latestPrecheck, actor)
+      const executionResult = await this.executeSQLiteToMySqlMigration(runningTask, latestPrecheck, adminActor)
       importedTables = executionResult.importedTables
       validationResult = executionResult.validationResult
       runtimeOverrideApplied = executionResult.runtimeOverrideApplied
@@ -1592,7 +1626,7 @@ export class DatabaseMigrationService {
         targetType: 'database_migration',
         targetId: succeededTask.id,
         targetCode: succeededTask.id,
-        actor,
+        actor: adminActor,
         requestMeta,
         detail: {
           importedRows: succeededTask.result?.importedRows ?? 0,
@@ -1632,7 +1666,7 @@ export class DatabaseMigrationService {
         targetType: 'database_migration',
         targetId: failedTask.id,
         targetCode: failedTask.id,
-        actor,
+        actor: adminActor,
         requestMeta,
         resultStatus: 'failed',
         detail: {
@@ -1695,6 +1729,7 @@ export class DatabaseMigrationService {
     activeOverride: ReturnType<typeof maskDatabaseRuntimeOverride>
     sourceTaskId?: string
   }> {
+    const adminActor = await this.assertAdminActor(actor, requestMeta, 'database_migration.apply_switch', '应用数据库切换覆盖配置')
     const task = input.taskId ? await this.readTaskRecord(input.taskId, '切换到目标 MySQL') : null
     if (task) {
       this.ensureTaskValidationPassed(task)
@@ -1706,7 +1741,7 @@ export class DatabaseMigrationService {
 
     const persisted = await this.writeMysqlRuntimeOverride(
       target,
-      actor,
+      adminActor,
       input.taskId,
       input.reason?.trim() || DATABASE_MIGRATION_SWITCH_REASON_DEFAULT,
     )
@@ -1716,7 +1751,7 @@ export class DatabaseMigrationService {
       actionLabel: '应用数据库切换覆盖配置',
       targetType: 'database_runtime_override',
       targetCode: input.taskId ?? persisted.config.DB_NAME ?? 'mysql',
-      actor,
+      actor: adminActor,
       requestMeta,
       detail: {
         sourceTaskId: input.taskId,
@@ -1740,6 +1775,7 @@ export class DatabaseMigrationService {
     rollbackMode: 'clear' | 'sqlite_override'
     activeOverride: ReturnType<typeof maskDatabaseRuntimeOverride>
   }> {
+    const adminActor = await this.assertAdminActor(actor, requestMeta, 'database_migration.rollback_switch', '回退数据库切换覆盖配置')
     const currentOverride = readDatabaseRuntimeOverride()
 
     if (input.clearOnly) {
@@ -1750,7 +1786,7 @@ export class DatabaseMigrationService {
         actionLabel: '回退数据库切换覆盖配置（仅清理覆盖文件）',
         targetType: 'database_runtime_override',
         targetCode: input.taskId ?? 'clear',
-        actor,
+        actor: adminActor,
         requestMeta,
         detail: {
           clearOnly: true,
@@ -1806,7 +1842,7 @@ export class DatabaseMigrationService {
       actionLabel: '回退数据库切换覆盖配置',
       targetType: 'database_runtime_override',
       targetCode: input.taskId ?? 'sqlite',
-      actor,
+      actor: adminActor,
       requestMeta,
       detail: {
         sqlitePath,
@@ -1825,6 +1861,7 @@ export class DatabaseMigrationService {
     actor?: AuthUserContext,
     requestMeta?: RequestMeta,
   ): Promise<{ cleared: boolean; restartRequired: true }> {
+    const adminActor = await this.assertAdminActor(actor, requestMeta, 'database_migration.clear_override', '清理数据库运行时覆盖配置')
     const cleared = await clearDatabaseRuntimeOverride()
 
     await auditService.safeRecord({
@@ -1832,7 +1869,7 @@ export class DatabaseMigrationService {
       actionLabel: '清理数据库运行时覆盖配置',
       targetType: 'database_runtime_override',
       targetCode: 'clear',
-      actor,
+      actor: adminActor,
       requestMeta,
       detail: {
         cleared,

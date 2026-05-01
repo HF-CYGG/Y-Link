@@ -28,7 +28,9 @@ import {
   PageToolbarCard,
 } from '@/components/common'
 import { useCrudManager } from '@/composables/useCrudManager'
+import { useAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
+import { showPermissionDenied } from '@/utils/permission'
 
 const allTags = ref<Tag[]>([])
 const formRef = ref<FormInstance>()
@@ -96,6 +98,8 @@ const createDefaultForm = (): ProductForm => ({
 
 const selectedProductCount = computed(() => selectedProductIds.value.length)
 const batchCreateRowCount = computed(() => batchCreateRows.value.length)
+const authStore = useAuthStore()
+const canManageProducts = computed(() => authStore.currentUser?.role === 'admin' && authStore.hasPermission('products:manage'))
 
 const createBatchCreateRow = (): BatchCreateProductFormRow => {
   batchCreateRowSeed.value += 1
@@ -383,11 +387,19 @@ const reloadProducts = async () => {
 }
 
 const handleAdd = async () => {
+  if (!canManageProducts.value) {
+    showPermissionDenied()
+    return
+  }
   await clearSelection()
   openCreateDialog()
 }
 
 const handleEditProduct = async (row: ProductRecord) => {
+  if (!canManageProducts.value) {
+    showPermissionDenied()
+    return
+  }
   editingProductId.value = row.id
   editLoading.value = true
   try {
@@ -399,6 +411,14 @@ const handleEditProduct = async (row: ProductRecord) => {
     editingProductId.value = ''
     editLoading.value = false
   }
+}
+
+const handleDeleteProduct = async (row: ProductRecord) => {
+  if (!canManageProducts.value) {
+    showPermissionDenied()
+    return
+  }
+  await handleDelete(row)
 }
 
 const resolveTagIds = async (tagValues: Array<string | number>, silent = false): Promise<string[]> => {
@@ -455,6 +475,10 @@ const refreshProductView = async () => {
 }
 
 const handleBatchUpdateStatus = async (isActive: boolean) => {
+  if (!canManageProducts.value) {
+    showPermissionDenied()
+    return
+  }
   if (!selectedProductIds.value.length) {
     ElMessage.warning('请先选择要批量处理的产品')
     return
@@ -478,6 +502,10 @@ const handleBatchUpdateStatus = async (isActive: boolean) => {
 }
 
 const openBatchCreateDialog = () => {
+  if (!canManageProducts.value) {
+    showPermissionDenied()
+    return
+  }
   batchCreateRows.value = [createBatchCreateRow()]
   batchCreateDialogVisible.value = true
 }
@@ -537,6 +565,10 @@ const validateBatchCreateRows = (): string | null => {
 }
 
 const handleBatchCreate = async () => {
+  if (!canManageProducts.value) {
+    showPermissionDenied()
+    return
+  }
   const validationError = validateBatchCreateRows()
   if (validationError) {
     ElMessage.warning(validationError)
@@ -630,8 +662,10 @@ onActivated(() => {
 
       <template #actions="{ isPhone }">
         <div class="flex w-full flex-wrap justify-end gap-2">
-          <el-tag type="info">已选 {{ selectedProductCount }} 项</el-tag>
+          <el-tag v-if="canManageProducts" type="info">已选 {{ selectedProductCount }} 项</el-tag>
+          <el-tag v-else type="info">当前为只读模式</el-tag>
           <el-button
+            v-if="canManageProducts"
             :class="isPhone ? 'w-full' : ''"
             :disabled="!selectedProductCount"
             :loading="batchSubmitting"
@@ -640,6 +674,7 @@ onActivated(() => {
             批量启用
           </el-button>
           <el-button
+            v-if="canManageProducts"
             :class="isPhone ? 'w-full' : ''"
             :disabled="!selectedProductCount"
             :loading="batchSubmitting"
@@ -647,13 +682,13 @@ onActivated(() => {
           >
             批量停用
           </el-button>
-          <el-button :class="isPhone ? 'w-full' : ''" :disabled="!selectedProductCount" @click="clearSelection">
+          <el-button v-if="canManageProducts" :class="isPhone ? 'w-full' : ''" :disabled="!selectedProductCount" @click="clearSelection">
             清空选择
           </el-button>
-          <el-button :class="isPhone ? 'w-full' : ''" type="primary" plain @click="openBatchCreateDialog">
+          <el-button v-if="canManageProducts" :class="isPhone ? 'w-full' : ''" type="primary" plain @click="openBatchCreateDialog">
             批量新增
           </el-button>
-          <el-button :class="isPhone ? 'w-full' : ''" type="primary" icon="Plus" @click="handleAdd">新增产品</el-button>
+          <el-button v-if="canManageProducts" :class="isPhone ? 'w-full' : ''" type="primary" icon="Plus" @click="handleAdd">新增产品</el-button>
         </div>
       </template>
     </PageToolbarCard>
@@ -680,7 +715,7 @@ onActivated(() => {
           @selection-change="handleTableSelectionChange"
           @sort-change="handleTableSortChange"
         >
-            <el-table-column type="selection" width="52" reserve-selection />
+            <el-table-column v-if="canManageProducts" type="selection" width="52" reserve-selection />
             <el-table-column
               label="产品编码"
               prop="productCode"
@@ -727,7 +762,7 @@ onActivated(() => {
                 </div>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="132" align="right" fixed="right">
+            <el-table-column v-if="canManageProducts" label="操作" width="132" align="right" fixed="right">
               <template #default="{ row }">
                 <el-button
                   link
@@ -737,7 +772,7 @@ onActivated(() => {
                 >
                   编辑
                 </el-button>
-                <el-button link type="danger" @click="handleDelete(row)">删除</el-button>
+                <el-button link type="danger" @click="handleDeleteProduct(row)">删除</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -747,6 +782,7 @@ onActivated(() => {
         <div class="apple-card mobile-product-card min-w-0 p-4">
           <div class="mb-3 flex items-center justify-between">
             <el-checkbox
+              v-if="canManageProducts"
               :model-value="selectedProductIds.includes(item.id)"
               @change="handleCardSelectionChange(item.id, $event)"
             >
@@ -785,17 +821,18 @@ onActivated(() => {
               {{ tag.tagName }}
             </el-tag>
           </div>
-          <div class="mt-3 flex flex-wrap justify-end gap-2 border-t border-slate-100 pt-3 dark:border-white/10">
+          <div v-if="canManageProducts" class="mt-3 flex flex-wrap justify-end gap-2 border-t border-slate-100 pt-3 dark:border-white/10">
             <el-button size="small" :loading="editLoading && editingProductId === item.id" @click="handleEditProduct(item)">
               编辑
             </el-button>
-            <el-button size="small" type="danger" plain @click="handleDelete(item)">删除</el-button>
+            <el-button size="small" type="danger" plain @click="handleDeleteProduct(item)">删除</el-button>
           </div>
         </div>
       </template>
     </BizResponsiveDataCollectionShell>
 
     <BizCrudDialogShell
+      v-if="canManageProducts"
       v-model="batchCreateDialogVisible"
       title="批量新增产品"
       phone-width="96%"
@@ -900,6 +937,7 @@ onActivated(() => {
     </BizCrudDialogShell>
 
     <BizCrudDialogShell
+      v-if="canManageProducts"
       v-model="dialogVisible"
       :title="dialogTitle"
       phone-width="94%"

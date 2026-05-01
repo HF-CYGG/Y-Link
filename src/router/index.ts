@@ -4,12 +4,12 @@
  * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
  */
 
-import { ElMessage } from 'element-plus'
 import { createRouter, createWebHistory } from 'vue-router'
 import { scheduleRouteComponentWarmup, type AppRouteName } from '@/router/route-performance'
 import { useAuthStore, useClientAuthStore } from '@/store'
 import { canAccessRoute, resolveFirstAccessibleManagementPath, routes } from '@/router/routes'
 import type { UserSafeProfile } from '@/api/modules/auth'
+import { showPermissionDenied } from '@/utils/permission'
 
 export const resolveDefaultManagementRedirect = (user?: Pick<UserSafeProfile, 'role'> | null) => {
   return user?.role === 'supplier' ? '/supplier-delivery' : '/dashboard'
@@ -117,11 +117,11 @@ router.beforeEach(async (to) => {
      */
     const firstAccessiblePath = resolveFirstAccessibleManagementPath(authStore.currentUser)
     if (firstAccessiblePath && firstAccessiblePath !== to.fullPath) {
-      ElMessage.warning('当前账号无权访问该页面，已为你切换到可访问页面')
+      showPermissionDenied('已为你切换到可访问页面')
       return firstAccessiblePath
     }
 
-    ElMessage.warning('当前账号无权访问该页面')
+    showPermissionDenied()
     return '/404'
   }
 

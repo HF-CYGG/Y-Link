@@ -116,7 +116,8 @@ const selectedTaskId = ref('')
  * - 更新权限控制预检之外的高风险动作按钮。
  */
 const canViewMigration = computed(() => authStore.hasPermission('system_configs:view'))
-const canOperateMigration = computed(() => authStore.hasPermission('system_configs:update'))
+// 与后端门禁保持一致：迁移类高危写操作仅允许管理员执行。
+const canOperateMigration = computed(() => authStore.isAdmin && authStore.hasPermission('system_configs:update'))
 
 /**
  * 当前选中的迁移任务：

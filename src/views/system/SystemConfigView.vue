@@ -30,6 +30,7 @@ import {
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
+import { showPermissionDenied } from '@/utils/permission'
 import {
   DATABASE_MIGRATION_ASSISTANT_NAME,
   DATABASE_MIGRATION_ENTRY_DESCRIPTION,
@@ -576,7 +577,7 @@ const buildVerificationChannelPayload = (channel: 'mobile' | 'email') => {
 
 const handleTestVerificationSend = async (channel: 'mobile' | 'email') => {
   if (!canUpdateConfigs.value) {
-    ElMessage.warning('当前账号仅支持只读查看')
+    showPermissionDenied()
     return
   }
   if (!validateSingleVerificationConfig(channel)) {
@@ -681,7 +682,7 @@ const loadData = async () => {
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const handleSubmit = async () => {
   if (!canUpdateConfigs.value) {
-    ElMessage.warning('当前账号仅支持只读查看')
+    showPermissionDenied()
     return
   }
 

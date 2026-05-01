@@ -6,7 +6,7 @@
 
 import { Router } from 'express'
 import { z } from 'zod'
-import { requirePermission } from '../middleware/auth.middleware.js'
+import { requirePermission, requireRole } from '../middleware/auth.middleware.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 import { systemConfigService } from '../services/system-config.service.js'
 import type { UpdateClientDepartmentConfigsInput } from '../services/system-config.service.js'
@@ -105,6 +105,7 @@ systemConfigRouter.get(
 systemConfigRouter.put(
   '/order-serial',
   requirePermission('system_configs:update'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = updateOrderSerialConfigsSchema.parse(req.body)
@@ -133,6 +134,7 @@ systemConfigRouter.get(
 systemConfigRouter.put(
   '/o2o-rules',
   requirePermission('system_configs:update'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = updateO2oRuleConfigsSchema.parse(req.body)
@@ -161,6 +163,7 @@ systemConfigRouter.get(
 systemConfigRouter.put(
   '/verification-providers',
   requirePermission('system_configs:update'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = updateVerificationProviderConfigsSchema.parse(req.body)
@@ -176,6 +179,7 @@ systemConfigRouter.put(
 systemConfigRouter.post(
   '/verification-providers/test-send',
   requirePermission('system_configs:update'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     const payload = testVerificationProviderSchema.parse(req.body)
     const data = await verificationCodeService.sendTest({
@@ -208,6 +212,7 @@ systemConfigRouter.get(
 systemConfigRouter.put(
   '/client-departments',
   requirePermission('system_configs:update'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = updateClientDepartmentConfigsSchema.parse(req.body)
