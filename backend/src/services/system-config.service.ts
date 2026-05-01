@@ -341,7 +341,10 @@ class SystemConfigService {
    * - 管理页读取时不直接回传真实模板内容，避免浏览器、日志或抓包中泄露第三方密钥；
    * - 若管理员未修改该字段直接保存，后端会识别占位文本并保留数据库原值。
    */
-  private maskSensitiveConfigValue(value: string) {
+  private maskSensitiveConfigValue(value: string | null | undefined) {
+    if (!value) {
+      return ''
+    }
     return value.trim() ? VERIFICATION_SENSITIVE_VALUE_PLACEHOLDER : ''
   }
 
