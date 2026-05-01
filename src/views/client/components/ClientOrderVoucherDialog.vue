@@ -90,8 +90,8 @@ const emitEditableFieldUpdate = (key: VoucherEditableFieldKey, value: string | n
         <div class="voucher-orientation-toolbar">
           <span class="voucher-orientation-toolbar__label">页面方向</span>
           <el-radio-group :model-value="orientation" size="small" @update:model-value="handleOrientationChange">
-            <el-radio-button label="landscape">横版</el-radio-button>
-            <el-radio-button label="portrait">竖版</el-radio-button>
+            <el-radio-button value="landscape">横版</el-radio-button>
+            <el-radio-button value="portrait">竖版</el-radio-button>
           </el-radio-group>
         </div>
         <el-form label-position="top" class="voucher-editor-form">
