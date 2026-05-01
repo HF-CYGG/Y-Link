@@ -13,6 +13,7 @@ import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { BizCrudDialogShell } from '@/components/common'
 import { useClientAuthStore } from '@/store'
+import pinia from '@/store/pinia'
 import { redirectToClientLogin } from '@/utils/client-auth-navigation'
 import {
   clientChangePassword,
@@ -28,7 +29,7 @@ import {
 } from '@/utils/client-password-policy'
 import { extractErrorMessage } from '@/utils/error'
 
-const clientAuthStore = useClientAuthStore()
+const clientAuthStore = useClientAuthStore(pinia)
 
 const passwordDialogVisible = ref(false)
 const profileDialogVisible = ref(false)
