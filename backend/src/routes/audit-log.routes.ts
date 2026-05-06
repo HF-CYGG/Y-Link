@@ -5,7 +5,7 @@
  */
 
 import { Router } from 'express'
-import { requirePermission } from '../middleware/auth.middleware.js'
+import { requirePermission, requireRole } from '../middleware/auth.middleware.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { auditService } from '../services/audit.service.js'
 import { BizError } from '../utils/errors.js'
@@ -33,6 +33,7 @@ const parseDateQuery = (value: unknown, label: string) => {
 auditLogRouter.get(
   '/',
   requirePermission('audit_logs:view'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     // 列表与导出统一复用 startAt / endAt 字段，保持与服务层查询对象一致。
     const page = Number(req.query.page ?? 1)
@@ -61,6 +62,7 @@ auditLogRouter.get(
 auditLogRouter.get(
   '/export',
   requirePermission('audit_logs:export'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     const startAt = parseDateQuery(req.query.startAt, '开始时间')
     const endAt = parseDateQuery(req.query.endAt, '结束时间')

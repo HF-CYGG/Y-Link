@@ -62,6 +62,36 @@ const RATE_LIMIT_RULES = {
     windowMs: 30 * 60 * 1000,
     blockMessage: '重置密码请求过于频繁，请稍后再试',
   },
+  // clientForgotResetByAccount：客户端忘记密码完成重置的最后一步，按账号限频，避免同一账号被重复撞库或脚本化重置。
+  clientForgotResetByAccount: {
+    maxRequests: 3,
+    windowMs: 30 * 60 * 1000,
+    blockMessage: '该账号重置密码请求过于频繁，请稍后再试',
+  },
+  // clientChangePasswordByIp：客户端已登录后修改密码，按来源 IP 限频，降低同设备高频试探或批量脚本请求风险。
+  clientChangePasswordByIp: {
+    maxRequests: 10,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '修改密码请求过于频繁，请稍后再试',
+  },
+  // clientChangePasswordByUser：客户端已登录后修改密码，按当前用户限频，避免单账号短时间内反复改密触发异常行为。
+  clientChangePasswordByUser: {
+    maxRequests: 5,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '当前账号修改密码过于频繁，请稍后再试',
+  },
+  // clientProfileUpdateByIp：客户端资料维护操作，按来源 IP 限频，用于抑制批量资料写入或自动化刷接口。
+  clientProfileUpdateByIp: {
+    maxRequests: 20,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '资料更新请求过于频繁，请稍后再试',
+  },
+  // clientProfileUpdateByUser：客户端资料维护操作，按当前用户限频，避免单账号在短窗口内反复修改资料。
+  clientProfileUpdateByUser: {
+    maxRequests: 10,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '当前账号资料更新过于频繁，请稍后再试',
+  },
   captchaByIp: {
     maxRequests: 30,
     windowMs: 10 * 60 * 1000,
@@ -272,6 +302,25 @@ export class AuthSecurityService {
     await this.assertFailureNotLocked('admin-login', `admin-login:user:${normalizedUsername}`, requestMeta, normalizedUsername)
   }
 
+  async guardAdminCaptchaRequest(requestMeta: RequestMeta | undefined) {
+    const source = normalizeRiskSource(requestMeta)
+    await this.consumeRateLimit(`admin-captcha:ip:${source}`, RATE_LIMIT_RULES.captchaByIp, {
+      actionType: 'auth.guard.admin_captcha',
+      actionLabel: '管理端图形验证码频控',
+      requestMeta,
+      detail: { source },
+    })
+  }
+
+  isAdminLoginCaptchaRequired(requestMeta: RequestMeta | undefined, username: string) {
+    const source = normalizeRiskSource(requestMeta)
+    const normalizedUsername = username.trim().toLowerCase()
+    return (
+      this.hasActiveFailures('admin-login', `admin-login:ip:${source}`) ||
+      this.hasActiveFailures('admin-login', `admin-login:user:${normalizedUsername}`)
+    )
+  }
+
   async recordAdminLoginFailure(requestMeta: RequestMeta | undefined, username: string) {
     const source = normalizeRiskSource(requestMeta)
     const normalizedUsername = username.trim().toLowerCase()
@@ -368,6 +417,13 @@ export class AuthSecurityService {
       requestMeta,
       detail: { source },
     })
+    await this.consumeRateLimit(`client-forgot-reset:account:${accountKey}`, RATE_LIMIT_RULES.clientForgotResetByAccount, {
+      actionType: 'client.auth.guard.forgot_reset',
+      actionLabel: '客户端重置密码频控',
+      targetCode: accountKey,
+      requestMeta,
+      detail: { source, dimension: 'account' },
+    })
   }
 
   async guardClientLoginRequest(requestMeta: RequestMeta | undefined, accountKey: string) {
@@ -405,6 +461,42 @@ export class AuthSecurityService {
   clearClientLoginFailures(requestMeta: RequestMeta | undefined, accountKey: string) {
     const source = normalizeRiskSource(requestMeta)
     this.clearLoginFailures(`client-login:ip:${source}`, `client-login:account:${accountKey}`)
+  }
+
+  async guardClientChangePasswordRequest(requestMeta: RequestMeta | undefined, userId: string) {
+    const source = normalizeRiskSource(requestMeta)
+    await this.consumeRateLimit(`client-change-password:ip:${source}`, RATE_LIMIT_RULES.clientChangePasswordByIp, {
+      actionType: 'client.auth.guard.change_password',
+      actionLabel: '客户端修改密码频控',
+      targetCode: userId,
+      requestMeta,
+      detail: { source },
+    })
+    await this.consumeRateLimit(`client-change-password:user:${userId}`, RATE_LIMIT_RULES.clientChangePasswordByUser, {
+      actionType: 'client.auth.guard.change_password',
+      actionLabel: '客户端修改密码频控',
+      targetCode: userId,
+      requestMeta,
+      detail: { source, dimension: 'user' },
+    })
+  }
+
+  async guardClientProfileUpdateRequest(requestMeta: RequestMeta | undefined, userId: string) {
+    const source = normalizeRiskSource(requestMeta)
+    await this.consumeRateLimit(`client-profile-update:ip:${source}`, RATE_LIMIT_RULES.clientProfileUpdateByIp, {
+      actionType: 'client.auth.guard.profile_update',
+      actionLabel: '客户端资料更新频控',
+      targetCode: userId,
+      requestMeta,
+      detail: { source },
+    })
+    await this.consumeRateLimit(`client-profile-update:user:${userId}`, RATE_LIMIT_RULES.clientProfileUpdateByUser, {
+      actionType: 'client.auth.guard.profile_update',
+      actionLabel: '客户端资料更新频控',
+      targetCode: userId,
+      requestMeta,
+      detail: { source, dimension: 'user' },
+    })
   }
 }
 

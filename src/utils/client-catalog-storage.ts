@@ -1,10 +1,21 @@
 /**
  * 模块说明：src/utils/client-catalog-storage.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：负责客户端商品目录快照的本地持久化、按账号隔离恢复与历史全局缓存清理。
+ * 实现逻辑：
+ * 1. 商品目录快照按 `clientUserId` 分片，避免浏览器切换账号后把上一个账号的浏览上下文直接还原给新账号；
+ * 2. 恢复时同时保留商品列表、激活分类、搜索词和更新时间，让商城页支持“秒开 + 上下文恢复”；
+ * 3. 升级到新版本后会自动清理历史全局 key，确保旧缓存不再污染当前账号。
+ * 维护说明：
+ * - 若目录快照继续新增字段，请同步补齐 `readPersistedClientCatalogSnapshot()` 的兼容恢复逻辑；
+ * - 若后续目录缓存要按更多业务维度分片，可继续复用统一的作用域 key 工具。
  */
 
 import type { O2oMallProduct } from '@/api/modules/o2o'
+import {
+  clearLegacyScopedStorageKey,
+  getBrowserStorage,
+  resolveUserScopedStorageKey,
+} from '@/utils/storage-user-scope'
 
 export interface ClientCatalogSnapshot {
   products: O2oMallProduct[]
@@ -13,15 +24,15 @@ export interface ClientCatalogSnapshot {
   updatedAt: number
 }
 
-// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
-const CLIENT_CATALOG_SNAPSHOT_KEY = 'y-link.client-catalog.snapshot'
+// 统一抽出客户端账号作用域类型，避免同一联合类型在多个持久化函数签名里重复展开。
+type ClientCatalogStorageScopeId = string | number | null | undefined
 
-const getStorage = () => {
-  if (globalThis.window === undefined) {
-    return null
-  }
-  return globalThis.window.localStorage
-}
+// 详细注释：
+// - 历史版本使用单一全局 key，会导致不同客户端账号共享同一份商品目录浏览上下文；
+// - 新版本改为“前缀 + clientUserId”的隔离键；
+// - legacy key 仅用于平滑升级时的自动清理。
+const CLIENT_CATALOG_SNAPSHOT_KEY_PREFIX = 'y-link.client-catalog.snapshot'
+const LEGACY_CLIENT_CATALOG_SNAPSHOT_KEY = 'y-link.client-catalog.snapshot'
 
 const normalizePrice = (value: unknown) => {
   if (typeof value === 'number' && Number.isFinite(value)) {
@@ -71,12 +82,21 @@ const normalizeProducts = (products: unknown): O2oMallProduct[] => {
     .filter((item): item is O2oMallProduct => item !== null)
 }
 
-export const readPersistedClientCatalogSnapshot = (): ClientCatalogSnapshot | null => {
-  const storage = getStorage()
+export const readPersistedClientCatalogSnapshot = (
+  clientUserId: ClientCatalogStorageScopeId,
+): ClientCatalogSnapshot | null => {
+  const storage = getBrowserStorage('local')
   if (!storage) {
     return null
   }
-  const raw = storage.getItem(CLIENT_CATALOG_SNAPSHOT_KEY)
+
+  clearLegacyScopedStorageKey(storage, LEGACY_CLIENT_CATALOG_SNAPSHOT_KEY)
+  const scopedKey = resolveUserScopedStorageKey(CLIENT_CATALOG_SNAPSHOT_KEY_PREFIX, clientUserId)
+  if (!scopedKey) {
+    return null
+  }
+
+  const raw = storage.getItem(scopedKey)
   if (!raw) {
     return null
   }
@@ -90,19 +110,40 @@ export const readPersistedClientCatalogSnapshot = (): ClientCatalogSnapshot | nu
     }
   } catch (error) {
     console.warn('读取客户端商品目录缓存失败，已清理损坏快照。', error)
-    storage.removeItem(CLIENT_CATALOG_SNAPSHOT_KEY)
+    storage.removeItem(scopedKey)
     return null
   }
 }
 
-export const persistClientCatalogSnapshot = (snapshot: ClientCatalogSnapshot) => {
-  const storage = getStorage()
+export const persistClientCatalogSnapshot = (
+  clientUserId: ClientCatalogStorageScopeId,
+  snapshot: ClientCatalogSnapshot,
+) => {
+  const storage = getBrowserStorage('local')
   if (!storage) {
     return
   }
-  storage.setItem(CLIENT_CATALOG_SNAPSHOT_KEY, JSON.stringify(snapshot))
+
+  clearLegacyScopedStorageKey(storage, LEGACY_CLIENT_CATALOG_SNAPSHOT_KEY)
+  const scopedKey = resolveUserScopedStorageKey(CLIENT_CATALOG_SNAPSHOT_KEY_PREFIX, clientUserId)
+  if (!scopedKey) {
+    return
+  }
+
+  storage.setItem(scopedKey, JSON.stringify(snapshot))
 }
 
-export const clearPersistedClientCatalogSnapshot = () => {
-  getStorage()?.removeItem(CLIENT_CATALOG_SNAPSHOT_KEY)
+export const clearPersistedClientCatalogSnapshot = (clientUserId: ClientCatalogStorageScopeId) => {
+  const storage = getBrowserStorage('local')
+  if (!storage) {
+    return
+  }
+
+  clearLegacyScopedStorageKey(storage, LEGACY_CLIENT_CATALOG_SNAPSHOT_KEY)
+  const scopedKey = resolveUserScopedStorageKey(CLIENT_CATALOG_SNAPSHOT_KEY_PREFIX, clientUserId)
+  if (!scopedKey) {
+    return
+  }
+
+  storage.removeItem(scopedKey)
 }

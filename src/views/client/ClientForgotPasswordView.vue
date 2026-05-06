@@ -13,6 +13,7 @@ import { getClientAuthCapabilities, getClientCaptcha, type ClientAuthCapabilitie
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
 import { useClientAuthStore } from '@/store'
+import pinia from '@/store/pinia'
 import {
   CLIENT_CONFIRM_INPUT_MISMATCH_MESSAGE,
   CLIENT_CONFIRM_NEW_PASSWORD_PLACEHOLDER,
@@ -23,7 +24,7 @@ import {
 import { normalizeRequestError } from '@/utils/error'
 
 const router = useRouter()
-const clientAuthStore = useClientAuthStore()
+const clientAuthStore = useClientAuthStore(pinia)
 const { runLatest: runLatestCaptchaRequest, cancel: cancelCaptchaRequest } = useStableRequest()
 const { runLatest: runLatestCapabilityRequest, cancel: cancelCapabilityRequest } = useStableRequest()
 const { runWithGate } = useIdempotentAction()
@@ -277,6 +278,11 @@ const handleVerify = async () => {
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const handleReset = async () => {
+  if (!resetToken.value.trim()) {
+    ElMessage.warning('身份校验凭证已失效，请重新验证账号')
+    step.value = 1
+    return
+  }
   if (!validatePassword(resetForm.newPassword)) {
     ElMessage.warning(passwordStrengthHint)
     return

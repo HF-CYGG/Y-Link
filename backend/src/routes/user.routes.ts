@@ -8,14 +8,14 @@ import { Router } from 'express'
 import { z } from 'zod'
 import type { AuthenticatedRequest } from '../types/auth.js'
 import { USER_ROLES, USER_STATUSES } from '../types/auth.js'
-import { requirePermission } from '../middleware/auth.middleware.js'
+import { requirePermission, requireRole } from '../middleware/auth.middleware.js'
 import { userService } from '../services/user.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 
 const createUserSchema = z.object({
   username: z.string().min(1, '账号不能为空').max(64, '账号长度不能超过 64'),
-  password: z.string().min(6, '密码长度至少为 6 位').max(50, '密码长度不能超过 50 位'),
+  password: z.string().min(8, '密码至少 8 位').max(50, '密码长度不能超过 50 位'),
   displayName: z.string().min(1, '姓名不能为空').max(64, '姓名长度不能超过 64'),
   role: z.enum(USER_ROLES),
   status: z.enum(USER_STATUSES).optional(),
@@ -24,7 +24,7 @@ const createUserSchema = z.object({
 const updateUserSchema = z
   .object({
     displayName: z.string().min(1, '姓名不能为空').max(64, '姓名长度不能超过 64').optional(),
-    password: z.string().min(6, '密码长度至少为 6 位').max(50, '密码长度不能超过 50 位').optional(),
+    password: z.string().min(8, '密码至少 8 位').max(50, '密码长度不能超过 50 位').optional(),
     role: z.enum(USER_ROLES).optional(),
   })
   .refine((value) => Object.values(value).some((item) => item !== undefined), {
@@ -36,7 +36,7 @@ const updateUserStatusSchema = z.object({
 })
 
 const resetPasswordSchema = z.object({
-  newPassword: z.string().min(6, '新密码长度至少为 6 位').max(50, '新密码长度不能超过 50 位'),
+  newPassword: z.string().min(8, '新密码至少 8 位').max(50, '新密码长度不能超过 50 位'),
 })
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
@@ -45,6 +45,7 @@ export const userRouter = Router()
 userRouter.get(
   '/',
   requirePermission('users:view'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     const page = Number(req.query.page ?? 1)
     const pageSize = Number(req.query.pageSize ?? 20)
@@ -72,6 +73,7 @@ userRouter.get(
 userRouter.post(
   '/',
   requirePermission('users:create'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = createUserSchema.parse(req.body)
@@ -87,6 +89,7 @@ userRouter.post(
 userRouter.put(
   '/:id',
   requirePermission('users:update'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = updateUserSchema.parse(req.body)
@@ -102,6 +105,7 @@ userRouter.put(
 userRouter.patch(
   '/:id/status',
   requirePermission('users:status'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = updateUserStatusSchema.parse(req.body)
@@ -117,6 +121,7 @@ userRouter.patch(
 userRouter.post(
   '/:id/reset-password',
   requirePermission('users:reset_password'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = resetPasswordSchema.parse(req.body)

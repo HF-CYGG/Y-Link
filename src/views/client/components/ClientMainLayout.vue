@@ -15,17 +15,21 @@ import { ElMessageBox } from 'element-plus'
 import { useClientAuthStore, useClientCartStore } from '@/store'
 import { buildClientNavigationItems } from '@/router/routes'
 import { redirectToClientLogin } from '@/utils/client-auth-navigation'
+import pinia from '@/store/pinia'
 
 const route = useRoute()
-const clientAuthStore = useClientAuthStore()
-const clientCartStore = useClientCartStore()
+const clientAuthStore = useClientAuthStore(pinia)
+const clientCartStore = useClientCartStore(pinia)
 
-clientCartStore.initialize()
+clientCartStore.initialize(clientAuthStore.currentUser?.id)
 const transitionName = ref<'slide-left' | 'slide-right'>('slide-left')
-const cartBadgeBouncing = ref(false)
 
 const displayName = computed(() => {
-  return clientAuthStore.currentUser?.account || clientAuthStore.currentUser?.realName || clientAuthStore.currentUser?.mobile || '访客'
+  return clientAuthStore.currentUser?.username
+    || clientAuthStore.currentUser?.account
+    || clientAuthStore.currentUser?.realName
+    || clientAuthStore.currentUser?.mobile
+    || '访客'
 })
 
 /**
@@ -104,18 +108,9 @@ watch(
 )
 
 watch(
-  () => clientCartStore.totalQty,
-  (nextQty, previousQty) => {
-    if (nextQty <= previousQty || nextQty <= 0) {
-      return
-    }
-    cartBadgeBouncing.value = false
-    globalThis.window.setTimeout(() => {
-      cartBadgeBouncing.value = true
-      globalThis.window.setTimeout(() => {
-        cartBadgeBouncing.value = false
-      }, 360)
-    }, 16)
+  () => clientAuthStore.currentUser?.id,
+  (nextClientUserId) => {
+    clientCartStore.initialize(nextClientUserId)
   },
 )
 

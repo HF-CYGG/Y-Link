@@ -8,15 +8,17 @@
  
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue' 
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus' 
-import { Lock, User, Right } from '@element-plus/icons-vue' 
+import { Lock, User, Right, Key } from '@element-plus/icons-vue' 
 import { useRoute, useRouter } from 'vue-router' 
 import { resolveDefaultManagementRedirect, resolveSafeRedirect } from '@/router' 
 import { useAuthStore } from '@/store' 
-import { extractErrorMessage } from '@/utils/error' 
+import { getAdminCaptcha } from '@/api/modules/auth'
+import { extractErrorMessage, normalizeRequestError } from '@/utils/error' 
 
 const form = reactive({ 
   username: '', 
   password: '', 
+  captcha: '',
 }) 
 
 const formRef = ref<FormInstance>() 
@@ -26,6 +28,13 @@ const authStore = useAuthStore()
 
 const submitPhase = ref<'idle' | 'submitting' | 'success'>('idle') 
 const securityHint = ref('') 
+const captchaVisible = ref(false)
+const captchaLoading = ref(false)
+const captchaState = reactive({
+  captchaId: '',
+  captchaSvg: '',
+  expiresInSeconds: 0,
+})
 
 const rules: FormRules = { 
   username:[{ required: true, message: '请输入账号', trigger: 'blur' }], 
@@ -38,10 +47,40 @@ const submitButtonLabel = computed(() => {
   return '继续' 
 }) 
 
+// 安全说明：验证码后端返回的是 SVG 字符串，
+// 这里转为 data URL 图片渲染，避免通过 v-html 直接把 SVG 片段注入 DOM。
+const captchaImageSrc = computed(() => (
+  captchaState.captchaSvg
+    ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(captchaState.captchaSvg)}`
+    : ''
+))
+
 // 当后端风控触发限流/锁定时，把提示固定显示在表单顶部，
 // 避免用户只看到一闪而过的消息后不知道当前该等多久。
 const applySecurityHintFromMessage = (message: string) => {
   securityHint.value = /频繁|锁定|稍后|重试/.test(message) ? message : ''
+}
+
+const refreshCaptcha = async () => {
+  captchaLoading.value = true
+  try {
+    const result = await getAdminCaptcha()
+    captchaState.captchaId = result.captchaId
+    captchaState.captchaSvg = result.captchaSvg
+    captchaState.expiresInSeconds = result.expiresInSeconds
+    form.captcha = ''
+  } catch (error) {
+    ElMessage.error(extractErrorMessage(error, '验证码加载失败，请稍后重试'))
+  } finally {
+    captchaLoading.value = false
+  }
+}
+
+const ensureCaptchaVisible = async () => {
+  captchaVisible.value = true
+  if (!captchaState.captchaId) {
+    await refreshCaptcha()
+  }
 }
 
 onMounted(() => {
@@ -62,6 +101,10 @@ onBeforeUnmount(() => {
 const handleSubmit = async () => { 
   const valid = await formRef.value?.validate().catch(() => false) 
   if (!valid) return 
+  if (captchaVisible.value && !form.captcha.trim()) {
+    ElMessage.warning('请输入图形验证码')
+    return
+  }
 
   submitPhase.value = 'submitting' 
 
@@ -69,9 +112,16 @@ const handleSubmit = async () => {
     const result = await authStore.login({ 
       username: form.username, 
       password: form.password, 
+      captchaId: captchaVisible.value ? captchaState.captchaId : undefined,
+      captchaCode: captchaVisible.value ? form.captcha : undefined,
     }) 
 
     submitPhase.value = 'success' 
+    securityHint.value = ''
+    captchaVisible.value = false
+    captchaState.captchaId = ''
+    captchaState.captchaSvg = ''
+    form.captcha = ''
     ElMessage.success(`欢迎回来，${result.user.displayName}`) 
     if (result.securityReminder) {
       ElMessageBox.alert(result.securityReminder, '安全提醒', {
@@ -79,14 +129,25 @@ const handleSubmit = async () => {
         confirmButtonText: '我知道了',
       }).catch(() => undefined)
     }
-    const redirectPath = ref(typeof route.query.redirect === 'string' ? resolveSafeRedirect(route.query.redirect, result.user) : resolveDefaultManagementRedirect(result.user))
-    
-    await authStore.warmupPostLoginEntry(redirectPath.value)
+    const redirectPath = ref(
+      typeof route.query.redirect === 'string'
+        ? resolveSafeRedirect(route.query.redirect, result.user)
+        : resolveDefaultManagementRedirect(result.user),
+    )
+
+    // 登录成功后仅投递非阻塞预热任务，不等待其完成，优先保证真正的页面跳转立即发生。
+    authStore.warmupPostLoginEntry(redirectPath.value).catch(() => undefined)
     await router.replace(redirectPath.value) 
   } catch (error) { 
     submitPhase.value = 'idle' 
-    const message = extractErrorMessage(error, '登录失败，请稍后重试')
+    const normalizedError = normalizeRequestError(error, '登录失败，请稍后重试')
+    const message = normalizedError.message
     applySecurityHintFromMessage(message)
+    if (normalizedError.status === 428 || /验证码/.test(message)) {
+      await ensureCaptchaVisible()
+    } else if (captchaVisible.value) {
+      await refreshCaptcha()
+    }
     ElMessage.error(message) 
   } 
 } 
@@ -199,6 +260,36 @@ const handleSubmit = async () => {
                 @keyup.enter="handleSubmit" 
               /> 
             </el-form-item> 
+
+            <el-form-item v-if="captchaVisible" class="geo-input-2">
+              <div class="captcha-row">
+                <el-input
+                  v-model.trim="form.captcha"
+                  class="geo-input captcha-input"
+                  placeholder="图形验证码"
+                  :prefix-icon="Key"
+                  autocomplete="off"
+                  maxlength="8"
+                  @keyup.enter="handleSubmit"
+                />
+                <button
+                  class="captcha-image"
+                  type="button"
+                  :disabled="captchaLoading"
+                  title="点击刷新验证码"
+                  @click="refreshCaptcha"
+                >
+                  <span v-if="captchaLoading">刷新中</span>
+                  <img
+                    v-else-if="captchaImageSrc"
+                    :src="captchaImageSrc"
+                    alt="图形验证码"
+                    class="captcha-render-image"
+                  />
+                  <span v-else>刷新</span>
+                </button>
+              </div>
+            </el-form-item>
 
             <el-button 
               class="geo-submit group" 
@@ -668,6 +759,36 @@ const handleSubmit = async () => {
 .geo-input :deep(.el-input__wrapper.is-focus .el-input__prefix-inner) { 
   color: var(--accent); 
 } 
+
+.captcha-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 140px;
+  gap: 10px;
+  width: 100%;
+}
+
+.captcha-image {
+  height: 52px;
+  border: 1px solid var(--border-light);
+  border-radius: 16px;
+  background: var(--bg-primary);
+  color: var(--text-sub);
+  cursor: pointer;
+  overflow: hidden;
+  padding: 6px;
+}
+
+.captcha-image:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.captcha-render-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
 
 .geo-submit { 
   position: relative;

@@ -21,6 +21,9 @@ export interface ClientCaptchaResult {
 export interface ClientSafeProfile {
   id: string
   account: string
+  // `username` 是前端应优先消费的用户名字段；
+  // `realName` 保留给旧页面做兼容别名，当前与 username 保持同值。
+  username: string
   mobile: string
   email: string
   realName: string

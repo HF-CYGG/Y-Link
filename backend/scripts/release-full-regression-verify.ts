@@ -64,7 +64,7 @@ async function expectJsonOk<T>(
 ): Promise<T extends { data: infer D } ? D : never> {
   const response = await request()
   const payload = await readJson<{ code?: number; message?: string; data?: unknown }>(response)
-  assert.equal(response.status, 200, `${scene} HTTP 状态码异常：${response.status}`)
+  assert.equal(response.status, 200, `${scene} HTTP 状态码异常：${response.status}，响应：${JSON.stringify(payload)}`)
   assert.equal(payload.code, 0, `${scene} 业务状态码异常：${JSON.stringify(payload)}`)
   return payload.data as T extends { data: infer D } ? D : never
 }
@@ -642,7 +642,7 @@ async function main() {
     assert.equal(inboundOrder.order.status, 'pending')
     pass('供货方送货单提交通过')
 
-    const inboundSupplierList = await expectJsonOk<{ data: Array<{ id: string }> }>(
+    const inboundSupplierList = await expectJsonOk<{ data: { records: Array<{ id: string }> } }>(
       () =>
         fetch(`${baseUrl}/api/inbound/supplier/list`, {
           headers: {
@@ -651,7 +651,7 @@ async function main() {
         }),
       '供货方送货单列表读取',
     )
-    assert.ok(inboundSupplierList.some((item) => item.id === inboundOrder.order.id))
+    assert.ok(inboundSupplierList.records.some((item) => item.id === inboundOrder.order.id))
     pass('供货方送货单列表读取通过')
 
     const inboundVerifyDetail = await expectJsonOk<{
@@ -948,6 +948,9 @@ async function main() {
           },
           body: JSON.stringify({
             items: [{ productId: createdProduct.id, qty: 2 }],
+            clientOrderType: 'walkin',
+            isSystemApplied: false,
+            pickupContact: clientUsername,
             remark: '发布前全功能回归',
           }),
         }),
@@ -971,9 +974,11 @@ async function main() {
 
     const verifyDetail = await expectJsonOk<{
       data: {
-        order: {
-          id: string
-          status: string
+        detail: {
+          order: {
+            id: string
+            status: string
+          }
         }
       }
     }>(
@@ -985,8 +990,8 @@ async function main() {
         }),
       '管理端核销详情读取',
     )
-    assert.equal(verifyDetail.order.id, preorder.order.id)
-    assert.equal(verifyDetail.order.status, 'pending')
+    assert.equal(verifyDetail.detail.order.id, preorder.order.id)
+    assert.equal(verifyDetail.detail.order.status, 'pending')
     pass('管理端核销详情读取通过')
 
     const consoleOrders = await expectJsonOk<{ data: unknown }>(
@@ -1004,9 +1009,11 @@ async function main() {
 
     const verifiedOrder = await expectJsonOk<{
       data: {
-        order: {
-          id: string
-          status: string
+        detail: {
+          order: {
+            id: string
+            status: string
+          }
         }
       }
     }>(
@@ -1023,8 +1030,8 @@ async function main() {
         }),
       '管理端核销订单',
     )
-    assert.equal(verifiedOrder.order.id, preorder.order.id)
-    assert.equal(verifiedOrder.order.status, 'verified')
+    assert.equal(verifiedOrder.detail.order.id, preorder.order.id)
+    assert.equal(verifiedOrder.detail.order.status, 'verified')
     pass('管理端核销链路通过')
 
     const verifiedClientOrder = await expectJsonOk<{
@@ -1164,10 +1171,12 @@ async function main() {
 
     const showNoVerifyDetail = await expectJsonOk<{
       data: {
-        order: {
-          id: string
-          showNo: string
-          status: string
+        detail: {
+          order: {
+            id: string
+            showNo: string
+            status: string
+          }
         }
       }
     }>(
@@ -1179,9 +1188,9 @@ async function main() {
         }),
       '管理端按展示单号读取核销详情',
     )
-    assert.equal(showNoVerifyDetail.order.id, preorder.order.id)
-    assert.equal(showNoVerifyDetail.order.showNo, preorder.order.showNo)
-    assert.equal(showNoVerifyDetail.order.status, 'verified')
+    assert.equal(showNoVerifyDetail.detail.order.id, preorder.order.id)
+    assert.equal(showNoVerifyDetail.detail.order.showNo, preorder.order.showNo)
+    assert.equal(showNoVerifyDetail.detail.order.status, 'verified')
     pass('管理端按展示单号读取订单详情通过')
 
     const deletedTag = await expectJsonOk<{ data: boolean }>(

@@ -6,6 +6,7 @@
 
 import { randomBytes, randomUUID } from 'node:crypto'
 import { BizError } from '../utils/errors.js'
+import { EphemeralTicketStore } from '../utils/ephemeral-ticket-store.js'
 
 interface CaptchaTicket {
   code: string
@@ -14,16 +15,10 @@ interface CaptchaTicket {
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const CAPTCHA_TTL_MS = 5 * 60 * 1000
-const captchaStore = new Map<string, CaptchaTicket>()
-
-const cleanupExpiredTickets = () => {
-  const now = Date.now()
-  for (const [captchaId, ticket] of captchaStore) {
-    if (ticket.expireAt <= now) {
-      captchaStore.delete(captchaId)
-    }
-  }
-}
+const captchaStore = new EphemeralTicketStore<CaptchaTicket>({
+  maxSize: 4000,
+  resolveExpiresAt: (ticket) => ticket.expireAt,
+})
 
 const randomCaptchaCode = () => {
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -60,7 +55,6 @@ const buildCaptchaSvg = (code: string) => {
 
 class CaptchaService {
   createCaptcha() {
-    cleanupExpiredTickets()
     const captchaId = randomUUID()
     const code = randomCaptchaCode()
     captchaStore.set(captchaId, {
@@ -75,7 +69,6 @@ class CaptchaService {
   }
 
   verifyCaptcha(captchaId: string, captchaCode: string): void {
-    cleanupExpiredTickets()
     const ticket = captchaStore.get(captchaId)
     if (!ticket) {
       throw new BizError('验证码已失效，请刷新后重试', 400)

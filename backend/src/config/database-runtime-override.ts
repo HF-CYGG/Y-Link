@@ -49,13 +49,62 @@ export interface DatabaseRuntimeOverrideFile {
 const backendRootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
 const runtimeDir = path.resolve(backendRootDir, 'data', 'runtime')
 const runtimeOverrideFilePath = path.resolve(runtimeDir, 'database-runtime-override.json')
+const runtimeOverrideTempFilePath = `${runtimeOverrideFilePath}.tmp`
 
-function normalizeStringValue(value: unknown): string | undefined {
+/**
+ * 运行时覆盖文件字段边界：
+ * - 与路由层 zod 口径保持一致，避免“接口看似拦住了，磁盘落盘仍可写入脏数据”；
+ * - 统一在底层工具里兜底，确保任何调用方都要经过同一套合法性收敛。
+ */
+const RUNTIME_OVERRIDE_LIMITS = {
+  host: 200,
+  user: 100,
+  database: 100,
+  password: 500,
+  sqlitePath: 500,
+  reason: 500,
+  sourceTaskId: 100,
+  actorUserId: 64,
+  actorUsername: 64,
+  actorDisplayName: 128,
+} as const
+
+function normalizeLimitedText(value: unknown, maxLength: number): string | undefined {
   if (typeof value !== 'string') {
     return undefined
   }
   const normalized = value.trim()
-  return normalized.length > 0 ? normalized : undefined
+  if (!normalized || normalized.length > maxLength) {
+    return undefined
+  }
+  return normalized
+}
+
+function normalizeRawLimitedText(value: unknown, maxLength: number): string | undefined {
+  if (typeof value !== 'string' || value.length > maxLength) {
+    return undefined
+  }
+  return value
+}
+
+function normalizeIsoDateTime(value: unknown): string | undefined {
+  const normalized = normalizeLimitedText(value, 64)
+  if (!normalized) {
+    return undefined
+  }
+  const parsedTime = Date.parse(normalized)
+  if (Number.isNaN(parsedTime)) {
+    return undefined
+  }
+  return new Date(parsedTime).toISOString()
+}
+
+function containsUnsafeLineBreak(value: string): boolean {
+  return /[\r\n]/.test(value)
+}
+
+function normalizeStringValue(value: unknown): string | undefined {
+  return normalizeLimitedText(value, 2000)
 }
 
 function normalizeOptionalNumber(value: unknown): number | undefined {
@@ -87,6 +136,49 @@ function normalizeOptionalBoolean(value: unknown): boolean | undefined {
   return undefined
 }
 
+function normalizeOptionalPort(value: unknown): number | undefined {
+  const normalizedPort = normalizeOptionalNumber(value)
+  if (
+    normalizedPort === undefined
+    || !Number.isInteger(normalizedPort)
+    || normalizedPort < 1
+    || normalizedPort > 65535
+  ) {
+    return undefined
+  }
+  return normalizedPort
+}
+
+function normalizeSqlitePathValue(value: unknown): string | undefined {
+  const normalizedPath = normalizeLimitedText(value, RUNTIME_OVERRIDE_LIMITS.sqlitePath)
+  if (!normalizedPath || containsUnsafeLineBreak(normalizedPath)) {
+    return undefined
+  }
+  return normalizedPath
+}
+
+function normalizeRuntimeOverrideActor(
+  input: unknown,
+): DatabaseRuntimeOverrideFile['updatedBy'] {
+  if (!input || typeof input !== 'object') {
+    return null
+  }
+
+  const rawActor = input as Record<string, unknown>
+  const userId = normalizeLimitedText(rawActor.userId, RUNTIME_OVERRIDE_LIMITS.actorUserId)
+  const username = normalizeLimitedText(rawActor.username, RUNTIME_OVERRIDE_LIMITS.actorUsername)
+  const displayName = normalizeLimitedText(rawActor.displayName, RUNTIME_OVERRIDE_LIMITS.actorDisplayName)
+  if (!userId || !username || !displayName) {
+    return null
+  }
+
+  return {
+    userId,
+    username,
+    displayName,
+  }
+}
+
 function normalizeRuntimeOverrideConfig(input: unknown): DatabaseRuntimeOverrideConfig | null {
   if (!input || typeof input !== 'object') {
     return null
@@ -102,12 +194,12 @@ function normalizeRuntimeOverrideConfig(input: unknown): DatabaseRuntimeOverride
     DB_TYPE: rawDbType,
   }
 
-  const host = normalizeStringValue(rawConfig.DB_HOST)
-  const port = normalizeOptionalNumber(rawConfig.DB_PORT)
-  const user = normalizeStringValue(rawConfig.DB_USER)
-  const password = typeof rawConfig.DB_PASSWORD === 'string' ? rawConfig.DB_PASSWORD : undefined
-  const database = normalizeStringValue(rawConfig.DB_NAME)
-  const sqlitePath = normalizeStringValue(rawConfig.SQLITE_DB_PATH)
+  const host = normalizeLimitedText(rawConfig.DB_HOST, RUNTIME_OVERRIDE_LIMITS.host)
+  const port = normalizeOptionalPort(rawConfig.DB_PORT)
+  const user = normalizeLimitedText(rawConfig.DB_USER, RUNTIME_OVERRIDE_LIMITS.user)
+  const password = normalizeRawLimitedText(rawConfig.DB_PASSWORD, RUNTIME_OVERRIDE_LIMITS.password)
+  const database = normalizeLimitedText(rawConfig.DB_NAME, RUNTIME_OVERRIDE_LIMITS.database)
+  const sqlitePath = normalizeSqlitePathValue(rawConfig.SQLITE_DB_PATH)
   const dbSync = normalizeOptionalBoolean(rawConfig.DB_SYNC)
 
   if (rawDbType === 'mysql') {
@@ -142,7 +234,7 @@ function normalizeRollbackConfig(input: unknown): DatabaseRuntimeOverrideRollbac
 
   const rawRollback = input as Record<string, unknown>
   const dbType = normalizeStringValue(rawRollback.DB_TYPE)
-  const sqlitePath = normalizeStringValue(rawRollback.SQLITE_DB_PATH)
+  const sqlitePath = normalizeSqlitePathValue(rawRollback.SQLITE_DB_PATH)
   if (dbType !== 'sqlite' || !sqlitePath) {
     return undefined
   }
@@ -158,6 +250,38 @@ export function getDatabaseRuntimeOverrideFilePath(): string {
   return runtimeOverrideFilePath
 }
 
+function normalizeRuntimeOverrideFilePayload(input: unknown): DatabaseRuntimeOverrideFile | null {
+  if (!input || typeof input !== 'object') {
+    return null
+  }
+
+  const rawPayload = input as Record<string, unknown>
+  const config = normalizeRuntimeOverrideConfig(rawPayload.config)
+  if (!config) {
+    return null
+  }
+
+  const updatedAt = normalizeIsoDateTime(rawPayload.updatedAt)
+  if (!updatedAt) {
+    return null
+  }
+
+  const rawVersion = rawPayload.version
+  if (rawVersion !== 1 && rawVersion !== '1') {
+    return null
+  }
+
+  return {
+    version: 1,
+    updatedAt,
+    reason: normalizeLimitedText(rawPayload.reason, RUNTIME_OVERRIDE_LIMITS.reason),
+    sourceTaskId: normalizeLimitedText(rawPayload.sourceTaskId, RUNTIME_OVERRIDE_LIMITS.sourceTaskId),
+    updatedBy: normalizeRuntimeOverrideActor(rawPayload.updatedBy),
+    config,
+    rollbackConfig: normalizeRollbackConfig(rawPayload.rollbackConfig),
+  }
+}
+
 export function readDatabaseRuntimeOverride(): DatabaseRuntimeOverrideFile | null {
   if (!fs.existsSync(runtimeOverrideFilePath)) {
     return null
@@ -165,29 +289,7 @@ export function readDatabaseRuntimeOverride(): DatabaseRuntimeOverrideFile | nul
 
   try {
     const raw = JSON.parse(fs.readFileSync(runtimeOverrideFilePath, 'utf8')) as Record<string, unknown>
-    const config = normalizeRuntimeOverrideConfig(raw.config)
-    if (!config) {
-      return null
-    }
-
-    const updatedBy =
-      raw.updatedBy && typeof raw.updatedBy === 'object'
-        ? {
-            userId: normalizeStringValue((raw.updatedBy as Record<string, unknown>).userId) ?? '',
-            username: normalizeStringValue((raw.updatedBy as Record<string, unknown>).username) ?? '',
-            displayName: normalizeStringValue((raw.updatedBy as Record<string, unknown>).displayName) ?? '',
-          }
-        : null
-
-    return {
-      version: 1,
-      updatedAt: normalizeStringValue(raw.updatedAt) ?? new Date(0).toISOString(),
-      reason: normalizeStringValue(raw.reason),
-      sourceTaskId: normalizeStringValue(raw.sourceTaskId),
-      updatedBy: updatedBy?.userId && updatedBy.username ? updatedBy : null,
-      config,
-      rollbackConfig: normalizeRollbackConfig(raw.rollbackConfig),
-    }
+    return normalizeRuntimeOverrideFilePayload(raw)
   } catch {
     return null
   }
@@ -233,16 +335,21 @@ export function loadDatabaseRuntimeOverrideEnvValues(): Record<string, string> |
 
 export async function writeDatabaseRuntimeOverride(payload: DatabaseRuntimeOverrideFile): Promise<DatabaseRuntimeOverrideFile> {
   fs.mkdirSync(runtimeDir, { recursive: true })
-  const normalizedPayload: DatabaseRuntimeOverrideFile = {
-    version: 1,
-    updatedAt: payload.updatedAt,
-    reason: payload.reason,
-    sourceTaskId: payload.sourceTaskId,
-    updatedBy: payload.updatedBy ?? null,
-    config: payload.config,
-    rollbackConfig: payload.rollbackConfig,
+  const normalizedPayload = normalizeRuntimeOverrideFilePayload(payload)
+  if (!normalizedPayload) {
+    throw new Error('数据库运行时覆盖配置不合法，已拒绝写入磁盘')
   }
-  fs.writeFileSync(runtimeOverrideFilePath, JSON.stringify(normalizedPayload, null, 2), 'utf8')
+
+  // 先写临时文件再替换正式文件，尽量避免进程中断时留下半截 JSON。
+  fs.writeFileSync(runtimeOverrideTempFilePath, JSON.stringify(normalizedPayload, null, 2), 'utf8')
+  try {
+    fs.renameSync(runtimeOverrideTempFilePath, runtimeOverrideFilePath)
+  } catch {
+    if (fs.existsSync(runtimeOverrideFilePath)) {
+      fs.unlinkSync(runtimeOverrideFilePath)
+    }
+    fs.renameSync(runtimeOverrideTempFilePath, runtimeOverrideFilePath)
+  }
   return normalizedPayload
 }
 

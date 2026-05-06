@@ -11,7 +11,8 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { PageContainer } from '@/components/common'
-import { useAuthStore } from '@/store'
+import { usePermissionAction } from '@/composables/usePermissionAction'
+import { useStableRequest } from '@/composables/useStableRequest'
 import {
   getClientOrderStatusReportConfig,
   getO2oOrderBusinessStatusMeta,
@@ -33,7 +34,7 @@ import {
   type O2oOrderStatusReport,
   type O2oReturnRequestDetail,
 } from '@/api/modules/o2o'
-import { showPermissionDenied } from '@/utils/permission'
+import { extractErrorMessage } from '@/utils/error'
 
 type OrderPoolKey = 'all' | 'pending' | 'completed' | 'cancelled' | 'returns'
 
@@ -83,8 +84,11 @@ const nowMs = ref(Date.now())
 const orderHighlightExpiresAtMap = ref<Record<string, number>>({})
 const latestNewOrderNotice = ref<{ count: number; expiresAt: number } | null>(null)
 const orderSnapshotReady = ref(false)
+const appliedKeyword = ref('')
 const router = useRouter()
-const authStore = useAuthStore()
+const { hasPermission, ensurePermission } = usePermissionAction()
+const orderListRequest = useStableRequest()
+const orderDetailRequest = useStableRequest()
 
 let autoRefreshTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let secondTickTimer: ReturnType<typeof globalThis.setInterval> | null = null
@@ -318,7 +322,7 @@ const orderCustomerProfile = computed(() => {
     }
   }
   return {
-    username: profile.username?.trim() || '未命名用户',
+    username: profile.username?.trim() || profile.realName?.trim() || '未命名用户',
     mobile: profile.mobile?.trim() || '未留手机号',
     email: profile.email?.trim() || '未留邮箱',
     departmentName: profile.departmentName?.trim() || '未填写部门',
@@ -385,7 +389,7 @@ const complianceForm = ref({
 // - 默认展开“合规状态确认”，保证工作台打开详情后即可看到关键合规开关；
 // - 其他辅助项按需展开，避免挤占主信息区域。
 const detailAssistPanels = ref<string[]>(['compliance-flags'])
-const canEditComplianceFlags = computed(() => authStore.hasPermission('orders:update'))
+const canEditComplianceFlags = computed(() => hasPermission('orders:update'))
 
 const activeBusinessStatusMeta = computed(() => {
   return getO2oOrderBusinessStatusMeta(activeBusinessStatus.value)
@@ -568,17 +572,38 @@ const dismissNewOrderNotice = () => {
   latestNewOrderNotice.value = null
 }
 
-const loadOrderDetail = async (id: string) => {
+/**
+ * 加载订单详情：
+ * - 独立详情请求通道只保留“最后一次点选/刷新”的结果；
+ * - 自动轮询带来的静默详情刷新不再反复拉起右侧 loading，避免详情面板闪烁。
+ */
+const loadOrderDetail = async (
+  id: string,
+  options?: {
+    silent?: boolean
+    errorMessage?: string
+  },
+) => {
   if (!id) {
     activeOrderDetail.value = null
     return
   }
-  detailLoading.value = true
-  try {
-    activeOrderDetail.value = await getO2oConsoleOrderDetail(id)
-  } finally {
-    detailLoading.value = false
-  }
+  detailLoading.value = !options?.silent
+  await orderDetailRequest.runLatest({
+    executor: (signal) => getO2oConsoleOrderDetail(id, { signal }),
+    onSuccess: (detail) => {
+      activeOrderDetail.value = detail
+    },
+    onError: (error) => {
+      if (options?.silent) {
+        return
+      }
+      ElMessage.error(extractErrorMessage(error, options?.errorMessage ?? '加载订单详情失败，请稍后重试'))
+    },
+    onFinally: () => {
+      detailLoading.value = false
+    },
+  })
 }
 
 const mergeOrderSummaryFromDetail = (detail: O2oPreorderDetail) => {
@@ -629,7 +654,13 @@ const mergeOrderSummaryFromDetail = (detail: O2oPreorderDetail) => {
   orders.value = nextOrders
 }
 
-const syncActiveOrder = async () => {
+/**
+ * 同步当前选中订单：
+ * - 列表刷新后若当前订单仍存在，则刷新详情；
+ * - 若当前订单已不在当前分栏，则自动切到分栏首单；
+ * - 静默轮询时同步使用静默详情刷新，避免右侧面板每 10/15 秒闪烁一次。
+ */
+const syncActiveOrder = async (options?: { silentDetail?: boolean }) => {
   const currentOrders = currentPoolOrders.value
   if (currentOrders.length === 0) {
     // 用户主动点进空分类时，不自动跳走，右侧保留空态说明即可。
@@ -640,39 +671,67 @@ const syncActiveOrder = async () => {
   const latestCurrentOrders = poolOrderMap.value[activePool.value]
   const exists = latestCurrentOrders.find((item) => item.id === activeOrderId.value)
   if (exists) {
-    await loadOrderDetail(activeOrderId.value)
+    await loadOrderDetail(activeOrderId.value, {
+      silent: options?.silentDetail,
+      errorMessage: '同步订单详情失败，请稍后重试',
+    })
     return
   }
   const first = latestCurrentOrders[0]
   activeOrderId.value = first?.id ?? ''
-  await loadOrderDetail(activeOrderId.value)
+  await loadOrderDetail(activeOrderId.value, {
+    silent: options?.silentDetail,
+    errorMessage: '加载首个订单详情失败，请稍后重试',
+  })
 }
 
-const loadOrders = async (silent = false) => {
-  if (!silent) {
-    listLoading.value = true
-  }
-  try {
-    const previousOrderIds = new Set(orders.value.map((item) => item.id))
-    const latestOrders = await getO2oConsoleOrders({
-      keyword: query.keyword.trim() || undefined,
-      limit: 200,
-    })
-    if (orderSnapshotReady.value) {
-      const incrementalNewOrders = latestOrders.filter((item) => !previousOrderIds.has(item.id) && isNewOrder(item))
-      markIncrementalNewOrders(incrementalNewOrders)
-    }
-    orders.value = latestOrders
-    orderSnapshotReady.value = true
-    await syncActiveOrder()
-  } finally {
-    listLoading.value = false
-  }
+/**
+ * 加载订单池：
+ * - 列表接入稳定请求后，自动轮询与手动筛选共用同一通道；
+ * - 新请求会中止旧请求，只允许最后一次有效结果更新列表与详情联动；
+ * - 自动轮询仅复用最后一次已提交筛选词，避免用户正在输入时被后台刷新改写结果。
+ */
+const loadOrders = async (options?: { silent?: boolean }) => {
+  const silent = options?.silent ?? false
+  const committedKeyword = appliedKeyword.value.trim()
+  listLoading.value = !silent
+
+  await orderListRequest.runLatest({
+    executor: (signal) =>
+      getO2oConsoleOrders(
+        {
+          keyword: committedKeyword || undefined,
+          limit: 200,
+        },
+        { signal },
+      ),
+    onSuccess: async (latestOrders) => {
+      const previousOrderIds = new Set(orders.value.map((item) => item.id))
+      if (orderSnapshotReady.value) {
+        const incrementalNewOrders = latestOrders.filter((item) => !previousOrderIds.has(item.id) && isNewOrder(item))
+        markIncrementalNewOrders(incrementalNewOrders)
+      }
+      orders.value = latestOrders
+      orderSnapshotReady.value = true
+      await syncActiveOrder({ silentDetail: silent })
+    },
+    onError: (error) => {
+      if (silent) {
+        return
+      }
+      ElMessage.error(extractErrorMessage(error, '加载订单池失败，请稍后重试'))
+    },
+    onFinally: () => {
+      listLoading.value = false
+    },
+  })
 }
 
 const handlePickOrder = async (id: string) => {
   activeOrderId.value = id
-  await loadOrderDetail(id)
+  await loadOrderDetail(id, {
+    errorMessage: '切换订单详情失败，请稍后重试',
+  })
 }
 
 const handlePoolChange = async (poolKey: OrderPoolKey) => {
@@ -681,6 +740,8 @@ const handlePoolChange = async (poolKey: OrderPoolKey) => {
 }
 
 const handleSearch = async () => {
+  // 查询动作提交后，自动轮询统一复用这次确认过的关键词，避免输入中的草稿与轮询请求互相覆盖。
+  appliedKeyword.value = query.keyword.trim()
   await loadOrders()
 }
 
@@ -688,16 +749,12 @@ const handleRefreshCurrentOrder = async () => {
   if (!activeOrderId.value) {
     return
   }
-  detailLoading.value = true
-  try {
-    const latestDetail = await getO2oConsoleOrderDetail(activeOrderId.value)
-    activeOrderDetail.value = latestDetail
-    mergeOrderSummaryFromDetail(latestDetail)
+  await loadOrderDetail(activeOrderId.value, {
+    errorMessage: '刷新订单详情失败，请稍后重试',
+  })
+  if (activeOrderDetail.value?.order.id === activeOrderId.value) {
+    mergeOrderSummaryFromDetail(activeOrderDetail.value)
     ElMessage.success('当前订单状态已刷新')
-  } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '刷新失败，请稍后重试')
-  } finally {
-    detailLoading.value = false
   }
 }
 
@@ -832,8 +889,7 @@ const handleSaveComplianceFlags = async () => {
   if (!activeOrderDetail.value?.order.id) {
     return
   }
-  if (!canEditComplianceFlags.value) {
-    showPermissionDenied()
+  if (!ensurePermission('orders:update', '合规状态编辑')) {
     return
   }
   if (activeOrderDetail.value.order.clientOrderType !== 'department') {
@@ -865,7 +921,11 @@ const scheduleAutoRefresh = () => {
     return
   }
   autoRefreshTimer = globalThis.setInterval(() => {
-    void loadOrders(true)
+    // 用户正在手动查询或刷新详情时跳过本轮轮询，避免后台静默请求抢占前台交互。
+    if (listLoading.value || detailLoading.value) {
+      return
+    }
+    void loadOrders({ silent: true })
   }, pollIntervalSeconds.value * 1000)
 }
 
@@ -916,13 +976,15 @@ onBeforeUnmount(() => {
   <PageContainer title="订单池工作台" description="左侧订单池实时分栏，右侧工作台查看状态报告、商品明细、金额汇总与进度节点">
     <div class="order-workbench-root grid gap-4 xl:grid-cols-[26rem_minmax(0,1fr)]">
       <section class="min-w-0 overflow-hidden rounded-3xl bg-white p-5 shadow-sm">
-        <div class="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
-          <p class="break-words text-lg font-semibold text-slate-900">订单池</p>
-          <div class="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+        <div class="order-pool-header">
+          <p class="order-pool-header__title break-words text-lg font-semibold text-slate-900">订单池</p>
+          <div class="order-pool-header__controls">
             <el-switch
               v-model="autoRefreshEnabled"
+              class="order-pool-switch"
               size="small"
               inline-prompt
+              :width="64"
               active-text="轮询开"
               inactive-text="轮询关"
               @change="handleAutoRefreshChange"
@@ -930,7 +992,7 @@ onBeforeUnmount(() => {
             <el-select
               v-model="pollIntervalSeconds"
               size="small"
-              class="poll-interval-select w-full sm:w-28"
+              class="poll-interval-select"
               :disabled="!autoRefreshEnabled"
               @change="handlePollIntervalChange"
             >
@@ -938,8 +1000,10 @@ onBeforeUnmount(() => {
             </el-select>
             <el-switch
               v-model="soundNoticeEnabled"
+              class="order-pool-switch"
               size="small"
               inline-prompt
+              :width="64"
               active-text="声音开"
               inactive-text="声音关"
               @change="handleSoundSwitchChange"
@@ -1388,7 +1452,7 @@ onBeforeUnmount(() => {
             <p class="mb-2 text-base font-semibold text-slate-900">商品明细</p>
             <div class="hidden sm:block">
               <div class="table-scroll-wrap">
-                <el-table :data="activeOrderDetail.items" row-key="id" :loading="detailLoading">
+                <el-table native-scrollbar :data="activeOrderDetail.items" row-key="id" :loading="detailLoading">
                   <el-table-column prop="productName" label="商品名称" min-width="180" />
                   <el-table-column prop="defaultPrice" label="单价" width="120">
                     <template #default="{ row }">
@@ -1469,6 +1533,43 @@ onBeforeUnmount(() => {
   -webkit-overflow-scrolling: touch;
 }
 
+.order-pool-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.order-pool-header__title {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.order-pool-header__controls {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-width: fit-content;
+  flex: 0 0 auto;
+}
+
+.order-pool-switch {
+  flex: 0 0 auto;
+}
+
+/*
+ * 订单池头部控件稳定性修复：
+ * - Element Plus 的 small + inline-prompt 开关默认最小宽度过窄，中文提示词会被压缩；
+ * - 这里对业务开关显式锁定宽度，并在移动端让控件条独占一行，避免和标题抢占横向空间。
+ */
+.order-workbench-root :deep(.order-pool-switch .el-switch__core) {
+  width: 64px;
+  min-width: 64px;
+}
+
 .order-pool-tab {
   min-width: 0;
 }
@@ -1496,6 +1597,10 @@ onBeforeUnmount(() => {
 
 .search-action-button {
   min-width: 88px;
+}
+
+.poll-interval-select {
+  width: 112px;
 }
 
 .order-workbench-root :deep(.el-input__wrapper),
@@ -1545,10 +1650,25 @@ onBeforeUnmount(() => {
     padding: 16px;
   }
 
-  .order-workbench-root :deep(.el-switch),
-  .order-workbench-root :deep(.el-select),
-  .poll-interval-select {
+  .order-pool-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .order-pool-header__controls {
     width: 100%;
+    justify-content: flex-start;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .poll-interval-select {
+    width: 112px;
+  }
+
+  .order-workbench-root :deep(.el-input__wrapper),
+  .order-workbench-root :deep(.el-select__wrapper) {
+    max-width: 100%;
   }
 
   .order-workbench-root :deep(.el-button) {

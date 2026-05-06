@@ -12,11 +12,8 @@ import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'elem
 import { BizCrudDialogShell, BizResponsiveDataCollectionShell, PageContainer, PagePaginationBar, PageToolbarCard } from '@/components/common'
 import {
   changePassword,
-  GOVERNANCE_PERMISSION_CODES,
-  PERMISSION_LABEL_MAP,
   ROLE_LABEL_MAP,
   STATUS_LABEL_MAP,
-  type PermissionCode,
   type UserRole,
   type UserSafeProfile,
   type UserStatus,
@@ -32,12 +29,20 @@ import {
   type UpdateUserPayload,
   type UserListQuery,
 } from '@/api/modules/user'
+import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
-import { showPermissionDenied } from '@/utils/permission'
 import { useRouter } from 'vue-router'
+import {
+  accountTypeDescriptions,
+  getAccountTypeDescription,
+  getGovernancePermissionLabels,
+  getRoleTagType,
+  getStatusTagType,
+  roleOptions,
+} from '@/views/system/user-governance.helpers'
 
 /**
  * 用户管理搜索表单：
@@ -70,18 +75,18 @@ const listState = reactive(createPaginatedListState<UserSafeProfile>({
 const authStore = useAuthStore()
 const router = useRouter()
 const listRequest = useStableRequest()
+const { hasPermission, ensurePermission } = usePermissionAction()
 
 /**
  * 页面权限能力：
  * - 查看权限控制整页是否允许加载用户数据；
  * - 新增/编辑/启停/重置密码分别映射到对应按钮和提交动作。
  */
-const canViewUsers = computed(() => authStore.hasPermission('users:view'))
-const canCreateUser = computed(() => authStore.hasPermission('users:create'))
-const canEditUser = computed(() => authStore.hasPermission('users:update'))
-const canToggleUser = computed(() => authStore.hasPermission('users:status'))
-const canResetUserPassword = computed(() => authStore.hasPermission('users:reset_password'))
-const canOperateUsers = computed(() => authStore.hasAnyPermission(['users:update', 'users:status', 'users:reset_password']))
+const canCreateUser = computed(() => hasPermission('users:create'))
+const canEditUser = computed(() => hasPermission('users:update'))
+const canToggleUser = computed(() => hasPermission('users:status'))
+const canResetUserPassword = computed(() => hasPermission('users:reset_password'))
+const canOperateUsers = computed(() => canEditUser.value || canToggleUser.value || canResetUserPassword.value)
 
 /**
  * 弹窗状态：
@@ -237,72 +242,6 @@ const ownPasswordRules: FormRules = {
 const usernameDisabled = computed(() => dialogMode.value === 'edit')
 
 /**
- * 状态标签样式：
- * - enabled 用成功色，disabled 用警告色；
- * - 统一应用于表格与卡片模式。
- */
-const getStatusTagType = (status: UserStatus) => {
-  return status === 'enabled' ? 'success' : 'warning'
-}
-
-/**
- * 角色标签样式：
- * - 管理员使用品牌主色，突出系统治理职责；
- * - 供货方使用成功色，和内部操作员区分开。
- */
-const getRoleTagType = (role: UserRole) => {
-  if (role === 'admin') {
-    return 'primary'
-  }
-  if (role === 'supplier') {
-    return 'success'
-  }
-  return 'info'
-}
-
-/**
- * 角色选项：
- * - 用户管理页的筛选、创建与编辑统一复用同一份角色来源；
- * - 供货方账号在这里正式纳入治理入口，避免页面继续硬编码两种角色。
- */
-const roleOptions: Array<{ label: string; value: UserRole }> = [
-  { label: '管理员', value: 'admin' },
-  { label: '操作员', value: 'operator' },
-  { label: '供货方', value: 'supplier' },
-]
-
-/**
- * 账号类型说明：
- * - 管理员在创建账号前可快速理解三类账号的落点与职责；
- * - 文案集中在这里，便于后续继续补充能力边界说明。
- */
-const accountTypeDescriptions: Array<{
-  role: UserRole
-  title: string
-  description: string
-  badgeClass: string
-}> = [
-  {
-    role: 'admin',
-    title: '管理员账号',
-    description: '进入工作台与系统治理页，可管理用户、审计日志和系统配置。',
-    badgeClass: 'border-brand/20 bg-brand/8 text-brand dark:border-brand/25 dark:bg-brand/10 dark:text-teal-300',
-  },
-  {
-    role: 'operator',
-    title: '操作员账号',
-    description: '进入日常业务页面，聚焦开单、查询、基础资料和扫码入库。',
-    badgeClass: 'border-slate-200 bg-slate-50 text-slate-600 dark:border-white/10 dark:bg-white/5 dark:text-slate-300',
-  },
-  {
-    role: 'supplier',
-    title: '供货方账号',
-    description: '登录后直接进入送货单录入页，仅使用供货方专属送货功能。',
-    badgeClass: 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-300',
-  },
-]
-
-/**
  * 当前表单账号类型提示：
  * - 当管理员切换角色时，右侧提示同步变化；
  * - 重点强调供货方账号的专属落点，降低创建后“为什么没进工作台”的疑惑。
@@ -318,18 +257,6 @@ const currentRoleDescription = computed(() => {
  */
 const getRoleLabel = (role: UserRole) => ROLE_LABEL_MAP[role]
 const getStatusLabel = (status: UserStatus) => STATUS_LABEL_MAP[status]
-const getAccountTypeDescription = (role: UserRole) => {
-  return accountTypeDescriptions.find((item) => item.role === role)?.description ?? '默认业务账号'
-}
-
-/**
- * 关键治理权限文案：
- * - 只展示用户治理与审计相关能力，避免在用户列表中塞入全部业务权限；
- * - 用于明确展示每个角色当前边界。
- */
-const getGovernancePermissionLabels = (permissions: PermissionCode[]) => {
-  return GOVERNANCE_PERMISSION_CODES.filter((permission) => permissions.includes(permission)).map((permission) => PERMISSION_LABEL_MAP[permission])
-}
 
 /**
  * 将搜索条件转换为接口参数：
@@ -361,11 +288,10 @@ const buildQueryParams = (): UserListQuery => {
  * - 成功后统一回填到 listState。
  */
 const loadData = async () => {
-  if (!canViewUsers.value) {
+  if (!ensurePermission('users:view', '用户列表查看')) {
     listState.loading = false
     listState.records = []
     listState.total = 0
-    showPermissionDenied()
     return
   }
 
@@ -390,8 +316,7 @@ const loadData = async () => {
  * - 默认创建启用状态的普通操作员。
  */
 const handleOpenCreate = () => {
-  if (!canCreateUser.value) {
-    showPermissionDenied()
+  if (!ensurePermission('users:create', '新增用户')) {
     return
   }
 
@@ -448,8 +373,7 @@ const handleOpenOwnPasswordDialog = () => {
  * - 密码不在这里修改，避免用户资料编辑与安全操作混在一起。
  */
 const handleOpenEdit = (row: UserSafeProfile) => {
-  if (!canEditUser.value) {
-    showPermissionDenied()
+  if (!ensurePermission('users:update', '编辑用户')) {
     return
   }
 
@@ -470,8 +394,7 @@ const handleOpenEdit = (row: UserSafeProfile) => {
  * - 弹窗中明确展示目标账号，降低误操作概率。
  */
 const handleOpenResetPassword = (row: UserSafeProfile) => {
-  if (!canResetUserPassword.value) {
-    showPermissionDenied()
+  if (!ensurePermission('users:reset_password', '重置用户密码')) {
     return
   }
 
@@ -493,12 +416,10 @@ const handleSubmit = async () => {
     return
   }
 
-  if (dialogMode.value === 'create' && !canCreateUser.value) {
-    showPermissionDenied()
+  if (dialogMode.value === 'create' && !ensurePermission('users:create', '新增用户')) {
     return
   }
-  if (dialogMode.value === 'edit' && !canEditUser.value) {
-    showPermissionDenied()
+  if (dialogMode.value === 'edit' && !ensurePermission('users:update', '编辑用户')) {
     return
   }
 
@@ -520,8 +441,7 @@ const handleSubmit = async () => {
       )
     } else {
       const originalStatus = listState.records.find((item) => item.id === userForm.id)?.status
-      if (userForm.status !== originalStatus && !canToggleUser.value) {
-        showPermissionDenied()
+      if (userForm.status !== originalStatus && !ensurePermission('users:status', '启停用户')) {
         return
       }
 
@@ -559,8 +479,7 @@ const handleSubmitResetPassword = async () => {
     return
   }
 
-  if (!canResetUserPassword.value) {
-    showPermissionDenied()
+  if (!ensurePermission('users:reset_password', '重置用户密码')) {
     return
   }
 
@@ -617,8 +536,7 @@ const handleSubmitOwnPassword = async () => {
  * - 危险动作前增加确认提示，降低误操作风险。
  */
 const handleToggleStatus = async (row: UserSafeProfile) => {
-  if (!canToggleUser.value) {
-    showPermissionDenied()
+  if (!ensurePermission('users:status', '启停用户')) {
     return
   }
 
@@ -785,7 +703,7 @@ onMounted(() => {
           card-container-class="pb-4"
         >
           <template #table>
-            <el-table :data="listState.records" stripe class="user-manage-table w-full flex-1" height="100%" table-layout="auto">
+            <el-table native-scrollbar :data="listState.records" stripe class="user-manage-table w-full flex-1" height="100%" table-layout="auto">
               <el-table-column prop="username" label="账号" min-width="150" show-overflow-tooltip />
               <el-table-column prop="displayName" label="姓名" min-width="132" show-overflow-tooltip />
               <el-table-column label="角色" width="110">

@@ -1,5 +1,6 @@
 # 文件说明
 - 本文档用于盘点 Y-Link 当前“管理员（admin）”与“操作员（operator）”的资源动作权限，沉淀重要数据清单、权限矩阵和差异改造点，作为后续权限治理改造基线。
+- 当前最新权限真源已升级为 `spec/全量权限矩阵与门禁说明.md`；若本文与最新代码口径冲突，一律以后者为准。
 
 # 1. 盘点范围
 - 角色与默认权限来源：`backend/src/constants/auth-permissions.ts`、`src/api/modules/auth.ts`

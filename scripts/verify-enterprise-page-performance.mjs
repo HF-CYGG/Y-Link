@@ -38,10 +38,18 @@ const performanceBudget = {
 }
 
 const expectedKeepAliveRoutes = ['dashboard', 'order-entry', 'order-list', 'products', 'tags', 'system-users', 'system-audit-logs']
-const expectedWarmupTargets = ['order-entry', 'order-list', 'products', 'system-users', 'system-audit-logs']
+const expectedWarmupTargets = ['order-entry', 'order-list', 'products', 'system-audit-logs']
+const expectedColdStartDeferredRoutes = [
+  'system-configs',
+  'system-db-migration',
+  'system-users',
+  'system-client-users',
+  'system-audit-logs',
+]
 const expectedStableRequestFiles = [
   path.join(projectRoot, 'src', 'views', 'dashboard', 'DashboardView.vue'),
   path.join(projectRoot, 'src', 'views', 'order-list', 'composables', 'useOrderListView.ts'),
+  path.join(projectRoot, 'src', 'views', 'system', 'SystemConfigView.vue'),
   path.join(projectRoot, 'src', 'views', 'system', 'UserManageView.vue'),
   path.join(projectRoot, 'src', 'views', 'system', 'AuditLogView.vue'),
   path.join(projectRoot, 'src', 'composables', 'useCrudManager.ts'),
@@ -127,6 +135,13 @@ expectedWarmupTargets.forEach((routeName) => {
   assert(routesSource.includes(`'${routeName}'`), `未找到高频路由 ${routeName} 的预热配置`)
 })
 
+expectedColdStartDeferredRoutes.forEach((routeName) => {
+  assert(
+    routesSource.includes(`name: '${routeName}'`) && routesSource.includes('deferPreloadOnColdStart: true'),
+    `系统治理重页面 ${routeName} 未启用冷启动预热收缩配置`,
+  )
+})
+
 assert(routerIndexSource.includes('scheduleRouteComponentWarmup'), '路由后置守卫未接入预热调度')
 
 expectedStableRequestFiles.forEach((filePath) => {
@@ -172,6 +187,7 @@ fs.writeFileSync(
       routeChunkReport,
       keepAliveRoutes: expectedKeepAliveRoutes,
       warmupTargets: expectedWarmupTargets,
+      coldStartDeferredRoutes: expectedColdStartDeferredRoutes,
       stableRequestFiles: expectedStableRequestFiles,
     },
     null,

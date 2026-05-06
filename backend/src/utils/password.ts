@@ -14,6 +14,7 @@ const scrypt = promisify(scryptCallback)
 const PASSWORD_SALT_BYTES = 16
 const PASSWORD_KEY_LENGTH = 64
 export const CLIENT_PASSWORD_POLICY_MIN_LENGTH = 8
+export const ADMIN_PASSWORD_POLICY_MIN_LENGTH = 8
 
 /**
  * 客户端统一密码策略说明：
@@ -57,6 +58,27 @@ export function assertClientPasswordPolicy(plainPassword: string, fieldLabel = '
   const normalizedPassword = normalizePassword(plainPassword)
   if (!isClientPasswordPolicySatisfied(normalizedPassword)) {
     throw new BizError(getClientPasswordPolicyMessage(fieldLabel), 400)
+  }
+  return normalizedPassword
+}
+
+export function isAdminPasswordPolicySatisfied(plainPassword: string): boolean {
+  const normalizedPassword = normalizePassword(plainPassword)
+  return (
+    normalizedPassword.length >= ADMIN_PASSWORD_POLICY_MIN_LENGTH &&
+    /[A-Za-z]/.test(normalizedPassword) &&
+    /\d/.test(normalizedPassword)
+  )
+}
+
+export function getAdminPasswordPolicyMessage(fieldLabel = '密码'): string {
+  return `${fieldLabel}至少 ${ADMIN_PASSWORD_POLICY_MIN_LENGTH} 位，且需包含字母和数字`
+}
+
+export function assertAdminPasswordPolicy(plainPassword: string, fieldLabel = '密码'): string {
+  const normalizedPassword = normalizePassword(plainPassword)
+  if (!isAdminPasswordPolicySatisfied(normalizedPassword)) {
+    throw new BizError(getAdminPasswordPolicyMessage(fieldLabel), 400)
   }
   return normalizedPassword
 }

@@ -3,20 +3,31 @@
   该文件用于承载产品中心共享工作台页面。
   页面通过统一标签工作台外壳，在“基础信息”和“线上展示”两个产品视角之间切换，
   并复用共享的路由绑定组合式逻辑，兼容旧入口访问。
+  同时通过页内异步组件拆分，把两个重量级子页面从主壳层分包中剥离，降低首包体积。
 -->
 <script setup lang="ts">
+import { defineAsyncComponent } from 'vue'
 import { TabbedWorkbenchPage } from '@/components/common'
 import { useRouteBoundWorkbenchTab } from '@/composables/useRouteBoundWorkbenchTab'
-import ProductManager from '@/views/base-data/components/ProductManager.vue'
-import O2oProductMallManageView from '@/views/o2o/O2oProductMallManageView.vue'
+import {
+  productCenterTabLoaders,
+  type ProductCenterTabKey,
+} from '@/views/product-center/product-center-performance'
 
-type ProductCenterTab = 'basic' | 'o2o'
+type ProductCenterTab = ProductCenterTabKey
 
 // 定义工作台顶部标签，名称需要与下方映射配置中的标签键保持一致。
 const tabs = [
   { label: '基础信息', name: 'basic' },
   { label: '线上展示', name: 'o2o' },
 ] as const
+
+// 产品中心的两个业务子页都较重：
+// - 基础信息侧承载标签、批量维护与明细编辑；
+// - 线上展示侧承载图片压缩、上传与商城配置。
+// 这里改为页内异步组件，避免 ProductCenterView 主壳层一次性把两套实现都打进同一分包。
+const ProductManager = defineAsyncComponent(productCenterTabLoaders.basic)
+const O2oProductMallManageView = defineAsyncComponent(productCenterTabLoaders.o2o)
 
 // 产品中心统一承载“基础资料”和“线上展示”两种视角。
 // 旧路由仍然可访问，但会被映射到同一个共享工作台壳层。

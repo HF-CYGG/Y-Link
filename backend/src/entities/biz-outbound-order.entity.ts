@@ -5,6 +5,7 @@
  */
 
 import {
+  Check,
   Column,
   CreateDateColumn,
   Entity,
@@ -20,6 +21,7 @@ import { entityColumnOptions } from './entity-column-options.js'
 @Index('uk_biz_outbound_show_no_is_deleted', ['showNo', 'isDeleted'], { unique: true })
 @Index('idx_biz_outbound_order_type_created_at', ['orderType', 'createdAt'])
 @Entity({ name: 'biz_outbound_order' })
+@Check('ck_biz_outbound_order_amounts', "`total_qty` >= 0 AND `total_amount` >= 0 AND LENGTH(TRIM(COALESCE(`idempotency_key`, ''))) > 0")
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export class BizOutboundOrder {
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })

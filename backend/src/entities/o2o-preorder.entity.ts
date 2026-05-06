@@ -93,6 +93,11 @@ export class O2oPreorder {
   @Column({ name: 'has_customer_order', ...entityColumnOptions.booleanFlag, default: 0, comment: '是否已触发正式出库单打印/导出（客户端快照）' })
   hasCustomerOrder!: boolean
 
+  // pickupContact 记录用户本次下单明确填写的提货人，
+  // 不能再回退为账号用户名，否则“代同事下单/代部门领取”场景会丢失真实提货口径。
+  @Column({ name: 'pickup_contact', type: 'varchar', length: 32, nullable: true, comment: '提货人' })
+  pickupContact!: string | null
+
   // totalQty 记录整单总件数，便于列表快速展示，避免每次都聚合子项。
   @Column({ name: 'total_qty', type: 'int', default: 0, comment: '总件数' })
   totalQty!: number

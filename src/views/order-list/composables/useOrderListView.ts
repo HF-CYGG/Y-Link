@@ -13,13 +13,15 @@ import {
   deleteOrderById,
   getOrderDetailById,
   getOrderList,
+  purgeOrderById,
   restoreOrderById,
   type OrderDetailResult,
   type OrderListQuery,
   type OrderRecord,
 } from '@/api/modules/order'
-import { useAppStore, useAuthStore } from '@/store'
+import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
+import { useAppStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
 
@@ -36,7 +38,11 @@ const normalizeRouteQueryValue = (value: unknown): string => {
     return ''
   }
 
-  return String(value).trim()
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+    return String(value).trim()
+  }
+
+  return ''
 }
 
 /**
@@ -49,10 +55,11 @@ export const useOrderListView = () => {
   const route = useRoute()
   const router = useRouter()
   const appStore = useAppStore()
-  const authStore = useAuthStore()
+  const { hasPermission, ensurePermission } = usePermissionAction()
   const isPhone = computed(() => appStore.isPhone)
   const isTablet = computed(() => appStore.isTablet)
-  const canDeleteOrder = computed(() => authStore.hasPermission('orders:delete'))
+  const canViewOrder = computed(() => hasPermission('orders:view'))
+  const canDeleteOrder = computed(() => hasPermission('orders:delete'))
   const { height: windowHeight } = useWindowSize()
   const listRequest = useStableRequest()
   const detailRequest = useStableRequest()
@@ -147,6 +154,19 @@ export const useOrderListView = () => {
   const drawerLoading = ref(false)
   const currentOrder = ref<OrderDetailResult | null>(null)
 
+  /**
+   * 清空当前页面可见数据：
+   * - 在无权限或切换会话时避免继续展示上一位用户遗留的列表与详情；
+   * - 统一由组合式函数收口，而不是让页面模板自己兜底。
+   */
+  const resetVisibleData = () => {
+    listState.records = []
+    listState.total = 0
+    currentOrder.value = null
+    drawerVisible.value = false
+    drawerLoading.value = false
+  }
+
   const getTargetRefreshPayload = () => {
     const orderId = normalizeRouteQueryValue(route.query[ORDER_LIST_TARGET_ORDER_ID_QUERY_KEY])
     const showNo = normalizeRouteQueryValue(route.query[ORDER_LIST_TARGET_ORDER_SHOW_NO_QUERY_KEY])
@@ -223,6 +243,11 @@ export const useOrderListView = () => {
    * - 失败时展示稳定错误消息。
    */
   const loadData = async () => {
+    if (!ensurePermission('orders:view', '出库单查看')) {
+      listState.loading = false
+      resetVisibleData()
+      return
+    }
     listState.loading = true
     await listRequest.runLatest({
       executor: (signal) => getOrderList(buildQueryParams(), { signal }),
@@ -239,6 +264,10 @@ export const useOrderListView = () => {
   }
 
   const loadOrderDetail = async (orderId: string) => {
+    if (!ensurePermission('orders:view', '出库单查看')) {
+      resetVisibleData()
+      return null
+    }
     drawerVisible.value = true
     drawerLoading.value = true
     currentOrder.value = null
@@ -315,6 +344,10 @@ export const useOrderListView = () => {
    * - 请求失败时关闭抽屉，避免留下空壳视图。
    */
   const handleViewDetail = async (row: OrderRecord) => {
+    if (!ensurePermission('orders:view', '出库单查看')) {
+      resetVisibleData()
+      return
+    }
     drawerVisible.value = true
     drawerLoading.value = true
     currentOrder.value = null
@@ -340,6 +373,9 @@ export const useOrderListView = () => {
    * - 删除采用软删除，后续可在“已删除”筛选下恢复。
    */
   const handleDeleteOrder = async (row: OrderRecord, confirmShowNo: string) => {
+    if (!ensurePermission('orders:delete', '删除出库单')) {
+      return
+    }
     await deleteOrderById(row.id, { confirmShowNo })
     ElMessage.success(`已删除单据：${row.showNo}`)
     await loadData()
@@ -351,6 +387,9 @@ export const useOrderListView = () => {
    * - 确认后调用软删除接口，单据可在“已删除”或“全部”筛选下找回。
    */
   const handleDeleteOrderWithConfirm = async (row: OrderRecord) => {
+    if (!ensurePermission('orders:delete', '删除出库单')) {
+      return
+    }
     const result = await ElMessageBox.prompt(
       `请输入业务单号 ${row.showNo} 以确认删除。删除后可恢复。`,
       '删除二次确认',
@@ -377,6 +416,9 @@ export const useOrderListView = () => {
    * - 恢复后可在默认列表继续查看详情。
    */
   const handleRestoreOrder = async (row: OrderRecord) => {
+    if (!ensurePermission('orders:delete', '恢复出库单')) {
+      return
+    }
     await restoreOrderById(row.id)
     ElMessage.success(`已恢复单据：${row.showNo}`)
     await loadData()
@@ -388,6 +430,9 @@ export const useOrderListView = () => {
    * - 恢复成功后刷新当前筛选结果。
    */
   const handleRestoreOrderWithConfirm = async (row: OrderRecord) => {
+    if (!ensurePermission('orders:delete', '恢复出库单')) {
+      return
+    }
     await ElMessageBox.confirm(`确认恢复出库单 ${row.showNo} 吗？`, '恢复确认', {
       confirmButtonText: '确认恢复',
       cancelButtonText: '取消',
@@ -396,7 +441,58 @@ export const useOrderListView = () => {
     await handleRestoreOrder(row)
   }
 
+  /**
+   * 永久删除出库单：
+   * - 仅对已软删除单据开放，彻底移除主单与明细；
+   * - 若命中“最后一个流水号”，后端会同步回拨流水，便于测试场景连续重建首单。
+   */
+  const handlePurgeOrder = async (row: OrderRecord, confirmShowNo: string) => {
+    if (!ensurePermission('orders:delete', '永久删除出库单')) {
+      return
+    }
+    const result = await purgeOrderById(row.id, { confirmShowNo })
+    ElMessage.success(
+      result.serialRolledBack
+        ? `已永久删除单据：${row.showNo}，流水已安全回拨`
+        : `已永久删除单据：${row.showNo}`,
+    )
+    await loadData()
+  }
+
+  /**
+   * 永久删除二次确认：
+   * - 仍要求输入完整业务单号，避免把“测试删库”误点到正式历史单据；
+   * - 明确提示该操作不可恢复，并说明只有最后一张单据才会触发安全回拨。
+   */
+  const handlePurgeOrderWithConfirm = async (row: OrderRecord) => {
+    if (!ensurePermission('orders:delete', '永久删除出库单')) {
+      return
+    }
+    const result = await ElMessageBox.prompt(
+      `请输入业务单号 ${row.showNo} 以确认永久删除。永久删除后不可恢复；仅当它是当前类型最后一张单据时，流水才会安全回拨。`,
+      '永久删除确认',
+      {
+        confirmButtonText: '确认永久删除',
+        cancelButtonText: '取消',
+        inputPlaceholder: '请输入完整业务单号',
+        inputValue: '',
+        inputValidator: (value: string) => {
+          if (!String(value || '').trim()) {
+            return '请输入业务单号'
+          }
+          return true
+        },
+        type: 'warning',
+      },
+    )
+    await handlePurgeOrder(row, result.value.trim())
+  }
+
   const refreshForSubmittedOrder = async () => {
+    if (!canViewOrder.value) {
+      resetVisibleData()
+      return false
+    }
     const payload = getTargetRefreshPayload()
     if (!payload || processingTargetRefresh.value) {
       return false
@@ -496,5 +592,7 @@ export const useOrderListView = () => {
     handleDeleteOrderWithConfirm,
     handleRestoreOrder,
     handleRestoreOrderWithConfirm,
+    handlePurgeOrder,
+    handlePurgeOrderWithConfirm,
   }
 }

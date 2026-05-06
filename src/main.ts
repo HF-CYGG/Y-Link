@@ -1,29 +1,47 @@
 /**
  * 模块说明：src/main.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：负责初始化前端应用实例，并挂载全局状态、路由、主题、图标与少量全局指令。
+ * 实现逻辑：
+ * 1. 统一创建 Vue 应用与 Pinia，保证主题、权限、路由都从同一入口初始化；
+ * 2. 仅注册项目真实使用到的 Element Plus 图标与加载指令，避免入口整包注入 UI 组件；
+ * 3. Element Plus 组件本体与样式改由 Vite 编译期按需引入，降低 `ui-kit` 与总产物体积。
  */
 
 import { createApp } from 'vue'
-import { createPinia } from 'pinia'
-import ElementPlus from 'element-plus'
-import zhCn from 'element-plus/es/locale/lang/zh-cn'
+import { ElLoadingDirective } from 'element-plus'
 import dayjs from 'dayjs'
 import 'dayjs/locale/zh-cn'
-import 'element-plus/dist/index.css'
 import 'element-plus/theme-chalk/dark/css-vars.css'
 import './style.css'
 import App from './App.vue'
 import router from '@/router'
 import { elementPlusIconWhitelist } from '@/icons/element-plus'
 import { useThemeStore } from '@/store'
+import pinia from '@/store/pinia'
 
 // 创建应用实例，作为全局能力挂载入口。
 const app = createApp(App)
-const pinia = createPinia()
 
 // 统一日期/时间中文化，避免日期面板出现英文月份与星期。
 dayjs.locale('zh-cn')
+
+/**
+ * 固定 Element Plus 品牌色：
+ * - Vite 开发态按需注入组件样式时，默认色板可能在后续样式注入中覆盖主色变量；
+ * - 入口阶段用内联变量强制写回品牌色，确保管理端始终使用深绿色主色。
+ */
+const applyElementBrandPalette = () => {
+  const root = document.documentElement
+  root.style.setProperty('--el-color-primary', '#005b52')
+  root.style.setProperty('--el-color-primary-light-3', '#4d8c85')
+  root.style.setProperty('--el-color-primary-light-5', '#80ada8')
+  root.style.setProperty('--el-color-primary-light-7', '#b3cecb')
+  root.style.setProperty('--el-color-primary-light-8', '#ccdcdb')
+  root.style.setProperty('--el-color-primary-light-9', '#e6efee')
+  root.style.setProperty('--el-color-primary-dark-2', '#004942')
+}
+
+applyElementBrandPalette()
 
 /**
  * 注册 Element Plus 图标白名单：
@@ -47,10 +65,12 @@ useThemeStore(pinia).initializeTheme()
 // 注册 Vue Router：管理页面级路由与跳转守卫。
 app.use(router)
 
-// 注册 Element Plus：提供 PC 端高密度业务组件。
-app.use(ElementPlus, {
-  locale: zhCn,
-})
+/**
+ * 注册 Element Plus 全局加载指令：
+ * - 项目中的 `v-loading` 属于少量跨页面通用能力，继续在入口统一挂载；
+ * - 其余 UI 组件改由编译期按需引入，避免运行时整包注册。
+ */
+app.directive('loading', ElLoadingDirective)
 
 // 挂载到根节点，启动 SPA 应用。
 app.mount('#app')

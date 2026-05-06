@@ -13,18 +13,22 @@ import type { AuthenticatedRequest } from '../types/auth.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 
-const importPayloadSchema = z.object({
-  exportedAt: z.string(),
-  version: z.string(),
-  tables: z.object({
-    systemConfigs: z.array(z.record(z.any())).default([]),
-    products: z.array(z.record(z.any())).default([]),
-    clientUsers: z.array(z.record(z.any())).default([]),
-    preorders: z.array(z.record(z.any())).default([]),
-    preorderItems: z.array(z.record(z.any())).default([]),
-    inventoryLogs: z.array(z.record(z.any())).default([]),
-  }),
-})
+const importPayloadSchema = z
+  .object({
+    exportedAt: z.string().trim().min(1).max(100),
+    version: z.string().trim().min(1).max(100),
+    tables: z
+      .object({
+        systemConfigs: z.array(z.record(z.any())).default([]),
+        products: z.array(z.record(z.any())).default([]),
+        clientUsers: z.array(z.record(z.any())).default([]),
+        preorders: z.array(z.record(z.any())).default([]),
+        preorderItems: z.array(z.record(z.any())).default([]),
+        inventoryLogs: z.array(z.record(z.any())).default([]),
+      })
+      .strict(),
+  })
+  .strict()
 
 /**
  * MySQL 目标库连接参数：
@@ -74,7 +78,7 @@ export const dataMaintenanceRouter = Router()
 
 dataMaintenanceRouter.post(
   '/backup/sqlite',
-  requirePermission('system_configs:update'),
+  requirePermission('data_maintenance:backup'),
   requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
@@ -86,15 +90,17 @@ dataMaintenanceRouter.post(
 dataMaintenanceRouter.get(
   '/export/json',
   requirePermission('system_configs:view'),
-  asyncHandler(async (_req, res) => {
-    const data = await dataMaintenanceService.exportJson()
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const data = await dataMaintenanceService.exportJson(authReq.auth, extractRequestMeta(req))
     res.json({ code: 0, message: 'ok', data })
   }),
 )
 
 dataMaintenanceRouter.post(
   '/import/json',
-  requirePermission('system_configs:update'),
+  requirePermission('data_maintenance:import'),
   requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
@@ -106,7 +112,7 @@ dataMaintenanceRouter.post(
 
 dataMaintenanceRouter.post(
   '/db-migration/precheck',
-  requirePermission('system_configs:view'),
+  requirePermission('db_migration:view'),
   asyncHandler(async (req, res) => {
     const payload = sqliteToMysqlPrecheckSchema.parse(req.body)
     const data = await databaseMigrationService.precheckSQLiteToMySql(payload)
@@ -116,7 +122,7 @@ dataMaintenanceRouter.post(
 
 dataMaintenanceRouter.get(
   '/db-migration/tasks',
-  requirePermission('system_configs:view'),
+  requirePermission('db_migration:view'),
   asyncHandler(async (_req, res) => {
     const data = await databaseMigrationService.listSQLiteToMySqlTasks()
     res.json({ code: 0, message: 'ok', data })
@@ -125,7 +131,7 @@ dataMaintenanceRouter.get(
 
 dataMaintenanceRouter.get(
   '/db-migration/tasks/:taskId',
-  requirePermission('system_configs:view'),
+  requirePermission('db_migration:view'),
   asyncHandler(async (req, res) => {
     const data = await databaseMigrationService.getSQLiteToMySqlTask(req.params.taskId)
     res.json({ code: 0, message: 'ok', data })
@@ -134,7 +140,7 @@ dataMaintenanceRouter.get(
 
 dataMaintenanceRouter.post(
   '/db-migration/tasks',
-  requirePermission('system_configs:update'),
+  requirePermission('db_migration:operate'),
   requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
@@ -150,7 +156,7 @@ dataMaintenanceRouter.post(
 
 dataMaintenanceRouter.post(
   '/db-migration/tasks/:taskId/run',
-  requirePermission('system_configs:update'),
+  requirePermission('db_migration:operate'),
   requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
@@ -165,7 +171,7 @@ dataMaintenanceRouter.post(
 
 dataMaintenanceRouter.get(
   '/db-migration/runtime-override',
-  requirePermission('system_configs:view'),
+  requirePermission('db_migration:view'),
   asyncHandler(async (_req, res) => {
     const data = await databaseMigrationService.getRuntimeOverrideState()
     res.json({ code: 0, message: 'ok', data })
@@ -174,7 +180,7 @@ dataMaintenanceRouter.get(
 
 dataMaintenanceRouter.post(
   '/db-migration/switch',
-  requirePermission('system_configs:update'),
+  requirePermission('db_migration:operate'),
   requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
@@ -186,7 +192,7 @@ dataMaintenanceRouter.post(
 
 dataMaintenanceRouter.post(
   '/db-migration/rollback',
-  requirePermission('system_configs:update'),
+  requirePermission('db_migration:operate'),
   requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
@@ -198,7 +204,7 @@ dataMaintenanceRouter.post(
 
 dataMaintenanceRouter.delete(
   '/db-migration/runtime-override',
-  requirePermission('system_configs:update'),
+  requirePermission('db_migration:operate'),
   requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest

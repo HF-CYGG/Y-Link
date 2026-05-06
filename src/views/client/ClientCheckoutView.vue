@@ -19,6 +19,7 @@ import { ArrowLeft } from '@element-plus/icons-vue'
 import { submitO2oPreorder, type O2oClientOrderType } from '@/api/modules/o2o'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
 import { useClientAuthStore, useClientCartStore } from '@/store'
+import pinia from '@/store/pinia'
 import { normalizeRequestError } from '@/utils/error'
 
 const props = defineProps<{
@@ -30,8 +31,8 @@ const emit = defineEmits<{
 }>()
 
 const router = useRouter()
-const clientAuthStore = useClientAuthStore()
-const clientCartStore = useClientCartStore()
+const clientAuthStore = useClientAuthStore(pinia)
+const clientCartStore = useClientCartStore(pinia)
 const { runWithGate } = useIdempotentAction()
 
 const remark = ref('')
@@ -53,7 +54,7 @@ const PICKUP_CONTACT_STORAGE_KEY_PREFIX = 'ylink:client:checkout:pickup-contact:
 
 const resolveDefaultPickupContact = (): string => {
   const currentUser = clientAuthStore.currentUser
-  const username = currentUser?.account?.trim()
+  const username = currentUser?.username?.trim() || currentUser?.account?.trim()
   if (username) {
     return username
   }
@@ -62,7 +63,7 @@ const resolveDefaultPickupContact = (): string => {
 
 const resolvePickupContactStorageKey = (): string => {
   const currentUser = clientAuthStore.currentUser
-  const userIdentity = `${currentUser?.id ?? currentUser?.account ?? ''}`.trim()
+  const userIdentity = `${currentUser?.id ?? currentUser?.username ?? currentUser?.account ?? ''}`.trim()
   return `${PICKUP_CONTACT_STORAGE_KEY_PREFIX}${userIdentity || 'anonymous'}`
 }
 
@@ -112,7 +113,7 @@ const handlePickupContactBlur = () => {
 }
 
 onMounted(() => {
-  clientCartStore.initialize()
+  clientCartStore.initialize(clientAuthStore.currentUser?.id)
   // 从商城页直接进入结算时，用户可能尚未进入购物车页手动勾选；
   // 这里默认全选“仍有效”的商品，减少结算前的重复操作。
   if (!clientCartStore.selectedValidItems.length && clientCartStore.validItems.length > 0) {
@@ -216,6 +217,8 @@ const handleSubmit = async () => {
         const result = await submitO2oPreorder({
           clientOrderType: clientOrderType.value,
           isSystemApplied: isDepartmentOrder.value ? Boolean(departmentSystemApplyChoice.value) : false,
+          // 详细注释：提货人需要随订单一起落库，后续订单详情、门店核销与正式出库单都以这里为准。
+          pickupContact: normalizedPickupContact,
           remark: remark.value.trim() || undefined,
           items: selectedItems.value.map((item) => ({
             productId: item.productId,

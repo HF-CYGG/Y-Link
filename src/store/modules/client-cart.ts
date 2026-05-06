@@ -55,6 +55,7 @@ const createCartItemFromProduct = (product: O2oMallProduct, qty: number): Client
 }
 
 export const useClientCartStore = defineStore('client-cart', () => {
+  const clientUserId = ref('')
   const items = ref<ClientCartItem[]>([])
   const initialized = ref(false)
 
@@ -77,6 +78,10 @@ export const useClientCartStore = defineStore('client-cart', () => {
   })
 
   const persist = () => {
+    if (!clientUserId.value) {
+      return
+    }
+
     // 本地快照除了数量，还保留库存与限购字段：
     // 这样页面刷新后仍能先恢复可视状态，再等待目录接口回填最新库存。
     const snapshot: ClientCartSnapshotItem[] = items.value.map((item) => ({
@@ -92,7 +97,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
       selected: item.selected,
     }))
 
-    persistClientCartSnapshot(snapshot)
+    persistClientCartSnapshot(clientUserId.value, snapshot)
   }
 
   const normalizeItem = (item: ClientCartItem) => {
@@ -107,17 +112,42 @@ export const useClientCartStore = defineStore('client-cart', () => {
     } satisfies ClientCartItem
   }
 
+  const resetState = () => {
+    items.value = []
+  }
+
+  const normalizeClientUserId = (value: string | number | null | undefined): string => {
+    if (typeof value === 'string') {
+      return value.trim()
+    }
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return String(value).trim()
+    }
+    return ''
+  }
+
   const replaceItems = (nextItems: ClientCartItem[]) => {
     items.value = nextItems.map(normalizeItem).filter((item) => item.qty > 0)
     persist()
   }
 
-  const initialize = () => {
-    if (initialized.value) {
+  const initialize = (nextClientUserId: string | number | null | undefined) => {
+    const normalizedClientUserId = normalizeClientUserId(nextClientUserId)
+    if (!normalizedClientUserId) {
+      clientUserId.value = ''
+      resetState()
+      initialized.value = true
       return
     }
 
-    const persisted = readPersistedClientCartSnapshot()
+    const switchedUser = clientUserId.value !== normalizedClientUserId
+    if (initialized.value && !switchedUser) {
+      return
+    }
+
+    clientUserId.value = normalizedClientUserId
+    resetState()
+    const persisted = readPersistedClientCartSnapshot(normalizedClientUserId)
     // 持久化快照读取后仍需再次标准化，避免旧版本缓存或异常值污染当前会话。
     replaceItems(persisted)
     initialized.value = true
@@ -125,7 +155,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
 
   const ensureInitialized = () => {
     if (!initialized.value) {
-      initialize()
+      initialize(clientUserId.value)
     }
   }
 
@@ -257,9 +287,11 @@ export const useClientCartStore = defineStore('client-cart', () => {
   }
 
   const clearAll = () => {
-    items.value = []
-    initialized.value = true
-    clearPersistedClientCartSnapshot()
+    const currentClientUserId = clientUserId.value
+    resetState()
+    clientUserId.value = ''
+    initialized.value = false
+    clearPersistedClientCartSnapshot(currentClientUserId)
   }
 
   const toggleItemSelected = (productId: string, selected: boolean) => {
@@ -295,6 +327,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
   }
 
   return {
+    clientUserId,
     items,
     initialized,
     totalQty,

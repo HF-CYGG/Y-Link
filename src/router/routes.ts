@@ -1,9 +1,9 @@
 /**
  * 模块说明：src/router/routes.ts
- * 文件职责：统一维护管理端与客户端的路由、菜单、快捷入口和权限元信息，本次新增系统治理下的数据库迁移助手页面入口。
+ * 文件职责：统一维护管理端与客户端的路由、菜单、快捷入口和权限元信息，本次补充产品中心共享工作台的预热收口配置并收缩 Dashboard 首屏预热范围。
  * 实现逻辑：
  * - 所有业务页面都通过 routeViewLoaders 做懒加载，保证路由、预热和权限入口保持同源；
- * - 系统治理分组下新增数据库迁移助手子路由，并把预热目标同步纳入系统配置页；
+ * - 产品中心共享工作台仍然由两个历史路由承接，但预热目标会按双入口互相补齐，确保壳层拆包后标签切换依旧平滑；
  * - 菜单、快捷入口和首个可访问路由仍然完全由本文件派生，避免出现多份配置源。
  * 维护说明：新增或调整业务页面时，需要同步检查路由名称、权限码、菜单顺序和预热目标是否一致。
  */
@@ -56,6 +56,7 @@ export interface AppRouteMeta extends RouteMeta {
   allowedRoles?: UserRole[]
   keepAlive?: boolean
   preloadTargets?: AppRouteName[]
+  deferPreloadOnColdStart?: boolean
   viewKey?: string
   suppressGlobalLoadingBar?: boolean
 }
@@ -125,7 +126,11 @@ const layoutChildren: AppRouteRecord[] = [
       requiredPermissions: ['dashboard:view'],
       allowedRoles: ['admin', 'operator'],
       keepAlive: true,
-      preloadTargets: ['order-entry', 'order-list', 'products', 'system-users'],
+      // 工作台仅预热最邻近的高频业务页：
+      // - 出库开单与出库单列表是首页最常见下一跳；
+      // - 产品中心、用户中心属于次级治理链路，继续在这里预热会额外拉起共享壳层子包，
+      //   登录后与 Dashboard 首屏渲染争抢网络，得不偿失。
+      preloadTargets: ['order-entry', 'order-list'],
     },
   },
   {
@@ -320,7 +325,9 @@ const layoutChildren: AppRouteRecord[] = [
           keepAlive: true,
           viewKey: 'product-center',
           suppressGlobalLoadingBar: true,
-          preloadTargets: ['o2o-console-verify'],
+          // 线上展示入口命中后，除了预热后续核销链路，也要把基础信息标签对应子包补齐，
+          // 避免共享壳层拆包后，用户切回“基础信息”时再次等待子页面分包下载。
+          preloadTargets: ['products', 'o2o-console-verify'],
         },
       },
       {
@@ -372,7 +379,7 @@ const layoutChildren: AppRouteRecord[] = [
       icon: 'UserFilled',
       menuGroup: '系统管理',
       menuOrder: 50,
-      requiredAnyPermissions: ['system_configs:view', 'users:view', 'audit_logs:view'],
+      requiredAnyPermissions: ['system_configs:view', 'db_migration:view', 'users:view', 'audit_logs:view'],
       allowedRoles: ['admin', 'operator'],
       shortcut: {
         title: '系统配置',
@@ -395,7 +402,11 @@ const layoutChildren: AppRouteRecord[] = [
           activeMenu: '/system',
           requiredPermissions: ['system_configs:view'],
           keepAlive: true,
-          preloadTargets: ['system-db-migration', 'system-users', 'system-client-users'],
+          // 系统治理页首次进入时优先让当前页先稳定显示：
+          // - 系统配置原本会顺手预热数据库迁移与用户中心，冷启动时会把多个重模块一起拉起；
+          // - 这里改为仅保留更轻量的治理链路，并结合 deferPreloadOnColdStart 避免首次进入时抢占带宽。
+          preloadTargets: ['system-audit-logs'],
+          deferPreloadOnColdStart: true,
         },
       },
       {
@@ -406,7 +417,7 @@ const layoutChildren: AppRouteRecord[] = [
           title: '数据库迁移助手',
           menuOrder: 15,
           activeMenu: '/system',
-          requiredPermissions: ['system_configs:view'],
+          requiredPermissions: ['db_migration:view'],
           shortcut: {
             title: '数据库迁移',
             description: '进入数据库迁移助手，完成预检、迁移、切换与回退',
@@ -417,7 +428,8 @@ const layoutChildren: AppRouteRecord[] = [
             bgClass: 'bg-secondary/10 dark:bg-secondary/20',
           },
           keepAlive: true,
-          preloadTargets: ['system-configs', 'system-audit-logs'],
+          preloadTargets: ['system-audit-logs'],
+          deferPreloadOnColdStart: true,
         },
       },
       {
@@ -432,7 +444,8 @@ const layoutChildren: AppRouteRecord[] = [
           keepAlive: true,
           viewKey: 'user-center',
           suppressGlobalLoadingBar: true,
-          preloadTargets: ['system-client-users', 'system-audit-logs'],
+          preloadTargets: ['system-client-users'],
+          deferPreloadOnColdStart: true,
         },
       },
       {
@@ -448,7 +461,7 @@ const layoutChildren: AppRouteRecord[] = [
           keepAlive: true,
           viewKey: 'user-center',
           suppressGlobalLoadingBar: true,
-          preloadTargets: ['system-audit-logs'],
+          deferPreloadOnColdStart: true,
         },
       },
       {
@@ -461,6 +474,7 @@ const layoutChildren: AppRouteRecord[] = [
           activeMenu: '/system',
           requiredPermissions: ['audit_logs:view'],
           keepAlive: true,
+          deferPreloadOnColdStart: true,
         },
       },
     ],
@@ -700,7 +714,9 @@ const deriveMenuItems = (records: AppRouteRecord[], user?: Pick<UserSafeProfile,
 
     collectedItems.push({
       title: record.meta.title,
-      path: fullPath,
+      // 父级菜单若已存在可访问子页，则直接指向首个可访问子页，
+      // 避免先命中父级 redirect 再跳子页，放大系统治理冷启动等待感。
+      path: children.length > 0 ? children[0].path : fullPath,
       icon: record.meta.icon,
       group: record.meta.menuGroup,
       children: children.length > 0 ? children : undefined,

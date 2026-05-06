@@ -513,6 +513,7 @@ README 仅保留基础说明，完整开发文档与部署细节统一维护在 
 - [GitHub Actions（自动化与 CI/CD）](https://github.com/HF-CYGG/Y-Link/wiki/GitHub-Actions)
 - [API Reference（接口说明）](https://github.com/HF-CYGG/Y-Link/wiki/API-Reference)
 - [Troubleshooting（故障排查）](https://github.com/HF-CYGG/Y-Link/wiki/Troubleshooting)
+- [Task1：全栈治理基线、模块边界、历史模式禁令与范围边界](./spec/task1-全栈治理基线、模块边界、历史模式禁令与范围边界.md)
 - [数据库迁移向导演练与验收手册](./docs/Y-Link数据库迁移向导演练与验收手册.md)
 
 ---

@@ -1,10 +1,12 @@
 /**
  * 模块说明：src/router/route-performance.ts
- * 文件职责：统一维护路由异步加载器、页面预热目标和登录后首跳预热策略，本次补入系统治理下的数据库迁移助手懒加载与预热映射。
+ * 文件职责：统一维护路由异步加载器、页面预热目标和登录后首跳预热策略，本次收缩登录后预热范围并保留高频页面空闲预热能力。
  * 维护说明：
  * - 路由表与预热表必须保持同一命名口径，否则 preloadTargets 会静默失效；
  * - 新增业务页面时，除了补 routes，还要同步评估是否需要纳入这里的预热范围。
  */
+import { preloadProductCenterTabs, resolveProductCenterWarmupTargets } from '@/views/product-center/product-center-performance'
+import { preloadUserCenterTabs } from '@/views/system/user-center-performance'
 
 /**
  * 前端命名路由集合：
@@ -72,7 +74,7 @@ export const routeViewLoaders = {
 
   // 送货单与扫码入库模块
   'supplier-delivery': () => import('@/views/inbound/SupplierWorkbenchView.vue'),
-  'supplier-history': () => import('@/views/inbound/SupplierWorkbenchView.vue'),
+  'supplier-history': () => import('@/views/inbound/SupplierHistoryView.vue'),
   'inbound-scan': () => import('@/views/inbound/InboundScanView.vue'),
 
   'o2o-console-products': () => import('@/views/product-center/ProductCenterView.vue'),
@@ -103,18 +105,39 @@ const warmableRouteLoaders: Partial<Record<RouteWarmupTarget, RouteViewLoader>> 
   dashboard: routeViewLoaders.dashboard,
   'order-entry': routeViewLoaders['order-entry'],
   'order-list': routeViewLoaders['order-list'],
-  products: routeViewLoaders.products,
+  // 产品中心当前使用共享工作台壳层：
+  // - 仅预热壳层会导致标签切换时仍然需要额外等待子页面分包；
+  // - 因此这里在路由预热阶段一并补齐默认标签对应的业务子包。
+  products: () =>
+    Promise.all([
+      routeViewLoaders.products(),
+      preloadProductCenterTabs(resolveProductCenterWarmupTargets('products')),
+    ]),
   tags: routeViewLoaders.tags,
   'supplier-delivery': routeViewLoaders['supplier-delivery'],
   'supplier-history': routeViewLoaders['supplier-history'],
-  'o2o-console-products': routeViewLoaders['o2o-console-products'],
+  'o2o-console-products': () =>
+    Promise.all([
+      routeViewLoaders['o2o-console-products'](),
+      preloadProductCenterTabs(resolveProductCenterWarmupTargets('o2o-console-products')),
+    ]),
   'o2o-console-orders': routeViewLoaders['o2o-console-orders'],
   'o2o-console-verify': routeViewLoaders['o2o-console-verify'],
   'o2o-console-inbound': routeViewLoaders['o2o-console-inbound'],
   'system-configs': routeViewLoaders['system-configs'],
   'system-db-migration': routeViewLoaders['system-db-migration'],
-  'system-users': routeViewLoaders['system-users'],
-  'system-client-users': routeViewLoaders['system-client-users'],
+  // 用户中心改为共享壳层 + 异步标签页后，预热阶段继续补齐默认标签，
+  // 避免从系统菜单首跳进入时还要额外等待标签子包下载。
+  'system-users': () =>
+    Promise.all([
+      routeViewLoaders['system-users'](),
+      preloadUserCenterTabs(['management']),
+    ]),
+  'system-client-users': () =>
+    Promise.all([
+      routeViewLoaders['system-client-users'](),
+      preloadUserCenterTabs(['client']),
+    ]),
   'system-audit-logs': routeViewLoaders['system-audit-logs'],
 }
 
@@ -241,13 +264,15 @@ const resolveWarmupTargetByPath = (redirectPath: string): RouteWarmupTarget | nu
 }
 
 export const resolvePostLoginWarmupTargets = (redirectPath?: string): RouteWarmupTarget[] => {
-  // 登录后至少保证 AppLayout 和工作台被预热；
-  // 如果存在明确 redirect，再额外补充一次“下一跳页面”预热。
-  const targets: RouteWarmupTarget[] = ['appLayout', 'dashboard']
+  // 登录成功后不再默认把 Dashboard 整页提前拉起：
+  // - 登录页随后的 replace 本身就会加载目标页面，若这里同步预热 Dashboard，
+  //   会与真实导航重复争抢带宽，放大“登录后首跳变慢”的体感；
+  // - 因此这里仅保留基础壳层，并按 redirect 精确补充下一跳业务页。
+  const targets: RouteWarmupTarget[] = ['appLayout']
   const normalizedRedirectPath = typeof redirectPath === 'string' ? redirectPath.trim() : ''
   const matchedTarget = normalizedRedirectPath ? resolveWarmupTargetByPath(normalizedRedirectPath) : null
 
-  if (matchedTarget) {
+  if (matchedTarget && matchedTarget !== 'dashboard') {
     targets.push(matchedTarget)
   }
 
@@ -274,8 +299,20 @@ export const resolveClientPostLoginWarmupTargets = (redirectPath?: string): AppR
  * - 避免与当前页面首屏渲染争抢主线程与网络；
  * - 使用 requestIdleCallback 优先，缺失时回退到短延时 setTimeout。
  */
-export const scheduleRouteComponentWarmup = (routeNames: AppRouteName[]) => {
+export const scheduleRouteComponentWarmup = (routeNames: RouteWarmupTarget[]) => {
   if (globalThis.window === undefined) {
+    return
+  }
+
+  /**
+   * 弱网与省流场景下收缩预热：
+   * - `saveData` 打开或命中 2G/slow-2g 时，优先把带宽留给当前页面；
+   * - 正常网络仍保持现有空闲预热策略，不影响高频路径体验。
+   */
+  const networkConnection = 'connection' in globalThis.navigator
+    ? (globalThis.navigator.connection as { saveData?: boolean; effectiveType?: string } | undefined)
+    : undefined
+  if (networkConnection?.saveData || /(?:^|-)2g$/i.test(networkConnection?.effectiveType ?? '')) {
     return
   }
 

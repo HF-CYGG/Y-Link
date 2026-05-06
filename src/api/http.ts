@@ -10,6 +10,7 @@ import { useAppStore } from '@/store/modules/app'
 import { clearPersistedAuthState, getPersistedAuthToken } from '@/utils/auth-storage'
 import { clearPersistedClientAuthState, getPersistedClientAuthToken } from '@/utils/client-auth-storage'
 import { normalizeRequestError, unwrapApiResponse } from '@/utils/error'
+import pinia from '@/store/pinia'
 
 /**
  * 页面层可安全透传的请求控制项：
@@ -135,13 +136,13 @@ const http = axios.create({
  */
 http.interceptors.request.use(
   (config) => {
-    const appStore = useAppStore()
+    const appStore = useAppStore(pinia)
     appStore.startLoading()
 
     return attachAuthorizationHeader(config)
   },
   (error) => {
-    const appStore = useAppStore()
+    const appStore = useAppStore(pinia)
     appStore.endLoading()
     return Promise.reject(error)
   },
@@ -154,12 +155,12 @@ http.interceptors.request.use(
  */
 http.interceptors.response.use(
   (response: AxiosResponse<ApiResponse<unknown>>) => {
-    const appStore = useAppStore()
+    const appStore = useAppStore(pinia)
     appStore.endLoading()
     return response
   },
   (error) => {
-    const appStore = useAppStore()
+    const appStore = useAppStore(pinia)
     appStore.endLoading()
     const normalizedError = normalizeRequestError(error)
 

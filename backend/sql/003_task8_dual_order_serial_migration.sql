@@ -14,7 +14,7 @@ ALTER TABLE `biz_outbound_order`
 CREATE TABLE IF NOT EXISTS `system_configs` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '配置主键',
   `config_key` VARCHAR(128) NOT NULL COMMENT '配置键',
-  `config_value` VARCHAR(255) NOT NULL COMMENT '配置值',
+  `config_value` TEXT NOT NULL COMMENT '配置值',
   `config_group` VARCHAR(64) NOT NULL DEFAULT 'general' COMMENT '配置分组',
   `remark` VARCHAR(255) DEFAULT NULL COMMENT '备注',
   `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '创建时间',

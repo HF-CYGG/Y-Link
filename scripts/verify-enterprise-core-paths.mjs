@@ -292,6 +292,7 @@ const verifyFrontendStaticCoverage = () => {
   const appLayoutPath = path.join(projectRoot, 'src', 'layout', 'AppLayout.vue')
   const orderListComposablePath = path.join(projectRoot, 'src', 'views', 'order-list', 'composables', 'useOrderListView.ts')
   const orderListViewPath = path.join(projectRoot, 'src', 'views', 'order-list', 'OrderListView.vue')
+  const orderVoucherWorkbenchDialogPath = path.join(projectRoot, 'src', 'views', 'order-list', 'components', 'OrderVoucherWorkbenchDialog.vue')
   const orderVoucherTemplatePath = path.join(projectRoot, 'src', 'views', 'order-list', 'components', 'OrderVoucherTemplate.vue')
   const systemConfigViewPath = path.join(projectRoot, 'src', 'views', 'system', 'SystemConfigView.vue')
   const userManageViewPath = path.join(projectRoot, 'src', 'views', 'system', 'UserManageView.vue')
@@ -309,6 +310,7 @@ const verifyFrontendStaticCoverage = () => {
   const appLayoutSource = readText(appLayoutPath)
   const orderListComposableSource = readText(orderListComposablePath)
   const orderListViewSource = readText(orderListViewPath)
+  const orderVoucherWorkbenchDialogSource = readText(orderVoucherWorkbenchDialogPath)
   const orderVoucherTemplateSource = readText(orderVoucherTemplatePath)
   const systemConfigViewSource = readText(systemConfigViewPath)
   const userManageViewSource = readText(userManageViewPath)
@@ -343,9 +345,15 @@ const verifyFrontendStaticCoverage = () => {
   assert.match(dashboardViewSource, /executor: \(signal\) => getDashboardStats\(\{ signal \}\)/, '工作台未接入 signal 控制')
   assert.match(orderListComposableSource, /executor: \(signal\) => getOrderList\(buildQueryParams\(\), \{ signal \}\)/, '出库列表未接入 signal 控制')
   assert.match(orderListComposableSource, /executor: \(signal\) => getOrderDetailById\(row\.id, \{ signal \}\)/, '出库详情未接入 signal 控制')
-  assert.match(orderListViewSource, /handlePrintVoucher/, '出库列表页面未接入凭证打印入口')
-  assert.match(orderListViewSource, /handleExportVoucherPdf/, '出库列表页面未接入凭证导出入口')
-  assert.match(orderVoucherTemplateSource, /出库明细/, '凭证模板缺少出库明细核心区块')
+  assert.match(orderListViewSource, /handleOpenVoucherDialog/, '出库列表页面未保留正式出库单入口控制')
+  assert.match(
+    orderListViewSource,
+    /defineAsyncComponent\(\(\) => import\('\.\/components\/OrderVoucherWorkbenchDialog\.vue'\)\)/,
+    '出库列表页面未将正式出库单工作台拆到低频异步分包',
+  )
+  assert.match(orderVoucherWorkbenchDialogSource, /handlePrintVoucher/, '正式出库单工作台未接入凭证打印入口')
+  assert.match(orderVoucherWorkbenchDialogSource, /handleExportVoucherPdf/, '正式出库单工作台未接入凭证导出入口')
+  assert.match(orderVoucherTemplateSource, /voucher-master-table/, '凭证模板缺少正式出库单主表格结构')
   assert.match(systemConfigViewSource, /系统配置/, '系统配置页面入口异常')
   assert.match(userManageViewSource, /executor: \(signal\) => getUserList\(buildQueryParams\(\), \{ signal \}\)/, '系统用户页未接入 signal 控制')
   assert.match(auditLogViewSource, /executor: \(signal\) => getAuditLogList\(buildQueryParams\(\), \{ signal \}\)/, '审计日志页未接入 signal 控制')
@@ -365,6 +373,7 @@ const verifyFrontendStaticCoverage = () => {
       appLayoutPath,
       orderListComposablePath,
       orderListViewPath,
+      orderVoucherWorkbenchDialogPath,
       orderVoucherTemplatePath,
       systemConfigViewPath,
       userManageViewPath,

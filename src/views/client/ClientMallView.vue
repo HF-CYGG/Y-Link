@@ -14,7 +14,8 @@ import { ArrowDown, ArrowRight, Search, ShoppingCart } from '@element-plus/icons
 import { getO2oMallProducts, type O2oMallProduct } from '@/api/modules/o2o'
 import { BaseRequestState } from '@/components/common'
 import { useStableRequest } from '@/composables/useStableRequest'
-import { useClientCartStore, useClientCatalogStore } from '@/store'
+import { useClientAuthStore, useClientCartStore, useClientCatalogStore } from '@/store'
+import pinia from '@/store/pinia'
 import { normalizeRequestError } from '@/utils/error'
 import { useDevice } from '@/composables/useDevice'
 import { resolveProductPlaceholder } from '@/utils/product-placeholder'
@@ -28,8 +29,9 @@ interface ProductCategoryGroup {
   items: O2oMallProduct[]
 }
 
-const clientCartStore = useClientCartStore()
-const clientCatalogStore = useClientCatalogStore()
+const clientCartStore = useClientCartStore(pinia)
+const clientCatalogStore = useClientCatalogStore(pinia)
+const clientAuthStore = useClientAuthStore(pinia)
 const { runLatest } = useStableRequest()
 const { isPhone } = useDevice()
 const route = useRoute()
@@ -72,8 +74,8 @@ const CATEGORY_VIEWPORT_ACTIVATE_OFFSET = 28
 const CATEGORY_BOTTOM_VISIBLE_PADDING = 56
 
 // 商城页属于高频返回页面，初始化时优先恢复购物车与目录缓存，避免每次进入都重置上下文。
-clientCartStore.initialize()
-clientCatalogStore.initialize()
+clientCartStore.initialize(clientAuthStore.currentUser?.id)
+clientCatalogStore.initialize(clientAuthStore.currentUser?.id)
 
 const products = computed(() => clientCatalogStore.products)
 
@@ -209,6 +211,14 @@ const warmupProductImages = (items: O2oMallProduct[]) => {
   }
   globalThis.window.setTimeout(warmup, 180)
 }
+
+watch(
+  () => clientAuthStore.currentUser?.id,
+  (nextClientUserId) => {
+    clientCartStore.initialize(nextClientUserId)
+    clientCatalogStore.initialize(nextClientUserId)
+  },
+)
 
 const loadProducts = async (force = false) => {
   // 如果缓存仍在有效期内，则直接复用本地目录快照，并只同步购物车库存信息。

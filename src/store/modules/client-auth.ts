@@ -28,8 +28,12 @@ import {
   clearPersistedClientAuthState,
   persistClientAuthState,
   readPersistedClientAuthState,
+  type ClientAuthUserSnapshot,
 } from '@/utils/client-auth-storage'
 import { normalizeRequestError } from '@/utils/error'
+import pinia from '@/store/pinia'
+import { useClientCartStore } from './client-cart'
+import { useClientCatalogStore } from './client-catalog'
 import { useClientOrderStore } from './client-order'
 
 /**
@@ -45,7 +49,11 @@ export const useClientAuthStore = defineStore('client-auth', () => {
   const initializing = ref(false)
 
   const clearClientScopedStores = () => {
-    const clientOrderStore = useClientOrderStore()
+    const clientCartStore = useClientCartStore(pinia)
+    const clientCatalogStore = useClientCatalogStore(pinia)
+    const clientOrderStore = useClientOrderStore(pinia)
+    clientCartStore.clearAll()
+    clientCatalogStore.clearAll()
     clientOrderStore.clearAll()
   }
 
@@ -80,6 +88,31 @@ export const useClientAuthStore = defineStore('client-auth', () => {
   }
 
   /**
+   * 归一化历史本地快照：
+   * - 旧缓存里可能还没有 `username` 字段；
+   * - 这里统一补齐 `username` / `realName` / `account`，避免启动恢复阶段出现类型断裂。
+   */
+  const normalizePersistedUser = (user: ClientAuthUserSnapshot | null): ClientSafeProfile | null => {
+    if (!user) {
+      return null
+    }
+
+    const normalizedUsername = user.username?.trim() || user.account?.trim() || user.realName?.trim() || ''
+    const normalizedAccount = user.account?.trim() || normalizedUsername || user.email?.trim() || user.mobile?.trim() || ''
+
+    return {
+      ...user,
+      account: normalizedAccount,
+      username: normalizedUsername,
+      realName: user.realName?.trim() || normalizedUsername,
+      mobile: user.mobile ?? '',
+      email: user.email ?? '',
+      departmentName: user.departmentName ?? null,
+      lastLoginAt: user.lastLoginAt ?? null,
+    }
+  }
+
+  /**
    * 清空客户端登录态：
    * - 主动退出和会话失效都复用该逻辑；
    * - 同步清掉本地持久化内容，避免刷新后回填旧用户。
@@ -106,7 +139,7 @@ export const useClientAuthStore = defineStore('client-auth', () => {
     try {
       const persisted = readPersistedClientAuthState()
       token.value = persisted.token
-      currentUser.value = persisted.user
+      currentUser.value = normalizePersistedUser(persisted.user)
       expiresAt.value = persisted.expiresAt
 
       if (!persisted.token) {

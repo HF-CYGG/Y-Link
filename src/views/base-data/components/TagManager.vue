@@ -17,14 +17,13 @@ import {
   PageToolbarCard,
 } from '@/components/common'
 import { useCrudManager } from '@/composables/useCrudManager'
+import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
-import { useAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
-import { showPermissionDenied } from '@/utils/permission'
 
 const formRef = ref<FormInstance>()
-const authStore = useAuthStore()
-const canManageTags = computed(() => authStore.currentUser?.role === 'admin' && authStore.hasPermission('tags:manage'))
+const { hasPermission, ensurePermission } = usePermissionAction()
+const canManageTags = computed(() => hasPermission('tags:manage'))
 const pageReady = ref(false)
 const keepAliveActivated = ref(false)
 const aggregateLoading = ref(false)
@@ -229,32 +228,28 @@ const handleAggregateReset = () => {
 }
 
 const handleAddTag = () => {
-  if (!canManageTags.value) {
-    showPermissionDenied()
+  if (!ensurePermission('tags:manage', '新增标签')) {
     return
   }
   handleAdd()
 }
 
 const handleEditTag = (row: Tag) => {
-  if (!canManageTags.value) {
-    showPermissionDenied()
+  if (!ensurePermission('tags:manage', '编辑标签')) {
     return
   }
   handleEdit(row)
 }
 
 const handleDeleteTag = async (row: Tag) => {
-  if (!canManageTags.value) {
-    showPermissionDenied()
+  if (!ensurePermission('tags:manage', '删除标签')) {
     return
   }
   await handleDelete(row)
 }
 
 const handleSubmitTag = async () => {
-  if (!canManageTags.value) {
-    showPermissionDenied()
+  if (!ensurePermission('tags:manage', '保存标签')) {
     return
   }
   await handleSubmit()
@@ -359,7 +354,7 @@ onActivated(() => {
       card-container-class="pb-4 xl:grid-cols-3"
     >
       <template #table>
-        <el-table :data="tags" class="h-full w-full" stripe row-key="id" table-layout="auto">
+        <el-table native-scrollbar :data="tags" class="h-full w-full" stripe row-key="id" table-layout="auto">
             <el-table-column label="标签名称" prop="tagName" min-width="220" show-overflow-tooltip>
               <template #default="{ row }">
                 <el-tag :color="row.tagCode || '#409EFF'" effect="dark" class="border-none">

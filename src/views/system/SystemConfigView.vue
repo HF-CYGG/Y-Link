@@ -27,10 +27,13 @@ import {
   type OrderSerialConfigRecord,
   type VerificationProviderConfigsResult,
 } from '@/api/modules/system-config'
+import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
-import { useAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
-import { showPermissionDenied } from '@/utils/permission'
+import SystemConfigDepartmentSection from '@/views/system/components/SystemConfigDepartmentSection.vue'
+import SystemConfigO2oRulesSection from '@/views/system/components/SystemConfigO2oRulesSection.vue'
+import SystemConfigSerialSection from '@/views/system/components/SystemConfigSerialSection.vue'
+import SystemConfigVerificationSection from '@/views/system/components/SystemConfigVerificationSection.vue'
 import {
   DATABASE_MIGRATION_ASSISTANT_NAME,
   DATABASE_MIGRATION_ENTRY_DESCRIPTION,
@@ -56,7 +59,7 @@ type VerificationFormValue = {
 type ConfigSectionKey = 'order_serial' | 'o2o_rules' | 'verification' | 'department'
 type DepartmentTreeNode = ClientDepartmentTreeNode
 
-const authStore = useAuthStore()
+const { hasPermission, ensurePermission } = usePermissionAction()
 const router = useRouter()
 const formRef = ref<FormInstance>()
 const loading = ref(true)
@@ -70,6 +73,19 @@ const o2oRuleConfig = ref<O2oRuleConfigRecord | null>(null)
 const verificationConfigMap = ref<VerificationProviderConfigsResult | null>(null)
 const clientDepartmentConfig = ref<ClientDepartmentConfigRecord | null>(null)
 const loadRequest = useStableRequest()
+const deferredSectionRequest = useStableRequest()
+const sectionLoadingState = reactive<Record<ConfigSectionKey, boolean>>({
+  order_serial: true,
+  o2o_rules: true,
+  verification: true,
+  department: true,
+})
+const sectionErrorState = reactive<Record<ConfigSectionKey, string>>({
+  order_serial: '',
+  o2o_rules: '',
+  verification: '',
+  department: '',
+})
 
 const sectionOptions: Array<{ key: ConfigSectionKey; label: string }> = [
   { key: 'order_serial', label: '订单流水' },
@@ -138,9 +154,27 @@ const serialForm = reactive<{
 })
 
 const initialSnapshot = ref('')
-const canViewConfigs = computed(() => authStore.hasPermission('system_configs:view'))
-const canUpdateConfigs = computed(() => authStore.isAdmin && authStore.hasPermission('system_configs:update'))
-const canViewMigrationAssistant = computed(() => authStore.hasPermission('system_configs:view'))
+const canViewConfigs = computed(() => hasPermission('system_configs:view'))
+const canUpdateConfigs = computed(() => hasPermission('system_configs:update'))
+const canTestVerificationProviders = computed(() => hasPermission('verification_providers:test'))
+const canViewMigrationAssistant = computed(() => hasPermission('db_migration:view'))
+const hasPendingDeferredSections = computed(() => sectionLoadingState.verification || sectionLoadingState.department)
+const hasDeferredSectionFailure = computed(() => Boolean(sectionErrorState.verification || sectionErrorState.department))
+const formInteractionLoading = computed(() => loading.value || hasPendingDeferredSections.value)
+const deferredSectionStatusText = computed(() => {
+  if (hasPendingDeferredSections.value) {
+    return '系统配置主内容已就绪，验证码配置与部门配置正在继续加载，加载完成前暂不可编辑或保存。'
+  }
+
+  const failedSections = sectionOptions
+    .filter((section) => sectionErrorState[section.key])
+    .map((section) => section.label)
+  if (failedSections.length > 0) {
+    return `${failedSections.join('、')}加载失败，请刷新后重试，避免未加载分区被默认值覆盖。`
+  }
+
+  return ''
+})
 
 /**
  * 进入数据库迁移助手：
@@ -576,8 +610,7 @@ const buildVerificationChannelPayload = (channel: 'mobile' | 'email') => {
 }
 
 const handleTestVerificationSend = async (channel: 'mobile' | 'email') => {
-  if (!canUpdateConfigs.value) {
-    showPermissionDenied()
+  if (!ensurePermission('verification_providers:test', '测试验证码平台发送')) {
     return
   }
   if (!validateSingleVerificationConfig(channel)) {
@@ -618,26 +651,36 @@ const handleTestVerificationSend = async (channel: 'mobile' | 'email') => {
 const loadData = async () => {
   if (!canViewConfigs.value) {
     loading.value = false
+    sectionLoadingState.order_serial = false
+    sectionLoadingState.o2o_rules = false
+    sectionLoadingState.verification = false
+    sectionLoadingState.department = false
     return
   }
 
   loadError.value = ''
   loading.value = true
+  sectionErrorState.order_serial = ''
+  sectionErrorState.o2o_rules = ''
+  sectionErrorState.verification = ''
+  sectionErrorState.department = ''
+  sectionLoadingState.order_serial = true
+  sectionLoadingState.o2o_rules = true
+  sectionLoadingState.verification = true
+  sectionLoadingState.department = true
   await loadRequest.runLatest({
     executor: async () => {
-      // 首屏容错策略：即便某一类配置加载失败，也不阻断整页渲染，避免出现“白屏空态”。
-      const [orderSerialResult, o2oRuleResult, verificationResult, clientDepartmentResult] = await Promise.allSettled([
+      // 首屏分层加载策略：
+      // - 订单流水与线上预定规则属于系统配置首页最先需要看到的核心信息；
+      // - 验证码配置与部门配置继续在后台补齐，避免首次进入时同时叠加过多接口与重分区渲染。
+      const [orderSerialResult, o2oRuleResult] = await Promise.allSettled([
         getOrderSerialConfigs(),
         getO2oRuleConfigs(),
-        getVerificationProviderConfigs(),
-        getClientDepartmentConfigs(),
       ])
 
       return {
         orderSerialResult,
         o2oRuleResult,
-        verificationResult,
-        clientDepartmentResult,
       }
     },
     onSuccess: (result) => {
@@ -650,30 +693,73 @@ const loadData = async () => {
       if (result.o2oRuleResult.status === 'fulfilled') {
         applyO2oRules(result.o2oRuleResult.value)
         successCount += 1
+      } else {
+        sectionErrorState.o2o_rules = '线上预定规则加载失败'
       }
-      if (result.verificationResult.status === 'fulfilled') {
-        applyVerificationConfigs(result.verificationResult.value)
-        successCount += 1
-      }
-      if (result.clientDepartmentResult.status === 'fulfilled') {
-        applyClientDepartmentConfigs(result.clientDepartmentResult.value)
-        successCount += 1
+      if (result.orderSerialResult.status !== 'fulfilled') {
+        sectionErrorState.order_serial = '订单流水配置加载失败'
       }
 
       if (successCount === 0) {
         loadError.value = '系统配置加载失败，请刷新重试或检查后端服务状态'
+        sectionLoadingState.verification = false
+        sectionLoadingState.department = false
+        return
       }
-      if (successCount > 0 && successCount < 4) {
-        ElMessage.warning('部分配置加载失败，已展示可用内容')
+      if (successCount > 0 && successCount < 2) {
+        ElMessage.warning('核心配置已部分加载，页面将继续展示可用内容')
       }
 
-      initialSnapshot.value = snapshotForm()
+      deferredSectionRequest
+        .runLatest({
+        executor: async () => {
+          const [verificationResult, clientDepartmentResult] = await Promise.allSettled([
+            getVerificationProviderConfigs(),
+            getClientDepartmentConfigs(),
+          ])
+          return {
+            verificationResult,
+            clientDepartmentResult,
+          }
+        },
+        onSuccess: (deferredResult) => {
+          if (deferredResult.verificationResult.status === 'fulfilled') {
+            applyVerificationConfigs(deferredResult.verificationResult.value)
+          } else {
+            sectionErrorState.verification = '验证码配置加载失败'
+          }
+
+          if (deferredResult.clientDepartmentResult.status === 'fulfilled') {
+            applyClientDepartmentConfigs(deferredResult.clientDepartmentResult.value)
+          } else {
+            sectionErrorState.department = '部门配置加载失败'
+          }
+
+          if (sectionErrorState.verification || sectionErrorState.department) {
+            ElMessage.warning('部分次级配置仍在加载失败，已保留当前可用内容')
+          }
+        },
+        onError: (error) => {
+          const message = extractErrorMessage(error, '继续加载验证码与部门配置失败')
+          sectionErrorState.verification = sectionErrorState.verification || message
+          sectionErrorState.department = sectionErrorState.department || message
+          ElMessage.warning(message)
+        },
+        onFinally: () => {
+          sectionLoadingState.verification = false
+          sectionLoadingState.department = false
+          initialSnapshot.value = snapshotForm()
+        },
+        })
+        .catch(() => undefined)
     },
     onError: (error) => {
       loadError.value = extractErrorMessage(error, '加载系统配置失败，请稍后重试')
       ElMessage.error(loadError.value)
     },
     onFinally: () => {
+      sectionLoadingState.order_serial = false
+      sectionLoadingState.o2o_rules = false
       loading.value = false
     },
   })
@@ -681,8 +767,7 @@ const loadData = async () => {
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const handleSubmit = async () => {
-  if (!canUpdateConfigs.value) {
-    showPermissionDenied()
+  if (!ensurePermission('system_configs:update')) {
     return
   }
 
@@ -801,9 +886,15 @@ onMounted(() => {
       <PageToolbarCard class="space-y-3">
         <div class="flex flex-wrap items-center justify-between gap-3">
           <div class="text-sm text-slate-600 dark:text-slate-300">
-            {{ canUpdateConfigs ? '当前账号（管理员）可编辑参数并提交保存' : '当前账号仅支持只读查看（仅管理员可修改）' }}
+            {{ canUpdateConfigs ? '当前账号具备系统配置维护权限，可编辑参数并提交保存' : '当前账号仅支持只读查看' }}
           </div>
-          <el-button v-if="canUpdateConfigs" type="primary" :loading="saving" :disabled="loading || !isDirty" @click="handleSubmit">
+          <el-button
+            v-if="canUpdateConfigs"
+            type="primary"
+            :loading="saving"
+            :disabled="formInteractionLoading || hasDeferredSectionFailure || !isDirty"
+            @click="handleSubmit"
+          >
             保存配置
           </el-button>
         </div>
@@ -840,6 +931,14 @@ onMounted(() => {
 
       <el-form v-else ref="formRef" :model="serialForm" :rules="rules" label-position="top">
         <div class="apple-card p-5 sm:p-6 xl:p-7">
+          <el-alert
+            v-if="deferredSectionStatusText"
+            :title="deferredSectionStatusText"
+            :type="hasDeferredSectionFailure ? 'warning' : 'info'"
+            :closable="false"
+            show-icon
+            class="mb-4"
+          />
           <div class="mb-4">
             <el-tabs :model-value="activeSection" @tab-change="handleSectionChange">
               <el-tab-pane v-for="section in sectionOptions" :key="section.key" :label="section.label" :name="section.key" />
@@ -847,410 +946,62 @@ onMounted(() => {
           </div>
 
           <div class="config-stage">
-          <transition name="workbench-horizontal-slide">
-            <div v-if="activeSection === 'order_serial'" class="config-stage__panel grid gap-6 lg:grid-cols-2">
-          <div class="apple-card flex flex-col p-5 sm:p-6 xl:p-7">
-            <div class="mb-5 flex items-center justify-between gap-2 border-b border-slate-100 pb-4 dark:border-white/5">
-              <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">部门订单流水</h2>
-              <span class="rounded-lg bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-                前缀：{{ configMap?.department.prefix || 'hyyzjd' }}
-              </span>
-            </div>
-            <div class="grid flex-1 gap-5">
-              <div class="rounded-xl border border-teal-200/60 bg-teal-50/50 p-4 text-teal-800 dark:border-teal-900/40 dark:bg-teal-900/10 dark:text-teal-300">
-                <div class="text-xs font-medium opacity-80">订单编号示例（下一单）</div>
-                <div class="mt-1.5 text-lg font-bold tracking-wide">{{ departmentPreview }}</div>
-              </div>
-              <div class="space-y-4">
-                <el-form-item prop="department.start" class="!mb-0">
-                  <template #label>
-                    <span class="field-label">起始号 <span class="field-label__help">首次生效编号起点</span></span>
-                  </template>
-                  <el-input-number v-model="serialForm.department.start" :min="1" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
-                </el-form-item>
-                <el-form-item prop="department.current" class="!mb-0">
-                  <template #label>
-                    <span class="field-label">当前号 <span class="field-label__help">系统自动维护，仅展示不可编辑</span></span>
-                  </template>
-                  <el-input :model-value="String(serialForm.department.current)" disabled class="!w-full" />
-                </el-form-item>
-                <el-form-item prop="department.width" class="!mb-0">
-                  <template #label>
-                    <span class="field-label">位宽 <span class="field-label__help">流水号补零位数（1-12）</span></span>
-                  </template>
-                  <el-input-number v-model="serialForm.department.width" :min="1" :max="12" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
-                </el-form-item>
-              </div>
-            </div>
-            <div class="mt-6 border-t border-slate-100 pt-4 text-xs text-slate-400 dark:border-white/5 dark:text-slate-500">
-              最近更新时间：{{ getUpdatedAtLabel('department') }}
-            </div>
-          </div>
-
-          <div class="apple-card flex flex-col p-5 sm:p-6 xl:p-7">
-            <div class="mb-5 flex items-center justify-between gap-2 border-b border-slate-100 pb-4 dark:border-white/5">
-              <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">散客订单流水</h2>
-              <span class="rounded-lg bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-                前缀：{{ configMap?.walkin.prefix || 'hyyz' }}
-              </span>
-            </div>
-            <div class="grid flex-1 gap-5">
-              <div class="rounded-xl border border-sky-200/60 bg-sky-50/50 p-4 text-sky-800 dark:border-sky-900/40 dark:bg-sky-900/10 dark:text-sky-300">
-                <div class="text-xs font-medium opacity-80">订单编号示例（下一单）</div>
-                <div class="mt-1.5 text-lg font-bold tracking-wide">{{ walkinPreview }}</div>
-              </div>
-              <div class="space-y-4">
-                <el-form-item prop="walkin.start" class="!mb-0">
-                  <template #label>
-                    <span class="field-label">起始号 <span class="field-label__help">首次生效编号起点</span></span>
-                  </template>
-                  <el-input-number v-model="serialForm.walkin.start" :min="1" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
-                </el-form-item>
-                <el-form-item prop="walkin.current" class="!mb-0">
-                  <template #label>
-                    <span class="field-label">当前号 <span class="field-label__help">系统自动维护，仅展示不可编辑</span></span>
-                  </template>
-                  <el-input :model-value="String(serialForm.walkin.current)" disabled class="!w-full" />
-                </el-form-item>
-                <el-form-item prop="walkin.width" class="!mb-0">
-                  <template #label>
-                    <span class="field-label">位宽 <span class="field-label__help">流水号补零位数（1-12）</span></span>
-                  </template>
-                  <el-input-number v-model="serialForm.walkin.width" :min="1" :max="12" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
-                </el-form-item>
-              </div>
-            </div>
-            <div class="mt-6 border-t border-slate-100 pt-4 text-xs text-slate-400 dark:border-white/5 dark:text-slate-500">
-              最近更新时间：{{ getUpdatedAtLabel('walkin') }}
-            </div>
-          </div>
-          </div>
-          </transition>
-
-          <transition name="workbench-horizontal-slide">
-            <div v-if="activeSection === 'o2o_rules'" class="config-stage__panel space-y-4">
-          <div class="mb-5 flex items-center justify-between gap-2 border-b border-slate-100 pb-4 dark:border-white/5">
-            <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">线上预订规则</h2>
-            <span class="rounded-lg bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-              默认值：24小时 / 5件 / 3次
-            </span>
-          </div>
-          <div class="grid gap-4 md:grid-cols-2">
-            <div class="space-y-2">
-              <div class="text-sm text-slate-600 dark:text-slate-300">超时自动取消</div>
-              <el-switch v-model="serialForm.o2o.autoCancelEnabled" :disabled="!canUpdateConfigs || loading" />
-            </div>
-            <div class="space-y-2">
-              <div class="text-sm text-slate-600 dark:text-slate-300">超时取消时长（小时）</div>
-              <el-input-number
-                v-model="serialForm.o2o.autoCancelHours"
-                :min="1"
-                :max="168"
-                :controls="false"
-                :disabled="!canUpdateConfigs || loading"
-                class="!w-full"
+            <transition name="workbench-horizontal-slide">
+              <SystemConfigSerialSection
+                v-if="activeSection === 'order_serial'"
+                :config-map="configMap"
+                :department-preview="departmentPreview"
+                :walkin-preview="walkinPreview"
+                :serial-form="serialForm"
+                :can-update-configs="canUpdateConfigs"
+                :loading="formInteractionLoading"
+                :get-updated-at-label="getUpdatedAtLabel"
               />
-            </div>
-            <div class="space-y-2">
-              <div class="text-sm text-slate-600 dark:text-slate-300">全局限购开关</div>
-              <el-switch v-model="serialForm.o2o.limitEnabled" :disabled="!canUpdateConfigs || loading" />
-            </div>
-            <div class="space-y-2">
-              <div class="text-sm text-slate-600 dark:text-slate-300">默认限购数量</div>
-              <el-input-number
-                v-model="serialForm.o2o.limitQty"
-                :min="1"
-                :max="999"
-                :controls="false"
-                :disabled="!canUpdateConfigs || loading"
-                class="!w-full"
+            </transition>
+
+            <transition name="workbench-horizontal-slide">
+              <SystemConfigO2oRulesSection
+                v-if="activeSection === 'o2o_rules'"
+                :o2o-form="serialForm.o2o"
+                :can-update-configs="canUpdateConfigs"
+                :loading="formInteractionLoading"
+                :o2o-updated-at-label="o2oUpdatedAtLabel"
               />
-            </div>
-            <div class="space-y-2">
-              <div class="text-sm text-slate-600 dark:text-slate-300">客户端改单次数上限</div>
-              <el-input-number
-                v-model="serialForm.o2o.clientPreorderUpdateLimit"
-                :min="1"
-                :max="999"
-                :controls="false"
-                :disabled="!canUpdateConfigs || loading"
-                class="!w-full"
+            </transition>
+
+            <transition name="workbench-horizontal-slide">
+              <SystemConfigVerificationSection
+                v-if="activeSection === 'verification'"
+                :verification-form="serialForm.verification"
+                :can-update-configs="canUpdateConfigs"
+                :can-test-verification-providers="canTestVerificationProviders"
+                :loading="formInteractionLoading"
+                :saving="saving"
+                :test-sending-channel="testSendingChannel"
+                :get-verification-updated-at-label="getVerificationUpdatedAtLabel"
+                @test-send="handleTestVerificationSend"
               />
-            </div>
-          </div>
-          <div class="mt-6 border-t border-slate-100 pt-4 text-xs text-slate-400 dark:border-white/5 dark:text-slate-500">
-            最近更新时间：{{ o2oUpdatedAtLabel }}
-          </div>
-          </div>
-          </transition>
+            </transition>
 
-          <transition name="workbench-horizontal-slide">
-            <div v-if="activeSection === 'verification'" class="config-stage__panel space-y-5">
-          <div class="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-4 dark:border-white/5">
-            <div>
-              <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">验证码平台配置</h2>
-              <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                管理客户端注册与找回密码所需的短信、邮箱验证码发送平台。支持模板变量：
-                <span v-pre class="font-mono">{{target}}</span>、
-                <span v-pre class="font-mono">{{code}}</span>、
-                <span v-pre class="font-mono">{{scene}}</span>、
-                <span v-pre class="font-mono">{{ip}}</span>。
-              </p>
-            </div>
-            <span class="rounded-lg bg-slate-50 px-2.5 py-1 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-              保存后立即生效
-            </span>
-          </div>
-
-          <el-alert
-            title="模板填写说明"
-            type="info"
-            :closable="false"
-            show-icon
-            description="请求头模板需填写合法 JSON；请求体模板会原样发送给目标平台。若配置成功关键字，系统会在第三方返回文本中匹配该内容来判断发送成功。客户端找回密码仅在手机与邮箱验证码平台同时启用时开放。"
-          />
-
-          <div class="grid gap-6 xl:grid-cols-2">
-            <div class="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-5 dark:border-white/10 dark:bg-slate-900/30">
-              <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100">短信验证码平台</h3>
-                  <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">用于手机号注册、手机号找回密码。</p>
-                </div>
-                <div class="flex items-center gap-3">
-                  <el-button
-                    size="small"
-                    :loading="testSendingChannel === 'mobile'"
-                    :disabled="!canUpdateConfigs || loading || saving"
-                    @click="handleTestVerificationSend('mobile')"
-                  >
-                    发送测试短信
-                  </el-button>
-                  <el-switch v-model="serialForm.verification.mobile.enabled" :disabled="!canUpdateConfigs || loading" />
-                </div>
-              </div>
-
-              <div class="grid gap-4">
-                <div class="grid gap-4 md:grid-cols-[140px_minmax(0,1fr)]">
-                  <div class="space-y-2">
-                    <div class="text-sm text-slate-600 dark:text-slate-300">请求方法</div>
-                    <el-select v-model="serialForm.verification.mobile.httpMethod" :disabled="!canUpdateConfigs || loading">
-                      <el-option label="POST" value="POST" />
-                      <el-option label="GET" value="GET" />
-                    </el-select>
-                  </div>
-                  <div class="space-y-2">
-                    <div class="text-sm text-slate-600 dark:text-slate-300">API 地址</div>
-                    <el-input v-model="serialForm.verification.mobile.apiUrl" :disabled="!canUpdateConfigs || loading" placeholder="https://example.com/send-sms" clearable />
-                  </div>
-                </div>
-
-                <div class="space-y-2">
-                  <div class="text-sm text-slate-600 dark:text-slate-300">请求头模板（JSON）</div>
-                  <el-input
-                    v-model="serialForm.verification.mobile.headersTemplate"
-                    type="textarea"
-                    :rows="4"
-                    :disabled="!canUpdateConfigs || loading"
-                    placeholder='{"Content-Type":"application/json","Authorization":"Bearer xxx"}'
-                  />
-                </div>
-
-                <div class="space-y-2">
-                  <div class="text-sm text-slate-600 dark:text-slate-300">请求体模板</div>
-                  <el-input
-                    v-model="serialForm.verification.mobile.bodyTemplate"
-                    type="textarea"
-                    :rows="6"
-                    :disabled="!canUpdateConfigs || loading"
-                    placeholder='{"mobile":"{{target}}","code":"{{code}}","scene":"{{scene}}"}'
-                  />
-                </div>
-
-                <div class="space-y-2">
-                  <div class="text-sm text-slate-600 dark:text-slate-300">成功关键字（可选）</div>
-                  <el-input
-                    v-model="serialForm.verification.mobile.successMatch"
-                    :disabled="!canUpdateConfigs || loading"
-                    placeholder="如：success"
-                    clearable
-                  />
-                </div>
-              </div>
-
-              <div class="mt-5 border-t border-slate-200/80 pt-4 text-xs text-slate-400 dark:border-white/10 dark:text-slate-500">
-                最近更新时间：{{ getVerificationUpdatedAtLabel('mobile') }}
-              </div>
-            </div>
-
-            <div class="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-5 dark:border-white/10 dark:bg-slate-900/30">
-              <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100">邮箱验证码平台</h3>
-                  <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">用于邮箱注册、邮箱找回密码。</p>
-                </div>
-                <div class="flex items-center gap-3">
-                  <el-button
-                    size="small"
-                    :loading="testSendingChannel === 'email'"
-                    :disabled="!canUpdateConfigs || loading || saving"
-                    @click="handleTestVerificationSend('email')"
-                  >
-                    发送测试邮件
-                  </el-button>
-                  <el-switch v-model="serialForm.verification.email.enabled" :disabled="!canUpdateConfigs || loading" />
-                </div>
-              </div>
-
-              <div class="grid gap-4">
-                <div class="grid gap-4 md:grid-cols-[140px_minmax(0,1fr)]">
-                  <div class="space-y-2">
-                    <div class="text-sm text-slate-600 dark:text-slate-300">请求方法</div>
-                    <el-select v-model="serialForm.verification.email.httpMethod" :disabled="!canUpdateConfigs || loading">
-                      <el-option label="POST" value="POST" />
-                      <el-option label="GET" value="GET" />
-                    </el-select>
-                  </div>
-                  <div class="space-y-2">
-                    <div class="text-sm text-slate-600 dark:text-slate-300">API 地址</div>
-                    <el-input v-model="serialForm.verification.email.apiUrl" :disabled="!canUpdateConfigs || loading" placeholder="https://example.com/send-mail" clearable />
-                  </div>
-                </div>
-
-                <div class="space-y-2">
-                  <div class="text-sm text-slate-600 dark:text-slate-300">请求头模板（JSON）</div>
-                  <el-input
-                    v-model="serialForm.verification.email.headersTemplate"
-                    type="textarea"
-                    :rows="4"
-                    :disabled="!canUpdateConfigs || loading"
-                    placeholder='{"Content-Type":"application/json","Authorization":"Bearer xxx"}'
-                  />
-                </div>
-
-                <div class="space-y-2">
-                  <div class="text-sm text-slate-600 dark:text-slate-300">请求体模板</div>
-                  <el-input
-                    v-model="serialForm.verification.email.bodyTemplate"
-                    type="textarea"
-                    :rows="6"
-                    :disabled="!canUpdateConfigs || loading"
-                    placeholder='{"email":"{{target}}","subject":"Y-Link 验证码","content":"您的验证码为 {{code}}"}'
-                  />
-                </div>
-
-                <div class="space-y-2">
-                  <div class="text-sm text-slate-600 dark:text-slate-300">成功关键字（可选）</div>
-                  <el-input
-                    v-model="serialForm.verification.email.successMatch"
-                    :disabled="!canUpdateConfigs || loading"
-                    placeholder="如：accepted"
-                    clearable
-                  />
-                </div>
-              </div>
-
-              <div class="mt-5 border-t border-slate-200/80 pt-4 text-xs text-slate-400 dark:border-white/10 dark:text-slate-500">
-                最近更新时间：{{ getVerificationUpdatedAtLabel('email') }}
-              </div>
-            </div>
-          </div>
-          </div>
-          </transition>
-
-          <transition name="workbench-horizontal-slide">
-            <div v-if="activeSection === 'department'" class="config-stage__panel space-y-5">
-          <div class="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-4 dark:border-white/5">
-            <div>
-              <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">部门配置</h2>
-              <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                维护客户端可选部门树，支持子部门编排。客户端注册、资料编辑和后台用户编辑会从树中提取可选项。
-              </p>
-            </div>
-            <div class="flex flex-wrap items-center gap-2">
-              <el-button size="small" :disabled="!canUpdateConfigs || loading || saving" @click="handleAddRootDepartment">新增一级部门</el-button>
-              <el-button size="small" :disabled="!canUpdateConfigs || loading || saving" @click="handleAddChildDepartment()">
-                新增子部门
-              </el-button>
-            </div>
-          </div>
-          <el-alert
-            title="填写规范"
-            type="info"
-            :closable="false"
-            show-icon
-            description="可通过拖拽调整部门层级与排序。部门名称最多 32 个字符，部门节点总数不超过 50 个，且全局不能重名。"
-          />
-          <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
-            <div class="rounded-2xl border border-slate-200/80 bg-slate-50/60 p-4 dark:border-white/10 dark:bg-slate-900/20">
-              <el-tree
-                :data="serialForm.clientDepartmentTree"
-                node-key="id"
-                default-expand-all
-                draggable
-                :expand-on-click-node="false"
-                :allow-drop="handleAllowDepartmentDrop"
+            <transition name="workbench-horizontal-slide">
+              <SystemConfigDepartmentSection
+                v-if="activeSection === 'department'"
+                :serial-form="serialForm"
+                :can-update-configs="canUpdateConfigs"
+                :loading="formInteractionLoading"
+                :saving="saving"
+                :selected-department-node="selectedDepartmentNode"
+                :client-department-preview-options="clientDepartmentPreviewOptions"
+                :client-department-config="clientDepartmentConfig"
+                :get-department-path-label="getDepartmentPathLabel"
+                :handle-allow-department-drop="handleAllowDepartmentDrop"
+                @add-root="handleAddRootDepartment"
+                @add-child="handleAddChildDepartment"
+                @edit="handleEditDepartment"
+                @delete="handleDeleteDepartment"
                 @node-click="handleDepartmentNodeClick"
-              >
-                <template #default="{ data }">
-                  <div class="flex w-full items-center justify-between gap-2 py-1">
-                    <span class="truncate text-sm text-slate-700 dark:text-slate-200">{{ getDepartmentPathLabel(data.id) || data.label }}</span>
-                    <div class="flex items-center gap-1">
-                      <el-button
-                        size="small"
-                        text
-                        :disabled="!canUpdateConfigs || loading || saving"
-                        @click.stop="handleAddChildDepartment(data)"
-                      >
-                        子级
-                      </el-button>
-                      <el-button
-                        size="small"
-                        text
-                        :disabled="!canUpdateConfigs || loading || saving"
-                        @click.stop="handleEditDepartment(data)"
-                      >
-                        编辑
-                      </el-button>
-                      <el-button
-                        size="small"
-                        text
-                        type="danger"
-                        :disabled="!canUpdateConfigs || loading || saving"
-                        @click.stop="handleDeleteDepartment(data)"
-                      >
-                        删除
-                      </el-button>
-                    </div>
-                  </div>
-                </template>
-              </el-tree>
-            </div>
-            <div class="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-4 text-sm dark:border-white/10 dark:bg-slate-900/30">
-              <div class="mb-2 font-medium text-slate-700 dark:text-slate-200">当前预览</div>
-              <div class="mb-3 text-xs text-slate-500 dark:text-slate-400">
-                当前选择：{{ selectedDepartmentNode?.label || '未选择节点' }}
-              </div>
-              <div class="flex flex-wrap gap-2">
-                <el-tag
-                  v-for="department in clientDepartmentPreviewOptions"
-                  :key="department"
-                  type="info"
-                  effect="light"
-                >
-                  {{ department }}
-                </el-tag>
-                <span v-if="clientDepartmentPreviewOptions.length === 0" class="text-xs text-slate-400">
-                  暂无部门选项
-                </span>
-              </div>
-            </div>
-          </div>
-          <div class="border-t border-slate-100 pt-4 text-xs text-slate-400 dark:border-white/5 dark:text-slate-500">
-            最近更新时间：{{ clientDepartmentConfig?.updatedAt ? dayjs(clientDepartmentConfig.updatedAt).format('YYYY-MM-DD HH:mm:ss') : '-' }}
-          </div>
-        </div>
-          </transition>
+              />
+            </transition>
           </div>
         </div>
       </el-form>

@@ -138,6 +138,38 @@ productRouter.get(
   }),
 )
 
+productRouter.get(
+  '/paged',
+  requirePermission('products:view'),
+  asyncHandler(async (req, res) => {
+    const isActiveRaw = req.query.isActive
+    const isActive =
+      typeof isActiveRaw === 'string'
+        ? isActiveRaw === '1' || isActiveRaw.toLowerCase() === 'true'
+        : undefined
+    const page = Number(req.query.page ?? 1)
+    const pageSize = Number(req.query.pageSize ?? 20)
+
+    const data = await productService.listPaged({
+      keyword: typeof req.query.keyword === 'string' ? req.query.keyword : undefined,
+      tagId: typeof req.query.tagId === 'string' ? req.query.tagId : undefined,
+      isActive,
+      o2oStatus:
+        req.query.o2oStatus === 'listed' || req.query.o2oStatus === 'unlisted'
+          ? req.query.o2oStatus
+          : undefined,
+      page: Number.isFinite(page) ? page : 1,
+      pageSize: Number.isFinite(pageSize) ? pageSize : 20,
+    })
+
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
 productRouter.post(
   '/batch',
   // 批量更新商品状态属于管理操作，需要 products:manage。

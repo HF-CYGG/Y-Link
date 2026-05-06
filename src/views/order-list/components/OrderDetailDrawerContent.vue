@@ -104,7 +104,7 @@ const getOrderDisplayName = (order: OrderDetailResult) => {
       <span class="inline-block h-2 w-2 rounded-full bg-brand" />
       明细列表
     </h3>
-    <el-table v-if="isDesktop" :data="order.items" border stripe size="small" table-layout="auto">
+    <el-table native-scrollbar v-if="isDesktop" :data="order.items" border stripe size="small" table-layout="auto">
       <el-table-column type="index" label="行号" width="68" align="center" />
       <el-table-column prop="productCode" label="产品编码" min-width="130" show-overflow-tooltip />
       <el-table-column prop="productName" label="产品名称" min-width="180" show-overflow-tooltip />

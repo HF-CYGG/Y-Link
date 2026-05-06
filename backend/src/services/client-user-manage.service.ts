@@ -11,7 +11,7 @@ import { CLIENT_USER_STATUSES, type ClientUserStatus, ClientUser } from '../enti
 import { ClientUserSession } from '../entities/client-user-session.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
-import { hashPassword } from '../utils/password.js'
+import { assertClientPasswordPolicy, hashPassword } from '../utils/password.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
 import { systemConfigService } from './system-config.service.js'
@@ -50,14 +50,19 @@ export interface ClientUserManageSafeProfile {
 }
 
 const sanitizeClientUserProfile = (user: ClientUser): ClientUserManageSafeProfile => {
-  const account = user.realName || user.email || user.mobile || ''
+  const normalizedUsername = user.realName?.trim() || ''
+  const account = normalizedUsername || user.email || user.mobile || ''
   return {
     id: user.id,
     account,
-    username: account,
+    // 字段口径说明：
+    // - `username` 代表客户端用户名，是管理端编辑与展示应优先使用的字段；
+    // - `realName` 暂保留为历史兼容别名，当前与 username 保持同值；
+    // - `account` 继续保留旧字段，避免旧页面或旧缓存直接断裂。
+    username: normalizedUsername,
     mobile: user.mobile ?? '',
     email: user.email ?? '',
-    realName: user.realName,
+    realName: normalizedUsername,
     departmentName: user.departmentName ?? '',
     status: user.status,
     lastLoginAt: user.lastLoginAt,
@@ -284,12 +289,9 @@ export class ClientUserManageService {
     actor: AuthUserContext,
     requestMeta?: RequestMeta,
   ): Promise<ClientUserManageSafeProfile> {
-    const newPassword = input.newPassword.trim()
+    const newPassword = assertClientPasswordPolicy(input.newPassword, '新密码')
     if (!newPassword) {
       throw new BizError('新密码不能为空', 400)
-    }
-    if (newPassword.length < 6) {
-      throw new BizError('新密码长度至少为 6 位', 400)
     }
 
     return AppDataSource.transaction(async (manager) => {

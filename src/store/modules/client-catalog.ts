@@ -7,7 +7,11 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import type { O2oMallProduct } from '@/api/modules/o2o'
-import { persistClientCatalogSnapshot, readPersistedClientCatalogSnapshot } from '@/utils/client-catalog-storage'
+import {
+  clearPersistedClientCatalogSnapshot,
+  persistClientCatalogSnapshot,
+  readPersistedClientCatalogSnapshot,
+} from '@/utils/client-catalog-storage'
 
 // 商品目录缓存时间不宜过长：
 // - 过短会导致用户切页返回时仍频繁请求接口；
@@ -15,6 +19,7 @@ import { persistClientCatalogSnapshot, readPersistedClientCatalogSnapshot } from
 const CLIENT_CATALOG_CACHE_TTL_MS = 5 * 60 * 1000
 
 export const useClientCatalogStore = defineStore('client-catalog', () => {
+  const clientUserId = ref('')
   const products = ref<O2oMallProduct[]>([])
   const activeCategoryKey = ref('all')
   const keyword = ref('')
@@ -24,8 +29,12 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
   const isFresh = computed(() => Date.now() - updatedAt.value <= CLIENT_CATALOG_CACHE_TTL_MS)
 
   const persist = () => {
+    if (!clientUserId.value) {
+      return
+    }
+
     // 目录快照除了商品数据，还需要保留“当前分类 + 搜索词”，这样用户返回商城页时能完整恢复浏览上下文。
-    persistClientCatalogSnapshot({
+    persistClientCatalogSnapshot(clientUserId.value, {
       products: products.value,
       activeCategoryKey: activeCategoryKey.value,
       keyword: keyword.value,
@@ -33,11 +42,40 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
     })
   }
 
-  const initialize = () => {
-    if (initialized.value) {
+  const resetState = () => {
+    products.value = []
+    activeCategoryKey.value = 'all'
+    keyword.value = ''
+    updatedAt.value = 0
+  }
+
+  const normalizeClientUserId = (value: string | number | null | undefined): string => {
+    if (typeof value === 'string') {
+      return value.trim()
+    }
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return String(value).trim()
+    }
+    return ''
+  }
+
+  const initialize = (nextClientUserId: string | number | null | undefined) => {
+    const normalizedClientUserId = normalizeClientUserId(nextClientUserId)
+    if (!normalizedClientUserId) {
+      clientUserId.value = ''
+      resetState()
+      initialized.value = true
       return
     }
-    const snapshot = readPersistedClientCatalogSnapshot()
+
+    const switchedUser = clientUserId.value !== normalizedClientUserId
+    if (initialized.value && !switchedUser) {
+      return
+    }
+
+    clientUserId.value = normalizedClientUserId
+    resetState()
+    const snapshot = readPersistedClientCatalogSnapshot(normalizedClientUserId)
     if (snapshot) {
       // 初始化阶段只负责恢复本地快照，不在这里校验新鲜度；
       // 是否需要重新拉取接口由页面层结合 isFresh 决定，职责更清晰。
@@ -66,7 +104,16 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
     persist()
   }
 
+  const clearAll = () => {
+    const currentClientUserId = clientUserId.value
+    resetState()
+    clientUserId.value = ''
+    initialized.value = false
+    clearPersistedClientCatalogSnapshot(currentClientUserId)
+  }
+
   return {
+    clientUserId,
     products,
     activeCategoryKey,
     keyword,
@@ -77,5 +124,6 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
     setProducts,
     setActiveCategoryKey,
     setKeyword,
+    clearAll,
   }
 })

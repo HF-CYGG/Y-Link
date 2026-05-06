@@ -6,13 +6,14 @@
  */
 
 
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute, type RouteLocationNormalizedLoaded } from 'vue-router'
 import AppHeader from '@/layout/components/AppHeader.vue'
 import AppSidebar from '@/layout/components/AppSidebar.vue'
 import { useDevice } from '@/composables/useDevice'
 import { buildAppMenuItems } from '@/router/routes'
 import { useAppStore, useAuthStore } from '@/store'
+import pinia from '@/store/pinia'
 
 /**
  * 初始化设备监听：
@@ -26,8 +27,8 @@ useDevice()
  * - appStore 负责页面级加载条与布局间距；
  * - authStore 负责根据当前角色派生菜单与登录过渡蒙层。
  */
-const appStore = useAppStore()
-const authStore = useAuthStore()
+const appStore = useAppStore(pinia)
+const authStore = useAuthStore(pinia)
 const route = useRoute()
 
 /**
@@ -66,6 +67,30 @@ const shouldShowGlobalLoadingBar = computed(() => {
   }
   return route.meta.suppressGlobalLoadingBar !== true
 })
+
+// 重治理页面在首次冷加载时更容易出现“旧页残影像回退”的观感，
+// 这里仅对系统治理链路启用更积极的 fallback 覆盖策略。
+const routeStagePending = ref(false)
+const shouldUseStableRouteFallback = computed(() => route.path.startsWith('/system/'))
+const suspenseTimeout = computed(() => (shouldUseStableRouteFallback.value ? 0 : 120))
+
+const handleRoutePending = () => {
+  if (!shouldUseStableRouteFallback.value) {
+    return
+  }
+  routeStagePending.value = true
+}
+
+const handleRouteResolved = () => {
+  routeStagePending.value = false
+}
+
+watch(
+  () => route.fullPath,
+  () => {
+    routeStagePending.value = false
+  },
+)
 
 /**
  * 路由缓存键：
@@ -115,9 +140,9 @@ const resolveViewKey = (route: RouteLocationNormalizedLoaded) => {
 
       <main :class="['relative flex-1 overflow-y-auto overflow-x-hidden', mainPaddingClass]">
         <router-view v-slot="{ Component, route }">
-          <Suspense timeout="120">
+              <Suspense :timeout="suspenseTimeout" @pending="handleRoutePending" @resolve="handleRouteResolved">
             <template #default>
-              <div class="route-stage min-h-full">
+              <div :class="['route-stage min-h-full', { 'route-stage--pending': routeStagePending }]">
                 <transition name="fade-slide">
                   <KeepAlive v-if="route.meta.keepAlive" :max="8">
                     <component :is="Component" v-if="Component" :key="resolveViewKey(route)" class="route-panel" />
@@ -128,7 +153,12 @@ const resolveViewKey = (route: RouteLocationNormalizedLoaded) => {
             </template>
 
             <template #fallback>
-              <div class="route-loading-shell min-h-full rounded-[28px] border border-slate-200/70 bg-white/92 p-5 shadow-sm dark:border-white/10 dark:bg-[#111214]/94">
+              <div
+                :class="[
+                  'route-loading-shell min-h-full rounded-[28px] border border-slate-200/70 bg-white/92 p-5 shadow-sm dark:border-white/10 dark:bg-[#111214]/94',
+                  { 'route-loading-shell--overlay': routeStagePending },
+                ]"
+              >
                 <div class="route-loading-shell__heading">
                   <span class="route-loading-shell__title" />
                   <span class="route-loading-shell__subtitle" />
@@ -169,6 +199,10 @@ const resolveViewKey = (route: RouteLocationNormalizedLoaded) => {
   min-height: 100%;
   overflow: hidden;
   background-color: #eff1f5;
+}
+
+.route-stage--pending {
+  isolation: isolate;
 }
 
 .dark .route-stage {
@@ -228,6 +262,12 @@ const resolveViewKey = (route: RouteLocationNormalizedLoaded) => {
 .route-loading-shell {
   display: grid;
   gap: 1rem;
+}
+
+.route-loading-shell--overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
 }
 
 .route-loading-shell__heading {

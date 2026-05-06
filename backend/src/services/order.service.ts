@@ -9,7 +9,7 @@
  */
 
 import { AppDataSource } from '../config/data-source.js'
-import { Brackets } from 'typeorm'
+import { Brackets, type EntityManager } from 'typeorm'
 import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
@@ -118,6 +118,13 @@ export interface SubmittedOrderItemView {
   remark: string | null
 }
 
+export interface PurgedOrderView {
+  id: string
+  showNo: string
+  orderType: string
+  serialRolledBack: boolean
+}
+
 interface SubmitOrderContext {
   normalizedIdempotencyKey: string
   normalizedOrderType: OrderType
@@ -168,6 +175,17 @@ const SHOW_NO_CONSTRAINT_MATCHER = {
 
 const ORDER_SUBMIT_MAX_RETRY = 3
 const ORDER_TYPE_SET = new Set<OrderType>(['department', 'walkin'])
+const ORDER_FIELD_LIMITS = {
+  idempotencyKey: 128,
+  issuerName: 64,
+  customerDepartmentName: 128,
+  customerName: 128,
+  orderRemark: 500,
+  itemRemark: 200,
+  maxItemCount: 200,
+  maxQty: 999999999.99,
+  maxUnitPrice: 9999999999.99,
+} as const
 
 export class OrderService {
   private readonly orderRepo = AppDataSource.getRepository(BizOutboundOrder)
@@ -178,10 +196,12 @@ export class OrderService {
 
     const normalizedKeyword = String(query.keyword ?? query.showNo ?? '').trim()
     if (normalizedKeyword) {
+      const isLikelyShowNo = /^[A-Za-z0-9-]+$/.test(normalizedKeyword)
       qb.andWhere(
         new Brackets((keywordQb) => {
           keywordQb
             .where('order.showNo LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
+            .orWhere(isLikelyShowNo ? 'order.showNo = :exactShowNo' : '1 = 0', { exactShowNo: normalizedKeyword })
             .orWhere('order.customerName LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
             .orWhere('order.customerDepartmentName LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
             .orWhere('order.issuerName LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
@@ -374,6 +394,80 @@ export class OrderService {
   }
 
   /**
+   * 永久删除单据：
+   * - 仅允许对已软删除单据执行，避免把正常业务单据直接物理移除；
+   * - 物理删除主单后依赖外键级联删除明细；
+   * - 仅当该单据是同类型“最后一张单”且流水 current 与其编号匹配时，才安全回拨 1 位。
+   */
+  async purgeById(
+    id: string,
+    actor: AuthUserContext,
+    confirmShowNo: string,
+    requestMeta?: RequestMeta,
+  ): Promise<PurgedOrderView> {
+    const normalizedConfirmShowNo = confirmShowNo.trim()
+    if (!normalizedConfirmShowNo) {
+      throw new BizError('请填写业务单号完成二次确认')
+    }
+
+    return AppDataSource.transaction(async (manager) => {
+      const orderRepo = manager.getRepository(BizOutboundOrder)
+      const order = await orderRepo.findOne({ where: { id } })
+      if (!order) {
+        throw new BizError('出库单不存在', 404)
+      }
+
+      if (order.showNo !== normalizedConfirmShowNo) {
+        throw new BizError('二次确认失败：业务单号不匹配', 400)
+      }
+
+      if (!order.isDeleted) {
+        throw new BizError('仅已删除单据支持永久删除，请先执行删除操作', 409)
+      }
+
+      const latestSameTypeOrderId = await this.loadLatestOrderIdByType(order.orderType, manager)
+      const shouldRollbackSerial = latestSameTypeOrderId === String(order.id)
+      let serialRolledBack = false
+
+      if (shouldRollbackSerial) {
+        const rollbackResult = await orderSerialService.rollbackCurrentIfMatches(order.orderType, order.showNo, manager)
+        serialRolledBack = rollbackResult.applied
+      }
+
+      const auditDetail = {
+        ...this.buildOrderAuditDetail(order),
+        serialRolledBack,
+      }
+
+      const deleteResult = await orderRepo.delete({ id: order.id })
+      if ((deleteResult.affected ?? 0) <= 0) {
+        throw new BizError('永久删除出库单失败，请稍后重试', 500)
+      }
+
+      await auditService.record(
+        {
+          actionType: 'order.purge',
+          actionLabel: '永久删除出库单',
+          targetType: 'order',
+          targetId: String(order.id),
+          targetCode: order.showNo,
+          actor,
+          requestMeta,
+          detail: auditDetail,
+        },
+        manager,
+      )
+
+      return {
+        id: normalizeEntityId(order.id),
+        showNo: order.showNo,
+        orderType: order.orderType,
+        serialRolledBack,
+      }
+    })
+  }
+
+  /**
    * 整单提交逻辑：
    * 1) 幂等键查重（命中直接返回）
    * 2) 生成 order_uuid + show_no
@@ -385,9 +479,17 @@ export class OrderService {
     actor: AuthUserContext,
     requestMeta?: RequestMeta,
   ): Promise<{ order: SubmittedOrderView; items: SubmittedOrderItemView[] }> {
-    if (!input.items.length) {
-      throw new BizError('至少需要一条明细')
-    }
+    const normalizedItems = this.normalizeSubmitItemsInput(input.items)
+    const normalizedCustomerName = this.readLimitedText(
+      input.customerName,
+      '客户名称',
+      ORDER_FIELD_LIMITS.customerName,
+    )
+    const normalizedRemark = this.readLimitedText(
+      input.remark,
+      '订单备注',
+      ORDER_FIELD_LIMITS.orderRemark,
+    )
     const submitContext = this.buildSubmitOrderContext(input, actor)
 
     let lastError: unknown
@@ -413,7 +515,7 @@ export class OrderService {
             }
           }
 
-          const normalizedProductIds = [...new Set(input.items.map((item) => String(item.productId).trim()))]
+          const normalizedProductIds = normalizedItems.map((item) => String(item.productId).trim())
           const products = await productRepo
             .createQueryBuilder('product')
             .where('product.id IN (:...productIds)', { productIds: normalizedProductIds })
@@ -426,7 +528,7 @@ export class OrderService {
           }
           const orderUuid = generateOrderUuid()
           const showNo = await orderSerialService.generateOrderNo(submitContext.normalizedOrderType, manager)
-          const preparedItems = this.prepareSubmitItems(input.items, productMap, itemRepo)
+          const preparedItems = this.prepareSubmitItems(normalizedItems, productMap, itemRepo)
 
           const order = orderRepo.create({
             orderUuid,
@@ -437,8 +539,8 @@ export class OrderService {
             issuerName: submitContext.normalizedIssuerName,
             customerDepartmentName: submitContext.normalizedCustomerDepartmentName,
             idempotencyKey: submitContext.normalizedIdempotencyKey,
-            customerName: input.customerName?.trim() || null,
-            remark: input.remark?.trim() || null,
+            customerName: normalizedCustomerName,
+            remark: normalizedRemark,
             totalQty: preparedItems.totalQty.toFixed(2),
             totalAmount: preparedItems.totalAmount.toFixed(2),
             creatorUserId: actor.userId,
@@ -509,27 +611,99 @@ export class OrderService {
     throw lastError ?? new BizError('订单提交失败，请稍后重试', 500)
   }
 
-  private buildSubmitOrderContext(input: SubmitOrderInput, actor: AuthUserContext): SubmitOrderContext {
-    const normalizedIdempotencyKey = input.idempotencyKey.trim()
-    if (!normalizedIdempotencyKey) {
-      throw new BizError('幂等键不能为空')
+  /**
+   * 统一读取订单文本字段：
+   * - 订单主表、明细备注共用同一套边界约束；
+   * - 服务层直接阻断空白文本与超长内容，避免数据库截断后才暴露问题。
+   */
+  private readLimitedText(
+    value: string | undefined,
+    label: string,
+    maxLength: number,
+    options: { required?: boolean } = {},
+  ): string | null {
+    const normalizedValue = value?.trim() ?? ''
+    if (!normalizedValue) {
+      if (options.required) {
+        throw new BizError(`${label}不能为空`, 400)
+      }
+      return null
     }
+    if (normalizedValue.length > maxLength) {
+      throw new BizError(`${label}长度不能超过 ${maxLength} 个字符`, 400)
+    }
+    return normalizedValue
+  }
+
+  private readPositiveDecimal(value: number, label: string, maxValue: number, rowIndex?: number): number {
+    const rowPrefix = rowIndex ? `第 ${rowIndex} 行` : ''
+    if (!Number.isFinite(value) || value <= 0) {
+      throw new BizError(`${rowPrefix}${label}必须大于 0`, 400)
+    }
+    if (value > maxValue) {
+      throw new BizError(`${rowPrefix}${label}不能超过 ${maxValue}`, 400)
+    }
+    return Number(value.toFixed(2))
+  }
+
+  private normalizeSubmitItemsInput(inputItems: SubmitOrderItemInput[]): SubmitOrderItemInput[] {
+    if (!inputItems.length) {
+      throw new BizError('至少需要一条明细', 400)
+    }
+    if (inputItems.length > ORDER_FIELD_LIMITS.maxItemCount) {
+      throw new BizError(`单次最多提交 ${ORDER_FIELD_LIMITS.maxItemCount} 条明细`, 400)
+    }
+
+    const productIdSet = new Set<string>()
+    return inputItems.map((item, index) => {
+      const rowIndex = index + 1
+      const normalizedProductId = String(item.productId ?? '').trim()
+      if (!normalizedProductId) {
+        throw new BizError(`第 ${rowIndex} 行产品ID不能为空`, 400)
+      }
+      if (productIdSet.has(normalizedProductId)) {
+        throw new BizError(`第 ${rowIndex} 行产品与前面明细重复，请合并数量后再提交`, 400)
+      }
+      productIdSet.add(normalizedProductId)
+
+      return {
+        productId: normalizedProductId,
+        qty: this.readPositiveDecimal(item.qty, '数量', ORDER_FIELD_LIMITS.maxQty, rowIndex),
+        unitPrice: this.readPositiveDecimal(item.unitPrice, '单价', ORDER_FIELD_LIMITS.maxUnitPrice, rowIndex),
+        remark: this.readLimitedText(item.remark, '明细备注', ORDER_FIELD_LIMITS.itemRemark) ?? undefined,
+      }
+    })
+  }
+
+  private buildSubmitOrderContext(input: SubmitOrderInput, actor: AuthUserContext): SubmitOrderContext {
+    const normalizedIdempotencyKey = this.readLimitedText(
+      input.idempotencyKey,
+      '幂等键',
+      ORDER_FIELD_LIMITS.idempotencyKey,
+      { required: true },
+    )
     const normalizedOrderType = this.normalizeOrderType(input.orderType)
     if (!normalizedOrderType) {
       throw new BizError('订单类型非法，仅支持 department 或 walkin', 400)
     }
-    const normalizedIssuerName = input.issuerName?.trim() || actor.displayName?.trim() || actor.username?.trim()
-    if (!normalizedIssuerName) {
-      throw new BizError('出单人不能为空', 400)
-    }
-    const normalizedCustomerDepartmentName = input.customerDepartmentName?.trim() || null
+    const normalizedIssuerName = this.readLimitedText(
+      input.issuerName ?? actor.displayName ?? actor.username,
+      '出单人',
+      ORDER_FIELD_LIMITS.issuerName,
+      { required: true },
+    )
+    const normalizedCustomerDepartmentName = this.readLimitedText(
+      input.customerDepartmentName,
+      '客户部门名称',
+      ORDER_FIELD_LIMITS.customerDepartmentName,
+    )
     if (normalizedOrderType === 'department' && !normalizedCustomerDepartmentName) {
       throw new BizError('部门订单必须填写客户部门名称', 400)
     }
     return {
-      normalizedIdempotencyKey,
+      normalizedIdempotencyKey: normalizedIdempotencyKey as string,
       normalizedOrderType,
-      normalizedIssuerName,
+      normalizedIssuerName: normalizedIssuerName as string,
       normalizedCustomerDepartmentName,
     }
   }
@@ -549,12 +723,6 @@ export class OrderService {
       const product = productMap.get(normalizedProductId)
       if (!product) {
         throw new BizError(`产品不存在: ${item.productId}`)
-      }
-      if (item.qty <= 0) {
-        throw new BizError(`第 ${index + 1} 行数量非法`)
-      }
-      if (item.unitPrice <= 0) {
-        throw new BizError(`第 ${index + 1} 行单价必须大于 0`)
       }
 
       const lineAmount = Number((item.qty * item.unitPrice).toFixed(2))
@@ -643,6 +811,42 @@ export class OrderService {
       lineAmount: normalizeDecimalText(item.lineAmount),
       remark: item.remark,
     }))
+  }
+
+  /**
+   * 读取同类型最后一张单据主键：
+   * - 使用创建时间倒序 + 主键倒序双重排序，尽量稳定定位最新生成的单据；
+   * - 安全回拨只允许命中这一张，避免删除历史中间号时把流水号回退。
+   */
+  private async loadLatestOrderIdByType(orderType: string, manager: EntityManager): Promise<string | null> {
+    const latestOrder = await manager.getRepository(BizOutboundOrder).findOne({
+      select: {
+        id: true,
+      },
+      where: {
+        orderType,
+      },
+      order: {
+        createdAt: 'DESC',
+        id: 'DESC',
+      },
+    })
+
+    return latestOrder ? normalizeEntityId(latestOrder.id) : null
+  }
+
+  /**
+   * 统一构造订单审计详情：
+   * - 删除、恢复、永久删除都复用同一组业务快照；
+   * - 让工作台近期动态与审计详情保持同一份客户/金额口径。
+   */
+  private buildOrderAuditDetail(order: BizOutboundOrder) {
+    return {
+      customerDepartmentName: order.customerDepartmentName,
+      customerName: order.customerName,
+      totalQty: order.totalQty,
+      totalAmount: order.totalAmount,
+    }
   }
 
   private buildOrderSummaryView(order: BizOutboundOrder): OrderSummaryView {

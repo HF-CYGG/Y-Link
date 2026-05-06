@@ -3,14 +3,18 @@
   该文件用于承载用户中心共享工作台页面。
   页面把“管理端用户”和“客户端用户”两个治理入口收口到同一个工作台中，
   通过共享标签切换逻辑实现路由兼容、标签同步和动态组件切换。
+  同时把两个低频治理子页改为异步标签组件，避免用户中心壳层同步装入两套重表单与表格能力。
 -->
 <script setup lang="ts">
+import { defineAsyncComponent } from 'vue'
 import { TabbedWorkbenchPage } from '@/components/common'
 import { useRouteBoundWorkbenchTab } from '@/composables/useRouteBoundWorkbenchTab'
-import UserManageView from '@/views/system/UserManageView.vue'
-import ClientUserManageView from '@/views/system/ClientUserManageView.vue'
+import { userCenterTabLoaders } from '@/views/system/user-center-performance'
 
 type UserCenterTab = 'management' | 'client'
+
+const UserManageView = defineAsyncComponent(userCenterTabLoaders.management)
+const ClientUserManageView = defineAsyncComponent(userCenterTabLoaders.client)
 
 // 定义用户中心的标签结构，标签值会同时用于路由映射和组件选择。
 const tabs = [

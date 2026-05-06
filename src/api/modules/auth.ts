@@ -31,6 +31,11 @@ export const PERMISSION_CODES = [
   'tags:manage',
   'system_configs:view',
   'system_configs:update',
+  'verification_providers:test',
+  'data_maintenance:backup',
+  'data_maintenance:import',
+  'db_migration:view',
+  'db_migration:operate',
   'users:view',
   'users:create',
   'users:update',
@@ -63,6 +68,11 @@ export const ROLE_DEFAULT_PERMISSION_MAP: Record<UserRole, PermissionCode[]> = {
     'tags:manage',
     'system_configs:view',
     'system_configs:update',
+    'verification_providers:test',
+    'data_maintenance:backup',
+    'data_maintenance:import',
+    'db_migration:view',
+    'db_migration:operate',
     'users:view',
     'users:create',
     'users:update',
@@ -103,13 +113,18 @@ export const PERMISSION_LABEL_MAP: Record<PermissionCode, string> = {
   'orders:create': '新增出库单',
   'orders:view': '查看出库单',
   'orders:update': '更新订单状态',
-  'orders:delete': '删除/恢复出库单',
+  'orders:delete': '删除/恢复/永久删除出库单',
   'products:view': '查看产品资料',
   'products:manage': '维护产品资料',
   'tags:view': '查看标签资料',
   'tags:manage': '维护标签资料',
   'system_configs:view': '查看系统配置',
   'system_configs:update': '维护系统配置',
+  'verification_providers:test': '测试验证码平台发送',
+  'data_maintenance:backup': '创建 SQLite 备份',
+  'data_maintenance:import': '导入全量 JSON 数据',
+  'db_migration:view': '查看数据库迁移助手',
+  'db_migration:operate': '执行数据库迁移与切换',
   'users:view': '查看用户',
   'users:create': '新增用户',
   'users:update': '编辑用户',
@@ -130,6 +145,11 @@ export const PERMISSION_LABEL_MAP: Record<PermissionCode, string> = {
 export const GOVERNANCE_PERMISSION_CODES: PermissionCode[] = [
   'system_configs:view',
   'system_configs:update',
+  'verification_providers:test',
+  'data_maintenance:backup',
+  'data_maintenance:import',
+  'db_migration:view',
+  'db_migration:operate',
   'users:view',
   'users:create',
   'users:update',
@@ -171,6 +191,14 @@ export interface UserSafeProfile {
 export interface LoginPayload {
   username: string
   password: string
+  captchaId?: string
+  captchaCode?: string
+}
+
+export interface AdminCaptchaResult {
+  captchaId: string
+  captchaSvg: string
+  expiresInSeconds: number
 }
 
 /**
@@ -238,6 +266,12 @@ export const login = async (payload: LoginPayload) => {
     user: normalizeUserSafeProfile(result.user),
   }
 }
+
+export const getAdminCaptcha = () =>
+  request<AdminCaptchaResult>({
+    method: 'GET',
+    url: '/auth/captcha',
+  })
 
 /**
  * 调用退出接口：

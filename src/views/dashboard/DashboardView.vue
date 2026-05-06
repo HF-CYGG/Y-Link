@@ -151,13 +151,16 @@ const recentActivities = computed(() => {
  * 动作标签样式：
  * - 新建强调成功态；
  * - 删除使用风险态；
- * - 恢复使用提醒态，帮助管理者快速识别事件类型。
+ * - 恢复与永久删除分别使用提醒态与高风险态，帮助管理者快速识别事件类型。
  */
 const resolveActivityTagType = (actionType: string): 'success' | 'danger' | 'warning' | 'info' => {
   if (actionType === 'order.create') {
     return 'success'
   }
   if (actionType === 'order.delete') {
+    return 'danger'
+  }
+  if (actionType === 'order.purge') {
     return 'danger'
   }
   if (actionType === 'order.restore') {

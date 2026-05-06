@@ -15,6 +15,11 @@ import type { SubmitOrderPayload } from '@/api/modules/order'
 import type { ProductRecord } from '@/api/modules/product'
 import { useAppStore, useAuthStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
+import {
+  clearLegacyScopedStorageKey,
+  getBrowserStorage,
+  resolveUserScopedStorageKey,
+} from '@/utils/storage-user-scope'
 import type { FocusField, OrderEntryDrawerForm, OrderHeaderForm, OrderItemRow } from '../types'
 
 /**
@@ -54,7 +59,8 @@ export const useOrderEntryForm = () => {
   const appStore = useAppStore()
   const authStore = useAuthStore()
   const router = useRouter()
-  const ORDER_ENTRY_DRAFT_STORAGE_KEY = 'y-link.order-entry.draft.v1'
+  const ORDER_ENTRY_DRAFT_STORAGE_KEY_PREFIX = 'y-link.order-entry.draft.v1'
+  const LEGACY_ORDER_ENTRY_DRAFT_STORAGE_KEY = 'y-link.order-entry.draft.v1'
   const defaultIssuerName = computed(() => {
     return authStore.currentUser?.displayName || authStore.currentUser?.username || ''
   })
@@ -218,6 +224,27 @@ export const useOrderEntryForm = () => {
   })
 
   /**
+   * 获取当前管理员的草稿存储上下文：
+   * - 使用 sessionStorage 保留“当前浏览器会话内”的录入草稿；
+   * - 同时清理历史全局 key，避免旧版本未分账号的草稿继续污染当前账号。
+   */
+  const resolveDraftStorageContext = () => {
+    const storage = getBrowserStorage('session')
+    if (!storage) {
+      return {
+        storage: null,
+        storageKey: null,
+      }
+    }
+
+    clearLegacyScopedStorageKey(storage, LEGACY_ORDER_ENTRY_DRAFT_STORAGE_KEY)
+    return {
+      storage,
+      storageKey: resolveUserScopedStorageKey(ORDER_ENTRY_DRAFT_STORAGE_KEY_PREFIX, authStore.currentUser?.id),
+    }
+  }
+
+  /**
    * 构建当前草稿快照：
    * - 仅保存录入页真实需要恢复的数据；
    * - 使用深拷贝后的普通对象，避免把 Vue 响应式代理直接写入 sessionStorage。
@@ -255,11 +282,16 @@ export const useOrderEntryForm = () => {
    * - 仅在浏览器环境且持久化开关就绪后执行，避免初始化阶段把空白态覆盖到草稿。
    */
   const persistDraft = () => {
-    if (!draftPersistenceReady.value || globalThis.window === undefined) {
+    if (!draftPersistenceReady.value) {
       return
     }
 
-    globalThis.window.sessionStorage.setItem(ORDER_ENTRY_DRAFT_STORAGE_KEY, JSON.stringify(buildDraftSnapshot()))
+    const { storage, storageKey } = resolveDraftStorageContext()
+    if (!storage || !storageKey) {
+      return
+    }
+
+    storage.setItem(storageKey, JSON.stringify(buildDraftSnapshot()))
   }
 
   /**
@@ -268,11 +300,12 @@ export const useOrderEntryForm = () => {
    * - 若草稿不存在或解析失败，则回退为全新空白录入状态。
    */
   const restoreDraft = (): boolean => {
-    if (globalThis.window === undefined) {
+    const { storage, storageKey } = resolveDraftStorageContext()
+    if (!storage || !storageKey) {
       return false
     }
 
-    const rawDraft = globalThis.window.sessionStorage.getItem(ORDER_ENTRY_DRAFT_STORAGE_KEY)
+    const rawDraft = storage.getItem(storageKey)
     if (!rawDraft) {
       return false
     }
@@ -313,7 +346,7 @@ export const useOrderEntryForm = () => {
       drawerForm.remark = parsedDraft.drawerForm.remark ?? ''
       return true
     } catch {
-      globalThis.window.sessionStorage.removeItem(ORDER_ENTRY_DRAFT_STORAGE_KEY)
+      storage.removeItem(storageKey)
       return false
     }
   }
@@ -828,6 +861,26 @@ export const useOrderEntryForm = () => {
       if (!headerForm.issuerName.trim()) {
         headerForm.issuerName = value
       }
+    },
+  )
+
+  /**
+   * 账号切换时同步切换草稿作用域：
+   * - 新账号优先恢复自己的草稿；
+   * - 若没有草稿则回退到空白态，避免继续展示上一账号录入中的明细。
+   */
+  watch(
+    () => authStore.currentUser?.id,
+    (nextUserId, previousUserId) => {
+      if (!draftPersistenceReady.value || nextUserId === previousUserId) {
+        return
+      }
+
+      const restored = restoreDraft()
+      if (!restored) {
+        resetForm()
+      }
+      persistDraft()
     },
   )
 

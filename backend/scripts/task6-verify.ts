@@ -10,16 +10,17 @@ import { AppDataSource } from '../src/config/data-source.js'
 import { BizOutboundOrder } from '../src/entities/biz-outbound-order.entity.js'
 import { BizOutboundOrderItem } from '../src/entities/biz-outbound-order-item.entity.js'
 import { BaseProduct } from '../src/entities/base-product.entity.js'
+import { SystemConfig } from '../src/entities/system-config.entity.js'
 import { SysAuditLog } from '../src/entities/sys-audit-log.entity.js'
 import { orderService } from '../src/services/order.service.js'
+import { orderSerialService } from '../src/services/order-serial.service.js'
 import type { AuthUserContext } from '../src/types/auth.js'
-import { generateShowNo } from '../src/utils/id-generator.js'
 
 /**
  * Task 6 自动化验证脚本（无需真实 MySQL）：
  * 1) 用内存仓储模拟 TypeORM 事务，验证“主子表原子提交 + 失败回滚 + 幂等防重”；
- * 2) 验证 show_no 当日流水规则（CK-YYYYMMDD-4位）；
- * 3) 用源码静态断言验证“拼音检索 + 标签过滤 + PC键盘流 + 移动端 Drawer”关键实现存在。
+ * 2) 验证当前订单双流水规则（散客 `hyyz`、部门 `hyyzjd`）；
+ * 3) 用源码静态断言验证“拼音检索 + 标签过滤 + PC键盘流 + 移动端共享抽屉”关键实现存在。
  *
  * 说明：
  * - 本脚本目标是解决 CI 或本地未启动 MySQL 时无法执行联调的问题；
@@ -74,11 +75,31 @@ function pass(title: string) {
 }
 
 /**
- * 构建与 generateShowNo 兼容的最小 manager：
- * - 仅实现 query()；
- * - 通过内存 order 列表返回“今日最后一单”。
+ * 构建与当前 orderSerialService 兼容的最小 manager：
+ * - 在内存中维护 system_configs 所需的起始值、当前值与位宽；
+ * - 让 task6 脚本不连真实数据库也能覆盖当前双流水实现。
  */
-function createShowNoManager(orders: OrderRecord[]) {
+function createSerialConfigState() {
+  return new Map<string, string>([
+    ['order.serial.walkin.start', '1'],
+    ['order.serial.walkin.current', '0'],
+    ['order.serial.walkin.width', '6'],
+    ['order.serial.department.start', '1'],
+    ['order.serial.department.current', '0'],
+    ['order.serial.department.width', '6'],
+  ])
+}
+
+function createSerialConfigRepository(serialConfigState: Map<string, string>) {
+  return {
+    async update(where: { configKey: string }, payload: { configValue: string }) {
+      serialConfigState.set(where.configKey, payload.configValue)
+      return { affected: 1 }
+    },
+  }
+}
+
+function createOrderSerialManager(serialConfigState: Map<string, string>) {
   return {
     connection: {
       options: {
@@ -86,15 +107,17 @@ function createShowNoManager(orders: OrderRecord[]) {
       },
     },
     async query(_sql: string, params: unknown[]) {
-      const rawPrefix = typeof params[0] === 'string' ? params[0] : ''
-      const prefix = rawPrefix.replace('%', '')
-      const matched = orders
-        .filter((order) => order.showNo.startsWith(prefix))
-        .sort((a, b) => b.showNo.localeCompare(a.showNo))
-      if (!matched.length) {
-        return []
+      const keys = params.filter((item): item is string => typeof item === 'string')
+      return keys.map((configKey) => ({
+        configKey,
+        configValue: serialConfigState.get(configKey) ?? '',
+      }))
+    },
+    getRepository(entity: unknown) {
+      if (entity === SystemConfig) {
+        return createSerialConfigRepository(serialConfigState)
       }
-      return [{ show_no: matched[0].showNo }]
+      throw new Error('未处理的流水配置仓储类型')
     },
   }
 }
@@ -232,6 +255,7 @@ function createMockManager(
   stagedOrders: OrderRecord[],
   stagedItems: ItemRecord[],
   stagedAuditLogs: AuditLogRecord[],
+  serialConfigState: Map<string, string>,
   products: Array<{ id: string; productName: string; isActive: boolean }>,
   shouldFailOnItemSaveRef: { value: boolean },
   opts: {
@@ -241,10 +265,10 @@ function createMockManager(
   }
 ) {
   const { getNextOrderId, getNextItemId, getNextAuditLogId } = opts
-  const showNoManager = createShowNoManager(stagedOrders)
+  const orderSerialManager = createOrderSerialManager(serialConfigState)
   return {
-    connection: showNoManager.connection,
-    query: async (sql: string, params: unknown[]) => showNoManager.query(sql, params),
+    connection: orderSerialManager.connection,
+    query: async (sql: string, params: unknown[]) => orderSerialManager.query(sql, params),
     getRepository: (entity: unknown) => {
       const getRepo = () => {
         if (entity === BizOutboundOrder) {
@@ -255,6 +279,9 @@ function createMockManager(
         }
         if (entity === BaseProduct) {
           return createProductRepository(products)
+        }
+        if (entity === SystemConfig) {
+          return createSerialConfigRepository(serialConfigState)
         }
         if (entity === SysAuditLog) {
           return createAuditLogRepository(stagedAuditLogs, getNextAuditLogId)
@@ -275,6 +302,7 @@ async function verifyOrderTransactionAndNumbering() {
   const committedOrders: OrderRecord[] = []
   const committedItems: ItemRecord[] = []
   const committedAuditLogs: AuditLogRecord[] = []
+  const committedSerialConfigState = createSerialConfigState()
   const products = [{ id: '1001', productName: '电缆', isActive: true }]
   /**
    * 构建固定的验证操作者上下文：
@@ -301,7 +329,7 @@ async function verifyOrderTransactionAndNumbering() {
 
   ;(AppDataSource as unknown as { transaction: unknown }).transaction = async (
     cb: (manager: {
-      query: (sql: string, params: unknown[]) => Promise<Array<{ show_no: string }>>
+      query: (sql: string, params: unknown[]) => Promise<Array<Record<string, string>>>
       getRepository: (entity: unknown) => {
         findOne: (args: unknown) => Promise<unknown>
         find: (args?: unknown) => Promise<unknown[]>
@@ -313,10 +341,12 @@ async function verifyOrderTransactionAndNumbering() {
     const stagedOrders = committedOrders.map((item) => ({ ...item }))
     const stagedItems = committedItems.map((item) => ({ ...item }))
     const stagedAuditLogs = committedAuditLogs.map((item) => ({ ...item }))
+    const stagedSerialConfigState = new Map(committedSerialConfigState)
     const manager = createMockManager(
       stagedOrders,
       stagedItems,
       stagedAuditLogs,
+      stagedSerialConfigState,
       products,
       shouldFailOnItemSaveRef,
       {
@@ -332,6 +362,10 @@ async function verifyOrderTransactionAndNumbering() {
     committedItems.push(...stagedItems)
     committedAuditLogs.length = 0
     committedAuditLogs.push(...stagedAuditLogs)
+    committedSerialConfigState.clear()
+    stagedSerialConfigState.forEach((value, key) => {
+      committedSerialConfigState.set(key, value)
+    })
     return result
   }
 
@@ -348,8 +382,8 @@ async function verifyOrderTransactionAndNumbering() {
 
     assert.equal(committedOrders.length, 1)
     assert.equal(committedItems.length, 1)
-    assert.match(first.order.showNo, /^CK-\d{8}-0001$/)
-    pass('整单提交成功：主子表均写入且 show_no 首单流水为 0001')
+    assert.equal(first.order.showNo, 'hyyz000001')
+    pass('整单提交成功：主子表均写入且散客单首张 showNo 为 hyyz000001')
 
     const duplicated = await orderService.submit(
       {
@@ -387,31 +421,33 @@ async function verifyOrderTransactionAndNumbering() {
       },
       mockActor,
     )
-    assert.match(second.order.showNo, /^CK-\d{8}-0002$/)
-    pass('编号规则生效：同日第二张单据流水递增到 0002')
+    assert.equal(second.order.showNo, 'hyyz000002')
+    pass('编号规则生效：散客单流水按系统配置递增到 hyyz000002')
   } finally {
     ;(AppDataSource as unknown as { transaction: unknown }).transaction = originalTransaction
   }
 }
 
 /**
- * 单独验证 generateShowNo 在“空数据集”时从 0001 起算。
+ * 单独验证当前订单流水服务在初始配置状态下能正确生成双流水编号。
  */
-async function verifyShowNoStartsFrom0001() {
-  const showNo = await generateShowNo(createShowNoManager([]) as never)
-  assert.match(showNo, /^CK-\d{8}-0001$/)
-  pass('编号生成器在无历史单据时从 0001 开始')
+async function verifyOrderSerialStartsFromConfigStart() {
+  const walkinShowNo = await orderSerialService.generateOrderNo('walkin', createOrderSerialManager(createSerialConfigState()) as never)
+  const departmentShowNo = await orderSerialService.generateOrderNo('department', createOrderSerialManager(createSerialConfigState()) as never)
+  assert.equal(walkinShowNo, 'hyyz000001')
+  assert.equal(departmentShowNo, 'hyyzjd000001')
+  pass('订单流水服务可在初始配置下按散客/部门双流水前缀生成首号')
 }
 
 /**
  * 前端/检索能力的自动化静态检查：
  * - 检索：后端产品列表支持名称+拼音 keyword，且支持 tagId 关联过滤；
- * - 多端：开单页存在 PC/移动端分支、键盘流入口、Drawer 编辑组件。
+ * - 多端：开单页存在 PC/移动端分支、键盘流入口、共享抽屉编辑组件。
  */
 function verifySearchAndMultiDeviceByStaticChecks() {
   const productServiceFile = path.resolve(process.cwd(), 'src/services/product.service.ts')
-  const orderEntryFile = path.resolve(process.cwd(), 'src/views/order-entry/OrderEntryView.vue')
-  const orderEntryItemsEditorFile = path.resolve(process.cwd(), 'src/views/order-entry/components/OrderEntryItemsEditor.vue')
+  const orderEntryFile = path.resolve(process.cwd(), '../src/views/order-entry/OrderEntryView.vue')
+  const orderEntryItemsEditorFile = path.resolve(process.cwd(), '../src/views/order-entry/components/OrderEntryItemsEditor.vue')
 
   const productServiceSource = fs.readFileSync(productServiceFile, 'utf8')
   const orderEntrySource = fs.readFileSync(orderEntryFile, 'utf8')
@@ -425,12 +461,12 @@ function verifySearchAndMultiDeviceByStaticChecks() {
   assert.match(orderEntrySource, /handleGridKeydown/)
   assert.match(orderEntryItemsEditorSource, /v-else-if="isDesktop"/)
   assert.match(orderEntryItemsEditorSource, /v-else class="space-y-3"/)
-  assert.match(orderEntryItemsEditorSource, /<el-drawer/)
-  pass('多端交互能力存在：PC 键盘流与移动端 Drawer 编辑分支齐全')
+  assert.match(orderEntryItemsEditorSource, /<BizResponsiveDrawerShell/)
+  pass('多端交互能力存在：PC 键盘流与移动端共享抽屉编辑分支齐全')
 }
 
 async function main() {
-  await verifyShowNoStartsFrom0001()
+  await verifyOrderSerialStartsFromConfigStart()
   await verifyOrderTransactionAndNumbering()
   verifySearchAndMultiDeviceByStaticChecks()
   // eslint-disable-next-line no-console
