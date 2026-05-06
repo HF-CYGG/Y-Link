@@ -9,7 +9,7 @@
  */
 
 import { AppDataSource } from '../config/data-source.js'
-import { Brackets } from 'typeorm'
+import { Brackets, type EntityManager } from 'typeorm'
 import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
@@ -116,6 +116,13 @@ export interface SubmittedOrderItemView {
   qty: string
   unitPrice: string
   remark: string | null
+}
+
+export interface PurgedOrderView {
+  id: string
+  showNo: string
+  orderType: string
+  serialRolledBack: boolean
 }
 
 interface SubmitOrderContext {
@@ -383,6 +390,80 @@ export class OrderService {
       )
 
       return this.buildOrderSummaryView(savedOrder)
+    })
+  }
+
+  /**
+   * 永久删除单据：
+   * - 仅允许对已软删除单据执行，避免把正常业务单据直接物理移除；
+   * - 物理删除主单后依赖外键级联删除明细；
+   * - 仅当该单据是同类型“最后一张单”且流水 current 与其编号匹配时，才安全回拨 1 位。
+   */
+  async purgeById(
+    id: string,
+    actor: AuthUserContext,
+    confirmShowNo: string,
+    requestMeta?: RequestMeta,
+  ): Promise<PurgedOrderView> {
+    const normalizedConfirmShowNo = confirmShowNo.trim()
+    if (!normalizedConfirmShowNo) {
+      throw new BizError('请填写业务单号完成二次确认')
+    }
+
+    return AppDataSource.transaction(async (manager) => {
+      const orderRepo = manager.getRepository(BizOutboundOrder)
+      const order = await orderRepo.findOne({ where: { id } })
+      if (!order) {
+        throw new BizError('出库单不存在', 404)
+      }
+
+      if (order.showNo !== normalizedConfirmShowNo) {
+        throw new BizError('二次确认失败：业务单号不匹配', 400)
+      }
+
+      if (!order.isDeleted) {
+        throw new BizError('仅已删除单据支持永久删除，请先执行删除操作', 409)
+      }
+
+      const latestSameTypeOrderId = await this.loadLatestOrderIdByType(order.orderType, manager)
+      const shouldRollbackSerial = latestSameTypeOrderId === String(order.id)
+      let serialRolledBack = false
+
+      if (shouldRollbackSerial) {
+        const rollbackResult = await orderSerialService.rollbackCurrentIfMatches(order.orderType, order.showNo, manager)
+        serialRolledBack = rollbackResult.applied
+      }
+
+      const auditDetail = {
+        ...this.buildOrderAuditDetail(order),
+        serialRolledBack,
+      }
+
+      const deleteResult = await orderRepo.delete({ id: order.id })
+      if ((deleteResult.affected ?? 0) <= 0) {
+        throw new BizError('永久删除出库单失败，请稍后重试', 500)
+      }
+
+      await auditService.record(
+        {
+          actionType: 'order.purge',
+          actionLabel: '永久删除出库单',
+          targetType: 'order',
+          targetId: String(order.id),
+          targetCode: order.showNo,
+          actor,
+          requestMeta,
+          detail: auditDetail,
+        },
+        manager,
+      )
+
+      return {
+        id: normalizeEntityId(order.id),
+        showNo: order.showNo,
+        orderType: order.orderType,
+        serialRolledBack,
+      }
     })
   }
 
@@ -730,6 +811,42 @@ export class OrderService {
       lineAmount: normalizeDecimalText(item.lineAmount),
       remark: item.remark,
     }))
+  }
+
+  /**
+   * 读取同类型最后一张单据主键：
+   * - 使用创建时间倒序 + 主键倒序双重排序，尽量稳定定位最新生成的单据；
+   * - 安全回拨只允许命中这一张，避免删除历史中间号时把流水号回退。
+   */
+  private async loadLatestOrderIdByType(orderType: string, manager: EntityManager): Promise<string | null> {
+    const latestOrder = await manager.getRepository(BizOutboundOrder).findOne({
+      select: {
+        id: true,
+      },
+      where: {
+        orderType,
+      },
+      order: {
+        createdAt: 'DESC',
+        id: 'DESC',
+      },
+    })
+
+    return latestOrder ? normalizeEntityId(latestOrder.id) : null
+  }
+
+  /**
+   * 统一构造订单审计详情：
+   * - 删除、恢复、永久删除都复用同一组业务快照；
+   * - 让工作台近期动态与审计详情保持同一份客户/金额口径。
+   */
+  private buildOrderAuditDetail(order: BizOutboundOrder) {
+    return {
+      customerDepartmentName: order.customerDepartmentName,
+      customerName: order.customerName,
+      totalQty: order.totalQty,
+      totalAmount: order.totalAmount,
+    }
   }
 
   private buildOrderSummaryView(order: BizOutboundOrder): OrderSummaryView {

@@ -64,7 +64,7 @@ interface DashboardStatsResult {
 interface DashboardRecentActivity {
   id: string
   orderId: string
-  actionType: 'order.create' | 'order.delete' | 'order.restore'
+  actionType: 'order.create' | 'order.delete' | 'order.restore' | 'order.purge'
   actionLabel: string
   showNo: string
   actorDisplayName: string
@@ -403,7 +403,7 @@ export const dashboardService = {
       auditLogRepo
         .createQueryBuilder('audit')
         .where('audit.actionType IN (:...actionTypes)', {
-          actionTypes: ['order.create', 'order.delete', 'order.restore'],
+          actionTypes: ['order.create', 'order.delete', 'order.restore', 'order.purge'],
         })
         .orderBy('audit.id', 'DESC')
         .limit(10)
@@ -425,7 +425,9 @@ export const dashboardService = {
     const recentActivities: DashboardRecentActivity[] = recentAuditLogs.map((audit) => {
       const detail = parseAuditDetail(audit.detailJson)
       const actionType =
-        audit.actionType === 'order.delete' || audit.actionType === 'order.restore' ? audit.actionType : 'order.create'
+        audit.actionType === 'order.delete' || audit.actionType === 'order.restore' || audit.actionType === 'order.purge'
+          ? audit.actionType
+          : 'order.create'
 
       return {
         id: String(audit.id),

@@ -162,6 +162,21 @@ orderRouter.post(
   }),
 )
 
+orderRouter.delete(
+  '/:id/purge',
+  requirePermission('orders:delete'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = deleteOrderSchema.parse(req.body ?? {})
+    const data = await orderService.purgeById(req.params.id, authReq.auth, payload.confirmShowNo, extractRequestMeta(req))
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
 orderRouter.patch(
   '/:id/compliance-flags',
   requirePermission('orders:update'),

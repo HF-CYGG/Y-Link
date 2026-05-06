@@ -44,7 +44,7 @@ export interface DashboardTopCustomer {
 export interface DashboardRecentActivity {
   id: string
   orderId: string
-  actionType: 'order.create' | 'order.delete' | 'order.restore'
+  actionType: 'order.create' | 'order.delete' | 'order.restore' | 'order.purge'
   actionLabel: string
   showNo: string
   actorDisplayName: string

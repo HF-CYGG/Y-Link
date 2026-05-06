@@ -25,6 +25,12 @@ const ORDER_SERIAL_RULES: Record<OrderType, { prefix: string; configKeyPrefix: s
   },
 }
 
+export interface OrderSerialRollbackResult {
+  applied: boolean
+  current: number
+  removedSerial: number | null
+}
+
 class OrderSerialService {
   async generateOrderNo(orderType: string, manager?: EntityManager): Promise<string> {
     const normalizedOrderType = this.normalizeOrderType(orderType)
@@ -54,6 +60,27 @@ class OrderSerialService {
     throw lastError ?? new BizError('订单流水号生成失败，请稍后重试', 500)
   }
 
+  /**
+   * 安全回拨订单流水：
+   * - 仅当被永久删除单据的流水号正好等于当前流水 current 时才执行回拨；
+   * - 回拨后的 current 不会低于起始值减一，保证下一次生成仍符合既有规则；
+   * - 未命中条件时直接返回当前值，避免删除历史中间号导致编号倒退。
+   */
+  async rollbackCurrentIfMatches(orderType: string, showNo: string, manager?: EntityManager): Promise<OrderSerialRollbackResult> {
+    const normalizedOrderType = this.normalizeOrderType(orderType)
+    if (!normalizedOrderType) {
+      throw new BizError('订单类型非法，仅支持 department 或 walkin', 400)
+    }
+
+    if (manager) {
+      return this.rollbackCurrentIfMatchesWithManager(normalizedOrderType, showNo, manager)
+    }
+
+    return AppDataSource.transaction((transactionManager) =>
+      this.rollbackCurrentIfMatchesWithManager(normalizedOrderType, showNo, transactionManager),
+    )
+  }
+
   private async generateOrderNoWithManager(orderType: OrderType, manager: EntityManager): Promise<string> {
     const serialRule = ORDER_SERIAL_RULES[orderType]
     const configMap = await this.loadSerialConfigMap(serialRule.configKeyPrefix, manager)
@@ -81,6 +108,41 @@ class OrderSerialService {
 
     await manager.getRepository(SystemConfig).update({ configKey: currentKey }, { configValue: String(nextSerial) })
     return `${serialRule.prefix}${String(nextSerial).padStart(width, '0')}`
+  }
+
+  private async rollbackCurrentIfMatchesWithManager(
+    orderType: OrderType,
+    showNo: string,
+    manager: EntityManager,
+  ): Promise<OrderSerialRollbackResult> {
+    const serialRule = ORDER_SERIAL_RULES[orderType]
+    const configMap = await this.loadSerialConfigMap(serialRule.configKeyPrefix, manager)
+
+    const startKey = `${serialRule.configKeyPrefix}.start`
+    const currentKey = `${serialRule.configKeyPrefix}.current`
+    const widthKey = `${serialRule.configKeyPrefix}.width`
+
+    const start = this.parsePositiveInteger(configMap.get(startKey), `${startKey} 配置异常`)
+    const current = this.parseNonNegativeInteger(configMap.get(currentKey), `${currentKey} 配置异常`)
+    const width = this.parsePositiveInteger(configMap.get(widthKey), `${widthKey} 配置异常`)
+    const removedSerial = this.parseSerialFromShowNo(showNo, serialRule.prefix)
+
+    if (removedSerial === null || removedSerial !== current) {
+      return {
+        applied: false,
+        current,
+        removedSerial,
+      }
+    }
+
+    const nextCurrent = Math.max(start - 1, current - 1)
+    await manager.getRepository(SystemConfig).update({ configKey: currentKey }, { configValue: String(nextCurrent) })
+
+    return {
+      applied: true,
+      current: nextCurrent,
+      removedSerial,
+    }
   }
 
   private async loadSerialConfigMap(configKeyPrefix: string, manager: EntityManager): Promise<Map<string, string>> {
@@ -130,6 +192,30 @@ class OrderSerialService {
     if (!Number.isInteger(parsed) || parsed < 0) {
       throw new BizError(errorMessage, 500)
     }
+    return parsed
+  }
+
+  /**
+   * 从展示单号中提取数值流水：
+   * - 仅识别当前订单类型对应前缀的标准展示单号；
+   * - 解析失败时返回 null，让上层按“不满足安全回拨条件”处理。
+   */
+  private parseSerialFromShowNo(showNo: string, prefix: string): number | null {
+    const normalizedShowNo = showNo.trim()
+    if (!normalizedShowNo.startsWith(prefix)) {
+      return null
+    }
+
+    const serialText = normalizedShowNo.slice(prefix.length)
+    if (!/^\d+$/.test(serialText)) {
+      return null
+    }
+
+    const parsed = Number.parseInt(serialText, 10)
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      return null
+    }
+
     return parsed
   }
 

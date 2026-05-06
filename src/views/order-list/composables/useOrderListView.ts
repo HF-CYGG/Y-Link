@@ -13,6 +13,7 @@ import {
   deleteOrderById,
   getOrderDetailById,
   getOrderList,
+  purgeOrderById,
   restoreOrderById,
   type OrderDetailResult,
   type OrderListQuery,
@@ -440,6 +441,53 @@ export const useOrderListView = () => {
     await handleRestoreOrder(row)
   }
 
+  /**
+   * 永久删除出库单：
+   * - 仅对已软删除单据开放，彻底移除主单与明细；
+   * - 若命中“最后一个流水号”，后端会同步回拨流水，便于测试场景连续重建首单。
+   */
+  const handlePurgeOrder = async (row: OrderRecord, confirmShowNo: string) => {
+    if (!ensurePermission('orders:delete', '永久删除出库单')) {
+      return
+    }
+    const result = await purgeOrderById(row.id, { confirmShowNo })
+    ElMessage.success(
+      result.serialRolledBack
+        ? `已永久删除单据：${row.showNo}，流水已安全回拨`
+        : `已永久删除单据：${row.showNo}`,
+    )
+    await loadData()
+  }
+
+  /**
+   * 永久删除二次确认：
+   * - 仍要求输入完整业务单号，避免把“测试删库”误点到正式历史单据；
+   * - 明确提示该操作不可恢复，并说明只有最后一张单据才会触发安全回拨。
+   */
+  const handlePurgeOrderWithConfirm = async (row: OrderRecord) => {
+    if (!ensurePermission('orders:delete', '永久删除出库单')) {
+      return
+    }
+    const result = await ElMessageBox.prompt(
+      `请输入业务单号 ${row.showNo} 以确认永久删除。永久删除后不可恢复；仅当它是当前类型最后一张单据时，流水才会安全回拨。`,
+      '永久删除确认',
+      {
+        confirmButtonText: '确认永久删除',
+        cancelButtonText: '取消',
+        inputPlaceholder: '请输入完整业务单号',
+        inputValue: '',
+        inputValidator: (value: string) => {
+          if (!String(value || '').trim()) {
+            return '请输入业务单号'
+          }
+          return true
+        },
+        type: 'warning',
+      },
+    )
+    await handlePurgeOrder(row, result.value.trim())
+  }
+
   const refreshForSubmittedOrder = async () => {
     if (!canViewOrder.value) {
       resetVisibleData()
@@ -544,5 +592,7 @@ export const useOrderListView = () => {
     handleDeleteOrderWithConfirm,
     handleRestoreOrder,
     handleRestoreOrderWithConfirm,
+    handlePurgeOrder,
+    handlePurgeOrderWithConfirm,
   }
 }

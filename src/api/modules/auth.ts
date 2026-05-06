@@ -113,7 +113,7 @@ export const PERMISSION_LABEL_MAP: Record<PermissionCode, string> = {
   'orders:create': '新增出库单',
   'orders:view': '查看出库单',
   'orders:update': '更新订单状态',
-  'orders:delete': '删除/恢复出库单',
+  'orders:delete': '删除/恢复/永久删除出库单',
   'products:view': '查看产品资料',
   'products:manage': '维护产品资料',
   'tags:view': '查看标签资料',

@@ -124,6 +124,7 @@ const {
   handlePageSizeChange,
   handleViewDetail,
   handleDeleteOrderWithConfirm,
+  handlePurgeOrderWithConfirm,
   handleRestoreOrderWithConfirm,
 } = useOrderListView()
 const { hasPermission, ensurePermission } = usePermissionAction()
@@ -347,7 +348,7 @@ const handleSaveComplianceFlags = async () => {
                   <el-tag v-else type="success" effect="light">正常</el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="190" fixed="right" align="right">
+              <el-table-column label="操作" width="250" fixed="right" align="right">
                 <template #default="{ row }">
                   <el-button link type="primary" @click="handleViewDetail(row)">详情</el-button>
                   <el-button
@@ -365,6 +366,14 @@ const handleSaveComplianceFlags = async () => {
                     @click="handleRestoreOrderWithConfirm(row).catch(() => undefined)"
                   >
                     恢复
+                  </el-button>
+                  <el-button
+                    v-if="canDeleteOrder && row.isDeleted"
+                    link
+                    type="danger"
+                    @click="handlePurgeOrderWithConfirm(row).catch(() => undefined)"
+                  >
+                    永久删除
                   </el-button>
                 </template>
               </el-table-column>
@@ -448,6 +457,14 @@ const handleSaveComplianceFlags = async () => {
                   @click.stop="handleRestoreOrderWithConfirm(item).catch(() => undefined)"
                 >
                   恢复
+                </el-button>
+                <el-button
+                  v-if="item.isDeleted"
+                  link
+                  type="danger"
+                  @click.stop="handlePurgeOrderWithConfirm(item).catch(() => undefined)"
+                >
+                  永久删除
                 </el-button>
               </div>
               <div v-else class="mobile-order-card__actions">

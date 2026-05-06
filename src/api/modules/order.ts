@@ -371,6 +371,13 @@ export interface DeleteOrderPayload {
   confirmShowNo: string
 }
 
+export interface PurgeOrderResult {
+  id: string
+  showNo: string
+  orderType: 'department' | 'walkin'
+  serialRolledBack: boolean
+}
+
 export interface UpdateOrderComplianceFlagsPayload {
   hasCustomerOrder?: boolean
   isSystemApplied?: boolean
@@ -387,6 +394,18 @@ export const deleteOrderById = (id: string, payload: DeleteOrderPayload) =>
     url: `/orders/${id}`,
     data: payload,
   }).then(normalizeOrderRecord)
+
+/**
+ * 永久删除已软删除出库单（管理员）：
+ * - 仅对已删除单据生效，主单与明细会被物理移除；
+ * - 若该单据正好是当前类型最新流水号，后端会安全回拨一位流水。
+ */
+export const purgeOrderById = (id: string, payload: DeleteOrderPayload) =>
+  request<PurgeOrderResult>({
+    method: 'DELETE',
+    url: `/orders/${id}/purge`,
+    data: payload,
+  })
 
 /**
  * 恢复已删除出库单（管理员）：
