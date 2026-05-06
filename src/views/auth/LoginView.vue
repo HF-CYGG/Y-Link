@@ -47,6 +47,14 @@ const submitButtonLabel = computed(() => {
   return '继续' 
 }) 
 
+// 安全说明：验证码后端返回的是 SVG 字符串，
+// 这里转为 data URL 图片渲染，避免通过 v-html 直接把 SVG 片段注入 DOM。
+const captchaImageSrc = computed(() => (
+  captchaState.captchaSvg
+    ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(captchaState.captchaSvg)}`
+    : ''
+))
+
 // 当后端风控触发限流/锁定时，把提示固定显示在表单顶部，
 // 避免用户只看到一闪而过的消息后不知道当前该等多久。
 const applySecurityHintFromMessage = (message: string) => {
@@ -272,7 +280,12 @@ const handleSubmit = async () => {
                   @click="refreshCaptcha"
                 >
                   <span v-if="captchaLoading">刷新中</span>
-                  <span v-else-if="captchaState.captchaSvg" v-html="captchaState.captchaSvg"></span>
+                  <img
+                    v-else-if="captchaImageSrc"
+                    :src="captchaImageSrc"
+                    alt="图形验证码"
+                    class="captcha-render-image"
+                  />
                   <span v-else>刷新</span>
                 </button>
               </div>
@@ -770,10 +783,11 @@ const handleSubmit = async () => {
   opacity: 0.7;
 }
 
-.captcha-image :deep(svg) {
+.captcha-render-image {
   display: block;
   width: 100%;
   height: 100%;
+  object-fit: cover;
 }
 
 .geo-submit { 
