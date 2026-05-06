@@ -5,6 +5,7 @@
  */
 
 import {
+  Check,
   Column,
   CreateDateColumn,
   Entity,
@@ -19,6 +20,7 @@ import { entityColumnOptions } from './entity-column-options.js'
 import { RelProductTag } from './rel-product-tag.entity.js'
 
 @Entity({ name: 'base_product' })
+@Check('ck_base_product_non_negative', '`default_price` >= 0 AND `limit_per_user` >= 1 AND `current_stock` >= 0 AND `pre_ordered_stock` >= 0 AND `pre_ordered_stock` <= `current_stock`')
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export class BaseProduct {
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })

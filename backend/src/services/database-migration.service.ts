@@ -370,6 +370,57 @@ function createTableStatMap(tableStats: DatabaseMigrationTableStat[]): Map<strin
   return new Map(tableStats.map((item) => [item.tableName, item.rowCount]))
 }
 
+function parseVersionParts(version: string): [number, number, number] | null {
+  const match = version.match(/(\d+)\.(\d+)\.(\d+)/)
+  if (!match) {
+    return null
+  }
+  return [Number(match[1]), Number(match[2]), Number(match[3])]
+}
+
+function isVersionAtLeast(versionParts: [number, number, number], minimumParts: [number, number, number]): boolean {
+  for (let index = 0; index < minimumParts.length; index += 1) {
+    if (versionParts[index] > minimumParts[index]) {
+      return true
+    }
+    if (versionParts[index] < minimumParts[index]) {
+      return false
+    }
+  }
+  return true
+}
+
+function buildCheckConstraintSupportIssue(version: string | null): DatabaseMigrationIssue | undefined {
+  if (!version) {
+    return {
+      level: 'warning',
+      code: 'target_mysql_version_unknown',
+      message: '无法识别目标 MySQL 版本，请确认该版本会强制执行 CHECK 约束，否则业务字段兜底约束可能不会生效。',
+    }
+  }
+
+  const versionParts = parseVersionParts(version)
+  if (!versionParts) {
+    return {
+      level: 'warning',
+      code: 'target_mysql_version_unknown',
+      message: `无法解析目标 MySQL 版本 ${version}，请确认该版本会强制执行 CHECK 约束。`,
+    }
+  }
+
+  const isMariaDb = version.toLowerCase().includes('mariadb')
+  const minimumVersion: [number, number, number] = isMariaDb ? [10, 2, 1] : [8, 0, 16]
+  if (isVersionAtLeast(versionParts, minimumVersion)) {
+    return undefined
+  }
+
+  return {
+    level: 'error',
+    code: 'target_mysql_check_constraint_unsupported',
+    message: `目标数据库版本 ${version} 不满足 CHECK 约束强制执行要求，请升级到 ${isMariaDb ? 'MariaDB 10.2.1+' : 'MySQL 8.0.16+'} 后再迁移。`,
+  }
+}
+
 /**
  * 区分“任务文件不存在”和“文件内容损坏”：
  * - 列表接口遇到损坏文件要继续返回其他任务；
@@ -539,6 +590,60 @@ export class DatabaseMigrationService {
   private async countTableRows(dataSource: DataSource, tableName: string): Promise<number> {
     const result = await dataSource.query(`SELECT COUNT(1) AS total FROM ${quoteIdentifier(tableName)}`)
     return toNumber(this.readFirstField(result, 'total') ?? 0)
+  }
+
+  private async countRowsMatching(dataSource: DataSource, tableName: string, whereClause: string): Promise<number> {
+    const result = await dataSource.query(
+      `SELECT COUNT(1) AS total FROM ${quoteIdentifier(tableName)} WHERE ${whereClause}`,
+    )
+    return toNumber(this.readFirstField(result, 'total') ?? 0)
+  }
+
+  private async collectSourceBusinessConstraintIssues(existingSourceTableNames: string[]): Promise<DatabaseMigrationIssue[]> {
+    const existingTableSet = new Set(existingSourceTableNames)
+    const checks: Array<{
+      tableName: string
+      code: string
+      message: (count: number) => string
+      whereClause: string
+    }> = [
+      {
+        tableName: 'base_product',
+        code: 'source_base_product_constraint_dirty',
+        message: (count) => `源 SQLite 中有 ${count} 条商品数据不满足库存或价格约束，请先清理后再迁移到 MySQL。`,
+        whereClause:
+          '`default_price` < 0 OR `limit_per_user` < 1 OR `current_stock` < 0 OR `pre_ordered_stock` < 0 OR `pre_ordered_stock` > `current_stock`',
+      },
+      {
+        tableName: 'biz_outbound_order',
+        code: 'source_outbound_order_constraint_dirty',
+        message: (count) => `源 SQLite 中有 ${count} 条出库主单不满足总数、总金额或幂等键约束，请先清理后再迁移到 MySQL。`,
+        whereClause:
+          "`total_qty` < 0 OR `total_amount` < 0 OR LENGTH(TRIM(COALESCE(`idempotency_key`, ''))) = 0",
+      },
+      {
+        tableName: 'biz_outbound_order_item',
+        code: 'source_outbound_order_item_constraint_dirty',
+        message: (count) => `源 SQLite 中有 ${count} 条出库明细不满足行号、数量、单价或金额约束，请先清理后再迁移到 MySQL。`,
+        whereClause: '`line_no` < 1 OR `qty` <= 0 OR `unit_price` <= 0 OR `line_amount` < 0',
+      },
+    ]
+
+    const issues: DatabaseMigrationIssue[] = []
+    for (const check of checks) {
+      if (!existingTableSet.has(check.tableName)) {
+        continue
+      }
+      const dirtyCount = await this.countRowsMatching(AppDataSource, check.tableName, check.whereClause)
+      if (dirtyCount > 0) {
+        issues.push({
+          level: 'error',
+          code: check.code,
+          message: check.message(dirtyCount),
+        })
+      }
+    }
+    return issues
   }
 
   private resolveOrderedEntityMetadatas(dataSource: DataSource): EntityMetadata[] {
@@ -1108,6 +1213,7 @@ export class DatabaseMigrationService {
     }
 
     const sourceTableStats = await this.collectSourceTableStats(AppDataSource)
+    issues.push(...(await this.collectSourceBusinessConstraintIssues(existingSourceTableNames)))
     const sourceTotalRows = sourceTableStats.reduce((sum, item) => sum + item.rowCount, 0)
     if (sourceTotalRows === 0) {
       issues.push({
@@ -1239,6 +1345,7 @@ export class DatabaseMigrationService {
       await targetDataSource.initialize()
 
       const versionRows = await targetDataSource.query('SELECT VERSION() AS version')
+      const targetVersion = this.readStringField(this.toQueryRows(versionRows)[0] ?? {}, 'version') ?? null
       const targetSchemaInfo = await this.inspectMySqlSchemaCharset(targetDataSource)
       const targetExistingAppTables = await this.collectMySqlExistingAppTableStats(targetDataSource)
       const targetState = this.collectTargetPrecheckIssues(
@@ -1247,6 +1354,10 @@ export class DatabaseMigrationService {
         targetSchemaInfo,
         targetExistingAppTables,
       )
+      const checkConstraintSupportIssue = buildCheckConstraintSupportIssue(targetVersion)
+      if (checkConstraintSupportIssue) {
+        targetState.issues.push(checkConstraintSupportIssue)
+      }
 
       try {
         await this.verifyMySqlWritePermission(targetDataSource)
@@ -1260,7 +1371,7 @@ export class DatabaseMigrationService {
 
       return {
         targetReachable: true,
-        targetVersion: this.readStringField(this.toQueryRows(versionRows)[0] ?? {}, 'version') ?? null,
+        targetVersion,
         targetDatabaseExists: targetState.targetDatabaseExists,
         targetExistingAppTables,
         targetMissingAppTables: targetState.targetMissingAppTables,

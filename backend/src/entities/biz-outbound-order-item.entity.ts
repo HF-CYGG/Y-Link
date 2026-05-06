@@ -5,6 +5,7 @@
  */
 
 import {
+  Check,
   Column,
   CreateDateColumn,
   Entity,
@@ -20,6 +21,7 @@ import { BizOutboundOrder } from './biz-outbound-order.entity.js'
 import { entityColumnOptions } from './entity-column-options.js'
 
 @Entity({ name: 'biz_outbound_order_item' })
+@Check('ck_biz_outbound_order_item_positive', '`line_no` >= 1 AND `qty` > 0 AND `unit_price` > 0 AND `line_amount` >= 0')
 @Index('uk_biz_outbound_order_line', ['orderId', 'lineNo'], { unique: true })
 export class BizOutboundOrderItem {
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })
