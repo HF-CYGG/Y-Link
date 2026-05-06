@@ -46,7 +46,7 @@ const props = withDefaults(
       issuerSignature: '',
       completionSignature: '',
     }),
-    copyLabels: () => ['第一联（部门留存）', '第二联（财务留存）'],
+    copyLabels: () => ['第一联（部门留存）', '第二联（书院留存）'],
     orientation: 'landscape',
   },
 )
@@ -179,11 +179,9 @@ const printTimestamp = formatDateTime(new Date())
           </tr>
           <tr class="voucher-meta-row voucher-meta-row--secondary">
             <th scope="row">业务单号</th>
-            <td>{{ props.order.showNo }}</td>
-            <th scope="row">出库人</th>
-            <td>{{ props.order.issuerName || '-' }}</td>
+            <td colspan="2">{{ props.order.showNo }}</td>
             <th scope="row">开单时间</th>
-            <td>{{ formatDateTime(props.order.createdAt) }}</td>
+            <td colspan="2">{{ formatDateTime(props.order.createdAt) }}</td>
           </tr>
           <tr class="voucher-detail-header-row">
             <th colspan="2" scope="colgroup">产品名称</th>
