@@ -56,6 +56,7 @@ export interface AppRouteMeta extends RouteMeta {
   allowedRoles?: UserRole[]
   keepAlive?: boolean
   preloadTargets?: AppRouteName[]
+  deferPreloadOnColdStart?: boolean
   viewKey?: string
   suppressGlobalLoadingBar?: boolean
 }
@@ -401,7 +402,11 @@ const layoutChildren: AppRouteRecord[] = [
           activeMenu: '/system',
           requiredPermissions: ['system_configs:view'],
           keepAlive: true,
-          preloadTargets: ['system-db-migration', 'system-users', 'system-client-users'],
+          // 系统治理页首次进入时优先让当前页先稳定显示：
+          // - 系统配置原本会顺手预热数据库迁移与用户中心，冷启动时会把多个重模块一起拉起；
+          // - 这里改为仅保留更轻量的治理链路，并结合 deferPreloadOnColdStart 避免首次进入时抢占带宽。
+          preloadTargets: ['system-audit-logs'],
+          deferPreloadOnColdStart: true,
         },
       },
       {
@@ -423,7 +428,8 @@ const layoutChildren: AppRouteRecord[] = [
             bgClass: 'bg-secondary/10 dark:bg-secondary/20',
           },
           keepAlive: true,
-          preloadTargets: ['system-configs', 'system-audit-logs'],
+          preloadTargets: ['system-audit-logs'],
+          deferPreloadOnColdStart: true,
         },
       },
       {
@@ -438,7 +444,8 @@ const layoutChildren: AppRouteRecord[] = [
           keepAlive: true,
           viewKey: 'user-center',
           suppressGlobalLoadingBar: true,
-          preloadTargets: ['system-client-users', 'system-audit-logs'],
+          preloadTargets: ['system-client-users'],
+          deferPreloadOnColdStart: true,
         },
       },
       {
@@ -454,7 +461,7 @@ const layoutChildren: AppRouteRecord[] = [
           keepAlive: true,
           viewKey: 'user-center',
           suppressGlobalLoadingBar: true,
-          preloadTargets: ['system-audit-logs'],
+          deferPreloadOnColdStart: true,
         },
       },
       {
@@ -467,6 +474,7 @@ const layoutChildren: AppRouteRecord[] = [
           activeMenu: '/system',
           requiredPermissions: ['audit_logs:view'],
           keepAlive: true,
+          deferPreloadOnColdStart: true,
         },
       },
     ],
@@ -706,7 +714,9 @@ const deriveMenuItems = (records: AppRouteRecord[], user?: Pick<UserSafeProfile,
 
     collectedItems.push({
       title: record.meta.title,
-      path: fullPath,
+      // 父级菜单若已存在可访问子页，则直接指向首个可访问子页，
+      // 避免先命中父级 redirect 再跳子页，放大系统治理冷启动等待感。
+      path: children.length > 0 ? children[0].path : fullPath,
       icon: record.meta.icon,
       group: record.meta.menuGroup,
       children: children.length > 0 ? children : undefined,

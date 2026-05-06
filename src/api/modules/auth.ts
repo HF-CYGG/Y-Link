@@ -191,6 +191,14 @@ export interface UserSafeProfile {
 export interface LoginPayload {
   username: string
   password: string
+  captchaId?: string
+  captchaCode?: string
+}
+
+export interface AdminCaptchaResult {
+  captchaId: string
+  captchaSvg: string
+  expiresInSeconds: number
 }
 
 /**
@@ -258,6 +266,12 @@ export const login = async (payload: LoginPayload) => {
     user: normalizeUserSafeProfile(result.user),
   }
 }
+
+export const getAdminCaptcha = () =>
+  request<AdminCaptchaResult>({
+    method: 'GET',
+    url: '/auth/captcha',
+  })
 
 /**
  * 调用退出接口：

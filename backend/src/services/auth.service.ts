@@ -13,7 +13,7 @@ import { SysUserSession } from '../entities/sys-user-session.entity.js'
 import type { AuthUserContext, UserSafeProfile } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
 import type { RequestMeta } from '../utils/request-meta.js'
-import { hashPassword, verifyPassword } from '../utils/password.js'
+import { assertAdminPasswordPolicy, hashPassword, verifyPassword } from '../utils/password.js'
 import { generateSessionToken } from '../utils/token.js'
 import { auditService } from './audit.service.js'
 import { authSecurityService } from './auth-security.service.js'
@@ -259,13 +259,10 @@ export class AuthService {
    */
   async changeOwnPassword(auth: AuthUserContext, input: ChangeOwnPasswordInput, requestMeta?: RequestMeta): Promise<void> {
     const currentPassword = input.currentPassword.trim()
-    const newPassword = input.newPassword.trim()
+    const newPassword = assertAdminPasswordPolicy(input.newPassword, '新密码')
 
     if (!currentPassword || !newPassword) {
       throw new BizError('当前密码和新密码不能为空', 400)
-    }
-    if (newPassword.length < 6) {
-      throw new BizError('新密码长度至少为 6 位', 400)
     }
     if (currentPassword === newPassword) {
       throw new BizError('新密码不能与当前密码相同', 400)
@@ -483,7 +480,7 @@ export class AuthService {
     if (configuredPassword === LEGACY_DEFAULT_BOOTSTRAP_PASSWORD) {
       throw new Error('禁止继续使用历史默认管理员口令，请将 `INIT_ADMIN_PASSWORD` 设置为私有强密码。')
     }
-    return configuredPassword
+    return assertAdminPasswordPolicy(configuredPassword, '管理员初始密码')
   }
 }
 

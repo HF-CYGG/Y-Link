@@ -9,18 +9,22 @@ import { z } from 'zod'
 import type { AuthenticatedRequest } from '../types/auth.js'
 import { requireAuth } from '../middleware/auth.middleware.js'
 import { asyncHandler } from '../utils/async-handler.js'
+import { BizError } from '../utils/errors.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 import { authService } from '../services/auth.service.js'
 import { authSecurityService } from '../services/auth-security.service.js'
+import { captchaService } from '../services/captcha.service.js'
 
 const loginSchema = z.object({
   username: z.string().min(1, '账号不能为空'),
   password: z.string().min(1, '密码不能为空'),
+  captchaId: z.string().trim().min(1).optional(),
+  captchaCode: z.string().trim().min(1).optional(),
 })
 
 const changePasswordSchema = z.object({
   currentPassword: z.string().min(1, '当前密码不能为空'),
-  newPassword: z.string().min(6, '新密码长度至少为 6 位').max(50, '新密码长度不能超过 50 位'),
+  newPassword: z.string().min(8, '新密码至少 8 位').max(50, '新密码长度不能超过 50 位'),
 })
 
 /**
@@ -30,6 +34,20 @@ const changePasswordSchema = z.object({
  */
 export const authRouter = Router()
 
+authRouter.get(
+  '/captcha',
+  asyncHandler(async (req, res) => {
+    await authSecurityService.guardAdminCaptchaRequest(extractRequestMeta(req))
+    const data = captchaService.createCaptcha()
+    res.setHeader('Cache-Control', 'no-store')
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
 authRouter.post(
   '/login',
   asyncHandler(async (req, res) => {
@@ -37,7 +55,14 @@ authRouter.post(
     const requestMeta = extractRequestMeta(req)
     // 管理端登录先经过频控与锁定校验，再进入账号密码校验。
     await authSecurityService.guardAdminLoginRequest(requestMeta, payload.username)
+    if (authSecurityService.isAdminLoginCaptchaRequired(requestMeta, payload.username)) {
+      if (!payload.captchaId?.trim() || !payload.captchaCode?.trim()) {
+        throw new BizError('当前登录环境需要图形验证码', 428)
+      }
+      captchaService.verifyCaptcha(payload.captchaId, payload.captchaCode)
+    }
     const data = await authService.login(payload, requestMeta)
+    res.setHeader('Cache-Control', 'no-store')
     res.json({
       code: 0,
       message: 'ok',

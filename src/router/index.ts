@@ -62,6 +62,15 @@ const router = createRouter({
   routes,
 })
 
+const coldStartPreloadVisitedRoutes = new Set<string>()
+
+const logRouteTrace = (event: string, payload: Record<string, unknown>) => {
+  if (!import.meta.env.DEV) {
+    return
+  }
+  console.info(`[route-trace] ${event}`, payload)
+}
+
 /**
  * 全局前置守卫：
  * - 负责首次刷新后的登录态恢复；
@@ -70,6 +79,12 @@ const router = createRouter({
 router.beforeEach(async (to) => {
   const authStore = useAuthStore(pinia)
   const clientAuthStore = useClientAuthStore(pinia)
+
+  logRouteTrace('beforeEach:start', {
+    to: to.fullPath,
+    from: router.currentRoute.value.fullPath,
+    requiresAuth: to.matched.some((record) => record.meta.requiresAuth),
+  })
 
   if (!authStore.initialized) {
     await authStore.initializeAuth()
@@ -84,6 +99,9 @@ router.beforeEach(async (to) => {
   const isClientGuestOnly = to.matched.some((record) => record.meta.clientGuestOnly)
 
   if (requiresAuth && !authStore.isAuthenticated) {
+    logRouteTrace('beforeEach:redirect-login', {
+      to: to.fullPath,
+    })
     return {
       path: '/login',
       query: {
@@ -93,10 +111,18 @@ router.beforeEach(async (to) => {
   }
 
   if (isGuestOnly && authStore.isAuthenticated) {
-    return resolveSafeRedirect(to.query.redirect, authStore.currentUser)
+    const redirectPath = resolveSafeRedirect(to.query.redirect, authStore.currentUser)
+    logRouteTrace('beforeEach:guest-redirect', {
+      to: to.fullPath,
+      redirectPath,
+    })
+    return redirectPath
   }
 
   if (requiresClientAuth && !clientAuthStore.isAuthenticated) {
+    logRouteTrace('beforeEach:redirect-client-login', {
+      to: to.fullPath,
+    })
     return {
       path: '/client/login',
       query: {
@@ -106,7 +132,12 @@ router.beforeEach(async (to) => {
   }
 
   if (isClientGuestOnly && clientAuthStore.isAuthenticated) {
-    return resolveSafeClientRedirect(to.query.redirect)
+    const redirectPath = resolveSafeClientRedirect(to.query.redirect)
+    logRouteTrace('beforeEach:client-guest-redirect', {
+      to: to.fullPath,
+      redirectPath,
+    })
+    return redirectPath
   }
 
   const deniedRecord = to.matched.find((record) => !canAccessRoute(record.meta, authStore.currentUser))
@@ -119,10 +150,17 @@ router.beforeEach(async (to) => {
     const firstAccessiblePath = resolveFirstAccessibleManagementPath(authStore.currentUser)
     if (firstAccessiblePath && firstAccessiblePath !== to.fullPath) {
       showPermissionDenied('已为你切换到可访问页面')
+      logRouteTrace('beforeEach:redirect-first-accessible', {
+        to: to.fullPath,
+        redirectPath: firstAccessiblePath,
+      })
       return firstAccessiblePath
     }
 
     showPermissionDenied()
+    logRouteTrace('beforeEach:redirect-404', {
+      to: to.fullPath,
+    })
     return '/404'
   }
 
@@ -148,8 +186,32 @@ router.afterEach((to) => {
   const preloadTargets = to.matched.flatMap((record) => {
     return Array.isArray(record.meta.preloadTargets) ? (record.meta.preloadTargets as AppRouteName[]) : []
   })
+  const routeVisitKey = typeof to.name === 'string' ? to.name : to.path
+  const shouldDeferCurrentPreload = to.matched.some((record) => record.meta.deferPreloadOnColdStart === true)
+    && !coldStartPreloadVisitedRoutes.has(routeVisitKey)
 
+  coldStartPreloadVisitedRoutes.add(routeVisitKey)
+
+  if (shouldDeferCurrentPreload) {
+    logRouteTrace('afterEach:skip-cold-start-preload', {
+      to: to.fullPath,
+      preloadTargets,
+    })
+    return
+  }
+
+  logRouteTrace('afterEach:complete', {
+    to: to.fullPath,
+    preloadTargets,
+  })
   scheduleRouteComponentWarmup(preloadTargets)
+})
+
+router.onError((error, to) => {
+  logRouteTrace('router:error', {
+    to: to.fullPath,
+    message: error instanceof Error ? error.message : String(error),
+  })
 })
 
 export { resolveSafeRedirect }

@@ -11,7 +11,7 @@ import { CLIENT_USER_STATUSES, type ClientUserStatus, ClientUser } from '../enti
 import { ClientUserSession } from '../entities/client-user-session.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
-import { hashPassword } from '../utils/password.js'
+import { assertClientPasswordPolicy, hashPassword } from '../utils/password.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
 import { systemConfigService } from './system-config.service.js'
@@ -289,12 +289,9 @@ export class ClientUserManageService {
     actor: AuthUserContext,
     requestMeta?: RequestMeta,
   ): Promise<ClientUserManageSafeProfile> {
-    const newPassword = input.newPassword.trim()
+    const newPassword = assertClientPasswordPolicy(input.newPassword, '新密码')
     if (!newPassword) {
       throw new BizError('新密码不能为空', 400)
-    }
-    if (newPassword.length < 6) {
-      throw new BizError('新密码长度至少为 6 位', 400)
     }
 
     return AppDataSource.transaction(async (manager) => {

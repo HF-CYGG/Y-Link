@@ -297,6 +297,25 @@ export class AuthSecurityService {
     await this.assertFailureNotLocked('admin-login', `admin-login:user:${normalizedUsername}`, requestMeta, normalizedUsername)
   }
 
+  async guardAdminCaptchaRequest(requestMeta: RequestMeta | undefined) {
+    const source = normalizeRiskSource(requestMeta)
+    await this.consumeRateLimit(`admin-captcha:ip:${source}`, RATE_LIMIT_RULES.captchaByIp, {
+      actionType: 'auth.guard.admin_captcha',
+      actionLabel: '管理端图形验证码频控',
+      requestMeta,
+      detail: { source },
+    })
+  }
+
+  isAdminLoginCaptchaRequired(requestMeta: RequestMeta | undefined, username: string) {
+    const source = normalizeRiskSource(requestMeta)
+    const normalizedUsername = username.trim().toLowerCase()
+    return (
+      this.hasActiveFailures('admin-login', `admin-login:ip:${source}`) ||
+      this.hasActiveFailures('admin-login', `admin-login:user:${normalizedUsername}`)
+    )
+  }
+
   async recordAdminLoginFailure(requestMeta: RequestMeta | undefined, username: string) {
     const source = normalizeRiskSource(requestMeta)
     const normalizedUsername = username.trim().toLowerCase()

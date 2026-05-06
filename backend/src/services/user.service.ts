@@ -10,7 +10,7 @@ import { SysUserSession } from '../entities/sys-user-session.entity.js'
 import type { AuthUserContext, UserRole, UserSafeProfile, UserStatus } from '../types/auth.js'
 import { isUniqueConstraintError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
-import { hashPassword } from '../utils/password.js'
+import { assertAdminPasswordPolicy, hashPassword } from '../utils/password.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
 import { sanitizeUserProfile } from './auth.service.js'
@@ -91,7 +91,7 @@ export class UserService {
   async create(input: CreateUserInput, actor: AuthUserContext, requestMeta?: RequestMeta): Promise<UserSafeProfile> {
     const username = input.username.trim()
     const displayName = input.displayName.trim()
-    const password = input.password.trim()
+    const password = assertAdminPasswordPolicy(input.password)
 
     if (!username) {
       throw new BizError('账号不能为空', 400)
@@ -99,10 +99,6 @@ export class UserService {
     if (!displayName) {
       throw new BizError('姓名不能为空', 400)
     }
-    if (password.length < 6) {
-      throw new BizError('密码长度至少为 6 位', 400)
-    }
-
     try {
       return await AppDataSource.transaction(async (manager) => {
         const userRepo = manager.getRepository(SysUser)
@@ -146,7 +142,7 @@ export class UserService {
 
   async update(id: string, input: UpdateUserInput, actor: AuthUserContext, requestMeta?: RequestMeta): Promise<UserSafeProfile> {
     const normalizedDisplayName = input.displayName?.trim()
-    const normalizedPassword = input.password?.trim()
+    const normalizedPassword = input.password === undefined ? undefined : assertAdminPasswordPolicy(input.password)
 
     if (
       normalizedDisplayName === undefined &&
@@ -159,10 +155,6 @@ export class UserService {
     if (normalizedDisplayName !== undefined && !normalizedDisplayName) {
       throw new BizError('姓名不能为空', 400)
     }
-    if (normalizedPassword !== undefined && normalizedPassword.length < 6) {
-      throw new BizError('密码长度至少为 6 位', 400)
-    }
-
     return AppDataSource.transaction(async (manager) => {
       const userRepo = manager.getRepository(SysUser)
       const sessionRepo = manager.getRepository(SysUserSession)
@@ -283,13 +275,10 @@ export class UserService {
     actor: AuthUserContext,
     requestMeta?: RequestMeta,
   ): Promise<UserSafeProfile> {
-    const newPassword = input.newPassword.trim()
+    const newPassword = assertAdminPasswordPolicy(input.newPassword, '新密码')
 
     if (!newPassword) {
       throw new BizError('新密码不能为空', 400)
-    }
-    if (newPassword.length < 6) {
-      throw new BizError('新密码长度至少为 6 位', 400)
     }
     if (actor.userId === id) {
       throw new BizError('请使用本人修改密码入口处理自己的密码', 400)

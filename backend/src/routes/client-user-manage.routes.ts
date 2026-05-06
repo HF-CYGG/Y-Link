@@ -9,7 +9,7 @@
 import { Router } from 'express'
 import { z } from 'zod'
 import type { AuthenticatedRequest } from '../types/auth.js'
-import { requirePermission } from '../middleware/auth.middleware.js'
+import { requirePermission, requireRole } from '../middleware/auth.middleware.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 import { CLIENT_USER_STATUSES } from '../entities/client-user.entity.js'
@@ -28,7 +28,7 @@ const updateClientUserSchema = z.object({
 })
 
 const resetClientUserPasswordSchema = z.object({
-  newPassword: z.string().min(6, '新密码长度至少为 6 位').max(50, '新密码长度不能超过 50 位'),
+  newPassword: z.string().min(8, '新密码至少 8 位').max(50, '新密码长度不能超过 50 位'),
 })
 
 export const clientUserManageRouter = Router()
@@ -36,6 +36,7 @@ export const clientUserManageRouter = Router()
 clientUserManageRouter.get(
   '/',
   requirePermission('users:view'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     const page = Number(req.query.page ?? 1)
     const pageSize = Number(req.query.pageSize ?? 20)
@@ -60,6 +61,7 @@ clientUserManageRouter.get(
 clientUserManageRouter.patch(
   '/:id',
   requirePermission('users:update'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = updateClientUserSchema.parse(req.body)
@@ -75,6 +77,7 @@ clientUserManageRouter.patch(
 clientUserManageRouter.patch(
   '/:id/status',
   requirePermission('users:status'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = updateClientUserStatusSchema.parse(req.body)
@@ -90,6 +93,7 @@ clientUserManageRouter.patch(
 clientUserManageRouter.post(
   '/:id/reset-password',
   requirePermission('users:reset_password'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = resetClientUserPasswordSchema.parse(req.body)

@@ -34,6 +34,17 @@ import { BizError } from './utils/errors.js'
 export function createApp() {
   const app = express()
 
+  app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff')
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin')
+    res.setHeader('X-Frame-Options', 'DENY')
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
+    if (req.path.startsWith('/api/auth') || req.path.startsWith('/api/client-auth')) {
+      res.setHeader('Cache-Control', 'no-store')
+    }
+    next()
+  })
+
   // 确保 uploads 目录存在
   const uploadsDir = path.resolve(process.cwd(), 'uploads')
   if (!fs.existsSync(uploadsDir)) {

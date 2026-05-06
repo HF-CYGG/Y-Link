@@ -73,6 +73,19 @@ const o2oRuleConfig = ref<O2oRuleConfigRecord | null>(null)
 const verificationConfigMap = ref<VerificationProviderConfigsResult | null>(null)
 const clientDepartmentConfig = ref<ClientDepartmentConfigRecord | null>(null)
 const loadRequest = useStableRequest()
+const deferredSectionRequest = useStableRequest()
+const sectionLoadingState = reactive<Record<ConfigSectionKey, boolean>>({
+  order_serial: true,
+  o2o_rules: true,
+  verification: true,
+  department: true,
+})
+const sectionErrorState = reactive<Record<ConfigSectionKey, string>>({
+  order_serial: '',
+  o2o_rules: '',
+  verification: '',
+  department: '',
+})
 
 const sectionOptions: Array<{ key: ConfigSectionKey; label: string }> = [
   { key: 'order_serial', label: '订单流水' },
@@ -145,6 +158,23 @@ const canViewConfigs = computed(() => hasPermission('system_configs:view'))
 const canUpdateConfigs = computed(() => hasPermission('system_configs:update'))
 const canTestVerificationProviders = computed(() => hasPermission('verification_providers:test'))
 const canViewMigrationAssistant = computed(() => hasPermission('db_migration:view'))
+const hasPendingDeferredSections = computed(() => sectionLoadingState.verification || sectionLoadingState.department)
+const hasDeferredSectionFailure = computed(() => Boolean(sectionErrorState.verification || sectionErrorState.department))
+const formInteractionLoading = computed(() => loading.value || hasPendingDeferredSections.value)
+const deferredSectionStatusText = computed(() => {
+  if (hasPendingDeferredSections.value) {
+    return '系统配置主内容已就绪，验证码配置与部门配置正在继续加载，加载完成前暂不可编辑或保存。'
+  }
+
+  const failedSections = sectionOptions
+    .filter((section) => sectionErrorState[section.key])
+    .map((section) => section.label)
+  if (failedSections.length > 0) {
+    return `${failedSections.join('、')}加载失败，请刷新后重试，避免未加载分区被默认值覆盖。`
+  }
+
+  return ''
+})
 
 /**
  * 进入数据库迁移助手：
@@ -621,26 +651,36 @@ const handleTestVerificationSend = async (channel: 'mobile' | 'email') => {
 const loadData = async () => {
   if (!canViewConfigs.value) {
     loading.value = false
+    sectionLoadingState.order_serial = false
+    sectionLoadingState.o2o_rules = false
+    sectionLoadingState.verification = false
+    sectionLoadingState.department = false
     return
   }
 
   loadError.value = ''
   loading.value = true
+  sectionErrorState.order_serial = ''
+  sectionErrorState.o2o_rules = ''
+  sectionErrorState.verification = ''
+  sectionErrorState.department = ''
+  sectionLoadingState.order_serial = true
+  sectionLoadingState.o2o_rules = true
+  sectionLoadingState.verification = true
+  sectionLoadingState.department = true
   await loadRequest.runLatest({
     executor: async () => {
-      // 首屏容错策略：即便某一类配置加载失败，也不阻断整页渲染，避免出现“白屏空态”。
-      const [orderSerialResult, o2oRuleResult, verificationResult, clientDepartmentResult] = await Promise.allSettled([
+      // 首屏分层加载策略：
+      // - 订单流水与线上预定规则属于系统配置首页最先需要看到的核心信息；
+      // - 验证码配置与部门配置继续在后台补齐，避免首次进入时同时叠加过多接口与重分区渲染。
+      const [orderSerialResult, o2oRuleResult] = await Promise.allSettled([
         getOrderSerialConfigs(),
         getO2oRuleConfigs(),
-        getVerificationProviderConfigs(),
-        getClientDepartmentConfigs(),
       ])
 
       return {
         orderSerialResult,
         o2oRuleResult,
-        verificationResult,
-        clientDepartmentResult,
       }
     },
     onSuccess: (result) => {
@@ -653,30 +693,71 @@ const loadData = async () => {
       if (result.o2oRuleResult.status === 'fulfilled') {
         applyO2oRules(result.o2oRuleResult.value)
         successCount += 1
+      } else {
+        sectionErrorState.o2o_rules = '线上预定规则加载失败'
       }
-      if (result.verificationResult.status === 'fulfilled') {
-        applyVerificationConfigs(result.verificationResult.value)
-        successCount += 1
-      }
-      if (result.clientDepartmentResult.status === 'fulfilled') {
-        applyClientDepartmentConfigs(result.clientDepartmentResult.value)
-        successCount += 1
+      if (result.orderSerialResult.status !== 'fulfilled') {
+        sectionErrorState.order_serial = '订单流水配置加载失败'
       }
 
       if (successCount === 0) {
         loadError.value = '系统配置加载失败，请刷新重试或检查后端服务状态'
+        sectionLoadingState.verification = false
+        sectionLoadingState.department = false
+        return
       }
-      if (successCount > 0 && successCount < 4) {
-        ElMessage.warning('部分配置加载失败，已展示可用内容')
+      if (successCount > 0 && successCount < 2) {
+        ElMessage.warning('核心配置已部分加载，页面将继续展示可用内容')
       }
 
-      initialSnapshot.value = snapshotForm()
+      void deferredSectionRequest.runLatest({
+        executor: async () => {
+          const [verificationResult, clientDepartmentResult] = await Promise.allSettled([
+            getVerificationProviderConfigs(),
+            getClientDepartmentConfigs(),
+          ])
+          return {
+            verificationResult,
+            clientDepartmentResult,
+          }
+        },
+        onSuccess: (deferredResult) => {
+          if (deferredResult.verificationResult.status === 'fulfilled') {
+            applyVerificationConfigs(deferredResult.verificationResult.value)
+          } else {
+            sectionErrorState.verification = '验证码配置加载失败'
+          }
+
+          if (deferredResult.clientDepartmentResult.status === 'fulfilled') {
+            applyClientDepartmentConfigs(deferredResult.clientDepartmentResult.value)
+          } else {
+            sectionErrorState.department = '部门配置加载失败'
+          }
+
+          if (sectionErrorState.verification || sectionErrorState.department) {
+            ElMessage.warning('部分次级配置仍在加载失败，已保留当前可用内容')
+          }
+        },
+        onError: (error) => {
+          const message = extractErrorMessage(error, '继续加载验证码与部门配置失败')
+          sectionErrorState.verification = sectionErrorState.verification || message
+          sectionErrorState.department = sectionErrorState.department || message
+          ElMessage.warning(message)
+        },
+        onFinally: () => {
+          sectionLoadingState.verification = false
+          sectionLoadingState.department = false
+          initialSnapshot.value = snapshotForm()
+        },
+      })
     },
     onError: (error) => {
       loadError.value = extractErrorMessage(error, '加载系统配置失败，请稍后重试')
       ElMessage.error(loadError.value)
     },
     onFinally: () => {
+      sectionLoadingState.order_serial = false
+      sectionLoadingState.o2o_rules = false
       loading.value = false
     },
   })
@@ -805,7 +886,13 @@ onMounted(() => {
           <div class="text-sm text-slate-600 dark:text-slate-300">
             {{ canUpdateConfigs ? '当前账号具备系统配置维护权限，可编辑参数并提交保存' : '当前账号仅支持只读查看' }}
           </div>
-          <el-button v-if="canUpdateConfigs" type="primary" :loading="saving" :disabled="loading || !isDirty" @click="handleSubmit">
+          <el-button
+            v-if="canUpdateConfigs"
+            type="primary"
+            :loading="saving"
+            :disabled="formInteractionLoading || hasDeferredSectionFailure || !isDirty"
+            @click="handleSubmit"
+          >
             保存配置
           </el-button>
         </div>
@@ -842,6 +929,14 @@ onMounted(() => {
 
       <el-form v-else ref="formRef" :model="serialForm" :rules="rules" label-position="top">
         <div class="apple-card p-5 sm:p-6 xl:p-7">
+          <el-alert
+            v-if="deferredSectionStatusText"
+            :title="deferredSectionStatusText"
+            :type="hasDeferredSectionFailure ? 'warning' : 'info'"
+            :closable="false"
+            show-icon
+            class="mb-4"
+          />
           <div class="mb-4">
             <el-tabs :model-value="activeSection" @tab-change="handleSectionChange">
               <el-tab-pane v-for="section in sectionOptions" :key="section.key" :label="section.label" :name="section.key" />
@@ -857,7 +952,7 @@ onMounted(() => {
                 :walkin-preview="walkinPreview"
                 :serial-form="serialForm"
                 :can-update-configs="canUpdateConfigs"
-                :loading="loading"
+                :loading="formInteractionLoading"
                 :get-updated-at-label="getUpdatedAtLabel"
               />
             </transition>
@@ -867,7 +962,7 @@ onMounted(() => {
                 v-if="activeSection === 'o2o_rules'"
                 :o2o-form="serialForm.o2o"
                 :can-update-configs="canUpdateConfigs"
-                :loading="loading"
+                :loading="formInteractionLoading"
                 :o2o-updated-at-label="o2oUpdatedAtLabel"
               />
             </transition>
@@ -878,7 +973,7 @@ onMounted(() => {
                 :verification-form="serialForm.verification"
                 :can-update-configs="canUpdateConfigs"
                 :can-test-verification-providers="canTestVerificationProviders"
-                :loading="loading"
+                :loading="formInteractionLoading"
                 :saving="saving"
                 :test-sending-channel="testSendingChannel"
                 :get-verification-updated-at-label="getVerificationUpdatedAtLabel"
@@ -891,7 +986,7 @@ onMounted(() => {
                 v-if="activeSection === 'department'"
                 :serial-form="serialForm"
                 :can-update-configs="canUpdateConfigs"
-                :loading="loading"
+                :loading="formInteractionLoading"
                 :saving="saving"
                 :selected-department-node="selectedDepartmentNode"
                 :client-department-preview-options="clientDepartmentPreviewOptions"
