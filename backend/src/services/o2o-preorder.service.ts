@@ -392,7 +392,9 @@ class O2oPreorderService {
   // - 统一去首尾空格并校验长度；
   // - 不允许继续由服务端静默回退成账号名，否则无法区分“本人账号”和“实际提货人”。
   private normalizePickupContact(value: string | null | undefined): string {
-    const normalizedValue = value?.trim() ?? ''
+    // 运行时兜底：即使上游传来 null/undefined 或非字符串脏值，
+    // 这里也先统一转成字符串再裁剪空白，避免在 trim 阶段失稳。
+    const normalizedValue = (value ?? '').toString().trim()
     if (!normalizedValue) {
       throw new BizError('请填写提货人', 400)
     }
