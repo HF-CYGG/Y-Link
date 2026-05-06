@@ -124,7 +124,7 @@ class OrderSerialService {
 
     const start = this.parsePositiveInteger(configMap.get(startKey), `${startKey} 配置异常`)
     const current = this.parseNonNegativeInteger(configMap.get(currentKey), `${currentKey} 配置异常`)
-    const width = this.parsePositiveInteger(configMap.get(widthKey), `${widthKey} 配置异常`)
+    this.parsePositiveInteger(configMap.get(widthKey), `${widthKey} 配置异常`)
     const removedSerial = this.parseSerialFromShowNo(showNo, serialRule.prefix)
 
     if (removedSerial === null || removedSerial !== current) {
@@ -149,7 +149,7 @@ class OrderSerialService {
     const keys = [`${configKeyPrefix}.start`, `${configKeyPrefix}.current`, `${configKeyPrefix}.width`]
     const placeholders = keys.map(() => '?').join(', ')
     const useForUpdate = manager.connection.options.type === 'mysql'
-    const rows = (await manager.query(
+    const rows: Array<{ configKey?: string; configValue?: string }> = await manager.query(
       `
         SELECT config_key AS configKey, config_value AS configValue
         FROM system_configs
@@ -157,7 +157,7 @@ class OrderSerialService {
         ${useForUpdate ? 'FOR UPDATE' : ''}
       `,
       keys,
-    )) as Array<{ configKey?: string; configValue?: string }>
+    )
 
     if (rows.length !== keys.length) {
       throw new BizError('订单流水配置缺失，请联系管理员补齐配置', 500)
