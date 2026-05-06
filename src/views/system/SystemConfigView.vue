@@ -710,7 +710,8 @@ const loadData = async () => {
         ElMessage.warning('核心配置已部分加载，页面将继续展示可用内容')
       }
 
-      void deferredSectionRequest.runLatest({
+      deferredSectionRequest
+        .runLatest({
         executor: async () => {
           const [verificationResult, clientDepartmentResult] = await Promise.allSettled([
             getVerificationProviderConfigs(),
@@ -749,7 +750,8 @@ const loadData = async () => {
           sectionLoadingState.department = false
           initialSnapshot.value = snapshotForm()
         },
-      })
+        })
+        .catch(() => undefined)
     },
     onError: (error) => {
       loadError.value = extractErrorMessage(error, '加载系统配置失败，请稍后重试')
