@@ -46,6 +46,7 @@ const SQLITE_REQUIRED_ORDER_COLUMNS = [
   'customer_department_name',
 ]
 
+const SQLITE_REQUIRED_ORDER_ITEM_COLUMNS = ['unit_price', 'line_amount']
 const SQLITE_REQUIRED_PRODUCT_COLUMNS = [
   'o2o_status',
   'thumbnail',
@@ -68,6 +69,27 @@ const SQLITE_REQUIRED_O2O_PREORDER_COLUMNS = [
   'update_count',
 ]
 const SQLITE_REQUIRED_O2O_RETURN_REQUEST_COLUMNS = ['handled_at', 'handled_by', 'rejected_reason']
+
+async function listSqliteTableColumns(dataSource: DataSource, tableName: string): Promise<Set<string>> {
+  const columns: Array<{ name: string }> = await dataSource.query(`PRAGMA table_info('${tableName}')`)
+  return new Set(columns.map((column) => column.name))
+}
+
+async function normalizeSqliteOutboundItemColumns(dataSource: DataSource): Promise<void> {
+  const itemColumnSet = await listSqliteTableColumns(dataSource, 'biz_outbound_order_item')
+  if (itemColumnSet.size === 0) {
+    return
+  }
+
+  if (itemColumnSet.has('unitPrice') && !itemColumnSet.has('unit_price')) {
+    await dataSource.query(`ALTER TABLE "biz_outbound_order_item" RENAME COLUMN "unitPrice" TO "unit_price"`)
+  }
+
+  const refreshedColumnSet = await listSqliteTableColumns(dataSource, 'biz_outbound_order_item')
+  if (refreshedColumnSet.has('lineAmount') && !refreshedColumnSet.has('line_amount')) {
+    await dataSource.query(`ALTER TABLE "biz_outbound_order_item" RENAME COLUMN "lineAmount" TO "line_amount"`)
+  }
+}
 
 export function resolveSqliteDatabasePath(sqliteDbPath = env.SQLITE_DB_PATH): string {
   return path.isAbsolute(sqliteDbPath)
@@ -119,36 +141,40 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
     return true
   }
 
-  const orderColumns: Array<{ name: string }> = await dataSource.query(`PRAGMA table_info('biz_outbound_order')`)
-  const orderColumnSet = new Set(orderColumns.map((column) => column.name))
+  const orderColumnSet = await listSqliteTableColumns(dataSource, 'biz_outbound_order')
   if (SQLITE_REQUIRED_ORDER_COLUMNS.some((column) => !orderColumnSet.has(column))) {
     return true
   }
 
-  const productColumns: Array<{ name: string }> = await dataSource.query(`PRAGMA table_info('base_product')`)
-  const productColumnSet = new Set(productColumns.map((column) => column.name))
+  const orderItemColumnSet = await listSqliteTableColumns(dataSource, 'biz_outbound_order_item')
+  if (SQLITE_REQUIRED_ORDER_ITEM_COLUMNS.some((column) => !orderItemColumnSet.has(column))) {
+    return true
+  }
+
+  const productColumnSet = await listSqliteTableColumns(dataSource, 'base_product')
   if (SQLITE_REQUIRED_PRODUCT_COLUMNS.some((column) => !productColumnSet.has(column))) {
     return true
   }
 
-  const clientUserColumns: Array<{ name: string }> = await dataSource.query(`PRAGMA table_info('client_user')`)
-  const clientUserColumnSet = new Set(clientUserColumns.map((column) => column.name))
+  const clientUserColumnSet = await listSqliteTableColumns(dataSource, 'client_user')
   if (SQLITE_REQUIRED_CLIENT_USER_COLUMNS.some((column) => !clientUserColumnSet.has(column))) {
     return true
   }
 
-  const o2oPreorderColumns: Array<{ name: string }> = await dataSource.query(`PRAGMA table_info('o2o_preorder')`)
-  const o2oPreorderColumnSet = new Set(o2oPreorderColumns.map((column) => column.name))
+  const o2oPreorderColumnSet = await listSqliteTableColumns(dataSource, 'o2o_preorder')
   if (SQLITE_REQUIRED_O2O_PREORDER_COLUMNS.some((column) => !o2oPreorderColumnSet.has(column))) {
     return true
   }
 
-  const o2oReturnRequestColumns: Array<{ name: string }> = await dataSource.query(`PRAGMA table_info('o2o_return_request')`)
-  const o2oReturnRequestColumnSet = new Set(o2oReturnRequestColumns.map((column) => column.name))
+  const o2oReturnRequestColumnSet = await listSqliteTableColumns(dataSource, 'o2o_return_request')
   return SQLITE_REQUIRED_O2O_RETURN_REQUEST_COLUMNS.some((column) => !o2oReturnRequestColumnSet.has(column))
 }
 
 export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): Promise<DatabaseSchemaInitResult> {
+  if (env.DB_TYPE === 'sqlite') {
+    await normalizeSqliteOutboundItemColumns(dataSource)
+  }
+
   // DB_SYNC=true 时直接走 TypeORM 同步，便于本地快速调试实体结构。
   if (env.DB_SYNC === true) {
     await dataSource.synchronize()

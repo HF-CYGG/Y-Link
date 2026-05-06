@@ -43,10 +43,10 @@ export class BizOutboundOrderItem {
   @Column({ type: 'decimal', precision: 12, scale: 2 })
   qty!: string
 
-  @Column({ type: 'decimal', precision: 12, scale: 2 })
+  @Column({ name: 'unit_price', type: 'decimal', precision: 12, scale: 2 })
   unitPrice!: string
 
-  @Column({ type: 'decimal', precision: 14, scale: 2 })
+  @Column({ name: 'line_amount', type: 'decimal', precision: 14, scale: 2 })
   lineAmount!: string
 
   @Column({ type: 'varchar', length: 200, nullable: true })
