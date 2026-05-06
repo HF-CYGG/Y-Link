@@ -62,26 +62,31 @@ const RATE_LIMIT_RULES = {
     windowMs: 30 * 60 * 1000,
     blockMessage: '重置密码请求过于频繁，请稍后再试',
   },
+  // clientForgotResetByAccount：客户端忘记密码完成重置的最后一步，按账号限频，避免同一账号被重复撞库或脚本化重置。
   clientForgotResetByAccount: {
     maxRequests: 3,
     windowMs: 30 * 60 * 1000,
     blockMessage: '该账号重置密码请求过于频繁，请稍后再试',
   },
+  // clientChangePasswordByIp：客户端已登录后修改密码，按来源 IP 限频，降低同设备高频试探或批量脚本请求风险。
   clientChangePasswordByIp: {
     maxRequests: 10,
     windowMs: 10 * 60 * 1000,
     blockMessage: '修改密码请求过于频繁，请稍后再试',
   },
+  // clientChangePasswordByUser：客户端已登录后修改密码，按当前用户限频，避免单账号短时间内反复改密触发异常行为。
   clientChangePasswordByUser: {
     maxRequests: 5,
     windowMs: 10 * 60 * 1000,
     blockMessage: '当前账号修改密码过于频繁，请稍后再试',
   },
+  // clientProfileUpdateByIp：客户端资料维护操作，按来源 IP 限频，用于抑制批量资料写入或自动化刷接口。
   clientProfileUpdateByIp: {
     maxRequests: 20,
     windowMs: 10 * 60 * 1000,
     blockMessage: '资料更新请求过于频繁，请稍后再试',
   },
+  // clientProfileUpdateByUser：客户端资料维护操作，按当前用户限频，避免单账号在短窗口内反复修改资料。
   clientProfileUpdateByUser: {
     maxRequests: 10,
     windowMs: 10 * 60 * 1000,

@@ -63,6 +63,56 @@ function parseIpv4Segments(hostname: string) {
   return segments
 }
 
+type Ipv4UnsafeMatcher = {
+  matches: (segments: number[], ipValue: number) => boolean
+  reason: UnsafeHostReason
+}
+
+const IPV4_UNSAFE_MATCHERS: Ipv4UnsafeMatcher[] = [
+  {
+    matches: (_segments, ipValue) => ipValue === 0,
+    reason: 'unspecified',
+  },
+  {
+    matches: ([firstOctet]) => firstOctet === 0,
+    reason: 'unspecified',
+  },
+  {
+    matches: ([firstOctet]) => firstOctet === 127,
+    reason: 'loopback',
+  },
+  {
+    matches: ([firstOctet]) => firstOctet === 10,
+    reason: 'private',
+  },
+  {
+    matches: ([firstOctet, secondOctet]) => firstOctet === 172 && secondOctet >= 16 && secondOctet <= 31,
+    reason: 'private',
+  },
+  {
+    matches: ([firstOctet, secondOctet]) => firstOctet === 192 && secondOctet === 168,
+    reason: 'private',
+  },
+  {
+    matches: ([firstOctet, secondOctet]) => firstOctet === 169 && secondOctet === 254,
+    reason: 'link_local',
+  },
+  {
+    // 运营商级 NAT 共享地址虽然不属于 RFC1918 私网，但同样不应作为出站目标访问。
+    matches: ([firstOctet, secondOctet]) => firstOctet === 100 && secondOctet >= 64 && secondOctet <= 127,
+    reason: 'private',
+  },
+  {
+    // 192.0.0.0/24 属于 IETF 协议保留地址段，应与普通公网地址区分处理。
+    matches: ([firstOctet, secondOctet, thirdOctet]) => firstOctet === 192 && secondOctet === 0 && thirdOctet === 0,
+    reason: 'reserved',
+  },
+  {
+    matches: ([firstOctet, secondOctet]) => firstOctet === 198 && (secondOctet === 18 || secondOctet === 19),
+    reason: 'reserved',
+  },
+]
+
 function detectUnsafeIpv4(hostname: string): UnsafeHostReason | null {
   const segments = parseIpv4Segments(hostname)
   const ipValue = parseIpv4ToInt(hostname)
@@ -70,34 +120,10 @@ function detectUnsafeIpv4(hostname: string): UnsafeHostReason | null {
     return null
   }
 
-  const [firstOctet, secondOctet] = segments
-
-  if (ipValue === 0) {
-    return 'unspecified'
-  }
-  if (firstOctet === 0) {
-    return 'unspecified'
-  }
-  if (firstOctet === 127) {
-    return 'loopback'
-  }
-  if (firstOctet === 10) {
-    return 'private'
-  }
-  if (firstOctet === 172 && secondOctet >= 16 && secondOctet <= 31) {
-    return 'private'
-  }
-  if (firstOctet === 192 && secondOctet === 168) {
-    return 'private'
-  }
-  if (firstOctet === 169 && secondOctet === 254) {
-    return 'link_local'
-  }
-  if (firstOctet === 100 && secondOctet >= 64 && secondOctet <= 127) {
-    return 'reserved'
-  }
-  if (firstOctet === 198 && (secondOctet === 18 || secondOctet === 19)) {
-    return 'reserved'
+  for (const matcher of IPV4_UNSAFE_MATCHERS) {
+    if (matcher.matches(segments, ipValue)) {
+      return matcher.reason
+    }
   }
 
   return null
