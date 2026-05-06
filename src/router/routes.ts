@@ -1,6 +1,6 @@
 /**
  * 模块说明：src/router/routes.ts
- * 文件职责：统一维护管理端与客户端的路由、菜单、快捷入口和权限元信息，本次补充产品中心共享工作台的预热收口配置。
+ * 文件职责：统一维护管理端与客户端的路由、菜单、快捷入口和权限元信息，本次补充产品中心共享工作台的预热收口配置并收缩 Dashboard 首屏预热范围。
  * 实现逻辑：
  * - 所有业务页面都通过 routeViewLoaders 做懒加载，保证路由、预热和权限入口保持同源；
  * - 产品中心共享工作台仍然由两个历史路由承接，但预热目标会按双入口互相补齐，确保壳层拆包后标签切换依旧平滑；
@@ -125,7 +125,11 @@ const layoutChildren: AppRouteRecord[] = [
       requiredPermissions: ['dashboard:view'],
       allowedRoles: ['admin', 'operator'],
       keepAlive: true,
-      preloadTargets: ['order-entry', 'order-list', 'products', 'system-users'],
+      // 工作台仅预热最邻近的高频业务页：
+      // - 出库开单与出库单列表是首页最常见下一跳；
+      // - 产品中心、用户中心属于次级治理链路，继续在这里预热会额外拉起共享壳层子包，
+      //   登录后与 Dashboard 首屏渲染争抢网络，得不偿失。
+      preloadTargets: ['order-entry', 'order-list'],
     },
   },
   {

@@ -16,7 +16,7 @@ import {
   type PermissionCode,
   type UserSafeProfile,
 } from '@/api/modules/auth'
-import { preloadRouteComponents, resolvePostLoginWarmupTargets } from '@/router/route-performance'
+import { resolvePostLoginWarmupTargets, scheduleRouteComponentWarmup } from '@/router/route-performance'
 import { clearPersistedAuthState, persistAuthState, readPersistedAuthState } from '@/utils/auth-storage'
 
 /**
@@ -160,7 +160,10 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   const warmupPostLoginEntry = async (redirectPath?: string) => {
-    await preloadRouteComponents(resolvePostLoginWarmupTargets(redirectPath))
+    // 登录成功后改为“异步空闲预热”：
+    // - 避免在真正 router.replace 之前同步等待 import，导致登录按钮成功后仍卡住；
+    // - 继续保留少量高概率页面的空闲预热，兼顾首跳速度与后续切换流畅度。
+    scheduleRouteComponentWarmup(resolvePostLoginWarmupTargets(redirectPath))
   }
 
   /**

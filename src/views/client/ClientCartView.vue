@@ -9,7 +9,7 @@ import { computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { ArrowLeft } from '@element-plus/icons-vue'
-import { useClientCartStore } from '@/store'
+import { useClientAuthStore, useClientCartStore } from '@/store'
 import pinia from '@/store/pinia'
 
 const props = defineProps<{
@@ -22,10 +22,11 @@ const emit = defineEmits<{
 }>()
 
 const router = useRouter()
+const clientAuthStore = useClientAuthStore(pinia)
 const clientCartStore = useClientCartStore(pinia)
 
 onMounted(() => {
-  clientCartStore.initialize()
+  clientCartStore.initialize(clientAuthStore.currentUser?.id)
 })
 
 const selectedCount = computed(() => clientCartStore.selectedValidItems.length)

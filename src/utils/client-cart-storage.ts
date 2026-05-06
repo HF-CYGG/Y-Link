@@ -1,8 +1,20 @@
 /**
  * 模块说明：src/utils/client-cart-storage.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：负责客户端购物车快照的本地持久化、按账号隔离恢复与历史全局缓存清理。
+ * 实现逻辑：
+ * 1. 购物车缓存使用 `clientUserId` 作为作用域后缀，保证同一浏览器切换账号不会读到别人的加购结果；
+ * 2. 恢复时统一做结构归一化，避免旧版本或被污染的缓存把非法数量、价格写回 Store；
+ * 3. 每次读写顺手清理历史单一全局 key，确保升级后不会再被旧缓存串号。
+ * 维护说明：
+ * - 若购物车快照后续新增字段，需要同步补齐 `normalizeSnapshotItems()`；
+ * - 若未来购物车还要按门店、租户隔离，可在作用域 key 的拼装逻辑上继续扩展。
  */
+
+import {
+  clearLegacyScopedStorageKey,
+  getBrowserStorage,
+  resolveUserScopedStorageKey,
+} from '@/utils/storage-user-scope'
 
 export interface ClientCartSnapshotItem {
   productId: string
@@ -17,16 +29,15 @@ export interface ClientCartSnapshotItem {
   selected: boolean
 }
 
-// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
-const CLIENT_CART_SNAPSHOT_KEY = 'y-link.client-cart.snapshot'
+// 统一抽出客户端账号作用域类型，避免同一联合类型在读/写/清理函数签名中重复展开。
+type ClientCartStorageScopeId = string | number | null | undefined
 
-const getStorage = () => {
-  if (globalThis.window === undefined) {
-    return null
-  }
-
-  return globalThis.window.localStorage
-}
+// 详细注释：
+// - 历史版本使用单一全局 key，会让同一浏览器上的多个客户端账号共用一份购物车；
+// - 新版本改为“前缀 + clientUserId”的隔离键；
+// - legacy key 继续保留仅用于升级时清理，不再作为读取来源。
+const CLIENT_CART_SNAPSHOT_KEY_PREFIX = 'y-link.client-cart.snapshot'
+const LEGACY_CLIENT_CART_SNAPSHOT_KEY = 'y-link.client-cart.snapshot'
 
 const normalizePrice = (value: unknown) => {
   if (typeof value === 'number' && Number.isFinite(value)) {
@@ -85,13 +96,19 @@ const normalizeSnapshotItems = (items: unknown): ClientCartSnapshotItem[] => {
     .filter((item): item is ClientCartSnapshotItem => item !== null)
 }
 
-export const readPersistedClientCartSnapshot = () => {
-  const storage = getStorage()
+export const readPersistedClientCartSnapshot = (clientUserId: ClientCartStorageScopeId) => {
+  const storage = getBrowserStorage('local')
   if (!storage) {
     return [] as ClientCartSnapshotItem[]
   }
 
-  const raw = storage.getItem(CLIENT_CART_SNAPSHOT_KEY)
+  clearLegacyScopedStorageKey(storage, LEGACY_CLIENT_CART_SNAPSHOT_KEY)
+  const scopedKey = resolveUserScopedStorageKey(CLIENT_CART_SNAPSHOT_KEY_PREFIX, clientUserId)
+  if (!scopedKey) {
+    return [] as ClientCartSnapshotItem[]
+  }
+
+  const raw = storage.getItem(scopedKey)
   if (!raw) {
     return [] as ClientCartSnapshotItem[]
   }
@@ -99,25 +116,45 @@ export const readPersistedClientCartSnapshot = () => {
   try {
     return normalizeSnapshotItems(JSON.parse(raw))
   } catch {
-    storage.removeItem(CLIENT_CART_SNAPSHOT_KEY)
+    storage.removeItem(scopedKey)
     return [] as ClientCartSnapshotItem[]
   }
 }
 
-export const persistClientCartSnapshot = (items: ClientCartSnapshotItem[]) => {
-  const storage = getStorage()
+export const persistClientCartSnapshot = (
+  clientUserId: ClientCartStorageScopeId,
+  items: ClientCartSnapshotItem[],
+) => {
+  const storage = getBrowserStorage('local')
   if (!storage) {
     return
   }
 
-  if (!items.length) {
-    storage.removeItem(CLIENT_CART_SNAPSHOT_KEY)
+  clearLegacyScopedStorageKey(storage, LEGACY_CLIENT_CART_SNAPSHOT_KEY)
+  const scopedKey = resolveUserScopedStorageKey(CLIENT_CART_SNAPSHOT_KEY_PREFIX, clientUserId)
+  if (!scopedKey) {
     return
   }
 
-  storage.setItem(CLIENT_CART_SNAPSHOT_KEY, JSON.stringify(items))
+  if (!items.length) {
+    storage.removeItem(scopedKey)
+    return
+  }
+
+  storage.setItem(scopedKey, JSON.stringify(items))
 }
 
-export const clearPersistedClientCartSnapshot = () => {
-  getStorage()?.removeItem(CLIENT_CART_SNAPSHOT_KEY)
+export const clearPersistedClientCartSnapshot = (clientUserId: ClientCartStorageScopeId) => {
+  const storage = getBrowserStorage('local')
+  if (!storage) {
+    return
+  }
+
+  clearLegacyScopedStorageKey(storage, LEGACY_CLIENT_CART_SNAPSHOT_KEY)
+  const scopedKey = resolveUserScopedStorageKey(CLIENT_CART_SNAPSHOT_KEY_PREFIX, clientUserId)
+  if (!scopedKey) {
+    return
+  }
+
+  storage.removeItem(scopedKey)
 }

@@ -13,6 +13,7 @@ import type { AuthUserContext } from '../types/auth.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { BizError } from '../utils/errors.js'
 import { normalizeClientVerificationTarget } from '../utils/client-auth-account.js'
+import { detectUnsafeHost, formatUnsafeHostReason } from '../utils/safe-network.js'
 import {
   systemConfigService,
   type VerificationProviderConfigInput,
@@ -88,6 +89,23 @@ export class VerificationCodeService {
       throw new BizError('验证码平台 API 未配置，请联系管理员补齐', 500)
     }
 
+    /**
+     * 运行期兜底：
+     * - 旧数据库里可能已经存在历史危险配置；
+     * - 即使绕过保存接口，真正出站前仍再次拦截 localhost、裸 IP、私网与链路本地地址；
+     * - 这样可以把“存量脏数据”也纳入防线，避免直接向内网发起请求。
+     */
+    let providerUrl: URL
+    try {
+      providerUrl = new URL(config.apiUrl)
+    } catch {
+      throw new BizError('验证码平台 API 地址格式不正确，请联系管理员修正', 500)
+    }
+    const unsafeReason = detectUnsafeHost(providerUrl.hostname)
+    if (unsafeReason) {
+      throw new BizError(`验证码平台 API 地址命中受限主机：${formatUnsafeHostReason(unsafeReason)}`, 500)
+    }
+
     const renderedHeadersText = this.renderTemplate(config.headersTemplate, context) || '{}'
     const renderedBodyText = this.renderTemplate(config.bodyTemplate, context)
 
@@ -115,7 +133,7 @@ export class VerificationCodeService {
     let response: Response
     let responseText: string
     try {
-      response = await fetch(config.apiUrl, requestInit)
+      response = await fetch(providerUrl, requestInit)
       responseText = await response.text()
     } catch (error) {
       if (error instanceof Error && error.name === 'AbortError') {

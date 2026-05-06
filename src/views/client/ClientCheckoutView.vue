@@ -113,7 +113,7 @@ const handlePickupContactBlur = () => {
 }
 
 onMounted(() => {
-  clientCartStore.initialize()
+  clientCartStore.initialize(clientAuthStore.currentUser?.id)
   // 从商城页直接进入结算时，用户可能尚未进入购物车页手动勾选；
   // 这里默认全选“仍有效”的商品，减少结算前的重复操作。
   if (!clientCartStore.selectedValidItems.length && clientCartStore.validItems.length > 0) {

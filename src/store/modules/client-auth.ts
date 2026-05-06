@@ -32,6 +32,8 @@ import {
 } from '@/utils/client-auth-storage'
 import { normalizeRequestError } from '@/utils/error'
 import pinia from '@/store/pinia'
+import { useClientCartStore } from './client-cart'
+import { useClientCatalogStore } from './client-catalog'
 import { useClientOrderStore } from './client-order'
 
 /**
@@ -47,7 +49,11 @@ export const useClientAuthStore = defineStore('client-auth', () => {
   const initializing = ref(false)
 
   const clearClientScopedStores = () => {
+    const clientCartStore = useClientCartStore(pinia)
+    const clientCatalogStore = useClientCatalogStore(pinia)
     const clientOrderStore = useClientOrderStore(pinia)
+    clientCartStore.clearAll()
+    clientCatalogStore.clearAll()
     clientOrderStore.clearAll()
   }
 

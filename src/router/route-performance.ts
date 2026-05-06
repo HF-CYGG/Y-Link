@@ -1,6 +1,6 @@
 /**
  * 模块说明：src/router/route-performance.ts
- * 文件职责：统一维护路由异步加载器、页面预热目标和登录后首跳预热策略，本次补充产品中心共享壳层的子页预热映射。
+ * 文件职责：统一维护路由异步加载器、页面预热目标和登录后首跳预热策略，本次收缩登录后预热范围并保留高频页面空闲预热能力。
  * 维护说明：
  * - 路由表与预热表必须保持同一命名口径，否则 preloadTargets 会静默失效；
  * - 新增业务页面时，除了补 routes，还要同步评估是否需要纳入这里的预热范围。
@@ -264,13 +264,15 @@ const resolveWarmupTargetByPath = (redirectPath: string): RouteWarmupTarget | nu
 }
 
 export const resolvePostLoginWarmupTargets = (redirectPath?: string): RouteWarmupTarget[] => {
-  // 登录后至少保证 AppLayout 和工作台被预热；
-  // 如果存在明确 redirect，再额外补充一次“下一跳页面”预热。
-  const targets: RouteWarmupTarget[] = ['appLayout', 'dashboard']
+  // 登录成功后不再默认把 Dashboard 整页提前拉起：
+  // - 登录页随后的 replace 本身就会加载目标页面，若这里同步预热 Dashboard，
+  //   会与真实导航重复争抢带宽，放大“登录后首跳变慢”的体感；
+  // - 因此这里仅保留基础壳层，并按 redirect 精确补充下一跳业务页。
+  const targets: RouteWarmupTarget[] = ['appLayout']
   const normalizedRedirectPath = typeof redirectPath === 'string' ? redirectPath.trim() : ''
   const matchedTarget = normalizedRedirectPath ? resolveWarmupTargetByPath(normalizedRedirectPath) : null
 
-  if (matchedTarget) {
+  if (matchedTarget && matchedTarget !== 'dashboard') {
     targets.push(matchedTarget)
   }
 
@@ -297,7 +299,7 @@ export const resolveClientPostLoginWarmupTargets = (redirectPath?: string): AppR
  * - 避免与当前页面首屏渲染争抢主线程与网络；
  * - 使用 requestIdleCallback 优先，缺失时回退到短延时 setTimeout。
  */
-export const scheduleRouteComponentWarmup = (routeNames: AppRouteName[]) => {
+export const scheduleRouteComponentWarmup = (routeNames: RouteWarmupTarget[]) => {
   if (globalThis.window === undefined) {
     return
   }

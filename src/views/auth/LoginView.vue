@@ -86,7 +86,8 @@ const handleSubmit = async () => {
         : resolveDefaultManagementRedirect(result.user),
     )
 
-    await authStore.warmupPostLoginEntry(redirectPath.value)
+    // 登录成功后仅投递非阻塞预热任务，不等待其完成，优先保证真正的页面跳转立即发生。
+    authStore.warmupPostLoginEntry(redirectPath.value).catch(() => undefined)
     await router.replace(redirectPath.value) 
   } catch (error) { 
     submitPhase.value = 'idle' 

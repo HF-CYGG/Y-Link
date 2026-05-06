@@ -165,6 +165,7 @@ export class UserService {
 
     return AppDataSource.transaction(async (manager) => {
       const userRepo = manager.getRepository(SysUser)
+      const sessionRepo = manager.getRepository(SysUserSession)
       const user = await userRepo.findOne({ where: { id } })
       if (!user) {
         throw new BizError('用户不存在', 404)
@@ -192,6 +193,16 @@ export class UserService {
       }
 
       const savedUser = await userRepo.save(user)
+      if (normalizedPassword !== undefined) {
+        /**
+         * 安全修复：
+         * - 管理端“编辑用户”也允许直接改密码；
+         * - 若只更新密码哈希而不清理历史会话，旧 Bearer Token 仍可继续访问；
+         * - 因此这里与专门改密接口保持一致，密码变更后立即吊销该账号全部会话。
+         */
+        const deletedSessions = await sessionRepo.delete({ userId: savedUser.id })
+        changeSummary.revokedSessionCount = String(deletedSessions.affected ?? 0)
+      }
       await auditService.record(
         {
           actionType: 'user.update',

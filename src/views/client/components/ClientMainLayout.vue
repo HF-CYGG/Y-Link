@@ -21,7 +21,7 @@ const route = useRoute()
 const clientAuthStore = useClientAuthStore(pinia)
 const clientCartStore = useClientCartStore(pinia)
 
-clientCartStore.initialize()
+clientCartStore.initialize(clientAuthStore.currentUser?.id)
 const transitionName = ref<'slide-left' | 'slide-right'>('slide-left')
 
 const displayName = computed(() => {
@@ -105,6 +105,13 @@ watch(
     transitionName.value = nextDepth >= previousDepth ? 'slide-left' : 'slide-right'
   },
   { immediate: true },
+)
+
+watch(
+  () => clientAuthStore.currentUser?.id,
+  (nextClientUserId) => {
+    clientCartStore.initialize(nextClientUserId)
+  },
 )
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。

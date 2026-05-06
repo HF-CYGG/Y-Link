@@ -8,6 +8,7 @@ import { AppDataSource } from '../config/data-source.js'
 import { SystemConfig } from '../entities/system-config.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
+import { detectUnsafeHost, formatUnsafeHostReason } from '../utils/safe-network.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
 
@@ -374,6 +375,17 @@ class SystemConfigService {
     }
     if (!['http:', 'https:'].includes(url.protocol)) {
       throw new BizError(`${channelLabel}API 地址仅支持 http 或 https 协议`, 400)
+    }
+
+    /**
+     * SSRF 防护：
+     * - 验证码平台属于服务端主动出站请求；
+     * - 若允许 localhost、裸 IP、私网或链路本地地址，攻击者可把请求打到宿主机、本地服务或内网资源；
+     * - 因此在配置保存阶段直接拒绝危险主机，减少错误配置与恶意利用窗口。
+     */
+    const unsafeReason = detectUnsafeHost(url.hostname)
+    if (unsafeReason) {
+      throw new BizError(`${channelLabel}API 地址禁止使用${formatUnsafeHostReason(unsafeReason)}`, 400)
     }
   }
 
