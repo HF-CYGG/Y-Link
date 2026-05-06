@@ -915,12 +915,14 @@ onBeforeUnmount(() => {
     <div class="order-workbench-root grid gap-4 xl:grid-cols-[26rem_minmax(0,1fr)]">
       <section class="min-w-0 overflow-hidden rounded-3xl bg-white p-5 shadow-sm">
         <div class="order-pool-header">
-          <p class="break-words text-lg font-semibold text-slate-900">订单池</p>
+          <p class="order-pool-header__title break-words text-lg font-semibold text-slate-900">订单池</p>
           <div class="order-pool-header__controls">
             <el-switch
               v-model="autoRefreshEnabled"
+              class="order-pool-switch"
               size="small"
               inline-prompt
+              :width="64"
               active-text="轮询开"
               inactive-text="轮询关"
               @change="handleAutoRefreshChange"
@@ -936,8 +938,10 @@ onBeforeUnmount(() => {
             </el-select>
             <el-switch
               v-model="soundNoticeEnabled"
+              class="order-pool-switch"
               size="small"
               inline-prompt
+              :width="64"
               active-text="声音开"
               inactive-text="声音关"
               @change="handleSoundSwitchChange"
@@ -1468,10 +1472,16 @@ onBeforeUnmount(() => {
 }
 
 .order-pool-header {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
   gap: 12px;
+}
+
+.order-pool-header__title {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .order-pool-header__controls {
@@ -1481,6 +1491,21 @@ onBeforeUnmount(() => {
   justify-content: flex-end;
   gap: 8px;
   min-width: fit-content;
+  flex: 0 0 auto;
+}
+
+.order-pool-switch {
+  flex: 0 0 auto;
+}
+
+/*
+ * 订单池头部控件稳定性修复：
+ * - Element Plus 的 small + inline-prompt 开关默认最小宽度过窄，中文提示词会被压缩；
+ * - 这里对业务开关显式锁定宽度，并在移动端让控件条独占一行，避免和标题抢占横向空间。
+ */
+.order-workbench-root :deep(.order-pool-switch .el-switch__core) {
+  width: 64px;
+  min-width: 64px;
 }
 
 .order-pool-tab {
@@ -1564,14 +1589,15 @@ onBeforeUnmount(() => {
   }
 
   .order-pool-header {
-    grid-template-columns: minmax(0, 1fr) auto;
-    align-items: center;
+    flex-direction: column;
+    align-items: stretch;
   }
 
   .order-pool-header__controls {
-    flex-wrap: nowrap;
-    align-items: center;
-    justify-content: flex-end;
+    width: 100%;
+    justify-content: flex-start;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
   }
 
   .poll-interval-select {
