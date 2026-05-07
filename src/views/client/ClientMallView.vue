@@ -685,10 +685,10 @@ onBeforeUnmount(() => {
           <p class="mall-hero-card__title mt-1 text-xl font-semibold text-slate-900">商城</p>
           <p class="mall-hero-card__desc mt-1 text-sm text-slate-500">浏览标签、查看库存并快速加入购物车</p>
         </div>
-        <div v-else class="mall-hero-card__compact-banner" role="status" aria-live="polite">
+        <output v-else class="mall-hero-card__compact-banner" aria-live="polite">
           <span class="mall-hero-card__compact-badge">公告</span>
           <p class="mall-hero-card__compact-text">库存实时刷新，请以下单结果为准</p>
-        </div>
+        </output>
         <button
           type="button"
           class="mall-hero-card__refresh rounded-full border border-[var(--ylink-color-border)] bg-[var(--ylink-color-surface-soft)] px-4 py-2 text-sm text-slate-600"
@@ -1035,8 +1035,8 @@ onBeforeUnmount(() => {
 .mall-hero-card__compact-badge {
   flex-shrink: 0;
   border-radius: 9999px;
-  background: rgba(217, 119, 6, 0.12);
-  color: #b45309;
+  background: #ffedd5;
+  color: #7c2d12;
   font-size: 0.72rem;
   font-weight: 700;
   line-height: 1;
@@ -1045,7 +1045,7 @@ onBeforeUnmount(() => {
 
 .mall-hero-card__compact-text {
   overflow: hidden;
-  color: #b45309;
+  color: #92400e;
   font-size: 0.76rem;
   font-weight: 600;
   line-height: 1.25;
@@ -1139,6 +1139,7 @@ onBeforeUnmount(() => {
   font-size: 0.76rem;
   line-height: 1.45;
   display: -webkit-box;
+  line-clamp: 2;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
 }
@@ -1868,9 +1869,6 @@ onBeforeUnmount(() => {
     --mall-mini-cart-height: 4.95rem;
     --mall-floating-bottom-clearance: calc(var(--client-tab-bar-clearance, 5.5rem) + var(--mall-mini-cart-height) + 0.85rem);
     padding-bottom: calc(var(--client-tab-bar-clearance, 5.5rem) + 0.35rem);
-  }
-
-  .mall-page {
     gap: 0.7rem;
   }
 
