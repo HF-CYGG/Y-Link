@@ -10,7 +10,7 @@
  * - 若后续新增工作台页签，优先复用本组件的视觉与动效约束，不要在业务页重复搭建一套 Tab 容器；
  * - 当前组件默认会隐藏嵌套页面的二级页头，避免出现双标题与重复说明。
  */
-import type { Component } from 'vue'
+import { computed, type Component } from 'vue'
 import { PageContainer } from '@/components/common'
 
 interface WorkbenchTabOption {
@@ -25,6 +25,7 @@ interface Props {
   activeTab: string
   activeComponent: Component
   keepAlive?: boolean
+  componentCacheKeyPrefix?: string
   cardClass?: string
   contentClass?: string
 }
@@ -32,6 +33,7 @@ interface Props {
 const props = withDefaults(defineProps<Props>(), {
   description: '',
   keepAlive: true,
+  componentCacheKeyPrefix: '',
   cardClass: '',
   contentClass: '',
 })
@@ -45,6 +47,16 @@ const emit = defineEmits<{
 const handleTabChange = (value: string | number) => {
   emit('tab-change', value)
 }
+
+// ?????????
+// - ?????????? viewKey ?????????????????
+// - ??????????? + ???????????????????? keep-alive
+//   ?? tab ???????????????????????????????
+const resolvedComponentCacheKey = computed(() => {
+  return props.componentCacheKeyPrefix
+    ? `${props.componentCacheKeyPrefix}:${props.activeTab}`
+    : props.activeTab
+})
 </script>
 
 <template>
@@ -82,14 +94,14 @@ const handleTabChange = (value: string | number) => {
       </div>
 
       <div :class="['embedded-page px-3 pb-3 pt-3 sm:px-4 sm:pb-4 sm:pt-4', props.contentClass]">
-        <transition name="workbench-horizontal-slide">
+        <transition name="workbench-horizontal-slide" mode="out-in">
           <keep-alive v-if="props.keepAlive">
-            <component :is="props.activeComponent" :key="props.activeTab" class="workbench-horizontal-slide__panel" />
+            <component :is="props.activeComponent" :key="resolvedComponentCacheKey" class="workbench-horizontal-slide__panel" />
           </keep-alive>
           <component
             :is="props.activeComponent"
             v-else
-            :key="props.activeTab"
+            :key="resolvedComponentCacheKey"
             class="workbench-horizontal-slide__panel"
           />
         </transition>

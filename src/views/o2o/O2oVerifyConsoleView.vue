@@ -51,6 +51,7 @@ import {
   resolveEditableItemMaxQty,
   type EditableOnsiteOrderItem,
 } from '@/views/o2o/o2o-verify-console.helpers'
+import { notifyClientOrderRefresh } from '@/utils/client-order-refresh'
 
 const verifyCode = ref('')
 const verifyResult = ref<O2oVerifyDetailResult | null>(null)
@@ -261,6 +262,15 @@ const canSubmitOnsiteAdjust = computed(() => {
 const focusInput = async () => {
   await nextTick()
   inputRef.value?.focus()
+}
+
+// 详细注释：门店侧完成核销、现场改单或合规状态更新后，客户端订单详情需要立即感知并重拉最新详情。
+// 这里只广播订单 id 与变化原因，不直接耦合客户端页面实现，保持管理端与客户端边界清晰。
+const notifyPreorderChanged = (orderId: string, reason: 'verified' | 'updated' | 'compliance_updated') => {
+  notifyClientOrderRefresh({
+    orderId,
+    reason,
+  })
 }
 
 const replacePreorderDetail = (detail: O2oPreorderDetail) => {
@@ -599,6 +609,7 @@ const handleSubmitOnsiteAdjust = async () => {
       })),
     })
     replacePreorderDetail(nextDetail)
+    notifyPreorderChanged(nextDetail.order.id, 'updated')
     onsiteAdjustDialogVisible.value = false
     ElMessage.success('现场改单已保存')
   } catch (error) {
@@ -634,6 +645,7 @@ const handleSaveComplianceFlags = async () => {
     })
     replacePreorderDetail(nextDetail)
     syncComplianceFormFromDetail(nextDetail)
+    notifyPreorderChanged(nextDetail.order.id, 'compliance_updated')
     ElMessage.success('状态已更新')
   } catch (error) {
     const message = error instanceof Error ? error.message : '状态更新失败，请稍后重试'
@@ -687,6 +699,9 @@ const handleVerify = async () => {
   submitting.value = true
   try {
     verifyResult.value = await verifyO2oPreorder(activeVerifyCode)
+    if (!isReturnVerify && isPreorderDetail(verifyResult.value.detail)) {
+      notifyPreorderChanged(verifyResult.value.detail.order.id, 'verified')
+    }
     ElMessage.success(isReturnVerify ? '退货核销完成，库存已同步回补' : '核销完成，库存已同步扣减')
     verifyCode.value = ''
     await focusInput()

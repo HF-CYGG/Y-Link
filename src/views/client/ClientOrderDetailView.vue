@@ -40,6 +40,8 @@ import {
 } from '@/constants/o2o-order-status'
 import { useClientAuthStore, useClientOrderStore } from '@/store'
 import pinia from '@/store/pinia'
+import { subscribeClientOrderRefresh } from '@/utils/client-order-refresh'
+import { formatDateTime } from '@/utils/date-time'
 import { normalizeRequestError } from '@/utils/error'
 import { exportVoucherPdf } from '@/utils/pdf/export-voucher-pdf'
 import ClientOrderEditDialog from '@/views/client/components/ClientOrderEditDialog.vue'
@@ -90,6 +92,7 @@ const voucherEditableForm = reactive<OrderVoucherEditableFields>(createEmptyVouc
 const { runLatest } = useStableRequest()
 const clientAuthStore = useClientAuthStore(pinia)
 const clientOrderStore = useClientOrderStore(pinia)
+let disposeClientOrderRefresh: () => void = () => {}
 clientOrderStore.initialize(clientAuthStore.currentUser?.id)
 
 const currentReportScenario = computed(() => {
@@ -187,6 +190,12 @@ const toVoucherMoneyText = (value: string | number | null | undefined) => {
   return Number.isFinite(normalizedValue) ? normalizedValue.toFixed(2) : '0.00'
 }
 
+// 详细注释：客户端订单详情的所有用户可见时间统一走共享格式化工具，
+// 避免页面直接渲染服务端 ISO 字符串，造成时区、秒数与展示风格不一致。
+const formatOrderDateTime = (value?: string | null, fallback = '-') => {
+  return formatDateTime(value, fallback)
+}
+
 /**
  * 订单详情到正式出库单模板的适配层：
  * - 客户端 O2O 订单结构与管理端出库单结构不同，这里统一映射为模板所需字段；
@@ -254,21 +263,21 @@ const timelineItems = computed(() => {
 
   if (isO2oOrderVerified(order.status)) {
     return [
-      { key: 'created', title: '已下单', time: order.createdAt, active: true },
-      { key: 'prepare', title: '备货完成', time: order.timeoutAt || '门店已备货', active: true },
-      { key: 'verify', title: '已核销', time: order.verifiedAt || '核销成功', active: true },
-      { key: 'done', title: '订单完成', time: order.verifiedAt || '已完成', active: true },
+      { key: 'created', title: '已下单', time: formatOrderDateTime(order.createdAt, '已下单'), active: true },
+      { key: 'prepare', title: '备货完成', time: formatOrderDateTime(order.timeoutAt, '门店已备货'), active: true },
+      { key: 'verify', title: '已核销', time: formatOrderDateTime(order.verifiedAt, '核销成功'), active: true },
+      { key: 'done', title: '订单完成', time: formatOrderDateTime(order.verifiedAt, '已完成'), active: true },
     ]
   }
 
   if (isO2oOrderCancelled(order.status)) {
     return [
-      { key: 'created', title: '已下单', time: order.createdAt, active: true },
-      { key: 'prepare', title: '备货中', time: order.timeoutAt || '门店处理中', active: !cancelledByTimeout },
+      { key: 'created', title: '已下单', time: formatOrderDateTime(order.createdAt, '已下单'), active: true },
+      { key: 'prepare', title: '备货中', time: formatOrderDateTime(order.timeoutAt, '门店处理中'), active: !cancelledByTimeout },
       {
         key: 'cancelled',
         title: report.timelineCurrentTitle,
-        time: order.timeoutAt || '已取消',
+        time: formatOrderDateTime(order.timeoutAt, '已取消'),
         active: true,
       },
       {
@@ -281,17 +290,17 @@ const timelineItems = computed(() => {
   }
 
   return [
-    { key: 'created', title: '已下单', time: order.createdAt, active: true },
+    { key: 'created', title: '已下单', time: formatOrderDateTime(order.createdAt, '已下单'), active: true },
     {
       key: 'prepare',
       title: '备货中',
-      time: order.timeoutAt || '按门店通知准备',
+      time: formatOrderDateTime(order.timeoutAt, '按门店通知准备'),
       active: true,
     },
     {
       key: 'pending',
       title: report.timelineCurrentTitle,
-      time: order.timeoutAt || report.timelineCurrentHint,
+      time: formatOrderDateTime(order.timeoutAt, report.timelineCurrentHint),
       active: true,
     },
     {
@@ -840,6 +849,18 @@ const loadDetail = async () => {
   })
 }
 
+// 详细注释：详情页订阅共享订单刷新事件，仅在当前打开订单命中时才静默重拉，
+// 避免门店核销其它订单时把当前页无意义地反复刷新。
+const startClientOrderRefreshSubscription = () => {
+  disposeClientOrderRefresh = subscribeClientOrderRefresh(async (event) => {
+    const currentOrderId = String(route.params.id ?? '').trim()
+    if (!event.orderId || !currentOrderId || event.orderId !== currentOrderId) {
+      return
+    }
+    await loadDetail()
+  })
+}
+
 // 详细注释：撤回订单操作，弹出二次确认，调用接口后刷新本地状态及二维码。
 const handleRecallOrder = async () => {
   if (!detail.value) {
@@ -1050,10 +1071,12 @@ watch(
 )
 
 onMounted(async () => {
+  startClientOrderRefreshSubscription()
   await loadDetail()
 })
 
 onBeforeUnmount(() => {
+  disposeClientOrderRefresh()
   resetDialogTransientState()
 })
 </script>
@@ -1168,7 +1191,7 @@ onBeforeUnmount(() => {
           <div class="mt-4 grid gap-3 sm:grid-cols-2">
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">创建时间</p>
-              <p class="mt-1 text-sm text-slate-700">{{ detail.order.createdAt }}</p>
+              <p class="mt-1 text-sm text-slate-700">{{ formatOrderDateTime(detail.order.createdAt) }}</p>
             </div>
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">下单归属</p>
@@ -1190,11 +1213,11 @@ onBeforeUnmount(() => {
             </div>
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">超时取消时间</p>
-              <p class="mt-1 text-sm text-slate-700">{{ detail.order.timeoutAt || '未开启自动取消' }}</p>
+              <p class="mt-1 text-sm text-slate-700">{{ formatOrderDateTime(detail.order.timeoutAt, '未开启自动取消') }}</p>
             </div>
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">核销时间</p>
-              <p class="mt-1 text-sm text-slate-700">{{ detail.order.verifiedAt || '尚未核销' }}</p>
+              <p class="mt-1 text-sm text-slate-700">{{ formatOrderDateTime(detail.order.verifiedAt, '尚未核销') }}</p>
             </div>
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">商家状态</p>
@@ -1309,7 +1332,7 @@ onBeforeUnmount(() => {
               <div class="flex flex-wrap items-start justify-between gap-3">
                 <div>
                   <p class="text-base font-semibold text-slate-900">{{ request.returnNo }}</p>
-                  <p class="mt-1 text-xs text-slate-400">申请时间：{{ request.createdAt }}</p>
+                  <p class="mt-1 text-xs text-slate-400">申请时间：{{ formatOrderDateTime(request.createdAt) }}</p>
                 </div>
                 <div
                   class="rounded-full px-3 py-1 text-xs font-medium"
@@ -1334,7 +1357,7 @@ onBeforeUnmount(() => {
                     </div>
                     <div class="rounded-2xl bg-white px-4 py-3">
                       <p class="text-sm text-slate-400">处理时间</p>
-                      <p class="mt-1 text-sm text-slate-700">{{ request.handledAt || '等待门店处理' }}</p>
+                      <p class="mt-1 text-sm text-slate-700">{{ formatOrderDateTime(request.handledAt, '等待门店处理') }}</p>
                     </div>
                     <div class="rounded-2xl bg-white px-4 py-3">
                       <p class="text-sm text-slate-400">处理人</p>

@@ -1,11 +1,15 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/client/ClientCartView.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：负责客户端购物车列表、勾选态维护、批量删除与进入结算前的交互反馈。
+ * 实现逻辑：
+ * - 购物车页与商城内嵌购物车共用同一组件，通过 `standalone` 区分路由页与抽屉页模式；
+ * - 去结算时统一沿用商城页口径，若用户尚未手动勾选，则自动勾选全部可结算商品再继续；
+ * - 在路由跳转或抽屉切换前先进入短暂“处理中”状态，减少重复点击与“无响应”感知。
+ * 维护说明：后续若继续扩展购物车入口，需要同步保持不同入口的勾选与反馈口径一致。
  */
 
-import { computed, onMounted } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { ArrowLeft } from '@element-plus/icons-vue'
@@ -24,6 +28,7 @@ const emit = defineEmits<{
 const router = useRouter()
 const clientAuthStore = useClientAuthStore(pinia)
 const clientCartStore = useClientCartStore(pinia)
+const checkoutPending = ref(false)
 
 onMounted(() => {
   clientCartStore.initialize(clientAuthStore.currentUser?.id)
@@ -42,15 +47,40 @@ const removeSelected = () => {
   ElMessage.success('已删除选中商品')
 }
 
-const goCheckout = () => {
-  if (!clientCartStore.selectedValidItems.length) {
-    ElMessage.warning('请选择至少一件可结算商品')
+const checkoutButtonText = computed(() => {
+  if (!checkoutPending.value) {
+    return '去结算'
+  }
+  return props.standalone ? '进入结算中...' : '打开结算中...'
+})
+
+const goCheckout = async () => {
+  if (checkoutPending.value) {
     return
   }
-  if (props.standalone) {
-    router.push('/client/checkout')
-  } else {
+
+  if (!clientCartStore.selectedValidItems.length) {
+    if (clientCartStore.validItems.length > 0) {
+      // 与商城页底部“去结算”保持一致：未手动勾选时默认勾选全部有效商品，再进入结算。
+      clientCartStore.toggleAllValidSelected(true)
+    } else {
+      ElMessage.warning('购物车暂无可结算商品')
+      return
+    }
+  }
+
+  checkoutPending.value = true
+  try {
+    if (props.standalone) {
+      await router.push('/client/checkout')
+      return
+    }
+
     emit('checkout')
+    // 抽屉模式等待父层消费事件并开始切换，确保按钮文案至少完成一次可见反馈。
+    await nextTick()
+  } finally {
+    checkoutPending.value = false
   }
 }
 
@@ -178,7 +208,14 @@ const handleBack = () => {
             种商品
           </p>
         </div>
-        <button type="button" class="rounded-full bg-slate-900 px-8 py-2.5 text-sm font-semibold text-white transition-transform active:scale-95 shadow-md hover:shadow-lg" @click="goCheckout">去结算</button>
+        <button
+          type="button"
+          class="rounded-full bg-slate-900 px-8 py-2.5 text-sm font-semibold text-white transition-transform active:scale-95 shadow-md hover:shadow-lg disabled:cursor-not-allowed disabled:opacity-60"
+          :disabled="checkoutPending"
+          @click="goCheckout"
+        >
+          {{ checkoutButtonText }}
+        </button>
       </div>
     </div>
   </div>

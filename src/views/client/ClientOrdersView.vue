@@ -26,6 +26,7 @@ import {
 } from '@/constants/o2o-order-status'
 import { useClientAuthStore, useClientOrderStore } from '@/store'
 import pinia from '@/store/pinia'
+import { formatDateTime } from '@/utils/date-time'
 import { normalizeRequestError } from '@/utils/error'
 
 const ORDER_TYPE_LABEL_MAP = {
@@ -218,12 +219,18 @@ const formatOrderAmountFact = (amount: string | undefined) => {
   return `金额 ${amount} 元`
 }
 
+// 详细注释：订单列表摘要中的时间、释放时间统一复用共享格式化函数，
+// 这样列表与详情页对同一字段的展示口径保持一致，避免一边是原始字符串一边是格式化文本。
+const formatOrderDateTime = (value?: string | null, fallback = '-') => {
+  return formatDateTime(value, fallback)
+}
+
 // 详细注释：订单摘要信息压缩成可换行的小标签，减少原先“每项一整行”带来的高度浪费。
 const buildOrderMetaFacts = (order: O2oPreorderSummary): OrderMetaFact[] => {
   const facts: OrderMetaFact[] = [
     {
       key: 'createdAt',
-      label: `下单 ${order.createdAt}`,
+      label: `下单 ${formatOrderDateTime(order.createdAt)}`,
     },
     {
       key: 'ownership',
@@ -278,7 +285,7 @@ const buildOrderStatusChips = (
   if (order.status === 'pending' && order.timeoutAt) {
     chips.push({
       key: 'timeoutAt',
-      label: `释放 ${order.timeoutAt}`,
+      label: `释放 ${formatOrderDateTime(order.timeoutAt)}`,
       className: 'bg-slate-100 text-slate-500',
     })
   }
@@ -295,7 +302,7 @@ const buildOrderAssistSummary = (
   const summarySegments: string[] = []
 
   if (order.status === 'pending' && order.timeoutAt) {
-    summarySegments.push(`超时释放 ${order.timeoutAt}`)
+    summarySegments.push(`超时释放 ${formatOrderDateTime(order.timeoutAt)}`)
   }
   if (businessStatusMeta) {
     summarySegments.push(`商家状态 ${businessStatusMeta.label}`)

@@ -49,6 +49,7 @@ const { activeTab, activeComponent, handleTabChange } = useRouteBoundWorkbenchTa
     :tabs="tabs"
     :active-tab="activeTab"
     :active-component="activeComponent"
+    component-cache-key-prefix="supplier-workbench"
     card-class="supplier-workbench-page"
     content-class="supplier-workbench-page__content"
     @tab-change="handleTabChange"
