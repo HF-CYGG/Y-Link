@@ -20,7 +20,20 @@ export const normalizeSubmitText = (value: unknown): string => {
     return ''
   }
 
-  return String(value).trim()
+  if (typeof value === 'string') {
+    return value.trim()
+  }
+
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    return `${value}`.trim()
+  }
+
+  if (value instanceof Date) {
+    return Number.isFinite(value.getTime()) ? value.toISOString().trim() : ''
+  }
+
+  // 对象/数组等复杂值不做默认字符串化，避免提交成 "[object Object]"。
+  return ''
 }
 
 /**
