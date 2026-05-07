@@ -301,7 +301,7 @@ const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProdu
   const resolvedTagIds = await resolveTagIds(currentForm.tagIds)
   const normalizedProductCode = normalizeOptionalSubmitText(currentForm.productCode)
   const normalizedProductName = normalizeSubmitText(currentForm.productName)
-  const normalizedPinyinAbbr = normalizeSubmitText(currentForm.pinyinAbbr)
+  const normalizedPinyinAbbr = normalizeOptionalSubmitText(currentForm.pinyinAbbr)
   const normalizedDefaultPrice = normalizeSubmitNumber(currentForm.defaultPrice, {
     fallback: 0,
     min: 0,
