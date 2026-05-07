@@ -675,26 +675,33 @@ onBeforeUnmount(() => {
       </Transition>
     </Teleport>
 
-    <div class="overflow-hidden rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-4 shadow-[var(--ylink-shadow-soft)]">
+    <div
+      class="mall-hero-card overflow-hidden rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-4 shadow-[var(--ylink-shadow-soft)]"
+      :class="isPhone ? 'mall-hero-card--compact-mobile' : ''"
+    >
       <div class="flex flex-wrap items-center justify-between gap-3">
-        <div>
+        <div v-if="!isPhone" class="mall-hero-card__heading">
           <p class="text-xs font-semibold tracking-[0.16em] text-slate-400">CLIENT MALL</p>
-          <p class="mt-1 text-xl font-semibold text-slate-900">商城</p>
-          <p class="mt-1 text-sm text-slate-500">浏览标签、查看库存并快速加入购物车</p>
+          <p class="mall-hero-card__title mt-1 text-xl font-semibold text-slate-900">商城</p>
+          <p class="mall-hero-card__desc mt-1 text-sm text-slate-500">浏览标签、查看库存并快速加入购物车</p>
+        </div>
+        <div v-else class="mall-hero-card__compact-banner" role="status" aria-live="polite">
+          <span class="mall-hero-card__compact-badge">公告</span>
+          <p class="mall-hero-card__compact-text">库存实时刷新，请以下单结果为准</p>
         </div>
         <button
           type="button"
-          class="rounded-full border border-[var(--ylink-color-border)] bg-[var(--ylink-color-surface-soft)] px-4 py-2 text-sm text-slate-600"
+          class="mall-hero-card__refresh rounded-full border border-[var(--ylink-color-border)] bg-[var(--ylink-color-surface-soft)] px-4 py-2 text-sm text-slate-600"
           :disabled="loading"
           @click="loadProducts(true)"
         >
           刷新库存
         </button>
       </div>
-      <div class="mt-4 grid gap-3 sm:grid-cols-3">
-        <div class="rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700">营业时间：10:00 - 22:00</div>
-        <div class="rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700">提货须知：请在订单有效期内到店核销</div>
-        <div class="rounded-2xl bg-amber-50 px-3 py-3 text-sm text-amber-700">公告：库存实时刷新，请以下单结果为准</div>
+      <div v-if="!isPhone" class="mall-hero-card__meta-grid mt-4 grid gap-3 sm:grid-cols-3">
+        <div class="mall-hero-card__meta-item rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700">营业时间：10:00 - 22:00</div>
+        <div class="mall-hero-card__meta-item rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700">提货须知：请在订单有效期内到店核销</div>
+        <div class="mall-hero-card__meta-item mall-hero-card__meta-item--notice rounded-2xl bg-amber-50 px-3 py-3 text-sm text-amber-700">公告：库存实时刷新，请以下单结果为准</div>
       </div>
     </div>
 
@@ -1002,15 +1009,48 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .mall-page {
-  /* 商城页统一预留底部悬浮购物车与底部导航的总可视区，保证搜索态和分类态末尾内容都不被遮挡。 */
+  /* 商城页仅为底部导航预留页面级安全区，悬浮购物车改为覆盖在内容上方，让商品选择区继续向下延伸。 */
   --mall-mini-cart-height: 4.7rem;
   --mall-floating-bottom-clearance: calc(var(--client-tab-bar-clearance, 5.5rem) + var(--mall-mini-cart-height) + 1rem);
-  padding-bottom: calc(var(--mall-floating-bottom-clearance) + 1rem);
+  padding-bottom: calc(var(--client-tab-bar-clearance, 5.5rem) + 0.65rem);
 }
 
 .mall-search-results,
 .mall-browse-panel {
   position: relative;
+}
+
+.mall-hero-card {
+  position: relative;
+}
+
+.mall-hero-card__compact-banner {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.mall-hero-card__compact-badge {
+  flex-shrink: 0;
+  border-radius: 9999px;
+  background: rgba(217, 119, 6, 0.12);
+  color: #b45309;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0.34rem 0.58rem;
+}
+
+.mall-hero-card__compact-text {
+  overflow: hidden;
+  color: #b45309;
+  font-size: 0.76rem;
+  font-weight: 600;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mall-browse-panel {
@@ -1449,16 +1489,42 @@ onBeforeUnmount(() => {
 
 .mini-cart-card {
   overflow: hidden;
-  border: 1px solid rgba(226, 232, 240, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.7);
   border-radius: 1.5rem;
-  background: rgba(255, 255, 255, 0.95);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
-  box-shadow: 0 20px 50px rgba(15, 23, 42, 0.12);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0.68)),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0.08));
+  backdrop-filter: blur(28px) saturate(1.35);
+  -webkit-backdrop-filter: blur(28px) saturate(1.35);
+  box-shadow:
+    0 22px 54px rgba(15, 23, 42, 0.12),
+    0 6px 18px rgba(15, 23, 42, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.72);
   pointer-events: auto;
   transition:
     transform var(--ylink-motion-normal) var(--ylink-motion-ease),
     box-shadow var(--ylink-motion-normal) var(--ylink-motion-ease);
+}
+
+.mini-cart-card::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at top left, rgba(255, 255, 255, 0.42), transparent 34%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.26), transparent 52%);
+  opacity: 0.95;
+}
+
+.mini-cart-card::after {
+  content: '';
+  position: absolute;
+  inset: 1px;
+  border-radius: calc(1.5rem - 1px);
+  pointer-events: none;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  opacity: 0.9;
 }
 
 .mini-cart-card.is-pulse {
@@ -1466,6 +1532,8 @@ onBeforeUnmount(() => {
 }
 
 .cart-summary-bar {
+  position: relative;
+  z-index: 1;
   display: flex;
   min-height: 64px;
   align-items: center;
@@ -1573,6 +1641,8 @@ onBeforeUnmount(() => {
 }
 
 .cart-expand-content {
+  position: relative;
+  z-index: 1;
   display: grid;
   grid-template-rows: 0fr;
   transition: grid-template-rows var(--ylink-motion-normal) var(--ylink-motion-ease);
@@ -1797,6 +1867,65 @@ onBeforeUnmount(() => {
   .mall-page {
     --mall-mini-cart-height: 4.95rem;
     --mall-floating-bottom-clearance: calc(var(--client-tab-bar-clearance, 5.5rem) + var(--mall-mini-cart-height) + 0.85rem);
+    padding-bottom: calc(var(--client-tab-bar-clearance, 5.5rem) + 0.35rem);
+  }
+
+  .mall-page {
+    gap: 0.7rem;
+  }
+
+  .mall-hero-card {
+    border-radius: 1.15rem;
+    padding: 0.8rem;
+  }
+
+  .mall-hero-card--compact-mobile {
+    border-radius: 1rem;
+    padding: 0.68rem 0.78rem;
+  }
+
+  .mall-hero-card__heading {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .mall-hero-card__title {
+    font-size: 1rem;
+    line-height: 1.2;
+  }
+
+  .mall-hero-card__desc {
+    margin-top: 0.2rem;
+    font-size: 0.74rem;
+    line-height: 1.3;
+  }
+
+  .mall-hero-card__refresh {
+    padding: 0.45rem 0.8rem;
+    font-size: 0.78rem;
+    line-height: 1.1;
+  }
+
+  .mall-hero-card--compact-mobile .mall-hero-card__refresh {
+    flex-shrink: 0;
+    padding: 0.42rem 0.72rem;
+    font-size: 0.74rem;
+  }
+
+  .mall-hero-card__meta-grid {
+    margin-top: 0.65rem;
+    gap: 0.45rem;
+  }
+
+  .mall-hero-card__meta-item {
+    border-radius: 0.9rem;
+    padding: 0.58rem 0.75rem;
+    font-size: 0.75rem;
+    line-height: 1.3;
+  }
+
+  .mall-hero-card__meta-item:not(.mall-hero-card__meta-item--notice) {
+    display: none;
   }
 
   .mall-browse-panel {
@@ -1806,7 +1935,13 @@ onBeforeUnmount(() => {
 
   .mall-browse-categories,
   .mall-browse-list {
-    max-height: clamp(20rem, calc(100dvh - var(--mall-floating-bottom-clearance) - 12rem), 34rem);
+    /*
+     * 移动端商品选择区继续向下延伸：
+     * 1. 页面级不再为悬浮购物车完整让位；
+     * 2. 列表高度仅主要避让底部导航，让购物车亚克力卡片覆盖在上方；
+     * 3. 末尾商品是否会被挡住，交给列表内部 spacer 处理，而不是提前牺牲可视高度。
+     */
+    max-height: clamp(28rem, calc(100dvh - var(--client-tab-bar-clearance, 5.5rem) - 5.1rem), 48rem);
   }
 
   .mall-category-button {
@@ -1883,7 +2018,7 @@ onBeforeUnmount(() => {
   }
 
   .mini-cart-wrapper {
-    bottom: calc(var(--client-tab-bar-clearance, 5.5rem) + 0.55rem);
+    bottom: calc(var(--client-tab-bar-clearance, 5.5rem) + 0.4rem);
   }
 
   .cart-summary-bar {
