@@ -32,6 +32,28 @@ const ORDER_TYPE_LABEL_MAP = {
   department: '部门订',
   walkin: '散客',
 } as const
+type LatestReturnRequestMeta = (typeof RETURN_REQUEST_STATUS_META)[keyof typeof RETURN_REQUEST_STATUS_META]
+type ClientOrderStatusReportConfig = ReturnType<typeof getClientOrderStatusReportConfig>
+
+interface OrderMetaFact {
+  key: string
+  label: string
+}
+
+interface OrderStatusChip {
+  key: string
+  label: string
+  className: string
+}
+
+interface OrderCardPresentation {
+  order: O2oPreorderSummary
+  report: ClientOrderStatusReportConfig
+  metaFacts: OrderMetaFact[]
+  statusChips: OrderStatusChip[]
+  assistSummary: string
+}
+
 const RETURN_REQUEST_STATUS_META = {
   pending: {
     label: '待门店核销',
@@ -183,6 +205,125 @@ const getLatestReturnRequestMeta = (order: O2oPreorderSummary) => {
   }
   return RETURN_REQUEST_STATUS_META[order.latestReturnRequest.status]
 }
+
+// 详细注释：统一格式化订单金额，优先输出保留两位小数的“元”文案，避免移动端卡片里出现过长原始数值。
+const formatOrderAmountFact = (amount: string | undefined) => {
+  if (!amount) {
+    return ''
+  }
+  const normalizedAmount = Number(amount)
+  if (Number.isFinite(normalizedAmount)) {
+    return `金额 ${normalizedAmount.toFixed(2)} 元`
+  }
+  return `金额 ${amount} 元`
+}
+
+// 详细注释：订单摘要信息压缩成可换行的小标签，减少原先“每项一整行”带来的高度浪费。
+const buildOrderMetaFacts = (order: O2oPreorderSummary): OrderMetaFact[] => {
+  const facts: OrderMetaFact[] = [
+    {
+      key: 'createdAt',
+      label: `下单 ${order.createdAt}`,
+    },
+    {
+      key: 'ownership',
+      label: order.departmentNameSnapshot ? `归属 ${order.departmentNameSnapshot}` : `归属 ${getClientOrderTypeLabel(order)}`,
+    },
+    {
+      key: 'qty',
+      label: `共 ${order.totalQty} 件`,
+    },
+  ]
+  const amountFact = formatOrderAmountFact(order.totalAmount)
+  if (amountFact) {
+    facts.push({
+      key: 'amount',
+      label: amountFact,
+    })
+  }
+  return facts
+}
+
+// 详细注释：主状态、业务状态、退货状态与释放时间统一抽象为横向 chip，移动端优先用横向空间承载状态信息。
+const buildOrderStatusChips = (
+  order: O2oPreorderSummary,
+  report: ClientOrderStatusReportConfig,
+  businessStatusMeta: ReturnType<typeof getO2oOrderBusinessStatusMeta>,
+  latestReturnRequestMeta: LatestReturnRequestMeta | null,
+): OrderStatusChip[] => {
+  const chips: OrderStatusChip[] = [
+    {
+      key: 'status',
+      label: report.statusLabel,
+      className: getOrderStatusClassName(order),
+    },
+  ]
+
+  if (businessStatusMeta) {
+    chips.push({
+      key: 'businessStatus',
+      label: businessStatusMeta.label,
+      className: businessStatusMeta.className,
+    })
+  }
+
+  if (latestReturnRequestMeta) {
+    chips.push({
+      key: 'returnRequest',
+      label: `退货 ${latestReturnRequestMeta.label}`,
+      className: latestReturnRequestMeta.className,
+    })
+  }
+
+  if (order.status === 'pending' && order.timeoutAt) {
+    chips.push({
+      key: 'timeoutAt',
+      label: `释放 ${order.timeoutAt}`,
+      className: 'bg-slate-100 text-slate-500',
+    })
+  }
+
+  return chips
+}
+
+// 详细注释：辅助说明收口成一段紧凑摘要，把原来分散在多块卡片中的补充状态压缩为可阅读的一段文本。
+const buildOrderAssistSummary = (
+  order: O2oPreorderSummary,
+  businessStatusMeta: ReturnType<typeof getO2oOrderBusinessStatusMeta>,
+  latestReturnRequestMeta: LatestReturnRequestMeta | null,
+) => {
+  const summarySegments: string[] = []
+
+  if (order.status === 'pending' && order.timeoutAt) {
+    summarySegments.push(`超时释放 ${order.timeoutAt}`)
+  }
+  if (businessStatusMeta) {
+    summarySegments.push(`商家状态 ${businessStatusMeta.label}`)
+  }
+  if (latestReturnRequestMeta) {
+    const returnRequestNo = order.latestReturnRequest?.returnNo ? `（${order.latestReturnRequest.returnNo}）` : ''
+    summarySegments.push(`退货状态 ${latestReturnRequestMeta.label}${returnRequestNo}`)
+  }
+
+  return summarySegments.join(' · ')
+}
+
+// 详细注释：把模板需要的展示数据提前整形成视图模型，避免模板层重复求值，也便于后续继续压缩卡片结构。
+const orderCardList = computed<OrderCardPresentation[]>(() => {
+  return orders.value.map((order) => {
+    const report = getOrderStatusReport(order)
+    const businessStatusMeta = getBusinessStatusMeta(order)
+    const latestReturnRequestMeta = getLatestReturnRequestMeta(order)
+
+    return {
+      order,
+      report,
+      metaFacts: buildOrderMetaFacts(order),
+      statusChips: buildOrderStatusChips(order, report, businessStatusMeta, latestReturnRequestMeta),
+      assistSummary: buildOrderAssistSummary(order, businessStatusMeta, latestReturnRequestMeta),
+    }
+  })
+})
 
 // 详细注释：统一根据当前页面状态拼出服务端查询条件，保证刷新、筛选、加载更多共用同一口径。
 const buildListQuery = (targetPage: number) => {
@@ -346,9 +487,9 @@ onMounted(async () => {
 </script>
 
 <template>
-  <section class="space-y-4 pb-20">
-    <div class="rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
-      <div class="flex flex-wrap items-center justify-between gap-3">
+  <section class="order-list-page space-y-4">
+    <div class="rounded-[1.4rem] bg-white p-3.5 shadow-[var(--ylink-shadow-soft)] sm:p-4">
+      <div class="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p class="text-xl font-semibold text-slate-900">我的订单</p>
           <p class="text-sm text-slate-500">查看待提货、已核销与已取消订单，并区分部门订与散客</p>
@@ -395,8 +536,8 @@ onMounted(async () => {
       </p>
     </div>
 
-    <div v-if="firstScreenLoading" class="grid gap-3 rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
-      <div v-for="index in 4" :key="index" class="h-[4.6rem] animate-pulse rounded-2xl bg-slate-100" />
+    <div v-if="firstScreenLoading" class="grid gap-3 rounded-[1.4rem] bg-white p-3.5 shadow-[var(--ylink-shadow-soft)] sm:p-4">
+      <div v-for="index in 4" :key="index" class="h-[4rem] animate-pulse rounded-2xl bg-slate-100" />
     </div>
     <BaseRequestState
       v-else-if="requestError"
@@ -416,63 +557,66 @@ onMounted(async () => {
     />
 
     <div v-else class="space-y-3">
-      <article v-for="order in orders" :key="order.id" class="rounded-[1.2rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
+      <article
+        v-for="card in orderCardList"
+        :key="card.order.id"
+        class="rounded-[1.2rem] bg-white p-3.5 shadow-[var(--ylink-shadow-soft)] sm:p-4"
+      >
         <div class="flex flex-wrap items-start justify-between gap-3">
-          <div>
+          <div class="min-w-0 flex-1">
             <div class="flex flex-wrap items-center gap-2">
-              <p class="text-base font-semibold text-slate-900">{{ order.showNo }}</p>
-              <span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">
-                {{ getClientOrderTypeLabel(order) }}
+              <p class="min-w-0 flex-1 truncate text-[0.98rem] font-semibold text-slate-900 sm:flex-none sm:text-base">
+                {{ card.order.showNo }}
+              </p>
+              <span class="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-600 sm:text-xs">
+                {{ getClientOrderTypeLabel(card.order) }}
               </span>
             </div>
-            <p class="mt-1 text-xs text-slate-400">下单时间：{{ order.createdAt }}</p>
-            <p class="mt-1 text-xs text-slate-400">
-              归属：{{ getClientOrderTypeLabel(order) }}{{ order.departmentNameSnapshot ? ` / ${order.departmentNameSnapshot}` : '' }}
-            </p>
-            <p v-if="order.timeoutAt" class="mt-1 text-xs text-slate-400">超时释放：{{ order.timeoutAt }}</p>
+            <div class="order-list-card__meta">
+              <span
+                v-for="metaFact in card.metaFacts"
+                :key="metaFact.key"
+                class="order-list-card__meta-pill"
+              >
+                {{ metaFact.label }}
+              </span>
+            </div>
           </div>
-          <div class="flex items-center gap-2">
-            <span class="rounded-full px-2.5 py-1 text-xs font-semibold" :class="getOrderStatusClassName(order)">
-              {{ getOrderStatusReport(order).statusLabel }}
-            </span>
+          <div class="flex items-center gap-2 self-start">
             <button
-              v-if="order.status === 'pending'"
+              v-if="card.order.status === 'pending'"
               type="button"
               class="rounded-full border border-rose-200 px-3 py-1.5 text-xs text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
-              :disabled="recallingOrderId === order.id"
-              @click="handleRecallOrder(order)"
+              :disabled="recallingOrderId === card.order.id"
+              @click="handleRecallOrder(card.order)"
             >
-              {{ recallingOrderId === order.id ? '撤回中...' : '撤回订单' }}
+              {{ recallingOrderId === card.order.id ? '撤回中...' : '撤回订单' }}
             </button>
-            <router-link :to="`/client/orders/${order.id}`" class="rounded-full bg-slate-900 px-3 py-1.5 text-xs text-white">详情</router-link>
+            <router-link :to="`/client/orders/${card.order.id}`" class="rounded-full bg-slate-900 px-3 py-1.5 text-xs text-white">
+              详情
+            </router-link>
           </div>
         </div>
-        <div class="mt-3 rounded-2xl px-3 py-2" :class="getOrderStatusReport(order).cardClassName">
-          <p class="text-sm font-semibold">{{ getOrderStatusReport(order).cardTitle }}</p>
-          <p class="mt-1 text-xs">{{ getOrderStatusReport(order).cardDescription }}</p>
+
+        <div class="order-list-card__status-row">
+          <span
+            v-for="statusChip in card.statusChips"
+            :key="statusChip.key"
+            class="rounded-full px-2.5 py-1 text-[11px] font-semibold sm:text-xs"
+            :class="statusChip.className"
+          >
+            {{ statusChip.label }}
+          </span>
         </div>
-        <div
-          v-if="getLatestReturnRequestMeta(order)"
-          class="mt-3 rounded-2xl px-3 py-2"
-          :class="getLatestReturnRequestMeta(order)?.className"
-        >
-          <p class="text-sm font-semibold">
-            退货状态：{{ getLatestReturnRequestMeta(order)?.label }}
+
+        <div class="mt-3 rounded-2xl px-3 py-2.5" :class="card.report.cardClassName">
+          <div class="order-list-card__summary">
+            <p class="order-list-card__summary-title text-sm font-semibold">{{ card.report.cardTitle }}</p>
+            <p class="order-list-card__summary-text text-xs">{{ card.report.cardDescription }}</p>
+          </div>
+          <p v-if="card.assistSummary" class="mt-1.5 text-[11px] leading-5 opacity-80">
+            {{ card.assistSummary }}
           </p>
-          <p class="mt-1 text-xs">
-            {{ getLatestReturnRequestMeta(order)?.description }}
-          </p>
-          <p class="mt-1 text-[11px] opacity-80">
-            退货单号：{{ order.latestReturnRequest?.returnNo }}
-          </p>
-        </div>
-        <div
-          v-if="getBusinessStatusMeta(order)"
-          class="mt-3 rounded-2xl px-3 py-2"
-          :class="getBusinessStatusMeta(order)?.className"
-        >
-          <p class="text-sm font-semibold">商家状态：{{ getBusinessStatusMeta(order)?.label }}</p>
-          <p class="mt-1 text-xs">{{ getBusinessStatusMeta(order)?.clientDescription }}</p>
         </div>
       </article>
       <div class="flex justify-center pt-1">
@@ -490,3 +634,86 @@ onMounted(async () => {
     </div>
   </section>
 </template>
+
+<style scoped>
+/* 订单列表页根容器：为底部悬浮导航与安全区预留稳定空间，避免最后一张卡片被导航覆盖。 */
+.order-list-page {
+  padding-bottom: calc(7.25rem + env(safe-area-inset-bottom, 0px));
+}
+
+/*
+ * 局部覆盖全局 client-page-absolute：
+ * - 订单列表属于长内容页面，需要让自身参与文档流计算高度；
+ * - 否则容器只按视口高度计算，滚动到底部时最后一张卡片容易被裁掉。
+ */
+:global(.client-page-absolute.order-list-page) {
+  position: relative;
+}
+
+/* 订单摘要标签：把时间、归属、件数、金额压缩为可换行的小胶囊，提升同屏信息密度。 */
+.order-list-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.order-list-card__meta-pill {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: center;
+  border-radius: 9999px;
+  background: rgb(248 250 252);
+  padding: 0.35rem 0.75rem;
+  font-size: 0.75rem;
+  line-height: 1.25rem;
+  color: rgb(100 116 139);
+}
+
+/* 状态横向信息带：主状态、业务状态与退货状态统一采用横向胶囊表达，减少额外说明卡数量。 */
+.order-list-card__status-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+/* 核心说明卡改为“标题 + 描述”同层排布，减少原先上下两行强制堆叠造成的高度浪费。 */
+.order-list-card__summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem 0.75rem;
+}
+
+.order-list-card__summary-title {
+  flex: 0 0 auto;
+}
+
+.order-list-card__summary-text {
+  flex: 1 1 14rem;
+  min-width: 0;
+  line-height: 1.45;
+}
+
+@media (max-width: 767px) {
+  .order-list-page {
+    padding-bottom: calc(7.75rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  .order-list-card__meta {
+    gap: 0.45rem;
+    margin-top: 0.65rem;
+  }
+
+  .order-list-card__status-row {
+    gap: 0.45rem;
+    margin-top: 0.65rem;
+  }
+
+  .order-list-card__summary {
+    gap: 0.25rem 0.65rem;
+  }
+}
+</style>
