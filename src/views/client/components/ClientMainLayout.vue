@@ -4,22 +4,24 @@
  * 文件职责：客户端主布局，负责页面切换动画、底部导航与统一退出登录行为。
  * 实现逻辑：
  * - 页面切换通过路径深度推导过渡方向，保持移动端浏览路径直觉；
+ * - 主壳层直接读取全局路由实例的当前路由，避免开发态依赖重优化时 `useRoute()` 注入短暂缺失导致白屏；
  * - 退出时先清理登录态与按账号隔离的订单缓存，再清空购物车并硬跳转回登录页。
  * 维护说明：若客户端新增更多持久化模块，需要评估是否也应接入退出清理链路。
  */
 
 
 import { computed, ref, watch } from 'vue'
-import { useRoute, type RouteLocationNormalizedLoaded } from 'vue-router'
+import type { RouteLocationNormalizedLoaded } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 import { useClientAuthStore, useClientCartStore } from '@/store'
+import router from '@/router'
 import { buildClientNavigationItems } from '@/router/routes'
 import { redirectToClientLogin } from '@/utils/client-auth-navigation'
 import pinia from '@/store/pinia'
 
-const route = useRoute()
 const clientAuthStore = useClientAuthStore(pinia)
 const clientCartStore = useClientCartStore(pinia)
+const currentRoute = computed(() => router.currentRoute.value)
 
 clientCartStore.initialize(clientAuthStore.currentUser?.id)
 const transitionName = ref<'slide-left' | 'slide-right'>('slide-left')
@@ -62,10 +64,11 @@ const indicatorStyle = computed(() => {
 
 // 详细注释：判断指定的 tab 路径是否处于激活状态，订单模块通过前缀匹配以包含详情等子页面
 const isTabActive = (path: string) => {
+  const currentPath = currentRoute.value.path || '/client'
   if (path === '/client/orders') {
-    return route.path.startsWith('/client/orders')
+    return currentPath.startsWith('/client/orders')
   }
-  return route.path === path
+  return currentPath === path
 }
 
 const resolveViewKey = (currentRoute: RouteLocationNormalizedLoaded) => {
@@ -98,7 +101,7 @@ const resolvePathDepth = (path: string) => {
 }
 
 watch(
-  () => route.fullPath,
+  () => currentRoute.value.fullPath || '/client',
   (nextPath, previousPath) => {
     const nextDepth = resolvePathDepth(nextPath)
     const previousDepth = resolvePathDepth(previousPath || '/client')
