@@ -1,8 +1,15 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/base-data/components/TagManager.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：负责标签主数据维护与标签聚合统计查询，并复用统一的响应式列表壳输出桌面表格与移动卡片。
+ * 实现逻辑：
+ * - 通过 `useCrudManager` 统一处理标签新增、编辑、删除与列表刷新；
+ * - 通过 `useStableRequest` 承接统计查询，只保留最后一次筛选结果，避免重复点击导致旧统计覆盖；
+ * - 通过列表共享壳在桌面展示表格、在移动端展示卡片；
+ * - 对标签列表显式关闭逐项卡片过渡，避免 keep-alive 恢复、刷新列表和统计联动时批量重排造成操作迟滞。
+ * 维护说明：
+ * - 标签页本身数据量通常较小，但在弱机和移动端仍容易被频繁动画放大体感卡顿，后续保持“稳态优先”即可；
+ * - 若统计区后续新增图表，优先异步化图表子块，不要阻塞主列表交互。
  */
 
 
@@ -20,6 +27,7 @@ import { useCrudManager } from '@/composables/useCrudManager'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
+import { normalizeSubmitText } from '@/utils/submit-feedback'
 
 const formRef = ref<FormInstance>()
 const { hasPermission, ensurePermission } = usePermissionAction()
@@ -95,8 +103,8 @@ const buildEditForm = (row: Tag): TagForm => ({
  * - 让新增与编辑都走相同的数据构造规则。
  */
 const buildSubmitPayload = (currentForm: TagForm): CreateTagDto => ({
-  tagName: currentForm.tagName,
-  tagCode: currentForm.tagCode,
+  tagName: normalizeSubmitText(currentForm.tagName),
+  tagCode: normalizeSubmitText(currentForm.tagCode),
 })
 
 const upsertTag = (tag: Tag) => {
@@ -139,6 +147,9 @@ const {
   messages: {
     createTitle: '新增标签',
     editTitle: '编辑标签',
+    submitPending: '正在提交标签信息，请稍候',
+    duplicateSubmit: '标签信息正在提交，请勿重复点击',
+    validateError: '请先完善标签名称与颜色后再提交',
     createSuccess: '创建成功',
     updateSuccess: '更新成功',
     saveError: '保存失败',
@@ -348,6 +359,7 @@ onActivated(() => {
       :loading="loading"
       empty-description="暂无标签数据"
       :empty-card="true"
+      :disable-card-transition="true"
       card-key="id"
       wrapper-class="flex min-h-0 flex-1 flex-col"
       table-wrapper-class="apple-card h-full min-w-0 overflow-hidden px-0 py-3 sm:py-4 xl:py-5"

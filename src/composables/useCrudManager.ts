@@ -1,12 +1,19 @@
 /**
  * 模块说明：src/composables/useCrudManager.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：提供管理端高频 CRUD 页面共享的列表、弹窗、提交与删除编排能力，统一提交反馈规范。
+ * 实现逻辑：
+ * - 收口列表加载、弹窗新增/编辑、提交保存、删除确认、本地同步与重载策略，减少页面重复脚本；
+ * - 在共享层统一处理提交中状态、重复点击防护、前端校验失败提示与失败文案归一化；
+ * - 通过配置注入页面独有的表单映射、接口方法与后处理回调，保持公共骨架稳定、业务差异外置。
+ * 维护说明：
+ * - 若后续有新的 CRUD 页面接入，应优先复用本 composable，而不是复制提交逻辑；
+ * - 若要扩展批量提交、只读详情、草稿保存等能力，应优先在此处补齐共享状态机。
  */
 
 import { ref, type Ref } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance } from 'element-plus'
 import type { RequestConfig } from '@/api/http'
+import { useIdempotentAction } from '@/composables/useIdempotentAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
 
@@ -27,6 +34,9 @@ interface CrudFormModel {
 interface CrudManagerMessages {
   createTitle: string
   editTitle: string
+  submitPending?: string
+  duplicateSubmit?: string
+  validateError?: string
   createSuccess: string
   updateSuccess: string
   saveError: string
@@ -94,6 +104,7 @@ export const useCrudManager = <
   const submitting = ref(false)
   const form = ref(config.createDefaultForm()) as Ref<TForm>
   const listRequest = useStableRequest()
+  const submitAction = useIdempotentAction()
 
   /**
    * 加载列表数据：
@@ -179,53 +190,75 @@ export const useCrudManager = <
       return
     }
 
-    const isValid = await formRef.value.validate().catch(() => false)
-    if (!isValid) {
+    if (submitting.value) {
+      ElMessage.warning(config.messages.duplicateSubmit || '正在提交，请勿重复点击')
       return
     }
 
-    submitting.value = true
-    try {
-      const currentForm = form.value
-      const payload = await config.buildSubmitPayload(currentForm)
-      const rowId = currentForm.id
-      const isEdit = Boolean(rowId)
-      const mode = isEdit ? 'update' : 'create'
-      let result: TEntity
+    const isValid = await formRef.value.validate().catch(() => false)
+    if (!isValid) {
+      ElMessage.warning(config.messages.validateError || '请先完善表单必填项后再提交')
+      return
+    }
 
-      if (isEdit && rowId) {
-        result = await config.updateItem(rowId, payload)
-        ElMessage.success(config.messages.updateSuccess)
-      } else {
-        result = await config.createItem(payload)
-        ElMessage.success(config.messages.createSuccess)
-      }
+    const submitResult = await submitAction.runWithGate({
+      actionKey: 'crud-submit',
+      onDuplicated: () => {
+        ElMessage.warning(config.messages.duplicateSubmit || '正在提交，请勿重复点击')
+      },
+      executor: async () => {
+        submitting.value = true
+        ElMessage.info(config.messages.submitPending || '正在提交，请稍候')
+        try {
+          const currentForm = form.value
+          const payload = await config.buildSubmitPayload(currentForm)
+          const rowId = currentForm.id
+          const isEdit = Boolean(rowId)
+          const mode = isEdit ? 'update' : 'create'
+          let result: TEntity
 
-      await config.afterSubmit?.({
-        mode,
-        rowId,
-        payload,
-        form: currentForm,
-        result,
-      })
+          if (isEdit && rowId) {
+            result = await config.updateItem(rowId, payload)
+            ElMessage.success(config.messages.updateSuccess)
+          } else {
+            result = await config.createItem(payload)
+            ElMessage.success(config.messages.createSuccess)
+          }
 
-      dialogVisible.value = false
-      const syncMode = await config.syncAfterSubmit?.({
-        mode,
-        rowId,
-        payload,
-        form: currentForm,
-        result,
-        items: items.value,
-      })
+          await config.afterSubmit?.({
+            mode,
+            rowId,
+            payload,
+            form: currentForm,
+            result,
+          })
 
-      if (syncMode !== 'local') {
-        void loadData()
-      }
-    } catch (error) {
-      ElMessage.error(extractErrorMessage(error, config.messages.saveError))
-    } finally {
-      submitting.value = false
+          dialogVisible.value = false
+          const syncMode = await config.syncAfterSubmit?.({
+            mode,
+            rowId,
+            payload,
+            form: currentForm,
+            result,
+            items: items.value,
+          })
+
+          if (syncMode !== 'local') {
+            void loadData()
+          }
+
+          return true
+        } catch (error) {
+          ElMessage.error(extractErrorMessage(error, config.messages.saveError))
+          return false
+        } finally {
+          submitting.value = false
+        }
+      },
+    })
+
+    if (submitResult === null) {
+      return
     }
   }
 

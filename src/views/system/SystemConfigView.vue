@@ -1,8 +1,15 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/system/SystemConfigView.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：负责维护订单流水、线上预订规则、验证码平台与客户端部门树等系统级配置，并统一承接高风险配置的保存与测试操作。
+ * 实现逻辑：
+ * - 首屏优先并行加载“订单流水 + 线上预订规则”，保证核心配置尽快可见；
+ * - 验证码配置与部门配置继续后台补齐，并按分区维护各自的加载态与错误态；
+ * - 当前激活分区只受自身加载状态约束，避免某个低优先级分区未完成时把整页表单都锁成“看得见但点不动”；
+ * - 保存时继续串行提交四类配置，避免 SQLite 单连接场景下并发事务冲突。
+ * 维护说明：
+ * - 若后续新增新的延迟加载分区，必须同步补充本页的分区可交互状态映射，而不是直接复用整页 loading；
+ * - 高风险保存仍应保持串行提交，优先保证一致性与可回溯性。
  */
 
 
@@ -174,6 +181,33 @@ const deferredSectionStatusText = computed(() => {
   }
 
   return ''
+})
+
+/**
+ * 当前分区是否仍在加载：
+ * - 只锁定当前激活分区，避免“验证码/部门仍在补齐”时把订单流水和 O2O 规则也一起锁死；
+ * - 页面顶部保存按钮仍会基于全局条件统一收口，防止未完整加载的数据被误保存。
+ */
+const activeSectionLoading = computed(() => {
+  return sectionLoadingState[activeSection.value]
+})
+
+/**
+ * 当前分区是否加载失败：
+ * - 用于当前激活面板的只读与提示控制；
+ * - 让用户明确知道“哪一块不可用”，而不是整个页面都像失去响应。
+ */
+const activeSectionLoadFailed = computed(() => {
+  return Boolean(sectionErrorState[activeSection.value])
+})
+
+/**
+ * 当前分区交互门禁：
+ * - 核心配置首屏加载完成后即可立即编辑；
+ * - 只有当前所在分区仍在加载或失败时，才限制该分区内部交互。
+ */
+const activeSectionInteractionLoading = computed(() => {
+  return loading.value || activeSectionLoading.value
 })
 
 /**
@@ -939,6 +973,14 @@ onMounted(() => {
             show-icon
             class="mb-4"
           />
+          <el-alert
+            v-if="activeSectionLoadFailed"
+            :title="sectionErrorState[activeSection]"
+            type="warning"
+            :closable="false"
+            show-icon
+            class="mb-4"
+          />
           <div class="mb-4">
             <el-tabs :model-value="activeSection" @tab-change="handleSectionChange">
               <el-tab-pane v-for="section in sectionOptions" :key="section.key" :label="section.label" :name="section.key" />
@@ -954,7 +996,7 @@ onMounted(() => {
                 :walkin-preview="walkinPreview"
                 :serial-form="serialForm"
                 :can-update-configs="canUpdateConfigs"
-                :loading="formInteractionLoading"
+                :loading="activeSectionInteractionLoading"
                 :get-updated-at-label="getUpdatedAtLabel"
               />
             </transition>
@@ -964,7 +1006,7 @@ onMounted(() => {
                 v-if="activeSection === 'o2o_rules'"
                 :o2o-form="serialForm.o2o"
                 :can-update-configs="canUpdateConfigs"
-                :loading="formInteractionLoading"
+                :loading="activeSectionInteractionLoading"
                 :o2o-updated-at-label="o2oUpdatedAtLabel"
               />
             </transition>
@@ -975,7 +1017,7 @@ onMounted(() => {
                 :verification-form="serialForm.verification"
                 :can-update-configs="canUpdateConfigs"
                 :can-test-verification-providers="canTestVerificationProviders"
-                :loading="formInteractionLoading"
+                :loading="activeSectionInteractionLoading"
                 :saving="saving"
                 :test-sending-channel="testSendingChannel"
                 :get-verification-updated-at-label="getVerificationUpdatedAtLabel"
@@ -988,7 +1030,7 @@ onMounted(() => {
                 v-if="activeSection === 'department'"
                 :serial-form="serialForm"
                 :can-update-configs="canUpdateConfigs"
-                :loading="formInteractionLoading"
+                :loading="activeSectionInteractionLoading"
                 :saving="saving"
                 :selected-department-node="selectedDepartmentNode"
                 :client-department-preview-options="clientDepartmentPreviewOptions"

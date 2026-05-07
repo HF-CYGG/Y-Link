@@ -116,6 +116,7 @@ const canOpenOnsiteAdjust = computed(() => {
 const canEditComplianceFlags = computed(() => hasPermission('orders:update'))
 const isDepartmentPreorder = computed(() => preorderDetail.value?.order.clientOrderType === 'department')
 const canVerifyAction = computed(() => canVerifyStatus.value && hasPermission('orders:create'))
+const canSearch = computed(() => !loading.value && !submitting.value)
 
 const showVerifyActionButton = computed(() => {
   if (preorderDetail.value) {
@@ -317,6 +318,9 @@ watch(imageInputRef, () => undefined, { flush: 'post' })
  * - 查询成功后在当前页右侧展示预订单或退货申请详情，供工作人员复核。
  */
 const handleSearch = async () => {
+  if (!canSearch.value) {
+    return
+  }
   const normalizedCode = normalizeVerifyCode(verifyCode.value)
   if (!normalizedCode) {
     ElMessage.warning('请输入核销码')
@@ -345,6 +349,9 @@ const handleSearch = async () => {
 }
 
 const handlePasteAndSearch = async () => {
+  if (!canSearch.value) {
+    return
+  }
   if (!globalThis.navigator?.clipboard?.readText) {
     ElMessage.warning('当前环境不支持读取剪贴板，请手动粘贴')
     return
@@ -748,6 +755,7 @@ watch(
                 <el-button
                   class="verify-console-icon-btn"
                   :loading="scanLoading"
+                  :disabled="!canSearch"
                   @click="openScanDialog"
                 >
                   <el-icon :size="18"><CameraFilled /></el-icon>
@@ -757,13 +765,14 @@ watch(
                 <el-button
                   class="verify-console-icon-btn"
                   :loading="loading"
+                  :disabled="!canSearch"
                   @click="handlePasteAndSearch"
                 >
                   <el-icon :size="18"><DocumentCopy /></el-icon>
                 </el-button>
               </el-tooltip>
             </div>
-            <el-button type="primary" class="verify-console-search-btn" :loading="loading" @click="handleSearch">
+            <el-button type="primary" class="verify-console-search-btn" :loading="loading" :disabled="!canSearch" @click="handleSearch">
               <el-icon class="mr-1.5"><Search /></el-icon>
               {{ searchButtonText }}
             </el-button>

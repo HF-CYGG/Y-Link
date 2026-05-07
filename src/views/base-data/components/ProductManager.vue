@@ -1,8 +1,15 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/base-data/components/ProductManager.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：负责产品主数据的查询、编辑、批量启停与批量新增，并在桌面表格和移动卡片间复用同一份业务状态。
+ * 实现逻辑：
+ * - 通过 `useCrudManager` 统一收敛产品列表、弹窗保存与删除流程；
+ * - 通过 `useStableRequest` 保证编辑详情和列表刷新始终只回写最后一次有效请求，避免筛选或切页后旧结果覆盖新结果；
+ * - 通过共享 `BizResponsiveDataCollectionShell` 统一输出桌面表格与移动卡片；
+ * - 对移动端大列表显式关闭逐项卡片动画，避免筛选、刷新和 keep-alive 恢复时出现长时间卡顿或“页面像没反应”。
+ * 维护说明：
+ * - 若后续继续增加移动卡片内的复杂内容，优先保持本页“关闭逐项过渡”的策略，不要重新引入全量动画；
+ * - 批量能力、选择态与筛选态共用同一列表源，调整刷新逻辑时要同步校验选择回填。
  */
 
 
@@ -31,6 +38,11 @@ import { useCrudManager } from '@/composables/useCrudManager'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
+import {
+  normalizeOptionalSubmitText,
+  normalizeSubmitNumber,
+  normalizeSubmitText,
+} from '@/utils/submit-feedback'
 import {
   compareProductCode,
   createBatchCreateRow,
@@ -287,20 +299,27 @@ const buildEditForm = (row: ProductRecord): ProductForm => ({
 const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProductDto> => {
   hasAutoCreatedTags.value = false
   const resolvedTagIds = await resolveTagIds(currentForm.tagIds)
-  const normalizedProductCode = currentForm.productCode.trim()
-  const normalizedProductName = currentForm.productName.trim()
-  const normalizedPinyinAbbr = currentForm.pinyinAbbr.trim()
-  const normalizedDefaultPrice = Number(currentForm.defaultPrice)
-  const normalizedCurrentStock = Number(currentForm.currentStock)
+  const normalizedProductCode = normalizeOptionalSubmitText(currentForm.productCode)
+  const normalizedProductName = normalizeSubmitText(currentForm.productName)
+  const normalizedPinyinAbbr = normalizeSubmitText(currentForm.pinyinAbbr)
+  const normalizedDefaultPrice = normalizeSubmitNumber(currentForm.defaultPrice, {
+    fallback: 0,
+    min: 0,
+  })
+  const normalizedCurrentStock = normalizeSubmitNumber(currentForm.currentStock, {
+    fallback: 0,
+    min: 0,
+    integer: true,
+  })
 
   return {
     // 详细注释：单个新增/编辑与批量新增统一使用相同的字段归一化口径，
     // 避免输入组件短暂产生空串或 NaN 时直接把非法值发给后端，导致点击保存表现为“没反应”。
-    productCode: normalizedProductCode || undefined,
+    productCode: normalizedProductCode,
     productName: normalizedProductName,
     pinyinAbbr: normalizedPinyinAbbr,
-    defaultPrice: Number.isFinite(normalizedDefaultPrice) ? normalizedDefaultPrice : 0,
-    currentStock: Number.isFinite(normalizedCurrentStock) ? Math.max(0, Math.floor(normalizedCurrentStock)) : 0,
+    defaultPrice: normalizedDefaultPrice,
+    currentStock: normalizedCurrentStock,
     isActive: currentForm.isActive,
     tagIds: resolvedTagIds,
   }
@@ -335,6 +354,9 @@ const {
   messages: {
     createTitle: '新增产品',
     editTitle: '编辑产品',
+    submitPending: '正在提交产品信息，请稍候',
+    duplicateSubmit: '产品信息正在提交，请勿重复点击',
+    validateError: '请先检查产品名称、价格等必填项',
     createSuccess: '创建成功',
     updateSuccess: '更新成功',
     saveError: '保存失败',
@@ -523,11 +545,18 @@ const handleBatchCreate = async () => {
     for (const row of batchCreateRows.value) {
       const tagIds = await resolveTagIds(row.tagIds, true)
       productsPayload.push({
-        productCode: row.productCode.trim() || undefined,
-        productName: row.productName.trim(),
-        pinyinAbbr: row.pinyinAbbr.trim(),
-        defaultPrice: Number(row.defaultPrice),
-        currentStock: Math.max(0, Math.floor(row.currentStock)),
+        productCode: normalizeOptionalSubmitText(row.productCode),
+        productName: normalizeSubmitText(row.productName),
+        pinyinAbbr: normalizeSubmitText(row.pinyinAbbr),
+        defaultPrice: normalizeSubmitNumber(row.defaultPrice, {
+          fallback: 0,
+          min: 0,
+        }),
+        currentStock: normalizeSubmitNumber(row.currentStock, {
+          fallback: 0,
+          min: 0,
+          integer: true,
+        }),
         isActive: row.isActive,
         tagIds,
       })
@@ -639,6 +668,7 @@ onActivated(() => {
       :loading="loading"
       empty-description="暂无产品数据"
       :empty-card="true"
+      :disable-card-transition="true"
       card-key="id"
       wrapper-class="flex min-h-0 flex-1 flex-col"
       table-wrapper-class="apple-card h-full min-w-0 overflow-hidden px-0 py-3 sm:py-4 xl:py-5"

@@ -1,8 +1,15 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/auth/LoginView.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：负责管理端登录、验证码补录与登录后安全提示展示，并保证登录成功后的跳转优先级高于装饰动画与预热任务。
+ * 实现逻辑：
+ * - 先执行表单校验，再按需携带图形验证码发起登录；
+ * - 风控触发后固定展示安全提示，并按需拉取验证码，避免用户只看到一闪而过的错误消息；
+ * - 登录成功后仅投递非阻塞预热任务，先保证真正的页面跳转立即发生；
+ * - 登录页视觉层改为“静态背景 + 轻量交互反馈”，避免持续网格漂移、呼吸光晕和焦点脉冲长期占用主线程，导致输入、点击看起来无响应。
+ * 维护说明：
+ * - 若后续需要恢复更强动画，请优先评估低端机输入与按钮点击延迟，不要直接叠加无限循环动效；
+ * - 验证码展示必须继续使用图片 data URL，避免改回 `v-html` 注入 SVG。
  */
 
  
@@ -346,7 +353,7 @@ const handleSubmit = async () => {
   --border-light: #2c2c2e; 
 } 
 
-/* 动感网格层（极客骨架） */
+/* 登录背景装饰层保留静态视觉，不再使用持续循环动画，优先保证输入与点击响应。 */
 .login-grid-layer {
   position: absolute;
   inset: 0;
@@ -358,8 +365,6 @@ const handleSubmit = async () => {
   background-size: 40px 40px;
   mask-image: radial-gradient(circle at center, black 48%, transparent 92%);
   -webkit-mask-image: radial-gradient(circle at center, black 48%, transparent 92%);
-  animation: gridDrift 12s linear infinite;
-  will-change: background-position;
 }
 
 :global(.dark) .login-grid-layer {
@@ -379,32 +384,11 @@ const handleSubmit = async () => {
   pointer-events: none;
   background: radial-gradient(circle, rgba(13, 148, 136, 0.11) 0%, transparent 62%);
   filter: blur(80px);
-  animation: ambientBreathe 10s ease-in-out infinite alternate;
-  will-change: transform, opacity;
+  opacity: 0.9;
 }
 
 :global(.dark) .login-ambient-layer {
   background: radial-gradient(circle, rgba(20, 184, 166, 0.17) 0%, transparent 62%);
-}
-
-@keyframes gridDrift {
-  0% {
-    background-position: 0 0;
-  }
-  100% {
-    background-position: -80px -80px;
-  }
-}
-
-@keyframes ambientBreathe {
-  0% {
-    transform: translate(-50%, -50%) scale(0.9);
-    opacity: 0.5;
-  }
-  100% {
-    transform: translate(-50%, -50%) scale(1.2);
-    opacity: 1;
-  }
 }
 
 .login-shell { 
@@ -738,7 +722,6 @@ const handleSubmit = async () => {
   background-color: var(--bg-panel); 
   border-color: var(--accent); 
   box-shadow: 0 0 0 1px #0d9488, 0 0 20px 0 rgba(13, 148, 136, 0.2) !important;
-  animation: pulseGlow 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 } 
 
 :global(.dark) .geo-input :deep(.el-input__wrapper.is-focus) { 
@@ -833,8 +816,6 @@ const handleSubmit = async () => {
 } 
 
 @media (prefers-reduced-motion: reduce) {
-  .login-grid-layer,
-  .login-ambient-layer,
   .form-title,
   .form-subtitle,
   .geo-input-1,
@@ -849,16 +830,6 @@ const handleSubmit = async () => {
 
   .geo-submit::after {
     display: none;
-  }
-}
-
-@keyframes pulseGlow {
-  0%,
-  100% {
-    box-shadow: 0 0 0 1px #0d9488, 0 0 16px 0 rgba(13, 148, 136, 0.15);
-  }
-  50% {
-    box-shadow: 0 0 0 1px #0d9488, 0 0 24px 2px rgba(13, 148, 136, 0.3);
   }
 }
 

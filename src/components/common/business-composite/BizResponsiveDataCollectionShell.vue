@@ -1,11 +1,15 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/components/common/business-composite/BizResponsiveDataCollectionShell.vue
- * 文件职责：提供列表表格 / 卡片双视图壳，统一管理加载态、空状态、桌面表格与移动端卡片切换，并为混合内容卡片提供稳定的高度对齐基线。
+ * 文件职责：提供列表表格 / 卡片双视图共享壳，统一承接加载态、空状态、桌面表格与移动端卡片切换。
  * 实现逻辑：
- * - 桌面端默认输出表格，手机与平板自动切换到卡片布局；
+ * - 桌面端默认输出表格，手机与平板自动切到卡片模式；
  * - 通过统一响应式网格类名，避免内容长短不一的卡片在同一行被互相拉伸；
- * - 页面只关注表格列与卡片内容，不再重复处理空态和骨架屏。
+ * - 当卡片数量过多或页面显式声明关闭时，自动跳过逐项过渡，避免大列表切换把主线程拖成“无响应”；
+ * - 页面只关注表格列与卡片内容，不再重复处理空态、骨架屏和过渡降级逻辑。
+ * 维护说明：
+ * - 若后续新增高密度卡片页，优先通过本壳层的过渡降级参数处理，不要在业务页重复复制一套列表模板；
+ * - 若页面明确以“工作台实时操作”为主，可直接关闭卡片过渡，优先保证点击和滚动稳定。
  */
 
 
@@ -40,6 +44,8 @@ interface Props {
   cardContainerClass?: string
   emptyCard?: boolean
   emptyMinHeight?: string
+  disableCardTransition?: boolean
+  cardTransitionThreshold?: number
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -54,6 +60,8 @@ const props = withDefaults(defineProps<Props>(), {
   cardContainerClass: '',
   emptyCard: false,
   emptyMinHeight: '240px',
+  disableCardTransition: false,
+  cardTransitionThreshold: 24,
 })
 
 const appStore = useAppStore()
@@ -106,6 +114,19 @@ const cardEntries = computed(() => {
     }
   })
 })
+
+/**
+ * 卡片过渡开关：
+ * - 普通列表仍保留轻量入场反馈；
+ * - 大于阈值的卡片集合自动降级为普通列表，避免手机端筛选、切页或恢复 keep-alive 时批量参与动画造成卡顿。
+ */
+const shouldUseCardTransition = computed(() => {
+  if (props.disableCardTransition) {
+    return false
+  }
+
+  return cardEntries.value.length <= props.cardTransitionThreshold
+})
 </script>
 
 <template>
@@ -142,7 +163,12 @@ const cardEntries = computed(() => {
         />
       </div>
 
-      <transition-group v-else name="shared-list" tag="div" :class="responsiveCardContainerClass">
+      <transition-group
+        v-else-if="shouldUseCardTransition"
+        name="shared-list"
+        tag="div"
+        :class="responsiveCardContainerClass"
+      >
         <template v-for="entry in cardEntries" :key="entry.key">
           <slot
             name="card"
@@ -154,6 +180,19 @@ const cardEntries = computed(() => {
           />
         </template>
       </transition-group>
+
+      <div v-else :class="responsiveCardContainerClass">
+        <template v-for="entry in cardEntries" :key="entry.key">
+          <slot
+            name="card"
+            :item="entry.item"
+            :index="entry.index"
+            :is-phone="appStore.isPhone"
+            :is-tablet="appStore.isTablet"
+            :is-desktop="appStore.isDesktop"
+          />
+        </template>
+      </div>
     </template>
   </div>
 </template>

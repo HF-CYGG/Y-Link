@@ -2,9 +2,13 @@
 /**
  * 模块说明：src/views/inbound/InboundScanView.vue
  * 文件职责：提供送货单扫码查询、明细核对、一键确认入库与最近查询回查能力。
+ * 实现逻辑：
+ * - 页面同时兼容核销码与送货单号两种输入方式，并在查询失败时按规则自动兜底到 showNo 查询；
+ * - 查询、核销、快捷键和扫码弹窗共用同一份状态门禁，避免连续作业时重复触发请求；
+ * - 工作台布局统一收敛为“单主滚动区”，避免桌面与移动端多层滚动互相抢焦点。
  * 维护说明：
- * - 页面同时兼容核销码与送货单号两种输入方式，调整查询逻辑时要保留双通道兜底；
- * - 快捷键、扫码弹窗和最近查询列表属于连续作业链路，修改交互时需避免打断回焦节奏。
+ * - 快捷键、扫码弹窗和最近查询列表属于连续作业链路，修改交互时需避免打断回焦节奏；
+ * - 模板里用到的图标必须与脚本导入保持一致，否则运行时会直接报错并表现为页面无响应。
  */
 
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
@@ -16,7 +20,7 @@ import {
   verifyInboundOrder,
   type InboundOrderDetail,
 } from '@/api/modules/inbound'
-import { CameraFilled, DocumentCopy, Loading, Search } from '@element-plus/icons-vue'
+import { CameraFilled, Check, Document, DocumentCopy, Loading, Picture, Search } from '@element-plus/icons-vue'
 import { useCameraQrScanner } from '@/composables/useCameraQrScanner'
 import { useDevice } from '@/composables/useDevice'
 import { extractErrorMessage } from '@/utils/error'
@@ -257,6 +261,9 @@ const handleVerify = async () => {
 }
 
 const handleReset = () => {
+  if (loading.value || verifying.value) {
+    return
+  }
   currentOrder.value = null
   scanCode.value = ''
   focusScanInput()
@@ -295,6 +302,9 @@ const handleGlobalKeydown = (event: KeyboardEvent) => {
 
 // 最近查询允许一键回填，减少仓管在连续作业时重复扫码。
 const handleReuseRecentScan = (verifyCode: string) => {
+  if (!canQuery.value) {
+    return
+  }
   scanCode.value = verifyCode
   void handleScan()
 }
