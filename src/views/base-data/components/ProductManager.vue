@@ -287,12 +287,20 @@ const buildEditForm = (row: ProductRecord): ProductForm => ({
 const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProductDto> => {
   hasAutoCreatedTags.value = false
   const resolvedTagIds = await resolveTagIds(currentForm.tagIds)
+  const normalizedProductCode = currentForm.productCode.trim()
+  const normalizedProductName = currentForm.productName.trim()
+  const normalizedPinyinAbbr = currentForm.pinyinAbbr.trim()
+  const normalizedDefaultPrice = Number(currentForm.defaultPrice)
+  const normalizedCurrentStock = Number(currentForm.currentStock)
+
   return {
-    productCode: currentForm.productCode,
-    productName: currentForm.productName,
-    pinyinAbbr: currentForm.pinyinAbbr,
-    defaultPrice: currentForm.defaultPrice,
-    currentStock: currentForm.currentStock,
+    // 详细注释：单个新增/编辑与批量新增统一使用相同的字段归一化口径，
+    // 避免输入组件短暂产生空串或 NaN 时直接把非法值发给后端，导致点击保存表现为“没反应”。
+    productCode: normalizedProductCode || undefined,
+    productName: normalizedProductName,
+    pinyinAbbr: normalizedPinyinAbbr,
+    defaultPrice: Number.isFinite(normalizedDefaultPrice) ? normalizedDefaultPrice : 0,
+    currentStock: Number.isFinite(normalizedCurrentStock) ? Math.max(0, Math.floor(normalizedCurrentStock)) : 0,
     isActive: currentForm.isActive,
     tagIds: resolvedTagIds,
   }
