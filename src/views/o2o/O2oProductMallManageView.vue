@@ -26,6 +26,7 @@ import {
   type ProductRecord,
   type UpdateProductDto,
 } from '@/api/modules/product'
+import { useDevice } from '@/composables/useDevice'
 
 type O2oProductFormState = {
   id: string
@@ -45,6 +46,7 @@ const submitting = ref(false)
 const dialogVisible = ref(false)
 const keyword = ref('')
 const products = ref<ProductRecord[]>([])
+const { isPhone } = useDevice()
 
 const form = reactive<O2oProductFormState>({
   id: '',
@@ -88,6 +90,31 @@ const uploadProgressStatus = computed(() => {
 const dialogTitle = computed(() => {
   return form.id ? '编辑线上商品' : '新增线上商品'
 })
+
+/**
+ * 列表展示辅助文案：
+ * - 手机卡片与桌面表格共用一套状态判断，避免同一商品在不同断点出现不同语义；
+ * - 保持“基础状态 / 商城展示”两个维度分离，方便管理员快速判断不可上架原因。
+ */
+const getBaseStatusLabel = (product: ProductRecord) => {
+  return product.isActive ? '启用' : '停用'
+}
+
+const getBaseStatusTagType = (product: ProductRecord) => {
+  return product.isActive ? 'success' : 'info'
+}
+
+const getMallStatusLabel = (product: ProductRecord) => {
+  return product.o2oStatus === 'listed' ? '已上架' : '已下架'
+}
+
+const getMallStatusTagType = (product: ProductRecord) => {
+  return product.o2oStatus === 'listed' ? 'success' : 'warning'
+}
+
+const formatProductPrice = (price: string | number) => {
+  return `¥${Number(price).toFixed(2)}`
+}
 
 watch(
   () => form.isActive,
@@ -337,14 +364,125 @@ onMounted(async () => {
     </template>
 
     <div class="mt-4 rounded-3xl bg-white p-4 shadow-sm">
-      <el-table native-scrollbar :data="products" :loading="loading" row-key="id">
-        <el-table-column prop="productName" label="商品名称" min-width="180" />
-        <el-table-column label="单价" min-width="120">
+      <div
+        v-if="isPhone"
+        v-loading="loading"
+        element-loading-text="正在加载线上商品..."
+        class="mall-mobile-list"
+      >
+        <template v-if="products.length">
+          <article
+            v-for="product in products"
+            :key="product.id"
+            class="mall-mobile-card"
+          >
+            <div class="mall-mobile-card__head">
+              <el-image
+                :src="resolveProductPlaceholder(product.thumbnail)"
+                :preview-src-list="product.thumbnail ? [resolveProductPlaceholder(product.thumbnail)] : []"
+                preview-teleported
+                fit="cover"
+                class="mall-mobile-card__thumb"
+              />
+
+              <div class="min-w-0 flex-1">
+                <div class="flex items-start justify-between gap-3">
+                  <div class="min-w-0 flex-1">
+                    <h3 class="mall-mobile-card__title">
+                      {{ product.productName }}
+                    </h3>
+                    <p class="mall-mobile-card__code">
+                      商品编码：{{ product.productCode || '系统自动生成' }}
+                    </p>
+                  </div>
+
+                  <el-button
+                    link
+                    type="primary"
+                    class="mall-mobile-card__edit-button"
+                    @click="openEditDialog(product)"
+                  >
+                    编辑
+                  </el-button>
+                </div>
+
+                <div class="mall-mobile-card__tag-row">
+                  <el-tag :type="getBaseStatusTagType(product)" size="small" effect="light">
+                    {{ getBaseStatusLabel(product) }}
+                  </el-tag>
+                  <el-tag :type="getMallStatusTagType(product)" size="small" effect="light">
+                    {{ getMallStatusLabel(product) }}
+                  </el-tag>
+                </div>
+              </div>
+            </div>
+
+            <div class="mall-mobile-card__price-strip">
+              <div>
+                <p class="mall-mobile-card__section-label">建议单价</p>
+                <p class="mall-mobile-card__price">
+                  {{ formatProductPrice(product.defaultPrice) }}
+                </p>
+              </div>
+              <div class="mall-mobile-card__limit">
+                单人限购 {{ product.limitPerUser }}
+              </div>
+            </div>
+
+            <div class="mall-mobile-card__stock-grid">
+              <div class="mall-mobile-card__stock-item">
+                <span class="mall-mobile-card__stock-label">当前库存</span>
+                <span class="mall-mobile-card__stock-value">{{ product.currentStock }}</span>
+              </div>
+              <div class="mall-mobile-card__stock-item">
+                <span class="mall-mobile-card__stock-label">已预订</span>
+                <span class="mall-mobile-card__stock-value">{{ product.preOrderedStock }}</span>
+              </div>
+              <div class="mall-mobile-card__stock-item is-highlight">
+                <span class="mall-mobile-card__stock-label">可用库存</span>
+                <span class="mall-mobile-card__stock-value">{{ product.availableStock }}</span>
+              </div>
+            </div>
+
+            <div class="mall-mobile-card__footer">
+              <div class="mall-mobile-card__footer-copy">
+                <span class="mall-mobile-card__section-label">商城展示</span>
+                <span class="mall-mobile-card__footer-hint">
+                  {{ product.isActive ? '支持直接切换上下架' : '商品停用时不可上架' }}
+                </span>
+              </div>
+              <el-switch
+                :model-value="product.o2oStatus === 'listed'"
+                inline-prompt
+                active-text="上架"
+                inactive-text="下架"
+                :disabled="!product.isActive"
+                @change="toggleListed(product, $event ? 'listed' : 'unlisted')"
+              />
+            </div>
+          </article>
+        </template>
+
+        <el-empty v-else description="暂无线上商品" :image-size="110" />
+      </div>
+
+      <el-table v-else native-scrollbar :data="products" :loading="loading" row-key="id">
+        <el-table-column label="商品信息" min-width="250">
           <template #default="{ row }">
-            <span class="font-semibold text-teal-600">¥{{ Number(row.defaultPrice).toFixed(2) }}</span>
+            <div class="mall-table-product-cell">
+              <div class="mall-table-product-cell__name">{{ row.productName }}</div>
+              <div class="mall-table-product-cell__code">
+                商品编码：{{ row.productCode || '系统自动生成' }}
+              </div>
+            </div>
           </template>
         </el-table-column>
-        <el-table-column label="库存信息" min-width="220">
+        <el-table-column label="单价" min-width="108">
+          <template #default="{ row }">
+            <span class="font-semibold text-teal-600">{{ formatProductPrice(row.defaultPrice) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="库存信息" min-width="190">
           <template #default="{ row }">
             <div class="text-sm leading-6 text-slate-600">
               <div>当前库存：{{ row.currentStock }}</div>
@@ -353,7 +491,7 @@ onMounted(async () => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="上架状态" min-width="120">
+        <el-table-column label="上架状态" min-width="118">
           <template #default="{ row }">
             <el-switch
               :model-value="row.o2oStatus === 'listed'"
@@ -365,7 +503,7 @@ onMounted(async () => {
             />
           </template>
         </el-table-column>
-        <el-table-column label="预览图" min-width="150">
+        <el-table-column label="预览图" min-width="110">
           <template #default="{ row }">
             <el-image
               :src="resolveProductPlaceholder(row.thumbnail)"
@@ -376,8 +514,8 @@ onMounted(async () => {
             />
           </template>
         </el-table-column>
-        <el-table-column prop="limitPerUser" label="单人限购" width="110" align="center" />
-        <el-table-column label="操作" width="120" fixed="right">
+        <el-table-column prop="limitPerUser" label="单人限购" width="96" align="center" />
+        <el-table-column label="操作" width="84" fixed="right" align="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="openEditDialog(row)">编辑</el-button>
           </template>
@@ -540,6 +678,177 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.mall-mobile-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+  min-height: 220px;
+}
+
+.mall-mobile-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.95rem;
+  padding: 1rem;
+  border: 1px solid rgba(226, 232, 240, 0.92);
+  border-radius: 24px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.96));
+  box-shadow: 0 16px 40px -34px rgba(15, 23, 42, 0.28);
+}
+
+.mall-mobile-card__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.85rem;
+  min-width: 0;
+}
+
+.mall-mobile-card__thumb {
+  width: 84px;
+  height: 84px;
+  flex: 0 0 auto;
+  border-radius: 20px;
+  overflow: hidden;
+  background: rgb(241 245 249);
+}
+
+.mall-mobile-card__title {
+  font-size: 1rem;
+  line-height: 1.45;
+  font-weight: 600;
+  color: rgb(15 23 42);
+  word-break: break-word;
+}
+
+.mall-mobile-card__code {
+  margin-top: 0.3rem;
+  font-size: 0.78rem;
+  line-height: 1.5;
+  color: rgb(100 116 139);
+  word-break: break-all;
+}
+
+.mall-mobile-card__edit-button {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  padding-top: 0;
+}
+
+.mall-mobile-card__tag-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.7rem;
+}
+
+.mall-mobile-card__price-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.9rem 0.95rem;
+  border-radius: 20px;
+  background: rgba(240, 249, 255, 0.86);
+}
+
+.mall-mobile-card__section-label {
+  display: block;
+  font-size: 0.75rem;
+  color: rgb(100 116 139);
+  line-height: 1.4;
+}
+
+.mall-mobile-card__price {
+  margin-top: 0.2rem;
+  font-size: 1.18rem;
+  line-height: 1.2;
+  font-weight: 700;
+  color: rgb(13 148 136);
+}
+
+.mall-mobile-card__limit {
+  flex: 0 0 auto;
+  padding: 0.38rem 0.72rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  font-size: 0.78rem;
+  color: rgb(51 65 85);
+}
+
+.mall-mobile-card__stock-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.65rem;
+}
+
+.mall-mobile-card__stock-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.28rem;
+  min-width: 0;
+  padding: 0.8rem 0.72rem;
+  border-radius: 18px;
+  background: rgba(248, 250, 252, 0.96);
+}
+
+.mall-mobile-card__stock-item.is-highlight {
+  background: rgba(236, 253, 245, 0.96);
+}
+
+.mall-mobile-card__stock-label {
+  font-size: 0.73rem;
+  line-height: 1.4;
+  color: rgb(100 116 139);
+}
+
+.mall-mobile-card__stock-value {
+  font-size: 1rem;
+  line-height: 1.2;
+  font-weight: 600;
+  color: rgb(15 23 42);
+}
+
+.mall-mobile-card__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding-top: 0.15rem;
+}
+
+.mall-mobile-card__footer-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.mall-mobile-card__footer-hint {
+  font-size: 0.76rem;
+  line-height: 1.45;
+  color: rgb(100 116 139);
+}
+
+.mall-table-product-cell {
+  min-width: 0;
+}
+
+.mall-table-product-cell__name {
+  font-size: 0.95rem;
+  line-height: 1.5;
+  font-weight: 600;
+  color: rgb(15 23 42);
+  word-break: break-word;
+}
+
+.mall-table-product-cell__code {
+  margin-top: 0.25rem;
+  font-size: 0.78rem;
+  line-height: 1.45;
+  color: rgb(100 116 139);
+  word-break: break-all;
+}
+
 .avatar-uploader :deep(.el-upload) {
   width: 100%;
   border: 1px solid rgba(203, 213, 225, 0.88);
@@ -703,6 +1012,43 @@ onMounted(async () => {
 }
 
 @media (max-width: 767px) {
+  .mall-mobile-card {
+    padding: 0.9rem;
+    border-radius: 22px;
+  }
+
+  .mall-mobile-card__head {
+    gap: 0.75rem;
+  }
+
+  .mall-mobile-card__thumb {
+    width: 76px;
+    height: 76px;
+    border-radius: 18px;
+  }
+
+  .mall-mobile-card__price-strip {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .mall-mobile-card__limit {
+    align-self: flex-start;
+  }
+
+  .mall-mobile-card__stock-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .mall-mobile-card__stock-item.is-highlight {
+    grid-column: 1 / -1;
+  }
+
+  .mall-mobile-card__footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
   .avatar-uploader__empty-state {
     grid-template-columns: 1fr;
     align-items: start;

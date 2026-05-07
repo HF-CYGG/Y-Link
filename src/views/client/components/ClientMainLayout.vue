@@ -4,22 +4,24 @@
  * 文件职责：客户端主布局，负责页面切换动画、底部导航与统一退出登录行为。
  * 实现逻辑：
  * - 页面切换通过路径深度推导过渡方向，保持移动端浏览路径直觉；
+ * - 主壳层直接读取全局路由实例的当前路由，避免开发态依赖重优化时 `useRoute()` 注入短暂缺失导致白屏；
  * - 退出时先清理登录态与按账号隔离的订单缓存，再清空购物车并硬跳转回登录页。
  * 维护说明：若客户端新增更多持久化模块，需要评估是否也应接入退出清理链路。
  */
 
 
 import { computed, ref, watch } from 'vue'
-import { useRoute, type RouteLocationNormalizedLoaded } from 'vue-router'
+import type { RouteLocationNormalizedLoaded } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
 import { useClientAuthStore, useClientCartStore } from '@/store'
+import router from '@/router'
 import { buildClientNavigationItems } from '@/router/routes'
 import { redirectToClientLogin } from '@/utils/client-auth-navigation'
 import pinia from '@/store/pinia'
 
-const route = useRoute()
 const clientAuthStore = useClientAuthStore(pinia)
 const clientCartStore = useClientCartStore(pinia)
+const currentRoute = computed(() => router.currentRoute.value)
 
 clientCartStore.initialize(clientAuthStore.currentUser?.id)
 const transitionName = ref<'slide-left' | 'slide-right'>('slide-left')
@@ -62,10 +64,11 @@ const indicatorStyle = computed(() => {
 
 // 详细注释：判断指定的 tab 路径是否处于激活状态，订单模块通过前缀匹配以包含详情等子页面
 const isTabActive = (path: string) => {
+  const currentPath = currentRoute.value.path || '/client'
   if (path === '/client/orders') {
-    return route.path.startsWith('/client/orders')
+    return currentPath.startsWith('/client/orders')
   }
-  return route.path === path
+  return currentPath === path
 }
 
 const resolveViewKey = (currentRoute: RouteLocationNormalizedLoaded) => {
@@ -98,7 +101,7 @@ const resolvePathDepth = (path: string) => {
 }
 
 watch(
-  () => route.fullPath,
+  () => currentRoute.value.fullPath || '/client',
   (nextPath, previousPath) => {
     const nextDepth = resolvePathDepth(nextPath)
     const previousDepth = resolvePathDepth(previousPath || '/client')
@@ -138,7 +141,7 @@ const handleLogout = async () => {
 </script>
 
 <template>
-  <div class="client-main-layout min-h-[100dvh] pb-28 text-slate-900">
+  <div class="client-main-layout min-h-[100dvh] text-slate-900">
     <header class="client-main-layout__header sticky top-0 z-30">
       <div class="client-main-layout__container flex items-center justify-between gap-3 px-4 py-3 sm:px-5">
         <div>
@@ -180,7 +183,7 @@ const handleLogout = async () => {
 
     <nav
       v-if="tabs.length"
-      class="client-main-layout__tab fixed bottom-3 left-1/2 z-50 -translate-x-1/2 rounded-[1.4rem] px-2 py-2"
+      class="client-main-layout__tab fixed left-1/2 z-50 -translate-x-1/2 rounded-[1.4rem] px-2 py-2"
     >
       <div class="grid relative gap-1" :style="{ gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))` }">
         <div class="client-main-layout__tab-indicator" :style="indicatorStyle"></div>
@@ -202,6 +205,14 @@ const handleLogout = async () => {
 .client-main-layout {
   --client-shell-max: 1100px;
   --client-shell-inline: clamp(0.85rem, 2.3vw, 1.25rem);
+  /* 统一输出底部导航占位变量，供商城页等固定底部组件共享，避免各页面重复写死高度。 */
+  --client-tab-bar-height: 4.75rem;
+  --client-tab-bar-safe-area: env(safe-area-inset-bottom);
+  --client-tab-bar-bottom-offset: 0.75rem;
+  --client-tab-bar-clearance: calc(
+    var(--client-tab-bar-height) + var(--client-tab-bar-bottom-offset) + var(--client-tab-bar-safe-area)
+  );
+  padding-bottom: calc(var(--client-tab-bar-clearance) + 1.75rem);
   background:
     radial-gradient(circle at top, rgba(13, 148, 136, 0.14), transparent 36%),
     radial-gradient(circle at bottom right, rgba(15, 118, 110, 0.12), transparent 30%),
@@ -222,13 +233,15 @@ const handleLogout = async () => {
 .client-main-layout__viewport {
   position: relative;
   min-height: calc(100dvh - 7.5rem);
-  overflow: clip;
+  overflow: visible;
   isolation: isolate;
   padding-top: 1rem;
+  padding-bottom: calc(1rem + var(--client-tab-bar-safe-area));
 }
 
 .client-main-layout__tab {
   width: min(var(--client-shell-max), calc(100vw - var(--client-shell-inline) * 2));
+  bottom: calc(var(--client-tab-bar-bottom-offset) + var(--client-tab-bar-safe-area));
   border: 1px solid color-mix(in srgb, var(--ylink-color-border) 72%, #ffffff 28%);
   background: color-mix(in srgb, var(--ylink-color-surface) 86%, #ffffff 14%);
   backdrop-filter: blur(20px);
@@ -306,15 +319,14 @@ const handleLogout = async () => {
 @media (max-width: 768px) {
   .client-main-layout {
     --client-shell-inline: 0.75rem;
+    --client-tab-bar-height: 4.5rem;
+    --client-tab-bar-bottom-offset: 0.7rem;
   }
 
   .client-main-layout__viewport {
     min-height: calc(100dvh - 7rem);
     padding-top: 0.75rem;
-  }
-
-  .client-main-layout__tab {
-    bottom: max(0.7rem, env(safe-area-inset-bottom));
+    padding-bottom: calc(1.25rem + var(--client-tab-bar-safe-area));
   }
 }
 </style>

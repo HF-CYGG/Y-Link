@@ -47,6 +47,9 @@ const SQLITE_REQUIRED_ORDER_COLUMNS = [
 ]
 
 const SQLITE_REQUIRED_ORDER_ITEM_COLUMNS = ['unit_price', 'line_amount']
+// 历史 SQLite 本地库缺少金额字段时，先用极小正数兜底补齐结构，避免 synchronize 重建临时表时被 NOT NULL / CHECK 约束直接拦截。
+const SQLITE_LEGACY_OUTBOUND_ITEM_FALLBACK_UNIT_PRICE = 0.01
+const SQLITE_LEGACY_OUTBOUND_ITEM_FALLBACK_LINE_AMOUNT = 0
 const SQLITE_REQUIRED_PRODUCT_COLUMNS = [
   'o2o_status',
   'thumbnail',
@@ -75,19 +78,118 @@ async function listSqliteTableColumns(dataSource: DataSource, tableName: string)
   return new Set(columns.map((column) => column.name))
 }
 
+function serializeSqliteNumericLiteral(value: number, fractionDigits = 2): string {
+  // SQLite DDL 的 DEFAULT 子句不能使用参数占位符，因此这里先把内部常量收敛为有限数字，再序列化成 SQL 数值字面量。
+  if (!Number.isFinite(value)) {
+    throw new Error(`SQLite 数值字面量非法: ${String(value)}`)
+  }
+  return value.toFixed(fractionDigits)
+}
+
 async function normalizeSqliteOutboundItemColumns(dataSource: DataSource): Promise<void> {
   const itemColumnSet = await listSqliteTableColumns(dataSource, 'biz_outbound_order_item')
   if (itemColumnSet.size === 0) {
     return
   }
 
+  let hasCompatMutation = false
+  const fallbackUnitPriceLiteral = serializeSqliteNumericLiteral(SQLITE_LEGACY_OUTBOUND_ITEM_FALLBACK_UNIT_PRICE)
+  const fallbackLineAmountLiteral = serializeSqliteNumericLiteral(SQLITE_LEGACY_OUTBOUND_ITEM_FALLBACK_LINE_AMOUNT)
+
   if (itemColumnSet.has('unitPrice') && !itemColumnSet.has('unit_price')) {
     await dataSource.query(`ALTER TABLE "biz_outbound_order_item" RENAME COLUMN "unitPrice" TO "unit_price"`)
+    hasCompatMutation = true
   }
 
-  const refreshedColumnSet = await listSqliteTableColumns(dataSource, 'biz_outbound_order_item')
+  let refreshedColumnSet = await listSqliteTableColumns(dataSource, 'biz_outbound_order_item')
   if (refreshedColumnSet.has('lineAmount') && !refreshedColumnSet.has('line_amount')) {
     await dataSource.query(`ALTER TABLE "biz_outbound_order_item" RENAME COLUMN "lineAmount" TO "line_amount"`)
+    hasCompatMutation = true
+  }
+
+  refreshedColumnSet = await listSqliteTableColumns(dataSource, 'biz_outbound_order_item')
+  if (!refreshedColumnSet.has('unit_price')) {
+    // 先以 NOT NULL + 默认值补列，确保旧库在 TypeORM 复制到 temporary_* 表之前就具备最基础的金额字段。
+    await dataSource.query(
+      `ALTER TABLE "biz_outbound_order_item" ADD COLUMN "unit_price" decimal(12, 2) NOT NULL DEFAULT ${fallbackUnitPriceLiteral}`,
+    )
+    hasCompatMutation = true
+  }
+
+  refreshedColumnSet = await listSqliteTableColumns(dataSource, 'biz_outbound_order_item')
+  if (!refreshedColumnSet.has('line_amount')) {
+    // 行金额允许先以 0 占位，随后统一按数量 * 单价回填，避免旧库启动阶段直接中断。
+    await dataSource.query(
+      `ALTER TABLE "biz_outbound_order_item" ADD COLUMN "line_amount" decimal(14, 2) NOT NULL DEFAULT ${fallbackLineAmountLiteral}`,
+    )
+    hasCompatMutation = true
+  }
+
+  // 兼容历史库中金额列缺失或无效的记录：
+  // 1. 优先沿用既有 line_amount / qty 反推单价；
+  // 2. 其次回退到主单总金额 / 总数量均价；
+  // 3. 再退到当前商品默认单价；
+  // 4. 最后使用极小正数兜底，只用于让本地旧库完成结构升级。
+  await dataSource.query(`
+    UPDATE "biz_outbound_order_item"
+    SET "unit_price" = printf(
+      '%.2f',
+      ROUND(
+        COALESCE(
+          CASE
+            WHEN CAST(COALESCE("line_amount", 0) AS REAL) > 0 AND CAST(COALESCE("qty", 0) AS REAL) > 0
+              THEN CAST("line_amount" AS REAL) / CAST("qty" AS REAL)
+          END,
+          (
+            SELECT CASE
+              WHEN CAST(COALESCE("total_amount", 0) AS REAL) > 0 AND CAST(COALESCE("total_qty", 0) AS REAL) > 0
+                THEN CAST("total_amount" AS REAL) / CAST("total_qty" AS REAL)
+            END
+            FROM "biz_outbound_order"
+            WHERE "biz_outbound_order"."id" = "biz_outbound_order_item"."order_id"
+          ),
+          (
+            SELECT CASE
+              WHEN CAST(COALESCE("default_price", 0) AS REAL) > 0
+                THEN CAST("default_price" AS REAL)
+            END
+            FROM "base_product"
+            WHERE "base_product"."id" = "biz_outbound_order_item"."product_id"
+          ),
+          ${fallbackUnitPriceLiteral}
+        ),
+        2
+      )
+    )
+    WHERE "unit_price" IS NULL OR CAST(COALESCE("unit_price", 0) AS REAL) <= 0
+  `)
+
+  // 对缺失或非法的行金额统一重算，保证后续同步和统计查询拿到的是可用数据。
+  await dataSource.query(`
+    UPDATE "biz_outbound_order_item"
+    SET "line_amount" = printf(
+      '%.2f',
+      ROUND(
+        CAST(COALESCE("qty", 0) AS REAL) * CAST(COALESCE("unit_price", ${fallbackUnitPriceLiteral}) AS REAL),
+        2
+      )
+    )
+    WHERE "line_amount" IS NULL OR CAST(COALESCE("line_amount", 0) AS REAL) < 0
+  `)
+
+  if (hasCompatMutation) {
+    // 旧库刚补列时，默认值可能还残留在部分记录上；这里再次按规则回算，保证同步前数据状态尽量完整。
+    await dataSource.query(`
+      UPDATE "biz_outbound_order_item"
+      SET "line_amount" = printf(
+        '%.2f',
+        ROUND(
+          CAST(COALESCE("qty", 0) AS REAL) * CAST(COALESCE("unit_price", ${fallbackUnitPriceLiteral}) AS REAL),
+          2
+        )
+      )
+      WHERE CAST(COALESCE("line_amount", 0) AS REAL) <= 0
+    `)
   }
 }
 

@@ -66,7 +66,10 @@ const categoryScrollUnlockTimer = ref<number | null>(null)
 const categoryScrollSessionId = ref(0)
 const currentLockedSessionId = ref(0)
 const pendingCategoryTargetTop = ref<number | null>(null)
-const listViewportBottomSpacer = ref(220)
+const DEFAULT_LIST_VIEWPORT_BOTTOM_SPACER = 220
+const PHONE_FLOATING_CLEARANCE_FALLBACK = 196
+const DESKTOP_FLOATING_CLEARANCE_FALLBACK = 124
+const listViewportBottomSpacer = ref(DEFAULT_LIST_VIEWPORT_BOTTOM_SPACER)
 
 const CATEGORY_SCROLL_HIT_THRESHOLD = 12
 const CATEGORY_SCROLL_FALLBACK_MS = 420
@@ -336,6 +339,33 @@ const clearCategoryUnlockTimer = () => {
   }
 }
 
+const resolveMallFloatingBottomClearance = (element: HTMLElement) => {
+  if (globalThis.window === undefined) {
+    return isPhone.value ? PHONE_FLOATING_CLEARANCE_FALLBACK : DESKTOP_FLOATING_CLEARANCE_FALLBACK
+  }
+  // 读取布局层透出的底部导航安全区变量，让商城内部滚动容器与悬浮购物车共用同一套底部留白基线。
+  const resolvedValue = globalThis.window
+    .getComputedStyle(element)
+    .getPropertyValue('--mall-floating-bottom-clearance')
+    .trim()
+  const parsedValue = Number.parseFloat(resolvedValue.replace('px', ''))
+  if (Number.isFinite(parsedValue) && parsedValue > 0) {
+    return parsedValue
+  }
+  return isPhone.value ? PHONE_FLOATING_CLEARANCE_FALLBACK : DESKTOP_FLOATING_CLEARANCE_FALLBACK
+}
+
+const resolveListViewportBottomSpacer = (scroller: HTMLElement) => {
+  const floatingBottomClearance = resolveMallFloatingBottomClearance(scroller)
+  // 手机端底部有“悬浮购物车 + 底部导航”两层固定区，因此尾部缓冲区至少要覆盖整块可视遮挡区。
+  const viewportTailRoom = Math.floor(scroller.clientHeight * (isPhone.value ? 0.96 : 0.75))
+  return Math.max(
+    180,
+    viewportTailRoom,
+    Math.ceil(floatingBottomClearance + CATEGORY_VIEWPORT_ACTIVATE_OFFSET),
+  )
+}
+
 const releaseCategoryScrollLock = () => {
   clearCategoryUnlockTimer()
   scrollingByCategoryClick.value = false
@@ -346,11 +376,11 @@ const releaseCategoryScrollLock = () => {
 const syncListViewportBottomSpacer = () => {
   const scroller = listScrollerRef.value
   if (!scroller) {
-    listViewportBottomSpacer.value = 220
+    listViewportBottomSpacer.value = DEFAULT_LIST_VIEWPORT_BOTTOM_SPACER
     return
   }
-  // 为右侧分组列表补一个“可滚动缓冲尾部”，确保尾部标签也有足够空间滚动到可视定位线附近。
-  listViewportBottomSpacer.value = Math.max(180, Math.floor(scroller.clientHeight * 0.75))
+  // 为右侧分组列表补一个“可滚动缓冲尾部”，确保末尾分组在手机端也能越过底部固定购物车后平滑顶到定位线。
+  listViewportBottomSpacer.value = resolveListViewportBottomSpacer(scroller)
 }
 
 const resolveSectionTopWithinScroller = (section: HTMLElement, scroller: HTMLElement) => {
@@ -595,7 +625,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="space-y-4 pb-20">
+  <section class="mall-page space-y-4">
     <div class="mall-search-launcher-wrap">
       <button type="button" class="mall-search-launcher" @click="openSearchPanel">
         <el-icon><Search /></el-icon>
@@ -698,12 +728,12 @@ onBeforeUnmount(() => {
 
     <section
       v-else-if="searchMode"
-      class="space-y-3 rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-4 shadow-[var(--ylink-shadow-soft)]"
+      class="mall-search-results space-y-3 rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-4 shadow-[var(--ylink-shadow-soft)]"
     >
       <header class="flex items-center justify-between">
         <p class="text-sm font-semibold text-slate-700">搜索结果 {{ searchResults.length }} 条</p>
       </header>
-      <div class="client-product-grid">
+      <div class="client-product-grid mall-product-grid">
         <article v-for="product in searchResults" :key="product.id" class="client-product-card">
           <button type="button" class="client-product-card__image-button" @click="openProductImagePreview(product)">
             <img
@@ -715,11 +745,11 @@ onBeforeUnmount(() => {
             />
           </button>
           <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
-            <div class="min-w-0 flex-1 text-left">
-              <p class="truncate text-base font-semibold text-slate-900">{{ product.productName }}</p>
-              <p class="mt-1 text-sm font-bold text-[var(--ylink-color-primary-strong)]">¥{{ Number(product.defaultPrice).toFixed(2) }}</p>
-              <p class="mt-1 text-xs text-slate-500 truncate">{{ product.detailContent || '暂无商品描述' }}</p>
-              <div class="mt-2 flex flex-wrap gap-2 text-xs">
+            <div class="client-product-card__content">
+              <p class="client-product-card__name">{{ product.productName }}</p>
+              <p class="client-product-card__price">¥{{ Number(product.defaultPrice).toFixed(2) }}</p>
+              <p class="client-product-card__desc">{{ product.detailContent || '暂无商品描述' }}</p>
+              <div class="client-product-card__meta">
                 <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">
                   可预订 {{ product.availableStock }}
                 </span>
@@ -734,13 +764,13 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
-    <section v-else class="grid grid-cols-[88px_minmax(0,1fr)] sm:grid-cols-[140px_minmax(0,1fr)] gap-3 rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-3 sm:p-4 shadow-[var(--ylink-shadow-soft)]">
-      <aside class="max-h-[64vh] overflow-y-auto pr-1 sm:pr-2 hide-scrollbar">
+    <section v-else class="mall-browse-panel grid grid-cols-[76px_minmax(0,1fr)] sm:grid-cols-[140px_minmax(0,1fr)] gap-3 rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-3 sm:p-4 shadow-[var(--ylink-shadow-soft)]">
+      <aside class="mall-browse-categories overflow-y-auto pr-1 sm:pr-2 hide-scrollbar">
         <button
           v-for="category in categoryOptions"
           :key="category.key"
           type="button"
-          class="mb-2 w-full rounded-xl px-2 py-2 sm:px-3 sm:py-3 text-left transition-colors duration-200"
+          class="mall-category-button mb-2 w-full rounded-xl px-2 py-2 sm:px-3 sm:py-3 text-left transition-colors duration-200"
           :class="activeCategoryKey === category.key ? 'bg-[var(--ylink-color-primary-strong)] text-white shadow-md' : 'bg-[var(--ylink-color-surface-muted)] text-slate-500 hover:bg-slate-200'"
           @click="scrollToCategory(category.key)"
         >
@@ -749,8 +779,8 @@ onBeforeUnmount(() => {
         </button>
       </aside>
 
-      <div v-if="largeDatasetMode" class="max-h-[64vh] overflow-y-auto pr-1" v-bind="virtualContainerProps">
-        <div v-bind="virtualWrapperProps" class="client-product-grid">
+      <div v-if="largeDatasetMode" class="mall-browse-list mall-browse-list--virtual overflow-y-auto pr-1" v-bind="virtualContainerProps">
+        <div v-bind="virtualWrapperProps" class="client-product-grid mall-product-grid mall-virtual-wrapper">
           <article v-for="row in virtualRows" :key="row.index" class="client-product-card mb-2">
             <button type="button" class="client-product-card__image-button" @click="openProductImagePreview(row.data)">
               <img
@@ -762,10 +792,11 @@ onBeforeUnmount(() => {
               />
             </button>
             <button type="button" class="client-product-card__body" @click="openProductDetail(row.data)">
-              <div class="min-w-0 flex-1 text-left">
-                <p class="truncate text-base font-semibold text-slate-900">{{ row.data.productName }}</p>
-                <p class="mt-1 text-sm font-bold text-[var(--ylink-color-primary-strong)]">¥{{ Number(row.data.defaultPrice).toFixed(2) }}</p>
-                <div class="mt-2 flex flex-wrap gap-2 text-xs">
+              <div class="client-product-card__content">
+                <p class="client-product-card__name">{{ row.data.productName }}</p>
+                <p class="client-product-card__price">¥{{ Number(row.data.defaultPrice).toFixed(2) }}</p>
+                <p class="client-product-card__desc">{{ row.data.detailContent || '暂无商品描述' }}</p>
+                <div class="client-product-card__meta">
                   <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ row.data.availableStock }}</span>
                   <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">已预订 {{ row.data.preOrderedStock }}</span>
                 </div>
@@ -779,7 +810,7 @@ onBeforeUnmount(() => {
       <div
         v-else
         ref="listScrollerRef"
-        class="max-h-[64vh] overflow-y-auto pr-1"
+        class="mall-browse-list mall-browse-list--group overflow-y-auto pr-1"
         @scroll="handleProductListScroll"
         @wheel.passive="handleCategoryManualInterrupt"
         @touchstart.passive="handleCategoryManualInterrupt"
@@ -788,12 +819,12 @@ onBeforeUnmount(() => {
           v-for="group in categoryGroups"
           :key="group.key"
           :ref="(el) => setSectionRef(group.key, el)"
-          class="mb-4"
+          class="mall-category-section mb-4"
         >
-          <header class="sticky top-0 z-10 mb-2 rounded-lg bg-white/95 px-1 py-1.5 text-sm font-semibold text-slate-700 backdrop-blur-sm">
+          <header class="mall-category-section__header sticky top-0 z-10 mb-2 rounded-lg bg-white/95 px-1 py-1.5 text-sm font-semibold text-slate-700 backdrop-blur-sm">
             {{ group.label }}
           </header>
-          <div class="client-product-grid">
+          <div class="client-product-grid mall-product-grid">
             <article v-for="product in group.items" :key="product.id" class="client-product-card">
               <button type="button" class="client-product-card__image-button" @click="openProductImagePreview(product)">
                 <img
@@ -805,10 +836,11 @@ onBeforeUnmount(() => {
                 />
               </button>
               <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
-                <div class="min-w-0 flex-1 text-left">
-                  <p class="truncate text-base font-semibold text-slate-900">{{ product.productName }}</p>
-                  <p class="mt-1 text-sm font-bold text-[var(--ylink-color-primary-strong)]">¥{{ Number(product.defaultPrice).toFixed(2) }}</p>
-                  <div class="mt-2 flex flex-wrap gap-2 text-xs">
+                <div class="client-product-card__content">
+                  <p class="client-product-card__name">{{ product.productName }}</p>
+                  <p class="client-product-card__price">¥{{ Number(product.defaultPrice).toFixed(2) }}</p>
+                  <p class="client-product-card__desc">{{ product.detailContent || '暂无商品描述' }}</p>
+                  <div class="client-product-card__meta">
                     <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ product.availableStock }}</span>
                     <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">已预订 {{ product.preOrderedStock }}</span>
                   </div>
@@ -969,6 +1001,31 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.mall-page {
+  /* 商城页统一预留底部悬浮购物车与底部导航的总可视区，保证搜索态和分类态末尾内容都不被遮挡。 */
+  --mall-mini-cart-height: 4.7rem;
+  --mall-floating-bottom-clearance: calc(var(--client-tab-bar-clearance, 5.5rem) + var(--mall-mini-cart-height) + 1rem);
+  padding-bottom: calc(var(--mall-floating-bottom-clearance) + 1rem);
+}
+
+.mall-search-results,
+.mall-browse-panel {
+  position: relative;
+}
+
+.mall-browse-panel {
+  align-items: start;
+}
+
+.mall-browse-categories,
+.mall-browse-list {
+  max-height: clamp(18rem, calc(100dvh - var(--mall-floating-bottom-clearance) - 13.5rem), 42rem);
+}
+
+.mall-product-grid {
+  align-content: start;
+}
+
 .client-product-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
@@ -1009,6 +1066,49 @@ onBeforeUnmount(() => {
   background: transparent;
   text-align: left;
   padding: 0;
+}
+
+.client-product-card__content {
+  min-width: 0;
+  flex: 1;
+  text-align: left;
+}
+
+.client-product-card__name {
+  overflow: hidden;
+  color: #0f172a;
+  font-size: 1rem;
+  font-weight: 600;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.client-product-card__price {
+  margin-top: 0.18rem;
+  color: var(--ylink-color-primary-strong);
+  font-size: 0.92rem;
+  font-weight: 700;
+  line-height: 1.25;
+}
+
+.client-product-card__desc {
+  margin-top: 0.2rem;
+  overflow: hidden;
+  color: #64748b;
+  font-size: 0.76rem;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+.client-product-card__meta {
+  margin-top: 0.45rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  font-size: 0.75rem;
 }
 
 .client-product-card__cover {
@@ -1297,7 +1397,7 @@ onBeforeUnmount(() => {
 
 .mini-cart-wrapper {
   position: fixed;
-  bottom: calc(82px + 0.75rem);
+  bottom: calc(var(--client-tab-bar-clearance, 5.5rem) + 0.75rem);
   left: 50%;
   z-index: 50;
   width: min(var(--client-shell-max, 1100px), calc(100vw - var(--client-shell-inline, 1.25rem) * 2));
@@ -1646,6 +1746,14 @@ onBeforeUnmount(() => {
   display: none;
 }
 
+.mall-category-section:last-of-type {
+  margin-bottom: 0;
+}
+
+.mall-category-section__header {
+  top: 0;
+}
+
 .price-num {
   margin-left: 0.25rem;
   color: #0d9488;
@@ -1686,13 +1794,120 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 767px) {
+  .mall-page {
+    --mall-mini-cart-height: 4.95rem;
+    --mall-floating-bottom-clearance: calc(var(--client-tab-bar-clearance, 5.5rem) + var(--mall-mini-cart-height) + 0.85rem);
+  }
+
+  .mall-browse-panel {
+    gap: 0.65rem;
+    padding: 0.7rem;
+  }
+
+  .mall-browse-categories,
+  .mall-browse-list {
+    max-height: clamp(20rem, calc(100dvh - var(--mall-floating-bottom-clearance) - 12rem), 34rem);
+  }
+
+  .mall-category-button {
+    margin-bottom: 0.45rem;
+    border-radius: 0.95rem;
+    padding: 0.65rem 0.45rem;
+  }
+
+  .mall-category-button p:first-child {
+    font-size: 0.74rem;
+    line-height: 1.2;
+  }
+
+  .mall-category-button p:last-child {
+    margin-top: 0.18rem;
+    font-size: 0.62rem;
+  }
+
+  .mall-category-section__header {
+    margin-bottom: 0.45rem;
+    padding: 0.32rem 0.45rem;
+    font-size: 0.78rem;
+  }
+
+  .mall-product-grid {
+    gap: 0.5rem;
+  }
+
+  .mall-virtual-wrapper {
+    padding-bottom: 0.2rem;
+  }
+
+  .client-product-card {
+    gap: 0.5rem;
+    border-radius: 0.95rem;
+    padding: 0.4rem;
+  }
+
+  .client-product-card__cover {
+    height: 3.8rem;
+    width: 3.8rem;
+    border-radius: 0.8rem;
+  }
+
+  .client-product-card__name {
+    font-size: 0.9rem;
+  }
+
+  .client-product-card__price {
+    font-size: 0.84rem;
+  }
+
+  .client-product-card__desc {
+    margin-top: 0.12rem;
+    font-size: 0.7rem;
+    line-height: 1.35;
+  }
+
+  .client-product-card__meta {
+    margin-top: 0.28rem;
+    gap: 0.25rem;
+  }
+
+  .client-product-card__meta > span {
+    padding: 0.22rem 0.46rem;
+    font-size: 0.65rem;
+  }
+
+  .client-product-card__add-button {
+    height: 1.95rem;
+    align-self: center;
+    font-size: 0.72rem;
+    padding: 0 0.7rem;
+  }
+
   .mini-cart-wrapper {
-    bottom: calc(82px + env(safe-area-inset-bottom));
+    bottom: calc(var(--client-tab-bar-clearance, 5.5rem) + 0.55rem);
   }
 
   .cart-summary-bar {
     align-items: stretch;
+    min-height: 58px;
     padding: 0.75rem 0.85rem;
+  }
+
+  .summary-info {
+    gap: 0.55rem;
+  }
+
+  .cart-icon-wrapper {
+    height: 40px;
+    width: 40px;
+    border-radius: 0.8rem;
+  }
+
+  .main-text {
+    font-size: 0.84rem;
+  }
+
+  .sub-text {
+    font-size: 0.68rem;
   }
 
   .summary-actions {
@@ -1702,6 +1917,8 @@ onBeforeUnmount(() => {
 
   .btn-checkout {
     justify-content: center;
+    min-height: 38px;
+    font-size: 0.82rem;
     padding-inline: 0.8rem;
   }
 
