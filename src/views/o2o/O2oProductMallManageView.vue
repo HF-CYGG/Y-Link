@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 /**
  * 模块说明：src/views/o2o/O2oProductMallManageView.vue
  * 文件职责：维护线上商品大厅的新增、编辑、上架状态切换与商品预览图上传交互。
