@@ -14,6 +14,7 @@
 
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { RefreshRight } from '@element-plus/icons-vue'
 import { cancelMyO2oPreorder, getMyO2oPreorders, type O2oPreorderDetail, type O2oPreorderSummary } from '@/api/modules/o2o'
 import { BaseRequestState } from '@/components/common'
 import { useStableRequest } from '@/composables/useStableRequest'
@@ -496,17 +497,19 @@ onMounted(async () => {
 <template>
   <section class="order-list-page space-y-4">
     <div class="rounded-[1.4rem] bg-white p-3.5 shadow-[var(--ylink-shadow-soft)] sm:p-4">
-      <div class="flex flex-wrap items-start justify-between gap-3">
-        <div>
+      <div class="order-list-page__hero">
+        <div class="min-w-0 flex-1">
           <p class="text-xl font-semibold text-slate-900">我的订单</p>
           <p class="text-sm text-slate-500">查看待提货、已核销与已取消订单，并区分部门订与散客</p>
         </div>
         <button
-          class="rounded-full border border-slate-200 bg-slate-50 px-4 py-2 text-sm text-slate-600 disabled:cursor-not-allowed disabled:opacity-60"
+          class="order-list-page__refresh-btn disabled:cursor-not-allowed disabled:opacity-60"
           :disabled="refreshing"
           @click="loadOrders(true)"
         >
-          {{ refreshing ? '刷新中...' : '刷新订单' }}
+          <el-icon class="text-sm"><RefreshRight /></el-icon>
+          <span class="sm:hidden">{{ refreshing ? '刷新中' : '刷新' }}</span>
+          <span class="hidden sm:inline">{{ refreshing ? '刷新中...' : '刷新订单' }}</span>
         </button>
       </div>
       <div class="mt-3 flex flex-wrap gap-2">
@@ -657,6 +660,27 @@ onMounted(async () => {
   position: relative;
 }
 
+.order-list-page__hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.order-list-page__refresh-btn {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 0.35rem;
+  border: 1px solid rgb(226 232 240);
+  border-radius: 9999px;
+  background: rgb(248 250 252);
+  color: rgb(71 85 105);
+  font-size: 0.875rem;
+  line-height: 1;
+  padding: 0.625rem 0.9rem;
+}
+
 /* 订单摘要标签：把时间、归属、件数、金额压缩为可换行的小胶囊，提升同屏信息密度。 */
 .order-list-card__meta {
   display: flex;
@@ -707,6 +731,16 @@ onMounted(async () => {
 @media (max-width: 767px) {
   .order-list-page {
     padding-bottom: calc(7.75rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  .order-list-page__hero {
+    gap: 0.5rem;
+  }
+
+  .order-list-page__refresh-btn {
+    margin-top: 0.1rem;
+    padding: 0.55rem 0.72rem;
+    font-size: 0.78rem;
   }
 
   .order-list-card__meta {
