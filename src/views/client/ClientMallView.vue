@@ -755,7 +755,7 @@ onBeforeUnmount(() => {
             <div class="client-product-card__content">
               <p class="client-product-card__name">{{ product.productName }}</p>
               <p class="client-product-card__price">¥{{ Number(product.defaultPrice).toFixed(2) }}</p>
-              <p class="client-product-card__desc">{{ product.detailContent || '暂无商品描述' }}</p>
+              <p v-if="product.detailContent" class="client-product-card__desc">{{ product.detailContent }}</p>
               <div class="client-product-card__meta">
                 <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">
                   可预订 {{ product.availableStock }}
@@ -802,7 +802,7 @@ onBeforeUnmount(() => {
               <div class="client-product-card__content">
                 <p class="client-product-card__name">{{ row.data.productName }}</p>
                 <p class="client-product-card__price">¥{{ Number(row.data.defaultPrice).toFixed(2) }}</p>
-                <p class="client-product-card__desc">{{ row.data.detailContent || '暂无商品描述' }}</p>
+                <p v-if="row.data.detailContent" class="client-product-card__desc">{{ row.data.detailContent }}</p>
                 <div class="client-product-card__meta">
                   <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ row.data.availableStock }}</span>
                   <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">已预订 {{ row.data.preOrderedStock }}</span>
@@ -846,7 +846,7 @@ onBeforeUnmount(() => {
                 <div class="client-product-card__content">
                   <p class="client-product-card__name">{{ product.productName }}</p>
                   <p class="client-product-card__price">¥{{ Number(product.defaultPrice).toFixed(2) }}</p>
-                  <p class="client-product-card__desc">{{ product.detailContent || '暂无商品描述' }}</p>
+                  <p v-if="product.detailContent" class="client-product-card__desc">{{ product.detailContent }}</p>
                   <div class="client-product-card__meta">
                     <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ product.availableStock }}</span>
                     <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">已预订 {{ product.preOrderedStock }}</span>
