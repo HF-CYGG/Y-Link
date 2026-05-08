@@ -183,6 +183,10 @@ const orderTypeLabel = computed(() => {
   return detail.value ? ORDER_TYPE_LABEL_MAP[detail.value.order.clientOrderType] : '散客'
 })
 
+const shouldShowVoucherButton = computed(() => {
+  return detail.value?.order.clientOrderType === 'department'
+})
+
 const voucherOrientationLabel = computed(() => (voucherOrientation.value === 'landscape' ? '横版' : '竖版'))
 
 const toVoucherMoneyText = (value: string | number | null | undefined) => {
@@ -754,6 +758,10 @@ const resetDialogTransientState = () => {
 }
 
 const handleOpenVoucherDialog = () => {
+  if (!shouldShowVoucherButton.value) {
+    ElMessage.warning('散客订单不提供正式出库单')
+    return
+  }
   if (!voucherOrder.value) {
     ElMessage.warning('当前订单暂无可打印内容')
     return
@@ -1115,6 +1123,7 @@ onBeforeUnmount(() => {
           </div>
           <div class="flex flex-wrap gap-2">
             <button
+              v-if="shouldShowVoucherButton"
               type="button"
               class="rounded-full border border-teal-200 px-4 py-2 text-sm font-medium text-teal-700 transition hover:bg-teal-50"
               @click="handleOpenVoucherDialog"
