@@ -655,30 +655,21 @@ const handleSaveComplianceFlags = async () => {
   }
 }
 
-// 详细注释：处理核销操作，先弹窗二次确认，成功后请求核销接口并刷新状态。
-const handleVerify = async () => {
-  if (!verifyResult.value) {
-    return
-  }
-  const isReturnVerify = isReturnVerifyMode.value
-  const activeVerifyCode = currentVerifyCode.value
+const getVerifyActionLabel = (isReturnVerify: boolean) => (isReturnVerify ? '退货回库核销' : '预订单核销')
 
-  if (!ensurePermission('orders:create', isReturnVerify ? '退货回库核销' : '预订单核销')) {
-    return
-  }
-
-  // 只有“待处理”单据才允许继续核销。
-  // 预订单要求主状态仍为 pending，退货申请要求自身状态仍为 pending，
-  // 后端事务内也会再次兜底校验，防止多终端重复核销。
+const ensureVerifyPreconditions = (isReturnVerify: boolean, activeVerifyCode: string) => {
   if (!canVerifyStatus.value) {
     ElMessage.warning(isReturnVerify ? '当前退货申请已处理，不可继续回库' : '当前订单已取消或已核销，不可继续核销')
-    return
+    return false
   }
   if (!activeVerifyCode) {
     ElMessage.warning(isReturnVerify ? '当前退货申请缺少退货码，无法继续处理' : '当前订单缺少核销码，无法继续处理')
-    return
+    return false
   }
+  return true
+}
 
+const confirmVerifyAction = async (isReturnVerify: boolean) => {
   try {
     await ElMessageBox.confirm(
       isReturnVerify
@@ -692,7 +683,32 @@ const handleVerify = async () => {
         distinguishCancelAndClose: true,
       },
     )
+    return true
   } catch {
+    return false
+  }
+}
+
+// 详细注释：处理核销操作，先弹窗二次确认，成功后请求核销接口并刷新状态。
+const handleVerify = async () => {
+  if (!verifyResult.value) {
+    return
+  }
+  const isReturnVerify = isReturnVerifyMode.value
+  const activeVerifyCode = currentVerifyCode.value
+
+  if (!ensurePermission('orders:create', getVerifyActionLabel(isReturnVerify))) {
+    return
+  }
+
+  // 只有“待处理”单据才允许继续核销。
+  // 预订单要求主状态仍为 pending，退货申请要求自身状态仍为 pending，
+  // 后端事务内也会再次兜底校验，防止多终端重复核销。
+  if (!ensureVerifyPreconditions(isReturnVerify, activeVerifyCode)) {
+    return
+  }
+
+  if (!(await confirmVerifyAction(isReturnVerify))) {
     return
   }
 
