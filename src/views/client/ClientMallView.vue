@@ -1951,6 +1951,7 @@ onBeforeUnmount(() => {
     margin-bottom: 0.45rem;
     border-radius: 0.95rem;
     padding: 0.65rem 0.45rem;
+    text-align: center;
   }
 
   .mall-category-button p:first-child {
@@ -2093,6 +2094,12 @@ onBeforeUnmount(() => {
 
   .cart-expand-trigger {
     align-self: flex-end;
+  }
+}
+
+@media (min-width: 640px) and (max-width: 767px) {
+  .mall-browse-panel {
+    grid-template-columns: 105px minmax(0, 1fr);
   }
 }
 </style>
