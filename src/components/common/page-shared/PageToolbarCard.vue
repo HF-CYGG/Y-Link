@@ -19,12 +19,14 @@ interface Props {
   contentClass?: string
   actionsClass?: string
   actionStretchOnPhone?: boolean
+  stackActionsOnTablet?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
   contentClass: '',
   actionsClass: '',
   actionStretchOnPhone: true,
+  stackActionsOnTablet: false,
 })
 
 const slots = useSlots()
@@ -44,6 +46,10 @@ const hasActions = computed(() => Boolean(slots.actions))
  */
 const wrapperClass = computed(() => {
   if (!hasActions.value) {
+    return ['flex flex-col gap-3', props.contentClass]
+  }
+
+  if (appStore.isTablet && props.stackActionsOnTablet) {
     return ['flex flex-col gap-3', props.contentClass]
   }
 

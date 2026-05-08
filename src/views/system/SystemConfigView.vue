@@ -917,7 +917,7 @@ onMounted(() => {
 <template>
   <PageContainer title="系统配置" description="维护流水号、线上预订规则与短信/邮箱验证码平台参数，所有变更会记录审计日志。">
     <div class="space-y-6">
-      <PageToolbarCard class="space-y-3">
+      <PageToolbarCard class="space-y-3" :stack-actions-on-tablet="true">
         <div class="flex flex-wrap items-center justify-between gap-3">
           <div class="text-sm text-slate-600 dark:text-slate-300">
             {{ canUpdateConfigs ? '当前账号具备系统配置维护权限，可编辑参数并提交保存' : '当前账号仅支持只读查看' }}
@@ -940,14 +940,14 @@ onMounted(() => {
           :description="`这里用于维护订单编号规则、线上预订规则，以及客户端注册/找回密码依赖的短信与邮箱验证码平台。建议仅在管理员确认后修改，以免影响业务连续性。若需要处理数据库迁移、切换或回退，请统一进入${DATABASE_MIGRATION_ASSISTANT_NAME}，并按“${DATABASE_MIGRATION_RECOMMENDED_FLOW_TEXT}”闭环执行。`"
         />
         <template #actions>
-          <div class="flex w-full flex-wrap items-center justify-end gap-2">
+          <div class="system-config-toolbar-actions flex w-full flex-wrap items-start gap-3">
             <div
               v-if="canViewMigrationAssistant"
-              class="rounded-2xl bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-500 dark:bg-slate-900/40 dark:text-slate-400"
+              class="system-config-toolbar-hint rounded-2xl bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-500 dark:bg-slate-900/40 dark:text-slate-400"
             >
               {{ DATABASE_MIGRATION_ENTRY_DESCRIPTION }}
             </div>
-            <el-button v-if="canViewMigrationAssistant" plain @click="handleGoToDatabaseMigration">
+            <el-button v-if="canViewMigrationAssistant" plain class="system-config-toolbar-button" @click="handleGoToDatabaseMigration">
               {{ DATABASE_MIGRATION_ENTRY_LABEL }}
             </el-button>
           </div>
@@ -1101,5 +1101,37 @@ onMounted(() => {
 .workbench-horizontal-slide-leave-to {
   opacity: 0;
   transform: translate3d(-20px, 0, 0);
+}
+
+.system-config-toolbar-actions {
+  justify-content: space-between;
+  width: auto;
+  max-width: 100%;
+}
+
+.system-config-toolbar-hint {
+  flex: 1 1 420px;
+  min-width: 0;
+  max-width: 520px;
+}
+
+.system-config-toolbar-button {
+  flex-shrink: 0;
+}
+
+@media (max-width: 1279px) {
+  .system-config-toolbar-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .system-config-toolbar-hint {
+    flex-basis: auto;
+    width: 100%;
+  }
+
+  .system-config-toolbar-button {
+    width: 100%;
+  }
 }
 </style>
