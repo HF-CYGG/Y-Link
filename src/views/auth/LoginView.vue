@@ -20,6 +20,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { resolveDefaultManagementRedirect, resolveSafeRedirect } from '@/router' 
 import { useAuthStore } from '@/store' 
 import { getAdminCaptcha } from '@/api/modules/auth'
+import { APP_META } from '@/constants/app-meta'
 import { extractErrorMessage, normalizeRequestError } from '@/utils/error' 
 
 const form = reactive({ 
@@ -212,8 +213,9 @@ const handleSubmit = async () => {
           </div> 
         </div> 
 
-        <div class="brand-bottom"> 
-          &copy; 2026 Y-Link System. 
+        <div class="brand-bottom">
+          <div class="brand-bottom__version">{{ APP_META.version }}</div>
+          <div class="brand-bottom__copyright">{{ APP_META.copyright }}</div>
         </div> 
       </aside> 
 
@@ -623,9 +625,21 @@ const handleSubmit = async () => {
 
 .brand-bottom { 
   z-index: 10; 
-  font-size: 12px; 
-  color: var(--text-sub); 
-  font-family: monospace; 
+  color: var(--text-sub);
+}
+
+.brand-bottom__version {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+}
+
+.brand-bottom__copyright {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  opacity: 0.9;
 } 
 
 .form-panel { 

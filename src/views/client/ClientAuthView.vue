@@ -80,6 +80,7 @@ import { useClientAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
+import { APP_META } from '@/constants/app-meta'
 import {
   CLIENT_CONFIRM_INPUT_MISMATCH_MESSAGE,
   CLIENT_CONFIRM_NEW_PASSWORD_PLACEHOLDER,
@@ -659,7 +660,10 @@ onUnmounted(() => {
           <p class="brand-desc">实时查看库存，在线预订即锁单。<br />线下出示核销码，即刻带走心仪好物。</p>
         </div>
 
-        <div class="brand-footer">&copy; 2026 Y-Link System. All rights reserved.</div>
+        <div class="brand-footer">
+          <div class="brand-footer__version">{{ APP_META.version }}</div>
+          <div class="brand-footer__copyright">{{ APP_META.copyright }}</div>
+        </div>
       </aside>
 
       <section class="form-panel">
@@ -994,10 +998,22 @@ onUnmounted(() => {
 }
 
 .brand-footer {
-  font-size: 12px;
   color: #94a3b8;
   position: relative;
   z-index: 1;
+}
+
+.brand-footer__version {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+}
+
+.brand-footer__copyright {
+  margin-top: 6px;
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .form-panel {

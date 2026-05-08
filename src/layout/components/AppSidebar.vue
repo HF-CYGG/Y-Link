@@ -8,6 +8,7 @@
 
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
+import { APP_META } from '@/constants/app-meta'
 import type { AppMenuItem } from '@/router/routes'
 import { useAppStore } from '@/store'
 
@@ -199,8 +200,14 @@ const deviceLabel = computed(() => {
       </div>
     </div>
 
-    <div class="border-t border-slate-200/60 p-4 text-center text-xs text-slate-500 dark:border-white/5 dark:text-slate-400">
-      {{ deviceLabel }}
+    <div class="border-t border-slate-200/60 p-4 dark:border-white/5">
+      <div class="app-sidebar__build-signature">
+        <div class="app-sidebar__build-topline">
+          <span class="app-sidebar__build-badge">{{ APP_META.version }}</span>
+          <span class="app-sidebar__device-pill">{{ deviceLabel }}</span>
+        </div>
+        <div class="app-sidebar__build-author">{{ APP_META.developer }}</div>
+      </div>
     </div>
   </aside>
 </template>
@@ -269,5 +276,72 @@ const deviceLabel = computed(() => {
 /* 侧栏切页时抑制子菜单箭头过渡抖动，避免出现右侧短暂残影。 */
 :deep(.app-sidebar-menu .el-sub-menu__icon-arrow) {
   transition: none !important;
+}
+
+.app-sidebar__build-signature {
+  display: grid;
+  gap: 0.45rem;
+  max-width: 100%;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 16px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(248, 250, 252, 0.96));
+  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
+  padding: 0.75rem 0.85rem;
+}
+
+.app-sidebar__build-topline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem 0.5rem;
+}
+
+.app-sidebar__build-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 9999px;
+  background: rgba(15, 118, 110, 0.1);
+  color: #0f766e;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  padding: 0.38rem 0.62rem;
+}
+
+.app-sidebar__device-pill {
+  color: #64748b;
+  font-size: 0.68rem;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.app-sidebar__build-author {
+  color: #475569;
+  font-size: 0.75rem;
+  font-weight: 600;
+  line-height: 1.2;
+  word-break: break-word;
+}
+
+.dark .app-sidebar__build-signature {
+  border-color: rgba(255, 255, 255, 0.08);
+  background:
+    linear-gradient(180deg, rgba(20, 20, 21, 0.96), rgba(17, 18, 20, 0.98));
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.24);
+}
+
+.dark .app-sidebar__build-badge {
+  background: rgba(45, 212, 191, 0.12);
+  color: #99f6e4;
+}
+
+.dark .app-sidebar__device-pill {
+  color: #94a3b8;
+}
+
+.dark .app-sidebar__build-author {
+  color: #e2e8f0;
 }
 </style>

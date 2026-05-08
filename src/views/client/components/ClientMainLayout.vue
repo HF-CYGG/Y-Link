@@ -13,6 +13,7 @@
 import { computed, ref, watch } from 'vue'
 import type { RouteLocationNormalizedLoaded } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
+import { APP_META } from '@/constants/app-meta'
 import { useClientAuthStore, useClientCartStore } from '@/store'
 import router from '@/router'
 import { buildClientNavigationItems } from '@/router/routes'
@@ -148,13 +149,19 @@ const handleLogout = async () => {
           <p class="text-xs font-semibold tracking-[0.16em] text-slate-400">Y-LINK CLIENT</p>
           <p class="text-base font-semibold text-slate-900">{{ displayName }}</p>
         </div>
-        <button
-          type="button"
-          class="rounded-full border border-[var(--ylink-color-border)] bg-white/90 px-3 py-1.5 text-xs font-medium text-slate-600"
-          @click="handleLogout"
-        >
-          退出
-        </button>
+        <div class="client-main-layout__header-actions">
+          <div class="client-main-layout__build-meta" aria-label="版本信息">
+            <span class="client-main-layout__build-version">{{ APP_META.version }}</span>
+            <span class="client-main-layout__build-author">{{ APP_META.developer }}</span>
+          </div>
+          <button
+            type="button"
+            class="rounded-full border border-[var(--ylink-color-border)] bg-white/90 px-3 py-1.5 text-xs font-medium text-slate-600"
+            @click="handleLogout"
+          >
+            退出
+          </button>
+        </div>
       </div>
     </header>
 
@@ -228,6 +235,32 @@ const handleLogout = async () => {
   border-bottom: 1px solid color-mix(in srgb, var(--ylink-color-border) 70%, #ffffff 30%);
   background: var(--ylink-color-overlay);
   backdrop-filter: blur(18px);
+}
+
+.client-main-layout__header-actions {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.75rem;
+}
+
+.client-main-layout__build-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  line-height: 1.2;
+}
+
+.client-main-layout__build-version {
+  color: #475569;
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
+.client-main-layout__build-author {
+  color: #94a3b8;
+  font-size: 0.66rem;
+  font-weight: 600;
 }
 
 .client-main-layout__viewport {
@@ -321,6 +354,18 @@ const handleLogout = async () => {
     --client-shell-inline: 0.75rem;
     --client-tab-bar-height: 4.5rem;
     --client-tab-bar-bottom-offset: 0.7rem;
+  }
+
+  .client-main-layout__header-actions {
+    gap: 0.55rem;
+  }
+
+  .client-main-layout__build-version {
+    font-size: 0.68rem;
+  }
+
+  .client-main-layout__build-author {
+    font-size: 0.6rem;
   }
 
   .client-main-layout__viewport {
