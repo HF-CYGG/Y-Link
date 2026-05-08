@@ -672,6 +672,8 @@ onMounted(async () => {
   flex-shrink: 0;
   align-items: center;
   gap: 0.35rem;
+  width: max-content;
+  max-width: 100%;
   border: 1px solid rgb(226 232 240);
   border-radius: 9999px;
   background: rgb(248 250 252);
@@ -679,6 +681,7 @@ onMounted(async () => {
   font-size: 0.875rem;
   line-height: 1;
   padding: 0.625rem 0.9rem;
+  white-space: nowrap;
 }
 
 /* 订单摘要标签：把时间、归属、件数、金额压缩为可换行的小胶囊，提升同屏信息密度。 */
