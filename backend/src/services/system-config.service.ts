@@ -11,6 +11,7 @@ import { BizError } from '../utils/errors.js'
 import { detectUnsafeHost, formatUnsafeHostReason } from '../utils/safe-network.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
+import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const DEFAULT_SYSTEM_CONFIGS = [
@@ -158,6 +159,60 @@ const DEFAULT_SYSTEM_CONFIGS = [
     configGroup: 'verification',
     remark: '邮箱验证码平台成功关键字（可选）',
   },
+  {
+    configKey: 'customer_service.enabled',
+    configValue: '1',
+    configGroup: 'customer_service',
+    remark: '客户端反馈入口启用开关',
+  },
+  {
+    configKey: 'customer_service.realtime_enabled',
+    configValue: '1',
+    configGroup: 'customer_service',
+    remark: '客服中心实时通道启用开关',
+  },
+  {
+    configKey: 'customer_service.entry_notice',
+    configValue: '客服中心工作时间内会尽快回复，请尽量描述问题现象、时间和影响范围。',
+    configGroup: 'customer_service',
+    remark: '客户端反馈入口提示语',
+  },
+  {
+    configKey: 'customer_service.workday_start',
+    configValue: '09:00',
+    configGroup: 'customer_service',
+    remark: '客服工作开始时间',
+  },
+  {
+    configKey: 'customer_service.workday_end',
+    configValue: '18:00',
+    configGroup: 'customer_service',
+    remark: '客服工作结束时间',
+  },
+  {
+    configKey: 'customer_service.workday_weekdays',
+    configValue: '[1,2,3,4,5]',
+    configGroup: 'customer_service',
+    remark: '客服工作日配置(JSON 数组，0=周日，6=周六)',
+  },
+  {
+    configKey: 'customer_service.offline_notice',
+    configValue: '当前客服暂时离线，您仍可提交问题，我们会在工作时间优先处理。',
+    configGroup: 'customer_service',
+    remark: '客服离线提示语',
+  },
+  {
+    configKey: 'customer_service.offline_faq_json',
+    configValue: '[{"question":"客服什么时候在线？","answer":"默认工作时间为周一至周五 09:00-18:00。"},{"question":"离线时提交的问题会丢失吗？","answer":"不会，系统会保留完整会话记录，客服上线后继续跟进。"}]',
+    configGroup: 'customer_service',
+    remark: '客服离线 FAQ(JSON)',
+  },
+  {
+    configKey: 'customer_service.sse_keepalive_seconds',
+    configValue: '20',
+    configGroup: 'customer_service',
+    remark: '客服中心 SSE 心跳间隔（秒）',
+  },
 ] as const
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
@@ -264,6 +319,43 @@ export interface UpdateClientDepartmentConfigsInput {
   options?: string[]
 }
 
+export interface CustomerServiceConfigRecord {
+  enabled: boolean
+  realtimeEnabled: boolean
+  entryNotice: string
+  workdayStart: string
+  workdayEnd: string
+  workdayWeekdays: number[]
+  offlineNotice: string
+  offlineFaqs: Array<{ question: string; answer: string }>
+  sseKeepaliveSeconds: number
+  availability: {
+    status: 'online' | 'offline'
+    reason: 'within_work_hours' | 'outside_work_hours' | 'no_online_staff'
+    isOnline: boolean
+    withinWorkHours: boolean
+    hasOnlineStaff: boolean
+    serviceConnectedCount: number
+    serverTime: string
+    workHoursText: string
+    offlineNotice: string
+    offlineFaqs: Array<{ question: string; answer: string }>
+  }
+  updatedAt: Date
+}
+
+export interface UpdateCustomerServiceConfigsInput {
+  enabled: boolean
+  realtimeEnabled: boolean
+  entryNotice: string
+  workdayStart: string
+  workdayEnd: string
+  workdayWeekdays: number[]
+  offlineNotice: string
+  offlineFaqs: Array<{ question: string; answer: string }>
+  sseKeepaliveSeconds: number
+}
+
 class SystemConfigService {
   private readonly configRepo = AppDataSource.getRepository(SystemConfig)
   private readonly o2oConfigKeys = [
@@ -287,6 +379,17 @@ class SystemConfigService {
     'verification.email.headers_template',
     'verification.email.body_template',
     'verification.email.success_match',
+  ] as const
+  private readonly customerServiceConfigKeys = [
+    'customer_service.enabled',
+    'customer_service.realtime_enabled',
+    'customer_service.entry_notice',
+    'customer_service.workday_start',
+    'customer_service.workday_end',
+    'customer_service.workday_weekdays',
+    'customer_service.offline_notice',
+    'customer_service.offline_faq_json',
+    'customer_service.sse_keepalive_seconds',
   ] as const
   /**
    * 系统治理配置写操作强制管理员：
@@ -335,6 +438,121 @@ class SystemConfigService {
       throw new BizError(`${field} 配置值非法`, 500)
     }
     return parsed
+  }
+
+  private parseBooleanFlag(value: string, field: string) {
+    const parsed = this.parseNonNegativeInteger(value, field)
+    return parsed > 0
+  }
+
+  private normalizeTimeText(value: string, fieldLabel: string) {
+    const normalized = value.trim()
+    if (!/^\d{2}:\d{2}$/.test(normalized)) {
+      throw new BizError(`${fieldLabel}格式必须为 HH:mm`, 400)
+    }
+    const [hour, minute] = normalized.split(':').map((item) => Number.parseInt(item, 10))
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+      throw new BizError(`${fieldLabel}格式非法`, 400)
+    }
+    return normalized
+  }
+
+  private normalizeWeekdays(value: number[]) {
+    if (!Array.isArray(value) || value.length === 0) {
+      throw new BizError('客服工作日不能为空', 400)
+    }
+    const normalized = Array.from(
+      new Set(
+        value.map((item) => {
+          if (!Number.isInteger(item) || item < 0 || item > 6) {
+            throw new BizError('客服工作日仅支持 0 到 6 的整数', 400)
+          }
+          return item
+        }),
+      ),
+    ).sort((left, right) => left - right)
+    return normalized
+  }
+
+  private normalizeCustomerServiceFaqs(input: Array<{ question: string; answer: string }>) {
+    if (!Array.isArray(input)) {
+      throw new BizError('离线 FAQ 配置格式非法', 400)
+    }
+    if (input.length > 20) {
+      throw new BizError('离线 FAQ 最多支持 20 条', 400)
+    }
+    return input.map((item, index) => {
+      const question = item.question?.trim() || ''
+      const answer = item.answer?.trim() || ''
+      if (!question) {
+        throw new BizError(`第 ${index + 1} 条 FAQ 问题不能为空`, 400)
+      }
+      if (!answer) {
+        throw new BizError(`第 ${index + 1} 条 FAQ 答案不能为空`, 400)
+      }
+      if (question.length > 100) {
+        throw new BizError(`第 ${index + 1} 条 FAQ 问题长度不能超过 100 个字符`, 400)
+      }
+      if (answer.length > 1000) {
+        throw new BizError(`第 ${index + 1} 条 FAQ 答案长度不能超过 1000 个字符`, 400)
+      }
+      return { question, answer }
+    })
+  }
+
+  private parseCustomerServiceFaqs(rawValue: string) {
+    const raw = rawValue.trim()
+    if (!raw) {
+      return []
+    }
+    try {
+      const parsed = JSON.parse(raw)
+      return this.normalizeCustomerServiceFaqs(Array.isArray(parsed) ? parsed : [])
+    } catch {
+      throw new BizError('客服离线 FAQ 配置格式非法', 500)
+    }
+  }
+
+  private buildWorkHoursText(start: string, end: string, weekdays: number[]) {
+    const weekTextMap = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+    const weekdayText = weekdays.map((item) => weekTextMap[item]).join('、')
+    return `${weekdayText} ${start}-${end}`
+  }
+
+  private computeCustomerServiceAvailability(config: Omit<CustomerServiceConfigRecord, 'availability'>, serviceConnectedCount: number) {
+    const now = new Date()
+    const serverTime = now.toISOString()
+    const currentWeekday = now.getDay()
+    const currentMinutes = now.getHours() * 60 + now.getMinutes()
+    const [startHour, startMinute] = config.workdayStart.split(':').map((item) => Number.parseInt(item, 10))
+    const [endHour, endMinute] = config.workdayEnd.split(':').map((item) => Number.parseInt(item, 10))
+    const startMinutes = startHour * 60 + startMinute
+    const endMinutes = endHour * 60 + endMinute
+    const withinTimeWindow = endMinutes > startMinutes
+      ? currentMinutes >= startMinutes && currentMinutes <= endMinutes
+      : currentMinutes >= startMinutes || currentMinutes <= endMinutes
+    const withinWorkHours = config.workdayWeekdays.includes(currentWeekday) && withinTimeWindow
+    const hasOnlineStaff = serviceConnectedCount > 0
+    const isOnline = config.enabled && config.realtimeEnabled && withinWorkHours && hasOnlineStaff
+    let reason: 'within_work_hours' | 'outside_work_hours' | 'no_online_staff' = 'within_work_hours'
+    if (!withinWorkHours) {
+      reason = 'outside_work_hours'
+    } else if (!hasOnlineStaff) {
+      reason = 'no_online_staff'
+    }
+    const status: 'online' | 'offline' = isOnline ? 'online' : 'offline'
+    return {
+      status,
+      reason,
+      isOnline,
+      withinWorkHours,
+      hasOnlineStaff,
+      serviceConnectedCount,
+      serverTime,
+      workHoursText: this.buildWorkHoursText(config.workdayStart, config.workdayEnd, config.workdayWeekdays),
+      offlineNotice: config.offlineNotice,
+      offlineFaqs: config.offlineFaqs,
+    }
   }
 
   /**
@@ -976,6 +1194,171 @@ class SystemConfigService {
         )
       }
 
+      return { config, changed }
+    })
+  }
+
+  async getCustomerServiceConfigs(): Promise<CustomerServiceConfigRecord> {
+    await this.ensureDefaultConfigs()
+    const rows = await this.configRepo.find({
+      where: this.customerServiceConfigKeys.map((key) => ({ configKey: key })),
+      select: {
+        configKey: true,
+        configValue: true,
+        updatedAt: true,
+      },
+    })
+    if (rows.length !== this.customerServiceConfigKeys.length) {
+      throw new BizError('客服中心配置缺失，请联系管理员补齐配置', 500)
+    }
+    const configMap = new Map(rows.map((row) => [row.configKey, row]))
+    const enabledConfig = configMap.get('customer_service.enabled')
+    const realtimeEnabledConfig = configMap.get('customer_service.realtime_enabled')
+    const entryNoticeConfig = configMap.get('customer_service.entry_notice')
+    const workdayStartConfig = configMap.get('customer_service.workday_start')
+    const workdayEndConfig = configMap.get('customer_service.workday_end')
+    const workdayWeekdaysConfig = configMap.get('customer_service.workday_weekdays')
+    const offlineNoticeConfig = configMap.get('customer_service.offline_notice')
+    const offlineFaqConfig = configMap.get('customer_service.offline_faq_json')
+    const keepaliveConfig = configMap.get('customer_service.sse_keepalive_seconds')
+    if (
+      !enabledConfig
+      || !realtimeEnabledConfig
+      || !entryNoticeConfig
+      || !workdayStartConfig
+      || !workdayEndConfig
+      || !workdayWeekdaysConfig
+      || !offlineNoticeConfig
+      || !offlineFaqConfig
+      || !keepaliveConfig
+    ) {
+      throw new BizError('客服中心配置缺失，请联系管理员补齐配置', 500)
+    }
+
+    const baseConfig = {
+      enabled: this.parseBooleanFlag(enabledConfig.configValue, 'customer_service.enabled'),
+      realtimeEnabled: this.parseBooleanFlag(realtimeEnabledConfig.configValue, 'customer_service.realtime_enabled'),
+      entryNotice: entryNoticeConfig.configValue,
+      workdayStart: this.normalizeTimeText(workdayStartConfig.configValue, '客服工作开始时间'),
+      workdayEnd: this.normalizeTimeText(workdayEndConfig.configValue, '客服工作结束时间'),
+      workdayWeekdays: this.normalizeWeekdays(JSON.parse(workdayWeekdaysConfig.configValue) as number[]),
+      offlineNotice: offlineNoticeConfig.configValue.trim(),
+      offlineFaqs: this.parseCustomerServiceFaqs(offlineFaqConfig.configValue),
+      sseKeepaliveSeconds: this.parsePositiveInteger(
+        keepaliveConfig.configValue,
+        'customer_service.sse_keepalive_seconds',
+      ),
+      updatedAt: [
+        enabledConfig.updatedAt,
+        realtimeEnabledConfig.updatedAt,
+        entryNoticeConfig.updatedAt,
+        workdayStartConfig.updatedAt,
+        workdayEndConfig.updatedAt,
+        workdayWeekdaysConfig.updatedAt,
+        offlineNoticeConfig.updatedAt,
+        offlineFaqConfig.updatedAt,
+        keepaliveConfig.updatedAt,
+      ].sort((a, b) => b.getTime() - a.getTime())[0],
+    }
+    return {
+      ...baseConfig,
+      availability: this.computeCustomerServiceAvailability(
+        baseConfig,
+        customerServiceRealtimeService.buildServiceSessionSnapshot().serviceConnectionCount,
+      ),
+    }
+  }
+
+  async updateCustomerServiceConfigs(
+    input: UpdateCustomerServiceConfigsInput,
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ): Promise<{ config: CustomerServiceConfigRecord; changed: boolean }> {
+    await this.assertAdminActor(actor, requestMeta, 'system_config.update_customer_service', '更新客服中心配置')
+    const entryNotice = input.entryNotice.trim()
+    if (!entryNotice) {
+      throw new BizError('客服入口提示语不能为空', 400)
+    }
+    if (entryNotice.length > 500) {
+      throw new BizError('客服入口提示语长度不能超过 500 个字符', 400)
+    }
+    const workdayStart = this.normalizeTimeText(input.workdayStart, '客服工作开始时间')
+    const workdayEnd = this.normalizeTimeText(input.workdayEnd, '客服工作结束时间')
+    const workdayWeekdays = this.normalizeWeekdays(input.workdayWeekdays)
+    const offlineNotice = input.offlineNotice.trim()
+    if (!offlineNotice) {
+      throw new BizError('离线提示语不能为空', 400)
+    }
+    if (offlineNotice.length > 500) {
+      throw new BizError('离线提示语长度不能超过 500 个字符', 400)
+    }
+    const offlineFaqs = this.normalizeCustomerServiceFaqs(input.offlineFaqs)
+    if (
+      !Number.isInteger(input.sseKeepaliveSeconds)
+      || input.sseKeepaliveSeconds < 5
+      || input.sseKeepaliveSeconds > 300
+    ) {
+      throw new BizError('SSE 心跳间隔必须为 5 到 300 秒的整数', 400)
+    }
+
+    await this.ensureDefaultConfigs()
+    return AppDataSource.transaction(async (manager) => {
+      const useForUpdate = manager.connection.options.type === 'mysql'
+      const placeholders = this.customerServiceConfigKeys.map(() => '?').join(', ')
+      const lockedRows: Array<{ id: string; configKey: string; configValue: string; updatedAt: string }> = await manager.query(
+        `
+          SELECT id, config_key AS configKey, config_value AS configValue, updated_at AS updatedAt
+          FROM system_configs
+          WHERE config_key IN (${placeholders})
+          ${useForUpdate ? 'FOR UPDATE' : ''}
+        `,
+        [...this.customerServiceConfigKeys],
+      )
+      if (lockedRows.length !== this.customerServiceConfigKeys.length) {
+        throw new BizError('客服中心配置缺失，请联系管理员补齐配置', 500)
+      }
+
+      const targetMap = new Map<string, string>([
+        ['customer_service.enabled', input.enabled ? '1' : '0'],
+        ['customer_service.realtime_enabled', input.realtimeEnabled ? '1' : '0'],
+        ['customer_service.entry_notice', entryNotice],
+        ['customer_service.workday_start', workdayStart],
+        ['customer_service.workday_end', workdayEnd],
+        ['customer_service.workday_weekdays', JSON.stringify(workdayWeekdays)],
+        ['customer_service.offline_notice', offlineNotice],
+        ['customer_service.offline_faq_json', JSON.stringify(offlineFaqs)],
+        ['customer_service.sse_keepalive_seconds', String(input.sseKeepaliveSeconds)],
+      ])
+      const before = await this.getCustomerServiceConfigs()
+      let changed = false
+      const repo = manager.getRepository(SystemConfig)
+      for (const row of lockedRows) {
+        const targetValue = targetMap.get(row.configKey)
+        if (targetValue == null || targetValue === row.configValue) {
+          continue
+        }
+        await repo.update({ id: row.id }, { configValue: targetValue })
+        changed = true
+      }
+
+      const config = await this.getCustomerServiceConfigs()
+      if (changed) {
+        await auditService.record(
+          {
+            actionType: 'system_config.update_customer_service',
+            actionLabel: '更新客服中心配置',
+            targetType: 'system_config',
+            targetCode: 'customer_service',
+            actor,
+            requestMeta,
+            detail: {
+              before,
+              after: config,
+            },
+          },
+          manager,
+        )
+      }
       return { config, changed }
     })
   }

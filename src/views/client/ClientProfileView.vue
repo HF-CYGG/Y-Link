@@ -9,6 +9,7 @@
  */
 
 import { computed, onMounted, reactive, ref, toRaw } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { BizCrudDialogShell } from '@/components/common'
@@ -30,6 +31,7 @@ import {
 import { extractErrorMessage } from '@/utils/error'
 
 const clientAuthStore = useClientAuthStore(pinia)
+const router = useRouter()
 
 const passwordDialogVisible = ref(false)
 const profileDialogVisible = ref(false)
@@ -347,6 +349,22 @@ onMounted(() => {
           @click="openPasswordDialog"
         >
           修改
+        </button>
+      </div>
+    </div>
+
+    <div class="rounded-[1.2rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
+      <div class="flex items-center justify-between gap-3">
+        <div>
+          <p class="text-base font-semibold text-slate-900">反馈与客服</p>
+          <p class="mt-1 text-xs text-slate-400">统一进入反馈会话页，提交 Issue 字段并查看客服处理进度。</p>
+        </div>
+        <button
+          type="button"
+          class="rounded-full border border-slate-200 px-4 py-1.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50 hover:text-slate-900"
+          @click="router.push('/client/feedback')"
+        >
+          进入
         </button>
       </div>
     </div>

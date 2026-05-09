@@ -63,6 +63,15 @@ const indicatorStyle = computed(() => {
   }
 })
 
+/**
+ * 客户端沉浸式页面开关：
+ * - 会话页、详情页可通过路由 meta 主动隐藏底部导航；
+ * - 布局层同时回收底部占位，避免收起导航后仍残留大片空白。
+ */
+const shouldShowBottomNav = computed(() => {
+  return tabs.value.length > 0 && currentRoute.value.meta.hideClientBottomNav !== true
+})
+
 // 详细注释：判断指定的 tab 路径是否处于激活状态，订单模块通过前缀匹配以包含详情等子页面
 const isTabActive = (path: string) => {
   const currentPath = currentRoute.value.path || '/client'
@@ -142,7 +151,10 @@ const handleLogout = async () => {
 </script>
 
 <template>
-  <div class="client-main-layout min-h-[100dvh] text-slate-900">
+  <div
+    class="client-main-layout min-h-[100dvh] text-slate-900"
+    :class="{ 'client-main-layout--without-tab': !shouldShowBottomNav }"
+  >
     <header class="client-main-layout__header sticky top-0 z-30">
       <div class="client-main-layout__container flex items-center justify-between gap-3 px-4 py-3 sm:px-5">
         <div>
@@ -189,7 +201,7 @@ const handleLogout = async () => {
     </main>
 
     <nav
-      v-if="tabs.length"
+      v-if="shouldShowBottomNav"
       class="client-main-layout__tab fixed left-1/2 z-50 -translate-x-1/2 rounded-[1.4rem] px-2 py-2"
     >
       <div class="grid relative gap-1" :style="{ gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))` }">
@@ -224,6 +236,10 @@ const handleLogout = async () => {
     radial-gradient(circle at top, rgba(13, 148, 136, 0.14), transparent 36%),
     radial-gradient(circle at bottom right, rgba(15, 118, 110, 0.12), transparent 30%),
     var(--ylink-color-bg);
+}
+
+.client-main-layout--without-tab {
+  --client-tab-bar-clearance: 0px;
 }
 
 .client-main-layout__container {

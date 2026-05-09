@@ -48,11 +48,11 @@ const isClientGuestAuthRequest = (url?: string) => {
 
 /**
  * 当前请求是否属于客户端链路：
- * - `/client-auth/*` 与 `/o2o/mall/*` 使用客户端 token；
+ * - `/client-auth/*`、`/client-feedback/*` 与 `/o2o/mall/*` 使用客户端 token；
  * - 管理端继续沿用原有管理员 token，避免两个端的鉴权头混用。
  */
 const isClientRequest = (url?: string) => {
-  return /\/(?:client-auth|o2o\/mall)(?:\/|$)/.test(normalizeRequestUrl(url))
+  return /\/(?:client-auth|client-feedback|o2o\/mall)(?:\/|$)/.test(normalizeRequestUrl(url))
 }
 
 /**

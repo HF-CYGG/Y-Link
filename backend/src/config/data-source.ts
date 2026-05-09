@@ -27,6 +27,8 @@ import { O2oReturnRequestItem } from '../entities/o2o-return-request-item.entity
 import { InventoryLog } from '../entities/inventory-log.entity.js'
 import { BizInboundOrder } from '../entities/biz-inbound-order.entity.js'
 import { BizInboundOrderItem } from '../entities/biz-inbound-order-item.entity.js'
+import { ClientFeedbackConversation } from '../entities/client-feedback-conversation.entity.js'
+import { ClientFeedbackMessage } from '../entities/client-feedback-message.entity.js'
 
 export const appEntities = [
   BaseProduct,
@@ -47,6 +49,8 @@ export const appEntities = [
   InventoryLog,
   BizInboundOrder,
   BizInboundOrderItem,
+  ClientFeedbackConversation,
+  ClientFeedbackMessage,
 ]
 
 function resolveEffectiveDatabaseConfig(

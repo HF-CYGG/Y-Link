@@ -11,14 +11,24 @@ import type { ClientAuthenticatedRequest } from '../types/client-auth.js'
 
 const parseBearerToken = (req: Request) => {
   const authorization = req.headers.authorization
-  if (!authorization) {
+  if (authorization) {
+    const [scheme, token] = authorization.split(' ')
+    if (scheme === 'Bearer' && token?.trim()) {
+      return token.trim()
+    }
+  }
+
+  /**
+   * 客户端反馈页的在线状态使用浏览器原生 SSE，
+   * 这里兼容 `access_token` 查询参数，保证无需额外协议库也能续接。
+   */
+  const queryToken = typeof req.query.access_token === 'string'
+    ? req.query.access_token.trim()
+    : ''
+  if (!queryToken) {
     return null
   }
-  const [scheme, token] = authorization.split(' ')
-  if (scheme !== 'Bearer' || !token?.trim()) {
-    return null
-  }
-  return token.trim()
+  return queryToken
 }
 
 export const requireClientAuth = async (req: Request, _res: Response, next: NextFunction) => {

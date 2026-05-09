@@ -13,7 +13,9 @@ import { errorHandler, notFoundHandler } from './middleware/error-handler.js'
 import { authRouter } from './routes/auth.routes.js'
 import { auditLogRouter } from './routes/audit-log.routes.js'
 import { clientAuthRouter } from './routes/client-auth.routes.js'
+import { clientFeedbackRouter } from './routes/client-feedback.routes.js'
 import { clientUserManageRouter } from './routes/client-user-manage.routes.js'
+import { customerServiceRouter } from './routes/customer-service.routes.js'
 import { dataMaintenanceRouter } from './routes/data-maintenance.routes.js'
 import { dashboardRouter } from './routes/dashboard.routes.js'
 import { o2oRouter } from './routes/o2o.routes.js'
@@ -75,6 +77,7 @@ export function createApp() {
   // 认证接口允许匿名访问，其中 logout / me 已在子路由内部再次做鉴权。
   app.use('/api/auth', authRouter)
   app.use('/api/client-auth', clientAuthRouter)
+  app.use('/api/client-feedback', clientFeedbackRouter)
   app.use('/api/o2o', o2oRouter)
 
   // 业务主系统统一要求先登录再访问，避免接口侧出现“匿名调用”漏洞。
@@ -92,6 +95,7 @@ export function createApp() {
   // 系统治理接口：由细粒度权限点控制，而不是单纯依赖管理员角色。
   app.use('/api/users', userRouter)
   app.use('/api/client-users', clientUserManageRouter)
+  app.use('/api/customer-service', customerServiceRouter)
   app.use('/api/audit-logs', auditLogRouter)
   app.use('/api/system-configs', systemConfigRouter)
   app.use('/api/data-maintenance', dataMaintenanceRouter)
