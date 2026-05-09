@@ -1,27 +1,24 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/client/ClientFeedbackView.vue
- * 文件职责：提供客户端统一反馈会话页，负责普通建议与专业 BUG 的渐进式提交、会话查看与续接沟通，并将左上返回入口收敛为更轻量的小箭头样式。
+ * 文件职责：提供客户端统一反馈会话页，负责历史会话查看、续接沟通与跳转到独立新建反馈页，并将左上返回入口收敛为更轻量的小箭头样式。
  * 实现逻辑：
- * - 页面把“新建反馈表单”和“历史会话详情”收口到同一视图，避免用户在多个入口来回切换；
- * - 普通建议默认只保留轻量输入，切换为专业 BUG 后再渐进展开结构化字段，降低提交门槛；
+ * - 页面主视图聚焦“我的反馈会话”和当前线程沟通，新增反馈通过独立按钮跳转到专门的新建页；
+ * - 新建页和会话页分离后，会话页首屏信息更聚焦，用户更容易先继续已有会话而不是重复建单；
  * - 页面通过真实后端接口与 SSE 订阅同步在线状态、离线提示和续接结果，确保客户端与客服工作台数据一致。
  * 维护说明：
  * - 若后续需要扩展附件上传、截图或满意度评价，建议继续在当前页面局部扩展，不再拆分页级流程；
  * - 若客服在线规则改为后端动态可配置，优先复用共享 API 中的 availability 字段，不在页面层重复推导。
  */
 
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
   FEEDBACK_CATEGORY_OPTIONS,
-  FEEDBACK_ISSUE_TYPE_OPTIONS,
   FEEDBACK_PRIORITY_META_MAP,
-  FEEDBACK_PRIORITY_OPTIONS,
   FEEDBACK_STATUS_META_MAP,
   appendClientFeedbackMessage,
-  createClientFeedbackConversation,
   getClientFeedbackConversation,
   getClientFeedbackPortalConfig,
   listClientFeedbackConversations,
@@ -29,8 +26,6 @@ import {
   summarizeClientFeedbackConversations,
   type FeedbackConversationRecord,
   type FeedbackIssueCategory,
-  type FeedbackIssuePriority,
-  type FeedbackIssueType,
   type FeedbackPortalAvailability,
   type FeedbackRealtimeConnection,
 } from '@/api/modules/customer-service-feedback'
@@ -40,12 +35,12 @@ import { formatDateTime } from '@/utils/date-time'
 import { extractErrorMessage } from '@/utils/error'
 import { normalizeSubmitText } from '@/utils/submit-feedback'
 
+const route = useRoute()
 const router = useRouter()
 const clientAuthStore = useClientAuthStore(pinia)
 
 const loading = ref(false)
 const detailLoading = ref(false)
-const createSubmitting = ref(false)
 const replySubmitting = ref(false)
 const selectedConversationId = ref('')
 const selectedConversation = ref<FeedbackConversationRecord | null>(null)
@@ -57,28 +52,9 @@ const realtimeState = ref<'connecting' | 'online' | 'offline'>('offline')
 const reconnectTip = ref('进入页面后会自动续接当前在线会话。')
 let realtimeConnection: FeedbackRealtimeConnection | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
-
-/**
- * 新建反馈表单：
- * - 普通建议仅要求轻量描述，降低首次反馈门槛；
- * - 专业 BUG 再展开结构化字段，便于客服快速复现问题。
- */
-const createForm = reactive({
-  issueType: 'suggestion' as FeedbackIssueType,
-  title: '',
-  summary: '',
-  category: 'order' as FeedbackIssueCategory,
-  priority: 'medium' as FeedbackIssuePriority,
-  orderRef: '',
-  expectedResult: '',
-  actualResult: '',
-  reproductionSteps: '',
-  contactPreference: '',
-  tagText: '',
-})
+const preferredConversationId = ref('')
 
 const currentClientUser = computed(() => clientAuthStore.currentUser)
-const isBugMode = computed(() => createForm.issueType === 'bug')
 const summary = computed(() => summarizeClientFeedbackConversations(conversations.value))
 const summaryCards = computed(() => {
   return [
@@ -100,15 +76,6 @@ const availabilityText = computed(() => {
   return availability.value.offlineNotice
 })
 
-const parseTagText = (value: string): string[] => {
-  return [...new Set(
-    value
-      .split(/[，,]/)
-      .map((item) => item.trim())
-      .filter((item) => item.length > 0),
-  )]
-}
-
 const getCategoryLabel = (category: FeedbackIssueCategory) => {
   return FEEDBACK_CATEGORY_OPTIONS.find((item) => item.value === category)?.label ?? '其他建议'
 }
@@ -126,18 +93,8 @@ const handleNavigateBack = () => {
   void router.push('/client/profile')
 }
 
-const resetCreateForm = () => {
-  createForm.issueType = 'suggestion'
-  createForm.title = ''
-  createForm.summary = ''
-  createForm.category = 'order'
-  createForm.priority = 'medium'
-  createForm.orderRef = ''
-  createForm.expectedResult = ''
-  createForm.actualResult = ''
-  createForm.reproductionSteps = ''
-  createForm.contactPreference = ''
-  createForm.tagText = ''
+const handleNavigateToCreate = () => {
+  void router.push('/client/feedback/create')
 }
 
 const loadPortalConfig = async () => {
@@ -178,7 +135,15 @@ const loadConversations = async () => {
     if (!conversations.value.length) {
       selectedConversationId.value = ''
       selectedConversation.value = null
+      preferredConversationId.value = ''
       return
+    }
+
+    const hasPreferredSelection = preferredConversationId.value
+      && conversations.value.some((item) => item.id === preferredConversationId.value)
+    if (hasPreferredSelection) {
+      selectedConversationId.value = preferredConversationId.value
+      preferredConversationId.value = ''
     }
 
     const hasCurrentSelection = conversations.value.some((item) => item.id === selectedConversationId.value)
@@ -194,53 +159,6 @@ const loadConversations = async () => {
 const handleSelectConversation = async (conversationId: string) => {
   selectedConversationId.value = conversationId
   await loadConversationDetail(conversationId)
-}
-
-const handleCreateConversation = async () => {
-  if (!currentClientUser.value) {
-    ElMessage.warning('当前登录状态异常，请重新进入客户端后重试')
-    return
-  }
-
-  const normalizedTitle = normalizeSubmitText(createForm.title)
-  const normalizedSummary = normalizeSubmitText(createForm.summary)
-  const normalizedExpectedResult = normalizeSubmitText(createForm.expectedResult)
-  const normalizedActualResult = normalizeSubmitText(createForm.actualResult)
-
-  if (!normalizedTitle || !normalizedSummary) {
-    ElMessage.warning('请至少填写问题标题和问题描述')
-    return
-  }
-  if (isBugMode.value && (!normalizedExpectedResult || !normalizedActualResult)) {
-    ElMessage.warning('专业 BUG 需要补充期望结果与实际结果，方便客服快速定位')
-    return
-  }
-
-  createSubmitting.value = true
-  try {
-    const createdRecord = await createClientFeedbackConversation({
-      title: normalizedTitle,
-      summary: normalizedSummary,
-      issueType: createForm.issueType,
-      priority: createForm.priority,
-      category: createForm.category,
-      orderRef: createForm.orderRef,
-      expectedResult: isBugMode.value ? normalizedExpectedResult : undefined,
-      actualResult: isBugMode.value ? normalizedActualResult : undefined,
-      reproductionSteps: createForm.reproductionSteps,
-      contactPreference: createForm.contactPreference,
-      tags: parseTagText(createForm.tagText),
-    })
-    resetCreateForm()
-    selectedConversationId.value = createdRecord.id
-    await loadConversations()
-    reconnectTip.value = '已为你创建并续接新会话，后续补充可直接在当前线程继续。'
-    ElMessage.success('反馈已提交，客服会在同一会话中继续跟进')
-  } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '反馈提交失败，请稍后重试'))
-  } finally {
-    createSubmitting.value = false
-  }
 }
 
 const handleReply = async () => {
@@ -317,6 +235,16 @@ watch(
   },
 )
 
+watch(
+  () => route.query.conversationId,
+  (conversationId) => {
+    preferredConversationId.value = typeof conversationId === 'string' ? conversationId : ''
+  },
+  {
+    immediate: true,
+  },
+)
+
 onMounted(async () => {
   if (!currentClientUser.value?.id) {
     return
@@ -357,7 +285,7 @@ onBeforeUnmount(() => {
           </button>
           <p class="text-xl font-semibold text-slate-900">反馈会话</p>
           <p class="mt-1 text-sm leading-6 text-slate-500">
-            在一个页面里完成反馈提交、结构化补充和客服续接，避免在多个入口之间重复描述问题。
+            查看历史反馈并继续补充说明；如需新增问题，可进入独立的新建反馈页提交。
           </p>
         </div>
         <div class="flex shrink-0 items-center gap-2">
@@ -386,156 +314,26 @@ onBeforeUnmount(() => {
       </article>
     </div>
 
-    <div class="grid gap-4 xl:grid-cols-[380px_minmax(0,1fr)]">
+    <div class="grid gap-4 xl:grid-cols-[340px_minmax(0,1fr)]">
       <div class="space-y-4">
         <article class="rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
           <div class="flex items-center justify-between gap-3">
             <div>
               <p class="text-base font-semibold text-slate-900">新建反馈</p>
-              <p class="mt-1 text-xs leading-5 text-slate-400">{{ portalNotice }}</p>
+              <p class="mt-1 text-xs leading-5 text-slate-400">新问题将跳转到独立提交页，已创建的反馈请继续在原会话补充。</p>
             </div>
-            <span class="rounded-full bg-brand/10 px-3 py-1 text-xs font-semibold text-brand">渐进式提交</span>
+            <span class="rounded-full bg-brand/10 px-3 py-1 text-xs font-semibold text-brand">独立提交页</span>
           </div>
-
-          <div class="mt-4 space-y-3">
-            <div class="grid gap-3 sm:grid-cols-2">
-              <button
-                v-for="item in FEEDBACK_ISSUE_TYPE_OPTIONS"
-                :key="item.value"
-                type="button"
-                class="rounded-[1rem] border p-4 text-left transition"
-                :class="createForm.issueType === item.value ? 'border-brand bg-brand/5' : 'border-slate-200 bg-slate-50 hover:border-slate-300'"
-                @click="createForm.issueType = item.value"
-              >
-                <p class="text-sm font-semibold text-slate-900">{{ item.label }}</p>
-                <p class="mt-1 text-xs leading-5 text-slate-500">{{ item.hint }}</p>
-              </button>
-            </div>
-
-            <label class="block">
-              <span class="mb-1 block text-xs font-medium text-slate-500">问题标题</span>
-              <input
-                v-model="createForm.title"
-                type="text"
-                maxlength="80"
-                class="feedback-input"
-                placeholder="例如：订单核销后客户端仍显示待提货"
-              />
-            </label>
-
-            <div class="grid gap-3 sm:grid-cols-2">
-              <label class="block">
-                <span class="mb-1 block text-xs font-medium text-slate-500">问题分类</span>
-                <select v-model="createForm.category" class="feedback-input">
-                  <option v-for="item in FEEDBACK_CATEGORY_OPTIONS" :key="item.value" :value="item.value">
-                    {{ item.label }}
-                  </option>
-                </select>
-              </label>
-              <label class="block">
-                <span class="mb-1 block text-xs font-medium text-slate-500">优先级</span>
-                <select v-model="createForm.priority" class="feedback-input">
-                  <option v-for="item in FEEDBACK_PRIORITY_OPTIONS" :key="item.value" :value="item.value">
-                    {{ item.label }}
-                  </option>
-                </select>
-              </label>
-            </div>
-
-            <label class="block">
-              <span class="mb-1 block text-xs font-medium text-slate-500">问题描述</span>
-              <textarea
-                v-model="createForm.summary"
-                class="feedback-textarea"
-                maxlength="400"
-                :placeholder="isBugMode ? '请描述异常现象、出现时间、影响范围和使用环境。' : '请说明你的建议、诉求或遇到的不便。'"
-              />
-            </label>
-
-            <div v-if="isBugMode" class="rounded-[1rem] border border-slate-200 bg-slate-50/80 p-4">
-              <div class="flex items-center justify-between gap-3">
-                <div>
-                  <p class="text-sm font-semibold text-slate-900">专业 BUG 补充</p>
-                  <p class="mt-1 text-xs text-slate-400">仅在需要排查时填写，客服会按这些结构化字段定位问题。</p>
-                </div>
-                <span class="rounded-full bg-white px-3 py-1 text-xs font-medium text-slate-500">结构化字段</span>
-              </div>
-
-              <div class="mt-3 space-y-3">
-                <label class="block">
-                  <span class="mb-1 block text-xs font-medium text-slate-500">关联订单号</span>
-                  <input
-                    v-model="createForm.orderRef"
-                    type="text"
-                    maxlength="64"
-                    class="feedback-input"
-                    placeholder="如与某笔订单相关，可填写订单号或提货码"
-                  />
-                </label>
-
-                <label class="block">
-                  <span class="mb-1 block text-xs font-medium text-slate-500">期望结果</span>
-                  <textarea
-                    v-model="createForm.expectedResult"
-                    class="feedback-textarea feedback-textarea--short"
-                    maxlength="240"
-                    placeholder="例如：核销成功后订单应立即更新为已提货。"
-                  />
-                </label>
-
-                <label class="block">
-                  <span class="mb-1 block text-xs font-medium text-slate-500">实际结果</span>
-                  <textarea
-                    v-model="createForm.actualResult"
-                    class="feedback-textarea feedback-textarea--short"
-                    maxlength="240"
-                    placeholder="例如：订单状态仍停留在待提货，并重复弹出核销提示。"
-                  />
-                </label>
-
-                <label class="block">
-                  <span class="mb-1 block text-xs font-medium text-slate-500">复现步骤</span>
-                  <textarea
-                    v-model="createForm.reproductionSteps"
-                    class="feedback-textarea feedback-textarea--short"
-                    maxlength="300"
-                    placeholder="可按 1、2、3 步说明操作路径，帮助客服复现。"
-                  />
-                </label>
-
-                <div class="grid gap-3 sm:grid-cols-2">
-                  <label class="block">
-                    <span class="mb-1 block text-xs font-medium text-slate-500">联系偏好</span>
-                    <input
-                      v-model="createForm.contactPreference"
-                      type="text"
-                      maxlength="64"
-                      class="feedback-input"
-                      placeholder="如：优先站内回复 / 也可电话联系"
-                    />
-                  </label>
-                  <label class="block">
-                    <span class="mb-1 block text-xs font-medium text-slate-500">标签</span>
-                    <input
-                      v-model="createForm.tagText"
-                      type="text"
-                      maxlength="120"
-                      class="feedback-input"
-                      placeholder="使用中文逗号分隔，如：核销，状态不同步"
-                    />
-                  </label>
-                </div>
-              </div>
-            </div>
-          </div>
-
           <button
             type="button"
-            class="mt-4 w-full rounded-[1rem] bg-brand px-4 py-3 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
-            :disabled="createSubmitting"
-            @click="handleCreateConversation"
+            class="mt-4 flex w-full items-center justify-between rounded-[1rem] border border-brand/20 bg-brand/5 px-4 py-3 text-left transition hover:border-brand/35 hover:bg-brand/10"
+            @click="handleNavigateToCreate"
           >
-            {{ createSubmitting ? '提交中...' : '提交反馈并进入会话' }}
+            <div>
+              <p class="text-sm font-semibold text-slate-900">进入新建反馈页</p>
+              <p class="mt-1 text-xs leading-5 text-slate-500">{{ portalNotice }}</p>
+            </div>
+            <span class="rounded-full bg-brand px-3 py-1 text-xs font-semibold text-white">新建</span>
           </button>
         </article>
 

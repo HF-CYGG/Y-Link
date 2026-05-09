@@ -365,6 +365,29 @@ const handleQuickStatus = async (status: FeedbackIssueStatus) => {
   }
 }
 
+const handleReassignPriority = async (priority: FeedbackIssuePriority) => {
+  if (!selectedConversation.value) {
+    ElMessage.warning('请先选择一条会话')
+    return
+  }
+
+  saving.value = true
+  try {
+    await updateFeedbackIssue(selectedConversation.value.id, {
+      priority,
+    })
+    issueForm.priority = priority
+    await loadConversations({
+      refreshSelectedDetail: true,
+    })
+    ElMessage.success(`已将优先级调整为${FEEDBACK_PRIORITY_META_MAP[priority].label}`)
+  } catch (error) {
+    ElMessage.error(extractErrorMessage(error, '优先级调整失败，请稍后重试'))
+  } finally {
+    saving.value = false
+  }
+}
+
 const handleSaveInternalRemark = async () => {
   if (!selectedConversation.value) {
     ElMessage.warning('请先选择一条会话')
@@ -848,6 +871,30 @@ onBeforeUnmount(() => {
             <button type="button" class="cs-secondary-button" :disabled="saving" @click="handleQuickStatus('closed')">关闭会话</button>
           </div>
 
+          <div class="mt-3 rounded-[18px] border border-slate-200 bg-slate-50/80 p-3">
+            <div class="flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <p class="text-sm font-semibold text-slate-900">客服优先级重分配</p>
+                <p class="mt-1 text-xs text-slate-400">客服可按当前影响范围与处理紧急度，直接重新分配反馈优先级。</p>
+              </div>
+              <span class="rounded-full px-2.5 py-1 text-[11px] font-semibold" :class="FEEDBACK_PRIORITY_META_MAP[issueForm.priority].className">
+                当前：{{ FEEDBACK_PRIORITY_META_MAP[issueForm.priority].label }}
+              </span>
+            </div>
+            <div class="mt-3 flex flex-wrap gap-2">
+              <button
+                v-for="item in FEEDBACK_PRIORITY_OPTIONS"
+                :key="item.value"
+                type="button"
+                class="cs-secondary-button"
+                :disabled="saving || issueForm.priority === item.value"
+                @click="handleReassignPriority(item.value)"
+              >
+                调整为{{ item.label }}
+              </button>
+            </div>
+          </div>
+
           <div class="mt-5 grid gap-4 xl:min-h-0 xl:flex-1 2xl:grid-cols-[minmax(0,1fr)_320px]">
             <div class="flex min-h-0 flex-col gap-4">
               <div class="rounded-[20px] border border-slate-200 bg-slate-50/80 p-4 xl:flex xl:min-h-0 xl:flex-col">
@@ -946,7 +993,7 @@ onBeforeUnmount(() => {
                     </select>
                   </label>
                   <label class="block">
-                    <span class="mb-1.5 block text-xs font-medium text-slate-500">优先级</span>
+                    <span class="mb-1.5 block text-xs font-medium text-slate-500">优先级（客服可重分配）</span>
                     <select v-model="issueForm.priority" class="cs-input">
                       <option v-for="item in FEEDBACK_PRIORITY_OPTIONS" :key="item.value" :value="item.value">
                         {{ item.label }}
