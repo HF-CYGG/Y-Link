@@ -85,6 +85,7 @@ const appendMessageSchema = z.object({
 })
 
 export const clientFeedbackRouter = Router()
+const authenticatedClientFeedbackRouter = Router()
 
 clientFeedbackRouter.get(
   '/portal-config',
@@ -94,9 +95,9 @@ clientFeedbackRouter.get(
   }),
 )
 
-clientFeedbackRouter.use(requireClientAuth)
+authenticatedClientFeedbackRouter.use(requireClientAuth)
 
-clientFeedbackRouter.get(
+authenticatedClientFeedbackRouter.get(
   '/conversations',
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
@@ -111,7 +112,7 @@ clientFeedbackRouter.get(
   }),
 )
 
-clientFeedbackRouter.post(
+authenticatedClientFeedbackRouter.post(
   '/conversations',
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
@@ -121,7 +122,7 @@ clientFeedbackRouter.post(
   }),
 )
 
-clientFeedbackRouter.get(
+authenticatedClientFeedbackRouter.get(
   '/conversations/:id',
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
@@ -130,7 +131,7 @@ clientFeedbackRouter.get(
   }),
 )
 
-clientFeedbackRouter.post(
+authenticatedClientFeedbackRouter.post(
   '/conversations/:id/messages',
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
@@ -145,10 +146,12 @@ clientFeedbackRouter.post(
   }),
 )
 
-clientFeedbackRouter.get(
+authenticatedClientFeedbackRouter.get(
   '/stream',
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     await clientFeedbackService.openClientRealtimeChannel(authReq.clientAuth, res)
   }),
 )
+
+clientFeedbackRouter.use(authenticatedClientFeedbackRouter)
