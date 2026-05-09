@@ -68,6 +68,7 @@ export const routeViewLoaders = {
   'client-profile': () => import('@/views/client/ClientProfileView.vue'),
   'client-feedback': () => import('@/views/client/ClientFeedbackView.vue'),
   'client-feedback-create': () => import('@/views/client/ClientFeedbackCreateView.vue'),
+  'client-feedback-detail': () => import('@/views/client/ClientFeedbackDetailView.vue'),
   'client-order-detail': () => import('@/views/client/ClientOrderDetailView.vue'),
   appLayout: () => import('@/layout/AppLayout.vue'),
   dashboard: () => import('@/views/dashboard/DashboardView.vue'),

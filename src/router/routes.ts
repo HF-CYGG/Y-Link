@@ -641,6 +641,18 @@ export const routes: RouteRecordRaw[] = [
         } satisfies AppRouteMeta,
       },
       {
+        path: 'feedback/:id',
+        name: 'client-feedback-detail',
+        component: routeViewLoaders['client-feedback-detail'],
+        meta: {
+          title: '反馈单详情',
+          menu: false,
+          requiresClientAuth: true,
+          hideClientBottomNav: true,
+          preloadTargets: ['client-feedback'],
+        } satisfies AppRouteMeta,
+      },
+      {
         path: 'orders/:id',
         name: 'client-order-detail',
         component: routeViewLoaders['client-order-detail'],

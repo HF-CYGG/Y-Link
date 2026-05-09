@@ -62,11 +62,11 @@ const parseTagText = (value: string): string[] => {
 }
 
 const handleNavigateBack = () => {
-  if (window.history.length > 1) {
+  if (globalThis.history.length > 1) {
     router.back()
     return
   }
-  void router.push('/client/feedback')
+  router.push('/client/feedback')
 }
 
 const resetBugFields = () => {
@@ -127,12 +127,9 @@ const handleCreateConversation = async () => {
       tags: isBugMode.value ? parseTagText(createForm.tagText) : undefined,
     })
 
-    ElMessage.success('反馈已提交，正在跳转到会话页')
+    ElMessage.success('反馈已提交，正在跳转到反馈单详情页')
     await router.replace({
-      path: '/client/feedback',
-      query: {
-        conversationId: createdRecord.id,
-      },
+      path: `/client/feedback/${createdRecord.id}`,
     })
   } catch (error) {
     ElMessage.error(extractErrorMessage(error, '反馈提交失败，请稍后重试'))
