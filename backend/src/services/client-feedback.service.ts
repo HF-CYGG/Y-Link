@@ -1094,6 +1094,10 @@ class ClientFeedbackService {
         throw new BizError('当前反馈会话已关闭，请先重新打开后再回复', 400)
       }
 
+      // 客服回复只应把“待处理”推进到“处理中”。
+      // 若会话已被人工标记为“已解决”，继续补充回复时应保持已解决状态，不应回退。
+      const nextConversationStatus = conversation.status === 'open' ? 'processing' : conversation.status
+
       conversation.assignedUserId = actor.userId
       conversation.assignedUsername = actor.username
       conversation.assignedDisplayName = actor.displayName
@@ -1105,7 +1109,7 @@ class ClientFeedbackService {
           senderType: 'service',
           senderUserId: actor.userId,
           senderName: actor.displayName,
-          conversationStatus: 'processing',
+          conversationStatus: nextConversationStatus,
         },
         content,
         'text',

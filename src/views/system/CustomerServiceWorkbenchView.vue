@@ -1002,7 +1002,7 @@ onBeforeUnmount(() => {
 
             <div class="mt-5 grid gap-4 xl:min-h-0 xl:flex-1 2xl:grid-cols-[minmax(0,1fr)_320px]">
               <div class="flex min-h-0 flex-col gap-4">
-                <el-card class="cs-sub-card xl:flex xl:min-h-0 xl:flex-col" shadow="never">
+                <el-card class="cs-sub-card cs-conversation-detail-card xl:flex xl:min-h-0 xl:flex-col" shadow="never">
                   <div class="flex items-center justify-between gap-3">
                     <div>
                       <p class="text-base font-semibold text-slate-900">会话详情</p>
@@ -1011,7 +1011,7 @@ onBeforeUnmount(() => {
                     <span class="text-xs text-slate-400">{{ selectedConversation.messages.length }} 条消息</span>
                   </div>
 
-                  <el-scrollbar class="mt-4 xl:min-h-0 xl:flex-1">
+                  <el-scrollbar class="cs-conversation-detail-scrollbar mt-4 xl:min-h-0 xl:flex-1">
                     <TransitionGroup name="cs-message-stack" tag="div" class="space-y-3 pr-1">
                       <el-card
                         v-for="message in selectedConversation.messages"
@@ -1248,6 +1248,14 @@ onBeforeUnmount(() => {
   background: rgba(248, 250, 252, 0.75);
 }
 
+.cs-conversation-detail-card {
+  overflow: hidden;
+}
+
+.cs-conversation-detail-scrollbar {
+  min-height: 0;
+}
+
 .cs-sub-card :deep(.el-card__body),
 .cs-inner-action-card :deep(.el-card__body),
 .cs-summary-card :deep(.el-card__body),
@@ -1439,6 +1447,16 @@ onBeforeUnmount(() => {
 @media (max-width: 767px) {
   .cs-list-heading__desc {
     max-width: 13.5rem;
+  }
+}
+
+@media (min-width: 1280px) {
+  .cs-conversation-detail-card {
+    max-height: min(36rem, calc(100dvh - 18rem));
+  }
+
+  .cs-conversation-detail-scrollbar {
+    max-height: calc(min(36rem, calc(100dvh - 18rem)) - 5.5rem);
   }
 }
 
