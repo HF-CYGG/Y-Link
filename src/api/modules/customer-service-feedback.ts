@@ -516,6 +516,11 @@ export const getClientFeedbackConversation = async (conversationId: string): Pro
 }
 
 export const createClientFeedbackConversation = async (input: CreateClientFeedbackConversationInput): Promise<FeedbackConversationRecord> => {
+  const normalizedSummary = input.summary?.trim()
+  if (!normalizedSummary) {
+    throw new Error('反馈内容不能为空')
+  }
+
   const response = await request<{
     conversation: BackendConversationSummary
   }>({
@@ -526,7 +531,7 @@ export const createClientFeedbackConversation = async (input: CreateClientFeedba
       category: input.category,
       subject: input.title,
       priority: FRONTEND_PRIORITY_TO_BACKEND_MAP[input.priority],
-      content: input.summary,
+      content: normalizedSummary,
       orderRef: input.orderRef,
       expectedResult: input.expectedResult,
       actualResult: input.actualResult,
