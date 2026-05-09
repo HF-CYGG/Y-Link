@@ -1,6 +1,6 @@
 /**
  * 模块说明：src/router/routes.ts
- * 文件职责：统一维护管理端与客户端的路由、菜单、快捷入口和权限元信息，本次补充产品中心共享工作台的预热收口配置并收缩 Dashboard 首屏预热范围。
+ * 文件职责：统一维护管理端与客户端的路由、菜单、快捷入口和权限元信息，本次继续修复客服工作台独立导航未实际渲染的问题，并保持既有预热与权限收口策略。
  * 实现逻辑：
  * - 所有业务页面都通过 routeViewLoaders 做懒加载，保证路由、预热和权限入口保持同源；
  * - 产品中心共享工作台仍然由两个历史路由承接，但预热目标会按双入口互相补齐，确保壳层拆包后标签切换依旧平滑；
@@ -36,6 +36,7 @@ export interface AppShortcutMeta {
  * - activeMenu 用于需要时指定菜单高亮归属；
  * - requiresAuth / guestOnly / requiredPermissions 用于管理端权限点路由守卫。
  * - requiresClientAuth / clientGuestOnly 用于客户端 H5 的登录态路由守卫。
+ * - hideClientBottomNav 用于会话页、详情页等沉浸式客户端页面主动收起底部导航。
  */
 export interface AppRouteMeta extends RouteMeta {
   title: string
@@ -43,6 +44,8 @@ export interface AppRouteMeta extends RouteMeta {
   menu?: boolean
   menuOrder?: number
   menuGroup?: string
+  menuStandalone?: boolean
+  menuHighlight?: 'spotlight'
   clientNav?: boolean
   clientNavOrder?: number
   activeMenu?: string
@@ -51,6 +54,7 @@ export interface AppRouteMeta extends RouteMeta {
   guestOnly?: boolean
   requiresClientAuth?: boolean
   clientGuestOnly?: boolean
+  hideClientBottomNav?: boolean
   requiredPermissions?: PermissionCode[]
   requiredAnyPermissions?: PermissionCode[]
   allowedRoles?: UserRole[]
@@ -71,6 +75,8 @@ export interface AppMenuItem {
   path: string
   icon?: ElementPlusIconName
   group?: string
+  standalone?: boolean
+  highlight?: 'spotlight'
   children?: AppMenuItem[]
 }
 
@@ -371,6 +377,22 @@ const layoutChildren: AppRouteRecord[] = [
     ],
   },
   {
+    path: 'system/customer-service',
+    name: 'system-customer-service',
+    component: routeViewLoaders['system-customer-service'],
+    meta: {
+      title: '客服工作台',
+      icon: 'Setting',
+      menuOrder: 37,
+      menuGroup: '业务操作',
+      activeMenu: '/system/customer-service',
+      requiredPermissions: ['users:view'],
+      keepAlive: true,
+      preloadTargets: ['system-client-users'],
+      deferPreloadOnColdStart: true,
+    },
+  },
+  {
     path: 'system',
     name: 'system',
     redirect: '/system/configs',
@@ -590,7 +612,44 @@ export const routes: RouteRecordRaw[] = [
           clientNavOrder: 30,
           requiresClientAuth: true,
           keepAlive: true,
-          preloadTargets: ['client-orders'],
+          preloadTargets: ['client-orders', 'client-feedback'],
+        } satisfies AppRouteMeta,
+      },
+      {
+        path: 'feedback',
+        name: 'client-feedback',
+        component: routeViewLoaders['client-feedback'],
+        meta: {
+          title: '反馈会话',
+          menu: false,
+          requiresClientAuth: true,
+          hideClientBottomNav: true,
+          keepAlive: true,
+          preloadTargets: ['client-profile'],
+        } satisfies AppRouteMeta,
+      },
+      {
+        path: 'feedback/create',
+        name: 'client-feedback-create',
+        component: routeViewLoaders['client-feedback-create'],
+        meta: {
+          title: '新建反馈',
+          menu: false,
+          requiresClientAuth: true,
+          hideClientBottomNav: true,
+          preloadTargets: ['client-feedback'],
+        } satisfies AppRouteMeta,
+      },
+      {
+        path: 'feedback/:id',
+        name: 'client-feedback-detail',
+        component: routeViewLoaders['client-feedback-detail'],
+        meta: {
+          title: '反馈单详情',
+          menu: false,
+          requiresClientAuth: true,
+          hideClientBottomNav: true,
+          preloadTargets: ['client-feedback'],
         } satisfies AppRouteMeta,
       },
       {
@@ -702,25 +761,45 @@ const deriveMenuItems = (records: AppRouteRecord[], user?: Pick<UserSafeProfile,
     const fullPath = resolveRoutePath(parentPath, record.path)
     const hasConfiguredChildren = Boolean(record.children?.length)
     const children = record.children ? deriveMenuItems(record.children, user, fullPath) : []
+    const nestedChildren = children.filter((item) => !item.standalone)
+    const standaloneChildren = children.filter((item) => item.standalone)
 
     /**
      * 父级自动隐藏策略：
      * - 当父节点声明了子路由，但当前用户对所有子节点都无访问权限时，父级不再降级成“空壳可点菜单”；
      * - 避免出现点击父级后立即触发路由守卫拦截的割裂体验。
      */
-    if (hasConfiguredChildren && children.length === 0) {
+    if (hasConfiguredChildren && nestedChildren.length === 0 && standaloneChildren.length === 0) {
       return
     }
 
-    collectedItems.push({
+    const currentMenuItem: AppMenuItem = {
       title: record.meta.title,
       // 父级菜单若已存在可访问子页，则直接指向首个可访问子页，
       // 避免先命中父级 redirect 再跳子页，放大系统治理冷启动等待感。
-      path: children.length > 0 ? children[0].path : fullPath,
+      path: nestedChildren.length > 0 ? nestedChildren[0].path : fullPath,
       icon: record.meta.icon,
       group: record.meta.menuGroup,
-      children: children.length > 0 ? children : undefined,
-    })
+      highlight: record.meta.menuHighlight,
+      standalone: record.meta.menuStandalone,
+      children: nestedChildren.length > 0 ? nestedChildren : undefined,
+    }
+
+    /**
+     * 独立导航自身也必须产出菜单项：
+     * - 之前仅把 standalone 子节点从父分组里剥离，但没有把它自己写入 collectedItems；
+     * - 结果就是“路由配置存在、权限也通过”，最终侧栏仍拿不到客服工作台这一项。
+     */
+    collectedItems.push(currentMenuItem)
+
+    /**
+     * 允许个别子页脱离父级分组，直接作为独立导航入口：
+     * - 典型场景是高频工作台需要单独突出展示；
+     * - 路由路径与权限仍然复用原有业务模块，不引入第二套路由真源。
+     */
+    if (standaloneChildren.length > 0) {
+      collectedItems.push(...standaloneChildren)
+    }
   })
 
   return collectedItems

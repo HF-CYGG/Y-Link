@@ -38,6 +38,8 @@ export const PERMISSION_CODES = [
   'inbound:create',
   'inbound:view',
   'inbound:verify',
+  'customer_service:view',
+  'customer_service:reply',
 ] as const
 
 export type PermissionCode = (typeof PERMISSION_CODES)[number]
@@ -74,6 +76,8 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, PermissionCode[]> = {
     'audit_logs:export',
     'inbound:view',
     'inbound:verify',
+    'customer_service:view',
+    'customer_service:reply',
   ],
   operator: [
     'dashboard:view',
@@ -87,6 +91,8 @@ export const DEFAULT_ROLE_PERMISSIONS: Record<UserRole, PermissionCode[]> = {
     'system_configs:view',
     'inbound:view',
     'inbound:verify',
+    'customer_service:view',
+    'customer_service:reply',
   ],
   supplier: [
     'products:view',

@@ -572,39 +572,41 @@ onMounted(async () => {
         :key="card.order.id"
         class="rounded-[1.2rem] bg-white p-3.5 shadow-[var(--ylink-shadow-soft)] sm:p-4"
       >
-        <div class="flex flex-wrap items-start justify-between gap-3">
-          <div class="min-w-0 flex-1">
-            <div class="flex flex-wrap items-center gap-2">
-              <p class="min-w-0 flex-1 truncate text-[0.98rem] font-semibold text-slate-900 sm:flex-none sm:text-base">
-                {{ card.order.showNo }}
-              </p>
-              <span class="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-600 sm:text-xs">
-                {{ getClientOrderTypeLabel(card.order) }}
-              </span>
+        <div class="order-list-card__header">
+          <div class="order-list-card__topline">
+            <div class="min-w-0 flex-1">
+              <div class="flex flex-wrap items-center gap-2">
+                <p class="min-w-0 flex-1 truncate text-[0.98rem] font-semibold text-slate-900 sm:flex-none sm:text-base">
+                  {{ card.order.showNo }}
+                </p>
+                <span class="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-600 sm:text-xs">
+                  {{ getClientOrderTypeLabel(card.order) }}
+                </span>
+              </div>
             </div>
-            <div class="order-list-card__meta">
-              <span
-                v-for="metaFact in card.metaFacts"
-                :key="metaFact.key"
-                class="order-list-card__meta-pill"
+            <div class="flex items-center gap-2 self-start">
+              <button
+                v-if="card.order.status === 'pending'"
+                type="button"
+                class="rounded-full border border-rose-200 px-3 py-1.5 text-xs text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
+                :disabled="recallingOrderId === card.order.id"
+                @click="handleRecallOrder(card.order)"
               >
-                {{ metaFact.label }}
-              </span>
+                {{ recallingOrderId === card.order.id ? '撤回中...' : '撤回订单' }}
+              </button>
+              <router-link :to="`/client/orders/${card.order.id}`" class="rounded-full bg-slate-900 px-3 py-1.5 text-xs text-white">
+                详情
+              </router-link>
             </div>
           </div>
-          <div class="flex items-center gap-2 self-start">
-            <button
-              v-if="card.order.status === 'pending'"
-              type="button"
-              class="rounded-full border border-rose-200 px-3 py-1.5 text-xs text-rose-600 transition hover:bg-rose-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
-              :disabled="recallingOrderId === card.order.id"
-              @click="handleRecallOrder(card.order)"
+          <div class="order-list-card__meta">
+            <span
+              v-for="metaFact in card.metaFacts"
+              :key="metaFact.key"
+              class="order-list-card__meta-pill"
             >
-              {{ recallingOrderId === card.order.id ? '撤回中...' : '撤回订单' }}
-            </button>
-            <router-link :to="`/client/orders/${card.order.id}`" class="rounded-full bg-slate-900 px-3 py-1.5 text-xs text-white">
-              详情
-            </router-link>
+              {{ metaFact.label }}
+            </span>
           </div>
         </div>
 
@@ -685,16 +687,28 @@ onMounted(async () => {
 }
 
 /* 订单摘要标签：把时间、归属、件数、金额压缩为可换行的小胶囊，提升同屏信息密度。 */
+.order-list-card__header {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.order-list-card__topline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
 .order-list-card__meta {
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
-  margin-top: 0.75rem;
 }
 
 .order-list-card__meta-pill {
   display: inline-flex;
-  min-width: 0;
+  min-width: fit-content;
   max-width: 100%;
   align-items: center;
   border-radius: 9999px;
@@ -703,6 +717,7 @@ onMounted(async () => {
   font-size: 0.75rem;
   line-height: 1.25rem;
   color: rgb(100 116 139);
+  white-space: nowrap;
 }
 
 /* 状态横向信息带：主状态、业务状态与退货状态统一采用横向胶囊表达，减少额外说明卡数量。 */
@@ -748,7 +763,14 @@ onMounted(async () => {
 
   .order-list-card__meta {
     gap: 0.45rem;
-    margin-top: 0.65rem;
+  }
+
+  .order-list-card__header {
+    gap: 0.65rem;
+  }
+
+  .order-list-card__topline {
+    gap: 0.6rem;
   }
 
   .order-list-card__status-row {

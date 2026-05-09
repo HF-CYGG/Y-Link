@@ -1412,8 +1412,8 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   border-radius: 9999px;
-  background: rgba(15, 118, 110, 0.08);
-  color: #0f766e;
+  background: #0f766e;
+  color: #ffffff;
   pointer-events: none;
 }
 
@@ -1451,8 +1451,8 @@ onBeforeUnmount(() => {
   justify-content: center;
   border: none;
   border-radius: 9999px;
-  background: rgba(148, 163, 184, 0.18);
-  color: #64748b;
+  background: #64748b;
+  color: #ffffff;
   font-size: 0.65rem;
   font-weight: 700;
   line-height: 1;
@@ -1465,8 +1465,8 @@ onBeforeUnmount(() => {
 
 .mall-search-inline-clear:hover {
   transform: scale(1.08);
-  background: rgba(148, 163, 184, 0.28);
-  color: #334155;
+  background: #475569;
+  color: #ffffff;
 }
 
 .mall-search-inline-clear:active {

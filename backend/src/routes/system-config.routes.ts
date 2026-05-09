@@ -47,6 +47,23 @@ const updateVerificationProviderConfigsSchema = z.object({
   email: verificationProviderChannelSchema,
 })
 
+const updateCustomerServiceConfigsSchema = z.object({
+  enabled: z.boolean(),
+  realtimeEnabled: z.boolean(),
+  entryNotice: z.string().trim().min(1).max(500),
+  workdayStart: z.string().trim().regex(/^\d{2}:\d{2}$/),
+  workdayEnd: z.string().trim().regex(/^\d{2}:\d{2}$/),
+  workdayWeekdays: z.array(z.number().int().min(0).max(6)).min(1).max(7),
+  offlineNotice: z.string().trim().min(1).max(500),
+  offlineFaqs: z.array(
+    z.object({
+      question: z.string().trim().min(1).max(100),
+      answer: z.string().trim().min(1).max(1000),
+    }),
+  ).max(20),
+  sseKeepaliveSeconds: z.number().int().min(5).max(300),
+})
+
 const clientDepartmentTreeNodeSchema: z.ZodType<{
   id?: string
   label: string
@@ -139,6 +156,35 @@ systemConfigRouter.put(
     const authReq = req as AuthenticatedRequest
     const payload = updateO2oRuleConfigsSchema.parse(req.body)
     const data = await systemConfigService.updateO2oRuleConfigs(payload, authReq.auth, extractRequestMeta(req))
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+systemConfigRouter.get(
+  '/customer-service',
+  requirePermission('system_configs:view'),
+  asyncHandler(async (_req, res) => {
+    const data = await systemConfigService.getCustomerServiceConfigs()
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+systemConfigRouter.put(
+  '/customer-service',
+  requirePermission('system_configs:update'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = updateCustomerServiceConfigsSchema.parse(req.body)
+    const data = await systemConfigService.updateCustomerServiceConfigs(payload, authReq.auth, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',

@@ -22,6 +22,7 @@ export type AppRouteName =
   | 'client-cart'
   | 'client-checkout'
   | 'client-profile'
+  | 'client-feedback'
   | 'client-order-detail'
   | 'dashboard'
   | 'order-entry'
@@ -42,6 +43,7 @@ export type AppRouteName =
   | 'system-db-migration'
   | 'system-users'
   | 'system-client-users'
+  | 'system-customer-service'
   | 'system-audit-logs'
   | 'not-found'
 
@@ -64,6 +66,9 @@ export const routeViewLoaders = {
   'client-cart': () => import('@/views/client/ClientCartView.vue'),
   'client-checkout': () => import('@/views/client/ClientCheckoutView.vue'),
   'client-profile': () => import('@/views/client/ClientProfileView.vue'),
+  'client-feedback': () => import('@/views/client/ClientFeedbackView.vue'),
+  'client-feedback-create': () => import('@/views/client/ClientFeedbackCreateView.vue'),
+  'client-feedback-detail': () => import('@/views/client/ClientFeedbackDetailView.vue'),
   'client-order-detail': () => import('@/views/client/ClientOrderDetailView.vue'),
   appLayout: () => import('@/layout/AppLayout.vue'),
   dashboard: () => import('@/views/dashboard/DashboardView.vue'),
@@ -85,6 +90,7 @@ export const routeViewLoaders = {
   'system-db-migration': () => import('@/views/system/DatabaseMigrationView.vue'),
   'system-users': () => import('@/views/system/UserCenterView.vue'),
   'system-client-users': () => import('@/views/system/UserCenterView.vue'),
+  'system-customer-service': () => import('@/views/system/CustomerServiceWorkbenchView.vue'),
   'system-audit-logs': () => import('@/views/system/AuditLogView.vue'),
   'not-found': () => import('@/views/not-found/NotFoundView.vue'),
 } satisfies Record<string, RouteViewLoader>
@@ -101,6 +107,7 @@ const warmableRouteLoaders: Partial<Record<RouteWarmupTarget, RouteViewLoader>> 
   'client-cart': routeViewLoaders['client-cart'],
   'client-checkout': routeViewLoaders['client-checkout'],
   'client-profile': routeViewLoaders['client-profile'],
+  'client-feedback': routeViewLoaders['client-feedback'],
   'client-order-detail': routeViewLoaders['client-order-detail'],
   dashboard: routeViewLoaders.dashboard,
   'order-entry': routeViewLoaders['order-entry'],
@@ -138,6 +145,7 @@ const warmableRouteLoaders: Partial<Record<RouteWarmupTarget, RouteViewLoader>> 
       routeViewLoaders['system-client-users'](),
       preloadUserCenterTabs(['client']),
     ]),
+  'system-customer-service': routeViewLoaders['system-customer-service'],
   'system-audit-logs': routeViewLoaders['system-audit-logs'],
 }
 
@@ -156,6 +164,9 @@ const resolveClientWarmupTargetByPath = (redirectPath: string): AppRouteName | n
   }
   if (redirectPath.startsWith('/client/profile')) {
     return 'client-profile'
+  }
+  if (redirectPath.startsWith('/client/feedback')) {
+    return 'client-feedback'
   }
   if (redirectPath.startsWith('/client/mall') || redirectPath.startsWith('/client')) {
     return 'client-mall'
@@ -254,6 +265,10 @@ const resolveWarmupTargetByPath = (redirectPath: string): RouteWarmupTarget | nu
 
   if (redirectPath.startsWith('/system/client-users')) {
     return 'system-client-users'
+  }
+
+  if (redirectPath.startsWith('/system/customer-service')) {
+    return 'system-customer-service'
   }
 
   if (redirectPath.startsWith('/system/users') || redirectPath.startsWith('/system')) {

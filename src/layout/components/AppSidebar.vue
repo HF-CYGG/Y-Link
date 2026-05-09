@@ -21,19 +21,31 @@ const route = useRoute()
 const appStore = useAppStore()
 
 /**
- * 将菜单按分组整理：
+ * 需要被单独突出的工作台入口：
+ * - 由路由 meta.menuHighlight 驱动，不在侧栏里再手写业务常量；
+ * - 当前用于把客服工作台从系统治理分组中单独提炼出来。
+ */
+const spotlightMenuItems = computed(() => {
+  return props.menuItems.filter((item) => item.highlight === 'spotlight')
+})
+
+/**
+ * 将常规菜单按分组整理：
  * - 菜单分组信息全部来自路由 meta.menuGroup；
+ * - 已被单独突出的入口不再重复渲染到普通分组中。
  * - 未配置分组的菜单自动归入“导航”。
  */
 const groupedMenuItems = computed(() => {
   const groups = new Map<string, AppMenuItem[]>()
 
-  props.menuItems.forEach((item) => {
-    const groupName = item.group ?? '导航'
-    const currentItems = groups.get(groupName) ?? []
-    currentItems.push(item)
-    groups.set(groupName, currentItems)
-  })
+  props.menuItems
+    .filter((item) => item.highlight !== 'spotlight')
+    .forEach((item) => {
+      const groupName = item.group ?? '导航'
+      const currentItems = groups.get(groupName) ?? []
+      currentItems.push(item)
+      groups.set(groupName, currentItems)
+    })
 
   return Array.from(groups.entries()).map(([groupName, items]) => ({
     groupName,
@@ -159,6 +171,39 @@ const deviceLabel = computed(() => {
     </div>
 
     <div :class="['flex-1 overflow-y-auto', appStore.isDesktop ? 'px-3 py-4' : 'px-2.5 py-3']">
+      <div v-if="spotlightMenuItems.length" class="mb-5">
+        <p
+          :class="[
+            'pb-2 text-xs font-semibold uppercase tracking-[0.18em] text-brand/75 dark:text-teal-300/80',
+            appStore.isDesktop ? 'px-3' : 'px-2',
+          ]"
+        >
+          重点工作台
+        </p>
+
+        <div class="space-y-2">
+          <router-link
+            v-for="menu in spotlightMenuItems"
+            :key="menu.path"
+            :to="menu.path"
+            class="app-sidebar__spotlight-item"
+            :class="activePath === menu.path ? 'is-active' : ''"
+            @click="handleMenuSelect"
+          >
+            <div class="flex items-start gap-3">
+              <span class="app-sidebar__spotlight-icon">
+                <el-icon v-if="menu.icon"><component :is="menu.icon" /></el-icon>
+                <span v-else>客</span>
+              </span>
+              <div class="min-w-0 flex-1">
+                <p class="truncate text-sm font-semibold">{{ menu.title }}</p>
+                <p class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-300">优先处理反馈会话、Issue 字段和客服回复。</p>
+              </div>
+            </div>
+          </router-link>
+        </div>
+      </div>
+
       <div v-for="group in groupedMenuItems" :key="group.groupName" class="mb-5 last:mb-0">
         <p
           :class="[
@@ -273,6 +318,70 @@ const deviceLabel = computed(() => {
   color: #ffffff !important;
 }
 
+/*
+ * 重点工作台卡片：
+ * - 用更强的底色和图标壳强调高频入口；
+ * - 激活态保持与主品牌色一致，避免和普通菜单混淆。
+ */
+.app-sidebar__spotlight-item {
+  display: block;
+  border: 1px solid rgba(15, 118, 110, 0.14);
+  border-radius: 20px;
+  background:
+    linear-gradient(180deg, rgba(240, 253, 250, 0.98), rgba(255, 255, 255, 0.96));
+  box-shadow: 0 14px 30px -28px rgba(15, 23, 42, 0.4);
+  color: rgb(15 23 42);
+  padding: 0.9rem 0.95rem;
+  transition:
+    transform 0.18s ease,
+    box-shadow 0.18s ease,
+    border-color 0.18s ease;
+}
+
+.app-sidebar__spotlight-item:hover {
+  border-color: rgba(15, 118, 110, 0.3);
+  box-shadow: 0 18px 36px -28px rgba(15, 118, 110, 0.28);
+  transform: translateY(-1px);
+}
+
+.app-sidebar__spotlight-item.is-active {
+  border-color: rgba(15, 118, 110, 0.44);
+  box-shadow: 0 22px 42px -30px rgba(15, 118, 110, 0.34);
+}
+
+.app-sidebar__spotlight-icon {
+  display: inline-flex;
+  height: 2.25rem;
+  width: 2.25rem;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  background: rgb(15 118 110);
+  color: rgb(240 253 250);
+  font-size: 0.95rem;
+  font-weight: 700;
+}
+
+.dark .app-sidebar__spotlight-item {
+  border-color: rgba(45, 212, 191, 0.18);
+  background:
+    linear-gradient(180deg, rgba(23, 37, 37, 0.96), rgba(20, 20, 21, 0.98));
+  box-shadow: 0 16px 30px -24px rgba(0, 0, 0, 0.45);
+  color: rgb(241 245 249);
+}
+
+.dark .app-sidebar__spotlight-item:hover,
+.dark .app-sidebar__spotlight-item.is-active {
+  border-color: rgba(94, 234, 212, 0.28);
+  box-shadow: 0 18px 34px -22px rgba(13, 148, 136, 0.28);
+}
+
+.dark .app-sidebar__spotlight-icon {
+  background: rgb(17 94 89);
+  color: rgb(240 253 250);
+}
+
 /* 侧栏切页时抑制子菜单箭头过渡抖动，避免出现右侧短暂残影。 */
 :deep(.app-sidebar-menu .el-sub-menu__icon-arrow) {
   transition: none !important;
@@ -301,8 +410,8 @@ const deviceLabel = computed(() => {
   display: inline-flex;
   align-items: center;
   border-radius: 9999px;
-  background: rgba(15, 118, 110, 0.1);
-  color: #0f766e;
+  background: #0f766e;
+  color: #f0fdfa;
   font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.04em;
@@ -333,8 +442,8 @@ const deviceLabel = computed(() => {
 }
 
 .dark .app-sidebar__build-badge {
-  background: rgba(45, 212, 191, 0.12);
-  color: #99f6e4;
+  background: #115e59;
+  color: #f0fdfa;
 }
 
 .dark .app-sidebar__device-pill {

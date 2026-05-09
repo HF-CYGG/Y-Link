@@ -1,16 +1,14 @@
-const fs = require('fs');
-const path = require('path');
+const fs = require('node:fs');
 
 const checklistPath = 'f:/Y-Link/.trae/specs/review-entire-workspace-file-by-file/checklist.md';
 let checklist = fs.readFileSync(checklistPath, 'utf8');
 
 const lines = checklist.split('\n');
 let updatedLines = [];
-let skippedFiles = [];
 let missingFiles = [];
 
 for (let line of lines) {
-  const match = line.match(/- \[ \] \`([^\`]+)\`/);
+  const match = line.match(/- \[ \] `([^`]+)`/);
   if (match) {
     const filePath = match[1];
     try {
@@ -32,12 +30,12 @@ for (let line of lines) {
       
       if (hasHeader) {
         updatedLines.push(line.replace('- [ ]', '- [x]'));
-        skippedFiles.push(filePath);
       } else {
         updatedLines.push(line);
         missingFiles.push(filePath);
       }
-    } catch (e) {
+    } catch (error) {
+      console.warn('跳过无法读取的文件:', filePath, error?.message ?? error);
       updatedLines.push(line);
     }
   } else {

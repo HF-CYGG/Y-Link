@@ -9,6 +9,7 @@
  */
 
 import { computed, onMounted, reactive, ref, toRaw } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { BizCrudDialogShell } from '@/components/common'
@@ -30,6 +31,7 @@ import {
 import { extractErrorMessage } from '@/utils/error'
 
 const clientAuthStore = useClientAuthStore(pinia)
+const router = useRouter()
 
 const passwordDialogVisible = ref(false)
 const profileDialogVisible = ref(false)
@@ -311,7 +313,7 @@ onMounted(() => {
         </div>
         <button
           type="button"
-          class="rounded-full border border-slate-200 px-4 py-1.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50 hover:text-slate-900"
+          class="profile-action-button"
           @click="openProfileDialog"
         >
           编辑
@@ -343,10 +345,26 @@ onMounted(() => {
         </div>
         <button
           type="button"
-          class="rounded-full border border-slate-200 px-4 py-1.5 text-sm font-medium text-slate-700 transition hover:bg-slate-50 hover:text-slate-900"
+          class="profile-action-button"
           @click="openPasswordDialog"
         >
           修改
+        </button>
+      </div>
+    </div>
+
+    <div class="rounded-[1.2rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
+      <div class="flex items-center justify-between gap-3">
+        <div>
+          <p class="text-base font-semibold text-slate-900">反馈与客服</p>
+          <p class="mt-1 text-xs text-slate-400">统一进入反馈会话页，提交 Issue 字段并查看客服处理进度。</p>
+        </div>
+        <button
+          type="button"
+          class="profile-action-button"
+          @click="router.push('/client/feedback')"
+        >
+          进入
         </button>
       </div>
     </div>
@@ -433,3 +451,34 @@ onMounted(() => {
     </BizCrudDialogShell>
   </section>
 </template>
+
+<style scoped>
+/*
+ * 个人中心右侧操作按钮：
+ * - 移动端窄屏下强制保持单行显示，避免“编辑 / 进入 / 修改”被按字换行；
+ * - 通过最小宽度与 shrink-0 约束，让卡片正文再窄也不会把按钮挤成竖排。
+ */
+.profile-action-button {
+  display: inline-flex;
+  min-width: 4.5rem;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  border: 1px solid rgb(226 232 240);
+  border-radius: 9999px;
+  padding: 0.375rem 1rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: rgb(51 65 85);
+  transition:
+    background-color 0.18s ease,
+    color 0.18s ease,
+    transform 0.18s ease;
+}
+
+.profile-action-button:hover {
+  background: rgb(248 250 252);
+  color: rgb(15 23 42);
+}
+</style>

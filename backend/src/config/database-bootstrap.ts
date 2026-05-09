@@ -28,6 +28,8 @@ const SQLITE_REQUIRED_TABLES = [
   'inventory_log',
   'biz_inbound_order',
   'biz_inbound_order_item',
+  'client_feedback_conversation',
+  'client_feedback_message',
 ]
 
 const SQLITE_REQUIRED_ORDER_COLUMNS = [
@@ -60,6 +62,23 @@ const SQLITE_REQUIRED_PRODUCT_COLUMNS = [
 ]
 
 const SQLITE_REQUIRED_CLIENT_USER_COLUMNS = ['mobile', 'email', 'real_name', 'department_name', 'status', 'last_login_at']
+const SQLITE_REQUIRED_CLIENT_FEEDBACK_CONVERSATION_COLUMNS = [
+  'issue_type',
+  'source_code',
+  'source_label',
+  'order_ref',
+  'expected_result',
+  'actual_result',
+  'reproduction_steps',
+  'contact_preference',
+  'tag_json',
+  'internal_remark',
+  'internal_remark_updated_at',
+  'internal_remark_by_user_id',
+  'internal_remark_by_username',
+  'internal_remark_by_display_name',
+]
+const SQLITE_REQUIRED_CLIENT_FEEDBACK_MESSAGE_COLUMNS = ['internal_only', 'attachment_json']
 const SQLITE_REQUIRED_O2O_PREORDER_COLUMNS = [
   'cancel_reason',
   'business_status',
@@ -81,7 +100,7 @@ async function listSqliteTableColumns(dataSource: DataSource, tableName: string)
 function serializeSqliteNumericLiteral(value: number, fractionDigits = 2): string {
   // SQLite DDL 的 DEFAULT 子句不能使用参数占位符，因此这里先把内部常量收敛为有限数字，再序列化成 SQL 数值字面量。
   if (!Number.isFinite(value)) {
-    throw new Error(`SQLite 数值字面量非法: ${String(value)}`)
+    throw new TypeError(`SQLite 数值字面量非法: ${String(value)}`)
   }
   return value.toFixed(fractionDigits)
 }
@@ -263,13 +282,26 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
     return true
   }
 
+  const clientFeedbackConversationColumnSet = await listSqliteTableColumns(dataSource, 'client_feedback_conversation')
+  if (SQLITE_REQUIRED_CLIENT_FEEDBACK_CONVERSATION_COLUMNS.some((column) => !clientFeedbackConversationColumnSet.has(column))) {
+    return true
+  }
+
+  const clientFeedbackMessageColumnSet = await listSqliteTableColumns(dataSource, 'client_feedback_message')
+  if (SQLITE_REQUIRED_CLIENT_FEEDBACK_MESSAGE_COLUMNS.some((column) => !clientFeedbackMessageColumnSet.has(column))) {
+    return true
+  }
+
   const o2oPreorderColumnSet = await listSqliteTableColumns(dataSource, 'o2o_preorder')
   if (SQLITE_REQUIRED_O2O_PREORDER_COLUMNS.some((column) => !o2oPreorderColumnSet.has(column))) {
     return true
   }
 
   const o2oReturnRequestColumnSet = await listSqliteTableColumns(dataSource, 'o2o_return_request')
-  return SQLITE_REQUIRED_O2O_RETURN_REQUEST_COLUMNS.some((column) => !o2oReturnRequestColumnSet.has(column))
+  if (SQLITE_REQUIRED_O2O_RETURN_REQUEST_COLUMNS.some((column) => !o2oReturnRequestColumnSet.has(column))) {
+    return true
+  }
+  return false
 }
 
 export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): Promise<DatabaseSchemaInitResult> {

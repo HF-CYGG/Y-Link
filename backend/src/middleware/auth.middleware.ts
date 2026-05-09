@@ -46,16 +46,25 @@ function recordForbiddenAudit(req: Request, reason: string, requiredRules: Recor
 
 function parseBearerToken(req: Request): string | null {
   const authorization = req.headers.authorization
-  if (!authorization) {
-    return null
+  if (authorization) {
+    const [scheme, token] = authorization.split(' ')
+    if (scheme === 'Bearer' && token?.trim()) {
+      return token.trim()
+    }
   }
 
-  const [scheme, token] = authorization.split(' ')
-  if (scheme !== 'Bearer' || !token?.trim()) {
+  /**
+   * SSE 原生 EventSource 无法附带自定义 Authorization 头，
+   * 因此在仅流式订阅场景下额外兼容 `access_token` 查询参数，
+   * 仍统一复用同一套 token 解析与鉴权链路。
+   */
+  const queryToken = typeof req.query.access_token === 'string'
+    ? req.query.access_token.trim()
+    : ''
+  if (!queryToken) {
     return null
   }
-
-  return token.trim()
+  return queryToken
 }
 
 /**
