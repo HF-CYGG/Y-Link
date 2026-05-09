@@ -32,15 +32,67 @@
 ### 仓库结构一览
 ```text
 f:\Y-Link
-├─ src/                    前端源码（管理端 + 客户端）
-├─ backend/                后端源码、SQL、校验脚本
-├─ scripts/                构建、性能、质量与部署辅助脚本
-├─ docs/                   使用说明、迁移文档、界面截图
-├─ docker/                 Nginx 与 onebox 相关配置
-├─ compose.yml             本地 Docker 编排
-├─ compose.cloud.yml       云端/1Panel 编排
-└─ README.md               项目入口说明
+├─ src/                          前端源码（管理端 + 客户端）
+│  ├─ api/                      前端 API 封装与模块化请求入口
+│  ├─ components/               通用图表、通用页面壳、弹窗壳、展示组件
+│  ├─ composables/              设备探测、稳定请求、权限动作等复用逻辑
+│  ├─ constants/                共享常量（版本号、订单状态等）
+│  ├─ layout/                   管理端布局、侧栏、头部、主题切换
+│  ├─ router/                   前端路由、性能钩子、导航元信息
+│  ├─ store/                    Pinia 状态管理（管理端 + 客户端）
+│  ├─ utils/                    权限、时间、缓存、提交反馈、PDF 导出等工具
+│  └─ views/                    管理端与客户端各业务页面
+│     ├─ auth/                  管理端登录
+│     ├─ dashboard/             工作台 / 看板
+│     ├─ order-entry/           出库开单
+│     ├─ order-list/            出库列表、详情、出库单模板
+│     ├─ inbound/               扫码入库、供货录入、供货历史、供货工作台
+│     ├─ o2o/                   线上预订查询、预订单核销、线上展示管理
+│     ├─ base-data/             基础产品与标签管理
+│     ├─ product-center/        产品中心整合页
+│     ├─ system/                用户中心、系统配置、数据库迁移、审计日志
+│     └─ client/                客户端登录、商城、购物车、结算、订单、个人中心
+├─ backend/                     后端源码、SQL、校验脚本
+│  ├─ src/
+│  │  ├─ config/                数据源、环境变量、数据库启动与运行时覆盖
+│  │  ├─ entities/              TypeORM 实体（商品、订单、库存、用户、配置等）
+│  │  ├─ middleware/            鉴权、中间件、统一错误处理
+│  │  ├─ routes/                REST 路由入口（auth、order、o2o、system 等）
+│  │  ├─ services/              核心业务服务、审计、安全、迁移、验证码等逻辑
+│  │  ├─ constants/             权限码、迁移文案等共享后端常量
+│  │  ├─ types/                 API / 鉴权 / 仪表盘类型定义
+│  │  └─ utils/                 token、密码、异常、网络安全、请求元信息工具
+│  ├─ sql/                      初始化脚本、结构迁移脚本、回滚脚本
+│  ├─ scripts/                  后端专项校验、功能回归、数据修复脚本
+│  └─ uploads/                  上传文件存储目录
+├─ scripts/                     前端构建、性能、发布、onebox、并发与质量总控脚本
+├─ docs/                        使用说明、迁移文档、界面截图、规范与白皮书
+├─ docker/                      Nginx 与 onebox 启动配置
+│  ├─ nginx/                    前端静态站点、代理与 onebox Nginx 配置
+│  └─ onebox/                   单镜像入口脚本
+├─ spec/                        历史任务说明、治理约束、验收留档与专项文档
+├─ public/                      前端静态资源
+├─ .github/workflows/           Docker 镜像发布等 CI 工作流
+├─ compose.yml                  本地 Docker 编排
+├─ compose.cloud.yml            云端 / 1Panel 编排
+├─ compose.mysql.yml            外置 MySQL 编排
+├─ Dockerfile                   前端镜像构建文件
+├─ Dockerfile.onebox            前后端一体化镜像构建文件
+├─ start-local-dev.ps1          本地联调启动脚本
+├─ status-local-dev.ps1         本地联调状态脚本
+├─ stop-local-dev.ps1           本地联调停止脚本
+└─ README.md                    项目入口说明
 ```
+
+### 目录职责补充
+- `src/views`：承载主要业务页面，管理端与客户端共存，是理解业务流最直观的入口。
+- `src/components/common`：沉淀跨模块复用的页面壳、弹窗壳、空态与请求态组件，适合二开时优先复用。
+- `src/store/modules`：集中管理管理端鉴权、客户端购物车、客户端订单、主题等跨页面状态。
+- `backend/services`：后端业务核心区，大部分规则、审计、库存变更、迁移控制都在这里汇总。
+- `backend/sql`：用于新库初始化、历史结构升级与特定任务迁移，部署和排障时常会用到。
+- `scripts` 与 `backend/scripts`：分别负责前端/全栈质量总控和后端专项验收，建议在较大改动后配合使用。
+- `docs`：提供上手手册、数据库迁移向导、企业维护白皮书、模块职责地图等面向使用者与开发者的文档。
+- `spec`：保存历史治理任务、约束清单与验收留档，适合回看设计决策与问题背景。
 
 ### 命令速查
 | 场景 | 命令 | 说明 |
