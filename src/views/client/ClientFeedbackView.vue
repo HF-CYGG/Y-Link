@@ -180,13 +180,13 @@ onBeforeUnmount(() => {
         <div class="min-w-0 flex-1">
           <button
             type="button"
-            class="inline-flex h-8 w-8 items-center justify-center rounded-full text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
-            aria-label="返回上一页"
+            class="inline-flex items-center gap-1 rounded-full px-2.5 py-1.5 text-sm font-medium text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
             @click="handleNavigateBack"
           >
             <svg viewBox="0 0 20 20" fill="none" class="h-4 w-4" aria-hidden="true">
               <path d="M11.5 4.5L6 10l5.5 5.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
             </svg>
+            <span>返回</span>
           </button>
           <p class="text-xl font-semibold text-slate-900">反馈会话</p>
           <p class="mt-1 text-sm leading-6 text-slate-500">
