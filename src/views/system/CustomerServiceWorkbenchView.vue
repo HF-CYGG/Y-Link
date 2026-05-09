@@ -105,6 +105,55 @@ const getCategoryLabel = (category: FeedbackIssueCategory) => {
   return FEEDBACK_CATEGORY_OPTIONS.find((item) => item.value === category)?.label ?? '其他建议'
 }
 
+/**
+ * Element Plus 标签类型映射：
+ * - 统一把业务状态翻译成组件语义色，避免模板层散落多套 class 判断；
+ * - 后续若要统一品牌色，只需要在这里集中调整。
+ */
+const getRealtimeTagType = () => {
+  if (realtimeState.value === 'online') {
+    return 'success'
+  }
+  if (realtimeState.value === 'connecting') {
+    return 'warning'
+  }
+  return 'info'
+}
+
+const getStatusTagType = (status: FeedbackIssueStatus) => {
+  if (status === 'pending') {
+    return 'warning'
+  }
+  if (status === 'processing') {
+    return 'primary'
+  }
+  if (status === 'resolved') {
+    return 'success'
+  }
+  return 'info'
+}
+
+const getPriorityTagType = (priority: FeedbackIssuePriority) => {
+  if (priority === 'urgent') {
+    return 'danger'
+  }
+  if (priority === 'high') {
+    return 'warning'
+  }
+  if (priority === 'medium') {
+    return 'primary'
+  }
+  return 'info'
+}
+
+const getQuickStatusButtonType = (status: FeedbackIssueStatus) => {
+  return issueForm.status === status ? 'primary' : 'default'
+}
+
+const getPriorityButtonType = (priority: FeedbackIssuePriority) => {
+  return issueForm.priority === priority ? 'primary' : 'default'
+}
+
 const parseTagText = (value: string): string[] => {
   return [...new Set(
     value
@@ -736,17 +785,14 @@ onBeforeUnmount(() => {
     description="统一承接客户端反馈、Issue 字段治理与会话回复，减少客服在多个系统之间切换。"
   >
     <div class="space-y-3">
-      <article class="rounded-[28px] border border-slate-200/80 bg-white/95 p-4 shadow-[0_18px_48px_-40px_rgba(15,23,42,0.24)]">
+      <el-card class="cs-panel-card" shadow="never">
         <div class="flex flex-col gap-4 2xl:flex-row 2xl:items-start 2xl:justify-between">
           <div class="min-w-0 2xl:max-w-[420px]">
             <div class="flex flex-wrap items-center gap-2">
               <p class="text-base font-semibold text-slate-900">在线状态</p>
-              <span
-                class="rounded-full px-3 py-1.5 text-xs font-semibold"
-                :class="realtimeState === 'online' ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'"
-              >
+              <el-tag :type="getRealtimeTagType()" effect="light" round>
                 {{ realtimeState === 'online' ? '客服在线' : realtimeState === 'connecting' ? '连接中' : '客服离线' }}
-              </span>
+              </el-tag>
             </div>
             <p class="mt-2 text-sm text-slate-500">
               {{ presence?.availability?.isOnline ? `当前在线，已有 ${presence?.session.serviceConnectionCount ?? 0} 位客服在线接待，可在当前工作台持续跟进。` : (presence?.availability?.offlineNotice || '正在确认客服在线状态...') }}
@@ -755,99 +801,102 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="grid gap-2 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-6 2xl:min-w-0 2xl:flex-1">
-            <article class="cs-summary-card cs-summary-card--compact">
+            <el-card class="cs-summary-card cs-summary-card--compact" shadow="never">
               <p class="cs-summary-card__label">全部反馈</p>
               <p class="cs-summary-card__value">{{ summary.all }}</p>
-            </article>
-            <article class="cs-summary-card cs-summary-card--compact">
+            </el-card>
+            <el-card class="cs-summary-card cs-summary-card--compact" shadow="never">
               <p class="cs-summary-card__label">待受理</p>
               <p class="cs-summary-card__value text-amber-600">{{ summary.pending }}</p>
-            </article>
-            <article class="cs-summary-card cs-summary-card--compact">
+            </el-card>
+            <el-card class="cs-summary-card cs-summary-card--compact" shadow="never">
               <p class="cs-summary-card__label">处理中</p>
               <p class="cs-summary-card__value text-sky-600">{{ summary.processing }}</p>
-            </article>
-            <article class="cs-summary-card cs-summary-card--compact">
+            </el-card>
+            <el-card class="cs-summary-card cs-summary-card--compact" shadow="never">
               <p class="cs-summary-card__label">紧急反馈</p>
               <p class="cs-summary-card__value text-rose-600">{{ summary.urgent }}</p>
-            </article>
-            <article class="cs-summary-card cs-summary-card--compact">
+            </el-card>
+            <el-card class="cs-summary-card cs-summary-card--compact" shadow="never">
               <p class="cs-summary-card__label">待分配</p>
               <p class="cs-summary-card__value text-slate-700">{{ summary.unassigned }}</p>
-            </article>
-            <article class="cs-summary-card cs-summary-card--compact">
+            </el-card>
+            <el-card class="cs-summary-card cs-summary-card--compact" shadow="never">
               <p class="cs-summary-card__label">等待客服回复</p>
               <p class="cs-summary-card__value text-brand">{{ summary.waitingStaffReply }}</p>
-            </article>
+            </el-card>
           </div>
         </div>
-      </article>
+      </el-card>
 
-      <article class="rounded-[28px] border border-slate-200/80 bg-white/95 p-4 shadow-[0_18px_48px_-40px_rgba(15,23,42,0.24)]">
-        <div class="flex flex-col gap-3 xl:flex-row xl:items-end">
-          <div class="grid flex-1 gap-3 md:grid-cols-2 xl:grid-cols-[minmax(0,1.5fr)_160px_160px_170px]">
-            <label class="block">
-              <span class="mb-1.5 block text-xs font-medium tracking-[0.16em] text-slate-400">关键字</span>
-              <input
-                v-model="searchForm.keyword"
-                type="text"
-                maxlength="80"
-                class="cs-input"
-                placeholder="搜索标题、Issue 编号、用户、订单号、标签"
-                @keyup.enter="handleSearch"
-              />
-            </label>
-            <label class="block">
-              <span class="mb-1.5 block text-xs font-medium tracking-[0.16em] text-slate-400">状态</span>
-              <select v-model="searchForm.status" class="cs-input">
-                <option value="">全部状态</option>
-                <option v-for="item in FEEDBACK_STATUS_OPTIONS" :key="item.value" :value="item.value">
-                  {{ item.label }}
-                </option>
-              </select>
-            </label>
-            <label class="block">
-              <span class="mb-1.5 block text-xs font-medium tracking-[0.16em] text-slate-400">优先级</span>
-              <select v-model="searchForm.priority" class="cs-input">
-                <option value="">全部优先级</option>
-                <option v-for="item in FEEDBACK_PRIORITY_OPTIONS" :key="item.value" :value="item.value">
-                  {{ item.label }}
-                </option>
-              </select>
-            </label>
-            <label class="block">
-              <span class="mb-1.5 block text-xs font-medium tracking-[0.16em] text-slate-400">分配范围</span>
-              <select v-model="searchForm.assigneeScope" class="cs-input">
-                <option value="all">全部工单</option>
-                <option value="mine">仅看我的</option>
-                <option value="unassigned">仅看待分配</option>
-              </select>
-            </label>
-          </div>
+      <el-card class="cs-panel-card" shadow="never">
+        <el-form label-position="top" class="cs-filter-form">
+          <div class="flex flex-col gap-3 xl:flex-row xl:items-end">
+            <div class="grid flex-1 gap-3 md:grid-cols-2 xl:grid-cols-[minmax(0,1.5fr)_160px_160px_170px]">
+              <el-form-item label="关键字" class="!mb-0">
+                <el-input
+                  v-model="searchForm.keyword"
+                  maxlength="80"
+                  clearable
+                  placeholder="搜索标题、Issue 编号、用户、订单号、标签"
+                  @keyup.enter="handleSearch"
+                />
+              </el-form-item>
+              <el-form-item label="状态" class="!mb-0">
+                <el-select v-model="searchForm.status" placeholder="全部状态" clearable class="w-full">
+                  <el-option
+                    v-for="item in FEEDBACK_STATUS_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="优先级" class="!mb-0">
+                <el-select v-model="searchForm.priority" placeholder="全部优先级" clearable class="w-full">
+                  <el-option
+                    v-for="item in FEEDBACK_PRIORITY_OPTIONS"
+                    :key="item.value"
+                    :label="item.label"
+                    :value="item.value"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item label="分配范围" class="!mb-0">
+                <el-select v-model="searchForm.assigneeScope" class="w-full">
+                  <el-option label="全部工单" value="all" />
+                  <el-option label="仅看我的" value="mine" />
+                  <el-option label="仅看待分配" value="unassigned" />
+                </el-select>
+              </el-form-item>
+            </div>
 
-          <div class="flex flex-wrap gap-2 xl:shrink-0 xl:justify-end">
-            <button type="button" class="cs-secondary-button" @click="handleReset">重置筛选</button>
-            <button type="button" class="cs-primary-button" @click="handleSearch">刷新列表</button>
+            <div class="flex flex-wrap gap-2 xl:shrink-0 xl:justify-end">
+              <el-button @click="handleReset">重置筛选</el-button>
+              <el-button type="primary" :loading="loading" @click="handleSearch">刷新列表</el-button>
+            </div>
           </div>
-        </div>
-      </article>
+        </el-form>
+      </el-card>
 
       <div class="grid gap-4 xl:grid-cols-[320px_minmax(0,1fr)] 2xl:grid-cols-[336px_minmax(0,1fr)]">
-        <article class="rounded-[28px] border border-slate-200/80 bg-white/95 p-4 shadow-[0_18px_48px_-40px_rgba(15,23,42,0.24)] xl:flex xl:min-h-[calc(100vh-18rem)] xl:flex-col">
-          <div class="flex items-center justify-between gap-3">
-            <div>
+        <el-card class="cs-panel-card xl:flex xl:min-h-[calc(100vh-18rem)] xl:flex-col" shadow="never">
+          <div class="cs-list-heading">
+            <div class="min-w-0">
               <p class="text-base font-semibold text-slate-900">反馈列表</p>
-              <p class="mt-1 text-xs text-slate-400">最近更新的会话优先展示，便于先处理正在往来的问题。</p>
+              <p class="cs-list-heading__desc">最近更新的会话优先展示，便于先处理正在往来的问题。</p>
             </div>
-            <span class="text-xs font-medium text-slate-400">{{ conversations.length }} 条</span>
+            <el-tag type="info" effect="plain" round class="cs-list-count">
+              共 {{ conversations.length }} 条
+            </el-tag>
           </div>
 
-          <div v-if="loading" class="mt-4 rounded-[18px] bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
-            正在加载反馈列表...
+          <div v-if="loading" class="mt-4">
+            <el-skeleton :rows="6" animated />
           </div>
 
-          <div v-else-if="!conversations.length" class="mt-4 rounded-[18px] bg-slate-50 px-4 py-8 text-center text-sm text-slate-500">
-            当前筛选下暂无反馈会话，可调整筛选条件后重试。
+          <div v-else-if="!conversations.length" class="mt-4 rounded-[18px] bg-slate-50/70">
+            <el-empty description="当前筛选下暂无反馈会话，可调整筛选条件后重试。" :image-size="88" />
           </div>
 
           <TransitionGroup
@@ -856,12 +905,12 @@ onBeforeUnmount(() => {
             tag="div"
             class="mt-4 space-y-3 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:pr-1"
           >
-            <button
+            <el-card
               v-for="item in conversations"
               :key="item.id"
-              type="button"
-              class="cs-conversation-item block w-full rounded-[20px] border p-4 text-left transition"
-              :class="item.id === selectedConversationId ? 'is-selected border-brand bg-brand/5' : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50'"
+              class="cs-conversation-item"
+              shadow="hover"
+              :class="item.id === selectedConversationId ? 'is-selected' : ''"
               @click="handleSelectConversation(item.id)"
             >
               <div class="flex flex-wrap items-start justify-between gap-2">
@@ -869,9 +918,9 @@ onBeforeUnmount(() => {
                   <p class="truncate text-sm font-semibold text-slate-900">{{ item.title }}</p>
                   <p class="mt-1 text-xs text-slate-500">{{ item.issueNo }}</p>
                 </div>
-                <span class="rounded-full px-2.5 py-1 text-[11px] font-semibold" :class="FEEDBACK_STATUS_META_MAP[item.status].className">
+                <el-tag :type="getStatusTagType(item.status)" effect="light" round>
                   {{ FEEDBACK_STATUS_META_MAP[item.status].label }}
-                </span>
+                </el-tag>
               </div>
 
               <div class="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-500">
@@ -881,263 +930,287 @@ onBeforeUnmount(() => {
               </div>
 
               <div class="mt-3 flex flex-wrap items-center gap-2">
-                <span class="rounded-full px-2.5 py-1 text-[11px] font-semibold" :class="FEEDBACK_PRIORITY_META_MAP[item.priority].className">
+                <el-tag :type="getPriorityTagType(item.priority)" effect="light" round>
                   {{ FEEDBACK_PRIORITY_META_MAP[item.priority].label }}
-                </span>
-                <span v-if="item.assigneeName" class="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-600">
+                </el-tag>
+                <el-tag v-if="item.assigneeName" type="info" effect="plain" round>
                   {{ item.assigneeName }}
-                </span>
-                <span v-if="item.unreadForStaff > 0" class="rounded-full bg-rose-50 px-2.5 py-1 text-[11px] font-semibold text-rose-600">
+                </el-tag>
+                <el-tag v-if="item.unreadForStaff > 0" type="danger" effect="light" round>
                   待回复 {{ item.unreadForStaff }}
-                </span>
+                </el-tag>
               </div>
-            </button>
+            </el-card>
           </TransitionGroup>
-        </article>
+        </el-card>
 
         <Transition name="cs-detail-panel" mode="out-in">
-          <article
+          <el-card
             v-if="selectedConversation"
             :key="selectedConversation.id"
-            class="rounded-[28px] border border-slate-200/80 bg-white/95 p-4 shadow-[0_18px_48px_-40px_rgba(15,23,42,0.24)] xl:flex xl:min-h-[calc(100vh-18rem)] xl:flex-col"
+            class="cs-panel-card xl:flex xl:min-h-[calc(100vh-18rem)] xl:flex-col"
+            shadow="never"
           >
-          <div v-if="detailLoading" class="mb-4 rounded-[18px] bg-slate-50 px-4 py-3 text-sm text-slate-500">
-            正在同步会话详情...
-          </div>
-          <div class="flex flex-wrap items-start justify-between gap-3">
-            <div class="min-w-0">
-              <p class="text-xs font-semibold tracking-[0.16em] text-slate-400">{{ selectedConversation.issueNo }}</p>
-              <h2 class="mt-2 text-xl font-semibold text-slate-900">{{ selectedConversation.title }}</h2>
-              <p class="mt-2 text-sm leading-6 text-slate-500">
-                {{ selectedConversation.clientDisplayName }} · {{ selectedConversation.clientAccount }} · {{ selectedConversation.clientDepartmentName || '未填写部门' }}
-              </p>
+            <div v-if="detailLoading" class="mb-4">
+              <el-skeleton :rows="4" animated />
+            </div>
+            <div class="flex flex-wrap items-start justify-between gap-3">
+              <div class="min-w-0">
+                <p class="text-xs font-semibold tracking-[0.16em] text-slate-400">{{ selectedConversation.issueNo }}</p>
+                <h2 class="mt-2 text-xl font-semibold text-slate-900">{{ selectedConversation.title }}</h2>
+                <p class="mt-2 text-sm leading-6 text-slate-500">
+                  {{ selectedConversation.clientDisplayName }} · {{ selectedConversation.clientAccount }} · {{ selectedConversation.clientDepartmentName || '未填写部门' }}
+                </p>
+              </div>
+
+              <div class="flex flex-wrap gap-2">
+                <el-tag :type="getStatusTagType(selectedConversation.status)" effect="light" round>
+                  {{ FEEDBACK_STATUS_META_MAP[selectedConversation.status].label }}
+                </el-tag>
+                <el-tag :type="getPriorityTagType(selectedConversation.priority)" effect="light" round>
+                  {{ FEEDBACK_PRIORITY_META_MAP[selectedConversation.priority].label }}
+                </el-tag>
+              </div>
             </div>
 
-            <div class="flex flex-wrap gap-2">
-              <span class="rounded-full px-3 py-1.5 text-xs font-semibold" :class="FEEDBACK_STATUS_META_MAP[selectedConversation.status].className">
-                {{ FEEDBACK_STATUS_META_MAP[selectedConversation.status].label }}
-              </span>
-              <span class="rounded-full px-3 py-1.5 text-xs font-semibold" :class="FEEDBACK_PRIORITY_META_MAP[selectedConversation.priority].className">
-                {{ FEEDBACK_PRIORITY_META_MAP[selectedConversation.priority].label }}
-              </span>
+            <div class="mt-4 rounded-[20px] border border-slate-200 bg-slate-50/80 px-4 py-3">
+              <div class="flex flex-wrap items-center justify-between gap-3">
+                <div class="flex flex-wrap items-center gap-2">
+                  <el-button type="primary" plain :loading="saving && quickStatusUpdating === '' && priorityUpdating === ''" :disabled="saving" @click="handleTakeOver">
+                    接手处理
+                  </el-button>
+                  <el-button
+                    v-for="item in FEEDBACK_STATUS_OPTIONS.filter((option) => ['pending', 'processing', 'resolved'].includes(option.value))"
+                    :key="item.value"
+                    :type="getQuickStatusButtonType(item.value)"
+                    :plain="issueForm.status !== item.value"
+                    :loading="quickStatusUpdating === item.value"
+                    :disabled="saving"
+                    @click="handleQuickStatus(item.value)"
+                  >
+                    {{ item.label }}
+                  </el-button>
+                </div>
+                <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                  <el-tag type="info" effect="plain" round>
+                    当前负责人：{{ selectedConversation.assigneeName || '待分配' }}
+                  </el-tag>
+                  <el-button link type="danger" :disabled="saving" @click="handleQuickStatus('closed')">关闭会话</el-button>
+                </div>
+              </div>
             </div>
-          </div>
 
-          <div class="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-[20px] border border-slate-200 bg-slate-50/80 px-4 py-3">
-            <div class="flex flex-wrap items-center gap-2">
-              <button type="button" class="cs-mini-button" :class="{ 'is-busy': saving && quickStatusUpdating === '' && priorityUpdating === '' }" :disabled="saving" @click="handleTakeOver">接手处理</button>
-              <button
-                v-for="item in FEEDBACK_STATUS_OPTIONS.filter((option) => ['pending', 'processing', 'resolved'].includes(option.value))"
-                :key="item.value"
-                type="button"
-                class="cs-status-button"
-                :class="[{ 'is-busy': quickStatusUpdating === item.value }, issueForm.status === item.value ? 'is-active' : '']"
-                :disabled="saving"
-                @click="handleQuickStatus(item.value)"
-              >
-                {{ quickStatusUpdating === item.value ? '处理中...' : item.label }}
-              </button>
-            </div>
-            <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-              <span class="rounded-full bg-white px-2.5 py-1 font-medium text-slate-600">
-                当前负责人：{{ selectedConversation.assigneeName || '待分配' }}
-              </span>
-              <button type="button" class="cs-text-button" :disabled="saving" @click="handleQuickStatus('closed')">关闭会话</button>
-            </div>
-          </div>
+            <div class="mt-5 grid gap-4 xl:min-h-0 xl:flex-1 2xl:grid-cols-[minmax(0,1fr)_320px]">
+              <div class="flex min-h-0 flex-col gap-4">
+                <el-card class="cs-sub-card xl:flex xl:min-h-0 xl:flex-col" shadow="never">
+                  <div class="flex items-center justify-between gap-3">
+                    <div>
+                      <p class="text-base font-semibold text-slate-900">会话详情</p>
+                      <p class="mt-1 text-xs text-slate-400">围绕当前 Issue 的完整消息记录，客服回复后客户端会看到同一条会话更新。</p>
+                    </div>
+                    <span class="text-xs text-slate-400">{{ selectedConversation.messages.length }} 条消息</span>
+                  </div>
 
-          <div class="mt-5 grid gap-4 xl:min-h-0 xl:flex-1 2xl:grid-cols-[minmax(0,1fr)_320px]">
-            <div class="flex min-h-0 flex-col gap-4">
-              <div class="rounded-[20px] border border-slate-200 bg-slate-50/80 p-4 xl:flex xl:min-h-0 xl:flex-col">
+                  <el-scrollbar class="mt-4 xl:min-h-0 xl:flex-1">
+                    <TransitionGroup name="cs-message-stack" tag="div" class="space-y-3 pr-1">
+                      <el-card
+                        v-for="message in selectedConversation.messages"
+                        :key="message.id"
+                        class="cs-message-card"
+                        shadow="never"
+                        :class="message.senderRole === 'staff' ? 'is-staff' : 'is-client'"
+                      >
+                        <div class="flex flex-wrap items-center justify-between gap-2">
+                          <p class="text-sm font-semibold text-slate-900">
+                            {{ message.senderName }}
+                            <span class="ml-2 text-xs font-medium text-slate-400">
+                              {{ message.senderRole === 'staff' ? '客服' : '客户端' }}
+                            </span>
+                          </p>
+                          <span class="text-xs text-slate-400">{{ formatDateTime(message.createdAt) }}</span>
+                        </div>
+                        <p class="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-700">{{ message.body }}</p>
+                      </el-card>
+                    </TransitionGroup>
+                  </el-scrollbar>
+                </el-card>
+
+                <el-card class="cs-sub-card" shadow="never">
+                  <div class="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <p class="text-base font-semibold text-slate-900">客服处理面板</p>
+                      <p class="mt-1 text-xs text-slate-400">将回复、内部备注和优先级重分配收口到同一区域，减少信息分散。</p>
+                    </div>
+                    <el-button plain :disabled="saving" @click="handleTogglePriorityPanel">
+                      {{ isPriorityPanelExpanded ? '收起优先级' : '重分配优先级' }}
+                    </el-button>
+                  </div>
+
+                  <el-collapse-transition>
+                    <div v-if="isPriorityPanelExpanded" class="mt-4 rounded-[18px] border border-slate-200 bg-slate-50 px-4 py-3">
+                      <div class="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <p class="text-sm font-semibold text-slate-900">客服优先级重分配</p>
+                          <p class="mt-1 text-xs text-slate-400">按实际影响范围与紧急度调整优先级，保存后会同步列表与会话标签。</p>
+                        </div>
+                        <el-tag :type="getPriorityTagType(issueForm.priority)" effect="light" round>
+                          当前：{{ FEEDBACK_PRIORITY_META_MAP[issueForm.priority].label }}
+                        </el-tag>
+                      </div>
+                      <div class="mt-3 flex flex-wrap gap-2">
+                        <el-button
+                          v-for="item in FEEDBACK_PRIORITY_OPTIONS"
+                          :key="item.value"
+                          :type="getPriorityButtonType(item.value)"
+                          :plain="issueForm.priority !== item.value"
+                          :loading="priorityUpdating === item.value"
+                          :disabled="saving"
+                          @click="handleReassignPriority(item.value)"
+                        >
+                          {{ item.label }}
+                        </el-button>
+                      </div>
+                    </div>
+                  </el-collapse-transition>
+
+                  <div class="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+                    <el-card class="cs-inner-action-card" shadow="never">
+                      <div class="flex items-center justify-between gap-3">
+                        <div>
+                          <p class="text-sm font-semibold text-slate-900">客服回复</p>
+                          <p class="mt-1 text-xs text-slate-400">发送前会同步当前结构化字段，确保结论与状态一致。</p>
+                        </div>
+                        <el-button type="primary" :loading="replying" :disabled="replying" @click="handleReply">
+                          发送回复
+                        </el-button>
+                      </div>
+                      <el-input
+                        v-model="replyDraft"
+                        class="mt-4"
+                        type="textarea"
+                        :rows="5"
+                        maxlength="500"
+                        show-word-limit
+                        resize="vertical"
+                        placeholder="请输入给客户端的回复内容，例如处理结论、补充说明或下一步动作。"
+                      />
+                    </el-card>
+
+                    <el-card class="cs-inner-action-card" shadow="never">
+                      <div class="flex items-center justify-between gap-3">
+                        <div>
+                          <p class="text-sm font-semibold text-slate-900">内部备注</p>
+                          <p class="mt-1 text-xs text-slate-400">仅客服内部可见，适合记录排查结论与交接信息。</p>
+                        </div>
+                        <el-button :loading="remarkSaving" :disabled="remarkSaving" @click="handleSaveInternalRemark">
+                          保存备注
+                        </el-button>
+                      </div>
+                      <el-input
+                        v-model="issueForm.internalRemark"
+                        class="mt-4"
+                        type="textarea"
+                        :rows="5"
+                        maxlength="4000"
+                        show-word-limit
+                        resize="vertical"
+                        placeholder="可记录排查结论、交接信息、风险判断或内部提醒。"
+                      />
+                      <p v-if="selectedConversation.internalRemark?.updatedAt" class="mt-2 text-xs text-slate-400">
+                        最近更新：{{ selectedConversation.internalRemark.updatedByDisplayName || selectedConversation.internalRemark.updatedByUsername || '未知客服' }}
+                        · {{ formatDateTime(selectedConversation.internalRemark.updatedAt) }}
+                      </p>
+                    </el-card>
+                  </div>
+                </el-card>
+              </div>
+
+              <el-card class="cs-sub-card xl:min-h-0" shadow="never">
                 <div class="flex items-center justify-between gap-3">
                   <div>
-                    <p class="text-base font-semibold text-slate-900">会话详情</p>
-                    <p class="mt-1 text-xs text-slate-400">围绕当前 Issue 的完整消息记录，客服回复后客户端会看到同一条会话更新。</p>
+                    <p class="text-base font-semibold text-slate-900">Issue 字段</p>
+                    <p class="mt-1 text-xs text-slate-400">聚焦结构化排查字段，去掉与顶部状态和优先级重复的内容。</p>
                   </div>
-                  <span class="text-xs text-slate-400">{{ selectedConversation.messages.length }} 条消息</span>
+                  <el-tag type="info" effect="plain" round>
+                    {{ getCategoryLabel(issueForm.category) }}
+                  </el-tag>
                 </div>
 
-                <TransitionGroup name="cs-message-stack" tag="div" class="mt-4 space-y-3 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:pr-1">
-                  <article
-                    v-for="message in selectedConversation.messages"
-                    :key="message.id"
-                    class="cs-message-card rounded-[18px] px-4 py-3"
-                    :class="message.senderRole === 'staff' ? 'ml-auto bg-brand/10' : 'bg-white'"
-                  >
-                    <div class="flex flex-wrap items-center justify-between gap-2">
-                      <p class="text-sm font-semibold text-slate-900">
-                        {{ message.senderName }}
-                        <span class="ml-2 text-xs font-medium text-slate-400">
-                          {{ message.senderRole === 'staff' ? '客服' : '客户端' }}
-                        </span>
-                      </p>
-                      <span class="text-xs text-slate-400">{{ formatDateTime(message.createdAt) }}</span>
-                    </div>
-                    <p class="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-700">{{ message.body }}</p>
-                  </article>
-                </TransitionGroup>
-              </div>
+                <el-scrollbar class="mt-4 xl:min-h-0">
+                  <el-form label-position="top" class="cs-issue-form pr-1">
+                    <el-form-item label="标题">
+                      <el-input v-model="issueForm.title" maxlength="80" show-word-limit />
+                    </el-form-item>
 
-              <div class="rounded-[20px] border border-slate-200 bg-white p-4">
-                <div class="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <p class="text-base font-semibold text-slate-900">客服处理面板</p>
-                    <p class="mt-1 text-xs text-slate-400">将回复、内部备注和优先级重分配收口到同一区域，减少信息分散。</p>
-                  </div>
-                  <button type="button" class="cs-mini-button" :disabled="saving" @click="handleTogglePriorityPanel">
-                    {{ isPriorityPanelExpanded ? '收起优先级' : '重分配优先级' }}
-                  </button>
-                </div>
-
-                <Transition name="cs-collapse">
-                  <div v-if="isPriorityPanelExpanded" class="mt-4 rounded-[18px] border border-slate-200 bg-slate-50 px-4 py-3">
-                  <div class="flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <p class="text-sm font-semibold text-slate-900">客服优先级重分配</p>
-                      <p class="mt-1 text-xs text-slate-400">按实际影响范围与紧急度调整优先级，保存后会同步列表与会话标签。</p>
+                    <div class="grid gap-3 sm:grid-cols-2">
+                      <el-form-item label="问题类型" class="!mb-0">
+                        <el-select v-model="issueForm.issueType" class="w-full">
+                          <el-option
+                            v-for="item in FEEDBACK_ISSUE_TYPE_OPTIONS"
+                            :key="item.value"
+                            :label="item.label"
+                            :value="item.value"
+                          />
+                        </el-select>
+                      </el-form-item>
+                      <el-form-item label="问题分类" class="!mb-0">
+                        <el-select v-model="issueForm.category" class="w-full">
+                          <el-option
+                            v-for="item in FEEDBACK_CATEGORY_OPTIONS"
+                            :key="item.value"
+                            :label="item.label"
+                            :value="item.value"
+                          />
+                        </el-select>
+                      </el-form-item>
                     </div>
-                    <span class="rounded-full px-2.5 py-1 text-[11px] font-semibold" :class="FEEDBACK_PRIORITY_META_MAP[issueForm.priority].className">
-                      当前：{{ FEEDBACK_PRIORITY_META_MAP[issueForm.priority].label }}
-                    </span>
-                  </div>
-                  <div class="mt-3 flex flex-wrap gap-2">
-                    <button
-                      v-for="item in FEEDBACK_PRIORITY_OPTIONS"
-                      :key="item.value"
-                      type="button"
-                      class="cs-priority-button"
-                      :class="[{ 'is-busy': priorityUpdating === item.value }, issueForm.priority === item.value ? 'is-active' : '']"
-                      :disabled="saving"
-                      @click="handleReassignPriority(item.value)"
-                    >
-                      {{ priorityUpdating === item.value ? '更新中...' : item.label }}
-                    </button>
-                  </div>
-                  </div>
-                </Transition>
 
-                <div class="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
-                  <section class="rounded-[18px] border border-slate-200 bg-slate-50/70 p-4">
-                    <div class="flex items-center justify-between gap-3">
-                      <div>
-                        <p class="text-sm font-semibold text-slate-900">客服回复</p>
-                        <p class="mt-1 text-xs text-slate-400">发送前会同步当前结构化字段，确保结论与状态一致。</p>
-                      </div>
-                      <button type="button" class="cs-primary-button cs-primary-button--compact" :class="{ 'is-busy': replying }" :disabled="replying" @click="handleReply">
-                        {{ replying ? '发送中...' : '发送回复' }}
-                      </button>
-                    </div>
-                    <textarea
-                      v-model="replyDraft"
-                      class="cs-textarea mt-4"
-                      maxlength="500"
-                      placeholder="请输入给客户端的回复内容，例如处理结论、补充说明或下一步动作。"
-                    />
-                  </section>
+                    <el-form-item label="关联订单号">
+                      <el-input v-model="issueForm.orderRef" maxlength="64" placeholder="如问题关联订单，可补充订单号或提货码" />
+                    </el-form-item>
 
-                  <section class="rounded-[18px] border border-slate-200 bg-slate-50/70 p-4">
-                    <div class="flex items-center justify-between gap-3">
-                      <div>
-                        <p class="text-sm font-semibold text-slate-900">内部备注</p>
-                        <p class="mt-1 text-xs text-slate-400">仅客服内部可见，适合记录排查结论与交接信息。</p>
-                      </div>
-                      <button type="button" class="cs-mini-button" :class="{ 'is-busy': remarkSaving }" :disabled="remarkSaving" @click="handleSaveInternalRemark">
-                        {{ remarkSaving ? '保存中...' : '保存备注' }}
-                      </button>
-                    </div>
-                    <textarea
-                      v-model="issueForm.internalRemark"
-                      class="cs-textarea mt-4"
-                      maxlength="4000"
-                      placeholder="可记录排查结论、交接信息、风险判断或内部提醒。"
-                    />
-                    <p v-if="selectedConversation.internalRemark?.updatedAt" class="mt-2 text-xs text-slate-400">
-                      最近更新：{{ selectedConversation.internalRemark.updatedByDisplayName || selectedConversation.internalRemark.updatedByUsername || '未知客服' }}
-                      · {{ formatDateTime(selectedConversation.internalRemark.updatedAt) }}
-                    </p>
-                  </section>
-                </div>
-              </div>
+                    <el-form-item label="期望结果">
+                      <el-input v-model="issueForm.expectedResult" type="textarea" :rows="4" maxlength="240" show-word-limit resize="vertical" />
+                    </el-form-item>
+
+                    <el-form-item label="实际结果">
+                      <el-input v-model="issueForm.actualResult" type="textarea" :rows="4" maxlength="240" show-word-limit resize="vertical" />
+                    </el-form-item>
+
+                    <el-form-item label="复现步骤">
+                      <el-input v-model="issueForm.reproductionSteps" type="textarea" :rows="4" maxlength="300" show-word-limit resize="vertical" />
+                    </el-form-item>
+
+                    <el-form-item label="联系偏好">
+                      <el-input v-model="issueForm.contactPreference" maxlength="64" />
+                    </el-form-item>
+
+                    <el-form-item label="标签">
+                      <el-input v-model="issueForm.tagText" maxlength="120" show-word-limit placeholder="使用中文逗号分隔多个标签" />
+                    </el-form-item>
+                  </el-form>
+                </el-scrollbar>
+
+                <el-button type="primary" class="mt-4 w-full" :loading="saving && quickStatusUpdating === '' && priorityUpdating === ''" :disabled="saving" @click="handleSaveIssue">
+                  保存 Issue 字段
+                </el-button>
+              </el-card>
             </div>
+          </el-card>
 
-            <div class="rounded-[20px] border border-slate-200 bg-slate-50/70 p-4 xl:min-h-0 xl:overflow-y-auto">
-              <div class="flex items-center justify-between gap-3">
-                <div>
-                  <p class="text-base font-semibold text-slate-900">Issue 字段</p>
-                  <p class="mt-1 text-xs text-slate-400">聚焦结构化排查字段，去掉与顶部状态和优先级重复的内容。</p>
+          <el-card v-else key="empty-detail" class="cs-panel-card" shadow="never">
+            <el-empty
+              description="当客户端提交反馈后，这里会自动展示统一会话与 Issue 字段明细。"
+              :image-size="108"
+            >
+              <template #description>
+                <div class="space-y-2">
+                  <p class="text-lg font-semibold text-slate-900">暂无可查看的反馈会话</p>
+                  <p class="text-sm leading-6 text-slate-500">当客户端提交反馈后，这里会自动展示统一会话与 Issue 字段明细。</p>
                 </div>
-                <span class="rounded-full bg-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600">
-                  {{ getCategoryLabel(issueForm.category) }}
-                </span>
-              </div>
-
-              <div class="mt-4 space-y-3">
-                <label class="block">
-                  <span class="mb-1.5 block text-xs font-medium text-slate-500">标题</span>
-                  <input v-model="issueForm.title" type="text" maxlength="80" class="cs-input" />
-                </label>
-
-                <div class="grid gap-3 sm:grid-cols-2">
-                  <label class="block">
-                    <span class="mb-1.5 block text-xs font-medium text-slate-500">问题类型</span>
-                    <select v-model="issueForm.issueType" class="cs-input">
-                      <option v-for="item in FEEDBACK_ISSUE_TYPE_OPTIONS" :key="item.value" :value="item.value">
-                        {{ item.label }}
-                      </option>
-                    </select>
-                  </label>
-                  <label class="block">
-                    <span class="mb-1.5 block text-xs font-medium text-slate-500">问题分类</span>
-                    <select v-model="issueForm.category" class="cs-input">
-                      <option v-for="item in FEEDBACK_CATEGORY_OPTIONS" :key="item.value" :value="item.value">
-                        {{ item.label }}
-                      </option>
-                    </select>
-                  </label>
-                </div>
-
-                <label class="block">
-                  <span class="mb-1.5 block text-xs font-medium text-slate-500">关联订单号</span>
-                  <input v-model="issueForm.orderRef" type="text" maxlength="64" class="cs-input" placeholder="如问题关联订单，可补充订单号或提货码" />
-                </label>
-
-                <label class="block">
-                  <span class="mb-1.5 block text-xs font-medium text-slate-500">期望结果</span>
-                  <textarea v-model="issueForm.expectedResult" class="cs-textarea cs-textarea--compact" maxlength="240" />
-                </label>
-
-                <label class="block">
-                  <span class="mb-1.5 block text-xs font-medium text-slate-500">实际结果</span>
-                  <textarea v-model="issueForm.actualResult" class="cs-textarea cs-textarea--compact" maxlength="240" />
-                </label>
-
-                <label class="block">
-                  <span class="mb-1.5 block text-xs font-medium text-slate-500">复现步骤</span>
-                  <textarea v-model="issueForm.reproductionSteps" class="cs-textarea cs-textarea--compact" maxlength="300" />
-                </label>
-
-                <label class="block">
-                  <span class="mb-1.5 block text-xs font-medium text-slate-500">联系偏好</span>
-                  <input v-model="issueForm.contactPreference" type="text" maxlength="64" class="cs-input" />
-                </label>
-
-                <label class="block">
-                  <span class="mb-1.5 block text-xs font-medium text-slate-500">标签</span>
-                  <input v-model="issueForm.tagText" type="text" maxlength="120" class="cs-input" placeholder="使用中文逗号分隔多个标签" />
-                </label>
-              </div>
-
-              <button type="button" class="cs-primary-button mt-4 w-full justify-center" :class="{ 'is-busy': saving && quickStatusUpdating === '' && priorityUpdating === '' }" :disabled="saving" @click="handleSaveIssue">
-                {{ saving ? '保存中...' : '保存 Issue 字段' }}
-              </button>
-            </div>
-          </div>
-          </article>
-
-          <article v-else key="empty-detail" class="rounded-[28px] border border-slate-200/80 bg-white/95 p-8 text-center shadow-[0_18px_48px_-40px_rgba(15,23,42,0.24)]">
-            <p class="text-lg font-semibold text-slate-900">暂无可查看的反馈会话</p>
-            <p class="mt-2 text-sm leading-6 text-slate-500">当客户端提交反馈后，这里会自动展示统一会话与 Issue 字段明细。</p>
-          </article>
+              </template>
+            </el-empty>
+          </el-card>
         </Transition>
       </div>
     </div>
@@ -1154,8 +1227,36 @@ onBeforeUnmount(() => {
   border: 1px solid rgba(226, 232, 240, 0.9);
   border-radius: 24px;
   background: rgba(255, 255, 255, 0.95);
+}
+
+.cs-panel-card,
+.cs-sub-card,
+.cs-inner-action-card,
+.cs-summary-card,
+.cs-conversation-item,
+.cs-message-card {
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  border-radius: 24px;
   box-shadow: 0 18px 48px -40px rgba(15, 23, 42, 0.24);
+}
+
+.cs-panel-card :deep(.el-card__body) {
   padding: 1rem;
+}
+
+.cs-sub-card {
+  background: rgba(248, 250, 252, 0.75);
+}
+
+.cs-sub-card :deep(.el-card__body),
+.cs-inner-action-card :deep(.el-card__body),
+.cs-summary-card :deep(.el-card__body),
+.cs-message-card :deep(.el-card__body) {
+  padding: 1rem;
+}
+
+.cs-inner-action-card {
+  background: rgba(248, 250, 252, 0.7);
 }
 
 .cs-summary-card__label {
@@ -1192,6 +1293,7 @@ onBeforeUnmount(() => {
 }
 
 .cs-conversation-item {
+  cursor: pointer;
   transition:
     border-color 0.2s ease,
     background-color 0.2s ease,
@@ -1205,168 +1307,78 @@ onBeforeUnmount(() => {
 }
 
 .cs-conversation-item.is-selected {
+  border-color: rgba(13, 148, 136, 0.32);
+  background: rgba(20, 184, 166, 0.05);
   box-shadow: 0 18px 34px -28px rgba(13, 148, 136, 0.28);
   transform: translateY(-1px);
 }
 
-/*
- * 统一输入控件与按钮样式：
- * - 避免页面中混用多套边框、圆角与焦点反馈；
- * - 让筛选区、Issue 编辑区与回复区维持同一套语言。
- */
-.cs-input,
-.cs-textarea {
-  width: 100%;
-  border: 1px solid rgb(226 232 240);
-  border-radius: 16px;
-  background: #ffffff;
-  color: rgb(15 23 42);
-  font-size: 0.92rem;
-  line-height: 1.5;
-  padding: 0.8rem 0.92rem;
-  transition:
-    border-color 0.18s ease,
-    box-shadow 0.18s ease;
+.cs-list-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
 }
 
-.cs-input:focus,
-.cs-textarea:focus {
-  outline: none;
-  border-color: rgba(13, 148, 136, 0.5);
-  box-shadow: 0 0 0 4px rgba(13, 148, 136, 0.12);
+.cs-list-heading__desc {
+  margin-top: 0.35rem;
+  max-width: 16rem;
+  color: rgb(100 116 139);
+  font-size: 0.82rem;
+  line-height: 1.45;
 }
 
-.cs-textarea {
-  min-height: 124px;
-  resize: vertical;
-}
-
-.cs-textarea--compact {
-  min-height: 92px;
-}
-
-.cs-primary-button,
-.cs-secondary-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 16px;
-  font-size: 0.92rem;
+.cs-list-count {
+  flex-shrink: 0;
+  min-height: 1.9rem;
+  padding-inline: 0.72rem;
+  font-size: 0.76rem;
   font-weight: 600;
-  line-height: 1;
-  padding: 0.82rem 1rem;
-  transition:
-    transform 0.18s ease,
-    opacity 0.18s ease,
-    background-color 0.18s ease;
+  white-space: nowrap;
 }
 
-.cs-primary-button {
-  background: rgb(15 118 110);
-  color: #ffffff;
-}
-
-.cs-primary-button,
-.cs-mini-button,
-.cs-status-button,
-.cs-priority-button {
-  position: relative;
-  overflow: hidden;
-}
-
-.cs-primary-button:hover,
-.cs-secondary-button:hover {
-  transform: translateY(-1px);
-}
-
-.cs-secondary-button {
-  border: 1px solid rgb(226 232 240);
-  background: #ffffff;
-  color: rgb(51 65 85);
-}
-
-.cs-primary-button:disabled,
-.cs-secondary-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.6;
-  transform: none;
-}
-
-.cs-primary-button--compact {
-  min-height: 2.25rem;
-  border-radius: 14px;
-  font-size: 0.84rem;
-  padding: 0.68rem 0.92rem;
-}
-
-.cs-mini-button,
-.cs-status-button,
-.cs-priority-button,
-.cs-text-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 9999px;
+/*
+ * Element Plus 表单与卡片细节：
+ * - 输入框、下拉和文本域统一提高圆角，和管理端当前设计语言保持一致；
+ * - 仅调整本页局部外观，不覆盖全局主题。
+ */
+.cs-filter-form :deep(.el-form-item__label),
+.cs-issue-form :deep(.el-form-item__label) {
+  color: rgb(100 116 139);
   font-size: 0.78rem;
   font-weight: 600;
-  line-height: 1;
-  transition:
-    background-color 0.18s ease,
-    color 0.18s ease,
-    border-color 0.18s ease,
-    transform 0.18s ease,
-    opacity 0.18s ease;
 }
 
-.cs-mini-button,
-.cs-status-button,
-.cs-priority-button {
-  border: 1px solid rgb(226 232 240);
-  background: #ffffff;
-  color: rgb(51 65 85);
-  padding: 0.52rem 0.85rem;
+.cs-filter-form :deep(.el-input__wrapper),
+.cs-filter-form :deep(.el-textarea__inner),
+.cs-filter-form :deep(.el-select__wrapper),
+.cs-issue-form :deep(.el-input__wrapper),
+.cs-issue-form :deep(.el-textarea__inner),
+.cs-issue-form :deep(.el-select__wrapper) {
+  border-radius: 16px;
+  box-shadow: 0 0 0 1px rgb(226 232 240) inset;
 }
 
-.cs-text-button {
-  color: rgb(148 35 35);
-  padding: 0.3rem 0;
+.cs-filter-form :deep(.el-input__wrapper.is-focus),
+.cs-filter-form :deep(.el-select__wrapper.is-focused),
+.cs-issue-form :deep(.el-input__wrapper.is-focus),
+.cs-issue-form :deep(.el-select__wrapper.is-focused) {
+  box-shadow:
+    0 0 0 1px rgba(13, 148, 136, 0.45) inset,
+    0 0 0 4px rgba(13, 148, 136, 0.1);
 }
 
-.cs-mini-button:hover,
-.cs-status-button:hover,
-.cs-priority-button:hover,
-.cs-text-button:hover {
-  transform: translateY(-1px);
+.cs-filter-form :deep(.el-textarea__inner:focus),
+.cs-issue-form :deep(.el-textarea__inner:focus) {
+  box-shadow:
+    0 0 0 1px rgba(13, 148, 136, 0.45) inset,
+    0 0 0 4px rgba(13, 148, 136, 0.1);
 }
 
-.cs-status-button.is-active {
-  border-color: rgba(13, 148, 136, 0.22);
-  background: rgba(13, 148, 136, 0.12);
-  color: rgb(15 118 110);
-  box-shadow: inset 0 0 0 1px rgba(13, 148, 136, 0.04), 0 8px 18px -16px rgba(13, 148, 136, 0.45);
-}
-
-.cs-priority-button.is-active {
-  border-color: rgba(2, 132, 199, 0.2);
-  background: rgba(14, 165, 233, 0.12);
-  color: rgb(3 105 161);
-  box-shadow: inset 0 0 0 1px rgba(14, 165, 233, 0.04), 0 8px 18px -16px rgba(14, 165, 233, 0.38);
-}
-
-.cs-mini-button:disabled,
-.cs-status-button:disabled,
-.cs-priority-button:disabled,
-.cs-text-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.6;
-  transform: none;
-}
-
-.cs-primary-button.is-busy,
-.cs-mini-button.is-busy,
-.cs-status-button.is-busy,
-.cs-priority-button.is-busy {
-  animation: cs-button-busy 1.1s ease-in-out infinite;
+.cs-filter-form :deep(.el-button),
+.cs-inner-action-card :deep(.el-button),
+.cs-sub-card :deep(.el-button) {
+  border-radius: 16px;
 }
 
 .cs-message-card {
@@ -1374,6 +1386,15 @@ onBeforeUnmount(() => {
     transform 0.22s ease,
     box-shadow 0.22s ease,
     background-color 0.22s ease;
+}
+
+.cs-message-card.is-staff {
+  margin-left: auto;
+  background: rgba(20, 184, 166, 0.08);
+}
+
+.cs-message-card.is-client {
+  background: rgba(255, 255, 255, 0.92);
 }
 
 .cs-message-card:hover {
@@ -1415,29 +1436,9 @@ onBeforeUnmount(() => {
   transform: translateY(12px);
 }
 
-.cs-collapse-enter-from,
-.cs-collapse-leave-to {
-  opacity: 0;
-  transform: translateY(-8px);
-  max-height: 0;
-}
-
-.cs-collapse-enter-to,
-.cs-collapse-leave-from {
-  opacity: 1;
-  transform: translateY(0);
-  max-height: 16rem;
-}
-
-@keyframes cs-button-busy {
-  0%,
-  100% {
-    box-shadow: 0 0 0 0 rgba(13, 148, 136, 0.1);
-    transform: translateY(0);
-  }
-  50% {
-    box-shadow: 0 0 0 6px rgba(13, 148, 136, 0.06);
-    transform: translateY(-1px);
+@media (max-width: 767px) {
+  .cs-list-heading__desc {
+    max-width: 13.5rem;
   }
 }
 
