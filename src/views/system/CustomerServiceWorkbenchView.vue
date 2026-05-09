@@ -484,11 +484,10 @@ const refreshWorkbenchData = async (
     }
   } finally {
     refreshInFlight = false
-    if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
+    const shouldStopRefreshLoop = !isWorkbenchResident.value || currentToken !== lifecycleToken
+    if (shouldStopRefreshLoop) {
       pendingRefresh = false
-      return
-    }
-    if (pendingRefresh) {
+    } else if (pendingRefresh) {
       pendingRefresh = false
       await refreshWorkbenchData(currentToken, options)
     }

@@ -357,8 +357,8 @@ const deviceLabel = computed(() => {
   align-items: center;
   justify-content: center;
   border-radius: 9999px;
-  background: rgba(15, 118, 110, 0.12);
-  color: rgb(15 118 110);
+  background: rgb(15 118 110);
+  color: rgb(240 253 250);
   font-size: 0.95rem;
   font-weight: 700;
 }
@@ -378,8 +378,8 @@ const deviceLabel = computed(() => {
 }
 
 .dark .app-sidebar__spotlight-icon {
-  background: rgba(45, 212, 191, 0.12);
-  color: rgb(153 246 228);
+  background: rgb(17 94 89);
+  color: rgb(240 253 250);
 }
 
 /* 侧栏切页时抑制子菜单箭头过渡抖动，避免出现右侧短暂残影。 */
@@ -410,8 +410,8 @@ const deviceLabel = computed(() => {
   display: inline-flex;
   align-items: center;
   border-radius: 9999px;
-  background: rgba(15, 118, 110, 0.1);
-  color: #0f766e;
+  background: #0f766e;
+  color: #f0fdfa;
   font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.04em;
@@ -442,8 +442,8 @@ const deviceLabel = computed(() => {
 }
 
 .dark .app-sidebar__build-badge {
-  background: rgba(45, 212, 191, 0.12);
-  color: #99f6e4;
+  background: #115e59;
+  color: #f0fdfa;
 }
 
 .dark .app-sidebar__device-pill {

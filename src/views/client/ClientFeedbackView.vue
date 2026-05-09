@@ -86,15 +86,15 @@ const getCategoryLabel = (category: FeedbackIssueCategory) => {
  * - 若当前是首次直达反馈页，则回退到“我的”页，避免返回空白或站外页面。
  */
 const handleNavigateBack = () => {
-  if (window.history.length > 1) {
+  if (globalThis.history.length > 1) {
     router.back()
     return
   }
-  void router.push('/client/profile')
+  router.push('/client/profile')
 }
 
 const handleNavigateToCreate = () => {
-  void router.push('/client/feedback/create')
+  router.push('/client/feedback/create')
 }
 
 const loadPortalConfig = async () => {
