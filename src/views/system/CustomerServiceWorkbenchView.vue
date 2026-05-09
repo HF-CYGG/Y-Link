@@ -850,13 +850,18 @@ onBeforeUnmount(() => {
             当前筛选下暂无反馈会话，可调整筛选条件后重试。
           </div>
 
-          <div v-else class="mt-4 space-y-3 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:pr-1">
+          <TransitionGroup
+            v-else
+            name="cs-conversation-list"
+            tag="div"
+            class="mt-4 space-y-3 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:pr-1"
+          >
             <button
               v-for="item in conversations"
               :key="item.id"
               type="button"
-              class="block w-full rounded-[20px] border p-4 text-left transition"
-              :class="item.id === selectedConversationId ? 'border-brand bg-brand/5' : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50'"
+              class="cs-conversation-item block w-full rounded-[20px] border p-4 text-left transition"
+              :class="item.id === selectedConversationId ? 'is-selected border-brand bg-brand/5' : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50'"
               @click="handleSelectConversation(item.id)"
             >
               <div class="flex flex-wrap items-start justify-between gap-2">
@@ -887,13 +892,15 @@ onBeforeUnmount(() => {
                 </span>
               </div>
             </button>
-          </div>
+          </TransitionGroup>
         </article>
 
-        <article
-          v-if="selectedConversation"
-          class="rounded-[28px] border border-slate-200/80 bg-white/95 p-4 shadow-[0_18px_48px_-40px_rgba(15,23,42,0.24)] xl:flex xl:min-h-[calc(100vh-18rem)] xl:flex-col"
-        >
+        <Transition name="cs-detail-panel" mode="out-in">
+          <article
+            v-if="selectedConversation"
+            :key="selectedConversation.id"
+            class="rounded-[28px] border border-slate-200/80 bg-white/95 p-4 shadow-[0_18px_48px_-40px_rgba(15,23,42,0.24)] xl:flex xl:min-h-[calc(100vh-18rem)] xl:flex-col"
+          >
           <div v-if="detailLoading" class="mb-4 rounded-[18px] bg-slate-50 px-4 py-3 text-sm text-slate-500">
             正在同步会话详情...
           </div>
@@ -918,13 +925,13 @@ onBeforeUnmount(() => {
 
           <div class="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-[20px] border border-slate-200 bg-slate-50/80 px-4 py-3">
             <div class="flex flex-wrap items-center gap-2">
-              <button type="button" class="cs-mini-button" :disabled="saving" @click="handleTakeOver">接手处理</button>
+              <button type="button" class="cs-mini-button" :class="{ 'is-busy': saving && quickStatusUpdating === '' && priorityUpdating === '' }" :disabled="saving" @click="handleTakeOver">接手处理</button>
               <button
                 v-for="item in FEEDBACK_STATUS_OPTIONS.filter((option) => ['pending', 'processing', 'resolved'].includes(option.value))"
                 :key="item.value"
                 type="button"
                 class="cs-status-button"
-                :class="issueForm.status === item.value ? 'is-active' : ''"
+                :class="[{ 'is-busy': quickStatusUpdating === item.value }, issueForm.status === item.value ? 'is-active' : '']"
                 :disabled="saving"
                 @click="handleQuickStatus(item.value)"
               >
@@ -950,11 +957,11 @@ onBeforeUnmount(() => {
                   <span class="text-xs text-slate-400">{{ selectedConversation.messages.length }} 条消息</span>
                 </div>
 
-                <div class="mt-4 space-y-3 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:pr-1">
+                <TransitionGroup name="cs-message-stack" tag="div" class="mt-4 space-y-3 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:pr-1">
                   <article
                     v-for="message in selectedConversation.messages"
                     :key="message.id"
-                    class="rounded-[18px] px-4 py-3"
+                    class="cs-message-card rounded-[18px] px-4 py-3"
                     :class="message.senderRole === 'staff' ? 'ml-auto bg-brand/10' : 'bg-white'"
                   >
                     <div class="flex flex-wrap items-center justify-between gap-2">
@@ -968,7 +975,7 @@ onBeforeUnmount(() => {
                     </div>
                     <p class="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-700">{{ message.body }}</p>
                   </article>
-                </div>
+                </TransitionGroup>
               </div>
 
               <div class="rounded-[20px] border border-slate-200 bg-white p-4">
@@ -982,7 +989,8 @@ onBeforeUnmount(() => {
                   </button>
                 </div>
 
-                <div v-if="isPriorityPanelExpanded" class="mt-4 rounded-[18px] border border-slate-200 bg-slate-50 px-4 py-3">
+                <Transition name="cs-collapse">
+                  <div v-if="isPriorityPanelExpanded" class="mt-4 rounded-[18px] border border-slate-200 bg-slate-50 px-4 py-3">
                   <div class="flex flex-wrap items-center justify-between gap-2">
                     <div>
                       <p class="text-sm font-semibold text-slate-900">客服优先级重分配</p>
@@ -998,14 +1006,15 @@ onBeforeUnmount(() => {
                       :key="item.value"
                       type="button"
                       class="cs-priority-button"
-                      :class="issueForm.priority === item.value ? 'is-active' : ''"
+                      :class="[{ 'is-busy': priorityUpdating === item.value }, issueForm.priority === item.value ? 'is-active' : '']"
                       :disabled="saving"
                       @click="handleReassignPriority(item.value)"
                     >
                       {{ priorityUpdating === item.value ? '更新中...' : item.label }}
                     </button>
                   </div>
-                </div>
+                  </div>
+                </Transition>
 
                 <div class="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
                   <section class="rounded-[18px] border border-slate-200 bg-slate-50/70 p-4">
@@ -1014,7 +1023,7 @@ onBeforeUnmount(() => {
                         <p class="text-sm font-semibold text-slate-900">客服回复</p>
                         <p class="mt-1 text-xs text-slate-400">发送前会同步当前结构化字段，确保结论与状态一致。</p>
                       </div>
-                      <button type="button" class="cs-primary-button cs-primary-button--compact" :disabled="replying" @click="handleReply">
+                      <button type="button" class="cs-primary-button cs-primary-button--compact" :class="{ 'is-busy': replying }" :disabled="replying" @click="handleReply">
                         {{ replying ? '发送中...' : '发送回复' }}
                       </button>
                     </div>
@@ -1032,7 +1041,7 @@ onBeforeUnmount(() => {
                         <p class="text-sm font-semibold text-slate-900">内部备注</p>
                         <p class="mt-1 text-xs text-slate-400">仅客服内部可见，适合记录排查结论与交接信息。</p>
                       </div>
-                      <button type="button" class="cs-mini-button" :disabled="remarkSaving" @click="handleSaveInternalRemark">
+                      <button type="button" class="cs-mini-button" :class="{ 'is-busy': remarkSaving }" :disabled="remarkSaving" @click="handleSaveInternalRemark">
                         {{ remarkSaving ? '保存中...' : '保存备注' }}
                       </button>
                     </div>
@@ -1118,17 +1127,18 @@ onBeforeUnmount(() => {
                 </label>
               </div>
 
-              <button type="button" class="cs-primary-button mt-4 w-full justify-center" :disabled="saving" @click="handleSaveIssue">
+              <button type="button" class="cs-primary-button mt-4 w-full justify-center" :class="{ 'is-busy': saving && quickStatusUpdating === '' && priorityUpdating === '' }" :disabled="saving" @click="handleSaveIssue">
                 {{ saving ? '保存中...' : '保存 Issue 字段' }}
               </button>
             </div>
           </div>
-        </article>
+          </article>
 
-        <article v-else class="rounded-[28px] border border-slate-200/80 bg-white/95 p-8 text-center shadow-[0_18px_48px_-40px_rgba(15,23,42,0.24)]">
-          <p class="text-lg font-semibold text-slate-900">暂无可查看的反馈会话</p>
-          <p class="mt-2 text-sm leading-6 text-slate-500">当客户端提交反馈后，这里会自动展示统一会话与 Issue 字段明细。</p>
-        </article>
+          <article v-else key="empty-detail" class="rounded-[28px] border border-slate-200/80 bg-white/95 p-8 text-center shadow-[0_18px_48px_-40px_rgba(15,23,42,0.24)]">
+            <p class="text-lg font-semibold text-slate-900">暂无可查看的反馈会话</p>
+            <p class="mt-2 text-sm leading-6 text-slate-500">当客户端提交反馈后，这里会自动展示统一会话与 Issue 字段明细。</p>
+          </article>
+        </Transition>
       </div>
     </div>
   </PageContainer>
@@ -1179,6 +1189,24 @@ onBeforeUnmount(() => {
   margin-top: 0.5rem;
   white-space: nowrap;
   font-size: 1.35rem;
+}
+
+.cs-conversation-item {
+  transition:
+    border-color 0.2s ease,
+    background-color 0.2s ease,
+    box-shadow 0.22s ease,
+    transform 0.22s ease;
+}
+
+.cs-conversation-item:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 14px 28px -24px rgba(15, 23, 42, 0.22);
+}
+
+.cs-conversation-item.is-selected {
+  box-shadow: 0 18px 34px -28px rgba(13, 148, 136, 0.28);
+  transform: translateY(-1px);
 }
 
 /*
@@ -1236,6 +1264,14 @@ onBeforeUnmount(() => {
 .cs-primary-button {
   background: rgb(15 118 110);
   color: #ffffff;
+}
+
+.cs-primary-button,
+.cs-mini-button,
+.cs-status-button,
+.cs-priority-button {
+  position: relative;
+  overflow: hidden;
 }
 
 .cs-primary-button:hover,
@@ -1307,12 +1343,14 @@ onBeforeUnmount(() => {
   border-color: rgba(13, 148, 136, 0.22);
   background: rgba(13, 148, 136, 0.12);
   color: rgb(15 118 110);
+  box-shadow: inset 0 0 0 1px rgba(13, 148, 136, 0.04), 0 8px 18px -16px rgba(13, 148, 136, 0.45);
 }
 
 .cs-priority-button.is-active {
   border-color: rgba(2, 132, 199, 0.2);
   background: rgba(14, 165, 233, 0.12);
   color: rgb(3 105 161);
+  box-shadow: inset 0 0 0 1px rgba(14, 165, 233, 0.04), 0 8px 18px -16px rgba(14, 165, 233, 0.38);
 }
 
 .cs-mini-button:disabled,
@@ -1322,6 +1360,85 @@ onBeforeUnmount(() => {
   cursor: not-allowed;
   opacity: 0.6;
   transform: none;
+}
+
+.cs-primary-button.is-busy,
+.cs-mini-button.is-busy,
+.cs-status-button.is-busy,
+.cs-priority-button.is-busy {
+  animation: cs-button-busy 1.1s ease-in-out infinite;
+}
+
+.cs-message-card {
+  transition:
+    transform 0.22s ease,
+    box-shadow 0.22s ease,
+    background-color 0.22s ease;
+}
+
+.cs-message-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 14px 28px -24px rgba(15, 23, 42, 0.18);
+}
+
+.cs-conversation-list-enter-active,
+.cs-conversation-list-leave-active,
+.cs-message-stack-enter-active,
+.cs-message-stack-leave-active,
+.cs-detail-panel-enter-active,
+.cs-detail-panel-leave-active,
+.cs-collapse-enter-active,
+.cs-collapse-leave-active {
+  transition: all 0.24s ease;
+}
+
+.cs-conversation-list-enter-from,
+.cs-conversation-list-leave-to {
+  opacity: 0;
+  transform: translateY(10px);
+}
+
+.cs-message-stack-enter-from,
+.cs-message-stack-leave-to {
+  opacity: 0;
+  transform: translateY(12px) scale(0.98);
+}
+
+.cs-message-stack-move,
+.cs-conversation-list-move {
+  transition: transform 0.24s ease;
+}
+
+.cs-detail-panel-enter-from,
+.cs-detail-panel-leave-to {
+  opacity: 0;
+  transform: translateY(12px);
+}
+
+.cs-collapse-enter-from,
+.cs-collapse-leave-to {
+  opacity: 0;
+  transform: translateY(-8px);
+  max-height: 0;
+}
+
+.cs-collapse-enter-to,
+.cs-collapse-leave-from {
+  opacity: 1;
+  transform: translateY(0);
+  max-height: 16rem;
+}
+
+@keyframes cs-button-busy {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(13, 148, 136, 0.1);
+    transform: translateY(0);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(13, 148, 136, 0.06);
+    transform: translateY(-1px);
+  }
 }
 
 /*
