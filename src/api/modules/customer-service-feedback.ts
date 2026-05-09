@@ -252,6 +252,16 @@ interface BackendConversationDetail {
   internalRemark?: FeedbackInternalRemarkRecord | null
 }
 
+interface BackendRealtimeConversationEventPayload {
+  eventType: string
+  conversationId: string
+  clientUserId: string
+  occurredAt: string
+  conversation: BackendConversationSummary
+  message?: BackendConversationDetail['messages'][number]
+  detail?: Record<string, unknown>
+}
+
 interface BackendListResult<T> {
   page: number
   pageSize: number
@@ -261,12 +271,22 @@ interface BackendListResult<T> {
 
 export interface FeedbackRealtimeHandlers {
   onOpen?: (payload: { availability?: FeedbackPortalAvailability; session?: FeedbackRealtimeSessionSnapshot }) => void
-  onConversation?: (payload: unknown) => void
+  onConversation?: (payload: FeedbackRealtimeConversationEvent | null) => void
   onError?: () => void
 }
 
 export interface FeedbackRealtimeConnection {
   close: () => void
+}
+
+export interface FeedbackRealtimeConversationEvent {
+  eventType: string
+  conversationId: string
+  clientUserId: string
+  occurredAt: string
+  conversation: FeedbackConversationRecord
+  message?: FeedbackConversationMessage
+  detail?: Record<string, unknown>
 }
 
 export const FEEDBACK_STATUS_META_MAP: Record<FeedbackIssueStatus, FeedbackIssueStatusMeta> = {
@@ -408,6 +428,20 @@ const mapConversation = (
     },
     messages,
     internalRemark,
+  }
+}
+
+const mapRealtimeConversationEvent = (
+  payload: BackendRealtimeConversationEventPayload,
+): FeedbackRealtimeConversationEvent => {
+  return {
+    eventType: payload.eventType,
+    conversationId: payload.conversationId,
+    clientUserId: payload.clientUserId,
+    occurredAt: payload.occurredAt,
+    conversation: mapConversation(payload.conversation),
+    message: payload.message ? mapMessage(payload.message) : undefined,
+    detail: payload.detail,
   }
 }
 
@@ -661,7 +695,11 @@ export const openFeedbackRealtimeStream = (
 
   eventSource.addEventListener('conversation', (event) => {
     try {
-      handlers.onConversation?.(JSON.parse((event as MessageEvent<string>).data))
+      handlers.onConversation?.(
+        mapRealtimeConversationEvent(
+          JSON.parse((event as MessageEvent<string>).data) as BackendRealtimeConversationEventPayload,
+        ),
+      )
     } catch {
       handlers.onConversation?.(null)
     }

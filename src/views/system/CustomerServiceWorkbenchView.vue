@@ -29,11 +29,13 @@ import {
   updateFeedbackInternalRemark,
   updateFeedbackIssue,
   type FeedbackConversationRecord,
+  type FeedbackConversationMessage,
   type FeedbackIssueCategory,
   type FeedbackIssuePriority,
   type FeedbackIssueStatus,
   type FeedbackIssueType,
   type FeedbackRealtimeConnection,
+  type FeedbackRealtimeConversationEvent,
   type FeedbackServicePresence,
 } from '@/api/modules/customer-service-feedback'
 import { PageContainer } from '@/components/common'
@@ -60,7 +62,10 @@ const reconnectTip = ref('进入工作台后会自动续接当前客服会话。
 const isWorkbenchResident = ref(false)
 let realtimeConnection: FeedbackRealtimeConnection | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+let refreshTimer: ReturnType<typeof setInterval> | null = null
 let lifecycleToken = 0
+let refreshInFlight = false
+let pendingRefresh = false
 
 /**
  * - 关键字覆盖标题、Issue 编号、用户、订单号和标签；
@@ -136,7 +141,8 @@ const loadConversationDetail = async (conversationId: string) => {
   }
 }
 
-const loadConversations = async () => {
+const loadConversations = async (options: { refreshSelectedDetail?: boolean } = {}) => {
+  const shouldRefreshSelectedDetail = options.refreshSelectedDetail ?? true
   loading.value = true
   try {
     conversations.value = await listSupportFeedbackConversations({
@@ -158,9 +164,102 @@ const loadConversations = async () => {
       selectedConversationId.value = conversations.value[0].id
     }
 
-    await loadConversationDetail(selectedConversationId.value)
+    const shouldLoadDetail = shouldRefreshSelectedDetail
+      || !selectedConversation.value
+      || selectedConversation.value.id !== selectedConversationId.value
+
+    if (shouldLoadDetail) {
+      await loadConversationDetail(selectedConversationId.value)
+    }
   } finally {
     loading.value = false
+  }
+}
+
+const replaceConversationSummary = (records: FeedbackConversationRecord[], nextRecord: FeedbackConversationRecord) => {
+  const nextRecords = [...records]
+  const currentIndex = nextRecords.findIndex((item) => item.id === nextRecord.id)
+  if (currentIndex >= 0) {
+    nextRecords.splice(currentIndex, 1)
+  }
+  nextRecords.unshift(nextRecord)
+  return nextRecords.sort((left, right) => right.lastMessageAt.localeCompare(left.lastMessageAt))
+}
+
+const mergeSelectedConversationSummary = (summaryRecord: FeedbackConversationRecord) => {
+  const currentRecord = selectedConversation.value
+  if (!currentRecord || currentRecord.id !== summaryRecord.id) {
+    return
+  }
+
+  selectedConversation.value = {
+    ...currentRecord,
+    issueNo: summaryRecord.issueNo,
+    title: summaryRecord.title,
+    summary: summaryRecord.summary,
+    status: summaryRecord.status,
+    priority: summaryRecord.priority,
+    clientUserId: summaryRecord.clientUserId,
+    clientAccount: summaryRecord.clientAccount,
+    clientDisplayName: summaryRecord.clientDisplayName,
+    clientDepartmentName: summaryRecord.clientDepartmentName,
+    assigneeName: summaryRecord.assigneeName,
+    lastMessageAt: summaryRecord.lastMessageAt,
+    unreadForClient: summaryRecord.unreadForClient,
+    unreadForStaff: summaryRecord.unreadForStaff,
+    createdAt: summaryRecord.createdAt,
+    updatedAt: summaryRecord.updatedAt,
+    fields: summaryRecord.fields,
+  }
+
+  if (!saving.value && !remarkSaving.value && !replying.value) {
+    syncIssueForm(selectedConversation.value)
+  }
+}
+
+const mergeRealtimeMessageIntoSelectedConversation = (message: FeedbackConversationMessage | undefined) => {
+  if (!message || !selectedConversation.value) {
+    return
+  }
+
+  const nextMessages = [...selectedConversation.value.messages]
+  const currentIndex = nextMessages.findIndex((item) => item.id === message.id)
+  if (currentIndex >= 0) {
+    nextMessages.splice(currentIndex, 1, message)
+  } else {
+    nextMessages.push(message)
+  }
+  nextMessages.sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+  selectedConversation.value = {
+    ...selectedConversation.value,
+    messages: nextMessages,
+  }
+}
+
+const applyRealtimeConversationPatch = async (
+  payload: FeedbackRealtimeConversationEvent,
+) => {
+  conversations.value = replaceConversationSummary(conversations.value, payload.conversation)
+
+  if (selectedConversationId.value !== payload.conversationId) {
+    return
+  }
+
+  mergeSelectedConversationSummary(payload.conversation)
+  mergeRealtimeMessageIntoSelectedConversation(payload.message)
+
+  if (payload.eventType === 'conversation_internal_remark_updated') {
+    await loadConversationDetail(payload.conversationId)
+    return
+  }
+
+  if (!selectedConversation.value || selectedConversation.value.id !== payload.conversationId) {
+    await loadConversationDetail(payload.conversationId)
+    return
+  }
+
+  if (payload.eventType === 'conversation_created' && !payload.message) {
+    await loadConversationDetail(payload.conversationId)
   }
 }
 
@@ -332,6 +431,92 @@ const loadPresence = async () => {
 }
 
 /**
+ * 工作台列表刷新统一收口：
+ * - SSE 与轮询都走同一条刷新链路，避免多处各自拉取导致覆盖顺序混乱；
+ * - 若前一次刷新尚未完成，新的刷新请求只做排队，等当前批次结束后立即补一次。
+ */
+const refreshWorkbenchData = async (
+  currentToken: number,
+  options: {
+    refreshPresence?: boolean
+    refreshSelectedDetail?: boolean
+  } = {},
+) => {
+  if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
+    return
+  }
+
+  if (refreshInFlight) {
+    pendingRefresh = true
+    return
+  }
+
+  refreshInFlight = true
+  try {
+    await loadConversations({
+      refreshSelectedDetail: options.refreshSelectedDetail,
+    })
+    if (options.refreshPresence !== false) {
+      await loadPresence()
+    }
+  } finally {
+    refreshInFlight = false
+    if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
+      pendingRefresh = false
+      return
+    }
+    if (pendingRefresh) {
+      pendingRefresh = false
+      await refreshWorkbenchData(currentToken, options)
+    }
+  }
+}
+
+/**
+ * 轮询兜底：
+ * - 正常情况下优先依赖 SSE 推送即时刷新；
+ * - 若浏览器标签页挂起、网络瞬断或 SSE 事件丢失，轮询会把反馈列表重新拉回最新状态。
+ */
+const startRefreshPolling = (currentToken: number) => {
+  if (refreshTimer) {
+    clearInterval(refreshTimer)
+  }
+  refreshTimer = setInterval(() => {
+    if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
+      return
+    }
+    void refreshWorkbenchData(currentToken, { refreshPresence: true })
+  }, 8000)
+}
+
+const handleRealtimeConversation = async (
+  currentToken: number,
+  payload: FeedbackRealtimeConversationEvent | null,
+) => {
+  if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
+    return
+  }
+
+  if (!payload) {
+    await refreshWorkbenchData(currentToken, { refreshPresence: false, refreshSelectedDetail: false })
+    return
+  }
+
+  try {
+    await applyRealtimeConversationPatch(payload)
+  } catch {
+    await refreshWorkbenchData(currentToken, { refreshPresence: false, refreshSelectedDetail: false })
+    return
+  }
+
+  await refreshWorkbenchData(currentToken, { refreshPresence: false, refreshSelectedDetail: false })
+  if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
+    return
+  }
+  reconnectTip.value = '检测到会话有新变化，工作台已自动续接最新进展。'
+}
+
+/**
  * 统一释放实时连接与重连定时器。
  * - 页面离开但组件被 keep-alive 缓存时，也必须主动释放在线占位；
  * - 统一收口后可以避免重连定时器在离页后继续把客服重新拉回在线。
@@ -343,6 +528,11 @@ const disposeRealtime = () => {
   if (reconnectTimer) {
     clearTimeout(reconnectTimer)
     reconnectTimer = null
+  }
+
+  if (refreshTimer) {
+    clearInterval(refreshTimer)
+    refreshTimer = null
   }
 }
 
@@ -381,19 +571,11 @@ const connectRealtime = (currentToken: number) => {
           },
         }
       }
-      void loadPresence()
+      void refreshWorkbenchData(currentToken, { refreshPresence: true, refreshSelectedDetail: false })
       reconnectTip.value = '已恢复客服实时连接，当前工作台会自动续接最新会话变化。'
     },
-    onConversation: async () => {
-      if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
-        return
-      }
-      await loadConversations()
-      await loadPresence()
-      if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
-        return
-      }
-      reconnectTip.value = '检测到会话有新变化，工作台已自动续接最新进展。'
+    onConversation: async (payload) => {
+      await handleRealtimeConversation(currentToken, payload)
     },
     onError: () => {
       if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
@@ -423,11 +605,11 @@ const enterWorkbench = async () => {
   reconnectTip.value = '进入工作台后会自动续接当前客服会话。'
 
   try {
-    await loadPresence()
-    await loadConversations()
+    await refreshWorkbenchData(currentToken, { refreshPresence: true, refreshSelectedDetail: true })
     if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
       return
     }
+    startRefreshPolling(currentToken)
     connectRealtime(currentToken)
   } catch (error) {
     if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
@@ -440,6 +622,7 @@ const enterWorkbench = async () => {
 const leaveWorkbench = () => {
   isWorkbenchResident.value = false
   lifecycleToken += 1
+  pendingRefresh = false
   disposeRealtime()
   realtimeState.value = 'offline'
   reconnectTip.value = '离开工作台后已释放在线状态，返回页面会自动续接。'
