@@ -54,9 +54,9 @@ const imagePreviewVisible = ref(false)
 const previewImageUrl = ref('')
 const miniCartVisible = ref(false)
 const settlePulsing = ref(false)
-const searchPanelVisible = ref(false)
-const searchDraft = ref('')
-const searchInputRef = ref<HTMLInputElement | null>(null)
+const searchInputFocused = ref(false)
+const mobileSearchVisible = ref(false)
+const mobileSearchInputRef = ref<HTMLInputElement | null>(null)
 
 const listScrollerRef = ref<HTMLElement | null>(null)
 const sectionRefMap = reactive<Record<string, HTMLElement | null>>({})
@@ -273,25 +273,18 @@ const openProductDetail = (product: O2oMallProduct) => {
   detailVisible.value = true
 }
 
-const openSearchPanel = async () => {
-  searchDraft.value = keyword.value
-  searchPanelVisible.value = true
-  await nextTick()
-  searchInputRef.value?.focus()
-}
-
-const closeSearchPanel = () => {
-  searchPanelVisible.value = false
-}
-
-const applySearch = () => {
-  keyword.value = searchDraft.value
-  searchPanelVisible.value = false
-}
-
 const clearSearch = () => {
-  searchDraft.value = ''
   keyword.value = ''
+}
+
+const openMobileSearch = async () => {
+  mobileSearchVisible.value = true
+  await nextTick()
+  mobileSearchInputRef.value?.focus()
+}
+
+const closeMobileSearch = () => {
+  mobileSearchVisible.value = false
 }
 
 const changeDetailQty = (delta: number) => {
@@ -626,38 +619,45 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="mall-page space-y-4">
-    <div class="mall-search-launcher-wrap">
-      <button type="button" class="mall-search-launcher" @click="openSearchPanel">
-        <el-icon><Search /></el-icon>
-        搜索商品
-      </button>
-    </div>
-
     <Teleport to="body">
-      <Transition name="mall-search-overlay">
-        <div v-if="searchPanelVisible" class="mall-search-overlay" @click.self="closeSearchPanel">
-          <section class="mall-search-panel">
-            <header class="mall-search-panel__header">
-              <p class="mall-search-panel__title">搜索商品</p>
-              <button type="button" class="mall-search-panel__close" @click="closeSearchPanel">关闭</button>
+      <button
+        type="button"
+        class="mall-mobile-search-trigger mall-mobile-search-trigger--floating"
+        :class="{ 'is-hidden': mobileSearchVisible }"
+        @click="openMobileSearch"
+      >
+        <el-icon><Search /></el-icon>
+        <span>搜索</span>
+      </button>
+      <Transition name="mall-mobile-search">
+        <div v-if="mobileSearchVisible" class="mall-mobile-search-overlay" @click.self="closeMobileSearch">
+          <section class="mall-mobile-search-sheet">
+            <header class="mall-mobile-search-sheet__header">
+              <p class="mall-mobile-search-sheet__title">搜索商品</p>
+              <button type="button" class="mall-mobile-search-sheet__close" @click="closeMobileSearch">完成</button>
             </header>
-            <div class="mall-search-panel__body">
+            <div class="mall-mobile-search-inline" :class="{ 'is-focused': searchInputFocused }">
+              <span class="mall-search-launcher__icon">
+                <el-icon><Search /></el-icon>
+              </span>
               <input
-                ref="searchInputRef"
-                v-model.trim="searchDraft"
-                class="mall-search-panel__input"
-                placeholder="输入商品名称"
-                @keyup.enter="applySearch"
+                ref="mobileSearchInputRef"
+                v-model.trim="keyword"
+                type="search"
+                class="mall-search-inline-input"
+                placeholder="搜索商品名称"
+                @focus="searchInputFocused = true"
+                @blur="searchInputFocused = false"
               />
-              <div class="mall-search-panel__actions">
-                <button type="button" class="mall-search-btn mall-search-btn--ghost" @click="clearSearch">清空</button>
-                <button type="button" class="mall-search-btn mall-search-btn--primary" @click="applySearch">开始搜索</button>
-              </div>
-            </div>
-            <div class="mall-search-panel__chips">
-              <button type="button" class="mall-chip" @click="searchDraft = '热销'">热销</button>
-              <button type="button" class="mall-chip" @click="searchDraft = '新品'">新品</button>
-              <button type="button" class="mall-chip" @click="searchDraft = '低库存'">低库存优先</button>
+              <button
+                v-if="keyword.trim()"
+                type="button"
+                class="mall-search-inline-clear"
+                aria-label="清空搜索"
+                @click="clearSearch"
+              >
+                x
+              </button>
             </div>
           </section>
         </div>
@@ -704,7 +704,6 @@ onBeforeUnmount(() => {
         <div class="mall-hero-card__meta-item mall-hero-card__meta-item--notice rounded-2xl bg-amber-50 px-3 py-3 text-sm text-amber-700">公告：库存实时刷新，请以下单结果为准</div>
       </div>
     </div>
-
     <div v-if="loading" class="grid gap-3 rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
       <div v-for="index in 6" :key="index" class="h-[5.8rem] animate-pulse rounded-2xl bg-slate-100" />
     </div>
@@ -737,6 +736,30 @@ onBeforeUnmount(() => {
       v-else-if="searchMode"
       class="mall-search-results space-y-3 rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-4 shadow-[var(--ylink-shadow-soft)]"
     >
+      <div class="mall-search-launcher-wrap mall-search-launcher-wrap--inside">
+        <div class="mall-search-toolbar mall-search-toolbar--minimal" :class="{ 'is-focused': searchInputFocused }">
+          <span class="mall-search-launcher__icon">
+            <el-icon><Search /></el-icon>
+          </span>
+          <input
+            v-model.trim="keyword"
+            type="search"
+            class="mall-search-inline-input"
+            placeholder="搜索商品名称 / 标签"
+            @focus="searchInputFocused = true"
+            @blur="searchInputFocused = false"
+          />
+          <button
+            v-if="keyword.trim()"
+            type="button"
+            class="mall-search-inline-clear"
+            @click="clearSearch"
+            aria-label="清空搜索"
+          >
+            x
+          </button>
+        </div>
+      </div>
       <header class="flex items-center justify-between">
         <p class="text-sm font-semibold text-slate-700">搜索结果 {{ searchResults.length }} 条</p>
       </header>
@@ -772,6 +795,30 @@ onBeforeUnmount(() => {
     </section>
 
     <section v-else class="mall-browse-panel grid grid-cols-[76px_minmax(0,1fr)] sm:grid-cols-[140px_minmax(0,1fr)] gap-3 rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-3 sm:p-4 shadow-[var(--ylink-shadow-soft)]">
+      <div class="mall-search-launcher-wrap mall-search-launcher-wrap--inside mall-search-launcher-wrap--browse">
+        <div class="mall-search-toolbar mall-search-toolbar--minimal" :class="{ 'is-focused': searchInputFocused }">
+          <span class="mall-search-launcher__icon">
+            <el-icon><Search /></el-icon>
+          </span>
+          <input
+            v-model.trim="keyword"
+            type="search"
+            class="mall-search-inline-input"
+            placeholder="搜索商品名称 / 标签"
+            @focus="searchInputFocused = true"
+            @blur="searchInputFocused = false"
+          />
+          <button
+            v-if="keyword.trim()"
+            type="button"
+            class="mall-search-inline-clear"
+            @click="clearSearch"
+            aria-label="清空搜索"
+          >
+            x
+          </button>
+        </div>
+      </div>
       <aside class="mall-browse-categories overflow-y-auto pr-1 sm:pr-2 hide-scrollbar">
         <button
           v-for="category in categoryOptions"
@@ -1275,165 +1322,239 @@ onBeforeUnmount(() => {
 }
 
 .mall-search-launcher-wrap {
-  position: fixed;
-  top: max(0.4rem, env(safe-area-inset-top));
-  left: 0;
-  right: 0;
-  z-index: 82;
   display: flex;
   justify-content: center;
+  margin-top: -0.3rem;
+  margin-bottom: -0.1rem;
+}
+
+.mall-search-toolbar {
+  display: flex;
+  width: min(100%, 36rem);
+  align-items: center;
+  gap: 0.42rem;
+  border: 1px solid rgba(203, 213, 225, 0.92);
+  border-radius: 9999px;
+  background: rgba(248, 250, 252, 0.96);
+  padding: 0.34rem 0.42rem;
+  box-shadow: 0 6px 14px rgba(15, 23, 42, 0.05);
+  transition:
+    transform var(--ylink-motion-normal) var(--ylink-motion-ease),
+    border-color var(--ylink-motion-normal) var(--ylink-motion-ease),
+    box-shadow var(--ylink-motion-normal) var(--ylink-motion-ease),
+    background var(--ylink-motion-normal) var(--ylink-motion-ease);
+}
+
+.mall-search-toolbar--minimal {
+  min-height: 2.75rem;
+}
+
+.mall-search-toolbar.is-focused {
+  transform: translateY(-1px);
+  border-color: rgba(13, 148, 136, 0.28);
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow:
+    0 10px 22px rgba(15, 23, 42, 0.08),
+    0 0 0 2px rgba(13, 148, 136, 0.08);
+}
+
+.mall-search-launcher-wrap--inside {
+  margin-top: 0;
+  margin-bottom: 0.1rem;
+}
+
+.mall-search-launcher-wrap--browse {
+  grid-column: 1 / -1;
+  margin-bottom: 0.15rem;
+}
+
+.mall-mobile-search-trigger {
+  display: inline-flex;
+  height: 2rem;
+  min-width: 4.6rem;
+  align-items: center;
+  justify-content: center;
+  gap: 0.28rem;
+  border: 1px solid rgba(148, 163, 184, 0.56);
+  border-radius: 9999px;
+  background: #ffffff;
+  color: #0f172a;
+  font-size: 0.72rem;
+  font-weight: 600;
+  padding: 0 0.65rem;
+  box-shadow:
+    0 10px 22px rgba(15, 23, 42, 0.14),
+    0 0 0 1px rgba(255, 255, 255, 0.9) inset;
+}
+
+.mall-mobile-search-trigger--floating {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  top: calc(env(safe-area-inset-top) + 0.95rem);
+  z-index: 220;
+  transition:
+    opacity var(--ylink-motion-normal) var(--ylink-motion-ease),
+    visibility var(--ylink-motion-normal) var(--ylink-motion-ease);
+}
+
+.mall-mobile-search-trigger--floating.is-hidden {
+  opacity: 0;
+  visibility: hidden;
   pointer-events: none;
 }
 
-.mall-search-launcher {
+.mall-search-launcher__icon {
   display: inline-flex;
+  height: 1.65rem;
+  width: 1.65rem;
+  flex-shrink: 0;
   align-items: center;
-  gap: 0.45rem;
-  border: 1px solid var(--ylink-color-border);
+  justify-content: center;
   border-radius: 9999px;
-  background: var(--ylink-color-surface);
-  color: #0f172a;
-  font-size: 0.88rem;
-  font-weight: 600;
-  padding: 0.52rem 1.05rem;
-  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
-  transition:
-    transform var(--ylink-motion-normal) var(--ylink-motion-ease),
-    box-shadow var(--ylink-motion-normal) var(--ylink-motion-ease);
-  pointer-events: auto;
+  background: rgba(15, 118, 110, 0.08);
+  color: #0f766e;
+  pointer-events: none;
 }
 
-.mall-search-launcher:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 14px 30px rgba(15, 23, 42, 0.12);
-}
-
-.mall-search-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 95;
-  display: grid;
-  place-items: start center;
-  background: rgba(15, 23, 42, 0.36);
-  isolation: isolate;
-  padding: 7vh 1rem 1rem;
-}
-
-.mall-search-panel {
-  width: min(760px, calc(100vw - 2rem));
-  border: 1px solid rgba(226, 232, 240, 0.9);
-  border-radius: 1.25rem;
-  background: rgba(255, 255, 255, 0.96);
-  box-shadow: 0 22px 44px rgba(15, 23, 42, 0.14);
-  padding: 1rem;
-}
-
-.mall-search-panel__header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-}
-
-.mall-search-panel__title {
-  color: #0f172a;
-  font-size: 1rem;
-  font-weight: 700;
-}
-
-.mall-search-panel__close {
+.mall-search-inline-input {
+  min-width: 0;
+  flex: 1;
   border: none;
   background: transparent;
+  overflow: hidden;
   color: #64748b;
-  font-size: 0.82rem;
-}
-
-.mall-search-panel__body {
-  margin-top: 0.8rem;
-  display: grid;
-  gap: 0.65rem;
-}
-
-.mall-search-panel__input {
-  height: 46px;
-  width: 100%;
-  border: 1px solid var(--ylink-color-border);
-  border-radius: 9999px;
-  background: var(--ylink-color-surface-soft);
-  color: #0f172a;
-  font-size: 0.9rem;
-  padding: 0 1rem;
+  font-size: 0.84rem;
+  font-weight: 500;
+  line-height: 1.2;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0;
   outline: none;
 }
 
-.mall-search-panel__input:focus {
-  border-color: var(--ylink-color-primary-soft);
+.mall-search-inline-input::placeholder {
+  color: #94a3b8;
 }
 
-.mall-search-panel__actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 0.5rem;
+.mall-search-inline-input[type='search']::-webkit-search-cancel-button {
+  display: none;
 }
 
-.mall-search-btn {
-  height: 36px;
-  border-radius: 9999px;
-  font-size: 0.82rem;
-  font-weight: 600;
-  padding: 0 1rem;
-}
-
-.mall-search-btn--ghost {
-  border: 1px solid var(--ylink-color-border);
-  background: #ffffff;
-  color: #475569;
-}
-
-.mall-search-btn--primary {
+.mall-search-inline-clear {
+  display: inline-flex;
+  height: 1.15rem;
+  width: 1.15rem;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
   border: none;
-  background: var(--ylink-color-primary-strong);
-  color: #ffffff;
-}
-
-.mall-search-panel__chips {
-  margin-top: 0.7rem;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.45rem;
-}
-
-.mall-chip {
-  border: 1px solid rgba(226, 232, 240, 0.95);
   border-radius: 9999px;
-  background: #f8fafc;
+  background: rgba(148, 163, 184, 0.18);
+  color: #64748b;
+  font-size: 0.65rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0;
+  transition:
+    transform var(--ylink-motion-normal) var(--ylink-motion-ease),
+    background var(--ylink-motion-normal) var(--ylink-motion-ease),
+    color var(--ylink-motion-normal) var(--ylink-motion-ease);
+}
+
+.mall-search-inline-clear:hover {
+  transform: scale(1.08);
+  background: rgba(148, 163, 184, 0.28);
+  color: #334155;
+}
+
+.mall-search-inline-clear:active {
+  transform: scale(0.94);
+}
+
+.mall-mobile-search-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 190;
+  background: rgba(15, 23, 42, 0.34);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: max(0.65rem, env(safe-area-inset-top)) 0.75rem 0.75rem;
+}
+
+.mall-mobile-search-sheet {
+  width: min(var(--client-shell-max, 1100px), calc(100vw - 1.5rem));
+  border: 1px solid rgba(226, 232, 240, 0.95);
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.98);
+  padding: 0.72rem;
+  box-shadow: 0 18px 36px rgba(15, 23, 42, 0.2);
+}
+
+.mall-mobile-search-sheet__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.55rem;
+}
+
+.mall-mobile-search-sheet__title {
+  color: #0f172a;
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.mall-mobile-search-sheet__close {
+  border: none;
+  background: transparent;
   color: #64748b;
   font-size: 0.76rem;
   font-weight: 600;
-  padding: 0.3rem 0.7rem;
+  padding: 0;
 }
 
-.mall-search-overlay-enter-active,
-.mall-search-overlay-leave-active {
+.mall-mobile-search-inline {
+  display: flex;
+  align-items: center;
+  gap: 0.38rem;
+  min-height: 2.5rem;
+  border: 1px solid rgba(203, 213, 225, 0.92);
+  border-radius: 9999px;
+  background: rgba(248, 250, 252, 0.96);
+  padding: 0.3rem 0.38rem;
+  transition:
+    border-color var(--ylink-motion-normal) var(--ylink-motion-ease),
+    box-shadow var(--ylink-motion-normal) var(--ylink-motion-ease);
+}
+
+.mall-mobile-search-inline.is-focused {
+  border-color: rgba(13, 148, 136, 0.3);
+  box-shadow: 0 0 0 2px rgba(13, 148, 136, 0.08);
+}
+
+.mall-mobile-search-enter-active,
+.mall-mobile-search-leave-active {
   transition: opacity var(--ylink-motion-normal) var(--ylink-motion-ease);
 }
 
-.mall-search-overlay-enter-active .mall-search-panel,
-.mall-search-overlay-leave-active .mall-search-panel {
+.mall-mobile-search-enter-from,
+.mall-mobile-search-leave-to {
+  opacity: 0;
+}
+
+.mall-mobile-search-enter-active .mall-mobile-search-sheet,
+.mall-mobile-search-leave-active .mall-mobile-search-sheet {
   transition:
     transform var(--ylink-motion-normal) var(--ylink-motion-ease),
     opacity var(--ylink-motion-normal) var(--ylink-motion-ease);
 }
 
-.mall-search-overlay-enter-from,
-.mall-search-overlay-leave-to {
+.mall-mobile-search-enter-from .mall-mobile-search-sheet,
+.mall-mobile-search-leave-to .mall-mobile-search-sheet {
+  transform: translateY(-8px);
   opacity: 0;
-}
-
-.mall-search-overlay-enter-from .mall-search-panel,
-.mall-search-overlay-leave-to .mall-search-panel {
-  opacity: 0;
-  transform: translateY(-10px) scale(0.98);
 }
 
 .mini-cart-wrapper {
@@ -1857,6 +1978,20 @@ onBeforeUnmount(() => {
 }
 
 @media (min-width: 768px) {
+  .mall-search-toolbar {
+    width: min(100%, 28rem);
+    min-height: 2.65rem;
+    padding: 0.3rem 0.38rem;
+  }
+
+  .mall-search-inline-input {
+    font-size: 0.8rem;
+  }
+
+  .mall-mobile-search-trigger {
+    display: none;
+  }
+
   .client-product-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1864,12 +1999,50 @@ onBeforeUnmount(() => {
 }
 
 @media (min-width: 1200px) {
+  .mall-search-toolbar {
+    width: min(100%, 36rem);
+    min-height: 2.75rem;
+    padding: 0.34rem 0.42rem;
+  }
+
+  .mall-search-inline-input {
+    font-size: 0.84rem;
+  }
+
   .client-product-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
 
 @media (max-width: 767px) {
+  .mall-search-launcher-wrap {
+    margin-top: -0.2rem;
+  }
+
+  .mall-search-launcher-wrap--inside {
+    margin-top: 0;
+  }
+
+  .mall-search-launcher-wrap--browse {
+    margin-bottom: 0.05rem;
+  }
+
+  .mall-search-toolbar {
+    display: none;
+  }
+
+  .mall-mobile-search-trigger {
+    display: inline-flex;
+    min-width: 4.2rem;
+    height: 1.9rem;
+    font-size: 0.68rem;
+    padding-inline: 0.58rem;
+  }
+
+  .mall-mobile-search-trigger--floating {
+    top: calc(env(safe-area-inset-top) + 1.15rem);
+  }
+
   .mall-page {
     --mall-mini-cart-height: 4.95rem;
     --mall-floating-bottom-clearance: calc(var(--client-tab-bar-clearance, 5.5rem) + var(--mall-mini-cart-height) + 0.85rem);
