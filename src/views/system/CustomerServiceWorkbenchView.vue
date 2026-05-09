@@ -60,6 +60,9 @@ const presence = ref<FeedbackServicePresence | null>(null)
 const realtimeState = ref<'connecting' | 'online' | 'offline'>('offline')
 const reconnectTip = ref('进入工作台后会自动续接当前客服会话。')
 const isWorkbenchResident = ref(false)
+const isPriorityPanelExpanded = ref(false)
+const quickStatusUpdating = ref<FeedbackIssueStatus | ''>('')
+const priorityUpdating = ref<FeedbackIssuePriority | ''>('')
 let realtimeConnection: FeedbackRealtimeConnection | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let refreshTimer: ReturnType<typeof setInterval> | null = null
@@ -126,15 +129,43 @@ const syncIssueForm = (record: FeedbackConversationRecord | null) => {
   issueForm.internalRemark = record?.internalRemark?.content ?? ''
 }
 
+const patchSelectedConversation = (patch: Partial<FeedbackConversationRecord>) => {
+  if (!selectedConversation.value) {
+    return
+  }
+  selectedConversation.value = {
+    ...selectedConversation.value,
+    ...patch,
+  }
+}
+
+const patchConversationListItem = (conversationId: string, patch: Partial<FeedbackConversationRecord>) => {
+  conversations.value = conversations.value.map((item) => {
+    if (item.id !== conversationId) {
+      return item
+    }
+    return {
+      ...item,
+      ...patch,
+    }
+  })
+}
+
+const handleTogglePriorityPanel = () => {
+  isPriorityPanelExpanded.value = !isPriorityPanelExpanded.value
+}
+
 const loadConversationDetail = async (conversationId: string) => {
   if (!conversationId) {
     selectedConversation.value = null
+    isPriorityPanelExpanded.value = false
     return
   }
 
   detailLoading.value = true
   try {
     selectedConversation.value = await getSupportFeedbackConversation(conversationId)
+    isPriorityPanelExpanded.value = false
     syncIssueForm(selectedConversation.value)
   } finally {
     detailLoading.value = false
@@ -351,16 +382,27 @@ const handleQuickStatus = async (status: FeedbackIssueStatus) => {
     return
   }
 
+  quickStatusUpdating.value = status
   saving.value = true
   try {
     await updateFeedbackIssue(selectedConversation.value.id, {
       status,
+    })
+    issueForm.status = status
+    patchSelectedConversation({
+      status,
+      updatedAt: new Date().toISOString(),
+    })
+    patchConversationListItem(selectedConversation.value.id, {
+      status,
+      updatedAt: new Date().toISOString(),
     })
     await loadConversations()
     ElMessage.success(`状态已更新为${FEEDBACK_STATUS_META_MAP[status].label}`)
   } catch (error) {
     ElMessage.error(extractErrorMessage(error, '状态更新失败，请稍后重试'))
   } finally {
+    quickStatusUpdating.value = ''
     saving.value = false
   }
 }
@@ -371,19 +413,30 @@ const handleReassignPriority = async (priority: FeedbackIssuePriority) => {
     return
   }
 
+  priorityUpdating.value = priority
   saving.value = true
   try {
     await updateFeedbackIssue(selectedConversation.value.id, {
       priority,
     })
     issueForm.priority = priority
+    patchSelectedConversation({
+      priority,
+      updatedAt: new Date().toISOString(),
+    })
+    patchConversationListItem(selectedConversation.value.id, {
+      priority,
+      updatedAt: new Date().toISOString(),
+    })
     await loadConversations({
       refreshSelectedDetail: true,
     })
+    isPriorityPanelExpanded.value = false
     ElMessage.success(`已将优先级调整为${FEEDBACK_PRIORITY_META_MAP[priority].label}`)
   } catch (error) {
     ElMessage.error(extractErrorMessage(error, '优先级调整失败，请稍后重试'))
   } finally {
+    priorityUpdating.value = ''
     saving.value = false
   }
 }
@@ -863,34 +916,26 @@ onBeforeUnmount(() => {
             </div>
           </div>
 
-          <div class="mt-4 flex flex-wrap gap-2">
-            <button type="button" class="cs-secondary-button" :disabled="saving" @click="handleTakeOver">接手处理</button>
-            <button type="button" class="cs-secondary-button" :disabled="saving" @click="handleQuickStatus('processing')">标记处理中</button>
-            <button type="button" class="cs-secondary-button" :disabled="saving" @click="handleQuickStatus('resolved')">标记已解决</button>
-            <button type="button" class="cs-secondary-button" :disabled="saving" @click="handleQuickStatus('closed')">关闭会话</button>
-          </div>
-
-          <div class="mt-3 rounded-[18px] border border-slate-200 bg-slate-50/80 p-3">
-            <div class="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <p class="text-sm font-semibold text-slate-900">客服优先级重分配</p>
-                <p class="mt-1 text-xs text-slate-400">客服可按当前影响范围与处理紧急度，直接重新分配反馈优先级。</p>
-              </div>
-              <span class="rounded-full px-2.5 py-1 text-[11px] font-semibold" :class="FEEDBACK_PRIORITY_META_MAP[issueForm.priority].className">
-                当前：{{ FEEDBACK_PRIORITY_META_MAP[issueForm.priority].label }}
-              </span>
-            </div>
-            <div class="mt-3 flex flex-wrap gap-2">
+          <div class="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-[20px] border border-slate-200 bg-slate-50/80 px-4 py-3">
+            <div class="flex flex-wrap items-center gap-2">
+              <button type="button" class="cs-mini-button" :disabled="saving" @click="handleTakeOver">接手处理</button>
               <button
-                v-for="item in FEEDBACK_PRIORITY_OPTIONS"
+                v-for="item in FEEDBACK_STATUS_OPTIONS.filter((option) => ['pending', 'processing', 'resolved'].includes(option.value))"
                 :key="item.value"
                 type="button"
-                class="cs-secondary-button"
-                :disabled="saving || issueForm.priority === item.value"
-                @click="handleReassignPriority(item.value)"
+                class="cs-status-button"
+                :class="issueForm.status === item.value ? 'is-active' : ''"
+                :disabled="saving"
+                @click="handleQuickStatus(item.value)"
               >
-                调整为{{ item.label }}
+                {{ quickStatusUpdating === item.value ? '处理中...' : item.label }}
               </button>
+            </div>
+            <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+              <span class="rounded-full bg-white px-2.5 py-1 font-medium text-slate-600">
+                当前负责人：{{ selectedConversation.assigneeName || '待分配' }}
+              </span>
+              <button type="button" class="cs-text-button" :disabled="saving" @click="handleQuickStatus('closed')">关闭会话</button>
             </div>
           </div>
 
@@ -927,41 +972,82 @@ onBeforeUnmount(() => {
               </div>
 
               <div class="rounded-[20px] border border-slate-200 bg-white p-4">
-                <p class="text-base font-semibold text-slate-900">客服回复</p>
-                <p class="mt-1 text-xs text-slate-400">发送前会先同步当前 Issue 字段，确保字段状态和消息内容一致。</p>
-                <textarea
-                  v-model="replyDraft"
-                  class="cs-textarea mt-4"
-                  maxlength="500"
-                  placeholder="请输入给客户端的回复内容，例如处理结论、补充说明或下一步动作。"
-                />
-                <div class="mt-3 flex justify-end">
-                  <button type="button" class="cs-primary-button" :disabled="replying" @click="handleReply">
-                    {{ replying ? '发送中...' : '发送客服回复' }}
-                  </button>
-                </div>
-              </div>
-
-              <div class="rounded-[20px] border border-slate-200 bg-white p-4">
-                <div class="flex items-center justify-between gap-3">
+                <div class="flex flex-wrap items-start justify-between gap-3">
                   <div>
-                    <p class="text-base font-semibold text-slate-900">内部备注</p>
-                    <p class="mt-1 text-xs text-slate-400">仅客服内部可见，不会同步给客户端。</p>
+                    <p class="text-base font-semibold text-slate-900">客服处理面板</p>
+                    <p class="mt-1 text-xs text-slate-400">将回复、内部备注和优先级重分配收口到同一区域，减少信息分散。</p>
                   </div>
-                  <button type="button" class="cs-secondary-button" :disabled="remarkSaving" @click="handleSaveInternalRemark">
-                    {{ remarkSaving ? '保存中...' : '保存备注' }}
+                  <button type="button" class="cs-mini-button" :disabled="saving" @click="handleTogglePriorityPanel">
+                    {{ isPriorityPanelExpanded ? '收起优先级' : '重分配优先级' }}
                   </button>
                 </div>
-                <textarea
-                  v-model="issueForm.internalRemark"
-                  class="cs-textarea mt-4"
-                  maxlength="4000"
-                  placeholder="可记录排查结论、交接信息、风险判断或内部提醒。"
-                />
-                <p v-if="selectedConversation.internalRemark?.updatedAt" class="mt-2 text-xs text-slate-400">
-                  最近更新：{{ selectedConversation.internalRemark.updatedByDisplayName || selectedConversation.internalRemark.updatedByUsername || '未知客服' }}
-                  · {{ formatDateTime(selectedConversation.internalRemark.updatedAt) }}
-                </p>
+
+                <div v-if="isPriorityPanelExpanded" class="mt-4 rounded-[18px] border border-slate-200 bg-slate-50 px-4 py-3">
+                  <div class="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p class="text-sm font-semibold text-slate-900">客服优先级重分配</p>
+                      <p class="mt-1 text-xs text-slate-400">按实际影响范围与紧急度调整优先级，保存后会同步列表与会话标签。</p>
+                    </div>
+                    <span class="rounded-full px-2.5 py-1 text-[11px] font-semibold" :class="FEEDBACK_PRIORITY_META_MAP[issueForm.priority].className">
+                      当前：{{ FEEDBACK_PRIORITY_META_MAP[issueForm.priority].label }}
+                    </span>
+                  </div>
+                  <div class="mt-3 flex flex-wrap gap-2">
+                    <button
+                      v-for="item in FEEDBACK_PRIORITY_OPTIONS"
+                      :key="item.value"
+                      type="button"
+                      class="cs-priority-button"
+                      :class="issueForm.priority === item.value ? 'is-active' : ''"
+                      :disabled="saving"
+                      @click="handleReassignPriority(item.value)"
+                    >
+                      {{ priorityUpdating === item.value ? '更新中...' : item.label }}
+                    </button>
+                  </div>
+                </div>
+
+                <div class="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+                  <section class="rounded-[18px] border border-slate-200 bg-slate-50/70 p-4">
+                    <div class="flex items-center justify-between gap-3">
+                      <div>
+                        <p class="text-sm font-semibold text-slate-900">客服回复</p>
+                        <p class="mt-1 text-xs text-slate-400">发送前会同步当前结构化字段，确保结论与状态一致。</p>
+                      </div>
+                      <button type="button" class="cs-primary-button cs-primary-button--compact" :disabled="replying" @click="handleReply">
+                        {{ replying ? '发送中...' : '发送回复' }}
+                      </button>
+                    </div>
+                    <textarea
+                      v-model="replyDraft"
+                      class="cs-textarea mt-4"
+                      maxlength="500"
+                      placeholder="请输入给客户端的回复内容，例如处理结论、补充说明或下一步动作。"
+                    />
+                  </section>
+
+                  <section class="rounded-[18px] border border-slate-200 bg-slate-50/70 p-4">
+                    <div class="flex items-center justify-between gap-3">
+                      <div>
+                        <p class="text-sm font-semibold text-slate-900">内部备注</p>
+                        <p class="mt-1 text-xs text-slate-400">仅客服内部可见，适合记录排查结论与交接信息。</p>
+                      </div>
+                      <button type="button" class="cs-mini-button" :disabled="remarkSaving" @click="handleSaveInternalRemark">
+                        {{ remarkSaving ? '保存中...' : '保存备注' }}
+                      </button>
+                    </div>
+                    <textarea
+                      v-model="issueForm.internalRemark"
+                      class="cs-textarea mt-4"
+                      maxlength="4000"
+                      placeholder="可记录排查结论、交接信息、风险判断或内部提醒。"
+                    />
+                    <p v-if="selectedConversation.internalRemark?.updatedAt" class="mt-2 text-xs text-slate-400">
+                      最近更新：{{ selectedConversation.internalRemark.updatedByDisplayName || selectedConversation.internalRemark.updatedByUsername || '未知客服' }}
+                      · {{ formatDateTime(selectedConversation.internalRemark.updatedAt) }}
+                    </p>
+                  </section>
+                </div>
               </div>
             </div>
 
@@ -969,7 +1055,7 @@ onBeforeUnmount(() => {
               <div class="flex items-center justify-between gap-3">
                 <div>
                   <p class="text-base font-semibold text-slate-900">Issue 字段</p>
-                  <p class="mt-1 text-xs text-slate-400">将客户端描述整理成可流转、可追踪的 Issue 结构。</p>
+                  <p class="mt-1 text-xs text-slate-400">聚焦结构化排查字段，去掉与顶部状态和优先级重复的内容。</p>
                 </div>
                 <span class="rounded-full bg-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600">
                   {{ getCategoryLabel(issueForm.category) }}
@@ -981,25 +1067,6 @@ onBeforeUnmount(() => {
                   <span class="mb-1.5 block text-xs font-medium text-slate-500">标题</span>
                   <input v-model="issueForm.title" type="text" maxlength="80" class="cs-input" />
                 </label>
-
-                <div class="grid gap-3 sm:grid-cols-2">
-                  <label class="block">
-                    <span class="mb-1.5 block text-xs font-medium text-slate-500">状态</span>
-                    <select v-model="issueForm.status" class="cs-input">
-                      <option v-for="item in FEEDBACK_STATUS_OPTIONS" :key="item.value" :value="item.value">
-                        {{ item.label }}
-                      </option>
-                    </select>
-                  </label>
-                  <label class="block">
-                    <span class="mb-1.5 block text-xs font-medium text-slate-500">优先级（客服可重分配）</span>
-                    <select v-model="issueForm.priority" class="cs-input">
-                      <option v-for="item in FEEDBACK_PRIORITY_OPTIONS" :key="item.value" :value="item.value">
-                        {{ item.label }}
-                      </option>
-                    </select>
-                  </label>
-                </div>
 
                 <div class="grid gap-3 sm:grid-cols-2">
                   <label class="block">
@@ -1049,10 +1116,6 @@ onBeforeUnmount(() => {
                   <span class="mb-1.5 block text-xs font-medium text-slate-500">标签</span>
                   <input v-model="issueForm.tagText" type="text" maxlength="120" class="cs-input" placeholder="使用中文逗号分隔多个标签" />
                 </label>
-
-                <div class="rounded-[16px] bg-white px-4 py-3 text-sm text-slate-500">
-                  当前负责人：<span class="font-medium text-slate-900">{{ selectedConversation.assigneeName || '待分配' }}</span>
-                </div>
               </div>
 
               <button type="button" class="cs-primary-button mt-4 w-full justify-center" :disabled="saving" @click="handleSaveIssue">
@@ -1188,6 +1251,74 @@ onBeforeUnmount(() => {
 
 .cs-primary-button:disabled,
 .cs-secondary-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+  transform: none;
+}
+
+.cs-primary-button--compact {
+  min-height: 2.25rem;
+  border-radius: 14px;
+  font-size: 0.84rem;
+  padding: 0.68rem 0.92rem;
+}
+
+.cs-mini-button,
+.cs-status-button,
+.cs-priority-button,
+.cs-text-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9999px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1;
+  transition:
+    background-color 0.18s ease,
+    color 0.18s ease,
+    border-color 0.18s ease,
+    transform 0.18s ease,
+    opacity 0.18s ease;
+}
+
+.cs-mini-button,
+.cs-status-button,
+.cs-priority-button {
+  border: 1px solid rgb(226 232 240);
+  background: #ffffff;
+  color: rgb(51 65 85);
+  padding: 0.52rem 0.85rem;
+}
+
+.cs-text-button {
+  color: rgb(148 35 35);
+  padding: 0.3rem 0;
+}
+
+.cs-mini-button:hover,
+.cs-status-button:hover,
+.cs-priority-button:hover,
+.cs-text-button:hover {
+  transform: translateY(-1px);
+}
+
+.cs-status-button.is-active {
+  border-color: rgba(13, 148, 136, 0.22);
+  background: rgba(13, 148, 136, 0.12);
+  color: rgb(15 118 110);
+}
+
+.cs-priority-button.is-active {
+  border-color: rgba(2, 132, 199, 0.2);
+  background: rgba(14, 165, 233, 0.12);
+  color: rgb(3 105 161);
+}
+
+.cs-mini-button:disabled,
+.cs-status-button:disabled,
+.cs-priority-button:disabled,
+.cs-text-button:disabled {
   cursor: not-allowed;
   opacity: 0.6;
   transform: none;
