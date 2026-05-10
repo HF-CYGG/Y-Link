@@ -1,10 +1,10 @@
 /**
  * 模块说明：src/router/routes.ts
- * 文件职责：统一维护管理端与客户端的路由、菜单、快捷入口和权限元信息，本次继续修复客服工作台独立导航未实际渲染的问题，并保持既有预热与权限收口策略。
+ * 文件职责：统一维护管理端与客户端的路由、菜单、快捷入口和权限元信息，本次继续细化客户端高频相邻页的预热顺序并收缩过度预加载。
  * 实现逻辑：
  * - 所有业务页面都通过 routeViewLoaders 做懒加载，保证路由、预热和权限入口保持同源；
  * - 产品中心共享工作台仍然由两个历史路由承接，但预热目标会按双入口互相补齐，确保壳层拆包后标签切换依旧平滑；
- * - 菜单、快捷入口和首个可访问路由仍然完全由本文件派生，避免出现多份配置源。
+ * - 客户端路由的 preloadTargets 改为围绕真实相邻页面配置，把“最可能下一跳”排在前面，并减少低频页面顺手预热。
  * 维护说明：新增或调整业务页面时，需要同步检查路由名称、权限码、菜单顺序和预热目标是否一致。
  */
 
@@ -562,7 +562,11 @@ export const routes: RouteRecordRaw[] = [
           clientNavOrder: 10,
           requiresClientAuth: true,
           keepAlive: true,
-          preloadTargets: ['client-orders', 'client-cart', 'client-profile'],
+          // 商城主入口优先预热“购物车 -> 订单列表”：
+          // - 加购后去购物车是最高频下一跳；
+          // - 订单列表是次高频回访入口；
+          // - “我的”页改为按需再预热，避免首页冷启动顺手拉起过多非关键页面。
+          preloadTargets: ['client-cart', 'client-orders'],
         } satisfies AppRouteMeta,
       },
       {
@@ -576,6 +580,7 @@ export const routes: RouteRecordRaw[] = [
           clientNavOrder: 20,
           requiresClientAuth: true,
           keepAlive: true,
+          // 订单列表优先照顾“详情查看”，其次才是回商城继续下单。
           preloadTargets: ['client-order-detail', 'client-mall'],
         } satisfies AppRouteMeta,
       },
@@ -588,6 +593,7 @@ export const routes: RouteRecordRaw[] = [
           menu: false,
           requiresClientAuth: true,
           keepAlive: true,
+          // 购物车下一跳几乎总是结算，回商城作为补充链路保留在第二优先级。
           preloadTargets: ['client-checkout', 'client-mall'],
         } satisfies AppRouteMeta,
       },
@@ -599,7 +605,8 @@ export const routes: RouteRecordRaw[] = [
           title: '确认订单',
           menu: false,
           requiresClientAuth: true,
-          preloadTargets: ['client-orders', 'client-order-detail'],
+          // 结算成功后会直接跳订单详情，因此先预热详情，再补列表页。
+          preloadTargets: ['client-order-detail', 'client-orders'],
         } satisfies AppRouteMeta,
       },
       {
@@ -613,7 +620,8 @@ export const routes: RouteRecordRaw[] = [
           clientNavOrder: 30,
           requiresClientAuth: true,
           keepAlive: true,
-          preloadTargets: ['client-orders', 'client-feedback'],
+          // “我的”页进入反馈中心的频率高于回订单列表，因此先预热反馈页。
+          preloadTargets: ['client-feedback', 'client-orders'],
         } satisfies AppRouteMeta,
       },
       {
@@ -626,7 +634,8 @@ export const routes: RouteRecordRaw[] = [
           requiresClientAuth: true,
           hideClientBottomNav: true,
           keepAlive: true,
-          preloadTargets: ['client-profile'],
+          // 反馈会话页的高频下一跳是“新建反馈”和“进入详情”，返回个人页放在兜底位。
+          preloadTargets: ['client-feedback-create', 'client-feedback-detail', 'client-profile'],
         } satisfies AppRouteMeta,
       },
       {
@@ -638,7 +647,8 @@ export const routes: RouteRecordRaw[] = [
           menu: false,
           requiresClientAuth: true,
           hideClientBottomNav: true,
-          preloadTargets: ['client-feedback'],
+          // 新建成功后通常直达反馈详情，返回列表则作为第二落点预热。
+          preloadTargets: ['client-feedback-detail', 'client-feedback'],
         } satisfies AppRouteMeta,
       },
       {
@@ -650,7 +660,8 @@ export const routes: RouteRecordRaw[] = [
           menu: false,
           requiresClientAuth: true,
           hideClientBottomNav: true,
-          preloadTargets: ['client-feedback'],
+          // 详情页返回主要回到会话列表，个人页仅作为后续兜底入口。
+          preloadTargets: ['client-feedback', 'client-profile'],
         } satisfies AppRouteMeta,
       },
       {
@@ -661,6 +672,7 @@ export const routes: RouteRecordRaw[] = [
           title: '订单详情',
           menu: false,
           requiresClientAuth: true,
+          // 订单详情的主回退页是订单列表，避免顺手拉起更多低频页面。
           preloadTargets: ['client-orders'],
         } satisfies AppRouteMeta,
       },

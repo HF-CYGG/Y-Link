@@ -7,7 +7,7 @@
  * - 页面层可基于 `isFresh` 判断是否直接使用缓存，或在展示旧内容的同时发起后台刷新。
  * 维护说明：
  * - 若订单列表查询条件继续扩展，需要同时补齐 `persist()` 与 `initialize()` 的快照字段；
- * - 详情页更新订单摘要时会复用 `upsertOrder()`，因此新增摘要字段时也要同步合并策略。
+ * - 详情页与列表页收到单条订单变更时会复用 `syncOrderSummary()`，因此新增摘要字段时也要同步合并策略。
  */
 
 import { computed, ref } from 'vue'
@@ -18,6 +18,7 @@ import {
   persistClientOrderSnapshot,
   readPersistedClientOrderSnapshot,
 } from '@/utils/client-order-storage'
+import { matchesClientOrderQuery } from '@/utils/client-order-summary'
 
 // 订单列表缓存时间比商品目录更短：
 // 用户对“待提货 / 已核销 / 已取消”状态变化更敏感，需要更快看到最新状态。
@@ -76,7 +77,7 @@ export const useClientOrderStore = defineStore('client-order', () => {
     updatedAt.value = 0
   }
 
-  const persist = () => {
+  const persist = (options?: { includeOrders?: boolean }) => {
     if (!clientUserId.value) {
       return
     }
@@ -89,7 +90,7 @@ export const useClientOrderStore = defineStore('client-order', () => {
       pageSize: pageSize.value,
       total: total.value,
       updatedAt: updatedAt.value,
-    })
+    }, options)
   }
 
   // 详细注释：
@@ -166,25 +167,43 @@ export const useClientOrderStore = defineStore('client-order', () => {
   }
 
   const setActiveStatus = (status: 'all' | O2oPreorderSummary['status']) => {
+    if (activeStatus.value === status) {
+      return
+    }
     activeStatus.value = status
-    persist()
+    // 详细注释：切换筛选标签只会改变查询上下文，不需要把整份订单数组再次重写到 localStorage。
+    persist({ includeOrders: false })
   }
 
   const setKeyword = (nextKeyword: string) => {
-    keyword.value = nextKeyword.trim()
-    persist()
+    const normalizedKeyword = nextKeyword.trim()
+    if (keyword.value === normalizedKeyword) {
+      return
+    }
+    keyword.value = normalizedKeyword
+    // 详细注释：关键词输入在弱网和高频搜索下会频繁变化，只持久化 meta 可显著降低同步写入成本。
+    persist({ includeOrders: false })
   }
 
   const markStale = () => {
+    if (updatedAt.value === 0) {
+      return
+    }
     updatedAt.value = 0
+    persist({ includeOrders: false })
+  }
+
+  const finalizeLocalSync = (preserveFresh?: boolean) => {
+    updatedAt.value = preserveFresh ? Date.now() : 0
     persist()
   }
 
-  const upsertOrder = (nextOrder: O2oPreorderSummary) => {
+  const upsertOrder = (nextOrder: O2oPreorderSummary, options?: { preserveFresh?: boolean }) => {
     const index = orders.value.findIndex((item) => item.id === nextOrder.id)
     if (index < 0) {
       // 新订单或详情页首次打开后同步回列表缓存，统一插入顶部便于用户立即看到结果。
       orders.value = [nextOrder, ...orders.value]
+      total.value = Math.max(total.value, orders.value.length)
     } else {
       const nextOrders = orders.value.slice()
       nextOrders[index] = {
@@ -193,10 +212,29 @@ export const useClientOrderStore = defineStore('client-order', () => {
       }
       orders.value = nextOrders
     }
-    // 详情页、撤回、退货等动作虽然会同步刷新单条摘要，但不一定满足当前服务端筛选结果，
-    // 因此这里主动把缓存标记为 stale，让订单页回到前台后自动以当前查询条件重新拉取。
-    updatedAt.value = 0
-    persist()
+    finalizeLocalSync(options?.preserveFresh)
+  }
+
+  const removeOrder = (orderId: string, options?: { preserveFresh?: boolean }) => {
+    const existedOrderCount = orders.value.length
+    orders.value = orders.value.filter((item) => item.id !== orderId)
+    if (orders.value.length === existedOrderCount) {
+      return
+    }
+    total.value = Math.max(0, total.value - 1)
+    finalizeLocalSync(options?.preserveFresh)
+  }
+
+  const syncOrderSummary = (nextOrder: O2oPreorderSummary, options?: { preserveFresh?: boolean }) => {
+    const matchesCurrentQuery = matchesClientOrderQuery(nextOrder, {
+      activeStatus: activeStatus.value,
+      keyword: keyword.value,
+    })
+    if (!matchesCurrentQuery) {
+      removeOrder(nextOrder.id, options)
+      return
+    }
+    upsertOrder(nextOrder, options)
   }
 
   const clearAll = (options?: { clearPersisted?: boolean }) => {
@@ -227,6 +265,8 @@ export const useClientOrderStore = defineStore('client-order', () => {
     setKeyword,
     markStale,
     upsertOrder,
+    removeOrder,
+    syncOrderSummary,
     clearAll,
   }
 })

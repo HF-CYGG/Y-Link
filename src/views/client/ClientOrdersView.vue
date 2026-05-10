@@ -5,7 +5,7 @@
  * 实现逻辑：
  * - 状态筛选与关键词查询统一走服务端接口，不再只对第一页缓存做本地过滤，避免遗漏更多历史订单；
  * - 订单列表支持“加载更多”，并把当前筛选条件、关键词、页码和已加载结果缓存到按账号隔离的 Store 中；
- * - 页面层继续使用 `useStableRequest` 保证只有最新一次查询结果生效，减少频繁切换筛选时的闪烁与覆盖。
+ * - 页面层继续使用 `useStableRequest` 保证只有最新一次查询结果生效，并在收到订单变更广播后优先增量刷新单条摘要。
  * 维护说明：
  * - 若后续新增列表查询条件，需要同步修改 `buildListQuery()`、Store 快照字段与空态文案；
  * - 订单撤回等会改变服务端筛选结果的操作，要优先考虑当前列表是否需要局部剔除或整页刷新。
@@ -15,7 +15,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { RefreshRight } from '@element-plus/icons-vue'
-import { cancelMyO2oPreorder, getMyO2oPreorders, type O2oPreorderDetail, type O2oPreorderSummary } from '@/api/modules/o2o'
+import { cancelMyO2oPreorder, getMyO2oPreorderSummary, getMyO2oPreorders, type O2oPreorderSummary } from '@/api/modules/o2o'
 import { BaseRequestState } from '@/components/common'
 import { useStableRequest } from '@/composables/useStableRequest'
 import {
@@ -29,6 +29,8 @@ import { useClientAuthStore, useClientOrderStore } from '@/store'
 import pinia from '@/store/pinia'
 import { formatDateTime } from '@/utils/date-time'
 import { normalizeRequestError } from '@/utils/error'
+import { buildClientOrderSummaryFromDetail } from '@/utils/client-order-summary'
+import { notifyClientOrderRefresh, subscribeClientOrderRefresh } from '@/utils/client-order-refresh'
 
 const ORDER_TYPE_LABEL_MAP = {
   department: '部门订',
@@ -84,8 +86,11 @@ const recallingOrderId = ref('')
 const requestError = ref<{ type: 'offline' | 'error'; message: string } | null>(null)
 const clientAuthStore = useClientAuthStore(pinia)
 const clientOrderStore = useClientOrderStore(pinia)
-const { runLatest } = useStableRequest()
+const { runLatest: runLatestListRequest } = useStableRequest()
+const { runLatest: runLatestSummaryRequest } = useStableRequest()
 clientOrderStore.initialize(clientAuthStore.currentUser?.id)
+let disposeClientOrderRefresh: () => void = () => {}
+const clientOrderRefreshSourceId = `client-orders-${Math.random().toString(36).slice(2)}`
 
 const orders = computed(() => clientOrderStore.orders)
 const total = computed(() => clientOrderStore.total)
@@ -158,43 +163,6 @@ const handleStatusChange = (value: 'all' | O2oPreorderSummary['status']) => {
   }
   activeStatus.value = value
   void loadOrders(true)
-}
-
-const buildOrderSummaryFromDetail = (detail: O2oPreorderDetail): O2oPreorderSummary => {
-  const { order } = detail
-  const latestReturnRequest = detail.returnRequests
-    .slice()
-    .sort((prev, next) => new Date(next.createdAt).getTime() - new Date(prev.createdAt).getTime())[0] ?? null
-  return {
-    id: order.id,
-    showNo: order.showNo,
-    verifyCode: order.verifyCode,
-    status: order.status,
-    businessStatus: order.businessStatus,
-    hasCustomerOrder: Boolean(order.hasCustomerOrder),
-    isSystemApplied: order.isSystemApplied,
-    merchantMessage: order.merchantMessage,
-    clientOrderType: order.clientOrderType,
-    departmentNameSnapshot: order.departmentNameSnapshot,
-    returnRequestCount: detail.returnRequests.length,
-    pendingReturnRequestCount: detail.returnRequests.filter((item) => item.status === 'pending').length,
-    latestReturnRequest: latestReturnRequest
-      ? {
-          id: latestReturnRequest.id,
-          returnNo: latestReturnRequest.returnNo,
-          status: latestReturnRequest.status,
-          createdAt: latestReturnRequest.createdAt,
-          handledAt: latestReturnRequest.handledAt,
-          rejectedReason: latestReturnRequest.rejectedReason,
-        }
-      : null,
-    statusReport: order.statusReport,
-    totalAmount: order.totalAmount,
-    expireInSeconds: order.expireInSeconds,
-    totalQty: order.totalQty,
-    timeoutAt: order.timeoutAt,
-    createdAt: order.createdAt,
-  }
 }
 
 const getBusinessStatusMeta = (order: O2oPreorderSummary) => {
@@ -363,7 +331,7 @@ const loadOrders = async (force = false, options?: { append?: boolean }) => {
   if (!append) {
     requestError.value = null
   }
-  await runLatest({
+  await runLatestListRequest({
     executor: (signal) =>
       getMyO2oPreorders(
         buildListQuery(targetPage),
@@ -405,6 +373,41 @@ const loadOrders = async (force = false, options?: { append?: boolean }) => {
       refreshing.value = false
       loadingMore.value = false
     },
+  })
+}
+
+// 详细注释：列表收到订单广播后优先按订单 id 只刷新一条摘要，
+// 只有摘要接口失败或订单已无权限访问时，才回退为移除缓存或标记整页过期。
+const refreshSingleOrderSummary = async (orderId: string, options?: { silent?: boolean }) => {
+  const normalizedOrderId = orderId.trim()
+  if (!normalizedOrderId) {
+    return
+  }
+  await runLatestSummaryRequest({
+    executor: (signal) => getMyO2oPreorderSummary(normalizedOrderId, { signal }),
+    onSuccess: (result) => {
+      clientOrderStore.syncOrderSummary(result, { preserveFresh: true })
+    },
+    onError: (error) => {
+      const normalizedError = normalizeRequestError(error, '订单摘要刷新失败')
+      if (normalizedError.status === 404 || normalizedError.status === 403) {
+        clientOrderStore.removeOrder(normalizedOrderId, { preserveFresh: true })
+        return
+      }
+      clientOrderStore.markStale()
+      if (!options?.silent) {
+        ElMessage.warning(`订单刷新失败：${normalizedError.message}`)
+      }
+    },
+  })
+}
+
+const startClientOrderRefreshSubscription = () => {
+  disposeClientOrderRefresh = subscribeClientOrderRefresh(async (event) => {
+    if (event.sourceId === clientOrderRefreshSourceId) {
+      return
+    }
+    await refreshSingleOrderSummary(event.orderId, { silent: true })
   })
 }
 
@@ -452,9 +455,12 @@ const handleRecallOrder = async (order: O2oPreorderSummary) => {
   recallingOrderId.value = order.id
   try {
     const detail = await cancelMyO2oPreorder(order.id)
-    clientOrderStore.upsertOrder(buildOrderSummaryFromDetail(detail))
-    // 撤回后订单可能不再属于当前筛选结果，这里主动以当前服务端查询条件刷新列表。
-    await loadOrders(true)
+    clientOrderStore.syncOrderSummary(buildClientOrderSummaryFromDetail(detail), { preserveFresh: true })
+    notifyClientOrderRefresh({
+      orderId: detail.order.id,
+      reason: 'cancelled',
+      sourceId: clientOrderRefreshSourceId,
+    })
     ElMessage.success('订单已撤回')
   } catch (error) {
     const normalizedError = normalizeRequestError(error, '撤回订单失败')
@@ -489,8 +495,13 @@ watch(
 )
 
 onMounted(async () => {
+  startClientOrderRefreshSubscription()
   syncStoreWithCurrentUser()
   await loadOrders()
+})
+
+onBeforeUnmount(() => {
+  disposeClientOrderRefresh()
 })
 </script>
 

@@ -3,7 +3,7 @@
  * 模块说明：src/views/client/ClientOrderDetailView.vue
  * 文件职责：承载客户端订单详情展示、进度查看、二维码展示、订单撤回与退货申请。
  * 实现逻辑：
- * - 详情页加载成功后会同步刷新订单摘要缓存，方便返回列表页时立即看到最新状态；
+ * - 详情页加载成功后会同步刷新订单摘要缓存，并在编辑、退货等场景优先做局部回写而不是整单重拉；
  * - 订单 Store 初始化按当前客户端账号执行，避免共享终端切换账号后把旧订单摘要带入新账号上下文。
  * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
  */
@@ -40,7 +40,8 @@ import {
 } from '@/constants/o2o-order-status'
 import { useClientAuthStore, useClientOrderStore } from '@/store'
 import pinia from '@/store/pinia'
-import { subscribeClientOrderRefresh } from '@/utils/client-order-refresh'
+import { buildClientOrderSummaryFromDetail } from '@/utils/client-order-summary'
+import { notifyClientOrderRefresh, subscribeClientOrderRefresh } from '@/utils/client-order-refresh'
 import { formatDateTime } from '@/utils/date-time'
 import { normalizeRequestError } from '@/utils/error'
 import { exportVoucherPdf } from '@/utils/pdf/export-voucher-pdf'
@@ -93,6 +94,7 @@ const { runLatest } = useStableRequest()
 const clientAuthStore = useClientAuthStore(pinia)
 const clientOrderStore = useClientOrderStore(pinia)
 let disposeClientOrderRefresh: () => void = () => {}
+const clientOrderRefreshSourceId = `client-order-detail-${Math.random().toString(36).slice(2)}`
 clientOrderStore.initialize(clientAuthStore.currentUser?.id)
 
 const currentReportScenario = computed(() => {
@@ -479,53 +481,26 @@ const qrDisabledHint = computed(() => {
   return '当前订单二维码暂不可用'
 })
 
-const buildOrderSummaryFromDetail = (nextDetail: O2oPreorderDetail): O2oPreorderSummary => {
-  const { order } = nextDetail
-  return {
-    id: order.id,
-    showNo: order.showNo,
-    verifyCode: order.verifyCode,
-    status: order.status,
-    businessStatus: order.businessStatus,
-    hasCustomerOrder: Boolean(order.hasCustomerOrder),
-    isSystemApplied: order.isSystemApplied,
-    merchantMessage: order.merchantMessage,
-    clientOrderType: order.clientOrderType,
-    departmentNameSnapshot: order.departmentNameSnapshot,
-    returnRequestCount: nextDetail.returnRequests.length,
-    pendingReturnRequestCount: nextDetail.returnRequests.filter((item) => item.status === 'pending').length,
-    latestReturnRequest: nextDetail.returnRequests.length
-      ? nextDetail.returnRequests
-          .slice()
-          .sort((prev, next) => new Date(next.createdAt).getTime() - new Date(prev.createdAt).getTime())[0]
-      : null,
-    statusReport: order.statusReport,
-    totalAmount: order.totalAmount,
-    expireInSeconds: order.expireInSeconds,
-    totalQty: order.totalQty,
-    timeoutAt: order.timeoutAt,
-    createdAt: order.createdAt,
-  }
-}
-
 const toEditableItemMaxQty = (product: O2oMallProduct, originalQty = 0) => {
   return Math.max(0, Number(product.availableStock ?? 0) + originalQty)
 }
 
-const buildEditableItemsFromDetail = (nextDetail: O2oPreorderDetail) => {
+const buildEditableItemsFromDetail = (nextDetail: O2oPreorderDetail, existingItems: EditableOrderItem[] = []) => {
   const productMap = new Map(mallProducts.value.map((item) => [item.id, item]))
+  const draftQtyMap = new Map(existingItems.map((item) => [item.productId, item.qty]))
   return nextDetail.items.map((item) => {
     const product = productMap.get(item.productId)
     const maxQty = product ? toEditableItemMaxQty(product, item.qty) : item.qty
     const unavailableReason = product
       ? null
       : '当前商品已不在可售目录中，仅支持减少或删除原有数量'
+    const draftQty = draftQtyMap.get(item.productId)
     return {
       productId: item.productId,
       productCode: item.productCode,
       productName: item.productName,
       defaultPrice: item.defaultPrice,
-      qty: item.qty,
+      qty: draftQty === undefined ? item.qty : Math.max(0, Math.min(maxQty, Math.floor(Number(draftQty ?? item.qty)))),
       originalQty: item.qty,
       maxQty,
       unavailableReason,
@@ -684,6 +659,9 @@ const loadMallProducts = async () => {
   editProductsLoading.value = true
   try {
     mallProducts.value = await getO2oMallProducts()
+    if (detail.value) {
+      editOrderItems.value = buildEditableItemsFromDetail(detail.value, editOrderItems.value)
+    }
   } catch (error) {
     const normalizedError = normalizeRequestError(error, '可修改商品加载失败')
     ElMessage.error(normalizedError.message)
@@ -692,8 +670,10 @@ const loadMallProducts = async () => {
   }
 }
 
-const syncOrderStoreFromDetail = (nextDetail: O2oPreorderDetail) => {
-  clientOrderStore.upsertOrder(buildOrderSummaryFromDetail(nextDetail))
+const syncOrderStoreFromDetail = (nextDetail: O2oPreorderDetail, options?: { preserveFresh?: boolean }) => {
+  clientOrderStore.syncOrderSummary(buildClientOrderSummaryFromDetail(nextDetail), {
+    preserveFresh: options?.preserveFresh,
+  })
 }
 
 const markCustomerOrderPrintedIfNeeded = async () => {
@@ -703,7 +683,12 @@ const markCustomerOrderPrintedIfNeeded = async () => {
   try {
     const nextDetail = await markMyO2oPreorderCustomerOrderPrinted(detail.value.order.id)
     detail.value = nextDetail
-    syncOrderStoreFromDetail(nextDetail)
+    syncOrderStoreFromDetail(nextDetail, { preserveFresh: true })
+    notifyClientOrderRefresh({
+      orderId: nextDetail.order.id,
+      reason: 'compliance_updated',
+      sourceId: clientOrderRefreshSourceId,
+    })
   } catch (error) {
     const normalizedError = normalizeRequestError(error, '已完成打印/导出，但出库单状态上报失败')
     ElMessage.warning(normalizedError.message)
@@ -840,7 +825,7 @@ const loadDetail = async () => {
     executor: (signal) => getO2oPreorderDetail(orderId, { signal }),
     onSuccess: async (result) => {
       detail.value = result
-      syncOrderStoreFromDetail(result)
+      syncOrderStoreFromDetail(result, { preserveFresh: true })
       await renderQrCode()
       await renderReturnRequestQrs()
     },
@@ -862,6 +847,9 @@ const loadDetail = async () => {
 const startClientOrderRefreshSubscription = () => {
   disposeClientOrderRefresh = subscribeClientOrderRefresh(async (event) => {
     const currentOrderId = String(route.params.id ?? '').trim()
+    if (event.sourceId === clientOrderRefreshSourceId) {
+      return
+    }
     if (!event.orderId || !currentOrderId || event.orderId !== currentOrderId) {
       return
     }
@@ -902,9 +890,14 @@ const handleRecallOrder = async () => {
   try {
     const nextDetail = await cancelMyO2oPreorder(detail.value.order.id)
     detail.value = nextDetail
-    syncOrderStoreFromDetail(nextDetail)
+    syncOrderStoreFromDetail(nextDetail, { preserveFresh: true })
     await renderQrCode()
     await renderReturnRequestQrs()
+    notifyClientOrderRefresh({
+      orderId: nextDetail.order.id,
+      reason: 'cancelled',
+      sourceId: clientOrderRefreshSourceId,
+    })
     ElMessage.success('订单已撤回')
   } catch (error) {
     const normalizedError = normalizeRequestError(error, '撤回订单失败')
@@ -914,7 +907,7 @@ const handleRecallOrder = async () => {
   }
 }
 
-const openEditDialog = async () => {
+const openEditDialog = () => {
   if (!detail.value) {
     ElMessage.warning('当前订单不可修改')
     return
@@ -923,9 +916,9 @@ const openEditDialog = async () => {
     ElMessage.warning(modifyOrderDisabledHint.value || '当前订单不可修改')
     return
   }
-  await loadMallProducts()
   resetEditForm()
   editDialogVisible.value = true
+  void loadMallProducts()
 }
 
 const handleEditDialogClosed = () => {
@@ -985,10 +978,15 @@ const handleSubmitOrderEdit = async () => {
       })),
     })
     detail.value = nextDetail
-    syncOrderStoreFromDetail(nextDetail)
+    syncOrderStoreFromDetail(nextDetail, { preserveFresh: true })
     await renderQrCode()
     await renderReturnRequestQrs()
     editDialogVisible.value = false
+    notifyClientOrderRefresh({
+      orderId: nextDetail.order.id,
+      reason: 'updated',
+      sourceId: clientOrderRefreshSourceId,
+    })
     ElMessage.success('订单修改成功')
   } catch (error) {
     const normalizedError = normalizeRequestError(error, '订单修改失败')
@@ -1057,8 +1055,18 @@ const handleSubmitReturnRequest = async () => {
         qty: item.selectedQty,
       })),
     })
-    await loadDetail()
+    detail.value = {
+      ...detail.value,
+      returnRequests: [createdReturnRequest, ...detail.value.returnRequests],
+    }
+    syncOrderStoreFromDetail(detail.value, { preserveFresh: true })
+    await renderReturnRequestQrs()
     returnDialogVisible.value = false
+    notifyClientOrderRefresh({
+      orderId: detail.value.order.id,
+      reason: 'return_requested',
+      sourceId: clientOrderRefreshSourceId,
+    })
     ElMessage.success(`退货申请已提交，退货单号：${createdReturnRequest.returnNo}`)
   } catch (error) {
     const normalizedError = normalizeRequestError(error, '提交退货申请失败')

@@ -1,6 +1,10 @@
 /**
  * 模块说明：src/router/route-performance.ts
- * 文件职责：统一维护路由异步加载器、页面预热目标和登录后首跳预热策略，本次收缩登录后预热范围并保留高频页面空闲预热能力。
+ * 文件职责：统一维护路由异步加载器、页面预热目标和登录后首跳预热策略，本次补齐客户端高频动态页预热映射，并拦截重复预热调度。
+ * 实现逻辑：
+ * - 所有可预热页面继续复用同一份异步加载器，避免路由表与预热表出现两套入口；
+ * - 客户端登录后按“当前目标页 + 高频相邻页”生成更轻量的预热清单，减少冷启动时的过度加载；
+ * - 空闲预热新增“已完成/已排队”双重门禁，避免用户来回切页时重复塞入相同的空闲任务。
  * 维护说明：
  * - 路由表与预热表必须保持同一命名口径，否则 preloadTargets 会静默失效；
  * - 新增业务页面时，除了补 routes，还要同步评估是否需要纳入这里的预热范围。
@@ -23,6 +27,8 @@ export type AppRouteName =
   | 'client-checkout'
   | 'client-profile'
   | 'client-feedback'
+  | 'client-feedback-create'
+  | 'client-feedback-detail'
   | 'client-order-detail'
   | 'dashboard'
   | 'order-entry'
@@ -111,6 +117,8 @@ const warmableRouteLoaders: Partial<Record<RouteWarmupTarget, RouteViewLoader>> 
   'client-checkout': routeViewLoaders['client-checkout'],
   'client-profile': routeViewLoaders['client-profile'],
   'client-feedback': routeViewLoaders['client-feedback'],
+  'client-feedback-create': routeViewLoaders['client-feedback-create'],
+  'client-feedback-detail': routeViewLoaders['client-feedback-detail'],
   'client-order-detail': routeViewLoaders['client-order-detail'],
   dashboard: routeViewLoaders.dashboard,
   'order-entry': routeViewLoaders['order-entry'],
@@ -168,6 +176,12 @@ const resolveClientWarmupTargetByPath = (redirectPath: string): AppRouteName | n
   if (redirectPath.startsWith('/client/profile')) {
     return 'client-profile'
   }
+  if (redirectPath.startsWith('/client/feedback/create')) {
+    return 'client-feedback-create'
+  }
+  if (/^\/client\/feedback\/[^/]+/i.test(redirectPath)) {
+    return 'client-feedback-detail'
+  }
   if (redirectPath.startsWith('/client/feedback')) {
     return 'client-feedback'
   }
@@ -183,6 +197,13 @@ const resolveClientWarmupTargetByPath = (redirectPath: string): AppRouteName | n
  * - 即使多个入口同时请求预热，也只会真正加载一次。
  */
 const warmedRoutePromises = new Map<RouteWarmupTarget, Promise<unknown>>()
+
+/**
+ * 已经排队等待空闲调度的预热任务：
+ * - 与 warmedRoutePromises 分工不同，这里只负责“还没真正执行、但已经安排过”的任务；
+ * - 可以阻止用户在短时间内多次切页时，把同一路由反复塞进 requestIdleCallback / setTimeout 队列。
+ */
+const scheduledWarmupRouteNames = new Set<RouteWarmupTarget>()
 
 /**
  * 立即预热指定路由组件：
@@ -211,71 +232,52 @@ export const preloadRouteComponents = async (routeNames: RouteWarmupTarget[]) =>
   )
 }
 
+/**
+ * 客户端高频相邻页预热映射：
+ * - 第一个元素始终是“当前落点最可能的下一跳”；
+ * - 只保留真正高频的相邻页，避免客户端冷启动时把低频页面也一并拉起。
+ */
+const clientWarmupAdjacencyMap: Partial<Record<AppRouteName, AppRouteName[]>> = {
+  'client-mall': ['client-cart', 'client-orders'],
+  'client-orders': ['client-order-detail', 'client-mall'],
+  'client-cart': ['client-checkout', 'client-mall'],
+  'client-checkout': ['client-order-detail', 'client-orders'],
+  'client-profile': ['client-feedback', 'client-orders'],
+  'client-feedback': ['client-feedback-create', 'client-feedback-detail', 'client-profile'],
+  'client-feedback-create': ['client-feedback-detail', 'client-feedback'],
+  'client-feedback-detail': ['client-feedback', 'client-profile'],
+  'client-order-detail': ['client-orders'],
+}
+
+const warmupTargetMatchers: Array<{
+  target: RouteWarmupTarget
+  prefixes: string[]
+}> = [
+  { target: 'dashboard', prefixes: ['/dashboard'] },
+  { target: 'order-entry', prefixes: ['/order-entry'] },
+  { target: 'order-list', prefixes: ['/order-list'] },
+  { target: 'tags', prefixes: ['/base-data/tags'] },
+  { target: 'products', prefixes: ['/base-data/products', '/base-data'] },
+  { target: 'supplier-delivery', prefixes: ['/supplier-delivery'] },
+  { target: 'supplier-history', prefixes: ['/supplier-history'] },
+  { target: 'o2o-console-products', prefixes: ['/o2o-console/products'] },
+  { target: 'o2o-console-orders', prefixes: ['/o2o-console/orders'] },
+  { target: 'o2o-console-verify', prefixes: ['/o2o-console/verify'] },
+  { target: 'o2o-console-inbound', prefixes: ['/inbound-manage', '/o2o-console/inbound'] },
+  { target: 'system-audit-logs', prefixes: ['/system/audit-logs'] },
+  { target: 'system-db-migration', prefixes: ['/system/db-migration'] },
+  { target: 'system-client-users', prefixes: ['/system/client-users'] },
+  { target: 'system-customer-service', prefixes: ['/system/customer-service'] },
+  { target: 'system-users', prefixes: ['/system/users', '/system'] },
+]
+
 const resolveWarmupTargetByPath = (redirectPath: string): RouteWarmupTarget | null => {
   // 这里按“登录成功后最常见落点”做路径归类，把任意 redirect 路径收口成可预热的核心页面。
   // 即便用户命中更深层子路径，也尽量先把上层高频页面的代码包拉下来，降低首跳等待感。
-  if (redirectPath.startsWith('/dashboard')) {
-    return 'dashboard'
-  }
-
-  if (redirectPath.startsWith('/order-entry')) {
-    return 'order-entry'
-  }
-
-  if (redirectPath.startsWith('/order-list')) {
-    return 'order-list'
-  }
-
-  if (redirectPath.startsWith('/base-data/tags')) {
-    return 'tags'
-  }
-
-  if (redirectPath.startsWith('/base-data/products') || redirectPath.startsWith('/base-data')) {
-    return 'products'
-  }
-
-  if (redirectPath.startsWith('/supplier-delivery')) {
-    return 'supplier-delivery'
-  }
-
-  if (redirectPath.startsWith('/supplier-history')) {
-    return 'supplier-history'
-  }
-
-  if (redirectPath.startsWith('/o2o-console/products')) {
-    return 'o2o-console-products'
-  }
-
-  if (redirectPath.startsWith('/o2o-console/orders')) {
-    return 'o2o-console-orders'
-  }
-
-  if (redirectPath.startsWith('/o2o-console/verify')) {
-    return 'o2o-console-verify'
-  }
-
-  if (redirectPath.startsWith('/inbound-manage') || redirectPath.startsWith('/o2o-console/inbound')) {
-    return 'o2o-console-inbound'
-  }
-
-  if (redirectPath.startsWith('/system/audit-logs')) {
-    return 'system-audit-logs'
-  }
-
-  if (redirectPath.startsWith('/system/db-migration')) {
-    return 'system-db-migration'
-  }
-
-  if (redirectPath.startsWith('/system/client-users')) {
-    return 'system-client-users'
-  }
-
-  if (redirectPath.startsWith('/system/customer-service')) {
-    return 'system-customer-service'
-  }
-
-  if (redirectPath.startsWith('/system/users') || redirectPath.startsWith('/system')) {
-    return 'system-users'
+  for (const matcher of warmupTargetMatchers) {
+    if (matcher.prefixes.some((prefix) => redirectPath.startsWith(prefix))) {
+      return matcher.target
+    }
   }
 
   return null
@@ -303,12 +305,13 @@ export const resolvePostLoginWarmupTargets = (redirectPath?: string): RouteWarmu
  * - 若 redirect 指向具体客户端页，则补充目标页面预热，减少登录后首跳等待。
  */
 export const resolveClientPostLoginWarmupTargets = (redirectPath?: string): AppRouteName[] => {
-  const targets: AppRouteName[] = ['client-mall', 'client-orders', 'client-cart']
   const normalizedRedirectPath = typeof redirectPath === 'string' ? redirectPath.trim() : ''
   const matchedTarget = normalizedRedirectPath ? resolveClientWarmupTargetByPath(normalizedRedirectPath) : null
-  if (matchedTarget) {
-    targets.push(matchedTarget)
-  }
+  const entryTarget = matchedTarget ?? 'client-mall'
+  const targets: AppRouteName[] = [
+    entryTarget,
+    ...(clientWarmupAdjacencyMap[entryTarget] ?? []),
+  ]
   return [...new Set(targets)]
 }
 
@@ -335,12 +338,55 @@ export const scheduleRouteComponentWarmup = (routeNames: RouteWarmupTarget[]) =>
   }
 
   const uniqueRouteNames = [...new Set(routeNames)]
-  if (!uniqueRouteNames.length) {
+  const routeNamesToSchedule = uniqueRouteNames.filter((routeName) => {
+    return !warmedRoutePromises.has(routeName) && !scheduledWarmupRouteNames.has(routeName)
+  })
+  if (!routeNamesToSchedule.length) {
     return
   }
 
+  routeNamesToSchedule.forEach((routeName) => {
+    scheduledWarmupRouteNames.add(routeName)
+  })
+
+  /**
+   * 预热批次执行器：
+   * - 真正开始执行时，再把对应路由从“已排队”集合里移除；
+   * - 这样可以同时覆盖“尚未执行前去重”和“执行开始后由 Promise 缓存兜底”两段窗口。
+   */
+  const runWarmupBatch = (batchRouteNames: RouteWarmupTarget[]) => {
+    if (!batchRouteNames.length) {
+      return
+    }
+    batchRouteNames.forEach((routeName) => {
+      scheduledWarmupRouteNames.delete(routeName)
+    })
+    void preloadRouteComponents(batchRouteNames)
+  }
+
+  /**
+   * 高频相邻页分两段预热：
+   * - 第一优先级页面先起，优先照顾最可能的下一跳；
+   * - 其余目标继续挂到后续空闲片段，避免一次性并发拉起过多子包。
+   */
   const warmupTask = () => {
-    void preloadRouteComponents(uniqueRouteNames)
+    runWarmupBatch(routeNamesToSchedule.slice(0, 1))
+
+    const trailingRouteNames = routeNamesToSchedule.slice(1)
+    if (!trailingRouteNames.length) {
+      return
+    }
+
+    if (typeof globalThis.window.requestIdleCallback === 'function') {
+      globalThis.window.requestIdleCallback(() => {
+        runWarmupBatch(trailingRouteNames)
+      }, { timeout: 1200 })
+      return
+    }
+
+    globalThis.window.setTimeout(() => {
+      runWarmupBatch(trailingRouteNames)
+    }, 420)
   }
 
   if (typeof globalThis.window.requestIdleCallback === 'function') {

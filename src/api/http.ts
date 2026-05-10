@@ -44,7 +44,9 @@ const isLoginRequest = (url?: string) => {
  * - 否则用户在输入错误验证码时会被莫名其妙重定向。
  */
 const isClientGuestAuthRequest = (url?: string) => {
-  return /\/client-auth\/(?:captcha|login|register|forgot-password\/verify|forgot-password\/reset)(?:\?|$)/.test(normalizeRequestUrl(url))
+  return /\/client-auth\/(?:captcha|capabilities|login|register|verification-code\/send|forgot-password\/verify|forgot-password\/reset)(?:\?|$)/.test(
+    normalizeRequestUrl(url),
+  )
 }
 
 /**

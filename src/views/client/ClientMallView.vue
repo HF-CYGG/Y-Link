@@ -29,6 +29,18 @@ interface ProductCategoryGroup {
   items: O2oMallProduct[]
 }
 
+interface ProductSearchEntry {
+  product: O2oMallProduct
+  searchText: string
+}
+
+interface MallBrowseIndexSnapshot {
+  categoryGroups: ProductCategoryGroup[]
+  categoryOptions: Array<{ key: string; label: string; count: number }>
+  categoryItemMap: Map<string, O2oMallProduct[]>
+  searchEntries: ProductSearchEntry[]
+}
+
 const clientCartStore = useClientCartStore(pinia)
 const clientCatalogStore = useClientCatalogStore(pinia)
 const clientAuthStore = useClientAuthStore(pinia)
@@ -37,6 +49,7 @@ const { isPhone } = useDevice()
 const route = useRoute()
 
 const loading = ref(false)
+const refreshing = ref(false)
 const requestError = ref<{ type: 'offline' | 'error'; message: string } | null>(null)
 // 搜索词与激活分类直接映射到 Store，保证页面切走后仍能恢复到用户上次浏览上下文。
 const keyword = computed({
@@ -81,6 +94,15 @@ clientCartStore.initialize(clientAuthStore.currentUser?.id)
 clientCatalogStore.initialize(clientAuthStore.currentUser?.id)
 
 const products = computed(() => clientCatalogStore.products)
+const normalizedKeyword = computed(() => keyword.value.trim().toLowerCase())
+const hasKeyword = computed(() => normalizedKeyword.value.length > 0)
+const hasRenderableProducts = computed(() => products.value.length > 0)
+const blockingRequestError = computed(() => {
+  return hasRenderableProducts.value ? null : requestError.value
+})
+const passiveRefreshErrorMessage = computed(() => {
+  return hasRenderableProducts.value ? requestError.value?.message ?? '' : ''
+})
 
 const classifyProduct = (product: O2oMallProduct) => {
   return product.tags && product.tags.length > 0 ? product.tags : ['默认标签']
@@ -100,56 +122,67 @@ const closeProductImagePreview = () => {
   imagePreviewVisible.value = false
 }
 
-const categoryGroups = computed<ProductCategoryGroup[]>(() => {
-  const groupMap = new Map<string, O2oMallProduct[]>()
+const mallBrowseIndex = computed<MallBrowseIndexSnapshot>(() => {
+  // 分类分组与搜索索引统一在单次遍历里完成，避免商品数组在多个 computed 中被重复扫描。
+  const groupMap = new Map<string, ProductCategoryGroup>()
+  const searchEntries: ProductSearchEntry[] = []
+
   products.value.forEach((product) => {
-    const keys = classifyProduct(product)
-    keys.forEach(key => {
+    const categoryKeys = classifyProduct(product)
+    searchEntries.push({
+      product,
+      // 搜索索引预先拼好常用字段，减少用户每次输入关键字时的字符串拼接成本。
+      searchText: `${product.productName} ${product.productCode} ${product.detailContent ?? ''} ${categoryKeys.join(' ')}`.toLowerCase(),
+    })
+    categoryKeys.forEach((key) => {
       const grouped = groupMap.get(key)
       if (grouped) {
-        grouped.push(product)
-      } else {
-        groupMap.set(key, [product])
+        grouped.items.push(product)
+        return
       }
+      groupMap.set(key, {
+        key,
+        label: key,
+        items: [product],
+      })
     })
   })
 
-  return [...groupMap.entries()]
-    .sort((prev, next) => prev[0].localeCompare(next[0], 'zh-Hans-CN'))
-    .map(([key, items]) => ({
-      key,
-      label: key,
-      items,
-    }))
+  const categoryGroups = [...groupMap.values()].sort((prev, next) => prev.label.localeCompare(next.label, 'zh-Hans-CN'))
+  return {
+    categoryGroups,
+    categoryOptions: [{ key: 'all', label: '全部', count: products.value.length }].concat(
+      categoryGroups.map((group) => ({
+        key: group.key,
+        label: group.label,
+        count: group.items.length,
+      })),
+    ),
+    categoryItemMap: new Map(categoryGroups.map((group) => [group.key, group.items])),
+    searchEntries,
+  }
 })
 
 // 搜索模式与大数据模式互斥：
 // - 有关键字时优先进入搜索结果态，弱化标签导航；
 // - 数据量较大时启用虚拟列表，仅渲染当前标签内的可视区域。
-const searchMode = computed(() => keyword.value.trim().length > 0)
+const categoryGroups = computed(() => mallBrowseIndex.value.categoryGroups)
+const categoryOptions = computed(() => mallBrowseIndex.value.categoryOptions)
+const searchMode = computed(() => hasKeyword.value)
 const largeDatasetMode = computed(() => products.value.length > 100)
 
-const categoryOptions = computed(() => {
-  return [{ key: 'all', label: '全部', count: products.value.length }].concat(
-    categoryGroups.value.map((group) => ({
-      key: group.key,
-      label: group.label,
-      count: group.items.length,
-    })),
-  )
-})
-
 const searchResults = computed(() => {
-  const normalizedKeyword = keyword.value.trim().toLowerCase()
-  if (!normalizedKeyword) {
+  if (!normalizedKeyword.value) {
     return []
   }
 
-  return products.value.filter((product) => {
-    // 搜索同时命中名称、编码与详情文案，兼顾运营配置与用户口语化输入。
-    const text = `${product.productName} ${product.productCode} ${product.detailContent ?? ''}`.toLowerCase()
-    return text.includes(normalizedKeyword)
+  const matchedProducts: O2oMallProduct[] = []
+  mallBrowseIndex.value.searchEntries.forEach((entry) => {
+    if (entry.searchText.includes(normalizedKeyword.value)) {
+      matchedProducts.push(entry.product)
+    }
   })
+  return matchedProducts
 })
 
 const bottomSelectedQty = computed(() => clientCartStore.totalQty)
@@ -164,7 +197,7 @@ const activeCategoryItems = computed(() => {
   if (activeCategoryKey.value === 'all') {
     return products.value
   }
-  return categoryGroups.value.find((group) => group.key === activeCategoryKey.value)?.items ?? []
+  return mallBrowseIndex.value.categoryItemMap.get(activeCategoryKey.value) ?? []
 })
 const virtualSource = computed(() => {
   if (searchMode.value) {
@@ -192,7 +225,7 @@ const triggerSettlePulse = () => {
 }
 
 const warmupProductImages = (items: O2oMallProduct[]) => {
-  if (globalThis.window === undefined) {
+  if (globalThis.window === undefined || !items.length) {
     return
   }
   // 仅预热首屏附近的小批量图片，避免在慢网环境下一次性抢占过多带宽。
@@ -229,9 +262,11 @@ const loadProducts = async (force = false) => {
   if (!force && clientCatalogStore.products.length > 0 && clientCatalogStore.isFresh) {
     requestError.value = null
     clientCartStore.syncWithCatalog(clientCatalogStore.products)
+    warmupProductImages(clientCatalogStore.products)
     return
   }
   loading.value = clientCatalogStore.products.length === 0
+  refreshing.value = true
   requestError.value = null
   await runLatest({
     executor: (signal) => getO2oMallProducts({ signal }),
@@ -259,6 +294,7 @@ const loadProducts = async (force = false) => {
     },
     onFinally: () => {
       loading.value = false
+      refreshing.value = false
     },
   })
 }
@@ -567,6 +603,12 @@ const handleMallViewportResize = () => {
   handleProductListScroll()
 }
 
+const syncMallViewportAfterRender = async () => {
+  await nextTick()
+  syncListViewportBottomSpacer()
+  handleProductListScroll()
+}
+
 const cartDrawerVisible = ref(false)
 const checkoutDrawerVisible = ref(false)
 
@@ -604,11 +646,23 @@ watch(
 )
 
 onMounted(async () => {
-  await loadProducts()
-  await nextTick()
-  syncListViewportBottomSpacer()
-  handleProductListScroll()
   globalThis.window.addEventListener('resize', handleMallViewportResize, { passive: true })
+  const hasHydratedCatalog = products.value.length > 0
+  if (hasHydratedCatalog) {
+    // 已有缓存时先把现有内容稳定渲染出来，再后台刷新，避免首屏等待被网络重新拉长。
+    warmupProductImages(products.value)
+  }
+
+  const loadPromise = loadProducts()
+  if (hasHydratedCatalog) {
+    await syncMallViewportAfterRender()
+    await loadPromise
+    await syncMallViewportAfterRender()
+    return
+  }
+
+  await loadPromise
+  await syncMallViewportAfterRender()
 })
 
 onBeforeUnmount(() => {
@@ -650,7 +704,7 @@ onBeforeUnmount(() => {
                 @blur="searchInputFocused = false"
               />
               <button
-                v-if="keyword.trim()"
+                v-if="hasKeyword"
                 type="button"
                 class="mall-search-inline-clear"
                 aria-label="清空搜索"
@@ -692,10 +746,10 @@ onBeforeUnmount(() => {
         <button
           type="button"
           class="mall-hero-card__refresh rounded-full border border-[var(--ylink-color-border)] bg-[var(--ylink-color-surface-soft)] px-4 py-2 text-sm text-slate-600"
-          :disabled="loading"
+          :disabled="refreshing"
           @click="loadProducts(true)"
         >
-          刷新库存
+          {{ refreshing ? '刷新中...' : '刷新库存' }}
         </button>
       </div>
       <div v-if="!isPhone" class="mall-hero-card__meta-grid mt-4 grid gap-3 sm:grid-cols-3">
@@ -703,15 +757,21 @@ onBeforeUnmount(() => {
         <div class="mall-hero-card__meta-item rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700">提货须知：请在订单有效期内到店核销</div>
         <div class="mall-hero-card__meta-item mall-hero-card__meta-item--notice rounded-2xl bg-amber-50 px-3 py-3 text-sm text-amber-700">公告：库存实时刷新，请以下单结果为准</div>
       </div>
+      <div
+        v-if="passiveRefreshErrorMessage"
+        class="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-700"
+      >
+        当前先展示本地缓存，后台刷新失败：{{ passiveRefreshErrorMessage }}
+      </div>
     </div>
     <div v-if="loading" class="grid gap-3 rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
       <div v-for="index in 6" :key="index" class="h-[5.8rem] animate-pulse rounded-2xl bg-slate-100" />
     </div>
     <BaseRequestState
-      v-else-if="requestError"
+      v-else-if="blockingRequestError"
       :type="isOffline ? 'offline' : 'error'"
       :title="isOffline ? '网络异常' : '加载失败'"
-      :description="requestError.message"
+      :description="blockingRequestError.message"
       action-text="重试"
       @retry="loadProducts(true)"
     />
@@ -750,7 +810,7 @@ onBeforeUnmount(() => {
             @blur="searchInputFocused = false"
           />
           <button
-            v-if="keyword.trim()"
+            v-if="hasKeyword"
             type="button"
             class="mall-search-inline-clear"
             @click="clearSearch"
@@ -809,7 +869,7 @@ onBeforeUnmount(() => {
             @blur="searchInputFocused = false"
           />
           <button
-            v-if="keyword.trim()"
+            v-if="hasKeyword"
             type="button"
             class="mall-search-inline-clear"
             @click="clearSearch"

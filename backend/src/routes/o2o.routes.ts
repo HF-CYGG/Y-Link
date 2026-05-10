@@ -165,6 +165,17 @@ o2oRouter.get(
   }),
 )
 
+// 订单摘要：供客户端订单列表在外部变更后按订单 id 增量刷新单条卡片，避免整页重查。
+o2oRouter.get(
+  '/mall/preorders/:id/summary',
+  requireClientAuth,
+  asyncHandler(async (req, res) => {
+    const authReq = req as ClientAuthenticatedRequest
+    const data = await o2oPreorderService.getMyOrderSummary(authReq.clientAuth, req.params.id)
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
 // 客户端触发正式出库单打印/导出后上报：用于把“是否有出库单”从默认否更新为是。
 o2oRouter.post(
   '/mall/preorders/:id/customer-order-print',

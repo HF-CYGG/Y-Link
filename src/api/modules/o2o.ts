@@ -291,6 +291,19 @@ export const getO2oPreorderDetail = (id: string, config?: RequestConfig) =>
     ...config,
   })
 
+/**
+ * 读取当前客户端订单的轻量摘要：
+ * - 供订单列表在收到外部变更广播后按订单 id 增量刷新单条卡片；
+ * - 返回结构与列表项保持一致，避免为了同步一条订单而重拉整页；
+ * - 若订单已无权限访问或已被移除，调用方可据此清理本地缓存。
+ */
+export const getMyO2oPreorderSummary = (id: string, config?: RequestConfig) =>
+  request<O2oPreorderSummary>({
+    method: 'GET',
+    url: `/o2o/mall/preorders/${id}/summary`,
+    ...config,
+  })
+
 export const markMyO2oPreorderCustomerOrderPrinted = (id: string, config?: RequestConfig) =>
   request<O2oPreorderDetail>({
     method: 'POST',

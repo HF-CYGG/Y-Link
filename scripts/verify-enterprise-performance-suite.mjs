@@ -6,7 +6,7 @@
 
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { runCommand } from './process-runner-utils.mjs'
+import { resolveTsxCliPath, runCommand } from './process-runner-utils.mjs'
 
 /**
  * 企业页面性能统一验证入口：
@@ -18,6 +18,8 @@ import { runCommand } from './process-runner-utils.mjs'
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const projectRoot = path.resolve(__dirname, '..')
+const backendRoot = path.resolve(projectRoot, 'backend')
+const tsxCliPath = resolveTsxCliPath(backendRoot)
 
 const log = (message) => {
   // eslint-disable-next-line no-console
@@ -51,6 +53,7 @@ const main = async () => {
   await runStep('构建预算校验', process.execPath, [path.join(projectRoot, 'scripts', 'verify-enterprise-page-performance.mjs')])
   await runStep('核心路径回归校验', process.execPath, [path.join(projectRoot, 'scripts', 'verify-enterprise-core-paths.mjs')])
   await runStep('客户端并发与性能基线校验', process.execPath, [path.join(projectRoot, 'scripts', 'verify-client-concurrency-performance.mjs')])
+  await runStep('客户端五场景性能与订单编辑回归校验', process.execPath, [tsxCliPath, path.join(backendRoot, 'scripts', 'task6-client-core-flow-verify.ts')], backendRoot)
 
   log('\n[suite] 企业页面性能统一验证入口执行完成')
 }

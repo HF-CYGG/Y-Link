@@ -5,7 +5,9 @@
  * 实现逻辑：
  * - 结算页默认按“散客”下单，避免系统根据账号资料自动推断成部门单，减少误下单；
  * - 用户若主动切换为“部门订”，提交前必须再次确认，确保其明确知晓订单会归入部门出库；
- * - 真正提交成功后再清理购物车并跳转订单详情页，避免前端先删数据导致状态丢失。
+ * - 进入页面后会静默同步最新商品目录，但不会阻塞用户先查看清单、填写提货信息和提交；
+ * - 提交前会写入短时会话锁，弱网或重复进入场景下会拦截同一笔预订意图的重复提交；
+ * - 真正提交成功后再清理购物车、局部修正目录库存并跳转订单详情页，避免前端先删数据导致状态丢失。
  * 维护说明：
  * - 若后续继续扩展下单归属类型，需要同步调整本页选项卡、提交校验和确认文案；
  * - 若后端修改预订单入参结构，需要同步检查 `submitO2oPreorder` 的 payload 拼装逻辑。
@@ -17,10 +19,19 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { submitO2oPreorder, type O2oClientOrderType } from '@/api/modules/o2o'
+import { useClientMallSnapshotRefresh } from '@/composables/useClientMallSnapshotRefresh'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
 import { useClientAuthStore, useClientCartStore } from '@/store'
+import { useClientCatalogStore } from '@/store/modules/client-catalog'
 import pinia from '@/store/pinia'
 import { normalizeRequestError } from '@/utils/error'
+import {
+  buildClientPreorderSubmitIntentKey,
+  clearClientPreorderSubmitLock,
+  createClientPreorderSubmitLock,
+  readActiveClientPreorderSubmitLock,
+  refreshClientPreorderSubmitLock,
+} from '@/utils/client-preorder-submit-guard'
 
 const props = defineProps<{
   standalone?: boolean
@@ -33,6 +44,8 @@ const emit = defineEmits<{
 const router = useRouter()
 const clientAuthStore = useClientAuthStore(pinia)
 const clientCartStore = useClientCartStore(pinia)
+const clientCatalogStore = useClientCatalogStore(pinia)
+const { syncing: catalogSyncing, refreshMallSnapshot } = useClientMallSnapshotRefresh()
 const { runWithGate } = useIdempotentAction()
 
 const remark = ref('')
@@ -51,6 +64,7 @@ const submitting = ref(false)
 const departmentSystemApplyChoice = ref<boolean | null>(null)
 
 const PICKUP_CONTACT_STORAGE_KEY_PREFIX = 'ylink:client:checkout:pickup-contact:'
+const AMBIGUOUS_PREORDER_SUBMIT_STATUS_SET = new Set<number | undefined>([undefined, 408, 502, 503, 504])
 
 const resolveDefaultPickupContact = (): string => {
   const currentUser = clientAuthStore.currentUser
@@ -120,6 +134,8 @@ onMounted(() => {
     clientCartStore.toggleAllValidSelected(true)
   }
   restorePickupContactDraft()
+  // 目录同步放到后台静默执行，避免“进结算先等库存接口”拖慢首屏可交互时间。
+  void refreshMallSnapshot()
 })
 
 watch(
@@ -205,6 +221,26 @@ const handleSubmit = async () => {
     }
   }
 
+  const submitItemSnapshot = selectedItems.value.map((item) => ({
+    productId: item.productId,
+    qty: item.qty,
+  }))
+  const submitRemark = remark.value.trim() || undefined
+  const submitIntentKey = buildClientPreorderSubmitIntentKey({
+    clientUserId: clientAuthStore.currentUser?.id,
+    clientOrderType: clientOrderType.value,
+    isSystemApplied: isDepartmentOrder.value ? Boolean(departmentSystemApplyChoice.value) : false,
+    pickupContact: normalizedPickupContact,
+    remark: submitRemark,
+    items: submitItemSnapshot,
+  })
+  const activeSubmitLock = readActiveClientPreorderSubmitLock(clientAuthStore.currentUser?.id)
+  if (activeSubmitLock?.intentKey === submitIntentKey) {
+    ElMessage.info('相同预订单正在确认中，请勿重复提交')
+    return
+  }
+  const submitRequestKey = createClientPreorderSubmitLock(clientAuthStore.currentUser?.id, submitIntentKey)
+
   const runResult = await runWithGate({
     actionKey: 'client-checkout-submit',
     onDuplicated: () => {
@@ -219,17 +255,18 @@ const handleSubmit = async () => {
           isSystemApplied: isDepartmentOrder.value ? Boolean(departmentSystemApplyChoice.value) : false,
           // 详细注释：提货人需要随订单一起落库，后续订单详情、门店核销与正式出库单都以这里为准。
           pickupContact: normalizedPickupContact,
-          remark: remark.value.trim() || undefined,
-          items: selectedItems.value.map((item) => ({
-            productId: item.productId,
-            qty: item.qty,
-          })),
+          remark: submitRemark,
+          items: submitItemSnapshot,
         })
 
         // 只有服务端创建预订单成功后，才真正从购物车中移除已提交商品，避免前端先删导致状态丢失。
-        selectedItems.value.forEach((item) => {
-          clientCartStore.removeItem(item.productId)
+        submitItemSnapshot.forEach((item) => {
+          clientCartStore.removeItem(String(item.productId))
         })
+        // 下单成功后优先用“本次已知变更”局部修正目录缓存，再同步购物车剩余商品的库存口径。
+        clientCatalogStore.applyPreorderSubmission(submitItemSnapshot)
+        clientCartStore.syncWithCatalog(clientCatalogStore.products)
+        clearClientPreorderSubmitLock(clientAuthStore.currentUser?.id, submitRequestKey)
 
         ElMessage.success('预订单提交成功')
 
@@ -242,6 +279,14 @@ const handleSubmit = async () => {
         await router.replace(`/client/orders/${result.order.id}`)
       } catch (error) {
         const normalizedError = normalizeRequestError(error, '提交失败，请稍后再试')
+        if (AMBIGUOUS_PREORDER_SUBMIT_STATUS_SET.has(normalizedError.status)) {
+          // 网络超时或网关抖动时，无法百分百确认服务端是否已成功落单；
+          // 因此短时间内保留提交锁，避免用户立刻重复发起相同请求。
+          refreshClientPreorderSubmitLock(clientAuthStore.currentUser?.id, submitIntentKey, submitRequestKey)
+          ElMessage.warning('提交结果确认中，请先勿重复点击；如长时间未返回，可前往我的订单查看')
+          return
+        }
+        clearClientPreorderSubmitLock(clientAuthStore.currentUser?.id, submitRequestKey)
         ElMessage.error(normalizedError.message)
       } finally {
         submitting.value = false
@@ -266,6 +311,9 @@ const handleSubmit = async () => {
     <section class="flex-1 overflow-y-auto px-4 py-4 sm:px-5 pb-32">
       <div class="mb-4 rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
         <p class="text-sm text-slate-500">提交前将以服务端库存与限购规则为准</p>
+        <p class="mt-2 text-xs text-slate-400">
+          {{ catalogSyncing ? '正在后台同步最新库存，不影响当前填写与提交' : '进入页面后会自动静默同步最新库存与限购信息' }}
+        </p>
       </div>
 
       <div class="mb-4 rounded-[1.2rem] border border-slate-100 bg-white p-4 shadow-[var(--ylink-shadow-soft)]">

@@ -163,6 +163,9 @@ const seedOrdersForBaseline = async (clientAuth: ClientAuthContext) => {
   // 生成 60 条订单样本，覆盖 pending/verified/cancelled 三种状态。
   for (let index = 0; index < 60; index += 1) {
     await o2oPreorderService.submit(clientAuth, {
+      clientOrderType: 'walkin',
+      isSystemApplied: false,
+      pickupContact: '订单查询基线联系人',
       items: [{ productId: product.id, qty: 1 }],
       remark: `订单查询性能样本-${index + 1}`,
     })
