@@ -89,6 +89,20 @@ const currentSatisfactionMeta = computed(() => {
   const level = conversation.value?.satisfaction?.level
   return level ? FEEDBACK_SATISFACTION_META_MAP[level] : null
 })
+/**
+ * 满意度评价选项按“满意 -> 一般 -> 不满意”排序：
+ * - 默认选中满意时，视觉阅读方向更贴近处理结果确认场景；
+ * - 统一从元信息映射读取文案，避免再次手写字符串导致 key 拼写错误。
+ */
+const satisfactionOptionOrder = ['satisfied', 'neutral', 'unsatisfied'] as const satisfies readonly FeedbackSatisfactionLevel[]
+const satisfactionCardOptions = satisfactionOptionOrder.map((level) => ({
+  value: level,
+  label: FEEDBACK_SATISFACTION_META_MAP[level].label,
+  description: FEEDBACK_SATISFACTION_META_MAP[level].description,
+}))
+const selectedSatisfactionMeta = computed(() => {
+  return FEEDBACK_SATISFACTION_META_MAP[selectedSatisfactionLevel.value]
+})
 const conversationAttachmentEntries = computed(() => {
   const currentConversation = conversation.value
   if (!currentConversation) {
@@ -1095,27 +1109,48 @@ onBeforeUnmount(() => {
       v-model="satisfactionDialogVisible"
       class="client-feedback-satisfaction-dialog ylink-dialog-height-mode--auto"
       width="32rem"
-      title="满意度评价"
       append-to-body
       align-center
       destroy-on-close
     >
+      <template #header>
+        <div class="client-feedback-satisfaction-dialog__header">
+          <span class="client-feedback-satisfaction-dialog__eyebrow">处理反馈</span>
+          <h3 class="client-feedback-satisfaction-dialog__title">满意度评价</h3>
+          <p class="client-feedback-satisfaction-dialog__desc">
+            请选择你对本次处理结果的感受，如有补充建议，也可以一并写给我们。
+          </p>
+        </div>
+      </template>
       <div class="space-y-4">
-        <p class="text-sm leading-6 text-slate-500">
-          请选择你对本次处理结果的感受，如有补充建议，也可以一并写给我们。
-        </p>
-        <div class="grid gap-2 sm:grid-cols-3">
-          <button
-            v-for="(meta, level) in FEEDBACK_SATISFACTION_META_MAP"
-            :key="level"
-            type="button"
-            class="rounded-[0.9rem] border px-3 py-3 text-left transition"
-            :class="selectedSatisfactionLevel === level ? meta.className : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'"
-            @click="selectedSatisfactionLevel = level"
+        <div class="space-y-3">
+          <el-radio-group
+            v-model="selectedSatisfactionLevel"
+            class="client-feedback-satisfaction-dialog__radio-group"
+            aria-label="满意度评价选项"
           >
-            <p class="text-sm font-semibold">{{ meta.label }}</p>
-            <p class="mt-1 text-xs leading-5">{{ meta.description }}</p>
-          </button>
+            <el-radio
+              v-for="option in satisfactionCardOptions"
+              :key="option.value"
+              :value="option.value"
+              class="client-feedback-satisfaction-dialog__radio-card"
+              :class="[
+                `client-feedback-satisfaction-dialog__radio-card--${option.value}`,
+                { 'is-active': selectedSatisfactionLevel === option.value },
+              ]"
+            >
+              <span class="client-feedback-satisfaction-dialog__radio-card-title">{{ option.label }}</span>
+              <span class="client-feedback-satisfaction-dialog__radio-card-desc">{{ option.description }}</span>
+            </el-radio>
+          </el-radio-group>
+          <div class="client-feedback-satisfaction-dialog__selected-card" :class="selectedSatisfactionMeta.className">
+            <p class="client-feedback-satisfaction-dialog__selected-title">
+              当前选择：{{ selectedSatisfactionMeta.label }}
+            </p>
+            <p class="client-feedback-satisfaction-dialog__selected-desc">
+              {{ selectedSatisfactionMeta.description }}
+            </p>
+          </div>
         </div>
         <textarea
           v-model="satisfactionComment"
@@ -1126,21 +1161,22 @@ onBeforeUnmount(() => {
       </div>
       <template #footer>
         <div class="flex justify-end gap-3">
-          <button
-            type="button"
-            class="rounded-[0.9rem] border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
+          <el-button
+            class="client-feedback-satisfaction-dialog__cancel"
+            plain
             @click="satisfactionDialogVisible = false"
           >
             取消
-          </button>
-          <button
-            type="button"
-            class="rounded-[0.9rem] bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+          </el-button>
+          <el-button
+            class="client-feedback-satisfaction-dialog__submit"
+            type="primary"
+            :loading="satisfactionSubmitting"
             :disabled="satisfactionSubmitting"
             @click="handleSubmitSatisfaction"
           >
             {{ satisfactionSubmitting ? '提交中...' : '提交处理评价' }}
-          </button>
+          </el-button>
         </div>
       </template>
     </el-dialog>
@@ -1261,17 +1297,187 @@ onBeforeUnmount(() => {
 
 .client-feedback-satisfaction-dialog :deep(.el-dialog) {
   border-radius: 1.5rem;
+  overflow: hidden;
+  border: 1px solid rgba(13, 148, 136, 0.08);
+  box-shadow: 0 26px 70px rgba(15, 23, 42, 0.14);
 }
 
 .client-feedback-satisfaction-dialog :deep(.el-dialog__header) {
-  padding-bottom: 0.5rem;
+  margin-right: 0;
+  padding: 0;
 }
 
 .client-feedback-satisfaction-dialog :deep(.el-dialog__body) {
-  padding-top: 0.5rem;
+  padding: 1.15rem 1.25rem 0.5rem;
 }
 
 .client-feedback-satisfaction-dialog :deep(.el-dialog__footer) {
-  padding-top: 0;
+  padding: 0 1.25rem 1.2rem;
+}
+
+.client-feedback-satisfaction-dialog__header {
+  margin: -20px -20px 0;
+  border-bottom: 1px solid rgba(13, 148, 136, 0.1);
+  background:
+    radial-gradient(circle at top right, rgba(45, 212, 191, 0.2), transparent 42%),
+    linear-gradient(135deg, rgba(13, 148, 136, 0.16), rgba(20, 184, 166, 0.08)),
+    rgb(248 250 252);
+  padding: 1.15rem 1.25rem 1.05rem;
+}
+
+.client-feedback-satisfaction-dialog__eyebrow {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 9999px;
+  background: rgba(13, 148, 136, 0.12);
+  padding: 0.28rem 0.62rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: rgb(15 118 110);
+}
+
+.client-feedback-satisfaction-dialog__title {
+  margin-top: 0.8rem;
+  font-size: 1.18rem;
+  font-weight: 700;
+  line-height: 1.35;
+  color: rgb(15 23 42);
+}
+
+.client-feedback-satisfaction-dialog__desc {
+  margin-top: 0.35rem;
+  font-size: 0.88rem;
+  line-height: 1.6;
+  color: rgb(71 85 105);
+}
+
+.client-feedback-satisfaction-dialog__radio-group {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+  width: 100%;
+}
+
+.client-feedback-satisfaction-dialog__radio-card {
+  margin-right: 0;
+  min-width: 0;
+}
+
+.client-feedback-satisfaction-dialog__radio-card :deep(.el-radio__input) {
+  display: none;
+}
+
+.client-feedback-satisfaction-dialog__radio-card :deep(.el-radio__label) {
+  display: flex;
+  min-height: 6.25rem;
+  width: 100%;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 0.55rem;
+  border-radius: 1.1rem;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.96));
+  padding: 0.95rem 0.9rem;
+  color: rgb(51 65 85);
+  transition:
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    transform 0.18s ease,
+    background-color 0.18s ease;
+}
+
+.client-feedback-satisfaction-dialog__radio-card.is-active :deep(.el-radio__label) {
+  transform: translateY(-1px);
+  border-color: rgba(13, 148, 136, 0.24);
+  background:
+    linear-gradient(180deg, rgba(240, 253, 250, 0.98), rgba(255, 255, 255, 0.96));
+  box-shadow:
+    0 0 0 1px rgba(13, 148, 136, 0.08) inset,
+    0 12px 24px rgba(13, 148, 136, 0.12);
+}
+
+.client-feedback-satisfaction-dialog__radio-card--satisfied.is-active :deep(.el-radio__label) {
+  border-color: rgba(16, 185, 129, 0.28);
+  box-shadow:
+    0 0 0 1px rgba(16, 185, 129, 0.08) inset,
+    0 12px 24px rgba(16, 185, 129, 0.12);
+}
+
+.client-feedback-satisfaction-dialog__radio-card--neutral.is-active :deep(.el-radio__label) {
+  border-color: rgba(245, 158, 11, 0.28);
+  box-shadow:
+    0 0 0 1px rgba(245, 158, 11, 0.08) inset,
+    0 12px 24px rgba(245, 158, 11, 0.12);
+}
+
+.client-feedback-satisfaction-dialog__radio-card--unsatisfied.is-active :deep(.el-radio__label) {
+  border-color: rgba(244, 63, 94, 0.28);
+  box-shadow:
+    0 0 0 1px rgba(244, 63, 94, 0.08) inset,
+    0 12px 24px rgba(244, 63, 94, 0.12);
+}
+
+.client-feedback-satisfaction-dialog__radio-card-title {
+  font-size: 0.92rem;
+  font-weight: 700;
+  line-height: 1.35;
+  color: rgb(15 23 42);
+}
+
+.client-feedback-satisfaction-dialog__radio-card-desc {
+  font-size: 0.78rem;
+  line-height: 1.55;
+  color: rgb(100 116 139);
+}
+
+.client-feedback-satisfaction-dialog__selected-card {
+  border-radius: 1rem;
+  border: 1px solid rgba(13, 148, 136, 0.1);
+  padding: 0.85rem 0.95rem;
+}
+
+.client-feedback-satisfaction-dialog__selected-title {
+  font-size: 0.9rem;
+  font-weight: 700;
+  line-height: 1.4;
+}
+
+.client-feedback-satisfaction-dialog__selected-desc {
+  margin-top: 0.2rem;
+  font-size: 0.8rem;
+  line-height: 1.6;
+}
+
+.client-feedback-satisfaction-dialog__cancel,
+.client-feedback-satisfaction-dialog__submit {
+  min-width: 6rem;
+  border-radius: 9999px;
+  font-weight: 600;
+}
+
+.client-feedback-satisfaction-dialog__cancel {
+  --el-button-bg-color: rgba(240, 253, 250, 0.92);
+  --el-button-border-color: rgba(13, 148, 136, 0.16);
+  --el-button-text-color: rgb(15 118 110);
+  --el-button-hover-bg-color: rgba(13, 148, 136, 0.06);
+  --el-button-hover-border-color: rgba(13, 148, 136, 0.28);
+  --el-button-hover-text-color: rgb(15 118 110);
+}
+
+.client-feedback-satisfaction-dialog__submit {
+  --el-button-bg-color: rgb(15 118 110);
+  --el-button-border-color: rgb(15 118 110);
+  --el-button-hover-bg-color: rgb(17 94 89);
+  --el-button-hover-border-color: rgb(17 94 89);
+  --el-button-active-bg-color: rgb(19 78 74);
+  --el-button-active-border-color: rgb(19 78 74);
+  box-shadow: 0 10px 24px rgba(15, 118, 110, 0.22);
+}
+
+@media (max-width: 640px) {
+  .client-feedback-satisfaction-dialog__radio-group {
+    grid-template-columns: 1fr;
+  }
 }
 </style>
