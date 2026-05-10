@@ -16,6 +16,8 @@ alwaysApply: true
 - **前端**：Vue 3 (Composition API, `<script setup>`) + TypeScript + Tailwind CSS + Element Plus。
 - **后端**：Node.js + TypeScript + TypeORM + Express (无头轻量架构，避免过重框架)。
 - **语言偏好**：所有代码注释、UI 文本、计划书及沟通必须使用**简体中文**。
+- **组件规范**：页面级交互控件与结构化表单必须优先使用 **Element Plus 组件**（如 `ElButton`、`ElInput`、`ElSelect`、`ElDialog`、`ElForm`、`ElTable` 等），不得随意回退为原生 HTML 表单控件或自造一套行为不一致的交互。
+- **兜底例外**：仅当 Element Plus 明确不覆盖目标能力，或业务需要接入浏览器原生能力（如文件选择器底层输入）时，才允许少量使用原生节点；但外层交互承载、状态反馈、弹窗与按钮样式仍应由 Element Plus 统一输出。
 
 ## 4. 架构与状态
 - **共享组件**：集中在 `src/components/common`，通过根 `index.ts` 聚合导出。

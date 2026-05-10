@@ -61,6 +61,22 @@ const createForm = reactive({
 const currentClientUser = computed(() => clientAuthStore.currentUser)
 const isBugMode = computed(() => createForm.issueType === 'bug')
 const hasCreateAttachments = computed(() => createAttachments.value.length > 0)
+const issueTypeSegmentedOptions = FEEDBACK_ISSUE_TYPE_OPTIONS.map((item) => ({
+  label: item.label,
+  value: item.value,
+}))
+const currentIssueTypeHint = computed(() => {
+  return FEEDBACK_ISSUE_TYPE_OPTIONS.find((item) => item.value === createForm.issueType)?.hint
+    ?? '请选择反馈类型，系统会按类型展示对应字段。'
+})
+const previewDialogVisible = computed({
+  get: () => Boolean(previewImageUrl.value),
+  set: (visible: boolean) => {
+    if (!visible) {
+      previewImageUrl.value = ''
+    }
+  },
+})
 
 const parseTagText = (value: string): string[] => {
   return [...new Set(
@@ -253,16 +269,17 @@ onMounted(async () => {
   <div class="space-y-4 pb-4">
     <div class="rounded-[1.5rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
       <div class="flex items-start gap-3">
-        <button
-          type="button"
-          class="inline-flex shrink-0 items-center gap-1 rounded-full px-2.5 py-1.5 text-sm font-medium text-slate-500 transition hover:bg-slate-100 hover:text-slate-900"
+        <el-button
+          type="default"
+          plain
+          class="feedback-back-button shrink-0"
           @click="handleNavigateBack"
         >
           <svg viewBox="0 0 20 20" fill="none" class="h-4 w-4" aria-hidden="true">
             <path d="M11.5 4.5L6 10l5.5 5.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
           </svg>
           <span>返回</span>
-        </button>
+        </el-button>
         <div class="min-w-0 flex-1">
           <p class="text-xl font-semibold text-slate-900">新建反馈</p>
           <p class="mt-1 text-sm leading-6 text-slate-500">
@@ -282,63 +299,65 @@ onMounted(async () => {
           <p class="text-base font-semibold text-slate-900">反馈信息</p>
           <p class="mt-1 text-xs leading-5 text-slate-400">普通建议默认轻量提交，专业 BUG 再展开排查字段。</p>
         </div>
-        <span class="rounded-full bg-brand/10 px-3 py-1 text-xs font-semibold text-brand">独立提交页</span>
+        <el-tag type="success" effect="light" round>独立提交页</el-tag>
       </div>
 
       <div class="mt-4 space-y-3">
-        <div class="grid gap-3 sm:grid-cols-2">
-          <button
-            v-for="item in FEEDBACK_ISSUE_TYPE_OPTIONS"
-            :key="item.value"
-            type="button"
-            class="rounded-[1rem] border p-4 text-left transition"
-            :class="createForm.issueType === item.value ? 'border-brand bg-brand/5' : 'border-slate-200 bg-slate-50 hover:border-slate-300'"
-            @click="handleChangeIssueType(item.value)"
-          >
-            <p class="text-sm font-semibold text-slate-900">{{ item.label }}</p>
-            <p class="mt-1 text-xs leading-5 text-slate-500">{{ item.hint }}</p>
-          </button>
-        </div>
-
-        <label class="block">
-          <span class="mb-1 block text-xs font-medium text-slate-500">问题标题</span>
-          <input
-            v-model="createForm.title"
-            type="text"
-            maxlength="80"
-            class="feedback-input"
-            placeholder="例如：订单核销后客户端仍显示待提货"
+        <div class="space-y-2">
+          <el-segmented
+            v-model="createForm.issueType"
+            class="feedback-type-segmented"
+            :options="issueTypeSegmentedOptions"
+            aria-label="反馈类型"
+            @change="handleChangeIssueType"
           />
-        </label>
-
-        <div class="grid gap-3 sm:grid-cols-2">
-          <label class="block">
-            <span class="mb-1 block text-xs font-medium text-slate-500">问题分类</span>
-            <select v-model="createForm.category" class="feedback-input">
-              <option v-for="item in FEEDBACK_CATEGORY_OPTIONS" :key="item.value" :value="item.value">
-                {{ item.label }}
-              </option>
-            </select>
-          </label>
-          <label v-if="isBugMode" class="block">
-            <span class="mb-1 block text-xs font-medium text-slate-500">优先级</span>
-            <select v-model="createForm.priority" class="feedback-input">
-              <option v-for="item in FEEDBACK_PRIORITY_OPTIONS" :key="item.value" :value="item.value">
-                {{ item.label }}
-              </option>
-            </select>
-          </label>
+          <p class="text-xs leading-5 text-slate-500">{{ currentIssueTypeHint }}</p>
         </div>
 
-        <label class="block">
+        <div class="block">
+          <span class="mb-1 block text-xs font-medium text-slate-500">问题标题</span>
+          <el-input
+            v-model="createForm.title"
+            maxlength="80"
+            placeholder="例如：订单核销后客户端仍显示待提货"
+            clearable
+            show-word-limit
+            aria-label="问题标题"
+          />
+        </div>
+
+        <div class="grid gap-3 sm:grid-cols-2">
+          <div class="block">
+            <span class="mb-1 block text-xs font-medium text-slate-500">问题分类</span>
+            <el-select v-model="createForm.category" class="w-full" placeholder="请选择问题分类" aria-label="问题分类">
+              <el-option v-for="item in FEEDBACK_CATEGORY_OPTIONS" :key="item.value" :value="item.value" :label="item.label">
+                {{ item.label }}
+              </el-option>
+            </el-select>
+          </div>
+          <div v-if="isBugMode" class="block">
+            <span class="mb-1 block text-xs font-medium text-slate-500">优先级</span>
+            <el-select v-model="createForm.priority" class="w-full" placeholder="请选择优先级" aria-label="优先级">
+              <el-option v-for="item in FEEDBACK_PRIORITY_OPTIONS" :key="item.value" :value="item.value" :label="item.label">
+                {{ item.label }}
+              </el-option>
+            </el-select>
+          </div>
+        </div>
+
+        <div class="block">
           <span class="mb-1 block text-xs font-medium text-slate-500">问题描述</span>
-          <textarea
+          <el-input
             v-model="createForm.summary"
-            class="feedback-textarea"
+            type="textarea"
             maxlength="400"
             :placeholder="isBugMode ? '请描述异常现象、出现时间、影响范围和使用环境。' : '请说明你的建议、诉求或遇到的不便。'"
+            :autosize="{ minRows: 5, maxRows: 10 }"
+            resize="vertical"
+            show-word-limit
+            aria-label="问题描述"
           />
-        </label>
+        </div>
 
         <div v-if="isBugMode" class="rounded-[1rem] border border-slate-200 bg-slate-50/80 p-4">
           <div class="flex items-center justify-between gap-3">
@@ -346,72 +365,87 @@ onMounted(async () => {
               <p class="text-sm font-semibold text-slate-900">专业 BUG 补充</p>
               <p class="mt-1 text-xs text-slate-400">仅在需要排查时填写，客服会按这些结构化字段定位问题。</p>
             </div>
-            <span class="rounded-full bg-white px-3 py-1 text-xs font-medium text-slate-500">结构化字段</span>
+            <el-tag round effect="plain">结构化字段</el-tag>
           </div>
 
           <div class="mt-3 space-y-3">
-            <label class="block">
+            <div class="block">
               <span class="mb-1 block text-xs font-medium text-slate-500">关联订单号</span>
-              <input
+              <el-input
                 v-model="createForm.orderRef"
-                type="text"
                 maxlength="64"
-                class="feedback-input"
                 placeholder="如与某笔订单相关，可填写订单号或提货码"
+                clearable
+                show-word-limit
+                aria-label="关联订单号"
               />
-            </label>
+            </div>
 
-            <label class="block">
+            <div class="block">
               <span class="mb-1 block text-xs font-medium text-slate-500">期望结果</span>
-              <textarea
+              <el-input
                 v-model="createForm.expectedResult"
-                class="feedback-textarea feedback-textarea--short"
+                type="textarea"
                 maxlength="240"
                 placeholder="例如：核销成功后订单应立即更新为已提货。"
+                :autosize="{ minRows: 3, maxRows: 6 }"
+                resize="vertical"
+                show-word-limit
+                aria-label="期望结果"
               />
-            </label>
+            </div>
 
-            <label class="block">
+            <div class="block">
               <span class="mb-1 block text-xs font-medium text-slate-500">实际结果</span>
-              <textarea
+              <el-input
                 v-model="createForm.actualResult"
-                class="feedback-textarea feedback-textarea--short"
+                type="textarea"
                 maxlength="240"
                 placeholder="例如：订单状态仍停留在待提货，并重复弹出核销提示。"
+                :autosize="{ minRows: 3, maxRows: 6 }"
+                resize="vertical"
+                show-word-limit
+                aria-label="实际结果"
               />
-            </label>
+            </div>
 
-            <label class="block">
+            <div class="block">
               <span class="mb-1 block text-xs font-medium text-slate-500">复现步骤</span>
-              <textarea
+              <el-input
                 v-model="createForm.reproductionSteps"
-                class="feedback-textarea feedback-textarea--short"
+                type="textarea"
                 maxlength="300"
                 placeholder="可按 1、2、3 步说明操作路径，帮助客服复现。"
+                :autosize="{ minRows: 4, maxRows: 8 }"
+                resize="vertical"
+                show-word-limit
+                aria-label="复现步骤"
               />
-            </label>
+            </div>
 
             <div class="grid gap-3 sm:grid-cols-2">
-              <label class="block">
+              <div class="block">
                 <span class="mb-1 block text-xs font-medium text-slate-500">联系偏好</span>
-                <input
+                <el-input
                   v-model="createForm.contactPreference"
-                  type="text"
                   maxlength="64"
-                  class="feedback-input"
                   placeholder="如：优先站内回复 / 也可电话联系"
+                  clearable
+                  show-word-limit
+                  aria-label="联系偏好"
                 />
-              </label>
-              <label class="block">
+              </div>
+              <div class="block">
                 <span class="mb-1 block text-xs font-medium text-slate-500">标签</span>
-                <input
+                <el-input
                   v-model="createForm.tagText"
-                  type="text"
                   maxlength="120"
-                  class="feedback-input"
                   placeholder="使用中文逗号分隔，如：核销，状态不同步"
+                  clearable
+                  show-word-limit
+                  aria-label="标签"
                 />
-              </label>
+              </div>
             </div>
           </div>
         </div>
@@ -424,14 +458,14 @@ onMounted(async () => {
                 可上传截图、异常界面或订单凭证图片，帮助客服更快理解问题。单次最多 {{ FEEDBACK_ATTACHMENT_LIMIT }} 张，仅支持 JPG/PNG/WEBP/GIF。
               </p>
             </div>
-            <button
-              type="button"
-              class="rounded-[0.9rem] border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:border-slate-300 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+            <el-button
+              type="default"
+              plain
               :disabled="uploadingAttachments || createAttachments.length >= FEEDBACK_ATTACHMENT_LIMIT"
               @click="openAttachmentPicker"
             >
               {{ uploadingAttachments ? '上传中...' : hasCreateAttachments ? '继续添加图片' : '上传图片附件' }}
-            </button>
+            </el-button>
           </div>
           <input
             ref="createAttachmentInputRef"
@@ -465,20 +499,12 @@ onMounted(async () => {
                   <p class="truncate text-sm font-semibold text-slate-900">{{ attachment.name }}</p>
                   <p class="mt-1 text-xs text-slate-400">{{ formatAttachmentSize(attachment.size) }}</p>
                   <div class="mt-3 flex flex-wrap gap-2">
-                    <button
-                      type="button"
-                      class="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 transition hover:bg-slate-200"
-                      @click="handlePreviewAttachment(attachment)"
-                    >
+                    <el-button size="small" @click="handlePreviewAttachment(attachment)">
                       预览
-                    </button>
-                    <button
-                      type="button"
-                      class="rounded-full bg-rose-50 px-3 py-1 text-xs font-medium text-rose-600 transition hover:bg-rose-100"
-                      @click="handleRemoveAttachment(index)"
-                    >
+                    </el-button>
+                    <el-button size="small" type="danger" plain @click="handleRemoveAttachment(index)">
                       移除
-                    </button>
+                    </el-button>
                   </div>
                 </div>
               </div>
@@ -487,57 +513,98 @@ onMounted(async () => {
         </div>
       </div>
 
-      <button
-        type="button"
-        class="mt-4 w-full rounded-[1rem] bg-brand px-4 py-3 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+      <el-button
+        class="mt-4 w-full"
+        type="primary"
+        size="large"
         :disabled="creating"
         @click="handleCreateConversation"
       >
         {{ creating ? '提交中...' : '提交反馈并进入会话' }}
-      </button>
+      </el-button>
     </article>
 
-    <Teleport to="body">
-      <div v-if="previewImageUrl" class="feedback-preview-overlay" @click.self="previewImageUrl = ''">
-        <div class="feedback-preview-panel">
-          <button type="button" class="feedback-preview-close" @click="previewImageUrl = ''">关闭</button>
-          <img :src="previewImageUrl" alt="附件预览" class="feedback-preview-image" />
-        </div>
-      </div>
-    </Teleport>
+    <el-dialog
+      v-model="previewDialogVisible"
+      title="附件预览"
+      width="min(92vw, 48rem)"
+      align-center
+      destroy-on-close
+    >
+      <img v-if="previewImageUrl" :src="previewImageUrl" alt="附件预览" class="feedback-preview-image" />
+    </el-dialog>
   </div>
 </template>
 
 <style scoped>
-.feedback-input,
-.feedback-textarea {
+.feedback-back-button {
+  border-radius: 999px;
+}
+
+.feedback-type-segmented {
   width: 100%;
-  border: 1px solid rgb(226 232 240);
+  min-width: 0;
+}
+
+.feedback-type-segmented :deep(.el-segmented) {
+  width: 100%;
+  border-radius: 1.15rem;
+  padding: 0.3rem;
+  background: rgba(13, 148, 136, 0.08);
+}
+
+.feedback-type-segmented :deep(.el-segmented__group) {
+  width: 100%;
+  gap: 0.2rem;
+}
+
+.feedback-type-segmented :deep(.el-segmented__item) {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 3rem;
+  border-radius: 0.95rem;
+  color: rgb(71 85 105);
+}
+
+.feedback-type-segmented :deep(.el-segmented__item-label) {
+  white-space: nowrap;
+  font-size: 0.92rem;
+  font-weight: 600;
+}
+
+.feedback-type-segmented :deep(.el-segmented__item-selected) {
+  border-radius: 0.95rem;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow:
+    0 0 0 1px rgba(13, 148, 136, 0.12) inset,
+    0 8px 20px rgba(15, 23, 42, 0.06);
+}
+
+.feedback-type-segmented :deep(.el-segmented__item.is-selected) {
+  color: var(--el-color-primary);
+}
+
+.feedback-type-segmented :deep(.el-segmented__item.is-selected .el-segmented__item-label) {
+  color: var(--el-color-primary);
+}
+
+.feedback-type-segmented :deep(.el-segmented__item:not(.is-selected):hover) {
+  color: rgb(51 65 85);
+}
+
+:deep(.el-input__wrapper),
+:deep(.el-textarea__inner),
+:deep(.el-select__wrapper) {
   border-radius: 1rem;
-  background: #ffffff;
-  color: rgb(15 23 42);
-  font-size: 0.95rem;
-  line-height: 1.5;
-  padding: 0.8rem 0.92rem;
-  transition:
-    border-color 0.18s ease,
-    box-shadow 0.18s ease;
+  box-shadow: 0 0 0 1px rgb(226 232 240) inset;
 }
 
-.feedback-input:focus,
-.feedback-textarea:focus {
-  outline: none;
-  border-color: rgba(13, 148, 136, 0.45);
-  box-shadow: 0 0 0 4px rgba(13, 148, 136, 0.12);
-}
-
-.feedback-textarea {
-  min-height: 7.5rem;
-  resize: vertical;
-}
-
-.feedback-textarea--short {
-  min-height: 5.5rem;
+:deep(.el-input__wrapper.is-focus),
+:deep(.el-select__wrapper.is-focused),
+:deep(.el-textarea__inner:focus) {
+  box-shadow:
+    0 0 0 1px rgba(13, 148, 136, 0.45) inset,
+    0 0 0 4px rgba(13, 148, 136, 0.12);
 }
 
 .feedback-attachment-thumb {
@@ -553,44 +620,11 @@ onMounted(async () => {
   border: 1px dashed rgb(203 213 225);
 }
 
-.feedback-preview-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 60;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(15, 23, 42, 0.72);
-  padding: 1rem;
-}
-
-.feedback-preview-panel {
-  width: min(100%, 48rem);
-  border-radius: 1.5rem;
-  background: rgba(255, 255, 255, 0.98);
-  padding: 1rem;
-  box-shadow: 0 24px 80px rgba(15, 23, 42, 0.28);
-}
-
-.feedback-preview-close {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: none;
-  border-radius: 999px;
-  background: rgb(241 245 249);
-  color: rgb(71 85 105);
-  padding: 0.55rem 0.95rem;
-  font-size: 0.8rem;
-  font-weight: 600;
-  cursor: pointer;
-}
-
 .feedback-preview-image {
-  margin-top: 0.9rem;
-  max-height: 72vh;
+  display: block;
+  max-height: 70vh;
   width: 100%;
-  border-radius: 1.25rem;
+  border-radius: 1rem;
   object-fit: contain;
   background: rgb(248 250 252);
 }
