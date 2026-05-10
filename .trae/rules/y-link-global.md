@@ -22,6 +22,7 @@ alwaysApply: true
 ## 4. 架构与状态
 - **共享组件**：集中在 `src/components/common`，通过根 `index.ts` 聚合导出。
 - **路由按需加载**：所有业务路由必须通过 `() => import()` 懒加载，高频路径配置 `keepAlive` 与 `preloadTargets` 并在空闲时预热。
+- **路由动画结构约束**：凡是直接参与路由切页动画、被 `<Transition>` / `<KeepAlive>` / `router-view` 动态承载的页面组件，必须保持**单根元素**；禁止返回 fragment、多根节点或把 `Teleport`、`ElDialog`、预览浮层等直接挂成与页面主体并列的根级结构，避免出现属性透传失败、切页动画异常和 Vue 的 non-element root 警告。
 - **请求治理**：
   - 前端请求错误统一在 `src/utils/error.ts` 归一化。
   - 高频列表/详情查询必须接入 `useStableRequest`，拦截旧请求以防页面闪烁与结果覆盖。
