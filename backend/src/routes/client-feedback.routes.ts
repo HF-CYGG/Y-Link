@@ -146,6 +146,19 @@ authenticatedClientFeedbackRouter.post(
   }),
 )
 
+authenticatedClientFeedbackRouter.patch(
+  '/conversations/:id/confirm-resolved',
+  asyncHandler(async (req, res) => {
+    const authReq = req as ClientAuthenticatedRequest
+    const data = await clientFeedbackService.confirmConversationResolvedByClient(
+      req.params.id,
+      authReq.clientAuth,
+      extractRequestMeta(req),
+    )
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
 authenticatedClientFeedbackRouter.get(
   '/stream',
   asyncHandler(async (req, res) => {

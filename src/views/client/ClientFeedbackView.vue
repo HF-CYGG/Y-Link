@@ -14,6 +14,8 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
+  buildClientFeedbackConversationGroups,
+  buildClientFeedbackNextStepPrompt,
   FEEDBACK_PRIORITY_META_MAP,
   FEEDBACK_STATUS_META_MAP,
   getClientFeedbackPortalConfig,
@@ -43,6 +45,14 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
 const currentClientUser = computed(() => clientAuthStore.currentUser)
 const summary = computed(() => summarizeClientFeedbackConversations(conversations.value))
+/**
+ * 分组式会话数据直接复用共享 API 的统一口径：
+ * - 首页只负责展示，不在页面内再次手写“待我补充 / 待客服处理 / 已完成”判断；
+ * - 这样列表页与详情页的阶段表达才能保持一致。
+ */
+const groupedConversations = computed(() => buildClientFeedbackConversationGroups(conversations.value))
+const offlineFaqEntries = computed(() => availability.value?.offlineFaqs ?? [])
+const showOfflineFaq = computed(() => Boolean(availability.value && !availability.value.isOnline && offlineFaqEntries.value.length))
 const summaryCards = computed(() => {
   return [
     { key: 'all', label: '全部会话', value: summary.value.all, valueClassName: 'text-slate-900' },
@@ -62,6 +72,24 @@ const availabilityText = computed(() => {
   }
   return availability.value.offlineNotice
 })
+
+/**
+ * 列表卡片补一层“当前阶段”摘要：
+ * - 具体生成逻辑仍由共享层统一维护；
+ * - 首页只消费 stageLabel 与 nextStep，避免和详情页出现两套解释口径。
+ */
+const getConversationPrompt = (item: FeedbackConversationRecord) => {
+  return buildClientFeedbackNextStepPrompt(item)
+}
+
+/**
+ * 已完成反馈单只作为历史记录展示：
+ * - 关闭状态不再展示“下一步”文案，避免给用户造成仍需操作的误解；
+ * - 同时为已完成卡片提供更紧凑的展示条件，减少列表纵向占用。
+ */
+const shouldShowConversationNextStep = (item: FeedbackConversationRecord) => {
+  return item.status !== 'closed'
+}
 
 const handleNavigateBack = () => {
   if (globalThis.history.length > 1) {
@@ -241,11 +269,31 @@ onBeforeUnmount(() => {
         </button>
       </article>
 
+      <article v-if="showOfflineFaq" class="rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
+        <div class="flex items-start justify-between gap-3">
+          <div>
+            <p class="text-base font-semibold text-slate-900">离线常见问题</p>
+            <p class="mt-1 text-xs leading-5 text-slate-400">客服当前离线，你可以先查看常见答案，再决定是新建反馈还是继续补充原会话。</p>
+          </div>
+          <span class="rounded-full bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-700">离线导流</span>
+        </div>
+        <div class="mt-4 grid gap-3">
+          <article
+            v-for="item in offlineFaqEntries"
+            :key="item.question"
+            class="rounded-[1rem] border border-slate-200 bg-slate-50 px-4 py-3"
+          >
+            <p class="text-sm font-semibold text-slate-900">{{ item.question }}</p>
+            <p class="mt-2 text-xs leading-6 text-slate-500">{{ item.answer }}</p>
+          </article>
+        </div>
+      </article>
+
       <article class="rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
         <div class="flex items-center justify-between gap-3">
           <div>
             <p class="text-base font-semibold text-slate-900">我的会话</p>
-            <p class="mt-1 text-xs leading-5 text-slate-400">按最近更新时间排序，可从每张卡片右上角进入对应反馈单详情。</p>
+            <p class="mt-1 text-xs leading-5 text-slate-400">按“当前更需要谁动作”的口径分组展示，进入详情页后可查看完整处理进度。</p>
           </div>
           <span class="text-xs font-medium text-slate-400">{{ conversations.length }} 条</span>
         </div>
@@ -258,48 +306,84 @@ onBeforeUnmount(() => {
           还没有反馈记录，可先提交一条新的问题说明。
         </div>
 
-        <div v-else class="mt-4 space-y-3">
-          <article
-            v-for="item in conversations"
-            :key="item.id"
-            class="rounded-[1rem] border border-slate-200 p-4 transition hover:border-slate-300 hover:bg-slate-50"
+        <div v-else class="mt-4 space-y-4">
+          <section
+            v-for="group in groupedConversations"
+            :key="group.key"
+            class="rounded-[1rem] border border-slate-200 bg-slate-50/80 p-4"
           >
             <div class="flex flex-wrap items-start justify-between gap-3">
-              <div class="min-w-0 flex-1">
-                <p class="truncate text-sm font-semibold text-slate-900">{{ item.title }}</p>
-                <p class="mt-1 text-xs text-slate-500">{{ item.issueNo }}</p>
+              <div>
+                <p class="text-sm font-semibold text-slate-900">{{ group.label }}</p>
+                <p class="mt-1 text-xs leading-5 text-slate-400">{{ group.description }}</p>
               </div>
-
-              <div class="flex shrink-0 items-center gap-2">
-                <span
-                  class="rounded-full px-2.5 py-1 text-[11px] font-semibold"
-                  :class="FEEDBACK_STATUS_META_MAP[item.status].className"
-                >
-                  {{ FEEDBACK_STATUS_META_MAP[item.status].label }}
-                </span>
-                <button
-                  type="button"
-                  class="feedback-conversation-card__detail-button"
-                  @click="handleNavigateToDetail(item.id)"
-                >
-                  详情
-                </button>
-              </div>
+              <span class="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-500">{{ group.count }} 条</span>
             </div>
 
-            <p class="mt-3 line-clamp-2 text-sm leading-6 text-slate-600">{{ item.summary }}</p>
+            <div v-if="group.conversations.length" class="mt-4 space-y-3">
+              <article
+                v-for="item in group.conversations"
+                :key="item.id"
+                class="rounded-[1rem] border border-slate-200 bg-white p-4 transition hover:border-slate-300 hover:bg-slate-50"
+                :class="{ 'feedback-conversation-card--closed': item.status === 'closed' }"
+              >
+                <div class="flex flex-wrap items-start justify-between gap-3">
+                  <div class="min-w-0 flex-1">
+                    <div class="flex flex-wrap items-center gap-2">
+                      <p class="truncate text-sm font-semibold text-slate-900">{{ item.title }}</p>
+                      <span class="rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-semibold text-slate-600">
+                        {{ getConversationPrompt(item).stageLabel }}
+                      </span>
+                    </div>
+                    <p class="mt-1 text-xs text-slate-500">{{ item.issueNo }}</p>
+                  </div>
 
-            <div class="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-400">
-              <span class="rounded-full px-2.5 py-1 font-medium" :class="FEEDBACK_PRIORITY_META_MAP[item.priority].className">
-                {{ FEEDBACK_PRIORITY_META_MAP[item.priority].label }}
-              </span>
-              <span>{{ item.fields.issueType === 'bug' ? '专业 BUG' : '普通建议' }}</span>
-              <span>更新于 {{ formatDateTime(item.lastMessageAt) }}</span>
-              <span v-if="item.unreadForClient > 0" class="rounded-full bg-rose-50 px-2 py-1 font-medium text-rose-600">
-                {{ item.unreadForClient }} 条未读
-              </span>
+                  <div class="flex shrink-0 items-center gap-2">
+                    <span
+                      class="rounded-full px-2.5 py-1 text-[11px] font-semibold"
+                      :class="FEEDBACK_STATUS_META_MAP[item.status].className"
+                    >
+                      {{ FEEDBACK_STATUS_META_MAP[item.status].label }}
+                    </span>
+                    <button
+                      type="button"
+                      class="feedback-conversation-card__detail-button"
+                      @click="handleNavigateToDetail(item.id)"
+                    >
+                      详情
+                    </button>
+                  </div>
+                </div>
+
+                <p class="line-clamp-2 text-sm leading-6 text-slate-600" :class="item.status === 'closed' ? 'mt-2' : 'mt-3'">
+                  {{ item.lastMessagePreview || item.summary }}
+                </p>
+
+                <div v-if="shouldShowConversationNextStep(item)" class="mt-3 rounded-[0.9rem] bg-slate-50 px-3 py-2">
+                  <p class="text-[11px] font-semibold tracking-[0.12em] text-slate-400">下一步</p>
+                  <p class="mt-1 text-xs leading-5 text-slate-500">{{ getConversationPrompt(item).nextStep }}</p>
+                </div>
+
+                <div class="flex flex-wrap items-center gap-2 text-xs text-slate-400" :class="shouldShowConversationNextStep(item) ? 'mt-3' : 'mt-2'">
+                  <span class="rounded-full px-2.5 py-1 font-medium" :class="FEEDBACK_PRIORITY_META_MAP[item.priority].className">
+                    {{ FEEDBACK_PRIORITY_META_MAP[item.priority].label }}
+                  </span>
+                  <span>{{ item.fields.issueType === 'bug' ? '专业 BUG' : '普通建议' }}</span>
+                  <span>更新于 {{ formatDateTime(item.lastMessageAt) }}</span>
+                  <span
+                    v-if="item.unreadForClient > 0"
+                    class="rounded-full bg-rose-50 px-2 py-1 font-medium text-rose-600"
+                  >
+                    {{ item.unreadForClient }} 条未读
+                  </span>
+                </div>
+              </article>
             </div>
-          </article>
+
+            <div v-else class="mt-4 rounded-[1rem] border border-dashed border-slate-200 bg-white px-4 py-6 text-center text-sm text-slate-500">
+              {{ group.emptyText }}
+            </div>
+          </section>
         </div>
       </article>
     </div>
@@ -364,6 +448,11 @@ onBeforeUnmount(() => {
 .feedback-conversation-card__detail-button:focus-visible {
   outline: none;
   box-shadow: 0 0 0 4px rgba(15, 23, 42, 0.12);
+}
+
+.feedback-conversation-card--closed {
+  padding-top: 0.875rem;
+  padding-bottom: 0.875rem;
 }
 
 @media (min-width: 1280px) {

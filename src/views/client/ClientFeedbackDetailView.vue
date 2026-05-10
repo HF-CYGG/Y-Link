@@ -10,14 +10,16 @@
  * - 列表页仅保留导航职责，详情相关交互统一在此页维护。
  */
 
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
+  buildClientFeedbackNextStepPrompt,
   FEEDBACK_CATEGORY_OPTIONS,
   FEEDBACK_PRIORITY_META_MAP,
   FEEDBACK_STATUS_META_MAP,
   appendClientFeedbackMessage,
+  confirmClientFeedbackResolved,
   getClientFeedbackConversation,
   getClientFeedbackPortalConfig,
   openFeedbackRealtimeStream,
@@ -39,8 +41,10 @@ const clientAuthStore = useClientAuthStore(pinia)
 const loading = ref(false)
 const detailLoading = ref(false)
 const replySubmitting = ref(false)
+const confirmingResolved = ref(false)
 const conversation = ref<FeedbackConversationRecord | null>(null)
 const replyDraft = ref('')
+const replyTextareaRef = ref<HTMLTextAreaElement | null>(null)
 const availability = ref<FeedbackPortalAvailability | null>(null)
 const realtimeState = ref<'connecting' | 'online' | 'offline'>('offline')
 const reconnectTip = ref('进入页面后会自动续接当前会话。')
@@ -50,6 +54,60 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 const currentClientUser = computed(() => clientAuthStore.currentUser)
 const currentConversationId = computed(() => {
   return typeof route.params.id === 'string' ? route.params.id : ''
+})
+const nextStepPrompt = computed(() => {
+  return conversation.value ? buildClientFeedbackNextStepPrompt(conversation.value) : null
+})
+const offlineFaqEntries = computed(() => availability.value?.offlineFaqs ?? [])
+const showOfflineFaq = computed(() => Boolean(availability.value && !availability.value.isOnline && offlineFaqEntries.value.length))
+const canConfirmResolved = computed(() => conversation.value?.status === 'resolved')
+const shouldShowReplyComposer = computed(() => conversation.value?.status !== 'closed')
+
+/**
+ * 详情页进度条采用固定四阶段表达：
+ * - 已提交：反馈已创建成功，等待系统或客服接入；
+ * - 客服跟进中：客服已接手，或客户端刚补充信息后重新回到处理队列；
+ * - 待我确认：客服给出回复/结论后，当前更需要客户端确认或补充；
+ * - 已完成：会话关闭，作为历史记录保留。
+ */
+const progressSteps = computed(() => {
+  const currentConversation = conversation.value
+  const currentStepIndex = !currentConversation
+    ? -1
+    : currentConversation.status === 'closed'
+      ? 3
+      : currentConversation.status === 'resolved' || currentConversation.unreadForClient > 0
+        ? 2
+        : currentConversation.status === 'processing' || currentConversation.unreadForStaff > 0
+          ? 1
+          : 0
+
+  return [
+    {
+      key: 'submitted',
+      label: '已提交',
+      description: '反馈单已经创建，系统会保留完整上下文。',
+      state: currentStepIndex > 0 ? 'done' : currentStepIndex === 0 ? 'current' : 'upcoming',
+    },
+    {
+      key: 'processing',
+      label: '客服跟进中',
+      description: '客服会基于现有信息受理、排查并持续回复。',
+      state: currentStepIndex > 1 ? 'done' : currentStepIndex === 1 ? 'current' : 'upcoming',
+    },
+    {
+      key: 'waiting_client',
+      label: '待我确认',
+      description: '客服已给出阶段性回复，当前更需要你查看或继续补充。',
+      state: currentStepIndex > 2 ? 'done' : currentStepIndex === 2 ? 'current' : 'upcoming',
+    },
+    {
+      key: 'completed',
+      label: '已完成',
+      description: '当前反馈单已关闭，历史记录继续保留。',
+      state: currentStepIndex === 3 ? 'current' : 'upcoming',
+    },
+  ] as const
 })
 
 const availabilityText = computed(() => {
@@ -64,6 +122,64 @@ const availabilityText = computed(() => {
 
 const getCategoryLabel = (category: FeedbackIssueCategory) => {
   return FEEDBACK_CATEGORY_OPTIONS.find((item) => item.value === category)?.label ?? '其他建议'
+}
+
+/**
+ * 消息角色显示文案：
+ * - 客户端自己的消息保持“我”，延续当前会话语境；
+ * - 客服消息明确标记为“客服”；
+ * - 系统消息统一降级为“系统通知”，避免和人工回复混淆。
+ */
+const getMessageRoleLabel = (senderRole: 'client' | 'staff' | 'system') => {
+  if (senderRole === 'client') {
+    return '我'
+  }
+  if (senderRole === 'staff') {
+    return '客服'
+  }
+  return '系统通知'
+}
+
+/**
+ * 消息标题文案：
+ * - 系统消息不再突出具体发送者姓名，而是直接展示“系统通知”；
+ * - 客服与客户端仍保留原始发送者姓名，方便用户识别真实回复人。
+ */
+const getMessageTitle = (senderRole: 'client' | 'staff' | 'system', senderName: string) => {
+  if (senderRole === 'system') {
+    return '系统通知'
+  }
+  return senderName
+}
+
+/**
+ * 会话消息卡片样式：
+ * - 客户端消息保持主色块，突出“我刚刚补充了什么”；
+ * - 客服消息使用普通白卡片，作为主要人工回复；
+ * - 系统消息弱化为更窄、更浅、更轻的通知条，降低视觉占比。
+ */
+const getMessageCardClass = (senderRole: 'client' | 'staff' | 'system') => {
+  if (senderRole === 'client') {
+    return 'ml-auto border border-brand/10 bg-brand/10 text-slate-900'
+  }
+  if (senderRole === 'staff') {
+    return 'border border-slate-200 bg-white text-slate-900'
+  }
+  return 'mx-auto border border-dashed border-slate-200 bg-slate-50/85 text-slate-600 shadow-none'
+}
+
+const getMessageContainerClass = (senderRole: 'client' | 'staff' | 'system') => {
+  return senderRole === 'system' ? 'max-w-[92%]' : 'max-w-full'
+}
+
+const getMessageTitleClass = (senderRole: 'client' | 'staff' | 'system') => {
+  return senderRole === 'system' ? 'text-xs font-semibold text-slate-500' : 'text-sm font-semibold text-slate-900'
+}
+
+const getMessageBodyClass = (senderRole: 'client' | 'staff' | 'system') => {
+  return senderRole === 'system'
+    ? 'mt-2 whitespace-pre-wrap text-xs leading-6 text-slate-500'
+    : 'mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-700'
 }
 
 const handleNavigateBack = () => {
@@ -134,6 +250,51 @@ const handleReply = async () => {
   } finally {
     replySubmitting.value = false
   }
+}
+
+const handleConfirmResolved = async () => {
+  if (!conversation.value) {
+    ElMessage.warning('当前反馈单尚未加载完成')
+    return
+  }
+  if (conversation.value.status !== 'resolved') {
+    ElMessage.warning('当前反馈单还未进入待确认阶段')
+    return
+  }
+
+  confirmingResolved.value = true
+  try {
+    await confirmClientFeedbackResolved(conversation.value.id)
+    await loadConversationDetail(conversation.value.id)
+    reconnectTip.value = '你已确认处理完成，当前反馈单已归档保留。'
+    ElMessage.success('已确认问题处理完成')
+  } catch (error) {
+    ElMessage.error(extractErrorMessage(error, '确认处理结果失败，请稍后重试'))
+  } finally {
+    confirmingResolved.value = false
+  }
+}
+
+/**
+ * “仍未解决，继续反馈”动作用于把用户直接带到补充说明区：
+ * - 若输入框当前为空，自动补一段简短开头，降低继续反馈的表达门槛；
+ * - 再滚动并聚焦到输入框，让“待我确认”真正具备下一步动作。
+ */
+const handleContinueFeedback = async () => {
+  if (!canConfirmResolved.value) {
+    return
+  }
+
+  if (!normalizeSubmitText(replyDraft.value)) {
+    replyDraft.value = '当前问题仍未解决，补充说明如下：\n'
+  }
+
+  await nextTick()
+  replyTextareaRef.value?.scrollIntoView({
+    behavior: 'smooth',
+    block: 'center',
+  })
+  replyTextareaRef.value?.focus()
 }
 
 const connectRealtime = () => {
@@ -291,6 +452,112 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
+        <div class="mt-5 grid gap-3 lg:grid-cols-[1.3fr_0.9fr]">
+          <div class="rounded-[1rem] bg-slate-50 p-4">
+            <div class="flex items-center justify-between gap-3">
+              <div>
+                <p class="text-xs font-semibold tracking-[0.16em] text-slate-400">处理进度</p>
+                <p class="mt-1 text-sm text-slate-500">统一用四个阶段说明当前反馈单所处位置，减少“看见状态但不知道下一步”的落差。</p>
+              </div>
+              <span
+                v-if="nextStepPrompt"
+                class="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-600 ring-1 ring-inset ring-slate-200"
+              >
+                {{ nextStepPrompt.groupLabel }}
+              </span>
+            </div>
+
+            <div class="mt-4 space-y-3">
+              <div
+                v-for="(step, index) in progressSteps"
+                :key="step.key"
+                class="flex items-start gap-3"
+              >
+                <div class="flex flex-col items-center">
+                  <span
+                    class="flex h-8 w-8 items-center justify-center rounded-full text-xs font-semibold"
+                    :class="
+                      step.state === 'done'
+                        ? 'bg-emerald-500 text-white'
+                        : step.state === 'current'
+                          ? 'bg-slate-900 text-white'
+                          : 'bg-white text-slate-400 ring-1 ring-inset ring-slate-200'
+                    "
+                  >
+                    {{ index + 1 }}
+                  </span>
+                  <span
+                    v-if="index < progressSteps.length - 1"
+                    class="mt-2 h-8 w-px"
+                    :class="step.state === 'upcoming' ? 'bg-slate-200' : 'bg-slate-300'"
+                  />
+                </div>
+                <div class="min-w-0 flex-1 pb-2">
+                  <p class="text-sm font-semibold" :class="step.state === 'upcoming' ? 'text-slate-500' : 'text-slate-900'">
+                    {{ step.label }}
+                  </p>
+                  <p class="mt-1 text-xs leading-5 text-slate-500">{{ step.description }}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="rounded-[1rem] bg-slate-50 p-4">
+            <p class="text-xs font-semibold tracking-[0.16em] text-slate-400">进度提示</p>
+            <div v-if="nextStepPrompt" class="mt-3 space-y-3">
+              <div class="rounded-[0.9rem] bg-white px-3 py-3">
+                <p class="text-xs font-medium text-slate-400">当前阶段</p>
+                <p class="mt-1 text-sm font-semibold text-slate-900">{{ nextStepPrompt.stageLabel }}</p>
+              </div>
+              <div class="rounded-[0.9rem] bg-white px-3 py-3">
+                <p class="text-xs font-medium text-slate-400">最近动作</p>
+                <p class="mt-1 text-sm leading-6 text-slate-600">{{ nextStepPrompt.recentAction }}</p>
+              </div>
+              <div class="rounded-[0.9rem] bg-white px-3 py-3">
+                <p class="text-xs font-medium text-slate-400">建议下一步</p>
+                <p class="mt-1 text-sm leading-6 text-slate-600">{{ nextStepPrompt.nextStep }}</p>
+              </div>
+              <div v-if="canConfirmResolved" class="grid gap-3 sm:grid-cols-2">
+                <button
+                  type="button"
+                  class="rounded-[0.9rem] bg-emerald-600 px-4 py-3 text-sm font-semibold text-white transition hover:bg-emerald-500 disabled:cursor-not-allowed disabled:opacity-60"
+                  :disabled="confirmingResolved"
+                  @click="handleConfirmResolved"
+                >
+                  {{ confirmingResolved ? '确认中...' : '确认已解决' }}
+                </button>
+                <button
+                  type="button"
+                  class="rounded-[0.9rem] border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
+                  @click="handleContinueFeedback"
+                >
+                  仍未解决，继续反馈
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <article v-if="showOfflineFaq" class="mt-5 rounded-[1rem] border border-amber-200 bg-amber-50/70 p-4">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <p class="text-sm font-semibold text-slate-900">离线常见问题</p>
+              <p class="mt-1 text-xs leading-5 text-slate-500">客服当前离线时，可先查看常见问题答案；如果当前反馈单还有新增现象，仍可直接在下方继续补充。</p>
+            </div>
+            <span class="rounded-full bg-white px-3 py-1 text-xs font-semibold text-amber-700">离线导流</span>
+          </div>
+          <div class="mt-4 grid gap-3">
+            <article
+              v-for="item in offlineFaqEntries"
+              :key="item.question"
+              class="rounded-[0.9rem] bg-white px-4 py-3"
+            >
+              <p class="text-sm font-semibold text-slate-900">{{ item.question }}</p>
+              <p class="mt-2 text-xs leading-6 text-slate-500">{{ item.answer }}</p>
+            </article>
+          </div>
+        </article>
+
         <div class="mt-5 grid gap-3 lg:grid-cols-2">
           <div class="rounded-[1rem] bg-slate-50 p-4">
             <p class="text-xs font-semibold tracking-[0.16em] text-slate-400">Issue 字段</p>
@@ -368,27 +635,31 @@ onBeforeUnmount(() => {
           <article
             v-for="message in conversation.messages"
             :key="message.id"
-            class="rounded-[1rem] px-4 py-3"
-            :class="message.senderRole === 'client' ? 'ml-auto bg-brand/10 text-slate-900' : 'bg-white text-slate-900'"
+            class="rounded-[1rem] px-4 py-3 transition"
+            :class="[getMessageCardClass(message.senderRole), getMessageContainerClass(message.senderRole)]"
           >
             <div class="flex flex-wrap items-center justify-between gap-2">
-              <p class="text-sm font-semibold">
-                {{ message.senderName }}
-                <span class="ml-2 text-xs font-medium text-slate-400">
-                  {{ message.senderRole === 'client' ? '我' : message.senderRole === 'staff' ? '客服' : '系统' }}
+              <p :class="getMessageTitleClass(message.senderRole)">
+                {{ getMessageTitle(message.senderRole, message.senderName) }}
+                <span
+                  class="ml-2 rounded-full px-2 py-0.5 text-[0.68rem] font-medium"
+                  :class="message.senderRole === 'system' ? 'bg-slate-200/80 text-slate-500' : 'bg-slate-100 text-slate-500'"
+                >
+                  {{ getMessageRoleLabel(message.senderRole) }}
                 </span>
               </p>
               <span class="text-xs text-slate-400">{{ formatDateTime(message.createdAt) }}</span>
             </div>
-            <p class="mt-2 whitespace-pre-wrap text-sm leading-6">{{ message.body }}</p>
+            <p :class="getMessageBodyClass(message.senderRole)">{{ message.body }}</p>
           </article>
         </div>
       </article>
 
-      <article class="rounded-[1rem] border border-slate-200 bg-white p-4">
+      <article v-if="shouldShowReplyComposer" class="rounded-[1rem] border border-slate-200 bg-white p-4">
         <p class="text-base font-semibold text-slate-900">继续补充说明</p>
         <p class="mt-1 text-xs text-slate-400">同一问题后续有新现象时，直接追加消息即可，不需要重新新建反馈。</p>
         <textarea
+          ref="replyTextareaRef"
           v-model="replyDraft"
           class="feedback-textarea mt-4"
           maxlength="400"

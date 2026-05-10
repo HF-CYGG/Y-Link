@@ -1009,6 +1009,83 @@ class ClientFeedbackService {
     }
   }
 
+  async confirmConversationResolvedByClient(
+    id: string,
+    clientAuth: ClientAuthContext,
+    requestMeta?: RequestMeta,
+  ) {
+    const clientSnapshot = await this.getClientUserSnapshot(clientAuth.userId)
+
+    const result = await AppDataSource.transaction(async (manager) => {
+      const conversation = await this.requireOwnedConversation(id, clientAuth, manager)
+      if (conversation.status === 'closed') {
+        return {
+          conversation,
+          systemMessage: null as ClientFeedbackMessage | null,
+          changed: false,
+        }
+      }
+      if (conversation.status !== 'resolved') {
+        throw new BizError('当前反馈单还未进入待确认阶段，暂不能确认完成', 400)
+      }
+
+      conversation.status = 'closed'
+      conversation.closedAt = new Date()
+      await manager.getRepository(ClientFeedbackConversation).save(conversation)
+
+      const systemMessage = await this.createMessage(
+        manager,
+        conversation,
+        {
+          senderType: 'system',
+          senderUserId: null,
+          senderName: '系统',
+          conversationStatus: 'closed',
+        },
+        '客户端已确认该反馈单处理完成，当前会话已关闭。',
+        'system',
+      )
+
+      await auditService.record(
+        {
+          actionType: 'client_feedback.confirm_resolved',
+          actionLabel: '客户端确认反馈已解决',
+          targetType: 'feedback_conversation',
+          targetId: conversation.id,
+          targetCode: conversation.conversationNo,
+          actor: {
+            userId: clientAuth.userId,
+            username: clientAuth.account,
+            displayName: clientAuth.realName || clientSnapshot.clientUsername || clientSnapshot.clientAccount,
+          },
+          requestMeta,
+          detail: {
+            statusAfter: 'closed',
+          },
+        },
+        manager,
+      )
+
+      return {
+        conversation,
+        systemMessage,
+        changed: true,
+      }
+    })
+
+    if (result.changed) {
+      const systemMessageView = result.systemMessage
+        ? this.buildMessageView(result.systemMessage, { scope: 'client', userId: clientAuth.userId })
+        : undefined
+      this.publishConversationEvent('conversation_status_changed', result.conversation, { status: 'closed', confirmedBy: 'client' }, systemMessageView)
+    }
+
+    return {
+      changed: result.changed,
+      conversation: this.buildConversationSummary(result.conversation),
+    }
+  }
+
   async listServiceConversations(query: CustomerServiceConversationListQuery, actor: AuthUserContext) {
     const qb = this.conversationRepo.createQueryBuilder('conversation')
 
