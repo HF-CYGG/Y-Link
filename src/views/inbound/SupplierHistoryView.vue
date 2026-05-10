@@ -12,10 +12,10 @@
  * - 二维码生成失败时不能静默吞掉，否则用户只会看到空白占位而不知道单据本身已存在。
  */
 
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import QRCode from 'qrcode'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { BizResponsiveDrawerShell, PageContainer, PagePaginationBar } from '@/components/common'
 import {
   cancelSupplierDelivery,
@@ -33,6 +33,7 @@ import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
 import dayjs from 'dayjs'
 
 const router = useRouter()
+const route = useRoute()
 const listRequest = useStableRequest()
 const detailRequest = useStableRequest()
 const productRequest = useStableRequest()
@@ -445,6 +446,17 @@ const handlePageSizeChange = (pageSize: number) => {
   listState.query.page = 1
   void loadData()
 }
+
+// 进入“历史单据”标签时主动刷新列表：
+// - 供货工作台现在通过 KeepAlive 保留历史页状态，单纯依赖 onMounted 无法覆盖二次进入场景；
+// - 这里监听路由名切回 supplier-history，在保留筛选条件和分页位置的前提下重新请求当前列表。
+watch(() => route.name, (nextName, previousName) => {
+  if (nextName !== 'supplier-history' || previousName === nextName) {
+    return
+  }
+
+  void loadData()
+})
 
 onMounted(() => {
   resetEditForm()
