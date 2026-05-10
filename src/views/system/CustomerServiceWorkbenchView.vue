@@ -1295,7 +1295,7 @@ onBeforeUnmount(() => {
           <el-card
             v-if="selectedConversation"
             :key="selectedConversation.id"
-            class="cs-panel-card xl:flex xl:min-h-[calc(100vh-18rem)] xl:flex-col"
+            class="cs-panel-card cs-detail-panel-card xl:flex xl:min-h-[calc(100vh-18rem)] xl:flex-col"
             shadow="never"
           >
             <div v-if="detailLoading" class="mb-4">
@@ -1418,13 +1418,9 @@ onBeforeUnmount(() => {
 
             <el-tabs v-model="activeDetailTab" class="cs-detail-tabs mt-5 xl:min-h-0 xl:flex-1" stretch>
               <el-tab-pane label="会话记录" name="conversation" class="cs-detail-tab-pane">
-                <div class="flex min-h-0 flex-col gap-4">
-                  <el-card class="cs-sub-card cs-conversation-detail-card xl:flex xl:min-h-0 xl:flex-col" shadow="never">
-                    <div class="flex items-center justify-between gap-3">
-                      <div>
-                        <p class="text-base font-semibold text-slate-900">会话记录</p>
-                        <p class="mt-1 text-xs text-slate-400">围绕当前 Issue 的完整消息记录，客服回复后客户端会看到同一条会话更新。</p>
-                      </div>
+                <div class="cs-conversation-tab-panel">
+                  <el-card class="cs-sub-card cs-conversation-detail-card flex-1 xl:flex xl:min-h-0 xl:flex-col" shadow="never">
+                    <div class="flex items-center justify-end gap-3">
                       <span class="text-xs text-slate-400">{{ selectedConversation.messages.length }} 条消息</span>
                     </div>
 
@@ -1469,7 +1465,7 @@ onBeforeUnmount(() => {
                     </el-scrollbar>
                   </el-card>
 
-                  <el-card class="cs-sub-card" shadow="never">
+                  <el-card class="cs-sub-card cs-conversation-composer-card" shadow="never">
                     <div class="flex flex-wrap items-start justify-between gap-3">
                       <div>
                         <p class="text-base font-semibold text-slate-900">客服回复</p>
@@ -1537,12 +1533,8 @@ onBeforeUnmount(() => {
               </el-tab-pane>
 
               <el-tab-pane label="工单信息" name="issue" class="cs-detail-tab-pane">
-                <el-card class="cs-sub-card xl:min-h-0" shadow="never">
-                  <div class="flex items-center justify-between gap-3">
-                    <div>
-                      <p class="text-base font-semibold text-slate-900">工单信息</p>
-                      <p class="mt-1 text-xs text-slate-400">聚焦结构化排查字段，去掉与顶部状态和优先级重复的内容。</p>
-                    </div>
+                <el-card class="cs-sub-card flex-1 xl:min-h-0" shadow="never">
+                  <div class="flex justify-end gap-3">
                     <el-tag type="info" effect="plain" round>
                       {{ getCategoryLabel(issueForm.category) }}
                     </el-tag>
@@ -1750,6 +1742,13 @@ onBeforeUnmount(() => {
   padding: 1rem;
 }
 
+.cs-detail-panel-card :deep(.el-card__body) {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
 .cs-sub-card {
   background: rgba(248, 250, 252, 0.75);
 }
@@ -1758,8 +1757,16 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 
+.cs-conversation-detail-card :deep(.el-card__body) {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
 .cs-conversation-detail-scrollbar {
   min-height: 0;
+  height: 100%;
 }
 
 .cs-sub-card :deep(.el-card__body),
@@ -1869,6 +1876,9 @@ onBeforeUnmount(() => {
  */
 .cs-detail-tabs {
   min-height: 0;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
 }
 
 .cs-detail-tabs :deep(.el-tabs__header) {
@@ -1891,10 +1901,35 @@ onBeforeUnmount(() => {
 
 .cs-detail-tabs :deep(.el-tabs__content) {
   min-height: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
 }
 
 .cs-detail-tab-pane {
   min-height: 0;
+  height: 100%;
+}
+
+.cs-detail-tabs :deep(.el-tab-pane) {
+  display: flex;
+  min-height: 0;
+  height: 100%;
+  flex-direction: column;
+}
+
+.cs-detail-tabs :deep(.el-tab-pane.is-active) {
+  flex: 1 1 auto;
+}
+
+.cs-conversation-tab-panel {
+  display: grid;
+  min-height: 0;
+  flex: 1 1 auto;
+  gap: 1rem;
+}
+
+.cs-conversation-composer-card {
+  flex-shrink: 0;
 }
 
 /*
@@ -2017,6 +2052,11 @@ onBeforeUnmount(() => {
 }
 
 @media (min-width: 1280px) {
+  .cs-conversation-tab-panel {
+    height: 100%;
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
   .cs-conversation-detail-card {
     max-height: min(36rem, calc(100dvh - 18rem));
   }
