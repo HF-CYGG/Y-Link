@@ -201,6 +201,19 @@ export const verifyInboundOrder = (verifyCode: string) =>
   })
 
 /**
+ * 管理端现场改单：
+ * - 仅允许对待入库单据修改商品、数量和备注；
+ * - 改单后仍停留在扫码页，方便继续核对后直接入库。
+ */
+export const updateInboundOrderForAdmin = (id: string, data: UpdateSupplierInboundInput, requestConfig: RequestConfig = {}) =>
+  request<InboundOrderDetail>({
+    ...requestConfig,
+    method: 'PATCH',
+    url: `/inbound/admin/${id}`,
+    data,
+  })
+
+/**
  * 管理端查看入库单列表：
  * - 用于后续工作台或统计页按状态查看最近送货单；
  * - 当前仅做契约补齐，不改变现有页面行为。

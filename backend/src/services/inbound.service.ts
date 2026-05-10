@@ -72,6 +72,13 @@ class InboundService {
     }
   }
 
+  // 后台现场改单与核销入库属于同一工作台职责，统一限制为 admin / operator。
+  private assertAdminInboundActor(actor: AuthUserContext) {
+    if (actor.role !== 'admin' && actor.role !== 'operator') {
+      throw new BizError('仅后台库管人员可操作该送货单', 403)
+    }
+  }
+
   private normalizeSupplierInboundItems(items: SubmitInboundItemInput[]) {
     if (!Array.isArray(items) || !items.length) {
       throw new BizError('至少选择一个商品', 400)
@@ -254,6 +261,66 @@ class InboundService {
       return {
         order: savedOrder,
         items,
+      }
+    })
+  }
+
+  // 后台现场改单：仓管在扫码核对现场可直接修正待入库单据，再继续完成核销。
+  async updateInboundOrderForAdmin(actor: AuthUserContext, orderId: string, input: UpdateSupplierInboundInput) {
+    this.assertAdminInboundActor(actor)
+    const normalizedItems = this.normalizeSupplierInboundItems(input.items)
+
+    return AppDataSource.transaction(async (manager) => {
+      const normalizedOrderId = String(orderId).trim()
+      if (!normalizedOrderId) {
+        throw new BizError('送货单不存在', 404)
+      }
+
+      const order = await manager.getRepository(BizInboundOrder).findOne({
+        where: { id: normalizedOrderId },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
+
+      if (!order) {
+        throw new BizError('送货单不存在', 404)
+      }
+
+      if (order.status === 'verified') {
+        throw new BizError(`送货单“${order.showNo}”已入库，无法现场改单`, 409)
+      }
+
+      if (order.status === 'cancelled') {
+        throw new BizError(`送货单“${order.showNo}”已撤销，无法现场改单`, 409)
+      }
+
+      const productIds = [...new Set(normalizedItems.map((item) => item.productId))]
+      const productMap = await this.loadActiveProductsByIds(productIds, manager)
+      const nextTotalQty = normalizedItems.reduce((sum, item) => sum + item.qty, 0)
+
+      await manager.getRepository(BizInboundOrderItem).delete({ orderId: order.id })
+
+      const nextItems = normalizedItems.map((item) => {
+        const product = productMap.get(item.productId)
+        if (!product) {
+          throw new BizError('存在无效或停用商品', 400)
+        }
+
+        return manager.getRepository(BizInboundOrderItem).create({
+          orderId: order.id,
+          productId: item.productId,
+          productNameSnapshot: product.productName,
+          qty: String(item.qty),
+        })
+      })
+      await manager.getRepository(BizInboundOrderItem).save(nextItems)
+
+      order.remark = input.remark?.trim() || null
+      order.totalQty = String(nextTotalQty)
+
+      const savedOrder = await manager.getRepository(BizInboundOrder).save(order)
+      return {
+        order: savedOrder,
+        items: nextItems,
       }
     })
   }

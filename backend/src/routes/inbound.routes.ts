@@ -164,6 +164,22 @@ inboundRouter.post(
   }),
 )
 
+// 库管员：现场改单
+inboundRouter.patch(
+  '/admin/:id',
+  requirePermission('inbound:verify'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const input = updateSupplierInboundSchema.parse(req.body)
+    const result = await inboundService.updateInboundOrderForAdmin(authReq.auth, req.params.id, input)
+    res.json({
+      code: 0,
+      message: '现场改单成功',
+      data: result,
+    })
+  }),
+)
+
 // 库管员：查看所有送货单/入库单
 inboundRouter.get(
   '/admin/list',
