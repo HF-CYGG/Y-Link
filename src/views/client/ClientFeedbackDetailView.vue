@@ -1329,12 +1329,12 @@ onBeforeUnmount(() => {
   display: inline-flex;
   align-items: center;
   border-radius: 9999px;
-  background: rgba(13, 148, 136, 0.12);
+  background: rgba(13, 148, 136, 0.18);
   padding: 0.28rem 0.62rem;
   font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.08em;
-  color: rgb(15 118 110);
+  color: rgb(17 94 89);
 }
 
 .client-feedback-satisfaction-dialog__title {
