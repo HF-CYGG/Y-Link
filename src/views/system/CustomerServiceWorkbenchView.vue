@@ -1138,8 +1138,8 @@ onBeforeUnmount(() => {
   >
     <div class="space-y-3">
       <el-card class="cs-panel-card" shadow="never">
-        <div class="flex flex-col gap-4 2xl:flex-row 2xl:items-start 2xl:justify-between">
-          <div class="min-w-0 2xl:max-w-[420px]">
+        <div class="cs-online-status-shell">
+          <div class="cs-online-status-copy">
             <div class="flex flex-wrap items-center gap-2">
               <p class="text-base font-semibold text-slate-900">在线状态</p>
               <el-tag :type="getRealtimeTagType()" effect="light" round>
@@ -1152,7 +1152,7 @@ onBeforeUnmount(() => {
             <p class="mt-1 text-xs text-slate-400">{{ reconnectTip }}</p>
           </div>
 
-          <div class="grid gap-2 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-7 2xl:min-w-0 2xl:flex-1">
+          <div class="cs-summary-strip">
             <el-card
               v-for="item in summaryCategoryDefinitions"
               :key="item.key"
@@ -1742,6 +1742,31 @@ onBeforeUnmount(() => {
   padding: 1rem;
 }
 
+.cs-online-status-shell {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.cs-online-status-copy {
+  min-width: 0;
+}
+
+.cs-summary-strip {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(8.75rem, 1fr);
+  gap: 0.65rem;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  padding-bottom: 0.15rem;
+  scrollbar-width: none;
+}
+
+.cs-summary-strip::-webkit-scrollbar {
+  display: none;
+}
+
 .cs-detail-panel-card :deep(.el-card__body) {
   display: flex;
   min-height: 0;
@@ -1799,6 +1824,11 @@ onBeforeUnmount(() => {
   min-width: 0;
   border-radius: 20px;
   padding: 0.75rem 0.82rem;
+}
+
+.cs-summary-strip .cs-summary-card {
+  min-height: 5.6rem;
+  scroll-snap-align: start;
 }
 
 .cs-summary-card:hover {
@@ -2046,12 +2076,61 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 767px) {
+  .cs-panel-card :deep(.el-card__body) {
+    padding: 0.9rem;
+  }
+
+  .cs-online-status-copy {
+    max-width: none;
+  }
+
+  .cs-summary-strip {
+    margin-inline: -0.1rem;
+    padding-inline: 0.1rem;
+    scroll-snap-type: x proximity;
+  }
+
+  .cs-summary-card--compact {
+    border-radius: 18px;
+    padding: 0.68rem 0.72rem;
+  }
+
+  .cs-summary-card--compact .cs-summary-card__label {
+    letter-spacing: 0.08em;
+    font-size: 0.66rem;
+  }
+
+  .cs-summary-card--compact .cs-summary-card__value {
+    margin-top: 0.45rem;
+    font-size: 1.15rem;
+  }
+
   .cs-list-heading__desc {
     max-width: 13.5rem;
   }
 }
 
 @media (min-width: 1280px) {
+  .cs-online-status-shell {
+    flex-direction: row;
+    align-items: flex-start;
+    justify-content: space-between;
+  }
+
+  .cs-online-status-copy {
+    max-width: 420px;
+  }
+
+  .cs-summary-strip {
+    min-width: 0;
+    flex: 1 1 auto;
+    grid-auto-flow: row;
+    grid-auto-columns: initial;
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+    overflow: visible;
+    padding-bottom: 0;
+  }
+
   .cs-conversation-tab-panel {
     height: 100%;
     grid-template-rows: minmax(0, 1fr) auto;
