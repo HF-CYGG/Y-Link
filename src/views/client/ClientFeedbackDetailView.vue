@@ -568,7 +568,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="space-y-4 pb-4">
+  <div class="space-y-4 pb-4">
     <div class="rounded-[1.5rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0 flex-1">
@@ -1085,16 +1085,17 @@ onBeforeUnmount(() => {
         返回我的会话
       </button>
     </article>
-  </section>
+  
 
-  <Teleport to="body">
-    <div v-if="previewImageUrl" class="feedback-preview-overlay" @click.self="previewImageUrl = ''">
-      <div class="feedback-preview-panel">
-        <button type="button" class="feedback-preview-close" @click="previewImageUrl = ''">关闭</button>
-        <img :src="previewImageUrl" alt="附件预览" class="feedback-preview-image" />
+    <Teleport to="body">
+      <div v-if="previewImageUrl" class="feedback-preview-overlay" @click.self="previewImageUrl = ''">
+        <div class="feedback-preview-panel">
+          <button type="button" class="feedback-preview-close" @click="previewImageUrl = ''">关闭</button>
+          <img :src="previewImageUrl" alt="附件预览" class="feedback-preview-image" />
+        </div>
       </div>
-    </div>
-  </Teleport>
+    </Teleport>
+  </div>
 </template>
 
 <style scoped>
