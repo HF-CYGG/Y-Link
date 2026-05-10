@@ -165,6 +165,14 @@ const seedOrdersForBaseline = async (clientAuth: ClientAuthContext) => {
     await o2oPreorderService.submit(clientAuth, {
       items: [{ productId: product.id, qty: 1 }],
       remark: `订单查询性能样本-${index + 1}`,
+      // 基线脚本使用独立注册的新客户端账号，默认不依赖部门资料，
+      // 因此固定走“散客”口径，避免被当前 `normalizeClientOrderType`
+      // 与部门快照校验拦截，确保种子数据在本地/CI 都可稳定生成。
+      clientOrderType: 'walkin',
+      // 基线场景只验证订单查询性能，不需要额外引入“系统申请”变量。
+      isSystemApplied: false,
+      // 当前 O2O 下单已强制要求显式提货人，脚本同步补齐，避免继续沿用旧版最小入参。
+      pickupContact: `基线提货人-${(index % 5) + 1}`,
     })
   }
 

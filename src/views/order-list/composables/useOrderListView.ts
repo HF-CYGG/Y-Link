@@ -1,11 +1,19 @@
 /**
  * 模块说明：src/views/order-list/composables/useOrderListView.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：集中承载管理端出库单列表页的筛选、分页、详情抽屉、静默自动刷新、上下文保持与新单高亮能力。
+ * 实现逻辑：
+ * - 使用 `useStableRequest` 统一兜底列表与详情并发，仅允许最后一次有效请求回写页面；
+ * - 将“输入中的筛选条件”与“已提交的筛选条件”拆开，避免自动刷新打断用户尚未确认的查询输入；
+ * - 静默刷新时仅更新当前页数据，并尽量恢复列表滚动位置、分页、抽屉打开态与当前查看单据；
+ * - 当新单进入当前结果集时，仅对新增项做局部插入高亮与轻提示，不触发整页重载或抽屉关闭。
+ * 维护说明：
+ * - 若后续新增筛选项，需同时补齐默认值、克隆逻辑与 `buildQueryParams()`；
+ * - 若调整自动刷新频率，需同时评估详情抽屉静默回写、滚动恢复与高亮动画时长；
+ * - 若表格 DOM 结构因组件升级变化，需同步检查桌面端滚动容器选择器是否仍然有效。
  */
 
 import dayjs from 'dayjs'
-import { computed, onActivated, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useWindowSize } from '@vueuse/core'
 import { useRoute, useRouter } from 'vue-router'
@@ -24,10 +32,64 @@ import { useStableRequest } from '@/composables/useStableRequest'
 import { useAppStore } from '@/store'
 import { extractErrorMessage } from '@/utils/error'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
+import { captureOrderRefreshAnchor, restoreOrderRefreshAnchor, type OrderRefreshAnchorSnapshot } from '@/utils/order-refresh-visual'
 
 const ORDER_LIST_TARGET_ORDER_ID_QUERY_KEY = 'focusOrderId'
 const ORDER_LIST_TARGET_ORDER_SHOW_NO_QUERY_KEY = 'focusOrderShowNo'
 const ORDER_LIST_TARGET_REFRESH_QUERY_KEY = 'focusRefreshToken'
+const ORDER_AUTO_REFRESH_INTERVAL_MS = 15 * 1000
+const ORDER_REFRESH_MARK_MS = 3200
+const ORDER_REFRESH_NOTICE_MS = 6000
+const ORDER_REFRESH_VIEWPORT_TOP_OFFSET = 104
+
+type OrderTypeFilter = 'all' | 'department' | 'walkin'
+type OrderDeletionScope = 'active' | 'deleted' | 'all'
+
+interface OrderListSearchFormState {
+  keyword: string
+  orderType: OrderTypeFilter
+  dateRange: [Date, Date] | null
+  deletionScope: OrderDeletionScope
+}
+
+interface OrderListViewportSnapshot {
+  tableScrollTop: number | null
+  cardAnchor: OrderRefreshAnchorSnapshot | null
+}
+
+interface LoadOrderListOptions {
+  silent?: boolean
+  preserveScroll?: boolean
+  highlightNewOrders?: boolean
+}
+
+interface LoadOrderDetailOptions {
+  silent?: boolean
+}
+
+const createDefaultSearchForm = (): OrderListSearchFormState => ({
+  keyword: '',
+  orderType: 'all',
+  dateRange: null,
+  deletionScope: 'active',
+})
+
+const cloneSearchDateRange = (value: [Date, Date] | null): [Date, Date] | null => {
+  if (!value?.length) {
+    return null
+  }
+
+  return [new Date(value[0]), new Date(value[1])]
+}
+
+const cloneSearchForm = (value: OrderListSearchFormState): OrderListSearchFormState => {
+  return {
+    keyword: value.keyword,
+    orderType: value.orderType,
+    dateRange: cloneSearchDateRange(value.dateRange),
+    deletionScope: value.deletionScope,
+  }
+}
 
 const normalizeRouteQueryValue = (value: unknown): string => {
   if (Array.isArray(value)) {
@@ -64,8 +126,18 @@ export const useOrderListView = () => {
   const listRequest = useStableRequest()
   const detailRequest = useStableRequest()
   const pageReady = ref(false)
+  const pageActive = ref(false)
   const keepAliveActivated = ref(false)
   const processingTargetRefresh = ref(false)
+  const listSnapshotReady = ref(false)
+  const listBodyRef = ref<HTMLElement | null>(null)
+  const silentRefreshing = ref(false)
+  const lastAutoRefreshAt = ref(0)
+  const newOrderNotice = ref<{ count: number; eventAt: number } | null>(null)
+  const recentOrderMarkExpiresAtMap = ref<Record<string, number>>({})
+  let autoRefreshTimer: ReturnType<typeof globalThis.setInterval> | null = null
+  let refreshMarkCleanupTimer: ReturnType<typeof globalThis.setTimeout> | null = null
+  let newOrderNoticeTimer: ReturnType<typeof globalThis.setTimeout> | null = null
 
   /**
    * 列表分页状态：
@@ -84,12 +156,8 @@ export const useOrderListView = () => {
    * - showNo 对应业务单号模糊筛选；
    * - dateRange 保持最近日期筛选交互方式不变。
    */
-  const searchForm = ref({
-    keyword: '',
-    orderType: 'all' as 'all' | 'department' | 'walkin',
-    dateRange: null as [Date, Date] | null,
-    deletionScope: 'active' as 'active' | 'deleted' | 'all',
-  })
+  const searchForm = ref<OrderListSearchFormState>(createDefaultSearchForm())
+  const appliedSearchForm = ref<OrderListSearchFormState>(cloneSearchForm(searchForm.value))
 
   /**
    * 详情区域卡片网格：
@@ -153,6 +221,14 @@ export const useOrderListView = () => {
   const drawerVisible = ref(false)
   const drawerLoading = ref(false)
   const currentOrder = ref<OrderDetailResult | null>(null)
+  const activeDetailOrderId = ref('')
+  const autoRefreshStatusText = computed(() => {
+    if (!lastAutoRefreshAt.value) {
+      return '自动刷新已开启'
+    }
+
+    return `最近同步 ${dayjs(lastAutoRefreshAt.value).format('YYYY-MM-DD HH:mm:ss')}`
+  })
 
   /**
    * 清空当前页面可见数据：
@@ -160,11 +236,28 @@ export const useOrderListView = () => {
    * - 统一由组合式函数收口，而不是让页面模板自己兜底。
    */
   const resetVisibleData = () => {
+    activeDetailOrderId.value = ''
+    detailRequest.cancel()
+    listRequest.cancel()
     listState.records = []
     listState.total = 0
     currentOrder.value = null
     drawerVisible.value = false
     drawerLoading.value = false
+    silentRefreshing.value = false
+    listSnapshotReady.value = false
+    lastAutoRefreshAt.value = 0
+    newOrderNotice.value = null
+    recentOrderMarkExpiresAtMap.value = {}
+  }
+
+  /**
+   * 记录当前筛选快照：
+   * - 列表自动刷新只读取“已提交条件”，不读取用户输入中的草稿；
+   * - 避免用户还没点“搜索”，后台轮询就提前把草稿条件应用到列表上。
+   */
+  const commitSearchForm = () => {
+    appliedSearchForm.value = cloneSearchForm(searchForm.value)
   }
 
   const getTargetRefreshPayload = () => {
@@ -207,28 +300,29 @@ export const useOrderListView = () => {
    * - 日期始终格式化为 YYYY-MM-DD，保持后端查询兼容性。
    */
   const buildQueryParams = (): OrderListQuery => {
+    const filters = appliedSearchForm.value
     const params: OrderListQuery = {
       page: listState.query.page,
       pageSize: listState.query.pageSize,
     }
 
-    if (searchForm.value.keyword) {
-      params.keyword = searchForm.value.keyword
+    if (filters.keyword) {
+      params.keyword = filters.keyword
     }
 
-    if (searchForm.value.orderType !== 'all') {
-      params.orderType = searchForm.value.orderType
+    if (filters.orderType !== 'all') {
+      params.orderType = filters.orderType
     }
 
-    if (searchForm.value.dateRange?.length === 2) {
-      params.startDate = dayjs(searchForm.value.dateRange[0]).format('YYYY-MM-DD')
-      params.endDate = dayjs(searchForm.value.dateRange[1]).format('YYYY-MM-DD')
+    if (filters.dateRange?.length === 2) {
+      params.startDate = dayjs(filters.dateRange[0]).format('YYYY-MM-DD')
+      params.endDate = dayjs(filters.dateRange[1]).format('YYYY-MM-DD')
     }
 
     if (canDeleteOrder.value) {
-      if (searchForm.value.deletionScope === 'deleted') {
+      if (filters.deletionScope === 'deleted') {
         params.onlyDeleted = true
-      } else if (searchForm.value.deletionScope === 'all') {
+      } else if (filters.deletionScope === 'all') {
         params.includeDeleted = true
       }
     }
@@ -237,55 +331,259 @@ export const useOrderListView = () => {
   }
 
   /**
-   * 加载订单列表：
-   * - 根据当前筛选与分页状态请求数据；
-   * - 成功后回填统一分页状态；
-   * - 失败时展示稳定错误消息。
+   * 查找桌面表格真实滚动容器：
+   * - Element Plus 表格会把滚动放到内部 body wrapper；
+   * - 刷新前后恢复它的 scrollTop，能避免桌面端列表突然跳回顶部。
    */
-  const loadData = async () => {
+  const resolveTableScrollContainer = () => {
+    if (!listBodyRef.value) {
+      return null
+    }
+
+    return listBodyRef.value.querySelector<HTMLElement>('.el-table__body-wrapper, .el-scrollbar__wrap')
+  }
+
+  /**
+   * 捕获当前列表可视上下文：
+   * - 桌面端优先记录表格内部滚动条位置；
+   * - 移动端卡片列表记录首个可视卡片锚点，刷新后尽量恢复到同一阅读位置。
+   */
+  const captureListViewportSnapshot = (): OrderListViewportSnapshot | null => {
+    if (globalThis.window === undefined || !listBodyRef.value) {
+      return null
+    }
+
+    return {
+      tableScrollTop: resolveTableScrollContainer()?.scrollTop ?? null,
+      cardAnchor: captureOrderRefreshAnchor({
+        listRoot: listBodyRef.value,
+        itemAttributeName: 'data-order-list-item-id',
+        visibilityTopOffset: ORDER_REFRESH_VIEWPORT_TOP_OFFSET,
+      }),
+    }
+  }
+
+  const restoreListViewportSnapshot = async (snapshot: OrderListViewportSnapshot | null) => {
+    if (!snapshot) {
+      return
+    }
+
+    await nextTick()
+
+    if (snapshot.tableScrollTop !== null) {
+      const tableScrollContainer = resolveTableScrollContainer()
+      if (tableScrollContainer) {
+        tableScrollContainer.scrollTop = snapshot.tableScrollTop
+      }
+    }
+
+    restoreOrderRefreshAnchor(snapshot.cardAnchor, {
+      listRoot: listBodyRef.value,
+      itemAttributeName: 'data-order-list-item-id',
+    })
+  }
+
+  const scheduleRefreshMarkCleanup = () => {
+    if (refreshMarkCleanupTimer !== null) {
+      globalThis.clearTimeout(refreshMarkCleanupTimer)
+      refreshMarkCleanupTimer = null
+    }
+
+    const activeExpiresAtList = Object.values(recentOrderMarkExpiresAtMap.value)
+    if (!activeExpiresAtList.length) {
+      return
+    }
+
+    const nextExpiresAt = Math.min(...activeExpiresAtList)
+    const delay = Math.max(0, nextExpiresAt - Date.now() + 32)
+    refreshMarkCleanupTimer = globalThis.setTimeout(() => {
+      const now = Date.now()
+      recentOrderMarkExpiresAtMap.value = Object.fromEntries(
+        Object.entries(recentOrderMarkExpiresAtMap.value).filter(([, expiresAt]) => expiresAt > now),
+      )
+      scheduleRefreshMarkCleanup()
+    }, delay)
+  }
+
+  const markRecentOrders = (orderIds: string[]) => {
+    if (!orderIds.length) {
+      return
+    }
+
+    const expiresAt = Date.now() + ORDER_REFRESH_MARK_MS
+    const nextMarkMap = { ...recentOrderMarkExpiresAtMap.value }
+    for (const orderId of orderIds) {
+      nextMarkMap[orderId] = expiresAt
+    }
+    recentOrderMarkExpiresAtMap.value = nextMarkMap
+    scheduleRefreshMarkCleanup()
+  }
+
+  const dismissNewOrderNotice = () => {
+    if (newOrderNoticeTimer !== null) {
+      globalThis.clearTimeout(newOrderNoticeTimer)
+      newOrderNoticeTimer = null
+    }
+
+    newOrderNotice.value = null
+  }
+
+  const showNewOrderNotice = (count: number) => {
+    if (count <= 0) {
+      return
+    }
+
+    dismissNewOrderNotice()
+    newOrderNotice.value = {
+      count,
+      eventAt: Date.now(),
+    }
+    newOrderNoticeTimer = globalThis.setTimeout(() => {
+      newOrderNotice.value = null
+      newOrderNoticeTimer = null
+    }, ORDER_REFRESH_NOTICE_MS)
+  }
+
+  const isOrderRecentlyInserted = (orderId: string) => {
+    return (recentOrderMarkExpiresAtMap.value[orderId] ?? 0) > Date.now()
+  }
+
+  const isOrderDetailActive = (orderId: string) => {
+    return activeDetailOrderId.value === orderId && drawerVisible.value
+  }
+
+  /**
+   * 将详情页里最新的主单摘要回写到当前列表：
+   * - 详情自动刷新后，列表中的“带单 / 系统申请 / 删除态”等摘要也要同步更新；
+   * - 只更新当前页已存在记录，避免偷偷改动其它分页的数据感知。
+   */
+  const syncOrderSummaryIntoList = (order: OrderRecord) => {
+    const targetIndex = listState.records.findIndex((item) => item.id === order.id)
+    if (targetIndex < 0) {
+      return
+    }
+
+    const nextRecords = listState.records.slice()
+    nextRecords[targetIndex] = {
+      ...nextRecords[targetIndex],
+      ...order,
+    }
+    listState.records = nextRecords
+  }
+
+  /**
+   * 加载订单列表：
+   * - 根据“已提交筛选”与当前分页状态请求数据；
+   * - 静默刷新时只局部回写当前页结果，并尽量恢复滚动位置；
+   * - 新单进入当前结果集时，仅做高亮与提示，不额外打断用户当前上下文。
+   */
+  const loadData = async (options: LoadOrderListOptions = {}) => {
     if (!ensurePermission('orders:view', '出库单查看')) {
       listState.loading = false
       resetVisibleData()
       return
     }
-    listState.loading = true
+
+    const silent = options.silent === true
+    const previousRecords = listState.records.slice()
+    const previousOrderIds = new Set(previousRecords.map((record) => record.id))
+    const viewportSnapshot = options.preserveScroll && previousRecords.length > 0
+      ? captureListViewportSnapshot()
+      : null
+
+    if (silent) {
+      silentRefreshing.value = previousRecords.length > 0
+    } else {
+      listState.loading = true
+    }
+
     await listRequest.runLatest({
       executor: (signal) => getOrderList(buildQueryParams(), { signal }),
-      onSuccess: (result) => {
+      onSuccess: async (result) => {
         applyPaginatedResult(listState, result)
+
+        if (listSnapshotReady.value && options.highlightNewOrders) {
+          const incrementalNewOrderIds = listState.records
+            .filter((record) => !previousOrderIds.has(record.id))
+            .map((record) => record.id)
+
+          if (incrementalNewOrderIds.length) {
+            markRecentOrders(incrementalNewOrderIds)
+            showNewOrderNotice(incrementalNewOrderIds.length)
+          }
+        }
+
+        if (viewportSnapshot) {
+          await restoreListViewportSnapshot(viewportSnapshot)
+        }
+
+        listSnapshotReady.value = true
+        if (silent) {
+          lastAutoRefreshAt.value = Date.now()
+        }
       },
       onError: (error) => {
+        if (silent) {
+          return
+        }
+
         ElMessage.error(extractErrorMessage(error, '获取单据列表失败'))
       },
       onFinally: () => {
         listState.loading = false
+        silentRefreshing.value = false
       },
     })
   }
 
-  const loadOrderDetail = async (orderId: string) => {
+  /**
+   * 加载详情抽屉：
+   * - 手动打开时展示骨架并重置旧详情；
+   * - 静默刷新时保持抽屉打开与当前内容，只回写最新详情字段。
+   */
+  const loadOrderDetail = async (row: { id: string }, options: LoadOrderDetailOptions = {}) => {
     if (!ensurePermission('orders:view', '出库单查看')) {
       resetVisibleData()
       return null
     }
-    drawerVisible.value = true
-    drawerLoading.value = true
-    currentOrder.value = null
+
+    const orderId = row.id
+    const silent = options.silent === true
+    activeDetailOrderId.value = orderId
+    if (!silent) {
+      drawerVisible.value = true
+      drawerLoading.value = true
+      currentOrder.value = null
+    }
 
     let detailResult: OrderDetailResult | null = null
 
     await detailRequest.runLatest({
-      executor: (signal) => getOrderDetailById(orderId, { signal }),
+      executor: (signal) => getOrderDetailById(row.id, { signal }),
       onSuccess: (result) => {
+        if (activeDetailOrderId.value !== orderId) {
+          return
+        }
         currentOrder.value = result
+        syncOrderSummaryIntoList(result)
         detailResult = result
       },
       onError: (error) => {
+        if (activeDetailOrderId.value !== orderId) {
+          return
+        }
+
+        if (silent) {
+          return
+        }
+
         ElMessage.error(extractErrorMessage(error, '获取单据详情失败'))
         drawerVisible.value = false
       },
       onFinally: () => {
-        drawerLoading.value = false
+        if (!silent) {
+          drawerLoading.value = false
+        }
       },
     })
 
@@ -298,6 +596,7 @@ export const useOrderListView = () => {
    * - 再按当前条件重新请求列表。
    */
   const handleSearch = () => {
+    commitSearchForm()
     listState.query.page = 1
     void loadData()
   }
@@ -308,13 +607,10 @@ export const useOrderListView = () => {
    * - 保持原先“重置后立即刷新列表”的体验。
    */
   const handleReset = () => {
-    searchForm.value = {
-      keyword: '',
-      orderType: 'all',
-      dateRange: null,
-      deletionScope: 'active',
-    }
-    handleSearch()
+    searchForm.value = createDefaultSearchForm()
+    commitSearchForm()
+    listState.query.page = 1
+    void loadData()
   }
 
   /**
@@ -348,23 +644,7 @@ export const useOrderListView = () => {
       resetVisibleData()
       return
     }
-    drawerVisible.value = true
-    drawerLoading.value = true
-    currentOrder.value = null
-
-    await detailRequest.runLatest({
-      executor: (signal) => getOrderDetailById(row.id, { signal }),
-      onSuccess: (result) => {
-        currentOrder.value = result
-      },
-      onError: (error) => {
-        ElMessage.error(extractErrorMessage(error, '获取单据详情失败'))
-        drawerVisible.value = false
-      },
-      onFinally: () => {
-        drawerLoading.value = false
-      },
-    })
+    await loadOrderDetail(row)
   }
 
   /**
@@ -502,10 +782,14 @@ export const useOrderListView = () => {
 
     try {
       listState.query.page = 1
-      await loadData()
+      await loadData({
+        highlightNewOrders: true,
+      })
 
       const targetOrder = listState.records.find((record) => record.id === payload.orderId || record.showNo === payload.showNo)
-      await loadOrderDetail(targetOrder?.id ?? payload.orderId)
+      await loadOrderDetail({
+        id: targetOrder?.id ?? payload.orderId,
+      })
     } finally {
       processingTargetRefresh.value = false
       await clearTargetRefreshQuery()
@@ -532,11 +816,86 @@ export const useOrderListView = () => {
     await loadData()
   }
 
+  const refreshCurrentDetailSilently = async () => {
+    if (!drawerVisible.value || !activeDetailOrderId.value) {
+      return
+    }
+
+    await loadOrderDetail({
+      id: activeDetailOrderId.value,
+    }, {
+      silent: true,
+    })
+  }
+
+  const canRunAutoRefresh = () => {
+    if (!pageReady.value || !pageActive.value || !canViewOrder.value) {
+      return false
+    }
+
+    if (processingTargetRefresh.value || listState.loading || drawerLoading.value) {
+      return false
+    }
+
+    if (globalThis.document?.visibilityState === 'hidden') {
+      return false
+    }
+
+    return true
+  }
+
+  const triggerSilentRefresh = async () => {
+    if (!canRunAutoRefresh()) {
+      return
+    }
+
+    await loadData({
+      silent: true,
+      preserveScroll: true,
+      highlightNewOrders: true,
+    })
+    await refreshCurrentDetailSilently()
+  }
+
+  const stopAutoRefresh = () => {
+    if (autoRefreshTimer !== null) {
+      globalThis.clearInterval(autoRefreshTimer)
+      autoRefreshTimer = null
+    }
+  }
+
+  const scheduleAutoRefresh = () => {
+    stopAutoRefresh()
+    autoRefreshTimer = globalThis.setInterval(() => {
+      void triggerSilentRefresh()
+    }, ORDER_AUTO_REFRESH_INTERVAL_MS)
+  }
+
+  const handleVisibilityChange = () => {
+    if (globalThis.document?.visibilityState === 'visible') {
+      void triggerSilentRefresh()
+    }
+  }
+
   /**
    * 监听自适应 pageSize：
    * - 仅当实际容量发生变化时才刷新；
    * - 首次进入页面即按当前窗口尺寸初始化分页并拉取数据。
    */
+  watch(
+    drawerVisible,
+    (visible) => {
+      if (visible) {
+        return
+      }
+
+      activeDetailOrderId.value = ''
+      detailRequest.cancel()
+      drawerLoading.value = false
+      currentOrder.value = null
+    },
+  )
+
   watch(
     adaptivePageSize,
     (value) => {
@@ -557,10 +916,15 @@ export const useOrderListView = () => {
   onMounted(() => {
     initializePageSize()
     pageReady.value = true
+    pageActive.value = true
+    globalThis.document?.addEventListener('visibilitychange', handleVisibilityChange)
+    scheduleAutoRefresh()
     void refreshListView()
   })
 
   onActivated(() => {
+    pageActive.value = true
+    scheduleAutoRefresh()
     if (!pageReady.value) {
       return
     }
@@ -570,19 +934,43 @@ export const useOrderListView = () => {
       return
     }
 
-    void refreshListView()
+    void triggerSilentRefresh()
+  })
+
+  onDeactivated(() => {
+    pageActive.value = false
+    stopAutoRefresh()
+  })
+
+  onBeforeUnmount(() => {
+    pageActive.value = false
+    stopAutoRefresh()
+    globalThis.document?.removeEventListener('visibilitychange', handleVisibilityChange)
+    if (refreshMarkCleanupTimer !== null) {
+      globalThis.clearTimeout(refreshMarkCleanupTimer)
+      refreshMarkCleanupTimer = null
+    }
+    dismissNewOrderNotice()
   })
 
   return {
     searchForm,
     listState,
+    listBodyRef,
     detailGridClass,
     paginationLayout,
     paginationPageSizes,
     drawerVisible,
     drawerLoading,
     currentOrder,
+    silentRefreshing,
+    autoRefreshStatusText,
+    newOrderNotice,
     canDeleteOrder,
+    activeDetailOrderId,
+    isOrderRecentlyInserted,
+    isOrderDetailActive,
+    dismissNewOrderNotice,
     handleSearch,
     handleReset,
     handleCurrentChange,

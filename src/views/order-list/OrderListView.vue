@@ -7,18 +7,19 @@
 <script setup lang="ts">
 /**
  * 模块说明：`src/views/order-list/OrderListView.vue`
- * 文件职责：装配出库单列表、详情抽屉、合规状态编辑，以及正式出库单低频入口。
+ * 文件职责：装配出库单列表、详情抽屉、合规状态编辑、自动刷新提示、新单高亮动画，以及正式出库单低频入口。
  * 实现逻辑：
  * 1. 复用列表 composable 提供的详情查询结果，不新增服务端接口；
  * 2. 将正式出库单编辑、预览、打印、导出整体拆到异步工作台组件，降低 `OrderListView` 主分包体积；
  * 3. 页面层仅保留低频入口控制，确保高频“列表 -> 详情”路径不被打印模板拖重；
  * 4. 列表与移动端卡片按订单类型收口展示字段，部门单展示部门流程字段，散客单隐藏不适用信息；
- * 5. 清理早期设备调试文案，避免把“手机卡片 / 平板卡片”等开发态信息暴露给最终用户。
+ * 5. 管理端自动刷新期间仅展示轻量提示，并为新增单据补充克制的入场高亮，不打断当前筛选、分页、滚动与详情抽屉；
+ * 6. 清理早期设备调试文案，避免把“手机卡片 / 平板卡片”等开发态信息暴露给最终用户。
  */
 
 import dayjs from 'dayjs'
 import { ElMessage } from 'element-plus'
-import { computed, defineAsyncComponent, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, ref, watch, type ComponentPublicInstance } from 'vue'
 import { updateOrderComplianceFlags } from '@/api/modules/order'
 import {
   BizResponsiveDataCollectionShell,
@@ -29,7 +30,6 @@ import {
 } from '@/components/common'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { extractErrorMessage } from '@/utils/error'
-import OrderDetailDrawerContent from './components/OrderDetailDrawerContent.vue'
 import { useOrderListView } from './composables/useOrderListView'
 
 const getOrderTypeLabel = (value: 'department' | 'walkin') => {
@@ -111,13 +111,20 @@ const getOrderDisplayName = (order: {
 const {
   searchForm,
   listState,
+  listBodyRef,
   detailGridClass,
   paginationLayout,
   paginationPageSizes,
   drawerVisible,
   drawerLoading,
   currentOrder,
+  silentRefreshing,
+  autoRefreshStatusText,
+  newOrderNotice,
   canDeleteOrder,
+  isOrderRecentlyInserted,
+  isOrderDetailActive,
+  dismissNewOrderNotice,
   handleSearch,
   handleReset,
   handleCurrentChange,
@@ -128,6 +135,7 @@ const {
   handleRestoreOrderWithConfirm,
 } = useOrderListView()
 const { hasPermission, ensurePermission } = usePermissionAction()
+const OrderDetailDrawerContent = defineAsyncComponent(() => import('./components/OrderDetailDrawerContent.vue'))
 const OrderVoucherWorkbenchDialog = defineAsyncComponent(() => import('./components/OrderVoucherWorkbenchDialog.vue'))
 
 const voucherDialogVisible = ref(false)
@@ -135,6 +143,8 @@ const enableHtml2pdfExport = import.meta.env.VITE_ORDER_VOUCHER_HTML2PDF_ENABLED
 const canUseOrderVoucher = computed(() => currentOrder.value?.orderType === 'department')
 const canEditComplianceFlags = computed(() => hasPermission('orders:update'))
 const complianceSaving = ref(false)
+const complianceDraftTrackingSuspended = ref(false)
+const hasUnsavedComplianceDraft = ref(false)
 const complianceForm = ref({
   hasCustomerOrder: false,
   isSystemApplied: false,
@@ -145,18 +155,80 @@ const hasActiveFilter = computed(() => {
 const emptyDescription = computed(() => {
   return hasActiveFilter.value ? '未匹配到符合条件的订单，请调整筛选条件后重试' : '暂无订单数据，稍后可通过开单后回来查看'
 })
+const bindListBodyRef = (element: Element | ComponentPublicInstance | null) => {
+  listBodyRef.value = element instanceof HTMLElement ? element : null
+}
+const getTableRowClassName = (payload: { row: { id: string } }) => {
+  return [
+    isOrderRecentlyInserted(payload.row.id) ? 'order-list-table-row--new' : '',
+    isOrderDetailActive(payload.row.id) ? 'order-list-table-row--active' : '',
+  ]
+    .filter(Boolean)
+    .join(' ')
+}
+const getCardClassList = (orderId: string) => {
+  return {
+    'mobile-order-card--new': isOrderRecentlyInserted(orderId),
+    'mobile-order-card--active': isOrderDetailActive(orderId),
+  }
+}
 
-const syncComplianceFormFromCurrentOrder = () => {
+const syncComplianceFormFromCurrentOrder = (options: { force?: boolean } = {}) => {
+  if (!options.force && hasUnsavedComplianceDraft.value) {
+    return
+  }
+
+  complianceDraftTrackingSuspended.value = true
   complianceForm.value = {
     hasCustomerOrder: Boolean(currentOrder.value?.hasCustomerOrder),
     isSystemApplied: Boolean(currentOrder.value?.isSystemApplied),
   }
+  hasUnsavedComplianceDraft.value = false
+  complianceDraftTrackingSuspended.value = false
 }
 
 watch(
   () => currentOrder.value?.id ?? '',
+  (currentOrderId, previousOrderId) => {
+    syncComplianceFormFromCurrentOrder({
+      // 详细注释：切换到另一张单据时必须强制重置编辑表单，
+      // 否则上一张单据的本地草稿会错误带到新详情里。
+      force: currentOrderId !== previousOrderId,
+    })
+  },
+)
+
+watch(
+  () => [currentOrder.value?.hasCustomerOrder, currentOrder.value?.isSystemApplied],
   () => {
     syncComplianceFormFromCurrentOrder()
+  },
+)
+
+watch(
+  () => [complianceForm.value.hasCustomerOrder, complianceForm.value.isSystemApplied],
+  () => {
+    if (complianceDraftTrackingSuspended.value) {
+      return
+    }
+
+    hasUnsavedComplianceDraft.value =
+      complianceForm.value.hasCustomerOrder !== Boolean(currentOrder.value?.hasCustomerOrder)
+      || complianceForm.value.isSystemApplied !== Boolean(currentOrder.value?.isSystemApplied)
+  },
+)
+
+watch(
+  drawerVisible,
+  (visible) => {
+    if (visible) {
+      return
+    }
+
+    hasUnsavedComplianceDraft.value = false
+    syncComplianceFormFromCurrentOrder({
+      force: true,
+    })
   },
 )
 
@@ -211,6 +283,10 @@ const handleSaveComplianceFlags = async () => {
       isSystemApplied: complianceForm.value.isSystemApplied,
     })
     currentOrder.value = nextDetail
+    hasUnsavedComplianceDraft.value = false
+    syncComplianceFormFromCurrentOrder({
+      force: true,
+    })
     listState.records = listState.records.map((item) =>
       item.id === nextDetail.id
         ? {
@@ -276,7 +352,33 @@ const handleSaveComplianceFlags = async () => {
         </template>
       </PageToolbarCard>
 
-      <div class="data-area apple-card flex min-h-0 flex-1 flex-col p-3 sm:p-4 xl:p-5">
+      <Transition name="order-refresh-badge">
+        <div
+          v-if="silentRefreshing"
+          class="rounded-2xl border border-teal-100 bg-teal-50 px-4 py-3 text-sm text-teal-700"
+        >
+          正在静默同步最新单据，当前筛选、分页、滚动与详情查看保持不变
+        </div>
+      </Transition>
+
+      <Transition name="new-order-notice">
+        <div
+          v-if="newOrderNotice"
+          class="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700"
+        >
+          <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div class="min-w-0">
+              <p class="font-medium">新单提醒：新增 {{ newOrderNotice.count }} 张单据，已在当前列表中高亮显示</p>
+              <p class="mt-1 text-xs text-amber-600">{{ autoRefreshStatusText }}</p>
+            </div>
+            <el-button link type="warning" @click="dismissNewOrderNotice">知道了</el-button>
+          </div>
+        </div>
+      </Transition>
+
+      <p v-if="listState.records.length" class="px-1 text-xs text-slate-400">{{ autoRefreshStatusText }}</p>
+
+      <div :ref="bindListBodyRef" class="data-area apple-card flex min-h-0 flex-1 flex-col p-3 sm:p-4 xl:p-5">
         <BizResponsiveDataCollectionShell
           :items="listState.records"
           :loading="listState.loading"
@@ -292,6 +394,8 @@ const handleSaveComplianceFlags = async () => {
           <template #table>
             <el-table native-scrollbar
               :data="listState.records"
+              :row-class-name="getTableRowClassName"
+              row-key="id"
               stripe
               class="flex-1 w-full"
               height="100%"
@@ -381,7 +485,12 @@ const handleSaveComplianceFlags = async () => {
           </template>
 
           <template #card="{ item, isTablet }">
-            <div class="apple-card mobile-order-card min-w-0 p-4 active:scale-[0.99]" @click="handleViewDetail(item)">
+            <div
+              :data-order-list-item-id="item.id"
+              class="apple-card mobile-order-card min-w-0 p-4 active:scale-[0.99]"
+              :class="getCardClassList(item.id)"
+              @click="handleViewDetail(item)"
+            >
               <div class="mobile-order-card__head">
                 <div class="min-w-0">
                   <div class="mobile-order-card__show-no">{{ item.showNo }}</div>
@@ -583,6 +692,14 @@ const handleSaveComplianceFlags = async () => {
 
 .mobile-order-card {
   transition: transform 0.25s ease, box-shadow 0.25s ease;
+}
+
+.mobile-order-card--active {
+  box-shadow: 0 0 0 1px rgba(13, 148, 136, 0.28), 0 18px 40px rgba(15, 118, 110, 0.16);
+}
+
+.mobile-order-card--new {
+  animation: order-card-fade-highlight 0.9s ease;
 }
 
 .mobile-order-card__head {
@@ -815,6 +932,77 @@ const handleSaveComplianceFlags = async () => {
 
 .dark .order-detail-content :deep(.el-descriptions__content) {
   color: #e2e8f0;
+}
+
+:deep(.el-table__body tr.order-list-table-row--active > td) {
+  background: rgba(13, 148, 136, 0.1) !important;
+}
+
+:deep(.el-table__body tr.order-list-table-row--new > td) {
+  animation: order-table-row-fade-highlight 1s ease;
+}
+
+@keyframes order-card-fade-highlight {
+  0% {
+    transform: translateY(14px) scale(0.985);
+    box-shadow: 0 18px 34px rgba(245, 158, 11, 0.18);
+    background-color: rgba(254, 243, 199, 0.88);
+  }
+
+  60% {
+    transform: translateY(0) scale(1);
+    box-shadow: 0 12px 24px rgba(245, 158, 11, 0.12);
+    background-color: rgba(254, 252, 232, 0.76);
+  }
+
+  100% {
+    transform: translateY(0) scale(1);
+    box-shadow: inherit;
+    background-color: transparent;
+  }
+}
+
+@keyframes order-table-row-fade-highlight {
+  0% {
+    background-color: rgba(254, 243, 199, 0.9);
+  }
+
+  65% {
+    background-color: rgba(254, 252, 232, 0.72);
+  }
+
+  100% {
+    background-color: transparent;
+  }
+}
+
+.order-refresh-badge-enter-active,
+.order-refresh-badge-leave-active,
+.new-order-notice-enter-active,
+.new-order-notice-leave-active {
+  transition: opacity 0.22s ease, transform 0.22s ease;
+}
+
+.order-refresh-badge-enter-from,
+.order-refresh-badge-leave-to,
+.new-order-notice-enter-from,
+.new-order-notice-leave-to {
+  opacity: 0;
+  transform: translateY(-8px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mobile-order-card--new,
+  :deep(.el-table__body tr.order-list-table-row--new > td) {
+    animation: none !important;
+  }
+
+  .order-refresh-badge-enter-active,
+  .order-refresh-badge-leave-active,
+  .new-order-notice-enter-active,
+  .new-order-notice-leave-active {
+    transition-duration: 0.01ms !important;
+  }
 }
 
 </style>
