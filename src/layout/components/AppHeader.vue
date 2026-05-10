@@ -8,12 +8,12 @@
 
 import { ArrowDown, Lock, Menu, SwitchButton } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
-import { useRouter } from 'vue-router'
 import { computed, reactive, ref, useAttrs } from 'vue'
 import { BizCrudDialogShell } from '@/components/common'
 import QuoteBanner from '@/layout/components/QuoteBanner.vue'
 import { changePassword, ROLE_LABEL_MAP } from '@/api/modules/auth'
 import { useAppStore, useAuthStore } from '@/store'
+import { redirectToAdminLogin } from '@/utils/auth-navigation'
 import { extractErrorMessage } from '@/utils/error'
 
 defineOptions({
@@ -35,7 +35,6 @@ const headerAttrs = useAttrs()
  */
 const appStore = useAppStore()
 const authStore = useAuthStore()
-const router = useRouter()
 const passwordDialogVisible = ref(false)
 const passwordSubmitting = ref(false)
 const passwordFormRef = ref<FormInstance>()
@@ -132,7 +131,8 @@ const handleChangePassword = async () => {
     passwordDialogVisible.value = false
     resetPasswordForm()
     await authStore.logout()
-    await router.replace('/login')
+    // 管理端改密后改为硬跳转登录页，彻底卸载旧的工作台页面树与 keep-alive 缓存。
+    redirectToAdminLogin()
     ElMessage.success('密码修改成功，请使用新密码重新登录')
   } catch (error) {
     ElMessage.error(extractErrorMessage(error, '修改密码失败'))
@@ -156,7 +156,8 @@ const handleLogout = async () => {
     })
 
     await authStore.logout()
-    await router.replace('/login')
+    // 管理端退出同样使用硬跳转，避免旧高权限页面实例在切账号后残留。
+    redirectToAdminLogin()
     ElMessage.success('已退出登录')
   } catch (error) {
     if (error === 'cancel') {
