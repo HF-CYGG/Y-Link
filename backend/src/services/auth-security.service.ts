@@ -26,45 +26,71 @@ interface RateLimitRule {
   blockMessage: string
 }
 
+interface ClientRiskActor {
+  source: string
+  sourceType: 'session' | 'browser' | 'ip'
+  bucketSegment: string
+}
+
 const RATE_LIMIT_RULES = {
   adminLoginByIp: {
     maxRequests: 12,
     windowMs: 5 * 60 * 1000,
     blockMessage: '登录尝试过于频繁，请稍后再试',
   },
-  clientLoginByIp: {
-    maxRequests: 20,
+  clientLoginBySource: {
+    maxRequests: 18,
     windowMs: 5 * 60 * 1000,
     blockMessage: '登录尝试过于频繁，请稍后再试',
   },
-  clientRegisterByIp: {
-    maxRequests: 6,
+  clientLoginByIpFallback: {
+    maxRequests: 120,
+    windowMs: 5 * 60 * 1000,
+    blockMessage: '当前网络下登录请求过于频繁，请稍后再试',
+  },
+  clientRegisterBySource: {
+    maxRequests: 8,
     windowMs: 30 * 60 * 1000,
     blockMessage: '注册请求过于频繁，请稍后再试',
   },
-  clientRegisterByMobile: {
+  clientRegisterByIpFallback: {
+    maxRequests: 48,
+    windowMs: 30 * 60 * 1000,
+    blockMessage: '当前网络下注册请求过于频繁，请稍后再试',
+  },
+  clientRegisterByAccount: {
     maxRequests: 3,
     windowMs: 24 * 60 * 60 * 1000,
     blockMessage: '该账号注册尝试过于频繁，请明天再试',
   },
-  clientForgotVerifyByIp: {
-    maxRequests: 6,
+  clientForgotVerifyBySource: {
+    maxRequests: 8,
     windowMs: 30 * 60 * 1000,
     blockMessage: '找回密码校验请求过于频繁，请稍后再试',
   },
-  clientForgotVerifyByMobile: {
-    maxRequests: 3,
+  clientForgotVerifyByIpFallback: {
+    maxRequests: 48,
+    windowMs: 30 * 60 * 1000,
+    blockMessage: '当前网络下找回密码校验请求过于频繁，请稍后再试',
+  },
+  clientForgotVerifyByAccount: {
+    maxRequests: 5,
     windowMs: 30 * 60 * 1000,
     blockMessage: '该账号找回密码尝试过于频繁，请稍后再试',
   },
-  clientForgotResetByIp: {
-    maxRequests: 6,
+  clientForgotResetBySource: {
+    maxRequests: 8,
     windowMs: 30 * 60 * 1000,
     blockMessage: '重置密码请求过于频繁，请稍后再试',
   },
+  clientForgotResetByIpFallback: {
+    maxRequests: 48,
+    windowMs: 30 * 60 * 1000,
+    blockMessage: '当前网络下重置密码请求过于频繁，请稍后再试',
+  },
   // clientForgotResetByAccount：客户端忘记密码完成重置的最后一步，按账号限频，避免同一账号被重复撞库或脚本化重置。
   clientForgotResetByAccount: {
-    maxRequests: 3,
+    maxRequests: 5,
     windowMs: 30 * 60 * 1000,
     blockMessage: '该账号重置密码请求过于频繁，请稍后再试',
   },
@@ -92,15 +118,25 @@ const RATE_LIMIT_RULES = {
     windowMs: 10 * 60 * 1000,
     blockMessage: '当前账号资料更新过于频繁，请稍后再试',
   },
-  captchaByIp: {
-    maxRequests: 30,
+  captchaBySource: {
+    maxRequests: 40,
     windowMs: 10 * 60 * 1000,
     blockMessage: '验证码请求过于频繁，请稍后再试',
   },
-  verificationCodeSendByIp: {
-    maxRequests: 10,
+  captchaByIpFallback: {
+    maxRequests: 120,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '当前网络下验证码请求过于频繁，请稍后再试',
+  },
+  verificationCodeSendBySource: {
+    maxRequests: 8,
     windowMs: 10 * 60 * 1000,
     blockMessage: '验证码发送过于频繁，请稍后再试',
+  },
+  verificationCodeSendByIpFallback: {
+    maxRequests: 40,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '当前网络下验证码发送过于频繁，请稍后再试',
   },
   verificationCodeSendByTarget: {
     maxRequests: 5,
@@ -111,12 +147,12 @@ const RATE_LIMIT_RULES = {
 
 const FAILURE_LOCK_THRESHOLD = {
   'admin-login': 5,
-  'client-login': 6,
+  'client-login': 8,
 } as const satisfies Record<FailureScope, number>
 
 const FAILURE_LOCK_MS = {
   'admin-login': 15 * 60 * 1000,
-  'client-login': 10 * 60 * 1000,
+  'client-login': 5 * 60 * 1000,
 } as const satisfies Record<FailureScope, number>
 
 const FAILURE_RESET_WINDOW_MS = {
@@ -126,19 +162,21 @@ const FAILURE_RESET_WINDOW_MS = {
 
 /**
  * 内存态时间窗口记录：
- * - key 一般由“接口 + IP”或“接口 + 账号/手机号”组成；
+ * - key 一般由“接口 + 浏览器会话/浏览器实例/IP”或“接口 + 账号/手机号”组成；
  * - value 记录请求时间戳，用于滑动窗口频率限制。
  */
 const requestWindowStore = new Map<string, number[]>()
 
 /**
  * 登录失败态：
- * - 分别按“来源 IP”和“账号/手机号”记录；
- * - 同时限制来源与目标账号，可降低密码爆破和撞库的成功率。
+ * - 管理端继续按“来源 IP”和“账号/手机号”记录；
+ * - 客户端优先按“浏览器会话/浏览器实例”和“账号/手机号”记录，降低共享公网 IP 的误伤。
  */
 const failureStateStore = new Map<string, FailureState>()
 
 const normalizeRiskSource = (meta?: RequestMeta) => meta?.ipAddress?.trim() || 'unknown-ip'
+const normalizeClientRiskBrowserId = (meta?: RequestMeta) => meta?.clientRiskBrowserId?.trim() || ''
+const normalizeClientRiskSessionId = (meta?: RequestMeta) => meta?.clientRiskSessionId?.trim() || ''
 
 export class AuthSecurityService {
   private trimRateLimitWindow(timestamps: number[], windowMs: number, nowMs: number) {
@@ -288,6 +326,71 @@ export class AuthSecurityService {
     return Boolean(state && state.count > 0)
   }
 
+  private resolveClientRiskActor(requestMeta?: RequestMeta): ClientRiskActor {
+    const sessionRiskId = normalizeClientRiskSessionId(requestMeta)
+    if (sessionRiskId) {
+      return {
+        source: sessionRiskId,
+        sourceType: 'session',
+        bucketSegment: `session:${sessionRiskId}`,
+      }
+    }
+
+    const browserRiskId = normalizeClientRiskBrowserId(requestMeta)
+    if (browserRiskId) {
+      return {
+        source: browserRiskId,
+        sourceType: 'browser',
+        bucketSegment: `browser:${browserRiskId}`,
+      }
+    }
+
+    const ipAddress = normalizeRiskSource(requestMeta)
+    return {
+      source: ipAddress,
+      sourceType: 'ip',
+      bucketSegment: `ip:${ipAddress}`,
+    }
+  }
+
+  private async consumeClientSourceRateLimit(
+    baseBucketKey: string,
+    primaryRule: RateLimitRule,
+    ipFallbackRule: RateLimitRule,
+    auditInput: {
+      actionType: string
+      actionLabel: string
+      targetCode?: string | null
+      requestMeta?: RequestMeta
+      detail?: Record<string, unknown>
+    },
+  ) {
+    const riskActor = this.resolveClientRiskActor(auditInput.requestMeta)
+    await this.consumeRateLimit(`${baseBucketKey}:${riskActor.bucketSegment}`, primaryRule, {
+      ...auditInput,
+      detail: {
+        ...(auditInput.detail ?? {}),
+        source: riskActor.source,
+        sourceType: riskActor.sourceType,
+      },
+    })
+
+    const ipAddress = normalizeRiskSource(auditInput.requestMeta)
+    if (riskActor.sourceType === 'ip' || ipAddress === 'unknown-ip') {
+      return
+    }
+
+    await this.consumeRateLimit(`${baseBucketKey}:ip-fallback:${ipAddress}`, ipFallbackRule, {
+      ...auditInput,
+      detail: {
+        ...(auditInput.detail ?? {}),
+        source: ipAddress,
+        sourceType: 'ip_fallback',
+        primarySourceType: riskActor.sourceType,
+      },
+    })
+  }
+
   async guardAdminLoginRequest(requestMeta: RequestMeta | undefined, username: string) {
     const source = normalizeRiskSource(requestMeta)
     const normalizedUsername = username.trim().toLowerCase()
@@ -304,7 +407,7 @@ export class AuthSecurityService {
 
   async guardAdminCaptchaRequest(requestMeta: RequestMeta | undefined) {
     const source = normalizeRiskSource(requestMeta)
-    await this.consumeRateLimit(`admin-captcha:ip:${source}`, RATE_LIMIT_RULES.captchaByIp, {
+    await this.consumeRateLimit(`admin-captcha:ip:${source}`, RATE_LIMIT_RULES.captchaBySource, {
       actionType: 'auth.guard.admin_captcha',
       actionLabel: '管理端图形验证码频控',
       requestMeta,
@@ -340,30 +443,33 @@ export class AuthSecurityService {
   }
 
   async guardClientCaptchaRequest(requestMeta: RequestMeta | undefined) {
-    const source = normalizeRiskSource(requestMeta)
-    await this.consumeRateLimit(`client-captcha:ip:${source}`, RATE_LIMIT_RULES.captchaByIp, {
+    await this.consumeClientSourceRateLimit('client-captcha', RATE_LIMIT_RULES.captchaBySource, RATE_LIMIT_RULES.captchaByIpFallback, {
       actionType: 'client.auth.guard.captcha',
       actionLabel: '客户端验证码频控',
       requestMeta,
-      detail: { source },
+      detail: {},
     })
   }
 
   async guardVerificationCodeSendRequest(requestMeta: RequestMeta | undefined, target: string, channel: 'mobile' | 'email') {
-    const source = normalizeRiskSource(requestMeta)
-    await this.consumeRateLimit(`verification-send:ip:${source}`, RATE_LIMIT_RULES.verificationCodeSendByIp, {
+    const riskActor = this.resolveClientRiskActor(requestMeta)
+    await this.consumeClientSourceRateLimit(
+      'verification-send',
+      RATE_LIMIT_RULES.verificationCodeSendBySource,
+      RATE_LIMIT_RULES.verificationCodeSendByIpFallback,
+      {
       actionType: 'client.auth.guard.verification_send',
       actionLabel: '验证码发送频控',
       targetCode: target,
       requestMeta,
-      detail: { source, channel },
+      detail: { channel },
     })
     await this.consumeRateLimit(`verification-send:${channel}:${target}`, RATE_LIMIT_RULES.verificationCodeSendByTarget, {
       actionType: 'client.auth.guard.verification_send',
       actionLabel: '验证码发送频控',
       targetCode: target,
       requestMeta,
-      detail: { source, channel, dimension: 'target' },
+      detail: { source: riskActor.source, sourceType: riskActor.sourceType, channel, dimension: 'target' },
     })
   }
 
@@ -373,94 +479,106 @@ export class AuthSecurityService {
    * - 这样同一个邮箱的大小写变体会落到同一风控桶内。
    */
   async guardClientRegisterRequest(requestMeta: RequestMeta | undefined, accountKey: string) {
-    const source = normalizeRiskSource(requestMeta)
-    await this.consumeRateLimit(`client-register:ip:${source}`, RATE_LIMIT_RULES.clientRegisterByIp, {
+    const riskActor = this.resolveClientRiskActor(requestMeta)
+    await this.consumeClientSourceRateLimit(
+      'client-register',
+      RATE_LIMIT_RULES.clientRegisterBySource,
+      RATE_LIMIT_RULES.clientRegisterByIpFallback,
+      {
       actionType: 'client.auth.guard.register',
       actionLabel: '客户端注册频控',
       targetCode: accountKey,
       requestMeta,
-      detail: { source },
+      detail: {},
     })
-    await this.consumeRateLimit(`client-register:account:${accountKey}`, RATE_LIMIT_RULES.clientRegisterByMobile, {
+    await this.consumeRateLimit(`client-register:account:${accountKey}`, RATE_LIMIT_RULES.clientRegisterByAccount, {
       actionType: 'client.auth.guard.register',
       actionLabel: '客户端注册频控',
       targetCode: accountKey,
       requestMeta,
-      detail: { source, dimension: 'account' },
+      detail: { source: riskActor.source, sourceType: riskActor.sourceType, dimension: 'account' },
     })
   }
 
   async guardClientForgotVerifyRequest(requestMeta: RequestMeta | undefined, accountKey: string) {
-    const source = normalizeRiskSource(requestMeta)
-    await this.consumeRateLimit(`client-forgot-verify:ip:${source}`, RATE_LIMIT_RULES.clientForgotVerifyByIp, {
+    const riskActor = this.resolveClientRiskActor(requestMeta)
+    await this.consumeClientSourceRateLimit(
+      'client-forgot-verify',
+      RATE_LIMIT_RULES.clientForgotVerifyBySource,
+      RATE_LIMIT_RULES.clientForgotVerifyByIpFallback,
+      {
       actionType: 'client.auth.guard.forgot_verify',
       actionLabel: '客户端找回密码校验频控',
       targetCode: accountKey,
       requestMeta,
-      detail: { source },
+      detail: {},
     })
-    await this.consumeRateLimit(`client-forgot-verify:account:${accountKey}`, RATE_LIMIT_RULES.clientForgotVerifyByMobile, {
+    await this.consumeRateLimit(`client-forgot-verify:account:${accountKey}`, RATE_LIMIT_RULES.clientForgotVerifyByAccount, {
       actionType: 'client.auth.guard.forgot_verify',
       actionLabel: '客户端找回密码校验频控',
       targetCode: accountKey,
       requestMeta,
-      detail: { source, dimension: 'account' },
+      detail: { source: riskActor.source, sourceType: riskActor.sourceType, dimension: 'account' },
     })
   }
 
   async guardClientForgotResetRequest(requestMeta: RequestMeta | undefined, accountKey: string) {
-    const source = normalizeRiskSource(requestMeta)
-    await this.consumeRateLimit(`client-forgot-reset:ip:${source}`, RATE_LIMIT_RULES.clientForgotResetByIp, {
+    const riskActor = this.resolveClientRiskActor(requestMeta)
+    await this.consumeClientSourceRateLimit(
+      'client-forgot-reset',
+      RATE_LIMIT_RULES.clientForgotResetBySource,
+      RATE_LIMIT_RULES.clientForgotResetByIpFallback,
+      {
       actionType: 'client.auth.guard.forgot_reset',
       actionLabel: '客户端重置密码频控',
       targetCode: accountKey,
       requestMeta,
-      detail: { source },
+      detail: {},
     })
     await this.consumeRateLimit(`client-forgot-reset:account:${accountKey}`, RATE_LIMIT_RULES.clientForgotResetByAccount, {
       actionType: 'client.auth.guard.forgot_reset',
       actionLabel: '客户端重置密码频控',
       targetCode: accountKey,
       requestMeta,
-      detail: { source, dimension: 'account' },
+      detail: { source: riskActor.source, sourceType: riskActor.sourceType, dimension: 'account' },
     })
   }
 
   async guardClientLoginRequest(requestMeta: RequestMeta | undefined, accountKey: string) {
-    const source = normalizeRiskSource(requestMeta)
-    await this.consumeRateLimit(`client-login:ip:${source}`, RATE_LIMIT_RULES.clientLoginByIp, {
+    const riskActor = this.resolveClientRiskActor(requestMeta)
+    await this.consumeClientSourceRateLimit('client-login', RATE_LIMIT_RULES.clientLoginBySource, RATE_LIMIT_RULES.clientLoginByIpFallback, {
       actionType: 'client.auth.guard.login',
       actionLabel: '客户端登录频控',
       targetCode: accountKey,
       requestMeta,
-      detail: { source },
+      detail: {},
     })
-    await this.assertFailureNotLocked('client-login', `client-login:ip:${source}`, requestMeta, accountKey)
+    await this.assertFailureNotLocked('client-login', `client-login:${riskActor.bucketSegment}`, requestMeta, accountKey)
     await this.assertFailureNotLocked('client-login', `client-login:account:${accountKey}`, requestMeta, accountKey)
   }
 
   isClientLoginCaptchaRequired(requestMeta: RequestMeta | undefined, accountKey: string) {
-    const source = normalizeRiskSource(requestMeta)
+    const riskActor = this.resolveClientRiskActor(requestMeta)
     return (
-      this.hasActiveFailures('client-login', `client-login:ip:${source}`) ||
+      this.hasActiveFailures('client-login', `client-login:${riskActor.bucketSegment}`) ||
       this.hasActiveFailures('client-login', `client-login:account:${accountKey}`)
     )
   }
 
   async recordClientLoginFailure(requestMeta: RequestMeta | undefined, accountKey: string) {
-    const source = normalizeRiskSource(requestMeta)
+    const riskActor = this.resolveClientRiskActor(requestMeta)
     await this.recordLoginFailure(
       'client-login',
       requestMeta,
       accountKey,
-      `client-login:ip:${source}`,
+      `client-login:${riskActor.bucketSegment}`,
       `client-login:account:${accountKey}`,
     )
   }
 
   clearClientLoginFailures(requestMeta: RequestMeta | undefined, accountKey: string) {
-    const source = normalizeRiskSource(requestMeta)
-    this.clearLoginFailures(`client-login:ip:${source}`, `client-login:account:${accountKey}`)
+    const riskActor = this.resolveClientRiskActor(requestMeta)
+    this.clearLoginFailures(`client-login:${riskActor.bucketSegment}`, `client-login:account:${accountKey}`)
   }
 
   async guardClientChangePasswordRequest(requestMeta: RequestMeta | undefined, userId: string) {

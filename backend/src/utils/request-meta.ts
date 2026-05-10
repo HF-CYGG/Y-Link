@@ -9,6 +9,19 @@ import type { Request } from 'express'
 export interface RequestMeta {
   ipAddress: string | null
   userAgent: string | null
+  clientRiskBrowserId: string | null
+  clientRiskSessionId: string | null
+}
+
+const normalizeRiskHeader = (headerValue: unknown) => {
+  const value = typeof headerValue === 'string' ? headerValue.trim() : Array.isArray(headerValue) ? headerValue[0]?.trim() : ''
+  if (!value) {
+    return null
+  }
+  if (!/^[A-Za-z0-9._:-]{8,128}$/.test(value)) {
+    return null
+  }
+  return value
 }
 
 /**
@@ -41,5 +54,7 @@ export function extractRequestMeta(req: Request): RequestMeta {
   return {
     ipAddress: forwardedIp || req.ip || null,
     userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
+    clientRiskBrowserId: normalizeRiskHeader(req.headers['x-client-risk-browser-id']),
+    clientRiskSessionId: normalizeRiskHeader(req.headers['x-client-risk-session-id']),
   }
 }

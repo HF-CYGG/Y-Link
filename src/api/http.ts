@@ -8,6 +8,7 @@ import axios, { type AxiosRequestConfig, type AxiosResponse, type InternalAxiosR
 import type { ApiResponse } from '@/types/api'
 import { useAppStore } from '@/store/modules/app'
 import { clearPersistedAuthState, getPersistedAuthToken } from '@/utils/auth-storage'
+import { getClientRiskHeaderSnapshot } from '@/utils/client-auth-risk'
 import { clearPersistedClientAuthState, getPersistedClientAuthToken } from '@/utils/client-auth-storage'
 import { normalizeRequestError, unwrapApiResponse } from '@/utils/error'
 import pinia from '@/store/pinia'
@@ -69,6 +70,27 @@ const attachAuthorizationHeader = (config: InternalAxiosRequestConfig) => {
   const currentAuthorization = config.headers.Authorization
   if (!currentAuthorization) {
     config.headers.Authorization = `Bearer ${token}`
+  }
+
+  return config
+}
+
+/**
+ * 客户端风控标识请求头：
+ * - 客户端登录、注册、找回密码等访客链路不应只依赖公网 IP 频控；
+ * - 统一透传“浏览器实例 + 浏览器会话”两个标识，供后端优先按会话/设备维度做风控。
+ */
+const attachClientRiskHeaders = (config: InternalAxiosRequestConfig) => {
+  if (!isClientRequest(config.url)) {
+    return config
+  }
+
+  const { browserId, sessionId } = getClientRiskHeaderSnapshot()
+  if (!config.headers['x-client-risk-browser-id']) {
+    config.headers['x-client-risk-browser-id'] = browserId
+  }
+  if (!config.headers['x-client-risk-session-id']) {
+    config.headers['x-client-risk-session-id'] = sessionId
   }
 
   return config
@@ -139,7 +161,7 @@ http.interceptors.request.use(
     const appStore = useAppStore(pinia)
     appStore.startLoading()
 
-    return attachAuthorizationHeader(config)
+    return attachClientRiskHeaders(attachAuthorizationHeader(config))
   },
   (error) => {
     const appStore = useAppStore(pinia)
