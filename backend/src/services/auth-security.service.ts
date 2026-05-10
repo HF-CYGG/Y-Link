@@ -366,13 +366,20 @@ export class AuthSecurityService {
     },
   ) {
     const riskActor = this.resolveClientRiskActor(auditInput.requestMeta)
+    const primaryDetail = auditInput.detail
+      ? {
+          ...auditInput.detail,
+          source: riskActor.source,
+          sourceType: riskActor.sourceType,
+        }
+      : {
+          source: riskActor.source,
+          sourceType: riskActor.sourceType,
+        }
+
     await this.consumeRateLimit(`${baseBucketKey}:${riskActor.bucketSegment}`, primaryRule, {
       ...auditInput,
-      detail: {
-        ...(auditInput.detail ?? {}),
-        source: riskActor.source,
-        sourceType: riskActor.sourceType,
-      },
+      detail: primaryDetail,
     })
 
     const ipAddress = normalizeRiskSource(auditInput.requestMeta)
@@ -380,14 +387,22 @@ export class AuthSecurityService {
       return
     }
 
+    const fallbackDetail = auditInput.detail
+      ? {
+          ...auditInput.detail,
+          source: ipAddress,
+          sourceType: 'ip_fallback',
+          primarySourceType: riskActor.sourceType,
+        }
+      : {
+          source: ipAddress,
+          sourceType: 'ip_fallback',
+          primarySourceType: riskActor.sourceType,
+        }
+
     await this.consumeRateLimit(`${baseBucketKey}:ip-fallback:${ipAddress}`, ipFallbackRule, {
       ...auditInput,
-      detail: {
-        ...(auditInput.detail ?? {}),
-        source: ipAddress,
-        sourceType: 'ip_fallback',
-        primarySourceType: riskActor.sourceType,
-      },
+      detail: fallbackDetail,
     })
   }
 

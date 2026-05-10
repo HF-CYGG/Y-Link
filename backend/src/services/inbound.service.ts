@@ -54,7 +54,6 @@ export interface SupplierDeliveryListResult {
 class InboundService {
   private readonly inboundRepo = AppDataSource.getRepository(BizInboundOrder)
   private readonly inboundItemRepo = AppDataSource.getRepository(BizInboundOrderItem)
-  private readonly productRepo = AppDataSource.getRepository(BaseProduct)
 
   // 核销入库属于后台库管职责：
   // - 即便路由层误配权限，服务层也只允许 admin / operator 执行最终入库动作；
@@ -125,7 +124,7 @@ class InboundService {
       lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
     })
 
-    if (!order || order.supplierId !== actor.userId) {
+    if (order?.supplierId !== actor.userId) {
       throw new BizError('送货单不存在', 404)
     }
 

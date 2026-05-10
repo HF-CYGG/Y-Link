@@ -14,7 +14,14 @@ export interface RequestMeta {
 }
 
 const normalizeRiskHeader = (headerValue: unknown) => {
-  const value = typeof headerValue === 'string' ? headerValue.trim() : Array.isArray(headerValue) ? headerValue[0]?.trim() : ''
+  let value = ''
+
+  if (typeof headerValue === 'string') {
+    value = headerValue.trim()
+  } else if (Array.isArray(headerValue)) {
+    value = headerValue[0]?.trim() || ''
+  }
+
   if (!value) {
     return null
   }

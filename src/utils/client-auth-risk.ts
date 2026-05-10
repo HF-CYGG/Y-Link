@@ -17,14 +17,14 @@ let memoryBrowserRiskId: string | null = null
 let memorySessionRiskId: string | null = null
 
 const getStorage = (storageType: 'local' | 'session'): Storage | null => {
-  if (typeof globalThis.window === 'undefined') {
+  if (globalThis.window === undefined) {
     return null
   }
   return storageType === 'session' ? globalThis.window.sessionStorage : globalThis.window.localStorage
 }
 
 const createRiskId = (prefix: 'br' | 'sess') => {
-  if (typeof globalThis.crypto !== 'undefined' && typeof globalThis.crypto.randomUUID === 'function') {
+  if (globalThis.crypto !== undefined && typeof globalThis.crypto.randomUUID === 'function') {
     return `${prefix}-${globalThis.crypto.randomUUID()}`
   }
 
