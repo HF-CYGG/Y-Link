@@ -24,6 +24,11 @@ export interface SubmitInboundInput {
   items: SubmitInboundItemInput[]
 }
 
+export interface UpdateSupplierInboundInput {
+  remark?: string
+  items: SubmitInboundItemInput[]
+}
+
 export interface SupplierDeliveryListQuery {
   keyword?: string
   status?: string
@@ -61,6 +66,73 @@ class InboundService {
   }
   private readonly supplierInboundStatuses = new Set<BizInboundOrder['status']>(['pending', 'verified', 'cancelled'])
 
+  private assertSupplierActor(actor: AuthUserContext) {
+    if (actor.role !== 'supplier') {
+      throw new BizError('仅供货方账号可操作送货单', 403)
+    }
+  }
+
+  private normalizeSupplierInboundItems(items: SubmitInboundItemInput[]) {
+    if (!Array.isArray(items) || !items.length) {
+      throw new BizError('至少选择一个商品', 400)
+    }
+
+    const normalizedItems = items.map((item) => ({
+      productId: String(item.productId).trim(),
+      qty: Math.floor(Number(item.qty)),
+    }))
+
+    normalizedItems.forEach((item) => {
+      if (!item.productId || !Number.isInteger(item.qty) || item.qty <= 0) {
+        throw new BizError('商品数量必须为正整数', 400)
+      }
+    })
+
+    return normalizedItems
+  }
+
+  private async loadActiveProductsByIds(productIds: string[], manager = AppDataSource.manager) {
+    const products = await manager.getRepository(BaseProduct)
+      .createQueryBuilder('product')
+      .where('product.id IN (:...productIds)', { productIds })
+      .andWhere('product.isActive = :isActive', { isActive: true })
+      .getMany()
+
+    if (products.length !== productIds.length) {
+      throw new BizError('存在无效或停用商品', 400)
+    }
+
+    return new Map(products.map((item) => [String(item.id), item]))
+  }
+
+  private async findSupplierMutableOrder(orderId: string, actor: AuthUserContext, actionLabel: '改单' | '撤销', manager = AppDataSource.manager) {
+    this.assertSupplierActor(actor)
+
+    const normalizedOrderId = String(orderId).trim()
+    if (!normalizedOrderId) {
+      throw new BizError('送货单不存在', 404)
+    }
+
+    const order = await manager.getRepository(BizInboundOrder).findOne({
+      where: { id: normalizedOrderId },
+      lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+    })
+
+    if (!order || order.supplierId !== actor.userId) {
+      throw new BizError('送货单不存在', 404)
+    }
+
+    if (order.status === 'verified') {
+      throw new BizError(`送货单“${order.showNo}”已入库，无法继续${actionLabel}`, 409)
+    }
+
+    if (order.status === 'cancelled') {
+      throw new BizError(`送货单“${order.showNo}”已撤销，无法继续${actionLabel}`, 409)
+    }
+
+    return order
+  }
+
   private async generateShowNo(manager = AppDataSource.manager): Promise<string> {
     const dateText = new Date().toISOString().slice(0, 10).replaceAll('-', '')
     const prefix = `IN${dateText}`
@@ -77,35 +149,12 @@ class InboundService {
 
   // 供货方创建送货单
   async submitSupplierDelivery(actor: AuthUserContext, input: SubmitInboundInput) {
-    if (actor.role !== 'supplier') {
-      throw new BizError('仅供货方账号可提交送货单', 403)
-    }
-    if (!Array.isArray(input.items) || !input.items.length) {
-      throw new BizError('至少选择一个商品', 400)
-    }
-
-    const normalizedItems = input.items.map((item) => ({
-      productId: String(item.productId).trim(),
-      qty: Math.floor(Number(item.qty)),
-    }))
-    normalizedItems.forEach((item) => {
-      if (!item.productId || !Number.isInteger(item.qty) || item.qty <= 0) {
-        throw new BizError('商品数量必须为正整数', 400)
-      }
-    })
+    this.assertSupplierActor(actor)
+    const normalizedItems = this.normalizeSupplierInboundItems(input.items)
 
     return AppDataSource.transaction(async (manager) => {
       const productIds = [...new Set(normalizedItems.map((item) => item.productId))]
-      const products = await manager.getRepository(BaseProduct)
-        .createQueryBuilder('product')
-        .where('product.id IN (:...productIds)', { productIds })
-        .andWhere('product.isActive = :isActive', { isActive: true })
-        .getMany()
-
-      if (products.length !== productIds.length) {
-        throw new BizError('存在无效或停用商品', 400)
-      }
-      const productMap = new Map(products.map((item) => [String(item.id), item]))
+      const productMap = await this.loadActiveProductsByIds(productIds, manager)
       
       let totalQty = 0
       normalizedItems.forEach((item) => {
@@ -141,6 +190,71 @@ class InboundService {
       await manager.getRepository(BizInboundOrderItem).save(itemEntities)
 
       return this.detailById(savedOrder.id)
+    })
+  }
+
+  // 供货方改单：仅允许修改本人待入库送货单的商品、数量和备注。
+  async updateSupplierDelivery(actor: AuthUserContext, orderId: string, input: UpdateSupplierInboundInput) {
+    const normalizedItems = this.normalizeSupplierInboundItems(input.items)
+
+    return AppDataSource.transaction(async (manager) => {
+      const order = await this.findSupplierMutableOrder(orderId, actor, '改单', manager)
+      const productIds = [...new Set(normalizedItems.map((item) => item.productId))]
+      const productMap = await this.loadActiveProductsByIds(productIds, manager)
+
+      const nextTotalQty = normalizedItems.reduce((sum, item) => sum + item.qty, 0)
+
+      await manager.getRepository(BizInboundOrderItem).delete({ orderId: order.id })
+
+      const nextItems = normalizedItems.map((item) => {
+        const product = productMap.get(item.productId)
+        if (!product) {
+          throw new BizError('存在无效或停用商品', 400)
+        }
+
+        return manager.getRepository(BizInboundOrderItem).create({
+          orderId: order.id,
+          productId: item.productId,
+          productNameSnapshot: product.productName,
+          qty: String(item.qty),
+        })
+      })
+      await manager.getRepository(BizInboundOrderItem).save(nextItems)
+
+      order.remark = input.remark?.trim() || null
+      order.totalQty = String(nextTotalQty)
+
+      const savedOrder = await manager.getRepository(BizInboundOrder).save(order)
+      return {
+        order: savedOrder,
+        items: nextItems,
+      }
+    })
+  }
+
+  // 供货方撤销：仅允许本人待入库送货单撤销，撤销后保留历史明细与撤销原因用于追溯。
+  async cancelSupplierDelivery(actor: AuthUserContext, orderId: string, reason: string) {
+    const normalizedReason = reason.trim()
+    if (!normalizedReason) {
+      throw new BizError('请填写撤销原因', 400)
+    }
+
+    return AppDataSource.transaction(async (manager) => {
+      const order = await this.findSupplierMutableOrder(orderId, actor, '撤销', manager)
+      const items = await manager.getRepository(BizInboundOrderItem).find({ where: { orderId: order.id } })
+
+      order.status = 'cancelled'
+      order.cancelReason = normalizedReason
+      order.cancelledAt = new Date()
+      order.cancelledByUserId = actor.userId
+      order.cancelledByUsername = actor.username
+      order.cancelledByDisplayName = actor.displayName || actor.username
+
+      const savedOrder = await manager.getRepository(BizInboundOrder).save(order)
+      return {
+        order: savedOrder,
+        items,
+      }
     })
   }
 

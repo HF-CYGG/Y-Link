@@ -94,6 +94,13 @@ const SQLITE_REQUIRED_O2O_PREORDER_COLUMNS = [
   'update_count',
 ]
 const SQLITE_REQUIRED_O2O_RETURN_REQUEST_COLUMNS = ['handled_at', 'handled_by', 'rejected_reason']
+const SQLITE_REQUIRED_BIZ_INBOUND_ORDER_COLUMNS = [
+  'cancel_reason',
+  'cancelled_at',
+  'cancelled_by_user_id',
+  'cancelled_by_username',
+  'cancelled_by_display_name',
+]
 
 async function listSqliteTableColumns(dataSource: DataSource, tableName: string): Promise<Set<string>> {
   const columns: Array<{ name: string }> = await dataSource.query(`PRAGMA table_info('${tableName}')`)
@@ -302,6 +309,11 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
 
   const o2oReturnRequestColumnSet = await listSqliteTableColumns(dataSource, 'o2o_return_request')
   if (SQLITE_REQUIRED_O2O_RETURN_REQUEST_COLUMNS.some((column) => !o2oReturnRequestColumnSet.has(column))) {
+    return true
+  }
+
+  const inboundOrderColumnSet = await listSqliteTableColumns(dataSource, 'biz_inbound_order')
+  if (SQLITE_REQUIRED_BIZ_INBOUND_ORDER_COLUMNS.some((column) => !inboundOrderColumnSet.has(column))) {
     return true
   }
   return false

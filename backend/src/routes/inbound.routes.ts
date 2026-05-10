@@ -35,6 +35,20 @@ const supplierListQuerySchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(50).optional(),
 })
 
+const updateSupplierInboundSchema = z.object({
+  remark: z.string().trim().max(255).optional(),
+  items: z.array(
+    z.object({
+      productId: z.string().min(1),
+      qty: z.number().int().positive(),
+    }),
+  ).min(1, '至少选择一个商品'),
+})
+
+const cancelSupplierInboundSchema = z.object({
+  reason: z.string().trim().min(1, '请填写撤销原因').max(255, '撤销原因不能超过 255 个字符'),
+})
+
 inboundRouter.post(
   '/supplier/submit',
   requirePermission('inbound:create'),
@@ -61,6 +75,38 @@ inboundRouter.get(
     res.json({
       code: 0,
       message: 'ok',
+      data: result,
+    })
+  }),
+)
+
+// 供货方：修改待入库送货单
+inboundRouter.patch(
+  '/supplier/:id',
+  requirePermission('inbound:create'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const input = updateSupplierInboundSchema.parse(req.body)
+    const result = await inboundService.updateSupplierDelivery(authReq.auth, req.params.id, input)
+    res.json({
+      code: 0,
+      message: '改单成功',
+      data: result,
+    })
+  }),
+)
+
+// 供货方：撤销待入库送货单
+inboundRouter.post(
+  '/supplier/:id/cancel',
+  requirePermission('inbound:create'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const input = cancelSupplierInboundSchema.parse(req.body)
+    const result = await inboundService.cancelSupplierDelivery(authReq.auth, req.params.id, input.reason)
+    res.json({
+      code: 0,
+      message: '撤销成功',
       data: result,
     })
   }),

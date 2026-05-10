@@ -24,6 +24,21 @@ export interface SubmitInboundInput {
 }
 
 /**
+ * 供货方改单参数：
+ */
+export interface UpdateSupplierInboundInput {
+  remark?: string
+  items: SubmitInboundItemInput[]
+}
+
+/**
+ * 供货方撤销参数：
+ */
+export interface CancelSupplierInboundInput {
+  reason: string
+}
+
+/**
  * 入库送货单模型：
  * - status: pending (待核销), verified (已核销), cancelled (已取消)
  */
@@ -36,7 +51,13 @@ export interface InboundOrder {
   status: 'pending' | 'verified' | 'cancelled'
   totalQty: string
   remark: string | null
+  cancelReason: string | null
+  cancelledAt: string | null
+  cancelledByUserId: string | null
+  cancelledByUsername: string | null
+  cancelledByDisplayName: string | null
   createdAt: string
+  updatedAt: string
   verifiedAt: string | null
 }
 
@@ -121,6 +142,30 @@ export const getSupplierDeliveries = (params: SupplierDeliveryListQuery = {}, re
     method: 'GET',
     url: '/inbound/supplier/list',
     params,
+  })
+
+/**
+ * 供货方修改待入库送货单：
+ * - 仅允许本人待入库单据修改商品、数量和备注。
+ */
+export const updateSupplierDelivery = (id: string, data: UpdateSupplierInboundInput, requestConfig: RequestConfig = {}) =>
+  request<InboundOrderDetail>({
+    ...requestConfig,
+    method: 'PATCH',
+    url: `/inbound/supplier/${id}`,
+    data,
+  })
+
+/**
+ * 供货方撤销待入库送货单：
+ * - 撤销后历史单据继续保留，只变更状态并记录撤销原因。
+ */
+export const cancelSupplierDelivery = (id: string, data: CancelSupplierInboundInput, requestConfig: RequestConfig = {}) =>
+  request<InboundOrderDetail>({
+    ...requestConfig,
+    method: 'POST',
+    url: `/inbound/supplier/${id}/cancel`,
+    data,
   })
 
 /**

@@ -18,12 +18,15 @@ import QRCode from 'qrcode'
 import { useRouter } from 'vue-router'
 import { BizResponsiveDrawerShell, PageContainer, PagePaginationBar } from '@/components/common'
 import {
+  cancelSupplierDelivery,
   getSupplierDeliveries,
   getInboundDetail,
+  updateSupplierDelivery,
   type InboundOrder,
   type InboundOrderDetail,
   type SupplierDeliverySummary,
 } from '@/api/modules/inbound'
+import { getProductList, type ProductRecord } from '@/api/modules/product'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
@@ -32,6 +35,8 @@ import dayjs from 'dayjs'
 const router = useRouter()
 const listRequest = useStableRequest()
 const detailRequest = useStableRequest()
+const productRequest = useStableRequest()
+const actionRequest = useStableRequest()
 const listState = reactive(createPaginatedListState<InboundOrder>({
   loading: false,
   query: {
@@ -51,6 +56,33 @@ const qrCodeDataUrl = ref('')
 const qrCodeUnavailable = ref(false)
 const statusFilter = ref<'all' | InboundOrder['status']>('all')
 const keyword = ref('')
+const cancelDialogVisible = ref(false)
+const cancelReason = ref('')
+const cancelSubmitting = ref(false)
+const targetCancelOrder = ref<InboundOrder | null>(null)
+const editDialogVisible = ref(false)
+const editSubmitting = ref(false)
+const editProductLoading = ref(false)
+const products = ref<ProductRecord[]>([])
+
+interface EditItemRow {
+  uid: string
+  productId: string
+  qty: number
+}
+
+const editUidSeed = ref(0)
+const createEditItemRow = (): EditItemRow => ({
+  uid: `supplier-history-edit-item-${editUidSeed.value++}`,
+  productId: '',
+  qty: 1,
+})
+
+const editForm = reactive({
+  orderId: '',
+  remark: '',
+  items: [] as EditItemRow[],
+})
 
 const statusMap = {
   pending: { label: '待入库', type: 'warning' },
@@ -108,6 +140,12 @@ const emptyDescription = computed(() => {
   return isFiltering.value ? '当前筛选下暂无单据' : '暂无历史送货记录'
 })
 
+const canEditOrder = (order: InboundOrder) => order.status === 'pending'
+const canCancelOrder = (order: InboundOrder) => order.status === 'pending'
+const shouldShowPendingQrCode = computed(() => {
+  return currentDetail.value?.order.status === 'pending'
+})
+
 const buildListQuery = () => {
   return {
     page: listState.query.page,
@@ -115,6 +153,55 @@ const buildListQuery = () => {
     keyword: keyword.value.trim() || undefined,
     status: statusFilter.value === 'all' ? undefined : statusFilter.value,
   }
+}
+
+const replaceCurrentPageRecord = (nextOrder: InboundOrder) => {
+  const targetIndex = listState.records.findIndex((item) => item.id === nextOrder.id)
+  if (targetIndex < 0) {
+    return
+  }
+  listState.records.splice(targetIndex, 1, nextOrder)
+}
+
+const resetEditForm = () => {
+  editForm.orderId = ''
+  editForm.remark = ''
+  editForm.items = [createEditItemRow()]
+}
+
+const ensureEditRowsFromDetail = (detail: InboundOrderDetail) => {
+  editForm.orderId = detail.order.id
+  editForm.remark = detail.order.remark ?? ''
+  editForm.items = detail.items.map((item) => ({
+    uid: `supplier-history-edit-item-${editUidSeed.value++}`,
+    productId: item.productId,
+    qty: Number(item.qty) || 1,
+  }))
+
+  if (!editForm.items.length) {
+    editForm.items = [createEditItemRow()]
+  }
+}
+
+// 商品目录懒加载：改单弹窗打开时再取一次，保证能拿到当前仍可选的启用商品。
+const ensureProductsLoaded = async () => {
+  if (products.value.length > 0) {
+    return
+  }
+
+  editProductLoading.value = true
+  await productRequest.runLatest({
+    executor: (signal) => getProductList({}, { signal }),
+    onSuccess: (result) => {
+      products.value = result
+    },
+    onError: (error) => {
+      ElMessage.error(extractErrorMessage(error, '可改单商品加载失败，请稍后重试'))
+    },
+    onFinally: () => {
+      editProductLoading.value = false
+    },
+  })
 }
 
 const loadData = async () => {
@@ -150,29 +237,191 @@ const generateQRCode = async (verifyCode: string) => {
   }
 }
 
-// 查看详情时重置上一次弹窗状态，避免旧二维码或旧详情短暂闪现。
-const handleViewDetail = async (row: InboundOrder) => {
-  detailVisible.value = true
+const applyDetailResult = async (detail: InboundOrderDetail, options?: { openDrawer?: boolean }) => {
+  currentDetail.value = detail
+  replaceCurrentPageRecord(detail.order)
+
+  if (options?.openDrawer !== false) {
+    detailVisible.value = true
+  }
+
+  if (detail.order.status === 'pending') {
+    await generateQRCode(detail.order.verifyCode)
+    return
+  }
+
+  qrCodeDataUrl.value = ''
+  qrCodeUnavailable.value = false
+}
+
+// 详情刷新共用入口：
+// - 列表查看详情、改单成功后详情回写、撤销成功后详情切换都统一走这里；
+// - 避免每个动作各自维护一套“重置二维码 + 请求详情 + 刷新抽屉”的分支。
+const loadDetail = async (row: Pick<InboundOrder, 'id' | 'verifyCode'>, options?: { openDrawer?: boolean }) => {
+  if (options?.openDrawer !== false) {
+    detailVisible.value = true
+  }
   detailLoading.value = true
   qrCodeDataUrl.value = ''
   qrCodeUnavailable.value = false
-  currentDetail.value = null
+  if (options?.openDrawer !== false) {
+    currentDetail.value = null
+  }
 
   await detailRequest.runLatest({
     executor: (signal) => getInboundDetail(row.verifyCode, { signal }),
     onSuccess: async (detail) => {
-      currentDetail.value = detail
-
-      if (detail.order.status === 'pending') {
-        await generateQRCode(detail.order.verifyCode)
-      }
+      await applyDetailResult(detail, options)
     },
     onError: (err) => {
       ElMessage.error(extractErrorMessage(err, '获取详情失败'))
-      detailVisible.value = false
+      if (options?.openDrawer !== false) {
+        detailVisible.value = false
+      }
     },
     onFinally: () => {
       detailLoading.value = false
+    },
+  })
+}
+
+// 查看详情时重置上一次弹窗状态，避免旧二维码或旧详情短暂闪现。
+const handleViewDetail = async (row: InboundOrder) => {
+  await loadDetail(row, { openDrawer: true })
+}
+
+const handleAddEditItem = () => {
+  editForm.items.push(createEditItemRow())
+}
+
+const handleRemoveEditItem = (index: number) => {
+  if (editForm.items.length === 1) {
+    return
+  }
+  editForm.items.splice(index, 1)
+}
+
+const openCancelDialog = (order: InboundOrder) => {
+  if (!canCancelOrder(order)) {
+    ElMessage.warning('当前送货单不可撤销')
+    return
+  }
+
+  targetCancelOrder.value = order
+  cancelReason.value = ''
+  cancelDialogVisible.value = true
+}
+
+const openEditDialog = async (row: InboundOrder) => {
+  if (!canEditOrder(row)) {
+    ElMessage.warning('当前送货单不可改单')
+    return
+  }
+
+  await ensureProductsLoaded()
+  if (!products.value.length) {
+    return
+  }
+
+  const shouldReuseCurrentDetail = currentDetail.value?.order.id === row.id
+  if (shouldReuseCurrentDetail && currentDetail.value) {
+    ensureEditRowsFromDetail(currentDetail.value)
+    editDialogVisible.value = true
+    return
+  }
+
+  detailLoading.value = true
+  await detailRequest.runLatest({
+    executor: (signal) => getInboundDetail(row.verifyCode, { signal }),
+    onSuccess: (detail) => {
+      ensureEditRowsFromDetail(detail)
+      editDialogVisible.value = true
+    },
+    onError: (error) => {
+      ElMessage.error(extractErrorMessage(error, '读取改单详情失败'))
+    },
+    onFinally: () => {
+      detailLoading.value = false
+    },
+  })
+}
+
+const handleSubmitCancel = async () => {
+  if (!targetCancelOrder.value) {
+    return
+  }
+
+  const reason = cancelReason.value.trim()
+  if (!reason) {
+    ElMessage.warning('请填写撤销原因')
+    return
+  }
+
+  cancelSubmitting.value = true
+  await actionRequest.runLatest({
+    executor: (signal) => cancelSupplierDelivery(targetCancelOrder.value!.id, { reason }, { signal }),
+    onSuccess: async (detail) => {
+      cancelDialogVisible.value = false
+      cancelReason.value = ''
+      targetCancelOrder.value = null
+      await applyDetailResult(detail)
+      await loadData()
+      ElMessage.success('送货单已撤销')
+    },
+    onError: (error) => {
+      ElMessage.error(extractErrorMessage(error, '撤销送货单失败'))
+    },
+    onFinally: () => {
+      cancelSubmitting.value = false
+    },
+  })
+}
+
+const buildEditPayload = () => {
+  const validItems = editForm.items.filter((item) => item.productId && item.qty > 0)
+  if (!validItems.length) {
+    throw new Error('请至少保留一件有效商品')
+  }
+
+  const uniqueItems = new Map<string, number>()
+  validItems.forEach((item) => {
+    uniqueItems.set(item.productId, (uniqueItems.get(item.productId) || 0) + item.qty)
+  })
+
+  return {
+    remark: editForm.remark.trim(),
+    items: Array.from(uniqueItems.entries()).map(([productId, qty]) => ({ productId, qty })),
+  }
+}
+
+const handleSubmitEdit = async () => {
+  if (!editForm.orderId) {
+    return
+  }
+
+  let payload: { remark: string; items: Array<{ productId: string; qty: number }> }
+  try {
+    payload = buildEditPayload()
+  } catch (error) {
+    ElMessage.warning(extractErrorMessage(error, '请至少保留一件有效商品'))
+    return
+  }
+
+  editSubmitting.value = true
+  await actionRequest.runLatest({
+    executor: (signal) => updateSupplierDelivery(editForm.orderId, payload, { signal }),
+    onSuccess: async (detail) => {
+      editDialogVisible.value = false
+      resetEditForm()
+      await applyDetailResult(detail)
+      await loadData()
+      ElMessage.success('送货单已更新')
+    },
+    onError: (error) => {
+      ElMessage.error(extractErrorMessage(error, '改单失败'))
+    },
+    onFinally: () => {
+      editSubmitting.value = false
     },
   })
 }
@@ -198,6 +447,7 @@ const handlePageSizeChange = (pageSize: number) => {
 }
 
 onMounted(() => {
+  resetEditForm()
   void loadData()
 })
 </script>
@@ -271,11 +521,31 @@ onMounted(() => {
                 {{ row.verifiedAt ? dayjs(row.verifiedAt).format('YYYY-MM-DD HH:mm') : '-' }}
               </template>
             </el-table-column>
-            <el-table-column label="操作" min-width="132" fixed="right" align="right">
+            <el-table-column label="操作" min-width="220" fixed="right" align="right">
               <template #default="{ row }">
-                <el-button class="history-detail-button" link type="primary" @click="handleViewDetail(row)">
-                  查看详情
-                </el-button>
+                <div class="flex items-center justify-end gap-2">
+                  <el-button
+                    v-if="canEditOrder(row as InboundOrder)"
+                    class="history-detail-button"
+                    link
+                    type="primary"
+                    @click="openEditDialog(row as InboundOrder)"
+                  >
+                    改单
+                  </el-button>
+                  <el-button
+                    v-if="canCancelOrder(row as InboundOrder)"
+                    class="history-detail-button"
+                    link
+                    type="danger"
+                    @click="openCancelDialog(row as InboundOrder)"
+                  >
+                    撤销
+                  </el-button>
+                  <el-button class="history-detail-button" link type="primary" @click="handleViewDetail(row as InboundOrder)">
+                    查看详情
+                  </el-button>
+                </div>
               </template>
             </el-table-column>
 
@@ -325,14 +595,34 @@ onMounted(() => {
                   <div>
                     <p class="text-xs uppercase tracking-[0.2em] text-slate-400 dark:text-slate-500">送货单详情</p>
                     <h3 class="mt-2 text-lg font-semibold text-slate-900 dark:text-slate-100">{{ currentDetail.order.showNo }}</h3>
-                    <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">创建于 {{ dayjs(currentDetail.order.createdAt).format('YYYY-MM-DD HH:mm') }}</p>
+                    <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                      创建于 {{ dayjs(currentDetail.order.createdAt).format('YYYY-MM-DD HH:mm') }}
+                    </p>
                   </div>
-                  <el-tag :type="getStatusMeta(currentDetail.order.status).type" size="small" effect="light" round>
-                    {{ getStatusMeta(currentDetail.order.status).label }}
-                  </el-tag>
+                  <div class="flex shrink-0 items-center gap-2">
+                    <el-button
+                      v-if="canEditOrder(currentDetail.order)"
+                      type="primary"
+                      plain
+                      @click="openEditDialog(currentDetail.order)"
+                    >
+                      改单
+                    </el-button>
+                    <el-button
+                      v-if="canCancelOrder(currentDetail.order)"
+                      type="danger"
+                      plain
+                      @click="openCancelDialog(currentDetail.order)"
+                    >
+                      撤销
+                    </el-button>
+                    <el-tag :type="getStatusMeta(currentDetail.order.status).type" size="small" effect="light" round>
+                      {{ getStatusMeta(currentDetail.order.status).label }}
+                    </el-tag>
+                  </div>
                 </div>
 
-                <div class="mt-4 grid gap-3 sm:grid-cols-3">
+                <div class="mt-4 grid gap-3 sm:grid-cols-4">
                   <div class="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-slate-700/70 dark:bg-slate-900/40">
                     <p class="text-xs text-slate-500 dark:text-slate-400">总件数</p>
                     <p class="mt-2 text-lg font-semibold text-brand dark:text-teal-400">{{ Number(currentDetail.order.totalQty) }} 件</p>
@@ -346,6 +636,40 @@ onMounted(() => {
                   <div class="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-slate-700/70 dark:bg-slate-900/40">
                     <p class="text-xs text-slate-500 dark:text-slate-400">供货方</p>
                     <p class="mt-2 text-lg font-semibold text-slate-800 dark:text-slate-100">{{ currentDetail.order.supplierName || '-' }}</p>
+                  </div>
+                  <div class="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-slate-700/70 dark:bg-slate-900/40">
+                    <p class="text-xs text-slate-500 dark:text-slate-400">最近更新</p>
+                    <p class="mt-2 text-lg font-semibold text-slate-800 dark:text-slate-100">
+                      {{ dayjs(currentDetail.order.updatedAt).format('MM-DD HH:mm') }}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div
+                class="rounded-[26px] border border-slate-200/70 bg-white/95 p-5 shadow-[0_14px_32px_-32px_rgba(15,23,42,0.14)] dark:border-slate-700/80 dark:bg-slate-800/95"
+              >
+                <div class="grid gap-3 sm:grid-cols-2">
+                  <div class="rounded-2xl border border-slate-200/70 bg-slate-50/80 p-4 dark:border-slate-700/70 dark:bg-slate-900/40">
+                    <p class="text-xs text-slate-500 dark:text-slate-400">备注</p>
+                    <p class="mt-2 text-sm leading-6 text-slate-700 dark:text-slate-300">
+                      {{ currentDetail.order.remark || '未填写备注' }}
+                    </p>
+                  </div>
+                  <div
+                    v-if="currentDetail.order.status === 'cancelled'"
+                    class="rounded-2xl border border-rose-200/70 bg-rose-50/75 p-4 dark:border-rose-900/60 dark:bg-rose-950/20"
+                  >
+                    <p class="text-xs text-rose-500 dark:text-rose-300">撤销信息</p>
+                    <p class="mt-2 text-sm font-medium text-rose-700 dark:text-rose-200">
+                      {{ currentDetail.order.cancelReason || '未记录撤销原因' }}
+                    </p>
+                    <p class="mt-2 text-xs leading-5 text-rose-600/85 dark:text-rose-200/75">
+                      {{ currentDetail.order.cancelledAt ? `撤销于 ${dayjs(currentDetail.order.cancelledAt).format('YYYY-MM-DD HH:mm')}` : '撤销时间未记录' }}
+                    </p>
+                    <p class="mt-1 text-xs leading-5 text-rose-600/85 dark:text-rose-200/75">
+                      {{ currentDetail.order.cancelledByDisplayName || currentDetail.order.cancelledByUsername || '当前供货方' }}
+                    </p>
                   </div>
                 </div>
               </div>
@@ -369,7 +693,7 @@ onMounted(() => {
 
               <!-- 若未入库，展示二维码以便补扫。 -->
               <transition name="history-detail-fade">
-                <div v-if="currentDetail.order.status === 'pending' && qrCodeDataUrl" class="rounded-[26px] border border-amber-200/70 bg-amber-50/65 p-5 text-center shadow-[0_12px_28px_-28px_rgba(245,158,11,0.18)] dark:border-amber-900/60 dark:bg-amber-950/20">
+                <div v-if="shouldShowPendingQrCode && qrCodeDataUrl" class="rounded-[26px] border border-amber-200/70 bg-amber-50/65 p-5 text-center shadow-[0_12px_28px_-28px_rgba(245,158,11,0.18)] dark:border-amber-900/60 dark:bg-amber-950/20">
                   <p class="text-sm font-medium text-amber-700 dark:text-amber-300">向库管员出示此二维码完成入库</p>
                   <img :src="qrCodeDataUrl" alt="核销二维码" class="mx-auto mt-4 h-40 w-40 rounded-2xl border border-white/80 bg-white p-2 shadow-sm dark:border-slate-700/70 dark:bg-slate-900/70" />
                 </div>
@@ -378,7 +702,7 @@ onMounted(() => {
               <!-- 二维码生成失败时保留页面内提示，避免用户误以为详情尚未加载完成。 -->
               <transition name="history-detail-fade">
                 <div
-                  v-if="currentDetail.order.status === 'pending' && qrCodeUnavailable"
+                  v-if="shouldShowPendingQrCode && qrCodeUnavailable"
                   class="rounded-[26px] border border-amber-200/70 bg-amber-50/65 p-5 text-center shadow-[0_12px_28px_-28px_rgba(245,158,11,0.14)] dark:border-amber-900/60 dark:bg-amber-950/20"
                 >
                   <p class="text-sm font-medium text-amber-700 dark:text-amber-300">二维码暂未生成</p>
@@ -391,6 +715,130 @@ onMounted(() => {
           </transition>
         </div>
       </BizResponsiveDrawerShell>
+
+      <el-dialog
+        v-model="cancelDialogVisible"
+        title="撤销送货单"
+        width="28rem"
+        append-to-body
+        destroy-on-close
+        @closed="targetCancelOrder = null"
+      >
+        <div class="space-y-4">
+          <p class="text-sm leading-6 text-slate-500 dark:text-slate-400">
+            撤销后该送货单会保留在历史单据中，但不再允许库管继续扫码入库。
+          </p>
+          <div class="rounded-2xl border border-slate-200/70 bg-slate-50/80 px-4 py-3 text-sm text-slate-600 dark:border-slate-700/70 dark:bg-slate-900/40 dark:text-slate-300">
+            当前单据：{{ targetCancelOrder?.showNo || '-' }}
+          </div>
+          <el-input
+            v-model="cancelReason"
+            type="textarea"
+            :rows="4"
+            maxlength="255"
+            show-word-limit
+            resize="none"
+            placeholder="请填写撤销原因，例如到货延迟、送货内容有误、需重新录入等。"
+          />
+        </div>
+        <template #footer>
+          <div class="flex justify-end gap-3">
+            <el-button @click="cancelDialogVisible = false">取消</el-button>
+            <el-button type="danger" :loading="cancelSubmitting" @click="handleSubmitCancel">确认撤销</el-button>
+          </div>
+        </template>
+      </el-dialog>
+
+      <el-dialog
+        v-model="editDialogVisible"
+        title="修改送货单"
+        width="46rem"
+        append-to-body
+        destroy-on-close
+        @closed="resetEditForm"
+      >
+        <div class="space-y-4">
+          <div class="rounded-2xl border border-slate-200/70 bg-slate-50/80 px-4 py-3 text-sm leading-6 text-slate-600 dark:border-slate-700/70 dark:bg-slate-900/40 dark:text-slate-300">
+            仅待入库送货单支持改单。保存后会直接覆盖当前商品明细、总件数和备注，核销二维码保持不变。
+          </div>
+
+          <div class="space-y-3">
+            <transition-group name="item-list" tag="div" class="space-y-3">
+              <div
+                v-for="(item, index) in editForm.items"
+                :key="item.uid"
+                class="history-edit-item-row flex flex-col gap-3 rounded-2xl border border-slate-200/70 bg-slate-50/75 p-4 dark:border-slate-700/70 dark:bg-slate-900/40 lg:flex-row lg:items-start"
+              >
+                <div class="history-detail-item__index flex-shrink-0">{{ index + 1 }}</div>
+                <div class="flex-1">
+                  <el-select
+                    v-model="item.productId"
+                    filterable
+                    class="w-full"
+                    placeholder="请选择商品"
+                    :loading="editProductLoading"
+                  >
+                    <el-option
+                      v-for="product in products"
+                      :key="product.id"
+                      :label="product.productName"
+                      :value="product.id"
+                    >
+                      <span class="float-left">{{ product.productName }}</span>
+                      <span class="float-right text-sm text-slate-400">{{ product.productCode }}</span>
+                    </el-option>
+                  </el-select>
+                </div>
+                <div class="w-full lg:w-36">
+                  <el-input-number
+                    v-model="item.qty"
+                    :min="1"
+                    :step="1"
+                    step-strictly
+                    class="w-full"
+                    placeholder="数量"
+                  />
+                </div>
+                <el-button
+                  class="delete-button"
+                  type="danger"
+                  link
+                  :disabled="editForm.items.length === 1"
+                  @click="handleRemoveEditItem(index)"
+                >
+                  删除
+                </el-button>
+              </div>
+            </transition-group>
+
+            <el-button plain @click="handleAddEditItem">添加商品</el-button>
+          </div>
+
+          <div class="rounded-2xl border border-slate-200/70 bg-slate-50/70 p-4 dark:border-slate-700/70 dark:bg-slate-900/40">
+            <p class="mb-2 text-sm font-medium text-slate-600 dark:text-slate-400">备注信息</p>
+            <el-input
+              v-model="editForm.remark"
+              type="textarea"
+              :rows="3"
+              maxlength="255"
+              show-word-limit
+              resize="none"
+              placeholder="备注信息（选填）"
+            />
+          </div>
+        </div>
+        <template #footer>
+          <div class="flex justify-between gap-3">
+            <div class="text-sm leading-6 text-slate-500 dark:text-slate-400">
+              当前共 {{ editForm.items.filter((item) => item.productId && item.qty > 0).length }} 行有效商品
+            </div>
+            <div class="flex justify-end gap-3">
+              <el-button @click="editDialogVisible = false">取消</el-button>
+              <el-button type="primary" :loading="editSubmitting" @click="handleSubmitEdit">保存改单</el-button>
+            </div>
+          </div>
+        </template>
+      </el-dialog>
     </div>
   </PageContainer>
 </template>
