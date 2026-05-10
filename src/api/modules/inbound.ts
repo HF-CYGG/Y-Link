@@ -8,6 +8,13 @@ import { request, type RequestConfig } from '@/api/http'
 import type { PaginationQueryInput, PaginationResult } from '@/types/api'
 
 /**
+ * 入库单号识别：
+ * - 供货单展示号当前采用 IN + 日期 + 4 位流水 的格式；
+ * - 共享详情查询会基于该规则自动分流到 showNo 详情接口，避免页面误把展示单号当成核销码时直接 404。
+ */
+const isInboundShowNo = (value: string) => /^IN\d{12}$/i.test(value.trim())
+
+/**
  * 供货方提交明细项参数：
  */
 export interface SubmitInboundItemInput {
@@ -170,21 +177,29 @@ export const cancelSupplierDelivery = (id: string, data: CancelSupplierInboundIn
 
 /**
  * 查看送货单详情 (通用)：
- * - 基于核销码查询，可用于扫码场景。
+ * - 默认仍优先兼容核销码查询；
+ * - 若调用方传入的是送货单号，则自动改走 showNo 详情接口，避免历史页面或管理端回查直接报 404。
  */
-export const getInboundDetail = (verifyCode: string, requestConfig: RequestConfig = {}) =>
-  request<InboundOrderDetail>({
+export const getInboundDetail = (verifyCodeOrShowNo: string, requestConfig: RequestConfig = {}) => {
+  const normalizedCode = verifyCodeOrShowNo.trim()
+  const detailPath = isInboundShowNo(normalizedCode)
+    ? `/inbound/detail/show-no/${normalizedCode.toUpperCase()}`
+    : `/inbound/detail/${normalizedCode}`
+
+  return request<InboundOrderDetail>({
     ...requestConfig,
     method: 'GET',
-    url: `/inbound/detail/${verifyCode}`,
+    url: detailPath,
   })
+}
 
 /**
  * 按送货单号查看详情：
  * - 用于扫码失败后的人工录入兜底。
  */
-export const getInboundDetailByShowNo = (showNo: string) =>
+export const getInboundDetailByShowNo = (showNo: string, requestConfig: RequestConfig = {}) =>
   request<InboundOrderDetail>({
+    ...requestConfig,
     method: 'GET',
     url: `/inbound/detail/show-no/${showNo}`,
   })
