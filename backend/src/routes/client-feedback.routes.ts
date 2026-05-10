@@ -1,12 +1,13 @@
 /**
  * 模块说明：backend/src/routes/client-feedback.routes.ts
- * 文件职责：提供客户端反馈中心接口，覆盖入口配置读取、会话列表、详情、留言与实时 SSE 订阅。
+ * 文件职责：提供客户端反馈中心接口，覆盖入口配置读取、会话列表、详情、留言、附件上传、满意度评价与实时 SSE 订阅。
  * 实现逻辑：
  * - 所有接口都走客户端鉴权，确保客户端只能访问自己的反馈会话；
  * - 反馈入口配置单独暴露为轻量接口，便于客户端页面按配置决定是否展示入口与提示语；
+ * - 附件上传与满意度评价都继续收口在同一路由域下，减少客户端跨模块鉴权差异；
  * - 实时通道采用 SSE，便于浏览器直接接入且不额外引入复杂协议栈。
  * 维护说明：
- * - 若后续需要上传附件，请优先扩展消息提交 schema 与服务层，不要在路由层直接分散处理；
+ * - 若后续需要扩展更多附件类型，请同步调整 multer 白名单、前端上传提示与服务层附件校验；
  * - 若客户端需要按未读状态筛选，可继续在 query schema 中补字段并下沉到服务层。
  */
 
@@ -20,6 +21,7 @@ import {
   CLIENT_FEEDBACK_CONVERSATION_STATUSES,
   CLIENT_FEEDBACK_ISSUE_TYPES,
   CLIENT_FEEDBACK_PRIORITIES,
+  CLIENT_FEEDBACK_SATISFACTION_LEVELS,
 } from '../entities/client-feedback-conversation.entity.js'
 import {
   clientFeedbackService,
@@ -33,9 +35,12 @@ import {
   CLIENT_FEEDBACK_MAX_TAG_LENGTH,
   CLIENT_FEEDBACK_MAX_TAGS,
   CLIENT_FEEDBACK_ORDER_REF_MAX_LENGTH,
+  CLIENT_FEEDBACK_SATISFACTION_COMMENT_MAX_LENGTH,
   CLIENT_FEEDBACK_SOURCE_LABEL_MAX_LENGTH,
   CLIENT_FEEDBACK_SUBJECT_MAX_LENGTH,
 } from '../services/client-feedback.service.js'
+import { BizError } from '../utils/errors.js'
+import { buildUploadPublicUrl, createCategorizedImageUpload } from '../utils/upload-storage.js'
 
 /**
  * 客户端会话列表分页上限：
@@ -84,6 +89,18 @@ const appendMessageSchema = z.object({
   attachments: z.array(feedbackAttachmentSchema).max(CLIENT_FEEDBACK_MAX_ATTACHMENTS_PER_MESSAGE).optional(),
 })
 
+const submitSatisfactionSchema = z.object({
+  level: z.enum(CLIENT_FEEDBACK_SATISFACTION_LEVELS),
+  comment: z.string().trim().max(CLIENT_FEEDBACK_SATISFACTION_COMMENT_MAX_LENGTH).optional(),
+})
+
+/**
+ * 客户端反馈附件仍沿用本地磁盘 + 静态资源 URL 方案：
+ * - 先满足截图、界面异常凭证等高频图片证据场景；
+ * - 反馈截图单独落在 `uploads/client-feedback`，避免和商品图片混放。
+ */
+const feedbackAttachmentUpload = createCategorizedImageUpload('client-feedback')
+
 export const clientFeedbackRouter = Router()
 const authenticatedClientFeedbackRouter = Router()
 
@@ -113,6 +130,28 @@ authenticatedClientFeedbackRouter.get(
 )
 
 authenticatedClientFeedbackRouter.post(
+  '/attachments',
+  feedbackAttachmentUpload.single('file'),
+  asyncHandler(async (req, res) => {
+    if (!req.file) {
+      throw new BizError('文件上传失败', 400)
+    }
+    res.json({
+      code: 0,
+      message: 'ok',
+      data: {
+        attachment: {
+          name: req.file.originalname,
+          url: buildUploadPublicUrl('client-feedback', req.file.filename),
+          mimeType: req.file.mimetype || null,
+          size: typeof req.file.size === 'number' ? req.file.size : null,
+        },
+      },
+    })
+  }),
+)
+
+authenticatedClientFeedbackRouter.post(
   '/conversations',
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
@@ -137,6 +176,34 @@ authenticatedClientFeedbackRouter.post(
     const authReq = req as ClientAuthenticatedRequest
     const payload = appendMessageSchema.parse(req.body)
     const data = await clientFeedbackService.appendClientMessage(
+      req.params.id,
+      payload,
+      authReq.clientAuth,
+      extractRequestMeta(req),
+    )
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+authenticatedClientFeedbackRouter.patch(
+  '/conversations/:id/confirm-resolved',
+  asyncHandler(async (req, res) => {
+    const authReq = req as ClientAuthenticatedRequest
+    const data = await clientFeedbackService.confirmConversationResolvedByClient(
+      req.params.id,
+      authReq.clientAuth,
+      extractRequestMeta(req),
+    )
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+authenticatedClientFeedbackRouter.post(
+  '/conversations/:id/satisfaction',
+  asyncHandler(async (req, res) => {
+    const authReq = req as ClientAuthenticatedRequest
+    const payload = submitSatisfactionSchema.parse(req.body)
+    const data = await clientFeedbackService.submitConversationSatisfactionByClient(
       req.params.id,
       payload,
       authReq.clientAuth,

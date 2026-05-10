@@ -46,6 +46,8 @@ export const PERMISSION_CODES = [
   'inbound:create',
   'inbound:view',
   'inbound:verify',
+  'customer_service:view',
+  'customer_service:reply',
 ] as const
 
 export type PermissionCode = (typeof PERMISSION_CODES)[number]
@@ -82,6 +84,8 @@ export const ROLE_DEFAULT_PERMISSION_MAP: Record<UserRole, PermissionCode[]> = {
     'audit_logs:export',
     'inbound:view',
     'inbound:verify',
+    'customer_service:view',
+    'customer_service:reply',
   ],
   operator: [
     'dashboard:view',
@@ -95,6 +99,8 @@ export const ROLE_DEFAULT_PERMISSION_MAP: Record<UserRole, PermissionCode[]> = {
     'system_configs:view',
     'inbound:view',
     'inbound:verify',
+    'customer_service:view',
+    'customer_service:reply',
   ],
   supplier: [
     'products:view',
@@ -135,6 +141,8 @@ export const PERMISSION_LABEL_MAP: Record<PermissionCode, string> = {
   'inbound:create': '创建送货单',
   'inbound:view': '查看送货单',
   'inbound:verify': '核销入库',
+  'customer_service:view': '查看客服工作台',
+  'customer_service:reply': '回复客服反馈',
 }
 
 /**
