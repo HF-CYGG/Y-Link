@@ -14,7 +14,6 @@
 import { computed, onActivated, onBeforeUnmount, onDeactivated, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
-  buildSupportWorkbenchQuickViews,
   compareSupportFeedbackConversationPriority,
   DEFAULT_SUPPORT_QUICK_REPLY_TEMPLATES,
   FEEDBACK_CATEGORY_OPTIONS,
@@ -23,12 +22,12 @@ import {
   FEEDBACK_PRIORITY_OPTIONS,
   FEEDBACK_STATUS_META_MAP,
   FEEDBACK_STATUS_OPTIONS,
-  filterSupportFeedbackConversationsByQuickView,
   appendStaffFeedbackMessage,
   getCustomerServicePresence,
   getSupportFeedbackConversation,
   listSupportAssignableUsers,
   listSupportFeedbackConversations,
+  resolveClientFeedbackConversationGroupKey,
   openFeedbackRealtimeStream,
   resolveSupportFeedbackConversationSla,
   SUPPORT_QUICK_REPLY_SOURCE_META,
@@ -46,7 +45,6 @@ import {
   type FeedbackRealtimeConversationEvent,
   type FeedbackServicePresence,
   type SupportAssignableUser,
-  type SupportWorkbenchQuickViewKey,
 } from '@/api/modules/customer-service-feedback'
 import { PageContainer } from '@/components/common'
 import { useAuthStore } from '@/store'
@@ -56,7 +54,7 @@ import { normalizeSubmitText } from '@/utils/submit-feedback'
 
 const authStore = useAuthStore()
 
-type WorkbenchQuickViewKey = 'all' | SupportWorkbenchQuickViewKey
+type WorkbenchQuickViewKey = 'all' | 'pending' | 'processing' | 'urgent' | 'unassigned' | 'sla_risk' | 'waiting_staff_reply'
 type DetailTabKey = 'conversation' | 'issue' | 'internal'
 
 const detailLoading = ref(false)
@@ -184,14 +182,33 @@ const parseTagText = (value: string): string[] => {
 }
 
 /**
- * 快捷视图始终基于“当前搜索与筛选结果”再做二次聚焦：
- * - 这样统计数字和列表内容天然同步，不会出现左侧数字与列表口径脱节；
- * - “全部会话”保留原始列表视角，便于客服回到全量队列。
+ * 顶部分类卡片统一作为工作台主筛选入口：
+ * - 所有分类都基于当前搜索与筛选结果再次聚焦，保证上方数字与左侧列表口径一致；
+ * - 默认进入“全部反馈”，让客服首次进入页面时先看到完整队列。
  */
 const getQuickViewFilteredConversations = (records: FeedbackConversationRecord[] = conversations.value) => {
-  const nextRecords = activeQuickView.value === 'all'
-    ? [...records]
-    : filterSupportFeedbackConversationsByQuickView(records, activeQuickView.value, authStore.currentUser?.id)
+  const nextRecords = records.filter((conversation) => {
+    if (activeQuickView.value === 'all') {
+      return true
+    }
+    if (activeQuickView.value === 'pending') {
+      return conversation.status === 'pending'
+    }
+    if (activeQuickView.value === 'processing') {
+      return conversation.status === 'processing'
+    }
+    if (activeQuickView.value === 'urgent') {
+      return conversation.priority === 'urgent'
+    }
+    if (activeQuickView.value === 'unassigned') {
+      return !conversation.assigneeUserId
+    }
+    if (activeQuickView.value === 'sla_risk') {
+      const slaMeta = resolveSupportFeedbackConversationSla(conversation)
+      return slaMeta.level === 'warning' || slaMeta.level === 'overtime'
+    }
+    return resolveClientFeedbackConversationGroupKey(conversation) === 'waiting_staff'
+  })
   return nextRecords.sort(compareSupportFeedbackConversationPriority)
 }
 
@@ -245,15 +262,57 @@ const getAssigneeTagLabel = (conversation: FeedbackConversationRecord) => {
     : conversation.assigneeName
 }
 
-const quickViewDefinitions = computed(() => {
+const summaryCategoryDefinitions = computed(() => {
   return [
     {
       key: 'all' as const,
-      label: '全部会话',
-      description: '基于当前关键字与筛选条件查看全部反馈单。',
+      label: '全部反馈',
+      description: '查看当前筛选条件下的全部反馈单，适合作为默认处理入口。',
       count: conversations.value.length,
+      valueClass: 'text-slate-900',
     },
-    ...buildSupportWorkbenchQuickViews(conversations.value, authStore.currentUser?.id),
+    {
+      key: 'pending' as const,
+      label: '待受理',
+      description: '尚未由客服正式接入的反馈单，优先用于首轮响应。',
+      count: summary.value.pending,
+      valueClass: 'text-amber-600',
+    },
+    {
+      key: 'processing' as const,
+      label: '处理中',
+      description: '已经进入处理阶段的反馈单，便于连续跟进。',
+      count: summary.value.processing,
+      valueClass: 'text-sky-600',
+    },
+    {
+      key: 'urgent' as const,
+      label: '紧急反馈',
+      description: '优先级为紧急的反馈单，用于快速聚焦高影响问题。',
+      count: summary.value.urgent,
+      valueClass: 'text-rose-600',
+    },
+    {
+      key: 'unassigned' as const,
+      label: '待分配',
+      description: '当前尚未明确负责人的反馈单，适合快速接单分流。',
+      count: summary.value.unassigned,
+      valueClass: 'text-slate-700',
+    },
+    {
+      key: 'sla_risk' as const,
+      label: 'SLA 风险',
+      description: '即将超时或已经超时的反馈单，优先用于抢救处理时效。',
+      count: summary.value.slaRisk,
+      valueClass: 'text-rose-600',
+    },
+    {
+      key: 'waiting_staff_reply' as const,
+      label: '待客服跟进',
+      description: '当前更需要客服继续回复或处理的反馈单，适合作为排队主视图。',
+      count: summary.value.waitingStaffReply,
+      valueClass: 'text-brand',
+    },
   ]
 })
 
@@ -310,7 +369,7 @@ const transferAssigneeOptions = computed(() => {
 })
 
 const activeQuickViewDefinition = computed(() => {
-  return quickViewDefinitions.value.find((item) => item.key === activeQuickView.value) ?? quickViewDefinitions.value[0]
+  return summaryCategoryDefinitions.value.find((item) => item.key === activeQuickView.value) ?? summaryCategoryDefinitions.value[0]
 })
 
 const syncIssueForm = (record: FeedbackConversationRecord | null) => {
@@ -1094,33 +1153,16 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="grid gap-2 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-7 2xl:min-w-0 2xl:flex-1">
-            <el-card class="cs-summary-card cs-summary-card--compact" shadow="never">
-              <p class="cs-summary-card__label">全部反馈</p>
-              <p class="cs-summary-card__value">{{ summary.all }}</p>
-            </el-card>
-            <el-card class="cs-summary-card cs-summary-card--compact" shadow="never">
-              <p class="cs-summary-card__label">待受理</p>
-              <p class="cs-summary-card__value text-amber-600">{{ summary.pending }}</p>
-            </el-card>
-            <el-card class="cs-summary-card cs-summary-card--compact" shadow="never">
-              <p class="cs-summary-card__label">处理中</p>
-              <p class="cs-summary-card__value text-sky-600">{{ summary.processing }}</p>
-            </el-card>
-            <el-card class="cs-summary-card cs-summary-card--compact" shadow="never">
-              <p class="cs-summary-card__label">紧急反馈</p>
-              <p class="cs-summary-card__value text-rose-600">{{ summary.urgent }}</p>
-            </el-card>
-            <el-card class="cs-summary-card cs-summary-card--compact" shadow="never">
-              <p class="cs-summary-card__label">待分配</p>
-              <p class="cs-summary-card__value text-slate-700">{{ summary.unassigned }}</p>
-            </el-card>
-            <el-card class="cs-summary-card cs-summary-card--compact" shadow="never">
-              <p class="cs-summary-card__label">SLA 风险</p>
-              <p class="cs-summary-card__value text-rose-600">{{ summary.slaRisk }}</p>
-            </el-card>
-            <el-card class="cs-summary-card cs-summary-card--compact" shadow="never">
-              <p class="cs-summary-card__label">等待客服回复</p>
-              <p class="cs-summary-card__value text-brand">{{ summary.waitingStaffReply }}</p>
+            <el-card
+              v-for="item in summaryCategoryDefinitions"
+              :key="item.key"
+              class="cs-summary-card cs-summary-card--compact"
+              shadow="never"
+              :class="item.key === activeQuickView ? 'is-active' : ''"
+              @click="handleChangeQuickView(item.key)"
+            >
+              <p class="cs-summary-card__label">{{ item.label }}</p>
+              <p class="cs-summary-card__value" :class="item.valueClass">{{ item.count }}</p>
             </el-card>
           </div>
         </div>
@@ -1178,43 +1220,15 @@ onBeforeUnmount(() => {
 
       <div class="grid gap-4 xl:grid-cols-[320px_minmax(0,1fr)] 2xl:grid-cols-[336px_minmax(0,1fr)]">
         <el-card class="cs-panel-card xl:flex xl:min-h-[calc(100vh-18rem)] xl:flex-col" shadow="never">
-          <div>
-            <div class="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <p class="text-base font-semibold text-slate-900">快捷视图</p>
-                <p class="mt-1 text-xs text-slate-400">把高频待办收口到固定视图，快速切换当前处理重心。</p>
-              </div>
-              <el-tag type="info" effect="plain" round>
-                当前：{{ activeQuickViewDefinition.label }}
-              </el-tag>
-            </div>
-            <div class="cs-quick-view-grid mt-4">
-              <el-card
-                v-for="item in quickViewDefinitions"
-                :key="item.key"
-                class="cs-quick-view-card"
-                shadow="hover"
-                :class="item.key === activeQuickView ? 'is-active' : ''"
-                @click="handleChangeQuickView(item.key)"
-              >
-                <div class="flex items-start justify-between gap-3">
-                  <div class="min-w-0">
-                    <p class="cs-quick-view-card__label">{{ item.label }}</p>
-                    <p class="cs-quick-view-card__desc">{{ item.description }}</p>
-                  </div>
-                  <span class="cs-quick-view-card__count">{{ item.count }}</span>
-                </div>
-              </el-card>
-            </div>
-          </div>
-
           <div class="cs-list-heading">
             <div class="min-w-0">
               <p class="text-base font-semibold text-slate-900">反馈列表</p>
-              <p class="cs-list-heading__desc">{{ activeQuickViewDefinition.description }}</p>
+              <p class="cs-list-heading__desc">
+                {{ activeQuickViewDefinition.description }}
+              </p>
             </div>
             <el-tag type="info" effect="plain" round class="cs-list-count">
-              共 {{ filteredConversations.length }} 条
+              当前：{{ activeQuickViewDefinition.label }} · {{ filteredConversations.length }} 条
             </el-tag>
           </div>
 
@@ -1710,9 +1724,15 @@ onBeforeUnmount(() => {
  * - 维持和现有管理端卡片相同的圆角留白语言。
  */
 .cs-summary-card {
+  cursor: pointer;
   border: 1px solid rgba(226, 232, 240, 0.9);
   border-radius: 24px;
   background: rgba(255, 255, 255, 0.95);
+  transition:
+    border-color 0.2s ease,
+    background-color 0.2s ease,
+    box-shadow 0.2s ease,
+    transform 0.2s ease;
 }
 
 .cs-panel-card,
@@ -1774,6 +1794,17 @@ onBeforeUnmount(() => {
   padding: 0.75rem 0.82rem;
 }
 
+.cs-summary-card:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 14px 28px -24px rgba(15, 23, 42, 0.2);
+}
+
+.cs-summary-card.is-active {
+  border-color: rgba(13, 148, 136, 0.36);
+  background: rgba(20, 184, 166, 0.06);
+  box-shadow: 0 18px 34px -28px rgba(13, 148, 136, 0.28);
+}
+
 .cs-summary-card--compact .cs-summary-card__label {
   white-space: nowrap;
   letter-spacing: 0.12em;
@@ -1784,63 +1815,6 @@ onBeforeUnmount(() => {
   margin-top: 0.5rem;
   white-space: nowrap;
   font-size: 1.35rem;
-}
-
-/*
- * 左侧快捷视图维持“轻卡片 + 数字”风格：
- * - 让客服能一眼看到当前待办量级；
- * - 激活态沿用工作台品牌色，和普通会话卡片保持清晰区分。
- */
-.cs-quick-view-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.75rem;
-}
-
-.cs-quick-view-card {
-  cursor: pointer;
-  border: 1px solid rgba(226, 232, 240, 0.9);
-  border-radius: 20px;
-  transition:
-    border-color 0.2s ease,
-    background-color 0.2s ease,
-    box-shadow 0.2s ease,
-    transform 0.2s ease;
-}
-
-.cs-quick-view-card :deep(.el-card__body) {
-  padding: 0.9rem;
-}
-
-.cs-quick-view-card:hover {
-  transform: translateY(-1px);
-  box-shadow: 0 14px 28px -24px rgba(15, 23, 42, 0.2);
-}
-
-.cs-quick-view-card.is-active {
-  border-color: rgba(13, 148, 136, 0.36);
-  background: rgba(20, 184, 166, 0.06);
-  box-shadow: 0 18px 34px -28px rgba(13, 148, 136, 0.28);
-}
-
-.cs-quick-view-card__label {
-  color: rgb(15 23 42);
-  font-size: 0.92rem;
-  font-weight: 700;
-}
-
-.cs-quick-view-card__desc {
-  margin-top: 0.35rem;
-  color: rgb(100 116 139);
-  font-size: 0.76rem;
-  line-height: 1.45;
-}
-
-.cs-quick-view-card__count {
-  color: rgb(15 23 42);
-  font-size: 1.55rem;
-  font-weight: 700;
-  line-height: 1;
 }
 
 .cs-conversation-item {
