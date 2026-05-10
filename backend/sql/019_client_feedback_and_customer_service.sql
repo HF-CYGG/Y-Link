@@ -159,7 +159,7 @@ WHERE NOT EXISTS (
 );
 
 INSERT INTO `system_configs` (`config_key`, `config_value`, `config_group`, `remark`)
-SELECT 'customer_service.offline_faq_json', '[{"question":"客服什么时候在线？","answer":"默认工作时间为周一至周五 09:00-18:00。"},{"question":"离线时提交的问题会丢失吗？","answer":"不会，系统会保留完整会话记录，客服上线后继续跟进。"}]', 'customer_service', '客服离线 FAQ(JSON)'
+SELECT 'customer_service.offline_faq_json', '[{"question":"客服什么时候在线？","answer":"默认工作时间为周一至周日 10:00-20:00。"},{"question":"离线时提交的问题会丢失吗？","answer":"不会，系统会保留完整会话记录，客服上线后继续跟进。"}]', 'customer_service', '客服离线 FAQ(JSON)'
 WHERE NOT EXISTS (
   SELECT 1
   FROM `system_configs`
