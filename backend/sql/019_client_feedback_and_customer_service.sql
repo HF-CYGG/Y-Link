@@ -1,9 +1,13 @@
 -- =============================================
--- File: backend/sql/019_client_feedback_and_customer_service.sql
--- Purpose:
---   Add client feedback conversation/message tables and seed
---   customer service system configs for MySQL deployments.
---   The script is idempotent and safe to execute repeatedly.
+-- 文件说明：backend/sql/019_client_feedback_and_customer_service.sql
+-- 文件职责：为 MySQL 部署补齐反馈中心与客服工作台所需的会话表、消息表及系统配置默认值。
+-- 实现逻辑：
+-- 1. 首次执行时创建反馈会话表与消息表；
+-- 2. 历史库重复执行时按需补列，保持脚本幂等；
+-- 3. 同步写入客服入口、离线 FAQ 与 SSE 心跳等默认系统配置。
+-- 维护说明：
+-- 1. 若实体层新增反馈字段，必须同步补充本脚本，避免 MySQL 正式库与 SQLite 自举口径分裂；
+-- 2. 若后续把附件、标签或客服内部字段拆表，本脚本也要同步更新兼容补列逻辑。
 -- =============================================
 
 CREATE TABLE IF NOT EXISTS `client_feedback_conversation` (
@@ -14,6 +18,8 @@ CREATE TABLE IF NOT EXISTS `client_feedback_conversation` (
   `client_account` varchar(128) NOT NULL COMMENT '客户端账号快照',
   `department_name_snapshot` varchar(128) NOT NULL DEFAULT '' COMMENT '客户端部门快照',
   `category` varchar(32) NOT NULL DEFAULT 'general' COMMENT '反馈分类',
+  `issue_type` varchar(16) NOT NULL DEFAULT 'suggestion' COMMENT 'Issue 类型',
+  `source_code` varchar(32) NOT NULL DEFAULT 'client_portal' COMMENT '反馈来源编码',
   `order_ref` varchar(64) DEFAULT NULL COMMENT '关联订单号/业务单号',
   `subject` varchar(128) NOT NULL COMMENT '反馈主题',
   `expected_result` longtext NOT NULL COMMENT '期望结果描述',
@@ -38,14 +44,19 @@ CREATE TABLE IF NOT EXISTS `client_feedback_conversation` (
   `internal_remark_by_user_id` bigint unsigned DEFAULT NULL COMMENT '内部备注更新人 ID',
   `internal_remark_by_username` varchar(64) DEFAULT NULL COMMENT '内部备注更新人账号快照',
   `internal_remark_by_display_name` varchar(64) DEFAULT NULL COMMENT '内部备注更新人姓名快照',
+  `client_satisfaction_level` varchar(16) DEFAULT NULL COMMENT '客户端满意度评价档位',
+  `client_satisfaction_comment` longtext DEFAULT NULL COMMENT '客户端满意度补充说明',
+  `client_satisfaction_rated_at` datetime(6) DEFAULT NULL COMMENT '客户端满意度评价时间',
   `created_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
   `updated_at` datetime(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_client_feedback_conversation_no` (`conversation_no`),
   KEY `idx_client_feedback_client_user_id` (`client_user_id`),
   KEY `idx_client_feedback_category` (`category`),
+  KEY `idx_client_feedback_issue_type` (`issue_type`),
   KEY `idx_client_feedback_status` (`status`),
   KEY `idx_client_feedback_priority` (`priority`),
+  KEY `idx_client_feedback_order_ref` (`order_ref`),
   KEY `idx_client_feedback_last_sender_type` (`last_message_sender_type`),
   KEY `idx_client_feedback_last_message_at` (`last_message_at`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='客户端反馈会话表';
@@ -57,6 +68,7 @@ CREATE TABLE IF NOT EXISTS `client_feedback_message` (
   `sender_user_id` bigint unsigned DEFAULT NULL COMMENT '发送方用户 ID',
   `sender_name` varchar(128) DEFAULT NULL COMMENT '发送方名称快照',
   `message_type` varchar(16) NOT NULL DEFAULT 'text' COMMENT '消息类型',
+  `internal_only` tinyint(1) NOT NULL DEFAULT 0 COMMENT '是否仅客服内部可见',
   `content` longtext NOT NULL COMMENT '消息正文',
   `attachment_json` longtext NOT NULL COMMENT '消息附件 JSON 文本',
   `client_read_at` datetime(6) DEFAULT NULL COMMENT '客户端已读时间',
@@ -68,7 +80,9 @@ CREATE TABLE IF NOT EXISTS `client_feedback_message` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='客户端反馈消息表';
 
 ALTER TABLE `client_feedback_conversation`
-  ADD COLUMN IF NOT EXISTS `order_ref` varchar(64) DEFAULT NULL COMMENT '关联订单号/业务单号' AFTER `category`,
+  ADD COLUMN IF NOT EXISTS `issue_type` varchar(16) NOT NULL DEFAULT 'suggestion' COMMENT 'Issue 类型' AFTER `category`,
+  ADD COLUMN IF NOT EXISTS `source_code` varchar(32) NOT NULL DEFAULT 'client_portal' COMMENT '反馈来源编码' AFTER `issue_type`,
+  ADD COLUMN IF NOT EXISTS `order_ref` varchar(64) DEFAULT NULL COMMENT '关联订单号/业务单号' AFTER `source_code`,
   ADD COLUMN IF NOT EXISTS `expected_result` longtext NOT NULL COMMENT '期望结果描述' AFTER `subject`,
   ADD COLUMN IF NOT EXISTS `actual_result` longtext NOT NULL COMMENT '实际结果描述' AFTER `expected_result`,
   ADD COLUMN IF NOT EXISTS `reproduction_steps` longtext DEFAULT NULL COMMENT '复现步骤描述' AFTER `actual_result`,
@@ -79,9 +93,13 @@ ALTER TABLE `client_feedback_conversation`
   ADD COLUMN IF NOT EXISTS `internal_remark_updated_at` datetime(6) DEFAULT NULL COMMENT '内部备注更新时间' AFTER `internal_remark`,
   ADD COLUMN IF NOT EXISTS `internal_remark_by_user_id` bigint unsigned DEFAULT NULL COMMENT '内部备注更新人 ID' AFTER `internal_remark_updated_at`,
   ADD COLUMN IF NOT EXISTS `internal_remark_by_username` varchar(64) DEFAULT NULL COMMENT '内部备注更新人账号快照' AFTER `internal_remark_by_user_id`,
-  ADD COLUMN IF NOT EXISTS `internal_remark_by_display_name` varchar(64) DEFAULT NULL COMMENT '内部备注更新人姓名快照' AFTER `internal_remark_by_username`;
+  ADD COLUMN IF NOT EXISTS `internal_remark_by_display_name` varchar(64) DEFAULT NULL COMMENT '内部备注更新人姓名快照' AFTER `internal_remark_by_username`,
+  ADD COLUMN IF NOT EXISTS `client_satisfaction_level` varchar(16) DEFAULT NULL COMMENT '客户端满意度评价档位' AFTER `internal_remark_by_display_name`,
+  ADD COLUMN IF NOT EXISTS `client_satisfaction_comment` longtext DEFAULT NULL COMMENT '客户端满意度补充说明' AFTER `client_satisfaction_level`,
+  ADD COLUMN IF NOT EXISTS `client_satisfaction_rated_at` datetime(6) DEFAULT NULL COMMENT '客户端满意度评价时间' AFTER `client_satisfaction_comment`;
 
 ALTER TABLE `client_feedback_message`
+  ADD COLUMN IF NOT EXISTS `internal_only` tinyint(1) NOT NULL DEFAULT 0 COMMENT '是否仅客服内部可见' AFTER `message_type`,
   ADD COLUMN IF NOT EXISTS `attachment_json` longtext NOT NULL COMMENT '消息附件 JSON 文本' AFTER `content`;
 
 INSERT INTO `system_configs` (`config_key`, `config_value`, `config_group`, `remark`)

@@ -386,7 +386,8 @@ const layoutChildren: AppRouteRecord[] = [
       menuOrder: 37,
       menuGroup: '业务操作',
       activeMenu: '/system/customer-service',
-      requiredPermissions: ['users:view'],
+      // 客服工作台应与后端路由权限保持一致，避免只有客服权限的账号被前端菜单误挡住。
+      requiredPermissions: ['customer_service:view'],
       keepAlive: true,
       preloadTargets: ['system-client-users'],
       deferPreloadOnColdStart: true,

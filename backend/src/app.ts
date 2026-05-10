@@ -52,6 +52,39 @@ export function createApp() {
   if (!fs.existsSync(uploadsDir)) {
     fs.mkdirSync(uploadsDir, { recursive: true })
   }
+
+  /**
+   * 兼容历史单层上传路径：
+   * - 早期记录可能仍引用 `/uploads/<file>`；
+   * - 当前真实文件已经按业务迁移到 `uploads/products` 或 `uploads/client-feedback`；
+   * - 若命中旧路径但根目录不存在对应文件，则自动重定向到实际分类路径，避免历史图片直接 404。
+   */
+  app.use('/uploads', (req, res, next) => {
+    const normalizedRequestPath = req.path.replace(/^\/+/, '')
+    if (!normalizedRequestPath || normalizedRequestPath.includes('/')) {
+      next()
+      return
+    }
+
+    const legacyFilePath = path.resolve(uploadsDir, normalizedRequestPath)
+    if (fs.existsSync(legacyFilePath)) {
+      next()
+      return
+    }
+
+    const uploadCategories = ['products', 'client-feedback'] as const
+    const matchedCategory = uploadCategories.find((category) => {
+      return fs.existsSync(path.resolve(uploadsDir, category, normalizedRequestPath))
+    })
+
+    if (!matchedCategory) {
+      next()
+      return
+    }
+
+    res.redirect(302, `/uploads/${matchedCategory}/${normalizedRequestPath}`)
+  })
+
   // 配置静态文件服务，让前端可以直接访问图片
   app.use('/uploads', express.static(uploadsDir))
 

@@ -45,6 +45,15 @@ export interface ClientFeedbackConversationIssueTag {
 }
 
 /**
+ * 客户端满意度评价档位：
+ * - satisfied：处理结果符合预期，整体体验较好；
+ * - neutral：问题有推进，但体验或效率一般；
+ * - unsatisfied：问题未达到预期，仍需要后续关注。
+ */
+export const CLIENT_FEEDBACK_SATISFACTION_LEVELS = ['satisfied', 'neutral', 'unsatisfied'] as const
+export type ClientFeedbackSatisfactionLevel = (typeof CLIENT_FEEDBACK_SATISFACTION_LEVELS)[number]
+
+/**
  * 最近消息发送方快照：
  * - client：最新消息来自客户端；
  * - service：最新消息来自客服/管理端；
@@ -113,7 +122,7 @@ export class ClientFeedbackConversation {
   @Column({ name: 'reproduction_steps', type: 'text', nullable: true, comment: '复现步骤' })
   reproductionSteps!: string | null
 
-  @Column({ name: 'contact_preference', type: 'varchar', length: 128, nullable: true, comment: '联系偏好' })
+  @Column({ name: 'contact_preference', type: 'varchar', length: 64, nullable: true, comment: '联系偏好' })
   contactPreference!: string | null
 
   @Column({ name: 'tag_json', type: 'text', default: '[]', comment: '标签 JSON 文本' })
@@ -133,6 +142,15 @@ export class ClientFeedbackConversation {
 
   @Column({ name: 'internal_remark_by_display_name', type: 'varchar', length: 64, nullable: true, comment: '内部备注更新人名称' })
   internalRemarkByDisplayName!: string | null
+
+  @Column({ name: 'client_satisfaction_level', type: 'varchar', length: 16, nullable: true, comment: '客户端满意度评价档位' })
+  clientSatisfactionLevel!: ClientFeedbackSatisfactionLevel | null
+
+  @Column({ name: 'client_satisfaction_comment', type: 'text', nullable: true, comment: '客户端满意度补充说明' })
+  clientSatisfactionComment!: string | null
+
+  @Column({ name: 'client_satisfaction_rated_at', ...entityColumnOptions.timestamp, nullable: true, comment: '客户端满意度评价时间' })
+  clientSatisfactionRatedAt!: Date | null
 
   @Column({ name: 'assigned_user_id', ...entityColumnOptions.foreignId, nullable: true, comment: '当前处理客服 ID' })
   assignedUserId!: string | null

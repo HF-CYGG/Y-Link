@@ -13,6 +13,7 @@
 import { request } from '@/api/http'
 import { getPersistedAuthToken } from '@/utils/auth-storage'
 import { getPersistedClientAuthToken } from '@/utils/client-auth-storage'
+import { compressImageForUpload } from '@/utils/image-upload'
 
 /**
  * 会话列表统一分页口径：
@@ -26,6 +27,7 @@ export type FeedbackIssuePriority = 'low' | 'medium' | 'high' | 'urgent'
 export type FeedbackIssueType = 'suggestion' | 'bug'
 export type FeedbackIssueCategory = 'account' | 'order' | 'product' | 'delivery' | 'invoice' | 'other'
 export type FeedbackMessageSenderRole = 'client' | 'staff' | 'system'
+export type FeedbackSatisfactionLevel = 'satisfied' | 'neutral' | 'unsatisfied'
 
 export interface FeedbackIssueStatusMeta {
   label: string
@@ -53,6 +55,17 @@ export interface FeedbackConversationMessage {
   createdAt: string
   internalOnly: boolean
   attachments: FeedbackConversationMessageAttachment[]
+}
+
+/**
+ * 反馈单满意度评价结构：
+ * - 只描述当前单据最终的客户端感受，不参与消息流本身；
+ * - 详情页与后续客服工作台可共用同一结构展示“已评价结果”。
+ */
+export interface FeedbackSatisfactionRecord {
+  level: FeedbackSatisfactionLevel
+  comment: string | null
+  ratedAt: string
 }
 
 export interface FeedbackIssueFields {
@@ -86,13 +99,18 @@ export interface FeedbackConversationRecord {
   clientAccount: string
   clientDisplayName: string
   clientDepartmentName: string | null
+  assigneeUserId: string | null
+  assigneeUsername: string | null
   assigneeName: string | null
+  lastMessagePreview: string
+  lastMessageSenderRole: FeedbackMessageSenderRole
   lastMessageAt: string
   unreadForClient: number
   unreadForStaff: number
   createdAt: string
   updatedAt: string
   fields: FeedbackIssueFields
+  satisfaction: FeedbackSatisfactionRecord | null
   messages: FeedbackConversationMessage[]
   internalRemark: FeedbackInternalRemarkRecord | null
 }
@@ -110,6 +128,128 @@ export interface SupportFeedbackSummary extends ClientFeedbackConversationSummar
   unassigned: number
   waitingClientReply: number
   waitingStaffReply: number
+  slaRisk: number
+}
+
+/**
+ * 离线 FAQ 统一条目结构：
+ * - 同时服务于入口页、详情页与离线状态卡片，避免各页面重复定义问答项；
+ * - 当前真实来源为系统配置 `customer_service.offline_faq_json`。
+ */
+export interface FeedbackFaqEntry {
+  question: string
+  answer: string
+}
+
+/**
+ * 数据来源元信息：
+ * - 用于在任务梳理阶段明确“字段从哪里来”，避免页面实现时再回头猜；
+ * - 当前只覆盖 FAQ 与快捷回复两类需要显式声明来源的数据。
+ */
+export interface FeedbackDataSourceMeta {
+  sourceKey: string
+  sourceLabel: string
+  owner: 'system_config' | 'frontend_local'
+  remark: string
+}
+
+/**
+ * 客户端会话分组采用“当前更需要谁动作”的口径，而不是简单照搬底层状态值。
+ */
+export type ClientFeedbackConversationGroupKey = 'waiting_client' | 'waiting_staff' | 'done'
+
+export interface ClientFeedbackConversationGroupMeta {
+  key: ClientFeedbackConversationGroupKey
+  label: string
+  description: string
+  emptyText: string
+}
+
+export interface ClientFeedbackConversationGroup {
+  key: ClientFeedbackConversationGroupKey
+  label: string
+  description: string
+  emptyText: string
+  count: number
+  conversations: FeedbackConversationRecord[]
+}
+
+/**
+ * 详情页“下一步提示”最小结构：
+ * - stageLabel 负责说明当前阶段；
+ * - recentAction 负责用一句话概括最近发生了什么；
+ * - nextStep 负责告诉客户端现在最适合做什么。
+ */
+export interface ClientFeedbackNextStepPrompt {
+  groupKey: ClientFeedbackConversationGroupKey
+  groupLabel: string
+  stageLabel: string
+  recentAction: string
+  nextStep: string
+}
+
+/**
+ * 客服工作台快捷视图采用“固定语义视图 + 实时统计”的结构，便于后续直接绑定左侧快捷区。
+ */
+export type SupportWorkbenchQuickViewKey =
+  | 'pending_acceptance'
+  | 'mine_processing'
+  | 'waiting_client_reply'
+  | 'high_priority'
+  | 'sla_risk'
+
+export interface SupportWorkbenchQuickViewDefinition {
+  key: SupportWorkbenchQuickViewKey
+  label: string
+  description: string
+  count: number
+}
+
+/**
+ * 快捷回复最小模板结构：
+ * - key 用于稳定标识与埋点；
+ * - content 为插入到输入框的模板正文；
+ * - suggestedStatuses 仅作为默认推荐，不强制限制使用范围。
+ */
+export interface SupportQuickReplyTemplate {
+  key: string
+  label: string
+  description: string
+  content: string
+  suggestedStatuses?: FeedbackIssueStatus[]
+}
+
+/**
+ * 客服可转派目标最小结构：
+ * - 只暴露接单/转派动作所需的识别信息；
+ * - 避免把完整用户治理字段直接带进客服工作台页面。
+ */
+export interface SupportAssignableUser {
+  id: string
+  username: string
+  displayName: string
+  role: string
+}
+
+export type SupportFeedbackSlaLevel = 'normal' | 'warning' | 'overtime' | 'paused'
+
+/**
+ * 客服工作台 SLA 统一展示结构：
+ * - 共享层负责把“阶段 + 时限 + 倒计时”转成页面可直接消费的口径；
+ * - 页面只关心标签、文案和排序，不再各自重复写时间判断。
+ */
+export interface SupportFeedbackConversationSlaMeta {
+  level: SupportFeedbackSlaLevel
+  label: string
+  stageLabel: string
+  description: string
+  countdownText: string
+  targetMinutes: number | null
+  elapsedMinutes: number
+  remainingMinutes: number | null
+  deadlineAt: string | null
+  shouldHighlight: boolean
+  sortWeight: number
 }
 
 export interface FeedbackPortalAvailability {
@@ -122,7 +262,7 @@ export interface FeedbackPortalAvailability {
   serverTime: string
   workHoursText: string
   offlineNotice: string
-  offlineFaqs: Array<{ question: string; answer: string }>
+  offlineFaqs: FeedbackFaqEntry[]
 }
 
 export interface FeedbackPortalConfig {
@@ -133,7 +273,7 @@ export interface FeedbackPortalConfig {
   workdayEnd: string
   workdayWeekdays: number[]
   offlineNotice: string
-  offlineFaqs: Array<{ question: string; answer: string }>
+  offlineFaqs: FeedbackFaqEntry[]
   sseKeepaliveSeconds: number
   availability: FeedbackPortalAvailability
   updatedAt: string
@@ -181,6 +321,11 @@ export interface AppendStaffFeedbackMessageInput {
   attachments?: FeedbackConversationMessageAttachment[]
 }
 
+export interface SubmitClientFeedbackSatisfactionInput {
+  level: FeedbackSatisfactionLevel
+  comment?: string
+}
+
 export interface UpdateFeedbackIssueInput {
   title?: string
   status?: FeedbackIssueStatus
@@ -217,12 +362,17 @@ interface BackendConversationSummary {
   subject: string
   status: BackendConversationStatus
   priority: BackendConversationPriority
+  assignedUserId: string | null
+  assignedUsername: string | null
   assignedDisplayName: string | null
+  lastMessagePreview: string
+  lastMessageSenderType: 'client' | 'service' | 'system'
   lastMessageAt: string
   unreadForClientCount: number
   unreadForServiceCount: number
   createdAt: string
   updatedAt: string
+  satisfaction?: FeedbackSatisfactionRecord | null
   fields: {
     issueType: BackendConversationIssueType
     category: string
@@ -340,11 +490,137 @@ export const FEEDBACK_PRIORITY_OPTIONS: Array<{ label: string; value: FeedbackIs
   { label: '紧急', value: 'urgent' },
 ]
 
+export const FEEDBACK_SATISFACTION_META_MAP: Record<
+  FeedbackSatisfactionLevel,
+  { label: string; className: string; description: string }
+> = {
+  satisfied: {
+    label: '满意',
+    className: 'bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-200',
+    description: '本次处理结果符合预期，问题已得到较好解决。',
+  },
+  neutral: {
+    label: '一般',
+    className: 'bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-200',
+    description: '问题有推进，但处理体验或效率仍有改进空间。',
+  },
+  unsatisfied: {
+    label: '不满意',
+    className: 'bg-rose-50 text-rose-700 ring-1 ring-inset ring-rose-200',
+    description: '当前结果未达到预期，仍希望继续优化处理体验。',
+  },
+}
+
 export const FEEDBACK_STATUS_OPTIONS: Array<{ label: string; value: FeedbackIssueStatus }> = [
   { label: '待受理', value: 'pending' },
   { label: '处理中', value: 'processing' },
   { label: '已解决', value: 'resolved' },
   { label: '已关闭', value: 'closed' },
+]
+
+/**
+ * FAQ 数据来源已经在后端系统配置中落地，前端只需要消费统一问答结构。
+ */
+export const FEEDBACK_OFFLINE_FAQ_SOURCE_META: FeedbackDataSourceMeta = {
+  sourceKey: 'customer_service.offline_faq_json',
+  sourceLabel: '客服离线 FAQ 系统配置',
+  owner: 'system_config',
+  remark: '由 backend/system-config.service.ts 提供默认值，并通过 portal-config / presence 接口下发到前端。',
+}
+
+/**
+ * 快捷回复暂以共享 API 模块内的本地预置模板起步：
+ * - 这样可以先满足 V1 的高频回复效率；
+ * - 后续若迁移到系统配置，只需替换此来源与读取方式，不必改页面契约。
+ */
+export const SUPPORT_QUICK_REPLY_SOURCE_META: FeedbackDataSourceMeta = {
+  sourceKey: 'customer_service_feedback.local_quick_reply_templates',
+  sourceLabel: '客服快捷回复本地预置模板',
+  owner: 'frontend_local',
+  remark: '首批模板先在前端共享层维护，页面只消费统一模板数组。',
+}
+
+export const CLIENT_FEEDBACK_CONVERSATION_GROUP_META_MAP: Record<
+  ClientFeedbackConversationGroupKey,
+  ClientFeedbackConversationGroupMeta
+> = {
+  waiting_client: {
+    key: 'waiting_client',
+    label: '待我补充',
+    description: '客服已经给出回复或处理结论，当前更需要你确认结果或继续补充说明。',
+    emptyText: '当前没有需要你补充的反馈单。',
+  },
+  waiting_staff: {
+    key: 'waiting_staff',
+    label: '待客服处理',
+    description: '你的问题已进入队列，客服会在当前反馈单里继续受理和回复。',
+    emptyText: '当前没有等待客服处理的反馈单。',
+  },
+  done: {
+    key: 'done',
+    label: '已完成',
+    description: '当前反馈单已完成或关闭，可作为历史记录留存查询。',
+    emptyText: '当前还没有已完成的反馈单。',
+  },
+}
+
+export const SUPPORT_WORKBENCH_QUICK_VIEW_META = [
+  {
+    key: 'pending_acceptance',
+    label: '待受理',
+    description: '尚未由客服正式接入的反馈单，优先用于首轮响应。',
+  },
+  {
+    key: 'mine_processing',
+    label: '我的处理中',
+    description: '当前客服本人已接手且仍在处理中，便于连续跟进。',
+  },
+  {
+    key: 'waiting_client_reply',
+    label: '待客户回复',
+    description: '客服已经给出阶段性处理结果，下一步更依赖客户确认或补充。',
+  },
+  {
+    key: 'high_priority',
+    label: '高优先级',
+    description: '优先级为高或紧急的反馈单，用于快速聚焦影响更大的问题。',
+  },
+  {
+    key: 'sla_risk',
+    label: 'SLA 风险',
+    description: '即将超时或已经超时的反馈单，优先用于抢救处理时效。',
+  },
+] as const satisfies Array<Omit<SupportWorkbenchQuickViewDefinition, 'count'>>
+
+export const DEFAULT_SUPPORT_QUICK_REPLY_TEMPLATES: SupportQuickReplyTemplate[] = [
+  {
+    key: 'acknowledge_received',
+    label: '已收到反馈',
+    description: '用于首次接入或快速确认已接单。',
+    content: '已收到你的反馈，我们正在核对相关信息，会尽快继续跟进。',
+    suggestedStatuses: ['pending', 'processing'],
+  },
+  {
+    key: 'request_more_context',
+    label: '补充更多信息',
+    description: '用于排查前补充时间、步骤、截图等上下文。',
+    content: '为便于继续排查，请补充问题出现时间、操作步骤以及相关截图或订单号。',
+    suggestedStatuses: ['processing', 'resolved'],
+  },
+  {
+    key: 'processing_sync',
+    label: '处理中同步',
+    description: '用于告知问题仍在处理中，减少用户重复追问。',
+    content: '当前问题已转入处理中，如有新进展我们会第一时间在当前反馈单同步给你。',
+    suggestedStatuses: ['processing'],
+  },
+  {
+    key: 'resolved_confirm',
+    label: '请确认结果',
+    description: '用于阶段性处理完成后引导用户确认是否恢复正常。',
+    content: '处理方案已同步给你，请确认是否已恢复正常；如仍有问题，可直接在当前反馈单继续补充。',
+    suggestedStatuses: ['resolved'],
+  },
 ]
 
 const BACKEND_STATUS_TO_FRONTEND_MAP: Record<BackendConversationStatus, FeedbackIssueStatus> = {
@@ -381,6 +657,285 @@ const normalizeCategory = (value: string): FeedbackIssueCategory => {
     : 'other'
 }
 
+const normalizeLastMessageSenderRole = (
+  senderType: BackendConversationSummary['lastMessageSenderType'],
+): FeedbackMessageSenderRole => {
+  return senderType === 'service' ? 'staff' : senderType
+}
+
+/**
+ * 客户端当前更需要谁动作的最小判断规则：
+ * - `closed` 直接视为完成；
+ * - `resolved` 明确表示客服已给出结论，等待客户确认或补充；
+ * - 其余状态若客户端存在未读，则说明客服最近有新回复，优先归入“待我补充”；
+ * - 其他场景默认仍由客服继续处理。
+ */
+export const resolveClientFeedbackConversationGroupKey = (
+  conversation: FeedbackConversationRecord,
+): ClientFeedbackConversationGroupKey => {
+  if (conversation.status === 'closed') {
+    return 'done'
+  }
+  if (conversation.status === 'resolved' || conversation.unreadForClient > 0) {
+    return 'waiting_client'
+  }
+  return 'waiting_staff'
+}
+
+export const buildClientFeedbackConversationGroups = (
+  records: FeedbackConversationRecord[],
+): ClientFeedbackConversationGroup[] => {
+  return (['waiting_client', 'waiting_staff', 'done'] as const).map((groupKey) => {
+    const meta = CLIENT_FEEDBACK_CONVERSATION_GROUP_META_MAP[groupKey]
+    const conversations = records.filter((item) => resolveClientFeedbackConversationGroupKey(item) === groupKey)
+    return {
+      key: meta.key,
+      label: meta.label,
+      description: meta.description,
+      emptyText: meta.emptyText,
+      count: conversations.length,
+      conversations,
+    }
+  })
+}
+
+/**
+ * 详情页下一步提示统一从共享层生成，避免客户端列表页、详情页和后续卡片模块各写一套口径。
+ */
+export const buildClientFeedbackNextStepPrompt = (
+  conversation: FeedbackConversationRecord,
+): ClientFeedbackNextStepPrompt => {
+  const groupKey = resolveClientFeedbackConversationGroupKey(conversation)
+  const groupMeta = CLIENT_FEEDBACK_CONVERSATION_GROUP_META_MAP[groupKey]
+
+  if (conversation.status === 'closed') {
+    return {
+      groupKey,
+      groupLabel: groupMeta.label,
+      stageLabel: '当前反馈单已完成',
+      recentAction: '当前反馈单已经关闭，历史沟通记录会继续保留供你查询。',
+      nextStep: '如果仍有新的问题或出现新的异常，请重新创建一条反馈单。',
+    }
+  }
+
+  if (conversation.status === 'resolved') {
+    return {
+      groupKey,
+      groupLabel: groupMeta.label,
+      stageLabel: '等待你确认处理结果',
+      recentAction: '客服已给出阶段性处理结论或解决建议，等待你确认是否恢复正常。',
+      nextStep: '请先查看最新回复；如果问题仍未解决，可直接在当前反馈单继续补充说明。',
+    }
+  }
+
+  if (conversation.unreadForClient > 0) {
+    return {
+      groupKey,
+      groupLabel: groupMeta.label,
+      stageLabel: '客服刚刚有新回复',
+      recentAction: '客服在当前反馈单里补充了新的处理信息，系统正在提醒你查看。',
+      nextStep: '建议先阅读最新消息；若客服需要更多信息，可直接在下方继续回复。',
+    }
+  }
+
+  if (conversation.unreadForStaff > 0) {
+    return {
+      groupKey,
+      groupLabel: groupMeta.label,
+      stageLabel: '等待客服继续跟进',
+      recentAction: '你最近补充了新的问题说明，当前会话已回到客服处理队列。',
+      nextStep: '当前无需重复提交，保持消息畅通即可，客服会继续在本单内回复你。',
+    }
+  }
+
+  if (conversation.status === 'processing') {
+    return {
+      groupKey,
+      groupLabel: groupMeta.label,
+      stageLabel: '客服处理中',
+      recentAction: '客服已经接入当前反馈单，正在结合现有信息持续排查和处理。',
+      nextStep: '暂时无需重复描述，若后续有新增现象或线索，可直接补充到当前反馈单。',
+    }
+  }
+
+  return {
+    groupKey,
+    groupLabel: groupMeta.label,
+    stageLabel: '等待客服受理',
+    recentAction: '你的问题已经提交成功，系统正在等待客服正式接入。',
+    nextStep: '请保留当前反馈单；如问题影响范围扩大，可补充更具体的时间、现象与订单信息。',
+  }
+}
+
+const matchesSupportWorkbenchQuickView = (
+  conversation: FeedbackConversationRecord,
+  quickViewKey: SupportWorkbenchQuickViewKey,
+  currentUserId?: string | null,
+) => {
+  if (quickViewKey === 'pending_acceptance') {
+    return conversation.status === 'pending'
+  }
+  if (quickViewKey === 'mine_processing') {
+    return conversation.status === 'processing' && Boolean(currentUserId) && conversation.assigneeUserId === currentUserId
+  }
+  if (quickViewKey === 'waiting_client_reply') {
+    return resolveClientFeedbackConversationGroupKey(conversation) === 'waiting_client'
+  }
+  if (quickViewKey === 'sla_risk') {
+    const slaMeta = resolveSupportFeedbackConversationSla(conversation)
+    return slaMeta.level === 'warning' || slaMeta.level === 'overtime'
+  }
+  return conversation.priority === 'high' || conversation.priority === 'urgent'
+}
+
+export const buildSupportWorkbenchQuickViews = (
+  records: FeedbackConversationRecord[],
+  currentUserId?: string | null,
+): SupportWorkbenchQuickViewDefinition[] => {
+  return SUPPORT_WORKBENCH_QUICK_VIEW_META.map((item) => ({
+    ...item,
+    count: records.filter((record) => matchesSupportWorkbenchQuickView(record, item.key, currentUserId)).length,
+  }))
+}
+
+export const filterSupportFeedbackConversationsByQuickView = (
+  records: FeedbackConversationRecord[],
+  quickViewKey: SupportWorkbenchQuickViewKey,
+  currentUserId?: string | null,
+): FeedbackConversationRecord[] => {
+  return records.filter((record) => matchesSupportWorkbenchQuickView(record, quickViewKey, currentUserId))
+}
+
+/**
+ * 将分钟数压缩为适合工作台卡片展示的短文案：
+ * - 60 分钟内用“X 分钟”；
+ * - 超过 60 分钟后切换为“X 小时 Y 分钟”，便于快速感知积压量级。
+ */
+const formatSlaDuration = (minutes: number) => {
+  const safeMinutes = Math.max(0, Math.floor(minutes))
+  if (safeMinutes < 60) {
+    return `${safeMinutes} 分钟`
+  }
+
+  const hours = Math.floor(safeMinutes / 60)
+  const remainMinutes = safeMinutes % 60
+  if (remainMinutes === 0) {
+    return `${hours} 小时`
+  }
+  return `${hours} 小时 ${remainMinutes} 分钟`
+}
+
+/**
+ * 客服工作台 SLA 规则：
+ * - `pending` 视为首响阶段，要求更快接单；
+ * - `processing` 视为处理中跟进阶段，允许更长处理窗口；
+ * - `resolved/closed` 当前主要等待客户端动作或已完结，不纳入客服时效风险。
+ */
+export const resolveSupportFeedbackConversationSla = (
+  conversation: FeedbackConversationRecord,
+): SupportFeedbackConversationSlaMeta => {
+  if (conversation.status === 'resolved' || conversation.status === 'closed') {
+    return {
+      level: 'paused',
+      label: '当前不计时',
+      stageLabel: conversation.status === 'resolved' ? '等待客户确认' : '会话已关闭',
+      description: conversation.status === 'resolved' ? '当前阶段主要等待客户确认结果或继续补充。' : '当前会话已结束，不再纳入客服 SLA 风险。', // eslint-disable-line max-len
+      countdownText: '已暂停',
+      targetMinutes: null,
+      elapsedMinutes: 0,
+      remainingMinutes: null,
+      deadlineAt: null,
+      shouldHighlight: false,
+      sortWeight: 0,
+    }
+  }
+
+  const stageLabel = conversation.status === 'pending' ? '待接单首响' : '处理中跟进'
+  const targetMinutes = conversation.status === 'pending' ? 15 : 240
+  const warningMinutes = conversation.status === 'pending' ? 5 : 60
+  const referenceTime = Date.parse(conversation.lastMessageAt || conversation.updatedAt || conversation.createdAt)
+  const now = Date.now()
+  const safeReferenceTime = Number.isFinite(referenceTime) ? referenceTime : now
+  const elapsedMinutes = Math.max(0, Math.floor((now - safeReferenceTime) / 60000))
+  const remainingMinutes = targetMinutes - elapsedMinutes
+  const deadlineAt = new Date(safeReferenceTime + targetMinutes * 60000).toISOString()
+
+  if (remainingMinutes < 0) {
+    return {
+      level: 'overtime',
+      label: '已超时',
+      stageLabel,
+      description: `当前阶段已超时 ${formatSlaDuration(Math.abs(remainingMinutes))}，建议立即接单、回复或转派。`,
+      countdownText: `超时 ${formatSlaDuration(Math.abs(remainingMinutes))}`,
+      targetMinutes,
+      elapsedMinutes,
+      remainingMinutes,
+      deadlineAt,
+      shouldHighlight: true,
+      sortWeight: 3,
+    }
+  }
+
+  if (remainingMinutes <= warningMinutes) {
+    return {
+      level: 'warning',
+      label: '即将超时',
+      stageLabel,
+      description: `距离当前阶段超时还有 ${formatSlaDuration(remainingMinutes)}，建议优先处理。`,
+      countdownText: `剩余 ${formatSlaDuration(remainingMinutes)}`,
+      targetMinutes,
+      elapsedMinutes,
+      remainingMinutes,
+      deadlineAt,
+      shouldHighlight: true,
+      sortWeight: 2,
+    }
+  }
+
+  return {
+    level: 'normal',
+    label: '时效正常',
+    stageLabel,
+    description: `距离当前阶段超时还有 ${formatSlaDuration(remainingMinutes)}。`,
+    countdownText: `剩余 ${formatSlaDuration(remainingMinutes)}`,
+    targetMinutes,
+    elapsedMinutes,
+    remainingMinutes,
+    deadlineAt,
+    shouldHighlight: false,
+    sortWeight: 1,
+  }
+}
+
+/**
+ * 客服列表排序优先级：
+ * - 先按 SLA 风险暴露真正需要马上处理的单据；
+ * - 再按剩余时间与最近消息时间排序，减少高风险单据被普通新消息淹没。
+ */
+export const compareSupportFeedbackConversationPriority = (
+  left: FeedbackConversationRecord,
+  right: FeedbackConversationRecord,
+) => {
+  const leftSla = resolveSupportFeedbackConversationSla(left)
+  const rightSla = resolveSupportFeedbackConversationSla(right)
+
+  if (leftSla.sortWeight !== rightSla.sortWeight) {
+    return rightSla.sortWeight - leftSla.sortWeight
+  }
+
+  if (leftSla.remainingMinutes !== rightSla.remainingMinutes) {
+    if (leftSla.remainingMinutes == null) {
+      return 1
+    }
+    if (rightSla.remainingMinutes == null) {
+      return -1
+    }
+    return leftSla.remainingMinutes - rightSla.remainingMinutes
+  }
+
+  return right.lastMessageAt.localeCompare(left.lastMessageAt)
+}
+
 const mapMessage = (message: BackendConversationDetail['messages'][number]): FeedbackConversationMessage => {
   return {
     id: message.id,
@@ -409,12 +964,17 @@ const mapConversation = (
     clientAccount: conversation.clientAccount,
     clientDisplayName: conversation.clientUsername || conversation.clientAccount || '客户端用户',
     clientDepartmentName: conversation.departmentNameSnapshot || null,
+    assigneeUserId: conversation.assignedUserId ?? null,
+    assigneeUsername: conversation.assignedUsername ?? null,
     assigneeName: conversation.assignedDisplayName || null,
+    lastMessagePreview: conversation.lastMessagePreview || '',
+    lastMessageSenderRole: normalizeLastMessageSenderRole(conversation.lastMessageSenderType),
     lastMessageAt: conversation.lastMessageAt,
     unreadForClient: conversation.unreadForClientCount,
     unreadForStaff: conversation.unreadForServiceCount,
     createdAt: conversation.createdAt,
     updatedAt: conversation.updatedAt,
+    satisfaction: conversation.satisfaction ?? null,
     fields: {
       issueType: conversation.fields.issueType,
       category: normalizeCategory(conversation.fields.category),
@@ -459,6 +1019,14 @@ const buildApiBaseUrl = () => {
   return import.meta.env.VITE_API_BASE_URL ?? '/api'
 }
 
+const resolveApiOrigin = () => {
+  const apiBaseUrl = buildApiBaseUrl()
+  if (/^https?:\/\//.test(apiBaseUrl)) {
+    return new URL(apiBaseUrl).origin
+  }
+  return globalThis.window?.location.origin ?? ''
+}
+
 const buildStreamUrl = (path: string, token: string) => {
   const apiBaseUrl = buildApiBaseUrl()
   const base = /^https?:\/\//.test(apiBaseUrl)
@@ -478,10 +1046,31 @@ export const summarizeSupportFeedbackConversations = (records: FeedbackConversat
   return {
     ...summary,
     urgent: records.filter((item) => item.priority === 'urgent').length,
-    unassigned: records.filter((item) => !item.assigneeName).length,
-    waitingClientReply: records.filter((item) => item.unreadForClient > 0).length,
-    waitingStaffReply: records.filter((item) => item.unreadForStaff > 0).length,
+    unassigned: records.filter((item) => !item.assigneeUserId).length,
+    waitingClientReply: records.filter((item) => matchesSupportWorkbenchQuickView(item, 'waiting_client_reply')).length,
+    waitingStaffReply: records.filter((item) => resolveClientFeedbackConversationGroupKey(item) === 'waiting_staff').length,
+    slaRisk: records.filter((item) => {
+      const slaMeta = resolveSupportFeedbackConversationSla(item)
+      return slaMeta.level === 'warning' || slaMeta.level === 'overtime'
+    }).length,
   }
+}
+
+/**
+ * 统一把后端返回的相对附件地址解析成前端可直接访问的 URL：
+ * - 同源部署时直接保留 `/uploads/...`；
+ * - API 独立域名部署时自动补齐资源域名来源，避免详情页缩略图与新窗口预览失效。
+ */
+export const resolveFeedbackAttachmentUrl = (url?: string | null) => {
+  const normalizedUrl = url?.trim()
+  if (!normalizedUrl) {
+    return ''
+  }
+  if (/^https?:\/\//.test(normalizedUrl)) {
+    return normalizedUrl
+  }
+  const origin = resolveApiOrigin()
+  return origin ? new URL(normalizedUrl.replace(/^\//, ''), `${origin}/`).toString() : normalizedUrl
 }
 
 export const getClientFeedbackPortalConfig = async (): Promise<FeedbackPortalConfig> => {
@@ -513,6 +1102,23 @@ export const getClientFeedbackConversation = async (conversationId: string): Pro
     response.messages.filter((item) => !item.internalOnly).map(mapMessage),
     null,
   )
+}
+
+export const uploadClientFeedbackAttachment = async (file: File): Promise<FeedbackConversationMessageAttachment> => {
+  const { file: normalizedUploadFile } = await compressImageForUpload(file)
+  const formData = new FormData()
+  formData.append('file', normalizedUploadFile)
+  const response = await request<{
+    attachment: FeedbackConversationMessageAttachment
+  }>({
+    url: '/client-feedback/attachments',
+    method: 'POST',
+    data: formData,
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+  return response.attachment
 }
 
 export const createClientFeedbackConversation = async (input: CreateClientFeedbackConversationInput): Promise<FeedbackConversationRecord> => {
@@ -557,6 +1163,32 @@ export const appendClientFeedbackMessage = async (
       attachments: input.attachments ?? [],
     },
   })
+}
+
+export const confirmClientFeedbackResolved = async (
+  conversationId: string,
+): Promise<void> => {
+  await request({
+    url: `/client-feedback/conversations/${conversationId}/confirm-resolved`,
+    method: 'PATCH',
+  })
+}
+
+export const submitClientFeedbackSatisfaction = async (
+  conversationId: string,
+  input: SubmitClientFeedbackSatisfactionInput,
+): Promise<FeedbackSatisfactionRecord | null> => {
+  const response = await request<{
+    satisfaction: FeedbackSatisfactionRecord | null
+  }>({
+    url: `/client-feedback/conversations/${conversationId}/satisfaction`,
+    method: 'POST',
+    data: {
+      level: input.level,
+      comment: input.comment,
+    },
+  })
+  return response.satisfaction
 }
 
 export const listSupportFeedbackConversations = async (query: SupportFeedbackListQuery = {}): Promise<FeedbackConversationRecord[]> => {
@@ -668,6 +1300,33 @@ export const getCustomerServicePresence = async (): Promise<FeedbackServicePrese
   return request<FeedbackServicePresence>({
     url: '/customer-service/presence',
     method: 'GET',
+  })
+}
+
+/**
+ * 转派目标统一走客服域接口：
+ * - 避免客服工作台依赖管理员专用的用户治理接口权限；
+ * - 后端会提前过滤不可接单的角色与停用账号。
+ */
+export const listSupportAssignableUsers = async (): Promise<SupportAssignableUser[]> => {
+  return request<SupportAssignableUser[]>({
+    url: '/customer-service/assignees',
+    method: 'GET',
+  })
+}
+
+/**
+ * 显式更新负责人：
+ * - 当前客服接单时传自己的用户 ID；
+ * - 转派时传目标客服用户 ID，负责人变更与系统轨迹统一由后端收口。
+ */
+export const updateSupportConversationAssignee = async (conversationId: string, assigneeUserId: string): Promise<void> => {
+  await request({
+    url: `/customer-service/conversations/${conversationId}/assignee`,
+    method: 'PATCH',
+    data: {
+      assigneeUserId,
+    },
   })
 }
 
