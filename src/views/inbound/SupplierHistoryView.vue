@@ -493,10 +493,10 @@ onMounted(() => {
             @keyup.enter="handleSearch"
           />
           <el-radio-group v-model="statusFilter" size="default" class="history-filter-card__tabs" @change="handleSearch">
-            <el-radio-button label="all">全部状态</el-radio-button>
-            <el-radio-button label="pending">待入库</el-radio-button>
-            <el-radio-button label="verified">已入库</el-radio-button>
-            <el-radio-button label="cancelled">已取消</el-radio-button>
+            <el-radio-button value="all">全部状态</el-radio-button>
+            <el-radio-button value="pending">待入库</el-radio-button>
+            <el-radio-button value="verified">已入库</el-radio-button>
+            <el-radio-button value="cancelled">已取消</el-radio-button>
           </el-radio-group>
           <el-button type="primary" @click="handleSearch">搜索</el-button>
         </div>
