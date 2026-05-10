@@ -54,6 +54,7 @@ const replySubmitting = ref(false)
 const confirmingResolved = ref(false)
 const uploadingReplyAttachments = ref(false)
 const satisfactionSubmitting = ref(false)
+const satisfactionDialogVisible = ref(false)
 const conversation = ref<FeedbackConversationRecord | null>(null)
 const replyDraft = ref('')
 const replyAttachments = ref<FeedbackConversationMessageAttachment[]>([])
@@ -319,6 +320,9 @@ const loadConversationDetail = async (conversationId: string) => {
     conversation.value = detail
     satisfactionComment.value = detail.satisfaction?.comment || ''
     selectedSatisfactionLevel.value = detail.satisfaction?.level || 'satisfied'
+    if (detail.satisfaction) {
+      satisfactionDialogVisible.value = false
+    }
   } finally {
     detailLoading.value = false
     loading.value = false
@@ -471,6 +475,7 @@ const handleSubmitSatisfaction = async () => {
       level: selectedSatisfactionLevel.value,
       comment: normalizeSubmitText(satisfactionComment.value) || undefined,
     })
+    satisfactionDialogVisible.value = false
     await loadConversationDetail(conversation.value.id)
     reconnectTip.value = '已记录你的满意度评价，当前反馈单详情已同步更新。'
     ElMessage.success('满意度评价已提交')
@@ -512,6 +517,13 @@ const connectRealtime = () => {
       }, 3000)
     },
   })
+}
+
+const handleOpenSatisfactionDialog = () => {
+  if (!showSatisfactionEntry.value) {
+    return
+  }
+  satisfactionDialogVisible.value = true
 }
 
 watch(
@@ -745,34 +757,17 @@ onBeforeUnmount(() => {
                   </p>
                 </div>
 
-                <div v-else class="mt-3 space-y-3">
-                  <div class="grid gap-2 sm:grid-cols-3">
-                    <button
-                      v-for="(meta, level) in FEEDBACK_SATISFACTION_META_MAP"
-                      :key="level"
-                      type="button"
-                      class="rounded-[0.9rem] border px-3 py-3 text-left transition"
-                      :class="selectedSatisfactionLevel === level ? meta.className : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'"
-                      @click="selectedSatisfactionLevel = level"
-                    >
-                      <p class="text-sm font-semibold">{{ meta.label }}</p>
-                      <p class="mt-1 text-xs leading-5">{{ meta.description }}</p>
-                    </button>
-                  </div>
-                  <textarea
-                    v-model="satisfactionComment"
-                    class="feedback-textarea feedback-textarea--compact"
-                    maxlength="300"
-                    placeholder="可选填写：比如回复速度、结论清晰度、是否仍有改进建议。"
-                  />
-                  <div class="flex justify-end">
+                <div v-else class="mt-3 rounded-[0.95rem] bg-slate-50 px-3 py-3">
+                  <p class="text-sm leading-6 text-slate-600">
+                    你可以通过弹窗快速评价本次处理体验，并补充对回复速度、结论清晰度或改进建议的看法。
+                  </p>
+                  <div class="mt-3 flex justify-end">
                     <button
                       type="button"
-                      class="rounded-[0.9rem] bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
-                      :disabled="satisfactionSubmitting"
-                      @click="handleSubmitSatisfaction"
+                      class="rounded-[0.9rem] bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800"
+                      @click="handleOpenSatisfactionDialog"
                     >
-                      {{ satisfactionSubmitting ? '提交中...' : '提交处理评价' }}
+                      填写处理评价
                     </button>
                   </div>
                 </div>
@@ -1095,6 +1090,60 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </Teleport>
+
+    <el-dialog
+      v-model="satisfactionDialogVisible"
+      class="client-feedback-satisfaction-dialog ylink-dialog-height-mode--auto"
+      width="32rem"
+      title="满意度评价"
+      append-to-body
+      align-center
+      destroy-on-close
+    >
+      <div class="space-y-4">
+        <p class="text-sm leading-6 text-slate-500">
+          请选择你对本次处理结果的感受，如有补充建议，也可以一并写给我们。
+        </p>
+        <div class="grid gap-2 sm:grid-cols-3">
+          <button
+            v-for="(meta, level) in FEEDBACK_SATISFACTION_META_MAP"
+            :key="level"
+            type="button"
+            class="rounded-[0.9rem] border px-3 py-3 text-left transition"
+            :class="selectedSatisfactionLevel === level ? meta.className : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'"
+            @click="selectedSatisfactionLevel = level"
+          >
+            <p class="text-sm font-semibold">{{ meta.label }}</p>
+            <p class="mt-1 text-xs leading-5">{{ meta.description }}</p>
+          </button>
+        </div>
+        <textarea
+          v-model="satisfactionComment"
+          class="feedback-textarea feedback-textarea--compact"
+          maxlength="300"
+          placeholder="可选填写：比如回复速度、结论清晰度、是否仍有改进建议。"
+        />
+      </div>
+      <template #footer>
+        <div class="flex justify-end gap-3">
+          <button
+            type="button"
+            class="rounded-[0.9rem] border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:border-slate-300 hover:bg-slate-50"
+            @click="satisfactionDialogVisible = false"
+          >
+            取消
+          </button>
+          <button
+            type="button"
+            class="rounded-[0.9rem] bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+            :disabled="satisfactionSubmitting"
+            @click="handleSubmitSatisfaction"
+          >
+            {{ satisfactionSubmitting ? '提交中...' : '提交处理评价' }}
+          </button>
+        </div>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -1208,5 +1257,21 @@ onBeforeUnmount(() => {
   border-radius: 1.25rem;
   object-fit: contain;
   background: rgb(248 250 252);
+}
+
+.client-feedback-satisfaction-dialog :deep(.el-dialog) {
+  border-radius: 1.5rem;
+}
+
+.client-feedback-satisfaction-dialog :deep(.el-dialog__header) {
+  padding-bottom: 0.5rem;
+}
+
+.client-feedback-satisfaction-dialog :deep(.el-dialog__body) {
+  padding-top: 0.5rem;
+}
+
+.client-feedback-satisfaction-dialog :deep(.el-dialog__footer) {
+  padding-top: 0;
 }
 </style>
