@@ -77,9 +77,12 @@ export const routeViewLoaders = {
   products: () => import('@/views/product-center/ProductCenterView.vue'),
   tags: () => import('@/views/base-data/TagManageView.vue'),
 
-  // 送货单与扫码入库模块
+  // 送货单与扫码入库模块：
+  // - 供货方“录入”和“历史”两个旧入口都必须回到同一个共享工作台壳层；
+  // - 否则在外层路由 KeepAlive 复用相同 viewKey 时，会出现“同 key 但不同组件类型”切换，
+  //   进而打断 Vue 的反激活链路，触发 deactivate 相关运行时异常。
   'supplier-delivery': () => import('@/views/inbound/SupplierWorkbenchView.vue'),
-  'supplier-history': () => import('@/views/inbound/SupplierHistoryView.vue'),
+  'supplier-history': () => import('@/views/inbound/SupplierWorkbenchView.vue'),
   'inbound-scan': () => import('@/views/inbound/InboundScanView.vue'),
 
   'o2o-console-products': () => import('@/views/product-center/ProductCenterView.vue'),
