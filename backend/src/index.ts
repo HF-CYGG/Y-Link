@@ -11,6 +11,7 @@ import { maskDatabaseRuntimeOverride, readDatabaseRuntimeOverride } from './conf
 import { env, envLoadContext } from './config/env.js'
 import { authService } from './services/auth.service.js'
 import { systemConfigService } from './services/system-config.service.js'
+import { migrateLegacyUploadReferences } from './utils/upload-migration.js'
 import {
   buildEffectiveDatabaseSummary,
   buildRuntimeOverrideStatusSummary,
@@ -121,6 +122,13 @@ async function bootstrap(): Promise<void> {
   logLine('STEP', 'initialize database schema')
   const schemaInitResult = await initializeDatabaseSchemaIfNeeded(AppDataSource)
   logLine('SCHEMA', `action=${schemaInitResult.action} reason=${schemaInitResult.reason}`)
+  logLine('STEP', 'migrate legacy upload references')
+  const uploadMigrationResult = await migrateLegacyUploadReferences(AppDataSource)
+  logLine(
+    'UPLOAD MIGRATION',
+    `products=${uploadMigrationResult.productThumbnailUpdatedCount} feedbackMessages=${uploadMigrationResult.feedbackAttachmentUpdatedCount} movedFiles=${uploadMigrationResult.movedFileCount}`,
+    uploadMigrationResult.movedFileCount > 0 ? 'success' : 'info',
+  )
   logLine('STEP', 'ensure default admin')
   const adminBootstrap = await authService.ensureDefaultAdmin()
   logLine('STEP', 'ensure default system configs')

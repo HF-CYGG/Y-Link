@@ -12,16 +12,19 @@
 
 import type { EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
+import { resolvePermissionsByRole } from '../constants/auth-permissions.js'
 import {
   ClientFeedbackConversation,
   CLIENT_FEEDBACK_CONVERSATION_STATUSES,
   CLIENT_FEEDBACK_ISSUE_TYPES,
   CLIENT_FEEDBACK_LAST_SENDER_TYPES,
   CLIENT_FEEDBACK_PRIORITIES,
+  CLIENT_FEEDBACK_SATISFACTION_LEVELS,
   type ClientFeedbackIssueType,
   type ClientFeedbackConversationIssueTag,
   type ClientFeedbackConversationStatus,
   type ClientFeedbackPriority,
+  type ClientFeedbackSatisfactionLevel,
 } from '../entities/client-feedback-conversation.entity.js'
 import {
   ClientFeedbackMessage,
@@ -30,6 +33,7 @@ import {
   type ClientFeedbackSenderType,
 } from '../entities/client-feedback-message.entity.js'
 import { ClientUser } from '../entities/client-user.entity.js'
+import { SysUser } from '../entities/sys-user.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import type { ClientAuthContext } from '../types/client-auth.js'
 import { isUniqueConstraintError } from '../utils/database-errors.js'
@@ -56,6 +60,7 @@ export const CLIENT_FEEDBACK_ATTACHMENT_MIME_TYPE_MAX_LENGTH = 128
 export const CLIENT_FEEDBACK_MAX_ATTACHMENTS_PER_MESSAGE = 9
 export const CLIENT_FEEDBACK_MAX_TAGS = 10
 export const CLIENT_FEEDBACK_MAX_TAG_LENGTH = 24
+export const CLIENT_FEEDBACK_SATISFACTION_COMMENT_MAX_LENGTH = 300
 
 const FEEDBACK_CONVERSATION_NO_UNIQUE_CONSTRAINT_MATCHER = {
   mysqlConstraint: 'uk_client_feedback_conversation_no',
@@ -83,6 +88,7 @@ export interface ClientFeedbackConversationSummary {
   unreadForServiceCount: number
   closedAt: Date | null
   fields: ClientFeedbackConversationFields
+  satisfaction: ClientFeedbackSatisfactionView | null
   createdAt: Date
   updatedAt: Date
   assignedToCurrentUser?: boolean
@@ -122,6 +128,12 @@ export interface ClientFeedbackInternalRemarkView {
   updatedByUserId: string | null
   updatedByUsername: string | null
   updatedByDisplayName: string | null
+}
+
+export interface ClientFeedbackSatisfactionView {
+  level: ClientFeedbackSatisfactionLevel
+  comment: string | null
+  ratedAt: Date
 }
 
 export interface ClientFeedbackConversationDetail {
@@ -201,6 +213,15 @@ export interface AppendCustomerServiceMessageInput {
   attachments?: ClientFeedbackMessageAttachment[]
 }
 
+/**
+ * 接单/转派统一入参：
+ * - 当前客服接单时直接传自己的用户 ID；
+ * - 转派时传目标客服用户 ID，避免路由层拆出两套近似结构。
+ */
+export interface UpdateCustomerServiceConversationAssigneeInput {
+  assigneeUserId: string
+}
+
 export interface UpdateCustomerServiceConversationStatusInput {
   status: ClientFeedbackConversationStatus
 }
@@ -221,6 +242,23 @@ export interface UpdateCustomerServiceIssueFieldsInput {
 
 export interface UpdateCustomerServiceInternalRemarkInput {
   content: string
+}
+
+export interface SubmitClientFeedbackSatisfactionInput {
+  level: ClientFeedbackSatisfactionLevel
+  comment?: string
+}
+
+/**
+ * 客服工作台可选负责人结构：
+ * - 仅保留转派选择所需字段；
+ * - 不暴露密码、最后登录等与客服处理无关的信息。
+ */
+export interface CustomerServiceAssignableUser {
+  id: string
+  username: string
+  displayName: string
+  role: string
 }
 
 type ConversationMessageWriter =
@@ -247,6 +285,8 @@ class ClientFeedbackService {
   private readonly conversationRepo = AppDataSource.getRepository(ClientFeedbackConversation)
 
   private readonly clientUserRepo = AppDataSource.getRepository(ClientUser)
+
+  private readonly sysUserRepo = AppDataSource.getRepository(SysUser)
 
   private parseJsonArray<T>(rawValue: string | null | undefined, fallback: T[]): T[] {
     const text = rawValue?.trim()
@@ -427,6 +467,13 @@ class ClientFeedbackService {
     return priority
   }
 
+  private normalizeSatisfactionLevel(level: ClientFeedbackSatisfactionLevel) {
+    if (!CLIENT_FEEDBACK_SATISFACTION_LEVELS.includes(level)) {
+      throw new BizError('满意度评价档位非法', 400)
+    }
+    return level
+  }
+
   private buildAvailability(
     config: Awaited<ReturnType<typeof systemConfigService.getCustomerServiceConfigs>>,
     session: CustomerServiceRealtimeSessionSnapshot = customerServiceRealtimeService.buildServiceSessionSnapshot(),
@@ -493,6 +540,7 @@ class ClientFeedbackService {
       unreadForServiceCount: conversation.unreadForServiceCount,
       closedAt: conversation.closedAt,
       fields: this.buildConversationFields(conversation),
+      satisfaction: this.buildSatisfactionView(conversation),
       createdAt: conversation.createdAt,
       updatedAt: conversation.updatedAt,
       assignedToCurrentUser: currentServiceUserId ? conversation.assignedUserId === currentServiceUserId : undefined,
@@ -562,6 +610,57 @@ class ClientFeedbackService {
       throw new BizError('反馈会话不存在', 404)
     }
     return conversation
+  }
+
+  /**
+   * 负责人合法性校验：
+   * - 只能转派给启用中的后台用户；
+   * - 目标用户必须具备客服工作台查看与回复权限，避免把工单挂给无处理能力的账号。
+   */
+  private async requireAssignableServiceUser(userId: string, manager?: EntityManager) {
+    const normalizedUserId = userId.trim()
+    if (!normalizedUserId) {
+      throw new BizError('负责人不能为空', 400)
+    }
+
+    const repository = (manager ?? AppDataSource.manager).getRepository(SysUser)
+    const user = await repository.findOne({ where: { id: normalizedUserId } })
+    if (!user) {
+      throw new BizError('目标负责人不存在', 404)
+    }
+    if (user.status !== 'enabled') {
+      throw new BizError('目标负责人已停用，暂不能接单', 400)
+    }
+
+    const permissions = resolvePermissionsByRole(user.role)
+    const hasCustomerServicePermission = permissions.includes('customer_service:view') && permissions.includes('customer_service:reply')
+    if (!hasCustomerServicePermission) {
+      throw new BizError('目标负责人不具备客服工作台处理权限', 400)
+    }
+    return user
+  }
+
+  /**
+   * 明确会话当前由谁负责：
+   * - 显式接单/转派模型下，回复和状态流转应由负责人执行；
+   * - 若未接单或当前负责人不是操作者，需要先通过接单/转派入口完成归属确认。
+   */
+  private ensureConversationOwnedByActor(conversation: ClientFeedbackConversation, actor: AuthUserContext) {
+    if (!conversation.assignedUserId) {
+      throw new BizError('当前会话尚未接单，请先接单后再继续处理', 400)
+    }
+    if (conversation.assignedUserId !== actor.userId) {
+      throw new BizError(`当前会话由 ${conversation.assignedDisplayName || conversation.assignedUsername || '其他客服'} 负责，请先转派或接回自己后再操作`, 400)
+    }
+  }
+
+  private buildAssignableUserView(user: SysUser): CustomerServiceAssignableUser {
+    return {
+      id: user.id,
+      username: user.username,
+      displayName: user.displayName,
+      role: user.role,
+    }
   }
 
   private async requireOwnedConversation(id: string, clientAuth: ClientAuthContext, manager?: EntityManager) {
@@ -1086,6 +1185,86 @@ class ClientFeedbackService {
     }
   }
 
+  async submitConversationSatisfactionByClient(
+    id: string,
+    input: SubmitClientFeedbackSatisfactionInput,
+    clientAuth: ClientAuthContext,
+    requestMeta?: RequestMeta,
+  ) {
+    const clientSnapshot = await this.getClientUserSnapshot(clientAuth.userId)
+    const level = this.normalizeSatisfactionLevel(input.level)
+    const comment = this.normalizeOptionalLongText(
+      input.comment,
+      '满意度补充说明',
+      CLIENT_FEEDBACK_SATISFACTION_COMMENT_MAX_LENGTH,
+    )
+
+    const result = await AppDataSource.transaction(async (manager) => {
+      const conversation = await this.requireOwnedConversation(id, clientAuth, manager)
+      if (conversation.status !== 'resolved' && conversation.status !== 'closed') {
+        throw new BizError('当前反馈单尚未进入可评价阶段', 400)
+      }
+
+      const before = this.buildSatisfactionView(conversation)
+      const now = new Date()
+      conversation.clientSatisfactionLevel = level
+      conversation.clientSatisfactionComment = comment
+      conversation.clientSatisfactionRatedAt = now
+      await manager.getRepository(ClientFeedbackConversation).save(conversation)
+
+      await auditService.record(
+        {
+          actionType: 'client_feedback.submit_satisfaction',
+          actionLabel: '客户端提交反馈满意度评价',
+          targetType: 'feedback_conversation',
+          targetId: conversation.id,
+          targetCode: conversation.conversationNo,
+          actor: {
+            userId: clientAuth.userId,
+            username: clientAuth.account,
+            displayName: clientAuth.realName || clientSnapshot.clientUsername || clientSnapshot.clientAccount,
+          },
+          requestMeta,
+          detail: {
+            before,
+            after: this.buildSatisfactionView(conversation),
+          },
+        },
+        manager,
+      )
+
+      return {
+        conversation,
+      }
+    })
+
+    this.publishConversationEvent('conversation_satisfaction_updated', result.conversation, {
+      ratedBy: 'client',
+      satisfaction: this.buildSatisfactionView(result.conversation),
+    })
+
+    return {
+      conversation: this.buildConversationSummary(result.conversation),
+      satisfaction: this.buildSatisfactionView(result.conversation),
+    }
+  }
+
+  /**
+   * 客户端满意度评价统一按可空对象输出：
+   * - 未评价时返回 null，前端据此决定展示“去评价”还是“已评价结果”；
+   * - 已评价时保留时间与补充说明，避免详情页只能看到档位看不到上下文。
+   */
+  private buildSatisfactionView(conversation: ClientFeedbackConversation): ClientFeedbackSatisfactionView | null {
+    if (!conversation.clientSatisfactionLevel || !conversation.clientSatisfactionRatedAt) {
+      return null
+    }
+    return {
+      level: conversation.clientSatisfactionLevel,
+      comment: conversation.clientSatisfactionComment?.trim() || null,
+      ratedAt: conversation.clientSatisfactionRatedAt,
+    }
+  }
+
   async listServiceConversations(query: CustomerServiceConversationListQuery, actor: AuthUserContext) {
     const qb = this.conversationRepo.createQueryBuilder('conversation')
 
@@ -1170,14 +1349,11 @@ class ClientFeedbackService {
       if (conversation.status === 'closed') {
         throw new BizError('当前反馈会话已关闭，请先重新打开后再回复', 400)
       }
+      this.ensureConversationOwnedByActor(conversation, actor)
 
       // 客服回复只应把“待处理”推进到“处理中”。
       // 若会话已被人工标记为“已解决”，继续补充回复时应保持已解决状态，不应回退。
       const nextConversationStatus = conversation.status === 'open' ? 'processing' : conversation.status
-
-      conversation.assignedUserId = actor.userId
-      conversation.assignedUsername = actor.username
-      conversation.assignedDisplayName = actor.displayName
 
       const message = await this.createMessage(
         manager,
@@ -1233,6 +1409,7 @@ class ClientFeedbackService {
 
     const result = await AppDataSource.transaction(async (manager) => {
       const conversation = await this.requireConversationById(id, manager)
+      this.ensureConversationOwnedByActor(conversation, actor)
       if (conversation.status === input.status) {
         return {
           conversation,
@@ -1243,9 +1420,6 @@ class ClientFeedbackService {
 
       const statusBefore = conversation.status
       conversation.status = input.status
-      conversation.assignedUserId = actor.userId
-      conversation.assignedUsername = actor.username
-      conversation.assignedDisplayName = actor.displayName
       conversation.closedAt = input.status === 'closed' ? new Date() : null
       await manager.getRepository(ClientFeedbackConversation).save(conversation)
 
@@ -1291,6 +1465,154 @@ class ClientFeedbackService {
         ? this.buildMessageView(result.systemMessage, { scope: 'service', userId: actor.userId })
         : undefined
       this.publishConversationEvent('conversation_status_changed', result.conversation, { status: result.conversation.status }, systemMessageView)
+    }
+
+    return {
+      changed: result.changed,
+      conversation: this.buildConversationSummary(result.conversation, actor.userId),
+    }
+  }
+
+  /**
+   * 可接单客服列表：
+   * - 当前仅筛选启用中的 admin/operator；
+   * - 再通过权限集合二次过滤，避免后续角色权限变化时漏网。
+   */
+  async listAssignableServiceUsers(): Promise<CustomerServiceAssignableUser[]> {
+    const list = await this.sysUserRepo
+      .createQueryBuilder('user')
+      .where('user.status = :status', { status: 'enabled' })
+      .andWhere('user.role IN (:...roles)', { roles: ['admin', 'operator'] })
+      .orderBy('user.displayName', 'ASC')
+      .addOrderBy('user.id', 'DESC')
+      .getMany()
+
+    return list
+      .filter((user) => {
+        const permissions = resolvePermissionsByRole(user.role)
+        return permissions.includes('customer_service:view') && permissions.includes('customer_service:reply')
+      })
+      .map((user) => this.buildAssignableUserView(user))
+  }
+
+  /**
+   * 显式更新负责人：
+   * - 未分配 -> 当前自己：视为接单；
+   * - 任意负责人 -> 其他客服：视为转派；
+   * - 未分配 -> 其他客服：视为明确指派，同样保留系统消息与审计痕迹。
+   */
+  async updateConversationAssignee(
+    id: string,
+    input: UpdateCustomerServiceConversationAssigneeInput,
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ) {
+    const targetUserId = input.assigneeUserId.trim()
+    const result = await AppDataSource.transaction(async (manager) => {
+      const conversation = await this.requireConversationById(id, manager)
+      const targetUser = await this.requireAssignableServiceUser(targetUserId, manager)
+      const beforeAssignee = {
+        userId: conversation.assignedUserId,
+        username: conversation.assignedUsername,
+        displayName: conversation.assignedDisplayName,
+      }
+      const statusBefore = conversation.status
+
+      if (beforeAssignee.userId === targetUser.id) {
+        return {
+          changed: false,
+          conversation,
+          systemMessage: null as ClientFeedbackMessage | null,
+        }
+      }
+
+      conversation.assignedUserId = targetUser.id
+      conversation.assignedUsername = targetUser.username
+      conversation.assignedDisplayName = targetUser.displayName
+      if (conversation.status === 'open') {
+        conversation.status = 'processing'
+      }
+      await manager.getRepository(ClientFeedbackConversation).save(conversation)
+
+      const isTakeOver = targetUser.id === actor.userId
+      const hasBeforeAssignee = Boolean(beforeAssignee.userId)
+      let systemMessageContent = `会话已由 ${beforeAssignee.displayName || beforeAssignee.username || '原负责人'} 转派给 ${targetUser.displayName}，当前负责人已更新。`
+      if (!hasBeforeAssignee) {
+        systemMessageContent = isTakeOver
+          ? `客服 ${targetUser.displayName} 已接单，当前负责人已更新为 ${targetUser.displayName}。`
+          : `会话已指派给客服 ${targetUser.displayName} 跟进，当前负责人已更新。`
+      }
+
+      let actionType = 'customer_service.transfer'
+      if (!hasBeforeAssignee) {
+        actionType = isTakeOver ? 'customer_service.take_over' : 'customer_service.assign'
+      }
+
+      let actionLabel = '转派反馈负责人'
+      if (!hasBeforeAssignee) {
+        actionLabel = isTakeOver ? '客服接单' : '指派反馈负责人'
+      }
+
+      const systemMessage = await this.createMessage(
+        manager,
+        conversation,
+        {
+          senderType: 'system',
+          senderUserId: null,
+          senderName: '系统',
+          conversationStatus: conversation.status,
+        },
+        systemMessageContent,
+        'system',
+      )
+
+      await auditService.record(
+        {
+          actionType,
+          actionLabel,
+          targetType: 'feedback_conversation',
+          targetId: conversation.id,
+          targetCode: conversation.conversationNo,
+          actor,
+          requestMeta,
+          detail: {
+            assigneeBeforeUserId: beforeAssignee.userId,
+            assigneeBeforeUsername: beforeAssignee.username,
+            assigneeBeforeDisplayName: beforeAssignee.displayName,
+            assigneeAfterUserId: targetUser.id,
+            assigneeAfterUsername: targetUser.username,
+            assigneeAfterDisplayName: targetUser.displayName,
+            statusBefore,
+            statusAfter: conversation.status,
+          },
+        },
+        manager,
+      )
+
+      return {
+        changed: true,
+        conversation,
+        systemMessage,
+        beforeAssignee,
+        targetUser,
+      }
+    })
+
+    if (result.changed) {
+      const systemMessageView = result.systemMessage
+        ? this.buildMessageView(result.systemMessage, { scope: 'service', userId: actor.userId })
+        : undefined
+      this.publishConversationEvent(
+        'conversation_assignee_updated',
+        result.conversation,
+        {
+          assigneeBeforeUserId: result.beforeAssignee?.userId ?? null,
+          assigneeBeforeDisplayName: result.beforeAssignee?.displayName ?? null,
+          assigneeAfterUserId: result.targetUser?.id ?? null,
+          assigneeAfterDisplayName: result.targetUser?.displayName ?? null,
+        },
+        systemMessageView,
+      )
     }
 
     return {

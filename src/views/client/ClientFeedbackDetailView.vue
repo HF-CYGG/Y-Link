@@ -1,12 +1,13 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/client/ClientFeedbackDetailView.vue
- * 文件职责：提供客户端单条反馈单的独立详情页，集中展示 Issue 字段、会话记录与继续补充说明。
+ * 文件职责：提供客户端单条反馈单的独立详情页，集中展示 Issue 字段、附件证据、满意度评价与继续补充说明。
  * 实现逻辑：
  * - 页面按路由参数加载当前反馈单详情，进入后自动续接实时状态和消息变化；
+ * - 附件与评价都复用当前反馈单详情接口回显，尽量不打断既有确认已解决与实时续接链路；
  * - 仅在当前会话发生变化时重拉详情，避免返回列表页才能看到最新处理进度。
  * 维护说明：
- * - 若后续接入附件上传、满意度评价或关闭反馈，可继续在本页扩展；
+ * - 当前附件上传仅开放图片类型，若后续扩展文档附件，需要同步补充预览与安全策略；
  * - 列表页仅保留导航职责，详情相关交互统一在此页维护。
  */
 
@@ -17,16 +18,23 @@ import {
   buildClientFeedbackNextStepPrompt,
   FEEDBACK_CATEGORY_OPTIONS,
   FEEDBACK_PRIORITY_META_MAP,
+  FEEDBACK_SATISFACTION_META_MAP,
   FEEDBACK_STATUS_META_MAP,
   appendClientFeedbackMessage,
   confirmClientFeedbackResolved,
   getClientFeedbackConversation,
   getClientFeedbackPortalConfig,
   openFeedbackRealtimeStream,
+  resolveFeedbackAttachmentUrl,
+  submitClientFeedbackSatisfaction,
+  uploadClientFeedbackAttachment,
   type FeedbackConversationRecord,
+  type FeedbackConversationMessageAttachment,
   type FeedbackIssueCategory,
+  type FeedbackMessageSenderRole,
   type FeedbackPortalAvailability,
   type FeedbackRealtimeConnection,
+  type FeedbackSatisfactionLevel,
 } from '@/api/modules/customer-service-feedback'
 import { useClientAuthStore } from '@/store'
 import pinia from '@/store/pinia'
@@ -37,17 +45,26 @@ import { normalizeSubmitText } from '@/utils/submit-feedback'
 const route = useRoute()
 const router = useRouter()
 const clientAuthStore = useClientAuthStore(pinia)
+const FEEDBACK_ATTACHMENT_LIMIT = 9
+const FEEDBACK_ATTACHMENT_MAX_SIZE = 10 * 1024 * 1024
 
 const loading = ref(false)
 const detailLoading = ref(false)
 const replySubmitting = ref(false)
 const confirmingResolved = ref(false)
+const uploadingReplyAttachments = ref(false)
+const satisfactionSubmitting = ref(false)
 const conversation = ref<FeedbackConversationRecord | null>(null)
 const replyDraft = ref('')
+const replyAttachments = ref<FeedbackConversationMessageAttachment[]>([])
+const satisfactionComment = ref('')
+const selectedSatisfactionLevel = ref<FeedbackSatisfactionLevel>('satisfied')
 const replyTextareaRef = ref<HTMLTextAreaElement | null>(null)
+const replyAttachmentInputRef = ref<HTMLInputElement | null>(null)
 const availability = ref<FeedbackPortalAvailability | null>(null)
 const realtimeState = ref<'connecting' | 'online' | 'offline'>('offline')
 const reconnectTip = ref('进入页面后会自动续接当前会话。')
+const previewImageUrl = ref('')
 let realtimeConnection: FeedbackRealtimeConnection | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -62,6 +79,62 @@ const offlineFaqEntries = computed(() => availability.value?.offlineFaqs ?? [])
 const showOfflineFaq = computed(() => Boolean(availability.value && !availability.value.isOnline && offlineFaqEntries.value.length))
 const canConfirmResolved = computed(() => conversation.value?.status === 'resolved')
 const shouldShowReplyComposer = computed(() => conversation.value?.status !== 'closed')
+const canRateSatisfaction = computed(() => {
+  return conversation.value?.status === 'resolved' || conversation.value?.status === 'closed'
+})
+const hasRatedSatisfaction = computed(() => Boolean(conversation.value?.satisfaction))
+const showSatisfactionEntry = computed(() => canRateSatisfaction.value && !hasRatedSatisfaction.value)
+const currentSatisfactionMeta = computed(() => {
+  const level = conversation.value?.satisfaction?.level
+  return level ? FEEDBACK_SATISFACTION_META_MAP[level] : null
+})
+const conversationAttachmentEntries = computed(() => {
+  const currentConversation = conversation.value
+  if (!currentConversation) {
+    return []
+  }
+  return currentConversation.messages.flatMap((message) => {
+    return message.attachments.map((attachment) => ({
+      id: `${message.id}-${attachment.url}`,
+      messageId: message.id,
+      senderName: getMessageTitle(message.senderRole, message.senderName),
+      senderRole: message.senderRole,
+      createdAt: message.createdAt,
+      attachment,
+    }))
+  })
+})
+
+type FeedbackProgressStepState = 'done' | 'current' | 'upcoming'
+
+const resolveProgressStepIndex = (currentConversation: FeedbackConversationRecord | null) => {
+  if (currentConversation === null) {
+    return -1
+  }
+  if (currentConversation.status === 'closed') {
+    return 3
+  }
+  if (currentConversation.status === 'resolved' || currentConversation.unreadForClient > 0) {
+    return 2
+  }
+  if (currentConversation.status === 'processing' || currentConversation.unreadForStaff > 0) {
+    return 1
+  }
+  return 0
+}
+
+const resolveProgressStepState = (
+  currentStepIndex: number,
+  stepIndex: number,
+): FeedbackProgressStepState => {
+  if (currentStepIndex > stepIndex) {
+    return 'done'
+  }
+  if (currentStepIndex === stepIndex) {
+    return 'current'
+  }
+  return 'upcoming'
+}
 
 /**
  * 详情页进度条采用固定四阶段表达：
@@ -71,41 +144,32 @@ const shouldShowReplyComposer = computed(() => conversation.value?.status !== 'c
  * - 已完成：会话关闭，作为历史记录保留。
  */
 const progressSteps = computed(() => {
-  const currentConversation = conversation.value
-  const currentStepIndex = !currentConversation
-    ? -1
-    : currentConversation.status === 'closed'
-      ? 3
-      : currentConversation.status === 'resolved' || currentConversation.unreadForClient > 0
-        ? 2
-        : currentConversation.status === 'processing' || currentConversation.unreadForStaff > 0
-          ? 1
-          : 0
+  const currentStepIndex = resolveProgressStepIndex(conversation.value)
 
   return [
     {
       key: 'submitted',
       label: '已提交',
       description: '反馈单已经创建，系统会保留完整上下文。',
-      state: currentStepIndex > 0 ? 'done' : currentStepIndex === 0 ? 'current' : 'upcoming',
+      state: resolveProgressStepState(currentStepIndex, 0),
     },
     {
       key: 'processing',
       label: '客服跟进中',
       description: '客服会基于现有信息受理、排查并持续回复。',
-      state: currentStepIndex > 1 ? 'done' : currentStepIndex === 1 ? 'current' : 'upcoming',
+      state: resolveProgressStepState(currentStepIndex, 1),
     },
     {
       key: 'waiting_client',
       label: '待我确认',
       description: '客服已给出阶段性回复，当前更需要你查看或继续补充。',
-      state: currentStepIndex > 2 ? 'done' : currentStepIndex === 2 ? 'current' : 'upcoming',
+      state: resolveProgressStepState(currentStepIndex, 2),
     },
     {
       key: 'completed',
       label: '已完成',
       description: '当前反馈单已关闭，历史记录继续保留。',
-      state: currentStepIndex === 3 ? 'current' : 'upcoming',
+      state: resolveProgressStepState(currentStepIndex, 3),
     },
   ] as const
 })
@@ -130,7 +194,7 @@ const getCategoryLabel = (category: FeedbackIssueCategory) => {
  * - 客服消息明确标记为“客服”；
  * - 系统消息统一降级为“系统通知”，避免和人工回复混淆。
  */
-const getMessageRoleLabel = (senderRole: 'client' | 'staff' | 'system') => {
+const getMessageRoleLabel = (senderRole: FeedbackMessageSenderRole) => {
   if (senderRole === 'client') {
     return '我'
   }
@@ -145,7 +209,7 @@ const getMessageRoleLabel = (senderRole: 'client' | 'staff' | 'system') => {
  * - 系统消息不再突出具体发送者姓名，而是直接展示“系统通知”；
  * - 客服与客户端仍保留原始发送者姓名，方便用户识别真实回复人。
  */
-const getMessageTitle = (senderRole: 'client' | 'staff' | 'system', senderName: string) => {
+const getMessageTitle = (senderRole: FeedbackMessageSenderRole, senderName: string) => {
   if (senderRole === 'system') {
     return '系统通知'
   }
@@ -158,7 +222,7 @@ const getMessageTitle = (senderRole: 'client' | 'staff' | 'system', senderName: 
  * - 客服消息使用普通白卡片，作为主要人工回复；
  * - 系统消息弱化为更窄、更浅、更轻的通知条，降低视觉占比。
  */
-const getMessageCardClass = (senderRole: 'client' | 'staff' | 'system') => {
+const getMessageCardClass = (senderRole: FeedbackMessageSenderRole) => {
   if (senderRole === 'client') {
     return 'ml-auto border border-brand/10 bg-brand/10 text-slate-900'
   }
@@ -168,18 +232,53 @@ const getMessageCardClass = (senderRole: 'client' | 'staff' | 'system') => {
   return 'mx-auto border border-dashed border-slate-200 bg-slate-50/85 text-slate-600 shadow-none'
 }
 
-const getMessageContainerClass = (senderRole: 'client' | 'staff' | 'system') => {
+const getMessageContainerClass = (senderRole: FeedbackMessageSenderRole) => {
   return senderRole === 'system' ? 'max-w-[92%]' : 'max-w-full'
 }
 
-const getMessageTitleClass = (senderRole: 'client' | 'staff' | 'system') => {
+const getMessageTitleClass = (senderRole: FeedbackMessageSenderRole) => {
   return senderRole === 'system' ? 'text-xs font-semibold text-slate-500' : 'text-sm font-semibold text-slate-900'
 }
 
-const getMessageBodyClass = (senderRole: 'client' | 'staff' | 'system') => {
+const getMessageBodyClass = (senderRole: FeedbackMessageSenderRole) => {
   return senderRole === 'system'
     ? 'mt-2 whitespace-pre-wrap text-xs leading-6 text-slate-500'
     : 'mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-700'
+}
+
+const formatAttachmentSize = (size: number | null) => {
+  if (!size || size <= 0) {
+    return '大小未知'
+  }
+  if (size >= 1024 * 1024) {
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`
+  }
+  return `${Math.max(1, Math.round(size / 1024))} KB`
+}
+
+const resolveAttachmentUrl = (attachment: FeedbackConversationMessageAttachment) => {
+  return resolveFeedbackAttachmentUrl(attachment.url)
+}
+
+const isImageAttachment = (attachment: FeedbackConversationMessageAttachment) => {
+  const normalizedMimeType = attachment.mimeType?.toLowerCase() || ''
+  if (normalizedMimeType.startsWith('image/')) {
+    return true
+  }
+  return /\.(png|jpe?g|gif|webp)$/i.test(attachment.name)
+}
+
+const openAttachmentPreview = (attachment: FeedbackConversationMessageAttachment) => {
+  const targetUrl = resolveAttachmentUrl(attachment)
+  if (!targetUrl) {
+    ElMessage.warning('当前附件地址无效，暂时无法预览')
+    return
+  }
+  if (!isImageAttachment(attachment)) {
+    window.open(targetUrl, '_blank', 'noopener')
+    return
+  }
+  previewImageUrl.value = targetUrl
 }
 
 const handleNavigateBack = () => {
@@ -218,10 +317,67 @@ const loadConversationDetail = async (conversationId: string) => {
       return
     }
     conversation.value = detail
+    satisfactionComment.value = detail.satisfaction?.comment || ''
+    selectedSatisfactionLevel.value = detail.satisfaction?.level || 'satisfied'
   } finally {
     detailLoading.value = false
     loading.value = false
   }
+}
+
+const openReplyAttachmentPicker = () => {
+  replyAttachmentInputRef.value?.click()
+}
+
+/**
+ * 详情页补充说明与新建页保持同一上传约束：
+ * - 单条补充消息最多 9 个附件；
+ * - 仅支持图片，减少客服侧消息渲染与安全策略分叉。
+ */
+const handleReplyAttachmentChange = async (event: Event) => {
+  const input = event.target as HTMLInputElement | null
+  const files = Array.from(input?.files ?? [])
+  if (!files.length) {
+    return
+  }
+
+  if (replyAttachments.value.length >= FEEDBACK_ATTACHMENT_LIMIT) {
+    ElMessage.warning(`单条补充消息最多上传 ${FEEDBACK_ATTACHMENT_LIMIT} 张图片`)
+    if (input) {
+      input.value = ''
+    }
+    return
+  }
+
+  const remainCount = FEEDBACK_ATTACHMENT_LIMIT - replyAttachments.value.length
+  const targetFiles = files.slice(0, remainCount)
+  uploadingReplyAttachments.value = true
+  try {
+    for (const file of targetFiles) {
+      if (!file.type.startsWith('image/')) {
+        ElMessage.warning(`文件 ${file.name} 不是图片，已跳过`)
+        continue
+      }
+      if (file.size > FEEDBACK_ATTACHMENT_MAX_SIZE) {
+        ElMessage.warning(`文件 ${file.name} 超过 10MB，已跳过`)
+        continue
+      }
+      const attachment = await uploadClientFeedbackAttachment(file)
+      replyAttachments.value = [...replyAttachments.value, attachment]
+    }
+    ElMessage.success('补充图片上传完成，可随消息一起发送')
+  } catch (error) {
+    ElMessage.error(extractErrorMessage(error, '附件上传失败，请稍后重试'))
+  } finally {
+    uploadingReplyAttachments.value = false
+    if (input) {
+      input.value = ''
+    }
+  }
+}
+
+const handleRemoveReplyAttachment = (attachmentIndex: number) => {
+  replyAttachments.value = replyAttachments.value.filter((_, index) => index !== attachmentIndex)
 }
 
 const handleReply = async () => {
@@ -240,8 +396,10 @@ const handleReply = async () => {
   try {
     await appendClientFeedbackMessage(conversation.value.id, {
       body: normalizedReply,
+      attachments: replyAttachments.value,
     })
     replyDraft.value = ''
+    replyAttachments.value = []
     await loadConversationDetail(conversation.value.id)
     reconnectTip.value = '已自动续接当前反馈单，你的新补充已提交给客服。'
     ElMessage.success('补充说明已发送')
@@ -295,6 +453,32 @@ const handleContinueFeedback = async () => {
     block: 'center',
   })
   replyTextareaRef.value?.focus()
+}
+
+const handleSubmitSatisfaction = async () => {
+  if (!conversation.value) {
+    ElMessage.warning('当前反馈单尚未加载完成')
+    return
+  }
+  if (!canRateSatisfaction.value) {
+    ElMessage.warning('当前反馈单尚未进入可评价阶段')
+    return
+  }
+
+  satisfactionSubmitting.value = true
+  try {
+    await submitClientFeedbackSatisfaction(conversation.value.id, {
+      level: selectedSatisfactionLevel.value,
+      comment: normalizeSubmitText(satisfactionComment.value) || undefined,
+    })
+    await loadConversationDetail(conversation.value.id)
+    reconnectTip.value = '已记录你的满意度评价，当前反馈单详情已同步更新。'
+    ElMessage.success('满意度评价已提交')
+  } catch (error) {
+    ElMessage.error(extractErrorMessage(error, '满意度评价提交失败，请稍后重试'))
+  } finally {
+    satisfactionSubmitting.value = false
+  }
 }
 
 const connectRealtime = () => {
@@ -534,6 +718,65 @@ onBeforeUnmount(() => {
                   仍未解决，继续反馈
                 </button>
               </div>
+              <div
+                v-if="showSatisfactionEntry || hasRatedSatisfaction"
+                class="rounded-[0.95rem] border border-dashed border-slate-200 bg-white px-3 py-3"
+              >
+                <div class="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p class="text-xs font-medium text-slate-400">处理评价</p>
+                    <p class="mt-1 text-sm leading-6 text-slate-600">
+                      {{ hasRatedSatisfaction ? '你的评价已记录，客服可基于该结果持续优化处理体验。' : '当前反馈单已进入结果阶段，可补充对本次处理体验的评价。' }}
+                    </p>
+                  </div>
+                  <span
+                    v-if="currentSatisfactionMeta"
+                    class="rounded-full px-3 py-1 text-xs font-semibold"
+                    :class="currentSatisfactionMeta.className"
+                  >
+                    {{ currentSatisfactionMeta.label }}
+                  </span>
+                </div>
+
+                <div v-if="hasRatedSatisfaction && conversation.satisfaction" class="mt-3 space-y-2 text-sm">
+                  <p class="text-slate-500">评价时间：{{ formatDateTime(conversation.satisfaction.ratedAt) }}</p>
+                  <p class="leading-6 text-slate-700">
+                    {{ conversation.satisfaction.comment || '你未填写额外说明，系统已记录当前评价结果。' }}
+                  </p>
+                </div>
+
+                <div v-else class="mt-3 space-y-3">
+                  <div class="grid gap-2 sm:grid-cols-3">
+                    <button
+                      v-for="(meta, level) in FEEDBACK_SATISFACTION_META_MAP"
+                      :key="level"
+                      type="button"
+                      class="rounded-[0.9rem] border px-3 py-3 text-left transition"
+                      :class="selectedSatisfactionLevel === level ? meta.className : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'"
+                      @click="selectedSatisfactionLevel = level"
+                    >
+                      <p class="text-sm font-semibold">{{ meta.label }}</p>
+                      <p class="mt-1 text-xs leading-5">{{ meta.description }}</p>
+                    </button>
+                  </div>
+                  <textarea
+                    v-model="satisfactionComment"
+                    class="feedback-textarea feedback-textarea--compact"
+                    maxlength="300"
+                    placeholder="可选填写：比如回复速度、结论清晰度、是否仍有改进建议。"
+                  />
+                  <div class="flex justify-end">
+                    <button
+                      type="button"
+                      class="rounded-[0.9rem] bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
+                      :disabled="satisfactionSubmitting"
+                      @click="handleSubmitSatisfaction"
+                    >
+                      {{ satisfactionSubmitting ? '提交中...' : '提交处理评价' }}
+                    </button>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -620,6 +863,62 @@ onBeforeUnmount(() => {
             </dl>
           </div>
         </div>
+
+        <article
+          v-if="conversationAttachmentEntries.length"
+          class="mt-5 rounded-[1rem] border border-slate-200 bg-slate-50/80 p-4"
+        >
+          <div class="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p class="text-sm font-semibold text-slate-900">附件总览</p>
+              <p class="mt-1 text-xs leading-5 text-slate-400">集中查看当前反馈单里已经上传的图片证据，不必逐条翻消息寻找。</p>
+            </div>
+            <span class="rounded-full bg-white px-3 py-1 text-xs font-semibold text-slate-500">
+              {{ conversationAttachmentEntries.length }} 个附件
+            </span>
+          </div>
+
+          <div class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            <article
+              v-for="item in conversationAttachmentEntries"
+              :key="item.id"
+              class="rounded-[1rem] bg-white p-3 shadow-sm ring-1 ring-inset ring-slate-200"
+            >
+              <img
+                v-if="isImageAttachment(item.attachment)"
+                :src="resolveAttachmentUrl(item.attachment)"
+                :alt="item.attachment.name"
+                class="detail-attachment-preview"
+              />
+              <div
+                v-else
+                class="detail-attachment-preview detail-attachment-preview--placeholder flex items-center justify-center text-sm font-semibold text-slate-500"
+              >
+                附件
+              </div>
+              <p class="mt-3 truncate text-sm font-semibold text-slate-900">{{ item.attachment.name }}</p>
+              <p class="mt-1 text-xs text-slate-400">{{ item.senderName }} · {{ formatDateTime(item.createdAt) }}</p>
+              <p class="mt-1 text-xs text-slate-400">{{ formatAttachmentSize(item.attachment.size) }}</p>
+              <div class="mt-3 flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  class="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 transition hover:bg-slate-200"
+                  @click="openAttachmentPreview(item.attachment)"
+                >
+                  预览
+                </button>
+                <a
+                  class="rounded-full bg-brand/10 px-3 py-1 text-xs font-medium text-brand transition hover:bg-brand/15"
+                  :href="resolveAttachmentUrl(item.attachment)"
+                  target="_blank"
+                  rel="noopener"
+                >
+                  新窗口打开
+                </a>
+              </div>
+            </article>
+          </div>
+        </article>
       </article>
 
       <article class="rounded-[1rem] border border-slate-200 bg-slate-50/80 p-4">
@@ -651,6 +950,32 @@ onBeforeUnmount(() => {
               <span class="text-xs text-slate-400">{{ formatDateTime(message.createdAt) }}</span>
             </div>
             <p :class="getMessageBodyClass(message.senderRole)">{{ message.body }}</p>
+            <div v-if="message.attachments.length" class="mt-3 grid gap-2 sm:grid-cols-2">
+              <button
+                v-for="(attachment, attachmentIndex) in message.attachments"
+                :key="`${message.id}-${attachment.url}-${attachmentIndex}`"
+                type="button"
+                class="message-attachment-card"
+                @click="openAttachmentPreview(attachment)"
+              >
+                <img
+                  v-if="isImageAttachment(attachment)"
+                  :src="resolveAttachmentUrl(attachment)"
+                  :alt="attachment.name"
+                  class="message-attachment-card__image"
+                />
+                <div
+                  v-else
+                  class="message-attachment-card__image message-attachment-card__image--placeholder flex items-center justify-center text-xs font-semibold text-slate-500"
+                >
+                  附件
+                </div>
+                <div class="min-w-0 flex-1 text-left">
+                  <p class="truncate text-sm font-semibold text-slate-900">{{ attachment.name }}</p>
+                  <p class="mt-1 text-xs text-slate-400">{{ formatAttachmentSize(attachment.size) }}</p>
+                </div>
+              </button>
+            </div>
           </article>
         </div>
       </article>
@@ -665,6 +990,75 @@ onBeforeUnmount(() => {
           maxlength="400"
           placeholder="例如：今天再次尝试后，问题仍在 iPhone 浏览器出现。"
         />
+        <div class="mt-3 rounded-[1rem] border border-dashed border-slate-200 bg-slate-50 px-3 py-3">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <p class="text-sm font-semibold text-slate-900">补充图片附件</p>
+              <p class="mt-1 text-xs leading-5 text-slate-400">
+                新的异常截图、界面对比图或订单凭证可直接附在本次补充说明里，方便客服继续定位。
+              </p>
+            </div>
+            <button
+              type="button"
+              class="rounded-[0.9rem] border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 transition hover:border-slate-300 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+              :disabled="uploadingReplyAttachments || replyAttachments.length >= FEEDBACK_ATTACHMENT_LIMIT"
+              @click="openReplyAttachmentPicker"
+            >
+              {{ uploadingReplyAttachments ? '上传中...' : replyAttachments.length ? '继续添加图片' : '上传图片附件' }}
+            </button>
+          </div>
+          <input
+            ref="replyAttachmentInputRef"
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/gif"
+            multiple
+            class="hidden"
+            @change="handleReplyAttachmentChange"
+          />
+
+          <div v-if="replyAttachments.length" class="mt-3 grid gap-3 sm:grid-cols-2">
+            <article
+              v-for="(attachment, index) in replyAttachments"
+              :key="`${attachment.url}-${index}`"
+              class="rounded-[0.95rem] bg-white p-3 shadow-sm ring-1 ring-inset ring-slate-200"
+            >
+              <div class="flex items-start gap-3">
+                <img
+                  v-if="isImageAttachment(attachment)"
+                  :src="resolveAttachmentUrl(attachment)"
+                  :alt="attachment.name"
+                  class="reply-attachment-thumb"
+                />
+                <div
+                  v-else
+                  class="reply-attachment-thumb reply-attachment-thumb--placeholder flex items-center justify-center text-xs font-semibold text-slate-500"
+                >
+                  附件
+                </div>
+                <div class="min-w-0 flex-1">
+                  <p class="truncate text-sm font-semibold text-slate-900">{{ attachment.name }}</p>
+                  <p class="mt-1 text-xs text-slate-400">{{ formatAttachmentSize(attachment.size) }}</p>
+                  <div class="mt-3 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      class="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-600 transition hover:bg-slate-200"
+                      @click="openAttachmentPreview(attachment)"
+                    >
+                      预览
+                    </button>
+                    <button
+                      type="button"
+                      class="rounded-full bg-rose-50 px-3 py-1 text-xs font-medium text-rose-600 transition hover:bg-rose-100"
+                      @click="handleRemoveReplyAttachment(index)"
+                    >
+                      移除
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </article>
+          </div>
+        </div>
         <div class="mt-3 flex justify-end">
           <button
             type="button"
@@ -692,6 +1086,15 @@ onBeforeUnmount(() => {
       </button>
     </article>
   </section>
+
+  <Teleport to="body">
+    <div v-if="previewImageUrl" class="feedback-preview-overlay" @click.self="previewImageUrl = ''">
+      <div class="feedback-preview-panel">
+        <button type="button" class="feedback-preview-close" @click="previewImageUrl = ''">关闭</button>
+        <img :src="previewImageUrl" alt="附件预览" class="feedback-preview-image" />
+      </div>
+    </div>
+  </Teleport>
 </template>
 
 <style scoped>
@@ -717,5 +1120,92 @@ onBeforeUnmount(() => {
   border-color: rgba(13, 148, 136, 0.48);
   background: #ffffff;
   box-shadow: 0 0 0 4px rgba(13, 148, 136, 0.12);
+}
+
+.feedback-textarea--compact {
+  min-height: 6rem;
+}
+
+.detail-attachment-preview,
+.reply-attachment-thumb {
+  height: 5rem;
+  width: 100%;
+  border-radius: 1rem;
+  object-fit: cover;
+  background: rgb(241 245 249);
+}
+
+.reply-attachment-thumb {
+  width: 4.5rem;
+  flex-shrink: 0;
+}
+
+.detail-attachment-preview--placeholder,
+.reply-attachment-thumb--placeholder,
+.message-attachment-card__image--placeholder {
+  border: 1px dashed rgb(203 213 225);
+}
+
+.message-attachment-card {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  border: none;
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.92);
+  padding: 0.65rem;
+  cursor: pointer;
+}
+
+.message-attachment-card__image {
+  height: 4rem;
+  width: 4rem;
+  flex-shrink: 0;
+  border-radius: 0.95rem;
+  object-fit: cover;
+  background: rgb(241 245 249);
+}
+
+.feedback-preview-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.72);
+  padding: 1rem;
+}
+
+.feedback-preview-panel {
+  width: min(100%, 48rem);
+  border-radius: 1.5rem;
+  background: rgba(255, 255, 255, 0.98);
+  padding: 1rem;
+  box-shadow: 0 24px 80px rgba(15, 23, 42, 0.28);
+}
+
+.feedback-preview-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 999px;
+  background: rgb(241 245 249);
+  color: rgb(71 85 105);
+  padding: 0.55rem 0.95rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.feedback-preview-image {
+  margin-top: 0.9rem;
+  max-height: 72vh;
+  width: 100%;
+  border-radius: 1.25rem;
+  object-fit: contain;
+  background: rgb(248 250 252);
 }
 </style>

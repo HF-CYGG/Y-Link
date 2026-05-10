@@ -1,9 +1,9 @@
 /**
  * 文件说明：backend/scripts/feedback-customer-service-verify.ts
- * 文件职责：提供反馈中心与客服工作台专项 HTTP 回归验证，覆盖客户端建单、客服字段维护、内部备注、双向回复与 SSE 实时事件。
+ * 文件职责：提供反馈中心与客服工作台专项 HTTP 回归验证，覆盖客户端建单、附件上传、客服字段维护、双向回复、完成确认、满意度评价与 SSE 实时事件。
  * 实现逻辑：
  * - 使用独立 SQLite 运行时启动真实 Express 服务，避免污染开发库；
- * - 同时拉起客户端与客服端 SSE 订阅，再串联建单、保存字段、内部备注和回复动作，验证事件与数据回读保持一致；
+ * - 同时拉起客户端与客服端 SSE 订阅，再串联建单、附件上传、保存字段、回复、关闭与评价动作，验证事件与数据回读保持一致；
  * - 所有断言围绕“当前清单关注的核心链路”组织，避免把无关业务一起绑进反馈专项验收。
  */
 
@@ -11,6 +11,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { inspect } from 'node:util'
 
 interface SseEventRecord<T = unknown> {
   event: string
@@ -66,7 +67,15 @@ async function expectJsonOk<T>(
 }
 
 function normalizeError(error: unknown) {
-  return error instanceof Error ? error : new Error(String(error))
+  return error instanceof Error ? error : new Error(inspect(error, { depth: 4, breakLength: 120 }))
+}
+
+function createTinyPngBlob() {
+  const pngBuffer = Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9YlR5X0AAAAASUVORK5CYII=',
+    'base64',
+  )
+  return new Blob([pngBuffer], { type: 'image/png' })
 }
 
 function createSseClient(url: string, scene: string) {
@@ -425,6 +434,33 @@ async function main() {
     assert.equal(servicePresence.availability.serviceConnectedCount, 1)
     pass('客服在线状态统计通过')
 
+    const initialAttachment = await expectJsonOk<{
+      data: {
+        attachment: {
+          name: string
+          url: string
+          mimeType: string | null
+          size: number | null
+        }
+      }
+    }>(
+      () => {
+        const formData = new FormData()
+        formData.append('file', createTinyPngBlob(), 'feedback-create-proof.png')
+        return fetch(`${baseUrl}/api/client-feedback/attachments`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${clientToken}`,
+          },
+          body: formData,
+        })
+      },
+      '客户端上传建单附件',
+    )
+    assert.match(initialAttachment.attachment.url, /^\/uploads\//)
+    assert.equal(initialAttachment.attachment.mimeType, 'image/png')
+    pass('客户端上传建单附件通过')
+
     const createdConversation = await expectJsonOk<{
       data: {
         conversation: {
@@ -454,6 +490,7 @@ async function main() {
             actualResult: '当前需要专项回归验证',
             tags: ['专项回归', '反馈中心'],
             sourceLabel: '自动化专项验证',
+            attachments: [initialAttachment.attachment],
           }),
         }),
       '客户端创建反馈会话',
@@ -501,6 +538,10 @@ async function main() {
         messages: Array<{
           senderType: string
           content: string
+          attachments?: Array<{
+            url: string
+            mimeType: string | null
+          }>
         }>
       }
     }>(
@@ -598,6 +639,48 @@ async function main() {
     )
     pass('内部备注保存与实时事件通过')
 
+    const takeOverResult = await expectJsonOk<{
+      data: {
+        changed: boolean
+        conversation: {
+          assignedUserId: string | null
+          assignedDisplayName: string | null
+          status: string
+        }
+      }
+    }>(
+      () =>
+        fetch(`${baseUrl}/api/customer-service/conversations/${conversationId}/assignee`, {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${operatorToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            assigneeUserId: operator.id,
+          }),
+        }),
+      '客服显式接单',
+    )
+    assert.equal(takeOverResult.changed, true)
+    assert.equal(takeOverResult.conversation.assignedUserId, operator.id)
+    assert.equal(takeOverResult.conversation.status, 'processing')
+    await clientStream.waitForEvent<{ eventType: string; conversationId: string; detail?: { assigneeAfterUserId?: string } }>(
+      'conversation',
+      (event) =>
+        event.eventType === 'conversation_assignee_updated'
+        && event.conversationId === conversationId
+        && event.detail?.assigneeAfterUserId === operator.id,
+    )
+    await serviceStream.waitForEvent<{ eventType: string; conversationId: string; detail?: { assigneeAfterUserId?: string } }>(
+      'conversation',
+      (event) =>
+        event.eventType === 'conversation_assignee_updated'
+        && event.conversationId === conversationId
+        && event.detail?.assigneeAfterUserId === operator.id,
+    )
+    pass('显式接单与负责人实时事件通过')
+
     await expectJsonOk<{
       data: {
         conversation: {
@@ -666,18 +749,50 @@ async function main() {
     assert.equal(clientDetailAfterReply.conversation.fields.orderRef, 'ORDER-VERIFY-001')
     assert.equal(clientDetailAfterReply.conversation.unreadForClientCount, 0)
     assert.ok(clientDetailAfterReply.messages.some((item) => item.senderType === 'service'))
+    assert.ok(
+      clientDetailAfterReply.messages.some(
+        (item) => item.senderType === 'client' && Array.isArray(item.attachments) && item.attachments[0]?.url === initialAttachment.attachment.url,
+      ),
+    )
     assert.ok(!clientDetailAfterReply.messages.some((item) => /内部备注/.test(item.content)))
     await serviceStream.waitForEvent<{ eventType: string; conversationId: string }>(
       'conversation',
       (event) => event.eventType === 'conversation_read_by_client' && event.conversationId === conversationId,
     )
-    pass('客户端详情回读字段、消息与客户端已读事件通过')
+    pass('客户端详情回读字段、首条附件、消息与客户端已读事件通过')
+
+    const replyAttachment = await expectJsonOk<{
+      data: {
+        attachment: {
+          name: string
+          url: string
+        }
+      }
+    }>(
+      () => {
+        const formData = new FormData()
+        formData.append('file', createTinyPngBlob(), 'feedback-reply-proof.png')
+        return fetch(`${baseUrl}/api/client-feedback/attachments`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${clientToken}`,
+          },
+          body: formData,
+        })
+      },
+      '客户端上传补充说明附件',
+    )
+    assert.match(replyAttachment.attachment.url, /^\/uploads\//)
+    pass('客户端上传补充说明附件通过')
 
     await expectJsonOk<{
       data: {
         message: {
           senderType: string
           content: string
+          attachments?: Array<{
+            url: string
+          }>
         }
       }
     }>(
@@ -690,6 +805,7 @@ async function main() {
           },
           body: JSON.stringify({
             content: '客户端补充：问题仍偶发出现，请继续协助排查。',
+            attachments: [replyAttachment.attachment],
           }),
         }),
       '客户端补充反馈消息',
@@ -721,6 +837,9 @@ async function main() {
         messages: Array<{
           senderType: string
           content: string
+          attachments?: Array<{
+            url: string
+          }>
         }>
       }
     }>(
@@ -735,7 +854,123 @@ async function main() {
     assert.equal(serviceDetailAfterClientReply.conversation.unreadForServiceCount, 0)
     assert.match(serviceDetailAfterClientReply.internalRemark?.content ?? '', /标签结构/)
     assert.ok(serviceDetailAfterClientReply.messages.some((item) => item.senderType === 'client' && /问题仍偶发出现/.test(item.content)))
-    pass('客服回读未读清零、内部备注与消息链路通过')
+    assert.ok(
+      serviceDetailAfterClientReply.messages.some(
+        (item) => item.senderType === 'client' && Array.isArray(item.attachments) && item.attachments[0]?.url === replyAttachment.attachment.url,
+      ),
+    )
+    pass('客服回读未读清零、内部备注、附件与消息链路通过')
+
+    await expectJsonOk<{
+      data: {
+        changed: boolean
+        conversation: {
+          status: string
+        }
+      }
+    }>(
+      () =>
+        fetch(`${baseUrl}/api/customer-service/conversations/${conversationId}/status`, {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${operatorToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            status: 'resolved',
+          }),
+        }),
+      '客服将反馈单更新为已解决',
+    )
+    await clientStream.waitForEvent<{ eventType: string; conversationId: string; detail?: { status?: string } }>(
+      'conversation',
+      (event) =>
+        event.eventType === 'conversation_status_changed'
+        && event.conversationId === conversationId
+        && event.detail?.status === 'resolved',
+    )
+    await serviceStream.waitForEvent<{ eventType: string; conversationId: string; detail?: { status?: string } }>(
+      'conversation',
+      (event) =>
+        event.eventType === 'conversation_status_changed'
+        && event.conversationId === conversationId
+        && event.detail?.status === 'resolved',
+    )
+    pass('客服更新已解决状态与双端实时事件通过')
+
+    await expectJsonOk<{
+      data: {
+        changed: boolean
+        conversation: {
+          status: string
+        }
+      }
+    }>(
+      () =>
+        fetch(`${baseUrl}/api/client-feedback/conversations/${conversationId}/confirm-resolved`, {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${clientToken}`,
+          },
+        }),
+      '客户端确认已解决',
+    )
+    await clientStream.waitForEvent<{ eventType: string; conversationId: string; detail?: { status?: string; confirmedBy?: string } }>(
+      'conversation',
+      (event) =>
+        event.eventType === 'conversation_status_changed'
+        && event.conversationId === conversationId
+        && event.detail?.status === 'closed'
+        && event.detail?.confirmedBy === 'client',
+    )
+    await serviceStream.waitForEvent<{ eventType: string; conversationId: string; detail?: { status?: string; confirmedBy?: string } }>(
+      'conversation',
+      (event) =>
+        event.eventType === 'conversation_status_changed'
+        && event.conversationId === conversationId
+        && event.detail?.status === 'closed'
+        && event.detail?.confirmedBy === 'client',
+    )
+    pass('客户端确认已解决与双端实时关闭事件通过')
+
+    const submittedSatisfaction = await expectJsonOk<{
+      data: {
+        satisfaction: {
+          level: string
+          comment: string | null
+        } | null
+      }
+    }>(
+      () =>
+        fetch(`${baseUrl}/api/client-feedback/conversations/${conversationId}/satisfaction`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${clientToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            level: 'satisfied',
+            comment: '专项回归验证中，附件展示与处理闭环体验正常。',
+          }),
+        }),
+      '客户端提交满意度评价',
+    )
+    assert.equal(submittedSatisfaction.satisfaction?.level, 'satisfied')
+    await clientStream.waitForEvent<{ eventType: string; conversationId: string; detail?: { satisfaction?: { level?: string } } }>(
+      'conversation',
+      (event) =>
+        event.eventType === 'conversation_satisfaction_updated'
+        && event.conversationId === conversationId
+        && event.detail?.satisfaction?.level === 'satisfied',
+    )
+    await serviceStream.waitForEvent<{ eventType: string; conversationId: string; detail?: { satisfaction?: { level?: string } } }>(
+      'conversation',
+      (event) =>
+        event.eventType === 'conversation_satisfaction_updated'
+        && event.conversationId === conversationId
+        && event.detail?.satisfaction?.level === 'satisfied',
+    )
+    pass('客户端满意度评价与双端实时事件通过')
 
     clientStream.close()
     serviceStream.close()

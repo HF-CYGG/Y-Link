@@ -90,6 +90,18 @@ const updateStatusSchema = z.object({
   status: z.enum(CLIENT_FEEDBACK_CONVERSATION_STATUSES),
 })
 
+/**
+ * 显式负责人变更入参：
+ * - 接单与转派统一复用同一接口；
+ * - 由服务层根据当前负责人和目标负责人判断是接单、指派还是转派。
+ */
+const updateAssigneeSchema = z.object({
+  assigneeUserId: z
+    .union([z.string(), z.number()])
+    .transform((value) => String(value).trim())
+    .pipe(z.string().min(1).max(64)),
+})
+
 const updateIssueFieldsSchema = z.object({
   issueType: z.enum(CLIENT_FEEDBACK_ISSUE_TYPES).optional(),
   subject: z.string().trim().min(1).max(CLIENT_FEEDBACK_SUBJECT_MAX_LENGTH).optional(),
@@ -109,6 +121,15 @@ const updateInternalRemarkSchema = z.object({
 })
 
 export const customerServiceRouter = Router()
+
+customerServiceRouter.get(
+  '/assignees',
+  requirePermission('customer_service:view'),
+  asyncHandler(async (_req, res) => {
+    const data = await clientFeedbackService.listAssignableServiceUsers()
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
 
 customerServiceRouter.get(
   '/conversations',
@@ -149,6 +170,22 @@ customerServiceRouter.post(
     const authReq = req as AuthenticatedRequest
     const payload = appendMessageSchema.parse(req.body)
     const data = await clientFeedbackService.appendServiceMessage(
+      req.params.id,
+      payload,
+      authReq.auth,
+      extractRequestMeta(req),
+    )
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+customerServiceRouter.patch(
+  '/conversations/:id/assignee',
+  requirePermission('customer_service:reply'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = updateAssigneeSchema.parse(req.body)
+    const data = await clientFeedbackService.updateConversationAssignee(
       req.params.id,
       payload,
       authReq.auth,

@@ -15,6 +15,7 @@ import { computed, onActivated, onBeforeUnmount, onDeactivated, reactive, ref, w
 import { ElMessage } from 'element-plus'
 import {
   buildSupportWorkbenchQuickViews,
+  compareSupportFeedbackConversationPriority,
   DEFAULT_SUPPORT_QUICK_REPLY_TEMPLATES,
   FEEDBACK_CATEGORY_OPTIONS,
   FEEDBACK_ISSUE_TYPE_OPTIONS,
@@ -26,12 +27,15 @@ import {
   appendStaffFeedbackMessage,
   getCustomerServicePresence,
   getSupportFeedbackConversation,
+  listSupportAssignableUsers,
   listSupportFeedbackConversations,
   openFeedbackRealtimeStream,
+  resolveSupportFeedbackConversationSla,
   SUPPORT_QUICK_REPLY_SOURCE_META,
   summarizeSupportFeedbackConversations,
   updateFeedbackInternalRemark,
   updateFeedbackIssue,
+  updateSupportConversationAssignee,
   type FeedbackConversationRecord,
   type FeedbackConversationMessage,
   type FeedbackIssueCategory,
@@ -41,6 +45,7 @@ import {
   type FeedbackRealtimeConnection,
   type FeedbackRealtimeConversationEvent,
   type FeedbackServicePresence,
+  type SupportAssignableUser,
   type SupportWorkbenchQuickViewKey,
 } from '@/api/modules/customer-service-feedback'
 import { PageContainer } from '@/components/common'
@@ -69,11 +74,15 @@ const realtimeState = ref<'connecting' | 'online' | 'offline'>('offline')
 const reconnectTip = ref('进入工作台后会自动续接当前客服会话。')
 const isWorkbenchResident = ref(false)
 const isPriorityPanelExpanded = ref(false)
+const assigneeLoading = ref(false)
+const assigneeUpdating = ref(false)
 const quickStatusUpdating = ref<FeedbackIssueStatus | ''>('')
 const priorityUpdating = ref<FeedbackIssuePriority | ''>('')
 const activeQuickView = ref<WorkbenchQuickViewKey>('all')
 const activeDetailTab = ref<DetailTabKey>('conversation')
 const selectedQuickReplyKey = ref('')
+const transferAssigneeUserId = ref('')
+const assigneeOptions = ref<SupportAssignableUser[]>([])
 let realtimeConnection: FeedbackRealtimeConnection | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let refreshTimer: ReturnType<typeof setInterval> | null = null
@@ -180,10 +189,60 @@ const parseTagText = (value: string): string[] => {
  * - “全部会话”保留原始列表视角，便于客服回到全量队列。
  */
 const getQuickViewFilteredConversations = (records: FeedbackConversationRecord[] = conversations.value) => {
-  if (activeQuickView.value === 'all') {
-    return records
+  const nextRecords = activeQuickView.value === 'all'
+    ? [...records]
+    : filterSupportFeedbackConversationsByQuickView(records, activeQuickView.value, authStore.currentUser?.id)
+  return nextRecords.sort(compareSupportFeedbackConversationPriority)
+}
+
+/**
+ * SLA 标签映射：
+ * - 超时使用红色，提醒马上处理；
+ * - 即将超时使用橙色，帮助客服提前介入；
+ * - 已暂停或正常保持中性，避免高频误报造成视觉疲劳。
+ */
+const getSlaTagType = (conversation: FeedbackConversationRecord) => {
+  const slaMeta = resolveSupportFeedbackConversationSla(conversation)
+  if (slaMeta.level === 'overtime') {
+    return 'danger'
   }
-  return filterSupportFeedbackConversationsByQuickView(records, activeQuickView.value, authStore.currentUser?.id)
+  if (slaMeta.level === 'warning') {
+    return 'warning'
+  }
+  if (slaMeta.level === 'paused') {
+    return 'info'
+  }
+  return 'success'
+}
+
+const getSlaPanelClass = (conversation: FeedbackConversationRecord) => {
+  const slaMeta = resolveSupportFeedbackConversationSla(conversation)
+  if (slaMeta.level === 'overtime') {
+    return 'border-rose-200 bg-rose-50/90'
+  }
+  if (slaMeta.level === 'warning') {
+    return 'border-amber-200 bg-amber-50/90'
+  }
+  return 'border-slate-200 bg-slate-50/80'
+}
+
+const getAssigneeTagType = (conversation: FeedbackConversationRecord) => {
+  if (!conversation.assigneeUserId) {
+    return 'warning'
+  }
+  if (currentUserId.value && conversation.assigneeUserId === currentUserId.value) {
+    return 'success'
+  }
+  return 'info'
+}
+
+const getAssigneeTagLabel = (conversation: FeedbackConversationRecord) => {
+  if (!conversation.assigneeName) {
+    return '待分配'
+  }
+  return currentUserId.value && conversation.assigneeUserId === currentUserId.value
+    ? `我负责`
+    : conversation.assigneeName
 }
 
 const quickViewDefinitions = computed(() => {
@@ -199,6 +258,56 @@ const quickViewDefinitions = computed(() => {
 })
 
 const filteredConversations = computed(() => getQuickViewFilteredConversations())
+const currentUserId = computed(() => authStore.currentUser?.id ?? '')
+
+/**
+ * 显式接单模型下的负责人判断：
+ * - 当前负责人是自己时，允许继续回复、改状态；
+ * - 未接单或由他人负责时，需要先通过接单/转派动作切换归属。
+ */
+const isSelectedConversationOwnedByCurrentUser = computed(() => {
+  if (!selectedConversation.value || !currentUserId.value) {
+    return false
+  }
+  return selectedConversation.value.assigneeUserId === currentUserId.value
+})
+
+const selectedConversationSla = computed(() => {
+  return selectedConversation.value ? resolveSupportFeedbackConversationSla(selectedConversation.value) : null
+})
+
+const takeOverButtonText = computed(() => {
+  if (!selectedConversation.value) {
+    return '立即接单'
+  }
+  if (!selectedConversation.value.assigneeUserId) {
+    return '立即接单'
+  }
+  if (isSelectedConversationOwnedByCurrentUser.value) {
+    return '当前由我负责'
+  }
+  return '转派给我'
+})
+
+const assignmentActionTip = computed(() => {
+  if (!selectedConversation.value) {
+    return '请选择一条会话后再处理负责人。'
+  }
+  if (!selectedConversation.value.assigneeUserId) {
+    return '当前会话尚未接单，请先点击“立即接单”后再回复或变更状态。'
+  }
+  if (!isSelectedConversationOwnedByCurrentUser.value) {
+    return `当前会话由 ${selectedConversation.value.assigneeName || '其他客服'} 负责，如需继续处理，请先转派给自己或指定其他客服。`
+  }
+  return '当前会话已由你负责，可继续回复、改状态或转派给其他客服。'
+})
+
+const transferAssigneeOptions = computed(() => {
+  if (!selectedConversation.value) {
+    return assigneeOptions.value
+  }
+  return assigneeOptions.value.filter((item) => item.id !== selectedConversation.value?.assigneeUserId)
+})
 
 const activeQuickViewDefinition = computed(() => {
   return quickViewDefinitions.value.find((item) => item.key === activeQuickView.value) ?? quickViewDefinitions.value[0]
@@ -338,6 +447,7 @@ const loadConversationDetail = async (conversationId: string) => {
     if (previousConversationId !== conversationId) {
       replyDraft.value = ''
       selectedQuickReplyKey.value = ''
+      transferAssigneeUserId.value = ''
     }
     syncIssueForm(selectedConversation.value)
   } finally {
@@ -391,6 +501,8 @@ const mergeSelectedConversationSummary = (summaryRecord: FeedbackConversationRec
     clientDisplayName: summaryRecord.clientDisplayName,
     clientDepartmentName: summaryRecord.clientDepartmentName,
     assigneeName: summaryRecord.assigneeName,
+    assigneeUserId: summaryRecord.assigneeUserId,
+    assigneeUsername: summaryRecord.assigneeUsername,
     lastMessageAt: summaryRecord.lastMessageAt,
     unreadForClient: summaryRecord.unreadForClient,
     unreadForStaff: summaryRecord.unreadForStaff,
@@ -480,19 +592,53 @@ const handleTakeOver = async () => {
     ElMessage.warning('请先选择一条会话')
     return
   }
+  if (!currentUserId.value) {
+    ElMessage.warning('当前登录信息已失效，请重新进入工作台')
+    return
+  }
+  if (selectedConversation.value.assigneeUserId === currentUserId.value) {
+    ElMessage.info('当前会话已经由你负责')
+    return
+  }
 
-  saving.value = true
+  assigneeUpdating.value = true
   try {
-    await updateFeedbackIssue(selectedConversation.value.id, {
-      status: issueForm.status === 'pending' ? 'processing' : issueForm.status,
+    await updateSupportConversationAssignee(selectedConversation.value.id, currentUserId.value)
+    await loadConversations({
+      refreshSelectedDetail: true,
     })
-    await loadConversations()
-    reconnectTip.value = '已续接并接手当前会话，后续消息会实时同步。'
-    ElMessage.success('已接手当前会话')
+    reconnectTip.value = '已完成显式接单，当前会话后续消息会继续实时同步。'
+    ElMessage.success('当前会话已接单')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '接手会话失败，请稍后重试'))
+    ElMessage.error(extractErrorMessage(error, '接单失败，请稍后重试'))
   } finally {
-    saving.value = false
+    assigneeUpdating.value = false
+  }
+}
+
+const handleTransferConversation = async () => {
+  if (!selectedConversation.value) {
+    ElMessage.warning('请先选择一条会话')
+    return
+  }
+  if (!transferAssigneeUserId.value) {
+    ElMessage.warning('请先选择转派目标')
+    return
+  }
+
+  assigneeUpdating.value = true
+  try {
+    await updateSupportConversationAssignee(selectedConversation.value.id, transferAssigneeUserId.value)
+    transferAssigneeUserId.value = ''
+    await loadConversations({
+      refreshSelectedDetail: true,
+    })
+    reconnectTip.value = '负责人已更新，工作台已同步最新归属信息。'
+    ElMessage.success('负责人已更新')
+  } catch (error) {
+    ElMessage.error(extractErrorMessage(error, '转派失败，请稍后重试'))
+  } finally {
+    assigneeUpdating.value = false
   }
 }
 
@@ -688,6 +834,20 @@ const loadPresence = async () => {
 }
 
 /**
+ * 转派候选人列表单独加载：
+ * - 页面只在工作台内获取一次，避免每次切换会话都重复请求；
+ * - 若后端调整可接单范围，前端只消费统一结果，不自行推断角色。
+ */
+const loadAssignableUsers = async () => {
+  assigneeLoading.value = true
+  try {
+    assigneeOptions.value = await listSupportAssignableUsers()
+  } finally {
+    assigneeLoading.value = false
+  }
+}
+
+/**
  * 工作台列表刷新统一收口：
  * - SSE 与轮询都走同一条刷新链路，避免多处各自拉取导致覆盖顺序混乱；
  * - 若前一次刷新尚未完成，新的刷新请求只做排队，等当前批次结束后立即补一次。
@@ -861,6 +1021,7 @@ const enterWorkbench = async () => {
   reconnectTip.value = '进入工作台后会自动续接当前客服会话。'
 
   try {
+    await loadAssignableUsers()
     await refreshWorkbenchData(currentToken, { refreshPresence: true, refreshSelectedDetail: true })
     if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
       return
@@ -932,7 +1093,7 @@ onBeforeUnmount(() => {
             <p class="mt-1 text-xs text-slate-400">{{ reconnectTip }}</p>
           </div>
 
-          <div class="grid gap-2 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-6 2xl:min-w-0 2xl:flex-1">
+          <div class="grid gap-2 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-7 2xl:min-w-0 2xl:flex-1">
             <el-card class="cs-summary-card cs-summary-card--compact" shadow="never">
               <p class="cs-summary-card__label">全部反馈</p>
               <p class="cs-summary-card__value">{{ summary.all }}</p>
@@ -952,6 +1113,10 @@ onBeforeUnmount(() => {
             <el-card class="cs-summary-card cs-summary-card--compact" shadow="never">
               <p class="cs-summary-card__label">待分配</p>
               <p class="cs-summary-card__value text-slate-700">{{ summary.unassigned }}</p>
+            </el-card>
+            <el-card class="cs-summary-card cs-summary-card--compact" shadow="never">
+              <p class="cs-summary-card__label">SLA 风险</p>
+              <p class="cs-summary-card__value text-rose-600">{{ summary.slaRisk }}</p>
             </el-card>
             <el-card class="cs-summary-card cs-summary-card--compact" shadow="never">
               <p class="cs-summary-card__label">等待客服回复</p>
@@ -1095,13 +1260,19 @@ onBeforeUnmount(() => {
                 <el-tag :type="getPriorityTagType(item.priority)" effect="light" round>
                   {{ FEEDBACK_PRIORITY_META_MAP[item.priority].label }}
                 </el-tag>
-                <el-tag v-if="item.assigneeName" type="info" effect="plain" round>
-                  {{ item.assigneeName }}
+                <el-tag :type="getSlaTagType(item)" effect="light" round>
+                  {{ resolveSupportFeedbackConversationSla(item).label }}
+                </el-tag>
+                <el-tag :type="getAssigneeTagType(item)" effect="plain" round>
+                  {{ getAssigneeTagLabel(item) }}
                 </el-tag>
                 <el-tag v-if="item.unreadForStaff > 0" type="danger" effect="light" round>
                   待回复 {{ item.unreadForStaff }}
                 </el-tag>
               </div>
+              <p class="mt-3 text-xs leading-5 text-slate-500">
+                {{ resolveSupportFeedbackConversationSla(item).stageLabel }} · {{ resolveSupportFeedbackConversationSla(item).countdownText }}
+              </p>
             </el-card>
           </TransitionGroup>
         </el-card>
@@ -1132,32 +1303,101 @@ onBeforeUnmount(() => {
                 <el-tag :type="getPriorityTagType(selectedConversation.priority)" effect="light" round>
                   {{ FEEDBACK_PRIORITY_META_MAP[selectedConversation.priority].label }}
                 </el-tag>
+                <el-tag :type="getSlaTagType(selectedConversation)" effect="light" round>
+                  {{ selectedConversationSla?.label }}
+                </el-tag>
+              </div>
+            </div>
+
+            <div class="mt-4 rounded-[20px] border px-4 py-3" :class="getSlaPanelClass(selectedConversation)">
+              <div class="flex flex-wrap items-start justify-between gap-3">
+                <div class="space-y-2">
+                  <div class="flex flex-wrap items-center gap-2">
+                    <el-tag :type="getSlaTagType(selectedConversation)" effect="light" round>
+                      {{ selectedConversationSla?.label }}
+                    </el-tag>
+                    <span class="text-sm font-semibold text-slate-900">{{ selectedConversationSla?.stageLabel }}</span>
+                    <span class="text-xs text-slate-500">{{ selectedConversationSla?.countdownText }}</span>
+                  </div>
+                  <p class="text-sm leading-6 text-slate-600">
+                    {{ selectedConversationSla?.description }}
+                  </p>
+                  <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                    <span>当前负责人：{{ selectedConversation.assigneeName || '待分配' }}</span>
+                    <span v-if="selectedConversationSla?.deadlineAt">目标截止：{{ formatDateTime(selectedConversationSla.deadlineAt) }}</span>
+                    <span>最近消息：{{ formatDateTime(selectedConversation.lastMessageAt) }}</span>
+                  </div>
+                </div>
+                <div class="min-w-[260px] max-w-full space-y-3">
+                  <div class="flex flex-wrap items-center gap-2">
+                    <el-button
+                      type="primary"
+                      plain
+                      :loading="assigneeUpdating"
+                      :disabled="assigneeUpdating || !selectedConversation || isSelectedConversationOwnedByCurrentUser"
+                      @click="handleTakeOver"
+                    >
+                      {{ takeOverButtonText }}
+                    </el-button>
+                    <el-button
+                      v-for="item in FEEDBACK_STATUS_OPTIONS.filter((option) => ['pending', 'processing', 'resolved'].includes(option.value))"
+                      :key="item.value"
+                      :type="getQuickStatusButtonType(item.value)"
+                      :plain="issueForm.status !== item.value"
+                      :loading="quickStatusUpdating === item.value"
+                      :disabled="saving || !isSelectedConversationOwnedByCurrentUser"
+                      @click="handleQuickStatus(item.value)"
+                    >
+                      {{ item.label }}
+                    </el-button>
+                    <el-button link type="danger" :disabled="saving || !isSelectedConversationOwnedByCurrentUser" @click="handleQuickStatus('closed')">
+                      关闭会话
+                    </el-button>
+                  </div>
+
+                  <div class="flex flex-wrap items-center gap-2">
+                    <el-select
+                      v-model="transferAssigneeUserId"
+                      class="min-w-[180px] flex-1"
+                      clearable
+                      filterable
+                      :loading="assigneeLoading"
+                      placeholder="选择转派目标"
+                    >
+                      <el-option
+                        v-for="item in transferAssigneeOptions"
+                        :key="item.id"
+                        :label="`${item.displayName}（${item.username}）`"
+                        :value="item.id"
+                      />
+                    </el-select>
+                    <el-button :loading="assigneeUpdating" :disabled="assigneeUpdating || !transferAssigneeUserId" @click="handleTransferConversation">
+                      确认转派
+                    </el-button>
+                  </div>
+                  <p class="text-xs leading-5 text-slate-500">
+                    {{ assignmentActionTip }}
+                  </p>
+                </div>
               </div>
             </div>
 
             <div class="mt-4 rounded-[20px] border border-slate-200 bg-slate-50/80 px-4 py-3">
               <div class="flex flex-wrap items-center justify-between gap-3">
                 <div class="flex flex-wrap items-center gap-2">
-                  <el-button type="primary" plain :loading="saving && quickStatusUpdating === '' && priorityUpdating === ''" :disabled="saving" @click="handleTakeOver">
-                    接手处理
-                  </el-button>
-                  <el-button
-                    v-for="item in FEEDBACK_STATUS_OPTIONS.filter((option) => ['pending', 'processing', 'resolved'].includes(option.value))"
-                    :key="item.value"
-                    :type="getQuickStatusButtonType(item.value)"
-                    :plain="issueForm.status !== item.value"
-                    :loading="quickStatusUpdating === item.value"
-                    :disabled="saving"
-                    @click="handleQuickStatus(item.value)"
-                  >
-                    {{ item.label }}
-                  </el-button>
+                  <el-tag :type="getAssigneeTagType(selectedConversation)" effect="plain" round>
+                    {{ getAssigneeTagLabel(selectedConversation) }}
+                  </el-tag>
+                  <el-tag v-if="selectedConversation.unreadForStaff > 0" type="danger" effect="light" round>
+                    待回复 {{ selectedConversation.unreadForStaff }}
+                  </el-tag>
+                  <el-tag v-if="selectedConversation.unreadForClient > 0" type="warning" effect="light" round>
+                    客户未读 {{ selectedConversation.unreadForClient }}
+                  </el-tag>
                 </div>
                 <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                  <el-tag type="info" effect="plain" round>
-                    当前负责人：{{ selectedConversation.assigneeName || '待分配' }}
-                  </el-tag>
-                  <el-button link type="danger" :disabled="saving" @click="handleQuickStatus('closed')">关闭会话</el-button>
+                  <span>最近更新时间：{{ formatDateTime(selectedConversation.updatedAt) }}</span>
+                  <span>会话编号：{{ selectedConversation.issueNo }}</span>
                 </div>
               </div>
             </div>
@@ -1219,12 +1459,15 @@ onBeforeUnmount(() => {
                     <div class="flex flex-wrap items-start justify-between gap-3">
                       <div>
                         <p class="text-base font-semibold text-slate-900">客服回复</p>
-                        <p class="mt-1 text-xs text-slate-400">回复区已接入快捷回复，插入后仍可继续编辑，发送前会同步当前结构化字段。</p>
+                        <p class="mt-1 text-xs text-slate-400">回复区已接入快捷回复，插入后仍可继续编辑；显式接单后才允许继续发送。</p>
                       </div>
-                      <el-button type="primary" :loading="replying" :disabled="replying" @click="handleReply">
+                      <el-button type="primary" :loading="replying" :disabled="replying || !isSelectedConversationOwnedByCurrentUser" @click="handleReply">
                         发送回复
                       </el-button>
                     </div>
+                    <p class="mt-3 text-xs leading-5 text-slate-500">
+                      {{ assignmentActionTip }}
+                    </p>
 
                     <div class="mt-4 grid gap-3 xl:grid-cols-[minmax(0,280px)_auto]">
                       <el-select
@@ -1369,13 +1612,14 @@ onBeforeUnmount(() => {
                       <div class="flex flex-wrap items-center justify-between gap-2">
                         <div>
                           <p class="text-sm font-semibold text-slate-900">当前协同信息</p>
-                          <p class="mt-1 text-xs text-slate-400">这里用于快速确认当前负责人与最新会话更新时间。</p>
+                          <p class="mt-1 text-xs text-slate-400">这里用于快速确认当前负责人、SLA 风险与最新会话更新时间。</p>
                         </div>
-                        <el-tag type="info" effect="plain" round>
-                          当前负责人：{{ selectedConversation.assigneeName || '待分配' }}
+                        <el-tag :type="getAssigneeTagType(selectedConversation)" effect="plain" round>
+                          当前负责人：{{ getAssigneeTagLabel(selectedConversation) }}
                         </el-tag>
                       </div>
                       <div class="mt-3 flex flex-wrap gap-2 text-xs text-slate-500">
+                        <span>SLA 状态：{{ selectedConversationSla?.label }} · {{ selectedConversationSla?.countdownText }}</span>
                         <span>最近更新时间：{{ formatDateTime(selectedConversation.updatedAt) }}</span>
                         <span>客户未读：{{ selectedConversation.unreadForClient }}</span>
                         <span>客服待处理：{{ selectedConversation.unreadForStaff }}</span>

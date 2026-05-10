@@ -77,6 +77,9 @@ const SQLITE_REQUIRED_CLIENT_FEEDBACK_CONVERSATION_COLUMNS = [
   'internal_remark_by_user_id',
   'internal_remark_by_username',
   'internal_remark_by_display_name',
+  'client_satisfaction_level',
+  'client_satisfaction_comment',
+  'client_satisfaction_rated_at',
 ]
 const SQLITE_REQUIRED_CLIENT_FEEDBACK_MESSAGE_COLUMNS = ['internal_only', 'attachment_json']
 const SQLITE_REQUIRED_O2O_PREORDER_COLUMNS = [
