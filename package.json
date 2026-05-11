@@ -19,6 +19,7 @@
     "verify:performance:budget": "node ./scripts/verify-enterprise-page-performance.mjs",
     "verify:performance:core-paths": "node ./scripts/verify-enterprise-core-paths.mjs",
     "verify:performance:client-concurrency": "node ./scripts/verify-client-concurrency-performance.mjs",
+    "verify:db:concurrency": "node ./scripts/verify-database-concurrency.mjs",
     "verify:performance": "node ./scripts/verify-enterprise-performance-suite.mjs",
     "verify:performance:all": "node ./scripts/verify-all-performance-suite.mjs",
     "verify:quality:all": "node ./scripts/verify-quality-full-suite.mjs",
