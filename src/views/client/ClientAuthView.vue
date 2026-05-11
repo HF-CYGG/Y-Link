@@ -67,11 +67,14 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import type { AxiosResponse } from 'axios'
+import { http } from '@/api/http'
 import { Key, Lock, Message, User } from '@element-plus/icons-vue'
 import {
   getClientAuthCapabilities,
   getClientCaptcha,
   type ClientAuthCapabilities,
+  type ClientRegisterResult,
   type ClientDepartmentOptionNode,
   type ClientValidationMode,
 } from '@/api/modules/client-auth'
@@ -191,6 +194,21 @@ const captchaHintText = computed(() => {
   }
   return `图形验证码约 ${captcha.expiresInSeconds}s 后失效，点击图片可立即刷新。`
 })
+
+const extractRegisterRemainingMessage = (response: AxiosResponse | undefined) => {
+  const rawHeader = response?.headers?.['x-ylink-register-remaining-message']
+  return typeof rawHeader === 'string' ? rawHeader.trim() : ''
+}
+
+const extractRateLimitWaitSeconds = (message: string) => {
+  const matchedSeconds = message.match(/(\d+)\s*秒(?:后重试|后再试)/)
+  if (!matchedSeconds) {
+    return null
+  }
+
+  const parsedSeconds = Number(matchedSeconds[1])
+  return Number.isFinite(parsedSeconds) && parsedSeconds > 0 ? parsedSeconds : null
+}
 
 const isCompactLoginLayout = computed(() => {
   return activeMode.value === 'login' && !loginCaptchaVisible.value && !successTip.value && !securityHint.value
@@ -498,7 +516,10 @@ const applyRegisterFeedbackFromError = (message: string, status?: number) => {
 
   if (status === 429) {
     registerFeedbackTitle.value = '注册过于频繁'
-    registerFeedbackDescription.value = message
+    const waitSeconds = extractRateLimitWaitSeconds(message)
+    registerFeedbackDescription.value = waitSeconds
+      ? `当前窗口还需等待约 ${waitSeconds} 秒才能继续注册，请稍后再试。`
+      : message
     registerFeedbackType.value = 'warning'
     registerFeedbackShowLoginAction.value = true
     return
@@ -727,9 +748,11 @@ const handleRegister = async () => {
       const registeredAccount = normalizeInputText(registerForm.account)
       const registeredUsername = normalizeInputText(registerForm.username)
       await runLatestRegisterRequest({
-        executor: (signal) =>
-          clientAuthStore.register(
-            {
+        executor: (signal): Promise<AxiosResponse<ClientRegisterResult>> =>
+          http.request<ClientRegisterResult>({
+            method: 'POST',
+            url: '/client-auth/register',
+            data: {
               username: registeredUsername,
               account: registeredAccount,
               password: registerForm.password,
@@ -738,15 +761,20 @@ const handleRegister = async () => {
               captchaId: registerUsesVerificationCode.value ? undefined : captcha.captchaId,
               captchaCode: registerUsesVerificationCode.value ? undefined : normalizeInputText(registerForm.captcha),
             },
-            { signal },
-          ),
-        onSuccess: async () => {
+            signal,
+          }),
+        onSuccess: async (response) => {
+          const registerRemainingMessage = extractRegisterRemainingMessage(response)
+          clientAuthStore.clearAuthState()
+          clientAuthStore.initialized = true
           ElMessage.success('注册成功，请登录')
           activeMode.value = 'login'
           loginForm.account = registeredAccount
           loginForm.password = ''
           loginForm.captcha = ''
-          successTip.value = '账号已创建成功，请使用用户名、手机号或邮箱与密码登录。'
+          successTip.value = registerRemainingMessage
+            ? `账号已创建成功，请使用用户名、手机号或邮箱与密码登录。${registerRemainingMessage}`
+            : '账号已创建成功，请使用用户名、手机号或邮箱与密码登录。'
           registerForm.captcha = ''
           registerForm.verificationCode = ''
           registerForm.username = ''

@@ -139,8 +139,19 @@ clientAuthRouter.post(
       allowUsername: false,
       fieldLabel: '账号',
     }).normalizedValue
-    await authSecurityService.guardClientRegisterSourceRequest(requestMeta, normalizedAccount)
+    const registerGuardResult = await authSecurityService.guardClientRegisterSourceRequest(requestMeta, normalizedAccount)
+    if (registerGuardResult.shouldWarnRemaining) {
+      res.setHeader('X-YLink-Register-Remaining-Attempts', String(registerGuardResult.remainingAttempts))
+      res.setHeader('X-YLink-Register-Max-Attempts', String(registerGuardResult.maxAttempts))
+      res.setHeader('X-YLink-Register-Remaining-Source-Type', registerGuardResult.sourceType)
+    }
     const data = await clientAuthService.register(payload, requestMeta)
+    if (registerGuardResult.shouldWarnRemaining) {
+      res.setHeader(
+        'X-YLink-Register-Remaining-Message',
+        `当前注册操作还可尝试 ${registerGuardResult.remainingAttempts} 次，请尽量避免重复提交。`,
+      )
+    }
     res.json({ code: 0, message: 'ok', data })
   }),
 )

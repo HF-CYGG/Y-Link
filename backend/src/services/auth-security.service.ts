@@ -20,6 +20,24 @@ interface FailureState {
   lockedUntil: number
 }
 
+interface RateLimitConsumeResult {
+  remainingRequests: number
+  maxRequests: number
+}
+
+interface LoginFailureRecordResult {
+  remainingAttempts: number
+  shouldWarnRemaining: boolean
+  lockTriggered: boolean
+}
+
+interface RegisterSourceGuardResult {
+  remainingAttempts: number
+  shouldWarnRemaining: boolean
+  maxAttempts: number
+  sourceType: ClientRiskActor['sourceType']
+}
+
 interface RateLimitRule {
   maxRequests: number
   windowMs: number
@@ -160,6 +178,9 @@ const FAILURE_RESET_WINDOW_MS = {
   'client-login': 15 * 60 * 1000,
 } as const satisfies Record<FailureScope, number>
 
+const LOGIN_REMAINING_WARNING_RATIO = 0.2
+const REGISTER_REMAINING_WARNING_THRESHOLD = 3
+
 /**
  * 内存态时间窗口记录：
  * - key 一般由“接口 + 浏览器会话/浏览器实例/IP”或“接口 + 账号/手机号”组成；
@@ -211,7 +232,7 @@ export class AuthSecurityService {
       requestMeta?: RequestMeta
       detail?: Record<string, unknown>
     },
-  ) {
+  ): Promise<RateLimitConsumeResult> {
     const nowMs = Date.now()
     const existing = requestWindowStore.get(bucketKey) ?? []
     const activeWindow = this.trimRateLimitWindow(existing, rule.windowMs, nowMs)
@@ -232,6 +253,10 @@ export class AuthSecurityService {
     }
     activeWindow.push(nowMs)
     requestWindowStore.set(bucketKey, activeWindow)
+    return {
+      remainingRequests: Math.max(0, rule.maxRequests - activeWindow.length),
+      maxRequests: rule.maxRequests,
+    }
   }
 
   private getFailureState(storeKey: string, scope: FailureScope, nowMs: number) {
@@ -277,7 +302,7 @@ export class AuthSecurityService {
     subject: string,
     sourceKey: string,
     subjectKey: string,
-  ) {
+  ): Promise<LoginFailureRecordResult> {
     const nowMs = Date.now()
     for (const storeKey of [sourceKey, subjectKey]) {
       const current = this.getFailureState(storeKey, scope, nowMs)
@@ -300,7 +325,12 @@ export class AuthSecurityService {
     }
 
     const currentSubjectState = failureStateStore.get(subjectKey)
-    if (currentSubjectState?.lockedUntil && currentSubjectState.lockedUntil > nowMs) {
+    const remainingAttempts = Math.max(0, FAILURE_LOCK_THRESHOLD[scope] - (currentSubjectState?.count ?? 0))
+    const shouldWarnRemaining =
+      remainingAttempts > 0 &&
+      remainingAttempts <= Math.max(1, Math.ceil(FAILURE_LOCK_THRESHOLD[scope] * LOGIN_REMAINING_WARNING_RATIO))
+    const lockTriggered = Boolean(currentSubjectState?.lockedUntil && currentSubjectState.lockedUntil > nowMs)
+    if (lockTriggered && currentSubjectState) {
       await this.recordRiskEvent({
         actionType: 'auth.guard.lock',
         actionLabel: '登录失败触发临时锁定',
@@ -312,6 +342,12 @@ export class AuthSecurityService {
           lockedSeconds: Math.max(1, Math.ceil((currentSubjectState.lockedUntil - nowMs) / 1000)),
         },
       })
+    }
+
+    return {
+      remainingAttempts,
+      shouldWarnRemaining,
+      lockTriggered,
     }
   }
 
@@ -364,7 +400,7 @@ export class AuthSecurityService {
       requestMeta?: RequestMeta
       detail?: Record<string, unknown>
     },
-  ) {
+  ): Promise<RateLimitConsumeResult> {
     const riskActor = this.resolveClientRiskActor(auditInput.requestMeta)
     const primaryDetail = auditInput.detail
       ? {
@@ -377,14 +413,14 @@ export class AuthSecurityService {
           sourceType: riskActor.sourceType,
         }
 
-    await this.consumeRateLimit(`${baseBucketKey}:${riskActor.bucketSegment}`, primaryRule, {
+    const primaryConsumeResult = await this.consumeRateLimit(`${baseBucketKey}:${riskActor.bucketSegment}`, primaryRule, {
       ...auditInput,
       detail: primaryDetail,
     })
 
     const ipAddress = normalizeRiskSource(auditInput.requestMeta)
     if (riskActor.sourceType === 'ip' || ipAddress === 'unknown-ip') {
-      return
+      return primaryConsumeResult
     }
 
     const fallbackDetail = auditInput.detail
@@ -404,6 +440,8 @@ export class AuthSecurityService {
       ...auditInput,
       detail: fallbackDetail,
     })
+
+    return primaryConsumeResult
   }
 
   async guardAdminLoginRequest(requestMeta: RequestMeta | undefined, username: string) {
@@ -493,9 +531,9 @@ export class AuthSecurityService {
    * - 只负责浏览器会话 / 浏览器实例 / IP 这一层的注册来源频控；
    * - 账号 24 小时额度由单独方法处理，便于在确认账号未占用后再记账。
    */
-  async guardClientRegisterSourceRequest(requestMeta: RequestMeta | undefined, accountKey: string) {
+  async guardClientRegisterSourceRequest(requestMeta: RequestMeta | undefined, accountKey: string): Promise<RegisterSourceGuardResult> {
     const riskActor = this.resolveClientRiskActor(requestMeta)
-    await this.consumeClientSourceRateLimit(
+    const consumeResult = await this.consumeClientSourceRateLimit(
       'client-register',
       RATE_LIMIT_RULES.clientRegisterBySource,
       RATE_LIMIT_RULES.clientRegisterByIpFallback,
@@ -506,6 +544,12 @@ export class AuthSecurityService {
       requestMeta,
       detail: {},
     })
+    return {
+      remainingAttempts: consumeResult.remainingRequests,
+      shouldWarnRemaining: consumeResult.remainingRequests > 0 && consumeResult.remainingRequests <= REGISTER_REMAINING_WARNING_THRESHOLD,
+      maxAttempts: consumeResult.maxRequests,
+      sourceType: riskActor.sourceType,
+    }
   }
 
   /**
@@ -591,7 +635,7 @@ export class AuthSecurityService {
 
   async recordClientLoginFailure(requestMeta: RequestMeta | undefined, accountKey: string) {
     const riskActor = this.resolveClientRiskActor(requestMeta)
-    await this.recordLoginFailure(
+    return this.recordLoginFailure(
       'client-login',
       requestMeta,
       accountKey,
