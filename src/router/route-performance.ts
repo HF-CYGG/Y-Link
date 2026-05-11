@@ -233,6 +233,15 @@ export const preloadRouteComponents = async (routeNames: RouteWarmupTarget[]) =>
 }
 
 /**
+ * 单路由预热包装：
+ * - 统一复用批量预热的 Promise 缓存；
+ * - 供空闲分片调度逐个拉起页面子包，避免一次回调里并发触发多个重模块。
+ */
+const preloadSingleRouteComponent = async (routeName: RouteWarmupTarget) => {
+  await preloadRouteComponents([routeName])
+}
+
+/**
  * 客户端高频相邻页预热映射：
  * - 第一个元素始终是“当前落点最可能的下一跳”；
  * - 只保留真正高频的相邻页，避免客户端冷启动时把低频页面也一并拉起。
@@ -349,50 +358,54 @@ export const scheduleRouteComponentWarmup = (routeNames: RouteWarmupTarget[]) =>
     scheduledWarmupRouteNames.add(routeName)
   })
 
-  /**
-   * 预热批次执行器：
-   * - 真正开始执行时，再把对应路由从“已排队”集合里移除；
-   * - 这样可以同时覆盖“尚未执行前去重”和“执行开始后由 Promise 缓存兜底”两段窗口。
-   */
-  const runWarmupBatch = (batchRouteNames: RouteWarmupTarget[]) => {
-    if (!batchRouteNames.length) {
+  const scheduleDeferredWarmup = (callback: () => void, timeout: number) => {
+    if (typeof globalThis.window.requestIdleCallback === 'function') {
+      globalThis.window.requestIdleCallback(callback, { timeout })
       return
     }
-    batchRouteNames.forEach((routeName) => {
-      scheduledWarmupRouteNames.delete(routeName)
-    })
-    void preloadRouteComponents(batchRouteNames)
+
+    globalThis.window.setTimeout(callback, Math.min(timeout, 420))
+  }
+
+  /**
+   * 单项预热执行器：
+   * - 真正开始执行时，再把该路由从“已排队”集合里移除；
+   * - 用逐个空闲片段串行拉起，减少单个 setTimeout 回调里的同步工作量。
+   */
+  const runWarmupItem = (routeName: RouteWarmupTarget) => {
+    scheduledWarmupRouteNames.delete(routeName)
+    void preloadSingleRouteComponent(routeName)
   }
 
   /**
    * 高频相邻页分两段预热：
    * - 第一优先级页面先起，优先照顾最可能的下一跳；
-   * - 其余目标继续挂到后续空闲片段，避免一次性并发拉起过多子包。
+   * - 其余目标继续拆到后续空闲片段里逐个执行，避免一次性并发拉起过多子包。
    */
   const warmupTask = () => {
-    runWarmupBatch(routeNamesToSchedule.slice(0, 1))
+    const [firstRouteName, ...trailingRouteNames] = routeNamesToSchedule
+    if (firstRouteName) {
+      runWarmupItem(firstRouteName)
+    }
 
-    const trailingRouteNames = routeNamesToSchedule.slice(1)
     if (!trailingRouteNames.length) {
       return
     }
 
-    if (typeof globalThis.window.requestIdleCallback === 'function') {
-      globalThis.window.requestIdleCallback(() => {
-        runWarmupBatch(trailingRouteNames)
-      }, { timeout: 1200 })
-      return
+    const scheduleTrailingWarmupAt = (index: number) => {
+      const nextRouteName = trailingRouteNames[index]
+      if (!nextRouteName) {
+        return
+      }
+
+      scheduleDeferredWarmup(() => {
+        runWarmupItem(nextRouteName)
+        scheduleTrailingWarmupAt(index + 1)
+      }, 1200)
     }
 
-    globalThis.window.setTimeout(() => {
-      runWarmupBatch(trailingRouteNames)
-    }, 420)
+    scheduleTrailingWarmupAt(0)
   }
 
-  if (typeof globalThis.window.requestIdleCallback === 'function') {
-    globalThis.window.requestIdleCallback(warmupTask, { timeout: 900 })
-    return
-  }
-
-  globalThis.window.setTimeout(warmupTask, 260)
+  scheduleDeferredWarmup(warmupTask, 900)
 }
