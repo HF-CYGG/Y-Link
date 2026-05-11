@@ -104,6 +104,9 @@ const route = useRoute()
 const clientAuthStore = useClientAuthStore(pinia)
 const { runLatest: runLatestCaptchaRequest, cancel: cancelCaptchaRequest } = useStableRequest()
 const { runLatest: runLatestCapabilityRequest, cancel: cancelCapabilityRequest } = useStableRequest()
+const { runLatest: runLatestLoginRequest, cancel: cancelLoginRequest } = useStableRequest()
+const { runLatest: runLatestRegisterRequest, cancel: cancelRegisterRequest } = useStableRequest()
+const { runLatest: runLatestVerificationCodeRequest, cancel: cancelVerificationCodeRequest } = useStableRequest()
 const { runWithGate } = useIdempotentAction()
 
 // 登录 / 注册模式切换：
@@ -117,9 +120,11 @@ const successTip = ref('')
 const securityHint = ref('')
 const verificationSending = ref(false)
 const capabilityLoading = ref(false)
+const capabilityErrorMessage = ref('')
 const registerVerificationCountdown = ref(0)
 let registerVerificationTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let captchaExpireTimer: ReturnType<typeof globalThis.setInterval> | null = null
+let capabilityDeferredTimer: ReturnType<typeof globalThis.setTimeout> | null = null
 const formWrapperRef = ref<HTMLElement | null>(null)
 const formBlockRef = ref<HTMLElement | null>(null)
 const formWrapperHeight = ref('auto')
@@ -166,6 +171,9 @@ const registerDepartmentOptions = computed(() => authCapabilities.value?.departm
 const registerDepartmentTreeSelectData = computed(() => {
   return buildDepartmentTreeSelectData(authCapabilities.value?.departmentTree ?? [])
 })
+const shouldPrepareCaptcha = computed(() => activeMode.value === 'register' || loginCaptchaVisible.value)
+const isCapabilityHintVisible = computed(() => capabilityLoading.value && !authCapabilities.value)
+const isCapabilityFallbackVisible = computed(() => !capabilityLoading.value && !!capabilityErrorMessage.value && !authCapabilities.value)
 
 const captchaHintText = computed(() => {
   if (captcha.expiresInSeconds <= 0) {
@@ -300,21 +308,44 @@ const handleManualRefreshCaptcha = async () => {
   await refreshCaptcha()
 }
 
-const loadAuthCapabilities = async () => {
+const loadAuthCapabilities = async (options: { silent?: boolean } = {}) => {
   capabilityLoading.value = true
+  capabilityErrorMessage.value = ''
   await runLatestCapabilityRequest({
     executor: (signal) => getClientAuthCapabilities({ signal }),
     onSuccess: (result) => {
       authCapabilities.value = result
+      capabilityErrorMessage.value = ''
     },
     onError: (error) => {
       const normalizedError = normalizeRequestError(error, '加载客户端校验策略失败，请稍后重试')
-      ElMessage.error(normalizedError.message)
+      capabilityErrorMessage.value = normalizedError.message
+      if (!options.silent) {
+        ElMessage.error(normalizedError.message)
+      }
     },
     onFinally: () => {
       capabilityLoading.value = false
     },
   })
+}
+
+const scheduleDeferredCapabilityLoad = () => {
+  if (authCapabilities.value || capabilityLoading.value) {
+    return
+  }
+  if (capabilityDeferredTimer) {
+    globalThis.clearTimeout(capabilityDeferredTimer)
+  }
+  // 认证页首屏先让输入区和主按钮稳定渲染，辅助能力在首帧之后补齐。
+  capabilityDeferredTimer = globalThis.setTimeout(() => {
+    capabilityDeferredTimer = null
+    void loadAuthCapabilities({ silent: true })
+  }, 0)
+}
+
+const handleRetryLoadAuthCapabilities = async () => {
+  await loadAuthCapabilities()
 }
 
 const validateMobile = (mobile: string) => /^1\d{10}$/.test(mobile.trim())
@@ -417,27 +448,36 @@ const handleSendRegisterVerificationCode = async () => {
     },
     executor: async () => {
       verificationSending.value = true
-      try {
-        const result = await clientAuthStore.sendVerificationCode({
-          channel,
-          target: normalizeInputText(registerForm.account),
-          scene: 'register',
-          captchaId: captcha.captchaId,
-          captchaCode: normalizeInputText(registerForm.captcha),
-        })
-        ElMessage.success(`${channel === 'email' ? '邮箱' : '手机'}验证码已发送`)
-        registerForm.captcha = ''
-        await refreshCaptcha(true)
-        startRegisterVerificationCountdown(result.expireSeconds)
-      } catch (error) {
-        const normalizedError = normalizeRequestError(error, '验证码发送失败，请稍后重试')
-        applySecurityHintFromMessage(normalizedError.message)
-        ElMessage.error(normalizedError.message)
-        registerForm.captcha = ''
-        await refreshCaptcha(true)
-      } finally {
-        verificationSending.value = false
-      }
+      securityHint.value = ''
+      await runLatestVerificationCodeRequest({
+        executor: (signal) =>
+          clientAuthStore.sendVerificationCode(
+            {
+              channel,
+              target: normalizeInputText(registerForm.account),
+              scene: 'register',
+              captchaId: captcha.captchaId,
+              captchaCode: normalizeInputText(registerForm.captcha),
+            },
+            { signal },
+          ),
+        onSuccess: async (result) => {
+          ElMessage.success(`${channel === 'email' ? '邮箱' : '手机'}验证码已发送`)
+          registerForm.captcha = ''
+          await refreshCaptcha(true)
+          startRegisterVerificationCountdown(result.expireSeconds)
+        },
+        onError: async (error) => {
+          const normalizedError = normalizeRequestError(error, '验证码发送失败，请稍后重试')
+          applySecurityHintFromMessage(normalizedError.message)
+          ElMessage.error(normalizedError.message)
+          registerForm.captcha = ''
+          await refreshCaptcha(true)
+        },
+        onFinally: () => {
+          verificationSending.value = false
+        },
+      })
     },
   })
   if (runResult === null) {
@@ -469,31 +509,40 @@ const handleLogin = async () => {
     },
     executor: async () => {
       isLoading.value = true
-      try {
-        await clientAuthStore.login({
-          account: normalizeInputText(loginForm.account),
-          password: loginForm.password,
-          captchaId: loginCaptchaVisible.value ? captcha.captchaId : undefined,
-          captchaCode: loginCaptchaVisible.value ? normalizeInputText(loginForm.captcha) : undefined,
-        })
-        loginCaptchaVisible.value = false
-        loginForm.captcha = ''
-        clearCaptcha()
-        await preloadRouteComponents(resolveClientPostLoginWarmupTargets(redirectPath.value))
-        ElMessage.success('登录成功，欢迎来到 Y-Link 客户端')
-        await router.replace(redirectPath.value)
-      } catch (error) {
-        const normalizedError = normalizeRequestError(error, '登录失败，请检查用户名、手机号、邮箱、密码和验证码后重试')
-        applySecurityHintFromMessage(normalizedError.message)
-        ElMessage.error(normalizedError.message)
-        if (/用户名或密码错误|图形验证码|锁定|稍后|重试/.test(normalizedError.message)) {
-          loginCaptchaVisible.value = true
+      securityHint.value = ''
+      await runLatestLoginRequest({
+        executor: (signal) =>
+          clientAuthStore.login(
+            {
+              account: normalizeInputText(loginForm.account),
+              password: loginForm.password,
+              captchaId: loginCaptchaVisible.value ? captcha.captchaId : undefined,
+              captchaCode: loginCaptchaVisible.value ? normalizeInputText(loginForm.captcha) : undefined,
+            },
+            { signal },
+          ),
+        onSuccess: async () => {
+          loginCaptchaVisible.value = false
           loginForm.captcha = ''
-          await refreshCaptcha(true)
-        }
-      } finally {
-        isLoading.value = false
-      }
+          clearCaptcha()
+          await preloadRouteComponents(resolveClientPostLoginWarmupTargets(redirectPath.value))
+          ElMessage.success('登录成功，欢迎来到 Y-Link 客户端')
+          await router.replace(redirectPath.value)
+        },
+        onError: async (error) => {
+          const normalizedError = normalizeRequestError(error, '登录失败，请检查用户名、手机号、邮箱、密码和验证码后重试')
+          applySecurityHintFromMessage(normalizedError.message)
+          ElMessage.error(normalizedError.message)
+          if (/用户名或密码错误|图形验证码|锁定|稍后|重试/.test(normalizedError.message)) {
+            loginCaptchaVisible.value = true
+            loginForm.captcha = ''
+            await refreshCaptcha(true)
+          }
+        },
+        onFinally: () => {
+          isLoading.value = false
+        },
+      })
     },
   })
   if (runResult === null) {
@@ -540,48 +589,57 @@ const handleRegister = async () => {
     },
     executor: async () => {
       isLoading.value = true
-      try {
-        const registeredAccount = normalizeInputText(registerForm.account)
-        const registeredUsername = normalizeInputText(registerForm.username)
-        await clientAuthStore.register({
-          username: registeredUsername,
-          account: registeredAccount,
-          password: registerForm.password,
-          departmentName: normalizeInputText(registerForm.department) || undefined,
-          verificationCode: registerUsesVerificationCode.value ? normalizeInputText(registerForm.verificationCode) : undefined,
-          captchaId: registerUsesVerificationCode.value ? undefined : captcha.captchaId,
-          captchaCode: registerUsesVerificationCode.value ? undefined : normalizeInputText(registerForm.captcha),
-        })
-        ElMessage.success('注册成功，请登录')
-        activeMode.value = 'login'
-        loginForm.account = registeredAccount
-        loginForm.password = ''
-        loginForm.captcha = ''
-        successTip.value = '账号已创建成功，请使用用户名、手机号或邮箱与密码登录。'
-        registerForm.captcha = ''
-        registerForm.verificationCode = ''
-        registerForm.username = ''
-        registerForm.password = ''
-        registerForm.confirmPassword = ''
-        registerForm.department = ''
-        await refreshCaptcha(true)
-        await router.replace({
-          path: '/client/login',
-          query: {
-            tab: 'login',
-            account: registeredAccount,
-            notice: successTip.value,
-          },
-        })
-      } catch (error) {
-        const normalizedError = normalizeRequestError(error, '注册失败，请检查信息后重试')
-        applySecurityHintFromMessage(normalizedError.message)
-        ElMessage.error(normalizedError.message)
-        registerForm.captcha = ''
-        await refreshCaptcha(true)
-      } finally {
-        isLoading.value = false
-      }
+      securityHint.value = ''
+      const registeredAccount = normalizeInputText(registerForm.account)
+      const registeredUsername = normalizeInputText(registerForm.username)
+      await runLatestRegisterRequest({
+        executor: (signal) =>
+          clientAuthStore.register(
+            {
+              username: registeredUsername,
+              account: registeredAccount,
+              password: registerForm.password,
+              departmentName: normalizeInputText(registerForm.department) || undefined,
+              verificationCode: registerUsesVerificationCode.value ? normalizeInputText(registerForm.verificationCode) : undefined,
+              captchaId: registerUsesVerificationCode.value ? undefined : captcha.captchaId,
+              captchaCode: registerUsesVerificationCode.value ? undefined : normalizeInputText(registerForm.captcha),
+            },
+            { signal },
+          ),
+        onSuccess: async () => {
+          ElMessage.success('注册成功，请登录')
+          activeMode.value = 'login'
+          loginForm.account = registeredAccount
+          loginForm.password = ''
+          loginForm.captcha = ''
+          successTip.value = '账号已创建成功，请使用用户名、手机号或邮箱与密码登录。'
+          registerForm.captcha = ''
+          registerForm.verificationCode = ''
+          registerForm.username = ''
+          registerForm.password = ''
+          registerForm.confirmPassword = ''
+          registerForm.department = ''
+          await refreshCaptcha(true)
+          await router.replace({
+            path: '/client/login',
+            query: {
+              tab: 'login',
+              account: registeredAccount,
+              notice: successTip.value,
+            },
+          })
+        },
+        onError: async (error) => {
+          const normalizedError = normalizeRequestError(error, '注册失败，请检查信息后重试')
+          applySecurityHintFromMessage(normalizedError.message)
+          ElMessage.error(normalizedError.message)
+          registerForm.captcha = ''
+          await refreshCaptcha(true)
+        },
+        onFinally: () => {
+          isLoading.value = false
+        },
+      })
     },
   })
   if (runResult === null) {
@@ -595,10 +653,10 @@ onMounted(async () => {
     return
   }
   applyRouteState()
-  await Promise.allSettled([loadAuthCapabilities(), ensureCaptchaReady()])
   await nextTick()
   syncWrapperHeight()
   resetRegisterVerificationTimer()
+  scheduleDeferredCapabilityLoad()
 })
 
 watch(
@@ -615,16 +673,11 @@ watch(registerValidationMode, (mode) => {
   }
 })
 
-watch(
-  [activeMode, loginCaptchaVisible, registerUsesVerificationCode],
-  async ([mode, shouldShowLoginCaptcha, usesVerificationCode]) => {
-    const shouldShowCaptcha = (mode === 'login' && shouldShowLoginCaptcha) || mode === 'register' || !usesVerificationCode
-    if (shouldShowCaptcha) {
-      await ensureCaptchaReady()
-    }
-  },
-  { immediate: true },
-)
+watch(shouldPrepareCaptcha, (shouldShowCaptcha) => {
+  if (shouldShowCaptcha) {
+    void ensureCaptchaReady()
+  }
+})
 
 // 提示变化不再强制重算高度
 watch(successTip, async () => {
@@ -639,6 +692,13 @@ onUnmounted(() => {
   // 页面离开时主动清理倒计时，避免重复进入后产生多个定时器。
   cancelCapabilityRequest()
   cancelCaptchaRequest()
+  cancelLoginRequest()
+  cancelRegisterRequest()
+  cancelVerificationCodeRequest()
+  if (capabilityDeferredTimer) {
+    globalThis.clearTimeout(capabilityDeferredTimer)
+    capabilityDeferredTimer = null
+  }
   resetRegisterVerificationTimer()
   clearCaptcha()
 })
@@ -688,6 +748,25 @@ onUnmounted(() => {
             show-icon
             :title="securityHint"
           />
+          <el-alert
+            v-if="isCapabilityHintVisible"
+            class="mb-4"
+            type="info"
+            :closable="false"
+            show-icon
+            title="正在补充认证辅助能力，核心输入区与主操作区已可直接使用。"
+          />
+          <el-alert v-else-if="isCapabilityFallbackVisible" class="mb-4" type="warning" :closable="false" show-icon>
+            <template #title>
+              认证辅助能力加载较慢，登录与注册基础流程仍可继续；如需忘记密码、部门选项或最新校验策略，请重试。
+            </template>
+            <template #default>
+              <div class="capability-alert__content">
+                <span>{{ capabilityErrorMessage }}</span>
+                <el-button link type="primary" @click="handleRetryLoadAuthCapabilities">重新加载</el-button>
+              </div>
+            </template>
+          </el-alert>
 
           <div ref="formWrapperRef" class="form-wrapper" :style="{ height: formWrapperHeight }">
             <transition
@@ -782,7 +861,8 @@ onUnmounted(() => {
                     check-strictly
                     :expand-on-click-node="false"
                     :render-after-expand="false"
-                    placeholder="所属部门（选填）"
+                    :disabled="capabilityLoading && !authCapabilities"
+                    :placeholder="capabilityLoading && !authCapabilities ? '部门选项加载中，可稍后再选' : '所属部门（选填）'"
                     class="geo-input-select"
                     size="large"
                     clearable
@@ -1283,6 +1363,15 @@ onUnmounted(() => {
   font-size: 12px;
   line-height: 1.6;
   color: #64748b;
+}
+
+.capability-alert__content {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .verification-code-button {

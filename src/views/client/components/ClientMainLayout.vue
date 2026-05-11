@@ -110,6 +110,40 @@ const resolvePathDepth = (path: string) => {
   return 1
 }
 
+/**
+ * 客户端主页面切页前回顶：
+ * - 仅用于底部导航触发的主页面切换；
+ * - 在路由切换前同步把窗口级滚动复位到顶部，避免新页面先带着旧 scrollY 进入视口再跳回顶部；
+ * - 不触碰页面内部局部滚动容器，因此不会误伤商品分类面板、抽屉或弹层的滚动状态。
+ */
+const resetClientPageScrollBeforeTabSwitch = () => {
+  const scrollingElement = document.scrollingElement
+  if (scrollingElement) {
+    scrollingElement.scrollTop = 0
+    scrollingElement.scrollLeft = 0
+  }
+
+  window.scrollTo({
+    top: 0,
+    left: 0,
+    behavior: 'auto',
+  })
+}
+
+/**
+ * 底部导航切页：
+ * - 仅在目标路由与当前路由不一致时执行，避免重复点击当前主页面时打断用户阅读；
+ * - 先回顶再跳路由，让目标页面首帧直接以顶部状态进入。
+ */
+const handleTabNavigation = async (targetPath: string) => {
+  if ((currentRoute.value.path || '/client') === targetPath) {
+    return
+  }
+
+  resetClientPageScrollBeforeTabSwitch()
+  await router.push(targetPath)
+}
+
 watch(
   () => currentRoute.value.fullPath || '/client',
   (nextPath, previousPath) => {
@@ -212,6 +246,7 @@ const handleLogout = async () => {
           :to="tab.path"
           class="client-main-layout__tab-item z-10"
           :class="isTabActive(tab.path) ? 'is-active' : ''"
+          @click.prevent="handleTabNavigation(tab.path)"
         >
           {{ tab.label }}
         </router-link>

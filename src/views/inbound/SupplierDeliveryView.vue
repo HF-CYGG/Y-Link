@@ -76,7 +76,7 @@ const canSubmit = computed(() => {
 // 右侧操作提示：只保留真正影响提交和交货的关键信息，避免与页头和成功态重复。
 const helperSteps = [
   '同一商品可分多行填写，提交时会自动合并数量。',
-  '确认生成后单据不可修改，请先核对商品和总件数。',
+  '送货单生成后，可在待入库阶段到历史单据中改单或撤销。',
   '如二维码未显示，可稍后到历史单据中补查。',
 ] as const
 
@@ -128,7 +128,7 @@ const handleSubmit = async () => {
   }
 
   try {
-    await ElMessageBox.confirm('送货单生成后不可修改，确认提交吗？', '确认生成', {
+    await ElMessageBox.confirm('送货单生成后可在待入库阶段到历史单据中改单或撤销，确认提交吗？', '确认生成', {
       confirmButtonText: '确认生成',
       cancelButtonText: '取消',
       type: 'warning',
@@ -155,7 +155,7 @@ const handleSubmit = async () => {
     currentShowNo.value = result.order.showNo
     await generateQRCode(verifyCode)
     isSuccess.value = true
-    ElMessage.success('送货单生成成功')
+    ElMessage.success('送货单生成成功，可在历史单据中继续改单或撤销')
   } catch (err) {
     ElMessage.error(extractErrorMessage(err, '生成失败'))
   } finally {
@@ -299,7 +299,7 @@ onMounted(() => {
                 <div class="min-w-0">
                   <h3 class="text-sm font-semibold text-slate-800 dark:text-slate-100">提交前留意</h3>
                   <p class="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
-                    生成后单据不可修改，请在提交前核对商品、数量和备注。
+                    生成后仍可在待入库阶段到历史单据中改单或撤销；已入库后将不可再修改。
                   </p>
                 </div>
                 <span class="delivery-side-card__signal">
@@ -349,6 +349,9 @@ onMounted(() => {
               <h2 class="mt-2 text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">送货单已生成</h2>
               <p class="mt-3 text-sm leading-6 text-slate-500 dark:text-slate-400">
                 单号 <span class="font-semibold text-slate-700 dark:text-slate-200">{{ currentShowNo }}</span> 已生成，交货时出示二维码即可。
+              </p>
+              <p class="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">
+                若需补充商品、调整数量或取消本单，请前往历史单据处理。
               </p>
 
               <div class="mt-6 flex flex-wrap gap-2 text-sm text-slate-500 dark:text-slate-400">

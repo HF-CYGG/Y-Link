@@ -5,6 +5,7 @@
  * 实现逻辑：
  * - 购物车页与商城内嵌购物车共用同一组件，通过 `standalone` 区分路由页与抽屉页模式；
  * - 去结算时统一沿用商城页口径，若用户尚未手动勾选，则自动勾选全部可结算商品再继续；
+ * - 进入页面后会在后台静默同步一次最新商品目录，及时修正库存、限购与失效商品状态；
  * - 在路由跳转或抽屉切换前先进入短暂“处理中”状态，减少重复点击与“无响应”感知。
  * 维护说明：后续若继续扩展购物车入口，需要同步保持不同入口的勾选与反馈口径一致。
  */
@@ -13,6 +14,7 @@ import { computed, nextTick, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { ArrowLeft } from '@element-plus/icons-vue'
+import { useClientMallSnapshotRefresh } from '@/composables/useClientMallSnapshotRefresh'
 import { useClientAuthStore, useClientCartStore } from '@/store'
 import pinia from '@/store/pinia'
 
@@ -28,10 +30,13 @@ const emit = defineEmits<{
 const router = useRouter()
 const clientAuthStore = useClientAuthStore(pinia)
 const clientCartStore = useClientCartStore(pinia)
+const { syncing: catalogSyncing, refreshMallSnapshot } = useClientMallSnapshotRefresh()
 const checkoutPending = ref(false)
 
 onMounted(() => {
   clientCartStore.initialize(clientAuthStore.currentUser?.id)
+  // 购物车页优先展示本地快照，再静默拉取最新库存，避免把首屏等待绑定到目录同步上。
+  void refreshMallSnapshot()
 })
 
 const selectedCount = computed(() => clientCartStore.selectedValidItems.length)
@@ -105,6 +110,9 @@ const handleBack = () => {
     <section class="flex-1 overflow-y-auto px-4 py-4 sm:px-5 pb-32">
       <div class="mb-4 rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-4 shadow-[var(--ylink-shadow-soft)]">
         <p class="text-sm text-slate-500">支持全选、批量删除与失效商品分组</p>
+        <p class="mt-2 text-xs text-slate-400">
+          {{ catalogSyncing ? '正在后台同步最新库存，不影响当前勾选与结算操作' : '商品库存与限购会在进入页面后自动静默同步' }}
+        </p>
       </div>
 
       <div

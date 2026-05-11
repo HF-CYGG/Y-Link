@@ -21,6 +21,7 @@ export type ClientOrderRefreshReason =
 export interface ClientOrderRefreshEventDetail {
   orderId: string
   reason: ClientOrderRefreshReason
+  sourceId: string | null
   eventAt: number
 }
 
@@ -29,6 +30,10 @@ const CLIENT_ORDER_REFRESH_STORAGE_KEY = 'y-link.client-order.refresh'
 
 const normalizeOrderId = (value: unknown) => {
   return typeof value === 'string' ? value.trim() : ''
+}
+
+const normalizeSourceId = (value: unknown) => {
+  return typeof value === 'string' && value.trim() ? value.trim() : null
 }
 
 const normalizeRefreshReason = (value: unknown): ClientOrderRefreshReason => {
@@ -53,6 +58,7 @@ const normalizeRefreshDetail = (value: unknown): ClientOrderRefreshEventDetail |
   return {
     orderId: normalizeOrderId(candidate.orderId),
     reason: normalizeRefreshReason(candidate.reason),
+    sourceId: normalizeSourceId(candidate.sourceId),
     eventAt: Number.isFinite(candidate.eventAt) ? Number(candidate.eventAt) : Date.now(),
   }
 }
@@ -68,7 +74,11 @@ const dispatchRefreshEvent = (detail: ClientOrderRefreshEventDetail) => {
   )
 }
 
-export const notifyClientOrderRefresh = (payload: { orderId?: string | null; reason: ClientOrderRefreshReason }) => {
+export const notifyClientOrderRefresh = (payload: {
+  orderId?: string | null
+  reason: ClientOrderRefreshReason
+  sourceId?: string | null
+}) => {
   if (globalThis.window === undefined) {
     return
   }
@@ -76,6 +86,7 @@ export const notifyClientOrderRefresh = (payload: { orderId?: string | null; rea
   const detail: ClientOrderRefreshEventDetail = {
     orderId: normalizeOrderId(payload.orderId),
     reason: payload.reason,
+    sourceId: normalizeSourceId(payload.sourceId),
     eventAt: Date.now(),
   }
 

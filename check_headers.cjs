@@ -1,3 +1,4 @@
+// 文件说明：校验规范清单中的文件是否包含约定的头部说明，并自动回写已完成项。
 const fs = require('node:fs');
 
 const checklistPath = 'f:/Y-Link/.trae/specs/review-entire-workspace-file-by-file/checklist.md';
@@ -7,8 +8,11 @@ const lines = checklist.split('\n');
 let updatedLines = [];
 let missingFiles = [];
 
+const uncheckedChecklistItemPattern = /- \[ \] `([^`]+)`/;
+const resourceFilePattern = /\.(png|svg|json|sqlite|sqlite-journal|lock|gitkeep|md)$/i;
+
 for (let line of lines) {
-  const match = line.match(/- \[ \] `([^`]+)`/);
+  const match = uncheckedChecklistItemPattern.exec(line);
   if (match) {
     const filePath = match[1];
     try {
@@ -17,7 +21,8 @@ for (let line of lines) {
         continue;
       }
       
-      const isResource = line.includes('资源文件登记') || filePath.match(/\.(png|svg|json|sqlite|sqlite-journal|lock|gitkeep|md)$/i);
+      const isResource =
+        line.includes('资源文件登记') || resourceFilePattern.exec(filePath);
       
       if (isResource) {
         // Resources don't need headers, mark as checked

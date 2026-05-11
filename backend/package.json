@@ -20,6 +20,7 @@
     "task345:verify": "tsx scripts/task345-verify.ts",
     "task123:o2o-enhance:verify": "tsx scripts/task123-o2o-enhance-verify.ts",
     "task6:verify": "tsx scripts/task6-verify.ts",
+    "task6:client-core-flow:verify": "tsx scripts/task6-client-core-flow-verify.ts",
     "task7:verify": "tsx scripts/task7-verify.ts",
     "task8:verify": "tsx scripts/task8-verify.ts",
     "feedback:customer-service:verify": "tsx scripts/feedback-customer-service-verify.ts",

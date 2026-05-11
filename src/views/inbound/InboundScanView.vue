@@ -1,26 +1,28 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/inbound/InboundScanView.vue
- * 文件职责：提供送货单扫码查询、明细核对、一键确认入库与最近查询回查能力。
+ * 文件职责：提供送货单扫码查询、明细核对、现场改单、一键确认入库与最近查询回查能力。
  * 实现逻辑：
  * - 页面同时兼容核销码与送货单号两种输入方式，并在查询失败时按规则自动兜底到 showNo 查询；
- * - 查询、核销、快捷键和扫码弹窗共用同一份状态门禁，避免连续作业时重复触发请求；
+ * - 查询、现场改单、核销、快捷键和扫码弹窗共用同一份状态门禁，避免连续作业时重复触发请求；
  * - 工作台布局统一收敛为“单主滚动区”，避免桌面与移动端多层滚动互相抢焦点。
  * 维护说明：
  * - 快捷键、扫码弹窗和最近查询列表属于连续作业链路，修改交互时需避免打断回焦节奏；
  * - 模板里用到的图标必须与脚本导入保持一致，否则运行时会直接报错并表现为页面无响应。
  */
 
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { PageContainer, UnifiedScanDialog } from '@/components/common'
 import {
   getInboundDetail,
   getInboundDetailByShowNo,
+  updateInboundOrderForAdmin,
   verifyInboundOrder,
   type InboundOrderDetail,
 } from '@/api/modules/inbound'
-import { CameraFilled, Check, Document, DocumentCopy, Loading, Picture, Search } from '@element-plus/icons-vue'
+import { getProductList, type ProductRecord } from '@/api/modules/product'
+import { CameraFilled, Check, Document, DocumentCopy, Edit, Loading, Picture, Search } from '@element-plus/icons-vue'
 import { useCameraQrScanner } from '@/composables/useCameraQrScanner'
 import { useDevice } from '@/composables/useDevice'
 import { extractErrorMessage } from '@/utils/error'
@@ -30,11 +32,34 @@ const scanCode = ref('')
 const scanInputRef = ref<{ focus: () => void } | null>(null)
 const loading = ref(false)
 const verifying = ref(false)
+const editing = ref(false)
 const successToastVisible = ref(false)
 const { isPhone } = useDevice()
 
 const currentOrder = ref<InboundOrderDetail | null>(null)
 const recentScans = ref<Array<{ verifyCode: string; showNo: string; status: InboundOrderDetail['order']['status']; scannedAt: string }>>([])
+const editDialogVisible = ref(false)
+const editProductsLoading = ref(false)
+const products = ref<ProductRecord[]>([])
+
+interface EditItemRow {
+  uid: string
+  productId: string
+  qty: number
+}
+
+const editUidSeed = ref(0)
+const createEditRow = (): EditItemRow => ({
+  uid: `inbound-scan-edit-${editUidSeed.value++}`,
+  productId: '',
+  qty: 1,
+})
+
+const editForm = reactive({
+  orderId: '',
+  remark: '',
+  items: [] as EditItemRow[],
+})
 
 const statusMap = {
   pending: { label: '待入库', type: 'warning' },
@@ -57,6 +82,11 @@ const canQuery = computed(() => {
 // 确认入库按钮可用状态：仅待入库单据允许操作，其他状态禁止。
 const canVerify = computed(() => {
   return Boolean(currentOrder.value && currentOrder.value.order.status === 'pending' && !verifying.value)
+})
+
+// 现场改单仅在待入库状态开放，改完后仍停留当前页继续核对与入库。
+const canEditOnsite = computed(() => {
+  return Boolean(currentOrder.value && currentOrder.value.order.status === 'pending' && !loading.value && !verifying.value && !editing.value)
 })
 
 const scanActionHint = computed(() => {
@@ -131,6 +161,46 @@ const appendRecentScan = (detail: InboundOrderDetail) => {
   recentScans.value = [nextRecord, ...deduplicated].slice(0, 5)
 }
 
+const replaceCurrentOrder = (detail: InboundOrderDetail) => {
+  currentOrder.value = detail
+  appendRecentScan(detail)
+}
+
+const resetEditForm = () => {
+  editForm.orderId = ''
+  editForm.remark = ''
+  editForm.items = [createEditRow()]
+}
+
+const hydrateEditForm = (detail: InboundOrderDetail) => {
+  editForm.orderId = detail.order.id
+  editForm.remark = detail.order.remark ?? ''
+  editForm.items = detail.items.map((item) => ({
+    uid: `inbound-scan-edit-${editUidSeed.value++}`,
+    productId: item.productId,
+    qty: Number(item.qty) || 1,
+  }))
+
+  if (!editForm.items.length) {
+    editForm.items = [createEditRow()]
+  }
+}
+
+const ensureProductsLoaded = async () => {
+  if (products.value.length) {
+    return
+  }
+
+  editProductsLoading.value = true
+  try {
+    products.value = await getProductList({})
+  } catch (error) {
+    ElMessage.error(extractErrorMessage(error, '加载商品目录失败'))
+  } finally {
+    editProductsLoading.value = false
+  }
+}
+
 const focusScanInput = () => {
   nextTick(() => {
     scanInputRef.value?.focus()
@@ -190,8 +260,7 @@ const handleScan = async () => {
       result = await getInboundDetailByShowNo(code.trim().toUpperCase())
     }
 
-    currentOrder.value = result
-    appendRecentScan(result)
+    replaceCurrentOrder(result)
     scanCode.value = ''
     focusScanInput()
   } catch (err) {
@@ -260,6 +329,75 @@ const handleVerify = async () => {
   }
 }
 
+const handleOpenEditDialog = async () => {
+  if (!currentOrder.value || !canEditOnsite.value) {
+    return
+  }
+
+  await ensureProductsLoaded()
+  if (!products.value.length) {
+    return
+  }
+
+  hydrateEditForm(currentOrder.value)
+  editDialogVisible.value = true
+}
+
+const handleAddEditItem = () => {
+  editForm.items.push(createEditRow())
+}
+
+const handleRemoveEditItem = (index: number) => {
+  if (editForm.items.length === 1) {
+    return
+  }
+  editForm.items.splice(index, 1)
+}
+
+const buildEditPayload = () => {
+  const validItems = editForm.items.filter((item) => item.productId && item.qty > 0)
+  if (!validItems.length) {
+    throw new Error('请至少保留一件有效商品')
+  }
+
+  const mergedItems = new Map<string, number>()
+  validItems.forEach((item) => {
+    mergedItems.set(item.productId, (mergedItems.get(item.productId) || 0) + item.qty)
+  })
+
+  return {
+    remark: editForm.remark.trim(),
+    items: Array.from(mergedItems.entries()).map(([productId, qty]) => ({ productId, qty })),
+  }
+}
+
+const handleSubmitEdit = async () => {
+  if (!currentOrder.value || !editForm.orderId) {
+    return
+  }
+
+  let payload: { remark: string; items: Array<{ productId: string; qty: number }> }
+  try {
+    payload = buildEditPayload()
+  } catch (error) {
+    ElMessage.warning(extractErrorMessage(error, '请至少保留一件有效商品'))
+    return
+  }
+
+  editing.value = true
+  try {
+    const detail = await updateInboundOrderForAdmin(editForm.orderId, payload)
+    replaceCurrentOrder(detail)
+    editDialogVisible.value = false
+    resetEditForm()
+    ElMessage.success('现场改单已保存，请继续核对后入库')
+  } catch (error) {
+    ElMessage.error(extractErrorMessage(error, '现场改单失败'))
+  } finally {
+    editing.value = false
+  }
+}
+
 const handleReset = () => {
   if (loading.value || verifying.value) {
     return
@@ -310,6 +448,7 @@ const handleReuseRecentScan = (verifyCode: string) => {
 }
 
 onMounted(() => {
+  resetEditForm()
   focusScanInput()
   // 模板会把文件输入框回填到此 ref，这里显式读取一次，避免类型检查误判为“未使用”。
   if (imageInputRef.value) {
@@ -394,7 +533,7 @@ onBeforeUnmount(() => {
           <h3 class="text-sm font-semibold text-slate-700 dark:text-slate-200 mb-2">作业指引</h3>
           <div class="space-y-2 text-sm text-slate-500 dark:text-slate-400">
             <p>1. 扫码或输入二维码后点击查询。</p>
-            <p>2. 核对供货方、单号、商品明细与数量。</p>
+            <p>2. 核对供货方、单号、商品明细与数量，必要时可现场改单。</p>
             <p>3. 确认无误后执行“一键确认入库”。</p>
           </div>
         </div>
@@ -505,6 +644,17 @@ onBeforeUnmount(() => {
                 重置并扫码下一单
               </el-button>
               <div class="flex gap-3">
+                <el-button
+                  type="warning"
+                  plain
+                  size="large"
+                  :disabled="!canEditOnsite"
+                  @click="handleOpenEditDialog"
+                  class="!rounded-xl px-8"
+                >
+                  <el-icon class="mr-2"><Edit /></el-icon>
+                  现场改单
+                </el-button>
                 <el-button type="primary" plain size="large" :disabled="loading || verifying" @click="handleScan" class="!rounded-xl px-8">
                   重新查询
                 </el-button>
@@ -555,6 +705,94 @@ onBeforeUnmount(() => {
       :bind-scanner-container="bindScannerContainer"
       @closed="closeScanDialog"
     />
+
+    <el-dialog
+      v-model="editDialogVisible"
+      title="现场改单"
+      width="46rem"
+      append-to-body
+      destroy-on-close
+      @closed="resetEditForm"
+    >
+      <div class="space-y-4">
+        <div class="rounded-2xl border border-amber-200/70 bg-amber-50/80 px-4 py-3 text-sm leading-6 text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/20 dark:text-amber-200">
+          当前为现场核对改单模式。保存后会直接覆盖待入库送货单的商品明细、数量与备注，核销码保持不变。
+        </div>
+
+        <transition-group name="item-list" tag="div" class="space-y-3">
+          <div
+            v-for="(item, index) in editForm.items"
+            :key="item.uid"
+            class="inbound-scan-edit-row flex flex-col gap-3 rounded-2xl border border-slate-200/70 bg-slate-50/75 p-4 dark:border-slate-700/70 dark:bg-slate-900/40 lg:flex-row lg:items-start"
+          >
+            <div class="inbound-scan-edit-row__index">{{ index + 1 }}</div>
+            <div class="flex-1">
+              <el-select
+                v-model="item.productId"
+                filterable
+                class="w-full"
+                placeholder="请选择商品"
+                :loading="editProductsLoading"
+              >
+                <el-option
+                  v-for="product in products"
+                  :key="product.id"
+                  :label="product.productName"
+                  :value="product.id"
+                >
+                  <span class="float-left">{{ product.productName }}</span>
+                  <span class="float-right text-sm text-slate-400">{{ product.productCode }}</span>
+                </el-option>
+              </el-select>
+            </div>
+            <div class="w-full lg:w-36">
+              <el-input-number
+                v-model="item.qty"
+                :min="1"
+                :step="1"
+                step-strictly
+                class="w-full"
+              />
+            </div>
+            <el-button
+              type="danger"
+              link
+              :disabled="editForm.items.length === 1"
+              @click="handleRemoveEditItem(index)"
+            >
+              删除
+            </el-button>
+          </div>
+        </transition-group>
+
+        <el-button plain @click="handleAddEditItem">添加商品</el-button>
+
+        <div class="rounded-2xl border border-slate-200/70 bg-slate-50/75 p-4 dark:border-slate-700/70 dark:bg-slate-900/40">
+          <p class="mb-2 text-sm font-medium text-slate-600 dark:text-slate-400">备注信息</p>
+          <el-input
+            v-model="editForm.remark"
+            type="textarea"
+            :rows="3"
+            maxlength="255"
+            show-word-limit
+            resize="none"
+            placeholder="可填写现场补充说明，例如实收数量修正、包装替换等。"
+          />
+        </div>
+      </div>
+
+      <template #footer>
+        <div class="flex justify-between gap-3">
+          <div class="text-sm leading-6 text-slate-500 dark:text-slate-400">
+            当前共 {{ editForm.items.filter((item) => item.productId && item.qty > 0).length }} 行有效商品
+          </div>
+          <div class="flex justify-end gap-3">
+            <el-button @click="editDialogVisible = false">取消</el-button>
+            <el-button type="primary" :loading="editing" @click="handleSubmitEdit">保存现场改单</el-button>
+          </div>
+        </div>
+      </template>
+    </el-dialog>
   </PageContainer>
 </template>
 
@@ -673,6 +911,20 @@ onBeforeUnmount(() => {
 .recent-item:hover {
   border-color: rgba(20, 184, 166, 0.4);
   background: rgba(240, 253, 250, 0.9);
+}
+
+.inbound-scan-edit-row__index {
+  display: flex;
+  height: 2rem;
+  width: 2rem;
+  flex: 0 0 2rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid rgba(203, 213, 225, 0.9);
+  background: rgba(255, 255, 255, 0.96);
+  color: rgb(71 85 105);
+  font-weight: 600;
 }
 
 /* 详情区切换动效：避免复用全局 fade-slide 导致与路由动画样式串扰。 */

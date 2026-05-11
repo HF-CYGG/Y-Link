@@ -30,11 +30,22 @@ export interface ClientOrderSnapshot {
   updatedAt: number
 }
 
+export interface ClientOrderSnapshotMeta {
+  activeStatus: ClientOrderSnapshot['activeStatus']
+  keyword: ClientOrderSnapshot['keyword']
+  page: ClientOrderSnapshot['page']
+  pageSize: ClientOrderSnapshot['pageSize']
+  total: ClientOrderSnapshot['total']
+  updatedAt: ClientOrderSnapshot['updatedAt']
+}
+
 // 详细注释：
 // - 历史版本只使用单一全局 key，会导致不同客户端账号读取到同一份订单缓存；
 // - 新版本改为“前缀 + clientUserId”分片存储；
 // - 同时保留 legacy key，便于升级时统一清理旧数据。
-const CLIENT_ORDER_SNAPSHOT_KEY_PREFIX = 'y-link.client-order.snapshot'
+const CLIENT_ORDER_SNAPSHOT_META_KEY_PREFIX = 'y-link.client-order.snapshot.meta'
+const CLIENT_ORDER_SNAPSHOT_ORDERS_KEY_PREFIX = 'y-link.client-order.snapshot.orders'
+const LEGACY_CLIENT_ORDER_SNAPSHOT_KEY_PREFIX = 'y-link.client-order.snapshot'
 const LEGACY_CLIENT_ORDER_SNAPSHOT_KEY = 'y-link.client-order.snapshot'
 
 const getStorage = () => {
@@ -50,8 +61,16 @@ const normalizeClientUserId = (value: unknown) => {
     : ''
 }
 
-const getSnapshotKey = (clientUserId: string) => {
-  return `${CLIENT_ORDER_SNAPSHOT_KEY_PREFIX}:${clientUserId}`
+const getMetaSnapshotKey = (clientUserId: string) => {
+  return `${CLIENT_ORDER_SNAPSHOT_META_KEY_PREFIX}:${clientUserId}`
+}
+
+const getOrdersSnapshotKey = (clientUserId: string) => {
+  return `${CLIENT_ORDER_SNAPSHOT_ORDERS_KEY_PREFIX}:${clientUserId}`
+}
+
+const getLegacySnapshotKey = (clientUserId: string) => {
+  return `${LEGACY_CLIENT_ORDER_SNAPSHOT_KEY_PREFIX}:${clientUserId}`
 }
 
 const clearLegacySnapshotIfNeeded = (storage: Storage) => {
@@ -210,6 +229,52 @@ const normalizeOrders = (orders: unknown): O2oPreorderSummary[] => {
   return orders.map(normalizeOrderRow).filter((item): item is O2oPreorderSummary => item !== null)
 }
 
+const normalizeSnapshotMeta = (value: unknown): ClientOrderSnapshotMeta => {
+  const parsed = value && typeof value === 'object'
+    ? (value as Record<string, unknown>)
+    : {}
+  const activeStatus = isO2oOrderStatus(parsed.activeStatus) ? parsed.activeStatus : 'all'
+  return {
+    activeStatus,
+    keyword: normalizeKeyword(parsed.keyword),
+    page: normalizePositiveInteger(parsed.page, 1),
+    pageSize: normalizePositiveInteger(parsed.pageSize, 20),
+    total: normalizeNonNegativeInteger(parsed.total),
+    updatedAt: Number.isFinite(parsed.updatedAt) ? Number(parsed.updatedAt) : 0,
+  }
+}
+
+const buildSnapshotMeta = (snapshot: ClientOrderSnapshot): ClientOrderSnapshotMeta => {
+  return {
+    activeStatus: snapshot.activeStatus,
+    keyword: snapshot.keyword,
+    page: snapshot.page,
+    pageSize: snapshot.pageSize,
+    total: snapshot.total,
+    updatedAt: snapshot.updatedAt,
+  }
+}
+
+const readLegacyPersistedClientOrderSnapshot = (storage: Storage, clientUserId: string): ClientOrderSnapshot | null => {
+  const raw = storage.getItem(getLegacySnapshotKey(clientUserId))
+  if (!raw) {
+    return null
+  }
+  try {
+    const parsed = JSON.parse(raw) as Record<string, unknown>
+    const snapshot = {
+      ...normalizeSnapshotMeta(parsed),
+      orders: normalizeOrders(parsed.orders),
+    }
+    return snapshot
+  } catch (error) {
+    if (error instanceof Error) {
+      storage.removeItem(getLegacySnapshotKey(clientUserId))
+    }
+    return null
+  }
+}
+
 export const readPersistedClientOrderSnapshot = (clientUserId: string): ClientOrderSnapshot | null => {
   const storage = getStorage()
   if (!storage) {
@@ -220,32 +285,46 @@ export const readPersistedClientOrderSnapshot = (clientUserId: string): ClientOr
   if (!normalizedClientUserId) {
     return null
   }
-  const raw = storage.getItem(getSnapshotKey(normalizedClientUserId))
-  if (!raw) {
-    return null
-  }
-  try {
-    const parsed = JSON.parse(raw) as Record<string, unknown>
-    const activeStatus = isO2oOrderStatus(parsed.activeStatus) ? parsed.activeStatus : 'all'
-    return {
-      activeStatus,
-      keyword: normalizeKeyword(parsed.keyword),
-      orders: normalizeOrders(parsed.orders),
-      page: normalizePositiveInteger(parsed.page, 1),
-      pageSize: normalizePositiveInteger(parsed.pageSize, 20),
-      total: normalizeNonNegativeInteger(parsed.total),
-      updatedAt: Number.isFinite(parsed.updatedAt) ? Number(parsed.updatedAt) : 0,
-    }
-  } catch (error) {
-    if (!(error instanceof Error)) {
+
+  const metaKey = getMetaSnapshotKey(normalizedClientUserId)
+  const ordersKey = getOrdersSnapshotKey(normalizedClientUserId)
+  const metaRaw = storage.getItem(metaKey)
+  const ordersRaw = storage.getItem(ordersKey)
+
+  if (metaRaw || ordersRaw) {
+    try {
+      const meta = metaRaw ? normalizeSnapshotMeta(JSON.parse(metaRaw) as unknown) : normalizeSnapshotMeta(null)
+      const orders = ordersRaw ? normalizeOrders(JSON.parse(ordersRaw) as unknown) : []
+      return {
+        ...meta,
+        orders,
+      }
+    } catch (error) {
+      if (error instanceof Error) {
+        storage.removeItem(metaKey)
+        storage.removeItem(ordersKey)
+      }
       return null
     }
-    storage.removeItem(getSnapshotKey(normalizedClientUserId))
+  }
+
+  const legacySnapshot = readLegacyPersistedClientOrderSnapshot(storage, normalizedClientUserId)
+  if (!legacySnapshot) {
     return null
   }
+  // 详细注释：读取到旧版“整包快照”后，立即迁移到拆分后的 meta/orders key，
+  // 后续再更新关键词或 freshness 时就不需要重复重写整份订单数组。
+  storage.setItem(metaKey, JSON.stringify(buildSnapshotMeta(legacySnapshot)))
+  storage.setItem(ordersKey, JSON.stringify(legacySnapshot.orders))
+  storage.removeItem(getLegacySnapshotKey(normalizedClientUserId))
+  return legacySnapshot
 }
 
-export const persistClientOrderSnapshot = (clientUserId: string, snapshot: ClientOrderSnapshot) => {
+export const persistClientOrderSnapshot = (
+  clientUserId: string,
+  snapshot: ClientOrderSnapshot,
+  options?: { includeOrders?: boolean },
+) => {
   const storage = getStorage()
   if (!storage) {
     return
@@ -255,7 +334,11 @@ export const persistClientOrderSnapshot = (clientUserId: string, snapshot: Clien
     return
   }
   clearLegacySnapshotIfNeeded(storage)
-  storage.setItem(getSnapshotKey(normalizedClientUserId), JSON.stringify(snapshot))
+  storage.setItem(getMetaSnapshotKey(normalizedClientUserId), JSON.stringify(buildSnapshotMeta(snapshot)))
+  if (options?.includeOrders !== false) {
+    storage.setItem(getOrdersSnapshotKey(normalizedClientUserId), JSON.stringify(snapshot.orders))
+  }
+  storage.removeItem(getLegacySnapshotKey(normalizedClientUserId))
 }
 
 // 详细注释：退出登录或检测到账号切换时，优先清掉当前账号快照，避免后续软跳转继续读到旧用户订单列表。
@@ -268,7 +351,9 @@ export const clearPersistedClientOrderSnapshot = (clientUserId: string) => {
   if (!normalizedClientUserId) {
     return
   }
-  storage.removeItem(getSnapshotKey(normalizedClientUserId))
+  storage.removeItem(getMetaSnapshotKey(normalizedClientUserId))
+  storage.removeItem(getOrdersSnapshotKey(normalizedClientUserId))
+  storage.removeItem(getLegacySnapshotKey(normalizedClientUserId))
   clearLegacySnapshotIfNeeded(storage)
 }
 
@@ -284,7 +369,12 @@ export const clearAllPersistedClientOrderSnapshots = () => {
     if (!currentKey) {
       continue
     }
-    if (currentKey === LEGACY_CLIENT_ORDER_SNAPSHOT_KEY || currentKey.startsWith(`${CLIENT_ORDER_SNAPSHOT_KEY_PREFIX}:`)) {
+    if (
+      currentKey === LEGACY_CLIENT_ORDER_SNAPSHOT_KEY ||
+      currentKey.startsWith(`${LEGACY_CLIENT_ORDER_SNAPSHOT_KEY_PREFIX}:`) ||
+      currentKey.startsWith(`${CLIENT_ORDER_SNAPSHOT_META_KEY_PREFIX}:`) ||
+      currentKey.startsWith(`${CLIENT_ORDER_SNAPSHOT_ORDERS_KEY_PREFIX}:`)
+    ) {
       keysToRemove.push(currentKey)
     }
   }

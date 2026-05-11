@@ -8,6 +8,13 @@ import { request, type RequestConfig } from '@/api/http'
 import type { PaginationQueryInput, PaginationResult } from '@/types/api'
 
 /**
+ * 入库单号识别：
+ * - 供货单展示号当前采用 IN + 日期 + 4 位流水 的格式；
+ * - 共享详情查询会基于该规则自动分流到 showNo 详情接口，避免页面误把展示单号当成核销码时直接 404。
+ */
+const isInboundShowNo = (value: string) => /^IN\d{12}$/i.test(value.trim())
+
+/**
  * 供货方提交明细项参数：
  */
 export interface SubmitInboundItemInput {
@@ -24,6 +31,21 @@ export interface SubmitInboundInput {
 }
 
 /**
+ * 供货方改单参数：
+ */
+export interface UpdateSupplierInboundInput {
+  remark?: string
+  items: SubmitInboundItemInput[]
+}
+
+/**
+ * 供货方撤销参数：
+ */
+export interface CancelSupplierInboundInput {
+  reason: string
+}
+
+/**
  * 入库送货单模型：
  * - status: pending (待核销), verified (已核销), cancelled (已取消)
  */
@@ -36,7 +58,13 @@ export interface InboundOrder {
   status: 'pending' | 'verified' | 'cancelled'
   totalQty: string
   remark: string | null
+  cancelReason: string | null
+  cancelledAt: string | null
+  cancelledByUserId: string | null
+  cancelledByUsername: string | null
+  cancelledByDisplayName: string | null
   createdAt: string
+  updatedAt: string
   verifiedAt: string | null
 }
 
@@ -124,22 +152,54 @@ export const getSupplierDeliveries = (params: SupplierDeliveryListQuery = {}, re
   })
 
 /**
- * 查看送货单详情 (通用)：
- * - 基于核销码查询，可用于扫码场景。
+ * 供货方修改待入库送货单：
+ * - 仅允许本人待入库单据修改商品、数量和备注。
  */
-export const getInboundDetail = (verifyCode: string, requestConfig: RequestConfig = {}) =>
+export const updateSupplierDelivery = (id: string, data: UpdateSupplierInboundInput, requestConfig: RequestConfig = {}) =>
   request<InboundOrderDetail>({
     ...requestConfig,
-    method: 'GET',
-    url: `/inbound/detail/${verifyCode}`,
+    method: 'PATCH',
+    url: `/inbound/supplier/${id}`,
+    data,
   })
+
+/**
+ * 供货方撤销待入库送货单：
+ * - 撤销后历史单据继续保留，只变更状态并记录撤销原因。
+ */
+export const cancelSupplierDelivery = (id: string, data: CancelSupplierInboundInput, requestConfig: RequestConfig = {}) =>
+  request<InboundOrderDetail>({
+    ...requestConfig,
+    method: 'POST',
+    url: `/inbound/supplier/${id}/cancel`,
+    data,
+  })
+
+/**
+ * 查看送货单详情 (通用)：
+ * - 默认仍优先兼容核销码查询；
+ * - 若调用方传入的是送货单号，则自动改走 showNo 详情接口，避免历史页面或管理端回查直接报 404。
+ */
+export const getInboundDetail = (verifyCodeOrShowNo: string, requestConfig: RequestConfig = {}) => {
+  const normalizedCode = verifyCodeOrShowNo.trim()
+  const detailPath = isInboundShowNo(normalizedCode)
+    ? `/inbound/detail/show-no/${normalizedCode.toUpperCase()}`
+    : `/inbound/detail/${normalizedCode}`
+
+  return request<InboundOrderDetail>({
+    ...requestConfig,
+    method: 'GET',
+    url: detailPath,
+  })
+}
 
 /**
  * 按送货单号查看详情：
  * - 用于扫码失败后的人工录入兜底。
  */
-export const getInboundDetailByShowNo = (showNo: string) =>
+export const getInboundDetailByShowNo = (showNo: string, requestConfig: RequestConfig = {}) =>
   request<InboundOrderDetail>({
+    ...requestConfig,
     method: 'GET',
     url: `/inbound/detail/show-no/${showNo}`,
   })
@@ -153,6 +213,19 @@ export const verifyInboundOrder = (verifyCode: string) =>
     method: 'POST',
     url: '/inbound/admin/verify',
     data: { verifyCode },
+  })
+
+/**
+ * 管理端现场改单：
+ * - 仅允许对待入库单据修改商品、数量和备注；
+ * - 改单后仍停留在扫码页，方便继续核对后直接入库。
+ */
+export const updateInboundOrderForAdmin = (id: string, data: UpdateSupplierInboundInput, requestConfig: RequestConfig = {}) =>
+  request<InboundOrderDetail>({
+    ...requestConfig,
+    method: 'PATCH',
+    url: `/inbound/admin/${id}`,
+    data,
   })
 
 /**
