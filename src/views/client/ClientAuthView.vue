@@ -118,6 +118,11 @@ const captchaLoading = ref(false)
 const loginCaptchaVisible = ref(false)
 const successTip = ref('')
 const securityHint = ref('')
+const registerFeedbackTitle = ref('')
+const registerFeedbackDescription = ref('')
+const registerFeedbackType = ref<'warning' | 'error' | 'info'>('warning')
+const registerFeedbackShowLoginAction = ref(false)
+const registerFeedbackShowForgotAction = ref(false)
 const verificationSending = ref(false)
 const capabilityLoading = ref(false)
 const capabilityErrorMessage = ref('')
@@ -209,6 +214,10 @@ const switchMode = async (nextMode: AuthMode) => {
 
   formAnimating.value = true
   syncWrapperHeight('measured')
+  registerFeedbackTitle.value = ''
+  registerFeedbackDescription.value = ''
+  registerFeedbackShowLoginAction.value = false
+  registerFeedbackShowForgotAction.value = false
   activeMode.value = nextMode
 }
 
@@ -406,6 +415,64 @@ const applySecurityHintFromMessage = (message: string) => {
   securityHint.value = /频繁|锁定|稍后|重试/.test(message) ? message : ''
 }
 
+const clearRegisterFeedback = () => {
+  registerFeedbackTitle.value = ''
+  registerFeedbackDescription.value = ''
+  registerFeedbackType.value = 'warning'
+  registerFeedbackShowLoginAction.value = false
+  registerFeedbackShowForgotAction.value = false
+}
+
+const applyRegisterFeedbackFromError = (message: string, status?: number) => {
+  clearRegisterFeedback()
+
+  if (status === 409 && /该手机号或邮箱已被占用/.test(message)) {
+    registerFeedbackTitle.value = '该手机号或邮箱已注册'
+    registerFeedbackDescription.value = '当前账号已经创建过客户端账号，可直接切换到登录；如果忘记密码，也可以进入找回密码流程。'
+    registerFeedbackType.value = 'warning'
+    registerFeedbackShowLoginAction.value = true
+    registerFeedbackShowForgotAction.value = true
+    return
+  }
+
+  if (status === 409 && /该用户名已被占用/.test(message)) {
+    registerFeedbackTitle.value = '用户名已被占用'
+    registerFeedbackDescription.value = '请更换一个新的用户名后再试，当前手机号或邮箱仍可继续作为登录账号使用。'
+    registerFeedbackType.value = 'warning'
+    return
+  }
+
+  if (status === 429) {
+    registerFeedbackTitle.value = '注册过于频繁'
+    registerFeedbackDescription.value = message
+    registerFeedbackType.value = 'warning'
+    registerFeedbackShowLoginAction.value = true
+    return
+  }
+
+  if (/图形验证码|验证码/.test(message)) {
+    registerFeedbackTitle.value = '请先完成验证码校验'
+    registerFeedbackDescription.value = message
+    registerFeedbackType.value = 'info'
+  }
+}
+
+const handleRegisterFeedbackLogin = async () => {
+  const registeredAccount = normalizeInputText(registerForm.account)
+  if (registeredAccount) {
+    loginForm.account = registeredAccount
+  }
+  await switchMode('login')
+}
+
+const handleRegisterFeedbackForgotPassword = async () => {
+  const account = normalizeInputText(registerForm.account)
+  await router.push({
+    path: '/client/forgot-password',
+    query: account ? { account } : undefined,
+  })
+}
+
 const resetRegisterVerificationTimer = () => {
   if (registerVerificationTimer) {
     globalThis.clearInterval(registerVerificationTimer)
@@ -590,6 +657,7 @@ const handleRegister = async () => {
     executor: async () => {
       isLoading.value = true
       securityHint.value = ''
+      clearRegisterFeedback()
       const registeredAccount = normalizeInputText(registerForm.account)
       const registeredUsername = normalizeInputText(registerForm.username)
       await runLatestRegisterRequest({
@@ -632,6 +700,7 @@ const handleRegister = async () => {
         onError: async (error) => {
           const normalizedError = normalizeRequestError(error, '注册失败，请检查信息后重试')
           applySecurityHintFromMessage(normalizedError.message)
+          applyRegisterFeedbackFromError(normalizedError.message, normalizedError.status)
           ElMessage.error(normalizedError.message)
           registerForm.captcha = ''
           await refreshCaptcha(true)
@@ -839,6 +908,44 @@ onUnmounted(() => {
               <div v-else ref="formBlockRef" key="register" class="form-block">
                 <h2 class="block-title">创建账号</h2>
                 <p class="block-subtitle">只需几步，创建用户名并绑定手机号或邮箱账号</p>
+
+                <el-alert
+                  v-if="registerFeedbackTitle"
+                  class="mt-5"
+                  :type="registerFeedbackType"
+                  :closable="false"
+                  show-icon
+                >
+                  <template #title>
+                    {{ registerFeedbackTitle }}
+                  </template>
+                  <template #default>
+                    <div class="register-feedback-alert">
+                      <span>{{ registerFeedbackDescription }}</span>
+                      <div
+                        v-if="registerFeedbackShowLoginAction || registerFeedbackShowForgotAction"
+                        class="register-feedback-alert__actions"
+                      >
+                        <el-button
+                          v-if="registerFeedbackShowLoginAction"
+                          link
+                          type="primary"
+                          @click="handleRegisterFeedbackLogin"
+                        >
+                          去登录
+                        </el-button>
+                        <el-button
+                          v-if="registerFeedbackShowForgotAction"
+                          link
+                          type="primary"
+                          @click="handleRegisterFeedbackForgotPassword"
+                        >
+                          忘记密码
+                        </el-button>
+                      </div>
+                    </div>
+                  </template>
+                </el-alert>
 
                 <el-form @submit.prevent="handleRegister" class="space-y-4 mt-6">
                   <el-input v-model="registerForm.username" placeholder="用户名（可自定义）" class="geo-input" size="large" clearable>
@@ -1177,6 +1284,19 @@ onUnmounted(() => {
   line-height: 1.6;
 }
 
+.register-feedback-alert {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  line-height: 1.6;
+}
+
+.register-feedback-alert__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
 .block-title {
   font-size: 26px;
   font-weight: 700;
@@ -1468,6 +1588,10 @@ onUnmounted(() => {
 
   .form-panel {
     padding: 40px 24px;
+  }
+
+  .register-feedback-alert__actions {
+    gap: 4px 10px;
   }
 }
 </style>

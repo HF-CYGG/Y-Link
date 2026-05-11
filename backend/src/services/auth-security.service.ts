@@ -489,11 +489,11 @@ export class AuthSecurityService {
   }
 
   /**
-   * 客户端注册频控：
-   * - 这里接收的 accountKey 必须是路由层先做过归一化后的账号键；
-   * - 这样同一个邮箱的大小写变体会落到同一风控桶内。
+   * 客户端注册来源频控：
+   * - 只负责浏览器会话 / 浏览器实例 / IP 这一层的注册来源频控；
+   * - 账号 24 小时额度由单独方法处理，便于在确认账号未占用后再记账。
    */
-  async guardClientRegisterRequest(requestMeta: RequestMeta | undefined, accountKey: string) {
+  async guardClientRegisterSourceRequest(requestMeta: RequestMeta | undefined, accountKey: string) {
     const riskActor = this.resolveClientRiskActor(requestMeta)
     await this.consumeClientSourceRateLimit(
       'client-register',
@@ -506,6 +506,15 @@ export class AuthSecurityService {
       requestMeta,
       detail: {},
     })
+  }
+
+  /**
+   * 客户端注册账号频控：
+   * - 这里接收的 accountKey 必须是路由层先做过归一化后的账号键；
+   * - 仅在确认账号未被占用后调用，避免“旧账号重复注册”继续消耗 24 小时额度。
+   */
+  async guardClientRegisterAccountRequest(requestMeta: RequestMeta | undefined, accountKey: string) {
+    const riskActor = this.resolveClientRiskActor(requestMeta)
     await this.consumeRateLimit(`client-register:account:${accountKey}`, RATE_LIMIT_RULES.clientRegisterByAccount, {
       actionType: 'client.auth.guard.register',
       actionLabel: '客户端注册频控',

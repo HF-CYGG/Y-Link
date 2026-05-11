@@ -12,7 +12,7 @@
  */
 
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Key, Lock, Message, User } from '@element-plus/icons-vue'
 import { getClientAuthCapabilities, getClientCaptcha, type ClientAuthCapabilities } from '@/api/modules/client-auth'
@@ -29,6 +29,7 @@ import {
 } from '@/utils/client-password-policy'
 import { normalizeRequestError } from '@/utils/error'
 
+const route = useRoute()
 const router = useRouter()
 const clientAuthStore = useClientAuthStore(pinia)
 const { runLatest: runLatestCaptchaRequest, cancel: cancelCaptchaRequest } = useStableRequest()
@@ -401,6 +402,10 @@ watch(shouldPrepareCaptcha, (shouldLoadCaptcha) => {
 })
 
 onMounted(() => {
+  const routeAccount = typeof route.query.account === 'string' ? route.query.account.trim() : ''
+  if (routeAccount) {
+    verifyForm.account = routeAccount
+  }
   scheduleDeferredCapabilityLoad()
 })
 

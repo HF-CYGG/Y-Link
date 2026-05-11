@@ -291,6 +291,7 @@ class ClientAuthService {
     if (existedByAccount) {
       throw new BizError('该手机号或邮箱已被占用', 409)
     }
+    await authSecurityService.guardClientRegisterAccountRequest(_requestMeta, account.account)
     const existedByUsername = await this.findUserByAnyIdentifier({
       channel: 'username',
       rawValue: username.value,

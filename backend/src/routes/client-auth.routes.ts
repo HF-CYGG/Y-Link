@@ -139,7 +139,7 @@ clientAuthRouter.post(
       allowUsername: false,
       fieldLabel: '账号',
     }).normalizedValue
-    await authSecurityService.guardClientRegisterRequest(requestMeta, normalizedAccount)
+    await authSecurityService.guardClientRegisterSourceRequest(requestMeta, normalizedAccount)
     const data = await clientAuthService.register(payload, requestMeta)
     res.json({ code: 0, message: 'ok', data })
   }),
