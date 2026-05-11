@@ -291,7 +291,6 @@ class ClientAuthService {
     if (existedByAccount) {
       throw new BizError('该手机号或邮箱已被占用', 409)
     }
-    await authSecurityService.guardClientRegisterAccountRequest(_requestMeta, account.account)
     const existedByUsername = await this.findUserByAnyIdentifier({
       channel: 'username',
       rawValue: username.value,
@@ -300,6 +299,7 @@ class ClientAuthService {
     if (existedByUsername) {
       throw new BizError('该用户名已被占用', 409)
     }
+    await authSecurityService.guardClientRegisterAccountRequest(_requestMeta, account.account)
     const selectedDepartmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName)
     const user = await this.userRepo.save(
       this.userRepo.create({

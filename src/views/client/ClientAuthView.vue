@@ -118,6 +118,10 @@ const captchaLoading = ref(false)
 const loginCaptchaVisible = ref(false)
 const successTip = ref('')
 const securityHint = ref('')
+const loginFeedbackTitle = ref('')
+const loginFeedbackDescription = ref('')
+const loginFeedbackType = ref<'warning' | 'error' | 'info'>('warning')
+const loginFeedbackShowForgotAction = ref(false)
 const registerFeedbackTitle = ref('')
 const registerFeedbackDescription = ref('')
 const registerFeedbackType = ref<'warning' | 'error' | 'info'>('warning')
@@ -179,6 +183,7 @@ const registerDepartmentTreeSelectData = computed(() => {
 const shouldPrepareCaptcha = computed(() => activeMode.value === 'register' || loginCaptchaVisible.value)
 const isCapabilityHintVisible = computed(() => capabilityLoading.value && !authCapabilities.value)
 const isCapabilityFallbackVisible = computed(() => !capabilityLoading.value && !!capabilityErrorMessage.value && !authCapabilities.value)
+const forgotPasswordAvailable = computed(() => authCapabilities.value?.forgotPasswordEnabled ?? false)
 
 const captchaHintText = computed(() => {
   if (captcha.expiresInSeconds <= 0) {
@@ -214,6 +219,9 @@ const switchMode = async (nextMode: AuthMode) => {
 
   formAnimating.value = true
   syncWrapperHeight('measured')
+  loginFeedbackTitle.value = ''
+  loginFeedbackDescription.value = ''
+  loginFeedbackShowForgotAction.value = false
   registerFeedbackTitle.value = ''
   registerFeedbackDescription.value = ''
   registerFeedbackShowLoginAction.value = false
@@ -415,6 +423,50 @@ const applySecurityHintFromMessage = (message: string) => {
   securityHint.value = /频繁|锁定|稍后|重试/.test(message) ? message : ''
 }
 
+const clearLoginFeedback = () => {
+  loginFeedbackTitle.value = ''
+  loginFeedbackDescription.value = ''
+  loginFeedbackType.value = 'warning'
+  loginFeedbackShowForgotAction.value = false
+}
+
+const applyLoginFeedbackFromError = (message: string, status?: number) => {
+  clearLoginFeedback()
+
+  if (status === 401 && /用户名或密码错误/.test(message)) {
+    loginFeedbackTitle.value = '账号或密码不正确'
+    loginFeedbackDescription.value = forgotPasswordAvailable.value
+      ? '请检查用户名、手机号、邮箱和密码后重试；如果忘记密码，可直接进入找回密码。'
+      : '请检查用户名、手机号、邮箱和密码后重试；当前系统未启用自助找回密码，请联系管理员手动修改密码。'
+    loginFeedbackType.value = 'warning'
+    loginFeedbackShowForgotAction.value = forgotPasswordAvailable.value
+    return
+  }
+
+  if (status === 403 && /停用/.test(message)) {
+    loginFeedbackTitle.value = '当前账号已停用'
+    loginFeedbackDescription.value = '该客户端账号暂时不可用，请联系管理员确认账号状态。'
+    loginFeedbackType.value = 'error'
+    return
+  }
+
+  if (status === 429) {
+    loginFeedbackTitle.value = /锁定/.test(message) ? '登录已被临时锁定' : '登录过于频繁'
+    loginFeedbackDescription.value = forgotPasswordAvailable.value
+      ? `${message} 如忘记密码，也可进入找回密码流程。`
+      : message
+    loginFeedbackType.value = 'warning'
+    loginFeedbackShowForgotAction.value = forgotPasswordAvailable.value
+    return
+  }
+
+  if (/图形验证码|验证码/.test(message)) {
+    loginFeedbackTitle.value = '请先完成验证码校验'
+    loginFeedbackDescription.value = message
+    loginFeedbackType.value = 'info'
+  }
+}
+
 const clearRegisterFeedback = () => {
   registerFeedbackTitle.value = ''
   registerFeedbackDescription.value = ''
@@ -428,10 +480,12 @@ const applyRegisterFeedbackFromError = (message: string, status?: number) => {
 
   if (status === 409 && /该手机号或邮箱已被占用/.test(message)) {
     registerFeedbackTitle.value = '该手机号或邮箱已注册'
-    registerFeedbackDescription.value = '当前账号已经创建过客户端账号，可直接切换到登录；如果忘记密码，也可以进入找回密码流程。'
+    registerFeedbackDescription.value = forgotPasswordAvailable.value
+      ? '当前账号已经创建过客户端账号，可直接切换到登录；如果忘记密码，也可以进入找回密码流程。'
+      : '当前账号已经创建过客户端账号，可直接切换到登录；当前系统未启用自助找回密码，请联系管理员手动修改密码。'
     registerFeedbackType.value = 'warning'
     registerFeedbackShowLoginAction.value = true
-    registerFeedbackShowForgotAction.value = true
+    registerFeedbackShowForgotAction.value = forgotPasswordAvailable.value
     return
   }
 
@@ -467,6 +521,14 @@ const handleRegisterFeedbackLogin = async () => {
 
 const handleRegisterFeedbackForgotPassword = async () => {
   const account = normalizeInputText(registerForm.account)
+  await router.push({
+    path: '/client/forgot-password',
+    query: account ? { account } : undefined,
+  })
+}
+
+const handleLoginFeedbackForgotPassword = async () => {
+  const account = normalizeInputText(loginForm.account)
   await router.push({
     path: '/client/forgot-password',
     query: account ? { account } : undefined,
@@ -576,7 +638,9 @@ const handleLogin = async () => {
     },
     executor: async () => {
       isLoading.value = true
+      successTip.value = ''
       securityHint.value = ''
+      clearLoginFeedback()
       await runLatestLoginRequest({
         executor: (signal) =>
           clientAuthStore.login(
@@ -599,6 +663,7 @@ const handleLogin = async () => {
         onError: async (error) => {
           const normalizedError = normalizeRequestError(error, '登录失败，请检查用户名、手机号、邮箱、密码和验证码后重试')
           applySecurityHintFromMessage(normalizedError.message)
+          applyLoginFeedbackFromError(normalizedError.message, normalizedError.status)
           ElMessage.error(normalizedError.message)
           if (/用户名或密码错误|图形验证码|锁定|稍后|重试/.test(normalizedError.message)) {
             loginCaptchaVisible.value = true
@@ -656,6 +721,7 @@ const handleRegister = async () => {
     },
     executor: async () => {
       isLoading.value = true
+      successTip.value = ''
       securityHint.value = ''
       clearRegisterFeedback()
       const registeredAccount = normalizeInputText(registerForm.account)
@@ -857,6 +923,28 @@ onUnmounted(() => {
                 <h2 class="block-title">欢迎回来</h2>
                 <p class="block-subtitle">请输入用户名、手机号或邮箱与密码登录客户端</p>
 
+                <el-alert
+                  v-if="loginFeedbackTitle"
+                  class="mt-5"
+                  :type="loginFeedbackType"
+                  :closable="false"
+                  show-icon
+                >
+                  <template #title>
+                    {{ loginFeedbackTitle }}
+                  </template>
+                  <template #default>
+                    <div class="register-feedback-alert">
+                      <span>{{ loginFeedbackDescription }}</span>
+                      <div v-if="loginFeedbackShowForgotAction" class="register-feedback-alert__actions">
+                        <el-button link type="primary" @click="handleLoginFeedbackForgotPassword">
+                          忘记密码
+                        </el-button>
+                      </div>
+                    </div>
+                  </template>
+                </el-alert>
+
                 <el-form
                   @submit.prevent="handleLogin"
                   class="mt-6 space-y-4"
@@ -897,7 +985,7 @@ onUnmounted(() => {
                     <div class="captcha-box captcha-box--placeholder"></div>
                   </div>
 
-                  <div v-if="!capabilityLoading && authCapabilities?.forgotPasswordEnabled" class="flex justify-end mt-2">
+                  <div v-if="!capabilityLoading && forgotPasswordAvailable" class="flex justify-end mt-2">
                     <router-link to="/client/forgot-password" class="forgot-link">忘记密码？</router-link>
                   </div>
 
