@@ -603,7 +603,7 @@ onUnmounted(() => {
 .step-badge {
   border-radius: 999px;
   background: #f1f5f9;
-  color: #64748b;
+  color: #475569;
   padding: 8px 14px;
   font-size: 13px;
   line-height: 1;

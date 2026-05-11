@@ -2463,7 +2463,7 @@ class O2oPreorderService {
     }
     const normalizedSkipRecentMs = Math.max(0, Number(options?.skipRecentMs ?? 0))
     const nowMs = Date.now()
-    if (this.cancelTimeoutOrdersInFlight) {
+    if (this.cancelTimeoutOrdersInFlight !== null) {
       return this.cancelTimeoutOrdersInFlight
     }
     if (
