@@ -15,7 +15,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import QRCode from 'qrcode'
-import { PageContainer } from '@/components/common'
+import { PageContainer, PassiveNumberInput } from '@/components/common'
 import { getProductList, type ProductRecord } from '@/api/modules/product'
 import { submitSupplierDelivery } from '@/api/modules/inbound'
 import { extractErrorMessage } from '@/utils/error'
@@ -237,7 +237,7 @@ onMounted(() => {
                     </el-select>
                   </div>
                   <div class="w-full lg:w-36">
-                    <el-input-number
+                    <PassiveNumberInput
                       v-model="item.qty"
                       :min="1"
                       :step="1"

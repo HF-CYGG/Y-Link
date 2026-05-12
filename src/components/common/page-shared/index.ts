@@ -11,5 +11,6 @@
  */
 export { default as PagePaginationBar } from './PagePaginationBar.vue'
 export { default as PageToolbarCard } from './PageToolbarCard.vue'
+export { default as PassiveNumberInput } from './PassiveNumberInput.vue'
 export { default as TabbedWorkbenchPage } from './TabbedWorkbenchPage.vue'
 export { default as UnifiedScanDialog } from './UnifiedScanDialog.vue'

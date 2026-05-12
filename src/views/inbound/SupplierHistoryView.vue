@@ -16,7 +16,7 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import QRCode from 'qrcode'
 import { useRoute, useRouter } from 'vue-router'
-import { BizResponsiveDrawerShell, PageContainer, PagePaginationBar } from '@/components/common'
+import { BizResponsiveDrawerShell, PageContainer, PagePaginationBar, PassiveNumberInput } from '@/components/common'
 import {
   cancelSupplierDelivery,
   getSupplierDeliveries,
@@ -802,7 +802,7 @@ onMounted(() => {
                   </el-select>
                 </div>
                 <div class="w-full lg:w-36">
-                  <el-input-number
+                  <PassiveNumberInput
                     v-model="item.qty"
                     :min="1"
                     :step="1"

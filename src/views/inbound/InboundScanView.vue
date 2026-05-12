@@ -13,7 +13,7 @@
 
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { PageContainer, UnifiedScanDialog } from '@/components/common'
+import { PageContainer, PassiveNumberInput, UnifiedScanDialog } from '@/components/common'
 import {
   getInboundDetail,
   getInboundDetailByShowNo,
@@ -746,7 +746,7 @@ onBeforeUnmount(() => {
               </el-select>
             </div>
             <div class="w-full lg:w-36">
-              <el-input-number
+              <PassiveNumberInput
                 v-model="item.qty"
                 :min="1"
                 :step="1"

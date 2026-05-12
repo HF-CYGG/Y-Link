@@ -15,7 +15,7 @@ import { ElMessage } from 'element-plus'
 import type { UploadRequestOptions } from 'element-plus'
 import { Delete, UploadFilled } from '@element-plus/icons-vue'
 import imageCompression from 'browser-image-compression'
-import { BizCrudDialogShell, PageContainer } from '@/components/common'
+import { BizCrudDialogShell, PageContainer, PassiveNumberInput } from '@/components/common'
 import { uploadImage } from '@/api/modules/upload'
 import { resolveProductPlaceholder } from '@/utils/product-placeholder'
 import {
@@ -553,7 +553,7 @@ onMounted(async () => {
         <el-row :gutter="16">
           <el-col :span="isPhone ? 24 : 12">
             <el-form-item label="建议单价">
-              <el-input-number v-model="form.defaultPrice" :min="0" :precision="2" style="width: 100%" :disabled="!!form.id" />
+              <PassiveNumberInput v-model="form.defaultPrice" :min="0" :precision="2" style="width: 100%" :disabled="!!form.id" />
             </el-form-item>
           </el-col>
         </el-row>
@@ -561,13 +561,13 @@ onMounted(async () => {
         <el-row :gutter="16">
           <el-col :span="isPhone ? 24 : 12">
             <el-form-item label="当前库存">
-              <el-input-number v-model="form.currentStock" :min="0" :step="1" style="width: 100%" disabled />
+              <PassiveNumberInput v-model="form.currentStock" :min="0" :step="1" style="width: 100%" disabled />
               <div class="mt-1 text-xs text-slate-400">请在“基础资料-产品管理”中编辑库存</div>
             </el-form-item>
           </el-col>
           <el-col :span="isPhone ? 24 : 12">
             <el-form-item label="单人限购">
-              <el-input-number v-model="form.limitPerUser" :min="1" :step="1" style="width: 100%" />
+              <PassiveNumberInput v-model="form.limitPerUser" :min="1" :step="1" style="width: 100%" />
             </el-form-item>
           </el-col>
         </el-row>

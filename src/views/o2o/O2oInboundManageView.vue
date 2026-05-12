@@ -7,7 +7,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CameraFilled } from '@element-plus/icons-vue'
-import { PageContainer, UnifiedScanDialog } from '@/components/common'
+import { PageContainer, PassiveNumberInput, UnifiedScanDialog } from '@/components/common'
 import { getProductList, type ProductRecord } from '@/api/modules/product'
 import { getO2oInventoryLogs, inboundO2oStock, type O2oInventoryLog } from '@/api/modules/o2o'
 import { useCameraQrScanner } from '@/composables/useCameraQrScanner'
@@ -488,7 +488,7 @@ onMounted(async () => {
               {{ recognizedProduct.availableStock }}
             </p>
             <div v-if="scanMode === 'scan_input_qty'" class="mt-3">
-              <el-input-number v-model="pendingManualQty" :min="1" :step="1" style="width: 100%" />
+              <PassiveNumberInput v-model="pendingManualQty" :min="1" :step="1" style="width: 100%" />
               <el-button class="mt-2 w-full" type="primary" @click="addRecognizedProductWithQty">加入清单</el-button>
             </div>
           </template>
@@ -515,7 +515,7 @@ onMounted(async () => {
               </el-select>
             </el-form-item>
             <el-form-item label="数量">
-              <el-input-number v-model="manualForm.qty" :min="1" :step="1" style="width: 100%" />
+              <PassiveNumberInput v-model="manualForm.qty" :min="1" :step="1" style="width: 100%" />
             </el-form-item>
             <el-form-item label="备注">
               <el-input
@@ -555,13 +555,13 @@ onMounted(async () => {
             <el-table-column prop="productName" label="商品名称" min-width="150" />
             <el-table-column label="数量" width="160">
               <template #default="{ row }">
-                <el-input-number
+                <PassiveNumberInput
                   :model-value="row.qty"
                   :min="1"
                   :step="1"
                   size="small"
                   style="width: 120px"
-                  @change="(value: number | undefined) => updateInboundListItemQty(row.productId, Number(value ?? 1))"
+                  @change="(value: number | null) => updateInboundListItemQty(row.productId, Number(value ?? 1))"
                 />
               </template>
             </el-table-column>

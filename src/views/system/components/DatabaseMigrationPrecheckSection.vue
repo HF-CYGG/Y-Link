@@ -9,6 +9,7 @@
  */
 
 import type { DatabaseMigrationIssue, DatabaseMigrationTableStat, SQLiteToMySqlPrecheckResult } from '@/api/modules/data-maintenance'
+import { PassiveNumberInput } from '@/components/common'
 
 type MigrationFormState = {
   target: {
@@ -68,7 +69,7 @@ const emit = defineEmits<{
           </div>
           <div class="space-y-2">
             <div class="text-sm text-slate-600 dark:text-slate-300">端口</div>
-            <el-input-number v-model="migrationForm.target.port" :min="1" :max="65535" :controls="false" class="!w-full" />
+            <PassiveNumberInput v-model="migrationForm.target.port" :min="1" :max="65535" :controls="false" class="!w-full" />
           </div>
           <div class="space-y-2">
             <div class="text-sm text-slate-600 dark:text-slate-300">用户名</div>
