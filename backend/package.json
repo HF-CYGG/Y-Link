@@ -25,7 +25,8 @@
     "task8:verify": "tsx scripts/task8-verify.ts",
     "feedback:customer-service:verify": "tsx scripts/feedback-customer-service-verify.ts",
     "o2o:verify": "tsx scripts/o2o-preorder-verify.ts",
-    "order-query:baseline:verify": "tsx scripts/order-query-baseline-verify.ts"
+    "order-query:baseline:verify": "tsx scripts/order-query-baseline-verify.ts",
+    "uploads:legacy:inspect": "tsx scripts/inspect-legacy-upload-urls.ts"
   },
   "dependencies": {
     "dotenv": "^16.6.1",

@@ -46,6 +46,33 @@ export const buildUploadPublicUrl = (category: UploadCategory, fileName: string)
 }
 
 /**
+ * 把历史单层上传路径规范化到指定分类目录：
+ * - 仅处理 `/uploads/<file>` 这类旧格式；
+ * - 已经是 `/uploads/<category>/<file>` 的新格式保持不变；
+ * - 供服务层在保存前与返回前统一收口，避免旧路径继续写回数据库。
+ */
+export const normalizeLegacyUploadUrl = (
+  category: UploadCategory,
+  value: string | null | undefined,
+): string | null | undefined => {
+  if (value === null || value === undefined) {
+    return value
+  }
+
+  const normalizedValue = value.trim()
+  if (!normalizedValue) {
+    return normalizedValue
+  }
+
+  const legacyMatch = /^\/uploads\/([^/]+)$/.exec(normalizedValue)
+  if (!legacyMatch?.[1]) {
+    return normalizedValue
+  }
+
+  return buildUploadPublicUrl(category, legacyMatch[1])
+}
+
+/**
  * 统一生成按分类落盘的图片上传中间件：
  * - 文件名仍使用 UUID，防止重名覆盖与中文名兼容问题；
  * - 目录在写入前自动确保存在，避免首次上传时报路径不存在。
