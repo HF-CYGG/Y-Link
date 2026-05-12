@@ -10,7 +10,7 @@
 # - 构建阶段安装依赖并产出 Vite 静态资源；
 # - 运行阶段通过 Nginx 托管静态资源，并把 `/api` 代理到同编排的后端服务。
 # ------------------------------
-FROM node:20-bookworm-slim AS build
+FROM --platform=$BUILDPLATFORM node:20-bookworm-slim AS build
 
 WORKDIR /app
 
