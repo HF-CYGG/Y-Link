@@ -57,7 +57,8 @@ export function createApp() {
    * 兼容历史单层上传路径：
    * - 早期记录可能仍引用 `/uploads/<file>`；
    * - 当前真实文件已经按业务迁移到 `uploads/products` 或 `uploads/client-feedback`；
-   * - 若命中旧路径但根目录不存在对应文件，则自动重定向到实际分类路径，避免历史图片直接 404。
+   * - 若命中旧路径但根目录不存在对应文件，则直接把请求内部改写到真实分类目录；
+   * - 避免浏览器先请求旧路径再跟随 302 请求新路径，导致访问日志被同一张图片放大为两条。
    */
   app.use('/uploads', (req, res, next) => {
     const normalizedRequestPath = req.path.replace(/^\/+/, '')
@@ -82,7 +83,8 @@ export function createApp() {
       return
     }
 
-    res.redirect(302, `/uploads/${matchedCategory}/${normalizedRequestPath}`)
+    req.url = `/${matchedCategory}/${normalizedRequestPath}${req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : ''}`
+    next()
   })
 
   // 配置静态文件服务，让前端可以直接访问图片
