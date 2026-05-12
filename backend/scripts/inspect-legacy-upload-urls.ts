@@ -146,27 +146,27 @@ async function run() {
 
     printSection('商品缩略图旧路径')
     console.log(`剩余记录数：${productResult.count}`)
-    if (!productResult.samples.length) {
-      console.log('样本：无')
-    } else {
+    if (productResult.samples.length > 0) {
       productResult.samples.forEach((sample, index) => {
         console.log(
           `${index + 1}. id=${sample.id} productCode=${sample.productCode} productName=${sample.productName} thumbnail=${sample.thumbnail}`,
         )
       })
+    } else {
+      console.log('样本：无')
     }
 
     printSection('反馈附件旧路径')
     console.log(`剩余消息数：${feedbackResult.count}`)
-    if (!feedbackResult.samples.length) {
-      console.log('样本：无')
-    } else {
+    if (feedbackResult.samples.length > 0) {
       feedbackResult.samples.forEach((sample, index) => {
         console.log(
           `${index + 1}. id=${sample.id} conversationId=${sample.conversationId} legacyUrls=${sample.legacyUrls.join(', ')}`,
         )
         console.log(`   attachmentJson=${sample.attachmentPreview}`)
       })
+    } else {
+      console.log('样本：无')
     }
 
     printSection('巡检结论')
