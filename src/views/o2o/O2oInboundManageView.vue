@@ -422,7 +422,7 @@ onMounted(async () => {
 <template>
   <PageContainer title="入库管理工作台" description="支持扫码录入、本次入库清单确认与库存流水联动追踪">
     <div class="inbound-workbench-root grid gap-4 xl:grid-cols-[24rem_minmax(0,1fr)_minmax(0,1fr)]">
-      <section class="min-w-0 overflow-hidden rounded-3xl bg-white p-5 shadow-sm">
+      <section class="inventory-log-panel min-w-0 overflow-hidden rounded-3xl bg-white p-5 shadow-sm">
         <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <p class="break-words text-lg font-semibold text-slate-900">扫码录入区</p>
           <el-segmented
@@ -613,8 +613,8 @@ onMounted(async () => {
           <el-button @click="loadLogs">刷新流水</el-button>
         </div>
 
-        <div class="table-scroll-wrap">
-          <el-table native-scrollbar :data="logs" :loading="logLoading" row-key="id">
+        <div class="table-scroll-wrap inventory-log-panel__table-wrap">
+          <el-table native-scrollbar :data="logs" :loading="logLoading" row-key="id" :max-height="520">
             <el-table-column prop="createdAt" label="时间" min-width="160" />
             <el-table-column prop="productName" label="商品" min-width="160" />
             <el-table-column prop="changeType" label="类型" width="140" />
@@ -666,6 +666,11 @@ onMounted(async () => {
   overflow-x: auto;
   max-width: 100%;
   -webkit-overflow-scrolling: touch;
+}
+
+.inventory-log-panel__table-wrap {
+  max-height: 520px;
+  overflow-y: auto;
 }
 
 .scan-mode-segmented {
