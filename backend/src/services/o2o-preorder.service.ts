@@ -241,6 +241,9 @@ class O2oPreorderService {
   private readonly returnRequestItemRepo = AppDataSource.getRepository(O2oReturnRequestItem)
   private readonly clientUserRepo = AppDataSource.getRepository(ClientUser)
   private readonly inventoryLogRepo = AppDataSource.getRepository(InventoryLog)
+  private timeoutCleanupPromise: Promise<{ cancelledCount: number }> | null = null
+  private lastTimeoutCleanupAt = 0
+  private readonly timeoutCleanupMinIntervalMs = 5000
 
   /**
    * 客户端改单次数上限：
@@ -2430,6 +2433,22 @@ class O2oPreorderService {
   }
 
   async cancelTimeoutOrders() {
+    const now = Date.now()
+    if (this.timeoutCleanupPromise) {
+      return this.timeoutCleanupPromise
+    }
+    if (now - this.lastTimeoutCleanupAt < this.timeoutCleanupMinIntervalMs) {
+      return { cancelledCount: 0 }
+    }
+
+    this.timeoutCleanupPromise = this.runCancelTimeoutOrders().finally(() => {
+      this.lastTimeoutCleanupAt = Date.now()
+      this.timeoutCleanupPromise = null
+    })
+    return this.timeoutCleanupPromise
+  }
+
+  private async runCancelTimeoutOrders() {
     const config = await systemConfigService.getO2oRuleConfigs()
     if (!config.autoCancelEnabled) {
       return { cancelledCount: 0 }

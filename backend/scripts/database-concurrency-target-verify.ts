@@ -1,5 +1,13 @@
+/**
+ * 模块说明：backend/scripts/database-concurrency-target-verify.ts
+ * 文件职责：执行数据库高并发验收，覆盖 SQLite / MySQL 临时库下的混合请求、库存一致性与唯一键稳定性校验。
+ * 维护说明：
+ * - 该脚本会临时启动一套后端进程内应用并注入独立数据库环境，请优先保持环境隔离与清理逻辑稳定；
+ * - 若后续继续扩展验收场景，优先复用现有统计、样本记录与临时数据种子能力，避免各段脚本重复维护。
+ */
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import type { Server } from 'node:http'
 import path from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
@@ -127,12 +135,8 @@ function summarizeSamples(samples: RequestSample[]): ScenarioSummary {
   }
 }
 
-function readCaptchaCode(captchaSvg: string) {
-  return captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6)
-}
-
 function normalizeSqlIdentifier(value: string) {
-  return value.replaceAll(/[^a-zA-Z0-9_]/g, '_').slice(0, 60)
+  return value.replaceAll(/\W/g, '_').slice(0, 60)
 }
 
 async function prepareTargetEnvironment() {
@@ -231,7 +235,77 @@ async function prepareTargetEnvironment() {
   }
 }
 
-async function waitForServer(server: ReturnType<Awaited<typeof import('../src/app.js')>['createApp']>['listen']) {
+async function ensureKnownAdmin(dataSource: { getRepository: Function }) {
+  const { SysUser } = await import('../src/entities/sys-user.entity.js')
+  const { hashPassword } = await import('../src/utils/password.js')
+  const userRepo = dataSource.getRepository(SysUser)
+  const username = process.env.INIT_ADMIN_USERNAME ?? 'admin'
+  const password = process.env.INIT_ADMIN_PASSWORD ?? `DbConcurrency_${runId}_Aa1!`
+  const existed = await userRepo.findOne({ where: { username } })
+
+  if (existed) {
+    existed.passwordHash = await hashPassword(password)
+    existed.displayName = 'Database Concurrency Admin'
+    existed.role = 'admin'
+    existed.status = 'enabled'
+    await userRepo.save(existed)
+    return
+  }
+
+  await userRepo.save(
+    userRepo.create({
+      username,
+      passwordHash: await hashPassword(password),
+      displayName: 'Database Concurrency Admin',
+      role: 'admin',
+      status: 'enabled',
+    }),
+  )
+}
+
+async function seedClientSessions(dataSource: { getRepository: Function }, count: number) {
+  const { ClientUser } = await import('../src/entities/client-user.entity.js')
+  const { ClientUserSession } = await import('../src/entities/client-user-session.entity.js')
+  const { hashPassword } = await import('../src/utils/password.js')
+  const { generateSessionToken } = await import('../src/utils/token.js')
+  const userRepo = dataSource.getRepository(ClientUser)
+  const sessionRepo = dataSource.getRepository(ClientUserSession)
+  const numericSeed = runId.replaceAll(/\D/g, '').slice(-8).padStart(8, '0')
+  const baseMobileSuffix = Number(numericSeed)
+  const now = new Date()
+  const expiresAt = new Date(now.getTime() + 24 * 60 * 60 * 1000)
+  const tokens: string[] = []
+
+  for (let index = 0; index < count; index += 1) {
+    const mobileSuffix = String((baseMobileSuffix + index) % 100_000_000).padStart(8, '0')
+    const mobile = `139${mobileSuffix}`
+    const email = `dbc_${runId}_${index}@example.local`
+    const passwordHash = await hashPassword(`Client_${runId}_${index}_Aa1!`)
+    const existed = await userRepo.findOne({ where: { mobile } })
+    const user = existed ?? userRepo.create({ mobile })
+
+    user.email = email
+    user.passwordHash = passwordHash
+    user.realName = `DBC Client ${index + 1}`
+    user.departmentName = ''
+    user.status = 'enabled'
+    user.lastLoginAt = now
+
+    const saved = await userRepo.save(user)
+    const token = generateSessionToken()
+    await sessionRepo.save(sessionRepo.create({
+      sessionToken: token,
+      userId: saved.id,
+      expiresAt,
+      lastAccessAt: now,
+    }))
+    tokens.push(token)
+  }
+
+  return tokens
+}
+
+async function waitForServer(server: Server) {
   if (server.listening) return
   await new Promise<void>((resolve, reject) => {
     server.once('error', reject)
@@ -315,7 +389,10 @@ function makeRequest(baseUrl: string) {
   }
 }
 
-async function setupFixtures(requestJson: ReturnType<typeof makeRequest>) {
+async function setupFixtures(
+  requestJson: ReturnType<typeof makeRequest>,
+  dataSource: { getRepository: Function },
+) {
   const adminLogin = await requestJson<{
     code: number
     data: { token: string; user: { username: string; role: string } }
@@ -358,44 +435,7 @@ async function setupFixtures(requestJson: ReturnType<typeof makeRequest>) {
   })
   assert.equal(supplierLogin.response.status, 200, 'supplier login failed')
 
-  const clientTokens: string[] = []
-  for (let index = 0; index < thresholds.mixedScenarioUsers; index += 1) {
-    const account = `13${String(Date.now() + index).slice(-9)}`
-    const password = `Client_${runId}_${index}_Aa1!`
-    const captcha = await requestJson<{ code: number; data: { captchaId: string; captchaSvg: string } }>({
-      label: `client ${index + 1} register captcha`,
-      pathname: '/api/client-auth/captcha',
-    })
-    await requestJson({
-      label: `client ${index + 1} register`,
-      method: 'POST',
-      pathname: '/api/client-auth/register',
-      body: {
-        account,
-        username: `dbc_client_${runId}_${index}`,
-        password,
-        captchaId: captcha.payload.data.captchaId,
-        captchaCode: readCaptchaCode(captcha.payload.data.captchaSvg),
-      },
-    })
-    const loginCaptcha = await requestJson<{ code: number; data: { captchaId: string; captchaSvg: string } }>({
-      label: `client ${index + 1} login captcha`,
-      pathname: '/api/client-auth/captcha',
-    })
-    const login = await requestJson<{ code: number; data: { token: string } }>({
-      label: `client ${index + 1} login`,
-      method: 'POST',
-      pathname: '/api/client-auth/login',
-      body: {
-        account,
-        password,
-        captchaId: loginCaptcha.payload.data.captchaId,
-        captchaCode: readCaptchaCode(loginCaptcha.payload.data.captchaSvg),
-      },
-    })
-    assert.equal(login.response.status, 200, `client ${index + 1} login failed`)
-    clientTokens.push(login.payload.data.token)
-  }
+  const clientTokens = await seedClientSessions(dataSource, thresholds.mixedScenarioUsers)
 
   addCheck('fixture users ready', {
     clientCount: clientTokens.length,
@@ -440,10 +480,10 @@ async function createProduct(
 }
 
 async function getProductStock(AppDataSource: Awaited<typeof import('../src/config/data-source.js')>['AppDataSource'], id: string) {
-  const rows = await AppDataSource.query(
+  const rows: Array<{ currentStock: string | number; preOrderedStock: string | number }> = await AppDataSource.query(
     'SELECT current_stock AS currentStock, pre_ordered_stock AS preOrderedStock FROM base_product WHERE id = ?',
     [id],
-  ) as Array<{ currentStock: string | number; preOrderedStock: string | number }>
+  )
   assert.ok(rows.length === 1, `product not found: ${id}`)
   return {
     currentStock: Number(rows[0].currentStock),
@@ -456,7 +496,7 @@ async function countRows(
   sql: string,
   params: unknown[],
 ) {
-  const rows = await AppDataSource.query(sql, params) as Array<{ count: string | number }>
+  const rows: Array<{ count: string | number }> = await AppDataSource.query(sql, params)
   return Number(rows[0]?.count ?? 0)
 }
 
@@ -794,7 +834,7 @@ async function runScenarios(
   addCheck('stock invariants passed', { dirtyProductCount })
 
   if (target === 'sqlite') {
-    const integrityRows = await AppDataSource.query('PRAGMA integrity_check') as Array<{ integrity_check: string }>
+    const integrityRows: Array<{ integrity_check: string }> = await AppDataSource.query('PRAGMA integrity_check')
     const integrityCheck = integrityRows[0]?.integrity_check ?? 'missing'
     assert.equal(integrityCheck, 'ok', 'SQLite integrity_check must be ok')
     addCheck('sqlite integrity_check passed', { integrityCheck })
@@ -831,21 +871,24 @@ async function main() {
   }
 
   const cleanupTarget = await prepareTargetEnvironment()
-  let server: ReturnType<Awaited<typeof import('../src/app.js')>['createApp']>['listen'] | null = null
+  let server: Server | null = null
   let dataSource: Awaited<typeof import('../src/config/data-source.js')>['AppDataSource'] | null = null
 
   try {
     const { createApp } = await import('../src/app.js')
     const { AppDataSource } = await import('../src/config/data-source.js')
     const { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } = await import('../src/config/database-bootstrap.js')
+    const { installSqliteTransactionQueue } = await import('../src/utils/sqlite-transaction-queue.js')
     const { authService } = await import('../src/services/auth.service.js')
     const { systemConfigService } = await import('../src/services/system-config.service.js')
 
     dataSource = AppDataSource
     prepareDatabaseRuntime()
     await AppDataSource.initialize()
+    installSqliteTransactionQueue(AppDataSource)
     await initializeDatabaseSchemaIfNeeded(AppDataSource)
     await authService.ensureDefaultAdmin()
+    await ensureKnownAdmin(AppDataSource)
     await systemConfigService.ensureDefaultConfigs()
 
     const app = createApp()
@@ -862,7 +905,7 @@ async function main() {
     })
     assert.equal(health.payload.data.status, 'UP')
 
-    const fixtures = await setupFixtures(requestJson)
+    const fixtures = await setupFixtures(requestJson, AppDataSource)
     await runScenarios(requestJson, fixtures, AppDataSource)
     finalizeScenarioMetrics()
 

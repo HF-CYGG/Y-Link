@@ -12,6 +12,7 @@ import { env, envLoadContext } from './config/env.js'
 import { authService } from './services/auth.service.js'
 import { systemConfigService } from './services/system-config.service.js'
 import { migrateLegacyUploadReferences } from './utils/upload-migration.js'
+import { installSqliteTransactionQueue } from './utils/sqlite-transaction-queue.js'
 import {
   buildEffectiveDatabaseSummary,
   buildRuntimeOverrideStatusSummary,
@@ -119,6 +120,7 @@ async function bootstrap(): Promise<void> {
   prepareDatabaseRuntime()
   logLine('STEP', 'initialize datasource')
   await AppDataSource.initialize()
+  installSqliteTransactionQueue(AppDataSource)
   logLine('STEP', 'initialize database schema')
   const schemaInitResult = await initializeDatabaseSchemaIfNeeded(AppDataSource)
   logLine('SCHEMA', `action=${schemaInitResult.action} reason=${schemaInitResult.reason}`)

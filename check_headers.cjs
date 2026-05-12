@@ -1,3 +1,10 @@
+/**
+ * 模块说明：check_headers.cjs
+ * 文件职责：扫描工作区清单中的文件头注释覆盖情况，并自动勾选已经具备模块说明的条目。
+ * 维护说明：
+ * - 该脚本只处理清单状态，不负责自动补写文件头；
+ * - 若后续扩展资源文件豁免规则，请优先收敛到统一正则，避免重复判断逻辑分散。
+ */
 const fs = require('node:fs');
 
 const checklistPath = 'f:/Y-Link/.trae/specs/review-entire-workspace-file-by-file/checklist.md';
@@ -8,7 +15,7 @@ let updatedLines = [];
 let missingFiles = [];
 
 for (let line of lines) {
-  const match = line.match(/- \[ \] `([^`]+)`/);
+  const match = /- \[ \] `([^`]+)`/.exec(line);
   if (match) {
     const filePath = match[1];
     try {
@@ -17,7 +24,7 @@ for (let line of lines) {
         continue;
       }
       
-      const isResource = line.includes('资源文件登记') || filePath.match(/\.(png|svg|json|sqlite|sqlite-journal|lock|gitkeep|md)$/i);
+      const isResource = line.includes('资源文件登记') || /\.(png|svg|json|sqlite|sqlite-journal|lock|gitkeep|md)$/i.exec(filePath);
       
       if (isResource) {
         // Resources don't need headers, mark as checked
