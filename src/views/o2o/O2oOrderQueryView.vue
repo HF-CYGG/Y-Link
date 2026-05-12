@@ -386,9 +386,9 @@ const complianceForm = ref({
   isSystemApplied: false,
 })
 // 详情辅助面板折叠状态：
-// - 默认展开“合规状态确认”，保证工作台打开详情后即可看到关键合规开关；
-// - 其他辅助项按需展开，避免挤占主信息区域。
-const detailAssistPanels = ref<string[]>(['compliance-flags'])
+// - 默认全部折叠，优先把订单核心摘要与状态信息露出来，减少详情首屏纵向占用；
+// - 门店仅在需要修改合规、特殊状态或留言时再手动展开对应区块。
+const detailAssistPanels = ref<string[]>([])
 const canEditComplianceFlags = computed(() => hasPermission('orders:update'))
 
 const activeBusinessStatusMeta = computed(() => {
@@ -1121,11 +1121,11 @@ onBeforeUnmount(() => {
             <p class="mt-1 break-words text-xs">{{ reportConfig.cardDescription }}</p>
           </div>
 
-          <div class="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2">
+          <div class="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-1.5">
             <el-collapse v-model="detailAssistPanels" class="order-detail-assist-collapse">
               <el-collapse-item name="compliance-flags">
                 <template #title>
-                  <div class="flex min-w-0 flex-col py-2">
+                  <div class="flex min-w-0 flex-col py-1">
                     <p class="text-sm font-semibold text-slate-900">合规状态确认</p>
                     <p class="mt-1 text-xs leading-5 text-slate-500">
                       仅部门单可编辑“是否有出库单”和“系统申请”状态。
@@ -1146,7 +1146,7 @@ onBeforeUnmount(() => {
                     </el-button>
                   </div>
                   <div class="mt-3 grid gap-3 sm:grid-cols-2">
-                    <div class="rounded-xl border border-slate-100 bg-white px-3 py-3">
+                    <div class="rounded-xl border border-slate-100 bg-white px-3 py-2.5">
                       <p class="text-xs text-slate-500">是否有出库单</p>
                       <div class="mt-2">
                         <el-switch
@@ -1161,7 +1161,7 @@ onBeforeUnmount(() => {
                         </span>
                       </div>
                     </div>
-                    <div class="rounded-xl border border-slate-100 bg-white px-3 py-3">
+                    <div class="rounded-xl border border-slate-100 bg-white px-3 py-2.5">
                       <p class="text-xs text-slate-500">系统申请</p>
                       <div class="mt-2">
                         <el-switch
@@ -1182,7 +1182,7 @@ onBeforeUnmount(() => {
 
               <el-collapse-item name="business-status">
                 <template #title>
-                  <div class="flex min-w-0 flex-col py-2">
+                  <div class="flex min-w-0 flex-col py-1">
                     <p class="text-sm font-semibold text-slate-900">商家特殊状态</p>
                     <p class="mt-1 text-xs leading-5 text-slate-500">
                       用于通知用户当前订单所处的特殊进度，不改变待核销、已核销、已取消等核心状态。
@@ -1213,7 +1213,7 @@ onBeforeUnmount(() => {
                   <p v-if="activeBusinessStatusMeta" class="mt-2 text-xs leading-5 text-slate-500">
                     {{ activeBusinessStatusMeta.consoleDescription }}
                   </p>
-                  <div v-if="activeBusinessStatusMeta" class="mt-3 rounded-2xl px-3 py-2" :class="activeBusinessStatusMeta.className">
+                  <div v-if="activeBusinessStatusMeta" class="mt-3 rounded-2xl px-3 py-1.5" :class="activeBusinessStatusMeta.className">
                     <p class="text-sm font-semibold">当前商家状态：{{ activeBusinessStatusMeta.label }}</p>
                     <p class="mt-1 text-xs">{{ activeBusinessStatusMeta.consoleDescription }}</p>
                   </div>
@@ -1222,7 +1222,7 @@ onBeforeUnmount(() => {
 
               <el-collapse-item name="merchant-message">
                 <template #title>
-                  <div class="flex min-w-0 flex-col py-2">
+                  <div class="flex min-w-0 flex-col py-1">
                     <p class="text-sm font-semibold text-slate-900">商家留言</p>
                     <p class="mt-1 text-xs leading-5 text-slate-500">
                       用于补充特殊订单说明；保存后客户端详情页可见，清空后客户端不再显示该模块。
@@ -1257,7 +1257,7 @@ onBeforeUnmount(() => {
                         </el-button>
                       </div>
                     </div>
-                    <div v-if="activeMerchantMessage" class="rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                    <div v-if="activeMerchantMessage" class="rounded-2xl border border-amber-200 bg-amber-50 px-3 py-1.5 text-sm text-amber-800">
                       <p class="text-xs text-amber-700">当前已生效留言</p>
                       <p class="mt-1 whitespace-pre-wrap break-words">{{ activeMerchantMessage }}</p>
                     </div>
@@ -1509,7 +1509,7 @@ onBeforeUnmount(() => {
 }
 
 .order-detail-assist-collapse :deep(.el-collapse-item__header) {
-  min-height: 56px;
+  min-height: 46px;
   border-bottom: 1px solid #e2e8f0;
   background: transparent;
 }
@@ -1525,6 +1525,7 @@ onBeforeUnmount(() => {
 
 .order-detail-assist-collapse :deep(.el-collapse-item__content) {
   padding-bottom: 0;
+  padding-top: 2px;
 }
 
 .table-scroll-wrap {
