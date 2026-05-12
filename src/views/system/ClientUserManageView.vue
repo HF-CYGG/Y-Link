@@ -1,10 +1,10 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/system/ClientUserManageView.vue
- * 文件职责：管理端对客户端用户进行查询、启停与密码重置。
+ * 文件职责：管理端对客户端用户进行查询、手动新增、启停与密码重置。
  * 维护说明：
  * - 客户端用户与管理端用户分开治理，避免字段语义和操作入口混淆；
- * - 当前不提供手动新增客户端用户，客户端账号仍以用户自助注册为主。
+ * - 手动新增入口仅服务管理端受权治理，不经过客户端自助注册风控。
  */
 
 import dayjs from 'dayjs'
@@ -12,10 +12,12 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { BizCrudDialogShell, BizResponsiveDataCollectionShell, PageContainer, PagePaginationBar, PageToolbarCard } from '@/components/common'
 import {
+  createClientUser,
   getClientUserList,
   resetClientUserPassword,
   updateClientUser,
   updateClientUserStatus,
+  type CreateClientUserPayload,
   type ClientUserManageProfile,
   type ClientUserStatus,
   type ResetClientUserPasswordPayload,
@@ -48,10 +50,81 @@ const listState = reactive(
 const canEditUser = computed(() => hasPermission('users:update'))
 const canToggleUser = computed(() => hasPermission('users:status'))
 const canResetUserPassword = computed(() => hasPermission('users:reset_password'))
+const canCreateUser = computed(() => hasPermission('users:create'))
 const canOperateUsers = computed(() => canEditUser.value || canToggleUser.value || canResetUserPassword.value)
 const departmentOptions = ref<string[]>([])
 const departmentPathLookup = ref<Record<string, string>>({})
 const departmentOptionsLoading = ref(false)
+
+const createVisible = ref(false)
+const createSubmitting = ref(false)
+const createFormRef = ref<FormInstance>()
+const createForm = reactive({
+  username: '',
+  mobile: '',
+  email: '',
+  departmentName: '',
+  password: '',
+  confirmPassword: '',
+  status: 'enabled' as ClientUserStatus,
+})
+
+const createRules: FormRules = {
+  username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
+  mobile: [
+    {
+      validator: (_rule, value: string, callback) => {
+        if (value && !/^1\d{10}$/.test(value.trim())) {
+          callback(new Error('手机号格式不正确'))
+          return
+        }
+        if (!value.trim() && !createForm.email.trim()) {
+          callback(new Error('手机号和邮箱至少保留一项'))
+          return
+        }
+        callback()
+      },
+      trigger: 'blur',
+    },
+  ],
+  email: [
+    {
+      validator: (_rule, value: string, callback) => {
+        if (value && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim())) {
+          callback(new Error('邮箱格式不正确'))
+          return
+        }
+        if (!value.trim() && !createForm.mobile.trim()) {
+          callback(new Error('手机号和邮箱至少保留一项'))
+          return
+        }
+        callback()
+      },
+      trigger: 'blur',
+    },
+  ],
+  password: [
+    { required: true, message: '请输入登录密码', trigger: 'blur' },
+    { min: 8, message: '登录密码至少 8 位', trigger: 'blur' },
+  ],
+  confirmPassword: [
+    {
+      validator: (_rule, value: string, callback) => {
+        if (!value) {
+          callback(new Error('请再次输入登录密码'))
+          return
+        }
+        if (value !== createForm.password) {
+          callback(new Error('两次输入的登录密码不一致'))
+          return
+        }
+        callback()
+      },
+      trigger: 'blur',
+    },
+  ],
+  status: [{ required: true, message: '请选择账号状态', trigger: 'change' }],
+}
 
 const editVisible = ref(false)
 const editSubmitting = ref(false)
@@ -142,6 +215,17 @@ const getStatusTagType = (status: ClientUserStatus) => {
 
 const getStatusLabel = (status: ClientUserStatus) => {
   return status === 'enabled' ? '启用' : '停用'
+}
+
+const resetCreateForm = () => {
+  createForm.username = ''
+  createForm.mobile = ''
+  createForm.email = ''
+  createForm.departmentName = ''
+  createForm.password = ''
+  createForm.confirmPassword = ''
+  createForm.status = 'enabled'
+  createFormRef.value?.clearValidate()
 }
 
 const resetEditForm = () => {
@@ -245,6 +329,14 @@ const handleSearch = () => {
   void loadData()
 }
 
+const handleOpenCreate = () => {
+  if (!ensurePermission('users:create', '手动新增客户端用户')) {
+    return
+  }
+  createVisible.value = true
+  resetCreateForm()
+}
+
 const handleReset = () => {
   searchForm.keyword = ''
   searchForm.status = ''
@@ -268,6 +360,51 @@ const handleOpenEdit = (row: ClientUserManageProfile) => {
   editForm.email = row.email || ''
   editForm.departmentName = resolveDepartmentPathDisplay(row.departmentName)
   editForm.status = row.status
+}
+
+const handleSubmitCreate = async () => {
+  const valid = await createFormRef.value?.validate().catch(() => false)
+  if (!valid) {
+    return
+  }
+  if (!ensurePermission('users:create', '手动新增客户端用户')) {
+    return
+  }
+
+  const normalizedUsername = createForm.username.trim()
+  if (!normalizedUsername) {
+    ElMessage.warning('请输入用户名')
+    return
+  }
+  const normalizedMobile = createForm.mobile.trim()
+  const normalizedEmail = createForm.email.trim().toLowerCase()
+  const normalizedDepartmentName = normalizeOptionalText(createForm.departmentName)
+  if (normalizedDepartmentName && !departmentOptions.value.includes(normalizedDepartmentName)) {
+    ElMessage.warning('请选择系统配置中的部门选项')
+    return
+  }
+
+  createSubmitting.value = true
+  try {
+    const payload: CreateClientUserPayload = {
+      username: normalizedUsername,
+      mobile: normalizedMobile || undefined,
+      email: normalizedEmail || undefined,
+      departmentName: normalizedDepartmentName || undefined,
+      password: createForm.password,
+      status: createForm.status,
+    }
+    await createClientUser(payload)
+    createVisible.value = false
+    resetCreateForm()
+    ElMessage.success('客户端用户已手动新增')
+    listState.query.page = 1
+    await loadData()
+  } catch (error) {
+    ElMessage.error(extractErrorMessage(error, '手动新增客户端用户失败'))
+  } finally {
+    createSubmitting.value = false
+  }
 }
 
 const handleSubmitEdit = async () => {
@@ -440,12 +577,15 @@ onMounted(() => {
             </el-select>
             <el-button :class="isPhone ? 'w-full' : ''" type="primary" icon="Search" @click="handleSearch">搜索</el-button>
             <el-button :class="isPhone ? 'w-full' : ''" icon="Refresh" @click="handleReset">重置</el-button>
+            <el-button v-if="canCreateUser" :class="isPhone ? 'w-full' : ''" type="primary" icon="Plus" @click="handleOpenCreate">
+              新增用户
+            </el-button>
           </div>
         </template>
       </PageToolbarCard>
 
       <div class="rounded-2xl border border-dashed border-brand/20 bg-brand/5 px-4 py-3 text-sm leading-6 text-slate-600 dark:border-brand/20 dark:bg-brand/10 dark:text-slate-300">
-        这里管理的是客户端注册用户，不包含系统后台账号。密码修改采用二次确认，修改成功后目标用户当前登录会话会立即失效。
+        这里管理的是客户端注册用户与后台手动新增的客户端账号，不包含系统后台账号。手动新增入口属于管理端治理动作，不受客户端注册风控影响；密码修改采用二次确认，修改成功后目标用户当前登录会话会立即失效。
       </div>
 
       <div class="apple-card flex min-h-0 flex-1 flex-col p-3 sm:p-4 xl:p-5">
@@ -556,6 +696,74 @@ onMounted(() => {
         />
       </div>
     </div>
+
+    <BizCrudDialogShell
+      v-model="createVisible"
+      title="新增客户端用户"
+      height-mode="auto"
+      phone-width="94%"
+      tablet-width="560px"
+      desktop-width="520px"
+      :confirm-loading="createSubmitting"
+      confirm-text="确认新增"
+      @confirm="handleSubmitCreate"
+      @closed="resetCreateForm"
+    >
+      <div class="mb-4 rounded-2xl bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-500 dark:bg-white/5 dark:text-slate-400">
+        手动新增仅走管理端治理接口，不受客户端自助注册风控限制；但用户名、手机号、邮箱仍会按现有客户端账号口径做唯一性校验。
+      </div>
+      <el-form ref="createFormRef" :model="createForm" :rules="createRules" label-position="top">
+        <el-form-item label="用户名" prop="username">
+          <el-input v-model.trim="createForm.username" placeholder="请输入用户名" />
+        </el-form-item>
+        <div class="grid gap-4 md:grid-cols-2">
+          <el-form-item label="手机号" prop="mobile">
+            <el-input v-model.trim="createForm.mobile" placeholder="请输入手机号" />
+          </el-form-item>
+          <el-form-item label="邮箱" prop="email">
+            <el-input v-model.trim="createForm.email" placeholder="请输入邮箱" />
+          </el-form-item>
+        </div>
+        <el-form-item label="所属部门" prop="departmentName">
+          <el-select
+            v-model="createForm.departmentName"
+            placeholder="请选择所属部门（选填）"
+            class="w-full"
+            clearable
+            filterable
+            :loading="departmentOptionsLoading"
+          >
+            <el-option v-for="department in departmentOptions" :key="department" :label="department" :value="department" />
+          </el-select>
+        </el-form-item>
+        <div class="grid gap-4 md:grid-cols-2">
+          <el-form-item label="登录密码" prop="password">
+            <el-input
+              v-model="createForm.password"
+              type="password"
+              show-password
+              placeholder="请输入初始登录密码"
+              autocomplete="new-password"
+            />
+          </el-form-item>
+          <el-form-item label="确认密码" prop="confirmPassword">
+            <el-input
+              v-model="createForm.confirmPassword"
+              type="password"
+              show-password
+              placeholder="请再次输入初始登录密码"
+              autocomplete="new-password"
+            />
+          </el-form-item>
+        </div>
+        <el-form-item label="账号状态" prop="status">
+          <el-select v-model="createForm.status" class="w-full">
+            <el-option label="启用" value="enabled" />
+            <el-option label="停用" value="disabled" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+    </BizCrudDialogShell>
 
     <BizCrudDialogShell
       v-model="editVisible"
