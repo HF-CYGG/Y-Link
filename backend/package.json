@@ -39,8 +39,8 @@
     "mysql2": "^3.15.2",
     "reflect-metadata": "^0.2.2",
     "sqlite3": "^5.1.7",
-    "typeorm": "^0.3.27",
-    "uuid": "^11.1.0",
+    "typeorm": "^0.3.29",
+    "uuid": "^11.1.1",
     "zod": "^3.25.76"
   },
   "devDependencies": {
@@ -49,5 +49,8 @@
     "@types/node": "^24.5.2",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3"
+  },
+  "overrides": {
+    "ip-address": "^10.2.0"
   }
 }

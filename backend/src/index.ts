@@ -10,6 +10,7 @@ import { AppDataSource } from './config/data-source.js'
 import { maskDatabaseRuntimeOverride, readDatabaseRuntimeOverride } from './config/database-runtime-override.js'
 import { env, envLoadContext } from './config/env.js'
 import { authService } from './services/auth.service.js'
+import { o2oPreorderService } from './services/o2o-preorder.service.js'
 import { systemConfigService } from './services/system-config.service.js'
 import { migrateLegacyUploadReferences } from './utils/upload-migration.js'
 import { installSqliteTransactionQueue } from './utils/sqlite-transaction-queue.js'
@@ -139,6 +140,7 @@ async function bootstrap(): Promise<void> {
 
   const app = createApp()
   app.listen(env.PORT, () => {
+    o2oPreorderService.startTimeoutRecycleLoop()
     const activeOverride = maskDatabaseRuntimeOverride(readDatabaseRuntimeOverride())
     const effectiveDatabase = buildEffectiveDatabaseSummary(activeOverride)
     const runtimeOverrideStatus = buildRuntimeOverrideStatusSummary(activeOverride)

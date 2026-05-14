@@ -233,6 +233,7 @@ export const O2O_PICKUP_CONTACT_MAX_LENGTH = 32
 const LIKE_ESCAPE_CHAR = String.raw`\\`
 const LIKE_SPECIAL_CHAR_PATTERN = /[%_\\]/g
 const O2O_TIMEOUT_RECYCLE_RECENT_WINDOW_MS = 15 * 1000
+const O2O_TIMEOUT_BACKGROUND_RECYCLE_INTERVAL_MS = 60 * 1000
 
 class O2oPreorderService {
   private readonly productRepo = AppDataSource.getRepository(BaseProduct)
@@ -245,6 +246,7 @@ class O2oPreorderService {
   private cancelTimeoutOrdersInFlight: Promise<{ cancelledCount: number }> | null = null
   private lastCancelTimeoutOrdersAt = 0
   private lastCancelTimeoutOrdersResult = { cancelledCount: 0 }
+  private timeoutRecycleTimer: ReturnType<typeof setInterval> | null = null
 
   /**
    * 客户端改单次数上限：
@@ -1732,11 +1734,7 @@ class O2oPreorderService {
   }
 
   async listMyOrders(auth: ClientAuthContext, query?: Partial<MyOrderListQuery>): Promise<PaginationResult<O2oPreorderSummaryView>> {
-    // 先做一次超时回收，保证用户看到的订单状态尽量接近当前真实状态。
-    // 详细注释：订单列表、详情页和单条摘要刷新会在短时间内连续触发；
-    // 这里复用最近一次回收结果，避免每次进入页面都阻塞在同一轮批量库存释放事务上。
-    await this.cancelTimeoutOrders({ skipRecentMs: O2O_TIMEOUT_RECYCLE_RECENT_WINDOW_MS })
-
+    // Timeout recycling runs in the background and on write paths; this read path stays query-only.
     const normalizedPage = Math.max(1, Number(query?.page) || 1)
     const normalizedPageSize = Math.max(1, Math.min(50, Number(query?.pageSize) || 20))
     const normalizedKeyword = query?.keyword?.trim() ?? ''
@@ -1799,7 +1797,6 @@ class O2oPreorderService {
   }
 
   async getMyOrderSummary(auth: ClientAuthContext, id: string) {
-    await this.cancelTimeoutOrders({ skipRecentMs: O2O_TIMEOUT_RECYCLE_RECENT_WINDOW_MS })
     const order = await this.preorderRepo.findOne({ where: { id, clientUserId: auth.userId } })
     if (!order) {
       throw new BizError('预订单不存在', 404)
@@ -1808,7 +1805,6 @@ class O2oPreorderService {
   }
 
   async getMyOrderDetail(auth: ClientAuthContext, id: string) {
-    await this.cancelTimeoutOrders({ skipRecentMs: O2O_TIMEOUT_RECYCLE_RECENT_WINDOW_MS })
     const order = await this.preorderRepo.findOne({ where: { id, clientUserId: auth.userId } })
     if (!order) {
       throw new BizError('预订单不存在', 404)
@@ -1902,7 +1898,6 @@ class O2oPreorderService {
     if (startTime && endTime && startTime.getTime() > endTime.getTime()) {
       throw new BizError('开始时间不能晚于结束时间', 400)
     }
-    await this.cancelTimeoutOrders()
     const queryBuilder = this.preorderRepo.createQueryBuilder('order').orderBy('order.id', 'DESC').take(normalizedLimit)
 
     if (input.status) {
@@ -1956,7 +1951,6 @@ class O2oPreorderService {
   }
 
   async detailById(id: string) {
-    await this.cancelTimeoutOrders()
     const order = await this.preorderRepo.findOne({ where: { id } })
     if (!order) {
       throw new BizError('预订单不存在', 404)
@@ -2454,6 +2448,30 @@ class O2oPreorderService {
     })
   }
 
+  startTimeoutRecycleLoop(intervalMs = O2O_TIMEOUT_BACKGROUND_RECYCLE_INTERVAL_MS) {
+    if (this.timeoutRecycleTimer) {
+      return
+    }
+    const normalizedIntervalMs = Math.max(5000, Math.floor(Number(intervalMs) || O2O_TIMEOUT_BACKGROUND_RECYCLE_INTERVAL_MS))
+    const runRecycle = () => {
+      void this.cancelTimeoutOrders({ skipRecentMs: O2O_TIMEOUT_RECYCLE_RECENT_WINDOW_MS }).catch((error) => {
+        console.warn('[o2o-timeout-recycle] failed:', error instanceof Error ? error.message : String(error))
+      })
+    }
+
+    runRecycle()
+    this.timeoutRecycleTimer = setInterval(runRecycle, normalizedIntervalMs)
+    this.timeoutRecycleTimer.unref?.()
+  }
+
+  stopTimeoutRecycleLoop() {
+    if (!this.timeoutRecycleTimer) {
+      return
+    }
+    clearInterval(this.timeoutRecycleTimer)
+    this.timeoutRecycleTimer = null
+  }
+
   async cancelTimeoutOrders(options?: { skipRecentMs?: number }) {
     const config = await systemConfigService.getO2oRuleConfigs()
     if (!config.autoCancelEnabled) {
@@ -2518,7 +2536,6 @@ class O2oPreorderService {
 
   async getVerifyDetail(verifyCode: string) {
     const normalizedVerifyCode = this.normalizeVerifyCode(verifyCode)
-    await this.cancelTimeoutOrders()
     const returnRequest = await this.returnRequestRepo.findOne({ where: { verifyCode: normalizedVerifyCode } })
     if (returnRequest) {
       return {
@@ -2541,7 +2558,6 @@ class O2oPreorderService {
     if (!normalizedShowNo) {
       throw new BizError('单号不能为空', 400)
     }
-    await this.cancelTimeoutOrders()
     const returnRequest = await this.returnRequestRepo.findOne({ where: { returnNo: normalizedShowNo } })
     if (returnRequest) {
       return {
