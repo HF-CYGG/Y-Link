@@ -16,6 +16,8 @@
     "verify:release:functional": "node ./scripts/verify-release-functional-suite.mjs",
     "verify:release": "node ./scripts/verify-release-full-suite.mjs",
     "verify:unit:functional": "node ./scripts/verify-unit-functional-suite.mjs",
+    "verify:frontend:low-frequency-imports": "node ./scripts/verify-frontend-low-frequency-heavy-imports.mjs",
+    "verify:db:concurrency": "node ./scripts/run-verify-db-concurrency.mjs",
     "verify:performance:budget": "node ./scripts/verify-enterprise-page-performance.mjs",
     "verify:performance:core-paths": "node ./scripts/verify-enterprise-core-paths.mjs",
     "verify:performance:client-concurrency": "node ./scripts/verify-client-concurrency-performance.mjs",

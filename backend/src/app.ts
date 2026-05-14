@@ -1,7 +1,13 @@
 /**
  * 模块说明：backend/src/app.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：统一装配后端应用、中间件、静态上传资源兼容策略与各业务路由。
+ * 实现逻辑：
+ * - 启动时注入基础安全响应头，收口敏感认证接口缓存策略；
+ * - 对历史 `/uploads/<file>` 旧路径做内部改写，兼容已迁移到分类目录的真实文件；
+ * - 为上传静态资源补充长期缓存与资源级安全头，降低重复回源与内容嗅探风险。
+ * 维护说明：
+ * - 若继续新增上传分类，请同步更新旧路径兼容改写的分类列表；
+ * - 若前端托管层也有安全头策略，需与本文件保持不冲突、不过度收紧。
  */
 
 import express from 'express'
@@ -32,6 +38,23 @@ import {
   buildRuntimeOverrideStatusSummary,
 } from './utils/effective-database.js'
 import { BizError } from './utils/errors.js'
+
+const UPLOAD_CACHE_CONTROL_VALUE = 'public, max-age=31536000, immutable'
+const UPLOAD_CONTENT_SECURITY_POLICY_VALUE = "default-src 'none'; img-src 'self' data:; style-src 'none'; sandbox"
+
+/**
+ * 上传静态资源头部策略：
+ * - 商品图、反馈截图均为已落盘且文件名带 UUID 的只读资源，适合长期缓存；
+ * - 通过资源级 CSP 与 `nosniff` 限制浏览器把图片误判成脚本等可执行内容；
+ * - `same-site` 兼容当前同域代理与本地联调，不强行收紧到跨子域不可用。
+ */
+function applyUploadStaticResponseHeaders(res: express.Response): void {
+  res.setHeader('Cache-Control', UPLOAD_CACHE_CONTROL_VALUE)
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin')
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-site')
+  res.setHeader('Content-Security-Policy', UPLOAD_CONTENT_SECURITY_POLICY_VALUE)
+}
 
 export function createApp() {
   const app = express()
@@ -87,8 +110,21 @@ export function createApp() {
     next()
   })
 
-  // 配置静态文件服务，让前端可以直接访问图片
-  app.use('/uploads', express.static(uploadsDir))
+  // 配置上传静态文件服务：
+  // - 继续直接暴露图片访问能力，前端数据库内仍只保存 `/uploads/...` 相对路径；
+  // - 对图片返回长期缓存与基础安全头，减少商品列表/反馈详情重复拉取压力；
+  // - 历史 `/uploads/<file>` 会先在上方被内部改写到分类目录，因此不会破坏旧路径兼容。
+  app.use(
+    '/uploads',
+    express.static(uploadsDir, {
+      etag: true,
+      immutable: true,
+      maxAge: '365d',
+      setHeaders: (res) => {
+        applyUploadStaticResponseHeaders(res)
+      },
+    }),
+  )
 
   app.use(express.json())
 

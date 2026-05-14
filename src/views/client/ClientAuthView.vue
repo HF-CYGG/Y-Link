@@ -188,6 +188,14 @@ const isCapabilityHintVisible = computed(() => capabilityLoading.value && !authC
 const isCapabilityFallbackVisible = computed(() => !capabilityLoading.value && !!capabilityErrorMessage.value && !authCapabilities.value)
 const forgotPasswordAvailable = computed(() => authCapabilities.value?.forgotPasswordEnabled ?? false)
 
+// 安全说明：后端返回的是 SVG 字符串，这里统一转为 data URL 图片渲染，
+// 避免通过 v-html 直接把未信任的 SVG 片段注入到页面 DOM 中。
+const captchaImageSrc = computed(() => {
+  return captcha.captchaSvg
+    ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(captcha.captchaSvg)}`
+    : ''
+})
+
 const captchaHintText = computed(() => {
   if (captcha.expiresInSeconds <= 0) {
     return '点击右侧验证码图片可立即刷新。'
@@ -1012,7 +1020,13 @@ onUnmounted(() => {
 
                     <button type="button" class="captcha-box" :disabled="captchaLoading" @click="handleManualRefreshCaptcha">
                       <span v-if="captchaLoading" class="captcha-loading">刷新中</span>
-                      <span v-else class="captcha-render" v-html="captcha.captchaSvg" />
+                      <img
+                        v-else
+                        class="captcha-render"
+                        :src="captchaImageSrc"
+                        alt="图形验证码"
+                        draggable="false"
+                      />
                     </button>
                   </div>
                   <p v-if="loginCaptchaVisible" class="captcha-hint-text">{{ captchaHintText }}</p>
@@ -1121,7 +1135,13 @@ onUnmounted(() => {
 
                     <button type="button" class="captcha-box" :disabled="captchaLoading" @click="handleManualRefreshCaptcha">
                       <span v-if="captchaLoading" class="captcha-loading">刷新中</span>
-                      <span v-else class="captcha-render" v-html="captcha.captchaSvg" />
+                      <img
+                        v-else
+                        class="captcha-render"
+                        :src="captchaImageSrc"
+                        alt="图形验证码"
+                        draggable="false"
+                      />
                     </button>
                   </div>
                   <p class="captcha-hint-text">{{ captchaHintText }}</p>
@@ -1181,7 +1201,13 @@ onUnmounted(() => {
 
                     <button type="button" class="captcha-box" :disabled="captchaLoading" @click="handleManualRefreshCaptcha">
                       <span v-if="captchaLoading" class="captcha-loading">刷新中</span>
-                      <span v-else class="captcha-render" v-html="captcha.captchaSvg" />
+                      <img
+                        v-else
+                        class="captcha-render"
+                        :src="captchaImageSrc"
+                        alt="图形验证码"
+                        draggable="false"
+                      />
                     </button>
                   </div>
                   <el-button class="submit-btn" :loading="isLoading" @click="handleRegister">立即注册</el-button>
@@ -1599,11 +1625,9 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-}
-
-.captcha-render :deep(svg) {
   width: 100px;
   height: 36px;
+  object-fit: contain;
 }
 
 .captcha-hint-text,

@@ -6,8 +6,9 @@
 
 import { Router } from 'express'
 import { requirePermission } from '../middleware/auth.middleware.js'
+import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
-import { buildUploadPublicUrl, createCategorizedImageUpload } from '../utils/upload-storage.js'
+import { buildUploadPublicUrl, createCategorizedImageUpload, finalizeUploadedImageFile } from '../utils/upload-storage.js'
 
 export const uploadRouter = Router()
 
@@ -23,15 +24,18 @@ uploadRouter.post(
   '/',
   requirePermission('products:manage'),
   upload.single('file'),
-  (req, res) => {
-  if (!req.file) {
-    throw new BizError('文件上传失败', 400)
-  }
+  asyncHandler(async (req, res) => {
+    if (!req.file) {
+      throw new BizError('文件上传失败', 400)
+    }
 
-  // 后端对外暴露统一的 uploads 前缀，前端只需保存该相对 URL，
-  // 后续域名、静态资源代理方式变化时可以保持业务层无感。
-  // 拼接得到可供前端直接访问的静态资源 URL
-  const url = buildUploadPublicUrl('products', req.file.filename)
-  res.json({ code: 0, message: 'ok', data: { url } })
-  },
+    // 上传文件先写入临时目录，只有通过真实图片内容校验后才会转入正式商品目录。
+    const finalizedFile = await finalizeUploadedImageFile('products', req.file)
+
+    // 后端对外暴露统一的 uploads 前缀，前端只需保存该相对 URL，
+    // 后续域名、静态资源代理方式变化时可以保持业务层无感。
+    // 拼接得到可供前端直接访问的静态资源 URL
+    const url = buildUploadPublicUrl('products', finalizedFile.fileName)
+    res.json({ code: 0, message: 'ok', data: { url } })
+  }),
 )

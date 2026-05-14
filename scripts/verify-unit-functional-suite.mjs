@@ -1,7 +1,7 @@
 /**
  * 模块说明：scripts/verify-unit-functional-suite.mjs
- * 文件职责：聚合执行 Y-Link 的单元功能测试与关键功能回归脚本，提供统一入口。
- * 实现逻辑：按“前端类型校验 -> 后端类型校验 -> 后端功能验证脚本”顺序执行，任一步失败即中断。
+ * 文件职责：聚合执行 Y-Link 的单元功能测试、静态契约门禁与关键功能回归脚本，提供统一入口。
+ * 实现逻辑：按“前端类型校验 -> 前端静态契约 -> 后端类型校验 -> 后端权限契约 -> 后端功能验证脚本”顺序执行，任一步失败即中断。
  */
 
 import path from 'node:path'
@@ -54,8 +54,23 @@ const main = async () => {
     projectRoot,
   )
 
+  // 低频重库静态导入门禁：
+  // - 避免 html2pdf、图表、扫码等重库重新回流到高频页面首包；
+  // - 同时守住正式出库单、用户中心、系统治理页等关键异步入口。
+  await runStep(
+    '前端低频重库静态导入检查',
+    process.execPath,
+    [path.join(projectRoot, 'scripts', 'verify-frontend-low-frequency-heavy-imports.mjs')],
+    projectRoot,
+  )
+
   // 后端类型校验作为功能脚本执行前的门禁，避免编译层问题掩盖业务问题。
   await runNpmScript('后端类型校验', 'check', backendRoot)
+
+  // 后端路由权限契约门禁：
+  // - 校验匿名挂载边界、权限点声明完整性与角色限制搭配关系；
+  // - 防止系统治理接口被误挂到匿名区，或新增路由时漏接权限中间件。
+  await runNpmScript('后端路由权限契约检查', 'task2:route-contract:verify', backendRoot)
 
   // O2O 关键功能脚本：覆盖预订单核心链路，属于当前项目最关键业务路径之一。
   await runNpmScript('后端 O2O 功能回归', 'o2o:verify', backendRoot)

@@ -11,9 +11,47 @@ server {
     resolver 127.0.0.11 valid=30s ipv6=off;
     set $backend_upstream backend:3001;
 
+    # 文本类前端静态资源开启 gzip，降低首屏与切页二次加载体积。
+    gzip on;
+    gzip_vary on;
+    gzip_proxied any;
+    gzip_min_length 1024;
+    gzip_comp_level 5;
+    gzip_types
+        text/plain
+        text/css
+        text/xml
+        application/json
+        application/javascript
+        application/xml
+        application/xml+rss
+        image/svg+xml;
+
+    # 前端静态托管层统一补基础安全头，避免浏览器做内容嗅探或被外部页面嵌入。
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
+    add_header Cross-Origin-Opener-Policy "same-origin" always;
+    add_header Cross-Origin-Resource-Policy "same-origin" always;
+    add_header Content-Security-Policy "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; connect-src 'self' http: https: ws: wss:;" always;
+
     # 托管前端静态资源目录。
     root /usr/share/nginx/html;
     index index.html;
+
+    # Vite 构建出的 hash 资源可长期缓存，减少重复下载。
+    location ~* \.(?:css|js|mjs|json|map|svg|ico|png|jpe?g|webp|gif|woff2?|ttf|otf|eot)$ {
+        try_files $uri =404;
+        expires 365d;
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+    }
+
+    # 入口 HTML 需要及时拿到最新版本，避免用户长期缓存旧入口引用已失效的 hash 资源。
+    location = /index.html {
+        try_files /index.html =404;
+        add_header Cache-Control "no-store" always;
+    }
 
     # Vue Router history 模式回退：
     # - 优先返回真实静态文件；
@@ -25,7 +63,7 @@ server {
     # API 反向代理：
     # - 默认走同编排服务名 backend:3001；
     # - 使用变量+resolver 做延迟解析，避免容器启动阶段因 DNS 瞬态失败直接退出。
-    location /api/ {
+    location ^~ /api/ {
         proxy_pass http://$backend_upstream/api/;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
@@ -37,7 +75,7 @@ server {
 
     # 商品图片等上传静态资源实际落在后端容器磁盘，
     # 这里显式代理给后端，避免前端容器误把 `/uploads/*` 当成自身静态文件处理。
-    location /uploads/ {
+    location ^~ /uploads/ {
         proxy_pass http://$backend_upstream/uploads/;
         proxy_http_version 1.1;
         proxy_set_header Host $host;

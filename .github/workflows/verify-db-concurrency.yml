@@ -1,0 +1,54 @@
+# 模块说明：GitHub Actions 数据库并发验收流水线
+# 文件职责：在 CI 中复用项目统一入口 `npm run verify:db:concurrency`，自动准备受控 MySQL 临时环境并执行并发校验
+# 维护说明：若后续调整 Node 版本、依赖安装方式或并发验收入口，请同步更新本文件
+
+#
+# 文件说明：GitHub Actions 数据库并发验收工作流。
+# 实现逻辑：
+# 1. 在手动触发、主分支推送或拉取请求时执行；
+# 2. 安装根目录与后端依赖后，直接复用统一命令 `npm run verify:db:concurrency`；
+# 3. MySQL 临时环境由脚本内部自动通过 Docker Compose 准备与清理，避免 CI 额外维护服务编排。
+#
+name: verify-db-concurrency
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-db-concurrency-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+
+      - name: 安装根目录依赖
+        run: npm ci
+
+      - name: 安装后端依赖
+        run: npm --prefix ./backend ci
+
+      - name: 执行数据库并发验收
+        run: npm run verify:db:concurrency

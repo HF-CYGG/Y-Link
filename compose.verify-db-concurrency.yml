@@ -1,0 +1,29 @@
+#
+# 文件说明：数据库并发验收专用 Docker Compose 编排。
+# 文件职责：为 `verify:db:concurrency` 提供受控、可重复创建与销毁的 MySQL 临时环境。
+# 实现逻辑：
+# 1. 仅启动一个 MySQL 8.4 临时容器，不挂载持久卷，确保每次验收都是干净环境；
+# 2. 端口、镜像与 root 密码统一由外部环境变量注入，便于本地与 CI 共用同一份编排；
+# 3. 绑定到 `127.0.0.1`，降低临时验收库暴露到局域网的风险。
+#
+services:
+  mysql:
+    image: ${VERIFY_DB_CONCURRENCY_DOCKER_IMAGE:-mysql:8.4}
+    environment:
+      MYSQL_ROOT_PASSWORD: ${VERIFY_DB_CONCURRENCY_DOCKER_ROOT_PASSWORD:-YLinkVerify123!}
+      MYSQL_DATABASE: mysql
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --skip-name-resolve
+    ports:
+      - "127.0.0.1:${VERIFY_DB_CONCURRENCY_DOCKER_PORT:-3406}:3306"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    restart: "no"

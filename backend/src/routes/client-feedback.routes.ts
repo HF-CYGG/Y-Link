@@ -40,7 +40,7 @@ import {
   CLIENT_FEEDBACK_SUBJECT_MAX_LENGTH,
 } from '../services/client-feedback.service.js'
 import { BizError } from '../utils/errors.js'
-import { buildUploadPublicUrl, createCategorizedImageUpload } from '../utils/upload-storage.js'
+import { buildUploadPublicUrl, createCategorizedImageUpload, finalizeUploadedImageFile } from '../utils/upload-storage.js'
 
 /**
  * 客户端会话列表分页上限：
@@ -136,15 +136,17 @@ authenticatedClientFeedbackRouter.post(
     if (!req.file) {
       throw new BizError('文件上传失败', 400)
     }
+    // 反馈附件同样需要先经过真实图片内容校验，再生成可回填数据库的正式 URL。
+    const finalizedFile = await finalizeUploadedImageFile('client-feedback', req.file)
     res.json({
       code: 0,
       message: 'ok',
       data: {
         attachment: {
           name: req.file.originalname,
-          url: buildUploadPublicUrl('client-feedback', req.file.filename),
-          mimeType: req.file.mimetype || null,
-          size: typeof req.file.size === 'number' ? req.file.size : null,
+          url: buildUploadPublicUrl('client-feedback', finalizedFile.fileName),
+          mimeType: finalizedFile.mimeType || null,
+          size: typeof finalizedFile.size === 'number' ? finalizedFile.size : null,
         },
       },
     })

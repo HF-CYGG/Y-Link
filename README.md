@@ -76,6 +76,7 @@ f:\Y-Link
 ├─ compose.yml                  本地 Docker 编排
 ├─ compose.cloud.yml            云端 / 1Panel 编排
 ├─ compose.mysql.yml            外置 MySQL 编排
+├─ compose.verify-db-concurrency.yml  数据库并发验收专用 MySQL 临时环境编排
 ├─ Dockerfile                   前端镜像构建文件
 ├─ Dockerfile.onebox            前后端一体化镜像构建文件
 ├─ start-local-dev.ps1          本地联调启动脚本
@@ -102,6 +103,7 @@ f:\Y-Link
 | 本地联调停止 | `npm run local:dev:stop` | 停止本地联调 |
 | 前端构建 | `npm run build` | 执行前端构建与打包前校验 |
 | 单元功能验证 | `npm run verify:unit:functional` | 执行前后端类型与关键功能验证 |
+| 数据库并发验收 | `npm run verify:db:concurrency` | 自动准备受控 MySQL 临时环境并执行并发验证 |
 | 核心性能回归 | `npm run verify:performance` | 执行页面预算、核心路径与企业性能套件 |
 | 全量性能验证 | `npm run verify:performance:all` | 执行前后端联合性能验证 |
 | 全量质量总控 | `npm run verify:all` | 串联单元功能 + 全量性能，失败即停并输出报告 |
@@ -463,6 +465,18 @@ cd backend
 npm run o2o:verify
 ```
 
+数据库并发验收（默认自动准备 Docker MySQL 临时环境）：
+
+```bash
+npm run verify:db:concurrency
+```
+
+说明：
+- 默认优先使用 `compose.verify-db-concurrency.yml` 拉起受控 MySQL 8.4 临时环境，执行结束后自动销毁。
+- 若 CI 或本机已显式提供 `VERIFY_DB_CONCURRENCY_MYSQL_*`，脚本会直接复用该连接并跳过 Docker 自动准备。
+- 若当前环境无法使用 Docker，但你已经准备了本地 MySQL，可设置 `VERIFY_DB_CONCURRENCY_AUTO_PREPARE=off` 后复用 `DB_*` 连接参数。
+- 默认映射端口为 `3406`；若被占用，可改用 `VERIFY_DB_CONCURRENCY_DOCKER_PORT`。
+
 性能与核心路径回归：
 
 ```bash
@@ -495,6 +509,7 @@ npm run verify:performance:client-concurrency
 
 ### 当前质量脚本体系
 - `verify:unit:functional`：前端类型、后端类型、O2O 关键功能回归。
+- `verify:db:concurrency`：自动准备受控 MySQL 临时环境并校验数据库并发写入场景。
 - `verify:performance:budget`：页面分包预算与体积校验。
 - `verify:performance:core-paths`：核心路径自动化回归。
 - `verify:performance:client-concurrency`：客户端并发与稳态断言。
