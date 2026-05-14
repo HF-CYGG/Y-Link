@@ -59,6 +59,7 @@ const clientOrderStorePath = path.resolve(projectRoot, 'src', 'store', 'modules'
 const clientOrderSummaryPath = path.resolve(projectRoot, 'src', 'utils', 'client-order-summary.ts')
 const clientConcurrencyReportPath = path.resolve(runtimeRoot, 'client-concurrency-performance.report.json')
 const performanceBudgetReportPath = path.resolve(runtimeRoot, 'enterprise-performance-budget-report.json')
+const dualBudgetReportPath = path.resolve(runtimeRoot, 'enterprise-performance-dual-budget-report.json')
 
 const scenarioThresholds = {
   registrationFlowP95MsMax: 1200,
@@ -530,10 +531,20 @@ const buildSupplementaryReportSummary = () => {
     checks?: Array<{ title: string; status: string }>
   }>(clientConcurrencyReportPath)
   const performanceBudgetReport = readOptionalJson<{
+    status?: string
     totalAssetsKB: number
-    performanceBudget: { totalAssetsMaxKB: number }
+    criticalAssetsKB?: number
+    performanceBudget: { totalAssetsMaxKB?: number; criticalAssetsMaxKB?: number }
     routeChunkReport?: string[]
   }>(performanceBudgetReportPath)
+  const dualBudgetReport = readOptionalJson<{
+    status: string
+    dualBudget?: {
+      runtimeBudget?: {
+        status?: string
+      }
+    }
+  }>(dualBudgetReportPath)
 
   return {
     clientConcurrency: clientConcurrencyReport
@@ -545,9 +556,18 @@ const buildSupplementaryReportSummary = () => {
       : null,
     performanceBudget: performanceBudgetReport
       ? {
+          status: performanceBudgetReport.status ?? 'unknown',
           totalAssetsKB: performanceBudgetReport.totalAssetsKB,
-          totalAssetsMaxKB: performanceBudgetReport.performanceBudget.totalAssetsMaxKB,
+          totalAssetsMaxKB: performanceBudgetReport.performanceBudget.totalAssetsMaxKB ?? null,
+          criticalAssetsKB: performanceBudgetReport.criticalAssetsKB ?? null,
+          criticalAssetsMaxKB: performanceBudgetReport.performanceBudget.criticalAssetsMaxKB ?? null,
           routeChunkReport: performanceBudgetReport.routeChunkReport ?? [],
+        }
+      : null,
+    dualBudget: dualBudgetReport
+      ? {
+          status: dualBudgetReport.status,
+          runtimeBudgetStatus: dualBudgetReport.dualBudget?.runtimeBudget?.status ?? null,
         }
       : null,
   }

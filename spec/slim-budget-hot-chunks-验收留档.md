@@ -4,13 +4,13 @@
 
 # 实现逻辑
 - 静态实现依据：`vite.config.ts`、`src/main.ts`、`src/App.vue`、`src/views/order-list/OrderListView.vue`、`src/views/order-list/components/OrderVoucherWorkbenchDialog.vue`、`src/views/system/UserCenterView.vue`、`src/views/system/user-center-performance.ts`、`src/utils/pdf/export-voucher-pdf.ts`。
-- 验证依据：`scripts/verify-enterprise-performance-suite.mjs`、`scripts/verify-enterprise-page-performance.mjs`、`scripts/verify-enterprise-core-paths.mjs`、`.local-dev/enterprise-performance-budget-report.json`、`.local-dev/task6-core-path-2026-05-01T12-19-10-595Z.report.json`。
+- 验证依据：`scripts/verify-enterprise-performance-suite.mjs`、`scripts/verify-enterprise-page-performance.mjs`、`scripts/verify-enterprise-core-paths.mjs`、`scripts/verify-enterprise-dual-budget-report.mjs`、`.local-dev/enterprise-performance-budget-report.json`、`.local-dev/enterprise-core-path-runtime-budget-report.json`、`.local-dev/enterprise-performance-dual-budget-report.json`、`.local-dev/task6-core-path-2026-05-01T12-19-10-595Z.report.json`。
 - 执行方式：以项目根目录 `f:\Y-Link` 为工作目录，执行真实前端构建、预算校验与核心路径回归，不依赖 mock 结果。
 
 # 验收范围
 - 构建预算：总产物、`vendor`、`ui-kit`、高频路由分包。
 - 热点来源治理：低频重库、按需组件、正式出库单工作台、用户中心低频页签。
-- 脚本口径稳定：预算报告输出、核心路径报告输出、静态断言与动态链路回归。
+- 脚本口径稳定：构建预算报告、运行时预算报告、双预算汇总报告、静态断言与动态链路回归。
 
 # 本轮已完成瘦身动作
 ## 1. 共享大包已从“单桶堆积”改为“热点专包 + 兜底 vendor”
@@ -84,7 +84,13 @@
   - `ui-kit = 617.82`
   - `OrderListView = 24.81`
 
-## 3. 核心路径自动化回归
+## 3. 运行时与双预算报告
+- 管理端运行时预算报告：`.local-dev/enterprise-core-path-runtime-budget-report.json`
+- 双预算汇总报告：`.local-dev/enterprise-performance-dual-budget-report.json`
+- 关键结论：
+  - 构建预算与运行时预算已拆分治理，避免只看包体不看真实链路耗时
+  - `verify:performance` 结束后可直接读取统一双预算报告做留档
+## 4. 核心路径自动化回归
 - 报告路径：`.local-dev/task6-core-path-2026-05-01T12-19-10-595Z.report.json`
 - 关键结论：
   - 已恢复完整 `7` 步验证

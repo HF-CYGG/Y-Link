@@ -11,7 +11,6 @@
  */
 
 import { request } from '@/api/http'
-import { getPersistedAuthToken } from '@/utils/auth-storage'
 import { getPersistedClientAuthToken } from '@/utils/client-auth-storage'
 import { compressImageForUpload } from '@/utils/image-upload'
 
@@ -1027,13 +1026,15 @@ const resolveApiOrigin = () => {
   return globalThis.window?.location.origin ?? ''
 }
 
-const buildStreamUrl = (path: string, token: string) => {
+const buildStreamUrl = (path: string, token?: string) => {
   const apiBaseUrl = buildApiBaseUrl()
   const base = /^https?:\/\//.test(apiBaseUrl)
     ? apiBaseUrl
     : new URL(apiBaseUrl, globalThis.window.location.origin).toString()
   const url = new URL(path.replace(/^\//, ''), `${base.replace(/\/$/, '')}/`)
-  url.searchParams.set('access_token', token)
+  if (token) {
+    url.searchParams.set('access_token', token)
+  }
   return url.toString()
 }
 
@@ -1338,12 +1339,23 @@ export const openFeedbackRealtimeStream = (
     return null
   }
 
-  const token = scope === 'client' ? getPersistedClientAuthToken() : getPersistedAuthToken()
-  if (!token) {
+  const token = scope === 'client' ? getPersistedClientAuthToken() : null
+  if (scope === 'client' && !token) {
     return null
   }
 
-  const eventSource = new EventSource(buildStreamUrl(scope === 'client' ? '/client-feedback/stream' : '/customer-service/stream', token))
+  /**
+   * 实时流鉴权策略：
+   * - 客户端仍沿用现有 `access_token` 查询参数，避免牵连客户端登录体系；
+   * - 管理端改为依赖浏览器自动附带的安全 Cookie，会随 EventSource 一起发送；
+   * - `withCredentials` 便于未来切到独立 API 域名时继续携带 Cookie。
+   */
+  const eventSource = new EventSource(
+    buildStreamUrl(scope === 'client' ? '/client-feedback/stream' : '/customer-service/stream', token ?? undefined),
+    {
+      withCredentials: scope === 'service',
+    },
+  )
 
   eventSource.addEventListener('connected', (event) => {
     try {

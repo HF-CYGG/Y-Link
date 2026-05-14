@@ -104,7 +104,8 @@ f:\Y-Link
 | 前端构建 | `npm run build` | 执行前端构建与打包前校验 |
 | 单元功能验证 | `npm run verify:unit:functional` | 执行前后端类型与关键功能验证 |
 | 数据库并发验收 | `npm run verify:db:concurrency` | 自动准备受控 MySQL 临时环境并执行并发验证 |
-| 核心性能回归 | `npm run verify:performance` | 执行页面预算、核心路径与企业性能套件 |
+| 核心性能回归 | `npm run verify:performance` | 执行构建预算、运行时预算与企业性能双预算套件 |
+| 双预算汇总 | `npm run verify:performance:dual-budget` | 汇总构建预算、管理端运行时预算与客户端性能报告 |
 | 全量性能验证 | `npm run verify:performance:all` | 执行前后端联合性能验证 |
 | 全量质量总控 | `npm run verify:all` | 串联单元功能 + 全量性能，失败即停并输出报告 |
 | 云端编排启动 | `npm run cloud:up` | 使用云端 compose 拉起编排 |
@@ -496,7 +497,8 @@ npm run verify:performance:client-concurrency
 ```
 
 说明：
-- `npm run verify:performance`：偏重页面预算、核心路径与企业性能回归。
+- `npm run verify:performance`：偏重构建预算、运行时预算与企业性能双预算回归。
+- `npm run verify:performance:dual-budget`：读取各子报告并生成统一双预算报告。
 - `npm run verify:performance:all`：在前端性能基础上继续联动后端性能基线验证。
 - `npm run verify:all`：质量总控入口，串联单元功能验证与全量性能验证，适合提交前使用。
 - `npm run verify:release:functional`：发布前功能回归入口，串联前端构建、后端构建、后端全功能 HTTP 回归与 onebox 冒烟验证。
@@ -513,6 +515,7 @@ npm run verify:performance:client-concurrency
 - `verify:performance:budget`：页面分包预算与体积校验。
 - `verify:performance:core-paths`：核心路径自动化回归。
 - `verify:performance:client-concurrency`：客户端并发与稳态断言。
+- `verify:performance:dual-budget`：生成统一性能双预算报告，汇总构建预算与运行时预算。
 - `verify:quality:all` / `verify:all`：总控入口，失败即停并写入 JSON 报告。
 - `verify:release:functional`：发布前功能回归入口，覆盖管理端、客户端、上传与 onebox 关键冒烟。
 - `verify:release`：发布前总控入口，在功能回归基础上叠加强制性能验证。
@@ -527,6 +530,9 @@ npm run verify:performance:client-concurrency
 
 ### 报告位置
 - 并发与稳态报告：`.local-dev/client-concurrency-performance.report.json`
+- 构建预算报告：`.local-dev/enterprise-performance-budget-report.json`
+- 管理端运行时预算报告：`.local-dev/enterprise-core-path-runtime-budget-report.json`
+- 双预算汇总报告：`.local-dev/enterprise-performance-dual-budget-report.json`
 - 质量总控报告：`.local-dev/verify-quality-full-suite.report.json`
 - 发布前功能回归报告：`.local-dev/verify-release-functional-suite.report.json`
 - 发布前聚合报告：`.local-dev/verify-release-full-suite.report.json`

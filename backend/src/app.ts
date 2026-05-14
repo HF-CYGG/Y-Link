@@ -14,7 +14,7 @@ import express from 'express'
 import path from 'node:path'
 import fs from 'node:fs'
 import { ZodError } from 'zod'
-import { requireAuth } from './middleware/auth.middleware.js'
+import { requireAdminCsrf, requireAuth } from './middleware/auth.middleware.js'
 import { errorHandler, notFoundHandler } from './middleware/error-handler.js'
 import { authRouter } from './routes/auth.routes.js'
 import { auditLogRouter } from './routes/audit-log.routes.js'
@@ -151,8 +151,8 @@ export function createApp() {
   app.use('/api/client-feedback', clientFeedbackRouter)
   app.use('/api/o2o', o2oRouter)
 
-  // 业务主系统统一要求先登录再访问，避免接口侧出现“匿名调用”漏洞。
-  app.use('/api', requireAuth)
+  // 业务主系统统一要求先登录再访问，且管理端写操作必须通过 CSRF 校验。
+  app.use('/api', requireAuth, requireAdminCsrf)
 
   app.use('/api/upload', uploadRouter)
 

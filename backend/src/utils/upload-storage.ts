@@ -1,13 +1,15 @@
 /**
  * 模块说明：backend/src/utils/upload-storage.ts
- * 文件职责：统一维护图片上传的分目录落盘、白名单校验与静态访问 URL 生成规则。
+ * 文件职责：统一维护图片上传的分目录落盘、白名单校验、尺寸上限、服务端重编码与静态访问 URL 生成规则。
  * 实现逻辑：
  * - 所有图片上传都按业务分类写入 `uploads/<category>` 子目录，避免不同模块文件混放；
- * - 上传前统一校验图片类型与体积，减少路由层重复定义同一套安全边界；
+ * - 上传前统一校验图片类型、体积与真实文件头，减少路由层重复定义同一套安全边界；
+ * - 文件转正前使用服务端图像解码能力校验像素尺寸、识别异常图片，并重编码为干净输出，降低损坏文件与畸形元数据风险；
  * - 返回值继续使用 `/uploads/...` 相对 URL，保持前端访问方式不变。
  * 维护说明：
  * - 若后续新增其他业务上传分类，请优先在本文件扩展 `UploadCategory`；
- * - 若要扩展到文档或视频上传，请拆分图片白名单与其他文件类型策略，避免互相污染。
+ * - 若要扩展到文档或视频上传，请拆分图片白名单与其他文件类型策略，避免互相污染；
+ * - 调整尺寸与重编码参数后，需同步执行上传专项验证脚本，确认旧路径兼容与异常图片拦截未退化。
  */
 
 import fs from 'node:fs'
@@ -15,11 +17,15 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import multer from 'multer'
 import type { Express } from 'express'
+import sharp from 'sharp'
 import { BizError } from './errors.js'
 
 export type UploadCategory = 'products' | 'client-feedback'
 
 export const IMAGE_UPLOAD_MAX_FILE_SIZE = 10 * 1024 * 1024
+export const IMAGE_UPLOAD_MAX_WIDTH = 4096
+export const IMAGE_UPLOAD_MAX_HEIGHT = 4096
+export const IMAGE_UPLOAD_MAX_PIXELS = IMAGE_UPLOAD_MAX_WIDTH * IMAGE_UPLOAD_MAX_HEIGHT
 
 const IMAGE_UPLOAD_ALLOWED_MIMES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/gif'])
 const IMAGE_UPLOAD_ALLOWED_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif'])
@@ -36,6 +42,20 @@ const IMAGE_MIME_TO_EXTENSIONS: Record<DetectedImageContent['mimeType'], Set<Det
   'image/png': new Set(['.png']),
   'image/webp': new Set(['.webp']),
   'image/gif': new Set(['.gif']),
+}
+
+const IMAGE_MIME_TO_FINAL_EXTENSION: Record<DetectedImageContent['mimeType'], DetectedImageContent['extension']> = {
+  'image/jpeg': '.jpg',
+  'image/png': '.png',
+  'image/webp': '.webp',
+  'image/gif': '.gif',
+}
+
+const SHARP_ANIMATED_MIME_TYPES = new Set<DetectedImageContent['mimeType']>(['image/webp', 'image/gif'])
+
+export interface ValidatedImageDimensions {
+  width: number
+  height: number
 }
 
 /**
@@ -147,11 +167,109 @@ const cleanupUploadFileIfExists = async (filePath: string | undefined) => {
   await fs.promises.unlink(filePath)
 }
 
+const createSharpInput = (buffer: Buffer, mimeType: DetectedImageContent['mimeType']) => {
+  return sharp(buffer, {
+    animated: SHARP_ANIMATED_MIME_TYPES.has(mimeType),
+    failOn: 'error',
+    limitInputPixels: IMAGE_UPLOAD_MAX_PIXELS,
+  })
+}
+
+/**
+ * 使用服务端图像解码能力做第二层图片真实性校验：
+ * - 能识别“文件头看起来像图片，但实际像素流损坏”的异常文件；
+ * - 同时统一读取宽高，避免只靠浏览器或前端脚本约束尺寸；
+ * - 对超大像素图直接拒绝，降低图像炸弹与异常内存占用风险。
+ */
+const validateImageDimensions = async (
+  buffer: Buffer,
+  detectedContent: DetectedImageContent,
+): Promise<ValidatedImageDimensions> => {
+  let metadata: sharp.Metadata
+  try {
+    metadata = await createSharpInput(buffer, detectedContent.mimeType).metadata()
+  } catch {
+    throw new BizError('上传图片已损坏或内容异常，请重新选择图片', 400)
+  }
+
+  const width = Number(metadata.width)
+  const height = Number(metadata.height)
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    throw new BizError('无法识别图片尺寸，请重新选择图片', 400)
+  }
+
+  if (width > IMAGE_UPLOAD_MAX_WIDTH || height > IMAGE_UPLOAD_MAX_HEIGHT || width * height > IMAGE_UPLOAD_MAX_PIXELS) {
+    throw new BizError(
+      `图片尺寸过大，宽高不能超过 ${IMAGE_UPLOAD_MAX_WIDTH}x${IMAGE_UPLOAD_MAX_HEIGHT} 像素`,
+      400,
+    )
+  }
+
+  return {
+    width,
+    height,
+  }
+}
+
+/**
+ * 所有通过校验的图片都会在服务端重新编码：
+ * - 去掉来源不明的冗余元数据，统一输出格式参数；
+ * - 通过重新解码/编码再次确认图片内容可被正常处理；
+ * - 对 JPEG 自动执行方向纠正，减少手机拍照图横竖颠倒问题。
+ */
+const reencodeValidatedImage = async (
+  buffer: Buffer,
+  detectedContent: DetectedImageContent,
+): Promise<Buffer> => {
+  const pipeline = createSharpInput(buffer, detectedContent.mimeType).rotate()
+
+  try {
+    if (detectedContent.mimeType === 'image/jpeg') {
+      return await pipeline
+        .jpeg({
+          quality: 86,
+          mozjpeg: true,
+        })
+        .toBuffer()
+    }
+
+    if (detectedContent.mimeType === 'image/png') {
+      return await pipeline
+        .png({
+          compressionLevel: 9,
+          adaptiveFiltering: true,
+          palette: false,
+        })
+        .toBuffer()
+    }
+
+    if (detectedContent.mimeType === 'image/webp') {
+      return await pipeline
+        .webp({
+          quality: 86,
+          alphaQuality: 90,
+          effort: 4,
+        })
+        .toBuffer()
+    }
+
+    return await pipeline
+      .gif({
+        effort: 7,
+        reuse: true,
+      })
+      .toBuffer()
+  } catch {
+    throw new BizError('上传图片已损坏或内容异常，请重新选择图片', 400)
+  }
+}
+
 /**
  * 将临时上传文件校验后转正到业务分类目录：
  * - 仅放行能通过文件头识别的真实图片；
  * - 若扩展名或浏览器声明类型与真实内容不一致，则立即删除临时文件并拒绝；
- * - 最终文件名仍使用 UUID，避免外部输入参与正式文件名。
+ * - 若图片已损坏、不可正常解码或像素尺寸超标，则立即删除临时文件并拒绝；
+ * - 通过校验后统一做服务端重编码，再以 UUID 文件名写入正式目录，避免外部输入参与正式文件名。
  */
 export const finalizeUploadedImageFile = async (
   category: UploadCategory,
@@ -175,16 +293,19 @@ export const finalizeUploadedImageFile = async (
       throw new BizError('上传文件扩展名或类型声明与真实图片内容不一致，请重新选择图片', 400)
     }
 
-    const finalExtension =
-      detectedContent.mimeType === 'image/jpeg' && originalExt === '.jpeg' ? '.jpeg' : detectedContent.extension
+    await validateImageDimensions(fileBuffer, detectedContent)
+    const reencodedBuffer = await reencodeValidatedImage(fileBuffer, detectedContent)
+
+    const finalExtension = IMAGE_MIME_TO_FINAL_EXTENSION[detectedContent.mimeType]
     const finalFileName = `${randomUUID()}${finalExtension}`
     const finalFilePath = path.resolve(ensureUploadCategoryDir(category), finalFileName)
-    await fs.promises.rename(tempFilePath, finalFilePath)
+    await fs.promises.writeFile(finalFilePath, reencodedBuffer)
+    await cleanupUploadFileIfExists(tempFilePath)
 
     return {
       fileName: finalFileName,
       mimeType: detectedContent.mimeType,
-      size: file.size,
+      size: reencodedBuffer.byteLength,
     }
   } catch (error) {
     await cleanupUploadFileIfExists(tempFilePath)

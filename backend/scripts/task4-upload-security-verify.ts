@@ -1,11 +1,12 @@
 /**
  * 文件说明：Task4 上传内容校验与静态资源安全策略专项验证脚本。
- * 文件职责：校验本次上传安全治理的关键回归点，覆盖真实图片内容识别、旧路径兼容映射、后端上传静态头配置以及 Nginx 前端静态托管策略。
+ * 文件职责：校验本次上传安全治理的关键回归点，覆盖真实图片内容识别、尺寸上限、服务端重编码、异常图片拦截、旧路径兼容映射、后端上传静态头配置以及 Nginx 前端静态托管策略。
  * 实现逻辑：
  * 1. 直接调用上传工具函数，验证 PNG/JPEG/GIF/WEBP 文件头可被识别，伪装文本内容会被拒绝；
  * 2. 验证“扩展名 + 浏览器声明类型”必须与真实图片内容一致，避免仅改后缀名绕过；
- * 3. 验证旧单层 `/uploads/<file>` 路径仍会被归一化到分类目录，不破坏历史数据库记录访问；
- * 4. 通过静态源码断言，确认后端 `/uploads` 已补长期缓存与资源级安全头，Nginx 已补 gzip、缓存与 `/uploads` 代理。
+ * 3. 验证服务端会拒绝超尺寸图片、拦截截断损坏图片，并将有效图片重编码后再落盘；
+ * 4. 验证旧单层 `/uploads/<file>` 路径仍会被归一化到分类目录，不破坏历史数据库记录访问；
+ * 5. 通过静态源码断言，确认后端 `/uploads` 已补长期缓存与资源级安全头，Nginx 已补 gzip、缓存与 `/uploads` 代理。
  */
 
 import assert from 'node:assert/strict'
@@ -14,10 +15,13 @@ import http from 'node:http'
 import path from 'node:path'
 import type { AddressInfo } from 'node:net'
 import { fileURLToPath } from 'node:url'
+import sharp from 'sharp'
 import { createApp } from '../src/app.js'
 import {
   detectImageContentFromBuffer,
   finalizeUploadedImageFile,
+  IMAGE_UPLOAD_MAX_HEIGHT,
+  IMAGE_UPLOAD_MAX_WIDTH,
   isDetectedImageCompatibleWithMetadata,
   normalizeLegacyUploadUrl,
 } from '../src/utils/upload-storage.js'
@@ -49,39 +53,87 @@ async function cleanupFileIfExists(filePath: string) {
   await fs.promises.unlink(filePath)
 }
 
+async function createSolidImageBuffer(options: {
+  width: number
+  height: number
+  format: 'jpeg' | 'png'
+  withOrientationMetadata?: boolean
+}) {
+  const baseImage = sharp({
+    create: {
+      width: options.width,
+      height: options.height,
+      channels: 3,
+      background: {
+        r: 64,
+        g: 128,
+        b: 192,
+      },
+    },
+  })
+
+  const normalizedImage = options.withOrientationMetadata ? baseImage.withMetadata({ orientation: 6 }) : baseImage
+  if (options.format === 'jpeg') {
+    return normalizedImage.jpeg({ quality: 92 }).toBuffer()
+  }
+  return normalizedImage.png().toBuffer()
+}
+
 /**
  * 通过转正流程动态验证：
- * - 真 PNG 会被转移到正式业务目录；
- * - 伪装成 PNG 的文本内容会被拒绝，且临时文件会被清理。
+ * - 真 JPEG 会被重编码后写入正式业务目录；
+ * - 截断损坏的 PNG 即使文件头正确，也会因无法正常解码被拒绝；
+ * - 超尺寸图片会被拒绝，且所有失败场景都会清理临时文件。
  */
 async function verifyFinalizeUploadFlow() {
   await fs.promises.mkdir(uploadTempDir, { recursive: true })
   await fs.promises.mkdir(productUploadDir, { recursive: true })
 
-  const validTempFilePath = path.resolve(uploadTempDir, `task4-valid-${Date.now()}.png`)
+  const validTempFilePath = path.resolve(uploadTempDir, `task4-valid-${Date.now()}.jpg`)
   const invalidTempFilePath = path.resolve(uploadTempDir, `task4-invalid-${Date.now()}.png`)
+  const oversizeTempFilePath = path.resolve(uploadTempDir, `task4-oversize-${Date.now()}.png`)
 
-  // 这里使用最小 PNG 头即可触发真实内容识别；验证目标是“识别与转存流程”而非图像解码能力。
-  await fs.promises.writeFile(
-    validTempFilePath,
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]),
-  )
-  await fs.promises.writeFile(invalidTempFilePath, Buffer.from('not-a-real-png', 'utf8'))
+  const validJpegBuffer = await createSolidImageBuffer({
+    width: 80,
+    height: 40,
+    format: 'jpeg',
+    withOrientationMetadata: true,
+  })
+  const validPngBuffer = await createSolidImageBuffer({
+    width: 48,
+    height: 48,
+    format: 'png',
+  })
+  const oversizePngBuffer = await createSolidImageBuffer({
+    width: IMAGE_UPLOAD_MAX_WIDTH + 1,
+    height: 16,
+    format: 'png',
+  })
+
+  await fs.promises.writeFile(validTempFilePath, validJpegBuffer)
+  await fs.promises.writeFile(invalidTempFilePath, validPngBuffer.subarray(0, 24))
+  await fs.promises.writeFile(oversizeTempFilePath, oversizePngBuffer)
 
   let finalizedFilePath: string | null = null
   try {
     const finalizedFile = await finalizeUploadedImageFile('products', {
       path: validTempFilePath,
-      originalname: 'demo.png',
-      mimetype: 'image/png',
-      size: 10,
+      originalname: 'demo.jpg',
+      mimetype: 'image/jpeg',
+      size: validJpegBuffer.byteLength,
     } as any)
     finalizedFilePath = path.resolve(productUploadDir, finalizedFile.fileName)
+    const finalizedBuffer = await fs.promises.readFile(finalizedFilePath)
+    const finalizedMetadata = await sharp(finalizedBuffer).metadata()
 
-    assert.equal(finalizedFile.mimeType, 'image/png')
-    assert.match(finalizedFile.fileName, /\.png$/)
+    assert.equal(finalizedFile.mimeType, 'image/jpeg')
+    assert.match(finalizedFile.fileName, /\.jpg$/)
     assert.equal(fs.existsSync(finalizedFilePath), true)
     assert.equal(fs.existsSync(validTempFilePath), false)
+    assert.notDeepEqual(finalizedBuffer, validJpegBuffer)
+    assert.equal(finalizedMetadata.orientation, undefined)
+    assert.equal(finalizedMetadata.width, 40)
+    assert.equal(finalizedMetadata.height, 80)
 
     await assert.rejects(
       () =>
@@ -89,18 +141,31 @@ async function verifyFinalizeUploadFlow() {
           path: invalidTempFilePath,
           originalname: 'fake.png',
           mimetype: 'image/png',
-          size: 14,
+          size: 24,
         } as any),
-      /不是受支持的真实图片内容/,
+      /已损坏或内容异常/,
     )
     assert.equal(fs.existsSync(invalidTempFilePath), false)
-    pass('上传文件会先校验真实内容后再转正，伪装文件会被拒绝并清理临时文件')
+
+    await assert.rejects(
+      () =>
+        finalizeUploadedImageFile('products', {
+          path: oversizeTempFilePath,
+          originalname: 'oversize.png',
+          mimetype: 'image/png',
+          size: oversizePngBuffer.byteLength,
+        } as any),
+      new RegExp(`宽高不能超过 ${IMAGE_UPLOAD_MAX_WIDTH}x${IMAGE_UPLOAD_MAX_HEIGHT} 像素`),
+    )
+    assert.equal(fs.existsSync(oversizeTempFilePath), false)
+    pass('上传文件会先校验尺寸与异常内容，再重编码转正；损坏图与超尺寸图都会被拒绝并清理临时文件')
   } finally {
     if (finalizedFilePath) {
       await cleanupFileIfExists(finalizedFilePath)
     }
     await cleanupFileIfExists(validTempFilePath)
     await cleanupFileIfExists(invalidTempFilePath)
+    await cleanupFileIfExists(oversizeTempFilePath)
   }
 }
 
@@ -158,10 +223,13 @@ async function verifyBackendUploadStaticRuntime() {
   const legacyCompatibleFileName = `task4-legacy-${Date.now()}.png`
   const categorizedFilePath = path.resolve(productUploadDir, legacyCompatibleFileName)
 
-  // 运行时只依赖静态文件存在即可，不需要完整图片像素数据；最小 PNG 头足以让静态响应返回正确 MIME。
   await fs.promises.writeFile(
     categorizedFilePath,
-    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]),
+    await createSolidImageBuffer({
+      width: 12,
+      height: 12,
+      format: 'png',
+    }),
   )
 
   const app = createApp()

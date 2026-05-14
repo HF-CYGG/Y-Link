@@ -7,13 +7,15 @@
 # ------------------------------
 # 文件说明：Y-Link 单镜像 onebox 构建文件。
 # 实现逻辑：
-# 1. 先分别构建前端静态资源与后端 TypeScript 产物；
-# 2. 再把前端、后端、Nginx 与入口脚本组装进同一运行镜像；
-# 3. 容器启动后由 `entrypoint.sh` 同时拉起 Node 后端与 Nginx 反向代理。
+# 1. 先分别复制根目录与 backend 的 `.npmrc`，让前后端构建都走官方 npm 源；
+# 2. 再分别构建前端静态资源与后端 TypeScript 产物；
+# 3. 最后把前端、后端、Nginx 与入口脚本组装进同一运行镜像；
+# 4. 容器启动后由 `entrypoint.sh` 同时拉起 Node 后端与 Nginx 反向代理。
 # ------------------------------
 FROM --platform=$BUILDPLATFORM node:20-bookworm-slim AS frontend-build
 WORKDIR /app
 COPY package*.json ./
+COPY .npmrc ./
 RUN npm ci
 COPY index.html ./
 COPY public ./public
@@ -33,6 +35,7 @@ RUN npm run build
 FROM node:20-bookworm-slim AS backend-build
 WORKDIR /backend
 COPY backend/package*.json ./
+COPY backend/.npmrc ./.npmrc
 RUN npm ci
 COPY backend/tsconfig.json ./
 COPY backend/src ./src
@@ -44,6 +47,7 @@ RUN npm run build
 FROM node:20-bookworm-slim AS backend-prod-deps
 WORKDIR /backend
 COPY backend/package*.json ./
+COPY backend/.npmrc ./.npmrc
 RUN npm ci --omit=dev
 
 # ------------------------------

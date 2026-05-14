@@ -375,6 +375,8 @@ export class AuthService {
       permissions: resolvePermissionsByRole(user.role),
       status: user.status,
       sessionToken: session.sessionToken,
+      // 认证来源由中间件根据“本次请求从 Cookie 还是 Bearer 进入”最终覆写。
+      authSource: 'bearer',
     }
   }
 

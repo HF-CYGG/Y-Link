@@ -12,7 +12,8 @@ import { resolveTsxCliPath, runCommand } from './process-runner-utils.mjs'
  * 企业页面性能统一验证入口：
  * - 先构建前端，确保产物级预算检查有最新输入；
  * - 再执行构建预算校验；
- * - 最后执行核心路径回归脚本，形成“预算 + 核心链路”的完整闭环。
+ * - 随后执行管理端核心路径、客户端并发与客户端五场景回归；
+ * - 最终汇总为“构建预算 + 运行时预算”的双预算报告。
  */
 
 const __filename = fileURLToPath(import.meta.url)
@@ -46,14 +47,16 @@ const runStep = async (title, command, args, cwd = projectRoot) => {
 const main = async () => {
   // 显式使用当前 Node 进程执行各个脚本，避免 shell=true 在 PowerShell 5 / 受限终端中
   // 因 cmd、COMSPEC 或 PATH 缺失而导致“命令未真正启动就直接退出”。
-  // 执行顺序刻意固定为“构建 -> 预算 -> 核心路径”：
+  // 执行顺序刻意固定为“构建 -> 构建预算 -> 运行时预算链路 -> 双预算汇总”：
   // - 预算校验依赖最新产物；
-  // - 核心路径回归应在预算通过后再执行，避免把明显超预算产物继续带入后续验收。
+  // - 管理端与客户端运行时报告都依赖前序脚本成功落盘；
+  // - 双预算汇总必须最后执行，才能拿到完整的验收上下文。
   await runStep('前端构建', process.execPath, [path.join(projectRoot, 'scripts', 'run-frontend-build.mjs')])
   await runStep('构建预算校验', process.execPath, [path.join(projectRoot, 'scripts', 'verify-enterprise-page-performance.mjs')])
-  await runStep('核心路径回归校验', process.execPath, [path.join(projectRoot, 'scripts', 'verify-enterprise-core-paths.mjs')])
+  await runStep('管理端核心路径与运行时预算校验', process.execPath, [path.join(projectRoot, 'scripts', 'verify-enterprise-core-paths.mjs')])
   await runStep('客户端并发与性能基线校验', process.execPath, [path.join(projectRoot, 'scripts', 'verify-client-concurrency-performance.mjs')])
   await runStep('客户端五场景性能与订单编辑回归校验', process.execPath, [tsxCliPath, path.join(backendRoot, 'scripts', 'task6-client-core-flow-verify.ts')], backendRoot)
+  await runStep('性能双预算汇总校验', process.execPath, [path.join(projectRoot, 'scripts', 'verify-enterprise-dual-budget-report.mjs')])
 
   log('\n[suite] 企业页面性能统一验证入口执行完成')
 }

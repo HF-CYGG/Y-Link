@@ -7,7 +7,7 @@
 import axios, { type AxiosRequestConfig, type AxiosResponse, type InternalAxiosRequestConfig } from 'axios'
 import type { ApiResponse } from '@/types/api'
 import { useAppStore } from '@/store/modules/app'
-import { clearPersistedAuthState, getPersistedAuthToken } from '@/utils/auth-storage'
+import { clearPersistedAuthState, getAdminCsrfToken } from '@/utils/auth-storage'
 import { getClientRiskHeaderSnapshot } from '@/utils/client-auth-risk'
 import { clearPersistedClientAuthState, getPersistedClientAuthToken } from '@/utils/client-auth-storage'
 import { normalizeRequestError, unwrapApiResponse } from '@/utils/error'
@@ -60,11 +60,11 @@ const isClientRequest = (url?: string) => {
 
 /**
  * 判断当前请求是否应注入 Authorization：
- * - 只要本地存在 token，统一走 Bearer 头传递；
+ * - 管理端已切换为 Cookie 会话，因此这里只继续处理客户端 token；
  * - 若调用方已手动传入 Authorization，则以调用方配置为准。
  */
 const attachAuthorizationHeader = (config: InternalAxiosRequestConfig) => {
-  const token = isClientRequest(config.url) ? getPersistedClientAuthToken() : getPersistedAuthToken()
+  const token = isClientRequest(config.url) ? getPersistedClientAuthToken() : null
   if (!token) {
     return config
   }
@@ -72,6 +72,52 @@ const attachAuthorizationHeader = (config: InternalAxiosRequestConfig) => {
   const currentAuthorization = config.headers.Authorization
   if (!currentAuthorization) {
     config.headers.Authorization = `Bearer ${token}`
+  }
+
+  return config
+}
+
+/**
+ * 当前请求是否属于管理端链路：
+ * - `/api/*` 默认视为管理端接口；
+ * - 但 `/client-auth/*`、`/client-feedback/*`、`/o2o/mall/*` 明确走客户端鉴权，不参与管理端 CSRF。
+ */
+const isAdminRequest = (url?: string) => {
+  const normalizedUrl = normalizeRequestUrl(url)
+  if (!normalizedUrl) {
+    return false
+  }
+
+  return !isClientRequest(normalizedUrl)
+}
+
+/**
+ * 是否为安全方法：
+ * - 只对会改动服务器状态的请求附加 CSRF 头；
+ * - 读取类请求依赖 Cookie 会话即可，无需额外校验头。
+ */
+const isSafeRequestMethod = (method?: string) => {
+  const normalizedMethod = (method ?? 'GET').toUpperCase()
+  return ['GET', 'HEAD', 'OPTIONS'].includes(normalizedMethod)
+}
+
+/**
+ * 管理端 CSRF 头透传：
+ * - 仅管理端非安全方法需要附加；
+ * - 前端从可读 Cookie 中取值，与浏览器自动附带的 Cookie 共同完成“双提交”校验。
+ */
+const attachAdminCsrfHeader = (config: InternalAxiosRequestConfig) => {
+  if (!isAdminRequest(config.url) || isSafeRequestMethod(config.method)) {
+    return config
+  }
+
+  if (config.headers['x-csrf-token']) {
+    return config
+  }
+
+  const csrfToken = getAdminCsrfToken()
+  if (csrfToken) {
+    config.headers['x-csrf-token'] = csrfToken
   }
 
   return config
@@ -151,6 +197,7 @@ const shouldForceRelogin = (error: ReturnType<typeof normalizeRequestError>, req
 const http = axios.create({
   baseURL: import.meta.env.VITE_API_BASE_URL ?? '/api',
   timeout: 15000,
+  withCredentials: true,
 })
 
 /**
@@ -163,7 +210,7 @@ http.interceptors.request.use(
     const appStore = useAppStore(pinia)
     appStore.startLoading()
 
-    return attachClientRiskHeaders(attachAuthorizationHeader(config))
+    return attachAdminCsrfHeader(attachClientRiskHeaders(attachAuthorizationHeader(config)))
   },
   (error) => {
     const appStore = useAppStore(pinia)

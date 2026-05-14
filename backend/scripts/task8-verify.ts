@@ -33,6 +33,7 @@ const mockActor: AuthUserContext = {
   role: 'admin',
   status: 'enabled',
   sessionToken: 'task8-verify-session',
+  authSource: 'bearer',
   permissions: [],
 }
 

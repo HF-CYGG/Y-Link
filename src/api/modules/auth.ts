@@ -211,12 +211,11 @@ export interface AdminCaptchaResult {
 
 /**
  * 登录返回结果：
- * - token 供后续请求走 Bearer 鉴权；
+ * - 管理端会话令牌改由 HttpOnly Cookie 承载，不再暴露给前端脚本；
  * - expiresAt 用于前端展示和持久化；
  * - user 同时承载角色与权限点，供页面鉴权直接复用。
  */
 export interface LoginResult {
-  token: string
   expiresAt: string
   user: UserSafeProfile
   securityReminder?: string

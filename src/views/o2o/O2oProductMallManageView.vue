@@ -1,4 +1,4 @@
-<script setup lang="ts">
+﻿<script setup lang="ts">
 /**
  * 模块说明：src/views/o2o/O2oProductMallManageView.vue
  * 文件职责：维护线上商品大厅的新增、编辑、上架状态切换与商品预览图上传交互。
@@ -14,9 +14,9 @@ import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { UploadRequestOptions } from 'element-plus'
 import { Delete, UploadFilled } from '@element-plus/icons-vue'
-import imageCompression from 'browser-image-compression'
 import { BizCrudDialogShell, PageContainer, PassiveNumberInput } from '@/components/common'
 import { uploadImage } from '@/api/modules/upload'
+ import { compressImageForUpload } from '@/utils/image-upload'
 import { resolveProductPlaceholder } from '@/utils/product-placeholder'
 import {
   createProduct,
@@ -172,15 +172,6 @@ const openCreateDialog = () => {
 const handleCustomUpload = async (options: UploadRequestOptions) => {
   thumbnailDragActive.value = false
   const file = options.file
-  if (!file.type.startsWith('image/')) {
-    ElMessage.error('只能上传图片文件')
-    return
-  }
-
-  if (file.size > 20 * 1024 * 1024) {
-    ElMessage.error('原图过大，不能超过 20MB')
-    return
-  }
 
   uploadingThumbnail.value = true
   uploadProgress.value = 0
@@ -188,17 +179,7 @@ const handleCustomUpload = async (options: UploadRequestOptions) => {
 
   let uploadStage: 'compress' | 'upload' = 'compress'
   try {
-    const compressedFile = await imageCompression(file, {
-      maxSizeMB: 0.8, // 压缩到不超过 800KB
-      maxWidthOrHeight: 1200, // 限制最大边长，保证画质同时减小体积
-      useWebWorker: true,
-      initialQuality: 0.85
-    })
-
-    const compressedUploadFile = new File([compressedFile], file.name, {
-      type: compressedFile.type,
-      lastModified: Date.now(),
-    })
+    const { file: compressedUploadFile } = await compressImageForUpload(file)
 
     if (localPreviewUrl.value) {
       URL.revokeObjectURL(localPreviewUrl.value)
@@ -227,7 +208,8 @@ const handleCustomUpload = async (options: UploadRequestOptions) => {
     }, 520)
   } catch (error) {
     console.error(uploadStage === 'compress' ? '图片压缩失败:' : '图片上传失败:', error)
-    ElMessage.error(uploadStage === 'compress' ? '图片压缩失败，请重试' : '图片上传失败，请重试')
+    const fallbackMessage = uploadStage === 'compress' ? '图片处理失败，请重试' : '图片上传失败，请重试'
+    ElMessage.error(error instanceof Error && error.message.trim() ? error.message : fallbackMessage)
     uploadProgress.value = 0
     uploadProgressVisible.value = false
   } finally {
