@@ -179,12 +179,18 @@ f:\Y-Link
 docker compose up -d --build
 ```
 
+首次启动前必须在当前终端或 `.env` 中提供管理员初始化私有密码：
+
+```bash
+INIT_ADMIN_PASSWORD=你的私有强密码 docker compose up -d --build
+```
+
 启动后访问：
 - 管理端：`http://127.0.0.1:8080/login`
 - 客户端：`http://127.0.0.1:8080/client/login`
 - 后端健康检查：`http://127.0.0.1:3001/health`
 
-首次部署（默认 SQLite）时，后端会在启动日志输出初始化管理员账号与密码，便于在 1Panel 日志中直接查看并登录。首次登录后请立即修改密码。
+首次部署（默认 SQLite）时，后端会根据 `INIT_ADMIN_PASSWORD` 初始化管理员账号。系统不会在启动日志输出明文密码，首次登录后仍建议立即修改密码。
 
 停止服务：
 
@@ -211,6 +217,7 @@ docker.io/yemiao351/y-link-onebox:latest
 ```bash
 docker run -d --name y-link-onebox \
   -p 9050:80 \
+  -e INIT_ADMIN_PASSWORD='你的私有强密码' \
   -v /opt/1panel/apps/y-link/data:/app/data \
   --restart unless-stopped \
   docker.io/yemiao351/y-link-onebox:latest
@@ -232,8 +239,8 @@ docker run -d --name y-link-onebox \
 - 迁移注意：更换服务器时只需备份并恢复该挂载目录，即可保留历史业务数据。
 
 重要说明：
-- 首次启动会自动初始化管理员账号，并在容器日志打印初始账号密码。
-- 登录后请立即修改默认密码，避免生产环境风险。
+- 首次启动必须在 1Panel / Docker 面板环境变量中手动配置 `INIT_ADMIN_PASSWORD`，系统不会提供默认弱密码。
+- 登录后请立即修改初始化密码，避免生产环境风险。
 - `y-link-frontend` 是前端静态站点镜像，单独运行无法提供业务 API；若不用 onebox，请务必同时启动 backend。
 - 若访问后出现 “Welcome to nginx!” 而不是登录页：通常是旧容器或旧镜像残留。请删除旧容器后重新 `docker pull docker.io/yemiao351/y-link-onebox:latest` 并重建。
 
@@ -342,8 +349,8 @@ npm run cloud:down
 - 正确方式是让前后端一起在同一编排网络启动，由 `frontend -> backend:3001` 自动联动。
 
 特点：
-- 不写 `.env` 也可直接启动（默认镜像、默认端口、默认 SQLite）。
-- 首次启动会自动初始化管理员，并在容器日志打印账号密码。
+- 需在面板环境变量中手动配置 `INIT_ADMIN_PASSWORD`；镜像和编排不再内置默认弱密码。
+- 首次启动会自动初始化管理员，但容器日志不会输出明文密码。
 - 日志默认开启彩色输出，便于在 1Panel 日志面板快速定位关键信息。
 - 前端默认联动同编排后端服务（`backend:3001`），并启用延迟解析，避免启动阶段因 DNS 瞬态异常直接退出。
 - 前端健康检查已联动后端可达性（`/health`），后端异常时可在 1Panel 直接看到前端健康状态变更。
@@ -372,6 +379,8 @@ npm run cloud:down
 #### 方式 B：Docker / 服务器部署时切换到 MySQL（适合新库初始化或高级运维）
 项目已经内置了专门的外置 MySQL 编排文件 [compose.mysql.yml](./compose.mysql.yml) 和环境变量模板 [`.env.docker.mysql.example`](./.env.docker.mysql.example)。
 
+该编排会使用 [backend/Dockerfile.mysql](./backend/Dockerfile.mysql) 构建 MySQL-only 后端镜像：镜像仍保留图片上传所需的 `sharp` 平台依赖，但会移除 SQLite 驱动 `sqlite3`，避免公网生产 MySQL 镜像携带 `sqlite3 -> node-gyp/tar` 审计链。默认 SQLite 镜像仍保留 SQLite 能力，适合本地、小规模一体化或迁移回退场景。
+
 步骤如下：
 
 1. 复制环境变量模板：
@@ -389,12 +398,14 @@ DB_USER=你的MySQL账号
 DB_PASSWORD=你的MySQL密码
 DB_NAME=y_link
 DB_SYNC=false
+INIT_ADMIN_PASSWORD=你的私有强密码
 ```
 
 填写建议：
 - `DB_HOST`：如果 MySQL 部署在宿主机本机，Docker Desktop 环境可优先尝试 `host.docker.internal`。
 - `DB_NAME`：建议提前创建独立库，例如 `y_link`。
 - `DB_SYNC`：生产环境推荐 `false`；仅本地临时调试才建议改为 `true`。
+- `INIT_ADMIN_PASSWORD`：必填，只能在 1Panel / Docker 面板环境变量或私有 `.env.docker.mysql` 中填写，不要提交真实密码。
 
 3. 初始化数据库结构：
 - 开发调试场景：可临时设置 `DB_SYNC=true`，首次启动由 TypeORM 自动建表。
@@ -415,6 +426,15 @@ docker compose --env-file .env.docker.mysql -f compose.mysql.yml up -d --build
 - 不要只把 `DB_HOST/DB_USER/DB_PASSWORD` 填进 `compose.cloud.yml`，却仍然保留 `DB_TYPE=sqlite`。
 - 不要在生产环境直接长期使用 `DB_SYNC=true`，否则后续实体调整时风险不可控。
 - 不要忘记提前为 MySQL 创建数据库实例和账号权限。
+
+MySQL-only 生产依赖审计：
+
+```bash
+cd backend
+npm run audit:prod:mysql
+```
+
+说明：该命令按 MySQL 生产 profile 口径排除 optional SQLite 驱动。若执行普通 `npm audit --omit=dev`，仍会统计本地/SQLite profile 需要的 `sqlite3@5.1.7`，这是 TypeORM 当前 sqlite peer 范围导致的兼容保留项，不建议强行升级到 `sqlite3@6`。
 
 #### 方式 C：非 Docker 直连 MySQL 运行后端
 如果你是在本地或服务器直接运行后端进程，而不是走 Docker，也可以把后端环境变量改为 MySQL 模式。

@@ -15,13 +15,37 @@ import 'element-plus/theme-chalk/dark/css-vars.css'
 import 'element-plus/es/components/message-box/style/css'
 import './style.css'
 import App from './App.vue'
+import { SESSION_RELOGIN_EVENT, type SessionReloginDetail } from '@/api/http'
 import router from '@/router'
 import { elementPlusIconWhitelist } from '@/icons/element-plus'
-import { useThemeStore } from '@/store'
+import { useAuthStore, useClientAuthStore, useThemeStore } from '@/store'
 import pinia from '@/store/pinia'
+
+/**
+ * 开发态统一预加载 Element Plus 全量样式：
+ * - 懒加载页面若在运行中首次暴露新的组件样式深导入，Vite 会重新做依赖预构建并整页 reload；
+ * - 客户端反馈页、系统治理页这类首次进入偶发“页面进不去又整体刷新”，核心就是这里的开发态重优化；
+ * - 因此本地开发阶段直接一次性加载完整样式，生产构建仍保持按组件拆分，不影响正式包体预算。
+ */
+if (import.meta.env.DEV) {
+  void import('element-plus/dist/index.css')
+}
 
 // 创建应用实例，作为全局能力挂载入口。
 const app = createApp(App)
+
+/**
+ * 精简开发台警告输出：
+ * - Vue 会在每次首次渲染 `Suspense` 时提示实验特性告警，这条信息当前对项目排障价值较低；
+ * - 这里仅过滤这条已知固定提示，其余 Vue 警告仍继续保留，避免掩盖真实问题。
+ */
+app.config.warnHandler = (message, _instance, trace) => {
+  if (message.includes('<Suspense> is an experimental feature')) {
+    return
+  }
+
+  console.warn(`[vue warn] ${message}${trace}`)
+}
 
 // 统一日期/时间中文化，避免日期面板出现英文月份与星期。
 dayjs.locale('zh-cn')
@@ -65,6 +89,34 @@ useThemeStore(pinia).initializeTheme()
 
 // 注册 Vue Router：管理页面级路由与跳转守卫。
 app.use(router)
+
+/**
+ * 会话失效桥接器：
+ * - HTTP 拦截器只负责识别“需要重新登录”的被动失效场景；
+ * - 真正的导航在这里统一收口为 `router.replace`，避免因为 `window.location.replace` 触发整页重刷；
+ * - 主动退出、改密重登仍保留各自的硬跳逻辑，不受这里影响。
+ */
+const installSessionReloginBridge = () => {
+  if (globalThis.window === undefined) {
+    return
+  }
+
+  globalThis.window.addEventListener(SESSION_RELOGIN_EVENT, (rawEvent) => {
+    const event = rawEvent as CustomEvent<SessionReloginDetail>
+    const redirectPath = typeof event.detail?.redirect === 'string' ? event.detail.redirect : '/login'
+    event.preventDefault()
+
+    if (event.detail?.target === 'client') {
+      useClientAuthStore(pinia).clearAuthState()
+    } else {
+      useAuthStore(pinia).handleSessionExpired()
+    }
+
+    void router.replace(redirectPath).catch(() => undefined)
+  })
+}
+
+installSessionReloginBridge()
 
 /**
  * 注册 Element Plus 全局加载指令：

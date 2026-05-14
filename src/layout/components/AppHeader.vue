@@ -13,6 +13,7 @@ import { BizCrudDialogShell } from '@/components/common'
 import QuoteBanner from '@/layout/components/QuoteBanner.vue'
 import { changePassword, ROLE_LABEL_MAP } from '@/api/modules/auth'
 import { useAppStore, useAuthStore } from '@/store'
+import pinia from '@/store/pinia'
 import { redirectToAdminLogin } from '@/utils/auth-navigation'
 import { extractErrorMessage } from '@/utils/error'
 
@@ -33,8 +34,8 @@ const headerAttrs = useAttrs()
  * - phone 模式显示导航开关按钮，并收缩为精简信息区；
  * - tablet / desktop 模式保留语录横幅与主题切换。
  */
-const appStore = useAppStore()
-const authStore = useAuthStore()
+const appStore = useAppStore(pinia)
+const authStore = useAuthStore(pinia)
 const passwordDialogVisible = ref(false)
 const passwordSubmitting = ref(false)
 const passwordFormRef = ref<FormInstance>()

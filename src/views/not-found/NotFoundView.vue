@@ -9,9 +9,10 @@
 import { useRouter } from 'vue-router'
 import { resolveDefaultManagementRedirect } from '@/router'
 import { useAuthStore } from '@/store'
+import pinia from '@/store/pinia'
 
 const router = useRouter()
-const authStore = useAuthStore()
+const authStore = useAuthStore(pinia)
 
 /**
  * 返回首页动作：

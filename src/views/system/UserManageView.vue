@@ -32,6 +32,7 @@ import {
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useAuthStore } from '@/store'
+import pinia from '@/store/pinia'
 import { redirectToAdminLogin } from '@/utils/auth-navigation'
 import { extractErrorMessage } from '@/utils/error'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
@@ -72,7 +73,7 @@ const listState = reactive(createPaginatedListState<UserSafeProfile>({
  * - 页面权限判断统一来自 Auth Store；
  * - 避免在页面内硬编码 admin/operator 角色分支。
  */
-const authStore = useAuthStore()
+const authStore = useAuthStore(pinia)
 const listRequest = useStableRequest()
 const { hasPermission, ensurePermission } = usePermissionAction()
 

@@ -7,6 +7,7 @@
 import { computed, watch } from 'vue'
 import { useWindowSize } from '@vueuse/core'
 import { DEVICE_BREAKPOINTS, type DeviceMode, useAppStore } from '@/store'
+import pinia from '@/store/pinia'
 
 const { width } = useWindowSize()
 
@@ -39,7 +40,7 @@ const ensureDeviceStoreSync = () => {
     return
   }
 
-  const appStore = useAppStore()
+  const appStore = useAppStore(pinia)
   watch(
     device,
     (value) => {

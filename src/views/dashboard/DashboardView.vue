@@ -20,11 +20,12 @@ import { getDashboardStats, type DashboardStats } from '@/api/modules/dashboard'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { buildDashboardShortcutItems } from '@/router/routes'
 import { useAppStore, useAuthStore } from '@/store'
+import pinia from '@/store/pinia'
 import { extractErrorMessage } from '@/utils/error'
 
 const router = useRouter()
-const appStore = useAppStore()
-const authStore = useAuthStore()
+const appStore = useAppStore(pinia)
+const authStore = useAuthStore(pinia)
 const loading = ref(false)
 const stats = ref<DashboardStats | null>(null)
 const loadStatus = ref<'idle' | 'success' | 'error' | 'canceled'>('idle')

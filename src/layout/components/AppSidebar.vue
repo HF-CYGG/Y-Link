@@ -11,6 +11,7 @@ import { useRoute } from 'vue-router'
 import { APP_META } from '@/constants/app-meta'
 import type { AppMenuItem } from '@/router/routes'
 import { useAppStore } from '@/store'
+import pinia from '@/store/pinia'
 
 interface Props {
   menuItems: AppMenuItem[]
@@ -18,7 +19,7 @@ interface Props {
 
 const props = defineProps<Props>()
 const route = useRoute()
-const appStore = useAppStore()
+const appStore = useAppStore(pinia)
 
 /**
  * 需要被单独突出的工作台入口：

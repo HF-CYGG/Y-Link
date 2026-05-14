@@ -8,6 +8,7 @@
 
 import { computed, useSlots } from 'vue'
 import { useAppStore } from '@/store'
+import pinia from '@/store/pinia'
 
 /**
  * 通用工具栏卡片参数：
@@ -30,7 +31,7 @@ const props = withDefaults(defineProps<Props>(), {
 })
 
 const slots = useSlots()
-const appStore = useAppStore()
+const appStore = useAppStore(pinia)
 
 /**
  * 当前是否存在操作区：

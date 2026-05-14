@@ -9,6 +9,7 @@
  * - 若后续需要支持“任一权限即可执行”“多个权限同时满足”等扩展，应优先在这里扩展，而不是让页面继续散点拼接判断。
  */
 import { useAuthStore } from '@/store'
+import pinia from '@/store/pinia'
 import type { PermissionCode } from '@/api/modules/auth'
 import { showPermissionDenied } from '@/utils/permission'
 
@@ -19,7 +20,7 @@ import { showPermissionDenied } from '@/utils/permission'
  * - `runWithPermission` 适合把“校验 + 执行”收口到一处。
  */
 export const usePermissionAction = () => {
-  const authStore = useAuthStore()
+  const authStore = useAuthStore(pinia)
 
   /**
    * 查询当前账号是否具备指定权限点：

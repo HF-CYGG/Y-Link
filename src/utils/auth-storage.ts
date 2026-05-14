@@ -87,6 +87,17 @@ export const readPersistedAuthState = (): PersistedAuthState => {
 }
 
 /**
+ * 判断当前浏览器是否还保留管理端会话痕迹：
+ * - 登录页/游客页不需要无条件请求 `/auth/me`，否则空会话时会产生 401 控制台噪音；
+ * - 只要本地仍保留用户快照、过期时间，或浏览器里还存在可读 CSRF Cookie，就认为值得发起一次服务端会话探测；
+ * - 真正的受保护管理端页面仍会强制调用 `/auth/me`，因此不会影响刷新后的登录恢复。
+ */
+export const hasRecoverableAdminSessionHint = (): boolean => {
+  const persisted = readPersistedAuthState()
+  return Boolean(persisted.user || persisted.expiresAt || getAdminCsrfToken())
+}
+
+/**
  * 读取管理端 CSRF Cookie：
  * - 仅供管理端写操作请求自动补头使用；
  * - 若浏览器暂未拿到该 Cookie，则返回 null，由调用方决定是否继续发起请求。

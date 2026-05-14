@@ -8,6 +8,7 @@
 
 import { computed } from 'vue'
 import { useAppStore } from '@/store'
+import pinia from '@/store/pinia'
 
 /**
  * 通用页面容器参数：
@@ -21,7 +22,7 @@ interface Props {
 }
 
 const props = defineProps<Props>()
-const appStore = useAppStore()
+const appStore = useAppStore(pinia)
 
 /**
  * 页面容器宽度策略：

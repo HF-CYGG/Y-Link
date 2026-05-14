@@ -6,6 +6,7 @@
  */
 import { computed, ref, watch } from 'vue'
 import { useAppStore } from '@/store'
+import pinia from '@/store/pinia'
 
 interface Props {
   modelValue: boolean
@@ -34,7 +35,7 @@ const emit = defineEmits<{
 }>()
 
 const localScannerContainerRef = ref<HTMLDivElement | null>(null)
-const appStore = useAppStore()
+const appStore = useAppStore(pinia)
 
 /**
  * 扫码卡片布局模式：

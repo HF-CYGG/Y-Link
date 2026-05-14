@@ -11,11 +11,12 @@ import type { EChartsOption } from 'echarts'
 import BaseEChart from '@/components/charts/BaseEChart.vue'
 import type { DashboardTrendPoint } from '@/api/modules/dashboard'
 import { useThemeStore } from '@/store'
+import pinia from '@/store/pinia'
 
 const props = defineProps<{
   trend: DashboardTrendPoint[]
 }>()
-const themeStore = useThemeStore()
+const themeStore = useThemeStore(pinia)
 
 const formatAmount = (value: string | number | null | undefined): string => {
   const normalizedNumber = Number(value ?? 0)

@@ -9,13 +9,14 @@
 import { Moon, Sunny } from '@element-plus/icons-vue'
 import { computed } from 'vue'
 import { useThemeStore } from '@/store'
+import pinia from '@/store/pinia'
 
 /**
  * 主题切换状态：
  * - 统一改由 Theme Store 托管，组件只负责触发交互；
  * - 点击事件会把触发点传给 Store，用于全局圆形扩散/收缩动画。
  */
-const themeStore = useThemeStore()
+const themeStore = useThemeStore(pinia)
 
 /**
  * 可访问性文案：

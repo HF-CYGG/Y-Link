@@ -14,10 +14,11 @@ import BaseEChart from '@/components/charts/BaseEChart.vue'
 import { getDashboardPieData, type DashboardPieDataResult, type DashboardPieSlice } from '@/api/modules/dashboard'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useAppStore, useThemeStore } from '@/store'
+import pinia from '@/store/pinia'
 import { extractErrorMessage } from '@/utils/error'
 
-const appStore = useAppStore()
-const themeStore = useThemeStore()
+const appStore = useAppStore(pinia)
+const themeStore = useThemeStore(pinia)
 const pieRequest = useStableRequest()
 const pieLoading = ref(false)
 const pieData = ref<DashboardPieDataResult>({

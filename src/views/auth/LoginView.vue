@@ -19,6 +19,7 @@ import { Lock, User, Right, Key } from '@element-plus/icons-vue'
 import { useRoute, useRouter } from 'vue-router' 
 import { resolveDefaultManagementRedirect, resolveSafeRedirect } from '@/router' 
 import { useAuthStore } from '@/store' 
+import pinia from '@/store/pinia'
 import { getAdminCaptcha } from '@/api/modules/auth'
 import { APP_META } from '@/constants/app-meta'
 import { extractErrorMessage, normalizeRequestError } from '@/utils/error' 
@@ -32,7 +33,7 @@ const form = reactive({
 const formRef = ref<FormInstance>() 
 const route = useRoute() 
 const router = useRouter() 
-const authStore = useAuthStore() 
+const authStore = useAuthStore(pinia)
 
 const submitPhase = ref<'idle' | 'submitting' | 'success'>('idle') 
 const securityHint = ref('') 

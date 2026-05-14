@@ -9,7 +9,7 @@ services:
   backend:
     build:
       context: ./backend
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.mysql
     environment:
       NODE_ENV: production
       PORT: 3001
@@ -20,8 +20,13 @@ services:
       DB_PASSWORD: ${DB_PASSWORD:-}
       DB_NAME: ${DB_NAME}
       DB_SYNC: ${DB_SYNC:-false}
+      INIT_ADMIN_USERNAME: ${INIT_ADMIN_USERNAME:-admin}
+      INIT_ADMIN_DISPLAY_NAME: ${INIT_ADMIN_DISPLAY_NAME:-系统管理员}
+      INIT_ADMIN_PASSWORD: ${INIT_ADMIN_PASSWORD:?请在容器面板环境变量中手动配置 INIT_ADMIN_PASSWORD 私有强密码}
     ports:
       - "${BACKEND_PORT:-3001}:3001"
+    volumes:
+      - y_link_mysql_uploads_data:/app/uploads
     extra_hosts:
       # 为 Linux / WSL 等环境补齐宿主机别名；在 Docker Desktop 下也可保持兼容。
       - "host.docker.internal:host-gateway"
@@ -56,3 +61,6 @@ services:
       retries: 6
       start_period: 5s
     restart: unless-stopped
+
+volumes:
+  y_link_mysql_uploads_data:

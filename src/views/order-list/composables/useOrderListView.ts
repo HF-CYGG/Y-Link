@@ -22,6 +22,7 @@ import {
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useAppStore } from '@/store'
+import pinia from '@/store/pinia'
 import { extractErrorMessage } from '@/utils/error'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
 
@@ -54,7 +55,7 @@ const normalizeRouteQueryValue = (value: unknown): string => {
 export const useOrderListView = () => {
   const route = useRoute()
   const router = useRouter()
-  const appStore = useAppStore()
+  const appStore = useAppStore(pinia)
   const { hasPermission, ensurePermission } = usePermissionAction()
   const isPhone = computed(() => appStore.isPhone)
   const isTablet = computed(() => appStore.isTablet)

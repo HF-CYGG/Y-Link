@@ -48,11 +48,18 @@ import {
 } from '@/api/modules/customer-service-feedback'
 import { PageContainer } from '@/components/common'
 import { useAuthStore } from '@/store'
+import pinia from '@/store/pinia'
 import { extractErrorMessage } from '@/utils/error'
 import { formatDateTime } from '@/utils/date-time'
 import { normalizeSubmitText } from '@/utils/submit-feedback'
 
-const authStore = useAuthStore()
+/**
+ * 显式注入全局 Pinia 单例：
+ * - 客服工作台页面属于懒加载页面，首次进入时可能与路由预热、KeepAlive 恢复并发发生；
+ * - 若依赖隐式 activePinia，极端时序下会出现 “getActivePinia() was called but there was no active Pinia”；
+ * - 这里改为显式传入单例，避免页面首次进入偶发白屏。
+ */
+const authStore = useAuthStore(pinia)
 
 type WorkbenchQuickViewKey = 'all' | 'pending' | 'processing' | 'urgent' | 'unassigned' | 'sla_risk' | 'waiting_staff_reply'
 type DetailTabKey = 'conversation' | 'issue' | 'internal'

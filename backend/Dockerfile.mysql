@@ -1,0 +1,45 @@
+# syntax=docker/dockerfile:1
+
+# ------------------------------
+# 文件说明：Y-Link 后端 MySQL-only 生产镜像构建文件。
+# 实现逻辑：
+# - 保留 sharp 等运行必需的可选平台包，再显式移除 sqlite3，避免 MySQL 生产镜像携带 sqlite3/node-gyp/tar 审计链；
+# - 仅适用于 DB_TYPE=mysql 的公网或正式部署；
+# - 如需 SQLite 一体化部署，继续使用 backend/Dockerfile。
+# ------------------------------
+FROM node:20-bookworm-slim AS build
+
+WORKDIR /app
+
+COPY package*.json ./
+RUN npm ci
+
+COPY tsconfig.json ./
+COPY src ./src
+COPY sql ./sql
+RUN npm run build \
+  && npm prune --omit=dev \
+  && npm uninstall sqlite3
+
+FROM node:20-bookworm-slim AS runtime
+
+WORKDIR /app
+
+ENV NODE_ENV=production \
+  PORT=3001 \
+  DB_TYPE=mysql \
+  DB_SYNC=false
+
+RUN mkdir -p /app/uploads \
+  && chown -R node:node /app
+
+COPY --from=build --chown=node:node /app/package*.json ./
+COPY --from=build --chown=node:node /app/node_modules ./node_modules
+COPY --from=build --chown=node:node /app/dist ./dist
+COPY --from=build --chown=node:node /app/sql ./sql
+
+USER node
+
+EXPOSE 3001
+
+CMD ["npm", "run", "start"]
