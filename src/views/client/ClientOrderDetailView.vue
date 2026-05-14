@@ -9,11 +9,10 @@
  */
 
 
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import QRCode from 'qrcode'
 import {
   cancelMyO2oPreorder,
   getO2oMallProducts,
@@ -44,10 +43,8 @@ import { buildClientOrderSummaryFromDetail } from '@/utils/client-order-summary'
 import { notifyClientOrderRefresh, subscribeClientOrderRefresh } from '@/utils/client-order-refresh'
 import { formatDateTime } from '@/utils/date-time'
 import { normalizeRequestError } from '@/utils/error'
-import { exportVoucherPdf } from '@/utils/pdf/export-voucher-pdf'
 import ClientOrderEditDialog from '@/views/client/components/ClientOrderEditDialog.vue'
 import ClientOrderReturnDialog from '@/views/client/components/ClientOrderReturnDialog.vue'
-import ClientOrderVoucherDialog from '@/views/client/components/ClientOrderVoucherDialog.vue'
 import {
   DEFAULT_VOUCHER_ORIENTATION,
   O2O_PREORDER_REMARK_MAX_LENGTH,
@@ -57,7 +54,24 @@ import {
   type OrderVoucherEditableFields,
   type VoucherOrientation,
 } from '@/views/client/client-order-detail-types'
-import OrderVoucherTemplate from '@/views/order-list/components/OrderVoucherTemplate.vue'
+
+// 详细注释：正式出库单能力属于低频扩展链路，页面首开时不应同步拉起弹层、模板与导出工具。
+// 因此这里把三个模块都收敛为异步加载，只在用户真正触发正式出库单相关操作时才下载对应 chunk。
+const loadClientOrderVoucherDialogModule = () => import('@/views/client/components/ClientOrderVoucherDialog.vue')
+const loadOrderVoucherTemplateModule = () => import('@/views/order-list/components/OrderVoucherTemplate.vue')
+const loadVoucherPdfExportModule = () => import('@/utils/pdf/export-voucher-pdf')
+type QrCodeModule = typeof import('qrcode')
+type QrCodeRenderer = Pick<QrCodeModule, 'toDataURL'>
+
+const ClientOrderVoucherDialog = defineAsyncComponent({
+  loader: async () => (await loadClientOrderVoucherDialogModule()).default,
+  suspensible: false,
+})
+
+const OrderVoucherTemplate = defineAsyncComponent({
+  loader: async () => (await loadOrderVoucherTemplateModule()).default,
+  suspensible: false,
+})
 
 const ORDER_TYPE_LABEL_MAP = {
   department: '部门订',
@@ -85,7 +99,9 @@ const returnReason = ref('')
 const returnQtyMap = ref<Record<string, number>>({})
 const requestError = ref<{ type: 'offline' | 'error'; message: string } | null>(null)
 const voucherDialogVisible = ref(false)
+const voucherDialogMounted = ref(false)
 const voucherPrintRootRef = ref<HTMLElement | null>(null)
+const voucherCapabilityLoading = ref(false)
 const exportPdfLoading = ref(false)
 const voucherOrientation = ref<VoucherOrientation>(DEFAULT_VOUCHER_ORIENTATION)
 const enableHtml2pdfExport = import.meta.env.VITE_ORDER_VOUCHER_HTML2PDF_ENABLED !== 'false'
@@ -95,6 +111,9 @@ const clientAuthStore = useClientAuthStore(pinia)
 const clientOrderStore = useClientOrderStore(pinia)
 let disposeClientOrderRefresh: () => void = () => {}
 const clientOrderRefreshSourceId = `client-order-detail-${Math.random().toString(36).slice(2)}`
+let voucherUiModulePromise: Promise<void> | null = null
+let voucherPdfExportModulePromise: ReturnType<typeof loadVoucherPdfExportModule> | null = null
+let qrCodeModulePromise: Promise<QrCodeModule> | null = null
 clientOrderStore.initialize(clientAuthStore.currentUser?.id)
 
 const currentReportScenario = computed(() => {
@@ -534,6 +553,63 @@ const handleVoucherEditableFieldUpdate = <TKey extends keyof OrderVoucherEditabl
   voucherEditableForm[key] = value
 }
 
+// 详细注释：首次打开正式出库单时，提前把弹层外壳和打印模板一起拉取下来。
+// 这样可以把低频模块移出详情页首开包，同时避免真正展示弹层时出现异步白屏。
+const ensureVoucherUiModulesReady = async () => {
+  if (!voucherUiModulePromise) {
+    voucherUiModulePromise = Promise.all([loadClientOrderVoucherDialogModule(), loadOrderVoucherTemplateModule()])
+      .then(() => undefined)
+      .catch((error) => {
+        voucherUiModulePromise = null
+        throw error
+      })
+  }
+  await voucherUiModulePromise
+  voucherDialogMounted.value = true
+}
+
+// 详细注释：PDF 导出比“仅预览/打印”更低频，因此继续拆出独立的导出工具加载阶段。
+// 用户只查看正式出库单时，只会下载预览模板；只有点击“导出 PDF”才会继续拉起导出实现与底层依赖。
+const resolveExportVoucherPdf = async () => {
+  if (!voucherPdfExportModulePromise) {
+    voucherPdfExportModulePromise = loadVoucherPdfExportModule().catch((error) => {
+      voucherPdfExportModulePromise = null
+      throw error
+    })
+  }
+  const module = await voucherPdfExportModulePromise
+  return module.exportVoucherPdf
+}
+
+// 详细注释：订单详情页会在首开后立即渲染提货码与退货码，但二维码生成库体积相对更重，
+// 因此这里沿用与 PDF 相同的“首次使用再下载 + 成功后复用 Promise”策略，把依赖从详情首包移出。
+const resolveQrCodeModule = async () => {
+  if (!qrCodeModulePromise) {
+    qrCodeModulePromise = import('qrcode').catch((error) => {
+      qrCodeModulePromise = null
+      throw error
+    })
+  }
+
+  const module = await qrCodeModulePromise
+  const moduleWithDefault = module as QrCodeModule & { default?: QrCodeRenderer }
+  return moduleWithDefault.default ?? module
+}
+
+// 详细注释：详情页主二维码与退货二维码共用同一套渲染参数，仅宽度不同；
+// 抽成共享方法后可以保证两个入口都命中同一个懒加载缓存，避免同页重复写一段导入逻辑。
+const renderQrCodeDataUrl = async (payload: string, width: number) => {
+  const qrCode = await resolveQrCodeModule()
+  return qrCode.toDataURL(payload, {
+    width,
+    margin: 1,
+    color: {
+      dark: '#0f172a',
+      light: '#ffffff',
+    },
+  })
+}
+
 const handleVoucherOrientationChange = (value: VoucherOrientation) => {
   voucherOrientation.value = value
 }
@@ -622,14 +698,7 @@ const renderQrCode = async () => {
     return
   }
 
-  qrDataUrl.value = await QRCode.toDataURL(detail.value.qrPayload, {
-    width: 260,
-    margin: 1,
-    color: {
-      dark: '#0f172a',
-      light: '#ffffff',
-    },
-  })
+  qrDataUrl.value = await renderQrCodeDataUrl(detail.value.qrPayload, 260)
 }
 
 const renderReturnRequestQrs = async () => {
@@ -640,14 +709,7 @@ const renderReturnRequestQrs = async () => {
     if (request.status !== 'pending' || !request.qrPayload) {
       continue
     }
-    nextQrMap[request.id] = await QRCode.toDataURL(request.qrPayload, {
-      width: 220,
-      margin: 1,
-      color: {
-        dark: '#0f172a',
-        light: '#ffffff',
-      },
-    })
+    nextQrMap[request.id] = await renderQrCodeDataUrl(request.qrPayload, 220)
   }
   returnQrMap.value = nextQrMap
 }
@@ -742,7 +804,7 @@ const resetDialogTransientState = () => {
   cleanupVoucherPrintSideEffects()
 }
 
-const handleOpenVoucherDialog = () => {
+const handleOpenVoucherDialog = async () => {
   if (!shouldShowVoucherButton.value) {
     ElMessage.warning('散客订单不提供正式出库单')
     return
@@ -753,7 +815,16 @@ const handleOpenVoucherDialog = () => {
   }
   resetVoucherEditableForm()
   voucherOrientation.value = DEFAULT_VOUCHER_ORIENTATION
-  voucherDialogVisible.value = true
+  voucherCapabilityLoading.value = true
+  try {
+    await ensureVoucherUiModulesReady()
+    voucherDialogVisible.value = true
+  } catch (error) {
+    const normalizedError = normalizeRequestError(error, '正式出库单模块加载失败，请稍后重试')
+    ElMessage.error(normalizedError.message)
+  } finally {
+    voucherCapabilityLoading.value = false
+  }
 }
 
 // 详细注释：正式出库单弹层关闭后，需要把补填字段、打印方向和临时打印副作用统一清空，
@@ -789,13 +860,16 @@ const handleExportVoucherPdf = async () => {
     ElMessage.warning('当前订单暂无可导出的凭证')
     return
   }
-  const sourceElement = voucherPrintRootRef.value?.querySelector('.voucher-print-document')
-  if (!(sourceElement instanceof HTMLElement)) {
-    ElMessage.warning('凭证模板尚未准备完成，请稍后重试')
-    return
-  }
   exportPdfLoading.value = true
   try {
+    await ensureVoucherUiModulesReady()
+    const exportVoucherPdf = await resolveExportVoucherPdf()
+    await nextTick()
+    const sourceElement = voucherPrintRootRef.value?.querySelector('.voucher-print-document')
+    if (!(sourceElement instanceof HTMLElement)) {
+      ElMessage.warning('凭证模板尚未准备完成，请稍后重试')
+      return
+    }
     await exportVoucherPdf({
       sourceElement,
       filename: `${voucherOrder.value.showNo || 'client-order'}-正式出库单.pdf`,
@@ -1133,10 +1207,11 @@ onBeforeUnmount(() => {
             <button
               v-if="shouldShowVoucherButton"
               type="button"
-              class="rounded-full border border-teal-200 px-4 py-2 text-sm font-medium text-teal-700 transition hover:bg-teal-50"
+              class="rounded-full border border-teal-200 px-4 py-2 text-sm font-medium text-teal-700 transition hover:bg-teal-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
+              :disabled="voucherCapabilityLoading"
               @click="handleOpenVoucherDialog"
             >
-              正式出库单
+              {{ voucherCapabilityLoading ? '正在加载...' : '正式出库单' }}
             </button>
             <button
               v-if="shouldShowModifyOrderButton"
@@ -1491,6 +1566,7 @@ onBeforeUnmount(() => {
     />
 
     <ClientOrderVoucherDialog
+      v-if="voucherDialogMounted"
       :visible="voucherDialogVisible"
       :voucher-order="voucherOrder"
       :editable-fields="voucherEditableForm"

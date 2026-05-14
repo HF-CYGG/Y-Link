@@ -88,6 +88,8 @@ const CATEGORY_SCROLL_HIT_THRESHOLD = 12
 const CATEGORY_SCROLL_FALLBACK_MS = 420
 const CATEGORY_VIEWPORT_ACTIVATE_OFFSET = 28
 const CATEGORY_BOTTOM_VISIBLE_PADDING = 56
+const DEFAULT_PRODUCT_IMAGE_WARMUP_BATCH = 12
+const DEFAULT_PRODUCT_IMAGE_WARMUP_DELAY_MS = 180
 
 // 商城页属于高频返回页面，初始化时优先恢复购物车与目录缓存，避免每次进入都重置上下文。
 clientCartStore.initialize(clientAuthStore.currentUser?.id)
@@ -213,6 +215,13 @@ const { list: virtualRows, containerProps: virtualContainerProps, wrapperProps: 
   overscan: 6,
 })
 
+const isWechatMallScene = computed(() => {
+  if (globalThis.navigator === undefined) {
+    return false
+  }
+  return /MicroMessenger/i.test(globalThis.navigator.userAgent ?? '')
+})
+
 // 结算栏脉冲动效只负责视觉反馈，不参与真实业务状态；通过短暂切换 class 保证重复加购时也能触发。
 const triggerSettlePulse = () => {
   settlePulsing.value = false
@@ -224,28 +233,51 @@ const triggerSettlePulse = () => {
   }, 12)
 }
 
+const resolveProductImageWarmupBatch = () => {
+  if (globalThis.navigator === undefined) {
+    return DEFAULT_PRODUCT_IMAGE_WARMUP_BATCH
+  }
+  const networkConnection = 'connection' in globalThis.navigator
+    ? (globalThis.navigator.connection as { saveData?: boolean; effectiveType?: string } | undefined)
+    : undefined
+  if (networkConnection?.saveData || /(?:^|-)2g$/i.test(networkConnection?.effectiveType ?? '')) {
+    return 0
+  }
+  // Task6.1：微信 WebView 下彻底停用商城主动图片预热，改由原生懒加载 + 浏览器缓存自行接管。
+  // 这样既不破坏缓存恢复后的秒开结构，也避免主动 new Image() 与真实首屏请求争抢带宽。
+  if (isWechatMallScene.value) {
+    return 0
+  }
+  return DEFAULT_PRODUCT_IMAGE_WARMUP_BATCH
+}
+
 const warmupProductImages = (items: O2oMallProduct[]) => {
   if (globalThis.window === undefined || !items.length) {
     return
   }
-  // 仅预热首屏附近的小批量图片，避免在慢网环境下一次性抢占过多带宽。
+  const warmupBatch = resolveProductImageWarmupBatch()
+  if (warmupBatch <= 0) {
+    return
+  }
+  const warmupCandidates = items.filter((item) => Boolean(item.thumbnail)).slice(0, warmupBatch)
+  if (!warmupCandidates.length) {
+    return
+  }
+  // 非微信场景仍只预热首屏附近的小批量图片，主链路继续由模板内 loading="lazy" 负责。
   const warmup = () => {
-    items
-      .filter((item) => Boolean(item.thumbnail))
-      .slice(0, 12)
-      .forEach((item) => {
-        if (!item.thumbnail) {
-          return
-        }
-        const image = new Image()
-        image.src = item.thumbnail
-      })
+    warmupCandidates.forEach((item) => {
+      if (!item.thumbnail) {
+        return
+      }
+      const image = new Image()
+      image.src = item.thumbnail
+    })
   }
   if (typeof globalThis.window.requestIdleCallback === 'function') {
     globalThis.window.requestIdleCallback(warmup, { timeout: 800 })
     return
   }
-  globalThis.window.setTimeout(warmup, 180)
+  globalThis.window.setTimeout(warmup, DEFAULT_PRODUCT_IMAGE_WARMUP_DELAY_MS)
 }
 
 watch(

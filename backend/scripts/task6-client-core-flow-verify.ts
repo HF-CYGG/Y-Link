@@ -188,6 +188,21 @@ const verifyOrderEditStaticRegression = () => {
   )
   assert.doesNotMatch(
     detailSource,
+    /import\s+QRCode\s+from\s+['"]qrcode['"]/,
+    '订单详情页仍在静态导入 qrcode，二维码库会重新进入详情首包',
+  )
+  assert.match(
+    detailSource,
+    /const resolveQrCodeModule = async \(\) => \{[\s\S]*import\('qrcode'\)/,
+    '订单详情页缺少 qrcode 按需加载门禁，二维码依赖可能回退到同步下载',
+  )
+  assert.match(
+    detailSource,
+    /const loadVoucherPdfExportModule = \(\) => import\(['"]@\/utils\/pdf\/export-voucher-pdf['"]\)/,
+    '订单详情页缺少 PDF 导出模块的按需加载入口',
+  )
+  assert.doesNotMatch(
+    detailSource,
     /location\.reload\(|router\.go\(\s*0\s*\)|router\.replace\(route\.fullPath\)/,
     '订单编辑成功路径疑似退化为依赖整页刷新',
   )
@@ -214,6 +229,10 @@ const verifyOrderEditStaticRegression = () => {
 
   pushRegressionCheck('订单编辑前端局部回写静态断言通过', {
     files: [clientOrderDetailViewPath, clientOrdersViewPath, clientOrderStorePath, clientOrderSummaryPath],
+  })
+  pushRegressionCheck('订单详情页低频依赖按需加载静态断言通过', {
+    file: clientOrderDetailViewPath,
+    lazyDependencies: ['qrcode', '@/utils/pdf/export-voucher-pdf'],
   })
 }
 

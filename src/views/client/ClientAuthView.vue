@@ -78,7 +78,7 @@ import {
   type ClientDepartmentOptionNode,
   type ClientValidationMode,
 } from '@/api/modules/client-auth'
-import { preloadRouteComponents, resolveClientPostLoginWarmupTargets } from '@/router/route-performance'
+import { resolveClientPostLoginWarmupTargets, scheduleRouteComponentWarmup } from '@/router/route-performance'
 import { useClientAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { useStableRequest } from '@/composables/useStableRequest'
@@ -635,7 +635,20 @@ const handleSendRegisterVerificationCode = async () => {
   }
 }
 
-// 详细注释：提交登录表单。首先进行基础校验，然后调用 auth store 登录，成功后跳转至原页面或大厅。
+/**
+ * 登录成功后的空闲预热：
+ * - 先完成真正的路由跳转，把当前落点页交给路由本身去加载；
+ * - 再只预热“下一跳高频页”，避免把当前落点页再次加入预热队列，和真实首跳争抢带宽。
+ */
+const warmupClientPostLoginTargets = (redirectPath: string) => {
+  const [, ...adjacentTargets] = resolveClientPostLoginWarmupTargets(redirectPath)
+  if (!adjacentTargets.length) {
+    return
+  }
+  scheduleRouteComponentWarmup(adjacentTargets)
+}
+
+// 详细注释：提交登录表单。首先进行基础校验，然后调用 auth store 登录，成功后优先跳转，再在空闲时预热高频相邻页面。
 const handleLogin = async () => {
   if (!validateLoginAccount(loginForm.account)) {
     ElMessage.warning('请输入用户名、手机号或邮箱')
@@ -677,9 +690,9 @@ const handleLogin = async () => {
           loginCaptchaVisible.value = false
           loginForm.captcha = ''
           clearCaptcha()
-          await preloadRouteComponents(resolveClientPostLoginWarmupTargets(redirectPath.value))
           ElMessage.success('登录成功，欢迎来到 Y-Link 客户端')
           await router.replace(redirectPath.value)
+          warmupClientPostLoginTargets(redirectPath.value)
         },
         onError: async (error) => {
           const normalizedError = normalizeRequestError(error, '登录失败，请检查用户名、手机号、邮箱、密码和验证码后重试')
@@ -812,7 +825,7 @@ const handleRegister = async () => {
 
 onMounted(async () => {
   if (clientAuthStore.isAuthenticated) {
-    await router.replace('/client/mall')
+    await router.replace(redirectPath.value)
     return
   }
   applyRouteState()

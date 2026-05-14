@@ -1,10 +1,10 @@
 /**
  * 模块说明：src/router/route-performance.ts
- * 文件职责：统一维护路由异步加载器、页面预热目标和登录后首跳预热策略，本次补齐客户端高频动态页预热映射，并拦截重复预热调度。
+ * 文件职责：统一维护路由异步加载器、页面预热目标和登录后首跳预热策略，本次补齐客户端高频动态页预热映射，并为微信 / 弱性能移动浏览器增加保守预热分支。
  * 实现逻辑：
  * - 所有可预热页面继续复用同一份异步加载器，避免路由表与预热表出现两套入口；
- * - 客户端登录后按“当前目标页 + 高频相邻页”生成更轻量的预热清单，减少冷启动时的过度加载；
- * - 空闲预热新增“已完成/已排队”双重门禁，避免用户来回切页时重复塞入相同的空闲任务。
+ * - 客户端登录后按“当前目标页 + 高频相邻页”生成更轻量的预热清单，弱性能移动浏览器会自动收缩为仅保留首要目标；
+ * - 空闲预热新增“已完成/已排队”双重门禁，并对弱性能移动浏览器延后调度，避免用户来回切页时重复塞入相同的空闲任务。
  * 维护说明：
  * - 路由表与预热表必须保持同一命名口径，否则 preloadTargets 会静默失效；
  * - 新增业务页面时，除了补 routes，还要同步评估是否需要纳入这里的预热范围。
@@ -56,6 +56,15 @@ export type AppRouteName =
 export type RouteWarmupTarget = AppRouteName | 'appLayout'
 
 type RouteViewLoader = () => Promise<unknown>
+type WarmupNetworkConnection = {
+  saveData?: boolean
+  effectiveType?: string
+}
+
+type WarmupNavigator = Navigator & {
+  connection?: WarmupNetworkConnection
+  deviceMemory?: number
+}
 
 /**
  * 路由级异步组件加载器：
@@ -258,6 +267,85 @@ const clientWarmupAdjacencyMap: Partial<Record<AppRouteName, AppRouteName[]>> = 
   'client-order-detail': ['client-orders'],
 }
 
+/**
+ * 当前目标是否属于客户端页面预热：
+ * - 客户端页面统一使用 `client-` 前缀，便于在共享调度层做保守策略收口；
+ * - 管理端与壳层预热不受这里的客户端设备策略影响。
+ */
+const isClientWarmupTarget = (routeName: RouteWarmupTarget): routeName is AppRouteName => {
+  return routeName.startsWith('client-')
+}
+
+/**
+ * 当前浏览器是否需要启用客户端保守预热：
+ * - 微信 WebView 对首屏阶段的额外网络竞争更敏感，因此直接进入保守模式；
+ * - 其余移动浏览器则结合 CPU / 内存 / 网络 / 空闲回调能力综合判断，尽量只保留最高频的下一跳。
+ */
+const shouldUseConservativeClientWarmup = () => {
+  if (globalThis.window === undefined || globalThis.navigator === undefined) {
+    return false
+  }
+
+  const navigator = globalThis.navigator as WarmupNavigator
+  const userAgent = navigator.userAgent ?? ''
+  const maxTouchPoints = typeof navigator.maxTouchPoints === 'number' ? navigator.maxTouchPoints : 0
+  const isWechatBrowser = /MicroMessenger/i.test(userAgent)
+  const isMobileBrowser = /Android|webOS|iPhone|iPad|iPod|Mobile|Windows Phone|HarmonyOS/i.test(userAgent)
+    || (/Macintosh/i.test(userAgent) && maxTouchPoints > 1)
+
+  if (isWechatBrowser) {
+    return true
+  }
+
+  if (!isMobileBrowser) {
+    return false
+  }
+
+  const weakCpuDevice = typeof navigator.hardwareConcurrency === 'number' && navigator.hardwareConcurrency <= 4
+  const weakMemoryDevice = typeof navigator.deviceMemory === 'number' && navigator.deviceMemory <= 4
+  const networkConnection = navigator.connection
+  const constrainedMobileNetwork = networkConnection?.saveData === true
+    || /(?:^|-)3g$/i.test(networkConnection?.effectiveType ?? '')
+  const lacksIdleBudgetApi = typeof globalThis.window.requestIdleCallback !== 'function'
+
+  return weakCpuDevice || weakMemoryDevice || constrainedMobileNetwork || lacksIdleBudgetApi
+}
+
+/**
+ * 客户端相邻页保守裁剪：
+ * - 正常设备保持原有“当前页后续高频链路”预热顺序；
+ * - 微信或弱性能移动浏览器仅保留首个最高优先级目标，避免把低频相邻页顺手拉起。
+ */
+const trimClientWarmupAdjacencyTargets = (routeNames: AppRouteName[]) => {
+  const uniqueRouteNames = [...new Set(routeNames)]
+  if (!shouldUseConservativeClientWarmup()) {
+    return uniqueRouteNames
+  }
+
+  return uniqueRouteNames.slice(0, 1)
+}
+
+/**
+ * 路由级客户端预热保守裁剪：
+ * - 仅收缩客户端业务页的预热队列；
+ * - 允许非客户端壳层或管理端预热继续按原逻辑执行，避免共享层策略误伤其他模块。
+ */
+const trimScheduledClientWarmupTargets = (routeNames: RouteWarmupTarget[]) => {
+  const uniqueRouteNames = [...new Set(routeNames)]
+  if (!shouldUseConservativeClientWarmup()) {
+    return uniqueRouteNames
+  }
+
+  const firstClientRouteName = uniqueRouteNames.find((routeName) => isClientWarmupTarget(routeName))
+  if (!firstClientRouteName) {
+    return uniqueRouteNames
+  }
+
+  return uniqueRouteNames.filter((routeName) => {
+    return !isClientWarmupTarget(routeName) || routeName === firstClientRouteName
+  })
+}
+
 const warmupTargetMatchers: Array<{
   target: RouteWarmupTarget
   prefixes: string[]
@@ -317,11 +405,11 @@ export const resolveClientPostLoginWarmupTargets = (redirectPath?: string): AppR
   const normalizedRedirectPath = typeof redirectPath === 'string' ? redirectPath.trim() : ''
   const matchedTarget = normalizedRedirectPath ? resolveClientWarmupTargetByPath(normalizedRedirectPath) : null
   const entryTarget = matchedTarget ?? 'client-mall'
-  const targets: AppRouteName[] = [
+  const targets = trimClientWarmupAdjacencyTargets([
     entryTarget,
     ...(clientWarmupAdjacencyMap[entryTarget] ?? []),
-  ]
-  return [...new Set(targets)]
+  ])
+  return targets
 }
 
 /**
@@ -339,14 +427,13 @@ export const scheduleRouteComponentWarmup = (routeNames: RouteWarmupTarget[]) =>
    * - `saveData` 打开或命中 2G/slow-2g 时，优先把带宽留给当前页面；
    * - 正常网络仍保持现有空闲预热策略，不影响高频路径体验。
    */
-  const networkConnection = 'connection' in globalThis.navigator
-    ? (globalThis.navigator.connection as { saveData?: boolean; effectiveType?: string } | undefined)
-    : undefined
+  const navigator = globalThis.navigator as WarmupNavigator
+  const networkConnection = navigator.connection
   if (networkConnection?.saveData || /(?:^|-)2g$/i.test(networkConnection?.effectiveType ?? '')) {
     return
   }
 
-  const uniqueRouteNames = [...new Set(routeNames)]
+  const uniqueRouteNames = trimScheduledClientWarmupTargets(routeNames)
   const routeNamesToSchedule = uniqueRouteNames.filter((routeName) => {
     return !warmedRoutePromises.has(routeName) && !scheduledWarmupRouteNames.has(routeName)
   })
@@ -358,13 +445,22 @@ export const scheduleRouteComponentWarmup = (routeNames: RouteWarmupTarget[]) =>
     scheduledWarmupRouteNames.add(routeName)
   })
 
+  /**
+   * 弱性能移动浏览器延后调度：
+   * - 即使仍保留一个最高优先级相邻页，也应把预热放到更靠后的空闲片段；
+   * - 这样可以先让当前页面完成首屏绘制、交互绑定和关键接口请求，减少“像同步加载一样卡顿”的体感。
+   */
+  const useConservativeClientWarmup = shouldUseConservativeClientWarmup()
+  const initialWarmupDelay = useConservativeClientWarmup ? 1600 : 900
+  const trailingWarmupDelay = useConservativeClientWarmup ? 2200 : 1200
+
   const scheduleDeferredWarmup = (callback: () => void, timeout: number) => {
     if (typeof globalThis.window.requestIdleCallback === 'function') {
       globalThis.window.requestIdleCallback(callback, { timeout })
       return
     }
 
-    globalThis.window.setTimeout(callback, Math.min(timeout, 420))
+    globalThis.window.setTimeout(callback, useConservativeClientWarmup ? timeout : Math.min(timeout, 420))
   }
 
   /**
@@ -401,11 +497,11 @@ export const scheduleRouteComponentWarmup = (routeNames: RouteWarmupTarget[]) =>
       scheduleDeferredWarmup(() => {
         runWarmupItem(nextRouteName)
         scheduleTrailingWarmupAt(index + 1)
-      }, 1200)
+      }, trailingWarmupDelay)
     }
 
     scheduleTrailingWarmupAt(0)
   }
 
-  scheduleDeferredWarmup(warmupTask, 900)
+  scheduleDeferredWarmup(warmupTask, initialWarmupDelay)
 }
