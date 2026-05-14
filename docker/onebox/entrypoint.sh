@@ -28,8 +28,19 @@ export DB_PASSWORD="${DB_PASSWORD:-}"
 export DB_NAME="${DB_NAME:-y_link}"
 export DB_SYNC="${DB_SYNC:-false}"
 export INIT_ADMIN_USERNAME="${INIT_ADMIN_USERNAME:-admin}"
-export INIT_ADMIN_PASSWORD="${INIT_ADMIN_PASSWORD:-Admin@123456}"
 export INIT_ADMIN_DISPLAY_NAME="${INIT_ADMIN_DISPLAY_NAME:-系统管理员}"
+
+if [ -z "${INIT_ADMIN_PASSWORD:-}" ]; then
+  echo "[onebox] INIT_ADMIN_PASSWORD is required. Set it manually in the container panel environment variables before startup." >&2
+  exit 1
+fi
+
+if [ "${INIT_ADMIN_PASSWORD}" = "Admin@123456" ]; then
+  echo "[onebox] refusing insecure INIT_ADMIN_PASSWORD=Admin@123456. Set a private strong password in the container panel environment variables." >&2
+  exit 1
+fi
+
+export INIT_ADMIN_PASSWORD
 
 # 统一替换 nginx 反向代理端口，确保与后端实际监听端口保持一致。
 sed "s/__BACKEND_PORT__/${PORT}/g" /etc/nginx/conf.d/default.conf > /etc/nginx/conf.d/default.runtime.conf

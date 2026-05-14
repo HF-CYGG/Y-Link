@@ -251,7 +251,13 @@ docker compose -f compose.cloud.yml up -d
 - 来源选择：`编辑`
 - 编排名称：`y-link`
 - 将下方完整 YAML 直接粘贴到编辑器
+- 在容器/编排的“环境变量”面板中手动新增 `INIT_ADMIN_PASSWORD=你的私有强密码`
 - 点击创建并启动后，访问 `http://服务器IP:8080`（或你自定义的前端端口）
+
+管理员初始化密码说明：
+- `INIT_ADMIN_PASSWORD` 为必填环境变量，必须在 1Panel / Docker 面板环境变量中手动配置。
+- 系统不再提供 `Admin@123456` 这类默认密码；未配置时容器会拒绝启动，避免空库首次部署时产生弱口令。
+- 该密码仅用于首次创建管理员账号；启动日志不会输出明文密码。首次登录后仍建议在用户中心立即修改。
 
 `compose.cloud.yml` 参考内容（可直接粘贴到 1Panel 编排）：
 
@@ -275,7 +281,7 @@ services:
       - DB_SYNC=${DB_SYNC:-false}
       - INIT_ADMIN_USERNAME=${INIT_ADMIN_USERNAME:-admin}
       - INIT_ADMIN_DISPLAY_NAME=${INIT_ADMIN_DISPLAY_NAME:-系统管理员}
-      - INIT_ADMIN_PASSWORD=${INIT_ADMIN_PASSWORD:-Admin@123456}
+      - INIT_ADMIN_PASSWORD=${INIT_ADMIN_PASSWORD:?请在容器面板环境变量中手动配置 INIT_ADMIN_PASSWORD 私有强密码}
     ports:
       - "${BACKEND_PORT:-3001}:3001"
     volumes:

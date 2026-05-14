@@ -182,7 +182,8 @@ const main = () => {
   const appSource = readUtf8(appFilePath)
   const permissionCodes = extractPermissionCodes(readUtf8(permissionsFilePath))
   const mountedRouters = extractMountedRouters(appSource)
-  const authGateIndex = appSource.indexOf("app.use('/api', requireAuth)")
+  const authGateMatch = /app\.use\(\s*'\/api'\s*,\s*requireAuth\b/.exec(appSource)
+  const authGateIndex = authGateMatch?.index ?? -1
 
   assert.notEqual(authGateIndex, -1, '未在 app.ts 中找到全局 requireAuth 挂载点')
   assert.ok(mountedRouters.length > 0, '未在 app.ts 中解析到任何 app.use 路由挂载信息')
