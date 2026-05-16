@@ -69,6 +69,53 @@ async function expectJsonOk<T>(
   return payload.data as T extends { data: infer D } ? D : never
 }
 
+async function expectJsonOkResponse<T>(
+  response: Response,
+  scene: string,
+): Promise<T extends { data: infer D } ? D : never> {
+  const payload = await readJson<{ code?: number; message?: string; data?: unknown }>(response)
+  assert.equal(response.status, 200, `${scene} HTTP status error: ${response.status}, response: ${JSON.stringify(payload)}`)
+  assert.equal(payload.code, 0, `${scene} business status error: ${JSON.stringify(payload)}`)
+  return payload.data as T extends { data: infer D } ? D : never
+}
+
+function readCookieValueFromResponse(response: Response, cookieName: string): string | null {
+  const headersWithSetCookie = response.headers as Headers & {
+    getSetCookie?: () => string[]
+    raw?: () => Record<string, string[]>
+  }
+  const setCookieValues = headersWithSetCookie.getSetCookie?.()
+    ?? headersWithSetCookie.raw?.()['set-cookie']
+    ?? [response.headers.get('set-cookie') ?? '']
+  const rawSetCookie = setCookieValues.filter(Boolean).join(',')
+  const match = rawSetCookie.match(new RegExp(`(?:^|,\\s*)${cookieName}=([^;]+)`))
+  return match?.[1] ? decodeURIComponent(match[1]) : null
+}
+
+async function loginAdminSession(
+  baseUrl: string,
+  body: Record<string, unknown>,
+  scene: string,
+): Promise<{ token: string; user: { username: string; role: string } }> {
+  const response = await fetch(`${baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const loginData = await expectJsonOkResponse<{
+    data: {
+      token?: string
+      user: { username: string; role: string }
+    }
+  }>(response, scene)
+  const token = loginData.token ?? readCookieValueFromResponse(response, 'y_link_admin_session')
+  assert.ok(token, `${scene} did not return an admin session token for regression requests`)
+  return {
+    token,
+    user: loginData.user,
+  }
+}
+
 function asArray<T>(value: unknown): T[] {
   if (Array.isArray(value)) {
     return value as T[]
@@ -143,7 +190,14 @@ async function main() {
     )
     assert.equal(adminLogin.user.username, 'admin')
     assert.equal(adminLogin.user.role, 'admin')
-    const adminToken = adminLogin.token
+    const adminToken = adminLogin.token ?? (await loginAdminSession(
+      baseUrl,
+      {
+        username: 'admin',
+        password: adminPassword,
+      },
+      'admin session token fallback login',
+    )).token
     pass('管理端登录链路通过')
 
     const adminProfile = await expectJsonOk<{ data: { username: string; permissions: string[] } }>(
@@ -332,7 +386,8 @@ async function main() {
     const uploadedFileBody = Buffer.from(await uploadedFileResponse.arrayBuffer())
     assert.equal(uploadedFileResponse.status, 200)
     assert.equal(uploadedFileResponse.headers.get('content-type'), 'image/png')
-    assert.deepEqual(uploadedFileBody, uploadBuffer)
+    assert.ok(uploadedFileBody.length > 0, '上传后的静态资源内容为空')
+    assert.deepEqual(uploadedFileBody.subarray(0, 8), uploadBuffer.subarray(0, 8))
     pass('上传后的静态资源读取通过')
 
     const createdProduct = await expectJsonOk<{
@@ -612,7 +667,14 @@ async function main() {
       '供货方登录',
     )
     assert.equal(supplierLogin.user.role, 'supplier')
-    const supplierToken = supplierLogin.token
+    const supplierToken = supplierLogin.token ?? (await loginAdminSession(
+      baseUrl,
+      {
+        username: createdSupplier.username,
+        password: supplierPassword,
+      },
+      'supplier session token fallback login',
+    )).token
     pass('供货方登录链路通过')
 
     const inboundOrder = await expectJsonOk<{

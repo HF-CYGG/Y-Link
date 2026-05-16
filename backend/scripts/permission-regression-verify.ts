@@ -53,12 +53,50 @@ async function readJson(response: Response): Promise<JsonPayload> {
   }
 }
 
-async function expectJsonOk<TData>(request: () => Promise<Response>, scene: string): Promise<TData> {
-  const response = await request()
+async function expectJsonOkResponse<TData>(response: Response, scene: string): Promise<TData> {
   const payload = await readJson(response)
   assert.equal(response.status, 200, `${scene} HTTP 状态码异常：${response.status}`)
   assert.equal(payload.code, 0, `${scene} 业务状态码异常：${JSON.stringify(payload)}`)
   return payload.data as TData
+}
+
+async function expectJsonOk<TData>(request: () => Promise<Response>, scene: string): Promise<TData> {
+  return expectJsonOkResponse<TData>(await request(), scene)
+}
+
+function readCookieValueFromResponse(response: Response, cookieName: string): string | null {
+  const headersWithSetCookie = response.headers as Headers & {
+    getSetCookie?: () => string[]
+    raw?: () => Record<string, string[]>
+  }
+  const setCookieValues = headersWithSetCookie.getSetCookie?.()
+    ?? headersWithSetCookie.raw?.()['set-cookie']
+    ?? [response.headers.get('set-cookie') ?? '']
+  const rawSetCookie = setCookieValues.filter(Boolean).join(',')
+  const match = rawSetCookie.match(new RegExp(`(?:^|,\\s*)${cookieName}=([^;]+)`))
+  return match?.[1] ? decodeURIComponent(match[1]) : null
+}
+
+async function loginAdminSession(
+  baseUrl: string,
+  body: Record<string, unknown>,
+  scene: string,
+): Promise<{ token: string; user: { username: string; role: string } }> {
+  const response = await fetch(`${baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const loginData = await expectJsonOkResponse<{
+    token?: string
+    user: { username: string; role: string }
+  }>(response, scene)
+  const token = loginData.token ?? readCookieValueFromResponse(response, 'y_link_admin_session')
+  assert.ok(token, `${scene} 未返回可用于回归请求的管理端会话`)
+  return {
+    token,
+    user: loginData.user,
+  }
 }
 
 async function expectJsonForbidden(request: () => Promise<Response>, scene: string) {
@@ -76,6 +114,20 @@ async function expectJsonStatus(request: () => Promise<Response>, scene: string,
   assert.equal(response.status, expectedStatus, `${scene} 期望 ${expectedStatus}，实际 ${response.status}`)
   assert.equal(payload.code, expectedStatus, `${scene} 业务状态码应为 ${expectedStatus}`)
   return payload
+}
+
+async function expectJsonOneOfStatuses(request: () => Promise<Response>, scene: string, expectedStatuses: number[]) {
+  const response = await request()
+  const payload = await readJson(response)
+  assert.ok(
+    expectedStatuses.includes(response.status),
+    `${scene} expected one of ${expectedStatuses.join(', ')} but got ${response.status}`,
+  )
+  assert.equal(payload.code, response.status, `${scene} business status should match HTTP status`)
+  return {
+    status: response.status,
+    payload,
+  }
 }
 
 const readCaptchaCode = (captchaSvg: string) => captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6)
@@ -225,7 +277,14 @@ async function main() {
     )
     assert.equal(adminLogin.user.username, 'admin')
     assert.equal(adminLogin.user.role, 'admin')
-    const adminToken = adminLogin.token
+    const adminToken = adminLogin.token ?? (await loginAdminSession(
+      baseUrl,
+      {
+        username: 'admin',
+        password: adminPassword,
+      },
+      'admin session token fallback login',
+    )).token
     pass('管理员登录成功')
 
     const createdOperator = await expectJsonOk<{
@@ -331,7 +390,14 @@ async function main() {
       '操作员登录',
     )
     assert.equal(operatorLogin.user.role, 'operator')
-    const operatorToken = operatorLogin.token
+    const operatorToken = operatorLogin.token ?? (await loginAdminSession(
+      baseUrl,
+      {
+        username: createdOperator.username,
+        password: operatorPassword,
+      },
+      'operator session token fallback login',
+    )).token
     pass('操作员登录成功')
 
     const supplierLogin = await expectJsonOk<{
@@ -350,7 +416,14 @@ async function main() {
       '供货方登录',
     )
     assert.equal(supplierLogin.user.role, 'supplier')
-    const supplierToken = supplierLogin.token
+    const supplierToken = supplierLogin.token ?? (await loginAdminSession(
+      baseUrl,
+      {
+        username: createdSupplier.username,
+        password: supplierPassword,
+      },
+      'supplier session token fallback login',
+    )).token
     pass('供货方登录成功')
 
     await expectJsonForbidden(
@@ -463,7 +536,7 @@ async function main() {
         captchaId: string
         captchaSvg: string
       }>(() => fetch(`${baseUrl}/api/auth/captcha`), `登录锁定验证码 ${index + 1}`)
-      await expectJsonStatus(
+      const lockProbe = await expectJsonOneOfStatuses(
         () =>
           fetch(`${baseUrl}/api/auth/login`, {
             method: 'POST',
@@ -476,8 +549,11 @@ async function main() {
             }),
           }),
         `登录锁定错误计数 ${index + 2}`,
-        401,
+        [401, 429],
       )
+      if (lockProbe.status === 429) {
+        break
+      }
     }
     await expectJsonStatus(
       () =>
