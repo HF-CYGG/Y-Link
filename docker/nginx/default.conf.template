@@ -5,9 +5,15 @@
 # 2. 通过 `resolver` + 变量 upstream 实现延迟解析，降低编排刚启动时的 DNS 瞬态失败；
 # 3. 供官方前端镜像在运行阶段由 `/etc/nginx/templates` 自动渲染。
 #
+map $status $ylink_log_abnormal {
+    ~^[23] 0;
+    default 1;
+}
+
 server {
     listen 80;
     server_name _;
+    access_log /dev/stdout combined if=$ylink_log_abnormal;
     resolver 127.0.0.11 valid=30s ipv6=off;
     set $backend_upstream backend:3001;
 

@@ -11,7 +11,7 @@ set -e
 # 这里启动前先确保目录存在，避免首次上传时依赖运行期隐式创建。
 mkdir -p /app/data /app/uploads /run/nginx
 
-# 让 nginx 默认日志文件也指向容器标准输出，确保 docker logs/1Panel 能看到完整访问日志。
+# 让 nginx 日志文件指向容器标准输出；站点配置仅输出异常 HTTP 状态，避免正常访问刷屏。
 mkdir -p /var/log/nginx
 ln -sf /dev/stdout /var/log/nginx/access.log
 ln -sf /dev/stderr /var/log/nginx/error.log
