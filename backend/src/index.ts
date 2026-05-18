@@ -46,6 +46,53 @@ const paint = (text: string, color: keyof typeof colorPalette): string => {
   return `${colorPalette[color]}${text}${colorPalette.reset}`
 }
 
+const resolveLogTimeZone = (): string => {
+  return process.env.TZ?.trim() || 'Asia/Shanghai'
+}
+
+const getDateTimePartsInTimeZone = (date: Date, timeZone: string): Record<string, string> => {
+  const formatter = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+    hourCycle: 'h23',
+  })
+  return Object.fromEntries(formatter.formatToParts(date).map((part) => [part.type, part.value]))
+}
+
+const formatTimeZoneOffset = (date: Date, timeZone: string): string => {
+  const parts = getDateTimePartsInTimeZone(date, timeZone)
+  const zonedTimeAsUtc = Date.UTC(
+    Number(parts.year),
+    Number(parts.month) - 1,
+    Number(parts.day),
+    Number(parts.hour),
+    Number(parts.minute),
+    Number(parts.second),
+  )
+  const offsetMinutes = Math.round((zonedTimeAsUtc - date.getTime()) / 60_000)
+  const sign = offsetMinutes >= 0 ? '+' : '-'
+  const absoluteMinutes = Math.abs(offsetMinutes)
+  const hours = String(Math.floor(absoluteMinutes / 60)).padStart(2, '0')
+  const minutes = String(absoluteMinutes % 60).padStart(2, '0')
+  return `${sign}${hours}:${minutes}`
+}
+
+const formatLogTimestamp = (date = new Date()): string => {
+  const timeZone = resolveLogTimeZone()
+  try {
+    const parts = getDateTimePartsInTimeZone(date, timeZone)
+    return `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}${formatTimeZoneOffset(date, timeZone)}`
+  } catch {
+    return date.toISOString()
+  }
+}
+
 const logBanner = (title: string) => {
   console.log(paint('='.repeat(72), 'dim'))
   console.log(paint(`[y-link-backend] ${title}`, 'brightCyan'))
@@ -60,7 +107,7 @@ const logLine = (label: string, value: string, tone: 'info' | 'success' | 'warn'
     error: 'red',
   } as const
 
-  const timestamp = new Date().toISOString()
+  const timestamp = formatLogTimestamp()
   const logLabel = `[${label}]`
   console.log(`${paint(timestamp, 'dim')} ${paint(logLabel, colorByTone[tone])} ${value}`)
 }
@@ -84,7 +131,7 @@ const probeHealthEndpoint = async (port: number): Promise<boolean> => {
 
 const runStartupDiagnostics = async (port: number) => {
   logBanner('启动自检')
-  logLine('RUNTIME', `pid=${process.pid} node=${process.version} platform=${process.platform}/${process.arch}`)
+  logLine('RUNTIME', `pid=${process.pid} node=${process.version} platform=${process.platform}/${process.arch} timezone=${resolveLogTimeZone()}`)
 
   try {
     await AppDataSource.query('SELECT 1')

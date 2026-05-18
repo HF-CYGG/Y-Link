@@ -28,9 +28,13 @@ WORKDIR /app
 ENV NODE_ENV=production \
   PORT=3001 \
   DB_TYPE=mysql \
-  DB_SYNC=false
+  DB_SYNC=false \
+  TZ=Asia/Shanghai
 
-RUN mkdir -p /app/uploads \
+RUN apt-get update \
+  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata \
+  && rm -rf /var/lib/apt/lists/* \
+  && mkdir -p /app/uploads \
   && chown -R node:node /app
 
 COPY --from=build --chown=node:node /app/package*.json ./

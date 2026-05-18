@@ -38,7 +38,12 @@ WORKDIR /app
 
 ENV NODE_ENV=production \
   PORT=3001 \
-  SQLITE_DB_PATH=/app/data/y-link.sqlite
+  SQLITE_DB_PATH=/app/data/y-link.sqlite \
+  TZ=Asia/Shanghai
+
+RUN apt-get update \
+  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata \
+  && rm -rf /var/lib/apt/lists/*
 
 # 创建运行目录并提前授权给 node 用户，降低容器默认 root 运行风险。
 # 这里同时预创建 uploads 目录，确保首次上传前容器内就具备稳定的落盘路径。

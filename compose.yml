@@ -13,6 +13,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3001
+      TZ: ${TZ:-Asia/Shanghai}
       DB_TYPE: sqlite
       SQLITE_DB_PATH: /app/data/y-link.sqlite
       DB_SYNC: "false"
@@ -41,6 +42,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
     depends_on:
       backend:
         condition: service_healthy

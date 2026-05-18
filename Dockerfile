@@ -37,6 +37,10 @@ RUN npm run build
 # ------------------------------
 FROM nginx:1.27-alpine AS runtime
 
+ENV TZ=Asia/Shanghai
+
+RUN apk add --no-cache tzdata
+
 # 使用可模板化站点配置：
 # - 处理 Vue Router history 路由回退；
 # - 默认代理到同编排 backend:3001，并通过延迟解析降低启动阶段 DNS 瞬态失败风险。

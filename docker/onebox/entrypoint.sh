@@ -17,6 +17,7 @@ ln -sf /dev/stdout /var/log/nginx/access.log
 ln -sf /dev/stderr /var/log/nginx/error.log
 
 export PORT="${PORT:-3001}"
+export TZ="${TZ:-Asia/Shanghai}"
 export LOG_COLOR="${LOG_COLOR:-true}"
 export FORCE_COLOR="${FORCE_COLOR:-1}"
 export DB_TYPE="${DB_TYPE:-sqlite}"

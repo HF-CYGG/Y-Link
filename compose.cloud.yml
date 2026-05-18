@@ -13,6 +13,7 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3001
+      - TZ=${TZ:-Asia/Shanghai}
       - LOG_COLOR=${LOG_COLOR:-true}
       - FORCE_COLOR=${FORCE_COLOR:-1}
       - DB_TYPE=${DB_TYPE:-sqlite}
@@ -49,6 +50,8 @@ services:
   frontend:
     image: ${FRONTEND_IMAGE:-docker.io/yemiao351/y-link-frontend:latest}
     pull_policy: always
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
     depends_on:
       backend:
         condition: service_healthy

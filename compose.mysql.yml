@@ -13,6 +13,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3001
+      TZ: ${TZ:-Asia/Shanghai}
       DB_TYPE: mysql
       DB_HOST: ${DB_HOST}
       DB_PORT: ${DB_PORT:-3306}
@@ -46,6 +47,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
     depends_on:
       backend:
         condition: service_healthy
