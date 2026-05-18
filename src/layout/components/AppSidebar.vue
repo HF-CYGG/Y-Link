@@ -248,11 +248,25 @@ const deviceLabel = computed(() => {
 
     <div class="border-t border-slate-200/60 p-4 dark:border-white/5">
       <div class="app-sidebar__build-signature">
-        <div class="app-sidebar__build-topline">
+        <div class="app-sidebar__build-row">
           <span class="app-sidebar__build-badge">{{ APP_META.version }}</span>
           <span class="app-sidebar__device-pill">{{ deviceLabel }}</span>
         </div>
-        <div class="app-sidebar__build-author">{{ APP_META.developer }}</div>
+        <div class="app-sidebar__build-row app-sidebar__build-row--secondary">
+          <span class="app-sidebar__build-author">{{ APP_META.developer }}</span>
+          <a
+            class="app-sidebar__repo-link"
+            :href="APP_META.repositoryUrl"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="GitHub 仓库"
+          >
+            <svg class="app-sidebar__repo-icon" aria-hidden="true">
+              <use href="/icons.svg#github-icon"></use>
+            </svg>
+            {{ APP_META.repositoryLabel }}
+          </a>
+        </div>
       </div>
     </div>
   </aside>
@@ -389,27 +403,38 @@ const deviceLabel = computed(() => {
 }
 
 .app-sidebar__build-signature {
-  display: grid;
-  gap: 0.45rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.62rem;
   max-width: 100%;
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  border-radius: 16px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 18px;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(248, 250, 252, 0.96));
-  box-shadow: 0 8px 22px rgba(15, 23, 42, 0.05);
-  padding: 0.75rem 0.85rem;
+    linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(248, 250, 252, 0.78));
+  box-shadow:
+    0 16px 34px -28px rgba(15, 23, 42, 0.48),
+    inset 0 1px 0 rgba(255, 255, 255, 0.86);
+  padding: 0.78rem 0.86rem;
+  backdrop-filter: blur(18px);
 }
 
-.app-sidebar__build-topline {
+.app-sidebar__build-row {
   display: flex;
-  flex-wrap: wrap;
+  justify-content: space-between;
   align-items: center;
-  gap: 0.4rem 0.5rem;
+  min-width: 0;
+  gap: 0.75rem;
+}
+
+.app-sidebar__build-row--secondary {
+  padding-top: 0.62rem;
+  border-top: 1px solid rgba(148, 163, 184, 0.16);
 }
 
 .app-sidebar__build-badge {
   display: inline-flex;
   align-items: center;
+  flex: 0 0 auto;
   border-radius: 9999px;
   background: #0f766e;
   color: #f0fdfa;
@@ -417,34 +442,71 @@ const deviceLabel = computed(() => {
   font-weight: 700;
   letter-spacing: 0.04em;
   line-height: 1;
-  padding: 0.38rem 0.62rem;
+  padding: 0.38rem 0.64rem;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2);
 }
 
 .app-sidebar__device-pill {
+  min-width: 0;
   color: #64748b;
   font-size: 0.68rem;
   font-weight: 600;
   line-height: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .app-sidebar__build-author {
+  min-width: 0;
   color: #475569;
   font-size: 0.75rem;
   font-weight: 600;
   line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-sidebar__repo-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  flex: 0 0 auto;
+  color: #0f766e;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1.2;
+  text-decoration: none;
   word-break: break-word;
+}
+
+.app-sidebar__repo-icon {
+  width: 0.9rem;
+  height: 0.9rem;
+  flex: 0 0 auto;
+}
+
+.app-sidebar__repo-link:hover {
+  text-decoration: underline;
 }
 
 .dark .app-sidebar__build-signature {
   border-color: rgba(255, 255, 255, 0.08);
   background:
-    linear-gradient(180deg, rgba(20, 20, 21, 0.96), rgba(17, 18, 20, 0.98));
-  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.24);
+    linear-gradient(180deg, rgba(24, 24, 27, 0.9), rgba(15, 23, 42, 0.82));
+  box-shadow:
+    0 16px 34px -26px rgba(0, 0, 0, 0.72),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
 }
 
 .dark .app-sidebar__build-badge {
   background: #115e59;
   color: #f0fdfa;
+}
+
+.dark .app-sidebar__build-row--secondary {
+  border-top-color: rgba(255, 255, 255, 0.08);
 }
 
 .dark .app-sidebar__device-pill {
@@ -453,5 +515,13 @@ const deviceLabel = computed(() => {
 
 .dark .app-sidebar__build-author {
   color: #e2e8f0;
+}
+
+.dark .app-sidebar__repo-link {
+  color: #5eead4;
+}
+
+.dark .app-sidebar__repo-icon {
+  filter: invert(1);
 }
 </style>

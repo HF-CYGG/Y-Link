@@ -906,6 +906,17 @@ onUnmounted(() => {
 
         <div class="brand-footer">
           <div class="brand-footer__version">{{ APP_META.version }}</div>
+          <a
+            class="brand-footer__repo-link"
+            :href="APP_META.repositoryUrl"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <svg class="brand-footer__repo-icon" aria-hidden="true">
+              <use href="/icons.svg#github-icon"></use>
+            </svg>
+            {{ APP_META.repositoryLabel }}
+          </a>
           <div class="brand-footer__copyright">{{ APP_META.copyright }}</div>
         </div>
       </aside>
@@ -1350,6 +1361,29 @@ onUnmounted(() => {
   font-weight: 700;
   letter-spacing: 0.08em;
   line-height: 1.2;
+}
+
+.brand-footer__repo-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 6px;
+  color: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.35;
+  opacity: 0.92;
+  text-decoration: none;
+}
+
+.brand-footer__repo-icon {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+}
+
+.brand-footer__repo-link:hover {
+  text-decoration: underline;
 }
 
 .brand-footer__copyright {

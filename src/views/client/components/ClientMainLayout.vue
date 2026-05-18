@@ -198,7 +198,17 @@ const handleLogout = async () => {
         <div class="client-main-layout__header-actions">
           <div class="client-main-layout__build-meta" aria-label="版本信息">
             <span class="client-main-layout__build-version">{{ APP_META.version }}</span>
-            <span class="client-main-layout__build-author">{{ APP_META.developer }}</span>
+            <a
+              class="client-main-layout__repo-link"
+              :href="APP_META.repositoryUrl"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <svg class="client-main-layout__repo-icon" aria-hidden="true">
+                <use href="/icons.svg#github-icon"></use>
+              </svg>
+              {{ APP_META.repositoryLabel }}
+            </a>
           </div>
           <button
             type="button"
@@ -308,10 +318,29 @@ const handleLogout = async () => {
   font-weight: 700;
 }
 
-.client-main-layout__build-author {
+.client-main-layout__repo-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  max-width: 8.5rem;
   color: #94a3b8;
   font-size: 0.66rem;
   font-weight: 600;
+  overflow: hidden;
+  text-decoration: none;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.client-main-layout__repo-icon {
+  width: 0.78rem;
+  height: 0.78rem;
+  flex: 0 0 auto;
+}
+
+.client-main-layout__repo-link:hover {
+  color: var(--ylink-color-primary-strong);
+  text-decoration: underline;
 }
 
 .client-main-layout__viewport {
@@ -415,7 +444,8 @@ const handleLogout = async () => {
     font-size: 0.68rem;
   }
 
-  .client-main-layout__build-author {
+  .client-main-layout__repo-link {
+    max-width: 6.9rem;
     font-size: 0.6rem;
   }
 
