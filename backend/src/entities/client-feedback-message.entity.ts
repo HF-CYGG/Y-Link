@@ -14,6 +14,7 @@ import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 
 import { entityColumnOptions } from './entity-column-options.js'
 
 const feedbackMessageContentColumnType = entityColumnOptions.isSqlite ? 'text' : 'longtext'
+const feedbackJsonArrayDefaultColumnOptions = entityColumnOptions.isSqlite ? { default: '[]' } : {}
 
 /**
  * 消息发送方类型：
@@ -72,7 +73,12 @@ export class ClientFeedbackMessage {
   @Column({ name: 'content', type: feedbackMessageContentColumnType, comment: '消息正文' })
   content!: string
 
-  @Column({ name: 'attachment_json', type: feedbackMessageContentColumnType, default: '[]', comment: '消息附件 JSON 文本' })
+  @Column({
+    name: 'attachment_json',
+    type: feedbackMessageContentColumnType,
+    ...feedbackJsonArrayDefaultColumnOptions,
+    comment: '消息附件 JSON 文本',
+  })
   attachmentJson!: string
 
   @Column({ name: 'client_read_at', ...entityColumnOptions.timestamp, nullable: true, comment: '客户端已读时间' })
