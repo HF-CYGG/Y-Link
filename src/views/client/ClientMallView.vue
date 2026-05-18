@@ -7,7 +7,7 @@
 
 
 import { useVirtualList } from '@vueuse/core'
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { ArrowDown, ArrowRight, Search, ShoppingCart } from '@element-plus/icons-vue'
@@ -70,6 +70,8 @@ const settlePulsing = ref(false)
 const searchInputFocused = ref(false)
 const mobileSearchVisible = ref(false)
 const mobileSearchInputRef = ref<HTMLInputElement | null>(null)
+const isMallRoute = computed(() => route.path.startsWith('/client/mall'))
+const shouldShowMobileSearchEntry = computed(() => isPhone.value && isMallRoute.value)
 
 const listScrollerRef = ref<HTMLElement | null>(null)
 const sectionRefMap = reactive<Record<string, HTMLElement | null>>({})
@@ -673,9 +675,16 @@ watch(
   (nextPath) => {
     if (!nextPath.startsWith('/client/mall')) {
       miniCartVisible.value = false
+      mobileSearchVisible.value = false
+      searchInputFocused.value = false
     }
   },
 )
+
+onDeactivated(() => {
+  mobileSearchVisible.value = false
+  searchInputFocused.value = false
+})
 
 onMounted(async () => {
   globalThis.window.addEventListener('resize', handleMallViewportResize, { passive: true })
@@ -705,7 +714,7 @@ onBeforeUnmount(() => {
 
 <template>
   <section class="mall-page space-y-4">
-    <Teleport to="body">
+    <Teleport v-if="shouldShowMobileSearchEntry" to="body">
       <button
         type="button"
         class="mall-mobile-search-trigger mall-mobile-search-trigger--floating"
