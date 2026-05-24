@@ -273,7 +273,8 @@ const printTimestamp = formatDateTime(new Date())
 .voucher-sheet__meta {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
+  flex-wrap: wrap;
   gap: 12px;
   margin-bottom: 6px;
   font-size: 12px;
@@ -361,9 +362,9 @@ const printTimestamp = formatDateTime(new Date())
 }
 
 .voucher-master-table td.text-left {
-  text-align: left;
-  padding-left: 8px;
-  padding-right: 8px;
+  text-align: center;
+  padding-left: 5px;
+  padding-right: 5px;
 }
 
 .voucher-master-table tbody tr:not(.voucher-title-row):not(.voucher-detail-header-row):not(.voucher-sign-label-row) td {
@@ -417,10 +418,11 @@ const printTimestamp = formatDateTime(new Date())
   width: 100%;
   display: inline-flex;
   align-items: center;
-  justify-content: flex-start;
+  justify-content: center;
   padding: 0 4px;
   box-sizing: border-box;
   white-space: pre-wrap;
+  text-align: center;
 }
 
 .editable-line.is-empty {
