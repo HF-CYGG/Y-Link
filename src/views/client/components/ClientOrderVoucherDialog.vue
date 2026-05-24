@@ -23,7 +23,7 @@ type VoucherEditableFieldKey = keyof OrderVoucherEditableFields
  */
 const ORDER_VOUCHER_FIXED_FIELDS_TEXT = '固定版式字段：标题区、基础信息区、明细区、汇总区与签字区'
 const ORDER_VOUCHER_AUTO_FIELDS_TEXT = '自动填充字段：申请部门、商品名称、产品编码、单价、数量、小计、总计、业务单号'
-const ORDER_VOUCHER_EDITABLE_FIELDS_TEXT = '在线补填字段：部门经办人、金蝶单据编号、领取人签字、出库人签字、完成日期/签字'
+const ORDER_VOUCHER_EDITABLE_FIELDS_TEXT = '在线补填字段：部门经办人、金蝶单据编号、领取人签字、文创工坊管理员签字、出库人签字、完成日期/签字'
 
 const props = defineProps<{
   visible: boolean
@@ -132,6 +132,14 @@ const emitEditableFieldUpdate = (key: VoucherEditableFieldKey, value: string | n
                 @update:model-value="emitEditableFieldUpdate('receiverSignature', $event)"
               />
             </el-form-item>
+            <el-form-item label="文创工坊管理员签字">
+              <el-input
+                :model-value="editableFields.workshopManagerSignature"
+                placeholder="请输入文创工坊管理员签字"
+                clearable
+                @update:model-value="emitEditableFieldUpdate('workshopManagerSignature', $event)"
+              />
+            </el-form-item>
             <el-form-item label="出库人签字">
               <el-input
                 :model-value="editableFields.issuerSignature"
@@ -140,7 +148,7 @@ const emitEditableFieldUpdate = (key: VoucherEditableFieldKey, value: string | n
                 @update:model-value="emitEditableFieldUpdate('issuerSignature', $event)"
               />
             </el-form-item>
-            <el-form-item class="voucher-editor-form__item--full" label="完成日期/签字">
+            <el-form-item label="完成日期/签字">
               <el-input
                 :model-value="editableFields.completionSignature"
                 placeholder="请输入完成日期或签字说明，例如：2026-04-30 已完成"

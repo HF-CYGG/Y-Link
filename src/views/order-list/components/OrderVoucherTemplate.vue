@@ -17,6 +17,7 @@ interface OrderVoucherEditableFields {
   departmentOperator: string
   kingdeeVoucherNo: string
   receiverSignature: string
+  workshopManagerSignature: string
   issuerSignature: string
   completionSignature: string
 }
@@ -27,6 +28,7 @@ const createEmptyEditableFields = (): OrderVoucherEditableFields => ({
   departmentOperator: '',
   kingdeeVoucherNo: '',
   receiverSignature: '',
+  workshopManagerSignature: '',
   issuerSignature: '',
   completionSignature: '',
 })
@@ -43,6 +45,7 @@ const props = withDefaults(
       departmentOperator: '',
       kingdeeVoucherNo: '',
       receiverSignature: '',
+      workshopManagerSignature: '',
       issuerSignature: '',
       completionSignature: '',
     }),
@@ -213,8 +216,9 @@ const printTimestamp = formatDateTime(new Date())
           </tr>
           <tr class="voucher-sign-label-row">
             <th colspan="2" scope="colgroup">领取人签字</th>
-            <th colspan="2" scope="colgroup">出库人签字</th>
-            <th colspan="2" scope="colgroup">完成日期/签字</th>
+            <th colspan="2" scope="colgroup">文创工坊管理员签字</th>
+            <th scope="colgroup">出库人签字</th>
+            <th scope="colgroup">完成日期</th>
           </tr>
           <tr class="voucher-sign-value-row">
             <td colspan="2" class="is-editable-cell">
@@ -223,11 +227,16 @@ const printTimestamp = formatDateTime(new Date())
               </span>
             </td>
             <td colspan="2" class="is-editable-cell">
+              <span class="editable-line" :class="{ 'is-empty': !resolvedEditableFields.workshopManagerSignature.trim() }">
+                {{ getEditableFieldDisplay(resolvedEditableFields.workshopManagerSignature) }}
+              </span>
+            </td>
+            <td class="is-editable-cell">
               <span class="editable-line" :class="{ 'is-empty': !resolvedEditableFields.issuerSignature.trim() }">
                 {{ getEditableFieldDisplay(resolvedEditableFields.issuerSignature) }}
               </span>
             </td>
-            <td colspan="2" class="is-editable-cell">
+            <td class="is-editable-cell">
               <span class="editable-line" :class="{ 'is-empty': !resolvedEditableFields.completionSignature.trim() }">
                 {{ getEditableFieldDisplay(resolvedEditableFields.completionSignature) }}
               </span>

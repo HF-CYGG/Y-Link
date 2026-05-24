@@ -25,6 +25,7 @@ export interface OrderVoucherEditableFields {
   departmentOperator: string
   kingdeeVoucherNo: string
   receiverSignature: string
+  workshopManagerSignature: string
   issuerSignature: string
   completionSignature: string
 }
@@ -37,6 +38,7 @@ export const createEmptyVoucherEditableFields = (): OrderVoucherEditableFields =
   departmentOperator: '',
   kingdeeVoucherNo: '',
   receiverSignature: '',
+  workshopManagerSignature: '',
   issuerSignature: '',
   completionSignature: '',
 })
