@@ -17,9 +17,7 @@ interface OrderVoucherEditableFields {
   departmentOperator: string
   kingdeeVoucherNo: string
   receiverSignature: string
-  workshopManagerSignature: string
-  issuerSignature: string
-  completionSignature: string
+  completionDate: string
 }
 
 type VoucherOrientation = 'portrait' | 'landscape'
@@ -28,9 +26,7 @@ const createEmptyEditableFields = (): OrderVoucherEditableFields => ({
   departmentOperator: '',
   kingdeeVoucherNo: '',
   receiverSignature: '',
-  workshopManagerSignature: '',
-  issuerSignature: '',
-  completionSignature: '',
+  completionDate: '',
 })
 
 const props = withDefaults(
@@ -45,9 +41,7 @@ const props = withDefaults(
       departmentOperator: '',
       kingdeeVoucherNo: '',
       receiverSignature: '',
-      workshopManagerSignature: '',
-      issuerSignature: '',
-      completionSignature: '',
+      completionDate: '',
     }),
     copyLabels: () => ['第一联（部门留存）', '第二联（书院留存）'],
     orientation: 'landscape',
@@ -227,18 +221,18 @@ const printTimestamp = formatDateTime(new Date())
               </span>
             </td>
             <td colspan="2" class="is-editable-cell">
-              <span class="editable-line" :class="{ 'is-empty': !resolvedEditableFields.workshopManagerSignature.trim() }">
-                {{ getEditableFieldDisplay(resolvedEditableFields.workshopManagerSignature) }}
+              <span class="editable-line is-empty">
+                {{ getEditableFieldDisplay('') }}
               </span>
             </td>
             <td class="is-editable-cell">
-              <span class="editable-line" :class="{ 'is-empty': !resolvedEditableFields.issuerSignature.trim() }">
-                {{ getEditableFieldDisplay(resolvedEditableFields.issuerSignature) }}
+              <span class="editable-line is-empty">
+                {{ getEditableFieldDisplay('') }}
               </span>
             </td>
             <td class="is-editable-cell">
-              <span class="editable-line" :class="{ 'is-empty': !resolvedEditableFields.completionSignature.trim() }">
-                {{ getEditableFieldDisplay(resolvedEditableFields.completionSignature) }}
+              <span class="editable-line" :class="{ 'is-empty': !resolvedEditableFields.completionDate.trim() }">
+                {{ getEditableFieldDisplay(resolvedEditableFields.completionDate) }}
               </span>
             </td>
           </tr>

@@ -25,9 +25,7 @@ export interface OrderVoucherEditableFields {
   departmentOperator: string
   kingdeeVoucherNo: string
   receiverSignature: string
-  workshopManagerSignature: string
-  issuerSignature: string
-  completionSignature: string
+  completionDate: string
 }
 
 export type VoucherOrientation = 'portrait' | 'landscape'
@@ -38,7 +36,5 @@ export const createEmptyVoucherEditableFields = (): OrderVoucherEditableFields =
   departmentOperator: '',
   kingdeeVoucherNo: '',
   receiverSignature: '',
-  workshopManagerSignature: '',
-  issuerSignature: '',
-  completionSignature: '',
+  completionDate: '',
 })
