@@ -20,6 +20,7 @@ import {
   getO2oMallProducts,
   getO2oPreorderDetail,
   markMyO2oPreorderCustomerOrderPrinted,
+  resolveO2oDisplayShowNo,
   submitO2oReturnRequest,
   updateMyO2oPreorder,
   type O2oMallProduct,
@@ -192,6 +193,12 @@ const orderTypeLabel = computed(() => {
 const shouldShowVoucherButton = computed(() => {
   return detail.value?.order.clientOrderType === 'department'
 })
+const displayOrderShowNo = computed(() => {
+  if (!detail.value) {
+    return ''
+  }
+  return resolveO2oDisplayShowNo(detail.value.order)
+})
 
 const voucherOrientationLabel = computed(() => (voucherOrientation.value === 'landscape' ? '横版' : '竖版'))
 const showDetailRefreshNotice = computed(() => detailRefreshNoticeExpiresAt.value > Date.now())
@@ -245,11 +252,12 @@ const voucherOrder = computed<OrderDetailResult | null>(() => {
     return null
   }
   const { order, items, customerProfile } = detail.value
+  const displayShowNo = resolveO2oDisplayShowNo(order)
   const customerDisplayName = customerProfile?.realName || customerProfile?.username || null
   const normalizedTotalAmount = toVoucherMoneyText(order.totalAmount ?? totalAmount.value)
   return {
     id: order.id,
-    showNo: order.showNo,
+    showNo: displayShowNo,
     orderType: order.clientOrderType,
     hasCustomerOrder: Boolean(order.hasCustomerOrder),
     isSystemApplied: Boolean(order.isSystemApplied),
@@ -518,7 +526,7 @@ const buildOrderSummaryFromDetail = (nextDetail: O2oPreorderDetail): O2oPreorder
   const { order } = nextDetail
   return {
     id: order.id,
-    showNo: order.showNo,
+    showNo: resolveO2oDisplayShowNo(order),
     verifyCode: order.verifyCode,
     status: order.status,
     businessStatus: order.businessStatus,
@@ -969,7 +977,7 @@ const handleRecallOrder = async () => {
 
   try {
     await ElMessageBox.confirm(
-      `确认撤回订单“${detail.value.order.showNo}”吗？撤回后将释放预订库存，二维码会立即失效。`,
+      `确认撤回订单“${displayOrderShowNo.value}”吗？撤回后将释放预订库存，二维码会立即失效。`,
       '撤回订单',
       {
         type: 'warning',
@@ -1046,7 +1054,7 @@ const handleSubmitOrderEdit = async () => {
 
   try {
     await ElMessageBox.confirm(
-      `确认修改订单“${detail.value.order.showNo}”吗？保存后将按最新商品和数量重算预订库存。`,
+      `确认修改订单“${displayOrderShowNo.value}”吗？保存后将按最新商品和数量重算预订库存。`,
       '修改订单',
       {
         type: 'warning',
@@ -1211,7 +1219,7 @@ onBeforeUnmount(() => {
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div class="flex flex-wrap items-center gap-2">
-              <p class="text-lg font-semibold text-slate-900">{{ detail.order.showNo }}</p>
+              <p class="text-lg font-semibold text-slate-900">{{ displayOrderShowNo }}</p>
               <span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">{{ orderTypeLabel }}</span>
               <Transition name="detail-refresh-notice">
                 <span

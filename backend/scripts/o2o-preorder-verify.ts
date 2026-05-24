@@ -12,6 +12,7 @@ import assert from 'node:assert/strict'
 import { AppDataSource } from '../src/config/data-source.js'
 import { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } from '../src/config/database-bootstrap.js'
 import { BaseProduct } from '../src/entities/base-product.entity.js'
+import { BizOutboundOrder } from '../src/entities/biz-outbound-order.entity.js'
 import { InventoryLog } from '../src/entities/inventory-log.entity.js'
 import { O2oPreorder } from '../src/entities/o2o-preorder.entity.js'
 import { authService } from '../src/services/auth.service.js'
@@ -214,6 +215,19 @@ const run = async () => {
   const verified = await o2oPreorderService.verifyByCode(verifiedPreorder.order.verifyCode, verifyActor)
   const verifiedDetail = assertPreorderVerifyDetail(verified)
   assert.equal(verifiedDetail.order.status, 'verified')
+  const outboundOrderRepo = AppDataSource.getRepository(BizOutboundOrder)
+  const verifiedOutboundOrder = await outboundOrderRepo.findOne({
+    where: { idempotencyKey: `o2o-preorder-verify:${verifiedPreorder.order.id}` },
+  })
+  assert.ok(verifiedOutboundOrder, '核销后应生成后台正式出库单')
+  const verifiedCustomerOrderShowNo = (
+    verifiedDetail.order as O2oPreorderDetailView['order'] & { customerOrderShowNo?: string | null }
+  ).customerOrderShowNo
+  assert.equal(
+    verifiedCustomerOrderShowNo,
+    verifiedOutboundOrder.showNo,
+    '客户端订单详情应返回与管理端一致的正式出库单号',
+  )
   await expectBizError(() => o2oPreorderService.cancelMyOrder(clientAuth, verifiedPreorder.order.id), '订单已核销，无法撤回')
   await o2oPreorderService.inboundStock(product.id, 3, verifyActor, '自动化补货')
   log('管理端核销、已核销不可撤回与入库流程通过')

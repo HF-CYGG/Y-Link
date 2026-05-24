@@ -17,7 +17,13 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { RefreshRight } from '@element-plus/icons-vue'
-import { cancelMyO2oPreorder, getMyO2oPreorders, type O2oPreorderDetail, type O2oPreorderSummary } from '@/api/modules/o2o'
+import {
+  cancelMyO2oPreorder,
+  getMyO2oPreorders,
+  resolveO2oDisplayShowNo,
+  type O2oPreorderDetail,
+  type O2oPreorderSummary,
+} from '@/api/modules/o2o'
 import { BaseRequestState } from '@/components/common'
 import { useStableRequest } from '@/composables/useStableRequest'
 import {
@@ -187,7 +193,7 @@ const buildOrderSummaryFromDetail = (detail: O2oPreorderDetail): O2oPreorderSumm
     .sort((prev, next) => new Date(next.createdAt).getTime() - new Date(prev.createdAt).getTime())[0] ?? null
   return {
     id: order.id,
-    showNo: order.showNo,
+    showNo: resolveO2oDisplayShowNo(order),
     verifyCode: order.verifyCode,
     status: order.status,
     businessStatus: order.businessStatus,
@@ -214,6 +220,15 @@ const buildOrderSummaryFromDetail = (detail: O2oPreorderDetail): O2oPreorderSumm
     totalQty: order.totalQty,
     timeoutAt: order.timeoutAt,
     createdAt: order.createdAt,
+  }
+}
+
+// 详细注释：客户端订单列表进入 Store 前，统一把展示单号切换为管理端正式出库单号。
+// 这样列表卡片、撤回确认、详情返回后的局部刷新都能稳定复用同一个可见单号口径。
+const normalizeSummaryDisplayShowNo = (order: O2oPreorderSummary): O2oPreorderSummary => {
+  return {
+    ...order,
+    showNo: resolveO2oDisplayShowNo(order),
   }
 }
 
@@ -499,7 +514,7 @@ const loadOrders = async (force = false, options?: { append?: boolean; silent?: 
       ),
     onSuccess: async (result) => {
       if (append) {
-        clientOrderStore.appendOrders(result.records, {
+        clientOrderStore.appendOrders(result.records.map(normalizeSummaryDisplayShowNo), {
           page: result.page,
           pageSize: result.pageSize,
           total: result.total,
@@ -507,7 +522,8 @@ const loadOrders = async (force = false, options?: { append?: boolean; silent?: 
         return
       }
       const previousOrderMap = new Map(clientOrderStore.orders.map((item) => [item.id, item]))
-      const nextRecords = silent ? resolveSilentRefreshRecords(result.records) : result.records
+      const normalizedRecords = result.records.map(normalizeSummaryDisplayShowNo)
+      const nextRecords = silent ? resolveSilentRefreshRecords(normalizedRecords) : normalizedRecords
       const logicalPageSize = clientOrderStore.pageSize || DEFAULT_ORDER_PAGE_SIZE
       clientOrderStore.setOrders(nextRecords, {
         page: silent ? Math.max(1, Math.ceil(nextRecords.length / logicalPageSize)) : result.page,
