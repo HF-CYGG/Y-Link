@@ -10,7 +10,7 @@
     "check": "tsc -p tsconfig.json --noEmit",
     "audit:prod:mysql": "node scripts/audit-mysql-production.mjs",
     "verify:db:concurrency": "node ../scripts/run-verify-db-concurrency.mjs",
-    "verify:db:concurrency:raw": "tsx scripts/verify-db-concurrency.ts",
+    "verify:db:concurrency:raw": "tsx scripts/database-concurrency-target-verify.ts",
     "permission:regression:verify": "tsx scripts/permission-regression-verify.ts",
     "release:verify": "tsx scripts/release-full-regression-verify.ts",
     "spec:fix-order-product-tag-consistency:verify": "tsx scripts/fix-order-product-tag-consistency-verify.ts",

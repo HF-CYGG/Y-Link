@@ -13,16 +13,19 @@
 import { computed, ref, watch } from 'vue'
 import type { RouteLocationNormalizedLoaded } from 'vue-router'
 import { ElMessageBox } from 'element-plus'
+import { BaseRouteErrorState } from '@/components/common'
 import { APP_META } from '@/constants/app-meta'
 import { useClientAuthStore, useClientCartStore } from '@/store'
 import router from '@/router'
 import { buildClientNavigationItems } from '@/router/routes'
 import { redirectToClientLogin } from '@/utils/client-auth-navigation'
+import { clearRouteError, runtimeErrorState } from '@/utils/runtime-error-state'
 import pinia from '@/store/pinia'
 
 const clientAuthStore = useClientAuthStore(pinia)
 const clientCartStore = useClientCartStore(pinia)
 const currentRoute = computed(() => router.currentRoute.value)
+const routeError = computed(() => runtimeErrorState.clientRouteError.value)
 
 clientCartStore.initialize(clientAuthStore.currentUser?.id)
 const transitionName = ref<'slide-left' | 'slide-right'>('slide-left')
@@ -31,7 +34,6 @@ const displayName = computed(() => {
   return clientAuthStore.currentUser?.username
     || clientAuthStore.currentUser?.account
     || clientAuthStore.currentUser?.realName
-    || clientAuthStore.currentUser?.mobile
     || '访客'
 })
 
@@ -182,6 +184,11 @@ const handleLogout = async () => {
   // 退出后改为硬跳转登录页，避免旧客户端布局残留导致偶发白屏。
   redirectToClientLogin()
 }
+
+const retryRouteRender = () => {
+  clearRouteError('client')
+  globalThis.window?.location.reload()
+}
 </script>
 
 <template>
@@ -223,7 +230,16 @@ const handleLogout = async () => {
 
     <main class="client-main-layout__container min-w-0 px-4 pt-4 sm:px-5">
       <div class="client-main-layout__viewport">
+        <div v-if="routeError" class="py-4">
+          <BaseRouteErrorState
+            :title="routeError.title"
+            :description="routeError.message"
+            home-path="/client/mall"
+            @retry="retryRouteRender"
+          />
+        </div>
         <router-view v-slot="{ Component, route: viewRoute }">
+          <template v-if="!routeError">
           <!-- 统一使用单一 transition：保证 keepAlive 与非 keepAlive 走同一动画上下文，避免双过渡叠加。 -->
           <transition :name="transitionName" mode="out-in">
             <KeepAlive v-if="Component && viewRoute.meta.keepAlive" :max="3">
@@ -240,6 +256,7 @@ const handleLogout = async () => {
               class="client-page-absolute"
             />
           </transition>
+          </template>
         </router-view>
       </div>
     </main>

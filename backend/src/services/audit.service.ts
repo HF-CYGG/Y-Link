@@ -9,6 +9,7 @@ import { AppDataSource } from '../config/data-source.js'
 import { SysAuditLog } from '../entities/sys-audit-log.entity.js'
 import type { AuditResultStatus, AuthUserContext } from '../types/auth.js'
 import type { RequestMeta } from '../utils/request-meta.js'
+import { sanitizeAuditDetail, sanitizeAuditTargetCode } from '../utils/security-sanitizer.js'
 
 export interface CreateAuditLogInput {
   actionType: string
@@ -74,6 +75,7 @@ export class AuditService {
 
   async record(input: CreateAuditLogInput, manager?: EntityManager): Promise<SysAuditLog> {
     const repository = (manager ?? AppDataSource.manager).getRepository(SysAuditLog)
+    const sanitizedDetail = sanitizeAuditDetail(input.detail)
     const entity = repository.create({
       actionType: input.actionType,
       actionLabel: input.actionLabel,
@@ -82,9 +84,9 @@ export class AuditService {
       actorDisplayName: input.actor?.displayName ?? null,
       targetType: input.targetType,
       targetId: input.targetId ?? null,
-      targetCode: input.targetCode ?? null,
+      targetCode: sanitizeAuditTargetCode(input.targetCode),
       resultStatus: input.resultStatus ?? 'success',
-      detailJson: input.detail ? JSON.stringify(input.detail) : null,
+      detailJson: sanitizedDetail ? JSON.stringify(sanitizedDetail) : null,
       ipAddress: input.requestMeta?.ipAddress ?? null,
       userAgent: input.requestMeta?.userAgent ?? null,
     })
@@ -96,7 +98,8 @@ export class AuditService {
     try {
       await this.record(input)
     } catch (error) {
-      console.error('[y-link-backend] audit log write failed:', error)
+      const reason = error instanceof Error ? error.message : String(error)
+      console.error('[y-link-backend] audit log write failed:', reason)
     }
   }
 

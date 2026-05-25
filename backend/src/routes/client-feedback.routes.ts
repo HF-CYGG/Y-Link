@@ -13,7 +13,7 @@
 
 import { Router } from 'express'
 import { z } from 'zod'
-import { requireClientAuth } from '../middleware/client-auth.middleware.js'
+import { requireClientAuth, requireClientCsrf } from '../middleware/client-auth.middleware.js'
 import type { ClientAuthenticatedRequest } from '../types/client-auth.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
@@ -135,6 +135,7 @@ authenticatedClientFeedbackRouter.get(
 
 authenticatedClientFeedbackRouter.post(
   '/attachments',
+  requireClientCsrf,
   feedbackAttachmentUpload.single('file'),
   asyncHandler(async (req, res) => {
     if (!req.file) {
@@ -159,6 +160,7 @@ authenticatedClientFeedbackRouter.post(
 
 authenticatedClientFeedbackRouter.post(
   '/conversations',
+  requireClientCsrf,
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const payload = createConversationSchema.parse(req.body)
@@ -178,6 +180,7 @@ authenticatedClientFeedbackRouter.get(
 
 authenticatedClientFeedbackRouter.post(
   '/conversations/:id/messages',
+  requireClientCsrf,
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const payload = appendMessageSchema.parse(req.body)
@@ -193,6 +196,7 @@ authenticatedClientFeedbackRouter.post(
 
 authenticatedClientFeedbackRouter.patch(
   '/conversations/:id/confirm-resolved',
+  requireClientCsrf,
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const data = await clientFeedbackService.confirmConversationResolvedByClient(
@@ -206,6 +210,7 @@ authenticatedClientFeedbackRouter.patch(
 
 authenticatedClientFeedbackRouter.post(
   '/conversations/:id/satisfaction',
+  requireClientCsrf,
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const payload = submitSatisfactionSchema.parse(req.body)

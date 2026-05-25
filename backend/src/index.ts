@@ -5,7 +5,7 @@
  */
 
 import { createApp } from './app.js'
-import { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } from './config/database-bootstrap.js'
+import { applySqlitePragmas, initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } from './config/database-bootstrap.js'
 import { AppDataSource } from './config/data-source.js'
 import { maskDatabaseRuntimeOverride, readDatabaseRuntimeOverride } from './config/database-runtime-override.js'
 import { env, envLoadContext } from './config/env.js'
@@ -18,6 +18,7 @@ import {
   buildEffectiveDatabaseSummary,
   buildRuntimeOverrideStatusSummary,
 } from './utils/effective-database.js'
+import { revokeLegacyPlaintextSessions } from './utils/session-token.js'
 
 const colorPalette = {
   reset: '\u001B[0m',
@@ -168,10 +169,14 @@ async function bootstrap(): Promise<void> {
   prepareDatabaseRuntime()
   logLine('STEP', 'initialize datasource')
   await AppDataSource.initialize()
+  logLine('STEP', 'apply sqlite pragmas')
+  await applySqlitePragmas(AppDataSource)
   installSqliteTransactionQueue(AppDataSource)
   logLine('STEP', 'initialize database schema')
   const schemaInitResult = await initializeDatabaseSchemaIfNeeded(AppDataSource)
   logLine('SCHEMA', `action=${schemaInitResult.action} reason=${schemaInitResult.reason}`)
+  logLine('STEP', 'revoke legacy plaintext sessions')
+  const legacySessionCleanup = await revokeLegacyPlaintextSessions(AppDataSource)
   logLine('STEP', 'migrate legacy upload references')
   const uploadMigrationResult = await migrateLegacyUploadReferences(AppDataSource)
   logLine(
@@ -228,6 +233,11 @@ async function bootstrap(): Promise<void> {
       'SYSTEM CONFIG',
       `inserted=${configBootstrap.insertedCount}/${configBootstrap.totalCount}`,
       configBootstrap.insertedCount > 0 ? 'success' : 'info',
+    )
+    logLine(
+      'SESSION HARDENING',
+      `legacyAdminCleared=${legacySessionCleanup.adminCleared} legacyClientCleared=${legacySessionCleanup.clientCleared}`,
+      legacySessionCleanup.adminCleared > 0 || legacySessionCleanup.clientCleared > 0 ? 'warn' : 'info',
     )
     if (adminBootstrap.initialized) {
       // 安全加固：禁止在启动日志输出明文密码，避免被日志采集系统或终端历史泄露。

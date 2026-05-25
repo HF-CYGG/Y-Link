@@ -135,6 +135,23 @@ function summarizeSamples(samples: RequestSample[]): ScenarioSummary {
   }
 }
 
+function readCookieValueFromResponse(response: Response, cookieName: string): string | null {
+  const headersWithSetCookie = response.headers as Headers & {
+    getSetCookie?: () => string[]
+    raw?: () => Record<string, string[]>
+  }
+  const setCookieValues = headersWithSetCookie.getSetCookie?.()
+    ?? headersWithSetCookie.raw?.()['set-cookie']
+    ?? [response.headers.get('set-cookie') ?? '']
+  const rawSetCookie = setCookieValues.filter(Boolean).join(',')
+  const match = rawSetCookie.match(new RegExp(`(?:^|,\\s*)${cookieName}=([^;]+)`))
+  return match?.[1] ? decodeURIComponent(match[1]) : null
+}
+
+function parseJsonPayload<T>(text: string): T {
+  return (text ? JSON.parse(text) : {}) as T
+}
+
 function normalizeSqlIdentifier(value: string) {
   return value.replaceAll(/\W/g, '_').slice(0, 60)
 }
@@ -267,6 +284,7 @@ async function seedClientSessions(dataSource: { getRepository: Function }, count
   const { ClientUser } = await import('../src/entities/client-user.entity.js')
   const { ClientUserSession } = await import('../src/entities/client-user-session.entity.js')
   const { hashPassword } = await import('../src/utils/password.js')
+  const { hashSessionToken } = await import('../src/utils/session-token.js')
   const { generateSessionToken } = await import('../src/utils/token.js')
   const userRepo = dataSource.getRepository(ClientUser)
   const sessionRepo = dataSource.getRepository(ClientUserSession)
@@ -294,7 +312,7 @@ async function seedClientSessions(dataSource: { getRepository: Function }, count
     const saved = await userRepo.save(user)
     const token = generateSessionToken()
     await sessionRepo.save(sessionRepo.create({
-      sessionToken: token,
+      sessionToken: hashSessionToken(token),
       userId: saved.id,
       expiresAt,
       lastAccessAt: now,
@@ -340,7 +358,7 @@ function makeRequest(baseUrl: string) {
         signal: controller.signal,
       })
       const text = await response.text()
-      payload = (text ? JSON.parse(text) : {}) as T
+      payload = parseJsonPayload<T>(text)
     } catch (error) {
       const sample: RequestSample = {
         label: input.label,
@@ -389,24 +407,45 @@ function makeRequest(baseUrl: string) {
   }
 }
 
+async function loginAdminSession(
+  requestJson: ReturnType<typeof makeRequest>,
+  body: Record<string, unknown>,
+  scene: string,
+) {
+  const loginResponse = await requestJson<{
+    code?: number
+    data?: {
+      token?: string
+      user?: { username: string; role: string }
+    }
+  }>({
+    label: scene,
+    method: 'POST',
+    pathname: '/api/auth/login',
+    body,
+  })
+  const token = loginResponse.payload.data?.token ?? readCookieValueFromResponse(loginResponse.response, 'y_link_admin_session')
+  assert.equal(loginResponse.response.status, 200, `${scene} failed`)
+  assert.ok(token, `${scene} did not return admin session cookie`)
+  return {
+    token,
+    user: loginResponse.payload.data?.user ?? null,
+  }
+}
+
 async function setupFixtures(
   requestJson: ReturnType<typeof makeRequest>,
   dataSource: { getRepository: Function },
 ) {
-  const adminLogin = await requestJson<{
-    code: number
-    data: { token: string; user: { username: string; role: string } }
-  }>({
-    label: 'admin login',
-    method: 'POST',
-    pathname: '/api/auth/login',
-    body: {
+  const adminLogin = await loginAdminSession(
+    requestJson,
+    {
       username: 'admin',
       password: process.env.INIT_ADMIN_PASSWORD,
     },
-  })
-  assert.equal(adminLogin.response.status, 200, 'admin login failed')
-  const adminToken = adminLogin.payload.data.token
+    'admin login',
+  )
+  const adminToken = adminLogin.token
 
   const supplierPassword = `Supplier_${runId}_Aa1!`
   const supplier = await requestJson<{ code: number; data: { username: string } }>({
@@ -424,16 +463,14 @@ async function setupFixtures(
   })
   assert.equal(supplier.response.status, 200, 'supplier create failed')
 
-  const supplierLogin = await requestJson<{ code: number; data: { token: string } }>({
-    label: 'supplier login',
-    method: 'POST',
-    pathname: '/api/auth/login',
-    body: {
+  const supplierLogin = await loginAdminSession(
+    requestJson,
+    {
       username: `dbc_supplier_${runId}`,
       password: supplierPassword,
     },
-  })
-  assert.equal(supplierLogin.response.status, 200, 'supplier login failed')
+    'supplier login',
+  )
 
   const clientTokens = await seedClientSessions(dataSource, thresholds.mixedScenarioUsers)
 
@@ -444,7 +481,7 @@ async function setupFixtures(
 
   return {
     adminToken,
-    supplierToken: supplierLogin.payload.data.token,
+    supplierToken: supplierLogin.token,
     clientTokens,
   }
 }
@@ -877,7 +914,7 @@ async function main() {
   try {
     const { createApp } = await import('../src/app.js')
     const { AppDataSource } = await import('../src/config/data-source.js')
-    const { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } = await import('../src/config/database-bootstrap.js')
+    const { applySqlitePragmas, initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } = await import('../src/config/database-bootstrap.js')
     const { installSqliteTransactionQueue } = await import('../src/utils/sqlite-transaction-queue.js')
     const { authService } = await import('../src/services/auth.service.js')
     const { systemConfigService } = await import('../src/services/system-config.service.js')
@@ -885,6 +922,7 @@ async function main() {
     dataSource = AppDataSource
     prepareDatabaseRuntime()
     await AppDataSource.initialize()
+    await applySqlitePragmas(AppDataSource)
     installSqliteTransactionQueue(AppDataSource)
     await initializeDatabaseSchemaIfNeeded(AppDataSource)
     await authService.ensureDefaultAdmin()

@@ -10,10 +10,12 @@ import { computed, ref, watch } from 'vue'
 import { useRoute, type RouteLocationNormalizedLoaded } from 'vue-router'
 import AppHeader from '@/layout/components/AppHeader.vue'
 import AppSidebar from '@/layout/components/AppSidebar.vue'
+import { BaseRouteErrorState } from '@/components/common'
 import { useDevice } from '@/composables/useDevice'
 import { buildAppMenuItems } from '@/router/routes'
 import { useAppStore, useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
+import { clearRouteError, runtimeErrorState } from '@/utils/runtime-error-state'
 
 /**
  * 初始化设备监听：
@@ -30,6 +32,7 @@ useDevice()
 const appStore = useAppStore(pinia)
 const authStore = useAuthStore(pinia)
 const route = useRoute()
+const routeError = computed(() => runtimeErrorState.managementRouteError.value)
 
 /**
  * 当前用户可见菜单：
@@ -108,6 +111,13 @@ const resolveViewKey = (route: RouteLocationNormalizedLoaded) => {
 
   return route.fullPath
 }
+
+const managementHomePath = computed(() => (authStore.currentUser?.role === 'supplier' ? '/supplier-delivery' : '/dashboard'))
+
+const retryRouteRender = () => {
+  clearRouteError('management')
+  globalThis.window?.location.reload()
+}
 </script>
 
 <template>
@@ -139,7 +149,16 @@ const resolveViewKey = (route: RouteLocationNormalizedLoaded) => {
       </transition>
 
       <main :class="['relative flex-1 overflow-y-auto overflow-x-hidden', mainPaddingClass]">
+        <div v-if="routeError" class="min-h-full px-2 py-6">
+          <BaseRouteErrorState
+            :title="routeError.title"
+            :description="routeError.message"
+            :home-path="managementHomePath"
+            @retry="retryRouteRender"
+          />
+        </div>
         <router-view v-slot="{ Component, route }">
+          <template v-if="!routeError">
               <Suspense :timeout="suspenseTimeout" @pending="handleRoutePending" @resolve="handleRouteResolved">
             <template #default>
               <div :class="['route-stage min-h-full', { 'route-stage--pending': routeStagePending }]">
@@ -177,6 +196,7 @@ const resolveViewKey = (route: RouteLocationNormalizedLoaded) => {
               </div>
             </template>
           </Suspense>
+          </template>
         </router-view>
       </main>
     </div>

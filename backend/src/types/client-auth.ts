@@ -13,6 +13,7 @@ export interface ClientAuthContext {
   email: string
   realName: string
   sessionToken: string
+  authSource: 'cookie' | 'bearer'
 }
 
 export interface ClientAuthenticatedRequest extends Request {

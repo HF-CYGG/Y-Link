@@ -11,3 +11,4 @@
  */
 export { default as BaseEmptyState } from './BaseEmptyState.vue'
 export { default as BaseRequestState } from './BaseRequestState.vue'
+export { default as BaseRouteErrorState } from './BaseRouteErrorState.vue'

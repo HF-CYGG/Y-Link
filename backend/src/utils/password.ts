@@ -13,8 +13,14 @@ import { BizError } from './errors.js'
 const scrypt = promisify(scryptCallback)
 const PASSWORD_SALT_BYTES = 16
 const PASSWORD_KEY_LENGTH = 64
+const PASSWORD_HASH_VERSION = 'scrypt$v1'
 export const CLIENT_PASSWORD_POLICY_MIN_LENGTH = 8
 export const ADMIN_PASSWORD_POLICY_MIN_LENGTH = 8
+
+export interface PasswordVerificationResult {
+  matched: boolean
+  needsRehash: boolean
+}
 
 /**
  * 客户端统一密码策略说明：
@@ -92,7 +98,7 @@ export async function hashPassword(plainPassword: string): Promise<string> {
   const normalizedPassword = normalizePassword(plainPassword)
   const salt = randomBytes(PASSWORD_SALT_BYTES).toString('hex')
   const derivedKey = (await scrypt(normalizedPassword, salt, PASSWORD_KEY_LENGTH)) as Buffer
-  return `${salt}:${derivedKey.toString('hex')}`
+  return `${PASSWORD_HASH_VERSION}$${salt}$${derivedKey.toString('hex')}`
 }
 
 /**
@@ -101,18 +107,47 @@ export async function hashPassword(plainPassword: string): Promise<string> {
  * - 若历史数据格式异常，直接返回 false，避免抛出底层异常影响登录接口稳定性。
  */
 export async function verifyPassword(plainPassword: string, persistedPasswordHash: string): Promise<boolean> {
+  const result = await verifyPasswordDetailed(plainPassword, persistedPasswordHash)
+  return result.matched
+}
+
+export async function verifyPasswordDetailed(
+  plainPassword: string,
+  persistedPasswordHash: string,
+): Promise<PasswordVerificationResult> {
+  const normalizedPassword = normalizePassword(plainPassword)
+
+  if (persistedPasswordHash.startsWith(`${PASSWORD_HASH_VERSION}$`)) {
+    const [, , salt, storedHash] = persistedPasswordHash.split('$')
+    if (!salt || !storedHash) {
+      return { matched: false, needsRehash: false }
+    }
+
+    const derivedKey = (await scrypt(normalizedPassword, salt, PASSWORD_KEY_LENGTH)) as Buffer
+    const storedBuffer = Buffer.from(storedHash, 'hex')
+    if (storedBuffer.length !== derivedKey.length) {
+      return { matched: false, needsRehash: false }
+    }
+
+    return {
+      matched: timingSafeEqual(storedBuffer, derivedKey),
+      needsRehash: false,
+    }
+  }
+
   const [salt, storedHash] = persistedPasswordHash.split(':')
   if (!salt || !storedHash) {
-    return false
+    return { matched: false, needsRehash: false }
   }
 
-  const normalizedPassword = normalizePassword(plainPassword)
   const derivedKey = (await scrypt(normalizedPassword, salt, PASSWORD_KEY_LENGTH)) as Buffer
   const storedBuffer = Buffer.from(storedHash, 'hex')
-
   if (storedBuffer.length !== derivedKey.length) {
-    return false
+    return { matched: false, needsRehash: false }
   }
 
-  return timingSafeEqual(storedBuffer, derivedKey)
+  return {
+    matched: timingSafeEqual(storedBuffer, derivedKey),
+    needsRehash: true,
+  }
 }

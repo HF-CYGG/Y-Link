@@ -13,7 +13,8 @@ import { SysUserSession } from '../entities/sys-user-session.entity.js'
 import type { AuthUserContext, UserSafeProfile } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
 import type { RequestMeta } from '../utils/request-meta.js'
-import { assertAdminPasswordPolicy, hashPassword, verifyPassword } from '../utils/password.js'
+import { assertAdminPasswordPolicy, hashPassword, verifyPassword, verifyPasswordDetailed } from '../utils/password.js'
+import { hashSessionToken } from '../utils/session-token.js'
 import { generateSessionToken } from '../utils/token.js'
 import { auditService } from './audit.service.js'
 import { authSecurityService } from './auth-security.service.js'
@@ -134,8 +135,8 @@ export class AuthService {
       throw new BizError('当前账号已停用，请联系管理员', 403)
     }
 
-    const passwordMatched = await verifyPassword(password, user.passwordHash)
-    if (!passwordMatched) {
+    const passwordCheckResult = await verifyPasswordDetailed(password, user.passwordHash)
+    if (!passwordCheckResult.matched) {
       await authSecurityService.recordAdminLoginFailure(requestMeta, user.username)
       await auditService.safeRecord({
         actionType: 'auth.login',
@@ -173,12 +174,17 @@ export class AuthService {
       const savedUser = await userRepo.save(user)
       const session = await sessionRepo.save(
         sessionRepo.create({
-          sessionToken: token,
+          sessionToken: hashSessionToken(token),
           userId: savedUser.id,
           expiresAt,
           lastAccessAt: now,
         }),
       )
+
+      if (passwordCheckResult.needsRehash) {
+        savedUser.passwordHash = await hashPassword(password)
+        await userRepo.save(savedUser)
+      }
 
       await auditService.record(
         {
@@ -217,7 +223,7 @@ export class AuthService {
     await AppDataSource.transaction(async (manager) => {
       const sessionRepo = manager.getRepository(SysUserSession)
       const existedSession = await sessionRepo.findOne({
-        where: { sessionToken: auth.sessionToken },
+        where: { sessionToken: hashSessionToken(auth.sessionToken) },
       })
 
       if (existedSession) {
@@ -290,8 +296,8 @@ export class AuthService {
       throw new BizError('当前用户不存在', 404)
     }
 
-    const passwordMatched = await verifyPassword(currentPassword, user.passwordHash)
-    if (!passwordMatched) {
+    const passwordCheckResult = await verifyPasswordDetailed(currentPassword, user.passwordHash)
+    if (!passwordCheckResult.matched) {
       await auditService.safeRecord({
         actionType: 'auth.change_password',
         actionLabel: '本人修改密码',
@@ -316,6 +322,9 @@ export class AuthService {
       const userRepo = manager.getRepository(SysUser)
       const sessionRepo = manager.getRepository(SysUserSession)
 
+      if (passwordCheckResult.needsRehash) {
+        user.passwordHash = await hashPassword(currentPassword)
+      }
       user.passwordHash = await hashPassword(newPassword)
       await userRepo.save(user)
 
@@ -347,7 +356,7 @@ export class AuthService {
     const now = new Date()
     const session = await this.sessionRepo.findOne({
       where: {
-        sessionToken,
+        sessionToken: hashSessionToken(sessionToken),
         expiresAt: MoreThan(now),
       },
     })

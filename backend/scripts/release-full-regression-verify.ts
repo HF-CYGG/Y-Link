@@ -116,6 +116,31 @@ async function loginAdminSession(
   }
 }
 
+async function loginClientSession(
+  baseUrl: string,
+  body: Record<string, unknown>,
+  scene: string,
+): Promise<{ token: string; user: { mobile?: string; realName?: string }; authMode: string }> {
+  const response = await fetch(`${baseUrl}/api/client-auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const loginData = await expectJsonOkResponse<{
+    data: {
+      user: { mobile?: string; realName?: string }
+      authMode: string
+    }
+  }>(response, scene)
+  const token = readCookieValueFromResponse(response, 'y_link_client_session')
+  assert.ok(token, `${scene} did not return a client session cookie`)
+  return {
+    token,
+    user: loginData.user,
+    authMode: loginData.authMode,
+  }
+}
+
 function asArray<T>(value: unknown): T[] {
   if (Array.isArray(value)) {
     return value as T[]
@@ -166,38 +191,17 @@ async function main() {
     assert.equal(health.status, 'UP')
     pass('后端健康检查通过')
 
-    const adminLogin = await expectJsonOk<{
-      data: {
-        token: string
-        user: {
-          username: string
-          role: string
-        }
-      }
-    }>(
-      () =>
-        fetch(`${baseUrl}/api/auth/login`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            username: 'admin',
-            password: adminPassword,
-          }),
-        }),
-      '管理端登录',
-    )
-    assert.equal(adminLogin.user.username, 'admin')
-    assert.equal(adminLogin.user.role, 'admin')
-    const adminToken = adminLogin.token ?? (await loginAdminSession(
+    const adminLogin = await loginAdminSession(
       baseUrl,
       {
         username: 'admin',
         password: adminPassword,
       },
-      'admin session token fallback login',
-    )).token
+      '管理端登录',
+    )
+    assert.equal(adminLogin.user.username, 'admin')
+    assert.equal(adminLogin.user.role, 'admin')
+    const adminToken = adminLogin.token
     pass('管理端登录链路通过')
 
     const adminProfile = await expectJsonOk<{ data: { username: string; permissions: string[] } }>(
@@ -936,30 +940,18 @@ async function main() {
       () => fetch(`${baseUrl}/api/client-auth/captcha`),
       '客户端登录图形验证码获取',
     )
-    const clientLogin = await expectJsonOk<{
-      data: {
-        token: string
-        user: {
-          mobile: string
-        }
-      }
-    }>(
-      () =>
-        fetch(`${baseUrl}/api/client-auth/login`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            account: clientAccount,
-            password: clientPassword,
-            captchaId: loginCaptcha.captchaId,
-            captchaCode: readCaptchaCode(loginCaptcha.captchaSvg),
-          }),
-        }),
+    const clientLogin = await loginClientSession(
+      baseUrl,
+      {
+        account: clientAccount,
+        password: clientPassword,
+        captchaId: loginCaptcha.captchaId,
+        captchaCode: readCaptchaCode(loginCaptcha.captchaSvg),
+      },
       '客户端登录',
     )
     const clientToken = clientLogin.token
+    assert.equal(clientLogin.authMode, 'cookie')
     assert.equal(clientLogin.user.mobile, clientAccount)
     pass('客户端登录链路通过')
 

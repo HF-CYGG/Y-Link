@@ -18,7 +18,8 @@ import {
   normalizeClientUsername,
 } from '../utils/client-auth-account.js'
 import type { RequestMeta } from '../utils/request-meta.js'
-import { assertClientPasswordPolicy, hashPassword, verifyPassword } from '../utils/password.js'
+import { assertClientPasswordPolicy, hashPassword, verifyPasswordDetailed } from '../utils/password.js'
+import { hashSessionToken } from '../utils/session-token.js'
 import { generateSessionToken } from '../utils/token.js'
 import { auditService } from './audit.service.js'
 import { authSecurityService } from './auth-security.service.js'
@@ -34,6 +35,7 @@ interface ResetTicket {
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const RESET_TICKET_TTL_MS = 10 * 60 * 1000
+const SESSION_LAST_ACCESS_UPDATE_WINDOW_MS = 5 * 60 * 1000
 const resetTicketStore = new EphemeralTicketStore<ResetTicket>({
   maxSize: 3000,
   resolveExpiresAt: (ticket) => ticket.expireAt,
@@ -341,8 +343,8 @@ class ClientAuthService {
     if (user.status !== 'enabled') {
       throw new BizError('当前账号已停用', 403)
     }
-    const matched = await verifyPassword(password, user.passwordHash)
-    if (!matched) {
+    const passwordCheckResult = await verifyPasswordDetailed(password, user.passwordHash)
+    if (!passwordCheckResult.matched) {
       const loginFailureResult = await authSecurityService.recordClientLoginFailure(requestMeta, account.normalizedValue)
       await auditService.safeRecord({
         actionType: 'client.auth.login',
@@ -368,12 +370,16 @@ class ClientAuthService {
       await manager.getRepository(ClientUser).save(user)
       await manager.getRepository(ClientUserSession).save(
         manager.getRepository(ClientUserSession).create({
-          sessionToken: token,
+          sessionToken: hashSessionToken(token),
           userId: user.id,
           expiresAt,
           lastAccessAt: now,
         }),
       )
+      if (passwordCheckResult.needsRehash) {
+        user.passwordHash = await hashPassword(password)
+        await manager.getRepository(ClientUser).save(user)
+      }
     })
     authSecurityService.clearClientLoginFailures(requestMeta, account.normalizedValue)
     return {
@@ -442,22 +448,28 @@ class ClientAuthService {
 
   async resolveClientByToken(token: string): Promise<ClientAuthContext> {
     const now = new Date()
-    const session = await this.sessionRepo.findOne({ where: { sessionToken: token }, relations: { user: true } })
+    const session = await this.sessionRepo.findOne({
+      where: { sessionToken: hashSessionToken(token) },
+      relations: { user: true },
+    })
     if (!session || session.expiresAt <= now || !session.user) {
       throw new BizError('未登录或登录状态已失效', 401)
     }
     if (session.user.status !== 'enabled') {
       throw new BizError('当前账号已停用', 403)
     }
-    session.lastAccessAt = now
-    await this.sessionRepo.save(session)
+    if (now.getTime() - session.lastAccessAt.getTime() >= SESSION_LAST_ACCESS_UPDATE_WINDOW_MS) {
+      session.lastAccessAt = now
+      await this.sessionRepo.save(session)
+    }
     return {
       userId: session.user.id,
       mobile: session.user.mobile ?? '',
       email: session.user.email ?? '',
       account: session.user.realName || session.user.email || session.user.mobile || '',
       realName: session.user.realName,
-      sessionToken: session.sessionToken,
+      sessionToken: token,
+      authSource: 'bearer',
     }
   }
 
@@ -470,7 +482,7 @@ class ClientAuthService {
   }
 
   async logout(auth: ClientAuthContext) {
-    await this.sessionRepo.delete({ sessionToken: auth.sessionToken })
+    await this.sessionRepo.delete({ sessionToken: hashSessionToken(auth.sessionToken) })
   }
 
   async changePassword(auth: ClientAuthContext, input: ClientChangePasswordInput) {
@@ -488,8 +500,8 @@ class ClientAuthService {
       throw new BizError('当前用户不存在', 404)
     }
 
-    const matched = await verifyPassword(input.currentPassword, userWithPwd.passwordHash)
-    if (!matched) {
+    const passwordCheckResult = await verifyPasswordDetailed(input.currentPassword, userWithPwd.passwordHash)
+    if (!passwordCheckResult.matched) {
       throw new BizError('原密码错误', 400)
     }
 

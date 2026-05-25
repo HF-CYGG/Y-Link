@@ -6,7 +6,7 @@
 
 import { Router } from 'express'
 import { z } from 'zod'
-import { requireClientAuth } from '../middleware/client-auth.middleware.js'
+import { requireClientAuth, requireClientCsrf } from '../middleware/client-auth.middleware.js'
 import { requireAuth, requirePermission } from '../middleware/auth.middleware.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 import type { ClientAuthenticatedRequest } from '../types/client-auth.js'
@@ -135,6 +135,7 @@ o2oRouter.get(
 o2oRouter.post(
   '/mall/preorders',
   requireClientAuth,
+  requireClientCsrf,
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const data = await o2oPreorderService.submit(authReq.clientAuth, submitPreorderSchema.parse(req.body))
@@ -180,6 +181,7 @@ o2oRouter.get(
 o2oRouter.post(
   '/mall/preorders/:id/customer-order-print',
   requireClientAuth,
+  requireClientCsrf,
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const data = await o2oPreorderService.markCustomerOrderPrintedByClient(authReq.clientAuth, req.params.id)
@@ -191,6 +193,7 @@ o2oRouter.post(
 o2oRouter.post(
   '/mall/preorders/:id/cancel',
   requireClientAuth,
+  requireClientCsrf,
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const data = await o2oPreorderService.cancelMyOrder(authReq.clientAuth, req.params.id)
@@ -202,6 +205,7 @@ o2oRouter.post(
 o2oRouter.patch(
   '/mall/preorders/:id',
   requireClientAuth,
+  requireClientCsrf,
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const payload = updateMyPreorderSchema.parse(req.body)
@@ -249,6 +253,7 @@ o2oRouter.patch(
 o2oRouter.post(
   '/mall/preorders/:id/returns',
   requireClientAuth,
+  requireClientCsrf,
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const payload = submitReturnRequestSchema.parse(req.body)

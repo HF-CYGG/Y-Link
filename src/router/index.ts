@@ -11,6 +11,7 @@ import { canAccessRoute, resolveFirstAccessibleManagementPath, routes } from '@/
 import type { UserSafeProfile } from '@/api/modules/auth'
 import { showPermissionDenied } from '@/utils/permission'
 import { hasRecoverableAdminSessionHint } from '@/utils/auth-storage'
+import { clearRouteError, reportRouteError } from '@/utils/runtime-error-state'
 import pinia from '@/store/pinia'
 
 export const resolveDefaultManagementRedirect = (user?: Pick<UserSafeProfile, 'role'> | null) => {
@@ -231,6 +232,12 @@ router.beforeEach(async (to) => {
   const authStore = useAuthStore(pinia)
   const clientAuthStore = useClientAuthStore(pinia)
   const flags = resolveRouteGuardFlags(to)
+  if (flags.touchesClientAuth) {
+    clearRouteError('client')
+  }
+  if (flags.touchesManagementAuth || (!to.path.startsWith('/client') && !to.path.startsWith('/login'))) {
+    clearRouteError('management')
+  }
 
   logRouteTrace('beforeEach:start', {
     to: to.fullPath,
@@ -299,6 +306,7 @@ router.afterEach((to) => {
 })
 
 router.onError((error, to) => {
+  reportRouteError(to.path.startsWith('/client') ? 'client' : 'management', error)
   logRouteTrace('router:error', {
     to: to.fullPath,
     message: error instanceof Error ? error.message : String(error),

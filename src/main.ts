@@ -20,6 +20,7 @@ import router from '@/router'
 import { elementPlusIconWhitelist } from '@/icons/element-plus'
 import { useAuthStore, useClientAuthStore, useThemeStore } from '@/store'
 import pinia from '@/store/pinia'
+import { reportGlobalAppError } from '@/utils/runtime-error-state'
 
 /**
  * 开发态统一预加载 Element Plus 全量样式：
@@ -45,6 +46,11 @@ app.config.warnHandler = (message, _instance, trace) => {
   }
 
   console.warn(`[vue warn] ${message}${trace}`)
+}
+
+app.config.errorHandler = (error, _instance, info) => {
+  reportGlobalAppError(error, '页面运行异常')
+  console.error('[vue error]', info, error)
 }
 
 // 统一日期/时间中文化，避免日期面板出现英文月份与星期。
@@ -117,6 +123,15 @@ const installSessionReloginBridge = () => {
 }
 
 installSessionReloginBridge()
+
+if (globalThis.window !== undefined) {
+  globalThis.window.addEventListener('error', (event) => {
+    reportGlobalAppError(event.error ?? event.message, '页面脚本异常')
+  })
+  globalThis.window.addEventListener('unhandledrejection', (event) => {
+    reportGlobalAppError(event.reason, '页面请求异常')
+  })
+}
 
 /**
  * 注册 Element Plus 全局加载指令：

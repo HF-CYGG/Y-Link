@@ -66,13 +66,79 @@ async function expectJsonOk<T>(
   return payload.data as T extends { data: infer D } ? D : never
 }
 
+async function expectJsonOkResponse<T>(
+  response: Response,
+  scene: string,
+): Promise<T extends { data: infer D } ? D : never> {
+  const payload = await readJson<{ code?: number; message?: string; data?: unknown }>(response)
+  assert.equal(response.status, 200, `${scene} HTTP 状态码异常：${response.status}，响应：${JSON.stringify(payload)}`)
+  assert.equal(payload.code, 0, `${scene} 业务状态码异常：${JSON.stringify(payload)}`)
+  return payload.data as T extends { data: infer D } ? D : never
+}
+
+function readCookieValueFromResponse(response: Response, cookieName: string): string | null {
+  const headersWithSetCookie = response.headers as Headers & {
+    getSetCookie?: () => string[]
+    raw?: () => Record<string, string[]>
+  }
+  const setCookieValues = headersWithSetCookie.getSetCookie?.()
+    ?? headersWithSetCookie.raw?.()['set-cookie']
+    ?? [response.headers.get('set-cookie') ?? '']
+  const rawSetCookie = setCookieValues.filter(Boolean).join(',')
+  const match = rawSetCookie.match(new RegExp(`(?:^|,\\s*)${cookieName}=([^;]+)`))
+  return match?.[1] ? decodeURIComponent(match[1]) : null
+}
+
+async function loginAdminSession(
+  baseUrl: string,
+  body: Record<string, unknown>,
+  scene: string,
+): Promise<{ token: string; user?: { permissions?: string[] } }> {
+  const response = await fetch(`${baseUrl}/api/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const loginData = await expectJsonOkResponse<{
+    data: {
+      token?: string
+      user?: { permissions?: string[] }
+    }
+  }>(response, scene)
+  const token = loginData.token ?? readCookieValueFromResponse(response, 'y_link_admin_session')
+  assert.ok(token, `${scene} did not return an admin session cookie`)
+  return {
+    token,
+    user: loginData.user,
+  }
+}
+
+async function loginClientSession(baseUrl: string, body: Record<string, unknown>, scene: string): Promise<{ token: string; authMode: string }> {
+  const response = await fetch(`${baseUrl}/api/client-auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  const loginData = await expectJsonOkResponse<{
+    data: {
+      authMode: string
+    }
+  }>(response, scene)
+  const token = readCookieValueFromResponse(response, 'y_link_client_session')
+  assert.ok(token, `${scene} did not return a client session cookie`)
+  return {
+    token,
+    authMode: loginData.authMode,
+  }
+}
+
 function normalizeError(error: unknown) {
   return error instanceof Error ? error : new Error(inspect(error, { depth: 4, breakLength: 120 }))
 }
 
 function createTinyPngBlob() {
   const pngBuffer = Buffer.from(
-    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9YlR5X0AAAAASUVORK5CYII=',
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8Xw8AAoMBgM2PumoAAAAASUVORK5CYII=',
     'base64',
   )
   return new Blob([pngBuffer], { type: 'image/png' })
@@ -247,22 +313,12 @@ async function main() {
     assert.ok(address && typeof address === 'object' && typeof address.port === 'number', '反馈专项回归服务端口获取失败')
     const baseUrl = `http://127.0.0.1:${address.port}`
 
-    const adminLogin = await expectJsonOk<{
-      data: {
-        token: string
-      }
-    }>(
-      () =>
-        fetch(`${baseUrl}/api/auth/login`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            username: 'admin',
-            password: adminPassword,
-          }),
-        }),
+    const adminLogin = await loginAdminSession(
+      baseUrl,
+      {
+        username: 'admin',
+        password: adminPassword,
+      },
       '管理端管理员登录',
     )
     const adminToken = adminLogin.token
@@ -295,30 +351,17 @@ async function main() {
     assert.equal(operator.role, 'operator')
     pass('客服操作员创建通过')
 
-    const operatorLogin = await expectJsonOk<{
-      data: {
-        token: string
-        user: {
-          permissions: string[]
-        }
-      }
-    }>(
-      () =>
-        fetch(`${baseUrl}/api/auth/login`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            username: operator.username,
-            password: operatorPassword,
-          }),
-        }),
+    const operatorLogin = await loginAdminSession(
+      baseUrl,
+      {
+        username: operator.username,
+        password: operatorPassword,
+      },
       '客服操作员登录',
     )
     const operatorToken = operatorLogin.token
-    assert.ok(operatorLogin.user.permissions.includes('customer_service:view'))
-    assert.ok(operatorLogin.user.permissions.includes('customer_service:reply'))
+    assert.ok(operatorLogin.user?.permissions?.includes('customer_service:view'))
+    assert.ok(operatorLogin.user?.permissions?.includes('customer_service:reply'))
     pass('客服操作员权限读取通过')
 
     const registerCaptcha = await expectJsonOk<{ data: { captchaSvg: string; captchaId: string } }>(
@@ -355,27 +398,18 @@ async function main() {
       () => fetch(`${baseUrl}/api/client-auth/captcha`),
       '客户端登录图形验证码获取',
     )
-    const clientLogin = await expectJsonOk<{
-      data: {
-        token: string
-      }
-    }>(
-      () =>
-        fetch(`${baseUrl}/api/client-auth/login`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            account: clientAccount,
-            password: clientPassword,
-            captchaId: loginCaptcha.captchaId,
-            captchaCode: readCaptchaCode(loginCaptcha.captchaSvg),
-          }),
-        }),
+    const clientLogin = await loginClientSession(
+      baseUrl,
+      {
+        account: clientAccount,
+        password: clientPassword,
+        captchaId: loginCaptcha.captchaId,
+        captchaCode: readCaptchaCode(loginCaptcha.captchaSvg),
+      },
       '客户端登录',
     )
     const clientToken = clientLogin.token
+    assert.equal(clientLogin.authMode, 'cookie')
     pass('客户端登录通过')
 
     const portalConfig = await expectJsonOk<{

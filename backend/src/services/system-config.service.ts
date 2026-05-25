@@ -52,6 +52,24 @@ const DEFAULT_SYSTEM_CONFIGS = [
     remark: '散客单号位宽',
   },
   {
+    configKey: 'inbound.serial.current_date',
+    configValue: '',
+    configGroup: 'inbound_serial',
+    remark: 'Inbound serial date (YYYYMMDD)',
+  },
+  {
+    configKey: 'inbound.serial.current_value',
+    configValue: '0',
+    configGroup: 'inbound_serial',
+    remark: 'Inbound serial current value',
+  },
+  {
+    configKey: 'inbound.serial.width',
+    configValue: '4',
+    configGroup: 'inbound_serial',
+    remark: 'Inbound serial width',
+  },
+  {
     configKey: 'client.department.options',
     configValue: '[]',
     configGroup: 'client',

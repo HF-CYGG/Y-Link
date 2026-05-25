@@ -11,7 +11,6 @@
  */
 
 import { request, type RequestConfig } from '@/api/http'
-import { getPersistedClientAuthToken } from '@/utils/client-auth-storage'
 import { compressImageForUpload } from '@/utils/image-upload'
 
 /**
@@ -1358,11 +1357,6 @@ export const openFeedbackRealtimeStream = (
     return null
   }
 
-  const token = scope === 'client' ? getPersistedClientAuthToken() : null
-  if (scope === 'client' && !token) {
-    return null
-  }
-
   /**
    * 实时流鉴权策略：
    * - 客户端仍沿用现有 `access_token` 查询参数，避免牵连客户端登录体系；
@@ -1370,9 +1364,9 @@ export const openFeedbackRealtimeStream = (
    * - `withCredentials` 便于未来切到独立 API 域名时继续携带 Cookie。
    */
   const eventSource = new EventSource(
-    buildStreamUrl(scope === 'client' ? '/client-feedback/stream' : '/customer-service/stream', token ?? undefined),
+    buildStreamUrl(scope === 'client' ? '/client-feedback/stream' : '/customer-service/stream'),
     {
-      withCredentials: scope === 'service',
+      withCredentials: true,
     },
   )
 

@@ -9,7 +9,7 @@ import type { ApiResponse } from '@/types/api'
 import { useAppStore } from '@/store/modules/app'
 import { clearPersistedAuthState, getAdminCsrfToken } from '@/utils/auth-storage'
 import { getClientRiskHeaderSnapshot } from '@/utils/client-auth-risk'
-import { clearPersistedClientAuthState, getPersistedClientAuthToken } from '@/utils/client-auth-storage'
+import { clearPersistedClientAuthState, getClientCsrfToken } from '@/utils/client-auth-storage'
 import { normalizeRequestError, unwrapApiResponse } from '@/utils/error'
 import pinia from '@/store/pinia'
 
@@ -95,25 +95,6 @@ const isClientRequest = (url?: string) => {
 }
 
 /**
- * 判断当前请求是否应注入 Authorization：
- * - 管理端已切换为 Cookie 会话，因此这里只继续处理客户端 token；
- * - 若调用方已手动传入 Authorization，则以调用方配置为准。
- */
-const attachAuthorizationHeader = (config: InternalAxiosRequestConfig) => {
-  const token = isClientRequest(config.url) ? getPersistedClientAuthToken() : null
-  if (!token) {
-    return config
-  }
-
-  const currentAuthorization = config.headers.Authorization
-  if (!currentAuthorization) {
-    config.headers.Authorization = `Bearer ${token}`
-  }
-
-  return config
-}
-
-/**
  * 当前请求是否属于管理端链路：
  * - `/api/*` 默认视为管理端接口；
  * - 但客户端专属接口以及客户端页面中的共享 O2O 订单接口，不参与管理端 CSRF。
@@ -152,6 +133,23 @@ const attachAdminCsrfHeader = (config: InternalAxiosRequestConfig) => {
   }
 
   const csrfToken = getAdminCsrfToken()
+  if (csrfToken) {
+    config.headers['x-csrf-token'] = csrfToken
+  }
+
+  return config
+}
+
+const attachClientCsrfHeader = (config: InternalAxiosRequestConfig) => {
+  if (!isClientRequest(config.url) || isSafeRequestMethod(config.method)) {
+    return config
+  }
+
+  if (config.headers['x-csrf-token']) {
+    return config
+  }
+
+  const csrfToken = getClientCsrfToken()
   if (csrfToken) {
     config.headers['x-csrf-token'] = csrfToken
   }
@@ -257,7 +255,7 @@ http.interceptors.request.use(
     const appStore = useAppStore(pinia)
     appStore.startLoading()
 
-    return attachAdminCsrfHeader(attachClientRiskHeaders(attachAuthorizationHeader(config)))
+    return attachClientCsrfHeader(attachAdminCsrfHeader(attachClientRiskHeaders(config)))
   },
   (error) => {
     const appStore = useAppStore(pinia)

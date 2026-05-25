@@ -257,6 +257,17 @@ export interface DatabaseSchemaInitResult {
   reason: 'forced_by_db_sync' | 'mysql_external' | 'sqlite_schema_ready' | 'sqlite_schema_bootstrap'
 }
 
+export async function applySqlitePragmas(dataSource: DataSource): Promise<void> {
+  if (dataSource.options.type !== 'sqlite') {
+    return
+  }
+
+  await dataSource.query('PRAGMA journal_mode = WAL')
+  await dataSource.query('PRAGMA busy_timeout = 5000')
+  await dataSource.query('PRAGMA synchronous = NORMAL')
+  await dataSource.query('PRAGMA foreign_keys = ON')
+}
+
 async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<boolean> {
   const existingTables: Array<{ name: string }> = await dataSource.query(
     `

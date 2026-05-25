@@ -5,12 +5,13 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { Brackets } from 'typeorm'
+import { Brackets, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { BizInboundOrder } from '../entities/biz-inbound-order.entity.js'
 import { BizInboundOrderItem } from '../entities/biz-inbound-order-item.entity.js'
 import { InventoryLog } from '../entities/inventory-log.entity.js'
+import { SystemConfig } from '../entities/system-config.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
 
@@ -139,18 +140,80 @@ class InboundService {
     return order
   }
 
+  private parsePositiveInteger(value: string | undefined, errorMessage: string): number {
+    const parsed = Number.parseInt(value ?? '', 10)
+    if (!Number.isInteger(parsed) || parsed <= 0) {
+      throw new BizError(errorMessage, 500)
+    }
+    return parsed
+  }
+
+  private parseNonNegativeInteger(value: string | undefined, errorMessage: string): number {
+    const parsed = Number.parseInt(value ?? '', 10)
+    if (!Number.isInteger(parsed) || parsed < 0) {
+      throw new BizError(errorMessage, 500)
+    }
+    return parsed
+  }
+
+  private async loadInboundSerialConfigMap(manager: EntityManager): Promise<Map<string, string>> {
+    const keys = ['inbound.serial.current_date', 'inbound.serial.current_value', 'inbound.serial.width']
+    const placeholders = keys.map(() => '?').join(', ')
+    const useForUpdate = manager.connection.options.type === 'mysql'
+    const rows: Array<{ configKey?: string; configValue?: string }> = await manager.query(
+      `
+        SELECT config_key AS configKey, config_value AS configValue
+        FROM system_configs
+        WHERE config_key IN (${placeholders})
+        ${useForUpdate ? 'FOR UPDATE' : ''}
+      `,
+      keys,
+    )
+
+    if (rows.length !== keys.length) {
+      throw new BizError('閫佽揣鍗曟祦姘撮厤缃己澶憋紝璇疯仈绯荤鐞嗗憳琛ラ綈', 500)
+    }
+
+    const configMap = new Map<string, string>()
+    rows.forEach((row) => {
+      const configKey = typeof row.configKey === 'string' ? row.configKey.trim() : ''
+      if (!configKey) {
+        return
+      }
+      configMap.set(configKey, typeof row.configValue === 'string' ? row.configValue.trim() : '')
+    })
+
+    if (configMap.size !== keys.length) {
+      throw new BizError('閫佽揣鍗曟祦姘撮厤缃己澶憋紝璇疯仈绯荤鐞嗗憳琛ラ綈', 500)
+    }
+
+    return configMap
+  }
+
   private async generateShowNo(manager = AppDataSource.manager): Promise<string> {
     const dateText = new Date().toISOString().slice(0, 10).replaceAll('-', '')
-    const prefix = `IN${dateText}`
-    const raw = await manager
-      .getRepository(BizInboundOrder)
-      .createQueryBuilder('order')
-      .select('order.showNo', 'showNo')
-      .where('order.showNo LIKE :prefix', { prefix: `${prefix}%` })
-      .orderBy('order.showNo', 'DESC')
-      .getRawOne<{ showNo?: string }>()
-    const current = raw?.showNo ? Number.parseInt(raw.showNo.slice(prefix.length), 10) || 0 : 0
-    return `${prefix}${String(current + 1).padStart(4, '0')}`
+    const configMap = await this.loadInboundSerialConfigMap(manager)
+    const currentDateKey = 'inbound.serial.current_date'
+    const currentValueKey = 'inbound.serial.current_value'
+    const widthKey = 'inbound.serial.width'
+
+    const currentDate = configMap.get(currentDateKey) ?? ''
+    const currentValue = this.parseNonNegativeInteger(configMap.get(currentValueKey), '閫佽揣鍗曟祦姘村綋鍓嶅€奸厤缃紓甯?')
+    const width = this.parsePositiveInteger(configMap.get(widthKey), '閫佽揣鍗曟祦姘翠綅瀹介厤缃紓甯?')
+    if (width > 12) {
+      throw new BizError('閫佽揣鍗曟祦姘翠綅瀹介厤缃紓甯革紝璇疯仈绯荤鐞嗗憳', 500)
+    }
+
+    const nextSerial = currentDate === dateText ? currentValue + 1 : 1
+    const maxSerial = 10 ** width - 1
+    if (nextSerial > maxSerial) {
+      throw new BizError('今日送货单流水号已达到上限，请联系管理员处理', 409)
+    }
+
+    await manager.getRepository(SystemConfig).update({ configKey: currentDateKey }, { configValue: dateText })
+    await manager.getRepository(SystemConfig).update({ configKey: currentValueKey }, { configValue: String(nextSerial) })
+
+    return `IN${dateText}${String(nextSerial).padStart(width, '0')}`
   }
 
   // 供货方创建送货单

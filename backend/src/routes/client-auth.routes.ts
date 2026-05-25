@@ -6,10 +6,16 @@
 
 import { Router } from 'express'
 import { z } from 'zod'
-import { requireClientAuth } from '../middleware/client-auth.middleware.js'
+import { requireClientAuth, requireClientCsrf } from '../middleware/client-auth.middleware.js'
 import type { ClientAuthenticatedRequest } from '../types/client-auth.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
+import {
+  clearClientAuthCookies,
+  ensureClientCsrfCookie,
+  generateClientCsrfToken,
+  setClientAuthCookies,
+} from '../utils/client-auth-cookie.js'
 import {
   normalizeClientAccount,
   normalizeClientVerificationTarget,
@@ -92,6 +98,7 @@ clientAuthRouter.get(
   '/captcha',
   asyncHandler(async (req, res) => {
     const data = await clientAuthService.createCaptcha(extractRequestMeta(req))
+    res.setHeader('Cache-Control', 'no-store')
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -167,7 +174,22 @@ clientAuthRouter.post(
     }).normalizedValue
     await authSecurityService.guardClientLoginRequest(requestMeta, normalizedAccount)
     const data = await clientAuthService.login(payload, requestMeta)
-    res.json({ code: 0, message: 'ok', data })
+    const csrfToken = generateClientCsrfToken()
+    setClientAuthCookies(res, {
+      sessionToken: data.token,
+      csrfToken,
+      expiresAt: data.expiresAt,
+    })
+    res.setHeader('Cache-Control', 'no-store')
+    res.json({
+      code: 0,
+      message: 'ok',
+      data: {
+        expiresAt: data.expiresAt,
+        user: data.user,
+        authMode: 'cookie',
+      },
+    })
   }),
 )
 
@@ -207,6 +229,8 @@ clientAuthRouter.get(
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const data = await clientAuthService.me(authReq.clientAuth)
+    ensureClientCsrfCookie(req, res)
+    res.setHeader('Cache-Control', 'no-store')
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -214,9 +238,12 @@ clientAuthRouter.get(
 clientAuthRouter.post(
   '/logout',
   requireClientAuth,
+  requireClientCsrf,
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     await clientAuthService.logout(authReq.clientAuth)
+    clearClientAuthCookies(res)
+    res.setHeader('Cache-Control', 'no-store')
     res.json({ code: 0, message: 'ok', data: true })
   }),
 )
@@ -224,11 +251,14 @@ clientAuthRouter.post(
 clientAuthRouter.post(
   '/change-password',
   requireClientAuth,
+  requireClientCsrf,
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const requestMeta = extractRequestMeta(req)
     await authSecurityService.guardClientChangePasswordRequest(requestMeta, authReq.clientAuth.userId)
     await clientAuthService.changePassword(authReq.clientAuth, changePasswordSchema.parse(req.body))
+    clearClientAuthCookies(res)
+    res.setHeader('Cache-Control', 'no-store')
     res.json({ code: 0, message: 'ok', data: true })
   }),
 )
@@ -236,11 +266,13 @@ clientAuthRouter.post(
 clientAuthRouter.patch(
   '/profile',
   requireClientAuth,
+  requireClientCsrf,
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const requestMeta = extractRequestMeta(req)
     await authSecurityService.guardClientProfileUpdateRequest(requestMeta, authReq.clientAuth.userId)
     const data = await clientAuthService.updateProfile(authReq.clientAuth, updateProfileSchema.parse(req.body))
+    res.setHeader('Cache-Control', 'no-store')
     res.json({ code: 0, message: 'ok', data })
   }),
 )
