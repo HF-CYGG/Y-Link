@@ -412,6 +412,14 @@ Y-Link
 - 管理端已做登录失败风控、验证码、权限校验和审计记录。
 - SQLite 适合轻量部署；多人高并发和长期生产建议使用 MySQL。
 
+### 公网部署最小暴露面
+
+- 新版 Nginx 只会对白名单业务入口执行 SPA 回退；`/wp-admin/*`、`/wp-includes/*`、`/phpmyadmin/*`、`/cgi-bin/*`、`/nacos/*`、`/theme/*`、`/user/umi.min.js` 等探测路径会直接返回 `404`。
+- `/.env`、`/api/.env`、`/config.json`、`/aws-config.js`、`/secrets.json`、`/credentials.json`、`/serviceAccountKey.json` 等敏感文件探测会在 Nginx 层被拒绝，不会再误回落到前端 `index.html`。
+- `/api/auth/login`、`/api/client-auth/login`、`/api/auth/captcha`、`/api/client-auth/captcha` 已增加 Nginx 限速，和后端登录风控一起工作。
+- 页面型路由只接受 `GET/HEAD`；对 `/`、`/login`、`/client/*` 等页面发起 `POST/PUT/PATCH/DELETE` 会直接被拒绝。
+- 如果容器前面还有 1Panel、Nginx Proxy Manager 或云厂商负载均衡，仍建议在上游继续做 80/443 限流、黑名单和 HTTPS 终止。
+
 ## 相关文档
 
 - [Y-Link 使用指南](./docs/Y-Link使用指南.md)
