@@ -1,3 +1,13 @@
+/**
+ * 模块说明：backend/src/utils/security-sanitizer.ts
+ * 文件职责：提供审计明细与日志载荷的统一脱敏工具，阻断密码、令牌、手机号、邮箱等敏感信息外泄。
+ * 实现逻辑：
+ * - 先按 key 命中敏感字段规则，敏感凭证直接全量替换；
+ * - 联系方式字段按邮箱/手机号格式做部分掩码；
+ * - 对数组和对象递归遍历，确保嵌套结构也会被清洗。
+ * 维护说明：新增敏感字段时应优先扩展 key 规则，而不是在业务代码里手写脱敏分支。
+ */
+
 const FULL_REDACTED_TEXT = '[REDACTED]'
 const PARTIAL_REDACTED_TEXT = '[MASKED]'
 
@@ -94,6 +104,7 @@ export function sanitizeUnknown(value: unknown, keyHint?: string): unknown {
   return sanitizeScalarValue(value, keyHint)
 }
 
+// 审计 detail 专用入口：统一返回对象或 null，便于直接写入 JSON 字段。
 export function sanitizeAuditDetail(detail: Record<string, unknown> | null | undefined): Record<string, unknown> | null {
   if (!detail) {
     return null
@@ -101,6 +112,7 @@ export function sanitizeAuditDetail(detail: Record<string, unknown> | null | und
   return sanitizeObjectLike(detail)
 }
 
+// 审计 targetCode 也可能携带手机号/邮箱，写库前同样做脱敏兜底。
 export function sanitizeAuditTargetCode(targetCode: string | null | undefined): string | null {
   if (!targetCode) {
     return null
@@ -109,6 +121,7 @@ export function sanitizeAuditTargetCode(targetCode: string | null | undefined): 
   return typeof sanitized === 'string' ? sanitized : String(sanitized)
 }
 
+// 日志场景的泛型入口：保持原始类型签名，便于在调用点无缝替换。
 export function sanitizeLogPayload<T>(payload: T): T {
   return sanitizeUnknown(payload) as T
 }
