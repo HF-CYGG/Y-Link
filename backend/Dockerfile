@@ -3,7 +3,7 @@
 # ------------------------------
 # 文件说明：Y-Link 后端镜像构建文件。
 # 实现逻辑：
-# - 构建阶段安装完整依赖并编译 TypeScript；
+# - 构建阶段复制 backend 独立 `.npmrc`，使用官方 npm 源安装完整依赖并编译 TypeScript；
 # - 运行阶段仅保留生产依赖、编译产物与 SQL 模板，兼顾体积与 sqlite3 兼容性。
 # ------------------------------
 FROM node:20-bookworm-slim AS build
@@ -16,6 +16,7 @@ RUN apt-get update \
 
 # 先复制依赖清单，最大化复用 Docker 构建缓存。
 COPY package*.json ./
+COPY .npmrc ./
 RUN npm ci
 
 # 再复制源码与 SQL 脚本并执行生产构建。
@@ -37,7 +38,12 @@ WORKDIR /app
 
 ENV NODE_ENV=production \
   PORT=3001 \
-  SQLITE_DB_PATH=/app/data/y-link.sqlite
+  SQLITE_DB_PATH=/app/data/y-link.sqlite \
+  TZ=Asia/Shanghai
+
+RUN apt-get update \
+  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tzdata \
+  && rm -rf /var/lib/apt/lists/*
 
 # 创建运行目录并提前授权给 node 用户，降低容器默认 root 运行风险。
 # 这里同时预创建 uploads 目录，确保首次上传前容器内就具备稳定的落盘路径。

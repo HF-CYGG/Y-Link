@@ -11,6 +11,7 @@
 
 import { computed } from 'vue'
 import { useAppStore } from '@/store'
+import pinia from '@/store/pinia'
 
 /**
  * 响应式抽屉壳参数：
@@ -53,7 +54,7 @@ const emit = defineEmits<{
   'update:modelValue': [value: boolean]
 }>()
 
-const appStore = useAppStore()
+const appStore = useAppStore(pinia)
 
 /**
  * 抽屉展开方向：

@@ -77,6 +77,49 @@ export class BizInboundOrder {
   remark!: string | null
 
   @Column({
+    name: 'cancel_reason',
+    type: 'varchar',
+    length: 255,
+    nullable: true,
+    comment: '供货方撤销原因',
+  })
+  cancelReason!: string | null
+
+  @Column({
+    name: 'cancelled_at',
+    ...entityColumnOptions.timestamp,
+    nullable: true,
+    comment: '撤销时间',
+  })
+  cancelledAt!: Date | null
+
+  @Column({
+    name: 'cancelled_by_user_id',
+    ...entityColumnOptions.foreignId,
+    nullable: true,
+    comment: '撤销操作人 ID',
+  })
+  cancelledByUserId!: string | null
+
+  @Column({
+    name: 'cancelled_by_username',
+    type: 'varchar',
+    length: 64,
+    nullable: true,
+    comment: '撤销操作人账号快照',
+  })
+  cancelledByUsername!: string | null
+
+  @Column({
+    name: 'cancelled_by_display_name',
+    type: 'varchar',
+    length: 128,
+    nullable: true,
+    comment: '撤销操作人姓名快照',
+  })
+  cancelledByDisplayName!: string | null
+
+  @Column({
     name: 'verified_at',
     ...entityColumnOptions.timestamp,
     nullable: true,

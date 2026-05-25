@@ -7,9 +7,15 @@
 import { Router } from 'express'
 import { z } from 'zod'
 import type { AuthenticatedRequest } from '../types/auth.js'
-import { requireAuth } from '../middleware/auth.middleware.js'
+import { requireAdminCsrf, requireAuth } from '../middleware/auth.middleware.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
+import {
+  clearAdminAuthCookies,
+  ensureAdminCsrfCookie,
+  generateAdminCsrfToken,
+  setAdminAuthCookies,
+} from '../utils/admin-auth-cookie.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 import { authService } from '../services/auth.service.js'
 import { authSecurityService } from '../services/auth-security.service.js'
@@ -62,11 +68,21 @@ authRouter.post(
       captchaService.verifyCaptcha(payload.captchaId, payload.captchaCode)
     }
     const data = await authService.login(payload, requestMeta)
+    const csrfToken = generateAdminCsrfToken()
+    setAdminAuthCookies(res, {
+      sessionToken: data.token,
+      csrfToken,
+      expiresAt: data.expiresAt,
+    })
     res.setHeader('Cache-Control', 'no-store')
     res.json({
       code: 0,
       message: 'ok',
-      data,
+      data: {
+        expiresAt: data.expiresAt,
+        user: data.user,
+        securityReminder: data.securityReminder,
+      },
     })
   }),
 )
@@ -74,9 +90,11 @@ authRouter.post(
 authRouter.post(
   '/logout',
   requireAuth,
+  requireAdminCsrf,
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     await authService.logout(authReq.auth, extractRequestMeta(req))
+    clearAdminAuthCookies(res)
     res.json({
       code: 0,
       message: 'ok',
@@ -91,6 +109,8 @@ authRouter.get(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const data = await authService.me(authReq.auth)
+    ensureAdminCsrfCookie(req, res)
+    res.setHeader('Cache-Control', 'no-store')
     res.json({
       code: 0,
       message: 'ok',
@@ -102,10 +122,12 @@ authRouter.get(
 authRouter.post(
   '/change-password',
   requireAuth,
+  requireAdminCsrf,
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = changePasswordSchema.parse(req.body)
     await authService.changeOwnPassword(authReq.auth, payload, extractRequestMeta(req))
+    clearAdminAuthCookies(res)
     res.json({
       code: 0,
       message: 'ok',

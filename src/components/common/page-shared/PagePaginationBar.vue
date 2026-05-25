@@ -8,6 +8,7 @@
 
 import { computed } from 'vue'
 import { useAppStore } from '@/store'
+import pinia from '@/store/pinia'
 
 /**
  * 分页条参数：
@@ -34,7 +35,7 @@ const emit = defineEmits<{
   'size-change': [value: number]
 }>()
 
-const appStore = useAppStore()
+const appStore = useAppStore(pinia)
 
 /**
  * 分页栏对齐策略：

@@ -8,7 +8,11 @@ import { Router } from 'express'
 import { requirePermission } from '../middleware/auth.middleware.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
-import { buildUploadPublicUrl, createCategorizedImageUpload, persistValidatedImageUpload } from '../utils/upload-storage.js'
+import {
+  buildUploadPublicUrl,
+  createCategorizedImageUpload,
+  finalizeUploadedImageFile,
+} from '../utils/upload-storage.js'
 
 export const uploadRouter = Router()
 
@@ -24,13 +28,15 @@ uploadRouter.post(
   '/',
   requirePermission('products:manage'),
   upload.single('file'),
-  persistValidatedImageUpload('products'),
   asyncHandler(async (req, res) => {
     if (!req.file) {
       throw new BizError('文件上传失败', 400)
     }
 
-    const url = buildUploadPublicUrl('products', req.file.filename)
+    // 商品图片与反馈截图统一走“先落临时目录，再校验转正”的安全链路，
+    // 避免仅凭扩展名与 MIME 就把异常文件直接暴露为可访问静态资源。
+    const finalizedFile = await finalizeUploadedImageFile('products', req.file)
+    const url = buildUploadPublicUrl('products', finalizedFile.fileName)
     res.json({ code: 0, message: 'ok', data: { url } })
   }),
 )

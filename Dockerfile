@@ -7,15 +7,16 @@
 # ------------------------------
 # 文件说明：Y-Link 前端镜像构建文件。
 # 实现逻辑：
-# - 构建阶段安装依赖并产出 Vite 静态资源；
+# - 构建阶段复制仓库级 `.npmrc`，强制使用官方 npm 源安装依赖并产出 Vite 静态资源；
 # - 运行阶段通过 Nginx 托管静态资源，并把 `/api` 代理到同编排的后端服务。
 # ------------------------------
-FROM node:20-bookworm-slim AS build
+FROM --platform=$BUILDPLATFORM node:20-bookworm-slim AS build
 
 WORKDIR /app
 
 # 先安装依赖，充分利用层缓存。
 COPY package*.json ./
+COPY .npmrc ./
 RUN npm ci
 
 # 复制前端源码与构建配置后执行生产打包。
@@ -35,6 +36,10 @@ RUN npm run build
 # 运行阶段：使用 Nginx 托管静态资源并代理后端 API
 # ------------------------------
 FROM nginx:1.27-alpine AS runtime
+
+ENV TZ=Asia/Shanghai
+
+RUN apk add --no-cache tzdata
 
 # 使用可模板化站点配置：
 # - 处理 Vue Router history 路由回退；

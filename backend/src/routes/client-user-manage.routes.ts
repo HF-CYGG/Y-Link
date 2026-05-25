@@ -27,6 +27,15 @@ const updateClientUserSchema = z.object({
   status: z.enum(CLIENT_USER_STATUSES),
 })
 
+const createClientUserSchema = z.object({
+  username: z.string().trim().min(1).max(128),
+  mobile: z.string().trim().max(20).optional(),
+  email: z.string().trim().max(128).optional(),
+  departmentName: z.string().trim().max(128).optional(),
+  password: z.string().min(8, '登录密码至少 8 位').max(50, '登录密码长度不能超过 50 位'),
+  status: z.enum(CLIENT_USER_STATUSES),
+})
+
 const resetClientUserPasswordSchema = z.object({
   newPassword: z.string().min(8, '新密码至少 8 位').max(50, '新密码长度不能超过 50 位'),
 })
@@ -50,6 +59,22 @@ clientUserManageRouter.get(
       keyword: typeof req.query.keyword === 'string' ? req.query.keyword : undefined,
       status,
     })
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+clientUserManageRouter.post(
+  '/',
+  requirePermission('users:create'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = createClientUserSchema.parse(req.body)
+    const data = await clientUserManageService.createProfile(payload, authReq.auth, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',

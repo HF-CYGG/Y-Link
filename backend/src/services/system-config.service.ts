@@ -179,19 +179,19 @@ const DEFAULT_SYSTEM_CONFIGS = [
   },
   {
     configKey: 'customer_service.workday_start',
-    configValue: '09:00',
+    configValue: '10:00',
     configGroup: 'customer_service',
     remark: '客服工作开始时间',
   },
   {
     configKey: 'customer_service.workday_end',
-    configValue: '18:00',
+    configValue: '20:00',
     configGroup: 'customer_service',
     remark: '客服工作结束时间',
   },
   {
     configKey: 'customer_service.workday_weekdays',
-    configValue: '[1,2,3,4,5]',
+    configValue: '[0,1,2,3,4,5,6]',
     configGroup: 'customer_service',
     remark: '客服工作日配置(JSON 数组，0=周日，6=周六)',
   },
@@ -212,6 +212,38 @@ const DEFAULT_SYSTEM_CONFIGS = [
     configValue: '20',
     configGroup: 'customer_service',
     remark: '客服中心 SSE 心跳间隔（秒）',
+  },
+] as const
+
+/**
+ * 文件说明：客服中心默认营业时间已从“工作日 09:00-18:00”升级为“周一至周日 10:00-20:00”。
+ * 实现逻辑：
+ * 1. 仅对仍然保持旧默认值的配置自动升级，避免覆盖管理员手工调整过的营业时间；
+ * 2. 覆盖工作日、开始时间、结束时间和离线 FAQ 中对应的默认描述文案；
+ * 3. 该兼容逻辑会在读取系统配置前自动执行，保证已初始化环境也能无感收口到新默认值。
+ */
+const CUSTOMER_SERVICE_LEGACY_DEFAULT_UPDATES = [
+  {
+    configKey: 'customer_service.workday_start',
+    legacyValue: '09:00',
+    nextValue: '10:00',
+  },
+  {
+    configKey: 'customer_service.workday_end',
+    legacyValue: '18:00',
+    nextValue: '20:00',
+  },
+  {
+    configKey: 'customer_service.workday_weekdays',
+    legacyValue: '[1,2,3,4,5]',
+    nextValue: '[0,1,2,3,4,5,6]',
+  },
+  {
+    configKey: 'customer_service.offline_faq_json',
+    legacyValue:
+      '[{"question":"客服什么时候在线？","answer":"默认工作时间为周一至周五 09:00-18:00。"},{"question":"离线时提交的问题会丢失吗？","answer":"不会，系统会保留完整会话记录，客服上线后继续跟进。"}]',
+    nextValue:
+      '[{"question":"客服什么时候在线？","answer":"默认工作时间为周一至周日 10:00-20:00。"},{"question":"离线时提交的问题会丢失吗？","answer":"不会，系统会保留完整会话记录，客服上线后继续跟进。"}]',
   },
 ] as const
 
@@ -942,7 +974,9 @@ class SystemConfigService {
     const existingConfigs = await this.configRepo.find({
       where: DEFAULT_SYSTEM_CONFIGS.map((config) => ({ configKey: config.configKey })),
       select: {
+        id: true,
         configKey: true,
+        configValue: true,
       },
     })
     const existingKeySet = new Set(existingConfigs.map((config) => config.configKey))
@@ -950,6 +984,31 @@ class SystemConfigService {
 
     if (missingConfigs.length > 0) {
       await this.configRepo.insert(missingConfigs)
+    }
+
+    const legacyUpdateEntries: Array<{ id: string; configValue: string }> = []
+    for (const item of CUSTOMER_SERVICE_LEGACY_DEFAULT_UPDATES) {
+      const currentConfig = existingConfigs.find((config) => config.configKey === item.configKey)
+      if (currentConfig?.configValue !== item.legacyValue) {
+        continue
+      }
+      legacyUpdateEntries.push({
+        id: currentConfig.id,
+        configValue: item.nextValue,
+      })
+    }
+
+    if (legacyUpdateEntries.length > 0) {
+      await Promise.all(
+        legacyUpdateEntries.map((item) =>
+          this.configRepo.update(
+            { id: item.id },
+            {
+              configValue: item.configValue,
+            },
+          ),
+        ),
+      )
     }
 
     return {

@@ -14,6 +14,7 @@ import { orderApi, productApi } from '@/api'
 import type { SubmitOrderPayload } from '@/api/modules/order'
 import type { ProductRecord } from '@/api/modules/product'
 import { useAppStore, useAuthStore } from '@/store'
+import pinia from '@/store/pinia'
 import { extractErrorMessage } from '@/utils/error'
 import {
   clearLegacyScopedStorageKey,
@@ -56,8 +57,8 @@ function normalizeTextValue(value: string | number | null | undefined): string {
  * - 保持现有桌面表格、移动端卡片与抽屉编辑体验不变。
  */
 export const useOrderEntryForm = () => {
-  const appStore = useAppStore()
-  const authStore = useAuthStore()
+  const appStore = useAppStore(pinia)
+  const authStore = useAuthStore(pinia)
   const router = useRouter()
   const ORDER_ENTRY_DRAFT_STORAGE_KEY_PREFIX = 'y-link.order-entry.draft.v1'
   const LEGACY_ORDER_ENTRY_DRAFT_STORAGE_KEY = 'y-link.order-entry.draft.v1'

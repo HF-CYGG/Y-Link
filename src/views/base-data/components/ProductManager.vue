@@ -32,6 +32,7 @@ import {
 import {
   BizCrudDialogShell,
   BizResponsiveDataCollectionShell,
+  PassiveNumberInput,
   PageToolbarCard,
 } from '@/components/common'
 import { useCrudManager } from '@/composables/useCrudManager'
@@ -850,12 +851,12 @@ onActivated(() => {
               </el-table-column>
               <el-table-column label="默认售价" min-width="150">
                 <template #default="{ row }">
-                  <el-input-number v-model="row.defaultPrice" :min="0" :precision="2" :step="1" class="w-full" />
+                  <PassiveNumberInput v-model="row.defaultPrice" :min="0" :precision="2" :step="1" class="w-full" />
                 </template>
               </el-table-column>
               <el-table-column label="当前库存" min-width="150">
                 <template #default="{ row }">
-                  <el-input-number v-model="row.currentStock" :min="0" :step="1" :precision="0" class="w-full" />
+                  <PassiveNumberInput v-model="row.currentStock" :min="0" :step="1" :precision="0" class="w-full" />
                 </template>
               </el-table-column>
               <el-table-column label="关联标签" min-width="220">
@@ -932,7 +933,7 @@ onActivated(() => {
             <el-input v-model="form.pinyinAbbr" placeholder="请输入拼音简写(可选)" />
           </el-form-item>
           <el-form-item label="默认售价" prop="defaultPrice">
-            <el-input-number
+            <PassiveNumberInput
               v-model="form.defaultPrice"
               :min="0"
               :precision="2"
@@ -942,7 +943,7 @@ onActivated(() => {
             />
           </el-form-item>
           <el-form-item label="当前库存" prop="currentStock">
-            <el-input-number
+            <PassiveNumberInput
               v-model="form.currentStock"
               :min="0"
               :step="1"

@@ -9,6 +9,7 @@
  */
 
 import type { OrderSerialConfigRecord } from '@/api/modules/system-config'
+import { PassiveNumberInput } from '@/components/common'
 
 defineProps<{
   configMap: Record<'department' | 'walkin', OrderSerialConfigRecord> | null
@@ -51,7 +52,7 @@ defineProps<{
             <template #label>
               <span class="field-label">起始号 <span class="field-label__help">首次生效编号起点</span></span>
             </template>
-            <el-input-number v-model="serialForm.department.start" :min="1" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
+            <PassiveNumberInput v-model="serialForm.department.start" :min="1" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
           </el-form-item>
           <el-form-item prop="department.current" class="!mb-0">
             <template #label>
@@ -63,7 +64,7 @@ defineProps<{
             <template #label>
               <span class="field-label">位宽 <span class="field-label__help">流水号补零位数（1-12）</span></span>
             </template>
-            <el-input-number v-model="serialForm.department.width" :min="1" :max="12" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
+            <PassiveNumberInput v-model="serialForm.department.width" :min="1" :max="12" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
           </el-form-item>
         </div>
       </div>
@@ -89,7 +90,7 @@ defineProps<{
             <template #label>
               <span class="field-label">起始号 <span class="field-label__help">首次生效编号起点</span></span>
             </template>
-            <el-input-number v-model="serialForm.walkin.start" :min="1" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
+            <PassiveNumberInput v-model="serialForm.walkin.start" :min="1" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
           </el-form-item>
           <el-form-item prop="walkin.current" class="!mb-0">
             <template #label>
@@ -101,7 +102,7 @@ defineProps<{
             <template #label>
               <span class="field-label">位宽 <span class="field-label__help">流水号补零位数（1-12）</span></span>
             </template>
-            <el-input-number v-model="serialForm.walkin.width" :min="1" :max="12" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
+            <PassiveNumberInput v-model="serialForm.walkin.width" :min="1" :max="12" :step="1" :controls="false" :disabled="!canUpdateConfigs || loading" class="!w-full" />
           </el-form-item>
         </div>
       </div>

@@ -144,6 +144,33 @@ export const resolveNpmCommand = () => {
 }
 
 /**
+ * 解析 Docker CLI 入口：
+ * - 优先复用 PATH 中可见的 `docker.exe` / `docker`；
+ * - 在 Windows 机器上补充 Docker Desktop 常见安装目录；
+ * - 返回绝对路径，避免不同终端对 PATH 的继承不一致时出现“本机能跑、脚本里找不到”的问题。
+ */
+export const resolveDockerCommand = () => {
+  const fromPath = resolveCommandFromPath(['docker.exe', 'docker'])
+  if (fromPath) {
+    return fromPath
+  }
+
+  const programFiles = process.env['ProgramFiles']
+  const programFilesX86 = process.env['ProgramFiles(x86)']
+  const fallbackCandidates = [
+    programFiles ? path.join(programFiles, 'Docker', 'Docker', 'resources', 'bin', 'docker.exe') : null,
+    programFilesX86 ? path.join(programFilesX86, 'Docker', 'Docker', 'resources', 'bin', 'docker.exe') : null,
+  ].filter(Boolean)
+
+  const resolvedPath = resolveFirstExistingPath(fallbackCandidates)
+  if (resolvedPath) {
+    return resolvedPath
+  }
+
+  throw new Error('未找到可用的 Docker CLI（docker.exe / docker）。')
+}
+
+/**
  * 解析前端构建所需 CLI 的 JS 入口：
  * - 直接使用 process.execPath + cli.js，彻底绕开 .cmd 与 shell 运算符；
  * - 对 PowerShell 5、受限 PATH 终端以及 CI 壳层都更稳定。

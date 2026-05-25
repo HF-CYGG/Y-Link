@@ -32,9 +32,10 @@ import {
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useAuthStore } from '@/store'
+import pinia from '@/store/pinia'
+import { redirectToAdminLogin } from '@/utils/auth-navigation'
 import { extractErrorMessage } from '@/utils/error'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
-import { useRouter } from 'vue-router'
 import {
   accountTypeDescriptions,
   getAccountTypeDescription,
@@ -72,8 +73,7 @@ const listState = reactive(createPaginatedListState<UserSafeProfile>({
  * - 页面权限判断统一来自 Auth Store；
  * - 避免在页面内硬编码 admin/operator 角色分支。
  */
-const authStore = useAuthStore()
-const router = useRouter()
+const authStore = useAuthStore(pinia)
 const listRequest = useStableRequest()
 const { hasPermission, ensurePermission } = usePermissionAction()
 
@@ -521,7 +521,8 @@ const handleSubmitOwnPassword = async () => {
     ownPasswordVisible.value = false
     resetOwnPasswordForm()
     await authStore.logout()
-    await router.replace('/login')
+    // 本人改密后使用硬跳转返回登录页，避免旧管理端页面与权限上下文继续停留在当前标签页。
+    redirectToAdminLogin()
     ElMessage.success('密码修改成功，请使用新密码重新登录')
   } catch (error) {
     ElMessage.error(extractErrorMessage(error, '修改密码失败'))

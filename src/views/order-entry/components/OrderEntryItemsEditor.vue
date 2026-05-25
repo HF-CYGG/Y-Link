@@ -8,7 +8,7 @@
 
 import { computed } from 'vue'
 import type { ProductRecord } from '@/api/modules/product'
-import { BizResponsiveDrawerShell } from '@/components/common'
+import { BizResponsiveDrawerShell, PassiveNumberInput } from '@/components/common'
 import type { FocusField, OrderEntryDrawerForm, OrderItemRow } from '../types'
 import { getProductOptionLabel } from '../types'
 
@@ -155,7 +155,7 @@ const isExistingProduct = (productId: string | undefined | null) => {
           </el-table-column>
           <el-table-column label="数量" width="150">
             <template #default="{ row, $index }">
-              <el-input-number
+              <PassiveNumberInput
                 :ref="(el: unknown) => setFieldRef(row.uid, 'qty', el)"
                 v-model="row.qty"
                 :min="0"
@@ -168,7 +168,7 @@ const isExistingProduct = (productId: string | undefined | null) => {
           </el-table-column>
           <el-table-column label="单价" width="150">
             <template #default="{ row, $index }">
-              <el-input-number
+              <PassiveNumberInput
                 :ref="(el: unknown) => setFieldRef(row.uid, 'unitPrice', el)"
                 v-model="row.unitPrice"
                 :min="0"
@@ -272,10 +272,10 @@ const isExistingProduct = (productId: string | undefined | null) => {
             </el-select>
           </el-form-item>
           <el-form-item label="数量">
-            <el-input-number v-model="drawerForm.qty" :min="0" :precision="2" class="w-full" />
+            <PassiveNumberInput v-model="drawerForm.qty" :min="0" :precision="2" class="w-full" />
           </el-form-item>
           <el-form-item label="单价">
-            <el-input-number v-model="drawerForm.unitPrice" :min="0" :precision="2" class="w-full" :disabled="isExistingProduct(drawerForm.productId)" />
+            <PassiveNumberInput v-model="drawerForm.unitPrice" :min="0" :precision="2" class="w-full" :disabled="isExistingProduct(drawerForm.productId)" />
           </el-form-item>
           <el-form-item label="备注">
             <el-input v-model="drawerForm.remark" maxlength="255" placeholder="选填" />

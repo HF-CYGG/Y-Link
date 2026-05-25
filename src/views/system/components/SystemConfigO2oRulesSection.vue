@@ -8,6 +8,8 @@
  * 维护说明：若新增线上预订规则字段，优先在这里补齐输入控件与说明文案。
  */
 
+import { PassiveNumberInput } from '@/components/common'
+
 defineProps<{
   o2oForm: {
     autoCancelEnabled: boolean
@@ -37,7 +39,7 @@ defineProps<{
       </div>
       <div class="space-y-2">
         <div class="text-sm text-slate-600 dark:text-slate-300">超时取消时长（小时）</div>
-        <el-input-number
+        <PassiveNumberInput
           v-model="o2oForm.autoCancelHours"
           :min="1"
           :max="168"
@@ -52,7 +54,7 @@ defineProps<{
       </div>
       <div class="space-y-2">
         <div class="text-sm text-slate-600 dark:text-slate-300">默认限购数量</div>
-        <el-input-number
+        <PassiveNumberInput
           v-model="o2oForm.limitQty"
           :min="1"
           :max="999"
@@ -63,7 +65,7 @@ defineProps<{
       </div>
       <div class="space-y-2">
         <div class="text-sm text-slate-600 dark:text-slate-300">客户端改单次数上限</div>
-        <el-input-number
+        <PassiveNumberInput
           v-model="o2oForm.clientPreorderUpdateLimit"
           :min="1"
           :max="999"

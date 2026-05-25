@@ -29,6 +29,7 @@ const verifyStartedAt = new Date()
 const runId = `task6-core-path-${verifyStartedAt.toISOString().replaceAll(/[:.]/g, '-')}`
 const verifyDbPath = path.join(verifyRuntimeRoot, `${runId}.sqlite`)
 const reportPath = path.join(runtimeRoot, `${runId}.report.json`)
+const runtimeBudgetReportPath = path.join(runtimeRoot, 'enterprise-core-path-runtime-budget-report.json')
 const backendPort = Number(process.env.Y_LINK_PERF_VERIFY_BACKEND_PORT ?? 3301)
 const backendBaseUrl = `http://127.0.0.1:${backendPort}`
 const apiBaseUrl = `${backendBaseUrl}/api`
@@ -36,6 +37,7 @@ const tsxCliPath = resolveTsxCliPath(backendRoot)
 // 性能验证使用隔离数据库，不应继续依赖历史默认弱口令，避免被后端安全策略直接拒绝。
 const defaultVerifyPassword = ['PerfVerify', '@', '2026', 'Core'].join('')
 const defaultSystemUserPassword = ['PerfSystem', '@', '2026', 'Flow'].join('')
+const adminCsrfCookieName = 'y_link_admin_csrf'
 const verifyCredentials = {
   username: process.env.Y_LINK_VERIFY_USERNAME ?? 'admin',
   password: process.env.Y_LINK_VERIFY_PASSWORD ?? defaultVerifyPassword,
@@ -47,6 +49,62 @@ const verifyCredentials = {
  * - 最终会整体写入 JSON 文件，便于后续排查失败点或比较多次执行结果。
  */
 const verificationSteps = []
+let runtimeBudgetSummary = null
+const authCookieJar = new Map()
+
+/**
+ * 运行时预算：
+ * - 构建预算负责“包体不要失控”；
+ * - 运行时预算负责“关键业务链路不要悄悄变慢”。
+ */
+const runtimePerformanceBudget = {
+  startIsolatedBackendMaxMs: 3000,
+  loginAndDashboardMaxMs: 500,
+  dashboardRequestMaxMs: 120,
+  baseDataPathMaxMs: 500,
+  orderListPathMaxMs: 400,
+  systemConfigPathMaxMs: 300,
+  systemManagementPathMaxMs: 500,
+  auditLogPathMaxMs: 300,
+}
+
+const runtimeStepBudgetDefinitions = [
+  {
+    title: '启动隔离后端',
+    budgetKey: 'startIsolatedBackendMaxMs',
+    label: '隔离后端冷启动',
+  },
+  {
+    title: '登录后进入首页与工作台连续访问',
+    budgetKey: 'loginAndDashboardMaxMs',
+    label: '登录与工作台主链路',
+  },
+  {
+    title: '基础资料核心路径与连续筛选',
+    budgetKey: 'baseDataPathMaxMs',
+    label: '基础资料链路',
+  },
+  {
+    title: '出库列表核心路径',
+    budgetKey: 'orderListPathMaxMs',
+    label: '出库列表链路',
+  },
+  {
+    title: '系统配置关键参数读取与保存',
+    budgetKey: 'systemConfigPathMaxMs',
+    label: '系统配置链路',
+  },
+  {
+    title: '系统管理核心路径与连续筛选',
+    budgetKey: 'systemManagementPathMaxMs',
+    label: '系统管理链路',
+  },
+  {
+    title: '审计日志核心路径与导出',
+    budgetKey: 'auditLogPathMaxMs',
+    label: '审计日志链路',
+  },
+]
 
 const log = (message) => {
   // eslint-disable-next-line no-console
@@ -65,6 +123,40 @@ const readText = (filePath) => {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+const isSafeRequestMethod = (method = 'GET') => ['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase())
+
+const buildCookieHeader = () => {
+  if (authCookieJar.size === 0) {
+    return null
+  }
+
+  return Array.from(authCookieJar.entries())
+    .map(([cookieName, cookieValue]) => `${cookieName}=${cookieValue}`)
+    .join('; ')
+}
+
+const storeResponseCookies = (response) => {
+  const setCookieHeaders = typeof response.headers.getSetCookie === 'function'
+    ? response.headers.getSetCookie()
+    : []
+
+  setCookieHeaders.forEach((cookieLine) => {
+    const [cookiePair] = cookieLine.split(';')
+    const separatorIndex = cookiePair.indexOf('=')
+    if (separatorIndex <= 0) {
+      return
+    }
+
+    const cookieName = cookiePair.slice(0, separatorIndex).trim()
+    const cookieValue = cookiePair.slice(separatorIndex + 1).trim()
+    if (!cookieName) {
+      return
+    }
+
+    authCookieJar.set(cookieName, cookieValue)
+  })
+}
 
 /**
  * 生成唯一测试标识：
@@ -85,6 +177,8 @@ const pushStep = (title, durationMs, details = {}) => {
     details,
   })
 }
+
+const findVerificationStep = (title) => verificationSteps.find((step) => step.title === title)
 
 /**
  * 启动隔离后端：
@@ -236,25 +330,33 @@ const requestApi = async (
   pathname,
   {
     method = 'GET',
-    token,
     body,
     headers = {},
     expectedStatus = 200,
     expectJsonEnvelope = true,
+    includeCsrfHeader = true,
+    csrfHeaderValue,
   } = {},
 ) => {
   const url = pathname.startsWith('http') ? pathname : `${apiBaseUrl}${pathname}`
   const startedAt = performance.now()
+  const cookieHeader = buildCookieHeader()
+  const csrfToken = authCookieJar.get(adminCsrfCookieName) ?? null
+  const resolvedCsrfHeaderValue = csrfHeaderValue ?? csrfToken
   const response = await fetchWithTimeout(url, {
     method,
     headers: {
       ...(body ? { 'Content-Type': 'application/json' } : {}),
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(cookieHeader ? { Cookie: cookieHeader } : {}),
+      ...(!isSafeRequestMethod(method) && includeCsrfHeader && resolvedCsrfHeaderValue
+        ? { 'x-csrf-token': resolvedCsrfHeaderValue }
+        : {}),
       ...headers,
     },
     body: body ? JSON.stringify(body) : undefined,
   })
   const durationMs = performance.now() - startedAt
+  storeResponseCookies(response)
   const responseText = await response.text()
 
   assert.equal(response.status, expectedStatus, `${method} ${url} 返回状态异常，expected=${expectedStatus} actual=${response.status}\n${responseText}`)
@@ -268,10 +370,15 @@ const requestApi = async (
   }
 
   const payload = JSON.parse(responseText)
-  assert.equal(payload.code, 0, `${method} ${url} 业务返回失败：${payload.message ?? 'unknown error'}`)
+  if (expectedStatus >= 400) {
+    assert.notEqual(payload.code, 0, `${method} ${url} 预期失败但业务返回了成功响应`)
+  } else {
+    assert.equal(payload.code, 0, `${method} ${url} 业务返回失败：${payload.message ?? 'unknown error'}`)
+  }
 
   return {
     data: payload.data,
+    payload,
     response,
     durationMs,
   }
@@ -399,14 +506,12 @@ const verifyLoginAndDashboard = async () => {
     method: 'POST',
     body: verifyCredentials,
   })
-
-  const token = loginResult.data.token
-  assert.ok(token, '登录成功后未返回 token')
   assert.equal(loginResult.data.user.username, verifyCredentials.username, '登录返回的用户名与预期不一致')
+  assert.ok(authCookieJar.get('y_link_admin_session'), '登录成功后未写入管理端会话 Cookie')
+  assert.ok(authCookieJar.get(adminCsrfCookieName), '登录成功后未写入管理端 CSRF Cookie')
 
   const meResult = await requestApi('/auth/me', {
     method: 'GET',
-    token,
   })
   assert.equal(meResult.data.username, verifyCredentials.username, '/auth/me 返回用户与登录态不一致')
 
@@ -414,7 +519,6 @@ const verifyLoginAndDashboard = async () => {
   for (let index = 0; index < 3; index += 1) {
     const dashboardResult = await requestApi('/dashboard/stats', {
       method: 'GET',
-      token,
     })
 
     assert.equal(typeof dashboardResult.data.todayOrderCount, 'number', '工作台统计缺少 todayOrderCount')
@@ -430,13 +534,11 @@ const verifyLoginAndDashboard = async () => {
   const durationMs = performance.now() - startedAt
   pushStep('登录后进入首页与工作台连续访问', durationMs, {
     username: verifyCredentials.username,
+    authMode: 'cookie_session_with_csrf',
     dashboardSamples,
   })
 
   log('[core-path] 登录 / auth.me / 工作台统计连续访问验证通过')
-  return {
-    token,
-  }
 }
 
 /**
@@ -444,7 +546,7 @@ const verifyLoginAndDashboard = async () => {
  * - 创建专属标签与产品；
  * - 分别按中文关键字、拼音缩写、标签 ID 连续筛选，覆盖“连续筛选结果可追溯”的要求。
  */
-const verifyBaseDataPath = async (token) => {
+const verifyBaseDataPath = async () => {
   const startedAt = performance.now()
   const suffix = createUniqueSuffix()
   const tagName = `性能标签-${suffix}`
@@ -455,7 +557,6 @@ const verifyBaseDataPath = async (token) => {
 
   const createTagResult = await requestApi('/tags', {
     method: 'POST',
-    token,
     body: {
       tagName,
       tagCode,
@@ -467,7 +568,6 @@ const verifyBaseDataPath = async (token) => {
 
   const createProductResult = await requestApi('/products', {
     method: 'POST',
-    token,
     body: {
       productCode,
       productName,
@@ -482,7 +582,6 @@ const verifyBaseDataPath = async (token) => {
 
   const listByNameResult = await requestApi(`/products?keyword=${encodeURIComponent(productName)}`, {
     method: 'GET',
-    token,
   })
   assert.ok(
     listByNameResult.data.some((item) => item.id === createdProduct.id),
@@ -491,7 +590,6 @@ const verifyBaseDataPath = async (token) => {
 
   const listByPinyinResult = await requestApi(`/products?keyword=${encodeURIComponent(pinyinAbbr)}`, {
     method: 'GET',
-    token,
   })
   assert.ok(
     listByPinyinResult.data.some((item) => item.id === createdProduct.id),
@@ -500,7 +598,6 @@ const verifyBaseDataPath = async (token) => {
 
   const listByTagResult = await requestApi(`/products?tagId=${encodeURIComponent(createdTagId)}`, {
     method: 'GET',
-    token,
   })
   assert.ok(
     listByTagResult.data.some((item) => item.id === createdProduct.id),
@@ -509,7 +606,6 @@ const verifyBaseDataPath = async (token) => {
 
   const allTagsResult = await requestApi('/tags', {
     method: 'GET',
-    token,
   })
   assert.ok(allTagsResult.data.some((item) => item.id === createdTag.id), '标签列表中未找到新建标签')
 
@@ -544,13 +640,12 @@ const verifyBaseDataPath = async (token) => {
  * - 创建新单据后，立即走列表、按 showNo 筛选、详情 by id / by showNo；
  * - 用于覆盖“开单 -> 列表 -> 详情 -> 返回已访问页”的关键业务回路。
  */
-const verifyOrderListPath = async (token, product) => {
+const verifyOrderListPath = async (product) => {
   const startedAt = performance.now()
   const idempotencyKey = `perf-order-${createUniqueSuffix()}`
 
   const submitOrderResult = await requestApi('/orders/submit', {
     method: 'POST',
-    token,
     body: {
       idempotencyKey,
       customerName: '性能验证客户',
@@ -571,7 +666,6 @@ const verifyOrderListPath = async (token, product) => {
 
   const orderListResult = await requestApi(`/orders?page=1&pageSize=20&showNo=${encodeURIComponent(createdOrder.showNo)}`, {
     method: 'GET',
-    token,
   })
   assert.ok(orderListResult.data.list?.length ?? orderListResult.data.records?.length ?? 0, '出库列表按 showNo 筛选后未返回记录')
   const orderListRecords = orderListResult.data.list ?? orderListResult.data.records
@@ -579,14 +673,12 @@ const verifyOrderListPath = async (token, product) => {
 
   const detailByIdResult = await requestApi(`/orders/${createdOrder.id}`, {
     method: 'GET',
-    token,
   })
   assert.equal(detailByIdResult.data.order.id, createdOrder.id, '按主键查询订单详情返回错误单据')
   assert.equal(detailByIdResult.data.items.length, 1, '按主键查询订单详情未返回明细')
 
   const detailByShowNoResult = await requestApi(`/orders/show-no/${encodeURIComponent(createdOrder.showNo)}`, {
     method: 'GET',
-    token,
   })
   assert.equal(detailByShowNoResult.data.order.showNo, createdOrder.showNo, '按业务单号查询订单详情返回错误单据')
 
@@ -612,14 +704,13 @@ const verifyOrderListPath = async (token, product) => {
  * - 创建操作员、按关键字/角色/状态连续筛选；
  * - 切换启停状态并校验列表结果，覆盖“连续筛选 + 快速切页”常见治理操作。
  */
-const verifySystemManagementPath = async (token) => {
+const verifySystemManagementPath = async () => {
   const startedAt = performance.now()
   const suffix = createUniqueSuffix()
   const username = `perf_user_${suffix.replaceAll(/[^a-z0-9]/gi, '').slice(0, 12)}`
 
   const createUserResult = await requestApi('/users', {
     method: 'POST',
-    token,
     body: {
       username,
       password: defaultSystemUserPassword,
@@ -635,14 +726,12 @@ const verifySystemManagementPath = async (token) => {
     `/users?page=1&pageSize=20&keyword=${encodeURIComponent(username)}&role=operator&status=enabled`,
     {
       method: 'GET',
-      token,
     },
   )
   assert.ok(usersByKeywordResult.data.list.some((item) => item.id === createdUser.id), '按关键字/角色/状态筛选用户时未命中新建用户')
 
   const disableUserResult = await requestApi(`/users/${createdUser.id}/status`, {
     method: 'PATCH',
-    token,
     body: {
       status: 'disabled',
     },
@@ -653,14 +742,12 @@ const verifySystemManagementPath = async (token) => {
     `/users?page=1&pageSize=20&keyword=${encodeURIComponent(username)}&role=operator&status=disabled`,
     {
       method: 'GET',
-      token,
     },
   )
   assert.ok(usersByDisabledResult.data.list.some((item) => item.id === createdUser.id), '按 disabled 筛选用户时未命中停用后的用户')
 
   const enableUserResult = await requestApi(`/users/${createdUser.id}/status`, {
     method: 'PATCH',
-    token,
     body: {
       status: 'enabled',
     },
@@ -694,11 +781,10 @@ const verifySystemManagementPath = async (token) => {
  * - 拉取双流水配置；
  * - 使用原值回写，验证保存接口可正常响应（不改变业务数据）。
  */
-const verifySystemConfigPath = async (token) => {
+const verifySystemConfigPath = async () => {
   const startedAt = performance.now()
   const fetchSerialResult = await requestApi('/system-configs/order-serial', {
     method: 'GET',
-    token,
   })
 
   const configs = fetchSerialResult.data.list ?? []
@@ -708,21 +794,48 @@ const verifySystemConfigPath = async (token) => {
   assert.ok(department, '系统配置缺少 department 流水')
   assert.ok(walkin, '系统配置缺少 walkin 流水')
 
+  const invalidPayload = {
+    department: {
+      start: Number(department.start),
+      current: Number(department.current),
+      width: Number(department.width),
+    },
+    walkin: {
+      start: Number(walkin.start),
+      current: Number(walkin.current),
+      width: Number(walkin.width),
+    },
+  }
+
+  const missingCsrfResult = await requestApi('/system-configs/order-serial', {
+    method: 'PUT',
+    body: invalidPayload,
+    expectedStatus: 403,
+    expectJsonEnvelope: true,
+    includeCsrfHeader: false,
+  })
+  assert.match(
+    missingCsrfResult.payload.message ?? '',
+    /安全校验失败|刷新页面后重试/,
+    '系统配置接口缺少 CSRF 请求头时未返回预期安全提示',
+  )
+
+  const invalidCsrfResult = await requestApi('/system-configs/order-serial', {
+    method: 'PUT',
+    body: invalidPayload,
+    expectedStatus: 403,
+    expectJsonEnvelope: true,
+    csrfHeaderValue: 'invalid-csrf-token',
+  })
+  assert.match(
+    invalidCsrfResult.payload.message ?? '',
+    /安全校验失败|刷新页面后重试/,
+    '系统配置接口错误 CSRF 请求头未被预期拦截',
+  )
+
   const updateResult = await requestApi('/system-configs/order-serial', {
     method: 'PUT',
-    token,
-    body: {
-      department: {
-        start: Number(department.start),
-        current: Number(department.current),
-        width: Number(department.width),
-      },
-      walkin: {
-        start: Number(walkin.start),
-        current: Number(walkin.current),
-        width: Number(walkin.width),
-      },
-    },
+    body: invalidPayload,
   })
   assert.ok(Array.isArray(updateResult.data.list), '系统配置更新后返回数据结构异常')
 
@@ -730,7 +843,13 @@ const verifySystemConfigPath = async (token) => {
   pushStep('系统配置关键参数读取与保存', durationMs, {
     timings: {
       fetchSerialMs: Number(fetchSerialResult.durationMs.toFixed(2)),
+      missingCsrfBlockMs: Number(missingCsrfResult.durationMs.toFixed(2)),
+      invalidCsrfBlockMs: Number(invalidCsrfResult.durationMs.toFixed(2)),
       updateSerialMs: Number(updateResult.durationMs.toFixed(2)),
+    },
+    securityValidation: {
+      missingCsrfBlocked: true,
+      invalidCsrfBlocked: true,
     },
   })
   log('[core-path] 系统配置读取 / 保存验证通过')
@@ -741,13 +860,12 @@ const verifySystemConfigPath = async (token) => {
  * - 校验系统治理动作已经沉淀到审计日志；
  * - 同时验证 export 接口能导出当前筛选结果，保证验证结果具备可追溯性。
  */
-const verifyAuditLogPath = async (token, createdUser) => {
+const verifyAuditLogPath = async (createdUser) => {
   const startedAt = performance.now()
   const auditListResult = await requestApi(
     `/audit-logs?page=1&pageSize=20&actionType=${encodeURIComponent('user.update_status')}&targetId=${encodeURIComponent(createdUser.id)}`,
     {
       method: 'GET',
-      token,
     },
   )
 
@@ -762,7 +880,6 @@ const verifyAuditLogPath = async (token, createdUser) => {
     `/audit-logs/export?actionType=${encodeURIComponent('user.update_status')}&targetId=${encodeURIComponent(createdUser.id)}`,
     {
       method: 'GET',
-      token,
       expectJsonEnvelope: false,
     },
   )
@@ -784,25 +901,83 @@ const verifyAuditLogPath = async (token, createdUser) => {
 }
 
 /**
+ * 运行时预算断言：
+ * - 直接复用前面已经测得的真实耗时，不额外重复执行业务链路；
+ * - 既校验整步耗时，也单独卡住工作台统计请求，避免被总体平均值掩盖。
+ */
+const verifyRuntimePerformanceBudget = () => {
+  const startedAt = performance.now()
+  const stepBudgets = runtimeStepBudgetDefinitions.map((definition) => {
+    const step = findVerificationStep(definition.title)
+    assert.ok(step, `运行时预算缺少步骤数据：${definition.title}`)
+
+    const maxMs = runtimePerformanceBudget[definition.budgetKey]
+    return {
+      title: definition.title,
+      label: definition.label,
+      actualMs: Number(step.durationMs.toFixed(2)),
+      maxMs,
+      pass: step.durationMs <= maxMs,
+    }
+  })
+
+  const loginStep = findVerificationStep('登录后进入首页与工作台连续访问')
+  const dashboardSamples = loginStep?.details?.dashboardSamples ?? []
+  assert.ok(Array.isArray(dashboardSamples) && dashboardSamples.length > 0, '运行时预算缺少工作台采样数据')
+
+  const dashboardBudgets = dashboardSamples.map((sample) => ({
+    sampleIndex: sample.index,
+    actualMs: Number(sample.durationMs.toFixed(2)),
+    maxMs: runtimePerformanceBudget.dashboardRequestMaxMs,
+    pass: sample.durationMs <= runtimePerformanceBudget.dashboardRequestMaxMs,
+  }))
+
+  const failedBudgets = [
+    ...stepBudgets
+      .filter((item) => !item.pass)
+      .map((item) => `${item.label} 超预算：${item.actualMs} ms > ${item.maxMs} ms`),
+    ...dashboardBudgets
+      .filter((item) => !item.pass)
+      .map((item) => `工作台统计采样 #${item.sampleIndex} 超预算：${item.actualMs} ms > ${item.maxMs} ms`),
+  ]
+
+  runtimeBudgetSummary = {
+    status: failedBudgets.length === 0 ? 'passed' : 'failed',
+    stepBudgets,
+    dashboardBudgets,
+  }
+
+  pushStep('核心路径运行时预算校验', performance.now() - startedAt, runtimeBudgetSummary)
+  assert.equal(failedBudgets.length, 0, `运行时预算校验失败：${failedBudgets.join('；')}`)
+  log('[core-path] 运行时预算校验通过')
+}
+
+/**
  * 汇总写入 JSON 报告：
  * - 统一沉淀环境信息、隔离数据库路径与每个验证步骤；
  * - 供任务回写、问题排查与后续对比使用。
  */
-const writeReport = () => {
+const writeReport = (status = 'passed', errorMessage = null) => {
   const report = {
     runId,
     generatedAt: new Date().toISOString(),
+    status,
+    errorMessage,
     backendBaseUrl,
     verifyDbPath,
     credentials: {
       username: verifyCredentials.username,
     },
+    runtimePerformanceBudget,
+    runtimeBudgetSummary,
     verificationSteps,
   }
 
   fs.mkdirSync(runtimeRoot, { recursive: true })
   fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8')
+  fs.writeFileSync(runtimeBudgetReportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8')
   log(`[core-path] 核心路径验证报告已写入：${reportPath}`)
+  log(`[core-path] 运行时预算报告已写入：${runtimeBudgetReportPath}`)
 }
 
 const main = async () => {
@@ -811,13 +986,14 @@ const main = async () => {
   try {
     verifyFrontendStaticCoverage()
     backendContext = await startIsolatedBackend()
-    const { token } = await verifyLoginAndDashboard()
-    const { createdProduct } = await verifyBaseDataPath(token)
-    await verifyOrderListPath(token, createdProduct)
-    await verifySystemConfigPath(token)
-    const { createdUser } = await verifySystemManagementPath(token)
-    await verifyAuditLogPath(token, createdUser)
-    writeReport()
+    await verifyLoginAndDashboard()
+    const { createdProduct } = await verifyBaseDataPath()
+    await verifyOrderListPath(createdProduct)
+    await verifySystemConfigPath()
+    const { createdUser } = await verifySystemManagementPath()
+    await verifyAuditLogPath(createdUser)
+    verifyRuntimePerformanceBudget()
+    writeReport('passed', null)
     log('[core-path] 核心路径自动化回归全部通过')
   } finally {
     await stopIsolatedBackend(backendContext?.backendProcess)
@@ -827,7 +1003,7 @@ const main = async () => {
 try {
   await main()
 } catch (error) {
-  writeReport()
+  writeReport('failed', error instanceof Error ? error.message : String(error))
   // eslint-disable-next-line no-console
   console.error('\n[core-path] 核心路径自动化回归失败：', error)
   process.exit(1)

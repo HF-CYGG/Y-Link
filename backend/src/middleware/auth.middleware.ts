@@ -10,9 +10,15 @@ import { auditService } from '../services/audit.service.js'
 import type { AuthenticatedRequest, UserRole } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
+import {
+  readAdminCsrfTokenFromCookie,
+  readAdminSessionTokenFromCookie,
+  resolveAdminCsrfHeaderValue,
+} from '../utils/admin-auth-cookie.js'
 import { authService } from '../services/auth.service.js'
 
 const FORBIDDEN_MESSAGE = '当前账号无权执行该操作'
+const CSRF_FORBIDDEN_MESSAGE = '请求安全校验失败，请刷新页面后重试'
 
 /**
  * 统一记录越权访问审计：
@@ -68,23 +74,90 @@ function parseBearerToken(req: Request): string | null {
 }
 
 /**
+ * 统一解析管理端认证凭据：
+ * - 优先使用 HttpOnly 会话 Cookie，确保管理端主链路正式切换到安全 Cookie 会话；
+ * - 保留 Bearer Token 兼容兜底，避免历史 SSE 或联调脚本在过渡阶段立刻失效。
+ */
+function parseAdminCredential(req: Request): { token: string; source: 'cookie' | 'bearer' } | null {
+  const sessionToken = readAdminSessionTokenFromCookie(req)
+  if (sessionToken) {
+    return {
+      token: sessionToken,
+      source: 'cookie',
+    }
+  }
+
+  const bearerToken = parseBearerToken(req)
+  if (!bearerToken) {
+    return null
+  }
+
+  return {
+    token: bearerToken,
+    source: 'bearer',
+  }
+}
+
+function isSafeRequestMethod(method: string): boolean {
+  return ['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase())
+}
+
+/**
  * 认证中间件：
  * - 统一校验 Bearer Token；
  * - 将当前登录用户注入 req.auth，供后续业务与审计链路直接复用。
  */
 export async function requireAuth(req: Request, _res: Response, next: NextFunction): Promise<void> {
   try {
-    const token = parseBearerToken(req)
-    if (!token) {
+    const credential = parseAdminCredential(req)
+    if (!credential) {
       throw new BizError('未登录或登录状态已失效', 401)
     }
 
-    const auth = await authService.resolveAuthUserByToken(token)
+    const auth = await authService.resolveAuthUserByToken(credential.token)
+    auth.authSource = credential.source
     ;(req as AuthenticatedRequest).auth = auth
     next()
   } catch (error) {
     next(error)
   }
+}
+
+/**
+ * 管理端 CSRF 校验中间件：
+ * - 仅对非安全方法执行校验，避免 GET / SSE / 预加载请求被误拦截；
+ * - 仅当本次请求实际使用 Cookie 会话时校验，兼容少量 Bearer 过渡流量；
+ * - 采用“双提交 Cookie”校验：前端需同时提交可读 CSRF Cookie 与 `x-csrf-token` 请求头。
+ */
+export function requireAdminCsrf(req: Request, _res: Response, next: NextFunction): void {
+  if (isSafeRequestMethod(req.method)) {
+    next()
+    return
+  }
+
+  const auth = (req as AuthenticatedRequest).auth
+  if (!auth) {
+    next(new BizError('未登录或登录状态已失效', 401))
+    return
+  }
+
+  if (auth.authSource !== 'cookie') {
+    next()
+    return
+  }
+
+  const csrfCookieToken = readAdminCsrfTokenFromCookie(req)
+  const csrfHeaderToken = resolveAdminCsrfHeaderValue(req)
+  if (!csrfCookieToken || !csrfHeaderToken || csrfCookieToken !== csrfHeaderToken) {
+    recordForbiddenAudit(req, 'csrf_validation_failed', {
+      csrfCookiePresent: Boolean(csrfCookieToken),
+      csrfHeaderPresent: Boolean(csrfHeaderToken),
+    })
+    next(new BizError(CSRF_FORBIDDEN_MESSAGE, 403))
+    return
+  }
+
+  next()
 }
 
 /**

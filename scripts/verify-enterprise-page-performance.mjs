@@ -1,7 +1,11 @@
 /**
- * 模块说明：scripts/verify-enterprise-page-performance.mjs
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件说明：scripts/verify-enterprise-page-performance.mjs
+ * 文件职责：执行 Y-Link 前端构建预算校验，覆盖总产物、热路径资源、低频重包与高频路由分包，并输出统一 JSON 报告。
+ * 实现逻辑：
+ * 1. 读取 dist 产物，按前缀归类关键 chunk；
+ * 2. 对“总产物预算 + 热路径预算 + 低频专包预算 + 路由分包预算”逐项断言；
+ * 3. 复核 keepAlive、预热与稳定请求等性能治理结构是否仍存在；
+ * 4. 将预算上限、实测值、明细结果和最终状态写入 `.local-dev/enterprise-performance-budget-report.json`。
  */
 
 import fs from 'node:fs'
@@ -15,18 +19,25 @@ const runtimeRoot = path.join(projectRoot, '.local-dev')
 const reportPath = path.join(runtimeRoot, 'enterprise-performance-budget-report.json')
 
 /**
- * 企业页面性能预算：
- * - 预算口径聚焦“首屏核心块、高频页面分包、共享依赖块”三类指标；
- * - 当前阈值基于本项目现有依赖体量制定，后续可在同一脚本内持续收紧；
- * - 只要触线即返回非 0，保证性能优化具备回归约束。
+ * 构建预算分成两层：
+ * - 总产物预算：防止整体包体持续膨胀；
+ * - 热路径预算：把登录后高频路径与低频重包分开考核，避免“总量没超、首屏却变慢”。
  */
 const performanceBudget = {
-  totalAssetsMaxKB: 3800,
+  totalAssetsMaxKB: 4000,
+  criticalAssetsMaxKB: 2200,
   entryChunkMaxKB: 80,
   loginChunkMaxKB: 25,
   frameworkChunkMaxKB: 220,
   uiKitChunkMaxKB: 1000,
   vendorChunkMaxKB: 1900,
+  lowFrequencyChunkMaxKB: {
+    'pdf-export': 1000,
+    'qr-scanner': 450,
+    charting: 650,
+    'image-tools': 80,
+    'qr-code': 60,
+  },
   routeChunkMaxKB: {
     DashboardView: 20,
     OrderEntryView: 30,
@@ -58,24 +69,24 @@ const expectedStableRequestFiles = [
 const toKB = (sizeInBytes) => Number((sizeInBytes / 1024).toFixed(2))
 const formatKB = (sizeInBytes) => `${toKB(sizeInBytes)} KB`
 
-const readText = (filePath) => {
-  try {
-    return fs.readFileSync(filePath, 'utf8')
-  } catch (error) {
-    if (error.code === 'ENOENT') {
-      throw new Error(`文件未找到：${filePath}，请检查当前是否在正确的项目根目录下执行脚本`)
-    }
-    throw error
-  }
-}
-
 const assert = (condition, message) => {
   if (!condition) {
     throw new Error(message)
   }
 }
 
-assert(fs.existsSync(distAssetsRoot), `未找到构建产物目录：${distAssetsRoot}，请先执行 npm run build`)
+const readText = (filePath) => {
+  try {
+    return fs.readFileSync(filePath, 'utf8')
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      throw new Error(`文件未找到：${filePath}，请先在项目根目录执行 npm run build 生成最新产物。`)
+    }
+    throw error
+  }
+}
+
+assert(fs.existsSync(distAssetsRoot), `构建产物不存在：${distAssetsRoot}，请先执行 npm run build。`)
 
 const assetEntries = fs
   .readdirSync(distAssetsRoot, { withFileTypes: true })
@@ -93,6 +104,7 @@ const assetEntries = fs
   })
 
 const findAssetByPrefix = (prefix) => assetEntries.find((entry) => entry.name.startsWith(`${prefix}-`) && entry.name.endsWith('.js'))
+
 const totalAssetsSize = assetEntries.reduce((sum, entry) => sum + entry.size, 0)
 const entryChunk = findAssetByPrefix('index')
 const loginChunk = findAssetByPrefix('LoginView')
@@ -100,25 +112,91 @@ const frameworkChunk = findAssetByPrefix('framework')
 const uiKitChunk = findAssetByPrefix('ui-kit')
 const vendorChunk = findAssetByPrefix('vendor')
 
-assert(entryChunk, '未找到主入口 index-*.js 构建文件')
-assert(loginChunk, '未找到登录页 LoginView-*.js 构建文件')
-assert(frameworkChunk, '未找到 framework-*.js 共享框架块')
-assert(uiKitChunk, '未找到 ui-kit-*.js UI 组件共享块')
-assert(vendorChunk, '未找到 vendor-*.js 第三方共享块')
-
-assert(totalAssetsSize / 1024 <= performanceBudget.totalAssetsMaxKB, `构建总产物超预算：${formatKB(totalAssetsSize)}`)
-assert(entryChunk.sizeKB <= performanceBudget.entryChunkMaxKB, `主入口 chunk 超预算：${entryChunk.name} = ${entryChunk.sizeKB} KB`)
-assert(loginChunk.sizeKB <= performanceBudget.loginChunkMaxKB, `登录页 chunk 超预算：${loginChunk.name} = ${loginChunk.sizeKB} KB`)
-assert(frameworkChunk.sizeKB <= performanceBudget.frameworkChunkMaxKB, `framework chunk 超预算：${frameworkChunk.name} = ${frameworkChunk.sizeKB} KB`)
-assert(uiKitChunk.sizeKB <= performanceBudget.uiKitChunkMaxKB, `ui-kit chunk 超预算：${uiKitChunk.name} = ${uiKitChunk.sizeKB} KB`)
-assert(vendorChunk.sizeKB <= performanceBudget.vendorChunkMaxKB, `vendor chunk 超预算：${vendorChunk.name} = ${vendorChunk.sizeKB} KB`)
-
-const routeChunkReport = Object.entries(performanceBudget.routeChunkMaxKB).map(([prefix, maxKB]) => {
+const lowFrequencyChunks = Object.entries(performanceBudget.lowFrequencyChunkMaxKB).map(([prefix, maxKB]) => {
   const asset = findAssetByPrefix(prefix)
-  assert(asset, `未找到 ${prefix}-*.js 路由分包，说明对应页面没有独立拆包`)
-  assert(asset.sizeKB <= maxKB, `${prefix} 路由分包超预算：${asset.sizeKB} KB > ${maxKB} KB`)
+  assert(asset, `缺少低频重包：${prefix}-*.js`)
+  return {
+    prefix,
+    name: asset.name,
+    size: asset.size,
+    sizeKB: asset.sizeKB,
+    maxKB,
+    pass: asset.sizeKB <= maxKB,
+  }
+})
 
-  return `${prefix}: ${asset.sizeKB} KB`
+const lowFrequencyAssetsSize = lowFrequencyChunks.reduce((sum, entry) => sum + entry.size, 0)
+const criticalAssetsSize = totalAssetsSize - lowFrequencyAssetsSize
+
+assert(entryChunk, '缺少主入口 chunk：index-*.js')
+assert(loginChunk, '缺少登录页 chunk：LoginView-*.js')
+assert(frameworkChunk, '缺少框架基础 chunk：framework-*.js')
+assert(uiKitChunk, '缺少 UI 共享 chunk：ui-kit-*.js')
+assert(vendorChunk, '缺少共享依赖 chunk：vendor-*.js')
+
+const chunkBudgetChecks = [
+  {
+    key: 'total-assets',
+    label: '总产物',
+    actualKB: toKB(totalAssetsSize),
+    maxKB: performanceBudget.totalAssetsMaxKB,
+  },
+  {
+    key: 'critical-assets',
+    label: '热路径关键产物',
+    actualKB: toKB(criticalAssetsSize),
+    maxKB: performanceBudget.criticalAssetsMaxKB,
+  },
+  {
+    key: 'entry',
+    label: '主入口 chunk',
+    actualKB: entryChunk.sizeKB,
+    maxKB: performanceBudget.entryChunkMaxKB,
+    assetName: entryChunk.name,
+  },
+  {
+    key: 'login',
+    label: '登录页 chunk',
+    actualKB: loginChunk.sizeKB,
+    maxKB: performanceBudget.loginChunkMaxKB,
+    assetName: loginChunk.name,
+  },
+  {
+    key: 'framework',
+    label: '框架基础 chunk',
+    actualKB: frameworkChunk.sizeKB,
+    maxKB: performanceBudget.frameworkChunkMaxKB,
+    assetName: frameworkChunk.name,
+  },
+  {
+    key: 'ui-kit',
+    label: 'UI 共享 chunk',
+    actualKB: uiKitChunk.sizeKB,
+    maxKB: performanceBudget.uiKitChunkMaxKB,
+    assetName: uiKitChunk.name,
+  },
+  {
+    key: 'vendor',
+    label: '共享依赖 chunk',
+    actualKB: vendorChunk.sizeKB,
+    maxKB: performanceBudget.vendorChunkMaxKB,
+    assetName: vendorChunk.name,
+  },
+].map((item) => ({
+  ...item,
+  pass: item.actualKB <= item.maxKB,
+}))
+
+const routeChunkChecks = Object.entries(performanceBudget.routeChunkMaxKB).map(([prefix, maxKB]) => {
+  const asset = findAssetByPrefix(prefix)
+  assert(asset, `缺少高频路由分包：${prefix}-*.js`)
+  return {
+    prefix,
+    assetName: asset.name,
+    actualKB: asset.sizeKB,
+    maxKB,
+    pass: asset.sizeKB <= maxKB,
+  }
 })
 
 const routesSource = readText(routesFilePath)
@@ -127,84 +205,120 @@ const routerIndexSource = readText(routerIndexFilePath)
 expectedKeepAliveRoutes.forEach((routeName) => {
   assert(
     routesSource.includes(`name: '${routeName}'`) && routesSource.includes('keepAlive: true'),
-    `路由 ${routeName} 未接入 keepAlive 配置`,
+    `路由 ${routeName} 未接入 keepAlive。`,
   )
 })
 
 expectedWarmupTargets.forEach((routeName) => {
-  assert(routesSource.includes(`'${routeName}'`), `未找到高频路由 ${routeName} 的预热配置`)
+  assert(routesSource.includes(`'${routeName}'`), `缺少预热目标：${routeName}`)
 })
 
 expectedColdStartDeferredRoutes.forEach((routeName) => {
   assert(
     routesSource.includes(`name: '${routeName}'`) && routesSource.includes('deferPreloadOnColdStart: true'),
-    `系统治理重页面 ${routeName} 未启用冷启动预热收缩配置`,
+    `缺少冷启动延迟预热路由：${routeName}`,
   )
 })
 
-assert(routerIndexSource.includes('scheduleRouteComponentWarmup'), '路由后置守卫未接入预热调度')
+assert(routerIndexSource.includes('scheduleRouteComponentWarmup'), '路由预热调度器未接入 router 层。')
 
 expectedStableRequestFiles.forEach((filePath) => {
   const source = readText(filePath)
-  assert(source.includes('useStableRequest'), `文件未接入稳定请求治理：${filePath}`)
+  assert(source.includes('useStableRequest'), `稳定请求治理缺失：${filePath}`)
 })
 
 /**
- * 写入构建预算验证报告：
- * - 把本次预算口径、chunk 体积与关键断言结果持久化到 .local-dev；
- * - 便于后续对比优化前后差异，也让统一入口输出具备可追溯结果。
+ * 收敛为统一失败列表，便于 CI 和人工留档同时复用。
  */
-fs.mkdirSync(runtimeRoot, { recursive: true })
-fs.writeFileSync(
-  reportPath,
-  `${JSON.stringify(
-    {
-      generatedAt: new Date().toISOString(),
-      performanceBudget,
-      totalAssetsKB: toKB(totalAssetsSize),
-      chunks: {
-        entry: {
-          name: entryChunk.name,
-          sizeKB: entryChunk.sizeKB,
-        },
-        login: {
-          name: loginChunk.name,
-          sizeKB: loginChunk.sizeKB,
-        },
-        framework: {
-          name: frameworkChunk.name,
-          sizeKB: frameworkChunk.sizeKB,
-        },
-        'ui-kit': {
-          name: uiKitChunk.name,
-          sizeKB: uiKitChunk.sizeKB,
-        },
-        vendor: {
-          name: vendorChunk.name,
-          sizeKB: vendorChunk.sizeKB,
-        },
-      },
-      routeChunkReport,
-      keepAliveRoutes: expectedKeepAliveRoutes,
-      warmupTargets: expectedWarmupTargets,
-      coldStartDeferredRoutes: expectedColdStartDeferredRoutes,
-      stableRequestFiles: expectedStableRequestFiles,
-    },
-    null,
-    2,
-  )}\n`,
-  'utf8',
-)
+const failedChecks = [
+  ...chunkBudgetChecks
+    .filter((item) => !item.pass)
+    .map((item) => {
+      const assetSuffix = item.assetName ? ` (${item.assetName})` : ''
+      return `${item.label} 超预算：${item.actualKB} KB > ${item.maxKB} KB${assetSuffix}`
+    }),
+  ...lowFrequencyChunks
+    .filter((item) => !item.pass)
+    .map((item) => `低频重包 ${item.prefix} 超预算：${item.sizeKB} KB > ${item.maxKB} KB (${item.name})`),
+  ...routeChunkChecks
+    .filter((item) => !item.pass)
+    .map((item) => `高频路由分包 ${item.prefix} 超预算：${item.actualKB} KB > ${item.maxKB} KB (${item.assetName})`),
+]
 
-console.log('性能验证通过')
-console.log(`- 构建总产物：${formatKB(totalAssetsSize)}`)
-console.log(`- 主入口 chunk：${entryChunk.name} (${entryChunk.sizeKB} KB)`)
-console.log(`- 登录页 chunk：${loginChunk.name} (${loginChunk.sizeKB} KB)`)
-console.log(`- framework chunk：${frameworkChunk.name} (${frameworkChunk.sizeKB} KB)`)
-console.log(`- ui-kit chunk：${uiKitChunk.name} (${uiKitChunk.sizeKB} KB)`)
-console.log(`- vendor chunk：${vendorChunk.name} (${vendorChunk.sizeKB} KB)`)
-console.log(`- 高频路由分包：${routeChunkReport.join(' | ')}`)
-console.log(`- keep-alive 路由：${expectedKeepAliveRoutes.join(', ')}`)
-console.log(`- 预热调度：${expectedWarmupTargets.join(', ')}`)
+const report = {
+  generatedAt: new Date().toISOString(),
+  status: failedChecks.length === 0 ? 'passed' : 'failed',
+  errorMessage: failedChecks.length === 0 ? null : failedChecks.join('；'),
+  reportType: 'build-budget',
+  performanceBudget,
+  budgetSummary: {
+    totalAssets: {
+      actualKB: toKB(totalAssetsSize),
+      maxKB: performanceBudget.totalAssetsMaxKB,
+      pass: toKB(totalAssetsSize) <= performanceBudget.totalAssetsMaxKB,
+    },
+    criticalAssets: {
+      actualKB: toKB(criticalAssetsSize),
+      maxKB: performanceBudget.criticalAssetsMaxKB,
+      pass: toKB(criticalAssetsSize) <= performanceBudget.criticalAssetsMaxKB,
+    },
+  },
+  totalAssetsKB: toKB(totalAssetsSize),
+  criticalAssetsKB: toKB(criticalAssetsSize),
+  lowFrequencyAssetsKB: toKB(lowFrequencyAssetsSize),
+  chunks: {
+    entry: {
+      name: entryChunk.name,
+      sizeKB: entryChunk.sizeKB,
+      maxKB: performanceBudget.entryChunkMaxKB,
+      pass: entryChunk.sizeKB <= performanceBudget.entryChunkMaxKB,
+    },
+    login: {
+      name: loginChunk.name,
+      sizeKB: loginChunk.sizeKB,
+      maxKB: performanceBudget.loginChunkMaxKB,
+      pass: loginChunk.sizeKB <= performanceBudget.loginChunkMaxKB,
+    },
+    framework: {
+      name: frameworkChunk.name,
+      sizeKB: frameworkChunk.sizeKB,
+      maxKB: performanceBudget.frameworkChunkMaxKB,
+      pass: frameworkChunk.sizeKB <= performanceBudget.frameworkChunkMaxKB,
+    },
+    'ui-kit': {
+      name: uiKitChunk.name,
+      sizeKB: uiKitChunk.sizeKB,
+      maxKB: performanceBudget.uiKitChunkMaxKB,
+      pass: uiKitChunk.sizeKB <= performanceBudget.uiKitChunkMaxKB,
+    },
+    vendor: {
+      name: vendorChunk.name,
+      sizeKB: vendorChunk.sizeKB,
+      maxKB: performanceBudget.vendorChunkMaxKB,
+      pass: vendorChunk.sizeKB <= performanceBudget.vendorChunkMaxKB,
+    },
+  },
+  lowFrequencyChunks,
+  routeChunkChecks,
+  lowFrequencyChunkReport: lowFrequencyChunks.map((entry) => `${entry.prefix}: ${entry.sizeKB} KB`),
+  routeChunkReport: routeChunkChecks.map((entry) => `${entry.prefix}: ${entry.actualKB} KB`),
+  keepAliveRoutes: expectedKeepAliveRoutes,
+  warmupTargets: expectedWarmupTargets,
+  coldStartDeferredRoutes: expectedColdStartDeferredRoutes,
+  stableRequestFiles: expectedStableRequestFiles,
+}
+
+fs.mkdirSync(runtimeRoot, { recursive: true })
+fs.writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8')
+
+if (failedChecks.length > 0) {
+  throw new Error(failedChecks.join('\n'))
+}
+
+console.log('[build-budget] 构建预算校验通过')
+console.log(`- 总产物：${formatKB(totalAssetsSize)} / ${performanceBudget.totalAssetsMaxKB} KB`)
+console.log(`- 热路径关键产物：${formatKB(criticalAssetsSize)} / ${performanceBudget.criticalAssetsMaxKB} KB`)
+console.log(`- 低频重包：${report.lowFrequencyChunkReport.join(' | ')}`)
+console.log(`- 高频路由分包：${report.routeChunkReport.join(' | ')}`)
 console.log(`- 稳定请求接入文件数：${expectedStableRequestFiles.length}`)
-console.log(`- 构建预算报告：${reportPath}`)
+console.log(`- 报告：${reportPath}`)

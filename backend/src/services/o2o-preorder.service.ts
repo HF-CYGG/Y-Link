@@ -234,6 +234,8 @@ export const O2O_PICKUP_CONTACT_MAX_LENGTH = 32
 
 const LIKE_ESCAPE_CHAR = String.raw`\\`
 const LIKE_SPECIAL_CHAR_PATTERN = /[%_\\]/g
+const O2O_TIMEOUT_RECYCLE_RECENT_WINDOW_MS = 15 * 1000
+const O2O_TIMEOUT_BACKGROUND_RECYCLE_INTERVAL_MS = 60 * 1000
 
 class O2oPreorderService {
   private readonly productRepo = AppDataSource.getRepository(BaseProduct)
@@ -243,9 +245,10 @@ class O2oPreorderService {
   private readonly returnRequestItemRepo = AppDataSource.getRepository(O2oReturnRequestItem)
   private readonly clientUserRepo = AppDataSource.getRepository(ClientUser)
   private readonly inventoryLogRepo = AppDataSource.getRepository(InventoryLog)
-  private timeoutCleanupPromise: Promise<{ cancelledCount: number }> | null = null
-  private lastTimeoutCleanupAt = 0
-  private readonly timeoutCleanupMinIntervalMs = 5000
+  private cancelTimeoutOrdersInFlight: Promise<{ cancelledCount: number }> | null = null
+  private lastCancelTimeoutOrdersAt = 0
+  private lastCancelTimeoutOrdersResult = { cancelledCount: 0 }
+  private timeoutRecycleLoopTimer: ReturnType<typeof globalThis.setInterval> | null = null
 
   /**
    * 客户端改单次数上限：
@@ -1181,6 +1184,65 @@ class O2oPreorderService {
     return summaryMap
   }
 
+  /**
+   * 统一构建订单摘要视图：
+   * - 列表页与“单条摘要刷新”接口复用同一套聚合口径，避免金额、退货统计和状态报告在不同接口间漂移；
+   * - 保持传入顺序输出，方便调用方直接把结果映射回当前列表缓存。
+   */
+  private async buildOrderSummaryViews(
+    orders: O2oPreorder[],
+    options?: {
+      nowMs?: number
+    },
+  ): Promise<O2oPreorderSummaryView[]> {
+    if (!orders.length) {
+      return []
+    }
+    const orderIds = orders.map((item) => String(item.id))
+    const nowMs = options?.nowMs ?? Date.now()
+    const customerOrderShowNoMap = await this.resolveCustomerOrderShowNoMap(orderIds)
+    const totalAmountMap = await this.resolveOrderTotalAmountMap(orderIds)
+    const returnRequestCountMap = await this.resolveOrderReturnRequestCountMap(orderIds)
+    const latestReturnRequestMap = await this.resolveLatestReturnRequestSummaryMap(orderIds)
+    return orders.map((item) => ({
+      statusReport: this.resolveOrderStatusReport(item, nowMs),
+      totalAmount: totalAmountMap.get(String(item.id)) ?? '0.00',
+      expireInSeconds: this.resolveExpireInSeconds(item, nowMs),
+      id: String(item.id),
+      showNo: item.showNo,
+      customerOrderShowNo: customerOrderShowNoMap.get(String(item.id)) ?? null,
+      verifyCode: item.verifyCode,
+      status: item.status,
+      businessStatus: item.businessStatus ?? null,
+      hasCustomerOrder: Boolean(item.hasCustomerOrder),
+      isSystemApplied: Boolean(item.isSystemApplied),
+      merchantMessage: item.merchantMessage ?? null,
+      clientOrderType: item.clientOrderType === 'department' ? 'department' : 'walkin',
+      departmentNameSnapshot: item.departmentNameSnapshot?.trim() || null,
+      returnRequestCount: returnRequestCountMap.get(String(item.id))?.total ?? 0,
+      pendingReturnRequestCount: returnRequestCountMap.get(String(item.id))?.pending ?? 0,
+      latestReturnRequest: latestReturnRequestMap.get(String(item.id)) ?? null,
+      totalQty: item.totalQty,
+      timeoutAt: item.timeoutAt,
+      createdAt: item.createdAt,
+    }))
+  }
+
+  /**
+   * 单条摘要构建器：
+   * - 供客户端订单列表的“增量刷新单条订单”接口复用；
+   * - 内部仍走与列表页一致的聚合逻辑，避免出现“单条刷新后摘要字段缺失”。
+   */
+  private async buildOrderSummaryView(
+    order: O2oPreorder,
+    options?: {
+      nowMs?: number
+    },
+  ): Promise<O2oPreorderSummaryView> {
+    const [summary] = await this.buildOrderSummaryViews([order], options)
+    return summary
+  }
+
   async listMallProducts() {
     // 商城端只暴露“可售且已上架”的商品，并把库存口径统一换算成前端直接可用的 availableStock。
     const products = await this.productRepo.find({
@@ -1640,7 +1702,6 @@ class O2oPreorderService {
   }
 
   async updateMyOrder(auth: ClientAuthContext, orderId: string, input: UpdateMyPreorderInput) {
-    await this.cancelTimeoutOrders()
     const normalizedItems = this.normalizePreorderItems(input.items)
     const normalizedRemark = this.normalizePreorderRemark(input.remark)
     const o2oRules = await systemConfigService.getO2oRuleConfigs()
@@ -1743,9 +1804,7 @@ class O2oPreorderService {
   }
 
   async listMyOrders(auth: ClientAuthContext, query?: Partial<MyOrderListQuery>): Promise<PaginationResult<O2oPreorderSummaryView>> {
-    // 先做一次超时回收，保证用户看到的订单状态尽量接近当前真实状态。
-    await this.cancelTimeoutOrders()
-
+    // Timeout recycling runs in the background and on write paths; this read path stays query-only.
     const normalizedPage = Math.max(1, Number(query?.page) || 1)
     const normalizedPageSize = Math.max(1, Math.min(50, Number(query?.pageSize) || 20))
     const normalizedKeyword = query?.keyword?.trim() ?? ''
@@ -1805,46 +1864,28 @@ class O2oPreorderService {
 
     const [rows, total] = await queryBuilder.getManyAndCount()
     const nowMs = Date.now()
-    const customerOrderShowNoMap = await this.resolveCustomerOrderShowNoMap(rows.map((item) => String(item.id)))
-    const totalAmountMap = await this.resolveOrderTotalAmountMap(rows.map((item) => String(item.id)))
-    const returnRequestCountMap = await this.resolveOrderReturnRequestCountMap(rows.map((item) => String(item.id)))
-    const latestReturnRequestMap = await this.resolveLatestReturnRequestSummaryMap(rows.map((item) => String(item.id)))
     return {
       page: normalizedPage,
       pageSize: normalizedPageSize,
       total,
-      list: rows.map((item) => ({
-        statusReport: this.resolveOrderStatusReport(item, nowMs),
-        totalAmount: totalAmountMap.get(String(item.id)) ?? '0.00',
-        expireInSeconds: this.resolveExpireInSeconds(item, nowMs),
-        id: String(item.id),
-        showNo: item.showNo,
-        customerOrderShowNo: customerOrderShowNoMap.get(String(item.id)) ?? null,
-        verifyCode: item.verifyCode,
-        status: item.status,
-        businessStatus: item.businessStatus ?? null,
-        hasCustomerOrder: Boolean(item.hasCustomerOrder),
-        isSystemApplied: Boolean(item.isSystemApplied),
-        merchantMessage: item.merchantMessage ?? null,
-        clientOrderType: item.clientOrderType === 'department' ? 'department' : 'walkin',
-        departmentNameSnapshot: item.departmentNameSnapshot?.trim() || null,
-        returnRequestCount: returnRequestCountMap.get(String(item.id))?.total ?? 0,
-        pendingReturnRequestCount: returnRequestCountMap.get(String(item.id))?.pending ?? 0,
-        latestReturnRequest: latestReturnRequestMap.get(String(item.id)) ?? null,
-        totalQty: item.totalQty,
-        timeoutAt: item.timeoutAt,
-        createdAt: item.createdAt,
-      })),
+      list: await this.buildOrderSummaryViews(rows, { nowMs }),
     }
   }
 
   async getMyOrderDetail(auth: ClientAuthContext, id: string) {
-    await this.cancelTimeoutOrders()
     const order = await this.preorderRepo.findOne({ where: { id, clientUserId: auth.userId } })
     if (!order) {
       throw new BizError('预订单不存在', 404)
     }
     return this.buildOrderDetail(order)
+  }
+
+  async getMyOrderSummary(auth: ClientAuthContext, id: string) {
+    const order = await this.preorderRepo.findOne({ where: { id, clientUserId: auth.userId } })
+    if (!order) {
+      throw new BizError('预订单不存在', 404)
+    }
+    return this.buildOrderSummaryView(order)
   }
 
   async createReturnRequest(auth: ClientAuthContext, orderId: string, input: SubmitReturnRequestInput) {
@@ -1933,7 +1974,6 @@ class O2oPreorderService {
     if (startTime && endTime && startTime.getTime() > endTime.getTime()) {
       throw new BizError('开始时间不能晚于结束时间', 400)
     }
-    await this.cancelTimeoutOrders()
     const queryBuilder = this.preorderRepo.createQueryBuilder('order').orderBy('order.id', 'DESC').take(normalizedLimit)
 
     if (input.status) {
@@ -1983,34 +2023,10 @@ class O2oPreorderService {
 
     const rows = await queryBuilder.getMany()
     const nowMs = Date.now()
-    const totalAmountMap = await this.resolveOrderTotalAmountMap(rows.map((item) => String(item.id)))
-    const returnRequestCountMap = await this.resolveOrderReturnRequestCountMap(rows.map((item) => String(item.id)))
-    const latestReturnRequestMap = await this.resolveLatestReturnRequestSummaryMap(rows.map((item) => String(item.id)))
-    return rows.map((item) => ({
-      statusReport: this.resolveOrderStatusReport(item, nowMs),
-      totalAmount: totalAmountMap.get(String(item.id)) ?? '0.00',
-      expireInSeconds: this.resolveExpireInSeconds(item, nowMs),
-      id: String(item.id),
-      showNo: item.showNo,
-      verifyCode: item.verifyCode,
-      status: item.status,
-      businessStatus: item.businessStatus ?? null,
-      hasCustomerOrder: Boolean(item.hasCustomerOrder),
-      isSystemApplied: Boolean(item.isSystemApplied),
-      merchantMessage: item.merchantMessage ?? null,
-      clientOrderType: item.clientOrderType === 'department' ? 'department' : 'walkin',
-      departmentNameSnapshot: item.departmentNameSnapshot?.trim() || null,
-      returnRequestCount: returnRequestCountMap.get(String(item.id))?.total ?? 0,
-      pendingReturnRequestCount: returnRequestCountMap.get(String(item.id))?.pending ?? 0,
-      latestReturnRequest: latestReturnRequestMap.get(String(item.id)) ?? null,
-      totalQty: item.totalQty,
-      timeoutAt: item.timeoutAt,
-      createdAt: item.createdAt,
-    }))
+    return this.buildOrderSummaryViews(rows, { nowMs })
   }
 
   async detailById(id: string) {
-    await this.cancelTimeoutOrders()
     const order = await this.preorderRepo.findOne({ where: { id } })
     if (!order) {
       throw new BizError('预订单不存在', 404)
@@ -2508,59 +2524,79 @@ class O2oPreorderService {
     })
   }
 
-  async cancelTimeoutOrders() {
-    const now = Date.now()
-    if (this.timeoutCleanupPromise) {
-      return this.timeoutCleanupPromise
+  startTimeoutRecycleLoop() {
+    if (this.timeoutRecycleLoopTimer !== null) {
+      return
     }
-    if (now - this.lastTimeoutCleanupAt < this.timeoutCleanupMinIntervalMs) {
-      return { cancelledCount: 0 }
-    }
-
-    this.timeoutCleanupPromise = this.runCancelTimeoutOrders().finally(() => {
-      this.lastTimeoutCleanupAt = Date.now()
-      this.timeoutCleanupPromise = null
-    })
-    return this.timeoutCleanupPromise
+    this.timeoutRecycleLoopTimer = globalThis.setInterval(() => {
+      void this.cancelTimeoutOrders({ skipRecentMs: O2O_TIMEOUT_RECYCLE_RECENT_WINDOW_MS }).catch(() => undefined)
+    }, O2O_TIMEOUT_BACKGROUND_RECYCLE_INTERVAL_MS)
   }
 
-  private async runCancelTimeoutOrders() {
+  async cancelTimeoutOrders(options?: { skipRecentMs?: number }) {
     const config = await systemConfigService.getO2oRuleConfigs()
     if (!config.autoCancelEnabled) {
-      return { cancelledCount: 0 }
+      this.lastCancelTimeoutOrdersAt = Date.now()
+      this.lastCancelTimeoutOrdersResult = { cancelledCount: 0 }
+      return this.lastCancelTimeoutOrdersResult
     }
-    let cancelledCount = 0
-    // 分批循环回收，避免单次只处理 100 条导致仍有超时订单残留。
-    // 这样即使门店长时间未触发查询，也能在下一次入口访问时尽量回收完整。
-    while (true) {
-      const timeoutOrders = await this.preorderRepo.find({
-        where: {
-          status: 'pending',
-          timeoutAt: LessThanOrEqual(new Date()),
-        },
-        take: 100,
-      })
-      if (!timeoutOrders.length) {
-        break
-      }
-      await AppDataSource.transaction(async (manager) => {
-        for (const order of timeoutOrders) {
-          const cancelled = await this.cancelTimedOutOrderInManager(manager, order)
-          if (cancelled) {
-            cancelledCount += 1
-          }
+    const normalizedSkipRecentMs = Math.max(0, Number(options?.skipRecentMs ?? 0))
+    const nowMs = Date.now()
+    if (this.cancelTimeoutOrdersInFlight !== null) {
+      return this.cancelTimeoutOrdersInFlight
+    }
+    if (
+      normalizedSkipRecentMs > 0 &&
+      nowMs - this.lastCancelTimeoutOrdersAt < normalizedSkipRecentMs
+    ) {
+      return this.lastCancelTimeoutOrdersResult
+    }
+
+    const recyclePromise = (async () => {
+      let cancelledCount = 0
+      // 分批循环回收，避免单次只处理 100 条导致仍有超时订单残留。
+      // 这样即使门店长时间未触发查询，也能在下一次入口访问时尽量回收完整。
+      while (true) {
+        const timeoutOrders = await this.preorderRepo.find({
+          where: {
+            status: 'pending',
+            timeoutAt: LessThanOrEqual(new Date()),
+          },
+          take: 100,
+        })
+        if (!timeoutOrders.length) {
+          break
         }
-      })
-      if (timeoutOrders.length < 100) {
-        break
+        await AppDataSource.transaction(async (manager) => {
+          for (const order of timeoutOrders) {
+            const cancelled = await this.cancelTimedOutOrderInManager(manager, order)
+            if (cancelled) {
+              cancelledCount += 1
+            }
+          }
+        })
+        if (timeoutOrders.length < 100) {
+          break
+        }
+      }
+      return { cancelledCount }
+    })()
+
+    this.cancelTimeoutOrdersInFlight = recyclePromise
+    try {
+      const result = await recyclePromise
+      this.lastCancelTimeoutOrdersAt = Date.now()
+      this.lastCancelTimeoutOrdersResult = result
+      return result
+    } finally {
+      if (this.cancelTimeoutOrdersInFlight === recyclePromise) {
+        this.cancelTimeoutOrdersInFlight = null
       }
     }
-    return { cancelledCount }
   }
 
   async getVerifyDetail(verifyCode: string) {
     const normalizedVerifyCode = this.normalizeVerifyCode(verifyCode)
-    await this.cancelTimeoutOrders()
     const returnRequest = await this.returnRequestRepo.findOne({ where: { verifyCode: normalizedVerifyCode } })
     if (returnRequest) {
       return {
@@ -2583,7 +2619,6 @@ class O2oPreorderService {
     if (!normalizedShowNo) {
       throw new BizError('单号不能为空', 400)
     }
-    await this.cancelTimeoutOrders()
     const returnRequest = await this.returnRequestRepo.findOne({ where: { returnNo: normalizedShowNo } })
     if (returnRequest) {
       return {

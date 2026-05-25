@@ -5,8 +5,7 @@
  * 实现逻辑：
  * - 状态筛选与关键词查询统一走服务端接口，不再只对第一页缓存做本地过滤，避免遗漏更多历史订单；
  * - 订单列表支持“加载更多”，并把当前筛选条件、关键词、页码和已加载结果缓存到按账号隔离的 Store 中；
- * - 页面层继续使用 `useStableRequest` 保证只有最新一次查询结果生效，减少频繁切换筛选时的闪烁与覆盖；
- * - 静默刷新会尽量维持当前滚动锚点，只高亮新增或发生状态变化的订单卡片，避免整页回跳。
+ * - 页面层继续使用 `useStableRequest` 保证只有最新一次查询结果生效，减少频繁切换筛选时的闪烁与覆盖。
  * 维护说明：
  * - 若后续新增列表查询条件，需要同步修改 `buildListQuery()`、Store 快照字段与空态文案；
  * - 订单撤回等会改变服务端筛选结果的操作，要优先考虑当前列表是否需要局部剔除或整页刷新；
@@ -19,9 +18,9 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { RefreshRight } from '@element-plus/icons-vue'
 import {
   cancelMyO2oPreorder,
+  getMyO2oPreorderSummary,
   getMyO2oPreorders,
   resolveO2oDisplayShowNo,
-  type O2oPreorderDetail,
   type O2oPreorderSummary,
 } from '@/api/modules/o2o'
 import { BaseRequestState } from '@/components/common'
@@ -35,7 +34,8 @@ import {
 } from '@/constants/o2o-order-status'
 import { useClientAuthStore, useClientOrderStore } from '@/store'
 import pinia from '@/store/pinia'
-import { subscribeClientOrderRefresh } from '@/utils/client-order-refresh'
+import { notifyClientOrderRefresh, subscribeClientOrderRefresh } from '@/utils/client-order-refresh'
+import { buildClientOrderSummaryFromDetail } from '@/utils/client-order-summary'
 import { formatDateTime } from '@/utils/date-time'
 import { normalizeRequestError } from '@/utils/error'
 import { captureOrderRefreshAnchor, restoreOrderRefreshAnchor } from '@/utils/order-refresh-visual'
@@ -102,10 +102,12 @@ const orderRefreshMarkExpiresAtMap = ref<Record<string, number>>({})
 const clientAuthStore = useClientAuthStore(pinia)
 const clientOrderStore = useClientOrderStore(pinia)
 const { runLatest } = useStableRequest()
-let autoRefreshTimer: ReturnType<typeof globalThis.setInterval> | null = null
-let refreshMarkCleanupTimer: ReturnType<typeof globalThis.setTimeout> | null = null
-let disposeClientOrderRefresh: () => void = () => {}
 clientOrderStore.initialize(clientAuthStore.currentUser?.id)
+let disposeClientOrderRefresh: () => void = () => {}
+let refreshMarkCleanupTimer: ReturnType<typeof globalThis.setTimeout> | null = null
+let autoRefreshTimer: ReturnType<typeof globalThis.setInterval> | null = null
+const clientOrderRefreshSourceId = `client-orders-${Math.random().toString(36).slice(2)}`
+const runLatestListRequest = runLatest
 
 const orders = computed(() => clientOrderStore.orders)
 const total = computed(() => clientOrderStore.total)
@@ -186,49 +188,11 @@ const handleStatusChange = (value: 'all' | O2oPreorderSummary['status']) => {
   void loadOrders(true)
 }
 
-const buildOrderSummaryFromDetail = (detail: O2oPreorderDetail): O2oPreorderSummary => {
-  const { order } = detail
-  const latestReturnRequest = detail.returnRequests
-    .slice()
-    .sort((prev, next) => new Date(next.createdAt).getTime() - new Date(prev.createdAt).getTime())[0] ?? null
-  return {
-    id: order.id,
-    showNo: resolveO2oDisplayShowNo(order),
-    verifyCode: order.verifyCode,
-    status: order.status,
-    businessStatus: order.businessStatus,
-    hasCustomerOrder: Boolean(order.hasCustomerOrder),
-    isSystemApplied: order.isSystemApplied,
-    merchantMessage: order.merchantMessage,
-    clientOrderType: order.clientOrderType,
-    departmentNameSnapshot: order.departmentNameSnapshot,
-    returnRequestCount: detail.returnRequests.length,
-    pendingReturnRequestCount: detail.returnRequests.filter((item) => item.status === 'pending').length,
-    latestReturnRequest: latestReturnRequest
-      ? {
-          id: latestReturnRequest.id,
-          returnNo: latestReturnRequest.returnNo,
-          status: latestReturnRequest.status,
-          createdAt: latestReturnRequest.createdAt,
-          handledAt: latestReturnRequest.handledAt,
-          rejectedReason: latestReturnRequest.rejectedReason,
-        }
-      : null,
-    statusReport: order.statusReport,
-    totalAmount: order.totalAmount,
-    expireInSeconds: order.expireInSeconds,
-    totalQty: order.totalQty,
-    timeoutAt: order.timeoutAt,
-    createdAt: order.createdAt,
-  }
-}
-
-// 详细注释：客户端订单列表进入 Store 前，统一把展示单号切换为管理端正式出库单号。
-// 这样列表卡片、撤回确认、详情返回后的局部刷新都能稳定复用同一个可见单号口径。
 const normalizeSummaryDisplayShowNo = (order: O2oPreorderSummary): O2oPreorderSummary => {
   return {
     ...order,
     showNo: resolveO2oDisplayShowNo(order),
+    customerOrderShowNo: order.customerOrderShowNo ?? null,
   }
 }
 
@@ -479,6 +443,45 @@ const canRunAutoRefresh = () => {
   return !firstScreenLoading.value && !refreshing.value && !loadingMore.value && !recallingOrderId.value
 }
 
+const triggerSilentOrderRefresh = async () => {
+  if (!canRunAutoRefresh()) {
+    return
+  }
+  await loadOrders(true, { silent: true, preserveScroll: true })
+}
+
+const startClientOrderRefreshSubscription = () => {
+  disposeClientOrderRefresh()
+  disposeClientOrderRefresh = subscribeClientOrderRefresh(async (event) => {
+    if (event.sourceId === clientOrderRefreshSourceId || !event.orderId) {
+      return
+    }
+    try {
+      const latestSummary = normalizeSummaryDisplayShowNo(await getMyO2oPreorderSummary(event.orderId))
+      clientOrderStore.syncOrderSummary(latestSummary, { preserveFresh: true })
+      markRefreshedOrders([latestSummary.id])
+    } catch {
+      await triggerSilentOrderRefresh()
+    }
+  })
+}
+
+const handleVisibilityChange = () => {
+  if (globalThis.document?.visibilityState === 'visible') {
+    void triggerSilentOrderRefresh()
+  }
+}
+
+const scheduleAutoRefresh = () => {
+  if (autoRefreshTimer !== null) {
+    globalThis.clearInterval(autoRefreshTimer)
+    autoRefreshTimer = null
+  }
+  autoRefreshTimer = globalThis.setInterval(() => {
+    void triggerSilentOrderRefresh()
+  }, ORDER_AUTO_REFRESH_INTERVAL_MS)
+}
+
 const loadOrders = async (force = false, options?: { append?: boolean; silent?: boolean; preserveScroll?: boolean }) => {
   const append = options?.append === true
   const silent = options?.silent === true
@@ -506,7 +509,7 @@ const loadOrders = async (force = false, options?: { append?: boolean; silent?: 
   if (!append) {
     requestError.value = null
   }
-  await runLatest({
+  await runLatestListRequest({
     executor: (signal) =>
       getMyO2oPreorders(
         silent && !append ? buildSilentRefreshQuery() : buildListQuery(targetPage),
@@ -573,38 +576,6 @@ const loadOrders = async (force = false, options?: { append?: boolean; silent?: 
   })
 }
 
-const triggerSilentRefresh = async () => {
-  if (!canRunAutoRefresh()) {
-    return
-  }
-  await loadOrders(true, {
-    silent: true,
-    preserveScroll: true,
-  })
-}
-
-const scheduleAutoRefresh = () => {
-  if (autoRefreshTimer !== null) {
-    globalThis.clearInterval(autoRefreshTimer)
-    autoRefreshTimer = null
-  }
-  autoRefreshTimer = globalThis.setInterval(() => {
-    void triggerSilentRefresh()
-  }, ORDER_AUTO_REFRESH_INTERVAL_MS)
-}
-
-const handleVisibilityChange = () => {
-  if (globalThis.document.visibilityState === 'visible') {
-    void triggerSilentRefresh()
-  }
-}
-
-const startClientOrderRefreshSubscription = () => {
-  disposeClientOrderRefresh = subscribeClientOrderRefresh(async () => {
-    await triggerSilentRefresh()
-  })
-}
-
 const clearKeyword = () => {
   const hadKeyword = Boolean(keywordInput.value.trim() || effectiveKeyword.value.trim())
   if (keywordDebounceTimer.value !== null) {
@@ -649,9 +620,12 @@ const handleRecallOrder = async (order: O2oPreorderSummary) => {
   recallingOrderId.value = order.id
   try {
     const detail = await cancelMyO2oPreorder(order.id)
-    clientOrderStore.upsertOrder(buildOrderSummaryFromDetail(detail))
-    // 撤回后订单可能不再属于当前筛选结果，这里主动以当前服务端查询条件刷新列表。
-    await loadOrders(true)
+    clientOrderStore.syncOrderSummary(buildClientOrderSummaryFromDetail(detail), { preserveFresh: true })
+    notifyClientOrderRefresh({
+      orderId: detail.order.id,
+      reason: 'cancelled',
+      sourceId: clientOrderRefreshSourceId,
+    })
     ElMessage.success('订单已撤回')
   } catch (error) {
     const normalizedError = normalizeRequestError(error, '撤回订单失败')
@@ -686,24 +660,28 @@ watch(
 )
 
 onMounted(async () => {
-  syncStoreWithCurrentUser()
   startClientOrderRefreshSubscription()
+  syncStoreWithCurrentUser()
   globalThis.document?.addEventListener('visibilitychange', handleVisibilityChange)
   scheduleAutoRefresh()
   await loadOrders()
 })
 
 onBeforeUnmount(() => {
-  disposeClientOrderRefresh()
-  globalThis.document?.removeEventListener('visibilitychange', handleVisibilityChange)
-  if (autoRefreshTimer !== null) {
-    globalThis.clearInterval(autoRefreshTimer)
-    autoRefreshTimer = null
+  if (keywordDebounceTimer.value !== null) {
+    globalThis.clearTimeout(keywordDebounceTimer.value)
+    keywordDebounceTimer.value = null
   }
   if (refreshMarkCleanupTimer !== null) {
     globalThis.clearTimeout(refreshMarkCleanupTimer)
     refreshMarkCleanupTimer = null
   }
+  if (autoRefreshTimer !== null) {
+    globalThis.clearInterval(autoRefreshTimer)
+    autoRefreshTimer = null
+  }
+  disposeClientOrderRefresh()
+  globalThis.document?.removeEventListener('visibilitychange', handleVisibilityChange)
 })
 </script>
 

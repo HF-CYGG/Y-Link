@@ -13,6 +13,8 @@
 import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm'
 import { entityColumnOptions } from './entity-column-options.js'
 
+const feedbackJsonArrayDefaultColumnOptions = entityColumnOptions.isSqlite ? { default: '[]' } : {}
+
 /**
  * 反馈会话状态：
  * - open：客户端新建或最新一条消息来自客户端，等待客服处理；
@@ -125,7 +127,7 @@ export class ClientFeedbackConversation {
   @Column({ name: 'contact_preference', type: 'varchar', length: 64, nullable: true, comment: '联系偏好' })
   contactPreference!: string | null
 
-  @Column({ name: 'tag_json', type: 'text', default: '[]', comment: '标签 JSON 文本' })
+  @Column({ name: 'tag_json', type: 'text', ...feedbackJsonArrayDefaultColumnOptions, comment: '标签 JSON 文本' })
   tagJson!: string
 
   @Column({ name: 'internal_remark', type: 'text', nullable: true, comment: '仅客服可见的内部备注' })

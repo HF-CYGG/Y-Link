@@ -4,10 +4,10 @@
  * 文件职责：提供扫码识别、批量入库清单确认与库存流水联动追踪的一体化入库操作界面
  * 维护说明：调整入库流程时需同步维护“识别→入清单→批量确认→流水核对”四段式状态链路，避免库存口径不一致
  */
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CameraFilled } from '@element-plus/icons-vue'
-import { PageContainer, UnifiedScanDialog } from '@/components/common'
+import { PageContainer, PassiveNumberInput, UnifiedScanDialog } from '@/components/common'
 import { getProductList, type ProductRecord } from '@/api/modules/product'
 import { getO2oInventoryLogs, inboundO2oStock, type O2oInventoryLog } from '@/api/modules/o2o'
 import { useCameraQrScanner } from '@/composables/useCameraQrScanner'
@@ -44,6 +44,7 @@ const confirmingBatch = ref(false)
 const products = ref<ProductRecord[]>([])
 const logs = ref<O2oInventoryLog[]>([])
 const inboundList = ref<InboundDraftItem[]>([])
+const scanPanelRef = ref<HTMLElement | null>(null)
 const scanCode = ref('')
 const scanMode = ref<InboundScanMode>('scan_plus_one')
 const recognizedProductId = ref('')
@@ -55,6 +56,10 @@ const batchInboundResult = ref<{
   failedCount: number
   details: BatchInboundResultItem[]
 } | null>(null)
+const inventoryLogPanelHeight = ref('')
+let scanPanelResizeObserver: ResizeObserver | null = null
+const desktopWorkbenchMediaQuery = '(min-width: 1280px)'
+let desktopWorkbenchMediaList: MediaQueryList | null = null
 
 const manualForm = reactive({
   productId: '',
@@ -115,6 +120,38 @@ const scanCapabilityHint = computed(() => {
   }
 
   return '当前为 HTTP 环境，已切换为拍照识别，请轻触相机图标拍照扫描商品条码或二维码。'
+})
+
+// 通过真实测量“扫码录入区”高度来驱动右侧库存流水区高度：
+// - 不再依赖整行 stretch，避免被中间清单或其他列错误撑高；
+// - 仅在 PC 三列工作台下同步，移动端仍保留原来的自然布局。
+// - 扫码区内容增减后，右侧高度会通过 ResizeObserver 自动同步。
+const isDesktopWorkbenchLayout = () => {
+  if (globalThis.window === undefined || typeof globalThis.window.matchMedia !== 'function') {
+    return false
+  }
+
+  return globalThis.window.matchMedia(desktopWorkbenchMediaQuery).matches
+}
+
+const syncInventoryLogPanelHeight = () => {
+  if (!isDesktopWorkbenchLayout()) {
+    inventoryLogPanelHeight.value = ''
+    return
+  }
+
+  const nextHeight = scanPanelRef.value?.offsetHeight ?? 0
+  inventoryLogPanelHeight.value = nextHeight > 0 ? `${nextHeight}px` : ''
+}
+
+const inventoryLogPanelStyle = computed(() => {
+  if (!inventoryLogPanelHeight.value) {
+    return undefined
+  }
+
+  return {
+    '--inventory-log-panel-height': inventoryLogPanelHeight.value,
+  }
 })
 
 const setRecognizedProduct = (product: ProductRecord | null) => {
@@ -416,13 +453,38 @@ onMounted(async () => {
   await Promise.all([loadProducts(), loadLogs()])
   // 页面初始化后把焦点放到扫码框，保证扫码枪/键盘可直接开始录入。
   focusScanInput()
+
+  await nextTick()
+  syncInventoryLogPanelHeight()
+
+  if (globalThis.window !== undefined && typeof globalThis.window.matchMedia === 'function') {
+    desktopWorkbenchMediaList = globalThis.window.matchMedia(desktopWorkbenchMediaQuery)
+    desktopWorkbenchMediaList.addEventListener('change', syncInventoryLogPanelHeight)
+  }
+
+  if (typeof ResizeObserver !== 'undefined') {
+    scanPanelResizeObserver = new ResizeObserver(() => {
+      syncInventoryLogPanelHeight()
+    })
+
+    if (scanPanelRef.value) {
+      scanPanelResizeObserver.observe(scanPanelRef.value)
+    }
+  }
+})
+
+onBeforeUnmount(() => {
+  scanPanelResizeObserver?.disconnect()
+  scanPanelResizeObserver = null
+  desktopWorkbenchMediaList?.removeEventListener('change', syncInventoryLogPanelHeight)
+  desktopWorkbenchMediaList = null
 })
 </script>
 
 <template>
   <PageContainer title="入库管理工作台" description="支持扫码录入、本次入库清单确认与库存流水联动追踪">
     <div class="inbound-workbench-root grid gap-4 xl:grid-cols-[24rem_minmax(0,1fr)_minmax(0,1fr)]">
-      <section class="min-w-0 overflow-hidden rounded-3xl bg-white p-5 shadow-sm">
+      <section ref="scanPanelRef" class="inbound-scan-panel min-w-0 overflow-hidden rounded-3xl bg-white p-5 shadow-sm">
         <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <p class="break-words text-lg font-semibold text-slate-900">扫码录入区</p>
           <el-segmented
@@ -488,7 +550,7 @@ onMounted(async () => {
               {{ recognizedProduct.availableStock }}
             </p>
             <div v-if="scanMode === 'scan_input_qty'" class="mt-3">
-              <el-input-number v-model="pendingManualQty" :min="1" :step="1" style="width: 100%" />
+              <PassiveNumberInput v-model="pendingManualQty" :min="1" :step="1" style="width: 100%" />
               <el-button class="mt-2 w-full" type="primary" @click="addRecognizedProductWithQty">加入清单</el-button>
             </div>
           </template>
@@ -515,7 +577,7 @@ onMounted(async () => {
               </el-select>
             </el-form-item>
             <el-form-item label="数量">
-              <el-input-number v-model="manualForm.qty" :min="1" :step="1" style="width: 100%" />
+              <PassiveNumberInput v-model="manualForm.qty" :min="1" :step="1" style="width: 100%" />
             </el-form-item>
             <el-form-item label="备注">
               <el-input
@@ -537,7 +599,7 @@ onMounted(async () => {
         </div>
       </section>
 
-      <section class="min-w-0 overflow-hidden rounded-3xl bg-white p-5 shadow-sm">
+      <section class="inventory-log-panel min-w-0 overflow-hidden rounded-3xl bg-white p-5 shadow-sm" :style="inventoryLogPanelStyle">
         <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <p class="break-words text-lg font-semibold text-slate-900">本次入库清单</p>
@@ -555,13 +617,13 @@ onMounted(async () => {
             <el-table-column prop="productName" label="商品名称" min-width="150" />
             <el-table-column label="数量" width="160">
               <template #default="{ row }">
-                <el-input-number
+                <PassiveNumberInput
                   :model-value="row.qty"
                   :min="1"
                   :step="1"
                   size="small"
                   style="width: 120px"
-                  @change="(value: number | undefined) => updateInboundListItemQty(row.productId, Number(value ?? 1))"
+                  @change="(value: number | null) => updateInboundListItemQty(row.productId, Number(value ?? 1))"
                 />
               </template>
             </el-table-column>
@@ -613,7 +675,7 @@ onMounted(async () => {
           <el-button @click="loadLogs">刷新流水</el-button>
         </div>
 
-        <div class="table-scroll-wrap">
+        <div class="table-scroll-wrap inventory-log-panel__table-wrap">
           <el-table native-scrollbar :data="logs" :loading="logLoading" row-key="id">
             <el-table-column prop="createdAt" label="时间" min-width="160" />
             <el-table-column prop="productName" label="商品" min-width="160" />
@@ -666,6 +728,18 @@ onMounted(async () => {
   overflow-x: auto;
   max-width: 100%;
   -webkit-overflow-scrolling: touch;
+}
+
+.inventory-log-panel {
+  display: flex;
+  flex-direction: column;
+  height: var(--inventory-log-panel-height, auto);
+}
+
+.inventory-log-panel__table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .scan-mode-segmented {

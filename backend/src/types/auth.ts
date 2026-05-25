@@ -34,7 +34,8 @@ export type AuditResultStatus = (typeof AUDIT_RESULT_STATUSES)[number]
 
 /**
  * 认证上下文：
- * - 由认证中间件解析 Bearer Token 后注入到请求对象；
+ * - 由认证中间件解析管理端安全 Cookie 或兼容 Bearer Token 后注入到请求对象；
+ * - `authSource` 用于区分当前请求是否需要额外执行 CSRF 校验；
  * - 后续服务层据此完成权限判定、数据归属与审计留痕。
  */
 export interface AuthUserContext {
@@ -45,6 +46,7 @@ export interface AuthUserContext {
   permissions: PermissionCode[]
   status: UserStatus
   sessionToken: string
+  authSource: 'cookie' | 'bearer'
 }
 
 /**

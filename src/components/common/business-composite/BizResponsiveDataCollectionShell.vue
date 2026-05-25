@@ -15,6 +15,7 @@
 
 import { computed } from 'vue'
 import { useAppStore } from '@/store'
+import pinia from '@/store/pinia'
 import { BaseEmptyState } from '@/components/common/base-display'
 
 /**
@@ -64,7 +65,7 @@ const props = withDefaults(defineProps<Props>(), {
   cardTransitionThreshold: 24,
 })
 
-const appStore = useAppStore()
+const appStore = useAppStore(pinia)
 
 /**
  * 是否存在数据：

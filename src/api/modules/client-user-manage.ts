@@ -3,7 +3,7 @@
  * 文件职责：封装管理端对客户端用户的治理接口。
  * 维护说明：
  * - 客户端用户与管理端用户分开维护，避免前端页面混淆字段语义；
- * - 当前聚焦列表、启停与重置密码三类治理动作。
+ * - 当前聚焦列表、手动新增、启停与重置密码四类治理动作。
  */
 
 import { request, type RequestConfig } from '@/api/http'
@@ -67,6 +67,20 @@ export interface ResetClientUserPasswordPayload {
 }
 
 /**
+ * 手动新增客户端用户参数：
+ * - 仅供管理端用户中心使用；
+ * - 不走客户端自助注册风控，而是走后台受权治理接口。
+ */
+export interface CreateClientUserPayload {
+  username: string
+  mobile?: string
+  email?: string
+  departmentName?: string
+  password: string
+  status: ClientUserStatus
+}
+
+/**
  * 更新客户端用户信息参数：
  */
 export interface UpdateClientUserPayload {
@@ -99,6 +113,16 @@ export const getClientUserList = async (
     records: result.list,
   }
 }
+
+/**
+ * 管理端手动新增客户端用户：
+ */
+export const createClientUser = (payload: CreateClientUserPayload) =>
+  request<ClientUserManageProfile>({
+    method: 'POST',
+    url: '/client-users',
+    data: payload,
+  })
 
 /**
  * 更新客户端用户启停状态：

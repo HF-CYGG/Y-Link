@@ -13,6 +13,7 @@
 
 import { computed } from 'vue'
 import { useAppStore } from '@/store'
+import pinia from '@/store/pinia'
 
 /**
  * 通用 CRUD 弹窗壳参数：
@@ -55,7 +56,7 @@ const emit = defineEmits<{
   closed: []
 }>()
 
-const appStore = useAppStore()
+const appStore = useAppStore(pinia)
 
 /**
  * 弹窗宽度策略：

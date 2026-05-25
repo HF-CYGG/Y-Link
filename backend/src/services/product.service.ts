@@ -17,6 +17,7 @@ import type { PaginationResult } from '../types/api.js'
 import { isRetryableSqliteLockError, isUniqueConstraintError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
 import { generateProductCode } from '../utils/id-generator.js'
+import { normalizeLegacyUploadUrl } from '../utils/upload-storage.js'
 
 export interface ProductQuery {
   keyword?: string
@@ -111,6 +112,10 @@ const normalizeProductCodeInput = (value: string | null | undefined): string => 
   }
 
   return value.trim()
+}
+
+const normalizeProductThumbnailUrl = (value: string | null | undefined) => {
+  return normalizeLegacyUploadUrl('products', value)
 }
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
@@ -438,7 +443,7 @@ export class ProductService {
         defaultPrice: normalizeDecimalText(product.defaultPrice),
         isActive: Boolean(product.isActive),
         o2oStatus: product.o2oStatus ?? 'unlisted',
-        thumbnail: product.thumbnail ?? null,
+        thumbnail: normalizeProductThumbnailUrl(product.thumbnail) ?? null,
         detailContent: product.detailContent ?? null,
         limitPerUser: Number(product.limitPerUser ?? 5),
         currentStock: Number(product.currentStock ?? 0),
@@ -599,11 +604,13 @@ export class ProductService {
       ) ?? '')
     }
     if (typeof input.thumbnail === 'string' || input.thumbnail === null) {
-      normalizedInput.thumbnail = this.readLimitedText(
-        input.thumbnail,
-        '商品缩略图地址',
-        PRODUCT_FIELD_LIMITS.thumbnail,
-        { allowNull: true },
+      normalizedInput.thumbnail = normalizeProductThumbnailUrl(
+        this.readLimitedText(
+          input.thumbnail,
+          '商品缩略图地址',
+          PRODUCT_FIELD_LIMITS.thumbnail,
+          { allowNull: true },
+        ),
       )
     }
     if (typeof input.detailContent === 'string' || input.detailContent === null) {
@@ -700,12 +707,15 @@ export class ProductService {
 
   private applyContentUpdate(product: BaseProduct, input: UpdateProductInput): void {
     if (typeof input.thumbnail === 'string' || input.thumbnail === null) {
-      product.thumbnail = this.readLimitedText(
-        input.thumbnail,
-        '商品缩略图地址',
-        PRODUCT_FIELD_LIMITS.thumbnail,
-        { allowNull: true },
-      ) ?? null
+      product.thumbnail =
+        normalizeProductThumbnailUrl(
+          this.readLimitedText(
+            input.thumbnail,
+            '商品缩略图地址',
+            PRODUCT_FIELD_LIMITS.thumbnail,
+            { allowNull: true },
+          ),
+        ) ?? null
     }
     if (typeof input.detailContent === 'string' || input.detailContent === null) {
       product.detailContent = this.readLimitedText(
@@ -764,7 +774,7 @@ export class ProductService {
       defaultPrice: this.readOptionalPrice(input.defaultPrice, '默认单价') ?? '0.00',
       isActive,
       o2oStatus: resolveEffectiveO2oStatus(isActive, input.o2oStatus),
-      thumbnail: input.thumbnail ?? null,
+      thumbnail: normalizeProductThumbnailUrl(input.thumbnail) ?? null,
       detailContent: input.detailContent ?? null,
       limitPerUser: input.limitPerUser ?? 5,
       currentStock: input.currentStock ?? 0,

@@ -299,6 +299,7 @@ class ClientAuthService {
     if (existedByUsername) {
       throw new BizError('该用户名已被占用', 409)
     }
+    await authSecurityService.guardClientRegisterAccountRequest(_requestMeta, account.account)
     const selectedDepartmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName)
     const user = await this.userRepo.save(
       this.userRepo.create({
@@ -322,7 +323,7 @@ class ClientAuthService {
     }
     const user = await this.findUserWithPasswordByAccount(account)
     if (!user) {
-      await authSecurityService.recordClientLoginFailure(requestMeta, account.normalizedValue)
+      const loginFailureResult = await authSecurityService.recordClientLoginFailure(requestMeta, account.normalizedValue)
       await auditService.safeRecord({
         actionType: 'client.auth.login',
         actionLabel: '客户端登录',
@@ -332,14 +333,17 @@ class ClientAuthService {
         requestMeta,
         detail: { reason: 'user_not_found' },
       })
-      throw new BizError('用户名或密码错误', 401)
+      const loginErrorMessage = loginFailureResult.shouldWarnRemaining
+        ? `用户名或密码错误（还可尝试 ${loginFailureResult.remainingAttempts} 次）`
+        : '用户名或密码错误'
+      throw new BizError(loginErrorMessage, 401)
     }
     if (user.status !== 'enabled') {
       throw new BizError('当前账号已停用', 403)
     }
     const matched = await verifyPassword(password, user.passwordHash)
     if (!matched) {
-      await authSecurityService.recordClientLoginFailure(requestMeta, account.normalizedValue)
+      const loginFailureResult = await authSecurityService.recordClientLoginFailure(requestMeta, account.normalizedValue)
       await auditService.safeRecord({
         actionType: 'client.auth.login',
         actionLabel: '客户端登录',
@@ -350,7 +354,10 @@ class ClientAuthService {
         requestMeta,
         detail: { reason: 'password_mismatch' },
       })
-      throw new BizError('用户名或密码错误', 401)
+      const loginErrorMessage = loginFailureResult.shouldWarnRemaining
+        ? `用户名或密码错误（还可尝试 ${loginFailureResult.remainingAttempts} 次）`
+        : '用户名或密码错误'
+      throw new BizError(loginErrorMessage, 401)
     }
     const now = new Date()
     const expiresAt = new Date(now.getTime() + env.AUTH_TOKEN_TTL_HOURS * 60 * 60 * 1000)

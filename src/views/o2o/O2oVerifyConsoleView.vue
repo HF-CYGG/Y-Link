@@ -17,7 +17,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRoute } from 'vue-router'
 import { CameraFilled, DocumentCopy, Search } from '@element-plus/icons-vue'
-import { BizCrudDialogShell, PageContainer, UnifiedScanDialog } from '@/components/common'
+import { BizCrudDialogShell, PageContainer, PassiveNumberInput, UnifiedScanDialog } from '@/components/common'
 import { useStableRequest } from '@/composables/useStableRequest'
 import {
   VERIFY_CONSOLE_O2O_ORDER_STATUS_CLASS_MAP,
@@ -1164,7 +1164,7 @@ watch(
               <div class="flex flex-col gap-3 sm:flex-row sm:items-center">
                 <div class="w-full sm:w-44">
                   <p class="mb-2 text-xs text-slate-400">修改后数量</p>
-                  <el-input-number
+                  <PassiveNumberInput
                     :model-value="item.qty"
                     :min="0"
                     :max="item.maxQty"

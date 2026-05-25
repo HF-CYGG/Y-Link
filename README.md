@@ -1,574 +1,420 @@
-# Y-Link 文创出库管理系统 (EquipTrack)
+# Y-Link 文创出入库与 O2O 预订系统
 
 ![Vue](https://img.shields.io/badge/Vue.js-3-4FC08D?logo=vue.js&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white)
 ![Express](https://img.shields.io/badge/Express-4.x-000000?logo=express&logoColor=white)
 ![Docker](https://img.shields.io/badge/Docker-Ready-2496ED?logo=docker&logoColor=white)
-![License](https://img.shields.io/badge/License-MIT-green.svg)
 
-**Y-Link** 是一套面向文创与非遗行业的现代化出库管理系统，致力于打通“线上预订 -> 线下核销 -> 出库追踪 -> 供货入库”的全业务闭环。系统分为**管理端（企业后台）**与**客户端（O2O 线上预订端）**，聚焦“开单效率、视觉体验、部署稳定性”。
-前端基于 Vue 3 + TypeScript，后端基于 Express + TypeORM，支持亮暗双主题、键盘流极速开单、智能验证码降级，以及 Docker 一体化与云端镜像化部署。
+Y-Link 是一套面向文创、非遗、门店和活动场景的库存管理系统，覆盖“线上预订、线下核销、出库开单、供货入库、库存追踪、客户反馈”流程。
 
-👉 **[点击查看《Y-Link 详细使用指南》](./docs/Y-Link使用指南.md)**，快速了解系统的所有功能模块与业务流转逻辑。
+系统包含两端：
 
-[查看详细开发与部署文档（Wiki）](https://github.com/HF-CYGG/Y-Link/wiki)
-[在线查看仓库](https://github.com/HF-CYGG/Y-Link)
+- 管理端：管理员、运营人员、供货方使用，负责商品、库存、出入库、核销、用户、配置和审计。
+- 客户端：普通用户使用，负责注册登录、商品大厅、购物车、预订下单、订单查看、个人资料和反馈。
 
----
-
-## 5 分钟快速了解
-
-### 你将得到什么
-- 一个同时包含 **管理端** 与 **客户端** 的完整业务系统。
-- 一个默认可直接启动的 **SQLite 零配置方案**，适合本地联调与轻量部署。
-- 一套已经内置 **性能回归、质量验证、并发稳定性验证** 的工程化脚本体系。
-- 一套支持 **Docker / Onebox / 1Panel / 本地 HTTPS 联调** 的多环境运行方式。
-
-### 最适合哪些场景
-- 文创、非遗、展会、门店等需要“线上预订 + 线下核销 + 出入库追踪”的团队。
-- 希望先快速上线，再逐步平滑切换到 MySQL 与容器化部署的团队。
-- 需要同时管理后台运营人员、供货人员与终端用户三类角色的业务系统。
-
-### 仓库结构一览
-```text
-f:\Y-Link
-├─ src/                          前端源码（管理端 + 客户端）
-│  ├─ api/                      前端 API 封装与模块化请求入口
-│  ├─ components/               通用图表、通用页面壳、弹窗壳、展示组件
-│  ├─ composables/              设备探测、稳定请求、权限动作等复用逻辑
-│  ├─ constants/                共享常量（版本号、订单状态等）
-│  ├─ layout/                   管理端布局、侧栏、头部、主题切换
-│  ├─ router/                   前端路由、性能钩子、导航元信息
-│  ├─ store/                    Pinia 状态管理（管理端 + 客户端）
-│  ├─ utils/                    权限、时间、缓存、提交反馈、PDF 导出等工具
-│  └─ views/                    管理端与客户端各业务页面
-│     ├─ auth/                  管理端登录
-│     ├─ dashboard/             工作台 / 看板
-│     ├─ order-entry/           出库开单
-│     ├─ order-list/            出库列表、详情、出库单模板
-│     ├─ inbound/               扫码入库、供货录入、供货历史、供货工作台
-│     ├─ o2o/                   线上预订查询、预订单核销、线上展示管理
-│     ├─ base-data/             基础产品与标签管理
-│     ├─ product-center/        产品中心整合页
-│     ├─ system/                用户中心、系统配置、数据库迁移、审计日志
-│     └─ client/                客户端登录、商城、购物车、结算、订单、个人中心
-├─ backend/                     后端源码、SQL、校验脚本
-│  ├─ src/
-│  │  ├─ config/                数据源、环境变量、数据库启动与运行时覆盖
-│  │  ├─ entities/              TypeORM 实体（商品、订单、库存、用户、配置等）
-│  │  ├─ middleware/            鉴权、中间件、统一错误处理
-│  │  ├─ routes/                REST 路由入口（auth、order、o2o、system 等）
-│  │  ├─ services/              核心业务服务、审计、安全、迁移、验证码等逻辑
-│  │  ├─ constants/             权限码、迁移文案等共享后端常量
-│  │  ├─ types/                 API / 鉴权 / 仪表盘类型定义
-│  │  └─ utils/                 token、密码、异常、网络安全、请求元信息工具
-│  ├─ sql/                      初始化脚本、结构迁移脚本、回滚脚本
-│  ├─ scripts/                  后端专项校验、功能回归、数据修复脚本
-│  └─ uploads/                  上传文件存储目录
-├─ scripts/                     前端构建、性能、发布、onebox、并发与质量总控脚本
-├─ docs/                        使用说明、迁移文档、界面截图、规范与白皮书
-├─ docker/                      Nginx 与 onebox 启动配置
-│  ├─ nginx/                    前端静态站点、代理与 onebox Nginx 配置
-│  └─ onebox/                   单镜像入口脚本
-├─ spec/                        历史任务说明、治理约束、验收留档与专项文档
-├─ public/                      前端静态资源
-├─ .github/workflows/           Docker 镜像发布等 CI 工作流
-├─ compose.yml                  本地 Docker 编排
-├─ compose.cloud.yml            云端 / 1Panel 编排
-├─ compose.mysql.yml            外置 MySQL 编排
-├─ Dockerfile                   前端镜像构建文件
-├─ Dockerfile.onebox            前后端一体化镜像构建文件
-├─ start-local-dev.ps1          本地联调启动脚本
-├─ status-local-dev.ps1         本地联调状态脚本
-├─ stop-local-dev.ps1           本地联调停止脚本
-└─ README.md                    项目入口说明
-```
-
-### 目录职责补充
-- `src/views`：承载主要业务页面，管理端与客户端共存，是理解业务流最直观的入口。
-- `src/components/common`：沉淀跨模块复用的页面壳、弹窗壳、空态与请求态组件，适合二开时优先复用。
-- `src/store/modules`：集中管理管理端鉴权、客户端购物车、客户端订单、主题等跨页面状态。
-- `backend/services`：后端业务核心区，大部分规则、审计、库存变更、迁移控制都在这里汇总。
-- `backend/sql`：用于新库初始化、历史结构升级与特定任务迁移，部署和排障时常会用到。
-- `scripts` 与 `backend/scripts`：分别负责前端/全栈质量总控和后端专项验收，建议在较大改动后配合使用。
-- `docs`：提供上手手册、数据库迁移向导、企业维护白皮书、模块职责地图等面向使用者与开发者的文档。
-- `spec`：保存历史治理任务、约束清单与验收留档，适合回看设计决策与问题背景。
-
-### 命令速查
-| 场景 | 命令 | 说明 |
-| --- | --- | --- |
-| 本地联调启动 | `npm run local:dev` | 启动前后端联调环境（默认 HTTPS 前端 + 本地后端） |
-| 本地联调状态 | `npm run local:dev:status` | 查看本地联调状态 |
-| 本地联调停止 | `npm run local:dev:stop` | 停止本地联调 |
-| 前端构建 | `npm run build` | 执行前端构建与打包前校验 |
-| 单元功能验证 | `npm run verify:unit:functional` | 执行前后端类型与关键功能验证 |
-| 核心性能回归 | `npm run verify:performance` | 执行页面预算、核心路径与企业性能套件 |
-| 全量性能验证 | `npm run verify:performance:all` | 执行前后端联合性能验证 |
-| 全量质量总控 | `npm run verify:all` | 串联单元功能 + 全量性能，失败即停并输出报告 |
-| 云端编排启动 | `npm run cloud:up` | 使用云端 compose 拉起编排 |
-| 云端编排日志 | `npm run cloud:logs` | 查看统一日志 |
-| 云端编排停止 | `npm run cloud:down` | 停止云端编排 |
-
----
-
-## 核心特性
-- 🍏 **极简视觉体验**：Apple 风格极简 UI，支持丝滑的亮暗模式切换与过渡动画。
-- ⚡ **极致开单效率**：出库开单支持全键盘流操作与实时金额计算，录入效率极高；支持草稿态保留。
-- 🛍️ **O2O 线上预订**：客户端提供多通道（用户名/手机/邮箱）注册登录、商品大厅浏览、购物车结算等功能。
-- 📦 **库存实时同步**：客户端清晰展示“当前剩余可预订数量”与“已被预订数量”，防止超卖。
-- 🔄 **业务闭环与核销**：管理端支持商品上/下架维护、扫码/手动核销，并生成完整的库存流水追踪。
-- 🚚 **供货方独立工作台**：供应商账号可独立登录，仅访问“送货单录入 / 历史单据”两类供货功能。
-- 🧭 **工作台式页面整合**：后台已将高频治理页面整合为“产品中心 / 用户中心 / 供货工作台”，减少重复入口与跨页来回切换。
-- 📥 **入库链路独立化**：`扫码入库` 与 `入库管理` 已从 `线上预订` 分类中解耦，作为独立业务入口存在。
-- ⚙️ **灵活的系统配置**：后台可自由配置 O2O 单人限购规则、图片/短信/邮件验证码开关，甚至支持智能降级。
-- 🐳 **一键私有化部署**：内置 Docker Compose，支持单镜像（Onebox）或双镜像极速部署，1Panel 完美兼容。
-- 🗄️ **零配置数据库**：默认 SQLite 零配置启动，支持物理备份与 JSON 导入导出，并推荐通过数据库迁移向导平滑切换至 MySQL。
-- 🔒 **安全与审计**：权限控制、操作审计链路完善，适合持续迭代的企业级业务系统。
-
----
+技术栈：Vue 3、TypeScript、Element Plus、Pinia、Express、TypeORM。默认使用 SQLite，支持迁移到 MySQL。
 
 ## 界面预览
-### 登录页（亮色 / 暗色）
-![Login White](./docs/photo/login-white.png)
-![Login Dark](./docs/photo/login-black.png)
+
+### 登录页
+
+![登录页亮色](./docs/photo/login-white.png)
+
+![登录页暗色](./docs/photo/login-black.png)
 
 ### 工作台
-![Dashboard](./docs/photo/dashboard.png)
 
-### 出库录入 / 明细
-![Order Entry](./docs/photo/order-entry.png)
+![工作台](./docs/photo/dashboard.png)
+
+### 出库录入
+
+![出库录入](./docs/photo/order-entry.png)
 
 ### 系统管理
-![Management](./docs/photo/management.png)
 
----
+![系统管理](./docs/photo/management.png)
 
-## 快速体验
-### 当前后台模块结构
-- `业务操作`
-  - `出库录入`
-  - `出库列表`
-  - `扫码入库`
-  - `入库管理`
-  - `线上预订`
-    - `订单查询`
-    - `预订单核销`
-- `供货管理`
-  - `供货工作台`
-    - `送货单录入`
-    - `历史单据`
-- `基础资料`
-  - `产品中心`
-    - `基础信息`
-    - `线上展示`
-  - `标签管理`
-- `系统管理`
-  - `用户中心`
-    - `管理端用户`
-    - `客户端用户`
-  - `系统配置`
-  - `审计日志`
+## 推荐部署：1Panel 单镜像
 
-### Docker 本地构建体验
-安装 Docker 后，直接执行：
+新手优先使用 onebox 单镜像。它把前端、后端、Nginx 放在同一个容器里，1Panel 只需要创建一个容器。
 
-```bash
-docker compose up -d --build
+部署前先准备：
+
+- 一个可访问的服务器端口，例如 `9050`。
+- 一个初始管理员强密码，用于 `INIT_ADMIN_PASSWORD`。
+- 两个宿主机目录，用于保存数据库和上传文件。
+
+推荐目录：
+
+```text
+/opt/1panel/apps/y-link/data
+/opt/1panel/apps/y-link/uploads
 ```
+
+这两个目录建议纳入日常备份。
+
+### 1. 基本信息
+
+| 项目 | 填写 |
+| --- | --- |
+| 名称 | `y-link` |
+| 镜像 | `ghcr.io/hf-cygg/y-link-onebox:latest` |
+| 备用镜像 | `docker.io/yemiao351/y-link-onebox:latest` |
+| 网络 | `bridge` |
+| Entrypoint | `/entrypoint.sh` |
+| Command | 留空 |
+
+如果服务器拉取 GitHub Container Registry 慢，可改用 Docker Hub 镜像。
+
+1Panel 操作路径通常是：容器 -> 创建容器 -> 手动输入镜像或选择已有镜像。创建时不要勾选“强制拉取镜像”，除非你明确需要重新拉取最新镜像。
+
+### 2. 端口
+
+| 服务器端口 | 容器端口 | 协议 | 说明 |
+| --- | --- | --- | --- |
+| `9050` | `80` | `tcp` | Web 访问入口 |
 
 启动后访问：
-- 管理端：`http://127.0.0.1:8080/login`
-- 客户端：`http://127.0.0.1:8080/client/login`
-- 后端健康检查：`http://127.0.0.1:3001/health`
 
-首次部署（默认 SQLite）时，后端会在启动日志输出初始化管理员账号与密码，便于在 1Panel 日志中直接查看并登录。首次登录后请立即修改密码。
-
-停止服务：
-
-```bash
-docker compose down
-```
-
-### 1Panel 一键镜像部署（默认 SQLite，可直接使用）
-镜像支持双源（Docker Hub / GHCR），推荐国内网络受限时使用 `ghcr.io`：
-
-- 前端：`docker.io/yemiao351/y-link-frontend:latest` 或 `ghcr.io/hf-cygg/y-link-frontend:latest`
-- 后端：`docker.io/yemiao351/y-link-backend:latest` 或 `ghcr.io/hf-cygg/y-link-backend:latest`
-- 单镜像一键版（前后端同容器）：`docker.io/yemiao351/y-link-onebox:latest` 或 `ghcr.io/hf-cygg/y-link-onebox:latest`
-
-#### 方式 A（优先推荐）：单镜像一键部署（前后端同容器）
-如果你希望在 1Panel 里“只填一个镜像就直接可用”，请优先使用（网络受限请将 `docker.io/yemiao351` 替换为 `ghcr.io/hf-cygg`）：
-
-```bash
-docker.io/yemiao351/y-link-onebox:latest
-```
-
-如需命令行“一键启动”（等价于 1Panel 单镜像部署），可直接执行：
-
-```bash
-docker run -d --name y-link-onebox \
-  -p 9050:80 \
-  -v /opt/1panel/apps/y-link/data:/app/data \
-  --restart unless-stopped \
-  docker.io/yemiao351/y-link-onebox:latest
-```
-
-启动后验证：
 - 管理端：`http://服务器IP:9050/login`
 - 客户端：`http://服务器IP:9050/client/login`
 - 健康检查：`http://服务器IP:9050/health`
 
-建议参数：
-- 网络：`bridge`
-- 端口映射：`宿主机端口 -> 容器 80`（例如 `9050:80`）
-- 可选端口：如需直连后端健康检查，可额外映射 `3001:3001`
-- 数据持久化（SQLite）：必须把容器目录 `/app/data` 挂载到宿主机目录，否则重建容器后会丢失账号、单据与基础数据。
-- 1Panel 填写示例：挂载类型选「本机目录」，`本机目录` 填 `/opt/1panel/apps/y-link/data`，`容器目录` 填 `/app/data`，权限选「读写」。
-- 目录建议：请使用固定且可备份的宿主机目录（如 `/opt/1panel/apps/y-link/data`），不要使用临时目录（如 `/tmp`）。
-- 生效验证：启动后容器内会生成 SQLite 文件（默认 `y-link.sqlite`），在宿主机挂载目录中应能看到同名文件。
-- 迁移注意：更换服务器时只需备份并恢复该挂载目录，即可保留历史业务数据。
+如果你使用域名和 HTTPS，在 1Panel 反向代理里把域名代理到 `http://127.0.0.1:9050`。
 
-重要说明：
-- 首次启动会自动初始化管理员账号，并在容器日志打印初始账号密码。
-- 登录后请立即修改默认密码，避免生产环境风险。
-- `y-link-frontend` 是前端静态站点镜像，单独运行无法提供业务 API；若不用 onebox，请务必同时启动 backend。
-- 若访问后出现 “Welcome to nginx!” 而不是登录页：通常是旧容器或旧镜像残留。请删除旧容器后重新 `docker pull docker.io/yemiao351/y-link-onebox:latest` 并重建。
+端口说明：
 
-#### 方式 B（进阶）：双容器编排部署（frontend + backend）
-如果你在 1Panel 使用容器编排，推荐执行（如果拉取失败，可将 `docker.io/yemiao351` 换为 `ghcr.io/hf-cygg`）：
+- 容器内固定使用 `80` 作为 Web 入口。
+- 服务器端口可以自定义，截图里的 `9050 -> 80` 是推荐写法。
+- 不需要额外暴露后端 `3001`，前端、API、上传文件、健康检查都会由容器内 Nginx 统一代理。
 
-```bash
-docker pull docker.io/yemiao351/y-link-frontend:latest
-docker pull docker.io/yemiao351/y-link-backend:latest
-docker compose -f compose.cloud.yml pull
-docker compose -f compose.cloud.yml up -d
-```
+### 3. 挂载目录
 
-在 1Panel「容器编排」页面可按下列方式填写：
-- 来源选择：`编辑`
-- 编排名称：`y-link`
-- 将下方完整 YAML 直接粘贴到编辑器
-- 点击创建并启动后，访问 `http://服务器IP:8080`（或你自定义的前端端口）
+必须挂载数据目录和上传目录，否则重建容器后会丢失数据或图片。
 
-`compose.cloud.yml` 参考内容（可直接粘贴到 1Panel 编排）：
+| 本机目录 | 容器目录 | 权限 | 保存内容 |
+| --- | --- | --- | --- |
+| `/opt/1panel/apps/y-link/data` | `/app/data` | 读写 | SQLite 数据库 |
+| `/opt/1panel/apps/y-link/uploads` | `/app/uploads` | 读写 | 商品图片、反馈附件等上传文件 |
 
-```yaml
-services:
-  backend:
-    image: ${BACKEND_IMAGE:-docker.io/yemiao351/y-link-backend:latest}
-    pull_policy: always
-    environment:
-      - NODE_ENV=production
-      - PORT=3001
-      - LOG_COLOR=${LOG_COLOR:-true}
-      - FORCE_COLOR=${FORCE_COLOR:-1}
-      - DB_TYPE=${DB_TYPE:-sqlite}
-      - SQLITE_DB_PATH=${SQLITE_DB_PATH:-/app/data/y-link.sqlite}
-      - DB_HOST=${DB_HOST:-127.0.0.1}
-      - DB_PORT=${DB_PORT:-3306}
-      - DB_USER=${DB_USER:-root}
-      - DB_PASSWORD=${DB_PASSWORD:-}
-      - DB_NAME=${DB_NAME:-y_link}
-      - DB_SYNC=${DB_SYNC:-false}
-      - INIT_ADMIN_USERNAME=${INIT_ADMIN_USERNAME:-admin}
-      - INIT_ADMIN_DISPLAY_NAME=${INIT_ADMIN_DISPLAY_NAME:-系统管理员}
-      - INIT_ADMIN_PASSWORD=${INIT_ADMIN_PASSWORD:-Admin@123456}
-    ports:
-      - "${BACKEND_PORT:-3001}:3001"
-    volumes:
-      - y_link_cloud_sqlite_data:/app/data
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - wget -q -O /dev/null http://127.0.0.1:3001/health || exit 1
-      interval: 10s
-      timeout: 5s
-      retries: 6
-      start_period: 10s
-    restart: unless-stopped
+你截图里的挂载方式是正确的：类型选“本机目录”，权限选“读写”。本机目录可以按自己的 1Panel 习惯调整，但容器目录必须保持上表一致。
 
-  frontend:
-    image: ${FRONTEND_IMAGE:-docker.io/yemiao351/y-link-frontend:latest}
-    pull_policy: always
-    depends_on:
-      backend:
-        condition: service_healthy
-    ports:
-      - "${FRONTEND_PORT:-8080}:80"
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - wget -q -O /dev/null http://127.0.0.1/ && wget -q -O /dev/null http://127.0.0.1/health || exit 1
-      interval: 10s
-      timeout: 5s
-      retries: 6
-      start_period: 5s
-    restart: unless-stopped
+目录用途：
 
-volumes:
-  y_link_cloud_sqlite_data:
-```
+- `/app/data/y-link.sqlite` 是默认 SQLite 数据库文件。
+- `/app/uploads` 保存商品图片、反馈图片、附件等上传内容。
+- 迁移服务器时，复制宿主机的 `data` 和 `uploads` 两个目录即可保留业务数据。
 
-项目内置一键命令（自动拉起前后端 + 统一日志）：
+不要把这两个目录挂载到 `/tmp` 这类临时目录。
 
-```bash
-npm run cloud:up
-```
+### 4. 环境变量
 
-只看统一日志：
-
-```bash
-npm run cloud:logs
-```
-
-停止编排：
-
-```bash
-npm run cloud:down
-```
-
-1Panel 部署注意：
-- 推荐使用 **编排 / Compose 项目** 导入 [compose.cloud.yml]，不要只启动单个前端镜像。
-- 不要把前端容器设为 `host` 网络，否则容器内 Nginx 会直接占用宿主机 `80` 端口，容易报 `bind() ... 80 failed (98: Address in use)`。
-- 正确方式是让前后端一起在同一编排网络启动，由 `frontend -> backend:3001` 自动联动。
-
-特点：
-- 不写 `.env` 也可直接启动（默认镜像、默认端口、默认 SQLite）。
-- 首次启动会自动初始化管理员，并在容器日志打印账号密码。
-- 日志默认开启彩色输出，便于在 1Panel 日志面板快速定位关键信息。
-- 前端默认联动同编排后端服务（`backend:3001`），并启用延迟解析，避免启动阶段因 DNS 瞬态异常直接退出。
-- 前端健康检查已联动后端可达性（`/health`），后端异常时可在 1Panel 直接看到前端健康状态变更。
-
-### 如何切换到 MySQL（外置数据库）
-如果你希望把默认 SQLite 切换为外置 MySQL，优先推荐使用管理端的`数据库迁移向导`，由系统完成预检、任务创建、迁移执行、切换写入与 SQLite 回退。只有在“新库初始化”或“高级运维手工接管”场景下，才建议继续使用下方命令行方式。
-
-#### 方式 A：使用管理端数据库迁移向导（首选）
-适用场景：
-- 当前系统已经在 SQLite 上稳定运行，且希望平滑迁移现有业务数据到 MySQL。
-- 需要在切换前完成源库存在性、目标库连通性、目标表风险、运行时覆盖状态等预检。
-- 需要保留 SQLite 物理备份，并在切换异常时可直接从管理端发起回退。
-
-推荐步骤：
-1. 先完成一次 SQLite 文件物理备份，并准备好目标 MySQL 空库、账号与授权。
-2. 使用具备系统配置更新权限的账号登录管理端，进入`系统管理 -> 数据库迁移助手`。
-3. 填写目标 MySQL 连接信息，先点击`执行预检`，确认页面未出现阻断错误。
-4. 点击`创建迁移任务`，确认任务配置后再执行迁移；建议保持`初始化目标表结构`和`执行前创建 SQLite 物理备份`开启。
-5. 迁移成功后，优先通过向导内的`切换`能力写入运行时覆盖配置，并按页面提示在约定窗口重启后端服务。
-6. 切换后按本文末尾的验收建议检查登录、商品、订单、核销等关键链路；如发现异常，优先使用向导内的`回退到 SQLite`能力恢复。
-
-配套文档：
-- [数据库迁移向导演练与验收手册](./docs/Y-Link数据库迁移向导演练与验收手册.md)
-- [企业级维护与二开白皮书](./docs/Y-Link企业级维护与二开白皮书.md)
-
-#### 方式 B：Docker / 服务器部署时切换到 MySQL（适合新库初始化或高级运维）
-项目已经内置了专门的外置 MySQL 编排文件 [compose.mysql.yml](./compose.mysql.yml) 和环境变量模板 [`.env.docker.mysql.example`](./.env.docker.mysql.example)。
-
-步骤如下：
-
-1. 复制环境变量模板：
-
-```bash
-cp .env.docker.mysql.example .env.docker.mysql
-```
-
-2. 编辑 `.env.docker.mysql`，至少填写以下字段：
+至少需要手动新增一个变量：
 
 ```env
-DB_HOST=你的MySQL地址
-DB_PORT=3306
-DB_USER=你的MySQL账号
-DB_PASSWORD=你的MySQL密码
-DB_NAME=y_link
-DB_SYNC=false
+INIT_ADMIN_PASSWORD=请改成你自己的强密码
+TZ=Asia/Shanghai
 ```
 
-填写建议：
-- `DB_HOST`：如果 MySQL 部署在宿主机本机，Docker Desktop 环境可优先尝试 `host.docker.internal`。
-- `DB_NAME`：建议提前创建独立库，例如 `y_link`。
-- `DB_SYNC`：生产环境推荐 `false`；仅本地临时调试才建议改为 `true`。
+要求：
 
-3. 初始化数据库结构：
-- 开发调试场景：可临时设置 `DB_SYNC=true`，首次启动由 TypeORM 自动建表。
-- 生产/正式环境：若是“全新空库上线”，可先手动执行 [001_init_schema.sql](file:///f:/Y-Link/backend/sql/001_init_schema.sql)；若是“已有 SQLite 业务数据迁移到 MySQL”，请优先改用管理端`数据库迁移向导`，不要再手工拼接导入与切换步骤。
+- 必填，不填容器会拒绝启动。
+- 不能使用 `Admin@123456`。
+- 建议至少 8 位，并包含字母和数字。
+- 只在 1Panel 环境变量里填写，不要写进公开文档或提交到仓库。
 
-4. 使用外置 MySQL 编排启动：
+可选变量：
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `INIT_ADMIN_USERNAME` | `admin` | 初始管理员账号 |
+| `INIT_ADMIN_DISPLAY_NAME` | `系统管理员` | 初始管理员显示名 |
+| `TZ` | `Asia/Shanghai` | 容器和日志时区；国内部署建议保持此值 |
+| `DB_TYPE` | `sqlite` | 默认 SQLite |
+| `SQLITE_DB_PATH` | `/app/data/y-link.sqlite` | SQLite 文件位置 |
+| `PORT` | `3001` | 容器内后端端口，通常不用改 |
+
+首次启动后，系统会自动创建管理员账号。已有管理员时不会覆盖原账号密码。
+
+如果容器日志显示 `initialized=false`，通常表示数据库里已经存在管理员，系统没有再次初始化，这是正常行为。
+
+不建议新手修改这些变量：
+
+| 变量 | 原因 |
+| --- | --- |
+| `DB_SYNC` | 生产环境不建议长期启用自动同步结构 |
+| `DB_HOST` / `DB_USER` / `DB_PASSWORD` | 只有 `DB_TYPE=mysql` 时才需要 |
+| `PORT` | onebox 内部 Nginx 已按默认端口代理后端 |
+
+### 5. 重启规则和资源
+
+截图中选择“不重启”可以用于首次排错。正式使用建议改为“失败后重启”或“一直重启”。
+
+资源限制可按服务器情况配置：
+
+- CPU 权重：`1024` 可保持默认。
+- CPU 限制：`0` 表示不限制。
+- 内存限制：`0` 表示不限制；小服务器建议至少预留 512MB 以上。
+
+建议：
+
+- 首次启动排错：可先选“不重启”，方便看到真实错误日志。
+- 正式使用：建议选“失败后重启”或“一直重启”。
+- 如果服务器内存较小，不要同时跑太多同类容器。
+
+### 6. 常见启动日志
+
+正常启动会看到类似内容：
+
+```text
+[onebox] starting backend on 127.0.0.1:3001
+[onebox] starting nginx on 0.0.0.0:80
+[y-link-backend] 服务启动完成
+```
+
+常见错误：
+
+| 日志 | 原因 | 处理 |
+| --- | --- | --- |
+| `INIT_ADMIN_PASSWORD is required` | 未配置初始管理员密码 | 在环境变量里添加 `INIT_ADMIN_PASSWORD` |
+| `refusing insecure INIT_ADMIN_PASSWORD=Admin@123456` | 使用了禁用弱密码 | 换成私有强密码 |
+| `Welcome to nginx!` | 旧容器或旧镜像残留 | 删除旧容器，重新拉取 onebox 镜像 |
+| 上传图片 404 | 未挂载或未保留 `/app/uploads` | 增加 `/app/uploads` 读写挂载 |
+| 日志时间显示 `+0000` 或 `Z` | 容器时区未配置，或仍在使用旧镜像 | 添加 `TZ=Asia/Shanghai`，拉取新镜像并重建容器 |
+| 日志 IP 总是 `10.255.0.1` | 容器只看到了 Docker/1Panel 的上一跳地址 | 确认 1Panel 反向代理传递 `X-Forwarded-For`，并使用新版镜像 |
+
+新版 nginx 访问日志会优先显示可信代理传来的真实用户 IP，并在同一行保留 `proxy="..." xff="..." real="..."` 便于排查。若 `xff="-"` 或为空，说明上游没有把真实 IP 传给容器，应用无法凭空还原用户 IP。
+
+启动成功后建议做 4 个检查：
+
+1. 打开 `http://服务器IP:9050/health`，能返回健康信息。
+2. 打开 `http://服务器IP:9050/login`，能看到管理端登录页。
+3. 用 `admin` 和你配置的 `INIT_ADMIN_PASSWORD` 登录。
+4. 打开 `http://服务器IP:9050/client/login`，能看到客户端登录页。
+
+### 7. 升级和备份
+
+升级前先备份两个目录：
+
+```text
+/opt/1panel/apps/y-link/data
+/opt/1panel/apps/y-link/uploads
+```
+
+升级步骤：
+
+1. 停止容器。
+2. 拉取最新镜像 `ghcr.io/hf-cygg/y-link-onebox:latest`。
+3. 用原来的端口、挂载和环境变量重建容器。
+4. 访问 `/health`、管理端登录页和客户端商品大厅确认可用。
+
+只要保留 `/app/data` 和 `/app/uploads` 对应的宿主机目录，账号、单据、商品、图片都能继续使用。
+
+回退方式：
+
+1. 停止新容器。
+2. 换回旧镜像标签或旧镜像 ID。
+3. 继续挂载原来的 `data` 和 `uploads` 目录。
+4. 启动后检查登录、商品图片、订单列表。
+
+如果升级前已经备份目录，必要时可以恢复备份目录后再启动容器。
+
+### 8. 1Panel 填写对照
+
+按照你截图里的页面，可逐项核对：
+
+| 1Panel 字段 | 推荐值 |
+| --- | --- |
+| 名称 | `y-link` |
+| 镜像 | `ghcr.io/hf-cygg/y-link-onebox:latest` |
+| 端口 | 服务器 `9050`，容器 `80`，协议 `tcp` |
+| 网络 | `bridge` |
+| 挂载 1 | 本机 `/opt/1panel/apps/y-link/data` -> 容器 `/app/data`，读写 |
+| 挂载 2 | 本机 `/opt/1panel/apps/y-link/uploads` -> 容器 `/app/uploads`，读写 |
+| Entrypoint | `/entrypoint.sh` |
+| Command | 留空 |
+| 环境变量 | 至少添加 `INIT_ADMIN_PASSWORD=你的私有强密码` 和 `TZ=Asia/Shanghai` |
+| 特权模式 | 不开启 |
+| 控制台交互 | 不需要开启 |
+| 重启规则 | 首次排错可不重启，正式使用建议失败后重启 |
+
+截图中只有 `PATH`、`NODE_VERSION`、`YARN_VERSION` 这类镜像自带变量还不够，必须额外添加 `INIT_ADMIN_PASSWORD`。如果希望容器日志与国内现实时间一致，也建议添加 `TZ=Asia/Shanghai`；旧容器需要重建后才会应用新镜像和新时区。
+
+## 其他部署方式
+
+### Docker 命令启动 onebox
 
 ```bash
-docker compose --env-file .env.docker.mysql -f compose.mysql.yml up -d --build
+docker run -d --name y-link \
+  -p 9050:80 \
+  -e INIT_ADMIN_PASSWORD='请改成你自己的强密码' \
+  -e TZ=Asia/Shanghai \
+  -v /opt/1panel/apps/y-link/data:/app/data \
+  -v /opt/1panel/apps/y-link/uploads:/app/uploads \
+  --restart unless-stopped \
+  ghcr.io/hf-cygg/y-link-onebox:latest
 ```
 
-5. 启动后访问：
-- 管理端：`http://服务器IP:8080/login`
-- 客户端：`http://服务器IP:8080/client/login`
-- 后端健康检查：`http://服务器IP:3001/health`
+### 双容器部署
 
-常见误填项：
-- 不要只把 `DB_HOST/DB_USER/DB_PASSWORD` 填进 `compose.cloud.yml`，却仍然保留 `DB_TYPE=sqlite`。
-- 不要在生产环境直接长期使用 `DB_SYNC=true`，否则后续实体调整时风险不可控。
-- 不要忘记提前为 MySQL 创建数据库实例和账号权限。
+适合需要前后端分开管理的服务器：
 
-#### 方式 C：非 Docker 直连 MySQL 运行后端
-如果你是在本地或服务器直接运行后端进程，而不是走 Docker，也可以把后端环境变量改为 MySQL 模式。
-
-以 `backend/.env` 或你自己的 `backend/.env.<profile>` 为例：
-
-```env
-DB_TYPE=mysql
-DB_HOST=127.0.0.1
-DB_PORT=3306
-DB_USER=root
-DB_PASSWORD=你的密码
-DB_NAME=y_link
-DB_SYNC=true
+```bash
+INIT_ADMIN_PASSWORD='请改成你自己的强密码' TZ=Asia/Shanghai docker compose -f compose.cloud.yml up -d
 ```
+
+默认端口：
+
+- 前端：`8080`
+- 后端：`3001`
 
 说明：
-- `DB_TYPE=mysql` 是切换成功的关键开关。
-- `DB_SYNC=true` 更适合本地开发新库初始化；正式环境请优先手工建表后改为 `false`。
-- 环境变量解析规则可参考 [backend/.env.example](./backend/.env.example)。
 
-验证方法：
-- 启动后访问 `http://127.0.0.1:3001/health`，确认后端可用。
-- 登录系统后新增一条测试数据，确认 MySQL 中对应表已有落库记录。
-- 若启动失败，优先检查 `DB_TYPE`、`DB_HOST`、数据库权限和防火墙放行情况。
+- `compose.cloud.yml` 默认使用 SQLite，并持久化 `/app/data` 和 `/app/uploads`。
+- 不要只启动 `y-link-frontend`，单独前端镜像没有业务 API。
+- 如果要使用 MySQL，请确认 `DB_TYPE=mysql`，并填写 `DB_HOST`、`DB_PORT`、`DB_USER`、`DB_PASSWORD`、`DB_NAME`。
 
-### 本地开发（非 Docker）
+### MySQL 部署建议
+
+默认 SQLite 适合个人、小团队、轻量部署和快速上线。以下情况建议迁移到 MySQL：
+
+- 多人高频同时下单、核销、入库。
+- 数据量持续增长。
+- 需要更标准的备份、审计、主机迁移和运维体系。
+
+已有 SQLite 数据时，优先使用管理端“系统管理 -> 数据库迁移”功能迁移，不建议手工拼接导入。
+
+新库直接使用 MySQL 时，可参考：
+
+- [compose.mysql.yml](./compose.mysql.yml)
+- [.env.docker.mysql.example](./.env.docker.mysql.example)
+- [数据库迁移演练与验收手册](./docs/Y-Link数据库迁移向导演练与验收手册.md)
+
+## 功能概览
+
+### 管理端
+
+- 工作台：业务数据看板、快捷入口。
+- 出库开单：商品搜索、数量录入、金额计算、单据生成。
+- 出库列表：历史单据、详情、导出、作废和删除治理。
+- 入库管理：供货方送货单、扫码入库、入库核销。
+- 商品管理：基础资料、标签、库存、线上展示、图片。
+- O2O 核销：客户预订单查询、核销、撤回和库存流水。
+- 用户中心：管理端用户、供货方用户、客户端用户。
+- 系统配置：验证码、部门、客户服务、业务规则等配置。
+- 审计日志：登录、权限拦截、关键业务操作追踪。
+
+### 客户端
+
+- 注册登录：用户名、手机号、邮箱等账号能力。
+- 商品大厅：商品浏览、搜索、分类、加购。
+- 购物车和结算：预订下单、库存占用、订单生成。
+- 我的订单：订单列表、详情、状态查看、撤回。
+- 我的：资料维护、修改密码、反馈与客服入口。
+
+### 供货方
+
+- 独立账号登录。
+- 录入送货单。
+- 查看历史送货单。
+- 配合管理端完成入库核销。
+
+## 本地开发
+
+### 环境要求
+
+- Node.js 20+
+- npm
+- Docker 可选，用于容器验证和 MySQL 并发验收
+
+### 安装依赖
+
+```bash
+npm install
+npm --prefix backend install
+```
+
+### 启动本地联调
 
 ```bash
 npm run local:dev
 ```
 
-本地联调启动后访问：
-- 管理端登录：`https://localhost:5173/login`
-- 客户端登录：`https://localhost:5173/client/login`
-- 客户端商品大厅：`https://localhost:5173/client/mall`
-- 后端健康检查：`http://127.0.0.1:3001/health`
-- 本地 SQLite 文件：`backend/data/local-dev/y-link.local-dev.sqlite`
+常用命令：
 
-说明：
-- 当前本地联调由一个前端开发服务器同时承载“管理端页面”和“客户端页面”。
-- 前端默认启用自签名 HTTPS（`VITE_DEV_SERVER_HTTPS=true`），首次访问需在浏览器手动信任证书。
-- 数据库默认使用 SQLite，执行 `start-local-dev.ps1` 后会随后台自动初始化，无需额外手动启动数据库进程。
-- 若 Docker / CI 构建在前端阶段失败，可先本地执行 `npm run build` 定位 `vue-tsc` 类型或未使用变量问题，再进入镜像构建排查。
+| 命令 | 说明 |
+| --- | --- |
+| `npm run local:dev` | 启动本地前后端联调 |
+| `npm run local:dev:status` | 查看本地服务状态 |
+| `npm run local:dev:stop` | 停止本地联调 |
+| `npm run build` | 前端类型检查和生产构建 |
+| `npm --prefix backend run check` | 后端 TypeScript 检查 |
+| `npm --prefix backend run build` | 后端构建 |
 
-扫码能力说明（html5-qrcode）：
-- `HTTPS` / `localhost` 下支持实时摄像头扫码。
-- `HTTP` 或非安全上下文下自动回退为图片识别，不承诺实时摄像头能力。
-- 手机通过局域网访问时，需先在浏览器中信任本地自签名证书，再使用摄像头扫码。
+## 验证命令
 
-后端本地验收（O2O 功能）：
+| 命令 | 说明 |
+| --- | --- |
+| `npm run verify:unit:functional` | 单元和功能基线验证 |
+| `npm --prefix backend run permission:regression:verify` | 后端权限回归 |
+| `npm --prefix backend run release:verify` | 后端发布回归 |
+| `npm run verify:onebox:smoke` | onebox 冒烟验证 |
+| `npm run verify:db:concurrency` | SQLite 副本 + MySQL 临时库并发验收 |
+| `npm run verify:performance` | 性能预算验证 |
+| `npm run verify:all` | 全量质量验证 |
 
-```bash
-cd backend
-npm run o2o:verify
+`verify:db:concurrency` 默认会通过 Docker 拉起 MySQL 8.4 临时环境。没有 Docker 时，可提供 `VERIFY_DB_CONCURRENCY_MYSQL_*` 连接到自备 MySQL。
+
+## 项目结构
+
+```text
+Y-Link
+├─ src/                         前端源码
+│  ├─ api/                      API 封装
+│  ├─ components/               通用组件
+│  ├─ router/                   路由和菜单元信息
+│  ├─ store/                    Pinia 状态
+│  └─ views/                    管理端和客户端页面
+├─ backend/                     后端源码
+│  ├─ src/config/               环境变量、数据源、启动自检
+│  ├─ src/entities/             TypeORM 实体
+│  ├─ src/routes/               REST 路由
+│  ├─ src/services/             业务服务
+│  ├─ sql/                      初始化和迁移 SQL
+│  └─ scripts/                  后端验证脚本
+├─ docker/
+│  ├─ nginx/                    Nginx 配置
+│  └─ onebox/                   onebox 入口脚本
+├─ docs/                        使用和运维文档
+├─ scripts/                     构建、验证、部署辅助脚本
+├─ compose.cloud.yml            云端双容器部署
+├─ compose.mysql.yml            外置 MySQL 部署
+├─ Dockerfile                   前端镜像
+├─ Dockerfile.onebox            单镜像
+└─ README.md
 ```
 
-性能与核心路径回归：
+## 关键目录说明
 
-```bash
-npm run verify:performance
-```
+| 路径 | 说明 |
+| --- | --- |
+| `/app/data` | 容器内 SQLite 数据目录，必须持久化 |
+| `/app/uploads` | 容器内上传文件目录，必须持久化 |
+| `backend/sql` | MySQL 初始化和结构升级脚本 |
+| `backend/data` | 本地开发 SQLite 数据目录 |
+| `docs` | 使用指南、迁移手册、维护文档 |
 
-全量质量回归（推荐在较大改动后执行）：
+## 安全说明
 
-```bash
-npm run verify:all
-```
+- 初始管理员密码必须手动配置，系统不会内置默认弱密码。
+- 不要把真实密码、数据库连接、Token 写入仓库。
+- 生产环境建议使用 HTTPS 和反向代理。
+- 管理端已做登录失败风控、验证码、权限校验和审计记录。
+- SQLite 适合轻量部署；多人高并发和长期生产建议使用 MySQL。
 
-客户端并发与稳态验证（适合验证 20 人左右同时注册/登录/查询/下单场景）：
+## 相关文档
 
-```bash
-npm run verify:performance:client-concurrency
-```
-
-说明：
-- `npm run verify:performance`：偏重页面预算、核心路径与企业性能回归。
-- `npm run verify:performance:all`：在前端性能基础上继续联动后端性能基线验证。
-- `npm run verify:all`：质量总控入口，串联单元功能验证与全量性能验证，适合提交前使用。
-- `npm run verify:release:functional`：发布前功能回归入口，串联前端构建、后端构建、后端全功能 HTTP 回归与 onebox 冒烟验证。
-- `npm run verify:release`：发布前总控入口，先执行 `verify:release:functional`，再执行强制性能验证。
-- 所有质量脚本的报告默认输出到 `.local-dev/`，便于回归对比与留档。
-
----
-
-## 测试与质量保障
-
-### 当前质量脚本体系
-- `verify:unit:functional`：前端类型、后端类型、O2O 关键功能回归。
-- `verify:performance:budget`：页面分包预算与体积校验。
-- `verify:performance:core-paths`：核心路径自动化回归。
-- `verify:performance:client-concurrency`：客户端并发与稳态断言。
-- `verify:quality:all` / `verify:all`：总控入口，失败即停并写入 JSON 报告。
-- `verify:release:functional`：发布前功能回归入口，覆盖管理端、客户端、上传与 onebox 关键冒烟。
-- `verify:release`：发布前总控入口，在功能回归基础上叠加强制性能验证。
-
-### 推荐使用顺序
-1. 日常改动后先执行 `npm run build`
-2. 业务链路改动后执行 `npm run verify:unit:functional`
-3. 核心页面或路由结构改动后执行 `npm run verify:performance`
-4. 提交前执行 `npm run verify:all`
-5. 发布前先执行 `npm run verify:release:functional`
-6. 正式上线前执行 `npm run verify:release`
-
-### 报告位置
-- 并发与稳态报告：`.local-dev/client-concurrency-performance.report.json`
-- 质量总控报告：`.local-dev/verify-quality-full-suite.report.json`
-- 发布前功能回归报告：`.local-dev/verify-release-functional-suite.report.json`
-- 发布前聚合报告：`.local-dev/verify-release-full-suite.report.json`
-- 其它性能与核心路径报告：`.local-dev/*.report.json`
-
----
-
-## 代码规模参考
-
-如果你想快速了解当前项目规模，推荐使用 `cloc` 统计：
-
-```powershell
-& "$env:LOCALAPPDATA\Microsoft\WinGet\Links\cloc.exe" . --exclude-dir=node_modules,dist,.git,.trae,.local-dev
-```
-
-按最近一次统计口径（排除 `node_modules`、`dist`、`.git`、`.trae`、`.local-dev`）：
-- 有效文件数：`258`
-- 空行：`5333`
-- 注释行：`5173`
-- 代码行：`49215`
-
-更细分的统计建议：
-- 前端：`src` + `scripts`
-- 后端：`backend/src` + `backend/scripts` + `backend/sql`
-- 总仓：整个项目根目录统一排除依赖与构建产物
-
----
-
-## 技术栈
-- 前端：Vue 3、TypeScript、Vite、Pinia、Element Plus、Tailwind CSS
-- 后端：Node.js、Express、TypeScript、TypeORM
-- 数据库：SQLite（默认）/ MySQL
-- 部署：Docker Compose、GitHub Actions、Docker Hub
-
----
-
-## 近期更新
-- `供货工作台`：供应商登录后以单一入口处理送货单录入与历史查询。
-- `产品中心`：统一管理基础产品资料、库存信息与线上展示配置。
-- `用户中心`：统一管理管理端账号与客户端账号，减少后台重复入口。
-- `扫码入库`：支持键盘快捷操作、送货单号兜底查询、最近查询列表与更清晰的核销交互。
-- `入库管理`：从 `线上预订` 分类中拆出，成为独立的业务操作入口。
-
----
-
-## 文档导航（Wiki）
-README 仅保留基础说明，完整开发文档与部署细节统一维护在 Wiki：
-- [Home（架构总览）](https://github.com/HF-CYGG/Y-Link/wiki)
-- [Developer Guide（本地开发）](https://github.com/HF-CYGG/Y-Link/wiki/Developer-Guide)
-- [Deployment（部署指南）](https://github.com/HF-CYGG/Y-Link/wiki/Deployment)
-- [GitHub Actions（自动化与 CI/CD）](https://github.com/HF-CYGG/Y-Link/wiki/GitHub-Actions)
-- [API Reference（接口说明）](https://github.com/HF-CYGG/Y-Link/wiki/API-Reference)
-- [Troubleshooting（故障排查）](https://github.com/HF-CYGG/Y-Link/wiki/Troubleshooting)
-- [Task1：全栈治理基线、模块边界、历史模式禁令与范围边界](./spec/task1-全栈治理基线、模块边界、历史模式禁令与范围边界.md)
-- [数据库迁移向导演练与验收手册](./docs/Y-Link数据库迁移向导演练与验收手册.md)
-
----
-
-## License
-本项目基于 [MIT License](./LICENSE) 开源，欢迎 Fork 与贡献。
+- [Y-Link 使用指南](./docs/Y-Link使用指南.md)
+- [数据库迁移演练与验收手册](./docs/Y-Link数据库迁移向导演练与验收手册.md)
+- [企业级维护与二开白皮书](./docs/Y-Link企业级维护与二开白皮书.md)
+- [GitHub Wiki](https://github.com/HF-CYGG/Y-Link/wiki)

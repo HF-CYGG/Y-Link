@@ -4,17 +4,15 @@
  * 文件职责：承载客户端订单详情展示、进度查看、二维码展示、订单撤回与退货申请。
  * 实现逻辑：
  * - 详情页加载成功后会同步刷新订单摘要缓存，方便返回列表页时立即看到最新状态；
- * - 订单 Store 初始化按当前客户端账号执行，避免共享终端切换账号后把旧订单摘要带入新账号上下文；
- * - 页面在后台静默刷新当前订单详情时不会反复拉起整页 loading，并会在更新命中时显示轻量提示。
+ * - 订单 Store 初始化按当前客户端账号执行，避免共享终端切换账号后把旧订单摘要带入新账号上下文。
  * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
  */
 
 
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import QRCode from 'qrcode'
 import {
   cancelMyO2oPreorder,
   getO2oMallProducts,
@@ -42,13 +40,12 @@ import {
 } from '@/constants/o2o-order-status'
 import { useClientAuthStore, useClientOrderStore } from '@/store'
 import pinia from '@/store/pinia'
-import { subscribeClientOrderRefresh } from '@/utils/client-order-refresh'
+import { buildClientOrderSummaryFromDetail } from '@/utils/client-order-summary'
+import { notifyClientOrderRefresh, subscribeClientOrderRefresh } from '@/utils/client-order-refresh'
 import { formatDateTime } from '@/utils/date-time'
 import { normalizeRequestError } from '@/utils/error'
-import { exportVoucherPdf } from '@/utils/pdf/export-voucher-pdf'
 import ClientOrderEditDialog from '@/views/client/components/ClientOrderEditDialog.vue'
 import ClientOrderReturnDialog from '@/views/client/components/ClientOrderReturnDialog.vue'
-import ClientOrderVoucherDialog from '@/views/client/components/ClientOrderVoucherDialog.vue'
 import {
   DEFAULT_VOUCHER_ORIENTATION,
   O2O_PREORDER_REMARK_MAX_LENGTH,
@@ -58,7 +55,25 @@ import {
   type OrderVoucherEditableFields,
   type VoucherOrientation,
 } from '@/views/client/client-order-detail-types'
-import OrderVoucherTemplate from '@/views/order-list/components/OrderVoucherTemplate.vue'
+
+// 详细注释：正式出库单能力属于低频扩展链路，页面首开时不应同步拉起弹层、模板与导出工具。
+// 因此这里把三个模块都收敛为异步加载，只在用户真正触发正式出库单相关操作时才下载对应 chunk。
+const loadClientOrderVoucherDialogModule = () => import('@/views/client/components/ClientOrderVoucherDialog.vue')
+const loadOrderVoucherTemplateModule = () => import('@/views/order-list/components/OrderVoucherTemplate.vue')
+const loadVoucherPdfExportModule = () => import('@/utils/pdf/export-voucher-pdf')
+type QrCodeModule = typeof import('qrcode')
+type QrCodeRenderer = Pick<QrCodeModule, 'toDataURL'>
+type VoucherUiModulePromise = Promise<void>
+
+const ClientOrderVoucherDialog = defineAsyncComponent({
+  loader: async () => (await loadClientOrderVoucherDialogModule()).default,
+  suspensible: false,
+})
+
+const OrderVoucherTemplate = defineAsyncComponent({
+  loader: async () => (await loadOrderVoucherTemplateModule()).default,
+  suspensible: false,
+})
 
 const ORDER_TYPE_LABEL_MAP = {
   department: '部门订',
@@ -66,6 +81,7 @@ const ORDER_TYPE_LABEL_MAP = {
 } as const
 const DETAIL_AUTO_REFRESH_INTERVAL_MS = 15 * 1000
 const DETAIL_REFRESH_NOTICE_MS = 3200
+const clientOrderRefreshSourceId = `client-order-detail-${Math.random().toString(36).slice(2)}`
 
 const route = useRoute()
 const router = useRouter()
@@ -88,7 +104,9 @@ const returnReason = ref('')
 const returnQtyMap = ref<Record<string, number>>({})
 const requestError = ref<{ type: 'offline' | 'error'; message: string } | null>(null)
 const voucherDialogVisible = ref(false)
+const voucherDialogMounted = ref(false)
 const voucherPrintRootRef = ref<HTMLElement | null>(null)
+const voucherCapabilityLoading = ref(false)
 const exportPdfLoading = ref(false)
 const voucherOrientation = ref<VoucherOrientation>(DEFAULT_VOUCHER_ORIENTATION)
 const enableHtml2pdfExport = import.meta.env.VITE_ORDER_VOUCHER_HTML2PDF_ENABLED !== 'false'
@@ -99,6 +117,9 @@ const { runLatest } = useStableRequest()
 const clientAuthStore = useClientAuthStore(pinia)
 const clientOrderStore = useClientOrderStore(pinia)
 let disposeClientOrderRefresh: () => void = () => {}
+let voucherUiModulePromise: VoucherUiModulePromise | null = null
+let voucherPdfExportModulePromise: ReturnType<typeof loadVoucherPdfExportModule> | null = null
+let qrCodeModulePromise: Promise<QrCodeModule> | null = null
 let detailAutoRefreshTimer: ReturnType<typeof globalThis.setInterval> | null = null
 clientOrderStore.initialize(clientAuthStore.currentUser?.id)
 
@@ -522,53 +543,26 @@ const qrDisabledHint = computed(() => {
   return '当前订单二维码暂不可用'
 })
 
-const buildOrderSummaryFromDetail = (nextDetail: O2oPreorderDetail): O2oPreorderSummary => {
-  const { order } = nextDetail
-  return {
-    id: order.id,
-    showNo: resolveO2oDisplayShowNo(order),
-    verifyCode: order.verifyCode,
-    status: order.status,
-    businessStatus: order.businessStatus,
-    hasCustomerOrder: Boolean(order.hasCustomerOrder),
-    isSystemApplied: order.isSystemApplied,
-    merchantMessage: order.merchantMessage,
-    clientOrderType: order.clientOrderType,
-    departmentNameSnapshot: order.departmentNameSnapshot,
-    returnRequestCount: nextDetail.returnRequests.length,
-    pendingReturnRequestCount: nextDetail.returnRequests.filter((item) => item.status === 'pending').length,
-    latestReturnRequest: nextDetail.returnRequests.length
-      ? nextDetail.returnRequests
-          .slice()
-          .sort((prev, next) => new Date(next.createdAt).getTime() - new Date(prev.createdAt).getTime())[0]
-      : null,
-    statusReport: order.statusReport,
-    totalAmount: order.totalAmount,
-    expireInSeconds: order.expireInSeconds,
-    totalQty: order.totalQty,
-    timeoutAt: order.timeoutAt,
-    createdAt: order.createdAt,
-  }
-}
-
 const toEditableItemMaxQty = (product: O2oMallProduct, originalQty = 0) => {
   return Math.max(0, Number(product.availableStock ?? 0) + originalQty)
 }
 
-const buildEditableItemsFromDetail = (nextDetail: O2oPreorderDetail) => {
+const buildEditableItemsFromDetail = (nextDetail: O2oPreorderDetail, existingItems: EditableOrderItem[] = []) => {
   const productMap = new Map(mallProducts.value.map((item) => [item.id, item]))
+  const draftQtyMap = new Map(existingItems.map((item) => [item.productId, item.qty]))
   return nextDetail.items.map((item) => {
     const product = productMap.get(item.productId)
     const maxQty = product ? toEditableItemMaxQty(product, item.qty) : item.qty
     const unavailableReason = product
       ? null
       : '当前商品已不在可售目录中，仅支持减少或删除原有数量'
+    const draftQty = draftQtyMap.get(item.productId)
     return {
       productId: item.productId,
       productCode: item.productCode,
       productName: item.productName,
       defaultPrice: item.defaultPrice,
-      qty: item.qty,
+      qty: draftQty === undefined ? item.qty : Math.max(0, Math.min(maxQty, Math.floor(Number(draftQty ?? item.qty)))),
       originalQty: item.qty,
       maxQty,
       unavailableReason,
@@ -600,6 +594,63 @@ const handleVoucherEditableFieldUpdate = <TKey extends keyof OrderVoucherEditabl
   value: OrderVoucherEditableFields[TKey],
 ) => {
   voucherEditableForm[key] = value
+}
+
+// 详细注释：首次打开正式出库单时，提前把弹层外壳和打印模板一起拉取下来。
+// 这样可以把低频模块移出详情页首开包，同时避免真正展示弹层时出现异步白屏。
+const ensureVoucherUiModulesReady = async () => {
+  if (!voucherUiModulePromise) {
+    voucherUiModulePromise = Promise.all([loadClientOrderVoucherDialogModule(), loadOrderVoucherTemplateModule()])
+      .then(() => undefined)
+      .catch((error) => {
+        voucherUiModulePromise = null
+        throw error
+      })
+  }
+  await voucherUiModulePromise
+  voucherDialogMounted.value = true
+}
+
+// 详细注释：PDF 导出比“仅预览/打印”更低频，因此继续拆出独立的导出工具加载阶段。
+// 用户只查看正式出库单时，只会下载预览模板；只有点击“导出 PDF”才会继续拉起导出实现与底层依赖。
+const resolveExportVoucherPdf = async () => {
+  if (!voucherPdfExportModulePromise) {
+    voucherPdfExportModulePromise = loadVoucherPdfExportModule().catch((error) => {
+      voucherPdfExportModulePromise = null
+      throw error
+    })
+  }
+  const module = await voucherPdfExportModulePromise
+  return module.exportVoucherPdf
+}
+
+// 详细注释：订单详情页会在首开后立即渲染提货码与退货码，但二维码生成库体积相对更重，
+// 因此这里沿用与 PDF 相同的“首次使用再下载 + 成功后复用 Promise”策略，把依赖从详情首包移出。
+const resolveQrCodeModule = async () => {
+  if (!qrCodeModulePromise) {
+    qrCodeModulePromise = import('qrcode').catch((error) => {
+      qrCodeModulePromise = null
+      throw error
+    })
+  }
+
+  const module = await qrCodeModulePromise
+  const moduleWithDefault = module as QrCodeModule & { default?: QrCodeRenderer }
+  return moduleWithDefault.default ?? module
+}
+
+// 详细注释：详情页主二维码与退货二维码共用同一套渲染参数，仅宽度不同；
+// 抽成共享方法后可以保证两个入口都命中同一个懒加载缓存，避免同页重复写一段导入逻辑。
+const renderQrCodeDataUrl = async (payload: string, width: number) => {
+  const qrCode = await resolveQrCodeModule()
+  return qrCode.toDataURL(payload, {
+    width,
+    margin: 1,
+    color: {
+      dark: '#0f172a',
+      light: '#ffffff',
+    },
+  })
 }
 
 const handleVoucherOrientationChange = (value: VoucherOrientation) => {
@@ -690,14 +741,7 @@ const renderQrCode = async () => {
     return
   }
 
-  qrDataUrl.value = await QRCode.toDataURL(detail.value.qrPayload, {
-    width: 260,
-    margin: 1,
-    color: {
-      dark: '#0f172a',
-      light: '#ffffff',
-    },
-  })
+  qrDataUrl.value = await renderQrCodeDataUrl(detail.value.qrPayload, 260)
 }
 
 const renderReturnRequestQrs = async () => {
@@ -708,14 +752,7 @@ const renderReturnRequestQrs = async () => {
     if (request.status !== 'pending' || !request.qrPayload) {
       continue
     }
-    nextQrMap[request.id] = await QRCode.toDataURL(request.qrPayload, {
-      width: 220,
-      margin: 1,
-      color: {
-        dark: '#0f172a',
-        light: '#ffffff',
-      },
-    })
+    nextQrMap[request.id] = await renderQrCodeDataUrl(request.qrPayload, 220)
   }
   returnQrMap.value = nextQrMap
 }
@@ -727,6 +764,9 @@ const loadMallProducts = async () => {
   editProductsLoading.value = true
   try {
     mallProducts.value = await getO2oMallProducts()
+    if (detail.value) {
+      editOrderItems.value = buildEditableItemsFromDetail(detail.value, editOrderItems.value)
+    }
   } catch (error) {
     const normalizedError = normalizeRequestError(error, '可修改商品加载失败')
     ElMessage.error(normalizedError.message)
@@ -735,8 +775,10 @@ const loadMallProducts = async () => {
   }
 }
 
-const syncOrderStoreFromDetail = (nextDetail: O2oPreorderDetail) => {
-  clientOrderStore.upsertOrder(buildOrderSummaryFromDetail(nextDetail))
+const syncOrderStoreFromDetail = (nextDetail: O2oPreorderDetail, options?: { preserveFresh?: boolean }) => {
+  clientOrderStore.syncOrderSummary(buildClientOrderSummaryFromDetail(nextDetail), {
+    preserveFresh: options?.preserveFresh,
+  })
 }
 
 const markCustomerOrderPrintedIfNeeded = async () => {
@@ -746,7 +788,12 @@ const markCustomerOrderPrintedIfNeeded = async () => {
   try {
     const nextDetail = await markMyO2oPreorderCustomerOrderPrinted(detail.value.order.id)
     detail.value = nextDetail
-    syncOrderStoreFromDetail(nextDetail)
+    syncOrderStoreFromDetail(nextDetail, { preserveFresh: true })
+    notifyClientOrderRefresh({
+      orderId: nextDetail.order.id,
+      reason: 'compliance_updated',
+      sourceId: clientOrderRefreshSourceId,
+    })
   } catch (error) {
     const normalizedError = normalizeRequestError(error, '已完成打印/导出，但出库单状态上报失败')
     ElMessage.warning(normalizedError.message)
@@ -800,7 +847,7 @@ const resetDialogTransientState = () => {
   cleanupVoucherPrintSideEffects()
 }
 
-const handleOpenVoucherDialog = () => {
+const handleOpenVoucherDialog = async () => {
   if (!shouldShowVoucherButton.value) {
     ElMessage.warning('散客订单不提供正式出库单')
     return
@@ -811,7 +858,16 @@ const handleOpenVoucherDialog = () => {
   }
   resetVoucherEditableForm()
   voucherOrientation.value = DEFAULT_VOUCHER_ORIENTATION
-  voucherDialogVisible.value = true
+  voucherCapabilityLoading.value = true
+  try {
+    await ensureVoucherUiModulesReady()
+    voucherDialogVisible.value = true
+  } catch (error) {
+    const normalizedError = normalizeRequestError(error, '正式出库单模块加载失败，请稍后重试')
+    ElMessage.error(normalizedError.message)
+  } finally {
+    voucherCapabilityLoading.value = false
+  }
 }
 
 // 详细注释：正式出库单弹层关闭后，需要把补填字段、打印方向和临时打印副作用统一清空，
@@ -847,13 +903,16 @@ const handleExportVoucherPdf = async () => {
     ElMessage.warning('当前订单暂无可导出的凭证')
     return
   }
-  const sourceElement = voucherPrintRootRef.value?.querySelector('.voucher-print-document')
-  if (!(sourceElement instanceof HTMLElement)) {
-    ElMessage.warning('凭证模板尚未准备完成，请稍后重试')
-    return
-  }
   exportPdfLoading.value = true
   try {
+    await ensureVoucherUiModulesReady()
+    const exportVoucherPdf = await resolveExportVoucherPdf()
+    await nextTick()
+    const sourceElement = voucherPrintRootRef.value?.querySelector('.voucher-print-document')
+    if (!(sourceElement instanceof HTMLElement)) {
+      ElMessage.warning('凭证模板尚未准备完成，请稍后重试')
+      return
+    }
     await exportVoucherPdf({
       sourceElement,
       filename: `${voucherOrder.value.showNo || 'client-order'}-正式出库单.pdf`,
@@ -887,7 +946,7 @@ const loadDetail = async (options?: { silent?: boolean }) => {
     onSuccess: async (result) => {
       const changed = hasOrderDetailChanged(detail.value, result)
       detail.value = result
-      syncOrderStoreFromDetail(result)
+      syncOrderStoreFromDetail(result, { preserveFresh: true })
       await renderQrCode()
       await renderReturnRequestQrs()
       if (silent) {
@@ -942,6 +1001,9 @@ const triggerSilentDetailRefresh = async () => {
 const startClientOrderRefreshSubscription = () => {
   disposeClientOrderRefresh = subscribeClientOrderRefresh(async (event) => {
     const currentOrderId = String(route.params.id ?? '').trim()
+    if (event.sourceId === clientOrderRefreshSourceId) {
+      return
+    }
     if (!event.orderId || !currentOrderId || event.orderId !== currentOrderId) {
       return
     }
@@ -998,9 +1060,14 @@ const handleRecallOrder = async () => {
   try {
     const nextDetail = await cancelMyO2oPreorder(detail.value.order.id)
     detail.value = nextDetail
-    syncOrderStoreFromDetail(nextDetail)
+    syncOrderStoreFromDetail(nextDetail, { preserveFresh: true })
     await renderQrCode()
     await renderReturnRequestQrs()
+    notifyClientOrderRefresh({
+      orderId: nextDetail.order.id,
+      reason: 'cancelled',
+      sourceId: clientOrderRefreshSourceId,
+    })
     ElMessage.success('订单已撤回')
   } catch (error) {
     const normalizedError = normalizeRequestError(error, '撤回订单失败')
@@ -1010,7 +1077,7 @@ const handleRecallOrder = async () => {
   }
 }
 
-const openEditDialog = async () => {
+const openEditDialog = () => {
   if (!detail.value) {
     ElMessage.warning('当前订单不可修改')
     return
@@ -1019,9 +1086,9 @@ const openEditDialog = async () => {
     ElMessage.warning(modifyOrderDisabledHint.value || '当前订单不可修改')
     return
   }
-  await loadMallProducts()
   resetEditForm()
   editDialogVisible.value = true
+  void loadMallProducts()
 }
 
 const handleEditDialogClosed = () => {
@@ -1081,10 +1148,15 @@ const handleSubmitOrderEdit = async () => {
       })),
     })
     detail.value = nextDetail
-    syncOrderStoreFromDetail(nextDetail)
+    syncOrderStoreFromDetail(nextDetail, { preserveFresh: true })
     await renderQrCode()
     await renderReturnRequestQrs()
     editDialogVisible.value = false
+    notifyClientOrderRefresh({
+      orderId: nextDetail.order.id,
+      reason: 'updated',
+      sourceId: clientOrderRefreshSourceId,
+    })
     ElMessage.success('订单修改成功')
   } catch (error) {
     const normalizedError = normalizeRequestError(error, '订单修改失败')
@@ -1153,8 +1225,18 @@ const handleSubmitReturnRequest = async () => {
         qty: item.selectedQty,
       })),
     })
-    await loadDetail()
+    detail.value = {
+      ...detail.value,
+      returnRequests: [createdReturnRequest, ...detail.value.returnRequests],
+    }
+    syncOrderStoreFromDetail(detail.value, { preserveFresh: true })
+    await renderReturnRequestQrs()
     returnDialogVisible.value = false
+    notifyClientOrderRefresh({
+      orderId: detail.value.order.id,
+      reason: 'return_requested',
+      sourceId: clientOrderRefreshSourceId,
+    })
     ElMessage.success(`退货申请已提交，退货单号：${createdReturnRequest.returnNo}`)
   } catch (error) {
     const normalizedError = normalizeRequestError(error, '提交退货申请失败')
@@ -1237,10 +1319,11 @@ onBeforeUnmount(() => {
             <button
               v-if="shouldShowVoucherButton"
               type="button"
-              class="rounded-full border border-teal-200 px-4 py-2 text-sm font-medium text-teal-700 transition hover:bg-teal-50"
+              class="rounded-full border border-teal-200 px-4 py-2 text-sm font-medium text-teal-700 transition hover:bg-teal-50 disabled:cursor-not-allowed disabled:border-slate-200 disabled:text-slate-400"
+              :disabled="voucherCapabilityLoading"
               @click="handleOpenVoucherDialog"
             >
-              正式出库单
+              {{ voucherCapabilityLoading ? '正在加载...' : '正式出库单' }}
             </button>
             <button
               v-if="shouldShowModifyOrderButton"
@@ -1595,6 +1678,7 @@ onBeforeUnmount(() => {
     />
 
     <ClientOrderVoucherDialog
+      v-if="voucherDialogMounted"
       :visible="voucherDialogVisible"
       :voucher-order="voucherOrder"
       :editable-fields="voucherEditableForm"

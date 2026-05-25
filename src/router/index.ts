@@ -4,12 +4,13 @@
  * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
  */
 
-import { createRouter, createWebHistory } from 'vue-router'
+import { createRouter, createWebHistory, type RouteLocationNormalized } from 'vue-router'
 import { scheduleRouteComponentWarmup, type AppRouteName } from '@/router/route-performance'
 import { useAuthStore, useClientAuthStore } from '@/store'
 import { canAccessRoute, resolveFirstAccessibleManagementPath, routes } from '@/router/routes'
 import type { UserSafeProfile } from '@/api/modules/auth'
 import { showPermissionDenied } from '@/utils/permission'
+import { hasRecoverableAdminSessionHint } from '@/utils/auth-storage'
 import pinia from '@/store/pinia'
 
 export const resolveDefaultManagementRedirect = (user?: Pick<UserSafeProfile, 'role'> | null) => {
@@ -63,42 +64,75 @@ const router = createRouter({
 })
 
 const coldStartPreloadVisitedRoutes = new Set<string>()
+const isRouteTraceEnabled = import.meta.env.DEV && import.meta.env.VITE_ROUTE_TRACE_DEBUG === 'true'
 
 const logRouteTrace = (event: string, payload: Record<string, unknown>) => {
-  if (!import.meta.env.DEV) {
+  if (!isRouteTraceEnabled) {
     return
   }
   console.info(`[route-trace] ${event}`, payload)
 }
 
+type RouteGuardFlags = {
+  touchesManagementAuth: boolean
+  touchesClientAuth: boolean
+  requiresAuth: boolean
+  isGuestOnly: boolean
+  requiresClientAuth: boolean
+  isClientGuestOnly: boolean
+}
+
 /**
- * 全局前置守卫：
- * - 负责首次刷新后的登录态恢复；
- * - 负责未登录拦截、登录页回跳与权限点路由校验。
+ * 提前收敛当前路由依赖的鉴权语义：
+ * - 统一在一个地方计算管理端/客户端的守卫标记；
+ * - 避免在前置守卫里多次重复遍历 `to.matched`，同时降低条件分支复杂度。
  */
-router.beforeEach(async (to) => {
-  const authStore = useAuthStore(pinia)
-  const clientAuthStore = useClientAuthStore(pinia)
-
-  logRouteTrace('beforeEach:start', {
-    to: to.fullPath,
-    from: router.currentRoute.value.fullPath,
+const resolveRouteGuardFlags = (to: RouteLocationNormalized): RouteGuardFlags => {
+  return {
+    touchesManagementAuth: to.matched.some((record) => record.meta.requiresAuth || record.meta.guestOnly),
+    touchesClientAuth: to.matched.some((record) => record.meta.requiresClientAuth || record.meta.clientGuestOnly),
     requiresAuth: to.matched.some((record) => record.meta.requiresAuth),
-  })
+    isGuestOnly: to.matched.some((record) => record.meta.guestOnly),
+    requiresClientAuth: to.matched.some((record) => record.meta.requiresClientAuth),
+    isClientGuestOnly: to.matched.some((record) => record.meta.clientGuestOnly),
+  }
+}
 
-  if (!authStore.initialized) {
+/**
+ * 首次进入相关路由时，只初始化当前链路真正需要的登录态。
+ */
+const initializeRouteAuthIfNeeded = async (
+  flags: RouteGuardFlags,
+  authStore: ReturnType<typeof useAuthStore>,
+  clientAuthStore: ReturnType<typeof useClientAuthStore>,
+) => {
+  /**
+   * 管理端登录页属于游客路由：
+   * - 未登录用户访问时，不必无条件探测 `/auth/me`，否则浏览器会稳定出现 401 噪音；
+   * - 仅当路由本身受保护，或本地存在用户快照 / 过期时间 / CSRF Cookie 等会话痕迹时，才值得请求服务端确认。
+   */
+  const shouldInitializeManagementAuth = !authStore.initialized
+    && (flags.requiresAuth || (flags.isGuestOnly && hasRecoverableAdminSessionHint()))
+
+  if (shouldInitializeManagementAuth) {
     await authStore.initializeAuth()
   }
-  if (!clientAuthStore.initialized) {
+  if (flags.touchesClientAuth && !clientAuthStore.initialized) {
     await clientAuthStore.initializeAuth()
   }
+}
 
-  const requiresAuth = to.matched.some((record) => record.meta.requiresAuth)
-  const isGuestOnly = to.matched.some((record) => record.meta.guestOnly)
-  const requiresClientAuth = to.matched.some((record) => record.meta.requiresClientAuth)
-  const isClientGuestOnly = to.matched.some((record) => record.meta.clientGuestOnly)
-
-  if (requiresAuth && !authStore.isAuthenticated) {
+/**
+ * 管理端登录态守卫：
+ * - 未登录访问受保护页时跳登录；
+ * - 已登录访问游客页时回跳到安全目标。
+ */
+const resolveManagementRouteRedirect = (
+  to: RouteLocationNormalized,
+  flags: RouteGuardFlags,
+  authStore: ReturnType<typeof useAuthStore>,
+) => {
+  if (flags.requiresAuth && !authStore.isAuthenticated) {
     logRouteTrace('beforeEach:redirect-login', {
       to: to.fullPath,
     })
@@ -110,7 +144,7 @@ router.beforeEach(async (to) => {
     }
   }
 
-  if (isGuestOnly && authStore.isAuthenticated) {
+  if (flags.isGuestOnly && authStore.isAuthenticated) {
     const redirectPath = resolveSafeRedirect(to.query.redirect, authStore.currentUser)
     logRouteTrace('beforeEach:guest-redirect', {
       to: to.fullPath,
@@ -119,7 +153,20 @@ router.beforeEach(async (to) => {
     return redirectPath
   }
 
-  if (requiresClientAuth && !clientAuthStore.isAuthenticated) {
+  return null
+}
+
+/**
+ * 客户端登录态守卫：
+ * - 未登录访问客户端受保护页时跳客户端登录；
+ * - 已登录访问客户端游客页时回到客户端大厅。
+ */
+const resolveClientRouteRedirect = (
+  to: RouteLocationNormalized,
+  flags: RouteGuardFlags,
+  clientAuthStore: ReturnType<typeof useClientAuthStore>,
+) => {
+  if (flags.requiresClientAuth && !clientAuthStore.isAuthenticated) {
     logRouteTrace('beforeEach:redirect-client-login', {
       to: to.fullPath,
     })
@@ -131,7 +178,7 @@ router.beforeEach(async (to) => {
     }
   }
 
-  if (isClientGuestOnly && clientAuthStore.isAuthenticated) {
+  if (flags.isClientGuestOnly && clientAuthStore.isAuthenticated) {
     const redirectPath = resolveSafeClientRedirect(to.query.redirect)
     logRouteTrace('beforeEach:client-guest-redirect', {
       to: to.fullPath,
@@ -140,28 +187,72 @@ router.beforeEach(async (to) => {
     return redirectPath
   }
 
-  const deniedRecord = to.matched.find((record) => !canAccessRoute(record.meta, authStore.currentUser))
-  if (requiresAuth && deniedRecord) {
-    /**
-     * 无权限回退策略：
-     * - 优先回退到“首个可访问管理端路由”，避免默认回退到 dashboard 触发二次拒绝；
-     * - 若当前账号没有任何可访问管理页，则统一跳转 404，避免重复弹告警与路由循环。
-     */
-    const firstAccessiblePath = resolveFirstAccessibleManagementPath(authStore.currentUser)
-    if (firstAccessiblePath && firstAccessiblePath !== to.fullPath) {
-      showPermissionDenied('已为你切换到可访问页面')
-      logRouteTrace('beforeEach:redirect-first-accessible', {
-        to: to.fullPath,
-        redirectPath: firstAccessiblePath,
-      })
-      return firstAccessiblePath
-    }
+  return null
+}
 
-    showPermissionDenied()
-    logRouteTrace('beforeEach:redirect-404', {
+/**
+ * 管理端权限守卫：
+ * - 当已登录但无菜单权限时，优先回退到首个可访问页面；
+ * - 如果完全没有任何可访问页，则进入 404，避免死循环。
+ */
+const resolveManagementPermissionRedirect = (
+  to: RouteLocationNormalized,
+  flags: RouteGuardFlags,
+  authStore: ReturnType<typeof useAuthStore>,
+) => {
+  const deniedRecord = to.matched.find((record) => !canAccessRoute(record.meta, authStore.currentUser))
+  if (!flags.requiresAuth || !deniedRecord) {
+    return null
+  }
+
+  const firstAccessiblePath = resolveFirstAccessibleManagementPath(authStore.currentUser)
+  if (firstAccessiblePath && firstAccessiblePath !== to.fullPath) {
+    showPermissionDenied('已为你切换到可访问页面')
+    logRouteTrace('beforeEach:redirect-first-accessible', {
       to: to.fullPath,
+      redirectPath: firstAccessiblePath,
     })
-    return '/404'
+    return firstAccessiblePath
+  }
+
+  showPermissionDenied()
+  logRouteTrace('beforeEach:redirect-404', {
+    to: to.fullPath,
+  })
+  return '/404'
+}
+
+/**
+ * 全局前置守卫：
+ * - 负责首次刷新后的登录态恢复；
+ * - 负责未登录拦截、登录页回跳与权限点路由校验。
+ */
+router.beforeEach(async (to) => {
+  const authStore = useAuthStore(pinia)
+  const clientAuthStore = useClientAuthStore(pinia)
+  const flags = resolveRouteGuardFlags(to)
+
+  logRouteTrace('beforeEach:start', {
+    to: to.fullPath,
+    from: router.currentRoute.value.fullPath,
+    requiresAuth: flags.requiresAuth,
+  })
+
+  await initializeRouteAuthIfNeeded(flags, authStore, clientAuthStore)
+
+  const managementRedirect = resolveManagementRouteRedirect(to, flags, authStore)
+  if (managementRedirect) {
+    return managementRedirect
+  }
+
+  const clientRedirect = resolveClientRouteRedirect(to, flags, clientAuthStore)
+  if (clientRedirect) {
+    return clientRedirect
+  }
+
+  const permissionRedirect = resolveManagementPermissionRedirect(to, flags, authStore)
+  if (permissionRedirect) {
+    return permissionRedirect
   }
 
   return true

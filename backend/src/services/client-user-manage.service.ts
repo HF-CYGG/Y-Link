@@ -1,6 +1,6 @@
 /**
  * 模块说明：backend/src/services/client-user-manage.service.ts
- * 文件职责：管理端对客户端用户进行查询、启停与重置密码。
+ * 文件职责：管理端对客户端用户进行查询、手动创建、启停与重置密码。
  * 维护说明：
  * - 客户端用户与管理端用户分表治理，避免角色、权限和登录会话语义混用；
  * - 当前仅开放治理侧高频动作，客户端账号创建仍以客户端自助注册为主。
@@ -15,6 +15,7 @@ import { assertClientPasswordPolicy, hashPassword } from '../utils/password.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
 import { systemConfigService } from './system-config.service.js'
+import type { EntityManager } from 'typeorm'
 
 export interface ClientUserListQuery {
   page: number
@@ -25,6 +26,15 @@ export interface ClientUserListQuery {
 
 export interface ResetClientUserPasswordInput {
   newPassword: string
+}
+
+export interface CreateClientUserInput {
+  username: string
+  mobile?: string
+  email?: string
+  departmentName?: string
+  password: string
+  status: ClientUserStatus
 }
 
 export interface UpdateClientUserInput {
@@ -74,8 +84,9 @@ const sanitizeClientUserProfile = (user: ClientUser): ClientUserManageSafeProfil
 export class ClientUserManageService {
   private readonly userRepo = AppDataSource.getRepository(ClientUser)
 
-  private async findUserByAnyIdentifier(account: string) {
-    return this.userRepo
+  private async findUserByAnyIdentifier(account: string, manager?: EntityManager) {
+    const targetRepo = manager ? manager.getRepository(ClientUser) : this.userRepo
+    return targetRepo
       .createQueryBuilder('user')
       .where('user.mobile = :account OR user.email = :account OR user.realName = :account', { account })
       .getOne()
@@ -109,6 +120,84 @@ export class ClientUserManageService {
       throw new BizError('用户名不能为空', 400)
     }
     return normalized
+  }
+
+  async createProfile(
+    input: CreateClientUserInput,
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ): Promise<ClientUserManageSafeProfile> {
+    if (!CLIENT_USER_STATUSES.includes(input.status)) {
+      throw new BizError('客户端用户状态非法', 400)
+    }
+
+    const username = this.normalizeUsername(input.username)
+    const mobile = this.normalizeMobile(input.mobile)
+    const email = this.normalizeEmail(input.email)
+    const password = assertClientPasswordPolicy(input.password, '登录密码')
+    const departmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName)
+
+    if (!mobile && !email) {
+      throw new BizError('手机号和邮箱至少保留一项', 400)
+    }
+
+    return AppDataSource.transaction(async (manager) => {
+      const userRepo = manager.getRepository(ClientUser)
+
+      const duplicatedUsernameUser = await this.findUserByAnyIdentifier(username, manager)
+      if (duplicatedUsernameUser) {
+        throw new BizError('该用户名已被其他客户端用户使用', 409)
+      }
+
+      if (mobile) {
+        const duplicatedMobileUser = await this.findUserByAnyIdentifier(mobile, manager)
+        if (duplicatedMobileUser) {
+          throw new BizError('该手机号已被其他客户端用户使用', 409)
+        }
+      }
+
+      if (email) {
+        const duplicatedEmailUser = await this.findUserByAnyIdentifier(email, manager)
+        if (duplicatedEmailUser) {
+          throw new BizError('该邮箱已被其他客户端用户使用', 409)
+        }
+      }
+
+      const createdUser = userRepo.create({
+        realName: username,
+        mobile,
+        email,
+        departmentName,
+        status: input.status,
+        passwordHash: await hashPassword(password),
+        lastLoginAt: null,
+      })
+      const savedUser = await userRepo.save(createdUser)
+
+      await auditService.record(
+        {
+          actionType: 'client_user.create',
+          actionLabel: '手动新增客户端用户',
+          targetType: 'client_user',
+          targetId: savedUser.id,
+          targetCode: savedUser.realName || savedUser.email || savedUser.mobile || '',
+          actor,
+          requestMeta,
+          detail: {
+            username: savedUser.realName,
+            mobile: savedUser.mobile,
+            email: savedUser.email,
+            departmentName: savedUser.departmentName,
+            status: savedUser.status,
+            createdBy: 'admin_manual_create',
+            bypassedClientRegisterRiskGuard: true,
+          },
+        },
+        manager,
+      )
+
+      return sanitizeClientUserProfile(savedUser)
+    })
   }
 
   async list(query: ClientUserListQuery): Promise<{

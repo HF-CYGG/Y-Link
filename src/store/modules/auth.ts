@@ -1,7 +1,13 @@
 /**
  * 模块说明：src/store/modules/auth.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：统一管理管理端 Cookie 会话、当前用户与权限态。
+ * 实现逻辑：
+ * - 管理端真实会话令牌改由浏览器 HttpOnly Cookie 承担，Store 只维护“是否已恢复成功”的前端状态；
+ * - 刷新后通过 `/auth/me` 让服务端确认 Cookie 会话有效性，并同步更新本地安全快照；
+ * - 路由守卫、按钮权限与退出流程都继续以本 Store 为单一真源。
+ * 维护说明：
+ * - 若后续增加“会话即将过期提醒”，请基于 `expiresAt` 做展示，不要回退到前端持有真实令牌；
+ * - 任何新增管理端鉴权逻辑都应优先复用本 Store，而不是页面自行判断 Cookie 状态。
  */
 
 import { computed, ref } from 'vue'
@@ -33,9 +39,6 @@ const POST_LOGIN_TRANSITION_MS = 520
  */
 export const useAuthStore = defineStore('auth', () => {
   const persisted = readPersistedAuthState()
-
-  // 登录令牌：应用启动时优先从本地存储恢复，保证刷新后仍能续用会话。
-  const token = ref<string | null>(persisted.token)
 
   // 当前用户信息：可先用本地快照回填，再通过 /auth/me 做服务端校验刷新。
   const currentUser = ref<UserSafeProfile | null>(persisted.user ? normalizeUserSafeProfile(persisted.user) : null)
@@ -70,10 +73,10 @@ export const useAuthStore = defineStore('auth', () => {
 
   /**
    * 是否已登录：
-   * - token 与 currentUser 同时存在才视为“前端已确认登录”；
-   * - 可避免仅有本地 token 但尚未校验成功时误判为已登录。
+   * - 管理端会话有效性的最终依据是服务端 `/auth/me` 校验结果；
+   * - 当前用户存在即可视为前端已经完成登录恢复。
    */
-  const isAuthenticated = computed(() => Boolean(token.value && currentUser.value))
+  const isAuthenticated = computed(() => Boolean(currentUser.value))
 
   /**
    * 是否为管理员：
@@ -102,7 +105,6 @@ export const useAuthStore = defineStore('auth', () => {
    */
   const syncPersistedState = () => {
     persistAuthState({
-      token: token.value,
       user: currentUser.value,
       expiresAt: expiresAt.value,
     })
@@ -113,11 +115,7 @@ export const useAuthStore = defineStore('auth', () => {
    * - 登录成功与 me 刷新成功都走同一入口；
    * - initialized 同步置为 true，表示当前状态已可信。
    */
-  const setAuthState = (payload: { token?: string | null; user: UserSafeProfile; expiresAt?: string | null }) => {
-    if (payload.token !== undefined) {
-      token.value = payload.token
-    }
-
+  const setAuthState = (payload: { user: UserSafeProfile; expiresAt?: string | null }) => {
     currentUser.value = normalizeUserSafeProfile(payload.user)
     if (payload.expiresAt !== undefined) {
       expiresAt.value = payload.expiresAt
@@ -134,7 +132,6 @@ export const useAuthStore = defineStore('auth', () => {
   const clearAuthState = (options?: { resetInitialized?: boolean }) => {
     // 清理登录态前先终止过渡副作用，防止退出后出现“仍在进入系统中”的假状态。
     resetPostLoginTransition()
-    token.value = null
     currentUser.value = null
     expiresAt.value = null
     initializing.value = false
@@ -168,8 +165,8 @@ export const useAuthStore = defineStore('auth', () => {
 
   /**
    * 恢复并校验登录态：
-   * - 若本地没有 token，则直接完成初始化；
-   * - 若有 token，则调用 /auth/me 让服务端确认会话有效性。
+   * - 管理端已切换为 Cookie 会话，无法也不应通过本地 token 预判登录；
+   * - 统一调用 /auth/me 让服务端确认 Cookie 会话是否有效。
    */
   const initializeAuth = async (): Promise<boolean> => {
     if (initialized.value) {
@@ -180,18 +177,11 @@ export const useAuthStore = defineStore('auth', () => {
       return initializePromise
     }
 
-    if (!token.value) {
-      initialized.value = true
-      currentUser.value = null
-      expiresAt.value = null
-      return false
-    }
-
     initializing.value = true
     initializePromise = (async () => {
       try {
         const user = await getCurrentUser()
-        setAuthState({ user })
+        setAuthState({ user, expiresAt: persisted.expiresAt })
         return true
       } catch {
         clearAuthState()
@@ -208,13 +198,12 @@ export const useAuthStore = defineStore('auth', () => {
   /**
    * 登录动作：
    * - 请求成功后同时更新 token/user/expiresAt；
-   * - 进入主系统前触发短过渡态。
+   * - 服务端会在响应中写入 HttpOnly Cookie；
+   * - 前端仅更新 user/expiresAt 并进入主系统过渡态。
    */
   const login = async (payload: LoginPayload) => {
     const result = await loginApi(payload)
-    token.value = result.token
     setAuthState({
-      token: result.token,
       user: result.user,
       expiresAt: result.expiresAt,
     })
@@ -229,7 +218,7 @@ export const useAuthStore = defineStore('auth', () => {
    */
   const logout = async () => {
     try {
-      if (token.value) {
+      if (isAuthenticated.value) {
         await logoutApi()
       }
     } finally {
@@ -276,7 +265,6 @@ export const useAuthStore = defineStore('auth', () => {
   }
 
   return {
-    token,
     currentUser,
     expiresAt,
     initialized,

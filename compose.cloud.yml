@@ -13,6 +13,7 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3001
+      - TZ=${TZ:-Asia/Shanghai}
       - LOG_COLOR=${LOG_COLOR:-true}
       - FORCE_COLOR=${FORCE_COLOR:-1}
       - DB_TYPE=${DB_TYPE:-sqlite}
@@ -25,7 +26,7 @@ services:
       - DB_SYNC=${DB_SYNC:-false}
       - INIT_ADMIN_USERNAME=${INIT_ADMIN_USERNAME:-admin}
       - INIT_ADMIN_DISPLAY_NAME=${INIT_ADMIN_DISPLAY_NAME:-系统管理员}
-      - INIT_ADMIN_PASSWORD=${INIT_ADMIN_PASSWORD:-Admin@123456}
+      - INIT_ADMIN_PASSWORD=${INIT_ADMIN_PASSWORD:?请在容器面板环境变量中手动配置 INIT_ADMIN_PASSWORD 私有强密码}
     ports:
       - "${BACKEND_PORT:-3001}:3001"
     volumes:
@@ -49,6 +50,8 @@ services:
   frontend:
     image: ${FRONTEND_IMAGE:-docker.io/yemiao351/y-link-frontend:latest}
     pull_policy: always
+    environment:
+      - TZ=${TZ:-Asia/Shanghai}
     depends_on:
       backend:
         condition: service_healthy

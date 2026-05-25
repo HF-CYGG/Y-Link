@@ -5,6 +5,7 @@
  */
 
 import type { NextFunction, Request, Response } from 'express'
+import multer from 'multer'
 import { mapDatabaseErrorToBizError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
 
@@ -32,6 +33,21 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
     res.status(err.statusCode).json({
       code: err.statusCode,
       message: err.message,
+      data: null,
+    })
+    return
+  }
+
+  /**
+   * 上传类异常统一转成人能理解的业务提示：
+   * - 文件体积超限时直接提示 10MB 上限；
+   * - 其他 multer 错误统一视为上传失败，避免把底层错误码直接暴露给前端。
+   */
+  if (err instanceof multer.MulterError) {
+    const message = err.code === 'LIMIT_FILE_SIZE' ? '图片大小不能超过 10MB' : '文件上传失败，请重试'
+    res.status(400).json({
+      code: 400,
+      message,
       data: null,
     })
     return

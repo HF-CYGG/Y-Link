@@ -67,15 +67,18 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import type { AxiosResponse } from 'axios'
+import { http } from '@/api/http'
 import { Key, Lock, Message, User } from '@element-plus/icons-vue'
 import {
   getClientAuthCapabilities,
   getClientCaptcha,
   type ClientAuthCapabilities,
+  type ClientRegisterResult,
   type ClientDepartmentOptionNode,
   type ClientValidationMode,
 } from '@/api/modules/client-auth'
-import { preloadRouteComponents, resolveClientPostLoginWarmupTargets } from '@/router/route-performance'
+import { resolveClientPostLoginWarmupTargets, scheduleRouteComponentWarmup } from '@/router/route-performance'
 import { useClientAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { useStableRequest } from '@/composables/useStableRequest'
@@ -104,6 +107,9 @@ const route = useRoute()
 const clientAuthStore = useClientAuthStore(pinia)
 const { runLatest: runLatestCaptchaRequest, cancel: cancelCaptchaRequest } = useStableRequest()
 const { runLatest: runLatestCapabilityRequest, cancel: cancelCapabilityRequest } = useStableRequest()
+const { runLatest: runLatestLoginRequest, cancel: cancelLoginRequest } = useStableRequest()
+const { runLatest: runLatestRegisterRequest, cancel: cancelRegisterRequest } = useStableRequest()
+const { runLatest: runLatestVerificationCodeRequest, cancel: cancelVerificationCodeRequest } = useStableRequest()
 const { runWithGate } = useIdempotentAction()
 
 // 登录 / 注册模式切换：
@@ -115,11 +121,22 @@ const captchaLoading = ref(false)
 const loginCaptchaVisible = ref(false)
 const successTip = ref('')
 const securityHint = ref('')
+const loginFeedbackTitle = ref('')
+const loginFeedbackDescription = ref('')
+const loginFeedbackType = ref<'warning' | 'error' | 'info'>('warning')
+const loginFeedbackShowForgotAction = ref(false)
+const registerFeedbackTitle = ref('')
+const registerFeedbackDescription = ref('')
+const registerFeedbackType = ref<'warning' | 'error' | 'info'>('warning')
+const registerFeedbackShowLoginAction = ref(false)
+const registerFeedbackShowForgotAction = ref(false)
 const verificationSending = ref(false)
 const capabilityLoading = ref(false)
+const capabilityErrorMessage = ref('')
 const registerVerificationCountdown = ref(0)
 let registerVerificationTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let captchaExpireTimer: ReturnType<typeof globalThis.setInterval> | null = null
+let capabilityDeferredTimer: ReturnType<typeof globalThis.setTimeout> | null = null
 const formWrapperRef = ref<HTMLElement | null>(null)
 const formBlockRef = ref<HTMLElement | null>(null)
 const formWrapperHeight = ref('auto')
@@ -166,6 +183,18 @@ const registerDepartmentOptions = computed(() => authCapabilities.value?.departm
 const registerDepartmentTreeSelectData = computed(() => {
   return buildDepartmentTreeSelectData(authCapabilities.value?.departmentTree ?? [])
 })
+const shouldPrepareCaptcha = computed(() => activeMode.value === 'register' || loginCaptchaVisible.value)
+const isCapabilityHintVisible = computed(() => capabilityLoading.value && !authCapabilities.value)
+const isCapabilityFallbackVisible = computed(() => !capabilityLoading.value && !!capabilityErrorMessage.value && !authCapabilities.value)
+const forgotPasswordAvailable = computed(() => authCapabilities.value?.forgotPasswordEnabled ?? false)
+
+// 安全说明：后端返回的是 SVG 字符串，这里统一转为 data URL 图片渲染，
+// 避免通过 v-html 直接把未信任的 SVG 片段注入到页面 DOM 中。
+const captchaImageSrc = computed(() => {
+  return captcha.captchaSvg
+    ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(captcha.captchaSvg)}`
+    : ''
+})
 
 const captchaHintText = computed(() => {
   if (captcha.expiresInSeconds <= 0) {
@@ -173,6 +202,21 @@ const captchaHintText = computed(() => {
   }
   return `图形验证码约 ${captcha.expiresInSeconds}s 后失效，点击图片可立即刷新。`
 })
+
+const extractRegisterRemainingMessage = (response: AxiosResponse | undefined) => {
+  const rawHeader = response?.headers?.['x-ylink-register-remaining-message']
+  return typeof rawHeader === 'string' ? rawHeader.trim() : ''
+}
+
+const extractRateLimitWaitSeconds = (message: string) => {
+  const matchedSeconds = message.match(/(\d+)\s*秒(?:后重试|后再试)/)
+  if (!matchedSeconds) {
+    return null
+  }
+
+  const parsedSeconds = Number(matchedSeconds[1])
+  return Number.isFinite(parsedSeconds) && parsedSeconds > 0 ? parsedSeconds : null
+}
 
 const isCompactLoginLayout = computed(() => {
   return activeMode.value === 'login' && !loginCaptchaVisible.value && !successTip.value && !securityHint.value
@@ -201,6 +245,13 @@ const switchMode = async (nextMode: AuthMode) => {
 
   formAnimating.value = true
   syncWrapperHeight('measured')
+  loginFeedbackTitle.value = ''
+  loginFeedbackDescription.value = ''
+  loginFeedbackShowForgotAction.value = false
+  registerFeedbackTitle.value = ''
+  registerFeedbackDescription.value = ''
+  registerFeedbackShowLoginAction.value = false
+  registerFeedbackShowForgotAction.value = false
   activeMode.value = nextMode
 }
 
@@ -300,21 +351,44 @@ const handleManualRefreshCaptcha = async () => {
   await refreshCaptcha()
 }
 
-const loadAuthCapabilities = async () => {
+const loadAuthCapabilities = async (options: { silent?: boolean } = {}) => {
   capabilityLoading.value = true
+  capabilityErrorMessage.value = ''
   await runLatestCapabilityRequest({
     executor: (signal) => getClientAuthCapabilities({ signal }),
     onSuccess: (result) => {
       authCapabilities.value = result
+      capabilityErrorMessage.value = ''
     },
     onError: (error) => {
       const normalizedError = normalizeRequestError(error, '加载客户端校验策略失败，请稍后重试')
-      ElMessage.error(normalizedError.message)
+      capabilityErrorMessage.value = normalizedError.message
+      if (!options.silent) {
+        ElMessage.error(normalizedError.message)
+      }
     },
     onFinally: () => {
       capabilityLoading.value = false
     },
   })
+}
+
+const scheduleDeferredCapabilityLoad = () => {
+  if (authCapabilities.value || capabilityLoading.value) {
+    return
+  }
+  if (capabilityDeferredTimer) {
+    globalThis.clearTimeout(capabilityDeferredTimer)
+  }
+  // 认证页首屏先让输入区和主按钮稳定渲染，辅助能力在首帧之后补齐。
+  capabilityDeferredTimer = globalThis.setTimeout(() => {
+    capabilityDeferredTimer = null
+    void loadAuthCapabilities({ silent: true })
+  }, 0)
+}
+
+const handleRetryLoadAuthCapabilities = async () => {
+  await loadAuthCapabilities()
 }
 
 const validateMobile = (mobile: string) => /^1\d{10}$/.test(mobile.trim())
@@ -375,6 +449,121 @@ const applySecurityHintFromMessage = (message: string) => {
   securityHint.value = /频繁|锁定|稍后|重试/.test(message) ? message : ''
 }
 
+const clearLoginFeedback = () => {
+  loginFeedbackTitle.value = ''
+  loginFeedbackDescription.value = ''
+  loginFeedbackType.value = 'warning'
+  loginFeedbackShowForgotAction.value = false
+}
+
+const applyLoginFeedbackFromError = (message: string, status?: number) => {
+  clearLoginFeedback()
+
+  if (status === 401 && /用户名或密码错误/.test(message)) {
+    loginFeedbackTitle.value = '账号或密码不正确'
+    loginFeedbackDescription.value = forgotPasswordAvailable.value
+      ? '请检查用户名、手机号、邮箱和密码后重试；如果忘记密码，可直接进入找回密码。'
+      : '请检查用户名、手机号、邮箱和密码后重试；当前系统未启用自助找回密码，请联系管理员手动修改密码。'
+    loginFeedbackType.value = 'warning'
+    loginFeedbackShowForgotAction.value = forgotPasswordAvailable.value
+    return
+  }
+
+  if (status === 403 && /停用/.test(message)) {
+    loginFeedbackTitle.value = '当前账号已停用'
+    loginFeedbackDescription.value = '该客户端账号暂时不可用，请联系管理员确认账号状态。'
+    loginFeedbackType.value = 'error'
+    return
+  }
+
+  if (status === 429) {
+    loginFeedbackTitle.value = /锁定/.test(message) ? '登录已被临时锁定' : '登录过于频繁'
+    loginFeedbackDescription.value = forgotPasswordAvailable.value
+      ? `${message} 如忘记密码，也可进入找回密码流程。`
+      : message
+    loginFeedbackType.value = 'warning'
+    loginFeedbackShowForgotAction.value = forgotPasswordAvailable.value
+    return
+  }
+
+  if (/图形验证码|验证码/.test(message)) {
+    loginFeedbackTitle.value = '请先完成验证码校验'
+    loginFeedbackDescription.value = message
+    loginFeedbackType.value = 'info'
+  }
+}
+
+const clearRegisterFeedback = () => {
+  registerFeedbackTitle.value = ''
+  registerFeedbackDescription.value = ''
+  registerFeedbackType.value = 'warning'
+  registerFeedbackShowLoginAction.value = false
+  registerFeedbackShowForgotAction.value = false
+}
+
+const applyRegisterFeedbackFromError = (message: string, status?: number) => {
+  clearRegisterFeedback()
+
+  if (status === 409 && /该手机号或邮箱已被占用/.test(message)) {
+    registerFeedbackTitle.value = '该手机号或邮箱已注册'
+    registerFeedbackDescription.value = forgotPasswordAvailable.value
+      ? '当前账号已经创建过客户端账号，可直接切换到登录；如果忘记密码，也可以进入找回密码流程。'
+      : '当前账号已经创建过客户端账号，可直接切换到登录；当前系统未启用自助找回密码，请联系管理员手动修改密码。'
+    registerFeedbackType.value = 'warning'
+    registerFeedbackShowLoginAction.value = true
+    registerFeedbackShowForgotAction.value = forgotPasswordAvailable.value
+    return
+  }
+
+  if (status === 409 && /该用户名已被占用/.test(message)) {
+    registerFeedbackTitle.value = '用户名已被占用'
+    registerFeedbackDescription.value = '请更换一个新的用户名后再试，当前手机号或邮箱仍可继续作为登录账号使用。'
+    registerFeedbackType.value = 'warning'
+    return
+  }
+
+  if (status === 429) {
+    registerFeedbackTitle.value = '注册过于频繁'
+    const waitSeconds = extractRateLimitWaitSeconds(message)
+    registerFeedbackDescription.value = waitSeconds
+      ? `当前窗口还需等待约 ${waitSeconds} 秒才能继续注册，请稍后再试。`
+      : message
+    registerFeedbackType.value = 'warning'
+    registerFeedbackShowLoginAction.value = true
+    return
+  }
+
+  if (/图形验证码|验证码/.test(message)) {
+    registerFeedbackTitle.value = '请先完成验证码校验'
+    registerFeedbackDescription.value = message
+    registerFeedbackType.value = 'info'
+  }
+}
+
+const handleRegisterFeedbackLogin = async () => {
+  const registeredAccount = normalizeInputText(registerForm.account)
+  if (registeredAccount) {
+    loginForm.account = registeredAccount
+  }
+  await switchMode('login')
+}
+
+const handleRegisterFeedbackForgotPassword = async () => {
+  const account = normalizeInputText(registerForm.account)
+  await router.push({
+    path: '/client/forgot-password',
+    query: account ? { account } : undefined,
+  })
+}
+
+const handleLoginFeedbackForgotPassword = async () => {
+  const account = normalizeInputText(loginForm.account)
+  await router.push({
+    path: '/client/forgot-password',
+    query: account ? { account } : undefined,
+  })
+}
+
 const resetRegisterVerificationTimer = () => {
   if (registerVerificationTimer) {
     globalThis.clearInterval(registerVerificationTimer)
@@ -417,27 +606,36 @@ const handleSendRegisterVerificationCode = async () => {
     },
     executor: async () => {
       verificationSending.value = true
-      try {
-        const result = await clientAuthStore.sendVerificationCode({
-          channel,
-          target: normalizeInputText(registerForm.account),
-          scene: 'register',
-          captchaId: captcha.captchaId,
-          captchaCode: normalizeInputText(registerForm.captcha),
-        })
-        ElMessage.success(`${channel === 'email' ? '邮箱' : '手机'}验证码已发送`)
-        registerForm.captcha = ''
-        await refreshCaptcha(true)
-        startRegisterVerificationCountdown(result.expireSeconds)
-      } catch (error) {
-        const normalizedError = normalizeRequestError(error, '验证码发送失败，请稍后重试')
-        applySecurityHintFromMessage(normalizedError.message)
-        ElMessage.error(normalizedError.message)
-        registerForm.captcha = ''
-        await refreshCaptcha(true)
-      } finally {
-        verificationSending.value = false
-      }
+      securityHint.value = ''
+      await runLatestVerificationCodeRequest({
+        executor: (signal) =>
+          clientAuthStore.sendVerificationCode(
+            {
+              channel,
+              target: normalizeInputText(registerForm.account),
+              scene: 'register',
+              captchaId: captcha.captchaId,
+              captchaCode: normalizeInputText(registerForm.captcha),
+            },
+            { signal },
+          ),
+        onSuccess: async (result) => {
+          ElMessage.success(`${channel === 'email' ? '邮箱' : '手机'}验证码已发送`)
+          registerForm.captcha = ''
+          await refreshCaptcha(true)
+          startRegisterVerificationCountdown(result.expireSeconds)
+        },
+        onError: async (error) => {
+          const normalizedError = normalizeRequestError(error, '验证码发送失败，请稍后重试')
+          applySecurityHintFromMessage(normalizedError.message)
+          ElMessage.error(normalizedError.message)
+          registerForm.captcha = ''
+          await refreshCaptcha(true)
+        },
+        onFinally: () => {
+          verificationSending.value = false
+        },
+      })
     },
   })
   if (runResult === null) {
@@ -445,7 +643,20 @@ const handleSendRegisterVerificationCode = async () => {
   }
 }
 
-// 详细注释：提交登录表单。首先进行基础校验，然后调用 auth store 登录，成功后跳转至原页面或大厅。
+/**
+ * 登录成功后的空闲预热：
+ * - 先完成真正的路由跳转，把当前落点页交给路由本身去加载；
+ * - 再只预热“下一跳高频页”，避免把当前落点页再次加入预热队列，和真实首跳争抢带宽。
+ */
+const warmupClientPostLoginTargets = (redirectPath: string) => {
+  const [, ...adjacentTargets] = resolveClientPostLoginWarmupTargets(redirectPath)
+  if (!adjacentTargets.length) {
+    return
+  }
+  scheduleRouteComponentWarmup(adjacentTargets)
+}
+
+// 详细注释：提交登录表单。首先进行基础校验，然后调用 auth store 登录，成功后优先跳转，再在空闲时预热高频相邻页面。
 const handleLogin = async () => {
   if (!validateLoginAccount(loginForm.account)) {
     ElMessage.warning('请输入用户名、手机号或邮箱')
@@ -469,31 +680,43 @@ const handleLogin = async () => {
     },
     executor: async () => {
       isLoading.value = true
-      try {
-        await clientAuthStore.login({
-          account: normalizeInputText(loginForm.account),
-          password: loginForm.password,
-          captchaId: loginCaptchaVisible.value ? captcha.captchaId : undefined,
-          captchaCode: loginCaptchaVisible.value ? normalizeInputText(loginForm.captcha) : undefined,
-        })
-        loginCaptchaVisible.value = false
-        loginForm.captcha = ''
-        clearCaptcha()
-        await preloadRouteComponents(resolveClientPostLoginWarmupTargets(redirectPath.value))
-        ElMessage.success('登录成功，欢迎来到 Y-Link 客户端')
-        await router.replace(redirectPath.value)
-      } catch (error) {
-        const normalizedError = normalizeRequestError(error, '登录失败，请检查用户名、手机号、邮箱、密码和验证码后重试')
-        applySecurityHintFromMessage(normalizedError.message)
-        ElMessage.error(normalizedError.message)
-        if (/用户名或密码错误|图形验证码|锁定|稍后|重试/.test(normalizedError.message)) {
-          loginCaptchaVisible.value = true
+      successTip.value = ''
+      securityHint.value = ''
+      clearLoginFeedback()
+      await runLatestLoginRequest({
+        executor: (signal) =>
+          clientAuthStore.login(
+            {
+              account: normalizeInputText(loginForm.account),
+              password: loginForm.password,
+              captchaId: loginCaptchaVisible.value ? captcha.captchaId : undefined,
+              captchaCode: loginCaptchaVisible.value ? normalizeInputText(loginForm.captcha) : undefined,
+            },
+            { signal },
+          ),
+        onSuccess: async () => {
+          loginCaptchaVisible.value = false
           loginForm.captcha = ''
-          await refreshCaptcha(true)
-        }
-      } finally {
-        isLoading.value = false
-      }
+          clearCaptcha()
+          ElMessage.success('登录成功，欢迎来到 Y-Link 客户端')
+          await router.replace(redirectPath.value)
+          warmupClientPostLoginTargets(redirectPath.value)
+        },
+        onError: async (error) => {
+          const normalizedError = normalizeRequestError(error, '登录失败，请检查用户名、手机号、邮箱、密码和验证码后重试')
+          applySecurityHintFromMessage(normalizedError.message)
+          applyLoginFeedbackFromError(normalizedError.message, normalizedError.status)
+          ElMessage.error(normalizedError.message)
+          if (/用户名或密码错误|图形验证码|锁定|稍后|重试/.test(normalizedError.message)) {
+            loginCaptchaVisible.value = true
+            loginForm.captcha = ''
+            await refreshCaptcha(true)
+          }
+        },
+        onFinally: () => {
+          isLoading.value = false
+        },
+      })
     },
   })
   if (runResult === null) {
@@ -540,48 +763,67 @@ const handleRegister = async () => {
     },
     executor: async () => {
       isLoading.value = true
-      try {
-        const registeredAccount = normalizeInputText(registerForm.account)
-        const registeredUsername = normalizeInputText(registerForm.username)
-        await clientAuthStore.register({
-          username: registeredUsername,
-          account: registeredAccount,
-          password: registerForm.password,
-          departmentName: normalizeInputText(registerForm.department) || undefined,
-          verificationCode: registerUsesVerificationCode.value ? normalizeInputText(registerForm.verificationCode) : undefined,
-          captchaId: registerUsesVerificationCode.value ? undefined : captcha.captchaId,
-          captchaCode: registerUsesVerificationCode.value ? undefined : normalizeInputText(registerForm.captcha),
-        })
-        ElMessage.success('注册成功，请登录')
-        activeMode.value = 'login'
-        loginForm.account = registeredAccount
-        loginForm.password = ''
-        loginForm.captcha = ''
-        successTip.value = '账号已创建成功，请使用用户名、手机号或邮箱与密码登录。'
-        registerForm.captcha = ''
-        registerForm.verificationCode = ''
-        registerForm.username = ''
-        registerForm.password = ''
-        registerForm.confirmPassword = ''
-        registerForm.department = ''
-        await refreshCaptcha(true)
-        await router.replace({
-          path: '/client/login',
-          query: {
-            tab: 'login',
-            account: registeredAccount,
-            notice: successTip.value,
-          },
-        })
-      } catch (error) {
-        const normalizedError = normalizeRequestError(error, '注册失败，请检查信息后重试')
-        applySecurityHintFromMessage(normalizedError.message)
-        ElMessage.error(normalizedError.message)
-        registerForm.captcha = ''
-        await refreshCaptcha(true)
-      } finally {
-        isLoading.value = false
-      }
+      successTip.value = ''
+      securityHint.value = ''
+      clearRegisterFeedback()
+      const registeredAccount = normalizeInputText(registerForm.account)
+      const registeredUsername = normalizeInputText(registerForm.username)
+      await runLatestRegisterRequest({
+        executor: (signal): Promise<AxiosResponse<ClientRegisterResult>> =>
+          http.request<ClientRegisterResult>({
+            method: 'POST',
+            url: '/client-auth/register',
+            data: {
+              username: registeredUsername,
+              account: registeredAccount,
+              password: registerForm.password,
+              departmentName: normalizeInputText(registerForm.department) || undefined,
+              verificationCode: registerUsesVerificationCode.value ? normalizeInputText(registerForm.verificationCode) : undefined,
+              captchaId: registerUsesVerificationCode.value ? undefined : captcha.captchaId,
+              captchaCode: registerUsesVerificationCode.value ? undefined : normalizeInputText(registerForm.captcha),
+            },
+            signal,
+          }),
+        onSuccess: async (response) => {
+          const registerRemainingMessage = extractRegisterRemainingMessage(response)
+          clientAuthStore.clearAuthState()
+          clientAuthStore.initialized = true
+          ElMessage.success('注册成功，请登录')
+          activeMode.value = 'login'
+          loginForm.account = registeredAccount
+          loginForm.password = ''
+          loginForm.captcha = ''
+          successTip.value = registerRemainingMessage
+            ? `账号已创建成功，请使用用户名、手机号或邮箱与密码登录。${registerRemainingMessage}`
+            : '账号已创建成功，请使用用户名、手机号或邮箱与密码登录。'
+          registerForm.captcha = ''
+          registerForm.verificationCode = ''
+          registerForm.username = ''
+          registerForm.password = ''
+          registerForm.confirmPassword = ''
+          registerForm.department = ''
+          await refreshCaptcha(true)
+          await router.replace({
+            path: '/client/login',
+            query: {
+              tab: 'login',
+              account: registeredAccount,
+              notice: successTip.value,
+            },
+          })
+        },
+        onError: async (error) => {
+          const normalizedError = normalizeRequestError(error, '注册失败，请检查信息后重试')
+          applySecurityHintFromMessage(normalizedError.message)
+          applyRegisterFeedbackFromError(normalizedError.message, normalizedError.status)
+          ElMessage.error(normalizedError.message)
+          registerForm.captcha = ''
+          await refreshCaptcha(true)
+        },
+        onFinally: () => {
+          isLoading.value = false
+        },
+      })
     },
   })
   if (runResult === null) {
@@ -591,14 +833,14 @@ const handleRegister = async () => {
 
 onMounted(async () => {
   if (clientAuthStore.isAuthenticated) {
-    await router.replace('/client/mall')
+    await router.replace(redirectPath.value)
     return
   }
   applyRouteState()
-  await Promise.allSettled([loadAuthCapabilities(), ensureCaptchaReady()])
   await nextTick()
   syncWrapperHeight()
   resetRegisterVerificationTimer()
+  scheduleDeferredCapabilityLoad()
 })
 
 watch(
@@ -615,16 +857,11 @@ watch(registerValidationMode, (mode) => {
   }
 })
 
-watch(
-  [activeMode, loginCaptchaVisible, registerUsesVerificationCode],
-  async ([mode, shouldShowLoginCaptcha, usesVerificationCode]) => {
-    const shouldShowCaptcha = (mode === 'login' && shouldShowLoginCaptcha) || mode === 'register' || !usesVerificationCode
-    if (shouldShowCaptcha) {
-      await ensureCaptchaReady()
-    }
-  },
-  { immediate: true },
-)
+watch(shouldPrepareCaptcha, (shouldShowCaptcha) => {
+  if (shouldShowCaptcha) {
+    void ensureCaptchaReady()
+  }
+})
 
 // 提示变化不再强制重算高度
 watch(successTip, async () => {
@@ -639,6 +876,13 @@ onUnmounted(() => {
   // 页面离开时主动清理倒计时，避免重复进入后产生多个定时器。
   cancelCapabilityRequest()
   cancelCaptchaRequest()
+  cancelLoginRequest()
+  cancelRegisterRequest()
+  cancelVerificationCodeRequest()
+  if (capabilityDeferredTimer) {
+    globalThis.clearTimeout(capabilityDeferredTimer)
+    capabilityDeferredTimer = null
+  }
   resetRegisterVerificationTimer()
   clearCaptcha()
 })
@@ -662,6 +906,17 @@ onUnmounted(() => {
 
         <div class="brand-footer">
           <div class="brand-footer__version">{{ APP_META.version }}</div>
+          <a
+            class="brand-footer__repo-link"
+            :href="APP_META.repositoryUrl"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <svg class="brand-footer__repo-icon" aria-hidden="true">
+              <use href="/icons.svg#github-icon"></use>
+            </svg>
+            {{ APP_META.repositoryLabel }}
+          </a>
           <div class="brand-footer__copyright">{{ APP_META.copyright }}</div>
         </div>
       </aside>
@@ -688,6 +943,25 @@ onUnmounted(() => {
             show-icon
             :title="securityHint"
           />
+          <el-alert
+            v-if="isCapabilityHintVisible"
+            class="mb-4"
+            type="info"
+            :closable="false"
+            show-icon
+            title="正在补充认证辅助能力，核心输入区与主操作区已可直接使用。"
+          />
+          <el-alert v-else-if="isCapabilityFallbackVisible" class="mb-4" type="warning" :closable="false" show-icon>
+            <template #title>
+              认证辅助能力加载较慢，登录与注册基础流程仍可继续；如需忘记密码、部门选项或最新校验策略，请重试。
+            </template>
+            <template #default>
+              <div class="capability-alert__content">
+                <span>{{ capabilityErrorMessage }}</span>
+                <el-button link type="primary" @click="handleRetryLoadAuthCapabilities">重新加载</el-button>
+              </div>
+            </template>
+          </el-alert>
 
           <div ref="formWrapperRef" class="form-wrapper" :style="{ height: formWrapperHeight }">
             <transition
@@ -708,6 +982,28 @@ onUnmounted(() => {
               >
                 <h2 class="block-title">欢迎回来</h2>
                 <p class="block-subtitle">请输入用户名、手机号或邮箱与密码登录客户端</p>
+
+                <el-alert
+                  v-if="loginFeedbackTitle"
+                  class="mt-5"
+                  :type="loginFeedbackType"
+                  :closable="false"
+                  show-icon
+                >
+                  <template #title>
+                    {{ loginFeedbackTitle }}
+                  </template>
+                  <template #default>
+                    <div class="register-feedback-alert">
+                      <span>{{ loginFeedbackDescription }}</span>
+                      <div v-if="loginFeedbackShowForgotAction" class="register-feedback-alert__actions">
+                        <el-button link type="primary" @click="handleLoginFeedbackForgotPassword">
+                          忘记密码
+                        </el-button>
+                      </div>
+                    </div>
+                  </template>
+                </el-alert>
 
                 <el-form
                   @submit.prevent="handleLogin"
@@ -735,7 +1031,13 @@ onUnmounted(() => {
 
                     <button type="button" class="captcha-box" :disabled="captchaLoading" @click="handleManualRefreshCaptcha">
                       <span v-if="captchaLoading" class="captcha-loading">刷新中</span>
-                      <span v-else class="captcha-render" v-html="captcha.captchaSvg" />
+                      <img
+                        v-else
+                        class="captcha-render"
+                        :src="captchaImageSrc"
+                        alt="图形验证码"
+                        draggable="false"
+                      />
                     </button>
                   </div>
                   <p v-if="loginCaptchaVisible" class="captcha-hint-text">{{ captchaHintText }}</p>
@@ -749,7 +1051,7 @@ onUnmounted(() => {
                     <div class="captcha-box captcha-box--placeholder"></div>
                   </div>
 
-                  <div v-if="!capabilityLoading && authCapabilities?.forgotPasswordEnabled" class="flex justify-end mt-2">
+                  <div v-if="!capabilityLoading && forgotPasswordAvailable" class="flex justify-end mt-2">
                     <router-link to="/client/forgot-password" class="forgot-link">忘记密码？</router-link>
                   </div>
 
@@ -760,6 +1062,44 @@ onUnmounted(() => {
               <div v-else ref="formBlockRef" key="register" class="form-block">
                 <h2 class="block-title">创建账号</h2>
                 <p class="block-subtitle">只需几步，创建用户名并绑定手机号或邮箱账号</p>
+
+                <el-alert
+                  v-if="registerFeedbackTitle"
+                  class="mt-5"
+                  :type="registerFeedbackType"
+                  :closable="false"
+                  show-icon
+                >
+                  <template #title>
+                    {{ registerFeedbackTitle }}
+                  </template>
+                  <template #default>
+                    <div class="register-feedback-alert">
+                      <span>{{ registerFeedbackDescription }}</span>
+                      <div
+                        v-if="registerFeedbackShowLoginAction || registerFeedbackShowForgotAction"
+                        class="register-feedback-alert__actions"
+                      >
+                        <el-button
+                          v-if="registerFeedbackShowLoginAction"
+                          link
+                          type="primary"
+                          @click="handleRegisterFeedbackLogin"
+                        >
+                          去登录
+                        </el-button>
+                        <el-button
+                          v-if="registerFeedbackShowForgotAction"
+                          link
+                          type="primary"
+                          @click="handleRegisterFeedbackForgotPassword"
+                        >
+                          忘记密码
+                        </el-button>
+                      </div>
+                    </div>
+                  </template>
+                </el-alert>
 
                 <el-form @submit.prevent="handleRegister" class="space-y-4 mt-6">
                   <el-input v-model="registerForm.username" placeholder="用户名（可自定义）" class="geo-input" size="large" clearable>
@@ -782,7 +1122,8 @@ onUnmounted(() => {
                     check-strictly
                     :expand-on-click-node="false"
                     :render-after-expand="false"
-                    placeholder="所属部门（选填）"
+                    :disabled="capabilityLoading && !authCapabilities"
+                    :placeholder="capabilityLoading && !authCapabilities ? '部门选项加载中，可稍后再选' : '所属部门（选填）'"
                     class="geo-input-select"
                     size="large"
                     clearable
@@ -805,7 +1146,13 @@ onUnmounted(() => {
 
                     <button type="button" class="captcha-box" :disabled="captchaLoading" @click="handleManualRefreshCaptcha">
                       <span v-if="captchaLoading" class="captcha-loading">刷新中</span>
-                      <span v-else class="captcha-render" v-html="captcha.captchaSvg" />
+                      <img
+                        v-else
+                        class="captcha-render"
+                        :src="captchaImageSrc"
+                        alt="图形验证码"
+                        draggable="false"
+                      />
                     </button>
                   </div>
                   <p class="captcha-hint-text">{{ captchaHintText }}</p>
@@ -865,7 +1212,13 @@ onUnmounted(() => {
 
                     <button type="button" class="captcha-box" :disabled="captchaLoading" @click="handleManualRefreshCaptcha">
                       <span v-if="captchaLoading" class="captcha-loading">刷新中</span>
-                      <span v-else class="captcha-render" v-html="captcha.captchaSvg" />
+                      <img
+                        v-else
+                        class="captcha-render"
+                        :src="captchaImageSrc"
+                        alt="图形验证码"
+                        draggable="false"
+                      />
                     </button>
                   </div>
                   <el-button class="submit-btn" :loading="isLoading" @click="handleRegister">立即注册</el-button>
@@ -1010,6 +1363,29 @@ onUnmounted(() => {
   line-height: 1.2;
 }
 
+.brand-footer__repo-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 6px;
+  color: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.35;
+  opacity: 0.92;
+  text-decoration: none;
+}
+
+.brand-footer__repo-icon {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+}
+
+.brand-footer__repo-link:hover {
+  text-decoration: underline;
+}
+
 .brand-footer__copyright {
   margin-top: 6px;
   font-size: 11px;
@@ -1095,6 +1471,19 @@ onUnmounted(() => {
   padding: 12px 14px;
   font-size: 13px;
   line-height: 1.6;
+}
+
+.register-feedback-alert {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  line-height: 1.6;
+}
+
+.register-feedback-alert__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
 }
 
 .block-title {
@@ -1270,11 +1659,9 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-}
-
-.captcha-render :deep(svg) {
   width: 100px;
   height: 36px;
+  object-fit: contain;
 }
 
 .captcha-hint-text,
@@ -1283,6 +1670,15 @@ onUnmounted(() => {
   font-size: 12px;
   line-height: 1.6;
   color: #64748b;
+}
+
+.capability-alert__content {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  line-height: 1.6;
 }
 
 .verification-code-button {
@@ -1379,6 +1775,10 @@ onUnmounted(() => {
 
   .form-panel {
     padding: 40px 24px;
+  }
+
+  .register-feedback-alert__actions {
+    gap: 4px 10px;
   }
 }
 </style>

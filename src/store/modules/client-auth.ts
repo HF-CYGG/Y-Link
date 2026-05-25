@@ -24,6 +24,7 @@ import {
   sendClientVerificationCode,
   verifyClientForgotPassword,
 } from '@/api/modules/client-auth'
+import type { RequestConfig } from '@/api/http'
 import {
   clearPersistedClientAuthState,
   persistClientAuthState,
@@ -181,8 +182,8 @@ export const useClientAuthStore = defineStore('client-auth', () => {
     verificationCode?: string
     captchaId?: string
     captchaCode?: string
-  }) => {
-    const result = await clientRegister(payload)
+  }, config?: RequestConfig) => {
+    const result = await clientRegister(payload, config)
     clearAuthState()
     initialized.value = true
     return result
@@ -198,8 +199,8 @@ export const useClientAuthStore = defineStore('client-auth', () => {
     password: string
     captchaId?: string
     captchaCode?: string
-  }) => {
-    const result = await clientLogin(payload)
+  }, config?: RequestConfig) => {
+    const result = await clientLogin(payload, config)
     applyAuthResult(result)
     initialized.value = true
     return result
@@ -216,8 +217,8 @@ export const useClientAuthStore = defineStore('client-auth', () => {
     scene: 'register' | 'forgot_password'
     captchaId: string
     captchaCode: string
-  }) => {
-    return sendClientVerificationCode(payload)
+  }, config?: RequestConfig) => {
+    return sendClientVerificationCode(payload, config)
   }
 
   /**
@@ -246,8 +247,8 @@ export const useClientAuthStore = defineStore('client-auth', () => {
     verificationCode?: string
     captchaId?: string
     captchaCode?: string
-  }) => {
-    return verifyClientForgotPassword(payload)
+  }, config?: RequestConfig) => {
+    return verifyClientForgotPassword(payload, config)
   }
 
   /**
@@ -259,8 +260,8 @@ export const useClientAuthStore = defineStore('client-auth', () => {
     account: string
     resetToken: string
     newPassword: string
-  }) => {
-    return resetClientPassword(payload)
+  }, config?: RequestConfig) => {
+    return resetClientPassword(payload, config)
   }
 
   const updateProfile = async (payload: {

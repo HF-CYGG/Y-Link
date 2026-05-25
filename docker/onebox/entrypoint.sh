@@ -11,12 +11,13 @@ set -e
 # 这里启动前先确保目录存在，避免首次上传时依赖运行期隐式创建。
 mkdir -p /app/data /app/uploads /run/nginx
 
-# 让 nginx 默认日志文件也指向容器标准输出，确保 docker logs/1Panel 能看到完整访问日志。
+# 让 nginx 日志文件指向容器标准输出；站点配置会保留异常、关键业务与采样健康检查日志。
 mkdir -p /var/log/nginx
 ln -sf /dev/stdout /var/log/nginx/access.log
 ln -sf /dev/stderr /var/log/nginx/error.log
 
 export PORT="${PORT:-3001}"
+export TZ="${TZ:-Asia/Shanghai}"
 export LOG_COLOR="${LOG_COLOR:-true}"
 export FORCE_COLOR="${FORCE_COLOR:-1}"
 export DB_TYPE="${DB_TYPE:-sqlite}"
@@ -28,8 +29,19 @@ export DB_PASSWORD="${DB_PASSWORD:-}"
 export DB_NAME="${DB_NAME:-y_link}"
 export DB_SYNC="${DB_SYNC:-false}"
 export INIT_ADMIN_USERNAME="${INIT_ADMIN_USERNAME:-admin}"
-export INIT_ADMIN_PASSWORD="${INIT_ADMIN_PASSWORD:-Admin@123456}"
 export INIT_ADMIN_DISPLAY_NAME="${INIT_ADMIN_DISPLAY_NAME:-系统管理员}"
+
+if [ -z "${INIT_ADMIN_PASSWORD:-}" ]; then
+  echo "[onebox] INIT_ADMIN_PASSWORD is required. Set it manually in the container panel environment variables before startup." >&2
+  exit 1
+fi
+
+if [ "${INIT_ADMIN_PASSWORD}" = "Admin@123456" ]; then
+  echo "[onebox] refusing insecure INIT_ADMIN_PASSWORD=Admin@123456. Set a private strong password in the container panel environment variables." >&2
+  exit 1
+fi
+
+export INIT_ADMIN_PASSWORD
 
 # 统一替换 nginx 反向代理端口，确保与后端实际监听端口保持一致。
 sed "s/__BACKEND_PORT__/${PORT}/g" /etc/nginx/conf.d/default.conf > /etc/nginx/conf.d/default.runtime.conf
