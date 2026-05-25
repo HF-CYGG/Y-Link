@@ -40,7 +40,7 @@ import {
   CLIENT_FEEDBACK_SUBJECT_MAX_LENGTH,
 } from '../services/client-feedback.service.js'
 import { BizError } from '../utils/errors.js'
-import { buildUploadPublicUrl, createCategorizedImageUpload } from '../utils/upload-storage.js'
+import { buildUploadPublicUrl, createCategorizedImageUpload, persistValidatedImageUpload } from '../utils/upload-storage.js'
 
 /**
  * 客户端会话列表分页上限：
@@ -132,6 +132,7 @@ authenticatedClientFeedbackRouter.get(
 authenticatedClientFeedbackRouter.post(
   '/attachments',
   feedbackAttachmentUpload.single('file'),
+  persistValidatedImageUpload('client-feedback'),
   asyncHandler(async (req, res) => {
     if (!req.file) {
       throw new BizError('文件上传失败', 400)
