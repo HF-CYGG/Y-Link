@@ -1,11 +1,11 @@
+<!--
+  模块说明：F:/Y-Link/src/views/system/UserManageView.vue
+  文件职责：后台用户管理页面。
+  实现逻辑：编排用户列表、角色权限编辑、密码重置等治理操作。
+  维护说明：权限模型变更需同步按钮可见性与表单校验。
+-->
+
 <script setup lang="ts">
-/**
- * 模块说明：src/views/system/UserManageView.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
- */
-
-
 import dayjs from 'dayjs'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'

@@ -1,7 +1,8 @@
 /**
- * 模块说明：src/composables/useDevice.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：F:/Y-Link/src/composables/useDevice.ts
+ * 文件职责：设备尺寸组合函数。
+ * 实现逻辑：统一计算当前设备模式并驱动布局断点行为。
+ * 维护说明：断点值调整需同步 store 常量与布局组件表现。
  */
 
 import { computed, watch } from 'vue'

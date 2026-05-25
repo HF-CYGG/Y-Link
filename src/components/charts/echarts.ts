@@ -1,7 +1,8 @@
 /**
- * 模块说明：src/components/charts/echarts.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：F:/Y-Link/src/components/charts/echarts.ts
+ * 文件职责：图表依赖封装文件，集中管理 ECharts 按需引入与注册。
+ * 实现逻辑：统一导出项目使用的图表能力，避免页面重复注册。
+ * 维护说明：新增图表类型时在此处注册并核对打包体积变化。
  */
 
 import { use } from 'echarts/core'

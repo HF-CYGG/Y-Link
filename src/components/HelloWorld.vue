@@ -1,11 +1,11 @@
+<!--
+  模块说明：F:/Y-Link/src/components/HelloWorld.vue
+  文件职责：示例组件文件。
+  实现逻辑：用于保留默认模板占位并验证基础组件构建链路。
+  维护说明：若项目不再使用可在清理模板时移除。
+-->
+
 <script setup lang="ts">
-/**
- * 模块说明：src/components/HelloWorld.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
- */
-
-
 import { ref } from 'vue'
 import viteLogo from '../assets/vite.svg'
 import heroImg from '../assets/hero.png'

@@ -1,7 +1,8 @@
 /**
- * 模块说明：scripts/verify-enterprise-core-paths.mjs
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：F:/Y-Link/scripts/verify-enterprise-core-paths.mjs
+ * 文件职责：企业核心路径回归脚本，验证管理端关键导航与接口链路。
+ * 实现逻辑：在隔离运行目录启动临时服务并执行路径探测，输出结构化结果报告。
+ * 维护说明：新增关键页面后需同步扩展校验场景。
  */
 
 import assert from 'node:assert/strict'

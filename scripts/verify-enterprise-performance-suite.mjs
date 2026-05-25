@@ -1,7 +1,8 @@
 /**
- * 模块说明：scripts/verify-enterprise-performance-suite.mjs
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：F:/Y-Link/scripts/verify-enterprise-performance-suite.mjs
+ * 文件职责：企业性能套件总入口，编排预算与场景性能校验。
+ * 实现逻辑：按固定顺序执行构建、预算采集和结果汇总，输出统一性能结论。
+ * 维护说明：预算阈值调整需同步文档与流水线阈值。
  */
 
 import path from 'node:path'

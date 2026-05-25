@@ -1,7 +1,8 @@
 /**
- * 模块说明：src/views/order-entry/types.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：F:/Y-Link/src/views/order-entry/types.ts
+ * 文件职责：出库录入页面类型定义。
+ * 实现逻辑：约束录入页本地状态、行模型与提交负载结构。
+ * 维护说明：类型变更需同步 composable 与组件 props。
  */
 
 import type { ProductRecord } from '@/api/modules/product'

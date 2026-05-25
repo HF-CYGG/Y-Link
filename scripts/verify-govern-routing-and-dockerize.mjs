@@ -1,7 +1,8 @@
 /**
- * 模块说明：scripts/verify-govern-routing-and-dockerize.mjs
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：F:/Y-Link/scripts/verify-govern-routing-and-dockerize.mjs
+ * 文件职责：治理与容器化综合验收脚本。
+ * 实现逻辑：覆盖前后端构建、数据库连通、onebox 冒烟并输出分阶段失败点。
+ * 维护说明：新增部署形态时需补充对应检查分支。
  */
 
 import fs from 'node:fs'

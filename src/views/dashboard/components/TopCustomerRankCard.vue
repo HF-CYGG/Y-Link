@@ -1,11 +1,11 @@
+<!--
+  模块说明：F:/Y-Link/src/views/dashboard/components/TopCustomerRankCard.vue
+  文件职责：客户排行卡片组件。
+  实现逻辑：展示客户 TOP 排行与快捷下钻入口。
+  维护说明：排序规则变化需与后端统计保持一致。
+-->
+
 <script setup lang="ts">
-/**
- * 模块说明：src/views/dashboard/components/TopCustomerRankCard.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
- */
-
-
 import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { DashboardTopCustomer } from '@/api/modules/dashboard'

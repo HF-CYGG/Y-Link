@@ -1,11 +1,11 @@
+<!--
+  模块说明：F:/Y-Link/src/layout/components/AppSidebar.vue
+  文件职责：管理端侧边导航组件。
+  实现逻辑：根据路由元信息和权限生成菜单并处理折叠交互。
+  维护说明：菜单规则改动需同步路由 meta 配置。
+-->
+
 <script setup lang="ts">
-/**
- * 模块说明：src/layout/components/AppSidebar.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
- */
-
-
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { APP_META } from '@/constants/app-meta'

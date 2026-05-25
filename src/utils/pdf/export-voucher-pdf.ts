@@ -1,7 +1,8 @@
 /**
- * 模块说明：src/utils/pdf/export-voucher-pdf.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：F:/Y-Link/src/utils/pdf/export-voucher-pdf.ts
+ * 文件职责：出库凭证 PDF 导出工具。
+ * 实现逻辑：把凭证模板渲染为 PDF 并处理导出配置。
+ * 维护说明：导出样式调整需回归打印与移动端下载场景。
  */
 
 import type { Html2PdfFactory } from 'html2pdf.js'

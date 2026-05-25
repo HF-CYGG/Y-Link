@@ -1,11 +1,11 @@
+<!--
+  模块说明：F:/Y-Link/src/views/order-entry/components/OrderEntryItemsEditor.vue
+  文件职责：出库明细编辑组件。
+  实现逻辑：处理商品行增删改、数量价格输入与校验提示。
+  维护说明：编辑规则调整需同步提交参数映射。
+-->
+
 <script setup lang="ts">
-/**
- * 模块说明：src/views/order-entry/components/OrderEntryItemsEditor.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
- */
-
-
 import { computed } from 'vue'
 import type { ProductRecord } from '@/api/modules/product'
 import { BizResponsiveDrawerShell, PassiveNumberInput } from '@/components/common'

@@ -1,7 +1,8 @@
 /**
  * 模块说明：backend/src/entities/client-user.entity.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：客户端用户实体，定义客户端账号资料、登录凭据与状态字段。
+ * 实现逻辑：为客户端认证、订单归属与反馈会话提供统一用户主数据模型。
+ * 维护说明：账号字段与唯一索引变更需同步注册/登录/找回密码链路。
  */
 
 import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm'

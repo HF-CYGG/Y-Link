@@ -1,7 +1,8 @@
 /**
- * 模块说明：src/router/index.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：F:/Y-Link/src/router/index.ts
+ * 文件职责：路由入口文件，负责路由实例、守卫、登录回跳与错误兜底。
+ * 实现逻辑：在导航守卫中收敛权限判断和会话恢复，阻断非法重定向。
+ * 维护说明：新增页面必须补齐 meta 权限与回跳策略。
  */
 
 import { createRouter, createWebHistory, type RouteLocationNormalized } from 'vue-router'

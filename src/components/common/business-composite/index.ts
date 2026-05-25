@@ -1,7 +1,8 @@
 /**
- * 模块说明：src/components/common/business-composite/index.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：F:/Y-Link/src/components/common/business-composite/index.ts
+ * 文件职责：业务复合组件导出入口。
+ * 实现逻辑：统一导出业务壳组件与复合表单容器。
+ * 维护说明：导出名变更会影响大量页面引用，需谨慎。
  */
 
 /**

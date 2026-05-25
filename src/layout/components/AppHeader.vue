@@ -1,11 +1,11 @@
+<!--
+  模块说明：F:/Y-Link/src/layout/components/AppHeader.vue
+  文件职责：管理端顶部栏组件。
+  实现逻辑：承载系统标题、用户区、快捷操作与状态提示。
+  维护说明：新增头部动作需同步权限和移动端布局。
+-->
+
 <script setup lang="ts">
-/**
- * 模块说明：src/layout/components/AppHeader.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
- */
-
-
 import { ArrowDown, Lock, Menu, SwitchButton } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { computed, reactive, ref, useAttrs } from 'vue'

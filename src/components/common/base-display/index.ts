@@ -1,7 +1,8 @@
 /**
- * 模块说明：src/components/common/base-display/index.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：F:/Y-Link/src/components/common/base-display/index.ts
+ * 文件职责：基础展示组件导出入口。
+ * 实现逻辑：集中导出 base-display 目录组件，便于上层统一引用。
+ * 维护说明：新增组件后需在此更新导出。
  */
 
 /**

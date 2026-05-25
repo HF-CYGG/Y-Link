@@ -1,7 +1,12 @@
 /**
  * 模块说明：backend/src/utils/async-handler.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：异步路由包装器，统一把 Promise 异常交给 Express 错误中间件。
+ * 实现逻辑：
+ * - 包装 async 路由处理函数；
+ * - 捕获 rejected 异常并调用 next(error)；
+ * - 避免在每个路由手写 try/catch。
+ * 维护说明：
+ * - 新增路由默认应使用该包装器，确保异常路径可观测。
  */
 
 import type { NextFunction, Request, RequestHandler, Response } from 'express'

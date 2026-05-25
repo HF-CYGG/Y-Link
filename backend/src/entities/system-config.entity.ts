@@ -1,7 +1,8 @@
 /**
  * 模块说明：backend/src/entities/system-config.entity.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：系统配置实体，保存平台级功能开关与参数值。
+ * 实现逻辑：以键值对形式承载配置项，供系统配置服务统一读写与默认值补齐。
+ * 维护说明：配置键命名与类型变化需同步前后端与迁移脚本。
  */
 
 import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm'

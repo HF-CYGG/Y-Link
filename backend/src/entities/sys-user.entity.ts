@@ -1,7 +1,8 @@
 /**
  * 模块说明：backend/src/entities/sys-user.entity.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：管理端用户实体，定义账号、角色、权限与安全状态字段。
+ * 实现逻辑：作为后台权限体系主数据，供认证、菜单权限与审计模块共享。
+ * 维护说明：角色和权限字段变更需同步鉴权中间件与前端路由权限模型。
  */
 
 import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm'

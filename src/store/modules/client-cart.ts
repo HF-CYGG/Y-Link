@@ -1,7 +1,8 @@
 /**
- * 模块说明：src/store/modules/client-cart.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：F:/Y-Link/src/store/modules/client-cart.ts
+ * 文件职责：客户端购物车 store。
+ * 实现逻辑：管理购物车明细、数量变更、快照持久化与用户域隔离。
+ * 维护说明：购物车结构变更需同步下单页与本地缓存迁移。
  */
 
 import { computed, ref } from 'vue'

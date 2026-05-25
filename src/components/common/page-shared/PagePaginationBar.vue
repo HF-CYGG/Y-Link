@@ -1,11 +1,11 @@
+<!--
+  模块说明：F:/Y-Link/src/components/common/page-shared/PagePaginationBar.vue
+  文件职责：分页条组件。
+  实现逻辑：封装分页信息展示与页码切换事件，统一分页交互样式。
+  维护说明：分页参数命名变更需同步 API 分页契约。
+-->
+
 <script setup lang="ts">
-/**
- * 模块说明：src/components/common/page-shared/PagePaginationBar.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
- */
-
-
 import { computed } from 'vue'
 import { useAppStore } from '@/store'
 import pinia from '@/store/pinia'

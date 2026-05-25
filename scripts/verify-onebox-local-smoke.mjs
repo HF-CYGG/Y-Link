@@ -1,7 +1,8 @@
 /**
- * 模块说明：scripts/verify-onebox-local-smoke.mjs
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：F:/Y-Link/scripts/verify-onebox-local-smoke.mjs
+ * 文件职责：onebox 本地冒烟脚本，验证单端口集成链路可用性。
+ * 实现逻辑：本地启动后端与静态代理后依次探测首页、健康检查与核心 API。
+ * 维护说明：端口与启动参数变更需同步该脚本。
  */
 
 import fs from 'node:fs'

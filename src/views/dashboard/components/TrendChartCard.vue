@@ -1,11 +1,11 @@
+<!--
+  模块说明：F:/Y-Link/src/views/dashboard/components/TrendChartCard.vue
+  文件职责：趋势图卡片组件。
+  实现逻辑：展示时间序列趋势并支持维度切换。
+  维护说明：时间粒度调整需同步查询参数。
+-->
+
 <script setup lang="ts">
-/**
- * 模块说明：src/views/dashboard/components/TrendChartCard.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
- */
-
-
 import { computed } from 'vue'
 import type { EChartsOption } from 'echarts'
 import BaseEChart from '@/components/charts/BaseEChart.vue'

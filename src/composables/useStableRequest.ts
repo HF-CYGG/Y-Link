@@ -1,7 +1,8 @@
 /**
- * 模块说明：src/composables/useStableRequest.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：F:/Y-Link/src/composables/useStableRequest.ts
+ * 文件职责：稳定请求组合函数。
+ * 实现逻辑：封装请求取消、仅保留最后一次结果和统一错误回调。
+ * 维护说明：修改取消策略需重点回归高频筛选页面。
  */
 
 import { onBeforeUnmount, onDeactivated } from 'vue'

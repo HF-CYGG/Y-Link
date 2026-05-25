@@ -1,7 +1,8 @@
 /**
- * 模块说明：src/components/common/page-container/index.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：F:/Y-Link/src/components/common/page-container/index.ts
+ * 文件职责：页面容器组件导出入口。
+ * 实现逻辑：向页面层提供统一布局容器导出。
+ * 维护说明：容器组件重命名需同步全局替换引用。
  */
 
 /**

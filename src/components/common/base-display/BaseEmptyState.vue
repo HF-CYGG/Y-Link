@@ -1,11 +1,11 @@
+<!--
+  模块说明：F:/Y-Link/src/components/common/base-display/BaseEmptyState.vue
+  文件职责：空态展示组件。
+  实现逻辑：用于列表/卡片无数据时统一展示文案与操作提示。
+  维护说明：改动样式需同步验证管理端与客户端空态一致性。
+-->
+
 <script setup lang="ts">
-/**
- * 模块说明：src/components/common/base-display/BaseEmptyState.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
- */
-
-
 /**
  * 通用空状态参数：
  * - description 控制默认提示文案；

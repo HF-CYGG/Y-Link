@@ -1,7 +1,8 @@
 /**
- * 模块说明：src/utils/list.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：F:/Y-Link/src/utils/list.ts
+ * 文件职责：列表辅助工具函数。
+ * 实现逻辑：封装列表筛选、排序或映射等可复用逻辑。
+ * 维护说明：工具函数签名变更需同步调用页面。
  */
 
 import type { PaginationQuery, PaginationQueryInput, PaginationResult } from '@/types/api'

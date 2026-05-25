@@ -1,7 +1,8 @@
 /**
- * 模块说明：src/api/http.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：F:/Y-Link/src/api/http.ts
+ * 文件职责：前端 HTTP 基础层，负责请求拦截、鉴权注入、CSRF 头与统一错误处理。
+ * 实现逻辑：根据请求归属自动选择管理端/客户端认证策略，并标准化响应壳展开。
+ * 维护说明：鉴权规则调整需同步 API 模块与认证 store。
  */
 
 import axios, { type AxiosRequestConfig, type AxiosResponse, type InternalAxiosRequestConfig } from 'axios'

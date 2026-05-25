@@ -1,11 +1,11 @@
+<!--
+  模块说明：F:/Y-Link/src/views/dashboard/components/TopCustomerDrilldownDrawer.vue
+  文件职责：客户排行下钻抽屉组件。
+  实现逻辑：展示客户排行明细与关联单据信息。
+  维护说明：抽屉字段变更需同步 dashboard API。
+-->
+
 <script setup lang="ts">
-/**
- * 模块说明：src/views/dashboard/components/TopCustomerDrilldownDrawer.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
- */
-
-
 import { ref, watch } from 'vue'
 import dayjs from 'dayjs'
 import { ElMessage } from 'element-plus'

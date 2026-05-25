@@ -1,11 +1,11 @@
+<!--
+  模块说明：F:/Y-Link/src/components/common/page-shared/PageToolbarCard.vue
+  文件职责：页面工具条卡片组件。
+  实现逻辑：承载查询条件、主操作按钮与辅助操作区的统一布局。
+  维护说明：工具条布局调整需验证移动端换行表现。
+-->
+
 <script setup lang="ts">
-/**
- * 模块说明：src/components/common/page-shared/PageToolbarCard.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
- */
-
-
 import { computed, useSlots } from 'vue'
 import { useAppStore } from '@/store'
 import pinia from '@/store/pinia'

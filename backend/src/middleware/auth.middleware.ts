@@ -1,7 +1,13 @@
 /**
  * 模块说明：backend/src/middleware/auth.middleware.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：管理端鉴权中间件入口，负责会话解析、权限判定、角色限制与 CSRF 校验。
+ * 实现逻辑：
+ * - 先从 Cookie/Bearer 中解析会话，再加载用户上下文；
+ * - `requirePermission` 与 `requireRole` 负责访问控制；
+ * - 写操作通过 `requireAdminCsrf` 校验双提交令牌，失败时返回 403。
+ * 维护说明：
+ * - 新增管理端写接口必须显式接入 CSRF 中间件；
+ * - 权限码或角色策略变更后需同步权限回归脚本。
  */
 
 import type { NextFunction, Request, Response } from 'express'

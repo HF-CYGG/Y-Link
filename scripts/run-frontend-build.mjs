@@ -1,7 +1,8 @@
 /**
- * 模块说明：scripts/run-frontend-build.mjs
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：F:/Y-Link/scripts/run-frontend-build.mjs
+ * 文件职责：前端构建入口脚本，负责串联类型检查与生产打包。
+ * 实现逻辑：按“vue-tsc -> vite build”顺序执行并统一 Node CLI 调用，规避 shell 差异导致的构建失败。
+ * 维护说明：构建链路变更需同步 CI 命令与本地脚本口径。
  */
 
 import path from 'node:path'

@@ -1,11 +1,11 @@
+<!--
+  模块说明：F:/Y-Link/src/views/order-entry/components/OrderEntrySummaryCard.vue
+  文件职责：出库汇总卡片组件。
+  实现逻辑：计算并展示件数、金额与提交前校验信息。
+  维护说明：汇总口径改动需与后端金额计算一致。
+-->
+
 <script setup lang="ts">
-/**
- * 模块说明：src/views/order-entry/components/OrderEntrySummaryCard.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
- */
-
-
 /**
  * 底部汇总卡片：
  * - 负责展示行数、总数量、总金额；

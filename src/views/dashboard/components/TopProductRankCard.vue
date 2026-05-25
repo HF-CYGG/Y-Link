@@ -1,11 +1,11 @@
+<!--
+  模块说明：F:/Y-Link/src/views/dashboard/components/TopProductRankCard.vue
+  文件职责：商品排行卡片组件。
+  实现逻辑：展示商品 TOP 排行和快速查看入口。
+  维护说明：指标口径变更需同步文案说明。
+-->
+
 <script setup lang="ts">
-/**
- * 模块说明：src/views/dashboard/components/TopProductRankCard.vue
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
- */
-
-
 import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { DashboardTopProduct } from '@/api/modules/dashboard'

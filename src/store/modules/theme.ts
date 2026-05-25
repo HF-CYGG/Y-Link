@@ -1,7 +1,8 @@
 /**
- * 模块说明：src/store/modules/theme.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：F:/Y-Link/src/store/modules/theme.ts
+ * 文件职责：主题状态 store。
+ * 实现逻辑：持久化主题偏好并驱动全局主题切换。
+ * 维护说明：主题键名变更需考虑历史缓存兼容。
  */
 
 import { computed, nextTick, ref, watch } from 'vue'
