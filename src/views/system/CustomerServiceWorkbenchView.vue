@@ -11,7 +11,7 @@
  * - 若客服在线规则改为更精细的排班模型，本页优先消费共享 API 已暴露的 presence 数据，不在页面层重复实现。
  */
 
-import { computed, onActivated, onBeforeUnmount, onDeactivated, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   compareSupportFeedbackConversationPriority,
@@ -47,6 +47,7 @@ import {
   type SupportAssignableUser,
 } from '@/api/modules/customer-service-feedback'
 import { PageContainer } from '@/components/common'
+import { useStableRequest } from '@/composables/useStableRequest'
 import { useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { extractErrorMessage } from '@/utils/error'
@@ -63,6 +64,22 @@ const authStore = useAuthStore(pinia)
 
 type WorkbenchQuickViewKey = 'all' | 'pending' | 'processing' | 'urgent' | 'unassigned' | 'sla_risk' | 'waiting_staff_reply'
 type DetailTabKey = 'conversation' | 'issue' | 'internal'
+type WorkbenchScrollbarLike = {
+  wrapRef?: HTMLElement | null
+  setScrollTop?: (value: number) => void
+}
+type WorkbenchIssueFormSnapshot = typeof issueForm
+type WorkbenchDetailUiSnapshot = {
+  activeDetailTab: DetailTabKey
+  replyDraft: string
+  selectedQuickReplyKey: string
+  transferAssigneeUserId: string
+  isPriorityPanelExpanded: boolean
+  issueForm: WorkbenchIssueFormSnapshot
+  listScrollTop: number
+  conversationScrollTop: number
+  issueScrollTop: number
+}
 
 const detailLoading = ref(false)
 const loading = ref(false)
@@ -88,12 +105,27 @@ const activeDetailTab = ref<DetailTabKey>('conversation')
 const selectedQuickReplyKey = ref('')
 const transferAssigneeUserId = ref('')
 const assigneeOptions = ref<SupportAssignableUser[]>([])
+const conversationListPanelRef = ref<HTMLDivElement | null>(null)
+const conversationMessageScrollbarRef = ref<WorkbenchScrollbarLike | null>(null)
+const issueFormScrollbarRef = ref<WorkbenchScrollbarLike | null>(null)
+const freshConversationIds = ref<string[]>([])
+const freshMessageIds = ref<string[]>([])
 let realtimeConnection: FeedbackRealtimeConnection | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let refreshTimer: ReturnType<typeof setInterval> | null = null
+let freshConversationTimer: ReturnType<typeof setTimeout> | null = null
+let freshMessageTimer: ReturnType<typeof setTimeout> | null = null
 let lifecycleToken = 0
 let refreshInFlight = false
 let pendingRefresh = false
+const listRequest = useStableRequest()
+const detailRequest = useStableRequest()
+const presenceRequest = useStableRequest()
+const assigneeRequest = useStableRequest()
+const draftTrackingSuspended = ref(false)
+const hasUnsavedReplyDraft = ref(false)
+const hasUnsavedIssueDraft = ref(false)
+const hasUnsavedInternalRemarkDraft = ref(false)
 
 /**
  * - 关键字覆盖标题、Issue 编号、用户、订单号和标签；
@@ -186,6 +218,70 @@ const parseTagText = (value: string): string[] => {
       .map((item) => item.trim())
       .filter((item) => item.length > 0),
   )]
+}
+
+const normalizeComparableText = (value: unknown) => {
+  return normalizeSubmitText(value)
+}
+
+const normalizeComparableTagText = (value: string | string[]) => {
+  const tags = Array.isArray(value)
+    ? value.map((item) => item.trim()).filter((item) => item.length > 0)
+    : parseTagText(value)
+  return [...new Set(tags)].sort().join('||')
+}
+
+const buildIssueFormComparableSnapshot = () => {
+  return {
+    title: normalizeComparableText(issueForm.title),
+    status: issueForm.status,
+    priority: issueForm.priority,
+    issueType: issueForm.issueType,
+    category: issueForm.category,
+    orderRef: normalizeComparableText(issueForm.orderRef),
+    expectedResult: normalizeComparableText(issueForm.expectedResult),
+    actualResult: normalizeComparableText(issueForm.actualResult),
+    reproductionSteps: normalizeComparableText(issueForm.reproductionSteps),
+    contactPreference: normalizeComparableText(issueForm.contactPreference),
+    tagText: normalizeComparableTagText(issueForm.tagText),
+  }
+}
+
+const buildConversationIssueComparableSnapshot = (record: FeedbackConversationRecord | null) => {
+  return {
+    title: normalizeComparableText(record?.title),
+    status: record?.status ?? 'pending',
+    priority: record?.priority ?? 'medium',
+    issueType: record?.fields.issueType ?? 'suggestion',
+    category: record?.fields.category ?? 'other',
+    orderRef: normalizeComparableText(record?.fields.orderRef),
+    expectedResult: normalizeComparableText(record?.fields.expectedResult),
+    actualResult: normalizeComparableText(record?.fields.actualResult),
+    reproductionSteps: normalizeComparableText(record?.fields.reproductionSteps),
+    contactPreference: normalizeComparableText(record?.fields.contactPreference),
+    tagText: normalizeComparableTagText(record?.fields.tags ?? []),
+  }
+}
+
+const syncLocalDraftFlags = () => {
+  if (draftTrackingSuspended.value) {
+    return
+  }
+
+  hasUnsavedReplyDraft.value = Boolean(normalizeComparableText(replyDraft.value))
+  hasUnsavedIssueDraft.value = JSON.stringify(buildIssueFormComparableSnapshot())
+    !== JSON.stringify(buildConversationIssueComparableSnapshot(selectedConversation.value))
+  hasUnsavedInternalRemarkDraft.value = normalizeComparableText(issueForm.internalRemark)
+    !== normalizeComparableText(selectedConversation.value?.internalRemark?.content)
+}
+
+const runWithSuspendedDraftTracking = (task: () => void) => {
+  draftTrackingSuspended.value = true
+  try {
+    task()
+  } finally {
+    draftTrackingSuspended.value = false
+  }
 }
 
 /**
@@ -327,6 +423,105 @@ const filteredConversations = computed(() => getQuickViewFilteredConversations()
 const currentUserId = computed(() => authStore.currentUser?.id ?? '')
 
 /**
+ * Element Plus Scrollbar 的公开实例带有 `wrapRef` 和 `setScrollTop`：
+ * - 页面内部只依赖这两个最稳定的滚动能力；
+ * - 若后续组件实例类型升级，依旧可以在这里集中兼容。
+ */
+const getScrollbarWrap = (scrollbar: WorkbenchScrollbarLike | null) => {
+  return scrollbar?.wrapRef ?? null
+}
+
+const captureScrollbarTop = (scrollbar: WorkbenchScrollbarLike | null) => {
+  return getScrollbarWrap(scrollbar)?.scrollTop ?? 0
+}
+
+const restoreScrollbarTop = (scrollbar: WorkbenchScrollbarLike | null, top: number) => {
+  if (scrollbar?.setScrollTop) {
+    scrollbar.setScrollTop(top)
+    return
+  }
+  const wrap = getScrollbarWrap(scrollbar)
+  if (wrap) {
+    wrap.scrollTop = top
+  }
+}
+
+/**
+ * 自动刷新前先快照当前 UI 状态：
+ * - 当前标签、草稿、Issue 编辑内容都需要保留，避免客服看到数据更新时输入被覆盖；
+ * - 列表和详情滚动位置也一起记录，保证同会话局部刷新不会把视线拉回顶部。
+ */
+const captureWorkbenchDetailUiSnapshot = (): WorkbenchDetailUiSnapshot => {
+  return {
+    activeDetailTab: activeDetailTab.value,
+    replyDraft: replyDraft.value,
+    selectedQuickReplyKey: selectedQuickReplyKey.value,
+    transferAssigneeUserId: transferAssigneeUserId.value,
+    isPriorityPanelExpanded: isPriorityPanelExpanded.value,
+    issueForm: {
+      ...issueForm,
+    },
+    listScrollTop: conversationListPanelRef.value?.scrollTop ?? 0,
+    conversationScrollTop: captureScrollbarTop(conversationMessageScrollbarRef.value),
+    issueScrollTop: captureScrollbarTop(issueFormScrollbarRef.value),
+  }
+}
+
+const restoreWorkbenchDetailUiSnapshot = async (snapshot: WorkbenchDetailUiSnapshot | null) => {
+  if (!snapshot) {
+    return
+  }
+  runWithSuspendedDraftTracking(() => {
+    activeDetailTab.value = snapshot.activeDetailTab
+    replyDraft.value = snapshot.replyDraft
+    selectedQuickReplyKey.value = snapshot.selectedQuickReplyKey
+    transferAssigneeUserId.value = snapshot.transferAssigneeUserId
+    isPriorityPanelExpanded.value = snapshot.isPriorityPanelExpanded
+    Object.assign(issueForm, snapshot.issueForm)
+  })
+  await nextTick()
+  if (conversationListPanelRef.value) {
+    conversationListPanelRef.value.scrollTop = snapshot.listScrollTop
+  }
+  restoreScrollbarTop(conversationMessageScrollbarRef.value, snapshot.conversationScrollTop)
+  restoreScrollbarTop(issueFormScrollbarRef.value, snapshot.issueScrollTop)
+  syncLocalDraftFlags()
+}
+
+/**
+ * 新项高亮只保留极短时间：
+ * - 让客服一眼看到刚补进来的工单或消息；
+ * - 又不会像强提醒那样持续干扰当前操作。
+ */
+const markFreshConversationIds = (ids: string[]) => {
+  if (!ids.length) {
+    return
+  }
+  freshConversationIds.value = [...new Set([...freshConversationIds.value, ...ids])]
+  if (freshConversationTimer) {
+    clearTimeout(freshConversationTimer)
+  }
+  freshConversationTimer = setTimeout(() => {
+    freshConversationIds.value = []
+    freshConversationTimer = null
+  }, 1800)
+}
+
+const markFreshMessageIds = (ids: string[]) => {
+  if (!ids.length) {
+    return
+  }
+  freshMessageIds.value = [...new Set([...freshMessageIds.value, ...ids])]
+  if (freshMessageTimer) {
+    clearTimeout(freshMessageTimer)
+  }
+  freshMessageTimer = setTimeout(() => {
+    freshMessageIds.value = []
+    freshMessageTimer = null
+  }, 1800)
+}
+
+/**
  * 显式接单模型下的负责人判断：
  * - 当前负责人是自己时，允许继续回复、改状态；
  * - 未接单或由他人负责时，需要先通过接单/转派动作切换归属。
@@ -380,18 +575,21 @@ const activeQuickViewDefinition = computed(() => {
 })
 
 const syncIssueForm = (record: FeedbackConversationRecord | null) => {
-  issueForm.title = record?.title ?? ''
-  issueForm.status = record?.status ?? 'pending'
-  issueForm.priority = record?.priority ?? 'medium'
-  issueForm.issueType = record?.fields.issueType ?? 'suggestion'
-  issueForm.category = record?.fields.category ?? 'other'
-  issueForm.orderRef = record?.fields.orderRef ?? ''
-  issueForm.expectedResult = record?.fields.expectedResult ?? ''
-  issueForm.actualResult = record?.fields.actualResult ?? ''
-  issueForm.reproductionSteps = record?.fields.reproductionSteps ?? ''
-  issueForm.contactPreference = record?.fields.contactPreference ?? ''
-  issueForm.tagText = record?.fields.tags.join('，') ?? ''
-  issueForm.internalRemark = record?.internalRemark?.content ?? ''
+  runWithSuspendedDraftTracking(() => {
+    issueForm.title = record?.title ?? ''
+    issueForm.status = record?.status ?? 'pending'
+    issueForm.priority = record?.priority ?? 'medium'
+    issueForm.issueType = record?.fields.issueType ?? 'suggestion'
+    issueForm.category = record?.fields.category ?? 'other'
+    issueForm.orderRef = record?.fields.orderRef ?? ''
+    issueForm.expectedResult = record?.fields.expectedResult ?? ''
+    issueForm.actualResult = record?.fields.actualResult ?? ''
+    issueForm.reproductionSteps = record?.fields.reproductionSteps ?? ''
+    issueForm.contactPreference = record?.fields.contactPreference ?? ''
+    issueForm.tagText = record?.fields.tags.join('，') ?? ''
+    issueForm.internalRemark = record?.internalRemark?.content ?? ''
+  })
+  syncLocalDraftFlags()
 }
 
 const quickReplyTemplates = computed(() => {
@@ -478,9 +676,14 @@ const syncVisibleConversationSelection = async (options: { forceReloadDetail?: b
   if (!visibleConversations.length) {
     selectedConversationId.value = ''
     selectedConversation.value = null
-    replyDraft.value = ''
-    selectedQuickReplyKey.value = ''
+    runWithSuspendedDraftTracking(() => {
+      replyDraft.value = ''
+      selectedQuickReplyKey.value = ''
+      transferAssigneeUserId.value = ''
+      isPriorityPanelExpanded.value = false
+    })
     syncIssueForm(null)
+    syncLocalDraftFlags()
     return
   }
 
@@ -489,54 +692,118 @@ const syncVisibleConversationSelection = async (options: { forceReloadDetail?: b
   const shouldLoadDetail = options.forceReloadDetail
     || !selectedConversation.value
     || selectedConversation.value.id !== nextConversationId
+  const shouldPreserveDetailUiState = hasCurrentSelection
+    && nextConversationId === selectedConversation.value?.id
+    && Boolean(options.forceReloadDetail)
 
   selectedConversationId.value = nextConversationId
   if (shouldLoadDetail) {
-    await loadConversationDetail(nextConversationId)
+    await loadConversationDetail(nextConversationId, {
+      preserveDetailUiState: shouldPreserveDetailUiState,
+    })
   }
 }
 
-const loadConversationDetail = async (conversationId: string) => {
+const loadConversationDetail = async (
+  conversationId: string,
+  options: {
+    preserveDetailUiState?: boolean
+  } = {},
+) => {
   if (!conversationId) {
     selectedConversation.value = null
-    replyDraft.value = ''
-    selectedQuickReplyKey.value = ''
-    isPriorityPanelExpanded.value = false
+    runWithSuspendedDraftTracking(() => {
+      replyDraft.value = ''
+      selectedQuickReplyKey.value = ''
+      transferAssigneeUserId.value = ''
+      isPriorityPanelExpanded.value = false
+    })
+    syncIssueForm(null)
+    syncLocalDraftFlags()
     return
   }
 
   const previousConversationId = selectedConversation.value?.id ?? ''
+  const shouldPreserveDetailUiState = Boolean(options.preserveDetailUiState && previousConversationId === conversationId)
+  const detailUiSnapshot = shouldPreserveDetailUiState ? captureWorkbenchDetailUiSnapshot() : null
+  const previousMessageIds = shouldPreserveDetailUiState
+    ? new Set(selectedConversation.value?.messages.map((message) => message.id) ?? [])
+    : null
   detailLoading.value = true
-  try {
-    selectedConversation.value = await getSupportFeedbackConversation(conversationId)
-    isPriorityPanelExpanded.value = false
-    if (previousConversationId !== conversationId) {
-      replyDraft.value = ''
-      selectedQuickReplyKey.value = ''
-      transferAssigneeUserId.value = ''
-    }
-    syncIssueForm(selectedConversation.value)
-  } finally {
-    detailLoading.value = false
-  }
+  await detailRequest.runLatest({
+    executor: (signal) => getSupportFeedbackConversation(conversationId, { signal }),
+    onSuccess: async (detail) => {
+      if (selectedConversationId.value !== conversationId) {
+        return
+      }
+
+      selectedConversation.value = detail
+      isPriorityPanelExpanded.value = false
+      if (previousConversationId !== conversationId) {
+        runWithSuspendedDraftTracking(() => {
+          replyDraft.value = ''
+          selectedQuickReplyKey.value = ''
+          transferAssigneeUserId.value = ''
+        })
+      }
+      syncIssueForm(selectedConversation.value)
+      if (shouldPreserveDetailUiState) {
+        const nextFreshMessageIds = detail?.messages
+          .filter((message) => !previousMessageIds?.has(message.id))
+          .map((message) => message.id) ?? []
+        markFreshMessageIds(nextFreshMessageIds)
+        await restoreWorkbenchDetailUiSnapshot(detailUiSnapshot)
+      }
+      syncLocalDraftFlags()
+    },
+    onFinally: () => {
+      detailLoading.value = false
+    },
+  })
 }
 
-const loadConversations = async (options: { refreshSelectedDetail?: boolean } = {}) => {
+const loadConversations = async (
+  options: {
+    refreshSelectedDetail?: boolean
+    preserveUiState?: boolean
+  } = {},
+) => {
   const shouldRefreshSelectedDetail = options.refreshSelectedDetail ?? true
+  const previousConversationIds = options.preserveUiState
+    ? new Set(conversations.value.map((item) => item.id))
+    : null
+  const listScrollTop = options.preserveUiState ? (conversationListPanelRef.value?.scrollTop ?? 0) : null
   loading.value = true
-  try {
-    conversations.value = await listSupportFeedbackConversations({
+  await listRequest.runLatest({
+    executor: (signal) => listSupportFeedbackConversations({
       keyword: searchForm.keyword,
       status: searchForm.status,
       priority: searchForm.priority,
       assigneeScope: searchForm.assigneeScope,
-    })
-    await syncVisibleConversationSelection({
-      forceReloadDetail: shouldRefreshSelectedDetail,
-    })
-  } finally {
-    loading.value = false
-  }
+    }, { signal }),
+    onSuccess: async (nextConversations) => {
+      conversations.value = nextConversations
+      if (previousConversationIds) {
+        markFreshConversationIds(
+          nextConversations
+            .filter((item) => !previousConversationIds.has(item.id))
+            .map((item) => item.id),
+        )
+      }
+      await syncVisibleConversationSelection({
+        forceReloadDetail: shouldRefreshSelectedDetail,
+      })
+      if (listScrollTop !== null) {
+        await nextTick()
+        if (conversationListPanelRef.value) {
+          conversationListPanelRef.value.scrollTop = listScrollTop
+        }
+      }
+    },
+    onFinally: () => {
+      loading.value = false
+    },
+  })
 }
 
 const replaceConversationSummary = (records: FeedbackConversationRecord[], nextRecord: FeedbackConversationRecord) => {
@@ -577,9 +844,17 @@ const mergeSelectedConversationSummary = (summaryRecord: FeedbackConversationRec
     fields: summaryRecord.fields,
   }
 
-  if (!saving.value && !remarkSaving.value && !replying.value) {
+  if (
+    !saving.value
+    && !remarkSaving.value
+    && !replying.value
+    && !hasUnsavedIssueDraft.value
+    && !hasUnsavedInternalRemarkDraft.value
+  ) {
     syncIssueForm(selectedConversation.value)
   }
+
+  syncLocalDraftFlags()
 }
 
 const mergeRealtimeMessageIntoSelectedConversation = (message: FeedbackConversationMessage | undefined) => {
@@ -642,7 +917,9 @@ const handleReset = () => {
 
 const handleSelectConversation = async (conversationId: string) => {
   selectedConversationId.value = conversationId
-  await loadConversationDetail(conversationId)
+  await loadConversationDetail(conversationId, {
+    preserveDetailUiState: false,
+  })
 }
 
 const handleChangeQuickView = async (quickViewKey: WorkbenchQuickViewKey) => {
@@ -672,6 +949,7 @@ const handleTakeOver = async () => {
     await updateSupportConversationAssignee(selectedConversation.value.id, currentUserId.value)
     await loadConversations({
       refreshSelectedDetail: true,
+      preserveUiState: true,
     })
     reconnectTip.value = '已完成显式接单，当前会话后续消息会继续实时同步。'
     ElMessage.success('当前会话已接单')
@@ -698,6 +976,7 @@ const handleTransferConversation = async () => {
     transferAssigneeUserId.value = ''
     await loadConversations({
       refreshSelectedDetail: true,
+      preserveUiState: true,
     })
     reconnectTip.value = '负责人已更新，工作台已同步最新归属信息。'
     ElMessage.success('负责人已更新')
@@ -743,7 +1022,10 @@ const handleSaveIssue = async () => {
       contactPreference: issueForm.contactPreference,
       tags: parseTagText(issueForm.tagText),
     })
-    await loadConversations()
+    hasUnsavedIssueDraft.value = false
+    await loadConversations({
+      preserveUiState: true,
+    })
     ElMessage.success('Issue 字段已保存')
   } catch (error) {
     ElMessage.error(extractErrorMessage(error, 'Issue 字段保存失败，请稍后重试'))
@@ -765,6 +1047,7 @@ const handleQuickStatus = async (status: FeedbackIssueStatus) => {
       status,
     })
     issueForm.status = status
+    hasUnsavedIssueDraft.value = false
     patchSelectedConversation({
       status,
       updatedAt: new Date().toISOString(),
@@ -773,7 +1056,9 @@ const handleQuickStatus = async (status: FeedbackIssueStatus) => {
       status,
       updatedAt: new Date().toISOString(),
     })
-    await loadConversations()
+    await loadConversations({
+      preserveUiState: true,
+    })
     ElMessage.success(`状态已更新为${FEEDBACK_STATUS_META_MAP[status].label}`)
   } catch (error) {
     ElMessage.error(extractErrorMessage(error, '状态更新失败，请稍后重试'))
@@ -796,6 +1081,7 @@ const handleReassignPriority = async (priority: FeedbackIssuePriority) => {
       priority,
     })
     issueForm.priority = priority
+    hasUnsavedIssueDraft.value = false
     patchSelectedConversation({
       priority,
       updatedAt: new Date().toISOString(),
@@ -806,6 +1092,7 @@ const handleReassignPriority = async (priority: FeedbackIssuePriority) => {
     })
     await loadConversations({
       refreshSelectedDetail: true,
+      preserveUiState: true,
     })
     isPriorityPanelExpanded.value = false
     ElMessage.success(`已将优先级调整为${FEEDBACK_PRIORITY_META_MAP[priority].label}`)
@@ -826,7 +1113,10 @@ const handleSaveInternalRemark = async () => {
   remarkSaving.value = true
   try {
     await updateFeedbackInternalRemark(selectedConversation.value.id, issueForm.internalRemark)
-    await loadConversationDetail(selectedConversation.value.id)
+    hasUnsavedInternalRemarkDraft.value = false
+    await loadConversationDetail(selectedConversation.value.id, {
+      preserveDetailUiState: true,
+    })
     ElMessage.success('内部备注已保存')
   } catch (error) {
     ElMessage.error(extractErrorMessage(error, '内部备注保存失败，请稍后重试'))
@@ -867,7 +1157,10 @@ const handleReply = async () => {
       body: normalizedReply,
     })
     replyDraft.value = ''
-    await loadConversations()
+    hasUnsavedReplyDraft.value = false
+    await loadConversations({
+      preserveUiState: true,
+    })
     reconnectTip.value = '已续接当前客服会话，最新回复已同步发送给客户端。'
     ElMessage.success('客服回复已发送')
   } catch (error) {
@@ -895,8 +1188,13 @@ const handleApplyQuickReply = () => {
 }
 
 const loadPresence = async () => {
-  presence.value = await getCustomerServicePresence()
-  realtimeState.value = presence.value.availability.isOnline ? 'online' : 'offline'
+  await presenceRequest.runLatest({
+    executor: (signal) => getCustomerServicePresence({ signal }),
+    onSuccess: (result) => {
+      presence.value = result
+      realtimeState.value = result.availability.isOnline ? 'online' : 'offline'
+    },
+  })
 }
 
 /**
@@ -906,11 +1204,15 @@ const loadPresence = async () => {
  */
 const loadAssignableUsers = async () => {
   assigneeLoading.value = true
-  try {
-    assigneeOptions.value = await listSupportAssignableUsers()
-  } finally {
-    assigneeLoading.value = false
-  }
+  await assigneeRequest.runLatest({
+    executor: (signal) => listSupportAssignableUsers({ signal }),
+    onSuccess: (result) => {
+      assigneeOptions.value = result
+    },
+    onFinally: () => {
+      assigneeLoading.value = false
+    },
+  })
 }
 
 /**
@@ -923,6 +1225,7 @@ const refreshWorkbenchData = async (
   options: {
     refreshPresence?: boolean
     refreshSelectedDetail?: boolean
+    preserveUiState?: boolean
   } = {},
 ) => {
   if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
@@ -938,6 +1241,7 @@ const refreshWorkbenchData = async (
   try {
     await loadConversations({
       refreshSelectedDetail: options.refreshSelectedDetail,
+      preserveUiState: options.preserveUiState ?? true,
     })
     if (options.refreshPresence !== false) {
       await loadPresence()
@@ -980,18 +1284,30 @@ const handleRealtimeConversation = async (
   }
 
   if (!payload) {
-    await refreshWorkbenchData(currentToken, { refreshPresence: false, refreshSelectedDetail: false })
+    await refreshWorkbenchData(currentToken, {
+      refreshPresence: false,
+      refreshSelectedDetail: Boolean(selectedConversationId.value),
+      preserveUiState: true,
+    })
     return
   }
 
   try {
     await applyRealtimeConversationPatch(payload)
   } catch {
-    await refreshWorkbenchData(currentToken, { refreshPresence: false, refreshSelectedDetail: false })
+    await refreshWorkbenchData(currentToken, {
+      refreshPresence: false,
+      refreshSelectedDetail: Boolean(selectedConversationId.value),
+      preserveUiState: true,
+    })
     return
   }
 
-  await refreshWorkbenchData(currentToken, { refreshPresence: false, refreshSelectedDetail: false })
+  await refreshWorkbenchData(currentToken, {
+    refreshPresence: false,
+    refreshSelectedDetail: Boolean(selectedConversationId.value),
+    preserveUiState: true,
+  })
   if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
     return
   }
@@ -1015,6 +1331,16 @@ const disposeRealtime = () => {
   if (refreshTimer) {
     clearInterval(refreshTimer)
     refreshTimer = null
+  }
+
+  if (freshConversationTimer) {
+    clearTimeout(freshConversationTimer)
+    freshConversationTimer = null
+  }
+
+  if (freshMessageTimer) {
+    clearTimeout(freshMessageTimer)
+    freshMessageTimer = null
   }
 }
 
@@ -1053,7 +1379,11 @@ const connectRealtime = (currentToken: number) => {
           },
         }
       }
-      void refreshWorkbenchData(currentToken, { refreshPresence: true, refreshSelectedDetail: false })
+      void refreshWorkbenchData(currentToken, {
+        refreshPresence: true,
+        refreshSelectedDetail: Boolean(selectedConversationId.value),
+        preserveUiState: true,
+      })
       reconnectTip.value = '已恢复客服实时连接，当前工作台会自动续接最新会话变化。'
     },
     onConversation: async (payload) => {
@@ -1106,10 +1436,48 @@ const leaveWorkbench = () => {
   isWorkbenchResident.value = false
   lifecycleToken += 1
   pendingRefresh = false
+  refreshInFlight = false
+  listRequest.cancel()
+  detailRequest.cancel()
+  presenceRequest.cancel()
+  assigneeRequest.cancel()
+  loading.value = false
+  detailLoading.value = false
+  assigneeLoading.value = false
   disposeRealtime()
   realtimeState.value = 'offline'
   reconnectTip.value = '离开工作台后已释放在线状态，返回页面会自动续接。'
 }
+
+watch(replyDraft, () => {
+  syncLocalDraftFlags()
+})
+
+watch(
+  () => [
+    issueForm.title,
+    issueForm.status,
+    issueForm.priority,
+    issueForm.issueType,
+    issueForm.category,
+    issueForm.orderRef,
+    issueForm.expectedResult,
+    issueForm.actualResult,
+    issueForm.reproductionSteps,
+    issueForm.contactPreference,
+    issueForm.tagText,
+  ],
+  () => {
+    syncLocalDraftFlags()
+  },
+)
+
+watch(
+  () => issueForm.internalRemark,
+  () => {
+    syncLocalDraftFlags()
+  },
+)
 
 watch(
   () => authStore.currentUser?.id,
@@ -1247,55 +1615,63 @@ onBeforeUnmount(() => {
             <el-empty :description="`${activeQuickViewDefinition.label}视图下暂无反馈会话，可切换视图或调整筛选条件后重试。`" :image-size="88" />
           </div>
 
-          <TransitionGroup
+          <div
             v-else
-            name="cs-conversation-list"
-            tag="div"
-            class="mt-4 space-y-3 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:pr-1"
+            ref="conversationListPanelRef"
+            class="mt-4 xl:min-h-0 xl:flex-1 xl:overflow-y-auto xl:pr-1"
           >
-            <el-card
-              v-for="item in filteredConversations"
-              :key="item.id"
-              class="cs-conversation-item"
-              shadow="hover"
-              :class="item.id === selectedConversationId ? 'is-selected' : ''"
-              @click="handleSelectConversation(item.id)"
+            <TransitionGroup
+              name="cs-conversation-list"
+              tag="div"
+              class="space-y-3"
             >
-              <div class="flex flex-wrap items-start justify-between gap-2">
-                <div class="min-w-0">
-                  <p class="truncate text-sm font-semibold text-slate-900">{{ item.title }}</p>
-                  <p class="mt-1 text-xs text-slate-500">{{ item.issueNo }}</p>
+              <el-card
+                v-for="item in filteredConversations"
+                :key="item.id"
+                class="cs-conversation-item"
+                shadow="hover"
+                :class="[
+                  item.id === selectedConversationId ? 'is-selected' : '',
+                  freshConversationIds.includes(item.id) ? 'is-fresh' : '',
+                ]"
+                @click="handleSelectConversation(item.id)"
+              >
+                <div class="flex flex-wrap items-start justify-between gap-2">
+                  <div class="min-w-0">
+                    <p class="truncate text-sm font-semibold text-slate-900">{{ item.title }}</p>
+                    <p class="mt-1 text-xs text-slate-500">{{ item.issueNo }}</p>
+                  </div>
+                  <el-tag :type="getStatusTagType(item.status)" effect="light" round>
+                    {{ FEEDBACK_STATUS_META_MAP[item.status].label }}
+                  </el-tag>
                 </div>
-                <el-tag :type="getStatusTagType(item.status)" effect="light" round>
-                  {{ FEEDBACK_STATUS_META_MAP[item.status].label }}
-                </el-tag>
-              </div>
 
-              <div class="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                <span>{{ item.clientDisplayName }}</span>
-                <span>{{ item.clientDepartmentName || '未填写部门' }}</span>
-                <span>{{ formatDateTime(item.lastMessageAt) }}</span>
-              </div>
+                <div class="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                  <span>{{ item.clientDisplayName }}</span>
+                  <span>{{ item.clientDepartmentName || '未填写部门' }}</span>
+                  <span>{{ formatDateTime(item.lastMessageAt) }}</span>
+                </div>
 
-              <div class="mt-3 flex flex-wrap items-center gap-2">
-                <el-tag :type="getPriorityTagType(item.priority)" effect="light" round>
-                  {{ FEEDBACK_PRIORITY_META_MAP[item.priority].label }}
-                </el-tag>
-                <el-tag :type="getSlaTagType(item)" effect="light" round>
-                  {{ resolveSupportFeedbackConversationSla(item).label }}
-                </el-tag>
-                <el-tag :type="getAssigneeTagType(item)" effect="plain" round>
-                  {{ getAssigneeTagLabel(item) }}
-                </el-tag>
-                <el-tag v-if="item.unreadForStaff > 0" type="danger" effect="light" round>
-                  待回复 {{ item.unreadForStaff }}
-                </el-tag>
-              </div>
-              <p class="mt-3 text-xs leading-5 text-slate-500">
-                {{ resolveSupportFeedbackConversationSla(item).stageLabel }} · {{ resolveSupportFeedbackConversationSla(item).countdownText }}
-              </p>
-            </el-card>
-          </TransitionGroup>
+                <div class="mt-3 flex flex-wrap items-center gap-2">
+                  <el-tag :type="getPriorityTagType(item.priority)" effect="light" round>
+                    {{ FEEDBACK_PRIORITY_META_MAP[item.priority].label }}
+                  </el-tag>
+                  <el-tag :type="getSlaTagType(item)" effect="light" round>
+                    {{ resolveSupportFeedbackConversationSla(item).label }}
+                  </el-tag>
+                  <el-tag :type="getAssigneeTagType(item)" effect="plain" round>
+                    {{ getAssigneeTagLabel(item) }}
+                  </el-tag>
+                  <el-tag v-if="item.unreadForStaff > 0" type="danger" effect="light" round>
+                    待回复 {{ item.unreadForStaff }}
+                  </el-tag>
+                </div>
+                <p class="mt-3 text-xs leading-5 text-slate-500">
+                  {{ resolveSupportFeedbackConversationSla(item).stageLabel }} · {{ resolveSupportFeedbackConversationSla(item).countdownText }}
+                </p>
+              </el-card>
+            </TransitionGroup>
+          </div>
         </el-card>
 
         <Transition name="cs-detail-panel" mode="out-in">
@@ -1431,14 +1807,24 @@ onBeforeUnmount(() => {
 
             <div class="cs-detail-tab-stage mt-4 xl:min-h-0 xl:flex-1">
               <Transition name="cs-detail-tab-switch" mode="out-in">
-                <div v-if="activeDetailTab === 'conversation'" key="conversation" class="cs-detail-tab-panel cs-detail-tab-panel--conversation">
+                <div
+                  v-if="activeDetailTab === 'conversation'"
+                  key="conversation"
+                  class="cs-detail-tab-panel cs-detail-tab-panel--conversation"
+                >
                   <div class="cs-conversation-tab-panel">
-                    <el-card class="cs-sub-card cs-conversation-detail-card flex-1 xl:flex xl:min-h-0 xl:flex-col" shadow="never">
+                    <el-card
+                      class="cs-sub-card cs-conversation-detail-card flex-1 xl:flex xl:min-h-0 xl:flex-col"
+                      shadow="never"
+                    >
                       <div class="flex items-center justify-end gap-3">
                         <span class="text-xs text-slate-400">{{ selectedConversation.messages.length }} 条消息</span>
                       </div>
 
-                      <el-scrollbar class="cs-conversation-detail-scrollbar mt-4 xl:min-h-0 xl:flex-1">
+                      <el-scrollbar
+                        ref="conversationMessageScrollbarRef"
+                        class="cs-conversation-detail-scrollbar mt-4 xl:min-h-0 xl:flex-1"
+                      >
                         <TransitionGroup name="cs-message-stack" tag="div" class="space-y-3 pr-1">
                           <el-card
                             v-for="message in selectedConversation.messages"
@@ -1485,7 +1871,12 @@ onBeforeUnmount(() => {
                           <p class="text-base font-semibold text-slate-900">客服回复</p>
                           <p class="mt-1 text-xs text-slate-400">回复区已接入快捷回复，插入后仍可继续编辑；显式接单后才允许继续发送。</p>
                         </div>
-                        <el-button type="primary" :loading="replying" :disabled="replying || !isSelectedConversationOwnedByCurrentUser" @click="handleReply">
+                        <el-button
+                          type="primary"
+                          :loading="replying"
+                          :disabled="replying || !isSelectedConversationOwnedByCurrentUser"
+                          @click="handleReply"
+                        >
                           发送回复
                         </el-button>
                       </div>
@@ -1517,7 +1908,10 @@ onBeforeUnmount(() => {
                         </el-button>
                       </div>
 
-                      <div v-if="selectedQuickReplyTemplate" class="mt-3 rounded-[18px] border border-slate-200 bg-slate-50 px-4 py-3">
+                      <div
+                        v-if="selectedQuickReplyTemplate"
+                        class="mt-3 rounded-[18px] border border-slate-200 bg-slate-50 px-4 py-3"
+                      >
                         <div class="flex flex-wrap items-center justify-between gap-2">
                           <p class="text-sm font-semibold text-slate-900">{{ selectedQuickReplyTemplate.label }}</p>
                           <el-tag type="info" effect="plain" round>
@@ -1584,19 +1978,44 @@ onBeforeUnmount(() => {
                         </div>
 
                         <el-form-item label="关联订单号">
-                          <el-input v-model="issueForm.orderRef" maxlength="64" placeholder="如问题关联订单，可补充订单号或提货码" />
+                          <el-input
+                            v-model="issueForm.orderRef"
+                            maxlength="64"
+                            placeholder="如问题关联订单，可补充订单号或提货码"
+                          />
                         </el-form-item>
 
                         <el-form-item label="期望结果">
-                          <el-input v-model="issueForm.expectedResult" type="textarea" :rows="4" maxlength="240" show-word-limit resize="vertical" />
+                          <el-input
+                            v-model="issueForm.expectedResult"
+                            type="textarea"
+                            :rows="4"
+                            maxlength="240"
+                            show-word-limit
+                            resize="vertical"
+                          />
                         </el-form-item>
 
                         <el-form-item label="实际结果">
-                          <el-input v-model="issueForm.actualResult" type="textarea" :rows="4" maxlength="240" show-word-limit resize="vertical" />
+                          <el-input
+                            v-model="issueForm.actualResult"
+                            type="textarea"
+                            :rows="4"
+                            maxlength="240"
+                            show-word-limit
+                            resize="vertical"
+                          />
                         </el-form-item>
 
                         <el-form-item label="复现步骤">
-                          <el-input v-model="issueForm.reproductionSteps" type="textarea" :rows="4" maxlength="300" show-word-limit resize="vertical" />
+                          <el-input
+                            v-model="issueForm.reproductionSteps"
+                            type="textarea"
+                            :rows="4"
+                            maxlength="300"
+                            show-word-limit
+                            resize="vertical"
+                          />
                         </el-form-item>
 
                         <el-form-item label="联系偏好">
@@ -1604,12 +2023,23 @@ onBeforeUnmount(() => {
                         </el-form-item>
 
                         <el-form-item label="标签">
-                          <el-input v-model="issueForm.tagText" maxlength="120" show-word-limit placeholder="使用中文逗号分隔多个标签" />
+                          <el-input
+                            v-model="issueForm.tagText"
+                            maxlength="120"
+                            show-word-limit
+                            placeholder="使用中文逗号分隔多个标签"
+                          />
                         </el-form-item>
                       </el-form>
                     </el-scrollbar>
 
-                    <el-button type="primary" class="mt-4 w-full" :loading="saving && quickStatusUpdating === '' && priorityUpdating === ''" :disabled="saving" @click="handleSaveIssue">
+                    <el-button
+                      type="primary"
+                      class="mt-4 w-full"
+                      :loading="saving && quickStatusUpdating === '' && priorityUpdating === ''"
+                      :disabled="saving"
+                      @click="handleSaveIssue"
+                    >
                       保存 Issue 字段
                     </el-button>
                   </el-card>
@@ -1647,7 +2077,10 @@ onBeforeUnmount(() => {
                       </div>
 
                       <el-collapse-transition>
-                        <div v-if="isPriorityPanelExpanded" class="mt-4 rounded-[18px] border border-slate-200 bg-slate-50 px-4 py-3">
+                        <div
+                          v-if="isPriorityPanelExpanded"
+                          class="mt-4 rounded-[18px] border border-slate-200 bg-slate-50 px-4 py-3"
+                        >
                           <div class="flex flex-wrap items-center justify-between gap-2">
                             <div>
                               <p class="text-sm font-semibold text-slate-900">客服优先级重分配</p>
@@ -1695,7 +2128,11 @@ onBeforeUnmount(() => {
                         placeholder="可记录排查结论、交接信息、风险判断或内部提醒。"
                       />
                       <p v-if="selectedConversation.internalRemark?.updatedAt" class="mt-2 text-xs text-slate-400">
-                        最近更新：{{ selectedConversation.internalRemark.updatedByDisplayName || selectedConversation.internalRemark.updatedByUsername || '未知客服' }}
+                        最近更新：{{
+                          selectedConversation.internalRemark.updatedByDisplayName
+                          || selectedConversation.internalRemark.updatedByUsername
+                          || '未知客服'
+                        }}
                         · {{ formatDateTime(selectedConversation.internalRemark.updatedAt) }}
                       </p>
                     </el-card>
@@ -1890,6 +2327,11 @@ onBeforeUnmount(() => {
   transform: translateY(-1px);
 }
 
+.cs-conversation-item.is-fresh,
+.cs-message-card.is-fresh {
+  animation: cs-fresh-highlight 1.6s ease;
+}
+
 .cs-list-heading {
   display: flex;
   align-items: flex-start;
@@ -2053,6 +2495,25 @@ onBeforeUnmount(() => {
 .cs-message-card:hover {
   transform: translateY(-1px);
   box-shadow: 0 14px 28px -24px rgba(15, 23, 42, 0.18);
+}
+
+@keyframes cs-fresh-highlight {
+  0% {
+    box-shadow:
+      0 0 0 1px rgba(45, 212, 191, 0.26) inset,
+      0 0 0 0 rgba(45, 212, 191, 0.18);
+    background-color: rgba(240, 253, 250, 0.92);
+  }
+  55% {
+    box-shadow:
+      0 0 0 1px rgba(45, 212, 191, 0.18) inset,
+      0 16px 28px -24px rgba(13, 148, 136, 0.26);
+    background-color: rgba(204, 251, 241, 0.34);
+  }
+  100% {
+    box-shadow: 0 18px 48px -40px rgba(15, 23, 42, 0.24);
+    background-color: transparent;
+  }
 }
 
 .cs-conversation-list-enter-active,

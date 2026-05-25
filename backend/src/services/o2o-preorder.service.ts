@@ -111,6 +111,7 @@ export interface O2oPreorderSummaryView {
   expireInSeconds: number
   id: string
   showNo: string
+  customerOrderShowNo: string | null
   verifyCode: string
   status: O2oPreorder['status']
   businessStatus: O2oPreorder['businessStatus']
@@ -153,6 +154,7 @@ export interface O2oPreorderDetailView {
     expireInSeconds: number
     id: string
     showNo: string
+    customerOrderShowNo: string | null
     verifyCode: string
     status: O2oPreorder['status']
     businessStatus: O2oPreorder['businessStatus']
@@ -246,7 +248,7 @@ class O2oPreorderService {
   private cancelTimeoutOrdersInFlight: Promise<{ cancelledCount: number }> | null = null
   private lastCancelTimeoutOrdersAt = 0
   private lastCancelTimeoutOrdersResult = { cancelledCount: 0 }
-  private timeoutRecycleTimer: ReturnType<typeof setInterval> | null = null
+  private timeoutRecycleLoopTimer: ReturnType<typeof globalThis.setInterval> | null = null
 
   /**
    * 客户端改单次数上限：
@@ -663,6 +665,69 @@ class O2oPreorderService {
     await outboundOrderRepo.save(outboundOrder)
   }
 
+  // 详细注释：客户端展示正式出库单号时，不能再直接复用 O2O 预订单号。
+  // 这里统一通过核销时写入的 idempotencyKey 回查正式出库单，确保客户端与管理端引用同一张正式单据。
+  private buildVerifiedPreorderOutboundOrderIdempotencyKey(preorderId: string) {
+    return `o2o-preorder-verify:${preorderId}`
+  }
+
+  // 详细注释：批量回查正式出库单号，供“我的订单列表”和“订单详情”共用。
+  // - 未核销或尚未生成正式出库单时返回空映射；
+  // - 命中后以预订单 ID 为键，便于前端页面继续保留原订单实体，同时替换展示单号。
+  private async resolveCustomerOrderShowNoMap(preorderIds: string[]) {
+    if (!preorderIds.length) {
+      return new Map<string, string>()
+    }
+    const idempotencyKeyToPreorderIdMap = new Map(
+      preorderIds.map((preorderId) => [this.buildVerifiedPreorderOutboundOrderIdempotencyKey(preorderId), preorderId]),
+    )
+    const outboundOrders = await AppDataSource.getRepository(BizOutboundOrder).find({
+      select: ['idempotencyKey', 'showNo'],
+      where: {
+        idempotencyKey: In([...idempotencyKeyToPreorderIdMap.keys()]),
+      },
+    })
+    const customerOrderShowNoMap = new Map<string, string>()
+    outboundOrders.forEach((outboundOrder) => {
+      const preorderId = idempotencyKeyToPreorderIdMap.get(outboundOrder.idempotencyKey)
+      if (!preorderId || !outboundOrder.showNo?.trim()) {
+        return
+      }
+      customerOrderShowNoMap.set(preorderId, outboundOrder.showNo.trim())
+    })
+    return customerOrderShowNoMap
+  }
+
+  // 详细注释：当客户端已切换为展示正式出库单号后，关键词搜索也必须支持这个单号。
+  // 这里先从正式出库单表按“精确匹配 + 前缀匹配”回查，再反推出对应预订单 ID，避免页面显示与搜索口径脱节。
+  private async resolveMatchedPreorderIdsByCustomerOrderKeyword(keyword: string) {
+    const normalizedKeyword = keyword.trim()
+    if (!normalizedKeyword) {
+      return []
+    }
+    const escapedKeyword = this.escapeLikeKeyword(normalizedKeyword)
+    const rows = await AppDataSource.getRepository(BizOutboundOrder)
+      .createQueryBuilder('outboundOrder')
+      .select(['outboundOrder.idempotencyKey AS idempotencyKey'])
+      .where('outboundOrder.showNo = :showNoExact', { showNoExact: normalizedKeyword })
+      .orWhere(String.raw`outboundOrder.showNo LIKE :showNoPrefix ESCAPE '\'`, { showNoPrefix: `${escapedKeyword}%` })
+      .getRawMany<{ idempotencyKey: string | null }>()
+    const preorderIdPrefix = this.buildVerifiedPreorderOutboundOrderIdempotencyKey('')
+    const preorderIdSet = new Set<string>()
+    rows.forEach((row) => {
+      const idempotencyKey = row.idempotencyKey?.trim() ?? ''
+      if (!idempotencyKey.startsWith(preorderIdPrefix)) {
+        return
+      }
+      const preorderId = idempotencyKey.slice(preorderIdPrefix.length).trim()
+      if (!preorderId) {
+        return
+      }
+      preorderIdSet.add(preorderId)
+    })
+    return [...preorderIdSet]
+  }
+
   private resolveExpireInSeconds(order: Pick<O2oPreorder, 'status' | 'timeoutAt'>, nowMs = Date.now()) {
     if (order.status !== 'pending' || !order.timeoutAt) {
       return 0
@@ -880,6 +945,8 @@ class O2oPreorderService {
   private async buildOrderDetail(order: O2oPreorder): Promise<O2oPreorderDetailView> {
     const id = String(order.id)
     const clientPreorderUpdateLimit = await this.getClientPreorderUpdateLimit()
+    const customerOrderShowNoMap = await this.resolveCustomerOrderShowNoMap([id])
+    const customerOrderShowNo = customerOrderShowNoMap.get(id) ?? null
     const clientUser = await this.clientUserRepo.findOne({
       where: { id: String(order.clientUserId) },
       select: ['id', 'realName', 'mobile', 'email', 'departmentName'],
@@ -937,6 +1004,7 @@ class O2oPreorderService {
         expireInSeconds: this.resolveExpireInSeconds(order, nowMs),
         id,
         showNo: order.showNo,
+        customerOrderShowNo,
         verifyCode: order.verifyCode,
         status: order.status,
         businessStatus: order.businessStatus ?? null,
@@ -1132,6 +1200,7 @@ class O2oPreorderService {
     }
     const orderIds = orders.map((item) => String(item.id))
     const nowMs = options?.nowMs ?? Date.now()
+    const customerOrderShowNoMap = await this.resolveCustomerOrderShowNoMap(orderIds)
     const totalAmountMap = await this.resolveOrderTotalAmountMap(orderIds)
     const returnRequestCountMap = await this.resolveOrderReturnRequestCountMap(orderIds)
     const latestReturnRequestMap = await this.resolveLatestReturnRequestSummaryMap(orderIds)
@@ -1141,6 +1210,7 @@ class O2oPreorderService {
       expireInSeconds: this.resolveExpireInSeconds(item, nowMs),
       id: String(item.id),
       showNo: item.showNo,
+      customerOrderShowNo: customerOrderShowNoMap.get(String(item.id)) ?? null,
       verifyCode: item.verifyCode,
       status: item.status,
       businessStatus: item.businessStatus ?? null,
@@ -1760,6 +1830,7 @@ class O2oPreorderService {
       const normalizedVerifyCodeKeyword = this.normalizeVerifyCode(normalizedKeyword)
       const escapedVerifyKeyword = this.escapeLikeKeyword(normalizedVerifyCodeKeyword)
       const matchedClientOrderType = this.resolveClientOrderTypeByKeyword(normalizedKeyword)
+      const matchedCustomerOrderPreorderIds = await this.resolveMatchedPreorderIdsByCustomerOrderKeyword(normalizedKeyword)
       const keywordContains = `%${escapedKeyword}%`
 
       queryBuilder.andWhere(
@@ -1777,6 +1848,11 @@ class O2oPreorderService {
             .orWhere(String.raw`order.departmentNameSnapshot LIKE :departmentKeyword ESCAPE '\'`, {
               departmentKeyword: keywordContains,
             })
+          if (matchedCustomerOrderPreorderIds.length) {
+            keywordQb.orWhere('order.id IN (:...matchedCustomerOrderPreorderIds)', {
+              matchedCustomerOrderPreorderIds,
+            })
+          }
           if (matchedClientOrderType) {
             keywordQb.orWhere('order.clientOrderType = :clientOrderType', {
               clientOrderType: matchedClientOrderType,
@@ -1796,20 +1872,20 @@ class O2oPreorderService {
     }
   }
 
-  async getMyOrderSummary(auth: ClientAuthContext, id: string) {
-    const order = await this.preorderRepo.findOne({ where: { id, clientUserId: auth.userId } })
-    if (!order) {
-      throw new BizError('预订单不存在', 404)
-    }
-    return this.buildOrderSummaryView(order)
-  }
-
   async getMyOrderDetail(auth: ClientAuthContext, id: string) {
     const order = await this.preorderRepo.findOne({ where: { id, clientUserId: auth.userId } })
     if (!order) {
       throw new BizError('预订单不存在', 404)
     }
     return this.buildOrderDetail(order)
+  }
+
+  async getMyOrderSummary(auth: ClientAuthContext, id: string) {
+    const order = await this.preorderRepo.findOne({ where: { id, clientUserId: auth.userId } })
+    if (!order) {
+      throw new BizError('预订单不存在', 404)
+    }
+    return this.buildOrderSummaryView(order)
   }
 
   async createReturnRequest(auth: ClientAuthContext, orderId: string, input: SubmitReturnRequestInput) {
@@ -2448,28 +2524,13 @@ class O2oPreorderService {
     })
   }
 
-  startTimeoutRecycleLoop(intervalMs = O2O_TIMEOUT_BACKGROUND_RECYCLE_INTERVAL_MS) {
-    if (this.timeoutRecycleTimer) {
+  startTimeoutRecycleLoop() {
+    if (this.timeoutRecycleLoopTimer !== null) {
       return
     }
-    const normalizedIntervalMs = Math.max(5000, Math.floor(Number(intervalMs) || O2O_TIMEOUT_BACKGROUND_RECYCLE_INTERVAL_MS))
-    const runRecycle = () => {
-      void this.cancelTimeoutOrders({ skipRecentMs: O2O_TIMEOUT_RECYCLE_RECENT_WINDOW_MS }).catch((error) => {
-        console.warn('[o2o-timeout-recycle] failed:', error instanceof Error ? error.message : String(error))
-      })
-    }
-
-    runRecycle()
-    this.timeoutRecycleTimer = setInterval(runRecycle, normalizedIntervalMs)
-    this.timeoutRecycleTimer.unref?.()
-  }
-
-  stopTimeoutRecycleLoop() {
-    if (!this.timeoutRecycleTimer) {
-      return
-    }
-    clearInterval(this.timeoutRecycleTimer)
-    this.timeoutRecycleTimer = null
+    this.timeoutRecycleLoopTimer = globalThis.setInterval(() => {
+      void this.cancelTimeoutOrders({ skipRecentMs: O2O_TIMEOUT_RECYCLE_RECENT_WINDOW_MS }).catch(() => undefined)
+    }, O2O_TIMEOUT_BACKGROUND_RECYCLE_INTERVAL_MS)
   }
 
   async cancelTimeoutOrders(options?: { skipRecentMs?: number }) {

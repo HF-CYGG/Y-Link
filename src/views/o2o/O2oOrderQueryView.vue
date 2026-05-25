@@ -7,7 +7,7 @@
  * - 详情区的状态文案必须复用共享状态配置，避免“主动撤回”被错误展示成普通取消。
  */
 
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { PageContainer } from '@/components/common'
@@ -35,6 +35,7 @@ import {
   type O2oReturnRequestDetail,
 } from '@/api/modules/o2o'
 import { extractErrorMessage } from '@/utils/error'
+import { captureOrderRefreshAnchor, restoreOrderRefreshAnchor } from '@/utils/order-refresh-visual'
 
 type OrderPoolKey = 'all' | 'pending' | 'completed' | 'cancelled' | 'returns'
 
@@ -48,6 +49,7 @@ const ORDER_POOL_TABS: Array<{ key: OrderPoolKey; label: string }> = [
 
 const NEW_ORDER_WINDOW_MS = 30 * 60 * 1000
 const NEW_ORDER_HIGHLIGHT_MS = 6000
+const ORDER_POOL_REFRESH_MARK_MS = 3200
 const MERCHANT_MESSAGE_MAX_LENGTH = 500
 const POLL_INTERVAL_OPTIONS = [10, 15] as const
 const ORDER_TYPE_LABEL_MAP = {
@@ -85,6 +87,10 @@ const orderHighlightExpiresAtMap = ref<Record<string, number>>({})
 const latestNewOrderNotice = ref<{ count: number; expiresAt: number } | null>(null)
 const orderSnapshotReady = ref(false)
 const appliedKeyword = ref('')
+const orderPoolListRef = ref<HTMLElement | null>(null)
+const orderRefreshMarkExpiresAtMap = ref<Record<string, number>>({})
+const detailRefreshNoticeExpiresAt = ref(0)
+const lastSilentListRefreshAt = ref(0)
 const router = useRouter()
 const { hasPermission, ensurePermission } = usePermissionAction()
 const orderListRequest = useStableRequest()
@@ -260,6 +266,13 @@ const activeNewOrderNotice = computed(() => {
     return null
   }
   return latestNewOrderNotice.value
+})
+const showDetailRefreshNotice = computed(() => detailRefreshNoticeExpiresAt.value > nowMs.value)
+const listAutoRefreshStatusText = computed(() => {
+  if (!lastSilentListRefreshAt.value) {
+    return '订单池自动轮询中'
+  }
+  return `最近同步 ${formatOrderDateTime(new Date(lastSilentListRefreshAt.value).toISOString(), { includeSeconds: false })}`
 })
 
 const activeScenario = computed(() => {
@@ -495,6 +508,60 @@ const formatCountdown = (order: { status: O2oOrderStatus; expireInSeconds?: numb
   return `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:${String(second).padStart(2, '0')}`
 }
 
+// 详细注释：订单池静默刷新只高亮新增或摘要变更的订单，
+// 这样操作员可以快速感知关键变化，但不会因为整个列表轮询而失去视觉焦点。
+const hasOrderSummaryChanged = (previous: O2oPreorderSummary | undefined, next: O2oPreorderSummary) => {
+  if (!previous) {
+    return true
+  }
+  return (
+    previous.showNo !== next.showNo
+    || previous.verifyCode !== next.verifyCode
+    || previous.status !== next.status
+    || previous.businessStatus !== next.businessStatus
+    || previous.hasCustomerOrder !== next.hasCustomerOrder
+    || previous.isSystemApplied !== next.isSystemApplied
+    || previous.merchantMessage !== next.merchantMessage
+    || previous.returnRequestCount !== next.returnRequestCount
+    || previous.pendingReturnRequestCount !== next.pendingReturnRequestCount
+    || previous.totalQty !== next.totalQty
+    || previous.totalAmount !== next.totalAmount
+    || previous.timeoutAt !== next.timeoutAt
+    || previous.createdAt !== next.createdAt
+    || JSON.stringify(previous.latestReturnRequest) !== JSON.stringify(next.latestReturnRequest)
+    || JSON.stringify(previous.statusReport) !== JSON.stringify(next.statusReport)
+  )
+}
+
+const hasOrderDetailChanged = (previous: O2oPreorderDetail | null, next: O2oPreorderDetail) => {
+  if (!previous) {
+    return true
+  }
+  return (
+    JSON.stringify(previous.order) !== JSON.stringify(next.order)
+    || JSON.stringify(previous.items) !== JSON.stringify(next.items)
+    || JSON.stringify(previous.returnRequests) !== JSON.stringify(next.returnRequests)
+    || JSON.stringify(previous.amountSummary ?? null) !== JSON.stringify(next.amountSummary ?? null)
+    || JSON.stringify(previous.customerProfile ?? null) !== JSON.stringify(next.customerProfile ?? null)
+  )
+}
+
+const markRefreshedOrders = (orderIds: string[]) => {
+  if (!orderIds.length) {
+    return
+  }
+  const expiresAt = nowMs.value + ORDER_POOL_REFRESH_MARK_MS
+  const nextMap = { ...orderRefreshMarkExpiresAtMap.value }
+  for (const orderId of orderIds) {
+    nextMap[orderId] = expiresAt
+  }
+  orderRefreshMarkExpiresAtMap.value = nextMap
+}
+
+const isOrderRefreshed = (orderId: string) => {
+  return (orderRefreshMarkExpiresAtMap.value[orderId] ?? 0) > nowMs.value
+}
+
 /**
  * 订单池卡片倒计时文案：
  * - 仅待核销订单且存在有效剩余时间时展示；
@@ -518,8 +585,15 @@ const pruneTransientMarks = () => {
   if (activeEntries.length !== Object.keys(orderHighlightExpiresAtMap.value).length) {
     orderHighlightExpiresAtMap.value = Object.fromEntries(activeEntries)
   }
+  const activeRefreshEntries = Object.entries(orderRefreshMarkExpiresAtMap.value).filter(([, expiresAt]) => expiresAt > nowMs.value)
+  if (activeRefreshEntries.length !== Object.keys(orderRefreshMarkExpiresAtMap.value).length) {
+    orderRefreshMarkExpiresAtMap.value = Object.fromEntries(activeRefreshEntries)
+  }
   if (latestNewOrderNotice.value && latestNewOrderNotice.value.expiresAt <= nowMs.value) {
     latestNewOrderNotice.value = null
+  }
+  if (detailRefreshNoticeExpiresAt.value <= nowMs.value) {
+    detailRefreshNoticeExpiresAt.value = 0
   }
 }
 
@@ -592,7 +666,12 @@ const loadOrderDetail = async (
   await orderDetailRequest.runLatest({
     executor: (signal) => getO2oConsoleOrderDetail(id, { signal }),
     onSuccess: (detail) => {
+      const changed = hasOrderDetailChanged(activeOrderDetail.value, detail)
       activeOrderDetail.value = detail
+      mergeOrderSummaryFromDetail(detail)
+      if (options?.silent && changed) {
+        detailRefreshNoticeExpiresAt.value = nowMs.value + ORDER_POOL_REFRESH_MARK_MS
+      }
     },
     onError: (error) => {
       if (options?.silent) {
@@ -694,6 +773,13 @@ const syncActiveOrder = async (options?: { silentDetail?: boolean }) => {
 const loadOrders = async (options?: { silent?: boolean }) => {
   const silent = options?.silent ?? false
   const committedKeyword = appliedKeyword.value.trim()
+  const scrollAnchor = silent
+    ? captureOrderRefreshAnchor({
+        listRoot: orderPoolListRef.value,
+        itemAttributeName: 'data-order-pool-card-id',
+        visibilityTopOffset: orderPoolListRef.value?.getBoundingClientRect().top ?? 0,
+      })
+    : null
   listLoading.value = !silent
 
   await orderListRequest.runLatest({
@@ -706,14 +792,29 @@ const loadOrders = async (options?: { silent?: boolean }) => {
         { signal },
       ),
     onSuccess: async (latestOrders) => {
+      const previousOrderMap = new Map(orders.value.map((item) => [item.id, item]))
       const previousOrderIds = new Set(orders.value.map((item) => item.id))
       if (orderSnapshotReady.value) {
         const incrementalNewOrders = latestOrders.filter((item) => !previousOrderIds.has(item.id) && isNewOrder(item))
         markIncrementalNewOrders(incrementalNewOrders)
       }
       orders.value = latestOrders
+      if (silent) {
+        const refreshedOrderIds = latestOrders
+          .filter((item) => hasOrderSummaryChanged(previousOrderMap.get(item.id), item))
+          .map((item) => item.id)
+        markRefreshedOrders(refreshedOrderIds)
+        lastSilentListRefreshAt.value = Date.now()
+      }
       orderSnapshotReady.value = true
       await syncActiveOrder({ silentDetail: silent })
+      if (scrollAnchor) {
+        await nextTick()
+        restoreOrderRefreshAnchor(scrollAnchor, {
+          listRoot: orderPoolListRef.value,
+          itemAttributeName: 'data-order-pool-card-id',
+        })
+      }
     },
     onError: (error) => {
       if (silent) {
@@ -922,7 +1023,7 @@ const scheduleAutoRefresh = () => {
   }
   autoRefreshTimer = globalThis.setInterval(() => {
     // 用户正在手动查询或刷新详情时跳过本轮轮询，避免后台静默请求抢占前台交互。
-    if (listLoading.value || detailLoading.value) {
+    if (globalThis.document?.visibilityState === 'hidden' || listLoading.value || detailLoading.value) {
       return
     }
     void loadOrders({ silent: true })
@@ -946,9 +1047,16 @@ const handleSoundSwitchChange = () => {
   ElMessage.success(soundNoticeEnabled.value ? '已开启新单提示音' : '已关闭新单提示音')
 }
 
+const handleVisibilityChange = () => {
+  if (globalThis.document.visibilityState === 'visible' && autoRefreshEnabled.value && !listLoading.value && !detailLoading.value) {
+    void loadOrders({ silent: true })
+  }
+}
+
 onMounted(async () => {
   await loadOrders()
   scheduleAutoRefresh()
+  globalThis.document?.addEventListener('visibilitychange', handleVisibilityChange)
   secondTickTimer = globalThis.setInterval(() => {
     nowMs.value = Date.now()
     pruneTransientMarks()
@@ -956,6 +1064,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  globalThis.document?.removeEventListener('visibilitychange', handleVisibilityChange)
   if (autoRefreshTimer !== null) {
     globalThis.clearInterval(autoRefreshTimer)
     autoRefreshTimer = null
@@ -977,7 +1086,10 @@ onBeforeUnmount(() => {
     <div class="order-workbench-root grid gap-4 xl:grid-cols-[26rem_minmax(0,1fr)]">
       <section class="min-w-0 overflow-hidden rounded-3xl bg-white p-5 shadow-sm">
         <div class="order-pool-header">
-          <p class="order-pool-header__title break-words text-lg font-semibold text-slate-900">订单池</p>
+          <div class="order-pool-header__title">
+            <p class="break-words text-lg font-semibold text-slate-900">订单池</p>
+            <p class="mt-1 text-xs text-slate-400">{{ listAutoRefreshStatusText }}</p>
+          </div>
           <div class="order-pool-header__controls">
             <el-switch
               v-model="autoRefreshEnabled"
@@ -1047,55 +1159,67 @@ onBeforeUnmount(() => {
           </div>
         </Transition>
 
-        <div class="mt-4 space-y-2">
-          <button
-            v-for="order in currentPoolOrders"
-            :key="order.id"
-            type="button"
-            class="w-full rounded-2xl border px-3 py-3 text-left transition"
-            :class="[
-              activeOrderId === order.id ? 'border-teal-200 bg-teal-50' : 'border-slate-100 bg-white hover:bg-slate-50',
-              isOrderHighlighted(order.id) ? 'order-card--new' : '',
-            ]"
-            @click="handlePickOrder(order.id)"
-          >
-            <div class="flex min-w-0 items-start justify-between gap-2">
-              <div class="min-w-0">
-                <div class="flex min-w-0 flex-wrap items-center gap-2">
-                  <p class="min-w-0 break-words text-sm font-semibold text-slate-900">{{ order.showNo }}</p>
-                  <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">
-                    {{ getOrderTypeLabel(order.clientOrderType) }}
+        <div ref="orderPoolListRef" class="mt-4">
+          <TransitionGroup name="order-pool-refresh" tag="div" class="space-y-2">
+            <button
+              v-for="order in currentPoolOrders"
+              :key="order.id"
+              type="button"
+              class="w-full rounded-2xl border px-3 py-3 text-left transition"
+              :class="[
+                activeOrderId === order.id ? 'border-teal-200 bg-teal-50' : 'border-slate-100 bg-white hover:bg-slate-50',
+                isOrderHighlighted(order.id) ? 'order-card--new' : '',
+                isOrderRefreshed(order.id) ? 'order-card--refreshed' : '',
+              ]"
+              :data-order-pool-card-id="order.id"
+              @click="handlePickOrder(order.id)"
+            >
+              <div class="flex min-w-0 items-start justify-between gap-2">
+                <div class="min-w-0">
+                  <div class="flex min-w-0 flex-wrap items-center gap-2">
+                    <p class="min-w-0 break-words text-sm font-semibold text-slate-900">{{ order.showNo }}</p>
+                    <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">
+                      {{ getOrderTypeLabel(order.clientOrderType) }}
+                    </span>
+                    <Transition name="detail-refresh-notice">
+                      <span
+                        v-if="isOrderRefreshed(order.id)"
+                        class="rounded-full bg-teal-50 px-2 py-0.5 text-[11px] font-medium text-teal-700"
+                      >
+                        已更新
+                      </span>
+                    </Transition>
+                    <span
+                      v-if="order.returnRequestCount > 0"
+                      class="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700"
+                    >
+                      退货 {{ order.returnRequestCount }} 笔
+                    </span>
+                  </div>
+                </div>
+                <div class="flex shrink-0 flex-col items-end gap-1 text-right">
+                  <span class="rounded-full px-2 py-0.5 text-[11px] font-medium" :class="getOrderReportConfig(order).cardClassName">
+                    {{ getOrderReportConfig(order).statusLabel }}
                   </span>
                   <span
-                    v-if="order.returnRequestCount > 0"
+                    v-if="getOrderCountdownText(order)"
                     class="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700"
                   >
-                    退货 {{ order.returnRequestCount }} 笔
+                    {{ getOrderCountdownText(order) }}
                   </span>
                 </div>
               </div>
-              <div class="flex shrink-0 flex-col items-end gap-1 text-right">
-                <span class="rounded-full px-2 py-0.5 text-[11px] font-medium" :class="getOrderReportConfig(order).cardClassName">
-                  {{ getOrderReportConfig(order).statusLabel }}
-                </span>
-                <span
-                  v-if="getOrderCountdownText(order)"
-                  class="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700"
-                >
-                  {{ getOrderCountdownText(order) }}
-                </span>
+              <div class="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500">
+                <p class="break-words">时间：{{ formatOrderDateTime(order.createdAt, { includeSeconds: false }) }}</p>
+                <p class="text-right">件数：{{ order.totalQty }}</p>
+                <p class="break-words">归属：{{ getOrderTypeLabel(order.clientOrderType) }}{{ order.departmentNameSnapshot ? ` / ${order.departmentNameSnapshot}` : '' }}</p>
+                <p>应付总额：¥{{ formatCurrency(order.totalAmount) }}</p>
+                <p class="break-words" :class="order.returnRequestCount > 0 ? 'text-amber-700' : 'text-slate-400'">
+                  退货记录：{{ order.returnRequestCount > 0 ? `共 ${order.returnRequestCount} 笔${order.pendingReturnRequestCount > 0 ? `，待处理 ${order.pendingReturnRequestCount} 笔` : ''}` : '暂无' }}
+                </p>
               </div>
-            </div>
-            <div class="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500">
-              <p class="break-words">时间：{{ formatOrderDateTime(order.createdAt, { includeSeconds: false }) }}</p>
-              <p class="text-right">件数：{{ order.totalQty }}</p>
-              <p class="break-words">归属：{{ getOrderTypeLabel(order.clientOrderType) }}{{ order.departmentNameSnapshot ? ` / ${order.departmentNameSnapshot}` : '' }}</p>
-              <p>应付总额：¥{{ formatCurrency(order.totalAmount) }}</p>
-              <p class="break-words" :class="order.returnRequestCount > 0 ? 'text-amber-700' : 'text-slate-400'">
-                退货记录：{{ order.returnRequestCount > 0 ? `共 ${order.returnRequestCount} 笔${order.pendingReturnRequestCount > 0 ? `，待处理 ${order.pendingReturnRequestCount} 笔` : ''}` : '暂无' }}
-              </p>
-            </div>
-          </button>
+            </button>
+          </TransitionGroup>
           <div v-if="!listLoading && !currentPoolOrders.length" class="rounded-2xl border border-dashed border-slate-200 px-3 py-8 text-center text-sm text-slate-400">
             当前分栏暂无订单
           </div>
@@ -1106,7 +1230,17 @@ onBeforeUnmount(() => {
         <template v-if="activeOrderDetail">
           <div class="flex flex-col gap-3 lg:flex-row lg:flex-wrap lg:items-start lg:justify-between">
             <div class="min-w-0">
-              <p class="break-words text-lg font-semibold text-slate-900">{{ activeOrderDetail.order.showNo }}</p>
+              <div class="flex flex-wrap items-center gap-2">
+                <p class="break-words text-lg font-semibold text-slate-900">{{ activeOrderDetail.order.showNo }}</p>
+                <Transition name="detail-refresh-notice">
+                  <span
+                    v-if="showDetailRefreshNotice"
+                    class="rounded-full bg-teal-50 px-2.5 py-1 text-xs font-semibold text-teal-700"
+                  >
+                    详情已更新
+                  </span>
+                </Transition>
+              </div>
               <p class="mt-1 break-all text-sm text-slate-400">核销码：{{ activeOrderDetail.order.verifyCode }}</p>
             </div>
             <div class="grid grid-cols-1 gap-2 sm:grid-cols-3 lg:w-auto">
@@ -1615,6 +1749,30 @@ onBeforeUnmount(() => {
   animation: new-order-pulse 0.9s var(--ylink-motion-ease) 2;
 }
 
+.order-card--refreshed {
+  border-color: rgba(13, 148, 136, 0.32);
+  box-shadow: 0 0 0 2px rgba(45, 212, 191, 0.16);
+  animation: refreshed-order-pulse 0.9s var(--ylink-motion-ease);
+}
+
+.order-pool-refresh-enter-active,
+.order-pool-refresh-leave-active,
+.order-pool-refresh-move,
+.detail-refresh-notice-enter-active,
+.detail-refresh-notice-leave-active {
+  transition:
+    opacity var(--ylink-motion-normal) var(--ylink-motion-ease),
+    transform var(--ylink-motion-normal) var(--ylink-motion-ease);
+}
+
+.order-pool-refresh-enter-from,
+.order-pool-refresh-leave-to,
+.detail-refresh-notice-enter-from,
+.detail-refresh-notice-leave-to {
+  opacity: 0;
+  transform: translateY(8px) scale(0.98);
+}
+
 .new-order-notice-enter-active,
 .new-order-notice-leave-active {
   transition:
@@ -1637,6 +1795,17 @@ onBeforeUnmount(() => {
   }
   100% {
     box-shadow: 0 0 0 0 rgba(251, 191, 36, 0);
+  }
+}
+
+@keyframes refreshed-order-pulse {
+  0% {
+    transform: translateY(6px);
+    box-shadow: 0 0 0 0 rgba(45, 212, 191, 0.2);
+  }
+  100% {
+    transform: translateY(0);
+    box-shadow: 0 0 0 2px rgba(45, 212, 191, 0.16);
   }
 }
 

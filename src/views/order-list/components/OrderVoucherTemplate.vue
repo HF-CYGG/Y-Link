@@ -17,8 +17,7 @@ interface OrderVoucherEditableFields {
   departmentOperator: string
   kingdeeVoucherNo: string
   receiverSignature: string
-  issuerSignature: string
-  completionSignature: string
+  completionDate: string
 }
 
 type VoucherOrientation = 'portrait' | 'landscape'
@@ -27,8 +26,7 @@ const createEmptyEditableFields = (): OrderVoucherEditableFields => ({
   departmentOperator: '',
   kingdeeVoucherNo: '',
   receiverSignature: '',
-  issuerSignature: '',
-  completionSignature: '',
+  completionDate: '',
 })
 
 const props = withDefaults(
@@ -43,8 +41,7 @@ const props = withDefaults(
       departmentOperator: '',
       kingdeeVoucherNo: '',
       receiverSignature: '',
-      issuerSignature: '',
-      completionSignature: '',
+      completionDate: '',
     }),
     copyLabels: () => ['第一联（部门留存）', '第二联（书院留存）'],
     orientation: 'landscape',
@@ -213,8 +210,9 @@ const printTimestamp = formatDateTime(new Date())
           </tr>
           <tr class="voucher-sign-label-row">
             <th colspan="2" scope="colgroup">领取人签字</th>
-            <th colspan="2" scope="colgroup">出库人签字</th>
-            <th colspan="2" scope="colgroup">完成日期/签字</th>
+            <th colspan="2" scope="colgroup">文创工坊管理员签字</th>
+            <th scope="colgroup">出库人签字</th>
+            <th scope="colgroup">完成日期</th>
           </tr>
           <tr class="voucher-sign-value-row">
             <td colspan="2" class="is-editable-cell">
@@ -223,13 +221,18 @@ const printTimestamp = formatDateTime(new Date())
               </span>
             </td>
             <td colspan="2" class="is-editable-cell">
-              <span class="editable-line" :class="{ 'is-empty': !resolvedEditableFields.issuerSignature.trim() }">
-                {{ getEditableFieldDisplay(resolvedEditableFields.issuerSignature) }}
+              <span class="editable-line is-empty">
+                {{ getEditableFieldDisplay('') }}
               </span>
             </td>
-            <td colspan="2" class="is-editable-cell">
-              <span class="editable-line" :class="{ 'is-empty': !resolvedEditableFields.completionSignature.trim() }">
-                {{ getEditableFieldDisplay(resolvedEditableFields.completionSignature) }}
+            <td class="is-editable-cell">
+              <span class="editable-line is-empty">
+                {{ getEditableFieldDisplay('') }}
+              </span>
+            </td>
+            <td class="is-editable-cell">
+              <span class="editable-line" :class="{ 'is-empty': !resolvedEditableFields.completionDate.trim() }">
+                {{ getEditableFieldDisplay(resolvedEditableFields.completionDate) }}
               </span>
             </td>
           </tr>
@@ -270,7 +273,8 @@ const printTimestamp = formatDateTime(new Date())
 .voucher-sheet__meta {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
+  flex-wrap: wrap;
   gap: 12px;
   margin-bottom: 6px;
   font-size: 12px;
@@ -358,9 +362,9 @@ const printTimestamp = formatDateTime(new Date())
 }
 
 .voucher-master-table td.text-left {
-  text-align: left;
-  padding-left: 8px;
-  padding-right: 8px;
+  text-align: center;
+  padding-left: 5px;
+  padding-right: 5px;
 }
 
 .voucher-master-table tbody tr:not(.voucher-title-row):not(.voucher-detail-header-row):not(.voucher-sign-label-row) td {
@@ -414,10 +418,11 @@ const printTimestamp = formatDateTime(new Date())
   width: 100%;
   display: inline-flex;
   align-items: center;
-  justify-content: flex-start;
+  justify-content: center;
   padding: 0 4px;
   box-sizing: border-box;
   white-space: pre-wrap;
+  text-align: center;
 }
 
 .editable-line.is-empty {

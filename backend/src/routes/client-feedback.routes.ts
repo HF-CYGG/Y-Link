@@ -40,7 +40,11 @@ import {
   CLIENT_FEEDBACK_SUBJECT_MAX_LENGTH,
 } from '../services/client-feedback.service.js'
 import { BizError } from '../utils/errors.js'
-import { buildUploadPublicUrl, createCategorizedImageUpload, finalizeUploadedImageFile } from '../utils/upload-storage.js'
+import {
+  buildUploadPublicUrl,
+  createCategorizedImageUpload,
+  finalizeUploadedImageFile,
+} from '../utils/upload-storage.js'
 
 /**
  * 客户端会话列表分页上限：

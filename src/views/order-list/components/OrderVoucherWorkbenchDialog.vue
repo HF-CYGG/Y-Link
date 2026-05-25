@@ -27,8 +27,7 @@ interface OrderVoucherEditableFields {
   departmentOperator: string
   kingdeeVoucherNo: string
   receiverSignature: string
-  issuerSignature: string
-  completionSignature: string
+  completionDate: string
 }
 
 type VoucherOrientation = 'portrait' | 'landscape'
@@ -56,15 +55,15 @@ const emit = defineEmits<{
  */
 const ORDER_VOUCHER_FIXED_FIELDS_TEXT = '固定版式字段：标题区、基础信息区、明细区、汇总区与签字区'
 const ORDER_VOUCHER_AUTO_FIELDS_TEXT = '自动填充字段：申请部门、商品名称、产品编码、单价、数量、小计、总计、业务单号'
-const ORDER_VOUCHER_EDITABLE_FIELDS_TEXT = '在线补填字段：部门经办人、金蝶单据编号、领取人签字、出库人签字、完成日期/签字'
+const ORDER_VOUCHER_EDITABLE_FIELDS_TEXT = '在线补填字段：部门经办人、金蝶单据编号、领取人签字、完成日期'
+const ORDER_VOUCHER_OFFLINE_SIGNATURE_TEXT = '线下手写字段：文创工坊管理员签字、出库人签字'
 const VOUCHER_PRINT_STYLE_ID = 'y-link-order-voucher-print-page-style'
 
 const createEmptyVoucherEditableFields = (): OrderVoucherEditableFields => ({
   departmentOperator: '',
   kingdeeVoucherNo: '',
   receiverSignature: '',
-  issuerSignature: '',
-  completionSignature: '',
+  completionDate: '',
 })
 
 const dialogVisible = computed({
@@ -199,6 +198,7 @@ const handleExportVoucherPdf = async () => {
         <span>{{ ORDER_VOUCHER_FIXED_FIELDS_TEXT }}</span>
         <span>{{ ORDER_VOUCHER_AUTO_FIELDS_TEXT }}</span>
         <span>{{ ORDER_VOUCHER_EDITABLE_FIELDS_TEXT }}</span>
+        <span>{{ ORDER_VOUCHER_OFFLINE_SIGNATURE_TEXT }}</span>
         <span>本期补填内容仅在当前页面临时生效，不回写数据库。</span>
       </div>
     </div>
@@ -232,13 +232,10 @@ const handleExportVoucherPdf = async () => {
             <el-form-item label="领取人签字">
               <el-input v-model="voucherEditableForm.receiverSignature" placeholder="请输入领取人签字" clearable />
             </el-form-item>
-            <el-form-item label="出库人签字">
-              <el-input v-model="voucherEditableForm.issuerSignature" placeholder="请输入出库人签字" clearable />
-            </el-form-item>
-            <el-form-item class="voucher-editor-form__item--full" label="完成日期/签字">
+            <el-form-item label="完成日期">
               <el-input
-                v-model="voucherEditableForm.completionSignature"
-                placeholder="请输入完成日期或签字说明，例如：2026-04-28 已完成"
+                v-model="voucherEditableForm.completionDate"
+                placeholder="请输入完成日期，例如：2026-04-28"
                 clearable
               />
             </el-form-item>

@@ -168,7 +168,6 @@ async function bootstrap(): Promise<void> {
   prepareDatabaseRuntime()
   logLine('STEP', 'initialize datasource')
   await AppDataSource.initialize()
-  logLine('STEP', 'install sqlite transaction queue')
   installSqliteTransactionQueue(AppDataSource)
   logLine('STEP', 'initialize database schema')
   const schemaInitResult = await initializeDatabaseSchemaIfNeeded(AppDataSource)

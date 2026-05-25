@@ -36,6 +36,7 @@ import {
   type FeedbackRealtimeConnection,
   type FeedbackSatisfactionLevel,
 } from '@/api/modules/customer-service-feedback'
+import { useStableRequest } from '@/composables/useStableRequest'
 import { useClientAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { formatDateTime } from '@/utils/date-time'
@@ -45,8 +46,17 @@ import { normalizeSubmitText } from '@/utils/submit-feedback'
 const route = useRoute()
 const router = useRouter()
 const clientAuthStore = useClientAuthStore(pinia)
+const detailRequest = useStableRequest()
 const FEEDBACK_ATTACHMENT_LIMIT = 9
 const FEEDBACK_ATTACHMENT_MAX_SIZE = 10 * 1024 * 1024
+type ClientFeedbackDetailUiSnapshot = {
+  replyDraft: string
+  replyAttachments: FeedbackConversationMessageAttachment[]
+  satisfactionComment: string
+  selectedSatisfactionLevel: FeedbackSatisfactionLevel
+  satisfactionDialogVisible: boolean
+  windowScrollY: number
+}
 
 const loading = ref(false)
 const detailLoading = ref(false)
@@ -66,8 +76,10 @@ const availability = ref<FeedbackPortalAvailability | null>(null)
 const realtimeState = ref<'connecting' | 'online' | 'offline'>('offline')
 const reconnectTip = ref('进入页面后会自动续接当前会话。')
 const previewImageUrl = ref('')
+const freshMessageIds = ref<string[]>([])
 let realtimeConnection: FeedbackRealtimeConnection | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+let freshMessageTimer: ReturnType<typeof setTimeout> | null = null
 
 const currentClientUser = computed(() => clientAuthStore.currentUser)
 const currentConversationId = computed(() => {
@@ -275,6 +287,57 @@ const resolveAttachmentUrl = (attachment: FeedbackConversationMessageAttachment)
   return resolveFeedbackAttachmentUrl(attachment.url)
 }
 
+/**
+ * 自动刷新前快照页面级本地状态：
+ * - 补充说明、待发送附件与评价弹窗输入都属于用户临时编辑内容，不能被实时刷新覆盖；
+ * - 页面整体滚动位置也一起记录，避免有新进展时把用户拉回顶部。
+ */
+const captureDetailUiSnapshot = (): ClientFeedbackDetailUiSnapshot => {
+  return {
+    replyDraft: replyDraft.value,
+    replyAttachments: [...replyAttachments.value],
+    satisfactionComment: satisfactionComment.value,
+    selectedSatisfactionLevel: selectedSatisfactionLevel.value,
+    satisfactionDialogVisible: satisfactionDialogVisible.value,
+    windowScrollY: globalThis.window?.scrollY ?? 0,
+  }
+}
+
+const restoreDetailUiSnapshot = async (snapshot: ClientFeedbackDetailUiSnapshot | null) => {
+  if (!snapshot) {
+    return
+  }
+  replyDraft.value = snapshot.replyDraft
+  replyAttachments.value = [...snapshot.replyAttachments]
+  satisfactionComment.value = snapshot.satisfactionComment
+  selectedSatisfactionLevel.value = snapshot.selectedSatisfactionLevel
+  satisfactionDialogVisible.value = snapshot.satisfactionDialogVisible
+  await nextTick()
+  globalThis.window?.scrollTo({
+    top: snapshot.windowScrollY,
+    behavior: 'auto',
+  })
+}
+
+/**
+ * 新消息高亮只保留一个很短的窗口：
+ * - 让用户能快速分辨“这次自动刷新到底更新了哪里”；
+ * - 又不会形成持续闪烁，影响阅读长消息。
+ */
+const markFreshMessageIds = (ids: string[]) => {
+  if (!ids.length) {
+    return
+  }
+  freshMessageIds.value = [...new Set([...freshMessageIds.value, ...ids])]
+  if (freshMessageTimer) {
+    clearTimeout(freshMessageTimer)
+  }
+  freshMessageTimer = setTimeout(() => {
+    freshMessageIds.value = []
+    freshMessageTimer = null
+  }, 1800)
+}
+
 const isImageAttachment = (attachment: FeedbackConversationMessageAttachment) => {
   const normalizedMimeType = attachment.mimeType?.toLowerCase() || ''
   if (normalizedMimeType.startsWith('image/')) {
@@ -313,34 +376,65 @@ const loadPortalConfig = async () => {
     : '客服当前离线，你仍可先留言，客服上线后会在当前反馈单继续跟进。'
 }
 
-const loadConversationDetail = async (conversationId: string) => {
+const loadConversationDetail = async (
+  conversationId: string,
+  options: {
+    preserveLocalState?: boolean
+  } = {},
+) => {
   if (!conversationId) {
+    // 路由已切离当前详情时，立即终止未完成请求，避免旧结果回写到空态或其他详情页。
+    detailRequest.cancel()
     conversation.value = null
+    detailLoading.value = false
+    loading.value = false
     return
   }
 
+  const previousConversationId = conversation.value?.id ?? ''
+  const shouldPreserveLocalState = Boolean(options.preserveLocalState && previousConversationId === conversationId)
+  const detailUiSnapshot = shouldPreserveLocalState ? captureDetailUiSnapshot() : null
+  const previousMessageIds = shouldPreserveLocalState
+    ? new Set(conversation.value?.messages.map((message) => message.id) ?? [])
+    : null
   detailLoading.value = true
   if (!conversation.value) {
     loading.value = true
   }
 
-  try {
-    const detail = await getClientFeedbackConversation(conversationId)
-    if (!detail) {
-      ElMessage.warning('未找到对应反馈单，已返回会话列表')
-      router.replace('/client/feedback')
-      return
-    }
-    conversation.value = detail
-    satisfactionComment.value = detail.satisfaction?.comment || ''
-    selectedSatisfactionLevel.value = detail.satisfaction?.level || 'satisfied'
-    if (detail.satisfaction) {
-      satisfactionDialogVisible.value = false
-    }
-  } finally {
-    detailLoading.value = false
-    loading.value = false
-  }
+  await detailRequest.runLatest({
+    executor: (signal) => getClientFeedbackConversation(conversationId, { signal }),
+    onSuccess: async (detail) => {
+      // 即便当前请求仍是“最后一次”，也额外确认路由参数未切走，避免边界场景误回写。
+      if (currentConversationId.value !== conversationId) {
+        return
+      }
+      if (!detail) {
+        ElMessage.warning('未找到对应反馈单，已返回会话列表')
+        router.replace('/client/feedback')
+        return
+      }
+
+      conversation.value = detail
+      satisfactionComment.value = detail.satisfaction?.comment || ''
+      selectedSatisfactionLevel.value = detail.satisfaction?.level || 'satisfied'
+      if (detail.satisfaction) {
+        satisfactionDialogVisible.value = false
+      }
+      if (shouldPreserveLocalState) {
+        markFreshMessageIds(
+          detail.messages
+            .filter((message) => !previousMessageIds?.has(message.id))
+            .map((message) => message.id),
+        )
+        await restoreDetailUiSnapshot(detailUiSnapshot)
+      }
+    },
+    onFinally: () => {
+      detailLoading.value = false
+      loading.value = false
+    },
+  })
 }
 
 const openReplyAttachmentPicker = () => {
@@ -520,7 +614,9 @@ const connectRealtime = () => {
       if (payload?.conversationId !== currentConversationId.value) {
         return
       }
-      await loadConversationDetail(currentConversationId.value)
+      await loadConversationDetail(currentConversationId.value, {
+        preserveLocalState: true,
+      })
       reconnectTip.value = '检测到当前反馈单有新进展，已自动刷新详情。'
     },
     onError: () => {
@@ -589,6 +685,10 @@ onBeforeUnmount(() => {
   if (reconnectTimer) {
     clearTimeout(reconnectTimer)
     reconnectTimer = null
+  }
+  if (freshMessageTimer) {
+    clearTimeout(freshMessageTimer)
+    freshMessageTimer = null
   }
 })
 </script>
@@ -944,7 +1044,11 @@ onBeforeUnmount(() => {
             v-for="message in conversation.messages"
             :key="message.id"
             class="rounded-[1rem] px-4 py-3 transition"
-            :class="[getMessageCardClass(message.senderRole), getMessageContainerClass(message.senderRole)]"
+            :class="[
+              getMessageCardClass(message.senderRole),
+              getMessageContainerClass(message.senderRole),
+              freshMessageIds.includes(message.id) ? 'client-feedback-message--fresh' : '',
+            ]"
           >
             <div class="flex flex-wrap items-center justify-between gap-2">
               <p :class="getMessageTitleClass(message.senderRole)">
@@ -1253,6 +1357,10 @@ onBeforeUnmount(() => {
   background: rgb(241 245 249);
 }
 
+.client-feedback-message--fresh {
+  animation: client-feedback-fresh-highlight 1.6s ease;
+}
+
 .feedback-preview-overlay {
   position: fixed;
   inset: 0;
@@ -1293,6 +1401,25 @@ onBeforeUnmount(() => {
   border-radius: 1.25rem;
   object-fit: contain;
   background: rgb(248 250 252);
+}
+
+@keyframes client-feedback-fresh-highlight {
+  0% {
+    box-shadow:
+      0 0 0 1px rgba(45, 212, 191, 0.24) inset,
+      0 0 0 0 rgba(45, 212, 191, 0.16);
+    background: rgba(240, 253, 250, 0.96);
+  }
+  55% {
+    box-shadow:
+      0 0 0 1px rgba(45, 212, 191, 0.16) inset,
+      0 14px 26px -22px rgba(13, 148, 136, 0.24);
+    background: rgba(204, 251, 241, 0.34);
+  }
+  100% {
+    box-shadow: none;
+    background: transparent;
+  }
 }
 
 .client-feedback-satisfaction-dialog :deep(.el-dialog) {

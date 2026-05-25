@@ -47,6 +47,7 @@ export interface O2oPreorderSummary {
   expireInSeconds?: number
   id: string
   showNo: string
+  customerOrderShowNo?: string | null
   verifyCode: string
   status: O2oOrderStatus
   businessStatus: O2oOrderBusinessStatus | null
@@ -130,6 +131,7 @@ export interface O2oPreorderDetail {
     expireInSeconds?: number
     id: string
     showNo: string
+    customerOrderShowNo?: string | null
     verifyCode: string
     status: O2oOrderStatus
     businessStatus: O2oOrderBusinessStatus | null
@@ -238,6 +240,21 @@ export interface O2oConsoleOrderListQuery {
   startTime?: string
   endTime?: string
   limit?: number
+}
+
+/**
+ * 客户端展示订单号时，优先使用核销后沉淀出的正式出库单号：
+ * - 已生成管理端正式出库单时，客户端应与管理端保持完全一致；
+ * - 尚未核销或历史数据未关联正式出库单时，再回退显示预订单号。
+ */
+export const resolveO2oDisplayShowNo = (
+  orderLike: Pick<O2oPreorderSummary, 'showNo' | 'customerOrderShowNo'>,
+) => {
+  const normalizedCustomerOrderShowNo = orderLike.customerOrderShowNo?.trim()
+  if (normalizedCustomerOrderShowNo) {
+    return normalizedCustomerOrderShowNo
+  }
+  return orderLike.showNo
 }
 
 export const getO2oMallProducts = (config?: RequestConfig) =>

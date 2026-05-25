@@ -10,7 +10,7 @@
  * - 若需要切换到 WebSocket，仅需替换本模块的流连接实现，页面事件回调签名可保持不变。
  */
 
-import { request } from '@/api/http'
+import { request, type RequestConfig } from '@/api/http'
 import { getPersistedClientAuthToken } from '@/utils/client-auth-storage'
 import { compressImageForUpload } from '@/utils/image-upload'
 
@@ -1093,8 +1093,17 @@ export const listClientFeedbackConversations = async (): Promise<FeedbackConvers
   return response.list.map((item) => mapConversation(item))
 }
 
-export const getClientFeedbackConversation = async (conversationId: string): Promise<FeedbackConversationRecord | null> => {
+/**
+ * 获取客户端反馈详情：
+ * - 允许页面透传 `signal`，供自动刷新、路由切换与显式动作并发时取消旧请求；
+ * - 这样可以与稳定请求通道配合，避免旧详情在更晚返回后覆盖当前页面状态。
+ */
+export const getClientFeedbackConversation = async (
+  conversationId: string,
+  requestConfig: RequestConfig = {},
+): Promise<FeedbackConversationRecord | null> => {
   const response = await request<BackendConversationDetail>({
+    ...requestConfig,
     url: `/client-feedback/conversations/${conversationId}`,
     method: 'GET',
   })
@@ -1192,8 +1201,12 @@ export const submitClientFeedbackSatisfaction = async (
   return response.satisfaction
 }
 
-export const listSupportFeedbackConversations = async (query: SupportFeedbackListQuery = {}): Promise<FeedbackConversationRecord[]> => {
+export const listSupportFeedbackConversations = async (
+  query: SupportFeedbackListQuery = {},
+  requestConfig: RequestConfig = {},
+): Promise<FeedbackConversationRecord[]> => {
   const response = await request<BackendListResult<BackendConversationSummary>>({
+    ...requestConfig,
     url: '/customer-service/conversations',
     method: 'GET',
     params: {
@@ -1213,8 +1226,12 @@ export const listSupportFeedbackConversations = async (query: SupportFeedbackLis
   return records
 }
 
-export const getSupportFeedbackConversation = async (conversationId: string): Promise<FeedbackConversationRecord | null> => {
+export const getSupportFeedbackConversation = async (
+  conversationId: string,
+  requestConfig: RequestConfig = {},
+): Promise<FeedbackConversationRecord | null> => {
   const response = await request<BackendConversationDetail>({
+    ...requestConfig,
     url: `/customer-service/conversations/${conversationId}`,
     method: 'GET',
   })
@@ -1297,8 +1314,9 @@ export const updateFeedbackInternalRemark = async (conversationId: string, conte
   return response.internalRemark
 }
 
-export const getCustomerServicePresence = async (): Promise<FeedbackServicePresence> => {
+export const getCustomerServicePresence = async (requestConfig: RequestConfig = {}): Promise<FeedbackServicePresence> => {
   return request<FeedbackServicePresence>({
+    ...requestConfig,
     url: '/customer-service/presence',
     method: 'GET',
   })
@@ -1309,8 +1327,9 @@ export const getCustomerServicePresence = async (): Promise<FeedbackServicePrese
  * - 避免客服工作台依赖管理员专用的用户治理接口权限；
  * - 后端会提前过滤不可接单的角色与停用账号。
  */
-export const listSupportAssignableUsers = async (): Promise<SupportAssignableUser[]> => {
+export const listSupportAssignableUsers = async (requestConfig: RequestConfig = {}): Promise<SupportAssignableUser[]> => {
   return request<SupportAssignableUser[]>({
+    ...requestConfig,
     url: '/customer-service/assignees',
     method: 'GET',
   })

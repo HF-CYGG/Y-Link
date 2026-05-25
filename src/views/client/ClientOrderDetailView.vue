@@ -3,7 +3,7 @@
  * 模块说明：src/views/client/ClientOrderDetailView.vue
  * 文件职责：承载客户端订单详情展示、进度查看、二维码展示、订单撤回与退货申请。
  * 实现逻辑：
- * - 详情页加载成功后会同步刷新订单摘要缓存，并在编辑、退货等场景优先做局部回写而不是整单重拉；
+ * - 详情页加载成功后会同步刷新订单摘要缓存，方便返回列表页时立即看到最新状态；
  * - 订单 Store 初始化按当前客户端账号执行，避免共享终端切换账号后把旧订单摘要带入新账号上下文。
  * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
  */
@@ -18,6 +18,7 @@ import {
   getO2oMallProducts,
   getO2oPreorderDetail,
   markMyO2oPreorderCustomerOrderPrinted,
+  resolveO2oDisplayShowNo,
   submitO2oReturnRequest,
   updateMyO2oPreorder,
   type O2oMallProduct,
@@ -62,6 +63,7 @@ const loadOrderVoucherTemplateModule = () => import('@/views/order-list/componen
 const loadVoucherPdfExportModule = () => import('@/utils/pdf/export-voucher-pdf')
 type QrCodeModule = typeof import('qrcode')
 type QrCodeRenderer = Pick<QrCodeModule, 'toDataURL'>
+type VoucherUiModulePromise = Promise<void>
 
 const ClientOrderVoucherDialog = defineAsyncComponent({
   loader: async () => (await loadClientOrderVoucherDialogModule()).default,
@@ -77,6 +79,9 @@ const ORDER_TYPE_LABEL_MAP = {
   department: '部门订',
   walkin: '散客',
 } as const
+const DETAIL_AUTO_REFRESH_INTERVAL_MS = 15 * 1000
+const DETAIL_REFRESH_NOTICE_MS = 3200
+const clientOrderRefreshSourceId = `client-order-detail-${Math.random().toString(36).slice(2)}`
 
 const route = useRoute()
 const router = useRouter()
@@ -106,14 +111,16 @@ const exportPdfLoading = ref(false)
 const voucherOrientation = ref<VoucherOrientation>(DEFAULT_VOUCHER_ORIENTATION)
 const enableHtml2pdfExport = import.meta.env.VITE_ORDER_VOUCHER_HTML2PDF_ENABLED !== 'false'
 const voucherEditableForm = reactive<OrderVoucherEditableFields>(createEmptyVoucherEditableFields())
+const detailRefreshNoticeExpiresAt = ref(0)
+const lastSilentRefreshAt = ref(0)
 const { runLatest } = useStableRequest()
 const clientAuthStore = useClientAuthStore(pinia)
 const clientOrderStore = useClientOrderStore(pinia)
 let disposeClientOrderRefresh: () => void = () => {}
-const clientOrderRefreshSourceId = `client-order-detail-${Math.random().toString(36).slice(2)}`
-let voucherUiModulePromise: Promise<void> | null = null
+let voucherUiModulePromise: VoucherUiModulePromise | null = null
 let voucherPdfExportModulePromise: ReturnType<typeof loadVoucherPdfExportModule> | null = null
 let qrCodeModulePromise: Promise<QrCodeModule> | null = null
+let detailAutoRefreshTimer: ReturnType<typeof globalThis.setInterval> | null = null
 clientOrderStore.initialize(clientAuthStore.currentUser?.id)
 
 const currentReportScenario = computed(() => {
@@ -207,8 +214,21 @@ const orderTypeLabel = computed(() => {
 const shouldShowVoucherButton = computed(() => {
   return detail.value?.order.clientOrderType === 'department'
 })
+const displayOrderShowNo = computed(() => {
+  if (!detail.value) {
+    return ''
+  }
+  return resolveO2oDisplayShowNo(detail.value.order)
+})
 
 const voucherOrientationLabel = computed(() => (voucherOrientation.value === 'landscape' ? '横版' : '竖版'))
+const showDetailRefreshNotice = computed(() => detailRefreshNoticeExpiresAt.value > Date.now())
+const detailAutoRefreshStatusText = computed(() => {
+  if (!lastSilentRefreshAt.value) {
+    return '详情自动同步已开启'
+  }
+  return `最近同步 ${formatOrderDateTime(new Date(lastSilentRefreshAt.value).toISOString())}`
+})
 
 const toVoucherMoneyText = (value: string | number | null | undefined) => {
   const normalizedValue = Number(value ?? 0)
@@ -221,6 +241,28 @@ const formatOrderDateTime = (value?: string | null, fallback = '-') => {
   return formatDateTime(value, fallback)
 }
 
+// 详细注释：静默轮询只在核心详情摘要、明细、退货记录等字段真正变化时给出提示，
+// 避免每次轮询都出现“详情已更新”的冗余动画。
+const hasOrderDetailChanged = (
+  previousDetail: O2oPreorderDetail | null,
+  nextDetail: O2oPreorderDetail,
+) => {
+  if (!previousDetail) {
+    return true
+  }
+  return (
+    JSON.stringify(previousDetail.order) !== JSON.stringify(nextDetail.order)
+    || JSON.stringify(previousDetail.items) !== JSON.stringify(nextDetail.items)
+    || JSON.stringify(previousDetail.returnRequests) !== JSON.stringify(nextDetail.returnRequests)
+    || JSON.stringify(previousDetail.amountSummary ?? null) !== JSON.stringify(nextDetail.amountSummary ?? null)
+    || JSON.stringify(previousDetail.customerProfile ?? null) !== JSON.stringify(nextDetail.customerProfile ?? null)
+  )
+}
+
+const bumpDetailRefreshNotice = () => {
+  detailRefreshNoticeExpiresAt.value = Date.now() + DETAIL_REFRESH_NOTICE_MS
+}
+
 /**
  * 订单详情到正式出库单模板的适配层：
  * - 客户端 O2O 订单结构与管理端出库单结构不同，这里统一映射为模板所需字段；
@@ -231,11 +273,12 @@ const voucherOrder = computed<OrderDetailResult | null>(() => {
     return null
   }
   const { order, items, customerProfile } = detail.value
+  const displayShowNo = resolveO2oDisplayShowNo(order)
   const customerDisplayName = customerProfile?.realName || customerProfile?.username || null
   const normalizedTotalAmount = toVoucherMoneyText(order.totalAmount ?? totalAmount.value)
   return {
     id: order.id,
-    showNo: order.showNo,
+    showNo: displayShowNo,
     orderType: order.clientOrderType,
     hasCustomerOrder: Boolean(order.hasCustomerOrder),
     isSystemApplied: Boolean(order.isSystemApplied),
@@ -887,23 +930,36 @@ const handleExportVoucherPdf = async () => {
   }
 }
 
-const loadDetail = async () => {
+const loadDetail = async (options?: { silent?: boolean }) => {
   const orderId = String(route.params.id ?? '').trim()
   if (!orderId) {
     return
   }
 
-  loading.value = true
-  requestError.value = null
+  const silent = options?.silent === true
+  if (!silent) {
+    loading.value = true
+    requestError.value = null
+  }
   await runLatest({
     executor: (signal) => getO2oPreorderDetail(orderId, { signal }),
     onSuccess: async (result) => {
+      const changed = hasOrderDetailChanged(detail.value, result)
       detail.value = result
       syncOrderStoreFromDetail(result, { preserveFresh: true })
       await renderQrCode()
       await renderReturnRequestQrs()
+      if (silent) {
+        lastSilentRefreshAt.value = Date.now()
+        if (changed) {
+          bumpDetailRefreshNotice()
+        }
+      }
     },
     onError: (error) => {
+      if (silent) {
+        return
+      }
       const normalizedError = normalizeRequestError(error, '订单详情加载失败')
       requestError.value = {
         type: globalThis.navigator.onLine === false ? 'offline' : 'error',
@@ -914,6 +970,30 @@ const loadDetail = async () => {
       loading.value = false
     },
   })
+}
+
+const canRunSilentDetailRefresh = () => {
+  if (!String(route.params.id ?? '').trim()) {
+    return false
+  }
+  if (globalThis.document?.visibilityState === 'hidden') {
+    return false
+  }
+  return !loading.value
+    && !recalling.value
+    && !editSubmitting.value
+    && !returnSubmitting.value
+    && !exportPdfLoading.value
+    && !editDialogVisible.value
+    && !returnDialogVisible.value
+    && !voucherDialogVisible.value
+}
+
+const triggerSilentDetailRefresh = async () => {
+  if (!canRunSilentDetailRefresh()) {
+    return
+  }
+  await loadDetail({ silent: true })
 }
 
 // 详细注释：详情页订阅共享订单刷新事件，仅在当前打开订单命中时才静默重拉，
@@ -927,8 +1007,24 @@ const startClientOrderRefreshSubscription = () => {
     if (!event.orderId || !currentOrderId || event.orderId !== currentOrderId) {
       return
     }
-    await loadDetail()
+    await loadDetail({ silent: true })
   })
+}
+
+const scheduleDetailAutoRefresh = () => {
+  if (detailAutoRefreshTimer !== null) {
+    globalThis.clearInterval(detailAutoRefreshTimer)
+    detailAutoRefreshTimer = null
+  }
+  detailAutoRefreshTimer = globalThis.setInterval(() => {
+    void triggerSilentDetailRefresh()
+  }, DETAIL_AUTO_REFRESH_INTERVAL_MS)
+}
+
+const handleVisibilityChange = () => {
+  if (globalThis.document.visibilityState === 'visible') {
+    void triggerSilentDetailRefresh()
+  }
 }
 
 // 详细注释：撤回订单操作，弹出二次确认，调用接口后刷新本地状态及二维码。
@@ -943,7 +1039,7 @@ const handleRecallOrder = async () => {
 
   try {
     await ElMessageBox.confirm(
-      `确认撤回订单“${detail.value.order.showNo}”吗？撤回后将释放预订库存，二维码会立即失效。`,
+      `确认撤回订单“${displayOrderShowNo.value}”吗？撤回后将释放预订库存，二维码会立即失效。`,
       '撤回订单',
       {
         type: 'warning',
@@ -1025,7 +1121,7 @@ const handleSubmitOrderEdit = async () => {
 
   try {
     await ElMessageBox.confirm(
-      `确认修改订单“${detail.value.order.showNo}”吗？保存后将按最新商品和数量重算预订库存。`,
+      `确认修改订单“${displayOrderShowNo.value}”吗？保存后将按最新商品和数量重算预订库存。`,
       '修改订单',
       {
         type: 'warning',
@@ -1162,11 +1258,18 @@ watch(
 
 onMounted(async () => {
   startClientOrderRefreshSubscription()
+  globalThis.document?.addEventListener('visibilitychange', handleVisibilityChange)
+  scheduleDetailAutoRefresh()
   await loadDetail()
 })
 
 onBeforeUnmount(() => {
   disposeClientOrderRefresh()
+  globalThis.document?.removeEventListener('visibilitychange', handleVisibilityChange)
+  if (detailAutoRefreshTimer !== null) {
+    globalThis.clearInterval(detailAutoRefreshTimer)
+    detailAutoRefreshTimer = null
+  }
   resetDialogTransientState()
 })
 </script>
@@ -1198,10 +1301,19 @@ onBeforeUnmount(() => {
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div>
             <div class="flex flex-wrap items-center gap-2">
-              <p class="text-lg font-semibold text-slate-900">{{ detail.order.showNo }}</p>
+              <p class="text-lg font-semibold text-slate-900">{{ displayOrderShowNo }}</p>
               <span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">{{ orderTypeLabel }}</span>
+              <Transition name="detail-refresh-notice">
+                <span
+                  v-if="showDetailRefreshNotice"
+                  class="rounded-full bg-teal-50 px-2.5 py-1 text-xs font-semibold text-teal-700"
+                >
+                  详情已更新
+                </span>
+              </Transition>
             </div>
             <p class="mt-1 text-sm text-slate-400">状态：{{ statusLabel }}</p>
+            <p class="mt-1 text-xs text-slate-400">{{ detailAutoRefreshStatusText }}</p>
           </div>
           <div class="flex flex-wrap gap-2">
             <button
@@ -1637,6 +1749,19 @@ onBeforeUnmount(() => {
   z-index: 30;
   left: max(10px, calc((100vw - 1240px) / 2 - 52px));
   top: calc(env(safe-area-inset-top) + 82px);
+}
+
+.detail-refresh-notice-enter-active,
+.detail-refresh-notice-leave-active {
+  transition:
+    opacity var(--ylink-motion-normal) var(--ylink-motion-ease),
+    transform var(--ylink-motion-normal) var(--ylink-motion-ease);
+}
+
+.detail-refresh-notice-enter-from,
+.detail-refresh-notice-leave-to {
+  opacity: 0;
+  transform: translateY(-6px) scale(0.96);
 }
 
 /*
