@@ -261,7 +261,12 @@ export const getO2oMallProducts = (config?: RequestConfig) =>
   request<O2oMallProduct[]>({
     method: 'GET',
     url: '/o2o/mall/products',
-    ...config,
+    signal: config?.signal,
+    cache: config?.cache ?? {
+      enabled: true,
+      ttlMs: 20_000,
+      scope: 'public',
+    },
   })
 
 export const submitO2oPreorder = (payload: SubmitO2oPreorderPayload, config?: RequestConfig) =>
@@ -280,7 +285,12 @@ export const getMyO2oPreorders = async (
     method: 'GET',
     url: '/o2o/mall/preorders',
     params,
-    ...config,
+    signal: config?.signal,
+    cache: config?.cache ?? {
+      enabled: true,
+      ttlMs: 12_000,
+      scope: 'client-user',
+    },
   })
   return {
     page: result.page,
@@ -318,7 +328,12 @@ export const getMyO2oPreorderSummary = (id: string, config?: RequestConfig) =>
   request<O2oPreorderSummary>({
     method: 'GET',
     url: `/o2o/mall/preorders/${id}/summary`,
-    ...config,
+    signal: config?.signal,
+    cache: config?.cache ?? {
+      enabled: true,
+      ttlMs: 12_000,
+      scope: 'client-user',
+    },
   })
 
 export const markMyO2oPreorderCustomerOrderPrinted = (id: string, config?: RequestConfig) =>

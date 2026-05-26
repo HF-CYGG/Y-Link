@@ -74,7 +74,7 @@ authRouter.post(
     }
     const data = await authService.login(payload, requestMeta)
     const csrfToken = generateAdminCsrfToken()
-    setAdminAuthCookies(res, {
+    setAdminAuthCookies(res, req, {
       sessionToken: data.token,
       csrfToken,
       expiresAt: data.expiresAt,

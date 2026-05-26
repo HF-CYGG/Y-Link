@@ -2,10 +2,11 @@
  * 模块说明：backend/src/utils/client-auth-cookie.ts
  * 文件职责：统一管理客户端会话 Cookie 与 CSRF Cookie 的签发、读取、续期与清理。
  * 实现逻辑：
- * - 登录成功后同时下发 `session`（HttpOnly）与 `csrf`（可读）两类 Cookie；
- * - `/client-auth/me` 等接口可复用 `ensureClientCsrfCookie` 兜底补发 CSRF；
- * - 支持从 Header 读取 `x-csrf-token` 参与双提交校验。
- * 维护说明：若调整 SameSite/Secure 策略，需要同步联调 WebView、移动端浏览器与反向代理 HTTPS 终止配置。
+ * - 登录后同时下发 HttpOnly 会话 Cookie 与可读 CSRF Cookie；
+ * - `/client-auth/me` 可复用补发 CSRF Cookie，保证刷新后写请求可继续通过校验；
+ * - CSRF Header 固定读取 `x-csrf-token`，与中间件保持一致。
+ * 维护说明：
+ * - SameSite/Secure 策略如需调整，必须同时验证移动端 WebView 与反向代理 HTTPS 场景。
  */
 
 import crypto from 'node:crypto'
@@ -26,11 +27,36 @@ interface CookieSerializeOptions {
   expires?: Date
 }
 
-function shouldUseSecureCookie(): boolean {
-  return env.NODE_ENV === 'production'
+export function generateClientCsrfToken(): string {
+  return crypto.randomBytes(32).toString('base64url')
 }
 
-// 手工序列化 Cookie，避免引入额外依赖，并保持管理端/客户端 Cookie 口径一致。
+function isHttpsRequest(req: Request | undefined): boolean {
+  if (!req) {
+    return false
+  }
+  if (req.secure) {
+    return true
+  }
+
+  const forwardedProto = req.headers['x-forwarded-proto']
+  if (typeof forwardedProto === 'string') {
+    return forwardedProto
+      .split(',')
+      .map((item) => item.trim().toLowerCase())
+      .includes('https')
+  }
+  if (Array.isArray(forwardedProto)) {
+    return forwardedProto.some((item) => item.trim().toLowerCase() === 'https')
+  }
+  return false
+}
+
+function resolveSecureCookieFlag(res: Response, req?: Request): boolean {
+  const resolvedRequest = req ?? (res.req as Request | undefined)
+  return isHttpsRequest(resolvedRequest)
+}
+
 function buildCookieValue(name: string, value: string, options: CookieSerializeOptions): string {
   const segments = [`${name}=${encodeURIComponent(value)}`]
   segments.push(`Path=${options.path ?? '/'}`)
@@ -54,7 +80,6 @@ function buildCookieValue(name: string, value: string, options: CookieSerializeO
   return segments.join('; ')
 }
 
-// 同一响应中可能写入多条 Set-Cookie，需追加而不是覆盖。
 function appendSetCookieHeader(res: Response, cookieValue: string): void {
   const currentValue = res.getHeader('Set-Cookie')
   if (!currentValue) {
@@ -78,17 +103,9 @@ function getCookieMaxAgeSeconds(expiresAt: Date): number {
   return Math.max(0, Math.floor((expiresAt.getTime() - Date.now()) / 1000))
 }
 
-export function generateClientCsrfToken(): string {
-  return crypto.randomBytes(32).toString('base64url')
-}
-
-/**
- * 设置客户端认证 Cookie：
- * - session token 仅 HttpOnly，防止前端脚本直接读取；
- * - csrf token 允许前端读取后写入请求头，形成双提交校验链路。
- */
 export function setClientAuthCookies(
   res: Response,
+  req: Request,
   payload: {
     sessionToken: string
     csrfToken: string
@@ -96,7 +113,7 @@ export function setClientAuthCookies(
   },
 ): void {
   const cookieMaxAgeSeconds = getCookieMaxAgeSeconds(payload.expiresAt)
-  const secure = shouldUseSecureCookie()
+  const secure = resolveSecureCookieFlag(res, req)
 
   setCookie(res, CLIENT_SESSION_COOKIE_NAME, payload.sessionToken, {
     httpOnly: true,
@@ -116,10 +133,9 @@ export function setClientAuthCookies(
   })
 }
 
-// 主动退出或会话失效时，统一写入过期 Cookie 清除浏览器残留状态。
 export function clearClientAuthCookies(res: Response): void {
   const expiredAt = new Date(0)
-  const secure = shouldUseSecureCookie()
+  const secure = resolveSecureCookieFlag(res)
 
   setCookie(res, CLIENT_SESSION_COOKIE_NAME, '', {
     httpOnly: true,
@@ -138,11 +154,6 @@ export function clearClientAuthCookies(res: Response): void {
   })
 }
 
-/**
- * 确保 CSRF Cookie 存在：
- * - 有值时复用，避免每次请求都刷新；
- * - 无值时补发，保障客户端写请求后续可通过 CSRF 校验。
- */
 export function ensureClientCsrfCookie(req: Request, res: Response): string {
   const existedCsrfToken = readClientCsrfTokenFromCookie(req)
   if (existedCsrfToken) {
@@ -151,7 +162,7 @@ export function ensureClientCsrfCookie(req: Request, res: Response): string {
 
   const csrfToken = generateClientCsrfToken()
   setCookie(res, CLIENT_CSRF_COOKIE_NAME, csrfToken, {
-    secure: shouldUseSecureCookie(),
+    secure: resolveSecureCookieFlag(res, req),
     sameSite: 'Lax',
     path: '/',
     maxAgeSeconds: env.AUTH_TOKEN_TTL_HOURS * 60 * 60,

@@ -180,7 +180,7 @@ clientAuthRouter.post(
     await authSecurityService.guardClientLoginRequest(requestMeta, normalizedAccount)
     const data = await clientAuthService.login(payload, requestMeta)
     const csrfToken = generateClientCsrfToken()
-    setClientAuthCookies(res, {
+    setClientAuthCookies(res, req, {
       sessionToken: data.token,
       csrfToken,
       expiresAt: data.expiresAt,

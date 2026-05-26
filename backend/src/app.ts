@@ -58,6 +58,7 @@ function applyUploadStaticResponseHeaders(res: express.Response): void {
 
 export function createApp() {
   const app = express()
+  app.disable('x-powered-by')
   app.set('trust proxy', 'loopback, linklocal, uniquelocal')
 
   app.use((req, res, next) => {
@@ -65,8 +66,29 @@ export function createApp() {
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin')
     res.setHeader('X-Frame-Options', 'DENY')
     res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
-    if (req.path.startsWith('/api/auth') || req.path.startsWith('/api/client-auth')) {
+    const isAuthPath = req.path.startsWith('/api/auth') || req.path.startsWith('/api/client-auth')
+    if (isAuthPath) {
       res.setHeader('Cache-Control', 'no-store')
+      res.setHeader('Pragma', 'no-cache')
+      res.vary('Cookie')
+      res.vary('Authorization')
+      res.vary('X-Forwarded-Proto')
+
+      const forwardedProto = req.headers['x-forwarded-proto']
+      const isHttps =
+        req.secure ||
+        (typeof forwardedProto === 'string' &&
+          forwardedProto
+            .split(',')
+            .map((item) => item.trim().toLowerCase())
+            .includes('https')) ||
+        (Array.isArray(forwardedProto) && forwardedProto.some((item) => item.trim().toLowerCase() === 'https'))
+      if (!isHttps) {
+        const userAgent = typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : 'unknown'
+        console.warn(
+          `[security.transport] insecure_auth_request method=${req.method} path=${req.path} ip=${req.ip} proto=http ua=${userAgent}`,
+        )
+      }
     }
     next()
   })

@@ -10,6 +10,8 @@
  */
 
 import { Router } from 'express'
+import type { Request, Response } from 'express'
+import crypto from 'node:crypto'
 import { z } from 'zod'
 import { requireClientAuth, requireClientCsrf } from '../middleware/client-auth.middleware.js'
 import { requireAuth, requirePermission } from '../middleware/auth.middleware.js'
@@ -125,14 +127,66 @@ const BUSINESS_STATUS_LABEL_MAP = {
   verify_failed: '核销失败',
 } as const
 
+const MALL_PRODUCTS_CACHE_SECONDS = 20
+const CLIENT_ORDER_CACHE_SECONDS = 12
+
+function buildWeakEtag(payload: unknown): string {
+  const normalizedPayload = JSON.stringify(payload)
+  const digest = crypto.createHash('sha1').update(normalizedPayload).digest('base64url')
+  return `W/"${digest}"`
+}
+
+function isEtagMatched(ifNoneMatchHeader: string | undefined, etag: string): boolean {
+  if (!ifNoneMatchHeader) {
+    return false
+  }
+  if (ifNoneMatchHeader.trim() === '*') {
+    return true
+  }
+
+  return ifNoneMatchHeader
+    .split(',')
+    .map((item) => item.trim())
+    .includes(etag)
+}
+
+function respondWithConditionalCache(
+  req: Request,
+  res: Response,
+  payload: { code: number; message: string; data: unknown },
+  options: { ttlSeconds: number; visibility: 'public' | 'private' },
+): void {
+  const etag = buildWeakEtag(payload)
+  res.setHeader('ETag', etag)
+  res.setHeader('Cache-Control', `${options.visibility}, max-age=${options.ttlSeconds}, must-revalidate`)
+  res.vary('Accept-Encoding')
+  if (options.visibility === 'private') {
+    res.vary('Cookie')
+    res.vary('Authorization')
+  }
+
+  const ifNoneMatchHeader = typeof req.headers['if-none-match'] === 'string' ? req.headers['if-none-match'] : undefined
+  if (isEtagMatched(ifNoneMatchHeader, etag)) {
+    res.status(304).end()
+    return
+  }
+
+  res.json(payload)
+}
+
 export const o2oRouter = Router()
 
 // 商城商品列表：客户端免登录可访问，用于展示当前上架商品与可预订库存。
 o2oRouter.get(
   '/mall/products',
-  asyncHandler(async (_req, res) => {
+  asyncHandler(async (req, res) => {
     const data = await o2oPreorderService.listMallProducts()
-    res.json({ code: 0, message: 'ok', data })
+    respondWithConditionalCache(
+      req,
+      res,
+      { code: 0, message: 'ok', data },
+      { ttlSeconds: MALL_PRODUCTS_CACHE_SECONDS, visibility: 'public' },
+    )
   }),
 )
 
@@ -156,7 +210,12 @@ o2oRouter.get(
     const authReq = req as ClientAuthenticatedRequest
     const query = myOrderQuerySchema.parse(req.query)
     const data = await o2oPreorderService.listMyOrders(authReq.clientAuth, query)
-    res.json({ code: 0, message: 'ok', data })
+    respondWithConditionalCache(
+      req,
+      res,
+      { code: 0, message: 'ok', data },
+      { ttlSeconds: CLIENT_ORDER_CACHE_SECONDS, visibility: 'private' },
+    )
   }),
 )
 
@@ -178,7 +237,12 @@ o2oRouter.get(
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const data = await o2oPreorderService.getMyOrderSummary(authReq.clientAuth, req.params.id)
-    res.json({ code: 0, message: 'ok', data })
+    respondWithConditionalCache(
+      req,
+      res,
+      { code: 0, message: 'ok', data },
+      { ttlSeconds: CLIENT_ORDER_CACHE_SECONDS, visibility: 'private' },
+    )
   }),
 )
 
