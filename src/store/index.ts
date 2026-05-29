@@ -1,14 +1,8 @@
 /**
  * 模块说明：F:/Y-Link/src/store/index.ts
  * 文件职责：store 聚合导出入口。
- * 实现逻辑：集中导出各 Pinia store，降低页面导入复杂度。
- * 维护说明：新增 store 时同步导出并保持命名一致。
- */
-
-/**
- * Store 统一出口：
- * - 聚合 app / auth / theme store 及其相关类型 / 常量；
- * - 让 composable、布局层、页面层都从同一入口消费状态定义。
+ * 实现逻辑：集中导出各 Pinia store 及相关类型/常量，让页面、布局层和 composable 使用统一状态入口。
+ * 维护说明：新增 store 或类型常量时需同步补充导出并保持命名一致，避免出现多入口状态引用。
  */
 export { DEVICE_BREAKPOINTS, useAppStore } from '@/store/modules/app'
 export { useAuthStore } from '@/store/modules/auth'

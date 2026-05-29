@@ -1,10 +1,9 @@
 <!--
   模块说明：F:/Y-Link/src/layout/components/AppSidebar.vue
-  文件职责：管理端侧边导航组件。
-  实现逻辑：根据路由元信息和权限生成菜单并处理折叠交互。
-  维护说明：菜单规则改动需同步路由 meta 配置。
+  文件职责：管理端侧边导航壳组件，负责把“可见菜单 + 分组结构 + 当前高亮 + 设备形态”统一渲染为稳定导航区。
+  实现逻辑：接收父层按权限过滤后的 menuItems，按 `highlight/group` 规则拆分重点入口与常规分组；结合 `route.path`、`route.meta.activeMenu`、`route.matched` 计算当前激活项与默认展开项；根据 appStore 的 phone/tablet/desktop 状态切换抽屉式或常驻式侧栏布局。
+  维护说明：若调整路由 meta 字段（如 `activeMenu`、`menuGroup`、`menuHighlight`）或菜单生成策略（`buildAppMenuItems`），需同步回归三类场景：权限裁剪后的菜单可见性、移动端抽屉开合与遮罩行为、spotlight 与常规分组不重复展示。
 -->
-
 <script setup lang="ts">
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'

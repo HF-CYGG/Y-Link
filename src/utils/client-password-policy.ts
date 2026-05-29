@@ -1,15 +1,13 @@
 /**
  * 模块说明：src/utils/client-password-policy.ts
  * 文件职责：统一客户端注册、找回密码、个人中心改密所使用的新密码规则文案、占位提示与前端校验函数。
+ * 实现逻辑：
+ * - 通过常量统一三类页面（注册/找回/个人中心）的输入占位与报错文案；
+ * - 提供统一口径校验函数（至少 8 位且同时包含字母和数字）；
+ * - 输出可直接接入 Element Plus rules 的校验器，避免页面层重复书写密码校验逻辑。
  * 维护说明：
  * - 仅收敛客户端用户可见的新密码规则，不处理后台用户口径；
  * - 若后续密码策略调整，优先修改本文件，避免多个页面提示不一致。
- */
-
-/**
- * 新密码规则基础文案：
- * - `TEXT` 适合表单报错与 toast；
- * - `HINT` 适合展示在输入框下方的静态说明。
  */
 export const CLIENT_NEW_PASSWORD_RULE_TEXT = '密码至少 8 位，且需同时包含字母和数字'
 export const CLIENT_NEW_PASSWORD_RULE_HINT = `${CLIENT_NEW_PASSWORD_RULE_TEXT}。`

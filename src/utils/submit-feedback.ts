@@ -9,12 +9,6 @@
  * - 若后续新增布尔、日期、数组等统一提交规则，优先继续在本文件扩展；
  * - 若业务字段需要特殊归一化，请在页面侧组合本文件工具，而不是回退到散点 `trim/Number`。
  */
-
-/**
- * 统一归一化必填文本：
- * - 所有输入先转成字符串再去掉前后空白；
- * - 空值最终收口为空字符串，便于表单校验和后续显式判断。
- */
 export const normalizeSubmitText = (value: unknown): string => {
   if (value === null || value === undefined) {
     return ''

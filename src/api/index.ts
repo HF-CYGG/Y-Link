@@ -1,13 +1,8 @@
 /**
  * 模块说明：F:/Y-Link/src/api/index.ts
  * 文件职责：前端 API 聚合出口文件。
- * 实现逻辑：统一导出各业务 API 模块，降低页面层导入路径复杂度。
- * 维护说明：新增 API 模块时在此处补充导出并保持命名一致。
- */
-
-/**
- * API 聚合出口：
- * 统一导出模块化接口，降低调用方的导入复杂度。
+ * 实现逻辑：统一导出各业务 API 模块，降低页面层导入路径复杂度并形成单一接口入口。
+ * 维护说明：新增、拆分或重命名 API 模块时需同步维护本文件导出，避免调用方使用深层路径直引。
  */
 export * as authApi from '@/api/modules/auth'
 export * as systemApi from '@/api/modules/system'
