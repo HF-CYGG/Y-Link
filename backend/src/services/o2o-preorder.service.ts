@@ -1283,21 +1283,16 @@ class O2oPreorderService {
     }))
   }
 
-  private async generatePreorderShowNo(manager = AppDataSource.manager): Promise<string> {
-    // 展示单号采用“日期 + 当日流水号”形式：
-    // - 便于人工肉眼识别和线下核对；
-    // - 与内部数据库主键解耦，避免直接暴露自增 ID。
-    const dateText = new Date().toISOString().slice(0, 10).replaceAll('-', '')
-    const prefix = `PO${dateText}`
-    const raw = await manager
-      .getRepository(O2oPreorder)
-      .createQueryBuilder('order')
-      .select('order.showNo', 'showNo')
-      .where('order.showNo LIKE :prefix', { prefix: `${prefix}%` })
-      .orderBy('order.showNo', 'DESC')
-      .getRawOne<{ showNo?: string }>()
-    const current = raw?.showNo ? Number.parseInt(raw.showNo.slice(prefix.length), 10) || 0 : 0
-    return `${prefix}${String(current + 1).padStart(4, '0')}`
+  private async generatePreorderShowNo(
+    clientOrderType: O2oClientOrderType,
+    manager = AppDataSource.manager,
+  ): Promise<string> {
+    // 预订单展示单号与正式出库单统一前缀规则：
+    // - 部门单：hyyzjdxxxx
+    // - 散客单：hyyzxxxx
+    // 这样客户端下单后立即显示业务单号口径，不再先出现 PO 前缀。
+    const orderType = clientOrderType === 'department' ? 'department' : 'walkin'
+    return orderSerialService.generateOrderNo(orderType, manager)
   }
 
   // 详细注释：创建退货申请前，需要先统一校验订单是否仍处于允许售后的窗口。
@@ -1447,7 +1442,7 @@ class O2oPreorderService {
       const departmentNameSnapshot = this.resolveDepartmentNameSnapshot(normalizedClientOrderType, clientUser)
 
       // verifyCode 既用于用户端展示二维码，也作为管理端核销入口的核心识别码。
-      const showNo = await this.generatePreorderShowNo(manager)
+      const showNo = await this.generatePreorderShowNo(normalizedClientOrderType, manager)
       const timeoutAt = o2oRules.autoCancelEnabled ? new Date(Date.now() + o2oRules.autoCancelHours * 60 * 60 * 1000) : null
       const savedOrder = await manager.getRepository(O2oPreorder).save(
         manager.getRepository(O2oPreorder).create({

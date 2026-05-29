@@ -22,6 +22,7 @@ backend/data/
 backend/uploads/*
 !backend/uploads/.gitkeep
 .local-dev/
+.agents
 
 # Editor directories and files
 .vscode/*
