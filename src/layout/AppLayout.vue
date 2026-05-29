@@ -6,8 +6,9 @@
  */
 
 
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, type RouteLocationNormalizedLoaded } from 'vue-router'
+import { sendPresenceHeartbeat } from '@/api/modules/auth'
 import AppHeader from '@/layout/components/AppHeader.vue'
 import AppSidebar from '@/layout/components/AppSidebar.vue'
 import { useDevice } from '@/composables/useDevice'
@@ -73,6 +74,42 @@ const shouldShowGlobalLoadingBar = computed(() => {
 const routeStagePending = ref(false)
 const shouldUseStableRouteFallback = computed(() => route.path.startsWith('/system/'))
 const suspenseTimeout = computed(() => (shouldUseStableRouteFallback.value ? 0 : 120))
+const ADMIN_PRESENCE_HEARTBEAT_MS = 60_000
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null
+
+const shouldSendPresenceHeartbeat = () => {
+  if (!authStore.isAuthenticated) {
+    return false
+  }
+  if (globalThis.document === undefined) {
+    return false
+  }
+  return globalThis.document.visibilityState === 'visible'
+}
+
+const sendPresenceHeartbeatSafely = async () => {
+  if (!shouldSendPresenceHeartbeat()) {
+    return
+  }
+  await sendPresenceHeartbeat().catch(() => undefined)
+}
+
+const clearPresenceHeartbeat = () => {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer)
+    heartbeatTimer = null
+  }
+}
+
+const setupPresenceHeartbeat = () => {
+  clearPresenceHeartbeat()
+  if (!authStore.isAuthenticated) {
+    return
+  }
+  heartbeatTimer = setInterval(() => {
+    void sendPresenceHeartbeatSafely()
+  }, ADMIN_PRESENCE_HEARTBEAT_MS)
+}
 
 const handleRoutePending = () => {
   if (!shouldUseStableRouteFallback.value) {
@@ -91,6 +128,40 @@ watch(
     routeStagePending.value = false
   },
 )
+
+const handleVisibilityChange = () => {
+  if (globalThis.document?.visibilityState === 'visible') {
+    void sendPresenceHeartbeatSafely()
+  }
+}
+
+watch(
+  () => authStore.isAuthenticated,
+  (isAuthenticated) => {
+    if (!isAuthenticated) {
+      clearPresenceHeartbeat()
+      return
+    }
+    setupPresenceHeartbeat()
+    void sendPresenceHeartbeatSafely()
+  },
+  { immediate: true },
+)
+
+onMounted(() => {
+  if (globalThis.document) {
+    globalThis.document.addEventListener('visibilitychange', handleVisibilityChange)
+  }
+  setupPresenceHeartbeat()
+  void sendPresenceHeartbeatSafely()
+})
+
+onBeforeUnmount(() => {
+  if (globalThis.document) {
+    globalThis.document.removeEventListener('visibilitychange', handleVisibilityChange)
+  }
+  clearPresenceHeartbeat()
+})
 
 /**
  * 路由缓存键：

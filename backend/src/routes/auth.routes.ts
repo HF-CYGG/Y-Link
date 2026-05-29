@@ -120,6 +120,21 @@ authRouter.get(
 )
 
 authRouter.post(
+  '/presence/heartbeat',
+  requireAuth,
+  requireAdminCsrf,
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    await authService.touchSessionActivity(authReq.auth.sessionToken, 1_000)
+    res.json({
+      code: 0,
+      message: 'ok',
+      data: true,
+    })
+  }),
+)
+
+authRouter.post(
   '/change-password',
   requireAuth,
   requireAdminCsrf,

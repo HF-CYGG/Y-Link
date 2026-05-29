@@ -27,12 +27,14 @@ export interface CreateUserInput {
   username: string
   password: string
   displayName: string
+  email?: string
   role: UserRole
   status?: UserStatus
 }
 
 export interface UpdateUserInput {
   displayName?: string
+  email?: string
   role?: UserRole
   password?: string
 }
@@ -51,6 +53,13 @@ const USERNAME_UNIQUE_CONSTRAINT_MATCHER = {
   sqliteColumns: ['sys_user.username'],
 } as const
 
+const EMAIL_UNIQUE_CONSTRAINT_MATCHER = {
+  mysqlConstraint: 'uk_sys_user_email',
+  sqliteColumns: ['sys_user.email'],
+} as const
+
+const EMAIL_REGEXP = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
 /**
  * 用户管理服务：
  * - 提供用户列表、创建、编辑与启停；
@@ -59,11 +68,25 @@ const USERNAME_UNIQUE_CONSTRAINT_MATCHER = {
 export class UserService {
   private readonly userRepo = AppDataSource.getRepository(SysUser)
 
+  private normalizeEmail(email: string | undefined): string | null {
+    const normalized = (email ?? '').trim().toLowerCase()
+    if (!normalized) {
+      return null
+    }
+    if (normalized.length > 128) {
+      throw new BizError('邮箱长度不能超过 128 个字符', 400)
+    }
+    if (!EMAIL_REGEXP.test(normalized)) {
+      throw new BizError('邮箱格式不正确', 400)
+    }
+    return normalized
+  }
+
   async list(query: UserListQuery): Promise<{ page: number; pageSize: number; total: number; list: UserSafeProfile[] }> {
     const qb = this.userRepo.createQueryBuilder('user')
 
     if (query.keyword?.trim()) {
-      qb.andWhere('(user.username LIKE :keyword OR user.displayName LIKE :keyword)', {
+      qb.andWhere('(user.username LIKE :keyword OR user.displayName LIKE :keyword OR user.email LIKE :keyword)', {
         keyword: `%${query.keyword.trim()}%`,
       })
     }
@@ -91,6 +114,7 @@ export class UserService {
   async create(input: CreateUserInput, actor: AuthUserContext, requestMeta?: RequestMeta): Promise<UserSafeProfile> {
     const username = input.username.trim()
     const displayName = input.displayName.trim()
+    const email = this.normalizeEmail(input.email)
     const password = assertAdminPasswordPolicy(input.password)
 
     if (!username) {
@@ -107,6 +131,7 @@ export class UserService {
           username,
           passwordHash,
           displayName,
+          email,
           role: input.role,
           status: input.status ?? 'enabled',
         })
@@ -136,16 +161,21 @@ export class UserService {
       if (isUniqueConstraintError(error, USERNAME_UNIQUE_CONSTRAINT_MATCHER)) {
         throw new BizError('账号已存在，请更换后重试', 409)
       }
+      if (isUniqueConstraintError(error, EMAIL_UNIQUE_CONSTRAINT_MATCHER)) {
+        throw new BizError('邮箱已被其他账号使用', 409)
+      }
       throw error
     }
   }
 
   async update(id: string, input: UpdateUserInput, actor: AuthUserContext, requestMeta?: RequestMeta): Promise<UserSafeProfile> {
     const normalizedDisplayName = input.displayName?.trim()
+    const normalizedEmail = input.email === undefined ? undefined : this.normalizeEmail(input.email)
     const normalizedPassword = input.password === undefined ? undefined : assertAdminPasswordPolicy(input.password)
 
     if (
       normalizedDisplayName === undefined &&
+      normalizedEmail === undefined &&
       input.role === undefined &&
       normalizedPassword === undefined
     ) {
@@ -155,62 +185,74 @@ export class UserService {
     if (normalizedDisplayName !== undefined && !normalizedDisplayName) {
       throw new BizError('姓名不能为空', 400)
     }
-    return AppDataSource.transaction(async (manager) => {
-      const userRepo = manager.getRepository(SysUser)
-      const sessionRepo = manager.getRepository(SysUserSession)
-      const user = await userRepo.findOne({ where: { id } })
-      if (!user) {
-        throw new BizError('用户不存在', 404)
-      }
+    try {
+      return await AppDataSource.transaction(async (manager) => {
+        const userRepo = manager.getRepository(SysUser)
+        const sessionRepo = manager.getRepository(SysUserSession)
+        const user = await userRepo.findOne({ where: { id } })
+        if (!user) {
+          throw new BizError('用户不存在', 404)
+        }
 
-      if (actor.userId === user.id && input.role && input.role !== 'admin') {
-        throw new BizError('不能将当前登录管理员降级为非管理员角色', 400)
-      }
+        if (actor.userId === user.id && input.role && input.role !== 'admin') {
+          throw new BizError('不能将当前登录管理员降级为非管理员角色', 400)
+        }
 
-      const changeSummary: Record<string, string | null> = {}
+        const changeSummary: Record<string, string | null> = {}
 
-      if (normalizedDisplayName !== undefined && normalizedDisplayName !== user.displayName) {
-        changeSummary.displayNameBefore = user.displayName
-        changeSummary.displayNameAfter = normalizedDisplayName
-        user.displayName = normalizedDisplayName
-      }
-      if (input.role && input.role !== user.role) {
-        changeSummary.roleBefore = user.role
-        changeSummary.roleAfter = input.role
-        user.role = input.role
-      }
-      if (normalizedPassword !== undefined) {
-        user.passwordHash = await hashPassword(normalizedPassword)
-        changeSummary.passwordReset = 'true'
-      }
+        if (normalizedDisplayName !== undefined && normalizedDisplayName !== user.displayName) {
+          changeSummary.displayNameBefore = user.displayName
+          changeSummary.displayNameAfter = normalizedDisplayName
+          user.displayName = normalizedDisplayName
+        }
+        if (normalizedEmail !== undefined && normalizedEmail !== user.email) {
+          changeSummary.emailBefore = user.email
+          changeSummary.emailAfter = normalizedEmail
+          user.email = normalizedEmail
+        }
+        if (input.role && input.role !== user.role) {
+          changeSummary.roleBefore = user.role
+          changeSummary.roleAfter = input.role
+          user.role = input.role
+        }
+        if (normalizedPassword !== undefined) {
+          user.passwordHash = await hashPassword(normalizedPassword)
+          changeSummary.passwordReset = 'true'
+        }
 
-      const savedUser = await userRepo.save(user)
-      if (normalizedPassword !== undefined) {
+        const savedUser = await userRepo.save(user)
+        if (normalizedPassword !== undefined) {
         /**
          * 安全修复：
          * - 管理端“编辑用户”也允许直接改密码；
          * - 若只更新密码哈希而不清理历史会话，旧 Bearer Token 仍可继续访问；
          * - 因此这里与专门改密接口保持一致，密码变更后立即吊销该账号全部会话。
          */
-        const deletedSessions = await sessionRepo.delete({ userId: savedUser.id })
-        changeSummary.revokedSessionCount = String(deletedSessions.affected ?? 0)
-      }
-      await auditService.record(
-        {
-          actionType: 'user.update',
-          actionLabel: '编辑用户',
-          targetType: 'user',
-          targetId: savedUser.id,
-          targetCode: savedUser.username,
-          actor,
-          requestMeta,
-          detail: changeSummary,
-        },
-        manager,
-      )
+          const deletedSessions = await sessionRepo.delete({ userId: savedUser.id })
+          changeSummary.revokedSessionCount = String(deletedSessions.affected ?? 0)
+        }
+        await auditService.record(
+          {
+            actionType: 'user.update',
+            actionLabel: '编辑用户',
+            targetType: 'user',
+            targetId: savedUser.id,
+            targetCode: savedUser.username,
+            actor,
+            requestMeta,
+            detail: changeSummary,
+          },
+          manager,
+        )
 
-      return sanitizeUserProfile(savedUser)
-    })
+        return sanitizeUserProfile(savedUser)
+      })
+    } catch (error) {
+      if (isUniqueConstraintError(error, EMAIL_UNIQUE_CONSTRAINT_MATCHER)) {
+        throw new BizError('邮箱已被其他账号使用', 409)
+      }
+      throw error
+    }
   }
 
   async updateStatus(

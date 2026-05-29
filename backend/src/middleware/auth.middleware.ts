@@ -117,6 +117,7 @@ export async function requireAuth(req: Request, _res: Response, next: NextFuncti
     const auth = await authService.resolveAuthUserByToken(credential.token)
     auth.authSource = credential.source
     ;(req as AuthenticatedRequest).auth = auth
+    await authService.touchSessionActivity(auth.sessionToken).catch(() => undefined)
     next()
   } catch (error) {
     next(error)

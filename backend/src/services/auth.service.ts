@@ -40,6 +40,7 @@ function toSafeProfile(user: SysUser): UserSafeProfile {
     id: user.id,
     username: user.username,
     displayName: user.displayName,
+    email: user.email,
     role: user.role,
     permissions: resolvePermissionsByRole(user.role),
     status: user.status,
@@ -378,6 +379,23 @@ export class AuthService {
       // 认证来源由中间件根据“本次请求从 Cookie 还是 Bearer 进入”最终覆写。
       authSource: 'bearer',
     }
+  }
+
+  /**
+   * 会话活跃时间写入节流：
+   * - 管理端每个请求都可能走鉴权链路，若每次都更新 last_access_at，会在 SQLite 下产生额外写压；
+   * - 仅当上次活跃时间超过最小间隔时才写库，兼顾在线状态准确性和并发稳定性。
+   */
+  async touchSessionActivity(sessionToken: string, minIntervalMs = 60_000): Promise<void> {
+    const now = new Date()
+    const threshold = new Date(now.getTime() - Math.max(1_000, minIntervalMs))
+    await this.sessionRepo
+      .createQueryBuilder()
+      .update(SysUserSession)
+      .set({ lastAccessAt: now })
+      .where('session_token = :sessionToken', { sessionToken })
+      .andWhere('(last_access_at IS NULL OR last_access_at < :threshold)', { threshold })
+      .execute()
   }
 
   async ensureDefaultAdmin(): Promise<{

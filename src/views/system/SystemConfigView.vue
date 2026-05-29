@@ -19,6 +19,13 @@ import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'elem
 import { useRouter } from 'vue-router'
 import { PageContainer, PageToolbarCard } from '@/components/common'
 import {
+  getNotificationPresenceSnapshot,
+  getNotificationRules,
+  updateNotificationRules,
+  type NotificationPresenceSnapshot,
+  type NotificationRuleRecord,
+} from '@/api/modules/notification'
+import {
   getClientDepartmentConfigs,
   getO2oRuleConfigs,
   getOrderSerialConfigs,
@@ -39,6 +46,7 @@ import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
 import SystemConfigDepartmentSection from '@/views/system/components/SystemConfigDepartmentSection.vue'
 import SystemConfigO2oRulesSection from '@/views/system/components/SystemConfigO2oRulesSection.vue'
+import SystemConfigNotificationSection from '@/views/system/components/SystemConfigNotificationSection.vue'
 import SystemConfigSerialSection from '@/views/system/components/SystemConfigSerialSection.vue'
 import SystemConfigVerificationSection from '@/views/system/components/SystemConfigVerificationSection.vue'
 import {
@@ -63,7 +71,7 @@ type VerificationFormValue = {
   successMatch: string
 }
 
-type ConfigSectionKey = 'order_serial' | 'o2o_rules' | 'verification' | 'department'
+type ConfigSectionKey = 'order_serial' | 'o2o_rules' | 'verification' | 'department' | 'notification'
 type DepartmentTreeNode = ClientDepartmentTreeNode
 
 const { hasPermission, ensurePermission } = usePermissionAction()
@@ -79,6 +87,9 @@ const configMap = ref<Record<'department' | 'walkin', OrderSerialConfigRecord> |
 const o2oRuleConfig = ref<O2oRuleConfigRecord | null>(null)
 const verificationConfigMap = ref<VerificationProviderConfigsResult | null>(null)
 const clientDepartmentConfig = ref<ClientDepartmentConfigRecord | null>(null)
+const notificationRules = ref<NotificationRuleRecord[]>([])
+const notificationPresence = ref<NotificationPresenceSnapshot | null>(null)
+const notificationPresenceLoading = ref(false)
 const loadRequest = useStableRequest()
 const deferredSectionRequest = useStableRequest()
 const sectionLoadingState = reactive<Record<ConfigSectionKey, boolean>>({
@@ -86,12 +97,14 @@ const sectionLoadingState = reactive<Record<ConfigSectionKey, boolean>>({
   o2o_rules: true,
   verification: true,
   department: true,
+  notification: true,
 })
 const sectionErrorState = reactive<Record<ConfigSectionKey, string>>({
   order_serial: '',
   o2o_rules: '',
   verification: '',
   department: '',
+  notification: '',
 })
 
 const sectionOptions: Array<{ key: ConfigSectionKey; label: string }> = [
@@ -99,6 +112,7 @@ const sectionOptions: Array<{ key: ConfigSectionKey; label: string }> = [
   { key: 'o2o_rules', label: '线上预定' },
   { key: 'verification', label: '验证码配置' },
   { key: 'department', label: '部门配置' },
+  { key: 'notification', label: '通知中心' },
 ]
 
 const handleSectionChange = (value: string | number) => {
@@ -165,12 +179,13 @@ const canViewConfigs = computed(() => hasPermission('system_configs:view'))
 const canUpdateConfigs = computed(() => hasPermission('system_configs:update'))
 const canTestVerificationProviders = computed(() => hasPermission('verification_providers:test'))
 const canViewMigrationAssistant = computed(() => hasPermission('db_migration:view'))
-const hasPendingDeferredSections = computed(() => sectionLoadingState.verification || sectionLoadingState.department)
-const hasDeferredSectionFailure = computed(() => Boolean(sectionErrorState.verification || sectionErrorState.department))
+const hasPendingDeferredSections = computed(() => sectionLoadingState.verification || sectionLoadingState.department || sectionLoadingState.notification)
+const hasDeferredSectionFailure = computed(() => Boolean(sectionErrorState.verification || sectionErrorState.department || sectionErrorState.notification))
 const formInteractionLoading = computed(() => loading.value || hasPendingDeferredSections.value)
+const managementUsers = computed(() => notificationPresence.value?.users ?? [])
 const deferredSectionStatusText = computed(() => {
   if (hasPendingDeferredSections.value) {
-    return '系统配置主内容已就绪，验证码配置与部门配置正在继续加载，加载完成前暂不可编辑或保存。'
+    return '系统配置主内容已就绪，验证码、部门与通知中心配置正在继续加载，加载完成前暂不可编辑或保存。'
   }
 
   const failedSections = sectionOptions
@@ -358,6 +373,17 @@ const snapshotForm = () =>
       },
     },
     clientDepartmentTree: serialForm.clientDepartmentTree,
+    notificationRules: notificationRules.value.map((rule) => ({
+      id: rule.id,
+      enabled: rule.enabled,
+      recipientUserIds: [...rule.recipientUserIds].sort(),
+      emailEnabled: rule.emailEnabled,
+      feishuEnabled: rule.feishuEnabled,
+      externalTriggerMode: rule.externalTriggerMode,
+      watchedUserIds: [...rule.watchedUserIds].sort(),
+      feishuWebhookUrl: rule.feishuWebhookUrl.trim(),
+      emailSubjectPrefix: rule.emailSubjectPrefix.trim(),
+    })),
   })
 
 const isDirty = computed(() => snapshotForm() !== initialSnapshot.value)
@@ -419,6 +445,40 @@ const applyClientDepartmentConfigs = (config: ClientDepartmentConfigRecord) => {
   clientDepartmentConfig.value = config
   serialForm.clientDepartmentTree = cloneDepartmentTree(config.tree)
   selectedDepartmentNodeId.value = ''
+}
+
+const applyNotificationRules = (list: NotificationRuleRecord[]) => {
+  notificationRules.value = list.map((rule) => ({
+    ...rule,
+    recipientUserIds: [...rule.recipientUserIds],
+    watchedUserIds: [...rule.watchedUserIds],
+  }))
+}
+
+const applyNotificationPresenceSnapshot = (snapshot: NotificationPresenceSnapshot) => {
+  notificationPresence.value = snapshot
+}
+
+const refreshNotificationPresenceSnapshot = async () => {
+  notificationPresenceLoading.value = true
+  try {
+    const snapshot = await getNotificationPresenceSnapshot()
+    applyNotificationPresenceSnapshot(snapshot)
+  } catch (error) {
+    ElMessage.warning(extractErrorMessage(error, '刷新在线状态失败'))
+  } finally {
+    notificationPresenceLoading.value = false
+  }
+}
+
+const validateNotificationRules = () => {
+  for (const rule of notificationRules.value) {
+    if (rule.externalTriggerMode === 'watched_accounts_offline' && rule.watchedUserIds.length === 0) {
+      ElMessage.warning(`规则“${rule.ruleName}”在“指定账号离线”模式下必须选择监测账号`)
+      return false
+    }
+  }
+  return true
 }
 
 const getVerificationChannelLabel = (channel: 'mobile' | 'email') => {
@@ -689,6 +749,7 @@ const loadData = async () => {
     sectionLoadingState.o2o_rules = false
     sectionLoadingState.verification = false
     sectionLoadingState.department = false
+    sectionLoadingState.notification = false
     return
   }
 
@@ -698,10 +759,12 @@ const loadData = async () => {
   sectionErrorState.o2o_rules = ''
   sectionErrorState.verification = ''
   sectionErrorState.department = ''
+  sectionErrorState.notification = ''
   sectionLoadingState.order_serial = true
   sectionLoadingState.o2o_rules = true
   sectionLoadingState.verification = true
   sectionLoadingState.department = true
+  sectionLoadingState.notification = true
   await loadRequest.runLatest({
     executor: async () => {
       // 首屏分层加载策略：
@@ -738,6 +801,7 @@ const loadData = async () => {
         loadError.value = '系统配置加载失败，请刷新重试或检查后端服务状态'
         sectionLoadingState.verification = false
         sectionLoadingState.department = false
+        sectionLoadingState.notification = false
         return
       }
       if (successCount > 0 && successCount < 2) {
@@ -747,13 +811,17 @@ const loadData = async () => {
       deferredSectionRequest
         .runLatest({
         executor: async () => {
-          const [verificationResult, clientDepartmentResult] = await Promise.allSettled([
+          const [verificationResult, clientDepartmentResult, notificationRulesResult, notificationPresenceResult] = await Promise.allSettled([
             getVerificationProviderConfigs(),
             getClientDepartmentConfigs(),
+            getNotificationRules(),
+            getNotificationPresenceSnapshot(),
           ])
           return {
             verificationResult,
             clientDepartmentResult,
+            notificationRulesResult,
+            notificationPresenceResult,
           }
         },
         onSuccess: (deferredResult) => {
@@ -769,19 +837,33 @@ const loadData = async () => {
             sectionErrorState.department = '部门配置加载失败'
           }
 
-          if (sectionErrorState.verification || sectionErrorState.department) {
+          if (deferredResult.notificationRulesResult.status === 'fulfilled') {
+            applyNotificationRules(deferredResult.notificationRulesResult.value.list)
+          } else {
+            sectionErrorState.notification = '通知规则加载失败'
+          }
+
+          if (deferredResult.notificationPresenceResult.status === 'fulfilled') {
+            applyNotificationPresenceSnapshot(deferredResult.notificationPresenceResult.value)
+          } else {
+            sectionErrorState.notification = sectionErrorState.notification || '在线状态快照加载失败'
+          }
+
+          if (sectionErrorState.verification || sectionErrorState.department || sectionErrorState.notification) {
             ElMessage.warning('部分次级配置仍在加载失败，已保留当前可用内容')
           }
         },
         onError: (error) => {
-          const message = extractErrorMessage(error, '继续加载验证码与部门配置失败')
+          const message = extractErrorMessage(error, '继续加载验证码、部门与通知配置失败')
           sectionErrorState.verification = sectionErrorState.verification || message
           sectionErrorState.department = sectionErrorState.department || message
+          sectionErrorState.notification = sectionErrorState.notification || message
           ElMessage.warning(message)
         },
         onFinally: () => {
           sectionLoadingState.verification = false
           sectionLoadingState.department = false
+          sectionLoadingState.notification = false
           initialSnapshot.value = snapshotForm()
         },
         })
@@ -815,6 +897,9 @@ const handleSubmit = async () => {
     return
   }
   if (!validateVerificationConfigs()) {
+    return
+  }
+  if (!validateNotificationRules()) {
     return
   }
   let normalizedDepartmentTree: DepartmentTreeNode[] = []
@@ -869,14 +954,29 @@ const handleSubmit = async () => {
     const departmentResult = await updateClientDepartmentConfigs({
       tree: normalizedDepartmentTree,
     })
+    const notificationResult = await updateNotificationRules({
+      rules: notificationRules.value.map((rule) => ({
+        id: rule.id,
+        enabled: rule.enabled,
+        recipientUserIds: [...rule.recipientUserIds],
+        emailEnabled: rule.emailEnabled,
+        feishuEnabled: rule.feishuEnabled,
+        externalTriggerMode: rule.externalTriggerMode,
+        watchedUserIds: [...rule.watchedUserIds],
+        feishuWebhookUrl: rule.feishuWebhookUrl.trim(),
+        emailSubjectPrefix: rule.emailSubjectPrefix.trim() || '[Y-Link]',
+      })),
+    })
 
     applyList(result.list)
     applyO2oRules(o2oResult.config)
     applyVerificationConfigs(verificationResult.config)
     applyClientDepartmentConfigs(departmentResult.config)
+    applyNotificationRules(notificationResult.list)
+    await refreshNotificationPresenceSnapshot()
     initialSnapshot.value = snapshotForm()
     ElMessage.success(
-      result.changed || o2oResult.changed || verificationResult.changed || departmentResult.changed ? '系统配置已保存' : '配置未变更',
+      result.changed || o2oResult.changed || verificationResult.changed || departmentResult.changed || notificationResult.changed ? '系统配置已保存' : '配置未变更',
     )
   } catch (error) {
     ElMessage.error(extractErrorMessage(error, '保存系统配置失败，请稍后重试'))
@@ -1042,6 +1142,20 @@ onMounted(() => {
                 @edit="handleEditDepartment"
                 @delete="handleDeleteDepartment"
                 @node-click="handleDepartmentNodeClick"
+              />
+            </transition>
+
+            <transition name="workbench-horizontal-slide">
+              <SystemConfigNotificationSection
+                v-if="activeSection === 'notification'"
+                :rules="notificationRules"
+                :presence-snapshot="notificationPresence"
+                :management-users="managementUsers"
+                :loading="activeSectionInteractionLoading"
+                :saving="saving"
+                :can-update-configs="canUpdateConfigs"
+                :presence-loading="notificationPresenceLoading"
+                @refresh-presence="refreshNotificationPresenceSnapshot"
               />
             </transition>
           </div>

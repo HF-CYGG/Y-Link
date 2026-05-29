@@ -30,6 +30,10 @@ const SQLITE_REQUIRED_TABLES = [
   'biz_inbound_order_item',
   'client_feedback_conversation',
   'client_feedback_message',
+  'notification_rule',
+  'notification_event',
+  'notification_inbox',
+  'notification_dispatch',
 ]
 
 const SQLITE_REQUIRED_ORDER_COLUMNS = [
@@ -62,6 +66,7 @@ const SQLITE_REQUIRED_PRODUCT_COLUMNS = [
 ]
 
 const SQLITE_REQUIRED_CLIENT_USER_COLUMNS = ['mobile', 'email', 'real_name', 'department_name', 'status', 'last_login_at']
+const SQLITE_REQUIRED_SYS_USER_COLUMNS = ['email']
 const SQLITE_REQUIRED_CLIENT_FEEDBACK_CONVERSATION_COLUMNS = [
   'issue_type',
   'source_code',
@@ -289,6 +294,11 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
 
   const clientUserColumnSet = await listSqliteTableColumns(dataSource, 'client_user')
   if (SQLITE_REQUIRED_CLIENT_USER_COLUMNS.some((column) => !clientUserColumnSet.has(column))) {
+    return true
+  }
+
+  const sysUserColumnSet = await listSqliteTableColumns(dataSource, 'sys_user')
+  if (SQLITE_REQUIRED_SYS_USER_COLUMNS.some((column) => !sysUserColumnSet.has(column))) {
     return true
   }
 

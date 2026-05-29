@@ -1,9 +1,3 @@
-/**
- * 模块说明：backend/src/routes/user.routes.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
- */
-
 import { Router } from 'express'
 import { z } from 'zod'
 import type { AuthenticatedRequest } from '../types/auth.js'
@@ -17,6 +11,7 @@ const createUserSchema = z.object({
   username: z.string().min(1, '账号不能为空').max(64, '账号长度不能超过 64'),
   password: z.string().min(8, '密码至少 8 位').max(50, '密码长度不能超过 50 位'),
   displayName: z.string().min(1, '姓名不能为空').max(64, '姓名长度不能超过 64'),
+  email: z.string().trim().max(128, '邮箱长度不能超过 128').optional(),
   role: z.enum(USER_ROLES),
   status: z.enum(USER_STATUSES).optional(),
 })
@@ -24,6 +19,7 @@ const createUserSchema = z.object({
 const updateUserSchema = z
   .object({
     displayName: z.string().min(1, '姓名不能为空').max(64, '姓名长度不能超过 64').optional(),
+    email: z.string().trim().max(128, '邮箱长度不能超过 128').optional(),
     password: z.string().min(8, '密码至少 8 位').max(50, '密码长度不能超过 50 位').optional(),
     role: z.enum(USER_ROLES).optional(),
   })
@@ -39,7 +35,6 @@ const resetPasswordSchema = z.object({
   newPassword: z.string().min(8, '新密码至少 8 位').max(50, '新密码长度不能超过 50 位'),
 })
 
-// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export const userRouter = Router()
 
 userRouter.get(

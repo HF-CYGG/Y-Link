@@ -67,6 +67,7 @@ export interface UserSafeProfile {
   id: string
   username: string
   displayName: string
+  email: string | null
   role: UserRole
   permissions: PermissionCode[]
   status: UserStatus

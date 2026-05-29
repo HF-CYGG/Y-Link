@@ -114,6 +114,7 @@ const userForm = reactive({
   username: '',
   password: '',
   displayName: '',
+  email: '',
   role: 'operator' as UserRole,
   status: 'enabled' as UserStatus,
 })
@@ -173,6 +174,23 @@ const rules: FormRules = {
     },
   ],
   displayName: [{ required: true, message: '请输入用户姓名', trigger: 'blur' }],
+  email: [
+    {
+      validator: (_rule, value: string, callback) => {
+        const text = value.trim()
+        if (!text) {
+          callback()
+          return
+        }
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text)) {
+          callback(new Error('请输入正确的邮箱地址'))
+          return
+        }
+        callback()
+      },
+      trigger: 'blur',
+    },
+  ],
   role: [{ required: true, message: '请选择用户角色', trigger: 'change' }],
   status: [{ required: true, message: '请选择用户状态', trigger: 'change' }],
 }
@@ -326,6 +344,7 @@ const handleOpenCreate = () => {
   userForm.username = ''
   userForm.password = ''
   userForm.displayName = ''
+  userForm.email = ''
   userForm.role = 'supplier'
   userForm.status = 'enabled'
   formRef.value?.clearValidate()
@@ -383,6 +402,7 @@ const handleOpenEdit = (row: UserSafeProfile) => {
   userForm.username = row.username
   userForm.password = ''
   userForm.displayName = row.displayName
+  userForm.email = row.email ?? ''
   userForm.role = row.role
   userForm.status = row.status
   formRef.value?.clearValidate()
@@ -430,6 +450,7 @@ const handleSubmit = async () => {
         username: userForm.username.trim(),
         password: userForm.password,
         displayName: userForm.displayName.trim(),
+        email: userForm.email.trim(),
         role: userForm.role,
         status: userForm.status,
       }
@@ -447,6 +468,7 @@ const handleSubmit = async () => {
 
       const payload: UpdateUserPayload = {
         displayName: userForm.displayName.trim(),
+        email: userForm.email.trim(),
         role: userForm.role,
       }
 
@@ -707,6 +729,9 @@ onMounted(() => {
             <el-table native-scrollbar :data="listState.records" stripe class="user-manage-table w-full flex-1" height="100%" table-layout="auto">
               <el-table-column prop="username" label="账号" min-width="150" show-overflow-tooltip />
               <el-table-column prop="displayName" label="姓名" min-width="132" show-overflow-tooltip />
+              <el-table-column prop="email" label="邮箱" min-width="200" show-overflow-tooltip>
+                <template #default="{ row }">{{ row.email || '-' }}</template>
+              </el-table-column>
               <el-table-column label="角色" width="110">
                 <template #default="{ row }">
                   <el-tag :type="getRoleTagType(row.role)" effect="light">{{ getRoleLabel(row.role) }}</el-tag>
@@ -795,6 +820,7 @@ onMounted(() => {
                 <div class="min-w-0">
                   <div class="truncate text-base font-semibold text-slate-800 dark:text-slate-100">{{ item.displayName }}</div>
                   <div class="truncate text-sm text-slate-500 dark:text-slate-400">{{ item.username }}</div>
+                  <div class="truncate text-xs text-slate-400 dark:text-slate-500">{{ item.email || '未配置邮箱' }}</div>
                 </div>
                 <el-tag :type="getStatusTagType(item.status)" effect="light">{{ getStatusLabel(item.status) }}</el-tag>
               </div>
@@ -892,6 +918,9 @@ onMounted(() => {
         </div>
         <el-form-item label="用户姓名" prop="displayName">
           <el-input v-model.trim="userForm.displayName" placeholder="请输入用户姓名" />
+        </el-form-item>
+        <el-form-item label="邮箱" prop="email">
+          <el-input v-model.trim="userForm.email" placeholder="可选，用于通知中心邮件提醒" />
         </el-form-item>
         <div class="grid gap-3 sm:grid-cols-2">
           <el-form-item label="角色" prop="role">

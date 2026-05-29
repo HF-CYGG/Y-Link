@@ -183,6 +183,7 @@ export interface UserSafeProfile {
   id: string
   username: string
   displayName: string
+  email: string | null
   role: UserRole
   permissions: PermissionCode[]
   status: UserStatus
@@ -315,6 +316,12 @@ export const changePassword = (payload: ChangePasswordPayload) =>
     method: 'POST',
     url: '/auth/change-password',
     data: payload,
+  })
+
+export const sendPresenceHeartbeat = () =>
+  request<boolean>({
+    method: 'POST',
+    url: '/auth/presence/heartbeat',
   })
 
 /**

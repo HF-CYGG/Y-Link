@@ -24,6 +24,10 @@ export class SysUser {
   @Column({ name: 'display_name', type: 'varchar', length: 64, comment: '用户显示名称' })
   displayName!: string
 
+  @Index('uk_sys_user_email', { unique: true })
+  @Column({ name: 'email', type: 'varchar', length: 128, nullable: true, comment: '邮箱地址（可空且唯一）' })
+  email!: string | null
+
   @Index('idx_sys_user_role')
   @Column({ name: 'role', type: 'varchar', length: 32, default: 'operator', comment: '用户角色：admin/operator/supplier' })
   role!: UserRole

@@ -29,6 +29,10 @@ import { BizInboundOrder } from '../entities/biz-inbound-order.entity.js'
 import { BizInboundOrderItem } from '../entities/biz-inbound-order-item.entity.js'
 import { ClientFeedbackConversation } from '../entities/client-feedback-conversation.entity.js'
 import { ClientFeedbackMessage } from '../entities/client-feedback-message.entity.js'
+import { NotificationRule } from '../entities/notification-rule.entity.js'
+import { NotificationEvent } from '../entities/notification-event.entity.js'
+import { NotificationInbox } from '../entities/notification-inbox.entity.js'
+import { NotificationDispatch } from '../entities/notification-dispatch.entity.js'
 
 export const appEntities = [
   BaseProduct,
@@ -51,6 +55,10 @@ export const appEntities = [
   BizInboundOrderItem,
   ClientFeedbackConversation,
   ClientFeedbackMessage,
+  NotificationRule,
+  NotificationEvent,
+  NotificationInbox,
+  NotificationDispatch,
 ]
 
 function resolveEffectiveDatabaseConfig(

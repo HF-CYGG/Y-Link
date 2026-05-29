@@ -28,6 +28,7 @@ import { o2oRouter } from './routes/o2o.routes.js'
 import { orderRouter } from './routes/order.routes.js'
 import { productRouter } from './routes/product.routes.js'
 import { systemConfigRouter } from './routes/system-config.routes.js'
+import { notificationRouter } from './routes/notification.routes.js'
 import { tagRouter } from './routes/tag.routes.js'
 import { uploadRouter } from './routes/upload.routes.js'
 import { userRouter } from './routes/user.routes.js'
@@ -170,6 +171,7 @@ export function createApp() {
   app.use('/api/customer-service', customerServiceRouter)
   app.use('/api/audit-logs', auditLogRouter)
   app.use('/api/system-configs', systemConfigRouter)
+  app.use('/api/notifications', notificationRouter)
   app.use('/api/data-maintenance', dataMaintenanceRouter)
 
   // 将 zod 参数校验错误转为业务错误，统一响应格式。

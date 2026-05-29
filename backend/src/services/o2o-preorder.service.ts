@@ -34,6 +34,7 @@ import { BizError } from '../utils/errors.js'
 import { generateOrderUuid } from '../utils/id-generator.js'
 import { orderSerialService } from './order-serial.service.js'
 import { systemConfigService } from './system-config.service.js'
+import { notificationService } from './notification.service.js'
 import type { PaginationResult } from '../types/api.js'
 
 export interface SubmitPreorderItemInput {
@@ -1401,7 +1402,7 @@ class O2oPreorderService {
     const normalizedPickupContact = this.normalizePickupContact(input.pickupContact)
 
     const o2oRules = await systemConfigService.getO2oRuleConfigs()
-    return AppDataSource.transaction(async (manager) => {
+    const detail = await AppDataSource.transaction(async (manager) => {
       // 事务内完成“查商品 -> 校验库存/限购 -> 写订单 -> 占用预订库存 -> 记录库存日志”，
       // 确保任一步失败都能整体回滚，避免只生成订单或只扣预订库存的脏状态。
       const productIds = [...new Set(normalizedItems.map((item) => item.productId))]
@@ -1496,6 +1497,17 @@ class O2oPreorderService {
       }
       return this.detailById(savedOrder.id)
     })
+    await notificationService.emitEvent({
+      eventType: 'o2o_preorder_created',
+      sourceType: 'o2o_preorder',
+      sourceId: detail.order.id,
+      payload: {
+        showNo: detail.order.showNo,
+        sourceUserId: auth.userId,
+        sourceUserDisplayName: auth.realName || auth.account,
+      },
+    })
+    return detail
   }
 
   private async assertCanUpdateOrderInManager(manager: EntityManager, order: O2oPreorder) {
