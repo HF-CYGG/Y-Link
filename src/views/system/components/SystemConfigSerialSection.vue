@@ -56,9 +56,16 @@ defineProps<{
           </el-form-item>
           <el-form-item prop="department.current" class="!mb-0">
             <template #label>
-              <span class="field-label">当前号 <span class="field-label__help">系统自动维护，仅展示不可编辑</span></span>
+              <span class="field-label">当前号 <span class="field-label__help">可手动设置；仅在无历史订单且无冲突时可重置到初始号</span></span>
             </template>
-            <el-input :model-value="String(serialForm.department.current)" disabled class="!w-full" />
+            <PassiveNumberInput
+              v-model="serialForm.department.current"
+              :min="0"
+              :step="1"
+              :controls="false"
+              :disabled="!canUpdateConfigs || loading"
+              class="!w-full"
+            />
           </el-form-item>
           <el-form-item prop="department.width" class="!mb-0">
             <template #label>
@@ -94,9 +101,16 @@ defineProps<{
           </el-form-item>
           <el-form-item prop="walkin.current" class="!mb-0">
             <template #label>
-              <span class="field-label">当前号 <span class="field-label__help">系统自动维护，仅展示不可编辑</span></span>
+              <span class="field-label">当前号 <span class="field-label__help">可手动设置；仅在无历史订单且无冲突时可重置到初始号</span></span>
             </template>
-            <el-input :model-value="String(serialForm.walkin.current)" disabled class="!w-full" />
+            <PassiveNumberInput
+              v-model="serialForm.walkin.current"
+              :min="0"
+              :step="1"
+              :controls="false"
+              :disabled="!canUpdateConfigs || loading"
+              class="!w-full"
+            />
           </el-form-item>
           <el-form-item prop="walkin.width" class="!mb-0">
             <template #label>

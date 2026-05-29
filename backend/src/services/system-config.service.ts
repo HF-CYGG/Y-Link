@@ -5,6 +5,8 @@
  */
 
 import { AppDataSource } from '../config/data-source.js'
+import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
+import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
 import { SystemConfig } from '../entities/system-config.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
@@ -897,6 +899,61 @@ class SystemConfigService {
     }
   }
 
+  private async countOrderSerialHistory(
+    manager: typeof AppDataSource.manager,
+    orderType: OrderSerialType,
+  ): Promise<number> {
+    const [outboundCount, preorderCount] = await Promise.all([
+      manager.getRepository(BizOutboundOrder).count({
+        where: {
+          orderType,
+        },
+      }),
+      manager.getRepository(O2oPreorder).count({
+        where: {
+          clientOrderType: orderType,
+        },
+      }),
+    ])
+    return outboundCount + preorderCount
+  }
+
+  private async assertOrderSerialCurrentSafety(
+    manager: typeof AppDataSource.manager,
+    beforeList: OrderSerialConfigRecord[],
+    input: UpdateOrderSerialConfigsInput,
+  ) {
+    for (const orderType of ORDER_SERIAL_TYPES) {
+      const before = beforeList.find((item) => item.orderType === orderType)
+      if (!before) {
+        continue
+      }
+      const next = input[orderType]
+      const isLoweringCurrent = next.current < before.current
+      if (!isLoweringCurrent) {
+        continue
+      }
+
+      const historyCount = await this.countOrderSerialHistory(manager, orderType)
+      if (historyCount <= 0) {
+        continue
+      }
+
+      const resetToInitialCurrent = next.start - 1
+      if (next.current === resetToInitialCurrent) {
+        throw new BizError(
+          `${ORDER_SERIAL_META[orderType].label}存在历史订单（含线上预订单或出库单），不能重置到初始单号。请仅在试运行且无历史订单时重置。`,
+          400,
+        )
+      }
+
+      throw new BizError(
+        `${ORDER_SERIAL_META[orderType].label}存在历史订单，当前号不允许回退以避免单号冲突。`,
+        400,
+      )
+    }
+  }
+
   private formatVerificationProviderConfig(
     channel: VerificationChannelType,
     configMap: Map<string, Pick<SystemConfig, 'configValue' | 'updatedAt'>>,
@@ -1076,6 +1133,7 @@ class SystemConfigService {
       )
 
       const beforeList = ORDER_SERIAL_TYPES.map((orderType) => this.formatConfigRecord(orderType, rowMap))
+      await this.assertOrderSerialCurrentSafety(manager, beforeList, input)
       const targetMap = new Map<string, string>()
 
       ORDER_SERIAL_TYPES.forEach((orderType) => {
