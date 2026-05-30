@@ -24,6 +24,13 @@ const emit = defineEmits<{
   (event: 'refresh-presence'): void
 }>()
 
+type TestChannel = 'email' | 'feishu'
+type TestFeedback = {
+  status: 'testing' | 'success' | 'error'
+  message: string
+  updatedAt: number
+}
+
 const eventLabelMap: Record<NotificationRuleRecord['eventType'], string> = {
   o2o_preorder_created: '新预订单',
   customer_service_client_message_created: '新客服消息',
@@ -33,12 +40,29 @@ const hasManagementUsers = computed(() => props.managementUsers.length > 0)
 const adminAndOperatorUsers = computed(() => props.managementUsers.filter((user) => user.role !== 'supplier'))
 const supplierUsers = computed(() => props.managementUsers.filter((user) => user.role === 'supplier'))
 const testingState = reactive<Record<string, boolean>>({})
+const testFeedbackState = reactive<Record<string, TestFeedback>>({})
 
-const isRuleTesting = (ruleId: string, channel: 'email' | 'feishu') => {
-  return testingState[`${ruleId}:${channel}`] === true
+const buildTestKey = (ruleId: string, channel: TestChannel) => {
+  return `${ruleId}:${channel}`
 }
 
-const getTestBlockedReason = (rule: NotificationRuleRecord, channel: 'email' | 'feishu') => {
+const isRuleTesting = (ruleId: string, channel: TestChannel) => {
+  return testingState[buildTestKey(String(ruleId ?? '').trim(), channel)] === true
+}
+
+const setTestFeedback = (ruleId: string, channel: TestChannel, status: TestFeedback['status'], message: string) => {
+  testFeedbackState[buildTestKey(ruleId, channel)] = {
+    status,
+    message,
+    updatedAt: Date.now(),
+  }
+}
+
+const getTestFeedback = (ruleId: string, channel: TestChannel) => {
+  return testFeedbackState[buildTestKey(String(ruleId ?? '').trim(), channel)] ?? null
+}
+
+const getTestBlockedReason = (rule: NotificationRuleRecord, channel: TestChannel) => {
   if (props.loading) {
     return '当前分区仍在加载，请稍后重试'
   }
@@ -81,22 +105,28 @@ const buildRuleDraft = (rule: NotificationRuleRecord) => {
   }
 }
 
-const handleTestSend = async (rule: NotificationRuleRecord, channel: 'email' | 'feishu') => {
+const handleTestSend = async (rule: NotificationRuleRecord, channel: TestChannel) => {
+  const ruleId = String(rule.id ?? '').trim()
   const blockReason = getTestBlockedReason(rule, channel)
   if (blockReason) {
+    setTestFeedback(ruleId, channel, 'error', blockReason)
     ElMessage.warning(blockReason)
     return
   }
 
-  const ruleId = String(rule.id ?? '').trim()
-  const key = `${ruleId}:${channel}`
+  const key = buildTestKey(ruleId, channel)
   if (testingState[key]) {
-    ElMessage.info(channel === 'feishu' ? '飞书测试发送中，请稍候' : '邮箱测试发送中，请稍候')
+    const text = channel === 'feishu' ? '飞书测试发送中，请稍候' : '邮箱测试发送中，请稍候'
+    setTestFeedback(ruleId, channel, 'testing', text)
+    ElMessage.info(text)
     return
   }
 
+  const testingMessage = channel === 'feishu' ? '正在测试飞书连接，请稍候…' : '正在测试邮箱发送，请稍候…'
   testingState[key] = true
-  ElMessage.info(channel === 'feishu' ? '正在测试飞书连接，请稍候…' : '正在测试邮箱发送，请稍候…')
+  setTestFeedback(ruleId, channel, 'testing', testingMessage)
+  ElMessage.info(testingMessage)
+
   try {
     const result = await testNotificationRuleSend({
       ruleId,
@@ -104,16 +134,22 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: 'email' | '
       draft: buildRuleDraft(rule),
     })
     if (result.success) {
-      ElMessage.success(result.message || '测试发送成功')
+      const successMessage = result.message || '测试发送成功'
+      setTestFeedback(ruleId, channel, 'success', successMessage)
+      ElMessage.success(successMessage)
       return
     }
     const failureText = result.failures
       .slice(0, 3)
       .map((item) => `${item.target}: ${item.reason}`)
       .join('；')
-    ElMessage.warning(failureText ? `${result.message}；${failureText}` : (result.message || '测试发送失败'))
+    const warningMessage = failureText ? `${result.message}；${failureText}` : (result.message || '测试发送失败')
+    setTestFeedback(ruleId, channel, 'error', warningMessage)
+    ElMessage.warning(warningMessage)
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '测试发送失败，请稍后重试'))
+    const errorMessage = extractErrorMessage(error, '测试发送失败，请稍后重试')
+    setTestFeedback(ruleId, channel, 'error', errorMessage)
+    ElMessage.error(errorMessage)
   } finally {
     testingState[key] = false
   }
@@ -304,6 +340,29 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: 'email' | '
               >
                 测试飞书
               </el-button>
+            </div>
+
+            <div class="lg:col-span-2 grid gap-1 text-xs text-slate-500 dark:text-slate-400">
+              <div v-if="getTestFeedback(rule.id, 'email')" class="break-all">
+                <span class="mr-2">邮箱：</span>
+                <span :class="{
+                  'text-emerald-600': getTestFeedback(rule.id, 'email')?.status === 'success',
+                  'text-rose-600': getTestFeedback(rule.id, 'email')?.status === 'error',
+                  'text-slate-500': getTestFeedback(rule.id, 'email')?.status === 'testing',
+                }">
+                  {{ getTestFeedback(rule.id, 'email')?.message }}
+                </span>
+              </div>
+              <div v-if="getTestFeedback(rule.id, 'feishu')" class="break-all">
+                <span class="mr-2">飞书：</span>
+                <span :class="{
+                  'text-emerald-600': getTestFeedback(rule.id, 'feishu')?.status === 'success',
+                  'text-rose-600': getTestFeedback(rule.id, 'feishu')?.status === 'error',
+                  'text-slate-500': getTestFeedback(rule.id, 'feishu')?.status === 'testing',
+                }">
+                  {{ getTestFeedback(rule.id, 'feishu')?.message }}
+                </span>
+              </div>
             </div>
           </div>
         </article>

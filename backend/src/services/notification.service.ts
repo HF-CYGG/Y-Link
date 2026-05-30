@@ -833,12 +833,14 @@ export class NotificationService {
         targetType: 'notification_rule',
         targetId: normalizedDraft.id,
         targetCode: normalizedDraft.ruleCode,
+        resultStatus: output.success ? 'success' : 'failed',
         actor: input.actor,
         requestMeta: input.requestMeta,
         detail: {
           channel: 'email',
           summary: output.summary,
           failureCount: output.failures.length,
+          failures: output.failures.slice(0, 5),
         },
       })
 
@@ -879,12 +881,14 @@ export class NotificationService {
       targetType: 'notification_rule',
       targetId: normalizedDraft.id,
       targetCode: normalizedDraft.ruleCode,
+      resultStatus: output.success ? 'success' : 'failed',
       actor: input.actor,
       requestMeta: input.requestMeta,
       detail: {
         channel: 'feishu',
         summary: output.summary,
         success: output.success,
+        failures: output.failures.slice(0, 5),
       },
     })
 

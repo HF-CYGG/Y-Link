@@ -13,19 +13,24 @@ const idValueSchema = z.union([z.string(), z.number()])
   .transform((value) => String(value).trim())
   .pipe(z.string().min(1))
 
+const looseTextSchema = (max: number) =>
+  z.union([z.string(), z.number(), z.null(), z.undefined()])
+    .transform((value) => String(value ?? '').trim())
+    .pipe(z.string().max(max))
+
 const updateNotificationRuleSchema = z.object({
   id: idValueSchema,
   enabled: z.boolean(),
-  recipientUserIds: z.array(idValueSchema).max(200),
-  emailRecipientAdminUserIds: z.array(idValueSchema).max(200),
-  emailRecipientSupplierUserIds: z.array(idValueSchema).max(200),
-  emailEnabled: z.boolean(),
-  feishuEnabled: z.boolean(),
-  externalTriggerMode: z.enum(NOTIFICATION_EXTERNAL_TRIGGER_MODES),
-  watchedUserIds: z.array(idValueSchema).max(200),
-  feishuWebhookUrl: z.string().trim().max(500),
-  feishuSignSecret: z.string().trim().max(256),
-  emailSubjectPrefix: z.string().trim().max(128),
+  recipientUserIds: z.array(idValueSchema).max(200).optional().default([]),
+  emailRecipientAdminUserIds: z.array(idValueSchema).max(200).optional().default([]),
+  emailRecipientSupplierUserIds: z.array(idValueSchema).max(200).optional().default([]),
+  emailEnabled: z.boolean().optional().default(false),
+  feishuEnabled: z.boolean().optional().default(false),
+  externalTriggerMode: z.enum(NOTIFICATION_EXTERNAL_TRIGGER_MODES).optional().default('all_management_offline'),
+  watchedUserIds: z.array(idValueSchema).max(200).optional().default([]),
+  feishuWebhookUrl: looseTextSchema(500),
+  feishuSignSecret: looseTextSchema(256),
+  emailSubjectPrefix: looseTextSchema(128),
 })
 
 const updateNotificationRulesSchema = z.object({
