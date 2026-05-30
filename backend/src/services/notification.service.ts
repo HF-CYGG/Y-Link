@@ -35,6 +35,7 @@ const ADMIN_MANAGEMENT_ROLES: Array<SysUser['role']> = ['admin', 'operator']
 const SUPPLIER_ROLE: SysUser['role'] = 'supplier'
 const ONLINE_WINDOW_MS = 120 * 1000
 const HEARTBEAT_WRITE_INTERVAL_MS = 60 * 1000
+const FEISHU_WEBHOOK_TIMEOUT_MS = 10 * 1000
 export const FEISHU_SIGN_SECRET_PLACEHOLDER = '[已配置签名密钥，保存时保留原值]'
 
 const DEFAULT_RULES: Array<{
@@ -678,11 +679,17 @@ export class NotificationService {
     content: string,
     signSecret?: string | null,
   ): Promise<{ status: number; ok: boolean; errorMessage?: string }> {
+    const abortController = new AbortController()
+    const timeout = setTimeout(() => {
+      abortController.abort()
+    }, FEISHU_WEBHOOK_TIMEOUT_MS)
+
     try {
       const normalizedSecret = signSecret?.trim() || ''
       const signedPart = normalizedSecret ? this.buildFeishuSignature(normalizedSecret) : null
       const response = await fetch(webhookUrl, {
         method: 'POST',
+        signal: abortController.signal,
         headers: {
           'Content-Type': 'application/json',
         },
@@ -714,11 +721,20 @@ export class NotificationService {
         ok: true,
       }
     } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') {
+        return {
+          status: 504,
+          ok: false,
+          errorMessage: `飞书 Webhook 请求超时（${Math.floor(FEISHU_WEBHOOK_TIMEOUT_MS / 1000)} 秒内未响应）`,
+        }
+      }
       return {
         status: 500,
         ok: false,
         errorMessage: error instanceof Error ? error.message : String(error),
       }
+    } finally {
+      clearTimeout(timeout)
     }
   }
 

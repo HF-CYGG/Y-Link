@@ -39,6 +39,17 @@ const isRuleTesting = (ruleId: string, channel: 'email' | 'feishu') => {
 }
 
 const handleTestSend = async (rule: NotificationRuleRecord, channel: 'email' | 'feishu') => {
+  if (channel === 'feishu') {
+    if (!rule.feishuEnabled) {
+      ElMessage.warning('请先勾选飞书外发渠道，再执行测试')
+      return
+    }
+    if (!rule.feishuWebhookUrl?.trim()) {
+      ElMessage.warning('请先填写飞书 Webhook 地址')
+      return
+    }
+  }
+
   const key = `${rule.id}:${channel}`
   testingState[key] = true
   try {
