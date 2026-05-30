@@ -43,18 +43,18 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: 'email' | '
   testingState[key] = true
   try {
     const result = await testNotificationRuleSend({
-      ruleId: rule.id,
+      ruleId: String(rule.id ?? '').trim(),
       channel,
       draft: {
-        id: rule.id,
+        id: String(rule.id ?? '').trim(),
         enabled: rule.enabled,
-        recipientUserIds: [...(rule.recipientUserIds ?? [])],
-        emailRecipientAdminUserIds: [...(rule.emailRecipientAdminUserIds ?? [])],
-        emailRecipientSupplierUserIds: [...(rule.emailRecipientSupplierUserIds ?? [])],
+        recipientUserIds: (rule.recipientUserIds ?? []).map((value) => String(value ?? '').trim()).filter(Boolean),
+        emailRecipientAdminUserIds: (rule.emailRecipientAdminUserIds ?? []).map((value) => String(value ?? '').trim()).filter(Boolean),
+        emailRecipientSupplierUserIds: (rule.emailRecipientSupplierUserIds ?? []).map((value) => String(value ?? '').trim()).filter(Boolean),
         emailEnabled: rule.emailEnabled,
         feishuEnabled: rule.feishuEnabled,
         externalTriggerMode: rule.externalTriggerMode,
-        watchedUserIds: [...(rule.watchedUserIds ?? [])],
+        watchedUserIds: (rule.watchedUserIds ?? []).map((value) => String(value ?? '').trim()).filter(Boolean),
         feishuWebhookUrl: rule.feishuWebhookUrl.trim(),
         feishuSignSecret: (rule.feishuSignSecret ?? '').trim(),
         emailSubjectPrefix: rule.emailSubjectPrefix.trim() || '[Y-Link]',

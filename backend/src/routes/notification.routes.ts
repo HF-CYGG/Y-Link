@@ -9,16 +9,20 @@ import { NOTIFICATION_EXTERNAL_TRIGGER_MODES } from '../entities/notification-ru
 import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 
+const idValueSchema = z.union([z.string(), z.number()])
+  .transform((value) => String(value).trim())
+  .pipe(z.string().min(1))
+
 const updateNotificationRuleSchema = z.object({
-  id: z.string().trim().min(1),
+  id: idValueSchema,
   enabled: z.boolean(),
-  recipientUserIds: z.array(z.string().trim().min(1)).max(200),
-  emailRecipientAdminUserIds: z.array(z.string().trim().min(1)).max(200),
-  emailRecipientSupplierUserIds: z.array(z.string().trim().min(1)).max(200),
+  recipientUserIds: z.array(idValueSchema).max(200),
+  emailRecipientAdminUserIds: z.array(idValueSchema).max(200),
+  emailRecipientSupplierUserIds: z.array(idValueSchema).max(200),
   emailEnabled: z.boolean(),
   feishuEnabled: z.boolean(),
   externalTriggerMode: z.enum(NOTIFICATION_EXTERNAL_TRIGGER_MODES),
-  watchedUserIds: z.array(z.string().trim().min(1)).max(200),
+  watchedUserIds: z.array(idValueSchema).max(200),
   feishuWebhookUrl: z.string().trim().max(500),
   feishuSignSecret: z.string().trim().max(256),
   emailSubjectPrefix: z.string().trim().max(128),
@@ -30,7 +34,7 @@ const updateNotificationRulesSchema = z.object({
 type UpdateNotificationRulesPayload = z.infer<typeof updateNotificationRulesSchema>
 
 const testSendNotificationRuleSchema = z.object({
-  ruleId: z.string().trim().min(1),
+  ruleId: idValueSchema,
   channel: z.enum(['email', 'feishu']),
   draft: updateNotificationRuleSchema,
 })

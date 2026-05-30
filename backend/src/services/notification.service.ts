@@ -188,9 +188,13 @@ function normalizeFeishuSignSecretInput(secret: string): string | null {
   return normalized.slice(0, 256)
 }
 
+function normalizeId(value: string | number | null | undefined): string {
+  return String(value ?? '').trim()
+}
+
 function toRuleRecord(row: NotificationRule): NotificationRuleRecord {
   return {
-    id: row.id,
+    id: normalizeId(row.id),
     ruleCode: row.ruleCode,
     ruleName: row.ruleName,
     eventType: row.eventType as NotificationEventType,
@@ -261,8 +265,8 @@ export class NotificationService {
     payload: Pick<NormalizedNotificationRuleDraft, 'recipientUserIds' | 'watchedUserIds' | 'emailRecipientAdminUserIds' | 'emailRecipientSupplierUserIds'>,
     managementUsers: Array<Pick<SysUser, 'id' | 'role'>>,
   ): void {
-    const managementUserIdSet = new Set(managementUsers.map((item) => item.id))
-    const roleByUserId = new Map(managementUsers.map((item) => [item.id, item.role]))
+    const managementUserIdSet = new Set(managementUsers.map((item) => normalizeId(item.id)))
+    const roleByUserId = new Map(managementUsers.map((item) => [normalizeId(item.id), item.role]))
 
     if (payload.recipientUserIds.some((userId) => !managementUserIdSet.has(userId))) {
       throw new BizError('通知接收账号包含无效或非管理端账号', 400)
@@ -292,10 +296,10 @@ export class NotificationService {
       throw new BizError('外发时机配置不合法', 400)
     }
 
-    const recipientUserIds = row.recipientUserIds.map((item) => item.trim()).filter(Boolean)
-    const watchedUserIds = row.watchedUserIds.map((item) => item.trim()).filter(Boolean)
-    const emailRecipientAdminUserIds = row.emailRecipientAdminUserIds.map((item) => item.trim()).filter(Boolean)
-    const emailRecipientSupplierUserIds = row.emailRecipientSupplierUserIds.map((item) => item.trim()).filter(Boolean)
+    const recipientUserIds = row.recipientUserIds.map((item) => normalizeId(item)).filter(Boolean)
+    const watchedUserIds = row.watchedUserIds.map((item) => normalizeId(item)).filter(Boolean)
+    const emailRecipientAdminUserIds = row.emailRecipientAdminUserIds.map((item) => normalizeId(item)).filter(Boolean)
+    const emailRecipientSupplierUserIds = row.emailRecipientSupplierUserIds.map((item) => normalizeId(item)).filter(Boolean)
     const feishuWebhookUrl = row.feishuWebhookUrl.trim()
     const emailSubjectPrefix = row.emailSubjectPrefix.trim().slice(0, 128) || '[Y-Link]'
 
@@ -315,7 +319,7 @@ export class NotificationService {
       : normalizeFeishuSignSecretInput(rawFeishuSignSecret)
 
     return {
-      id: row.id,
+      id: normalizeId(row.id),
       ruleCode: persistedRule.ruleCode,
       ruleName: persistedRule.ruleName,
       enabled: row.enabled,
@@ -339,15 +343,15 @@ export class NotificationService {
   ): Promise<{ changed: boolean; list: NotificationRuleRecord[] }> {
     await this.ensureDefaultRules()
     const rows = await this.ruleRepo.find()
-    const rowById = new Map(rows.map((item) => [item.id, item]))
+    const rowById = new Map(rows.map((item) => [normalizeId(item.id), item]))
     const normalizedById = new Map<string, UpdateNotificationRuleInput>()
     for (const row of input) {
-      const persistedRule = rowById.get(row.id)
+      const persistedRule = rowById.get(normalizeId(row.id))
       if (!persistedRule) {
         throw new BizError('通知规则不存在', 404)
       }
       const normalized = this.normalizeRuleDraft(row, persistedRule)
-      normalizedById.set(row.id, {
+      normalizedById.set(normalizeId(row.id), {
         id: normalized.id,
         enabled: normalized.enabled,
         recipientUserIds: normalized.recipientUserIds,
@@ -375,7 +379,7 @@ export class NotificationService {
     await AppDataSource.transaction(async (manager) => {
       const txRuleRepo = manager.getRepository(NotificationRule)
       for (const row of rows) {
-        const payload = normalizedById.get(row.id)
+        const payload = normalizedById.get(normalizeId(row.id))
         if (!payload) {
           continue
         }
@@ -474,26 +478,26 @@ export class NotificationService {
 
     const byUser = new Map<string, Array<Pick<SysUserSession, 'lastAccessAt' | 'expiresAt'>>>()
     for (const session of sessions) {
-      const list = byUser.get(session.userId) ?? []
+      const list = byUser.get(normalizeId(session.userId)) ?? []
       list.push({
         lastAccessAt: session.lastAccessAt,
         expiresAt: session.expiresAt,
       })
-      byUser.set(session.userId, list)
+      byUser.set(normalizeId(session.userId), list)
     }
 
     return {
       serverTime: now.toISOString(),
       onlineWindowSeconds: Math.floor(ONLINE_WINDOW_MS / 1000),
       users: users.map((user) => {
-        const sessionList = byUser.get(user.id) ?? []
+        const sessionList = byUser.get(normalizeId(user.id)) ?? []
         const activeSessions = sessionList.filter((session) => session.expiresAt > now)
         const onlineSessions = activeSessions.filter((session) => session.lastAccessAt >= onlineAfter)
         const latest = activeSessions
           .map((session) => session.lastAccessAt)
           .sort((left, right) => right.getTime() - left.getTime())[0]
         return {
-          userId: user.id,
+          userId: normalizeId(user.id),
           username: user.username,
           displayName: user.displayName,
           role: user.role,
@@ -554,7 +558,7 @@ export class NotificationService {
       return allManagementUsers
     }
     const idSet = new Set(rule.recipientUserIds)
-    return allManagementUsers.filter((item) => idSet.has(item.id))
+    return allManagementUsers.filter((item) => idSet.has(normalizeId(item.id)))
   }
 
   private async resolveRuleEmailRecipients(rule: NotificationRuleRecord): Promise<SysUser[]> {
@@ -572,17 +576,17 @@ export class NotificationService {
 
     const adminRecipients = rule.emailRecipientAdminUserIds.length
       ? allManagementUsers.filter((item) =>
-        rule.emailRecipientAdminUserIds.includes(item.id) && ADMIN_MANAGEMENT_ROLES.includes(item.role),
+        rule.emailRecipientAdminUserIds.includes(normalizeId(item.id)) && ADMIN_MANAGEMENT_ROLES.includes(item.role),
       )
       : []
     const supplierRecipients = rule.emailRecipientSupplierUserIds.length
       ? allManagementUsers.filter((item) =>
-        rule.emailRecipientSupplierUserIds.includes(item.id) && item.role === SUPPLIER_ROLE,
+        rule.emailRecipientSupplierUserIds.includes(normalizeId(item.id)) && item.role === SUPPLIER_ROLE,
       )
       : []
     const deduped = new Map<string, SysUser>()
     for (const user of [...adminRecipients, ...supplierRecipients]) {
-      deduped.set(user.id, user)
+      deduped.set(normalizeId(user.id), user)
     }
     return [...deduped.values()]
   }
@@ -720,11 +724,12 @@ export class NotificationService {
 
   async testSendByRule(input: NotificationRuleTestSendInput): Promise<NotificationRuleTestSendResult> {
     await this.ensureDefaultRules()
-    if (input.ruleId !== input.draft.id) {
+    const ruleId = normalizeId(input.ruleId)
+    if (ruleId !== normalizeId(input.draft.id)) {
       throw new BizError('测试参数中的规则标识不一致', 400)
     }
     const persistedRule = await this.ruleRepo.findOne({
-      where: { id: input.ruleId },
+      where: { id: ruleId },
       select: {
         id: true,
         ruleCode: true,
