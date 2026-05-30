@@ -23,6 +23,7 @@ import { extractRequestMeta } from '../utils/request-meta.js'
 import { clientAuthService } from '../services/client-auth.service.js'
 import { authSecurityService } from '../services/auth-security.service.js'
 import { verificationCodeService } from '../services/verification-code.service.js'
+import { clearClientAuthCookie, setClientAuthCookie } from '../utils/client-auth-cookie.js'
 
 /**
  * 客户端密码字段统一请求校验：
@@ -167,7 +168,21 @@ clientAuthRouter.post(
     }).normalizedValue
     await authSecurityService.guardClientLoginRequest(requestMeta, normalizedAccount)
     const data = await clientAuthService.login(payload, requestMeta)
-    res.json({ code: 0, message: 'ok', data })
+    setClientAuthCookie(req, res, {
+      sessionToken: data.token,
+      expiresAt: data.expiresAt,
+    })
+    res.setHeader('Cache-Control', 'no-store')
+    res.json({
+      code: 0,
+      message: 'ok',
+      data: {
+        expiresAt: data.expiresAt,
+        user: data.user,
+        verificationChannel: data.verificationChannel,
+        authMode: 'cookie',
+      },
+    })
   }),
 )
 
@@ -207,6 +222,7 @@ clientAuthRouter.get(
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const data = await clientAuthService.me(authReq.clientAuth)
+    res.setHeader('Cache-Control', 'no-store')
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -217,6 +233,7 @@ clientAuthRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     await clientAuthService.logout(authReq.clientAuth)
+    clearClientAuthCookie(req, res)
     res.json({ code: 0, message: 'ok', data: true })
   }),
 )
@@ -229,6 +246,7 @@ clientAuthRouter.post(
     const requestMeta = extractRequestMeta(req)
     await authSecurityService.guardClientChangePasswordRequest(requestMeta, authReq.clientAuth.userId)
     await clientAuthService.changePassword(authReq.clientAuth, changePasswordSchema.parse(req.body))
+    clearClientAuthCookie(req, res)
     res.json({ code: 0, message: 'ok', data: true })
   }),
 )

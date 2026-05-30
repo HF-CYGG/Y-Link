@@ -1018,11 +1018,17 @@ export class NotificationService {
       )
 
       const inboxRows: NotificationInbox[] = []
+      const inboxDedupUserIds = new Set<string>()
       for (const item of ruleRecipients) {
         for (const user of item.inboxUsers) {
+          const normalizedUserId = normalizeId(user.id)
+          if (!normalizedUserId || inboxDedupUserIds.has(normalizedUserId)) {
+            continue
+          }
+          inboxDedupUserIds.add(normalizedUserId)
           inboxRows.push(this.inboxRepo.create({
             eventId: event.id,
-            userId: user.id,
+            userId: normalizedUserId,
             eventType: input.eventType,
             title: message.title,
             content: message.content,
@@ -1036,6 +1042,7 @@ export class NotificationService {
         await this.inboxRepo.save(inboxRows)
       }
 
+      const dispatchDedupKeys = new Set<string>()
       for (const item of ruleRecipients) {
         const allowExternal = await this.shouldTriggerExternal(item.rule)
         let emailSent = 0
@@ -1068,18 +1075,28 @@ export class NotificationService {
         if (item.rule.emailEnabled) {
           for (const user of item.emailUsers) {
             const email = user.email?.trim() || ''
+            const fallbackTarget = (email || user.username).trim()
             if (!email || !isValidEmail(email)) {
+              const fallbackDispatchKey = `email:${fallbackTarget}`
+              if (!fallbackTarget || dispatchDedupKeys.has(fallbackDispatchKey)) {
+                continue
+              }
               await this.dispatchRepo.save(this.dispatchRepo.create({
                 eventId: event.id,
                 channel: 'email',
-                target: email || user.username,
+                target: fallbackTarget,
                 status: 'failed',
                 attemptCount: 1,
                 errorMessage: '接收账号未配置有效邮箱',
                 responseCode: null,
                 sentAt: null,
               }))
+              dispatchDedupKeys.add(`email:${fallbackTarget}`)
               emailFailed += 1
+              continue
+            }
+            const emailDispatchKey = `email:${email}`
+            if (dispatchDedupKeys.has(emailDispatchKey)) {
               continue
             }
             const subject = `${item.rule.emailSubjectPrefix || '[Y-Link]'} ${message.title}`
@@ -1094,6 +1111,7 @@ export class NotificationService {
               responseCode: sendResult.status,
               sentAt: sendResult.ok ? new Date() : null,
             }))
+            dispatchDedupKeys.add(emailDispatchKey)
             if (sendResult.ok) {
               emailSent += 1
             } else {
@@ -1103,8 +1121,13 @@ export class NotificationService {
         }
 
         if (item.rule.feishuEnabled && item.rule.feishuWebhookUrl) {
+          const feishuWebhookUrl = item.rule.feishuWebhookUrl.trim()
+          const feishuDispatchKey = `feishu:${feishuWebhookUrl}`
+          if (!feishuWebhookUrl || dispatchDedupKeys.has(feishuDispatchKey)) {
+            continue
+          }
           const sendResult = await this.sendFeishuWebhook(
-            item.rule.feishuWebhookUrl,
+            feishuWebhookUrl,
             message.title,
             message.content,
             item.feishuSignSecret,
@@ -1112,13 +1135,14 @@ export class NotificationService {
           await this.dispatchRepo.save(this.dispatchRepo.create({
             eventId: event.id,
             channel: 'feishu',
-            target: item.rule.feishuWebhookUrl,
+            target: feishuWebhookUrl,
             status: sendResult.ok ? 'sent' : 'failed',
             attemptCount: 1,
             errorMessage: sendResult.ok ? null : (sendResult.errorMessage ?? '飞书发送失败'),
             responseCode: sendResult.status,
             sentAt: sendResult.ok ? new Date() : null,
           }))
+          dispatchDedupKeys.add(feishuDispatchKey)
           if (sendResult.ok) {
             feishuSent += 1
           } else {

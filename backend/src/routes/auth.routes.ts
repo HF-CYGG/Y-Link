@@ -69,7 +69,7 @@ authRouter.post(
     }
     const data = await authService.login(payload, requestMeta)
     const csrfToken = generateAdminCsrfToken()
-    setAdminAuthCookies(res, {
+    setAdminAuthCookies(req, res, {
       sessionToken: data.token,
       csrfToken,
       expiresAt: data.expiresAt,
@@ -94,7 +94,7 @@ authRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     await authService.logout(authReq.auth, extractRequestMeta(req))
-    clearAdminAuthCookies(res)
+    clearAdminAuthCookies(req, res)
     res.json({
       code: 0,
       message: 'ok',
@@ -142,7 +142,7 @@ authRouter.post(
     const authReq = req as AuthenticatedRequest
     const payload = changePasswordSchema.parse(req.body)
     await authService.changeOwnPassword(authReq.auth, payload, extractRequestMeta(req))
-    clearAdminAuthCookies(res)
+    clearAdminAuthCookies(req, res)
     res.json({
       code: 0,
       message: 'ok',

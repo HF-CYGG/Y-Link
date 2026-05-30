@@ -38,10 +38,10 @@ export interface ClientSafeProfile {
  * - verificationChannel 指示最终采用的验证方式。
  */
 export interface ClientAuthSuccessResult {
-  token: string
   expiresAt: string
   user: ClientSafeProfile
   verificationChannel: 'captcha' | 'sms' | 'email'
+  authMode: 'cookie'
 }
 
 export type ClientRegisterResult = ClientSafeProfile

@@ -7,9 +7,15 @@
 import type { NextFunction, Request, Response } from 'express'
 import { clientAuthService } from '../services/client-auth.service.js'
 import { BizError } from '../utils/errors.js'
+import { readClientSessionTokenFromCookie } from '../utils/client-auth-cookie.js'
 import type { ClientAuthenticatedRequest } from '../types/client-auth.js'
 
 const parseBearerToken = (req: Request) => {
+  const sessionToken = readClientSessionTokenFromCookie(req)
+  if (sessionToken) {
+    return sessionToken
+  }
+
   const authorization = req.headers.authorization
   if (authorization) {
     const [scheme, token] = authorization.split(' ')

@@ -9,7 +9,7 @@ import type { ApiResponse } from '@/types/api'
 import { useAppStore } from '@/store/modules/app'
 import { clearPersistedAuthState, getAdminCsrfToken } from '@/utils/auth-storage'
 import { getClientRiskHeaderSnapshot } from '@/utils/client-auth-risk'
-import { clearPersistedClientAuthState, getPersistedClientAuthToken } from '@/utils/client-auth-storage'
+import { clearPersistedClientAuthState } from '@/utils/client-auth-storage'
 import { normalizeRequestError, unwrapApiResponse } from '@/utils/error'
 import pinia from '@/store/pinia'
 
@@ -92,25 +92,6 @@ const isClientRequest = (url?: string) => {
     return isClientRouteContext()
   }
   return false
-}
-
-/**
- * 判断当前请求是否应注入 Authorization：
- * - 管理端已切换为 Cookie 会话，因此这里只继续处理客户端 token；
- * - 若调用方已手动传入 Authorization，则以调用方配置为准。
- */
-const attachAuthorizationHeader = (config: InternalAxiosRequestConfig) => {
-  const token = isClientRequest(config.url) ? getPersistedClientAuthToken() : null
-  if (!token) {
-    return config
-  }
-
-  const currentAuthorization = config.headers.Authorization
-  if (!currentAuthorization) {
-    config.headers.Authorization = `Bearer ${token}`
-  }
-
-  return config
 }
 
 /**
@@ -257,7 +238,7 @@ http.interceptors.request.use(
     const appStore = useAppStore(pinia)
     appStore.startLoading()
 
-    return attachAdminCsrfHeader(attachClientRiskHeaders(attachAuthorizationHeader(config)))
+    return attachAdminCsrfHeader(attachClientRiskHeaders(config))
   },
   (error) => {
     const appStore = useAppStore(pinia)

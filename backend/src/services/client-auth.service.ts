@@ -19,6 +19,7 @@ import {
 } from '../utils/client-auth-account.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { assertClientPasswordPolicy, hashPassword, verifyPassword } from '../utils/password.js'
+import { hashSessionToken } from '../utils/session-token.js'
 import { generateSessionToken } from '../utils/token.js'
 import { auditService } from './audit.service.js'
 import { authSecurityService } from './auth-security.service.js'
@@ -34,6 +35,7 @@ interface ResetTicket {
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const RESET_TICKET_TTL_MS = 10 * 60 * 1000
+const CLIENT_SESSION_ACTIVITY_WRITE_INTERVAL_MS = 60 * 1000
 const resetTicketStore = new EphemeralTicketStore<ResetTicket>({
   maxSize: 3000,
   resolveExpiresAt: (ticket) => ticket.expireAt,
@@ -368,7 +370,7 @@ class ClientAuthService {
       await manager.getRepository(ClientUser).save(user)
       await manager.getRepository(ClientUserSession).save(
         manager.getRepository(ClientUserSession).create({
-          sessionToken: token,
+          sessionToken: hashSessionToken(token),
           userId: user.id,
           expiresAt,
           lastAccessAt: now,
@@ -442,22 +444,32 @@ class ClientAuthService {
 
   async resolveClientByToken(token: string): Promise<ClientAuthContext> {
     const now = new Date()
-    const session = await this.sessionRepo.findOne({ where: { sessionToken: token }, relations: { user: true } })
+    const session = await this.sessionRepo.findOne({
+      where: { sessionToken: hashSessionToken(token) },
+      relations: { user: true },
+    })
     if (!session || session.expiresAt <= now || !session.user) {
       throw new BizError('未登录或登录状态已失效', 401)
     }
     if (session.user.status !== 'enabled') {
       throw new BizError('当前账号已停用', 403)
     }
-    session.lastAccessAt = now
-    await this.sessionRepo.save(session)
+    const threshold = new Date(now.getTime() - CLIENT_SESSION_ACTIVITY_WRITE_INTERVAL_MS)
+    if (!session.lastAccessAt || session.lastAccessAt < threshold) {
+      await this.sessionRepo
+        .createQueryBuilder()
+        .update(ClientUserSession)
+        .set({ lastAccessAt: now })
+        .where('id = :id', { id: session.id })
+        .execute()
+    }
     return {
       userId: session.user.id,
       mobile: session.user.mobile ?? '',
       email: session.user.email ?? '',
       account: session.user.realName || session.user.email || session.user.mobile || '',
       realName: session.user.realName,
-      sessionToken: session.sessionToken,
+      sessionToken: token,
     }
   }
 
@@ -470,7 +482,7 @@ class ClientAuthService {
   }
 
   async logout(auth: ClientAuthContext) {
-    await this.sessionRepo.delete({ sessionToken: auth.sessionToken })
+    await this.sessionRepo.delete({ sessionToken: hashSessionToken(auth.sessionToken) })
   }
 
   async changePassword(auth: ClientAuthContext, input: ClientChangePasswordInput) {

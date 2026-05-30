@@ -92,6 +92,8 @@ function readCookieValueFromResponse(response: Response, cookieName: string): st
   return match?.[1] ? decodeURIComponent(match[1]) : null
 }
 
+const CLIENT_SESSION_COOKIE_NAME = 'y_link_client_session'
+
 async function loginAdminSession(
   baseUrl: string,
   body: Record<string, unknown>,
@@ -114,6 +116,26 @@ async function loginAdminSession(
     token,
     user: loginData.user,
   }
+}
+
+interface ClientSessionAuth {
+  token: string | null
+  cookie: string | null
+}
+
+function buildClientAuthHeaders(auth: ClientSessionAuth, extraHeaders: HeadersInit = {}): HeadersInit {
+  const headers: Record<string, string> = {
+    ...(extraHeaders as Record<string, string>),
+  }
+  if (auth.token) {
+    headers.Authorization = `Bearer ${auth.token}`
+    return headers
+  }
+  if (auth.cookie) {
+    headers.Cookie = `${CLIENT_SESSION_COOKIE_NAME}=${encodeURIComponent(auth.cookie)}`
+    return headers
+  }
+  throw new Error('客户端登录后未获取到 token 或 Cookie 会话，无法继续回归请求')
 }
 
 function asArray<T>(value: unknown): T[] {
@@ -960,6 +982,33 @@ async function main() {
       '客户端登录',
     )
     const clientToken = clientLogin.token
+    let clientSessionCookie: string | null = null
+    if (!clientToken) {
+      const fallbackLoginResponse = await fetch(`${baseUrl}/api/client-auth/login`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          account: clientAccount,
+          password: clientPassword,
+          captchaId: loginCaptcha.captchaId,
+          captchaCode: readCaptchaCode(loginCaptcha.captchaSvg),
+        }),
+      })
+      await expectJsonOkResponse<{
+        data: {
+          user: {
+            mobile: string
+          }
+        }
+      }>(fallbackLoginResponse, '瀹㈡埛绔櫥褰?')
+      clientSessionCookie = readCookieValueFromResponse(fallbackLoginResponse, CLIENT_SESSION_COOKIE_NAME)
+      assert.ok(clientSessionCookie, '客户端登录后未返回 Cookie 会话')
+    }
+    const clientAuthHeaders: HeadersInit = clientToken
+      ? { Authorization: `Bearer ${clientToken}` }
+      : { Cookie: `${CLIENT_SESSION_COOKIE_NAME}=${encodeURIComponent(clientSessionCookie ?? '')}` }
     assert.equal(clientLogin.user.mobile, clientAccount)
     pass('客户端登录链路通过')
 
@@ -971,9 +1020,7 @@ async function main() {
     }>(
       () =>
         fetch(`${baseUrl}/api/client-auth/me`, {
-          headers: {
-            Authorization: `Bearer ${clientToken}`,
-          },
+          headers: clientAuthHeaders,
         }),
       '客户端当前用户信息读取',
     )
@@ -1005,7 +1052,7 @@ async function main() {
         fetch(`${baseUrl}/api/o2o/mall/preorders`, {
           method: 'POST',
           headers: {
-            Authorization: `Bearer ${clientToken}`,
+            ...(clientAuthHeaders as Record<string, string>),
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
@@ -1024,9 +1071,7 @@ async function main() {
     const myOrders = await expectJsonOk<{ data: unknown }>(
       () =>
         fetch(`${baseUrl}/api/o2o/mall/preorders`, {
-          headers: {
-            Authorization: `Bearer ${clientToken}`,
-          },
+          headers: clientAuthHeaders,
         }),
       '客户端订单列表读取',
     )
@@ -1106,9 +1151,7 @@ async function main() {
     }>(
       () =>
         fetch(`${baseUrl}/api/o2o/mall/preorders/${preorder.order.id}`, {
-          headers: {
-            Authorization: `Bearer ${clientToken}`,
-          },
+          headers: clientAuthHeaders,
         }),
       '客户端订单详情回读',
     )
