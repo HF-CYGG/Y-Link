@@ -185,6 +185,25 @@ TZ=Asia/Shanghai
 
 新版 nginx 访问日志会优先显示可信代理传来的真实用户 IP，并在同一行保留 `proxy="..." xff="..." real="..."` 便于排查。若 `xff="-"` 或为空，说明上游没有把真实 IP 传给容器，应用无法凭空还原用户 IP。
 
+### 6.1 容器时间与北京时间校准
+
+`TZ=Asia/Shanghai` 只负责“时区显示”，真正时钟校准必须在宿主机完成（容器共享宿主机内核时钟，默认无权限直接改系统时间）。
+
+建议在服务器执行：
+
+```bash
+timedatectl set-timezone Asia/Shanghai
+timedatectl set-ntp true
+timedatectl status
+```
+
+确认 `System clock synchronized: yes` 后，重启容器。  
+新版 onebox 启动日志会打印：
+
+```text
+[onebox] timezone=Asia/Shanghai, now=2026-05-30 22:10:00 +0800 CST
+```
+
 启动成功后建议做 4 个检查：
 
 1. 打开 `http://服务器IP:9050/health`，能返回健康信息。

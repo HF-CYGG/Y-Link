@@ -31,6 +31,16 @@ export DB_SYNC="${DB_SYNC:-false}"
 export INIT_ADMIN_USERNAME="${INIT_ADMIN_USERNAME:-admin}"
 export INIT_ADMIN_DISPLAY_NAME="${INIT_ADMIN_DISPLAY_NAME:-系统管理员}"
 
+# 容器内统一使用北京时间（Asia/Shanghai）渲染日志和应用时间。
+# 注意：容器共享宿主机内核时钟，真正“自动校时”需在宿主机启用 NTP。
+if [ -f "/usr/share/zoneinfo/${TZ}" ]; then
+  ln -snf "/usr/share/zoneinfo/${TZ}" /etc/localtime
+  echo "${TZ}" > /etc/timezone
+else
+  echo "[onebox] warning: timezone file not found for TZ=${TZ}, keep current timezone." >&2
+fi
+echo "[onebox] timezone=${TZ}, now=$(date '+%Y-%m-%d %H:%M:%S %z %Z')"
+
 if [ -z "${INIT_ADMIN_PASSWORD:-}" ]; then
   echo "[onebox] INIT_ADMIN_PASSWORD is required. Set it manually in the container panel environment variables before startup." >&2
   exit 1
