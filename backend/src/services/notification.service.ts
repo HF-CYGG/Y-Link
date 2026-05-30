@@ -666,7 +666,10 @@ export class NotificationService {
   private buildFeishuSignature(signSecret: string): { timestamp: string; sign: string } {
     const timestamp = String(Math.floor(Date.now() / 1000))
     const stringToSign = `${timestamp}\n${signSecret}`
-    const sign = createHmac('sha256', signSecret).update(stringToSign).digest('base64')
+    // 飞书自定义机器人签名规范：
+    // key = `${timestamp}\n${secret}`，消息体为“空字符串”，再做 HMAC-SHA256 + Base64
+    // 参考官方文档「签名校验」示例代码（Java/Go/Python）
+    const sign = createHmac('sha256', stringToSign).digest('base64')
     return {
       timestamp,
       sign,
@@ -702,18 +705,32 @@ export class NotificationService {
         }),
       })
       const text = await response.text()
+      let feishuCode: number | null = null
+      let feishuMsg = ''
+      try {
+        const parsed = JSON.parse(text) as { code?: number; msg?: string }
+        feishuCode = typeof parsed.code === 'number' ? parsed.code : null
+        feishuMsg = typeof parsed.msg === 'string' ? parsed.msg.trim() : ''
+      } catch {
+        // 非 JSON 响应时走兜底文案
+      }
+
       if (!response.ok) {
         return {
           status: response.status,
           ok: false,
-          errorMessage: `飞书 Webhook 返回异常(HTTP ${response.status})`,
+          errorMessage: feishuCode !== null
+            ? `飞书 Webhook 返回异常(HTTP ${response.status}, code=${feishuCode}${feishuMsg ? `, msg=${feishuMsg}` : ''})`
+            : `飞书 Webhook 返回异常(HTTP ${response.status})`,
         }
       }
-      if (!/\"code\"\s*:\s*0/.test(text)) {
+      if (feishuCode !== 0 && !/\"code\"\s*:\s*0/.test(text)) {
         return {
           status: response.status,
           ok: false,
-          errorMessage: '飞书 Webhook 返回非成功响应',
+          errorMessage: feishuCode !== null
+            ? `飞书 Webhook 返回非成功响应(code=${feishuCode}${feishuMsg ? `, msg=${feishuMsg}` : ''})`
+            : '飞书 Webhook 返回非成功响应',
         }
       }
       return {
