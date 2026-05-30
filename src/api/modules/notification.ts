@@ -15,11 +15,15 @@ export interface NotificationRuleRecord {
   eventType: 'o2o_preorder_created' | 'customer_service_client_message_created'
   enabled: boolean
   recipientUserIds: string[]
+  emailRecipientAdminUserIds: string[]
+  emailRecipientSupplierUserIds: string[]
   emailEnabled: boolean
   feishuEnabled: boolean
   externalTriggerMode: NotificationExternalTriggerMode
   watchedUserIds: string[]
   feishuWebhookUrl: string
+  feishuSignSecretMasked: boolean
+  feishuSignSecret?: string
   emailSubjectPrefix: string
   updatedAt: string
 }
@@ -45,11 +49,14 @@ export interface UpdateNotificationRulesPayload {
     id: string
     enabled: boolean
     recipientUserIds: string[]
+    emailRecipientAdminUserIds: string[]
+    emailRecipientSupplierUserIds: string[]
     emailEnabled: boolean
     feishuEnabled: boolean
     externalTriggerMode: NotificationExternalTriggerMode
     watchedUserIds: string[]
     feishuWebhookUrl: string
+    feishuSignSecret: string
     emailSubjectPrefix: string
   }>
 }
@@ -57,6 +64,27 @@ export interface UpdateNotificationRulesPayload {
 export interface UpdateNotificationRulesResult {
   changed: boolean
   list: NotificationRuleRecord[]
+}
+
+export interface TestNotificationRuleSendPayload {
+  ruleId: string
+  channel: 'email' | 'feishu'
+  draft: UpdateNotificationRulesPayload['rules'][number]
+}
+
+export interface TestNotificationRuleSendResult {
+  channel: 'email' | 'feishu'
+  success: boolean
+  message: string
+  summary: {
+    attempted: number
+    succeeded: number
+    failed: number
+  }
+  failures: Array<{
+    target: string
+    reason: string
+  }>
 }
 
 export const getNotificationRules = () =>
@@ -76,4 +104,11 @@ export const getNotificationPresenceSnapshot = () =>
   request<NotificationPresenceSnapshot>({
     method: 'GET',
     url: '/notifications/presence-snapshot',
+  })
+
+export const testNotificationRuleSend = (payload: TestNotificationRuleSendPayload) =>
+  request<TestNotificationRuleSendResult>({
+    method: 'POST',
+    url: '/notifications/rules/test-send',
+    data: payload,
   })

@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto'
 import { In, MoreThan } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import {
@@ -30,8 +31,11 @@ export type NotificationEventType = (typeof NOTIFICATION_EVENT_TYPES)[number]
 type NotificationRuleCode = 'preorder_created_rule' | 'customer_service_message_rule'
 
 const MANAGEMENT_ROLES: Array<SysUser['role']> = ['admin', 'operator', 'supplier']
+const ADMIN_MANAGEMENT_ROLES: Array<SysUser['role']> = ['admin', 'operator']
+const SUPPLIER_ROLE: SysUser['role'] = 'supplier'
 const ONLINE_WINDOW_MS = 120 * 1000
 const HEARTBEAT_WRITE_INTERVAL_MS = 60 * 1000
+export const FEISHU_SIGN_SECRET_PLACEHOLDER = '[已配置签名密钥，保存时保留原值]'
 
 const DEFAULT_RULES: Array<{
   ruleCode: NotificationRuleCode
@@ -57,11 +61,14 @@ export interface NotificationRuleRecord {
   eventType: NotificationEventType
   enabled: boolean
   recipientUserIds: string[]
+  emailRecipientAdminUserIds: string[]
+  emailRecipientSupplierUserIds: string[]
   emailEnabled: boolean
   feishuEnabled: boolean
   externalTriggerMode: NotificationExternalTriggerMode
   watchedUserIds: string[]
   feishuWebhookUrl: string
+  feishuSignSecretMasked: boolean
   emailSubjectPrefix: string
   updatedAt: Date
 }
@@ -70,12 +77,38 @@ export interface UpdateNotificationRuleInput {
   id: string
   enabled: boolean
   recipientUserIds: string[]
+  emailRecipientAdminUserIds: string[]
+  emailRecipientSupplierUserIds: string[]
   emailEnabled: boolean
   feishuEnabled: boolean
   externalTriggerMode: NotificationExternalTriggerMode
   watchedUserIds: string[]
   feishuWebhookUrl: string
+  feishuSignSecret: string
   emailSubjectPrefix: string
+}
+
+export interface NotificationRuleTestSendInput {
+  ruleId: string
+  channel: 'email' | 'feishu'
+  draft: UpdateNotificationRuleInput
+  actor: AuthUserContext
+  requestMeta?: RequestMeta
+}
+
+export interface NotificationRuleTestSendResult {
+  channel: 'email' | 'feishu'
+  success: boolean
+  message: string
+  summary: {
+    attempted: number
+    succeeded: number
+    failed: number
+  }
+  failures: Array<{
+    target: string
+    reason: string
+  }>
 }
 
 export interface NotificationPresenceSnapshot {
@@ -108,8 +141,25 @@ interface EmitNotificationEventInput {
   requestMeta?: RequestMeta
 }
 
-function parseJsonStringArray(raw: string): string[] {
-  const text = raw.trim()
+interface NormalizedNotificationRuleDraft {
+  id: string
+  ruleCode: string
+  ruleName: string
+  enabled: boolean
+  recipientUserIds: string[]
+  emailRecipientAdminUserIds: string[]
+  emailRecipientSupplierUserIds: string[]
+  emailEnabled: boolean
+  feishuEnabled: boolean
+  externalTriggerMode: NotificationExternalTriggerMode
+  watchedUserIds: string[]
+  feishuWebhookUrl: string
+  feishuSignSecret: string | null
+  emailSubjectPrefix: string
+}
+
+function parseJsonStringArray(raw: string | null | undefined): string[] {
+  const text = String(raw ?? '').trim()
   if (!text) {
     return []
   }
@@ -130,6 +180,14 @@ function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
 }
 
+function normalizeFeishuSignSecretInput(secret: string): string | null {
+  const normalized = secret.trim()
+  if (!normalized || normalized === FEISHU_SIGN_SECRET_PLACEHOLDER) {
+    return null
+  }
+  return normalized.slice(0, 256)
+}
+
 function toRuleRecord(row: NotificationRule): NotificationRuleRecord {
   return {
     id: row.id,
@@ -138,11 +196,14 @@ function toRuleRecord(row: NotificationRule): NotificationRuleRecord {
     eventType: row.eventType as NotificationEventType,
     enabled: row.enabled > 0,
     recipientUserIds: parseJsonStringArray(row.recipientUserIdsJson),
+    emailRecipientAdminUserIds: parseJsonStringArray(row.emailRecipientAdminUserIdsJson),
+    emailRecipientSupplierUserIds: parseJsonStringArray(row.emailRecipientSupplierUserIdsJson),
     emailEnabled: row.emailEnabled > 0,
     feishuEnabled: row.feishuEnabled > 0,
     externalTriggerMode: row.externalTriggerMode,
     watchedUserIds: parseJsonStringArray(row.watchedUserIdsJson),
     feishuWebhookUrl: row.feishuWebhookUrl?.trim() || '',
+    feishuSignSecretMasked: Boolean(row.feishuSignSecret?.trim()),
     emailSubjectPrefix: row.emailSubjectPrefix?.trim() || '',
     updatedAt: row.updatedAt,
   }
@@ -173,11 +234,14 @@ export class NotificationService {
         eventType: item.eventType,
         enabled: 1,
         recipientUserIdsJson: '[]',
+        emailRecipientAdminUserIdsJson: '[]',
+        emailRecipientSupplierUserIdsJson: '[]',
         emailEnabled: 0,
         feishuEnabled: 0,
         externalTriggerMode: 'all_management_offline',
         watchedUserIdsJson: '[]',
         feishuWebhookUrl: null,
+        feishuSignSecret: null,
         emailSubjectPrefix: '[Y-Link]',
       }),
     )
@@ -193,45 +257,120 @@ export class NotificationService {
     return rows.map(toRuleRecord)
   }
 
+  private validateRuleUserSelections(
+    payload: Pick<NormalizedNotificationRuleDraft, 'recipientUserIds' | 'watchedUserIds' | 'emailRecipientAdminUserIds' | 'emailRecipientSupplierUserIds'>,
+    managementUsers: Array<Pick<SysUser, 'id' | 'role'>>,
+  ): void {
+    const managementUserIdSet = new Set(managementUsers.map((item) => item.id))
+    const roleByUserId = new Map(managementUsers.map((item) => [item.id, item.role]))
+
+    if (payload.recipientUserIds.some((userId) => !managementUserIdSet.has(userId))) {
+      throw new BizError('通知接收账号包含无效或非管理端账号', 400)
+    }
+    if (payload.watchedUserIds.some((userId) => !managementUserIdSet.has(userId))) {
+      throw new BizError('离线监测账号包含无效或非管理端账号', 400)
+    }
+    if (payload.emailRecipientAdminUserIds.some((userId) => !managementUserIdSet.has(userId))) {
+      throw new BizError('管理端邮件接收账号包含无效或非管理端账号', 400)
+    }
+    if (payload.emailRecipientSupplierUserIds.some((userId) => !managementUserIdSet.has(userId))) {
+      throw new BizError('供货端邮件接收账号包含无效或非管理端账号', 400)
+    }
+    if (payload.emailRecipientAdminUserIds.some((userId) => roleByUserId.get(userId) === SUPPLIER_ROLE)) {
+      throw new BizError('管理端邮件接收账号仅允许 admin/operator', 400)
+    }
+    if (payload.emailRecipientSupplierUserIds.some((userId) => roleByUserId.get(userId) !== SUPPLIER_ROLE)) {
+      throw new BizError('供货端邮件接收账号仅允许 supplier', 400)
+    }
+  }
+
+  private normalizeRuleDraft(
+    row: UpdateNotificationRuleInput,
+    persistedRule: Pick<NotificationRule, 'ruleCode' | 'ruleName' | 'feishuSignSecret'>,
+  ): NormalizedNotificationRuleDraft {
+    if (!NOTIFICATION_EXTERNAL_TRIGGER_MODES.includes(row.externalTriggerMode)) {
+      throw new BizError('外发时机配置不合法', 400)
+    }
+
+    const recipientUserIds = row.recipientUserIds.map((item) => item.trim()).filter(Boolean)
+    const watchedUserIds = row.watchedUserIds.map((item) => item.trim()).filter(Boolean)
+    const emailRecipientAdminUserIds = row.emailRecipientAdminUserIds.map((item) => item.trim()).filter(Boolean)
+    const emailRecipientSupplierUserIds = row.emailRecipientSupplierUserIds.map((item) => item.trim()).filter(Boolean)
+    const feishuWebhookUrl = row.feishuWebhookUrl.trim()
+    const emailSubjectPrefix = row.emailSubjectPrefix.trim().slice(0, 128) || '[Y-Link]'
+
+    if (row.externalTriggerMode === 'watched_accounts_offline' && watchedUserIds.length === 0) {
+      throw new BizError('指定账号离线模式至少需要一个监测账号', 400)
+    }
+    if (row.emailEnabled && emailRecipientAdminUserIds.length + emailRecipientSupplierUserIds.length === 0) {
+      throw new BizError('启用邮箱提醒时必须至少选择一组邮件接收账号', 400)
+    }
+    if (row.feishuEnabled && !feishuWebhookUrl) {
+      throw new BizError('启用飞书提醒时必须填写 Webhook 地址', 400)
+    }
+
+    const rawFeishuSignSecret = row.feishuSignSecret.trim()
+    const feishuSignSecret = rawFeishuSignSecret === FEISHU_SIGN_SECRET_PLACEHOLDER
+      ? (persistedRule.feishuSignSecret?.trim() || null)
+      : normalizeFeishuSignSecretInput(rawFeishuSignSecret)
+
+    return {
+      id: row.id,
+      ruleCode: persistedRule.ruleCode,
+      ruleName: persistedRule.ruleName,
+      enabled: row.enabled,
+      recipientUserIds,
+      emailRecipientAdminUserIds,
+      emailRecipientSupplierUserIds,
+      emailEnabled: row.emailEnabled,
+      feishuEnabled: row.feishuEnabled,
+      externalTriggerMode: row.externalTriggerMode,
+      watchedUserIds,
+      feishuWebhookUrl,
+      feishuSignSecret,
+      emailSubjectPrefix,
+    }
+  }
+
   async updateRules(
     input: UpdateNotificationRuleInput[],
     actor: AuthUserContext,
     requestMeta?: RequestMeta,
   ): Promise<{ changed: boolean; list: NotificationRuleRecord[] }> {
     await this.ensureDefaultRules()
+    const rows = await this.ruleRepo.find()
+    const rowById = new Map(rows.map((item) => [item.id, item]))
     const normalizedById = new Map<string, UpdateNotificationRuleInput>()
     for (const row of input) {
-      if (!NOTIFICATION_EXTERNAL_TRIGGER_MODES.includes(row.externalTriggerMode)) {
-        throw new BizError('外发时机配置不合法', 400)
+      const persistedRule = rowById.get(row.id)
+      if (!persistedRule) {
+        throw new BizError('通知规则不存在', 404)
       }
-      const normalizedWatchedUserIds = row.watchedUserIds.map((item) => item.trim()).filter(Boolean)
-      if (row.externalTriggerMode === 'watched_accounts_offline' && normalizedWatchedUserIds.length === 0) {
-        throw new BizError('指定账号离线模式至少需要一个监测账号', 400)
-      }
+      const normalized = this.normalizeRuleDraft(row, persistedRule)
       normalizedById.set(row.id, {
-        ...row,
-        recipientUserIds: row.recipientUserIds.map((item) => item.trim()).filter(Boolean),
-        watchedUserIds: normalizedWatchedUserIds,
-        feishuWebhookUrl: row.feishuWebhookUrl.trim(),
-        emailSubjectPrefix: row.emailSubjectPrefix.trim().slice(0, 128),
+        id: normalized.id,
+        enabled: normalized.enabled,
+        recipientUserIds: normalized.recipientUserIds,
+        emailRecipientAdminUserIds: normalized.emailRecipientAdminUserIds,
+        emailRecipientSupplierUserIds: normalized.emailRecipientSupplierUserIds,
+        emailEnabled: normalized.emailEnabled,
+        feishuEnabled: normalized.feishuEnabled,
+        externalTriggerMode: normalized.externalTriggerMode,
+        watchedUserIds: normalized.watchedUserIds,
+        feishuWebhookUrl: normalized.feishuWebhookUrl,
+        feishuSignSecret: normalized.feishuSignSecret ?? '',
+        emailSubjectPrefix: normalized.emailSubjectPrefix,
       })
     }
 
     const managementUsers = await this.userRepo.find({
       where: MANAGEMENT_ROLES.map((role) => ({ role, status: 'enabled' })),
-      select: { id: true },
+      select: { id: true, role: true },
     })
-    const managementUserIdSet = new Set(managementUsers.map((item) => item.id))
     for (const payload of normalizedById.values()) {
-      if (payload.recipientUserIds.some((userId) => !managementUserIdSet.has(userId))) {
-        throw new BizError('通知接收账号包含无效或非管理端账号', 400)
-      }
-      if (payload.watchedUserIds.some((userId) => !managementUserIdSet.has(userId))) {
-        throw new BizError('离线监测账号包含无效或非管理端账号', 400)
-      }
+      this.validateRuleUserSelections(payload, managementUsers)
     }
 
-    const rows = await this.ruleRepo.find()
     let changed = false
     await AppDataSource.transaction(async (manager) => {
       const txRuleRepo = manager.getRepository(NotificationRule)
@@ -241,16 +380,22 @@ export class NotificationService {
           continue
         }
         const nextRecipientJson = JSON.stringify(payload.recipientUserIds)
+        const nextEmailAdminRecipientJson = JSON.stringify(payload.emailRecipientAdminUserIds)
+        const nextEmailSupplierRecipientJson = JSON.stringify(payload.emailRecipientSupplierUserIds)
         const nextWatchedJson = JSON.stringify(payload.watchedUserIds)
         const nextFeishuWebhookUrl = payload.feishuWebhookUrl || null
+        const nextFeishuSignSecret = normalizeFeishuSignSecretInput(payload.feishuSignSecret)
         const nextEmailPrefix = payload.emailSubjectPrefix || '[Y-Link]'
         const isChanged = row.enabled !== (payload.enabled ? 1 : 0)
+          || row.emailRecipientAdminUserIdsJson !== nextEmailAdminRecipientJson
+          || row.emailRecipientSupplierUserIdsJson !== nextEmailSupplierRecipientJson
           || row.emailEnabled !== (payload.emailEnabled ? 1 : 0)
           || row.feishuEnabled !== (payload.feishuEnabled ? 1 : 0)
           || row.externalTriggerMode !== payload.externalTriggerMode
           || row.recipientUserIdsJson !== nextRecipientJson
           || row.watchedUserIdsJson !== nextWatchedJson
           || (row.feishuWebhookUrl ?? '') !== (nextFeishuWebhookUrl ?? '')
+          || (row.feishuSignSecret ?? '') !== (nextFeishuSignSecret ?? '')
           || row.emailSubjectPrefix !== nextEmailPrefix
         if (!isChanged) {
           continue
@@ -260,12 +405,15 @@ export class NotificationService {
           { id: row.id },
           {
             enabled: payload.enabled ? 1 : 0,
+            emailRecipientAdminUserIdsJson: nextEmailAdminRecipientJson,
+            emailRecipientSupplierUserIdsJson: nextEmailSupplierRecipientJson,
             emailEnabled: payload.emailEnabled ? 1 : 0,
             feishuEnabled: payload.feishuEnabled ? 1 : 0,
             externalTriggerMode: payload.externalTriggerMode,
             recipientUserIdsJson: nextRecipientJson,
             watchedUserIdsJson: nextWatchedJson,
             feishuWebhookUrl: nextFeishuWebhookUrl,
+            feishuSignSecret: nextFeishuSignSecret,
             emailSubjectPrefix: nextEmailPrefix,
           },
         )
@@ -409,6 +557,36 @@ export class NotificationService {
     return allManagementUsers.filter((item) => idSet.has(item.id))
   }
 
+  private async resolveRuleEmailRecipients(rule: NotificationRuleRecord): Promise<SysUser[]> {
+    const whereConditions = MANAGEMENT_ROLES.map((role) => ({ role, status: 'enabled' as const }))
+    const allManagementUsers = await this.userRepo.find({
+      where: whereConditions,
+      select: {
+        id: true,
+        username: true,
+        displayName: true,
+        role: true,
+        email: true,
+      },
+    })
+
+    const adminRecipients = rule.emailRecipientAdminUserIds.length
+      ? allManagementUsers.filter((item) =>
+        rule.emailRecipientAdminUserIds.includes(item.id) && ADMIN_MANAGEMENT_ROLES.includes(item.role),
+      )
+      : []
+    const supplierRecipients = rule.emailRecipientSupplierUserIds.length
+      ? allManagementUsers.filter((item) =>
+        rule.emailRecipientSupplierUserIds.includes(item.id) && item.role === SUPPLIER_ROLE,
+      )
+      : []
+    const deduped = new Map<string, SysUser>()
+    for (const user of [...adminRecipients, ...supplierRecipients]) {
+      deduped.set(user.id, user)
+    }
+    return [...deduped.values()]
+  }
+
   private async shouldTriggerExternal(rule: NotificationRuleRecord): Promise<boolean> {
     const snapshot = await this.getPresenceSnapshot()
     const onlineMap = new Map(snapshot.users.map((item) => [item.userId, item.isOnline]))
@@ -480,14 +658,32 @@ export class NotificationService {
     }
   }
 
-  private async sendFeishuWebhook(webhookUrl: string, title: string, content: string): Promise<{ status: number; ok: boolean; errorMessage?: string }> {
+  private buildFeishuSignature(signSecret: string): { timestamp: string; sign: string } {
+    const timestamp = String(Math.floor(Date.now() / 1000))
+    const stringToSign = `${timestamp}\n${signSecret}`
+    const sign = createHmac('sha256', signSecret).update(stringToSign).digest('base64')
+    return {
+      timestamp,
+      sign,
+    }
+  }
+
+  private async sendFeishuWebhook(
+    webhookUrl: string,
+    title: string,
+    content: string,
+    signSecret?: string | null,
+  ): Promise<{ status: number; ok: boolean; errorMessage?: string }> {
     try {
+      const normalizedSecret = signSecret?.trim() || ''
+      const signedPart = normalizedSecret ? this.buildFeishuSignature(normalizedSecret) : null
       const response = await fetch(webhookUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
+          ...(signedPart ?? {}),
           msg_type: 'text',
           content: {
             text: `${title}\n${content}`,
@@ -522,10 +718,170 @@ export class NotificationService {
     }
   }
 
+  async testSendByRule(input: NotificationRuleTestSendInput): Promise<NotificationRuleTestSendResult> {
+    await this.ensureDefaultRules()
+    if (input.ruleId !== input.draft.id) {
+      throw new BizError('测试参数中的规则标识不一致', 400)
+    }
+    const persistedRule = await this.ruleRepo.findOne({
+      where: { id: input.ruleId },
+      select: {
+        id: true,
+        ruleCode: true,
+        ruleName: true,
+        feishuSignSecret: true,
+      },
+    })
+    if (!persistedRule) {
+      throw new BizError('通知规则不存在', 404)
+    }
+
+    const normalizedDraft = this.normalizeRuleDraft(input.draft, persistedRule)
+    const managementUsers = await this.userRepo.find({
+      where: MANAGEMENT_ROLES.map((role) => ({ role, status: 'enabled' })),
+      select: { id: true, role: true },
+    })
+    this.validateRuleUserSelections(normalizedDraft, managementUsers)
+
+    const subject = `${normalizedDraft.emailSubjectPrefix || '[Y-Link]'} 通知中心测试消息`
+    const content = `规则：${normalizedDraft.ruleName}（${normalizedDraft.ruleCode}）\n渠道：${input.channel}\n时间：${new Date().toISOString()}`
+
+    if (input.channel === 'email') {
+      const emailUsers = await this.resolveRuleEmailRecipients({
+        id: normalizedDraft.id,
+        ruleCode: normalizedDraft.ruleCode,
+        ruleName: normalizedDraft.ruleName,
+        eventType: 'o2o_preorder_created',
+        enabled: normalizedDraft.enabled,
+        recipientUserIds: normalizedDraft.recipientUserIds,
+        emailRecipientAdminUserIds: normalizedDraft.emailRecipientAdminUserIds,
+        emailRecipientSupplierUserIds: normalizedDraft.emailRecipientSupplierUserIds,
+        emailEnabled: normalizedDraft.emailEnabled,
+        feishuEnabled: normalizedDraft.feishuEnabled,
+        externalTriggerMode: normalizedDraft.externalTriggerMode,
+        watchedUserIds: normalizedDraft.watchedUserIds,
+        feishuWebhookUrl: normalizedDraft.feishuWebhookUrl,
+        feishuSignSecretMasked: Boolean(normalizedDraft.feishuSignSecret),
+        emailSubjectPrefix: normalizedDraft.emailSubjectPrefix,
+        updatedAt: new Date(),
+      })
+
+      const failures: NotificationRuleTestSendResult['failures'] = []
+      let attempted = 0
+      let succeeded = 0
+      for (const user of emailUsers) {
+        const email = user.email?.trim() || ''
+        attempted += 1
+        if (!email || !isValidEmail(email)) {
+          failures.push({
+            target: user.username,
+            reason: '接收账号未配置有效邮箱',
+          })
+          continue
+        }
+        const result = await this.sendEmailByVerificationProvider(email, subject, content)
+        if (result.ok) {
+          succeeded += 1
+        } else {
+          failures.push({
+            target: email,
+            reason: result.errorMessage ?? '邮件发送失败',
+          })
+        }
+      }
+
+      const output: NotificationRuleTestSendResult = {
+        channel: 'email',
+        success: attempted > 0 && failures.length === 0,
+        message: attempted === 0
+          ? '未命中任何邮件接收账号'
+          : failures.length === 0
+            ? '邮件测试发送成功'
+            : '邮件测试发送部分失败',
+        summary: {
+          attempted,
+          succeeded,
+          failed: failures.length,
+        },
+        failures,
+      }
+
+      await auditService.safeRecord({
+        actionType: 'notification.rule.test_send',
+        actionLabel: '通知规则测试发送',
+        targetType: 'notification_rule',
+        targetId: normalizedDraft.id,
+        targetCode: normalizedDraft.ruleCode,
+        actor: input.actor,
+        requestMeta: input.requestMeta,
+        detail: {
+          channel: 'email',
+          summary: output.summary,
+          failureCount: output.failures.length,
+        },
+      })
+
+      return output
+    }
+
+    if (!normalizedDraft.feishuWebhookUrl) {
+      throw new BizError('飞书 Webhook 不能为空', 400)
+    }
+    const feishuResult = await this.sendFeishuWebhook(
+      normalizedDraft.feishuWebhookUrl,
+      subject,
+      content,
+      normalizedDraft.feishuSignSecret,
+    )
+    const output: NotificationRuleTestSendResult = {
+      channel: 'feishu',
+      success: feishuResult.ok,
+      message: feishuResult.ok ? '飞书测试发送成功' : (feishuResult.errorMessage ?? '飞书测试发送失败'),
+      summary: {
+        attempted: 1,
+        succeeded: feishuResult.ok ? 1 : 0,
+        failed: feishuResult.ok ? 0 : 1,
+      },
+      failures: feishuResult.ok
+        ? []
+        : [
+            {
+              target: normalizedDraft.feishuWebhookUrl,
+              reason: feishuResult.errorMessage ?? '飞书测试发送失败',
+            },
+          ],
+    }
+
+    await auditService.safeRecord({
+      actionType: 'notification.rule.test_send',
+      actionLabel: '通知规则测试发送',
+      targetType: 'notification_rule',
+      targetId: normalizedDraft.id,
+      targetCode: normalizedDraft.ruleCode,
+      actor: input.actor,
+      requestMeta: input.requestMeta,
+      detail: {
+        channel: 'feishu',
+        summary: output.summary,
+        success: output.success,
+      },
+    })
+
+    return output
+  }
+
   async emitEvent(input: EmitNotificationEventInput): Promise<void> {
     await this.ensureDefaultRules()
-    const allRules = await this.listRules()
-    const matchedRules = allRules.filter((item) => item.enabled && item.eventType === input.eventType)
+    const allRuleRows = await this.ruleRepo.find({
+      where: DEFAULT_RULES.map((item) => ({ ruleCode: item.ruleCode })),
+      order: { id: 'ASC' },
+    })
+    const matchedRules = allRuleRows
+      .map((row) => ({
+        rule: toRuleRecord(row),
+        feishuSignSecret: row.feishuSignSecret?.trim() || null,
+      }))
+      .filter((item) => item.rule.enabled && item.rule.eventType === input.eventType)
     if (!matchedRules.length) {
       return
     }
@@ -542,12 +898,16 @@ export class NotificationService {
 
     try {
       const ruleRecipients = await Promise.all(
-        matchedRules.map(async (rule) => ({ rule, users: await this.resolveRuleRecipients(rule) })),
+        matchedRules.map(async (item) => ({
+          ...item,
+          inboxUsers: await this.resolveRuleRecipients(item.rule),
+          emailUsers: await this.resolveRuleEmailRecipients(item.rule),
+        })),
       )
 
       const inboxRows: NotificationInbox[] = []
       for (const item of ruleRecipients) {
-        for (const user of item.users) {
+        for (const user of item.inboxUsers) {
           inboxRows.push(this.inboxRepo.create({
             eventId: event.id,
             userId: user.id,
@@ -583,7 +943,9 @@ export class NotificationService {
             eventType: input.eventType,
             externalTriggerMode: item.rule.externalTriggerMode,
             externalAllowed: allowExternal,
-            recipientCount: item.users.length,
+            recipientCount: item.inboxUsers.length,
+            emailRecipientAdminCount: item.rule.emailRecipientAdminUserIds.length,
+            emailRecipientSupplierCount: item.rule.emailRecipientSupplierUserIds.length,
           },
         })
 
@@ -592,7 +954,7 @@ export class NotificationService {
         }
 
         if (item.rule.emailEnabled) {
-          for (const user of item.users) {
+          for (const user of item.emailUsers) {
             const email = user.email?.trim() || ''
             if (!email || !isValidEmail(email)) {
               await this.dispatchRepo.save(this.dispatchRepo.create({
@@ -629,7 +991,12 @@ export class NotificationService {
         }
 
         if (item.rule.feishuEnabled && item.rule.feishuWebhookUrl) {
-          const sendResult = await this.sendFeishuWebhook(item.rule.feishuWebhookUrl, message.title, message.content)
+          const sendResult = await this.sendFeishuWebhook(
+            item.rule.feishuWebhookUrl,
+            message.title,
+            message.content,
+            item.feishuSignSecret,
+          )
           await this.dispatchRepo.save(this.dispatchRepo.create({
             eventId: event.id,
             channel: 'feishu',

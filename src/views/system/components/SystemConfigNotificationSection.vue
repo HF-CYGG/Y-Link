@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import dayjs from 'dayjs'
-import { computed } from 'vue'
+import { ElMessage } from 'element-plus'
+import { computed, reactive } from 'vue'
 import type {
   NotificationPresenceSnapshot,
   NotificationPresenceUser,
   NotificationRuleRecord,
 } from '@/api/modules/notification'
+import { testNotificationRuleSend } from '@/api/modules/notification'
+import { extractErrorMessage } from '@/utils/error'
 
 const props = defineProps<{
   rules: NotificationRuleRecord[]
@@ -27,6 +30,48 @@ const eventLabelMap: Record<NotificationRuleRecord['eventType'], string> = {
 }
 
 const hasManagementUsers = computed(() => props.managementUsers.length > 0)
+const adminAndOperatorUsers = computed(() => props.managementUsers.filter((user) => user.role !== 'supplier'))
+const supplierUsers = computed(() => props.managementUsers.filter((user) => user.role === 'supplier'))
+const testingState = reactive<Record<string, boolean>>({})
+
+const isRuleTesting = (ruleId: string, channel: 'email' | 'feishu') => {
+  return testingState[`${ruleId}:${channel}`] === true
+}
+
+const handleTestSend = async (rule: NotificationRuleRecord, channel: 'email' | 'feishu') => {
+  const key = `${rule.id}:${channel}`
+  testingState[key] = true
+  try {
+    const result = await testNotificationRuleSend({
+      ruleId: rule.id,
+      channel,
+      draft: {
+        id: rule.id,
+        enabled: rule.enabled,
+        recipientUserIds: [...(rule.recipientUserIds ?? [])],
+        emailRecipientAdminUserIds: [...(rule.emailRecipientAdminUserIds ?? [])],
+        emailRecipientSupplierUserIds: [...(rule.emailRecipientSupplierUserIds ?? [])],
+        emailEnabled: rule.emailEnabled,
+        feishuEnabled: rule.feishuEnabled,
+        externalTriggerMode: rule.externalTriggerMode,
+        watchedUserIds: [...(rule.watchedUserIds ?? [])],
+        feishuWebhookUrl: rule.feishuWebhookUrl.trim(),
+        feishuSignSecret: (rule.feishuSignSecret ?? '').trim(),
+        emailSubjectPrefix: rule.emailSubjectPrefix.trim() || '[Y-Link]',
+      },
+    })
+    if (result.success) {
+      ElMessage.success(result.message)
+      return
+    }
+    const failureText = result.failures.slice(0, 3).map((item) => `${item.target}：${item.reason}`).join('；')
+    ElMessage.warning(failureText ? `${result.message}（${failureText}）` : result.message)
+  } catch (error) {
+    ElMessage.error(extractErrorMessage(error, '测试发送失败'))
+  } finally {
+    testingState[key] = false
+  }
+}
 </script>
 
 <template>
@@ -73,6 +118,48 @@ const hasManagementUsers = computed(() => props.managementUsers.length > 0)
               >
                 <el-option
                   v-for="user in managementUsers"
+                  :key="user.userId"
+                  :label="`${user.displayName}(${user.username})`"
+                  :value="user.userId"
+                />
+              </el-select>
+            </el-form-item>
+
+            <el-form-item class="!mb-0" label="管理端邮箱接收账号（admin/operator）">
+              <el-select
+                v-model="rule.emailRecipientAdminUserIds"
+                multiple
+                collapse-tags
+                collapse-tags-tooltip
+                clearable
+                filterable
+                placeholder="请选择管理端邮箱接收账号"
+                :disabled="loading || saving || !canUpdateConfigs || !hasManagementUsers || !rule.emailEnabled"
+                class="w-full"
+              >
+                <el-option
+                  v-for="user in adminAndOperatorUsers"
+                  :key="user.userId"
+                  :label="`${user.displayName}(${user.username})`"
+                  :value="user.userId"
+                />
+              </el-select>
+            </el-form-item>
+
+            <el-form-item class="!mb-0" label="供货端邮箱接收账号（supplier）">
+              <el-select
+                v-model="rule.emailRecipientSupplierUserIds"
+                multiple
+                collapse-tags
+                collapse-tags-tooltip
+                clearable
+                filterable
+                placeholder="请选择供货端邮箱接收账号"
+                :disabled="loading || saving || !canUpdateConfigs || !hasManagementUsers || !rule.emailEnabled"
+                class="w-full"
+              >
+                <el-option
+                  v-for="user in supplierUsers"
                   :key="user.userId"
                   :label="`${user.displayName}(${user.username})`"
                   :value="user.userId"
@@ -133,6 +220,35 @@ const hasManagementUsers = computed(() => props.managementUsers.length > 0)
                 :disabled="loading || saving || !canUpdateConfigs || !rule.feishuEnabled"
               />
             </el-form-item>
+
+            <el-form-item class="!mb-0" label="飞书签名密钥（可选）">
+              <el-input
+                v-model.trim="rule.feishuSignSecret"
+                maxlength="256"
+                show-password
+                placeholder="未启用签名可留空，已配置可保留占位符"
+                :disabled="loading || saving || !canUpdateConfigs || !rule.feishuEnabled"
+              />
+            </el-form-item>
+
+            <div class="lg:col-span-2 flex flex-wrap gap-3">
+              <el-button
+                plain
+                :loading="isRuleTesting(rule.id, 'email')"
+                :disabled="loading || saving || !canUpdateConfigs"
+                @click="handleTestSend(rule, 'email')"
+              >
+                测试邮箱
+              </el-button>
+              <el-button
+                plain
+                :loading="isRuleTesting(rule.id, 'feishu')"
+                :disabled="loading || saving || !canUpdateConfigs"
+                @click="handleTestSend(rule, 'feishu')"
+              >
+                测试飞书
+              </el-button>
+            </div>
           </div>
         </article>
       </div>

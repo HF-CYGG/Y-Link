@@ -13,11 +13,14 @@ const updateNotificationRuleSchema = z.object({
   id: z.string().trim().min(1),
   enabled: z.boolean(),
   recipientUserIds: z.array(z.string().trim().min(1)).max(200),
+  emailRecipientAdminUserIds: z.array(z.string().trim().min(1)).max(200),
+  emailRecipientSupplierUserIds: z.array(z.string().trim().min(1)).max(200),
   emailEnabled: z.boolean(),
   feishuEnabled: z.boolean(),
   externalTriggerMode: z.enum(NOTIFICATION_EXTERNAL_TRIGGER_MODES),
   watchedUserIds: z.array(z.string().trim().min(1)).max(200),
   feishuWebhookUrl: z.string().trim().max(500),
+  feishuSignSecret: z.string().trim().max(256),
   emailSubjectPrefix: z.string().trim().max(128),
 })
 
@@ -25,6 +28,12 @@ const updateNotificationRulesSchema = z.object({
   rules: z.array(updateNotificationRuleSchema).min(1),
 })
 type UpdateNotificationRulesPayload = z.infer<typeof updateNotificationRulesSchema>
+
+const testSendNotificationRuleSchema = z.object({
+  ruleId: z.string().trim().min(1),
+  channel: z.enum(['email', 'feishu']),
+  draft: updateNotificationRuleSchema,
+})
 
 export const notificationRouter = Router()
 
@@ -62,6 +71,28 @@ notificationRouter.get(
   requirePermission('system_configs:view'),
   asyncHandler(async (_req, res) => {
     const data = await notificationService.getPresenceSnapshot()
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+notificationRouter.post(
+  '/rules/test-send',
+  requirePermission('system_configs:update'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = testSendNotificationRuleSchema.parse(req.body)
+    const data = await notificationService.testSendByRule({
+      ruleId: payload.ruleId,
+      channel: payload.channel,
+      draft: payload.draft,
+      actor: authReq.auth,
+      requestMeta: extractRequestMeta(req),
+    })
     res.json({
       code: 0,
       message: 'ok',

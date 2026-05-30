@@ -106,6 +106,11 @@ const SQLITE_REQUIRED_BIZ_INBOUND_ORDER_COLUMNS = [
   'cancelled_by_username',
   'cancelled_by_display_name',
 ]
+const SQLITE_REQUIRED_NOTIFICATION_RULE_COLUMNS = [
+  'email_recipient_admin_user_ids_json',
+  'email_recipient_supplier_user_ids_json',
+  'feishu_sign_secret',
+]
 
 async function listSqliteTableColumns(dataSource: DataSource, tableName: string): Promise<Set<string>> {
   const columns: Array<{ name: string }> = await dataSource.query(`PRAGMA table_info('${tableName}')`)
@@ -324,6 +329,11 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
 
   const inboundOrderColumnSet = await listSqliteTableColumns(dataSource, 'biz_inbound_order')
   if (SQLITE_REQUIRED_BIZ_INBOUND_ORDER_COLUMNS.some((column) => !inboundOrderColumnSet.has(column))) {
+    return true
+  }
+
+  const notificationRuleColumnSet = await listSqliteTableColumns(dataSource, 'notification_rule')
+  if (SQLITE_REQUIRED_NOTIFICATION_RULE_COLUMNS.some((column) => !notificationRuleColumnSet.has(column))) {
     return true
   }
   return false

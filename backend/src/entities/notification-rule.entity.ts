@@ -29,6 +29,12 @@ export class NotificationRule {
   @Column({ name: 'recipient_user_ids_json', type: 'text', comment: '站内通知接收账号 ID 列表(JSON)' })
   recipientUserIdsJson!: string
 
+  @Column({ name: 'email_recipient_admin_user_ids_json', type: 'text', nullable: true, comment: '邮件接收账号（admin/operator）ID 列表(JSON)' })
+  emailRecipientAdminUserIdsJson!: string | null
+
+  @Column({ name: 'email_recipient_supplier_user_ids_json', type: 'text', nullable: true, comment: '邮件接收账号（supplier）ID 列表(JSON)' })
+  emailRecipientSupplierUserIdsJson!: string | null
+
   @Column({ name: 'email_enabled', ...entityColumnOptions.booleanFlag, comment: '是否启用邮件提醒' })
   emailEnabled!: number
 
@@ -43,6 +49,9 @@ export class NotificationRule {
 
   @Column({ name: 'feishu_webhook_url', type: 'varchar', length: 500, nullable: true, comment: '飞书群机器人 Webhook 地址' })
   feishuWebhookUrl!: string | null
+
+  @Column({ name: 'feishu_sign_secret', type: 'varchar', length: 256, nullable: true, comment: '飞书群机器人签名密钥' })
+  feishuSignSecret!: string | null
 
   @Column({ name: 'email_subject_prefix', type: 'varchar', length: 128, default: '', comment: '邮件主题前缀' })
   emailSubjectPrefix!: string

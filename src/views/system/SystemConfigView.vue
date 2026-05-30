@@ -376,12 +376,15 @@ const snapshotForm = () =>
     notificationRules: notificationRules.value.map((rule) => ({
       id: rule.id,
       enabled: rule.enabled,
-      recipientUserIds: [...rule.recipientUserIds].sort(),
+      recipientUserIds: [...(rule.recipientUserIds ?? [])].sort(),
+      emailRecipientAdminUserIds: [...(rule.emailRecipientAdminUserIds ?? [])].sort(),
+      emailRecipientSupplierUserIds: [...(rule.emailRecipientSupplierUserIds ?? [])].sort(),
       emailEnabled: rule.emailEnabled,
       feishuEnabled: rule.feishuEnabled,
       externalTriggerMode: rule.externalTriggerMode,
       watchedUserIds: [...rule.watchedUserIds].sort(),
       feishuWebhookUrl: rule.feishuWebhookUrl.trim(),
+      feishuSignSecret: rule.feishuSignSecret?.trim() || '',
       emailSubjectPrefix: rule.emailSubjectPrefix.trim(),
     })),
   })
@@ -450,8 +453,11 @@ const applyClientDepartmentConfigs = (config: ClientDepartmentConfigRecord) => {
 const applyNotificationRules = (list: NotificationRuleRecord[]) => {
   notificationRules.value = list.map((rule) => ({
     ...rule,
-    recipientUserIds: [...rule.recipientUserIds],
-    watchedUserIds: [...rule.watchedUserIds],
+    recipientUserIds: [...(rule.recipientUserIds ?? [])],
+    emailRecipientAdminUserIds: [...(rule.emailRecipientAdminUserIds ?? [])],
+    emailRecipientSupplierUserIds: [...(rule.emailRecipientSupplierUserIds ?? [])],
+    watchedUserIds: [...(rule.watchedUserIds ?? [])],
+    feishuSignSecret: rule.feishuSignSecretMasked ? '[已配置签名密钥，保存时保留原值]' : '',
   }))
 }
 
@@ -473,8 +479,19 @@ const refreshNotificationPresenceSnapshot = async () => {
 
 const validateNotificationRules = () => {
   for (const rule of notificationRules.value) {
-    if (rule.externalTriggerMode === 'watched_accounts_offline' && rule.watchedUserIds.length === 0) {
+    const watchedUserIds = rule.watchedUserIds ?? []
+    const emailRecipientAdminUserIds = rule.emailRecipientAdminUserIds ?? []
+    const emailRecipientSupplierUserIds = rule.emailRecipientSupplierUserIds ?? []
+    if (rule.externalTriggerMode === 'watched_accounts_offline' && watchedUserIds.length === 0) {
       ElMessage.warning(`规则“${rule.ruleName}”在“指定账号离线”模式下必须选择监测账号`)
+      return false
+    }
+    if (rule.emailEnabled && emailRecipientAdminUserIds.length + emailRecipientSupplierUserIds.length === 0) {
+      ElMessage.warning(`规则“${rule.ruleName}”启用邮箱提醒时必须选择邮件接收账号`)
+      return false
+    }
+    if (rule.feishuEnabled && !rule.feishuWebhookUrl.trim()) {
+      ElMessage.warning(`规则“${rule.ruleName}”启用飞书提醒时必须填写 Webhook 地址`)
       return false
     }
   }
@@ -958,12 +975,15 @@ const handleSubmit = async () => {
       rules: notificationRules.value.map((rule) => ({
         id: rule.id,
         enabled: rule.enabled,
-        recipientUserIds: [...rule.recipientUserIds],
+        recipientUserIds: [...(rule.recipientUserIds ?? [])],
+        emailRecipientAdminUserIds: [...(rule.emailRecipientAdminUserIds ?? [])],
+        emailRecipientSupplierUserIds: [...(rule.emailRecipientSupplierUserIds ?? [])],
         emailEnabled: rule.emailEnabled,
         feishuEnabled: rule.feishuEnabled,
         externalTriggerMode: rule.externalTriggerMode,
         watchedUserIds: [...rule.watchedUserIds],
         feishuWebhookUrl: rule.feishuWebhookUrl.trim(),
+        feishuSignSecret: rule.feishuSignSecret?.trim() || '',
         emailSubjectPrefix: rule.emailSubjectPrefix.trim() || '[Y-Link]',
       })),
     })
