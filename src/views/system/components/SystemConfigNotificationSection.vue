@@ -38,47 +38,82 @@ const isRuleTesting = (ruleId: string, channel: 'email' | 'feishu') => {
   return testingState[`${ruleId}:${channel}`] === true
 }
 
+const getTestBlockedReason = (rule: NotificationRuleRecord, channel: 'email' | 'feishu') => {
+  if (props.loading) {
+    return '当前分区仍在加载，请稍后重试'
+  }
+  if (props.saving) {
+    return '配置保存进行中，请稍后重试'
+  }
+  if (!props.canUpdateConfigs) {
+    return '当前账号没有系统配置修改权限，无法执行测试发送'
+  }
+  if (channel === 'email' && !rule.emailEnabled) {
+    return '请先勾选邮箱外发渠道，再执行测试'
+  }
+  if (channel === 'feishu' && !rule.feishuEnabled) {
+    return '请先勾选飞书外发渠道，再执行测试'
+  }
+  if (channel === 'feishu' && !rule.feishuWebhookUrl?.trim()) {
+    return '请先填写飞书 Webhook 地址'
+  }
+  return ''
+}
+
+const buildRuleDraft = (rule: NotificationRuleRecord) => {
+  return {
+    id: String(rule.id ?? '').trim(),
+    enabled: Boolean(rule.enabled),
+    recipientUserIds: (rule.recipientUserIds ?? []).map((value) => String(value ?? '').trim()).filter(Boolean),
+    emailRecipientAdminUserIds: (rule.emailRecipientAdminUserIds ?? [])
+      .map((value) => String(value ?? '').trim())
+      .filter(Boolean),
+    emailRecipientSupplierUserIds: (rule.emailRecipientSupplierUserIds ?? [])
+      .map((value) => String(value ?? '').trim())
+      .filter(Boolean),
+    emailEnabled: Boolean(rule.emailEnabled),
+    feishuEnabled: Boolean(rule.feishuEnabled),
+    externalTriggerMode: rule.externalTriggerMode,
+    watchedUserIds: (rule.watchedUserIds ?? []).map((value) => String(value ?? '').trim()).filter(Boolean),
+    feishuWebhookUrl: String(rule.feishuWebhookUrl ?? '').trim(),
+    feishuSignSecret: String(rule.feishuSignSecret ?? '').trim(),
+    emailSubjectPrefix: String(rule.emailSubjectPrefix ?? '').trim() || '[Y-Link]',
+  }
+}
+
 const handleTestSend = async (rule: NotificationRuleRecord, channel: 'email' | 'feishu') => {
-  if (channel === 'feishu') {
-    if (!rule.feishuEnabled) {
-      ElMessage.warning('请先勾选飞书外发渠道，再执行测试')
-      return
-    }
-    if (!rule.feishuWebhookUrl?.trim()) {
-      ElMessage.warning('请先填写飞书 Webhook 地址')
-      return
-    }
+  const blockReason = getTestBlockedReason(rule, channel)
+  if (blockReason) {
+    ElMessage.warning(blockReason)
+    return
   }
 
-  const key = `${rule.id}:${channel}`
+  const ruleId = String(rule.id ?? '').trim()
+  const key = `${ruleId}:${channel}`
+  if (testingState[key]) {
+    ElMessage.info(channel === 'feishu' ? '飞书测试发送中，请稍候' : '邮箱测试发送中，请稍候')
+    return
+  }
+
   testingState[key] = true
+  ElMessage.info(channel === 'feishu' ? '正在测试飞书连接，请稍候…' : '正在测试邮箱发送，请稍候…')
   try {
     const result = await testNotificationRuleSend({
-      ruleId: String(rule.id ?? '').trim(),
+      ruleId,
       channel,
-      draft: {
-        id: String(rule.id ?? '').trim(),
-        enabled: rule.enabled,
-        recipientUserIds: (rule.recipientUserIds ?? []).map((value) => String(value ?? '').trim()).filter(Boolean),
-        emailRecipientAdminUserIds: (rule.emailRecipientAdminUserIds ?? []).map((value) => String(value ?? '').trim()).filter(Boolean),
-        emailRecipientSupplierUserIds: (rule.emailRecipientSupplierUserIds ?? []).map((value) => String(value ?? '').trim()).filter(Boolean),
-        emailEnabled: rule.emailEnabled,
-        feishuEnabled: rule.feishuEnabled,
-        externalTriggerMode: rule.externalTriggerMode,
-        watchedUserIds: (rule.watchedUserIds ?? []).map((value) => String(value ?? '').trim()).filter(Boolean),
-        feishuWebhookUrl: rule.feishuWebhookUrl.trim(),
-        feishuSignSecret: (rule.feishuSignSecret ?? '').trim(),
-        emailSubjectPrefix: rule.emailSubjectPrefix.trim() || '[Y-Link]',
-      },
+      draft: buildRuleDraft(rule),
     })
     if (result.success) {
-      ElMessage.success(result.message)
+      ElMessage.success(result.message || '测试发送成功')
       return
     }
-    const failureText = result.failures.slice(0, 3).map((item) => `${item.target}：${item.reason}`).join('；')
-    ElMessage.warning(failureText ? `${result.message}（${failureText}）` : result.message)
+    const failureText = result.failures
+      .slice(0, 3)
+      .map((item) => `${item.target}: ${item.reason}`)
+      .join('；')
+    ElMessage.warning(failureText ? `${result.message}；${failureText}` : (result.message || '测试发送失败'))
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '测试发送失败'))
+    ElMessage.error(extractErrorMessage(error, '测试发送失败，请稍后重试'))
   } finally {
     testingState[key] = false
   }
@@ -92,7 +127,7 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: 'email' | '
         <div>
           <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">通知规则</h2>
           <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">
-            站内通知始终生成，邮箱/飞书按离线触发条件外发。
+            站内通知始终生成；邮箱、飞书按离线触发条件外发。
           </p>
         </div>
         <el-tag type="info" effect="plain">离线窗口 {{ presenceSnapshot?.onlineWindowSeconds ?? 120 }} 秒</el-tag>
@@ -108,10 +143,16 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: 'email' | '
             <div>
               <div class="text-sm font-semibold text-slate-800 dark:text-slate-100">{{ rule.ruleName }}</div>
               <div class="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                事件：{{ eventLabelMap[rule.eventType] }} | 更新时间：{{ dayjs(rule.updatedAt).format('YYYY-MM-DD HH:mm:ss') }}
+                事件：{{ eventLabelMap[rule.eventType] }}｜更新时间：{{ dayjs(rule.updatedAt).format('YYYY-MM-DD HH:mm:ss') }}
               </div>
             </div>
-            <el-switch v-model="rule.enabled" :disabled="loading || saving || !canUpdateConfigs" inline-prompt active-text="启用" inactive-text="停用" />
+            <el-switch
+              v-model="rule.enabled"
+              :disabled="loading || saving || !canUpdateConfigs"
+              inline-prompt
+              active-text="启用"
+              inactive-text="停用"
+            />
           </div>
 
           <div class="grid gap-4 lg:grid-cols-2">
@@ -144,7 +185,7 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: 'email' | '
                 collapse-tags-tooltip
                 clearable
                 filterable
-                placeholder="请选择管理端邮箱接收账号"
+                placeholder="选择管理端邮箱接收账号"
                 :disabled="loading || saving || !canUpdateConfigs || !hasManagementUsers || !rule.emailEnabled"
                 class="w-full"
               >
@@ -165,7 +206,7 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: 'email' | '
                 collapse-tags-tooltip
                 clearable
                 filterable
-                placeholder="请选择供货端邮箱接收账号"
+                placeholder="选择供货端邮箱接收账号"
                 :disabled="loading || saving || !canUpdateConfigs || !hasManagementUsers || !rule.emailEnabled"
                 class="w-full"
               >
@@ -192,7 +233,11 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: 'email' | '
               </el-radio-group>
             </el-form-item>
 
-            <el-form-item v-if="rule.externalTriggerMode === 'watched_accounts_offline'" class="!mb-0 lg:col-span-2" label="离线监测账号">
+            <el-form-item
+              v-if="rule.externalTriggerMode === 'watched_accounts_offline'"
+              class="!mb-0 lg:col-span-2"
+              label="离线监测账号"
+            >
               <el-select
                 v-model="rule.watchedUserIds"
                 multiple
@@ -200,7 +245,7 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: 'email' | '
                 collapse-tags-tooltip
                 clearable
                 filterable
-                placeholder="请选择至少一个监测账号"
+                placeholder="请至少选择一个监测账号"
                 :disabled="loading || saving || !canUpdateConfigs || !hasManagementUsers"
                 class="w-full"
               >
@@ -246,7 +291,7 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: 'email' | '
               <el-button
                 plain
                 :loading="isRuleTesting(rule.id, 'email')"
-                :disabled="loading || saving || !canUpdateConfigs"
+                :disabled="isRuleTesting(rule.id, 'email') || isRuleTesting(rule.id, 'feishu')"
                 @click="handleTestSend(rule, 'email')"
               >
                 测试邮箱
@@ -254,7 +299,7 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: 'email' | '
               <el-button
                 plain
                 :loading="isRuleTesting(rule.id, 'feishu')"
-                :disabled="loading || saving || !canUpdateConfigs"
+                :disabled="isRuleTesting(rule.id, 'email') || isRuleTesting(rule.id, 'feishu')"
                 @click="handleTestSend(rule, 'feishu')"
               >
                 测试飞书
@@ -268,7 +313,9 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: 'email' | '
     <div class="apple-card p-5 sm:p-6 xl:p-7">
       <div class="mb-4 flex items-center justify-between gap-3">
         <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">在线状态快照</h2>
-        <el-button plain size="small" :loading="presenceLoading" :disabled="loading" @click="emit('refresh-presence')">刷新状态</el-button>
+        <el-button plain size="small" :loading="presenceLoading" :disabled="loading" @click="emit('refresh-presence')">
+          刷新状态
+        </el-button>
       </div>
       <el-table :data="managementUsers" stripe size="small" max-height="280" empty-text="暂无管理端账号">
         <el-table-column prop="displayName" label="账号" min-width="180">
