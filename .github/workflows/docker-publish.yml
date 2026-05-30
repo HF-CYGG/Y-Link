@@ -1,14 +1,3 @@
-# 模块说明：GitHub Actions 持续集成与发布配置
-# 文件职责：定义自动化构建并推送 Docker 镜像到容器镜像库的流水线
-# 维护说明：若新增部署架构（如 ARM 平台）或需要改动镜像名称，请同步修改此流水线
-
-#
-# 文件说明：GitHub Actions Docker 发布流水线。
-# 实现逻辑：
-# 1. 在主分支推送、版本标签推送或手动触发时执行；
-# 2. 始终发布 GHCR 镜像，若配置了 Docker Hub 凭据则额外发布 Docker Hub 镜像；
-# 3. 分别构建前端、后端与 onebox 三类镜像，并复用 GHA 构建缓存。
-#
 name: docker-publish
 
 on:
@@ -17,6 +6,7 @@ on:
       - main
     tags:
       - 'v*'
+      - 'release-v*'
   workflow_dispatch:
 
 permissions:
@@ -34,11 +24,13 @@ jobs:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
       DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+      ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
     steps:
       - name: 检出代码
         uses: actions/checkout@v6
 
-      - name: 计算 Docker Hub 和 GHCR 命名空间
+      - name: 计算镜像仓库与推送规则
         id: prepare
         shell: bash
         run: |
@@ -52,16 +44,60 @@ jobs:
           gh_owner="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
           echo "gh_owner=$gh_owner" >> "$GITHUB_OUTPUT"
 
+          acr_registry="${{ vars.ACR_REGISTRY }}"
+          if [ -z "$acr_registry" ]; then
+            acr_registry="crpi-9gmsq2s17re73ia9.cn-qingdao.personal.cr.aliyuncs.com"
+          fi
+          acr_namespace="${{ vars.ACR_NAMESPACE }}"
+          if [ -z "$acr_namespace" ]; then
+            acr_namespace="yyh163"
+          fi
+          acr_push_mode="${{ vars.ACR_PUSH_MODE }}"
+          if [ -z "$acr_push_mode" ]; then
+            acr_push_mode="release_tag_only"
+          fi
+          echo "acr_registry=$acr_registry" >> "$GITHUB_OUTPUT"
+          echo "acr_namespace=$acr_namespace" >> "$GITHUB_OUTPUT"
+          echo "acr_push_mode=$acr_push_mode" >> "$GITHUB_OUTPUT"
+
+          acr_enabled="false"
+          if [ -n "${ACR_USERNAME}" ] && [ -n "${ACR_PASSWORD}" ]; then
+            case "$acr_push_mode" in
+              all)
+                acr_enabled="true"
+                ;;
+              release_tag_only)
+                if [[ "${GITHUB_REF}" == refs/tags/release-v* ]]; then
+                  acr_enabled="true"
+                fi
+                ;;
+              *)
+                echo "Unsupported ACR_PUSH_MODE=$acr_push_mode, fallback to release_tag_only"
+                if [[ "${GITHUB_REF}" == refs/tags/release-v* ]]; then
+                  acr_enabled="true"
+                fi
+                ;;
+            esac
+          fi
+          echo "acr_enabled=$acr_enabled" >> "$GITHUB_OUTPUT"
+
           frontend_images="ghcr.io/${gh_owner}/y-link-frontend"
           backend_images="ghcr.io/${gh_owner}/y-link-backend"
           onebox_images="ghcr.io/${gh_owner}/y-link-onebox"
 
-          # 仅在 Docker Hub 凭据完整时追加 Docker Hub 镜像地址，
-          # 避免“登录允许失败但推送仍强制包含 docker.io 标签”导致整条流水线失败。
+          # Docker Hub 可选推送
           if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
             frontend_images="docker.io/${namespace}/y-link-frontend"$'\n'"${frontend_images}"
             backend_images="docker.io/${namespace}/y-link-backend"$'\n'"${backend_images}"
             onebox_images="docker.io/${namespace}/y-link-onebox"$'\n'"${onebox_images}"
+          fi
+
+          # 阿里云 ACR 可选推送
+          # onebox 默认推到 y-link，方便直接用于部署
+          if [ "$acr_enabled" = "true" ]; then
+            frontend_images="${acr_registry}/${acr_namespace}/y-link-frontend"$'\n'"${frontend_images}"
+            backend_images="${acr_registry}/${acr_namespace}/y-link-backend"$'\n'"${backend_images}"
+            onebox_images="${acr_registry}/${acr_namespace}/y-link"$'\n'"${onebox_images}"
           fi
 
           {
@@ -95,6 +131,14 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 登录阿里云 ACR
+        if: ${{ steps.prepare.outputs.acr_enabled == 'true' }}
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ steps.prepare.outputs.acr_registry }}
+          username: ${{ env.ACR_USERNAME }}
+          password: ${{ env.ACR_PASSWORD }}
 
       - name: 生成前端镜像元数据
         id: frontend_meta
@@ -142,7 +186,7 @@ jobs:
           cache-from: type=gha,scope=y-link-backend
           cache-to: type=gha,mode=max,scope=y-link-backend
 
-      - name: 生成单镜像一键部署元数据
+      - name: 生成 onebox 镜像元数据
         id: onebox_meta
         uses: docker/metadata-action@v6
         with:
@@ -153,7 +197,7 @@ jobs:
             type=ref,event=tag
             type=sha,prefix=sha-
 
-      - name: 构建并推送单镜像一键部署镜像
+      - name: 构建并推送 onebox 镜像
         uses: docker/build-push-action@v7
         with:
           context: .
