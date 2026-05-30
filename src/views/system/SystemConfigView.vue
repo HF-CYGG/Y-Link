@@ -89,6 +89,7 @@ const verificationConfigMap = ref<VerificationProviderConfigsResult | null>(null
 const clientDepartmentConfig = ref<ClientDepartmentConfigRecord | null>(null)
 const notificationRules = ref<NotificationRuleRecord[]>([])
 const notificationPresence = ref<NotificationPresenceSnapshot | null>(null)
+const notificationOfflineWindowSeconds = ref(120)
 const notificationPresenceLoading = ref(false)
 const loadRequest = useStableRequest()
 const deferredSectionRequest = useStableRequest()
@@ -387,6 +388,7 @@ const snapshotForm = () =>
       feishuSignSecret: rule.feishuSignSecret?.trim() || '',
       emailSubjectPrefix: rule.emailSubjectPrefix.trim(),
     })),
+    notificationOfflineWindowSeconds: Number(notificationOfflineWindowSeconds.value) || 120,
   })
 
 const isDirty = computed(() => snapshotForm() !== initialSnapshot.value)
@@ -463,6 +465,7 @@ const applyNotificationRules = (list: NotificationRuleRecord[]) => {
 
 const applyNotificationPresenceSnapshot = (snapshot: NotificationPresenceSnapshot) => {
   notificationPresence.value = snapshot
+  notificationOfflineWindowSeconds.value = Number(snapshot.onlineWindowSeconds) || 120
 }
 
 const refreshNotificationPresenceSnapshot = async () => {
@@ -478,6 +481,10 @@ const refreshNotificationPresenceSnapshot = async () => {
 }
 
 const validateNotificationRules = () => {
+  if (!Number.isInteger(notificationOfflineWindowSeconds.value) || notificationOfflineWindowSeconds.value < 30 || notificationOfflineWindowSeconds.value > 3600) {
+    ElMessage.warning('离线窗口需设置在 30-3600 秒之间')
+    return false
+  }
   for (const rule of notificationRules.value) {
     const watchedUserIds = rule.watchedUserIds ?? []
     const emailRecipientAdminUserIds = rule.emailRecipientAdminUserIds ?? []
@@ -972,6 +979,7 @@ const handleSubmit = async () => {
       tree: normalizedDepartmentTree,
     })
     const notificationResult = await updateNotificationRules({
+      offlineWindowSeconds: Number(notificationOfflineWindowSeconds.value),
       rules: notificationRules.value.map((rule) => ({
         id: String(rule.id ?? '').trim(),
         enabled: rule.enabled,
@@ -1170,12 +1178,14 @@ onMounted(() => {
                 v-if="activeSection === 'notification'"
                 :rules="notificationRules"
                 :presence-snapshot="notificationPresence"
+                :offline-window-seconds="notificationOfflineWindowSeconds"
                 :management-users="managementUsers"
                 :loading="activeSectionInteractionLoading"
                 :saving="saving"
                 :can-update-configs="canUpdateConfigs"
                 :presence-loading="notificationPresenceLoading"
                 @refresh-presence="refreshNotificationPresenceSnapshot"
+                @update-offline-window-seconds="notificationOfflineWindowSeconds = $event"
               />
             </transition>
           </div>

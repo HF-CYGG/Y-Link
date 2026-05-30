@@ -34,6 +34,7 @@ const updateNotificationRuleSchema = z.object({
 })
 
 const updateNotificationRulesSchema = z.object({
+  offlineWindowSeconds: z.coerce.number().int().min(30).max(3600).optional().default(120),
   rules: z.array(updateNotificationRuleSchema).min(1),
 })
 type UpdateNotificationRulesPayload = z.infer<typeof updateNotificationRulesSchema>
@@ -66,7 +67,12 @@ notificationRouter.put(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = updateNotificationRulesSchema.parse(req.body) as UpdateNotificationRulesPayload
-    const data = await notificationService.updateRules(payload.rules, authReq.auth, extractRequestMeta(req))
+    const data = await notificationService.updateRules(
+      payload.rules,
+      payload.offlineWindowSeconds,
+      authReq.auth,
+      extractRequestMeta(req),
+    )
     res.json({
       code: 0,
       message: 'ok',

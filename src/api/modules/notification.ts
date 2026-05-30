@@ -45,6 +45,7 @@ export interface NotificationPresenceSnapshot {
 }
 
 export interface UpdateNotificationRulesPayload {
+  offlineWindowSeconds: number
   rules: Array<{
     id: string
     enabled: boolean

@@ -1,5 +1,5 @@
 import { createHmac } from 'node:crypto'
-import { In, MoreThan } from 'typeorm'
+import { In, MoreThan, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import {
   NotificationRule,
@@ -15,6 +15,7 @@ import {
 } from '../entities/notification-dispatch.entity.js'
 import { SysUser } from '../entities/sys-user.entity.js'
 import { SysUserSession } from '../entities/sys-user-session.entity.js'
+import { SystemConfig } from '../entities/system-config.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
 import type { RequestMeta } from '../utils/request-meta.js'
@@ -33,7 +34,10 @@ type NotificationRuleCode = 'preorder_created_rule' | 'customer_service_message_
 const MANAGEMENT_ROLES: Array<SysUser['role']> = ['admin', 'operator', 'supplier']
 const ADMIN_MANAGEMENT_ROLES: Array<SysUser['role']> = ['admin', 'operator']
 const SUPPLIER_ROLE: SysUser['role'] = 'supplier'
-const ONLINE_WINDOW_MS = 120 * 1000
+const NOTIFICATION_ONLINE_WINDOW_CONFIG_KEY = 'notification.online_window_seconds'
+const DEFAULT_ONLINE_WINDOW_SECONDS = 120
+const MIN_ONLINE_WINDOW_SECONDS = 30
+const MAX_ONLINE_WINDOW_SECONDS = 3600
 const HEARTBEAT_WRITE_INTERVAL_MS = 60 * 1000
 const FEISHU_WEBHOOK_TIMEOUT_MS = 10 * 1000
 export const FEISHU_SIGN_SECRET_PLACEHOLDER = '[已配置签名密钥，保存时保留原值]'
@@ -221,8 +225,54 @@ export class NotificationService {
   private readonly dispatchRepo = AppDataSource.getRepository(NotificationDispatch)
   private readonly userRepo = AppDataSource.getRepository(SysUser)
   private readonly sessionRepo = AppDataSource.getRepository(SysUserSession)
+  private readonly systemConfigRepo = AppDataSource.getRepository(SystemConfig)
+
+  private normalizeOnlineWindowSeconds(value: number): number {
+    if (!Number.isFinite(value) || !Number.isInteger(value)) {
+      throw new BizError('离线窗口必须为整数秒', 400)
+    }
+    if (value < MIN_ONLINE_WINDOW_SECONDS || value > MAX_ONLINE_WINDOW_SECONDS) {
+      throw new BizError(`离线窗口需在 ${MIN_ONLINE_WINDOW_SECONDS}-${MAX_ONLINE_WINDOW_SECONDS} 秒之间`, 400)
+    }
+    return value
+  }
+
+  private parseOnlineWindowSeconds(raw: string | null | undefined): number {
+    const parsed = Number.parseInt(String(raw ?? '').trim(), 10)
+    if (!Number.isFinite(parsed) || parsed < MIN_ONLINE_WINDOW_SECONDS || parsed > MAX_ONLINE_WINDOW_SECONDS) {
+      return DEFAULT_ONLINE_WINDOW_SECONDS
+    }
+    return parsed
+  }
+
+  private async ensureOnlineWindowConfig(manager?: EntityManager): Promise<void> {
+    const repo = manager ? manager.getRepository(SystemConfig) : this.systemConfigRepo
+    const exists = await repo.findOne({
+      where: { configKey: NOTIFICATION_ONLINE_WINDOW_CONFIG_KEY },
+      select: { id: true },
+    })
+    if (exists) {
+      return
+    }
+    await repo.save(repo.create({
+      configKey: NOTIFICATION_ONLINE_WINDOW_CONFIG_KEY,
+      configValue: String(DEFAULT_ONLINE_WINDOW_SECONDS),
+      configGroup: 'notification',
+      remark: '通知中心离线判定窗口（秒）',
+    }))
+  }
+
+  private async getOnlineWindowSeconds(manager?: EntityManager): Promise<number> {
+    const repo = manager ? manager.getRepository(SystemConfig) : this.systemConfigRepo
+    const row = await repo.findOne({
+      where: { configKey: NOTIFICATION_ONLINE_WINDOW_CONFIG_KEY },
+      select: { configValue: true },
+    })
+    return this.parseOnlineWindowSeconds(row?.configValue)
+  }
 
   async ensureDefaultRules() {
+    await this.ensureOnlineWindowConfig()
     const existing = await this.ruleRepo.find({
       where: DEFAULT_RULES.map((item) => ({ ruleCode: item.ruleCode })),
       select: { id: true, ruleCode: true },
@@ -339,9 +389,11 @@ export class NotificationService {
 
   async updateRules(
     input: UpdateNotificationRuleInput[],
+    offlineWindowSeconds: number,
     actor: AuthUserContext,
     requestMeta?: RequestMeta,
   ): Promise<{ changed: boolean; list: NotificationRuleRecord[] }> {
+    const normalizedOnlineWindowSeconds = this.normalizeOnlineWindowSeconds(offlineWindowSeconds)
     await this.ensureDefaultRules()
     const rows = await this.ruleRepo.find()
     const rowById = new Map(rows.map((item) => [normalizeId(item.id), item]))
@@ -379,6 +431,8 @@ export class NotificationService {
     let changed = false
     await AppDataSource.transaction(async (manager) => {
       const txRuleRepo = manager.getRepository(NotificationRule)
+      const txSystemConfigRepo = manager.getRepository(SystemConfig)
+      await this.ensureOnlineWindowConfig(manager)
       for (const row of rows) {
         const payload = normalizedById.get(normalizeId(row.id))
         if (!payload) {
@@ -424,6 +478,19 @@ export class NotificationService {
         )
       }
 
+      const currentOnlineWindowRow = await txSystemConfigRepo.findOne({
+        where: { configKey: NOTIFICATION_ONLINE_WINDOW_CONFIG_KEY },
+        select: { id: true, configValue: true },
+      })
+      const currentOnlineWindowSeconds = this.parseOnlineWindowSeconds(currentOnlineWindowRow?.configValue)
+      if (currentOnlineWindowSeconds !== normalizedOnlineWindowSeconds && currentOnlineWindowRow) {
+        await txSystemConfigRepo.update(
+          { id: currentOnlineWindowRow.id },
+          { configValue: String(normalizedOnlineWindowSeconds) },
+        )
+        changed = true
+      }
+
       if (changed) {
         await auditService.record({
           actionType: 'notification.rule.update',
@@ -434,6 +501,7 @@ export class NotificationService {
           requestMeta,
           detail: {
             updatedRuleIds: [...normalizedById.keys()],
+            offlineWindowSeconds: normalizedOnlineWindowSeconds,
           },
         }, manager)
       }
@@ -447,7 +515,9 @@ export class NotificationService {
 
   async getPresenceSnapshot(): Promise<NotificationPresenceSnapshot> {
     const now = new Date()
-    const onlineAfter = new Date(now.getTime() - ONLINE_WINDOW_MS)
+    const onlineWindowSeconds = await this.getOnlineWindowSeconds()
+    const onlineWindowMs = onlineWindowSeconds * 1000
+    const onlineAfter = new Date(now.getTime() - onlineWindowMs)
     const users = await this.userRepo.find({
       where: MANAGEMENT_ROLES.map((role) => ({ role, status: 'enabled' })),
       select: {
@@ -489,7 +559,7 @@ export class NotificationService {
 
     return {
       serverTime: now.toISOString(),
-      onlineWindowSeconds: Math.floor(ONLINE_WINDOW_MS / 1000),
+      onlineWindowSeconds,
       users: users.map((user) => {
         const sessionList = byUser.get(normalizeId(user.id)) ?? []
         const activeSessions = sessionList.filter((session) => session.expiresAt > now)

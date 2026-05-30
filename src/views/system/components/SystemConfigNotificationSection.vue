@@ -13,6 +13,7 @@ import { extractErrorMessage } from '@/utils/error'
 const props = defineProps<{
   rules: NotificationRuleRecord[]
   presenceSnapshot: NotificationPresenceSnapshot | null
+  offlineWindowSeconds: number
   managementUsers: NotificationPresenceUser[]
   loading: boolean
   saving: boolean
@@ -22,6 +23,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   (event: 'refresh-presence'): void
+  (event: 'update-offline-window-seconds', value: number): void
 }>()
 
 type TestChannel = 'email' | 'feishu'
@@ -41,6 +43,15 @@ const adminAndOperatorUsers = computed(() => props.managementUsers.filter((user)
 const supplierUsers = computed(() => props.managementUsers.filter((user) => user.role === 'supplier'))
 const testingState = reactive<Record<string, boolean>>({})
 const testFeedbackState = reactive<Record<string, TestFeedback>>({})
+const OFFLINE_WINDOW_OPTIONS = [30, 60, 90, 120, 180, 300, 600, 900, 1800, 3600]
+
+const handleOfflineWindowChange = (value: string | number | boolean | undefined) => {
+  const seconds = Number.parseInt(String(value ?? ''), 10)
+  if (!Number.isFinite(seconds)) {
+    return
+  }
+  emit('update-offline-window-seconds', seconds)
+}
 
 const buildTestKey = (ruleId: string, channel: TestChannel) => {
   return `${ruleId}:${channel}`
@@ -166,7 +177,23 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: TestChannel
             站内通知始终生成；邮箱、飞书按离线触发条件外发。
           </p>
         </div>
-        <el-tag type="info" effect="plain">离线窗口 {{ presenceSnapshot?.onlineWindowSeconds ?? 120 }} 秒</el-tag>
+        <div class="flex items-center gap-2">
+          <span class="text-xs text-slate-500 dark:text-slate-400">离线窗口</span>
+          <el-select
+            :model-value="offlineWindowSeconds"
+            style="width: 132px"
+            size="small"
+            :disabled="loading || saving || !canUpdateConfigs"
+            @change="handleOfflineWindowChange"
+          >
+            <el-option
+              v-for="seconds in OFFLINE_WINDOW_OPTIONS"
+              :key="seconds"
+              :label="`${seconds} 秒`"
+              :value="seconds"
+            />
+          </el-select>
+        </div>
       </div>
 
       <div class="grid gap-4">

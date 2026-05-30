@@ -215,6 +215,12 @@ const DEFAULT_SYSTEM_CONFIGS = [
     configGroup: 'customer_service',
     remark: '客服中心 SSE 心跳间隔（秒）',
   },
+  {
+    configKey: 'notification.online_window_seconds',
+    configValue: '120',
+    configGroup: 'notification',
+    remark: '通知中心离线判定窗口（秒）',
+  },
 ] as const
 
 /**
