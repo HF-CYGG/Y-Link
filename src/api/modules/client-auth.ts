@@ -44,7 +44,7 @@ export interface ClientAuthSuccessResult {
   authMode: 'cookie'
 }
 
-export type ClientRegisterResult = ClientSafeProfile
+export type ClientRegisterResult = ClientAuthSuccessResult
 
 export interface ClientVerificationCodeSendResult {
   expireSeconds: number

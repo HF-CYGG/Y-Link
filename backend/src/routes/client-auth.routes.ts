@@ -147,13 +147,27 @@ clientAuthRouter.post(
       res.setHeader('X-YLink-Register-Remaining-Source-Type', registerGuardResult.sourceType)
     }
     const data = await clientAuthService.register(payload, requestMeta)
+    setClientAuthCookie(req, res, {
+      sessionToken: data.token,
+      expiresAt: data.expiresAt,
+    })
+    res.setHeader('Cache-Control', 'no-store')
     if (registerGuardResult.shouldWarnRemaining) {
       res.setHeader(
         'X-YLink-Register-Remaining-Message',
         `当前注册操作还可尝试 ${registerGuardResult.remainingAttempts} 次，请尽量避免重复提交。`,
       )
     }
-    res.json({ code: 0, message: 'ok', data })
+    res.json({
+      code: 0,
+      message: 'ok',
+      data: {
+        expiresAt: data.expiresAt,
+        user: data.user,
+        verificationChannel: data.verificationChannel,
+        authMode: 'cookie',
+      },
+    })
   }),
 )
 

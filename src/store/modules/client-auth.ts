@@ -139,7 +139,7 @@ export const useClientAuthStore = defineStore('client-auth', () => {
     captchaCode?: string
   }, config?: RequestConfig) => {
     const result = await clientRegister(payload, config)
-    clearAuthState()
+    applyAuthResult(result)
     initialized.value = true
     return result
   }

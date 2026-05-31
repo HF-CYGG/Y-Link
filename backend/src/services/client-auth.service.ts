@@ -114,6 +114,23 @@ export interface ClientAuthCapabilities {
   departmentOptions: string[]
 }
 
+export interface ClientAuthSessionResult {
+  token: string
+  expiresAt: Date
+  user: {
+    id: string
+    account: string
+    username: string
+    mobile: string
+    email: string
+    realName: string
+    departmentName: string | null
+    status: string
+    lastLoginAt: Date | null
+  }
+  verificationChannel: 'captcha' | 'sms' | 'email'
+}
+
 class ClientAuthService {
   private readonly userRepo = AppDataSource.getRepository(ClientUser)
   private readonly sessionRepo = AppDataSource.getRepository(ClientUserSession)
@@ -214,7 +231,7 @@ class ClientAuthService {
       // - `username` 是客户端前端应优先消费的用户名字段；
       // - `realName` 仍保留给历史调用方做兼容别名，当前值与 username 保持一致；
       // - `account` 继续保留旧字段，避免旧缓存或旧页面因字段缺失直接失效。
-      account: normalizedUsername || user.email || user.mobile,
+      account: normalizedUsername || user.email || user.mobile || '',
       username: normalizedUsername,
       mobile: user.mobile ?? '',
       email: user.email ?? '',
@@ -262,6 +279,29 @@ class ClientAuthService {
 
   async getCapabilities(): Promise<ClientAuthCapabilities> {
     return this.getVerificationCapabilities()
+  }
+
+  private async createSessionForUser(user: ClientUser) {
+    const now = new Date()
+    const expiresAt = new Date(now.getTime() + env.AUTH_TOKEN_TTL_HOURS * 60 * 60 * 1000)
+    const token = generateSessionToken()
+    await AppDataSource.transaction(async (manager) => {
+      await manager.getRepository(ClientUserSession).delete({ expiresAt: LessThan(now) })
+      user.lastLoginAt = now
+      await manager.getRepository(ClientUser).save(user)
+      await manager.getRepository(ClientUserSession).save(
+        manager.getRepository(ClientUserSession).create({
+          sessionToken: hashSessionToken(token),
+          userId: user.id,
+          expiresAt,
+          lastAccessAt: now,
+        }),
+      )
+    })
+    return {
+      token,
+      expiresAt,
+    }
   }
 
   async register(input: ClientRegisterInput, _requestMeta?: RequestMeta) {
@@ -314,7 +354,15 @@ class ClientAuthService {
         status: 'enabled',
       }),
     )
-    return this.toClientProfile(user)
+    const session = await this.createSessionForUser(user)
+    return {
+      token: session.token,
+      expiresAt: session.expiresAt,
+      user: this.toClientProfile(user),
+      verificationChannel: validationMode === 'verification_code'
+        ? (account.channel === 'mobile' ? 'sms' : 'email')
+        : 'captcha',
+    } satisfies ClientAuthSessionResult
   }
 
   async login(input: ClientLoginInput, requestMeta?: RequestMeta) {
@@ -361,29 +409,14 @@ class ClientAuthService {
         : '用户名或密码错误'
       throw new BizError(loginErrorMessage, 401)
     }
-    const now = new Date()
-    const expiresAt = new Date(now.getTime() + env.AUTH_TOKEN_TTL_HOURS * 60 * 60 * 1000)
-    const token = generateSessionToken()
-    await AppDataSource.transaction(async (manager) => {
-      await manager.getRepository(ClientUserSession).delete({ expiresAt: LessThan(now) })
-      user.lastLoginAt = now
-      await manager.getRepository(ClientUser).save(user)
-      await manager.getRepository(ClientUserSession).save(
-        manager.getRepository(ClientUserSession).create({
-          sessionToken: hashSessionToken(token),
-          userId: user.id,
-          expiresAt,
-          lastAccessAt: now,
-        }),
-      )
-    })
+    const session = await this.createSessionForUser(user)
     authSecurityService.clearClientLoginFailures(requestMeta, account.normalizedValue)
     return {
-      token,
-      expiresAt,
+      token: session.token,
+      expiresAt: session.expiresAt,
       user: this.toClientProfile(user),
       verificationChannel: 'captcha',
-    }
+    } satisfies ClientAuthSessionResult
   }
 
   async verifyForgotPassword(input: ClientForgotVerifyInput, _requestMeta?: RequestMeta) {

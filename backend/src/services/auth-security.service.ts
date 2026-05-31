@@ -67,17 +67,17 @@ const RATE_LIMIT_RULES = {
     blockMessage: '当前网络下登录请求过于频繁，请稍后再试',
   },
   clientRegisterBySource: {
-    maxRequests: 8,
+    maxRequests: 40,
     windowMs: 30 * 60 * 1000,
     blockMessage: '注册请求过于频繁，请稍后再试',
   },
   clientRegisterByIpFallback: {
-    maxRequests: 48,
+    maxRequests: 300,
     windowMs: 30 * 60 * 1000,
     blockMessage: '当前网络下注册请求过于频繁，请稍后再试',
   },
   clientRegisterByAccount: {
-    maxRequests: 3,
+    maxRequests: 10,
     windowMs: 24 * 60 * 60 * 1000,
     blockMessage: '该账号注册尝试过于频繁，请明天再试',
   },
