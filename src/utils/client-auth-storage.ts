@@ -1,6 +1,9 @@
-﻿/**
- * 妯″潡璇存槑锛歴rc/utils/client-auth-storage.ts
- * 鏂囦欢鑱岃矗锛氱淮鎶ゅ鎴风鏈€灏忕櫥褰曞揩鐓э紙涓嶅惈 token / 鎵嬫満鍙?/ 閭锛夈€? * 瀹炵幇閫昏緫锛氬彧鎸佷箙鍖?UI 鎭㈠闇€瑕佺殑鏈€灏忓瓧娈碉紝瀹屾暣璧勬枡缁熶竴鐢?/client-auth/me 鍥炲～銆? * 缁存姢璇存槑锛氬璋冩暣瀹㈡埛绔櫥褰曟€佸瓧娈碉紝闇€鍚屾鏇存柊 Store 鐨勫揩鐓у啓鍏ヤ笌鎭㈠閫昏緫銆? */
+/**
+ * 模块说明：src/utils/client-auth-storage.ts
+ * 文件职责：维护客户端登录最小快照（不包含 token、手机号、邮箱）在浏览器本地的读写。
+ * 实现逻辑：仅持久化 UI 恢复所需字段；完整用户资料统一通过 `/client-auth/me` 回填。
+ * 维护说明：若调整登录态字段，需同步更新 Store 的快照写入与恢复流程。
+ */
 
 const CLIENT_AUTH_USER_KEY = 'y-link.client-auth.user'
 const CLIENT_AUTH_EXPIRES_AT_KEY = 'y-link.client-auth.expiresAt'
