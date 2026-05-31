@@ -13,7 +13,7 @@
 
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   buildClientFeedbackNextStepPrompt,
   FEEDBACK_CATEGORY_OPTIONS,
@@ -28,6 +28,7 @@ import {
   resolveFeedbackAttachmentUrl,
   submitClientFeedbackSatisfaction,
   uploadClientFeedbackAttachment,
+  withdrawClientFeedbackConversation,
   type FeedbackConversationRecord,
   type FeedbackConversationMessageAttachment,
   type FeedbackIssueCategory,
@@ -62,6 +63,7 @@ const loading = ref(false)
 const detailLoading = ref(false)
 const replySubmitting = ref(false)
 const confirmingResolved = ref(false)
+const withdrawingConversation = ref(false)
 const uploadingReplyAttachments = ref(false)
 const satisfactionSubmitting = ref(false)
 const satisfactionDialogVisible = ref(false)
@@ -91,6 +93,7 @@ const nextStepPrompt = computed(() => {
 const offlineFaqEntries = computed(() => availability.value?.offlineFaqs ?? [])
 const showOfflineFaq = computed(() => Boolean(availability.value && !availability.value.isOnline && offlineFaqEntries.value.length))
 const canConfirmResolved = computed(() => conversation.value?.status === 'resolved')
+const canWithdrawConversation = computed(() => conversation.value?.status !== 'closed')
 const shouldShowReplyComposer = computed(() => conversation.value?.status !== 'closed')
 const canRateSatisfaction = computed(() => {
   return conversation.value?.status === 'resolved' || conversation.value?.status === 'closed'
@@ -545,6 +548,48 @@ const handleConfirmResolved = async () => {
   }
 }
 
+const handleWithdrawConversation = async () => {
+  if (!conversation.value) {
+    ElMessage.warning('当前反馈单尚未加载完成')
+    return
+  }
+  if (!canWithdrawConversation.value) {
+    ElMessage.warning('当前反馈单已关闭，无需重复撤回')
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      `确认撤回反馈单“${conversation.value.issueNo}”吗？撤回后会话将关闭，后续如需继续反馈需新建反馈单。`,
+      '撤回反馈单',
+      {
+        type: 'warning',
+        confirmButtonText: '确认撤回',
+        cancelButtonText: '取消',
+        closeOnClickModal: false,
+      },
+    )
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') {
+      return
+    }
+    ElMessage.error('撤回确认失败，请稍后重试')
+    return
+  }
+
+  withdrawingConversation.value = true
+  try {
+    await withdrawClientFeedbackConversation(conversation.value.id)
+    await loadConversationDetail(conversation.value.id)
+    reconnectTip.value = '你已主动撤回当前反馈单，会话已关闭并保留历史记录。'
+    ElMessage.success('反馈单已撤回')
+  } catch (error) {
+    ElMessage.error(extractErrorMessage(error, '撤回反馈单失败，请稍后重试'))
+  } finally {
+    withdrawingConversation.value = false
+  }
+}
+
 /**
  * “仍未解决，继续反馈”动作用于把用户直接带到补充说明区：
  * - 若输入框当前为空，自动补一段简短开头，降低继续反馈的表达门槛；
@@ -759,6 +804,15 @@ onBeforeUnmount(() => {
             >
               {{ FEEDBACK_PRIORITY_META_MAP[conversation.priority].label }}
             </span>
+            <button
+              v-if="canWithdrawConversation"
+              type="button"
+              class="rounded-full border border-rose-200 bg-rose-50 px-3 py-1.5 text-xs font-semibold text-rose-700 transition hover:bg-rose-100 disabled:cursor-not-allowed disabled:opacity-60"
+              :disabled="withdrawingConversation"
+              @click="handleWithdrawConversation"
+            >
+              {{ withdrawingConversation ? '撤回中...' : '撤回反馈单' }}
+            </button>
           </div>
         </div>
 

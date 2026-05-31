@@ -204,6 +204,19 @@ authenticatedClientFeedbackRouter.patch(
   }),
 )
 
+authenticatedClientFeedbackRouter.patch(
+  '/conversations/:id/withdraw',
+  asyncHandler(async (req, res) => {
+    const authReq = req as ClientAuthenticatedRequest
+    const data = await clientFeedbackService.withdrawConversationByClient(
+      req.params.id,
+      authReq.clientAuth,
+      extractRequestMeta(req),
+    )
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
 authenticatedClientFeedbackRouter.post(
   '/conversations/:id/satisfaction',
   asyncHandler(async (req, res) => {

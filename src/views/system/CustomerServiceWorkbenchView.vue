@@ -28,6 +28,7 @@ import {
   listSupportAssignableUsers,
   listSupportFeedbackConversations,
   resolveClientFeedbackConversationGroupKey,
+  resolveFeedbackConversationStatusMeta,
   openFeedbackRealtimeStream,
   resolveSupportFeedbackConversationSla,
   SUPPORT_QUICK_REPLY_SOURCE_META,
@@ -1642,7 +1643,7 @@ onBeforeUnmount(() => {
                     <p class="mt-1 text-xs text-slate-500">{{ item.issueNo }}</p>
                   </div>
                   <el-tag :type="getStatusTagType(item.status)" effect="light" round>
-                    {{ FEEDBACK_STATUS_META_MAP[item.status].label }}
+                    {{ resolveFeedbackConversationStatusMeta(item).label }}
                   </el-tag>
                 </div>
 
@@ -1695,7 +1696,7 @@ onBeforeUnmount(() => {
 
               <div class="flex flex-wrap gap-2">
                 <el-tag :type="getStatusTagType(selectedConversation.status)" effect="light" round>
-                  {{ FEEDBACK_STATUS_META_MAP[selectedConversation.status].label }}
+                  {{ resolveFeedbackConversationStatusMeta(selectedConversation).label }}
                 </el-tag>
                 <el-tag :type="getPriorityTagType(selectedConversation.priority)" effect="light" round>
                   {{ FEEDBACK_PRIORITY_META_MAP[selectedConversation.priority].label }}

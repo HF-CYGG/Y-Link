@@ -1210,6 +1210,82 @@ class ClientFeedbackService {
     }
   }
 
+  async withdrawConversationByClient(
+    id: string,
+    clientAuth: ClientAuthContext,
+    requestMeta?: RequestMeta,
+  ) {
+    const clientSnapshot = await this.getClientUserSnapshot(clientAuth.userId)
+
+    const result = await AppDataSource.transaction(async (manager) => {
+      const conversation = await this.requireOwnedConversation(id, clientAuth, manager)
+      if (conversation.status === 'closed') {
+        return {
+          conversation,
+          systemMessage: null as ClientFeedbackMessage | null,
+          changed: false,
+        }
+      }
+
+      const statusBefore = conversation.status
+      conversation.status = 'closed'
+      conversation.closedAt = new Date()
+      await manager.getRepository(ClientFeedbackConversation).save(conversation)
+
+      const systemMessage = await this.createMessage(
+        manager,
+        conversation,
+        {
+          senderType: 'system',
+          senderUserId: null,
+          senderName: '系统',
+          conversationStatus: 'closed',
+        },
+        '客户端已撤回当前反馈单，会话已关闭。',
+        'system',
+      )
+
+      await auditService.record(
+        {
+          actionType: 'client_feedback.withdraw',
+          actionLabel: '客户端撤回反馈单',
+          targetType: 'feedback_conversation',
+          targetId: conversation.id,
+          targetCode: conversation.conversationNo,
+          actor: {
+            userId: clientAuth.userId,
+            username: clientAuth.account,
+            displayName: clientAuth.realName || clientSnapshot.clientUsername || clientSnapshot.clientAccount,
+          },
+          requestMeta,
+          detail: {
+            statusBefore,
+            statusAfter: 'closed',
+          },
+        },
+        manager,
+      )
+
+      return {
+        conversation,
+        systemMessage,
+        changed: true,
+      }
+    })
+
+    if (result.changed) {
+      const systemMessageView = result.systemMessage
+        ? this.buildMessageView(result.systemMessage, { scope: 'client', userId: clientAuth.userId })
+        : undefined
+      this.publishConversationEvent('conversation_status_changed', result.conversation, { status: 'closed', withdrawnBy: 'client' }, systemMessageView)
+    }
+
+    return {
+      changed: result.changed,
+      conversation: this.buildConversationSummary(result.conversation),
+    }
+  }
+
   async submitConversationSatisfactionByClient(
     id: string,
     input: SubmitClientFeedbackSatisfactionInput,
