@@ -701,6 +701,7 @@ const mergeOrderSummaryFromDetail = (detail: O2oPreorderDetail) => {
     merchantMessage: nextOrder.merchantMessage,
     clientOrderType: nextOrder.clientOrderType,
     departmentNameSnapshot: nextOrder.departmentNameSnapshot,
+    staffNoSnapshot: nextOrder.staffNoSnapshot,
     returnRequestCount: detail.returnRequests.length,
     pendingReturnRequestCount: detail.returnRequests.filter((item) => item.status === 'pending').length,
     latestReturnRequest: latestReturnRequest

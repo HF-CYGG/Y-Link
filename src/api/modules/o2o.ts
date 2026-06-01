@@ -56,6 +56,7 @@ export interface O2oPreorderSummary {
   merchantMessage: string | null
   clientOrderType: O2oClientOrderType
   departmentNameSnapshot: string | null
+  staffNoSnapshot: string | null
   returnRequestCount: number
   pendingReturnRequestCount: number
   latestReturnRequest: {
@@ -141,6 +142,7 @@ export interface O2oPreorderDetail {
     merchantMessage: string | null
     clientOrderType: O2oClientOrderType
     departmentNameSnapshot: string | null
+    staffNoSnapshot: string | null
     remark: string | null
     updateCount: number
     remainingUpdateCount: number
@@ -157,6 +159,8 @@ export interface O2oPreorderDetail {
     mobile: string | null
     email: string | null
     departmentName: string | null
+    accountType: 'personal' | 'department'
+    staffNo: string | null
   } | null
   items: O2oPreorderDetailItem[]
   returnRequests: O2oReturnRequestDetail[]
@@ -202,7 +206,6 @@ export interface O2oInventoryLog {
 }
 
 export interface SubmitO2oPreorderPayload {
-  clientOrderType: O2oClientOrderType
   isSystemApplied: boolean
   pickupContact: string
   remark?: string

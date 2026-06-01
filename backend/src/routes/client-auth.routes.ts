@@ -39,6 +39,8 @@ const clientPasswordSchema = (fieldLabel = '密码') =>
 const registerSchema = z.object({
   username: z.string().trim().min(1).max(128),
   account: z.string().trim().min(1),
+  accountType: z.enum(['personal', 'department']),
+  staffNo: z.string().trim().max(64).optional(),
   password: clientPasswordSchema('密码'),
   departmentName: z.string().optional(),
   verificationCode: z.string().trim().min(4).max(8).optional(),

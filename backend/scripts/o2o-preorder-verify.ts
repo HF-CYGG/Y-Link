@@ -58,6 +58,7 @@ const ensureSystemConfigs = async () => {
 }
 
 const readCaptchaCode = (captchaSvg: string) => captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6)
+const toChineseDigits = (value: string) => value.replaceAll(/\d/g, (digit) => '零一二三四五六七八九'[Number(digit)] ?? '')
 
 const expectBizError = async (executor: () => Promise<unknown>, expectedMessage: string) => {
   try {
@@ -80,21 +81,22 @@ const assertPreorderVerifyDetail = (verifyResult: O2oVerifyResultView): O2oPreor
 const registerAndLoginClient = async (seed: number): Promise<ClientAuthContext> => {
   const registerCaptcha = await clientAuthService.createCaptcha()
   const account = `1${String(seed).slice(-10)}`
-  const username = `test_user_${String(seed).slice(-6)}`
+  const username = `测试用户${toChineseDigits(String(seed).slice(-6))}`
   const password = process.env.Y_LINK_VERIFY_CLIENT_PASSWORD ?? `Client@${String(seed).slice(-6)}`
 
   const registerResult = await clientAuthService.register({
+    accountType: 'personal',
     account,
     username,
     password,
     captchaId: registerCaptcha.captchaId,
     captchaCode: readCaptchaCode(registerCaptcha.captchaSvg),
   })
-  assert.ok(registerResult.id)
+  assert.ok(registerResult.user.id)
 
   const loginCaptcha = await clientAuthService.createCaptcha()
   const loginResult = await clientAuthService.login({
-    account: registerResult.mobile,
+    account: registerResult.user.mobile,
     password,
     captchaId: loginCaptcha.captchaId,
     captchaCode: readCaptchaCode(loginCaptcha.captchaSvg),

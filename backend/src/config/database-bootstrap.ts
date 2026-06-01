@@ -21,6 +21,7 @@ const SQLITE_REQUIRED_TABLES = [
   'system_configs',
   'client_user',
   'client_user_session',
+  'client_staff_directory',
   'o2o_preorder',
   'o2o_preorder_item',
   'o2o_return_request',
@@ -65,7 +66,18 @@ const SQLITE_REQUIRED_PRODUCT_COLUMNS = [
   'pre_ordered_stock',
 ]
 
-const SQLITE_REQUIRED_CLIENT_USER_COLUMNS = ['mobile', 'email', 'real_name', 'department_name', 'status', 'last_login_at']
+const SQLITE_REQUIRED_CLIENT_USER_COLUMNS = [
+  'mobile',
+  'email',
+  'real_name',
+  'department_name',
+  'account_type',
+  'staff_no',
+  'staff_verified',
+  'status',
+  'last_login_at',
+]
+const SQLITE_REQUIRED_CLIENT_STAFF_DIRECTORY_COLUMNS = ['staff_no', 'real_name', 'department_name', 'status']
 const SQLITE_REQUIRED_SYS_USER_COLUMNS = ['email']
 const SQLITE_REQUIRED_CLIENT_FEEDBACK_CONVERSATION_COLUMNS = [
   'issue_type',
@@ -93,6 +105,7 @@ const SQLITE_REQUIRED_O2O_PREORDER_COLUMNS = [
   'merchant_message',
   'client_order_type',
   'department_name_snapshot',
+  'staff_no_snapshot',
   'is_system_applied',
   'has_customer_order',
   'pickup_contact',
@@ -299,6 +312,11 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
 
   const clientUserColumnSet = await listSqliteTableColumns(dataSource, 'client_user')
   if (SQLITE_REQUIRED_CLIENT_USER_COLUMNS.some((column) => !clientUserColumnSet.has(column))) {
+    return true
+  }
+
+  const clientStaffDirectoryColumnSet = await listSqliteTableColumns(dataSource, 'client_staff_directory')
+  if (SQLITE_REQUIRED_CLIENT_STAFF_DIRECTORY_COLUMNS.some((column) => !clientStaffDirectoryColumnSet.has(column))) {
     return true
   }
 

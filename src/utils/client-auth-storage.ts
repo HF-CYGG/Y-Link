@@ -13,6 +13,9 @@ export interface ClientAuthUserSnapshot {
   username: string
   account: string
   departmentName: string | null
+  accountType: 'personal' | 'department'
+  staffNo: string | null
+  staffVerified: boolean
   status: string
 }
 

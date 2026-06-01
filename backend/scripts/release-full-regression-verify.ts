@@ -45,6 +45,10 @@ function readCaptchaCode(captchaSvg: string) {
   return captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6)
 }
 
+function toChineseDigits(value: string) {
+  return value.replaceAll(/\d/g, (digit) => '零一二三四五六七八九'[Number(digit)] ?? '')
+}
+
 async function readJson<T>(response: Response): Promise<T> {
   const responseText = await response.text()
   try {
@@ -927,11 +931,14 @@ async function main() {
       '客户端注册图形验证码获取',
     )
     const clientAccount = `13${String(Date.now()).slice(-9)}`
-    const clientUsername = `回归用户${String(Date.now()).slice(-6)}`
+    const clientUsername = `回归用户${toChineseDigits(String(Date.now()).slice(-6))}`
     const clientRegister = await expectJsonOk<{
       data: {
-        id: string
-        mobile: string
+        token?: string
+        user: {
+          id: string
+          mobile: string
+        }
       }
     }>(
       () =>
@@ -941,6 +948,7 @@ async function main() {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
+            accountType: 'personal',
             username: clientUsername,
             account: clientAccount,
             password: clientPassword,
@@ -950,8 +958,8 @@ async function main() {
         }),
       '客户端注册',
     )
-    assert.ok(clientRegister.id)
-    assert.equal(clientRegister.mobile, clientAccount)
+    assert.ok(clientRegister.user.id)
+    assert.equal(clientRegister.user.mobile, clientAccount)
     pass('客户端注册链路通过')
 
     const loginCaptcha = await expectJsonOk<{ data: { captchaSvg: string; captchaId: string } }>(
@@ -1197,7 +1205,7 @@ async function main() {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            username: `${clientUsername}-已治理`,
+            username: `${clientUsername}已治理`,
             mobile: clientAccount,
             email: `${verifySeed}@example.com`,
             departmentName: releaseDepartmentName,

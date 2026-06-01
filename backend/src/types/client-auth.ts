@@ -12,6 +12,8 @@ export interface ClientAuthContext {
   mobile: string
   email: string
   realName: string
+  accountType: 'personal' | 'department'
+  staffNo: string | null
   sessionToken: string
 }
 

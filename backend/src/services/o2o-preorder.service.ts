@@ -45,7 +45,6 @@ export interface SubmitPreorderItemInput {
 export interface SubmitPreorderInput {
   items: SubmitPreorderItemInput[]
   remark?: string
-  clientOrderType: O2oClientOrderType
   isSystemApplied: boolean
   pickupContact: string
 }
@@ -121,6 +120,7 @@ export interface O2oPreorderSummaryView {
   merchantMessage: string | null
   clientOrderType: O2oPreorder['clientOrderType']
   departmentNameSnapshot: string | null
+  staffNoSnapshot: string | null
   returnRequestCount: number
   pendingReturnRequestCount: number
   latestReturnRequest: {
@@ -165,6 +165,7 @@ export interface O2oPreorderDetailView {
     merchantMessage: string | null
     clientOrderType: O2oPreorder['clientOrderType']
     departmentNameSnapshot: string | null
+    staffNoSnapshot: string | null
     remark: string | null
     updateCount: number
     remainingUpdateCount: number
@@ -181,6 +182,8 @@ export interface O2oPreorderDetailView {
     mobile: string | null
     email: string | null
     departmentName: string | null
+    accountType: ClientUser['accountType']
+    staffNo: string | null
   } | null
   items: O2oPreorderDetailItemView[]
   returnRequests: O2oReturnRequestView[]
@@ -437,6 +440,20 @@ class O2oPreorderService {
       throw new BizError('部门订必须先完善账号部门信息', 400)
     }
     return departmentName
+  }
+
+  private resolveStaffNoSnapshot(
+    clientOrderType: O2oClientOrderType,
+    clientUser: Pick<ClientUser, 'staffNo'> | null,
+  ): string | null {
+    if (clientOrderType !== 'department') {
+      return null
+    }
+    const staffNo = clientUser?.staffNo?.trim() ?? ''
+    if (!staffNo) {
+      throw new BizError('部门账户缺少教职工号，无法创建部门订单', 400)
+    }
+    return staffNo
   }
 
   /**
@@ -950,7 +967,7 @@ class O2oPreorderService {
     const customerOrderShowNo = customerOrderShowNoMap.get(id) ?? null
     const clientUser = await this.clientUserRepo.findOne({
       where: { id: String(order.clientUserId) },
-      select: ['id', 'realName', 'mobile', 'email', 'departmentName'],
+      select: ['id', 'realName', 'mobile', 'email', 'departmentName', 'accountType', 'staffNo'],
     })
     // 历史库与不同驱动下 order_id 参数类型可能出现 number/string 混用，
     // 这里做双口径兼容查询，避免订单详情“总件数存在但明细为空”。
@@ -1015,6 +1032,7 @@ class O2oPreorderService {
         merchantMessage: order.merchantMessage ?? null,
         clientOrderType: order.clientOrderType === 'department' ? 'department' : 'walkin',
         departmentNameSnapshot: order.departmentNameSnapshot?.trim() || null,
+        staffNoSnapshot: order.staffNoSnapshot?.trim() || null,
         remark: order.remark ?? null,
         updateCount,
         remainingUpdateCount: Math.max(0, clientPreorderUpdateLimit - updateCount),
@@ -1036,6 +1054,8 @@ class O2oPreorderService {
               mobile: clientUser.mobile?.trim() || null,
               email: clientUser.email?.trim() || null,
               departmentName: clientUser.departmentName?.trim() || null,
+              accountType: clientUser.accountType,
+              staffNo: clientUser.staffNo?.trim() || null,
             }
           })()
         : null,
@@ -1220,6 +1240,7 @@ class O2oPreorderService {
       merchantMessage: item.merchantMessage ?? null,
       clientOrderType: item.clientOrderType === 'department' ? 'department' : 'walkin',
       departmentNameSnapshot: item.departmentNameSnapshot?.trim() || null,
+      staffNoSnapshot: item.staffNoSnapshot?.trim() || null,
       returnRequestCount: returnRequestCountMap.get(String(item.id))?.total ?? 0,
       pendingReturnRequestCount: returnRequestCountMap.get(String(item.id))?.pending ?? 0,
       latestReturnRequest: latestReturnRequestMap.get(String(item.id)) ?? null,
@@ -1396,7 +1417,6 @@ class O2oPreorderService {
   async submit(auth: ClientAuthContext, input: SubmitPreorderInput) {
     const normalizedItems = this.normalizePreorderItems(input.items)
     const normalizedRemark = this.normalizePreorderRemark(input.remark)
-    const normalizedClientOrderType = this.normalizeClientOrderType(input.clientOrderType)
     // 详细注释：是否系统申请必须以客户端本次明确选择为准，不再使用服务端默认兜底。
     const normalizedIsSystemApplied = Boolean(input.isSystemApplied)
     const normalizedPickupContact = this.normalizePickupContact(input.pickupContact)
@@ -1435,15 +1455,17 @@ class O2oPreorderService {
 
       const clientUser = await manager.getRepository(ClientUser).findOne({
         where: { id: auth.userId },
-        select: ['id', 'departmentName'],
+        select: ['id', 'accountType', 'departmentName', 'staffNo'],
       })
       if (!clientUser) {
         throw new BizError('客户端账号不存在，请重新登录后再试', 401)
       }
-      const departmentNameSnapshot = this.resolveDepartmentNameSnapshot(normalizedClientOrderType, clientUser)
+      const orderTypeFromProfile = this.normalizeClientOrderType(clientUser.accountType === 'department' ? 'department' : 'walkin')
+      const departmentNameSnapshot = this.resolveDepartmentNameSnapshot(orderTypeFromProfile, clientUser)
+      const staffNoSnapshot = this.resolveStaffNoSnapshot(orderTypeFromProfile, clientUser)
 
       // verifyCode 既用于用户端展示二维码，也作为管理端核销入口的核心识别码。
-      const showNo = await this.generatePreorderShowNo(normalizedClientOrderType, manager)
+      const showNo = await this.generatePreorderShowNo(orderTypeFromProfile, manager)
       const timeoutAt = o2oRules.autoCancelEnabled ? new Date(Date.now() + o2oRules.autoCancelHours * 60 * 60 * 1000) : null
       const savedOrder = await manager.getRepository(O2oPreorder).save(
         manager.getRepository(O2oPreorder).create({
@@ -1451,8 +1473,9 @@ class O2oPreorderService {
           clientUserId: auth.userId,
           verifyCode: randomUUID(),
           status: 'pending',
-          clientOrderType: normalizedClientOrderType,
+          clientOrderType: orderTypeFromProfile,
           departmentNameSnapshot,
+          staffNoSnapshot,
           isSystemApplied: normalizedIsSystemApplied,
           hasCustomerOrder: false,
           pickupContact: normalizedPickupContact,

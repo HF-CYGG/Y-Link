@@ -12,7 +12,7 @@ import type { AuthenticatedRequest } from '../types/auth.js'
 import { requirePermission, requireRole } from '../middleware/auth.middleware.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
-import { CLIENT_USER_STATUSES } from '../entities/client-user.entity.js'
+import { CLIENT_USER_ACCOUNT_TYPES, CLIENT_USER_STATUSES } from '../entities/client-user.entity.js'
 import { clientUserManageService } from '../services/client-user-manage.service.js'
 
 const updateClientUserStatusSchema = z.object({
@@ -53,11 +53,17 @@ clientUserManageRouter.get(
       typeof req.query.status === 'string' && CLIENT_USER_STATUSES.includes(req.query.status as (typeof CLIENT_USER_STATUSES)[number])
         ? (req.query.status as (typeof CLIENT_USER_STATUSES)[number])
         : undefined
+    const accountType =
+      typeof req.query.accountType === 'string'
+      && CLIENT_USER_ACCOUNT_TYPES.includes(req.query.accountType as (typeof CLIENT_USER_ACCOUNT_TYPES)[number])
+        ? (req.query.accountType as (typeof CLIENT_USER_ACCOUNT_TYPES)[number])
+        : undefined
     const data = await clientUserManageService.list({
       page: Number.isFinite(page) && page > 0 ? page : 1,
       pageSize: Number.isFinite(pageSize) && pageSize > 0 ? Math.min(pageSize, 100) : 20,
       keyword: typeof req.query.keyword === 'string' ? req.query.keyword : undefined,
       status,
+      accountType,
     })
     res.json({
       code: 0,

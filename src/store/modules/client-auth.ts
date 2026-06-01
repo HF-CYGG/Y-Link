@@ -11,6 +11,7 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import {
+  type ClientAccountType,
   type ClientAuthSuccessResult,
   type ClientSafeProfile,
   clientLogin,
@@ -52,11 +53,14 @@ export const useClientAuthStore = defineStore('client-auth', () => {
 
   const isAuthenticated = computed(() => Boolean(currentUser.value))
 
-  const toUserSnapshot = (user: ClientSafeProfile): ClientAuthUserSnapshot => ({
+const toUserSnapshot = (user: ClientSafeProfile): ClientAuthUserSnapshot => ({
     id: user.id,
     username: user.username,
     account: user.account,
     departmentName: user.departmentName ?? null,
+    accountType: user.accountType,
+    staffNo: user.staffNo ?? null,
+    staffVerified: Boolean(user.staffVerified),
     status: user.status,
   })
 
@@ -88,6 +92,9 @@ export const useClientAuthStore = defineStore('client-auth', () => {
       mobile: '',
       email: '',
       departmentName: user.departmentName ?? null,
+      accountType: user.accountType === 'department' ? 'department' : 'personal',
+      staffNo: user.staffNo ?? null,
+      staffVerified: Boolean(user.staffVerified),
       status: user.status,
       lastLoginAt: null,
     }
@@ -132,6 +139,8 @@ export const useClientAuthStore = defineStore('client-auth', () => {
   const register = async (payload: {
     username: string
     account: string
+    accountType: ClientAccountType
+    staffNo?: string
     password: string
     departmentName?: string
     verificationCode?: string

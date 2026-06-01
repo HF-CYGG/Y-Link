@@ -42,6 +42,10 @@ function readCaptchaCode(captchaSvg: string) {
   return captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6)
 }
 
+function toChineseDigits(value: string) {
+  return value.replaceAll(/\d/g, (digit) => '零一二三四五六七八九'[Number(digit)] ?? '')
+}
+
 async function readJson<T>(response: Response): Promise<T> {
   const responseText = await response.text()
   try {
@@ -326,11 +330,13 @@ async function main() {
       '客户端注册图形验证码获取',
     )
     const clientAccount = `13${String(Date.now()).slice(-9)}`
-    const clientUsername = `反馈用户${String(Date.now()).slice(-6)}`
+    const clientUsername = `反馈用户${toChineseDigits(String(Date.now()).slice(-6))}`
 
     await expectJsonOk<{
       data: {
-        id: string
+        user: {
+          id: string
+        }
       }
     }>(
       () =>
@@ -340,6 +346,7 @@ async function main() {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
+            accountType: 'personal',
             username: clientUsername,
             account: clientAccount,
             password: clientPassword,

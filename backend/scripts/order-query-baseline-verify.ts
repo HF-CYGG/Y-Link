@@ -61,14 +61,16 @@ const ensureReady = async () => {
 }
 
 const readCaptchaCode = (captchaSvg: string) => captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6)
+const toChineseDigits = (value: string) => value.replaceAll(/\d/g, (digit) => '零一二三四五六七八九'[Number(digit)] ?? '')
 
 const registerAndLoginClient = async (seed: number): Promise<ClientAuthContext> => {
   const registerCaptcha = await clientAuthService.createCaptcha()
   const account = `1${String(seed).slice(-10)}`
-  const username = `order_perf_${String(seed).slice(-6)}`
+  const username = `基线用户${toChineseDigits(String(seed).slice(-6))}`
   const password = `Perf@${String(seed).slice(-6)}`
 
   const registerResult = await clientAuthService.register({
+    accountType: 'personal',
     account,
     username,
     password,
@@ -78,7 +80,7 @@ const registerAndLoginClient = async (seed: number): Promise<ClientAuthContext> 
 
   const loginCaptcha = await clientAuthService.createCaptcha()
   const loginResult = await clientAuthService.login({
-    account: registerResult.mobile,
+    account: registerResult.user.mobile,
     password,
     captchaId: loginCaptcha.captchaId,
     captchaCode: readCaptchaCode(loginCaptcha.captchaSvg),

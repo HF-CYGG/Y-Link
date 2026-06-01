@@ -56,6 +56,7 @@ function resetVerifyDatabase() {
 }
 
 const readCaptchaCode = (captchaSvg: string) => captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6)
+const toChineseDigits = (value: string) => value.replaceAll(/\d/g, (digit) => '零一二三四五六七八九'[Number(digit)] ?? '')
 
 async function expectBizError(executor: () => Promise<unknown>, expectedMessage: string) {
   try {
@@ -70,10 +71,11 @@ async function expectBizError(executor: () => Promise<unknown>, expectedMessage:
 async function registerAndLoginClient(seed: number): Promise<ClientAuthContext> {
   const registerCaptcha = await clientAuthService.createCaptcha()
   const account = `1${String(seed).slice(-10)}`
-  const username = `task123_client_${String(seed).slice(-6)}`
+  const username = `增强用户${toChineseDigits(String(seed).slice(-6))}`
   const password = `Client@${String(seed).slice(-6)}`
 
   const registerResult = await clientAuthService.register({
+    accountType: 'personal',
     account,
     username,
     password,
@@ -82,7 +84,7 @@ async function registerAndLoginClient(seed: number): Promise<ClientAuthContext> 
   })
   const loginCaptcha = await clientAuthService.createCaptcha()
   const loginResult = await clientAuthService.login({
-    account: registerResult.mobile,
+    account: registerResult.user.mobile,
     password,
     captchaId: loginCaptcha.captchaId,
     captchaCode: readCaptchaCode(loginCaptcha.captchaSvg),

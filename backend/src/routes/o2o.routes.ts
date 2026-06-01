@@ -22,7 +22,6 @@ import {
 import { extractRequestMeta } from '../utils/request-meta.js'
 
 const submitPreorderSchema = z.object({
-  clientOrderType: z.enum(['department', 'walkin']),
   // 详细注释：客户端必须显式传入“是否系统申请”，避免服务端继续使用默认值导致语义失真。
   isSystemApplied: z.boolean(),
   // 详细注释：提货人由客户端显式填写后传入服务端，避免继续退回为账号默认名导致代领场景失真。

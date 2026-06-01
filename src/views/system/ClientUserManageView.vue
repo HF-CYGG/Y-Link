@@ -18,6 +18,7 @@ import {
   updateClientUser,
   updateClientUserStatus,
   type CreateClientUserPayload,
+  type ClientUserAccountType,
   type ClientUserManageProfile,
   type ClientUserStatus,
   type ResetClientUserPasswordPayload,
@@ -36,6 +37,7 @@ const { hasPermission, ensurePermission } = usePermissionAction()
 const searchForm = reactive({
   keyword: '',
   status: '' as '' | ClientUserStatus,
+  accountType: '' as '' | ClientUserAccountType,
 })
 
 const listState = reactive(
@@ -217,6 +219,14 @@ const getStatusLabel = (status: ClientUserStatus) => {
   return status === 'enabled' ? '启用' : '停用'
 }
 
+const getAccountTypeLabel = (accountType: ClientUserAccountType) => {
+  return accountType === 'department' ? '部门账户' : '个人账户'
+}
+
+const getAccountTypeTagType = (accountType: ClientUserAccountType) => {
+  return accountType === 'department' ? 'warning' : 'info'
+}
+
 const resetCreateForm = () => {
   createForm.username = ''
   createForm.mobile = ''
@@ -284,6 +294,9 @@ const buildQueryParams = (): ClientUserListQuery => {
   if (searchForm.status) {
     params.status = searchForm.status
   }
+  if (searchForm.accountType) {
+    params.accountType = searchForm.accountType
+  }
 
   return params
 }
@@ -340,6 +353,7 @@ const handleOpenCreate = () => {
 const handleReset = () => {
   searchForm.keyword = ''
   searchForm.status = ''
+  searchForm.accountType = ''
   handleSearch()
 }
 
@@ -575,6 +589,16 @@ onMounted(() => {
               <el-option label="启用" value="enabled" />
               <el-option label="停用" value="disabled" />
             </el-select>
+            <el-select
+              v-model="searchForm.accountType"
+              placeholder="账号类型"
+              clearable
+              :class="isPhone ? '!w-full' : isTablet ? '!w-[180px]' : '!w-[188px]'"
+              @change="handleSearch"
+            >
+              <el-option label="个人账户" value="personal" />
+              <el-option label="部门账户" value="department" />
+            </el-select>
             <el-button :class="isPhone ? 'w-full' : ''" type="primary" icon="Search" @click="handleSearch">搜索</el-button>
             <el-button :class="isPhone ? 'w-full' : ''" icon="Refresh" @click="handleReset">重置</el-button>
             <el-button v-if="canCreateUser" :class="isPhone ? 'w-full' : ''" type="primary" icon="Plus" @click="handleOpenCreate">
@@ -604,6 +628,14 @@ onMounted(() => {
               <el-table-column prop="username" label="用户名" min-width="180" show-overflow-tooltip />
               <el-table-column prop="mobile" label="手机号" min-width="140" show-overflow-tooltip />
               <el-table-column prop="email" label="邮箱" min-width="220" show-overflow-tooltip />
+              <el-table-column label="账号类型" width="120">
+                <template #default="{ row }">
+                  <el-tag :type="getAccountTypeTagType(row.accountType)" effect="light">{{ getAccountTypeLabel(row.accountType) }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column prop="staffNo" label="教职工号" min-width="140" show-overflow-tooltip>
+                <template #default="{ row }">{{ row.staffNo || '-' }}</template>
+              </el-table-column>
               <el-table-column prop="departmentName" label="部门" min-width="160" show-overflow-tooltip>
                 <template #default="{ row }">{{ resolveDepartmentPathDisplay(row.departmentName) || '-' }}</template>
               </el-table-column>
@@ -650,6 +682,14 @@ onMounted(() => {
               </div>
 
               <div class="grid gap-2 rounded-2xl bg-slate-50 p-3 text-sm text-slate-600 dark:bg-white/5 dark:text-slate-300">
+                <div class="flex items-center justify-between gap-3">
+                  <span class="text-slate-400">账号类型</span>
+                  <el-tag :type="getAccountTypeTagType(item.accountType)" effect="light">{{ getAccountTypeLabel(item.accountType) }}</el-tag>
+                </div>
+                <div class="flex items-center justify-between gap-3">
+                  <span class="text-slate-400">教职工号</span>
+                  <span class="text-right break-all">{{ item.staffNo || '-' }}</span>
+                </div>
                 <div class="flex items-center justify-between gap-3">
                   <span class="text-slate-400">手机号</span>
                   <span class="text-right break-all">{{ item.mobile || '-' }}</span>

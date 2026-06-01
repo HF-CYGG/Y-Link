@@ -1402,6 +1402,7 @@ onBeforeUnmount(() => {
               <p class="mt-1 text-sm text-slate-700">
                 {{ orderTypeLabel }}{{ detail.order.departmentNameSnapshot ? ` / ${detail.order.departmentNameSnapshot}` : '' }}
               </p>
+              <p v-if="detail.order.staffNoSnapshot" class="mt-1 text-xs text-slate-500">工号：{{ detail.order.staffNoSnapshot }}</p>
             </div>
             <div class="rounded-2xl bg-slate-50 px-4 py-3">
               <p class="text-sm text-slate-400">总件数</p>

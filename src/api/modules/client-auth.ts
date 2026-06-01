@@ -7,6 +7,8 @@
 import { request } from '@/api/http'
 import type { RequestConfig } from '@/api/http'
 
+export type ClientAccountType = 'personal' | 'department'
+
 export interface ClientCaptchaResult {
   captchaId: string
   captchaSvg: string
@@ -28,6 +30,9 @@ export interface ClientSafeProfile {
   email: string
   realName: string
   departmentName: string | null
+  accountType: ClientAccountType
+  staffNo: string | null
+  staffVerified: boolean
   status: string
   lastLoginAt: string | null
 }
@@ -126,6 +131,8 @@ export const sendClientVerificationCode = (payload: ClientVerificationCodeSendIn
 export const clientRegister = (payload: {
   username: string
   account: string
+  accountType: ClientAccountType
+  staffNo?: string
   password: string
   departmentName?: string
   verificationCode?: string

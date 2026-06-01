@@ -7,7 +7,8 @@
 import { LessThan } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { env } from '../config/env.js'
-import { ClientUser } from '../entities/client-user.entity.js'
+import { ClientStaffDirectory } from '../entities/client-staff-directory.entity.js'
+import { CLIENT_USER_ACCOUNT_TYPES, ClientUser, type ClientUserAccountType } from '../entities/client-user.entity.js'
 import { ClientUserSession } from '../entities/client-user-session.entity.js'
 import type { ClientAuthContext } from '../types/client-auth.js'
 import { BizError } from '../utils/errors.js'
@@ -44,6 +45,8 @@ const resetTicketStore = new EphemeralTicketStore<ResetTicket>({
 export interface ClientRegisterInput {
   username: string
   account: string
+  accountType: ClientUserAccountType
+  staffNo?: string
   password: string
   departmentName?: string
   verificationCode?: string
@@ -125,6 +128,9 @@ export interface ClientAuthSessionResult {
     email: string
     realName: string
     departmentName: string | null
+    accountType: ClientUserAccountType
+    staffNo: string | null
+    staffVerified: boolean
     status: string
     lastLoginAt: Date | null
   }
@@ -134,6 +140,9 @@ export interface ClientAuthSessionResult {
 class ClientAuthService {
   private readonly userRepo = AppDataSource.getRepository(ClientUser)
   private readonly sessionRepo = AppDataSource.getRepository(ClientUserSession)
+  private readonly clientStaffDirectoryRepo = AppDataSource.getRepository(ClientStaffDirectory)
+  private readonly staffNoPattern = /^[A-Za-z0-9-]{4,32}$/
+  private readonly realNamePattern = /^[\u4e00-\u9fa5][\u4e00-\u9fa5· ]{1,19}$/
 
   private async getVerificationCapabilities(): Promise<ClientAuthCapabilities> {
     const [configs, departmentConfigs] = await Promise.all([
@@ -237,9 +246,39 @@ class ClientAuthService {
       email: user.email ?? '',
       realName: normalizedUsername,
       departmentName: user.departmentName ?? '',
+      accountType: user.accountType,
+      staffNo: user.staffNo ?? null,
+      staffVerified: Boolean(user.staffVerified),
       status: user.status,
       lastLoginAt: user.lastLoginAt,
     }
+  }
+
+  private normalizeAccountType(value: string | null | undefined): ClientUserAccountType {
+    const normalized = value?.trim().toLowerCase() ?? ''
+    if (CLIENT_USER_ACCOUNT_TYPES.includes(normalized as ClientUserAccountType)) {
+      return normalized as ClientUserAccountType
+    }
+    throw new BizError('账号类型非法，仅支持 personal 或 department', 400)
+  }
+
+  private normalizeStaffNo(value: string | null | undefined): string {
+    const normalized = value?.trim() ?? ''
+    if (!normalized) {
+      throw new BizError('部门账户必须填写教职工号', 400)
+    }
+    if (!this.staffNoPattern.test(normalized)) {
+      throw new BizError('教职工号格式不正确，仅支持字母、数字和短横线（4-32位）', 400)
+    }
+    return normalized
+  }
+
+  private assertRealName(value: string): string {
+    const normalized = value.trim()
+    if (!this.realNamePattern.test(normalized)) {
+      throw new BizError('用户名必须为2-20位中文真实姓名，可包含空格或·', 400)
+    }
+    return normalized
   }
 
   private resolveAccount(account: string): {
@@ -306,7 +345,8 @@ class ClientAuthService {
 
   async register(input: ClientRegisterInput, _requestMeta?: RequestMeta) {
     const account = this.resolveAccount(input.account)
-    const username = normalizeClientUsername(input.username)
+    const username = normalizeClientUsername(this.assertRealName(input.username))
+    const accountType = this.normalizeAccountType(input.accountType)
     const password = assertClientPasswordPolicy(input.password)
     const capabilities = await this.getVerificationCapabilities()
     const validationMode = capabilities.registerValidationModes[account.channel]
@@ -342,7 +382,42 @@ class ClientAuthService {
       throw new BizError('该用户名已被占用', 409)
     }
     await authSecurityService.guardClientRegisterAccountRequest(_requestMeta, account.account)
-    const selectedDepartmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName)
+    let departmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName)
+    let staffNo: string | null = null
+    let staffVerified = false
+
+    if (accountType === 'department') {
+      staffNo = this.normalizeStaffNo(input.staffNo)
+      const existedByStaffNo = await this.userRepo.findOne({
+        where: { staffNo },
+        select: ['id'],
+      })
+      if (existedByStaffNo) {
+        throw new BizError('该教职工号已绑定其他账号', 409)
+      }
+
+      const activeDirectoryCount = await this.clientStaffDirectoryRepo.count({
+        where: { status: 'active' },
+      })
+      if (activeDirectoryCount > 0) {
+        const matchedStaff = await this.clientStaffDirectoryRepo.findOne({
+          where: { staffNo, status: 'active' },
+        })
+        if (!matchedStaff) {
+          throw new BizError('教职工号未在学校目录中登记，请联系管理员核验', 409)
+        }
+        username.value = this.assertRealName(matchedStaff.realName)
+        username.normalizedValue = username.value.toLowerCase()
+        departmentName = await systemConfigService.assertClientDepartmentOption(matchedStaff.departmentName)
+        staffVerified = true
+      } else if (!departmentName) {
+        throw new BizError('部门账户在目录未导入时，必须手动选择所属部门', 400)
+      }
+    } else {
+      staffNo = null
+      staffVerified = false
+    }
+
     const user = await this.userRepo.save(
       this.userRepo.create({
         mobile: account.mobile,
@@ -350,7 +425,10 @@ class ClientAuthService {
         passwordHash: await hashPassword(password),
         // 当前账号体系下，用户名与登录账号分离，支持用户自定义用户名。
         realName: username.value,
-        departmentName: selectedDepartmentName,
+        departmentName,
+        accountType,
+        staffNo,
+        staffVerified,
         status: 'enabled',
       }),
     )
@@ -502,6 +580,8 @@ class ClientAuthService {
       email: session.user.email ?? '',
       account: session.user.realName || session.user.email || session.user.mobile || '',
       realName: session.user.realName,
+      accountType: session.user.accountType,
+      staffNo: session.user.staffNo ?? null,
       sessionToken: token,
     }
   }
@@ -590,7 +670,7 @@ class ClientAuthService {
       throw new BizError('当前用户不存在', 404)
     }
 
-    const username = normalizeClientUsername(input.username)
+    const username = normalizeClientUsername(this.assertRealName(input.username))
     const mobile = input.mobile?.trim()
       ? normalizeClientVerificationTarget('mobile', input.mobile)
       : null
@@ -601,6 +681,15 @@ class ClientAuthService {
 
     if (!mobile && !email) {
       throw new BizError('手机号和邮箱至少保留一项', 400)
+    }
+
+    if (user.accountType === 'department' && user.staffVerified) {
+      if (username.value !== (user.realName?.trim() || '')) {
+        throw new BizError('部门账号已通过工号目录校验，姓名不可修改', 409)
+      }
+      if (departmentName !== (user.departmentName ?? null)) {
+        throw new BizError('部门账号已通过工号目录校验，所属部门不可修改', 409)
+      }
     }
 
     const checks = this.buildProfileUniquenessChecks(username, mobile, email)
