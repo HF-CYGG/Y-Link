@@ -1,7 +1,7 @@
 /**
- * 模块说明：backend/src/entities/sys-audit-log.entity.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件说明：系统审计日志实体，保存后台关键操作的动作类型、操作人快照、结果和上下文信息。
+ * 实现逻辑：借助索引字段与 JSON 文本列记录可检索的审计数据，为登录审计、业务留痕和问题追溯提供底层表结构。
+ * 维护重点：扩展审计字段时，需要同步检查日志写入服务、导出展示字段以及不同数据库的长文本容量设置。
  */
 
 import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 'typeorm'

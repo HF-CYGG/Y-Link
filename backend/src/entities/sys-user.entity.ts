@@ -1,7 +1,7 @@
 /**
- * 模块说明：backend/src/entities/sys-user.entity.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件说明：后台系统用户实体，定义管理员、操作员和供货方等后台账号的基础资料与登录状态字段。
+ * 实现逻辑：通过 TypeORM 注解声明唯一索引、角色状态字段和时间戳列，为后台鉴权、权限判断与用户管理提供持久化结构。
+ * 维护重点：新增账号属性或调整角色枚举时，需要同步核对鉴权类型定义、登录流程以及数据库唯一约束。
  */
 
 import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm'

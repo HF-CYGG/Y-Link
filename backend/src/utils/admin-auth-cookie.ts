@@ -1,13 +1,7 @@
 /**
- * 模块说明：backend/src/utils/admin-auth-cookie.ts
- * 文件职责：统一封装管理端安全 Cookie、CSRF Token 生成与请求侧解析逻辑。
- * 实现逻辑：
- * - 管理端会话使用 HttpOnly Cookie 持有数据库会话令牌，避免前端脚本直接读取；
- * - 管理端 CSRF 使用“双提交 Cookie”策略，前端从可读 Cookie 取值后放入自定义请求头；
- * - 所有 Cookie 序列化、写入、清理与读取规则都集中在这里，避免路由层散落字符串常量。
- * 维护说明：
- * - 若后续要接入独立域名部署，请优先在本文件扩展 domain / secure / sameSite 策略；
- * - 若管理端与客户端将来完全拆域，请继续保持管理端会话 Cookie 与客户端令牌链路隔离。
+ * 文件说明：管理端鉴权 Cookie 工具，统一封装后台会话 Cookie、CSRF Token 的生成、写入、清理和解析逻辑。
+ * 实现逻辑：采用 HttpOnly 会话 Cookie 加双提交 CSRF Cookie 的组合方案，把后台登录态与请求防伪策略集中维护在同一处。
+ * 维护重点：若接入独立域名部署或调整 SameSite、Secure 策略，需要同步验证管理端登录链路与客户端 Cookie 隔离仍然成立。
  */
 import crypto from 'node:crypto'
 import type { Request, Response } from 'express'

@@ -1,7 +1,7 @@
 /**
- * 模块说明：backend/src/entities/client-user-session.entity.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件说明：客户端用户会话实体，保存客户端登录后的会话令牌、所属用户和会话访问时间信息。
+ * 实现逻辑：通过唯一令牌索引与客户端用户外键管理登录态持久化，为客户端自动登录、退出和会话续期提供基础数据。
+ * 维护重点：变更客户端会话时效或退出策略时，需要同步核对 Cookie 配置、服务层刷新规则和级联删除行为。
  */
 
 import { Column, CreateDateColumn, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn, type Relation } from 'typeorm'

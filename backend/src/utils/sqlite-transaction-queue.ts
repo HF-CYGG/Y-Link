@@ -1,10 +1,7 @@
 /**
- * 模块说明：backend/src/utils/sqlite-transaction-queue.ts
- * 文件职责：为 SQLite 数据源安装事务串行队列，避免高并发下多个事务同时开启触发 "cannot start a transaction within a transaction"。
- * 实现逻辑：
- * - 仅在 sqlite 方言下接管 `DataSource.transaction`；
- * - 把每次事务执行串到上一笔事务完成之后再继续；
- * - 不改业务层调用方式，只在数据源层统一顺序化事务入口。
+ * 文件说明：SQLite 事务串行队列工具，用于避免单连接环境下事务并发开启导致的重入报错。
+ * 实现逻辑：仅在 SQLite 方言下接管 `DataSource.transaction`，把每次事务按顺序排队执行而不改变业务层调用方式。
+ * 维护重点：若调整数据库方言支持或数据源包装方式，需要同步验证非 SQLite 场景不受影响且事务串行仍然可靠。
  */
 
 import type { DataSource } from 'typeorm'

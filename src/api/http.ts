@@ -1,7 +1,10 @@
 /**
  * 模块说明：src/api/http.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：封装前端统一 HTTP 请求基础设施，集中处理请求实例、会话续登事件、CSRF 头注入与错误归一化链路。
+ * 实现逻辑：
+ * - 基于 Axios 创建共享请求实例，为所有 API 模块提供统一的请求入口与基础配置；
+ * - 在请求阶段补齐管理端 CSRF、客户端风控头及会话相关上下文，避免各接口模块重复拼装；
+ * - 在响应阶段统一解包后端返回体、处理登录失效与异常归一化，保证页面层消费口径一致。
  */
 
 import axios, { type AxiosRequestConfig, type AxiosResponse, type InternalAxiosRequestConfig } from 'axios'

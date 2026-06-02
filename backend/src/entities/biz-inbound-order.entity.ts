@@ -1,7 +1,7 @@
 /**
- * 模块说明：backend/src/entities/biz-inbound-order.entity.ts
- * 文件职责：定义入库主单实体，持久化供货方、核销码、核销人和状态快照等核心字段。
- * 维护说明：调整字段时需同步检查 MySQL 初始化脚本、迁移脚本与入库服务读写逻辑。
+ * 文件说明：入库主单实体，记录送货单号、供货方信息、核销码、核销状态和处理人等核心入库数据。
+ * 实现逻辑：通过主表字段沉淀入库流程中的状态快照与追踪信息，为送货单提交、扫码核销和历史查询提供统一结构。
+ * 维护重点：调整入库状态或核销相关字段时，需要同步核对初始化脚本、迁移脚本和入库服务读写逻辑。
  */
 
 import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm'

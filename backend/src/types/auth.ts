@@ -1,7 +1,10 @@
 /**
- * 模块说明：backend/src/types/auth.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：`backend/src/types/auth.ts`
+ * 文件职责：集中声明管理端认证与授权体系使用的角色、状态、审计结果、请求上下文以及安全用户视图类型。
+ * 实现逻辑：
+ * 1. 通过常量联合类型固定角色与状态取值，避免路由和服务层散落硬编码字符串；
+ * 2. 使用 `AuthUserContext` 与 `AuthenticatedRequest` 描述鉴权中间件挂载后的请求结构；
+ * 3. 通过 `UserSafeProfile` 约束对前端可暴露的用户字段，隔离密码和会话等敏感信息。
  */
 
 import type { Request } from 'express'

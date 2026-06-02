@@ -1,7 +1,10 @@
 /**
- * 模块说明：backend/src/middleware/client-auth.middleware.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：`backend/src/middleware/client-auth.middleware.ts`
+ * 文件职责：负责客户端接口的登录态识别与请求上下文注入，统一兼容 Cookie、Bearer Token 与 SSE 查询参数三种取值来源。
+ * 实现逻辑：
+ * 1. 优先从客户端安全 Cookie 中读取会话令牌，兼容历史 Bearer 头和 SSE `access_token` 查询参数；
+ * 2. 调用客户端认证服务解析用户会话，并把结果写入 `req.clientAuth` 供后续路由复用；
+ * 3. 当令牌缺失或失效时，统一抛出未登录错误，保持客户端接口鉴权口径一致。
  */
 
 import type { NextFunction, Request, Response } from 'express'

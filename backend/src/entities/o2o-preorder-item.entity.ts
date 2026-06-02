@@ -1,7 +1,7 @@
 /**
- * 模块说明：backend/src/entities/o2o-preorder-item.entity.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件说明：O2O 预订单明细实体，记录每张预订单下的商品、数量以及与主表和商品表的关联关系。
+ * 实现逻辑：用订单外键和商品外键组织明细项，并通过级联删除与限制删除规则保护订单历史和商品引用完整性。
+ * 维护重点：调整预订单明细字段时，需要同步确认下单入参、订单详情展示和库存占用计算逻辑。
  */
 
 import { Column, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn, type Relation } from 'typeorm'

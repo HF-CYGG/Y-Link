@@ -1,7 +1,10 @@
 /**
- * 模块说明：backend/src/middleware/auth.middleware.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：`backend/src/middleware/auth.middleware.ts`
+ * 文件职责：集中处理管理端请求的登录态解析、Cookie 场景下的 CSRF 校验、角色/权限拦截与越权审计记录。
+ * 实现逻辑：
+ * 1. 先按 Cookie 优先、Bearer 兜底的顺序解析管理端凭据，并把认证结果挂载到 `req.auth`；
+ * 2. 对写操作请求补充双提交 Cookie 方式的 CSRF 校验，避免管理端会话被跨站伪造利用；
+ * 3. 为角色校验、权限点校验统一输出失败响应，并在拒绝访问时写入安全审计日志。
  */
 
 import type { NextFunction, Request, Response } from 'express'

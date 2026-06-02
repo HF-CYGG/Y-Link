@@ -1,7 +1,7 @@
 /**
- * 模块说明：backend/src/entities/sys-user-session.entity.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件说明：后台用户会话实体，记录系统用户登录后的 Bearer 会话令牌、过期时间和最近访问时间。
+ * 实现逻辑：通过唯一令牌索引和用户外键把会话生命周期独立持久化，支撑后台登录续期、主动失效和在线状态判断。
+ * 维护重点：调整后台会话策略时，需要同步核对 Cookie/Token 发放逻辑、过期时间刷新规则以及关联删除行为。
  */
 
 import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm'

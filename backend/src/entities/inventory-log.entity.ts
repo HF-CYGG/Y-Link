@@ -1,7 +1,7 @@
 /**
- * 模块说明：backend/src/entities/inventory-log.entity.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件说明：库存变更日志实体，用于记录商品库存每次增减前后数量、来源动作和关联业务单据。
+ * 实现逻辑：通过商品外键、变更数量和前后库存快照沉淀完整留痕，支撑库存审计、问题排查和经营追溯。
+ * 维护重点：增加新的库存变更类型时，需要同步更新写日志服务、后台展示筛选条件以及关联单据字段。
  */
 
 import { Column, CreateDateColumn, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn, type Relation } from 'typeorm'

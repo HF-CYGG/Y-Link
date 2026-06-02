@@ -1,7 +1,10 @@
 /**
- * 模块说明：backend/src/middleware/error-handler.ts
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 模块说明：`backend/src/middleware/error-handler.ts`
+ * 文件职责：提供后端统一的兜底响应出口，负责未命中路由、业务异常、上传异常与数据库异常的标准化返回。
+ * 实现逻辑：
+ * 1. `notFoundHandler` 处理所有未匹配接口，固定返回结构化 404 JSON；
+ * 2. `errorHandler` 优先识别业务异常与上传异常，避免把底层错误细节直接暴露给前端；
+ * 3. 对数据库约束类错误先转换成可读业务提示，其余未知异常统一按 500 记录并返回。
  */
 
 import type { NextFunction, Request, Response } from 'express'
