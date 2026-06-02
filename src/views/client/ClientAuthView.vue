@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/client/ClientAuthView.vue
- * 文件职责：承载客户端登录、个人注册与部门注册三条认证入口，并根据服务端下发能力切换验证码或短信/邮箱校验流程。
+ * 文件职责：承载客户端登录、个人注册与部门注册三条认证入口，并以参考样版骨架呈现左品牌区与右表单区。
  * 实现逻辑：
  * - 登录与注册共用同一页壳体，但通过 `activeMode` 明确区分“登录 / 个人注册 / 部门注册”三种可见模式；
  * - 部门注册会强制校验真实姓名、教职工号和所属部门，防止学生通过前端手工切换冒用部门账号；
@@ -62,11 +62,6 @@ interface AuthModeTabOption {
   footnote: string
 }
 
-interface RegisterTypeOption {
-  value: ClientAccountType
-  label: string
-}
-
 interface BrandFeatureItem {
   title: string
   description: string
@@ -99,15 +94,10 @@ const authModeTabs: AuthModeTabOption[] = [
   },
 ]
 
-const registerTypeOptions: RegisterTypeOption[] = [
-  { value: 'personal', label: '个人注册' },
-  { value: 'department', label: '部门注册' },
-]
-
 const brandFeatureItems: BrandFeatureItem[] = [
   {
     title: '库存同步',
-    description: '提交前即时确认库存状态，避免下单后才发现名额已满。',
+    description: '提交前即时确认库存状态，避免预约后才发现可用名额不足。',
   },
   {
     title: '在线锁单',
@@ -115,7 +105,7 @@ const brandFeatureItems: BrandFeatureItem[] = [
   },
   {
     title: '部门协同',
-    description: '支持部门账号实名接入，满足组织统一预约与对账场景。',
+    description: '支持部门实名注册、教职工号校验与部门归属确认。',
   },
 ]
 
@@ -197,14 +187,13 @@ const captchaHintText = computed(() => (
 ))
 const activeModeMeta = computed(() => authModeTabs.find((item) => item.mode === activeMode.value) ?? authModeTabs[0])
 const activeModeIndex = computed(() => Math.max(authModeTabs.findIndex((item) => item.mode === activeMode.value), 0))
-const registerTypeIndex = computed(() => Math.max(registerTypeOptions.findIndex((item) => item.value === registerAccountType.value), 0))
 const registerModeHintText = computed(() => {
   if (isDepartmentRegister.value) {
     return hasRegisterDepartmentTree.value
-      ? '请选择系统已配置的部门目录，确保部门账号后续协同与对账口径一致。'
-      : '当前尚未导入部门树，请手动填写所属部门名称。'
+      ? '部门账号需绑定系统内部门目录，后续预约、协同和对账都将按该归属执行。'
+      : '当前尚未导入部门树，请先填写所属部门名称，后续可由管理员继续维护。'
   }
-  return '个人账号默认按散客流程下单，无需填写部门信息。'
+  return '个人账号默认按个人流程预约，无需填写教职工号和部门信息。'
 })
 const registerVerificationHintText = computed(() => (
   registerUsesVerificationCode.value
@@ -426,6 +415,7 @@ const handleRegister = async () => {
   if (
     isDepartmentRegister.value
     && registerForm.department.trim()
+    && registerDepartmentOptions.value.length > 0
     && !registerDepartmentOptions.value.includes(registerForm.department.trim())
   ) {
     ElMessage.warning('请选择系统配置中的部门选项')
@@ -583,51 +573,45 @@ onUnmounted(() => {
 
 <template>
   <div class="client-auth-page">
-    <div class="client-auth-backdrop" aria-hidden="true">
-      <span class="backdrop-orb backdrop-orb--mint"></span>
-      <span class="backdrop-orb backdrop-orb--slate"></span>
-      <span class="backdrop-grid"></span>
-    </div>
+    <div class="bg-shape bg-shape--primary" aria-hidden="true"></div>
+    <div class="bg-shape bg-shape--secondary" aria-hidden="true"></div>
     <main class="auth-shell">
-      <section class="brand-panel">
+      <aside class="brand-panel">
+        <div class="brand-panel__decor brand-panel__decor--large" aria-hidden="true"></div>
+        <div class="brand-panel__decor brand-panel__decor--small" aria-hidden="true"></div>
+
         <div class="brand-panel__header">
-          <div class="brand-chip-group">
-            <span class="brand-chip">Y-LINK CLIENT</span>
-            <span class="brand-chip brand-chip--soft">在线预约</span>
-          </div>
+          <span class="brand-tag">Y-LINK CLIENT</span>
           <p class="brand-panel__eyebrow">企业级文创预约入口</p>
         </div>
 
         <div class="brand-panel__content">
           <div class="brand-copy">
-            <h1 class="brand-title">野辙文创预约<br>双入口工作台</h1> 
+            <h1 class="brand-title">野辙文创<br />在线预约</h1>
             <p class="brand-desc">
-              面向个人与部门统一提供在线登录、实名注册、验证码校验与库存预约入口，让用户在一个首屏里完成接入与下单准备。
+              以更接近经典认证页的双栏骨架承载登录、个人注册和部门注册，让用户在同一入口完成实名认证、验证码校验与预约前接入。
             </p>
           </div>
 
-          <div class="brand-showcase" aria-hidden="true">
-            <div class="brand-showcase__halo brand-showcase__halo--large"></div>
-            <div class="brand-showcase__halo brand-showcase__halo--small"></div>
-            <div class="showcase-card showcase-card--back"></div>
-            <div class="showcase-card showcase-card--middle"></div>
-            <div class="showcase-card showcase-card--front">
-              <div class="showcase-card__header">
-                <span class="showcase-card__badge">实时锁单</span>
-                <span class="showcase-card__status">在线可用</span>
+          <div class="brand-preview" aria-hidden="true">
+            <div class="brand-preview__stack brand-preview__stack--back"></div>
+            <div class="brand-preview__stack brand-preview__stack--middle"></div>
+            <div class="brand-preview__stack brand-preview__stack--front">
+              <div class="brand-preview__row">
+                <span class="brand-preview__badge">在线可用</span>
+                <span class="brand-preview__badge brand-preview__badge--soft">三态认证</span>
               </div>
-              <div class="showcase-card__title">库存、身份与预约状态同步呈现</div>
-              <p class="showcase-card__desc">登录后直接进入商品大厅，注册流程保持实名校验与验证码风控。</p>
-              <div class="showcase-card__bars">
-                <span class="showcase-card__bar showcase-card__bar--1"></span>
-                <span class="showcase-card__bar showcase-card__bar--2"></span>
-                <span class="showcase-card__bar showcase-card__bar--3"></span>
-                <span class="showcase-card__bar showcase-card__bar--4"></span>
+              <div class="brand-preview__title">登录、个人注册、部门注册集中承载</div>
+              <p class="brand-preview__desc">参考样版的左品牌右表单骨架已回归，原有实名、工号、部门与验证码链路继续保留。</p>
+              <div class="brand-preview__lines">
+                <span class="brand-preview__line brand-preview__line--long"></span>
+                <span class="brand-preview__line"></span>
+                <span class="brand-preview__line brand-preview__line--short"></span>
               </div>
-              <div class="showcase-card__metrics">
-                <span>个人接入</span>
-                <span>部门协同</span>
-                <span>验证码守卫</span>
+              <div class="brand-preview__metrics">
+                <span>实名注册</span>
+                <span>部门归属</span>
+                <span>验证码校验</span>
               </div>
             </div>
           </div>
@@ -644,11 +628,18 @@ onUnmounted(() => {
         </div>
 
         <div class="brand-footer">
-          <div>{{ APP_META.version }}</div>
-          <a :href="APP_META.repositoryUrl" target="_blank" rel="noopener noreferrer">{{ APP_META.repositoryLabel }}</a>
-          <div>{{ APP_META.copyright }}</div>
+          <div class="brand-footer__version">{{ APP_META.version }}</div>
+          <a
+            class="brand-footer__link"
+            :href="APP_META.repositoryUrl"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            {{ APP_META.repositoryLabel }}
+          </a>
+          <div class="brand-footer__copyright">{{ APP_META.copyright }}</div>
         </div>
-      </section>
+      </aside>
 
       <section class="form-panel">
         <div class="form-panel__inner">
@@ -674,18 +665,18 @@ onUnmounted(() => {
               </div>
 
               <form v-if="activeMode === 'login'" class="form-body" @submit.prevent="handleLogin">
-                <el-input v-model="loginForm.account" placeholder="用户名 / 手机号 / 邮箱" size="large" clearable>
+                <el-input v-model="loginForm.account" placeholder="用户名 / 手机号 / 邮箱" class="auth-input" size="large" clearable>
                   <template #prefix><el-icon><User /></el-icon></template>
                 </el-input>
-                <el-input v-model="loginForm.password" placeholder="密码" type="password" size="large" show-password>
+                <el-input v-model="loginForm.password" placeholder="密码" class="auth-input" type="password" size="large" show-password>
                   <template #prefix><el-icon><Lock /></el-icon></template>
                 </el-input>
                 <div v-if="loginCaptchaVisible" class="captcha-row">
-                  <el-input v-model="loginForm.captcha" placeholder="图形验证码" size="large" clearable>
+                  <el-input v-model="loginForm.captcha" placeholder="图形验证码" class="auth-input" size="large" clearable>
                     <template #prefix><el-icon><Key /></el-icon></template>
                   </el-input>
                   <button type="button" class="captcha-box" :disabled="captchaLoading" @click="refreshCaptcha()">
-                    <img v-if="captchaImageSrc" :src="captchaImageSrc" alt="图形验证码">
+                    <img v-if="captchaImageSrc" :src="captchaImageSrc" alt="图形验证码" />
                     <span v-else>{{ captchaLoading ? '刷新中' : '获取验证码' }}</span>
                   </button>
                 </div>
@@ -698,32 +689,31 @@ onUnmounted(() => {
               </form>
 
               <form v-else class="form-body" @submit.prevent="handleRegister">
-                <div class="register-type-switch" :style="{ '--register-index': `${registerTypeIndex}` }">
-                  <span class="register-type-switch__thumb" aria-hidden="true"></span>
-                  <button
-                    v-for="item in registerTypeOptions"
-                    :key="item.value"
-                    :class="{ active: registerAccountType === item.value }"
-                    type="button"
-                    @click="registerAccountType = item.value"
-                  >
-                    {{ item.label }}
-                  </button>
+                <div class="register-channel">
+                  <div class="register-channel__tag">
+                    {{ isDepartmentRegister ? '部门注册通道' : '个人注册通道' }}
+                  </div>
+                  <p class="register-channel__desc">
+                    {{ isDepartmentRegister ? '继续保留真实姓名、教职工号、部门与验证码校验。' : '继续保留真实姓名、登录账号与验证码校验。' }}
+                  </p>
                 </div>
 
-                <el-input v-model="registerForm.username" placeholder="真实姓名（必填）" size="large" clearable>
+                <el-input v-model="registerForm.username" placeholder="真实姓名（必填）" class="auth-input" size="large" clearable>
                   <template #prefix><el-icon><User /></el-icon></template>
                 </el-input>
-                <el-input v-model="registerForm.account" placeholder="登录账号（手机号或邮箱）" size="large" clearable>
+                <el-input v-model="registerForm.account" placeholder="登录账号（手机号或邮箱）" class="auth-input" size="large" clearable>
                   <template #prefix><el-icon><User /></el-icon></template>
                 </el-input>
                 <el-input
                   v-if="isDepartmentRegister"
                   v-model="registerForm.staffNo"
                   placeholder="教职工号（部门账号必填）"
+                  class="auth-input"
                   size="large"
                   clearable
-                />
+                >
+                  <template #prefix><el-icon><Key /></el-icon></template>
+                </el-input>
                 <el-tree-select
                   v-if="isDepartmentRegister && hasRegisterDepartmentTree"
                   v-model="registerForm.department"
@@ -734,6 +724,7 @@ onUnmounted(() => {
                   :expand-on-click-node="false"
                   :render-after-expand="false"
                   :placeholder="capabilityLoading ? '部门选项加载中' : '所属部门（目录未导入时需手动选择）'"
+                  class="auth-select"
                   size="large"
                   clearable
                   filterable
@@ -742,6 +733,7 @@ onUnmounted(() => {
                   v-else-if="isDepartmentRegister"
                   v-model="registerForm.department"
                   placeholder="所属部门（部门账号必填）"
+                  class="auth-input"
                   size="large"
                   clearable
                 />
@@ -751,24 +743,26 @@ onUnmounted(() => {
                   <el-input
                     v-model="registerForm.captcha"
                     :placeholder="registerUsesVerificationCode ? '先输入图形验证码，再发送短信/邮箱验证码' : '图形验证码'"
+                    class="auth-input"
                     size="large"
                     clearable
                   >
                     <template #prefix><el-icon><Key /></el-icon></template>
                   </el-input>
                   <button type="button" class="captcha-box" :disabled="captchaLoading" @click="refreshCaptcha()">
-                    <img v-if="captchaImageSrc" :src="captchaImageSrc" alt="图形验证码">
+                    <img v-if="captchaImageSrc" :src="captchaImageSrc" alt="图形验证码" />
                     <span v-else>{{ captchaLoading ? '刷新中' : '获取验证码' }}</span>
                   </button>
                 </div>
                 <p class="field-tip">{{ registerVerificationHintText }}</p>
 
                 <div v-if="registerUsesVerificationCode" class="captcha-row captcha-row--verification">
-                  <el-input v-model="registerForm.verificationCode" placeholder="手机 / 邮箱验证码" size="large" clearable>
+                  <el-input v-model="registerForm.verificationCode" placeholder="手机 / 邮箱验证码" class="auth-input" size="large" clearable>
                     <template #prefix><el-icon><Message /></el-icon></template>
                   </el-input>
                   <el-button
                     class="verification-button"
+                    type="default"
                     :disabled="verificationSending || registerVerificationCountdown > 0"
                     @click="handleSendRegisterVerificationCode"
                   >
@@ -776,13 +770,21 @@ onUnmounted(() => {
                   </el-button>
                 </div>
 
-                <el-input v-model="registerForm.password" :placeholder="CLIENT_NEW_PASSWORD_PLACEHOLDER" type="password" size="large" show-password>
+                <el-input
+                  v-model="registerForm.password"
+                  :placeholder="CLIENT_NEW_PASSWORD_PLACEHOLDER"
+                  class="auth-input"
+                  type="password"
+                  size="large"
+                  show-password
+                >
                   <template #prefix><el-icon><Lock /></el-icon></template>
                 </el-input>
                 <el-input
                   v-model="registerForm.confirmPassword"
                   :placeholder="CLIENT_CONFIRM_NEW_PASSWORD_PLACEHOLDER"
                   type="password"
+                  class="auth-input"
                   size="large"
                   show-password
                 >
@@ -807,113 +809,86 @@ onUnmounted(() => {
   position: relative;
   min-height: 100dvh;
   overflow: hidden;
-  background:
-    radial-gradient(circle at top left, rgba(45, 212, 191, 0.16), transparent 32%),
-    linear-gradient(180deg, #f8fbfb 0%, #eef4f7 100%);
+  background: #f1f5f9;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 28px;
+  padding: 24px;
 }
 
-.client-auth-backdrop {
+.bg-shape {
   position: absolute;
-  inset: 0;
   pointer-events: none;
+  filter: blur(88px);
+  z-index: 0;
 }
 
-.backdrop-orb,
-.backdrop-grid {
-  position: absolute;
+.bg-shape--primary {
+  width: 58vw;
+  height: 58vw;
+  top: -16%;
+  left: -18%;
+  border-radius: 50%;
+  background: rgba(13, 148, 136, 0.08);
 }
 
-.backdrop-orb {
-  border-radius: 999px;
-  filter: blur(10px);
-  opacity: 0.72;
-  animation: backdropFloat 12s ease-in-out infinite;
-}
-
-.backdrop-orb--mint {
-  width: 360px;
-  height: 360px;
-  top: -96px;
-  left: -72px;
-  background: radial-gradient(circle, rgba(45, 212, 191, 0.22) 0%, rgba(45, 212, 191, 0) 72%);
-}
-
-.backdrop-orb--slate {
-  width: 420px;
-  height: 420px;
-  right: -140px;
-  bottom: -140px;
-  background: radial-gradient(circle, rgba(148, 163, 184, 0.2) 0%, rgba(148, 163, 184, 0) 72%);
-  animation-delay: -5s;
-}
-
-.backdrop-grid {
-  inset: 0;
-  background-image:
-    linear-gradient(rgba(15, 23, 42, 0.028) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(15, 23, 42, 0.028) 1px, transparent 1px);
-  background-size: 80px 80px;
-  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.32), transparent 92%);
+.bg-shape--secondary {
+  width: 46vw;
+  height: 46vw;
+  right: -10%;
+  bottom: -10%;
+  border-radius: 50%;
+  background: rgba(59, 130, 246, 0.06);
 }
 
 .auth-shell {
   position: relative;
   z-index: 1;
-  width: min(1080px, 100%);
-  min-height: min(760px, calc(100dvh - 56px));
-  background: rgba(255, 255, 255, 0.94);
-  border: 1px solid rgba(226, 232, 240, 0.9);
+  width: 100%;
+  max-width: 980px;
+  min-height: 620px;
+  background: #ffffff;
   border-radius: 32px;
   box-shadow:
-    0 28px 70px rgba(15, 23, 42, 0.14),
-    inset 0 1px 0 rgba(255, 255, 255, 0.6);
-  backdrop-filter: blur(14px);
+    0 24px 48px rgba(15, 23, 42, 0.08),
+    0 2px 6px rgba(15, 23, 42, 0.04);
   overflow: hidden;
-  display: grid;
-  grid-template-columns: minmax(360px, 43%) minmax(0, 1fr);
-  animation: shellEnter 0.72s cubic-bezier(0.22, 1, 0.36, 1);
+  display: flex;
 }
 
 .brand-panel {
   position: relative;
   overflow: hidden;
-  padding: 42px 36px 34px;
-  background:
-    radial-gradient(circle at 18% 20%, rgba(255, 255, 255, 0.82), transparent 22%),
-    linear-gradient(145deg, #dff8f2 0%, #edf4f8 42%, #f8fafc 100%);
+  flex: 1;
+  padding: 44px 40px 32px;
+  background: linear-gradient(135deg, #f0fdfa 0%, #f8fafc 100%);
   display: flex;
   flex-direction: column;
   justify-content: space-between;
   gap: 28px;
-  animation: sectionEnter 0.82s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-.brand-panel::before,
-.brand-panel::after {
-  content: '';
+.brand-panel__decor {
   position: absolute;
   border-radius: 999px;
   pointer-events: none;
 }
 
-.brand-panel::before {
-  width: 360px;
-  height: 360px;
-  top: -180px;
-  right: -120px;
-  background: radial-gradient(circle, rgba(13, 148, 136, 0.16) 0%, rgba(13, 148, 136, 0) 72%);
-}
-
-.brand-panel::after {
+.brand-panel__decor--large {
   width: 280px;
   height: 280px;
-  left: -120px;
-  bottom: -120px;
-  background: radial-gradient(circle, rgba(255, 255, 255, 0.86) 0%, rgba(255, 255, 255, 0) 72%);
+  top: -88px;
+  right: -92px;
+  background: rgba(13, 148, 136, 0.05);
+  border: 1px solid rgba(13, 148, 136, 0.08);
+}
+
+.brand-panel__decor--small {
+  width: 180px;
+  height: 180px;
+  left: -54px;
+  bottom: 10%;
+  background: rgba(15, 118, 110, 0.04);
 }
 
 .brand-panel__header,
@@ -926,30 +901,19 @@ onUnmounted(() => {
 .brand-panel__header {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-}
-
-.brand-chip-group {
-  display: flex;
-  flex-wrap: wrap;
   gap: 10px;
 }
 
-.brand-chip {
+.brand-tag {
+  display: inline-flex;
   width: fit-content;
-  padding: 8px 14px;
-  border-radius: 999px;
-  background: rgba(15, 23, 42, 0.92);
-  color: #f8fafc;
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-}
-
-.brand-chip--soft {
-  background: rgba(255, 255, 255, 0.72);
+  padding: 6px 14px;
+  border-radius: 10px;
+  background: rgba(13, 148, 136, 0.2);
   color: #0f172a;
-  box-shadow: inset 0 0 0 1px rgba(148, 163, 184, 0.3);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
 }
 
 .brand-panel__eyebrow {
@@ -967,162 +931,121 @@ onUnmounted(() => {
 }
 
 .brand-copy {
-  max-width: 420px;
+  max-width: 380px;
 }
 
 .brand-title {
   margin: 0;
-  font-size: clamp(2.6rem, 4vw, 4.35rem);
-  line-height: 1.06;
-  letter-spacing: -0.04em;
+  font-size: 42px;
+  line-height: 1.2;
+  letter-spacing: -0.03em;
   color: #0f172a;
 }
 
 .brand-desc {
-  margin: 18px 0 0;
-  font-size: 16px;
+  margin: 20px 0 0;
+  font-size: 15px;
   line-height: 1.8;
   color: #475569;
 }
 
-.brand-showcase {
+.brand-preview {
   position: relative;
-  min-height: 240px;
-  margin-top: 2px;
+  min-height: 208px;
 }
 
-.brand-showcase__halo {
+.brand-preview__stack {
   position: absolute;
-  border-radius: 999px;
-  filter: blur(6px);
-  animation: haloPulse 9s ease-in-out infinite;
-}
-
-.brand-showcase__halo--large {
-  width: 220px;
-  height: 220px;
-  top: -8px;
-  left: 8px;
-  background: radial-gradient(circle, rgba(45, 212, 191, 0.2) 0%, rgba(45, 212, 191, 0) 76%);
-}
-
-.brand-showcase__halo--small {
-  width: 150px;
-  height: 150px;
-  right: 18px;
-  bottom: 12px;
-  background: radial-gradient(circle, rgba(15, 23, 42, 0.12) 0%, rgba(15, 23, 42, 0) 76%);
-  animation-delay: -3s;
-}
-
-.showcase-card {
-  position: absolute;
-  inset: auto;
-  border-radius: 28px;
+  border-radius: 24px;
   background: rgba(255, 255, 255, 0.84);
-  border: 1px solid rgba(255, 255, 255, 0.78);
-  box-shadow: 0 24px 48px rgba(15, 23, 42, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  box-shadow: 0 18px 36px rgba(15, 23, 42, 0.09);
 }
 
-.showcase-card--back {
-  width: 58%;
-  height: 78%;
-  right: 8%;
-  top: 6%;
-  opacity: 0.4;
-  transform: rotate(9deg);
+.brand-preview__stack--back {
+  inset: 18px 54px 18px 66px;
+  opacity: 0.5;
+  transform: rotate(7deg);
 }
 
-.showcase-card--middle {
-  width: 66%;
-  height: 84%;
-  left: 12%;
-  bottom: 4%;
-  opacity: 0.52;
-  transform: rotate(-6deg);
+.brand-preview__stack--middle {
+  inset: 22px 34px 10px 48px;
+  opacity: 0.64;
+  transform: rotate(-5deg);
 }
 
-.showcase-card--front {
-  inset: 0 12px 0 0;
-  padding: 22px;
+.brand-preview__stack--front {
+  inset: 0 0 0 0;
+  padding: 24px;
   display: flex;
   flex-direction: column;
   gap: 16px;
   background: rgba(255, 255, 255, 0.96);
-  animation: cardFloat 8s ease-in-out infinite;
 }
 
-.showcase-card__header,
-.showcase-card__metrics {
+.brand-preview__row,
+.brand-preview__metrics {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
 }
 
-.showcase-card__badge,
-.showcase-card__status,
-.showcase-card__metrics span {
+.brand-preview__badge,
+.brand-preview__metrics span {
   border-radius: 999px;
   padding: 6px 10px;
   font-size: 12px;
   font-weight: 600;
 }
 
-.showcase-card__badge {
-  background: rgba(15, 23, 42, 0.94);
+.brand-preview__badge {
+  background: rgba(15, 23, 42, 0.92);
   color: #f8fafc;
 }
 
-.showcase-card__status {
-  background: rgba(20, 184, 166, 0.12);
+.brand-preview__badge--soft {
+  background: rgba(15, 118, 110, 0.12);
   color: #0f766e;
 }
 
-.showcase-card__title {
+.brand-preview__title {
   font-size: 20px;
   font-weight: 700;
   line-height: 1.5;
   color: #0f172a;
 }
 
-.showcase-card__desc {
+.brand-preview__desc {
   margin: 0;
   font-size: 14px;
   line-height: 1.7;
   color: #475569;
 }
 
-.showcase-card__bars {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  align-items: end;
+.brand-preview__lines {
+  display: flex;
+  flex-direction: column;
   gap: 10px;
-  min-height: 78px;
 }
 
-.showcase-card__bar {
+.brand-preview__line {
+  display: block;
+  width: 100%;
+  height: 10px;
   border-radius: 999px;
-  background: linear-gradient(180deg, rgba(15, 23, 42, 0.16), rgba(13, 148, 136, 0.8));
+  background: linear-gradient(90deg, rgba(15, 23, 42, 0.08), rgba(13, 148, 136, 0.32));
 }
 
-.showcase-card__bar--1 {
-  height: 44px;
+.brand-preview__line--long {
+  width: 92%;
 }
 
-.showcase-card__bar--2 {
-  height: 70px;
+.brand-preview__line--short {
+  width: 64%;
 }
 
-.showcase-card__bar--3 {
-  height: 56px;
-}
-
-.showcase-card__bar--4 {
-  height: 82px;
-}
-
-.showcase-card__metrics span {
+.brand-preview__metrics span {
   background: rgba(241, 245, 249, 0.92);
   color: #334155;
 }
@@ -1167,119 +1090,79 @@ onUnmounted(() => {
 .brand-footer {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
-  font-size: 14px;
+  gap: 6px 14px;
+  font-size: 12px;
   color: #64748b;
 }
 
-.brand-footer a {
+.brand-footer__link {
   color: inherit;
   text-decoration: none;
 }
 
 .form-panel {
-  padding: 34px;
+  flex: 1.08;
+  padding: 44px 40px;
   display: flex;
   align-items: center;
   justify-content: center;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.98) 0%, rgba(248, 250, 252, 0.96) 100%);
-  animation: sectionEnter 0.94s cubic-bezier(0.22, 1, 0.36, 1);
+  background: #ffffff;
 }
 
 .form-panel__inner {
-  width: min(100%, 500px);
+  width: 100%;
+  max-width: 368px;
   display: flex;
   flex-direction: column;
-  gap: 20px;
+  gap: 22px;
 }
 
 .mode-switch {
   position: relative;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-  background: rgba(226, 232, 240, 0.76);
-  border-radius: 18px;
-  padding: 6px;
-  isolation: isolate;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  gap: 4px;
+  background: #f1f5f9;
+  border-radius: 16px;
+  padding: 5px;
 }
 
 .mode-switch__thumb {
   position: absolute;
-  top: 6px;
-  left: 6px;
-  width: calc((100% - 12px - 12px) / 3);
-  height: calc(100% - 12px);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.96);
-  box-shadow:
-    0 10px 24px rgba(15, 23, 42, 0.08),
-    0 1px 2px rgba(15, 23, 42, 0.08);
+  top: 5px;
+  left: 5px;
+  width: calc((100% - 10px - 8px) / 3);
+  height: calc(100% - 10px);
+  border-radius: 12px;
+  background: #ffffff;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.05);
   transform: translateX(calc(var(--mode-index, 0) * 100%));
-  transition: transform 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
   z-index: 0;
 }
 
-.mode-switch button,
-.register-type-switch button {
+.mode-switch button {
   position: relative;
   z-index: 1;
-  height: 46px;
-  border-radius: 14px;
+  height: 44px;
+  border-radius: 12px;
   border: 0;
   background: transparent;
   color: #475569;
-  font-weight: 700;
+  font-weight: 600;
   cursor: pointer;
-  transition:
-    color 0.22s ease,
-    transform 0.22s ease,
-    opacity 0.22s ease;
+  transition: color 0.22s ease;
 }
 
 .mode-switch button:hover,
-.register-type-switch button:hover {
+.mode-switch button.active {
   color: #0f172a;
-}
-
-.mode-switch button.active,
-.register-type-switch button.active {
-  color: #0f172a;
-}
-
-.register-type-switch {
-  position: relative;
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
-  background: rgba(241, 245, 249, 0.92);
-  border-radius: 16px;
-  padding: 6px;
-  isolation: isolate;
-}
-
-.register-type-switch__thumb {
-  position: absolute;
-  top: 6px;
-  left: 6px;
-  width: calc((100% - 12px - 6px) / 2);
-  height: calc(100% - 12px);
-  border-radius: 12px;
-  background: #ffffff;
-  box-shadow:
-    0 8px 20px rgba(15, 23, 42, 0.06),
-    0 1px 2px rgba(15, 23, 42, 0.06);
-  transform: translateX(calc(var(--register-index, 0) * 100%));
-  transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
-  z-index: 0;
 }
 
 .panel-stage {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 16px;
 }
 
 .form-body {
@@ -1291,12 +1174,12 @@ onUnmounted(() => {
 .form-header {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 
 .form-header__eyebrow {
   margin: 0;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.08em;
   color: #0f766e;
@@ -1305,54 +1188,78 @@ onUnmounted(() => {
 
 .form-header h2 {
   margin: 0;
-  font-size: clamp(2rem, 3vw, 3rem);
-  line-height: 1.1;
-  letter-spacing: -0.04em;
+  font-size: 28px;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
   color: #0f172a;
 }
 
 .form-header__subtitle {
   margin: 0;
-  font-size: 14px;
-  line-height: 1.8;
+  font-size: 13px;
+  line-height: 1.7;
   color: #64748b;
 }
 
-.form-body :deep(.el-input__wrapper),
-.form-body :deep(.el-select__wrapper) {
+.register-channel {
+  border-radius: 16px;
+  background: rgba(241, 245, 249, 0.72);
+  padding: 14px 16px;
+}
+
+.register-channel__tag {
+  display: inline-flex;
+  width: fit-content;
+  border-radius: 999px;
+  background: rgba(13, 148, 136, 0.12);
+  color: #0f766e;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.register-channel__desc {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #64748b;
+}
+
+.auth-input :deep(.el-input__wrapper),
+.auth-select :deep(.el-select__wrapper),
+.auth-select :deep(.el-tree-select__wrapper) {
   min-height: 52px;
-  border-radius: 18px;
+  border-radius: 14px;
+  background: #f8fafc;
+  border: 1px solid transparent;
+  box-shadow: none !important;
   padding-inline: 16px;
-  box-shadow:
-    0 0 0 1px rgba(203, 213, 225, 0.92) inset,
-    0 1px 2px rgba(15, 23, 42, 0.04);
   transition:
-    box-shadow 0.24s ease,
-    transform 0.24s ease,
-    background-color 0.24s ease;
+    background-color 0.22s ease,
+    border-color 0.22s ease,
+    box-shadow 0.22s ease;
 }
 
-.form-body :deep(.el-input__wrapper.is-focus),
-.form-body :deep(.el-select__wrapper.is-focused),
-.form-body :deep(.el-select__wrapper.is-focus) {
-  box-shadow:
-    0 0 0 2px rgba(20, 184, 166, 0.16),
-    0 0 0 1px rgba(13, 148, 136, 0.72) inset,
-    0 14px 24px rgba(15, 23, 42, 0.08);
-  transform: translateY(-1px);
+.auth-input :deep(.el-input__wrapper:hover),
+.auth-select :deep(.el-select__wrapper:hover),
+.auth-select :deep(.el-tree-select__wrapper:hover) {
+  background: #f1f5f9;
 }
 
-.form-body :deep(.el-input__wrapper:hover),
-.form-body :deep(.el-select__wrapper:hover) {
-  box-shadow:
-    0 0 0 1px rgba(148, 163, 184, 0.98) inset,
-    0 10px 20px rgba(15, 23, 42, 0.05);
+.auth-input :deep(.el-input__wrapper.is-focus),
+.auth-select :deep(.el-select__wrapper.is-focused),
+.auth-select :deep(.el-tree-select__wrapper.is-focused),
+.auth-select :deep(.el-select__wrapper.is-focus),
+.auth-select :deep(.el-tree-select__wrapper.is-focus) {
+  background: #ffffff;
+  border-color: #0d9488;
+  box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.1) !important;
 }
 
 .captcha-row {
   display: grid;
-  grid-template-columns: 1fr 168px;
-  gap: 10px;
+  grid-template-columns: 1fr 132px;
+  gap: 12px;
 }
 
 .captcha-row--verification {
@@ -1360,9 +1267,9 @@ onUnmounted(() => {
 }
 
 .captcha-box {
-  border: 1px solid rgba(203, 213, 225, 0.92);
-  border-radius: 18px;
-  background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+  border: 1px dashed #dbe4ee;
+  border-radius: 14px;
+  background: #f8fafc;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -1371,14 +1278,14 @@ onUnmounted(() => {
   color: #475569;
   transition:
     transform 0.22s ease,
-    box-shadow 0.22s ease,
+    background-color 0.22s ease,
     border-color 0.22s ease;
 }
 
 .captcha-box:hover:not(:disabled) {
   transform: translateY(-1px);
-  border-color: rgba(13, 148, 136, 0.34);
-  box-shadow: 0 14px 24px rgba(15, 23, 42, 0.08);
+  background: #f1f5f9;
+  border-color: rgba(13, 148, 136, 0.3);
 }
 
 .captcha-box:disabled {
@@ -1389,8 +1296,8 @@ onUnmounted(() => {
 .captcha-box img {
   width: 100%;
   height: 100%;
-  object-fit: cover;
-  border-radius: 17px;
+  object-fit: contain;
+  border-radius: 13px;
 }
 
 .field-tip {
@@ -1403,7 +1310,7 @@ onUnmounted(() => {
 .form-actions {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   flex-wrap: wrap;
   justify-content: flex-end;
 }
@@ -1416,45 +1323,41 @@ onUnmounted(() => {
 
 .link-btn {
   font-size: 13px;
-  color: #0d9488;
+  color: #64748b;
   text-decoration: none;
-  transition:
-    color 0.22s ease,
-    transform 0.22s ease;
+  transition: color 0.22s ease;
 }
 
 .link-btn:hover {
-  color: #0f766e;
-  transform: translateX(2px);
+  color: #0d9488;
 }
 
 .verification-button {
   min-height: 52px;
-  border-radius: 18px;
-  font-weight: 700;
+  border-radius: 14px;
+  font-weight: 600;
 }
 
 .submit-btn {
-  margin-top: 6px;
-  height: 54px;
-  border-radius: 999px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  box-shadow: 0 18px 28px rgba(13, 148, 136, 0.18);
+  margin-top: 8px;
+  height: 52px;
+  border-radius: 14px;
+  font-weight: 600;
+  background-color: #0f766e !important;
+  border: none !important;
   transition:
     transform 0.22s ease,
     box-shadow 0.22s ease,
-    filter 0.22s ease;
+    background-color 0.22s ease;
 }
 
 .submit-btn:hover:not(.is-disabled):not(.is-loading) {
   transform: translateY(-1px);
-  box-shadow: 0 22px 34px rgba(13, 148, 136, 0.24);
+  box-shadow: 0 10px 22px rgba(13, 148, 136, 0.22);
 }
 
 .submit-btn:active:not(.is-disabled):not(.is-loading) {
   transform: translateY(0);
-  filter: brightness(0.98);
 }
 
 .panel-footnote {
@@ -1538,25 +1441,24 @@ onUnmounted(() => {
 
 @media (max-width: 1024px) {
   .auth-shell {
-    grid-template-columns: 1fr;
+    flex-direction: column;
     min-height: auto;
   }
 
   .brand-panel {
-    padding: 28px 24px;
-    gap: 24px;
+    padding: 36px 24px 28px;
   }
 
   .form-panel {
-    padding: 28px 24px 32px;
+    padding: 36px 24px 40px;
   }
 
   .form-panel__inner {
-    width: min(100%, 640px);
+    max-width: 640px;
   }
 
-  .brand-showcase {
-    min-height: 220px;
+  .brand-footer {
+    display: none;
   }
 }
 
@@ -1565,17 +1467,13 @@ onUnmounted(() => {
     padding: 16px;
   }
 
-  .auth-shell {
-    border-radius: 28px;
-  }
-
   .brand-panel,
   .form-panel {
     padding-inline: 20px;
   }
 
-  .showcase-card--front {
-    inset: 0;
+  .brand-title {
+    font-size: 32px;
   }
 }
 
@@ -1594,22 +1492,12 @@ onUnmounted(() => {
     padding: max(20px, env(safe-area-inset-top)) 18px 18px;
   }
 
-  .brand-panel__content {
-    gap: 20px;
-  }
-
-  .brand-showcase {
-    min-height: 200px;
+  .brand-preview {
+    min-height: 196px;
   }
 
   .form-panel {
     padding: 22px 18px calc(24px + env(safe-area-inset-bottom));
-  }
-
-  .mode-switch,
-  .register-type-switch {
-    gap: 4px;
-    padding: 4px;
   }
 
   .mode-switch__thumb {
@@ -1619,15 +1507,7 @@ onUnmounted(() => {
     height: calc(100% - 8px);
   }
 
-  .register-type-switch__thumb {
-    top: 4px;
-    left: 4px;
-    width: calc((100% - 8px - 4px) / 2);
-    height: calc(100% - 8px);
-  }
-
-  .mode-switch button,
-  .register-type-switch button {
+  .mode-switch button {
     height: 44px;
     font-size: 13px;
   }
@@ -1644,23 +1524,4 @@ onUnmounted(() => {
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .client-auth-page *,
-  .client-auth-page *::before,
-  .client-auth-page *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
-  }
-
-  .auth-shell,
-  .brand-panel,
-  .form-panel,
-  .showcase-card--front,
-  .backdrop-orb,
-  .brand-showcase__halo {
-    transform: none !important;
-  }
-}
 </style>
