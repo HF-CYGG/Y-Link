@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import * as XLSX from 'xlsx'
 
 const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
@@ -67,6 +68,19 @@ function readCookieValueFromResponse(response: Response, cookieName: string): st
   const rawSetCookie = setCookieValues.filter(Boolean).join(',')
   const match = rawSetCookie.match(new RegExp(`(?:^|,\\s*)${cookieName}=([^;]+)`))
   return match?.[1] ? decodeURIComponent(match[1]) : null
+}
+
+function createStaffDirectoryWorkbookBlob(rows: string[][]) {
+  const worksheet = XLSX.utils.aoa_to_sheet(rows)
+  const workbook = XLSX.utils.book_new()
+  XLSX.utils.book_append_sheet(workbook, worksheet, '教职工工号库')
+  const buffer = XLSX.write(workbook, {
+    type: 'buffer',
+    bookType: 'xlsx',
+  })
+  return new Blob([buffer], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  })
 }
 
 async function loginSession(
@@ -231,6 +245,56 @@ async function main() {
     )
     assert.equal(rawTextImportResult.summary.created, 2, '姓名、工号、部门顺序导入应创建 2 条记录')
     pass('支持按姓名、工号、部门顺序导入教职工库')
+
+    const txtUploadForm = new FormData()
+    txtUploadForm.append(
+      'file',
+      new Blob([['孙老师\tHY1005\t工业设计中心', '周老师\tHY1006\t工业设计中心'].join('\n')], {
+        type: 'text/plain',
+      }),
+      'staff-directory-import.txt',
+    )
+    const txtFileImportResult = await expectJsonOkResponse<{
+      summary: { created: number; updated: number; skipped: number }
+      list: Array<{ id: string; staffNo: string; realName: string; departmentName: string; status: string }>
+    }>(
+      await fetch(`${baseUrl}/api/system-configs/client-staff-directory/import`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminLogin.token}`,
+        },
+        body: txtUploadForm,
+      }),
+      '上传 txt 文件导入教职工库',
+    )
+    assert.equal(txtFileImportResult.summary.created, 2, '上传 txt 文件导入应创建 2 条记录')
+    pass('支持上传 txt 文件自动导入教职工库')
+
+    const xlsxUploadForm = new FormData()
+    xlsxUploadForm.append(
+      'file',
+      createStaffDirectoryWorkbookBlob([
+        ['姓名', '工号', '部门'],
+        ['吴老师', 'HY1007', '实验实训中心'],
+        ['郑老师', 'HY1008', '实验实训中心'],
+      ]),
+      'staff-directory-import.xlsx',
+    )
+    const xlsxFileImportResult = await expectJsonOkResponse<{
+      summary: { created: number; updated: number; skipped: number }
+      list: Array<{ id: string; staffNo: string; realName: string; departmentName: string; status: string }>
+    }>(
+      await fetch(`${baseUrl}/api/system-configs/client-staff-directory/import`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminLogin.token}`,
+        },
+        body: xlsxUploadForm,
+      }),
+      '上传 xlsx 文件导入教职工库',
+    )
+    assert.equal(xlsxFileImportResult.summary.created, 2, '上传 xlsx 文件导入应创建 2 条记录')
+    pass('支持上传 xlsx 文件自动导入教职工库')
 
     const departmentConfigAfterImport = await expectJsonOkResponse<{
       tree: Array<{ id?: string; label: string; children?: unknown[] }>

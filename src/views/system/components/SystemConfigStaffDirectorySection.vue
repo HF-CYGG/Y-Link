@@ -348,7 +348,16 @@ onMounted(() => {
       />
     </div>
 
-    <el-dialog v-model="dialogVisible" :title="dialogTitle" width="560px" destroy-on-close @closed="resetDialogForm">
+    <el-dialog
+      v-model="dialogVisible"
+      :title="dialogTitle"
+      width="560px"
+      destroy-on-close
+      append-to-body
+      :modal-append-to-body="true"
+      align-center
+      @closed="resetDialogForm"
+    >
       <el-form ref="dialogFormRef" :model="dialogForm" :rules="rules" label-position="top">
         <el-form-item label="教职工号" prop="staffNo">
           <el-input v-model.trim="dialogForm.staffNo" placeholder="请输入教职工号" />
@@ -374,7 +383,16 @@ onMounted(() => {
       </template>
     </el-dialog>
 
-    <el-dialog v-model="importVisible" title="批量导入教职工目录" width="680px" destroy-on-close @closed="resetImportForm">
+    <el-dialog
+      v-model="importVisible"
+      title="批量导入教职工目录"
+      width="680px"
+      destroy-on-close
+      append-to-body
+      :modal-append-to-body="true"
+      align-center
+      @closed="resetImportForm"
+    >
       <el-form ref="importFormRef" :model="importForm" :rules="importRules" label-position="top">
         <el-form-item label="目录文本" prop="rawText">
           <el-input
