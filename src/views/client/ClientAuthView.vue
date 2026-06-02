@@ -781,51 +781,120 @@ const handleLogin = async () => {
   }
 }
 
-const handleRegister = async () => {
-  const accountChannel = resolveAccountChannel(registerForm.account)
-  if (!validateRealName(registerForm.username)) {
-    ElMessage.warning('请输入 2-20 位中文真实姓名，可包含空格或·')
-    return
+// 部门注册的工号与部门选择单独校验，避免主校验函数继续堆叠条件分支。
+const validateDepartmentRegisterFields = () => {
+  if (!isDepartmentRegisterMode.value) {
+    return true
   }
-  if (!accountChannel) {
-    ElMessage.warning('请输入正确的手机号或邮箱作为登录账号')
-    return
-  }
-  if (!validateRegisterPassword(registerForm.password)) {
-    ElMessage.warning(CLIENT_NEW_PASSWORD_RULE_TEXT)
-    return
-  }
-  if (registerForm.password !== registerForm.confirmPassword) {
-    ElMessage.warning(CLIENT_CONFIRM_INPUT_MISMATCH_MESSAGE)
-    return
-  }
-  if (isDepartmentRegisterMode.value && !registerForm.staffNo.trim()) {
+  const normalizedStaffNo = registerForm.staffNo.trim()
+  const normalizedDepartment = registerForm.department.trim()
+  if (!normalizedStaffNo) {
     ElMessage.warning('请输入教职工号')
-    return
+    return false
   }
-  if (isDepartmentRegisterMode.value && !validateStaffNo(registerForm.staffNo)) {
+  if (!validateStaffNo(normalizedStaffNo)) {
     ElMessage.warning('教职工号仅支持字母、数字和短横线（4-32位）')
-    return
+    return false
   }
-  if (isDepartmentRegisterMode.value && !registerForm.department.trim()) {
+  if (!normalizedDepartment) {
     ElMessage.warning('请选择所属部门')
-    return
+    return false
   }
-  if (
-    isDepartmentRegisterMode.value &&
-    registerForm.department.trim() &&
-    !registerDepartmentOptions.value.includes(registerForm.department.trim())
-  ) {
+  if (!registerDepartmentOptions.value.includes(normalizedDepartment)) {
     ElMessage.warning('请选择系统配置中的部门选项')
-    return
+    return false
   }
+  return true
+}
+
+// 注册验证码校验与部门字段校验拆开维护，便于后续继续扩展不同通道策略。
+const validateRegisterChallengeFields = () => {
   if (registerUsesVerificationCode.value) {
     if (!registerForm.verificationCode.trim()) {
       ElMessage.warning('请输入手机/邮箱验证码')
-      return
+      return false
     }
-  } else if (!captcha.captchaId || !registerForm.captcha.trim()) {
+    return true
+  }
+  if (!captcha.captchaId || !registerForm.captcha.trim()) {
     ElMessage.warning('请输入图形验证码')
+    return false
+  }
+  return true
+}
+
+// 注册前置校验只负责拦截非法输入并整理提交上下文，避免注册主流程堆叠过多分支。
+const validateRegisterBeforeSubmit = () => {
+  const accountChannel = resolveAccountChannel(registerForm.account)
+  if (!validateRealName(registerForm.username)) {
+    ElMessage.warning('请输入 2-20 位中文真实姓名，可包含空格或·')
+    return null
+  }
+  if (!accountChannel) {
+    ElMessage.warning('请输入正确的手机号或邮箱作为登录账号')
+    return null
+  }
+  if (!validateRegisterPassword(registerForm.password)) {
+    ElMessage.warning(CLIENT_NEW_PASSWORD_RULE_TEXT)
+    return null
+  }
+  if (registerForm.password !== registerForm.confirmPassword) {
+    ElMessage.warning(CLIENT_CONFIRM_INPUT_MISMATCH_MESSAGE)
+    return null
+  }
+  if (!validateDepartmentRegisterFields()) {
+    return null
+  }
+  if (!validateRegisterChallengeFields()) {
+    return null
+  }
+
+  return {
+    registeredAccount: normalizeInputText(registerForm.account),
+    registeredUsername: normalizeInputText(registerForm.username),
+  }
+}
+
+// 注册请求体按当前注册通道集中生成，保证部门字段与验证码字段的启停逻辑只维护一处。
+const buildRegisterRequestPayload = (registeredAccount: string, registeredUsername: string) => {
+  return {
+    username: registeredUsername,
+    account: registeredAccount,
+    accountType: registerAccountType.value,
+    staffNo: isDepartmentRegisterMode.value ? registerForm.staffNo.trim() : undefined,
+    password: registerForm.password,
+    departmentName: isDepartmentRegisterMode.value ? normalizeInputText(registerForm.department) || undefined : undefined,
+    verificationCode: registerUsesVerificationCode.value ? normalizeInputText(registerForm.verificationCode) : undefined,
+    captchaId: registerUsesVerificationCode.value ? undefined : captcha.captchaId,
+    captchaCode: registerUsesVerificationCode.value ? undefined : normalizeInputText(registerForm.captcha),
+  }
+}
+
+// 注册成功后的状态收口：
+// - 清空注册表单，避免再次进入注册态时残留旧数据；
+// - 预填登录账号与成功提示，保证回到登录页后能立即继续操作。
+const resetRegisterStateAfterSuccess = (registeredAccount: string, registerRemainingMessage: string) => {
+  clientAuthStore.clearAuthState()
+  clientAuthStore.initialized = true
+  activeMode.value = 'login'
+  loginForm.account = registeredAccount
+  loginForm.password = ''
+  loginForm.captcha = ''
+  successTip.value = registerRemainingMessage
+    ? `账号已创建成功，请使用用户名、手机号或邮箱与密码登录。${registerRemainingMessage}`
+    : '账号已创建成功，请使用用户名、手机号或邮箱与密码登录。'
+  registerForm.captcha = ''
+  registerForm.verificationCode = ''
+  registerForm.username = ''
+  registerForm.staffNo = ''
+  registerForm.password = ''
+  registerForm.confirmPassword = ''
+  registerForm.department = ''
+}
+
+const handleRegister = async () => {
+  const registerContext = validateRegisterBeforeSubmit()
+  if (!registerContext) {
     return
   }
 
@@ -839,45 +908,19 @@ const handleRegister = async () => {
       successTip.value = ''
       securityHint.value = ''
       clearRegisterFeedback()
-      const registeredAccount = normalizeInputText(registerForm.account)
-      const registeredUsername = normalizeInputText(registerForm.username)
+      const { registeredAccount, registeredUsername } = registerContext
       await runLatestRegisterRequest({
         executor: (signal): Promise<AxiosResponse<ClientRegisterResult>> =>
           http.request<ClientRegisterResult>({
             method: 'POST',
             url: '/client-auth/register',
-            data: {
-              username: registeredUsername,
-              account: registeredAccount,
-              accountType: registerAccountType.value,
-              staffNo: isDepartmentRegisterMode.value ? registerForm.staffNo.trim() : undefined,
-              password: registerForm.password,
-              departmentName: isDepartmentRegisterMode.value ? normalizeInputText(registerForm.department) || undefined : undefined,
-              verificationCode: registerUsesVerificationCode.value ? normalizeInputText(registerForm.verificationCode) : undefined,
-              captchaId: registerUsesVerificationCode.value ? undefined : captcha.captchaId,
-              captchaCode: registerUsesVerificationCode.value ? undefined : normalizeInputText(registerForm.captcha),
-            },
+            data: buildRegisterRequestPayload(registeredAccount, registeredUsername),
             signal,
           }),
         onSuccess: async (response) => {
           const registerRemainingMessage = extractRegisterRemainingMessage(response)
-          clientAuthStore.clearAuthState()
-          clientAuthStore.initialized = true
           ElMessage.success('注册成功，请登录')
-          activeMode.value = 'login'
-          loginForm.account = registeredAccount
-          loginForm.password = ''
-          loginForm.captcha = ''
-          successTip.value = registerRemainingMessage
-            ? `账号已创建成功，请使用用户名、手机号或邮箱与密码登录。${registerRemainingMessage}`
-            : '账号已创建成功，请使用用户名、手机号或邮箱与密码登录。'
-          registerForm.captcha = ''
-          registerForm.verificationCode = ''
-          registerForm.username = ''
-          registerForm.staffNo = ''
-          registerForm.password = ''
-          registerForm.confirmPassword = ''
-          registerForm.department = ''
+          resetRegisterStateAfterSuccess(registeredAccount, registerRemainingMessage)
           await refreshCaptcha(true)
           await router.replace({
             path: '/client/login',

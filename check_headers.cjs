@@ -6,12 +6,11 @@ let checklist = fs.readFileSync(checklistPath, 'utf8');
 const lines = checklist.split('\n');
 let updatedLines = [];
 let missingFiles = [];
-
 const uncheckedChecklistItemPattern = /- \[ \] `([^`]+)`/;
 const resourceFilePattern = /\.(png|svg|json|sqlite|sqlite-journal|lock|gitkeep|md)$/i;
 
 for (let line of lines) {
-  const match = line.match(/- \[ \] `([^`]+)`/);
+  const match = uncheckedChecklistItemPattern.exec(line);
   if (match) {
     const filePath = match[1];
     try {
@@ -20,7 +19,7 @@ for (let line of lines) {
         continue;
       }
       
-      const isResource = line.includes('资源文件登记') || filePath.match(/\.(png|svg|json|sqlite|sqlite-journal|lock|gitkeep|md)$/i);
+      const isResource = line.includes('资源文件登记') || resourceFilePattern.exec(filePath);
       
       if (isResource) {
         // Resources don't need headers, mark as checked
