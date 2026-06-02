@@ -42,6 +42,7 @@ import { BizError } from './utils/errors.js'
 
 const UPLOAD_CACHE_CONTROL_VALUE = 'public, max-age=31536000, immutable'
 const UPLOAD_CONTENT_SECURITY_POLICY_VALUE = "default-src 'none'; img-src 'self' data:; style-src 'none'; sandbox"
+const API_JSON_BODY_LIMIT = '64mb'
 
 /**
  * 上传静态资源头部策略：
@@ -129,7 +130,13 @@ export function createApp() {
     }),
   )
 
-  app.use(express.json())
+  /**
+   * JSON 请求体上限：
+   * - 教职工目录“预览后确认导入”会把已识别记录以 JSON 数组再次提交；
+   * - 批量导入上千条记录时，默认 100 KB 容量会被轻易撑爆，导致 body-parser 直接抛 `PayloadTooLargeError`；
+   * - 这里统一放宽到与文件上传场景相同的 8 MB，覆盖系统配置大文本与批量导入确认请求。
+   */
+  app.use(express.json({ limit: API_JSON_BODY_LIMIT }))
 
   app.get('/health', (_req, res) => {
     const activeOverride = maskDatabaseRuntimeOverride(readDatabaseRuntimeOverride())

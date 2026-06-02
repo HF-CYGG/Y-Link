@@ -468,6 +468,51 @@ async function main() {
     assert.equal(englishNamePreviewResult.rows[0]?.realName, 'MATTHEW BRUNGER', '英文姓名预览应保留原始格式')
     pass('英文姓名可通过教职工库导入预览校验')
 
+    const largeImportRows = Array.from({ length: 1200 }, (_, index) => ({
+      realName: '批量教师',
+      staffNo: `L${String(index + 1).padStart(7, '0')}`,
+      departmentName: `批量导入测试部门-${String((index % 12) + 1).padStart(2, '0')}`,
+      status: 'active' as const,
+    }))
+    const largeImportPreviewResult = await expectJsonOkResponse<StaffDirectoryPreviewResult>(
+      await fetch(`${baseUrl}/api/system-configs/client-staff-directory/import/preview`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminLogin.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          rows: largeImportRows,
+        }),
+      }),
+      '预览大批量教职工库导入结果',
+    )
+    assert.equal(largeImportPreviewResult.summary.total, 1200, '大批量导入预览应识别 1200 条记录')
+
+    const largeImportResult = await expectJsonOkResponse<{
+      summary: { created: number; updated: number; skipped: number }
+      list: Array<{ id: string; staffNo: string; realName: string; departmentName: string; status: string }>
+    }>(
+      await fetch(`${baseUrl}/api/system-configs/client-staff-directory/import`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminLogin.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          rows: largeImportPreviewResult.rows.map((item) => ({
+            staffNo: item.staffNo,
+            realName: item.realName,
+            departmentName: item.departmentName,
+            status: item.status,
+          })),
+        }),
+      }),
+      '导入大批量教职工库',
+    )
+    assert.equal(largeImportResult.summary.created, 1200, '大批量导入应创建 1200 条记录')
+    pass('大批量预览后确认导入教职工库应成功')
+
     const departmentConfigAfterImport = await expectJsonOkResponse<{
       tree: Array<{ id?: string; label: string; children?: unknown[] }>
       options: string[]

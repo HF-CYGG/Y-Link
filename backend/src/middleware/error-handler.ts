@@ -56,6 +56,20 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
     return
   }
 
+  if (
+    typeof err === 'object'
+    && err !== null
+    && 'type' in err
+    && err.type === 'entity.too.large'
+  ) {
+    res.status(413).json({
+      code: 413,
+      message: '请求体过大，请减少单次提交的数据量或改用文件导入',
+      data: null,
+    })
+    return
+  }
+
   const mappedDatabaseError = mapDatabaseErrorToBizError(err)
   if (mappedDatabaseError) {
     console.error('[y-link-backend] database error:', err)
