@@ -373,6 +373,73 @@ async function main() {
     assert.equal(xlsxFileImportResult.summary.created, 2, '上传 xlsx 文件导入应创建 2 条记录')
     pass('支持上传 xlsx 文件自动导入教职工库')
 
+    const orderedList = await expectJsonOkResponse<{
+      list: Array<{ id: string; staffNo: string; status: string }>
+      total: number
+    }>(
+      await fetch(`${baseUrl}/api/system-configs/client-staff-directory?page=1&pageSize=20`, {
+        headers: { Authorization: `Bearer ${adminLogin.token}` },
+      }),
+      '按默认顺序查询教职工库',
+    )
+    assert.deepEqual(
+      orderedList.list.slice(0, 8).map((item) => item.staffNo),
+      ['HY1001', 'HY1002', 'HY1003', 'HY1004', 'HY1005', 'HY1006', 'HY1007', 'HY1008'],
+      '教职工库列表默认应按录入正序展示',
+    )
+    pass('教职工库默认按录入正序展示')
+
+    await expectJsonForbidden(
+      () =>
+        fetch(`${baseUrl}/api/system-configs/client-staff-directory`, {
+          method: 'DELETE',
+          headers: {
+            Authorization: `Bearer ${operatorLogin.token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            ids: orderedList.list.slice(1, 3).map((item) => item.id),
+          }),
+        }),
+      '操作员批量删除教职工库',
+    )
+    pass('非管理员无法批量删除教职工库')
+
+    const batchDeleteResult = await expectJsonOkResponse<{
+      summary: { deleted: number; linkedDepartmentAccounts: number }
+    }>(
+      await fetch(`${baseUrl}/api/system-configs/client-staff-directory`, {
+        method: 'DELETE',
+        headers: {
+          Authorization: `Bearer ${adminLogin.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ids: orderedList.list.slice(1, 3).map((item) => item.id),
+        }),
+      }),
+      '批量删除教职工库',
+    )
+    assert.equal(batchDeleteResult.summary.deleted, 2, '批量删除应删除 2 条记录')
+    pass('管理员可批量删除教职工库')
+
+    const listAfterBatchDelete = await expectJsonOkResponse<{
+      list: Array<{ id: string; staffNo: string; status: string }>
+      total: number
+    }>(
+      await fetch(`${baseUrl}/api/system-configs/client-staff-directory?page=1&pageSize=20`, {
+        headers: { Authorization: `Bearer ${adminLogin.token}` },
+      }),
+      '批量删除后查询教职工库',
+    )
+    assert.equal(listAfterBatchDelete.total, 6, '批量删除后总数应减少 2 条')
+    assert.deepEqual(
+      listAfterBatchDelete.list.slice(0, 6).map((item) => item.staffNo),
+      ['HY1001', 'HY1004', 'HY1005', 'HY1006', 'HY1007', 'HY1008'],
+      '批量删除后列表应保持正序并剔除已删除记录',
+    )
+    pass('批量删除后教职工库列表会移除所选记录')
+
     const rareHanNamePreviewResult = await expectJsonOkResponse<StaffDirectoryPreviewResult>(
       await fetch(`${baseUrl}/api/system-configs/client-staff-directory/import/preview`, {
         method: 'POST',

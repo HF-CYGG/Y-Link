@@ -217,6 +217,17 @@ export interface SaveClientStaffDirectoryResult {
   record: ClientStaffDirectoryRecord
 }
 
+export interface DeleteClientStaffDirectoryBatchPayload {
+  ids: string[]
+}
+
+export interface DeleteClientStaffDirectoryBatchResult {
+  summary: {
+    deleted: number
+    linkedDepartmentAccounts: number
+  }
+}
+
 export interface ImportClientStaffDirectoryPayload {
   rows?: SaveClientStaffDirectoryPayload[]
   rawText?: string
@@ -391,6 +402,13 @@ export const updateClientStaffDirectoryStatus = (id: string, status: ClientStaff
     method: 'PATCH',
     url: `/system-configs/client-staff-directory/${id}/status`,
     data: { status },
+  })
+
+export const deleteClientStaffDirectoryBatch = (payload: DeleteClientStaffDirectoryBatchPayload) =>
+  request<DeleteClientStaffDirectoryBatchResult>({
+    method: 'DELETE',
+    url: '/system-configs/client-staff-directory',
+    data: payload,
   })
 
 export const importClientStaffDirectory = (payload: ImportClientStaffDirectoryPayload) =>

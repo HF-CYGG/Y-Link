@@ -7,10 +7,11 @@
 -->
 <script setup lang="ts">
 import dayjs from 'dayjs'
-import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox, type FormInstance, type FormRules, type UploadFile, type UploadInstance } from 'element-plus'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { ElMessage, ElMessageBox, type FormInstance, type FormRules, type TableInstance, type UploadFile, type UploadInstance } from 'element-plus'
 import {
   createClientStaffDirectoryRecord,
+  deleteClientStaffDirectoryBatch,
   getClientStaffDirectoryList,
   importClientStaffDirectory,
   previewClientStaffDirectoryImport,
@@ -34,6 +35,8 @@ type StaffDirectoryDialogMode = 'create' | 'edit'
 const listLoading = ref(false)
 const records = ref<ClientStaffDirectoryRecord[]>([])
 const total = ref(0)
+const tableRef = ref<TableInstance>()
+const selectedRecords = ref<ClientStaffDirectoryRecord[]>([])
 
 const queryForm = reactive<{
   keyword: string
@@ -75,6 +78,10 @@ const STAFF_DIRECTORY_IMPORT_MAX_FILE_SIZE = 8 * 1024 * 1024
 const dialogTitle = computed(() => (dialogMode.value === 'create' ? '新增教职工目录记录' : '编辑教职工目录记录'))
 const actionDisabled = computed(() => props.loading || listLoading.value)
 const hasImportPreview = computed(() => Boolean(importPreviewResult.value?.rows.length))
+const selectedRecordCount = computed(() => selectedRecords.value.length)
+const selectedLinkedDepartmentAccountCount = computed(() => {
+  return selectedRecords.value.reduce((count, item) => count + item.linkedClientUserCount, 0)
+})
 
 const staffNoRule = (_rule: unknown, value: string, callback: (error?: Error) => void) => {
   const normalized = value.trim()
@@ -238,6 +245,9 @@ const loadList = async () => {
     })
     records.value = result.list
     total.value = result.total
+    selectedRecords.value = []
+    await nextTick()
+    tableRef.value?.clearSelection()
   } catch (error) {
     ElMessage.error(extractErrorMessage(error, '加载教职工目录失败，请稍后重试'))
   } finally {
@@ -333,6 +343,47 @@ const handleToggleStatus = async (record: ClientStaffDirectoryRecord) => {
   }
 }
 
+const handleSelectionChange = (value: ClientStaffDirectoryRecord[]) => {
+  selectedRecords.value = value
+}
+
+const handleBatchDelete = async () => {
+  if (!props.canUpdateConfigs || selectedRecords.value.length === 0) {
+    return
+  }
+  const selectedIds = selectedRecords.value.map((item) => item.id)
+  const linkedDepartmentAccountCount = selectedLinkedDepartmentAccountCount.value
+  const linkedDepartmentAccountText = linkedDepartmentAccountCount > 0
+    ? `，其中会影响 ${linkedDepartmentAccountCount} 个已关联部门账号的工号校验状态`
+    : ''
+
+  try {
+    await ElMessageBox.confirm(
+      `确认批量删除已选中的 ${selectedIds.length} 条教职工目录记录吗？${linkedDepartmentAccountText}`,
+      '批量删除确认',
+      {
+        type: 'warning',
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+      },
+    )
+    const result = await deleteClientStaffDirectoryBatch({ ids: selectedIds })
+    const linkedDepartmentAccountSummary = result.summary.linkedDepartmentAccounts > 0
+      ? `，同步回收 ${result.summary.linkedDepartmentAccounts} 个部门账号的工号校验`
+      : ''
+    ElMessage.success(`已删除 ${result.summary.deleted} 条教职工目录记录${linkedDepartmentAccountSummary}`)
+    if (records.value.length === selectedIds.length && queryForm.page > 1) {
+      queryForm.page -= 1
+    }
+    void loadList()
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') {
+      return
+    }
+    ElMessage.error(extractErrorMessage(error, '批量删除教职工目录记录失败'))
+  }
+}
+
 const handleSubmitImport = async () => {
   if (!props.canUpdateConfigs) {
     return
@@ -388,8 +439,19 @@ onMounted(() => {
         <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
           用于部门账号注册时校验工号，并自动回填实名与所属部门。目录变更会同步影响已绑定的部门账号校验状态。
         </p>
+        <p class="mt-1 text-xs text-slate-400 dark:text-slate-500">
+          已关联部门账号数：指当前已注册并使用该工号的部门账户数量。
+        </p>
       </div>
       <div class="flex flex-wrap items-center gap-2">
+        <el-button
+          type="danger"
+          plain
+          :disabled="actionDisabled || !canUpdateConfigs || selectedRecordCount === 0"
+          @click="handleBatchDelete"
+        >
+          批量删除<span v-if="selectedRecordCount > 0">（{{ selectedRecordCount }}）</span>
+        </el-button>
         <el-button :disabled="actionDisabled || !canUpdateConfigs" @click="importVisible = true">批量导入</el-button>
         <el-button type="primary" :disabled="actionDisabled || !canUpdateConfigs" @click="handleOpenCreate">新增记录</el-button>
       </div>
@@ -422,14 +484,18 @@ onMounted(() => {
     />
 
     <el-table
+      ref="tableRef"
       class="mt-4"
       :data="records"
+      row-key="id"
       border
       stripe
       table-layout="auto"
       v-loading="listLoading"
       empty-text="暂无教职工目录数据"
+      @selection-change="handleSelectionChange"
     >
+      <el-table-column v-if="canUpdateConfigs" type="selection" width="52" align="center" />
       <el-table-column prop="staffNo" label="教职工号" min-width="140" />
       <el-table-column prop="realName" label="真实姓名" min-width="120" />
       <el-table-column prop="departmentName" label="所属部门" min-width="180" show-overflow-tooltip />
@@ -438,7 +504,18 @@ onMounted(() => {
           <el-tag :type="getStatusTagType(row.status)" effect="light">{{ getStatusLabel(row.status) }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="已绑定部门账号" width="130" align="center">
+      <el-table-column width="150" align="center">
+        <template #header>
+          <div class="flex items-center justify-center gap-1">
+            <span>已关联部门账号数</span>
+            <el-tooltip
+              content="指当前已注册并使用该工号的部门账户数量。若停用或删除该记录，这些部门账户会失去工号校验通过状态。"
+              placement="top"
+            >
+              <span class="cursor-help text-slate-400">?</span>
+            </el-tooltip>
+          </div>
+        </template>
         <template #default="{ row }">{{ row.linkedClientUserCount }}</template>
       </el-table-column>
       <el-table-column label="更新时间" min-width="170">

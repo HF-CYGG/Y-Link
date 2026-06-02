@@ -17,7 +17,7 @@ import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
-import type { EntityManager, Repository } from 'typeorm'
+import { In, type EntityManager, type Repository } from 'typeorm'
 import {
   systemConfigService,
   type EnsureClientDepartmentOptionsResult,
@@ -56,6 +56,10 @@ export interface UpdateClientStaffDirectoryInput {
 
 export interface UpdateClientStaffDirectoryStatusInput {
   status: ClientStaffDirectoryStatus
+}
+
+export interface DeleteClientStaffDirectoryBatchInput {
+  ids: Array<string | number>
 }
 
 export interface ImportClientStaffDirectoryRowInput {
@@ -704,8 +708,8 @@ export class ClientStaffDirectoryService {
     }
 
     const [list, total] = await qb
-      .orderBy('directory.updatedAt', 'DESC')
-      .addOrderBy('directory.id', 'DESC')
+      .orderBy('directory.createdAt', 'ASC')
+      .addOrderBy('directory.id', 'ASC')
       .skip((query.page - 1) * query.pageSize)
       .take(query.pageSize)
       .getManyAndCount()
@@ -859,6 +863,62 @@ export class ClientStaffDirectoryService {
         manager,
       )
       return { record: await this.buildRecord(saved, manager) }
+    })
+  }
+
+  async deleteBatch(
+    input: DeleteClientStaffDirectoryBatchInput,
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ): Promise<{ summary: { deleted: number; linkedDepartmentAccounts: number } }> {
+    const normalizedIds = [...new Set(input.ids.map((item) => String(item).trim()).filter(Boolean))]
+    if (normalizedIds.length === 0) {
+      throw new BizError('请先选择要删除的教职工目录记录', 400)
+    }
+
+    return AppDataSource.transaction(async (manager) => {
+      const repo = manager.getRepository(ClientStaffDirectory)
+      const records = await repo.find({
+        where: {
+          id: In(normalizedIds),
+        },
+      })
+      if (records.length !== normalizedIds.length) {
+        throw new BizError('部分教职工目录记录不存在，请刷新后重试', 404)
+      }
+
+      const staffNos = records.map((item) => item.staffNo)
+      const linkedCountMap = await this.countLinkedUsers(manager, staffNos)
+      const linkedDepartmentAccounts = staffNos.reduce((count, staffNo) => {
+        return count + (linkedCountMap.get(staffNo) ?? 0)
+      }, 0)
+
+      await this.syncLinkedUsersForImport(manager, [], staffNos)
+      await repo.delete(normalizedIds)
+      await auditService.record(
+        {
+          actionType: 'client_staff_directory.batch_delete',
+          actionLabel: '批量删除教职工目录记录',
+          targetType: 'client_staff_directory',
+          targetCode: 'batch_delete',
+          actor,
+          requestMeta,
+          detail: {
+            deletedCount: records.length,
+            linkedDepartmentAccounts,
+            ids: records.map((item) => item.id),
+            staffNos,
+          },
+        },
+        manager,
+      )
+
+      return {
+        summary: {
+          deleted: records.length,
+          linkedDepartmentAccounts,
+        },
+      }
     })
   }
 

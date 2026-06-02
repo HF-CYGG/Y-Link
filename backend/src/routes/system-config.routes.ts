@@ -141,6 +141,10 @@ const updateClientStaffDirectoryStatusSchema = z.object({
   status: clientStaffDirectoryStatusSchema,
 })
 
+const deleteClientStaffDirectoryBatchSchema = z.object({
+  ids: z.array(z.union([z.string().trim().min(1).max(64), z.number().int().positive()])).min(1).max(500),
+})
+
 const importClientStaffDirectorySchema = z
   .object({
     rows: z.array(clientStaffDirectoryRecordSchema).max(5000).optional(),
@@ -419,6 +423,22 @@ systemConfigRouter.patch(
       authReq.auth,
       extractRequestMeta(req),
     )
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+systemConfigRouter.delete(
+  '/client-staff-directory',
+  requirePermission('system_configs:update'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = deleteClientStaffDirectoryBatchSchema.parse(req.body)
+    const data = await clientStaffDirectoryService.deleteBatch(payload, authReq.auth, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',
