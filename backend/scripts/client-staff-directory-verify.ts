@@ -391,6 +391,82 @@ async function main() {
     assert.equal(rareHanNamePreviewResult.rows[0]?.realName, '𠮷文', '扩展汉字姓名预览应保留原始姓名')
     pass('扩展汉字姓名可通过教职工库导入预览校验')
 
+    const hiddenCharNamePreviewResult = await expectJsonOkResponse<StaffDirectoryPreviewResult>(
+      await fetch(`${baseUrl}/api/system-configs/client-staff-directory/import/preview`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminLogin.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          rows: [
+            { staffNo: 'HY1011', realName: '李\u200b文喜', departmentName: '校长办公室' },
+          ],
+        }),
+      }),
+      '预览包含零宽字符姓名的教职工库导入结果',
+    )
+    assert.equal(hiddenCharNamePreviewResult.summary.total, 1, '零宽字符姓名预览应识别 1 条记录')
+    assert.equal(hiddenCharNamePreviewResult.rows[0]?.realName, '李文喜', '零宽字符姓名预览应自动清洗为标准姓名')
+    pass('零宽字符姓名可通过教职工库导入预览校验')
+
+    const separatorVariantNamePreviewResult = await expectJsonOkResponse<StaffDirectoryPreviewResult>(
+      await fetch(`${baseUrl}/api/system-configs/client-staff-directory/import/preview`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminLogin.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          rows: [
+            { staffNo: 'HY1012', realName: '阿依努尔•买买提', departmentName: '校长办公室' },
+          ],
+        }),
+      }),
+      '预览包含分隔点变体姓名的教职工库导入结果',
+    )
+    assert.equal(separatorVariantNamePreviewResult.summary.total, 1, '分隔点变体姓名预览应识别 1 条记录')
+    assert.equal(separatorVariantNamePreviewResult.rows[0]?.realName, '阿依努尔·买买提', '分隔点变体姓名预览应统一归一为标准中点')
+    pass('分隔点变体姓名可通过教职工库导入预览校验')
+
+    const annotatedNamePreviewResult = await expectJsonOkResponse<StaffDirectoryPreviewResult>(
+      await fetch(`${baseUrl}/api/system-configs/client-staff-directory/import/preview`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminLogin.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          rows: [
+            { staffNo: 'HY1013', realName: '张伟（资）', departmentName: '资产管理处' },
+          ],
+        }),
+      }),
+      '预览包含括注姓名的教职工库导入结果',
+    )
+    assert.equal(annotatedNamePreviewResult.summary.total, 1, '括注姓名预览应识别 1 条记录')
+    assert.equal(annotatedNamePreviewResult.rows[0]?.realName, '张伟(资)', '括注姓名预览应统一归一为半角括号')
+    pass('括注姓名可通过教职工库导入预览校验')
+
+    const englishNamePreviewResult = await expectJsonOkResponse<StaffDirectoryPreviewResult>(
+      await fetch(`${baseUrl}/api/system-configs/client-staff-directory/import/preview`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminLogin.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          rows: [
+            { staffNo: 'HY1014', realName: 'MATTHEW BRUNGER', departmentName: '国际教育学院' },
+          ],
+        }),
+      }),
+      '预览包含英文姓名的教职工库导入结果',
+    )
+    assert.equal(englishNamePreviewResult.summary.total, 1, '英文姓名预览应识别 1 条记录')
+    assert.equal(englishNamePreviewResult.rows[0]?.realName, 'MATTHEW BRUNGER', '英文姓名预览应保留原始格式')
+    pass('英文姓名可通过教职工库导入预览校验')
+
     const departmentConfigAfterImport = await expectJsonOkResponse<{
       tree: Array<{ id?: string; label: string; children?: unknown[] }>
       options: string[]

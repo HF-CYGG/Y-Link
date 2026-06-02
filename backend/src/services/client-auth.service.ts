@@ -145,6 +145,9 @@ class ClientAuthService {
   private readonly clientStaffDirectoryRepo = AppDataSource.getRepository(ClientStaffDirectory)
   private readonly staffNoPattern = /^[A-Za-z0-9-]{4,32}$/
   private readonly realNamePattern = /^[\p{Script=Han}][\p{Script=Han}· ]{1,19}$/u
+  private readonly invisibleNameCharsPattern = /[\u200B-\u200D\u2060\uFEFF]/g
+  private readonly controlNameCharsPattern = /[\u0000-\u001F\u007F-\u009F]/g
+  private readonly normalizableNameSeparatorPattern = /[•・･‧∙⋅·﹒]/g
 
   private async getVerificationCapabilities(): Promise<ClientAuthCapabilities> {
     const [configs, departmentConfigs] = await Promise.all([
@@ -276,7 +279,14 @@ class ClientAuthService {
   }
 
   private assertRealName(value: string): string {
-    const normalized = value.trim()
+    const normalized = value
+      .normalize('NFKC')
+      .replace(this.invisibleNameCharsPattern, '')
+      .replace(this.controlNameCharsPattern, '')
+      .replace(/\u3000/g, ' ')
+      .replace(this.normalizableNameSeparatorPattern, '·')
+      .trim()
+      .replaceAll(/\s+/g, ' ')
     if (!this.realNamePattern.test(normalized)) {
       throw new BizError('用户名必须为2-20位中文真实姓名，可包含空格或·', 400)
     }

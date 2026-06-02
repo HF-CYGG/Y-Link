@@ -107,7 +107,10 @@ type NormalizedImportRow = {
 }
 
 const STAFF_NO_PATTERN = /^[A-Za-z0-9-]{4,32}$/
-const REAL_NAME_PATTERN = /^[\p{Script=Han}][\p{Script=Han}·\s]{1,19}$/u
+const STAFF_DIRECTORY_NAME_PATTERN = /^[\p{Script=Han}A-Za-z][\p{Script=Han}A-Za-z·\s()'’-]{1,39}$/u
+const INVISIBLE_NAME_CHARS_PATTERN = /[\u200B-\u200D\u2060\uFEFF]/g
+const CONTROL_NAME_CHARS_PATTERN = /[\u0000-\u001F\u007F-\u009F]/g
+const NORMALIZABLE_NAME_SEPARATOR_PATTERN = /[•・･‧∙⋅·﹒]/g
 const STAFF_DIRECTORY_HEADER_KEYWORDS = {
   realName: new Set(['姓名', '真实姓名']),
   staffNo: new Set(['工号', '教职工号', '职工号']),
@@ -146,9 +149,16 @@ export class ClientStaffDirectoryService {
   }
 
   private normalizeRealName(value: string): string {
-    const normalized = value.trim().replaceAll(/\s+/g, ' ')
-    if (!REAL_NAME_PATTERN.test(normalized)) {
-      throw new BizError('姓名必须为2-20位中文真实姓名，可包含空格或·', 400)
+    const normalized = value
+      .normalize('NFKC')
+      .replace(INVISIBLE_NAME_CHARS_PATTERN, '')
+      .replace(CONTROL_NAME_CHARS_PATTERN, '')
+      .replace(/\u3000/g, ' ')
+      .replace(NORMALIZABLE_NAME_SEPARATOR_PATTERN, '·')
+      .trim()
+      .replaceAll(/\s+/g, ' ')
+    if (!STAFF_DIRECTORY_NAME_PATTERN.test(normalized)) {
+      throw new BizError('姓名长度需为2-40位，支持中文、英文、空格、·、括号和短横线', 400)
     }
     return normalized
   }
@@ -404,18 +414,25 @@ export class ClientStaffDirectoryService {
 
     const duplicateStaffNos = new Set<string>()
     const seenStaffNos = new Set<string>()
-    const normalizedRows: NormalizedImportRow[] = rows.map((row) => {
-      const normalizedRow: NormalizedImportRow = {
-        staffNo: this.normalizeStaffNo(row.staffNo),
-        realName: this.normalizeRealName(row.realName),
-        departmentName: this.normalizeDepartmentName(row.departmentName),
-        status: this.normalizeStatus(row.status),
+    const normalizedRows: NormalizedImportRow[] = rows.map((row, index) => {
+      try {
+        const normalizedRow: NormalizedImportRow = {
+          staffNo: this.normalizeStaffNo(row.staffNo),
+          realName: this.normalizeRealName(row.realName),
+          departmentName: this.normalizeDepartmentName(row.departmentName),
+          status: this.normalizeStatus(row.status),
+        }
+        if (seenStaffNos.has(normalizedRow.staffNo)) {
+          duplicateStaffNos.add(normalizedRow.staffNo)
+        }
+        seenStaffNos.add(normalizedRow.staffNo)
+        return normalizedRow
+      } catch (error) {
+        if (error instanceof BizError) {
+          throw new BizError(`第 ${index + 1} 条导入记录校验失败：${error.message}`, error.statusCode)
+        }
+        throw error
       }
-      if (seenStaffNos.has(normalizedRow.staffNo)) {
-        duplicateStaffNos.add(normalizedRow.staffNo)
-      }
-      seenStaffNos.add(normalizedRow.staffNo)
-      return normalizedRow
     })
 
     if (duplicateStaffNos.size > 0) {

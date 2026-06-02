@@ -90,13 +90,20 @@ const staffNoRule = (_rule: unknown, value: string, callback: (error?: Error) =>
 }
 
 const realNameRule = (_rule: unknown, value: string, callback: (error?: Error) => void) => {
-  const normalized = value.trim().replaceAll(/\s+/g, ' ')
+  const normalized = value
+    .normalize('NFKC')
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+    .replace(/[\u0000-\u001F\u007F-\u009F]/g, '')
+    .replace(/\u3000/g, ' ')
+    .replace(/[•・･‧∙⋅·﹒]/g, '·')
+    .trim()
+    .replaceAll(/\s+/g, ' ')
   if (!normalized) {
     callback(new Error('请输入真实姓名'))
     return
   }
-  if (!/^[\p{Script=Han}][\p{Script=Han}·\s]{1,19}$/u.test(normalized)) {
-    callback(new Error('姓名必须为2-20位中文，可包含空格或·'))
+  if (!/^[\p{Script=Han}A-Za-z][\p{Script=Han}A-Za-z·\s()'’-]{1,39}$/u.test(normalized)) {
+    callback(new Error('姓名长度需为2-40位，支持中文、英文、空格、·、括号和短横线'))
     return
   }
   callback()
