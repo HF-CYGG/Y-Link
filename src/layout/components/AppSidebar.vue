@@ -262,7 +262,6 @@ const deviceLabel = computed(() => {
             :href="APP_META.repositoryUrl"
             target="_blank"
             rel="noopener noreferrer"
-            aria-label="GitHub 仓库"
           >
             <svg class="app-sidebar__repo-icon" aria-hidden="true">
               <use href="/icons.svg#github-icon"></use>

@@ -306,6 +306,120 @@ class ClientAuthService {
     }
   }
 
+  private verifyRegisterChallenge(
+    input: ClientRegisterInput,
+    validationMode: ClientValidationMode,
+    account: ReturnType<ClientAuthService['resolveAccount']>,
+  ) {
+    if (validationMode === 'verification_code') {
+      this.verifyCodeIfRequired(
+        input,
+        {
+          channel: account.channel,
+          target: account.account,
+          scene: 'register',
+        },
+        `请输入${account.channel === 'email' ? '邮箱' : '手机'}验证码`,
+      )
+      return
+    }
+    this.verifyCaptchaIfRequired(input)
+  }
+
+  private async assertRegisterIdentifiersAvailable(
+    account: ReturnType<ClientAuthService['resolveAccount']>,
+    username: ReturnType<typeof normalizeClientUsername>,
+  ) {
+    const existedByAccount = await this.findUserByAnyIdentifier({
+      channel: account.channel,
+      rawValue: account.account,
+      normalizedValue: account.account,
+    })
+    if (existedByAccount) {
+      throw new BizError('该手机号或邮箱已被占用', 409)
+    }
+
+    const existedByUsername = await this.findUserByAnyIdentifier({
+      channel: 'username',
+      rawValue: username.value,
+      normalizedValue: username.normalizedValue,
+    })
+    if (existedByUsername) {
+      throw new BizError('该用户名已被占用', 409)
+    }
+  }
+
+  private async resolveDepartmentRegistrationProfile(
+    accountType: ClientUserAccountType,
+    input: ClientRegisterInput,
+    username: ReturnType<typeof normalizeClientUsername>,
+  ): Promise<{
+    usernameValue: string
+    departmentName: string | null
+    staffNo: string | null
+    staffVerified: boolean
+  }> {
+    let departmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName)
+    if (accountType !== 'department') {
+      return {
+        usernameValue: username.value,
+        departmentName,
+        staffNo: null,
+        staffVerified: false,
+      }
+    }
+
+    const staffNo = this.normalizeStaffNo(input.staffNo)
+    const existedByStaffNo = await this.userRepo.findOne({
+      where: { staffNo },
+      select: ['id'],
+    })
+    if (existedByStaffNo) {
+      throw new BizError('该教职工号已绑定其他账号', 409)
+    }
+
+    const activeDirectoryCount = await this.clientStaffDirectoryRepo.count({
+      where: { status: 'active' },
+    })
+    if (activeDirectoryCount <= 0) {
+      if (!departmentName) {
+        throw new BizError('部门账户在目录未导入时，必须手动选择所属部门', 400)
+      }
+      return {
+        usernameValue: username.value,
+        departmentName,
+        staffNo,
+        staffVerified: false,
+      }
+    }
+
+    const matchedStaff = await this.clientStaffDirectoryRepo.findOne({
+      where: { staffNo, status: 'active' },
+    })
+    if (!matchedStaff) {
+      throw new BizError('教职工号未在学校目录中登记，请联系管理员核验', 409)
+    }
+
+    const usernameValue = this.assertRealName(matchedStaff.realName)
+    departmentName = await systemConfigService.assertClientDepartmentOption(matchedStaff.departmentName)
+    return {
+      usernameValue,
+      departmentName,
+      staffNo,
+      staffVerified: true,
+    }
+  }
+
+  private resolveRegisterVerificationChannel(
+    validationMode: ClientValidationMode,
+    accountChannel: 'mobile' | 'email',
+  ): ClientAuthSessionResult['verificationChannel'] {
+    if (validationMode !== 'verification_code') {
+      return 'captcha'
+    }
+    return accountChannel === 'mobile' ? 'sms' : 'email'
+  }
+
   private resolveLoginAccount(account: string) {
     return normalizeClientAccount(account, {
       allowUsername: true,
@@ -352,85 +466,22 @@ class ClientAuthService {
     const password = assertClientPasswordPolicy(input.password)
     const capabilities = await this.getVerificationCapabilities()
     const validationMode = capabilities.registerValidationModes[account.channel]
-
-    if (validationMode === 'verification_code') {
-      this.verifyCodeIfRequired(
-        input,
-        {
-          channel: account.channel,
-          target: account.account,
-          scene: 'register',
-        },
-        `请输入${account.channel === 'email' ? '邮箱' : '手机'}验证码`,
-      )
-    } else {
-      this.verifyCaptchaIfRequired(input)
-    }
-
-    const existedByAccount = await this.findUserByAnyIdentifier({
-      channel: account.channel,
-      rawValue: account.account,
-      normalizedValue: account.account,
-    })
-    if (existedByAccount) {
-      throw new BizError('该手机号或邮箱已被占用', 409)
-    }
-    const existedByUsername = await this.findUserByAnyIdentifier({
-      channel: 'username',
-      rawValue: username.value,
-      normalizedValue: username.normalizedValue,
-    })
-    if (existedByUsername) {
-      throw new BizError('该用户名已被占用', 409)
-    }
+    this.verifyRegisterChallenge(input, validationMode, account)
+    await this.assertRegisterIdentifiersAvailable(account, username)
     await authSecurityService.guardClientRegisterAccountRequest(_requestMeta, account.account)
-    let departmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName)
-    let staffNo: string | null = null
-    let staffVerified = false
-
-    if (accountType === 'department') {
-      staffNo = this.normalizeStaffNo(input.staffNo)
-      const existedByStaffNo = await this.userRepo.findOne({
-        where: { staffNo },
-        select: ['id'],
-      })
-      if (existedByStaffNo) {
-        throw new BizError('该教职工号已绑定其他账号', 409)
-      }
-
-      const activeDirectoryCount = await this.clientStaffDirectoryRepo.count({
-        where: { status: 'active' },
-      })
-      if (activeDirectoryCount > 0) {
-        const matchedStaff = await this.clientStaffDirectoryRepo.findOne({
-          where: { staffNo, status: 'active' },
-        })
-        if (!matchedStaff) {
-          throw new BizError('教职工号未在学校目录中登记，请联系管理员核验', 409)
-        }
-        username.value = this.assertRealName(matchedStaff.realName)
-        username.normalizedValue = username.value.toLowerCase()
-        departmentName = await systemConfigService.assertClientDepartmentOption(matchedStaff.departmentName)
-        staffVerified = true
-      } else if (!departmentName) {
-        throw new BizError('部门账户在目录未导入时，必须手动选择所属部门', 400)
-      }
-    } else {
-      staffNo = null
-      staffVerified = false
-    }
+    const registerProfile = await this.resolveDepartmentRegistrationProfile(accountType, input, username)
 
     const user = await this.userRepo.save(
       this.userRepo.create({
-        mobile: account.mobile,
-        email: account.email,
+        mobile: account.mobile ?? undefined,
+        email: account.email ?? undefined,
         passwordHash: await hashPassword(password),
         // 当前账号体系下，用户名与登录账号分离，支持用户自定义用户名。
-        realName: username.value,
-        departmentName,
+        realName: registerProfile.usernameValue,
+        departmentName: registerProfile.departmentName ?? undefined,
         accountType,
-        staffNo,
-        staffVerified,
+        staffNo: registerProfile.staffNo ?? undefined,
+        staffVerified: registerProfile.staffVerified,
         status: 'enabled',
       }),
     )
@@ -439,9 +490,7 @@ class ClientAuthService {
       token: session.token,
       expiresAt: session.expiresAt,
       user: this.toClientProfile(user),
-      verificationChannel: validationMode === 'verification_code'
-        ? (account.channel === 'mobile' ? 'sms' : 'email')
-        : 'captcha',
+      verificationChannel: this.resolveRegisterVerificationChannel(validationMode, account.channel),
     } satisfies ClientAuthSessionResult
   }
 

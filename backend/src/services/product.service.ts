@@ -193,8 +193,10 @@ export class ProductService {
 
     qb.orderBy('p.id', 'DESC')
 
-    if (Number.isFinite(query.page) && Number.isFinite(query.pageSize) && (query.page ?? 0) > 0 && (query.pageSize ?? 0) > 0) {
-      qb.skip(((query.page as number) - 1) * (query.pageSize as number)).take(query.pageSize as number)
+    const page = query.page ?? 0
+    const pageSize = query.pageSize ?? 0
+    if (Number.isFinite(page) && Number.isFinite(pageSize) && page > 0 && pageSize > 0) {
+      qb.skip((page - 1) * pageSize).take(pageSize)
     }
 
     const products = await qb.getMany()

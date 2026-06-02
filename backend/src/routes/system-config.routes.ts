@@ -100,6 +100,17 @@ const normalizeClientDepartmentTreePayload = (
   }))
 }
 
+const readSingleQueryValue = (value: unknown): string | undefined => {
+  if (typeof value === 'string') {
+    return value
+  }
+  if (Array.isArray(value)) {
+    const firstString = value.find((item) => typeof item === 'string')
+    return typeof firstString === 'string' ? firstString : undefined
+  }
+  return undefined
+}
+
 const testVerificationProviderSchema = z.object({
   channel: z.enum(['mobile', 'email']),
   target: z.string().trim().min(1).max(200),
@@ -315,13 +326,14 @@ systemConfigRouter.get(
   requirePermission('system_configs:view'),
   requireRole('admin'),
   asyncHandler(async (req, res) => {
-    const page = Number.parseInt(String(req.query.page ?? '1'), 10)
-    const pageSize = Number.parseInt(String(req.query.pageSize ?? '20'), 10)
-    const statusInput = String(req.query.status ?? '').trim()
+    const page = Number.parseInt(readSingleQueryValue(req.query.page) ?? '1', 10)
+    const pageSize = Number.parseInt(readSingleQueryValue(req.query.pageSize) ?? '20', 10)
+    const statusInput = (readSingleQueryValue(req.query.status) ?? '').trim()
+    const keywordInput = (readSingleQueryValue(req.query.keyword) ?? '').trim()
     const data = await clientStaffDirectoryService.list({
       page: Number.isFinite(page) && page > 0 ? page : 1,
       pageSize: Number.isFinite(pageSize) && pageSize > 0 ? Math.min(pageSize, 100) : 20,
-      keyword: String(req.query.keyword ?? '').trim() || undefined,
+      keyword: keywordInput || undefined,
       status: statusInput ? clientStaffDirectoryStatusSchema.parse(statusInput) : undefined,
     })
     res.json({

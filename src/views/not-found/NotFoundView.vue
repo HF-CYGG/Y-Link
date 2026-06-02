@@ -24,8 +24,8 @@ const authStore = useAuthStore(pinia)
  * - 404 场景下统一回到工作台；
  * - 使用 replace 避免无效路径继续留在历史栈中。
  */
-const goHome = () => {
-  void router.replace(resolveDefaultManagementRedirect(authStore.currentUser))
+const goHome = async () => {
+  await router.replace(resolveDefaultManagementRedirect(authStore.currentUser))
 }
 </script>
 

@@ -988,7 +988,7 @@ class O2oPreorderService {
     // 历史库与不同驱动下 order_id 参数类型可能出现 number/string 混用，
     // 这里做双口径兼容查询，避免订单详情“总件数存在但明细为空”。
     let items = await this.preorderItemRepo.find({
-      where: { orderId: order.id as unknown as string },
+      where: { orderId: String(order.id) },
       relations: { product: true },
     })
     if (!items.length) {
