@@ -1281,12 +1281,21 @@ class O2oPreorderService {
 
   async listMallProducts() {
     // 商城端只暴露“可售且已上架”的商品，并把库存口径统一换算成前端直接可用的 availableStock。
+    // 同时把允许对客户端公开的门店展示配置一并返回，避免客户端误调后台系统配置接口。
+    const o2oRules = await systemConfigService.getO2oRuleConfigs()
     const products = await this.productRepo.find({
       where: { isActive: true, o2oStatus: 'listed' },
       order: { id: 'DESC' },
     })
 
-    if (!products.length) return []
+    if (!products.length) {
+      return {
+        list: [],
+        storefront: {
+          businessHoursText: o2oRules.storeBusinessHoursText,
+        },
+      }
+    }
 
     const productIds = products.map((p) => String(p.id))
     const relations = await AppDataSource.manager.getRepository(RelProductTag).find({
@@ -1304,19 +1313,24 @@ class O2oPreorderService {
       productTagMap.set(productId, currentTags)
     })
 
-    return products.map((item) => ({
-      id: String(item.id),
-      productCode: item.productCode,
-      productName: item.productName,
-      defaultPrice: item.defaultPrice,
-      tags: productTagMap.get(String(item.id)) ?? [],
-      thumbnail: item.thumbnail,
-      detailContent: item.detailContent,
-      limitPerUser: Number(item.limitPerUser ?? 5),
-      currentStock: Number(item.currentStock ?? 0),
-      preOrderedStock: Number(item.preOrderedStock ?? 0),
-      availableStock: Math.max(0, Number(item.currentStock ?? 0) - Number(item.preOrderedStock ?? 0)),
-    }))
+    return {
+      list: products.map((item) => ({
+        id: String(item.id),
+        productCode: item.productCode,
+        productName: item.productName,
+        defaultPrice: item.defaultPrice,
+        tags: productTagMap.get(String(item.id)) ?? [],
+        thumbnail: item.thumbnail,
+        detailContent: item.detailContent,
+        limitPerUser: Number(item.limitPerUser ?? 5),
+        currentStock: Number(item.currentStock ?? 0),
+        preOrderedStock: Number(item.preOrderedStock ?? 0),
+        availableStock: Math.max(0, Number(item.currentStock ?? 0) - Number(item.preOrderedStock ?? 0)),
+      })),
+      storefront: {
+        businessHoursText: o2oRules.storeBusinessHoursText,
+      },
+    }
   }
 
   private async generatePreorderShowNo(

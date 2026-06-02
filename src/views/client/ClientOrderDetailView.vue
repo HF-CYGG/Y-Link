@@ -763,7 +763,7 @@ const loadMallProducts = async () => {
   }
   editProductsLoading.value = true
   try {
-    mallProducts.value = await getO2oMallProducts()
+    mallProducts.value = (await getO2oMallProducts()).list
     if (detail.value) {
       editOrderItems.value = buildEditableItemsFromDetail(detail.value, editOrderItems.value)
     }

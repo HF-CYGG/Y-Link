@@ -33,6 +33,7 @@ const updateO2oRuleConfigsSchema = z.object({
   limitEnabled: z.boolean(),
   limitQty: z.number().int().min(1).max(999),
   clientPreorderUpdateLimit: z.number().int().min(1).max(999).optional(),
+  storeBusinessHoursText: z.string().trim().min(1).max(100),
 })
 
 const verificationProviderChannelSchema = z.object({

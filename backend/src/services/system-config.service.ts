@@ -90,6 +90,12 @@ const DEFAULT_SYSTEM_CONFIGS = [
     remark: '客户端单笔预订单最大可修改次数',
   },
   {
+    configKey: 'o2o.store_business_hours_text',
+    configValue: '10:00 - 22:00',
+    configGroup: 'o2o',
+    remark: '客户端商城展示的店铺营业时间文案',
+  },
+  {
     configKey: 'verification.mobile.enabled',
     configValue: '0',
     configGroup: 'verification',
@@ -296,6 +302,7 @@ export interface O2oRuleConfigRecord {
   limitEnabled: boolean
   limitQty: number
   clientPreorderUpdateLimit: number
+  storeBusinessHoursText: string
   updatedAt: Date
 }
 
@@ -305,6 +312,7 @@ export interface UpdateO2oRuleConfigsInput {
   limitEnabled: boolean
   limitQty: number
   clientPreorderUpdateLimit?: number
+  storeBusinessHoursText: string
 }
 
 export type VerificationChannelType = 'mobile' | 'email'
@@ -404,6 +412,7 @@ class SystemConfigService {
     'o2o.limit_enabled',
     'o2o.limit_qty',
     'o2o.client_preorder_update_limit',
+    'o2o.store_business_hours_text',
   ] as const
   private readonly clientDepartmentConfigKey = 'client.department.options'
   private readonly verificationConfigKeys = [
@@ -1222,6 +1231,10 @@ class SystemConfigService {
       getRequiredConfigValue('o2o.client_preorder_update_limit'),
       'o2o.client_preorder_update_limit',
     )
+    const storeBusinessHoursText = getRequiredConfigValue('o2o.store_business_hours_text').trim()
+    if (!storeBusinessHoursText) {
+      throw new BizError('线上预订配置缺失：o2o.store_business_hours_text', 500)
+    }
     const updatedAt = rows.map((row) => row.updatedAt).sort((a, b) => b.getTime() - a.getTime())[0]
 
     return {
@@ -1230,6 +1243,7 @@ class SystemConfigService {
       limitEnabled,
       limitQty,
       clientPreorderUpdateLimit,
+      storeBusinessHoursText,
       updatedAt,
     }
   }
@@ -1256,6 +1270,13 @@ class SystemConfigService {
     ) {
       throw new BizError('客户端改单次数上限必须为 1 到 999 的整数', 400)
     }
+    const storeBusinessHoursText = input.storeBusinessHoursText.trim()
+    if (!storeBusinessHoursText) {
+      throw new BizError('店铺营业时间不能为空', 400)
+    }
+    if (storeBusinessHoursText.length > 100) {
+      throw new BizError('店铺营业时间长度不能超过 100 个字符', 400)
+    }
 
     await this.ensureDefaultConfigs()
     return AppDataSource.transaction(async (manager) => {
@@ -1280,6 +1301,7 @@ class SystemConfigService {
         ['o2o.auto_cancel_hours', String(input.autoCancelHours)],
         ['o2o.limit_enabled', input.limitEnabled ? '1' : '0'],
         ['o2o.limit_qty', String(input.limitQty)],
+        ['o2o.store_business_hours_text', storeBusinessHoursText],
       ])
       if (input.clientPreorderUpdateLimit !== undefined) {
         targetMap.set('o2o.client_preorder_update_limit', String(input.clientPreorderUpdateLimit))

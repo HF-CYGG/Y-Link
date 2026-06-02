@@ -42,6 +42,25 @@ export interface O2oMallProduct {
   availableStock: number
 }
 
+/**
+ * 商城门店展示配置：
+ * - 当前先承载面向客户端公开的营业时间文案；
+ * - 后续若要继续透出门店公告、提货说明等公开信息，可继续在这里扩展。
+ */
+export interface O2oMallStorefrontConfig {
+  businessHoursText: string
+}
+
+/**
+ * 商城商品列表接口返回值：
+ * - `list` 继续承载商品目录；
+ * - `storefront` 负责承载客户端允许公开消费的门店展示配置。
+ */
+export interface O2oMallProductsResult {
+  list: O2oMallProduct[]
+  storefront: O2oMallStorefrontConfig
+}
+
 export interface O2oPreorderSummary {
   statusReport: O2oOrderStatusReport
   totalAmount?: string
@@ -268,7 +287,7 @@ export const resolveO2oDisplayShowNo = (
 }
 
 export const getO2oMallProducts = (config?: RequestConfig) =>
-  request<O2oMallProduct[]>({
+  request<O2oMallProductsResult>({
     method: 'GET',
     url: '/o2o/mall/products',
     ...config,

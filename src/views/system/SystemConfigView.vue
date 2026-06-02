@@ -1,10 +1,10 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/system/SystemConfigView.vue
- * 文件职责：负责维护订单流水、线上预订规则、验证码平台与客户端部门树等系统级配置，并统一承接高风险配置的保存与测试操作。
+ * 文件职责：负责维护订单流水、线上预订规则、客服中心时间、验证码平台与客户端部门树等系统级配置，并统一承接高风险配置的保存与测试操作。
  * 实现逻辑：
  * - 首屏优先并行加载“订单流水 + 线上预订规则”，保证核心配置尽快可见；
- * - 验证码配置与部门配置继续后台补齐，并按分区维护各自的加载态与错误态；
+ * - 客服中心、验证码配置与部门配置继续后台补齐，并按分区维护各自的加载态与错误态；
  * - 当前激活分区只受自身加载状态约束，避免某个低优先级分区未完成时把整页表单都锁成“看得见但点不动”；
  * - 保存时继续串行提交四类配置，避免 SQLite 单连接场景下并发事务冲突。
  * 维护说明：
@@ -27,16 +27,19 @@ import {
 } from '@/api/modules/notification'
 import {
   getClientDepartmentConfigs,
+  getCustomerServiceConfigs,
   getO2oRuleConfigs,
   getOrderSerialConfigs,
   getVerificationProviderConfigs,
   testVerificationProviderSend,
   updateClientDepartmentConfigs,
+  updateCustomerServiceConfigs,
   updateO2oRuleConfigs,
   updateOrderSerialConfigs,
   updateVerificationProviderConfigs,
   type ClientDepartmentConfigRecord,
   type ClientDepartmentTreeNode,
+  type CustomerServiceConfigRecord,
   type O2oRuleConfigRecord,
   type OrderSerialConfigRecord,
   type VerificationProviderConfigsResult,
@@ -45,6 +48,7 @@ import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
 import SystemConfigDepartmentSection from '@/views/system/components/SystemConfigDepartmentSection.vue'
+import SystemConfigCustomerServiceSection from '@/views/system/components/SystemConfigCustomerServiceSection.vue'
 import SystemConfigO2oRulesSection from '@/views/system/components/SystemConfigO2oRulesSection.vue'
 import SystemConfigNotificationSection from '@/views/system/components/SystemConfigNotificationSection.vue'
 import SystemConfigSerialSection from '@/views/system/components/SystemConfigSerialSection.vue'
@@ -71,7 +75,13 @@ type VerificationFormValue = {
   successMatch: string
 }
 
-type ConfigSectionKey = 'order_serial' | 'o2o_rules' | 'verification' | 'department' | 'notification'
+type ConfigSectionKey =
+  | 'order_serial'
+  | 'o2o_rules'
+  | 'customer_service'
+  | 'verification'
+  | 'department'
+  | 'notification'
 type DepartmentTreeNode = ClientDepartmentTreeNode
 
 const { hasPermission, ensurePermission } = usePermissionAction()
@@ -85,6 +95,7 @@ const activeSection = ref<ConfigSectionKey>('order_serial')
 const selectedDepartmentNodeId = ref('')
 const configMap = ref<Record<'department' | 'walkin', OrderSerialConfigRecord> | null>(null)
 const o2oRuleConfig = ref<O2oRuleConfigRecord | null>(null)
+const customerServiceConfig = ref<CustomerServiceConfigRecord | null>(null)
 const verificationConfigMap = ref<VerificationProviderConfigsResult | null>(null)
 const clientDepartmentConfig = ref<ClientDepartmentConfigRecord | null>(null)
 const notificationRules = ref<NotificationRuleRecord[]>([])
@@ -96,6 +107,7 @@ const deferredSectionRequest = useStableRequest()
 const sectionLoadingState = reactive<Record<ConfigSectionKey, boolean>>({
   order_serial: true,
   o2o_rules: true,
+  customer_service: true,
   verification: true,
   department: true,
   notification: true,
@@ -103,6 +115,7 @@ const sectionLoadingState = reactive<Record<ConfigSectionKey, boolean>>({
 const sectionErrorState = reactive<Record<ConfigSectionKey, string>>({
   order_serial: '',
   o2o_rules: '',
+  customer_service: '',
   verification: '',
   department: '',
   notification: '',
@@ -111,6 +124,7 @@ const sectionErrorState = reactive<Record<ConfigSectionKey, string>>({
 const sectionOptions: Array<{ key: ConfigSectionKey; label: string }> = [
   { key: 'order_serial', label: '订单流水' },
   { key: 'o2o_rules', label: '线上预定' },
+  { key: 'customer_service', label: '客服中心' },
   { key: 'verification', label: '验证码配置' },
   { key: 'department', label: '部门配置' },
   { key: 'notification', label: '通知中心' },
@@ -129,6 +143,12 @@ const serialForm = reactive<{
     limitEnabled: boolean
     limitQty: number
     clientPreorderUpdateLimit: number
+    storeBusinessHoursText: string
+  }
+  customerService: {
+    workdayStart: string
+    workdayEnd: string
+    workdayWeekdays: number[]
   }
   verification: {
     mobile: VerificationFormValue
@@ -153,6 +173,12 @@ const serialForm = reactive<{
     limitQty: 5,
     // 客户端改单次数上限默认值，与后端默认配置保持一致，避免页面首屏空值。
     clientPreorderUpdateLimit: 3,
+    storeBusinessHoursText: '10:00 - 22:00',
+  },
+  customerService: {
+    workdayStart: '10:00',
+    workdayEnd: '20:00',
+    workdayWeekdays: [0, 1, 2, 3, 4, 5, 6],
   },
   verification: {
     mobile: {
@@ -180,13 +206,22 @@ const canViewConfigs = computed(() => hasPermission('system_configs:view'))
 const canUpdateConfigs = computed(() => hasPermission('system_configs:update'))
 const canTestVerificationProviders = computed(() => hasPermission('verification_providers:test'))
 const canViewMigrationAssistant = computed(() => hasPermission('db_migration:view'))
-const hasPendingDeferredSections = computed(() => sectionLoadingState.verification || sectionLoadingState.department || sectionLoadingState.notification)
-const hasDeferredSectionFailure = computed(() => Boolean(sectionErrorState.verification || sectionErrorState.department || sectionErrorState.notification))
+const hasPendingDeferredSections = computed(() => {
+  return sectionLoadingState.customer_service || sectionLoadingState.verification || sectionLoadingState.department || sectionLoadingState.notification
+})
+const hasDeferredSectionFailure = computed(() => {
+  return Boolean(
+    sectionErrorState.customer_service
+    || sectionErrorState.verification
+    || sectionErrorState.department
+    || sectionErrorState.notification,
+  )
+})
 const formInteractionLoading = computed(() => loading.value || hasPendingDeferredSections.value)
 const managementUsers = computed(() => notificationPresence.value?.users ?? [])
 const deferredSectionStatusText = computed(() => {
   if (hasPendingDeferredSections.value) {
-    return '系统配置主内容已就绪，验证码、部门与通知中心配置正在继续加载，加载完成前暂不可编辑或保存。'
+    return '系统配置主内容已就绪，客服中心、验证码、部门与通知中心配置正在继续加载，加载完成前暂不可编辑或保存。'
   }
 
   const failedSections = sectionOptions
@@ -354,6 +389,12 @@ const snapshotForm = () =>
       limitEnabled: Boolean(serialForm.o2o.limitEnabled),
       limitQty: Number(serialForm.o2o.limitQty),
       clientPreorderUpdateLimit: Number(serialForm.o2o.clientPreorderUpdateLimit),
+      storeBusinessHoursText: serialForm.o2o.storeBusinessHoursText.trim(),
+    },
+    customerService: {
+      workdayStart: serialForm.customerService.workdayStart,
+      workdayEnd: serialForm.customerService.workdayEnd,
+      workdayWeekdays: [...serialForm.customerService.workdayWeekdays].sort((prev, next) => prev - next),
     },
     verification: {
       mobile: {
@@ -427,6 +468,14 @@ const applyO2oRules = (config: O2oRuleConfigRecord) => {
   serialForm.o2o.limitEnabled = config.limitEnabled
   serialForm.o2o.limitQty = config.limitQty
   serialForm.o2o.clientPreorderUpdateLimit = config.clientPreorderUpdateLimit
+  serialForm.o2o.storeBusinessHoursText = config.storeBusinessHoursText
+}
+
+const applyCustomerServiceConfigs = (config: CustomerServiceConfigRecord) => {
+  customerServiceConfig.value = config
+  serialForm.customerService.workdayStart = config.workdayStart
+  serialForm.customerService.workdayEnd = config.workdayEnd
+  serialForm.customerService.workdayWeekdays = [...config.workdayWeekdays]
 }
 
 const applyVerificationConfigs = (config: VerificationProviderConfigsResult) => {
@@ -524,6 +573,26 @@ const validateVerificationConfigs = () => {
       ElMessage.warning(`${label}请求头模板必须是合法 JSON`)
       return false
     }
+  }
+  return true
+}
+
+const validateCustomerServiceConfigs = () => {
+  if (!customerServiceConfig.value) {
+    ElMessage.warning('客服中心配置尚未加载完成，暂不可保存')
+    return false
+  }
+  if (!serialForm.customerService.workdayStart || !serialForm.customerService.workdayEnd) {
+    ElMessage.warning('请补齐客服开始时间和结束时间')
+    return false
+  }
+  if (!/^\d{2}:\d{2}$/.test(serialForm.customerService.workdayStart) || !/^\d{2}:\d{2}$/.test(serialForm.customerService.workdayEnd)) {
+    ElMessage.warning('客服在线时间格式必须为 HH:mm')
+    return false
+  }
+  if (!serialForm.customerService.workdayWeekdays.length) {
+    ElMessage.warning('请至少选择一个客服在线星期')
+    return false
   }
   return true
 }
@@ -771,6 +840,7 @@ const loadData = async () => {
     loading.value = false
     sectionLoadingState.order_serial = false
     sectionLoadingState.o2o_rules = false
+    sectionLoadingState.customer_service = false
     sectionLoadingState.verification = false
     sectionLoadingState.department = false
     sectionLoadingState.notification = false
@@ -781,11 +851,13 @@ const loadData = async () => {
   loading.value = true
   sectionErrorState.order_serial = ''
   sectionErrorState.o2o_rules = ''
+  sectionErrorState.customer_service = ''
   sectionErrorState.verification = ''
   sectionErrorState.department = ''
   sectionErrorState.notification = ''
   sectionLoadingState.order_serial = true
   sectionLoadingState.o2o_rules = true
+  sectionLoadingState.customer_service = true
   sectionLoadingState.verification = true
   sectionLoadingState.department = true
   sectionLoadingState.notification = true
@@ -793,7 +865,7 @@ const loadData = async () => {
     executor: async () => {
       // 首屏分层加载策略：
       // - 订单流水与线上预定规则属于系统配置首页最先需要看到的核心信息；
-      // - 验证码配置与部门配置继续在后台补齐，避免首次进入时同时叠加过多接口与重分区渲染。
+      // - 客服中心、验证码配置与部门配置继续在后台补齐，避免首次进入时同时叠加过多接口与重分区渲染。
       const [orderSerialResult, o2oRuleResult] = await Promise.allSettled([
         getOrderSerialConfigs(),
         getO2oRuleConfigs(),
@@ -823,6 +895,7 @@ const loadData = async () => {
 
       if (successCount === 0) {
         loadError.value = '系统配置加载失败，请刷新重试或检查后端服务状态'
+        sectionLoadingState.customer_service = false
         sectionLoadingState.verification = false
         sectionLoadingState.department = false
         sectionLoadingState.notification = false
@@ -835,13 +908,21 @@ const loadData = async () => {
       deferredSectionRequest
         .runLatest({
         executor: async () => {
-          const [verificationResult, clientDepartmentResult, notificationRulesResult, notificationPresenceResult] = await Promise.allSettled([
+          const [
+            customerServiceResult,
+            verificationResult,
+            clientDepartmentResult,
+            notificationRulesResult,
+            notificationPresenceResult,
+          ] = await Promise.allSettled([
+            getCustomerServiceConfigs(),
             getVerificationProviderConfigs(),
             getClientDepartmentConfigs(),
             getNotificationRules(),
             getNotificationPresenceSnapshot(),
           ])
           return {
+            customerServiceResult,
             verificationResult,
             clientDepartmentResult,
             notificationRulesResult,
@@ -849,6 +930,12 @@ const loadData = async () => {
           }
         },
         onSuccess: (deferredResult) => {
+          if (deferredResult.customerServiceResult.status === 'fulfilled') {
+            applyCustomerServiceConfigs(deferredResult.customerServiceResult.value)
+          } else {
+            sectionErrorState.customer_service = '客服中心配置加载失败'
+          }
+
           if (deferredResult.verificationResult.status === 'fulfilled') {
             applyVerificationConfigs(deferredResult.verificationResult.value)
           } else {
@@ -873,18 +960,25 @@ const loadData = async () => {
             sectionErrorState.notification = sectionErrorState.notification || '在线状态快照加载失败'
           }
 
-          if (sectionErrorState.verification || sectionErrorState.department || sectionErrorState.notification) {
+          if (
+            sectionErrorState.customer_service
+            || sectionErrorState.verification
+            || sectionErrorState.department
+            || sectionErrorState.notification
+          ) {
             ElMessage.warning('部分次级配置仍在加载失败，已保留当前可用内容')
           }
         },
         onError: (error) => {
-          const message = extractErrorMessage(error, '继续加载验证码、部门与通知配置失败')
+          const message = extractErrorMessage(error, '继续加载客服中心、验证码、部门与通知配置失败')
+          sectionErrorState.customer_service = sectionErrorState.customer_service || message
           sectionErrorState.verification = sectionErrorState.verification || message
           sectionErrorState.department = sectionErrorState.department || message
           sectionErrorState.notification = sectionErrorState.notification || message
           ElMessage.warning(message)
         },
         onFinally: () => {
+          sectionLoadingState.customer_service = false
           sectionLoadingState.verification = false
           sectionLoadingState.department = false
           sectionLoadingState.notification = false
@@ -923,6 +1017,9 @@ const handleSubmit = async () => {
   if (!validateVerificationConfigs()) {
     return
   }
+  if (!validateCustomerServiceConfigs()) {
+    return
+  }
   if (!validateNotificationRules()) {
     return
   }
@@ -937,6 +1034,11 @@ const handleSubmit = async () => {
 
   saving.value = true
   try {
+    const currentCustomerServiceConfig = customerServiceConfig.value
+    if (!currentCustomerServiceConfig) {
+      ElMessage.warning('客服中心配置尚未加载完成，暂不可保存')
+      return
+    }
     // SQLite 单连接下并发写事务会互相冲突，这里改为串行提交，避免 “cannot start a transaction within a transaction”。
     const result = await updateOrderSerialConfigs({
       department: {
@@ -956,6 +1058,18 @@ const handleSubmit = async () => {
       limitEnabled: serialForm.o2o.limitEnabled,
       limitQty: Number(serialForm.o2o.limitQty),
       clientPreorderUpdateLimit: Number(serialForm.o2o.clientPreorderUpdateLimit),
+      storeBusinessHoursText: serialForm.o2o.storeBusinessHoursText.trim(),
+    })
+    const customerServiceResult = await updateCustomerServiceConfigs({
+      enabled: currentCustomerServiceConfig.enabled,
+      realtimeEnabled: currentCustomerServiceConfig.realtimeEnabled,
+      entryNotice: currentCustomerServiceConfig.entryNotice,
+      workdayStart: serialForm.customerService.workdayStart,
+      workdayEnd: serialForm.customerService.workdayEnd,
+      workdayWeekdays: [...serialForm.customerService.workdayWeekdays].sort((prev, next) => prev - next),
+      offlineNotice: currentCustomerServiceConfig.offlineNotice,
+      offlineFaqs: currentCustomerServiceConfig.offlineFaqs,
+      sseKeepaliveSeconds: currentCustomerServiceConfig.sseKeepaliveSeconds,
     })
     const verificationResult = await updateVerificationProviderConfigs({
       mobile: {
@@ -998,13 +1112,21 @@ const handleSubmit = async () => {
 
     applyList(result.list)
     applyO2oRules(o2oResult.config)
+    applyCustomerServiceConfigs(customerServiceResult.config)
     applyVerificationConfigs(verificationResult.config)
     applyClientDepartmentConfigs(departmentResult.config)
     applyNotificationRules(notificationResult.list)
     await refreshNotificationPresenceSnapshot()
     initialSnapshot.value = snapshotForm()
     ElMessage.success(
-      result.changed || o2oResult.changed || verificationResult.changed || departmentResult.changed || notificationResult.changed ? '系统配置已保存' : '配置未变更',
+      result.changed
+      || o2oResult.changed
+      || customerServiceResult.changed
+      || verificationResult.changed
+      || departmentResult.changed
+      || notificationResult.changed
+        ? '系统配置已保存'
+        : '配置未变更',
     )
   } catch (error) {
     ElMessage.error(extractErrorMessage(error, '保存系统配置失败，请稍后重试'))
@@ -1029,6 +1151,14 @@ const o2oUpdatedAtLabel = computed(() => {
   return dayjs(value).format('YYYY-MM-DD HH:mm:ss')
 })
 
+const customerServiceUpdatedAtLabel = computed(() => {
+  const value = customerServiceConfig.value?.updatedAt
+  if (!value) {
+    return '-'
+  }
+  return dayjs(value).format('YYYY-MM-DD HH:mm:ss')
+})
+
 const getVerificationUpdatedAtLabel = (channel: 'mobile' | 'email') => {
   const value = verificationConfigMap.value?.[channel]?.updatedAt
   if (!value) {
@@ -1043,7 +1173,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <PageContainer title="系统配置" description="维护流水号、线上预订规则与短信/邮箱验证码平台参数，所有变更会记录审计日志。">
+  <PageContainer title="系统配置" description="维护流水号、线上预订规则、客服在线时间与短信/邮箱验证码平台参数，所有变更会记录审计日志。">
     <div class="space-y-6">
       <PageToolbarCard class="space-y-3" :stack-actions-on-tablet="true">
         <div class="flex flex-wrap items-center justify-between gap-3">
@@ -1136,6 +1266,16 @@ onMounted(() => {
                 :can-update-configs="canUpdateConfigs"
                 :loading="activeSectionInteractionLoading"
                 :o2o-updated-at-label="o2oUpdatedAtLabel"
+              />
+            </transition>
+
+            <transition name="workbench-horizontal-slide">
+              <SystemConfigCustomerServiceSection
+                v-if="activeSection === 'customer_service'"
+                :customer-service-form="serialForm.customerService"
+                :can-update-configs="canUpdateConfigs"
+                :loading="activeSectionInteractionLoading"
+                :customer-service-updated-at-label="customerServiceUpdatedAtLabel"
               />
             </transition>
 

@@ -98,6 +98,7 @@ clientCartStore.initialize(clientAuthStore.currentUser?.id)
 clientCatalogStore.initialize(clientAuthStore.currentUser?.id)
 
 const products = computed(() => clientCatalogStore.products)
+const storeBusinessHoursText = computed(() => clientCatalogStore.storefront.businessHoursText || '10:00 - 22:00')
 const normalizedKeyword = computed(() => keyword.value.trim().toLowerCase())
 const hasKeyword = computed(() => normalizedKeyword.value.length > 0)
 const hasRenderableProducts = computed(() => products.value.length > 0)
@@ -309,8 +310,8 @@ const loadProducts = async (force = false) => {
       // 1. 目录 Store 负责商品列表、分类与搜索上下文；
       // 2. 购物车 Store 负责把已选商品映射到最新库存/限购规则。
       clientCatalogStore.setProducts(result)
-      clientCartStore.syncWithCatalog(result)
-      warmupProductImages(result)
+      clientCartStore.syncWithCatalog(result.list)
+      warmupProductImages(result.list)
       const activeExists = categoryOptions.value.some((option) => option.key === activeCategoryKey.value)
       if (!activeExists) {
         activeCategoryKey.value = 'all'
@@ -794,7 +795,7 @@ onBeforeUnmount(() => {
         </button>
       </div>
       <div v-if="!isPhone" class="mall-hero-card__meta-grid mt-4 grid gap-3 sm:grid-cols-3">
-        <div class="mall-hero-card__meta-item rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700">营业时间：10:00 - 22:00</div>
+        <div class="mall-hero-card__meta-item rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700">营业时间：{{ storeBusinessHoursText }}</div>
         <div class="mall-hero-card__meta-item rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700">提货须知：请在订单有效期内到店核销</div>
         <div class="mall-hero-card__meta-item mall-hero-card__meta-item--notice rounded-2xl bg-amber-50 px-3 py-3 text-sm text-amber-700">公告：库存实时刷新，请以下单结果为准</div>
       </div>

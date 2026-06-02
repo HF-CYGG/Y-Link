@@ -44,6 +44,7 @@ export interface O2oRuleConfigRecord {
   limitEnabled: boolean
   limitQty: number
   clientPreorderUpdateLimit: number
+  storeBusinessHoursText: string
   updatedAt: string
 }
 
@@ -53,6 +54,7 @@ export interface UpdateO2oRuleConfigsPayload {
   limitEnabled: boolean
   limitQty: number
   clientPreorderUpdateLimit: number
+  storeBusinessHoursText: string
 }
 
 export interface UpdateO2oRuleConfigsResult {
@@ -91,6 +93,55 @@ export interface UpdateVerificationProviderConfigsPayload {
 
 export interface UpdateVerificationProviderConfigsResult {
   config: VerificationProviderConfigsResult
+  changed: boolean
+}
+
+export interface CustomerServiceFaqRecord {
+  question: string
+  answer: string
+}
+
+export interface CustomerServiceAvailabilityRecord {
+  status: 'online' | 'offline'
+  reason: 'within_work_hours' | 'outside_work_hours' | 'no_online_staff'
+  isOnline: boolean
+  withinWorkHours: boolean
+  hasOnlineStaff: boolean
+  serviceConnectedCount: number
+  serverTime: string
+  workHoursText: string
+  offlineNotice: string
+  offlineFaqs: CustomerServiceFaqRecord[]
+}
+
+export interface CustomerServiceConfigRecord {
+  enabled: boolean
+  realtimeEnabled: boolean
+  entryNotice: string
+  workdayStart: string
+  workdayEnd: string
+  workdayWeekdays: number[]
+  offlineNotice: string
+  offlineFaqs: CustomerServiceFaqRecord[]
+  sseKeepaliveSeconds: number
+  availability: CustomerServiceAvailabilityRecord
+  updatedAt: string
+}
+
+export interface UpdateCustomerServiceConfigsPayload {
+  enabled: boolean
+  realtimeEnabled: boolean
+  entryNotice: string
+  workdayStart: string
+  workdayEnd: string
+  workdayWeekdays: number[]
+  offlineNotice: string
+  offlineFaqs: CustomerServiceFaqRecord[]
+  sseKeepaliveSeconds: number
+}
+
+export interface UpdateCustomerServiceConfigsResult {
+  config: CustomerServiceConfigRecord
   changed: boolean
 }
 
@@ -218,6 +269,27 @@ export const updateO2oRuleConfigs = (payload: UpdateO2oRuleConfigsPayload) =>
   request<UpdateO2oRuleConfigsResult>({
     method: 'PUT',
     url: '/system-configs/o2o-rules',
+    data: payload,
+  })
+
+/**
+ * 获取客服中心配置：
+ * - 当前管理端系统配置页只修改其中一部分字段，但保存时仍沿用完整配置结构。
+ */
+export const getCustomerServiceConfigs = () =>
+  request<CustomerServiceConfigRecord>({
+    method: 'GET',
+    url: '/system-configs/customer-service',
+  })
+
+/**
+ * 保存客服中心配置：
+ * - 包括客服在线时间、入口提示语、离线提示与 FAQ 等共享口径。
+ */
+export const updateCustomerServiceConfigs = (payload: UpdateCustomerServiceConfigsPayload) =>
+  request<UpdateCustomerServiceConfigsResult>({
+    method: 'PUT',
+    url: '/system-configs/customer-service',
     data: payload,
   })
 
