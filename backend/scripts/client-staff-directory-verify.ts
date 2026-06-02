@@ -178,6 +178,18 @@ async function main() {
     )
     pass('非管理员无法访问教职工库配置接口')
 
+    const initialDepartmentConfig = await expectJsonOkResponse<{
+      tree: Array<{ id?: string; label: string; children?: unknown[] }>
+      options: string[]
+    }>(
+      await fetch(`${baseUrl}/api/system-configs/client-departments`, {
+        headers: { Authorization: `Bearer ${adminLogin.token}` },
+      }),
+      '读取初始客户端部门配置',
+    )
+    assert.deepEqual(initialDepartmentConfig.options, [], '初始客户端部门选项应为空')
+    pass('初始客户端部门配置为空')
+
     const importResult = await expectJsonOkResponse<{
       summary: { created: number; updated: number; skipped: number }
       list: Array<{ id: string; staffNo: string; realName: string; departmentName: string; status: string }>
@@ -200,6 +212,38 @@ async function main() {
     assert.equal(importResult.summary.created, 2, '首次导入应创建 2 条记录')
     assert.equal(importResult.list.length, 2, '导入后应返回最新列表')
     pass('管理员可批量导入教职工库')
+
+    const rawTextImportResult = await expectJsonOkResponse<{
+      summary: { created: number; updated: number; skipped: number }
+      list: Array<{ id: string; staffNo: string; realName: string; departmentName: string; status: string }>
+    }>(
+      await fetch(`${baseUrl}/api/system-configs/client-staff-directory/import`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminLogin.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          rawText: ['王老师\tHY1003\t智能制造中心', '赵老师\tHY1004\t智能制造中心'].join('\n'),
+        }),
+      }),
+      '按姓名工号部门顺序导入教职工库',
+    )
+    assert.equal(rawTextImportResult.summary.created, 2, '姓名、工号、部门顺序导入应创建 2 条记录')
+    pass('支持按姓名、工号、部门顺序导入教职工库')
+
+    const departmentConfigAfterImport = await expectJsonOkResponse<{
+      tree: Array<{ id?: string; label: string; children?: unknown[] }>
+      options: string[]
+    }>(
+      await fetch(`${baseUrl}/api/system-configs/client-departments`, {
+        headers: { Authorization: `Bearer ${adminLogin.token}` },
+      }),
+      '读取导入后的客户端部门配置',
+    )
+    assert.ok(departmentConfigAfterImport.options.includes('海右书院'), '导入后应自动补齐海右书院部门')
+    assert.ok(departmentConfigAfterImport.options.includes('智能制造中心'), '导入后应自动补齐智能制造中心部门')
+    pass('导入教职工库时会自动补齐缺失部门配置')
 
     const importedRecord = importResult.list.find((item) => item.staffNo === 'HY1001')
     assert.ok(importedRecord, '应能找到 HY1001 记录')

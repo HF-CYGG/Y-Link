@@ -1,3 +1,10 @@
+/**
+ * 文件说明：维护客户端教职工工号目录，负责单条维护、批量导入以及与部门配置、部门账号实名信息之间的联动同步。
+ * 实现逻辑：
+ * 1. 统一校验工号、姓名和部门字段，保证部门账号注册时可按工号库稳定回填实名与所属部门；
+ * 2. 批量导入时会先批量匹配现有工号，再按需自动补齐客户端部门配置，避免逐行查库造成的大批量导入性能抖动；
+ * 3. 目录状态变化后会批量同步已绑定的部门账号实名校验状态，保证历史账号数据与目录口径一致。
+ */
 import { AppDataSource } from '../config/data-source.js'
 import {
   CLIENT_STAFF_DIRECTORY_STATUSES,
@@ -10,6 +17,7 @@ import { BizError } from '../utils/errors.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
 import type { EntityManager } from 'typeorm'
+import { systemConfigService } from './system-config.service.js'
 
 export interface ClientStaffDirectoryListQuery {
   page: number
@@ -216,7 +224,18 @@ export class ClientStaffDirectoryService {
       const columns = line.includes('\t')
         ? line.split('\t')
         : line.split(/[，,]/)
-      const [staffNo = '', realName = '', departmentName = '', status = 'active'] = columns.map((item) => item.trim())
+      const [firstColumn = '', secondColumn = '', departmentName = '', status = 'active'] = columns.map((item) => item.trim())
+      let staffNo = ''
+      let realName = ''
+      if (STAFF_NO_PATTERN.test(firstColumn) && !STAFF_NO_PATTERN.test(secondColumn)) {
+        staffNo = firstColumn
+        realName = secondColumn
+      } else if (STAFF_NO_PATTERN.test(secondColumn) && !STAFF_NO_PATTERN.test(firstColumn)) {
+        realName = firstColumn
+        staffNo = secondColumn
+      } else {
+        throw new BizError(`第 ${index + 1} 行格式不正确，请按“姓名、工号、部门”或“工号、姓名、部门”顺序填写`, 400)
+      }
       if (!staffNo || !realName || !departmentName) {
         throw new BizError(`第 ${index + 1} 行缺少教职工号、姓名或部门`, 400)
       }
@@ -263,6 +282,71 @@ export class ClientStaffDirectoryService {
     })
     if (existing && existing.id !== excludeId) {
       throw new BizError(`教职工号 ${staffNo} 已存在`, 409)
+    }
+  }
+
+  private async loadExistingByStaffNos(manager: EntityManager, staffNos: string[]) {
+    const normalizedStaffNos = [...new Set(staffNos.map((item) => item.trim()).filter(Boolean))]
+    if (normalizedStaffNos.length === 0) {
+      return new Map<string, ClientStaffDirectory>()
+    }
+    const list = await manager
+      .getRepository(ClientStaffDirectory)
+      .createQueryBuilder('directory')
+      .where('directory.staffNo IN (:...staffNos)', { staffNos: normalizedStaffNos })
+      .getMany()
+    return new Map(list.map((item) => [item.staffNo, item]))
+  }
+
+  private async syncLinkedUsersForImport(
+    manager: EntityManager,
+    activeRows: NormalizedImportRow[],
+    inactiveStaffNos: string[],
+  ) {
+    const userRepo = manager.getRepository(ClientUser)
+    const normalizedInactiveStaffNos = [...new Set(inactiveStaffNos.map((item) => item.trim()).filter(Boolean))]
+    const normalizedActiveRows = activeRows.filter((item, index, list) => {
+      return item.staffNo.trim() && list.findIndex((candidate) => candidate.staffNo === item.staffNo) === index
+    })
+
+    if (normalizedInactiveStaffNos.length > 0) {
+      await userRepo
+        .createQueryBuilder()
+        .update(ClientUser)
+        .set({ staffVerified: false })
+        .where('accountType = :accountType', { accountType: 'department' })
+        .andWhere('staffNo IN (:...staffNos)', { staffNos: normalizedInactiveStaffNos })
+        .execute()
+    }
+
+    const chunkSize = 200
+    for (let index = 0; index < normalizedActiveRows.length; index += chunkSize) {
+      const chunk = normalizedActiveRows.slice(index, index + chunkSize)
+      const staffNoPlaceholders = chunk.map(() => '?').join(', ')
+      const realNameCases = chunk.map(() => 'WHEN ? THEN ?').join(' ')
+      const departmentCases = chunk.map(() => 'WHEN ? THEN ?').join(' ')
+      const realNameParams = chunk.flatMap((item) => [item.staffNo, item.realName])
+      const departmentParams = chunk.flatMap((item) => [item.staffNo, item.departmentName])
+      const staffNoParams = chunk.map((item) => item.staffNo)
+
+      await manager.query(
+        `
+          UPDATE client_user
+          SET
+            real_name = CASE staff_no ${realNameCases} ELSE real_name END,
+            department_name = CASE staff_no ${departmentCases} ELSE department_name END,
+            staff_verified = ?
+          WHERE account_type = ?
+            AND staff_no IN (${staffNoPlaceholders})
+        `,
+        [
+          ...realNameParams,
+          ...departmentParams,
+          true,
+          'department',
+          ...staffNoParams,
+        ],
+      )
     }
   }
 
@@ -313,10 +397,12 @@ export class ClientStaffDirectoryService {
   ): Promise<{ record: ClientStaffDirectoryRecord }> {
     const staffNo = this.normalizeStaffNo(input.staffNo)
     const realName = this.normalizeRealName(input.realName)
-    const departmentName = this.normalizeDepartmentName(input.departmentName)
     const status = this.normalizeStatus(input.status)
 
     return AppDataSource.transaction(async (manager) => {
+      const departmentResult = await systemConfigService.ensureClientDepartmentOptions([input.departmentName], actor, requestMeta, manager)
+      const departmentName = departmentResult.resolvedDepartmentMap.get(this.normalizeDepartmentName(input.departmentName))
+        ?? this.normalizeDepartmentName(input.departmentName)
       await this.assertUniqueStaffNo(manager, staffNo)
       const repo = manager.getRepository(ClientStaffDirectory)
       const entity = repo.create({
@@ -357,9 +443,11 @@ export class ClientStaffDirectoryService {
   ): Promise<{ record: ClientStaffDirectoryRecord }> {
     const staffNo = this.normalizeStaffNo(input.staffNo)
     const realName = this.normalizeRealName(input.realName)
-    const departmentName = this.normalizeDepartmentName(input.departmentName)
 
     return AppDataSource.transaction(async (manager) => {
+      const departmentResult = await systemConfigService.ensureClientDepartmentOptions([input.departmentName], actor, requestMeta, manager)
+      const departmentName = departmentResult.resolvedDepartmentMap.get(this.normalizeDepartmentName(input.departmentName))
+        ?? this.normalizeDepartmentName(input.departmentName)
       const repo = manager.getRepository(ClientStaffDirectory)
       const record = await repo.findOne({ where: { id } })
       if (!record) {
@@ -450,27 +538,47 @@ export class ClientStaffDirectoryService {
     actor: AuthUserContext,
     requestMeta?: RequestMeta,
   ): Promise<{
-    summary: { created: number; updated: number; skipped: number }
+    summary: { created: number; updated: number; skipped: number; autoCreatedDepartments: string[] }
     list: ClientStaffDirectoryRecord[]
   }> {
     const rows = this.normalizeImportRows(input)
     return AppDataSource.transaction(async (manager) => {
       const repo = manager.getRepository(ClientStaffDirectory)
+      const departmentResult = await systemConfigService.ensureClientDepartmentOptions(
+        rows.map((item) => item.departmentName),
+        actor,
+        requestMeta,
+        manager,
+      )
+      const resolvedRows = rows.map((row) => ({
+        ...row,
+        departmentName: departmentResult.resolvedDepartmentMap.get(row.departmentName) ?? row.departmentName,
+      }))
+      const existingMap = await this.loadExistingByStaffNos(manager, resolvedRows.map((item) => item.staffNo))
       const summary = {
         created: 0,
         updated: 0,
         skipped: 0,
+        autoCreatedDepartments: departmentResult.createdDepartments,
       }
       const changedStaffNos = new Set<string>()
+      const activeRowsForUserSync: NormalizedImportRow[] = []
+      const inactiveStaffNosForUserSync: string[] = []
+      const recordsToCreate: ClientStaffDirectory[] = []
+      const recordsToUpdate: ClientStaffDirectory[] = []
 
-      for (const row of rows) {
-        const existing = await repo.findOne({ where: { staffNo: row.staffNo } })
+      for (const row of resolvedRows) {
+        const existing = existingMap.get(row.staffNo)
         if (!existing) {
           const created = repo.create(row)
-          const saved = await repo.save(created)
-          await this.syncLinkedUsers(manager, null, this.toSnapshot(saved))
+          recordsToCreate.push(created)
           summary.created += 1
-          changedStaffNos.add(saved.staffNo)
+          changedStaffNos.add(row.staffNo)
+          if (row.status === 'active') {
+            activeRowsForUserSync.push(row)
+          } else {
+            inactiveStaffNosForUserSync.push(row.staffNo)
+          }
           continue
         }
 
@@ -486,10 +594,25 @@ export class ClientStaffDirectoryService {
         existing.realName = row.realName
         existing.departmentName = row.departmentName
         existing.status = row.status
-        const saved = await repo.save(existing)
-        await this.syncLinkedUsers(manager, before, this.toSnapshot(saved))
+        recordsToUpdate.push(existing)
         summary.updated += 1
-        changedStaffNos.add(saved.staffNo)
+        changedStaffNos.add(row.staffNo)
+        if (before.status === 'active' && row.status !== 'active') {
+          inactiveStaffNosForUserSync.push(row.staffNo)
+        }
+        if (row.status === 'active') {
+          activeRowsForUserSync.push(row)
+        }
+      }
+
+      if (recordsToCreate.length > 0) {
+        await repo.save(recordsToCreate, { chunk: 200 })
+      }
+      if (recordsToUpdate.length > 0) {
+        await repo.save(recordsToUpdate, { chunk: 200 })
+      }
+      if (activeRowsForUserSync.length > 0 || inactiveStaffNosForUserSync.length > 0) {
+        await this.syncLinkedUsersForImport(manager, activeRowsForUserSync, inactiveStaffNosForUserSync)
       }
 
       const directoryList = await repo.find({
@@ -511,8 +634,8 @@ export class ClientStaffDirectoryService {
           requestMeta,
           detail: {
             summary,
-            importedCount: rows.length,
-            staffNos: rows.map((item) => item.staffNo),
+            importedCount: resolvedRows.length,
+            staffNos: resolvedRows.map((item) => item.staffNo),
           },
         },
         manager,

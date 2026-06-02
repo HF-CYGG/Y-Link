@@ -227,6 +227,7 @@ export interface ImportClientStaffDirectoryResult {
     created: number
     updated: number
     skipped: number
+    autoCreatedDepartments: string[]
   }
   list: ClientStaffDirectoryRecord[]
 }

@@ -140,8 +140,8 @@ const updateClientStaffDirectoryStatusSchema = z.object({
 
 const importClientStaffDirectorySchema = z
   .object({
-    rows: z.array(clientStaffDirectoryRecordSchema).max(500).optional(),
-    rawText: z.string().max(200000).optional(),
+    rows: z.array(clientStaffDirectoryRecordSchema).max(5000).optional(),
+    rawText: z.string().max(2000000).optional(),
   })
   .refine((value) => (Array.isArray(value.rows) && value.rows.length > 0) || Boolean(value.rawText?.trim()), {
     message: '教职工目录导入参数缺失',

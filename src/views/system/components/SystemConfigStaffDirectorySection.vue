@@ -233,8 +233,11 @@ const handleSubmitImport = async () => {
     const result = await importClientStaffDirectory({
       rawText: importForm.rawText,
     })
+    const autoCreatedDepartmentText = result.summary.autoCreatedDepartments.length > 0
+      ? `，自动补齐部门 ${result.summary.autoCreatedDepartments.length} 个`
+      : ''
     ElMessage.success(
-      `导入完成：新增 ${result.summary.created} 条，更新 ${result.summary.updated} 条，跳过 ${result.summary.skipped} 条`,
+      `导入完成：新增 ${result.summary.created} 条，更新 ${result.summary.updated} 条，跳过 ${result.summary.skipped} 条${autoCreatedDepartmentText}`,
     )
     importVisible.value = false
     resetImportForm()
@@ -290,7 +293,7 @@ onMounted(() => {
       :closable="false"
       show-icon
       title="导入格式"
-      description="支持粘贴多行文本，每行一条记录。列顺序为：工号, 姓名, 所属部门，支持英文逗号、中文逗号或 Tab 分隔。示例：HY1001,张老师,海右书院。"
+      description="支持粘贴多行文本，每行一条记录。列顺序优先按：姓名, 工号, 所属部门 解析，也兼容旧格式“工号, 姓名, 所属部门”；支持英文逗号、中文逗号或 Tab 分隔。若部门尚未在系统配置中维护，导入时会自动补齐。"
     />
 
     <el-table
@@ -378,7 +381,7 @@ onMounted(() => {
             v-model="importForm.rawText"
             type="textarea"
             :rows="12"
-            placeholder="示例：&#10;HY1001,张老师,海右书院&#10;HY1002,李老师,海右书院"
+            placeholder="示例：&#10;张老师,HY1001,海右书院&#10;李老师,HY1002,海右书院"
           />
         </el-form-item>
       </el-form>

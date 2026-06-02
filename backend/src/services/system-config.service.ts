@@ -16,6 +16,7 @@ import { detectUnsafeHost, formatUnsafeHostReason } from '../utils/safe-network.
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
 import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
+import type { EntityManager } from 'typeorm'
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const DEFAULT_SYSTEM_CONFIGS = [
@@ -356,6 +357,13 @@ export interface ClientDepartmentConfigRecord {
   tree: ClientDepartmentTreeNode[]
   options: string[]
   updatedAt: Date
+}
+
+export interface EnsureClientDepartmentOptionsResult {
+  config: ClientDepartmentConfigRecord
+  changed: boolean
+  createdDepartments: string[]
+  resolvedDepartmentMap: Map<string, string>
 }
 
 export interface ClientDepartmentTreeNode {
@@ -1625,6 +1633,125 @@ class SystemConfigService {
 
       return { config, changed }
     })
+  }
+
+  /**
+   * 批量补齐客户端部门配置：
+   * - 导入教职工目录时优先按现有路径精确匹配或按唯一标签回填；
+   * - 若系统里不存在该部门，则自动作为根节点追加到客户端部门树，避免管理员先手工建部门再导入；
+   * - 支持复用外层事务，保证“补部门配置”和“写教职工目录”在同一事务内完成。
+   */
+  async ensureClientDepartmentOptions(
+    departmentNames: string[],
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+    manager?: EntityManager,
+  ): Promise<EnsureClientDepartmentOptionsResult> {
+    await this.assertAdminActor(actor, requestMeta, 'system_config.ensure_client_departments', '自动补齐客户端部门配置')
+    const normalizedDepartmentNames = [...new Set(departmentNames.map((item) => this.normalizeDepartmentLabel(item)))]
+    if (normalizedDepartmentNames.length === 0) {
+      const config = await this.getClientDepartmentConfigs()
+      return {
+        config,
+        changed: false,
+        createdDepartments: [],
+        resolvedDepartmentMap: new Map<string, string>(),
+      }
+    }
+
+    await this.ensureDefaultConfigs()
+    const execute = async (transactionManager: EntityManager): Promise<EnsureClientDepartmentOptionsResult> => {
+      const useForUpdate = transactionManager.connection.options.type === 'mysql'
+      const lockedRows: Array<{ id: string; configValue: string; updatedAt: string }> = await transactionManager.query(
+        `
+          SELECT id, config_value AS configValue, updated_at AS updatedAt
+          FROM system_configs
+          WHERE config_key = ?
+          ${useForUpdate ? 'FOR UPDATE' : ''}
+        `,
+        [this.clientDepartmentConfigKey],
+      )
+      const row = lockedRows[0]
+      if (!row) {
+        throw new BizError('客户端部门配置缺失，请联系管理员补齐配置', 500)
+      }
+
+      const before: ClientDepartmentConfigRecord = {
+        ...this.parseClientDepartmentConfig(row.configValue),
+        updatedAt: new Date(row.updatedAt),
+      }
+      let workingTree = before.tree.map((node) => ({ ...node, children: [...node.children] }))
+      const createdDepartments: string[] = []
+      const resolvedDepartmentMap = new Map<string, string>()
+
+      for (const departmentName of normalizedDepartmentNames) {
+        if (before.options.includes(departmentName) || this.flattenDepartmentTree(workingTree).includes(departmentName)) {
+          resolvedDepartmentMap.set(departmentName, departmentName)
+          continue
+        }
+        const matchedPaths = this.findDepartmentPathsByLabel(workingTree, departmentName)
+        if (matchedPaths.length === 1) {
+          resolvedDepartmentMap.set(departmentName, matchedPaths[0])
+          continue
+        }
+        if (matchedPaths.length > 1) {
+          throw new BizError(`部门“${departmentName}”存在多个同名节点，请先在系统配置中明确路径后再导入`, 400)
+        }
+        workingTree = [
+          ...workingTree,
+          {
+            id: this.createDepartmentNodeId(`${departmentName}-${workingTree.length + 1}`),
+            label: departmentName,
+            children: [],
+          },
+        ]
+        createdDepartments.push(departmentName)
+        resolvedDepartmentMap.set(departmentName, departmentName)
+      }
+
+      const normalizedTree = this.normalizeClientDepartmentTree(workingTree)
+      const normalizedOptions = this.normalizeClientDepartmentOptions(this.flattenDepartmentTree(normalizedTree))
+      const targetValue = JSON.stringify({ tree: normalizedTree })
+      const changed = row.configValue !== targetValue
+
+      if (changed) {
+        await transactionManager.getRepository(SystemConfig).update({ id: row.id }, { configValue: targetValue })
+      }
+
+      const config: ClientDepartmentConfigRecord = {
+        tree: normalizedTree,
+        options: normalizedOptions,
+        updatedAt: changed ? new Date() : new Date(row.updatedAt),
+      }
+
+      if (changed) {
+        await auditService.record(
+          {
+            actionType: 'system_config.ensure_client_departments',
+            actionLabel: '自动补齐客户端部门配置',
+            targetType: 'system_config',
+            targetCode: 'client_departments',
+            actor,
+            requestMeta,
+            detail: {
+              before,
+              after: config,
+              createdDepartments,
+            },
+          },
+          transactionManager,
+        )
+      }
+
+      return {
+        config,
+        changed,
+        createdDepartments,
+        resolvedDepartmentMap,
+      }
+    }
+
+    return manager ? execute(manager) : AppDataSource.transaction(execute)
   }
 
   async assertClientDepartmentOption(departmentName?: string) {
