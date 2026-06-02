@@ -174,80 +174,82 @@ const deviceLabel = computed(() => {
       </div>
     </div>
 
-    <div :class="['flex-1 overflow-y-auto', appStore.isDesktop ? 'px-3 py-4' : 'px-2.5 py-3']">
-      <div v-if="spotlightMenuItems.length" class="mb-5">
-        <p
-          :class="[
-            'pb-2 text-xs font-semibold uppercase tracking-[0.18em] text-brand/75 dark:text-teal-300/80',
-            appStore.isDesktop ? 'px-3' : 'px-2',
-          ]"
-        >
-          重点工作台
-        </p>
-
-        <div class="space-y-2">
-          <router-link
-            v-for="menu in spotlightMenuItems"
-            :key="menu.path"
-            :to="menu.path"
-            class="app-sidebar__spotlight-item"
-            :class="activePath === menu.path ? 'is-active' : ''"
-            @click="handleMenuSelect"
+    <el-scrollbar class="app-sidebar__scroll-shell flex-1">
+      <div :class="[appStore.isDesktop ? 'px-3 py-4' : 'px-2.5 py-3']">
+        <div v-if="spotlightMenuItems.length" class="mb-5">
+          <p
+            :class="[
+              'pb-2 text-xs font-semibold uppercase tracking-[0.18em] text-brand/75 dark:text-teal-300/80',
+              appStore.isDesktop ? 'px-3' : 'px-2',
+            ]"
           >
-            <div class="flex items-start gap-3">
-              <span class="app-sidebar__spotlight-icon">
-                <el-icon v-if="menu.icon"><component :is="menu.icon" /></el-icon>
-                <span v-else>客</span>
-              </span>
-              <div class="min-w-0 flex-1">
-                <p class="truncate text-sm font-semibold">{{ menu.title }}</p>
-                <p class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-300">优先处理反馈会话、Issue 字段和客服回复。</p>
+            重点工作台
+          </p>
+
+          <div class="space-y-2">
+            <router-link
+              v-for="menu in spotlightMenuItems"
+              :key="menu.path"
+              :to="menu.path"
+              class="app-sidebar__spotlight-item"
+              :class="activePath === menu.path ? 'is-active' : ''"
+              @click="handleMenuSelect"
+            >
+              <div class="flex items-start gap-3">
+                <span class="app-sidebar__spotlight-icon">
+                  <el-icon v-if="menu.icon"><component :is="menu.icon" /></el-icon>
+                  <span v-else>客</span>
+                </span>
+                <div class="min-w-0 flex-1">
+                  <p class="truncate text-sm font-semibold">{{ menu.title }}</p>
+                  <p class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-300">优先处理反馈会话、Issue 字段和客服回复。</p>
+                </div>
               </div>
-            </div>
-          </router-link>
+            </router-link>
+          </div>
+        </div>
+
+        <div v-for="group in groupedMenuItems" :key="group.groupName" class="mb-5 last:mb-0">
+          <p
+            :class="[
+              'pb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500',
+              appStore.isDesktop ? 'px-3' : 'px-2',
+            ]"
+          >
+            {{ group.groupName }}
+          </p>
+
+          <el-menu
+            :key="group.groupName"
+            :default-active="activePath"
+            :default-openeds="openedMenuPaths"
+            class="app-sidebar-menu border-none bg-transparent"
+            :class="appStore.isTablet ? 'app-sidebar-menu--compact' : ''"
+            :collapse-transition="false"
+            router
+            @select="handleMenuSelect"
+          >
+            <template v-for="menu in group.items" :key="menu.path">
+              <el-sub-menu v-if="menu.children?.length" :index="menu.path">
+                <template #title>
+                  <el-icon v-if="menu.icon"><component :is="menu.icon" /></el-icon>
+                  <span>{{ menu.title }}</span>
+                </template>
+
+                <el-menu-item v-for="child in menu.children" :key="child.path" :index="child.path">
+                  {{ child.title }}
+                </el-menu-item>
+              </el-sub-menu>
+
+              <el-menu-item v-else :index="menu.path">
+                <el-icon v-if="menu.icon"><component :is="menu.icon" /></el-icon>
+                <template #title>{{ menu.title }}</template>
+              </el-menu-item>
+            </template>
+          </el-menu>
         </div>
       </div>
-
-      <div v-for="group in groupedMenuItems" :key="group.groupName" class="mb-5 last:mb-0">
-        <p
-          :class="[
-            'pb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500',
-            appStore.isDesktop ? 'px-3' : 'px-2',
-          ]"
-        >
-          {{ group.groupName }}
-        </p>
-
-        <el-menu
-          :key="group.groupName"
-          :default-active="activePath"
-          :default-openeds="openedMenuPaths"
-          class="app-sidebar-menu border-none bg-transparent"
-          :class="appStore.isTablet ? 'app-sidebar-menu--compact' : ''"
-          :collapse-transition="false"
-          router
-          @select="handleMenuSelect"
-        >
-          <template v-for="menu in group.items" :key="menu.path">
-            <el-sub-menu v-if="menu.children?.length" :index="menu.path">
-              <template #title>
-                <el-icon v-if="menu.icon"><component :is="menu.icon" /></el-icon>
-                <span>{{ menu.title }}</span>
-              </template>
-
-              <el-menu-item v-for="child in menu.children" :key="child.path" :index="child.path">
-                {{ child.title }}
-              </el-menu-item>
-            </el-sub-menu>
-
-            <el-menu-item v-else :index="menu.path">
-              <el-icon v-if="menu.icon"><component :is="menu.icon" /></el-icon>
-              <template #title>{{ menu.title }}</template>
-            </el-menu-item>
-          </template>
-        </el-menu>
-      </div>
-    </div>
+    </el-scrollbar>
 
     <div class="border-t border-slate-200/60 p-4 dark:border-white/5">
       <div class="app-sidebar__build-signature">
@@ -290,6 +292,31 @@ const deviceLabel = computed(() => {
 
 :deep(.app-sidebar-menu .el-sub-menu .el-menu) {
   background-color: transparent !important;
+}
+
+:deep(.app-sidebar__scroll-shell .el-scrollbar__wrap) {
+  overflow-x: hidden;
+}
+
+:deep(.app-sidebar__scroll-shell .el-scrollbar__bar.is-horizontal) {
+  display: none;
+}
+
+:deep(.app-sidebar__scroll-shell .el-scrollbar__bar.is-vertical) {
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+
+:deep(.app-sidebar__scroll-shell:hover .el-scrollbar__bar.is-vertical) {
+  opacity: 0.38;
+}
+
+:deep(.app-sidebar__scroll-shell .el-scrollbar__thumb) {
+  background-color: rgba(148, 163, 184, 0.45);
+}
+
+.dark :deep(.app-sidebar__scroll-shell .el-scrollbar__thumb) {
+  background-color: rgba(100, 116, 139, 0.52);
 }
 
 :deep(.app-sidebar-menu .el-menu-item),
