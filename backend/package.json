@@ -29,6 +29,7 @@
     "task7:verify": "tsx scripts/task7-verify.ts",
     "task8:verify": "tsx scripts/task8-verify.ts",
     "feedback:customer-service:verify": "tsx scripts/feedback-customer-service-verify.ts",
+    "client-staff-directory:verify": "tsx scripts/client-staff-directory-verify.ts",
     "o2o:verify": "tsx scripts/o2o-preorder-verify.ts",
     "order-query:baseline:verify": "tsx scripts/order-query-baseline-verify.ts",
     "uploads:legacy:inspect": "tsx scripts/inspect-legacy-upload-urls.ts"

@@ -11,6 +11,8 @@ import type { AuthenticatedRequest } from '../types/auth.js'
 import { systemConfigService } from '../services/system-config.service.js'
 import type { UpdateClientDepartmentConfigsInput } from '../services/system-config.service.js'
 import { verificationCodeService } from '../services/verification-code.service.js'
+import { clientStaffDirectoryService } from '../services/client-staff-directory.service.js'
+import { CLIENT_STAFF_DIRECTORY_STATUSES } from '../entities/client-staff-directory.entity.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 
@@ -102,6 +104,36 @@ const testVerificationProviderSchema = z.object({
   target: z.string().trim().min(1).max(200),
   config: verificationProviderChannelSchema,
 })
+
+const clientStaffDirectoryStatusSchema = z.enum(CLIENT_STAFF_DIRECTORY_STATUSES)
+
+const clientStaffDirectoryRecordSchema = z.object({
+  staffNo: z.string().trim().min(1).max(64),
+  realName: z.string().trim().min(1).max(128),
+  departmentName: z.string().trim().min(1).max(128),
+  status: clientStaffDirectoryStatusSchema.optional(),
+})
+
+const createClientStaffDirectorySchema = clientStaffDirectoryRecordSchema
+
+const updateClientStaffDirectorySchema = z.object({
+  staffNo: z.string().trim().min(1).max(64),
+  realName: z.string().trim().min(1).max(128),
+  departmentName: z.string().trim().min(1).max(128),
+})
+
+const updateClientStaffDirectoryStatusSchema = z.object({
+  status: clientStaffDirectoryStatusSchema,
+})
+
+const importClientStaffDirectorySchema = z
+  .object({
+    rows: z.array(clientStaffDirectoryRecordSchema).max(500).optional(),
+    rawText: z.string().max(200000).optional(),
+  })
+  .refine((value) => (Array.isArray(value.rows) && value.rows.length > 0) || Boolean(value.rawText?.trim()), {
+    message: '教职工目录导入参数缺失',
+  })
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export const systemConfigRouter = Router()
@@ -269,6 +301,97 @@ systemConfigRouter.put(
       tree: payload.tree ? normalizeClientDepartmentTreePayload(payload.tree) : undefined,
     }
     const data = await systemConfigService.updateClientDepartmentConfigs(normalizedPayload, authReq.auth, extractRequestMeta(req))
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+systemConfigRouter.get(
+  '/client-staff-directory',
+  requirePermission('system_configs:view'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const page = Number.parseInt(String(req.query.page ?? '1'), 10)
+    const pageSize = Number.parseInt(String(req.query.pageSize ?? '20'), 10)
+    const statusInput = String(req.query.status ?? '').trim()
+    const data = await clientStaffDirectoryService.list({
+      page: Number.isFinite(page) && page > 0 ? page : 1,
+      pageSize: Number.isFinite(pageSize) && pageSize > 0 ? Math.min(pageSize, 100) : 20,
+      keyword: String(req.query.keyword ?? '').trim() || undefined,
+      status: statusInput ? clientStaffDirectoryStatusSchema.parse(statusInput) : undefined,
+    })
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+systemConfigRouter.post(
+  '/client-staff-directory',
+  requirePermission('system_configs:update'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = createClientStaffDirectorySchema.parse(req.body)
+    const data = await clientStaffDirectoryService.create(payload, authReq.auth, extractRequestMeta(req))
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+systemConfigRouter.put(
+  '/client-staff-directory/:id',
+  requirePermission('system_configs:update'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = updateClientStaffDirectorySchema.parse(req.body)
+    const data = await clientStaffDirectoryService.update(String(req.params.id ?? '').trim(), payload, authReq.auth, extractRequestMeta(req))
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+systemConfigRouter.patch(
+  '/client-staff-directory/:id/status',
+  requirePermission('system_configs:update'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = updateClientStaffDirectoryStatusSchema.parse(req.body)
+    const data = await clientStaffDirectoryService.updateStatus(
+      String(req.params.id ?? '').trim(),
+      payload,
+      authReq.auth,
+      extractRequestMeta(req),
+    )
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+systemConfigRouter.post(
+  '/client-staff-directory/import',
+  requirePermission('system_configs:update'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = importClientStaffDirectorySchema.parse(req.body)
+    const data = await clientStaffDirectoryService.importRows(payload, authReq.auth, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',

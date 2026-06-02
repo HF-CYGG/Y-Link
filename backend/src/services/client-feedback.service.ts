@@ -74,6 +74,8 @@ export interface ClientFeedbackConversationSummary {
   clientUserId: string
   clientUsername: string
   clientAccount: string
+  clientAccountType: ClientUser['accountType']
+  staffNoSnapshot: string | null
   departmentNameSnapshot: string
   category: string
   subject: string
@@ -526,6 +528,8 @@ class ClientFeedbackService {
       clientUserId: conversation.clientUserId,
       clientUsername: conversation.clientUsername,
       clientAccount: conversation.clientAccount,
+      clientAccountType: conversation.clientAccountType,
+      staffNoSnapshot: conversation.staffNoSnapshot?.trim() || null,
       departmentNameSnapshot: conversation.departmentNameSnapshot,
       category: conversation.category,
       subject: conversation.subject,
@@ -717,6 +721,8 @@ class ClientFeedbackService {
     return {
       clientUsername: clientUser.realName?.trim() || '',
       clientAccount: clientUser.email?.trim() || clientUser.mobile?.trim() || clientUser.realName?.trim() || '',
+      clientAccountType: clientUser.accountType,
+      staffNoSnapshot: clientUser.staffNo?.trim() || null,
       departmentNameSnapshot: clientUser.departmentName?.trim() || '',
     }
   }
@@ -895,6 +901,8 @@ class ClientFeedbackService {
               clientUserId: clientAuth.userId,
               clientUsername: clientSnapshot.clientUsername,
               clientAccount: clientSnapshot.clientAccount,
+              clientAccountType: clientSnapshot.clientAccountType,
+              staffNoSnapshot: clientSnapshot.staffNoSnapshot,
               departmentNameSnapshot: clientSnapshot.departmentNameSnapshot,
               issueType,
               category,
@@ -1384,6 +1392,7 @@ class ClientFeedbackService {
             OR conversation.conversationNo LIKE :keyword
             OR conversation.clientUsername LIKE :keyword
             OR conversation.clientAccount LIKE :keyword
+            OR conversation.staffNoSnapshot LIKE :keyword
             OR conversation.departmentNameSnapshot LIKE :keyword
             OR conversation.lastMessagePreview LIKE :keyword
           )

@@ -128,6 +128,58 @@ export interface UpdateClientDepartmentConfigsResult {
   changed: boolean
 }
 
+export type ClientStaffDirectoryStatus = 'active' | 'inactive'
+
+export interface ClientStaffDirectoryRecord {
+  id: string
+  staffNo: string
+  realName: string
+  departmentName: string
+  status: ClientStaffDirectoryStatus
+  linkedClientUserCount: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ClientStaffDirectoryListQuery {
+  page: number
+  pageSize: number
+  keyword?: string
+  status?: ClientStaffDirectoryStatus
+}
+
+export interface ClientStaffDirectoryListResult {
+  page: number
+  pageSize: number
+  total: number
+  list: ClientStaffDirectoryRecord[]
+}
+
+export interface SaveClientStaffDirectoryPayload {
+  staffNo: string
+  realName: string
+  departmentName: string
+  status?: ClientStaffDirectoryStatus
+}
+
+export interface SaveClientStaffDirectoryResult {
+  record: ClientStaffDirectoryRecord
+}
+
+export interface ImportClientStaffDirectoryPayload {
+  rows?: SaveClientStaffDirectoryPayload[]
+  rawText?: string
+}
+
+export interface ImportClientStaffDirectoryResult {
+  summary: {
+    created: number
+    updated: number
+    skipped: number
+  }
+  list: ClientStaffDirectoryRecord[]
+}
+
 /**
  * 获取流水号生成配置：
  * - 区分“部门”和“散客”开单类型。
@@ -218,5 +270,40 @@ export const updateClientDepartmentConfigs = (payload: UpdateClientDepartmentCon
   request<UpdateClientDepartmentConfigsResult>({
     method: 'PUT',
     url: '/system-configs/client-departments',
+    data: payload,
+  })
+
+export const getClientStaffDirectoryList = (params: ClientStaffDirectoryListQuery) =>
+  request<ClientStaffDirectoryListResult>({
+    method: 'GET',
+    url: '/system-configs/client-staff-directory',
+    params,
+  })
+
+export const createClientStaffDirectoryRecord = (payload: SaveClientStaffDirectoryPayload) =>
+  request<SaveClientStaffDirectoryResult>({
+    method: 'POST',
+    url: '/system-configs/client-staff-directory',
+    data: payload,
+  })
+
+export const updateClientStaffDirectoryRecord = (id: string, payload: Omit<SaveClientStaffDirectoryPayload, 'status'>) =>
+  request<SaveClientStaffDirectoryResult>({
+    method: 'PUT',
+    url: `/system-configs/client-staff-directory/${id}`,
+    data: payload,
+  })
+
+export const updateClientStaffDirectoryStatus = (id: string, status: ClientStaffDirectoryStatus) =>
+  request<SaveClientStaffDirectoryResult>({
+    method: 'PATCH',
+    url: `/system-configs/client-staff-directory/${id}/status`,
+    data: { status },
+  })
+
+export const importClientStaffDirectory = (payload: ImportClientStaffDirectoryPayload) =>
+  request<ImportClientStaffDirectoryResult>({
+    method: 'POST',
+    url: '/system-configs/client-staff-directory/import',
     data: payload,
   })

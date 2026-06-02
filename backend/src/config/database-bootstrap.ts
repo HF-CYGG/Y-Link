@@ -80,6 +80,8 @@ const SQLITE_REQUIRED_CLIENT_USER_COLUMNS = [
 const SQLITE_REQUIRED_CLIENT_STAFF_DIRECTORY_COLUMNS = ['staff_no', 'real_name', 'department_name', 'status']
 const SQLITE_REQUIRED_SYS_USER_COLUMNS = ['email']
 const SQLITE_REQUIRED_CLIENT_FEEDBACK_CONVERSATION_COLUMNS = [
+  'client_account_type',
+  'staff_no_snapshot',
   'issue_type',
   'source_code',
   'source_label',

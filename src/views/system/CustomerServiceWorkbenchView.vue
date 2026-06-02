@@ -366,6 +366,21 @@ const getAssigneeTagLabel = (conversation: FeedbackConversationRecord) => {
     : conversation.assigneeName
 }
 
+const getClientAccountTypeLabel = (conversation: FeedbackConversationRecord) => {
+  return conversation.clientAccountType === 'department' ? '部门账户' : '个人账户'
+}
+
+const buildClientIdentitySummary = (conversation: FeedbackConversationRecord) => {
+  const summaryParts = [getClientAccountTypeLabel(conversation)]
+  if (conversation.clientDepartmentName) {
+    summaryParts.push(conversation.clientDepartmentName)
+  }
+  if (conversation.clientStaffNo) {
+    summaryParts.push(`工号 ${conversation.clientStaffNo}`)
+  }
+  return summaryParts.join(' · ')
+}
+
 const summaryCategoryDefinitions = computed(() => {
   return [
     {
@@ -1649,6 +1664,7 @@ onBeforeUnmount(() => {
 
                 <div class="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-500">
                   <span>{{ item.clientDisplayName }}</span>
+                  <span>{{ buildClientIdentitySummary(item) }}</span>
                   <span>{{ item.clientDepartmentName || '未填写部门' }}</span>
                   <span>{{ formatDateTime(item.lastMessageAt) }}</span>
                 </div>
@@ -1689,6 +1705,7 @@ onBeforeUnmount(() => {
               <div class="min-w-0">
                 <p class="text-xs font-semibold tracking-[0.16em] text-slate-400">{{ selectedConversation.issueNo }}</p>
                 <h2 class="mt-2 text-xl font-semibold text-slate-900">{{ selectedConversation.title }}</h2>
+                <p class="mt-1 text-xs leading-5 text-slate-400">{{ buildClientIdentitySummary(selectedConversation) }}</p>
                 <p class="mt-2 text-sm leading-6 text-slate-500">
                   {{ selectedConversation.clientDisplayName }} · {{ selectedConversation.clientAccount }} · {{ selectedConversation.clientDepartmentName || '未填写部门' }}
                 </p>

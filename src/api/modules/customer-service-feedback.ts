@@ -96,6 +96,8 @@ export interface FeedbackConversationRecord {
   clientUserId: string
   clientAccount: string
   clientDisplayName: string
+  clientAccountType: 'personal' | 'department'
+  clientStaffNo: string | null
   clientDepartmentName: string | null
   assigneeUserId: string | null
   assigneeUsername: string | null
@@ -357,6 +359,8 @@ interface BackendConversationSummary {
   clientUserId: string
   clientUsername: string
   clientAccount: string
+  clientAccountType: 'personal' | 'department'
+  staffNoSnapshot: string | null
   departmentNameSnapshot: string
   subject: string
   status: BackendConversationStatus
@@ -1013,6 +1017,8 @@ const mapConversation = (
     clientUserId: conversation.clientUserId,
     clientAccount: conversation.clientAccount,
     clientDisplayName: conversation.clientUsername || conversation.clientAccount || '客户端用户',
+    clientAccountType: conversation.clientAccountType === 'department' ? 'department' : 'personal',
+    clientStaffNo: conversation.staffNoSnapshot?.trim() || null,
     clientDepartmentName: conversation.departmentNameSnapshot || null,
     assigneeUserId: conversation.assignedUserId ?? null,
     assigneeUsername: conversation.assignedUsername ?? null,

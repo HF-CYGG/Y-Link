@@ -10,6 +10,7 @@
 
 import dayjs from 'dayjs'
 import type { ClientDepartmentConfigRecord, ClientDepartmentTreeNode } from '@/api/modules/system-config'
+import SystemConfigStaffDirectorySection from './SystemConfigStaffDirectorySection.vue'
 
 defineProps<{
   serialForm: {
@@ -125,5 +126,6 @@ const emit = defineEmits<{
     <div class="border-t border-slate-100 pt-4 text-xs text-slate-400 dark:border-white/5 dark:text-slate-500">
       最近更新时间：{{ clientDepartmentConfig?.updatedAt ? dayjs(clientDepartmentConfig.updatedAt).format('YYYY-MM-DD HH:mm:ss') : '-' }}
     </div>
+    <SystemConfigStaffDirectorySection :can-update-configs="canUpdateConfigs" :loading="loading || saving" />
   </div>
 </template>
