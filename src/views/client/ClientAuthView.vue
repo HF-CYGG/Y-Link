@@ -1,4 +1,15 @@
 <script setup lang="ts">
+/**
+ * 模块说明：src/views/client/ClientAuthView.vue
+ * 文件职责：承载客户端登录、个人注册与部门注册三条认证入口，并根据服务端下发能力切换验证码或短信/邮箱校验流程。
+ * 实现逻辑：
+ * - 登录与注册共用同一页壳体，但通过 `activeMode` 明确区分“登录 / 个人注册 / 部门注册”三种可见模式；
+ * - 部门注册会强制校验真实姓名、教职工号和所属部门，防止学生通过前端手工切换冒用部门账号；
+ * - 图形验证码、短信/邮箱验证码与注册能力配置统一走最新请求守卫，避免重复点击后状态错乱。
+ * 维护说明：
+ * - 若后端继续扩展实名白名单或注册能力字段，优先同步本页的 `resolveAuthModeFromRouteTab()`、注册校验和提交参数；
+ * - 若调整注册模式文案或入口结构，务必同步检查 `activeMode`、`registerAccountType` 与模板切换条件是否仍保持同一口径。
+ */
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
@@ -27,7 +38,7 @@ import {
 } from '@/utils/client-password-policy'
 import { normalizeRequestError } from '@/utils/error'
 
-type AuthMode = 'login' | 'register'
+type AuthMode = 'login' | 'register-personal' | 'register-department'
 
 interface ClientCaptchaState {
   captchaId: string
@@ -40,6 +51,12 @@ interface RegisterDepartmentTreeSelectNode {
   label: string
   value: string
   children: RegisterDepartmentTreeSelectNode[]
+}
+
+const resolveAuthModeFromRouteTab = (tab: unknown): AuthMode => {
+  if (tab === 'register-department') return 'register-department'
+  if (tab === 'register' || tab === 'register-personal') return 'register-personal'
+  return 'login'
 }
 
 const router = useRouter()
@@ -69,7 +86,7 @@ const loginForm = reactive({
 })
 
 const registerForm = reactive({
-  username: '',
+  username: '', // 现在代表真实姓名
   account: '',
   staffNo: '',
   department: '',
@@ -103,6 +120,7 @@ const registerUsesVerificationCode = computed(() => registerValidationMode.value
 const forgotPasswordAvailable = computed(() => authCapabilities.value?.forgotPasswordEnabled ?? false)
 const registerDepartmentOptions = computed(() => authCapabilities.value?.departmentOptions ?? [])
 const registerDepartmentTreeSelectData = computed(() => buildDepartmentTreeSelectData(authCapabilities.value?.departmentTree ?? []))
+const hasRegisterDepartmentTree = computed(() => registerDepartmentTreeSelectData.value.length > 0)
 const captchaImageSrc = computed(() => (
   captcha.captchaSvg ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(captcha.captchaSvg)}` : ''
 ))
@@ -280,16 +298,22 @@ const handleLogin = async () => {
 
 const handleRegister = async () => {
   const accountChannel = resolveAccountChannel(registerForm.account)
+
   if (!validateUsername(registerForm.username)) {
     ElMessage.warning('姓名需为 2-20 位中文，可包含空格或·')
     return
   }
+
   if (!accountChannel) {
     ElMessage.warning('请输入正确的手机号或邮箱作为登录账号')
     return
   }
   if (isDepartmentRegister.value && !registerForm.staffNo.trim()) {
     ElMessage.warning('部门账号注册必须填写教职工号')
+    return
+  }
+  if (isDepartmentRegister.value && !normalizeInputText(registerForm.department)) {
+    ElMessage.warning('部门账号注册必须填写所属部门')
     return
   }
   if (!validateRegisterPassword(registerForm.password)) {
@@ -328,11 +352,11 @@ const handleRegister = async () => {
           username: normalizeInputText(registerForm.username),
           account: normalizeInputText(registerForm.account),
           accountType: registerAccountType.value,
-          staffNo: isDepartmentRegister.value ? normalizeInputText(registerForm.staffNo) || undefined : undefined,
+          staffNo: isDepartmentRegister.value ? (normalizeInputText(registerForm.staffNo) || undefined) : undefined,
           password: registerForm.password,
-          departmentName: isDepartmentRegister.value ? normalizeInputText(registerForm.department) || undefined : undefined,
+          departmentName: isDepartmentRegister.value ? (normalizeInputText(registerForm.department) || undefined) : undefined,
           verificationCode: registerUsesVerificationCode.value ? normalizeInputText(registerForm.verificationCode) : undefined,
-          captchaId: registerUsesVerificationCode.value ? undefined : captcha.captchaId,
+          captchaId: registerUsesVerificationCode.value ? undefined : captcha?.captchaId,
           captchaCode: registerUsesVerificationCode.value ? undefined : normalizeInputText(registerForm.captcha),
         }, { signal }),
         onSuccess: async () => {
@@ -399,12 +423,17 @@ const handleSendRegisterVerificationCode = async () => {
 watch(
   () => route.fullPath,
   () => {
-    activeMode.value = route.query.tab === 'register' ? 'register' : 'login'
+    activeMode.value = resolveAuthModeFromRouteTab(route.query.tab)
   },
 )
 
 watch(activeMode, (nextMode) => {
-  if (nextMode === 'register') {
+  if (nextMode === 'register-department' && registerAccountType.value !== 'department') {
+    registerAccountType.value = 'department'
+  } else if (nextMode === 'register-personal' && registerAccountType.value !== 'personal') {
+    registerAccountType.value = 'personal'
+  }
+  if (nextMode !== 'login') {
     void ensureCaptchaReady()
     return
   }
@@ -425,6 +454,10 @@ watch(registerAccountType, (type) => {
     registerForm.staffNo = ''
     registerForm.department = ''
   }
+  const expectedMode = type === 'department' ? 'register-department' : 'register-personal'
+  if (activeMode.value !== 'login' && activeMode.value !== expectedMode) {
+    activeMode.value = expectedMode
+  }
 })
 
 onMounted(async () => {
@@ -432,7 +465,7 @@ onMounted(async () => {
     await router.replace(redirectPath.value)
     return
   }
-  activeMode.value = route.query.tab === 'register' ? 'register' : 'login'
+  activeMode.value = resolveAuthModeFromRouteTab(route.query.tab)
   await loadAuthCapabilities(true)
   await ensureCaptchaReady()
 })
@@ -463,8 +496,10 @@ onUnmounted(() => {
 
       <section class="form-panel">
         <div class="mode-switch">
+          <!-- Auth mode switch -->
           <button :class="{ active: activeMode === 'login' }" type="button" @click="activeMode = 'login'">登录</button>
-          <button :class="{ active: activeMode === 'register' }" type="button" @click="activeMode = 'register'">注册</button>
+          <button :class="{ active: activeMode === 'register-personal' }" type="button" @click="activeMode = 'register-personal'">个人注册</button>
+          <button :class="{ active: activeMode === 'register-department' }" type="button" @click="activeMode = 'register-department'">部门注册</button>
         </div>
 
         <form v-if="activeMode === 'login'" class="form-body" @submit.prevent="handleLogin">
@@ -492,7 +527,7 @@ onUnmounted(() => {
         </form>
 
         <form v-else class="form-body" @submit.prevent="handleRegister">
-          <h2>创建账号</h2>
+          <h2>{{ isDepartmentRegister ? '创建部门账号' : '创建个人账号' }}</h2>
           <div class="register-type-switch">
             <button :class="{ active: registerAccountType === 'personal' }" type="button" @click="registerAccountType = 'personal'">个人注册</button>
             <button :class="{ active: registerAccountType === 'department' }" type="button" @click="registerAccountType = 'department'">部门注册</button>
@@ -512,7 +547,7 @@ onUnmounted(() => {
             clearable
           />
           <el-tree-select
-            v-if="isDepartmentRegister"
+            v-if="isDepartmentRegister && hasRegisterDepartmentTree"
             v-model="registerForm.department"
             :data="registerDepartmentTreeSelectData"
             node-key="id"
@@ -525,8 +560,15 @@ onUnmounted(() => {
             clearable
             filterable
           />
-          <p v-if="isDepartmentRegister && registerDepartmentOptions.length === 0" class="field-tip">
-            暂无可选部门，请联系管理员配置部门树
+          <el-input
+            v-else-if="isDepartmentRegister"
+            v-model="registerForm.department"
+            placeholder="所属部门（部门账号必填）"
+            size="large"
+            clearable
+          />
+          <p v-if="isDepartmentRegister && !hasRegisterDepartmentTree" class="field-tip">
+            当前尚未导入部门树，请手动填写所属部门名称
           </p>
           <p v-else-if="!isDepartmentRegister" class="field-tip">
             个人账号默认按散客流程下单
@@ -653,7 +695,7 @@ onUnmounted(() => {
 
 .mode-switch {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
   background: #e2e8f0;
   border-radius: 16px;

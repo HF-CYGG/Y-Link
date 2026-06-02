@@ -209,7 +209,10 @@ export interface SubmitO2oPreorderPayload {
   isSystemApplied: boolean
   pickupContact: string
   remark?: string
-  items: Array<{ productId: string | number; qty: number }>
+  items: Array<{
+    productId: string | number
+    qty: number
+  }>
 }
 
 export interface SubmitO2oReturnRequestPayload {

@@ -303,6 +303,12 @@ const buildOrderMetaFacts = (order: O2oPreorderSummary): OrderMetaFact[] => {
       label: `共 ${order.totalQty} 件`,
     },
   ]
+  if (order.staffNoSnapshot) {
+    facts.push({
+      key: 'staffNo',
+      label: `工号 ${order.staffNoSnapshot}`,
+    })
+  }
   const amountFact = formatOrderAmountFact(order.totalAmount)
   if (amountFact) {
     facts.push({
@@ -719,7 +725,7 @@ onBeforeUnmount(() => {
         <input
           v-model="keywordInput"
           class="h-10 flex-1 rounded-full border border-slate-200 bg-slate-50 px-4 text-sm outline-none focus:border-slate-300"
-          placeholder="搜索订单号、核销码、部门或归属"
+          placeholder="搜索订单号、核销码、部门、工号或归属"
         />
         <button type="button" class="h-10 rounded-full border border-slate-200 px-4 text-sm text-slate-600" @click="clearKeyword">清空</button>
       </div>

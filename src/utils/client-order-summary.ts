@@ -75,6 +75,7 @@ export const matchesClientOrderKeyword = (order: O2oPreorderSummary, keyword: st
     order.customerOrderShowNo || '',
     order.verifyCode,
     order.departmentNameSnapshot || '',
+    order.staffNoSnapshot || '',
     ...CLIENT_ORDER_TYPE_KEYWORDS[order.clientOrderType],
   ]
     .map((item) => item.trim().toLowerCase())
