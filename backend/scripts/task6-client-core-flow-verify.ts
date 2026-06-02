@@ -322,7 +322,6 @@ const measurePreorderScenario = async (clientAuth: ClientAuthContext) => {
   for (let index = 0; index < 5; index += 1) {
     const startedAt = performance.now()
     const detail = await o2oPreorderService.submit(clientAuth, {
-      clientOrderType: 'walkin',
       isSystemApplied: false,
       pickupContact: 'Task6下单联系人',
       items: [{ productId: product.id, qty: 2 }],
@@ -361,7 +360,6 @@ const seedOrdersForQueryScenario = async (clientAuth: ClientAuthContext) => {
   const product = await createListedProduct(`query-${Date.now()}`, 1000)
   for (let index = 0; index < 30; index += 1) {
     await o2oPreorderService.submit(clientAuth, {
-      clientOrderType: 'walkin',
       isSystemApplied: false,
       pickupContact: 'Task6查询联系人',
       items: [{ productId: product.id, qty: 1 }],
@@ -453,7 +451,6 @@ const measureOrderEditScenario = async (clientAuth: ClientAuthContext) => {
 
   for (let index = 0; index < 5; index += 1) {
     const created = await o2oPreorderService.submit(clientAuth, {
-      clientOrderType: 'walkin',
       isSystemApplied: false,
       pickupContact: 'Task6改单联系人',
       items: [{ productId: productA.id, qty: 2 }],

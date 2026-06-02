@@ -29,6 +29,8 @@ export interface ClientUserListQuery {
   keyword?: string
   status?: ClientUserStatus
   accountType?: ClientUserAccountType
+  departmentName?: string
+  staffNo?: string
 }
 
 export interface ResetClientUserPasswordInput {
@@ -240,6 +242,12 @@ export class ClientUserManageService {
     }
     if (query.accountType && CLIENT_USER_ACCOUNT_TYPES.includes(query.accountType)) {
       qb.andWhere('user.accountType = :accountType', { accountType: query.accountType })
+    }
+    if (query.departmentName?.trim()) {
+      qb.andWhere('user.departmentName = :departmentName', { departmentName: query.departmentName.trim() })
+    }
+    if (query.staffNo?.trim()) {
+      qb.andWhere('user.staffNo LIKE :staffNo', { staffNo: `%${query.staffNo.trim()}%` })
     }
 
     const [list, total] = await qb

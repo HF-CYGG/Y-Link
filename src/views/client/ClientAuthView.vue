@@ -159,6 +159,23 @@ const startRegisterVerificationCountdown = (seconds: number) => {
   }, 1000)
 }
 
+// 详细注释：认证页三态除了控制当前可见表单，还需要同步到路由 query，
+// 这样刷新页面、分享链接或浏览器前进后退时，仍能回到用户刚才选择的登录/注册入口。
+const syncRouteTabWithMode = async (mode: AuthMode) => {
+  const currentTab = typeof route.query.tab === 'string' ? route.query.tab : ''
+  const nextTab = mode === 'login' ? '' : mode
+  if (currentTab === nextTab) {
+    return
+  }
+  const nextQuery = { ...route.query }
+  if (mode === 'login') {
+    delete nextQuery.tab
+  } else {
+    nextQuery.tab = mode
+  }
+  await router.replace({ query: nextQuery })
+}
+
 const loadAuthCapabilities = async (silent = false) => {
   capabilityLoading.value = true
   await runLatestCapabilityRequest({
@@ -428,6 +445,7 @@ watch(
 )
 
 watch(activeMode, (nextMode) => {
+  void syncRouteTabWithMode(nextMode)
   if (nextMode === 'register-department' && registerAccountType.value !== 'department') {
     registerAccountType.value = 'department'
   } else if (nextMode === 'register-personal' && registerAccountType.value !== 'personal') {

@@ -1065,7 +1065,6 @@ async function main() {
           },
           body: JSON.stringify({
             items: [{ productId: createdProduct.id, qty: 2 }],
-            clientOrderType: 'walkin',
             isSystemApplied: false,
             pickupContact: clientUsername,
             remark: '发布前全功能回归',

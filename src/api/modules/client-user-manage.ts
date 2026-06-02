@@ -49,6 +49,8 @@ export interface ClientUserListQuery extends PaginationQueryInput {
   keyword?: string
   status?: ClientUserStatus
   accountType?: ClientUserAccountType
+  departmentName?: string
+  staffNo?: string
 }
 
 interface ClientUserListRawResult {

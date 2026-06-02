@@ -154,7 +154,8 @@ async function main() {
   const onsiteOrder = await o2oPreorderService.submit(clientAuth, {
     items: [{ productId: adjustBaseProduct.id, qty: 2 }],
     remark: '待现场改单',
-    clientOrderType: 'walkin',
+    pickupContact: 'Task123现场改单提货人',
+    isSystemApplied: false,
   })
   const onsiteAdjusted = await o2oPreorderService.updateOrderOnsite(adminActor, {
     orderId: onsiteOrder.order.id,
@@ -208,7 +209,8 @@ async function main() {
   const returnOrder = await o2oPreorderService.submit(clientAuth, {
     items: [{ productId: returnProduct.id, qty: 2 }],
     remark: '待退货拒绝验证',
-    clientOrderType: 'walkin',
+    pickupContact: 'Task123退货验证提货人',
+    isSystemApplied: false,
   })
   const verifiedReturnOrderResult = await o2oPreorderService.verifyByCode(returnOrder.order.verifyCode, adminActor)
   const verifiedReturnOrderDetail = assertPreorderVerifyDetail(verifiedReturnOrderResult)

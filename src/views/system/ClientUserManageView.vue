@@ -38,6 +38,8 @@ const searchForm = reactive({
   keyword: '',
   status: '' as '' | ClientUserStatus,
   accountType: '' as '' | ClientUserAccountType,
+  departmentName: '',
+  staffNo: '',
 })
 
 const listState = reactive(
@@ -297,6 +299,12 @@ const buildQueryParams = (): ClientUserListQuery => {
   if (searchForm.accountType) {
     params.accountType = searchForm.accountType
   }
+  if (searchForm.departmentName.trim()) {
+    params.departmentName = searchForm.departmentName.trim()
+  }
+  if (searchForm.staffNo.trim()) {
+    params.staffNo = searchForm.staffNo.trim()
+  }
 
   return params
 }
@@ -354,6 +362,8 @@ const handleReset = () => {
   searchForm.keyword = ''
   searchForm.status = ''
   searchForm.accountType = ''
+  searchForm.departmentName = ''
+  searchForm.staffNo = ''
   handleSearch()
 }
 
@@ -599,6 +609,25 @@ onMounted(() => {
               <el-option label="个人账户" value="personal" />
               <el-option label="部门账户" value="department" />
             </el-select>
+            <el-select
+              v-model="searchForm.departmentName"
+              placeholder="所属部门"
+              clearable
+              filterable
+              :loading="departmentOptionsLoading"
+              :class="isPhone ? '!w-full' : isTablet ? '!w-[220px]' : '!w-[240px]'"
+              @change="handleSearch"
+            >
+              <el-option v-for="department in departmentOptions" :key="department" :label="department" :value="department" />
+            </el-select>
+            <el-input
+              v-model="searchForm.staffNo"
+              placeholder="搜索工号"
+              clearable
+              :class="isPhone ? '!w-full' : isTablet ? '!w-[180px]' : '!w-[188px]'"
+              @clear="handleSearch"
+              @keyup.enter="handleSearch"
+            />
             <el-button :class="isPhone ? 'w-full' : ''" type="primary" icon="Search" @click="handleSearch">搜索</el-button>
             <el-button :class="isPhone ? 'w-full' : ''" icon="Refresh" @click="handleReset">重置</el-button>
             <el-button v-if="canCreateUser" :class="isPhone ? 'w-full' : ''" type="primary" icon="Plus" @click="handleOpenCreate">

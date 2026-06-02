@@ -34,6 +34,8 @@ import {
   type O2oOrderStatusReport,
   type O2oReturnRequestDetail,
 } from '@/api/modules/o2o'
+import { getClientDepartmentConfigs } from '@/api/modules/system-config'
+import type { ClientUserAccountType } from '@/api/modules/client-user-manage'
 import { extractErrorMessage } from '@/utils/error'
 import { captureOrderRefreshAnchor, restoreOrderRefreshAnchor } from '@/utils/order-refresh-visual'
 
@@ -56,6 +58,10 @@ const ORDER_TYPE_LABEL_MAP = {
   department: '部门订',
   walkin: '散客',
 } as const
+const ACCOUNT_TYPE_LABEL_MAP: Record<ClientUserAccountType, string> = {
+  personal: '个人账户',
+  department: '部门账户',
+}
 const RETURN_REQUEST_STATUS_META = {
   pending: {
     label: '待门店核销',
@@ -95,6 +101,8 @@ const router = useRouter()
 const { hasPermission, ensurePermission } = usePermissionAction()
 const orderListRequest = useStableRequest()
 const orderDetailRequest = useStableRequest()
+const departmentOptions = ref<string[]>([])
+const departmentOptionsLoading = ref(false)
 
 let autoRefreshTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let secondTickTimer: ReturnType<typeof globalThis.setInterval> | null = null
@@ -102,6 +110,9 @@ let reminderAudioContext: AudioContext | null = null
 
 const query = reactive({
   keyword: '',
+  accountType: '' as '' | ClientUserAccountType,
+  departmentName: '',
+  staffNo: '',
 })
 
 // “去核销”只允许真正处于 pending 的订单进入核销台。
@@ -111,6 +122,14 @@ const goVerifyButtonText = computed(() => (canGoVerify.value ? '去核销' : '�
 
 const formatCurrency = (value: string | number | null | undefined) => {
   return Number(value ?? 0).toFixed(2)
+}
+
+const getAccountTypeLabel = (accountType: ClientUserAccountType) => {
+  return ACCOUNT_TYPE_LABEL_MAP[accountType]
+}
+
+const getOrderAccountType = (orderType: O2oPreorderSummary['clientOrderType']): ClientUserAccountType => {
+  return orderType === 'department' ? 'department' : 'personal'
 }
 
 /**
@@ -326,24 +345,42 @@ const detailAmountSummary = computed(() => {
 // - 模板仅消费这里的展示值，避免散落空值判断导致显示口径不一致。
 const orderCustomerProfile = computed(() => {
   const profile = activeOrderDetail.value?.customerProfile
+  const order = activeOrderDetail.value?.order
+  const accountType = order ? getOrderAccountType(order.clientOrderType) : null
   if (!profile) {
     return {
       username: '未查询到预定用户',
       mobile: '未留手机号',
       email: '未留邮箱',
-      departmentName: '未填写部门',
+      accountType: accountType ? getAccountTypeLabel(accountType) : '未识别账号类型',
+      departmentName: order?.departmentNameSnapshot?.trim() || '未填写部门',
+      staffNo: order?.staffNoSnapshot?.trim() || '未留工号',
     }
   }
   return {
     username: profile.username?.trim() || profile.realName?.trim() || '未命名用户',
     mobile: profile.mobile?.trim() || '未留手机号',
     email: profile.email?.trim() || '未留邮箱',
-    departmentName: profile.departmentName?.trim() || '未填写部门',
+    accountType: accountType ? getAccountTypeLabel(accountType) : getAccountTypeLabel(profile.accountType),
+    departmentName: order?.departmentNameSnapshot?.trim() || profile.departmentName?.trim() || '未填写部门',
+    staffNo: order?.staffNoSnapshot?.trim() || profile.staffNo?.trim() || '未留工号',
   }
 })
 
 const getOrderTypeLabel = (orderType: O2oPreorderSummary['clientOrderType']) => {
   return ORDER_TYPE_LABEL_MAP[orderType]
+}
+
+const loadDepartmentOptions = async () => {
+  departmentOptionsLoading.value = true
+  try {
+    const result = await getClientDepartmentConfigs()
+    departmentOptions.value = result.options
+  } catch (error) {
+    ElMessage.error(extractErrorMessage(error, '加载部门筛选项失败'))
+  } finally {
+    departmentOptionsLoading.value = false
+  }
 }
 
 const buildOwnershipLabel = (orderType: O2oPreorderSummary['clientOrderType'], departmentNameSnapshot: string | null) => {
@@ -774,6 +811,8 @@ const syncActiveOrder = async (options?: { silentDetail?: boolean }) => {
 const loadOrders = async (options?: { silent?: boolean }) => {
   const silent = options?.silent ?? false
   const committedKeyword = appliedKeyword.value.trim()
+  const committedDepartmentName = query.departmentName.trim()
+  const committedStaffNo = query.staffNo.trim()
   const scrollAnchor = silent
     ? captureOrderRefreshAnchor({
         listRoot: orderPoolListRef.value,
@@ -788,6 +827,9 @@ const loadOrders = async (options?: { silent?: boolean }) => {
       getO2oConsoleOrders(
         {
           keyword: committedKeyword || undefined,
+          accountType: query.accountType || undefined,
+          departmentName: committedDepartmentName || undefined,
+          staffNo: committedStaffNo || undefined,
           limit: 200,
         },
         { signal },
@@ -844,6 +886,15 @@ const handlePoolChange = async (poolKey: OrderPoolKey) => {
 const handleSearch = async () => {
   // 查询动作提交后，自动轮询统一复用这次确认过的关键词，避免输入中的草稿与轮询请求互相覆盖。
   appliedKeyword.value = query.keyword.trim()
+  await loadOrders()
+}
+
+const handleReset = async () => {
+  query.keyword = ''
+  query.accountType = ''
+  query.departmentName = ''
+  query.staffNo = ''
+  appliedKeyword.value = ''
   await loadOrders()
 }
 
@@ -1055,7 +1106,7 @@ const handleVisibilityChange = () => {
 }
 
 onMounted(async () => {
-  await loadOrders()
+  await Promise.all([loadOrders(), loadDepartmentOptions()])
   scheduleAutoRefresh()
   globalThis.document?.addEventListener('visibilitychange', handleVisibilityChange)
   secondTickTimer = globalThis.setInterval(() => {
@@ -1140,15 +1191,49 @@ onBeforeUnmount(() => {
           </button>
         </div>
 
-        <div class="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+        <div class="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
           <el-input
             v-model.trim="query.keyword"
             class="min-w-0"
-            placeholder="搜索订单号或核销码"
+            placeholder="搜索订单号、核销码、用户名或商品"
             clearable
+            @clear="handleSearch"
             @keyup.enter="handleSearch"
           />
+          <el-select
+            v-model="query.accountType"
+            class="min-w-0"
+            placeholder="账号类型"
+            clearable
+            @change="handleSearch"
+          >
+            <el-option label="个人账户" value="personal" />
+            <el-option label="部门账户" value="department" />
+          </el-select>
+          <el-select
+            v-model="query.departmentName"
+            class="min-w-0"
+            placeholder="所属部门"
+            clearable
+            filterable
+            :loading="departmentOptionsLoading"
+            @change="handleSearch"
+          >
+            <el-option v-for="department in departmentOptions" :key="department" :label="department" :value="department" />
+          </el-select>
+          <el-input
+            v-model.trim="query.staffNo"
+            class="min-w-0"
+            placeholder="搜索工号"
+            clearable
+            @clear="handleSearch"
+            @keyup.enter="handleSearch"
+          />
+        </div>
+
+        <div class="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
           <el-button class="search-action-button w-full sm:w-auto" type="primary" @click="handleSearch">查询</el-button>
+          <el-button class="w-full sm:w-auto" @click="handleReset">重置</el-button>
         </div>
 
         <Transition name="new-order-notice">
@@ -1213,8 +1298,10 @@ onBeforeUnmount(() => {
               <div class="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500">
                 <p class="break-words">时间：{{ formatOrderDateTime(order.createdAt, { includeSeconds: false }) }}</p>
                 <p class="text-right">件数：{{ order.totalQty }}</p>
-                <p class="break-words">归属：{{ getOrderTypeLabel(order.clientOrderType) }}{{ order.departmentNameSnapshot ? ` / ${order.departmentNameSnapshot}` : '' }}</p>
+                <p class="break-words">账号类型：{{ getAccountTypeLabel(getOrderAccountType(order.clientOrderType)) }}</p>
                 <p>应付总额：¥{{ formatCurrency(order.totalAmount) }}</p>
+                <p class="break-words">部门：{{ order.departmentNameSnapshot || '未填写' }}</p>
+                <p class="text-right">工号：{{ order.staffNoSnapshot || '未留工号' }}</p>
                 <p class="break-words" :class="order.returnRequestCount > 0 ? 'text-amber-700' : 'text-slate-400'">
                   退货记录：{{ order.returnRequestCount > 0 ? `共 ${order.returnRequestCount} 笔${order.pendingReturnRequestCount > 0 ? `，待处理 ${order.pendingReturnRequestCount} 笔` : ''}` : '暂无' }}
                 </p>
@@ -1445,10 +1532,14 @@ onBeforeUnmount(() => {
                 便于门店在特殊情况下通过电话、邮件等方式及时联系客户并同步订单变化。
               </p>
             </div>
-            <div class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <div class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
               <div class="rounded-2xl bg-slate-50 px-4 py-3">
                 <p class="text-sm text-slate-400">用户名</p>
                 <p class="mt-1 break-words text-sm font-semibold text-slate-900">{{ orderCustomerProfile.username }}</p>
+              </div>
+              <div class="rounded-2xl bg-slate-50 px-4 py-3">
+                <p class="text-sm text-slate-400">账号类型</p>
+                <p class="mt-1 break-words text-sm font-semibold text-slate-900">{{ orderCustomerProfile.accountType }}</p>
               </div>
               <div class="rounded-2xl bg-slate-50 px-4 py-3">
                 <p class="text-sm text-slate-400">手机号</p>
@@ -1461,6 +1552,10 @@ onBeforeUnmount(() => {
               <div class="rounded-2xl bg-slate-50 px-4 py-3">
                 <p class="text-sm text-slate-400">所属部门</p>
                 <p class="mt-1 break-words text-sm font-semibold text-slate-900">{{ orderCustomerProfile.departmentName }}</p>
+              </div>
+              <div class="rounded-2xl bg-slate-50 px-4 py-3">
+                <p class="text-sm text-slate-400">工号</p>
+                <p class="mt-1 break-words text-sm font-semibold text-slate-900">{{ orderCustomerProfile.staffNo }}</p>
               </div>
             </div>
           </div>

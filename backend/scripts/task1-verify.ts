@@ -25,6 +25,14 @@ async function main() {
 
   const { AppDataSource } = await import('../src/config/data-source.js')
   const { systemConfigService } = await import('../src/services/system-config.service.js')
+  const requiredOrderSerialConfigKeys = [
+    'order.serial.department.start',
+    'order.serial.department.current',
+    'order.serial.department.width',
+    'order.serial.walkin.start',
+    'order.serial.walkin.current',
+    'order.serial.walkin.width',
+  ]
 
   await AppDataSource.initialize()
 
@@ -32,8 +40,13 @@ async function main() {
     await AppDataSource.synchronize()
 
     const firstBootstrap = await systemConfigService.ensureDefaultConfigs()
-    assert.equal(firstBootstrap.insertedCount, 6)
-    assert.equal(firstBootstrap.totalCount, 6)
+    assert.ok(firstBootstrap.insertedCount >= requiredOrderSerialConfigKeys.length)
+    assert.ok(firstBootstrap.totalCount >= requiredOrderSerialConfigKeys.length)
+    const configRows: Array<{ config_key: string }> = await AppDataSource.query(
+      `SELECT config_key FROM system_configs WHERE config_key IN (${requiredOrderSerialConfigKeys.map(() => '?').join(', ')})`,
+      requiredOrderSerialConfigKeys,
+    )
+    assert.equal(configRows.length, requiredOrderSerialConfigKeys.length)
     pass('system_configs 默认配置首次初始化成功')
 
     const secondBootstrap = await systemConfigService.ensureDefaultConfigs()

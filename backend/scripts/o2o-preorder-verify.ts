@@ -13,6 +13,7 @@ import { AppDataSource } from '../src/config/data-source.js'
 import { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } from '../src/config/database-bootstrap.js'
 import { BaseProduct } from '../src/entities/base-product.entity.js'
 import { BizOutboundOrder } from '../src/entities/biz-outbound-order.entity.js'
+import { ClientUser } from '../src/entities/client-user.entity.js'
 import { InventoryLog } from '../src/entities/inventory-log.entity.js'
 import { O2oPreorder } from '../src/entities/o2o-preorder.entity.js'
 import { authService } from '../src/services/auth.service.js'
@@ -132,19 +133,75 @@ const run = async () => {
   log('客户端商品大厅展示通过')
 
   const productRepo = AppDataSource.getRepository(BaseProduct)
+  const clientUserRepo = AppDataSource.getRepository(ClientUser)
   const preorderRepo = AppDataSource.getRepository(O2oPreorder)
   const inventoryLogRepo = AppDataSource.getRepository(InventoryLog)
+
+  // 先把当前客户端账号切到“部门账号”，后续验证服务端是否会按当前登录账号强制判定归属，
+  // 并确认正式出库单仍严格沿用“下单时快照”，不会被之后的资料修改串改。
+  await clientUserRepo.update(
+    { id: clientAuth.userId },
+    {
+      accountType: 'department',
+      departmentName: '脚本部门-A',
+      staffNo: `STAFF-${Date.now()}`,
+      staffVerified: true,
+    },
+  )
+
+  const departmentOwnedResult = await o2oPreorderService.submit(clientAuth, {
+    items: [{ productId: product.id, qty: 1 }],
+    remark: '部门账号归属强制判定验证',
+    isSystemApplied: false,
+    pickupContact: '脚本提货人-部门账号',
+  })
+  assert.equal(departmentOwnedResult.order.clientOrderType, 'department')
+  assert.equal(departmentOwnedResult.order.departmentNameSnapshot, '脚本部门-A')
+  assert.ok(departmentOwnedResult.order.staffNoSnapshot)
+  await o2oPreorderService.cancelMyOrder(clientAuth, departmentOwnedResult.order.id)
+  log('服务端会按部门账号强制判定订单归属通过')
+
+  const departmentSnapshotPreorder = await o2oPreorderService.submit(clientAuth, {
+    items: [{ productId: product.id, qty: 1 }],
+    remark: '部门快照固化验证',
+    isSystemApplied: true,
+    pickupContact: '脚本提货人-部门快照',
+  })
+  assert.equal(departmentSnapshotPreorder.order.clientOrderType, 'department')
+  assert.equal(departmentSnapshotPreorder.order.departmentNameSnapshot, '脚本部门-A')
+  assert.ok(departmentSnapshotPreorder.order.staffNoSnapshot)
+
+  // 客户端订单列表会展示工号快照，因此服务端关键词搜索也必须能直接命中该快照。
+  const staffNoSearchResult = await o2oPreorderService.listMyOrders(clientAuth, {
+    page: 1,
+    pageSize: 20,
+    keyword: departmentSnapshotPreorder.order.staffNoSnapshot,
+  })
+  assert.ok(
+    staffNoSearchResult.list.some((item) => item.id === departmentSnapshotPreorder.order.id),
+    '客户端订单列表应支持通过工号快照搜索命中对应订单',
+  )
+  log('客户端订单列表支持通过工号关键词命中订单')
+
+  // 下单完成后模拟用户资料被维护人员修改，正式出库单仍必须沿用“下单时快照”。
+  await clientUserRepo.update(
+    { id: clientAuth.userId },
+    {
+      departmentName: '脚本部门-B',
+    },
+  )
+
+  const productStateBeforeRegularPreorder = await productRepo.findOneByOrFail({ id: product.id })
   const preorderResult = await o2oPreorderService.submit(clientAuth, {
     items: [{ productId: product.id, qty: 2 }],
     remark: '自动化验证',
-    clientOrderType: 'walkin',
     isSystemApplied: false,
     pickupContact: '脚本提货人-A',
   })
   assert.equal(preorderResult.order.status, 'pending')
   assert.equal(preorderResult.order.pickupContact, '脚本提货人-A')
   const heldProduct = await productRepo.findOneByOrFail({ id: product.id })
-  assert.equal(heldProduct.preOrderedStock, 2)
+  assert.equal(heldProduct.preOrderedStock, productStateBeforeRegularPreorder.preOrderedStock + 2)
   log('客户端下单与库存预占通过')
 
   const otherClientAuth = await registerAndLoginClient(Date.now() + 1)
@@ -156,7 +213,7 @@ const run = async () => {
   assert.equal(cancelledResult.order.statusReport.scenario, 'cancelled')
   const releasedProduct = await productRepo.findOneByOrFail({ id: product.id })
   assert.equal(releasedProduct.currentStock, 20)
-  assert.equal(releasedProduct.preOrderedStock, 0)
+  assert.equal(releasedProduct.preOrderedStock, productStateBeforeRegularPreorder.preOrderedStock)
   const latestReleaseLog = await inventoryLogRepo.findOne({
     where: { refId: preorderResult.order.id, changeType: 'preorder_release' },
     order: { id: 'DESC' },
@@ -179,7 +236,6 @@ const run = async () => {
   const timeoutPreorder = await o2oPreorderService.submit(clientAuth, {
     items: [{ productId: product.id, qty: 1 }],
     remark: '超时取消验证',
-    clientOrderType: 'walkin',
     isSystemApplied: false,
     pickupContact: '脚本提货人-B',
   })
@@ -207,17 +263,27 @@ const run = async () => {
     adminAuth = await authService.resolveAuthUserByToken(adminLogin.token)
   }
   const verifyActor = adminAuth ?? scriptAdminActor
+  const departmentSnapshotVerified = await o2oPreorderService.verifyByCode(departmentSnapshotPreorder.order.verifyCode, verifyActor)
+  const departmentSnapshotDetail = assertPreorderVerifyDetail(departmentSnapshotVerified)
+  assert.equal(departmentSnapshotDetail.order.clientOrderType, 'department')
+  const outboundOrderRepo = AppDataSource.getRepository(BizOutboundOrder)
+  const departmentSnapshotOutboundOrder = await outboundOrderRepo.findOne({
+    where: { idempotencyKey: `o2o-preorder-verify:${departmentSnapshotPreorder.order.id}` },
+  })
+  assert.ok(departmentSnapshotOutboundOrder, '部门预订单核销后应生成正式出库单')
+  assert.equal(departmentSnapshotOutboundOrder.orderType, 'department')
+  assert.equal(departmentSnapshotOutboundOrder.customerDepartmentName, '脚本部门-A')
+  log('部门订单下单快照会稳定继承到正式出库单通过')
+
   const verifiedPreorder = await o2oPreorderService.submit(clientAuth, {
     items: [{ productId: product.id, qty: 2 }],
     remark: '核销后不可撤回验证',
-    clientOrderType: 'walkin',
     isSystemApplied: false,
     pickupContact: '脚本提货人-C',
   })
   const verified = await o2oPreorderService.verifyByCode(verifiedPreorder.order.verifyCode, verifyActor)
   const verifiedDetail = assertPreorderVerifyDetail(verified)
   assert.equal(verifiedDetail.order.status, 'verified')
-  const outboundOrderRepo = AppDataSource.getRepository(BizOutboundOrder)
   const verifiedOutboundOrder = await outboundOrderRepo.findOne({
     where: { idempotencyKey: `o2o-preorder-verify:${verifiedPreorder.order.id}` },
   })

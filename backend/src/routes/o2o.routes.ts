@@ -20,6 +20,7 @@ import {
   o2oPreorderService,
 } from '../services/o2o-preorder.service.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
+import { CLIENT_USER_ACCOUNT_TYPES } from '../entities/client-user.entity.js'
 
 const submitPreorderSchema = z.object({
   // 详细注释：客户端必须显式传入“是否系统申请”，避免服务端继续使用默认值导致语义失真。
@@ -60,6 +61,9 @@ const myOrderQuerySchema = z.object({
 const consoleOrderQuerySchema = z.object({
   status: z.enum(['pending', 'verified', 'cancelled']).optional(),
   keyword: z.string().trim().max(64).optional(),
+  accountType: z.enum(CLIENT_USER_ACCOUNT_TYPES).optional(),
+  departmentName: z.string().trim().max(128).optional(),
+  staffNo: z.string().trim().max(64).optional(),
   startTime: z.string().trim().max(32).optional(),
   endTime: z.string().trim().max(32).optional(),
   limit: z.coerce.number().int().min(1).max(200).optional(),

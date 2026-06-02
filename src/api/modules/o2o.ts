@@ -16,6 +16,7 @@ import type {
   O2oOrderBusinessStatus,
   O2oOrderStatus,
 } from '@/constants/o2o-order-status'
+import type { ClientUserAccountType } from '@/api/modules/client-user-manage'
 import type { PaginationQueryInput, PaginationResult } from '@/types/api'
 
 export type O2oClientOrderType = 'department' | 'walkin'
@@ -243,6 +244,9 @@ export interface UpdateO2oComplianceFlagsPayload {
 export interface O2oConsoleOrderListQuery {
   status?: O2oOrderStatus
   keyword?: string
+  accountType?: ClientUserAccountType
+  departmentName?: string
+  staffNo?: string
   startTime?: string
   endTime?: string
   limit?: number

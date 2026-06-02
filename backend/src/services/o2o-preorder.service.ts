@@ -442,6 +442,20 @@ class O2oPreorderService {
     return departmentName
   }
 
+  // 正式出库单必须沿用预订单在“下单当时”沉淀的归属快照：
+  // - 避免用户后续改资料后，把历史部门单串改成最新部门；
+  // - 若历史脏数据缺少快照，则直接阻断并提示修复，而不是继续用当前资料兜底。
+  private resolveDepartmentNameSnapshotFromPreorder(preorder: Pick<O2oPreorder, 'clientOrderType' | 'departmentNameSnapshot'>) {
+    if (preorder.clientOrderType !== 'department') {
+      return null
+    }
+    const departmentNameSnapshot = preorder.departmentNameSnapshot?.trim() ?? ''
+    if (!departmentNameSnapshot) {
+      throw new BizError('部门订单缺少下单部门快照，无法生成正式出库单', 409)
+    }
+    return departmentNameSnapshot
+  }
+
   private resolveStaffNoSnapshot(
     clientOrderType: O2oClientOrderType,
     clientUser: Pick<ClientUser, 'staffNo'> | null,
@@ -594,7 +608,7 @@ class O2oPreorderService {
 
     const clientUser = await clientUserRepo.findOne({ where: { id: input.preorder.clientUserId } })
     const outboundOrderType = input.preorder.clientOrderType === 'department' ? 'department' : 'walkin'
-    const departmentNameSnapshot = this.resolveDepartmentNameSnapshot(outboundOrderType, clientUser)
+    const departmentNameSnapshot = this.resolveDepartmentNameSnapshotFromPreorder(input.preorder)
     const showNo = await orderSerialService.generateOrderNo(outboundOrderType, manager)
 
     let totalQty = 0
@@ -1460,12 +1474,16 @@ class O2oPreorderService {
       if (!clientUser) {
         throw new BizError('客户端账号不存在，请重新登录后再试', 401)
       }
-      const orderTypeFromProfile = this.normalizeClientOrderType(clientUser.accountType === 'department' ? 'department' : 'walkin')
-      const departmentNameSnapshot = this.resolveDepartmentNameSnapshot(orderTypeFromProfile, clientUser)
-      const staffNoSnapshot = this.resolveStaffNoSnapshot(orderTypeFromProfile, clientUser)
+      // 订单归属由服务端按当前登录账号强制判定：
+      // - 部门账号一律沉淀为部门单；
+      // - 个人账号一律沉淀为散客单；
+      // - 这样可避免客户端伪造归属类型，保持账号身份与订单归属一致。
+      const normalizedClientOrderType = this.normalizeClientOrderType(clientUser.accountType === 'department' ? 'department' : 'walkin')
+      const departmentNameSnapshot = this.resolveDepartmentNameSnapshot(normalizedClientOrderType, clientUser)
+      const staffNoSnapshot = this.resolveStaffNoSnapshot(normalizedClientOrderType, clientUser)
 
       // verifyCode 既用于用户端展示二维码，也作为管理端核销入口的核心识别码。
-      const showNo = await this.generatePreorderShowNo(orderTypeFromProfile, manager)
+      const showNo = await this.generatePreorderShowNo(normalizedClientOrderType, manager)
       const timeoutAt = o2oRules.autoCancelEnabled ? new Date(Date.now() + o2oRules.autoCancelHours * 60 * 60 * 1000) : null
       const savedOrder = await manager.getRepository(O2oPreorder).save(
         manager.getRepository(O2oPreorder).create({
@@ -1473,7 +1491,7 @@ class O2oPreorderService {
           clientUserId: auth.userId,
           verifyCode: randomUUID(),
           status: 'pending',
-          clientOrderType: orderTypeFromProfile,
+          clientOrderType: normalizedClientOrderType,
           departmentNameSnapshot,
           staffNoSnapshot,
           isSystemApplied: normalizedIsSystemApplied,
@@ -1878,6 +1896,10 @@ class O2oPreorderService {
             .orWhere(String.raw`order.departmentNameSnapshot LIKE :departmentKeyword ESCAPE '\'`, {
               departmentKeyword: keywordContains,
             })
+            // 工号快照已在列表卡片展示，这里必须同步纳入关键词命中，避免出现“看得到但搜不到”。
+            .orWhere(String.raw`order.staffNoSnapshot LIKE :staffNoKeyword ESCAPE '\'`, {
+              staffNoKeyword: keywordContains,
+            })
           if (matchedCustomerOrderPreorderIds.length) {
             keywordQb.orWhere('order.id IN (:...matchedCustomerOrderPreorderIds)', {
               matchedCustomerOrderPreorderIds,
@@ -1993,11 +2015,16 @@ class O2oPreorderService {
   async listConsoleOrders(input: {
     status?: 'pending' | 'verified' | 'cancelled'
     keyword?: string
+    accountType?: ClientUser['accountType']
+    departmentName?: string
+    staffNo?: string
     startTime?: string
     endTime?: string
     limit?: number
   }) {
     const normalizedKeyword = input.keyword?.trim() ?? ''
+    const normalizedDepartmentName = input.departmentName?.trim() ?? ''
+    const normalizedStaffNo = input.staffNo?.trim() ?? ''
     const normalizedLimit = Math.max(1, Math.min(200, Number(input.limit) || 50))
     const startTime = this.parseTimeFilter(input.startTime, '开始时间')
     const endTime = this.parseTimeFilter(input.endTime, '结束时间')
@@ -2009,6 +2036,19 @@ class O2oPreorderService {
     if (input.status) {
       queryBuilder.andWhere('order.status = :status', { status: input.status })
     }
+    if (input.accountType === 'department') {
+      queryBuilder.andWhere('order.clientOrderType = :accountTypeOrderType', { accountTypeOrderType: 'department' })
+    }
+    if (input.accountType === 'personal') {
+      queryBuilder.andWhere('order.clientOrderType = :accountTypeOrderType', { accountTypeOrderType: 'walkin' })
+    }
+    if (normalizedDepartmentName) {
+      queryBuilder.andWhere('order.departmentNameSnapshot = :departmentName', { departmentName: normalizedDepartmentName })
+    }
+    if (normalizedStaffNo) {
+      const escapedStaffNo = this.escapeLikeKeyword(normalizedStaffNo)
+      queryBuilder.andWhere(String.raw`order.staffNoSnapshot LIKE :staffNo ESCAPE '\'`, { staffNo: `%${escapedStaffNo}%` })
+    }
 
     if (startTime) {
       queryBuilder.andWhere('order.createdAt >= :startTime', { startTime })
@@ -2018,7 +2058,8 @@ class O2oPreorderService {
     }
 
     if (normalizedKeyword) {
-      const keyword = `%${normalizedKeyword}%`
+      const escapedKeyword = this.escapeLikeKeyword(normalizedKeyword)
+      const keyword = `%${escapedKeyword}%`
       const clientKeywordSubQuery = this.preorderRepo
         .createQueryBuilder('order_keyword_client')
         .subQuery()
@@ -2026,7 +2067,13 @@ class O2oPreorderService {
         .from(ClientUser, 'clientUser')
         .where('clientUser.id = order.clientUserId')
         .andWhere(
-          '(clientUser.realName LIKE :keyword OR clientUser.mobile LIKE :keyword OR clientUser.departmentName LIKE :keyword)',
+          String.raw`(
+            clientUser.realName LIKE :keyword ESCAPE '\'
+            OR clientUser.mobile LIKE :keyword ESCAPE '\'
+            OR clientUser.email LIKE :keyword ESCAPE '\'
+            OR clientUser.departmentName LIKE :keyword ESCAPE '\'
+            OR clientUser.staffNo LIKE :keyword ESCAPE '\'
+          )`,
         )
         .getQuery()
       const itemKeywordSubQuery = this.preorderRepo
@@ -2036,15 +2083,17 @@ class O2oPreorderService {
         .from(O2oPreorderItem, 'item')
         .leftJoin(BaseProduct, 'product', 'product.id = item.productId')
         .where('item.orderId = order.id')
-        .andWhere('(product.productName LIKE :keyword OR product.productCode LIKE :keyword)')
+        .andWhere(String.raw`(product.productName LIKE :keyword ESCAPE '\' OR product.productCode LIKE :keyword ESCAPE '\')`)
         .getQuery()
       queryBuilder.andWhere(
         new Brackets((keywordQb) => {
           keywordQb
-            .where('order.showNo LIKE :keyword', { keyword })
-            .orWhere('order.verifyCode LIKE :keyword', { keyword })
-            .orWhere('order.remark LIKE :keyword', { keyword })
-            .orWhere('order.verifiedBy LIKE :keyword', { keyword })
+            .where(String.raw`order.showNo LIKE :keyword ESCAPE '\'`, { keyword })
+            .orWhere(String.raw`order.verifyCode LIKE :keyword ESCAPE '\'`, { keyword })
+            .orWhere(String.raw`order.remark LIKE :keyword ESCAPE '\'`, { keyword })
+            .orWhere(String.raw`order.verifiedBy LIKE :keyword ESCAPE '\'`, { keyword })
+            .orWhere(String.raw`order.departmentNameSnapshot LIKE :keyword ESCAPE '\'`, { keyword })
+            .orWhere(String.raw`order.staffNoSnapshot LIKE :keyword ESCAPE '\'`, { keyword })
             .orWhere(`EXISTS ${clientKeywordSubQuery}`, { keyword })
             .orWhere(`EXISTS ${itemKeywordSubQuery}`, { keyword })
         }),

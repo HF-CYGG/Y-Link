@@ -62,7 +62,15 @@ const registerAndLoginClient = async (seed: number): Promise<ClientAuthContext> 
     captchaCode: readCaptchaCode(registerCaptcha.captchaSvg),
   })
 
-  await AppDataSource.getRepository(ClientUser).update({ id: registerResult.user.id }, { departmentName: '海右书院' })
+  await AppDataSource.getRepository(ClientUser).update(
+    { id: registerResult.user.id },
+    {
+      accountType: 'department',
+      departmentName: '海右书院',
+      staffNo: `SHOWNO-${String(seed).slice(-6)}`,
+      staffVerified: true,
+    },
+  )
 
   const loginCaptcha = await clientAuthService.createCaptcha()
   const loginResult = await clientAuthService.login({
@@ -107,7 +115,6 @@ const run = async () => {
   const preorder = await o2oPreorderService.submit(clientAuth, {
     items: [{ productId: product.id, qty: 1 }],
     remark: '正式出库单号校验',
-    clientOrderType: 'department',
     isSystemApplied: false,
     pickupContact: '测试提货人',
   })

@@ -1,4 +1,15 @@
 <script setup lang="ts">
+/**
+ * 模块说明：src/views/client/ClientCheckoutView.vue
+ * 文件职责：承载客户端确认订单页，展示实名归属信息、提货信息、商品明细与下单提交入口。
+ * 实现逻辑：
+ * - 进入页面后会恢复当前账号的提货人草稿，并同步最新商品库存快照；
+ * - 下单归属完全由当前登录账号类型决定，页面只负责展示部门/工号/实名信息，不允许手动篡改归属；
+ * - 部门账号下单前强制校验所属部门、教职工号与金蝶申请状态，避免订单归属与实名链路脱节。
+ * 维护说明：
+ * - 若后端继续扩展实名字段或工号核验状态，请优先同步本页的实名信息展示区与 `handleSubmit()` 前置校验；
+ * - 若调整下单归属说明文案，请保持“前端只展示，服务端强制判定”的口径不变。
+ */
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
@@ -116,8 +127,23 @@ const selectedItems = computed(() => clientCartStore.selectedValidItems)
 const totalQty = computed(() => selectedItems.value.reduce((sum, item) => sum + item.qty, 0))
 const totalAmount = computed(() => selectedItems.value.reduce((sum, item) => sum + Math.max(0, Number(item.defaultPrice || 0)) * item.qty, 0))
 const submitDisabled = computed(() => submitting.value || !selectedItems.value.length)
+const currentRealName = computed(() => (
+  clientAuthStore.currentUser?.realName?.trim()
+  || clientAuthStore.currentUser?.username?.trim()
+  || clientAuthStore.currentUser?.account?.trim()
+  || '未设置'
+))
+const currentAccountTypeLabel = computed(() => (
+  clientAuthStore.currentUser?.accountType === 'department' ? '部门账号' : '个人账号'
+))
 const currentDepartmentName = computed(() => clientAuthStore.currentUser?.departmentName?.trim() || '')
 const currentStaffNo = computed(() => clientAuthStore.currentUser?.staffNo?.trim() || '')
+const currentStaffVerifiedText = computed(() => {
+  if (!isDepartmentOrder.value) {
+    return '个人账号无需工号核验'
+  }
+  return clientAuthStore.currentUser?.staffVerified ? '已完成工号核验' : '待人工核验'
+})
 const enforcedClientOrderType = computed(() => (
   clientAuthStore.currentUser?.accountType === 'department' ? 'department' : 'walkin'
 ))
@@ -276,12 +302,24 @@ const handleSubmit = async () => {
         </div>
         <div class="mt-3 grid gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
           <div class="flex items-center gap-2">
+            <span class="font-medium text-slate-600">账号类型</span>
+            <span class="truncate">{{ currentAccountTypeLabel }}</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="font-medium text-slate-600">真实姓名</span>
+            <span class="truncate">{{ currentRealName }}</span>
+          </div>
+          <div class="flex items-center gap-2">
             <span class="font-medium text-slate-600">所属部门</span>
-            <span class="truncate">{{ clientAuthStore.currentUser?.departmentName || '未设置部门' }}</span>
+            <span class="truncate">{{ isDepartmentOrder ? (clientAuthStore.currentUser?.departmentName || '未设置部门') : '个人账号不适用' }}</span>
           </div>
           <div class="flex items-center gap-2">
             <span class="font-medium text-slate-600">教职工号</span>
-            <span class="truncate">{{ clientAuthStore.currentUser?.staffNo || '无' }}</span>
+            <span class="truncate">{{ isDepartmentOrder ? (clientAuthStore.currentUser?.staffNo || '未设置工号') : '个人账号不适用' }}</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="font-medium text-slate-600">工号核验</span>
+            <span class="truncate">{{ currentStaffVerifiedText }}</span>
           </div>
         </div>
       </div>

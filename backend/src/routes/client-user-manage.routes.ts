@@ -64,6 +64,8 @@ clientUserManageRouter.get(
       keyword: typeof req.query.keyword === 'string' ? req.query.keyword : undefined,
       status,
       accountType,
+      departmentName: typeof req.query.departmentName === 'string' ? req.query.departmentName : undefined,
+      staffNo: typeof req.query.staffNo === 'string' ? req.query.staffNo : undefined,
     })
     res.json({
       code: 0,
