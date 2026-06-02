@@ -71,6 +71,7 @@ import type { AxiosResponse } from 'axios'
 import { http } from '@/api/http'
 import { Key, Lock, Message, User } from '@element-plus/icons-vue'
 import {
+  type ClientAccountType,
   getClientAuthCapabilities,
   getClientCaptcha,
   type ClientAuthCapabilities,
@@ -94,7 +95,14 @@ import {
 } from '@/utils/client-password-policy'
 import { normalizeRequestError } from '@/utils/error'
 
-type AuthMode = 'login' | 'register'
+type AuthMode = 'login' | 'register-personal' | 'register-department'
+
+const AUTH_MODE_QUERY_TAB_MAP: Record<AuthMode, 'login' | 'register-personal' | 'register-department'> = {
+  login: 'login',
+  'register-personal': 'register-personal',
+  'register-department': 'register-department',
+}
+const AUTH_MODE_SEQUENCE: AuthMode[] = ['login', 'register-personal', 'register-department']
 
 interface ClientCaptchaState {
   captchaId: string
@@ -157,6 +165,7 @@ const loginForm = reactive({
 const registerForm = reactive({
   username: '',
   account: '',
+  staffNo: '',
   department: '',
   password: '',
   confirmPassword: '',
@@ -171,6 +180,20 @@ const redirectPath = computed(() => {
 })
 
 const registerAccountChannel = computed(() => resolveAccountChannel(registerForm.account))
+const isRegisterMode = computed(() => activeMode.value !== 'login')
+const isDepartmentRegisterMode = computed(() => activeMode.value === 'register-department')
+const registerAccountType = computed<ClientAccountType>(() => {
+  return isDepartmentRegisterMode.value ? 'department' : 'personal'
+})
+const registerDepartmentPlaceholder = computed(() => {
+  if (capabilityLoading.value && !authCapabilities.value) {
+    return '部门选项加载中，可稍后再选'
+  }
+  return '所属部门（必选）'
+})
+const modeToggleSliderTransform = computed(() => {
+  return `translateX(${AUTH_MODE_SEQUENCE.indexOf(activeMode.value) * 100}%)`
+})
 const registerValidationMode = computed<ClientValidationMode>(() => {
   const channel = registerAccountChannel.value
   if (!channel) {
@@ -183,7 +206,7 @@ const registerDepartmentOptions = computed(() => authCapabilities.value?.departm
 const registerDepartmentTreeSelectData = computed(() => {
   return buildDepartmentTreeSelectData(authCapabilities.value?.departmentTree ?? [])
 })
-const shouldPrepareCaptcha = computed(() => activeMode.value === 'register' || loginCaptchaVisible.value)
+const shouldPrepareCaptcha = computed(() => isRegisterMode.value || loginCaptchaVisible.value)
 const isCapabilityHintVisible = computed(() => capabilityLoading.value && !authCapabilities.value)
 const isCapabilityFallbackVisible = computed(() => !capabilityLoading.value && !!capabilityErrorMessage.value && !authCapabilities.value)
 const forgotPasswordAvailable = computed(() => authCapabilities.value?.forgotPasswordEnabled ?? false)
@@ -222,6 +245,34 @@ const isCompactLoginLayout = computed(() => {
   return activeMode.value === 'login' && !loginCaptchaVisible.value && !successTip.value && !securityHint.value
 })
 
+// 三态模式和 query.tab 映射：
+// - 兼容历史 `register` 链接，默认回落到个人注册；
+// - 点击顶部切换器后同步刷新当前路由 query，保证刷新与分享链接能恢复正确表单。
+const resolveAuthModeFromQueryTab = (tab: unknown): AuthMode => {
+  if (tab === 'register-department') {
+    return 'register-department'
+  }
+  if (tab === 'register-personal' || tab === 'register') {
+    return 'register-personal'
+  }
+  return 'login'
+}
+
+const syncModeQuery = async (nextMode: AuthMode) => {
+  const nextTab = AUTH_MODE_QUERY_TAB_MAP[nextMode]
+  const currentTab = typeof route.query.tab === 'string' ? route.query.tab : ''
+  if (currentTab === nextTab) {
+    return
+  }
+  await router.replace({
+    path: route.path,
+    query: {
+      ...route.query,
+      tab: nextTab,
+    },
+  })
+}
+
 const getElementHeight = (element: Element | HTMLElement | null | undefined) => {
   return element instanceof HTMLElement ? element.offsetHeight : 0
 }
@@ -239,7 +290,11 @@ const syncWrapperHeight = (heightMode: 'auto' | 'measured' = 'auto', element?: E
 }
 
 const switchMode = async (nextMode: AuthMode) => {
-  if (activeMode.value === nextMode || formAnimating.value) {
+  if (formAnimating.value) {
+    return
+  }
+  if (activeMode.value === nextMode) {
+    await syncModeQuery(nextMode)
     return
   }
 
@@ -253,6 +308,7 @@ const switchMode = async (nextMode: AuthMode) => {
   registerFeedbackShowLoginAction.value = false
   registerFeedbackShowForgotAction.value = false
   activeMode.value = nextMode
+  await syncModeQuery(nextMode)
 }
 
 const handleFormBeforeLeave = () => {
@@ -281,7 +337,7 @@ const handleFormTransitionCancelled = () => {
 
 const applyRouteState = () => {
   const registeredAccount = typeof route.query.account === 'string' ? route.query.account.trim() : ''
-  activeMode.value = route.query.tab === 'register' ? 'register' : 'login'
+  activeMode.value = resolveAuthModeFromQueryTab(route.query.tab)
   successTip.value = typeof route.query.notice === 'string' ? route.query.notice : ''
 
   if (registeredAccount) {
@@ -405,7 +461,8 @@ const validateLoginPassword = (password: string) => password.trim().length > 0
  * - 继续复用共享的新密码强度规则，保证注册与改密口径一致。
  */
 const validateRegisterPassword = (password: string) => isClientNewPasswordValid(password)
-const validateUsername = (username: string) => username.trim().length >= 2
+const validateRealName = (username: string) => /^[\u4e00-\u9fa5][\u4e00-\u9fa5·\s]{1,19}$/.test(normalizeInputText(username))
+const validateStaffNo = (staffNo: string) => /^[A-Za-z0-9-]{4,32}$/.test(staffNo.trim())
 const validateLoginAccount = (account: string) => account.trim().length > 0
 const resolveAccountChannel = (account: string): 'mobile' | 'email' | null => {
   const normalized = account.trim()
@@ -726,8 +783,8 @@ const handleLogin = async () => {
 
 const handleRegister = async () => {
   const accountChannel = resolveAccountChannel(registerForm.account)
-  if (!validateUsername(registerForm.username)) {
-    ElMessage.warning('用户名至少 2 位')
+  if (!validateRealName(registerForm.username)) {
+    ElMessage.warning('请输入 2-20 位中文真实姓名，可包含空格或·')
     return
   }
   if (!accountChannel) {
@@ -742,7 +799,23 @@ const handleRegister = async () => {
     ElMessage.warning(CLIENT_CONFIRM_INPUT_MISMATCH_MESSAGE)
     return
   }
-  if (registerForm.department.trim() && !registerDepartmentOptions.value.includes(registerForm.department.trim())) {
+  if (isDepartmentRegisterMode.value && !registerForm.staffNo.trim()) {
+    ElMessage.warning('请输入教职工号')
+    return
+  }
+  if (isDepartmentRegisterMode.value && !validateStaffNo(registerForm.staffNo)) {
+    ElMessage.warning('教职工号仅支持字母、数字和短横线（4-32位）')
+    return
+  }
+  if (isDepartmentRegisterMode.value && !registerForm.department.trim()) {
+    ElMessage.warning('请选择所属部门')
+    return
+  }
+  if (
+    isDepartmentRegisterMode.value &&
+    registerForm.department.trim() &&
+    !registerDepartmentOptions.value.includes(registerForm.department.trim())
+  ) {
     ElMessage.warning('请选择系统配置中的部门选项')
     return
   }
@@ -776,8 +849,10 @@ const handleRegister = async () => {
             data: {
               username: registeredUsername,
               account: registeredAccount,
+              accountType: registerAccountType.value,
+              staffNo: isDepartmentRegisterMode.value ? registerForm.staffNo.trim() : undefined,
               password: registerForm.password,
-              departmentName: normalizeInputText(registerForm.department) || undefined,
+              departmentName: isDepartmentRegisterMode.value ? normalizeInputText(registerForm.department) || undefined : undefined,
               verificationCode: registerUsesVerificationCode.value ? normalizeInputText(registerForm.verificationCode) : undefined,
               captchaId: registerUsesVerificationCode.value ? undefined : captcha.captchaId,
               captchaCode: registerUsesVerificationCode.value ? undefined : normalizeInputText(registerForm.captcha),
@@ -799,6 +874,7 @@ const handleRegister = async () => {
           registerForm.captcha = ''
           registerForm.verificationCode = ''
           registerForm.username = ''
+          registerForm.staffNo = ''
           registerForm.password = ''
           registerForm.confirmPassword = ''
           registerForm.department = ''
@@ -924,10 +1000,23 @@ onUnmounted(() => {
       <section class="form-panel">
         <div class="form-container">
           <div class="mode-toggle">
-            <div class="toggle-slider" :class="activeMode === 'register' ? 'translate-x-full' : 'translate-x-0'"></div>
-            <button class="toggle-btn" :class="{ 'is-active': activeMode === 'login' }" @click="switchMode('login')">登录</button>
-            <button class="toggle-btn" :class="{ 'is-active': activeMode === 'register' }" @click="switchMode('register')">
-              注册
+            <div class="toggle-slider" :style="{ transform: modeToggleSliderTransform }"></div>
+            <button type="button" class="toggle-btn" :class="{ 'is-active': activeMode === 'login' }" @click="switchMode('login')">登录</button>
+            <button
+              type="button"
+              class="toggle-btn"
+              :class="{ 'is-active': activeMode === 'register-personal' }"
+              @click="switchMode('register-personal')"
+            >
+              个人注册
+            </button>
+            <button
+              type="button"
+              class="toggle-btn"
+              :class="{ 'is-active': activeMode === 'register-department' }"
+              @click="switchMode('register-department')"
+            >
+              部门注册
             </button>
           </div>
 
@@ -1059,9 +1148,19 @@ onUnmounted(() => {
                 </el-form>
               </div>
 
-              <div v-else ref="formBlockRef" key="register" class="form-block">
-                <h2 class="block-title">创建账号</h2>
-                <p class="block-subtitle">只需几步，创建用户名并绑定手机号或邮箱账号</p>
+              <div
+                v-else-if="activeMode === 'register-personal'"
+                ref="formBlockRef"
+                key="register-personal"
+                class="form-block"
+              >
+                <h2 class="block-title">创建个人账号</h2>
+                <p class="block-subtitle">填写真实姓名、登录账号与密码后，即可创建个人账号</p>
+                <el-alert class="register-channel-alert" type="info" :closable="false" show-icon>
+                  <template #title>
+                    个人账号默认按个人/散客流程下单，无需填写教职工号或所属部门。
+                  </template>
+                </el-alert>
 
                 <el-alert
                   v-if="registerFeedbackTitle"
@@ -1102,7 +1201,13 @@ onUnmounted(() => {
                 </el-alert>
 
                 <el-form @submit.prevent="handleRegister" class="space-y-4 mt-6">
-                  <el-input v-model="registerForm.username" placeholder="用户名（可自定义）" class="geo-input" size="large" clearable>
+                  <el-input
+                    v-model="registerForm.username"
+                    placeholder="真实姓名"
+                    class="geo-input"
+                    size="large"
+                    clearable
+                  >
                     <template #prefix>
                       <el-icon class="input-icon"><User /></el-icon>
                     </template>
@@ -1114,23 +1219,6 @@ onUnmounted(() => {
                     </template>
                   </el-input>
 
-                  <el-tree-select
-                    v-model="registerForm.department"
-                    :data="registerDepartmentTreeSelectData"
-                    node-key="id"
-                    :props="{ label: 'label', value: 'value', children: 'children' }"
-                    check-strictly
-                    :expand-on-click-node="false"
-                    :render-after-expand="false"
-                    :disabled="capabilityLoading && !authCapabilities"
-                    :placeholder="capabilityLoading && !authCapabilities ? '部门选项加载中，可稍后再选' : '所属部门（选填）'"
-                    class="geo-input-select"
-                    size="large"
-                    clearable
-                    filterable
-                    popper-class="client-auth-department-popper"
-                  />
-                  <p v-if="registerDepartmentOptions.length === 0" class="mt-1 text-xs text-slate-400">暂无可选部门，请联系管理员配置</p>
                   <div class="captcha-row">
                     <el-input
                       v-model="registerForm.captcha"
@@ -1221,7 +1309,192 @@ onUnmounted(() => {
                       />
                     </button>
                   </div>
-                  <el-button class="submit-btn" :loading="isLoading" @click="handleRegister">立即注册</el-button>
+                  <el-button class="submit-btn" native-type="submit" :loading="isLoading">立即注册个人账号</el-button>
+                </el-form>
+              </div>
+
+              <div v-else ref="formBlockRef" key="register-department" class="form-block">
+                <h2 class="block-title">创建部门账号</h2>
+                <p class="block-subtitle">填写实名、教职工号与所属部门后，即可走部门流程注册</p>
+                <el-alert class="register-channel-alert" type="info" :closable="false" show-icon>
+                  <template #title>
+                    部门账号会按部门流程下单，请确保真实姓名、教职工号和所属部门与实际登记一致。
+                  </template>
+                </el-alert>
+
+                <el-alert
+                  v-if="registerFeedbackTitle"
+                  class="mt-5"
+                  :type="registerFeedbackType"
+                  :closable="false"
+                  show-icon
+                >
+                  <template #title>
+                    {{ registerFeedbackTitle }}
+                  </template>
+                  <template #default>
+                    <div class="register-feedback-alert">
+                      <span>{{ registerFeedbackDescription }}</span>
+                      <div
+                        v-if="registerFeedbackShowLoginAction || registerFeedbackShowForgotAction"
+                        class="register-feedback-alert__actions"
+                      >
+                        <el-button
+                          v-if="registerFeedbackShowLoginAction"
+                          link
+                          type="primary"
+                          @click="handleRegisterFeedbackLogin"
+                        >
+                          去登录
+                        </el-button>
+                        <el-button
+                          v-if="registerFeedbackShowForgotAction"
+                          link
+                          type="primary"
+                          @click="handleRegisterFeedbackForgotPassword"
+                        >
+                          忘记密码
+                        </el-button>
+                      </div>
+                    </div>
+                  </template>
+                </el-alert>
+
+                <el-form @submit.prevent="handleRegister" class="space-y-4 mt-6">
+                  <el-input
+                    v-model="registerForm.username"
+                    placeholder="真实姓名（需与部门登记一致）"
+                    class="geo-input"
+                    size="large"
+                    clearable
+                  >
+                    <template #prefix>
+                      <el-icon class="input-icon"><User /></el-icon>
+                    </template>
+                  </el-input>
+
+                  <el-input v-model="registerForm.account" placeholder="登录账号（手机号或邮箱）" class="geo-input" size="large" clearable>
+                    <template #prefix>
+                      <el-icon class="input-icon"><User /></el-icon>
+                    </template>
+                  </el-input>
+
+                  <el-input v-model="registerForm.staffNo" placeholder="教职工号" class="geo-input" size="large" clearable>
+                    <template #prefix>
+                      <el-icon class="input-icon"><Key /></el-icon>
+                    </template>
+                  </el-input>
+
+                  <el-tree-select
+                    v-model="registerForm.department"
+                    :data="registerDepartmentTreeSelectData"
+                    node-key="id"
+                    :props="{ label: 'label', value: 'value', children: 'children' }"
+                    check-strictly
+                    :expand-on-click-node="false"
+                    :render-after-expand="false"
+                    :disabled="capabilityLoading && !authCapabilities"
+                    :placeholder="registerDepartmentPlaceholder"
+                    class="geo-input-select"
+                    size="large"
+                    clearable
+                    filterable
+                    popper-class="client-auth-department-popper"
+                  />
+                  <p v-if="registerDepartmentOptions.length === 0" class="mt-1 text-xs text-slate-400">
+                    暂无可选部门，请联系管理员配置
+                  </p>
+                  <div class="captcha-row">
+                    <el-input
+                      v-model="registerForm.captcha"
+                      :placeholder="registerUsesVerificationCode ? '先输入图形验证码，再发送手机/邮箱验证码' : '图形验证码'"
+                      class="geo-input flex-1"
+                      size="large"
+                      clearable
+                    >
+                      <template #prefix>
+                        <el-icon class="input-icon"><Key /></el-icon>
+                      </template>
+                    </el-input>
+
+                    <button type="button" class="captcha-box" :disabled="captchaLoading" @click="handleManualRefreshCaptcha">
+                      <span v-if="captchaLoading" class="captcha-loading">刷新中</span>
+                      <img
+                        v-else
+                        class="captcha-render"
+                        :src="captchaImageSrc"
+                        alt="图形验证码"
+                        draggable="false"
+                      />
+                    </button>
+                  </div>
+                  <p class="captcha-hint-text">{{ captchaHintText }}</p>
+                  <div v-if="registerUsesVerificationCode" class="captcha-row">
+                    <el-input v-model="registerForm.verificationCode" placeholder="手机/邮箱验证码" class="geo-input flex-1" size="large" clearable>
+                      <template #prefix>
+                        <el-icon class="input-icon"><Message /></el-icon>
+                      </template>
+                    </el-input>
+                    <el-button
+                      class="verification-code-button"
+                      :disabled="verificationSending || registerVerificationCountdown > 0"
+                      @click="handleSendRegisterVerificationCode"
+                    >
+                      {{
+                        registerVerificationCountdown > 0
+                          ? `${registerVerificationCountdown}s 后重发`
+                          : verificationSending
+                            ? '发送中'
+                            : '发送验证码'
+                      }}
+                    </el-button>
+                  </div>
+
+                  <el-input
+                    v-model="registerForm.password"
+                    :placeholder="CLIENT_NEW_PASSWORD_PLACEHOLDER"
+                    type="password"
+                    class="geo-input"
+                    size="large"
+                    show-password
+                  >
+                    <template #prefix>
+                      <el-icon class="input-icon"><Lock /></el-icon>
+                    </template>
+                  </el-input>
+                  <el-input
+                    v-model="registerForm.confirmPassword"
+                    :placeholder="CLIENT_CONFIRM_NEW_PASSWORD_PLACEHOLDER"
+                    type="password"
+                    class="geo-input"
+                    size="large"
+                    show-password
+                  >
+                    <template #prefix>
+                      <el-icon class="input-icon"><Lock /></el-icon>
+                    </template>
+                  </el-input>
+                  <p class="password-hint-text">{{ CLIENT_NEW_PASSWORD_RULE_HINT }}</p>
+
+                  <div v-if="!registerUsesVerificationCode" class="captcha-row sr-only">
+                    <el-input v-model="registerForm.captcha" placeholder="图形验证码" class="geo-input flex-1" size="large" clearable>
+                      <template #prefix>
+                        <el-icon class="input-icon"><Key /></el-icon>
+                      </template>
+                    </el-input>
+
+                    <button type="button" class="captcha-box" :disabled="captchaLoading" @click="handleManualRefreshCaptcha">
+                      <span v-if="captchaLoading" class="captcha-loading">刷新中</span>
+                      <img
+                        v-else
+                        class="captcha-render"
+                        :src="captchaImageSrc"
+                        alt="图形验证码"
+                        draggable="false"
+                      />
+                    </button>
+                  </div>
+                  <el-button class="submit-btn" native-type="submit" :loading="isLoading">立即注册部门账号</el-button>
                 </el-form>
               </div>
             </transition>
@@ -1397,7 +1670,7 @@ onUnmounted(() => {
   background: #ffffff;
   padding: 48px;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
   position: relative;
 }
@@ -1407,6 +1680,7 @@ onUnmounted(() => {
   max-width: 340px;
   position: relative;
   z-index: 1;
+  margin-top: 0;
 }
 
 .form-wrapper {
@@ -1437,7 +1711,7 @@ onUnmounted(() => {
   position: absolute;
   top: 5px;
   left: 5px;
-  width: calc(50% - 5px);
+  width: calc((100% - 10px) / 3);
   height: calc(100% - 10px);
   background: #ffffff;
   border-radius: 12px;
@@ -1498,6 +1772,10 @@ onUnmounted(() => {
   font-size: 13px;
   color: #475569;
   margin-bottom: 24px;
+}
+
+.register-channel-alert {
+  margin-bottom: 20px;
 }
 
 .geo-input :deep(.el-input__wrapper) {
