@@ -144,7 +144,7 @@ class ClientAuthService {
   private readonly sessionRepo = AppDataSource.getRepository(ClientUserSession)
   private readonly clientStaffDirectoryRepo = AppDataSource.getRepository(ClientStaffDirectory)
   private readonly staffNoPattern = /^[A-Za-z0-9-]{4,32}$/
-  private readonly realNamePattern = /^[\u4e00-\u9fa5][\u4e00-\u9fa5· ]{1,19}$/
+  private readonly realNamePattern = /^[\p{Script=Han}][\p{Script=Han}· ]{1,19}$/u
 
   private async getVerificationCapabilities(): Promise<ClientAuthCapabilities> {
     const [configs, departmentConfigs] = await Promise.all([

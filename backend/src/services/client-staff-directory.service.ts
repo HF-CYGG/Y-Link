@@ -107,7 +107,7 @@ type NormalizedImportRow = {
 }
 
 const STAFF_NO_PATTERN = /^[A-Za-z0-9-]{4,32}$/
-const REAL_NAME_PATTERN = /^[\u4e00-\u9fa5][\u4e00-\u9fa5·\s]{1,19}$/
+const REAL_NAME_PATTERN = /^[\p{Script=Han}][\p{Script=Han}·\s]{1,19}$/u
 const STAFF_DIRECTORY_HEADER_KEYWORDS = {
   realName: new Set(['姓名', '真实姓名']),
   staffNo: new Set(['工号', '教职工号', '职工号']),

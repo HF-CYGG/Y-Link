@@ -95,7 +95,7 @@ const realNameRule = (_rule: unknown, value: string, callback: (error?: Error) =
     callback(new Error('请输入真实姓名'))
     return
   }
-  if (!/^[\u4e00-\u9fa5][\u4e00-\u9fa5·\s]{1,19}$/.test(normalized)) {
+  if (!/^[\p{Script=Han}][\p{Script=Han}·\s]{1,19}$/u.test(normalized)) {
     callback(new Error('姓名必须为2-20位中文，可包含空格或·'))
     return
   }

@@ -461,7 +461,7 @@ const validateLoginPassword = (password: string) => password.trim().length > 0
  * - 继续复用共享的新密码强度规则，保证注册与改密口径一致。
  */
 const validateRegisterPassword = (password: string) => isClientNewPasswordValid(password)
-const validateRealName = (username: string) => /^[\u4e00-\u9fa5][\u4e00-\u9fa5·\s]{1,19}$/.test(normalizeInputText(username))
+const validateRealName = (username: string) => /^[\p{Script=Han}][\p{Script=Han}·\s]{1,19}$/u.test(normalizeInputText(username))
 const validateStaffNo = (staffNo: string) => /^[A-Za-z0-9-]{4,32}$/.test(staffNo.trim())
 const validateLoginAccount = (account: string) => account.trim().length > 0
 const resolveAccountChannel = (account: string): 'mobile' | 'email' | null => {

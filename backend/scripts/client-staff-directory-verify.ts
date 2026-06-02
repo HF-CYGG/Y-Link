@@ -372,6 +372,25 @@ async function main() {
     assert.equal(xlsxFileImportResult.summary.created, 2, '上传 xlsx 文件导入应创建 2 条记录')
     pass('支持上传 xlsx 文件自动导入教职工库')
 
+    const rareHanNamePreviewResult = await expectJsonOkResponse<StaffDirectoryPreviewResult>(
+      await fetch(`${baseUrl}/api/system-configs/client-staff-directory/import/preview`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminLogin.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          rows: [
+            { staffNo: 'HY1010', realName: '𠮷文', departmentName: '学校办公室' },
+          ],
+        }),
+      }),
+      '预览包含扩展汉字姓名的教职工库导入结果',
+    )
+    assert.equal(rareHanNamePreviewResult.summary.total, 1, '扩展汉字姓名预览应识别 1 条记录')
+    assert.equal(rareHanNamePreviewResult.rows[0]?.realName, '𠮷文', '扩展汉字姓名预览应保留原始姓名')
+    pass('扩展汉字姓名可通过教职工库导入预览校验')
+
     const departmentConfigAfterImport = await expectJsonOkResponse<{
       tree: Array<{ id?: string; label: string; children?: unknown[] }>
       options: string[]
