@@ -6,6 +6,7 @@
  * 3. 目录状态变化后会批量同步已绑定的部门账号实名校验状态，保证历史账号数据与目录口径一致。
  */
 import { AppDataSource } from '../config/data-source.js'
+import ExcelJS from 'exceljs'
 import {
   CLIENT_STAFF_DIRECTORY_STATUSES,
   type ClientStaffDirectoryStatus,
@@ -66,6 +67,11 @@ export interface ImportClientStaffDirectoryInput {
   rawText?: string
 }
 
+export interface ImportClientStaffDirectoryFileInput {
+  buffer: Buffer
+  originalName: string
+}
+
 type ClientStaffDirectorySnapshot = {
   id: string
   staffNo: string
@@ -83,6 +89,12 @@ type NormalizedImportRow = {
 
 const STAFF_NO_PATTERN = /^[A-Za-z0-9-]{4,32}$/
 const REAL_NAME_PATTERN = /^[\u4e00-\u9fa5][\u4e00-\u9fa5·\s]{1,19}$/
+const STAFF_DIRECTORY_HEADER_KEYWORDS = {
+  realName: new Set(['姓名', '真实姓名']),
+  staffNo: new Set(['工号', '教职工号', '职工号']),
+  departmentName: new Set(['部门', '所属部门']),
+  status: new Set(['状态']),
+}
 
 function sanitizeRecord(
   record: ClientStaffDirectory,
@@ -224,24 +236,142 @@ export class ClientStaffDirectoryService {
       const columns = line.includes('\t')
         ? line.split('\t')
         : line.split(/[，,]/)
-      const [firstColumn = '', secondColumn = '', departmentName = '', status = 'active'] = columns.map((item) => item.trim())
-      let staffNo = ''
-      let realName = ''
-      if (STAFF_NO_PATTERN.test(firstColumn) && !STAFF_NO_PATTERN.test(secondColumn)) {
-        staffNo = firstColumn
-        realName = secondColumn
-      } else if (STAFF_NO_PATTERN.test(secondColumn) && !STAFF_NO_PATTERN.test(firstColumn)) {
-        realName = firstColumn
-        staffNo = secondColumn
-      } else {
-        throw new BizError(`第 ${index + 1} 行格式不正确，请按“姓名、工号、部门”或“工号、姓名、部门”顺序填写`, 400)
+      const parsedRow = this.parseImportColumns(columns, index)
+      if (parsedRow) {
+        rows.push(parsedRow)
       }
-      if (!staffNo || !realName || !departmentName) {
-        throw new BizError(`第 ${index + 1} 行缺少教职工号、姓名或部门`, 400)
-      }
-      rows.push({ staffNo, realName, departmentName, status: status as ClientStaffDirectoryStatus })
     }
     return rows
+  }
+
+  private isHeaderKeyword(value: string, keywordType: keyof typeof STAFF_DIRECTORY_HEADER_KEYWORDS) {
+    const normalizedValue = value.trim().replaceAll(/\s+/g, '')
+    return STAFF_DIRECTORY_HEADER_KEYWORDS[keywordType].has(normalizedValue)
+  }
+
+  private isImportHeaderRow(columns: string[]) {
+    const [firstColumn = '', secondColumn = '', thirdColumn = ''] = columns.map((item) => item.trim())
+    return this.isHeaderKeyword(firstColumn, 'realName')
+      && this.isHeaderKeyword(secondColumn, 'staffNo')
+      && this.isHeaderKeyword(thirdColumn, 'departmentName')
+  }
+
+  private parseImportColumns(columns: string[], index: number): ImportClientStaffDirectoryRowInput | null {
+    if (columns.every((item) => !item.trim())) {
+      return null
+    }
+    if (index === 0 && this.isImportHeaderRow(columns)) {
+      return null
+    }
+    const [firstColumn = '', secondColumn = '', departmentName = '', status = 'active'] = columns.map((item) => item.trim())
+    let staffNo = ''
+    let realName = ''
+    if (STAFF_NO_PATTERN.test(firstColumn) && !STAFF_NO_PATTERN.test(secondColumn)) {
+      staffNo = firstColumn
+      realName = secondColumn
+    } else if (STAFF_NO_PATTERN.test(secondColumn) && !STAFF_NO_PATTERN.test(firstColumn)) {
+      realName = firstColumn
+      staffNo = secondColumn
+    } else {
+      throw new BizError(`第 ${index + 1} 行格式不正确，请按“姓名、工号、部门”或“工号、姓名、部门”顺序填写`, 400)
+    }
+    if (!staffNo || !realName || !departmentName) {
+      throw new BizError(`第 ${index + 1} 行缺少教职工号、姓名或部门`, 400)
+    }
+    return {
+      staffNo,
+      realName,
+      departmentName,
+      status: status as ClientStaffDirectoryStatus,
+    }
+  }
+
+  private stringifyWorkbookCellValue(value: unknown): string {
+    if (value == null) {
+      return ''
+    }
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+      return String(value)
+    }
+    if (value instanceof Date) {
+      return value.toISOString()
+    }
+    if (typeof value === 'object') {
+      if ('text' in value && typeof value.text === 'string') {
+        return value.text
+      }
+      if ('result' in value && value.result != null) {
+        return String(value.result)
+      }
+      if ('richText' in value && Array.isArray(value.richText)) {
+        return value.richText
+          .map((item) => (typeof item?.text === 'string' ? item.text : ''))
+          .join('')
+      }
+      if ('hyperlink' in value && 'text' in value && typeof value.text === 'string') {
+        return value.text
+      }
+      if ('error' in value && typeof value.error === 'string') {
+        return value.error
+      }
+    }
+    return String(value)
+  }
+
+  private normalizeWorkbookColumns(rowValues: unknown): string[] {
+    if (!Array.isArray(rowValues)) {
+      return []
+    }
+    return rowValues
+      .slice(1)
+      .map((item: unknown) => this.stringifyWorkbookCellValue(item))
+  }
+
+  private async parseWorkbookRows(buffer: Buffer): Promise<ImportClientStaffDirectoryRowInput[]> {
+    const workbook = new ExcelJS.Workbook()
+    try {
+      // `exceljs` 的 Buffer 类型定义仍停留在旧版 Node 声明，这里按其入参签名显式收窄，避免与 Node 24 的泛型 Buffer 冲突。
+      const workbookBuffer = Buffer.from(buffer) as unknown as Parameters<typeof workbook.xlsx.load>[0]
+      await workbook.xlsx.load(workbookBuffer)
+    } catch {
+      throw new BizError('Excel 文件内容无法识别，请确认文件未损坏后重试', 400)
+    }
+    const worksheet = workbook.worksheets.find((item) => item.name.trim())
+    if (!worksheet) {
+      throw new BizError('Excel 文件中没有可读取的工作表', 400)
+    }
+    const rows: ImportClientStaffDirectoryRowInput[] = []
+    worksheet.eachRow({ includeEmpty: false }, (row, rowNumber) => {
+      const parsedRow = this.parseImportColumns(
+        this.normalizeWorkbookColumns(row.values),
+        rowNumber - 1,
+      )
+      if (parsedRow) {
+        rows.push(parsedRow)
+      }
+    })
+    return rows
+  }
+
+  /**
+   * 文件导入解析：
+   * - txt 直接按现有文本导入规则解析，继续兼容逗号 / 中文逗号 / Tab；
+   * - xlsx 读取首个工作表，自动识别表头并抽取“姓名、工号、部门”三列；
+   * - 文件内容最终都会归一化为既有导入结构，保证后续批量入库、补部门和同步账号逻辑无需分叉。
+   */
+  async parseImportFile(input: ImportClientStaffDirectoryFileInput): Promise<ImportClientStaffDirectoryInput> {
+    const normalizedName = input.originalName.trim().toLowerCase()
+    if (normalizedName.endsWith('.txt')) {
+      return {
+        rawText: input.buffer.toString('utf-8'),
+      }
+    }
+    if (normalizedName.endsWith('.xlsx')) {
+      return {
+        rows: await this.parseWorkbookRows(input.buffer),
+      }
+    }
+    throw new BizError('仅支持上传 txt 或 xlsx 文件', 400)
   }
 
   private normalizeImportRows(input: ImportClientStaffDirectoryInput): NormalizedImportRow[] {

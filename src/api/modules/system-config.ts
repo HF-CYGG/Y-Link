@@ -380,3 +380,16 @@ export const importClientStaffDirectory = (payload: ImportClientStaffDirectoryPa
     url: '/system-configs/client-staff-directory/import',
     data: payload,
   })
+
+export const importClientStaffDirectoryFile = (file: File) => {
+  const formData = new FormData()
+  formData.append('file', file)
+  return request<ImportClientStaffDirectoryResult>({
+    method: 'POST',
+    url: '/system-configs/client-staff-directory/import',
+    data: formData,
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+}

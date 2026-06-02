@@ -1,3 +1,10 @@
+<!--
+  文件说明：系统配置页中的教职工目录维护面板，负责目录查询、单条维护以及 txt/xlsx 批量导入入口。
+  实现逻辑：
+  1. 统一承接目录列表筛选、分页与启停操作，保证管理员维护入口集中在同一块配置面板内；
+  2. 新增与编辑共用同一套表单校验规则，避免教职工号、实名和部门字段出现口径不一致；
+  3. 批量导入支持上传 txt、xlsx 或直接粘贴文本，前端仅做轻量校验，具体格式识别交由后端解析。
+-->
 <script setup lang="ts">
 import dayjs from 'dayjs'
 import { computed, onMounted, reactive, ref } from 'vue'
@@ -6,6 +13,7 @@ import {
   createClientStaffDirectoryRecord,
   getClientStaffDirectoryList,
   importClientStaffDirectory,
+  importClientStaffDirectoryFile,
   updateClientStaffDirectoryRecord,
   updateClientStaffDirectoryStatus,
   type ClientStaffDirectoryRecord,
@@ -51,9 +59,13 @@ const dialogForm = reactive({
 const importVisible = ref(false)
 const importSubmitting = ref(false)
 const importFormRef = ref<FormInstance>()
+const importFileInputRef = ref<HTMLInputElement>()
+const selectedImportFile = ref<File | null>(null)
 const importForm = reactive({
   rawText: '',
 })
+const STAFF_DIRECTORY_IMPORT_FILE_ACCEPT = '.txt,.xlsx'
+const STAFF_DIRECTORY_IMPORT_MAX_FILE_SIZE = 8 * 1024 * 1024
 
 const dialogTitle = computed(() => (dialogMode.value === 'create' ? '新增教职工目录记录' : '编辑教职工目录记录'))
 const actionDisabled = computed(() => props.loading || listLoading.value)
@@ -93,10 +105,6 @@ const rules: FormRules = {
   ],
 }
 
-const importRules: FormRules = {
-  rawText: [{ required: true, message: '请粘贴至少一条目录记录', trigger: 'blur' }],
-}
-
 const getStatusTagType = (status: ClientStaffDirectoryStatus) => (status === 'active' ? 'success' : 'info')
 const getStatusLabel = (status: ClientStaffDirectoryStatus) => (status === 'active' ? '启用中' : '已停用')
 
@@ -111,6 +119,42 @@ const resetDialogForm = () => {
 
 const resetImportForm = () => {
   importForm.rawText = ''
+  selectedImportFile.value = null
+  if (importFileInputRef.value) {
+    importFileInputRef.value.value = ''
+  }
+  importFormRef.value?.clearValidate()
+}
+
+const triggerImportFilePicker = () => {
+  importFileInputRef.value?.click()
+}
+
+const clearSelectedImportFile = () => {
+  selectedImportFile.value = null
+  if (importFileInputRef.value) {
+    importFileInputRef.value.value = ''
+  }
+}
+
+const handleImportFileChange = (event: Event) => {
+  const target = event.target as HTMLInputElement | null
+  const file = target?.files?.[0]
+  if (!file) {
+    clearSelectedImportFile()
+    return
+  }
+  if (!/\.(txt|xlsx)$/i.test(file.name)) {
+    ElMessage.warning('仅支持上传 txt 或 xlsx 文件')
+    clearSelectedImportFile()
+    return
+  }
+  if (file.size > STAFF_DIRECTORY_IMPORT_MAX_FILE_SIZE) {
+    ElMessage.warning('导入文件不能超过 8 MB')
+    clearSelectedImportFile()
+    return
+  }
+  selectedImportFile.value = file
   importFormRef.value?.clearValidate()
 }
 
@@ -224,15 +268,17 @@ const handleSubmitImport = async () => {
   if (!props.canUpdateConfigs) {
     return
   }
-  const valid = await importFormRef.value?.validate().catch(() => false)
-  if (!valid) {
+  if (!selectedImportFile.value && !importForm.rawText.trim()) {
+    ElMessage.warning('请上传 txt/xlsx 文件，或粘贴至少一条目录记录')
     return
   }
   importSubmitting.value = true
   try {
-    const result = await importClientStaffDirectory({
-      rawText: importForm.rawText,
-    })
+    const result = selectedImportFile.value
+      ? await importClientStaffDirectoryFile(selectedImportFile.value)
+      : await importClientStaffDirectory({
+          rawText: importForm.rawText,
+        })
     const autoCreatedDepartmentText = result.summary.autoCreatedDepartments.length > 0
       ? `，自动补齐部门 ${result.summary.autoCreatedDepartments.length} 个`
       : ''
@@ -293,7 +339,7 @@ onMounted(() => {
       :closable="false"
       show-icon
       title="导入格式"
-      description="支持粘贴多行文本，每行一条记录。列顺序优先按：姓名, 工号, 所属部门 解析，也兼容旧格式“工号, 姓名, 所属部门”；支持英文逗号、中文逗号或 Tab 分隔。若部门尚未在系统配置中维护，导入时会自动补齐。"
+      description="支持上传 txt、xlsx 文件，也支持粘贴多行文本。列顺序优先按：姓名, 工号, 所属部门 解析，也兼容旧格式“工号, 姓名, 所属部门”；支持英文逗号、中文逗号或 Tab 分隔。若部门尚未在系统配置中维护，导入时会自动补齐。"
     />
 
     <el-table
@@ -393,13 +439,33 @@ onMounted(() => {
       align-center
       @closed="resetImportForm"
     >
-      <el-form ref="importFormRef" :model="importForm" :rules="importRules" label-position="top">
-        <el-form-item label="目录文本" prop="rawText">
+      <el-form ref="importFormRef" :model="importForm" label-position="top">
+        <el-form-item label="上传导入文件">
+          <input
+            ref="importFileInputRef"
+            class="hidden"
+            type="file"
+            :accept="STAFF_DIRECTORY_IMPORT_FILE_ACCEPT"
+            @change="handleImportFileChange"
+          />
+          <div class="w-full rounded-2xl border border-dashed border-slate-300 bg-slate-50/80 p-4">
+            <div class="flex flex-wrap items-center gap-3">
+              <el-button type="primary" plain @click="triggerImportFilePicker">选择 txt / xlsx 文件</el-button>
+              <span class="text-sm text-slate-500">支持 `.txt`、`.xlsx`，系统会自动识别并导入。</span>
+            </div>
+            <div v-if="selectedImportFile" class="mt-3 flex flex-wrap items-center gap-3 rounded-xl bg-white px-3 py-2 text-sm text-slate-600">
+              <span>已选择：{{ selectedImportFile.name }}</span>
+              <span>大小：{{ Math.max(1, Math.round(selectedImportFile.size / 1024)) }} KB</span>
+              <el-button link type="danger" @click="clearSelectedImportFile">移除文件</el-button>
+            </div>
+          </div>
+        </el-form-item>
+        <el-form-item label="目录文本（可选兜底）" prop="rawText">
           <el-input
             v-model="importForm.rawText"
             type="textarea"
             :rows="12"
-            placeholder="示例：&#10;张老师,HY1001,海右书院&#10;李老师,HY1002,海右书院"
+            placeholder="未上传文件时，可直接粘贴文本。示例：&#10;张老师,HY1001,海右书院&#10;李老师,HY1002,海右书院"
           />
         </el-form-item>
       </el-form>

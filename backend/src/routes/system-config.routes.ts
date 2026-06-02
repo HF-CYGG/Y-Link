@@ -4,7 +4,9 @@
  * 维护重点：新增配置项时需要同步关注配置键名、前端表单字段以及操作审计所依赖的请求上下文。
  */
 
+import path from 'node:path'
 import { Router } from 'express'
+import multer from 'multer'
 import { z } from 'zod'
 import { requirePermission, requireRole } from '../middleware/auth.middleware.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
@@ -14,6 +16,7 @@ import { verificationCodeService } from '../services/verification-code.service.j
 import { clientStaffDirectoryService } from '../services/client-staff-directory.service.js'
 import { CLIENT_STAFF_DIRECTORY_STATUSES } from '../entities/client-staff-directory.entity.js'
 import { asyncHandler } from '../utils/async-handler.js'
+import { BizError } from '../utils/errors.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 
 const orderSerialConfigValueSchema = z.object({
@@ -146,6 +149,33 @@ const importClientStaffDirectorySchema = z
   .refine((value) => (Array.isArray(value.rows) && value.rows.length > 0) || Boolean(value.rawText?.trim()), {
     message: '教职工目录导入参数缺失',
   })
+
+const STAFF_DIRECTORY_IMPORT_ALLOWED_EXTENSIONS = new Set(['.txt', '.xlsx'])
+const STAFF_DIRECTORY_IMPORT_ALLOWED_MIME_TYPES = new Set([
+  'text/plain',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  'application/octet-stream',
+])
+const STAFF_DIRECTORY_IMPORT_MAX_FILE_SIZE = 8 * 1024 * 1024
+
+const staffDirectoryImportUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: STAFF_DIRECTORY_IMPORT_MAX_FILE_SIZE,
+  },
+  fileFilter: (_req, file, cb) => {
+    const normalizedExtension = path.extname(file.originalname).toLowerCase()
+    const normalizedMimeType = (file.mimetype || '').toLowerCase()
+    if (
+      STAFF_DIRECTORY_IMPORT_ALLOWED_EXTENSIONS.has(normalizedExtension)
+      && (!normalizedMimeType || STAFF_DIRECTORY_IMPORT_ALLOWED_MIME_TYPES.has(normalizedMimeType))
+    ) {
+      cb(null, true)
+      return
+    }
+    cb(new BizError('仅支持上传 txt 或 xlsx 文件', 400))
+  },
+})
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export const systemConfigRouter = Router()
@@ -401,9 +431,15 @@ systemConfigRouter.post(
   '/client-staff-directory/import',
   requirePermission('system_configs:update'),
   requireRole('admin'),
+  staffDirectoryImportUpload.single('file'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
-    const payload = importClientStaffDirectorySchema.parse(req.body)
+    const payload = req.file
+      ? await clientStaffDirectoryService.parseImportFile({
+          buffer: req.file.buffer,
+          originalName: req.file.originalname,
+        })
+      : importClientStaffDirectorySchema.parse(req.body)
     const data = await clientStaffDirectoryService.importRows(payload, authReq.auth, extractRequestMeta(req))
     res.json({
       code: 0,

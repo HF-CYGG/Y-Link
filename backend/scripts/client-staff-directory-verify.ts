@@ -1,9 +1,9 @@
 import 'reflect-metadata'
 import assert from 'node:assert/strict'
+import ExcelJS from 'exceljs'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import * as XLSX from 'xlsx'
 
 const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
@@ -70,14 +70,13 @@ function readCookieValueFromResponse(response: Response, cookieName: string): st
   return match?.[1] ? decodeURIComponent(match[1]) : null
 }
 
-function createStaffDirectoryWorkbookBlob(rows: string[][]) {
-  const worksheet = XLSX.utils.aoa_to_sheet(rows)
-  const workbook = XLSX.utils.book_new()
-  XLSX.utils.book_append_sheet(workbook, worksheet, '教职工工号库')
-  const buffer = XLSX.write(workbook, {
-    type: 'buffer',
-    bookType: 'xlsx',
-  })
+async function createStaffDirectoryWorkbookBlob(rows: string[][]) {
+  const workbook = new ExcelJS.Workbook()
+  const worksheet = workbook.addWorksheet('教职工工号库')
+  for (const row of rows) {
+    worksheet.addRow(row)
+  }
+  const buffer = await workbook.xlsx.writeBuffer()
   return new Blob([buffer], {
     type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   })
@@ -273,7 +272,7 @@ async function main() {
     const xlsxUploadForm = new FormData()
     xlsxUploadForm.append(
       'file',
-      createStaffDirectoryWorkbookBlob([
+      await createStaffDirectoryWorkbookBlob([
         ['姓名', '工号', '部门'],
         ['吴老师', 'HY1007', '实验实训中心'],
         ['郑老师', 'HY1008', '实验实训中心'],
