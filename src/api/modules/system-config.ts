@@ -232,6 +232,25 @@ export interface ImportClientStaffDirectoryResult {
   list: ClientStaffDirectoryRecord[]
 }
 
+export interface ImportClientStaffDirectoryPreviewRow {
+  staffNo: string
+  realName: string
+  departmentName: string
+  status: ClientStaffDirectoryStatus
+  action: 'create' | 'update' | 'skip'
+}
+
+export interface ImportClientStaffDirectoryPreviewResult {
+  summary: {
+    total: number
+    creatable: number
+    updatable: number
+    skippable: number
+    autoCreatedDepartments: string[]
+  }
+  rows: ImportClientStaffDirectoryPreviewRow[]
+}
+
 /**
  * 获取流水号生成配置：
  * - 区分“部门”和“散客”开单类型。
@@ -381,12 +400,32 @@ export const importClientStaffDirectory = (payload: ImportClientStaffDirectoryPa
     data: payload,
   })
 
+export const previewClientStaffDirectoryImport = (payload: ImportClientStaffDirectoryPayload) =>
+  request<ImportClientStaffDirectoryPreviewResult>({
+    method: 'POST',
+    url: '/system-configs/client-staff-directory/import/preview',
+    data: payload,
+  })
+
 export const importClientStaffDirectoryFile = (file: File) => {
   const formData = new FormData()
   formData.append('file', file)
   return request<ImportClientStaffDirectoryResult>({
     method: 'POST',
     url: '/system-configs/client-staff-directory/import',
+    data: formData,
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+}
+
+export const previewClientStaffDirectoryImportFile = (file: File) => {
+  const formData = new FormData()
+  formData.append('file', file)
+  return request<ImportClientStaffDirectoryPreviewResult>({
+    method: 'POST',
+    url: '/system-configs/client-staff-directory/import/preview',
     data: formData,
     headers: {
       'Content-Type': 'multipart/form-data',

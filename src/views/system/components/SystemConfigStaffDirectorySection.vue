@@ -1,21 +1,24 @@
 <!--
-  文件说明：系统配置页中的教职工目录维护面板，负责目录查询、单条维护以及 txt/xlsx 批量导入入口。
+  文件说明：系统配置页中的教职工目录维护面板，负责目录查询、单条维护以及 txt/xlsx 拖拽导入预览入口。
   实现逻辑：
   1. 统一承接目录列表筛选、分页与启停操作，保证管理员维护入口集中在同一块配置面板内；
   2. 新增与编辑共用同一套表单校验规则，避免教职工号、实名和部门字段出现口径不一致；
-  3. 批量导入支持上传 txt、xlsx 或直接粘贴文本，前端仅做轻量校验，具体格式识别交由后端解析。
+  3. 批量导入支持拖拽/选择 txt、xlsx 或直接粘贴文本，先请求后端生成预览，再由管理员确认后正式入库。
 -->
 <script setup lang="ts">
 import dayjs from 'dayjs'
-import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { ElMessage, ElMessageBox, type FormInstance, type FormRules, type UploadFile, type UploadInstance } from 'element-plus'
 import {
   createClientStaffDirectoryRecord,
   getClientStaffDirectoryList,
   importClientStaffDirectory,
-  importClientStaffDirectoryFile,
+  previewClientStaffDirectoryImport,
+  previewClientStaffDirectoryImportFile,
   updateClientStaffDirectoryRecord,
   updateClientStaffDirectoryStatus,
+  type ImportClientStaffDirectoryPreviewResult,
+  type ImportClientStaffDirectoryPreviewRow,
   type ClientStaffDirectoryRecord,
   type ClientStaffDirectoryStatus,
 } from '@/api/modules/system-config'
@@ -58,9 +61,11 @@ const dialogForm = reactive({
 
 const importVisible = ref(false)
 const importSubmitting = ref(false)
+const importPreviewLoading = ref(false)
 const importFormRef = ref<FormInstance>()
-const importFileInputRef = ref<HTMLInputElement>()
+const importUploadRef = ref<UploadInstance>()
 const selectedImportFile = ref<File | null>(null)
+const importPreviewResult = ref<ImportClientStaffDirectoryPreviewResult | null>(null)
 const importForm = reactive({
   rawText: '',
 })
@@ -69,6 +74,7 @@ const STAFF_DIRECTORY_IMPORT_MAX_FILE_SIZE = 8 * 1024 * 1024
 
 const dialogTitle = computed(() => (dialogMode.value === 'create' ? '新增教职工目录记录' : '编辑教职工目录记录'))
 const actionDisabled = computed(() => props.loading || listLoading.value)
+const hasImportPreview = computed(() => Boolean(importPreviewResult.value?.rows.length))
 
 const staffNoRule = (_rule: unknown, value: string, callback: (error?: Error) => void) => {
   const normalized = value.trim()
@@ -107,6 +113,24 @@ const rules: FormRules = {
 
 const getStatusTagType = (status: ClientStaffDirectoryStatus) => (status === 'active' ? 'success' : 'info')
 const getStatusLabel = (status: ClientStaffDirectoryStatus) => (status === 'active' ? '启用中' : '已停用')
+const getImportActionTagType = (action: ImportClientStaffDirectoryPreviewRow['action']) => {
+  if (action === 'create') {
+    return 'success'
+  }
+  if (action === 'update') {
+    return 'warning'
+  }
+  return 'info'
+}
+const getImportActionLabel = (action: ImportClientStaffDirectoryPreviewRow['action']) => {
+  if (action === 'create') {
+    return '新增'
+  }
+  if (action === 'update') {
+    return '更新'
+  }
+  return '跳过'
+}
 
 const resetDialogForm = () => {
   editingRecordId.value = ''
@@ -117,45 +141,83 @@ const resetDialogForm = () => {
   dialogFormRef.value?.clearValidate()
 }
 
-const resetImportForm = () => {
-  importForm.rawText = ''
-  selectedImportFile.value = null
-  if (importFileInputRef.value) {
-    importFileInputRef.value.value = ''
-  }
-  importFormRef.value?.clearValidate()
+const resetImportPreview = () => {
+  importPreviewResult.value = null
 }
 
-const triggerImportFilePicker = () => {
-  importFileInputRef.value?.click()
+const resetImportForm = () => {
+  importForm.rawText = ''
+  resetImportPreview()
+  selectedImportFile.value = null
+  importUploadRef.value?.clearFiles()
+  importFormRef.value?.clearValidate()
 }
 
 const clearSelectedImportFile = () => {
+  resetImportPreview()
   selectedImportFile.value = null
-  if (importFileInputRef.value) {
-    importFileInputRef.value.value = ''
-  }
+  importUploadRef.value?.clearFiles()
 }
 
-const handleImportFileChange = (event: Event) => {
-  const target = event.target as HTMLInputElement | null
-  const file = target?.files?.[0]
-  if (!file) {
-    clearSelectedImportFile()
-    return
-  }
+const applySelectedImportFile = (file: File) => {
   if (!/\.(txt|xlsx)$/i.test(file.name)) {
     ElMessage.warning('仅支持上传 txt 或 xlsx 文件')
-    clearSelectedImportFile()
-    return
+    return false
   }
   if (file.size > STAFF_DIRECTORY_IMPORT_MAX_FILE_SIZE) {
     ElMessage.warning('导入文件不能超过 8 MB')
+    return false
+  }
+  resetImportPreview()
+  selectedImportFile.value = file
+  importFormRef.value?.clearValidate()
+  return true
+}
+
+const handleImportUploadChange = (uploadFile: UploadFile) => {
+  const rawFile = uploadFile.raw
+  importUploadRef.value?.clearFiles()
+  if (!(rawFile instanceof File)) {
     clearSelectedImportFile()
     return
   }
-  selectedImportFile.value = file
-  importFormRef.value?.clearValidate()
+  if (!applySelectedImportFile(rawFile)) {
+    clearSelectedImportFile()
+  }
+}
+
+const buildConfirmedImportRows = (rows: ImportClientStaffDirectoryPreviewRow[]) => {
+  return rows.map((item) => ({
+    staffNo: item.staffNo,
+    realName: item.realName,
+    departmentName: item.departmentName,
+    status: item.status,
+  }))
+}
+
+const handleGenerateImportPreview = async () => {
+  if (!props.canUpdateConfigs) {
+    return
+  }
+  if (!selectedImportFile.value && !importForm.rawText.trim()) {
+    ElMessage.warning('请先拖拽/选择 txt/xlsx 文件，或粘贴至少一条目录记录')
+    return
+  }
+  importPreviewLoading.value = true
+  try {
+    const result = selectedImportFile.value
+      ? await previewClientStaffDirectoryImportFile(selectedImportFile.value)
+      : await previewClientStaffDirectoryImport({
+          rawText: importForm.rawText,
+        })
+    importPreviewResult.value = result
+    ElMessage.success('识别完成，请核对预览结果后再确认导入')
+  } catch (error) {
+    resetImportPreview()
+    ElMessage.error(extractErrorMessage(error, '生成导入预览失败'))
+  } finally {
+    importPreviewLoading.value = false
+  }
 }
 
 const loadList = async () => {
@@ -268,17 +330,15 @@ const handleSubmitImport = async () => {
   if (!props.canUpdateConfigs) {
     return
   }
-  if (!selectedImportFile.value && !importForm.rawText.trim()) {
-    ElMessage.warning('请上传 txt/xlsx 文件，或粘贴至少一条目录记录')
+  if (!importPreviewResult.value || importPreviewResult.value.rows.length === 0) {
+    ElMessage.warning('请先生成导入预览，并确认识别结果无误后再导入')
     return
   }
   importSubmitting.value = true
   try {
-    const result = selectedImportFile.value
-      ? await importClientStaffDirectoryFile(selectedImportFile.value)
-      : await importClientStaffDirectory({
-          rawText: importForm.rawText,
-        })
+    const result = await importClientStaffDirectory({
+      rows: buildConfirmedImportRows(importPreviewResult.value.rows),
+    })
     const autoCreatedDepartmentText = result.summary.autoCreatedDepartments.length > 0
       ? `，自动补齐部门 ${result.summary.autoCreatedDepartments.length} 个`
       : ''
@@ -295,6 +355,18 @@ const handleSubmitImport = async () => {
     importSubmitting.value = false
   }
 }
+
+watch(
+  () => importForm.rawText,
+  (value, previousValue) => {
+    if (value === previousValue) {
+      return
+    }
+    if (importPreviewResult.value) {
+      resetImportPreview()
+    }
+  },
+)
 
 onMounted(() => {
   void loadList()
@@ -432,7 +504,7 @@ onMounted(() => {
     <el-dialog
       v-model="importVisible"
       title="批量导入教职工目录"
-      width="680px"
+      width="820px"
       destroy-on-close
       append-to-body
       :modal-append-to-body="true"
@@ -441,23 +513,25 @@ onMounted(() => {
     >
       <el-form ref="importFormRef" :model="importForm" label-position="top">
         <el-form-item label="上传导入文件">
-          <input
-            ref="importFileInputRef"
-            class="hidden"
-            type="file"
+          <el-upload
+            ref="importUploadRef"
+            class="w-full"
+            drag
+            action=""
+            :auto-upload="false"
+            :show-file-list="false"
             :accept="STAFF_DIRECTORY_IMPORT_FILE_ACCEPT"
-            @change="handleImportFileChange"
-          />
-          <div class="w-full rounded-2xl border border-dashed border-slate-300 bg-slate-50/80 p-4">
-            <div class="flex flex-wrap items-center gap-3">
-              <el-button type="primary" plain @click="triggerImportFilePicker">选择 txt / xlsx 文件</el-button>
-              <span class="text-sm text-slate-500">支持 `.txt`、`.xlsx`，系统会自动识别并导入。</span>
+            @change="handleImportUploadChange"
+          >
+            <div class="py-3">
+              <p class="text-base font-medium text-slate-700">将 txt / xlsx 文件拖到此处，或点击选择文件</p>
+              <p class="mt-2 text-sm text-slate-500">系统会先自动识别内容并生成预览，确认无误后才会正式导入。</p>
             </div>
-            <div v-if="selectedImportFile" class="mt-3 flex flex-wrap items-center gap-3 rounded-xl bg-white px-3 py-2 text-sm text-slate-600">
-              <span>已选择：{{ selectedImportFile.name }}</span>
-              <span>大小：{{ Math.max(1, Math.round(selectedImportFile.size / 1024)) }} KB</span>
-              <el-button link type="danger" @click="clearSelectedImportFile">移除文件</el-button>
-            </div>
+          </el-upload>
+          <div v-if="selectedImportFile" class="mt-3 flex flex-wrap items-center gap-3 rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600">
+            <span>已选择：{{ selectedImportFile.name }}</span>
+            <span>大小：{{ Math.max(1, Math.round(selectedImportFile.size / 1024)) }} KB</span>
+            <el-button link type="danger" @click="clearSelectedImportFile">移除文件</el-button>
           </div>
         </el-form-item>
         <el-form-item label="目录文本（可选兜底）" prop="rawText">
@@ -468,11 +542,53 @@ onMounted(() => {
             placeholder="未上传文件时，可直接粘贴文本。示例：&#10;张老师,HY1001,海右书院&#10;李老师,HY1002,海右书院"
           />
         </el-form-item>
+        <div v-if="importPreviewResult" class="rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
+          <div class="flex flex-wrap items-center gap-2">
+            <el-tag type="primary">共识别 {{ importPreviewResult.summary.total }} 条</el-tag>
+            <el-tag type="success">待新增 {{ importPreviewResult.summary.creatable }} 条</el-tag>
+            <el-tag type="warning">待更新 {{ importPreviewResult.summary.updatable }} 条</el-tag>
+            <el-tag type="info">将跳过 {{ importPreviewResult.summary.skippable }} 条</el-tag>
+          </div>
+          <el-alert
+            v-if="importPreviewResult.summary.autoCreatedDepartments.length > 0"
+            class="mt-3"
+            type="warning"
+            :closable="false"
+            show-icon
+            :title="`确认导入后将自动补齐部门：${importPreviewResult.summary.autoCreatedDepartments.join('、')}`"
+          />
+          <el-table
+            class="mt-3"
+            :data="importPreviewResult.rows"
+            border
+            stripe
+            table-layout="auto"
+            max-height="320"
+            empty-text="暂无可导入记录"
+          >
+            <el-table-column label="处理结果" width="110">
+              <template #default="{ row }">
+                <el-tag :type="getImportActionTagType(row.action)" effect="light">
+                  {{ getImportActionLabel(row.action) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="staffNo" label="教职工号" min-width="130" />
+            <el-table-column prop="realName" label="真实姓名" min-width="110" />
+            <el-table-column prop="departmentName" label="所属部门" min-width="180" show-overflow-tooltip />
+            <el-table-column label="状态" width="100">
+              <template #default="{ row }">
+                <el-tag :type="getStatusTagType(row.status)" effect="light">{{ getStatusLabel(row.status) }}</el-tag>
+              </template>
+            </el-table-column>
+          </el-table>
+        </div>
       </el-form>
       <template #footer>
         <div class="flex justify-end gap-3">
           <el-button @click="importVisible = false">取消</el-button>
-          <el-button type="primary" :loading="importSubmitting" @click="handleSubmitImport">开始导入</el-button>
+          <el-button type="primary" plain :loading="importPreviewLoading" @click="handleGenerateImportPreview">识别并预览</el-button>
+          <el-button type="primary" :disabled="!hasImportPreview" :loading="importSubmitting" @click="handleSubmitImport">确认导入</el-button>
         </div>
       </template>
     </el-dialog>

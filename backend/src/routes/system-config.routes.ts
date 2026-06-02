@@ -428,6 +428,27 @@ systemConfigRouter.patch(
 )
 
 systemConfigRouter.post(
+  '/client-staff-directory/import/preview',
+  requirePermission('system_configs:update'),
+  requireRole('admin'),
+  staffDirectoryImportUpload.single('file'),
+  asyncHandler(async (req, res) => {
+    const payload = req.file
+      ? await clientStaffDirectoryService.parseImportFile({
+          buffer: req.file.buffer,
+          originalName: req.file.originalname,
+        })
+      : importClientStaffDirectorySchema.parse(req.body)
+    const data = await clientStaffDirectoryService.previewImport(payload)
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+systemConfigRouter.post(
   '/client-staff-directory/import',
   requirePermission('system_configs:update'),
   requireRole('admin'),

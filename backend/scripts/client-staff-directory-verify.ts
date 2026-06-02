@@ -26,6 +26,25 @@ type JsonPayload = {
   data?: unknown
 }
 
+type StaffDirectoryPreviewRow = {
+  staffNo: string
+  realName: string
+  departmentName: string
+  status: string
+  action: 'create' | 'update' | 'skip'
+}
+
+type StaffDirectoryPreviewResult = {
+  summary: {
+    total: number
+    creatable: number
+    updatable: number
+    skippable: number
+    autoCreatedDepartments: string[]
+  }
+  rows: StaffDirectoryPreviewRow[]
+}
+
 function pass(message: string) {
   console.log(`OK ${message}`)
 }
@@ -203,11 +222,8 @@ async function main() {
     assert.deepEqual(initialDepartmentConfig.options, [], '初始客户端部门选项应为空')
     pass('初始客户端部门配置为空')
 
-    const importResult = await expectJsonOkResponse<{
-      summary: { created: number; updated: number; skipped: number }
-      list: Array<{ id: string; staffNo: string; realName: string; departmentName: string; status: string }>
-    }>(
-      await fetch(`${baseUrl}/api/system-configs/client-staff-directory/import`, {
+    const importPreviewResult = await expectJsonOkResponse<StaffDirectoryPreviewResult>(
+      await fetch(`${baseUrl}/api/system-configs/client-staff-directory/import/preview`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${adminLogin.token}`,
@@ -219,6 +235,37 @@ async function main() {
             { staffNo: 'HY1002', realName: '李老师', departmentName: '海右书院' },
           ],
         }),
+      }),
+      '预览导入教职工库',
+    )
+    assert.equal(importPreviewResult.summary.total, 2, '首次导入预览应识别 2 条记录')
+    assert.equal(importPreviewResult.summary.creatable, 2, '首次导入预览应提示创建 2 条记录')
+    assert.equal(importPreviewResult.rows[0]?.action, 'create', '首次导入预览应标记为创建')
+    pass('管理员可预览教职工库导入结果')
+
+    const listAfterPreview = await expectJsonOkResponse<{
+      list: Array<{ id: string; staffNo: string }>
+      total: number
+    }>(
+      await fetch(`${baseUrl}/api/system-configs/client-staff-directory?page=1&pageSize=20`, {
+        headers: { Authorization: `Bearer ${adminLogin.token}` },
+      }),
+      '预览后再次查询空教职工库',
+    )
+    assert.equal(listAfterPreview.total, 0, '预览阶段不应提前写入教职工库')
+    pass('预览教职工库导入结果不会提前入库')
+
+    const importResult = await expectJsonOkResponse<{
+      summary: { created: number; updated: number; skipped: number }
+      list: Array<{ id: string; staffNo: string; realName: string; departmentName: string; status: string }>
+    }>(
+      await fetch(`${baseUrl}/api/system-configs/client-staff-directory/import`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminLogin.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ rows: importPreviewResult.rows }),
       }),
       '导入教职工库',
     )
@@ -245,14 +292,28 @@ async function main() {
     assert.equal(rawTextImportResult.summary.created, 2, '姓名、工号、部门顺序导入应创建 2 条记录')
     pass('支持按姓名、工号、部门顺序导入教职工库')
 
-    const txtUploadForm = new FormData()
-    txtUploadForm.append(
+    const txtPreviewForm = new FormData()
+    txtPreviewForm.append(
       'file',
       new Blob([['孙老师\tHY1005\t工业设计中心', '周老师\tHY1006\t工业设计中心'].join('\n')], {
         type: 'text/plain',
       }),
       'staff-directory-import.txt',
     )
+    const txtFilePreviewResult = await expectJsonOkResponse<StaffDirectoryPreviewResult>(
+      await fetch(`${baseUrl}/api/system-configs/client-staff-directory/import/preview`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminLogin.token}`,
+        },
+        body: txtPreviewForm,
+      }),
+      '上传 txt 文件预览教职工库导入结果',
+    )
+    assert.equal(txtFilePreviewResult.summary.total, 2, '上传 txt 文件预览应识别 2 条记录')
+    assert.equal(txtFilePreviewResult.summary.creatable, 2, '上传 txt 文件预览应提示创建 2 条记录')
+    pass('支持上传 txt 文件自动识别并预览教职工库')
+
     const txtFileImportResult = await expectJsonOkResponse<{
       summary: { created: number; updated: number; skipped: number }
       list: Array<{ id: string; staffNo: string; realName: string; departmentName: string; status: string }>
@@ -261,16 +322,17 @@ async function main() {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${adminLogin.token}`,
+          'Content-Type': 'application/json',
         },
-        body: txtUploadForm,
+        body: JSON.stringify({ rows: txtFilePreviewResult.rows }),
       }),
       '上传 txt 文件导入教职工库',
     )
     assert.equal(txtFileImportResult.summary.created, 2, '上传 txt 文件导入应创建 2 条记录')
     pass('支持上传 txt 文件自动导入教职工库')
 
-    const xlsxUploadForm = new FormData()
-    xlsxUploadForm.append(
+    const xlsxPreviewForm = new FormData()
+    xlsxPreviewForm.append(
       'file',
       await createStaffDirectoryWorkbookBlob([
         ['姓名', '工号', '部门'],
@@ -279,6 +341,20 @@ async function main() {
       ]),
       'staff-directory-import.xlsx',
     )
+    const xlsxFilePreviewResult = await expectJsonOkResponse<StaffDirectoryPreviewResult>(
+      await fetch(`${baseUrl}/api/system-configs/client-staff-directory/import/preview`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminLogin.token}`,
+        },
+        body: xlsxPreviewForm,
+      }),
+      '上传 xlsx 文件预览教职工库导入结果',
+    )
+    assert.equal(xlsxFilePreviewResult.summary.total, 2, '上传 xlsx 文件预览应识别 2 条记录')
+    assert.equal(xlsxFilePreviewResult.rows[0]?.action, 'create', '上传 xlsx 文件预览应标记为创建')
+    pass('支持上传 xlsx 文件自动识别并预览教职工库')
+
     const xlsxFileImportResult = await expectJsonOkResponse<{
       summary: { created: number; updated: number; skipped: number }
       list: Array<{ id: string; staffNo: string; realName: string; departmentName: string; status: string }>
@@ -287,8 +363,9 @@ async function main() {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${adminLogin.token}`,
+          'Content-Type': 'application/json',
         },
-        body: xlsxUploadForm,
+        body: JSON.stringify({ rows: xlsxFilePreviewResult.rows }),
       }),
       '上传 xlsx 文件导入教职工库',
     )

@@ -72,6 +72,25 @@ export interface ImportClientStaffDirectoryFileInput {
   originalName: string
 }
 
+export interface ImportClientStaffDirectoryPreviewRow {
+  staffNo: string
+  realName: string
+  departmentName: string
+  status: ClientStaffDirectoryStatus
+  action: 'create' | 'update' | 'skip'
+}
+
+export interface ImportClientStaffDirectoryPreviewResult {
+  summary: {
+    total: number
+    creatable: number
+    updatable: number
+    skippable: number
+    autoCreatedDepartments: string[]
+  }
+  rows: ImportClientStaffDirectoryPreviewRow[]
+}
+
 type ClientStaffDirectorySnapshot = {
   id: string
   staffNo: string
@@ -480,6 +499,74 @@ export class ClientStaffDirectoryService {
     }
   }
 
+  private flattenDepartmentPaths(
+    tree: Array<{ label: string; children: Array<{ label: string; children: unknown[] }> }>,
+    parentPath = '',
+  ): string[] {
+    const paths: string[] = []
+    for (const node of tree) {
+      const currentPath = parentPath ? `${parentPath}-${node.label}` : node.label
+      paths.push(currentPath)
+      if (Array.isArray(node.children) && node.children.length > 0) {
+        paths.push(
+          ...this.flattenDepartmentPaths(
+            node.children as Array<{ label: string; children: Array<{ label: string; children: unknown[] }> }>,
+            currentPath,
+          ),
+        )
+      }
+    }
+    return paths
+  }
+
+  private findDepartmentPathsByLabel(
+    tree: Array<{ label: string; children: Array<{ label: string; children: unknown[] }> }>,
+    targetLabel: string,
+    parentPath = '',
+  ): string[] {
+    const paths: string[] = []
+    for (const node of tree) {
+      const currentPath = parentPath ? `${parentPath}-${node.label}` : node.label
+      if (node.label === targetLabel) {
+        paths.push(currentPath)
+      }
+      if (Array.isArray(node.children) && node.children.length > 0) {
+        paths.push(
+          ...this.findDepartmentPathsByLabel(
+            node.children as Array<{ label: string; children: Array<{ label: string; children: unknown[] }> }>,
+            targetLabel,
+            currentPath,
+          ),
+        )
+      }
+    }
+    return paths
+  }
+
+  private async resolvePreviewAutoCreatedDepartments(rows: NormalizedImportRow[]): Promise<string[]> {
+    const departmentNames = [...new Set(rows.map((item) => item.departmentName))]
+    if (departmentNames.length === 0) {
+      return []
+    }
+    const config = await systemConfigService.getClientDepartmentConfigs()
+    const flattenedDepartmentPaths = this.flattenDepartmentPaths(config.tree)
+    const autoCreatedDepartments: string[] = []
+    for (const departmentName of departmentNames) {
+      if (config.options.includes(departmentName) || flattenedDepartmentPaths.includes(departmentName)) {
+        continue
+      }
+      const matchedPaths = this.findDepartmentPathsByLabel(config.tree, departmentName)
+      if (matchedPaths.length === 1) {
+        continue
+      }
+      if (matchedPaths.length > 1) {
+        throw new BizError(`部门“${departmentName}”存在多个同名节点，请先在系统配置中明确路径后再导入`, 400)
+      }
+      autoCreatedDepartments.push(departmentName)
+    }
+    return autoCreatedDepartments
+  }
+
   async list(query: ClientStaffDirectoryListQuery): Promise<{
     page: number
     pageSize: number
@@ -661,6 +748,47 @@ export class ClientStaffDirectoryService {
       )
       return { record: await this.buildRecord(saved, manager) }
     })
+  }
+
+  /**
+   * 导入预览：
+   * - 仅解析并校验待导入内容，不写入教职工目录，也不修改部门配置；
+   * - 逐行对比现有目录，提前告知管理员哪些记录会新增、更新或被跳过；
+   * - 预估需自动补齐的部门列表，帮助管理员在确认前先核对导入影响范围。
+   */
+  async previewImport(input: ImportClientStaffDirectoryInput): Promise<ImportClientStaffDirectoryPreviewResult> {
+    const rows = this.normalizeImportRows(input)
+    const existingMap = await this.loadExistingByStaffNos(AppDataSource.manager, rows.map((item) => item.staffNo))
+    const autoCreatedDepartments = await this.resolvePreviewAutoCreatedDepartments(rows)
+    const previewRows: ImportClientStaffDirectoryPreviewRow[] = rows.map((row) => {
+      const existing = existingMap.get(row.staffNo)
+      if (!existing) {
+        return {
+          ...row,
+          action: 'create',
+        }
+      }
+      const action: ImportClientStaffDirectoryPreviewRow['action'] =
+        existing.realName === row.realName
+        && existing.departmentName === row.departmentName
+        && existing.status === row.status
+          ? 'skip'
+          : 'update'
+      return {
+        ...row,
+        action,
+      }
+    })
+    return {
+      summary: {
+        total: previewRows.length,
+        creatable: previewRows.filter((item) => item.action === 'create').length,
+        updatable: previewRows.filter((item) => item.action === 'update').length,
+        skippable: previewRows.filter((item) => item.action === 'skip').length,
+        autoCreatedDepartments,
+      },
+      rows: previewRows,
+    }
   }
 
   async importRows(
