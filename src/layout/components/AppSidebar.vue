@@ -284,14 +284,21 @@ const deviceLabel = computed(() => {
  */
 :deep(.app-sidebar-menu) {
   background-color: transparent !important;
+  border-right: none !important;
+  border-inline-end: none !important;
+  --el-menu-border-color: transparent;
 }
 
 :deep(.app-sidebar-menu .el-menu) {
   background-color: transparent !important;
+  border-right: none !important;
+  border-inline-end: none !important;
 }
 
 :deep(.app-sidebar-menu .el-sub-menu .el-menu) {
   background-color: transparent !important;
+  border-right: none !important;
+  border-inline-end: none !important;
 }
 
 :deep(.app-sidebar__scroll-shell .el-scrollbar__wrap) {
