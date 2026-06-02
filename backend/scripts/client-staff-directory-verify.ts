@@ -85,7 +85,8 @@ function readCookieValueFromResponse(response: Response, cookieName: string): st
     ?? headersWithSetCookie.raw?.()['set-cookie']
     ?? [response.headers.get('set-cookie') ?? '']
   const rawSetCookie = setCookieValues.filter(Boolean).join(',')
-  const match = rawSetCookie.match(new RegExp(`(?:^|,\\s*)${cookieName}=([^;]+)`))
+  const cookiePattern = new RegExp(String.raw`(?:^|,\s*)${cookieName}=([^;]+)`)
+  const match = cookiePattern.exec(rawSetCookie)
   return match?.[1] ? decodeURIComponent(match[1]) : null
 }
 
@@ -543,8 +544,10 @@ async function main() {
   }
 }
 
-main().catch((error) => {
+try {
+  await main()
+} catch (error) {
   console.error(error)
   cleanupSqliteFile()
   process.exitCode = 1
-})
+}

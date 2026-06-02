@@ -94,7 +94,7 @@ const realNameRule = (_rule: unknown, value: string, callback: (error?: Error) =
     .normalize('NFKC')
     .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
     .replace(/[\u0000-\u001F\u007F-\u009F]/g, '')
-    .replace(/\u3000/g, ' ')
+    .replaceAll('　', ' ')
     .replace(/[•・･‧∙⋅·﹒]/g, '·')
     .trim()
     .replaceAll(/\s+/g, ' ')

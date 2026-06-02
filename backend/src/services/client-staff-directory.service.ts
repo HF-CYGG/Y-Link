@@ -17,8 +17,11 @@ import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
-import type { EntityManager } from 'typeorm'
-import { systemConfigService } from './system-config.service.js'
+import type { EntityManager, Repository } from 'typeorm'
+import {
+  systemConfigService,
+  type EnsureClientDepartmentOptionsResult,
+} from './system-config.service.js'
 
 export interface ClientStaffDirectoryListQuery {
   page: number
@@ -153,7 +156,7 @@ export class ClientStaffDirectoryService {
       .normalize('NFKC')
       .replace(INVISIBLE_NAME_CHARS_PATTERN, '')
       .replace(CONTROL_NAME_CHARS_PATTERN, '')
-      .replace(/\u3000/g, ' ')
+      .replaceAll('　', ' ')
       .replace(NORMALIZABLE_NAME_SEPARATOR_PATTERN, '·')
       .trim()
       .replaceAll(/\s+/g, ' ')
@@ -225,7 +228,9 @@ export class ClientStaffDirectoryService {
     after: ClientStaffDirectorySnapshot | null,
   ) {
     const userRepo = manager.getRepository(ClientUser)
-    if (before?.staffNo && (!after || before.staffNo !== after.staffNo || after.status !== 'active')) {
+    const shouldResetBeforeLinkedUsers = before?.staffNo
+      && (after?.staffNo !== before.staffNo || after?.status !== 'active')
+    if (shouldResetBeforeLinkedUsers) {
       await userRepo
         .createQueryBuilder()
         .update(ClientUser)
@@ -293,17 +298,18 @@ export class ClientStaffDirectoryService {
       return null
     }
     const [firstColumn = '', secondColumn = '', departmentName = '', status = 'active'] = columns.map((item) => item.trim())
-    let staffNo = ''
-    let realName = ''
-    if (STAFF_NO_PATTERN.test(firstColumn) && !STAFF_NO_PATTERN.test(secondColumn)) {
-      staffNo = firstColumn
-      realName = secondColumn
-    } else if (STAFF_NO_PATTERN.test(secondColumn) && !STAFF_NO_PATTERN.test(firstColumn)) {
-      realName = firstColumn
-      staffNo = secondColumn
-    } else {
-      throw new BizError(`第 ${index + 1} 行格式不正确，请按“姓名、工号、部门”或“工号、姓名、部门”顺序填写`, 400)
+    const firstIsStaffNo = STAFF_NO_PATTERN.test(firstColumn)
+    const secondIsStaffNo = STAFF_NO_PATTERN.test(secondColumn)
+    let staffNoAndRealName: [string, string] | null = null
+    if (firstIsStaffNo && !secondIsStaffNo) {
+      staffNoAndRealName = [firstColumn, secondColumn]
+    } else if (secondIsStaffNo && !firstIsStaffNo) {
+      staffNoAndRealName = [secondColumn, firstColumn]
     }
+    if (!staffNoAndRealName) {
+      throw new BizError(`第 ${index + 1} 行格式不正确，请按“姓名、工号、部门”或“工号、姓名、部门”顺序填写`, 400)
+    } 
+    const [staffNo, realName] = staffNoAndRealName
     if (!staffNo || !realName || !departmentName) {
       throw new BizError(`第 ${index + 1} 行缺少教职工号、姓名或部门`, 400)
     }
@@ -315,36 +321,125 @@ export class ClientStaffDirectoryService {
     }
   }
 
+  private stringifyPrimitiveWorkbookValue(value: string | number | boolean | Date): string {
+    return value instanceof Date ? value.toISOString() : String(value)
+  }
+
+  private stringifyWorkbookFormulaResult(value: unknown): string | null {
+    if (value == null) {
+      return ''
+    }
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || value instanceof Date) {
+      return this.stringifyPrimitiveWorkbookValue(value)
+    }
+    return null
+  }
+
+  private stringifyWorkbookObjectCellValue(value: Record<string, unknown>): string | null {
+    if (typeof value.text === 'string') {
+      return value.text
+    }
+    if (Array.isArray(value.richText)) {
+      return value.richText
+        .map((item) => (typeof item === 'object' && item && 'text' in item && typeof item.text === 'string' ? item.text : ''))
+        .join('')
+    }
+    if ('result' in value) {
+      return this.stringifyWorkbookFormulaResult(value.result)
+    }
+    if (typeof value.error === 'string') {
+      return value.error
+    }
+    return null
+  }
+
   private stringifyWorkbookCellValue(value: unknown): string {
     if (value == null) {
       return ''
     }
-    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
-      return String(value)
-    }
-    if (value instanceof Date) {
-      return value.toISOString()
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || value instanceof Date) {
+      return this.stringifyPrimitiveWorkbookValue(value)
     }
     if (typeof value === 'object') {
-      if ('text' in value && typeof value.text === 'string') {
-        return value.text
+      return this.stringifyWorkbookObjectCellValue(value as Record<string, unknown>) ?? ''
+    }
+    return ''
+  }
+
+  private mergeResolvedDepartmentRows(
+    rows: NormalizedImportRow[],
+    departmentResult: EnsureClientDepartmentOptionsResult,
+  ): NormalizedImportRow[] {
+    return rows.map((row) => ({
+      ...row,
+      departmentName: departmentResult.resolvedDepartmentMap.get(row.departmentName) ?? row.departmentName,
+    }))
+  }
+
+  private collectImportChanges(
+    repo: Repository<ClientStaffDirectory>,
+    resolvedRows: NormalizedImportRow[],
+    existingMap: Map<string, ClientStaffDirectory>,
+    departmentResult: EnsureClientDepartmentOptionsResult,
+  ) {
+    const summary = {
+      created: 0,
+      updated: 0,
+      skipped: 0,
+      autoCreatedDepartments: departmentResult.createdDepartments,
+    }
+    const changedStaffNos = new Set<string>()
+    const activeRowsForUserSync: NormalizedImportRow[] = []
+    const inactiveStaffNosForUserSync: string[] = []
+    const recordsToCreate: ClientStaffDirectory[] = []
+    const recordsToUpdate: ClientStaffDirectory[] = []
+
+    for (const row of resolvedRows) {
+      const existing = existingMap.get(row.staffNo)
+      if (!existing) {
+        recordsToCreate.push(repo.create(row))
+        summary.created += 1
+        changedStaffNos.add(row.staffNo)
+        if (row.status === 'active') {
+          activeRowsForUserSync.push(row)
+        } else {
+          inactiveStaffNosForUserSync.push(row.staffNo)
+        }
+        continue
       }
-      if ('result' in value && value.result != null) {
-        return String(value.result)
+
+      const before = this.toSnapshot(existing)
+      const changed =
+        existing.realName !== row.realName
+        || existing.departmentName !== row.departmentName
+        || existing.status !== row.status
+      if (!changed) {
+        summary.skipped += 1
+        continue
       }
-      if ('richText' in value && Array.isArray(value.richText)) {
-        return value.richText
-          .map((item) => (typeof item?.text === 'string' ? item.text : ''))
-          .join('')
+
+      existing.realName = row.realName
+      existing.departmentName = row.departmentName
+      existing.status = row.status
+      recordsToUpdate.push(existing)
+      summary.updated += 1
+      changedStaffNos.add(row.staffNo)
+      if (before.status === 'active' && row.status !== 'active') {
+        inactiveStaffNosForUserSync.push(row.staffNo)
       }
-      if ('hyperlink' in value && 'text' in value && typeof value.text === 'string') {
-        return value.text
-      }
-      if ('error' in value && typeof value.error === 'string') {
-        return value.error
+      if (row.status === 'active') {
+        activeRowsForUserSync.push(row)
       }
     }
-    return String(value)
+
+    return {
+      summary,
+      changedStaffNos,
+      activeRowsForUserSync,
+      inactiveStaffNosForUserSync,
+      recordsToCreate,
+      recordsToUpdate,
+    }
   }
 
   private normalizeWorkbookColumns(rowValues: unknown): string[] {
@@ -825,60 +920,16 @@ export class ClientStaffDirectoryService {
         requestMeta,
         manager,
       )
-      const resolvedRows = rows.map((row) => ({
-        ...row,
-        departmentName: departmentResult.resolvedDepartmentMap.get(row.departmentName) ?? row.departmentName,
-      }))
+      const resolvedRows = this.mergeResolvedDepartmentRows(rows, departmentResult)
       const existingMap = await this.loadExistingByStaffNos(manager, resolvedRows.map((item) => item.staffNo))
-      const summary = {
-        created: 0,
-        updated: 0,
-        skipped: 0,
-        autoCreatedDepartments: departmentResult.createdDepartments,
-      }
-      const changedStaffNos = new Set<string>()
-      const activeRowsForUserSync: NormalizedImportRow[] = []
-      const inactiveStaffNosForUserSync: string[] = []
-      const recordsToCreate: ClientStaffDirectory[] = []
-      const recordsToUpdate: ClientStaffDirectory[] = []
-
-      for (const row of resolvedRows) {
-        const existing = existingMap.get(row.staffNo)
-        if (!existing) {
-          const created = repo.create(row)
-          recordsToCreate.push(created)
-          summary.created += 1
-          changedStaffNos.add(row.staffNo)
-          if (row.status === 'active') {
-            activeRowsForUserSync.push(row)
-          } else {
-            inactiveStaffNosForUserSync.push(row.staffNo)
-          }
-          continue
-        }
-
-        const before = this.toSnapshot(existing)
-        const changed =
-          existing.realName !== row.realName
-          || existing.departmentName !== row.departmentName
-          || existing.status !== row.status
-        if (!changed) {
-          summary.skipped += 1
-          continue
-        }
-        existing.realName = row.realName
-        existing.departmentName = row.departmentName
-        existing.status = row.status
-        recordsToUpdate.push(existing)
-        summary.updated += 1
-        changedStaffNos.add(row.staffNo)
-        if (before.status === 'active' && row.status !== 'active') {
-          inactiveStaffNosForUserSync.push(row.staffNo)
-        }
-        if (row.status === 'active') {
-          activeRowsForUserSync.push(row)
-        }
-      }
+      const {
+        summary,
+        changedStaffNos,
+        activeRowsForUserSync,
+        inactiveStaffNosForUserSync,
+        recordsToCreate,
+        recordsToUpdate,
+      } = this.collectImportChanges(repo, resolvedRows, existingMap, departmentResult)
 
       if (recordsToCreate.length > 0) {
         await repo.save(recordsToCreate, { chunk: 200 })

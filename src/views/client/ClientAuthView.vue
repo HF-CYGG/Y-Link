@@ -461,7 +461,7 @@ const validateLoginPassword = (password: string) => password.trim().length > 0
  * - 继续复用共享的新密码强度规则，保证注册与改密口径一致。
  */
 const validateRegisterPassword = (password: string) => isClientNewPasswordValid(password)
-const validateRealName = (username: string) => /^[\p{Script=Han}][\p{Script=Han}·\s]{1,19}$/u.test(normalizeHumanName(username))
+const validateRealName = (username: string) => /^\p{Script=Han}[\p{Script=Han}·\s]{1,19}$/u.test(normalizeHumanName(username))
 const validateStaffNo = (staffNo: string) => /^[A-Za-z0-9-]{4,32}$/.test(staffNo.trim())
 const validateLoginAccount = (account: string) => account.trim().length > 0
 const resolveAccountChannel = (account: string): 'mobile' | 'email' | null => {
@@ -482,7 +482,7 @@ const normalizeHumanName = (value: string) => {
     .normalize('NFKC')
     .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
     .replace(/[\u0000-\u001F\u007F-\u009F]/g, '')
-    .replace(/\u3000/g, ' ')
+    .replaceAll('　', ' ')
     .replace(/[•・･‧∙⋅·﹒]/g, '·')
     .replaceAll(/\s+/g, ' ')
     .trim()

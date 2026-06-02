@@ -144,7 +144,7 @@ class ClientAuthService {
   private readonly sessionRepo = AppDataSource.getRepository(ClientUserSession)
   private readonly clientStaffDirectoryRepo = AppDataSource.getRepository(ClientStaffDirectory)
   private readonly staffNoPattern = /^[A-Za-z0-9-]{4,32}$/
-  private readonly realNamePattern = /^[\p{Script=Han}][\p{Script=Han}· ]{1,19}$/u
+  private readonly realNamePattern = /^\p{Script=Han}[\p{Script=Han}· ]{1,19}$/u
   private readonly invisibleNameCharsPattern = /[\u200B-\u200D\u2060\uFEFF]/g
   private readonly controlNameCharsPattern = /[\u0000-\u001F\u007F-\u009F]/g
   private readonly normalizableNameSeparatorPattern = /[•・･‧∙⋅·﹒]/g
@@ -283,7 +283,7 @@ class ClientAuthService {
       .normalize('NFKC')
       .replace(this.invisibleNameCharsPattern, '')
       .replace(this.controlNameCharsPattern, '')
-      .replace(/\u3000/g, ' ')
+      .replaceAll('　', ' ')
       .replace(this.normalizableNameSeparatorPattern, '·')
       .trim()
       .replaceAll(/\s+/g, ' ')
