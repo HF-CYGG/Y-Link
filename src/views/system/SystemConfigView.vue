@@ -16,7 +16,6 @@
 import dayjs from 'dayjs'
 import { computed, onMounted, reactive, ref, toRaw } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
-import { useRouter } from 'vue-router'
 import { PageContainer, PageToolbarCard } from '@/components/common'
 import {
   getNotificationPresenceSnapshot,
@@ -55,8 +54,6 @@ import SystemConfigSerialSection from '@/views/system/components/SystemConfigSer
 import SystemConfigVerificationSection from '@/views/system/components/SystemConfigVerificationSection.vue'
 import {
   DATABASE_MIGRATION_ASSISTANT_NAME,
-  DATABASE_MIGRATION_ENTRY_DESCRIPTION,
-  DATABASE_MIGRATION_ENTRY_LABEL,
   DATABASE_MIGRATION_RECOMMENDED_FLOW_TEXT,
 } from './database-migration-copy'
 
@@ -85,7 +82,6 @@ type ConfigSectionKey =
 type DepartmentTreeNode = ClientDepartmentTreeNode
 
 const { hasPermission, ensurePermission } = usePermissionAction()
-const router = useRouter()
 const formRef = ref<FormInstance>()
 const loading = ref(true)
 const saving = ref(false)
@@ -205,7 +201,6 @@ const initialSnapshot = ref('')
 const canViewConfigs = computed(() => hasPermission('system_configs:view'))
 const canUpdateConfigs = computed(() => hasPermission('system_configs:update'))
 const canTestVerificationProviders = computed(() => hasPermission('verification_providers:test'))
-const canViewMigrationAssistant = computed(() => hasPermission('db_migration:view'))
 const hasPendingDeferredSections = computed(() => {
   return sectionLoadingState.customer_service || sectionLoadingState.verification || sectionLoadingState.department || sectionLoadingState.notification
 })
@@ -260,15 +255,6 @@ const activeSectionLoadFailed = computed(() => {
 const activeSectionInteractionLoading = computed(() => {
   return loading.value || activeSectionLoading.value
 })
-
-/**
- * 进入数据库迁移助手：
- * - 将数据库迁移高风险动作统一收口到专门页面；
- * - 让管理员在系统配置页就能一键直达，减少左侧菜单查找成本。
- */
-const handleGoToDatabaseMigration = () => {
-  router.push('/system/db-migration').catch(() => undefined)
-}
 
 const formatSerialPreview = (prefix: string | undefined, current: number, width: number) => {
   const safePrefix = String(prefix ?? '').trim() || '-'
@@ -1197,19 +1183,6 @@ onMounted(() => {
           show-icon
           :description="`这里用于维护订单编号规则、线上预订规则，以及客户端注册/找回密码依赖的短信与邮箱验证码平台。建议仅在管理员确认后修改，以免影响业务连续性。若需要处理数据库迁移、切换或回退，请统一进入${DATABASE_MIGRATION_ASSISTANT_NAME}，并按“${DATABASE_MIGRATION_RECOMMENDED_FLOW_TEXT}”闭环执行。`"
         />
-        <template #actions>
-          <div class="system-config-toolbar-actions flex w-full flex-wrap items-start gap-3">
-            <div
-              v-if="canViewMigrationAssistant"
-              class="system-config-toolbar-hint rounded-2xl bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-500 dark:bg-slate-900/40 dark:text-slate-400"
-            >
-              {{ DATABASE_MIGRATION_ENTRY_DESCRIPTION }}
-            </div>
-            <el-button v-if="canViewMigrationAssistant" plain class="system-config-toolbar-button" @click="handleGoToDatabaseMigration">
-              {{ DATABASE_MIGRATION_ENTRY_LABEL }}
-            </el-button>
-          </div>
-        </template>
       </PageToolbarCard>
 
       <el-alert

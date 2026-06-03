@@ -650,6 +650,8 @@ onMounted(() => {
     <el-dialog
       v-model="dialogVisible"
       :title="dialogTitle"
+      class="staff-directory-dialog staff-directory-dialog--entry ylink-dialog-height-mode--auto"
+      modal-class="staff-directory-dialog-overlay"
       width="560px"
       destroy-on-close
       append-to-body
@@ -700,6 +702,8 @@ onMounted(() => {
     <el-dialog
       v-model="importVisible"
       title="批量导入教职工目录"
+      class="staff-directory-dialog staff-directory-dialog--import ylink-dialog-height-mode--auto"
+      modal-class="staff-directory-dialog-overlay"
       width="820px"
       destroy-on-close
       append-to-body
@@ -790,3 +794,32 @@ onMounted(() => {
     </el-dialog>
   </div>
 </template>
+
+<style>
+.staff-directory-dialog-overlay .el-overlay-dialog {
+  align-items: center;
+  justify-content: center;
+}
+
+.staff-directory-dialog {
+  margin: 0 !important;
+  max-height: min(86vh, 760px);
+}
+
+.staff-directory-dialog--entry {
+  max-width: min(560px, calc(100vw - 32px));
+}
+
+.staff-directory-dialog--entry .el-dialog__body {
+  padding-bottom: 8px;
+}
+
+.staff-directory-dialog--import {
+  max-width: min(820px, calc(100vw - 32px));
+}
+
+.staff-directory-dialog--import .el-dialog__body {
+  max-height: min(62vh, 560px);
+  overflow: auto;
+}
+</style>
