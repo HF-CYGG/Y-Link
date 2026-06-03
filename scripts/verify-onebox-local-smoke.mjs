@@ -72,6 +72,30 @@ const readRequestBody = async (request) =>
     request.on('error', reject)
   })
 
+const collectSetCookieHeaders = (headers) => {
+  if (typeof headers.getSetCookie === 'function') {
+    return headers.getSetCookie()
+  }
+
+  const rawSetCookie = headers.get('set-cookie')
+  if (!rawSetCookie) {
+    return []
+  }
+
+  return rawSetCookie
+    .split(/,\s*(?=[^=;,]+=)/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+const buildCookieHeader = (headers) => {
+  const cookiePairs = collectSetCookieHeaders(headers)
+    .map((item) => String(item).split(';')[0]?.trim())
+    .filter(Boolean)
+
+  return cookiePairs.join('; ')
+}
+
 const waitForHttpReady = async ({ url, expectedStatus = 200, retries = 80, intervalMs = 500 }) => {
   for (let index = 0; index < retries; index += 1) {
     try {
@@ -99,12 +123,19 @@ const proxyRequest = async ({ request, response }) => {
   })
 
   response.statusCode = upstreamResponse.status
+  const setCookieHeaders = collectSetCookieHeaders(upstreamResponse.headers)
   upstreamResponse.headers.forEach((value, key) => {
     if (key.toLowerCase() === 'transfer-encoding') {
       return
     }
+    if (key.toLowerCase() === 'set-cookie') {
+      return
+    }
     response.setHeader(key, value)
   })
+  if (setCookieHeaders.length > 0) {
+    response.setHeader('Set-Cookie', setCookieHeaders)
+  }
 
   const buffer = Buffer.from(await upstreamResponse.arrayBuffer())
   response.end(buffer)
@@ -200,14 +231,26 @@ const verifyOneboxEndpoints = async () => {
     }),
   })
   const loginJson = await loginResponse.json()
-  const token = loginJson?.data?.token
-  if (!loginResponse.ok || typeof token !== 'string' || token.length === 0) {
+  const cookieHeader = buildCookieHeader(loginResponse.headers)
+  if (!loginResponse.ok || !loginJson?.data?.user || !cookieHeader) {
     throw new Error('onebox 登录链路异常')
+  }
+
+  const meResponse = await fetch(`${oneboxBaseUrl}/api/auth/me`, {
+    headers: {
+      Cookie: cookieHeader,
+    },
+  })
+  const meJson = await meResponse.json()
+  if (!meResponse.ok || meJson?.code !== 0 || !meJson?.data?.id) {
+    throw new Error(
+      `onebox admin auth state probe failed: status=${meResponse.status}, code=${meJson?.code}, message=${meJson?.message ?? ''}`,
+    )
   }
 
   const productResponse = await fetch(`${oneboxBaseUrl}/api/products?page=1&pageSize=1`, {
     headers: {
-      Authorization: `Bearer ${token}`,
+      Cookie: cookieHeader,
     },
   })
   const productJson = await productResponse.json()

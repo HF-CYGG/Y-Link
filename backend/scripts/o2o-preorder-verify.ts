@@ -129,7 +129,7 @@ const run = async () => {
   log('商品上下架/库存字段创建通过')
 
   const mallProducts = await o2oPreorderService.listMallProducts()
-  assert.ok(mallProducts.some((item) => item.id === product.id))
+  assert.ok(mallProducts.list.some((item) => item.id === product.id))
   log('客户端商品大厅展示通过')
 
   const productRepo = AppDataSource.getRepository(BaseProduct)

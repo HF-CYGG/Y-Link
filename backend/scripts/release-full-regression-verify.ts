@@ -564,6 +564,8 @@ async function main() {
         autoCancelHours: number
         limitEnabled: boolean
         limitQty: number
+        clientPreorderUpdateLimit: number
+        storeBusinessHoursText: string
       }
     }>(
       () =>
@@ -584,6 +586,8 @@ async function main() {
           autoCancelHours: number
           limitEnabled: boolean
           limitQty: number
+          clientPreorderUpdateLimit: number
+          storeBusinessHoursText: string
         }
         changed: boolean
       }
@@ -600,6 +604,8 @@ async function main() {
             autoCancelHours: Math.min(168, o2oRuleConfigs.autoCancelHours + 1),
             limitEnabled: o2oRuleConfigs.limitEnabled,
             limitQty: o2oRuleConfigs.limitQty,
+            clientPreorderUpdateLimit: o2oRuleConfigs.clientPreorderUpdateLimit,
+            storeBusinessHoursText: o2oRuleConfigs.storeBusinessHoursText,
           }),
         }),
       '系统配置 O2O 规则更新',

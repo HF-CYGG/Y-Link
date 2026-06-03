@@ -596,6 +596,8 @@ async function main() {
     const importedRecord = importResult.list.find((item) => item.staffNo === 'HY1001')
     assert.ok(importedRecord, '应能找到 HY1001 记录')
 
+    const editableDepartmentName = importedRecord.departmentName
+
     const updateResult = await expectJsonOkResponse<{
       record: { id: string; staffNo: string; realName: string; departmentName: string; status: string }
     }>(
@@ -608,13 +610,13 @@ async function main() {
         body: JSON.stringify({
           staffNo: importedRecord.staffNo,
           realName: '张主任',
-          departmentName: '海右书院测试部',
+          departmentName: editableDepartmentName,
         }),
       }),
       '编辑教职工记录',
     )
     assert.equal(updateResult.record.realName, '张主任')
-    assert.equal(updateResult.record.departmentName, '海右书院测试部')
+    assert.equal(updateResult.record.departmentName, editableDepartmentName)
     pass('管理员可编辑教职工库记录')
 
     const statusResult = await expectJsonOkResponse<{
