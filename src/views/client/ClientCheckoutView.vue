@@ -54,6 +54,9 @@ const AMBIGUOUS_PREORDER_SUBMIT_STATUS_SET = new Set<number | undefined>([undefi
 
 const resolveDefaultPickupContact = () => {
   const currentUser = clientAuthStore.currentUser
+  if (currentUser?.accountType === 'department') {
+    return currentUser.realName?.trim() || currentUser.username?.trim() || currentUser.account?.trim() || ''
+  }
   const username = currentUser?.username?.trim() || currentUser?.account?.trim()
   if (username) return username
   return currentUser?.realName?.trim() || currentUser?.mobile?.trim() || ''
@@ -68,6 +71,15 @@ const resolvePickupContactStorageKey = () => {
 const restorePickupContactDraft = () => {
   const storageKey = resolvePickupContactStorageKey()
   const defaultPickupContact = resolveDefaultPickupContact()
+  if (clientAuthStore.currentUser?.accountType === 'department') {
+    pickupContact.value = defaultPickupContact
+    try {
+      globalThis.window?.localStorage.removeItem(storageKey)
+    } catch {
+      // 部门账号提货人由实名锁定，本地缓存清理失败不影响下单。
+    }
+    return
+  }
   if (globalThis.window === undefined) {
     pickupContact.value = defaultPickupContact
     return
@@ -83,6 +95,14 @@ const restorePickupContactDraft = () => {
 const persistPickupContactDraft = () => {
   if (globalThis.window === undefined) return
   const storageKey = resolvePickupContactStorageKey()
+  if (clientAuthStore.currentUser?.accountType === 'department') {
+    try {
+      globalThis.window.localStorage.removeItem(storageKey)
+    } catch {
+      // 部门账号提货人不可编辑，不依赖本地缓存。
+    }
+    return
+  }
   const normalizedPickupContact = pickupContact.value.trim()
   try {
     if (normalizedPickupContact) {
@@ -96,6 +116,11 @@ const persistPickupContactDraft = () => {
 }
 
 const handlePickupContactBlur = () => {
+  if (clientAuthStore.currentUser?.accountType === 'department') {
+    pickupContact.value = resolveDefaultPickupContact()
+    persistPickupContactDraft()
+    return
+  }
   const normalizedPickupContact = pickupContact.value.trim()
   if (normalizedPickupContact) {
     pickupContact.value = normalizedPickupContact
@@ -120,6 +145,21 @@ watch(
   () => {
     restorePickupContactDraft()
     departmentSystemApplyChoice.value = null
+  },
+)
+
+watch(
+  () => [
+    clientAuthStore.currentUser?.accountType,
+    clientAuthStore.currentUser?.realName,
+    clientAuthStore.currentUser?.username,
+    clientAuthStore.currentUser?.account,
+  ],
+  () => {
+    if (clientAuthStore.currentUser?.accountType === 'department') {
+      pickupContact.value = resolveDefaultPickupContact()
+      persistPickupContactDraft()
+    }
   },
 )
 
@@ -148,6 +188,10 @@ const enforcedClientOrderType = computed(() => (
   clientAuthStore.currentUser?.accountType === 'department' ? 'department' : 'walkin'
 ))
 const isDepartmentOrder = computed(() => enforcedClientOrderType.value === 'department')
+const pickupContactReadonly = computed(() => isDepartmentOrder.value)
+const pickupContactInputHint = computed(() => (
+  isDepartmentOrder.value ? '部门账号提货人按实名锁定，不可更改' : '可编辑并自动记忆'
+))
 const currentAccountOrderHint = computed(() => (
   isDepartmentOrder.value ? '当前为部门账户，可提交部门订单' : '当前为散客下单'
 ))
@@ -176,7 +220,9 @@ const handleBack = () => {
 }
 
 const handleSubmit = async () => {
-  const normalizedPickupContact = pickupContact.value.trim() || resolveDefaultPickupContact()
+  const normalizedPickupContact = isDepartmentOrder.value
+    ? resolveDefaultPickupContact()
+    : (pickupContact.value.trim() || resolveDefaultPickupContact())
   if (!normalizedPickupContact) {
     ElMessage.warning('请填写提货人')
     return
@@ -290,7 +336,7 @@ const handleSubmit = async () => {
             <span class="inline-flex h-6 items-center rounded-full bg-teal-50 px-2 text-xs font-semibold text-teal-700">提货信息</span>
             <p class="text-sm font-semibold text-slate-800">提货人</p>
           </div>
-          <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-500">可编辑并自动记忆</span>
+          <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-500">{{ pickupContactInputHint }}</span>
         </div>
         <div class="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 focus-within:border-teal-300 focus-within:bg-white">
           <p class="text-[11px] text-slate-400">提货姓名</p>
@@ -298,7 +344,11 @@ const handleSubmit = async () => {
             v-model.trim="pickupContact"
             type="text"
             maxlength="32"
-            class="mt-1 w-full border-0 bg-transparent p-0 text-base font-semibold text-slate-900 outline-none"
+            :readonly="pickupContactReadonly"
+            :class="[
+              'mt-1 w-full border-0 bg-transparent p-0 text-base font-semibold text-slate-900 outline-none',
+              pickupContactReadonly ? 'cursor-default text-slate-900' : '',
+            ]"
             placeholder="请输入提货人（默认用户名）"
             @blur="handlePickupContactBlur"
           />

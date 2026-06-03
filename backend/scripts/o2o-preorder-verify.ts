@@ -136,6 +136,7 @@ const run = async () => {
   const clientUserRepo = AppDataSource.getRepository(ClientUser)
   const preorderRepo = AppDataSource.getRepository(O2oPreorder)
   const inventoryLogRepo = AppDataSource.getRepository(InventoryLog)
+  const expectedDepartmentPickupContact = clientAuth.realName
 
   // 先把当前客户端账号切到“部门账号”，后续验证服务端是否会按当前登录账号强制判定归属，
   // 并确认正式出库单仍严格沿用“下单时快照”，不会被之后的资料修改串改。
@@ -158,6 +159,7 @@ const run = async () => {
   assert.equal(departmentOwnedResult.order.clientOrderType, 'department')
   assert.equal(departmentOwnedResult.order.departmentNameSnapshot, '脚本部门-A')
   assert.ok(departmentOwnedResult.order.staffNoSnapshot)
+  assert.equal(departmentOwnedResult.order.pickupContact, expectedDepartmentPickupContact)
   await o2oPreorderService.cancelMyOrder(clientAuth, departmentOwnedResult.order.id)
   log('服务端会按部门账号强制判定订单归属通过')
 
@@ -170,6 +172,7 @@ const run = async () => {
   assert.equal(departmentSnapshotPreorder.order.clientOrderType, 'department')
   assert.equal(departmentSnapshotPreorder.order.departmentNameSnapshot, '脚本部门-A')
   assert.ok(departmentSnapshotPreorder.order.staffNoSnapshot)
+  assert.equal(departmentSnapshotPreorder.order.pickupContact, expectedDepartmentPickupContact)
 
   // 客户端订单列表会展示工号快照，因此服务端关键词搜索也必须能直接命中该快照。
   const staffNoSearchResult = await o2oPreorderService.listMyOrders(clientAuth, {
@@ -199,7 +202,7 @@ const run = async () => {
     pickupContact: '脚本提货人-A',
   })
   assert.equal(preorderResult.order.status, 'pending')
-  assert.equal(preorderResult.order.pickupContact, '脚本提货人-A')
+  assert.equal(preorderResult.order.pickupContact, expectedDepartmentPickupContact)
   const heldProduct = await productRepo.findOneByOrFail({ id: product.id })
   assert.equal(heldProduct.preOrderedStock, productStateBeforeRegularPreorder.preOrderedStock + 2)
   log('客户端下单与库存预占通过')

@@ -1449,7 +1449,6 @@ class O2oPreorderService {
     const normalizedRemark = this.normalizePreorderRemark(input.remark)
     // 详细注释：是否系统申请必须以客户端本次明确选择为准，不再使用服务端默认兜底。
     const normalizedIsSystemApplied = Boolean(input.isSystemApplied)
-    const normalizedPickupContact = this.normalizePickupContact(input.pickupContact)
 
     const o2oRules = await systemConfigService.getO2oRuleConfigs()
     const detail = await AppDataSource.transaction(async (manager) => {
@@ -1485,7 +1484,7 @@ class O2oPreorderService {
 
       const clientUser = await manager.getRepository(ClientUser).findOne({
         where: { id: auth.userId },
-        select: ['id', 'accountType', 'departmentName', 'staffNo'],
+        select: ['id', 'realName', 'accountType', 'departmentName', 'staffNo'],
       })
       if (!clientUser) {
         throw new BizError('客户端账号不存在，请重新登录后再试', 401)
@@ -1497,6 +1496,11 @@ class O2oPreorderService {
       const normalizedClientOrderType = this.normalizeClientOrderType(clientUser.accountType === 'department' ? 'department' : 'walkin')
       const departmentNameSnapshot = this.resolveDepartmentNameSnapshot(normalizedClientOrderType, clientUser)
       const staffNoSnapshot = this.resolveStaffNoSnapshot(normalizedClientOrderType, clientUser)
+      const normalizedPickupContact = this.normalizePickupContact(
+        normalizedClientOrderType === 'department'
+          ? (clientUser.realName || auth.realName)
+          : input.pickupContact,
+      )
 
       // verifyCode 既用于用户端展示二维码，也作为管理端核销入口的核心识别码。
       const showNo = await this.generatePreorderShowNo(normalizedClientOrderType, manager)
