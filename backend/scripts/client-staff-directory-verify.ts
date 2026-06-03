@@ -234,6 +234,32 @@ async function main() {
     assert.deepEqual(initialDepartmentConfig.options, [], '初始客户端部门选项应为空')
     pass('初始客户端部门配置为空')
 
+    await expectJsonBadRequest(
+      () =>
+        fetch(`${baseUrl}/api/system-configs/client-departments`, {
+          method: 'PUT',
+          headers: {
+            Authorization: `Bearer ${adminLogin.token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            tree: [
+              {
+                id: 'dept_duplicate_parent',
+                label: '重复校验父级',
+                children: [
+                  { id: 'dept_duplicate_child_a', label: '办公室', children: [] },
+                  { id: 'dept_duplicate_child_b', label: '办公室', children: [] },
+                ],
+              },
+            ],
+          }),
+        }),
+      '保存同一父级下重复名称的部门配置',
+      '重复',
+    )
+    pass('部门配置会阻断同一父级下重复部门名称')
+
     const bulkImportDepartmentNodes = Array.from({ length: 12 }, (_, index) => ({
       id: `dept_bulk_${String(index + 1).padStart(2, '0')}`,
       label: `批量导入测试部门-${String(index + 1).padStart(2, '0')}`,

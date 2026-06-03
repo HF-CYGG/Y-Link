@@ -611,6 +611,21 @@ const normalizeDepartmentTreeForSubmit = (tree: DepartmentTreeNode[], depth = 1)
 }
 
 const validateDepartmentTree = (tree: DepartmentTreeNode[]) => {
+  const validateSiblings = (nodes: DepartmentTreeNode[], parentPath = '') => {
+    const siblingLabels = new Set<string>()
+    nodes.forEach((node) => {
+      if (siblingLabels.has(node.label)) {
+        const parentLabel = parentPath || '根部门'
+        throw new Error(`部门“${node.label}”在“${parentLabel}”下重复，请调整同级部门名称后保存`)
+      }
+      siblingLabels.add(node.label)
+      if (node.children.length > 0) {
+        const currentPath = parentPath ? `${parentPath}-${node.label}` : node.label
+        validateSiblings(node.children, currentPath)
+      }
+    })
+  }
+  validateSiblings(tree)
   const labels = flattenDepartmentTreeLabels(tree)
   if (labels.length > 50) {
     throw new Error('部门节点总数最多保留 50 个')
@@ -624,21 +639,34 @@ const validateDepartmentTree = (tree: DepartmentTreeNode[]) => {
   })
 }
 
-const createDepartmentNodeWithPrompt = async (title: string, placeholder: string) => {
+const assertSiblingDepartmentNameAvailable = (
+  siblingNodes: DepartmentTreeNode[],
+  label: string,
+  excludeNodeId = '',
+) => {
+  const normalizedLabel = normalizeDepartmentLabel(label)
+  const duplicated = siblingNodes.some((node) => node.id !== excludeNodeId && normalizeDepartmentLabel(node.label) === normalizedLabel)
+  if (duplicated) {
+    throw new Error(`同一父级下已存在“${normalizedLabel}”，请更换部门名称`)
+  }
+  return normalizedLabel
+}
+
+const createDepartmentNodeWithPrompt = async (title: string, placeholder: string, siblingNodes: DepartmentTreeNode[]) => {
   const promptResult = await ElMessageBox.prompt('请输入部门名称', title, {
     inputPlaceholder: placeholder,
     confirmButtonText: '确认',
     cancelButtonText: '取消',
     inputValidator: (value: string) => {
       try {
-        normalizeDepartmentLabel(value)
+        assertSiblingDepartmentNameAvailable(siblingNodes, value)
         return true
       } catch (error) {
         return extractErrorMessage(error, '部门名称不合法')
       }
     },
   })
-  const label = normalizeDepartmentLabel(promptResult.value)
+  const label = assertSiblingDepartmentNameAvailable(siblingNodes, promptResult.value)
   return {
     id: createDepartmentNodeId(label),
     label,
@@ -659,6 +687,19 @@ const findDepartmentNodeById = (nodes: DepartmentTreeNode[], id: string): Depart
   return null
 }
 
+const findDepartmentSiblingNodesById = (nodes: DepartmentTreeNode[], id: string): DepartmentTreeNode[] | null => {
+  if (nodes.some((node) => node.id === id)) {
+    return nodes
+  }
+  for (const node of nodes) {
+    const siblingNodes = findDepartmentSiblingNodesById(node.children, id)
+    if (siblingNodes) {
+      return siblingNodes
+    }
+  }
+  return null
+}
+
 const removeDepartmentNodeById = (nodes: DepartmentTreeNode[], id: string): boolean => {
   const index = nodes.findIndex((node) => node.id === id)
   if (index >= 0) {
@@ -670,7 +711,7 @@ const removeDepartmentNodeById = (nodes: DepartmentTreeNode[], id: string): bool
 
 const handleAddRootDepartment = async () => {
   try {
-    const node = await createDepartmentNodeWithPrompt('新增一级部门', '例如：市场部')
+    const node = await createDepartmentNodeWithPrompt('新增一级部门', '例如：市场部', serialForm.clientDepartmentTree)
     serialForm.clientDepartmentTree.push(node)
     selectedDepartmentNodeId.value = node.id
   } catch (error) {
@@ -688,7 +729,7 @@ const handleAddChildDepartment = async (parentNode?: DepartmentTreeNode) => {
     return
   }
   try {
-    const node = await createDepartmentNodeWithPrompt('新增子部门', '例如：华南组')
+    const node = await createDepartmentNodeWithPrompt('新增子部门', '例如：华南组', targetParent.children)
     targetParent.children.push(node)
     selectedDepartmentNodeId.value = node.id
   } catch (error) {
@@ -700,6 +741,7 @@ const handleAddChildDepartment = async (parentNode?: DepartmentTreeNode) => {
 }
 
 const handleEditDepartment = async (node: DepartmentTreeNode) => {
+  const siblingNodes = findDepartmentSiblingNodesById(serialForm.clientDepartmentTree, node.id) ?? []
   try {
     const promptResult = await ElMessageBox.prompt('请输入新的部门名称', '编辑部门', {
       inputValue: node.label,
@@ -708,14 +750,14 @@ const handleEditDepartment = async (node: DepartmentTreeNode) => {
       cancelButtonText: '取消',
       inputValidator: (value: string) => {
         try {
-          normalizeDepartmentLabel(value)
+          assertSiblingDepartmentNameAvailable(siblingNodes, value, node.id)
           return true
         } catch (error) {
           return extractErrorMessage(error, '部门名称不合法')
         }
       },
     })
-    node.label = normalizeDepartmentLabel(promptResult.value)
+    node.label = assertSiblingDepartmentNameAvailable(siblingNodes, promptResult.value, node.id)
   } catch (error) {
     if (error === 'cancel' || error === 'close') {
       return

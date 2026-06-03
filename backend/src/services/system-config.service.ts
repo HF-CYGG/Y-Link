@@ -845,20 +845,38 @@ class SystemConfigService {
     return [...uniqueSet]
   }
 
-  private normalizeClientDepartmentTree(tree: ClientDepartmentTreeNode[], depth = 1): ClientDepartmentTreeNode[] {
+  private assertUniqueSiblingDepartmentLabels(nodes: ClientDepartmentTreeNode[], parentPath = '') {
+    const siblingLabels = new Set<string>()
+    for (const node of nodes) {
+      if (siblingLabels.has(node.label)) {
+        const parentLabel = parentPath || '根部门'
+        throw new BizError(`部门“${node.label}”在“${parentLabel}”下重复，请调整同级部门名称后保存`, 400)
+      }
+      siblingLabels.add(node.label)
+      if (node.children.length > 0) {
+        const currentPath = parentPath ? `${parentPath}-${node.label}` : node.label
+        this.assertUniqueSiblingDepartmentLabels(node.children, currentPath)
+      }
+    }
+  }
+
+  private normalizeClientDepartmentTree(tree: ClientDepartmentTreeNode[], depth = 1, parentPath = ''): ClientDepartmentTreeNode[] {
     if (depth > 8) {
       throw new BizError('部门层级最多支持 8 级', 400)
     }
-    return tree.map((node, index) => {
+    const normalizedTree = tree.map((node, index) => {
       const label = this.normalizeDepartmentLabel(node.label)
       const id = String(node.id ?? '').trim() || this.createDepartmentNodeId(`${label}-${depth}-${index + 1}`)
-      const children = Array.isArray(node.children) ? this.normalizeClientDepartmentTree(node.children, depth + 1) : []
+      const currentPath = parentPath ? `${parentPath}-${label}` : label
+      const children = Array.isArray(node.children) ? this.normalizeClientDepartmentTree(node.children, depth + 1, currentPath) : []
       return {
         id,
         label,
         children,
       }
     })
+    this.assertUniqueSiblingDepartmentLabels(normalizedTree, parentPath)
+    return normalizedTree
   }
 
   private parseClientDepartmentConfig(rawValue: string): { tree: ClientDepartmentTreeNode[]; options: string[] } {
