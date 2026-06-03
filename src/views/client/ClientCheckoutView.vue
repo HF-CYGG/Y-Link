@@ -134,7 +134,7 @@ const currentRealName = computed(() => (
   || '未设置'
 ))
 const currentAccountTypeLabel = computed(() => (
-  clientAuthStore.currentUser?.accountType === 'department' ? '部门账号' : '个人账号'
+  clientAuthStore.currentUser?.accountType === 'department' ? '部门账户' : '散客账户'
 ))
 const currentDepartmentName = computed(() => clientAuthStore.currentUser?.departmentName?.trim() || '')
 const currentStaffNo = computed(() => clientAuthStore.currentUser?.staffNo?.trim() || '')
@@ -148,6 +148,9 @@ const enforcedClientOrderType = computed(() => (
   clientAuthStore.currentUser?.accountType === 'department' ? 'department' : 'walkin'
 ))
 const isDepartmentOrder = computed(() => enforcedClientOrderType.value === 'department')
+const currentAccountOrderHint = computed(() => (
+  isDepartmentOrder.value ? '当前为部门账户，可提交部门订单' : '当前为散客下单'
+))
 const orderTypeDescription = computed(() => {
   if (isDepartmentOrder.value) {
     return currentDepartmentName.value
@@ -328,7 +331,11 @@ const handleSubmit = async () => {
         <p class="mb-3 text-sm font-semibold text-slate-700">下单归属</p>
         <p class="mb-3 text-xs leading-5 text-slate-400">订单归属由当前账号类型自动判定，客户端不可手动切换。</p>
         <div class="rounded-[1rem] border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-600">
-          当前归属：<span class="font-semibold text-slate-900">{{ isDepartmentOrder ? '部门单' : '散客单' }}</span>
+          <div class="flex flex-wrap items-center gap-2">
+            <span>当前账户类型：<span class="font-semibold text-slate-900">{{ currentAccountTypeLabel }}</span></span>
+            <span class="rounded-full bg-white px-2 py-0.5 text-[11px] font-semibold text-teal-700">{{ isDepartmentOrder ? '部门单' : '散客单' }}</span>
+          </div>
+          <p class="mt-1 text-xs font-medium text-slate-700">{{ currentAccountOrderHint }}</p>
         </div>
         <div v-if="isDepartmentOrder" class="mt-4 rounded-[1rem] border border-slate-200 bg-slate-50 px-3 py-3">
           <div class="flex flex-wrap items-center gap-2">
