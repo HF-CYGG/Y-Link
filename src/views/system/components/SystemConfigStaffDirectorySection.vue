@@ -479,11 +479,8 @@ const handleSubmitImport = async () => {
     const result = await importClientStaffDirectory({
       rows: buildConfirmedImportRows(importPreviewResult.value.rows),
     })
-    const autoCreatedDepartmentText = result.summary.autoCreatedDepartments.length > 0
-      ? `，自动补齐部门 ${result.summary.autoCreatedDepartments.length} 个`
-      : ''
     ElMessage.success(
-      `导入完成：新增 ${result.summary.created} 条，更新 ${result.summary.updated} 条，跳过 ${result.summary.skipped} 条${autoCreatedDepartmentText}`,
+      `导入完成：新增 ${result.summary.created} 条，更新 ${result.summary.updated} 条，跳过 ${result.summary.skipped} 条`,
     )
     importVisible.value = false
     resetImportForm()
@@ -573,7 +570,7 @@ onMounted(() => {
       :closable="false"
       show-icon
       title="导入格式"
-      description="支持上传 txt、xlsx 文件，也支持粘贴多行文本。列顺序优先按：姓名, 工号, 所属部门 解析，也兼容旧格式“工号, 姓名, 所属部门”；支持英文逗号、中文逗号或 Tab 分隔。若部门尚未在系统配置中维护，导入时会自动补齐。"
+      description="支持上传 txt、xlsx 文件，也支持粘贴多行文本。列顺序优先按：姓名, 工号, 所属部门 解析，也兼容旧格式“工号, 姓名, 所属部门”；支持英文逗号、中文逗号或 Tab 分隔。所属部门会按当前部门树匹配为完整路径，未匹配或同名部门会阻断导入。"
     />
 
     <el-table
@@ -750,12 +747,11 @@ onMounted(() => {
             <el-tag type="info">将跳过 {{ importPreviewResult.summary.skippable }} 条</el-tag>
           </div>
           <el-alert
-            v-if="importPreviewResult.summary.autoCreatedDepartments.length > 0"
             class="mt-3"
-            type="warning"
+            type="info"
             :closable="false"
             show-icon
-            :title="`确认导入后将自动补齐部门：${importPreviewResult.summary.autoCreatedDepartments.join('、')}`"
+            title="预览中的所属部门已按现有部门树解析为完整路径；如部门未匹配或存在多个同名节点，请先维护部门配置或在导入文件中填写完整路径。"
           />
           <el-table
             class="mt-3"

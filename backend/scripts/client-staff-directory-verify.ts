@@ -76,6 +76,17 @@ async function expectJsonForbidden(request: () => Promise<Response>, scene: stri
   assert.equal(payload.code, 403, `${scene} 业务状态码应为 403`)
 }
 
+async function expectJsonBadRequest(request: () => Promise<Response>, scene: string, messageIncludes: string) {
+  const response = await request()
+  const payload = await readJson(response)
+  assert.equal(response.status, 400, `${scene} 应返回 400`)
+  assert.equal(payload.code, 400, `${scene} 业务状态码应为 400`)
+  assert.ok(
+    String(payload.message ?? '').includes(messageIncludes),
+    `${scene} 错误信息应包含“${messageIncludes}”: ${JSON.stringify(payload)}`,
+  )
+}
+
 function readCookieValueFromResponse(response: Response, cookieName: string): string | null {
   const headersWithSetCookie = response.headers as Headers & {
     getSetCookie?: () => string[]
@@ -223,6 +234,115 @@ async function main() {
     assert.deepEqual(initialDepartmentConfig.options, [], '初始客户端部门选项应为空')
     pass('初始客户端部门配置为空')
 
+    const bulkImportDepartmentNodes = Array.from({ length: 12 }, (_, index) => ({
+      id: `dept_bulk_${String(index + 1).padStart(2, '0')}`,
+      label: `批量导入测试部门-${String(index + 1).padStart(2, '0')}`,
+      children: [],
+    }))
+    const seededDepartmentTree = [
+      {
+        id: 'dept_book_college',
+        label: '书院部',
+        children: [
+          { id: 'dept_haiyou_college', label: '海右书院', children: [] },
+        ],
+      },
+      {
+        id: 'dept_admin_org',
+        label: '行政机构',
+        children: [
+          { id: 'dept_school_office', label: '学校办公室', children: [] },
+          { id: 'dept_principal_office', label: '校长办公室', children: [] },
+          { id: 'dept_asset_office', label: '资产管理处', children: [] },
+          { id: 'dept_admin_office', label: '办公室', children: [] },
+        ],
+      },
+      {
+        id: 'dept_party_org',
+        label: '党群机构',
+        children: [
+          { id: 'dept_party_office', label: '办公室', children: [] },
+        ],
+      },
+      { id: 'dept_smart_manufacturing', label: '智能制造中心', children: [] },
+      { id: 'dept_industrial_design', label: '工业设计中心', children: [] },
+      { id: 'dept_training_center', label: '实验实训中心', children: [] },
+      { id: 'dept_international_education', label: '国际教育学院', children: [] },
+      ...bulkImportDepartmentNodes,
+    ]
+    const seededDepartmentUpdateResult = await expectJsonOkResponse<{
+      config: {
+        tree: Array<{ id?: string; label: string; children?: unknown[] }>
+        options: string[]
+      }
+      changed: boolean
+    }>(
+      await fetch(`${baseUrl}/api/system-configs/client-departments`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${adminLogin.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ tree: seededDepartmentTree }),
+      }),
+      '写入教职工目录验证用客户端部门配置',
+    )
+    const seededDepartmentConfig = seededDepartmentUpdateResult.config
+    assert.ok(seededDepartmentConfig.options.includes('书院部-海右书院'), '测试部门树应包含多级书院部门路径')
+    assert.ok(seededDepartmentConfig.options.includes('行政机构-校长办公室'), '测试部门树应包含多级行政部门路径')
+    const seededDepartmentConfigTreeJson = JSON.stringify(seededDepartmentConfig.tree)
+    pass('教职工目录导入验证会先维护既有部门树')
+
+    await expectJsonBadRequest(
+      () =>
+        fetch(`${baseUrl}/api/system-configs/client-staff-directory/import/preview`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${adminLogin.token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            rows: [{ staffNo: 'HY1998', realName: '未匹配教师', departmentName: '测试部门A' }],
+          }),
+        }),
+      '预览未维护部门的教职工目录导入',
+      '不在当前部门配置中',
+    )
+    pass('未匹配部门会在预览阶段阻断且不会自动创建')
+
+    await expectJsonBadRequest(
+      () =>
+        fetch(`${baseUrl}/api/system-configs/client-staff-directory/import/preview`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${adminLogin.token}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            rows: [{ staffNo: 'HY1999', realName: '同名教师', departmentName: '办公室' }],
+          }),
+        }),
+      '预览同名叶子部门的教职工目录导入',
+      '存在多个同名节点',
+    )
+    pass('同名叶子部门会要求填写完整部门路径')
+
+    const fullPathPreviewResult = await expectJsonOkResponse<StaffDirectoryPreviewResult>(
+      await fetch(`${baseUrl}/api/system-configs/client-staff-directory/import/preview`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${adminLogin.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          rows: [{ staffNo: 'HY1997', realName: '路径教师', departmentName: '行政机构-办公室' }],
+        }),
+      }),
+      '预览完整部门路径的教职工目录导入',
+    )
+    assert.equal(fullPathPreviewResult.rows[0]?.departmentName, '行政机构-办公室')
+    pass('完整部门路径可直接通过导入预览')
+
     const importPreviewResult = await expectJsonOkResponse<StaffDirectoryPreviewResult>(
       await fetch(`${baseUrl}/api/system-configs/client-staff-directory/import/preview`, {
         method: 'POST',
@@ -242,6 +362,7 @@ async function main() {
     assert.equal(importPreviewResult.summary.total, 2, '首次导入预览应识别 2 条记录')
     assert.equal(importPreviewResult.summary.creatable, 2, '首次导入预览应提示创建 2 条记录')
     assert.equal(importPreviewResult.rows[0]?.action, 'create', '首次导入预览应标记为创建')
+    assert.equal(importPreviewResult.rows[0]?.departmentName, '书院部-海右书院', '唯一叶子部门应解析为完整部门路径')
     pass('管理员可预览教职工库导入结果')
 
     const listAfterPreview = await expectJsonOkResponse<{
@@ -589,9 +710,14 @@ async function main() {
       }),
       '读取导入后的客户端部门配置',
     )
-    assert.ok(departmentConfigAfterImport.options.includes('海右书院'), '导入后应自动补齐海右书院部门')
-    assert.ok(departmentConfigAfterImport.options.includes('智能制造中心'), '导入后应自动补齐智能制造中心部门')
-    pass('导入教职工库时会自动补齐缺失部门配置')
+    assert.equal(
+      JSON.stringify(departmentConfigAfterImport.tree),
+      seededDepartmentConfigTreeJson,
+      '教职工目录导入不应修改客户端部门树',
+    )
+    assert.ok(departmentConfigAfterImport.options.includes('书院部-海右书院'), '导入后应保留已维护的完整部门路径')
+    assert.ok(departmentConfigAfterImport.options.includes('智能制造中心'), '导入后应保留已维护的顶级部门')
+    pass('导入教职工库只匹配已有部门配置，不会自动新增部门')
 
     const importedRecord = importResult.list.find((item) => item.staffNo === 'HY1001')
     assert.ok(importedRecord, '应能找到 HY1001 记录')

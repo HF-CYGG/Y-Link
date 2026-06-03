@@ -2,7 +2,7 @@
  * 文件说明：维护客户端教职工工号目录，负责单条维护、批量导入以及与部门配置、部门账号实名信息之间的联动同步。
  * 实现逻辑：
  * 1. 统一校验工号、姓名和部门字段，保证部门账号注册时可按工号库稳定回填实名与所属部门；
- * 2. 批量导入时会先批量匹配现有工号，再按需自动补齐客户端部门配置，避免逐行查库造成的大批量导入性能抖动；
+ * 2. 批量导入时会先批量匹配现有工号，并将部门名称解析到已有部门树的完整路径，避免导入时隐式修改部门配置；
  * 3. 目录状态变化后会批量同步已绑定的部门账号实名校验状态，保证历史账号数据与目录口径一致。
  */
 import { AppDataSource } from '../config/data-source.js'
@@ -18,10 +18,7 @@ import { BizError } from '../utils/errors.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
 import { In, type EntityManager, type Repository } from 'typeorm'
-import {
-  systemConfigService,
-  type EnsureClientDepartmentOptionsResult,
-} from './system-config.service.js'
+import { systemConfigService } from './system-config.service.js'
 
 export interface ClientStaffDirectoryListQuery {
   page: number
@@ -373,27 +370,16 @@ export class ClientStaffDirectoryService {
     return ''
   }
 
-  private mergeResolvedDepartmentRows(
-    rows: NormalizedImportRow[],
-    departmentResult: EnsureClientDepartmentOptionsResult,
-  ): NormalizedImportRow[] {
-    return rows.map((row) => ({
-      ...row,
-      departmentName: departmentResult.resolvedDepartmentMap.get(row.departmentName) ?? row.departmentName,
-    }))
-  }
-
   private collectImportChanges(
     repo: Repository<ClientStaffDirectory>,
     resolvedRows: NormalizedImportRow[],
     existingMap: Map<string, ClientStaffDirectory>,
-    departmentResult: EnsureClientDepartmentOptionsResult,
   ) {
     const summary = {
       created: 0,
       updated: 0,
       skipped: 0,
-      autoCreatedDepartments: departmentResult.createdDepartments,
+      autoCreatedDepartments: [] as string[],
     }
     const changedStaffNos = new Set<string>()
     const activeRowsForUserSync: NormalizedImportRow[] = []
@@ -662,28 +648,43 @@ export class ClientStaffDirectoryService {
     return paths
   }
 
-  private async resolvePreviewAutoCreatedDepartments(rows: NormalizedImportRow[]): Promise<string[]> {
+  private async resolveImportDepartmentRows(rows: NormalizedImportRow[]): Promise<NormalizedImportRow[]> {
     const departmentNames = [...new Set(rows.map((item) => item.departmentName))]
     if (departmentNames.length === 0) {
-      return []
+      return rows
     }
     const config = await systemConfigService.getClientDepartmentConfigs()
     const flattenedDepartmentPaths = this.flattenDepartmentPaths(config.tree)
-    const autoCreatedDepartments: string[] = []
+    const resolvedDepartmentMap = new Map<string, string>()
+    const unmatchedDepartments: string[] = []
     for (const departmentName of departmentNames) {
+      const matchedPaths = this.findDepartmentPathsByLabel(config.tree, departmentName)
       if (config.options.includes(departmentName) || flattenedDepartmentPaths.includes(departmentName)) {
+        if (!departmentName.includes('-') && matchedPaths.length > 1) {
+          throw new BizError(`部门“${departmentName}”存在多个同名节点，请在导入文件中填写完整部门路径后再导入`, 400)
+        }
+        resolvedDepartmentMap.set(departmentName, departmentName)
         continue
       }
-      const matchedPaths = this.findDepartmentPathsByLabel(config.tree, departmentName)
       if (matchedPaths.length === 1) {
+        resolvedDepartmentMap.set(departmentName, matchedPaths[0])
         continue
       }
       if (matchedPaths.length > 1) {
-        throw new BizError(`部门“${departmentName}”存在多个同名节点，请先在系统配置中明确路径后再导入`, 400)
+        throw new BizError(`部门“${departmentName}”存在多个同名节点，请在导入文件中填写完整部门路径后再导入`, 400)
       }
-      autoCreatedDepartments.push(departmentName)
+      unmatchedDepartments.push(departmentName)
     }
-    return autoCreatedDepartments
+    if (unmatchedDepartments.length > 0) {
+      throw new BizError(
+        `以下部门不在当前部门配置中：${unmatchedDepartments.join('、')}。请先在部门配置中维护，或在导入文件中填写正确完整路径`,
+        400,
+      )
+    }
+    return rows.map((row) => ({
+      ...row,
+      departmentName: resolvedDepartmentMap.get(row.departmentName) ?? row.departmentName,
+    }))
   }
 
   async list(query: ClientStaffDirectoryListQuery): Promise<{
@@ -945,12 +946,11 @@ export class ClientStaffDirectoryService {
    * 导入预览：
    * - 仅解析并校验待导入内容，不写入教职工目录，也不修改部门配置；
    * - 逐行对比现有目录，提前告知管理员哪些记录会新增、更新或被跳过；
-   * - 预估需自动补齐的部门列表，帮助管理员在确认前先核对导入影响范围。
+   * - 按当前部门树解析所属部门，导入文件可填写完整路径或唯一叶子名，未命中或同名部门会阻断。
    */
   async previewImport(input: ImportClientStaffDirectoryInput): Promise<ImportClientStaffDirectoryPreviewResult> {
-    const rows = this.normalizeImportRows(input)
+    const rows = await this.resolveImportDepartmentRows(this.normalizeImportRows(input))
     const existingMap = await this.loadExistingByStaffNos(AppDataSource.manager, rows.map((item) => item.staffNo))
-    const autoCreatedDepartments = await this.resolvePreviewAutoCreatedDepartments(rows)
     const previewRows: ImportClientStaffDirectoryPreviewRow[] = rows.map((row) => {
       const existing = existingMap.get(row.staffNo)
       if (!existing) {
@@ -976,7 +976,7 @@ export class ClientStaffDirectoryService {
         creatable: previewRows.filter((item) => item.action === 'create').length,
         updatable: previewRows.filter((item) => item.action === 'update').length,
         skippable: previewRows.filter((item) => item.action === 'skip').length,
-        autoCreatedDepartments,
+        autoCreatedDepartments: [],
       },
       rows: previewRows,
     }
@@ -990,16 +990,10 @@ export class ClientStaffDirectoryService {
     summary: { created: number; updated: number; skipped: number; autoCreatedDepartments: string[] }
     list: ClientStaffDirectoryRecord[]
   }> {
-    const rows = this.normalizeImportRows(input)
+    const rows = await this.resolveImportDepartmentRows(this.normalizeImportRows(input))
     return AppDataSource.transaction(async (manager) => {
       const repo = manager.getRepository(ClientStaffDirectory)
-      const departmentResult = await systemConfigService.ensureClientDepartmentOptions(
-        rows.map((item) => item.departmentName),
-        actor,
-        requestMeta,
-        manager,
-      )
-      const resolvedRows = this.mergeResolvedDepartmentRows(rows, departmentResult)
+      const resolvedRows = rows
       const existingMap = await this.loadExistingByStaffNos(manager, resolvedRows.map((item) => item.staffNo))
       const {
         summary,
@@ -1008,7 +1002,7 @@ export class ClientStaffDirectoryService {
         inactiveStaffNosForUserSync,
         recordsToCreate,
         recordsToUpdate,
-      } = this.collectImportChanges(repo, resolvedRows, existingMap, departmentResult)
+      } = this.collectImportChanges(repo, resolvedRows, existingMap)
 
       if (recordsToCreate.length > 0) {
         await repo.save(recordsToCreate, { chunk: 200 })
