@@ -754,11 +754,9 @@ export class ClientStaffDirectoryService {
     const staffNo = this.normalizeStaffNo(input.staffNo)
     const realName = this.normalizeRealName(input.realName)
     const status = this.normalizeStatus(input.status)
+    const departmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName)
 
     return AppDataSource.transaction(async (manager) => {
-      const departmentResult = await systemConfigService.ensureClientDepartmentOptions([input.departmentName], actor, requestMeta, manager)
-      const departmentName = departmentResult.resolvedDepartmentMap.get(this.normalizeDepartmentName(input.departmentName))
-        ?? this.normalizeDepartmentName(input.departmentName)
       await this.assertUniqueStaffNo(manager, staffNo)
       const repo = manager.getRepository(ClientStaffDirectory)
       const entity = repo.create({
@@ -799,11 +797,9 @@ export class ClientStaffDirectoryService {
   ): Promise<{ record: ClientStaffDirectoryRecord }> {
     const staffNo = this.normalizeStaffNo(input.staffNo)
     const realName = this.normalizeRealName(input.realName)
+    const departmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName)
 
     return AppDataSource.transaction(async (manager) => {
-      const departmentResult = await systemConfigService.ensureClientDepartmentOptions([input.departmentName], actor, requestMeta, manager)
-      const departmentName = departmentResult.resolvedDepartmentMap.get(this.normalizeDepartmentName(input.departmentName))
-        ?? this.normalizeDepartmentName(input.departmentName)
       const repo = manager.getRepository(ClientStaffDirectory)
       const record = await repo.findOne({ where: { id } })
       if (!record) {

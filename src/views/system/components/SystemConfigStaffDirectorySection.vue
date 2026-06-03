@@ -12,6 +12,7 @@ import { ElMessage, ElMessageBox, type FormInstance, type FormRules, type TableI
 import {
   createClientStaffDirectoryRecord,
   deleteClientStaffDirectoryBatch,
+  getClientDepartmentConfigs,
   getClientStaffDirectoryList,
   importClientStaffDirectory,
   previewClientStaffDirectoryImport,
@@ -23,6 +24,7 @@ import {
   type ClientStaffDirectoryRecord,
   type ClientStaffDirectoryRegistrationStatus,
   type ClientStaffDirectoryStatus,
+  type ClientDepartmentTreeNode,
 } from '@/api/modules/system-config'
 import { extractErrorMessage } from '@/utils/error'
 
@@ -32,6 +34,11 @@ const props = defineProps<{
 }>()
 
 type StaffDirectoryDialogMode = 'create' | 'edit'
+type DepartmentTreeSelectOption = {
+  value: string
+  label: string
+  children?: DepartmentTreeSelectOption[]
+}
 
 const listLoading = ref(false)
 const records = ref<ClientStaffDirectoryRecord[]>([])
@@ -58,6 +65,9 @@ const dialogSubmitting = ref(false)
 const dialogMode = ref<StaffDirectoryDialogMode>('create')
 const dialogFormRef = ref<FormInstance>()
 const editingRecordId = ref('')
+const departmentOptions = ref<string[]>([])
+const departmentTree = ref<ClientDepartmentTreeNode[]>([])
+const departmentOptionsLoading = ref(false)
 const dialogForm = reactive({
   staffNo: '',
   realName: '',
@@ -85,6 +95,35 @@ const selectedRecordCount = computed(() => selectedRecords.value.length)
 const selectedRegisteredStaffAccountCount = computed(() => {
   return selectedRecords.value.reduce((count, item) => count + (item.isRegistered ? 1 : 0), 0)
 })
+const departmentTreeSelectOptions = computed(() => {
+  const buildOptions = (nodes: ClientDepartmentTreeNode[], parentPath = ''): DepartmentTreeSelectOption[] => {
+    return nodes
+      .map((node) => {
+        const label = String(node.label ?? '').trim()
+        if (!label) {
+          return null
+        }
+        const value = parentPath ? `${parentPath}-${label}` : label
+        const children = buildOptions(Array.isArray(node.children) ? node.children : [], value)
+        return {
+          value,
+          label,
+          ...(children.length > 0 ? { children } : {}),
+        }
+      })
+      .filter((item): item is DepartmentTreeSelectOption => Boolean(item))
+  }
+
+  return buildOptions(departmentTree.value)
+})
+const departmentTreeDefaultExpandedKeys = computed(() => {
+  return departmentTreeSelectOptions.value.map((item) => item.value)
+})
+const departmentTreeSelectProps = {
+  value: 'value',
+  label: 'label',
+  children: 'children',
+} as const
 
 const staffNoRule = (_rule: unknown, value: string, callback: (error?: Error) => void) => {
   const normalized = value.trim()
@@ -119,13 +158,27 @@ const realNameRule = (_rule: unknown, value: string, callback: (error?: Error) =
   callback()
 }
 
+const departmentNameRule = (_rule: unknown, value: string, callback: (error?: Error) => void) => {
+  const normalized = String(value ?? '').trim()
+  if (!normalized) {
+    callback(new Error('请选择所属部门'))
+    return
+  }
+  if (departmentOptions.value.length === 0) {
+    callback(new Error('请先在部门配置中维护可选部门'))
+    return
+  }
+  if (!departmentOptions.value.includes(normalized)) {
+    callback(new Error('所属部门只能从已有部门中选择'))
+    return
+  }
+  callback()
+}
+
 const rules: FormRules = {
   staffNo: [{ validator: staffNoRule, trigger: 'blur' }],
   realName: [{ validator: realNameRule, trigger: 'blur' }],
-  departmentName: [
-    { required: true, message: '请输入所属部门', trigger: 'blur' },
-    { min: 1, max: 128, message: '所属部门长度需在1-128个字符内', trigger: 'blur' },
-  ],
+  departmentName: [{ validator: departmentNameRule, trigger: 'change' }],
 }
 
 const getStatusTagType = (status: ClientStaffDirectoryStatus) => (status === 'active' ? 'success' : 'info')
@@ -273,10 +326,26 @@ const handleReset = () => {
   void loadList()
 }
 
+const loadDepartmentOptions = async () => {
+  departmentOptionsLoading.value = true
+  try {
+    const result = await getClientDepartmentConfigs()
+    departmentOptions.value = result.options
+    departmentTree.value = result.tree
+  } catch (error) {
+    ElMessage.error(extractErrorMessage(error, '加载部门配置失败'))
+  } finally {
+    departmentOptionsLoading.value = false
+  }
+}
+
 const handleOpenCreate = () => {
   dialogMode.value = 'create'
   resetDialogForm()
   dialogVisible.value = true
+  if (departmentOptions.value.length === 0) {
+    void loadDepartmentOptions()
+  }
 }
 
 const handleOpenEdit = (record: ClientStaffDirectoryRecord) => {
@@ -287,6 +356,9 @@ const handleOpenEdit = (record: ClientStaffDirectoryRecord) => {
   dialogForm.departmentName = record.departmentName
   dialogForm.status = record.status
   dialogVisible.value = true
+  if (departmentOptions.value.length === 0) {
+    void loadDepartmentOptions()
+  }
 }
 
 const handleSubmitDialog = async () => {
@@ -297,13 +369,18 @@ const handleSubmitDialog = async () => {
   if (!valid) {
     return
   }
+  const normalizedDepartmentName = dialogForm.departmentName.trim()
+  if (!departmentOptions.value.includes(normalizedDepartmentName)) {
+    ElMessage.warning('请选择已有部门，不能手动录入新部门')
+    return
+  }
   dialogSubmitting.value = true
   try {
     if (dialogMode.value === 'create') {
       await createClientStaffDirectoryRecord({
         staffNo: dialogForm.staffNo.trim(),
         realName: dialogForm.realName.trim(),
-        departmentName: dialogForm.departmentName.trim(),
+        departmentName: normalizedDepartmentName,
         status: dialogForm.status,
       })
       ElMessage.success('教职工目录记录已新增')
@@ -311,7 +388,7 @@ const handleSubmitDialog = async () => {
       await updateClientStaffDirectoryRecord(editingRecordId.value, {
         staffNo: dialogForm.staffNo.trim(),
         realName: dialogForm.realName.trim(),
-        departmentName: dialogForm.departmentName.trim(),
+        departmentName: normalizedDepartmentName,
       })
       ElMessage.success('教职工目录记录已更新')
     }
@@ -433,6 +510,7 @@ watch(
 
 onMounted(() => {
   void loadList()
+  void loadDepartmentOptions()
 })
 </script>
 
@@ -587,7 +665,22 @@ onMounted(() => {
           <el-input v-model.trim="dialogForm.realName" placeholder="请输入真实姓名" />
         </el-form-item>
         <el-form-item label="所属部门" prop="departmentName">
-          <el-input v-model.trim="dialogForm.departmentName" placeholder="请输入所属部门" />
+          <el-tree-select
+            v-model="dialogForm.departmentName"
+            class="w-full"
+            filterable
+            placeholder="请选择已有部门"
+            check-strictly
+            node-key="value"
+            :data="departmentTreeSelectOptions"
+            :props="departmentTreeSelectProps"
+            :default-expanded-keys="departmentTreeDefaultExpandedKeys"
+            :loading="departmentOptionsLoading"
+            :disabled="departmentOptionsLoading || departmentOptions.length === 0"
+          />
+          <p v-if="departmentOptions.length === 0 && !departmentOptionsLoading" class="mt-2 text-xs text-amber-600">
+            暂无可选部门，请先在“部门配置”中维护部门。
+          </p>
         </el-form-item>
         <el-form-item v-if="dialogMode === 'create'" label="初始状态" prop="status">
           <el-select v-model="dialogForm.status" class="w-full">
