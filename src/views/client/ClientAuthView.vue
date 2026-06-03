@@ -74,6 +74,7 @@ import {
   type ClientAccountType,
   getClientAuthCapabilities,
   getClientCaptcha,
+  lookupClientStaffDirectory,
   type ClientAuthCapabilities,
   type ClientRegisterResult,
   type ClientValidationMode,
@@ -109,6 +110,8 @@ interface ClientCaptchaState {
   expiresInSeconds: number
 }
 
+type StaffLookupStatus = 'idle' | 'typing' | 'loading' | 'matched' | 'registered' | 'not_found' | 'error'
+
 const router = useRouter()
 const route = useRoute()
 const clientAuthStore = useClientAuthStore(pinia)
@@ -117,6 +120,7 @@ const { runLatest: runLatestCapabilityRequest, cancel: cancelCapabilityRequest }
 const { runLatest: runLatestLoginRequest, cancel: cancelLoginRequest } = useStableRequest()
 const { runLatest: runLatestRegisterRequest, cancel: cancelRegisterRequest } = useStableRequest()
 const { runLatest: runLatestVerificationCodeRequest, cancel: cancelVerificationCodeRequest } = useStableRequest()
+const { runLatest: runLatestStaffLookupRequest, cancel: cancelStaffLookupRequest } = useStableRequest()
 const { runWithGate } = useIdempotentAction()
 
 // 登录 / 注册模式切换：
@@ -144,6 +148,7 @@ const registerVerificationCountdown = ref(0)
 let registerVerificationTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let captchaExpireTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let capabilityDeferredTimer: ReturnType<typeof globalThis.setTimeout> | null = null
+let staffLookupTimer: ReturnType<typeof globalThis.setTimeout> | null = null
 const formWrapperRef = ref<HTMLElement | null>(null)
 const formBlockRef = ref<HTMLElement | null>(null)
 const formWrapperHeight = ref('auto')
@@ -153,6 +158,13 @@ const captcha = reactive<ClientCaptchaState>({
   captchaId: '',
   captchaSvg: '',
   expiresInSeconds: 0,
+})
+const staffLookup = reactive({
+  status: 'idle' as StaffLookupStatus,
+  staffNo: '',
+  realName: '',
+  departmentName: '',
+  message: '',
 })
 
 const loginForm = reactive({
@@ -199,6 +211,15 @@ const shouldPrepareCaptcha = computed(() => isRegisterMode.value || loginCaptcha
 const isCapabilityHintVisible = computed(() => capabilityLoading.value && !authCapabilities.value)
 const isCapabilityFallbackVisible = computed(() => !capabilityLoading.value && !!capabilityErrorMessage.value && !authCapabilities.value)
 const forgotPasswordAvailable = computed(() => authCapabilities.value?.forgotPasswordEnabled ?? false)
+const isStaffLookupVisible = computed(() => {
+  return isDepartmentRegisterMode.value && Boolean(registerForm.staffNo.trim()) && staffLookup.status !== 'idle'
+})
+const staffLookupTone = computed(() => {
+  if (staffLookup.status === 'matched') return 'success'
+  if (staffLookup.status === 'registered') return 'warning'
+  if (staffLookup.status === 'not_found' || staffLookup.status === 'error') return 'danger'
+  return 'info'
+})
 
 // 安全说明：后端返回的是 SVG 字符串，这里统一转为 data URL 图片渲染，
 // 避免通过 v-html 直接把未信任的 SVG 片段注入到页面 DOM 中。
@@ -460,6 +481,89 @@ const resolveAccountChannel = (account: string): 'mobile' | 'email' | null => {
     return validateEmail(normalized) ? 'email' : null
   }
   return validateMobile(normalized) ? 'mobile' : null
+}
+
+const clearStaffLookupTimer = () => {
+  if (staffLookupTimer) {
+    globalThis.clearTimeout(staffLookupTimer)
+    staffLookupTimer = null
+  }
+}
+
+const resetStaffLookup = () => {
+  clearStaffLookupTimer()
+  cancelStaffLookupRequest()
+  staffLookup.status = 'idle'
+  staffLookup.staffNo = ''
+  staffLookup.realName = ''
+  staffLookup.departmentName = ''
+  staffLookup.message = ''
+}
+
+const applyStaffLookupResult = (staffNo: string, result: Awaited<ReturnType<typeof lookupClientStaffDirectory>>) => {
+  staffLookup.staffNo = staffNo
+  staffLookup.realName = result.realName ?? ''
+  staffLookup.departmentName = result.departmentName ?? ''
+
+  if (!result.matched) {
+    staffLookup.status = 'not_found'
+    staffLookup.message = '未找到该教职工号，请确认输入或联系管理员导入目录。'
+    return
+  }
+
+  if (result.isRegistered) {
+    staffLookup.status = 'registered'
+    staffLookup.message = '该教职工号已注册部门账号，不能重复注册。'
+    return
+  }
+
+  staffLookup.status = 'matched'
+  staffLookup.message = '已匹配到姓名和部门，请确认无误后继续注册。'
+}
+
+const scheduleStaffDirectoryLookup = (staffNoInput: string) => {
+  clearStaffLookupTimer()
+  cancelStaffLookupRequest()
+  const normalizedStaffNo = staffNoInput.trim()
+  staffLookup.staffNo = normalizedStaffNo
+  staffLookup.realName = ''
+  staffLookup.departmentName = ''
+
+  if (!isDepartmentRegisterMode.value || !normalizedStaffNo) {
+    resetStaffLookup()
+    return
+  }
+
+  if (!validateStaffNo(normalizedStaffNo)) {
+    staffLookup.status = 'typing'
+    staffLookup.message = '请输入 4-32 位教职工号，支持字母、数字和短横线。'
+    return
+  }
+
+  staffLookup.status = 'typing'
+  staffLookup.message = '系统将自动匹配姓名和部门。'
+  staffLookupTimer = globalThis.setTimeout(() => {
+    staffLookupTimer = null
+    staffLookup.status = 'loading'
+    staffLookup.message = '正在匹配教职工目录...'
+    void runLatestStaffLookupRequest({
+      executor: (signal) => lookupClientStaffDirectory(normalizedStaffNo, { signal }),
+      onSuccess: (result) => {
+        if (registerForm.staffNo.trim() !== normalizedStaffNo || !isDepartmentRegisterMode.value) {
+          return
+        }
+        applyStaffLookupResult(normalizedStaffNo, result)
+      },
+      onError: (error) => {
+        if (registerForm.staffNo.trim() !== normalizedStaffNo || !isDepartmentRegisterMode.value) {
+          return
+        }
+        const normalizedError = normalizeRequestError(error, '工号匹配失败，请稍后重试')
+        staffLookup.status = 'error'
+        staffLookup.message = normalizedError.message
+      },
+    })
+  }, 450)
 }
 
 const normalizeInputText = (value: string) => {
@@ -770,6 +874,19 @@ const validateDepartmentRegisterFields = () => {
     ElMessage.warning('教职工号仅支持字母、数字和短横线（4-32位）')
     return false
   }
+  if (staffLookup.staffNo !== normalizedStaffNo || staffLookup.status === 'typing' || staffLookup.status === 'loading') {
+    ElMessage.warning('请等待系统完成工号匹配后再注册')
+    scheduleStaffDirectoryLookup(normalizedStaffNo)
+    return false
+  }
+  if (staffLookup.status === 'registered') {
+    ElMessage.warning('该教职工号已注册部门账号，不能重复注册')
+    return false
+  }
+  if (staffLookup.status !== 'matched') {
+    ElMessage.warning('教职工号未匹配到有效目录，暂不能注册部门账号')
+    return false
+  }
   return true
 }
 
@@ -891,6 +1008,7 @@ const handleRegister = async () => {
           }),
         onSuccess: async (response) => {
           const registerRemainingMessage = extractRegisterRemainingMessage(response)
+          const nextLoginAccount = registeredAccount || registerForm.staffNo.trim()
           ElMessage.success('注册成功，请登录')
           resetRegisterStateAfterSuccess(registeredAccount, registerRemainingMessage)
           await refreshCaptcha(true)
@@ -898,7 +1016,7 @@ const handleRegister = async () => {
             path: '/client/login',
             query: {
               tab: 'login',
-              account: registeredAccount,
+              account: nextLoginAccount,
               notice: successTip.value,
             },
           })
@@ -948,6 +1066,17 @@ watch(registerValidationMode, (mode) => {
   }
 })
 
+watch(
+  () => [activeMode.value, registerForm.staffNo] as const,
+  ([mode, staffNo]) => {
+    if (mode !== 'register-department') {
+      resetStaffLookup()
+      return
+    }
+    scheduleStaffDirectoryLookup(staffNo)
+  },
+)
+
 watch(shouldPrepareCaptcha, (shouldShowCaptcha) => {
   if (shouldShowCaptcha) {
     void ensureCaptchaReady()
@@ -970,10 +1099,12 @@ onUnmounted(() => {
   cancelLoginRequest()
   cancelRegisterRequest()
   cancelVerificationCodeRequest()
+  cancelStaffLookupRequest()
   if (capabilityDeferredTimer) {
     globalThis.clearTimeout(capabilityDeferredTimer)
     capabilityDeferredTimer = null
   }
+  clearStaffLookupTimer()
   resetRegisterVerificationTimer()
   clearCaptcha()
 })
@@ -1381,6 +1512,36 @@ onUnmounted(() => {
                       <el-icon class="input-icon"><Key /></el-icon>
                     </template>
                   </el-input>
+
+                  <transition name="staff-lookup">
+                    <div v-if="isStaffLookupVisible" class="staff-lookup-slot">
+                      <div
+                        class="staff-lookup-card"
+                        :class="[`staff-lookup-card--${staffLookupTone}`, { 'is-loading': staffLookup.status === 'loading' }]"
+                      >
+                        <div class="staff-lookup-card__icon">
+                          <span v-if="staffLookup.status === 'loading'" class="staff-lookup-spinner"></span>
+                          <span v-else-if="staffLookup.status === 'matched'">✓</span>
+                          <span v-else-if="staffLookup.status === 'registered'">!</span>
+                          <span v-else-if="staffLookup.status === 'not_found' || staffLookup.status === 'error'">×</span>
+                          <span v-else>…</span>
+                        </div>
+                        <div class="staff-lookup-card__content">
+                          <div class="staff-lookup-card__message">{{ staffLookup.message }}</div>
+                          <div v-if="staffLookup.realName || staffLookup.departmentName" class="staff-lookup-card__grid">
+                            <div>
+                              <span>姓名</span>
+                              <strong>{{ staffLookup.realName || '-' }}</strong>
+                            </div>
+                            <div>
+                              <span>部门</span>
+                              <strong>{{ staffLookup.departmentName || '-' }}</strong>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </transition>
 
                   <el-input v-model="registerForm.account" placeholder="手机号或邮箱（选填）" class="geo-input" size="large" clearable>
                     <template #prefix>
@@ -1860,6 +2021,196 @@ onUnmounted(() => {
 
 .geo-input :deep(.el-input__wrapper.is-focus .input-icon) {
   color: #0d9488;
+}
+
+.staff-lookup-enter-active,
+.staff-lookup-leave-active {
+  transition:
+    grid-template-rows 0.34s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.22s ease;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: 1fr;
+  will-change: grid-template-rows, opacity;
+}
+
+.staff-lookup-enter-from,
+.staff-lookup-leave-to {
+  opacity: 0;
+  grid-template-rows: 0fr;
+}
+
+.staff-lookup-enter-to,
+.staff-lookup-leave-from {
+  opacity: 1;
+  grid-template-rows: 1fr;
+}
+
+.staff-lookup-slot {
+  min-height: 0;
+  overflow: hidden;
+  contain: layout paint;
+}
+
+.staff-lookup-enter-active .staff-lookup-card,
+.staff-lookup-leave-active .staff-lookup-card {
+  transition:
+    transform 0.34s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.24s ease,
+    filter 0.28s ease;
+  will-change: transform, opacity, filter;
+}
+
+.staff-lookup-enter-from .staff-lookup-card,
+.staff-lookup-leave-to .staff-lookup-card {
+  opacity: 0;
+  transform: translate3d(0, -6px, 0) scale(0.985);
+  filter: saturate(0.92);
+}
+
+.staff-lookup-enter-to .staff-lookup-card,
+.staff-lookup-leave-from .staff-lookup-card {
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scale(1);
+  filter: saturate(1);
+}
+
+.staff-lookup-card {
+  position: relative;
+  display: flex;
+  gap: 12px;
+  min-height: 88px;
+  padding: 14px 15px;
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  background: #f8fafc;
+  overflow: hidden;
+  backface-visibility: hidden;
+  transform: translateZ(0);
+  transition:
+    background-color 0.24s ease,
+    border-color 0.24s ease,
+    box-shadow 0.24s ease;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.03);
+}
+
+.staff-lookup-card.is-loading::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.72), transparent);
+  transform: translateX(-100%);
+  animation: staff-lookup-shine 1.25s ease-in-out infinite;
+}
+
+.staff-lookup-card--success {
+  border-color: rgba(13, 148, 136, 0.26);
+  background: rgba(240, 253, 250, 0.92);
+  box-shadow: 0 10px 24px rgba(13, 148, 136, 0.08);
+}
+
+.staff-lookup-card--warning {
+  border-color: rgba(245, 158, 11, 0.28);
+  background: rgba(255, 251, 235, 0.92);
+  box-shadow: 0 10px 24px rgba(245, 158, 11, 0.08);
+}
+
+.staff-lookup-card--danger {
+  border-color: rgba(244, 63, 94, 0.22);
+  background: rgba(255, 241, 242, 0.88);
+  box-shadow: 0 10px 24px rgba(244, 63, 94, 0.07);
+}
+
+.staff-lookup-card--info {
+  border-color: rgba(148, 163, 184, 0.26);
+  background: rgba(248, 250, 252, 0.94);
+}
+
+.staff-lookup-card__icon {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 26px;
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #0f766e;
+  font-size: 15px;
+  font-weight: 800;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.08);
+}
+
+.staff-lookup-card--warning .staff-lookup-card__icon {
+  color: #b45309;
+}
+
+.staff-lookup-card--danger .staff-lookup-card__icon {
+  color: #be123c;
+}
+
+.staff-lookup-card__content {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  flex: 1;
+}
+
+.staff-lookup-card__message {
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.staff-lookup-card__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.75fr) minmax(0, 1.25fr);
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.staff-lookup-card__grid span,
+.staff-lookup-card__grid strong {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.staff-lookup-card__grid span {
+  color: #94a3b8;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.staff-lookup-card__grid strong {
+  color: #0f172a;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.staff-lookup-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(13, 148, 136, 0.2);
+  border-top-color: #0f766e;
+  border-radius: 999px;
+  animation: staff-lookup-spin 0.8s linear infinite;
+}
+
+@keyframes staff-lookup-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes staff-lookup-shine {
+  to {
+    transform: translateX(100%);
+  }
 }
 
 .captcha-row {

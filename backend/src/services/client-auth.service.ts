@@ -138,6 +138,14 @@ export interface ClientAuthSessionResult {
   verificationChannel: 'captcha' | 'sms' | 'email'
 }
 
+export interface ClientStaffDirectoryLookupResult {
+  matched: boolean
+  staffNo: string
+  realName: string | null
+  departmentName: string | null
+  isRegistered: boolean
+}
+
 class ClientAuthService {
   private readonly userRepo = AppDataSource.getRepository(ClientUser)
   private readonly sessionRepo = AppDataSource.getRepository(ClientUserSession)
@@ -448,6 +456,35 @@ class ClientAuthService {
 
   async getCapabilities(): Promise<ClientAuthCapabilities> {
     return this.getVerificationCapabilities()
+  }
+
+  async lookupStaffDirectoryForRegister(staffNoInput: string): Promise<ClientStaffDirectoryLookupResult> {
+    const staffNo = this.normalizeStaffNo(staffNoInput)
+    const matchedStaff = await this.clientStaffDirectoryRepo.findOne({
+      where: { staffNo, status: 'active' },
+    })
+    if (!matchedStaff) {
+      return {
+        matched: false,
+        staffNo,
+        realName: null,
+        departmentName: null,
+        isRegistered: false,
+      }
+    }
+
+    const existedByStaffNo = await this.userRepo.findOne({
+      where: { staffNo, accountType: 'department' },
+      select: ['id'],
+    })
+
+    return {
+      matched: true,
+      staffNo,
+      realName: matchedStaff.realName,
+      departmentName: matchedStaff.departmentName,
+      isRegistered: Boolean(existedByStaffNo),
+    }
   }
 
   private async createSessionForUser(user: ClientUser) {

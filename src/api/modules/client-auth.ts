@@ -82,6 +82,14 @@ export interface ClientAuthCapabilities {
   departmentOptions: string[]
 }
 
+export interface ClientStaffDirectoryLookupResult {
+  matched: boolean
+  staffNo: string
+  realName: string | null
+  departmentName: string | null
+  isRegistered: boolean
+}
+
 /**
  * 获取图形验证码：
  * - 用于客户端注册、登录、找回密码时的防刷。
@@ -101,6 +109,19 @@ export const getClientAuthCapabilities = (config?: RequestConfig) =>
   request<ClientAuthCapabilities>({
     method: 'GET',
     url: '/client-auth/capabilities',
+    ...config,
+  })
+
+/**
+ * 部门注册时按教职工号精确查询目录：
+ * - 只返回 active 目录记录；
+ * - 用于前端展示姓名和部门确认，不允许前端自行提交这些字段。
+ */
+export const lookupClientStaffDirectory = (staffNo: string, config?: RequestConfig) =>
+  request<ClientStaffDirectoryLookupResult>({
+    method: 'GET',
+    url: '/client-auth/staff-directory/lookup',
+    params: { staffNo },
     ...config,
   })
 

@@ -97,6 +97,10 @@ const loginSchema = z.object({
   captchaCode: z.string().trim().min(1).optional(),
 })
 
+const staffDirectoryLookupSchema = z.object({
+  staffNo: z.string().trim().min(1).max(64),
+})
+
 const forgotVerifySchema = z.object({
   account: z.string().trim().min(1),
   verificationCode: z.string().trim().min(4).max(8).optional(),
@@ -144,6 +148,16 @@ clientAuthRouter.get(
   '/capabilities',
   asyncHandler(async (_req, res) => {
     const data = await clientAuthService.getCapabilities()
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+clientAuthRouter.get(
+  '/staff-directory/lookup',
+  asyncHandler(async (req, res) => {
+    const payload = staffDirectoryLookupSchema.parse(req.query)
+    const data = await clientAuthService.lookupStaffDirectoryForRegister(payload.staffNo)
+    res.setHeader('Cache-Control', 'no-store')
     res.json({ code: 0, message: 'ok', data })
   }),
 )
