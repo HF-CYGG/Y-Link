@@ -28,6 +28,7 @@ export interface ClientStaffDirectoryListQuery {
   pageSize: number
   keyword?: string
   status?: ClientStaffDirectoryStatus
+  registrationStatus?: 'registered' | 'unregistered'
 }
 
 export interface ClientStaffDirectoryRecord {
@@ -36,6 +37,7 @@ export interface ClientStaffDirectoryRecord {
   realName: string
   departmentName: string
   status: ClientStaffDirectoryStatus
+  isRegistered: boolean
   linkedClientUserCount: number
   createdAt: Date
   updatedAt: Date
@@ -135,6 +137,7 @@ function sanitizeRecord(
     realName: record.realName,
     departmentName: record.departmentName,
     status: record.status,
+    isRegistered: linkedClientUserCount > 0,
     linkedClientUserCount,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
@@ -705,6 +708,26 @@ export class ClientStaffDirectoryService {
     }
     if (query.status) {
       qb.andWhere('directory.status = :status', { status: query.status })
+    }
+    if (query.registrationStatus === 'registered') {
+      qb.andWhere(`
+        EXISTS (
+          SELECT 1
+          FROM client_user linked_user
+          WHERE linked_user.account_type = :linkedAccountType
+            AND linked_user.staff_no = directory.staff_no
+        )
+      `, { linkedAccountType: 'department' })
+    }
+    if (query.registrationStatus === 'unregistered') {
+      qb.andWhere(`
+        NOT EXISTS (
+          SELECT 1
+          FROM client_user linked_user
+          WHERE linked_user.account_type = :linkedAccountType
+            AND linked_user.staff_no = directory.staff_no
+        )
+      `, { linkedAccountType: 'department' })
     }
 
     const [list, total] = await qb

@@ -85,7 +85,6 @@ const updateProfileSchema = z.object({
   username: z.string().trim().min(1).max(128),
   mobile: z.string().trim().max(20).optional(),
   email: z.string().trim().max(128).optional(),
-  departmentName: z.string().trim().max(128).optional(),
 })
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。

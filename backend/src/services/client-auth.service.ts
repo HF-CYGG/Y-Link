@@ -93,7 +93,6 @@ export interface ClientUpdateProfileInput {
   username: string
   mobile?: string
   email?: string
-  departmentName?: string
 }
 
 export type ClientValidationMode = 'captcha' | 'verification_code'
@@ -730,6 +729,9 @@ class ClientAuthService {
     if (!user) {
       throw new BizError('当前用户不存在', 404)
     }
+    if (user.accountType === 'department') {
+      throw new BizError('部门账户资料由管理员或教职工目录维护，不支持在客户端自助修改', 403)
+    }
 
     const username = normalizeClientUsername(this.assertRealName(input.username))
     const mobile = input.mobile?.trim()
@@ -738,19 +740,9 @@ class ClientAuthService {
     const email = input.email?.trim()
       ? normalizeClientVerificationTarget('email', input.email)
       : null
-    const departmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName)
 
     if (!mobile && !email) {
       throw new BizError('手机号和邮箱至少保留一项', 400)
-    }
-
-    if (user.accountType === 'department' && user.staffVerified) {
-      if (username.value !== (user.realName?.trim() || '')) {
-        throw new BizError('部门账号已通过工号目录校验，姓名不可修改', 409)
-      }
-      if (departmentName !== (user.departmentName ?? null)) {
-        throw new BizError('部门账号已通过工号目录校验，所属部门不可修改', 409)
-      }
     }
 
     const checks = this.buildProfileUniquenessChecks(username, mobile, email)
@@ -759,7 +751,6 @@ class ClientAuthService {
     user.realName = username.value
     user.mobile = mobile
     user.email = email
-    user.departmentName = departmentName
 
     const savedUser = await this.userRepo.save(user)
     return this.toClientProfile(savedUser)

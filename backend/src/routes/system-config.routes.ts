@@ -121,6 +121,7 @@ const testVerificationProviderSchema = z.object({
 })
 
 const clientStaffDirectoryStatusSchema = z.enum(CLIENT_STAFF_DIRECTORY_STATUSES)
+const clientStaffDirectoryRegistrationStatusSchema = z.enum(['registered', 'unregistered'])
 
 const clientStaffDirectoryRecordSchema = z.object({
   staffNo: z.string().trim().min(1).max(64),
@@ -359,17 +360,21 @@ systemConfigRouter.get(
   '/client-staff-directory',
   requirePermission('system_configs:view'),
   requireRole('admin'),
-  asyncHandler(async (req, res) => {
-    const page = Number.parseInt(readSingleQueryValue(req.query.page) ?? '1', 10)
-    const pageSize = Number.parseInt(readSingleQueryValue(req.query.pageSize) ?? '20', 10)
-    const statusInput = (readSingleQueryValue(req.query.status) ?? '').trim()
-    const keywordInput = (readSingleQueryValue(req.query.keyword) ?? '').trim()
-    const data = await clientStaffDirectoryService.list({
-      page: Number.isFinite(page) && page > 0 ? page : 1,
-      pageSize: Number.isFinite(pageSize) && pageSize > 0 ? Math.min(pageSize, 100) : 20,
-      keyword: keywordInput || undefined,
-      status: statusInput ? clientStaffDirectoryStatusSchema.parse(statusInput) : undefined,
-    })
+    asyncHandler(async (req, res) => {
+      const page = Number.parseInt(readSingleQueryValue(req.query.page) ?? '1', 10)
+      const pageSize = Number.parseInt(readSingleQueryValue(req.query.pageSize) ?? '20', 10)
+      const statusInput = (readSingleQueryValue(req.query.status) ?? '').trim()
+      const registrationStatusInput = (readSingleQueryValue(req.query.registrationStatus) ?? '').trim()
+      const keywordInput = (readSingleQueryValue(req.query.keyword) ?? '').trim()
+      const data = await clientStaffDirectoryService.list({
+        page: Number.isFinite(page) && page > 0 ? page : 1,
+        pageSize: Number.isFinite(pageSize) && pageSize > 0 ? Math.min(pageSize, 100) : 20,
+        keyword: keywordInput || undefined,
+        status: statusInput ? clientStaffDirectoryStatusSchema.parse(statusInput) : undefined,
+        registrationStatus: registrationStatusInput
+          ? clientStaffDirectoryRegistrationStatusSchema.parse(registrationStatusInput)
+          : undefined,
+      })
     res.json({
       code: 0,
       message: 'ok',

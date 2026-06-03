@@ -180,6 +180,7 @@ export interface UpdateClientDepartmentConfigsResult {
 }
 
 export type ClientStaffDirectoryStatus = 'active' | 'inactive'
+export type ClientStaffDirectoryRegistrationStatus = 'registered' | 'unregistered'
 
 export interface ClientStaffDirectoryRecord {
   id: string
@@ -187,6 +188,7 @@ export interface ClientStaffDirectoryRecord {
   realName: string
   departmentName: string
   status: ClientStaffDirectoryStatus
+  isRegistered: boolean
   linkedClientUserCount: number
   createdAt: string
   updatedAt: string
@@ -197,6 +199,7 @@ export interface ClientStaffDirectoryListQuery {
   pageSize: number
   keyword?: string
   status?: ClientStaffDirectoryStatus
+  registrationStatus?: ClientStaffDirectoryRegistrationStatus
 }
 
 export interface ClientStaffDirectoryListResult {

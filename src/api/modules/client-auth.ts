@@ -229,13 +229,12 @@ export const clientChangePassword = (data: { currentPassword: string; newPasswor
 
 /**
  * 客户端更新个人资料：
- * - 允许更新用户名、手机号、邮箱及部门名称。
+ * - 仅允许个人账户维护姓名、手机号与邮箱；部门账户身份资料由管理端或教职工目录维护。
  */
 export const clientUpdateProfile = (data: {
   username: string
   mobile?: string
   email?: string
-  departmentName?: string
 }, config?: RequestConfig) =>
   request<ClientSafeProfile>({
     method: 'PATCH',

@@ -132,6 +132,11 @@ async function listSqliteTableColumns(dataSource: DataSource, tableName: string)
   return new Set(columns.map((column) => column.name))
 }
 
+async function listSqliteUniqueIndexes(dataSource: DataSource, tableName: string): Promise<Set<string>> {
+  const indexes: Array<{ name: string; unique: number }> = await dataSource.query(`PRAGMA index_list('${tableName}')`)
+  return new Set(indexes.filter((index) => Number(index.unique) === 1).map((index) => index.name))
+}
+
 function serializeSqliteNumericLiteral(value: number, fractionDigits = 2): string {
   // SQLite DDL 的 DEFAULT 子句不能使用参数占位符，因此这里先把内部常量收敛为有限数字，再序列化成 SQL 数值字面量。
   if (!Number.isFinite(value)) {
@@ -314,6 +319,10 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
 
   const clientUserColumnSet = await listSqliteTableColumns(dataSource, 'client_user')
   if (SQLITE_REQUIRED_CLIENT_USER_COLUMNS.some((column) => !clientUserColumnSet.has(column))) {
+    return true
+  }
+  const clientUserUniqueIndexSet = await listSqliteUniqueIndexes(dataSource, 'client_user')
+  if (!clientUserUniqueIndexSet.has('uk_client_user_staff_no')) {
     return true
   }
 

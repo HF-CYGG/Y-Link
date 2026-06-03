@@ -205,7 +205,6 @@ const toUserSnapshot = (user: ClientSafeProfile): ClientAuthUserSnapshot => ({
     username: string
     mobile?: string
     email?: string
-    departmentName?: string
   }) => {
     const profile = await clientUpdateProfile(payload)
     currentUser.value = profile
