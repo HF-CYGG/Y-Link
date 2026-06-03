@@ -137,12 +137,11 @@ const toUserSnapshot = (user: ClientSafeProfile): ClientAuthUserSnapshot => ({
   }
 
   const register = async (payload: {
-    username: string
-    account: string
+    username?: string
+    account?: string
     accountType: ClientAccountType
     staffNo?: string
     password: string
-    departmentName?: string
     verificationCode?: string
     captchaId?: string
     captchaCode?: string

@@ -76,7 +76,6 @@ import {
   getClientCaptcha,
   type ClientAuthCapabilities,
   type ClientRegisterResult,
-  type ClientDepartmentOptionNode,
   type ClientValidationMode,
 } from '@/api/modules/client-auth'
 import { resolveClientPostLoginWarmupTargets, scheduleRouteComponentWarmup } from '@/router/route-performance'
@@ -185,12 +184,6 @@ const isDepartmentRegisterMode = computed(() => activeMode.value === 'register-d
 const registerAccountType = computed<ClientAccountType>(() => {
   return isDepartmentRegisterMode.value ? 'department' : 'personal'
 })
-const registerDepartmentPlaceholder = computed(() => {
-  if (capabilityLoading.value && !authCapabilities.value) {
-    return '部门选项加载中，可稍后再选'
-  }
-  return '所属部门（必选）'
-})
 const modeToggleSliderTransform = computed(() => {
   return `translateX(${AUTH_MODE_SEQUENCE.indexOf(activeMode.value) * 100}%)`
 })
@@ -202,10 +195,6 @@ const registerValidationMode = computed<ClientValidationMode>(() => {
   return authCapabilities.value?.registerValidationModes[channel] ?? 'captcha'
 })
 const registerUsesVerificationCode = computed(() => registerValidationMode.value === 'verification_code')
-const registerDepartmentOptions = computed(() => authCapabilities.value?.departmentOptions ?? [])
-const registerDepartmentTreeSelectData = computed(() => {
-  return buildDepartmentTreeSelectData(authCapabilities.value?.departmentTree ?? [])
-})
 const shouldPrepareCaptcha = computed(() => isRegisterMode.value || loginCaptchaVisible.value)
 const isCapabilityHintVisible = computed(() => capabilityLoading.value && !authCapabilities.value)
 const isCapabilityFallbackVisible = computed(() => !capabilityLoading.value && !!capabilityErrorMessage.value && !authCapabilities.value)
@@ -488,31 +477,6 @@ const normalizeHumanName = (value: string) => {
     .trim()
 }
 
-interface RegisterDepartmentTreeSelectNode {
-  id: string
-  label: string
-  value: string
-  children: RegisterDepartmentTreeSelectNode[]
-}
-
-// 部门树下拉数据转换：
-// - 下拉面板显示当前层级名称，保持类似“图 2”的紧凑树菜单；
-// - 实际提交值仍保存为完整路径，继续兼容后端现有 departmentOptions 校验口径。
-const buildDepartmentTreeSelectData = (
-  tree: ClientDepartmentOptionNode[],
-  parentPath = '',
-): RegisterDepartmentTreeSelectNode[] => {
-  return tree.map((node) => {
-    const currentPath = parentPath ? `${parentPath}-${node.label}` : node.label
-    return {
-      id: node.id,
-      label: node.label,
-      value: currentPath,
-      children: buildDepartmentTreeSelectData(node.children, currentPath),
-    }
-  })
-}
-
 const applySecurityHintFromMessage = (message: string) => {
   securityHint.value = /频繁|锁定|稍后|重试/.test(message) ? message : ''
 }
@@ -792,27 +756,18 @@ const handleLogin = async () => {
   }
 }
 
-// 部门注册的工号与部门选择单独校验，避免主校验函数继续堆叠条件分支。
+// 部门注册只校验工号本身；姓名和部门必须由后端教职工目录反查，前端不再提供自选入口。
 const validateDepartmentRegisterFields = () => {
   if (!isDepartmentRegisterMode.value) {
     return true
   }
   const normalizedStaffNo = registerForm.staffNo.trim()
-  const normalizedDepartment = registerForm.department.trim()
   if (!normalizedStaffNo) {
     ElMessage.warning('请输入教职工号')
     return false
   }
   if (!validateStaffNo(normalizedStaffNo)) {
     ElMessage.warning('教职工号仅支持字母、数字和短横线（4-32位）')
-    return false
-  }
-  if (!normalizedDepartment) {
-    ElMessage.warning('请选择所属部门')
-    return false
-  }
-  if (!registerDepartmentOptions.value.includes(normalizedDepartment)) {
-    ElMessage.warning('请选择系统配置中的部门选项')
     return false
   }
   return true
@@ -837,13 +792,20 @@ const validateRegisterChallengeFields = () => {
 // 注册前置校验只负责拦截非法输入并整理提交上下文，避免注册主流程堆叠过多分支。
 const validateRegisterBeforeSubmit = () => {
   const accountChannel = resolveAccountChannel(registerForm.account)
-  if (!validateRealName(registerForm.username)) {
-    ElMessage.warning('请输入 2-20 位中文真实姓名，可包含空格或·')
-    return null
-  }
-  if (!accountChannel) {
-    ElMessage.warning('请输入正确的手机号或邮箱作为登录账号')
-    return null
+  if (isDepartmentRegisterMode.value) {
+    if (registerForm.account.trim() && !accountChannel) {
+      ElMessage.warning('手机号或邮箱为选填项；如填写，请输入正确格式')
+      return null
+    }
+  } else {
+    if (!validateRealName(registerForm.username)) {
+      ElMessage.warning('请输入 2-20 位中文真实姓名，可包含空格或·')
+      return null
+    }
+    if (!accountChannel) {
+      ElMessage.warning('请输入正确的手机号或邮箱作为登录账号')
+      return null
+    }
   }
   if (!validateRegisterPassword(registerForm.password)) {
     ElMessage.warning(CLIENT_NEW_PASSWORD_RULE_TEXT)
@@ -862,19 +824,18 @@ const validateRegisterBeforeSubmit = () => {
 
   return {
     registeredAccount: normalizeInputText(registerForm.account),
-    registeredUsername: normalizeInputText(registerForm.username),
+    registeredUsername: isDepartmentRegisterMode.value ? '' : normalizeInputText(registerForm.username),
   }
 }
 
 // 注册请求体按当前注册通道集中生成，保证部门字段与验证码字段的启停逻辑只维护一处。
 const buildRegisterRequestPayload = (registeredAccount: string, registeredUsername: string) => {
   return {
-    username: registeredUsername,
-    account: registeredAccount,
+    username: registeredUsername || undefined,
+    account: registeredAccount || undefined,
     accountType: registerAccountType.value,
     staffNo: isDepartmentRegisterMode.value ? registerForm.staffNo.trim() : undefined,
     password: registerForm.password,
-    departmentName: isDepartmentRegisterMode.value ? normalizeInputText(registerForm.department) || undefined : undefined,
     verificationCode: registerUsesVerificationCode.value ? normalizeInputText(registerForm.verificationCode) : undefined,
     captchaId: registerUsesVerificationCode.value ? undefined : captcha.captchaId,
     captchaCode: registerUsesVerificationCode.value ? undefined : normalizeInputText(registerForm.captcha),
@@ -888,12 +849,12 @@ const resetRegisterStateAfterSuccess = (registeredAccount: string, registerRemai
   clientAuthStore.clearAuthState()
   clientAuthStore.initialized = true
   activeMode.value = 'login'
-  loginForm.account = registeredAccount
+  loginForm.account = registeredAccount || registerForm.staffNo.trim()
   loginForm.password = ''
   loginForm.captcha = ''
   successTip.value = registerRemainingMessage
-    ? `账号已创建成功，请使用用户名、手机号或邮箱与密码登录。${registerRemainingMessage}`
-    : '账号已创建成功，请使用用户名、手机号或邮箱与密码登录。'
+    ? `账号已创建成功，请使用姓名、工号、手机号或邮箱与密码登录。${registerRemainingMessage}`
+    : '账号已创建成功，请使用姓名、工号、手机号或邮箱与密码登录。'
   registerForm.captcha = ''
   registerForm.verificationCode = ''
   registerForm.username = ''
@@ -1369,10 +1330,10 @@ onUnmounted(() => {
 
               <div v-else ref="formBlockRef" key="register-department" class="form-block">
                 <h2 class="block-title">创建部门账号</h2>
-                <p class="block-subtitle">填写实名、教职工号与所属部门后，即可走部门流程注册</p>
+                <p class="block-subtitle">填写教职工号后，系统会自动匹配姓名和所属部门</p>
                 <el-alert class="register-channel-alert" type="info" :closable="false" show-icon>
                   <template #title>
-                    部门账号会按部门流程下单，请确保真实姓名、教职工号和所属部门与实际登记一致。
+                    部门账号仅按教职工目录注册，姓名和部门由系统自动带出；手机号和邮箱可选，用于登录或找回密码。
                   </template>
                 </el-alert>
 
@@ -1415,49 +1376,17 @@ onUnmounted(() => {
                 </el-alert>
 
                 <el-form @submit.prevent="handleRegister" class="space-y-4 mt-6">
-                  <el-input
-                    v-model="registerForm.username"
-                    placeholder="真实姓名（需与部门登记一致）"
-                    class="geo-input"
-                    size="large"
-                    clearable
-                  >
-                    <template #prefix>
-                      <el-icon class="input-icon"><User /></el-icon>
-                    </template>
-                  </el-input>
-
-                  <el-input v-model="registerForm.account" placeholder="登录账号（手机号或邮箱）" class="geo-input" size="large" clearable>
-                    <template #prefix>
-                      <el-icon class="input-icon"><User /></el-icon>
-                    </template>
-                  </el-input>
-
                   <el-input v-model="registerForm.staffNo" placeholder="教职工号" class="geo-input" size="large" clearable>
                     <template #prefix>
                       <el-icon class="input-icon"><Key /></el-icon>
                     </template>
                   </el-input>
 
-                  <el-tree-select
-                    v-model="registerForm.department"
-                    :data="registerDepartmentTreeSelectData"
-                    node-key="id"
-                    :props="{ label: 'label', value: 'value', children: 'children' }"
-                    check-strictly
-                    :expand-on-click-node="false"
-                    :render-after-expand="false"
-                    :disabled="capabilityLoading && !authCapabilities"
-                    :placeholder="registerDepartmentPlaceholder"
-                    class="geo-input-select"
-                    size="large"
-                    clearable
-                    filterable
-                    popper-class="client-auth-department-popper"
-                  />
-                  <p v-if="registerDepartmentOptions.length === 0" class="mt-1 text-xs text-slate-400">
-                    暂无可选部门，请联系管理员配置
-                  </p>
+                  <el-input v-model="registerForm.account" placeholder="手机号或邮箱（选填）" class="geo-input" size="large" clearable>
+                    <template #prefix>
+                      <el-icon class="input-icon"><User /></el-icon>
+                    </template>
+                  </el-input>
                   <div class="captcha-row">
                     <el-input
                       v-model="registerForm.captcha"

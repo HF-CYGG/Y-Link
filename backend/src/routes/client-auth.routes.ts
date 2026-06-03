@@ -36,17 +36,59 @@ const clientPasswordSchema = (fieldLabel = '密码') =>
     .min(CLIENT_PASSWORD_POLICY_MIN_LENGTH, getClientPasswordPolicyMessage(fieldLabel))
     .refine((value) => isClientPasswordPolicySatisfied(value), getClientPasswordPolicyMessage(fieldLabel))
 
-const registerSchema = z.object({
-  username: z.string().trim().min(1).max(128),
-  account: z.string().trim().min(1),
-  accountType: z.enum(['personal', 'department']),
-  staffNo: z.string().trim().max(64).optional(),
-  password: clientPasswordSchema('密码'),
-  departmentName: z.string().optional(),
-  verificationCode: z.string().trim().min(4).max(8).optional(),
-  captchaId: z.string().trim().min(1).optional(),
-  captchaCode: z.string().trim().min(1).optional(),
-})
+const registerSchema = z
+  .object({
+    username: z.string().trim().max(128).optional(),
+    account: z.string().trim().max(128).optional(),
+    accountType: z.enum(['personal', 'department']),
+    staffNo: z.string().trim().max(64).optional(),
+    password: clientPasswordSchema('密码'),
+    departmentName: z.string().optional(),
+    verificationCode: z.string().trim().min(4).max(8).optional(),
+    captchaId: z.string().trim().min(1).optional(),
+    captchaCode: z.string().trim().min(1).optional(),
+  })
+  .superRefine((payload, ctx) => {
+    if (payload.accountType === 'personal') {
+      if (!payload.username?.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['username'],
+          message: '个人注册必须填写真实姓名',
+        })
+      }
+      if (!payload.account?.trim()) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['account'],
+          message: '个人注册必须填写手机号或邮箱',
+        })
+      }
+      return
+    }
+
+    if (!payload.staffNo?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['staffNo'],
+        message: '部门注册必须填写教职工号',
+      })
+    }
+    if (payload.username?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['username'],
+        message: '部门注册姓名由教职工目录自动匹配，请勿自行填写',
+      })
+    }
+    if (payload.departmentName?.trim()) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['departmentName'],
+        message: '部门注册所属部门由教职工目录自动匹配，请勿自行选择',
+      })
+    }
+  })
 
 const loginSchema = z.object({
   account: z.string().trim().min(1),
@@ -137,11 +179,13 @@ clientAuthRouter.post(
   asyncHandler(async (req, res) => {
     const payload = registerSchema.parse(req.body)
     const requestMeta = extractRequestMeta(req)
-    const normalizedAccount = normalizeClientAccount(payload.account, {
-      allowUsername: false,
-      fieldLabel: '账号',
-    }).normalizedValue
-    const registerGuardResult = await authSecurityService.guardClientRegisterSourceRequest(requestMeta, normalizedAccount)
+    const registerSourceKey = payload.account?.trim()
+      ? normalizeClientAccount(payload.account, {
+          allowUsername: false,
+          fieldLabel: '账号',
+        }).normalizedValue
+      : payload.staffNo?.trim() ?? ''
+    const registerGuardResult = await authSecurityService.guardClientRegisterSourceRequest(requestMeta, registerSourceKey)
     if (registerGuardResult.shouldWarnRemaining) {
       res.setHeader('X-YLink-Register-Remaining-Attempts', String(registerGuardResult.remainingAttempts))
       res.setHeader('X-YLink-Register-Max-Attempts', String(registerGuardResult.maxAttempts))

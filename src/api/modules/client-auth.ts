@@ -129,12 +129,11 @@ export const sendClientVerificationCode = (payload: ClientVerificationCodeSendIn
  * - 支持图形验证码或短信/邮件验证码。
  */
 export const clientRegister = (payload: {
-  username: string
-  account: string
+  username?: string
+  account?: string
   accountType: ClientAccountType
   staffNo?: string
   password: string
-  departmentName?: string
   verificationCode?: string
   captchaId?: string
   captchaCode?: string

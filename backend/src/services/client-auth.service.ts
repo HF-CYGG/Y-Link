@@ -45,8 +45,8 @@ const resetTicketStore = new EphemeralTicketStore<ResetTicket>({
 })
 
 export interface ClientRegisterInput {
-  username: string
-  account: string
+  username?: string
+  account?: string
   accountType: ClientUserAccountType
   staffNo?: string
   password: string
@@ -221,7 +221,10 @@ class ClientAuthService {
       query.addSelect('user.passwordHash')
     }
     if (identifier.channel === 'username') {
-      query.where('LOWER(user.realName) = :account', { account: identifier.normalizedValue })
+      query.where('LOWER(user.realName) = :account OR user.staffNo = :staffNo', {
+        account: identifier.normalizedValue,
+        staffNo: identifier.rawValue,
+      })
       return query
     }
     query.where(`user.${identifier.channel} = :account`, { account: identifier.normalizedValue })
@@ -315,11 +318,20 @@ class ClientAuthService {
     }
   }
 
+  private resolveOptionalContactAccount(account: string | null | undefined): ReturnType<ClientAuthService['resolveAccount']> | null {
+    const normalized = account?.trim() ?? ''
+    return normalized ? this.resolveAccount(normalized) : null
+  }
+
   private verifyRegisterChallenge(
     input: ClientRegisterInput,
     validationMode: ClientValidationMode,
-    account: ReturnType<ClientAuthService['resolveAccount']>,
+    account: ReturnType<ClientAuthService['resolveAccount']> | null,
   ) {
+    if (!account) {
+      this.verifyCaptchaIfRequired(input)
+      return
+    }
     if (validationMode === 'verification_code') {
       this.verifyCodeIfRequired(
         input,
@@ -336,16 +348,22 @@ class ClientAuthService {
   }
 
   private async assertRegisterIdentifiersAvailable(
-    account: ReturnType<ClientAuthService['resolveAccount']>,
-    username: ReturnType<typeof normalizeClientUsername>,
+    account: ReturnType<ClientAuthService['resolveAccount']> | null,
+    username: ReturnType<typeof normalizeClientUsername> | null,
   ) {
-    const existedByAccount = await this.findUserByAnyIdentifier({
-      channel: account.channel,
-      rawValue: account.account,
-      normalizedValue: account.account,
-    })
-    if (existedByAccount) {
-      throw new BizError('该手机号或邮箱已被占用', 409)
+    if (account) {
+      const existedByAccount = await this.findUserByAnyIdentifier({
+        channel: account.channel,
+        rawValue: account.account,
+        normalizedValue: account.account,
+      })
+      if (existedByAccount) {
+        throw new BizError('该手机号或邮箱已被占用', 409)
+      }
+    }
+
+    if (!username) {
+      return
     }
 
     const existedByUsername = await this.findUserByAnyIdentifier({
@@ -361,18 +379,20 @@ class ClientAuthService {
   private async resolveDepartmentRegistrationProfile(
     accountType: ClientUserAccountType,
     input: ClientRegisterInput,
-    username: ReturnType<typeof normalizeClientUsername>,
+    username: ReturnType<typeof normalizeClientUsername> | null,
   ): Promise<{
     usernameValue: string
     departmentName: string | null
     staffNo: string | null
     staffVerified: boolean
   }> {
-    let departmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName)
     if (accountType !== 'department') {
+      if (!username) {
+        throw new BizError('个人注册必须填写真实姓名', 400)
+      }
       return {
         usernameValue: username.value,
-        departmentName,
+        departmentName: null,
         staffNo: null,
         staffVerified: false,
       }
@@ -387,21 +407,6 @@ class ClientAuthService {
       throw new BizError('该教职工号已绑定其他账号', 409)
     }
 
-    const activeDirectoryCount = await this.clientStaffDirectoryRepo.count({
-      where: { status: 'active' },
-    })
-    if (activeDirectoryCount <= 0) {
-      if (!departmentName) {
-        throw new BizError('部门账户在目录未导入时，必须手动选择所属部门', 400)
-      }
-      return {
-        usernameValue: username.value,
-        departmentName,
-        staffNo,
-        staffVerified: false,
-      }
-    }
-
     const matchedStaff = await this.clientStaffDirectoryRepo.findOne({
       where: { staffNo, status: 'active' },
     })
@@ -410,7 +415,7 @@ class ClientAuthService {
     }
 
     const usernameValue = this.assertRealName(matchedStaff.realName)
-    departmentName = await systemConfigService.assertClientDepartmentOption(matchedStaff.departmentName)
+    const departmentName = await systemConfigService.assertClientDepartmentOption(matchedStaff.departmentName)
     return {
       usernameValue,
       departmentName,
@@ -421,9 +426,9 @@ class ClientAuthService {
 
   private resolveRegisterVerificationChannel(
     validationMode: ClientValidationMode,
-    accountChannel: 'mobile' | 'email',
+    accountChannel?: 'mobile' | 'email',
   ): ClientAuthSessionResult['verificationChannel'] {
-    if (validationMode !== 'verification_code') {
+    if (validationMode !== 'verification_code' || !accountChannel) {
       return 'captcha'
     }
     return accountChannel === 'mobile' ? 'sms' : 'email'
@@ -469,21 +474,25 @@ class ClientAuthService {
   }
 
   async register(input: ClientRegisterInput, _requestMeta?: RequestMeta) {
-    const account = this.resolveAccount(input.account)
-    const username = normalizeClientUsername(this.assertRealName(input.username))
     const accountType = this.normalizeAccountType(input.accountType)
+    const account = accountType === 'department'
+      ? this.resolveOptionalContactAccount(input.account)
+      : this.resolveAccount(input.account ?? '')
+    const username = accountType === 'department'
+      ? null
+      : normalizeClientUsername(this.assertRealName(input.username ?? ''))
     const password = assertClientPasswordPolicy(input.password)
     const capabilities = await this.getVerificationCapabilities()
-    const validationMode = capabilities.registerValidationModes[account.channel]
+    const validationMode = account ? capabilities.registerValidationModes[account.channel] : 'captcha'
     this.verifyRegisterChallenge(input, validationMode, account)
     await this.assertRegisterIdentifiersAvailable(account, username)
-    await authSecurityService.guardClientRegisterAccountRequest(_requestMeta, account.account)
     const registerProfile = await this.resolveDepartmentRegistrationProfile(accountType, input, username)
+    await authSecurityService.guardClientRegisterAccountRequest(_requestMeta, account?.account ?? registerProfile.staffNo ?? registerProfile.usernameValue)
 
     const user = await this.userRepo.save(
       this.userRepo.create({
-        mobile: account.mobile ?? undefined,
-        email: account.email ?? undefined,
+        mobile: account?.mobile ?? undefined,
+        email: account?.email ?? undefined,
         passwordHash: await hashPassword(password),
         // 当前账号体系下，用户名与登录账号分离，支持用户自定义用户名。
         realName: registerProfile.usernameValue,
@@ -499,7 +508,7 @@ class ClientAuthService {
       token: session.token,
       expiresAt: session.expiresAt,
       user: this.toClientProfile(user),
-      verificationChannel: this.resolveRegisterVerificationChannel(validationMode, account.channel),
+      verificationChannel: this.resolveRegisterVerificationChannel(validationMode, account?.channel),
     } satisfies ClientAuthSessionResult
   }
 
