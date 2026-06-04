@@ -29,6 +29,7 @@ import { getClientDepartmentConfigs } from '@/api/modules/system-config'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
+import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
 
 const listRequest = useStableRequest()
@@ -425,7 +426,11 @@ const handleSubmitCreate = async () => {
     listState.query.page = 1
     await loadData()
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '手动新增客户端用户失败'))
+    void showCriticalErrorDialog(error, {
+      title: '新增客户端用户失败',
+      fallback: '手动新增客户端用户失败',
+      operation: '手动新增客户端用户',
+    })
   } finally {
     createSubmitting.value = false
   }
@@ -468,7 +473,11 @@ const handleSubmitEdit = async () => {
     ElMessage.success('客户端用户资料已更新')
     await loadData()
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '更新客户端用户资料失败'))
+    void showCriticalErrorDialog(error, {
+      title: '更新客户端用户失败',
+      fallback: '更新客户端用户资料失败',
+      operation: '更新客户端用户资料',
+    })
   } finally {
     editSubmitting.value = false
   }
@@ -538,7 +547,11 @@ const handleSubmitResetPassword = async () => {
     ElMessage.success('客户端用户密码已修改')
     await loadData()
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '修改客户端用户密码失败'))
+    void showCriticalErrorDialog(error, {
+      title: '修改客户端用户密码失败',
+      fallback: '修改客户端用户密码失败',
+      operation: '修改客户端用户密码',
+    })
   } finally {
     resetPasswordSubmitting.value = false
   }
@@ -565,7 +578,11 @@ const handleToggleStatus = async (row: ClientUserManageProfile) => {
     if (error === 'cancel' || error === 'close') {
       return
     }
-    ElMessage.error(extractErrorMessage(error, `${actionLabel}失败`))
+    void showCriticalErrorDialog(error, {
+      title: `${actionLabel}客户端用户失败`,
+      fallback: `${actionLabel}失败`,
+      operation: `${actionLabel}客户端用户`,
+    })
   }
 }
 

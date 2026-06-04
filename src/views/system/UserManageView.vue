@@ -40,6 +40,7 @@ import { useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { redirectToAdminLogin } from '@/utils/auth-navigation'
 import { extractErrorMessage } from '@/utils/error'
+import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
 import {
   accountTypeDescriptions,
@@ -489,7 +490,11 @@ const handleSubmit = async () => {
     dialogVisible.value = false
     await loadData()
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '保存用户失败'))
+    void showCriticalErrorDialog(error, {
+      title: '保存用户失败',
+      fallback: '保存用户失败',
+      operation: userForm.id ? '编辑管理端用户' : '新增管理端用户',
+    })
   } finally {
     submitting.value = false
   }
@@ -522,7 +527,11 @@ const handleSubmitResetPassword = async () => {
     ElMessage.success(`已重置“${targetDisplayName}”的登录密码`)
     await loadData()
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '重置密码失败'))
+    void showCriticalErrorDialog(error, {
+      title: '重置密码失败',
+      fallback: '重置密码失败',
+      operation: '重置管理端用户密码',
+    })
   } finally {
     resetPasswordSubmitting.value = false
   }
@@ -552,7 +561,11 @@ const handleSubmitOwnPassword = async () => {
     redirectToAdminLogin()
     ElMessage.success('密码修改成功，请使用新密码重新登录')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '修改密码失败'))
+    void showCriticalErrorDialog(error, {
+      title: '修改密码失败',
+      fallback: '修改密码失败',
+      operation: '修改本人管理端密码',
+    })
   } finally {
     ownPasswordSubmitting.value = false
   }
@@ -585,7 +598,11 @@ const handleToggleStatus = async (row: UserSafeProfile) => {
     if (error === 'cancel') {
       return
     }
-    ElMessage.error(extractErrorMessage(error, `${actionLabel}失败`))
+    void showCriticalErrorDialog(error, {
+      title: `${actionLabel}用户失败`,
+      fallback: `${actionLabel}失败`,
+      operation: `${actionLabel}管理端用户`,
+    })
   }
 }
 

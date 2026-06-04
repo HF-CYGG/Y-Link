@@ -46,6 +46,7 @@ import {
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
+import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import SystemConfigDepartmentSection from '@/views/system/components/SystemConfigDepartmentSection.vue'
 import SystemConfigCustomerServiceSection from '@/views/system/components/SystemConfigCustomerServiceSection.vue'
 import SystemConfigO2oRulesSection from '@/views/system/components/SystemConfigO2oRulesSection.vue'
@@ -630,13 +631,6 @@ const validateDepartmentTree = (tree: DepartmentTreeNode[]) => {
   if (labels.length > 50) {
     throw new Error('部门节点总数最多保留 50 个')
   }
-  const uniqueSet = new Set<string>()
-  labels.forEach((label) => {
-    if (uniqueSet.has(label)) {
-      throw new Error(`部门“${label}”重复，请去重后保存`)
-    }
-    uniqueSet.add(label)
-  })
 }
 
 const assertSiblingDepartmentNameAvailable = (
@@ -1157,7 +1151,11 @@ const handleSubmit = async () => {
         : '配置未变更',
     )
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '保存系统配置失败，请稍后重试'))
+    void showCriticalErrorDialog(error, {
+      title: '系统配置保存失败',
+      fallback: '保存系统配置失败，请稍后重试',
+      operation: '保存系统配置',
+    })
   } finally {
     saving.value = false
   }

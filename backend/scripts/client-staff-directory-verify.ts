@@ -260,6 +260,38 @@ async function main() {
     )
     pass('部门配置会阻断同一父级下重复部门名称')
 
+    const delimiterCollisionDepartmentResult = await expectJsonOkResponse<{
+      config: {
+        tree: Array<{ id?: string; label: string; children?: unknown[] }>
+        options: string[]
+      }
+      changed: boolean
+    }>(
+      await fetch(`${baseUrl}/api/system-configs/client-departments`, {
+        method: 'PUT',
+        headers: {
+          Authorization: `Bearer ${adminLogin.token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          tree: [
+            { id: 'dept_path_like_root', label: '行政机构-办公室', children: [] },
+            {
+              id: 'dept_path_like_parent',
+              label: '行政机构',
+              children: [{ id: 'dept_path_like_child', label: '办公室', children: [] }],
+            },
+          ],
+        }),
+      }),
+      '保存非同级但完整路径文本相同的部门配置',
+    )
+    assert.ok(
+      delimiterCollisionDepartmentResult.config.options.includes('行政机构-办公室'),
+      '非同级部门完整路径文本相同时仍应保留可选项',
+    )
+    pass('部门配置只限制同级重名，不再误拦截完整路径文本重复')
+
     const bulkImportDepartmentNodes = Array.from({ length: 12 }, (_, index) => ({
       id: `dept_bulk_${String(index + 1).padStart(2, '0')}`,
       label: `批量导入测试部门-${String(index + 1).padStart(2, '0')}`,

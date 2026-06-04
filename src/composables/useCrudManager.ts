@@ -16,6 +16,7 @@ import type { RequestConfig } from '@/api/http'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
+import { showCriticalErrorDialog } from '@/utils/error-dialog'
 
 /**
  * 通用 CRUD 表单约束：
@@ -175,7 +176,11 @@ export const useCrudManager = <
       })
     } catch (error) {
       if (error !== 'cancel' && error !== 'close') {
-        ElMessage.error(extractErrorMessage(error, config.messages.deleteError))
+        void showCriticalErrorDialog(error, {
+          title: config.messages.deleteError,
+          fallback: config.messages.deleteError,
+          operation: '删除数据',
+        })
       }
     }
   }
@@ -209,11 +214,12 @@ export const useCrudManager = <
       executor: async () => {
         submitting.value = true
         ElMessage.info(config.messages.submitPending || '正在提交，请稍候')
+        const currentForm = form.value
+        const rowId = currentForm.id
+        const isEdit = Boolean(rowId)
+        const operationLabel = isEdit && rowId ? '编辑数据' : '新增数据'
         try {
-          const currentForm = form.value
           const payload = await config.buildSubmitPayload(currentForm)
-          const rowId = currentForm.id
-          const isEdit = Boolean(rowId)
           const mode = isEdit ? 'update' : 'create'
           let result: TEntity
 
@@ -249,7 +255,11 @@ export const useCrudManager = <
 
           return true
         } catch (error) {
-          ElMessage.error(extractErrorMessage(error, config.messages.saveError))
+          void showCriticalErrorDialog(error, {
+            title: config.messages.saveError,
+            fallback: config.messages.saveError,
+            operation: operationLabel,
+          })
           return false
         } finally {
           submitting.value = false

@@ -9,6 +9,7 @@ import type {
 } from '@/api/modules/notification'
 import { testNotificationRuleSend } from '@/api/modules/notification'
 import { extractErrorMessage } from '@/utils/error'
+import { showCriticalErrorDialog } from '@/utils/error-dialog'
 
 const props = defineProps<{
   rules: NotificationRuleRecord[]
@@ -160,7 +161,11 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: TestChannel
   } catch (error) {
     const errorMessage = extractErrorMessage(error, '测试发送失败，请稍后重试')
     setTestFeedback(ruleId, channel, 'error', errorMessage)
-    ElMessage.error(errorMessage)
+    void showCriticalErrorDialog(error, {
+      title: channel === 'feishu' ? '飞书测试失败' : '邮箱测试失败',
+      fallback: '测试发送失败，请稍后重试',
+      operation: channel === 'feishu' ? '测试飞书通知' : '测试邮箱通知',
+    })
   } finally {
     testingState[key] = false
   }

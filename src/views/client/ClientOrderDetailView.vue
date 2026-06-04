@@ -47,6 +47,7 @@ import { buildClientOrderSummaryFromDetail } from '@/utils/client-order-summary'
 import { notifyClientOrderRefresh, subscribeClientOrderRefresh } from '@/utils/client-order-refresh'
 import { formatDateTime } from '@/utils/date-time'
 import { normalizeRequestError } from '@/utils/error'
+import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import ClientOrderEditDialog from '@/views/client/components/ClientOrderEditDialog.vue'
 import ClientOrderReturnDialog from '@/views/client/components/ClientOrderReturnDialog.vue'
 import {
@@ -1074,7 +1075,11 @@ const handleRecallOrder = async () => {
     ElMessage.success('订单已撤回')
   } catch (error) {
     const normalizedError = normalizeRequestError(error, '撤回订单失败')
-    ElMessage.error(normalizedError.message)
+    void showCriticalErrorDialog(normalizedError, {
+      title: '撤回订单失败',
+      fallback: '撤回订单失败',
+      operation: '撤回订单',
+    })
   } finally {
     recalling.value = false
   }
@@ -1163,7 +1168,11 @@ const handleSubmitOrderEdit = async () => {
     ElMessage.success('订单修改成功')
   } catch (error) {
     const normalizedError = normalizeRequestError(error, '订单修改失败')
-    ElMessage.error(normalizedError.message)
+    void showCriticalErrorDialog(normalizedError, {
+      title: '订单修改失败',
+      fallback: '订单修改失败',
+      operation: '提交订单修改',
+    })
   } finally {
     editSubmitting.value = false
   }
@@ -1243,7 +1252,11 @@ const handleSubmitReturnRequest = async () => {
     ElMessage.success(`退货申请已提交，退货单号：${createdReturnRequest.returnNo}`)
   } catch (error) {
     const normalizedError = normalizeRequestError(error, '提交退货申请失败')
-    ElMessage.error(normalizedError.message)
+    void showCriticalErrorDialog(normalizedError, {
+      title: '退货申请提交失败',
+      fallback: '提交退货申请失败',
+      operation: '提交退货申请',
+    })
   } finally {
     returnSubmitting.value = false
   }

@@ -29,7 +29,7 @@ import {
   PageToolbarCard,
 } from '@/components/common'
 import { usePermissionAction } from '@/composables/usePermissionAction'
-import { extractErrorMessage } from '@/utils/error'
+import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { useOrderListView } from './composables/useOrderListView'
 
 const getOrderTypeLabel = (value: 'department' | 'walkin') => {
@@ -298,7 +298,11 @@ const handleSaveComplianceFlags = async () => {
     )
     ElMessage.success('状态已更新')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '状态更新失败，请稍后重试'))
+    void showCriticalErrorDialog(error, {
+      title: '订单状态更新失败',
+      fallback: '状态更新失败，请稍后重试',
+      operation: '更新出库单状态',
+    })
   } finally {
     complianceSaving.value = false
   }

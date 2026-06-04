@@ -35,6 +35,7 @@ import {
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
+import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import {
   DATABASE_MIGRATION_ASSISTANT_NAME,
   DATABASE_MIGRATION_CLEAR_OVERRIDE_SUCCESS,
@@ -595,7 +596,11 @@ const handlePrecheck = async () => {
     enterStepFlow(result.canProceed ? 'create' : 'precheck')
     ElMessage.success(result.canProceed ? '预检通过，可继续创建迁移任务' : '预检已完成，请先处理阻断问题')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '迁移预检失败'))
+    void showCriticalErrorDialog(error, {
+      title: '迁移预检失败',
+      fallback: '迁移预检失败',
+      operation: '数据库迁移预检',
+    })
   } finally {
     precheckLoading.value = false
   }
@@ -627,7 +632,11 @@ const handleCreateTask = async () => {
     ElMessage.success('迁移任务已创建，可在下方任务列表中执行')
     await loadOverview()
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '创建迁移任务失败'))
+    void showCriticalErrorDialog(error, {
+      title: '创建迁移任务失败',
+      fallback: '创建迁移任务失败',
+      operation: '创建数据库迁移任务',
+    })
   } finally {
     taskCreating.value = false
   }
@@ -672,7 +681,11 @@ const handleRunTask = async (task: SQLiteToMySqlTaskRecord) => {
     ElMessage.success(latestTask.status === 'succeeded' ? '迁移任务执行完成' : '迁移任务已执行，请查看结果')
     await loadOverview()
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '执行迁移任务失败'))
+    void showCriticalErrorDialog(error, {
+      title: '执行迁移任务失败',
+      fallback: '执行迁移任务失败',
+      operation: '执行数据库迁移任务',
+    })
   } finally {
     taskRunningId.value = ''
   }
@@ -721,7 +734,11 @@ const handleSwitchToTask = async (task: SQLiteToMySqlTaskRecord) => {
     if (error === 'cancel' || error === 'close') {
       return
     }
-    ElMessage.error(extractErrorMessage(error, '切换到 MySQL 失败'))
+    void showCriticalErrorDialog(error, {
+      title: '切换到 MySQL 失败',
+      fallback: '切换到 MySQL 失败',
+      operation: '切换数据库到 MySQL',
+    })
   } finally {
     switchingTaskId.value = ''
   }
@@ -766,7 +783,11 @@ const handleRollbackToSqlite = async () => {
     if (error === 'cancel' || error === 'close') {
       return
     }
-    ElMessage.error(extractErrorMessage(error, '回退到 SQLite 失败'))
+    void showCriticalErrorDialog(error, {
+      title: '回退到 SQLite 失败',
+      fallback: '回退到 SQLite 失败',
+      operation: '回退数据库到 SQLite',
+    })
   } finally {
     rollbackLoading.value = false
   }
@@ -815,7 +836,11 @@ const handleClearRuntimeOverride = async () => {
     )
     await loadOverview()
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '清空运行时覆盖失败'))
+    void showCriticalErrorDialog(error, {
+      title: '清空运行时覆盖失败',
+      fallback: '清空运行时覆盖失败',
+      operation: '清空数据库运行时覆盖',
+    })
   } finally {
     clearOverrideLoading.value = false
   }

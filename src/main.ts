@@ -19,6 +19,7 @@ import { SESSION_RELOGIN_EVENT, type SessionReloginDetail } from '@/api/http'
 import router from '@/router'
 import { elementPlusIconWhitelist } from '@/icons/element-plus'
 import { useAuthStore, useClientAuthStore, useThemeStore } from '@/store'
+import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import pinia from '@/store/pinia'
 
 /**
@@ -45,6 +46,15 @@ app.config.warnHandler = (message, _instance, trace) => {
   }
 
   console.warn(`[vue warn] ${message}${trace}`)
+}
+
+app.config.errorHandler = (error, _instance, info) => {
+  console.error('[vue error]', info, error)
+  void showCriticalErrorDialog(error, {
+    title: '页面运行异常',
+    fallback: '页面运行异常，请刷新后重试',
+    operation: `Vue ${info}`,
+  })
 }
 
 // 统一日期/时间中文化，避免日期面板出现英文月份与星期。
@@ -117,6 +127,24 @@ const installSessionReloginBridge = () => {
 }
 
 installSessionReloginBridge()
+
+if (globalThis.window !== undefined) {
+  window.addEventListener('error', (event) => {
+    void showCriticalErrorDialog(event.error || event.message, {
+      title: '页面脚本异常',
+      fallback: '页面脚本异常，请刷新后重试',
+      operation: 'window.onerror',
+    })
+  })
+
+  window.addEventListener('unhandledrejection', (event) => {
+    void showCriticalErrorDialog(event.reason, {
+      title: '页面异步操作异常',
+      fallback: '页面异步操作异常，请刷新后重试',
+      operation: 'unhandledrejection',
+    })
+  })
+}
 
 /**
  * 注册 Element Plus 全局加载指令：

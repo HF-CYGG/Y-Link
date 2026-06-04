@@ -94,6 +94,7 @@ import {
   isClientNewPasswordValid,
 } from '@/utils/client-password-policy'
 import { normalizeRequestError } from '@/utils/error'
+import { showCriticalErrorDialog } from '@/utils/error-dialog'
 
 type AuthMode = 'login' | 'register-personal' | 'register-department'
 
@@ -1025,7 +1026,11 @@ const handleRegister = async () => {
           const normalizedError = normalizeRequestError(error, '注册失败，请检查信息后重试')
           applySecurityHintFromMessage(normalizedError.message)
           applyRegisterFeedbackFromError(normalizedError.message, normalizedError.status)
-          ElMessage.error(normalizedError.message)
+          void showCriticalErrorDialog(normalizedError, {
+            title: '注册失败',
+            fallback: '注册失败，请检查信息后重试',
+            operation: activeMode.value === 'register-department' ? '部门账号注册' : '个人账号注册',
+          })
           registerForm.captcha = ''
           await refreshCaptcha(true)
         },

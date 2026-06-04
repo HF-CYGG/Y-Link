@@ -42,6 +42,7 @@ import { useClientAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { formatDateTime } from '@/utils/date-time'
 import { extractErrorMessage } from '@/utils/error'
+import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { normalizeSubmitText } from '@/utils/submit-feedback'
 
 const route = useRoute()
@@ -519,7 +520,11 @@ const handleReply = async () => {
     reconnectTip.value = '已自动续接当前反馈单，你的新补充已提交给客服。'
     ElMessage.success('补充说明已发送')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '补充说明发送失败，请稍后重试'))
+    void showCriticalErrorDialog(error, {
+      title: '补充说明发送失败',
+      fallback: '补充说明发送失败，请稍后重试',
+      operation: '发送反馈补充说明',
+    })
   } finally {
     replySubmitting.value = false
   }
@@ -542,7 +547,11 @@ const handleConfirmResolved = async () => {
     reconnectTip.value = '你已确认处理完成，当前反馈单已归档保留。'
     ElMessage.success('已确认问题处理完成')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '确认处理结果失败，请稍后重试'))
+    void showCriticalErrorDialog(error, {
+      title: '确认处理结果失败',
+      fallback: '确认处理结果失败，请稍后重试',
+      operation: '确认反馈处理结果',
+    })
   } finally {
     confirmingResolved.value = false
   }
@@ -584,7 +593,11 @@ const handleWithdrawConversation = async () => {
     reconnectTip.value = '你已主动撤回当前反馈单，会话已关闭并保留历史记录。'
     ElMessage.success('反馈单已撤回')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '撤回反馈单失败，请稍后重试'))
+    void showCriticalErrorDialog(error, {
+      title: '撤回反馈单失败',
+      fallback: '撤回反馈单失败，请稍后重试',
+      operation: '撤回反馈单',
+    })
   } finally {
     withdrawingConversation.value = false
   }
@@ -633,7 +646,11 @@ const handleSubmitSatisfaction = async () => {
     reconnectTip.value = '已记录你的满意度评价，当前反馈单详情已同步更新。'
     ElMessage.success('满意度评价已提交')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '满意度评价提交失败，请稍后重试'))
+    void showCriticalErrorDialog(error, {
+      title: '满意度评价提交失败',
+      fallback: '满意度评价提交失败，请稍后重试',
+      operation: '提交满意度评价',
+    })
   } finally {
     satisfactionSubmitting.value = false
   }

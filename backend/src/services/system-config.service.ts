@@ -826,6 +826,14 @@ class SystemConfigService {
     return paths
   }
 
+  private buildClientDepartmentOptionsFromTree(tree: ClientDepartmentTreeNode[]): string[] {
+    const flattenedLabels = this.flattenDepartmentTree(tree)
+    if (flattenedLabels.length > 50) {
+      throw new BizError('部门节点总数最多保留 50 个', 400)
+    }
+    return [...new Set(flattenedLabels)]
+  }
+
   private normalizeClientDepartmentOptions(options: string[]): string[] {
     const normalizedList = options
       .map((item) => this.normalizeDepartmentLabel(item))
@@ -914,7 +922,7 @@ class SystemConfigService {
           }
         }),
       )
-      const options = this.normalizeClientDepartmentOptions(this.flattenDepartmentTree(tree))
+      const options = this.buildClientDepartmentOptionsFromTree(tree)
       return { tree, options }
     } catch {
       throw new BizError('客户端部门配置格式非法', 500)
@@ -1593,7 +1601,7 @@ class SystemConfigService {
     const normalizedTree = Array.isArray(input.tree)
       ? this.normalizeClientDepartmentTree(input.tree)
       : this.buildTreeFromOptions(this.normalizeClientDepartmentOptions(input.options ?? []))
-    const normalizedOptions = this.normalizeClientDepartmentOptions(this.flattenDepartmentTree(normalizedTree))
+    const normalizedOptions = this.buildClientDepartmentOptionsFromTree(normalizedTree)
     await this.ensureDefaultConfigs()
     return AppDataSource.transaction(async (manager) => {
       const useForUpdate = manager.connection.options.type === 'mysql'
@@ -1728,7 +1736,7 @@ class SystemConfigService {
       }
 
       const normalizedTree = this.normalizeClientDepartmentTree(workingTree)
-      const normalizedOptions = this.normalizeClientDepartmentOptions(this.flattenDepartmentTree(normalizedTree))
+      const normalizedOptions = this.buildClientDepartmentOptionsFromTree(normalizedTree)
       const targetValue = JSON.stringify({ tree: normalizedTree })
       const changed = row.configValue !== targetValue
 

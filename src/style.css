@@ -595,6 +595,20 @@ canvas {
   align-content: start;
 }
 
+.ylink-critical-error-dialog {
+  width: min(560px, calc(100vw - 32px));
+  border-radius: 18px;
+}
+
+.ylink-critical-error-dialog .el-message-box__content {
+  max-height: min(62vh, 520px);
+  overflow-y: auto;
+}
+
+.ylink-critical-error-dialog .el-message-box__message {
+  width: 100%;
+}
+
 @media (prefers-reduced-motion: reduce) {
   :root {
     --motion-duration-fast: 0.01ms;

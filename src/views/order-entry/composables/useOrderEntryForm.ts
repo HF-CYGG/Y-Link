@@ -16,6 +16,7 @@ import type { ProductRecord } from '@/api/modules/product'
 import { useAppStore, useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { extractErrorMessage } from '@/utils/error'
+import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import {
   clearLegacyScopedStorageKey,
   getBrowserStorage,
@@ -773,7 +774,11 @@ export const useOrderEntryForm = () => {
         },
       })
     } catch (error) {
-      ElMessage.error(extractErrorMessage(error, '保存失败，请稍后重试'))
+      void showCriticalErrorDialog(error, {
+        title: '出库单保存失败',
+        fallback: '保存失败，请稍后重试',
+        operation: '保存出库单',
+      })
     } finally {
       isSaving.value = false
     }

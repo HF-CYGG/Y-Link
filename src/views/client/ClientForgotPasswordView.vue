@@ -28,6 +28,7 @@ import {
   isClientNewPasswordValid,
 } from '@/utils/client-password-policy'
 import { normalizeRequestError } from '@/utils/error'
+import { showCriticalErrorDialog } from '@/utils/error-dialog'
 
 const route = useRoute()
 const router = useRouter()
@@ -391,7 +392,11 @@ const handleReset = async () => {
         onError: (error) => {
           const normalizedError = normalizeRequestError(error, '重置密码失败，请稍后重试')
           applySecurityHintFromMessage(normalizedError.message)
-          ElMessage.error(normalizedError.message)
+          void showCriticalErrorDialog(normalizedError, {
+            title: '重置密码失败',
+            fallback: '重置密码失败，请稍后重试',
+            operation: '客户端找回密码',
+          })
         },
         onFinally: () => {
           submitting.value = false

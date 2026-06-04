@@ -52,6 +52,7 @@ import { useStableRequest } from '@/composables/useStableRequest'
 import { useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { extractErrorMessage } from '@/utils/error'
+import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { formatDateTime } from '@/utils/date-time'
 import { normalizeSubmitText } from '@/utils/submit-feedback'
 
@@ -970,7 +971,11 @@ const handleTakeOver = async () => {
     reconnectTip.value = '已完成显式接单，当前会话后续消息会继续实时同步。'
     ElMessage.success('当前会话已接单')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '接单失败，请稍后重试'))
+    void showCriticalErrorDialog(error, {
+      title: '接单失败',
+      fallback: '接单失败，请稍后重试',
+      operation: '客服会话接单',
+    })
   } finally {
     assigneeUpdating.value = false
   }
@@ -997,7 +1002,11 @@ const handleTransferConversation = async () => {
     reconnectTip.value = '负责人已更新，工作台已同步最新归属信息。'
     ElMessage.success('负责人已更新')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '转派失败，请稍后重试'))
+    void showCriticalErrorDialog(error, {
+      title: '转派失败',
+      fallback: '转派失败，请稍后重试',
+      operation: '客服会话转派',
+    })
   } finally {
     assigneeUpdating.value = false
   }
@@ -1044,7 +1053,11 @@ const handleSaveIssue = async () => {
     })
     ElMessage.success('Issue 字段已保存')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, 'Issue 字段保存失败，请稍后重试'))
+    void showCriticalErrorDialog(error, {
+      title: 'Issue 字段保存失败',
+      fallback: 'Issue 字段保存失败，请稍后重试',
+      operation: '保存客服 Issue 字段',
+    })
   } finally {
     saving.value = false
   }
@@ -1077,7 +1090,11 @@ const handleQuickStatus = async (status: FeedbackIssueStatus) => {
     })
     ElMessage.success(`状态已更新为${FEEDBACK_STATUS_META_MAP[status].label}`)
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '状态更新失败，请稍后重试'))
+    void showCriticalErrorDialog(error, {
+      title: '反馈状态更新失败',
+      fallback: '状态更新失败，请稍后重试',
+      operation: '更新反馈状态',
+    })
   } finally {
     quickStatusUpdating.value = ''
     saving.value = false
@@ -1113,7 +1130,11 @@ const handleReassignPriority = async (priority: FeedbackIssuePriority) => {
     isPriorityPanelExpanded.value = false
     ElMessage.success(`已将优先级调整为${FEEDBACK_PRIORITY_META_MAP[priority].label}`)
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '优先级调整失败，请稍后重试'))
+    void showCriticalErrorDialog(error, {
+      title: '优先级调整失败',
+      fallback: '优先级调整失败，请稍后重试',
+      operation: '调整反馈优先级',
+    })
   } finally {
     priorityUpdating.value = ''
     saving.value = false
@@ -1135,7 +1156,11 @@ const handleSaveInternalRemark = async () => {
     })
     ElMessage.success('内部备注已保存')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '内部备注保存失败，请稍后重试'))
+    void showCriticalErrorDialog(error, {
+      title: '内部备注保存失败',
+      fallback: '内部备注保存失败，请稍后重试',
+      operation: '保存客服内部备注',
+    })
   } finally {
     remarkSaving.value = false
   }
@@ -1180,7 +1205,11 @@ const handleReply = async () => {
     reconnectTip.value = '已续接当前客服会话，最新回复已同步发送给客户端。'
     ElMessage.success('客服回复已发送')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '客服回复发送失败，请稍后重试'))
+    void showCriticalErrorDialog(error, {
+      title: '客服回复发送失败',
+      fallback: '客服回复发送失败，请稍后重试',
+      operation: '发送客服回复',
+    })
   } finally {
     replying.value = false
   }

@@ -14,6 +14,7 @@ import { canAccessRoute, resolveFirstAccessibleManagementPath, routes } from '@/
 import type { UserSafeProfile } from '@/api/modules/auth'
 import { showPermissionDenied } from '@/utils/permission'
 import { hasRecoverableAdminSessionHint } from '@/utils/auth-storage'
+import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import pinia from '@/store/pinia'
 
 export const resolveDefaultManagementRedirect = (user?: Pick<UserSafeProfile, 'role'> | null) => {
@@ -305,6 +306,11 @@ router.onError((error, to) => {
   logRouteTrace('router:error', {
     to: to.fullPath,
     message: error instanceof Error ? error.message : String(error),
+  })
+  void showCriticalErrorDialog(error, {
+    title: '页面加载失败',
+    fallback: '页面资源加载失败，请刷新页面后重试',
+    operation: `进入 ${to.fullPath}`,
   })
 })
 

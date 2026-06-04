@@ -30,6 +30,7 @@ import {
 import { useClientAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { extractErrorMessage } from '@/utils/error'
+import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { normalizeSubmitText } from '@/utils/submit-feedback'
 
 const router = useRouter()
@@ -247,7 +248,11 @@ const handleCreateConversation = async () => {
       path: `/client/feedback/${createdRecord.id}`,
     })
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '反馈提交失败，请稍后重试'))
+    void showCriticalErrorDialog(error, {
+      title: '反馈提交失败',
+      fallback: '反馈提交失败，请稍后重试',
+      operation: '提交反馈单',
+    })
   } finally {
     creating.value = false
   }

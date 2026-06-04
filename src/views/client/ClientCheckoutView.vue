@@ -21,6 +21,7 @@ import { useClientAuthStore, useClientCartStore } from '@/store'
 import { useClientCatalogStore } from '@/store/modules/client-catalog'
 import pinia from '@/store/pinia'
 import { normalizeRequestError } from '@/utils/error'
+import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import {
   buildClientPreorderSubmitIntentKey,
   clearClientPreorderSubmitLock,
@@ -303,7 +304,11 @@ const handleSubmit = async () => {
           return
         }
         clearClientPreorderSubmitLock(clientAuthStore.currentUser?.id, submitRequestKey)
-        ElMessage.error(normalizedError.message)
+        void showCriticalErrorDialog(normalizedError, {
+          title: '预订单提交失败',
+          fallback: '提交失败，请稍后再试',
+          operation: '提交预订单',
+        })
       } finally {
         submitting.value = false
       }
