@@ -1136,13 +1136,15 @@ const handleSubmit = async () => {
   }
 
   const form = formRef.value
-  if (!form) {
+  if (!form && activeSection.value !== 'notification') {
     return
   }
 
-  const valid = await form.validate().catch(() => false)
-  if (!valid) {
-    return
+  if (form) {
+    const valid = await form.validate().catch(() => false)
+    if (!valid) {
+      return
+    }
   }
   if (!validateVerificationConfigs()) {
     return
@@ -1338,7 +1340,7 @@ onMounted(() => {
       />
       <el-alert v-else-if="loadError" :title="loadError" type="error" :closable="false" show-icon />
 
-      <el-form v-else ref="formRef" :model="serialForm" :rules="rules" label-position="top">
+      <template v-else>
         <div class="apple-card p-5 sm:p-6 xl:p-7">
           <el-alert
             v-if="deferredSectionStatusText"
@@ -1372,7 +1374,14 @@ onMounted(() => {
             </nav>
           </div>
 
-          <div class="config-stage">
+          <el-form
+            v-if="activeSection !== 'notification'"
+            ref="formRef"
+            :model="serialForm"
+            :rules="rules"
+            label-position="top"
+          >
+            <div class="config-stage">
             <transition name="workbench-horizontal-slide">
               <SystemConfigSerialSection
                 v-if="activeSection === 'order_serial'"
@@ -1440,10 +1449,12 @@ onMounted(() => {
                 @node-click="handleDepartmentNodeClick"
               />
             </transition>
+            </div>
+          </el-form>
 
+          <div v-else class="config-stage">
             <transition name="workbench-horizontal-slide">
               <SystemConfigNotificationSection
-                v-if="activeSection === 'notification'"
                 :rules="notificationRules"
                 :presence-snapshot="notificationPresence"
                 :offline-window-seconds="notificationOfflineWindowSeconds"
@@ -1458,7 +1469,7 @@ onMounted(() => {
             </transition>
           </div>
         </div>
-      </el-form>
+      </template>
     </div>
   </PageContainer>
 </template>
