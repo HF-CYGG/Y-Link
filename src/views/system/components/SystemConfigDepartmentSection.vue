@@ -59,8 +59,9 @@ const emit = defineEmits<{
       description="可通过拖拽调整部门层级与排序。部门名称最多 32 个字符，部门节点总数不超过 50 个；同一父级下不能出现相同部门名称。"
     />
     <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
-      <div class="rounded-2xl border border-slate-200/80 bg-slate-50/60 p-4 dark:border-white/10 dark:bg-slate-900/20">
+      <div class="department-tree-shell rounded-2xl border border-slate-200/80 bg-slate-50/60 p-4 dark:border-white/10 dark:bg-slate-900/20">
         <el-tree
+          class="department-tree"
           :data="serialForm.clientDepartmentTree"
           node-key="id"
           default-expand-all
@@ -70,9 +71,9 @@ const emit = defineEmits<{
           @node-click="emit('node-click', $event)"
         >
           <template #default="{ data }">
-            <div class="flex w-full items-center justify-between gap-2 py-1">
-              <span class="truncate text-sm text-slate-700 dark:text-slate-200">{{ getDepartmentPathLabel(data.id) || data.label }}</span>
-              <div class="flex items-center gap-1">
+            <div class="department-tree-node">
+              <span class="department-tree-node__label text-sm text-slate-700 dark:text-slate-200">{{ getDepartmentPathLabel(data.id) || data.label }}</span>
+              <div class="department-tree-node__actions">
                 <el-button
                   size="small"
                   text
@@ -129,3 +130,87 @@ const emit = defineEmits<{
     <SystemConfigStaffDirectorySection :can-update-configs="canUpdateConfigs" :loading="loading || saving" />
   </div>
 </template>
+
+<style scoped>
+.department-tree-shell {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.department-tree {
+  min-width: 0;
+}
+
+.department-tree :deep(.el-tree-node__content) {
+  box-sizing: border-box;
+  height: auto;
+  min-height: 38px;
+  align-items: flex-start;
+  padding-block: 4px;
+}
+
+.department-tree :deep(.el-tree-node__children),
+.department-tree :deep(.el-tree-node__content > .el-tree-node__label) {
+  min-width: 0;
+}
+
+.department-tree-node {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-block: 2px;
+}
+
+.department-tree-node__label {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.department-tree-node__actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 2px;
+}
+
+@media (max-width: 640px) {
+  .department-tree-shell {
+    padding: 12px;
+  }
+
+  .department-tree :deep(.el-tree-node__content) {
+    padding-right: 0;
+  }
+
+  .department-tree-node {
+    flex-wrap: wrap;
+    align-items: flex-start;
+    row-gap: 4px;
+  }
+
+  .department-tree-node__label {
+    flex-basis: 100%;
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+
+  .department-tree-node__actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+
+  .department-tree-node__actions :deep(.el-button) {
+    min-height: 28px;
+    padding-inline: 6px;
+  }
+}
+</style>

@@ -14,7 +14,7 @@
 
 
 import dayjs from 'dayjs'
-import { computed, onMounted, reactive, ref, toRaw } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, toRaw } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { PageContainer, PageToolbarCard } from '@/components/common'
 import {
@@ -127,8 +127,27 @@ const sectionOptions: Array<{ key: ConfigSectionKey; label: string }> = [
   { key: 'notification', label: '通知中心' },
 ]
 
+const sectionTabRefs = ref<HTMLElement[]>([])
+
+const setSectionTabRef = (el: unknown, index: number) => {
+  if (el instanceof HTMLElement) {
+    sectionTabRefs.value[index] = el
+  }
+}
+
+const scrollActiveSectionTabIntoView = async () => {
+  await nextTick()
+  const activeIndex = sectionOptions.findIndex((section) => section.key === activeSection.value)
+  sectionTabRefs.value[activeIndex]?.scrollIntoView({
+    behavior: 'smooth',
+    block: 'nearest',
+    inline: 'center',
+  })
+}
+
 const handleSectionChange = (value: string | number) => {
   activeSection.value = String(value) as ConfigSectionKey
+  void scrollActiveSectionTabIntoView()
 }
 
 const serialForm = reactive<{
@@ -1253,9 +1272,19 @@ onMounted(() => {
             class="mb-4"
           />
           <div class="mb-4">
-            <el-tabs :model-value="activeSection" @tab-change="handleSectionChange">
-              <el-tab-pane v-for="section in sectionOptions" :key="section.key" :label="section.label" :name="section.key" />
-            </el-tabs>
+            <nav class="system-config-section-tabs" aria-label="系统配置分区导航">
+              <button
+                v-for="(section, index) in sectionOptions"
+                :key="section.key"
+                :ref="(el) => setSectionTabRef(el, index)"
+                type="button"
+                class="system-config-section-tab"
+                :class="{ 'system-config-section-tab--active': activeSection === section.key }"
+                @click="handleSectionChange(section.key)"
+              >
+                {{ section.label }}
+              </button>
+            </nav>
           </div>
 
           <div class="config-stage">
@@ -1400,6 +1429,85 @@ onMounted(() => {
   transform: translate3d(-20px, 0, 0);
 }
 
+.system-config-section-tabs {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-bottom: 1px solid #e2e8f0;
+  scroll-behavior: smooth;
+  scroll-snap-type: x proximity;
+  -webkit-overflow-scrolling: touch;
+}
+
+.system-config-section-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.system-config-section-tab {
+  position: relative;
+  flex: 0 0 auto;
+  min-width: max-content;
+  scroll-snap-align: center;
+  border: 0;
+  background: transparent;
+  color: #334155;
+  padding: 12px 18px;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.2;
+  white-space: nowrap;
+  transition:
+    color var(--ylink-motion-fast) var(--ylink-motion-ease),
+    background var(--ylink-motion-fast) var(--ylink-motion-ease);
+}
+
+.system-config-section-tab::after {
+  position: absolute;
+  right: 14px;
+  bottom: -1px;
+  left: 14px;
+  height: 3px;
+  border-radius: 999px 999px 0 0;
+  background: transparent;
+  content: '';
+  transition: background var(--ylink-motion-fast) var(--ylink-motion-ease);
+}
+
+.system-config-section-tab:hover {
+  background: #f8fafc;
+  color: #0f766e;
+}
+
+.system-config-section-tab--active {
+  color: #04786f;
+}
+
+.system-config-section-tab--active::after {
+  background: #04786f;
+}
+
+.dark .system-config-section-tabs {
+  border-bottom-color: rgba(148, 163, 184, 0.22);
+}
+
+.dark .system-config-section-tab {
+  color: #cbd5e1;
+}
+
+.dark .system-config-section-tab:hover,
+.dark .system-config-section-tab--active {
+  color: #5eead4;
+}
+
+.dark .system-config-section-tab:hover {
+  background: rgba(15, 23, 42, 0.5);
+}
+
+.dark .system-config-section-tab--active::after {
+  background: #5eead4;
+}
+
 .system-config-toolbar-actions {
   justify-content: space-between;
   width: auto;
@@ -1429,6 +1537,19 @@ onMounted(() => {
 
   .system-config-toolbar-button {
     width: 100%;
+  }
+}
+
+@media (max-width: 640px) {
+  .system-config-section-tabs {
+    gap: 4px;
+    margin-inline: -8px;
+    padding-inline: 8px;
+  }
+
+  .system-config-section-tab {
+    padding: 11px 16px;
+    font-size: 14px;
   }
 }
 </style>
