@@ -817,7 +817,7 @@ onMounted(() => {
               v-if="importPreviewTotal > importPreviewPageSize"
               v-model:current-page="importPreviewPage"
               v-model:page-size="importPreviewPageSize"
-              small
+              size="small"
               background
               layout="sizes, prev, pager, next"
               :page-sizes="STAFF_DIRECTORY_IMPORT_PREVIEW_PAGE_SIZES"
