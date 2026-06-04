@@ -438,7 +438,12 @@ const handleOpenResetPassword = (row: UserSafeProfile) => {
  * - 提交前再次按权限点做兜底，防止通过异常交互绕过按钮显隐。
  */
 const handleSubmit = async () => {
-  const valid = await formRef.value?.validate().catch(() => false)
+  const form = formRef.value
+  if (!form) {
+    return
+  }
+
+  const valid = await form.validate().catch(() => false)
   if (!valid) {
     return
   }

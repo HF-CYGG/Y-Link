@@ -349,13 +349,17 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: TestChannel
             </el-form-item>
 
             <el-form-item class="!mb-0" label="飞书签名密钥（可选）">
-              <el-input
-                v-model.trim="rule.feishuSignSecret"
-                maxlength="256"
-                show-password
-                placeholder="未启用签名可留空，已配置可保留占位符"
-                :disabled="loading || saving || !canUpdateConfigs || !rule.feishuEnabled"
-              />
+              <form class="w-full" autocomplete="off" @submit.prevent>
+                <el-input
+                  v-model.trim="rule.feishuSignSecret"
+                  maxlength="256"
+                  show-password
+                  autocomplete="off"
+                  :name="`feishu-sign-secret-${rule.id}`"
+                  placeholder="未启用签名可留空，已配置可保留占位符"
+                  :disabled="loading || saving || !canUpdateConfigs || !rule.feishuEnabled"
+                />
+              </form>
             </el-form-item>
 
             <div class="lg:col-span-2 flex flex-wrap gap-3">
