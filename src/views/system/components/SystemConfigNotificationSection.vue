@@ -361,6 +361,7 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: TestChannel
                     show-word-limit
                     placeholder="例如 [Y-Link]"
                     :disabled="loading || saving || !canUpdateConfigs || !rule.emailEnabled"
+                    class="w-full"
                   />
                 </el-form-item>
               </el-col>
@@ -372,6 +373,7 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: TestChannel
                     maxlength="500"
                     placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..."
                     :disabled="loading || saving || !canUpdateConfigs || !rule.feishuEnabled"
+                    class="w-full"
                   />
                 </el-form-item>
               </el-col>
@@ -386,6 +388,7 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: TestChannel
                     :name="`feishu-sign-secret-${rule.id}`"
                     placeholder="未启用签名可留空，已配置可保留占位符"
                     :disabled="loading || saving || !canUpdateConfigs || !rule.feishuEnabled"
+                    class="w-full"
                   />
                 </el-form-item>
               </el-col>
@@ -567,12 +570,11 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: TestChannel
 
 .notification-rule-form :deep(.el-input),
 .notification-rule-form :deep(.el-select) {
-  max-width: 560px;
+  width: 100%;
 }
 
 .notification-rule-form :deep(.el-input__wrapper),
 .notification-rule-form :deep(.el-select__wrapper) {
-  min-height: 42px;
   border-radius: 6px;
   box-shadow: 0 0 0 1px #dce3ec inset;
 }
@@ -649,11 +651,6 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: TestChannel
 
   .notification-rule-form__row {
     gap: 18px;
-  }
-
-  .notification-rule-form :deep(.el-input),
-  .notification-rule-form :deep(.el-select) {
-    max-width: none;
   }
 
   .notification-rule-actions :deep(.el-button) {
