@@ -287,8 +287,8 @@ const measureMallScenario = async () => {
   let listedCount = 0
   for (let index = 0; index < 20; index += 1) {
     const startedAt = performance.now()
-    const rows = await o2oPreorderService.listMallProducts()
-    listedCount = rows.length
+    const mallResult = await o2oPreorderService.listMallProducts()
+    listedCount = mallResult.list.length
     samples.push(Number((performance.now() - startedAt).toFixed(2)))
   }
 
