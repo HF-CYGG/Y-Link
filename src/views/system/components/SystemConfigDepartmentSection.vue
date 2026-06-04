@@ -87,7 +87,6 @@ const treeProps = {
           :data="serialForm.clientDepartmentTree"
           :props="treeProps"
           node-key="id"
-          default-expand-all
           highlight-current
           :current-node-key="selectedDepartmentNode?.id"
           :draggable="canUpdateConfigs && !loading && !saving"
