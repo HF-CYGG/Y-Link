@@ -161,11 +161,16 @@ const showTopFeedbackMessage = (type: TopFeedbackMessageType, message: string) =
     type,
     message,
     showClose: true,
-    offset: 72,
+    offset: 24,
     duration: type === 'error' ? 5200 : 2800,
     customClass: 'ylink-top-feedback-message',
+    appendTo: document.body,
   })
 }
+
+const showTopSuccess = (message: string) => showTopFeedbackMessage('success', message)
+const showTopWarning = (message: string) => showTopFeedbackMessage('warning', message)
+const showTopError = (message: string) => showTopFeedbackMessage('error', message)
 
 const handleSectionChange = (value: string | number) => {
   activeSection.value = String(value) as ConfigSectionKey
@@ -551,7 +556,7 @@ const refreshNotificationPresenceSnapshot = async () => {
     const snapshot = await getNotificationPresenceSnapshot()
     applyNotificationPresenceSnapshot(snapshot)
   } catch (error) {
-    ElMessage.warning(extractErrorMessage(error, '刷新在线状态失败'))
+    showTopWarning(extractErrorMessage(error, '刷新在线状态失败'))
   } finally {
     notificationPresenceLoading.value = false
   }
@@ -559,7 +564,7 @@ const refreshNotificationPresenceSnapshot = async () => {
 
 const validateNotificationRules = () => {
   if (!Number.isInteger(notificationOfflineWindowSeconds.value) || notificationOfflineWindowSeconds.value < 30 || notificationOfflineWindowSeconds.value > 3600) {
-    ElMessage.warning('离线窗口需设置在 30-3600 秒之间')
+    showTopWarning('离线窗口需设置在 30-3600 秒之间')
     return false
   }
   for (const rule of notificationRules.value) {
@@ -567,15 +572,15 @@ const validateNotificationRules = () => {
     const emailRecipientAdminUserIds = rule.emailRecipientAdminUserIds ?? []
     const emailRecipientSupplierUserIds = rule.emailRecipientSupplierUserIds ?? []
     if (rule.externalTriggerMode === 'watched_accounts_offline' && watchedUserIds.length === 0) {
-      ElMessage.warning(`规则“${rule.ruleName}”在“指定账号离线”模式下必须选择监测账号`)
+      showTopWarning(`规则“${rule.ruleName}”在“指定账号离线”模式下必须选择监测账号`)
       return false
     }
     if (rule.emailEnabled && emailRecipientAdminUserIds.length + emailRecipientSupplierUserIds.length === 0) {
-      ElMessage.warning(`规则“${rule.ruleName}”启用邮箱提醒时必须选择邮件接收账号`)
+      showTopWarning(`规则“${rule.ruleName}”启用邮箱提醒时必须选择邮件接收账号`)
       return false
     }
     if (rule.feishuEnabled && !rule.feishuWebhookUrl.trim()) {
-      ElMessage.warning(`规则“${rule.ruleName}”启用飞书提醒时必须填写 Webhook 地址`)
+      showTopWarning(`规则“${rule.ruleName}”启用飞书提醒时必须填写 Webhook 地址`)
       return false
     }
   }
@@ -592,13 +597,13 @@ const validateVerificationConfigs = () => {
     const label = getVerificationChannelLabel(channel)
     const config = serialForm.verification[channel]
     if (config.enabled && !config.apiUrl.trim()) {
-      ElMessage.warning(`${label}已启用时必须填写 API 地址`)
+      showTopWarning(`${label}已启用时必须填写 API 地址`)
       return false
     }
     try {
       JSON.parse(config.headersTemplate.trim() || '{}')
     } catch {
-      ElMessage.warning(`${label}请求头模板必须是合法 JSON`)
+      showTopWarning(`${label}请求头模板必须是合法 JSON`)
       return false
     }
   }
@@ -607,19 +612,19 @@ const validateVerificationConfigs = () => {
 
 const validateCustomerServiceConfigs = () => {
   if (!customerServiceConfig.value) {
-    ElMessage.warning('客服中心配置尚未加载完成，暂不可保存')
+    showTopWarning('客服中心配置尚未加载完成，暂不可保存')
     return false
   }
   if (!serialForm.customerService.workdayStart || !serialForm.customerService.workdayEnd) {
-    ElMessage.warning('请补齐客服开始时间和结束时间')
+    showTopWarning('请补齐客服开始时间和结束时间')
     return false
   }
   if (!/^\d{2}:\d{2}$/.test(serialForm.customerService.workdayStart) || !/^\d{2}:\d{2}$/.test(serialForm.customerService.workdayEnd)) {
-    ElMessage.warning('客服在线时间格式必须为 HH:mm')
+    showTopWarning('客服在线时间格式必须为 HH:mm')
     return false
   }
   if (!serialForm.customerService.workdayWeekdays.length) {
-    ElMessage.warning('请至少选择一个客服在线星期')
+    showTopWarning('请至少选择一个客服在线星期')
     return false
   }
   return true
@@ -794,14 +799,14 @@ const handleAddRootDepartment = async () => {
     if (error === 'cancel' || error === 'close') {
       return
     }
-    ElMessage.warning(extractErrorMessage(error, '新增一级部门失败'))
+    showTopWarning(extractErrorMessage(error, '新增一级部门失败'))
   }
 }
 
 const handleAddChildDepartment = async (parentNode?: DepartmentTreeNode) => {
   const targetParent = parentNode ?? selectedDepartmentNode.value
   if (!targetParent) {
-    ElMessage.warning('请先选择父级部门，再新增子部门')
+    showTopWarning('请先选择父级部门，再新增子部门')
     return
   }
   try {
@@ -812,7 +817,7 @@ const handleAddChildDepartment = async (parentNode?: DepartmentTreeNode) => {
     if (error === 'cancel' || error === 'close') {
       return
     }
-    ElMessage.warning(extractErrorMessage(error, '新增子部门失败'))
+    showTopWarning(extractErrorMessage(error, '新增子部门失败'))
   }
 }
 
@@ -838,7 +843,7 @@ const handleEditDepartment = async (node: DepartmentTreeNode) => {
     if (error === 'cancel' || error === 'close') {
       return
     }
-    ElMessage.warning(extractErrorMessage(error, '编辑部门失败'))
+    showTopWarning(extractErrorMessage(error, '编辑部门失败'))
   }
 }
 
@@ -857,7 +862,7 @@ const handleDeleteDepartment = async (node: DepartmentTreeNode) => {
     if (error === 'cancel' || error === 'close') {
       return
     }
-    ElMessage.warning(extractErrorMessage(error, '删除部门失败'))
+    showTopWarning(extractErrorMessage(error, '删除部门失败'))
   }
 }
 
@@ -898,7 +903,7 @@ const handleDepartmentNodeDrop = () => {
     validateDepartmentTree(normalizedTree)
     serialForm.clientDepartmentTree = normalizedTree
   } catch (error) {
-    ElMessage.warning(extractErrorMessage(error, '部门排序结果不合法，请调整后再保存'))
+    showTopWarning(extractErrorMessage(error, '部门排序结果不合法，请调整后再保存'))
   }
 }
 
@@ -906,17 +911,17 @@ const validateSingleVerificationConfig = (channel: 'mobile' | 'email') => {
   const label = getVerificationChannelLabel(channel)
   const config = serialForm.verification[channel]
   if (!config.enabled) {
-    ElMessage.warning(`${label}未启用，无法发送测试消息`)
+    showTopWarning(`${label}未启用，无法发送测试消息`)
     return false
   }
   if (!config.apiUrl.trim()) {
-    ElMessage.warning(`${label}未填写 API 地址，无法发送测试消息`)
+    showTopWarning(`${label}未填写 API 地址，无法发送测试消息`)
     return false
   }
   try {
     JSON.parse(config.headersTemplate.trim() || '{}')
   } catch {
-    ElMessage.warning(`${label}请求头模板必须是合法 JSON`)
+    showTopWarning(`${label}请求头模板必须是合法 JSON`)
     return false
   }
   return true
@@ -960,12 +965,12 @@ const handleTestVerificationSend = async (channel: 'mobile' | 'email') => {
       target: promptResult.value.trim(),
       config: buildVerificationChannelPayload(channel),
     })
-    ElMessage.success(`${channel === 'mobile' ? '测试短信' : '测试邮件'}已发送至 ${result.target}`)
+    showTopSuccess(`${channel === 'mobile' ? '测试短信' : '测试邮件'}已发送至 ${result.target}`)
   } catch (error) {
     if (error === 'cancel' || error === 'close') {
       return
     }
-    ElMessage.error(extractErrorMessage(error, '测试发送失败，请检查平台配置后重试'))
+    showTopError(extractErrorMessage(error, '测试发送失败，请检查平台配置后重试'))
   } finally {
     testSendingChannel.value = ''
   }
@@ -1039,7 +1044,7 @@ const loadData = async () => {
         return
       }
       if (successCount > 0 && successCount < 2) {
-        ElMessage.warning('核心配置已部分加载，页面将继续展示可用内容')
+        showTopWarning('核心配置已部分加载，页面将继续展示可用内容')
       }
 
       deferredSectionRequest
@@ -1103,7 +1108,7 @@ const loadData = async () => {
             || sectionErrorState.department
             || sectionErrorState.notification
           ) {
-            ElMessage.warning('部分次级配置仍在加载失败，已保留当前可用内容')
+            showTopWarning('部分次级配置仍在加载失败，已保留当前可用内容')
           }
         },
         onError: (error) => {
@@ -1112,7 +1117,7 @@ const loadData = async () => {
           sectionErrorState.verification = sectionErrorState.verification || message
           sectionErrorState.department = sectionErrorState.department || message
           sectionErrorState.notification = sectionErrorState.notification || message
-          ElMessage.warning(message)
+          showTopWarning(message)
         },
         onFinally: () => {
           sectionLoadingState.customer_service = false
@@ -1126,7 +1131,7 @@ const loadData = async () => {
     },
     onError: (error) => {
       loadError.value = extractErrorMessage(error, '加载系统配置失败，请稍后重试')
-      ElMessage.error(loadError.value)
+      showTopError(loadError.value)
     },
     onFinally: () => {
       sectionLoadingState.order_serial = false
@@ -1165,7 +1170,7 @@ const handleSubmit = async () => {
     normalizedDepartmentTree = normalizeDepartmentTreeForSubmit(cloneDepartmentTree(serialForm.clientDepartmentTree))
     validateDepartmentTree(normalizedDepartmentTree)
   } catch (error) {
-    ElMessage.warning(extractErrorMessage(error, '部门配置格式不正确'))
+    showTopWarning(extractErrorMessage(error, '部门配置格式不正确'))
     return
   }
 
@@ -1173,7 +1178,7 @@ const handleSubmit = async () => {
   try {
     const currentCustomerServiceConfig = customerServiceConfig.value
     if (!currentCustomerServiceConfig) {
-      ElMessage.warning('客服中心配置尚未加载完成，暂不可保存')
+      showTopWarning('客服中心配置尚未加载完成，暂不可保存')
       return
     }
     // SQLite 单连接下并发写事务会互相冲突，这里改为串行提交，避免 “cannot start a transaction within a transaction”。
