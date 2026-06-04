@@ -56,11 +56,19 @@ const allTags = ref<Tag[]>([])
 const productTableRef = ref<TableInstance>()
 const selectedProductIds = ref<string[]>([])
 const batchSubmitting = ref(false)
+const mallPage = ref(1)
+const mallPageSize = ref(10)
+const mallPageSizes = [10, 20, 50]
 const { isPhone, isTablet } = useDevice()
 const { hasPermission, ensurePermission } = usePermissionAction()
 
 const canManageProducts = computed(() => hasPermission('products:manage'))
 const selectedProductCount = computed(() => selectedProductIds.value.length)
+const mallTotal = computed(() => products.value.length)
+const pagedProducts = computed(() => {
+  const start = (mallPage.value - 1) * mallPageSize.value
+  return products.value.slice(start, start + mallPageSize.value)
+})
 
 const form = reactive<O2oProductFormState>({
   id: '',
@@ -173,6 +181,7 @@ const loadProducts = async () => {
       keyword: keyword.value.trim() || undefined,
       tagId: searchTagId.value || undefined,
     })
+    clampMallPage()
     await syncSelectedProductIds()
   } finally {
     loading.value = false
@@ -188,7 +197,15 @@ const loadTags = async () => {
 }
 
 const handleSearch = () => {
+  mallPage.value = 1
   void loadProducts()
+}
+
+const clampMallPage = () => {
+  const maxPage = Math.max(1, Math.ceil(products.value.length / mallPageSize.value))
+  if (mallPage.value > maxPage) {
+    mallPage.value = maxPage
+  }
 }
 
 const applyTableSelection = async () => {
@@ -200,7 +217,7 @@ const applyTableSelection = async () => {
 
   table.clearSelection()
   const selectedIdSet = new Set(selectedProductIds.value)
-  products.value.forEach((product) => {
+  pagedProducts.value.forEach((product) => {
     if (selectedIdSet.has(product.id)) {
       table.toggleRowSelection(product, true)
     }
@@ -219,7 +236,22 @@ const clearSelection = async () => {
 }
 
 const handleTableSelectionChange = (selection: ProductRecord[]) => {
-  selectedProductIds.value = selection.map((item) => item.id)
+  const currentPageIdSet = new Set(pagedProducts.value.map((product) => product.id))
+  const selectedIdSet = new Set(selection.map((item) => item.id))
+  selectedProductIds.value = Array.from(new Set([
+    ...selectedProductIds.value.filter((id) => !currentPageIdSet.has(id)),
+    ...Array.from(selectedIdSet),
+  ]))
+}
+
+const handleMallPageChange = async () => {
+  await applyTableSelection()
+}
+
+const handleMallPageSizeChange = async (pageSize: number) => {
+  mallPageSize.value = pageSize
+  mallPage.value = 1
+  await applyTableSelection()
 }
 
 const handleCardSelectionChange = async (productId: string, checked: boolean | string | number) => {
@@ -521,7 +553,7 @@ onMounted(async () => {
       >
         <template v-if="products.length">
           <article
-            v-for="product in products"
+            v-for="product in pagedProducts"
             :key="product.id"
             class="mall-mobile-card"
           >
@@ -628,7 +660,7 @@ onMounted(async () => {
         v-else
         ref="productTableRef"
         native-scrollbar
-        :data="products"
+        :data="pagedProducts"
         :loading="loading"
         row-key="id"
         @selection-change="handleTableSelectionChange"
@@ -688,6 +720,18 @@ onMounted(async () => {
           </template>
         </el-table-column>
       </el-table>
+
+      <div v-if="products.length" class="mall-pagination-bar mt-4">
+        <el-pagination
+          v-model:current-page="mallPage"
+          v-model:page-size="mallPageSize"
+          layout="sizes, prev, pager, next"
+          :page-sizes="mallPageSizes"
+          :total="mallTotal"
+          @current-change="handleMallPageChange"
+          @size-change="handleMallPageSizeChange"
+        />
+      </div>
     </div>
 
     <BizCrudDialogShell
@@ -916,6 +960,21 @@ onMounted(async () => {
   background: rgb(248 250 252);
 }
 
+.mall-pagination-bar {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  justify-content: flex-end;
+  overflow-x: auto;
+  padding-bottom: 0.1rem;
+}
+
+.mall-pagination-bar :deep(.el-pagination) {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  row-gap: 0.5rem;
+}
+
 .avatar-uploader :deep(.el-upload),
 .avatar-uploader__content {
   width: 100%;
@@ -966,5 +1025,15 @@ onMounted(async () => {
 .thumbnail-progress-fade-enter-from,
 .thumbnail-progress-fade-leave-to {
   opacity: 0;
+}
+
+@media (max-width: 640px) {
+  .mall-pagination-bar {
+    justify-content: flex-start;
+  }
+
+  .mall-pagination-bar :deep(.el-pagination) {
+    justify-content: flex-start;
+  }
 }
 </style>
