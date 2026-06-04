@@ -87,7 +87,7 @@ const clientDepartmentTreeNodeSchema: z.ZodType<{
 const updateClientDepartmentConfigsSchema = z
   .object({
     tree: z.array(clientDepartmentTreeNodeSchema).max(CLIENT_DEPARTMENT_NODE_LIMIT).optional(),
-    options: z.array(z.string().trim().min(1).max(32)).max(CLIENT_DEPARTMENT_NODE_LIMIT).optional(),
+    options: z.array(z.string().trim().min(1).max(512)).max(CLIENT_DEPARTMENT_NODE_LIMIT).optional(),
   })
   .refine((value) => Array.isArray(value.tree) || Array.isArray(value.options), {
     message: '部门配置参数缺失',

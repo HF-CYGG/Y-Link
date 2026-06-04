@@ -788,12 +788,41 @@ class SystemConfigService {
     return label
   }
 
+  private readDepartmentPathSegments(value: string): string[] {
+    return value
+      .split('-')
+      .map((segment) => this.normalizeDepartmentLabel(segment))
+      .filter((segment) => segment.length > 0)
+  }
+
   private buildTreeFromOptions(options: string[]): ClientDepartmentTreeNode[] {
-    return options.map((label, index) => ({
-      id: this.createDepartmentNodeId(`${label}-${index + 1}`),
-      label,
-      children: [],
-    }))
+    const rootNodes: ClientDepartmentTreeNode[] = []
+    const findOrCreateNode = (nodes: ClientDepartmentTreeNode[], label: string, seed: string) => {
+      const existingNode = nodes.find((node) => node.label === label)
+      if (existingNode) {
+        return existingNode
+      }
+      const node: ClientDepartmentTreeNode = {
+        id: this.createDepartmentNodeId(seed),
+        label,
+        children: [],
+      }
+      nodes.push(node)
+      return node
+    }
+
+    options.forEach((option, optionIndex) => {
+      const segments = this.readDepartmentPathSegments(option)
+      let currentNodes = rootNodes
+      let currentPath = ''
+      segments.forEach((segment, segmentIndex) => {
+        currentPath = currentPath ? `${currentPath}-${segment}` : segment
+        const node = findOrCreateNode(currentNodes, segment, `${currentPath}-${optionIndex + 1}-${segmentIndex + 1}`)
+        currentNodes = node.children
+      })
+    })
+
+    return this.normalizeClientDepartmentTree(rootNodes)
   }
 
   private flattenDepartmentTree(tree: ClientDepartmentTreeNode[]): string[] {
@@ -897,9 +926,10 @@ class SystemConfigService {
     try {
       const parsed = JSON.parse(raw)
       if (Array.isArray(parsed) && parsed.every((item) => typeof item === 'string')) {
-        const options = this.normalizeClientDepartmentOptions(parsed)
+        const tree = this.buildTreeFromOptions(parsed)
+        const options = this.buildClientDepartmentOptionsFromTree(tree)
         return {
-          tree: this.buildTreeFromOptions(options),
+          tree,
           options,
         }
       }
@@ -909,21 +939,41 @@ class SystemConfigService {
         rawTree = parsed
       } else if (parsed && typeof parsed === 'object' && Array.isArray((parsed as { tree?: unknown[] }).tree)) {
         rawTree = (parsed as { tree: unknown[] }).tree
+      } else if (parsed && typeof parsed === 'object' && Array.isArray((parsed as { options?: unknown[] }).options)) {
+        const optionList = (parsed as { options: unknown[] }).options.filter((item): item is string => typeof item === 'string')
+        const tree = this.buildTreeFromOptions(optionList)
+        const options = this.buildClientDepartmentOptionsFromTree(tree)
+        return { tree, options }
       }
       if (!rawTree) {
         throw new BizError('客户端部门配置格式非法', 500)
       }
 
-      const tree = this.normalizeClientDepartmentTree(
-        rawTree.map((item) => {
-          const node = item as Partial<ClientDepartmentTreeNode> & { name?: string; title?: string }
-          return {
-            id: String(node.id ?? '').trim(),
-            label: String(node.label ?? node.name ?? node.title ?? '').trim(),
-            children: Array.isArray(node.children) ? node.children : [],
-          }
-        }),
-      )
+      const rawTreeLabels = rawTree.map((item) => {
+        const node = item as Partial<ClientDepartmentTreeNode> & { name?: string; title?: string }
+        return String(node.label ?? node.name ?? node.title ?? '').trim()
+      })
+      const isLegacyFlatTree = rawTree.length > 0
+        && rawTreeLabels.some((label) => label.includes('-'))
+        && rawTree.every((item) => {
+          const node = item as Partial<ClientDepartmentTreeNode>
+          return !Array.isArray(node.children) || node.children.length === 0
+        })
+      if (isLegacyFlatTree) {
+        const tree = this.buildTreeFromOptions(rawTreeLabels)
+        const options = this.buildClientDepartmentOptionsFromTree(tree)
+        return { tree, options }
+      }
+
+      const normalizeRawTreeNode = (item: unknown): ClientDepartmentTreeNode => {
+        const node = item as Partial<ClientDepartmentTreeNode> & { name?: string; title?: string }
+        return {
+          id: String(node.id ?? '').trim(),
+          label: String(node.label ?? node.name ?? node.title ?? '').trim(),
+          children: Array.isArray(node.children) ? node.children.map((child) => normalizeRawTreeNode(child)) : [],
+        }
+      }
+      const tree = this.normalizeClientDepartmentTree(rawTree.map((item) => normalizeRawTreeNode(item)))
       const options = this.buildClientDepartmentOptionsFromTree(tree)
       return { tree, options }
     } catch {
@@ -1602,7 +1652,7 @@ class SystemConfigService {
     await this.assertAdminActor(actor, requestMeta, 'system_config.update_client_departments', '更新客户端部门配置')
     const normalizedTree = Array.isArray(input.tree)
       ? this.normalizeClientDepartmentTree(input.tree)
-      : this.buildTreeFromOptions(this.normalizeClientDepartmentOptions(input.options ?? []))
+      : this.buildTreeFromOptions(input.options ?? [])
     const normalizedOptions = this.buildClientDepartmentOptionsFromTree(normalizedTree)
     await this.ensureDefaultConfigs()
     return AppDataSource.transaction(async (manager) => {
