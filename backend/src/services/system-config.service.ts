@@ -669,10 +669,11 @@ class SystemConfigService {
   }
 
   private normalizeVerificationHeadersTemplate(rawValue: string, channelLabel: string) {
-    const text = rawValue.trim() || '{}'
+    const text = rawValue.trim()
+    const jsonText = text || '{}'
     let parsed: unknown
     try {
-      parsed = JSON.parse(text)
+      parsed = JSON.parse(jsonText)
     } catch {
       throw new BizError(`${channelLabel}请求头模板必须是合法 JSON 对象`, 400)
     }
