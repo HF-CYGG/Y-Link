@@ -58,6 +58,12 @@ const myOrderQuerySchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(50).optional(),
 })
 
+const inventoryLogQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).optional(),
+  pageSize: z.coerce.number().int().min(1).max(50).optional(),
+  limit: z.coerce.number().int().min(1).max(500).optional(),
+})
+
 const consoleOrderQuerySchema = z.object({
   status: z.enum(['pending', 'verified', 'cancelled']).optional(),
   keyword: z.string().trim().max(64).optional(),
@@ -597,8 +603,13 @@ o2oRouter.get(
   requireAuth,
   requirePermission('orders:view'),
   asyncHandler(async (req, res) => {
-    const limit = typeof req.query.limit === 'string' ? Number.parseInt(req.query.limit, 10) : 100
-    const data = await o2oPreorderService.listInventoryLogs(limit)
+    const query = inventoryLogQuerySchema.parse(req.query)
+    const data = query.page || query.pageSize
+      ? await o2oPreorderService.listInventoryLogsPage({
+          page: query.page ?? 1,
+          pageSize: query.pageSize ?? 10,
+        })
+      : await o2oPreorderService.listInventoryLogs(query.limit ?? 100)
     res.json({ code: 0, message: 'ok', data })
   }),
 )

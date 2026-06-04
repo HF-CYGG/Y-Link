@@ -9,7 +9,7 @@ import { ElMessageBox } from 'element-plus'
 import { CameraFilled } from '@element-plus/icons-vue'
 import { PageContainer, PassiveNumberInput, UnifiedScanDialog } from '@/components/common'
 import { getProductList, type ProductRecord } from '@/api/modules/product'
-import { getO2oInventoryLogs, inboundO2oStock, type O2oInventoryLog } from '@/api/modules/o2o'
+import { getO2oInventoryLogsPaged, inboundO2oStock, type O2oInventoryLog } from '@/api/modules/o2o'
 import { useCameraQrScanner } from '@/composables/useCameraQrScanner'
 import { extractErrorMessage } from '@/utils/error'
 
@@ -46,6 +46,9 @@ const submittingSingle = ref(false)
 const confirmingBatch = ref(false)
 const products = ref<ProductRecord[]>([])
 const logs = ref<O2oInventoryLog[]>([])
+const logPage = ref(1)
+const logPageSize = ref(10)
+const logTotal = ref(0)
 const inboundList = ref<InboundDraftItem[]>([])
 const scanPanelRef = ref<HTMLElement | null>(null)
 const scanCode = ref('')
@@ -229,15 +232,32 @@ const loadProducts = async () => {
   }
 }
 
-// 最近库存流水用于“提交后立即核对”。
-// 这里保留最近 20 条，避免页面首屏信息过多。
+// 最近库存流水用于“提交后立即核对”，通过分页避免一次铺满所有流水。
 const loadLogs = async () => {
   logLoading.value = true
   try {
-    logs.value = await getO2oInventoryLogs(20)
+    const result = await getO2oInventoryLogsPaged({
+      page: logPage.value,
+      pageSize: logPageSize.value,
+    })
+    logs.value = result.list
+    logPage.value = result.page
+    logPageSize.value = result.pageSize
+    logTotal.value = result.total
   } finally {
     logLoading.value = false
   }
+}
+
+const loadLatestLogs = async () => {
+  logPage.value = 1
+  await loadLogs()
+}
+
+const handleLogPageSizeChange = (pageSize: number) => {
+  logPageSize.value = pageSize
+  logPage.value = 1
+  void loadLogs()
 }
 
 // 保持扫码输入框常驻焦点，适配扫码枪“扫描后自动回车”的典型使用方式。
@@ -387,7 +407,7 @@ const handleSingleInbound = async () => {
     showAppSuccess('单笔入库成功')
     manualForm.qty = 1
     manualForm.remark = ''
-    await Promise.all([loadProducts(), loadLogs()])
+    await Promise.all([loadProducts(), loadLatestLogs()])
   } catch (error) {
     showAppError(extractErrorMessage(error, '单笔入库失败'))
   } finally {
@@ -446,7 +466,7 @@ const handleBatchConfirmInbound = async () => {
       showAppSuccess(`本次入库完成：成功 ${successCount} 条`)
       listRemark.value = ''
     }
-    await Promise.all([loadProducts(), loadLogs()])
+    await Promise.all([loadProducts(), loadLatestLogs()])
   } finally {
     confirmingBatch.value = false
   }
@@ -673,7 +693,6 @@ onBeforeUnmount(() => {
         <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <p class="break-words text-lg font-semibold text-slate-900">库存流水区</p>
-            <p class="break-words text-sm text-slate-500">可追踪预订占用、核销出库、手动入库等变化</p>
           </div>
           <el-button @click="loadLogs">刷新流水</el-button>
         </div>
@@ -694,6 +713,17 @@ onBeforeUnmount(() => {
             </el-table-column>
             <el-table-column prop="operatorName" label="操作人" width="110" />
           </el-table>
+        </div>
+        <div class="mt-4 flex w-full min-w-0 justify-end">
+          <el-pagination
+            v-model:current-page="logPage"
+            v-model:page-size="logPageSize"
+            layout="sizes, prev, pager, next"
+            :page-sizes="[10, 20, 50]"
+            :total="logTotal"
+            @current-change="loadLogs"
+            @size-change="handleLogPageSizeChange"
+          />
         </div>
       </section>
     </div>

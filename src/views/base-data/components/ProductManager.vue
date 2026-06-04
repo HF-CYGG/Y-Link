@@ -24,7 +24,7 @@ import {
   createProduct,
   deleteProduct,
   getProductDetail,
-  getProductList,
+  getProductListPaged,
   updateProduct,
   type ProductListQuery,
   type ProductRecord,
@@ -70,6 +70,9 @@ const selectedProductIds = ref<string[]>([])
 const searchKeyword = ref('')
 const searchTagId = ref('')
 const productCodeSortOrder = ref<'ascending' | 'descending'>('ascending')
+const productPage = ref(1)
+const productPageSize = ref(10)
+const productTotal = ref(0)
 
 /**
  * 产品表单类型：
@@ -180,46 +183,8 @@ const buildQueryParams = (): ProductListQuery => {
 }
 
 const handleSearch = () => {
+  productPage.value = 1
   void reloadProducts()
-}
-
-const productMatchesFilters = (product: ProductRecord) => {
-  const normalizedKeyword = searchKeyword.value.trim().toLowerCase()
-  const normalizedTagId = searchTagId.value.trim()
-
-  if (normalizedKeyword) {
-    const searchableText = [product.productName, product.productCode, product.pinyinAbbr]
-      .join(' ')
-      .toLowerCase()
-
-    if (!searchableText.includes(normalizedKeyword)) {
-      return false
-    }
-  }
-
-  if (normalizedTagId && !product.tagIds.includes(normalizedTagId)) {
-    return false
-  }
-
-  return true
-}
-
-const upsertProduct = (product: ProductRecord) => {
-  const currentIndex = products.value.findIndex((item) => item.id === product.id)
-
-  if (!productMatchesFilters(product)) {
-    if (currentIndex > -1) {
-      products.value.splice(currentIndex, 1)
-    }
-    return
-  }
-
-  if (currentIndex > -1) {
-    products.value.splice(currentIndex, 1, product)
-    return
-  }
-
-  products.value.unshift(product)
 }
 
 const applyTableSelection = async () => {
@@ -349,7 +314,20 @@ const {
   createDefaultForm,
   buildEditForm,
   buildSubmitPayload,
-  loadList: (requestConfig) => getProductList(buildQueryParams(), requestConfig),
+  loadList: async (requestConfig) => {
+    const result = await getProductListPaged(
+      {
+        ...buildQueryParams(),
+        page: productPage.value,
+        pageSize: productPageSize.value,
+      },
+      requestConfig,
+    )
+    productPage.value = result.page
+    productPageSize.value = result.pageSize
+    productTotal.value = result.total
+    return result.list
+  },
   createItem: createProduct,
   updateItem: updateProduct,
   deleteItem: deleteProduct,
@@ -375,16 +353,28 @@ const {
     hasAutoCreatedTags.value = false
     await loadTags()
   },
-  syncAfterSubmit: ({ result }) => {
-    upsertProduct(result)
-    void syncSelectedProductIds()
-    return 'local'
+  syncAfterSubmit: () => {
+    productPage.value = 1
+    selectedProductIds.value = []
+    return 'reload' as const
+  },
+  afterDelete: async () => {
+    if (!products.value.length && productPage.value > 1) {
+      productPage.value -= 1
+    }
+    await reloadProducts()
   },
 })
 
 const reloadProducts = async () => {
   await loadData()
   await syncSelectedProductIds()
+}
+
+const handleProductPageSizeChange = (pageSize: number) => {
+  productPageSize.value = pageSize
+  productPage.value = 1
+  void reloadProducts()
 }
 
 const handleAdd = async () => {
@@ -803,6 +793,18 @@ onActivated(() => {
         </div>
       </template>
     </BizResponsiveDataCollectionShell>
+
+    <div class="flex w-full min-w-0 justify-end">
+      <el-pagination
+        v-model:current-page="productPage"
+        v-model:page-size="productPageSize"
+        layout="sizes, prev, pager, next"
+        :page-sizes="[10, 20, 50]"
+        :total="productTotal"
+        @current-change="reloadProducts"
+        @size-change="handleProductPageSizeChange"
+      />
+    </div>
 
     <BizCrudDialogShell
       v-if="canManageProducts"

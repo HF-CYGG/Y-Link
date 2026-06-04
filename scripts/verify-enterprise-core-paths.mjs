@@ -464,7 +464,11 @@ const verifyFrontendStaticCoverage = () => {
   assert.match(systemConfigViewSource, /系统配置/, '系统配置页面入口异常')
   assert.match(userManageViewSource, /executor: \(signal\) => getUserList\(buildQueryParams\(\), \{ signal \}\)/, '系统用户页未接入 signal 控制')
   assert.match(auditLogViewSource, /executor: \(signal\) => getAuditLogList\(buildQueryParams\(\), \{ signal \}\)/, '审计日志页未接入 signal 控制')
-  assert.match(productManagerSource, /loadList: \(requestConfig\) => getProductList\(buildQueryParams\(\), requestConfig\)/, '产品管理未复用统一 CRUD 列表加载入口')
+  assert.ok(
+    /loadList: \(requestConfig\) => getProductList\(buildQueryParams\(\), requestConfig\)/.test(productManagerSource) ||
+      /loadList: async \(requestConfig\) => \{[\s\S]*?getProductListPaged\(/.test(productManagerSource),
+    '产品管理未复用统一 CRUD 列表加载入口',
+  )
   assert.match(tagManagerSource, /loadList: getTagList/, '标签管理未复用统一 CRUD 列表加载入口')
 
   const durationMs = performance.now() - startedAt

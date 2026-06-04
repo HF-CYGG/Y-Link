@@ -113,6 +113,23 @@ export interface DeletedConsolePreorderView {
   outboundSerialRolledBack: boolean
 }
 
+export interface InventoryLogView {
+  id: string
+  productId: string
+  productName: string
+  changeType: string
+  changeQty: number
+  beforeCurrentStock: number
+  afterCurrentStock: number
+  beforePreorderedStock: number
+  afterPreorderedStock: number
+  operatorType: string
+  operatorName: string | null
+  refType: string | null
+  refId: string | null
+  createdAt: Date
+}
+
 type O2oNumericLike = string | number | null
 
 export interface MyOrderListQuery {
@@ -2961,7 +2978,28 @@ class O2oPreorderService {
       take: Math.max(1, Math.min(500, limit)),
       relations: { product: true },
     })
-    return rows.map((item) => ({
+    return rows.map((item) => this.buildInventoryLogView(item))
+  }
+
+  async listInventoryLogsPage(query: { page?: number; pageSize?: number }): Promise<PaginationResult<InventoryLogView>> {
+    const page = Math.max(1, Math.floor(Number(query.page || 1)))
+    const pageSize = Math.min(50, Math.max(10, Math.floor(Number(query.pageSize || 10))))
+    const [rows, total] = await this.inventoryLogRepo.findAndCount({
+      order: { id: 'DESC' },
+      skip: (page - 1) * pageSize,
+      take: pageSize,
+      relations: { product: true },
+    })
+    return {
+      page,
+      pageSize,
+      total,
+      list: rows.map((item) => this.buildInventoryLogView(item)),
+    }
+  }
+
+  private buildInventoryLogView(item: InventoryLog): InventoryLogView {
+    return {
       id: String(item.id),
       productId: String(item.productId),
       productName: item.product?.productName ?? '',
@@ -2976,7 +3014,7 @@ class O2oPreorderService {
       refType: item.refType,
       refId: item.refId,
       createdAt: item.createdAt,
-    }))
+    }
   }
 }
 

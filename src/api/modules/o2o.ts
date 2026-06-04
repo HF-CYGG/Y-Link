@@ -225,6 +225,8 @@ export interface O2oInventoryLog {
   createdAt: string
 }
 
+export type O2oInventoryLogListQuery = PaginationQueryInput
+
 export interface SubmitO2oPreorderPayload {
   isSystemApplied: boolean
   pickupContact: string
@@ -524,4 +526,23 @@ export const getO2oInventoryLogs = (limit = 50) =>
     method: 'GET',
     url: '/o2o/inventory/logs',
     params: { limit },
+  })
+
+export const getO2oInventoryLogsPaged = (
+  params: O2oInventoryLogListQuery,
+): Promise<{
+  page: number
+  pageSize: number
+  total: number
+  list: O2oInventoryLog[]
+}> =>
+  request<{
+    page: number
+    pageSize: number
+    total: number
+    list: O2oInventoryLog[]
+  }>({
+    method: 'GET',
+    url: '/o2o/inventory/logs',
+    params,
   })

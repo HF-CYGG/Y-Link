@@ -179,7 +179,7 @@ export class ProductService {
 
     if (query.keyword?.trim()) {
       // 支持产品名称 + 拼音首字母双字段模糊检索。
-      qb.andWhere('(p.product_name LIKE :keyword OR p.pinyin_abbr LIKE :keyword)', {
+      qb.andWhere('(p.product_name LIKE :keyword OR p.pinyin_abbr LIKE :keyword OR p.product_code LIKE :keyword)', {
         keyword: `%${query.keyword.trim()}%`,
       })
     }
@@ -224,7 +224,7 @@ export class ProductService {
       qb.andWhere('p.o2o_status = :o2oStatus', { o2oStatus: query.o2oStatus })
     }
     if (query.keyword?.trim()) {
-      qb.andWhere('(p.product_name LIKE :keyword OR p.pinyin_abbr LIKE :keyword)', { keyword: `%${query.keyword.trim()}%` })
+      qb.andWhere('(p.product_name LIKE :keyword OR p.pinyin_abbr LIKE :keyword OR p.product_code LIKE :keyword)', { keyword: `%${query.keyword.trim()}%` })
     }
     if (query.tagId) {
       qb.innerJoin('rel_product_tag', 'rpt', 'rpt.product_id = p.id AND rpt.tag_id = :tagId', { tagId: query.tagId })
