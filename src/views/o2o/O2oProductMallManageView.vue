@@ -340,13 +340,17 @@ onMounted(async () => {
 
 <template>
   <PageContainer title="线上商品大厅" description="维护客户端可见商品，支持上/下架、预览图、详情文案与库存配置">
-    <template #actions>
-      <el-space wrap>
-        <el-input v-model="keyword" placeholder="搜索商品名称" clearable style="width: 220px" @keyup.enter="loadProducts" />
-        <el-button @click="loadProducts">刷新</el-button>
-        <el-button type="primary" @click="openCreateDialog">新增商品</el-button>
-      </el-space>
-    </template>
+    <div class="rounded-3xl bg-white p-4 shadow-sm">
+      <div class="flex flex-wrap gap-2">
+        <el-input
+          v-model="keyword"
+          placeholder="搜索"
+          class="!w-[300px]"
+        />
+        <el-button type="primary" @click="loadProducts">搜索</el-button>
+        <el-button class="ml-auto" type="primary" @click="openCreateDialog">新增</el-button>
+      </div>
+    </div>
 
     <div class="mt-4 rounded-3xl bg-white p-4 shadow-sm">
       <div
