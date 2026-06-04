@@ -575,6 +575,10 @@ const handleBatchCreate = async () => {
 onMounted(() => {
   pageReady.value = true
   void refreshProductView()
+  if (globalThis.sessionStorage.getItem('ylink:o2o-batch-create') === '1') {
+    globalThis.sessionStorage.removeItem('ylink:o2o-batch-create')
+    openBatchCreateDialog()
+  }
 })
 
 onActivated(() => {

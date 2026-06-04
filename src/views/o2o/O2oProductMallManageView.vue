@@ -10,11 +10,12 @@
  */
 
 
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 
-import type { UploadRequestOptions } from 'element-plus'
+import type { TableInstance, UploadRequestOptions } from 'element-plus'
 import { Delete, UploadFilled } from '@element-plus/icons-vue'
 import { BizCrudDialogShell, PageContainer, PassiveNumberInput } from '@/components/common'
+import { getTagList, type Tag } from '@/api/modules/tag'
 import { uploadImage } from '@/api/modules/upload'
  import { compressImageForUpload } from '@/utils/image-upload'
 import { resolveProductPlaceholder } from '@/utils/product-placeholder'
@@ -27,6 +28,7 @@ import {
   type UpdateProductDto,
 } from '@/api/modules/product'
 import { useDevice } from '@/composables/useDevice'
+import { usePermissionAction } from '@/composables/usePermissionAction'
 
 
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
@@ -48,8 +50,17 @@ const loading = ref(false)
 const submitting = ref(false)
 const dialogVisible = ref(false)
 const keyword = ref('')
+const searchTagId = ref('')
 const products = ref<ProductRecord[]>([])
-const { isPhone } = useDevice()
+const allTags = ref<Tag[]>([])
+const productTableRef = ref<TableInstance>()
+const selectedProductIds = ref<string[]>([])
+const batchSubmitting = ref(false)
+const { isPhone, isTablet } = useDevice()
+const { hasPermission, ensurePermission } = usePermissionAction()
+
+const canManageProducts = computed(() => hasPermission('products:manage'))
+const selectedProductCount = computed(() => selectedProductIds.value.length)
 
 const form = reactive<O2oProductFormState>({
   id: '',
@@ -154,22 +165,89 @@ const resetForm = () => {
   uploadProgressVisible.value = false
 }
 
-// 详细注释：加载商品列表，支持按名称关键词进行模糊搜索，刷新商城大厅商品数据。
+// 详细注释：加载商品列表，支持按名称、拼音、编码与标签筛选，刷新商城大厅商品数据。
 const loadProducts = async () => {
   loading.value = true
   try {
     products.value = await getProductList({
       keyword: keyword.value.trim() || undefined,
+      tagId: searchTagId.value || undefined,
     })
+    await syncSelectedProductIds()
   } finally {
     loading.value = false
   }
 }
 
+const loadTags = async () => {
+  try {
+    allTags.value = await getTagList()
+  } catch (error) {
+    console.error('Failed to load tags', error)
+  }
+}
+
+const handleSearch = () => {
+  void loadProducts()
+}
+
+const applyTableSelection = async () => {
+  await nextTick()
+  const table = productTableRef.value
+  if (!table) {
+    return
+  }
+
+  table.clearSelection()
+  const selectedIdSet = new Set(selectedProductIds.value)
+  products.value.forEach((product) => {
+    if (selectedIdSet.has(product.id)) {
+      table.toggleRowSelection(product, true)
+    }
+  })
+}
+
+const syncSelectedProductIds = async () => {
+  const visibleIdSet = new Set(products.value.map((product) => product.id))
+  selectedProductIds.value = selectedProductIds.value.filter((id) => visibleIdSet.has(id))
+  await applyTableSelection()
+}
+
+const clearSelection = async () => {
+  selectedProductIds.value = []
+  await applyTableSelection()
+}
+
+const handleTableSelectionChange = (selection: ProductRecord[]) => {
+  selectedProductIds.value = selection.map((item) => item.id)
+}
+
+const handleCardSelectionChange = async (productId: string, checked: boolean | string | number) => {
+  const isChecked = checked === true
+  if (isChecked) {
+    selectedProductIds.value = [...new Set([...selectedProductIds.value, productId])]
+  } else {
+    selectedProductIds.value = selectedProductIds.value.filter((id) => id !== productId)
+  }
+
+  await applyTableSelection()
+}
+
 // 详细注释：打开新增商品弹窗，执行表单重置，确保表单为干净状态。
 const openCreateDialog = () => {
+  if (!ensurePermission('products:manage', '新增产品')) {
+    return
+  }
   resetForm()
   dialogVisible.value = true
+}
+
+const openBatchCreateDialog = () => {
+  if (!ensurePermission('products:manage', '批量新增产品')) {
+    return
+  }
+  globalThis.sessionStorage.setItem('ylink:o2o-batch-create', '1')
+  globalThis.location.assign('/base-data/products')
 }
 
 const handleCustomUpload = async (options: UploadRequestOptions) => {
@@ -256,6 +334,9 @@ const handleRemoveThumbnail = () => {
 
 // 详细注释：打开编辑商品弹窗，将商品记录字段回显到表单模型中。
 const openEditDialog = (product: ProductRecord) => {
+  if (!ensurePermission('products:manage', '编辑产品')) {
+    return
+  }
   resetForm()
   form.id = product.id
   form.productCode = product.productCode
@@ -286,6 +367,35 @@ const toggleListed = async (product: ProductRecord, nextStatus: 'listed' | 'unli
   })
   showAppSuccess(nextStatus === 'listed' ? '商品已上架' : '商品已下架')
   await loadProducts()
+}
+
+const handleBatchUpdateStatus = async (enabled: boolean) => {
+  if (!ensurePermission('products:manage', enabled ? '批量上架线上展示' : '批量下架线上展示')) {
+    return
+  }
+  if (!selectedProductIds.value.length) {
+    showAppWarning('请先选择要批量处理的产品')
+    return
+  }
+
+  const selectedProducts = products.value.filter((product) => selectedProductIds.value.includes(product.id))
+  if (enabled && selectedProducts.some((product) => !product.isActive)) {
+    showAppWarning('选中的产品包含已停用产品，请先在基础信息中启用后再批量上架线上展示')
+    return
+  }
+
+  batchSubmitting.value = true
+  try {
+    const updatedCount = selectedProductIds.value.length
+    await Promise.all(selectedProductIds.value.map((id) => updateProduct(id, {
+      o2oStatus: enabled ? 'listed' : 'unlisted',
+    })))
+    await clearSelection()
+    await loadProducts()
+    showAppSuccess(`已批量${enabled ? '上架' : '下架'} ${updatedCount} 个产品`)
+  } finally {
+    batchSubmitting.value = false
+  }
 }
 
 // 详细注释：提交商品表单（新增/编辑），处理图片上传逻辑并构造对应 payload 发起请求。
@@ -334,21 +444,71 @@ const handleSubmit = async () => {
 }
 
 onMounted(async () => {
-  await loadProducts()
+  await Promise.all([loadTags(), loadProducts()])
 })
 </script>
 
 <template>
   <PageContainer title="线上商品大厅" description="维护客户端可见商品，支持上/下架、预览图、详情文案与库存配置">
-    <div class="rounded-3xl bg-white p-4 shadow-sm">
-      <div class="flex flex-wrap gap-2">
-        <el-input
-          v-model="keyword"
-          placeholder="搜索"
-          class="!w-[300px]"
-        />
-        <el-button type="primary" @click="loadProducts">搜索</el-button>
-        <el-button class="ml-auto" type="primary" @click="openCreateDialog">新增</el-button>
+    <div class="apple-card flex min-w-0 flex-col gap-3 p-4">
+      <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div class="min-w-0 flex-1">
+        <div class="flex w-full flex-wrap gap-2.5">
+          <el-input
+            v-model="keyword"
+            placeholder="搜索产品名称/拼音/编码"
+            :class="isPhone ? '!w-full' : isTablet ? '!w-[240px]' : '!w-[300px]'"
+            clearable
+            @clear="handleSearch"
+            @keyup.enter="handleSearch"
+          />
+          <el-select
+            v-model="searchTagId"
+            placeholder="按标签筛选"
+            clearable
+            :class="isPhone ? '!w-full' : isTablet ? '!w-[200px]' : '!w-[220px]'"
+            @change="handleSearch"
+          >
+            <el-option
+              v-for="tag in allTags"
+              :key="tag.id"
+              :label="tag.tagName"
+              :value="tag.id"
+            />
+          </el-select>
+          <el-button :class="isPhone ? 'w-full' : ''" type="primary" icon="Search" @click="handleSearch">搜索</el-button>
+        </div>
+        </div>
+
+        <div class="flex shrink-0 flex-wrap items-center justify-end gap-2">
+          <el-tag v-if="canManageProducts" type="info">已选 {{ selectedProductCount }} 项</el-tag>
+          <el-tag v-else type="info">当前为只读模式</el-tag>
+          <el-button
+            v-if="canManageProducts"
+            :class="isPhone ? 'w-full' : ''"
+            :disabled="!selectedProductCount"
+            :loading="batchSubmitting"
+            @click="handleBatchUpdateStatus(true)"
+          >
+            批量上架
+          </el-button>
+          <el-button
+            v-if="canManageProducts"
+            :class="isPhone ? 'w-full' : ''"
+            :disabled="!selectedProductCount"
+            :loading="batchSubmitting"
+            @click="handleBatchUpdateStatus(false)"
+          >
+            批量下架
+          </el-button>
+          <el-button v-if="canManageProducts" :class="isPhone ? 'w-full' : ''" :disabled="!selectedProductCount" @click="clearSelection">
+            清空选择
+          </el-button>
+          <el-button v-if="canManageProducts" :class="isPhone ? 'w-full' : ''" type="primary" plain @click="openBatchCreateDialog">
+            批量新增
+          </el-button>
+          <el-button v-if="canManageProducts" :class="isPhone ? 'w-full' : ''" type="primary" icon="Plus" @click="openCreateDialog">新增产品</el-button>
+        </div>
       </div>
     </div>
 
@@ -365,6 +525,14 @@ onMounted(async () => {
             :key="product.id"
             class="mall-mobile-card"
           >
+            <div v-if="canManageProducts" class="mb-1 flex items-center justify-between">
+              <el-checkbox
+                :model-value="selectedProductIds.includes(product.id)"
+                @change="handleCardSelectionChange(product.id, $event)"
+              >
+                选择产品
+              </el-checkbox>
+            </div>
             <div class="mall-mobile-card__head">
               <el-image
                 :src="resolveProductPlaceholder(product.thumbnail)"
@@ -386,6 +554,7 @@ onMounted(async () => {
                   </div>
 
                   <el-button
+                    v-if="canManageProducts"
                     link
                     type="primary"
                     class="mall-mobile-card__edit-button"
@@ -445,7 +614,7 @@ onMounted(async () => {
                 inline-prompt
                 active-text="上架"
                 inactive-text="下架"
-                :disabled="!product.isActive"
+                :disabled="!canManageProducts || !product.isActive"
                 @change="toggleListed(product, $event ? 'listed' : 'unlisted')"
               />
             </div>
@@ -455,7 +624,16 @@ onMounted(async () => {
         <el-empty v-else description="暂无线上商品" :image-size="110" />
       </div>
 
-      <el-table v-else native-scrollbar :data="products" :loading="loading" row-key="id">
+      <el-table
+        v-else
+        ref="productTableRef"
+        native-scrollbar
+        :data="products"
+        :loading="loading"
+        row-key="id"
+        @selection-change="handleTableSelectionChange"
+      >
+        <el-table-column v-if="canManageProducts" type="selection" width="52" reserve-selection />
         <el-table-column label="商品信息" min-width="250">
           <template #default="{ row }">
             <div class="mall-table-product-cell">
@@ -487,7 +665,7 @@ onMounted(async () => {
               inline-prompt
               active-text="上架"
               inactive-text="下架"
-              :disabled="!row.isActive"
+              :disabled="!canManageProducts || !row.isActive"
               @change="toggleListed(row, $event ? 'listed' : 'unlisted')"
             />
           </template>
@@ -504,7 +682,7 @@ onMounted(async () => {
           </template>
         </el-table-column>
         <el-table-column prop="limitPerUser" label="单人限购" width="96" align="center" />
-        <el-table-column label="操作" width="84" fixed="right" align="right">
+        <el-table-column v-if="canManageProducts" label="操作" width="84" fixed="right" align="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="openEditDialog(row)">编辑</el-button>
           </template>
@@ -667,60 +845,30 @@ onMounted(async () => {
 </template>
 
 <style scoped>
-.mall-mobile-list {
+.mall-mobile-list,
+.mall-mobile-card,
+.mall-mobile-card__footer-copy {
   display: flex;
   flex-direction: column;
+}
+
+.mall-mobile-list,
+.mall-mobile-card {
   gap: 0.9rem;
-  min-height: 220px;
 }
 
 .mall-mobile-card {
-  display: flex;
-  flex-direction: column;
-  gap: 0.95rem;
   padding: 1rem;
-  border: 1px solid rgba(226, 232, 240, 0.92);
-  border-radius: 24px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.96));
-  box-shadow: 0 16px 40px -34px rgba(15, 23, 42, 0.28);
+  border: 1px solid rgb(226 232 240);
+  border-radius: 22px;
 }
 
-.mall-mobile-card__head {
+.mall-mobile-card__head,
+.mall-mobile-card__price-strip,
+.mall-mobile-card__footer {
   display: flex;
-  align-items: flex-start;
-  gap: 0.85rem;
-  min-width: 0;
-}
-
-.mall-mobile-card__thumb {
-  width: 84px;
-  height: 84px;
-  flex: 0 0 auto;
-  border-radius: 20px;
-  overflow: hidden;
-  background: rgb(241 245 249);
-}
-
-.mall-mobile-card__title {
-  font-size: 1rem;
-  line-height: 1.45;
-  font-weight: 600;
-  color: rgb(15 23 42);
-  word-break: break-word;
-}
-
-.mall-mobile-card__code {
-  margin-top: 0.3rem;
-  font-size: 0.78rem;
-  line-height: 1.5;
-  color: rgb(100 116 139);
-  word-break: break-all;
-}
-
-.mall-mobile-card__edit-button {
-  flex: 0 0 auto;
-  align-self: flex-start;
-  padding-top: 0;
+  gap: 0.75rem;
+  justify-content: space-between;
 }
 
 .mall-mobile-card__tag-row {
@@ -730,38 +878,30 @@ onMounted(async () => {
   margin-top: 0.7rem;
 }
 
-.mall-mobile-card__price-strip {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  padding: 0.9rem 0.95rem;
-  border-radius: 20px;
-  background: rgba(240, 249, 255, 0.86);
+.mall-mobile-card__thumb {
+  width: 80px;
+  height: 80px;
+  flex: 0 0 auto;
+  border-radius: 18px;
+  overflow: hidden;
 }
 
-.mall-mobile-card__section-label {
-  display: block;
-  font-size: 0.75rem;
+.mall-mobile-card__title,
+.mall-table-product-cell__name {
+  font-weight: 600;
+  color: rgb(15 23 42);
+}
+
+.mall-mobile-card__code,
+.mall-mobile-card__section-label,
+.mall-mobile-card__footer-hint,
+.mall-table-product-cell__code {
   color: rgb(100 116 139);
-  line-height: 1.4;
 }
 
 .mall-mobile-card__price {
-  margin-top: 0.2rem;
-  font-size: 1.18rem;
-  line-height: 1.2;
   font-weight: 700;
   color: rgb(13 148 136);
-}
-
-.mall-mobile-card__limit {
-  flex: 0 0 auto;
-  padding: 0.38rem 0.72rem;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.92);
-  font-size: 0.78rem;
-  color: rgb(51 65 85);
 }
 
 .mall-mobile-card__stock-grid {
@@ -771,290 +911,60 @@ onMounted(async () => {
 }
 
 .mall-mobile-card__stock-item {
-  display: flex;
-  flex-direction: column;
-  gap: 0.28rem;
-  min-width: 0;
-  padding: 0.8rem 0.72rem;
-  border-radius: 18px;
-  background: rgba(248, 250, 252, 0.96);
+  padding: 0.75rem;
+  border-radius: 16px;
+  background: rgb(248 250 252);
 }
 
-.mall-mobile-card__stock-item.is-highlight {
-  background: rgba(236, 253, 245, 0.96);
-}
-
-.mall-mobile-card__stock-label {
-  font-size: 0.73rem;
-  line-height: 1.4;
-  color: rgb(100 116 139);
-}
-
-.mall-mobile-card__stock-value {
-  font-size: 1rem;
-  line-height: 1.2;
-  font-weight: 600;
-  color: rgb(15 23 42);
-}
-
-.mall-mobile-card__footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  padding-top: 0.15rem;
-}
-
-.mall-mobile-card__footer-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 0.2rem;
-  min-width: 0;
-}
-
-.mall-mobile-card__footer-hint {
-  font-size: 0.76rem;
-  line-height: 1.45;
-  color: rgb(100 116 139);
-}
-
-.mall-table-product-cell {
-  min-width: 0;
-}
-
-.mall-table-product-cell__name {
-  font-size: 0.95rem;
-  line-height: 1.5;
-  font-weight: 600;
-  color: rgb(15 23 42);
-  word-break: break-word;
-}
-
-.mall-table-product-cell__code {
-  margin-top: 0.25rem;
-  font-size: 0.78rem;
-  line-height: 1.45;
-  color: rgb(100 116 139);
-  word-break: break-all;
-}
-
-.avatar-uploader :deep(.el-upload) {
+.avatar-uploader :deep(.el-upload),
+.avatar-uploader__content {
   width: 100%;
-  border: 1px solid rgba(203, 213, 225, 0.88);
-  border-radius: 22px;
-  cursor: pointer;
-  position: relative;
-  overflow: hidden;
-  transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
-  background: rgba(255, 255, 255, 0.98);
-}
-
-.avatar-uploader-wrap.is-drag-active :deep(.el-upload),
-.avatar-uploader :deep(.el-upload:hover) {
-  border-color: rgba(148, 163, 184, 0.95);
-  box-shadow: 0 18px 36px -28px rgba(15, 23, 42, 0.24);
-}
-
-.avatar-uploader-wrap.is-drag-active :deep(.el-upload) {
-  background: rgba(240, 249, 255, 0.96);
-  box-shadow: 0 0 0 4px rgba(14, 165, 233, 0.08);
 }
 
 .avatar-uploader :deep(.el-upload-dragger) {
-  border: none;
-  background: transparent;
   padding: 0;
 }
 
-.avatar-uploader__content {
-  display: block;
-  width: 100%;
-  min-height: 172px;
-  padding: 0;
-}
-
-.avatar-uploader__content.has-image {
-  min-height: 240px;
-}
-
-.avatar-uploader__content.is-empty {
-  padding: 1.1rem 1.2rem;
-}
-
-.avatar-uploader__empty-state {
-  display: grid;
-  grid-template-columns: 132px minmax(0, 1fr);
+.avatar-uploader__empty-state,
+.thumbnail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
   align-items: center;
-  gap: 1.1rem;
 }
 
 .avatar-uploader__preview-shell {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 132px;
-  height: 132px;
-  border-radius: 28px;
-  background: linear-gradient(180deg, rgb(248 250 252), rgb(241 245 249));
-}
-
-.avatar-uploader__preview-shell.is-empty {
-  background: linear-gradient(180deg, rgb(249 250 251), rgb(244 246 248));
-}
-
-.avatar-uploader__text {
-  display: flex;
-  flex-direction: column;
-  gap: 0.22rem;
-  min-width: 0;
-}
-
-.thumbnail-actions__hint {
-  font-size: 13px;
-  color: #64748b;
-  line-height: 1.6;
-}
-
-.avatar-uploader__title {
-  font-size: 1rem;
-  font-weight: 600;
-  letter-spacing: -0.01em;
-  color: rgb(15 23 42);
-}
-
-.avatar-uploader__hint {
-  font-size: 0.82rem;
-  color: rgb(100 116 139);
-}
-
-.el-icon.avatar-uploader-icon {
-  font-size: 28px;
-  color: #8c939d;
-  width: 140px;
-  height: 140px;
-  text-align: center;
-}
-
-.avatar {
-  width: 100px;
-  height: 100px;
-  display: block;
-  object-fit: cover;
-  border-radius: 24px;
-  background: transparent;
+  display: grid;
+  place-items: center;
+  width: 120px;
+  height: 120px;
+  border-radius: 20px;
+  background: rgb(248 250 252);
 }
 
 .avatar--full {
   width: 100%;
   height: 240px;
-  border-radius: 22px;
   object-fit: cover;
 }
 
-.avatar-uploader__empty-icon {
-  font-size: 1.55rem;
-  color: rgb(148 163 184);
+.thumbnail-actions__hint,
+.avatar-uploader__hint {
+  color: rgb(100 116 139);
 }
 
-.thumbnail-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.65rem;
-}
-
-.thumbnail-actions :deep(.el-button) {
-  min-height: 38px;
-  border-radius: 999px;
-  border-color: rgba(203, 213, 225, 0.96);
-  background: rgba(255, 255, 255, 0.96);
-  color: rgb(51 65 85);
-  font-weight: 500;
-  padding-inline: 1rem;
-}
-
-.thumbnail-remove-button {
-  color: rgb(185 28 28) !important;
-  border-color: rgba(254, 205, 211, 0.92) !important;
-  background: rgba(255, 255, 255, 0.96) !important;
-}
-
-.thumbnail-preview-dialog-image {
-  display: block;
-  width: 100%;
-  max-height: min(78vh, 760px);
-  border-radius: 14px;
-  object-fit: contain;
-  background: #f8fafc;
+.avatar-uploader__title {
+  font-weight: 600;
+  color: rgb(15 23 42);
 }
 
 .thumbnail-progress-fade-enter-active,
 .thumbnail-progress-fade-leave-active {
-  transition:
-    opacity 0.26s ease,
-    transform 0.32s ease;
+  transition: opacity 0.2s ease;
 }
 
 .thumbnail-progress-fade-enter-from,
 .thumbnail-progress-fade-leave-to {
   opacity: 0;
-  transform: translateY(-6px);
-}
-
-@media (max-width: 767px) {
-  .mall-mobile-card {
-    padding: 0.9rem;
-    border-radius: 22px;
-  }
-
-  .mall-mobile-card__head {
-    gap: 0.75rem;
-  }
-
-  .mall-mobile-card__thumb {
-    width: 76px;
-    height: 76px;
-    border-radius: 18px;
-  }
-
-  .mall-mobile-card__price-strip {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
-  .mall-mobile-card__limit {
-    align-self: flex-start;
-  }
-
-  .mall-mobile-card__stock-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .mall-mobile-card__stock-item.is-highlight {
-    grid-column: 1 / -1;
-  }
-
-  .mall-mobile-card__footer {
-    align-items: flex-start;
-    flex-direction: column;
-  }
-
-  .avatar-uploader__empty-state {
-    grid-template-columns: 1fr;
-    align-items: start;
-  }
-
-  .avatar-uploader__preview-shell {
-    width: 120px;
-    height: 120px;
-  }
-
-  .avatar {
-    width: 88px;
-    height: 88px;
-  }
-
-  .avatar--full {
-    height: 220px;
-  }
 }
 </style>
