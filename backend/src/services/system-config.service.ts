@@ -18,6 +18,8 @@ import { auditService } from './audit.service.js'
 import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
 import type { EntityManager } from 'typeorm'
 
+const CLIENT_DEPARTMENT_NODE_LIMIT = 3000
+
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const DEFAULT_SYSTEM_CONFIGS = [
   {
@@ -828,8 +830,8 @@ class SystemConfigService {
 
   private buildClientDepartmentOptionsFromTree(tree: ClientDepartmentTreeNode[]): string[] {
     const flattenedLabels = this.flattenDepartmentTree(tree)
-    if (flattenedLabels.length > 50) {
-      throw new BizError('部门节点总数最多保留 50 个', 400)
+    if (flattenedLabels.length > CLIENT_DEPARTMENT_NODE_LIMIT) {
+      throw new BizError(`部门节点总数最多保留 ${CLIENT_DEPARTMENT_NODE_LIMIT} 个`, 400)
     }
     return [...new Set(flattenedLabels)]
   }
@@ -839,8 +841,8 @@ class SystemConfigService {
       .map((item) => this.normalizeDepartmentLabel(item))
       .filter((item) => item.length > 0)
 
-    if (normalizedList.length > 50) {
-      throw new BizError('部门节点总数最多保留 50 个', 400)
+    if (normalizedList.length > CLIENT_DEPARTMENT_NODE_LIMIT) {
+      throw new BizError(`部门节点总数最多保留 ${CLIENT_DEPARTMENT_NODE_LIMIT} 个`, 400)
     }
 
     const uniqueSet = new Set<string>()

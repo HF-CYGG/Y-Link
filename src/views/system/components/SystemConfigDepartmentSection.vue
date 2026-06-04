@@ -24,6 +24,7 @@ defineProps<{
   clientDepartmentConfig: ClientDepartmentConfigRecord | null
   getDepartmentPathLabel: (targetId: string) => string
   handleAllowDepartmentDrop: (_draggingNode: unknown, _dropNode: unknown, type: 'prev' | 'inner' | 'next') => boolean
+  handleDepartmentNodeDrop: () => void
 }>()
 
 const emit = defineEmits<{
@@ -56,7 +57,7 @@ const emit = defineEmits<{
       type="info"
       :closable="false"
       show-icon
-      description="可通过拖拽调整部门层级与排序。部门名称最多 32 个字符，部门节点总数不超过 50 个；同一父级下不能出现相同部门名称。"
+      description="可通过拖拽调整部门层级与排序。部门名称最多 32 个字符，部门节点总数不超过 3000 个；同一父级下不能出现相同部门名称。"
     />
     <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
       <div class="department-tree-shell rounded-2xl border border-slate-200/80 bg-slate-50/60 p-4 dark:border-white/10 dark:bg-slate-900/20">
@@ -69,6 +70,7 @@ const emit = defineEmits<{
           :expand-on-click-node="false"
           :allow-drop="handleAllowDepartmentDrop"
           @node-click="emit('node-click', $event)"
+          @node-drop="handleDepartmentNodeDrop"
         >
           <template #default="{ data }">
             <div class="department-tree-node">

@@ -80,7 +80,18 @@ type ConfigSectionKey =
   | 'department'
   | 'notification'
 type TopFeedbackMessageType = 'success' | 'warning' | 'error' | 'info'
+type DepartmentDropType = 'prev' | 'inner' | 'next'
 type DepartmentTreeNode = ClientDepartmentTreeNode
+type DepartmentTreeDropNode = {
+  data?: DepartmentTreeNode
+  level?: number
+  parent?: {
+    childNodes?: DepartmentTreeDropNode[]
+  }
+  childNodes?: DepartmentTreeDropNode[]
+}
+
+const CLIENT_DEPARTMENT_NODE_LIMIT = 3000
 
 const { hasPermission, ensurePermission } = usePermissionAction()
 const formRef = ref<FormInstance>()
@@ -658,9 +669,50 @@ const validateDepartmentTree = (tree: DepartmentTreeNode[]) => {
   }
   validateSiblings(tree)
   const labels = flattenDepartmentTreeLabels(tree)
-  if (labels.length > 50) {
-    throw new Error('部门节点总数最多保留 50 个')
+  if (labels.length > CLIENT_DEPARTMENT_NODE_LIMIT) {
+    throw new Error(`部门节点总数最多保留 ${CLIENT_DEPARTMENT_NODE_LIMIT} 个`)
   }
+}
+
+const readDepartmentDropNode = (node: unknown): DepartmentTreeDropNode | null => {
+  if (!node || typeof node !== 'object') {
+    return null
+  }
+  return node as DepartmentTreeDropNode
+}
+
+const getDepartmentSubtreeDepth = (node: DepartmentTreeNode): number => {
+  if (!Array.isArray(node.children) || node.children.length === 0) {
+    return 1
+  }
+  return 1 + Math.max(...node.children.map((child) => getDepartmentSubtreeDepth(child)))
+}
+
+const hasDepartmentDescendant = (node: DepartmentTreeNode, targetId: string): boolean => {
+  return node.children.some((child) => child.id === targetId || hasDepartmentDescendant(child, targetId))
+}
+
+const getDepartmentDropSiblings = (
+  dropNode: DepartmentTreeDropNode,
+  dropData: DepartmentTreeNode,
+  type: DepartmentDropType,
+): DepartmentTreeNode[] => {
+  if (type === 'inner') {
+    return Array.isArray(dropData.children) ? dropData.children : []
+  }
+  return (dropNode.parent?.childNodes ?? [])
+    .map((childNode) => childNode.data)
+    .filter((childData): childData is DepartmentTreeNode => Boolean(childData))
+}
+
+const canDropDepartmentNodeBySiblingName = (
+  draggingData: DepartmentTreeNode,
+  siblings: DepartmentTreeNode[],
+) => {
+  const draggingLabel = normalizeDepartmentLabel(draggingData.label)
+  return !siblings.some((sibling) => {
+    return sibling.id !== draggingData.id && normalizeDepartmentLabel(sibling.label) === draggingLabel
+  })
 }
 
 const assertSiblingDepartmentNameAvailable = (
@@ -813,8 +865,41 @@ const handleDepartmentNodeClick = (data: DepartmentTreeNode) => {
   selectedDepartmentNodeId.value = data.id
 }
 
-const handleAllowDepartmentDrop = (_draggingNode: unknown, _dropNode: unknown, type: 'prev' | 'inner' | 'next') => {
-  return type === 'prev' || type === 'inner' || type === 'next'
+const handleAllowDepartmentDrop = (draggingNode: unknown, dropNode: unknown, type: DepartmentDropType) => {
+  const draggingTreeNode = readDepartmentDropNode(draggingNode)
+  const dropTreeNode = readDepartmentDropNode(dropNode)
+  const draggingData = draggingTreeNode?.data
+  const dropData = dropTreeNode?.data
+  if (!draggingData || !dropData || draggingData.id === dropData.id) {
+    return false
+  }
+  if (type === 'inner' && hasDepartmentDescendant(draggingData, dropData.id)) {
+    return false
+  }
+
+  const targetLevel = type === 'inner' ? Number(dropTreeNode.level ?? 0) + 1 : Number(dropTreeNode.level ?? 1)
+  if (targetLevel + getDepartmentSubtreeDepth(draggingData) - 1 > 8) {
+    return false
+  }
+
+  try {
+    return canDropDepartmentNodeBySiblingName(
+      draggingData,
+      getDepartmentDropSiblings(dropTreeNode, dropData, type),
+    )
+  } catch {
+    return false
+  }
+}
+
+const handleDepartmentNodeDrop = () => {
+  try {
+    const normalizedTree = normalizeDepartmentTreeForSubmit(cloneDepartmentTree(serialForm.clientDepartmentTree))
+    validateDepartmentTree(normalizedTree)
+    serialForm.clientDepartmentTree = normalizedTree
+  } catch (error) {
+    ElMessage.warning(extractErrorMessage(error, '部门排序结果不合法，请调整后再保存'))
+  }
 }
 
 const validateSingleVerificationConfig = (channel: 'mobile' | 'email') => {
@@ -1355,6 +1440,7 @@ onMounted(() => {
                 :client-department-config="clientDepartmentConfig"
                 :get-department-path-label="getDepartmentPathLabel"
                 :handle-allow-department-drop="handleAllowDepartmentDrop"
+                :handle-department-node-drop="handleDepartmentNodeDrop"
                 @add-root="handleAddRootDepartment"
                 @add-child="handleAddChildDepartment"
                 @edit="handleEditDepartment"

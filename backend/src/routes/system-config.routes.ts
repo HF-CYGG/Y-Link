@@ -19,6 +19,8 @@ import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 
+const CLIENT_DEPARTMENT_NODE_LIMIT = 3000
+
 const orderSerialConfigValueSchema = z.object({
   start: z.number().int().positive(),
   current: z.number().int().nonnegative(),
@@ -78,14 +80,14 @@ const clientDepartmentTreeNodeSchema: z.ZodType<{
   z.object({
     id: z.string().trim().max(128).optional(),
     label: z.string().trim().min(1).max(32),
-    children: z.array(clientDepartmentTreeNodeSchema).max(50).optional(),
+    children: z.array(clientDepartmentTreeNodeSchema).max(CLIENT_DEPARTMENT_NODE_LIMIT).optional(),
   }),
 )
 
 const updateClientDepartmentConfigsSchema = z
   .object({
-    tree: z.array(clientDepartmentTreeNodeSchema).max(50).optional(),
-    options: z.array(z.string().trim().min(1).max(32)).max(50).optional(),
+    tree: z.array(clientDepartmentTreeNodeSchema).max(CLIENT_DEPARTMENT_NODE_LIMIT).optional(),
+    options: z.array(z.string().trim().min(1).max(32)).max(CLIENT_DEPARTMENT_NODE_LIMIT).optional(),
   })
   .refine((value) => Array.isArray(value.tree) || Array.isArray(value.options), {
     message: '部门配置参数缺失',
