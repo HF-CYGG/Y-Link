@@ -56,7 +56,7 @@ defineProps<{
           </el-form-item>
           <el-form-item prop="department.current" class="!mb-0">
             <template #label>
-              <span class="field-label">当前号 <span class="field-label__help">可手动设置；仅在无历史订单且无冲突时可重置到初始号</span></span>
+              <span class="field-label">当前号 <span class="field-label__help">已使用到的流水；下一单号 = 当前号 + 1，不能小于仍占用单号的最大流水</span></span>
             </template>
             <PassiveNumberInput
               v-model="serialForm.department.current"
@@ -101,7 +101,7 @@ defineProps<{
           </el-form-item>
           <el-form-item prop="walkin.current" class="!mb-0">
             <template #label>
-              <span class="field-label">当前号 <span class="field-label__help">可手动设置；仅在无历史订单且无冲突时可重置到初始号</span></span>
+              <span class="field-label">当前号 <span class="field-label__help">已使用到的流水；下一单号 = 当前号 + 1，不能小于仍占用单号的最大流水</span></span>
             </template>
             <PassiveNumberInput
               v-model="serialForm.walkin.current"

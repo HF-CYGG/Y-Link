@@ -301,6 +301,14 @@ export interface UpdateOrderSerialConfigsInput {
   walkin: OrderSerialConfigValue
 }
 
+interface OrderSerialOccupancySnapshot {
+  outboundCount: number
+  preorderCount: number
+  maxSerial: number
+  latestOutboundShowNo: string | null
+  latestPreorderShowNo: string | null
+}
+
 export interface O2oRuleConfigRecord {
   autoCancelEnabled: boolean
   autoCancelHours: number
@@ -1003,23 +1011,88 @@ class SystemConfigService {
     }
   }
 
-  private async countOrderSerialHistory(
+  private parseSerialFromShowNo(showNo: string | null | undefined, prefix: string): number | null {
+    const normalizedShowNo = String(showNo ?? '').trim()
+    if (!normalizedShowNo.startsWith(prefix)) {
+      return null
+    }
+
+    const serialText = normalizedShowNo.slice(prefix.length)
+    if (!/^\d+$/.test(serialText)) {
+      return null
+    }
+
+    const parsed = Number.parseInt(serialText, 10)
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null
+  }
+
+  private pickMaxSerialShowNo(rows: Array<{ showNo: string }>, prefix: string): { maxSerial: number; showNo: string | null } {
+    return rows.reduce(
+      (result, row) => {
+        const serial = this.parseSerialFromShowNo(row.showNo, prefix)
+        if (serial === null || serial <= result.maxSerial) {
+          return result
+        }
+        return {
+          maxSerial: serial,
+          showNo: row.showNo,
+        }
+      },
+      { maxSerial: 0, showNo: null as string | null },
+    )
+  }
+
+  private async getOrderSerialOccupancySnapshot(
     manager: typeof AppDataSource.manager,
     orderType: OrderSerialType,
-  ): Promise<number> {
-    const [outboundCount, preorderCount] = await Promise.all([
-      manager.getRepository(BizOutboundOrder).count({
-        where: {
-          orderType,
-        },
-      }),
-      manager.getRepository(O2oPreorder).count({
-        where: {
-          clientOrderType: orderType,
-        },
-      }),
+  ): Promise<OrderSerialOccupancySnapshot> {
+    const [outboundRows, preorderRows] = await Promise.all([
+      manager
+        .getRepository(BizOutboundOrder)
+        .createQueryBuilder('outboundOrder')
+        .select('outboundOrder.showNo', 'showNo')
+        .where('outboundOrder.orderType = :orderType', { orderType })
+        .andWhere('outboundOrder.isDeleted = :isDeleted', { isDeleted: false })
+        .getRawMany<{ showNo: string }>(),
+      manager
+        .getRepository(O2oPreorder)
+        .createQueryBuilder('preorder')
+        .select('preorder.showNo', 'showNo')
+        .where('preorder.clientOrderType = :orderType', { orderType })
+        .getRawMany<{ showNo: string }>(),
     ])
-    return outboundCount + preorderCount
+    const prefix = ORDER_SERIAL_META[orderType].prefix
+    const outboundMax = this.pickMaxSerialShowNo(outboundRows, prefix)
+    const preorderMax = this.pickMaxSerialShowNo(preorderRows, prefix)
+
+    return {
+      outboundCount: outboundRows.length,
+      preorderCount: preorderRows.length,
+      maxSerial: Math.max(outboundMax.maxSerial, preorderMax.maxSerial),
+      latestOutboundShowNo: outboundMax.showNo,
+      latestPreorderShowNo: preorderMax.showNo,
+    }
+  }
+
+  private formatOrderSerialOccupancyReason(
+    orderType: OrderSerialType,
+    nextCurrent: number,
+    snapshot: OrderSerialOccupancySnapshot,
+  ): string {
+    const sourceParts: string[] = []
+    if (snapshot.preorderCount > 0) {
+      sourceParts.push(`订单池 ${snapshot.preorderCount} 单${snapshot.latestPreorderShowNo ? `，最大单号 ${snapshot.latestPreorderShowNo}` : ''}`)
+    }
+    if (snapshot.outboundCount > 0) {
+      sourceParts.push(`出库单 ${snapshot.outboundCount} 单${snapshot.latestOutboundShowNo ? `，最大单号 ${snapshot.latestOutboundShowNo}` : ''}`)
+    }
+
+    return [
+      `${ORDER_SERIAL_META[orderType].label}当前号不能改为 ${nextCurrent}。`,
+      `原因：仍有订单占用该流水，当前号不能小于已占用的最大流水 ${snapshot.maxSerial}，否则后续生成单号会冲突。`,
+      `冲突来源：${sourceParts.join('；') || '未识别到可展示来源'}。`,
+      `处理方式：先删除或永久删除这些订单，或把当前号设置为 ${snapshot.maxSerial} 及以上。`,
+    ].join('')
   }
 
   private async assertOrderSerialCurrentSafety(
@@ -1038,23 +1111,12 @@ class SystemConfigService {
         continue
       }
 
-      const historyCount = await this.countOrderSerialHistory(manager, orderType)
-      if (historyCount <= 0) {
+      const occupancySnapshot = await this.getOrderSerialOccupancySnapshot(manager, orderType)
+      if (next.current >= occupancySnapshot.maxSerial) {
         continue
       }
 
-      const resetToInitialCurrent = next.start - 1
-      if (next.current === resetToInitialCurrent) {
-        throw new BizError(
-          `${ORDER_SERIAL_META[orderType].label}存在历史订单（含线上预订单或出库单），不能重置到初始单号。请仅在试运行且无历史订单时重置。`,
-          400,
-        )
-      }
-
-      throw new BizError(
-        `${ORDER_SERIAL_META[orderType].label}存在历史订单，当前号不允许回退以避免单号冲突。`,
-        400,
-      )
+      throw new BizError(this.formatOrderSerialOccupancyReason(orderType, next.current, occupancySnapshot), 400)
     }
   }
 

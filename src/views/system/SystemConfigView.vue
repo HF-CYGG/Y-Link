@@ -455,6 +455,22 @@ const snapshotForm = () =>
 
 const isDirty = computed(() => snapshotForm() !== initialSnapshot.value)
 
+const buildOrderSerialNoChangeWarning = () => {
+  const savedConfig = configMap.value
+  if (!savedConfig) {
+    return '配置未变更：订单流水配置尚未加载完成，请刷新后重试'
+  }
+
+  const departmentNextNo = formatSerialPreview(savedConfig.department.prefix, savedConfig.department.current, savedConfig.department.width)
+  const walkinNextNo = formatSerialPreview(savedConfig.walkin.prefix, savedConfig.walkin.current, savedConfig.walkin.width)
+  return [
+    '配置未变更：订单流水的起始号、当前号和位宽都与已保存配置一致。',
+    `部门订单当前号为 ${savedConfig.department.current}，下一单将生成 ${departmentNextNo}；`,
+    `散客订单当前号为 ${savedConfig.walkin.current}，下一单将生成 ${walkinNextNo}。`,
+    '当前号表示已经使用到的流水；如果要改变下一单号，请把当前号设置为目标流水减 1。',
+  ].join('')
+}
+
 const rules: FormRules = {
   'department.start': [{ required: true, message: '请输入部门单起始号', trigger: 'blur' }],
   'department.width': [{ required: true, message: '请输入部门单位宽', trigger: 'blur' }],
@@ -1175,12 +1191,12 @@ const handleSubmit = async () => {
     const result = await updateOrderSerialConfigs({
       department: {
         start: Number(serialForm.department.start),
-        current: Number(configMap.value?.department.current ?? serialForm.department.current),
+        current: Number(serialForm.department.current),
         width: Number(serialForm.department.width),
       },
       walkin: {
         start: Number(serialForm.walkin.start),
-        current: Number(configMap.value?.walkin.current ?? serialForm.walkin.current),
+        current: Number(serialForm.walkin.current),
         width: Number(serialForm.walkin.width),
       },
     })
@@ -1259,7 +1275,7 @@ const handleSubmit = async () => {
     if (hasConfigChanged) {
       showTopSuccess('系统配置已保存')
     } else {
-      showTopWarning('配置未变更：当前内容与已保存配置一致')
+      showTopWarning(activeSection.value === 'order_serial' ? buildOrderSerialNoChangeWarning() : '配置未变更：当前内容与已保存配置一致')
     }
   } catch (error) {
     showTopError(extractErrorMessage(error, '保存系统配置失败，请稍后重试'))
