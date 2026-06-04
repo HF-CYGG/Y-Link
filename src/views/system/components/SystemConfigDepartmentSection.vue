@@ -95,7 +95,41 @@ const treeProps = {
           :allow-drop="handleAllowDepartmentDrop"
           @node-click="emit('node-click', $event)"
           @node-drop="handleDepartmentNodeDrop"
-        />
+        >
+          <template #default="{ data }">
+            <div class="department-tree-node">
+              <span class="department-tree-node__label">{{ data.label }}</span>
+              <el-space :size="14" wrap class="department-tree-node__actions">
+                <el-button
+                  link
+                  type="primary"
+                  size="small"
+                  :disabled="!canUpdateConfigs || loading || saving"
+                  @click.stop="emit('add-child', data)"
+                >
+                  子级
+                </el-button>
+                <el-button
+                  link
+                  size="small"
+                  :disabled="!canUpdateConfigs || loading || saving"
+                  @click.stop="emit('edit', data)"
+                >
+                  编辑
+                </el-button>
+                <el-button
+                  link
+                  type="danger"
+                  size="small"
+                  :disabled="!canUpdateConfigs || loading || saving"
+                  @click.stop="emit('delete', data)"
+                >
+                  删除
+                </el-button>
+              </el-space>
+            </div>
+          </template>
+        </el-tree>
       </div>
 
       <aside class="department-selection-panel rounded-2xl border border-slate-200/80 bg-slate-50/70 p-4 text-sm dark:border-white/10 dark:bg-slate-900/30">
@@ -121,31 +155,6 @@ const treeProps = {
               <dd>{{ selectedDepartmentNode.children.length }} 个</dd>
             </div>
           </dl>
-          <div class="department-action-grid mt-4 grid grid-cols-3 gap-2">
-            <el-button
-              size="small"
-              :disabled="!canUpdateConfigs || loading || saving"
-              @click="emit('add-child', selectedDepartmentNode)"
-            >
-              新增子级
-            </el-button>
-            <el-button
-              size="small"
-              :disabled="!canUpdateConfigs || loading || saving"
-              @click="emit('edit', selectedDepartmentNode)"
-            >
-              编辑
-            </el-button>
-            <el-button
-              size="small"
-              type="danger"
-              plain
-              :disabled="!canUpdateConfigs || loading || saving"
-              @click="emit('delete', selectedDepartmentNode)"
-            >
-              删除
-            </el-button>
-          </div>
         </div>
         <div v-else class="department-selected-empty">
           <span>未选择节点</span>
@@ -193,25 +202,55 @@ const treeProps = {
 .department-tree :deep(.el-tree-node__content) {
   box-sizing: border-box;
   height: auto;
-  min-height: 38px;
-  padding-block: 4px;
+  min-height: 30px;
+  padding-block: 1px;
   border-radius: 8px;
 }
 
-.department-tree :deep(.el-tree-node__label) {
+.department-tree :deep(.el-tree-node__content > .el-tree-node__expand-icon) {
+  flex-shrink: 0;
+}
+
+.department-tree-node {
+  display: flex;
+  flex: 1 1 auto;
   min-width: 0;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  line-height: 1.45;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-right: 4px;
+}
+
+.department-tree-node__label {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.35;
   color: #334155;
   font-size: 14px;
+}
+
+.department-tree-node__actions {
+  flex: 0 0 auto;
+}
+
+.department-tree-node__actions :deep(.el-button) {
+  height: 24px;
+  padding: 0;
+  font-size: 13px;
+}
+
+.department-tree-node__actions :deep(.el-space__item) {
+  line-height: 1;
 }
 
 .department-tree :deep(.el-tree-node.is-current > .el-tree-node__content) {
   background: #eef2f7;
 }
 
-.department-tree :deep(.el-tree-node.is-current > .el-tree-node__content .el-tree-node__label) {
+.department-tree :deep(.el-tree-node.is-current > .el-tree-node__content .department-tree-node__label) {
   color: #075e59;
   font-weight: 700;
 }
@@ -267,7 +306,7 @@ const treeProps = {
   --el-tree-node-hover-bg-color: rgba(15, 23, 42, 0.78);
 }
 
-.dark .department-tree :deep(.el-tree-node__label) {
+.dark .department-tree-node__label {
   color: #cbd5e1;
 }
 
@@ -275,7 +314,7 @@ const treeProps = {
   background: rgba(20, 184, 166, 0.14);
 }
 
-.dark .department-tree :deep(.el-tree-node.is-current > .el-tree-node__content .el-tree-node__label) {
+.dark .department-tree :deep(.el-tree-node.is-current > .el-tree-node__content .department-tree-node__label) {
   color: #5eead4;
 }
 
@@ -304,11 +343,15 @@ const treeProps = {
   }
 
   .department-tree :deep(.el-tree-node__content) {
-    min-height: 40px;
+    min-height: 34px;
   }
 
-  .department-action-grid {
-    grid-template-columns: 1fr;
+  .department-tree-node {
+    gap: 8px;
+  }
+
+  .department-tree-node__actions {
+    display: none;
   }
 
   .department-preview-tags {
