@@ -1,4 +1,5 @@
-import { ElNotification } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import type { MessageHandler } from 'element-plus'
 import {
   buildRequestErrorDisplayInfo,
   normalizeRequestError,
@@ -23,7 +24,7 @@ interface CriticalAppErrorOptions {
   operation?: string
 }
 
-interface ActiveNotification {
+interface ActiveMessage {
   id: number
   close: () => void
 }
@@ -42,15 +43,16 @@ let nextAlertId = 1
 let latestAlertKey = ''
 let latestAlertAt = 0
 
-const activeNotifications: ActiveNotification[] = []
+const activeMessages: ActiveMessage[] = []
 
 const trimText = (value: unknown) => {
   return typeof value === 'string' ? value.trim() : ''
 }
 
 const resolveAlertTitle = (type: AppAlertType, title?: string) => {
-  if (title?.trim()) {
-    return title.trim()
+  const normalizedTitle = trimText(title)
+  if (normalizedTitle) {
+    return normalizedTitle
   }
   if (type === 'success') return '操作成功'
   if (type === 'warning') return '请注意'
@@ -58,15 +60,17 @@ const resolveAlertTitle = (type: AppAlertType, title?: string) => {
   return '提示'
 }
 
-const resolveNotificationMessage = (message: string, detail?: string) => {
+const resolveMessageText = (type: AppAlertType, message: string, title?: string, detail?: string) => {
+  const normalizedTitle = resolveAlertTitle(type, title)
   const normalizedDetail = trimText(detail)
-  return normalizedDetail ? `${message}\n${normalizedDetail}` : message
+  const body = normalizedDetail ? `${message}\n${normalizedDetail}` : message
+  return normalizedTitle ? `${normalizedTitle}：${body}` : body
 }
 
-const removeActiveNotification = (id: number) => {
-  const index = activeNotifications.findIndex((notification) => notification.id === id)
+const removeActiveMessage = (id: number) => {
+  const index = activeMessages.findIndex((message) => message.id === id)
   if (index >= 0) {
-    activeNotifications.splice(index, 1)
+    activeMessages.splice(index, 1)
   }
 }
 
@@ -86,20 +90,18 @@ export const showAppAlert = (options: AppAlertOptions) => {
 
   const id = nextAlertId++
   const duration = options.duration ?? DEFAULT_DURATION_MAP[options.type]
-  const notification = ElNotification({
-    title: resolveAlertTitle(options.type, options.title),
-    message: resolveNotificationMessage(message, options.detail),
+  const handler: MessageHandler = ElMessage({
+    message: resolveMessageText(options.type, message, options.title, options.detail),
     type: options.type,
     duration,
-    position: 'top-right',
     showClose: options.closable ?? true,
-    customClass: 'ylink-app-notification',
-    onClose: () => removeActiveNotification(id),
+    customClass: 'ylink-app-message',
+    onClose: () => removeActiveMessage(id),
   })
 
-  activeNotifications.push({ id, close: notification.close })
-  if (activeNotifications.length > MAX_VISIBLE_ALERTS) {
-    activeNotifications.shift()?.close()
+  activeMessages.push({ id, close: handler.close })
+  if (activeMessages.length > MAX_VISIBLE_ALERTS) {
+    activeMessages.shift()?.close()
   }
 
   return id

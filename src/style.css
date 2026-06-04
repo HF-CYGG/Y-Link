@@ -595,11 +595,12 @@ canvas {
   align-content: start;
 }
 
-.ylink-app-notification {
+.ylink-app-message {
   max-width: calc(100vw - 24px);
+  white-space: pre-line;
 }
 
-.ylink-app-notification .el-notification__content {
+.ylink-app-message .el-message__content {
   white-space: pre-line;
 }
 
@@ -649,8 +650,8 @@ canvas {
     justify-content: center;
   }
 
-  .ylink-app-notification {
+  .ylink-app-message {
     width: calc(100vw - 24px);
-    right: 12px !important;
+    min-width: 0;
   }
 }
