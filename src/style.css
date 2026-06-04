@@ -609,6 +609,52 @@ canvas {
   width: 100%;
 }
 
+.el-message.ylink-top-feedback-message {
+  top: 72px;
+  min-width: min(420px, calc(100vw - 32px));
+  border-radius: 999px;
+  border-width: 1px;
+  box-shadow: 0 14px 36px rgba(15, 23, 42, 0.14);
+  font-weight: 600;
+}
+
+.el-message .el-message__content {
+  color: inherit;
+}
+
+.el-message .el-message__icon {
+  color: currentColor;
+}
+
+.el-message .el-message__closeBtn {
+  color: currentColor;
+  opacity: 0.72;
+}
+
+.el-message.el-message--success {
+  border-color: #99f6e4;
+  background-color: #ecfdf5;
+  color: #047857;
+}
+
+.el-message.el-message--warning {
+  border-color: #fde68a;
+  background-color: #fffbeb;
+  color: #b45309;
+}
+
+.el-message.el-message--error {
+  border-color: #fecaca;
+  background-color: #fef2f2;
+  color: #be123c;
+}
+
+.el-message.el-message--info {
+  border-color: #bfdbfe;
+  background-color: #eff6ff;
+  color: #1d4ed8;
+}
+
 @media (prefers-reduced-motion: reduce) {
   :root {
     --motion-duration-fast: 0.01ms;

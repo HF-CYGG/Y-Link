@@ -46,7 +46,6 @@ import {
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
-import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import SystemConfigDepartmentSection from '@/views/system/components/SystemConfigDepartmentSection.vue'
 import SystemConfigCustomerServiceSection from '@/views/system/components/SystemConfigCustomerServiceSection.vue'
 import SystemConfigO2oRulesSection from '@/views/system/components/SystemConfigO2oRulesSection.vue'
@@ -80,6 +79,7 @@ type ConfigSectionKey =
   | 'verification'
   | 'department'
   | 'notification'
+type TopFeedbackMessageType = 'success' | 'warning' | 'error' | 'info'
 type DepartmentTreeNode = ClientDepartmentTreeNode
 
 const { hasPermission, ensurePermission } = usePermissionAction()
@@ -142,6 +142,17 @@ const scrollActiveSectionTabIntoView = async () => {
     behavior: 'smooth',
     block: 'nearest',
     inline: 'center',
+  })
+}
+
+const showTopFeedbackMessage = (type: TopFeedbackMessageType, message: string) => {
+  ElMessage({
+    type,
+    message,
+    showClose: true,
+    offset: 72,
+    duration: type === 'error' ? 5200 : 2800,
+    customClass: 'ylink-top-feedback-message',
   })
 }
 
@@ -1040,7 +1051,7 @@ const loadData = async () => {
   })
 }
 
-// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
+// 保存配置时按业务分区串行提交，避免 SQLite 单连接写事务互相抢锁。
 const handleSubmit = async () => {
   if (!ensurePermission('system_configs:update')) {
     return
@@ -1159,7 +1170,8 @@ const handleSubmit = async () => {
     applyNotificationRules(notificationResult.list)
     await refreshNotificationPresenceSnapshot()
     initialSnapshot.value = snapshotForm()
-    ElMessage.success(
+    showTopFeedbackMessage(
+      'success',
       result.changed
       || o2oResult.changed
       || customerServiceResult.changed
@@ -1170,11 +1182,7 @@ const handleSubmit = async () => {
         : '配置未变更',
     )
   } catch (error) {
-    void showCriticalErrorDialog(error, {
-      title: '系统配置保存失败',
-      fallback: '保存系统配置失败，请稍后重试',
-      operation: '保存系统配置',
-    })
+    showTopFeedbackMessage('error', extractErrorMessage(error, '保存系统配置失败，请稍后重试'))
   } finally {
     saving.value = false
   }
