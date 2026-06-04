@@ -78,7 +78,7 @@ const workHoursPreview = computed(() => {
       <div class="space-y-2 md:col-span-2">
         <div class="text-sm text-slate-600 dark:text-slate-300">客服在线星期</div>
         <el-checkbox-group v-model="customerServiceForm.workdayWeekdays" :disabled="!canUpdateConfigs || loading" class="flex flex-wrap gap-3">
-          <el-checkbox v-for="item in weekdayOptions" :key="item.value" :label="item.value">
+          <el-checkbox v-for="item in weekdayOptions" :key="item.value" :value="item.value">
             {{ item.label }}
           </el-checkbox>
         </el-checkbox-group>

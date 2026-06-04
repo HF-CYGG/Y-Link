@@ -203,7 +203,7 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: TestChannel
         </div>
       </div>
 
-      <el-form label-position="top" class="notification-rules-form" @submit.prevent>
+      <div class="el-form el-form--default el-form--label-top notification-rules-form">
         <div class="grid gap-4">
         <article
           v-for="rule in rules"
@@ -402,7 +402,7 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: TestChannel
           </div>
         </article>
         </div>
-      </el-form>
+      </div>
     </div>
 
     <div class="apple-card p-5 sm:p-6 xl:p-7">
