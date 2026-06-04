@@ -376,6 +376,8 @@ const getOrderTypeLabel = (orderType: O2oPreorderSummary['clientOrderType']) => 
   return ORDER_TYPE_LABEL_MAP[orderType]
 }
 
+const isDepartmentOrder = (orderType: O2oPreorderSummary['clientOrderType']) => orderType === 'department'
+
 const loadDepartmentOptions = async () => {
   departmentOptionsLoading.value = true
   try {
@@ -390,7 +392,7 @@ const loadDepartmentOptions = async () => {
 
 const buildOwnershipLabel = (orderType: O2oPreorderSummary['clientOrderType'], departmentNameSnapshot: string | null) => {
   const orderTypeLabel = getOrderTypeLabel(orderType)
-  const departmentLabel = departmentNameSnapshot ? ` / ${departmentNameSnapshot}` : ''
+  const departmentLabel = isDepartmentOrder(orderType) && departmentNameSnapshot ? ` / ${departmentNameSnapshot}` : ''
   return `${orderTypeLabel}${departmentLabel}`
 }
 
@@ -1355,8 +1357,8 @@ onBeforeUnmount(() => {
                 <p class="text-right">件数：{{ order.totalQty }}</p>
                 <p class="break-words">账号类型：{{ getAccountTypeLabel(getOrderAccountType(order.clientOrderType)) }}</p>
                 <p>应付总额：¥{{ formatCurrency(order.totalAmount) }}</p>
-                <p class="break-words">部门：{{ order.departmentNameSnapshot || '未填写' }}</p>
-                <p class="text-right">工号：{{ order.staffNoSnapshot || '未留工号' }}</p>
+                <p v-if="isDepartmentOrder(order.clientOrderType)" class="break-words">部门：{{ order.departmentNameSnapshot || '未填写' }}</p>
+                <p v-if="isDepartmentOrder(order.clientOrderType)" class="text-right">工号：{{ order.staffNoSnapshot || '未留工号' }}</p>
                 <p class="break-words" :class="order.returnRequestCount > 0 ? 'text-amber-700' : 'text-slate-400'">
                   退货记录：{{ order.returnRequestCount > 0 ? `共 ${order.returnRequestCount} 笔${order.pendingReturnRequestCount > 0 ? `，待处理 ${order.pendingReturnRequestCount} 笔` : ''}` : '暂无' }}
                 </p>
@@ -1615,11 +1617,11 @@ onBeforeUnmount(() => {
                 <p class="text-sm text-slate-400">邮箱</p>
                 <p class="mt-1 break-all text-sm font-semibold text-slate-900">{{ orderCustomerProfile.email }}</p>
               </div>
-              <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <div v-if="isDepartmentOrder(activeOrderDetail.order.clientOrderType)" class="rounded-2xl bg-slate-50 px-4 py-3">
                 <p class="text-sm text-slate-400">所属部门</p>
                 <p class="mt-1 break-words text-sm font-semibold text-slate-900">{{ orderCustomerProfile.departmentName }}</p>
               </div>
-              <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <div v-if="isDepartmentOrder(activeOrderDetail.order.clientOrderType)" class="rounded-2xl bg-slate-50 px-4 py-3">
                 <p class="text-sm text-slate-400">工号</p>
                 <p class="mt-1 break-words text-sm font-semibold text-slate-900">{{ orderCustomerProfile.staffNo }}</p>
               </div>
