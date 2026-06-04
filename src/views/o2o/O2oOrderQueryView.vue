@@ -24,6 +24,7 @@ import {
   type O2oOrderStatus,
 } from '@/constants/o2o-order-status'
 import {
+  deleteO2oConsoleOrder,
   getO2oConsoleOrderDetail,
   getO2oConsoleOrders,
   updateO2oOrderComplianceFlags,
@@ -83,6 +84,7 @@ const RETURN_REQUEST_STATUS_META = {
 } as const
 const listLoading = ref(false)
 const detailLoading = ref(false)
+const orderDeleting = ref(false)
 const orders = ref<O2oPreorderSummary[]>([])
 const activePool = ref<OrderPoolKey>('all')
 const activeOrderId = ref('')
@@ -121,6 +123,7 @@ const query = reactive({
 // 已超时取消、人工取消、已核销都不允许再进入核销流程，避免操作员误判。
 const canGoVerify = computed(() => isO2oOrderPending(activeOrderDetail.value?.order.status))
 const goVerifyButtonText = computed(() => (canGoVerify.value ? '去核销' : '不可核销'))
+const canDeleteCurrentOrder = computed(() => Boolean(activeOrderDetail.value?.order.id && hasPermission('orders:delete')))
 
 const formatCurrency = (value: string | number | null | undefined) => {
   return Number(value ?? 0).toFixed(2)
@@ -950,6 +953,56 @@ const handleCopyVerifyCode = async () => {
   }
 }
 
+const handleDeleteCurrentOrder = async () => {
+  const detail = activeOrderDetail.value
+  if (!detail?.order.id) {
+    return
+  }
+  if (!ensurePermission('orders:delete', '删除订单池订单')) {
+    return
+  }
+
+  const showNo = detail.order.showNo
+  try {
+    await ElMessageBox.confirm(
+      `确认删除订单“${showNo}”？将移除订单池记录及关联数据，此操作不可撤销。`,
+      '删除订单确认',
+      {
+        type: 'warning',
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+        closeOnClickModal: false,
+      },
+    )
+    await ElMessageBox.confirm(`再次确认删除“${showNo}”？`, '二次确认删除', {
+      type: 'error',
+      confirmButtonText: '确认删除订单',
+      cancelButtonText: '取消',
+      closeOnClickModal: false,
+      confirmButtonClass: 'el-button--danger',
+    })
+  } catch {
+    return
+  }
+
+  orderDeleting.value = true
+  try {
+    const result = await deleteO2oConsoleOrder(detail.order.id, { confirmShowNo: showNo })
+    orders.value = orders.value.filter((item) => item.id !== detail.order.id)
+    if (activeOrderId.value === detail.order.id) {
+      activeOrderId.value = ''
+      activeOrderDetail.value = null
+    }
+    await loadOrders({ silent: true })
+    const rollbackText = result.preorderSerialRolledBack || result.outboundSerialRolledBack ? '，相关流水已回拨' : ''
+    showAppSuccess(`订单“${showNo}”已删除${rollbackText}`)
+  } catch (error) {
+    showAppError(extractErrorMessage(error, '删除订单池订单失败，请稍后重试'))
+  } finally {
+    orderDeleting.value = false
+  }
+}
+
 const handleBusinessStatusChange = async (value: O2oOrderBusinessStatus | null) => {
   if (!activeOrderDetail.value?.order.id) {
     return
@@ -1333,10 +1386,21 @@ onBeforeUnmount(() => {
               </div>
               <p class="mt-1 break-all text-sm text-slate-400">核销码：{{ activeOrderDetail.order.verifyCode }}</p>
             </div>
-            <div class="grid grid-cols-1 gap-2 sm:grid-cols-3 lg:w-auto">
+            <div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 lg:w-auto">
               <el-button class="w-full" type="primary" plain :disabled="!canGoVerify" @click="handleGoVerify">{{ goVerifyButtonText }}</el-button>
               <el-button class="w-full" :loading="detailLoading" @click="handleRefreshCurrentOrder">刷新状态</el-button>
               <el-button class="w-full" @click="handleCopyVerifyCode">复制核销码</el-button>
+              <el-button
+                v-if="canDeleteCurrentOrder"
+                class="w-full"
+                type="danger"
+                plain
+                :loading="orderDeleting"
+                :disabled="detailLoading"
+                @click="handleDeleteCurrentOrder"
+              >
+                删除订单
+              </el-button>
             </div>
           </div>
 

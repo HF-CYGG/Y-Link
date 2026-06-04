@@ -1250,16 +1250,17 @@ const handleSubmit = async () => {
     applyNotificationRules(notificationResult.list)
     await refreshNotificationPresenceSnapshot()
     initialSnapshot.value = snapshotForm()
-    showTopSuccess(
-      result.changed
+    const hasConfigChanged = result.changed
       || o2oResult.changed
       || customerServiceResult.changed
       || verificationResult.changed
       || departmentResult.changed
       || notificationResult.changed
-        ? '系统配置已保存'
-        : '配置未变更',
-    )
+    if (hasConfigChanged) {
+      showTopSuccess('系统配置已保存')
+    } else {
+      showTopWarning('配置未变更：当前内容与已保存配置一致')
+    }
   } catch (error) {
     showTopError(extractErrorMessage(error, '保存系统配置失败，请稍后重试'))
   } finally {

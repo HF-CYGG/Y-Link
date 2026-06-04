@@ -255,6 +255,23 @@ export interface UpdateO2oComplianceFlagsPayload {
   isSystemApplied?: boolean
 }
 
+export interface DeleteO2oConsoleOrderPayload {
+  confirmShowNo: string
+}
+
+export interface DeleteO2oConsoleOrderResult {
+  id: string
+  showNo: string
+  status: O2oOrderStatus
+  clientOrderType: O2oClientOrderType
+  releasedPreorderedQty: number
+  returnRequestCount: number
+  outboundOrderShowNo: string | null
+  outboundOrderDeleted: boolean
+  preorderSerialRolledBack: boolean
+  outboundSerialRolledBack: boolean
+}
+
 /**
  * 管理端订单池查询参数：
  * - 与后端 `/o2o/orders` 路由保持一致；
@@ -397,6 +414,18 @@ export const getO2oConsoleOrderDetail = (id: string, config?: RequestConfig) =>
   request<O2oPreorderDetail>({
     method: 'GET',
     url: `/o2o/orders/${id}`,
+    ...config,
+  })
+
+export const deleteO2oConsoleOrder = (
+  id: string,
+  payload: DeleteO2oConsoleOrderPayload,
+  config?: RequestConfig,
+) =>
+  request<DeleteO2oConsoleOrderResult>({
+    method: 'DELETE',
+    url: `/o2o/orders/${id}`,
+    data: payload,
     ...config,
   })
 

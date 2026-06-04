@@ -100,6 +100,10 @@ const complianceFlagsSchema = z
     message: '至少传入一个可更新字段',
   })
 
+const deleteConsoleOrderSchema = z.object({
+  confirmShowNo: z.string().trim().min(1, '请填写订单号完成二次确认'),
+})
+
 const submitReturnRequestSchema = z.object({
   reason: z.string().trim().min(1).max(O2O_RETURN_REASON_MAX_LENGTH),
   items: z.array(z.object({ productId: z.union([z.string(), z.number()]), qty: z.number().int().positive() })).min(1),
@@ -311,6 +315,26 @@ o2oRouter.get(
   requirePermission('orders:view'),
   asyncHandler(async (req, res) => {
     const data = await o2oPreorderService.detailById(req.params.id)
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+// 管理员删除订单池订单：服务层统一处理关联出库单、库存占用、流水回拨与审计。
+o2oRouter.delete(
+  '/orders/:id',
+  requireAuth,
+  requirePermission('orders:delete'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = deleteConsoleOrderSchema.parse(req.body ?? {})
+    const data = await o2oPreorderService.deleteConsoleOrder(
+      {
+        orderId: req.params.id,
+        confirmShowNo: payload.confirmShowNo,
+      },
+      authReq.auth,
+      extractRequestMeta(req),
+    )
     res.json({ code: 0, message: 'ok', data })
   }),
 )

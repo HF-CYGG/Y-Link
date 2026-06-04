@@ -37,7 +37,9 @@ import { generateOrderUuid } from '../utils/id-generator.js'
 import { orderSerialService } from './order-serial.service.js'
 import { systemConfigService } from './system-config.service.js'
 import { notificationService } from './notification.service.js'
+import { auditService } from './audit.service.js'
 import type { PaginationResult } from '../types/api.js'
+import type { RequestMeta } from '../utils/request-meta.js'
 
 export interface SubmitPreorderItemInput {
   productId: string | number
@@ -91,6 +93,24 @@ export interface SubmitReturnRequestInput {
 export interface RejectReturnRequestInput {
   returnRequestId: string
   rejectReason: string
+}
+
+export interface DeleteConsolePreorderInput {
+  orderId: string
+  confirmShowNo: string
+}
+
+export interface DeletedConsolePreorderView {
+  id: string
+  showNo: string
+  status: O2oPreorderStatus
+  clientOrderType: O2oClientOrderType
+  releasedPreorderedQty: number
+  returnRequestCount: number
+  outboundOrderShowNo: string | null
+  outboundOrderDeleted: boolean
+  preorderSerialRolledBack: boolean
+  outboundSerialRolledBack: boolean
 }
 
 type O2oNumericLike = string | number | null
@@ -703,6 +723,97 @@ class O2oPreorderService {
   // 这里统一通过核销时写入的 idempotencyKey 回查正式出库单，确保客户端与管理端引用同一张正式单据。
   private buildVerifiedPreorderOutboundOrderIdempotencyKey(preorderId: string) {
     return `o2o-preorder-verify:${preorderId}`
+  }
+
+  private async loadLinkedOutboundOrderInManager(manager: EntityManager, preorderId: string) {
+    return manager.getRepository(BizOutboundOrder).findOne({
+      where: {
+        idempotencyKey: this.buildVerifiedPreorderOutboundOrderIdempotencyKey(preorderId),
+      },
+    })
+  }
+
+  private async loadLatestPreorderIdByType(clientOrderType: O2oClientOrderType, manager: EntityManager) {
+    const latestOrder = await manager.getRepository(O2oPreorder).findOne({
+      select: {
+        id: true,
+      },
+      where: {
+        clientOrderType,
+      },
+      order: {
+        createdAt: 'DESC',
+        id: 'DESC',
+      },
+    })
+    return latestOrder ? String(latestOrder.id) : null
+  }
+
+  private async loadLatestOutboundOrderIdByType(orderType: string, manager: EntityManager) {
+    const latestOrder = await manager.getRepository(BizOutboundOrder).findOne({
+      select: {
+        id: true,
+      },
+      where: {
+        orderType,
+      },
+      order: {
+        createdAt: 'DESC',
+        id: 'DESC',
+      },
+    })
+    return latestOrder ? String(latestOrder.id) : null
+  }
+
+  private async releasePendingPreorderStockForDeleteInManager(
+    manager: EntityManager,
+    order: O2oPreorder,
+    actor: AuthUserContext,
+  ) {
+    if (order.status !== 'pending') {
+      return 0
+    }
+
+    const items = await manager.getRepository(O2oPreorderItem).find({
+      where: { orderId: String(order.id) },
+    })
+    let releasedQty = 0
+    for (const row of items) {
+      const qty = Math.max(0, Number(row.qty ?? 0))
+      if (qty <= 0) {
+        continue
+      }
+      const product = await manager.getRepository(BaseProduct).findOne({
+        where: { id: String(row.productId) },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
+      if (!product) {
+        continue
+      }
+      const beforeCurrentStock = Number(product.currentStock ?? 0)
+      const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
+      product.preOrderedStock = Math.max(0, beforePreOrderedStock - qty)
+      await manager.getRepository(BaseProduct).save(product)
+      await manager.getRepository(InventoryLog).save(
+        manager.getRepository(InventoryLog).create({
+          productId: product.id,
+          changeType: 'preorder_release',
+          changeQty: qty,
+          beforeCurrentStock,
+          afterCurrentStock: beforeCurrentStock,
+          beforePreorderedStock: beforePreOrderedStock,
+          afterPreorderedStock: product.preOrderedStock,
+          operatorType: 'admin',
+          operatorId: actor.userId,
+          operatorName: actor.displayName,
+          refType: 'o2o_preorder',
+          refId: String(order.id),
+          remark: `管理员删除订单池订单，释放预订库存；订单号：${order.showNo}`,
+        }),
+      )
+      releasedQty += qty
+    }
+    return releasedQty
   }
 
   // 详细注释：批量回查正式出库单号，供“我的订单列表”和“订单详情”共用。
@@ -2204,6 +2315,115 @@ class O2oPreorderService {
         isSystemApplied: input.isSystemApplied,
       })
       return this.buildOrderDetail(order)
+    })
+  }
+
+  async deleteConsoleOrder(
+    input: DeleteConsolePreorderInput,
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ): Promise<DeletedConsolePreorderView> {
+    const normalizedConfirmShowNo = input.confirmShowNo.trim()
+    if (!normalizedConfirmShowNo) {
+      throw new BizError('请填写订单号完成二次确认', 400)
+    }
+
+    return AppDataSource.transaction(async (manager) => {
+      const preorderRepo = manager.getRepository(O2oPreorder)
+      const preorderItemRepo = manager.getRepository(O2oPreorderItem)
+      const returnRequestRepo = manager.getRepository(O2oReturnRequest)
+      const returnRequestItemRepo = manager.getRepository(O2oReturnRequestItem)
+      const outboundOrderRepo = manager.getRepository(BizOutboundOrder)
+      const outboundOrderItemRepo = manager.getRepository(BizOutboundOrderItem)
+      const order = await preorderRepo.findOne({
+        where: { id: input.orderId },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
+      if (!order) {
+        throw new BizError('订单池订单不存在', 404)
+      }
+      if (order.showNo !== normalizedConfirmShowNo) {
+        throw new BizError('二次确认失败：订单号不匹配', 400)
+      }
+
+      const linkedOutboundOrder = await this.loadLinkedOutboundOrderInManager(manager, String(order.id))
+      const returnRequests = await returnRequestRepo.find({
+        where: { orderId: String(order.id) },
+      })
+      const returnRequestIds = returnRequests.map((item) => String(item.id))
+      const releasedPreorderedQty = await this.releasePendingPreorderStockForDeleteInManager(manager, order, actor)
+      let outboundSerialRolledBack = false
+      let preorderSerialRolledBack = false
+
+      if (linkedOutboundOrder) {
+        const latestOutboundOrderId = await this.loadLatestOutboundOrderIdByType(linkedOutboundOrder.orderType, manager)
+        if (latestOutboundOrderId === String(linkedOutboundOrder.id)) {
+          const rollbackResult = await orderSerialService.rollbackCurrentIfMatches(
+            linkedOutboundOrder.orderType,
+            linkedOutboundOrder.showNo,
+            manager,
+          )
+          outboundSerialRolledBack = rollbackResult.applied
+        }
+        await outboundOrderItemRepo.delete({ orderId: String(linkedOutboundOrder.id) })
+        const deleteOutboundResult = await outboundOrderRepo.delete({ id: String(linkedOutboundOrder.id) })
+        if ((deleteOutboundResult.affected ?? 0) <= 0) {
+          throw new BizError('关联出库单删除失败，请稍后重试', 500)
+        }
+      }
+
+      const latestPreorderId = await this.loadLatestPreorderIdByType(order.clientOrderType, manager)
+      if (latestPreorderId === String(order.id)) {
+        const rollbackResult = await orderSerialService.rollbackCurrentIfMatches(order.clientOrderType, order.showNo, manager)
+        preorderSerialRolledBack = rollbackResult.applied
+      }
+
+      if (returnRequestIds.length) {
+        await returnRequestItemRepo.delete({ returnRequestId: In(returnRequestIds) })
+        await returnRequestRepo.delete({ id: In(returnRequestIds) })
+      }
+      await preorderItemRepo.delete({ orderId: String(order.id) })
+      const deletePreorderResult = await preorderRepo.delete({ id: String(order.id) })
+      if ((deletePreorderResult.affected ?? 0) <= 0) {
+        throw new BizError('订单池订单删除失败，请稍后重试', 500)
+      }
+
+      await auditService.record(
+        {
+          actionType: 'o2o.preorder.delete',
+          actionLabel: '删除订单池订单',
+          targetType: 'o2o_order',
+          targetId: String(order.id),
+          targetCode: order.showNo,
+          actor,
+          requestMeta,
+          detail: {
+            status: order.status,
+            clientOrderType: order.clientOrderType,
+            releasedPreorderedQty,
+            returnRequestCount: returnRequests.length,
+            outboundOrderId: linkedOutboundOrder ? String(linkedOutboundOrder.id) : null,
+            outboundOrderShowNo: linkedOutboundOrder?.showNo ?? null,
+            outboundOrderDeleted: Boolean(linkedOutboundOrder),
+            outboundSerialRolledBack,
+            preorderSerialRolledBack,
+          },
+        },
+        manager,
+      )
+
+      return {
+        id: String(order.id),
+        showNo: order.showNo,
+        status: order.status,
+        clientOrderType: order.clientOrderType,
+        releasedPreorderedQty,
+        returnRequestCount: returnRequests.length,
+        outboundOrderShowNo: linkedOutboundOrder?.showNo ?? null,
+        outboundOrderDeleted: Boolean(linkedOutboundOrder),
+        preorderSerialRolledBack,
+        outboundSerialRolledBack,
+      }
     })
   }
 
