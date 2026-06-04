@@ -49,19 +49,8 @@ const trimText = (value: unknown) => {
   return typeof value === 'string' ? value.trim() : ''
 }
 
-const resolveAlertTitle = (type: AppAlertType, title?: string) => {
+const resolveMessageText = (message: string, title?: string, detail?: string) => {
   const normalizedTitle = trimText(title)
-  if (normalizedTitle) {
-    return normalizedTitle
-  }
-  if (type === 'success') return '操作成功'
-  if (type === 'warning') return '请注意'
-  if (type === 'error') return '操作失败'
-  return '提示'
-}
-
-const resolveMessageText = (type: AppAlertType, message: string, title?: string, detail?: string) => {
-  const normalizedTitle = resolveAlertTitle(type, title)
   const normalizedDetail = trimText(detail)
   const body = normalizedDetail ? `${message}\n${normalizedDetail}` : message
   return normalizedTitle ? `${normalizedTitle}：${body}` : body
@@ -91,11 +80,10 @@ export const showAppAlert = (options: AppAlertOptions) => {
   const id = nextAlertId++
   const duration = options.duration ?? DEFAULT_DURATION_MAP[options.type]
   const handler: MessageHandler = ElMessage({
-    message: resolveMessageText(options.type, message, options.title, options.detail),
+    message: resolveMessageText(message, options.title, options.detail),
     type: options.type,
     duration,
     showClose: options.closable ?? true,
-    customClass: 'ylink-app-message',
     onClose: () => removeActiveMessage(id),
   })
 

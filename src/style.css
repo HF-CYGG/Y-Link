@@ -595,15 +595,6 @@ canvas {
   align-content: start;
 }
 
-.ylink-app-message {
-  max-width: calc(100vw - 24px);
-  white-space: pre-line;
-}
-
-.ylink-app-message .el-message__content {
-  white-space: pre-line;
-}
-
 @media (prefers-reduced-motion: reduce) {
   :root {
     --motion-duration-fast: 0.01ms;
@@ -650,8 +641,4 @@ canvas {
     justify-content: center;
   }
 
-  .ylink-app-message {
-    width: calc(100vw - 24px);
-    min-width: 0;
-  }
 }
