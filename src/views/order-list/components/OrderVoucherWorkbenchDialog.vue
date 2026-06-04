@@ -16,12 +16,15 @@
  */
 
 import dayjs from 'dayjs'
-import { ElMessage } from 'element-plus'
+
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import type { OrderDetailResult } from '@/api/modules/order'
 import { extractErrorMessage } from '@/utils/error'
 import { exportVoucherPdf } from '@/utils/pdf/export-voucher-pdf'
 import OrderVoucherTemplate from './OrderVoucherTemplate.vue'
+
+
+import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 interface OrderVoucherEditableFields {
   departmentOperator: string
@@ -151,13 +154,13 @@ const handlePrintVoucher = async () => {
  */
 const handleExportVoucherPdf = async () => {
   if (!props.enableHtml2pdfExport) {
-    ElMessage.info('PDF 导出开关未启用，当前仅支持打印')
+    showAppInfo('PDF 导出开关未启用，当前仅支持打印')
     return
   }
 
   const sourceElement = voucherPrintRootRef.value?.querySelector('.voucher-print-document')
   if (!(sourceElement instanceof HTMLElement)) {
-    ElMessage.warning('凭证模板尚未准备完成，请稍后重试')
+    showAppWarning('凭证模板尚未准备完成，请稍后重试')
     return
   }
 
@@ -172,9 +175,9 @@ const handleExportVoucherPdf = async () => {
       scale: 2,
       orientation: voucherOrientation.value,
     })
-    ElMessage.success('PDF 导出成功')
+    showAppSuccess('PDF 导出成功')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, 'PDF 导出失败，请稍后重试'))
+    showAppError(extractErrorMessage(error, 'PDF 导出失败，请稍后重试'))
   } finally {
     exportPdfLoading.value = false
   }

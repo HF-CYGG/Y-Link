@@ -10,7 +10,7 @@
 
 import { computed, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+
 import type { FormInstance, FormRules } from 'element-plus'
 import { BizCrudDialogShell } from '@/components/common'
 import { useClientAuthStore } from '@/store'
@@ -19,6 +19,7 @@ import { redirectToClientLogin } from '@/utils/client-auth-navigation'
 import {
   clientChangePassword,
 } from '@/api/modules/client-auth'
+import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 import {
   CLIENT_CONFIRM_NEW_PASSWORD_PLACEHOLDER,
   CLIENT_NEW_PASSWORD_PLACEHOLDER,
@@ -116,7 +117,7 @@ const profileRules: FormRules = {
 
 const openProfileDialog = () => {
   if (isDepartmentAccount.value) {
-    ElMessage.info('部门账户资料由管理员或教职工目录维护，客户端仅支持查看')
+    showAppInfo('部门账户资料由管理员或教职工目录维护，客户端仅支持查看')
     return
   }
   profileForm.username = clientAuthStore.currentUser?.username || clientAuthStore.currentUser?.account || clientAuthStore.currentUser?.realName || ''
@@ -148,13 +149,13 @@ const submitChangePassword = async () => {
       currentPassword: form.currentPassword,
       newPassword: form.newPassword,
     })
-    ElMessage.success('密码修改成功，请重新登录')
+    showAppSuccess('密码修改成功，请重新登录')
     passwordDialogVisible.value = false
     clientAuthStore.clearAuthState()
     // 改密后强制重建客户端页面树，避免旧登录态壳层残留。
     redirectToClientLogin()
   } catch (error: any) {
-    ElMessage.error(error.message || '修改密码失败')
+    showAppError(error.message || '修改密码失败')
   } finally {
     submitting.value = false
   }
@@ -167,7 +168,7 @@ const submitUpdateProfile = async () => {
 
   const normalizedUsername = profileForm.username.trim()
   if (!normalizedUsername) {
-    ElMessage.warning('请输入姓名')
+    showAppWarning('请输入姓名')
     return
   }
   const normalizedMobile = profileForm.mobile.trim()
@@ -180,10 +181,10 @@ const submitUpdateProfile = async () => {
       mobile: normalizedMobile || undefined,
       email: normalizedEmail || undefined,
     })
-    ElMessage.success('资料更新成功')
+    showAppSuccess('资料更新成功')
     profileDialogVisible.value = false
   } catch (error: any) {
-    ElMessage.error(error.message || '资料更新失败')
+    showAppError(error.message || '资料更新失败')
   } finally {
     profileSubmitting.value = false
   }

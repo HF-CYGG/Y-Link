@@ -8,7 +8,7 @@
  */
 
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { PageContainer } from '@/components/common'
 import { usePermissionAction } from '@/composables/usePermissionAction'
@@ -38,6 +38,8 @@ import { getClientDepartmentConfigs } from '@/api/modules/system-config'
 import type { ClientUserAccountType } from '@/api/modules/client-user-manage'
 import { extractErrorMessage } from '@/utils/error'
 import { captureOrderRefreshAnchor, restoreOrderRefreshAnchor } from '@/utils/order-refresh-visual'
+
+import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 type OrderPoolKey = 'all' | 'pending' | 'completed' | 'cancelled' | 'returns'
 
@@ -377,7 +379,7 @@ const loadDepartmentOptions = async () => {
     const result = await getClientDepartmentConfigs()
     departmentOptions.value = result.options
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '加载部门筛选项失败'))
+    showAppError(extractErrorMessage(error, '加载部门筛选项失败'))
   } finally {
     departmentOptionsLoading.value = false
   }
@@ -714,7 +716,7 @@ const loadOrderDetail = async (
       if (options?.silent) {
         return
       }
-      ElMessage.error(extractErrorMessage(error, options?.errorMessage ?? '加载订单详情失败，请稍后重试'))
+      showAppError(extractErrorMessage(error, options?.errorMessage ?? '加载订单详情失败，请稍后重试'))
     },
     onFinally: () => {
       detailLoading.value = false
@@ -863,7 +865,7 @@ const loadOrders = async (options?: { silent?: boolean }) => {
       if (silent) {
         return
       }
-      ElMessage.error(extractErrorMessage(error, '加载订单池失败，请稍后重试'))
+      showAppError(extractErrorMessage(error, '加载订单池失败，请稍后重试'))
     },
     onFinally: () => {
       listLoading.value = false
@@ -907,18 +909,18 @@ const handleRefreshCurrentOrder = async () => {
   })
   if (activeOrderDetail.value?.order.id === activeOrderId.value) {
     mergeOrderSummaryFromDetail(activeOrderDetail.value)
-    ElMessage.success('当前订单状态已刷新')
+    showAppSuccess('当前订单状态已刷新')
   }
 }
 
 const handleGoVerify = async () => {
   if (!canGoVerify.value) {
-    ElMessage.warning('当前订单已取消或已核销，不可继续核销')
+    showAppWarning('当前订单已取消或已核销，不可继续核销')
     return
   }
   const verifyCode = activeOrderDetail.value?.order.verifyCode?.trim()
   if (!verifyCode) {
-    ElMessage.warning('当前订单缺少核销码，无法前往核销台')
+    showAppWarning('当前订单缺少核销码，无法前往核销台')
     return
   }
   await router.push({
@@ -933,18 +935,18 @@ const handleGoVerify = async () => {
 const handleCopyVerifyCode = async () => {
   const verifyCode = activeOrderDetail.value?.order.verifyCode?.trim()
   if (!verifyCode) {
-    ElMessage.warning('当前订单缺少核销码，无法复制')
+    showAppWarning('当前订单缺少核销码，无法复制')
     return
   }
   if (!globalThis.navigator?.clipboard?.writeText) {
-    ElMessage.error('当前环境不支持复制，请手动复制核销码')
+    showAppError('当前环境不支持复制，请手动复制核销码')
     return
   }
   try {
     await globalThis.navigator.clipboard.writeText(verifyCode)
-    ElMessage.success('核销码复制成功')
+    showAppSuccess('核销码复制成功')
   } catch {
-    ElMessage.error('复制失败，请检查浏览器权限后重试')
+    showAppError('复制失败，请检查浏览器权限后重试')
   }
 }
 
@@ -980,10 +982,10 @@ const handleBusinessStatusChange = async (value: O2oOrderBusinessStatus | null) 
     activeOrderDetail.value = latestDetail
     mergeOrderSummaryFromDetail(latestDetail)
     draftBusinessStatus.value = latestDetail.order.businessStatus
-    ElMessage.success(value ? '商家特殊状态已更新' : '商家特殊状态已清除')
+    showAppSuccess(value ? '商家特殊状态已更新' : '商家特殊状态已清除')
   } catch (error) {
     draftBusinessStatus.value = previousValue
-    ElMessage.error(error instanceof Error ? error.message : '更新商家状态失败，请稍后重试')
+    showAppError(error instanceof Error ? error.message : '更新商家状态失败，请稍后重试')
   } finally {
     detailLoading.value = false
   }
@@ -994,7 +996,7 @@ const handleSaveMerchantMessage = async () => {
     return
   }
   if (!merchantMessageChanged.value) {
-    ElMessage.info('留言内容未变化，无需保存')
+    showAppInfo('留言内容未变化，无需保存')
     return
   }
 
@@ -1002,7 +1004,7 @@ const handleSaveMerchantMessage = async () => {
   const nextValue = normalizedDraftMerchantMessage.value
   const nextLength = nextValue?.length ?? 0
   if (nextLength > MERCHANT_MESSAGE_MAX_LENGTH) {
-    ElMessage.warning(`商家留言最多 ${MERCHANT_MESSAGE_MAX_LENGTH} 个字符`)
+    showAppWarning(`商家留言最多 ${MERCHANT_MESSAGE_MAX_LENGTH} 个字符`)
     return
   }
 
@@ -1030,9 +1032,9 @@ const handleSaveMerchantMessage = async () => {
     activeOrderDetail.value = latestDetail
     mergeOrderSummaryFromDetail(latestDetail)
     draftMerchantMessage.value = latestDetail.order.merchantMessage ?? ''
-    ElMessage.success(nextValue ? '商家留言已保存' : '商家留言已清空')
+    showAppSuccess(nextValue ? '商家留言已保存' : '商家留言已清空')
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '保存商家留言失败，请稍后重试')
+    showAppError(error instanceof Error ? error.message : '保存商家留言失败，请稍后重试')
   } finally {
     detailLoading.value = false
   }
@@ -1046,7 +1048,7 @@ const handleSaveComplianceFlags = async () => {
     return
   }
   if (activeOrderDetail.value.order.clientOrderType !== 'department') {
-    ElMessage.info('散客单不适用该状态编辑')
+    showAppInfo('散客单不适用该状态编辑')
     return
   }
   complianceSaving.value = true
@@ -1057,9 +1059,9 @@ const handleSaveComplianceFlags = async () => {
     })
     activeOrderDetail.value = latestDetail
     mergeOrderSummaryFromDetail(latestDetail)
-    ElMessage.success('合规状态已更新')
+    showAppSuccess('合规状态已更新')
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '合规状态更新失败，请稍后重试')
+    showAppError(error instanceof Error ? error.message : '合规状态更新失败，请稍后重试')
   } finally {
     complianceSaving.value = false
   }
@@ -1084,7 +1086,7 @@ const scheduleAutoRefresh = () => {
 
 const handleAutoRefreshChange = () => {
   scheduleAutoRefresh()
-  ElMessage.success(autoRefreshEnabled.value ? `已开启 ${pollIntervalSeconds.value} 秒轮询` : '已关闭轮询')
+  showAppSuccess(autoRefreshEnabled.value ? `已开启 ${pollIntervalSeconds.value} 秒轮询` : '已关闭轮询')
 }
 
 const handlePollIntervalChange = () => {
@@ -1092,11 +1094,11 @@ const handlePollIntervalChange = () => {
     return
   }
   scheduleAutoRefresh()
-  ElMessage.success(`轮询间隔已切换为 ${pollIntervalSeconds.value} 秒`)
+  showAppSuccess(`轮询间隔已切换为 ${pollIntervalSeconds.value} 秒`)
 }
 
 const handleSoundSwitchChange = () => {
-  ElMessage.success(soundNoticeEnabled.value ? '已开启新单提示音' : '已关闭新单提示音')
+  showAppSuccess(soundNoticeEnabled.value ? '已开启新单提示音' : '已关闭新单提示音')
 }
 
 const handleVisibilityChange = () => {

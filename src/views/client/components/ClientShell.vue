@@ -10,11 +10,14 @@
 
 
 import { computed } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessageBox } from 'element-plus'
 import { useClientAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { redirectToClientLogin } from '@/utils/client-auth-navigation'
 import { normalizeRequestError } from '@/utils/error'
+
+
+import { showAppSuccess } from '@/utils/app-alert'
 
 interface Props {
   title: string
@@ -59,7 +62,7 @@ const handleLogout = async () => {
   }
 
   await clientAuthStore.logout()
-  ElMessage.success('已退出登录')
+  showAppSuccess('已退出登录')
   // 退出后使用硬跳转重建页面，避免旧壳层在极端情况下残留成白屏。
   redirectToClientLogin()
 }

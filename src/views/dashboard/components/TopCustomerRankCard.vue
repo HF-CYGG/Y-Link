@@ -12,9 +12,11 @@
 
 
 import { ref } from 'vue'
-import { ElMessage } from 'element-plus'
+
 import type { DashboardTopCustomer } from '@/api/modules/dashboard'
 import TopCustomerDrilldownDrawer from './TopCustomerDrilldownDrawer.vue'
+
+import { showAppWarning } from '@/utils/app-alert'
 
 defineProps<{
   topCustomers: DashboardTopCustomer[]
@@ -31,7 +33,7 @@ const formatAmount = (value: string | number | null | undefined): string => {
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const openDrilldown = (customerName: string) => {
   if (!customerName.trim()) {
-    ElMessage.warning('当前榜单项缺少客户标识')
+    showAppWarning('当前榜单项缺少客户标识')
     return
   }
 

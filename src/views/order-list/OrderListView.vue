@@ -18,7 +18,7 @@
  */
 
 import dayjs from 'dayjs'
-import { ElMessage } from 'element-plus'
+
 import { computed, defineAsyncComponent, ref, watch, type ComponentPublicInstance } from 'vue'
 import { updateOrderComplianceFlags } from '@/api/modules/order'
 import {
@@ -31,6 +31,8 @@ import {
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { useOrderListView } from './composables/useOrderListView'
+
+import { showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 const getOrderTypeLabel = (value: 'department' | 'walkin') => {
   return value === 'department' ? '部门单' : '散客单'
@@ -251,11 +253,11 @@ watch(
  */
 const handleOpenVoucherDialog = () => {
   if (!currentOrder.value) {
-    ElMessage.warning('请先加载单据详情')
+    showAppWarning('请先加载单据详情')
     return
   }
   if (currentOrder.value.orderType !== 'department') {
-    ElMessage.info('正式出库单仅适用于部门单，散客单无需生成')
+    showAppInfo('正式出库单仅适用于部门单，散客单无需生成')
     return
   }
 
@@ -273,7 +275,7 @@ const handleSaveComplianceFlags = async () => {
     return
   }
   if (currentOrder.value.orderType !== 'department') {
-    ElMessage.info('散客单不适用该状态编辑')
+    showAppInfo('散客单不适用该状态编辑')
     return
   }
   complianceSaving.value = true
@@ -296,7 +298,7 @@ const handleSaveComplianceFlags = async () => {
           }
         : item,
     )
-    ElMessage.success('状态已更新')
+    showAppSuccess('状态已更新')
   } catch (error) {
     void showCriticalErrorDialog(error, {
       title: '订单状态更新失败',

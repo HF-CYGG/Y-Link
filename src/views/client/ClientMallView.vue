@@ -9,7 +9,7 @@
 import { useVirtualList } from '@vueuse/core'
 import { computed, nextTick, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { ElMessage } from 'element-plus'
+
 import { ArrowDown, ArrowRight, Search, ShoppingCart } from '@element-plus/icons-vue'
 import { getO2oMallProducts, type O2oMallProduct } from '@/api/modules/o2o'
 import { BaseRequestState } from '@/components/common'
@@ -22,6 +22,9 @@ import { resolveProductPlaceholder } from '@/utils/product-placeholder'
 
 import ClientCartView from './ClientCartView.vue'
 import ClientCheckoutView from './ClientCheckoutView.vue'
+
+
+import { showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 interface ProductCategoryGroup {
   key: string
@@ -366,9 +369,9 @@ const changeDetailQty = (delta: number) => {
   const nextQty = Math.min(maxQty, Math.max(1, detailQty.value + delta))
   if (detailQty.value === maxQty && delta > 0) {
     if (maxQty >= detailProduct.value.limitPerUser) {
-      ElMessage.warning('已达单人限购上限')
+      showAppWarning('已达单人限购上限')
     } else {
-      ElMessage.warning('库存不足')
+      showAppWarning('库存不足')
     }
   }
   detailQty.value = nextQty
@@ -382,7 +385,7 @@ const addCurrentDetailToCart = () => {
   if (addedQty <= 0) {
     return
   }
-  ElMessage.success('已加入购物车')
+  showAppSuccess('已加入购物车')
   triggerSettlePulse()
   detailVisible.value = false
 }
@@ -392,7 +395,7 @@ const quickAdd = (product: O2oMallProduct) => {
   if (addedQty <= 0) {
     return
   }
-  ElMessage.success('已加入购物车')
+  showAppSuccess('已加入购物车')
   triggerSettlePulse()
 }
 
@@ -658,7 +661,7 @@ const goToCheckout = () => {
       // 若用户尚未主动勾选，则默认全选有效商品，减少从商城直达结算的操作成本。
       clientCartStore.toggleAllValidSelected(true)
     } else {
-      ElMessage.warning('购物车暂无可结算商品')
+      showAppWarning('购物车暂无可结算商品')
       return
     }
   }
@@ -1132,9 +1135,9 @@ onBeforeUnmount(() => {
       class="client-drawer-responsive"
       destroy-on-close
     >
-      <ClientCartView 
-        @close="cartDrawerVisible = false" 
-        @checkout="goToCheckout" 
+      <ClientCartView
+        @close="cartDrawerVisible = false"
+        @checkout="goToCheckout"
       />
     </ElDrawer>
 
@@ -1148,8 +1151,8 @@ onBeforeUnmount(() => {
       class="client-drawer-responsive"
       destroy-on-close
     >
-      <ClientCheckoutView 
-        @close="checkoutDrawerVisible = false" 
+      <ClientCheckoutView
+        @close="checkoutDrawerVisible = false"
       />
     </ElDrawer>
 

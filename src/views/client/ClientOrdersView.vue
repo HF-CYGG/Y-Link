@@ -14,7 +14,7 @@
 
 
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessageBox } from 'element-plus'
 import { RefreshRight } from '@element-plus/icons-vue'
 import {
   cancelMyO2oPreorder,
@@ -39,6 +39,8 @@ import { buildClientOrderSummaryFromDetail } from '@/utils/client-order-summary'
 import { formatDateTime } from '@/utils/date-time'
 import { normalizeRequestError } from '@/utils/error'
 import { captureOrderRefreshAnchor, restoreOrderRefreshAnchor } from '@/utils/order-refresh-visual'
+
+import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 const ORDER_TYPE_LABEL_MAP = {
   department: '部门订',
@@ -560,12 +562,12 @@ const loadOrders = async (force = false, options?: { append?: boolean; silent?: 
         return
       }
       if (append) {
-        ElMessage.warning(`加载更多失败：${normalizedError.message}`)
+        showAppWarning(`加载更多失败：${normalizedError.message}`)
         return
       }
       if (hasCachedOrders) {
         // 已有列表时不切到整页错误态，避免“刷新失败导致内容闪退”。
-        ElMessage.warning(`订单刷新失败：${normalizedError.message}`)
+        showAppWarning(`订单刷新失败：${normalizedError.message}`)
         return
       }
       requestError.value = {
@@ -600,7 +602,7 @@ const clearKeyword = () => {
 // 详细注释：执行撤回订单，二次确认后请求撤回，并更新 Store 中的订单状态。
 const handleRecallOrder = async (order: O2oPreorderSummary) => {
   if (order.status !== 'pending') {
-    ElMessage.warning('当前订单状态不可撤回')
+    showAppWarning('当前订单状态不可撤回')
     return
   }
 
@@ -619,7 +621,7 @@ const handleRecallOrder = async (order: O2oPreorderSummary) => {
     if (error === 'cancel' || error === 'close') {
       return
     }
-    ElMessage.error('撤回确认失败，请稍后重试')
+    showAppError('撤回确认失败，请稍后重试')
     return
   }
 
@@ -632,10 +634,10 @@ const handleRecallOrder = async (order: O2oPreorderSummary) => {
       reason: 'cancelled',
       sourceId: clientOrderRefreshSourceId,
     })
-    ElMessage.success('订单已撤回')
+    showAppSuccess('订单已撤回')
   } catch (error) {
     const normalizedError = normalizeRequestError(error, '撤回订单失败')
-    ElMessage.error(normalizedError.message)
+    showAppError(normalizedError.message)
   } finally {
     recallingOrderId.value = ''
   }

@@ -7,7 +7,7 @@
 <script setup lang="ts">
 import dayjs from 'dayjs'
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessageBox } from 'element-plus'
 import { PageContainer, PageToolbarCard } from '@/components/common'
 import DatabaseMigrationOverviewSection from '@/views/system/components/DatabaseMigrationOverviewSection.vue'
 import DatabaseMigrationPrecheckSection from '@/views/system/components/DatabaseMigrationPrecheckSection.vue'
@@ -36,6 +36,7 @@ import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
+import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 import {
   DATABASE_MIGRATION_ASSISTANT_NAME,
   DATABASE_MIGRATION_CLEAR_OVERRIDE_SUCCESS,
@@ -468,19 +469,19 @@ const buildTaskPayload = (): CreateSQLiteToMySqlTaskPayload => {
 const validateTargetForm = () => {
   const target = buildNormalizedTarget()
   if (!target.host) {
-    ElMessage.warning('请输入目标 MySQL 主机地址')
+    showAppWarning('请输入目标 MySQL 主机地址')
     return false
   }
   if (!target.user) {
-    ElMessage.warning('请输入目标 MySQL 用户名')
+    showAppWarning('请输入目标 MySQL 用户名')
     return false
   }
   if (!target.database) {
-    ElMessage.warning('请输入目标 MySQL 数据库名')
+    showAppWarning('请输入目标 MySQL 数据库名')
     return false
   }
   if (!Number.isInteger(target.port) || target.port <= 0) {
-    ElMessage.warning('请输入正确的 MySQL 端口')
+    showAppWarning('请输入正确的 MySQL 端口')
     return false
   }
   return true
@@ -518,7 +519,7 @@ const refreshSelectedTaskDetail = async () => {
       upsertTaskRecord(task)
     },
     onError: (error) => {
-      ElMessage.warning(extractErrorMessage(error, '刷新任务详情失败'))
+      showAppWarning(extractErrorMessage(error, '刷新任务详情失败'))
     },
   })
 }
@@ -558,7 +559,7 @@ const loadOverview = async () => {
     },
     onError: (error) => {
       loadError.value = extractErrorMessage(error, '加载数据库迁移助手失败')
-      ElMessage.error(loadError.value)
+      showAppError(loadError.value)
     },
     onFinally: () => {
       pageLoading.value = false
@@ -573,7 +574,7 @@ const loadOverview = async () => {
  */
 const handlePrecheck = async () => {
   if (!canViewMigration.value) {
-    ElMessage.warning('当前账号暂无数据库迁移查看权限')
+    showAppWarning('当前账号暂无数据库迁移查看权限')
     return
   }
   if (!validateTargetForm()) {
@@ -594,7 +595,7 @@ const handlePrecheck = async () => {
       }
     }
     enterStepFlow(result.canProceed ? 'create' : 'precheck')
-    ElMessage.success(result.canProceed ? '预检通过，可继续创建迁移任务' : '预检已完成，请先处理阻断问题')
+    showAppSuccess(result.canProceed ? '预检通过，可继续创建迁移任务' : '预检已完成，请先处理阻断问题')
   } catch (error) {
     void showCriticalErrorDialog(error, {
       title: '迁移预检失败',
@@ -619,7 +620,7 @@ const handleCreateTask = async () => {
     return
   }
   if (hasPrecheckBlockingError.value) {
-    ElMessage.warning('当前预检存在阻断错误，请修复后再创建迁移任务')
+    showAppWarning('当前预检存在阻断错误，请修复后再创建迁移任务')
     return
   }
 
@@ -629,7 +630,7 @@ const handleCreateTask = async () => {
     upsertTaskRecord(task)
     selectedTaskId.value = task.id
     enterStepFlow('run')
-    ElMessage.success('迁移任务已创建，可在下方任务列表中执行')
+    showAppSuccess('迁移任务已创建，可在下方任务列表中执行')
     await loadOverview()
   } catch (error) {
     void showCriticalErrorDialog(error, {
@@ -652,7 +653,7 @@ const handleRunTask = async (task: SQLiteToMySqlTaskRecord) => {
     return
   }
   if (task.readState === 'corrupted') {
-    ElMessage.warning('该迁移任务文件已损坏，请先修复或删除该任务文件后再尝试执行')
+    showAppWarning('该迁移任务文件已损坏，请先修复或删除该任务文件后再尝试执行')
     return
   }
 
@@ -678,7 +679,7 @@ const handleRunTask = async (task: SQLiteToMySqlTaskRecord) => {
     upsertTaskRecord(latestTask)
     selectedTaskId.value = latestTask.id
     enterStepFlow(latestTask.status === 'succeeded' ? 'switch' : 'run')
-    ElMessage.success(latestTask.status === 'succeeded' ? '迁移任务执行完成' : '迁移任务已执行，请查看结果')
+    showAppSuccess(latestTask.status === 'succeeded' ? '迁移任务执行完成' : '迁移任务已执行，请查看结果')
     await loadOverview()
   } catch (error) {
     void showCriticalErrorDialog(error, {
@@ -701,7 +702,7 @@ const handleSwitchToTask = async (task: SQLiteToMySqlTaskRecord) => {
     return
   }
   if (task.status !== 'succeeded') {
-    ElMessage.warning('仅支持切换到已成功完成的迁移任务')
+    showAppWarning('仅支持切换到已成功完成的迁移任务')
     return
   }
 
@@ -728,7 +729,7 @@ const handleSwitchToTask = async (task: SQLiteToMySqlTaskRecord) => {
       }
     }
     enterStepFlow('switch')
-    ElMessage.success(`已写入 MySQL 运行时覆盖。${DATABASE_MIGRATION_RESTART_EFFECT_TEXT}`)
+    showAppSuccess(`已写入 MySQL 运行时覆盖。${DATABASE_MIGRATION_RESTART_EFFECT_TEXT}`)
     await loadOverview()
   } catch (error) {
     if (error === 'cancel' || error === 'close') {
@@ -777,7 +778,7 @@ const handleRollbackToSqlite = async () => {
       }
     }
     enterStepFlow('switch')
-    ElMessage.success(`已写入 SQLite 运行时覆盖。${DATABASE_MIGRATION_RESTART_EFFECT_TEXT}`)
+    showAppSuccess(`已写入 SQLite 运行时覆盖。${DATABASE_MIGRATION_RESTART_EFFECT_TEXT}`)
     await loadOverview()
   } catch (error) {
     if (error === 'cancel' || error === 'close') {
@@ -829,7 +830,7 @@ const handleClearRuntimeOverride = async () => {
       }
     }
     enterStepFlow('switch')
-    ElMessage.success(
+    showAppSuccess(
       result.cleared
         ? DATABASE_MIGRATION_CLEAR_OVERRIDE_SUCCESS
         : `当前未检测到数据库运行时覆盖文件。${DATABASE_MIGRATION_RESTART_EFFECT_TEXT}`,

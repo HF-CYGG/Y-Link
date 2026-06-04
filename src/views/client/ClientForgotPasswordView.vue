@@ -13,7 +13,7 @@
 
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+
 import { Key, Lock, Message, User } from '@element-plus/icons-vue'
 import { getClientAuthCapabilities, getClientCaptcha, type ClientAuthCapabilities } from '@/api/modules/client-auth'
 import { useStableRequest } from '@/composables/useStableRequest'
@@ -29,6 +29,8 @@ import {
 } from '@/utils/client-password-policy'
 import { normalizeRequestError } from '@/utils/error'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
+
+import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 const route = useRoute()
 const router = useRouter()
@@ -104,7 +106,7 @@ const loadAuthCapabilities = async (options: { silent?: boolean } = {}) => {
       const normalizedError = normalizeRequestError(error, '加载找回密码能力失败，请稍后重试')
       capabilityErrorMessage.value = normalizedError.message
       if (!options.silent) {
-        ElMessage.error(normalizedError.message)
+        showAppError(normalizedError.message)
       }
     },
     onFinally: () => {
@@ -158,13 +160,13 @@ const refreshCaptcha = async (silent = false) => {
         captcha.expiresInSeconds -= 1
       }, 1000)
       if (!silent) {
-        ElMessage.success('已刷新验证码')
+        showAppSuccess('已刷新验证码')
       }
     },
     onError: (error) => {
       const normalizedError = normalizeRequestError(error, '验证码刷新失败，请稍后重试')
       if (!silent) {
-        ElMessage.error(normalizedError.message)
+        showAppError(normalizedError.message)
       }
     },
     onFinally: () => {
@@ -247,18 +249,18 @@ const startVerificationCountdown = (seconds: number) => {
 const handleSendVerificationCode = async () => {
   const channel = resolveChannel(verifyForm.account)
   if (!channel) {
-    ElMessage.warning('请输入正确的手机号或邮箱')
+    showAppWarning('请输入正确的手机号或邮箱')
     return
   }
   if (!captcha.captchaId || !verifyForm.captcha.trim()) {
-    ElMessage.warning('发送验证码前请先输入图形验证码')
+    showAppWarning('发送验证码前请先输入图形验证码')
     await ensureCaptchaReady()
     return
   }
   const runResult = await runWithGate({
     actionKey: 'client-forgot-password-send-verification-code',
     onDuplicated: () => {
-      ElMessage.info('验证码发送中，请勿重复点击')
+      showAppInfo('验证码发送中，请勿重复点击')
     },
     executor: async () => {
       verificationSending.value = true
@@ -276,7 +278,7 @@ const handleSendVerificationCode = async () => {
             { signal },
           ),
         onSuccess: async (result) => {
-          ElMessage.success(`${channel === 'email' ? '邮箱' : '手机'}验证码已发送`)
+          showAppSuccess(`${channel === 'email' ? '邮箱' : '手机'}验证码已发送`)
           verifyForm.captcha = ''
           await refreshCaptcha(true)
           startVerificationCountdown(result.expireSeconds)
@@ -284,7 +286,7 @@ const handleSendVerificationCode = async () => {
         onError: async (error) => {
           const normalizedError = normalizeRequestError(error, '验证码发送失败，请稍后重试')
           applySecurityHintFromMessage(normalizedError.message)
-          ElMessage.error(normalizedError.message)
+          showAppError(normalizedError.message)
           verifyForm.captcha = ''
           await refreshCaptcha(true)
         },
@@ -301,22 +303,22 @@ const handleSendVerificationCode = async () => {
 
 const handleVerify = async () => {
   if (!forgotPasswordAvailable.value) {
-    ElMessage.warning('当前系统未同时启用手机与邮箱验证码，请联系管理员手动修改密码')
+    showAppWarning('当前系统未同时启用手机与邮箱验证码，请联系管理员手动修改密码')
     return
   }
   if (!validateAccount(verifyForm.account)) {
-    ElMessage.warning('请输入正确的手机号或邮箱')
+    showAppWarning('请输入正确的手机号或邮箱')
     return
   }
   if (!verifyForm.verificationCode.trim()) {
-    ElMessage.warning('请输入手机/邮箱验证码')
+    showAppWarning('请输入手机/邮箱验证码')
     return
   }
 
   const runResult = await runWithGate({
     actionKey: 'client-forgot-password-verify',
     onDuplicated: () => {
-      ElMessage.info('身份校验中，请勿重复提交')
+      showAppInfo('身份校验中，请勿重复提交')
     },
     executor: async () => {
       submitting.value = true
@@ -333,13 +335,13 @@ const handleVerify = async () => {
         onSuccess: async (result) => {
           resetToken.value = result.resetToken
           step.value = 2
-          ElMessage.success('身份校验通过，请设置新密码')
+          showAppSuccess('身份校验通过，请设置新密码')
           await refreshCaptcha(true)
         },
         onError: (error) => {
           const normalizedError = normalizeRequestError(error, '身份校验失败，请稍后重试')
           applySecurityHintFromMessage(normalizedError.message)
-          ElMessage.error(normalizedError.message)
+          showAppError(normalizedError.message)
         },
         onFinally: () => {
           submitting.value = false
@@ -354,23 +356,23 @@ const handleVerify = async () => {
 
 const handleReset = async () => {
   if (!resetToken.value.trim()) {
-    ElMessage.warning('身份校验凭证已失效，请重新验证账号')
+    showAppWarning('身份校验凭证已失效，请重新验证账号')
     step.value = 1
     return
   }
   if (!validatePassword(resetForm.newPassword)) {
-    ElMessage.warning(passwordStrengthHint)
+    showAppWarning(passwordStrengthHint)
     return
   }
   if (resetForm.newPassword !== resetForm.confirmPassword) {
-    ElMessage.warning(CLIENT_CONFIRM_INPUT_MISMATCH_MESSAGE)
+    showAppWarning(CLIENT_CONFIRM_INPUT_MISMATCH_MESSAGE)
     return
   }
 
   const runResult = await runWithGate({
     actionKey: 'client-forgot-password-reset',
     onDuplicated: () => {
-      ElMessage.info('重置请求处理中，请勿重复提交')
+      showAppInfo('重置请求处理中，请勿重复提交')
     },
     executor: async () => {
       submitting.value = true
@@ -386,7 +388,7 @@ const handleReset = async () => {
             { signal },
           ),
         onSuccess: async () => {
-          ElMessage.success('密码已重置，请重新登录')
+          showAppSuccess('密码已重置，请重新登录')
           await router.replace('/client/login')
         },
         onError: (error) => {

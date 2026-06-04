@@ -12,9 +12,11 @@
 
 
 import { ref } from 'vue'
-import { ElMessage } from 'element-plus'
+
 import type { DashboardTopProduct } from '@/api/modules/dashboard'
 import TopProductDrilldownDrawer from './TopProductDrilldownDrawer.vue'
+
+import { showAppWarning } from '@/utils/app-alert'
 
 defineProps<{
   topProducts: DashboardTopProduct[]
@@ -31,7 +33,7 @@ const formatQty = (value: string | number | null | undefined): string => {
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const openDrilldown = (productId: string) => {
   if (!productId.trim()) {
-    ElMessage.warning('当前榜单项缺少产品标识')
+    showAppWarning('当前榜单项缺少产品标识')
     return
   }
 

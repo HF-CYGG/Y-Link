@@ -13,13 +13,15 @@
 
 import dayjs from 'dayjs'
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+
 import { BizResponsiveDataCollectionShell, PageContainer, PagePaginationBar, PageToolbarCard } from '@/components/common'
 import { exportAuditLogs, getAuditLogList, type AuditLogListQuery, type AuditLogRecord } from '@/api/modules/audit'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
 import { extractErrorMessage } from '@/utils/error'
+
+import { showAppError, showAppSuccess } from '@/utils/app-alert'
 
 /**
  * 审计日志筛选表单：
@@ -215,7 +217,7 @@ const loadData = async () => {
       applyPaginatedResult(listState, result)
     },
     onError: (error) => {
-      ElMessage.error(extractErrorMessage(error, '获取审计日志失败'))
+      showAppError(extractErrorMessage(error, '获取审计日志失败'))
     },
     onFinally: () => {
       listState.loading = false
@@ -246,9 +248,9 @@ const handleExport = async () => {
     link.click()
     link.remove()
     globalThis.URL.revokeObjectURL(objectUrl)
-    ElMessage.success('已导出当前筛选结果')
+    showAppSuccess('已导出当前筛选结果')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '导出审计日志失败'))
+    showAppError(extractErrorMessage(error, '导出审计日志失败'))
   } finally {
     exportLoading.value = false
   }

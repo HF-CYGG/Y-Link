@@ -66,7 +66,7 @@
 
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+
 import type { AxiosResponse } from 'axios'
 import { http } from '@/api/http'
 import { Key, Lock, Message, User } from '@element-plus/icons-vue'
@@ -95,6 +95,8 @@ import {
 } from '@/utils/client-password-policy'
 import { normalizeRequestError } from '@/utils/error'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
+
+import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 type AuthMode = 'login' | 'register-personal' | 'register-department'
 
@@ -382,13 +384,13 @@ const refreshCaptcha = async (silent = false) => {
         captcha.expiresInSeconds -= 1
       }, 1000)
       if (!silent) {
-        ElMessage.success('已刷新验证码')
+        showAppSuccess('已刷新验证码')
       }
     },
     onError: (error) => {
       const normalizedError = normalizeRequestError(error, '验证码刷新失败，请稍后重试')
       if (!silent) {
-        ElMessage.error(normalizedError.message)
+        showAppError(normalizedError.message)
       }
     },
     onFinally: () => {
@@ -431,7 +433,7 @@ const loadAuthCapabilities = async (options: { silent?: boolean } = {}) => {
       const normalizedError = normalizeRequestError(error, '加载客户端校验策略失败，请稍后重试')
       capabilityErrorMessage.value = normalizedError.message
       if (!options.silent) {
-        ElMessage.error(normalizedError.message)
+        showAppError(normalizedError.message)
       }
     },
     onFinally: () => {
@@ -723,23 +725,23 @@ const startRegisterVerificationCountdown = (seconds: number) => {
 
 const handleSendRegisterVerificationCode = async () => {
   if (!registerUsesVerificationCode.value) {
-    ElMessage.warning('当前账号类型未启用验证码注册，请根据页面提示使用图片验证码完成注册')
+    showAppWarning('当前账号类型未启用验证码注册，请根据页面提示使用图片验证码完成注册')
     return
   }
   const channel = resolveAccountChannel(registerForm.account)
   if (!channel) {
-    ElMessage.warning('请输入正确的手机号或邮箱')
+    showAppWarning('请输入正确的手机号或邮箱')
     return
   }
   if (!captcha.captchaId || !registerForm.captcha.trim()) {
-    ElMessage.warning('发送验证码前请先输入图形验证码')
+    showAppWarning('发送验证码前请先输入图形验证码')
     await ensureCaptchaReady()
     return
   }
   const runResult = await runWithGate({
     actionKey: 'client-auth-register-send-verification-code',
     onDuplicated: () => {
-      ElMessage.info('验证码发送中，请勿重复点击')
+      showAppInfo('验证码发送中，请勿重复点击')
     },
     executor: async () => {
       verificationSending.value = true
@@ -757,7 +759,7 @@ const handleSendRegisterVerificationCode = async () => {
             { signal },
           ),
         onSuccess: async (result) => {
-          ElMessage.success(`${channel === 'email' ? '邮箱' : '手机'}验证码已发送`)
+          showAppSuccess(`${channel === 'email' ? '邮箱' : '手机'}验证码已发送`)
           registerForm.captcha = ''
           await refreshCaptcha(true)
           startRegisterVerificationCountdown(result.expireSeconds)
@@ -765,7 +767,7 @@ const handleSendRegisterVerificationCode = async () => {
         onError: async (error) => {
           const normalizedError = normalizeRequestError(error, '验证码发送失败，请稍后重试')
           applySecurityHintFromMessage(normalizedError.message)
-          ElMessage.error(normalizedError.message)
+          showAppError(normalizedError.message)
           registerForm.captcha = ''
           await refreshCaptcha(true)
         },
@@ -796,16 +798,16 @@ const warmupClientPostLoginTargets = (redirectPath: string) => {
 // 详细注释：提交登录表单。首先进行基础校验，然后调用 auth store 登录，成功后优先跳转，再在空闲时预热高频相邻页面。
 const handleLogin = async () => {
   if (!validateLoginAccount(loginForm.account)) {
-    ElMessage.warning('请输入用户名、手机号或邮箱')
+    showAppWarning('请输入用户名、手机号或邮箱')
     return
   }
   if (!validateLoginPassword(loginForm.password)) {
-    ElMessage.warning('请输入密码')
+    showAppWarning('请输入密码')
     return
   }
   if (loginCaptchaVisible.value) {
     if (!captcha.captchaId || !loginForm.captcha.trim()) {
-      ElMessage.warning('请输入图形验证码')
+      showAppWarning('请输入图形验证码')
       return
     }
   }
@@ -813,7 +815,7 @@ const handleLogin = async () => {
   const runResult = await runWithGate({
     actionKey: 'client-auth-login',
     onDuplicated: () => {
-      ElMessage.info('登录请求处理中，请勿重复提交')
+      showAppInfo('登录请求处理中，请勿重复提交')
     },
     executor: async () => {
       isLoading.value = true
@@ -835,7 +837,7 @@ const handleLogin = async () => {
           loginCaptchaVisible.value = false
           loginForm.captcha = ''
           clearCaptcha()
-          ElMessage.success('登录成功，欢迎来到 Y-Link 客户端')
+          showAppSuccess('登录成功，欢迎来到 Y-Link 客户端')
           await router.replace(redirectPath.value)
           warmupClientPostLoginTargets(redirectPath.value)
         },
@@ -843,7 +845,7 @@ const handleLogin = async () => {
           const normalizedError = normalizeRequestError(error, '登录失败，请检查用户名、手机号、邮箱、密码和验证码后重试')
           applySecurityHintFromMessage(normalizedError.message)
           applyLoginFeedbackFromError(normalizedError.message, normalizedError.status)
-          ElMessage.error(normalizedError.message)
+          showAppError(normalizedError.message)
           if (/用户名或密码错误|图形验证码|锁定|稍后|重试/.test(normalizedError.message)) {
             loginCaptchaVisible.value = true
             loginForm.captcha = ''
@@ -868,24 +870,24 @@ const validateDepartmentRegisterFields = () => {
   }
   const normalizedStaffNo = registerForm.staffNo.trim()
   if (!normalizedStaffNo) {
-    ElMessage.warning('请输入教职工号')
+    showAppWarning('请输入教职工号')
     return false
   }
   if (!validateStaffNo(normalizedStaffNo)) {
-    ElMessage.warning('教职工号仅支持字母、数字和短横线（4-32位）')
+    showAppWarning('教职工号仅支持字母、数字和短横线（4-32位）')
     return false
   }
   if (staffLookup.staffNo !== normalizedStaffNo || staffLookup.status === 'typing' || staffLookup.status === 'loading') {
-    ElMessage.warning('请等待系统完成工号匹配后再注册')
+    showAppWarning('请等待系统完成工号匹配后再注册')
     scheduleStaffDirectoryLookup(normalizedStaffNo)
     return false
   }
   if (staffLookup.status === 'registered') {
-    ElMessage.warning('该教职工号已注册部门账号，不能重复注册')
+    showAppWarning('该教职工号已注册部门账号，不能重复注册')
     return false
   }
   if (staffLookup.status !== 'matched') {
-    ElMessage.warning('教职工号未匹配到有效目录，暂不能注册部门账号')
+    showAppWarning('教职工号未匹配到有效目录，暂不能注册部门账号')
     return false
   }
   return true
@@ -895,13 +897,13 @@ const validateDepartmentRegisterFields = () => {
 const validateRegisterChallengeFields = () => {
   if (registerUsesVerificationCode.value) {
     if (!registerForm.verificationCode.trim()) {
-      ElMessage.warning('请输入手机/邮箱验证码')
+      showAppWarning('请输入手机/邮箱验证码')
       return false
     }
     return true
   }
   if (!captcha.captchaId || !registerForm.captcha.trim()) {
-    ElMessage.warning('请输入图形验证码')
+    showAppWarning('请输入图形验证码')
     return false
   }
   return true
@@ -912,25 +914,25 @@ const validateRegisterBeforeSubmit = () => {
   const accountChannel = resolveAccountChannel(registerForm.account)
   if (isDepartmentRegisterMode.value) {
     if (registerForm.account.trim() && !accountChannel) {
-      ElMessage.warning('手机号或邮箱为选填项；如填写，请输入正确格式')
+      showAppWarning('手机号或邮箱为选填项；如填写，请输入正确格式')
       return null
     }
   } else {
     if (!validateRealName(registerForm.username)) {
-      ElMessage.warning('请输入 2-20 位中文真实姓名，可包含空格或·')
+      showAppWarning('请输入 2-20 位中文真实姓名，可包含空格或·')
       return null
     }
     if (!accountChannel) {
-      ElMessage.warning('请输入正确的手机号或邮箱作为登录账号')
+      showAppWarning('请输入正确的手机号或邮箱作为登录账号')
       return null
     }
   }
   if (!validateRegisterPassword(registerForm.password)) {
-    ElMessage.warning(CLIENT_NEW_PASSWORD_RULE_TEXT)
+    showAppWarning(CLIENT_NEW_PASSWORD_RULE_TEXT)
     return null
   }
   if (registerForm.password !== registerForm.confirmPassword) {
-    ElMessage.warning(CLIENT_CONFIRM_INPUT_MISMATCH_MESSAGE)
+    showAppWarning(CLIENT_CONFIRM_INPUT_MISMATCH_MESSAGE)
     return null
   }
   if (!validateDepartmentRegisterFields()) {
@@ -991,7 +993,7 @@ const handleRegister = async () => {
   const runResult = await runWithGate({
     actionKey: 'client-auth-register',
     onDuplicated: () => {
-      ElMessage.info('注册请求处理中，请勿重复提交')
+      showAppInfo('注册请求处理中，请勿重复提交')
     },
     executor: async () => {
       isLoading.value = true
@@ -1010,7 +1012,7 @@ const handleRegister = async () => {
         onSuccess: async (response) => {
           const registerRemainingMessage = extractRegisterRemainingMessage(response)
           const nextLoginAccount = registeredAccount || registerForm.staffNo.trim()
-          ElMessage.success('注册成功，请登录')
+          showAppSuccess('注册成功，请登录')
           resetRegisterStateAfterSuccess(registeredAccount, registerRemainingMessage)
           await refreshCaptcha(true)
           await router.replace({

@@ -13,11 +13,13 @@
 
 import { ref, watch } from 'vue'
 import dayjs from 'dayjs'
-import { ElMessage } from 'element-plus'
+
 import { BizResponsiveDrawerShell } from '@/components/common'
 import { getCustomerDrilldown, type CustomerDrilldownResult } from '@/api/modules/dashboard'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
+
+import { showAppError, showAppWarning } from '@/utils/app-alert'
 
 const props = defineProps<{
   modelValue: boolean
@@ -49,7 +51,7 @@ const formatOrderType = (value: 'department' | 'walkin'): string => {
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const loadData = async () => {
   if (!props.customerName.trim()) {
-    ElMessage.warning('当前榜单项缺少客户标识')
+    showAppWarning('当前榜单项缺少客户标识')
     emit('update:modelValue', false)
     return
   }
@@ -62,7 +64,7 @@ const loadData = async () => {
       data.value = result
     },
     onError: (error) => {
-      ElMessage.error(extractErrorMessage(error, '获取客户榜明细失败'))
+      showAppError(extractErrorMessage(error, '获取客户榜明细失败'))
       emit('update:modelValue', false)
     },
     onFinally: () => {

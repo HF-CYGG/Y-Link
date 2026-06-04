@@ -8,7 +8,7 @@
 <script setup lang="ts">
 import dayjs from 'dayjs'
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox, type FormInstance, type FormRules, type TableInstance, type UploadFile, type UploadInstance } from 'element-plus'
+import { ElMessageBox, type FormInstance, type FormRules, type TableInstance, type UploadFile, type UploadInstance } from 'element-plus'
 import {
   createClientStaffDirectoryRecord,
   deleteClientStaffDirectoryBatch,
@@ -27,6 +27,8 @@ import {
   type ClientDepartmentTreeNode,
 } from '@/api/modules/system-config'
 import { extractErrorMessage } from '@/utils/error'
+
+import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 const props = defineProps<{
   canUpdateConfigs: boolean
@@ -231,11 +233,11 @@ const clearSelectedImportFile = () => {
 
 const applySelectedImportFile = (file: File) => {
   if (!/\.(txt|xlsx)$/i.test(file.name)) {
-    ElMessage.warning('仅支持上传 txt 或 xlsx 文件')
+    showAppWarning('仅支持上传 txt 或 xlsx 文件')
     return false
   }
   if (file.size > STAFF_DIRECTORY_IMPORT_MAX_FILE_SIZE) {
-    ElMessage.warning('导入文件不能超过 8 MB')
+    showAppWarning('导入文件不能超过 8 MB')
     return false
   }
   resetImportPreview()
@@ -270,7 +272,7 @@ const handleGenerateImportPreview = async () => {
     return
   }
   if (!selectedImportFile.value && !importForm.rawText.trim()) {
-    ElMessage.warning('请先拖拽/选择 txt/xlsx 文件，或粘贴至少一条目录记录')
+    showAppWarning('请先拖拽/选择 txt/xlsx 文件，或粘贴至少一条目录记录')
     return
   }
   importPreviewLoading.value = true
@@ -281,10 +283,10 @@ const handleGenerateImportPreview = async () => {
           rawText: importForm.rawText,
         })
     importPreviewResult.value = result
-    ElMessage.success('识别完成，请核对预览结果后再确认导入')
+    showAppSuccess('识别完成，请核对预览结果后再确认导入')
   } catch (error) {
     resetImportPreview()
-    ElMessage.error(extractErrorMessage(error, '生成导入预览失败'))
+    showAppError(extractErrorMessage(error, '生成导入预览失败'))
   } finally {
     importPreviewLoading.value = false
   }
@@ -306,7 +308,7 @@ const loadList = async () => {
     await nextTick()
     tableRef.value?.clearSelection()
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '加载教职工目录失败，请稍后重试'))
+    showAppError(extractErrorMessage(error, '加载教职工目录失败，请稍后重试'))
   } finally {
     listLoading.value = false
   }
@@ -333,7 +335,7 @@ const loadDepartmentOptions = async () => {
     departmentOptions.value = result.options
     departmentTree.value = result.tree
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '加载部门配置失败'))
+    showAppError(extractErrorMessage(error, '加载部门配置失败'))
   } finally {
     departmentOptionsLoading.value = false
   }
@@ -371,7 +373,7 @@ const handleSubmitDialog = async () => {
   }
   const normalizedDepartmentName = dialogForm.departmentName.trim()
   if (!departmentOptions.value.includes(normalizedDepartmentName)) {
-    ElMessage.warning('请选择已有部门，不能手动录入新部门')
+    showAppWarning('请选择已有部门，不能手动录入新部门')
     return
   }
   dialogSubmitting.value = true
@@ -383,20 +385,20 @@ const handleSubmitDialog = async () => {
         departmentName: normalizedDepartmentName,
         status: dialogForm.status,
       })
-      ElMessage.success('教职工目录记录已新增')
+      showAppSuccess('教职工目录记录已新增')
     } else {
       await updateClientStaffDirectoryRecord(editingRecordId.value, {
         staffNo: dialogForm.staffNo.trim(),
         realName: dialogForm.realName.trim(),
         departmentName: normalizedDepartmentName,
       })
-      ElMessage.success('教职工目录记录已更新')
+      showAppSuccess('教职工目录记录已更新')
     }
     dialogVisible.value = false
     resetDialogForm()
     void loadList()
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '保存教职工目录记录失败'))
+    showAppError(extractErrorMessage(error, '保存教职工目录记录失败'))
   } finally {
     dialogSubmitting.value = false
   }
@@ -415,13 +417,13 @@ const handleToggleStatus = async (record: ClientStaffDirectoryRecord) => {
       cancelButtonText: '取消',
     })
     await updateClientStaffDirectoryStatus(record.id, nextStatus)
-    ElMessage.success(`已${actionLabel}教职工目录记录`)
+    showAppSuccess(`已${actionLabel}教职工目录记录`)
     void loadList()
   } catch (error) {
     if (error === 'cancel' || error === 'close') {
       return
     }
-    ElMessage.error(extractErrorMessage(error, `${actionLabel}教职工目录记录失败`))
+    showAppError(extractErrorMessage(error, `${actionLabel}教职工目录记录失败`))
   }
 }
 
@@ -453,7 +455,7 @@ const handleBatchDelete = async () => {
     const linkedDepartmentAccountSummary = result.summary.linkedDepartmentAccounts > 0
       ? `，同步回收 ${result.summary.linkedDepartmentAccounts} 个已注册部门账号的工号校验`
       : ''
-    ElMessage.success(`已删除 ${result.summary.deleted} 条教职工目录记录${linkedDepartmentAccountSummary}`)
+    showAppSuccess(`已删除 ${result.summary.deleted} 条教职工目录记录${linkedDepartmentAccountSummary}`)
     if (records.value.length === selectedIds.length && queryForm.page > 1) {
       queryForm.page -= 1
     }
@@ -462,7 +464,7 @@ const handleBatchDelete = async () => {
     if (error === 'cancel' || error === 'close') {
       return
     }
-    ElMessage.error(extractErrorMessage(error, '批量删除教职工目录记录失败'))
+    showAppError(extractErrorMessage(error, '批量删除教职工目录记录失败'))
   }
 }
 
@@ -471,7 +473,7 @@ const handleSubmitImport = async () => {
     return
   }
   if (!importPreviewResult.value || importPreviewResult.value.rows.length === 0) {
-    ElMessage.warning('请先生成导入预览，并确认识别结果无误后再导入')
+    showAppWarning('请先生成导入预览，并确认识别结果无误后再导入')
     return
   }
   importSubmitting.value = true
@@ -479,7 +481,7 @@ const handleSubmitImport = async () => {
     const result = await importClientStaffDirectory({
       rows: buildConfirmedImportRows(importPreviewResult.value.rows),
     })
-    ElMessage.success(
+    showAppSuccess(
       `导入完成：新增 ${result.summary.created} 条，更新 ${result.summary.updated} 条，跳过 ${result.summary.skipped} 条`,
     )
     importVisible.value = false
@@ -487,7 +489,7 @@ const handleSubmitImport = async () => {
     queryForm.page = 1
     void loadList()
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '导入教职工目录失败'))
+    showAppError(extractErrorMessage(error, '导入教职工目录失败'))
   } finally {
     importSubmitting.value = false
   }

@@ -13,7 +13,7 @@
 
 import { computed, reactive, ref } from 'vue'
 import type { EChartsOption } from 'echarts'
-import { ElMessage } from 'element-plus'
+
 import { Document, Money } from '@element-plus/icons-vue'
 import BaseEChart from '@/components/charts/BaseEChart.vue'
 import { getDashboardPieData, type DashboardPieDataResult, type DashboardPieSlice } from '@/api/modules/dashboard'
@@ -21,6 +21,8 @@ import { useStableRequest } from '@/composables/useStableRequest'
 import { useAppStore, useThemeStore } from '@/store'
 import pinia from '@/store/pinia'
 import { extractErrorMessage } from '@/utils/error'
+
+import { showAppError } from '@/utils/app-alert'
 
 const appStore = useAppStore(pinia)
 const themeStore = useThemeStore(pinia)
@@ -188,7 +190,7 @@ const loadPieData = async () => {
       }
     },
     onError: (error) => {
-      ElMessage.error(extractErrorMessage(error, '获取饼图统计失败'))
+      showAppError(extractErrorMessage(error, '获取饼图统计失败'))
     },
     onFinally: () => {
       pieLoading.value = false

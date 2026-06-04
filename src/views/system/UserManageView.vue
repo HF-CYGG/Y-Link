@@ -13,7 +13,7 @@
 
 import dayjs from 'dayjs'
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
+import { ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { BizCrudDialogShell, BizResponsiveDataCollectionShell, PageContainer, PagePaginationBar, PageToolbarCard } from '@/components/common'
 import {
   changePassword,
@@ -42,6 +42,7 @@ import { redirectToAdminLogin } from '@/utils/auth-navigation'
 import { extractErrorMessage } from '@/utils/error'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
+import { showAppError, showAppSuccess } from '@/utils/app-alert'
 import {
   accountTypeDescriptions,
   getAccountTypeDescription,
@@ -326,7 +327,7 @@ const loadData = async () => {
       applyPaginatedResult(listState, result)
     },
     onError: (error) => {
-      ElMessage.error(extractErrorMessage(error, '获取用户列表失败'))
+      showAppError(extractErrorMessage(error, '获取用户列表失败'))
     },
     onFinally: () => {
       listState.loading = false
@@ -461,7 +462,7 @@ const handleSubmit = async () => {
         status: userForm.status,
       }
       await createUser(payload)
-      ElMessage.success(
+      showAppSuccess(
         userForm.role === 'supplier'
           ? '供货方账号创建成功，该账号登录后将进入送货单录入页'
           : '用户创建成功',
@@ -484,7 +485,7 @@ const handleSubmit = async () => {
         await updateUserStatus(userForm.id, userForm.status)
       }
 
-      ElMessage.success('用户信息更新成功')
+      showAppSuccess('用户信息更新成功')
     }
 
     dialogVisible.value = false
@@ -524,7 +525,7 @@ const handleSubmitResetPassword = async () => {
     await resetUserPassword(resetPasswordForm.targetUserId, payload)
     resetPasswordVisible.value = false
     resetAdminPasswordForm()
-    ElMessage.success(`已重置“${targetDisplayName}”的登录密码`)
+    showAppSuccess(`已重置“${targetDisplayName}”的登录密码`)
     await loadData()
   } catch (error) {
     void showCriticalErrorDialog(error, {
@@ -559,7 +560,7 @@ const handleSubmitOwnPassword = async () => {
     await authStore.logout()
     // 本人改密后使用硬跳转返回登录页，避免旧管理端页面与权限上下文继续停留在当前标签页。
     redirectToAdminLogin()
-    ElMessage.success('密码修改成功，请使用新密码重新登录')
+    showAppSuccess('密码修改成功，请使用新密码重新登录')
   } catch (error) {
     void showCriticalErrorDialog(error, {
       title: '修改密码失败',
@@ -592,7 +593,7 @@ const handleToggleStatus = async (row: UserSafeProfile) => {
     })
 
     await updateUserStatus(row.id, nextStatus)
-    ElMessage.success(`${actionLabel}成功`)
+    showAppSuccess(`${actionLabel}成功`)
     await loadData()
   } catch (error) {
     if (error === 'cancel') {

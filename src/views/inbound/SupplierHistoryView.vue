@@ -13,7 +13,7 @@
  */
 
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+
 import QRCode from 'qrcode'
 import { useRoute, useRouter } from 'vue-router'
 import { BizResponsiveDrawerShell, PageContainer, PagePaginationBar, PassiveNumberInput } from '@/components/common'
@@ -31,6 +31,9 @@ import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
 import dayjs from 'dayjs'
+
+
+import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 const router = useRouter()
 const route = useRoute()
@@ -197,7 +200,7 @@ const ensureProductsLoaded = async () => {
       products.value = result
     },
     onError: (error) => {
-      ElMessage.error(extractErrorMessage(error, '可改单商品加载失败，请稍后重试'))
+      showAppError(extractErrorMessage(error, '可改单商品加载失败，请稍后重试'))
     },
     onFinally: () => {
       editProductLoading.value = false
@@ -214,7 +217,7 @@ const loadData = async () => {
       summary.value = result.summary
     },
     onError: (err) => {
-      ElMessage.error(extractErrorMessage(err, '获取历史记录失败'))
+      showAppError(extractErrorMessage(err, '获取历史记录失败'))
     },
     onFinally: () => {
       listState.loading = false
@@ -234,7 +237,7 @@ const generateQRCode = async (verifyCode: string) => {
   } catch (err) {
     qrCodeDataUrl.value = ''
     qrCodeUnavailable.value = true
-    ElMessage.warning(extractErrorMessage(err, '详情已加载，但二维码生成失败，请稍后重试'))
+    showAppWarning(extractErrorMessage(err, '详情已加载，但二维码生成失败，请稍后重试'))
   }
 }
 
@@ -275,7 +278,7 @@ const loadDetail = async (row: Pick<InboundOrder, 'id' | 'verifyCode'>, options?
       await applyDetailResult(detail, options)
     },
     onError: (err) => {
-      ElMessage.error(extractErrorMessage(err, '获取详情失败'))
+      showAppError(extractErrorMessage(err, '获取详情失败'))
       if (options?.openDrawer !== false) {
         detailVisible.value = false
       }
@@ -304,7 +307,7 @@ const handleRemoveEditItem = (index: number) => {
 
 const openCancelDialog = (order: InboundOrder) => {
   if (!canCancelOrder(order)) {
-    ElMessage.warning('当前送货单不可撤销')
+    showAppWarning('当前送货单不可撤销')
     return
   }
 
@@ -315,7 +318,7 @@ const openCancelDialog = (order: InboundOrder) => {
 
 const openEditDialog = async (row: InboundOrder) => {
   if (!canEditOrder(row)) {
-    ElMessage.warning('当前送货单不可改单')
+    showAppWarning('当前送货单不可改单')
     return
   }
 
@@ -339,7 +342,7 @@ const openEditDialog = async (row: InboundOrder) => {
       editDialogVisible.value = true
     },
     onError: (error) => {
-      ElMessage.error(extractErrorMessage(error, '读取改单详情失败'))
+      showAppError(extractErrorMessage(error, '读取改单详情失败'))
     },
     onFinally: () => {
       detailLoading.value = false
@@ -354,7 +357,7 @@ const handleSubmitCancel = async () => {
 
   const reason = cancelReason.value.trim()
   if (!reason) {
-    ElMessage.warning('请填写撤销原因')
+    showAppWarning('请填写撤销原因')
     return
   }
 
@@ -367,10 +370,10 @@ const handleSubmitCancel = async () => {
       targetCancelOrder.value = null
       await applyDetailResult(detail)
       await loadData()
-      ElMessage.success('送货单已撤销')
+      showAppSuccess('送货单已撤销')
     },
     onError: (error) => {
-      ElMessage.error(extractErrorMessage(error, '撤销送货单失败'))
+      showAppError(extractErrorMessage(error, '撤销送货单失败'))
     },
     onFinally: () => {
       cancelSubmitting.value = false
@@ -404,7 +407,7 @@ const handleSubmitEdit = async () => {
   try {
     payload = buildEditPayload()
   } catch (error) {
-    ElMessage.warning(extractErrorMessage(error, '请至少保留一件有效商品'))
+    showAppWarning(extractErrorMessage(error, '请至少保留一件有效商品'))
     return
   }
 
@@ -416,10 +419,10 @@ const handleSubmitEdit = async () => {
       resetEditForm()
       await applyDetailResult(detail)
       await loadData()
-      ElMessage.success('送货单已更新')
+      showAppSuccess('送货单已更新')
     },
     onError: (error) => {
-      ElMessage.error(extractErrorMessage(error, '改单失败'))
+      showAppError(extractErrorMessage(error, '改单失败'))
     },
     onFinally: () => {
       editSubmitting.value = false

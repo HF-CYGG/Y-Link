@@ -13,7 +13,7 @@
 import { computed, defineAsyncComponent, onActivated, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import dayjs from 'dayjs'
-import { ElMessage } from 'element-plus'
+
 import { Box, DataAnalysis, Document, Money, More, WarningFilled } from '@element-plus/icons-vue'
 import { PageContainer } from '@/components/common'
 import { getDashboardStats, type DashboardStats } from '@/api/modules/dashboard'
@@ -22,6 +22,9 @@ import { buildDashboardShortcutItems } from '@/router/routes'
 import { useAppStore, useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { extractErrorMessage } from '@/utils/error'
+
+
+import { showAppError } from '@/utils/app-alert'
 
 const router = useRouter()
 const appStore = useAppStore(pinia)
@@ -218,7 +221,7 @@ const loadData = async () => {
     },
     onError: (error) => {
       loadStatus.value = 'error'
-      ElMessage.error(extractErrorMessage(error, '获取看板数据失败'))
+      showAppError(extractErrorMessage(error, '获取看板数据失败'))
     },
     onFinally: ({ status }) => {
       if (status === 'canceled' && !stats.value) {

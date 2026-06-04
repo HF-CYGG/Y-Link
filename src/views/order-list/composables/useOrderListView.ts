@@ -14,7 +14,7 @@
 
 import dayjs from 'dayjs'
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessageBox } from 'element-plus'
 import { useWindowSize } from '@vueuse/core'
 import { useRoute, useRouter } from 'vue-router'
 import {
@@ -34,6 +34,9 @@ import pinia from '@/store/pinia'
 import { extractErrorMessage } from '@/utils/error'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
 import { captureOrderRefreshAnchor, restoreOrderRefreshAnchor, type OrderRefreshAnchorSnapshot } from '@/utils/order-refresh-visual'
+
+
+import { showAppError, showAppSuccess } from '@/utils/app-alert'
 
 const ORDER_LIST_TARGET_ORDER_ID_QUERY_KEY = 'focusOrderId'
 const ORDER_LIST_TARGET_ORDER_SHOW_NO_QUERY_KEY = 'focusOrderShowNo'
@@ -528,7 +531,7 @@ export const useOrderListView = () => {
           return
         }
 
-        ElMessage.error(extractErrorMessage(error, '获取单据列表失败'))
+        showAppError(extractErrorMessage(error, '获取单据列表失败'))
       },
       onFinally: () => {
         listState.loading = false
@@ -578,7 +581,7 @@ export const useOrderListView = () => {
           return
         }
 
-        ElMessage.error(extractErrorMessage(error, '获取单据详情失败'))
+        showAppError(extractErrorMessage(error, '获取单据详情失败'))
         drawerVisible.value = false
       },
       onFinally: () => {
@@ -658,7 +661,7 @@ export const useOrderListView = () => {
       return
     }
     await deleteOrderById(row.id, { confirmShowNo })
-    ElMessage.success(`已删除单据：${row.showNo}`)
+    showAppSuccess(`已删除单据：${row.showNo}`)
     await loadData()
   }
 
@@ -701,7 +704,7 @@ export const useOrderListView = () => {
       return
     }
     await restoreOrderById(row.id)
-    ElMessage.success(`已恢复单据：${row.showNo}`)
+    showAppSuccess(`已恢复单据：${row.showNo}`)
     await loadData()
   }
 
@@ -732,7 +735,7 @@ export const useOrderListView = () => {
       return
     }
     const result = await purgeOrderById(row.id, { confirmShowNo })
-    ElMessage.success(
+    showAppSuccess(
       result.serialRolledBack
         ? `已永久删除单据：${row.showNo}，流水已安全回拨`
         : `已永久删除单据：${row.showNo}`,

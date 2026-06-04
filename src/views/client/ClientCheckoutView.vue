@@ -12,7 +12,7 @@
  */
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { submitO2oPreorder } from '@/api/modules/o2o'
 import { useClientMallSnapshotRefresh } from '@/composables/useClientMallSnapshotRefresh'
@@ -22,6 +22,7 @@ import { useClientCatalogStore } from '@/store/modules/client-catalog'
 import pinia from '@/store/pinia'
 import { normalizeRequestError } from '@/utils/error'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
+import { showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 import {
   buildClientPreorderSubmitIntentKey,
   clearClientPreorderSubmitLock,
@@ -225,26 +226,26 @@ const handleSubmit = async () => {
     ? resolveDefaultPickupContact()
     : (pickupContact.value.trim() || resolveDefaultPickupContact())
   if (!normalizedPickupContact) {
-    ElMessage.warning('请填写提货人')
+    showAppWarning('请填写提货人')
     return
   }
   pickupContact.value = normalizedPickupContact
   persistPickupContactDraft()
 
   if (!selectedItems.value.length) {
-    ElMessage.warning('请先选择可结算商品')
+    showAppWarning('请先选择可结算商品')
     return
   }
   if (isDepartmentOrder.value && !currentDepartmentName.value) {
-    ElMessage.warning('部门账号下单前，请先完善所属部门')
+    showAppWarning('部门账号下单前，请先完善所属部门')
     return
   }
   if (isDepartmentOrder.value && !currentStaffNo.value) {
-    ElMessage.warning('部门账号缺少教职工号，请先完善后再下单')
+    showAppWarning('部门账号缺少教职工号，请先完善后再下单')
     return
   }
   if (isDepartmentOrder.value && departmentSystemApplyChoice.value === null) {
-    ElMessage.warning('请选择金蝶系统是否已申请')
+    showAppWarning('请选择金蝶系统是否已申请')
     return
   }
 
@@ -264,7 +265,7 @@ const handleSubmit = async () => {
 
   const activeSubmitLock = readActiveClientPreorderSubmitLock(clientAuthStore.currentUser?.id)
   if (activeSubmitLock?.intentKey === submitIntentKey) {
-    ElMessage.info('相同预订单正在确认中，请勿重复提交')
+    showAppInfo('相同预订单正在确认中，请勿重复提交')
     return
   }
   const submitRequestKey = createClientPreorderSubmitLock(clientAuthStore.currentUser?.id, submitIntentKey)
@@ -272,7 +273,7 @@ const handleSubmit = async () => {
   const runResult = await runWithGate({
     actionKey: 'client-checkout-submit',
     onDuplicated: () => {
-      ElMessage.info('订单提交中，请勿重复点击')
+      showAppInfo('订单提交中，请勿重复点击')
     },
     executor: async () => {
       submitting.value = true
@@ -291,7 +292,7 @@ const handleSubmit = async () => {
         clientCartStore.syncWithCatalog(clientCatalogStore.products)
         clearClientPreorderSubmitLock(clientAuthStore.currentUser?.id, submitRequestKey)
 
-        ElMessage.success('预订单提交成功')
+        showAppSuccess('预订单提交成功')
         if (!props.standalone) {
           emit('close')
         }
@@ -300,7 +301,7 @@ const handleSubmit = async () => {
         const normalizedError = normalizeRequestError(error, '提交失败，请稍后再试')
         if (AMBIGUOUS_PREORDER_SUBMIT_STATUS_SET.has(normalizedError.status)) {
           refreshClientPreorderSubmitLock(clientAuthStore.currentUser?.id, submitIntentKey, submitRequestKey)
-          ElMessage.warning('提交结果确认中，请勿重复提交。可前往“我的订单”查询是否已创建成功。')
+          showAppWarning('提交结果确认中，请勿重复提交。可前往“我的订单”查询是否已创建成功。')
           return
         }
         clearClientPreorderSubmitLock(clientAuthStore.currentUser?.id, submitRequestKey)

@@ -10,7 +10,7 @@
 
 
 import { ArrowDown, Lock, Menu, SwitchButton } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
+import { ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { computed, reactive, ref, useAttrs } from 'vue'
 import { BizCrudDialogShell } from '@/components/common'
 import QuoteBanner from '@/layout/components/QuoteBanner.vue'
@@ -19,6 +19,8 @@ import { useAppStore, useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { redirectToAdminLogin } from '@/utils/auth-navigation'
 import { extractErrorMessage } from '@/utils/error'
+
+import { showAppError, showAppSuccess } from '@/utils/app-alert'
 
 defineOptions({
   inheritAttrs: false,
@@ -137,9 +139,9 @@ const handleChangePassword = async () => {
     await authStore.logout()
     // 管理端改密后改为硬跳转登录页，彻底卸载旧的工作台页面树与 keep-alive 缓存。
     redirectToAdminLogin()
-    ElMessage.success('密码修改成功，请使用新密码重新登录')
+    showAppSuccess('密码修改成功，请使用新密码重新登录')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '修改密码失败'))
+    showAppError(extractErrorMessage(error, '修改密码失败'))
   } finally {
     passwordSubmitting.value = false
   }
@@ -162,13 +164,13 @@ const handleLogout = async () => {
     await authStore.logout()
     // 管理端退出同样使用硬跳转，避免旧高权限页面实例在切账号后残留。
     redirectToAdminLogin()
-    ElMessage.success('已退出登录')
+    showAppSuccess('已退出登录')
   } catch (error) {
     if (error === 'cancel') {
       return
     }
 
-    ElMessage.error(extractErrorMessage(error, '退出登录失败'))
+    showAppError(extractErrorMessage(error, '退出登录失败'))
   }
 }
 </script>

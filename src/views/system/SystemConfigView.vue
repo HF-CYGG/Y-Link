@@ -15,7 +15,7 @@
 
 import dayjs from 'dayjs'
 import { computed, nextTick, onMounted, reactive, ref, toRaw } from 'vue'
-import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
+import { ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { PageContainer, PageToolbarCard } from '@/components/common'
 import {
   getNotificationPresenceSnapshot,
@@ -45,6 +45,11 @@ import {
 } from '@/api/modules/system-config'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
+import {
+  showAppError as showTopError,
+  showAppSuccess as showTopSuccess,
+  showAppWarning as showTopWarning,
+} from '@/utils/app-alert'
 import { extractErrorMessage } from '@/utils/error'
 import SystemConfigDepartmentSection from '@/views/system/components/SystemConfigDepartmentSection.vue'
 import SystemConfigCustomerServiceSection from '@/views/system/components/SystemConfigCustomerServiceSection.vue'
@@ -79,7 +84,6 @@ type ConfigSectionKey =
   | 'verification'
   | 'department'
   | 'notification'
-type TopFeedbackMessageType = 'success' | 'warning' | 'error' | 'info'
 type DepartmentDropType = 'prev' | 'inner' | 'next'
 type DepartmentTreeNode = ClientDepartmentTreeNode
 type DepartmentTreeDropNode = {
@@ -155,22 +159,6 @@ const scrollActiveSectionTabIntoView = async () => {
     inline: 'center',
   })
 }
-
-const showTopFeedbackMessage = (type: TopFeedbackMessageType, message: string) => {
-  ElMessage({
-    type,
-    message,
-    showClose: true,
-    offset: 24,
-    duration: type === 'error' ? 5200 : 2800,
-    customClass: 'ylink-top-feedback-message',
-    appendTo: document.body,
-  })
-}
-
-const showTopSuccess = (message: string) => showTopFeedbackMessage('success', message)
-const showTopWarning = (message: string) => showTopFeedbackMessage('warning', message)
-const showTopError = (message: string) => showTopFeedbackMessage('error', message)
 
 const handleSectionChange = (value: string | number) => {
   activeSection.value = String(value) as ConfigSectionKey
@@ -1260,8 +1248,7 @@ const handleSubmit = async () => {
     applyNotificationRules(notificationResult.list)
     await refreshNotificationPresenceSnapshot()
     initialSnapshot.value = snapshotForm()
-    showTopFeedbackMessage(
-      'success',
+    showTopSuccess(
       result.changed
       || o2oResult.changed
       || customerServiceResult.changed
@@ -1272,7 +1259,7 @@ const handleSubmit = async () => {
         : '配置未变更',
     )
   } catch (error) {
-    showTopFeedbackMessage('error', extractErrorMessage(error, '保存系统配置失败，请稍后重试'))
+    showTopError(extractErrorMessage(error, '保存系统配置失败，请稍后重试'))
   } finally {
     saving.value = false
   }

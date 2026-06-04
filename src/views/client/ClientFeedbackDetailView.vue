@@ -13,7 +13,7 @@
 
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessageBox } from 'element-plus'
 import {
   buildClientFeedbackNextStepPrompt,
   FEEDBACK_CATEGORY_OPTIONS,
@@ -44,6 +44,8 @@ import { formatDateTime } from '@/utils/date-time'
 import { extractErrorMessage } from '@/utils/error'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { normalizeSubmitText } from '@/utils/submit-feedback'
+
+import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 const route = useRoute()
 const router = useRouter()
@@ -353,7 +355,7 @@ const isImageAttachment = (attachment: FeedbackConversationMessageAttachment) =>
 const openAttachmentPreview = (attachment: FeedbackConversationMessageAttachment) => {
   const targetUrl = resolveAttachmentUrl(attachment)
   if (!targetUrl) {
-    ElMessage.warning('当前附件地址无效，暂时无法预览')
+    showAppWarning('当前附件地址无效，暂时无法预览')
     return
   }
   if (!isImageAttachment(attachment)) {
@@ -414,7 +416,7 @@ const loadConversationDetail = async (
         return
       }
       if (!detail) {
-        ElMessage.warning('未找到对应反馈单，已返回会话列表')
+        showAppWarning('未找到对应反馈单，已返回会话列表')
         router.replace('/client/feedback')
         return
       }
@@ -458,7 +460,7 @@ const handleReplyAttachmentChange = async (event: Event) => {
   }
 
   if (replyAttachments.value.length >= FEEDBACK_ATTACHMENT_LIMIT) {
-    ElMessage.warning(`单条补充消息最多上传 ${FEEDBACK_ATTACHMENT_LIMIT} 张图片`)
+    showAppWarning(`单条补充消息最多上传 ${FEEDBACK_ATTACHMENT_LIMIT} 张图片`)
     if (input) {
       input.value = ''
     }
@@ -471,19 +473,19 @@ const handleReplyAttachmentChange = async (event: Event) => {
   try {
     for (const file of targetFiles) {
       if (!file.type.startsWith('image/')) {
-        ElMessage.warning(`文件 ${file.name} 不是图片，已跳过`)
+        showAppWarning(`文件 ${file.name} 不是图片，已跳过`)
         continue
       }
       if (file.size > FEEDBACK_ATTACHMENT_MAX_SIZE) {
-        ElMessage.warning(`文件 ${file.name} 超过 10MB，已跳过`)
+        showAppWarning(`文件 ${file.name} 超过 10MB，已跳过`)
         continue
       }
       const attachment = await uploadClientFeedbackAttachment(file)
       replyAttachments.value = [...replyAttachments.value, attachment]
     }
-    ElMessage.success('补充图片上传完成，可随消息一起发送')
+    showAppSuccess('补充图片上传完成，可随消息一起发送')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '附件上传失败，请稍后重试'))
+    showAppError(extractErrorMessage(error, '附件上传失败，请稍后重试'))
   } finally {
     uploadingReplyAttachments.value = false
     if (input) {
@@ -498,13 +500,13 @@ const handleRemoveReplyAttachment = (attachmentIndex: number) => {
 
 const handleReply = async () => {
   if (!conversation.value) {
-    ElMessage.warning('当前反馈单尚未加载完成')
+    showAppWarning('当前反馈单尚未加载完成')
     return
   }
 
   const normalizedReply = normalizeSubmitText(replyDraft.value)
   if (!normalizedReply) {
-    ElMessage.warning('请输入要补充的说明')
+    showAppWarning('请输入要补充的说明')
     return
   }
 
@@ -518,7 +520,7 @@ const handleReply = async () => {
     replyAttachments.value = []
     await loadConversationDetail(conversation.value.id)
     reconnectTip.value = '已自动续接当前反馈单，你的新补充已提交给客服。'
-    ElMessage.success('补充说明已发送')
+    showAppSuccess('补充说明已发送')
   } catch (error) {
     void showCriticalErrorDialog(error, {
       title: '补充说明发送失败',
@@ -532,11 +534,11 @@ const handleReply = async () => {
 
 const handleConfirmResolved = async () => {
   if (!conversation.value) {
-    ElMessage.warning('当前反馈单尚未加载完成')
+    showAppWarning('当前反馈单尚未加载完成')
     return
   }
   if (conversation.value.status !== 'resolved') {
-    ElMessage.warning('当前反馈单还未进入待确认阶段')
+    showAppWarning('当前反馈单还未进入待确认阶段')
     return
   }
 
@@ -545,7 +547,7 @@ const handleConfirmResolved = async () => {
     await confirmClientFeedbackResolved(conversation.value.id)
     await loadConversationDetail(conversation.value.id)
     reconnectTip.value = '你已确认处理完成，当前反馈单已归档保留。'
-    ElMessage.success('已确认问题处理完成')
+    showAppSuccess('已确认问题处理完成')
   } catch (error) {
     void showCriticalErrorDialog(error, {
       title: '确认处理结果失败',
@@ -559,11 +561,11 @@ const handleConfirmResolved = async () => {
 
 const handleWithdrawConversation = async () => {
   if (!conversation.value) {
-    ElMessage.warning('当前反馈单尚未加载完成')
+    showAppWarning('当前反馈单尚未加载完成')
     return
   }
   if (!canWithdrawConversation.value) {
-    ElMessage.warning('当前反馈单已关闭，无需重复撤回')
+    showAppWarning('当前反馈单已关闭，无需重复撤回')
     return
   }
 
@@ -582,7 +584,7 @@ const handleWithdrawConversation = async () => {
     if (error === 'cancel' || error === 'close') {
       return
     }
-    ElMessage.error('撤回确认失败，请稍后重试')
+    showAppError('撤回确认失败，请稍后重试')
     return
   }
 
@@ -591,7 +593,7 @@ const handleWithdrawConversation = async () => {
     await withdrawClientFeedbackConversation(conversation.value.id)
     await loadConversationDetail(conversation.value.id)
     reconnectTip.value = '你已主动撤回当前反馈单，会话已关闭并保留历史记录。'
-    ElMessage.success('反馈单已撤回')
+    showAppSuccess('反馈单已撤回')
   } catch (error) {
     void showCriticalErrorDialog(error, {
       title: '撤回反馈单失败',
@@ -627,11 +629,11 @@ const handleContinueFeedback = async () => {
 
 const handleSubmitSatisfaction = async () => {
   if (!conversation.value) {
-    ElMessage.warning('当前反馈单尚未加载完成')
+    showAppWarning('当前反馈单尚未加载完成')
     return
   }
   if (!canRateSatisfaction.value) {
-    ElMessage.warning('当前反馈单尚未进入可评价阶段')
+    showAppWarning('当前反馈单尚未进入可评价阶段')
     return
   }
 
@@ -644,7 +646,7 @@ const handleSubmitSatisfaction = async () => {
     satisfactionDialogVisible.value = false
     await loadConversationDetail(conversation.value.id)
     reconnectTip.value = '已记录你的满意度评价，当前反馈单详情已同步更新。'
-    ElMessage.success('满意度评价已提交')
+    showAppSuccess('满意度评价已提交')
   } catch (error) {
     void showCriticalErrorDialog(error, {
       title: '满意度评价提交失败',
@@ -709,7 +711,7 @@ watch(
       await loadConversationDetail(currentConversationId.value)
       connectRealtime()
     } catch (error) {
-      ElMessage.error(extractErrorMessage(error, '反馈单详情初始化失败，请稍后重试'))
+      showAppError(extractErrorMessage(error, '反馈单详情初始化失败，请稍后重试'))
     }
   },
 )
@@ -723,7 +725,7 @@ watch(
     try {
       await loadConversationDetail(conversationId)
     } catch (error) {
-      ElMessage.error(extractErrorMessage(error, '反馈单详情加载失败，请稍后重试'))
+      showAppError(extractErrorMessage(error, '反馈单详情加载失败，请稍后重试'))
     }
   },
 )
@@ -737,7 +739,7 @@ onMounted(async () => {
     await loadConversationDetail(currentConversationId.value)
     connectRealtime()
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '反馈单详情加载失败，请稍后重试'))
+    showAppError(extractErrorMessage(error, '反馈单详情加载失败，请稍后重试'))
   }
 })
 
@@ -1269,7 +1271,7 @@ onBeforeUnmount(() => {
         返回我的会话
       </button>
     </article>
-  
+
 
     <Teleport to="body">
       <div v-if="previewImageUrl" class="feedback-preview-overlay" @click.self="previewImageUrl = ''">

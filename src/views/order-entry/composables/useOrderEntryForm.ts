@@ -8,7 +8,7 @@
  */
 
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+
 import { useRouter } from 'vue-router'
 import { orderApi, productApi } from '@/api'
 import type { SubmitOrderPayload } from '@/api/modules/order'
@@ -23,6 +23,9 @@ import {
   resolveUserScopedStorageKey,
 } from '@/utils/storage-user-scope'
 import type { FocusField, OrderEntryDrawerForm, OrderHeaderForm, OrderItemRow } from '../types'
+
+
+import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 /**
  * 数值归一化：
@@ -403,7 +406,7 @@ export const useOrderEntryForm = () => {
         isActive: true,
       })
     } catch (error) {
-      ElMessage.error(extractErrorMessage(error, '产品加载失败，请稍后重试'))
+      showAppError(extractErrorMessage(error, '产品加载失败，请稍后重试'))
     } finally {
       productsLoading.value = false
     }
@@ -717,7 +720,7 @@ export const useOrderEntryForm = () => {
     }
 
     if (!validSubmitItems.value.length) {
-      ElMessage.warning('请至少录入一条有效明细（已选择产品且数量大于 0）')
+      showAppWarning('请至少录入一条有效明细（已选择产品且数量大于 0）')
       return
     }
 
@@ -727,15 +730,15 @@ export const useOrderEntryForm = () => {
       return hasProduct && hasQty && normalizeNumber(row.unitPrice) <= 0
     })
     if (hasInvalidPriceRow) {
-      ElMessage.warning('存在单价小于等于 0 的明细，请先修正后再保存')
+      showAppWarning('存在单价小于等于 0 的明细，请先修正后再保存')
       return
     }
     if (!headerForm.issuerName.trim()) {
-      ElMessage.warning('请填写出单人')
+      showAppWarning('请填写出单人')
       return
     }
     if (headerForm.orderType === 'department' && !headerForm.customerDepartmentName.trim()) {
-      ElMessage.warning('部门单必须填写客户部门')
+      showAppWarning('部门单必须填写客户部门')
       return
     }
 
@@ -758,9 +761,9 @@ export const useOrderEntryForm = () => {
         items: submitItems,
       } as SubmitOrderPayload)
 
-      ElMessage.success(`保存成功，单号：${result.order.showNo}`)
+      showAppSuccess(`保存成功，单号：${result.order.showNo}`)
       if (autoCreatedProductNames.value.length) {
-        ElMessage.success(`已自动建档商品：${[...new Set(autoCreatedProductNames.value)].join('、')}`)
+        showAppSuccess(`已自动建档商品：${[...new Set(autoCreatedProductNames.value)].join('、')}`)
       }
 
       resetForm()

@@ -14,7 +14,7 @@
 
 
 import { computed, nextTick, onActivated, onMounted, ref } from 'vue'
-import { ElMessage, type FormInstance, type FormRules, type TableInstance } from 'element-plus'
+import { type FormInstance, type FormRules, type TableInstance } from 'element-plus'
 import type { RequestConfig } from '@/api/http'
 import { createTag, getTagList, type Tag } from '@/api/modules/tag'
 import {
@@ -44,6 +44,7 @@ import {
   normalizeSubmitNumber,
   normalizeSubmitText,
 } from '@/utils/submit-feedback'
+import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 import {
   compareProductCode,
   createBatchCreateRow,
@@ -406,7 +407,7 @@ const handleEditProduct = async (row: ProductRecord) => {
       handleEdit(detail)
     },
     onError: (error) => {
-      ElMessage.error(extractErrorMessage(error, '获取产品详情失败'))
+      showAppError(extractErrorMessage(error, '获取产品详情失败'))
     },
     onFinally: () => {
       editingProductId.value = ''
@@ -464,7 +465,7 @@ const resolveTagIds = async (tagValues: Array<string | number>, silent = false):
   if (autoCreatedTagNames.length) {
     hasAutoCreatedTags.value = true
     if (!silent) {
-      ElMessage.success(`已自动创建标签：${[...new Set(autoCreatedTagNames)].join('、')}`)
+      showAppSuccess(`已自动创建标签：${[...new Set(autoCreatedTagNames)].join('、')}`)
     }
   }
 
@@ -480,7 +481,7 @@ const handleBatchUpdateStatus = async (isActive: boolean) => {
     return
   }
   if (!selectedProductIds.value.length) {
-    ElMessage.warning('请先选择要批量处理的产品')
+    showAppWarning('请先选择要批量处理的产品')
     return
   }
 
@@ -493,9 +494,9 @@ const handleBatchUpdateStatus = async (isActive: boolean) => {
     })
     await clearSelection()
     await reloadProducts()
-    ElMessage.success(`已批量${isActive ? '启用' : '停用'} ${updatedCount} 个产品`)
+    showAppSuccess(`已批量${isActive ? '启用' : '停用'} ${updatedCount} 个产品`)
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '批量修改失败'))
+    showAppError(extractErrorMessage(error, '批量修改失败'))
   } finally {
     batchSubmitting.value = false
   }
@@ -515,7 +516,7 @@ const resetBatchCreateRows = () => {
 
 const addBatchCreateRow = () => {
   if (batchCreateRows.value.length >= BATCH_CREATE_MAX_ROWS) {
-    ElMessage.warning(`单次最多新增 ${BATCH_CREATE_MAX_ROWS} 行`)
+    showAppWarning(`单次最多新增 ${BATCH_CREATE_MAX_ROWS} 行`)
     return
   }
   batchCreateRows.value.push(createBatchCreateFormRow())
@@ -523,7 +524,7 @@ const addBatchCreateRow = () => {
 
 const removeBatchCreateRow = (rowId: string) => {
   if (batchCreateRows.value.length <= 1) {
-    ElMessage.warning('至少保留一行产品')
+    showAppWarning('至少保留一行产品')
     return
   }
   batchCreateRows.value = batchCreateRows.value.filter((row) => row.rowId !== rowId)
@@ -535,7 +536,7 @@ const handleBatchCreate = async () => {
   }
   const validationError = validateBatchCreateRows(batchCreateRows.value)
   if (validationError) {
-    ElMessage.warning(validationError)
+    showAppWarning(validationError)
     return
   }
 
@@ -568,14 +569,14 @@ const handleBatchCreate = async () => {
     })
     if (hasAutoCreatedTags.value) {
       await loadTags()
-      ElMessage.success('已自动创建并关联缺失标签')
+      showAppSuccess('已自动创建并关联缺失标签')
     }
     await clearSelection()
     await reloadProducts()
     batchCreateDialogVisible.value = false
-    ElMessage.success(`已批量新增 ${createdProducts.length} 个产品`)
+    showAppSuccess(`已批量新增 ${createdProducts.length} 个产品`)
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '批量新增失败'))
+    showAppError(extractErrorMessage(error, '批量新增失败'))
   } finally {
     batchCreateSubmitting.value = false
   }

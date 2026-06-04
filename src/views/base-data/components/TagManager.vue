@@ -15,7 +15,7 @@
 
 import dayjs from 'dayjs'
 import { computed, onActivated, onMounted, ref } from 'vue'
-import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
+import { type FormInstance, type FormRules } from 'element-plus'
 import { getTagAggregate, type TagAggregateResult } from '@/api/modules/dashboard'
 import { createTag, deleteTag, getTagList, updateTag, type CreateTagDto, type Tag } from '@/api/modules/tag'
 import {
@@ -28,6 +28,9 @@ import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
 import { normalizeSubmitText } from '@/utils/submit-feedback'
+
+
+import { showAppError, showAppWarning } from '@/utils/app-alert'
 
 const formRef = ref<FormInstance>()
 const { hasPermission, ensurePermission } = usePermissionAction()
@@ -202,7 +205,7 @@ const aggregateSummary = computed(() => {
 
 const handleAggregateSearch = async () => {
   if (!aggregateTagId.value.trim()) {
-    ElMessage.warning('请选择标签后再查询统计')
+    showAppWarning('请选择标签后再查询统计')
     return
   }
 
@@ -221,7 +224,7 @@ const handleAggregateSearch = async () => {
       aggregateResult.value = result
     },
     onError: (error) => {
-      ElMessage.error(extractErrorMessage(error, '获取标签统计失败'))
+      showAppError(extractErrorMessage(error, '获取标签统计失败'))
     },
     onFinally: () => {
       aggregateLoading.value = false

@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 /**
  * 模块说明：src/views/o2o/O2oProductMallManageView.vue
  * 文件职责：维护线上商品大厅的新增、编辑、上架状态切换与商品预览图上传交互。
@@ -11,7 +11,7 @@
 
 
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+
 import type { UploadRequestOptions } from 'element-plus'
 import { Delete, UploadFilled } from '@element-plus/icons-vue'
 import { BizCrudDialogShell, PageContainer, PassiveNumberInput } from '@/components/common'
@@ -27,6 +27,9 @@ import {
   type UpdateProductDto,
 } from '@/api/modules/product'
 import { useDevice } from '@/composables/useDevice'
+
+
+import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 type O2oProductFormState = {
   id: string
@@ -141,7 +144,7 @@ const resetForm = () => {
   form.detailContent = ''
   form.limitPerUser = 5
   form.currentStock = 0
-  
+
   if (localPreviewUrl.value) {
     URL.revokeObjectURL(localPreviewUrl.value)
   }
@@ -201,7 +204,7 @@ const handleCustomUpload = async (options: UploadRequestOptions) => {
     form.thumbnail = uploadResult.url
     uploadProgress.value = 100
     options.onSuccess?.(uploadResult)
-    ElMessage.success('图片上传完成')
+    showAppSuccess('图片上传完成')
     globalThis.window.setTimeout(() => {
       uploadProgressVisible.value = false
       uploadProgress.value = 0
@@ -209,7 +212,7 @@ const handleCustomUpload = async (options: UploadRequestOptions) => {
   } catch (error) {
     console.error(uploadStage === 'compress' ? '图片压缩失败:' : '图片上传失败:', error)
     const fallbackMessage = uploadStage === 'compress' ? '图片处理失败，请重试' : '图片上传失败，请重试'
-    ElMessage.error(error instanceof Error && error.message.trim() ? error.message : fallbackMessage)
+    showAppError(error instanceof Error && error.message.trim() ? error.message : fallbackMessage)
     uploadProgress.value = 0
     uploadProgressVisible.value = false
   } finally {
@@ -238,7 +241,7 @@ const handleThumbnailDrop = () => {
 
 const handleRemoveThumbnail = () => {
   if (uploadingThumbnail.value) {
-    ElMessage.warning('图片正在上传，请稍后再删除')
+    showAppWarning('图片正在上传，请稍后再删除')
     return
   }
   if (localPreviewUrl.value) {
@@ -248,7 +251,7 @@ const handleRemoveThumbnail = () => {
   form.thumbnail = ''
   uploadProgress.value = 0
   uploadProgressVisible.value = false
-  ElMessage.success('已移除商品预览图')
+  showAppSuccess('已移除商品预览图')
 }
 
 // 详细注释：打开编辑商品弹窗，将商品记录字段回显到表单模型中。
@@ -274,21 +277,21 @@ const openEditDialog = (product: ProductRecord) => {
  */
 const toggleListed = async (product: ProductRecord, nextStatus: 'listed' | 'unlisted') => {
   if (!product.isActive && nextStatus === 'listed') {
-    ElMessage.warning('请先启用商品，再手动上架到线上商城')
+    showAppWarning('请先启用商品，再手动上架到线上商城')
     return
   }
 
   await updateProduct(product.id, {
     o2oStatus: nextStatus,
   })
-  ElMessage.success(nextStatus === 'listed' ? '商品已上架' : '商品已下架')
+  showAppSuccess(nextStatus === 'listed' ? '商品已上架' : '商品已下架')
   await loadProducts()
 }
 
 // 详细注释：提交商品表单（新增/编辑），处理图片上传逻辑并构造对应 payload 发起请求。
 const handleSubmit = async () => {
   if (!form.productName.trim()) {
-    ElMessage.warning('请输入商品名称')
+    showAppWarning('请输入商品名称')
     return
   }
 
@@ -308,7 +311,7 @@ const handleSubmit = async () => {
         limitPerUser: Math.max(1, Math.floor(form.limitPerUser)),
       }
       await updateProduct(form.id, payload)
-      ElMessage.success('商品已更新')
+      showAppSuccess('商品已更新')
     } else {
       const payload: CreateProductDto = {
         productCode: form.productCode.trim() || undefined,
@@ -321,7 +324,7 @@ const handleSubmit = async () => {
         limitPerUser: Math.max(1, Math.floor(form.limitPerUser)),
       }
       await createProduct(payload)
-      ElMessage.success('商品已创建')
+      showAppSuccess('商品已创建')
     }
     dialogVisible.value = false
     await loadProducts()

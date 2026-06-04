@@ -13,12 +13,15 @@
  */
 
 import { computed, onMounted, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessageBox } from 'element-plus'
 import QRCode from 'qrcode'
 import { PageContainer, PassiveNumberInput } from '@/components/common'
 import { getProductList, type ProductRecord } from '@/api/modules/product'
 import { submitSupplierDelivery } from '@/api/modules/inbound'
 import { extractErrorMessage } from '@/utils/error'
+
+
+import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 const loading = ref(false)
 const submitting = ref(false)
@@ -86,7 +89,7 @@ const loadProducts = async () => {
   try {
     products.value = await getProductList({})
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '加载商品列表失败，请稍后重试'))
+    showAppError(extractErrorMessage(error, '加载商品列表失败，请稍后重试'))
   } finally {
     loading.value = false
   }
@@ -115,7 +118,7 @@ const generateQRCode = async (verifyCode: string) => {
   } catch (err) {
     qrCodeDataUrl.value = ''
     qrCodeUnavailable.value = true
-    ElMessage.warning(extractErrorMessage(err, '送货单已生成，但二维码渲染失败，请刷新后到历史单据查看'))
+    showAppWarning(extractErrorMessage(err, '送货单已生成，但二维码渲染失败，请刷新后到历史单据查看'))
   }
 }
 
@@ -123,7 +126,7 @@ const handleSubmit = async () => {
   // 仅提交“商品已选中且数量>0”的有效行，避免空行污染数据
   const validItems = items.value.filter((item) => item.productId && item.qty > 0)
   if (!validItems.length) {
-    ElMessage.warning('请至少添加一件有效的送货商品')
+    showAppWarning('请至少添加一件有效的送货商品')
     return
   }
 
@@ -155,9 +158,9 @@ const handleSubmit = async () => {
     currentShowNo.value = result.order.showNo
     await generateQRCode(verifyCode)
     isSuccess.value = true
-    ElMessage.success('送货单生成成功，可在历史单据中继续改单或撤销')
+    showAppSuccess('送货单生成成功，可在历史单据中继续改单或撤销')
   } catch (err) {
-    ElMessage.error(extractErrorMessage(err, '生成失败'))
+    showAppError(extractErrorMessage(err, '生成失败'))
   } finally {
     submitting.value = false
   }

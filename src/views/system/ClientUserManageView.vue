@@ -9,7 +9,7 @@
 
 import dayjs from 'dayjs'
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
+import { ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { BizCrudDialogShell, BizResponsiveDataCollectionShell, PageContainer, PagePaginationBar, PageToolbarCard } from '@/components/common'
 import {
   createClientUser,
@@ -31,6 +31,8 @@ import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
+
+import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 const listRequest = useStableRequest()
 const { hasPermission, ensurePermission } = usePermissionAction()
@@ -325,7 +327,7 @@ const loadData = async () => {
       applyPaginatedResult(listState, result)
     },
     onError: (error) => {
-      ElMessage.error(extractErrorMessage(error, '获取客户端用户列表失败'))
+      showAppError(extractErrorMessage(error, '获取客户端用户列表失败'))
     },
     onFinally: () => {
       listState.loading = false
@@ -340,7 +342,7 @@ const loadDepartmentOptions = async () => {
     departmentOptions.value = result.options
     departmentPathLookup.value = buildDepartmentPathLookup(result.tree)
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '加载部门配置失败'))
+    showAppError(extractErrorMessage(error, '加载部门配置失败'))
   } finally {
     departmentOptionsLoading.value = false
   }
@@ -398,14 +400,14 @@ const handleSubmitCreate = async () => {
 
   const normalizedUsername = createForm.username.trim()
   if (!normalizedUsername) {
-    ElMessage.warning('请输入用户名')
+    showAppWarning('请输入用户名')
     return
   }
   const normalizedMobile = createForm.mobile.trim()
   const normalizedEmail = createForm.email.trim().toLowerCase()
   const normalizedDepartmentName = normalizeOptionalText(createForm.departmentName)
   if (normalizedDepartmentName && !departmentOptions.value.includes(normalizedDepartmentName)) {
-    ElMessage.warning('请选择系统配置中的部门选项')
+    showAppWarning('请选择系统配置中的部门选项')
     return
   }
 
@@ -422,7 +424,7 @@ const handleSubmitCreate = async () => {
     await createClientUser(payload)
     createVisible.value = false
     resetCreateForm()
-    ElMessage.success('客户端用户已手动新增')
+    showAppSuccess('客户端用户已手动新增')
     listState.query.page = 1
     await loadData()
   } catch (error) {
@@ -447,14 +449,14 @@ const handleSubmitEdit = async () => {
 
   const normalizedUsername = editForm.username.trim()
   if (!normalizedUsername) {
-    ElMessage.warning('请输入用户名')
+    showAppWarning('请输入用户名')
     return
   }
   const normalizedMobile = editForm.mobile.trim()
   const normalizedEmail = editForm.email.trim().toLowerCase()
   const normalizedDepartmentName = normalizeOptionalText(editForm.departmentName)
   if (normalizedDepartmentName && !departmentOptions.value.includes(normalizedDepartmentName)) {
-    ElMessage.warning('请选择系统配置中的部门选项')
+    showAppWarning('请选择系统配置中的部门选项')
     return
   }
 
@@ -470,7 +472,7 @@ const handleSubmitEdit = async () => {
     await updateClientUser(editForm.id, payload)
     editVisible.value = false
     resetEditForm()
-    ElMessage.success('客户端用户资料已更新')
+    showAppSuccess('客户端用户资料已更新')
     await loadData()
   } catch (error) {
     void showCriticalErrorDialog(error, {
@@ -532,7 +534,7 @@ const handleSubmitResetPassword = async () => {
     if (error === 'cancel' || error === 'close') {
       return
     }
-    ElMessage.error(extractErrorMessage(error, '二次确认失败'))
+    showAppError(extractErrorMessage(error, '二次确认失败'))
     return
   }
 
@@ -544,7 +546,7 @@ const handleSubmitResetPassword = async () => {
     await resetClientUserPassword(resetPasswordForm.targetUserId, payload)
     resetPasswordVisible.value = false
     resetClientPasswordForm()
-    ElMessage.success('客户端用户密码已修改')
+    showAppSuccess('客户端用户密码已修改')
     await loadData()
   } catch (error) {
     void showCriticalErrorDialog(error, {
@@ -572,7 +574,7 @@ const handleToggleStatus = async (row: ClientUserManageProfile) => {
       cancelButtonText: '取消',
     })
     await updateClientUserStatus(row.id, nextStatus)
-    ElMessage.success(`${actionLabel}成功`)
+    showAppSuccess(`${actionLabel}成功`)
     await loadData()
   } catch (error) {
     if (error === 'cancel' || error === 'close') {

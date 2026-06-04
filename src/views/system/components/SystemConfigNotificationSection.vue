@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import dayjs from 'dayjs'
-import { ElMessage } from 'element-plus'
+
 import { computed, reactive } from 'vue'
 import type {
   NotificationPresenceSnapshot,
@@ -10,6 +10,8 @@ import type {
 import { testNotificationRuleSend } from '@/api/modules/notification'
 import { extractErrorMessage } from '@/utils/error'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
+
+import { showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 const props = defineProps<{
   rules: NotificationRuleRecord[]
@@ -122,7 +124,7 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: TestChannel
   const blockReason = getTestBlockedReason(rule, channel)
   if (blockReason) {
     setTestFeedback(ruleId, channel, 'error', blockReason)
-    ElMessage.warning(blockReason)
+    showAppWarning(blockReason)
     return
   }
 
@@ -130,14 +132,14 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: TestChannel
   if (testingState[key]) {
     const text = channel === 'feishu' ? '飞书测试发送中，请稍候' : '邮箱测试发送中，请稍候'
     setTestFeedback(ruleId, channel, 'testing', text)
-    ElMessage.info(text)
+    showAppInfo(text)
     return
   }
 
   const testingMessage = channel === 'feishu' ? '正在测试飞书连接，请稍候…' : '正在测试邮箱发送，请稍候…'
   testingState[key] = true
   setTestFeedback(ruleId, channel, 'testing', testingMessage)
-  ElMessage.info(testingMessage)
+  showAppInfo(testingMessage)
 
   try {
     const result = await testNotificationRuleSend({
@@ -148,7 +150,7 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: TestChannel
     if (result.success) {
       const successMessage = result.message || '测试发送成功'
       setTestFeedback(ruleId, channel, 'success', successMessage)
-      ElMessage.success(successMessage)
+      showAppSuccess(successMessage)
       return
     }
     const failureText = result.failures
@@ -157,7 +159,7 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: TestChannel
       .join('；')
     const warningMessage = failureText ? `${result.message}；${failureText}` : (result.message || '测试发送失败')
     setTestFeedback(ruleId, channel, 'error', warningMessage)
-    ElMessage.warning(warningMessage)
+    showAppWarning(warningMessage)
   } catch (error) {
     const errorMessage = extractErrorMessage(error, '测试发送失败，请稍后重试')
     setTestFeedback(ruleId, channel, 'error', errorMessage)

@@ -12,7 +12,7 @@
 
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+
 import {
   buildClientFeedbackConversationGroups,
   buildClientFeedbackNextStepPrompt,
@@ -30,6 +30,9 @@ import { useClientAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { formatDateTime } from '@/utils/date-time'
 import { extractErrorMessage } from '@/utils/error'
+
+
+import { showAppError } from '@/utils/app-alert'
 
 const router = useRouter()
 const clientAuthStore = useClientAuthStore(pinia)
@@ -174,7 +177,7 @@ watch(
       await loadConversations()
       connectRealtime()
     } catch (error) {
-      ElMessage.error(extractErrorMessage(error, '反馈中心初始化失败，请稍后重试'))
+      showAppError(extractErrorMessage(error, '反馈中心初始化失败，请稍后重试'))
     }
   },
 )
@@ -188,7 +191,7 @@ onMounted(async () => {
     await loadConversations()
     connectRealtime()
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '反馈中心加载失败，请稍后重试'))
+    showAppError(extractErrorMessage(error, '反馈中心加载失败，请稍后重试'))
   }
 })
 

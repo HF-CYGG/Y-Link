@@ -15,7 +15,7 @@
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft } from '@element-plus/icons-vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessageBox } from 'element-plus'
 import {
   cancelMyO2oPreorder,
   getO2oMallProducts,
@@ -50,6 +50,7 @@ import { normalizeRequestError } from '@/utils/error'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import ClientOrderEditDialog from '@/views/client/components/ClientOrderEditDialog.vue'
 import ClientOrderReturnDialog from '@/views/client/components/ClientOrderReturnDialog.vue'
+import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 import {
   DEFAULT_VOUCHER_ORIENTATION,
   O2O_PREORDER_REMARK_MAX_LENGTH,
@@ -681,21 +682,21 @@ const removeEditItem = (productId: string) => {
 const addEditProduct = () => {
   const productId = editAddProductId.value.trim()
   if (!productId) {
-    ElMessage.warning('请先选择要加入订单的商品')
+    showAppWarning('请先选择要加入订单的商品')
     return
   }
   if (editOrderItems.value.some((item) => item.productId === productId)) {
-    ElMessage.warning('该商品已在当前订单中')
+    showAppWarning('该商品已在当前订单中')
     return
   }
   const product = mallProducts.value.find((item) => item.id === productId)
   if (!product) {
-    ElMessage.warning('未找到可加入的商品')
+    showAppWarning('未找到可加入的商品')
     return
   }
   const maxQty = toEditableItemMaxQty(product, 0)
   if (maxQty <= 0) {
-    ElMessage.warning('该商品当前库存不足，暂不可加入订单')
+    showAppWarning('该商品当前库存不足，暂不可加入订单')
     return
   }
   editOrderItems.value = [
@@ -773,7 +774,7 @@ const loadMallProducts = async () => {
     }
   } catch (error) {
     const normalizedError = normalizeRequestError(error, '可修改商品加载失败')
-    ElMessage.error(normalizedError.message)
+    showAppError(normalizedError.message)
   } finally {
     editProductsLoading.value = false
   }
@@ -800,7 +801,7 @@ const markCustomerOrderPrintedIfNeeded = async () => {
     })
   } catch (error) {
     const normalizedError = normalizeRequestError(error, '已完成打印/导出，但出库单状态上报失败')
-    ElMessage.warning(normalizedError.message)
+    showAppWarning(normalizedError.message)
   }
 }
 
@@ -853,11 +854,11 @@ const resetDialogTransientState = () => {
 
 const handleOpenVoucherDialog = async () => {
   if (!shouldShowVoucherButton.value) {
-    ElMessage.warning('散客订单不提供正式出库单')
+    showAppWarning('散客订单不提供正式出库单')
     return
   }
   if (!voucherOrder.value) {
-    ElMessage.warning('当前订单暂无可打印内容')
+    showAppWarning('当前订单暂无可打印内容')
     return
   }
   resetVoucherEditableForm()
@@ -868,7 +869,7 @@ const handleOpenVoucherDialog = async () => {
     voucherDialogVisible.value = true
   } catch (error) {
     const normalizedError = normalizeRequestError(error, '正式出库单模块加载失败，请稍后重试')
-    ElMessage.error(normalizedError.message)
+    showAppError(normalizedError.message)
   } finally {
     voucherCapabilityLoading.value = false
   }
@@ -884,7 +885,7 @@ const handleVoucherDialogClosed = () => {
 
 const handlePrintVoucher = async () => {
   if (!voucherOrder.value) {
-    ElMessage.warning('当前订单暂无可打印内容')
+    showAppWarning('当前订单暂无可打印内容')
     return
   }
   cleanupVoucherPrintSideEffects()
@@ -900,11 +901,11 @@ const handlePrintVoucher = async () => {
 
 const handleExportVoucherPdf = async () => {
   if (!enableHtml2pdfExport) {
-    ElMessage.info('PDF 导出开关未启用，当前仅支持打印')
+    showAppInfo('PDF 导出开关未启用，当前仅支持打印')
     return
   }
   if (!voucherOrder.value) {
-    ElMessage.warning('当前订单暂无可导出的凭证')
+    showAppWarning('当前订单暂无可导出的凭证')
     return
   }
   exportPdfLoading.value = true
@@ -914,7 +915,7 @@ const handleExportVoucherPdf = async () => {
     await nextTick()
     const sourceElement = voucherPrintRootRef.value?.querySelector('.voucher-print-document')
     if (!(sourceElement instanceof HTMLElement)) {
-      ElMessage.warning('凭证模板尚未准备完成，请稍后重试')
+      showAppWarning('凭证模板尚未准备完成，请稍后重试')
       return
     }
     await exportVoucherPdf({
@@ -925,10 +926,10 @@ const handleExportVoucherPdf = async () => {
       orientation: voucherOrientation.value,
     })
     await markCustomerOrderPrintedIfNeeded()
-    ElMessage.success('PDF 导出成功')
+    showAppSuccess('PDF 导出成功')
   } catch (error) {
     const normalizedError = normalizeRequestError(error, 'PDF 导出失败，请稍后重试')
-    ElMessage.error(normalizedError.message)
+    showAppError(normalizedError.message)
   } finally {
     exportPdfLoading.value = false
   }
@@ -1037,7 +1038,7 @@ const handleRecallOrder = async () => {
     return
   }
   if (!canRecallOrder.value) {
-    ElMessage.warning('当前订单状态不可撤回')
+    showAppWarning('当前订单状态不可撤回')
     return
   }
 
@@ -1056,7 +1057,7 @@ const handleRecallOrder = async () => {
     if (error === 'cancel' || error === 'close') {
       return
     }
-    ElMessage.error('撤回确认失败，请稍后重试')
+    showAppError('撤回确认失败，请稍后重试')
     return
   }
 
@@ -1072,7 +1073,7 @@ const handleRecallOrder = async () => {
       reason: 'cancelled',
       sourceId: clientOrderRefreshSourceId,
     })
-    ElMessage.success('订单已撤回')
+    showAppSuccess('订单已撤回')
   } catch (error) {
     const normalizedError = normalizeRequestError(error, '撤回订单失败')
     void showCriticalErrorDialog(normalizedError, {
@@ -1087,11 +1088,11 @@ const handleRecallOrder = async () => {
 
 const openEditDialog = () => {
   if (!detail.value) {
-    ElMessage.warning('当前订单不可修改')
+    showAppWarning('当前订单不可修改')
     return
   }
   if (!canModifyOrder.value) {
-    ElMessage.warning(modifyOrderDisabledHint.value || '当前订单不可修改')
+    showAppWarning(modifyOrderDisabledHint.value || '当前订单不可修改')
     return
   }
   resetEditForm()
@@ -1108,7 +1109,7 @@ const handleSubmitOrderEdit = async () => {
     return
   }
   if (!canModifyOrder.value) {
-    ElMessage.warning(modifyOrderDisabledHint.value || '当前订单不可修改')
+    showAppWarning(modifyOrderDisabledHint.value || '当前订单不可修改')
     return
   }
   const normalizedItems = editOrderItems.value
@@ -1119,11 +1120,11 @@ const handleSubmitOrderEdit = async () => {
     }))
     .filter((item) => item.qty > 0)
   if (!normalizedItems.length) {
-    ElMessage.warning('订单至少保留一件商品')
+    showAppWarning('订单至少保留一件商品')
     return
   }
   if (editRemark.value.trim().length > O2O_PREORDER_REMARK_MAX_LENGTH) {
-    ElMessage.warning(`订单备注最多 ${O2O_PREORDER_REMARK_MAX_LENGTH} 个字符`)
+    showAppWarning(`订单备注最多 ${O2O_PREORDER_REMARK_MAX_LENGTH} 个字符`)
     return
   }
 
@@ -1142,7 +1143,7 @@ const handleSubmitOrderEdit = async () => {
     if (error === 'cancel' || error === 'close') {
       return
     }
-    ElMessage.error('改单确认失败，请稍后重试')
+    showAppError('改单确认失败，请稍后重试')
     return
   }
 
@@ -1165,7 +1166,7 @@ const handleSubmitOrderEdit = async () => {
       reason: 'updated',
       sourceId: clientOrderRefreshSourceId,
     })
-    ElMessage.success('订单修改成功')
+    showAppSuccess('订单修改成功')
   } catch (error) {
     const normalizedError = normalizeRequestError(error, '订单修改失败')
     void showCriticalErrorDialog(normalizedError, {
@@ -1180,7 +1181,7 @@ const handleSubmitOrderEdit = async () => {
 
 const openReturnDialog = () => {
   if (!canApplyReturn.value) {
-    ElMessage.warning('当前订单暂无可申请退货的商品')
+    showAppWarning('当前订单暂无可申请退货的商品')
     return
   }
   resetReturnForm()
@@ -1196,16 +1197,16 @@ const handleSubmitReturnRequest = async () => {
     return
   }
   if (!canApplyReturn.value) {
-    ElMessage.warning('当前订单不可申请退货')
+    showAppWarning('当前订单不可申请退货')
     return
   }
   if (!selectedReturnItems.value.length) {
-    ElMessage.warning('请至少选择一件商品并填写退货数量')
+    showAppWarning('请至少选择一件商品并填写退货数量')
     return
   }
   const normalizedReason = returnReason.value.trim()
   if (!normalizedReason) {
-    ElMessage.warning('请填写退货原因')
+    showAppWarning('请填写退货原因')
     return
   }
 
@@ -1224,7 +1225,7 @@ const handleSubmitReturnRequest = async () => {
     if (error === 'cancel' || error === 'close') {
       return
     }
-    ElMessage.error('退货申请确认失败，请稍后重试')
+    showAppError('退货申请确认失败，请稍后重试')
     return
   }
 
@@ -1249,7 +1250,7 @@ const handleSubmitReturnRequest = async () => {
       reason: 'return_requested',
       sourceId: clientOrderRefreshSourceId,
     })
-    ElMessage.success(`退货申请已提交，退货单号：${createdReturnRequest.returnNo}`)
+    showAppSuccess(`退货申请已提交，退货单号：${createdReturnRequest.returnNo}`)
   } catch (error) {
     const normalizedError = normalizeRequestError(error, '提交退货申请失败')
     void showCriticalErrorDialog(normalizedError, {
