@@ -84,15 +84,32 @@ const importFormRef = ref<FormInstance>()
 const importUploadRef = ref<UploadInstance>()
 const selectedImportFile = ref<File | null>(null)
 const importPreviewResult = ref<ImportClientStaffDirectoryPreviewResult | null>(null)
+const importPreviewPage = ref(1)
+const importPreviewPageSize = ref(50)
 const importForm = reactive({
   rawText: '',
 })
 const STAFF_DIRECTORY_IMPORT_FILE_ACCEPT = '.txt,.xlsx'
 const STAFF_DIRECTORY_IMPORT_MAX_FILE_SIZE = 8 * 1024 * 1024
+const STAFF_DIRECTORY_IMPORT_PREVIEW_PAGE_SIZES = [20, 50, 100]
 
 const dialogTitle = computed(() => (dialogMode.value === 'create' ? '新增教职工目录记录' : '编辑教职工目录记录'))
 const actionDisabled = computed(() => props.loading || listLoading.value)
 const hasImportPreview = computed(() => Boolean(importPreviewResult.value?.rows.length))
+const importPreviewRows = computed(() => importPreviewResult.value?.rows ?? [])
+const importPreviewTotal = computed(() => importPreviewRows.value.length)
+const importPreviewPagedRows = computed(() => {
+  const startIndex = (importPreviewPage.value - 1) * importPreviewPageSize.value
+  return importPreviewRows.value.slice(startIndex, startIndex + importPreviewPageSize.value)
+})
+const importPreviewRangeLabel = computed(() => {
+  if (importPreviewTotal.value === 0) {
+    return '当前无预览记录'
+  }
+  const startIndex = (importPreviewPage.value - 1) * importPreviewPageSize.value + 1
+  const endIndex = Math.min(importPreviewPage.value * importPreviewPageSize.value, importPreviewTotal.value)
+  return `当前展示 ${startIndex}-${endIndex} 条`
+})
 const selectedRecordCount = computed(() => selectedRecords.value.length)
 const selectedRegisteredStaffAccountCount = computed(() => {
   return selectedRecords.value.reduce((count, item) => count + (item.isRegistered ? 1 : 0), 0)
@@ -215,6 +232,7 @@ const resetDialogForm = () => {
 
 const resetImportPreview = () => {
   importPreviewResult.value = null
+  importPreviewPage.value = 1
 }
 
 const resetImportForm = () => {
@@ -282,6 +300,7 @@ const handleGenerateImportPreview = async () => {
       : await previewClientStaffDirectoryImport({
           rawText: importForm.rawText,
         })
+    importPreviewPage.value = 1
     importPreviewResult.value = result
     showAppSuccess('识别完成，请核对预览结果后再确认导入')
   } catch (error) {
@@ -290,6 +309,10 @@ const handleGenerateImportPreview = async () => {
   } finally {
     importPreviewLoading.value = false
   }
+}
+
+const handleImportPreviewPageSizeChange = () => {
+  importPreviewPage.value = 1
 }
 
 const loadList = async () => {
@@ -757,10 +780,10 @@ onMounted(() => {
           />
           <el-table
             class="mt-3"
-            :data="importPreviewResult.rows"
+            :data="importPreviewPagedRows"
             border
             stripe
-            table-layout="auto"
+            table-layout="fixed"
             max-height="320"
             empty-text="暂无可导入记录"
           >
@@ -780,6 +803,20 @@ onMounted(() => {
               </template>
             </el-table-column>
           </el-table>
+          <div class="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500">
+            <span>{{ importPreviewRangeLabel }}，确认导入会处理全部 {{ importPreviewTotal }} 条。</span>
+            <el-pagination
+              v-if="importPreviewTotal > importPreviewPageSize"
+              v-model:current-page="importPreviewPage"
+              v-model:page-size="importPreviewPageSize"
+              small
+              background
+              layout="sizes, prev, pager, next"
+              :page-sizes="STAFF_DIRECTORY_IMPORT_PREVIEW_PAGE_SIZES"
+              :total="importPreviewTotal"
+              @size-change="handleImportPreviewPageSizeChange"
+            />
+          </div>
         </div>
       </el-form>
       <template #footer>
