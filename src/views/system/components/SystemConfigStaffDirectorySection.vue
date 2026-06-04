@@ -733,38 +733,46 @@ onMounted(() => {
       align-center
       @closed="resetImportForm"
     >
-      <el-form ref="importFormRef" :model="importForm" label-position="top">
-        <el-form-item label="上传导入文件">
-          <el-upload
-            ref="importUploadRef"
-            class="w-full"
-            drag
-            action=""
-            :auto-upload="false"
-            :show-file-list="false"
-            :accept="STAFF_DIRECTORY_IMPORT_FILE_ACCEPT"
-            @change="handleImportUploadChange"
-          >
-            <div class="py-3">
-              <p class="text-base font-medium text-slate-700">将 txt / xlsx 文件拖到此处，或点击选择文件</p>
-              <p class="mt-2 text-sm text-slate-500">系统会先自动识别内容并生成预览，确认无误后才会正式导入。</p>
+      <el-form
+        ref="importFormRef"
+        :model="importForm"
+        label-position="top"
+        class="staff-directory-import-form"
+        :class="{ 'staff-directory-import-form--with-preview': importPreviewResult }"
+      >
+        <div class="staff-directory-import-source">
+          <el-form-item label="上传导入文件">
+            <el-upload
+              ref="importUploadRef"
+              class="w-full"
+              drag
+              action=""
+              :auto-upload="false"
+              :show-file-list="false"
+              :accept="STAFF_DIRECTORY_IMPORT_FILE_ACCEPT"
+              @change="handleImportUploadChange"
+            >
+              <div class="py-3">
+                <p class="text-base font-medium text-slate-700">将 txt / xlsx 文件拖到此处，或点击选择文件</p>
+                <p class="mt-2 text-sm text-slate-500">系统会先自动识别内容并生成预览，确认无误后才会正式导入。</p>
+              </div>
+            </el-upload>
+            <div v-if="selectedImportFile" class="mt-3 flex flex-wrap items-center gap-3 rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600">
+              <span>已选择：{{ selectedImportFile.name }}</span>
+              <span>大小：{{ Math.max(1, Math.round(selectedImportFile.size / 1024)) }} KB</span>
+              <el-button link type="danger" @click="clearSelectedImportFile">移除文件</el-button>
             </div>
-          </el-upload>
-          <div v-if="selectedImportFile" class="mt-3 flex flex-wrap items-center gap-3 rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600">
-            <span>已选择：{{ selectedImportFile.name }}</span>
-            <span>大小：{{ Math.max(1, Math.round(selectedImportFile.size / 1024)) }} KB</span>
-            <el-button link type="danger" @click="clearSelectedImportFile">移除文件</el-button>
-          </div>
-        </el-form-item>
-        <el-form-item label="目录文本（可选兜底）" prop="rawText">
-          <el-input
-            v-model="importForm.rawText"
-            type="textarea"
-            :rows="12"
-            placeholder="未上传文件时，可直接粘贴文本。示例：&#10;张老师,HY1001,海右书院&#10;李老师,HY1002,海右书院"
-          />
-        </el-form-item>
-        <div v-if="importPreviewResult" class="rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
+          </el-form-item>
+          <el-form-item label="目录文本（可选兜底）" prop="rawText">
+            <el-input
+              v-model="importForm.rawText"
+              type="textarea"
+              :rows="12"
+              placeholder="未上传文件时，可直接粘贴文本。示例：&#10;张老师,HY1001,海右书院&#10;李老师,HY1002,海右书院"
+            />
+          </el-form-item>
+        </div>
+        <div v-if="importPreviewResult" class="staff-directory-import-preview rounded-2xl border border-slate-200 bg-slate-50/70 p-4">
           <div class="flex flex-wrap items-center gap-2">
             <el-tag type="primary">共识别 {{ importPreviewResult.summary.total }} 条</el-tag>
             <el-tag type="success">待新增 {{ importPreviewResult.summary.creatable }} 条</el-tag>
@@ -851,10 +859,66 @@ onMounted(() => {
 
 .staff-directory-dialog--import {
   max-width: min(820px, calc(100vw - 32px));
+  height: min(86vh, 760px);
+  display: flex;
+  flex-direction: column;
 }
 
 .staff-directory-dialog--import .el-dialog__body {
-  max-height: min(62vh, 560px);
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.staff-directory-dialog--import .el-dialog__footer {
+  flex: 0 0 auto;
+}
+
+.staff-directory-import-form {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.staff-directory-import-source {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
+  padding-right: 4px;
+  -webkit-overflow-scrolling: touch;
+}
+
+.staff-directory-import-form--with-preview .staff-directory-import-source {
+  flex: 0 0 min(250px, 34vh);
+}
+
+.staff-directory-import-preview {
+  display: flex;
+  min-height: 0;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.staff-directory-import-preview .el-alert,
+.staff-directory-import-preview > .flex {
+  flex: 0 0 auto;
+}
+
+.staff-directory-import-preview .el-table {
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+@media (max-width: 768px) {
+  .staff-directory-dialog--import {
+    height: min(90vh, 760px);
+  }
+
+  .staff-directory-import-form--with-preview .staff-directory-import-source {
+    flex-basis: min(220px, 30vh);
+  }
 }
 </style>
