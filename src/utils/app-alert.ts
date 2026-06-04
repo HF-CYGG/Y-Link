@@ -82,6 +82,8 @@ export const showAppAlert = (options: AppAlertOptions) => {
   const handler: MessageHandler = ElMessage({
     message: resolveMessageText(message, options.title, options.detail),
     type: options.type,
+    placement: 'top',
+    offset: 16,
     duration,
     showClose: options.closable ?? true,
     onClose: () => removeActiveMessage(id),
@@ -124,7 +126,6 @@ export const showCriticalAppError = (error: unknown, options: CriticalAppErrorOp
     type: 'error',
     title: info.title,
     message: info.message,
-    detail: info.suggestion,
     diagnosticText: info.diagnosticText,
     duration: 0,
   })

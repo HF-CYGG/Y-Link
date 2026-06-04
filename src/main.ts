@@ -12,6 +12,7 @@ import { ElLoadingDirective } from 'element-plus'
 import dayjs from 'dayjs'
 import 'dayjs/locale/zh-cn'
 import 'element-plus/theme-chalk/dark/css-vars.css'
+import 'element-plus/es/components/message/style/css'
 import 'element-plus/es/components/message-box/style/css'
 import './style.css'
 import App from './App.vue'
@@ -32,6 +33,78 @@ if (import.meta.env.DEV) {
   void import('element-plus/dist/index.css')
 }
 
+const USER_CANCEL_MESSAGES = new Set(['cancel', 'close'])
+const EXTERNAL_SCRIPT_SOURCE_PATTERN =
+  /(userscript\.html|chrome-extension:\/\/|moz-extension:\/\/|safari-extension:\/\/|tampermonkey|violentmonkey|greasemonkey|content-script|injected-script|extension-script)/i
+
+const isRecord = (value: unknown): value is Record<string, unknown> => {
+  return typeof value === 'object' && value !== null
+}
+
+const normalizeRuntimeText = (value: unknown) => {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+const collectRuntimeSourceText = (value: unknown) => {
+  if (value instanceof Error) {
+    return [value.name, value.message, value.stack].filter(Boolean).join('\n')
+  }
+
+  if (isRecord(value)) {
+    return [
+      normalizeRuntimeText(value.message),
+      normalizeRuntimeText(value.stack),
+      normalizeRuntimeText(value.filename),
+      normalizeRuntimeText(value.sourceURL),
+    ].filter(Boolean).join('\n')
+  }
+
+  return normalizeRuntimeText(value)
+}
+
+const isUserCancelRuntimeError = (value: unknown) => {
+  if (typeof value === 'string') {
+    return USER_CANCEL_MESSAGES.has(value.trim().toLowerCase())
+  }
+  if (value instanceof Error) {
+    return USER_CANCEL_MESSAGES.has(value.message.trim().toLowerCase())
+  }
+  if (isRecord(value)) {
+    return USER_CANCEL_MESSAGES.has(normalizeRuntimeText(value.message).toLowerCase())
+  }
+  return false
+}
+
+const isElementFormValidationItem = (value: unknown) => {
+  return isRecord(value)
+    && typeof value.message === 'string'
+    && (typeof value.field === 'string' || 'fieldValue' in value)
+}
+
+const isElementFormValidationErrorList = (value: unknown) => {
+  return Array.isArray(value) && value.length > 0 && value.every(isElementFormValidationItem)
+}
+
+const isElementFormValidationPayload = (value: unknown) => {
+  if (!isRecord(value) || value instanceof Error) {
+    return false
+  }
+
+  const fieldErrors = Object.values(value)
+  return fieldErrors.length > 0 && fieldErrors.every(isElementFormValidationErrorList)
+}
+
+const isExternalScriptRuntimeError = (value: unknown, extraSource = '') => {
+  const sourceText = [extraSource, collectRuntimeSourceText(value)].filter(Boolean).join('\n')
+  return EXTERNAL_SCRIPT_SOURCE_PATTERN.test(sourceText)
+}
+
+const shouldIgnoreGlobalRuntimeError = (value: unknown, extraSource = '') => {
+  return isUserCancelRuntimeError(value)
+    || isElementFormValidationPayload(value)
+    || isExternalScriptRuntimeError(value, extraSource)
+}
+
 // 创建应用实例，作为全局能力挂载入口。
 const app = createApp(App)
 
@@ -49,6 +122,10 @@ app.config.warnHandler = (message, _instance, trace) => {
 }
 
 app.config.errorHandler = (error, _instance, info) => {
+  if (shouldIgnoreGlobalRuntimeError(error)) {
+    return
+  }
+
   console.error('[vue error]', info, error)
   void showCriticalErrorDialog(error, {
     title: '页面运行异常',
@@ -130,6 +207,11 @@ installSessionReloginBridge()
 
 if (globalThis.window !== undefined) {
   window.addEventListener('error', (event) => {
+    if (shouldIgnoreGlobalRuntimeError(event.error || event.message, event.filename)) {
+      event.preventDefault()
+      return
+    }
+
     void showCriticalErrorDialog(event.error || event.message, {
       title: '页面脚本异常',
       fallback: '页面脚本异常，请刷新后重试',
@@ -138,6 +220,11 @@ if (globalThis.window !== undefined) {
   })
 
   window.addEventListener('unhandledrejection', (event) => {
+    if (shouldIgnoreGlobalRuntimeError(event.reason)) {
+      event.preventDefault()
+      return
+    }
+
     void showCriticalErrorDialog(event.reason, {
       title: '页面异步操作异常',
       fallback: '页面异步操作异常，请刷新后重试',
