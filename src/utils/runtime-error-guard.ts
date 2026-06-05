@@ -20,6 +20,8 @@ const EXTERNAL_SCRIPT_SOURCE_PATTERN =
   /(userscript\.html|chrome-extension:\/\/|moz-extension:\/\/|safari-extension:\/\/|tampermonkey|violentmonkey|greasemonkey|content-script|injected-script|extension-script)/i
 const CHUNK_STALE_ERROR_PATTERN =
   /(ChunkLoadError|Loading chunk \d+ failed|Loading CSS chunk \d+ failed|Failed to fetch dynamically imported module|Importing a module script failed|error loading dynamically imported module|Unable to preload CSS)/i
+const RESIZE_OBSERVER_LOOP_ERROR_PATTERN =
+  /(ResizeObserver loop limit exceeded|ResizeObserver loop completed with undelivered notifications)/i
 const HTTP_URL_PATTERN = /https?:\/\/[^\s"'<>`]+/gi
 
 const isRecord = (value: unknown): value is Record<string, unknown> => {
@@ -115,6 +117,10 @@ const isChunkStaleRuntimeError = (value: unknown, extraSource = '') => {
   return CHUNK_STALE_ERROR_PATTERN.test(collectSourceText(value, extraSource))
 }
 
+const isResizeObserverLoopRuntimeError = (value: unknown, extraSource = '') => {
+  return RESIZE_OBSERVER_LOOP_ERROR_PATTERN.test(collectSourceText(value, extraSource))
+}
+
 const normalizeRuntimeUrl = (value: string) => {
   return value.replace(/[),.;\]]+$/g, '')
 }
@@ -183,6 +189,10 @@ export const classifyRuntimeError = (value: unknown, extraSource = ''): RuntimeE
 
   if (isElementFormValidationPayload(value)) {
     return { category: 'ignore', reason: 'Element Plus 表单校验对象', value, sourceText }
+  }
+
+  if (isResizeObserverLoopRuntimeError(value, extraSource)) {
+    return { category: 'ignore', reason: '浏览器 ResizeObserver 布局循环告警', value, sourceText }
   }
 
   if (isChunkStaleRuntimeError(value, extraSource)) {

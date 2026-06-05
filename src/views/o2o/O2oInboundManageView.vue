@@ -66,6 +66,7 @@ const inventoryLogPanelHeight = ref('')
 let scanPanelResizeObserver: ResizeObserver | null = null
 const desktopWorkbenchMediaQuery = '(min-width: 1280px)'
 let desktopWorkbenchMediaList: MediaQueryList | null = null
+let inventoryLogPanelHeightFrame = 0
 
 const manualForm = reactive({
   productId: '',
@@ -142,12 +143,33 @@ const isDesktopWorkbenchLayout = () => {
 
 const syncInventoryLogPanelHeight = () => {
   if (!isDesktopWorkbenchLayout()) {
-    inventoryLogPanelHeight.value = ''
+    if (inventoryLogPanelHeight.value) {
+      inventoryLogPanelHeight.value = ''
+    }
     return
   }
 
   const nextHeight = scanPanelRef.value?.offsetHeight ?? 0
-  inventoryLogPanelHeight.value = nextHeight > 0 ? `${nextHeight}px` : ''
+  const nextValue = nextHeight > 0 ? `${nextHeight}px` : ''
+  if (inventoryLogPanelHeight.value !== nextValue) {
+    inventoryLogPanelHeight.value = nextValue
+  }
+}
+
+const scheduleInventoryLogPanelHeightSync = () => {
+  if (globalThis.window === undefined || typeof globalThis.window.requestAnimationFrame !== 'function') {
+    syncInventoryLogPanelHeight()
+    return
+  }
+
+  if (inventoryLogPanelHeightFrame) {
+    return
+  }
+
+  inventoryLogPanelHeightFrame = globalThis.window.requestAnimationFrame(() => {
+    inventoryLogPanelHeightFrame = 0
+    syncInventoryLogPanelHeight()
+  })
 }
 
 const inventoryLogPanelStyle = computed(() => {
@@ -478,16 +500,16 @@ onMounted(async () => {
   focusScanInput()
 
   await nextTick()
-  syncInventoryLogPanelHeight()
+  scheduleInventoryLogPanelHeightSync()
 
   if (globalThis.window !== undefined && typeof globalThis.window.matchMedia === 'function') {
     desktopWorkbenchMediaList = globalThis.window.matchMedia(desktopWorkbenchMediaQuery)
-    desktopWorkbenchMediaList.addEventListener('change', syncInventoryLogPanelHeight)
+    desktopWorkbenchMediaList.addEventListener('change', scheduleInventoryLogPanelHeightSync)
   }
 
   if (typeof ResizeObserver !== 'undefined') {
     scanPanelResizeObserver = new ResizeObserver(() => {
-      syncInventoryLogPanelHeight()
+      scheduleInventoryLogPanelHeightSync()
     })
 
     if (scanPanelRef.value) {
@@ -499,8 +521,12 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   scanPanelResizeObserver?.disconnect()
   scanPanelResizeObserver = null
-  desktopWorkbenchMediaList?.removeEventListener('change', syncInventoryLogPanelHeight)
+  desktopWorkbenchMediaList?.removeEventListener('change', scheduleInventoryLogPanelHeightSync)
   desktopWorkbenchMediaList = null
+  if (inventoryLogPanelHeightFrame && globalThis.window !== undefined) {
+    globalThis.window.cancelAnimationFrame(inventoryLogPanelHeightFrame)
+    inventoryLogPanelHeightFrame = 0
+  }
 })
 </script>
 
