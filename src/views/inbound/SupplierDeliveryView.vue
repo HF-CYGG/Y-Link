@@ -42,6 +42,8 @@ const createDeliveryItemRow = (): DeliveryItemRow => ({
   qty: 1,
 })
 
+const getProductOptionValue = (product: ProductRecord) => String(product.id)
+
 // 供货单明细
 const items = ref<DeliveryItemRow[]>([])
 const remark = ref('')
@@ -143,7 +145,8 @@ const handleSubmit = async () => {
   // 按商品 ID 聚合数量，兼容同一商品被多次录入的场景。
   const uniqueItems = new Map<string, number>()
   for (const item of validItems) {
-    uniqueItems.set(item.productId, (uniqueItems.get(item.productId) || 0) + item.qty)
+    const productId = String(item.productId).trim()
+    uniqueItems.set(productId, (uniqueItems.get(productId) || 0) + item.qty)
   }
 
   const submitData = {
@@ -230,9 +233,9 @@ onMounted(() => {
                     >
                       <el-option
                         v-for="product in products"
-                        :key="product.id"
+                        :key="getProductOptionValue(product)"
                         :label="product.productName"
-                        :value="product.id"
+                        :value="getProductOptionValue(product)"
                       >
                         <span class="float-left">{{ product.productName }}</span>
                         <span class="float-right text-sm text-slate-400">{{ product.productCode }}</span>

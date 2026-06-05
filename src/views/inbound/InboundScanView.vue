@@ -58,6 +58,8 @@ const createEditRow = (): EditItemRow => ({
   qty: 1,
 })
 
+const getProductOptionValue = (product: ProductRecord) => String(product.id)
+
 const editForm = reactive({
   orderId: '',
   remark: '',
@@ -180,12 +182,39 @@ const hydrateEditForm = (detail: InboundOrderDetail) => {
   editForm.remark = detail.order.remark ?? ''
   editForm.items = detail.items.map((item) => ({
     uid: `inbound-scan-edit-${editUidSeed.value++}`,
-    productId: item.productId,
+    productId: String(item.productId),
     qty: Number(item.qty) || 1,
   }))
 
   if (!editForm.items.length) {
     editForm.items = [createEditRow()]
+  }
+}
+
+const ensureProductOptionsFromDetail = (detail: InboundOrderDetail) => {
+  const existingIds = new Set(products.value.map((product) => getProductOptionValue(product)))
+  const fallbackProducts = detail.items
+    .filter((item) => item.productId && !existingIds.has(String(item.productId)))
+    .map((item) => ({
+      id: String(item.productId),
+      productCode: '历史商品',
+      productName: item.productNameSnapshot || '未匹配商品',
+      pinyinAbbr: '',
+      defaultPrice: '0',
+      isActive: false,
+      o2oStatus: 'unlisted' as const,
+      thumbnail: null,
+      detailContent: null,
+      limitPerUser: 0,
+      currentStock: 0,
+      preOrderedStock: 0,
+      availableStock: 0,
+      tagIds: [],
+      tags: [],
+    }))
+
+  if (fallbackProducts.length) {
+    products.value = [...products.value, ...fallbackProducts]
   }
 }
 
@@ -338,10 +367,8 @@ const handleOpenEditDialog = async () => {
   }
 
   await ensureProductsLoaded()
-  if (!products.value.length) {
-    return
-  }
 
+  ensureProductOptionsFromDetail(currentOrder.value)
   hydrateEditForm(currentOrder.value)
   editDialogVisible.value = true
 }
@@ -365,7 +392,8 @@ const buildEditPayload = () => {
 
   const mergedItems = new Map<string, number>()
   validItems.forEach((item) => {
-    mergedItems.set(item.productId, (mergedItems.get(item.productId) || 0) + item.qty)
+    const productId = String(item.productId).trim()
+    mergedItems.set(productId, (mergedItems.get(productId) || 0) + item.qty)
   })
 
   return {
@@ -739,9 +767,9 @@ onBeforeUnmount(() => {
               >
                 <el-option
                   v-for="product in products"
-                  :key="product.id"
+                  :key="getProductOptionValue(product)"
                   :label="product.productName"
-                  :value="product.id"
+                  :value="getProductOptionValue(product)"
                 >
                   <span class="float-left">{{ product.productName }}</span>
                   <span class="float-right text-sm text-slate-400">{{ product.productCode }}</span>

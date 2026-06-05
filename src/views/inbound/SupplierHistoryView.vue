@@ -14,13 +14,17 @@
 
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 
+import { ElMessageBox } from 'element-plus'
 import QRCode from 'qrcode'
 import { useRoute, useRouter } from 'vue-router'
 import { BizResponsiveDrawerShell, PageContainer, PagePaginationBar, PassiveNumberInput } from '@/components/common'
 import {
   cancelSupplierDelivery,
+  deleteSupplierDelivery,
   getSupplierDeliveries,
   getInboundDetail,
+  permanentlyDeleteSupplierDelivery,
+  restoreSupplierDelivery,
   updateSupplierDelivery,
   type InboundOrder,
   type InboundOrderDetail,
@@ -52,6 +56,7 @@ const summary = ref<SupplierDeliverySummary>({
   pending: 0,
   verified: 0,
   cancelled: 0,
+  deleted: 0,
 })
 const detailVisible = ref(false)
 const detailLoading = ref(false)
@@ -59,6 +64,7 @@ const currentDetail = ref<InboundOrderDetail | null>(null)
 const qrCodeDataUrl = ref('')
 const qrCodeUnavailable = ref(false)
 const statusFilter = ref<'all' | InboundOrder['status']>('all')
+const deleteStateFilter = ref<'active' | 'deleted' | 'all'>('active')
 const keyword = ref('')
 const cancelDialogVisible = ref(false)
 const cancelReason = ref('')
@@ -81,6 +87,8 @@ const createEditItemRow = (): EditItemRow => ({
   productId: '',
   qty: 1,
 })
+
+const getProductOptionValue = (product: ProductRecord) => String(product.id)
 
 const editForm = reactive({
   orderId: '',
@@ -131,7 +139,7 @@ const summaryCards = computed(() => {
 
 // 当前是否处于筛选态：用于空态文案与局部提示收口，避免同一信息在多个区域重复出现。
 const isFiltering = computed(() => {
-  return statusFilter.value !== 'all' || Boolean(keyword.value.trim())
+  return statusFilter.value !== 'all' || deleteStateFilter.value !== 'active' || Boolean(keyword.value.trim())
 })
 
 // 列表头仅保留简短结果说明，避免再次重复展示完整筛选摘要。
@@ -144,10 +152,13 @@ const emptyDescription = computed(() => {
   return isFiltering.value ? '当前筛选下暂无单据' : '暂无历史送货记录'
 })
 
-const canEditOrder = (order: InboundOrder) => order.status === 'pending'
-const canCancelOrder = (order: InboundOrder) => order.status === 'pending'
+const canEditOrder = (order: InboundOrder) => order.status === 'pending' && !order.isDeleted
+const canCancelOrder = (order: InboundOrder) => order.status === 'pending' && !order.isDeleted
+const canSoftDeleteOrder = (order: InboundOrder) => !order.isDeleted && order.status !== 'verified'
+const canRestoreOrder = (order: InboundOrder) => order.isDeleted && order.status !== 'verified'
+const canPermanentDeleteOrder = (order: InboundOrder) => order.isDeleted && order.status !== 'verified'
 const shouldShowPendingQrCode = computed(() => {
-  return currentDetail.value?.order.status === 'pending'
+  return currentDetail.value?.order.status === 'pending' && !currentDetail.value.order.isDeleted
 })
 
 const buildListQuery = () => {
@@ -156,6 +167,8 @@ const buildListQuery = () => {
     pageSize: listState.query.pageSize,
     keyword: keyword.value.trim() || undefined,
     status: statusFilter.value === 'all' ? undefined : statusFilter.value,
+    includeDeleted: deleteStateFilter.value === 'all' ? true : undefined,
+    onlyDeleted: deleteStateFilter.value === 'deleted' ? true : undefined,
   }
 }
 
@@ -178,12 +191,39 @@ const ensureEditRowsFromDetail = (detail: InboundOrderDetail) => {
   editForm.remark = detail.order.remark ?? ''
   editForm.items = detail.items.map((item) => ({
     uid: `supplier-history-edit-item-${editUidSeed.value++}`,
-    productId: item.productId,
+    productId: String(item.productId),
     qty: Number(item.qty) || 1,
   }))
 
   if (!editForm.items.length) {
     editForm.items = [createEditItemRow()]
+  }
+}
+
+const ensureProductOptionsFromDetail = (detail: InboundOrderDetail) => {
+  const existingIds = new Set(products.value.map((product) => getProductOptionValue(product)))
+  const fallbackProducts = detail.items
+    .filter((item) => item.productId && !existingIds.has(String(item.productId)))
+    .map((item) => ({
+      id: String(item.productId),
+      productCode: '历史商品',
+      productName: item.productNameSnapshot || '未匹配商品',
+      pinyinAbbr: '',
+      defaultPrice: '0',
+      isActive: false,
+      o2oStatus: 'unlisted' as const,
+      thumbnail: null,
+      detailContent: null,
+      limitPerUser: 0,
+      currentStock: 0,
+      preOrderedStock: 0,
+      availableStock: 0,
+      tagIds: [],
+      tags: [],
+    }))
+
+  if (fallbackProducts.length) {
+    products.value = [...products.value, ...fallbackProducts]
   }
 }
 
@@ -261,7 +301,7 @@ const applyDetailResult = async (detail: InboundOrderDetail, options?: { openDra
 // 详情刷新共用入口：
 // - 列表查看详情、改单成功后详情回写、撤销成功后详情切换都统一走这里；
 // - 避免每个动作各自维护一套“重置二维码 + 请求详情 + 刷新抽屉”的分支。
-const loadDetail = async (row: Pick<InboundOrder, 'id' | 'verifyCode'>, options?: { openDrawer?: boolean }) => {
+const loadDetail = async (row: Pick<InboundOrder, 'id' | 'verifyCode'> & Partial<Pick<InboundOrder, 'isDeleted'>>, options?: { openDrawer?: boolean }) => {
   if (options?.openDrawer !== false) {
     detailVisible.value = true
   }
@@ -273,7 +313,10 @@ const loadDetail = async (row: Pick<InboundOrder, 'id' | 'verifyCode'>, options?
   }
 
   await detailRequest.runLatest({
-    executor: (signal) => getInboundDetail(row.verifyCode, { signal }),
+    executor: (signal) => getInboundDetail(row.verifyCode, {
+      signal,
+      includeDeleted: Boolean(row.isDeleted),
+    }),
     onSuccess: async (detail) => {
       await applyDetailResult(detail, options)
     },
@@ -323,12 +366,10 @@ const openEditDialog = async (row: InboundOrder) => {
   }
 
   await ensureProductsLoaded()
-  if (!products.value.length) {
-    return
-  }
 
   const shouldReuseCurrentDetail = currentDetail.value?.order.id === row.id
   if (shouldReuseCurrentDetail && currentDetail.value) {
+    ensureProductOptionsFromDetail(currentDetail.value)
     ensureEditRowsFromDetail(currentDetail.value)
     editDialogVisible.value = true
     return
@@ -338,6 +379,7 @@ const openEditDialog = async (row: InboundOrder) => {
   await detailRequest.runLatest({
     executor: (signal) => getInboundDetail(row.verifyCode, { signal }),
     onSuccess: (detail) => {
+      ensureProductOptionsFromDetail(detail)
       ensureEditRowsFromDetail(detail)
       editDialogVisible.value = true
     },
@@ -381,6 +423,112 @@ const handleSubmitCancel = async () => {
   })
 }
 
+const handleSoftDeleteOrder = async (order: InboundOrder) => {
+  if (!canSoftDeleteOrder(order)) {
+    showAppWarning(order.status === 'verified' ? '已入库送货单不能删除' : '当前送货单不可删除')
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      `删除后该送货单会从正常列表隐藏，可在“已删除单据”中恢复。\n送货单号：${order.showNo}`,
+      '删除送货单',
+      {
+        type: 'warning',
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+      },
+    )
+  } catch {
+    return
+  }
+
+  await actionRequest.runLatest({
+    executor: (signal) => deleteSupplierDelivery(order.id, { signal }),
+    onSuccess: async (detail) => {
+      if (currentDetail.value?.order.id === detail.order.id) {
+        await applyDetailResult(detail, { openDrawer: true })
+      }
+      await loadData()
+      showAppSuccess('送货单已删除，可在已删除单据中恢复')
+    },
+    onError: (error) => {
+      showAppError(extractErrorMessage(error, '删除送货单失败'))
+    },
+  })
+}
+
+const handleRestoreOrder = async (order: InboundOrder) => {
+  if (!canRestoreOrder(order)) {
+    showAppWarning('当前送货单不可恢复')
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(`确认恢复送货单“${order.showNo}”？`, '恢复送货单', {
+      type: 'warning',
+      confirmButtonText: '确认恢复',
+      cancelButtonText: '取消',
+    })
+  } catch {
+    return
+  }
+
+  await actionRequest.runLatest({
+    executor: (signal) => restoreSupplierDelivery(order.id, { signal }),
+    onSuccess: async (detail) => {
+      if (currentDetail.value?.order.id === detail.order.id) {
+        await applyDetailResult(detail, { openDrawer: true })
+      }
+      await loadData()
+      showAppSuccess('送货单已恢复')
+    },
+    onError: (error) => {
+      showAppError(extractErrorMessage(error, '恢复送货单失败'))
+    },
+  })
+}
+
+const handlePermanentDeleteOrder = async (order: InboundOrder) => {
+  if (!canPermanentDeleteOrder(order)) {
+    showAppWarning('当前送货单不可永久删除')
+    return
+  }
+
+  let confirmShowNo = ''
+  try {
+    const result = await ElMessageBox.prompt(
+      `永久删除后将清理送货单和商品明细，无法恢复。\n请输入送货单号确认：${order.showNo}`,
+      '永久删除送货单',
+      {
+        type: 'error',
+        confirmButtonText: '永久删除',
+        cancelButtonText: '取消',
+        inputPattern: new RegExp(`^${order.showNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
+        inputErrorMessage: '请输入完整送货单号',
+      },
+    )
+    confirmShowNo = result.value
+  } catch {
+    return
+  }
+
+  await actionRequest.runLatest({
+    executor: (signal) => permanentlyDeleteSupplierDelivery(order.id, { confirmShowNo }, { signal }),
+    onSuccess: async () => {
+      if (currentDetail.value?.order.id === order.id) {
+        detailVisible.value = false
+        currentDetail.value = null
+      }
+      await loadData()
+      showAppSuccess('送货单已永久删除')
+    },
+    onError: (error) => {
+      showAppError(extractErrorMessage(error, '永久删除送货单失败'))
+    },
+  })
+}
+
 const buildEditPayload = () => {
   const validItems = editForm.items.filter((item) => item.productId && item.qty > 0)
   if (!validItems.length) {
@@ -389,7 +537,8 @@ const buildEditPayload = () => {
 
   const uniqueItems = new Map<string, number>()
   validItems.forEach((item) => {
-    uniqueItems.set(item.productId, (uniqueItems.get(item.productId) || 0) + item.qty)
+    const productId = String(item.productId).trim()
+    uniqueItems.set(productId, (uniqueItems.get(productId) || 0) + item.qty)
   })
 
   return {
@@ -501,6 +650,16 @@ onMounted(() => {
             <el-radio-button value="verified">已入库</el-radio-button>
             <el-radio-button value="cancelled">已取消</el-radio-button>
           </el-radio-group>
+          <el-select
+            v-model="deleteStateFilter"
+            class="history-filter-card__delete-state lg:w-36"
+            placeholder="单据范围"
+            @change="handleSearch"
+          >
+            <el-option label="正常单据" value="active" />
+            <el-option :label="`已删除 ${summary.deleted}`" value="deleted" />
+            <el-option label="全部单据" value="all" />
+          </el-select>
           <el-button type="primary" @click="handleSearch">搜索</el-button>
         </div>
       </div>
@@ -524,6 +683,7 @@ onMounted(() => {
                 <el-tag :type="getStatusMeta(row.status as InboundOrder['status']).type" effect="light" round>
                   {{ getStatusMeta(row.status as InboundOrder['status']).label }}
                 </el-tag>
+                <el-tag v-if="row.isDeleted" class="ml-2" type="danger" effect="light" round>已删除</el-tag>
               </template>
             </el-table-column>
             <el-table-column label="创建时间" min-width="170">
@@ -556,6 +716,33 @@ onMounted(() => {
                     @click="openCancelDialog(row as InboundOrder)"
                   >
                     撤销
+                  </el-button>
+                  <el-button
+                    v-if="canSoftDeleteOrder(row as InboundOrder)"
+                    class="history-detail-button"
+                    link
+                    type="danger"
+                    @click="handleSoftDeleteOrder(row as InboundOrder)"
+                  >
+                    删除
+                  </el-button>
+                  <el-button
+                    v-if="canRestoreOrder(row as InboundOrder)"
+                    class="history-detail-button"
+                    link
+                    type="primary"
+                    @click="handleRestoreOrder(row as InboundOrder)"
+                  >
+                    恢复
+                  </el-button>
+                  <el-button
+                    v-if="canPermanentDeleteOrder(row as InboundOrder)"
+                    class="history-detail-button"
+                    link
+                    type="danger"
+                    @click="handlePermanentDeleteOrder(row as InboundOrder)"
+                  >
+                    永久删除
                   </el-button>
                   <el-button class="history-detail-button" link type="primary" @click="handleViewDetail(row as InboundOrder)">
                     查看详情
@@ -631,8 +818,35 @@ onMounted(() => {
                     >
                       撤销
                     </el-button>
+                    <el-button
+                      v-if="canSoftDeleteOrder(currentDetail.order)"
+                      type="danger"
+                      plain
+                      @click="handleSoftDeleteOrder(currentDetail.order)"
+                    >
+                      删除
+                    </el-button>
+                    <el-button
+                      v-if="canRestoreOrder(currentDetail.order)"
+                      type="primary"
+                      plain
+                      @click="handleRestoreOrder(currentDetail.order)"
+                    >
+                      恢复
+                    </el-button>
+                    <el-button
+                      v-if="canPermanentDeleteOrder(currentDetail.order)"
+                      type="danger"
+                      plain
+                      @click="handlePermanentDeleteOrder(currentDetail.order)"
+                    >
+                      永久删除
+                    </el-button>
                     <el-tag :type="getStatusMeta(currentDetail.order.status).type" size="small" effect="light" round>
                       {{ getStatusMeta(currentDetail.order.status).label }}
+                    </el-tag>
+                    <el-tag v-if="currentDetail.order.isDeleted" type="danger" size="small" effect="light" round>
+                      已删除
                     </el-tag>
                   </div>
                 </div>
@@ -795,9 +1009,9 @@ onMounted(() => {
                   >
                     <el-option
                       v-for="product in products"
-                      :key="product.id"
+                      :key="getProductOptionValue(product)"
                       :label="product.productName"
-                      :value="product.id"
+                      :value="getProductOptionValue(product)"
                     >
                       <span class="float-left">{{ product.productName }}</span>
                       <span class="float-right text-sm text-slate-400">{{ product.productCode }}</span>

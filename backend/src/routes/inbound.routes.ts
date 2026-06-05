@@ -9,6 +9,7 @@ import { z } from 'zod'
 import { requirePermission, requireRole } from '../middleware/auth.middleware.js'
 import { inboundService } from '../services/inbound.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
+import { extractRequestMeta } from '../utils/request-meta.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 
 export const inboundRouter = Router()
@@ -28,11 +29,17 @@ const submitInboundSchema = z.object({
   ).min(1, '至少选择一个商品'),
 })
 
+const booleanQuerySchema = z.union([z.literal('true'), z.literal('false'), z.boolean()])
+  .optional()
+  .transform((value) => value === true || value === 'true')
+
 const supplierListQuerySchema = z.object({
   keyword: z.string().trim().max(64).optional(),
   status: z.enum(['pending', 'verified', 'cancelled']).optional(),
   page: z.coerce.number().int().min(1).optional(),
   pageSize: z.coerce.number().int().min(1).max(50).optional(),
+  includeDeleted: booleanQuerySchema,
+  onlyDeleted: booleanQuerySchema,
 })
 
 const updateSupplierInboundSchema = z.object({
@@ -47,6 +54,10 @@ const updateSupplierInboundSchema = z.object({
 
 const cancelSupplierInboundSchema = z.object({
   reason: z.string().trim().min(1, '请填写撤销原因').max(255, '撤销原因不能超过 255 个字符'),
+})
+
+const permanentDeleteSupplierInboundSchema = z.object({
+  confirmShowNo: z.string().trim().max(64).optional(),
 })
 
 inboundRouter.post(
@@ -112,6 +123,52 @@ inboundRouter.post(
   }),
 )
 
+// 供货方：软删除未入库送货单
+inboundRouter.delete(
+  '/supplier/:id',
+  requirePermission('inbound:create'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const result = await inboundService.softDeleteSupplierDelivery(authReq.auth, req.params.id, extractRequestMeta(req))
+    res.json({
+      code: 0,
+      message: '删除成功',
+      data: result,
+    })
+  }),
+)
+
+// 供货方：恢复已删除送货单
+inboundRouter.post(
+  '/supplier/:id/restore',
+  requirePermission('inbound:create'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const result = await inboundService.restoreSupplierDelivery(authReq.auth, req.params.id, extractRequestMeta(req))
+    res.json({
+      code: 0,
+      message: '恢复成功',
+      data: result,
+    })
+  }),
+)
+
+// 供货方：永久删除已软删除送货单
+inboundRouter.delete(
+  '/supplier/:id/permanent',
+  requirePermission('inbound:create'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const input = permanentDeleteSupplierInboundSchema.parse(req.body ?? {})
+    const result = await inboundService.purgeSupplierDelivery(authReq.auth, req.params.id, input.confirmShowNo, extractRequestMeta(req))
+    res.json({
+      code: 0,
+      message: '永久删除成功',
+      data: result,
+    })
+  }),
+)
+
 // 供货方/管理端：通过 showNo 查看详情（人工输入单号时兜底）
 inboundRouter.get(
   '/detail/show-no/:showNo',
@@ -119,7 +176,9 @@ inboundRouter.get(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     // 服务层二次兜底：supplier 仅可查询本人单据，防止参数探测导致越权读取。
-    const result = await inboundService.detailByShowNo(req.params.showNo, authReq.auth)
+    const result = await inboundService.detailByShowNo(req.params.showNo, authReq.auth, {
+      includeDeleted: req.query.includeDeleted === 'true',
+    })
     res.json({
       code: 0,
       message: 'ok',
@@ -135,7 +194,9 @@ inboundRouter.get(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     // 即使具备 inbound:view，也需在服务层按角色做可见范围控制。
-    const result = await inboundService.detailByVerifyCode(req.params.verifyCode, authReq.auth)
+    const result = await inboundService.detailByVerifyCode(req.params.verifyCode, authReq.auth, {
+      includeDeleted: req.query.includeDeleted === 'true',
+    })
     res.json({
       code: 0,
       message: 'ok',

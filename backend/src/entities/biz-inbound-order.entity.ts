@@ -153,6 +153,50 @@ export class BizInboundOrder {
   })
   verifiedByDisplayName!: string | null
 
+  @Index('idx_biz_inbound_is_deleted')
+  @Column({
+    name: 'is_deleted',
+    type: 'tinyint',
+    width: 1,
+    default: 0,
+    comment: '是否已删除（软删除）',
+  })
+  isDeleted!: boolean
+
+  @Column({
+    name: 'deleted_at',
+    ...entityColumnOptions.timestamp,
+    nullable: true,
+    comment: '删除时间',
+  })
+  deletedAt!: Date | null
+
+  @Column({
+    name: 'deleted_by_user_id',
+    ...entityColumnOptions.foreignId,
+    nullable: true,
+    comment: '删除操作人 ID',
+  })
+  deletedByUserId!: string | null
+
+  @Column({
+    name: 'deleted_by_username',
+    type: 'varchar',
+    length: 64,
+    nullable: true,
+    comment: '删除操作人账号快照',
+  })
+  deletedByUsername!: string | null
+
+  @Column({
+    name: 'deleted_by_display_name',
+    type: 'varchar',
+    length: 128,
+    nullable: true,
+    comment: '删除操作人姓名快照',
+  })
+  deletedByDisplayName!: string | null
+
   @CreateDateColumn({ name: 'created_at', ...entityColumnOptions.timestamp, comment: '创建时间' })
   createdAt!: Date
 

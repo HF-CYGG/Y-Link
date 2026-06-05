@@ -120,6 +120,11 @@ const SQLITE_REQUIRED_BIZ_INBOUND_ORDER_COLUMNS = [
   'cancelled_by_user_id',
   'cancelled_by_username',
   'cancelled_by_display_name',
+  'is_deleted',
+  'deleted_at',
+  'deleted_by_user_id',
+  'deleted_by_username',
+  'deleted_by_display_name',
 ]
 const SQLITE_REQUIRED_NOTIFICATION_RULE_COLUMNS = [
   'email_recipient_admin_user_ids_json',

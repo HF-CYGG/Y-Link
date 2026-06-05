@@ -46,6 +46,14 @@ export interface CancelSupplierInboundInput {
 }
 
 /**
+ * 供货方永久删除送货单参数：
+ * - confirmShowNo 用于二次确认，避免误删。
+ */
+export interface PermanentDeleteSupplierInboundInput {
+  confirmShowNo?: string
+}
+
+/**
  * 入库送货单模型：
  * - status: pending (待核销), verified (已核销), cancelled (已取消)
  */
@@ -63,6 +71,11 @@ export interface InboundOrder {
   cancelledByUserId: string | null
   cancelledByUsername: string | null
   cancelledByDisplayName: string | null
+  isDeleted: boolean
+  deletedAt: string | null
+  deletedByUserId: string | null
+  deletedByUsername: string | null
+  deletedByDisplayName: string | null
   createdAt: string
   updatedAt: string
   verifiedAt: string | null
@@ -95,6 +108,8 @@ export interface InboundOrderDetail {
 export interface SupplierDeliveryListQuery extends PaginationQueryInput {
   keyword?: string
   status?: 'pending' | 'verified' | 'cancelled'
+  includeDeleted?: boolean
+  onlyDeleted?: boolean
 }
 
 /**
@@ -107,6 +122,7 @@ export interface SupplierDeliverySummary {
   pending: number
   verified: number
   cancelled: number
+  deleted: number
 }
 
 /**
@@ -126,6 +142,10 @@ export interface SupplierDeliveryListResult extends PaginationResult<InboundOrde
 export interface InboundAdminListQuery {
   status?: InboundOrder['status']
   limit?: number
+}
+
+interface InboundDetailRequestConfig extends RequestConfig {
+  includeDeleted?: boolean
 }
 
 /**
@@ -176,20 +196,60 @@ export const cancelSupplierDelivery = (id: string, data: CancelSupplierInboundIn
   })
 
 /**
+ * 供货方软删除未入库送货单：
+ * - 删除后默认历史列表隐藏，可在“已删除单据”中恢复或永久删除。
+ */
+export const deleteSupplierDelivery = (id: string, requestConfig: RequestConfig = {}) =>
+  request<InboundOrderDetail>({
+    ...requestConfig,
+    method: 'DELETE',
+    url: `/inbound/supplier/${id}`,
+  })
+
+/**
+ * 供货方恢复已删除送货单：
+ * - 恢复后单据回到原状态，待入库单据可继续扫码核销。
+ */
+export const restoreSupplierDelivery = (id: string, requestConfig: RequestConfig = {}) =>
+  request<InboundOrderDetail>({
+    ...requestConfig,
+    method: 'POST',
+    url: `/inbound/supplier/${id}/restore`,
+  })
+
+/**
+ * 供货方永久删除已软删除送货单：
+ * - 会清理主单与明细，操作不可恢复。
+ */
+export const permanentlyDeleteSupplierDelivery = (
+  id: string,
+  data: PermanentDeleteSupplierInboundInput = {},
+  requestConfig: RequestConfig = {},
+) =>
+  request<InboundOrderDetail>({
+    ...requestConfig,
+    method: 'DELETE',
+    url: `/inbound/supplier/${id}/permanent`,
+    data,
+  })
+
+/**
  * 查看送货单详情 (通用)：
  * - 默认仍优先兼容核销码查询；
  * - 若调用方传入的是送货单号，则自动改走 showNo 详情接口，避免历史页面或管理端回查直接报 404。
  */
-export const getInboundDetail = (verifyCodeOrShowNo: string, requestConfig: RequestConfig = {}) => {
+export const getInboundDetail = (verifyCodeOrShowNo: string, requestConfig: InboundDetailRequestConfig = {}) => {
   const normalizedCode = verifyCodeOrShowNo.trim()
   const detailPath = isInboundShowNo(normalizedCode)
     ? `/inbound/detail/show-no/${normalizedCode.toUpperCase()}`
     : `/inbound/detail/${normalizedCode}`
+  const { includeDeleted, ...safeRequestConfig } = requestConfig
 
   return request<InboundOrderDetail>({
-    ...requestConfig,
+    ...safeRequestConfig,
     method: 'GET',
     url: detailPath,
+    params: includeDeleted ? { includeDeleted: true } : undefined,
   })
 }
 
@@ -197,12 +257,15 @@ export const getInboundDetail = (verifyCodeOrShowNo: string, requestConfig: Requ
  * 按送货单号查看详情：
  * - 用于扫码失败后的人工录入兜底。
  */
-export const getInboundDetailByShowNo = (showNo: string, requestConfig: RequestConfig = {}) =>
-  request<InboundOrderDetail>({
-    ...requestConfig,
+export const getInboundDetailByShowNo = (showNo: string, requestConfig: InboundDetailRequestConfig = {}) => {
+  const { includeDeleted, ...safeRequestConfig } = requestConfig
+  return request<InboundOrderDetail>({
+    ...safeRequestConfig,
     method: 'GET',
     url: `/inbound/detail/show-no/${showNo}`,
+    params: includeDeleted ? { includeDeleted: true } : undefined,
   })
+}
 
 /**
  * 管理端核销入库：

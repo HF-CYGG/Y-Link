@@ -11,8 +11,10 @@ import { BaseProduct } from '../entities/base-product.entity.js'
 import { BizInboundOrder } from '../entities/biz-inbound-order.entity.js'
 import { BizInboundOrderItem } from '../entities/biz-inbound-order-item.entity.js'
 import { InventoryLog } from '../entities/inventory-log.entity.js'
+import { auditService } from './audit.service.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
+import type { RequestMeta } from '../utils/request-meta.js'
 
 export interface SubmitInboundItemInput {
   productId: string
@@ -34,6 +36,8 @@ export interface SupplierDeliveryListQuery {
   status?: string
   page?: number
   pageSize?: number
+  includeDeleted?: boolean
+  onlyDeleted?: boolean
 }
 
 export interface SupplierDeliverySummaryResult {
@@ -41,6 +45,7 @@ export interface SupplierDeliverySummaryResult {
   pending: number
   verified: number
   cancelled: number
+  deleted: number
 }
 
 export interface SupplierDeliveryListResult {
@@ -64,6 +69,10 @@ class InboundService {
     }
   }
   private readonly supplierInboundStatuses = new Set<BizInboundOrder['status']>(['pending', 'verified', 'cancelled'])
+
+  private isDeleted(order: Pick<BizInboundOrder, 'isDeleted'> | null | undefined): boolean {
+    return Boolean(order?.isDeleted)
+  }
 
   private assertSupplierActor(actor: AuthUserContext) {
     if (actor.role !== 'supplier') {
@@ -128,12 +137,36 @@ class InboundService {
       throw new BizError('送货单不存在', 404)
     }
 
+    if (this.isDeleted(order)) {
+      throw new BizError(`送货单“${order.showNo}”已删除，无法继续${actionLabel}`, 409)
+    }
+
     if (order.status === 'verified') {
       throw new BizError(`送货单“${order.showNo}”已入库，无法继续${actionLabel}`, 409)
     }
 
     if (order.status === 'cancelled') {
       throw new BizError(`送货单“${order.showNo}”已撤销，无法继续${actionLabel}`, 409)
+    }
+
+    return order
+  }
+
+  private async findSupplierOwnedOrder(orderId: string, actor: AuthUserContext, manager = AppDataSource.manager) {
+    this.assertSupplierActor(actor)
+
+    const normalizedOrderId = String(orderId).trim()
+    if (!normalizedOrderId) {
+      throw new BizError('送货单不存在', 404)
+    }
+
+    const order = await manager.getRepository(BizInboundOrder).findOne({
+      where: { id: normalizedOrderId },
+      lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+    })
+
+    if (order?.supplierId !== actor.userId) {
+      throw new BizError('送货单不存在', 404)
     }
 
     return order
@@ -264,6 +297,116 @@ class InboundService {
     })
   }
 
+  async softDeleteSupplierDelivery(actor: AuthUserContext, orderId: string, requestMeta?: RequestMeta) {
+    return AppDataSource.transaction(async (manager) => {
+      const order = await this.findSupplierOwnedOrder(orderId, actor, manager)
+      if (this.isDeleted(order)) {
+        throw new BizError(`送货单“${order.showNo}”已删除，请勿重复删除`, 409)
+      }
+      if (order.status === 'verified') {
+        throw new BizError(`送货单“${order.showNo}”已入库，不能删除入库凭证`, 409)
+      }
+
+      order.isDeleted = true
+      order.deletedAt = new Date()
+      order.deletedByUserId = actor.userId
+      order.deletedByUsername = actor.username
+      order.deletedByDisplayName = actor.displayName || actor.username
+
+      const savedOrder = await manager.getRepository(BizInboundOrder).save(order)
+      await auditService.record({
+        actionType: 'inbound.supplier.delete',
+        actionLabel: '供货方删除送货单',
+        targetType: 'biz_inbound_order',
+        targetId: savedOrder.id,
+        targetCode: savedOrder.showNo,
+        actor,
+        requestMeta,
+        detail: {
+          status: savedOrder.status,
+          supplierId: savedOrder.supplierId,
+          supplierName: savedOrder.supplierName,
+        },
+      }, manager)
+
+      const items = await manager.getRepository(BizInboundOrderItem).find({ where: { orderId: savedOrder.id } })
+      return { order: savedOrder, items }
+    })
+  }
+
+  async restoreSupplierDelivery(actor: AuthUserContext, orderId: string, requestMeta?: RequestMeta) {
+    return AppDataSource.transaction(async (manager) => {
+      const order = await this.findSupplierOwnedOrder(orderId, actor, manager)
+      if (!this.isDeleted(order)) {
+        throw new BizError(`送货单“${order.showNo}”未删除，无需恢复`, 409)
+      }
+      if (order.status === 'verified') {
+        throw new BizError(`送货单“${order.showNo}”已入库，不能恢复删除状态`, 409)
+      }
+
+      order.isDeleted = false
+      order.deletedAt = null
+      order.deletedByUserId = null
+      order.deletedByUsername = null
+      order.deletedByDisplayName = null
+
+      const savedOrder = await manager.getRepository(BizInboundOrder).save(order)
+      await auditService.record({
+        actionType: 'inbound.supplier.restore',
+        actionLabel: '供货方恢复送货单',
+        targetType: 'biz_inbound_order',
+        targetId: savedOrder.id,
+        targetCode: savedOrder.showNo,
+        actor,
+        requestMeta,
+        detail: {
+          status: savedOrder.status,
+          supplierId: savedOrder.supplierId,
+          supplierName: savedOrder.supplierName,
+        },
+      }, manager)
+
+      const items = await manager.getRepository(BizInboundOrderItem).find({ where: { orderId: savedOrder.id } })
+      return { order: savedOrder, items }
+    })
+  }
+
+  async purgeSupplierDelivery(actor: AuthUserContext, orderId: string, confirmShowNo?: string, requestMeta?: RequestMeta) {
+    return AppDataSource.transaction(async (manager) => {
+      const order = await this.findSupplierOwnedOrder(orderId, actor, manager)
+      if (!this.isDeleted(order)) {
+        throw new BizError(`送货单“${order.showNo}”未删除，请先删除后再永久删除`, 409)
+      }
+      if (order.status === 'verified') {
+        throw new BizError(`送货单“${order.showNo}”已入库，不能永久删除入库凭证`, 409)
+      }
+      if (!confirmShowNo || confirmShowNo.trim().toUpperCase() !== order.showNo.toUpperCase()) {
+        throw new BizError('确认单号不一致，已取消永久删除', 400)
+      }
+
+      const items = await manager.getRepository(BizInboundOrderItem).find({ where: { orderId: order.id } })
+      await manager.getRepository(BizInboundOrderItem).delete({ orderId: order.id })
+      await manager.getRepository(BizInboundOrder).delete({ id: order.id })
+      await auditService.record({
+        actionType: 'inbound.supplier.purge',
+        actionLabel: '供货方永久删除送货单',
+        targetType: 'biz_inbound_order',
+        targetId: order.id,
+        targetCode: order.showNo,
+        actor,
+        requestMeta,
+        detail: {
+          status: order.status,
+          supplierId: order.supplierId,
+          supplierName: order.supplierName,
+          itemCount: items.length,
+        },
+      }, manager)
+
+      return { order, items }
+    })
+  }
+
   // 后台现场改单：仓管在扫码核对现场可直接修正待入库单据，再继续完成核销。
   async updateInboundOrderForAdmin(actor: AuthUserContext, orderId: string, input: UpdateSupplierInboundInput) {
     this.assertAdminInboundActor(actor)
@@ -282,6 +425,10 @@ class InboundService {
 
       if (!order) {
         throw new BizError('送货单不存在', 404)
+      }
+
+      if (this.isDeleted(order)) {
+        throw new BizError(`送货单“${order.showNo}”已删除，无法现场改单`, 409)
       }
 
       if (order.status === 'verified') {
@@ -325,19 +472,28 @@ class InboundService {
   }
 
   private async buildSupplierDeliverySummary(supplierId: string): Promise<SupplierDeliverySummaryResult> {
-    const rows = await this.inboundRepo
-      .createQueryBuilder('order')
-      .select('order.status', 'status')
-      .addSelect('COUNT(1)', 'count')
-      .where('order.supplierId = :supplierId', { supplierId })
-      .groupBy('order.status')
-      .getRawMany<{ status: BizInboundOrder['status']; count: string }>()
+    const [rows, deleted] = await Promise.all([
+      this.inboundRepo
+        .createQueryBuilder('order')
+        .select('order.status', 'status')
+        .addSelect('COUNT(1)', 'count')
+        .where('order.supplierId = :supplierId', { supplierId })
+        .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
+        .groupBy('order.status')
+        .getRawMany<{ status: BizInboundOrder['status']; count: string }>(),
+      this.inboundRepo
+        .createQueryBuilder('order')
+        .where('order.supplierId = :supplierId', { supplierId })
+        .andWhere('order.isDeleted = :isDeleted', { isDeleted: true })
+        .getCount(),
+    ])
 
     const summary: SupplierDeliverySummaryResult = {
       total: 0,
       pending: 0,
       verified: 0,
       cancelled: 0,
+      deleted,
     }
     rows.forEach((row) => {
       const count = Number(row.count || 0)
@@ -358,11 +514,19 @@ class InboundService {
     const pageSize = Math.min(50, Math.max(10, Math.floor(Number(query.pageSize || 10))))
     const normalizedKeyword = String(query.keyword || '').trim()
     const normalizedStatus = String(query.status || '').trim() as BizInboundOrder['status'] | ''
+    const includeDeleted = Boolean(query.includeDeleted)
+    const onlyDeleted = Boolean(query.onlyDeleted)
 
     const baseQueryBuilder = this.inboundRepo
       .createQueryBuilder('order')
       .where('order.supplierId = :supplierId', { supplierId: actor.userId })
       .orderBy('order.createdAt', 'DESC')
+
+    if (onlyDeleted) {
+      baseQueryBuilder.andWhere('order.isDeleted = :isDeleted', { isDeleted: true })
+    } else if (!includeDeleted) {
+      baseQueryBuilder.andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
+    }
 
     if (normalizedStatus && this.supplierInboundStatuses.has(normalizedStatus)) {
       baseQueryBuilder.andWhere('order.status = :status', { status: normalizedStatus })
@@ -402,11 +566,14 @@ class InboundService {
     return { order, items }
   }
 
-  async detailByVerifyCode(verifyCode: string, actor: AuthUserContext) {
+  async detailByVerifyCode(verifyCode: string, actor: AuthUserContext, options: { includeDeleted?: boolean } = {}) {
     const normalizedCode = verifyCode.trim().toLowerCase()
     const qb = this.inboundRepo.createQueryBuilder('order').where('order.verifyCode = :verifyCode', {
       verifyCode: normalizedCode,
     })
+    if (!options.includeDeleted) {
+      qb.andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
+    }
     // 核心安全兜底：supplier 只能查询自己创建的单据，避免通过核销码横向读取他人数据。
     if (actor.role === 'supplier') {
       qb.andWhere('order.supplierId = :supplierId', { supplierId: actor.userId })
@@ -420,11 +587,14 @@ class InboundService {
   }
 
   // 供货方/管理端：通过 showNo 查看详情（兼容人工输入单号查询）
-  async detailByShowNo(showNo: string, actor: AuthUserContext) {
+  async detailByShowNo(showNo: string, actor: AuthUserContext, options: { includeDeleted?: boolean } = {}) {
     const normalizedShowNo = showNo.trim().toUpperCase()
     const qb = this.inboundRepo.createQueryBuilder('order').where('order.showNo = :showNo', {
       showNo: normalizedShowNo,
     })
+    if (!options.includeDeleted) {
+      qb.andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
+    }
     // 与 detailByVerifyCode 保持同一权限口径：supplier 仅读取本人送货单。
     if (actor.role === 'supplier') {
       qb.andWhere('order.supplierId = :supplierId', { supplierId: actor.userId })
@@ -451,6 +621,9 @@ class InboundService {
       })
       if (!order) {
         throw new BizError('核销码无效', 404)
+      }
+      if (this.isDeleted(order)) {
+        throw new BizError(`送货单“${order.showNo}”已删除，不能继续扫码入库`, 409)
       }
       if (order.status === 'verified') {
         throw new BizError(`该送货单（${order.showNo}）已入库，请勿重复操作`, 409)
@@ -507,6 +680,7 @@ class InboundService {
   async listAllInboundOrders(actor: AuthUserContext, query: { limit?: number, status?: string }) {
     const limit = Math.min(200, Math.max(1, query.limit || 50))
     const qb = this.inboundRepo.createQueryBuilder('order').orderBy('order.id', 'DESC').take(limit)
+    qb.andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
     // 服务层角色兜底：即便路由层误放开，supplier 也只能看到本人数据。
     if (actor.role === 'supplier') {
       qb.andWhere('order.supplierId = :supplierId', { supplierId: actor.userId })
