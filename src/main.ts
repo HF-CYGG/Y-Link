@@ -20,9 +20,8 @@ import { SESSION_RELOGIN_EVENT, type SessionReloginDetail } from '@/api/http'
 import router from '@/router'
 import { elementPlusIconWhitelist } from '@/icons/element-plus'
 import { useAuthStore, useClientAuthStore, useThemeStore } from '@/store'
-import { showAppWarning } from '@/utils/app-alert'
-import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { classifyRuntimeError, classifyWindowErrorEvent } from '@/utils/runtime-error-guard'
+import { reportRuntimeError } from '@/utils/runtime-error-presenter'
 import pinia from '@/store/pinia'
 
 /**
@@ -53,21 +52,7 @@ app.config.warnHandler = (message, _instance, trace) => {
 
 app.config.errorHandler = (error, _instance, info) => {
   const classification = classifyRuntimeError(error)
-  if (classification.category === 'ignore') {
-    return
-  }
-
-  if (classification.category === 'chunk-stale') {
-    showAppWarning('页面资源已更新，请刷新当前页面后继续操作')
-    return
-  }
-
-  console.error('[vue error]', info, error)
-  void showCriticalErrorDialog(error, {
-    title: '页面运行异常',
-    fallback: '页面运行异常，请刷新后重试',
-    operation: `Vue ${info}`,
-  })
+  reportRuntimeError(`Vue ${info}`, classification, error)
 }
 
 // 统一日期/时间中文化，避免日期面板出现英文月份与星期。
@@ -144,42 +129,14 @@ installSessionReloginBridge()
 if (globalThis.window !== undefined) {
   window.addEventListener('error', (event: ErrorEvent | Event) => {
     const classification = classifyWindowErrorEvent(event)
-    if (classification.category === 'ignore') {
-      event.preventDefault()
-      return
-    }
-
-    if (classification.category === 'chunk-stale') {
-      event.preventDefault()
-      showAppWarning('页面资源已更新，请刷新当前页面后继续操作')
-      return
-    }
-
-    void showCriticalErrorDialog(classification.value, {
-      title: '页面脚本异常',
-      fallback: '页面脚本异常，请刷新后重试',
-      operation: 'window.onerror',
-    })
+    event.preventDefault()
+    reportRuntimeError('window.onerror', classification, event)
   }, true)
 
   window.addEventListener('unhandledrejection', (event) => {
     const classification = classifyRuntimeError(event.reason)
-    if (classification.category === 'ignore') {
-      event.preventDefault()
-      return
-    }
-
-    if (classification.category === 'chunk-stale') {
-      event.preventDefault()
-      showAppWarning('页面资源已更新，请刷新当前页面后继续操作')
-      return
-    }
-
-    void showCriticalErrorDialog(classification.value, {
-      title: '页面异步操作异常',
-      fallback: '页面异步操作异常，请刷新后重试',
-      operation: 'unhandledrejection',
-    })
+    event.preventDefault()
+    reportRuntimeError('unhandledrejection', classification, event.reason)
   })
 }
 

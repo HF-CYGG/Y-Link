@@ -14,9 +14,8 @@ import { canAccessRoute, resolveFirstAccessibleManagementPath, routes } from '@/
 import type { UserSafeProfile } from '@/api/modules/auth'
 import { showPermissionDenied } from '@/utils/permission'
 import { hasRecoverableAdminSessionHint } from '@/utils/auth-storage'
-import { showAppWarning } from '@/utils/app-alert'
-import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { classifyRuntimeError } from '@/utils/runtime-error-guard'
+import { reportRuntimeError } from '@/utils/runtime-error-presenter'
 import pinia from '@/store/pinia'
 
 export const resolveDefaultManagementRedirect = (user?: Pick<UserSafeProfile, 'role'> | null) => {
@@ -313,20 +312,7 @@ router.onError((error, to) => {
     reason: classification.reason,
   })
 
-  if (classification.category === 'ignore') {
-    return
-  }
-
-  if (classification.category === 'chunk-stale') {
-    showAppWarning('页面资源已更新，请刷新当前页面后继续操作')
-    return
-  }
-
-  void showCriticalErrorDialog(classification.value, {
-    title: '页面加载失败',
-    fallback: '当前页面模块加载异常，请稍后重试或联系管理员',
-    operation: `进入 ${to.fullPath}`,
-  })
+  reportRuntimeError(`router:${to.fullPath}`, classification, error)
 })
 
 export { resolveSafeRedirect }

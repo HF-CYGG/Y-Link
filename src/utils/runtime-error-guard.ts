@@ -20,6 +20,7 @@ const EXTERNAL_SCRIPT_SOURCE_PATTERN =
   /(userscript\.html|chrome-extension:\/\/|moz-extension:\/\/|safari-extension:\/\/|tampermonkey|violentmonkey|greasemonkey|content-script|injected-script|extension-script)/i
 const CHUNK_STALE_ERROR_PATTERN =
   /(ChunkLoadError|Loading chunk \d+ failed|Loading CSS chunk \d+ failed|Failed to fetch dynamically imported module|Importing a module script failed|error loading dynamically imported module|Unable to preload CSS)/i
+const HTTP_URL_PATTERN = /https?:\/\/[^\s"'<>`]+/gi
 
 const isRecord = (value: unknown): value is Record<string, unknown> => {
   return typeof value === 'object' && value !== null
@@ -29,24 +30,31 @@ const normalizeRuntimeText = (value: unknown) => {
   return typeof value === 'string' ? value.trim() : ''
 }
 
+const collectRecordSourceText = (value: Record<string, unknown>) => {
+  const config = isRecord(value.config) ? value.config : null
+  const request = isRecord(value.request) ? value.request : null
+
+  return [
+    normalizeRuntimeText(value.message),
+    normalizeRuntimeText(value.stack),
+    normalizeRuntimeText(value.filename),
+    normalizeRuntimeText(value.sourceURL),
+    normalizeRuntimeText(value.url),
+    normalizeRuntimeText(value.href),
+    normalizeRuntimeText(value.src),
+    normalizeRuntimeText(config?.url),
+    normalizeRuntimeText(request?.responseURL),
+  ].filter(Boolean).join('\n')
+}
+
 const collectRuntimeSourceText = (value: unknown) => {
+  const recordSourceText = isRecord(value) ? collectRecordSourceText(value) : ''
+
   if (value instanceof Error) {
-    return [value.name, value.message, value.stack].filter(Boolean).join('\n')
+    return [value.name, value.message, value.stack, recordSourceText].filter(Boolean).join('\n')
   }
 
-  if (isRecord(value)) {
-    return [
-      normalizeRuntimeText(value.message),
-      normalizeRuntimeText(value.stack),
-      normalizeRuntimeText(value.filename),
-      normalizeRuntimeText(value.sourceURL),
-      normalizeRuntimeText(value.url),
-      normalizeRuntimeText(value.href),
-      normalizeRuntimeText(value.src),
-    ].filter(Boolean).join('\n')
-  }
-
-  return normalizeRuntimeText(value)
+  return recordSourceText || normalizeRuntimeText(value)
 }
 
 const collectSourceText = (value: unknown, extraSource = '') => {
@@ -99,11 +107,40 @@ const isElementFormValidationPayload = (value: unknown) => {
 }
 
 const isExternalScriptRuntimeError = (value: unknown, extraSource = '') => {
-  return EXTERNAL_SCRIPT_SOURCE_PATTERN.test(collectSourceText(value, extraSource))
+  const sourceText = collectSourceText(value, extraSource)
+  return EXTERNAL_SCRIPT_SOURCE_PATTERN.test(sourceText) || hasExternalHttpSource(sourceText)
 }
 
 const isChunkStaleRuntimeError = (value: unknown, extraSource = '') => {
   return CHUNK_STALE_ERROR_PATTERN.test(collectSourceText(value, extraSource))
+}
+
+const normalizeRuntimeUrl = (value: string) => {
+  return value.replace(/[),.;\]]+$/g, '')
+}
+
+const getCurrentOrigin = () => {
+  return typeof window === 'undefined' ? '' : window.location.origin
+}
+
+const hasExternalHttpSource = (sourceText: string) => {
+  const currentOrigin = getCurrentOrigin()
+  if (!currentOrigin) {
+    return false
+  }
+
+  for (const match of sourceText.matchAll(HTTP_URL_PATTERN)) {
+    try {
+      const url = new URL(normalizeRuntimeUrl(match[0]))
+      if (url.origin !== currentOrigin) {
+        return true
+      }
+    } catch {
+      // 忽略无法解析的异常片段，保留后续规则判断。
+    }
+  }
+
+  return false
 }
 
 const pickResourceTargetUrl = (target: EventTarget | null) => {
@@ -148,12 +185,12 @@ export const classifyRuntimeError = (value: unknown, extraSource = ''): RuntimeE
     return { category: 'ignore', reason: 'Element Plus 表单校验对象', value, sourceText }
   }
 
-  if (isExternalScriptRuntimeError(value, extraSource)) {
-    return { category: 'ignore', reason: '浏览器扩展或用户脚本异常', value, sourceText }
-  }
-
   if (isChunkStaleRuntimeError(value, extraSource)) {
     return { category: 'chunk-stale', reason: '前端资源版本已更新或动态分包加载失败', value, sourceText }
+  }
+
+  if (isExternalScriptRuntimeError(value, extraSource)) {
+    return { category: 'ignore', reason: '浏览器扩展、用户脚本或第三方资源异常', value, sourceText }
   }
 
   return { category: 'app-error', reason: '应用运行时异常', value, sourceText }
