@@ -124,6 +124,7 @@ const {
   autoRefreshStatusText,
   newOrderNotice,
   canDeleteOrder,
+  canPurgeOrder,
   isOrderRecentlyInserted,
   isOrderDetailActive,
   dismissNewOrderNotice,
@@ -478,7 +479,7 @@ const handleSaveComplianceFlags = async () => {
                     恢复
                   </el-button>
                   <el-button
-                    v-if="canDeleteOrder && row.isDeleted"
+                    v-if="canPurgeOrder && row.isDeleted"
                     link
                     type="danger"
                     @click="handlePurgeOrderWithConfirm(row).catch(() => undefined)"
@@ -574,7 +575,7 @@ const handleSaveComplianceFlags = async () => {
                   恢复
                 </el-button>
                 <el-button
-                  v-if="item.isDeleted"
+                  v-if="canPurgeOrder && item.isDeleted"
                   link
                   type="danger"
                   @click.stop="handlePurgeOrderWithConfirm(item).catch(() => undefined)"

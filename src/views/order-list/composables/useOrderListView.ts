@@ -29,7 +29,7 @@ import {
 } from '@/api/modules/order'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
-import { useAppStore } from '@/store'
+import { useAppStore, useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { extractErrorMessage } from '@/utils/error'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
@@ -121,11 +121,13 @@ export const useOrderListView = () => {
   const route = useRoute()
   const router = useRouter()
   const appStore = useAppStore(pinia)
+  const authStore = useAuthStore(pinia)
   const { hasPermission, ensurePermission } = usePermissionAction()
   const isPhone = computed(() => appStore.isPhone)
   const isTablet = computed(() => appStore.isTablet)
   const canViewOrder = computed(() => hasPermission('orders:view'))
   const canDeleteOrder = computed(() => hasPermission('orders:delete'))
+  const canPurgeOrder = computed(() => canDeleteOrder.value && authStore.currentUser?.role === 'admin')
   const { height: windowHeight } = useWindowSize()
   const listRequest = useStableRequest()
   const detailRequest = useStableRequest()
@@ -730,11 +732,15 @@ export const useOrderListView = () => {
    * - 仅对已软删除单据开放，彻底移除主单与明细；
    * - 若命中“最后一个流水号”，后端会同步回拨流水，便于测试场景连续重建首单。
    */
-  const handlePurgeOrder = async (row: OrderRecord, confirmShowNo: string) => {
+  const handlePurgeOrder = async (row: OrderRecord, confirmShowNo: string, permanentDeletePassword: string) => {
     if (!ensurePermission('orders:delete', '永久删除出库单')) {
       return
     }
-    const result = await purgeOrderById(row.id, { confirmShowNo })
+    if (!canPurgeOrder.value) {
+      showAppError('仅管理员可永久删除出库单')
+      return
+    }
+    const result = await purgeOrderById(row.id, { confirmShowNo, permanentDeletePassword })
     showAppSuccess(
       result.serialRolledBack
         ? `已永久删除单据：${row.showNo}，流水已安全回拨`
@@ -769,7 +775,24 @@ export const useOrderListView = () => {
         type: 'warning',
       },
     )
-    await handlePurgeOrder(row, result.value.trim())
+    const passwordResult = await ElMessageBox.prompt(
+      '请输入容器环境变量中配置的永久删除密码。',
+      '永久删除密码',
+      {
+        confirmButtonText: '确认永久删除',
+        cancelButtonText: '取消',
+        inputPlaceholder: '请输入永久删除密码',
+        inputType: 'password',
+        inputValidator: (value: string) => {
+          if (!String(value || '').trim()) {
+            return '请输入永久删除密码'
+          }
+          return true
+        },
+        type: 'warning',
+      },
+    )
+    await handlePurgeOrder(row, result.value.trim(), passwordResult.value.trim())
   }
 
   const refreshForSubmittedOrder = async () => {
@@ -971,6 +994,7 @@ export const useOrderListView = () => {
     autoRefreshStatusText,
     newOrderNotice,
     canDeleteOrder,
+    canPurgeOrder,
     activeDetailOrderId,
     isOrderRecentlyInserted,
     isOrderDetailActive,

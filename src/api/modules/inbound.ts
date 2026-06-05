@@ -51,6 +51,7 @@ export interface CancelSupplierInboundInput {
  */
 export interface PermanentDeleteSupplierInboundInput {
   confirmShowNo?: string
+  permanentDeletePassword?: string
 }
 
 /**

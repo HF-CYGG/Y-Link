@@ -496,6 +496,7 @@ const handlePermanentDeleteOrder = async (order: InboundOrder) => {
   }
 
   let confirmShowNo = ''
+  let permanentDeletePassword = ''
   try {
     const result = await ElMessageBox.prompt(
       `永久删除后将清理送货单和商品明细，无法恢复。\n请输入送货单号确认：${order.showNo}`,
@@ -509,12 +510,30 @@ const handlePermanentDeleteOrder = async (order: InboundOrder) => {
       },
     )
     confirmShowNo = result.value
+    const passwordResult = await ElMessageBox.prompt(
+      '请输入容器环境变量中配置的永久删除密码。',
+      '永久删除密码',
+      {
+        type: 'error',
+        confirmButtonText: '永久删除',
+        cancelButtonText: '取消',
+        inputType: 'password',
+        inputPlaceholder: '请输入永久删除密码',
+        inputValidator: (value: string) => {
+          if (!String(value || '').trim()) {
+            return '请输入永久删除密码'
+          }
+          return true
+        },
+      },
+    )
+    permanentDeletePassword = passwordResult.value.trim()
   } catch {
     return
   }
 
   await actionRequest.runLatest({
-    executor: (signal) => permanentlyDeleteSupplierDelivery(order.id, { confirmShowNo }, { signal }),
+    executor: (signal) => permanentlyDeleteSupplierDelivery(order.id, { confirmShowNo, permanentDeletePassword }, { signal }),
     onSuccess: async () => {
       if (currentDetail.value?.order.id === order.id) {
         detailVisible.value = false

@@ -157,6 +157,7 @@ const envSchema = z.object({
   // 管理员初始化密码不再提供内置默认值，必须在需要时由私有配置显式提供。
   INIT_ADMIN_PASSWORD: z.string().min(6).optional().transform(normalizeOptionalString),
   INIT_ADMIN_DISPLAY_NAME: z.string().trim().min(1).default('系统管理员'),
+  PERMANENT_DELETE_PASSWORD: z.string().optional().transform(normalizeOptionalString),
   VERIFICATION_CODE_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(8000),
 })
 

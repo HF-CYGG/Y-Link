@@ -369,6 +369,7 @@ export const getOrderDetailByShowNo = async (
 
 export interface DeleteOrderPayload {
   confirmShowNo: string
+  permanentDeletePassword?: string
 }
 
 export interface PurgeOrderResult {

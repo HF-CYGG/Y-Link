@@ -10,6 +10,7 @@ import { requirePermission, requireRole } from '../middleware/auth.middleware.js
 import { inboundService } from '../services/inbound.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
+import { assertPermanentDeletePassword } from '../utils/permanent-delete-password.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 
 export const inboundRouter = Router()
@@ -58,6 +59,7 @@ const cancelSupplierInboundSchema = z.object({
 
 const permanentDeleteSupplierInboundSchema = z.object({
   confirmShowNo: z.string().trim().max(64).optional(),
+  permanentDeletePassword: z.string().optional(),
 })
 
 inboundRouter.post(
@@ -160,6 +162,7 @@ inboundRouter.delete(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const input = permanentDeleteSupplierInboundSchema.parse(req.body ?? {})
+    assertPermanentDeletePassword(input.permanentDeletePassword)
     const result = await inboundService.purgeSupplierDelivery(authReq.auth, req.params.id, input.confirmShowNo, extractRequestMeta(req))
     res.json({
       code: 0,

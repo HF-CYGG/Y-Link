@@ -37,6 +37,8 @@ import {
 } from '@/api/modules/o2o'
 import { getClientDepartmentConfigs } from '@/api/modules/system-config'
 import type { ClientUserAccountType } from '@/api/modules/client-user-manage'
+import { useAuthStore } from '@/store'
+import pinia from '@/store/pinia'
 import { extractErrorMessage } from '@/utils/error'
 import { captureOrderRefreshAnchor, restoreOrderRefreshAnchor } from '@/utils/order-refresh-visual'
 
@@ -102,6 +104,7 @@ const orderRefreshMarkExpiresAtMap = ref<Record<string, number>>({})
 const detailRefreshNoticeExpiresAt = ref(0)
 const lastSilentListRefreshAt = ref(0)
 const router = useRouter()
+const authStore = useAuthStore(pinia)
 const { hasPermission, ensurePermission } = usePermissionAction()
 const orderListRequest = useStableRequest()
 const orderDetailRequest = useStableRequest()
@@ -123,7 +126,9 @@ const query = reactive({
 // 已超时取消、人工取消、已核销都不允许再进入核销流程，避免操作员误判。
 const canGoVerify = computed(() => isO2oOrderPending(activeOrderDetail.value?.order.status))
 const goVerifyButtonText = computed(() => (canGoVerify.value ? '去核销' : '不可核销'))
-const canDeleteCurrentOrder = computed(() => Boolean(activeOrderDetail.value?.order.id && hasPermission('orders:delete')))
+const canDeleteCurrentOrder = computed(() =>
+  Boolean(activeOrderDetail.value?.order.id && hasPermission('orders:delete') && authStore.currentUser?.role === 'admin'),
+)
 
 const formatCurrency = (value: string | number | null | undefined) => {
   return Number(value ?? 0).toFixed(2)
@@ -963,8 +968,13 @@ const handleDeleteCurrentOrder = async () => {
   if (!ensurePermission('orders:delete', '删除订单池订单')) {
     return
   }
+  if (authStore.currentUser?.role !== 'admin') {
+    showAppError('仅管理员可删除订单池订单')
+    return
+  }
 
   const showNo = detail.order.showNo
+  let permanentDeletePassword = ''
   try {
     await ElMessageBox.confirm(
       `确认删除订单“${showNo}”？将移除订单池记录及关联数据，此操作不可撤销。`,
@@ -983,13 +993,32 @@ const handleDeleteCurrentOrder = async () => {
       closeOnClickModal: false,
       confirmButtonClass: 'el-button--danger',
     })
+    const passwordResult = await ElMessageBox.prompt(
+      '请输入容器环境变量中配置的永久删除密码。',
+      '永久删除密码',
+      {
+        type: 'error',
+        confirmButtonText: '确认删除订单',
+        cancelButtonText: '取消',
+        inputType: 'password',
+        inputPlaceholder: '请输入永久删除密码',
+        closeOnClickModal: false,
+        inputValidator: (value: string) => {
+          if (!String(value || '').trim()) {
+            return '请输入永久删除密码'
+          }
+          return true
+        },
+      },
+    )
+    permanentDeletePassword = passwordResult.value.trim()
   } catch {
     return
   }
 
   orderDeleting.value = true
   try {
-    const result = await deleteO2oConsoleOrder(detail.order.id, { confirmShowNo: showNo })
+    const result = await deleteO2oConsoleOrder(detail.order.id, { confirmShowNo: showNo, permanentDeletePassword })
     orders.value = orders.value.filter((item) => item.id !== detail.order.id)
     if (activeOrderId.value === detail.order.id) {
       activeOrderId.value = ''

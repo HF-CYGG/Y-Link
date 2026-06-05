@@ -6,11 +6,12 @@
 
 import { Router } from 'express'
 import { z } from 'zod'
-import { requirePermission } from '../middleware/auth.middleware.js'
+import { requirePermission, requireRole } from '../middleware/auth.middleware.js'
 import { orderService } from '../services/order.service.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
+import { assertPermanentDeletePassword } from '../utils/permanent-delete-password.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 
 const submitOrderSchema = z.object({
@@ -36,6 +37,10 @@ const submitOrderSchema = z.object({
 
 const deleteOrderSchema = z.object({
   confirmShowNo: z.string().trim().min(1, '请填写业务单号完成二次确认'),
+})
+
+const purgeOrderSchema = deleteOrderSchema.extend({
+  permanentDeletePassword: z.string().optional(),
 })
 
 const updateComplianceFlagsSchema = z
@@ -165,9 +170,11 @@ orderRouter.post(
 orderRouter.delete(
   '/:id/purge',
   requirePermission('orders:delete'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
-    const payload = deleteOrderSchema.parse(req.body ?? {})
+    const payload = purgeOrderSchema.parse(req.body ?? {})
+    assertPermanentDeletePassword(payload.permanentDeletePassword)
     const data = await orderService.purgeById(req.params.id, authReq.auth, payload.confirmShowNo, extractRequestMeta(req))
     res.json({
       code: 0,

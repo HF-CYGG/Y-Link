@@ -259,6 +259,7 @@ export interface UpdateO2oComplianceFlagsPayload {
 
 export interface DeleteO2oConsoleOrderPayload {
   confirmShowNo: string
+  permanentDeletePassword?: string
 }
 
 export interface DeleteO2oConsoleOrderResult {

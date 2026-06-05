@@ -7,7 +7,7 @@
 import { Router } from 'express'
 import { z } from 'zod'
 import { requireClientAuth } from '../middleware/client-auth.middleware.js'
-import { requireAuth, requirePermission } from '../middleware/auth.middleware.js'
+import { requireAuth, requirePermission, requireRole } from '../middleware/auth.middleware.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 import type { ClientAuthenticatedRequest } from '../types/client-auth.js'
 import { auditService } from '../services/audit.service.js'
@@ -21,6 +21,7 @@ import {
 } from '../services/o2o-preorder.service.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 import { CLIENT_USER_ACCOUNT_TYPES } from '../entities/client-user.entity.js'
+import { assertPermanentDeletePassword } from '../utils/permanent-delete-password.js'
 
 const submitPreorderSchema = z.object({
   // 详细注释：客户端必须显式传入“是否系统申请”，避免服务端继续使用默认值导致语义失真。
@@ -108,6 +109,7 @@ const complianceFlagsSchema = z
 
 const deleteConsoleOrderSchema = z.object({
   confirmShowNo: z.string().trim().min(1, '请填写订单号完成二次确认'),
+  permanentDeletePassword: z.string().optional(),
 })
 
 const submitReturnRequestSchema = z.object({
@@ -330,9 +332,11 @@ o2oRouter.delete(
   '/orders/:id',
   requireAuth,
   requirePermission('orders:delete'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = deleteConsoleOrderSchema.parse(req.body ?? {})
+    assertPermanentDeletePassword(payload.permanentDeletePassword)
     const data = await o2oPreorderService.deleteConsoleOrder(
       {
         orderId: req.params.id,
