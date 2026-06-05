@@ -35,4 +35,4 @@ backend/uploads/*
 *.njsproj
 *.sln
 *.sw?
-AGENTS.md
+.agents
