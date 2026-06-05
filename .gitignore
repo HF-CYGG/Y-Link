@@ -22,7 +22,7 @@ backend/data/
 backend/uploads/*
 !backend/uploads/.gitkeep
 .local-dev/
-.agents
+.AGENTS.md
 
 # Editor directories and files
 .vscode/*
@@ -35,3 +35,4 @@ backend/uploads/*
 *.njsproj
 *.sln
 *.sw?
+AGENTS.md

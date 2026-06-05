@@ -9,7 +9,7 @@
  */
 
 import { AppDataSource } from '../config/data-source.js'
-import { Brackets, type EntityManager } from 'typeorm'
+import { Brackets } from 'typeorm'
 import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
@@ -425,23 +425,17 @@ export class OrderService {
         throw new BizError('仅已删除单据支持永久删除，请先执行删除操作', 409)
       }
 
-      const latestSameTypeOrderId = await this.loadLatestOrderIdByType(order.orderType, manager)
-      const shouldRollbackSerial = latestSameTypeOrderId === String(order.id)
-      let serialRolledBack = false
-
-      if (shouldRollbackSerial) {
-        const rollbackResult = await orderSerialService.rollbackCurrentIfMatches(order.orderType, order.showNo, manager)
-        serialRolledBack = rollbackResult.applied
-      }
-
-      const auditDetail = {
-        ...this.buildOrderAuditDetail(order),
-        serialRolledBack,
-      }
-
       const deleteResult = await orderRepo.delete({ id: order.id })
       if ((deleteResult.affected ?? 0) <= 0) {
         throw new BizError('永久删除出库单失败，请稍后重试', 500)
+      }
+
+      const serialCalibration = await orderSerialService.recalibrateCurrentFromOccupancy(order.orderType, manager)
+      const serialRolledBack = serialCalibration.rolledBack
+      const auditDetail = {
+        ...this.buildOrderAuditDetail(order),
+        serialRolledBack,
+        serialCalibration,
       }
 
       await auditService.record(
@@ -811,28 +805,6 @@ export class OrderService {
       lineAmount: normalizeDecimalText(item.lineAmount),
       remark: item.remark,
     }))
-  }
-
-  /**
-   * 读取同类型最后一张单据主键：
-   * - 使用创建时间倒序 + 主键倒序双重排序，尽量稳定定位最新生成的单据；
-   * - 安全回拨只允许命中这一张，避免删除历史中间号时把流水号回退。
-   */
-  private async loadLatestOrderIdByType(orderType: string, manager: EntityManager): Promise<string | null> {
-    const latestOrder = await manager.getRepository(BizOutboundOrder).findOne({
-      select: {
-        id: true,
-      },
-      where: {
-        orderType,
-      },
-      order: {
-        createdAt: 'DESC',
-        id: 'DESC',
-      },
-    })
-
-    return latestOrder ? normalizeEntityId(latestOrder.id) : null
   }
 
   /**

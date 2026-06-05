@@ -341,6 +341,43 @@ html.dark .el-drawer {
   transform: translateX(-30px);
 }
 
+/* 工作台内小页面切换动画：用于系统配置、产品中心、用户中心和供货工作台的页内 Tab 切换。 */
+.workbench-horizontal-slide__panel {
+  width: 100%;
+  backface-visibility: hidden;
+  transform: translateZ(0);
+}
+
+.workbench-horizontal-slide-enter-active {
+  transition:
+    transform var(--ylink-motion-normal) var(--ylink-motion-ease),
+    opacity var(--ylink-motion-normal) var(--ylink-motion-ease);
+  will-change: transform, opacity;
+  position: relative;
+  z-index: 2;
+}
+
+.workbench-horizontal-slide-leave-active {
+  transition:
+    transform var(--motion-duration-fast) var(--ylink-motion-ease),
+    opacity var(--motion-duration-fast) var(--ylink-motion-ease);
+  will-change: transform, opacity;
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.workbench-horizontal-slide-enter-from {
+  opacity: 0;
+  transform: translate3d(28px, 0, 0);
+}
+
+.workbench-horizontal-slide-leave-to {
+  opacity: 0;
+  transform: translate3d(-20px, 0, 0);
+}
+
 .client-page-absolute {
   position: absolute;
   top: 0;
@@ -617,7 +654,9 @@ canvas {
   .slide-left-enter-from,
   .slide-left-leave-to,
   .slide-right-enter-from,
-  .slide-right-leave-to {
+  .slide-right-leave-to,
+  .workbench-horizontal-slide-enter-from,
+  .workbench-horizontal-slide-leave-to {
     opacity: 1 !important;
     transform: none !important;
   }

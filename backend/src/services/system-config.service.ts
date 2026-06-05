@@ -1052,7 +1052,6 @@ class SystemConfigService {
         .createQueryBuilder('outboundOrder')
         .select('outboundOrder.showNo', 'showNo')
         .where('outboundOrder.orderType = :orderType', { orderType })
-        .andWhere('outboundOrder.isDeleted = :isDeleted', { isDeleted: false })
         .getRawMany<{ showNo: string }>(),
       manager
         .getRepository(O2oPreorder)

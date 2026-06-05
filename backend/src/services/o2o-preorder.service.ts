@@ -34,7 +34,7 @@ import type { AuthUserContext } from '../types/auth.js'
 import type { ClientAuthContext } from '../types/client-auth.js'
 import { BizError } from '../utils/errors.js'
 import { generateOrderUuid } from '../utils/id-generator.js'
-import { orderSerialService } from './order-serial.service.js'
+import { orderSerialService, type OrderSerialRecalibrationResult } from './order-serial.service.js'
 import { systemConfigService } from './system-config.service.js'
 import { notificationService } from './notification.service.js'
 import { auditService } from './audit.service.js'
@@ -748,38 +748,6 @@ class O2oPreorderService {
         idempotencyKey: this.buildVerifiedPreorderOutboundOrderIdempotencyKey(preorderId),
       },
     })
-  }
-
-  private async loadLatestPreorderIdByType(clientOrderType: O2oClientOrderType, manager: EntityManager) {
-    const latestOrder = await manager.getRepository(O2oPreorder).findOne({
-      select: {
-        id: true,
-      },
-      where: {
-        clientOrderType,
-      },
-      order: {
-        createdAt: 'DESC',
-        id: 'DESC',
-      },
-    })
-    return latestOrder ? String(latestOrder.id) : null
-  }
-
-  private async loadLatestOutboundOrderIdByType(orderType: string, manager: EntityManager) {
-    const latestOrder = await manager.getRepository(BizOutboundOrder).findOne({
-      select: {
-        id: true,
-      },
-      where: {
-        orderType,
-      },
-      order: {
-        createdAt: 'DESC',
-        id: 'DESC',
-      },
-    })
-    return latestOrder ? String(latestOrder.id) : null
   }
 
   private async releasePendingPreorderStockForDeleteInManager(
@@ -2369,30 +2337,17 @@ class O2oPreorderService {
       })
       const returnRequestIds = returnRequests.map((item) => String(item.id))
       const releasedPreorderedQty = await this.releasePendingPreorderStockForDeleteInManager(manager, order, actor)
-      let outboundSerialRolledBack = false
-      let preorderSerialRolledBack = false
+      const affectedOrderTypes = new Set<string>([order.clientOrderType])
+      if (linkedOutboundOrder) {
+        affectedOrderTypes.add(linkedOutboundOrder.orderType)
+      }
 
       if (linkedOutboundOrder) {
-        const latestOutboundOrderId = await this.loadLatestOutboundOrderIdByType(linkedOutboundOrder.orderType, manager)
-        if (latestOutboundOrderId === String(linkedOutboundOrder.id)) {
-          const rollbackResult = await orderSerialService.rollbackCurrentIfMatches(
-            linkedOutboundOrder.orderType,
-            linkedOutboundOrder.showNo,
-            manager,
-          )
-          outboundSerialRolledBack = rollbackResult.applied
-        }
         await outboundOrderItemRepo.delete({ orderId: String(linkedOutboundOrder.id) })
         const deleteOutboundResult = await outboundOrderRepo.delete({ id: String(linkedOutboundOrder.id) })
         if ((deleteOutboundResult.affected ?? 0) <= 0) {
           throw new BizError('关联出库单删除失败，请稍后重试', 500)
         }
-      }
-
-      const latestPreorderId = await this.loadLatestPreorderIdByType(order.clientOrderType, manager)
-      if (latestPreorderId === String(order.id)) {
-        const rollbackResult = await orderSerialService.rollbackCurrentIfMatches(order.clientOrderType, order.showNo, manager)
-        preorderSerialRolledBack = rollbackResult.applied
       }
 
       if (returnRequestIds.length) {
@@ -2404,6 +2359,18 @@ class O2oPreorderService {
       if ((deletePreorderResult.affected ?? 0) <= 0) {
         throw new BizError('订单池订单删除失败，请稍后重试', 500)
       }
+
+      const serialCalibrations: OrderSerialRecalibrationResult[] = []
+      for (const orderType of affectedOrderTypes) {
+        serialCalibrations.push(await orderSerialService.recalibrateCurrentFromOccupancy(orderType, manager))
+      }
+      const serialCalibrationMap = new Map(serialCalibrations.map((item) => [item.orderType, item]))
+      const preorderSerialCalibration = serialCalibrationMap.get(order.clientOrderType)
+      const outboundSerialCalibration = linkedOutboundOrder
+        ? serialCalibrationMap.get(linkedOutboundOrder.orderType as OrderSerialRecalibrationResult['orderType'])
+        : undefined
+      const preorderSerialRolledBack = Boolean(preorderSerialCalibration?.rolledBack)
+      const outboundSerialRolledBack = Boolean(outboundSerialCalibration?.rolledBack)
 
       await auditService.record(
         {
@@ -2424,6 +2391,7 @@ class O2oPreorderService {
             outboundOrderDeleted: Boolean(linkedOutboundOrder),
             outboundSerialRolledBack,
             preorderSerialRolledBack,
+            serialCalibrations,
           },
         },
         manager,

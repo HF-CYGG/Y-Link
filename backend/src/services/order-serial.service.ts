@@ -8,6 +8,8 @@
 
 import type { EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
+import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
+import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
 import { SystemConfig } from '../entities/system-config.entity.js'
 import { isRetryableSqliteLockError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
@@ -31,6 +33,28 @@ export interface OrderSerialRollbackResult {
   applied: boolean
   current: number
   removedSerial: number | null
+}
+
+export interface OrderSerialRecalibrationResult {
+  orderType: OrderType
+  applied: boolean
+  rolledBack: boolean
+  beforeCurrent: number
+  current: number
+  start: number
+  maxOccupiedSerial: number
+  outboundCount: number
+  preorderCount: number
+  latestOutboundShowNo: string | null
+  latestPreorderShowNo: string | null
+}
+
+interface OrderSerialOccupancySnapshot {
+  outboundCount: number
+  preorderCount: number
+  maxOccupiedSerial: number
+  latestOutboundShowNo: string | null
+  latestPreorderShowNo: string | null
 }
 
 class OrderSerialService {
@@ -80,6 +104,21 @@ class OrderSerialService {
 
     return AppDataSource.transaction((transactionManager) =>
       this.rollbackCurrentIfMatchesWithManager(normalizedOrderType, showNo, transactionManager),
+    )
+  }
+
+  async recalibrateCurrentFromOccupancy(orderType: string, manager?: EntityManager): Promise<OrderSerialRecalibrationResult> {
+    const normalizedOrderType = this.normalizeOrderType(orderType)
+    if (!normalizedOrderType) {
+      throw new BizError('订单类型非法，仅支持 department 或 walkin', 400)
+    }
+
+    if (manager) {
+      return this.recalibrateCurrentFromOccupancyWithManager(normalizedOrderType, manager)
+    }
+
+    return AppDataSource.transaction((transactionManager) =>
+      this.recalibrateCurrentFromOccupancyWithManager(normalizedOrderType, transactionManager),
     )
   }
 
@@ -147,6 +186,66 @@ class OrderSerialService {
     }
   }
 
+  private async recalibrateCurrentFromOccupancyWithManager(
+    orderType: OrderType,
+    manager: EntityManager,
+  ): Promise<OrderSerialRecalibrationResult> {
+    const serialRule = ORDER_SERIAL_RULES[orderType]
+    const configMap = await this.loadSerialConfigMap(serialRule.configKeyPrefix, manager)
+    const startKey = `${serialRule.configKeyPrefix}.start`
+    const currentKey = `${serialRule.configKeyPrefix}.current`
+    const start = this.parsePositiveInteger(configMap.get(startKey), `${startKey} 配置异常`)
+    const beforeCurrent = this.parseNonNegativeInteger(configMap.get(currentKey), `${currentKey} 配置异常`)
+    const snapshot = await this.loadOccupancySnapshotWithManager(orderType, manager)
+    const current = Math.max(start - 1, snapshot.maxOccupiedSerial)
+    const applied = current !== beforeCurrent
+
+    if (applied) {
+      await manager.getRepository(SystemConfig).update({ configKey: currentKey }, { configValue: String(current) })
+    }
+
+    return {
+      orderType,
+      applied,
+      rolledBack: current < beforeCurrent,
+      beforeCurrent,
+      current,
+      start,
+      ...snapshot,
+    }
+  }
+
+  private async loadOccupancySnapshotWithManager(
+    orderType: OrderType,
+    manager: EntityManager,
+  ): Promise<OrderSerialOccupancySnapshot> {
+    const serialRule = ORDER_SERIAL_RULES[orderType]
+    const [outboundRows, preorderRows] = await Promise.all([
+      manager
+        .getRepository(BizOutboundOrder)
+        .createQueryBuilder('outboundOrder')
+        .select('outboundOrder.showNo', 'showNo')
+        .where('outboundOrder.orderType = :orderType', { orderType })
+        .getRawMany<{ showNo: string }>(),
+      manager
+        .getRepository(O2oPreorder)
+        .createQueryBuilder('preorder')
+        .select('preorder.showNo', 'showNo')
+        .where('preorder.clientOrderType = :orderType', { orderType })
+        .getRawMany<{ showNo: string }>(),
+    ])
+    const outboundMax = this.pickMaxSerialShowNo(outboundRows, serialRule.prefix)
+    const preorderMax = this.pickMaxSerialShowNo(preorderRows, serialRule.prefix)
+
+    return {
+      outboundCount: outboundRows.length,
+      preorderCount: preorderRows.length,
+      maxOccupiedSerial: Math.max(outboundMax.maxSerial, preorderMax.maxSerial),
+      latestOutboundShowNo: outboundMax.showNo,
+      latestPreorderShowNo: preorderMax.showNo,
+    }
+  }
+
   private async loadSerialConfigMap(configKeyPrefix: string, manager: EntityManager): Promise<Map<string, string>> {
     const keys = [`${configKeyPrefix}.start`, `${configKeyPrefix}.current`, `${configKeyPrefix}.width`]
     const placeholders = keys.map(() => '?').join(', ')
@@ -195,6 +294,22 @@ class OrderSerialService {
       throw new BizError(errorMessage, 500)
     }
     return parsed
+  }
+
+  private pickMaxSerialShowNo(rows: Array<{ showNo: string }>, prefix: string): { maxSerial: number; showNo: string | null } {
+    return rows.reduce(
+      (result, row) => {
+        const serial = this.parseSerialFromShowNo(row.showNo, prefix)
+        if (serial === null || serial <= result.maxSerial) {
+          return result
+        }
+        return {
+          maxSerial: serial,
+          showNo: row.showNo,
+        }
+      },
+      { maxSerial: 0, showNo: null as string | null },
+    )
   }
 
   /**

@@ -14,7 +14,7 @@
 
 
 import dayjs from 'dayjs'
-import { computed, nextTick, onMounted, reactive, ref, toRaw } from 'vue'
+import { computed, nextTick, onActivated, onMounted, reactive, ref, toRaw } from 'vue'
 import { ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { PageContainer, PageToolbarCard } from '@/components/common'
 import {
@@ -101,6 +101,7 @@ const { hasPermission, ensurePermission } = usePermissionAction()
 const formRef = ref<FormInstance>()
 const loading = ref(true)
 const saving = ref(false)
+const hasCompletedInitialLoad = ref(false)
 const loadError = ref('')
 const testSendingChannel = ref<'mobile' | 'email' | ''>('')
 const activeSection = ref<ConfigSectionKey>('order_serial')
@@ -984,6 +985,7 @@ const handleTestVerificationSend = async (channel: 'mobile' | 'email') => {
 const loadData = async () => {
   if (!canViewConfigs.value) {
     loading.value = false
+    hasCompletedInitialLoad.value = true
     sectionLoadingState.order_serial = false
     sectionLoadingState.o2o_rules = false
     sectionLoadingState.customer_service = false
@@ -1141,8 +1143,36 @@ const loadData = async () => {
       sectionLoadingState.order_serial = false
       sectionLoadingState.o2o_rules = false
       loading.value = false
+      hasCompletedInitialLoad.value = true
     },
   })
+}
+
+const refreshOrderSerialConfigsOnActivated = async () => {
+  if (
+    !hasCompletedInitialLoad.value
+    || !canViewConfigs.value
+    || loading.value
+    || saving.value
+    || hasPendingDeferredSections.value
+    || isDirty.value
+  ) {
+    return
+  }
+
+  sectionLoadingState.order_serial = true
+  try {
+    const result = await getOrderSerialConfigs()
+    applyList(result.list)
+    sectionErrorState.order_serial = ''
+    initialSnapshot.value = snapshotForm()
+  } catch (error) {
+    const message = extractErrorMessage(error, '刷新订单流水配置失败，请稍后重试')
+    sectionErrorState.order_serial = message
+    showTopWarning(message)
+  } finally {
+    sectionLoadingState.order_serial = false
+  }
 }
 
 // 保存配置时按业务分区串行提交，避免 SQLite 单连接写事务互相抢锁。
@@ -1318,6 +1348,10 @@ const getVerificationUpdatedAtLabel = (channel: 'mobile' | 'email') => {
 
 onMounted(() => {
   void loadData()
+})
+
+onActivated(() => {
+  void refreshOrderSerialConfigsOnActivated()
 })
 </script>
 
@@ -1511,36 +1545,6 @@ onMounted(() => {
   font-size: 12px;
   font-weight: 400;
   color: #64748b;
-}
-
-.workbench-horizontal-slide-enter-active {
-  transition:
-    transform var(--ylink-motion-normal) var(--ylink-motion-ease),
-    opacity var(--ylink-motion-normal) var(--ylink-motion-ease);
-  will-change: transform, opacity;
-  position: relative;
-  z-index: 2;
-}
-
-.workbench-horizontal-slide-leave-active {
-  transition:
-    transform var(--motion-duration-fast) var(--ylink-motion-ease),
-    opacity var(--motion-duration-fast) var(--ylink-motion-ease);
-  will-change: transform, opacity;
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  pointer-events: none;
-}
-
-.workbench-horizontal-slide-enter-from {
-  opacity: 0;
-  transform: translate3d(28px, 0, 0);
-}
-
-.workbench-horizontal-slide-leave-to {
-  opacity: 0;
-  transform: translate3d(-20px, 0, 0);
 }
 
 .system-config-section-tabs {

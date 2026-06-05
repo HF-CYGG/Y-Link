@@ -120,6 +120,30 @@ async function main() {
     pass('散客流水号连续递增且不受部门流水影响')
 
     const orderRepo = AppDataSource.getRepository(BizOutboundOrder)
+    const thirdWalkinOrder = await orderService.submit(
+      {
+        idempotencyKey: `task2-walkin-third-${Date.now()}`,
+        orderType: 'walkin',
+        customerName: '散客C',
+        items: [{ productId: String(createdProduct.id), qty: 1, unitPrice: 12.5 }],
+      },
+      mockActor,
+    )
+    const thirdWalkinSerial = Number.parseInt(thirdWalkinOrder.order.showNo.replace('hyyz', ''), 10)
+    assert.equal(thirdWalkinSerial, walkinSerialB + 1)
+
+    await orderRepo.update({ id: thirdWalkinOrder.order.id }, { isDeleted: true, deletedAt: new Date() })
+    let recalibrationResult = await orderSerialService.recalibrateCurrentFromOccupancy('walkin')
+    assert.equal(recalibrationResult.current, thirdWalkinSerial)
+    assert.equal(recalibrationResult.maxOccupiedSerial, thirdWalkinSerial)
+    pass('软删除出库单仍占用流水，避免恢复时单号冲突')
+
+    await orderRepo.delete({ id: thirdWalkinOrder.order.id })
+    recalibrationResult = await orderSerialService.recalibrateCurrentFromOccupancy('walkin')
+    assert.equal(recalibrationResult.current, walkinSerialB)
+    assert.equal(recalibrationResult.maxOccupiedSerial, walkinSerialB)
+    assert.equal(recalibrationResult.rolledBack, true)
+    pass('永久删除最大流水单后，current 按剩余最大单号重算')
     const savedWalkinOrder = await orderRepo.findOneOrFail({ where: { id: walkinOrder.order.id } })
     const savedDepartmentOrder = await orderRepo.findOneOrFail({ where: { id: departmentOrder.order.id } })
     assert.equal(savedWalkinOrder.issuerName, mockActor.displayName)
