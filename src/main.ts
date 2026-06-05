@@ -20,7 +20,9 @@ import { SESSION_RELOGIN_EVENT, type SessionReloginDetail } from '@/api/http'
 import router from '@/router'
 import { elementPlusIconWhitelist } from '@/icons/element-plus'
 import { useAuthStore, useClientAuthStore, useThemeStore } from '@/store'
+import { showAppWarning } from '@/utils/app-alert'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
+import { classifyRuntimeError, classifyWindowErrorEvent } from '@/utils/runtime-error-guard'
 import pinia from '@/store/pinia'
 
 /**
@@ -31,78 +33,6 @@ import pinia from '@/store/pinia'
  */
 if (import.meta.env.DEV) {
   void import('element-plus/dist/index.css')
-}
-
-const USER_CANCEL_MESSAGES = new Set(['cancel', 'close'])
-const EXTERNAL_SCRIPT_SOURCE_PATTERN =
-  /(userscript\.html|chrome-extension:\/\/|moz-extension:\/\/|safari-extension:\/\/|tampermonkey|violentmonkey|greasemonkey|content-script|injected-script|extension-script)/i
-
-const isRecord = (value: unknown): value is Record<string, unknown> => {
-  return typeof value === 'object' && value !== null
-}
-
-const normalizeRuntimeText = (value: unknown) => {
-  return typeof value === 'string' ? value.trim() : ''
-}
-
-const collectRuntimeSourceText = (value: unknown) => {
-  if (value instanceof Error) {
-    return [value.name, value.message, value.stack].filter(Boolean).join('\n')
-  }
-
-  if (isRecord(value)) {
-    return [
-      normalizeRuntimeText(value.message),
-      normalizeRuntimeText(value.stack),
-      normalizeRuntimeText(value.filename),
-      normalizeRuntimeText(value.sourceURL),
-    ].filter(Boolean).join('\n')
-  }
-
-  return normalizeRuntimeText(value)
-}
-
-const isUserCancelRuntimeError = (value: unknown) => {
-  if (typeof value === 'string') {
-    return USER_CANCEL_MESSAGES.has(value.trim().toLowerCase())
-  }
-  if (value instanceof Error) {
-    return USER_CANCEL_MESSAGES.has(value.message.trim().toLowerCase())
-  }
-  if (isRecord(value)) {
-    return USER_CANCEL_MESSAGES.has(normalizeRuntimeText(value.message).toLowerCase())
-  }
-  return false
-}
-
-const isElementFormValidationItem = (value: unknown) => {
-  return isRecord(value)
-    && typeof value.message === 'string'
-    && (typeof value.field === 'string' || 'fieldValue' in value)
-}
-
-const isElementFormValidationErrorList = (value: unknown) => {
-  return Array.isArray(value) && value.length > 0 && value.every(isElementFormValidationItem)
-}
-
-const isElementFormValidationPayload = (value: unknown) => {
-  if (!isRecord(value) || value instanceof Error) {
-    return false
-  }
-
-  const fieldErrors = Object.values(value)
-  return fieldErrors.length > 0 && fieldErrors.every(isElementFormValidationErrorList)
-}
-
-const isExternalScriptRuntimeError = (value: unknown, extraSource = '') => {
-  const sourceText = [extraSource, collectRuntimeSourceText(value)].filter(Boolean).join('\n')
-  return EXTERNAL_SCRIPT_SOURCE_PATTERN.test(sourceText)
-}
-
-const shouldIgnoreGlobalRuntimeError = (value: unknown, extraSource = '') => {
-  return isUserCancelRuntimeError(value)
-    || isElementFormValidationPayload(value)
-    || isExternalScriptRuntimeError(value, extraSource)
 }
 
 // 创建应用实例，作为全局能力挂载入口。
@@ -122,7 +52,13 @@ app.config.warnHandler = (message, _instance, trace) => {
 }
 
 app.config.errorHandler = (error, _instance, info) => {
-  if (shouldIgnoreGlobalRuntimeError(error)) {
+  const classification = classifyRuntimeError(error)
+  if (classification.category === 'ignore') {
+    return
+  }
+
+  if (classification.category === 'chunk-stale') {
+    showAppWarning('页面资源已更新，请刷新当前页面后继续操作')
     return
   }
 
@@ -206,26 +142,40 @@ const installSessionReloginBridge = () => {
 installSessionReloginBridge()
 
 if (globalThis.window !== undefined) {
-  window.addEventListener('error', (event) => {
-    if (shouldIgnoreGlobalRuntimeError(event.error || event.message, event.filename)) {
+  window.addEventListener('error', (event: ErrorEvent | Event) => {
+    const classification = classifyWindowErrorEvent(event)
+    if (classification.category === 'ignore') {
       event.preventDefault()
       return
     }
 
-    void showCriticalErrorDialog(event.error || event.message, {
+    if (classification.category === 'chunk-stale') {
+      event.preventDefault()
+      showAppWarning('页面资源已更新，请刷新当前页面后继续操作')
+      return
+    }
+
+    void showCriticalErrorDialog(classification.value, {
       title: '页面脚本异常',
       fallback: '页面脚本异常，请刷新后重试',
       operation: 'window.onerror',
     })
-  })
+  }, true)
 
   window.addEventListener('unhandledrejection', (event) => {
-    if (shouldIgnoreGlobalRuntimeError(event.reason)) {
+    const classification = classifyRuntimeError(event.reason)
+    if (classification.category === 'ignore') {
       event.preventDefault()
       return
     }
 
-    void showCriticalErrorDialog(event.reason, {
+    if (classification.category === 'chunk-stale') {
+      event.preventDefault()
+      showAppWarning('页面资源已更新，请刷新当前页面后继续操作')
+      return
+    }
+
+    void showCriticalErrorDialog(classification.value, {
       title: '页面异步操作异常',
       fallback: '页面异步操作异常，请刷新后重试',
       operation: 'unhandledrejection',
