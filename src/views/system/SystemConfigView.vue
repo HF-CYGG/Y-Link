@@ -472,6 +472,75 @@ const buildOrderSerialNoChangeWarning = () => {
   ].join('')
 }
 
+const buildOrderSerialServerSyncedWarning = (list: OrderSerialConfigRecord[]) => {
+  const savedConfig = {
+    department: list.find((item) => item.orderType === 'department'),
+    walkin: list.find((item) => item.orderType === 'walkin'),
+  }
+  if (!savedConfig.department || !savedConfig.walkin) {
+    return buildOrderSerialNoChangeWarning()
+  }
+
+  const departmentNextNo = formatSerialPreview(
+    savedConfig.department.prefix,
+    savedConfig.department.current,
+    savedConfig.department.width,
+  )
+  const walkinNextNo = formatSerialPreview(savedConfig.walkin.prefix, savedConfig.walkin.current, savedConfig.walkin.width)
+  return [
+    '订单流水未写入新变更：服务端当前配置已经等于本次提交内容，页面已同步最新值。',
+    `部门订单当前号 ${savedConfig.department.current}，下一单号 ${departmentNextNo}。`,
+    `散客订单当前号 ${savedConfig.walkin.current}，下一单号 ${walkinNextNo}。`,
+    '如果你想继续降低当前号但保存失败，请查看错误提示里的“具体占用”单号，并先处理订单池或出库单中仍占用该流水的订单。',
+  ].join('')
+}
+
+const buildOrderSerialRejectedWarning = (
+  payload: {
+    department: { start: number; current: number; width: number }
+    walkin: { start: number; current: number; width: number }
+  },
+  list: OrderSerialConfigRecord[],
+) => {
+  const savedConfig = {
+    department: list.find((item) => item.orderType === 'department'),
+    walkin: list.find((item) => item.orderType === 'walkin'),
+  }
+  const diffParts: string[] = []
+  const fieldLabels = {
+    start: '起始号',
+    current: '当前号',
+    width: '位宽',
+  } as const
+  const typeLabels = {
+    department: '部门订单',
+    walkin: '散客订单',
+  } as const
+
+  ;(['department', 'walkin'] as const).forEach((orderType) => {
+    const saved = savedConfig[orderType]
+    if (!saved) {
+      diffParts.push(`${typeLabels[orderType]}配置未返回`)
+      return
+    }
+    ;(['start', 'current', 'width'] as const).forEach((field) => {
+      if (payload[orderType][field] !== saved[field]) {
+        diffParts.push(`${typeLabels[orderType]}${fieldLabels[field]}提交 ${payload[orderType][field]}，服务端仍为 ${saved[field]}`)
+      }
+    })
+  })
+
+  if (diffParts.length === 0) {
+    return buildOrderSerialServerSyncedWarning(list)
+  }
+
+  return [
+    '订单流水未写入本次输入：服务端返回值与提交值不一致。',
+    diffParts.join('；'),
+    '请根据后端错误提示中的具体占用单号处理订单池或出库单后重试；若没有看到错误提示，请刷新页面后再保存一次。',
+  ].join('')
+}
+
 const rules: FormRules = {
   'department.start': [{ required: true, message: '请输入部门单起始号', trigger: 'blur' }],
   'department.width': [{ required: true, message: '请输入部门单位宽', trigger: 'blur' }],
@@ -1218,7 +1287,7 @@ const handleSubmit = async () => {
       return
     }
     // SQLite 单连接下并发写事务会互相冲突，这里改为串行提交，避免 “cannot start a transaction within a transaction”。
-    const result = await updateOrderSerialConfigs({
+    const orderSerialPayload = {
       department: {
         start: Number(serialForm.department.start),
         current: Number(serialForm.department.current),
@@ -1229,7 +1298,8 @@ const handleSubmit = async () => {
         current: Number(serialForm.walkin.current),
         width: Number(serialForm.walkin.width),
       },
-    })
+    }
+    const result = await updateOrderSerialConfigs(orderSerialPayload)
     const o2oResult = await updateO2oRuleConfigs({
       autoCancelEnabled: serialForm.o2o.autoCancelEnabled,
       autoCancelHours: Number(serialForm.o2o.autoCancelHours),
@@ -1305,7 +1375,11 @@ const handleSubmit = async () => {
     if (hasConfigChanged) {
       showTopSuccess('系统配置已保存')
     } else {
-      showTopWarning(activeSection.value === 'order_serial' ? buildOrderSerialNoChangeWarning() : '配置未变更：当前内容与已保存配置一致')
+      showTopWarning(
+        activeSection.value === 'order_serial'
+          ? buildOrderSerialRejectedWarning(orderSerialPayload, result.list)
+          : '配置未变更：当前内容与已保存配置一致',
+      )
     }
   } catch (error) {
     showTopError(extractErrorMessage(error, '保存系统配置失败，请稍后重试'))

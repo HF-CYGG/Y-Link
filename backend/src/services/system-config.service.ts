@@ -303,10 +303,20 @@ export interface UpdateOrderSerialConfigsInput {
 
 interface OrderSerialOccupancySnapshot {
   outboundCount: number
+  outboundActiveCount: number
+  outboundDeletedCount: number
   preorderCount: number
   maxSerial: number
   latestOutboundShowNo: string | null
   latestPreorderShowNo: string | null
+  outboundExamples: OrderSerialOccupancyDetail[]
+  preorderExamples: OrderSerialOccupancyDetail[]
+}
+
+interface OrderSerialOccupancyDetail {
+  showNo: string
+  serial: number
+  statusLabel: string
 }
 
 export interface O2oRuleConfigRecord {
@@ -1042,6 +1052,26 @@ class SystemConfigService {
     )
   }
 
+  private normalizeBooleanFlag(value: unknown) {
+    return value === true || value === 1 || value === '1' || value === 'true'
+  }
+
+  private formatPreorderStatusLabel(status: string) {
+    const statusMap: Record<string, string> = {
+      pending: '订单池待核销',
+      verified: '订单池已核销',
+      cancelled: '订单池已取消',
+    }
+    return statusMap[status] ?? `订单池状态 ${status || '未知'}`
+  }
+
+  private formatOrderSerialOccupancyExamples(examples: OrderSerialOccupancyDetail[]) {
+    if (examples.length === 0) {
+      return ''
+    }
+    return `；需处理单号示例：${examples.map((item) => `${item.showNo}（${item.statusLabel}）`).join('、')}`
+  }
+
   private async getOrderSerialOccupancySnapshot(
     manager: typeof AppDataSource.manager,
     orderType: OrderSerialType,
@@ -1051,25 +1081,48 @@ class SystemConfigService {
         .getRepository(BizOutboundOrder)
         .createQueryBuilder('outboundOrder')
         .select('outboundOrder.showNo', 'showNo')
+        .addSelect('outboundOrder.isDeleted', 'isDeleted')
         .where('outboundOrder.orderType = :orderType', { orderType })
-        .getRawMany<{ showNo: string }>(),
+        .getRawMany<{ showNo: string; isDeleted: boolean | number | string }>(),
       manager
         .getRepository(O2oPreorder)
         .createQueryBuilder('preorder')
         .select('preorder.showNo', 'showNo')
+        .addSelect('preorder.status', 'status')
         .where('preorder.clientOrderType = :orderType', { orderType })
-        .getRawMany<{ showNo: string }>(),
+        .getRawMany<{ showNo: string; status: string }>(),
     ])
     const prefix = ORDER_SERIAL_META[orderType].prefix
     const outboundMax = this.pickMaxSerialShowNo(outboundRows, prefix)
     const preorderMax = this.pickMaxSerialShowNo(preorderRows, prefix)
+    const outboundDetails = outboundRows
+      .map((row) => ({
+        showNo: row.showNo,
+        serial: this.parseSerialFromShowNo(row.showNo, prefix),
+        statusLabel: this.normalizeBooleanFlag(row.isDeleted) ? '已删除未永久删除' : '正常出库单',
+      }))
+      .filter((item): item is OrderSerialOccupancyDetail => item.serial !== null)
+      .sort((left, right) => right.serial - left.serial)
+    const preorderDetails = preorderRows
+      .map((row) => ({
+        showNo: row.showNo,
+        serial: this.parseSerialFromShowNo(row.showNo, prefix),
+        statusLabel: this.formatPreorderStatusLabel(row.status),
+      }))
+      .filter((item): item is OrderSerialOccupancyDetail => item.serial !== null)
+      .sort((left, right) => right.serial - left.serial)
+    const outboundDeletedCount = outboundRows.filter((row) => this.normalizeBooleanFlag(row.isDeleted)).length
 
     return {
       outboundCount: outboundRows.length,
+      outboundActiveCount: outboundRows.length - outboundDeletedCount,
+      outboundDeletedCount,
       preorderCount: preorderRows.length,
       maxSerial: Math.max(outboundMax.maxSerial, preorderMax.maxSerial),
       latestOutboundShowNo: outboundMax.showNo,
       latestPreorderShowNo: preorderMax.showNo,
+      outboundExamples: outboundDetails.slice(0, 5),
+      preorderExamples: preorderDetails.slice(0, 5),
     }
   }
 
@@ -1080,17 +1133,26 @@ class SystemConfigService {
   ): string {
     const sourceParts: string[] = []
     if (snapshot.preorderCount > 0) {
-      sourceParts.push(`订单池 ${snapshot.preorderCount} 单${snapshot.latestPreorderShowNo ? `，最大单号 ${snapshot.latestPreorderShowNo}` : ''}`)
+      sourceParts.push(
+        `订单池仍有 ${snapshot.preorderCount} 单占用流水`
+        + `${snapshot.latestPreorderShowNo ? `，最大单号 ${snapshot.latestPreorderShowNo}` : ''}`
+        + this.formatOrderSerialOccupancyExamples(snapshot.preorderExamples),
+      )
     }
     if (snapshot.outboundCount > 0) {
-      sourceParts.push(`出库单 ${snapshot.outboundCount} 单${snapshot.latestOutboundShowNo ? `，最大单号 ${snapshot.latestOutboundShowNo}` : ''}`)
+      sourceParts.push(
+        `出库单仍有 ${snapshot.outboundCount} 单占用流水`
+        + `（正常 ${snapshot.outboundActiveCount} 单，已删除未永久删除 ${snapshot.outboundDeletedCount} 单）`
+        + `${snapshot.latestOutboundShowNo ? `，最大单号 ${snapshot.latestOutboundShowNo}` : ''}`
+        + this.formatOrderSerialOccupancyExamples(snapshot.outboundExamples),
+      )
     }
 
     return [
       `${ORDER_SERIAL_META[orderType].label}当前号不能改为 ${nextCurrent}。`,
-      `原因：仍有订单占用该流水，当前号不能小于已占用的最大流水 ${snapshot.maxSerial}，否则后续生成单号会冲突。`,
-      `冲突来源：${sourceParts.join('；') || '未识别到可展示来源'}。`,
-      `处理方式：先删除或永久删除这些订单，或把当前号设置为 ${snapshot.maxSerial} 及以上。`,
+      `原因：${ORDER_SERIAL_META[orderType].label}流水仍被订单占用，当前号不能小于已占用的最大流水 ${snapshot.maxSerial}，否则后续生成单号会冲突。`,
+      `具体占用：${sourceParts.join('；') || '未识别到可展示来源'}。`,
+      `处理方式：订单池订单请到“订单池工作台”删除；出库单请到“出库单列表”处理，正常单据需先删除，已删除单据需筛选“已删除单据”后执行永久删除。也可以把当前号设置为 ${snapshot.maxSerial} 及以上。`,
     ].join('')
   }
 
