@@ -35,6 +35,7 @@ import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
 import dayjs from 'dayjs'
+import InboundDeliverySheetWorkbenchDialog from './components/InboundDeliverySheetWorkbenchDialog.vue'
 
 
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
@@ -73,6 +74,7 @@ const targetCancelOrder = ref<InboundOrder | null>(null)
 const editDialogVisible = ref(false)
 const editSubmitting = ref(false)
 const editProductLoading = ref(false)
+const deliverySheetDialogVisible = ref(false)
 const products = ref<ProductRecord[]>([])
 
 interface EditItemRow {
@@ -357,6 +359,15 @@ const openCancelDialog = (order: InboundOrder) => {
   targetCancelOrder.value = order
   cancelReason.value = ''
   cancelDialogVisible.value = true
+}
+
+const openDeliverySheetDialog = () => {
+  if (!currentDetail.value) {
+    showAppWarning('送货单详情尚未加载完成')
+    return
+  }
+
+  deliverySheetDialogVisible.value = true
 }
 
 const openEditDialog = async (row: InboundOrder) => {
@@ -822,6 +833,13 @@ onMounted(() => {
                   </div>
                   <div class="flex shrink-0 items-center gap-2">
                     <el-button
+                      type="primary"
+                      plain
+                      @click="openDeliverySheetDialog"
+                    >
+                      生成送货单
+                    </el-button>
+                    <el-button
                       v-if="canEditOrder(currentDetail.order)"
                       type="primary"
                       plain
@@ -963,6 +981,11 @@ onMounted(() => {
           </transition>
         </div>
       </BizResponsiveDrawerShell>
+
+      <InboundDeliverySheetWorkbenchDialog
+        v-model="deliverySheetDialogVisible"
+        :detail="currentDetail"
+      />
 
       <el-dialog
         v-model="cancelDialogVisible"
