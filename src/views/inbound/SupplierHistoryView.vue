@@ -46,6 +46,7 @@ const listRequest = useStableRequest()
 const detailRequest = useStableRequest()
 const productRequest = useStableRequest()
 const actionRequest = useStableRequest()
+const listRenderKey = ref(0)
 const listState = reactive(createPaginatedListState<InboundOrder>({
   loading: false,
   query: {
@@ -257,6 +258,7 @@ const loadData = async () => {
     onSuccess: (result) => {
       applyPaginatedResult(listState, result)
       summary.value = result.summary
+      listRenderKey.value += 1
     },
     onError: (err) => {
       showAppError(extractErrorMessage(err, '获取历史记录失败'))
@@ -647,13 +649,14 @@ onMounted(() => {
 </script>
 
 <template>
-  <PageContainer title="历史送货单">
-    <div class="mx-auto max-w-7xl">
-      <div class="mb-5 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+  <PageContainer>
+    <div class="supplier-history-page mx-auto max-w-7xl">
+      <transition-group name="history-summary-card" tag="div" class="history-summary-grid mb-5 grid gap-4 md:grid-cols-2 xl:grid-cols-4" appear>
         <div
-          v-for="card in summaryCards"
+          v-for="(card, index) in summaryCards"
           :key="card.label"
           class="history-summary-card rounded-[26px] border border-slate-200/70 bg-white/95 p-5 shadow-[0_14px_34px_-34px_rgba(15,23,42,0.18)] dark:border-slate-700/80 dark:bg-slate-800/95"
+          :style="{ '--history-card-delay': `${index * 48}ms` }"
         >
           <div :class="['history-summary-card__badge', card.accentClass]">
             {{ String(card.value).padStart(2, '0') }}
@@ -662,15 +665,15 @@ onMounted(() => {
           <p class="mt-1 text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">{{ card.value }}</p>
           <p class="mt-2 text-xs leading-5 text-slate-400 dark:text-slate-500">{{ card.hint }}</p>
         </div>
-      </div>
+      </transition-group>
 
       <div class="history-filter-card mb-4 rounded-[28px] border border-slate-200/70 bg-white/95 p-4 shadow-[0_14px_34px_-34px_rgba(15,23,42,0.16)] dark:border-slate-700/80 dark:bg-slate-800/95 sm:p-5">
-        <div class="flex flex-1 flex-col gap-3 lg:flex-row lg:items-center">
+        <div class="history-filter-card__toolbar flex flex-1 flex-col gap-3 xl:flex-row xl:items-center">
           <el-input
             v-model="keyword"
             clearable
             placeholder="按送货单号或供货方搜索"
-            class="history-filter-card__input lg:max-w-xs"
+            class="history-filter-card__input xl:max-w-xs"
             @clear="handleSearch"
             @keyup.enter="handleSearch"
           />
@@ -682,7 +685,7 @@ onMounted(() => {
           </el-radio-group>
           <el-select
             v-model="deleteStateFilter"
-            class="history-filter-card__delete-state lg:w-36"
+            class="history-filter-card__delete-state xl:w-40"
             placeholder="单据范围"
             @change="handleSearch"
           >
@@ -690,7 +693,7 @@ onMounted(() => {
             <el-option :label="`已删除 ${summary.deleted}`" value="deleted" />
             <el-option label="全部单据" value="all" />
           </el-select>
-          <el-button type="primary" @click="handleSearch">搜索</el-button>
+          <el-button class="history-filter-card__submit" type="primary" @click="handleSearch">搜索</el-button>
         </div>
       </div>
 
@@ -701,94 +704,103 @@ onMounted(() => {
         </div>
 
         <div class="history-table-shell__body flex min-h-[520px] flex-col">
-          <el-table native-scrollbar v-loading="listState.loading" :data="listState.records" stripe class="history-table-shell__table w-full flex-1">
-            <el-table-column prop="showNo" label="送货单号" min-width="180" />
-            <el-table-column prop="totalQty" label="总数量" min-width="110">
-              <template #default="{ row }">
-                <span class="font-medium text-slate-800 dark:text-slate-200">{{ Number(row.totalQty) }}</span> 件
-              </template>
-            </el-table-column>
-            <el-table-column prop="status" label="状态" min-width="120">
-              <template #default="{ row }">
-                <el-tag :type="getStatusMeta(row.status as InboundOrder['status']).type" effect="light" round>
-                  {{ getStatusMeta(row.status as InboundOrder['status']).label }}
-                </el-tag>
-                <el-tag v-if="row.isDeleted" class="ml-2" type="danger" effect="light" round>已删除</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="创建时间" min-width="170">
-              <template #default="{ row }">
-                {{ dayjs(row.createdAt).format('YYYY-MM-DD HH:mm') }}
-              </template>
-            </el-table-column>
-            <el-table-column label="入库时间" min-width="170">
-              <template #default="{ row }">
-                {{ row.verifiedAt ? dayjs(row.verifiedAt).format('YYYY-MM-DD HH:mm') : '-' }}
-              </template>
-            </el-table-column>
-            <el-table-column label="操作" min-width="220" fixed="right" align="right">
-              <template #default="{ row }">
-                <div class="flex items-center justify-end gap-2">
-                  <el-button
-                    v-if="canEditOrder(row as InboundOrder)"
-                    class="history-detail-button"
-                    link
-                    type="primary"
-                    @click="openEditDialog(row as InboundOrder)"
-                  >
-                    改单
-                  </el-button>
-                  <el-button
-                    v-if="canCancelOrder(row as InboundOrder)"
-                    class="history-detail-button"
-                    link
-                    type="danger"
-                    @click="openCancelDialog(row as InboundOrder)"
-                  >
-                    撤销
-                  </el-button>
-                  <el-button
-                    v-if="canSoftDeleteOrder(row as InboundOrder)"
-                    class="history-detail-button"
-                    link
-                    type="danger"
-                    @click="handleSoftDeleteOrder(row as InboundOrder)"
-                  >
-                    删除
-                  </el-button>
-                  <el-button
-                    v-if="canRestoreOrder(row as InboundOrder)"
-                    class="history-detail-button"
-                    link
-                    type="primary"
-                    @click="handleRestoreOrder(row as InboundOrder)"
-                  >
-                    恢复
-                  </el-button>
-                  <el-button
-                    v-if="canPermanentDeleteOrder(row as InboundOrder)"
-                    class="history-detail-button"
-                    link
-                    type="danger"
-                    @click="handlePermanentDeleteOrder(row as InboundOrder)"
-                  >
-                    永久删除
-                  </el-button>
-                  <el-button class="history-detail-button" link type="primary" @click="handleViewDetail(row as InboundOrder)">
-                    查看详情
-                  </el-button>
+          <transition name="history-table-refresh" mode="out-in">
+            <el-table
+              :key="listRenderKey"
+              native-scrollbar
+              v-loading="listState.loading"
+              :data="listState.records"
+              stripe
+              class="history-table-shell__table w-full flex-1"
+            >
+              <el-table-column prop="showNo" label="送货单号" min-width="180" />
+              <el-table-column prop="totalQty" label="总数量" min-width="110">
+                <template #default="{ row }">
+                  <span class="font-medium text-slate-800 dark:text-slate-200">{{ Number(row.totalQty) }}</span> 件
+                </template>
+              </el-table-column>
+              <el-table-column prop="status" label="状态" min-width="120">
+                <template #default="{ row }">
+                  <el-tag :type="getStatusMeta(row.status as InboundOrder['status']).type" effect="light" round>
+                    {{ getStatusMeta(row.status as InboundOrder['status']).label }}
+                  </el-tag>
+                  <el-tag v-if="row.isDeleted" class="ml-2" type="danger" effect="light" round>已删除</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="创建时间" min-width="170">
+                <template #default="{ row }">
+                  {{ dayjs(row.createdAt).format('YYYY-MM-DD HH:mm') }}
+                </template>
+              </el-table-column>
+              <el-table-column label="入库时间" min-width="170">
+                <template #default="{ row }">
+                  {{ row.verifiedAt ? dayjs(row.verifiedAt).format('YYYY-MM-DD HH:mm') : '-' }}
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" min-width="220" fixed="right" align="right">
+                <template #default="{ row }">
+                  <div class="history-table-shell__actions flex items-center justify-end gap-2">
+                    <el-button
+                      v-if="canEditOrder(row as InboundOrder)"
+                      class="history-detail-button"
+                      link
+                      type="primary"
+                      @click="openEditDialog(row as InboundOrder)"
+                    >
+                      改单
+                    </el-button>
+                    <el-button
+                      v-if="canCancelOrder(row as InboundOrder)"
+                      class="history-detail-button"
+                      link
+                      type="danger"
+                      @click="openCancelDialog(row as InboundOrder)"
+                    >
+                      撤销
+                    </el-button>
+                    <el-button
+                      v-if="canSoftDeleteOrder(row as InboundOrder)"
+                      class="history-detail-button"
+                      link
+                      type="danger"
+                      @click="handleSoftDeleteOrder(row as InboundOrder)"
+                    >
+                      删除
+                    </el-button>
+                    <el-button
+                      v-if="canRestoreOrder(row as InboundOrder)"
+                      class="history-detail-button"
+                      link
+                      type="primary"
+                      @click="handleRestoreOrder(row as InboundOrder)"
+                    >
+                      恢复
+                    </el-button>
+                    <el-button
+                      v-if="canPermanentDeleteOrder(row as InboundOrder)"
+                      class="history-detail-button"
+                      link
+                      type="danger"
+                      @click="handlePermanentDeleteOrder(row as InboundOrder)"
+                    >
+                      永久删除
+                    </el-button>
+                    <el-button class="history-detail-button" link type="primary" @click="handleViewDetail(row as InboundOrder)">
+                      查看详情
+                    </el-button>
+                  </div>
+                </template>
+              </el-table-column>
+
+              <template #empty>
+                <div class="py-14">
+                  <el-empty :description="emptyDescription" :image-size="120">
+                    <el-button type="primary" @click="goToDelivery">去录入送货单</el-button>
+                  </el-empty>
                 </div>
               </template>
-            </el-table-column>
-
-            <template #empty>
-              <div class="py-14">
-                <el-empty :description="emptyDescription" :image-size="120">
-                  <el-button type="primary" @click="goToDelivery">去录入送货单</el-button>
-                </el-empty>
-              </div>
-            </template>
-          </el-table>
+            </el-table>
+          </transition>
         </div>
       </div>
       <PagePaginationBar
@@ -1115,20 +1127,41 @@ onMounted(() => {
 </template>
 
 <style scoped>
+.supplier-history-page {
+  padding-top: 0.25rem;
+}
+
 .history-summary-card,
 .history-filter-card,
 .history-table-shell,
 .history-detail-hero,
 .history-detail-item {
   transition:
-    box-shadow 0.16s ease,
-    border-color 0.18s ease;
+    box-shadow var(--ylink-motion-fast) var(--ylink-motion-ease),
+    border-color var(--ylink-motion-fast) var(--ylink-motion-ease),
+    transform var(--ylink-motion-fast) var(--ylink-motion-ease);
 }
 
 .history-summary-card:hover,
 .history-filter-card:hover,
 .history-table-shell:hover {
   box-shadow: 0 14px 28px -32px rgba(15, 23, 42, 0.16);
+}
+
+.history-summary-card:hover {
+  transform: translateY(-1px);
+}
+
+.history-summary-card-enter-active {
+  transition:
+    opacity var(--ylink-motion-normal) var(--ylink-motion-ease),
+    transform var(--ylink-motion-normal) var(--ylink-motion-ease);
+  transition-delay: var(--history-card-delay, 0ms);
+}
+
+.history-summary-card-enter-from {
+  opacity: 0;
+  transform: translateY(8px);
 }
 
 .history-summary-card__badge {
@@ -1143,8 +1176,48 @@ onMounted(() => {
   letter-spacing: 0.04em;
 }
 
+.history-filter-card__toolbar {
+  min-width: 0;
+}
+
+.history-filter-card__input {
+  min-width: 14rem;
+}
+
+.history-filter-card__delete-state {
+  min-width: 9rem;
+}
+
+.history-filter-card__submit {
+  min-width: 4.25rem;
+}
+
+.history-filter-card__tabs {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.45rem;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  scrollbar-width: none;
+}
+
+.history-filter-card__tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.history-filter-card__tabs :deep(.el-radio-button) {
+  flex: 0 0 auto;
+}
+
 .history-filter-card__tabs :deep(.el-radio-button__inner) {
   border-radius: 999px;
+  border-left: var(--el-border) !important;
+  transition:
+    background-color var(--ylink-motion-fast) var(--ylink-motion-ease),
+    border-color var(--ylink-motion-fast) var(--ylink-motion-ease),
+    color var(--ylink-motion-fast) var(--ylink-motion-ease);
 }
 
 .history-filter-card__tabs :deep(.el-radio-button:first-child .el-radio-button__inner),
@@ -1156,12 +1229,50 @@ onMounted(() => {
   background: linear-gradient(180deg, rgba(248, 250, 252, 0.9), rgba(255, 255, 255, 0.94));
 }
 
+.history-table-shell__table {
+  min-height: 520px;
+}
+
+.history-table-shell__table :deep(.el-table__row > .el-table__cell) {
+  transition:
+    background-color var(--ylink-motion-fast) var(--ylink-motion-ease),
+    color var(--ylink-motion-fast) var(--ylink-motion-ease);
+}
+
+.history-table-shell__table :deep(.el-table__row:hover > .el-table__cell) {
+  background-color: rgba(20, 184, 166, 0.06) !important;
+}
+
+.history-table-shell__actions {
+  min-width: 0;
+}
+
+.history-table-refresh-enter-active,
+.history-table-refresh-leave-active {
+  transition:
+    opacity var(--ylink-motion-fast) var(--ylink-motion-ease),
+    transform var(--ylink-motion-fast) var(--ylink-motion-ease);
+}
+
+.history-table-refresh-enter-from {
+  opacity: 0;
+  transform: translateY(5px);
+}
+
+.history-table-refresh-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
 .history-detail-button {
-  transition: opacity 0.16s ease;
+  transition:
+    opacity var(--ylink-motion-fast) var(--ylink-motion-ease),
+    transform var(--ylink-motion-fast) var(--ylink-motion-ease);
 }
 
 .history-detail-button:hover {
   opacity: 0.88;
+  transform: translateY(-1px);
 }
 
 /* 当前页详情抽屉样式：
@@ -1197,8 +1308,8 @@ onMounted(() => {
 .history-detail-fade-enter-active,
 .history-detail-fade-leave-active {
   transition:
-    transform 0.16s ease,
-    opacity 0.16s ease;
+    transform var(--ylink-motion-fast) var(--ylink-motion-ease),
+    opacity var(--ylink-motion-fast) var(--ylink-motion-ease);
 }
 
 .history-detail-fade-enter-from,
@@ -1213,6 +1324,21 @@ onMounted(() => {
   .history-table-shell {
     border-radius: 1.5rem;
   }
+
+  .history-filter-card__input,
+  .history-filter-card__delete-state,
+  .history-filter-card__submit {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .history-filter-card__submit {
+    justify-content: center;
+  }
+
+  .history-table-shell__table {
+    min-height: 430px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -1222,9 +1348,22 @@ onMounted(() => {
   .history-detail-hero,
   .history-detail-item,
   .history-detail-button,
+  .history-summary-card-enter-active,
+  .history-table-refresh-enter-active,
+  .history-table-refresh-leave-active,
   .history-detail-fade-enter-active,
   .history-detail-fade-leave-active {
     transition: none;
+  }
+
+  .history-summary-card:hover,
+  .history-detail-button:hover,
+  .history-summary-card-enter-from,
+  .history-table-refresh-enter-from,
+  .history-table-refresh-leave-to,
+  .history-detail-fade-enter-from,
+  .history-detail-fade-leave-to {
+    transform: none;
   }
 }
 </style>
