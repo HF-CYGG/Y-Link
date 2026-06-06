@@ -3,28 +3,37 @@
  * 模块说明：src/views/inbound/components/InboundDeliverySheetTemplate.vue
  * 文件职责：渲染供货方送货单的 A4 竖版打印模板，承接打印预览、浏览器打印和 PDF 导出的统一版式。
  * 实现逻辑：
- * - 接收送货单详情、二维码和弹窗临时补填字段，合并展示为纸质送货表结构；
- * - 模板按“项目信息、送货方信息、货物明细、验收情况、核对二维码、签字确认”分区；
+ * - 直接从送货单详情同步项目内容、供货方信息、送货时间、商品明细和合计数量；
+ * - 模板按“项目信息、送货方信息、货物明细、合计数量、验收情况、签字确认”分区；
  * - 商品明细默认展示商品名称和数量，合计数量由明细实时汇总，避免暴露商品数字 ID；
- * - 打印样式固定 A4 竖版，并保留 Y-Link 绿色体系、清晰表格线和适合手写签字的空白区域。
+ * - 验收情况和签字确认保留为空白手写区域，打印样式固定 A4 竖版并贴合纸质流转。
  * 维护说明：
- * - 本组件只负责展示版式，不发起接口请求，不保存验收、签字、问题描述等补填内容；
- * - 若后续调整纸质表字段，应优先通过 props 字段扩展保持预览、打印、PDF 三者共用同一模板。
+ * - 本组件只负责展示版式，不发起接口请求，不保存验收、签字、问题描述等纸面填写内容；
+ * - 若后续恢复在线补填，应同步调整工作台弹窗，并评估是否需要后端持久化与审计记录。
  */
 import dayjs from 'dayjs'
 import { computed } from 'vue'
 import type { InboundOrderDetail } from '@/api/modules/inbound'
-import type { InboundDeliverySheetFields } from './inbound-delivery-sheet-types'
 
 const props = defineProps<{
   detail: InboundOrderDetail
-  fields: InboundDeliverySheetFields
-  qrCodeDataUrl?: string
 }>()
 
 const totalQty = computed(() => {
   return props.detail.items.reduce((total, item) => total + Number(item.qty || 0), 0)
 })
+
+const deliveryDate = computed(() => dayjs(props.detail.order.createdAt).format('YYYY-MM-DD'))
+const deliveredTime = computed(() => {
+  const timeSource = props.detail.order.verifiedAt || props.detail.order.createdAt
+  return dayjs(timeSource).format('HH:mm')
+})
+const contentSummary = computed(() => {
+  return props.detail.items
+    .map((item) => `${item.productNameSnapshot || '未命名商品'} x ${formatQty(item.qty)}`)
+    .join('，')
+})
+const printedAt = dayjs().format('YYYY-MM-DD HH:mm')
 
 const formatQty = (value: string | number | null | undefined) => {
   const normalizedValue = Number(value ?? 0)
@@ -38,17 +47,6 @@ const displayText = (value: string | null | undefined, fallback = ' ') => {
   const normalizedValue = String(value ?? '').trim()
   return normalizedValue || fallback
 }
-
-const statusLabel = computed(() => {
-  const statusMap = {
-    pending: '待入库',
-    verified: '已入库',
-    cancelled: '已取消',
-  } as const
-  return statusMap[props.detail.order.status]
-})
-
-const printedAt = dayjs().format('YYYY-MM-DD HH:mm')
 </script>
 
 <template>
@@ -72,20 +70,20 @@ const printedAt = dayjs().format('YYYY-MM-DD HH:mm')
           </tr>
           <tr>
             <th scope="row">项目类别</th>
-            <td colspan="3">{{ displayText(fields.projectCategory) }}</td>
+            <td colspan="3">文创送货</td>
           </tr>
           <tr>
             <th scope="row">具体内容</th>
-            <td colspan="3">{{ displayText(fields.content) }}</td>
+            <td colspan="3">{{ displayText(contentSummary, `送货单 ${detail.order.showNo}`) }}</td>
           </tr>
           <tr>
             <th rowspan="2" scope="rowgroup">送货方信息</th>
-            <td colspan="3">姓名：{{ displayText(fields.senderName) }}</td>
+            <td colspan="3">姓名：{{ displayText(detail.order.supplierName, '-') }}</td>
           </tr>
           <tr>
             <td colspan="3">
-              送货日期：{{ displayText(fields.deliveryDate) }}
-              <span class="delivery-sheet-inline-gap">送达时间：{{ displayText(fields.deliveredTime) }}</span>
+              送货日期：{{ deliveryDate }}
+              <span class="delivery-sheet-inline-gap">送达时间：{{ deliveredTime }}</span>
             </td>
           </tr>
           <tr class="delivery-sheet-detail-title-row">
@@ -110,29 +108,21 @@ const printedAt = dayjs().format('YYYY-MM-DD HH:mm')
             <th rowspan="3" scope="rowgroup">验收情况</th>
             <td colspan="3">
               收货方确认：
-              <span class="delivery-sheet-checkbox" :class="{ 'is-checked': fields.quantityMatched }"></span> 数量相符
-              <span class="delivery-sheet-checkbox" :class="{ 'is-checked': fields.qualityAccepted }"></span> 质量合格
-              <span class="delivery-sheet-checkbox" :class="{ 'is-checked': fields.hasIssue }"></span> 存在问题
+              <span class="delivery-sheet-checkbox"></span> 数量相符
+              <span class="delivery-sheet-checkbox"></span> 质量合格
+              <span class="delivery-sheet-checkbox"></span> 存在问题
             </td>
           </tr>
           <tr>
-            <td colspan="3">问题描述：{{ displayText(fields.issueDescription) }}</td>
+            <td colspan="3">
+              问题描述：
+              <span class="delivery-sheet-handwrite-line"></span>
+            </td>
           </tr>
           <tr>
-            <td colspan="3">验收人：{{ displayText(fields.inspectorName) }}</td>
-          </tr>
-          <tr class="delivery-sheet-qr-row">
-            <th scope="row">核对二维码</th>
             <td colspan="3">
-              <div class="delivery-sheet-qr">
-                <div>
-                  <p>状态：{{ statusLabel }}</p>
-                  <p>供货方：{{ displayText(detail.order.supplierName, '-') }}</p>
-                  <p>入库时间：{{ detail.order.verifiedAt ? dayjs(detail.order.verifiedAt).format('YYYY-MM-DD HH:mm') : '-' }}</p>
-                </div>
-                <img v-if="qrCodeDataUrl" :src="qrCodeDataUrl" alt="送货单二维码" />
-                <div v-else class="delivery-sheet-qr__empty">二维码生成中</div>
-              </div>
+              验收人：
+              <span class="delivery-sheet-handwrite-line delivery-sheet-handwrite-line--short"></span>
             </td>
           </tr>
           <tr class="delivery-sheet-sign-title-row">
@@ -143,12 +133,18 @@ const printedAt = dayjs().format('YYYY-MM-DD HH:mm')
           <tr class="delivery-sheet-sign-row">
             <th scope="row"></th>
             <td>
-              <div class="delivery-sheet-signature">{{ displayText(fields.senderSignature) }}</div>
-              <div>签字日期：{{ displayText(fields.senderSignDate) }}</div>
+              <div class="delivery-sheet-signature"></div>
+              <div>
+                签字日期：
+                <span class="delivery-sheet-handwrite-line delivery-sheet-handwrite-line--date"></span>
+              </div>
             </td>
             <td colspan="2">
-              <div class="delivery-sheet-signature">{{ displayText(fields.receiverSignature) }}</div>
-              <div>签字日期：{{ displayText(fields.receiverSignDate) }}</div>
+              <div class="delivery-sheet-signature"></div>
+              <div>
+                签字日期：
+                <span class="delivery-sheet-handwrite-line delivery-sheet-handwrite-line--date"></span>
+              </div>
             </td>
           </tr>
         </tbody>
@@ -223,7 +219,7 @@ const printedAt = dayjs().format('YYYY-MM-DD HH:mm')
 }
 
 .delivery-sheet-detail-title-row td {
-  height: 148px;
+  height: 168px;
   vertical-align: top;
 }
 
@@ -259,49 +255,20 @@ const printedAt = dayjs().format('YYYY-MM-DD HH:mm')
   box-sizing: border-box;
 }
 
-.delivery-sheet-checkbox.is-checked::after {
-  content: "";
-  width: 8px;
-  height: 5px;
-  margin: 2px 0 0 2px;
-  border-left: 2px solid #00796b;
-  border-bottom: 2px solid #00796b;
-  transform: rotate(-45deg);
+.delivery-sheet-handwrite-line {
+  display: inline-block;
+  width: min(430px, 70%);
+  height: 18px;
+  border-bottom: 1px solid #64748b;
+  vertical-align: -2px;
 }
 
-.delivery-sheet-qr-row td {
-  padding: 10px;
+.delivery-sheet-handwrite-line--short {
+  width: 180px;
 }
 
-.delivery-sheet-qr {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.delivery-sheet-qr p {
-  margin: 0 0 4px;
-}
-
-.delivery-sheet-qr img,
-.delivery-sheet-qr__empty {
-  width: 86px;
-  height: 86px;
-  flex: 0 0 auto;
-  border: 1px solid #dbe4e1;
-  border-radius: 8px;
-  background: #ffffff;
-  padding: 5px;
-  box-sizing: border-box;
-}
-
-.delivery-sheet-qr__empty {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #94a3b8;
-  font-size: 12px;
+.delivery-sheet-handwrite-line--date {
+  width: 130px;
 }
 
 .delivery-sheet-sign-title-row td {
@@ -311,14 +278,12 @@ const printedAt = dayjs().format('YYYY-MM-DD HH:mm')
 }
 
 .delivery-sheet-sign-row td {
-  height: 86px;
+  height: 96px;
   vertical-align: bottom;
 }
 
 .delivery-sheet-signature {
-  min-height: 34px;
-  font-size: 17px;
-  font-weight: 600;
+  min-height: 44px;
 }
 
 @media (max-width: 900px) {
@@ -332,8 +297,7 @@ const printedAt = dayjs().format('YYYY-MM-DD HH:mm')
     font-size: 12px;
   }
 
-  .delivery-sheet__topline,
-  .delivery-sheet-qr {
+  .delivery-sheet__topline {
     flex-direction: column;
     align-items: flex-start;
   }
