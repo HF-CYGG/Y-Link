@@ -187,7 +187,7 @@ class InboundService {
   }
 
   // 供货方创建送货单
-  async submitSupplierDelivery(actor: AuthUserContext, input: SubmitInboundInput) {
+  async submitSupplierDelivery(actor: AuthUserContext, input: SubmitInboundInput, requestMeta?: RequestMeta) {
     this.assertSupplierActor(actor)
     const normalizedItems = this.normalizeSupplierInboundItems(input.items)
 
@@ -228,12 +228,29 @@ class InboundService {
       })
       await manager.getRepository(BizInboundOrderItem).save(itemEntities)
 
+      await auditService.record({
+        actionType: 'inbound.supplier.create',
+        actionLabel: '供货方创建送货单',
+        targetType: 'biz_inbound_order',
+        targetId: savedOrder.id,
+        targetCode: savedOrder.showNo,
+        actor,
+        requestMeta,
+        detail: {
+          status: savedOrder.status,
+          supplierId: savedOrder.supplierId,
+          supplierName: savedOrder.supplierName,
+          itemCount: itemEntities.length,
+          totalQty: savedOrder.totalQty,
+        },
+      }, manager)
+
       return this.detailById(savedOrder.id)
     })
   }
 
   // 供货方改单：仅允许修改本人待入库送货单的商品、数量和备注。
-  async updateSupplierDelivery(actor: AuthUserContext, orderId: string, input: UpdateSupplierInboundInput) {
+  async updateSupplierDelivery(actor: AuthUserContext, orderId: string, input: UpdateSupplierInboundInput, requestMeta?: RequestMeta) {
     const normalizedItems = this.normalizeSupplierInboundItems(input.items)
 
     return AppDataSource.transaction(async (manager) => {
@@ -264,6 +281,22 @@ class InboundService {
       order.totalQty = String(nextTotalQty)
 
       const savedOrder = await manager.getRepository(BizInboundOrder).save(order)
+      await auditService.record({
+        actionType: 'inbound.supplier.update',
+        actionLabel: '供货方修改送货单',
+        targetType: 'biz_inbound_order',
+        targetId: savedOrder.id,
+        targetCode: savedOrder.showNo,
+        actor,
+        requestMeta,
+        detail: {
+          status: savedOrder.status,
+          supplierId: savedOrder.supplierId,
+          supplierName: savedOrder.supplierName,
+          itemCount: nextItems.length,
+          totalQty: savedOrder.totalQty,
+        },
+      }, manager)
       return {
         order: savedOrder,
         items: nextItems,
@@ -272,7 +305,7 @@ class InboundService {
   }
 
   // 供货方撤销：仅允许本人待入库送货单撤销，撤销后保留历史明细与撤销原因用于追溯。
-  async cancelSupplierDelivery(actor: AuthUserContext, orderId: string, reason: string) {
+  async cancelSupplierDelivery(actor: AuthUserContext, orderId: string, reason: string, requestMeta?: RequestMeta) {
     const normalizedReason = reason.trim()
     if (!normalizedReason) {
       throw new BizError('请填写撤销原因', 400)
@@ -290,6 +323,22 @@ class InboundService {
       order.cancelledByDisplayName = actor.displayName || actor.username
 
       const savedOrder = await manager.getRepository(BizInboundOrder).save(order)
+      await auditService.record({
+        actionType: 'inbound.supplier.cancel',
+        actionLabel: '供货方撤销送货单',
+        targetType: 'biz_inbound_order',
+        targetId: savedOrder.id,
+        targetCode: savedOrder.showNo,
+        actor,
+        requestMeta,
+        detail: {
+          status: savedOrder.status,
+          supplierId: savedOrder.supplierId,
+          supplierName: savedOrder.supplierName,
+          itemCount: items.length,
+          cancelReason: savedOrder.cancelReason,
+        },
+      }, manager)
       return {
         order: savedOrder,
         items,
@@ -408,7 +457,7 @@ class InboundService {
   }
 
   // 后台现场改单：仓管在扫码核对现场可直接修正待入库单据，再继续完成核销。
-  async updateInboundOrderForAdmin(actor: AuthUserContext, orderId: string, input: UpdateSupplierInboundInput) {
+  async updateInboundOrderForAdmin(actor: AuthUserContext, orderId: string, input: UpdateSupplierInboundInput, requestMeta?: RequestMeta) {
     this.assertAdminInboundActor(actor)
     const normalizedItems = this.normalizeSupplierInboundItems(input.items)
 
@@ -464,6 +513,22 @@ class InboundService {
       order.totalQty = String(nextTotalQty)
 
       const savedOrder = await manager.getRepository(BizInboundOrder).save(order)
+      await auditService.record({
+        actionType: 'inbound.admin.update',
+        actionLabel: '库管现场修改送货单',
+        targetType: 'biz_inbound_order',
+        targetId: savedOrder.id,
+        targetCode: savedOrder.showNo,
+        actor,
+        requestMeta,
+        detail: {
+          status: savedOrder.status,
+          supplierId: savedOrder.supplierId,
+          supplierName: savedOrder.supplierName,
+          itemCount: nextItems.length,
+          totalQty: savedOrder.totalQty,
+        },
+      }, manager)
       return {
         order: savedOrder,
         items: nextItems,
@@ -608,7 +673,7 @@ class InboundService {
   }
 
   // 库管员核销入库
-  async verifyInbound(verifyCode: string, actor: AuthUserContext) {
+  async verifyInbound(verifyCode: string, actor: AuthUserContext, requestMeta?: RequestMeta) {
     this.assertCanVerifyInbound(actor)
     const normalizedCode = verifyCode.trim().toLowerCase()
     if (!normalizedCode) {
@@ -672,6 +737,22 @@ class InboundService {
       order.verifiedByDisplayName = actor.displayName
       
       const savedOrder = await manager.getRepository(BizInboundOrder).save(order)
+      await auditService.record({
+        actionType: 'inbound.admin.verify',
+        actionLabel: '库管核销入库',
+        targetType: 'biz_inbound_order',
+        targetId: savedOrder.id,
+        targetCode: savedOrder.showNo,
+        actor,
+        requestMeta,
+        detail: {
+          status: savedOrder.status,
+          supplierId: savedOrder.supplierId,
+          supplierName: savedOrder.supplierName,
+          itemCount: items.length,
+          totalQty: savedOrder.totalQty,
+        },
+      }, manager)
       return { order: savedOrder, items }
     })
   }

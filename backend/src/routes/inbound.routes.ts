@@ -68,7 +68,7 @@ inboundRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const input = submitInboundSchema.parse(req.body)
-    const result = await inboundService.submitSupplierDelivery(authReq.auth, input)
+    const result = await inboundService.submitSupplierDelivery(authReq.auth, input, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',
@@ -100,7 +100,7 @@ inboundRouter.patch(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const input = updateSupplierInboundSchema.parse(req.body)
-    const result = await inboundService.updateSupplierDelivery(authReq.auth, req.params.id, input)
+    const result = await inboundService.updateSupplierDelivery(authReq.auth, req.params.id, input, extractRequestMeta(req))
     res.json({
       code: 0,
       message: '改单成功',
@@ -116,7 +116,7 @@ inboundRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const input = cancelSupplierInboundSchema.parse(req.body)
-    const result = await inboundService.cancelSupplierDelivery(authReq.auth, req.params.id, input.reason)
+    const result = await inboundService.cancelSupplierDelivery(authReq.auth, req.params.id, input.reason, extractRequestMeta(req))
     res.json({
       code: 0,
       message: '撤销成功',
@@ -219,7 +219,7 @@ inboundRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const input = z.object({ verifyCode: z.string().min(1) }).parse(req.body)
-    const result = await inboundService.verifyInbound(input.verifyCode, authReq.auth)
+    const result = await inboundService.verifyInbound(input.verifyCode, authReq.auth, extractRequestMeta(req))
     res.json({
       code: 0,
       message: '核销入库成功',
@@ -235,7 +235,7 @@ inboundRouter.patch(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const input = updateSupplierInboundSchema.parse(req.body)
-    const result = await inboundService.updateInboundOrderForAdmin(authReq.auth, req.params.id, input)
+    const result = await inboundService.updateInboundOrderForAdmin(authReq.auth, req.params.id, input, extractRequestMeta(req))
     res.json({
       code: 0,
       message: '现场改单成功',

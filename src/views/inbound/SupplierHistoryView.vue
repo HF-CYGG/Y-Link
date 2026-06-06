@@ -1,18 +1,19 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/inbound/SupplierHistoryView.vue
- * 文件职责：展示供货方历史送货单列表，并支持服务端筛选分页、详情查看和待入库二维码回查。
+ * 文件职责：展示供货方历史送货单列表，并支持服务端筛选分页、详情查看、改单撤销与删除恢复等状态操作。
  * 实现逻辑：
  * - 页面采用“统计卡 + 筛选工具栏 + 列表容器 + 详情抽屉”的工作台布局，与录入页形成统一视觉语言；
- * - 历史页改为服务端筛选与分页，只返回当前页数据，降低首屏等待与前端内存占用；
- * - 列表请求与详情请求都接入稳定请求工具，避免快速切换筛选或连点详情时旧结果覆盖新状态；
- * - 详情抽屉保留原有查询与二维码逻辑，仅增强打开反馈与信息层级，不改动任何业务接口。
+ * - 历史页使用服务端筛选与分页，并通过自动同步保持库管入库、供货方删除恢复后的列表状态及时更新；
+ * - 列表请求、详情请求与操作前状态校验都接入稳定请求或最新详情读取，避免旧结果覆盖新状态；
+ * - 详情抽屉在打开期间进行轻量刷新，状态变化后立即收起不可用操作入口，降低误改单、误撤销风险。
  * 维护说明：
  * - 若后续要增加更多筛选维度，优先继续扩展服务端查询参数，而不是回退到前端全量筛选；
- * - 二维码生成失败时不能静默吞掉，否则用户只会看到空白占位而不知道单据本身已存在。
+ * - 二维码生成失败时不能静默吞掉，否则用户只会看到空白占位而不知道单据本身已存在；
+ * - 自动同步必须避开弹窗确认与表单编辑过程，避免覆盖用户正在输入的内容。
  */
 
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 
 import { ElMessageBox } from 'element-plus'
 import QRCode from 'qrcode'
@@ -32,7 +33,7 @@ import {
 } from '@/api/modules/inbound'
 import { getProductList, type ProductRecord } from '@/api/modules/product'
 import { useStableRequest } from '@/composables/useStableRequest'
-import { extractErrorMessage } from '@/utils/error'
+import { AppRequestError, extractErrorMessage } from '@/utils/error'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
 import dayjs from 'dayjs'
 import InboundDeliverySheetWorkbenchDialog from './components/InboundDeliverySheetWorkbenchDialog.vue'
@@ -46,6 +47,8 @@ const listRequest = useStableRequest()
 const detailRequest = useStableRequest()
 const productRequest = useStableRequest()
 const actionRequest = useStableRequest()
+const AUTO_REFRESH_INTERVAL_MS = 15_000
+const DETAIL_SYNC_INTERVAL_MS = 15_000
 const listRenderKey = ref(0)
 const listState = reactive(createPaginatedListState<InboundOrder>({
   loading: false,
@@ -77,6 +80,12 @@ const editSubmitting = ref(false)
 const editProductLoading = ref(false)
 const deliverySheetDialogVisible = ref(false)
 const products = ref<ProductRecord[]>([])
+const interactionLockCount = ref(0)
+const silentRefreshing = ref(false)
+const detailSyncing = ref(false)
+const lastSyncAt = ref('')
+let autoRefreshTimer: ReturnType<typeof globalThis.setInterval> | null = null
+let detailSyncTimer: ReturnType<typeof globalThis.setInterval> | null = null
 
 interface EditItemRow {
   uid: string
@@ -162,6 +171,18 @@ const canRestoreOrder = (order: InboundOrder) => order.isDeleted && order.status
 const canPermanentDeleteOrder = (order: InboundOrder) => order.isDeleted && order.status !== 'verified'
 const shouldShowPendingQrCode = computed(() => {
   return currentDetail.value?.order.status === 'pending' && !currentDetail.value.order.isDeleted
+})
+
+const isOnSupplierHistoryRoute = computed(() => route.name === 'supplier-history')
+const isInteractionLocked = computed(() => {
+  return (
+    interactionLockCount.value > 0 ||
+    cancelDialogVisible.value ||
+    editDialogVisible.value ||
+    deliverySheetDialogVisible.value ||
+    cancelSubmitting.value ||
+    editSubmitting.value
+  )
 })
 
 const buildListQuery = () => {
@@ -251,20 +272,59 @@ const ensureProductsLoaded = async () => {
   })
 }
 
-const loadData = async () => {
-  listState.loading = true
+const isMissingDeliveryError = (error: unknown) => {
+  if (error instanceof AppRequestError && error.status === 404) {
+    return true
+  }
+
+  const message = extractErrorMessage(error, '')
+  return /不存在|已被删除|不可访问|无效/.test(message)
+}
+
+const canRunBackgroundSync = () => {
+  return isOnSupplierHistoryRoute.value && !isInteractionLocked.value
+}
+
+const runWithInteractionLock = async <T,>(executor: () => Promise<T>) => {
+  interactionLockCount.value += 1
+  try {
+    return await executor()
+  } finally {
+    interactionLockCount.value = Math.max(0, interactionLockCount.value - 1)
+  }
+}
+
+const loadData = async (options: { silent?: boolean; force?: boolean } = {}) => {
+  if (!options.force && options.silent && !canRunBackgroundSync()) {
+    return
+  }
+
+  if (options.silent) {
+    silentRefreshing.value = true
+  } else {
+    silentRefreshing.value = false
+    listState.loading = true
+  }
+
   await listRequest.runLatest({
     executor: (signal) => getSupplierDeliveries(buildListQuery(), { signal }),
     onSuccess: (result) => {
       applyPaginatedResult(listState, result)
       summary.value = result.summary
       listRenderKey.value += 1
+      lastSyncAt.value = dayjs().format('HH:mm:ss')
     },
     onError: (err) => {
-      showAppError(extractErrorMessage(err, '获取历史记录失败'))
+      if (!options.silent) {
+        showAppError(extractErrorMessage(err, '获取历史记录失败'))
+      }
     },
     onFinally: () => {
-      listState.loading = false
+      if (options.silent) {
+        silentRefreshing.value = false
+      } else {
+        listState.loading = false
+      }
     },
   })
 }
@@ -302,10 +362,22 @@ const applyDetailResult = async (detail: InboundOrderDetail, options?: { openDra
   qrCodeUnavailable.value = false
 }
 
+const handleMissingCurrentDetail = async (options: { notify?: boolean } = {}) => {
+  const currentShowNo = currentDetail.value?.order.showNo
+  detailVisible.value = false
+  currentDetail.value = null
+  qrCodeDataUrl.value = ''
+  qrCodeUnavailable.value = false
+  await loadData({ silent: true, force: true })
+  if (options.notify !== false) {
+    showAppWarning(currentShowNo ? `送货单“${currentShowNo}”已被永久删除或不可访问` : '送货单已被永久删除或不可访问')
+  }
+}
+
 // 详情刷新共用入口：
 // - 列表查看详情、改单成功后详情回写、撤销成功后详情切换都统一走这里；
 // - 避免每个动作各自维护一套“重置二维码 + 请求详情 + 刷新抽屉”的分支。
-const loadDetail = async (row: Pick<InboundOrder, 'id' | 'verifyCode'> & Partial<Pick<InboundOrder, 'isDeleted'>>, options?: { openDrawer?: boolean }) => {
+const loadDetail = async (row: Pick<InboundOrder, 'id' | 'verifyCode'> & Partial<Pick<InboundOrder, 'isDeleted' | 'showNo'>>, options?: { openDrawer?: boolean }) => {
   if (options?.openDrawer !== false) {
     detailVisible.value = true
   }
@@ -324,7 +396,15 @@ const loadDetail = async (row: Pick<InboundOrder, 'id' | 'verifyCode'> & Partial
     onSuccess: async (detail) => {
       await applyDetailResult(detail, options)
     },
-    onError: (err) => {
+    onError: async (err) => {
+      if (isMissingDeliveryError(err)) {
+        detailVisible.value = false
+        currentDetail.value = null
+        await loadData({ silent: true, force: true })
+        showAppWarning(row.showNo ? `送货单“${row.showNo}”已被永久删除或不可访问` : '送货单已被永久删除或不可访问')
+        return
+      }
+
       showAppError(extractErrorMessage(err, '获取详情失败'))
       if (options?.openDrawer !== false) {
         detailVisible.value = false
@@ -334,6 +414,136 @@ const loadDetail = async (row: Pick<InboundOrder, 'id' | 'verifyCode'> & Partial
       detailLoading.value = false
     },
   })
+}
+
+const fetchLatestDetailForOrder = (order: Pick<InboundOrder, 'verifyCode'> & Partial<Pick<InboundOrder, 'isDeleted'>>) => {
+  return getInboundDetail(order.verifyCode, {
+    includeDeleted: true,
+  })
+}
+
+const syncCurrentDetail = async (options: { notifyMissing?: boolean } = {}) => {
+  if (!currentDetail.value || !detailVisible.value || !canRunBackgroundSync() || detailSyncing.value) {
+    return
+  }
+
+  detailSyncing.value = true
+  try {
+    const detail = await fetchLatestDetailForOrder(currentDetail.value.order)
+    await applyDetailResult(detail, { openDrawer: false })
+  } catch (error) {
+    if (isMissingDeliveryError(error)) {
+      await handleMissingCurrentDetail({ notify: options.notifyMissing })
+    }
+  } finally {
+    detailSyncing.value = false
+  }
+}
+
+const buildStateChangedMessage = (detail: InboundOrderDetail, actionLabel: string) => {
+  const order = detail.order
+  if (order.isDeleted) {
+    return `送货单“${order.showNo}”已删除，不能继续${actionLabel}`
+  }
+  if (order.status === 'verified') {
+    return `送货单“${order.showNo}”已入库，不能继续${actionLabel}`
+  }
+  if (order.status === 'cancelled') {
+    return `送货单“${order.showNo}”已撤销，不能继续${actionLabel}`
+  }
+  return `送货单“${order.showNo}”状态已变化，请确认后再操作`
+}
+
+const ensureLatestActionableDetail = async (
+  order: InboundOrder,
+  actionLabel: string,
+  predicate: (latestOrder: InboundOrder) => boolean,
+) => {
+  try {
+    const detail = await fetchLatestDetailForOrder(order)
+    const shouldKeepDrawerOpen = detailVisible.value && currentDetail.value?.order.id === detail.order.id
+    await applyDetailResult(detail, { openDrawer: shouldKeepDrawerOpen })
+    if (!predicate(detail.order)) {
+      await loadData({ silent: true, force: true })
+      showAppWarning(buildStateChangedMessage(detail, actionLabel))
+      return null
+    }
+    return detail
+  } catch (error) {
+    if (isMissingDeliveryError(error)) {
+      if (currentDetail.value?.order.id === order.id) {
+        await handleMissingCurrentDetail()
+      } else {
+        await loadData({ silent: true, force: true })
+        showAppWarning(`送货单“${order.showNo}”已被永久删除或不可访问`)
+      }
+      return null
+    }
+
+    showAppError(extractErrorMessage(error, `确认送货单状态失败，已取消${actionLabel}`))
+    return null
+  }
+}
+
+const refreshVisibleSupplierHistory = async () => {
+  if (!canRunBackgroundSync()) {
+    return
+  }
+
+  await loadData({ silent: true })
+}
+
+const refreshSupplierHistoryNow = async () => {
+  if (!isOnSupplierHistoryRoute.value) {
+    return
+  }
+
+  await loadData({ silent: true, force: true })
+  await syncCurrentDetail({ notifyMissing: true })
+}
+
+const startAutoRefresh = () => {
+  if (autoRefreshTimer) {
+    return
+  }
+
+  autoRefreshTimer = globalThis.setInterval(() => {
+    void refreshVisibleSupplierHistory()
+  }, AUTO_REFRESH_INTERVAL_MS)
+}
+
+const stopAutoRefresh = () => {
+  if (!autoRefreshTimer) {
+    return
+  }
+
+  globalThis.clearInterval(autoRefreshTimer)
+  autoRefreshTimer = null
+}
+
+const startDetailSync = () => {
+  if (detailSyncTimer) {
+    return
+  }
+
+  detailSyncTimer = globalThis.setInterval(() => {
+    void syncCurrentDetail({ notifyMissing: true })
+  }, DETAIL_SYNC_INTERVAL_MS)
+}
+
+const stopDetailSync = () => {
+  if (!detailSyncTimer) {
+    return
+  }
+
+  globalThis.clearInterval(detailSyncTimer)
+  detailSyncTimer = null
+}
+
+const handleVisibilitySync = () => {
+  if (globalThis.document?.visibilityState === 'visible') {
+    void refreshSupplierHistoryNow()
+  }
 }
 
 // 查看详情时重置上一次弹窗状态，避免旧二维码或旧详情短暂闪现。
@@ -352,13 +562,18 @@ const handleRemoveEditItem = (index: number) => {
   editForm.items.splice(index, 1)
 }
 
-const openCancelDialog = (order: InboundOrder) => {
+const openCancelDialog = async (order: InboundOrder) => {
   if (!canCancelOrder(order)) {
     showAppWarning('当前送货单不可撤销')
     return
   }
 
-  targetCancelOrder.value = order
+  const detail = await ensureLatestActionableDetail(order, '撤销', canCancelOrder)
+  if (!detail) {
+    return
+  }
+
+  targetCancelOrder.value = detail.order
   cancelReason.value = ''
   cancelDialogVisible.value = true
 }
@@ -378,9 +593,15 @@ const openEditDialog = async (row: InboundOrder) => {
     return
   }
 
-  await ensureProductsLoaded()
+  const latestDetail = await ensureLatestActionableDetail(row, '改单', canEditOrder)
+  if (!latestDetail) {
+    return
+  }
 
-  const shouldReuseCurrentDetail = currentDetail.value?.order.id === row.id
+  await ensureProductsLoaded()
+  ensureProductOptionsFromDetail(latestDetail)
+
+  const shouldReuseCurrentDetail = currentDetail.value?.order.id === latestDetail.order.id
   if (shouldReuseCurrentDetail && currentDetail.value) {
     ensureProductOptionsFromDetail(currentDetail.value)
     ensureEditRowsFromDetail(currentDetail.value)
@@ -388,21 +609,8 @@ const openEditDialog = async (row: InboundOrder) => {
     return
   }
 
-  detailLoading.value = true
-  await detailRequest.runLatest({
-    executor: (signal) => getInboundDetail(row.verifyCode, { signal }),
-    onSuccess: (detail) => {
-      ensureProductOptionsFromDetail(detail)
-      ensureEditRowsFromDetail(detail)
-      editDialogVisible.value = true
-    },
-    onError: (error) => {
-      showAppError(extractErrorMessage(error, '读取改单详情失败'))
-    },
-    onFinally: () => {
-      detailLoading.value = false
-    },
-  })
+  ensureEditRowsFromDetail(latestDetail)
+  editDialogVisible.value = true
 }
 
 const handleSubmitCancel = async () => {
@@ -415,6 +623,13 @@ const handleSubmitCancel = async () => {
     showAppWarning('请填写撤销原因')
     return
   }
+
+  const latestDetail = await ensureLatestActionableDetail(targetCancelOrder.value, '撤销', canCancelOrder)
+  if (!latestDetail) {
+    cancelDialogVisible.value = false
+    return
+  }
+  targetCancelOrder.value = latestDetail.order
 
   cancelSubmitting.value = true
   await actionRequest.runLatest({
@@ -442,22 +657,32 @@ const handleSoftDeleteOrder = async (order: InboundOrder) => {
     return
   }
 
+  const latestDetail = await ensureLatestActionableDetail(order, '删除', canSoftDeleteOrder)
+  if (!latestDetail) {
+    return
+  }
+
   try {
-    await ElMessageBox.confirm(
-      `删除后该送货单会从正常列表隐藏，可在“已删除单据”中恢复。\n送货单号：${order.showNo}`,
+    await runWithInteractionLock(() => ElMessageBox.confirm(
+      `删除后该送货单会从正常列表隐藏，可在“已删除单据”中恢复。\n送货单号：${latestDetail.order.showNo}`,
       '删除送货单',
       {
         type: 'warning',
         confirmButtonText: '确认删除',
         cancelButtonText: '取消',
       },
-    )
+    ))
   } catch {
     return
   }
 
+  const submitDetail = await ensureLatestActionableDetail(latestDetail.order, '删除', canSoftDeleteOrder)
+  if (!submitDetail) {
+    return
+  }
+
   await actionRequest.runLatest({
-    executor: (signal) => deleteSupplierDelivery(order.id, { signal }),
+    executor: (signal) => deleteSupplierDelivery(submitDetail.order.id, { signal }),
     onSuccess: async (detail) => {
       if (currentDetail.value?.order.id === detail.order.id) {
         await applyDetailResult(detail, { openDrawer: true })
@@ -477,18 +702,28 @@ const handleRestoreOrder = async (order: InboundOrder) => {
     return
   }
 
+  const latestDetail = await ensureLatestActionableDetail(order, '恢复', canRestoreOrder)
+  if (!latestDetail) {
+    return
+  }
+
   try {
-    await ElMessageBox.confirm(`确认恢复送货单“${order.showNo}”？`, '恢复送货单', {
+    await runWithInteractionLock(() => ElMessageBox.confirm(`确认恢复送货单“${latestDetail.order.showNo}”？`, '恢复送货单', {
       type: 'warning',
       confirmButtonText: '确认恢复',
       cancelButtonText: '取消',
-    })
+    }))
   } catch {
     return
   }
 
+  const submitDetail = await ensureLatestActionableDetail(latestDetail.order, '恢复', canRestoreOrder)
+  if (!submitDetail) {
+    return
+  }
+
   await actionRequest.runLatest({
-    executor: (signal) => restoreSupplierDelivery(order.id, { signal }),
+    executor: (signal) => restoreSupplierDelivery(submitDetail.order.id, { signal }),
     onSuccess: async (detail) => {
       if (currentDetail.value?.order.id === detail.order.id) {
         await applyDetailResult(detail, { openDrawer: true })
@@ -508,22 +743,27 @@ const handlePermanentDeleteOrder = async (order: InboundOrder) => {
     return
   }
 
+  const latestDetail = await ensureLatestActionableDetail(order, '永久删除', canPermanentDeleteOrder)
+  if (!latestDetail) {
+    return
+  }
+
   let confirmShowNo = ''
   let permanentDeletePassword = ''
   try {
-    const result = await ElMessageBox.prompt(
-      `永久删除后将清理送货单和商品明细，无法恢复。\n请输入送货单号确认：${order.showNo}`,
+    const result = await runWithInteractionLock(() => ElMessageBox.prompt(
+      `永久删除后将清理送货单和商品明细，无法恢复。\n请输入送货单号确认：${latestDetail.order.showNo}`,
       '永久删除送货单',
       {
         type: 'error',
         confirmButtonText: '永久删除',
         cancelButtonText: '取消',
-        inputPattern: new RegExp(`^${order.showNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
+        inputPattern: new RegExp(`^${latestDetail.order.showNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
         inputErrorMessage: '请输入完整送货单号',
       },
-    )
+    ))
     confirmShowNo = result.value
-    const passwordResult = await ElMessageBox.prompt(
+    const passwordResult = await runWithInteractionLock(() => ElMessageBox.prompt(
       '请输入容器环境变量中配置的永久删除密码。',
       '永久删除密码',
       {
@@ -539,16 +779,21 @@ const handlePermanentDeleteOrder = async (order: InboundOrder) => {
           return true
         },
       },
-    )
+    ))
     permanentDeletePassword = passwordResult.value.trim()
   } catch {
     return
   }
 
+  const submitDetail = await ensureLatestActionableDetail(latestDetail.order, '永久删除', canPermanentDeleteOrder)
+  if (!submitDetail) {
+    return
+  }
+
   await actionRequest.runLatest({
-    executor: (signal) => permanentlyDeleteSupplierDelivery(order.id, { confirmShowNo, permanentDeletePassword }, { signal }),
+    executor: (signal) => permanentlyDeleteSupplierDelivery(submitDetail.order.id, { confirmShowNo, permanentDeletePassword }, { signal }),
     onSuccess: async () => {
-      if (currentDetail.value?.order.id === order.id) {
+      if (currentDetail.value?.order.id === submitDetail.order.id) {
         detailVisible.value = false
         currentDetail.value = null
       }
@@ -590,6 +835,17 @@ const handleSubmitEdit = async () => {
   } catch (error) {
     showAppWarning(extractErrorMessage(error, '请至少保留一件有效商品'))
     return
+  }
+
+  const targetOrder = currentDetail.value?.order.id === editForm.orderId
+    ? currentDetail.value.order
+    : listState.records.find((order) => order.id === editForm.orderId)
+  if (targetOrder) {
+    const latestDetail = await ensureLatestActionableDetail(targetOrder, '改单', canEditOrder)
+    if (!latestDetail) {
+      editDialogVisible.value = false
+      return
+    }
   }
 
   editSubmitting.value = true
@@ -639,12 +895,34 @@ watch(() => route.name, (nextName, previousName) => {
     return
   }
 
-  void loadData()
+  void refreshSupplierHistoryNow()
+})
+
+watch(detailVisible, (visible) => {
+  if (visible) {
+    startDetailSync()
+    void syncCurrentDetail({ notifyMissing: true })
+    return
+  }
+
+  stopDetailSync()
+})
+
+onActivated(() => {
+  void refreshSupplierHistoryNow()
 })
 
 onMounted(() => {
   resetEditForm()
   void loadData()
+  startAutoRefresh()
+  globalThis.document?.addEventListener('visibilitychange', handleVisibilitySync)
+})
+
+onBeforeUnmount(() => {
+  stopAutoRefresh()
+  stopDetailSync()
+  globalThis.document?.removeEventListener('visibilitychange', handleVisibilitySync)
 })
 </script>
 
@@ -695,6 +973,9 @@ onMounted(() => {
           </el-select>
           <el-button class="history-filter-card__submit" type="primary" @click="handleSearch">搜索</el-button>
         </div>
+        <p class="history-filter-card__sync mt-3 text-xs leading-5 text-slate-400 dark:text-slate-500">
+          自动同步已开启<span v-if="lastSyncAt">，最近同步 {{ lastSyncAt }}</span><span v-if="silentRefreshing">，正在同步</span>
+        </p>
       </div>
 
       <div class="history-table-shell overflow-hidden rounded-[28px] border border-slate-200/70 bg-white/95 shadow-[0_18px_42px_-40px_rgba(15,23,42,0.18)] dark:border-slate-700/80 dark:bg-slate-800/95">
@@ -835,7 +1116,7 @@ onMounted(() => {
           <transition name="history-detail-fade" appear>
             <div v-if="currentDetail" class="space-y-4">
               <div class="history-detail-hero rounded-[26px] border border-slate-200/70 bg-white/95 p-5 shadow-[0_14px_32px_-32px_rgba(15,23,42,0.16)] dark:border-slate-700/80 dark:bg-slate-800/95">
-                <div class="flex items-start justify-between gap-3">
+                <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                   <div>
                     <p class="text-xs uppercase tracking-[0.2em] text-slate-400 dark:text-slate-500">送货单详情</p>
                     <h3 class="mt-2 text-lg font-semibold text-slate-900 dark:text-slate-100">{{ currentDetail.order.showNo }}</h3>
@@ -843,7 +1124,7 @@ onMounted(() => {
                       创建于 {{ dayjs(currentDetail.order.createdAt).format('YYYY-MM-DD HH:mm') }}
                     </p>
                   </div>
-                  <div class="flex shrink-0 items-center gap-2">
+                  <div class="history-detail-hero__actions flex shrink-0 flex-wrap items-center justify-start gap-2 lg:justify-end">
                     <el-button
                       type="primary"
                       plain
@@ -1192,6 +1473,10 @@ onMounted(() => {
   min-width: 4.25rem;
 }
 
+.history-filter-card__sync {
+  min-height: 1.25rem;
+}
+
 .history-filter-card__tabs {
   display: flex;
   flex-wrap: nowrap;
@@ -1287,6 +1572,10 @@ onMounted(() => {
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.94));
 }
 
+.history-detail-hero__actions {
+  max-width: 100%;
+}
+
 .history-detail-item:hover {
   border-color: rgba(148, 163, 184, 0.46);
 }
@@ -1334,6 +1623,10 @@ onMounted(() => {
 
   .history-filter-card__submit {
     justify-content: center;
+  }
+
+  .history-detail-hero__actions {
+    width: 100%;
   }
 
   .history-table-shell__table {
