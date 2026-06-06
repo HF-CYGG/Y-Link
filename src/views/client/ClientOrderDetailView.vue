@@ -118,6 +118,7 @@ const enableHtml2pdfExport = import.meta.env.VITE_ORDER_VOUCHER_HTML2PDF_ENABLED
 const voucherEditableForm = reactive<OrderVoucherEditableFields>(createEmptyVoucherEditableFields())
 const detailRefreshNoticeExpiresAt = ref(0)
 const lastSilentRefreshAt = ref(0)
+const deletedOrderRedirecting = ref(false)
 const { runLatest } = useStableRequest()
 const clientAuthStore = useClientAuthStore(pinia)
 const clientOrderStore = useClientOrderStore(pinia)
@@ -949,6 +950,7 @@ const loadDetail = async (options?: { silent?: boolean }) => {
   await runLatest({
     executor: (signal) => getO2oPreorderDetail(orderId, { signal }),
     onSuccess: async (result) => {
+      deletedOrderRedirecting.value = false
       const changed = hasOrderDetailChanged(detail.value, result)
       detail.value = result
       syncOrderStoreFromDetail(result, { preserveFresh: true })
@@ -962,10 +964,21 @@ const loadDetail = async (options?: { silent?: boolean }) => {
       }
     },
     onError: (error) => {
+      const normalizedError = normalizeRequestError(error, '订单详情加载失败')
+      if (normalizedError.status === 404) {
+        clientOrderStore.removeOrder(orderId, { preserveFresh: true })
+        detail.value = null
+        requestError.value = null
+        if (!deletedOrderRedirecting.value) {
+          deletedOrderRedirecting.value = true
+          showAppWarning('订单已删除或不可访问，已从本地订单列表移除')
+          void router.replace('/client/orders')
+        }
+        return
+      }
       if (silent) {
         return
       }
-      const normalizedError = normalizeRequestError(error, '订单详情加载失败')
       requestError.value = {
         type: globalThis.navigator.onLine === false ? 'offline' : 'error',
         message: normalizedError.message,

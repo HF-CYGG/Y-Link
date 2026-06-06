@@ -464,8 +464,16 @@ const refreshSingleOrderSummary = async (orderId: string, options?: { silent?: b
     clientOrderStore.syncOrderSummary(result, { preserveFresh: true })
     markRefreshedOrders([result.id])
   } catch (error) {
+    const normalizedError = normalizeRequestError(error, '订单摘要刷新失败')
+    if (normalizedError.status === 404) {
+      clientOrderStore.removeOrder(orderId, { preserveFresh: true })
+      if (options?.silent) {
+        await triggerSilentOrderRefresh()
+        return
+      }
+    }
     if (!options?.silent) {
-      throw error
+      throw normalizedError
     }
     await triggerSilentOrderRefresh()
   }
@@ -679,7 +687,11 @@ onMounted(async () => {
   syncStoreWithCurrentUser()
   globalThis.document?.addEventListener('visibilitychange', handleVisibilityChange)
   scheduleAutoRefresh()
+  const hadCachedOrders = clientOrderStore.orders.length > 0
   await loadOrders()
+  if (hadCachedOrders) {
+    void loadOrders(true, { silent: true, preserveScroll: true })
+  }
 })
 
 onBeforeUnmount(() => {

@@ -43,6 +43,7 @@ export type O2oClientOrderType = (typeof O2O_CLIENT_ORDER_TYPES)[number]
 @Index('idx_o2o_preorder_client_id', ['clientUserId', 'id'])
 @Index('idx_o2o_preorder_client_status_id', ['clientUserId', 'status', 'id'])
 @Index('idx_o2o_preorder_status_timeout_at', ['status', 'timeoutAt'])
+@Index('idx_o2o_preorder_is_deleted', ['isDeleted'])
 export class O2oPreorder {
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })
   id!: string
@@ -121,6 +122,21 @@ export class O2oPreorder {
 
   @Column({ name: 'verified_by', type: 'varchar', length: 64, nullable: true, comment: '核销操作人' })
   verifiedBy!: string | null
+
+  @Column({ name: 'is_deleted', ...entityColumnOptions.booleanFlag, default: 0, comment: '客户端可见性删除标记' })
+  isDeleted!: boolean
+
+  @Column({ name: 'deleted_at', ...entityColumnOptions.timestamp, nullable: true, comment: '客户端可见性删除时间' })
+  deletedAt!: Date | null
+
+  @Column({ name: 'deleted_by_user_id', ...entityColumnOptions.foreignId, nullable: true, comment: '客户端可见性删除操作人ID' })
+  deletedByUserId!: string | null
+
+  @Column({ name: 'deleted_by_username', type: 'varchar', length: 64, nullable: true, comment: '客户端可见性删除操作账号' })
+  deletedByUsername!: string | null
+
+  @Column({ name: 'deleted_by_display_name', type: 'varchar', length: 64, nullable: true, comment: '客户端可见性删除操作人名称' })
+  deletedByDisplayName!: string | null
 
   @ManyToOne(() => ClientUser, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'client_user_id' })

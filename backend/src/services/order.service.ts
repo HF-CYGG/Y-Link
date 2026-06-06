@@ -9,10 +9,11 @@
  */
 
 import { AppDataSource } from '../config/data-source.js'
-import { Brackets } from 'typeorm'
+import { Brackets, type EntityManager } from 'typeorm'
 import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
+import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import {
   isRetryableSqliteLockError,
@@ -175,6 +176,7 @@ const SHOW_NO_CONSTRAINT_MATCHER = {
 
 const ORDER_SUBMIT_MAX_RETRY = 3
 const ORDER_TYPE_SET = new Set<OrderType>(['department', 'walkin'])
+const O2O_VERIFIED_PREORDER_IDEMPOTENCY_KEY_PREFIX = 'o2o-preorder-verify:'
 const ORDER_FIELD_LIMITS = {
   idempotencyKey: 128,
   issuerName: 64,
@@ -190,6 +192,52 @@ const ORDER_FIELD_LIMITS = {
 export class OrderService {
   private readonly orderRepo = AppDataSource.getRepository(BizOutboundOrder)
   private readonly itemRepo = AppDataSource.getRepository(BizOutboundOrderItem)
+
+  private resolveLinkedO2oPreorderId(order: Pick<BizOutboundOrder, 'idempotencyKey'>): string | null {
+    const idempotencyKey = order.idempotencyKey?.trim() ?? ''
+    if (!idempotencyKey.startsWith(O2O_VERIFIED_PREORDER_IDEMPOTENCY_KEY_PREFIX)) {
+      return null
+    }
+    return idempotencyKey.slice(O2O_VERIFIED_PREORDER_IDEMPOTENCY_KEY_PREFIX.length).trim() || null
+  }
+
+  private async syncLinkedO2oPreorderVisibilityInManager(
+    manager: EntityManager,
+    order: Pick<BizOutboundOrder, 'idempotencyKey'>,
+    actor: AuthUserContext,
+    deleted: boolean,
+  ) {
+    const preorderId = this.resolveLinkedO2oPreorderId(order)
+    if (!preorderId) {
+      return null
+    }
+    const preorderRepo = manager.getRepository(O2oPreorder)
+    const preorder = await preorderRepo.findOne({
+      where: { id: preorderId },
+      lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+    })
+    if (!preorder) {
+      return { preorderId, changed: false, reason: 'not_found' }
+    }
+    if (preorder.isDeleted === deleted) {
+      return { preorderId, changed: false, reason: 'already_synced' }
+    }
+
+    preorder.isDeleted = deleted
+    if (deleted) {
+      preorder.deletedAt = new Date()
+      preorder.deletedByUserId = actor.userId
+      preorder.deletedByUsername = actor.username
+      preorder.deletedByDisplayName = actor.displayName
+    } else {
+      preorder.deletedAt = null
+      preorder.deletedByUserId = null
+      preorder.deletedByUsername = null
+      preorder.deletedByDisplayName = null
+    }
+    await preorderRepo.save(preorder)
+    return { preorderId, changed: true, deleted }
+  }
 
   async list(query: OrderListQuery): Promise<PaginationResult<OrderSummaryView>> {
     const qb = this.orderRepo.createQueryBuilder('order')
@@ -320,6 +368,7 @@ export class OrderService {
       order.deletedByUsername = actor.username
       order.deletedByDisplayName = actor.displayName
       const savedOrder = await orderRepo.save(order)
+      const linkedO2oPreorderSync = await this.syncLinkedO2oPreorderVisibilityInManager(manager, savedOrder, actor, true)
 
       await auditService.record(
         {
@@ -336,6 +385,7 @@ export class OrderService {
             customerName: savedOrder.customerName,
             totalQty: savedOrder.totalQty,
             totalAmount: savedOrder.totalAmount,
+            linkedO2oPreorderSync,
           },
         },
         manager,
@@ -368,6 +418,7 @@ export class OrderService {
       order.deletedByUsername = null
       order.deletedByDisplayName = null
       const savedOrder = await orderRepo.save(order)
+      const linkedO2oPreorderSync = await this.syncLinkedO2oPreorderVisibilityInManager(manager, savedOrder, actor, false)
 
       await auditService.record(
         {
@@ -384,6 +435,7 @@ export class OrderService {
             customerName: savedOrder.customerName,
             totalQty: savedOrder.totalQty,
             totalAmount: savedOrder.totalAmount,
+            linkedO2oPreorderSync,
           },
         },
         manager,
@@ -425,6 +477,7 @@ export class OrderService {
         throw new BizError('仅已删除单据支持永久删除，请先执行删除操作', 409)
       }
 
+      const linkedO2oPreorderSync = await this.syncLinkedO2oPreorderVisibilityInManager(manager, order, actor, true)
       const deleteResult = await orderRepo.delete({ id: order.id })
       if ((deleteResult.affected ?? 0) <= 0) {
         throw new BizError('永久删除出库单失败，请稍后重试', 500)
@@ -436,6 +489,7 @@ export class OrderService {
         ...this.buildOrderAuditDetail(order),
         serialRolledBack,
         serialCalibration,
+        linkedO2oPreorderSync,
       }
 
       await auditService.record(

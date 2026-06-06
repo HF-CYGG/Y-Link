@@ -112,6 +112,11 @@ const SQLITE_REQUIRED_O2O_PREORDER_COLUMNS = [
   'has_customer_order',
   'pickup_contact',
   'update_count',
+  'is_deleted',
+  'deleted_at',
+  'deleted_by_user_id',
+  'deleted_by_username',
+  'deleted_by_display_name',
 ]
 const SQLITE_REQUIRED_O2O_RETURN_REQUEST_COLUMNS = ['handled_at', 'handled_by', 'rejected_reason']
 const SQLITE_REQUIRED_BIZ_INBOUND_ORDER_COLUMNS = [

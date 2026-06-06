@@ -815,6 +815,7 @@ class O2oPreorderService {
       select: ['idempotencyKey', 'showNo'],
       where: {
         idempotencyKey: In([...idempotencyKeyToPreorderIdMap.keys()]),
+        isDeleted: false,
       },
     })
     const customerOrderShowNoMap = new Map<string, string>()
@@ -839,8 +840,14 @@ class O2oPreorderService {
     const rows = await AppDataSource.getRepository(BizOutboundOrder)
       .createQueryBuilder('outboundOrder')
       .select(['outboundOrder.idempotencyKey AS idempotencyKey'])
-      .where('outboundOrder.showNo = :showNoExact', { showNoExact: normalizedKeyword })
-      .orWhere(String.raw`outboundOrder.showNo LIKE :showNoPrefix ESCAPE '\'`, { showNoPrefix: `${escapedKeyword}%` })
+      .where('outboundOrder.isDeleted = :isDeleted', { isDeleted: false })
+      .andWhere(
+        new Brackets((showNoQb) => {
+          showNoQb
+            .where('outboundOrder.showNo = :showNoExact', { showNoExact: normalizedKeyword })
+            .orWhere(String.raw`outboundOrder.showNo LIKE :showNoPrefix ESCAPE '\'`, { showNoPrefix: `${escapedKeyword}%` })
+        }),
+      )
       .getRawMany<{ idempotencyKey: string | null }>()
     const preorderIdPrefix = this.buildVerifiedPreorderOutboundOrderIdempotencyKey('')
     const preorderIdSet = new Set<string>()
@@ -1875,7 +1882,7 @@ class O2oPreorderService {
       const orderItemRepo = manager.getRepository(O2oPreorderItem)
 
       const order = await orderRepo.findOne({
-        where: { id: orderId, clientUserId: auth.userId },
+        where: { id: orderId, clientUserId: auth.userId, isDeleted: false },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
       if (!order) {
@@ -1927,7 +1934,7 @@ class O2oPreorderService {
       const orderRepo = manager.getRepository(O2oPreorder)
       const orderItemRepo = manager.getRepository(O2oPreorderItem)
       const order = await orderRepo.findOne({
-        where: { id: input.orderId },
+        where: { id: input.orderId, isDeleted: false },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
       if (!order) {
@@ -1980,6 +1987,7 @@ class O2oPreorderService {
     const queryBuilder = this.preorderRepo
       .createQueryBuilder('order')
       .where('order.clientUserId = :clientUserId', { clientUserId: auth.userId })
+      .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
       .orderBy('order.id', 'DESC')
       .skip((normalizedPage - 1) * normalizedPageSize)
       .take(normalizedPageSize)
@@ -2041,7 +2049,7 @@ class O2oPreorderService {
   }
 
   async getMyOrderDetail(auth: ClientAuthContext, id: string) {
-    const order = await this.preorderRepo.findOne({ where: { id, clientUserId: auth.userId } })
+    const order = await this.preorderRepo.findOne({ where: { id, clientUserId: auth.userId, isDeleted: false } })
     if (!order) {
       throw new BizError('预订单不存在', 404)
     }
@@ -2049,7 +2057,7 @@ class O2oPreorderService {
   }
 
   async getMyOrderSummary(auth: ClientAuthContext, id: string) {
-    const order = await this.preorderRepo.findOne({ where: { id, clientUserId: auth.userId } })
+    const order = await this.preorderRepo.findOne({ where: { id, clientUserId: auth.userId, isDeleted: false } })
     if (!order) {
       throw new BizError('预订单不存在', 404)
     }
@@ -2074,7 +2082,7 @@ class O2oPreorderService {
     return AppDataSource.transaction(async (manager) => {
       const orderRepo = manager.getRepository(O2oPreorder)
       const order = await orderRepo.findOne({
-        where: { id: orderId, clientUserId: auth.userId },
+        where: { id: orderId, clientUserId: auth.userId, isDeleted: false },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
       if (!order) {
@@ -2147,7 +2155,11 @@ class O2oPreorderService {
     if (startTime && endTime && startTime.getTime() > endTime.getTime()) {
       throw new BizError('开始时间不能晚于结束时间', 400)
     }
-    const queryBuilder = this.preorderRepo.createQueryBuilder('order').orderBy('order.id', 'DESC').take(normalizedLimit)
+    const queryBuilder = this.preorderRepo
+      .createQueryBuilder('order')
+      .where('order.isDeleted = :isDeleted', { isDeleted: false })
+      .orderBy('order.id', 'DESC')
+      .take(normalizedLimit)
 
     if (input.status) {
       queryBuilder.andWhere('order.status = :status', { status: input.status })
@@ -2222,7 +2234,7 @@ class O2oPreorderService {
   }
 
   async detailById(id: string) {
-    const order = await this.preorderRepo.findOne({ where: { id } })
+    const order = await this.preorderRepo.findOne({ where: { id, isDeleted: false } })
     if (!order) {
       throw new BizError('预订单不存在', 404)
     }
@@ -2230,7 +2242,7 @@ class O2oPreorderService {
   }
 
   async updateBusinessStatus(input: UpdateOrderBusinessStatusInput) {
-    const order = await this.preorderRepo.findOne({ where: { id: input.orderId } })
+    const order = await this.preorderRepo.findOne({ where: { id: input.orderId, isDeleted: false } })
     if (!order) {
       throw new BizError('预订单不存在', 404)
     }
@@ -2240,7 +2252,7 @@ class O2oPreorderService {
   }
 
   async updateMerchantMessage(input: UpdateOrderMerchantMessageInput) {
-    const order = await this.preorderRepo.findOne({ where: { id: input.orderId } })
+    const order = await this.preorderRepo.findOne({ where: { id: input.orderId, isDeleted: false } })
     if (!order) {
       throw new BizError('预订单不存在', 404)
     }
@@ -2254,7 +2266,7 @@ class O2oPreorderService {
     return AppDataSource.transaction(async (manager) => {
       const orderRepo = manager.getRepository(O2oPreorder)
       const order = await orderRepo.findOne({
-        where: { id: orderId, clientUserId: auth.userId },
+        where: { id: orderId, clientUserId: auth.userId, isDeleted: false },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
       if (!order) {
@@ -2279,7 +2291,7 @@ class O2oPreorderService {
     return AppDataSource.transaction(async (manager) => {
       const orderRepo = manager.getRepository(O2oPreorder)
       const order = await orderRepo.findOne({
-        where: { id: input.orderId },
+        where: { id: input.orderId, isDeleted: false },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
       if (!order) {
@@ -2416,7 +2428,7 @@ class O2oPreorderService {
     await this.cancelTimeoutOrders()
     await AppDataSource.transaction(async (manager) => {
       const order = await manager.getRepository(O2oPreorder).findOne({
-        where: { id },
+        where: { id, isDeleted: false },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
       if (!order) {
@@ -2599,7 +2611,7 @@ class O2oPreorderService {
       throw new BizError('当前退货申请不可重复核销', 409)
     }
     const order = await manager.getRepository(O2oPreorder).findOne({
-      where: { id: String(returnRequest.orderId) },
+      where: { id: String(returnRequest.orderId), isDeleted: false },
       lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
     })
     if (!order) {
@@ -2667,7 +2679,7 @@ class O2oPreorderService {
       }
 
       const order = await orderRepo.findOne({
-        where: { id: String(returnRequest.orderId) },
+        where: { id: String(returnRequest.orderId), isDeleted: false },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
       if (!order) {
@@ -2774,7 +2786,7 @@ class O2oPreorderService {
         return this.verifyReturnRequestInManager(manager, returnRequest, actor)
       }
       const order = await manager.getRepository(O2oPreorder).findOne({
-        where: { verifyCode: normalizedVerifyCode },
+        where: { verifyCode: normalizedVerifyCode, isDeleted: false },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
       if (!order) {
@@ -2864,6 +2876,7 @@ class O2oPreorderService {
         const timeoutOrders = await this.preorderRepo.find({
           where: {
             status: 'pending',
+            isDeleted: false,
             timeoutAt: LessThanOrEqual(new Date()),
           },
           take: 100,
@@ -2908,7 +2921,7 @@ class O2oPreorderService {
         detail: await this.buildReturnRequestDetail(returnRequest),
       } satisfies O2oVerifyDetailView
     }
-    const order = await this.preorderRepo.findOne({ where: { verifyCode: normalizedVerifyCode } })
+    const order = await this.preorderRepo.findOne({ where: { verifyCode: normalizedVerifyCode, isDeleted: false } })
     if (!order) {
       throw new BizError('核销单不存在', 404)
     }
@@ -2930,7 +2943,7 @@ class O2oPreorderService {
         detail: await this.buildReturnRequestDetail(returnRequest),
       } satisfies O2oVerifyDetailView
     }
-    const order = await this.preorderRepo.findOne({ where: { showNo: normalizedShowNo } })
+    const order = await this.preorderRepo.findOne({ where: { showNo: normalizedShowNo, isDeleted: false } })
     if (!order) {
       throw new BizError('单据不存在', 404)
     }

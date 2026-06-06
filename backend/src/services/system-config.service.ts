@@ -1090,6 +1090,8 @@ class SystemConfigService {
         .select('preorder.showNo', 'showNo')
         .addSelect('preorder.status', 'status')
         .where('preorder.clientOrderType = :orderType', { orderType })
+        .andWhere('preorder.isDeleted = :isDeleted', { isDeleted: false })
+        .andWhere('preorder.status <> :verifiedStatus', { verifiedStatus: 'verified' })
         .getRawMany<{ showNo: string; status: string }>(),
     ])
     const prefix = ORDER_SERIAL_META[orderType].prefix

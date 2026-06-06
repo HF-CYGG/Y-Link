@@ -232,6 +232,8 @@ class OrderSerialService {
         .createQueryBuilder('preorder')
         .select('preorder.showNo', 'showNo')
         .where('preorder.clientOrderType = :orderType', { orderType })
+        .andWhere('preorder.isDeleted = :isDeleted', { isDeleted: false })
+        .andWhere('preorder.status <> :verifiedStatus', { verifiedStatus: 'verified' })
         .getRawMany<{ showNo: string }>(),
     ])
     const outboundMax = this.pickMaxSerialShowNo(outboundRows, serialRule.prefix)
