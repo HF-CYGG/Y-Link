@@ -299,8 +299,13 @@ const loadData = async (options: { silent?: boolean; force?: boolean } = {}) => 
     return
   }
 
+  if (options.silent && listState.loading) {
+    return
+  }
+
   if (options.silent) {
     silentRefreshing.value = true
+    listState.loading = false
   } else {
     silentRefreshing.value = false
     listState.loading = true
@@ -322,6 +327,7 @@ const loadData = async (options: { silent?: boolean; force?: boolean } = {}) => 
     onFinally: () => {
       if (options.silent) {
         silentRefreshing.value = false
+        listState.loading = false
       } else {
         listState.loading = false
       }
