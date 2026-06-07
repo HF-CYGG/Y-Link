@@ -176,7 +176,7 @@ function createTinyPngBlob() {
   return new Blob([pngBuffer], { type: 'image/png' })
 }
 
-function createSseClient(url: string, scene: string) {
+function createSseClient(url: string, scene: string, token?: string) {
   const controller = new AbortController()
   const eventQueue: SseEventRecord[] = []
   let readyResolved = false
@@ -243,6 +243,7 @@ function createSseClient(url: string, scene: string) {
       const response = await fetch(url, {
         headers: {
           Accept: 'text/event-stream',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
         signal: controller.signal,
       })
@@ -465,14 +466,8 @@ async function main() {
     assert.ok(portalConfig.offlineFaqs.length >= 1)
     pass('反馈入口与离线 FAQ 配置读取通过')
 
-    const clientStream = createSseClient(
-      `${baseUrl}/api/client-feedback/stream?access_token=${encodeURIComponent(clientToken)}`,
-      '客户端反馈 SSE',
-    )
-    const serviceStream = createSseClient(
-      `${baseUrl}/api/customer-service/stream?access_token=${encodeURIComponent(operatorToken)}`,
-      '客服工作台 SSE',
-    )
+    const clientStream = createSseClient(`${baseUrl}/api/client-feedback/stream`, '客户端反馈 SSE', clientToken)
+    const serviceStream = createSseClient(`${baseUrl}/api/customer-service/stream`, '客服工作台 SSE', operatorToken)
 
     const clientConnected = await clientStream.waitForEvent<{ eventType: string }>('connected')
     const serviceConnected = await serviceStream.waitForEvent<{ eventType: string; availability?: { isOnline?: boolean } }>('connected')
@@ -1069,4 +1064,3 @@ try {
   console.error('\n反馈中心与客服工作台专项回归失败：', error)
   process.exit(1)
 }
-

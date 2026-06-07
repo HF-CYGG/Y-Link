@@ -1424,9 +1424,9 @@ export const openFeedbackRealtimeStream = (
 
   /**
    * 实时流鉴权策略：
-   * - 客户端仍沿用现有 `access_token` 查询参数，避免牵连客户端登录体系；
-   * - 管理端改为依赖浏览器自动附带的安全 Cookie，会随 EventSource 一起发送；
-   * - `withCredentials` 便于未来切到独立 API 域名时继续携带 Cookie。
+   * - 客户端和管理端都依赖浏览器自动附带的安全 Cookie，不再把 token 放进 URL；
+   * - `withCredentials` 便于未来切到独立 API 域名时继续携带 Cookie；
+   * - 历史 `access_token` 查询参数已停用，避免日志、引用页和浏览器历史泄露会话。
    */
   const eventSource = new EventSource(
     buildStreamUrl(scope === 'client' ? '/client-feedback/stream' : '/customer-service/stream'),

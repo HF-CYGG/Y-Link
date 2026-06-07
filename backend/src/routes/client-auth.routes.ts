@@ -156,6 +156,7 @@ clientAuthRouter.get(
   '/staff-directory/lookup',
   asyncHandler(async (req, res) => {
     const payload = staffDirectoryLookupSchema.parse(req.query)
+    await authSecurityService.guardStaffDirectoryLookupRequest(extractRequestMeta(req), payload.staffNo)
     const data = await clientAuthService.lookupStaffDirectoryForRegister(payload.staffNo)
     res.setHeader('Cache-Control', 'no-store')
     res.json({ code: 0, message: 'ok', data })

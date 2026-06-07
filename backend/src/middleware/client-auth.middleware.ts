@@ -1,8 +1,8 @@
 /**
  * 模块说明：`backend/src/middleware/client-auth.middleware.ts`
- * 文件职责：负责客户端接口的登录态识别与请求上下文注入，统一兼容 Cookie、Bearer Token 与 SSE 查询参数三种取值来源。
+ * 文件职责：负责客户端接口的登录态识别与请求上下文注入，统一兼容 Cookie 与 Bearer Token 两种取值来源。
  * 实现逻辑：
- * 1. 优先从客户端安全 Cookie 中读取会话令牌，兼容历史 Bearer 头和 SSE `access_token` 查询参数；
+ * 1. 优先从客户端安全 Cookie 中读取会话令牌，兼容历史 Bearer 头，停止支持 URL query access_token；
  * 2. 调用客户端认证服务解析用户会话，并把结果写入 `req.clientAuth` 供后续路由复用；
  * 3. 当令牌缺失或失效时，统一抛出未登录错误，保持客户端接口鉴权口径一致。
  */
@@ -27,17 +27,8 @@ const parseBearerToken = (req: Request) => {
     }
   }
 
-  /**
-   * 客户端反馈页的在线状态使用浏览器原生 SSE，
-   * 这里兼容 `access_token` 查询参数，保证无需额外协议库也能续接。
-   */
-  const queryToken = typeof req.query.access_token === 'string'
-    ? req.query.access_token.trim()
-    : ''
-  if (!queryToken) {
-    return null
-  }
-  return queryToken
+  // 出于防泄露要求，客户端不再接受 URL query access_token。
+  return null
 }
 
 export const requireClientAuth = async (req: Request, _res: Response, next: NextFunction) => {

@@ -47,8 +47,8 @@ const listRequest = useStableRequest()
 const detailRequest = useStableRequest()
 const productRequest = useStableRequest()
 const actionRequest = useStableRequest()
-const AUTO_REFRESH_INTERVAL_MS = 15_000
-const DETAIL_SYNC_INTERVAL_MS = 15_000
+const AUTO_REFRESH_INTERVAL_MS = 30_000
+const DETAIL_SYNC_INTERVAL_MS = 30_000
 const listRenderKey = ref(0)
 const listState = reactive(createPaginatedListState<InboundOrder>({
   loading: false,
@@ -83,7 +83,6 @@ const products = ref<ProductRecord[]>([])
 const interactionLockCount = ref(0)
 const silentRefreshing = ref(false)
 const detailSyncing = ref(false)
-const lastSyncAt = ref('')
 let autoRefreshTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let detailSyncTimer: ReturnType<typeof globalThis.setInterval> | null = null
 
@@ -316,8 +315,9 @@ const loadData = async (options: { silent?: boolean; force?: boolean } = {}) => 
     onSuccess: (result) => {
       applyPaginatedResult(listState, result)
       summary.value = result.summary
-      listRenderKey.value += 1
-      lastSyncAt.value = dayjs().format('HH:mm:ss')
+      if (!options.silent) {
+        listRenderKey.value += 1
+      }
     },
     onError: (err) => {
       if (!options.silent) {
@@ -980,7 +980,7 @@ onBeforeUnmount(() => {
           <el-button class="history-filter-card__submit" type="primary" @click="handleSearch">搜索</el-button>
         </div>
         <p class="history-filter-card__sync mt-3 text-xs leading-5 text-slate-400 dark:text-slate-500">
-          自动同步已开启<span v-if="lastSyncAt">，最近同步 {{ lastSyncAt }}</span><span v-if="silentRefreshing">，正在同步</span>
+          自动同步已开启，约 30 秒刷新一次
         </p>
       </div>
 

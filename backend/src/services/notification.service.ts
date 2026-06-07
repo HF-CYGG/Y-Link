@@ -19,6 +19,8 @@ import { SystemConfig } from '../entities/system-config.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
 import type { RequestMeta } from '../utils/request-meta.js'
+import { detectUnsafeHost, formatUnsafeHostReason } from '../utils/safe-network.js'
+import { hashSessionToken } from '../utils/session-token.js'
 import { auditService } from './audit.service.js'
 import { systemConfigService } from './system-config.service.js'
 
@@ -40,6 +42,7 @@ const MIN_ONLINE_WINDOW_SECONDS = 30
 const MAX_ONLINE_WINDOW_SECONDS = 3600
 const HEARTBEAT_WRITE_INTERVAL_MS = 60 * 1000
 const FEISHU_WEBHOOK_TIMEOUT_MS = 10 * 1000
+const FEISHU_WEBHOOK_ALLOWED_HOSTS = new Set(['open.feishu.cn', 'open.larksuite.com'])
 export const FEISHU_SIGN_SECRET_PLACEHOLDER = '[已配置签名密钥，保存时保留原值]'
 
 const DEFAULT_RULES: Array<{
@@ -197,6 +200,69 @@ function normalizeId(value: string | number | null | undefined): string {
   return String(value ?? '').trim()
 }
 
+function maskFeishuWebhookTarget(webhookUrl: string): string {
+  try {
+    const url = new URL(webhookUrl.trim())
+    const segments = url.pathname.split('/').filter(Boolean)
+    const hookIndex = segments.findIndex((segment) => segment === 'hook')
+    const hookId = hookIndex >= 0 ? segments[hookIndex + 1] : ''
+    const suffix = hookId ? hookId.slice(-6) : ''
+    return suffix ? `${url.origin}/open-apis/bot/v2/hook/***${suffix}` : `${url.origin}/open-apis/bot/v2/hook/***`
+  } catch {
+    return '[已隐藏飞书 Webhook]'
+  }
+}
+
+function normalizeFeishuWebhookUrl(rawValue: string): string {
+  const text = rawValue.trim()
+  if (!text) {
+    return ''
+  }
+  let url: URL
+  try {
+    url = new URL(text)
+  } catch {
+    throw new BizError('飞书 Webhook 地址格式不正确', 400)
+  }
+  if (url.protocol !== 'https:') {
+    throw new BizError('飞书 Webhook 仅支持 HTTPS 地址', 400)
+  }
+  const hostname = url.hostname.toLowerCase()
+  if (!FEISHU_WEBHOOK_ALLOWED_HOSTS.has(hostname)) {
+    throw new BizError('飞书 Webhook 仅允许使用飞书官方机器人地址', 400)
+  }
+  const unsafeReason = detectUnsafeHost(hostname)
+  if (unsafeReason) {
+    throw new BizError(`飞书 Webhook 禁止使用${formatUnsafeHostReason(unsafeReason)}`, 400)
+  }
+  if (!/^\/open-apis\/bot\/v2\/hook\/[^/?#]+\/?$/.test(url.pathname)) {
+    throw new BizError('飞书 Webhook 必须是机器人 hook 地址', 400)
+  }
+  url.hash = ''
+  return url.toString()
+}
+
+function normalizeExternalHttpUrl(rawValue: string, channelLabel: string): string {
+  const text = rawValue.trim()
+  if (!text) {
+    return ''
+  }
+  let url: URL
+  try {
+    url = new URL(text)
+  } catch {
+    throw new BizError(`${channelLabel}地址格式不正确`, 400)
+  }
+  if (!['http:', 'https:'].includes(url.protocol)) {
+    throw new BizError(`${channelLabel}仅支持 http 或 https 协议`, 400)
+  }
+  const unsafeReason = detectUnsafeHost(url.hostname)
+  if (unsafeReason) {
+    throw new BizError(`${channelLabel}禁止使用${formatUnsafeHostReason(unsafeReason)}`, 400)
+  }
+  return url.toString()
+}
+
 function toRuleRecord(row: NotificationRule): NotificationRuleRecord {
   return {
     id: normalizeId(row.id),
@@ -351,7 +417,7 @@ export class NotificationService {
     const watchedUserIds = row.watchedUserIds.map((item) => normalizeId(item)).filter(Boolean)
     const emailRecipientAdminUserIds = row.emailRecipientAdminUserIds.map((item) => normalizeId(item)).filter(Boolean)
     const emailRecipientSupplierUserIds = row.emailRecipientSupplierUserIds.map((item) => normalizeId(item)).filter(Boolean)
-    const feishuWebhookUrl = row.feishuWebhookUrl.trim()
+    const feishuWebhookUrl = normalizeFeishuWebhookUrl(row.feishuWebhookUrl)
     const emailSubjectPrefix = row.emailSubjectPrefix.trim().slice(0, 128) || '[Y-Link]'
 
     if (row.externalTriggerMode === 'watched_accounts_offline' && watchedUserIds.length === 0) {
@@ -583,11 +649,12 @@ export class NotificationService {
   async touchSessionHeartbeat(auth: AuthUserContext): Promise<void> {
     const now = new Date()
     const threshold = new Date(now.getTime() - HEARTBEAT_WRITE_INTERVAL_MS)
+    const sessionTokenHash = hashSessionToken(auth.sessionToken)
     await this.sessionRepo
       .createQueryBuilder()
       .update(SysUserSession)
       .set({ lastAccessAt: now })
-      .where('session_token = :sessionToken', { sessionToken: auth.sessionToken })
+      .where('session_token = :sessionToken', { sessionToken: sessionTokenHash })
       .andWhere('(last_access_at IS NULL OR last_access_at < :threshold)', { threshold })
       .execute()
   }
@@ -685,6 +752,17 @@ export class NotificationService {
       }
     }
 
+    let providerApiUrl: string
+    try {
+      providerApiUrl = normalizeExternalHttpUrl(provider.apiUrl, '邮件通知通道 API 地址')
+    } catch (error) {
+      return {
+        status: 500,
+        ok: false,
+        errorMessage: error instanceof BizError ? error.message : '邮件通知通道 API 地址不安全',
+      }
+    }
+
     let headers: Record<string, string> = {}
     try {
       headers = JSON.parse(provider.headersTemplate.trim() || '{}')
@@ -710,7 +788,7 @@ export class NotificationService {
     }
 
     try {
-      const response = await fetch(provider.apiUrl, requestInit)
+      const response = await fetch(providerApiUrl, requestInit)
       const responseText = await response.text()
       const successMatch = provider.successMatch.trim()
       if (!response.ok || (successMatch && !responseText.includes(successMatch))) {
@@ -752,6 +830,16 @@ export class NotificationService {
     content: string,
     signSecret?: string | null,
   ): Promise<{ status: number; ok: boolean; errorMessage?: string }> {
+    let safeWebhookUrl: string
+    try {
+      safeWebhookUrl = normalizeFeishuWebhookUrl(webhookUrl)
+    } catch (error) {
+      return {
+        status: 500,
+        ok: false,
+        errorMessage: error instanceof BizError ? error.message : '飞书 Webhook 地址不安全',
+      }
+    }
     const abortController = new AbortController()
     const timeout = setTimeout(() => {
       abortController.abort()
@@ -760,7 +848,7 @@ export class NotificationService {
     try {
       const normalizedSecret = signSecret?.trim() || ''
       const signedPart = normalizedSecret ? this.buildFeishuSignature(normalizedSecret) : null
-      const response = await fetch(webhookUrl, {
+      const response = await fetch(safeWebhookUrl, {
         method: 'POST',
         signal: abortController.signal,
         headers: {
@@ -956,7 +1044,7 @@ export class NotificationService {
         ? []
         : [
             {
-              target: normalizedDraft.feishuWebhookUrl,
+              target: maskFeishuWebhookTarget(normalizedDraft.feishuWebhookUrl),
               reason: feishuResult.errorMessage ?? '飞书测试发送失败',
             },
           ],
@@ -1123,6 +1211,7 @@ export class NotificationService {
         if (item.rule.feishuEnabled && item.rule.feishuWebhookUrl) {
           const feishuWebhookUrl = item.rule.feishuWebhookUrl.trim()
           const feishuDispatchKey = `feishu:${feishuWebhookUrl}`
+          const maskedFeishuWebhookTarget = maskFeishuWebhookTarget(feishuWebhookUrl)
           if (!feishuWebhookUrl || dispatchDedupKeys.has(feishuDispatchKey)) {
             continue
           }
@@ -1135,7 +1224,7 @@ export class NotificationService {
           await this.dispatchRepo.save(this.dispatchRepo.create({
             eventId: event.id,
             channel: 'feishu',
-            target: feishuWebhookUrl,
+            target: maskedFeishuWebhookTarget,
             status: sendResult.ok ? 'sent' : 'failed',
             attemptCount: 1,
             errorMessage: sendResult.ok ? null : (sendResult.errorMessage ?? '飞书发送失败'),

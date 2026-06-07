@@ -161,6 +161,16 @@ const RATE_LIMIT_RULES = {
     windowMs: 10 * 60 * 1000,
     blockMessage: '该账号验证码发送过于频繁，请稍后再试',
   },
+  staffDirectoryLookupBySource: {
+    maxRequests: 20,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '工号目录查询过于频繁，请稍后再试',
+  },
+  staffDirectoryLookupByIpFallback: {
+    maxRequests: 80,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '当前网络下工号目录查询过于频繁，请稍后再试',
+  },
 } as const satisfies Record<string, RateLimitRule>
 
 const FAILURE_LOCK_THRESHOLD = {
@@ -502,6 +512,21 @@ export class AuthSecurityService {
       requestMeta,
       detail: {},
     })
+  }
+
+  async guardStaffDirectoryLookupRequest(requestMeta: RequestMeta | undefined, staffNo: string) {
+    await this.consumeClientSourceRateLimit(
+      'staff-directory-lookup',
+      RATE_LIMIT_RULES.staffDirectoryLookupBySource,
+      RATE_LIMIT_RULES.staffDirectoryLookupByIpFallback,
+      {
+        actionType: 'client.auth.guard.staff_directory_lookup',
+        actionLabel: '客户端工号目录查询频控',
+        targetCode: staffNo,
+        requestMeta,
+        detail: {},
+      },
+    )
   }
 
   async guardVerificationCodeSendRequest(requestMeta: RequestMeta | undefined, target: string, channel: 'mobile' | 'email') {

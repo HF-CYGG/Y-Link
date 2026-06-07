@@ -62,24 +62,14 @@ function parseBearerToken(req: Request): string | null {
     }
   }
 
-  /**
-   * SSE 原生 EventSource 无法附带自定义 Authorization 头，
-   * 因此在仅流式订阅场景下额外兼容 `access_token` 查询参数，
-   * 仍统一复用同一套 token 解析与鉴权链路。
-   */
-  const queryToken = typeof req.query.access_token === 'string'
-    ? req.query.access_token.trim()
-    : ''
-  if (!queryToken) {
-    return null
-  }
-  return queryToken
+  // 出于防泄露要求，管理端不再接受 URL query access_token。
+  return null
 }
 
 /**
  * 统一解析管理端认证凭据：
  * - 优先使用 HttpOnly 会话 Cookie，确保管理端主链路正式切换到安全 Cookie 会话；
- * - 保留 Bearer Token 兼容兜底，避免历史 SSE 或联调脚本在过渡阶段立刻失效。
+ * - 保留 Bearer Token 兼容兜底，旧版 query access_token 已停止支持。
  */
 function parseAdminCredential(req: Request): { token: string; source: 'cookie' | 'bearer' } | null {
   const sessionToken = readAdminSessionTokenFromCookie(req)

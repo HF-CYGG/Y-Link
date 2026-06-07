@@ -113,6 +113,7 @@ dataMaintenanceRouter.post(
 dataMaintenanceRouter.post(
   '/db-migration/precheck',
   requirePermission('db_migration:view'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     const payload = sqliteToMysqlPrecheckSchema.parse(req.body)
     const data = await databaseMigrationService.precheckSQLiteToMySql(payload)

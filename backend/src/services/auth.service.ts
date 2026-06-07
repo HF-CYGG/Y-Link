@@ -16,6 +16,7 @@ import type { AuthUserContext, UserSafeProfile } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { assertAdminPasswordPolicy, hashPassword, verifyPassword } from '../utils/password.js'
+import { hashSessionToken } from '../utils/session-token.js'
 import { generateSessionToken } from '../utils/token.js'
 import { auditService } from './audit.service.js'
 import { authSecurityService } from './auth-security.service.js'
@@ -176,7 +177,7 @@ export class AuthService {
       const savedUser = await userRepo.save(user)
       const session = await sessionRepo.save(
         sessionRepo.create({
-          sessionToken: token,
+          sessionToken: hashSessionToken(token),
           userId: savedUser.id,
           expiresAt,
           lastAccessAt: now,
@@ -219,8 +220,9 @@ export class AuthService {
   async logout(auth: AuthUserContext, requestMeta?: RequestMeta): Promise<void> {
     await AppDataSource.transaction(async (manager) => {
       const sessionRepo = manager.getRepository(SysUserSession)
+      const sessionTokenHash = hashSessionToken(auth.sessionToken)
       const existedSession = await sessionRepo.findOne({
-        where: { sessionToken: auth.sessionToken },
+        where: { sessionToken: sessionTokenHash },
       })
 
       if (existedSession) {
@@ -348,9 +350,10 @@ export class AuthService {
 
   async resolveAuthUserByToken(sessionToken: string): Promise<AuthUserContext> {
     const now = new Date()
+    const sessionTokenHash = hashSessionToken(sessionToken)
     const session = await this.sessionRepo.findOne({
       where: {
-        sessionToken,
+        sessionToken: sessionTokenHash,
         expiresAt: MoreThan(now),
       },
     })
@@ -377,7 +380,7 @@ export class AuthService {
       role: user.role,
       permissions: resolvePermissionsByRole(user.role),
       status: user.status,
-      sessionToken: session.sessionToken,
+      sessionToken,
       // 认证来源由中间件根据“本次请求从 Cookie 还是 Bearer 进入”最终覆写。
       authSource: 'bearer',
     }
@@ -391,11 +394,12 @@ export class AuthService {
   async touchSessionActivity(sessionToken: string, minIntervalMs = 60_000): Promise<void> {
     const now = new Date()
     const threshold = new Date(now.getTime() - Math.max(1_000, minIntervalMs))
+    const sessionTokenHash = hashSessionToken(sessionToken)
     await this.sessionRepo
       .createQueryBuilder()
       .update(SysUserSession)
       .set({ lastAccessAt: now })
-      .where('session_token = :sessionToken', { sessionToken })
+      .where('session_token = :sessionToken', { sessionToken: sessionTokenHash })
       .andWhere('(last_access_at IS NULL OR last_access_at < :threshold)', { threshold })
       .execute()
   }
