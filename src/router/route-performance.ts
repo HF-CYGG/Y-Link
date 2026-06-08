@@ -33,6 +33,7 @@ export type AppRouteName =
   | 'dashboard'
   | 'order-entry'
   | 'order-list'
+  | 'reports'
   | 'base-data'
   | 'products'
   | 'tags'
@@ -89,6 +90,7 @@ export const routeViewLoaders = {
   dashboard: () => import('@/views/dashboard/DashboardView.vue'),
   'order-entry': () => import('@/views/order-entry/OrderEntryView.vue'),
   'order-list': () => import('@/views/order-list/OrderListView.vue'),
+  reports: () => import('@/views/reports/ReportCenterView.vue'),
   products: () => import('@/views/product-center/ProductCenterView.vue'),
   tags: () => import('@/views/base-data/TagManageView.vue'),
 
@@ -132,6 +134,7 @@ const warmableRouteLoaders: Partial<Record<RouteWarmupTarget, RouteViewLoader>> 
   dashboard: routeViewLoaders.dashboard,
   'order-entry': routeViewLoaders['order-entry'],
   'order-list': routeViewLoaders['order-list'],
+  reports: routeViewLoaders.reports,
   // 产品中心当前使用共享工作台壳层：
   // - 仅预热壳层会导致标签切换时仍然需要额外等待子页面分包；
   // - 因此这里在路由预热阶段一并补齐默认标签对应的业务子包。
@@ -353,6 +356,7 @@ const warmupTargetMatchers: Array<{
   { target: 'dashboard', prefixes: ['/dashboard'] },
   { target: 'order-entry', prefixes: ['/order-entry'] },
   { target: 'order-list', prefixes: ['/order-list'] },
+  { target: 'reports', prefixes: ['/reports'] },
   { target: 'tags', prefixes: ['/base-data/tags'] },
   { target: 'products', prefixes: ['/base-data/products', '/base-data'] },
   { target: 'supplier-delivery', prefixes: ['/supplier-delivery'] },

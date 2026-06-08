@@ -33,6 +33,7 @@
     "client-staff-directory:verify": "tsx scripts/client-staff-directory-verify.ts",
     "o2o:verify": "tsx scripts/o2o-preorder-verify.ts",
     "order-query:baseline:verify": "tsx scripts/order-query-baseline-verify.ts",
+    "reports:contract:verify": "tsx scripts/report-center-contract-verify.ts",
     "uploads:legacy:inspect": "tsx scripts/inspect-legacy-upload-urls.ts"
   },
   "dependencies": {
