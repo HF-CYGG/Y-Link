@@ -173,17 +173,13 @@ const resolveActivityTagType = (actionType: string): 'success' | 'danger' | 'war
   return 'info'
 }
 
-const resolveActivityDotClass = (actionType: string): string => {
-  if (actionType === 'order.create') {
-    return 'bg-emerald-500 text-emerald-50 shadow-emerald-500/20 dark:bg-emerald-400 dark:text-emerald-950'
-  }
-  if (actionType === 'order.delete' || actionType === 'order.purge') {
-    return 'bg-rose-500 text-rose-50 shadow-rose-500/20 dark:bg-rose-400 dark:text-rose-950'
-  }
-  if (actionType === 'order.restore') {
-    return 'bg-amber-500 text-amber-50 shadow-amber-500/20 dark:bg-amber-400 dark:text-amber-950'
-  }
-  return 'bg-slate-400 text-white shadow-slate-400/20 dark:bg-slate-500'
+/**
+ * 动态是否可跳转：
+ * - 永久删除后的出库单已不存在可打开详情，首页只保留审计展示；
+ * - 其余动态仍复用出库单列表页的定位逻辑。
+ */
+const isActivityNavigable = (activity: { actionType: string; orderId: string }): boolean => {
+  return activity.actionType !== 'order.purge' && Boolean(activity.orderId.trim())
 }
 
 /**
@@ -204,7 +200,11 @@ const formatActivityTime = (value: string): string => {
  * - 点击首页动态后跳转到出库列表页；
  * - 通过 query 透传目标单据信息，复用列表页既有“定位并打开详情抽屉”逻辑。
  */
-const navigateToActivityOrder = (activity: { orderId: string; showNo: string }) => {
+const navigateToActivityOrder = (activity: { actionType: string; orderId: string; showNo: string }) => {
+  if (!isActivityNavigable(activity)) {
+    return
+  }
+
   router.push({
     path: '/order-list',
     query: {
@@ -462,69 +462,38 @@ onActivated(() => {
           <TopCustomerRankCard :top-customers="stats?.topCustomers ?? []" />
 
           <div class="apple-card p-5 sm:p-6 xl:p-7">
-            <div class="mb-5 flex items-center justify-between gap-3">
-              <h2 class="text-lg font-semibold text-slate-800 dark:text-slate-200">近期出库动态</h2>
-              <span class="text-xs text-slate-500 dark:text-slate-400">点击查看单据详情</span>
-            </div>
-            <div v-if="recentActivities.length" class="space-y-3">
+            <h2 class="mb-4 text-lg font-semibold text-slate-800 dark:text-slate-200">近期出库动态</h2>
+            <div v-if="recentActivities.length" class="space-y-2.5">
               <button
-                v-for="(activity, index) in recentActivities"
+                v-for="activity in recentActivities"
                 :key="activity.id"
                 type="button"
-                class="group relative flex w-full gap-3 rounded-xl bg-slate-50/80 p-3 text-left transition hover:bg-brand/5 hover:shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/45 dark:bg-slate-900/40 dark:hover:bg-brand/10 sm:gap-4 sm:p-4"
-                :aria-label="`查看出库单 ${activity.showNo} 的动态详情`"
+                :class="[
+                  'w-full rounded-lg border border-slate-100 bg-slate-50/80 px-3 py-2.5 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/35 dark:border-white/10 dark:bg-slate-900/40 sm:px-3.5 sm:py-3',
+                  isActivityNavigable(activity)
+                    ? 'cursor-pointer hover:border-brand/35 hover:bg-slate-50 hover:shadow-sm dark:hover:border-brand/40 dark:hover:bg-slate-900/60'
+                    : 'cursor-not-allowed opacity-80',
+                ]"
+                :disabled="!isActivityNavigable(activity)"
+                :aria-label="isActivityNavigable(activity) ? `查看出库单 ${activity.showNo} 的动态详情` : `出库单 ${activity.showNo} 已永久删除，无法跳转`"
+                :title="isActivityNavigable(activity) ? '查看单据详情' : '该出库单已永久删除，无法跳转'"
                 @click="navigateToActivityOrder(activity)"
               >
-                <div class="relative flex w-[58px] shrink-0 flex-col items-center pt-0.5 sm:w-[72px]">
-                  <span
-                    v-if="index < recentActivities.length - 1"
-                    class="absolute bottom-[-0.75rem] top-9 w-px bg-slate-200 dark:bg-white/10"
-                  />
-                  <span
-                    :class="[
-                      'relative z-10 flex h-8 w-8 items-center justify-center rounded-full shadow-lg ring-4 ring-slate-50 transition group-hover:scale-105 dark:ring-[#141415]',
-                      resolveActivityDotClass(activity.actionType),
-                    ]"
-                  >
-                    <span class="h-2 w-2 rounded-full bg-current" />
-                  </span>
-                  <span class="mt-2 whitespace-nowrap text-[11px] font-medium leading-none text-slate-500 dark:text-slate-400">
-                    {{ formatActivityTime(activity.createdAt) }}
-                  </span>
-                </div>
-
-                <div class="min-w-0 flex-1">
-                  <div class="flex flex-wrap items-center gap-2">
-                    <el-tag :type="resolveActivityTagType(activity.actionType)" size="small" effect="light" class="!rounded-full !px-2">
+                <div class="flex min-w-0 items-start justify-between gap-3">
+                  <div class="flex min-w-0 flex-wrap items-center gap-2">
+                    <el-tag :type="resolveActivityTagType(activity.actionType)" size="small" effect="light" class="!px-1.5">
                       {{ activity.actionLabel }}
                     </el-tag>
-                    <span class="min-w-0 flex-1 truncate text-sm font-semibold text-slate-800 dark:text-slate-100">
+                    <span class="min-w-0 truncate text-xs font-medium text-slate-700 dark:text-slate-200 sm:text-sm">
                       {{ activity.showNo }}
                     </span>
                   </div>
-                  <div class="mt-2 truncate text-sm font-medium text-slate-700 dark:text-slate-200">
-                    {{ activity.displayName }}
-                  </div>
-                  <div class="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
-                    <div class="col-span-2 min-w-0 rounded-lg bg-white/80 px-2.5 py-2 ring-1 ring-slate-100 dark:bg-white/5 dark:ring-white/10 sm:col-span-1">
-                      <div class="text-[11px] text-slate-400 dark:text-slate-500">数量</div>
-                      <div class="mt-0.5 truncate text-xs font-semibold text-slate-700 dark:text-slate-200">
-                        {{ formatQty(activity.totalQty) }} 件
-                      </div>
-                    </div>
-                    <div class="min-w-0 rounded-lg bg-white/80 px-2.5 py-2 ring-1 ring-slate-100 dark:bg-white/5 dark:ring-white/10">
-                      <div class="text-[11px] text-slate-400 dark:text-slate-500">金额</div>
-                      <div class="mt-0.5 truncate text-xs font-semibold text-slate-700 dark:text-slate-200">
-                        ¥{{ formatAmount(activity.totalAmount) }}
-                      </div>
-                    </div>
-                    <div class="min-w-0 rounded-lg bg-white/80 px-2.5 py-2 ring-1 ring-slate-100 dark:bg-white/5 dark:ring-white/10">
-                      <div class="text-[11px] text-slate-400 dark:text-slate-500">操作人</div>
-                      <div class="mt-0.5 truncate text-xs font-semibold text-slate-700 dark:text-slate-200">
-                        {{ activity.actorDisplayName }}
-                      </div>
-                    </div>
-                  </div>
+                  <span class="shrink-0 pt-0.5 text-xs text-slate-500 dark:text-slate-400">
+                    {{ formatActivityTime(activity.createdAt) }}
+                  </span>
+                </div>
+                <div class="mt-1.5 truncate text-xs leading-5 text-slate-600 dark:text-slate-300">
+                  {{ activity.displayName }} ｜ {{ formatQty(activity.totalQty) }} 件 ｜ ¥{{ formatAmount(activity.totalAmount) }} ｜ {{ activity.actorDisplayName }}
                 </div>
               </button>
             </div>
