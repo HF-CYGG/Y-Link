@@ -20,6 +20,8 @@ import {
   PagePaginationBar,
   PageToolbarCard,
 } from '@/components/common'
+import { useAppStore } from '@/store'
+import pinia from '@/store/pinia'
 import { exportReportExcel, getReportData, type ReportFieldDefinition, type ReportRow, type ReportType } from '@/api/modules/report'
 import { getTagList, type Tag } from '@/api/modules/tag'
 import { usePermissionAction } from '@/composables/usePermissionAction'
@@ -111,6 +113,7 @@ const tagsLoading = ref(false)
 const exportLoading = ref(false)
 const exportPreviewVisible = ref(false)
 const reportRequest = useStableRequest()
+const appStore = useAppStore(pinia)
 const { hasPermission, ensurePermission } = usePermissionAction()
 const canExportReports = computed(() => hasPermission('reports:export'))
 
@@ -132,6 +135,38 @@ const exportPreviewSummary = computed(() => {
   const totalText = listState.total > 0 ? `预计导出 ${listState.total} 条命中数据` : '当前条件暂无命中数据'
   return `${totalText}；已选 ${displayFields.value.length} 个字段`
 })
+const mobileCardTitleField = computed(() => {
+  return displayFields.value.find((field) => ['productName', 'showNo', 'category', 'time'].includes(field.key)) ?? displayFields.value[0]
+})
+const mobileCardSubtitleFields = computed(() => {
+  const titleKey = mobileCardTitleField.value?.key
+  return displayFields.value
+    .filter((field) => field.key !== titleKey && ['time', 'showNo', 'tags', 'departmentName', 'receiverName', 'operatorName', 'status', 'recordStatus'].includes(field.key))
+    .slice(0, 2)
+})
+const mobileCardMetricFields = computed(() => {
+  const excludedKeys = new Set([
+    mobileCardTitleField.value?.key,
+    ...mobileCardSubtitleFields.value.map((field) => field.key),
+  ].filter(Boolean))
+  return displayFields.value
+    .filter((field) => field.numeric && !excludedKeys.has(field.key))
+    .slice(0, 3)
+})
+const mobileCardDetailFields = computed(() => {
+  const excludedKeys = new Set([
+    mobileCardTitleField.value?.key,
+    ...mobileCardSubtitleFields.value.map((field) => field.key),
+    ...mobileCardMetricFields.value.map((field) => field.key),
+  ].filter(Boolean))
+  return displayFields.value.filter((field) => !excludedKeys.has(field.key))
+})
+const mobilePreviewDetailFields = computed(() => {
+  const titleKey = mobileCardTitleField.value?.key
+  return displayFields.value.filter((field) => field.key !== titleKey)
+})
+const paginationLayout = computed(() => appStore.isPhone ? 'total, prev, next' : 'total, sizes, prev, pager, next, jumper')
+const paginationPageSizes = computed(() => appStore.isPhone ? [10, 20, 50] : [10, 20, 50, 100])
 const showTagFilter = computed(() => reportType.value !== 'outbound-flow')
 const showDateFilter = computed(() => reportType.value !== 'inventory')
 const currentFilterSummary = computed(() => {
@@ -312,7 +347,7 @@ onMounted(() => {
     <div class="report-center-page flex min-w-0 flex-col gap-4">
       <PageToolbarCard content-class="items-start">
         <template #default="{ isPhone, isTablet }">
-          <div class="flex flex-1 flex-wrap items-start gap-2.5">
+          <div :class="['report-filter-grid flex flex-1 flex-wrap items-start gap-2.5', isPhone ? 'w-full' : '']">
             <el-select
               v-model="reportType"
               placeholder="选择报表"
@@ -329,7 +364,7 @@ onMounted(() => {
               start-placeholder="开始日期"
               end-placeholder="结束日期"
               clearable
-              :class="isPhone ? '!w-full' : isTablet ? '!w-[330px]' : '!w-[360px]'"
+              :class="isPhone ? '!w-full report-date-picker--phone' : isTablet ? '!w-[330px]' : '!w-[360px]'"
               @change="handleSearch"
             />
             <el-select
@@ -347,21 +382,23 @@ onMounted(() => {
             >
               <el-option v-for="tag in tags" :key="tag.id" :label="tag.tagName" :value="tag.id" />
             </el-select>
-            <el-popover placement="bottom-start" width="320" trigger="click">
-              <template #reference>
-                <el-button :class="isPhone ? 'w-full' : ''" :icon="List">字段选择</el-button>
-              </template>
-              <div class="max-h-[360px] overflow-auto pr-1">
-                <p class="mb-3 text-sm font-semibold text-slate-700">选择预览与导出字段</p>
-                <el-checkbox-group v-model="selectedFieldKeys" class="report-field-checkbox-group">
-                  <el-checkbox v-for="field in currentAvailableFields" :key="field.key" :value="field.key">
-                    {{ field.label }}
-                  </el-checkbox>
-                </el-checkbox-group>
-              </div>
-            </el-popover>
-            <el-button :class="isPhone ? 'w-full' : ''" type="primary" :icon="Search" @click="handleSearch">查询</el-button>
-            <el-button :class="isPhone ? 'w-full' : ''" :icon="Refresh" @click="handleReset">重置</el-button>
+            <div :class="['report-filter-actions flex gap-2', isPhone ? 'w-full' : '']">
+              <el-popover placement="bottom-start" :width="isPhone ? 'calc(100vw - 32px)' : 320" trigger="click" popper-class="report-field-popover">
+                <template #reference>
+                  <el-button :class="isPhone ? 'flex-1' : ''" :icon="List">字段选择</el-button>
+                </template>
+                <div class="max-h-[360px] overflow-auto pr-1">
+                  <p class="mb-3 text-sm font-semibold text-slate-700">选择预览与导出字段</p>
+                  <el-checkbox-group v-model="selectedFieldKeys" class="report-field-checkbox-group">
+                    <el-checkbox v-for="field in currentAvailableFields" :key="field.key" :value="field.key">
+                      {{ field.label }}
+                    </el-checkbox>
+                  </el-checkbox-group>
+                </div>
+              </el-popover>
+              <el-button :class="isPhone ? 'flex-1' : ''" type="primary" :icon="Search" @click="handleSearch">查询</el-button>
+              <el-button :class="isPhone ? 'flex-1' : ''" :icon="Refresh" @click="handleReset">重置</el-button>
+            </div>
           </div>
         </template>
 
@@ -379,10 +416,10 @@ onMounted(() => {
         </template>
       </PageToolbarCard>
 
-      <div class="rounded-2xl border border-dashed border-brand/20 bg-brand/5 px-4 py-3 text-sm leading-6 text-slate-600 dark:border-brand/20 dark:bg-brand/10 dark:text-slate-300">
+      <div class="report-summary-card rounded-2xl border border-dashed border-brand/20 bg-brand/5 px-4 py-3 text-sm leading-6 text-slate-600 dark:border-brand/20 dark:bg-brand/10 dark:text-slate-300">
         <p class="font-semibold text-slate-800 dark:text-slate-100">{{ currentReportOption.label }}</p>
         <p class="mt-1">{{ currentReportOption.description }}</p>
-        <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">当前条件：{{ currentFilterSummary }}</p>
+        <p class="report-summary-card__condition mt-1 text-xs text-slate-500 dark:text-slate-400">当前条件：{{ currentFilterSummary }}</p>
       </div>
 
       <div class="apple-card flex min-h-0 flex-1 flex-col p-3 sm:p-4 xl:p-5">
@@ -413,12 +450,35 @@ onMounted(() => {
             </el-table>
           </template>
 
-          <template #card="{ item }">
-            <div class="apple-card p-4">
-              <div class="grid gap-2 text-sm">
-                <div v-for="field in displayFields" :key="field.key" class="flex items-start justify-between gap-3">
-                  <span class="shrink-0 text-slate-400">{{ field.label }}</span>
-                  <span class="min-w-0 text-right font-medium text-slate-700 dark:text-slate-200">{{ formatCellValue(item, field) }}</span>
+          <template #card="{ item, isTablet }">
+            <div class="apple-card report-mobile-card min-w-0 p-4">
+              <div class="report-mobile-card__head">
+                <div class="min-w-0">
+                  <p class="report-mobile-card__label">{{ mobileCardTitleField?.label ?? '记录' }}</p>
+                  <p class="report-mobile-card__title">
+                    {{ mobileCardTitleField ? formatCellValue(item, mobileCardTitleField) : '-' }}
+                  </p>
+                </div>
+                <span class="report-mobile-card__chip">{{ currentReportOption.label }}</span>
+              </div>
+
+              <div v-if="mobileCardSubtitleFields.length" class="report-mobile-card__subtitle">
+                <span v-for="field in mobileCardSubtitleFields" :key="field.key">
+                  {{ field.label }}：{{ formatCellValue(item, field) }}
+                </span>
+              </div>
+
+              <div v-if="mobileCardMetricFields.length" class="report-mobile-card__metrics">
+                <div v-for="field in mobileCardMetricFields" :key="field.key" class="report-mobile-card__metric">
+                  <span>{{ field.label }}</span>
+                  <strong>{{ formatCellValue(item, field) }}</strong>
+                </div>
+              </div>
+
+              <div v-if="mobileCardDetailFields.length" class="report-mobile-card__meta" :class="isTablet ? 'is-tablet' : ''">
+                <div v-for="field in mobileCardDetailFields" :key="field.key" class="report-mobile-card__meta-item">
+                  <span class="report-mobile-card__meta-label">{{ field.label }}</span>
+                  <span class="report-mobile-card__meta-value">{{ formatCellValue(item, field) }}</span>
                 </div>
               </div>
             </div>
@@ -429,8 +489,8 @@ onMounted(() => {
           v-if="listState.total > 0"
           v-model:current-page="listState.query.page"
           v-model:page-size="listState.query.pageSize"
-          layout="total, sizes, prev, pager, next, jumper"
-          :page-sizes="[10, 20, 50, 100]"
+          :layout="paginationLayout"
+          :page-sizes="paginationPageSizes"
           :total="listState.total"
           @current-change="handleCurrentChange"
           @size-change="handlePageSizeChange"
@@ -470,7 +530,7 @@ onMounted(() => {
         <div>
           <p class="mb-2 text-sm font-semibold text-slate-700 dark:text-slate-200">数据预览</p>
           <el-table
-            v-if="exportPreviewRows.length > 0"
+            v-if="exportPreviewRows.length > 0 && !appStore.isPhone"
             :data="exportPreviewRows"
             border
             stripe
@@ -489,6 +549,20 @@ onMounted(() => {
               <template #default="{ row }">{{ formatCellValue(row, field) }}</template>
             </el-table-column>
           </el-table>
+          <div v-else-if="exportPreviewRows.length > 0" class="report-preview-card-list">
+            <div v-for="row in exportPreviewRows" :key="String(row.id ?? JSON.stringify(row))" class="report-preview-card">
+              <div class="report-preview-card__head">
+                <span>{{ mobileCardTitleField?.label ?? '记录' }}</span>
+                <strong>{{ mobileCardTitleField ? formatCellValue(row, mobileCardTitleField) : '-' }}</strong>
+              </div>
+              <div class="report-preview-card__body">
+                <div v-for="field in mobilePreviewDetailFields" :key="field.key">
+                  <span>{{ field.label }}</span>
+                  <strong>{{ formatCellValue(row, field) }}</strong>
+                </div>
+              </div>
+            </div>
+          </div>
           <el-empty v-else description="当前筛选暂无可预览数据，仍可导出空模板" :image-size="96" />
           <p class="mt-2 text-xs text-slate-400">仅展示当前页前 6 条数据，Excel 将按当前筛选导出全部命中数据。</p>
         </div>
@@ -509,6 +583,22 @@ onMounted(() => {
   min-height: calc(100dvh - 190px);
 }
 
+.report-filter-grid {
+  min-width: 0;
+}
+
+.report-filter-actions {
+  min-width: 0;
+}
+
+.report-summary-card {
+  min-width: 0;
+}
+
+.report-summary-card__condition {
+  overflow-wrap: anywhere;
+}
+
 .report-field-checkbox-group {
   display: grid;
   grid-template-columns: 1fr;
@@ -517,6 +607,182 @@ onMounted(() => {
 
 .report-field-checkbox-group :deep(.el-checkbox) {
   margin-right: 0;
+}
+
+.report-mobile-card {
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.report-mobile-card:active {
+  transform: scale(0.99);
+}
+
+.report-mobile-card__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.report-mobile-card__label {
+  margin: 0;
+  font-size: 12px;
+  color: #64748b;
+}
+
+.report-mobile-card__title {
+  margin: 3px 0 0;
+  color: #0f172a;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.report-mobile-card__chip {
+  flex-shrink: 0;
+  max-width: 112px;
+  border-radius: 9999px;
+  background: #ecfdf5;
+  color: #0f766e;
+  padding: 5px 8px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  text-align: center;
+}
+
+.report-mobile-card__subtitle {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.report-mobile-card__subtitle span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.report-mobile-card__metrics {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.report-mobile-card__metric {
+  min-width: 0;
+  border-radius: 12px;
+  background: #f8fafc;
+  padding: 9px 10px;
+}
+
+.report-mobile-card__metric span {
+  display: block;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.report-mobile-card__metric strong {
+  display: block;
+  margin-top: 3px;
+  color: #0f766e;
+  font-size: 16px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.report-mobile-card__meta {
+  margin-top: 12px;
+  display: grid;
+  gap: 7px 12px;
+}
+
+.report-mobile-card__meta.is-tablet {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.report-mobile-card__meta-item {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.report-mobile-card__meta-label {
+  flex-shrink: 0;
+  color: #64748b;
+  font-size: 13px;
+}
+
+.report-mobile-card__meta-value {
+  min-width: 0;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 500;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.report-preview-card-list {
+  display: grid;
+  gap: 10px;
+}
+
+.report-preview-card {
+  min-width: 0;
+  border-radius: 12px;
+  border: 1px solid #e2e8f0;
+  background: #ffffff;
+  padding: 12px;
+}
+
+.report-preview-card__head {
+  display: grid;
+  gap: 3px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.report-preview-card__head span,
+.report-preview-card__body span {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.report-preview-card__head strong {
+  color: #0f172a;
+  font-size: 16px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.report-preview-card__body {
+  margin-top: 10px;
+  display: grid;
+  gap: 7px;
+}
+
+.report-preview-card__body div {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.report-preview-card__body strong {
+  min-width: 0;
+  color: #334155;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: right;
+  overflow-wrap: anywhere;
 }
 
 :global(.report-export-preview-overlay) {
@@ -555,16 +821,112 @@ onMounted(() => {
 }
 
 @media (max-width: 640px) {
+  .report-center-page {
+    min-height: auto;
+    gap: 12px;
+  }
+
+  .report-filter-grid {
+    gap: 8px;
+  }
+
+  .report-filter-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .report-filter-actions :deep(.el-button) {
+    min-width: 0;
+    padding-inline: 8px;
+  }
+
+  .report-summary-card {
+    border-radius: 14px;
+    padding: 12px;
+  }
+
+  .report-summary-card__condition {
+    display: -webkit-box;
+    -webkit-line-clamp: 4;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .report-date-picker--phone:deep(.el-range-input) {
+    width: 100%;
+    min-width: 0;
+    font-size: 13px;
+  }
+
+  .report-date-picker--phone:deep(.el-range-separator) {
+    flex-shrink: 0;
+    padding: 0 5px;
+  }
+
+  .report-mobile-card__metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   :global(.report-export-preview-overlay .el-overlay-dialog) {
     padding: 10px;
   }
 
   .report-export-preview-dialog:deep(.el-dialog) {
+    width: calc(100vw - 20px) !important;
     max-height: calc(100dvh - 20px);
   }
 
+  .report-export-preview-dialog:deep(.el-dialog__header) {
+    padding: 14px 14px 8px;
+  }
+
   .report-export-preview-dialog:deep(.el-dialog__body) {
+    padding: 10px 14px;
     max-height: calc(100dvh - 138px);
   }
+
+  .report-export-preview-dialog:deep(.el-dialog__footer) {
+    display: flex;
+    gap: 8px;
+    padding: 10px 14px 14px;
+  }
+
+  .report-export-preview-dialog:deep(.el-dialog__footer .el-button) {
+    flex: 1;
+    min-width: 0;
+  }
+}
+
+.dark .report-mobile-card__title,
+.dark .report-preview-card__head strong {
+  color: #e2e8f0;
+}
+
+.dark .report-mobile-card__label,
+.dark .report-mobile-card__subtitle,
+.dark .report-mobile-card__metric span,
+.dark .report-mobile-card__meta-label,
+.dark .report-preview-card__head span,
+.dark .report-preview-card__body span {
+  color: #94a3b8;
+}
+
+.dark .report-mobile-card__metric,
+.dark .report-preview-card {
+  border-color: rgba(148, 163, 184, 0.22);
+  background: rgba(15, 23, 42, 0.58);
+}
+
+.dark .report-mobile-card__metric strong {
+  color: #5eead4;
+}
+
+.dark .report-mobile-card__meta-value,
+.dark .report-preview-card__body strong {
+  color: #e2e8f0;
+}
+
+.dark .report-preview-card__head {
+  border-bottom-color: rgba(148, 163, 184, 0.22);
 }
 </style>
