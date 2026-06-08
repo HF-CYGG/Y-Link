@@ -143,18 +143,12 @@ const sectionOptions: Array<{ key: ConfigSectionKey; label: string }> = [
   { key: 'notification', label: '通知中心' },
 ]
 
-const sectionTabRefs = ref<HTMLElement[]>([])
-
-const setSectionTabRef = (el: unknown, index: number) => {
-  if (el instanceof HTMLElement) {
-    sectionTabRefs.value[index] = el
-  }
-}
+const sectionMenuWrapRef = ref<HTMLElement | null>(null)
 
 const scrollActiveSectionTabIntoView = async () => {
   await nextTick()
-  const activeIndex = sectionOptions.findIndex((section) => section.key === activeSection.value)
-  sectionTabRefs.value[activeIndex]?.scrollIntoView({
+  const activeMenuItem = sectionMenuWrapRef.value?.querySelector<HTMLElement>('.el-menu-item.is-active')
+  activeMenuItem?.scrollIntoView({
     behavior: 'smooth',
     block: 'nearest',
     inline: 'center',
@@ -1483,103 +1477,97 @@ onActivated(() => {
             show-icon
             class="mb-4"
           />
-          <div class="mb-4">
-            <nav class="system-config-section-tabs" aria-label="系统配置分区导航">
-              <button
-                v-for="(section, index) in sectionOptions"
+          <div ref="sectionMenuWrapRef" class="system-config-section-menu-wrap mb-4" aria-label="系统配置分区导航">
+            <el-menu
+              class="system-config-section-menu"
+              mode="horizontal"
+              :default-active="activeSection"
+              @select="handleSectionChange"
+            >
+              <el-menu-item
+                v-for="section in sectionOptions"
                 :key="section.key"
-                :ref="(el) => setSectionTabRef(el, index)"
-                type="button"
-                class="system-config-section-tab"
-                :class="{ 'system-config-section-tab--active': activeSection === section.key }"
-                @click="handleSectionChange(section.key)"
+                :index="section.key"
               >
                 {{ section.label }}
-              </button>
-            </nav>
+              </el-menu-item>
+            </el-menu>
           </div>
 
-          <el-form
-            v-if="activeSection !== 'notification'"
-            ref="formRef"
-            :model="serialForm"
-            :rules="rules"
-            label-position="top"
-          >
-            <div class="config-stage">
-            <transition name="workbench-horizontal-slide">
-              <SystemConfigSerialSection
-                v-if="activeSection === 'order_serial'"
-                :config-map="configMap"
-                :department-preview="departmentPreview"
-                :walkin-preview="walkinPreview"
-                :serial-form="serialForm"
-                :can-update-configs="canUpdateConfigs"
-                :loading="activeSectionInteractionLoading"
-                :get-updated-at-label="getUpdatedAtLabel"
-              />
-            </transition>
+          <div class="config-stage">
+            <transition name="workbench-horizontal-slide" mode="out-in">
+              <el-form
+                v-if="activeSection !== 'notification'"
+                :key="activeSection"
+                ref="formRef"
+                class="workbench-horizontal-slide__panel"
+                :model="serialForm"
+                :rules="rules"
+                label-position="top"
+              >
+                <SystemConfigSerialSection
+                  v-if="activeSection === 'order_serial'"
+                  :config-map="configMap"
+                  :department-preview="departmentPreview"
+                  :walkin-preview="walkinPreview"
+                  :serial-form="serialForm"
+                  :can-update-configs="canUpdateConfigs"
+                  :loading="activeSectionInteractionLoading"
+                  :get-updated-at-label="getUpdatedAtLabel"
+                />
 
-            <transition name="workbench-horizontal-slide">
-              <SystemConfigO2oRulesSection
-                v-if="activeSection === 'o2o_rules'"
-                :o2o-form="serialForm.o2o"
-                :can-update-configs="canUpdateConfigs"
-                :loading="activeSectionInteractionLoading"
-                :o2o-updated-at-label="o2oUpdatedAtLabel"
-              />
-            </transition>
+                <SystemConfigO2oRulesSection
+                  v-else-if="activeSection === 'o2o_rules'"
+                  :o2o-form="serialForm.o2o"
+                  :can-update-configs="canUpdateConfigs"
+                  :loading="activeSectionInteractionLoading"
+                  :o2o-updated-at-label="o2oUpdatedAtLabel"
+                />
 
-            <transition name="workbench-horizontal-slide">
-              <SystemConfigCustomerServiceSection
-                v-if="activeSection === 'customer_service'"
-                :customer-service-form="serialForm.customerService"
-                :can-update-configs="canUpdateConfigs"
-                :loading="activeSectionInteractionLoading"
-                :customer-service-updated-at-label="customerServiceUpdatedAtLabel"
-              />
-            </transition>
+                <SystemConfigCustomerServiceSection
+                  v-else-if="activeSection === 'customer_service'"
+                  :customer-service-form="serialForm.customerService"
+                  :can-update-configs="canUpdateConfigs"
+                  :loading="activeSectionInteractionLoading"
+                  :customer-service-updated-at-label="customerServiceUpdatedAtLabel"
+                />
 
-            <transition name="workbench-horizontal-slide">
-              <SystemConfigVerificationSection
-                v-if="activeSection === 'verification'"
-                :verification-form="serialForm.verification"
-                :can-update-configs="canUpdateConfigs"
-                :can-test-verification-providers="canTestVerificationProviders"
-                :loading="activeSectionInteractionLoading"
-                :saving="saving"
-                :test-sending-channel="testSendingChannel"
-                :get-verification-updated-at-label="getVerificationUpdatedAtLabel"
-                @test-send="handleTestVerificationSend"
-              />
-            </transition>
+                <SystemConfigVerificationSection
+                  v-else-if="activeSection === 'verification'"
+                  :verification-form="serialForm.verification"
+                  :can-update-configs="canUpdateConfigs"
+                  :can-test-verification-providers="canTestVerificationProviders"
+                  :loading="activeSectionInteractionLoading"
+                  :saving="saving"
+                  :test-sending-channel="testSendingChannel"
+                  :get-verification-updated-at-label="getVerificationUpdatedAtLabel"
+                  @test-send="handleTestVerificationSend"
+                />
 
-            <transition name="workbench-horizontal-slide">
-              <SystemConfigDepartmentSection
-                v-if="activeSection === 'department'"
-                :serial-form="serialForm"
-                :can-update-configs="canUpdateConfigs"
-                :loading="activeSectionInteractionLoading"
-                :saving="saving"
-                :selected-department-node="selectedDepartmentNode"
-                :client-department-preview-options="clientDepartmentPreviewOptions"
-                :client-department-config="clientDepartmentConfig"
-                :get-department-path-label="getDepartmentPathLabel"
-                :handle-allow-department-drop="handleAllowDepartmentDrop"
-                :handle-department-node-drop="handleDepartmentNodeDrop"
-                @add-root="handleAddRootDepartment"
-                @add-child="handleAddChildDepartment"
-                @edit="handleEditDepartment"
-                @delete="handleDeleteDepartment"
-                @node-click="handleDepartmentNodeClick"
-              />
-            </transition>
-            </div>
-          </el-form>
+                <SystemConfigDepartmentSection
+                  v-else-if="activeSection === 'department'"
+                  :serial-form="serialForm"
+                  :can-update-configs="canUpdateConfigs"
+                  :loading="activeSectionInteractionLoading"
+                  :saving="saving"
+                  :selected-department-node="selectedDepartmentNode"
+                  :client-department-preview-options="clientDepartmentPreviewOptions"
+                  :client-department-config="clientDepartmentConfig"
+                  :get-department-path-label="getDepartmentPathLabel"
+                  :handle-allow-department-drop="handleAllowDepartmentDrop"
+                  :handle-department-node-drop="handleDepartmentNodeDrop"
+                  @add-root="handleAddRootDepartment"
+                  @add-child="handleAddChildDepartment"
+                  @edit="handleEditDepartment"
+                  @delete="handleDeleteDepartment"
+                  @node-click="handleDepartmentNodeClick"
+                />
+              </el-form>
 
-          <div v-else class="config-stage">
-            <transition name="workbench-horizontal-slide">
               <SystemConfigNotificationSection
+                v-else
+                key="notification"
+                class="workbench-horizontal-slide__panel"
                 :rules="notificationRules"
                 :presence-snapshot="notificationPresence"
                 :offline-window-seconds="notificationOfflineWindowSeconds"
@@ -1621,83 +1609,66 @@ onActivated(() => {
   color: #64748b;
 }
 
-.system-config-section-tabs {
-  display: flex;
-  gap: 8px;
+.system-config-section-menu-wrap {
   overflow-x: auto;
   overflow-y: hidden;
-  border-bottom: 1px solid #e2e8f0;
   scroll-behavior: smooth;
-  scroll-snap-type: x proximity;
   -webkit-overflow-scrolling: touch;
 }
 
-.system-config-section-tabs::-webkit-scrollbar {
+.system-config-section-menu-wrap::-webkit-scrollbar {
   display: none;
 }
 
-.system-config-section-tab {
-  position: relative;
-  flex: 0 0 auto;
+.system-config-section-menu {
   min-width: max-content;
-  scroll-snap-align: center;
-  border: 0;
+  border-bottom: 1px solid #e2e8f0;
   background: transparent;
-  color: #334155;
+}
+
+.system-config-section-menu :deep(.el-menu-item) {
+  height: auto;
+  min-width: max-content;
+  border-bottom: 3px solid transparent;
   padding: 12px 18px;
+  color: #334155;
   font-size: 15px;
   font-weight: 600;
   line-height: 1.2;
   white-space: nowrap;
   transition:
     color var(--ylink-motion-fast) var(--ylink-motion-ease),
-    background var(--ylink-motion-fast) var(--ylink-motion-ease);
+    background-color var(--ylink-motion-fast) var(--ylink-motion-ease),
+    transform var(--ylink-motion-fast) var(--ylink-motion-ease);
 }
 
-.system-config-section-tab::after {
-  position: absolute;
-  right: 14px;
-  bottom: -1px;
-  left: 14px;
-  height: 3px;
-  border-radius: 999px 999px 0 0;
-  background: transparent;
-  content: '';
-  transition: background var(--ylink-motion-fast) var(--ylink-motion-ease);
-}
-
-.system-config-section-tab:hover {
-  background: #f8fafc;
+.system-config-section-menu :deep(.el-menu-item:hover),
+.system-config-section-menu :deep(.el-menu-item:focus) {
+  background-color: #f8fafc;
   color: #0f766e;
+  transform: translateY(-1px);
 }
 
-.system-config-section-tab--active {
+.system-config-section-menu :deep(.el-menu-item.is-active) {
+  border-bottom: 3px solid #04786f;
   color: #04786f;
 }
 
-.system-config-section-tab--active::after {
-  background: #04786f;
-}
-
-.dark .system-config-section-tabs {
+.dark .system-config-section-menu {
   border-bottom-color: rgba(148, 163, 184, 0.22);
+  background: transparent;
 }
 
-.dark .system-config-section-tab {
+.dark .system-config-section-menu :deep(.el-menu-item) {
   color: #cbd5e1;
 }
 
-.dark .system-config-section-tab:hover,
-.dark .system-config-section-tab--active {
+.dark .system-config-section-menu :deep(.el-menu-item:hover),
+.dark .system-config-section-menu :deep(.el-menu-item:focus),
+.dark .system-config-section-menu :deep(.el-menu-item.is-active) {
+  background-color: rgba(15, 23, 42, 0.5);
+  border-bottom-color: #5eead4;
   color: #5eead4;
-}
-
-.dark .system-config-section-tab:hover {
-  background: rgba(15, 23, 42, 0.5);
-}
-
-.dark .system-config-section-tab--active::after {
-  background: #5eead4;
 }
 
 .system-config-toolbar-actions {
@@ -1733,15 +1704,28 @@ onActivated(() => {
 }
 
 @media (max-width: 640px) {
-  .system-config-section-tabs {
-    gap: 4px;
+  .system-config-section-menu-wrap {
     margin-inline: -8px;
     padding-inline: 8px;
   }
 
-  .system-config-section-tab {
+  .system-config-section-menu :deep(.el-menu-item) {
     padding: 11px 16px;
     font-size: 14px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .system-config-section-menu-wrap,
+  .system-config-section-menu,
+  .system-config-section-menu :deep(.el-menu-item) {
+    scroll-behavior: auto;
+    transition: none;
+  }
+
+  .system-config-section-menu :deep(.el-menu-item:hover),
+  .system-config-section-menu :deep(.el-menu-item:focus) {
+    transform: none;
   }
 }
 </style>
