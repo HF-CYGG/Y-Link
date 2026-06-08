@@ -141,7 +141,11 @@ class OrderSerialService {
       throw new BizError(`${currentKey} 配置异常：当前值不能小于起始值减一`, 500)
     }
 
-    const nextSerial = Math.max(start, current + 1)
+    // current 可能因数据导入、删除回拨或历史异常落后于真实已占用单号；
+    // 生成前必须合并正式出库单与仍存在预订单的最大流水，避免继续发出已存在的 showNo。
+    const occupancySnapshot = await this.loadOccupancySnapshotWithManager(orderType, manager)
+    const effectiveCurrent = Math.max(current, occupancySnapshot.maxOccupiedSerial)
+    const nextSerial = Math.max(start, effectiveCurrent + 1)
     const maxSerial = 10 ** width - 1
     if (nextSerial > maxSerial) {
       throw new BizError('订单流水号已超出位宽上限，请联系管理员调整配置', 409)
@@ -232,8 +236,6 @@ class OrderSerialService {
         .createQueryBuilder('preorder')
         .select('preorder.showNo', 'showNo')
         .where('preorder.clientOrderType = :orderType', { orderType })
-        .andWhere('preorder.isDeleted = :isDeleted', { isDeleted: false })
-        .andWhere('preorder.status <> :verifiedStatus', { verifiedStatus: 'verified' })
         .getRawMany<{ showNo: string }>(),
     ])
     const outboundMax = this.pickMaxSerialShowNo(outboundRows, serialRule.prefix)
