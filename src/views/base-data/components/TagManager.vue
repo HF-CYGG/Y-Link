@@ -289,21 +289,23 @@ onActivated(() => {
 </script>
 
 <template>
-  <div class="tag-manager flex min-w-0 flex-col gap-4">
-    <PageToolbarCard>
+  <div class="tag-manager flex min-w-0 flex-col gap-3 sm:gap-4">
+    <PageToolbarCard compact :action-stretch-on-phone="false">
       <template #default>
-        <div class="max-w-3xl text-sm leading-6 text-slate-500 dark:text-slate-400">统一维护标签名称与颜色，用于产品分类展示，并为产品检索、筛选与视觉识别提供稳定标签体系。</div>
+        <div class="max-w-3xl text-xs leading-5 text-slate-500 dark:text-slate-400 sm:text-sm sm:leading-6">统一维护标签名称与颜色，用于产品分类展示，并为产品检索、筛选与视觉识别提供稳定标签体系。</div>
       </template>
 
       <template #actions="{ isPhone }">
-        <el-tag v-if="!canManageTags" type="info">当前为只读模式</el-tag>
-        <el-button v-if="canManageTags" :class="isPhone ? 'flex-1' : ''" type="primary" icon="Plus" @click="handleAddTag">新增标签</el-button>
-        <el-button :class="isPhone ? 'flex-1' : ''" icon="Refresh" @click="refreshTagView">刷新列表</el-button>
+        <div class="grid w-full grid-cols-2 gap-2">
+          <el-tag v-if="!canManageTags" type="info">当前为只读模式</el-tag>
+          <el-button v-if="canManageTags" :class="isPhone ? 'w-full min-w-0' : ''" type="primary" icon="Plus" @click="handleAddTag">新增标签</el-button>
+          <el-button :class="isPhone ? 'w-full min-w-0' : ''" icon="Refresh" @click="refreshTagView">刷新列表</el-button>
+        </div>
       </template>
     </PageToolbarCard>
 
-    <div class="apple-card p-4 sm:p-5 xl:p-6">
-      <div class="flex flex-wrap items-center gap-3">
+    <div class="apple-card p-3 sm:p-5 xl:p-6">
+      <div class="flex flex-wrap items-center gap-2 sm:gap-3">
         <el-select
           v-model="aggregateTagId"
           filterable
@@ -338,21 +340,21 @@ onActivated(() => {
           <el-button class="flex-1 sm:flex-none" :disabled="aggregateLoading" @click="handleAggregateReset">重置</el-button>
         </div>
       </div>
-      <div v-if="aggregateLoading" class="mt-4">
+      <div v-if="aggregateLoading" class="mt-3 sm:mt-4">
         <el-skeleton animated :rows="4" />
       </div>
-      <div v-else-if="aggregateResult" class="mt-4 space-y-3">
-        <div class="rounded-xl bg-slate-50 px-3 py-2 text-xs text-slate-500 dark:bg-slate-900/40 dark:text-slate-300">
+      <div v-else-if="aggregateResult" class="mt-3 space-y-2 sm:mt-4 sm:space-y-3">
+        <div class="tag-aggregate-current truncate rounded-xl bg-slate-50 px-2.5 py-1.5 text-xs text-slate-500 dark:bg-slate-900/40 dark:text-slate-300 sm:px-3 sm:py-2">
           {{ aggregateResult.tagName }} ｜ {{ aggregateDateRange[0] }} 至 {{ aggregateDateRange[1] }} ｜ {{ aggregateOrderType ? (aggregateOrderType === 'department' ? '部门单' : '散客单') : '全部订单类型' }}
         </div>
-        <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <div v-for="item in aggregateSummary" :key="item.key" class="rounded-xl bg-slate-50 px-3 py-2.5 dark:bg-slate-900/40">
+        <div class="grid grid-cols-2 gap-2 sm:grid-cols-2 sm:gap-3 xl:grid-cols-4">
+          <div v-for="item in aggregateSummary" :key="item.key" class="rounded-xl bg-slate-50 px-2.5 py-2 dark:bg-slate-900/40 sm:px-3 sm:py-2.5">
             <div class="text-xs text-slate-500 dark:text-slate-400">{{ item.label }}</div>
             <div class="mt-1 text-sm font-semibold text-slate-800 dark:text-slate-100">{{ item.value }}</div>
           </div>
         </div>
       </div>
-      <div v-else class="mt-4 flex min-h-[110px] items-center justify-center rounded-xl bg-slate-50 text-slate-400 dark:bg-slate-900/40">
+      <div v-else class="mt-3 flex min-h-[88px] items-center justify-center rounded-xl bg-slate-50 text-slate-400 dark:bg-slate-900/40 sm:mt-4 sm:min-h-[110px]">
         <el-empty :image-size="56" description="请选择标签并查询统计" />
       </div>
     </div>
@@ -366,7 +368,7 @@ onActivated(() => {
       card-key="id"
       wrapper-class="flex min-h-0 flex-1 flex-col"
       table-wrapper-class="apple-card h-full min-w-0 overflow-hidden px-0 py-3 sm:py-4 xl:py-5"
-      card-container-class="pb-4 xl:grid-cols-3"
+      card-container-class="pb-3 xl:grid-cols-3"
     >
       <template #table>
         <el-table native-scrollbar :data="tags" class="h-full w-full" stripe row-key="id" table-layout="auto">
@@ -388,14 +390,14 @@ onActivated(() => {
       </template>
 
       <template #card="{ item }">
-        <div class="apple-card mobile-tag-card flex min-w-0 flex-col justify-between gap-4 p-4">
-          <div>
-            <el-tag :color="item.tagCode || '#409EFF'" effect="dark" class="border-none" size="large">
+        <div class="apple-card flex min-w-0 flex-col justify-between gap-2 p-3 sm:gap-4 sm:p-4">
+          <div class="flex min-w-0 items-center justify-between gap-3">
+            <el-tag :color="item.tagCode || '#409EFF'" effect="dark" class="min-w-0 border-none">
               {{ item.tagName }}
             </el-tag>
-            <div class="mt-3 break-all text-xs text-slate-500 dark:text-slate-400">{{ item.tagCode || '#409EFF' }}</div>
+            <span class="shrink-0 text-xs text-slate-500 dark:text-slate-400">{{ item.tagCode || '#409EFF' }}</span>
           </div>
-          <div v-if="canManageTags" class="flex flex-wrap justify-end gap-2 border-t border-slate-100 pt-3 dark:border-white/10">
+          <div v-if="canManageTags" class="flex flex-wrap justify-end gap-2 border-t border-slate-100 pt-2 dark:border-white/10 sm:pt-3">
             <el-button size="small" @click="handleEditTag(item)">编辑</el-button>
             <el-button size="small" type="danger" plain @click="handleDeleteTag(item)">删除</el-button>
           </div>
@@ -431,9 +433,3 @@ onActivated(() => {
     </BizCrudDialogShell>
   </div>
 </template>
-
-<style scoped>
-.mobile-tag-card {
-  transition: transform 0.25s ease, box-shadow 0.25s ease;
-}
-</style>
