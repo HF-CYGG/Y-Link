@@ -33,9 +33,9 @@ export const useClientMallSnapshotRefresh = () => {
     syncing.value = true
     await runLatest({
       executor: (signal) => getO2oMallProducts({ signal }),
-      onSuccess: (products) => {
-        clientCatalogStore.setProducts(products)
-        clientCartStore.syncWithCatalog(products)
+      onSuccess: (catalog) => {
+        clientCatalogStore.setProducts(catalog)
+        clientCartStore.syncWithCatalog(catalog.list)
       },
       onError: (error) => {
         requestError = normalizeRequestError(error, '商品目录同步失败，请稍后重试')

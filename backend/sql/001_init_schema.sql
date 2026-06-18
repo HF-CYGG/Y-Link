@@ -210,13 +210,19 @@ CREATE TABLE IF NOT EXISTS `biz_inbound_order` (
   `verified_by_user_id` BIGINT UNSIGNED DEFAULT NULL COMMENT '核销操作人ID',
   `verified_by_username` VARCHAR(64) DEFAULT NULL COMMENT '核销操作人账号快照',
   `verified_by_display_name` VARCHAR(128) DEFAULT NULL COMMENT '核销操作人姓名快照',
+  `is_deleted` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否已删除（软删除）',
+  `deleted_at` DATETIME(3) DEFAULT NULL COMMENT '删除时间',
+  `deleted_by_user_id` BIGINT UNSIGNED DEFAULT NULL COMMENT '删除操作用户ID',
+  `deleted_by_username` VARCHAR(64) DEFAULT NULL COMMENT '删除操作账号快照',
+  `deleted_by_display_name` VARCHAR(128) DEFAULT NULL COMMENT '删除操作姓名快照',
   `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '创建时间',
   `updated_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3) COMMENT '更新时间',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_biz_inbound_show_no` (`show_no`),
   UNIQUE KEY `uk_biz_inbound_verify_code` (`verify_code`),
   KEY `idx_biz_inbound_supplier_id` (`supplier_id`),
-  KEY `idx_biz_inbound_status` (`status`)
+  KEY `idx_biz_inbound_status` (`status`),
+  KEY `idx_biz_inbound_is_deleted` (`is_deleted`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='入库主表';
 
 CREATE TABLE IF NOT EXISTS `biz_inbound_order_item` (

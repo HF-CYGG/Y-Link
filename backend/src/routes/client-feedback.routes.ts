@@ -1,14 +1,7 @@
 /**
- * 模块说明：backend/src/routes/client-feedback.routes.ts
- * 文件职责：提供客户端反馈中心接口，覆盖入口配置读取、会话列表、详情、留言、附件上传、满意度评价与实时 SSE 订阅。
- * 实现逻辑：
- * - 所有接口都走客户端鉴权，确保客户端只能访问自己的反馈会话；
- * - 反馈入口配置单独暴露为轻量接口，便于客户端页面按配置决定是否展示入口与提示语；
- * - 附件上传与满意度评价都继续收口在同一路由域下，减少客户端跨模块鉴权差异；
- * - 实时通道采用 SSE，便于浏览器直接接入且不额外引入复杂协议栈。
- * 维护说明：
- * - 若后续需要扩展更多附件类型，请同步调整 multer 白名单、前端上传提示与服务层附件校验；
- * - 若客户端需要按未读状态筛选，可继续在 query schema 中补字段并下沉到服务层。
+ * 文件说明：客户端反馈中心路由，覆盖入口配置读取、会话列表、详情、留言、附件上传、满意度评价与实时 SSE 订阅。
+ * 实现逻辑：所有接口统一走客户端鉴权，在路由层校验留言、附件与筛选参数后交给反馈服务处理，并通过 SSE 输出实时消息变更。
+ * 维护重点：扩展附件类型、筛选条件或会话状态时，需要同步核对上传白名单、客户端提示文案和服务层未读计数逻辑。
  */
 
 import { Router } from 'express'
@@ -200,6 +193,19 @@ authenticatedClientFeedbackRouter.patch(
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const data = await clientFeedbackService.confirmConversationResolvedByClient(
+      req.params.id,
+      authReq.clientAuth,
+      extractRequestMeta(req),
+    )
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+authenticatedClientFeedbackRouter.patch(
+  '/conversations/:id/withdraw',
+  asyncHandler(async (req, res) => {
+    const authReq = req as ClientAuthenticatedRequest
+    const data = await clientFeedbackService.withdrawConversationByClient(
       req.params.id,
       authReq.clientAuth,
       extractRequestMeta(req),

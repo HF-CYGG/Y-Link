@@ -96,6 +96,8 @@ export interface FeedbackConversationRecord {
   clientUserId: string
   clientAccount: string
   clientDisplayName: string
+  clientAccountType: 'personal' | 'department'
+  clientStaffNo: string | null
   clientDepartmentName: string | null
   assigneeUserId: string | null
   assigneeUsername: string | null
@@ -111,6 +113,7 @@ export interface FeedbackConversationRecord {
   satisfaction: FeedbackSatisfactionRecord | null
   messages: FeedbackConversationMessage[]
   internalRemark: FeedbackInternalRemarkRecord | null
+  isWithdrawnByClient: boolean
 }
 
 export interface ClientFeedbackConversationSummary {
@@ -356,6 +359,8 @@ interface BackendConversationSummary {
   clientUserId: string
   clientUsername: string
   clientAccount: string
+  clientAccountType: 'personal' | 'department'
+  staffNoSnapshot: string | null
   departmentNameSnapshot: string
   subject: string
   status: BackendConversationStatus
@@ -458,6 +463,12 @@ export const FEEDBACK_STATUS_META_MAP: Record<FeedbackIssueStatus, FeedbackIssue
     className: 'bg-slate-100 text-slate-600 ring-1 ring-inset ring-slate-200',
     dotClassName: 'bg-slate-400',
   },
+}
+
+const WITHDRAWN_STATUS_META: FeedbackIssueStatusMeta = {
+  label: '已撤回',
+  className: 'bg-slate-100 text-slate-600 ring-1 ring-inset ring-slate-200',
+  dotClassName: 'bg-slate-400',
 }
 
 export const FEEDBACK_PRIORITY_META_MAP: Record<FeedbackIssuePriority, FeedbackIssuePriorityMeta> = {
@@ -661,6 +672,31 @@ const normalizeLastMessageSenderRole = (
   return senderType === 'service' ? 'staff' : senderType
 }
 
+const WITHDRAW_MESSAGE_KEYWORD = '撤回'
+
+const resolveIsWithdrawnByClient = (
+  status: FeedbackIssueStatus,
+  lastMessageSenderRole: FeedbackMessageSenderRole,
+  lastMessagePreview: string,
+): boolean => {
+  if (status !== 'closed') {
+    return false
+  }
+  if (lastMessageSenderRole !== 'system') {
+    return false
+  }
+  return lastMessagePreview.includes(WITHDRAW_MESSAGE_KEYWORD)
+}
+
+export const resolveFeedbackConversationStatusMeta = (
+  conversation: Pick<FeedbackConversationRecord, 'status' | 'isWithdrawnByClient'>,
+): FeedbackIssueStatusMeta => {
+  if (conversation.status === 'closed' && conversation.isWithdrawnByClient) {
+    return WITHDRAWN_STATUS_META
+  }
+  return FEEDBACK_STATUS_META_MAP[conversation.status]
+}
+
 /**
  * 客户端当前更需要谁动作的最小判断规则：
  * - `closed` 直接视为完成；
@@ -832,6 +868,22 @@ const formatSlaDuration = (minutes: number) => {
 export const resolveSupportFeedbackConversationSla = (
   conversation: FeedbackConversationRecord,
 ): SupportFeedbackConversationSlaMeta => {
+  if (conversation.status === 'closed' && conversation.isWithdrawnByClient) {
+    return {
+      level: 'paused',
+      label: '当前不计时',
+      stageLabel: '会话已撤回',
+      description: '当前反馈单已由客户端撤回，会话已结束，不再纳入客服 SLA 风险。',
+      countdownText: '已暂停',
+      targetMinutes: null,
+      elapsedMinutes: 0,
+      remainingMinutes: null,
+      deadlineAt: null,
+      shouldHighlight: false,
+      sortWeight: 0,
+    }
+  }
+
   if (conversation.status === 'resolved' || conversation.status === 'closed') {
     return {
       level: 'paused',
@@ -951,22 +1003,28 @@ const mapConversation = (
   messages: FeedbackConversationMessage[] = [],
   internalRemark: FeedbackInternalRemarkRecord | null = null,
 ): FeedbackConversationRecord => {
+  const status = BACKEND_STATUS_TO_FRONTEND_MAP[conversation.status]
+  const lastMessageSenderRole = normalizeLastMessageSenderRole(conversation.lastMessageSenderType)
+  const lastMessagePreview = conversation.lastMessagePreview || ''
+
   return {
     id: conversation.id,
     issueNo: conversation.conversationNo,
     title: conversation.subject,
     summary: conversation.fields.actualResult || conversation.subject,
-    status: BACKEND_STATUS_TO_FRONTEND_MAP[conversation.status],
+    status,
     priority: BACKEND_PRIORITY_TO_FRONTEND_MAP[conversation.priority],
     clientUserId: conversation.clientUserId,
     clientAccount: conversation.clientAccount,
     clientDisplayName: conversation.clientUsername || conversation.clientAccount || '客户端用户',
+    clientAccountType: conversation.clientAccountType === 'department' ? 'department' : 'personal',
+    clientStaffNo: conversation.staffNoSnapshot?.trim() || null,
     clientDepartmentName: conversation.departmentNameSnapshot || null,
     assigneeUserId: conversation.assignedUserId ?? null,
     assigneeUsername: conversation.assignedUsername ?? null,
     assigneeName: conversation.assignedDisplayName || null,
-    lastMessagePreview: conversation.lastMessagePreview || '',
-    lastMessageSenderRole: normalizeLastMessageSenderRole(conversation.lastMessageSenderType),
+    lastMessagePreview,
+    lastMessageSenderRole,
     lastMessageAt: conversation.lastMessageAt,
     unreadForClient: conversation.unreadForClientCount,
     unreadForStaff: conversation.unreadForServiceCount,
@@ -986,6 +1044,7 @@ const mapConversation = (
     },
     messages,
     internalRemark,
+    isWithdrawnByClient: resolveIsWithdrawnByClient(status, lastMessageSenderRole, lastMessagePreview),
   }
 }
 
@@ -1025,15 +1084,12 @@ const resolveApiOrigin = () => {
   return globalThis.window?.location.origin ?? ''
 }
 
-const buildStreamUrl = (path: string, token?: string) => {
+const buildStreamUrl = (path: string) => {
   const apiBaseUrl = buildApiBaseUrl()
   const base = /^https?:\/\//.test(apiBaseUrl)
     ? apiBaseUrl
     : new URL(apiBaseUrl, globalThis.window.location.origin).toString()
   const url = new URL(path.replace(/^\//, ''), `${base.replace(/\/$/, '')}/`)
-  if (token) {
-    url.searchParams.set('access_token', token)
-  }
   return url.toString()
 }
 
@@ -1179,6 +1235,15 @@ export const confirmClientFeedbackResolved = async (
 ): Promise<void> => {
   await request({
     url: `/client-feedback/conversations/${conversationId}/confirm-resolved`,
+    method: 'PATCH',
+  })
+}
+
+export const withdrawClientFeedbackConversation = async (
+  conversationId: string,
+): Promise<void> => {
+  await request({
+    url: `/client-feedback/conversations/${conversationId}/withdraw`,
     method: 'PATCH',
   })
 }
@@ -1359,9 +1424,9 @@ export const openFeedbackRealtimeStream = (
 
   /**
    * 实时流鉴权策略：
-   * - 客户端仍沿用现有 `access_token` 查询参数，避免牵连客户端登录体系；
-   * - 管理端改为依赖浏览器自动附带的安全 Cookie，会随 EventSource 一起发送；
-   * - `withCredentials` 便于未来切到独立 API 域名时继续携带 Cookie。
+   * - 客户端和管理端都依赖浏览器自动附带的安全 Cookie，不再把 token 放进 URL；
+   * - `withCredentials` 便于未来切到独立 API 域名时继续携带 Cookie；
+   * - 历史 `access_token` 查询参数已停用，避免日志、引用页和浏览器历史泄露会话。
    */
   const eventSource = new EventSource(
     buildStreamUrl(scope === 'client' ? '/client-feedback/stream' : '/customer-service/stream'),

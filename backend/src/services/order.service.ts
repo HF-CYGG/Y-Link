@@ -13,6 +13,7 @@ import { Brackets, type EntityManager } from 'typeorm'
 import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
+import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import {
   isRetryableSqliteLockError,
@@ -175,6 +176,7 @@ const SHOW_NO_CONSTRAINT_MATCHER = {
 
 const ORDER_SUBMIT_MAX_RETRY = 3
 const ORDER_TYPE_SET = new Set<OrderType>(['department', 'walkin'])
+const O2O_VERIFIED_PREORDER_IDEMPOTENCY_KEY_PREFIX = 'o2o-preorder-verify:'
 const ORDER_FIELD_LIMITS = {
   idempotencyKey: 128,
   issuerName: 64,
@@ -190,6 +192,52 @@ const ORDER_FIELD_LIMITS = {
 export class OrderService {
   private readonly orderRepo = AppDataSource.getRepository(BizOutboundOrder)
   private readonly itemRepo = AppDataSource.getRepository(BizOutboundOrderItem)
+
+  private resolveLinkedO2oPreorderId(order: Pick<BizOutboundOrder, 'idempotencyKey'>): string | null {
+    const idempotencyKey = order.idempotencyKey?.trim() ?? ''
+    if (!idempotencyKey.startsWith(O2O_VERIFIED_PREORDER_IDEMPOTENCY_KEY_PREFIX)) {
+      return null
+    }
+    return idempotencyKey.slice(O2O_VERIFIED_PREORDER_IDEMPOTENCY_KEY_PREFIX.length).trim() || null
+  }
+
+  private async syncLinkedO2oPreorderVisibilityInManager(
+    manager: EntityManager,
+    order: Pick<BizOutboundOrder, 'idempotencyKey'>,
+    actor: AuthUserContext,
+    deleted: boolean,
+  ) {
+    const preorderId = this.resolveLinkedO2oPreorderId(order)
+    if (!preorderId) {
+      return null
+    }
+    const preorderRepo = manager.getRepository(O2oPreorder)
+    const preorder = await preorderRepo.findOne({
+      where: { id: preorderId },
+      lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+    })
+    if (!preorder) {
+      return { preorderId, changed: false, reason: 'not_found' }
+    }
+    if (preorder.isDeleted === deleted) {
+      return { preorderId, changed: false, reason: 'already_synced' }
+    }
+
+    preorder.isDeleted = deleted
+    if (deleted) {
+      preorder.deletedAt = new Date()
+      preorder.deletedByUserId = actor.userId
+      preorder.deletedByUsername = actor.username
+      preorder.deletedByDisplayName = actor.displayName
+    } else {
+      preorder.deletedAt = null
+      preorder.deletedByUserId = null
+      preorder.deletedByUsername = null
+      preorder.deletedByDisplayName = null
+    }
+    await preorderRepo.save(preorder)
+    return { preorderId, changed: true, deleted }
+  }
 
   async list(query: OrderListQuery): Promise<PaginationResult<OrderSummaryView>> {
     const qb = this.orderRepo.createQueryBuilder('order')
@@ -320,6 +368,7 @@ export class OrderService {
       order.deletedByUsername = actor.username
       order.deletedByDisplayName = actor.displayName
       const savedOrder = await orderRepo.save(order)
+      const linkedO2oPreorderSync = await this.syncLinkedO2oPreorderVisibilityInManager(manager, savedOrder, actor, true)
 
       await auditService.record(
         {
@@ -336,6 +385,7 @@ export class OrderService {
             customerName: savedOrder.customerName,
             totalQty: savedOrder.totalQty,
             totalAmount: savedOrder.totalAmount,
+            linkedO2oPreorderSync,
           },
         },
         manager,
@@ -368,6 +418,7 @@ export class OrderService {
       order.deletedByUsername = null
       order.deletedByDisplayName = null
       const savedOrder = await orderRepo.save(order)
+      const linkedO2oPreorderSync = await this.syncLinkedO2oPreorderVisibilityInManager(manager, savedOrder, actor, false)
 
       await auditService.record(
         {
@@ -384,6 +435,7 @@ export class OrderService {
             customerName: savedOrder.customerName,
             totalQty: savedOrder.totalQty,
             totalAmount: savedOrder.totalAmount,
+            linkedO2oPreorderSync,
           },
         },
         manager,
@@ -425,23 +477,19 @@ export class OrderService {
         throw new BizError('仅已删除单据支持永久删除，请先执行删除操作', 409)
       }
 
-      const latestSameTypeOrderId = await this.loadLatestOrderIdByType(order.orderType, manager)
-      const shouldRollbackSerial = latestSameTypeOrderId === String(order.id)
-      let serialRolledBack = false
-
-      if (shouldRollbackSerial) {
-        const rollbackResult = await orderSerialService.rollbackCurrentIfMatches(order.orderType, order.showNo, manager)
-        serialRolledBack = rollbackResult.applied
-      }
-
-      const auditDetail = {
-        ...this.buildOrderAuditDetail(order),
-        serialRolledBack,
-      }
-
+      const linkedO2oPreorderSync = await this.syncLinkedO2oPreorderVisibilityInManager(manager, order, actor, true)
       const deleteResult = await orderRepo.delete({ id: order.id })
       if ((deleteResult.affected ?? 0) <= 0) {
         throw new BizError('永久删除出库单失败，请稍后重试', 500)
+      }
+
+      const serialCalibration = await orderSerialService.recalibrateCurrentFromOccupancy(order.orderType, manager)
+      const serialRolledBack = serialCalibration.rolledBack
+      const auditDetail = {
+        ...this.buildOrderAuditDetail(order),
+        serialRolledBack,
+        serialCalibration,
+        linkedO2oPreorderSync,
       }
 
       await auditService.record(
@@ -811,28 +859,6 @@ export class OrderService {
       lineAmount: normalizeDecimalText(item.lineAmount),
       remark: item.remark,
     }))
-  }
-
-  /**
-   * 读取同类型最后一张单据主键：
-   * - 使用创建时间倒序 + 主键倒序双重排序，尽量稳定定位最新生成的单据；
-   * - 安全回拨只允许命中这一张，避免删除历史中间号时把流水号回退。
-   */
-  private async loadLatestOrderIdByType(orderType: string, manager: EntityManager): Promise<string | null> {
-    const latestOrder = await manager.getRepository(BizOutboundOrder).findOne({
-      select: {
-        id: true,
-      },
-      where: {
-        orderType,
-      },
-      order: {
-        createdAt: 'DESC',
-        id: 'DESC',
-      },
-    })
-
-    return latestOrder ? normalizeEntityId(latestOrder.id) : null
   }
 
   /**

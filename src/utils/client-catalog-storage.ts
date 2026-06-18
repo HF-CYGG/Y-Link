@@ -10,7 +10,7 @@
  * - 若后续目录缓存要按更多业务维度分片，可继续复用统一的作用域 key 工具。
  */
 
-import type { O2oMallProduct } from '@/api/modules/o2o'
+import type { O2oMallProduct, O2oMallStorefrontConfig } from '@/api/modules/o2o'
 import {
   clearLegacyScopedStorageKey,
   getBrowserStorage,
@@ -19,6 +19,7 @@ import {
 
 export interface ClientCatalogSnapshot {
   products: O2oMallProduct[]
+  storefront: O2oMallStorefrontConfig
   activeCategoryKey: string
   keyword: string
   updatedAt: number
@@ -26,6 +27,7 @@ export interface ClientCatalogSnapshot {
 
 export interface ClientCatalogDataSnapshot {
   products: O2oMallProduct[]
+  storefront: O2oMallStorefrontConfig
   updatedAt: number
 }
 
@@ -100,6 +102,21 @@ const normalizeUpdatedAt = (value: unknown) => {
   return Number.isFinite(value) ? Number(value) : 0
 }
 
+const normalizeStorefront = (value: unknown): O2oMallStorefrontConfig => {
+  if (!value || typeof value !== 'object') {
+    return {
+      businessHoursText: '10:00 - 22:00',
+    }
+  }
+  const row = value as Record<string, unknown>
+  const businessHoursText = typeof row.businessHoursText === 'string' && row.businessHoursText.trim()
+    ? row.businessHoursText.trim()
+    : '10:00 - 22:00'
+  return {
+    businessHoursText,
+  }
+}
+
 const normalizeActiveCategoryKey = (value: unknown) => {
   return typeof value === 'string' && value.trim() ? value : 'all'
 }
@@ -153,6 +170,7 @@ export const readPersistedClientCatalogSnapshot = (
     clearLegacyScopedStorageKey(storage, LEGACY_CLIENT_CATALOG_SNAPSHOT_KEY)
     return {
       products: normalizeProducts(sourceData?.products),
+      storefront: normalizeStorefront(sourceData?.storefront),
       activeCategoryKey: normalizeActiveCategoryKey(sourceContext?.activeCategoryKey),
       keyword: normalizeKeyword(sourceContext?.keyword),
       updatedAt: normalizeUpdatedAt(sourceData?.updatedAt),

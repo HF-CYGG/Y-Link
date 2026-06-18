@@ -23,6 +23,7 @@ import type { AuthUserContext } from '../src/types/auth.js'
 import type { ClientAuthContext } from '../src/types/client-auth.js'
 
 const readCaptchaCode = (captchaSvg: string) => captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6)
+const toChineseDigits = (value: string) => value.replaceAll(/\d/g, (digit) => '零一二三四五六七八九'[Number(digit)] ?? '')
 
 const ensureReady = async () => {
   prepareDatabaseRuntime()
@@ -49,10 +50,11 @@ const buildScriptAdminActor = (bootstrapAdmin: Awaited<ReturnType<typeof authSer
 const registerAndLoginClient = async (seed: number): Promise<ClientAuthContext> => {
   const registerCaptcha = await clientAuthService.createCaptcha()
   const account = `1${String(seed).slice(-10)}`
-  const username = `show_no_test_${String(seed).slice(-6)}`
+  const username = `示例用户${toChineseDigits(String(seed).slice(-6))}`
   const password = `Client@${String(seed).slice(-6)}`
 
   const registerResult = await clientAuthService.register({
+    accountType: 'personal',
     account,
     username,
     password,
@@ -60,11 +62,19 @@ const registerAndLoginClient = async (seed: number): Promise<ClientAuthContext> 
     captchaCode: readCaptchaCode(registerCaptcha.captchaSvg),
   })
 
-  await AppDataSource.getRepository(ClientUser).update({ id: registerResult.id }, { departmentName: '海右书院' })
+  await AppDataSource.getRepository(ClientUser).update(
+    { id: registerResult.user.id },
+    {
+      accountType: 'department',
+      departmentName: '海右书院',
+      staffNo: `SHOWNO-${String(seed).slice(-6)}`,
+      staffVerified: true,
+    },
+  )
 
   const loginCaptcha = await clientAuthService.createCaptcha()
   const loginResult = await clientAuthService.login({
-    account: registerResult.mobile,
+    account: registerResult.user.mobile,
     password,
     captchaId: loginCaptcha.captchaId,
     captchaCode: readCaptchaCode(loginCaptcha.captchaSvg),
@@ -105,7 +115,6 @@ const run = async () => {
   const preorder = await o2oPreorderService.submit(clientAuth, {
     items: [{ productId: product.id, qty: 1 }],
     remark: '正式出库单号校验',
-    clientOrderType: 'department',
     isSystemApplied: false,
     pickupContact: '测试提货人',
   })

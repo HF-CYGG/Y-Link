@@ -13,13 +13,18 @@
  */
 
 import { computed, onMounted, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessageBox } from 'element-plus'
 import QRCode from 'qrcode'
+import { useRouter } from 'vue-router'
 import { PageContainer, PassiveNumberInput } from '@/components/common'
 import { getProductList, type ProductRecord } from '@/api/modules/product'
 import { submitSupplierDelivery } from '@/api/modules/inbound'
 import { extractErrorMessage } from '@/utils/error'
 
+
+import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
+
+const router = useRouter()
 const loading = ref(false)
 const submitting = ref(false)
 const products = ref<ProductRecord[]>([])
@@ -38,6 +43,8 @@ const createDeliveryItemRow = (): DeliveryItemRow => ({
   productId: '',
   qty: 1,
 })
+
+const getProductOptionValue = (product: ProductRecord) => String(product.id)
 
 // 供货单明细
 const items = ref<DeliveryItemRow[]>([])
@@ -70,8 +77,10 @@ const completionRate = computed(() => {
 
 // 提交按钮统一可用性判定，避免模板中散落复杂表达式
 const canSubmit = computed(() => {
-  return !submitting.value && totalQty.value > 0
+  return !loading.value && !submitting.value && products.value.length > 0 && totalQty.value > 0
 })
+
+const hasNoProducts = computed(() => !loading.value && products.value.length === 0)
 
 // 右侧操作提示：只保留真正影响提交和交货的关键信息，避免与页头和成功态重复。
 const helperSteps = [
@@ -86,7 +95,8 @@ const loadProducts = async () => {
   try {
     products.value = await getProductList({})
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '加载商品列表失败，请稍后重试'))
+    products.value = []
+    showAppError(extractErrorMessage(error, '加载商品列表失败，请稍后重试'))
   } finally {
     loading.value = false
   }
@@ -115,15 +125,25 @@ const generateQRCode = async (verifyCode: string) => {
   } catch (err) {
     qrCodeDataUrl.value = ''
     qrCodeUnavailable.value = true
-    ElMessage.warning(extractErrorMessage(err, '送货单已生成，但二维码渲染失败，请刷新后到历史单据查看'))
+    showAppWarning(extractErrorMessage(err, '送货单已生成，但二维码渲染失败，请刷新后到历史单据查看'))
   }
 }
 
 const handleSubmit = async () => {
+  if (loading.value) {
+    showAppWarning('商品目录正在加载，请稍后再提交')
+    return
+  }
+
+  if (!products.value.length) {
+    showAppWarning('暂无可送货商品，请联系管理员维护产品中心后再生成送货单')
+    return
+  }
+
   // 仅提交“商品已选中且数量>0”的有效行，避免空行污染数据
   const validItems = items.value.filter((item) => item.productId && item.qty > 0)
   if (!validItems.length) {
-    ElMessage.warning('请至少添加一件有效的送货商品')
+    showAppWarning('请至少添加一件有效的送货商品')
     return
   }
 
@@ -140,7 +160,8 @@ const handleSubmit = async () => {
   // 按商品 ID 聚合数量，兼容同一商品被多次录入的场景。
   const uniqueItems = new Map<string, number>()
   for (const item of validItems) {
-    uniqueItems.set(item.productId, (uniqueItems.get(item.productId) || 0) + item.qty)
+    const productId = String(item.productId).trim()
+    uniqueItems.set(productId, (uniqueItems.get(productId) || 0) + item.qty)
   }
 
   const submitData = {
@@ -155,9 +176,9 @@ const handleSubmit = async () => {
     currentShowNo.value = result.order.showNo
     await generateQRCode(verifyCode)
     isSuccess.value = true
-    ElMessage.success('送货单生成成功，可在历史单据中继续改单或撤销')
+    showAppSuccess('送货单生成成功，可在历史单据中继续改单或撤销')
   } catch (err) {
-    ElMessage.error(extractErrorMessage(err, '生成失败'))
+    showAppError(extractErrorMessage(err, '生成失败'))
   } finally {
     submitting.value = false
   }
@@ -172,6 +193,10 @@ const handleReset = () => {
   qrCodeUnavailable.value = false
   currentShowNo.value = ''
   handleAddItem()
+}
+
+const goToHistory = () => {
+  router.push('/supplier-history')
 }
 
 onMounted(() => {
@@ -208,6 +233,15 @@ onMounted(() => {
             </div>
 
             <div v-loading="loading" class="space-y-5 p-5 sm:p-6">
+              <el-alert
+                v-if="hasNoProducts"
+                type="warning"
+                show-icon
+                :closable="false"
+                title="暂无可送货商品"
+                description="请联系管理员先在产品中心维护并启用商品，当前无法生成空送货单。"
+              />
+
               <!-- 商品录入行使用过渡组，新增/删除时提供轻微动效反馈。 -->
               <transition-group name="item-list" tag="div" class="space-y-3">
                 <div
@@ -223,13 +257,15 @@ onMounted(() => {
                       v-model="item.productId"
                       placeholder="请选择商品"
                       filterable
+                      :disabled="hasNoProducts"
+                      empty-text="暂无可送货商品"
                       class="w-full"
                     >
                       <el-option
                         v-for="product in products"
-                        :key="product.id"
+                        :key="getProductOptionValue(product)"
                         :label="product.productName"
-                        :value="product.id"
+                        :value="getProductOptionValue(product)"
                       >
                         <span class="float-left">{{ product.productName }}</span>
                         <span class="float-right text-sm text-slate-400">{{ product.productCode }}</span>
@@ -359,9 +395,12 @@ onMounted(() => {
                 <span class="delivery-inline-metric">总件数 {{ totalQty }} 件</span>
               </div>
 
-              <div class="mt-6 flex justify-center lg:justify-start">
+              <div class="mt-6 flex flex-wrap justify-center gap-3 lg:justify-start">
                 <el-button plain size="large" @click="handleReset" class="delivery-reset-button !rounded-2xl px-8">
                   继续录入下一单
+                </el-button>
+                <el-button type="primary" size="large" plain @click="goToHistory" class="delivery-reset-button !rounded-2xl px-8">
+                  查看历史单据
                 </el-button>
               </div>
             </div>

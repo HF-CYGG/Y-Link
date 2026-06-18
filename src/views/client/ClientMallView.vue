@@ -9,7 +9,7 @@
 import { useVirtualList } from '@vueuse/core'
 import { computed, nextTick, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { ElMessage } from 'element-plus'
+
 import { ArrowDown, ArrowRight, Search, ShoppingCart } from '@element-plus/icons-vue'
 import { getO2oMallProducts, type O2oMallProduct } from '@/api/modules/o2o'
 import { BaseRequestState } from '@/components/common'
@@ -23,6 +23,9 @@ import { formatDiscountRate, resolveDiscountedUnitPrice, resolveOriginalPrice } 
 
 import ClientCartView from './ClientCartView.vue'
 import ClientCheckoutView from './ClientCheckoutView.vue'
+
+
+import { showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 interface ProductCategoryGroup {
   key: string
@@ -99,6 +102,7 @@ clientCartStore.initialize(clientAuthStore.currentUser?.id)
 clientCatalogStore.initialize(clientAuthStore.currentUser?.id)
 
 const products = computed(() => clientCatalogStore.products)
+const storeBusinessHoursText = computed(() => clientCatalogStore.storefront.businessHoursText || '10:00 - 22:00')
 const normalizedKeyword = computed(() => keyword.value.trim().toLowerCase())
 const hasKeyword = computed(() => normalizedKeyword.value.length > 0)
 const hasRenderableProducts = computed(() => products.value.length > 0)
@@ -310,8 +314,8 @@ const loadProducts = async (force = false) => {
       // 1. 目录 Store 负责商品列表、分类与搜索上下文；
       // 2. 购物车 Store 负责把已选商品映射到最新库存/限购规则。
       clientCatalogStore.setProducts(result)
-      clientCartStore.syncWithCatalog(result)
-      warmupProductImages(result)
+      clientCartStore.syncWithCatalog(result.list)
+      warmupProductImages(result.list)
       const activeExists = categoryOptions.value.some((option) => option.key === activeCategoryKey.value)
       if (!activeExists) {
         activeCategoryKey.value = 'all'
@@ -366,9 +370,9 @@ const changeDetailQty = (delta: number) => {
   const nextQty = Math.min(maxQty, Math.max(1, detailQty.value + delta))
   if (detailQty.value === maxQty && delta > 0) {
     if (maxQty >= detailProduct.value.limitPerUser) {
-      ElMessage.warning('已达单人限购上限')
+      showAppWarning('已达单人限购上限')
     } else {
-      ElMessage.warning('库存不足')
+      showAppWarning('库存不足')
     }
   }
   detailQty.value = nextQty
@@ -382,7 +386,7 @@ const addCurrentDetailToCart = () => {
   if (addedQty <= 0) {
     return
   }
-  ElMessage.success('已加入购物车')
+  showAppSuccess('已加入购物车')
   triggerSettlePulse()
   detailVisible.value = false
 }
@@ -392,7 +396,7 @@ const quickAdd = (product: O2oMallProduct) => {
   if (addedQty <= 0) {
     return
   }
-  ElMessage.success('已加入购物车')
+  showAppSuccess('已加入购物车')
   triggerSettlePulse()
 }
 
@@ -658,7 +662,7 @@ const goToCheckout = () => {
       // 若用户尚未主动勾选，则默认全选有效商品，减少从商城直达结算的操作成本。
       clientCartStore.toggleAllValidSelected(true)
     } else {
-      ElMessage.warning('购物车暂无可结算商品')
+      showAppWarning('购物车暂无可结算商品')
       return
     }
   }
@@ -795,7 +799,7 @@ onBeforeUnmount(() => {
         </button>
       </div>
       <div v-if="!isPhone" class="mall-hero-card__meta-grid mt-4 grid gap-3 sm:grid-cols-3">
-        <div class="mall-hero-card__meta-item rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700">营业时间：10:00 - 22:00</div>
+        <div class="mall-hero-card__meta-item rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700">营业时间：{{ storeBusinessHoursText }}</div>
         <div class="mall-hero-card__meta-item rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700">提货须知：请在订单有效期内到店核销</div>
         <div class="mall-hero-card__meta-item mall-hero-card__meta-item--notice rounded-2xl bg-amber-50 px-3 py-3 text-sm text-amber-700">公告：库存实时刷新，请以下单结果为准</div>
       </div>
@@ -1136,9 +1140,9 @@ onBeforeUnmount(() => {
       class="client-drawer-responsive"
       destroy-on-close
     >
-      <ClientCartView 
-        @close="cartDrawerVisible = false" 
-        @checkout="goToCheckout" 
+      <ClientCartView
+        @close="cartDrawerVisible = false"
+        @checkout="goToCheckout"
       />
     </ElDrawer>
 
@@ -1152,8 +1156,8 @@ onBeforeUnmount(() => {
       class="client-drawer-responsive"
       destroy-on-close
     >
-      <ClientCheckoutView 
-        @close="checkoutDrawerVisible = false" 
+      <ClientCheckoutView
+        @close="checkoutDrawerVisible = false"
       />
     </ElDrawer>
 

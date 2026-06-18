@@ -13,7 +13,7 @@
 import { computed, defineAsyncComponent, onActivated, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import dayjs from 'dayjs'
-import { ElMessage } from 'element-plus'
+
 import { Box, DataAnalysis, Document, Money, More, WarningFilled } from '@element-plus/icons-vue'
 import { PageContainer } from '@/components/common'
 import { getDashboardStats, type DashboardStats } from '@/api/modules/dashboard'
@@ -22,6 +22,9 @@ import { buildDashboardShortcutItems } from '@/router/routes'
 import { useAppStore, useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { extractErrorMessage } from '@/utils/error'
+
+
+import { showAppError } from '@/utils/app-alert'
 
 const router = useRouter()
 const appStore = useAppStore(pinia)
@@ -74,7 +77,7 @@ const formatQty = (value: string | number | null | undefined): string => {
 
 /**
  * 卡片网格策略：
- * - phone 使用单列，避免数值卡片过窄；
+ * - phone 使用 2x2 紧凑面板，优先压缩核心看板首屏高度；
  * - tablet 使用双列；
  * - desktop 使用四列完整展示，形成均衡四宫格。
  */
@@ -87,7 +90,7 @@ const statsGridClass = computed(() => {
     return 'sm:grid-cols-2'
   }
 
-  return 'grid-cols-1'
+  return 'grid-cols-2'
 })
 
 /**
@@ -171,6 +174,15 @@ const resolveActivityTagType = (actionType: string): 'success' | 'danger' | 'war
 }
 
 /**
+ * 动态是否可跳转：
+ * - 永久删除后的出库单已不存在可打开详情，首页只保留审计展示；
+ * - 其余动态仍复用出库单列表页的定位逻辑。
+ */
+const isActivityNavigable = (activity: { actionType: string; orderId: string }): boolean => {
+  return activity.actionType !== 'order.purge' && Boolean(activity.orderId.trim())
+}
+
+/**
  * 动态时间格式化：
  * - 同日显示“HH:mm”，便于快速追踪操作时序；
  * - 跨日显示“MM-DD HH:mm”，保留日期信息避免歧义。
@@ -188,7 +200,11 @@ const formatActivityTime = (value: string): string => {
  * - 点击首页动态后跳转到出库列表页；
  * - 通过 query 透传目标单据信息，复用列表页既有“定位并打开详情抽屉”逻辑。
  */
-const navigateToActivityOrder = (activity: { orderId: string; showNo: string }) => {
+const navigateToActivityOrder = (activity: { actionType: string; orderId: string; showNo: string }) => {
+  if (!isActivityNavigable(activity)) {
+    return
+  }
+
   router.push({
     path: '/order-list',
     query: {
@@ -218,7 +234,7 @@ const loadData = async () => {
     },
     onError: (error) => {
       loadStatus.value = 'error'
-      ElMessage.error(extractErrorMessage(error, '获取看板数据失败'))
+      showAppError(extractErrorMessage(error, '获取看板数据失败'))
     },
     onFinally: ({ status }) => {
       if (status === 'canceled' && !stats.value) {
@@ -292,17 +308,27 @@ onActivated(() => {
 
       <section class="space-y-4">
         <div class="h-6 w-28 animate-pulse rounded-full bg-slate-200 dark:bg-white/10" />
-        <div :class="['grid gap-4', statsGridClass]">
+        <div :class="appStore.isPhone ? 'dashboard-mobile-metric-panel' : ['grid gap-4', statsGridClass]">
           <div
             v-for="index in 4"
             :key="`stats-skeleton-${index}`"
-            class="min-h-[112px] animate-pulse rounded-2xl bg-white/90 p-5 shadow-sm dark:bg-white/5"
+            :class="[
+              appStore.isPhone
+                ? 'dashboard-mobile-metric-cell dashboard-mobile-metric-skeleton'
+                : 'min-h-[112px] animate-pulse rounded-2xl bg-white/90 p-5 shadow-sm dark:bg-white/5',
+            ]"
           >
-            <div class="mb-5 flex items-center justify-between">
-              <div class="h-4 w-24 rounded-full bg-slate-200 dark:bg-white/10" />
-              <div class="h-10 w-10 rounded-xl bg-slate-200 dark:bg-white/10" />
-            </div>
-            <div class="h-8 w-20 rounded-full bg-slate-200 dark:bg-white/10" />
+            <template v-if="appStore.isPhone">
+              <div class="h-3.5 w-20 rounded-full bg-slate-200 dark:bg-white/10" />
+              <div class="mt-3 h-7 w-16 rounded-full bg-slate-200 dark:bg-white/10" />
+            </template>
+            <template v-else>
+              <div class="mb-5 flex items-center justify-between">
+                <div class="h-4 w-24 rounded-full bg-slate-200 dark:bg-white/10" />
+                <div class="h-10 w-10 rounded-xl bg-slate-200 dark:bg-white/10" />
+              </div>
+              <div class="h-8 w-20 rounded-full bg-slate-200 dark:bg-white/10" />
+            </template>
           </div>
         </div>
       </section>
@@ -386,25 +412,36 @@ onActivated(() => {
       <section>
         <h2 class="mb-4 text-lg font-semibold text-slate-800 dark:text-slate-200">核心看板</h2>
 
-        <transition-group name="staggered-fade" tag="div" :class="['grid gap-4 xl:gap-5', statsGridClass]" appear>
+        <transition-group
+          name="staggered-fade"
+          tag="div"
+          :class="appStore.isPhone ? 'dashboard-mobile-metric-panel' : ['grid gap-4 xl:gap-5', statsGridClass]"
+          appear
+        >
           <div
             v-for="metric in metricCards"
             :key="metric.key"
-            class="apple-card-hover min-w-0 p-5 sm:p-6 xl:p-7"
+            :class="[
+              appStore.isPhone
+                ? 'dashboard-mobile-metric-cell'
+                : 'apple-card-hover min-w-0 p-5 sm:p-6 xl:p-7',
+            ]"
             :style="{ transitionDelay: metric.delay }"
           >
-            <div class="mb-4 flex items-center justify-between gap-3">
-              <div class="text-sm font-medium text-slate-500 dark:text-slate-400">{{ metric.title }}</div>
-              <div :class="['rounded-xl p-2', metric.iconBgClass, metric.iconTextClass]">
+            <div :class="[appStore.isPhone ? 'mb-2' : 'mb-4', 'flex items-center justify-between gap-3']">
+              <div :class="appStore.isPhone ? 'min-w-0 truncate text-xs font-medium text-slate-500 dark:text-slate-400' : 'text-sm font-medium text-slate-500 dark:text-slate-400'">
+                {{ metric.title }}
+              </div>
+              <div :class="[appStore.isPhone ? 'rounded-lg p-1.5' : 'rounded-xl p-2', metric.iconBgClass, metric.iconTextClass]">
                 <el-icon :size="20">
                   <component :is="metric.icon" />
                 </el-icon>
               </div>
             </div>
-            <div class="break-all text-3xl font-bold text-slate-800 dark:text-slate-100">
-              <span v-if="metric.unit === '¥'" class="mr-1 text-xl font-normal text-slate-500 dark:text-slate-400">¥</span>
+            <div :class="appStore.isPhone ? 'break-all text-2xl font-bold leading-tight text-slate-800 dark:text-slate-100' : 'break-all text-3xl font-bold text-slate-800 dark:text-slate-100'">
+              <span v-if="metric.unit === '¥'" :class="appStore.isPhone ? 'mr-0.5 text-base font-normal text-slate-500 dark:text-slate-400' : 'mr-1 text-xl font-normal text-slate-500 dark:text-slate-400'">¥</span>
               {{ metric.value }}
-              <span v-if="metric.unit !== '¥'" class="ml-1 text-sm font-normal text-slate-500 dark:text-slate-400">{{ metric.unit }}</span>
+              <span v-if="metric.unit !== '¥'" :class="appStore.isPhone ? 'ml-0.5 text-xs font-normal text-slate-500 dark:text-slate-400' : 'ml-1 text-sm font-normal text-slate-500 dark:text-slate-400'">{{ metric.unit }}</span>
             </div>
           </div>
         </transition-group>
@@ -447,28 +484,36 @@ onActivated(() => {
 
           <div class="apple-card p-5 sm:p-6 xl:p-7">
             <h2 class="mb-4 text-lg font-semibold text-slate-800 dark:text-slate-200">近期出库动态</h2>
-            <div v-if="recentActivities.length" class="space-y-2">
+            <div v-if="recentActivities.length" class="space-y-2.5">
               <button
                 v-for="activity in recentActivities"
                 :key="activity.id"
                 type="button"
-                class="w-full rounded-lg border border-slate-100 bg-slate-50/70 px-2.5 py-2 text-left transition hover:border-brand/40 hover:bg-slate-50 dark:border-white/10 dark:bg-slate-900/40 dark:hover:border-brand/40 dark:hover:bg-slate-900/55"
+                :class="[
+                  'w-full rounded-lg border border-slate-100 bg-slate-50/80 px-3 py-2.5 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand/35 dark:border-white/10 dark:bg-slate-900/40 sm:px-3.5 sm:py-3',
+                  isActivityNavigable(activity)
+                    ? 'cursor-pointer hover:border-brand/35 hover:bg-slate-50 hover:shadow-sm dark:hover:border-brand/40 dark:hover:bg-slate-900/60'
+                    : 'cursor-not-allowed opacity-80',
+                ]"
+                :disabled="!isActivityNavigable(activity)"
+                :aria-label="isActivityNavigable(activity) ? `查看出库单 ${activity.showNo} 的动态详情` : `出库单 ${activity.showNo} 已永久删除，无法跳转`"
+                :title="isActivityNavigable(activity) ? '查看单据详情' : '该出库单已永久删除，无法跳转'"
                 @click="navigateToActivityOrder(activity)"
               >
-                <div class="mb-1 flex items-center justify-between gap-2">
-                  <div class="flex min-w-0 items-center gap-1.5">
+                <div class="flex min-w-0 items-start justify-between gap-3">
+                  <div class="flex min-w-0 flex-wrap items-center gap-2">
                     <el-tag :type="resolveActivityTagType(activity.actionType)" size="small" effect="light" class="!px-1.5">
                       {{ activity.actionLabel }}
                     </el-tag>
-                    <span class="truncate text-xs font-medium text-slate-700 dark:text-slate-200">
+                    <span class="min-w-0 truncate text-xs font-medium text-slate-700 dark:text-slate-200 sm:text-sm">
                       {{ activity.showNo }}
                     </span>
                   </div>
-                  <span class="shrink-0 text-[11px] text-slate-500 dark:text-slate-400">
+                  <span class="shrink-0 pt-0.5 text-xs text-slate-500 dark:text-slate-400">
                     {{ formatActivityTime(activity.createdAt) }}
                   </span>
                 </div>
-                <div class="truncate text-[11px] leading-4 text-slate-600 dark:text-slate-300">
+                <div class="mt-1.5 truncate text-xs leading-5 text-slate-600 dark:text-slate-300">
                   {{ activity.displayName }} ｜ {{ formatQty(activity.totalQty) }} 件 ｜ ¥{{ formatAmount(activity.totalAmount) }} ｜ {{ activity.actorDisplayName }}
                 </div>
               </button>
@@ -498,6 +543,58 @@ onActivated(() => {
   transform: translateY(0);
 }
 
+.dashboard-mobile-metric-panel {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid rgba(226, 232, 240, 0.9);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 14px 32px rgba(15, 23, 42, 0.07);
+}
+
+.dashboard-mobile-metric-cell {
+  min-width: 0;
+  min-height: 104px;
+  padding: 14px;
+  background: transparent;
+  border-right: 1px solid rgba(226, 232, 240, 0.9);
+  border-bottom: 1px solid rgba(226, 232, 240, 0.9);
+}
+
+.dashboard-mobile-metric-cell:nth-child(2n) {
+  border-right: 0;
+}
+
+.dashboard-mobile-metric-cell:nth-last-child(-n + 2) {
+  border-bottom: 0;
+}
+
+.dashboard-mobile-metric-skeleton {
+  animation: dashboard-mobile-metric-pulse 1.4s ease-in-out infinite;
+}
+
+.dark .dashboard-mobile-metric-panel {
+  border-color: rgba(148, 163, 184, 0.18);
+  background: rgba(15, 23, 42, 0.72);
+  box-shadow: 0 14px 32px rgba(2, 6, 23, 0.24);
+}
+
+.dark .dashboard-mobile-metric-cell {
+  border-color: rgba(148, 163, 184, 0.18);
+}
+
+@keyframes dashboard-mobile-metric-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.62;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .staggered-fade-enter-active {
     transition-duration: 0.01ms !important;
@@ -507,6 +604,10 @@ onActivated(() => {
   .staggered-fade-enter-to {
     opacity: 1;
     transform: none;
+  }
+
+  .dashboard-mobile-metric-skeleton {
+    animation: none;
   }
 }
 </style>

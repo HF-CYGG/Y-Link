@@ -75,6 +75,11 @@ const main = async () => {
   // O2O 关键功能脚本：覆盖预订单核心链路，属于当前项目最关键业务路径之一。
   await runNpmScript('后端 O2O 功能回归', 'o2o:verify', backendRoot)
 
+  // 教职工目录治理回归：
+  // - 校验实名/工号目录的查询、导入、编辑、启停接口可用；
+  // - 防止系统配置页新增白名单治理后，后续改动把目录接口或权限链路悄悄带坏。
+  await runNpmScript('后端教职工目录治理回归', 'client-staff-directory:verify', backendRoot)
+
   log('\n[unit-functional] 单元功能测试套件执行完成')
 }
 

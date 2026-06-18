@@ -1,7 +1,7 @@
 /**
- * 模块说明：backend/src/routes/data-maintenance.routes.ts
- * 文件职责：提供数据维护接口，包括 SQLite 备份、JSON 导入导出、SQLite -> MySQL 迁移预检、迁移任务与应用切换回退。
- * 维护说明：所有迁移类接口统一收口在这里，避免数据库治理能力分散到多个路由文件。
+ * 文件说明：数据维护路由，负责数据库备份、JSON 导入导出、SQLite 到 MySQL 迁移预检与切换回退等治理接口。
+ * 实现逻辑：通过后台权限与角色控制把高风险数据操作统一收口，在路由层校验导入结构后调用维护服务和迁移服务执行任务。
+ * 维护重点：调整数据治理流程时，需要同步核对权限边界、导入导出结构版本以及迁移切换的审计留痕。
  */
 
 import { Router } from 'express'
@@ -113,6 +113,7 @@ dataMaintenanceRouter.post(
 dataMaintenanceRouter.post(
   '/db-migration/precheck',
   requirePermission('db_migration:view'),
+  requireRole('admin'),
   asyncHandler(async (req, res) => {
     const payload = sqliteToMysqlPrecheckSchema.parse(req.body)
     const data = await databaseMigrationService.precheckSQLiteToMySql(payload)

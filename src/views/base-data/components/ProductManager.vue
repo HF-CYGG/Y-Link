@@ -14,7 +14,7 @@
 
 
 import { computed, nextTick, onActivated, onMounted, ref } from 'vue'
-import { ElMessage, type FormInstance, type FormRules, type TableInstance } from 'element-plus'
+import { type FormInstance, type FormRules, type TableInstance } from 'element-plus'
 import type { RequestConfig } from '@/api/http'
 import { createTag, getTagList, type Tag } from '@/api/modules/tag'
 import {
@@ -24,7 +24,7 @@ import {
   createProduct,
   deleteProduct,
   getProductDetail,
-  getProductList,
+  getProductListPaged,
   updateProduct,
   type ProductListQuery,
   type ProductRecord,
@@ -45,6 +45,7 @@ import {
   normalizeSubmitNumber,
   normalizeSubmitText,
 } from '@/utils/submit-feedback'
+import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 import {
   compareProductCode,
   createBatchCreateRow,
@@ -70,6 +71,9 @@ const selectedProductIds = ref<string[]>([])
 const searchKeyword = ref('')
 const searchTagId = ref('')
 const productCodeSortOrder = ref<'ascending' | 'descending'>('ascending')
+const productPage = ref(1)
+const productPageSize = ref(10)
+const productTotal = ref(0)
 
 /**
  * 产品表单类型：
@@ -183,46 +187,8 @@ const buildQueryParams = (): ProductListQuery => {
 }
 
 const handleSearch = () => {
+  productPage.value = 1
   void reloadProducts()
-}
-
-const productMatchesFilters = (product: ProductRecord) => {
-  const normalizedKeyword = searchKeyword.value.trim().toLowerCase()
-  const normalizedTagId = searchTagId.value.trim()
-
-  if (normalizedKeyword) {
-    const searchableText = [product.productName, product.productCode, product.pinyinAbbr]
-      .join(' ')
-      .toLowerCase()
-
-    if (!searchableText.includes(normalizedKeyword)) {
-      return false
-    }
-  }
-
-  if (normalizedTagId && !product.tagIds.includes(normalizedTagId)) {
-    return false
-  }
-
-  return true
-}
-
-const upsertProduct = (product: ProductRecord) => {
-  const currentIndex = products.value.findIndex((item) => item.id === product.id)
-
-  if (!productMatchesFilters(product)) {
-    if (currentIndex > -1) {
-      products.value.splice(currentIndex, 1)
-    }
-    return
-  }
-
-  if (currentIndex > -1) {
-    products.value.splice(currentIndex, 1, product)
-    return
-  }
-
-  products.value.unshift(product)
 }
 
 const applyTableSelection = async () => {
@@ -359,7 +325,20 @@ const {
   createDefaultForm,
   buildEditForm,
   buildSubmitPayload,
-  loadList: (requestConfig) => getProductList(buildQueryParams(), requestConfig),
+  loadList: async (requestConfig) => {
+    const result = await getProductListPaged(
+      {
+        ...buildQueryParams(),
+        page: productPage.value,
+        pageSize: productPageSize.value,
+      },
+      requestConfig,
+    )
+    productPage.value = result.page
+    productPageSize.value = result.pageSize
+    productTotal.value = result.total
+    return result.list
+  },
   createItem: createProduct,
   updateItem: updateProduct,
   deleteItem: deleteProduct,
@@ -385,16 +364,28 @@ const {
     hasAutoCreatedTags.value = false
     await loadTags()
   },
-  syncAfterSubmit: ({ result }) => {
-    upsertProduct(result)
-    void syncSelectedProductIds()
-    return 'local'
+  syncAfterSubmit: () => {
+    productPage.value = 1
+    selectedProductIds.value = []
+    return 'reload' as const
+  },
+  afterDelete: async () => {
+    if (!products.value.length && productPage.value > 1) {
+      productPage.value -= 1
+    }
+    await reloadProducts()
   },
 })
 
 const reloadProducts = async () => {
   await loadData()
   await syncSelectedProductIds()
+}
+
+const handleProductPageSizeChange = (pageSize: number) => {
+  productPageSize.value = pageSize
+  productPage.value = 1
+  void reloadProducts()
 }
 
 const handleAdd = async () => {
@@ -417,7 +408,7 @@ const handleEditProduct = async (row: ProductRecord) => {
       handleEdit(detail)
     },
     onError: (error) => {
-      ElMessage.error(extractErrorMessage(error, '获取产品详情失败'))
+      showAppError(extractErrorMessage(error, '获取产品详情失败'))
     },
     onFinally: () => {
       editingProductId.value = ''
@@ -475,7 +466,7 @@ const resolveTagIds = async (tagValues: Array<string | number>, silent = false):
   if (autoCreatedTagNames.length) {
     hasAutoCreatedTags.value = true
     if (!silent) {
-      ElMessage.success(`已自动创建标签：${[...new Set(autoCreatedTagNames)].join('、')}`)
+      showAppSuccess(`已自动创建标签：${[...new Set(autoCreatedTagNames)].join('、')}`)
     }
   }
 
@@ -491,7 +482,7 @@ const handleBatchUpdateStatus = async (isActive: boolean) => {
     return
   }
   if (!selectedProductIds.value.length) {
-    ElMessage.warning('请先选择要批量处理的产品')
+    showAppWarning('请先选择要批量处理的产品')
     return
   }
 
@@ -504,9 +495,9 @@ const handleBatchUpdateStatus = async (isActive: boolean) => {
     })
     await clearSelection()
     await reloadProducts()
-    ElMessage.success(`已批量${isActive ? '启用' : '停用'} ${updatedCount} 个产品`)
+    showAppSuccess(`已批量${isActive ? '启用' : '停用'} ${updatedCount} 个产品`)
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '批量修改失败'))
+    showAppError(extractErrorMessage(error, '批量修改失败'))
   } finally {
     batchSubmitting.value = false
   }
@@ -526,7 +517,7 @@ const resetBatchCreateRows = () => {
 
 const addBatchCreateRow = () => {
   if (batchCreateRows.value.length >= BATCH_CREATE_MAX_ROWS) {
-    ElMessage.warning(`单次最多新增 ${BATCH_CREATE_MAX_ROWS} 行`)
+    showAppWarning(`单次最多新增 ${BATCH_CREATE_MAX_ROWS} 行`)
     return
   }
   batchCreateRows.value.push(createBatchCreateFormRow())
@@ -534,7 +525,7 @@ const addBatchCreateRow = () => {
 
 const removeBatchCreateRow = (rowId: string) => {
   if (batchCreateRows.value.length <= 1) {
-    ElMessage.warning('至少保留一行产品')
+    showAppWarning('至少保留一行产品')
     return
   }
   batchCreateRows.value = batchCreateRows.value.filter((row) => row.rowId !== rowId)
@@ -546,7 +537,7 @@ const handleBatchCreate = async () => {
   }
   const validationError = validateBatchCreateRows(batchCreateRows.value)
   if (validationError) {
-    ElMessage.warning(validationError)
+    showAppWarning(validationError)
     return
   }
 
@@ -584,14 +575,14 @@ const handleBatchCreate = async () => {
     })
     if (hasAutoCreatedTags.value) {
       await loadTags()
-      ElMessage.success('已自动创建并关联缺失标签')
+      showAppSuccess('已自动创建并关联缺失标签')
     }
     await clearSelection()
     await reloadProducts()
     batchCreateDialogVisible.value = false
-    ElMessage.success(`已批量新增 ${createdProducts.length} 个产品`)
+    showAppSuccess(`已批量新增 ${createdProducts.length} 个产品`)
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '批量新增失败'))
+    showAppError(extractErrorMessage(error, '批量新增失败'))
   } finally {
     batchCreateSubmitting.value = false
   }
@@ -600,6 +591,10 @@ const handleBatchCreate = async () => {
 onMounted(() => {
   pageReady.value = true
   void refreshProductView()
+  if (globalThis.sessionStorage.getItem('ylink:o2o-batch-create') === '1') {
+    globalThis.sessionStorage.removeItem('ylink:o2o-batch-create')
+    openBatchCreateDialog()
+  }
 })
 
 onActivated(() => {
@@ -822,6 +817,18 @@ onActivated(() => {
         </div>
       </template>
     </BizResponsiveDataCollectionShell>
+
+    <div class="flex w-full min-w-0 justify-end">
+      <el-pagination
+        v-model:current-page="productPage"
+        v-model:page-size="productPageSize"
+        layout="sizes, prev, pager, next"
+        :page-sizes="[10, 20, 50]"
+        :total="productTotal"
+        @current-change="reloadProducts"
+        @size-change="handleProductPageSizeChange"
+      />
+    </div>
 
     <BizCrudDialogShell
       v-if="canManageProducts"

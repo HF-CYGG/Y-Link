@@ -184,6 +184,28 @@ const layoutChildren: AppRouteRecord[] = [
     },
   },
   {
+    path: 'reports',
+    name: 'reports',
+    component: routeViewLoaders.reports,
+    meta: {
+      title: '报表中心',
+      icon: 'DataAnalysis',
+      menuGroup: '业务操作',
+      menuOrder: 34,
+      requiredPermissions: ['reports:view'],
+      allowedRoles: ['admin', 'operator'],
+      shortcut: {
+        title: '报表中心',
+        description: '查看库存、销售与出库流水并导出表格',
+        order: 24,
+        colorClass: 'text-brand dark:text-teal-300',
+        bgClass: 'bg-brand/10 dark:bg-brand/20',
+      },
+      keepAlive: true,
+      preloadTargets: ['order-list'],
+    },
+  },
+  {
     path: 'supplier-delivery',
     name: 'supplier-delivery',
     component: routeViewLoaders['supplier-delivery'],

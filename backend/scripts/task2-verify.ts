@@ -50,11 +50,24 @@ async function expectBizError(
 }
 
 async function main() {
-  const [{ AppDataSource }, { BaseProduct }, { BizOutboundOrder }, { SystemConfig }, { orderSerialService }, { orderService }, { systemConfigService }, { BizError }] =
+  const [
+    { AppDataSource },
+    { BaseProduct },
+    { BizOutboundOrder },
+    { ClientUser },
+    { O2oPreorder },
+    { SystemConfig },
+    { orderSerialService },
+    { orderService },
+    { systemConfigService },
+    { BizError },
+  ] =
     await Promise.all([
       import('../src/config/data-source.js'),
       import('../src/entities/base-product.entity.js'),
       import('../src/entities/biz-outbound-order.entity.js'),
+      import('../src/entities/client-user.entity.js'),
+      import('../src/entities/o2o-preorder.entity.js'),
       import('../src/entities/system-config.entity.js'),
       import('../src/services/order-serial.service.js'),
       import('../src/services/order.service.js'),
@@ -120,6 +133,115 @@ async function main() {
     pass('散客流水号连续递增且不受部门流水影响')
 
     const orderRepo = AppDataSource.getRepository(BizOutboundOrder)
+    const thirdWalkinOrder = await orderService.submit(
+      {
+        idempotencyKey: `task2-walkin-third-${Date.now()}`,
+        orderType: 'walkin',
+        customerName: '散客C',
+        items: [{ productId: String(createdProduct.id), qty: 1, unitPrice: 12.5 }],
+      },
+      mockActor,
+    )
+    const thirdWalkinSerial = Number.parseInt(thirdWalkinOrder.order.showNo.replace('hyyz', ''), 10)
+    assert.equal(thirdWalkinSerial, walkinSerialB + 1)
+
+    await orderRepo.update({ id: thirdWalkinOrder.order.id }, { isDeleted: true, deletedAt: new Date() })
+    let recalibrationResult = await orderSerialService.recalibrateCurrentFromOccupancy('walkin')
+    assert.equal(recalibrationResult.current, thirdWalkinSerial)
+    assert.equal(recalibrationResult.maxOccupiedSerial, thirdWalkinSerial)
+    pass('软删除出库单仍占用流水，避免恢复时单号冲突')
+
+    await orderRepo.delete({ id: thirdWalkinOrder.order.id })
+    recalibrationResult = await orderSerialService.recalibrateCurrentFromOccupancy('walkin')
+    assert.equal(recalibrationResult.current, walkinSerialB)
+    assert.equal(recalibrationResult.maxOccupiedSerial, walkinSerialB)
+    assert.equal(recalibrationResult.rolledBack, true)
+    pass('永久删除最大流水单后，current 按剩余最大单号重算')
+
+    const clientUserRepo = AppDataSource.getRepository(ClientUser)
+    const preorderRepo = AppDataSource.getRepository(O2oPreorder)
+    const serialOccupiedByPreorder = walkinSerialB + 1
+    const occupiedPreorderShowNo = `hyyz${String(serialOccupiedByPreorder).padStart(6, '0')}`
+    const serialClientUser = await clientUserRepo.save(
+      clientUserRepo.create({
+        mobile: `139${String(Date.now()).slice(-8)}`,
+        email: null,
+        passwordHash: 'task2-password-hash',
+        realName: 'Task2流水校准客户',
+        departmentName: '',
+        accountType: 'personal',
+        staffNo: null,
+        staffVerified: false,
+        status: 'enabled',
+      }),
+    )
+    await preorderRepo.save(
+      preorderRepo.create({
+        showNo: occupiedPreorderShowNo,
+        clientUserId: serialClientUser.id,
+        verifyCode: `task2-verify-${Date.now()}`,
+        status: 'pending',
+        cancelReason: null,
+        businessStatus: null,
+        merchantMessage: null,
+        clientOrderType: 'walkin',
+        departmentNameSnapshot: null,
+        staffNoSnapshot: null,
+        isSystemApplied: false,
+        hasCustomerOrder: false,
+        pickupContact: 'Task2流水校准客户',
+        totalQty: 1,
+        remark: null,
+        updateCount: 0,
+        timeoutAt: null,
+        verifiedAt: null,
+        verifiedBy: null,
+        isDeleted: false,
+        deletedAt: null,
+        deletedByUserId: null,
+        deletedByUsername: null,
+        deletedByDisplayName: null,
+      }),
+    )
+    const generatedAfterStaleCurrent = await orderSerialService.generateOrderNo('walkin')
+    const generatedAfterStaleSerial = Number.parseInt(generatedAfterStaleCurrent.replace('hyyz', ''), 10)
+    assert.equal(generatedAfterStaleSerial, serialOccupiedByPreorder + 1)
+    pass('流水 current 落后于已有预订单时会自动跳过已占用单号')
+
+    const serialOccupiedByHiddenVerifiedPreorder = generatedAfterStaleSerial + 1
+    await preorderRepo.save(
+      preorderRepo.create({
+        showNo: `hyyz${String(serialOccupiedByHiddenVerifiedPreorder).padStart(6, '0')}`,
+        clientUserId: serialClientUser.id,
+        verifyCode: `task2-hidden-verified-${Date.now()}`,
+        status: 'verified',
+        cancelReason: null,
+        businessStatus: null,
+        merchantMessage: null,
+        clientOrderType: 'walkin',
+        departmentNameSnapshot: null,
+        staffNoSnapshot: null,
+        isSystemApplied: false,
+        hasCustomerOrder: false,
+        pickupContact: 'Task2隐藏已核销客户',
+        totalQty: 1,
+        remark: null,
+        updateCount: 0,
+        timeoutAt: null,
+        verifiedAt: new Date(),
+        verifiedBy: 'task2',
+        isDeleted: true,
+        deletedAt: new Date(),
+        deletedByUserId: serialClientUser.id,
+        deletedByUsername: 'task2',
+        deletedByDisplayName: 'Task2隐藏已核销客户',
+      }),
+    )
+    const generatedAfterHiddenVerified = await orderSerialService.generateOrderNo('walkin')
+    const generatedAfterHiddenVerifiedSerial = Number.parseInt(generatedAfterHiddenVerified.replace('hyyz', ''), 10)
+    assert.equal(generatedAfterHiddenVerifiedSerial, serialOccupiedByHiddenVerifiedPreorder + 1)
+    pass('已核销或客户端隐藏的预订单仍参与流水占用校准')
+
     const savedWalkinOrder = await orderRepo.findOneOrFail({ where: { id: walkinOrder.order.id } })
     const savedDepartmentOrder = await orderRepo.findOneOrFail({ where: { id: departmentOrder.order.id } })
     assert.equal(savedWalkinOrder.issuerName, mockActor.displayName)

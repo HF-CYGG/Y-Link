@@ -66,16 +66,17 @@
 
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+
 import type { AxiosResponse } from 'axios'
 import { http } from '@/api/http'
 import { Key, Lock, Message, User } from '@element-plus/icons-vue'
 import {
+  type ClientAccountType,
   getClientAuthCapabilities,
   getClientCaptcha,
+  lookupClientStaffDirectory,
   type ClientAuthCapabilities,
   type ClientRegisterResult,
-  type ClientDepartmentOptionNode,
   type ClientValidationMode,
 } from '@/api/modules/client-auth'
 import { resolveClientPostLoginWarmupTargets, scheduleRouteComponentWarmup } from '@/router/route-performance'
@@ -93,14 +94,26 @@ import {
   isClientNewPasswordValid,
 } from '@/utils/client-password-policy'
 import { normalizeRequestError } from '@/utils/error'
+import { showCriticalErrorDialog } from '@/utils/error-dialog'
 
-type AuthMode = 'login' | 'register'
+import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
+
+type AuthMode = 'login' | 'register-personal' | 'register-department'
+
+const AUTH_MODE_QUERY_TAB_MAP: Record<AuthMode, 'login' | 'register-personal' | 'register-department'> = {
+  login: 'login',
+  'register-personal': 'register-personal',
+  'register-department': 'register-department',
+}
+const AUTH_MODE_SEQUENCE: AuthMode[] = ['login', 'register-personal', 'register-department']
 
 interface ClientCaptchaState {
   captchaId: string
   captchaSvg: string
   expiresInSeconds: number
 }
+
+type StaffLookupStatus = 'idle' | 'typing' | 'loading' | 'matched' | 'registered' | 'not_found' | 'error'
 
 const router = useRouter()
 const route = useRoute()
@@ -110,6 +123,7 @@ const { runLatest: runLatestCapabilityRequest, cancel: cancelCapabilityRequest }
 const { runLatest: runLatestLoginRequest, cancel: cancelLoginRequest } = useStableRequest()
 const { runLatest: runLatestRegisterRequest, cancel: cancelRegisterRequest } = useStableRequest()
 const { runLatest: runLatestVerificationCodeRequest, cancel: cancelVerificationCodeRequest } = useStableRequest()
+const { runLatest: runLatestStaffLookupRequest, cancel: cancelStaffLookupRequest } = useStableRequest()
 const { runWithGate } = useIdempotentAction()
 
 // 登录 / 注册模式切换：
@@ -137,6 +151,7 @@ const registerVerificationCountdown = ref(0)
 let registerVerificationTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let captchaExpireTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let capabilityDeferredTimer: ReturnType<typeof globalThis.setTimeout> | null = null
+let staffLookupTimer: ReturnType<typeof globalThis.setTimeout> | null = null
 const formWrapperRef = ref<HTMLElement | null>(null)
 const formBlockRef = ref<HTMLElement | null>(null)
 const formWrapperHeight = ref('auto')
@@ -146,6 +161,13 @@ const captcha = reactive<ClientCaptchaState>({
   captchaId: '',
   captchaSvg: '',
   expiresInSeconds: 0,
+})
+const staffLookup = reactive({
+  status: 'idle' as StaffLookupStatus,
+  staffNo: '',
+  realName: '',
+  departmentName: '',
+  message: '',
 })
 
 const loginForm = reactive({
@@ -157,6 +179,7 @@ const loginForm = reactive({
 const registerForm = reactive({
   username: '',
   account: '',
+  staffNo: '',
   department: '',
   password: '',
   confirmPassword: '',
@@ -171,6 +194,14 @@ const redirectPath = computed(() => {
 })
 
 const registerAccountChannel = computed(() => resolveAccountChannel(registerForm.account))
+const isRegisterMode = computed(() => activeMode.value !== 'login')
+const isDepartmentRegisterMode = computed(() => activeMode.value === 'register-department')
+const registerAccountType = computed<ClientAccountType>(() => {
+  return isDepartmentRegisterMode.value ? 'department' : 'personal'
+})
+const modeToggleSliderTransform = computed(() => {
+  return `translateX(${AUTH_MODE_SEQUENCE.indexOf(activeMode.value) * 100}%)`
+})
 const registerValidationMode = computed<ClientValidationMode>(() => {
   const channel = registerAccountChannel.value
   if (!channel) {
@@ -179,14 +210,19 @@ const registerValidationMode = computed<ClientValidationMode>(() => {
   return authCapabilities.value?.registerValidationModes[channel] ?? 'captcha'
 })
 const registerUsesVerificationCode = computed(() => registerValidationMode.value === 'verification_code')
-const registerDepartmentOptions = computed(() => authCapabilities.value?.departmentOptions ?? [])
-const registerDepartmentTreeSelectData = computed(() => {
-  return buildDepartmentTreeSelectData(authCapabilities.value?.departmentTree ?? [])
-})
-const shouldPrepareCaptcha = computed(() => activeMode.value === 'register' || loginCaptchaVisible.value)
+const shouldPrepareCaptcha = computed(() => isRegisterMode.value || loginCaptchaVisible.value)
 const isCapabilityHintVisible = computed(() => capabilityLoading.value && !authCapabilities.value)
 const isCapabilityFallbackVisible = computed(() => !capabilityLoading.value && !!capabilityErrorMessage.value && !authCapabilities.value)
 const forgotPasswordAvailable = computed(() => authCapabilities.value?.forgotPasswordEnabled ?? false)
+const isStaffLookupVisible = computed(() => {
+  return isDepartmentRegisterMode.value && Boolean(registerForm.staffNo.trim()) && staffLookup.status !== 'idle'
+})
+const staffLookupTone = computed(() => {
+  if (staffLookup.status === 'matched') return 'success'
+  if (staffLookup.status === 'registered') return 'warning'
+  if (staffLookup.status === 'not_found' || staffLookup.status === 'error') return 'danger'
+  return 'info'
+})
 
 // 安全说明：后端返回的是 SVG 字符串，这里统一转为 data URL 图片渲染，
 // 避免通过 v-html 直接把未信任的 SVG 片段注入到页面 DOM 中。
@@ -222,6 +258,34 @@ const isCompactLoginLayout = computed(() => {
   return activeMode.value === 'login' && !loginCaptchaVisible.value && !successTip.value && !securityHint.value
 })
 
+// 三态模式和 query.tab 映射：
+// - 兼容历史 `register` 链接，默认回落到个人注册；
+// - 点击顶部切换器后同步刷新当前路由 query，保证刷新与分享链接能恢复正确表单。
+const resolveAuthModeFromQueryTab = (tab: unknown): AuthMode => {
+  if (tab === 'register-department') {
+    return 'register-department'
+  }
+  if (tab === 'register-personal' || tab === 'register') {
+    return 'register-personal'
+  }
+  return 'login'
+}
+
+const syncModeQuery = async (nextMode: AuthMode) => {
+  const nextTab = AUTH_MODE_QUERY_TAB_MAP[nextMode]
+  const currentTab = typeof route.query.tab === 'string' ? route.query.tab : ''
+  if (currentTab === nextTab) {
+    return
+  }
+  await router.replace({
+    path: route.path,
+    query: {
+      ...route.query,
+      tab: nextTab,
+    },
+  })
+}
+
 const getElementHeight = (element: Element | HTMLElement | null | undefined) => {
   return element instanceof HTMLElement ? element.offsetHeight : 0
 }
@@ -239,7 +303,11 @@ const syncWrapperHeight = (heightMode: 'auto' | 'measured' = 'auto', element?: E
 }
 
 const switchMode = async (nextMode: AuthMode) => {
-  if (activeMode.value === nextMode || formAnimating.value) {
+  if (formAnimating.value) {
+    return
+  }
+  if (activeMode.value === nextMode) {
+    await syncModeQuery(nextMode)
     return
   }
 
@@ -253,6 +321,7 @@ const switchMode = async (nextMode: AuthMode) => {
   registerFeedbackShowLoginAction.value = false
   registerFeedbackShowForgotAction.value = false
   activeMode.value = nextMode
+  await syncModeQuery(nextMode)
 }
 
 const handleFormBeforeLeave = () => {
@@ -281,7 +350,7 @@ const handleFormTransitionCancelled = () => {
 
 const applyRouteState = () => {
   const registeredAccount = typeof route.query.account === 'string' ? route.query.account.trim() : ''
-  activeMode.value = route.query.tab === 'register' ? 'register' : 'login'
+  activeMode.value = resolveAuthModeFromQueryTab(route.query.tab)
   successTip.value = typeof route.query.notice === 'string' ? route.query.notice : ''
 
   if (registeredAccount) {
@@ -315,13 +384,13 @@ const refreshCaptcha = async (silent = false) => {
         captcha.expiresInSeconds -= 1
       }, 1000)
       if (!silent) {
-        ElMessage.success('已刷新验证码')
+        showAppSuccess('已刷新验证码')
       }
     },
     onError: (error) => {
       const normalizedError = normalizeRequestError(error, '验证码刷新失败，请稍后重试')
       if (!silent) {
-        ElMessage.error(normalizedError.message)
+        showAppError(normalizedError.message)
       }
     },
     onFinally: () => {
@@ -364,7 +433,7 @@ const loadAuthCapabilities = async (options: { silent?: boolean } = {}) => {
       const normalizedError = normalizeRequestError(error, '加载客户端校验策略失败，请稍后重试')
       capabilityErrorMessage.value = normalizedError.message
       if (!options.silent) {
-        ElMessage.error(normalizedError.message)
+        showAppError(normalizedError.message)
       }
     },
     onFinally: () => {
@@ -405,7 +474,8 @@ const validateLoginPassword = (password: string) => password.trim().length > 0
  * - 继续复用共享的新密码强度规则，保证注册与改密口径一致。
  */
 const validateRegisterPassword = (password: string) => isClientNewPasswordValid(password)
-const validateUsername = (username: string) => username.trim().length >= 2
+const validateRealName = (username: string) => /^\p{Script=Han}[\p{Script=Han}·\s]{1,19}$/u.test(normalizeHumanName(username))
+const validateStaffNo = (staffNo: string) => /^[A-Za-z0-9-]{4,32}$/.test(staffNo.trim())
 const validateLoginAccount = (account: string) => account.trim().length > 0
 const resolveAccountChannel = (account: string): 'mobile' | 'email' | null => {
   const normalized = account.trim()
@@ -416,33 +486,102 @@ const resolveAccountChannel = (account: string): 'mobile' | 'email' | null => {
   return validateMobile(normalized) ? 'mobile' : null
 }
 
+const clearStaffLookupTimer = () => {
+  if (staffLookupTimer) {
+    globalThis.clearTimeout(staffLookupTimer)
+    staffLookupTimer = null
+  }
+}
+
+const resetStaffLookup = () => {
+  clearStaffLookupTimer()
+  cancelStaffLookupRequest()
+  staffLookup.status = 'idle'
+  staffLookup.staffNo = ''
+  staffLookup.realName = ''
+  staffLookup.departmentName = ''
+  staffLookup.message = ''
+}
+
+const applyStaffLookupResult = (staffNo: string, result: Awaited<ReturnType<typeof lookupClientStaffDirectory>>) => {
+  staffLookup.staffNo = staffNo
+  staffLookup.realName = result.realName ?? ''
+  staffLookup.departmentName = result.departmentName ?? ''
+
+  if (!result.matched) {
+    staffLookup.status = 'not_found'
+    staffLookup.message = '未找到该教职工号，请确认输入或联系管理员导入目录。'
+    return
+  }
+
+  if (result.isRegistered) {
+    staffLookup.status = 'registered'
+    staffLookup.message = '该教职工号已注册部门账号，不能重复注册。'
+    return
+  }
+
+  staffLookup.status = 'matched'
+  staffLookup.message = '已匹配到姓名和部门，请确认无误后继续注册。'
+}
+
+const scheduleStaffDirectoryLookup = (staffNoInput: string) => {
+  clearStaffLookupTimer()
+  cancelStaffLookupRequest()
+  const normalizedStaffNo = staffNoInput.trim()
+  staffLookup.staffNo = normalizedStaffNo
+  staffLookup.realName = ''
+  staffLookup.departmentName = ''
+
+  if (!isDepartmentRegisterMode.value || !normalizedStaffNo) {
+    resetStaffLookup()
+    return
+  }
+
+  if (!validateStaffNo(normalizedStaffNo)) {
+    staffLookup.status = 'typing'
+    staffLookup.message = '请输入 4-32 位教职工号，支持字母、数字和短横线。'
+    return
+  }
+
+  staffLookup.status = 'typing'
+  staffLookup.message = '系统将自动匹配姓名和部门。'
+  staffLookupTimer = globalThis.setTimeout(() => {
+    staffLookupTimer = null
+    staffLookup.status = 'loading'
+    staffLookup.message = '正在匹配教职工目录...'
+    void runLatestStaffLookupRequest({
+      executor: (signal) => lookupClientStaffDirectory(normalizedStaffNo, { signal }),
+      onSuccess: (result) => {
+        if (registerForm.staffNo.trim() !== normalizedStaffNo || !isDepartmentRegisterMode.value) {
+          return
+        }
+        applyStaffLookupResult(normalizedStaffNo, result)
+      },
+      onError: (error) => {
+        if (registerForm.staffNo.trim() !== normalizedStaffNo || !isDepartmentRegisterMode.value) {
+          return
+        }
+        const normalizedError = normalizeRequestError(error, '工号匹配失败，请稍后重试')
+        staffLookup.status = 'error'
+        staffLookup.message = normalizedError.message
+      },
+    })
+  }, 450)
+}
+
 const normalizeInputText = (value: string) => {
   return value.replaceAll(/\s+/g, ' ').trim()
 }
 
-interface RegisterDepartmentTreeSelectNode {
-  id: string
-  label: string
-  value: string
-  children: RegisterDepartmentTreeSelectNode[]
-}
-
-// 部门树下拉数据转换：
-// - 下拉面板显示当前层级名称，保持类似“图 2”的紧凑树菜单；
-// - 实际提交值仍保存为完整路径，继续兼容后端现有 departmentOptions 校验口径。
-const buildDepartmentTreeSelectData = (
-  tree: ClientDepartmentOptionNode[],
-  parentPath = '',
-): RegisterDepartmentTreeSelectNode[] => {
-  return tree.map((node) => {
-    const currentPath = parentPath ? `${parentPath}-${node.label}` : node.label
-    return {
-      id: node.id,
-      label: node.label,
-      value: currentPath,
-      children: buildDepartmentTreeSelectData(node.children, currentPath),
-    }
-  })
+const normalizeHumanName = (value: string) => {
+  return value
+    .normalize('NFKC')
+    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
+    .replace(/[\u0000-\u001F\u007F-\u009F]/g, '')
+    .replaceAll('　', ' ')
+    .replace(/[•・･‧∙⋅·﹒]/g, '·')
+    .replaceAll(/\s+/g, ' ')
+    .trim()
 }
 
 const applySecurityHintFromMessage = (message: string) => {
@@ -586,23 +725,23 @@ const startRegisterVerificationCountdown = (seconds: number) => {
 
 const handleSendRegisterVerificationCode = async () => {
   if (!registerUsesVerificationCode.value) {
-    ElMessage.warning('当前账号类型未启用验证码注册，请根据页面提示使用图片验证码完成注册')
+    showAppWarning('当前账号类型未启用验证码注册，请根据页面提示使用图片验证码完成注册')
     return
   }
   const channel = resolveAccountChannel(registerForm.account)
   if (!channel) {
-    ElMessage.warning('请输入正确的手机号或邮箱')
+    showAppWarning('请输入正确的手机号或邮箱')
     return
   }
   if (!captcha.captchaId || !registerForm.captcha.trim()) {
-    ElMessage.warning('发送验证码前请先输入图形验证码')
+    showAppWarning('发送验证码前请先输入图形验证码')
     await ensureCaptchaReady()
     return
   }
   const runResult = await runWithGate({
     actionKey: 'client-auth-register-send-verification-code',
     onDuplicated: () => {
-      ElMessage.info('验证码发送中，请勿重复点击')
+      showAppInfo('验证码发送中，请勿重复点击')
     },
     executor: async () => {
       verificationSending.value = true
@@ -620,7 +759,7 @@ const handleSendRegisterVerificationCode = async () => {
             { signal },
           ),
         onSuccess: async (result) => {
-          ElMessage.success(`${channel === 'email' ? '邮箱' : '手机'}验证码已发送`)
+          showAppSuccess(`${channel === 'email' ? '邮箱' : '手机'}验证码已发送`)
           registerForm.captcha = ''
           await refreshCaptcha(true)
           startRegisterVerificationCountdown(result.expireSeconds)
@@ -628,7 +767,7 @@ const handleSendRegisterVerificationCode = async () => {
         onError: async (error) => {
           const normalizedError = normalizeRequestError(error, '验证码发送失败，请稍后重试')
           applySecurityHintFromMessage(normalizedError.message)
-          ElMessage.error(normalizedError.message)
+          showAppError(normalizedError.message)
           registerForm.captcha = ''
           await refreshCaptcha(true)
         },
@@ -659,16 +798,16 @@ const warmupClientPostLoginTargets = (redirectPath: string) => {
 // 详细注释：提交登录表单。首先进行基础校验，然后调用 auth store 登录，成功后优先跳转，再在空闲时预热高频相邻页面。
 const handleLogin = async () => {
   if (!validateLoginAccount(loginForm.account)) {
-    ElMessage.warning('请输入用户名、手机号或邮箱')
+    showAppWarning('请输入用户名、手机号或邮箱')
     return
   }
   if (!validateLoginPassword(loginForm.password)) {
-    ElMessage.warning('请输入密码')
+    showAppWarning('请输入密码')
     return
   }
   if (loginCaptchaVisible.value) {
     if (!captcha.captchaId || !loginForm.captcha.trim()) {
-      ElMessage.warning('请输入图形验证码')
+      showAppWarning('请输入图形验证码')
       return
     }
   }
@@ -676,7 +815,7 @@ const handleLogin = async () => {
   const runResult = await runWithGate({
     actionKey: 'client-auth-login',
     onDuplicated: () => {
-      ElMessage.info('登录请求处理中，请勿重复提交')
+      showAppInfo('登录请求处理中，请勿重复提交')
     },
     executor: async () => {
       isLoading.value = true
@@ -698,7 +837,7 @@ const handleLogin = async () => {
           loginCaptchaVisible.value = false
           loginForm.captcha = ''
           clearCaptcha()
-          ElMessage.success('登录成功，欢迎来到 Y-Link 客户端')
+          showAppSuccess('登录成功，欢迎来到 Y-Link 客户端')
           await router.replace(redirectPath.value)
           warmupClientPostLoginTargets(redirectPath.value)
         },
@@ -706,7 +845,7 @@ const handleLogin = async () => {
           const normalizedError = normalizeRequestError(error, '登录失败，请检查用户名、手机号、邮箱、密码和验证码后重试')
           applySecurityHintFromMessage(normalizedError.message)
           applyLoginFeedbackFromError(normalizedError.message, normalizedError.status)
-          ElMessage.error(normalizedError.message)
+          showAppError(normalizedError.message)
           if (/用户名或密码错误|图形验证码|锁定|稍后|重试/.test(normalizedError.message)) {
             loginCaptchaVisible.value = true
             loginForm.captcha = ''
@@ -724,90 +863,163 @@ const handleLogin = async () => {
   }
 }
 
-const handleRegister = async () => {
-  const accountChannel = resolveAccountChannel(registerForm.account)
-  if (!validateUsername(registerForm.username)) {
-    ElMessage.warning('用户名至少 2 位')
-    return
+// 部门注册只校验工号本身；姓名和部门必须由后端教职工目录反查，前端不再提供自选入口。
+const validateDepartmentRegisterFields = () => {
+  if (!isDepartmentRegisterMode.value) {
+    return true
   }
-  if (!accountChannel) {
-    ElMessage.warning('请输入正确的手机号或邮箱作为登录账号')
-    return
+  const normalizedStaffNo = registerForm.staffNo.trim()
+  if (!normalizedStaffNo) {
+    showAppWarning('请输入教职工号')
+    return false
   }
-  if (!validateRegisterPassword(registerForm.password)) {
-    ElMessage.warning(CLIENT_NEW_PASSWORD_RULE_TEXT)
-    return
+  if (!validateStaffNo(normalizedStaffNo)) {
+    showAppWarning('教职工号仅支持字母、数字和短横线（4-32位）')
+    return false
   }
-  if (registerForm.password !== registerForm.confirmPassword) {
-    ElMessage.warning(CLIENT_CONFIRM_INPUT_MISMATCH_MESSAGE)
-    return
+  if (staffLookup.staffNo !== normalizedStaffNo || staffLookup.status === 'typing' || staffLookup.status === 'loading') {
+    showAppWarning('请等待系统完成工号匹配后再注册')
+    scheduleStaffDirectoryLookup(normalizedStaffNo)
+    return false
   }
-  if (registerForm.department.trim() && !registerDepartmentOptions.value.includes(registerForm.department.trim())) {
-    ElMessage.warning('请选择系统配置中的部门选项')
-    return
+  if (staffLookup.status === 'registered') {
+    showAppWarning('该教职工号已注册部门账号，不能重复注册')
+    return false
   }
+  if (staffLookup.status !== 'matched') {
+    showAppWarning('教职工号未匹配到有效目录，暂不能注册部门账号')
+    return false
+  }
+  return true
+}
+
+// 注册验证码校验与部门字段校验拆开维护，便于后续继续扩展不同通道策略。
+const validateRegisterChallengeFields = () => {
   if (registerUsesVerificationCode.value) {
     if (!registerForm.verificationCode.trim()) {
-      ElMessage.warning('请输入手机/邮箱验证码')
-      return
+      showAppWarning('请输入手机/邮箱验证码')
+      return false
     }
-  } else if (!captcha.captchaId || !registerForm.captcha.trim()) {
-    ElMessage.warning('请输入图形验证码')
+    return true
+  }
+  if (!captcha.captchaId || !registerForm.captcha.trim()) {
+    showAppWarning('请输入图形验证码')
+    return false
+  }
+  return true
+}
+
+// 注册前置校验只负责拦截非法输入并整理提交上下文，避免注册主流程堆叠过多分支。
+const validateRegisterBeforeSubmit = () => {
+  const accountChannel = resolveAccountChannel(registerForm.account)
+  if (isDepartmentRegisterMode.value) {
+    if (registerForm.account.trim() && !accountChannel) {
+      showAppWarning('手机号或邮箱为选填项；如填写，请输入正确格式')
+      return null
+    }
+  } else {
+    if (!validateRealName(registerForm.username)) {
+      showAppWarning('请输入 2-20 位中文真实姓名，可包含空格或·')
+      return null
+    }
+    if (!accountChannel) {
+      showAppWarning('请输入正确的手机号或邮箱作为登录账号')
+      return null
+    }
+  }
+  if (!validateRegisterPassword(registerForm.password)) {
+    showAppWarning(CLIENT_NEW_PASSWORD_RULE_TEXT)
+    return null
+  }
+  if (registerForm.password !== registerForm.confirmPassword) {
+    showAppWarning(CLIENT_CONFIRM_INPUT_MISMATCH_MESSAGE)
+    return null
+  }
+  if (!validateDepartmentRegisterFields()) {
+    return null
+  }
+  if (!validateRegisterChallengeFields()) {
+    return null
+  }
+
+  return {
+    registeredAccount: normalizeInputText(registerForm.account),
+    registeredUsername: isDepartmentRegisterMode.value ? '' : normalizeInputText(registerForm.username),
+  }
+}
+
+// 注册请求体按当前注册通道集中生成，保证部门字段与验证码字段的启停逻辑只维护一处。
+const buildRegisterRequestPayload = (registeredAccount: string, registeredUsername: string) => {
+  return {
+    username: registeredUsername || undefined,
+    account: registeredAccount || undefined,
+    accountType: registerAccountType.value,
+    staffNo: isDepartmentRegisterMode.value ? registerForm.staffNo.trim() : undefined,
+    password: registerForm.password,
+    verificationCode: registerUsesVerificationCode.value ? normalizeInputText(registerForm.verificationCode) : undefined,
+    captchaId: registerUsesVerificationCode.value ? undefined : captcha.captchaId,
+    captchaCode: registerUsesVerificationCode.value ? undefined : normalizeInputText(registerForm.captcha),
+  }
+}
+
+// 注册成功后的状态收口：
+// - 清空注册表单，避免再次进入注册态时残留旧数据；
+// - 预填登录账号与成功提示，保证回到登录页后能立即继续操作。
+const resetRegisterStateAfterSuccess = (registeredAccount: string, registerRemainingMessage: string) => {
+  clientAuthStore.clearAuthState()
+  clientAuthStore.initialized = true
+  activeMode.value = 'login'
+  loginForm.account = registeredAccount || registerForm.staffNo.trim()
+  loginForm.password = ''
+  loginForm.captcha = ''
+  successTip.value = registerRemainingMessage
+    ? `账号已创建成功，请使用姓名、工号、手机号或邮箱与密码登录。${registerRemainingMessage}`
+    : '账号已创建成功，请使用姓名、工号、手机号或邮箱与密码登录。'
+  registerForm.captcha = ''
+  registerForm.verificationCode = ''
+  registerForm.username = ''
+  registerForm.staffNo = ''
+  registerForm.password = ''
+  registerForm.confirmPassword = ''
+  registerForm.department = ''
+}
+
+const handleRegister = async () => {
+  const registerContext = validateRegisterBeforeSubmit()
+  if (!registerContext) {
     return
   }
 
   const runResult = await runWithGate({
     actionKey: 'client-auth-register',
     onDuplicated: () => {
-      ElMessage.info('注册请求处理中，请勿重复提交')
+      showAppInfo('注册请求处理中，请勿重复提交')
     },
     executor: async () => {
       isLoading.value = true
       successTip.value = ''
       securityHint.value = ''
       clearRegisterFeedback()
-      const registeredAccount = normalizeInputText(registerForm.account)
-      const registeredUsername = normalizeInputText(registerForm.username)
+      const { registeredAccount, registeredUsername } = registerContext
       await runLatestRegisterRequest({
         executor: (signal): Promise<AxiosResponse<ClientRegisterResult>> =>
           http.request<ClientRegisterResult>({
             method: 'POST',
             url: '/client-auth/register',
-            data: {
-              username: registeredUsername,
-              account: registeredAccount,
-              password: registerForm.password,
-              departmentName: normalizeInputText(registerForm.department) || undefined,
-              verificationCode: registerUsesVerificationCode.value ? normalizeInputText(registerForm.verificationCode) : undefined,
-              captchaId: registerUsesVerificationCode.value ? undefined : captcha.captchaId,
-              captchaCode: registerUsesVerificationCode.value ? undefined : normalizeInputText(registerForm.captcha),
-            },
+            data: buildRegisterRequestPayload(registeredAccount, registeredUsername),
             signal,
           }),
         onSuccess: async (response) => {
           const registerRemainingMessage = extractRegisterRemainingMessage(response)
-          clientAuthStore.clearAuthState()
-          clientAuthStore.initialized = true
-          ElMessage.success('注册成功，请登录')
-          activeMode.value = 'login'
-          loginForm.account = registeredAccount
-          loginForm.password = ''
-          loginForm.captcha = ''
-          successTip.value = registerRemainingMessage
-            ? `账号已创建成功，请使用用户名、手机号或邮箱与密码登录。${registerRemainingMessage}`
-            : '账号已创建成功，请使用用户名、手机号或邮箱与密码登录。'
-          registerForm.captcha = ''
-          registerForm.verificationCode = ''
-          registerForm.username = ''
-          registerForm.password = ''
-          registerForm.confirmPassword = ''
-          registerForm.department = ''
+          const nextLoginAccount = registeredAccount || registerForm.staffNo.trim()
+          showAppSuccess('注册成功，请登录')
+          resetRegisterStateAfterSuccess(registeredAccount, registerRemainingMessage)
           await refreshCaptcha(true)
           await router.replace({
             path: '/client/login',
             query: {
               tab: 'login',
-              account: registeredAccount,
+              account: nextLoginAccount,
               notice: successTip.value,
             },
           })
@@ -816,7 +1028,11 @@ const handleRegister = async () => {
           const normalizedError = normalizeRequestError(error, '注册失败，请检查信息后重试')
           applySecurityHintFromMessage(normalizedError.message)
           applyRegisterFeedbackFromError(normalizedError.message, normalizedError.status)
-          ElMessage.error(normalizedError.message)
+          void showCriticalErrorDialog(normalizedError, {
+            title: '注册失败',
+            fallback: '注册失败，请检查信息后重试',
+            operation: activeMode.value === 'register-department' ? '部门账号注册' : '个人账号注册',
+          })
           registerForm.captcha = ''
           await refreshCaptcha(true)
         },
@@ -857,6 +1073,17 @@ watch(registerValidationMode, (mode) => {
   }
 })
 
+watch(
+  () => [activeMode.value, registerForm.staffNo] as const,
+  ([mode, staffNo]) => {
+    if (mode !== 'register-department') {
+      resetStaffLookup()
+      return
+    }
+    scheduleStaffDirectoryLookup(staffNo)
+  },
+)
+
 watch(shouldPrepareCaptcha, (shouldShowCaptcha) => {
   if (shouldShowCaptcha) {
     void ensureCaptchaReady()
@@ -879,10 +1106,12 @@ onUnmounted(() => {
   cancelLoginRequest()
   cancelRegisterRequest()
   cancelVerificationCodeRequest()
+  cancelStaffLookupRequest()
   if (capabilityDeferredTimer) {
     globalThis.clearTimeout(capabilityDeferredTimer)
     capabilityDeferredTimer = null
   }
+  clearStaffLookupTimer()
   resetRegisterVerificationTimer()
   clearCaptcha()
 })
@@ -924,10 +1153,23 @@ onUnmounted(() => {
       <section class="form-panel">
         <div class="form-container">
           <div class="mode-toggle">
-            <div class="toggle-slider" :class="activeMode === 'register' ? 'translate-x-full' : 'translate-x-0'"></div>
-            <button class="toggle-btn" :class="{ 'is-active': activeMode === 'login' }" @click="switchMode('login')">登录</button>
-            <button class="toggle-btn" :class="{ 'is-active': activeMode === 'register' }" @click="switchMode('register')">
-              注册
+            <div class="toggle-slider" :style="{ transform: modeToggleSliderTransform }"></div>
+            <button type="button" class="toggle-btn" :class="{ 'is-active': activeMode === 'login' }" @click="switchMode('login')">登录</button>
+            <button
+              type="button"
+              class="toggle-btn"
+              :class="{ 'is-active': activeMode === 'register-personal' }"
+              @click="switchMode('register-personal')"
+            >
+              个人注册
+            </button>
+            <button
+              type="button"
+              class="toggle-btn"
+              :class="{ 'is-active': activeMode === 'register-department' }"
+              @click="switchMode('register-department')"
+            >
+              部门注册
             </button>
           </div>
 
@@ -1059,9 +1301,19 @@ onUnmounted(() => {
                 </el-form>
               </div>
 
-              <div v-else ref="formBlockRef" key="register" class="form-block">
-                <h2 class="block-title">创建账号</h2>
-                <p class="block-subtitle">只需几步，创建用户名并绑定手机号或邮箱账号</p>
+              <div
+                v-else-if="activeMode === 'register-personal'"
+                ref="formBlockRef"
+                key="register-personal"
+                class="form-block"
+              >
+                <h2 class="block-title">创建个人账号</h2>
+                <p class="block-subtitle">填写真实姓名、登录账号与密码后，即可创建个人账号</p>
+                <el-alert class="register-channel-alert" type="info" :closable="false" show-icon>
+                  <template #title>
+                    个人账号默认按个人/散客流程下单，无需填写教职工号或所属部门。
+                  </template>
+                </el-alert>
 
                 <el-alert
                   v-if="registerFeedbackTitle"
@@ -1102,7 +1354,13 @@ onUnmounted(() => {
                 </el-alert>
 
                 <el-form @submit.prevent="handleRegister" class="space-y-4 mt-6">
-                  <el-input v-model="registerForm.username" placeholder="用户名（可自定义）" class="geo-input" size="large" clearable>
+                  <el-input
+                    v-model="registerForm.username"
+                    placeholder="真实姓名"
+                    class="geo-input"
+                    size="large"
+                    clearable
+                  >
                     <template #prefix>
                       <el-icon class="input-icon"><User /></el-icon>
                     </template>
@@ -1114,23 +1372,6 @@ onUnmounted(() => {
                     </template>
                   </el-input>
 
-                  <el-tree-select
-                    v-model="registerForm.department"
-                    :data="registerDepartmentTreeSelectData"
-                    node-key="id"
-                    :props="{ label: 'label', value: 'value', children: 'children' }"
-                    check-strictly
-                    :expand-on-click-node="false"
-                    :render-after-expand="false"
-                    :disabled="capabilityLoading && !authCapabilities"
-                    :placeholder="capabilityLoading && !authCapabilities ? '部门选项加载中，可稍后再选' : '所属部门（选填）'"
-                    class="geo-input-select"
-                    size="large"
-                    clearable
-                    filterable
-                    popper-class="client-auth-department-popper"
-                  />
-                  <p v-if="registerDepartmentOptions.length === 0" class="mt-1 text-xs text-slate-400">暂无可选部门，请联系管理员配置</p>
                   <div class="captcha-row">
                     <el-input
                       v-model="registerForm.captcha"
@@ -1221,7 +1462,190 @@ onUnmounted(() => {
                       />
                     </button>
                   </div>
-                  <el-button class="submit-btn" :loading="isLoading" @click="handleRegister">立即注册</el-button>
+                  <el-button class="submit-btn" native-type="submit" :loading="isLoading">立即注册个人账号</el-button>
+                </el-form>
+              </div>
+
+              <div v-else ref="formBlockRef" key="register-department" class="form-block">
+                <h2 class="block-title">创建部门账号</h2>
+                <p class="block-subtitle">填写教职工号后，系统会自动匹配姓名和所属部门</p>
+                <el-alert class="register-channel-alert" type="info" :closable="false" show-icon>
+                  <template #title>
+                    部门账号仅按教职工目录注册，姓名和部门由系统自动带出；手机号和邮箱可选，用于登录或找回密码。
+                  </template>
+                </el-alert>
+
+                <el-alert
+                  v-if="registerFeedbackTitle"
+                  class="mt-5"
+                  :type="registerFeedbackType"
+                  :closable="false"
+                  show-icon
+                >
+                  <template #title>
+                    {{ registerFeedbackTitle }}
+                  </template>
+                  <template #default>
+                    <div class="register-feedback-alert">
+                      <span>{{ registerFeedbackDescription }}</span>
+                      <div
+                        v-if="registerFeedbackShowLoginAction || registerFeedbackShowForgotAction"
+                        class="register-feedback-alert__actions"
+                      >
+                        <el-button
+                          v-if="registerFeedbackShowLoginAction"
+                          link
+                          type="primary"
+                          @click="handleRegisterFeedbackLogin"
+                        >
+                          去登录
+                        </el-button>
+                        <el-button
+                          v-if="registerFeedbackShowForgotAction"
+                          link
+                          type="primary"
+                          @click="handleRegisterFeedbackForgotPassword"
+                        >
+                          忘记密码
+                        </el-button>
+                      </div>
+                    </div>
+                  </template>
+                </el-alert>
+
+                <el-form @submit.prevent="handleRegister" class="space-y-4 mt-6">
+                  <el-input v-model="registerForm.staffNo" placeholder="教职工号" class="geo-input" size="large" clearable>
+                    <template #prefix>
+                      <el-icon class="input-icon"><Key /></el-icon>
+                    </template>
+                  </el-input>
+
+                  <transition name="staff-lookup">
+                    <div v-if="isStaffLookupVisible" class="staff-lookup-slot">
+                      <div
+                        class="staff-lookup-card"
+                        :class="[`staff-lookup-card--${staffLookupTone}`, { 'is-loading': staffLookup.status === 'loading' }]"
+                      >
+                        <div class="staff-lookup-card__icon">
+                          <span v-if="staffLookup.status === 'loading'" class="staff-lookup-spinner"></span>
+                          <span v-else-if="staffLookup.status === 'matched'">✓</span>
+                          <span v-else-if="staffLookup.status === 'registered'">!</span>
+                          <span v-else-if="staffLookup.status === 'not_found' || staffLookup.status === 'error'">×</span>
+                          <span v-else>…</span>
+                        </div>
+                        <div class="staff-lookup-card__content">
+                          <div class="staff-lookup-card__message">{{ staffLookup.message }}</div>
+                          <div v-if="staffLookup.realName || staffLookup.departmentName" class="staff-lookup-card__grid">
+                            <div>
+                              <span>姓名</span>
+                              <strong>{{ staffLookup.realName || '-' }}</strong>
+                            </div>
+                            <div>
+                              <span>部门</span>
+                              <strong>{{ staffLookup.departmentName || '-' }}</strong>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </transition>
+
+                  <el-input v-model="registerForm.account" placeholder="手机号或邮箱（选填）" class="geo-input" size="large" clearable>
+                    <template #prefix>
+                      <el-icon class="input-icon"><User /></el-icon>
+                    </template>
+                  </el-input>
+                  <div class="captcha-row">
+                    <el-input
+                      v-model="registerForm.captcha"
+                      :placeholder="registerUsesVerificationCode ? '先输入图形验证码，再发送手机/邮箱验证码' : '图形验证码'"
+                      class="geo-input flex-1"
+                      size="large"
+                      clearable
+                    >
+                      <template #prefix>
+                        <el-icon class="input-icon"><Key /></el-icon>
+                      </template>
+                    </el-input>
+
+                    <button type="button" class="captcha-box" :disabled="captchaLoading" @click="handleManualRefreshCaptcha">
+                      <span v-if="captchaLoading" class="captcha-loading">刷新中</span>
+                      <img
+                        v-else
+                        class="captcha-render"
+                        :src="captchaImageSrc"
+                        alt="图形验证码"
+                        draggable="false"
+                      />
+                    </button>
+                  </div>
+                  <p class="captcha-hint-text">{{ captchaHintText }}</p>
+                  <div v-if="registerUsesVerificationCode" class="captcha-row">
+                    <el-input v-model="registerForm.verificationCode" placeholder="手机/邮箱验证码" class="geo-input flex-1" size="large" clearable>
+                      <template #prefix>
+                        <el-icon class="input-icon"><Message /></el-icon>
+                      </template>
+                    </el-input>
+                    <el-button
+                      class="verification-code-button"
+                      :disabled="verificationSending || registerVerificationCountdown > 0"
+                      @click="handleSendRegisterVerificationCode"
+                    >
+                      {{
+                        registerVerificationCountdown > 0
+                          ? `${registerVerificationCountdown}s 后重发`
+                          : verificationSending
+                            ? '发送中'
+                            : '发送验证码'
+                      }}
+                    </el-button>
+                  </div>
+
+                  <el-input
+                    v-model="registerForm.password"
+                    :placeholder="CLIENT_NEW_PASSWORD_PLACEHOLDER"
+                    type="password"
+                    class="geo-input"
+                    size="large"
+                    show-password
+                  >
+                    <template #prefix>
+                      <el-icon class="input-icon"><Lock /></el-icon>
+                    </template>
+                  </el-input>
+                  <el-input
+                    v-model="registerForm.confirmPassword"
+                    :placeholder="CLIENT_CONFIRM_NEW_PASSWORD_PLACEHOLDER"
+                    type="password"
+                    class="geo-input"
+                    size="large"
+                    show-password
+                  >
+                    <template #prefix>
+                      <el-icon class="input-icon"><Lock /></el-icon>
+                    </template>
+                  </el-input>
+                  <p class="password-hint-text">{{ CLIENT_NEW_PASSWORD_RULE_HINT }}</p>
+
+                  <div v-if="!registerUsesVerificationCode" class="captcha-row sr-only">
+                    <el-input v-model="registerForm.captcha" placeholder="图形验证码" class="geo-input flex-1" size="large" clearable>
+                      <template #prefix>
+                        <el-icon class="input-icon"><Key /></el-icon>
+                      </template>
+                    </el-input>
+
+                    <button type="button" class="captcha-box" :disabled="captchaLoading" @click="handleManualRefreshCaptcha">
+                      <span v-if="captchaLoading" class="captcha-loading">刷新中</span>
+                      <img
+                        v-else
+                        class="captcha-render"
+                        :src="captchaImageSrc"
+                        alt="图形验证码"
+                        draggable="false"
+                      />
+                    </button>
+                  </div>
+                  <el-button class="submit-btn" native-type="submit" :loading="isLoading">立即注册部门账号</el-button>
                 </el-form>
               </div>
             </transition>
@@ -1397,7 +1821,7 @@ onUnmounted(() => {
   background: #ffffff;
   padding: 48px;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
   position: relative;
 }
@@ -1407,6 +1831,7 @@ onUnmounted(() => {
   max-width: 340px;
   position: relative;
   z-index: 1;
+  margin-top: 0;
 }
 
 .form-wrapper {
@@ -1437,7 +1862,7 @@ onUnmounted(() => {
   position: absolute;
   top: 5px;
   left: 5px;
-  width: calc(50% - 5px);
+  width: calc((100% - 10px) / 3);
   height: calc(100% - 10px);
   background: #ffffff;
   border-radius: 12px;
@@ -1498,6 +1923,10 @@ onUnmounted(() => {
   font-size: 13px;
   color: #475569;
   margin-bottom: 24px;
+}
+
+.register-channel-alert {
+  margin-bottom: 20px;
 }
 
 .geo-input :deep(.el-input__wrapper) {
@@ -1599,6 +2028,196 @@ onUnmounted(() => {
 
 .geo-input :deep(.el-input__wrapper.is-focus .input-icon) {
   color: #0d9488;
+}
+
+.staff-lookup-enter-active,
+.staff-lookup-leave-active {
+  transition:
+    grid-template-rows 0.34s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.22s ease;
+  overflow: hidden;
+  display: grid;
+  grid-template-rows: 1fr;
+  will-change: grid-template-rows, opacity;
+}
+
+.staff-lookup-enter-from,
+.staff-lookup-leave-to {
+  opacity: 0;
+  grid-template-rows: 0fr;
+}
+
+.staff-lookup-enter-to,
+.staff-lookup-leave-from {
+  opacity: 1;
+  grid-template-rows: 1fr;
+}
+
+.staff-lookup-slot {
+  min-height: 0;
+  overflow: hidden;
+  contain: layout paint;
+}
+
+.staff-lookup-enter-active .staff-lookup-card,
+.staff-lookup-leave-active .staff-lookup-card {
+  transition:
+    transform 0.34s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.24s ease,
+    filter 0.28s ease;
+  will-change: transform, opacity, filter;
+}
+
+.staff-lookup-enter-from .staff-lookup-card,
+.staff-lookup-leave-to .staff-lookup-card {
+  opacity: 0;
+  transform: translate3d(0, -6px, 0) scale(0.985);
+  filter: saturate(0.92);
+}
+
+.staff-lookup-enter-to .staff-lookup-card,
+.staff-lookup-leave-from .staff-lookup-card {
+  opacity: 1;
+  transform: translate3d(0, 0, 0) scale(1);
+  filter: saturate(1);
+}
+
+.staff-lookup-card {
+  position: relative;
+  display: flex;
+  gap: 12px;
+  min-height: 88px;
+  padding: 14px 15px;
+  border: 1px solid #e2e8f0;
+  border-radius: 16px;
+  background: #f8fafc;
+  overflow: hidden;
+  backface-visibility: hidden;
+  transform: translateZ(0);
+  transition:
+    background-color 0.24s ease,
+    border-color 0.24s ease,
+    box-shadow 0.24s ease;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.03);
+}
+
+.staff-lookup-card.is-loading::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.72), transparent);
+  transform: translateX(-100%);
+  animation: staff-lookup-shine 1.25s ease-in-out infinite;
+}
+
+.staff-lookup-card--success {
+  border-color: rgba(13, 148, 136, 0.26);
+  background: rgba(240, 253, 250, 0.92);
+  box-shadow: 0 10px 24px rgba(13, 148, 136, 0.08);
+}
+
+.staff-lookup-card--warning {
+  border-color: rgba(245, 158, 11, 0.28);
+  background: rgba(255, 251, 235, 0.92);
+  box-shadow: 0 10px 24px rgba(245, 158, 11, 0.08);
+}
+
+.staff-lookup-card--danger {
+  border-color: rgba(244, 63, 94, 0.22);
+  background: rgba(255, 241, 242, 0.88);
+  box-shadow: 0 10px 24px rgba(244, 63, 94, 0.07);
+}
+
+.staff-lookup-card--info {
+  border-color: rgba(148, 163, 184, 0.26);
+  background: rgba(248, 250, 252, 0.94);
+}
+
+.staff-lookup-card__icon {
+  position: relative;
+  z-index: 1;
+  flex: 0 0 26px;
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #0f766e;
+  font-size: 15px;
+  font-weight: 800;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.08);
+}
+
+.staff-lookup-card--warning .staff-lookup-card__icon {
+  color: #b45309;
+}
+
+.staff-lookup-card--danger .staff-lookup-card__icon {
+  color: #be123c;
+}
+
+.staff-lookup-card__content {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  flex: 1;
+}
+
+.staff-lookup-card__message {
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.staff-lookup-card__grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.75fr) minmax(0, 1.25fr);
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.staff-lookup-card__grid span,
+.staff-lookup-card__grid strong {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.staff-lookup-card__grid span {
+  color: #94a3b8;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.staff-lookup-card__grid strong {
+  color: #0f172a;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.staff-lookup-spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(13, 148, 136, 0.2);
+  border-top-color: #0f766e;
+  border-radius: 999px;
+  animation: staff-lookup-spin 0.8s linear infinite;
+}
+
+@keyframes staff-lookup-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes staff-lookup-shine {
+  to {
+    transform: translateX(100%);
+  }
 }
 
 .captcha-row {

@@ -35,6 +35,7 @@ export const buildClientOrderSummaryFromDetail = (detail: O2oPreorderDetail): O2
     merchantMessage: order.merchantMessage,
     clientOrderType: order.clientOrderType,
     departmentNameSnapshot: order.departmentNameSnapshot,
+    staffNoSnapshot: order.staffNoSnapshot,
     returnRequestCount: detail.returnRequests.length,
     pendingReturnRequestCount: detail.returnRequests.filter((item) => item.status === 'pending').length,
     latestReturnRequest: latestReturnRequest
@@ -74,6 +75,7 @@ export const matchesClientOrderKeyword = (order: O2oPreorderSummary, keyword: st
     order.customerOrderShowNo || '',
     order.verifyCode,
     order.departmentNameSnapshot || '',
+    order.staffNoSnapshot || '',
     ...CLIENT_ORDER_TYPE_KEYWORDS[order.clientOrderType],
   ]
     .map((item) => item.trim().toLowerCase())

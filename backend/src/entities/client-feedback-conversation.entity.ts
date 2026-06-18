@@ -1,17 +1,12 @@
 /**
- * 模块说明：backend/src/entities/client-feedback-conversation.entity.ts
- * 文件职责：定义客户端反馈会话主表，承载反馈单基础信息、客服处理状态、未读计数与最近消息摘要。
- * 实现逻辑：
- * - 一条会话代表客户端与客服中心的一条反馈工单；
- * - 会话表只保留列表页与摘要页需要的聚合字段，具体消息明细下沉到消息表；
- * - 通过未读计数、最近消息时间和指派快照，降低客服列表查询时的二次聚合成本。
- * 维护说明：
- * - 若后续引入转派、标签或 SLA，请优先扩展本表聚合字段，再评估是否拆分附表；
- * - 涉及状态枚举变更时，需同步服务层校验、路由入参与前端状态映射。
+ * 文件说明：客户端反馈会话实体，保存反馈工单的主信息、处理状态、未读计数和最近消息摘要。
+ * 实现逻辑：把列表页和客服工作台需要的聚合字段沉淀在会话主表，降低消息明细查询时的二次统计成本。
+ * 维护重点：变更会话状态、指派信息或 SLA 相关字段时，需要同步检查服务层状态机和前端状态映射。
  */
 
 import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm'
 import { entityColumnOptions } from './entity-column-options.js'
+import type { ClientUserAccountType } from './client-user.entity.js'
 
 const feedbackJsonArrayDefaultColumnOptions = entityColumnOptions.isSqlite ? { default: '[]' } : {}
 
@@ -85,6 +80,12 @@ export class ClientFeedbackConversation {
 
   @Column({ name: 'department_name_snapshot', type: 'varchar', length: 128, default: '', comment: '客户端部门快照' })
   departmentNameSnapshot!: string
+
+  @Column({ name: 'client_account_type', type: 'varchar', length: 16, default: 'personal', comment: '客户端账号类型快照' })
+  clientAccountType!: ClientUserAccountType
+
+  @Column({ name: 'staff_no_snapshot', type: 'varchar', length: 64, nullable: true, comment: '客户端教职工号快照' })
+  staffNoSnapshot!: string | null
 
   @Index('idx_client_feedback_category')
   @Column({ name: 'category', type: 'varchar', length: 32, default: 'general', comment: '反馈分类' })

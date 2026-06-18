@@ -43,6 +43,8 @@ export const PERMISSION_CODES = [
   'users:reset_password',
   'audit_logs:view',
   'audit_logs:export',
+  'reports:view',
+  'reports:export',
   'inbound:create',
   'inbound:view',
   'inbound:verify',
@@ -82,6 +84,8 @@ export const ROLE_DEFAULT_PERMISSION_MAP: Record<UserRole, PermissionCode[]> = {
     'users:reset_password',
     'audit_logs:view',
     'audit_logs:export',
+    'reports:view',
+    'reports:export',
     'inbound:view',
     'inbound:verify',
     'customer_service:view',
@@ -97,6 +101,8 @@ export const ROLE_DEFAULT_PERMISSION_MAP: Record<UserRole, PermissionCode[]> = {
     'tags:view',
     'tags:manage',
     'system_configs:view',
+    'reports:view',
+    'reports:export',
     'inbound:view',
     'inbound:verify',
     'customer_service:view',
@@ -138,6 +144,8 @@ export const PERMISSION_LABEL_MAP: Record<PermissionCode, string> = {
   'users:reset_password': '重置密码',
   'audit_logs:view': '查看审计日志',
   'audit_logs:export': '导出审计日志',
+  'reports:view': '查看报表中心',
+  'reports:export': '导出报表文件',
   'inbound:create': '创建送货单',
   'inbound:view': '查看送货单',
   'inbound:verify': '核销入库',
@@ -165,6 +173,8 @@ export const GOVERNANCE_PERMISSION_CODES: PermissionCode[] = [
   'users:reset_password',
   'audit_logs:view',
   'audit_logs:export',
+  'reports:view',
+  'reports:export',
 ]
 
 /**
@@ -183,6 +193,7 @@ export interface UserSafeProfile {
   id: string
   username: string
   displayName: string
+  email: string | null
   role: UserRole
   permissions: PermissionCode[]
   status: UserStatus
@@ -315,6 +326,12 @@ export const changePassword = (payload: ChangePasswordPayload) =>
     method: 'POST',
     url: '/auth/change-password',
     data: payload,
+  })
+
+export const sendPresenceHeartbeat = () =>
+  request<boolean>({
+    method: 'POST',
+    url: '/auth/presence/heartbeat',
   })
 
 /**

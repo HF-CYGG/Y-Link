@@ -67,17 +67,17 @@ const RATE_LIMIT_RULES = {
     blockMessage: '当前网络下登录请求过于频繁，请稍后再试',
   },
   clientRegisterBySource: {
-    maxRequests: 8,
+    maxRequests: 40,
     windowMs: 30 * 60 * 1000,
     blockMessage: '注册请求过于频繁，请稍后再试',
   },
   clientRegisterByIpFallback: {
-    maxRequests: 48,
+    maxRequests: 300,
     windowMs: 30 * 60 * 1000,
     blockMessage: '当前网络下注册请求过于频繁，请稍后再试',
   },
   clientRegisterByAccount: {
-    maxRequests: 3,
+    maxRequests: 10,
     windowMs: 24 * 60 * 60 * 1000,
     blockMessage: '该账号注册尝试过于频繁，请明天再试',
   },
@@ -160,6 +160,16 @@ const RATE_LIMIT_RULES = {
     maxRequests: 5,
     windowMs: 10 * 60 * 1000,
     blockMessage: '该账号验证码发送过于频繁，请稍后再试',
+  },
+  staffDirectoryLookupBySource: {
+    maxRequests: 20,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '工号目录查询过于频繁，请稍后再试',
+  },
+  staffDirectoryLookupByIpFallback: {
+    maxRequests: 80,
+    windowMs: 10 * 60 * 1000,
+    blockMessage: '当前网络下工号目录查询过于频繁，请稍后再试',
   },
 } as const satisfies Record<string, RateLimitRule>
 
@@ -502,6 +512,21 @@ export class AuthSecurityService {
       requestMeta,
       detail: {},
     })
+  }
+
+  async guardStaffDirectoryLookupRequest(requestMeta: RequestMeta | undefined, staffNo: string) {
+    await this.consumeClientSourceRateLimit(
+      'staff-directory-lookup',
+      RATE_LIMIT_RULES.staffDirectoryLookupBySource,
+      RATE_LIMIT_RULES.staffDirectoryLookupByIpFallback,
+      {
+        actionType: 'client.auth.guard.staff_directory_lookup',
+        actionLabel: '客户端工号目录查询频控',
+        targetCode: staffNo,
+        requestMeta,
+        detail: {},
+      },
+    )
   }
 
   async guardVerificationCodeSendRequest(requestMeta: RequestMeta | undefined, target: string, channel: 'mobile' | 'email') {

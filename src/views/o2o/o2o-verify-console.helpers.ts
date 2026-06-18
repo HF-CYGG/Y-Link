@@ -54,9 +54,9 @@ export const isReturnRequestDetail = (
 }
 
 /**
- * 核销台兼容预订单号 `PO...` 与退货申请单号 `RO...` 两类单据编号。
+ * 核销台兼容预订单号（`hyyzjd...` / `hyyz...`）与退货申请单号（`RO...`）两类单据编号。
  */
-export const isBizShowNo = (value: string) => /^(PO|RO)\d{8}\d{4}$/i.test(value)
+export const isBizShowNo = (value: string) => /^(?:RO\d{12}|hyyzjd\d{4,}|hyyz\d{4,})$/i.test(value)
 
 /**
  * 统一归一化核销码：

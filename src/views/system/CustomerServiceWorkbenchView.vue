@@ -12,7 +12,7 @@
  */
 
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, reactive, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+
 import {
   compareSupportFeedbackConversationPriority,
   DEFAULT_SUPPORT_QUICK_REPLY_TEMPLATES,
@@ -28,6 +28,7 @@ import {
   listSupportAssignableUsers,
   listSupportFeedbackConversations,
   resolveClientFeedbackConversationGroupKey,
+  resolveFeedbackConversationStatusMeta,
   openFeedbackRealtimeStream,
   resolveSupportFeedbackConversationSla,
   SUPPORT_QUICK_REPLY_SOURCE_META,
@@ -51,8 +52,11 @@ import { useStableRequest } from '@/composables/useStableRequest'
 import { useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { extractErrorMessage } from '@/utils/error'
+import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { formatDateTime } from '@/utils/date-time'
 import { normalizeSubmitText } from '@/utils/submit-feedback'
+
+import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 /**
  * 显式注入全局 Pinia 单例：
@@ -363,6 +367,21 @@ const getAssigneeTagLabel = (conversation: FeedbackConversationRecord) => {
   return currentUserId.value && conversation.assigneeUserId === currentUserId.value
     ? `我负责`
     : conversation.assigneeName
+}
+
+const getClientAccountTypeLabel = (conversation: FeedbackConversationRecord) => {
+  return conversation.clientAccountType === 'department' ? '部门账户' : '个人账户'
+}
+
+const buildClientIdentitySummary = (conversation: FeedbackConversationRecord) => {
+  const summaryParts = [getClientAccountTypeLabel(conversation)]
+  if (conversation.clientDepartmentName) {
+    summaryParts.push(conversation.clientDepartmentName)
+  }
+  if (conversation.clientStaffNo) {
+    summaryParts.push(`工号 ${conversation.clientStaffNo}`)
+  }
+  return summaryParts.join(' · ')
 }
 
 const summaryCategoryDefinitions = computed(() => {
@@ -932,15 +951,15 @@ const handleChangeQuickView = async (quickViewKey: WorkbenchQuickViewKey) => {
 
 const handleTakeOver = async () => {
   if (!selectedConversation.value) {
-    ElMessage.warning('请先选择一条会话')
+    showAppWarning('请先选择一条会话')
     return
   }
   if (!currentUserId.value) {
-    ElMessage.warning('当前登录信息已失效，请重新进入工作台')
+    showAppWarning('当前登录信息已失效，请重新进入工作台')
     return
   }
   if (selectedConversation.value.assigneeUserId === currentUserId.value) {
-    ElMessage.info('当前会话已经由你负责')
+    showAppInfo('当前会话已经由你负责')
     return
   }
 
@@ -952,9 +971,13 @@ const handleTakeOver = async () => {
       preserveUiState: true,
     })
     reconnectTip.value = '已完成显式接单，当前会话后续消息会继续实时同步。'
-    ElMessage.success('当前会话已接单')
+    showAppSuccess('当前会话已接单')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '接单失败，请稍后重试'))
+    void showCriticalErrorDialog(error, {
+      title: '接单失败',
+      fallback: '接单失败，请稍后重试',
+      operation: '客服会话接单',
+    })
   } finally {
     assigneeUpdating.value = false
   }
@@ -962,11 +985,11 @@ const handleTakeOver = async () => {
 
 const handleTransferConversation = async () => {
   if (!selectedConversation.value) {
-    ElMessage.warning('请先选择一条会话')
+    showAppWarning('请先选择一条会话')
     return
   }
   if (!transferAssigneeUserId.value) {
-    ElMessage.warning('请先选择转派目标')
+    showAppWarning('请先选择转派目标')
     return
   }
 
@@ -979,9 +1002,13 @@ const handleTransferConversation = async () => {
       preserveUiState: true,
     })
     reconnectTip.value = '负责人已更新，工作台已同步最新归属信息。'
-    ElMessage.success('负责人已更新')
+    showAppSuccess('负责人已更新')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '转派失败，请稍后重试'))
+    void showCriticalErrorDialog(error, {
+      title: '转派失败',
+      fallback: '转派失败，请稍后重试',
+      operation: '客服会话转派',
+    })
   } finally {
     assigneeUpdating.value = false
   }
@@ -989,7 +1016,7 @@ const handleTransferConversation = async () => {
 
 const handleSaveIssue = async () => {
   if (!selectedConversation.value) {
-    ElMessage.warning('请先选择一条会话')
+    showAppWarning('请先选择一条会话')
     return
   }
 
@@ -998,12 +1025,12 @@ const handleSaveIssue = async () => {
   const normalizedActualResult = normalizeSubmitText(issueForm.actualResult)
 
   if (!normalizedTitle) {
-    ElMessage.warning('请填写标题')
+    showAppWarning('请填写标题')
     return
   }
 
   if (issueForm.issueType === 'bug' && (!normalizedExpectedResult || !normalizedActualResult)) {
-    ElMessage.warning('专业 BUG 需要完整填写期望结果与实际结果')
+    showAppWarning('专业 BUG 需要完整填写期望结果与实际结果')
     return
   }
 
@@ -1026,9 +1053,13 @@ const handleSaveIssue = async () => {
     await loadConversations({
       preserveUiState: true,
     })
-    ElMessage.success('Issue 字段已保存')
+    showAppSuccess('Issue 字段已保存')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, 'Issue 字段保存失败，请稍后重试'))
+    void showCriticalErrorDialog(error, {
+      title: 'Issue 字段保存失败',
+      fallback: 'Issue 字段保存失败，请稍后重试',
+      operation: '保存客服 Issue 字段',
+    })
   } finally {
     saving.value = false
   }
@@ -1036,7 +1067,7 @@ const handleSaveIssue = async () => {
 
 const handleQuickStatus = async (status: FeedbackIssueStatus) => {
   if (!selectedConversation.value) {
-    ElMessage.warning('请先选择一条会话')
+    showAppWarning('请先选择一条会话')
     return
   }
 
@@ -1059,9 +1090,13 @@ const handleQuickStatus = async (status: FeedbackIssueStatus) => {
     await loadConversations({
       preserveUiState: true,
     })
-    ElMessage.success(`状态已更新为${FEEDBACK_STATUS_META_MAP[status].label}`)
+    showAppSuccess(`状态已更新为${FEEDBACK_STATUS_META_MAP[status].label}`)
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '状态更新失败，请稍后重试'))
+    void showCriticalErrorDialog(error, {
+      title: '反馈状态更新失败',
+      fallback: '状态更新失败，请稍后重试',
+      operation: '更新反馈状态',
+    })
   } finally {
     quickStatusUpdating.value = ''
     saving.value = false
@@ -1070,7 +1105,7 @@ const handleQuickStatus = async (status: FeedbackIssueStatus) => {
 
 const handleReassignPriority = async (priority: FeedbackIssuePriority) => {
   if (!selectedConversation.value) {
-    ElMessage.warning('请先选择一条会话')
+    showAppWarning('请先选择一条会话')
     return
   }
 
@@ -1095,9 +1130,13 @@ const handleReassignPriority = async (priority: FeedbackIssuePriority) => {
       preserveUiState: true,
     })
     isPriorityPanelExpanded.value = false
-    ElMessage.success(`已将优先级调整为${FEEDBACK_PRIORITY_META_MAP[priority].label}`)
+    showAppSuccess(`已将优先级调整为${FEEDBACK_PRIORITY_META_MAP[priority].label}`)
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '优先级调整失败，请稍后重试'))
+    void showCriticalErrorDialog(error, {
+      title: '优先级调整失败',
+      fallback: '优先级调整失败，请稍后重试',
+      operation: '调整反馈优先级',
+    })
   } finally {
     priorityUpdating.value = ''
     saving.value = false
@@ -1106,7 +1145,7 @@ const handleReassignPriority = async (priority: FeedbackIssuePriority) => {
 
 const handleSaveInternalRemark = async () => {
   if (!selectedConversation.value) {
-    ElMessage.warning('请先选择一条会话')
+    showAppWarning('请先选择一条会话')
     return
   }
 
@@ -1117,9 +1156,13 @@ const handleSaveInternalRemark = async () => {
     await loadConversationDetail(selectedConversation.value.id, {
       preserveDetailUiState: true,
     })
-    ElMessage.success('内部备注已保存')
+    showAppSuccess('内部备注已保存')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '内部备注保存失败，请稍后重试'))
+    void showCriticalErrorDialog(error, {
+      title: '内部备注保存失败',
+      fallback: '内部备注保存失败，请稍后重试',
+      operation: '保存客服内部备注',
+    })
   } finally {
     remarkSaving.value = false
   }
@@ -1127,13 +1170,13 @@ const handleSaveInternalRemark = async () => {
 
 const handleReply = async () => {
   if (!selectedConversation.value) {
-    ElMessage.warning('请先选择一条会话')
+    showAppWarning('请先选择一条会话')
     return
   }
 
   const normalizedReply = normalizeSubmitText(replyDraft.value)
   if (!normalizedReply) {
-    ElMessage.warning('请输入回复内容')
+    showAppWarning('请输入回复内容')
     return
   }
 
@@ -1162,9 +1205,13 @@ const handleReply = async () => {
       preserveUiState: true,
     })
     reconnectTip.value = '已续接当前客服会话，最新回复已同步发送给客户端。'
-    ElMessage.success('客服回复已发送')
+    showAppSuccess('客服回复已发送')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '客服回复发送失败，请稍后重试'))
+    void showCriticalErrorDialog(error, {
+      title: '客服回复发送失败',
+      fallback: '客服回复发送失败，请稍后重试',
+      operation: '发送客服回复',
+    })
   } finally {
     replying.value = false
   }
@@ -1172,11 +1219,11 @@ const handleReply = async () => {
 
 const handleApplyQuickReply = () => {
   if (!selectedConversation.value) {
-    ElMessage.warning('请先选择一条会话')
+    showAppWarning('请先选择一条会话')
     return
   }
   if (!selectedQuickReplyTemplate.value) {
-    ElMessage.warning('请先选择一条快捷回复')
+    showAppWarning('请先选择一条快捷回复')
     return
   }
 
@@ -1184,7 +1231,7 @@ const handleApplyQuickReply = () => {
     ? `${replyDraft.value.trimEnd()}\n\n${selectedQuickReplyTemplate.value.content}`
     : selectedQuickReplyTemplate.value.content
   replyDraft.value = nextDraft
-  ElMessage.success('已插入快捷回复，可继续编辑后发送')
+  showAppSuccess('已插入快捷回复，可继续编辑后发送')
 }
 
 const loadPresence = async () => {
@@ -1428,7 +1475,7 @@ const enterWorkbench = async () => {
     if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
       return
     }
-    ElMessage.error(extractErrorMessage(error, '客服工作台初始化失败，请稍后重试'))
+    showAppError(extractErrorMessage(error, '客服工作台初始化失败，请稍后重试'))
   }
 }
 
@@ -1642,12 +1689,13 @@ onBeforeUnmount(() => {
                     <p class="mt-1 text-xs text-slate-500">{{ item.issueNo }}</p>
                   </div>
                   <el-tag :type="getStatusTagType(item.status)" effect="light" round>
-                    {{ FEEDBACK_STATUS_META_MAP[item.status].label }}
+                    {{ resolveFeedbackConversationStatusMeta(item).label }}
                   </el-tag>
                 </div>
 
                 <div class="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-500">
                   <span>{{ item.clientDisplayName }}</span>
+                  <span>{{ buildClientIdentitySummary(item) }}</span>
                   <span>{{ item.clientDepartmentName || '未填写部门' }}</span>
                   <span>{{ formatDateTime(item.lastMessageAt) }}</span>
                 </div>
@@ -1688,6 +1736,7 @@ onBeforeUnmount(() => {
               <div class="min-w-0">
                 <p class="text-xs font-semibold tracking-[0.16em] text-slate-400">{{ selectedConversation.issueNo }}</p>
                 <h2 class="mt-2 text-xl font-semibold text-slate-900">{{ selectedConversation.title }}</h2>
+                <p class="mt-1 text-xs leading-5 text-slate-400">{{ buildClientIdentitySummary(selectedConversation) }}</p>
                 <p class="mt-2 text-sm leading-6 text-slate-500">
                   {{ selectedConversation.clientDisplayName }} · {{ selectedConversation.clientAccount }} · {{ selectedConversation.clientDepartmentName || '未填写部门' }}
                 </p>
@@ -1695,7 +1744,7 @@ onBeforeUnmount(() => {
 
               <div class="flex flex-wrap gap-2">
                 <el-tag :type="getStatusTagType(selectedConversation.status)" effect="light" round>
-                  {{ FEEDBACK_STATUS_META_MAP[selectedConversation.status].label }}
+                  {{ resolveFeedbackConversationStatusMeta(selectedConversation).label }}
                 </el-tag>
                 <el-tag :type="getPriorityTagType(selectedConversation.priority)" effect="light" round>
                   {{ FEEDBACK_PRIORITY_META_MAP[selectedConversation.priority].label }}

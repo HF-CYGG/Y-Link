@@ -27,7 +27,9 @@ import { dashboardRouter } from './routes/dashboard.routes.js'
 import { o2oRouter } from './routes/o2o.routes.js'
 import { orderRouter } from './routes/order.routes.js'
 import { productRouter } from './routes/product.routes.js'
+import { reportRouter } from './routes/report.routes.js'
 import { systemConfigRouter } from './routes/system-config.routes.js'
+import { notificationRouter } from './routes/notification.routes.js'
 import { tagRouter } from './routes/tag.routes.js'
 import { uploadRouter } from './routes/upload.routes.js'
 import { userRouter } from './routes/user.routes.js'
@@ -41,6 +43,7 @@ import { BizError } from './utils/errors.js'
 
 const UPLOAD_CACHE_CONTROL_VALUE = 'public, max-age=31536000, immutable'
 const UPLOAD_CONTENT_SECURITY_POLICY_VALUE = "default-src 'none'; img-src 'self' data:; style-src 'none'; sandbox"
+const API_JSON_BODY_LIMIT = '64mb'
 
 /**
  * 上传静态资源头部策略：
@@ -60,6 +63,7 @@ export function createApp() {
   const app = express()
   app.disable('x-powered-by')
   app.set('trust proxy', 'loopback, linklocal, uniquelocal')
+  app.disable('x-powered-by')
 
   app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff')
@@ -149,7 +153,13 @@ export function createApp() {
     }),
   )
 
-  app.use(express.json())
+  /**
+   * JSON 请求体上限：
+   * - 教职工目录“预览后确认导入”会把已识别记录以 JSON 数组再次提交；
+   * - 批量导入上千条记录时，默认 100 KB 容量会被轻易撑爆，导致 body-parser 直接抛 `PayloadTooLargeError`；
+   * - 这里统一放宽到与文件上传场景相同的 8 MB，覆盖系统配置大文本与批量导入确认请求。
+   */
+  app.use(express.json({ limit: API_JSON_BODY_LIMIT }))
 
   app.get('/health', (_req, res) => {
     const activeOverride = maskDatabaseRuntimeOverride(readDatabaseRuntimeOverride())
@@ -184,6 +194,7 @@ export function createApp() {
   app.use('/api/tags', tagRouter)
   app.use('/api/orders', orderRouter)
   app.use('/api/dashboard', dashboardRouter)
+  app.use('/api/reports', reportRouter)
   app.use('/api/inbound', inboundRouter)
 
   // 系统治理接口：由细粒度权限点控制，而不是单纯依赖管理员角色。
@@ -192,6 +203,7 @@ export function createApp() {
   app.use('/api/customer-service', customerServiceRouter)
   app.use('/api/audit-logs', auditLogRouter)
   app.use('/api/system-configs', systemConfigRouter)
+  app.use('/api/notifications', notificationRouter)
   app.use('/api/data-maintenance', dataMaintenanceRouter)
 
   // 将 zod 参数校验错误转为业务错误，统一响应格式。

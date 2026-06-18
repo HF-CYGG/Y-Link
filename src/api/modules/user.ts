@@ -48,6 +48,7 @@ export interface CreateUserPayload {
   username: string
   password: string
   displayName: string
+  email?: string
   role: UserRole
   status?: UserStatus
 }
@@ -59,6 +60,7 @@ export interface CreateUserPayload {
  */
 export interface UpdateUserPayload {
   displayName?: string
+  email?: string
   password?: string
   role?: UserRole
 }

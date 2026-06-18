@@ -12,7 +12,7 @@
 
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import type { O2oMallProduct } from '@/api/modules/o2o'
+import type { O2oMallProduct, O2oMallProductsResult, O2oMallStorefrontConfig } from '@/api/modules/o2o'
 import {
   clearPersistedClientCatalogSnapshot,
   persistClientCatalogBrowseContextSnapshot,
@@ -28,6 +28,9 @@ const CLIENT_CATALOG_CACHE_TTL_MS = 5 * 60 * 1000
 export const useClientCatalogStore = defineStore('client-catalog', () => {
   const clientUserId = ref('')
   const products = ref<O2oMallProduct[]>([])
+  const storefront = ref<O2oMallStorefrontConfig>({
+    businessHoursText: '10:00 - 22:00',
+  })
   const activeCategoryKey = ref('all')
   const keyword = ref('')
   const updatedAt = ref(0)
@@ -44,6 +47,7 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
     // 避免用户每次切分类、改搜索词都重复序列化整份商品数组。
     persistClientCatalogDataSnapshot(clientUserId.value, {
       products: products.value,
+      storefront: storefront.value,
       updatedAt: updatedAt.value,
     })
   }
@@ -60,8 +64,13 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
     })
   }
 
-  const replaceProducts = (nextProducts: O2oMallProduct[], options: { touchUpdatedAt: boolean }) => {
+  const replaceCatalogData = (
+    nextProducts: O2oMallProduct[],
+    nextStorefront: O2oMallStorefrontConfig,
+    options: { touchUpdatedAt: boolean },
+  ) => {
     products.value = nextProducts
+    storefront.value = nextStorefront
     if (options.touchUpdatedAt) {
       // 只要商品列表发生真实刷新，就更新时间戳，让页面层能判断当前缓存是否仍可复用。
       updatedAt.value = Date.now()
@@ -71,6 +80,9 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
 
   const resetState = () => {
     products.value = []
+    storefront.value = {
+      businessHoursText: '10:00 - 22:00',
+    }
     activeCategoryKey.value = 'all'
     keyword.value = ''
     updatedAt.value = 0
@@ -107,6 +119,7 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
       // 初始化阶段只负责恢复本地快照，不在这里校验新鲜度；
       // 是否需要重新拉取接口由页面层结合 isFresh 决定，职责更清晰。
       products.value = snapshot.products
+      storefront.value = snapshot.storefront
       activeCategoryKey.value = snapshot.activeCategoryKey
       keyword.value = snapshot.keyword
       updatedAt.value = snapshot.updatedAt
@@ -114,8 +127,18 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
     initialized.value = true
   }
 
-  const setProducts = (nextProducts: O2oMallProduct[]) => {
-    replaceProducts(nextProducts, { touchUpdatedAt: true })
+  const setProducts = (nextCatalog: O2oMallProduct[] | O2oMallProductsResult) => {
+    if (Array.isArray(nextCatalog)) {
+      replaceCatalogData(
+        nextCatalog,
+        {
+          businessHoursText: storefront.value.businessHoursText || '10:00 - 22:00',
+        },
+        { touchUpdatedAt: true },
+      )
+      return
+    }
+    replaceCatalogData(nextCatalog.list, nextCatalog.storefront, { touchUpdatedAt: true })
   }
 
   const applyPreorderSubmission = (submittedItems: Array<{ productId: string | number; qty: number }>) => {
@@ -159,7 +182,7 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
       return
     }
     // 局部刷新不应把目录误判为“刚刚完成整量同步”，因此保留原始更新时间戳。
-    replaceProducts(nextProducts, { touchUpdatedAt: false })
+    replaceCatalogData(nextProducts, storefront.value, { touchUpdatedAt: false })
   }
 
   const setActiveCategoryKey = (key: string) => {
@@ -183,6 +206,7 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
   return {
     clientUserId,
     products,
+    storefront,
     activeCategoryKey,
     keyword,
     updatedAt,

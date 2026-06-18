@@ -20,6 +20,7 @@ import { SysAuditLog } from '../entities/sys-audit-log.entity.js'
 import { SystemConfig } from '../entities/system-config.entity.js'
 import { ClientUser } from '../entities/client-user.entity.js'
 import { ClientUserSession } from '../entities/client-user-session.entity.js'
+import { ClientStaffDirectory } from '../entities/client-staff-directory.entity.js'
 import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
 import { O2oPreorderItem } from '../entities/o2o-preorder-item.entity.js'
 import { O2oReturnRequest } from '../entities/o2o-return-request.entity.js'
@@ -29,6 +30,10 @@ import { BizInboundOrder } from '../entities/biz-inbound-order.entity.js'
 import { BizInboundOrderItem } from '../entities/biz-inbound-order-item.entity.js'
 import { ClientFeedbackConversation } from '../entities/client-feedback-conversation.entity.js'
 import { ClientFeedbackMessage } from '../entities/client-feedback-message.entity.js'
+import { NotificationRule } from '../entities/notification-rule.entity.js'
+import { NotificationEvent } from '../entities/notification-event.entity.js'
+import { NotificationInbox } from '../entities/notification-inbox.entity.js'
+import { NotificationDispatch } from '../entities/notification-dispatch.entity.js'
 
 export const appEntities = [
   BaseProduct,
@@ -42,6 +47,7 @@ export const appEntities = [
   SystemConfig,
   ClientUser,
   ClientUserSession,
+  ClientStaffDirectory,
   O2oPreorder,
   O2oPreorderItem,
   O2oReturnRequest,
@@ -51,6 +57,10 @@ export const appEntities = [
   BizInboundOrderItem,
   ClientFeedbackConversation,
   ClientFeedbackMessage,
+  NotificationRule,
+  NotificationEvent,
+  NotificationInbox,
+  NotificationDispatch,
 ]
 
 function resolveEffectiveDatabaseConfig(

@@ -12,7 +12,7 @@
 
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+
 import {
   buildClientFeedbackConversationGroups,
   buildClientFeedbackNextStepPrompt,
@@ -30,6 +30,9 @@ import { useClientAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { formatDateTime } from '@/utils/date-time'
 import { extractErrorMessage } from '@/utils/error'
+
+
+import { showAppError } from '@/utils/app-alert'
 
 const router = useRouter()
 const clientAuthStore = useClientAuthStore(pinia)
@@ -72,6 +75,7 @@ const availabilityText = computed(() => {
   }
   return availability.value.offlineNotice
 })
+const workHoursText = computed(() => availability.value?.workHoursText || '客服在线时间正在同步中')
 
 /**
  * 列表卡片补一层“当前阶段”摘要：
@@ -173,7 +177,7 @@ watch(
       await loadConversations()
       connectRealtime()
     } catch (error) {
-      ElMessage.error(extractErrorMessage(error, '反馈中心初始化失败，请稍后重试'))
+      showAppError(extractErrorMessage(error, '反馈中心初始化失败，请稍后重试'))
     }
   },
 )
@@ -187,7 +191,7 @@ onMounted(async () => {
     await loadConversations()
     connectRealtime()
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '反馈中心加载失败，请稍后重试'))
+    showAppError(extractErrorMessage(error, '反馈中心加载失败，请稍后重试'))
   }
 })
 
@@ -232,6 +236,7 @@ onBeforeUnmount(() => {
       </div>
       <div class="mt-4 rounded-[1rem] border border-slate-200 bg-slate-50 px-4 py-3">
         <p class="text-sm font-medium text-slate-700">{{ availabilityText }}</p>
+        <p class="mt-2 text-xs leading-5 text-slate-500">在线时间：{{ workHoursText }}</p>
         <p class="mt-1 text-xs leading-5 text-slate-500">{{ reconnectTip }}</p>
       </div>
     </div>

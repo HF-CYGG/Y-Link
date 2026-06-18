@@ -1,9 +1,7 @@
 /**
- * 模块说明：backend/src/routes/client-user-manage.routes.ts
- * 文件职责：提供管理端对客户端用户的治理接口。
- * 维护说明：
- * - 客户端用户属于系统治理域，因此仍复用现有 users:* 权限点；
- * - 若后续需要更细粒度控制，可再独立拆分 client_users:* 权限模型。
+ * 文件说明：客户端用户管理路由，提供后台对客户端账号的查询、状态治理和资料维护接口。
+ * 实现逻辑：沿用后台鉴权与 users:* 权限体系，在路由层校验客户端用户状态等参数后调用治理服务完成操作。
+ * 维护重点：若后续拆分独立的客户端用户权限模型，需要同步调整本路由的权限点映射和前端管理入口。
  */
 
 import { Router } from 'express'
@@ -12,7 +10,7 @@ import type { AuthenticatedRequest } from '../types/auth.js'
 import { requirePermission, requireRole } from '../middleware/auth.middleware.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
-import { CLIENT_USER_STATUSES } from '../entities/client-user.entity.js'
+import { CLIENT_USER_ACCOUNT_TYPES, CLIENT_USER_STATUSES } from '../entities/client-user.entity.js'
 import { clientUserManageService } from '../services/client-user-manage.service.js'
 
 const updateClientUserStatusSchema = z.object({
@@ -53,11 +51,19 @@ clientUserManageRouter.get(
       typeof req.query.status === 'string' && CLIENT_USER_STATUSES.includes(req.query.status as (typeof CLIENT_USER_STATUSES)[number])
         ? (req.query.status as (typeof CLIENT_USER_STATUSES)[number])
         : undefined
+    const accountType =
+      typeof req.query.accountType === 'string'
+      && CLIENT_USER_ACCOUNT_TYPES.includes(req.query.accountType as (typeof CLIENT_USER_ACCOUNT_TYPES)[number])
+        ? (req.query.accountType as (typeof CLIENT_USER_ACCOUNT_TYPES)[number])
+        : undefined
     const data = await clientUserManageService.list({
       page: Number.isFinite(page) && page > 0 ? page : 1,
       pageSize: Number.isFinite(pageSize) && pageSize > 0 ? Math.min(pageSize, 100) : 20,
       keyword: typeof req.query.keyword === 'string' ? req.query.keyword : undefined,
       status,
+      accountType,
+      departmentName: typeof req.query.departmentName === 'string' ? req.query.departmentName : undefined,
+      staffNo: typeof req.query.staffNo === 'string' ? req.query.staffNo : undefined,
     })
     res.json({
       code: 0,

@@ -46,6 +46,7 @@ import {
   type CustomerServiceRealtimeSessionSnapshot,
 } from './customer-service-realtime.service.js'
 import { systemConfigService } from './system-config.service.js'
+import { notificationService } from './notification.service.js'
 
 export const CLIENT_FEEDBACK_SUBJECT_MAX_LENGTH = 128
 export const CLIENT_FEEDBACK_CATEGORY_MAX_LENGTH = 32
@@ -73,6 +74,8 @@ export interface ClientFeedbackConversationSummary {
   clientUserId: string
   clientUsername: string
   clientAccount: string
+  clientAccountType: ClientUser['accountType']
+  staffNoSnapshot: string | null
   departmentNameSnapshot: string
   category: string
   subject: string
@@ -525,6 +528,8 @@ class ClientFeedbackService {
       clientUserId: conversation.clientUserId,
       clientUsername: conversation.clientUsername,
       clientAccount: conversation.clientAccount,
+      clientAccountType: conversation.clientAccountType,
+      staffNoSnapshot: conversation.staffNoSnapshot?.trim() || null,
       departmentNameSnapshot: conversation.departmentNameSnapshot,
       category: conversation.category,
       subject: conversation.subject,
@@ -716,6 +721,8 @@ class ClientFeedbackService {
     return {
       clientUsername: clientUser.realName?.trim() || '',
       clientAccount: clientUser.email?.trim() || clientUser.mobile?.trim() || clientUser.realName?.trim() || '',
+      clientAccountType: clientUser.accountType,
+      staffNoSnapshot: clientUser.staffNo?.trim() || null,
       departmentNameSnapshot: clientUser.departmentName?.trim() || '',
     }
   }
@@ -894,6 +901,8 @@ class ClientFeedbackService {
               clientUserId: clientAuth.userId,
               clientUsername: clientSnapshot.clientUsername,
               clientAccount: clientSnapshot.clientAccount,
+              clientAccountType: clientSnapshot.clientAccountType,
+              staffNoSnapshot: clientSnapshot.staffNoSnapshot,
               departmentNameSnapshot: clientSnapshot.departmentNameSnapshot,
               issueType,
               category,
@@ -979,6 +988,18 @@ class ClientFeedbackService {
 
     const messageView = this.buildMessageView(result.message, { scope: 'client', userId: clientAuth.userId })
     this.publishConversationEvent('conversation_created', result.conversation, { source: 'client_create' }, messageView)
+    await notificationService.emitEvent({
+      eventType: 'customer_service_client_message_created',
+      sourceType: 'client_feedback_conversation',
+      sourceId: result.conversation.id,
+      payload: {
+        conversationNo: result.conversation.conversationNo,
+        sourceUserId: clientAuth.userId,
+        sourceUserDisplayName: clientSnapshot.clientUsername || clientSnapshot.clientAccount,
+        summary: content.slice(0, 100),
+      },
+      requestMeta,
+    })
     return {
       conversation: this.buildConversationSummary(result.conversation),
       message: messageView,
@@ -1102,6 +1123,18 @@ class ClientFeedbackService {
 
     const messageView = this.buildMessageView(result.message, { scope: 'client', userId: clientAuth.userId })
     this.publishConversationEvent('message_created', result.conversation, { senderType: 'client' }, messageView)
+    await notificationService.emitEvent({
+      eventType: 'customer_service_client_message_created',
+      sourceType: 'client_feedback_conversation',
+      sourceId: result.conversation.id,
+      payload: {
+        conversationNo: result.conversation.conversationNo,
+        sourceUserId: clientAuth.userId,
+        sourceUserDisplayName: clientSnapshot.clientUsername || clientSnapshot.clientAccount,
+        summary: content.slice(0, 100),
+      },
+      requestMeta,
+    })
     return {
       conversation: this.buildConversationSummary(result.conversation),
       message: messageView,
@@ -1177,6 +1210,82 @@ class ClientFeedbackService {
         ? this.buildMessageView(result.systemMessage, { scope: 'client', userId: clientAuth.userId })
         : undefined
       this.publishConversationEvent('conversation_status_changed', result.conversation, { status: 'closed', confirmedBy: 'client' }, systemMessageView)
+    }
+
+    return {
+      changed: result.changed,
+      conversation: this.buildConversationSummary(result.conversation),
+    }
+  }
+
+  async withdrawConversationByClient(
+    id: string,
+    clientAuth: ClientAuthContext,
+    requestMeta?: RequestMeta,
+  ) {
+    const clientSnapshot = await this.getClientUserSnapshot(clientAuth.userId)
+
+    const result = await AppDataSource.transaction(async (manager) => {
+      const conversation = await this.requireOwnedConversation(id, clientAuth, manager)
+      if (conversation.status === 'closed') {
+        return {
+          conversation,
+          systemMessage: null as ClientFeedbackMessage | null,
+          changed: false,
+        }
+      }
+
+      const statusBefore = conversation.status
+      conversation.status = 'closed'
+      conversation.closedAt = new Date()
+      await manager.getRepository(ClientFeedbackConversation).save(conversation)
+
+      const systemMessage = await this.createMessage(
+        manager,
+        conversation,
+        {
+          senderType: 'system',
+          senderUserId: null,
+          senderName: '系统',
+          conversationStatus: 'closed',
+        },
+        '客户端已撤回当前反馈单，会话已关闭。',
+        'system',
+      )
+
+      await auditService.record(
+        {
+          actionType: 'client_feedback.withdraw',
+          actionLabel: '客户端撤回反馈单',
+          targetType: 'feedback_conversation',
+          targetId: conversation.id,
+          targetCode: conversation.conversationNo,
+          actor: {
+            userId: clientAuth.userId,
+            username: clientAuth.account,
+            displayName: clientAuth.realName || clientSnapshot.clientUsername || clientSnapshot.clientAccount,
+          },
+          requestMeta,
+          detail: {
+            statusBefore,
+            statusAfter: 'closed',
+          },
+        },
+        manager,
+      )
+
+      return {
+        conversation,
+        systemMessage,
+        changed: true,
+      }
+    })
+
+    if (result.changed) {
+      const systemMessageView = result.systemMessage
+        ? this.buildMessageView(result.systemMessage, { scope: 'client', userId: clientAuth.userId })
+        : undefined
+      this.publishConversationEvent('conversation_status_changed', result.conversation, { status: 'closed', withdrawnBy: 'client' }, systemMessageView)
     }
 
     return {
@@ -1283,6 +1392,7 @@ class ClientFeedbackService {
             OR conversation.conversationNo LIKE :keyword
             OR conversation.clientUsername LIKE :keyword
             OR conversation.clientAccount LIKE :keyword
+            OR conversation.staffNoSnapshot LIKE :keyword
             OR conversation.departmentNameSnapshot LIKE :keyword
             OR conversation.lastMessagePreview LIKE :keyword
           )

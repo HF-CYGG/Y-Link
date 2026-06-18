@@ -12,12 +12,15 @@
 
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { useClientMallSnapshotRefresh } from '@/composables/useClientMallSnapshotRefresh'
 import { useClientAuthStore, useClientCartStore } from '@/store'
 import pinia from '@/store/pinia'
 import { formatDiscountRate, isDiscountedPrice, resolveDiscountedUnitPrice, resolveOriginalPrice } from '@/utils/o2o-price'
+
+
+import { showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 const props = defineProps<{
   standalone?: boolean
@@ -46,11 +49,11 @@ const totalAmount = computed(() => clientCartStore.selectedValidItems.reduce((su
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const removeSelected = () => {
   if (!selectedCount.value) {
-    ElMessage.warning('请先选择商品')
+    showAppWarning('请先选择商品')
     return
   }
   clientCartStore.clearSelectedItems()
-  ElMessage.success('已删除选中商品')
+  showAppSuccess('已删除选中商品')
 }
 
 const checkoutButtonText = computed(() => {
@@ -70,7 +73,7 @@ const goCheckout = async () => {
       // 与商城页底部“去结算”保持一致：未手动勾选时默认勾选全部有效商品，再进入结算。
       clientCartStore.toggleAllValidSelected(true)
     } else {
-      ElMessage.warning('购物车暂无可结算商品')
+      showAppWarning('购物车暂无可结算商品')
       return
     }
   }

@@ -7,7 +7,10 @@
  */
 
 import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+
+
+import { showAppError, showAppWarning } from '@/utils/app-alert'
+
 
 type Html5QrcodeModule = typeof import('html5-qrcode')
 type Html5QrcodeScannerInstance = import('html5-qrcode').Html5Qrcode
@@ -281,7 +284,7 @@ export const useCameraQrScanner = (options: UseCameraQrScannerOptions) => {
     } catch (error) {
       scanLoading.value = false
       scanStatusText.value = '图片识别失败，请重新拍摄或改用手动输入'
-      ElMessage.warning(error instanceof Error ? error.message : '图片识别失败，请重试')
+      showAppWarning(error instanceof Error ? error.message : '图片识别失败，请重试')
     } finally {
       await disposeScanner()
     }
@@ -299,7 +302,7 @@ export const useCameraQrScanner = (options: UseCameraQrScannerOptions) => {
     }
 
     if (!file.type.startsWith('image/')) {
-      ElMessage.warning('请选择图片文件后再尝试识别')
+      showAppWarning('请选择图片文件后再尝试识别')
       return
     }
 
@@ -312,16 +315,16 @@ export const useCameraQrScanner = (options: UseCameraQrScannerOptions) => {
     const normalizedMessage = errorMessage.toLowerCase()
 
     if (normalizedMessage.includes('denied') || normalizedMessage.includes('permission')) {
-      ElMessage.warning('浏览器未授予摄像头权限，请重新点击相机按钮并改用拍照识别')
+      showAppWarning('浏览器未授予摄像头权限，请重新点击相机按钮并改用拍照识别')
       return
     }
 
     if (!globalThis.isSecureContext) {
-      ElMessage.warning('当前为 HTTP 环境，实时摄像头不可用，请重新点击相机按钮并改用拍照识别')
+      showAppWarning('当前为 HTTP 环境，实时摄像头不可用，请重新点击相机按钮并改用拍照识别')
       return
     }
 
-    ElMessage.warning(
+    showAppWarning(
       errorMessage
         ? `${errorMessage}，请改用拍照识别`
         : '无法打开摄像头，请改用拍照识别',
@@ -355,7 +358,7 @@ export const useCameraQrScanner = (options: UseCameraQrScannerOptions) => {
 
     if (!scannerContainerRef.value) {
       closeScanDialog()
-      ElMessage.error('扫码容器初始化失败，请刷新页面后重试')
+      showAppError('扫码容器初始化失败，请刷新页面后重试')
       return
     }
 

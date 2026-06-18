@@ -58,6 +58,11 @@ CREATE TABLE IF NOT EXISTS `o2o_preorder` (
   `timeout_at` DATETIME(3) NULL,
   `verified_at` DATETIME(3) NULL,
   `verified_by` VARCHAR(64) NULL,
+  `is_deleted` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '客户端可见性删除标记',
+  `deleted_at` DATETIME(3) NULL COMMENT '客户端可见性删除时间',
+  `deleted_by_user_id` BIGINT UNSIGNED NULL COMMENT '客户端可见性删除操作人ID',
+  `deleted_by_username` VARCHAR(64) NULL COMMENT '客户端可见性删除操作账号',
+  `deleted_by_display_name` VARCHAR(64) NULL COMMENT '客户端可见性删除操作人名称',
   `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   `updated_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
   PRIMARY KEY (`id`),
@@ -66,7 +71,8 @@ CREATE TABLE IF NOT EXISTS `o2o_preorder` (
   KEY `idx_o2o_preorder_client_user_id` (`client_user_id`),
   KEY `idx_o2o_preorder_client_id` (`client_user_id`, `id`),
   KEY `idx_o2o_preorder_client_status_id` (`client_user_id`, `status`, `id`),
-  KEY `idx_o2o_preorder_status_timeout_at` (`status`, `timeout_at`)
+  KEY `idx_o2o_preorder_status_timeout_at` (`status`, `timeout_at`),
+  KEY `idx_o2o_preorder_is_deleted` (`is_deleted`)
 );
 
 CREATE TABLE IF NOT EXISTS `o2o_preorder_item` (

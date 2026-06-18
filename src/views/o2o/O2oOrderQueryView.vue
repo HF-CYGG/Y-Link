@@ -8,7 +8,7 @@
  */
 
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { PageContainer } from '@/components/common'
 import { usePermissionAction } from '@/composables/usePermissionAction'
@@ -24,6 +24,7 @@ import {
   type O2oOrderStatus,
 } from '@/constants/o2o-order-status'
 import {
+  deleteO2oConsoleOrder,
   getO2oConsoleOrderDetail,
   getO2oConsoleOrders,
   updateO2oOrderComplianceFlags,
@@ -34,9 +35,15 @@ import {
   type O2oOrderStatusReport,
   type O2oReturnRequestDetail,
 } from '@/api/modules/o2o'
+import { getClientDepartmentConfigs } from '@/api/modules/system-config'
+import type { ClientUserAccountType } from '@/api/modules/client-user-manage'
+import { useAuthStore } from '@/store'
+import pinia from '@/store/pinia'
 import { extractErrorMessage } from '@/utils/error'
 import { captureOrderRefreshAnchor, restoreOrderRefreshAnchor } from '@/utils/order-refresh-visual'
 import { formatDiscountRate, resolveDiscountedUnitPrice, resolveLineAmount, resolveOriginalPrice } from '@/utils/o2o-price'
+
+import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 type OrderPoolKey = 'all' | 'pending' | 'completed' | 'cancelled' | 'returns'
 
@@ -57,6 +64,10 @@ const ORDER_TYPE_LABEL_MAP = {
   department: '部门订',
   walkin: '散客',
 } as const
+const ACCOUNT_TYPE_LABEL_MAP: Record<ClientUserAccountType, string> = {
+  personal: '个人账户',
+  department: '部门账户',
+}
 const RETURN_REQUEST_STATUS_META = {
   pending: {
     label: '待门店核销',
@@ -76,6 +87,7 @@ const RETURN_REQUEST_STATUS_META = {
 } as const
 const listLoading = ref(false)
 const detailLoading = ref(false)
+const orderDeleting = ref(false)
 const orders = ref<O2oPreorderSummary[]>([])
 const activePool = ref<OrderPoolKey>('all')
 const activeOrderId = ref('')
@@ -93,9 +105,12 @@ const orderRefreshMarkExpiresAtMap = ref<Record<string, number>>({})
 const detailRefreshNoticeExpiresAt = ref(0)
 const lastSilentListRefreshAt = ref(0)
 const router = useRouter()
+const authStore = useAuthStore(pinia)
 const { hasPermission, ensurePermission } = usePermissionAction()
 const orderListRequest = useStableRequest()
 const orderDetailRequest = useStableRequest()
+const departmentOptions = ref<string[]>([])
+const departmentOptionsLoading = ref(false)
 
 let autoRefreshTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let secondTickTimer: ReturnType<typeof globalThis.setInterval> | null = null
@@ -103,15 +118,29 @@ let reminderAudioContext: AudioContext | null = null
 
 const query = reactive({
   keyword: '',
+  accountType: '' as '' | ClientUserAccountType,
+  departmentName: '',
+  staffNo: '',
 })
 
 // “去核销”只允许真正处于 pending 的订单进入核销台。
 // 已超时取消、人工取消、已核销都不允许再进入核销流程，避免操作员误判。
 const canGoVerify = computed(() => isO2oOrderPending(activeOrderDetail.value?.order.status))
 const goVerifyButtonText = computed(() => (canGoVerify.value ? '去核销' : '不可核销'))
+const canDeleteCurrentOrder = computed(() =>
+  Boolean(activeOrderDetail.value?.order.id && hasPermission('orders:delete') && authStore.currentUser?.role === 'admin'),
+)
 
 const formatCurrency = (value: string | number | null | undefined) => {
   return Number(value ?? 0).toFixed(2)
+}
+
+const getAccountTypeLabel = (accountType: ClientUserAccountType) => {
+  return ACCOUNT_TYPE_LABEL_MAP[accountType]
+}
+
+const getOrderAccountType = (orderType: O2oPreorderSummary['clientOrderType']): ClientUserAccountType => {
+  return orderType === 'department' ? 'department' : 'personal'
 }
 
 /**
@@ -326,19 +355,25 @@ const detailAmountSummary = computed(() => {
 // - 模板仅消费这里的展示值，避免散落空值判断导致显示口径不一致。
 const orderCustomerProfile = computed(() => {
   const profile = activeOrderDetail.value?.customerProfile
+  const order = activeOrderDetail.value?.order
+  const accountType = order ? getOrderAccountType(order.clientOrderType) : null
   if (!profile) {
     return {
       username: '未查询到预定用户',
       mobile: '未留手机号',
       email: '未留邮箱',
-      departmentName: '未填写部门',
+      accountType: accountType ? getAccountTypeLabel(accountType) : '未识别账号类型',
+      departmentName: order?.departmentNameSnapshot?.trim() || '未填写部门',
+      staffNo: order?.staffNoSnapshot?.trim() || '未留工号',
     }
   }
   return {
     username: profile.username?.trim() || profile.realName?.trim() || '未命名用户',
     mobile: profile.mobile?.trim() || '未留手机号',
     email: profile.email?.trim() || '未留邮箱',
-    departmentName: profile.departmentName?.trim() || '未填写部门',
+    accountType: accountType ? getAccountTypeLabel(accountType) : getAccountTypeLabel(profile.accountType),
+    departmentName: order?.departmentNameSnapshot?.trim() || profile.departmentName?.trim() || '未填写部门',
+    staffNo: order?.staffNoSnapshot?.trim() || profile.staffNo?.trim() || '未留工号',
   }
 })
 
@@ -346,9 +381,23 @@ const getOrderTypeLabel = (orderType: O2oPreorderSummary['clientOrderType']) => 
   return ORDER_TYPE_LABEL_MAP[orderType]
 }
 
+const isDepartmentOrder = (orderType: O2oPreorderSummary['clientOrderType']) => orderType === 'department'
+
+const loadDepartmentOptions = async () => {
+  departmentOptionsLoading.value = true
+  try {
+    const result = await getClientDepartmentConfigs()
+    departmentOptions.value = result.options
+  } catch (error) {
+    showAppError(extractErrorMessage(error, '加载部门筛选项失败'))
+  } finally {
+    departmentOptionsLoading.value = false
+  }
+}
+
 const buildOwnershipLabel = (orderType: O2oPreorderSummary['clientOrderType'], departmentNameSnapshot: string | null) => {
   const orderTypeLabel = getOrderTypeLabel(orderType)
-  const departmentLabel = departmentNameSnapshot ? ` / ${departmentNameSnapshot}` : ''
+  const departmentLabel = isDepartmentOrder(orderType) && departmentNameSnapshot ? ` / ${departmentNameSnapshot}` : ''
   return `${orderTypeLabel}${departmentLabel}`
 }
 
@@ -677,7 +726,7 @@ const loadOrderDetail = async (
       if (options?.silent) {
         return
       }
-      ElMessage.error(extractErrorMessage(error, options?.errorMessage ?? '加载订单详情失败，请稍后重试'))
+      showAppError(extractErrorMessage(error, options?.errorMessage ?? '加载订单详情失败，请稍后重试'))
     },
     onFinally: () => {
       detailLoading.value = false
@@ -701,6 +750,7 @@ const mergeOrderSummaryFromDetail = (detail: O2oPreorderDetail) => {
     merchantMessage: nextOrder.merchantMessage,
     clientOrderType: nextOrder.clientOrderType,
     departmentNameSnapshot: nextOrder.departmentNameSnapshot,
+    staffNoSnapshot: nextOrder.staffNoSnapshot,
     returnRequestCount: detail.returnRequests.length,
     pendingReturnRequestCount: detail.returnRequests.filter((item) => item.status === 'pending').length,
     latestReturnRequest: latestReturnRequest
@@ -773,6 +823,8 @@ const syncActiveOrder = async (options?: { silentDetail?: boolean }) => {
 const loadOrders = async (options?: { silent?: boolean }) => {
   const silent = options?.silent ?? false
   const committedKeyword = appliedKeyword.value.trim()
+  const committedDepartmentName = query.departmentName.trim()
+  const committedStaffNo = query.staffNo.trim()
   const scrollAnchor = silent
     ? captureOrderRefreshAnchor({
         listRoot: orderPoolListRef.value,
@@ -787,6 +839,9 @@ const loadOrders = async (options?: { silent?: boolean }) => {
       getO2oConsoleOrders(
         {
           keyword: committedKeyword || undefined,
+          accountType: query.accountType || undefined,
+          departmentName: committedDepartmentName || undefined,
+          staffNo: committedStaffNo || undefined,
           limit: 200,
         },
         { signal },
@@ -820,7 +875,7 @@ const loadOrders = async (options?: { silent?: boolean }) => {
       if (silent) {
         return
       }
-      ElMessage.error(extractErrorMessage(error, '加载订单池失败，请稍后重试'))
+      showAppError(extractErrorMessage(error, '加载订单池失败，请稍后重试'))
     },
     onFinally: () => {
       listLoading.value = false
@@ -846,6 +901,15 @@ const handleSearch = async () => {
   await loadOrders()
 }
 
+const handleReset = async () => {
+  query.keyword = ''
+  query.accountType = ''
+  query.departmentName = ''
+  query.staffNo = ''
+  appliedKeyword.value = ''
+  await loadOrders()
+}
+
 const handleRefreshCurrentOrder = async () => {
   if (!activeOrderId.value) {
     return
@@ -855,18 +919,18 @@ const handleRefreshCurrentOrder = async () => {
   })
   if (activeOrderDetail.value?.order.id === activeOrderId.value) {
     mergeOrderSummaryFromDetail(activeOrderDetail.value)
-    ElMessage.success('当前订单状态已刷新')
+    showAppSuccess('当前订单状态已刷新')
   }
 }
 
 const handleGoVerify = async () => {
   if (!canGoVerify.value) {
-    ElMessage.warning('当前订单已取消或已核销，不可继续核销')
+    showAppWarning('当前订单已取消或已核销，不可继续核销')
     return
   }
   const verifyCode = activeOrderDetail.value?.order.verifyCode?.trim()
   if (!verifyCode) {
-    ElMessage.warning('当前订单缺少核销码，无法前往核销台')
+    showAppWarning('当前订单缺少核销码，无法前往核销台')
     return
   }
   await router.push({
@@ -881,18 +945,92 @@ const handleGoVerify = async () => {
 const handleCopyVerifyCode = async () => {
   const verifyCode = activeOrderDetail.value?.order.verifyCode?.trim()
   if (!verifyCode) {
-    ElMessage.warning('当前订单缺少核销码，无法复制')
+    showAppWarning('当前订单缺少核销码，无法复制')
     return
   }
   if (!globalThis.navigator?.clipboard?.writeText) {
-    ElMessage.error('当前环境不支持复制，请手动复制核销码')
+    showAppError('当前环境不支持复制，请手动复制核销码')
     return
   }
   try {
     await globalThis.navigator.clipboard.writeText(verifyCode)
-    ElMessage.success('核销码复制成功')
+    showAppSuccess('核销码复制成功')
   } catch {
-    ElMessage.error('复制失败，请检查浏览器权限后重试')
+    showAppError('复制失败，请检查浏览器权限后重试')
+  }
+}
+
+const handleDeleteCurrentOrder = async () => {
+  const detail = activeOrderDetail.value
+  if (!detail?.order.id) {
+    return
+  }
+  if (!ensurePermission('orders:delete', '删除订单池订单')) {
+    return
+  }
+  if (authStore.currentUser?.role !== 'admin') {
+    showAppError('仅管理员可删除订单池订单')
+    return
+  }
+
+  const showNo = detail.order.showNo
+  let permanentDeletePassword = ''
+  try {
+    await ElMessageBox.confirm(
+      `确认删除订单“${showNo}”？将移除订单池记录及关联数据，此操作不可撤销。`,
+      '删除订单确认',
+      {
+        type: 'warning',
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+        closeOnClickModal: false,
+      },
+    )
+    await ElMessageBox.confirm(`再次确认删除“${showNo}”？`, '二次确认删除', {
+      type: 'error',
+      confirmButtonText: '确认删除订单',
+      cancelButtonText: '取消',
+      closeOnClickModal: false,
+      confirmButtonClass: 'el-button--danger',
+    })
+    const passwordResult = await ElMessageBox.prompt(
+      '请输入容器环境变量中配置的永久删除密码。',
+      '永久删除密码',
+      {
+        type: 'error',
+        confirmButtonText: '确认删除订单',
+        cancelButtonText: '取消',
+        inputType: 'password',
+        inputPlaceholder: '请输入永久删除密码',
+        closeOnClickModal: false,
+        inputValidator: (value: string) => {
+          if (!String(value || '').trim()) {
+            return '请输入永久删除密码'
+          }
+          return true
+        },
+      },
+    )
+    permanentDeletePassword = passwordResult.value.trim()
+  } catch {
+    return
+  }
+
+  orderDeleting.value = true
+  try {
+    const result = await deleteO2oConsoleOrder(detail.order.id, { confirmShowNo: showNo, permanentDeletePassword })
+    orders.value = orders.value.filter((item) => item.id !== detail.order.id)
+    if (activeOrderId.value === detail.order.id) {
+      activeOrderId.value = ''
+      activeOrderDetail.value = null
+    }
+    await loadOrders({ silent: true })
+    const rollbackText = result.preorderSerialRolledBack || result.outboundSerialRolledBack ? '，相关流水已回拨' : ''
+    showAppSuccess(`订单“${showNo}”已删除${rollbackText}`)
+  } catch (error) {
+    showAppError(extractErrorMessage(error, '删除订单池订单失败，请稍后重试'))
+  } finally {
+    orderDeleting.value = false
   }
 }
 
@@ -928,10 +1066,10 @@ const handleBusinessStatusChange = async (value: O2oOrderBusinessStatus | null) 
     activeOrderDetail.value = latestDetail
     mergeOrderSummaryFromDetail(latestDetail)
     draftBusinessStatus.value = latestDetail.order.businessStatus
-    ElMessage.success(value ? '商家特殊状态已更新' : '商家特殊状态已清除')
+    showAppSuccess(value ? '商家特殊状态已更新' : '商家特殊状态已清除')
   } catch (error) {
     draftBusinessStatus.value = previousValue
-    ElMessage.error(error instanceof Error ? error.message : '更新商家状态失败，请稍后重试')
+    showAppError(error instanceof Error ? error.message : '更新商家状态失败，请稍后重试')
   } finally {
     detailLoading.value = false
   }
@@ -942,7 +1080,7 @@ const handleSaveMerchantMessage = async () => {
     return
   }
   if (!merchantMessageChanged.value) {
-    ElMessage.info('留言内容未变化，无需保存')
+    showAppInfo('留言内容未变化，无需保存')
     return
   }
 
@@ -950,7 +1088,7 @@ const handleSaveMerchantMessage = async () => {
   const nextValue = normalizedDraftMerchantMessage.value
   const nextLength = nextValue?.length ?? 0
   if (nextLength > MERCHANT_MESSAGE_MAX_LENGTH) {
-    ElMessage.warning(`商家留言最多 ${MERCHANT_MESSAGE_MAX_LENGTH} 个字符`)
+    showAppWarning(`商家留言最多 ${MERCHANT_MESSAGE_MAX_LENGTH} 个字符`)
     return
   }
 
@@ -978,9 +1116,9 @@ const handleSaveMerchantMessage = async () => {
     activeOrderDetail.value = latestDetail
     mergeOrderSummaryFromDetail(latestDetail)
     draftMerchantMessage.value = latestDetail.order.merchantMessage ?? ''
-    ElMessage.success(nextValue ? '商家留言已保存' : '商家留言已清空')
+    showAppSuccess(nextValue ? '商家留言已保存' : '商家留言已清空')
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '保存商家留言失败，请稍后重试')
+    showAppError(error instanceof Error ? error.message : '保存商家留言失败，请稍后重试')
   } finally {
     detailLoading.value = false
   }
@@ -994,7 +1132,7 @@ const handleSaveComplianceFlags = async () => {
     return
   }
   if (activeOrderDetail.value.order.clientOrderType !== 'department') {
-    ElMessage.info('散客单不适用该状态编辑')
+    showAppInfo('散客单不适用该状态编辑')
     return
   }
   complianceSaving.value = true
@@ -1005,9 +1143,9 @@ const handleSaveComplianceFlags = async () => {
     })
     activeOrderDetail.value = latestDetail
     mergeOrderSummaryFromDetail(latestDetail)
-    ElMessage.success('合规状态已更新')
+    showAppSuccess('合规状态已更新')
   } catch (error) {
-    ElMessage.error(error instanceof Error ? error.message : '合规状态更新失败，请稍后重试')
+    showAppError(error instanceof Error ? error.message : '合规状态更新失败，请稍后重试')
   } finally {
     complianceSaving.value = false
   }
@@ -1032,7 +1170,7 @@ const scheduleAutoRefresh = () => {
 
 const handleAutoRefreshChange = () => {
   scheduleAutoRefresh()
-  ElMessage.success(autoRefreshEnabled.value ? `已开启 ${pollIntervalSeconds.value} 秒轮询` : '已关闭轮询')
+  showAppSuccess(autoRefreshEnabled.value ? `已开启 ${pollIntervalSeconds.value} 秒轮询` : '已关闭轮询')
 }
 
 const handlePollIntervalChange = () => {
@@ -1040,11 +1178,11 @@ const handlePollIntervalChange = () => {
     return
   }
   scheduleAutoRefresh()
-  ElMessage.success(`轮询间隔已切换为 ${pollIntervalSeconds.value} 秒`)
+  showAppSuccess(`轮询间隔已切换为 ${pollIntervalSeconds.value} 秒`)
 }
 
 const handleSoundSwitchChange = () => {
-  ElMessage.success(soundNoticeEnabled.value ? '已开启新单提示音' : '已关闭新单提示音')
+  showAppSuccess(soundNoticeEnabled.value ? '已开启新单提示音' : '已关闭新单提示音')
 }
 
 const handleVisibilityChange = () => {
@@ -1054,7 +1192,7 @@ const handleVisibilityChange = () => {
 }
 
 onMounted(async () => {
-  await loadOrders()
+  await Promise.all([loadOrders(), loadDepartmentOptions()])
   scheduleAutoRefresh()
   globalThis.document?.addEventListener('visibilitychange', handleVisibilityChange)
   secondTickTimer = globalThis.setInterval(() => {
@@ -1139,15 +1277,49 @@ onBeforeUnmount(() => {
           </button>
         </div>
 
-        <div class="mt-3 flex flex-col gap-2 sm:flex-row sm:items-center">
+        <div class="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
           <el-input
             v-model.trim="query.keyword"
             class="min-w-0"
-            placeholder="搜索订单号或核销码"
+            placeholder="搜索订单号、核销码、用户名或商品"
             clearable
+            @clear="handleSearch"
             @keyup.enter="handleSearch"
           />
+          <el-select
+            v-model="query.accountType"
+            class="min-w-0"
+            placeholder="账号类型"
+            clearable
+            @change="handleSearch"
+          >
+            <el-option label="个人账户" value="personal" />
+            <el-option label="部门账户" value="department" />
+          </el-select>
+          <el-select
+            v-model="query.departmentName"
+            class="min-w-0"
+            placeholder="所属部门"
+            clearable
+            filterable
+            :loading="departmentOptionsLoading"
+            @change="handleSearch"
+          >
+            <el-option v-for="department in departmentOptions" :key="department" :label="department" :value="department" />
+          </el-select>
+          <el-input
+            v-model.trim="query.staffNo"
+            class="min-w-0"
+            placeholder="搜索工号"
+            clearable
+            @clear="handleSearch"
+            @keyup.enter="handleSearch"
+          />
+        </div>
+
+        <div class="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
           <el-button class="search-action-button w-full sm:w-auto" type="primary" @click="handleSearch">查询</el-button>
+          <el-button class="w-full sm:w-auto" @click="handleReset">重置</el-button>
         </div>
 
         <Transition name="new-order-notice">
@@ -1212,8 +1384,10 @@ onBeforeUnmount(() => {
               <div class="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500">
                 <p class="break-words">时间：{{ formatOrderDateTime(order.createdAt, { includeSeconds: false }) }}</p>
                 <p class="text-right">件数：{{ order.totalQty }}</p>
-                <p class="break-words">归属：{{ getOrderTypeLabel(order.clientOrderType) }}{{ order.departmentNameSnapshot ? ` / ${order.departmentNameSnapshot}` : '' }}</p>
+                <p class="break-words">账号类型：{{ getAccountTypeLabel(getOrderAccountType(order.clientOrderType)) }}</p>
                 <p>应付总额：¥{{ formatCurrency(order.totalAmount) }}</p>
+                <p v-if="isDepartmentOrder(order.clientOrderType)" class="break-words">部门：{{ order.departmentNameSnapshot || '未填写' }}</p>
+                <p v-if="isDepartmentOrder(order.clientOrderType)" class="text-right">工号：{{ order.staffNoSnapshot || '未留工号' }}</p>
                 <p class="break-words" :class="order.returnRequestCount > 0 ? 'text-amber-700' : 'text-slate-400'">
                   退货记录：{{ order.returnRequestCount > 0 ? `共 ${order.returnRequestCount} 笔${order.pendingReturnRequestCount > 0 ? `，待处理 ${order.pendingReturnRequestCount} 笔` : ''}` : '暂无' }}
                 </p>
@@ -1243,10 +1417,21 @@ onBeforeUnmount(() => {
               </div>
               <p class="mt-1 break-all text-sm text-slate-400">核销码：{{ activeOrderDetail.order.verifyCode }}</p>
             </div>
-            <div class="grid grid-cols-1 gap-2 sm:grid-cols-3 lg:w-auto">
+            <div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-4 lg:w-auto">
               <el-button class="w-full" type="primary" plain :disabled="!canGoVerify" @click="handleGoVerify">{{ goVerifyButtonText }}</el-button>
               <el-button class="w-full" :loading="detailLoading" @click="handleRefreshCurrentOrder">刷新状态</el-button>
               <el-button class="w-full" @click="handleCopyVerifyCode">复制核销码</el-button>
+              <el-button
+                v-if="canDeleteCurrentOrder"
+                class="w-full"
+                type="danger"
+                plain
+                :loading="orderDeleting"
+                :disabled="detailLoading"
+                @click="handleDeleteCurrentOrder"
+              >
+                删除订单
+              </el-button>
             </div>
           </div>
 
@@ -1444,10 +1629,14 @@ onBeforeUnmount(() => {
                 便于门店在特殊情况下通过电话、邮件等方式及时联系客户并同步订单变化。
               </p>
             </div>
-            <div class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <div class="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
               <div class="rounded-2xl bg-slate-50 px-4 py-3">
                 <p class="text-sm text-slate-400">用户名</p>
                 <p class="mt-1 break-words text-sm font-semibold text-slate-900">{{ orderCustomerProfile.username }}</p>
+              </div>
+              <div class="rounded-2xl bg-slate-50 px-4 py-3">
+                <p class="text-sm text-slate-400">账号类型</p>
+                <p class="mt-1 break-words text-sm font-semibold text-slate-900">{{ orderCustomerProfile.accountType }}</p>
               </div>
               <div class="rounded-2xl bg-slate-50 px-4 py-3">
                 <p class="text-sm text-slate-400">手机号</p>
@@ -1457,9 +1646,13 @@ onBeforeUnmount(() => {
                 <p class="text-sm text-slate-400">邮箱</p>
                 <p class="mt-1 break-all text-sm font-semibold text-slate-900">{{ orderCustomerProfile.email }}</p>
               </div>
-              <div class="rounded-2xl bg-slate-50 px-4 py-3">
+              <div v-if="isDepartmentOrder(activeOrderDetail.order.clientOrderType)" class="rounded-2xl bg-slate-50 px-4 py-3">
                 <p class="text-sm text-slate-400">所属部门</p>
                 <p class="mt-1 break-words text-sm font-semibold text-slate-900">{{ orderCustomerProfile.departmentName }}</p>
+              </div>
+              <div v-if="isDepartmentOrder(activeOrderDetail.order.clientOrderType)" class="rounded-2xl bg-slate-50 px-4 py-3">
+                <p class="text-sm text-slate-400">工号</p>
+                <p class="mt-1 break-words text-sm font-semibold text-slate-900">{{ orderCustomerProfile.staffNo }}</p>
               </div>
             </div>
           </div>

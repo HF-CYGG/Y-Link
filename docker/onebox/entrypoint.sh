@@ -30,6 +30,17 @@ export DB_NAME="${DB_NAME:-y_link}"
 export DB_SYNC="${DB_SYNC:-false}"
 export INIT_ADMIN_USERNAME="${INIT_ADMIN_USERNAME:-admin}"
 export INIT_ADMIN_DISPLAY_NAME="${INIT_ADMIN_DISPLAY_NAME:-系统管理员}"
+export PERMANENT_DELETE_PASSWORD="${PERMANENT_DELETE_PASSWORD:-}"
+
+# 容器内统一使用北京时间（Asia/Shanghai）渲染日志和应用时间。
+# 注意：容器共享宿主机内核时钟，真正“自动校时”需在宿主机启用 NTP。
+if [ -f "/usr/share/zoneinfo/${TZ}" ]; then
+  ln -snf "/usr/share/zoneinfo/${TZ}" /etc/localtime
+  echo "${TZ}" > /etc/timezone
+else
+  echo "[onebox] warning: timezone file not found for TZ=${TZ}, keep current timezone." >&2
+fi
+echo "[onebox] timezone=${TZ}, now=$(date '+%Y-%m-%d %H:%M:%S %z %Z')"
 
 if [ -z "${INIT_ADMIN_PASSWORD:-}" ]; then
   echo "[onebox] INIT_ADMIN_PASSWORD is required. Set it manually in the container panel environment variables before startup." >&2
@@ -42,6 +53,7 @@ if [ "${INIT_ADMIN_PASSWORD}" = "Admin@123456" ]; then
 fi
 
 export INIT_ADMIN_PASSWORD
+export PERMANENT_DELETE_PASSWORD
 
 # 统一替换 nginx 反向代理端口，确保与后端实际监听端口保持一致。
 sed "s/__BACKEND_PORT__/${PORT}/g" /etc/nginx/conf.d/default.conf > /etc/nginx/conf.d/default.runtime.conf

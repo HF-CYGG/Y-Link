@@ -13,7 +13,7 @@
 
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+
 import {
   FEEDBACK_CATEGORY_OPTIONS,
   FEEDBACK_ISSUE_TYPE_OPTIONS,
@@ -30,7 +30,11 @@ import {
 import { useClientAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { extractErrorMessage } from '@/utils/error'
+import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { normalizeSubmitText } from '@/utils/submit-feedback'
+
+
+import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 const router = useRouter()
 const clientAuthStore = useClientAuthStore(pinia)
@@ -156,7 +160,7 @@ const handleCreateAttachmentChange = async (event: Event) => {
   }
 
   if (createAttachments.value.length >= FEEDBACK_ATTACHMENT_LIMIT) {
-    ElMessage.warning(`单条反馈最多上传 ${FEEDBACK_ATTACHMENT_LIMIT} 张图片`)
+    showAppWarning(`单条反馈最多上传 ${FEEDBACK_ATTACHMENT_LIMIT} 张图片`)
     input!.value = ''
     return
   }
@@ -167,19 +171,19 @@ const handleCreateAttachmentChange = async (event: Event) => {
   try {
     for (const file of targetFiles) {
       if (!file.type.startsWith('image/')) {
-        ElMessage.warning(`文件 ${file.name} 不是图片，已跳过`)
+        showAppWarning(`文件 ${file.name} 不是图片，已跳过`)
         continue
       }
       if (file.size > FEEDBACK_ATTACHMENT_MAX_SIZE) {
-        ElMessage.warning(`文件 ${file.name} 超过 10MB，已跳过`)
+        showAppWarning(`文件 ${file.name} 超过 10MB，已跳过`)
         continue
       }
       const attachment = await uploadClientFeedbackAttachment(file)
       createAttachments.value = [...createAttachments.value, attachment]
     }
-    ElMessage.success('附件上传完成，可随反馈单一并提交')
+    showAppSuccess('附件上传完成，可随反馈单一并提交')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '附件上传失败，请稍后重试'))
+    showAppError(extractErrorMessage(error, '附件上传失败，请稍后重试'))
   } finally {
     uploadingAttachments.value = false
     if (input) {
@@ -195,7 +199,7 @@ const handleRemoveAttachment = (attachmentIndex: number) => {
 const handlePreviewAttachment = (attachment: FeedbackConversationMessageAttachment) => {
   const previewUrl = resolveAttachmentPreviewUrl(attachment)
   if (!previewUrl) {
-    ElMessage.warning('当前附件地址无效，暂时无法预览')
+    showAppWarning('当前附件地址无效，暂时无法预览')
     return
   }
   if (!isImageAttachment(attachment)) {
@@ -207,7 +211,7 @@ const handlePreviewAttachment = (attachment: FeedbackConversationMessageAttachme
 
 const handleCreateConversation = async () => {
   if (!currentClientUser.value) {
-    ElMessage.warning('当前登录状态异常，请重新进入客户端后重试')
+    showAppWarning('当前登录状态异常，请重新进入客户端后重试')
     return
   }
 
@@ -217,11 +221,11 @@ const handleCreateConversation = async () => {
   const normalizedActualResult = normalizeSubmitText(createForm.actualResult)
 
   if (!normalizedTitle || !normalizedSummary) {
-    ElMessage.warning('请至少填写问题标题和问题描述')
+    showAppWarning('请至少填写问题标题和问题描述')
     return
   }
   if (isBugMode.value && (!normalizedExpectedResult || !normalizedActualResult)) {
-    ElMessage.warning('专业 BUG 需要补充期望结果与实际结果，方便客服快速定位')
+    showAppWarning('专业 BUG 需要补充期望结果与实际结果，方便客服快速定位')
     return
   }
 
@@ -242,12 +246,16 @@ const handleCreateConversation = async () => {
       attachments: createAttachments.value,
     })
 
-    ElMessage.success('反馈已提交，正在跳转到反馈单详情页')
+    showAppSuccess('反馈已提交，正在跳转到反馈单详情页')
     await router.replace({
       path: `/client/feedback/${createdRecord.id}`,
     })
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '反馈提交失败，请稍后重试'))
+    void showCriticalErrorDialog(error, {
+      title: '反馈提交失败',
+      fallback: '反馈提交失败，请稍后重试',
+      operation: '提交反馈单',
+    })
   } finally {
     creating.value = false
   }
@@ -260,7 +268,7 @@ onMounted(async () => {
   try {
     await loadPortalConfig()
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '新建反馈页加载失败，请稍后重试'))
+    showAppError(extractErrorMessage(error, '新建反馈页加载失败，请稍后重试'))
   }
 })
 </script>

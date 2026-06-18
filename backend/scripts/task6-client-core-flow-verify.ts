@@ -115,6 +115,7 @@ const buildScenarioMetric = (samples: number[]): ScenarioMetric => {
 }
 
 const readCaptchaCode = (captchaSvg: string) => captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6)
+const toChineseDigits = (value: string) => value.replaceAll(/\d/g, (digit) => '零一二三四五六七八九'[Number(digit)] ?? '')
 
 const readOptionalJson = <T>(filePath: string): T | null => {
   if (!fs.existsSync(filePath)) {
@@ -136,10 +137,11 @@ const ensureReady = async () => {
 const registerAndLoginClient = async (seed: number): Promise<ClientAuthContext> => {
   const registerCaptcha = await clientAuthService.createCaptcha()
   const account = `1${String(seed).slice(-10)}`
-  const username = `task6_client_${String(seed).slice(-6)}`
+  const username = `核心用户${toChineseDigits(String(seed).slice(-6))}`
   const password = `Task6@${String(seed).slice(-6)}`
 
   const registerResult = await clientAuthService.register({
+    accountType: 'personal',
     account,
     username,
     password,
@@ -149,7 +151,7 @@ const registerAndLoginClient = async (seed: number): Promise<ClientAuthContext> 
 
   const loginCaptcha = await clientAuthService.createCaptcha()
   const loginResult = await clientAuthService.login({
-    account: registerResult.mobile,
+    account: registerResult.user.mobile,
     password,
     captchaId: loginCaptcha.captchaId,
     captchaCode: readCaptchaCode(loginCaptcha.captchaSvg),
@@ -285,8 +287,8 @@ const measureMallScenario = async () => {
   let listedCount = 0
   for (let index = 0; index < 20; index += 1) {
     const startedAt = performance.now()
-    const rows = await o2oPreorderService.listMallProducts()
-    listedCount = rows.length
+    const mallResult = await o2oPreorderService.listMallProducts()
+    listedCount = mallResult.list.length
     samples.push(Number((performance.now() - startedAt).toFixed(2)))
   }
 
@@ -320,7 +322,6 @@ const measurePreorderScenario = async (clientAuth: ClientAuthContext) => {
   for (let index = 0; index < 5; index += 1) {
     const startedAt = performance.now()
     const detail = await o2oPreorderService.submit(clientAuth, {
-      clientOrderType: 'walkin',
       isSystemApplied: false,
       pickupContact: 'Task6下单联系人',
       items: [{ productId: product.id, qty: 2 }],
@@ -359,7 +360,6 @@ const seedOrdersForQueryScenario = async (clientAuth: ClientAuthContext) => {
   const product = await createListedProduct(`query-${Date.now()}`, 1000)
   for (let index = 0; index < 30; index += 1) {
     await o2oPreorderService.submit(clientAuth, {
-      clientOrderType: 'walkin',
       isSystemApplied: false,
       pickupContact: 'Task6查询联系人',
       items: [{ productId: product.id, qty: 1 }],
@@ -451,7 +451,6 @@ const measureOrderEditScenario = async (clientAuth: ClientAuthContext) => {
 
   for (let index = 0; index < 5; index += 1) {
     const created = await o2oPreorderService.submit(clientAuth, {
-      clientOrderType: 'walkin',
       isSystemApplied: false,
       pickupContact: 'Task6改单联系人',
       items: [{ productId: productA.id, qty: 2 }],

@@ -10,6 +10,7 @@ import { AppDataSource } from './config/data-source.js'
 import { maskDatabaseRuntimeOverride, readDatabaseRuntimeOverride } from './config/database-runtime-override.js'
 import { env, envLoadContext } from './config/env.js'
 import { authService } from './services/auth.service.js'
+import { notificationService } from './services/notification.service.js'
 import { o2oPreorderService } from './services/o2o-preorder.service.js'
 import { systemConfigService } from './services/system-config.service.js'
 import { migrateLegacyUploadReferences } from './utils/upload-migration.js'
@@ -188,6 +189,8 @@ async function bootstrap(): Promise<void> {
   const adminBootstrap = await authService.ensureDefaultAdmin()
   logLine('STEP', 'ensure default system configs')
   const configBootstrap = await systemConfigService.ensureDefaultConfigs()
+  logLine('STEP', 'ensure default notification rules')
+  await notificationService.ensureDefaultRules()
 
   const app = createApp()
   app.listen(env.PORT, () => {

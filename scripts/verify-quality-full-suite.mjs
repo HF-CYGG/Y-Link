@@ -82,6 +82,7 @@ const writeReport = (status) => {
 }
 
 const main = async () => {
+  await runStep('文本编码巡检', path.join(projectRoot, 'scripts', 'verify-text-encoding.mjs'))
   await runStep('单元功能测试套件', path.join(projectRoot, 'scripts', 'verify-unit-functional-suite.mjs'))
   await runStep('全部性能测试套件', path.join(projectRoot, 'scripts', 'verify-all-performance-suite.mjs'))
 }

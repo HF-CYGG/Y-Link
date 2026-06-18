@@ -14,7 +14,7 @@
  */
 
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessageBox } from 'element-plus'
 import { useRoute } from 'vue-router'
 import { CameraFilled, DocumentCopy, Search } from '@element-plus/icons-vue'
 import { BizCrudDialogShell, PageContainer, PassiveNumberInput, UnifiedScanDialog } from '@/components/common'
@@ -53,6 +53,9 @@ import {
 } from '@/views/o2o/o2o-verify-console.helpers'
 import { notifyClientOrderRefresh } from '@/utils/client-order-refresh'
 import { formatDiscountRate, resolveDiscountedUnitPrice, resolveOriginalPrice } from '@/utils/o2o-price'
+
+
+import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 const verifyCode = ref('')
 const verifyResult = ref<O2oVerifyDetailResult | null>(null)
@@ -334,7 +337,7 @@ const handleSearch = async () => {
   }
   const normalizedCode = normalizeVerifyCode(verifyCode.value)
   if (!normalizedCode) {
-    ElMessage.warning('请输入核销码')
+    showAppWarning('请输入核销码')
     return
   }
   verifyCode.value = normalizedCode
@@ -350,7 +353,7 @@ const handleSearch = async () => {
     },
     onError: (error) => {
       const message = error instanceof Error ? error.message : '查询失败，请稍后重试'
-      ElMessage.error(message)
+      showAppError(message)
       verifyResult.value = null
     },
     onFinally: () => {
@@ -364,19 +367,19 @@ const handlePasteAndSearch = async () => {
     return
   }
   if (!globalThis.navigator?.clipboard?.readText) {
-    ElMessage.warning('当前环境不支持读取剪贴板，请手动粘贴')
+    showAppWarning('当前环境不支持读取剪贴板，请手动粘贴')
     return
   }
   try {
     const text = await globalThis.navigator.clipboard.readText()
     verifyCode.value = normalizeVerifyCode(text)
     if (!verifyCode.value) {
-      ElMessage.warning('剪贴板中未读取到核销码')
+      showAppWarning('剪贴板中未读取到核销码')
       return
     }
     await handleSearch()
   } catch {
-    ElMessage.warning('读取剪贴板失败，请检查浏览器权限')
+    showAppWarning('读取剪贴板失败，请检查浏览器权限')
   }
 }
 
@@ -411,7 +414,7 @@ const loadProductCatalog = async () => {
     },
     onError: (error) => {
       const message = error instanceof Error ? error.message : '可改单商品加载失败，请稍后重试'
-      ElMessage.error(message)
+      showAppError(message)
     },
     onFinally: () => {
       productCatalogLoading.value = false
@@ -424,7 +427,7 @@ const openRejectDialog = () => {
     return
   }
   if (!canRejectReturnRequest.value) {
-    ElMessage.warning('当前退货申请不可拒绝')
+    showAppWarning('当前退货申请不可拒绝')
     return
   }
   resetRejectForm()
@@ -440,17 +443,17 @@ const handleSubmitReject = async () => {
     return
   }
   if (!canRejectReturnRequest.value) {
-    ElMessage.warning('当前退货申请不可拒绝')
+    showAppWarning('当前退货申请不可拒绝')
     return
   }
 
   const normalizedReason = rejectReason.value.trim()
   if (!normalizedReason) {
-    ElMessage.warning('请填写拒绝原因')
+    showAppWarning('请填写拒绝原因')
     return
   }
   if (normalizedReason.length > O2O_RETURN_REJECT_REASON_MAX_LENGTH) {
-    ElMessage.warning(`拒绝原因最多 ${O2O_RETURN_REJECT_REASON_MAX_LENGTH} 个字符`)
+    showAppWarning(`拒绝原因最多 ${O2O_RETURN_REJECT_REASON_MAX_LENGTH} 个字符`)
     return
   }
 
@@ -474,10 +477,10 @@ const handleSubmitReject = async () => {
     const nextDetail = await rejectO2oReturnRequest(returnRequestDetail.value.id, normalizedReason)
     replaceReturnRequestDetail(nextDetail)
     rejectDialogVisible.value = false
-    ElMessage.success('退货申请已拒绝')
+    showAppSuccess('退货申请已拒绝')
   } catch (error) {
     const message = error instanceof Error ? error.message : '拒绝退货申请失败，请稍后重试'
-    ElMessage.error(message)
+    showAppError(message)
   } finally {
     rejectSubmitting.value = false
   }
@@ -503,23 +506,23 @@ const removeOnsiteItem = (productId: string) => {
 const addOnsiteProduct = () => {
   const productId = onsiteAddProductId.value.trim()
   if (!productId) {
-    ElMessage.warning('请先选择要加入订单的商品')
+    showAppWarning('请先选择要加入订单的商品')
     return
   }
   if (onsiteOrderItems.value.some((item) => item.productId === productId)) {
-    ElMessage.warning('该商品已在当前订单中')
+    showAppWarning('该商品已在当前订单中')
     return
   }
 
   const product = productCatalog.value.find((item) => item.id === productId)
   if (!product) {
-    ElMessage.warning('未找到可加入的商品')
+    showAppWarning('未找到可加入的商品')
     return
   }
 
   const maxQty = resolveEditableItemMaxQty(product, 0)
   if (maxQty <= 0) {
-    ElMessage.warning('该商品当前库存不足，暂不可加入订单')
+    showAppWarning('该商品当前库存不足，暂不可加入订单')
     return
   }
 
@@ -550,7 +553,7 @@ const openOnsiteAdjustDialog = async () => {
     return
   }
   if (!canOpenOnsiteAdjust.value) {
-    ElMessage.warning('当前订单不可现场改单')
+    showAppWarning('当前订单不可现场改单')
     return
   }
   await loadProductCatalog()
@@ -567,7 +570,7 @@ const handleSubmitOnsiteAdjust = async () => {
     return
   }
   if (!canOpenOnsiteAdjust.value) {
-    ElMessage.warning('当前订单不可现场改单')
+    showAppWarning('当前订单不可现场改单')
     return
   }
 
@@ -580,11 +583,11 @@ const handleSubmitOnsiteAdjust = async () => {
     .filter((item) => item.qty > 0)
 
   if (!normalizedItems.length) {
-    ElMessage.warning('订单至少保留一件商品')
+    showAppWarning('订单至少保留一件商品')
     return
   }
   if (onsiteRemark.value.trim().length > O2O_PREORDER_REMARK_MAX_LENGTH) {
-    ElMessage.warning(`订单备注最多 ${O2O_PREORDER_REMARK_MAX_LENGTH} 个字符`)
+    showAppWarning(`订单备注最多 ${O2O_PREORDER_REMARK_MAX_LENGTH} 个字符`)
     return
   }
 
@@ -615,10 +618,10 @@ const handleSubmitOnsiteAdjust = async () => {
     replacePreorderDetail(nextDetail)
     notifyPreorderChanged(nextDetail.order.id, 'updated')
     onsiteAdjustDialogVisible.value = false
-    ElMessage.success('现场改单已保存')
+    showAppSuccess('现场改单已保存')
   } catch (error) {
     const message = error instanceof Error ? error.message : '现场改单失败，请稍后重试'
-    ElMessage.error(message)
+    showAppError(message)
   } finally {
     onsiteAdjustSubmitting.value = false
   }
@@ -650,10 +653,10 @@ const handleSaveComplianceFlags = async () => {
     replacePreorderDetail(nextDetail)
     syncComplianceFormFromDetail(nextDetail)
     notifyPreorderChanged(nextDetail.order.id, 'compliance_updated')
-    ElMessage.success('状态已更新')
+    showAppSuccess('状态已更新')
   } catch (error) {
     const message = error instanceof Error ? error.message : '状态更新失败，请稍后重试'
-    ElMessage.error(message)
+    showAppError(message)
   } finally {
     complianceSaving.value = false
   }
@@ -663,11 +666,11 @@ const getVerifyActionLabel = (isReturnVerify: boolean) => (isReturnVerify ? '退
 
 const ensureVerifyPreconditions = (isReturnVerify: boolean, activeVerifyCode: string) => {
   if (!canVerifyStatus.value) {
-    ElMessage.warning(isReturnVerify ? '当前退货申请已处理，不可继续回库' : '当前订单已取消或已核销，不可继续核销')
+    showAppWarning(isReturnVerify ? '当前退货申请已处理，不可继续回库' : '当前订单已取消或已核销，不可继续核销')
     return false
   }
   if (!activeVerifyCode) {
-    ElMessage.warning(isReturnVerify ? '当前退货申请缺少退货码，无法继续处理' : '当前订单缺少核销码，无法继续处理')
+    showAppWarning(isReturnVerify ? '当前退货申请缺少退货码，无法继续处理' : '当前订单缺少核销码，无法继续处理')
     return false
   }
   return true
@@ -722,7 +725,7 @@ const handleVerify = async () => {
     if (!isReturnVerify && isPreorderDetail(verifyResult.value.detail)) {
       notifyPreorderChanged(verifyResult.value.detail.order.id, 'verified')
     }
-    ElMessage.success(isReturnVerify ? '退货核销完成，库存已同步回补' : '核销完成，库存已同步扣减')
+    showAppSuccess(isReturnVerify ? '退货核销完成，库存已同步回补' : '核销完成，库存已同步扣减')
     verifyCode.value = ''
     await focusInput()
   } finally {

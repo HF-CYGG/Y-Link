@@ -154,6 +154,14 @@ function readBooleanFlag(row: Record<string, unknown>, field: string, label: str
   throw new BizError(`${label}类型非法，仅支持布尔值或 0/1`, 400)
 }
 
+function readOptionalBooleanFlag(row: Record<string, unknown>, field: string, fallback = false): boolean {
+  const rawValue = row[field]
+  if (rawValue === null || rawValue === undefined || rawValue === '') {
+    return fallback
+  }
+  return readBooleanFlag(row, field, field)
+}
+
 function readInteger(row: Record<string, unknown>, field: string, label: string, options: { min?: number; max?: number } = {}): number {
   const rawValue = row[field]
   const parsedValue = parseNumberish(rawValue)
@@ -372,6 +380,11 @@ function validatePreorderRows(rows: ExportRow[]) {
         timeoutAt: readOptionalDateText(rawRow, 'timeoutAt'),
         verifiedAt: readOptionalDateText(rawRow, 'verifiedAt'),
         verifiedBy: readOptionalText(rawRow, 'verifiedBy', 64),
+        isDeleted: readOptionalBooleanFlag(rawRow, 'isDeleted', false),
+        deletedAt: readOptionalDateText(rawRow, 'deletedAt'),
+        deletedByUserId: readOptionalIdentifier(rawRow, 'deletedByUserId'),
+        deletedByUsername: readOptionalText(rawRow, 'deletedByUsername', 64),
+        deletedByDisplayName: readOptionalText(rawRow, 'deletedByDisplayName', 64),
         createdAt: readRequiredDateText(rawRow, 'createdAt', '预订单创建时间'),
         updatedAt: readRequiredDateText(rawRow, 'updatedAt', '预订单更新时间'),
       }

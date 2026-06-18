@@ -5,13 +5,16 @@
  * 维护说明：调整入库流程时需同步维护“识别→入清单→批量确认→流水核对”四段式状态链路，避免库存口径不一致
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessageBox } from 'element-plus'
 import { CameraFilled } from '@element-plus/icons-vue'
 import { PageContainer, PassiveNumberInput, UnifiedScanDialog } from '@/components/common'
 import { getProductList, type ProductRecord } from '@/api/modules/product'
-import { getO2oInventoryLogs, inboundO2oStock, type O2oInventoryLog } from '@/api/modules/o2o'
+import { getO2oInventoryLogsPaged, inboundO2oStock, type O2oInventoryLog } from '@/api/modules/o2o'
 import { useCameraQrScanner } from '@/composables/useCameraQrScanner'
 import { extractErrorMessage } from '@/utils/error'
+
+
+import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 // 两种扫码模式：
 // - scan_plus_one：扫一件算一件，适合逐件补货；
@@ -43,6 +46,9 @@ const submittingSingle = ref(false)
 const confirmingBatch = ref(false)
 const products = ref<ProductRecord[]>([])
 const logs = ref<O2oInventoryLog[]>([])
+const logPage = ref(1)
+const logPageSize = ref(10)
+const logTotal = ref(0)
 const inboundList = ref<InboundDraftItem[]>([])
 const scanPanelRef = ref<HTMLElement | null>(null)
 const scanCode = ref('')
@@ -60,6 +66,7 @@ const inventoryLogPanelHeight = ref('')
 let scanPanelResizeObserver: ResizeObserver | null = null
 const desktopWorkbenchMediaQuery = '(min-width: 1280px)'
 let desktopWorkbenchMediaList: MediaQueryList | null = null
+let inventoryLogPanelHeightFrame = 0
 
 const manualForm = reactive({
   productId: '',
@@ -136,12 +143,33 @@ const isDesktopWorkbenchLayout = () => {
 
 const syncInventoryLogPanelHeight = () => {
   if (!isDesktopWorkbenchLayout()) {
-    inventoryLogPanelHeight.value = ''
+    if (inventoryLogPanelHeight.value) {
+      inventoryLogPanelHeight.value = ''
+    }
     return
   }
 
   const nextHeight = scanPanelRef.value?.offsetHeight ?? 0
-  inventoryLogPanelHeight.value = nextHeight > 0 ? `${nextHeight}px` : ''
+  const nextValue = nextHeight > 0 ? `${nextHeight}px` : ''
+  if (inventoryLogPanelHeight.value !== nextValue) {
+    inventoryLogPanelHeight.value = nextValue
+  }
+}
+
+const scheduleInventoryLogPanelHeightSync = () => {
+  if (globalThis.window === undefined || typeof globalThis.window.requestAnimationFrame !== 'function') {
+    syncInventoryLogPanelHeight()
+    return
+  }
+
+  if (inventoryLogPanelHeightFrame) {
+    return
+  }
+
+  inventoryLogPanelHeightFrame = globalThis.window.requestAnimationFrame(() => {
+    inventoryLogPanelHeightFrame = 0
+    syncInventoryLogPanelHeight()
+  })
 }
 
 const inventoryLogPanelStyle = computed(() => {
@@ -188,7 +216,7 @@ const updateInboundListItemQty = (productId: string, qty: number) => {
   }
   const normalizedQty = Math.floor(Number(qty))
   if (!Number.isInteger(normalizedQty) || normalizedQty <= 0) {
-    ElMessage.warning('数量必须为正整数')
+    showAppWarning('数量必须为正整数')
     return
   }
   target.qty = normalizedQty
@@ -226,15 +254,32 @@ const loadProducts = async () => {
   }
 }
 
-// 最近库存流水用于“提交后立即核对”。
-// 这里保留最近 20 条，避免页面首屏信息过多。
+// 最近库存流水用于“提交后立即核对”，通过分页避免一次铺满所有流水。
 const loadLogs = async () => {
   logLoading.value = true
   try {
-    logs.value = await getO2oInventoryLogs(20)
+    const result = await getO2oInventoryLogsPaged({
+      page: logPage.value,
+      pageSize: logPageSize.value,
+    })
+    logs.value = result.list
+    logPage.value = result.page
+    logPageSize.value = result.pageSize
+    logTotal.value = result.total
   } finally {
     logLoading.value = false
   }
+}
+
+const loadLatestLogs = async () => {
+  logPage.value = 1
+  await loadLogs()
+}
+
+const handleLogPageSizeChange = (pageSize: number) => {
+  logPageSize.value = pageSize
+  logPage.value = 1
+  void loadLogs()
 }
 
 // 保持扫码输入框常驻焦点，适配扫码枪“扫描后自动回车”的典型使用方式。
@@ -249,13 +294,13 @@ const focusScanInput = () => {
 const recognizeByCode = (rawCode: string) => {
   const normalizedCode = normalizeProductCode(rawCode)
   if (!normalizedCode) {
-    ElMessage.warning('请扫描或输入商品编码')
+    showAppWarning('请扫描或输入商品编码')
     return null
   }
   const product = productCodeMap.value.get(normalizedCode)
   if (!product) {
     setRecognizedProduct(null)
-    ElMessage.error('未识别到商品编码')
+    showAppError('未识别到商品编码')
     return null
   }
   setRecognizedProduct(product)
@@ -272,13 +317,13 @@ const handleScanSubmit = () => {
   }
   if (scanMode.value === 'scan_plus_one') {
     upsertInboundListItem(product, 1)
-    ElMessage.success(`已加入：${product.productName} +1`)
+    showAppSuccess(`已加入：${product.productName} +1`)
     scanCode.value = ''
     focusScanInput()
     return
   }
   pendingManualQty.value = 1
-  ElMessage.success(`已识别商品：${product.productName}，请输入数量后加入清单`)
+  showAppSuccess(`已识别商品：${product.productName}，请输入数量后加入清单`)
   scanCode.value = ''
   focusScanInput()
 }
@@ -318,11 +363,11 @@ const handleOpenCameraScanDialog = () => {
 const increaseQuickQty = (step: number) => {
   if (scanMode.value === 'scan_plus_one') {
     if (!recognizedProduct.value) {
-      ElMessage.warning('请先扫描识别商品')
+      showAppWarning('请先扫描识别商品')
       return
     }
     upsertInboundListItem(recognizedProduct.value, step)
-    ElMessage.success(`已加入：${recognizedProduct.value.productName} +${step}`)
+    showAppSuccess(`已加入：${recognizedProduct.value.productName} +${step}`)
     return
   }
   pendingManualQty.value = Math.max(1, Math.floor(Number(pendingManualQty.value)) + step)
@@ -331,47 +376,47 @@ const increaseQuickQty = (step: number) => {
 // 在“扫码后输入数量”模式下，把当前识别商品按手工数量加入清单。
 const addRecognizedProductWithQty = () => {
   if (!recognizedProduct.value) {
-    ElMessage.warning('请先扫码识别商品')
+    showAppWarning('请先扫码识别商品')
     return
   }
   const normalizedQty = Math.floor(Number(pendingManualQty.value))
   if (!Number.isInteger(normalizedQty) || normalizedQty <= 0) {
-    ElMessage.warning('数量必须为正整数')
+    showAppWarning('数量必须为正整数')
     return
   }
   upsertInboundListItem(recognizedProduct.value, normalizedQty)
-  ElMessage.success(`已加入：${recognizedProduct.value.productName} +${normalizedQty}`)
+  showAppSuccess(`已加入：${recognizedProduct.value.productName} +${normalizedQty}`)
 }
 
 // 兼容老流程：手动选商品后加入“本次清单”。
 const addManualToInboundList = () => {
   if (!manualForm.productId) {
-    ElMessage.warning('请选择商品')
+    showAppWarning('请选择商品')
     return
   }
   const product = productMap.value.get(manualForm.productId)
   if (!product) {
-    ElMessage.warning('商品不存在，请刷新后重试')
+    showAppWarning('商品不存在，请刷新后重试')
     return
   }
   if (!Number.isInteger(manualForm.qty) || manualForm.qty <= 0) {
-    ElMessage.warning('数量必须为正整数')
+    showAppWarning('数量必须为正整数')
     return
   }
   upsertInboundListItem(product, manualForm.qty)
   setRecognizedProduct(product)
-  ElMessage.success(`已加入清单：${product.productName} +${manualForm.qty}`)
+  showAppSuccess(`已加入清单：${product.productName} +${manualForm.qty}`)
 }
 
 // 兼容老流程：不走清单，直接单笔入库。
 // 适合偶发补货、只处理一个商品的场景。
 const handleSingleInbound = async () => {
   if (!manualForm.productId) {
-    ElMessage.warning('请选择商品')
+    showAppWarning('请选择商品')
     return
   }
   if (!Number.isInteger(manualForm.qty) || manualForm.qty <= 0) {
-    ElMessage.warning('入库数量必须为正整数')
+    showAppWarning('入库数量必须为正整数')
     return
   }
   submittingSingle.value = true
@@ -381,12 +426,12 @@ const handleSingleInbound = async () => {
       qty: manualForm.qty,
       remark: manualForm.remark.trim() || undefined,
     })
-    ElMessage.success('单笔入库成功')
+    showAppSuccess('单笔入库成功')
     manualForm.qty = 1
     manualForm.remark = ''
-    await Promise.all([loadProducts(), loadLogs()])
+    await Promise.all([loadProducts(), loadLatestLogs()])
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '单笔入库失败'))
+    showAppError(extractErrorMessage(error, '单笔入库失败'))
   } finally {
     submittingSingle.value = false
   }
@@ -398,7 +443,7 @@ const handleSingleInbound = async () => {
 // - 最后统一刷新商品库存与流水。
 const handleBatchConfirmInbound = async () => {
   if (!inboundList.value.length) {
-    ElMessage.warning('本次入库清单为空')
+    showAppWarning('本次入库清单为空')
     return
   }
   confirmingBatch.value = true
@@ -438,12 +483,12 @@ const handleBatchConfirmInbound = async () => {
       details: resultDetails,
     }
     if (failedCount > 0) {
-      ElMessage.warning(`本次入库完成：成功 ${successCount} 条，失败 ${failedCount} 条`)
+      showAppWarning(`本次入库完成：成功 ${successCount} 条，失败 ${failedCount} 条`)
     } else {
-      ElMessage.success(`本次入库完成：成功 ${successCount} 条`)
+      showAppSuccess(`本次入库完成：成功 ${successCount} 条`)
       listRemark.value = ''
     }
-    await Promise.all([loadProducts(), loadLogs()])
+    await Promise.all([loadProducts(), loadLatestLogs()])
   } finally {
     confirmingBatch.value = false
   }
@@ -455,16 +500,16 @@ onMounted(async () => {
   focusScanInput()
 
   await nextTick()
-  syncInventoryLogPanelHeight()
+  scheduleInventoryLogPanelHeightSync()
 
   if (globalThis.window !== undefined && typeof globalThis.window.matchMedia === 'function') {
     desktopWorkbenchMediaList = globalThis.window.matchMedia(desktopWorkbenchMediaQuery)
-    desktopWorkbenchMediaList.addEventListener('change', syncInventoryLogPanelHeight)
+    desktopWorkbenchMediaList.addEventListener('change', scheduleInventoryLogPanelHeightSync)
   }
 
   if (typeof ResizeObserver !== 'undefined') {
     scanPanelResizeObserver = new ResizeObserver(() => {
-      syncInventoryLogPanelHeight()
+      scheduleInventoryLogPanelHeightSync()
     })
 
     if (scanPanelRef.value) {
@@ -476,8 +521,12 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   scanPanelResizeObserver?.disconnect()
   scanPanelResizeObserver = null
-  desktopWorkbenchMediaList?.removeEventListener('change', syncInventoryLogPanelHeight)
+  desktopWorkbenchMediaList?.removeEventListener('change', scheduleInventoryLogPanelHeightSync)
   desktopWorkbenchMediaList = null
+  if (inventoryLogPanelHeightFrame && globalThis.window !== undefined) {
+    globalThis.window.cancelAnimationFrame(inventoryLogPanelHeightFrame)
+    inventoryLogPanelHeightFrame = 0
+  }
 })
 </script>
 
@@ -670,7 +719,6 @@ onBeforeUnmount(() => {
         <div class="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <p class="break-words text-lg font-semibold text-slate-900">库存流水区</p>
-            <p class="break-words text-sm text-slate-500">可追踪预订占用、核销出库、手动入库等变化</p>
           </div>
           <el-button @click="loadLogs">刷新流水</el-button>
         </div>
@@ -691,6 +739,17 @@ onBeforeUnmount(() => {
             </el-table-column>
             <el-table-column prop="operatorName" label="操作人" width="110" />
           </el-table>
+        </div>
+        <div class="mt-4 flex w-full min-w-0 justify-end">
+          <el-pagination
+            v-model:current-page="logPage"
+            v-model:page-size="logPageSize"
+            layout="sizes, prev, pager, next"
+            :page-sizes="[10, 20, 50]"
+            :total="logTotal"
+            @current-change="loadLogs"
+            @size-change="handleLogPageSizeChange"
+          />
         </div>
       </section>
     </div>

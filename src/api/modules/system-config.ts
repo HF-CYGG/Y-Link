@@ -44,6 +44,7 @@ export interface O2oRuleConfigRecord {
   limitEnabled: boolean
   limitQty: number
   clientPreorderUpdateLimit: number
+  storeBusinessHoursText: string
   updatedAt: string
 }
 
@@ -53,6 +54,7 @@ export interface UpdateO2oRuleConfigsPayload {
   limitEnabled: boolean
   limitQty: number
   clientPreorderUpdateLimit: number
+  storeBusinessHoursText: string
 }
 
 export interface UpdateO2oRuleConfigsResult {
@@ -94,6 +96,55 @@ export interface UpdateVerificationProviderConfigsResult {
   changed: boolean
 }
 
+export interface CustomerServiceFaqRecord {
+  question: string
+  answer: string
+}
+
+export interface CustomerServiceAvailabilityRecord {
+  status: 'online' | 'offline'
+  reason: 'within_work_hours' | 'outside_work_hours' | 'no_online_staff'
+  isOnline: boolean
+  withinWorkHours: boolean
+  hasOnlineStaff: boolean
+  serviceConnectedCount: number
+  serverTime: string
+  workHoursText: string
+  offlineNotice: string
+  offlineFaqs: CustomerServiceFaqRecord[]
+}
+
+export interface CustomerServiceConfigRecord {
+  enabled: boolean
+  realtimeEnabled: boolean
+  entryNotice: string
+  workdayStart: string
+  workdayEnd: string
+  workdayWeekdays: number[]
+  offlineNotice: string
+  offlineFaqs: CustomerServiceFaqRecord[]
+  sseKeepaliveSeconds: number
+  availability: CustomerServiceAvailabilityRecord
+  updatedAt: string
+}
+
+export interface UpdateCustomerServiceConfigsPayload {
+  enabled: boolean
+  realtimeEnabled: boolean
+  entryNotice: string
+  workdayStart: string
+  workdayEnd: string
+  workdayWeekdays: number[]
+  offlineNotice: string
+  offlineFaqs: CustomerServiceFaqRecord[]
+  sseKeepaliveSeconds: number
+}
+
+export interface UpdateCustomerServiceConfigsResult {
+  config: CustomerServiceConfigRecord
+  changed: boolean
+}
+
 export interface TestVerificationProviderPayload {
   channel: 'mobile' | 'email'
   target: string
@@ -126,6 +177,92 @@ export interface UpdateClientDepartmentConfigsPayload {
 export interface UpdateClientDepartmentConfigsResult {
   config: ClientDepartmentConfigRecord
   changed: boolean
+}
+
+export type ClientStaffDirectoryStatus = 'active' | 'inactive'
+export type ClientStaffDirectoryRegistrationStatus = 'registered' | 'unregistered'
+
+export interface ClientStaffDirectoryRecord {
+  id: string
+  staffNo: string
+  realName: string
+  departmentName: string
+  status: ClientStaffDirectoryStatus
+  isRegistered: boolean
+  linkedClientUserCount: number
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ClientStaffDirectoryListQuery {
+  page: number
+  pageSize: number
+  keyword?: string
+  status?: ClientStaffDirectoryStatus
+  registrationStatus?: ClientStaffDirectoryRegistrationStatus
+}
+
+export interface ClientStaffDirectoryListResult {
+  page: number
+  pageSize: number
+  total: number
+  list: ClientStaffDirectoryRecord[]
+}
+
+export interface SaveClientStaffDirectoryPayload {
+  staffNo: string
+  realName: string
+  departmentName: string
+  status?: ClientStaffDirectoryStatus
+}
+
+export interface SaveClientStaffDirectoryResult {
+  record: ClientStaffDirectoryRecord
+}
+
+export interface DeleteClientStaffDirectoryBatchPayload {
+  ids: string[]
+}
+
+export interface DeleteClientStaffDirectoryBatchResult {
+  summary: {
+    deleted: number
+    linkedDepartmentAccounts: number
+  }
+}
+
+export interface ImportClientStaffDirectoryPayload {
+  rows?: SaveClientStaffDirectoryPayload[]
+  rawText?: string
+}
+
+export interface ImportClientStaffDirectoryResult {
+  summary: {
+    created: number
+    updated: number
+    skipped: number
+    autoCreatedDepartments: string[]
+  }
+  list: ClientStaffDirectoryRecord[]
+}
+
+export interface ImportClientStaffDirectoryPreviewRow {
+  staffNo: string
+  realName: string
+  departmentName: string
+  status: ClientStaffDirectoryStatus
+  action: 'create' | 'update' | 'skip'
+}
+
+export interface ImportClientStaffDirectoryPreviewResult {
+  summary: {
+    total: number
+    creatable: number
+    updatable: number
+    skippable: number
+    autoCreatedDepartments: string[]
+  }
+  rows: ImportClientStaffDirectoryPreviewRow[]
 }
 
 /**
@@ -166,6 +303,27 @@ export const updateO2oRuleConfigs = (payload: UpdateO2oRuleConfigsPayload) =>
   request<UpdateO2oRuleConfigsResult>({
     method: 'PUT',
     url: '/system-configs/o2o-rules',
+    data: payload,
+  })
+
+/**
+ * 获取客服中心配置：
+ * - 当前管理端系统配置页只修改其中一部分字段，但保存时仍沿用完整配置结构。
+ */
+export const getCustomerServiceConfigs = () =>
+  request<CustomerServiceConfigRecord>({
+    method: 'GET',
+    url: '/system-configs/customer-service',
+  })
+
+/**
+ * 保存客服中心配置：
+ * - 包括客服在线时间、入口提示语、离线提示与 FAQ 等共享口径。
+ */
+export const updateCustomerServiceConfigs = (payload: UpdateCustomerServiceConfigsPayload) =>
+  request<UpdateCustomerServiceConfigsResult>({
+    method: 'PUT',
+    url: '/system-configs/customer-service',
     data: payload,
   })
 
@@ -220,3 +378,78 @@ export const updateClientDepartmentConfigs = (payload: UpdateClientDepartmentCon
     url: '/system-configs/client-departments',
     data: payload,
   })
+
+export const getClientStaffDirectoryList = (params: ClientStaffDirectoryListQuery) =>
+  request<ClientStaffDirectoryListResult>({
+    method: 'GET',
+    url: '/system-configs/client-staff-directory',
+    params,
+  })
+
+export const createClientStaffDirectoryRecord = (payload: SaveClientStaffDirectoryPayload) =>
+  request<SaveClientStaffDirectoryResult>({
+    method: 'POST',
+    url: '/system-configs/client-staff-directory',
+    data: payload,
+  })
+
+export const updateClientStaffDirectoryRecord = (id: string, payload: Omit<SaveClientStaffDirectoryPayload, 'status'>) =>
+  request<SaveClientStaffDirectoryResult>({
+    method: 'PUT',
+    url: `/system-configs/client-staff-directory/${id}`,
+    data: payload,
+  })
+
+export const updateClientStaffDirectoryStatus = (id: string, status: ClientStaffDirectoryStatus) =>
+  request<SaveClientStaffDirectoryResult>({
+    method: 'PATCH',
+    url: `/system-configs/client-staff-directory/${id}/status`,
+    data: { status },
+  })
+
+export const deleteClientStaffDirectoryBatch = (payload: DeleteClientStaffDirectoryBatchPayload) =>
+  request<DeleteClientStaffDirectoryBatchResult>({
+    method: 'DELETE',
+    url: '/system-configs/client-staff-directory',
+    data: payload,
+  })
+
+export const importClientStaffDirectory = (payload: ImportClientStaffDirectoryPayload) =>
+  request<ImportClientStaffDirectoryResult>({
+    method: 'POST',
+    url: '/system-configs/client-staff-directory/import',
+    data: payload,
+  })
+
+export const previewClientStaffDirectoryImport = (payload: ImportClientStaffDirectoryPayload) =>
+  request<ImportClientStaffDirectoryPreviewResult>({
+    method: 'POST',
+    url: '/system-configs/client-staff-directory/import/preview',
+    data: payload,
+  })
+
+export const importClientStaffDirectoryFile = (file: File) => {
+  const formData = new FormData()
+  formData.append('file', file)
+  return request<ImportClientStaffDirectoryResult>({
+    method: 'POST',
+    url: '/system-configs/client-staff-directory/import',
+    data: formData,
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+}
+
+export const previewClientStaffDirectoryImportFile = (file: File) => {
+  const formData = new FormData()
+  formData.append('file', file)
+  return request<ImportClientStaffDirectoryPreviewResult>({
+    method: 'POST',
+    url: '/system-configs/client-staff-directory/import/preview',
+    data: formData,
+    headers: {
+      'Content-Type': 'multipart/form-data',
+    },
+  })
+}

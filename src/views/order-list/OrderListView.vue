@@ -1,8 +1,8 @@
 <!--
-  文件说明：
-  该文件用于承载出库单列表主页面。
-  页面聚焦列表筛选、移动端卡片、详情抽屉与正式出库单入口装配，
-  其中低频的正式出库单工作台已拆到异步子组件，避免列表主分包携带整套打印模板与导出逻辑。
+  文件用途：承载管理端出库单列表主页面，是出库查询、详情查看与后续单据操作的页面壳层。
+  核心职责：负责装配筛选栏、列表卡片、详情抽屉、自动刷新提示以及正式出库单工作台入口。
+  设计原因：把高频使用的列表浏览链路保留在主页面内，把正式出库单这类低频重能力拆到异步子组件，减少主分包体积与首开压力。
+  页面边界：当前文件关注“列表与详情”的主交互编排，不直接承载正式出库单的内部打印实现细节。
 -->
 <script setup lang="ts">
 /**
@@ -18,7 +18,7 @@
  */
 
 import dayjs from 'dayjs'
-import { ElMessage } from 'element-plus'
+
 import { computed, defineAsyncComponent, ref, watch, type ComponentPublicInstance } from 'vue'
 import { updateOrderComplianceFlags } from '@/api/modules/order'
 import {
@@ -29,8 +29,10 @@ import {
   PageToolbarCard,
 } from '@/components/common'
 import { usePermissionAction } from '@/composables/usePermissionAction'
-import { extractErrorMessage } from '@/utils/error'
+import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { useOrderListView } from './composables/useOrderListView'
+
+import { showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 const getOrderTypeLabel = (value: 'department' | 'walkin') => {
   return value === 'department' ? '部门单' : '散客单'
@@ -122,6 +124,7 @@ const {
   autoRefreshStatusText,
   newOrderNotice,
   canDeleteOrder,
+  canPurgeOrder,
   isOrderRecentlyInserted,
   isOrderDetailActive,
   dismissNewOrderNotice,
@@ -251,11 +254,11 @@ watch(
  */
 const handleOpenVoucherDialog = () => {
   if (!currentOrder.value) {
-    ElMessage.warning('请先加载单据详情')
+    showAppWarning('请先加载单据详情')
     return
   }
   if (currentOrder.value.orderType !== 'department') {
-    ElMessage.info('正式出库单仅适用于部门单，散客单无需生成')
+    showAppInfo('正式出库单仅适用于部门单，散客单无需生成')
     return
   }
 
@@ -273,7 +276,7 @@ const handleSaveComplianceFlags = async () => {
     return
   }
   if (currentOrder.value.orderType !== 'department') {
-    ElMessage.info('散客单不适用该状态编辑')
+    showAppInfo('散客单不适用该状态编辑')
     return
   }
   complianceSaving.value = true
@@ -296,9 +299,13 @@ const handleSaveComplianceFlags = async () => {
           }
         : item,
     )
-    ElMessage.success('状态已更新')
+    showAppSuccess('状态已更新')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '状态更新失败，请稍后重试'))
+    void showCriticalErrorDialog(error, {
+      title: '订单状态更新失败',
+      fallback: '状态更新失败，请稍后重试',
+      operation: '更新出库单状态',
+    })
   } finally {
     complianceSaving.value = false
   }
@@ -472,7 +479,7 @@ const handleSaveComplianceFlags = async () => {
                     恢复
                   </el-button>
                   <el-button
-                    v-if="canDeleteOrder && row.isDeleted"
+                    v-if="canPurgeOrder && row.isDeleted"
                     link
                     type="danger"
                     @click="handlePurgeOrderWithConfirm(row).catch(() => undefined)"
@@ -568,7 +575,7 @@ const handleSaveComplianceFlags = async () => {
                   恢复
                 </el-button>
                 <el-button
-                  v-if="item.isDeleted"
+                  v-if="canPurgeOrder && item.isDeleted"
                   link
                   type="danger"
                   @click.stop="handlePurgeOrderWithConfirm(item).catch(() => undefined)"

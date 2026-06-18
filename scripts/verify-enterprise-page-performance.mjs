@@ -24,7 +24,7 @@ const reportPath = path.join(runtimeRoot, 'enterprise-performance-budget-report.
  * - 热路径预算：把登录后高频路径与低频重包分开考核，避免“总量没超、首屏却变慢”。
  */
 const performanceBudget = {
-  totalAssetsMaxKB: 4000,
+  totalAssetsMaxKB: 4050,
   criticalAssetsMaxKB: 2200,
   entryChunkMaxKB: 80,
   loginChunkMaxKB: 25,

@@ -16,6 +16,7 @@ import type {
   O2oOrderBusinessStatus,
   O2oOrderStatus,
 } from '@/constants/o2o-order-status'
+import type { ClientUserAccountType } from '@/api/modules/client-user-manage'
 import type { PaginationQueryInput, PaginationResult } from '@/types/api'
 
 export type O2oClientOrderType = 'department' | 'walkin'
@@ -43,6 +44,25 @@ export interface O2oMallProduct {
   availableStock: number
 }
 
+/**
+ * 商城门店展示配置：
+ * - 当前先承载面向客户端公开的营业时间文案；
+ * - 后续若要继续透出门店公告、提货说明等公开信息，可继续在这里扩展。
+ */
+export interface O2oMallStorefrontConfig {
+  businessHoursText: string
+}
+
+/**
+ * 商城商品列表接口返回值：
+ * - `list` 继续承载商品目录；
+ * - `storefront` 负责承载客户端允许公开消费的门店展示配置。
+ */
+export interface O2oMallProductsResult {
+  list: O2oMallProduct[]
+  storefront: O2oMallStorefrontConfig
+}
+
 export interface O2oPreorderSummary {
   statusReport: O2oOrderStatusReport
   totalAmount?: string
@@ -58,6 +78,7 @@ export interface O2oPreorderSummary {
   merchantMessage: string | null
   clientOrderType: O2oClientOrderType
   departmentNameSnapshot: string | null
+  staffNoSnapshot: string | null
   returnRequestCount: number
   pendingReturnRequestCount: number
   latestReturnRequest: {
@@ -147,6 +168,7 @@ export interface O2oPreorderDetail {
     merchantMessage: string | null
     clientOrderType: O2oClientOrderType
     departmentNameSnapshot: string | null
+    staffNoSnapshot: string | null
     remark: string | null
     updateCount: number
     remainingUpdateCount: number
@@ -163,6 +185,8 @@ export interface O2oPreorderDetail {
     mobile: string | null
     email: string | null
     departmentName: string | null
+    accountType: 'personal' | 'department'
+    staffNo: string | null
   } | null
   items: O2oPreorderDetailItem[]
   returnRequests: O2oReturnRequestDetail[]
@@ -207,12 +231,16 @@ export interface O2oInventoryLog {
   createdAt: string
 }
 
+export type O2oInventoryLogListQuery = PaginationQueryInput
+
 export interface SubmitO2oPreorderPayload {
-  clientOrderType: O2oClientOrderType
   isSystemApplied: boolean
   pickupContact: string
   remark?: string
-  items: Array<{ productId: string | number; qty: number }>
+  items: Array<{
+    productId: string | number
+    qty: number
+  }>
 }
 
 export interface SubmitO2oReturnRequestPayload {
@@ -235,6 +263,24 @@ export interface UpdateO2oComplianceFlagsPayload {
   isSystemApplied?: boolean
 }
 
+export interface DeleteO2oConsoleOrderPayload {
+  confirmShowNo: string
+  permanentDeletePassword?: string
+}
+
+export interface DeleteO2oConsoleOrderResult {
+  id: string
+  showNo: string
+  status: O2oOrderStatus
+  clientOrderType: O2oClientOrderType
+  releasedPreorderedQty: number
+  returnRequestCount: number
+  outboundOrderShowNo: string | null
+  outboundOrderDeleted: boolean
+  preorderSerialRolledBack: boolean
+  outboundSerialRolledBack: boolean
+}
+
 /**
  * 管理端订单池查询参数：
  * - 与后端 `/o2o/orders` 路由保持一致；
@@ -243,6 +289,9 @@ export interface UpdateO2oComplianceFlagsPayload {
 export interface O2oConsoleOrderListQuery {
   status?: O2oOrderStatus
   keyword?: string
+  accountType?: ClientUserAccountType
+  departmentName?: string
+  staffNo?: string
   startTime?: string
   endTime?: string
   limit?: number
@@ -264,7 +313,7 @@ export const resolveO2oDisplayShowNo = (
 }
 
 export const getO2oMallProducts = (config?: RequestConfig) =>
-  request<O2oMallProduct[]>({
+  request<O2oMallProductsResult>({
     method: 'GET',
     url: '/o2o/mall/products',
     signal: config?.signal,
@@ -392,6 +441,18 @@ export const getO2oConsoleOrderDetail = (id: string, config?: RequestConfig) =>
     ...config,
   })
 
+export const deleteO2oConsoleOrder = (
+  id: string,
+  payload: DeleteO2oConsoleOrderPayload,
+  config?: RequestConfig,
+) =>
+  request<DeleteO2oConsoleOrderResult>({
+    method: 'DELETE',
+    url: `/o2o/orders/${id}`,
+    data: payload,
+    ...config,
+  })
+
 export const updateO2oOrderBusinessStatus = (
   id: string,
   businessStatus: O2oOrderBusinessStatus | null,
@@ -487,4 +548,23 @@ export const getO2oInventoryLogs = (limit = 50) =>
     method: 'GET',
     url: '/o2o/inventory/logs',
     params: { limit },
+  })
+
+export const getO2oInventoryLogsPaged = (
+  params: O2oInventoryLogListQuery,
+): Promise<{
+  page: number
+  pageSize: number
+  total: number
+  list: O2oInventoryLog[]
+}> =>
+  request<{
+    page: number
+    pageSize: number
+    total: number
+    list: O2oInventoryLog[]
+  }>({
+    method: 'GET',
+    url: '/o2o/inventory/logs',
+    params,
   })

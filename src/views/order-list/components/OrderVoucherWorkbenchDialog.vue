@@ -1,8 +1,8 @@
 <!--
-  文件说明：
-  该文件用于承载出库列表页中的“正式出库单工作台”低频弹窗。
-  组件负责在线补填、横竖版预览、浏览器打印、PDF 导出以及打印专用 Teleport 输出，
-  通过异步分包把重模板与低频逻辑从 OrderListView 主页面中拆出，降低订单列表首包体积。
+  文件用途：承载订单列表页里的“正式出库单工作台”低频弹窗组件。
+  核心职责：集中处理正式出库单的补填字段、预览切换、浏览器打印、PDF 导出以及打印专用 Teleport 输出。
+  设计原因：将模板体积较大、触发频率较低的单据工作台从订单列表主页面拆分出去，避免高频列表场景首屏同步加载整套打印能力。
+  使用边界：当前组件只负责当前弹窗会话内的临时编辑与输出，不直接承担订单列表查询、筛选和详情主流程。
 -->
 <script setup lang="ts">
 /**
@@ -16,12 +16,15 @@
  */
 
 import dayjs from 'dayjs'
-import { ElMessage } from 'element-plus'
+
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import type { OrderDetailResult } from '@/api/modules/order'
 import { extractErrorMessage } from '@/utils/error'
 import { exportVoucherPdf } from '@/utils/pdf/export-voucher-pdf'
 import OrderVoucherTemplate from './OrderVoucherTemplate.vue'
+
+
+import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 interface OrderVoucherEditableFields {
   departmentOperator: string
@@ -151,13 +154,13 @@ const handlePrintVoucher = async () => {
  */
 const handleExportVoucherPdf = async () => {
   if (!props.enableHtml2pdfExport) {
-    ElMessage.info('PDF 导出开关未启用，当前仅支持打印')
+    showAppInfo('PDF 导出开关未启用，当前仅支持打印')
     return
   }
 
   const sourceElement = voucherPrintRootRef.value?.querySelector('.voucher-print-document')
   if (!(sourceElement instanceof HTMLElement)) {
-    ElMessage.warning('凭证模板尚未准备完成，请稍后重试')
+    showAppWarning('凭证模板尚未准备完成，请稍后重试')
     return
   }
 
@@ -172,9 +175,9 @@ const handleExportVoucherPdf = async () => {
       scale: 2,
       orientation: voucherOrientation.value,
     })
-    ElMessage.success('PDF 导出成功')
+    showAppSuccess('PDF 导出成功')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, 'PDF 导出失败，请稍后重试'))
+    showAppError(extractErrorMessage(error, 'PDF 导出失败，请稍后重试'))
   } finally {
     exportPdfLoading.value = false
   }

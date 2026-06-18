@@ -21,6 +21,7 @@ const SQLITE_REQUIRED_TABLES = [
   'system_configs',
   'client_user',
   'client_user_session',
+  'client_staff_directory',
   'o2o_preorder',
   'o2o_preorder_item',
   'o2o_return_request',
@@ -30,6 +31,10 @@ const SQLITE_REQUIRED_TABLES = [
   'biz_inbound_order_item',
   'client_feedback_conversation',
   'client_feedback_message',
+  'notification_rule',
+  'notification_event',
+  'notification_inbox',
+  'notification_dispatch',
 ]
 
 const SQLITE_REQUIRED_ORDER_COLUMNS = [
@@ -62,8 +67,22 @@ const SQLITE_REQUIRED_PRODUCT_COLUMNS = [
   'pre_ordered_stock',
 ]
 
-const SQLITE_REQUIRED_CLIENT_USER_COLUMNS = ['mobile', 'email', 'real_name', 'department_name', 'status', 'last_login_at']
+const SQLITE_REQUIRED_CLIENT_USER_COLUMNS = [
+  'mobile',
+  'email',
+  'real_name',
+  'department_name',
+  'account_type',
+  'staff_no',
+  'staff_verified',
+  'status',
+  'last_login_at',
+]
+const SQLITE_REQUIRED_CLIENT_STAFF_DIRECTORY_COLUMNS = ['staff_no', 'real_name', 'department_name', 'status']
+const SQLITE_REQUIRED_SYS_USER_COLUMNS = ['email']
 const SQLITE_REQUIRED_CLIENT_FEEDBACK_CONVERSATION_COLUMNS = [
+  'client_account_type',
+  'staff_no_snapshot',
   'issue_type',
   'source_code',
   'source_label',
@@ -89,10 +108,16 @@ const SQLITE_REQUIRED_O2O_PREORDER_COLUMNS = [
   'merchant_message',
   'client_order_type',
   'department_name_snapshot',
+  'staff_no_snapshot',
   'is_system_applied',
   'has_customer_order',
   'pickup_contact',
   'update_count',
+  'is_deleted',
+  'deleted_at',
+  'deleted_by_user_id',
+  'deleted_by_username',
+  'deleted_by_display_name',
 ]
 const SQLITE_REQUIRED_O2O_PREORDER_ITEM_COLUMNS = ['original_price', 'discount_rate', 'unit_price', 'line_amount']
 const SQLITE_REQUIRED_O2O_RETURN_REQUEST_COLUMNS = ['handled_at', 'handled_by', 'rejected_reason']
@@ -102,11 +127,26 @@ const SQLITE_REQUIRED_BIZ_INBOUND_ORDER_COLUMNS = [
   'cancelled_by_user_id',
   'cancelled_by_username',
   'cancelled_by_display_name',
+  'is_deleted',
+  'deleted_at',
+  'deleted_by_user_id',
+  'deleted_by_username',
+  'deleted_by_display_name',
+]
+const SQLITE_REQUIRED_NOTIFICATION_RULE_COLUMNS = [
+  'email_recipient_admin_user_ids_json',
+  'email_recipient_supplier_user_ids_json',
+  'feishu_sign_secret',
 ]
 
 async function listSqliteTableColumns(dataSource: DataSource, tableName: string): Promise<Set<string>> {
   const columns: Array<{ name: string }> = await dataSource.query(`PRAGMA table_info('${tableName}')`)
   return new Set(columns.map((column) => column.name))
+}
+
+async function listSqliteUniqueIndexes(dataSource: DataSource, tableName: string): Promise<Set<string>> {
+  const indexes: Array<{ name: string; unique: number }> = await dataSource.query(`PRAGMA index_list('${tableName}')`)
+  return new Set(indexes.filter((index) => Number(index.unique) === 1).map((index) => index.name))
 }
 
 function serializeSqliteNumericLiteral(value: number, fractionDigits = 2): string {
@@ -304,6 +344,20 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
   if (SQLITE_REQUIRED_CLIENT_USER_COLUMNS.some((column) => !clientUserColumnSet.has(column))) {
     return true
   }
+  const clientUserUniqueIndexSet = await listSqliteUniqueIndexes(dataSource, 'client_user')
+  if (!clientUserUniqueIndexSet.has('uk_client_user_staff_no')) {
+    return true
+  }
+
+  const clientStaffDirectoryColumnSet = await listSqliteTableColumns(dataSource, 'client_staff_directory')
+  if (SQLITE_REQUIRED_CLIENT_STAFF_DIRECTORY_COLUMNS.some((column) => !clientStaffDirectoryColumnSet.has(column))) {
+    return true
+  }
+
+  const sysUserColumnSet = await listSqliteTableColumns(dataSource, 'sys_user')
+  if (SQLITE_REQUIRED_SYS_USER_COLUMNS.some((column) => !sysUserColumnSet.has(column))) {
+    return true
+  }
 
   const clientFeedbackConversationColumnSet = await listSqliteTableColumns(dataSource, 'client_feedback_conversation')
   if (SQLITE_REQUIRED_CLIENT_FEEDBACK_CONVERSATION_COLUMNS.some((column) => !clientFeedbackConversationColumnSet.has(column))) {
@@ -332,6 +386,11 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
 
   const inboundOrderColumnSet = await listSqliteTableColumns(dataSource, 'biz_inbound_order')
   if (SQLITE_REQUIRED_BIZ_INBOUND_ORDER_COLUMNS.some((column) => !inboundOrderColumnSet.has(column))) {
+    return true
+  }
+
+  const notificationRuleColumnSet = await listSqliteTableColumns(dataSource, 'notification_rule')
+  if (SQLITE_REQUIRED_NOTIFICATION_RULE_COLUMNS.some((column) => !notificationRuleColumnSet.has(column))) {
     return true
   }
   return false

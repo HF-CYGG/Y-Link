@@ -1,7 +1,7 @@
 /**
- * 模块说明：backend/src/entities/o2o-return-request-item.entity.ts
- * 文件职责：定义 O2O 退货申请明细表结构，记录每次退货申请中各商品的退货数量。
- * 维护说明：若后续需要区分批次、良品/次品或绑定原始订单行，可在本实体扩展字段，并同步更新服务校验逻辑。
+ * 文件说明：O2O 退货申请明细实体，记录单次退货申请下各商品的退货数量与商品关联关系。
+ * 实现逻辑：通过退货申请外键和商品外键组织退货明细，为售后审核、入库回补和明细展示提供基础数据结构。
+ * 维护重点：若扩展批次、良品次品或原始订单行绑定能力，需要同步调整服务校验和退货详情展示字段。
  */
 
 import { Column, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn, type Relation } from 'typeorm'

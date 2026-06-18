@@ -12,7 +12,7 @@
  */
 
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessageBox } from 'element-plus'
 import { PageContainer, PassiveNumberInput, UnifiedScanDialog } from '@/components/common'
 import {
   getInboundDetail,
@@ -27,6 +27,9 @@ import { useCameraQrScanner } from '@/composables/useCameraQrScanner'
 import { useDevice } from '@/composables/useDevice'
 import { extractErrorMessage } from '@/utils/error'
 import dayjs from 'dayjs'
+
+
+import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 const scanCode = ref('')
 const scanInputRef = ref<{ focus: () => void } | null>(null)
@@ -54,6 +57,8 @@ const createEditRow = (): EditItemRow => ({
   productId: '',
   qty: 1,
 })
+
+const getProductOptionValue = (product: ProductRecord) => String(product.id)
 
 const editForm = reactive({
   orderId: '',
@@ -177,12 +182,39 @@ const hydrateEditForm = (detail: InboundOrderDetail) => {
   editForm.remark = detail.order.remark ?? ''
   editForm.items = detail.items.map((item) => ({
     uid: `inbound-scan-edit-${editUidSeed.value++}`,
-    productId: item.productId,
+    productId: String(item.productId),
     qty: Number(item.qty) || 1,
   }))
 
   if (!editForm.items.length) {
     editForm.items = [createEditRow()]
+  }
+}
+
+const ensureProductOptionsFromDetail = (detail: InboundOrderDetail) => {
+  const existingIds = new Set(products.value.map((product) => getProductOptionValue(product)))
+  const fallbackProducts = detail.items
+    .filter((item) => item.productId && !existingIds.has(String(item.productId)))
+    .map((item) => ({
+      id: String(item.productId),
+      productCode: '历史商品',
+      productName: item.productNameSnapshot || '未匹配商品',
+      pinyinAbbr: '',
+      defaultPrice: '0',
+      isActive: false,
+      o2oStatus: 'unlisted' as const,
+      thumbnail: null,
+      detailContent: null,
+      limitPerUser: 0,
+      currentStock: 0,
+      preOrderedStock: 0,
+      availableStock: 0,
+      tagIds: [],
+      tags: [],
+    }))
+
+  if (fallbackProducts.length) {
+    products.value = [...products.value, ...fallbackProducts]
   }
 }
 
@@ -195,7 +227,7 @@ const ensureProductsLoaded = async () => {
   try {
     products.value = await getProductList({})
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '加载商品目录失败'))
+    showAppError(extractErrorMessage(error, '加载商品目录失败'))
   } finally {
     editProductsLoading.value = false
   }
@@ -234,14 +266,14 @@ const isShowNoPattern = (code: string) => /^IN\d{12}$/i.test(code.trim())
 const handleScan = async () => {
   const code = scanCode.value.trim()
   if (!code) {
-    ElMessage.warning('请先扫描或输入送货单二维码')
+    showAppWarning('请先扫描或输入送货单二维码')
     return
   }
   if (!canQuery.value) {
     return
   }
   if (currentOrder.value?.order.verifyCode === code) {
-    ElMessage.info('该送货单已加载，无需重复扫描')
+    showAppInfo('该送货单已加载，无需重复扫描')
     scanCode.value = ''
     focusScanInput()
     return
@@ -264,7 +296,7 @@ const handleScan = async () => {
     scanCode.value = ''
     focusScanInput()
   } catch (err) {
-    ElMessage.error(normalizeScanErrorMessage(err))
+    showAppError(normalizeScanErrorMessage(err))
     scanCode.value = ''
     currentOrder.value = null
     focusScanInput()
@@ -275,19 +307,19 @@ const handleScan = async () => {
 
 const handlePasteAndSearch = async () => {
   if (!globalThis.navigator?.clipboard?.readText) {
-    ElMessage.warning('当前环境不支持读取剪贴板，请手动粘贴')
+    showAppWarning('当前环境不支持读取剪贴板，请手动粘贴')
     return
   }
   try {
     const text = await globalThis.navigator.clipboard.readText()
     scanCode.value = text.trim()
     if (!scanCode.value) {
-      ElMessage.warning('剪贴板中未读取到送货单号或二维码内容')
+      showAppWarning('剪贴板中未读取到送货单号或二维码内容')
       return
     }
     await handleScan()
   } catch {
-    ElMessage.warning('读取剪贴板失败，请检查浏览器权限')
+    showAppWarning('读取剪贴板失败，请检查浏览器权限')
   }
 }
 
@@ -315,7 +347,7 @@ const handleVerify = async () => {
     currentOrder.value = result
     appendRecentScan(result)
     successToastVisible.value = true
-    ElMessage.success('入库成功！库存已更新，可继续扫码下一单')
+    showAppSuccess('入库成功！库存已更新，可继续扫码下一单')
 
     // 成功提示条短暂展示，随后自动回焦扫码框。
     setTimeout(() => {
@@ -323,7 +355,7 @@ const handleVerify = async () => {
       focusScanInput()
     }, 1200)
   } catch (err) {
-    ElMessage.error(extractErrorMessage(err, '入库失败'))
+    showAppError(extractErrorMessage(err, '入库失败'))
   } finally {
     verifying.value = false
   }
@@ -335,10 +367,8 @@ const handleOpenEditDialog = async () => {
   }
 
   await ensureProductsLoaded()
-  if (!products.value.length) {
-    return
-  }
 
+  ensureProductOptionsFromDetail(currentOrder.value)
   hydrateEditForm(currentOrder.value)
   editDialogVisible.value = true
 }
@@ -362,7 +392,8 @@ const buildEditPayload = () => {
 
   const mergedItems = new Map<string, number>()
   validItems.forEach((item) => {
-    mergedItems.set(item.productId, (mergedItems.get(item.productId) || 0) + item.qty)
+    const productId = String(item.productId).trim()
+    mergedItems.set(productId, (mergedItems.get(productId) || 0) + item.qty)
   })
 
   return {
@@ -380,7 +411,7 @@ const handleSubmitEdit = async () => {
   try {
     payload = buildEditPayload()
   } catch (error) {
-    ElMessage.warning(extractErrorMessage(error, '请至少保留一件有效商品'))
+    showAppWarning(extractErrorMessage(error, '请至少保留一件有效商品'))
     return
   }
 
@@ -390,9 +421,9 @@ const handleSubmitEdit = async () => {
     replaceCurrentOrder(detail)
     editDialogVisible.value = false
     resetEditForm()
-    ElMessage.success('现场改单已保存，请继续核对后入库')
+    showAppSuccess('现场改单已保存，请继续核对后入库')
   } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '现场改单失败'))
+    showAppError(extractErrorMessage(error, '现场改单失败'))
   } finally {
     editing.value = false
   }
@@ -736,9 +767,9 @@ onBeforeUnmount(() => {
               >
                 <el-option
                   v-for="product in products"
-                  :key="product.id"
+                  :key="getProductOptionValue(product)"
                   :label="product.productName"
-                  :value="product.id"
+                  :value="getProductOptionValue(product)"
                 >
                   <span class="float-left">{{ product.productName }}</span>
                   <span class="float-right text-sm text-slate-400">{{ product.productCode }}</span>

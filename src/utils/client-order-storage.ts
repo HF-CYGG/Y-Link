@@ -200,6 +200,9 @@ const normalizeOrderRow = (item: unknown): O2oPreorderSummary | null => {
   return {
     id,
     showNo,
+    // 详细注释：正式出库单号一旦已经回写到订单摘要，本地缓存也必须保留，
+    // 否则刷新或离线恢复后会退回旧预订单号，导致“订单展示口径”前后不一致。
+    customerOrderShowNo: normalizeOptionalTrimmedText(row.customerOrderShowNo),
     verifyCode,
     status,
     businessStatus: normalizeBusinessStatus(row.businessStatus),
@@ -208,6 +211,7 @@ const normalizeOrderRow = (item: unknown): O2oPreorderSummary | null => {
     merchantMessage: normalizeMerchantMessage(row.merchantMessage),
     clientOrderType: normalizeClientOrderType(row.clientOrderType),
     departmentNameSnapshot: normalizeDepartmentNameSnapshot(row.departmentNameSnapshot),
+    staffNoSnapshot: normalizeOptionalTrimmedText(row.staffNoSnapshot),
     // 缓存恢复时尽量沿用服务端原始状态报告，确保“已撤回/超时取消”文案不会在刷新后退化。
     statusReport: normalizeStatusReport(row, status, timeoutAt),
     returnRequestCount: Number.isFinite(row.returnRequestCount) ? Number(row.returnRequestCount) : 0,

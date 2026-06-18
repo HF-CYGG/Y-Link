@@ -1,7 +1,7 @@
 /**
- * 模块说明：backend/src/entities/biz-inbound-order.entity.ts
- * 文件职责：定义入库主单实体，持久化供货方、核销码、核销人和状态快照等核心字段。
- * 维护说明：调整字段时需同步检查 MySQL 初始化脚本、迁移脚本与入库服务读写逻辑。
+ * 文件说明：入库主单实体，记录送货单号、供货方信息、核销码、核销状态和处理人等核心入库数据。
+ * 实现逻辑：通过主表字段沉淀入库流程中的状态快照与追踪信息，为送货单提交、扫码核销和历史查询提供统一结构。
+ * 维护重点：调整入库状态或核销相关字段时，需要同步核对初始化脚本、迁移脚本和入库服务读写逻辑。
  */
 
 import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm'
@@ -152,6 +152,50 @@ export class BizInboundOrder {
     comment: '核销操作人姓名快照',
   })
   verifiedByDisplayName!: string | null
+
+  @Index('idx_biz_inbound_is_deleted')
+  @Column({
+    name: 'is_deleted',
+    type: 'tinyint',
+    width: 1,
+    default: 0,
+    comment: '是否已删除（软删除）',
+  })
+  isDeleted!: boolean
+
+  @Column({
+    name: 'deleted_at',
+    ...entityColumnOptions.timestamp,
+    nullable: true,
+    comment: '删除时间',
+  })
+  deletedAt!: Date | null
+
+  @Column({
+    name: 'deleted_by_user_id',
+    ...entityColumnOptions.foreignId,
+    nullable: true,
+    comment: '删除操作人 ID',
+  })
+  deletedByUserId!: string | null
+
+  @Column({
+    name: 'deleted_by_username',
+    type: 'varchar',
+    length: 64,
+    nullable: true,
+    comment: '删除操作人账号快照',
+  })
+  deletedByUsername!: string | null
+
+  @Column({
+    name: 'deleted_by_display_name',
+    type: 'varchar',
+    length: 128,
+    nullable: true,
+    comment: '删除操作人姓名快照',
+  })
+  deletedByDisplayName!: string | null
 
   @CreateDateColumn({ name: 'created_at', ...entityColumnOptions.timestamp, comment: '创建时间' })
   createdAt!: Date

@@ -1,11 +1,15 @@
-<!--
-  文件说明：
-  该文件用于承载供货方共享工作台页面。
-  页面把“送货单录入”和“历史单据”两个入口整合到同一个工作台中，
-  通过共享路由绑定标签逻辑完成入口兼容与页面切换。
-  本次同时负责统一供货工作台的页头文案，避免子页面切换时出现重复说明。
--->
 <script setup lang="ts">
+/**
+ * 模块说明：src/views/inbound/SupplierWorkbenchView.vue
+ * 文件职责：承载供货方共享工作台页面，统一收口送货单录入与历史单据两个常用入口。
+ * 实现逻辑：
+ * - 页面通过 TabbedWorkbenchPage 输出统一页头、标签栏和内容容器，减少供货端页面来回跳转的割裂感；
+ * - 通过 useRouteBoundWorkbenchTab 维持旧路由与新标签的双向绑定，保证直接访问旧入口仍能进入对应子页；
+ * - 录入页和历史页保持各自业务状态，由工作台壳层负责 keep-alive 和切换动画。
+ * 维护说明：
+ * - 新增供货端子页面时优先扩展 tabs、routeNameToTab、tabToPath 和 tabToComponent，不要另建重复工作台壳层；
+ * - 当前文件只负责导航与容器编排，具体送货单业务逻辑应继续留在对应子页面内部实现。
+ */
 import { TabbedWorkbenchPage } from '@/components/common'
 import { useRouteBoundWorkbenchTab } from '@/composables/useRouteBoundWorkbenchTab'
 import SupplierDeliveryView from '@/views/inbound/SupplierDeliveryView.vue'

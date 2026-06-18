@@ -1,0 +1,166 @@
+import { Router } from 'express'
+import { z } from 'zod'
+import { requirePermission, requireRole } from '../middleware/auth.middleware.js'
+import type { AuthenticatedRequest } from '../types/auth.js'
+import {
+  notificationService,
+} from '../services/notification.service.js'
+import { NOTIFICATION_EXTERNAL_TRIGGER_MODES } from '../entities/notification-rule.entity.js'
+import { asyncHandler } from '../utils/async-handler.js'
+import { extractRequestMeta } from '../utils/request-meta.js'
+
+const idValueSchema = z.union([z.string(), z.number()])
+  .transform((value) => String(value).trim())
+  .pipe(z.string().min(1))
+
+const looseTextSchema = (max: number) =>
+  z.union([z.string(), z.number(), z.null(), z.undefined()])
+    .transform((value) => String(value ?? '').trim())
+    .pipe(z.string().max(max))
+
+const updateNotificationRuleSchema = z.object({
+  id: idValueSchema,
+  enabled: z.boolean(),
+  recipientUserIds: z.array(idValueSchema).max(200).optional().default([]),
+  emailRecipientAdminUserIds: z.array(idValueSchema).max(200).optional().default([]),
+  emailRecipientSupplierUserIds: z.array(idValueSchema).max(200).optional().default([]),
+  emailEnabled: z.boolean().optional().default(false),
+  feishuEnabled: z.boolean().optional().default(false),
+  externalTriggerMode: z.enum(NOTIFICATION_EXTERNAL_TRIGGER_MODES).optional().default('all_management_offline'),
+  watchedUserIds: z.array(idValueSchema).max(200).optional().default([]),
+  feishuWebhookUrl: looseTextSchema(500),
+  feishuSignSecret: looseTextSchema(256),
+  emailSubjectPrefix: looseTextSchema(128),
+})
+
+const updateNotificationRulesSchema = z.object({
+  offlineWindowSeconds: z.coerce.number().int().min(30).max(3600).optional().default(120),
+  rules: z.array(updateNotificationRuleSchema).min(1),
+})
+type UpdateNotificationRulesPayload = z.infer<typeof updateNotificationRulesSchema>
+
+const testSendNotificationRuleSchema = z.object({
+  ruleId: idValueSchema,
+  channel: z.enum(['email', 'feishu']),
+  draft: updateNotificationRuleSchema,
+})
+
+export const notificationRouter = Router()
+
+notificationRouter.get(
+  '/rules',
+  requirePermission('system_configs:view'),
+  asyncHandler(async (_req, res) => {
+    const list = await notificationService.listRules()
+    res.json({
+      code: 0,
+      message: 'ok',
+      data: { list },
+    })
+  }),
+)
+
+notificationRouter.put(
+  '/rules',
+  requirePermission('system_configs:update'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = updateNotificationRulesSchema.parse(req.body) as UpdateNotificationRulesPayload
+    const data = await notificationService.updateRules(
+      payload.rules,
+      payload.offlineWindowSeconds,
+      authReq.auth,
+      extractRequestMeta(req),
+    )
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+notificationRouter.get(
+  '/presence-snapshot',
+  requirePermission('system_configs:view'),
+  asyncHandler(async (_req, res) => {
+    const data = await notificationService.getPresenceSnapshot()
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+notificationRouter.post(
+  '/rules/test-send',
+  requirePermission('system_configs:update'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = testSendNotificationRuleSchema.parse(req.body)
+    const data = await notificationService.testSendByRule({
+      ruleId: payload.ruleId,
+      channel: payload.channel,
+      draft: payload.draft,
+      actor: authReq.auth,
+      requestMeta: extractRequestMeta(req),
+    })
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+notificationRouter.get(
+  '/inbox',
+  requirePermission('products:view'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const page = Number(req.query.page ?? 1)
+    const pageSize = Number(req.query.pageSize ?? 20)
+    const unreadOnly = String(req.query.unreadOnly ?? '') === '1'
+    const data = await notificationService.listInbox(authReq.auth, {
+      page: Number.isFinite(page) && page > 0 ? page : 1,
+      pageSize: Number.isFinite(pageSize) && pageSize > 0 ? Math.min(pageSize, 100) : 20,
+      unreadOnly,
+    })
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+notificationRouter.get(
+  '/unread-count',
+  requirePermission('products:view'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const count = await notificationService.getUnreadCount(authReq.auth)
+    res.json({
+      code: 0,
+      message: 'ok',
+      data: { count },
+    })
+  }),
+)
+
+notificationRouter.post(
+  '/inbox/:id/read',
+  requirePermission('products:view'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const changed = await notificationService.markInboxRead(req.params.id, authReq.auth)
+    res.json({
+      code: 0,
+      message: 'ok',
+      data: { changed },
+    })
+  }),
+)

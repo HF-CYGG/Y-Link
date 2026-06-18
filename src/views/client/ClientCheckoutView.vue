@@ -1,30 +1,28 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/client/ClientCheckoutView.vue
- * 文件职责：负责客户端确认订单页的下单归属选择、商品清单确认、备注填写与预订单提交。
+ * 文件职责：承载客户端确认订单页，展示实名归属信息、提货信息、商品明细与下单提交入口。
  * 实现逻辑：
- * - 结算页默认按“散客”下单，避免系统根据账号资料自动推断成部门单，减少误下单；
- * - 用户若主动切换为“部门订”，提交前必须再次确认，确保其明确知晓订单会归入部门出库；
- * - 进入页面后会静默同步最新商品目录，但不会阻塞用户先查看清单、填写提货信息和提交；
- * - 提交前会写入短时会话锁，弱网或重复进入场景下会拦截同一笔预订意图的重复提交；
- * - 真正提交成功后再清理购物车、局部修正目录库存并跳转订单详情页，避免前端先删数据导致状态丢失。
+ * - 进入页面后会恢复当前账号的提货人草稿，并同步最新商品库存快照；
+ * - 下单归属完全由当前登录账号类型决定，页面只负责展示部门/工号/实名信息，不允许手动篡改归属；
+ * - 部门账号下单前强制校验所属部门、教职工号与金蝶申请状态，避免订单归属与实名链路脱节。
  * 维护说明：
- * - 若后续继续扩展下单归属类型，需要同步调整本页选项卡、提交校验和确认文案；
- * - 若后端修改预订单入参结构，需要同步检查 `submitO2oPreorder` 的 payload 拼装逻辑。
+ * - 若后端继续扩展实名字段或工号核验状态，请优先同步本页的实名信息展示区与 `handleSubmit()` 前置校验；
+ * - 若调整下单归属说明文案，请保持“前端只展示，服务端强制判定”的口径不变。
  */
-
-
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+
 import { ArrowLeft } from '@element-plus/icons-vue'
-import { submitO2oPreorder, type O2oClientOrderType } from '@/api/modules/o2o'
+import { submitO2oPreorder } from '@/api/modules/o2o'
 import { useClientMallSnapshotRefresh } from '@/composables/useClientMallSnapshotRefresh'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
 import { useClientAuthStore, useClientCartStore } from '@/store'
 import { useClientCatalogStore } from '@/store/modules/client-catalog'
 import pinia from '@/store/pinia'
 import { normalizeRequestError } from '@/utils/error'
+import { showCriticalErrorDialog } from '@/utils/error-dialog'
+import { showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 import {
   buildClientPreorderSubmitIntentKey,
   clearClientPreorderSubmitLock,
@@ -50,33 +48,24 @@ const { syncing: catalogSyncing, refreshMallSnapshot } = useClientMallSnapshotRe
 const { runWithGate } = useIdempotentAction()
 
 const remark = ref('')
-// 详细注释：提货人输入框支持“默认用户名 + 用户自定义记忆”。
-// - 未编辑过时：默认回填当前登录用户名（优先 account）；
-// - 编辑过时：按当前客户端账号维度写入 localStorage，并在下次进入自动回填；
-// - 记忆值可反复修改，始终以用户最后一次输入为准。
 const pickupContact = ref('')
-// 详细注释：结算页始终默认走“散客”模式，只有用户主动点选“部门订”才切换，
-// 这样可以避免因为账号资料里恰好有部门信息，导致用户未感知地提交成部门单。
-const clientOrderType = ref<O2oClientOrderType>('walkin')
 const submitting = ref(false)
-// 详细注释：“金蝶系统是否已申请”改为“用户主动选择”的必填项。
-// - `null` 表示用户尚未做出选择（仅部门订会出现该状态）；
-// - `true/false` 分别表示“金蝶已申请/金蝶未申请”。
 const departmentSystemApplyChoice = ref<boolean | null>(null)
 
 const PICKUP_CONTACT_STORAGE_KEY_PREFIX = 'ylink:client:checkout:pickup-contact:'
 const AMBIGUOUS_PREORDER_SUBMIT_STATUS_SET = new Set<number | undefined>([undefined, 408, 502, 503, 504])
 
-const resolveDefaultPickupContact = (): string => {
+const resolveDefaultPickupContact = () => {
   const currentUser = clientAuthStore.currentUser
-  const username = currentUser?.username?.trim() || currentUser?.account?.trim()
-  if (username) {
-    return username
+  if (currentUser?.accountType === 'department') {
+    return currentUser.realName?.trim() || currentUser.username?.trim() || currentUser.account?.trim() || ''
   }
+  const username = currentUser?.username?.trim() || currentUser?.account?.trim()
+  if (username) return username
   return currentUser?.realName?.trim() || currentUser?.mobile?.trim() || ''
 }
 
-const resolvePickupContactStorageKey = (): string => {
+const resolvePickupContactStorageKey = () => {
   const currentUser = clientAuthStore.currentUser
   const userIdentity = `${currentUser?.id ?? currentUser?.username ?? currentUser?.account ?? ''}`.trim()
   return `${PICKUP_CONTACT_STORAGE_KEY_PREFIX}${userIdentity || 'anonymous'}`
@@ -85,6 +74,15 @@ const resolvePickupContactStorageKey = (): string => {
 const restorePickupContactDraft = () => {
   const storageKey = resolvePickupContactStorageKey()
   const defaultPickupContact = resolveDefaultPickupContact()
+  if (clientAuthStore.currentUser?.accountType === 'department') {
+    pickupContact.value = defaultPickupContact
+    try {
+      globalThis.window?.localStorage.removeItem(storageKey)
+    } catch {
+      // 部门账号提货人由实名锁定，本地缓存清理失败不影响下单。
+    }
+    return
+  }
   if (globalThis.window === undefined) {
     pickupContact.value = defaultPickupContact
     return
@@ -98,10 +96,16 @@ const restorePickupContactDraft = () => {
 }
 
 const persistPickupContactDraft = () => {
-  if (globalThis.window === undefined) {
+  if (globalThis.window === undefined) return
+  const storageKey = resolvePickupContactStorageKey()
+  if (clientAuthStore.currentUser?.accountType === 'department') {
+    try {
+      globalThis.window.localStorage.removeItem(storageKey)
+    } catch {
+      // 部门账号提货人不可编辑，不依赖本地缓存。
+    }
     return
   }
-  const storageKey = resolvePickupContactStorageKey()
   const normalizedPickupContact = pickupContact.value.trim()
   try {
     if (normalizedPickupContact) {
@@ -110,32 +114,32 @@ const persistPickupContactDraft = () => {
     }
     globalThis.window.localStorage.removeItem(storageKey)
   } catch {
-    // 详细注释：本地存储失败不阻断下单流程，仅降级为本次会话内输入有效。
+    // 本地存储异常时不阻塞下单
   }
 }
 
 const handlePickupContactBlur = () => {
+  if (clientAuthStore.currentUser?.accountType === 'department') {
+    pickupContact.value = resolveDefaultPickupContact()
+    persistPickupContactDraft()
+    return
+  }
   const normalizedPickupContact = pickupContact.value.trim()
   if (normalizedPickupContact) {
     pickupContact.value = normalizedPickupContact
     persistPickupContactDraft()
     return
   }
-
-  // 详细注释：若用户清空输入，回退到默认用户名，避免“提货人”显示为空。
   pickupContact.value = resolveDefaultPickupContact()
   persistPickupContactDraft()
 }
 
 onMounted(() => {
   clientCartStore.initialize(clientAuthStore.currentUser?.id)
-  // 从商城页直接进入结算时，用户可能尚未进入购物车页手动勾选；
-  // 这里默认全选“仍有效”的商品，减少结算前的重复操作。
   if (!clientCartStore.selectedValidItems.length && clientCartStore.validItems.length > 0) {
     clientCartStore.toggleAllValidSelected(true)
   }
   restorePickupContactDraft()
-  // 目录同步放到后台静默执行，避免“进结算先等库存接口”拖慢首屏可交互时间。
   void refreshMallSnapshot()
 })
 
@@ -143,6 +147,22 @@ watch(
   () => clientAuthStore.currentUser?.id,
   () => {
     restorePickupContactDraft()
+    departmentSystemApplyChoice.value = null
+  },
+)
+
+watch(
+  () => [
+    clientAuthStore.currentUser?.accountType,
+    clientAuthStore.currentUser?.realName,
+    clientAuthStore.currentUser?.username,
+    clientAuthStore.currentUser?.account,
+  ],
+  () => {
+    if (clientAuthStore.currentUser?.accountType === 'department') {
+      pickupContact.value = resolveDefaultPickupContact()
+      persistPickupContactDraft()
+    }
   },
 )
 
@@ -150,27 +170,47 @@ const selectedItems = computed(() => clientCartStore.selectedValidItems)
 const totalQty = computed(() => selectedItems.value.reduce((sum, item) => sum + item.qty, 0))
 const totalAmount = computed(() => selectedItems.value.reduce((sum, item) => sum + Number(resolveDiscountedUnitPrice(item)) * item.qty, 0))
 const submitDisabled = computed(() => submitting.value || !selectedItems.value.length)
+const currentRealName = computed(() => (
+  clientAuthStore.currentUser?.realName?.trim()
+  || clientAuthStore.currentUser?.username?.trim()
+  || clientAuthStore.currentUser?.account?.trim()
+  || '未设置'
+))
+const currentAccountTypeLabel = computed(() => (
+  clientAuthStore.currentUser?.accountType === 'department' ? '部门账户' : '散客账户'
+))
 const currentDepartmentName = computed(() => clientAuthStore.currentUser?.departmentName?.trim() || '')
-const isDepartmentOrder = computed(() => clientOrderType.value === 'department')
+const currentStaffNo = computed(() => clientAuthStore.currentUser?.staffNo?.trim() || '')
+const currentStaffVerifiedText = computed(() => {
+  if (!isDepartmentOrder.value) {
+    return '个人账号无需工号核验'
+  }
+  return clientAuthStore.currentUser?.staffVerified ? '已完成工号核验' : '待人工核验'
+})
+const enforcedClientOrderType = computed(() => (
+  clientAuthStore.currentUser?.accountType === 'department' ? 'department' : 'walkin'
+))
+const isDepartmentOrder = computed(() => enforcedClientOrderType.value === 'department')
+const pickupContactReadonly = computed(() => isDepartmentOrder.value)
+const pickupContactInputHint = computed(() => (
+  isDepartmentOrder.value ? '部门账号提货人按实名锁定，不可更改' : '可编辑并自动记忆'
+))
+const currentAccountOrderHint = computed(() => (
+  isDepartmentOrder.value ? '当前为部门账户，可提交部门订单' : '当前为散客下单'
+))
 const orderTypeDescription = computed(() => {
   if (isDepartmentOrder.value) {
     return currentDepartmentName.value
-      ? `已切换为部门订，请先选择“金蝶系统是否已申请”后再提交；核销后会归入部门出库单：${currentDepartmentName.value}`
-      : '部门订需要先在个人资料中完善部门信息'
+      ? `当前账号为部门账号，下单后将自动归入部门：${currentDepartmentName.value}`
+      : '当前账号为部门账号，请先在个人资料中完善部门信息'
   }
-  return '当前默认按散客下单，如需归入部门，请主动切换为部门订'
+  return '当前账号为个人账号，下单后自动按散客归属处理'
 })
 
 const systemApplyStatusText = computed(() => {
-  if (!isDepartmentOrder.value) {
-    return '散客单不要求填写金蝶系统申请状态'
-  }
-  if (departmentSystemApplyChoice.value === true) {
-    return '已选择：金蝶系统内已完成审批申请'
-  }
-  if (departmentSystemApplyChoice.value === false) {
-    return '已选择：金蝶系统内未完成审批申请'
-  }
+  if (!isDepartmentOrder.value) return '散客单无需填写金蝶系统申请状态'
+  if (departmentSystemApplyChoice.value === true) return '已选择：金蝶系统内已完成审批申请'
+  if (departmentSystemApplyChoice.value === false) return '已选择：金蝶系统内未完成审批申请'
   return '必填：请先选择金蝶系统是否已申请'
 })
 
@@ -183,43 +223,31 @@ const handleBack = () => {
 }
 
 const handleSubmit = async () => {
-  const normalizedPickupContact = pickupContact.value.trim() || resolveDefaultPickupContact()
+  const normalizedPickupContact = isDepartmentOrder.value
+    ? resolveDefaultPickupContact()
+    : (pickupContact.value.trim() || resolveDefaultPickupContact())
   if (!normalizedPickupContact) {
-    ElMessage.warning('请填写提货人')
+    showAppWarning('请填写提货人')
     return
   }
   pickupContact.value = normalizedPickupContact
   persistPickupContactDraft()
 
   if (!selectedItems.value.length) {
-    ElMessage.warning('请先选择可结算商品')
+    showAppWarning('请先选择可结算商品')
     return
   }
   if (isDepartmentOrder.value && !currentDepartmentName.value) {
-    ElMessage.warning('部门订需要先完善账号部门信息')
+    showAppWarning('部门账号下单前，请先完善所属部门')
+    return
+  }
+  if (isDepartmentOrder.value && !currentStaffNo.value) {
+    showAppWarning('部门账号缺少教职工号，请先完善后再下单')
     return
   }
   if (isDepartmentOrder.value && departmentSystemApplyChoice.value === null) {
-    ElMessage.warning('请先选择金蝶系统是否已申请')
+    showAppWarning('请选择金蝶系统是否已申请')
     return
-  }
-  if (isDepartmentOrder.value) {
-    try {
-      // 详细注释：部门单会影响后续门店出库归属，因此在真正提交前增加一次显式确认，
-      // 防止用户误触了“部门订”卡片后直接下单。
-      await ElMessageBox.confirm(
-        `当前将按“部门订”提交，核销后会归入部门：${currentDepartmentName.value}。请确认是否继续提交？`,
-        '确认提交部门订单',
-        {
-          confirmButtonText: '确认提交',
-          cancelButtonText: '返回检查',
-          type: 'warning',
-          distinguishCancelAndClose: true,
-        },
-      )
-    } catch {
-      return
-    }
   }
 
   const submitItemSnapshot = selectedItems.value.map((item) => ({
@@ -229,15 +257,16 @@ const handleSubmit = async () => {
   const submitRemark = remark.value.trim() || undefined
   const submitIntentKey = buildClientPreorderSubmitIntentKey({
     clientUserId: clientAuthStore.currentUser?.id,
-    clientOrderType: clientOrderType.value,
+    clientOrderType: enforcedClientOrderType.value,
     isSystemApplied: isDepartmentOrder.value ? Boolean(departmentSystemApplyChoice.value) : false,
     pickupContact: normalizedPickupContact,
     remark: submitRemark,
     items: submitItemSnapshot,
   })
+
   const activeSubmitLock = readActiveClientPreorderSubmitLock(clientAuthStore.currentUser?.id)
   if (activeSubmitLock?.intentKey === submitIntentKey) {
-    ElMessage.info('相同预订单正在确认中，请勿重复提交')
+    showAppInfo('相同预订单正在确认中，请勿重复提交')
     return
   }
   const submitRequestKey = createClientPreorderSubmitLock(clientAuthStore.currentUser?.id, submitIntentKey)
@@ -245,58 +274,49 @@ const handleSubmit = async () => {
   const runResult = await runWithGate({
     actionKey: 'client-checkout-submit',
     onDuplicated: () => {
-      ElMessage.info('订单提交中，请勿重复点击')
+      showAppInfo('订单提交中，请勿重复点击')
     },
     executor: async () => {
-      // 提交锁只防重复点击，不承担真正幂等保障；最终仍以服务端库存与限购校验结果为准。
       submitting.value = true
       try {
         const result = await submitO2oPreorder({
-          clientOrderType: clientOrderType.value,
           isSystemApplied: isDepartmentOrder.value ? Boolean(departmentSystemApplyChoice.value) : false,
-          // 详细注释：提货人需要随订单一起落库，后续订单详情、门店核销与正式出库单都以这里为准。
           pickupContact: normalizedPickupContact,
           remark: submitRemark,
           items: submitItemSnapshot,
         })
 
-        // 只有服务端创建预订单成功后，才真正从购物车中移除已提交商品，避免前端先删导致状态丢失。
         submitItemSnapshot.forEach((item) => {
           clientCartStore.removeItem(String(item.productId))
         })
-        // 下单成功后优先用“本次已知变更”局部修正目录缓存，再同步购物车剩余商品的库存口径。
         clientCatalogStore.applyPreorderSubmission(submitItemSnapshot)
         clientCartStore.syncWithCatalog(clientCatalogStore.products)
         clearClientPreorderSubmitLock(clientAuthStore.currentUser?.id, submitRequestKey)
 
-        ElMessage.success('预订单提交成功')
-
-        // 如果是内嵌抽屉模式，先关闭弹窗
+        showAppSuccess('预订单提交成功')
         if (!props.standalone) {
           emit('close')
         }
-
-        // 结算成功后直接跳转订单详情页，帮助用户立即看到核销码与待提货状态。
         await router.replace(`/client/orders/${result.order.id}`)
       } catch (error) {
         const normalizedError = normalizeRequestError(error, '提交失败，请稍后再试')
         if (AMBIGUOUS_PREORDER_SUBMIT_STATUS_SET.has(normalizedError.status)) {
-          // 网络超时或网关抖动时，无法百分百确认服务端是否已成功落单；
-          // 因此短时间内保留提交锁，避免用户立刻重复发起相同请求。
           refreshClientPreorderSubmitLock(clientAuthStore.currentUser?.id, submitIntentKey, submitRequestKey)
-          ElMessage.warning('提交结果确认中，请先勿重复点击；如长时间未返回，可前往我的订单查看')
+          showAppWarning('提交结果确认中，请勿重复提交。可前往“我的订单”查询是否已创建成功。')
           return
         }
         clearClientPreorderSubmitLock(clientAuthStore.currentUser?.id, submitRequestKey)
-        ElMessage.error(normalizedError.message)
+        void showCriticalErrorDialog(normalizedError, {
+          title: '预订单提交失败',
+          fallback: '提交失败，请稍后再试',
+          operation: '提交预订单',
+        })
       } finally {
         submitting.value = false
       }
     },
   })
-  if (runResult === null) {
-    return
-  }
+  if (runResult === null) return
 }
 </script>
 
@@ -309,11 +329,11 @@ const handleSubmit = async () => {
       <p class="text-lg font-semibold text-slate-900">确认订单</p>
     </div>
 
-    <section class="flex-1 overflow-y-auto px-4 py-4 sm:px-5 pb-32">
+    <section class="flex-1 overflow-y-auto px-4 py-4 pb-32 sm:px-5">
       <div class="mb-4 rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
         <p class="text-sm text-slate-500">提交前将以服务端库存与限购规则为准</p>
         <p class="mt-2 text-xs text-slate-400">
-          {{ catalogSyncing ? '正在后台同步最新库存，不影响当前填写与提交' : '进入页面后会自动静默同步最新库存与限购信息' }}
+          {{ catalogSyncing ? '正在后台同步最新库存，不影响当前填写与提交' : '进入页面后会自动同步最新库存与限购信息' }}
         </p>
       </div>
 
@@ -323,7 +343,7 @@ const handleSubmit = async () => {
             <span class="inline-flex h-6 items-center rounded-full bg-teal-50 px-2 text-xs font-semibold text-teal-700">提货信息</span>
             <p class="text-sm font-semibold text-slate-800">提货人</p>
           </div>
-          <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-500">可编辑并自动记忆</span>
+          <span class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-500">{{ pickupContactInputHint }}</span>
         </div>
         <div class="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 focus-within:border-teal-300 focus-within:bg-white">
           <p class="text-[11px] text-slate-400">提货姓名</p>
@@ -331,46 +351,55 @@ const handleSubmit = async () => {
             v-model.trim="pickupContact"
             type="text"
             maxlength="32"
-            class="mt-1 w-full border-0 bg-transparent p-0 text-base font-semibold text-slate-900 outline-none"
+            :readonly="pickupContactReadonly"
+            :class="[
+              'mt-1 w-full border-0 bg-transparent p-0 text-base font-semibold text-slate-900 outline-none',
+              pickupContactReadonly ? 'cursor-default text-slate-900' : '',
+            ]"
             placeholder="请输入提货人（默认用户名）"
             @blur="handlePickupContactBlur"
           />
         </div>
-        <div class="mt-3 flex items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
-          <span class="font-medium text-slate-600">所属部门</span>
-          <span class="truncate">{{ clientAuthStore.currentUser?.departmentName || '未设置部门' }}</span>
+        <div class="mt-3 grid gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs text-slate-500">
+          <div class="flex items-center gap-2">
+            <span class="font-medium text-slate-600">账号类型</span>
+            <span class="truncate">{{ currentAccountTypeLabel }}</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="font-medium text-slate-600">真实姓名</span>
+            <span class="truncate">{{ currentRealName }}</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="font-medium text-slate-600">所属部门</span>
+            <span class="truncate">{{ isDepartmentOrder ? (clientAuthStore.currentUser?.departmentName || '未设置部门') : '个人账号不适用' }}</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="font-medium text-slate-600">教职工号</span>
+            <span class="truncate">{{ isDepartmentOrder ? (clientAuthStore.currentUser?.staffNo || '未设置工号') : '个人账号不适用' }}</span>
+          </div>
+          <div class="flex items-center gap-2">
+            <span class="font-medium text-slate-600">工号核验</span>
+            <span class="truncate">{{ currentStaffVerifiedText }}</span>
+          </div>
         </div>
       </div>
 
       <div class="mb-4 rounded-[1.2rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
         <p class="mb-3 text-sm font-semibold text-slate-700">下单归属</p>
-        <p class="mb-3 text-xs leading-5 text-slate-400">默认按散客下单，如需归入部门，请主动选择“部门订”并在提交前完成必填项确认。</p>
-        <div class="grid grid-cols-2 gap-3">
-          <button
-            type="button"
-            class="rounded-[1.2rem] border px-4 py-3 text-left transition"
-            :class="clientOrderType === 'department' ? 'border-teal-300 bg-teal-50 text-teal-700' : 'border-slate-200 bg-slate-50 text-slate-600'"
-            @click="clientOrderType = 'department'; departmentSystemApplyChoice = null"
-          >
-            <p class="text-sm font-semibold">部门订</p>
-            <p class="mt-1 text-xs leading-5">适用于代表部门统一领取物资</p>
-          </button>
-          <button
-            type="button"
-            class="rounded-[1.2rem] border px-4 py-3 text-left transition"
-            :class="clientOrderType === 'walkin' ? 'border-slate-900 bg-slate-900 text-white' : 'border-slate-200 bg-slate-50 text-slate-600'"
-            @click="clientOrderType = 'walkin'; departmentSystemApplyChoice = null"
-          >
-            <p class="text-sm font-semibold">散客</p>
-            <p class="mt-1 text-xs leading-5">适用于个人临时领取，不归入部门</p>
-          </button>
+        <p class="mb-3 text-xs leading-5 text-slate-400">订单归属由当前账号类型自动判定，客户端不可手动切换。</p>
+        <div class="rounded-[1rem] border border-slate-200 bg-slate-50 px-3 py-2.5 text-sm text-slate-600">
+          <div class="flex flex-wrap items-center gap-2">
+            <span>当前账户类型：<span class="font-semibold text-slate-900">{{ currentAccountTypeLabel }}</span></span>
+            <span class="rounded-full bg-white px-2 py-0.5 text-[11px] font-semibold text-teal-700">{{ isDepartmentOrder ? '部门单' : '散客单' }}</span>
+          </div>
+          <p class="mt-1 text-xs font-medium text-slate-700">{{ currentAccountOrderHint }}</p>
         </div>
         <div v-if="isDepartmentOrder" class="mt-4 rounded-[1rem] border border-slate-200 bg-slate-50 px-3 py-3">
           <div class="flex flex-wrap items-center gap-2">
             <p class="text-sm font-semibold text-slate-700">金蝶系统是否已申请</p>
             <span class="rounded-full bg-rose-50 px-2 py-0.5 text-[11px] font-semibold text-rose-600">必填</span>
           </div>
-          <p class="mt-1 text-xs text-slate-500">用于标记该笔出库是否已在金蝶系统内完成审批申请。</p>
+          <p class="mt-1 text-xs text-slate-500">用于标记本次部门出库是否已在金蝶系统完成审批申请。</p>
           <div class="mt-3 grid grid-cols-2 gap-3">
             <button
               type="button"
@@ -382,7 +411,7 @@ const handleSubmit = async () => {
               "
               @click="departmentSystemApplyChoice = true"
             >
-              金蝶已申请
+              已申请
             </button>
             <button
               type="button"
@@ -394,7 +423,7 @@ const handleSubmit = async () => {
               "
               @click="departmentSystemApplyChoice = false"
             >
-              金蝶未申请
+              未申请
             </button>
           </div>
           <p class="mt-2 text-xs" :class="departmentSystemApplyChoice === null ? 'text-rose-600' : 'text-slate-500'">
@@ -430,20 +459,20 @@ const handleSubmit = async () => {
         <textarea
           v-model.trim="remark"
           class="min-h-24 w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-teal-300"
-          placeholder="选填：例如希望领取时间、特殊说明"
+          placeholder="选填：如领取时间、特殊说明等"
         />
       </div>
     </section>
 
-    <div class="client-cart-summary absolute bottom-0 left-0 right-0 z-20 bg-white border-t border-slate-200 px-4 py-3 pb-safe shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
-        <div class="flex items-center justify-between w-full max-w-[1100px] mx-auto">
-          <div class="flex flex-col">
-            <p class="text-sm text-slate-500">共 <span class="font-bold text-slate-900">{{ totalQty }}</span> 件，合计 <span class="font-bold text-teal-600">¥{{ totalAmount.toFixed(2) }}</span></p>
-            <p class="text-xs text-slate-400 mt-0.5">提交后进入待提货状态</p>
-          </div>
+    <div class="client-cart-summary absolute bottom-0 left-0 right-0 z-20 border-t border-slate-200 bg-white px-4 py-3 pb-safe shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
+      <div class="mx-auto flex w-full max-w-[1100px] items-center justify-between">
+        <div class="flex flex-col">
+          <p class="text-sm text-slate-500">共 <span class="font-bold text-slate-900">{{ totalQty }}</span> 件，合计 <span class="font-bold text-teal-600">¥{{ totalAmount.toFixed(2) }}</span></p>
+          <p class="mt-0.5 text-xs text-slate-400">提交后进入待提货状态</p>
+        </div>
         <button
           type="button"
-          class="rounded-full bg-slate-900 px-8 py-2.5 text-sm font-semibold text-white transition-transform active:scale-95 shadow-md hover:shadow-lg disabled:cursor-not-allowed disabled:opacity-60"
+          class="rounded-full bg-slate-900 px-8 py-2.5 text-sm font-semibold text-white shadow-md transition-transform hover:shadow-lg active:scale-95 disabled:cursor-not-allowed disabled:opacity-60"
           :disabled="submitDisabled"
           @click="handleSubmit"
         >

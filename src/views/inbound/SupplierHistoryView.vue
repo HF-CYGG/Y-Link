@@ -1,26 +1,31 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/inbound/SupplierHistoryView.vue
- * 文件职责：展示供货方历史送货单列表，并支持服务端筛选分页、详情查看和待入库二维码回查。
+ * 文件职责：展示供货方历史送货单列表，并支持服务端筛选分页、详情查看、改单撤销与删除恢复等状态操作。
  * 实现逻辑：
  * - 页面采用“统计卡 + 筛选工具栏 + 列表容器 + 详情抽屉”的工作台布局，与录入页形成统一视觉语言；
- * - 历史页改为服务端筛选与分页，只返回当前页数据，降低首屏等待与前端内存占用；
- * - 列表请求与详情请求都接入稳定请求工具，避免快速切换筛选或连点详情时旧结果覆盖新状态；
- * - 详情抽屉保留原有查询与二维码逻辑，仅增强打开反馈与信息层级，不改动任何业务接口。
+ * - 历史页使用服务端筛选与分页，并通过自动同步保持库管入库、供货方删除恢复后的列表状态及时更新；
+ * - 列表请求、详情请求与操作前状态校验都接入稳定请求或最新详情读取，避免旧结果覆盖新状态；
+ * - 详情抽屉在打开期间进行轻量刷新，状态变化后立即收起不可用操作入口，降低误改单、误撤销风险。
  * 维护说明：
  * - 若后续要增加更多筛选维度，优先继续扩展服务端查询参数，而不是回退到前端全量筛选；
- * - 二维码生成失败时不能静默吞掉，否则用户只会看到空白占位而不知道单据本身已存在。
+ * - 二维码生成失败时不能静默吞掉，否则用户只会看到空白占位而不知道单据本身已存在；
+ * - 自动同步必须避开弹窗确认与表单编辑过程，避免覆盖用户正在输入的内容。
  */
 
-import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { computed, onActivated, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+
+import { ElMessageBox } from 'element-plus'
 import QRCode from 'qrcode'
 import { useRoute, useRouter } from 'vue-router'
 import { BizResponsiveDrawerShell, PageContainer, PagePaginationBar, PassiveNumberInput } from '@/components/common'
 import {
   cancelSupplierDelivery,
+  deleteSupplierDelivery,
   getSupplierDeliveries,
   getInboundDetail,
+  permanentlyDeleteSupplierDelivery,
+  restoreSupplierDelivery,
   updateSupplierDelivery,
   type InboundOrder,
   type InboundOrderDetail,
@@ -28,9 +33,13 @@ import {
 } from '@/api/modules/inbound'
 import { getProductList, type ProductRecord } from '@/api/modules/product'
 import { useStableRequest } from '@/composables/useStableRequest'
-import { extractErrorMessage } from '@/utils/error'
+import { AppRequestError, extractErrorMessage } from '@/utils/error'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
 import dayjs from 'dayjs'
+import InboundDeliverySheetWorkbenchDialog from './components/InboundDeliverySheetWorkbenchDialog.vue'
+
+
+import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 const router = useRouter()
 const route = useRoute()
@@ -38,6 +47,9 @@ const listRequest = useStableRequest()
 const detailRequest = useStableRequest()
 const productRequest = useStableRequest()
 const actionRequest = useStableRequest()
+const AUTO_REFRESH_INTERVAL_MS = 30_000
+const DETAIL_SYNC_INTERVAL_MS = 30_000
+const listRenderKey = ref(0)
 const listState = reactive(createPaginatedListState<InboundOrder>({
   loading: false,
   query: {
@@ -49,6 +61,7 @@ const summary = ref<SupplierDeliverySummary>({
   pending: 0,
   verified: 0,
   cancelled: 0,
+  deleted: 0,
 })
 const detailVisible = ref(false)
 const detailLoading = ref(false)
@@ -56,6 +69,7 @@ const currentDetail = ref<InboundOrderDetail | null>(null)
 const qrCodeDataUrl = ref('')
 const qrCodeUnavailable = ref(false)
 const statusFilter = ref<'all' | InboundOrder['status']>('all')
+const deleteStateFilter = ref<'active' | 'deleted' | 'all'>('active')
 const keyword = ref('')
 const cancelDialogVisible = ref(false)
 const cancelReason = ref('')
@@ -64,7 +78,13 @@ const targetCancelOrder = ref<InboundOrder | null>(null)
 const editDialogVisible = ref(false)
 const editSubmitting = ref(false)
 const editProductLoading = ref(false)
+const deliverySheetDialogVisible = ref(false)
 const products = ref<ProductRecord[]>([])
+const interactionLockCount = ref(0)
+const silentRefreshing = ref(false)
+const detailSyncing = ref(false)
+let autoRefreshTimer: ReturnType<typeof globalThis.setInterval> | null = null
+let detailSyncTimer: ReturnType<typeof globalThis.setInterval> | null = null
 
 interface EditItemRow {
   uid: string
@@ -78,6 +98,8 @@ const createEditItemRow = (): EditItemRow => ({
   productId: '',
   qty: 1,
 })
+
+const getProductOptionValue = (product: ProductRecord) => String(product.id)
 
 const editForm = reactive({
   orderId: '',
@@ -128,7 +150,7 @@ const summaryCards = computed(() => {
 
 // 当前是否处于筛选态：用于空态文案与局部提示收口，避免同一信息在多个区域重复出现。
 const isFiltering = computed(() => {
-  return statusFilter.value !== 'all' || Boolean(keyword.value.trim())
+  return statusFilter.value !== 'all' || deleteStateFilter.value !== 'active' || Boolean(keyword.value.trim())
 })
 
 // 列表头仅保留简短结果说明，避免再次重复展示完整筛选摘要。
@@ -141,10 +163,25 @@ const emptyDescription = computed(() => {
   return isFiltering.value ? '当前筛选下暂无单据' : '暂无历史送货记录'
 })
 
-const canEditOrder = (order: InboundOrder) => order.status === 'pending'
-const canCancelOrder = (order: InboundOrder) => order.status === 'pending'
+const canEditOrder = (order: InboundOrder) => order.status === 'pending' && !order.isDeleted
+const canCancelOrder = (order: InboundOrder) => order.status === 'pending' && !order.isDeleted
+const canSoftDeleteOrder = (order: InboundOrder) => !order.isDeleted && order.status !== 'verified'
+const canRestoreOrder = (order: InboundOrder) => order.isDeleted && order.status !== 'verified'
+const canPermanentDeleteOrder = (order: InboundOrder) => order.isDeleted && order.status !== 'verified'
 const shouldShowPendingQrCode = computed(() => {
-  return currentDetail.value?.order.status === 'pending'
+  return currentDetail.value?.order.status === 'pending' && !currentDetail.value.order.isDeleted
+})
+
+const isOnSupplierHistoryRoute = computed(() => route.name === 'supplier-history')
+const isInteractionLocked = computed(() => {
+  return (
+    interactionLockCount.value > 0 ||
+    cancelDialogVisible.value ||
+    editDialogVisible.value ||
+    deliverySheetDialogVisible.value ||
+    cancelSubmitting.value ||
+    editSubmitting.value
+  )
 })
 
 const buildListQuery = () => {
@@ -153,6 +190,8 @@ const buildListQuery = () => {
     pageSize: listState.query.pageSize,
     keyword: keyword.value.trim() || undefined,
     status: statusFilter.value === 'all' ? undefined : statusFilter.value,
+    includeDeleted: deleteStateFilter.value === 'all' ? true : undefined,
+    onlyDeleted: deleteStateFilter.value === 'deleted' ? true : undefined,
   }
 }
 
@@ -175,12 +214,39 @@ const ensureEditRowsFromDetail = (detail: InboundOrderDetail) => {
   editForm.remark = detail.order.remark ?? ''
   editForm.items = detail.items.map((item) => ({
     uid: `supplier-history-edit-item-${editUidSeed.value++}`,
-    productId: item.productId,
+    productId: String(item.productId),
     qty: Number(item.qty) || 1,
   }))
 
   if (!editForm.items.length) {
     editForm.items = [createEditItemRow()]
+  }
+}
+
+const ensureProductOptionsFromDetail = (detail: InboundOrderDetail) => {
+  const existingIds = new Set(products.value.map((product) => getProductOptionValue(product)))
+  const fallbackProducts = detail.items
+    .filter((item) => item.productId && !existingIds.has(String(item.productId)))
+    .map((item) => ({
+      id: String(item.productId),
+      productCode: '历史商品',
+      productName: item.productNameSnapshot || '未匹配商品',
+      pinyinAbbr: '',
+      defaultPrice: '0',
+      isActive: false,
+      o2oStatus: 'unlisted' as const,
+      thumbnail: null,
+      detailContent: null,
+      limitPerUser: 0,
+      currentStock: 0,
+      preOrderedStock: 0,
+      availableStock: 0,
+      tagIds: [],
+      tags: [],
+    }))
+
+  if (fallbackProducts.length) {
+    products.value = [...products.value, ...fallbackProducts]
   }
 }
 
@@ -197,7 +263,7 @@ const ensureProductsLoaded = async () => {
       products.value = result
     },
     onError: (error) => {
-      ElMessage.error(extractErrorMessage(error, '可改单商品加载失败，请稍后重试'))
+      showAppError(extractErrorMessage(error, '可改单商品加载失败，请稍后重试'))
     },
     onFinally: () => {
       editProductLoading.value = false
@@ -205,19 +271,66 @@ const ensureProductsLoaded = async () => {
   })
 }
 
-const loadData = async () => {
-  listState.loading = true
+const isMissingDeliveryError = (error: unknown) => {
+  if (error instanceof AppRequestError && error.status === 404) {
+    return true
+  }
+
+  const message = extractErrorMessage(error, '')
+  return /不存在|已被删除|不可访问|无效/.test(message)
+}
+
+const canRunBackgroundSync = () => {
+  return isOnSupplierHistoryRoute.value && !isInteractionLocked.value
+}
+
+const runWithInteractionLock = async <T,>(executor: () => Promise<T>) => {
+  interactionLockCount.value += 1
+  try {
+    return await executor()
+  } finally {
+    interactionLockCount.value = Math.max(0, interactionLockCount.value - 1)
+  }
+}
+
+const loadData = async (options: { silent?: boolean; force?: boolean } = {}) => {
+  if (!options.force && options.silent && !canRunBackgroundSync()) {
+    return
+  }
+
+  if (options.silent && listState.loading) {
+    return
+  }
+
+  if (options.silent) {
+    silentRefreshing.value = true
+    listState.loading = false
+  } else {
+    silentRefreshing.value = false
+    listState.loading = true
+  }
+
   await listRequest.runLatest({
     executor: (signal) => getSupplierDeliveries(buildListQuery(), { signal }),
     onSuccess: (result) => {
       applyPaginatedResult(listState, result)
       summary.value = result.summary
+      if (!options.silent) {
+        listRenderKey.value += 1
+      }
     },
     onError: (err) => {
-      ElMessage.error(extractErrorMessage(err, '获取历史记录失败'))
+      if (!options.silent) {
+        showAppError(extractErrorMessage(err, '获取历史记录失败'))
+      }
     },
     onFinally: () => {
-      listState.loading = false
+      if (options.silent) {
+        silentRefreshing.value = false
+        listState.loading = false
+      } else {
+        listState.loading = false
+      }
     },
   })
 }
@@ -234,7 +347,7 @@ const generateQRCode = async (verifyCode: string) => {
   } catch (err) {
     qrCodeDataUrl.value = ''
     qrCodeUnavailable.value = true
-    ElMessage.warning(extractErrorMessage(err, '详情已加载，但二维码生成失败，请稍后重试'))
+    showAppWarning(extractErrorMessage(err, '详情已加载，但二维码生成失败，请稍后重试'))
   }
 }
 
@@ -255,10 +368,22 @@ const applyDetailResult = async (detail: InboundOrderDetail, options?: { openDra
   qrCodeUnavailable.value = false
 }
 
+const handleMissingCurrentDetail = async (options: { notify?: boolean } = {}) => {
+  const currentShowNo = currentDetail.value?.order.showNo
+  detailVisible.value = false
+  currentDetail.value = null
+  qrCodeDataUrl.value = ''
+  qrCodeUnavailable.value = false
+  await loadData({ silent: true, force: true })
+  if (options.notify !== false) {
+    showAppWarning(currentShowNo ? `送货单“${currentShowNo}”已被永久删除或不可访问` : '送货单已被永久删除或不可访问')
+  }
+}
+
 // 详情刷新共用入口：
 // - 列表查看详情、改单成功后详情回写、撤销成功后详情切换都统一走这里；
 // - 避免每个动作各自维护一套“重置二维码 + 请求详情 + 刷新抽屉”的分支。
-const loadDetail = async (row: Pick<InboundOrder, 'id' | 'verifyCode'>, options?: { openDrawer?: boolean }) => {
+const loadDetail = async (row: Pick<InboundOrder, 'id' | 'verifyCode'> & Partial<Pick<InboundOrder, 'isDeleted' | 'showNo'>>, options?: { openDrawer?: boolean }) => {
   if (options?.openDrawer !== false) {
     detailVisible.value = true
   }
@@ -270,12 +395,23 @@ const loadDetail = async (row: Pick<InboundOrder, 'id' | 'verifyCode'>, options?
   }
 
   await detailRequest.runLatest({
-    executor: (signal) => getInboundDetail(row.verifyCode, { signal }),
+    executor: (signal) => getInboundDetail(row.verifyCode, {
+      signal,
+      includeDeleted: Boolean(row.isDeleted),
+    }),
     onSuccess: async (detail) => {
       await applyDetailResult(detail, options)
     },
-    onError: (err) => {
-      ElMessage.error(extractErrorMessage(err, '获取详情失败'))
+    onError: async (err) => {
+      if (isMissingDeliveryError(err)) {
+        detailVisible.value = false
+        currentDetail.value = null
+        await loadData({ silent: true, force: true })
+        showAppWarning(row.showNo ? `送货单“${row.showNo}”已被永久删除或不可访问` : '送货单已被永久删除或不可访问')
+        return
+      }
+
+      showAppError(extractErrorMessage(err, '获取详情失败'))
       if (options?.openDrawer !== false) {
         detailVisible.value = false
       }
@@ -284,6 +420,136 @@ const loadDetail = async (row: Pick<InboundOrder, 'id' | 'verifyCode'>, options?
       detailLoading.value = false
     },
   })
+}
+
+const fetchLatestDetailForOrder = (order: Pick<InboundOrder, 'verifyCode'> & Partial<Pick<InboundOrder, 'isDeleted'>>) => {
+  return getInboundDetail(order.verifyCode, {
+    includeDeleted: true,
+  })
+}
+
+const syncCurrentDetail = async (options: { notifyMissing?: boolean } = {}) => {
+  if (!currentDetail.value || !detailVisible.value || !canRunBackgroundSync() || detailSyncing.value) {
+    return
+  }
+
+  detailSyncing.value = true
+  try {
+    const detail = await fetchLatestDetailForOrder(currentDetail.value.order)
+    await applyDetailResult(detail, { openDrawer: false })
+  } catch (error) {
+    if (isMissingDeliveryError(error)) {
+      await handleMissingCurrentDetail({ notify: options.notifyMissing })
+    }
+  } finally {
+    detailSyncing.value = false
+  }
+}
+
+const buildStateChangedMessage = (detail: InboundOrderDetail, actionLabel: string) => {
+  const order = detail.order
+  if (order.isDeleted) {
+    return `送货单“${order.showNo}”已删除，不能继续${actionLabel}`
+  }
+  if (order.status === 'verified') {
+    return `送货单“${order.showNo}”已入库，不能继续${actionLabel}`
+  }
+  if (order.status === 'cancelled') {
+    return `送货单“${order.showNo}”已撤销，不能继续${actionLabel}`
+  }
+  return `送货单“${order.showNo}”状态已变化，请确认后再操作`
+}
+
+const ensureLatestActionableDetail = async (
+  order: InboundOrder,
+  actionLabel: string,
+  predicate: (latestOrder: InboundOrder) => boolean,
+) => {
+  try {
+    const detail = await fetchLatestDetailForOrder(order)
+    const shouldKeepDrawerOpen = detailVisible.value && currentDetail.value?.order.id === detail.order.id
+    await applyDetailResult(detail, { openDrawer: shouldKeepDrawerOpen })
+    if (!predicate(detail.order)) {
+      await loadData({ silent: true, force: true })
+      showAppWarning(buildStateChangedMessage(detail, actionLabel))
+      return null
+    }
+    return detail
+  } catch (error) {
+    if (isMissingDeliveryError(error)) {
+      if (currentDetail.value?.order.id === order.id) {
+        await handleMissingCurrentDetail()
+      } else {
+        await loadData({ silent: true, force: true })
+        showAppWarning(`送货单“${order.showNo}”已被永久删除或不可访问`)
+      }
+      return null
+    }
+
+    showAppError(extractErrorMessage(error, `确认送货单状态失败，已取消${actionLabel}`))
+    return null
+  }
+}
+
+const refreshVisibleSupplierHistory = async () => {
+  if (!canRunBackgroundSync()) {
+    return
+  }
+
+  await loadData({ silent: true })
+}
+
+const refreshSupplierHistoryNow = async () => {
+  if (!isOnSupplierHistoryRoute.value) {
+    return
+  }
+
+  await loadData({ silent: true, force: true })
+  await syncCurrentDetail({ notifyMissing: true })
+}
+
+const startAutoRefresh = () => {
+  if (autoRefreshTimer) {
+    return
+  }
+
+  autoRefreshTimer = globalThis.setInterval(() => {
+    void refreshVisibleSupplierHistory()
+  }, AUTO_REFRESH_INTERVAL_MS)
+}
+
+const stopAutoRefresh = () => {
+  if (!autoRefreshTimer) {
+    return
+  }
+
+  globalThis.clearInterval(autoRefreshTimer)
+  autoRefreshTimer = null
+}
+
+const startDetailSync = () => {
+  if (detailSyncTimer) {
+    return
+  }
+
+  detailSyncTimer = globalThis.setInterval(() => {
+    void syncCurrentDetail({ notifyMissing: true })
+  }, DETAIL_SYNC_INTERVAL_MS)
+}
+
+const stopDetailSync = () => {
+  if (!detailSyncTimer) {
+    return
+  }
+
+  globalThis.clearInterval(detailSyncTimer)
+  detailSyncTimer = null
+}
+
+const handleVisibilitySync = () => {
+  if (globalThis.document?.visibilityState === 'visible') {
+    void refreshSupplierHistoryNow()
+  }
 }
 
 // 查看详情时重置上一次弹窗状态，避免旧二维码或旧详情短暂闪现。
@@ -302,49 +568,55 @@ const handleRemoveEditItem = (index: number) => {
   editForm.items.splice(index, 1)
 }
 
-const openCancelDialog = (order: InboundOrder) => {
+const openCancelDialog = async (order: InboundOrder) => {
   if (!canCancelOrder(order)) {
-    ElMessage.warning('当前送货单不可撤销')
+    showAppWarning('当前送货单不可撤销')
     return
   }
 
-  targetCancelOrder.value = order
+  const detail = await ensureLatestActionableDetail(order, '撤销', canCancelOrder)
+  if (!detail) {
+    return
+  }
+
+  targetCancelOrder.value = detail.order
   cancelReason.value = ''
   cancelDialogVisible.value = true
 }
 
+const openDeliverySheetDialog = () => {
+  if (!currentDetail.value) {
+    showAppWarning('送货单详情尚未加载完成')
+    return
+  }
+
+  deliverySheetDialogVisible.value = true
+}
+
 const openEditDialog = async (row: InboundOrder) => {
   if (!canEditOrder(row)) {
-    ElMessage.warning('当前送货单不可改单')
+    showAppWarning('当前送货单不可改单')
+    return
+  }
+
+  const latestDetail = await ensureLatestActionableDetail(row, '改单', canEditOrder)
+  if (!latestDetail) {
     return
   }
 
   await ensureProductsLoaded()
-  if (!products.value.length) {
-    return
-  }
+  ensureProductOptionsFromDetail(latestDetail)
 
-  const shouldReuseCurrentDetail = currentDetail.value?.order.id === row.id
+  const shouldReuseCurrentDetail = currentDetail.value?.order.id === latestDetail.order.id
   if (shouldReuseCurrentDetail && currentDetail.value) {
+    ensureProductOptionsFromDetail(currentDetail.value)
     ensureEditRowsFromDetail(currentDetail.value)
     editDialogVisible.value = true
     return
   }
 
-  detailLoading.value = true
-  await detailRequest.runLatest({
-    executor: (signal) => getInboundDetail(row.verifyCode, { signal }),
-    onSuccess: (detail) => {
-      ensureEditRowsFromDetail(detail)
-      editDialogVisible.value = true
-    },
-    onError: (error) => {
-      ElMessage.error(extractErrorMessage(error, '读取改单详情失败'))
-    },
-    onFinally: () => {
-      detailLoading.value = false
-    },
-  })
+  ensureEditRowsFromDetail(latestDetail)
+  editDialogVisible.value = true
 }
 
 const handleSubmitCancel = async () => {
@@ -354,9 +626,16 @@ const handleSubmitCancel = async () => {
 
   const reason = cancelReason.value.trim()
   if (!reason) {
-    ElMessage.warning('请填写撤销原因')
+    showAppWarning('请填写撤销原因')
     return
   }
+
+  const latestDetail = await ensureLatestActionableDetail(targetCancelOrder.value, '撤销', canCancelOrder)
+  if (!latestDetail) {
+    cancelDialogVisible.value = false
+    return
+  }
+  targetCancelOrder.value = latestDetail.order
 
   cancelSubmitting.value = true
   await actionRequest.runLatest({
@@ -367,13 +646,168 @@ const handleSubmitCancel = async () => {
       targetCancelOrder.value = null
       await applyDetailResult(detail)
       await loadData()
-      ElMessage.success('送货单已撤销')
+      showAppSuccess('送货单已撤销')
     },
     onError: (error) => {
-      ElMessage.error(extractErrorMessage(error, '撤销送货单失败'))
+      showAppError(extractErrorMessage(error, '撤销送货单失败'))
     },
     onFinally: () => {
       cancelSubmitting.value = false
+    },
+  })
+}
+
+const handleSoftDeleteOrder = async (order: InboundOrder) => {
+  if (!canSoftDeleteOrder(order)) {
+    showAppWarning(order.status === 'verified' ? '已入库送货单不能删除' : '当前送货单不可删除')
+    return
+  }
+
+  const latestDetail = await ensureLatestActionableDetail(order, '删除', canSoftDeleteOrder)
+  if (!latestDetail) {
+    return
+  }
+
+  try {
+    await runWithInteractionLock(() => ElMessageBox.confirm(
+      `删除后该送货单会从正常列表隐藏，可在“已删除单据”中恢复。\n送货单号：${latestDetail.order.showNo}`,
+      '删除送货单',
+      {
+        type: 'warning',
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+      },
+    ))
+  } catch {
+    return
+  }
+
+  const submitDetail = await ensureLatestActionableDetail(latestDetail.order, '删除', canSoftDeleteOrder)
+  if (!submitDetail) {
+    return
+  }
+
+  await actionRequest.runLatest({
+    executor: (signal) => deleteSupplierDelivery(submitDetail.order.id, { signal }),
+    onSuccess: async (detail) => {
+      if (currentDetail.value?.order.id === detail.order.id) {
+        await applyDetailResult(detail, { openDrawer: true })
+      }
+      await loadData()
+      showAppSuccess('送货单已删除，可在已删除单据中恢复')
+    },
+    onError: (error) => {
+      showAppError(extractErrorMessage(error, '删除送货单失败'))
+    },
+  })
+}
+
+const handleRestoreOrder = async (order: InboundOrder) => {
+  if (!canRestoreOrder(order)) {
+    showAppWarning('当前送货单不可恢复')
+    return
+  }
+
+  const latestDetail = await ensureLatestActionableDetail(order, '恢复', canRestoreOrder)
+  if (!latestDetail) {
+    return
+  }
+
+  try {
+    await runWithInteractionLock(() => ElMessageBox.confirm(`确认恢复送货单“${latestDetail.order.showNo}”？`, '恢复送货单', {
+      type: 'warning',
+      confirmButtonText: '确认恢复',
+      cancelButtonText: '取消',
+    }))
+  } catch {
+    return
+  }
+
+  const submitDetail = await ensureLatestActionableDetail(latestDetail.order, '恢复', canRestoreOrder)
+  if (!submitDetail) {
+    return
+  }
+
+  await actionRequest.runLatest({
+    executor: (signal) => restoreSupplierDelivery(submitDetail.order.id, { signal }),
+    onSuccess: async (detail) => {
+      if (currentDetail.value?.order.id === detail.order.id) {
+        await applyDetailResult(detail, { openDrawer: true })
+      }
+      await loadData()
+      showAppSuccess('送货单已恢复')
+    },
+    onError: (error) => {
+      showAppError(extractErrorMessage(error, '恢复送货单失败'))
+    },
+  })
+}
+
+const handlePermanentDeleteOrder = async (order: InboundOrder) => {
+  if (!canPermanentDeleteOrder(order)) {
+    showAppWarning('当前送货单不可永久删除')
+    return
+  }
+
+  const latestDetail = await ensureLatestActionableDetail(order, '永久删除', canPermanentDeleteOrder)
+  if (!latestDetail) {
+    return
+  }
+
+  let confirmShowNo = ''
+  let permanentDeletePassword = ''
+  try {
+    const result = await runWithInteractionLock(() => ElMessageBox.prompt(
+      `永久删除后将清理送货单和商品明细，无法恢复。\n请输入送货单号确认：${latestDetail.order.showNo}`,
+      '永久删除送货单',
+      {
+        type: 'error',
+        confirmButtonText: '永久删除',
+        cancelButtonText: '取消',
+        inputPattern: new RegExp(`^${latestDetail.order.showNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
+        inputErrorMessage: '请输入完整送货单号',
+      },
+    ))
+    confirmShowNo = result.value
+    const passwordResult = await runWithInteractionLock(() => ElMessageBox.prompt(
+      '请输入容器环境变量中配置的永久删除密码。',
+      '永久删除密码',
+      {
+        type: 'error',
+        confirmButtonText: '永久删除',
+        cancelButtonText: '取消',
+        inputType: 'password',
+        inputPlaceholder: '请输入永久删除密码',
+        inputValidator: (value: string) => {
+          if (!String(value || '').trim()) {
+            return '请输入永久删除密码'
+          }
+          return true
+        },
+      },
+    ))
+    permanentDeletePassword = passwordResult.value.trim()
+  } catch {
+    return
+  }
+
+  const submitDetail = await ensureLatestActionableDetail(latestDetail.order, '永久删除', canPermanentDeleteOrder)
+  if (!submitDetail) {
+    return
+  }
+
+  await actionRequest.runLatest({
+    executor: (signal) => permanentlyDeleteSupplierDelivery(submitDetail.order.id, { confirmShowNo, permanentDeletePassword }, { signal }),
+    onSuccess: async () => {
+      if (currentDetail.value?.order.id === submitDetail.order.id) {
+        detailVisible.value = false
+        currentDetail.value = null
+      }
+      await loadData()
+      showAppSuccess('送货单已永久删除')
+    },
+    onError: (error) => {
+      showAppError(extractErrorMessage(error, '永久删除送货单失败'))
     },
   })
 }
@@ -386,7 +820,8 @@ const buildEditPayload = () => {
 
   const uniqueItems = new Map<string, number>()
   validItems.forEach((item) => {
-    uniqueItems.set(item.productId, (uniqueItems.get(item.productId) || 0) + item.qty)
+    const productId = String(item.productId).trim()
+    uniqueItems.set(productId, (uniqueItems.get(productId) || 0) + item.qty)
   })
 
   return {
@@ -404,8 +839,19 @@ const handleSubmitEdit = async () => {
   try {
     payload = buildEditPayload()
   } catch (error) {
-    ElMessage.warning(extractErrorMessage(error, '请至少保留一件有效商品'))
+    showAppWarning(extractErrorMessage(error, '请至少保留一件有效商品'))
     return
+  }
+
+  const targetOrder = currentDetail.value?.order.id === editForm.orderId
+    ? currentDetail.value.order
+    : listState.records.find((order) => order.id === editForm.orderId)
+  if (targetOrder) {
+    const latestDetail = await ensureLatestActionableDetail(targetOrder, '改单', canEditOrder)
+    if (!latestDetail) {
+      editDialogVisible.value = false
+      return
+    }
   }
 
   editSubmitting.value = true
@@ -416,10 +862,10 @@ const handleSubmitEdit = async () => {
       resetEditForm()
       await applyDetailResult(detail)
       await loadData()
-      ElMessage.success('送货单已更新')
+      showAppSuccess('送货单已更新')
     },
     onError: (error) => {
-      ElMessage.error(extractErrorMessage(error, '改单失败'))
+      showAppError(extractErrorMessage(error, '改单失败'))
     },
     onFinally: () => {
       editSubmitting.value = false
@@ -455,23 +901,46 @@ watch(() => route.name, (nextName, previousName) => {
     return
   }
 
-  void loadData()
+  void refreshSupplierHistoryNow()
+})
+
+watch(detailVisible, (visible) => {
+  if (visible) {
+    startDetailSync()
+    void syncCurrentDetail({ notifyMissing: true })
+    return
+  }
+
+  stopDetailSync()
+})
+
+onActivated(() => {
+  void refreshSupplierHistoryNow()
 })
 
 onMounted(() => {
   resetEditForm()
   void loadData()
+  startAutoRefresh()
+  globalThis.document?.addEventListener('visibilitychange', handleVisibilitySync)
+})
+
+onBeforeUnmount(() => {
+  stopAutoRefresh()
+  stopDetailSync()
+  globalThis.document?.removeEventListener('visibilitychange', handleVisibilitySync)
 })
 </script>
 
 <template>
-  <PageContainer title="历史送货单">
-    <div class="mx-auto max-w-7xl">
-      <div class="mb-5 grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+  <PageContainer>
+    <div class="supplier-history-page mx-auto max-w-7xl">
+      <transition-group name="history-summary-card" tag="div" class="history-summary-grid mb-5 grid gap-4 md:grid-cols-2 xl:grid-cols-4" appear>
         <div
-          v-for="card in summaryCards"
+          v-for="(card, index) in summaryCards"
           :key="card.label"
           class="history-summary-card rounded-[26px] border border-slate-200/70 bg-white/95 p-5 shadow-[0_14px_34px_-34px_rgba(15,23,42,0.18)] dark:border-slate-700/80 dark:bg-slate-800/95"
+          :style="{ '--history-card-delay': `${index * 48}ms` }"
         >
           <div :class="['history-summary-card__badge', card.accentClass]">
             {{ String(card.value).padStart(2, '0') }}
@@ -480,15 +949,15 @@ onMounted(() => {
           <p class="mt-1 text-2xl font-semibold tracking-tight text-slate-900 dark:text-slate-100">{{ card.value }}</p>
           <p class="mt-2 text-xs leading-5 text-slate-400 dark:text-slate-500">{{ card.hint }}</p>
         </div>
-      </div>
+      </transition-group>
 
       <div class="history-filter-card mb-4 rounded-[28px] border border-slate-200/70 bg-white/95 p-4 shadow-[0_14px_34px_-34px_rgba(15,23,42,0.16)] dark:border-slate-700/80 dark:bg-slate-800/95 sm:p-5">
-        <div class="flex flex-1 flex-col gap-3 lg:flex-row lg:items-center">
+        <div class="history-filter-card__toolbar flex flex-1 flex-col gap-3 xl:flex-row xl:items-center">
           <el-input
             v-model="keyword"
             clearable
             placeholder="按送货单号或供货方搜索"
-            class="history-filter-card__input lg:max-w-xs"
+            class="history-filter-card__input xl:max-w-xs"
             @clear="handleSearch"
             @keyup.enter="handleSearch"
           />
@@ -498,8 +967,21 @@ onMounted(() => {
             <el-radio-button value="verified">已入库</el-radio-button>
             <el-radio-button value="cancelled">已取消</el-radio-button>
           </el-radio-group>
-          <el-button type="primary" @click="handleSearch">搜索</el-button>
+          <el-select
+            v-model="deleteStateFilter"
+            class="history-filter-card__delete-state xl:w-40"
+            placeholder="单据范围"
+            @change="handleSearch"
+          >
+            <el-option label="正常单据" value="active" />
+            <el-option :label="`已删除 ${summary.deleted}`" value="deleted" />
+            <el-option label="全部单据" value="all" />
+          </el-select>
+          <el-button class="history-filter-card__submit" type="primary" @click="handleSearch">搜索</el-button>
         </div>
+        <p class="history-filter-card__sync mt-3 text-xs leading-5 text-slate-400 dark:text-slate-500">
+          自动同步已开启，约 30 秒刷新一次
+        </p>
       </div>
 
       <div class="history-table-shell overflow-hidden rounded-[28px] border border-slate-200/70 bg-white/95 shadow-[0_18px_42px_-40px_rgba(15,23,42,0.18)] dark:border-slate-700/80 dark:bg-slate-800/95">
@@ -509,66 +991,103 @@ onMounted(() => {
         </div>
 
         <div class="history-table-shell__body flex min-h-[520px] flex-col">
-          <el-table native-scrollbar v-loading="listState.loading" :data="listState.records" stripe class="history-table-shell__table w-full flex-1">
-            <el-table-column prop="showNo" label="送货单号" min-width="180" />
-            <el-table-column prop="totalQty" label="总数量" min-width="110">
-              <template #default="{ row }">
-                <span class="font-medium text-slate-800 dark:text-slate-200">{{ Number(row.totalQty) }}</span> 件
-              </template>
-            </el-table-column>
-            <el-table-column prop="status" label="状态" min-width="120">
-              <template #default="{ row }">
-                <el-tag :type="getStatusMeta(row.status as InboundOrder['status']).type" effect="light" round>
-                  {{ getStatusMeta(row.status as InboundOrder['status']).label }}
-                </el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="创建时间" min-width="170">
-              <template #default="{ row }">
-                {{ dayjs(row.createdAt).format('YYYY-MM-DD HH:mm') }}
-              </template>
-            </el-table-column>
-            <el-table-column label="入库时间" min-width="170">
-              <template #default="{ row }">
-                {{ row.verifiedAt ? dayjs(row.verifiedAt).format('YYYY-MM-DD HH:mm') : '-' }}
-              </template>
-            </el-table-column>
-            <el-table-column label="操作" min-width="220" fixed="right" align="right">
-              <template #default="{ row }">
-                <div class="flex items-center justify-end gap-2">
-                  <el-button
-                    v-if="canEditOrder(row as InboundOrder)"
-                    class="history-detail-button"
-                    link
-                    type="primary"
-                    @click="openEditDialog(row as InboundOrder)"
-                  >
-                    改单
-                  </el-button>
-                  <el-button
-                    v-if="canCancelOrder(row as InboundOrder)"
-                    class="history-detail-button"
-                    link
-                    type="danger"
-                    @click="openCancelDialog(row as InboundOrder)"
-                  >
-                    撤销
-                  </el-button>
-                  <el-button class="history-detail-button" link type="primary" @click="handleViewDetail(row as InboundOrder)">
-                    查看详情
-                  </el-button>
+          <transition name="history-table-refresh" mode="out-in">
+            <el-table
+              :key="listRenderKey"
+              native-scrollbar
+              v-loading="listState.loading"
+              :data="listState.records"
+              stripe
+              class="history-table-shell__table w-full flex-1"
+            >
+              <el-table-column prop="showNo" label="送货单号" min-width="180" />
+              <el-table-column prop="totalQty" label="总数量" min-width="110">
+                <template #default="{ row }">
+                  <span class="font-medium text-slate-800 dark:text-slate-200">{{ Number(row.totalQty) }}</span> 件
+                </template>
+              </el-table-column>
+              <el-table-column prop="status" label="状态" min-width="120">
+                <template #default="{ row }">
+                  <el-tag :type="getStatusMeta(row.status as InboundOrder['status']).type" effect="light" round>
+                    {{ getStatusMeta(row.status as InboundOrder['status']).label }}
+                  </el-tag>
+                  <el-tag v-if="row.isDeleted" class="ml-2" type="danger" effect="light" round>已删除</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="创建时间" min-width="170">
+                <template #default="{ row }">
+                  {{ dayjs(row.createdAt).format('YYYY-MM-DD HH:mm') }}
+                </template>
+              </el-table-column>
+              <el-table-column label="入库时间" min-width="170">
+                <template #default="{ row }">
+                  {{ row.verifiedAt ? dayjs(row.verifiedAt).format('YYYY-MM-DD HH:mm') : '-' }}
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" min-width="220" fixed="right" align="right">
+                <template #default="{ row }">
+                  <div class="history-table-shell__actions flex items-center justify-end gap-2">
+                    <el-button
+                      v-if="canEditOrder(row as InboundOrder)"
+                      class="history-detail-button"
+                      link
+                      type="primary"
+                      @click="openEditDialog(row as InboundOrder)"
+                    >
+                      改单
+                    </el-button>
+                    <el-button
+                      v-if="canCancelOrder(row as InboundOrder)"
+                      class="history-detail-button"
+                      link
+                      type="danger"
+                      @click="openCancelDialog(row as InboundOrder)"
+                    >
+                      撤销
+                    </el-button>
+                    <el-button
+                      v-if="canSoftDeleteOrder(row as InboundOrder)"
+                      class="history-detail-button"
+                      link
+                      type="danger"
+                      @click="handleSoftDeleteOrder(row as InboundOrder)"
+                    >
+                      删除
+                    </el-button>
+                    <el-button
+                      v-if="canRestoreOrder(row as InboundOrder)"
+                      class="history-detail-button"
+                      link
+                      type="primary"
+                      @click="handleRestoreOrder(row as InboundOrder)"
+                    >
+                      恢复
+                    </el-button>
+                    <el-button
+                      v-if="canPermanentDeleteOrder(row as InboundOrder)"
+                      class="history-detail-button"
+                      link
+                      type="danger"
+                      @click="handlePermanentDeleteOrder(row as InboundOrder)"
+                    >
+                      永久删除
+                    </el-button>
+                    <el-button class="history-detail-button" link type="primary" @click="handleViewDetail(row as InboundOrder)">
+                      查看详情
+                    </el-button>
+                  </div>
+                </template>
+              </el-table-column>
+
+              <template #empty>
+                <div class="py-14">
+                  <el-empty :description="emptyDescription" :image-size="120">
+                    <el-button type="primary" @click="goToDelivery">去录入送货单</el-button>
+                  </el-empty>
                 </div>
               </template>
-            </el-table-column>
-
-            <template #empty>
-              <div class="py-14">
-                <el-empty :description="emptyDescription" :image-size="120">
-                  <el-button type="primary" @click="goToDelivery">去录入送货单</el-button>
-                </el-empty>
-              </div>
-            </template>
-          </el-table>
+            </el-table>
+          </transition>
         </div>
       </div>
       <PagePaginationBar
@@ -603,7 +1122,7 @@ onMounted(() => {
           <transition name="history-detail-fade" appear>
             <div v-if="currentDetail" class="space-y-4">
               <div class="history-detail-hero rounded-[26px] border border-slate-200/70 bg-white/95 p-5 shadow-[0_14px_32px_-32px_rgba(15,23,42,0.16)] dark:border-slate-700/80 dark:bg-slate-800/95">
-                <div class="flex items-start justify-between gap-3">
+                <div class="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
                   <div>
                     <p class="text-xs uppercase tracking-[0.2em] text-slate-400 dark:text-slate-500">送货单详情</p>
                     <h3 class="mt-2 text-lg font-semibold text-slate-900 dark:text-slate-100">{{ currentDetail.order.showNo }}</h3>
@@ -611,7 +1130,14 @@ onMounted(() => {
                       创建于 {{ dayjs(currentDetail.order.createdAt).format('YYYY-MM-DD HH:mm') }}
                     </p>
                   </div>
-                  <div class="flex shrink-0 items-center gap-2">
+                  <div class="history-detail-hero__actions flex shrink-0 flex-wrap items-center justify-start gap-2 lg:justify-end">
+                    <el-button
+                      type="primary"
+                      plain
+                      @click="openDeliverySheetDialog"
+                    >
+                      生成送货单
+                    </el-button>
                     <el-button
                       v-if="canEditOrder(currentDetail.order)"
                       type="primary"
@@ -628,8 +1154,35 @@ onMounted(() => {
                     >
                       撤销
                     </el-button>
+                    <el-button
+                      v-if="canSoftDeleteOrder(currentDetail.order)"
+                      type="danger"
+                      plain
+                      @click="handleSoftDeleteOrder(currentDetail.order)"
+                    >
+                      删除
+                    </el-button>
+                    <el-button
+                      v-if="canRestoreOrder(currentDetail.order)"
+                      type="primary"
+                      plain
+                      @click="handleRestoreOrder(currentDetail.order)"
+                    >
+                      恢复
+                    </el-button>
+                    <el-button
+                      v-if="canPermanentDeleteOrder(currentDetail.order)"
+                      type="danger"
+                      plain
+                      @click="handlePermanentDeleteOrder(currentDetail.order)"
+                    >
+                      永久删除
+                    </el-button>
                     <el-tag :type="getStatusMeta(currentDetail.order.status).type" size="small" effect="light" round>
                       {{ getStatusMeta(currentDetail.order.status).label }}
+                    </el-tag>
+                    <el-tag v-if="currentDetail.order.isDeleted" type="danger" size="small" effect="light" round>
+                      已删除
                     </el-tag>
                   </div>
                 </div>
@@ -728,6 +1281,11 @@ onMounted(() => {
         </div>
       </BizResponsiveDrawerShell>
 
+      <InboundDeliverySheetWorkbenchDialog
+        v-model="deliverySheetDialogVisible"
+        :detail="currentDetail"
+      />
+
       <el-dialog
         v-model="cancelDialogVisible"
         title="撤销送货单"
@@ -792,9 +1350,9 @@ onMounted(() => {
                   >
                     <el-option
                       v-for="product in products"
-                      :key="product.id"
+                      :key="getProductOptionValue(product)"
                       :label="product.productName"
-                      :value="product.id"
+                      :value="getProductOptionValue(product)"
                     >
                       <span class="float-left">{{ product.productName }}</span>
                       <span class="float-right text-sm text-slate-400">{{ product.productCode }}</span>
@@ -856,20 +1414,41 @@ onMounted(() => {
 </template>
 
 <style scoped>
+.supplier-history-page {
+  padding-top: 0.25rem;
+}
+
 .history-summary-card,
 .history-filter-card,
 .history-table-shell,
 .history-detail-hero,
 .history-detail-item {
   transition:
-    box-shadow 0.16s ease,
-    border-color 0.18s ease;
+    box-shadow var(--ylink-motion-fast) var(--ylink-motion-ease),
+    border-color var(--ylink-motion-fast) var(--ylink-motion-ease),
+    transform var(--ylink-motion-fast) var(--ylink-motion-ease);
 }
 
 .history-summary-card:hover,
 .history-filter-card:hover,
 .history-table-shell:hover {
   box-shadow: 0 14px 28px -32px rgba(15, 23, 42, 0.16);
+}
+
+.history-summary-card:hover {
+  transform: translateY(-1px);
+}
+
+.history-summary-card-enter-active {
+  transition:
+    opacity var(--ylink-motion-normal) var(--ylink-motion-ease),
+    transform var(--ylink-motion-normal) var(--ylink-motion-ease);
+  transition-delay: var(--history-card-delay, 0ms);
+}
+
+.history-summary-card-enter-from {
+  opacity: 0;
+  transform: translateY(8px);
 }
 
 .history-summary-card__badge {
@@ -884,8 +1463,52 @@ onMounted(() => {
   letter-spacing: 0.04em;
 }
 
+.history-filter-card__toolbar {
+  min-width: 0;
+}
+
+.history-filter-card__input {
+  min-width: 14rem;
+}
+
+.history-filter-card__delete-state {
+  min-width: 9rem;
+}
+
+.history-filter-card__submit {
+  min-width: 4.25rem;
+}
+
+.history-filter-card__sync {
+  min-height: 1.25rem;
+}
+
+.history-filter-card__tabs {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0.45rem;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+  scrollbar-width: none;
+}
+
+.history-filter-card__tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.history-filter-card__tabs :deep(.el-radio-button) {
+  flex: 0 0 auto;
+}
+
 .history-filter-card__tabs :deep(.el-radio-button__inner) {
   border-radius: 999px;
+  border-left: var(--el-border) !important;
+  transition:
+    background-color var(--ylink-motion-fast) var(--ylink-motion-ease),
+    border-color var(--ylink-motion-fast) var(--ylink-motion-ease),
+    color var(--ylink-motion-fast) var(--ylink-motion-ease);
 }
 
 .history-filter-card__tabs :deep(.el-radio-button:first-child .el-radio-button__inner),
@@ -897,12 +1520,50 @@ onMounted(() => {
   background: linear-gradient(180deg, rgba(248, 250, 252, 0.9), rgba(255, 255, 255, 0.94));
 }
 
+.history-table-shell__table {
+  min-height: 520px;
+}
+
+.history-table-shell__table :deep(.el-table__row > .el-table__cell) {
+  transition:
+    background-color var(--ylink-motion-fast) var(--ylink-motion-ease),
+    color var(--ylink-motion-fast) var(--ylink-motion-ease);
+}
+
+.history-table-shell__table :deep(.el-table__row:hover > .el-table__cell) {
+  background-color: rgba(20, 184, 166, 0.06) !important;
+}
+
+.history-table-shell__actions {
+  min-width: 0;
+}
+
+.history-table-refresh-enter-active,
+.history-table-refresh-leave-active {
+  transition:
+    opacity var(--ylink-motion-fast) var(--ylink-motion-ease),
+    transform var(--ylink-motion-fast) var(--ylink-motion-ease);
+}
+
+.history-table-refresh-enter-from {
+  opacity: 0;
+  transform: translateY(5px);
+}
+
+.history-table-refresh-leave-to {
+  opacity: 0;
+  transform: translateY(-4px);
+}
+
 .history-detail-button {
-  transition: opacity 0.16s ease;
+  transition:
+    opacity var(--ylink-motion-fast) var(--ylink-motion-ease),
+    transform var(--ylink-motion-fast) var(--ylink-motion-ease);
 }
 
 .history-detail-button:hover {
   opacity: 0.88;
+  transform: translateY(-1px);
 }
 
 /* 当前页详情抽屉样式：
@@ -915,6 +1576,10 @@ onMounted(() => {
 
 .history-detail-hero {
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.94));
+}
+
+.history-detail-hero__actions {
+  max-width: 100%;
 }
 
 .history-detail-item:hover {
@@ -938,8 +1603,8 @@ onMounted(() => {
 .history-detail-fade-enter-active,
 .history-detail-fade-leave-active {
   transition:
-    transform 0.16s ease,
-    opacity 0.16s ease;
+    transform var(--ylink-motion-fast) var(--ylink-motion-ease),
+    opacity var(--ylink-motion-fast) var(--ylink-motion-ease);
 }
 
 .history-detail-fade-enter-from,
@@ -954,6 +1619,25 @@ onMounted(() => {
   .history-table-shell {
     border-radius: 1.5rem;
   }
+
+  .history-filter-card__input,
+  .history-filter-card__delete-state,
+  .history-filter-card__submit {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .history-filter-card__submit {
+    justify-content: center;
+  }
+
+  .history-detail-hero__actions {
+    width: 100%;
+  }
+
+  .history-table-shell__table {
+    min-height: 430px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -963,9 +1647,22 @@ onMounted(() => {
   .history-detail-hero,
   .history-detail-item,
   .history-detail-button,
+  .history-summary-card-enter-active,
+  .history-table-refresh-enter-active,
+  .history-table-refresh-leave-active,
   .history-detail-fade-enter-active,
   .history-detail-fade-leave-active {
     transition: none;
+  }
+
+  .history-summary-card:hover,
+  .history-detail-button:hover,
+  .history-summary-card-enter-from,
+  .history-table-refresh-enter-from,
+  .history-table-refresh-leave-to,
+  .history-detail-fade-enter-from,
+  .history-detail-fade-leave-to {
+    transform: none;
   }
 }
 </style>

@@ -17,6 +17,7 @@ defineProps<{
     limitEnabled: boolean
     limitQty: number
     clientPreorderUpdateLimit: number
+    storeBusinessHoursText: string
   }
   canUpdateConfigs: boolean
   loading: boolean
@@ -73,6 +74,19 @@ defineProps<{
           :disabled="!canUpdateConfigs || loading"
           class="!w-full"
         />
+      </div>
+      <div class="space-y-2 md:col-span-2">
+        <div class="text-sm text-slate-600 dark:text-slate-300">店铺营业时间</div>
+        <el-input
+          v-model="o2oForm.storeBusinessHoursText"
+          maxlength="100"
+          show-word-limit
+          :disabled="!canUpdateConfigs || loading"
+          placeholder="例如：09:30 - 21:30"
+        />
+        <p class="text-xs leading-5 text-slate-400">
+          该文案会直接展示在客户端商城首页，用于告知用户当前门店营业时间。
+        </p>
       </div>
     </div>
     <div class="mt-6 border-t border-slate-100 pt-4 text-xs text-slate-400 dark:border-white/5 dark:text-slate-500">

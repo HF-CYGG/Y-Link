@@ -7,7 +7,13 @@
  */
 
 import { AppDataSource } from '../config/data-source.js'
-import { CLIENT_USER_STATUSES, type ClientUserStatus, ClientUser } from '../entities/client-user.entity.js'
+import {
+  CLIENT_USER_ACCOUNT_TYPES,
+  CLIENT_USER_STATUSES,
+  type ClientUserAccountType,
+  type ClientUserStatus,
+  ClientUser,
+} from '../entities/client-user.entity.js'
 import { ClientUserSession } from '../entities/client-user-session.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
@@ -22,6 +28,9 @@ export interface ClientUserListQuery {
   pageSize: number
   keyword?: string
   status?: ClientUserStatus
+  accountType?: ClientUserAccountType
+  departmentName?: string
+  staffNo?: string
 }
 
 export interface ResetClientUserPasswordInput {
@@ -53,6 +62,9 @@ export interface ClientUserManageSafeProfile {
   email: string
   realName: string
   departmentName: string
+  accountType: ClientUserAccountType
+  staffNo: string | null
+  staffVerified: boolean
   status: ClientUserStatus
   lastLoginAt: Date | null
   createdAt: Date
@@ -74,6 +86,9 @@ const sanitizeClientUserProfile = (user: ClientUser): ClientUserManageSafeProfil
     email: user.email ?? '',
     realName: normalizedUsername,
     departmentName: user.departmentName ?? '',
+    accountType: user.accountType,
+    staffNo: user.staffNo ?? null,
+    staffVerified: Boolean(user.staffVerified),
     status: user.status,
     lastLoginAt: user.lastLoginAt,
     createdAt: user.createdAt,
@@ -216,6 +231,7 @@ export class ClientUserManageService {
             OR user.email LIKE :keyword
             OR user.realName LIKE :keyword
             OR user.departmentName LIKE :keyword
+            OR user.staffNo LIKE :keyword
           )
         `,
         { keyword: `%${query.keyword.trim()}%` },
@@ -223,6 +239,15 @@ export class ClientUserManageService {
     }
     if (query.status) {
       qb.andWhere('user.status = :status', { status: query.status })
+    }
+    if (query.accountType && CLIENT_USER_ACCOUNT_TYPES.includes(query.accountType)) {
+      qb.andWhere('user.accountType = :accountType', { accountType: query.accountType })
+    }
+    if (query.departmentName?.trim()) {
+      qb.andWhere('user.departmentName = :departmentName', { departmentName: query.departmentName.trim() })
+    }
+    if (query.staffNo?.trim()) {
+      qb.andWhere('user.staffNo LIKE :staffNo', { staffNo: `%${query.staffNo.trim()}%` })
     }
 
     const [list, total] = await qb

@@ -15,6 +15,7 @@ import type { PaginationQueryInput, PaginationResult } from '@/types/api'
  * - disabled: 账号被停用，禁止登录
  */
 export type ClientUserStatus = 'enabled' | 'disabled'
+export type ClientUserAccountType = 'personal' | 'department'
 
 /**
  * 客户端用户管理资料：
@@ -30,6 +31,9 @@ export interface ClientUserManageProfile {
   email: string
   realName: string
   departmentName: string
+  accountType: ClientUserAccountType
+  staffNo: string | null
+  staffVerified: boolean
   status: ClientUserStatus
   lastLoginAt: string | null
   createdAt: string
@@ -44,6 +48,9 @@ export interface ClientUserManageProfile {
 export interface ClientUserListQuery extends PaginationQueryInput {
   keyword?: string
   status?: ClientUserStatus
+  accountType?: ClientUserAccountType
+  departmentName?: string
+  staffNo?: string
 }
 
 interface ClientUserListRawResult {

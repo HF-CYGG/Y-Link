@@ -580,7 +580,6 @@ async function runScenarios(
         token,
         expectedStatuses: [200, 409],
         body: {
-          clientOrderType: 'walkin',
           isSystemApplied: false,
           pickupContact: `client-${index + 1}`,
           items: [{ productId: stockRaceProduct.id, qty: 1 }],
@@ -611,7 +610,6 @@ async function runScenarios(
     pathname: '/api/o2o/mall/preorders',
     token: fixtures.clientTokens[0],
     body: {
-      clientOrderType: 'walkin',
       isSystemApplied: false,
       pickupContact: 'verify-client',
       items: [{ productId: verifyProduct.id, qty: 2 }],
@@ -804,7 +802,6 @@ async function runScenarios(
           token,
           expectedStatuses: [200, 409],
           body: {
-            clientOrderType: 'walkin',
             isSystemApplied: false,
             pickupContact: `mixed-${index + 1}`,
             items: [{ productId: mixedProduct.id, qty: 1 }],

@@ -61,14 +61,16 @@ const ensureReady = async () => {
 }
 
 const readCaptchaCode = (captchaSvg: string) => captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6)
+const toChineseDigits = (value: string) => value.replaceAll(/\d/g, (digit) => '零一二三四五六七八九'[Number(digit)] ?? '')
 
 const registerAndLoginClient = async (seed: number): Promise<ClientAuthContext> => {
   const registerCaptcha = await clientAuthService.createCaptcha()
   const account = `1${String(seed).slice(-10)}`
-  const username = `order_perf_${String(seed).slice(-6)}`
+  const username = `基线用户${toChineseDigits(String(seed).slice(-6))}`
   const password = `Perf@${String(seed).slice(-6)}`
 
   const registerResult = await clientAuthService.register({
+    accountType: 'personal',
     account,
     username,
     password,
@@ -78,7 +80,7 @@ const registerAndLoginClient = async (seed: number): Promise<ClientAuthContext> 
 
   const loginCaptcha = await clientAuthService.createCaptcha()
   const loginResult = await clientAuthService.login({
-    account: registerResult.mobile,
+    account: registerResult.user.mobile,
     password,
     captchaId: loginCaptcha.captchaId,
     captchaCode: readCaptchaCode(loginCaptcha.captchaSvg),
@@ -163,19 +165,12 @@ const seedOrdersForBaseline = async (clientAuth: ClientAuthContext) => {
   // 生成 60 条订单样本，覆盖 pending/verified/cancelled 三种状态。
   for (let index = 0; index < 60; index += 1) {
     await o2oPreorderService.submit(clientAuth, {
-      clientOrderType: 'walkin',
-      isSystemApplied: false,
-      pickupContact: '订单查询基线联系人',
-      items: [{ productId: product.id, qty: 1 }],
-      remark: `订单查询性能样本-${index + 1}`,
-      // 基线脚本使用独立注册的新客户端账号，默认不依赖部门资料，
-      // 因此固定走“散客”口径，避免被当前 `normalizeClientOrderType`
-      // 与部门快照校验拦截，确保种子数据在本地/CI 都可稳定生成。
-      clientOrderType: 'walkin',
       // 基线场景只验证订单查询性能，不需要额外引入“系统申请”变量。
       isSystemApplied: false,
       // 当前 O2O 下单已强制要求显式提货人，脚本同步补齐，避免继续沿用旧版最小入参。
       pickupContact: `基线提货人-${(index % 5) + 1}`,
+      items: [{ productId: product.id, qty: 1 }],
+      remark: `订单查询性能样本-${index + 1}`,
     })
   }
 

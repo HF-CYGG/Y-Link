@@ -48,10 +48,9 @@ const handleTabChange = (value: string | number) => {
   emit('tab-change', value)
 }
 
-// ?????????
-// - ?????????? viewKey ?????????????????
-// - ??????????? + ???????????????????? keep-alive
-//   ?? tab ???????????????????????????????
+// 组件缓存键说明：
+// - 带前缀时可区分不同工作台复用同名 tab 的场景；
+// - 不带前缀则保留原始 tab name，维持既有调用方的 keep-alive 行为。
 const resolvedComponentCacheKey = computed(() => {
   return props.componentCacheKeyPrefix
     ? `${props.componentCacheKeyPrefix}:${props.activeTab}`
@@ -133,42 +132,6 @@ const resolvedComponentCacheKey = computed(() => {
   min-height: 240px;
 }
 
-.workbench-horizontal-slide__panel {
-  width: 100%;
-  backface-visibility: hidden;
-  transform: translateZ(0);
-}
-
-.workbench-horizontal-slide-enter-active {
-  transition:
-    transform 0.18s ease,
-    opacity 0.16s ease;
-  will-change: transform, opacity;
-  position: relative;
-  z-index: 2;
-}
-
-.workbench-horizontal-slide-leave-active {
-  transition:
-    transform 0.14s ease,
-    opacity 0.12s ease;
-  will-change: transform, opacity;
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  pointer-events: none;
-}
-
-.workbench-horizontal-slide-enter-from {
-  transform: translate3d(8px, 0, 0);
-  opacity: 0;
-}
-
-.workbench-horizontal-slide-leave-to {
-  transform: translate3d(-6px, 0, 0);
-  opacity: 0;
-}
-
 /* 工作台内部承载的是“已存在的完整页面”，
    这里统一隐藏子页面原本自带的标题头，避免页面套页面后双标题重复。 */
 .embedded-page :deep(section > header) {
@@ -235,8 +198,6 @@ const resolvedComponentCacheKey = computed(() => {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .workbench-horizontal-slide-enter-active,
-  .workbench-horizontal-slide-leave-active,
   .supplier-workbench-shell :deep(.el-tabs__item) {
     transition: none;
   }

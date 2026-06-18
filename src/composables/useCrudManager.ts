@@ -11,11 +11,14 @@
  */
 
 import { ref, type Ref } from 'vue'
-import { ElMessage, ElMessageBox, type FormInstance } from 'element-plus'
+import { ElMessageBox, type FormInstance } from 'element-plus'
 import type { RequestConfig } from '@/api/http'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
+import { showCriticalErrorDialog } from '@/utils/error-dialog'
+
+import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
 /**
  * 通用 CRUD 表单约束：
@@ -119,7 +122,7 @@ export const useCrudManager = <
         items.value = result || []
       },
       onError: (error) => {
-        ElMessage.error(extractErrorMessage(error, config.messages.loadError))
+        showAppError(extractErrorMessage(error, config.messages.loadError))
       },
       onFinally: () => {
         loading.value = false
@@ -162,7 +165,7 @@ export const useCrudManager = <
         { type: 'warning' },
       )
       await config.deleteItem(row.id)
-      ElMessage.success(config.messages.deleteSuccess)
+      showAppSuccess(config.messages.deleteSuccess)
 
       const index = items.value.findIndex((item) => item.id === row.id)
       if (index > -1) {
@@ -175,7 +178,11 @@ export const useCrudManager = <
       })
     } catch (error) {
       if (error !== 'cancel' && error !== 'close') {
-        ElMessage.error(extractErrorMessage(error, config.messages.deleteError))
+        void showCriticalErrorDialog(error, {
+          title: config.messages.deleteError,
+          fallback: config.messages.deleteError,
+          operation: '删除数据',
+        })
       }
     }
   }
@@ -191,38 +198,39 @@ export const useCrudManager = <
     }
 
     if (submitting.value) {
-      ElMessage.warning(config.messages.duplicateSubmit || '正在提交，请勿重复点击')
+      showAppWarning(config.messages.duplicateSubmit || '正在提交，请勿重复点击')
       return
     }
 
     const isValid = await formRef.value.validate().catch(() => false)
     if (!isValid) {
-      ElMessage.warning(config.messages.validateError || '请先完善表单必填项后再提交')
+      showAppWarning(config.messages.validateError || '请先完善表单必填项后再提交')
       return
     }
 
     const submitResult = await submitAction.runWithGate({
       actionKey: 'crud-submit',
       onDuplicated: () => {
-        ElMessage.warning(config.messages.duplicateSubmit || '正在提交，请勿重复点击')
+        showAppWarning(config.messages.duplicateSubmit || '正在提交，请勿重复点击')
       },
       executor: async () => {
         submitting.value = true
-        ElMessage.info(config.messages.submitPending || '正在提交，请稍候')
+        showAppInfo(config.messages.submitPending || '正在提交，请稍候')
+        const currentForm = form.value
+        const rowId = currentForm.id
+        const isEdit = Boolean(rowId)
+        const operationLabel = isEdit && rowId ? '编辑数据' : '新增数据'
         try {
-          const currentForm = form.value
           const payload = await config.buildSubmitPayload(currentForm)
-          const rowId = currentForm.id
-          const isEdit = Boolean(rowId)
           const mode = isEdit ? 'update' : 'create'
           let result: TEntity
 
           if (isEdit && rowId) {
             result = await config.updateItem(rowId, payload)
-            ElMessage.success(config.messages.updateSuccess)
+            showAppSuccess(config.messages.updateSuccess)
           } else {
             result = await config.createItem(payload)
-            ElMessage.success(config.messages.createSuccess)
+            showAppSuccess(config.messages.createSuccess)
           }
 
           await config.afterSubmit?.({
@@ -249,7 +257,11 @@ export const useCrudManager = <
 
           return true
         } catch (error) {
-          ElMessage.error(extractErrorMessage(error, config.messages.saveError))
+          void showCriticalErrorDialog(error, {
+            title: config.messages.saveError,
+            fallback: config.messages.saveError,
+            operation: operationLabel,
+          })
           return false
         } finally {
           submitting.value = false

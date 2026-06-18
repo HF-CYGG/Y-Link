@@ -1,7 +1,7 @@
 /**
- * 模块说明：backend/src/routes/inbound.routes.ts
- * 文件职责：定义送货单提交、详情查询与核销入库接口，并在路由层收口权限与参数校验。
- * 维护说明：新增入库接口时请保持路由权限、服务层角色兜底与响应结构一致。
+ * 文件说明：入库业务路由，承接供货方送货单提交、详情查询以及库管员核销入库、现场改单等接口。
+ * 实现逻辑：按供货方与后台库管员两类角色拆分路由入口，在参数校验后把送货单流转和入库动作交给入库服务执行。
+ * 维护重点：新增入库流程节点时，需要同步核对角色权限、核销状态流转和前后端统一响应结构。
  */
 
 import { Router } from 'express'
@@ -9,6 +9,8 @@ import { z } from 'zod'
 import { requirePermission, requireRole } from '../middleware/auth.middleware.js'
 import { inboundService } from '../services/inbound.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
+import { extractRequestMeta } from '../utils/request-meta.js'
+import { assertPermanentDeletePassword } from '../utils/permanent-delete-password.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 
 export const inboundRouter = Router()
@@ -28,11 +30,17 @@ const submitInboundSchema = z.object({
   ).min(1, '至少选择一个商品'),
 })
 
+const booleanQuerySchema = z.union([z.literal('true'), z.literal('false'), z.boolean()])
+  .optional()
+  .transform((value) => value === true || value === 'true')
+
 const supplierListQuerySchema = z.object({
   keyword: z.string().trim().max(64).optional(),
   status: z.enum(['pending', 'verified', 'cancelled']).optional(),
   page: z.coerce.number().int().min(1).optional(),
   pageSize: z.coerce.number().int().min(1).max(50).optional(),
+  includeDeleted: booleanQuerySchema,
+  onlyDeleted: booleanQuerySchema,
 })
 
 const updateSupplierInboundSchema = z.object({
@@ -49,13 +57,18 @@ const cancelSupplierInboundSchema = z.object({
   reason: z.string().trim().min(1, '请填写撤销原因').max(255, '撤销原因不能超过 255 个字符'),
 })
 
+const permanentDeleteSupplierInboundSchema = z.object({
+  confirmShowNo: z.string().trim().max(64).optional(),
+  permanentDeletePassword: z.string().optional(),
+})
+
 inboundRouter.post(
   '/supplier/submit',
   requirePermission('inbound:create'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const input = submitInboundSchema.parse(req.body)
-    const result = await inboundService.submitSupplierDelivery(authReq.auth, input)
+    const result = await inboundService.submitSupplierDelivery(authReq.auth, input, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',
@@ -87,7 +100,7 @@ inboundRouter.patch(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const input = updateSupplierInboundSchema.parse(req.body)
-    const result = await inboundService.updateSupplierDelivery(authReq.auth, req.params.id, input)
+    const result = await inboundService.updateSupplierDelivery(authReq.auth, req.params.id, input, extractRequestMeta(req))
     res.json({
       code: 0,
       message: '改单成功',
@@ -103,10 +116,57 @@ inboundRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const input = cancelSupplierInboundSchema.parse(req.body)
-    const result = await inboundService.cancelSupplierDelivery(authReq.auth, req.params.id, input.reason)
+    const result = await inboundService.cancelSupplierDelivery(authReq.auth, req.params.id, input.reason, extractRequestMeta(req))
     res.json({
       code: 0,
       message: '撤销成功',
+      data: result,
+    })
+  }),
+)
+
+// 供货方：软删除未入库送货单
+inboundRouter.delete(
+  '/supplier/:id',
+  requirePermission('inbound:create'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const result = await inboundService.softDeleteSupplierDelivery(authReq.auth, req.params.id, extractRequestMeta(req))
+    res.json({
+      code: 0,
+      message: '删除成功',
+      data: result,
+    })
+  }),
+)
+
+// 供货方：恢复已删除送货单
+inboundRouter.post(
+  '/supplier/:id/restore',
+  requirePermission('inbound:create'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const result = await inboundService.restoreSupplierDelivery(authReq.auth, req.params.id, extractRequestMeta(req))
+    res.json({
+      code: 0,
+      message: '恢复成功',
+      data: result,
+    })
+  }),
+)
+
+// 供货方：永久删除已软删除送货单
+inboundRouter.delete(
+  '/supplier/:id/permanent',
+  requirePermission('inbound:create'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const input = permanentDeleteSupplierInboundSchema.parse(req.body ?? {})
+    assertPermanentDeletePassword(input.permanentDeletePassword)
+    const result = await inboundService.purgeSupplierDelivery(authReq.auth, req.params.id, input.confirmShowNo, extractRequestMeta(req))
+    res.json({
+      code: 0,
+      message: '永久删除成功',
       data: result,
     })
   }),
@@ -119,7 +179,9 @@ inboundRouter.get(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     // 服务层二次兜底：supplier 仅可查询本人单据，防止参数探测导致越权读取。
-    const result = await inboundService.detailByShowNo(req.params.showNo, authReq.auth)
+    const result = await inboundService.detailByShowNo(req.params.showNo, authReq.auth, {
+      includeDeleted: req.query.includeDeleted === 'true',
+    })
     res.json({
       code: 0,
       message: 'ok',
@@ -135,7 +197,9 @@ inboundRouter.get(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     // 即使具备 inbound:view，也需在服务层按角色做可见范围控制。
-    const result = await inboundService.detailByVerifyCode(req.params.verifyCode, authReq.auth)
+    const result = await inboundService.detailByVerifyCode(req.params.verifyCode, authReq.auth, {
+      includeDeleted: req.query.includeDeleted === 'true',
+    })
     res.json({
       code: 0,
       message: 'ok',
@@ -155,7 +219,7 @@ inboundRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const input = z.object({ verifyCode: z.string().min(1) }).parse(req.body)
-    const result = await inboundService.verifyInbound(input.verifyCode, authReq.auth)
+    const result = await inboundService.verifyInbound(input.verifyCode, authReq.auth, extractRequestMeta(req))
     res.json({
       code: 0,
       message: '核销入库成功',
@@ -171,7 +235,7 @@ inboundRouter.patch(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const input = updateSupplierInboundSchema.parse(req.body)
-    const result = await inboundService.updateInboundOrderForAdmin(authReq.auth, req.params.id, input)
+    const result = await inboundService.updateInboundOrderForAdmin(authReq.auth, req.params.id, input, extractRequestMeta(req))
     res.json({
       code: 0,
       message: '现场改单成功',

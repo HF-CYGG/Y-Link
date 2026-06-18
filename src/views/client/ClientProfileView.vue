@@ -8,9 +8,9 @@
  * - 改密成功后会强制清理客户端会话与订单缓存，避免共享设备上继续残留旧账号数据。
  */
 
-import { computed, onMounted, reactive, ref, toRaw } from 'vue'
+import { computed, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+
 import type { FormInstance, FormRules } from 'element-plus'
 import { BizCrudDialogShell } from '@/components/common'
 import { useClientAuthStore } from '@/store'
@@ -18,9 +18,8 @@ import pinia from '@/store/pinia'
 import { redirectToClientLogin } from '@/utils/client-auth-navigation'
 import {
   clientChangePassword,
-  getClientAuthCapabilities,
-  type ClientDepartmentOptionNode,
 } from '@/api/modules/client-auth'
+import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 import {
   CLIENT_CONFIRM_NEW_PASSWORD_PLACEHOLDER,
   CLIENT_NEW_PASSWORD_PLACEHOLDER,
@@ -28,7 +27,6 @@ import {
   validateClientConfirmNewPassword,
   validateClientNewPassword,
 } from '@/utils/client-password-policy'
-import { extractErrorMessage } from '@/utils/error'
 
 const clientAuthStore = useClientAuthStore(pinia)
 const router = useRouter()
@@ -37,10 +35,6 @@ const passwordDialogVisible = ref(false)
 const profileDialogVisible = ref(false)
 const submitting = ref(false)
 const profileSubmitting = ref(false)
-const departmentOptionsLoading = ref(false)
-const departmentTree = ref<ClientDepartmentOptionNode[]>([])
-const departmentOptions = ref<string[]>([])
-const departmentPathLookup = ref<Record<string, string>>({})
 const formRef = ref<FormInstance>()
 const profileFormRef = ref<FormInstance>()
 const form = reactive({
@@ -52,8 +46,18 @@ const profileForm = reactive({
   username: '',
   mobile: '',
   email: '',
-  departmentName: '',
 })
+
+const isDepartmentAccount = computed(() => clientAuthStore.currentUser?.accountType === 'department')
+const accountTypeLabel = computed(() => (isDepartmentAccount.value ? '部门账户' : '个人账户'))
+const displayName = computed(() => (
+  clientAuthStore.currentUser?.username
+  || clientAuthStore.currentUser?.realName
+  || clientAuthStore.currentUser?.account
+  || '-'
+))
+const displayDepartmentName = computed(() => clientAuthStore.currentUser?.departmentName?.trim() || '未设置')
+const displayStaffNo = computed(() => clientAuthStore.currentUser?.staffNo?.trim() || '未登记')
 
 const rules: FormRules = {
   currentPassword: [{ required: true, message: '请输入原密码', trigger: 'blur' }],
@@ -76,7 +80,7 @@ const rules: FormRules = {
 }
 
 const profileRules: FormRules = {
-  username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
+  username: [{ required: true, message: '请输入姓名', trigger: 'blur' }],
   mobile: [
     {
       validator: (_rule, value: string, callback) => {
@@ -112,117 +116,16 @@ const profileRules: FormRules = {
 }
 
 const openProfileDialog = () => {
+  if (isDepartmentAccount.value) {
+    showAppInfo('部门账户资料由管理员或教职工目录维护，客户端仅支持查看')
+    return
+  }
   profileForm.username = clientAuthStore.currentUser?.username || clientAuthStore.currentUser?.account || clientAuthStore.currentUser?.realName || ''
   profileForm.mobile = clientAuthStore.currentUser?.mobile || ''
   profileForm.email = clientAuthStore.currentUser?.email || ''
-  profileForm.departmentName = resolveDepartmentPathDisplay(clientAuthStore.currentUser?.departmentName || '')
-  void loadDepartmentOptions()
   profileDialogVisible.value = true
   profileFormRef.value?.clearValidate()
 }
-
-const dedupeDepartmentOptions = (list: string[]) => {
-  return [...new Set(list.map((item) => item.trim()).filter((item) => item.length > 0))]
-}
-
-const normalizeOptionalText = (value: unknown) => (typeof value === 'string' ? value.trim() : '')
-
-/**
- * 深拷贝部门树：
- * - 仅处理当前接口返回的纯树形结构字段；
- * - 优先使用浏览器原生 structuredClone；
- * - 旧环境下改为显式递归克隆，避免 JSON 深拷贝带来的序列化告警。
- */
-const cloneDepartmentTree = (tree: ClientDepartmentOptionNode[]): ClientDepartmentOptionNode[] => {
-  const rawTree = toRaw(tree)
-  if (typeof globalThis.structuredClone === 'function') {
-    try {
-      return globalThis.structuredClone(rawTree)
-    } catch {
-      // 某些浏览器在 structuredClone 遇到代理对象/非可克隆值时会抛错，转入 JSON 兜底。
-    }
-  }
-  // 兼容旧浏览器：部门树节点结构固定，使用递归方式稳定克隆。
-  return rawTree.map((node) => ({
-    id: node.id,
-    label: node.label,
-    children: cloneDepartmentTree(node.children),
-  }))
-}
-
-const buildDepartmentPathLookup = (tree: ClientDepartmentOptionNode[]) => {
-  const pathMap: Record<string, string> = {}
-  const labelPathMap = new Map<string, string[]>()
-  const walk = (nodes: ClientDepartmentOptionNode[], parentPath = '') => {
-    nodes.forEach((node) => {
-      const currentPath = parentPath ? `${parentPath}-${node.label}` : node.label
-      pathMap[currentPath] = currentPath
-      const paths = labelPathMap.get(node.label) ?? []
-      paths.push(currentPath)
-      labelPathMap.set(node.label, paths)
-      if (node.children.length > 0) {
-        walk(node.children, currentPath)
-      }
-    })
-  }
-  walk(tree)
-  labelPathMap.forEach((paths, label) => {
-    if (paths.length === 1) {
-      pathMap[label] = paths[0]
-    }
-  })
-  return pathMap
-}
-
-const resolveDepartmentPathDisplay = (value: unknown) => {
-  const normalized = normalizeOptionalText(value)
-  if (!normalized) {
-    return ''
-  }
-  return departmentPathLookup.value[normalized] ?? normalized
-}
-
-const buildDepartmentTreeSelectData = (tree: ClientDepartmentOptionNode[], parentPath = ''): ClientDepartmentOptionNode[] => {
-  return tree.map((node) => {
-    const currentPath = parentPath ? `${parentPath}-${node.label}` : node.label
-    return {
-      id: node.id,
-      label: currentPath,
-      children: buildDepartmentTreeSelectData(node.children, currentPath),
-    }
-  })
-}
-
-const loadDepartmentOptions = async () => {
-  departmentOptionsLoading.value = true
-  try {
-    const capabilities = await getClientAuthCapabilities()
-    departmentTree.value = cloneDepartmentTree(capabilities.departmentTree)
-    departmentOptions.value = dedupeDepartmentOptions(capabilities.departmentOptions)
-    departmentPathLookup.value = buildDepartmentPathLookup(departmentTree.value)
-    const currentDepartment = normalizeOptionalText(profileForm.departmentName)
-    if (currentDepartment && !departmentOptions.value.includes(currentDepartment) && !departmentPathLookup.value[currentDepartment]) {
-      departmentTree.value.push({
-        id: `legacy_${currentDepartment}`,
-        label: currentDepartment,
-        children: [],
-      })
-      departmentOptions.value = dedupeDepartmentOptions([...departmentOptions.value, currentDepartment])
-    }
-    departmentPathLookup.value = buildDepartmentPathLookup(departmentTree.value)
-    profileForm.departmentName = resolveDepartmentPathDisplay(profileForm.departmentName)
-  } catch (error) {
-    ElMessage.error(extractErrorMessage(error, '加载部门配置失败'))
-  } finally {
-    departmentOptionsLoading.value = false
-  }
-}
-
-const selectableDepartmentOptions = computed(() => {
-  return departmentOptions.value
-})
-
-const departmentTreeSelectData = computed(() => buildDepartmentTreeSelectData(departmentTree.value))
 
 const openPasswordDialog = () => {
   form.currentPassword = ''
@@ -246,13 +149,13 @@ const submitChangePassword = async () => {
       currentPassword: form.currentPassword,
       newPassword: form.newPassword,
     })
-    ElMessage.success('密码修改成功，请重新登录')
+    showAppSuccess('密码修改成功，请重新登录')
     passwordDialogVisible.value = false
     clientAuthStore.clearAuthState()
     // 改密后强制重建客户端页面树，避免旧登录态壳层残留。
     redirectToClientLogin()
   } catch (error: any) {
-    ElMessage.error(error.message || '修改密码失败')
+    showAppError(error.message || '修改密码失败')
   } finally {
     submitting.value = false
   }
@@ -265,16 +168,11 @@ const submitUpdateProfile = async () => {
 
   const normalizedUsername = profileForm.username.trim()
   if (!normalizedUsername) {
-    ElMessage.warning('请输入用户名')
+    showAppWarning('请输入姓名')
     return
   }
   const normalizedMobile = profileForm.mobile.trim()
   const normalizedEmail = profileForm.email.trim().toLowerCase()
-  const normalizedDepartmentName = normalizeOptionalText(profileForm.departmentName)
-  if (normalizedDepartmentName && !selectableDepartmentOptions.value.includes(normalizedDepartmentName)) {
-    ElMessage.warning('请选择系统配置中的部门选项')
-    return
-  }
 
   try {
     profileSubmitting.value = true
@@ -282,20 +180,16 @@ const submitUpdateProfile = async () => {
       username: normalizedUsername,
       mobile: normalizedMobile || undefined,
       email: normalizedEmail || undefined,
-      departmentName: normalizedDepartmentName || undefined,
     })
-    ElMessage.success('资料更新成功')
+    showAppSuccess('资料更新成功')
     profileDialogVisible.value = false
   } catch (error: any) {
-    ElMessage.error(error.message || '资料更新失败')
+    showAppError(error.message || '资料更新失败')
   } finally {
     profileSubmitting.value = false
   }
 }
 
-onMounted(() => {
-  void loadDepartmentOptions()
-})
 </script>
 
 <template>
@@ -309,9 +203,12 @@ onMounted(() => {
       <div class="mb-4 flex items-center justify-between">
         <div>
           <p class="text-base font-semibold text-slate-900">资料信息</p>
-          <p class="mt-1 text-xs text-slate-400">可修改用户名、手机号、邮箱与部门信息，后续可用三者任一登录</p>
+          <p class="mt-1 text-xs text-slate-400">
+            {{ isDepartmentAccount ? '部门账户资料由管理员或教职工目录维护，客户端仅展示身份信息' : '个人账户可维护姓名、手机号与邮箱，后续可用联系方式登录' }}
+          </p>
         </div>
         <button
+          v-if="!isDepartmentAccount"
           type="button"
           class="profile-action-button"
           @click="openProfileDialog"
@@ -320,21 +217,29 @@ onMounted(() => {
         </button>
       </div>
 
-      <p class="text-xs text-slate-400">用户名</p>
+      <p class="text-xs text-slate-400">账户类型</p>
+      <p class="mt-1 text-base font-semibold text-slate-900">{{ accountTypeLabel }}</p>
+
+      <p class="mt-4 text-xs text-slate-400">姓名</p>
       <p class="mt-1 text-base font-semibold text-slate-900">
-        {{ clientAuthStore.currentUser?.username || clientAuthStore.currentUser?.account || clientAuthStore.currentUser?.realName || '-' }}
+        {{ displayName }}
       </p>
 
-      <p class="mt-4 text-xs text-slate-400">手机号</p>
-      <p class="mt-1 text-base font-semibold text-slate-900">{{ clientAuthStore.currentUser?.mobile || '-' }}</p>
+      <template v-if="isDepartmentAccount">
+        <p class="mt-4 text-xs text-slate-400">教职工号</p>
+        <p class="mt-1 text-base font-semibold text-slate-900">{{ displayStaffNo }}</p>
 
-      <p class="mt-4 text-xs text-slate-400">邮箱</p>
-      <p class="mt-1 text-base font-semibold text-slate-900">{{ clientAuthStore.currentUser?.email || '-' }}</p>
+        <p class="mt-4 text-xs text-slate-400">部门</p>
+        <p class="mt-1 text-base font-semibold text-slate-900">{{ displayDepartmentName }}</p>
+      </template>
 
-      <p class="mt-4 text-xs text-slate-400">部门</p>
-      <p class="mt-1 text-base font-semibold text-slate-900">
-        {{ resolveDepartmentPathDisplay(clientAuthStore.currentUser?.departmentName) || '未设置' }}
-      </p>
+      <template v-else>
+        <p class="mt-4 text-xs text-slate-400">手机号</p>
+        <p class="mt-1 text-base font-semibold text-slate-900">{{ clientAuthStore.currentUser?.mobile || '-' }}</p>
+
+        <p class="mt-4 text-xs text-slate-400">邮箱</p>
+        <p class="mt-1 text-base font-semibold text-slate-900">{{ clientAuthStore.currentUser?.email || '-' }}</p>
+      </template>
     </div>
 
     <div class="rounded-[1.2rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
@@ -415,37 +320,14 @@ onMounted(() => {
       @confirm="submitUpdateProfile"
     >
       <el-form ref="profileFormRef" :model="profileForm" :rules="profileRules" label-position="top" @submit.prevent>
-        <el-form-item label="用户名" prop="username">
-          <el-input v-model="profileForm.username" placeholder="请输入用户名" />
+        <el-form-item label="姓名" prop="username">
+          <el-input v-model="profileForm.username" placeholder="请输入真实姓名" />
         </el-form-item>
         <el-form-item label="手机号" prop="mobile">
           <el-input v-model="profileForm.mobile" placeholder="请输入手机号" />
         </el-form-item>
         <el-form-item label="邮箱" prop="email">
           <el-input v-model="profileForm.email" placeholder="请输入邮箱" />
-        </el-form-item>
-        <el-form-item label="部门" prop="departmentName">
-          <el-tree-select
-            v-model="profileForm.departmentName"
-            :data="departmentTreeSelectData"
-            node-key="id"
-            :props="{ label: 'label', value: 'label', children: 'children' }"
-            check-strictly
-            default-expand-all
-            :expand-on-click-node="false"
-            :render-after-expand="false"
-            placeholder="请选择部门（支持一/二/三级，选填）"
-            class="w-full"
-            clearable
-            filterable
-            reserve-keyword
-            :loading="departmentOptionsLoading"
-            @visible-change="
-              (visible: boolean) => {
-                if (visible) void loadDepartmentOptions()
-              }
-            "
-          />
         </el-form-item>
       </el-form>
     </BizCrudDialogShell>
