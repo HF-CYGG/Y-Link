@@ -89,6 +89,8 @@ const sortModeAnimating = ref(false)
 const isMallRoute = computed(() => route.path.startsWith('/client/mall'))
 const shouldShowMobileSearchEntry = computed(() => isPhone.value && isMallRoute.value)
 const productCardElementMap = new Map<string, HTMLElement>()
+const productCardStableKeyMap = new Map<string, string>()
+const productCardStableElementMap = new Map<string, HTMLElement>()
 
 const listScrollerRef = ref<HTMLElement | null>(null)
 const sectionRefMap = reactive<Record<string, HTMLElement | null>>({})
@@ -126,6 +128,15 @@ const blockingRequestError = computed(() => {
 const passiveRefreshErrorMessage = computed(() => {
   return hasRenderableProducts.value ? requestError.value?.message ?? '' : ''
 })
+
+const REORDER_MOTION_EASING = 'cubic-bezier(0.20, 0, 0, 1)'
+const REORDER_MOTION_DESKTOP_MS = 420
+const REORDER_MOTION_TABLET_MS = 360
+const REORDER_MOTION_PHONE_MS = 280
+const REORDER_MOTION_DESKTOP_STAGGER_MS = 12
+const REORDER_MOTION_PHONE_STAGGER_MS = 6
+const REORDER_MOTION_DESKTOP_MAX_DELAY_MS = 96
+const REORDER_MOTION_PHONE_MAX_DELAY_MS = 42
 
 const productSortOptions: ProductSortOption[] = [
   { value: 'default', label: '默认' },
@@ -240,7 +251,8 @@ const categoryGroups = computed(() => mallBrowseIndex.value.categoryGroups)
 const categoryOptions = computed(() => mallBrowseIndex.value.categoryOptions)
 const searchMode = computed(() => hasKeyword.value)
 const largeDatasetMode = computed(() => products.value.length > 100)
-const useRecommendedAllProductFlow = computed(() => sortMode.value === 'recommended' && activeCategoryKey.value === 'all' && !largeDatasetMode.value)
+const isRecommendedSortMode = computed(() => sortMode.value === 'recommended')
+const useRecommendedAllProductFlow = computed(() => isRecommendedSortMode.value && !largeDatasetMode.value)
 const recommendedAllProducts = computed(() => sortProductsForDisplay(products.value))
 
 const searchResults = computed(() => {
@@ -266,7 +278,7 @@ const miniCartTotalAmount = computed(() => {
   }, 0)
 })
 const activeCategoryItems = computed(() => {
-  if (activeCategoryKey.value === 'all') {
+  if (isRecommendedSortMode.value || activeCategoryKey.value === 'all') {
     return sortProductsForDisplay(products.value)
   }
   return mallBrowseIndex.value.categoryItemMap.get(activeCategoryKey.value) ?? []
@@ -435,18 +447,40 @@ const closeMobileSearch = () => {
   mobileSearchVisible.value = false
 }
 
-const setProductCardRef = (productId: string | number, element: unknown) => {
-  const normalizedProductId = String(productId)
+const promoteStableProductCardElement = (stableProductId: string) => {
+  for (const [cardKey, element] of productCardElementMap.entries()) {
+    if (productCardStableKeyMap.get(cardKey) === stableProductId && element.isConnected) {
+      productCardStableElementMap.set(stableProductId, element)
+      return
+    }
+  }
+  productCardStableElementMap.delete(stableProductId)
+}
+
+const setProductCardRef = (cardKey: string | number, element: unknown, stableProductId: string | number = cardKey) => {
+  const normalizedCardKey = String(cardKey)
+  const normalizedStableProductId = String(stableProductId)
   if (element instanceof HTMLElement) {
-    productCardElementMap.set(normalizedProductId, element)
+    productCardElementMap.set(normalizedCardKey, element)
+    productCardStableKeyMap.set(normalizedCardKey, normalizedStableProductId)
+    const currentStableElement = productCardStableElementMap.get(normalizedStableProductId)
+    if (!currentStableElement || !currentStableElement.isConnected) {
+      productCardStableElementMap.set(normalizedStableProductId, element)
+    }
     return
   }
-  productCardElementMap.delete(normalizedProductId)
+  const previousElement = productCardElementMap.get(normalizedCardKey)
+  const previousStableProductId = productCardStableKeyMap.get(normalizedCardKey)
+  productCardElementMap.delete(normalizedCardKey)
+  productCardStableKeyMap.delete(normalizedCardKey)
+  if (previousStableProductId && productCardStableElementMap.get(previousStableProductId) === previousElement) {
+    promoteStableProductCardElement(previousStableProductId)
+  }
 }
 
 const captureProductCardRects = () => {
   const rectMap = new Map<string, DOMRect>()
-  productCardElementMap.forEach((element, productId) => {
+  productCardStableElementMap.forEach((element, productId) => {
     rectMap.set(productId, element.getBoundingClientRect())
   })
   return rectMap
@@ -457,9 +491,19 @@ const animateProductCardReorder = (previousRects: Map<string, DOMRect>) => {
   if (globalThis.window?.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
     return 0
   }
-  const duration = isPhone.value ? 190 : viewportWidth < 1024 ? 240 : 300
+  const duration = isPhone.value ? REORDER_MOTION_PHONE_MS : viewportWidth < 1024 ? REORDER_MOTION_TABLET_MS : REORDER_MOTION_DESKTOP_MS
+  const staggerStep = isPhone.value ? REORDER_MOTION_PHONE_STAGGER_MS : REORDER_MOTION_DESKTOP_STAGGER_MS
+  const maxDelay = isPhone.value ? REORDER_MOTION_PHONE_MAX_DELAY_MS : REORDER_MOTION_DESKTOP_MAX_DELAY_MS
   const maxPhoneDistance = isPhone.value ? Math.max(240, (globalThis.window?.innerHeight ?? 480) * 0.72) : Number.POSITIVE_INFINITY
-  productCardElementMap.forEach((element, productId) => {
+  const movedCards: Array<{
+    element: HTMLElement
+    deltaX: number
+    deltaY: number
+    currentRect: DOMRect
+    distance: number
+  }> = []
+
+  productCardStableElementMap.forEach((element, productId) => {
     const previousRect = previousRects.get(productId)
     if (!previousRect) {
       return
@@ -471,21 +515,53 @@ const animateProductCardReorder = (previousRects: Map<string, DOMRect>) => {
     if (distance < 1) {
       return
     }
-    const firstFrame = distance > maxPhoneDistance
-      ? { opacity: 0.78, transform: 'translateY(8px)' }
-      : { opacity: 0.92, transform: `translate(${deltaX}px, ${deltaY}px)` }
-    element.animate(
-      [
-        firstFrame,
-        { opacity: 1, transform: 'translate(0, 0)' },
-      ],
-      {
-        duration,
-        easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
-      },
-    )
+    movedCards.push({ element, deltaX, deltaY, currentRect, distance })
   })
-  return duration
+
+  movedCards
+    .sort((prev, next) => prev.currentRect.top - next.currentRect.top || prev.currentRect.left - next.currentRect.left)
+    .forEach(({ element, deltaX, deltaY, distance }, index) => {
+      const delay = Math.min(maxDelay, index * staggerStep)
+      const largePhoneMove = distance > maxPhoneDistance
+      const startTransform = largePhoneMove
+        ? 'translate3d(0, 10px, 0) scale(0.992)'
+        : `translate3d(${deltaX}px, ${deltaY}px, 0) scale(0.986)`
+      const settleTransform = largePhoneMove
+        ? 'translate3d(0, 1px, 0) scale(1)'
+        : `translate3d(${deltaX * 0.04}px, ${deltaY * 0.04}px, 0) scale(1.002)`
+      element.style.willChange = 'transform, opacity'
+      const animation = element.animate(
+        [
+          { opacity: largePhoneMove ? 0.82 : 0.9, transform: startTransform },
+          { opacity: 1, transform: settleTransform, offset: 0.82 },
+          { opacity: 1, transform: 'translate3d(0, 0, 0) scale(1)' },
+        ],
+        {
+          duration,
+          delay,
+          easing: REORDER_MOTION_EASING,
+          fill: 'both',
+        },
+      )
+      animation.addEventListener('finish', () => {
+        element.style.willChange = ''
+      }, { once: true })
+      animation.addEventListener('cancel', () => {
+        element.style.willChange = ''
+      }, { once: true })
+    })
+
+  return movedCards.length > 0 ? duration + Math.min(maxDelay, (movedCards.length - 1) * staggerStep) : 0
+}
+
+const resetProductListToTopForSortChange = async () => {
+  releaseCategoryScrollLock()
+  activeCategoryKey.value = 'all'
+  await nextTick()
+  const scroller = listScrollerRef.value
+  if (scroller) {
+    scroller.scrollTop = 0
+  }
 }
 
 const handleSortModeChange = async (nextMode: ProductSortMode) => {
@@ -495,6 +571,7 @@ const handleSortModeChange = async (nextMode: ProductSortMode) => {
   const previousRects = captureProductCardRects()
   sortModeAnimating.value = true
   sortMode.value = nextMode
+  await resetProductListToTopForSortChange()
   await nextTick()
   try {
     const animationDuration = animateProductCardReorder(previousRects)
@@ -1036,7 +1113,7 @@ onBeforeUnmount(() => {
         <article
           v-for="product in searchResults"
           :key="product.id"
-          :ref="(el) => setProductCardRef(`search:${product.id}`, el)"
+          :ref="(el) => setProductCardRef(`search:${product.id}`, el, product.id)"
           class="client-product-card"
         >
           <button type="button" class="client-product-card__image-button" @click="openProductImagePreview(product)">
@@ -1074,7 +1151,11 @@ onBeforeUnmount(() => {
       </div>
     </section>
 
-    <section v-else class="mall-browse-panel grid grid-cols-[76px_minmax(0,1fr)] sm:grid-cols-[140px_minmax(0,1fr)] gap-3 rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-3 sm:p-4 shadow-[var(--ylink-shadow-soft)]">
+    <section
+      v-else
+      class="mall-browse-panel grid rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-3 sm:p-4 shadow-[var(--ylink-shadow-soft)]"
+      :class="{ 'is-recommended-flow': isRecommendedSortMode }"
+    >
       <div class="mall-search-launcher-wrap mall-search-launcher-wrap--inside mall-search-launcher-wrap--browse">
         <div class="mall-search-toolbar mall-search-toolbar--minimal" :class="{ 'is-focused': searchInputFocused }">
           <span class="mall-search-launcher__icon">
@@ -1114,26 +1195,31 @@ onBeforeUnmount(() => {
           </button>
         </div>
       </div>
-      <aside class="mall-browse-categories overflow-y-auto pr-1 sm:pr-2 hide-scrollbar">
-        <button
-          v-for="category in categoryOptions"
-          :key="category.key"
-          type="button"
-          class="mall-category-button mb-2 w-full rounded-xl px-2 py-2 sm:px-3 sm:py-3 text-left transition-colors duration-200"
-          :class="activeCategoryKey === category.key ? 'bg-[var(--ylink-color-primary-strong)] text-white shadow-md' : 'bg-[var(--ylink-color-surface-muted)] text-slate-500 hover:bg-slate-200'"
-          @click="scrollToCategory(category.key)"
+      <Transition name="mall-category-panel">
+        <aside
+          v-if="!isRecommendedSortMode"
+          class="mall-browse-categories overflow-y-auto pr-1 sm:pr-2 hide-scrollbar"
         >
-          <p class="truncate text-xs sm:text-sm font-medium">{{ category.label }}</p>
-          <p class="mt-0.5 text-[10px] sm:text-xs opacity-75">{{ category.count }} 款</p>
-        </button>
-      </aside>
+          <button
+            v-for="category in categoryOptions"
+            :key="category.key"
+            type="button"
+            class="mall-category-button mb-2 w-full rounded-xl px-2 py-2 sm:px-3 sm:py-3 text-left transition-colors duration-200"
+            :class="activeCategoryKey === category.key ? 'bg-[var(--ylink-color-primary-strong)] text-white shadow-md' : 'bg-[var(--ylink-color-surface-muted)] text-slate-500 hover:bg-slate-200'"
+            @click="scrollToCategory(category.key)"
+          >
+            <p class="truncate text-xs sm:text-sm font-medium">{{ category.label }}</p>
+            <p class="mt-0.5 text-[10px] sm:text-xs opacity-75">{{ category.count }} 款</p>
+          </button>
+        </aside>
+      </Transition>
 
       <div v-if="largeDatasetMode" class="mall-browse-list mall-browse-list--virtual overflow-y-auto pr-1" v-bind="virtualContainerProps">
         <div v-bind="virtualWrapperProps" class="client-product-grid mall-product-grid mall-virtual-wrapper">
           <article
             v-for="row in virtualRows"
             :key="row.data.id"
-            :ref="(el) => setProductCardRef(`virtual:${row.data.id}`, el)"
+            :ref="(el) => setProductCardRef(`virtual:${row.data.id}`, el, row.data.id)"
             class="client-product-card mb-2"
           >
             <button type="button" class="client-product-card__image-button" @click="openProductImagePreview(row.data)">
@@ -1181,7 +1267,7 @@ onBeforeUnmount(() => {
             <article
               v-for="product in recommendedAllProducts"
               :key="product.id"
-              :ref="(el) => setProductCardRef(`recommended:${product.id}`, el)"
+              :ref="(el) => setProductCardRef(`recommended:${product.id}`, el, product.id)"
               class="client-product-card"
             >
               <button type="button" class="client-product-card__image-button" @click="openProductImagePreview(product)">
@@ -1226,7 +1312,7 @@ onBeforeUnmount(() => {
               <article
                 v-for="product in group.items"
                 :key="product.id"
-                :ref="(el) => setProductCardRef(`${group.key}:${product.id}`, el)"
+                :ref="(el) => setProductCardRef(`${group.key}:${product.id}`, el, product.id)"
                 class="client-product-card"
               >
                 <button type="button" class="client-product-card__image-button" @click="openProductImagePreview(product)">
@@ -1463,7 +1549,17 @@ onBeforeUnmount(() => {
 }
 
 .mall-browse-panel {
+  --mall-category-rail-width: 76px;
+  --mall-browse-gap: 0.75rem;
+  --mall-reorder-layout-duration: 420ms;
+  --mall-reorder-layout-easing: cubic-bezier(0.20, 0, 0, 1);
   align-items: start;
+  gap: var(--mall-browse-gap);
+  grid-template-columns: minmax(0, var(--mall-category-rail-width)) minmax(0, 1fr);
+  transition:
+    grid-template-columns var(--mall-reorder-layout-duration) var(--mall-reorder-layout-easing),
+    grid-template-rows var(--mall-reorder-layout-duration) var(--mall-reorder-layout-easing),
+    gap var(--mall-reorder-layout-duration) var(--mall-reorder-layout-easing);
 }
 
 .mall-browse-categories,
@@ -1479,6 +1575,71 @@ onBeforeUnmount(() => {
 .mall-browse-list {
   grid-column: 2;
   grid-row: 2;
+  justify-self: stretch;
+  min-width: 0;
+  transition:
+    opacity var(--mall-reorder-layout-duration) var(--mall-reorder-layout-easing),
+    transform var(--mall-reorder-layout-duration) var(--mall-reorder-layout-easing);
+}
+
+.mall-browse-panel.is-recommended-flow {
+  --mall-category-rail-width: 0px;
+  --mall-browse-gap: 0rem;
+}
+
+.mall-browse-panel.is-recommended-flow .mall-browse-list {
+  grid-column: 2;
+}
+
+.mall-browse-panel.is-recommended-flow .mall-sort-row--category {
+  grid-column: 1;
+  grid-row: 1;
+  justify-self: flex-start;
+  transform: translateX(0);
+}
+
+.mall-browse-panel.is-recommended-flow .mall-browse-list {
+  grid-row: 2;
+  justify-self: center;
+  width: min(100%, 58rem);
+  transform: translateX(0);
+}
+
+.mall-browse-panel.is-recommended-flow .mall-category-section {
+  margin-right: auto;
+  margin-left: auto;
+  width: 100%;
+}
+
+.mall-browse-panel.is-recommended-flow .mall-product-grid {
+  justify-content: center;
+}
+
+.mall-browse-panel.is-recommended-flow .client-product-grid {
+  width: 100%;
+}
+
+.mall-category-panel-enter-active,
+.mall-category-panel-leave-active {
+  overflow: hidden;
+  transition:
+    opacity var(--mall-reorder-layout-duration) var(--mall-reorder-layout-easing),
+    transform var(--mall-reorder-layout-duration) var(--mall-reorder-layout-easing),
+    max-height var(--mall-reorder-layout-duration) var(--mall-reorder-layout-easing);
+}
+
+.mall-category-panel-enter-from,
+.mall-category-panel-leave-to {
+  max-height: 0;
+  opacity: 0;
+  transform: translateX(-0.65rem);
+}
+
+.mall-category-panel-enter-to,
+.mall-category-panel-leave-from {
+  max-height: 48rem;
+  opacity: 1;
+  transform: translateX(0);
 }
 
 .mall-product-grid {
@@ -1488,7 +1649,7 @@ onBeforeUnmount(() => {
 .client-product-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: 0.65rem;
+  gap: 0.5rem;
 }
 
 .mall-category-bottom-spacer {
@@ -1497,13 +1658,15 @@ onBeforeUnmount(() => {
 }
 
 .client-product-card {
-  display: flex;
+  display: grid;
+  grid-template-columns: 3.9rem minmax(0, 1fr) auto;
+  min-height: 6.55rem;
   align-items: center;
-  gap: 0.6rem;
-  border-radius: 1rem;
+  gap: 0.68rem;
+  border-radius: 0.85rem;
   border: 1px solid var(--ylink-color-border);
   background: var(--ylink-color-surface-soft);
-  padding: 0.45rem;
+  padding: 0.64rem 0.7rem;
 }
 
 .client-product-card__image-button {
@@ -1517,10 +1680,8 @@ onBeforeUnmount(() => {
 }
 
 .client-product-card__body {
-  display: flex;
+  display: block;
   min-width: 0;
-  flex: 1;
-  align-items: center;
   border: none;
   background: transparent;
   text-align: left;
@@ -1534,55 +1695,70 @@ onBeforeUnmount(() => {
 }
 
 .client-product-card__name {
-  overflow: hidden;
+  overflow: visible;
   color: #0f172a;
-  font-size: 1rem;
-  font-weight: 600;
-  line-height: 1.35;
-  text-overflow: ellipsis;
+  font-size: 0.98rem;
+  font-weight: 700;
+  line-height: 1.22;
+  overflow-wrap: normal;
+  text-overflow: clip;
   white-space: nowrap;
+  word-break: keep-all;
 }
 
 .client-product-card__price {
-  margin-top: 0.18rem;
+  margin-top: 0.1rem;
   color: var(--ylink-color-primary-strong);
   font-size: 0.92rem;
   font-weight: 700;
-  line-height: 1.25;
+  line-height: 1.16;
 }
 
 .client-product-card__desc {
-  margin-top: 0.2rem;
+  margin-top: 0.14rem;
   overflow: hidden;
   color: #64748b;
-  font-size: 0.76rem;
-  line-height: 1.45;
+  font-size: 0.74rem;
+  line-height: 1.28;
   display: -webkit-box;
-  line-clamp: 2;
-  -webkit-line-clamp: 2;
+  line-clamp: 1;
+  -webkit-line-clamp: 1;
   -webkit-box-orient: vertical;
 }
 
 .client-product-card__meta {
-  margin-top: 0.45rem;
+  margin-top: 0.4rem;
   display: flex;
+  min-width: 0;
   flex-wrap: wrap;
-  gap: 0.35rem;
-  font-size: 0.75rem;
+  gap: 0.26rem;
+  overflow: visible;
+  font-size: 0.72rem;
+}
+
+.client-product-card__meta > span {
+  flex: 0 0 auto;
+  overflow: visible;
+  padding: 0.2rem 0.42rem !important;
+  line-height: 1.12;
+  white-space: nowrap;
 }
 
 .client-product-card__price-extra {
-  margin-top: 0.1rem;
+  margin-top: 0.08rem;
+  overflow: hidden;
   color: #94a3b8;
-  font-size: 0.76rem;
-  line-height: 1.25;
+  font-size: 0.72rem;
+  line-height: 1.16;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .client-product-card__cover {
-  height: 4.4rem;
-  width: 4.4rem;
+  height: 3.9rem;
+  width: 3.9rem;
   flex-shrink: 0;
-  border-radius: 0.9rem;
+  border-radius: 0.7rem;
   background: #e2e8f0;
   object-fit: cover;
 }
@@ -1681,14 +1857,16 @@ onBeforeUnmount(() => {
 }
 
 .client-product-card__add-button {
-  height: 2.15rem;
+  height: 1.95rem;
+  align-self: center;
   border-radius: 9999px;
   border: none;
   background: var(--ylink-color-primary-strong);
   color: #ffffff;
-  font-size: 0.78rem;
-  font-weight: 600;
-  padding: 0 0.8rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 0 0.72rem;
+  white-space: nowrap;
 }
 
 .client-qty-button {
@@ -2423,6 +2601,10 @@ onBeforeUnmount(() => {
 }
 
 @media (min-width: 768px) {
+  .mall-browse-panel {
+    --mall-category-rail-width: 140px;
+  }
+
   .mall-search-toolbar {
     width: min(100%, 28rem);
     min-height: 2.65rem;
@@ -2460,6 +2642,14 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 767px) {
+  .mall-browse-panel {
+    --mall-reorder-layout-duration: 280ms;
+    --mall-browse-gap: 0.7rem;
+    --mall-category-rail-width: 76px;
+    grid-template-columns: minmax(0, var(--mall-category-rail-width)) minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
   .mall-search-launcher-wrap {
     margin-top: -0.2rem;
   }
@@ -2473,6 +2663,8 @@ onBeforeUnmount(() => {
   }
 
   .mall-sort-row {
+    grid-column: 1 / -1;
+    grid-row: 1;
     justify-content: flex-start;
     margin-bottom: 0.05rem;
   }
@@ -2482,9 +2674,9 @@ onBeforeUnmount(() => {
   }
 
   .mall-sort-row--category .mall-sort-control {
-    width: 100%;
-    flex-direction: column;
-    border-radius: 0.9rem;
+    width: auto;
+    flex-direction: row;
+    border-radius: 9999px;
   }
 
   .mall-sort-control__button {
@@ -2495,8 +2687,25 @@ onBeforeUnmount(() => {
   }
 
   .mall-sort-row--category .mall-sort-control__button {
+    width: auto;
+    min-width: 2.85rem;
+  }
+
+  .mall-browse-panel.is-recommended-flow {
+    --mall-category-rail-width: 0px;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .mall-browse-panel.is-recommended-flow .mall-sort-row--category {
+    grid-column: 1 / -1;
+    grid-row: 1;
+  }
+
+  .mall-browse-panel.is-recommended-flow .mall-browse-list {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-self: stretch;
     width: 100%;
-    min-width: 0;
   }
 
   .mall-search-toolbar {
@@ -2581,6 +2790,46 @@ onBeforeUnmount(() => {
     padding: 0.7rem;
   }
 
+  .mall-browse-categories {
+    grid-column: 1;
+    grid-row: 2;
+    display: block;
+    max-height: clamp(28rem, calc(100dvh - var(--client-tab-bar-clearance, 5.5rem) - 5.1rem), 48rem);
+    overflow-x: hidden;
+    overflow-y: auto;
+    padding: 0 0.12rem 0 0;
+  }
+
+  .mall-category-panel-enter-active,
+  .mall-category-panel-leave-active {
+    transition:
+      opacity var(--mall-reorder-layout-duration) var(--mall-reorder-layout-easing),
+      transform var(--mall-reorder-layout-duration) var(--mall-reorder-layout-easing),
+      max-height var(--mall-reorder-layout-duration) var(--mall-reorder-layout-easing),
+      margin var(--mall-reorder-layout-duration) var(--mall-reorder-layout-easing);
+  }
+
+  .mall-category-panel-enter-from,
+  .mall-category-panel-leave-to {
+    max-height: 0;
+    opacity: 0;
+    transform: translateX(-0.45rem);
+  }
+
+  .mall-category-panel-enter-to,
+  .mall-category-panel-leave-from {
+    max-height: 48rem;
+    opacity: 1;
+    transform: translateX(0);
+  }
+
+  .mall-browse-list {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: stretch;
+    width: 100%;
+  }
+
   .mall-browse-categories,
   .mall-browse-list {
     /*
@@ -2590,6 +2839,20 @@ onBeforeUnmount(() => {
      * 3. 末尾商品是否会被挡住，交给列表内部 spacer 处理，而不是提前牺牲可视高度。
      */
     max-height: clamp(28rem, calc(100dvh - var(--client-tab-bar-clearance, 5.5rem) - 5.1rem), 48rem);
+  }
+
+  .mall-browse-categories.mall-category-panel-enter-from,
+  .mall-browse-categories.mall-category-panel-leave-to {
+    max-height: 0;
+    opacity: 0;
+    transform: translateX(-0.45rem);
+  }
+
+  .mall-browse-categories.mall-category-panel-enter-to,
+  .mall-browse-categories.mall-category-panel-leave-from {
+    max-height: 48rem;
+    opacity: 1;
+    transform: translateX(0);
   }
 
   .mall-category-button {
@@ -2624,46 +2887,47 @@ onBeforeUnmount(() => {
   }
 
   .client-product-card {
+    grid-template-columns: 3.45rem minmax(0, 1fr) auto;
+    min-height: 6.25rem;
     gap: 0.5rem;
-    border-radius: 0.95rem;
-    padding: 0.4rem;
+    border-radius: 0.85rem;
+    padding: 0.58rem 0.56rem;
   }
 
   .client-product-card__cover {
-    height: 3.8rem;
-    width: 3.8rem;
-    border-radius: 0.8rem;
+    height: 3.45rem;
+    width: 3.45rem;
+    border-radius: 0.68rem;
   }
 
   .client-product-card__name {
-    font-size: 0.9rem;
+    font-size: 0.94rem;
   }
 
   .client-product-card__price {
-    font-size: 0.84rem;
+    font-size: 0.88rem;
   }
 
   .client-product-card__desc {
-    margin-top: 0.12rem;
-    font-size: 0.7rem;
-    line-height: 1.35;
+    margin-top: 0.1rem;
+    font-size: 0.72rem;
+    line-height: 1.24;
   }
 
   .client-product-card__meta {
-    margin-top: 0.28rem;
-    gap: 0.25rem;
+    margin-top: 0.34rem;
+    gap: 0.22rem;
   }
 
   .client-product-card__meta > span {
-    padding: 0.22rem 0.46rem;
-    font-size: 0.65rem;
+    padding: 0.18rem 0.38rem !important;
+    font-size: 0.68rem;
   }
 
   .client-product-card__add-button {
-    height: 1.95rem;
-    align-self: center;
-    font-size: 0.72rem;
-    padding: 0 0.7rem;
+    height: 1.9rem;
+    font-size: 0.7rem;
+    padding: 0 0.58rem;
   }
 
   .mini-cart-wrapper {
@@ -2744,7 +3008,13 @@ onBeforeUnmount(() => {
 
 @media (min-width: 640px) and (max-width: 767px) {
   .mall-browse-panel {
-    grid-template-columns: 105px minmax(0, 1fr);
+    --mall-category-rail-width: 105px;
+    grid-template-columns: minmax(0, var(--mall-category-rail-width)) minmax(0, 1fr);
+  }
+
+  .mall-browse-panel.is-recommended-flow {
+    --mall-category-rail-width: 0px;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>
