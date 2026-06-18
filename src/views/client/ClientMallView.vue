@@ -85,6 +85,9 @@ const settlePulsing = ref(false)
 const searchInputFocused = ref(false)
 const mobileSearchVisible = ref(false)
 const mobileSearchInputRef = ref<HTMLInputElement | null>(null)
+const compactAnnouncementTextRef = ref<HTMLElement | null>(null)
+const compactAnnouncementOverflowing = ref(false)
+const announcementDialogVisible = ref(false)
 const sortModeAnimating = ref(false)
 const isMallRoute = computed(() => route.path.startsWith('/client/mall'))
 const shouldShowMobileSearchEntry = computed(() => isPhone.value && isMallRoute.value)
@@ -371,6 +374,21 @@ const refreshStorefrontConfig = async () => {
   }
 }
 
+const updateCompactAnnouncementOverflow = async () => {
+  await nextTick()
+  const textElement = compactAnnouncementTextRef.value
+  compactAnnouncementOverflowing.value = Boolean(
+    textElement && textElement.scrollWidth > textElement.clientWidth + 1,
+  )
+}
+
+const openFullAnnouncement = () => {
+  if (!compactAnnouncementOverflowing.value || !mallAnnouncementText.value) {
+    return
+  }
+  announcementDialogVisible.value = true
+}
+
 watch(
   () => clientAuthStore.currentUser?.id,
   (nextClientUserId) => {
@@ -378,6 +396,10 @@ watch(
     clientCatalogStore.initialize(nextClientUserId)
   },
 )
+
+watch([mallAnnouncementText, isPhone], () => {
+  void updateCompactAnnouncementOverflow()
+})
 
 const loadProducts = async (force = false) => {
   // 如果缓存仍在有效期内，则直接复用本地目录快照，并只同步购物车库存信息。
@@ -863,12 +885,14 @@ const getPendingLockedCategory = (scroller: HTMLElement): string | 'target-hit' 
 const handleMallViewportResize = () => {
   syncListViewportBottomSpacer()
   handleProductListScroll()
+  void updateCompactAnnouncementOverflow()
 }
 
 const syncMallViewportAfterRender = async () => {
   await nextTick()
   syncListViewportBottomSpacer()
   handleProductListScroll()
+  await updateCompactAnnouncementOverflow()
 }
 
 const cartDrawerVisible = ref(false)
@@ -1008,10 +1032,19 @@ onBeforeUnmount(() => {
           <p class="mall-hero-card__title mt-1 text-xl font-semibold text-slate-900">商城</p>
           <p class="mall-hero-card__desc mt-1 text-sm text-slate-500">浏览标签、查看库存并快速加入购物车</p>
         </div>
-        <output v-else-if="mallAnnouncementText" class="mall-hero-card__compact-banner" aria-live="polite">
+        <button
+          v-else-if="mallAnnouncementText"
+          type="button"
+          class="mall-hero-card__compact-banner"
+          :class="{ 'is-actionable': compactAnnouncementOverflowing }"
+          :disabled="!compactAnnouncementOverflowing"
+          :title="compactAnnouncementOverflowing ? '点击查看完整公告' : undefined"
+          aria-live="polite"
+          @click="openFullAnnouncement"
+        >
           <span class="mall-hero-card__compact-badge">公告</span>
-          <p class="mall-hero-card__compact-text">{{ mallAnnouncementText }}</p>
-        </output>
+          <p ref="compactAnnouncementTextRef" class="mall-hero-card__compact-text">{{ mallAnnouncementText }}</p>
+        </button>
         <button
           type="button"
           class="mall-hero-card__refresh rounded-full border border-[var(--ylink-color-border)] bg-[var(--ylink-color-surface-soft)] px-4 py-2 text-sm text-slate-600"
@@ -1033,6 +1066,20 @@ onBeforeUnmount(() => {
         当前先展示本地缓存，后台刷新失败：{{ passiveRefreshErrorMessage }}
       </div>
     </div>
+    <ElDialog
+      v-model="announcementDialogVisible"
+      :width="isPhone ? '88%' : '420px'"
+      append-to-body
+      align-center
+      class="mall-announcement-dialog ylink-dialog-height-mode--auto"
+      modal-class="mall-announcement-dialog-overlay"
+    >
+      <section class="mall-announcement-dialog__panel">
+        <span class="mall-announcement-dialog__badge">公告</span>
+        <h3 class="mall-announcement-dialog__title">商城公告</h3>
+        <p class="mall-announcement-dialog__content">{{ mallAnnouncementText }}</p>
+      </section>
+    </ElDialog>
     <div v-if="loading" class="grid gap-3 rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
       <div v-for="index in 6" :key="index" class="h-[5.8rem] animate-pulse rounded-2xl bg-slate-100" />
     </div>
@@ -1525,6 +1572,31 @@ onBeforeUnmount(() => {
   flex: 1;
   align-items: center;
   gap: 0.55rem;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: default;
+  padding: 0;
+  text-align: left;
+}
+
+.mall-hero-card__compact-banner:disabled {
+  opacity: 1;
+}
+
+.mall-hero-card__compact-banner.is-actionable {
+  cursor: pointer;
+}
+
+.mall-hero-card__compact-banner.is-actionable .mall-hero-card__compact-text {
+  text-decoration: underline;
+  text-decoration-color: rgba(146, 64, 14, 0.32);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.16rem;
+}
+
+.mall-hero-card__compact-banner.is-actionable:active {
+  transform: scale(0.995);
 }
 
 .mall-hero-card__compact-badge {
@@ -1546,6 +1618,125 @@ onBeforeUnmount(() => {
   line-height: 1.25;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+:global(.mall-announcement-dialog-overlay) {
+  overflow: hidden;
+}
+
+:global(.mall-announcement-dialog-overlay .el-overlay-dialog) {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: max(1.25rem, env(safe-area-inset-top)) 1.25rem max(1.25rem, env(safe-area-inset-bottom));
+  overflow-y: auto;
+}
+
+:global(.mall-announcement-dialog.el-dialog) {
+  --el-dialog-width: min(420px, calc(100vw - 2.5rem));
+  margin: 0 !important;
+  overflow: hidden;
+  border-radius: 1.35rem;
+  background:
+    linear-gradient(180deg, rgba(255, 251, 235, 0.92), rgba(255, 255, 255, 0.98) 46%),
+    #ffffff;
+  display: flex;
+  flex-direction: column;
+  align-self: center;
+  width: var(--el-dialog-width) !important;
+  height: fit-content !important;
+  max-height: min(72vh, 28rem);
+  min-height: unset !important;
+  box-shadow:
+    0 22px 60px rgba(15, 23, 42, 0.24),
+    0 0 0 1px rgba(245, 158, 11, 0.12);
+}
+
+:global(.mall-announcement-dialog .el-dialog__header) {
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+}
+
+:global(.mall-announcement-dialog .el-dialog__headerbtn) {
+  top: 0.78rem;
+  right: 0.78rem;
+  z-index: 2;
+  height: 2.1rem;
+  width: 2.1rem;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.78);
+  transition:
+    background var(--ylink-motion-fast) var(--ylink-motion-ease),
+    transform var(--ylink-motion-fast) var(--ylink-motion-ease);
+}
+
+:global(.mall-announcement-dialog .el-dialog__headerbtn:hover) {
+  background: rgba(255, 247, 237, 0.96);
+  transform: scale(1.04);
+}
+
+:global(.mall-announcement-dialog .el-dialog__headerbtn .el-dialog__close) {
+  color: #94a3b8;
+  font-size: 1rem;
+}
+
+:global(.mall-announcement-dialog .el-dialog__body) {
+  display: flex;
+  flex: 0 0 auto !important;
+  justify-content: center;
+  height: auto !important;
+  min-height: unset !important;
+  max-height: inherit;
+  overflow: visible !important;
+  padding: 0;
+}
+
+.mall-announcement-dialog__panel {
+  display: flex;
+  width: 100%;
+  min-height: 0;
+  flex-direction: column;
+  align-items: center;
+  padding: 1.15rem 1.15rem 1.25rem;
+}
+
+.mall-announcement-dialog__badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 9999px;
+  background: #ffedd5;
+  color: #9a3412;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0.38rem 0.68rem;
+}
+
+.mall-announcement-dialog__title {
+  margin-top: 0.78rem;
+  color: #0f172a;
+  font-size: 1.12rem;
+  font-weight: 750;
+  line-height: 1.28;
+  text-align: center;
+}
+
+.mall-announcement-dialog__content {
+  margin-top: 0.86rem;
+  width: 100%;
+  max-height: min(42vh, 18rem);
+  max-width: 23rem;
+  overflow-y: auto;
+  border-radius: 1rem;
+  background: rgba(255, 247, 237, 0.72);
+  color: #475569;
+  font-size: 0.92rem;
+  line-height: 1.75;
+  padding: 0.85rem 0.95rem;
+  text-align: center;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .mall-browse-panel {
@@ -2642,6 +2833,31 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 767px) {
+  :global(.mall-announcement-dialog-overlay .el-overlay-dialog) {
+    padding: max(1rem, env(safe-area-inset-top)) 1rem max(1rem, env(safe-area-inset-bottom));
+  }
+
+  :global(.mall-announcement-dialog.el-dialog) {
+    --el-dialog-width: min(88vw, 23rem);
+    border-radius: 1.25rem;
+    max-height: min(68vh, 24rem);
+  }
+
+  .mall-announcement-dialog__panel {
+    padding: 1rem 1rem 1.1rem;
+  }
+
+  .mall-announcement-dialog__title {
+    font-size: 1.05rem;
+  }
+
+  .mall-announcement-dialog__content {
+    max-height: min(38vh, 16rem);
+    font-size: 0.88rem;
+    line-height: 1.68;
+    padding: 0.78rem 0.85rem;
+  }
+
   .mall-browse-panel {
     --mall-reorder-layout-duration: 280ms;
     --mall-browse-gap: 0.7rem;
