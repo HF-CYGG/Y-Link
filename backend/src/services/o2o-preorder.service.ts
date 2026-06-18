@@ -1404,6 +1404,7 @@ class O2oPreorderService {
       .groupBy('item.productId')
       .getRawMany<{ productId: string; soldQty: O2oNumericLike }>()
 
+    // 退货核销会同步扣减原预订单明细 qty，因此已核销订单明细本身就是净销量。
     return new Map(
       soldRows.map((item) => [
         String(item.productId),
