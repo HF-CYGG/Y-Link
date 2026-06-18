@@ -32,6 +32,8 @@ export interface O2oMallProduct {
   productCode: string
   productName: string
   defaultPrice: string
+  discountRate: string
+  discountedPrice: string
   tags: string[]
   thumbnail: string | null
   detailContent: string | null
@@ -88,10 +90,14 @@ export interface O2oPreorderDetailItem {
   productId: string
   productCode: string
   productName: string
+  originalPrice?: string
+  discountRate?: string
+  unitPrice?: string
   defaultPrice: string
   qty: number
   returnedQty: number
   availableReturnQty: number
+  lineAmount?: string
   subTotal?: string
 }
 

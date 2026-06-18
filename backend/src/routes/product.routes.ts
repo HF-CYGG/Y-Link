@@ -73,6 +73,9 @@ const createProductSchema = z.object({
   productName: z.string().trim().min(1, 'productName 不能为空'),
   pinyinAbbr: z.string().optional(),
   defaultPrice: optionalNonNegativeNumberSchema,
+  discountRate: optionalNonNegativeNumberSchema.refine((value) => value === undefined || (value > 0 && value <= 10), {
+    message: 'discountRate 必须大于 0 且不能超过 10',
+  }),
   isActive: optionalBooleanSchema,
   o2oStatus: z.enum(['listed', 'unlisted']).optional(),
   thumbnail: z.string().max(255).nullable().optional(),
@@ -88,6 +91,9 @@ const updateProductSchema = z.object({
   productName: z.string().trim().min(1, 'productName 不能为空').optional(),
   pinyinAbbr: z.string().optional(),
   defaultPrice: optionalNonNegativeNumberSchema,
+  discountRate: optionalNonNegativeNumberSchema.refine((value) => value === undefined || (value > 0 && value <= 10), {
+    message: 'discountRate 必须大于 0 且不能超过 10',
+  }),
   isActive: optionalBooleanSchema,
   o2oStatus: z.enum(['listed', 'unlisted']).optional(),
   thumbnail: z.string().max(255).nullable().optional(),

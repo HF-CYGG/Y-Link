@@ -25,7 +25,7 @@ SET @constraint_exists = (
 );
 SET @sql = IF(
   @constraint_exists = 0,
-  'ALTER TABLE `base_product` ADD CONSTRAINT `ck_base_product_non_negative` CHECK (`default_price` >= 0 AND `limit_per_user` >= 1 AND `current_stock` >= 0 AND `pre_ordered_stock` >= 0 AND `pre_ordered_stock` <= `current_stock`)',
+  'ALTER TABLE `base_product` ADD CONSTRAINT `ck_base_product_non_negative` CHECK (`default_price` >= 0 AND `discount_rate` > 0 AND `discount_rate` <= 10 AND `limit_per_user` >= 1 AND `current_stock` >= 0 AND `pre_ordered_stock` >= 0 AND `pre_ordered_stock` <= `current_stock`)',
   'SELECT ''ck_base_product_non_negative already exists'' AS migration_notice'
 );
 PREPARE stmt FROM @sql;

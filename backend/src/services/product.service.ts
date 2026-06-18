@@ -23,6 +23,12 @@ import { isRetryableSqliteLockError, isUniqueConstraintError } from '../utils/da
 import { BizError } from '../utils/errors.js'
 import { generateProductCode } from '../utils/id-generator.js'
 import { normalizeLegacyUploadUrl } from '../utils/upload-storage.js'
+import {
+  DISCOUNT_RATE_MAX,
+  DISCOUNT_RATE_MIN,
+  calculateDiscountedPriceText,
+  normalizeDecimalText,
+} from '../utils/discount-price.js'
 
 export interface ProductQuery {
   keyword?: string
@@ -38,6 +44,7 @@ export interface CreateProductInput {
   productName: string
   pinyinAbbr?: string
   defaultPrice?: number
+  discountRate?: number
   isActive?: boolean
   o2oStatus?: 'listed' | 'unlisted'
   thumbnail?: string | null
@@ -53,6 +60,7 @@ export interface UpdateProductInput {
   productName?: string
   pinyinAbbr?: string
   defaultPrice?: number
+  discountRate?: number
   isActive?: boolean
   o2oStatus?: 'listed' | 'unlisted'
   thumbnail?: string | null
@@ -80,6 +88,8 @@ export interface ProductView {
   productName: string
   pinyinAbbr: string
   defaultPrice: string
+  discountRate: string
+  discountedPrice: string
   isActive: boolean
   o2oStatus: 'listed' | 'unlisted'
   thumbnail: string | null
@@ -94,16 +104,6 @@ export interface ProductView {
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const normalizeEntityId = (value: string | number): string => String(value).trim()
-
-// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
-const normalizeDecimalText = (value: string | number | null | undefined, fallback = '0.00'): string => {
-  if (value === null || value === undefined || value === '') {
-    return fallback
-  }
-
-  const normalizedNumber = Number(value)
-  return Number.isFinite(normalizedNumber) ? normalizedNumber.toFixed(2) : fallback
-}
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const normalizeTagIds = (tagIds: Array<string | number>): string[] => {
@@ -446,6 +446,8 @@ export class ProductService {
         productName: product.productName,
         pinyinAbbr: product.pinyinAbbr || '',
         defaultPrice: normalizeDecimalText(product.defaultPrice),
+        discountRate: normalizeDecimalText(product.discountRate, '10.00'),
+        discountedPrice: calculateDiscountedPriceText(product.defaultPrice, product.discountRate),
         isActive: Boolean(product.isActive),
         o2oStatus: product.o2oStatus ?? 'unlisted',
         thumbnail: normalizeProductThumbnailUrl(product.thumbnail) ?? null,
@@ -556,6 +558,16 @@ export class ProductService {
     return normalizeDecimalText(value)
   }
 
+  private readOptionalDiscountRate(value: number | undefined, label: string): string | undefined {
+    if (value === undefined) {
+      return undefined
+    }
+    if (!Number.isFinite(value) || value < DISCOUNT_RATE_MIN || value > DISCOUNT_RATE_MAX) {
+      throw new BizError(`${label}必须大于 0 且不能超过 10`, 400)
+    }
+    return normalizeDecimalText(value)
+  }
+
   private readOptionalInteger(
     value: number | undefined,
     label: string,
@@ -631,6 +643,10 @@ export class ProductService {
     if (normalizedPrice !== undefined) {
       normalizedInput.defaultPrice = Number(normalizedPrice)
     }
+    const normalizedDiscountRate = this.readOptionalDiscountRate(input.discountRate, '商品折扣')
+    if (normalizedDiscountRate !== undefined) {
+      normalizedInput.discountRate = Number(normalizedDiscountRate)
+    }
 
     const normalizedLimitPerUser = this.readOptionalInteger(
       input.limitPerUser,
@@ -691,6 +707,9 @@ export class ProductService {
     }
     if (typeof input.defaultPrice === 'number') {
       product.defaultPrice = this.readOptionalPrice(input.defaultPrice, '默认单价') as string
+    }
+    if (typeof input.discountRate === 'number') {
+      product.discountRate = this.readOptionalDiscountRate(input.discountRate, '商品折扣') as string
     }
     if (typeof input.isActive === 'boolean') {
       product.isActive = input.isActive
@@ -777,6 +796,7 @@ export class ProductService {
       productName: input.productName,
       pinyinAbbr: input.pinyinAbbr ?? '',
       defaultPrice: this.readOptionalPrice(input.defaultPrice, '默认单价') ?? '0.00',
+      discountRate: this.readOptionalDiscountRate(input.discountRate, '商品折扣') ?? '10.00',
       isActive,
       o2oStatus: resolveEffectiveO2oStatus(isActive, input.o2oStatus),
       thumbnail: normalizeProductThumbnailUrl(input.thumbnail) ?? null,

@@ -36,6 +36,7 @@ import {
 } from '@/api/modules/o2o'
 import { extractErrorMessage } from '@/utils/error'
 import { captureOrderRefreshAnchor, restoreOrderRefreshAnchor } from '@/utils/order-refresh-visual'
+import { formatDiscountRate, resolveDiscountedUnitPrice, resolveLineAmount, resolveOriginalPrice } from '@/utils/o2o-price'
 
 type OrderPoolKey = 'all' | 'pending' | 'completed' | 'cancelled' | 'returns'
 
@@ -311,8 +312,7 @@ const detailAmountSummary = computed(() => {
     return activeOrderDetail.value.amountSummary
   }
   const totalAmount = activeOrderDetail.value.items.reduce((sum, item) => {
-    const lineAmount = Number(item.subTotal ?? Number(item.defaultPrice || 0) * Number(item.qty || 0))
-    return sum + lineAmount
+    return sum + Number(resolveLineAmount(item))
   }, 0)
   return {
     totalAmount: formatCurrency(totalAmount),
@@ -1588,15 +1588,18 @@ onBeforeUnmount(() => {
               <div class="table-scroll-wrap">
                 <el-table native-scrollbar :data="activeOrderDetail.items" row-key="id" :loading="detailLoading">
                   <el-table-column prop="productName" label="商品名称" min-width="180" />
-                  <el-table-column prop="defaultPrice" label="单价" width="120">
+                  <el-table-column prop="unitPrice" label="单价" width="160">
                     <template #default="{ row }">
-                      <span>¥{{ formatCurrency(row.defaultPrice) }}</span>
+                      <div class="leading-5">
+                        <p class="font-semibold text-teal-600">¥{{ resolveDiscountedUnitPrice(row) }}</p>
+                        <p class="text-xs text-slate-400">原价 ¥{{ resolveOriginalPrice(row) }} · {{ formatDiscountRate(row.discountRate) }}</p>
+                      </div>
                     </template>
                   </el-table-column>
                   <el-table-column prop="qty" label="数量" width="90" align="right" />
                   <el-table-column label="小计" width="120" align="right">
                     <template #default="{ row }">
-                      <span>¥{{ formatCurrency(row.subTotal ?? Number(row.defaultPrice || 0) * Number(row.qty || 0)) }}</span>
+                      <span>¥{{ resolveLineAmount(row) }}</span>
                     </template>
                   </el-table-column>
                 </el-table>
@@ -1610,10 +1613,12 @@ onBeforeUnmount(() => {
               >
                 <p class="break-words text-sm font-semibold text-slate-900">{{ item.productName }}</p>
                 <div class="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500">
-                  <p>单价：¥{{ formatCurrency(item.defaultPrice) }}</p>
+                  <p>折后价：¥{{ resolveDiscountedUnitPrice(item) }}</p>
+                  <p>原价：¥{{ resolveOriginalPrice(item) }}</p>
                   <p class="text-right">数量：{{ item.qty }}</p>
+                  <p class="text-right">{{ formatDiscountRate(item.discountRate) }}</p>
                   <p class="col-span-2 text-right font-semibold text-slate-700">
-                    小计：¥{{ formatCurrency(item.subTotal ?? Number(item.defaultPrice || 0) * Number(item.qty || 0)) }}
+                    小计：¥{{ resolveLineAmount(item) }}
                   </p>
                 </div>
               </div>

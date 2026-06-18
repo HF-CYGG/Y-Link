@@ -21,7 +21,7 @@ import { entityColumnOptions } from './entity-column-options.js'
 import { RelProductTag } from './rel-product-tag.entity.js'
 
 @Entity({ name: 'base_product' })
-@Check('ck_base_product_non_negative', '`default_price` >= 0 AND `limit_per_user` >= 1 AND `current_stock` >= 0 AND `pre_ordered_stock` >= 0 AND `pre_ordered_stock` <= `current_stock`')
+@Check('ck_base_product_non_negative', '`default_price` >= 0 AND `discount_rate` > 0 AND `discount_rate` <= 10 AND `limit_per_user` >= 1 AND `current_stock` >= 0 AND `pre_ordered_stock` >= 0 AND `pre_ordered_stock` <= `current_stock`')
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export class BaseProduct {
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })
@@ -47,6 +47,9 @@ export class BaseProduct {
 
   @Column({ name: 'default_price', type: 'decimal', precision: 12, scale: 2, default: 0, comment: '默认单价' })
   defaultPrice!: string
+
+  @Column({ name: 'discount_rate', type: 'decimal', precision: 4, scale: 2, default: 10, comment: '商品折扣（几折）' })
+  discountRate!: string
 
   @Index('idx_base_product_is_active')
   @Column({ name: 'is_active', ...entityColumnOptions.booleanFlag, comment: '是否启用' })

@@ -82,6 +82,8 @@ const normalizeProducts = (products: unknown): O2oMallProduct[] => {
         productCode,
         productName,
         defaultPrice: normalizePrice(row.defaultPrice),
+        discountRate: normalizePrice(row.discountRate ?? 10),
+        discountedPrice: normalizePrice(row.discountedPrice ?? row.defaultPrice),
         tags: Array.isArray(row.tags) ? row.tags.map(String) : [],
         thumbnail: typeof row.thumbnail === 'string' ? row.thumbnail : null,
         detailContent: typeof row.detailContent === 'string' ? row.detailContent : null,

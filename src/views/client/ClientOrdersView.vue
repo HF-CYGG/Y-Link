@@ -450,6 +450,12 @@ const triggerSilentOrderRefresh = async () => {
   await loadOrders(true, { silent: true, preserveScroll: true })
 }
 
+const refreshSingleOrderSummary = async (orderId: string, _options?: { silent?: boolean }) => {
+  const result = normalizeSummaryDisplayShowNo(await getMyO2oPreorderSummary(orderId))
+  clientOrderStore.syncOrderSummary(result, { preserveFresh: true })
+  markRefreshedOrders([result.id])
+}
+
 const startClientOrderRefreshSubscription = () => {
   disposeClientOrderRefresh()
   disposeClientOrderRefresh = subscribeClientOrderRefresh(async (event) => {
@@ -457,9 +463,7 @@ const startClientOrderRefreshSubscription = () => {
       return
     }
     try {
-      const latestSummary = normalizeSummaryDisplayShowNo(await getMyO2oPreorderSummary(event.orderId))
-      clientOrderStore.syncOrderSummary(latestSummary, { preserveFresh: true })
-      markRefreshedOrders([latestSummary.id])
+      await refreshSingleOrderSummary(event.orderId, { silent: true })
     } catch {
       await triggerSilentOrderRefresh()
     }

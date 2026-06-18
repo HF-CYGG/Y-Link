@@ -10,6 +10,7 @@
 
 import type { O2oMallProduct, O2oPreorderDetail } from '@/api/modules/o2o'
 import type { EditableOrderItem } from '@/views/client/client-order-detail-types'
+import { formatDiscountRate, resolveDiscountedUnitPrice, resolveOriginalPrice } from '@/utils/o2o-price'
 
 const props = defineProps<{
   visible: boolean
@@ -113,6 +114,9 @@ const handleAddProductIdChange = (value: string) => {
               <p class="text-sm font-semibold text-slate-900">{{ item.productName }}</p>
               <p class="mt-1 text-xs leading-5 text-slate-400">
                 原数量 {{ item.originalQty }} 件，当前最多可改为 {{ item.maxQty }} 件
+              </p>
+              <p class="mt-1 text-xs leading-5 text-slate-500">
+                折后价 ¥{{ resolveDiscountedUnitPrice(item) }}，原价 ¥{{ resolveOriginalPrice(item) }} · {{ formatDiscountRate(item.discountRate) }}
               </p>
               <p v-if="item.unavailableReason" class="mt-2 text-xs leading-5 text-amber-600">
                 {{ item.unavailableReason }}

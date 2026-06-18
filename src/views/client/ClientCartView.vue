@@ -17,6 +17,7 @@ import { ArrowLeft } from '@element-plus/icons-vue'
 import { useClientMallSnapshotRefresh } from '@/composables/useClientMallSnapshotRefresh'
 import { useClientAuthStore, useClientCartStore } from '@/store'
 import pinia from '@/store/pinia'
+import { formatDiscountRate, isDiscountedPrice, resolveDiscountedUnitPrice, resolveOriginalPrice } from '@/utils/o2o-price'
 
 const props = defineProps<{
   standalone?: boolean
@@ -40,7 +41,7 @@ onMounted(() => {
 })
 
 const selectedCount = computed(() => clientCartStore.selectedValidItems.length)
-const totalAmount = computed(() => clientCartStore.selectedValidItems.reduce((sum, item) => sum + Math.max(0, Number(item.defaultPrice || 0)) * item.qty, 0))
+const totalAmount = computed(() => clientCartStore.selectedValidItems.reduce((sum, item) => sum + Number(resolveDiscountedUnitPrice(item)) * item.qty, 0))
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const removeSelected = () => {
@@ -155,7 +156,9 @@ const handleBack = () => {
                   />
                   <div class="min-w-0">
                     <p class="truncate text-sm font-semibold text-slate-900">{{ item.productName }}</p>
-                    <p class="mt-1 text-sm font-bold text-teal-600">¥{{ Number(item.defaultPrice).toFixed(2) }}</p>
+                    <p class="mt-1 text-sm font-bold text-teal-600">¥{{ resolveDiscountedUnitPrice(item) }}</p>
+                    <p class="mt-0.5 text-xs text-slate-400">原价 ¥{{ resolveOriginalPrice(item) }} · {{ formatDiscountRate(item.discountRate) }}</p>
+                    <p v-if="isDiscountedPrice(item)" class="mt-0.5 text-xs text-rose-500">折后价格</p>
                     <p class="text-xs text-slate-400 mt-1">可预订 {{ item.availableStock }} · 限购 {{ item.limitPerUser }}</p>
                   </div>
                 </div>

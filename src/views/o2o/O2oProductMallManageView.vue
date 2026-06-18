@@ -16,8 +16,9 @@ import type { UploadRequestOptions } from 'element-plus'
 import { Delete, UploadFilled } from '@element-plus/icons-vue'
 import { BizCrudDialogShell, PageContainer, PassiveNumberInput } from '@/components/common'
 import { uploadImage } from '@/api/modules/upload'
- import { compressImageForUpload } from '@/utils/image-upload'
+import { compressImageForUpload } from '@/utils/image-upload'
 import { resolveProductPlaceholder } from '@/utils/product-placeholder'
+import { formatDiscountRate } from '@/utils/o2o-price'
 import {
   createProduct,
   getProductList,
@@ -33,6 +34,7 @@ type O2oProductFormState = {
   productCode: string
   productName: string
   defaultPrice: number
+  discountRate: number
   isActive: boolean
   o2oStatus: 'listed' | 'unlisted'
   thumbnail: string
@@ -53,6 +55,7 @@ const form = reactive<O2oProductFormState>({
   productCode: '',
   productName: '',
   defaultPrice: 0,
+  discountRate: 10,
   isActive: true,
   o2oStatus: 'listed',
   thumbnail: '',
@@ -135,6 +138,7 @@ const resetForm = () => {
   form.productCode = ''
   form.productName = ''
   form.defaultPrice = 0
+  form.discountRate = 10
   form.isActive = true
   form.o2oStatus = 'listed'
   form.thumbnail = ''
@@ -258,6 +262,7 @@ const openEditDialog = (product: ProductRecord) => {
   form.productCode = product.productCode
   form.productName = product.productName
   form.defaultPrice = Number(product.defaultPrice)
+  form.discountRate = Number(product.discountRate || 10)
   form.isActive = product.isActive
   form.o2oStatus = product.o2oStatus
   form.thumbnail = product.thumbnail ?? ''
@@ -301,6 +306,7 @@ const handleSubmit = async () => {
         productCode: form.productCode.trim() || undefined,
         productName: form.productName.trim(),
         defaultPrice: Number(form.defaultPrice) || 0,
+        discountRate: Math.min(10, Math.max(0.01, Number(form.discountRate) || 10)),
         isActive: form.isActive,
         o2oStatus: form.o2oStatus,
         thumbnail: finalThumbnail,
@@ -314,6 +320,7 @@ const handleSubmit = async () => {
         productCode: form.productCode.trim() || undefined,
         productName: form.productName.trim(),
         defaultPrice: Number(form.defaultPrice) || 0,
+        discountRate: Math.min(10, Math.max(0.01, Number(form.discountRate) || 10)),
         isActive: form.isActive,
         o2oStatus: form.o2oStatus,
         thumbnail: finalThumbnail,
@@ -401,10 +408,11 @@ onMounted(async () => {
 
             <div class="mall-mobile-card__price-strip">
               <div>
-                <p class="mall-mobile-card__section-label">建议单价</p>
+                <p class="mall-mobile-card__section-label">价格</p>
                 <p class="mall-mobile-card__price">
-                  {{ formatProductPrice(product.defaultPrice) }}
+                  {{ formatProductPrice(product.discountedPrice) }}
                 </p>
+                <p class="text-xs text-slate-400">原价 {{ formatProductPrice(product.defaultPrice) }} · {{ formatDiscountRate(product.discountRate) }}</p>
               </div>
               <div class="mall-mobile-card__limit">
                 单人限购 {{ product.limitPerUser }}
@@ -459,9 +467,12 @@ onMounted(async () => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="单价" min-width="108">
+        <el-table-column label="价格" min-width="170">
           <template #default="{ row }">
-            <span class="font-semibold text-teal-600">{{ formatProductPrice(row.defaultPrice) }}</span>
+            <div class="leading-5">
+              <p class="font-semibold text-teal-600">{{ formatProductPrice(row.discountedPrice) }}</p>
+              <p class="text-xs text-slate-400">原价 {{ formatProductPrice(row.defaultPrice) }} · {{ formatDiscountRate(row.discountRate) }}</p>
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="库存信息" min-width="190">
@@ -536,6 +547,11 @@ onMounted(async () => {
           <el-col :span="isPhone ? 24 : 12">
             <el-form-item label="建议单价">
               <PassiveNumberInput v-model="form.defaultPrice" :min="0" :precision="2" style="width: 100%" :disabled="!!form.id" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="isPhone ? 24 : 12">
+            <el-form-item label="商品折扣">
+              <PassiveNumberInput v-model="form.discountRate" :min="0.01" :max="10" :precision="2" :step="0.1" style="width: 100%" />
             </el-form-item>
           </el-col>
         </el-row>

@@ -53,6 +53,7 @@ const SQLITE_REQUIRED_ORDER_ITEM_COLUMNS = ['unit_price', 'line_amount']
 const SQLITE_LEGACY_OUTBOUND_ITEM_FALLBACK_UNIT_PRICE = 0.01
 const SQLITE_LEGACY_OUTBOUND_ITEM_FALLBACK_LINE_AMOUNT = 0
 const SQLITE_REQUIRED_PRODUCT_COLUMNS = [
+  'discount_rate',
   'o2o_status',
   'thumbnail',
   'detail_content',
@@ -93,6 +94,7 @@ const SQLITE_REQUIRED_O2O_PREORDER_COLUMNS = [
   'pickup_contact',
   'update_count',
 ]
+const SQLITE_REQUIRED_O2O_PREORDER_ITEM_COLUMNS = ['original_price', 'discount_rate', 'unit_price', 'line_amount']
 const SQLITE_REQUIRED_O2O_RETURN_REQUEST_COLUMNS = ['handled_at', 'handled_by', 'rejected_reason']
 const SQLITE_REQUIRED_BIZ_INBOUND_ORDER_COLUMNS = [
   'cancel_reason',
@@ -315,6 +317,11 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
 
   const o2oPreorderColumnSet = await listSqliteTableColumns(dataSource, 'o2o_preorder')
   if (SQLITE_REQUIRED_O2O_PREORDER_COLUMNS.some((column) => !o2oPreorderColumnSet.has(column))) {
+    return true
+  }
+
+  const o2oPreorderItemColumnSet = await listSqliteTableColumns(dataSource, 'o2o_preorder_item')
+  if (SQLITE_REQUIRED_O2O_PREORDER_ITEM_COLUMNS.some((column) => !o2oPreorderItemColumnSet.has(column))) {
     return true
   }
 

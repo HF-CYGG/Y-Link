@@ -44,6 +44,7 @@ import { buildClientOrderSummaryFromDetail } from '@/utils/client-order-summary'
 import { notifyClientOrderRefresh, subscribeClientOrderRefresh } from '@/utils/client-order-refresh'
 import { formatDateTime } from '@/utils/date-time'
 import { normalizeRequestError } from '@/utils/error'
+import { formatDiscountRate, resolveDiscountedUnitPrice, resolveLineAmount, resolveOriginalPrice } from '@/utils/o2o-price'
 import ClientOrderEditDialog from '@/views/client/components/ClientOrderEditDialog.vue'
 import ClientOrderReturnDialog from '@/views/client/components/ClientOrderReturnDialog.vue'
 import {
@@ -300,8 +301,8 @@ const voucherOrder = computed<OrderDetailResult | null>(() => {
     deletedByDisplayName: null,
     createdAt: order.createdAt,
     items: items.map((item) => {
-      const unitPrice = toVoucherMoneyText(item.defaultPrice)
-      const subTotal = toVoucherMoneyText(item.subTotal ?? Number(unitPrice) * Number(item.qty ?? 0))
+      const unitPrice = toVoucherMoneyText(resolveDiscountedUnitPrice(item))
+      const subTotal = toVoucherMoneyText(resolveLineAmount(item))
       return {
         id: item.id,
         productId: item.productId,
@@ -385,7 +386,7 @@ const totalAmount = computed(() => {
     return 0
   }
   return detail.value.items.reduce((sum, item) => {
-    return sum + Math.max(0, Number(item.defaultPrice || 0)) * item.qty
+    return sum + Number(resolveLineAmount(item))
   }, 0)
 })
 
@@ -511,7 +512,7 @@ const editableOrderTotalQty = computed(() => {
 })
 
 const editableOrderTotalAmount = computed(() => {
-  return editOrderItems.value.reduce((sum, item) => sum + Math.max(0, Number(item.defaultPrice || 0)) * item.qty, 0)
+  return editOrderItems.value.reduce((sum, item) => sum + Number(resolveDiscountedUnitPrice(item)) * item.qty, 0)
 })
 
 const editableProductOptions = computed(() => {
@@ -561,6 +562,9 @@ const buildEditableItemsFromDetail = (nextDetail: O2oPreorderDetail, existingIte
       productId: item.productId,
       productCode: item.productCode,
       productName: item.productName,
+      originalPrice: item.originalPrice,
+      discountRate: item.discountRate,
+      unitPrice: item.unitPrice,
       defaultPrice: item.defaultPrice,
       qty: draftQty === undefined ? item.qty : Math.max(0, Math.min(maxQty, Math.floor(Number(draftQty ?? item.qty)))),
       originalQty: item.qty,
@@ -700,6 +704,9 @@ const addEditProduct = () => {
       productId: product.id,
       productCode: product.productCode,
       productName: product.productName,
+      originalPrice: product.defaultPrice,
+      discountRate: product.discountRate,
+      unitPrice: product.discountedPrice,
       defaultPrice: product.defaultPrice,
       qty: 1,
       originalQty: 0,
@@ -1504,7 +1511,10 @@ onBeforeUnmount(() => {
               <tbody class="divide-y divide-slate-100 bg-white text-slate-700">
                 <tr v-for="item in detail.items" :key="item.id">
                   <td class="px-4 py-3">{{ item.productName }}</td>
-                  <td class="px-4 py-3 text-right">¥{{ Number(item.defaultPrice || 0).toFixed(2) }}</td>
+                  <td class="px-4 py-3 text-right">
+                    <p class="font-semibold text-teal-600">¥{{ resolveDiscountedUnitPrice(item) }}</p>
+                    <p class="text-xs text-slate-400">原价 ¥{{ resolveOriginalPrice(item) }} · {{ formatDiscountRate(item.discountRate) }}</p>
+                  </td>
                   <td class="px-4 py-3 text-right font-medium">{{ item.qty }}</td>
                   <td v-if="shouldShowReturnSection" class="px-4 py-3 text-right text-amber-700">{{ item.returnedQty }}</td>
                   <td v-if="shouldShowReturnSection" class="px-4 py-3 text-right font-medium text-teal-700">{{ item.availableReturnQty }}</td>

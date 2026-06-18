@@ -52,6 +52,7 @@ import {
   type EditableOnsiteOrderItem,
 } from '@/views/o2o/o2o-verify-console.helpers'
 import { notifyClientOrderRefresh } from '@/utils/client-order-refresh'
+import { formatDiscountRate, resolveDiscountedUnitPrice, resolveOriginalPrice } from '@/utils/o2o-price'
 
 const verifyCode = ref('')
 const verifyResult = ref<O2oVerifyDetailResult | null>(null)
@@ -252,7 +253,7 @@ const onsiteTotalQty = computed(() => {
 })
 
 const onsiteTotalAmount = computed(() => {
-  return onsiteOrderItems.value.reduce((sum, item) => sum + Math.max(0, Number(item.defaultPrice || 0)) * item.qty, 0)
+  return onsiteOrderItems.value.reduce((sum, item) => sum + Number(resolveDiscountedUnitPrice(item)) * item.qty, 0)
 })
 
 const canSubmitOnsiteAdjust = computed(() => {
@@ -528,6 +529,9 @@ const addOnsiteProduct = () => {
       productId: product.id,
       productCode: product.productCode,
       productName: product.productName,
+      originalPrice: product.defaultPrice,
+      discountRate: product.discountRate,
+      unitPrice: product.discountedPrice,
       defaultPrice: product.defaultPrice,
       qty: 1,
       originalQty: 0,
@@ -947,9 +951,12 @@ watch(
             <el-table native-scrollbar class="mt-4" :data="preorderDetail.items" row-key="id">
               <el-table-column prop="productName" label="商品名称" min-width="180" />
               <el-table-column prop="productCode" label="商品编码" min-width="140" />
-              <el-table-column prop="defaultPrice" label="单价" width="120">
+              <el-table-column prop="unitPrice" label="单价" width="160">
                 <template #default="{ row }">
-                  <span>¥{{ Number(row.defaultPrice || 0).toFixed(2) }}</span>
+                  <div class="leading-5">
+                    <p class="font-semibold text-teal-600">¥{{ resolveDiscountedUnitPrice(row) }}</p>
+                    <p class="text-xs text-slate-400">原价 ¥{{ resolveOriginalPrice(row) }} · {{ formatDiscountRate(row.discountRate) }}</p>
+                  </div>
                 </template>
               </el-table-column>
               <el-table-column prop="qty" label="数量" width="90" align="right" />

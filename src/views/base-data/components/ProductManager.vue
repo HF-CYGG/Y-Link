@@ -39,6 +39,7 @@ import { useCrudManager } from '@/composables/useCrudManager'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
+import { formatDiscountRate } from '@/utils/o2o-price'
 import {
   normalizeOptionalSubmitText,
   normalizeSubmitNumber,
@@ -81,6 +82,7 @@ interface ProductForm {
   productName: string
   pinyinAbbr: string
   defaultPrice: number
+  discountRate: number
   currentStock: number
   isActive: boolean
   tagIds: string[]
@@ -101,6 +103,7 @@ const createDefaultForm = (): ProductForm => ({
   productName: '',
   pinyinAbbr: '',
   defaultPrice: 0,
+  discountRate: 10,
   currentStock: 0,
   isActive: true,
   tagIds: [] as string[],
@@ -150,6 +153,7 @@ const rules: FormRules = {
   ],
   productName: [{ required: true, message: '请输入产品名称', trigger: 'blur' }],
   defaultPrice: [{ required: true, message: '请输入默认售价', trigger: 'blur' }],
+  discountRate: [{ required: true, message: '请输入商品折扣', trigger: 'blur' }],
 }
 
 /**
@@ -287,6 +291,7 @@ const buildEditForm = (row: ProductRecord): ProductForm => ({
   productName: row.productName,
   pinyinAbbr: row.pinyinAbbr,
   defaultPrice: Number(row.defaultPrice),
+  discountRate: Number(row.discountRate || 10),
   currentStock: Number(row.currentStock) || 0,
   isActive: row.isActive,
   tagIds: row.tagIds,
@@ -307,6 +312,11 @@ const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProdu
     fallback: 0,
     min: 0,
   })
+  const normalizedDiscountRate = normalizeSubmitNumber(currentForm.discountRate, {
+    fallback: 10,
+    min: 0.01,
+    max: 10,
+  })
   const normalizedCurrentStock = normalizeSubmitNumber(currentForm.currentStock, {
     fallback: 0,
     min: 0,
@@ -320,6 +330,7 @@ const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProdu
     productName: normalizedProductName,
     pinyinAbbr: normalizedPinyinAbbr,
     defaultPrice: normalizedDefaultPrice,
+    discountRate: normalizedDiscountRate,
     currentStock: normalizedCurrentStock,
     isActive: currentForm.isActive,
     tagIds: resolvedTagIds,
@@ -553,6 +564,11 @@ const handleBatchCreate = async () => {
           fallback: 0,
           min: 0,
         }),
+        discountRate: normalizeSubmitNumber(row.discountRate, {
+          fallback: 10,
+          min: 0.01,
+          max: 10,
+        }),
         currentStock: normalizeSubmitNumber(row.currentStock, {
           fallback: 0,
           min: 0,
@@ -698,9 +714,12 @@ onActivated(() => {
             />
             <el-table-column label="产品名称" prop="productName" min-width="220" show-overflow-tooltip />
             <el-table-column label="拼音首字母" prop="pinyinAbbr" width="120" show-overflow-tooltip />
-            <el-table-column label="默认售价" prop="defaultPrice" width="132">
+            <el-table-column label="价格" prop="defaultPrice" width="168">
               <template #default="{ row }">
-                ¥{{ Number(row.defaultPrice).toFixed(2) }}
+                <div class="leading-5">
+                  <p class="font-semibold text-teal-600">折后 ¥{{ Number(row.discountedPrice).toFixed(2) }}</p>
+                  <p class="text-xs text-slate-400">原价 ¥{{ Number(row.defaultPrice).toFixed(2) }} · {{ formatDiscountRate(row.discountRate) }}</p>
+                </div>
               </template>
             </el-table-column>
             <el-table-column label="库存数量" min-width="170">
@@ -772,7 +791,8 @@ onActivated(() => {
               <p class="mt-1 break-all text-sm text-slate-500 dark:text-slate-400">{{ item.productCode }}</p>
             </div>
             <div class="text-right">
-              <span class="font-medium text-red-500">¥{{ Number(item.defaultPrice).toFixed(2) }}</span>
+              <span class="font-medium text-red-500">折后 ¥{{ Number(item.discountedPrice).toFixed(2) }}</span>
+              <span class="text-xs text-slate-400">原价 ¥{{ Number(item.defaultPrice).toFixed(2) }} · {{ formatDiscountRate(item.discountRate) }}</span>
             </div>
           </div>
           <div class="mt-2 text-xs text-slate-500 dark:text-slate-400">
@@ -852,6 +872,11 @@ onActivated(() => {
               <el-table-column label="默认售价" min-width="150">
                 <template #default="{ row }">
                   <PassiveNumberInput v-model="row.defaultPrice" :min="0" :precision="2" :step="1" class="w-full" />
+                </template>
+              </el-table-column>
+              <el-table-column label="折扣" min-width="130">
+                <template #default="{ row }">
+                  <PassiveNumberInput v-model="row.discountRate" :min="0.01" :max="10" :precision="2" :step="0.1" class="w-full" />
                 </template>
               </el-table-column>
               <el-table-column label="当前库存" min-width="150">
@@ -940,6 +965,17 @@ onActivated(() => {
               :step="1"
               class="w-full"
               placeholder="请输入售价"
+            />
+          </el-form-item>
+          <el-form-item label="商品折扣" prop="discountRate">
+            <PassiveNumberInput
+              v-model="form.discountRate"
+              :min="0.01"
+              :max="10"
+              :precision="2"
+              :step="0.1"
+              class="w-full"
+              placeholder="请输入几折，10 表示无折扣"
             />
           </el-form-item>
           <el-form-item label="当前库存" prop="currentStock">

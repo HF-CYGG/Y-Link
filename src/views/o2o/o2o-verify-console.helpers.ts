@@ -23,6 +23,9 @@ export interface EditableOnsiteOrderItem {
   productId: string
   productCode: string
   productName: string
+  originalPrice?: string
+  discountRate?: string
+  unitPrice?: string
   defaultPrice: string
   qty: number
   originalQty: number
@@ -118,6 +121,9 @@ export const buildOnsiteEditableItemsFromDetail = (
       productId: item.productId,
       productCode: item.productCode,
       productName: item.productName,
+      originalPrice: item.originalPrice,
+      discountRate: item.discountRate,
+      unitPrice: item.unitPrice,
       defaultPrice: item.defaultPrice,
       qty: item.qty,
       originalQty: item.qty,

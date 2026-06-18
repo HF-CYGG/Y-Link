@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS `base_product` (
   `product_name` VARCHAR(128) NOT NULL COMMENT '产品名称',
   `pinyin_abbr` VARCHAR(64) NOT NULL DEFAULT '' COMMENT '拼音首字母检索字段',
   `default_price` DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT '默认单价',
+  `discount_rate` DECIMAL(4,2) NOT NULL DEFAULT 10.00 COMMENT '商品折扣（几折）',
   `is_active` TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否启用',
   `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '创建时间',
   `updated_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3) COMMENT '更新时间',
@@ -24,6 +25,8 @@ CREATE TABLE IF NOT EXISTS `base_product` (
   KEY `idx_base_product_is_active` (`is_active`),
   CONSTRAINT `ck_base_product_non_negative` CHECK (
     `default_price` >= 0
+    AND `discount_rate` > 0
+    AND `discount_rate` <= 10
     AND `limit_per_user` >= 1
     AND `current_stock` >= 0
     AND `pre_ordered_stock` >= 0

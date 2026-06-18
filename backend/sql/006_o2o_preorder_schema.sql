@@ -5,6 +5,7 @@
 -- =============================================
 
 ALTER TABLE `base_product`
+  ADD COLUMN `discount_rate` DECIMAL(4,2) NOT NULL DEFAULT 10.00 COMMENT '商品折扣（几折）',
   ADD COLUMN `o2o_status` VARCHAR(16) NOT NULL DEFAULT 'unlisted' COMMENT '线上预订状态',
   ADD COLUMN `thumbnail` VARCHAR(255) NULL COMMENT '预览图地址',
   ADD COLUMN `detail_content` TEXT NULL COMMENT '商品详情',
@@ -73,6 +74,10 @@ CREATE TABLE IF NOT EXISTS `o2o_preorder_item` (
   `order_id` BIGINT UNSIGNED NOT NULL,
   `product_id` BIGINT UNSIGNED NOT NULL,
   `qty` INT NOT NULL DEFAULT 0,
+  `original_price` DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT '下单时原价快照',
+  `discount_rate` DECIMAL(4,2) NOT NULL DEFAULT 10.00 COMMENT '下单时折扣快照（几折）',
+  `unit_price` DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT '下单时折后单价快照',
+  `line_amount` DECIMAL(14,2) NOT NULL DEFAULT 0.00 COMMENT '明细行折后金额快照',
   PRIMARY KEY (`id`),
   KEY `idx_o2o_preorder_item_order_id` (`order_id`),
   KEY `idx_o2o_preorder_item_product_id` (`product_id`)

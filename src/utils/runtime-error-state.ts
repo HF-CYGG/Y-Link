@@ -39,7 +39,18 @@ const buildSnapshot = (title: string, error: unknown, fallbackMessage: string): 
 })
 
 export const reportGlobalAppError = (error: unknown, title = '应用出现异常') => {
+  if (shouldIgnoreGlobalRuntimeError(error)) {
+    return
+  }
   globalError.value = buildSnapshot(title, error, '页面运行异常，请刷新后重试')
+}
+
+export const shouldIgnoreGlobalRuntimeError = (error: unknown) => {
+  const message = normalizeErrorMessage(error, '')
+  return (
+    message === 'ResizeObserver loop completed with undelivered notifications.'
+    || message === 'ResizeObserver loop limit exceeded'
+  )
 }
 
 export const clearGlobalAppError = () => {

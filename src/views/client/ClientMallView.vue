@@ -19,6 +19,7 @@ import pinia from '@/store/pinia'
 import { normalizeRequestError } from '@/utils/error'
 import { useDevice } from '@/composables/useDevice'
 import { resolveProductPlaceholder } from '@/utils/product-placeholder'
+import { formatDiscountRate, resolveDiscountedUnitPrice, resolveOriginalPrice } from '@/utils/o2o-price'
 
 import ClientCartView from './ClientCartView.vue'
 import ClientCheckoutView from './ClientCheckoutView.vue'
@@ -194,7 +195,7 @@ const bottomSelectedTypeCount = computed(() => clientCartStore.items.length)
 const isOffline = computed(() => requestError.value?.type === 'offline')
 const miniCartTotalAmount = computed(() => {
   return clientCartStore.items.reduce((sum, item) => {
-    return sum + Math.max(0, Number(item.defaultPrice || 0)) * item.qty
+    return sum + Number(resolveDiscountedUnitPrice(item)) * item.qty
   }, 0)
 })
 const activeCategoryItems = computed(() => {
@@ -878,7 +879,8 @@ onBeforeUnmount(() => {
           <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
             <div class="client-product-card__content">
               <p class="client-product-card__name">{{ product.productName }}</p>
-              <p class="client-product-card__price">¥{{ Number(product.defaultPrice).toFixed(2) }}</p>
+              <p class="client-product-card__price">¥{{ resolveDiscountedUnitPrice(product) }}</p>
+              <p class="text-xs text-slate-400">原价 ¥{{ resolveOriginalPrice(product) }} · {{ formatDiscountRate(product.discountRate) }}</p>
               <p v-if="product.detailContent" class="client-product-card__desc">{{ product.detailContent }}</p>
               <div class="client-product-card__meta">
                 <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">
@@ -949,7 +951,8 @@ onBeforeUnmount(() => {
             <button type="button" class="client-product-card__body" @click="openProductDetail(row.data)">
               <div class="client-product-card__content">
                 <p class="client-product-card__name">{{ row.data.productName }}</p>
-                <p class="client-product-card__price">¥{{ Number(row.data.defaultPrice).toFixed(2) }}</p>
+                <p class="client-product-card__price">¥{{ resolveDiscountedUnitPrice(row.data) }}</p>
+                <p class="text-xs text-slate-400">原价 ¥{{ resolveOriginalPrice(row.data) }} · {{ formatDiscountRate(row.data.discountRate) }}</p>
                 <p v-if="row.data.detailContent" class="client-product-card__desc">{{ row.data.detailContent }}</p>
                 <div class="client-product-card__meta">
                   <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ row.data.availableStock }}</span>
@@ -993,7 +996,8 @@ onBeforeUnmount(() => {
               <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
                 <div class="client-product-card__content">
                   <p class="client-product-card__name">{{ product.productName }}</p>
-                  <p class="client-product-card__price">¥{{ Number(product.defaultPrice).toFixed(2) }}</p>
+                  <p class="client-product-card__price">¥{{ resolveDiscountedUnitPrice(product) }}</p>
+                  <p class="text-xs text-slate-400">原价 ¥{{ resolveOriginalPrice(product) }} · {{ formatDiscountRate(product.discountRate) }}</p>
                   <p v-if="product.detailContent" class="client-product-card__desc">{{ product.detailContent }}</p>
                   <div class="client-product-card__meta">
                     <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ product.availableStock }}</span>
@@ -1048,7 +1052,7 @@ onBeforeUnmount(() => {
               <article v-for="item in clientCartStore.items" :key="`mini-${item.productId}`" class="cart-item">
                 <div class="item-main">
                   <p class="item-name">{{ item.productName }}</p>
-                  <p class="item-price">¥{{ Number(item.defaultPrice).toFixed(2) }}</p>
+                  <p class="item-price">¥{{ resolveDiscountedUnitPrice(item) }}</p>
                 </div>
                 <div class="item-stepper">
                   <button type="button" class="step-btn" @click="clientCartStore.incrementQty(item.productId, -1)">-</button>
@@ -1098,7 +1102,8 @@ onBeforeUnmount(() => {
         </button>
         <div class="space-y-2 flex-shrink-0">
           <p class="text-lg font-semibold text-slate-900">{{ detailProduct.productName }}</p>
-          <p class="text-sm font-bold text-[var(--ylink-color-primary-strong)]">¥{{ Number(detailProduct.defaultPrice).toFixed(2) }}</p>
+          <p class="text-sm font-bold text-[var(--ylink-color-primary-strong)]">¥{{ resolveDiscountedUnitPrice(detailProduct) }}</p>
+          <p class="text-xs text-slate-400">原价 ¥{{ resolveOriginalPrice(detailProduct) }} · {{ formatDiscountRate(detailProduct.discountRate) }}</p>
           <p class="text-sm text-slate-500">{{ detailProduct.detailContent || '暂无商品描述' }}</p>
           <div class="flex flex-wrap gap-2 text-xs">
             <span class="rounded-full bg-emerald-50 px-3 py-1 text-emerald-600">可预订 {{ detailProduct.availableStock }}</span>

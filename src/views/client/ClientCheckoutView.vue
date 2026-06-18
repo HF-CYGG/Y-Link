@@ -32,6 +32,7 @@ import {
   readActiveClientPreorderSubmitLock,
   refreshClientPreorderSubmitLock,
 } from '@/utils/client-preorder-submit-guard'
+import { formatDiscountRate, resolveDiscountedUnitPrice, resolveOriginalPrice } from '@/utils/o2o-price'
 
 const props = defineProps<{
   standalone?: boolean
@@ -147,7 +148,7 @@ watch(
 
 const selectedItems = computed(() => clientCartStore.selectedValidItems)
 const totalQty = computed(() => selectedItems.value.reduce((sum, item) => sum + item.qty, 0))
-const totalAmount = computed(() => selectedItems.value.reduce((sum, item) => sum + Math.max(0, Number(item.defaultPrice || 0)) * item.qty, 0))
+const totalAmount = computed(() => selectedItems.value.reduce((sum, item) => sum + Number(resolveDiscountedUnitPrice(item)) * item.qty, 0))
 const submitDisabled = computed(() => submitting.value || !selectedItems.value.length)
 const currentDepartmentName = computed(() => clientAuthStore.currentUser?.departmentName?.trim() || '')
 const isDepartmentOrder = computed(() => clientOrderType.value === 'department')
@@ -414,7 +415,8 @@ const handleSubmit = async () => {
         >
           <div class="min-w-0">
             <p class="truncate text-sm font-semibold text-slate-900">{{ item.productName }}</p>
-            <p class="mt-1 text-sm font-bold text-teal-600">¥{{ Number(item.defaultPrice).toFixed(2) }}</p>
+            <p class="mt-1 text-sm font-bold text-teal-600">¥{{ resolveDiscountedUnitPrice(item) }}</p>
+            <p class="mt-0.5 text-xs text-slate-400">原价 ¥{{ resolveOriginalPrice(item) }} · {{ formatDiscountRate(item.discountRate) }}</p>
           </div>
           <span class="text-sm font-semibold text-slate-700">x {{ item.qty }}</span>
         </article>

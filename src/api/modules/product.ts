@@ -17,6 +17,8 @@ export interface ProductRecord {
   productName: string
   pinyinAbbr: string
   defaultPrice: string
+  discountRate: string
+  discountedPrice: string
   isActive: boolean
   o2oStatus: 'listed' | 'unlisted'
   thumbnail: string | null
@@ -34,6 +36,7 @@ export interface CreateProductDto {
   productName: string
   pinyinAbbr?: string
   defaultPrice?: number
+  discountRate?: number
   isActive?: boolean
   o2oStatus?: 'listed' | 'unlisted'
   thumbnail?: string | null
@@ -49,6 +52,7 @@ export interface UpdateProductDto {
   productName?: string
   pinyinAbbr?: string
   defaultPrice?: number
+  discountRate?: number
   isActive?: boolean
   o2oStatus?: 'listed' | 'unlisted'
   thumbnail?: string | null
@@ -102,6 +106,8 @@ interface ProductRawRecord {
   productName?: PrimitiveValue
   pinyinAbbr?: PrimitiveValue
   defaultPrice?: PrimitiveValue
+  discountRate?: PrimitiveValue
+  discountedPrice?: PrimitiveValue
   isActive?: PrimitiveValue
   o2oStatus?: PrimitiveValue
   thumbnail?: PrimitiveValue
@@ -190,6 +196,8 @@ const normalizeProductRecord = (record: ProductRawRecord): ProductRecord => {
     productName: normalizeText(record.productName),
     pinyinAbbr: normalizeText(record.pinyinAbbr),
     defaultPrice: normalizeDecimal(record.defaultPrice),
+    discountRate: normalizeDecimal(record.discountRate, '10.00'),
+    discountedPrice: normalizeDecimal(record.discountedPrice ?? record.defaultPrice),
     isActive: normalizeBoolean(record.isActive),
     o2oStatus: normalizeText(record.o2oStatus, 'unlisted') === 'listed' ? 'listed' : 'unlisted',
     thumbnail: normalizeText(record.thumbnail) || null,
