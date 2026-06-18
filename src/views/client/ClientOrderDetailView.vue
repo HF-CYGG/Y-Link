@@ -5,10 +5,7 @@
  * 实现逻辑：
  * - 详情页加载成功后会同步刷新订单摘要缓存，方便返回列表页时立即看到最新状态；
  * - 订单 Store 初始化按当前客户端账号执行，避免共享终端切换账号后把旧订单摘要带入新账号上下文。
- * 维护说明：
- * - 正式出库单预览、打印和导出能力已拆为按需异步加载，调整相关流程时要优先守住详情页首开体积；
- * - 详情页同时承接二维码、退货申请和撤回操作，修改状态流转时需同步检查用户可见文案与按钮显隐是否仍一致；
- * - 页面里存在多组弹层临时状态与打印副作用清理逻辑，扩展低频能力时不要破坏卸载与关闭时的复位链路。
+ * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
  */
 
 
@@ -51,6 +48,7 @@ import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import ClientOrderEditDialog from '@/views/client/components/ClientOrderEditDialog.vue'
 import ClientOrderReturnDialog from '@/views/client/components/ClientOrderReturnDialog.vue'
 import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
+import { normalizeDiscountRateText, resolveO2oPriceView, type O2oPriceSource } from '@/utils/o2o-price'
 import {
   DEFAULT_VOUCHER_ORIENTATION,
   O2O_PREORDER_REMARK_MAX_LENGTH,
@@ -270,6 +268,48 @@ const bumpDetailRefreshNotice = () => {
 }
 
 /**
+ * 统一解析订单详情页价格展示：
+ * - O2O 订单明细在不同接口里可能返回 `originalPrice`、`discountedPrice`、`unitPrice`、`lineAmount` 等不同字段；
+ * - 页面展示与正式出库单适配都统一走这里，避免模板和计算属性各自拼价格导致口径不一致。
+ */
+type ClientOrderPriceSource = O2oPriceSource & {
+  qty?: number
+  lineAmount?: string | null
+  subTotal?: string | null
+}
+
+const resolveDiscountedUnitPrice = (item: ClientOrderPriceSource) => {
+  return resolveO2oPriceView(item).discountedPrice
+}
+
+const resolveOriginalPrice = (item: ClientOrderPriceSource) => {
+  return resolveO2oPriceView(item).originalPrice
+}
+
+const shouldShowDiscountMeta = (item: ClientOrderPriceSource) => {
+  return resolveO2oPriceView(item).isDiscounted
+}
+
+const formatDiscountRate = (discountRate: string | number | null | undefined) => {
+  const normalized = normalizeDiscountRateText(discountRate)
+  return `${normalized.replace(/\.0$/, '')}折`
+}
+
+const resolveLineAmount = (item: ClientOrderPriceSource) => {
+  const explicitLineAmount = item.lineAmount ?? item.subTotal
+  if (explicitLineAmount !== null && explicitLineAmount !== undefined && explicitLineAmount !== '') {
+    const parsed = Number(explicitLineAmount)
+    if (Number.isFinite(parsed)) {
+      return parsed.toFixed(2)
+    }
+  }
+
+  const unitPrice = Number(resolveDiscountedUnitPrice(item))
+  const qty = Math.max(0, Number(item.qty ?? 0))
+  return (Number.isFinite(unitPrice) ? unitPrice * qty : 0).toFixed(2)
+}
+
+/**
  * 订单详情到正式出库单模板的适配层：
  * - 客户端 O2O 订单结构与管理端出库单结构不同，这里统一映射为模板所需字段；
  * - 缺失字段提供安全兜底，确保任意订单状态都能稳定预览/打印。
@@ -306,8 +346,8 @@ const voucherOrder = computed<OrderDetailResult | null>(() => {
     deletedByDisplayName: null,
     createdAt: order.createdAt,
     items: items.map((item) => {
-      const unitPrice = toVoucherMoneyText(item.defaultPrice)
-      const subTotal = toVoucherMoneyText(item.subTotal ?? Number(unitPrice) * Number(item.qty ?? 0))
+      const unitPrice = toVoucherMoneyText(resolveDiscountedUnitPrice(item))
+      const subTotal = toVoucherMoneyText(resolveLineAmount(item))
       return {
         id: item.id,
         productId: item.productId,
@@ -391,7 +431,7 @@ const totalAmount = computed(() => {
     return 0
   }
   return detail.value.items.reduce((sum, item) => {
-    return sum + Math.max(0, Number(item.defaultPrice || 0)) * item.qty
+    return sum + Number(resolveLineAmount(item))
   }, 0)
 })
 
@@ -517,7 +557,7 @@ const editableOrderTotalQty = computed(() => {
 })
 
 const editableOrderTotalAmount = computed(() => {
-  return editOrderItems.value.reduce((sum, item) => sum + Math.max(0, Number(item.defaultPrice || 0)) * item.qty, 0)
+  return editOrderItems.value.reduce((sum, item) => sum + Number(resolveDiscountedUnitPrice(item)) * item.qty, 0)
 })
 
 const editableProductOptions = computed(() => {
@@ -559,6 +599,7 @@ const buildEditableItemsFromDetail = (nextDetail: O2oPreorderDetail, existingIte
   return nextDetail.items.map((item) => {
     const product = productMap.get(item.productId)
     const maxQty = product ? toEditableItemMaxQty(product, item.qty) : item.qty
+    const priceView = resolveO2oPriceView(item)
     const unavailableReason = product
       ? null
       : '当前商品已不在可售目录中，仅支持减少或删除原有数量'
@@ -567,7 +608,10 @@ const buildEditableItemsFromDetail = (nextDetail: O2oPreorderDetail, existingIte
       productId: item.productId,
       productCode: item.productCode,
       productName: item.productName,
-      defaultPrice: item.defaultPrice,
+      originalPrice: priceView.originalPrice,
+      discountRate: priceView.discountRate,
+      unitPrice: item.unitPrice ?? priceView.unitPrice,
+      defaultPrice: item.defaultPrice || priceView.unitPrice,
       qty: draftQty === undefined ? item.qty : Math.max(0, Math.min(maxQty, Math.floor(Number(draftQty ?? item.qty)))),
       originalQty: item.qty,
       maxQty,
@@ -700,13 +744,17 @@ const addEditProduct = () => {
     showAppWarning('该商品当前库存不足，暂不可加入订单')
     return
   }
+  const priceView = resolveO2oPriceView(product)
   editOrderItems.value = [
     ...editOrderItems.value,
     {
       productId: product.id,
       productCode: product.productCode,
       productName: product.productName,
-      defaultPrice: product.defaultPrice,
+      originalPrice: priceView.originalPrice,
+      discountRate: priceView.discountRate,
+      unitPrice: priceView.unitPrice,
+      defaultPrice: priceView.unitPrice,
       qty: 1,
       originalQty: 0,
       maxQty,
@@ -1535,7 +1583,12 @@ onBeforeUnmount(() => {
               <tbody class="divide-y divide-slate-100 bg-white text-slate-700">
                 <tr v-for="item in detail.items" :key="item.id">
                   <td class="px-4 py-3">{{ item.productName }}</td>
-                  <td class="px-4 py-3 text-right">¥{{ Number(item.defaultPrice || 0).toFixed(2) }}</td>
+                  <td class="px-4 py-3 text-right">
+                    <p class="font-semibold text-teal-600">¥{{ resolveDiscountedUnitPrice(item) }}</p>
+                    <p v-if="shouldShowDiscountMeta(item)" class="text-xs text-slate-400">
+                      原价 ¥{{ resolveOriginalPrice(item) }} · {{ formatDiscountRate(item.discountRate) }}
+                    </p>
+                  </td>
                   <td class="px-4 py-3 text-right font-medium">{{ item.qty }}</td>
                   <td v-if="shouldShowReturnSection" class="px-4 py-3 text-right text-amber-700">{{ item.returnedQty }}</td>
                   <td v-if="shouldShowReturnSection" class="px-4 py-3 text-right font-medium text-teal-700">{{ item.availableReturnQty }}</td>

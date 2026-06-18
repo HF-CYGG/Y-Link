@@ -1,10 +1,7 @@
 /**
  * 模块说明：src/router/index.ts
- * 文件职责：创建前端路由实例并统一收口管理端、客户端两套登录态守卫、默认跳转与路由预热调度。
- * 实现逻辑：
- * - 基于共享路由表创建 Router，并在守卫中按管理端/客户端分别校验当前会话与访问权限；
- * - 对未登录、会话可恢复、无权限等场景统一给出跳转策略，保证首屏进入和刷新恢复口径一致；
- * - 在路由解析完成后串联页面异步组件预热，减少高频相邻页切换时的白屏与等待。
+ * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
+ * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
  */
 
 import { createRouter, createWebHistory, type RouteLocationNormalized } from 'vue-router'
@@ -16,6 +13,7 @@ import { showPermissionDenied } from '@/utils/permission'
 import { hasRecoverableAdminSessionHint } from '@/utils/auth-storage'
 import { classifyRuntimeError } from '@/utils/runtime-error-guard'
 import { reportRuntimeError } from '@/utils/runtime-error-presenter'
+import { clearRouteError, reportGlobalAppError } from '@/utils/runtime-error-state'
 import pinia from '@/store/pinia'
 
 export const resolveDefaultManagementRedirect = (user?: Pick<UserSafeProfile, 'role'> | null) => {
@@ -236,6 +234,12 @@ router.beforeEach(async (to) => {
   const authStore = useAuthStore(pinia)
   const clientAuthStore = useClientAuthStore(pinia)
   const flags = resolveRouteGuardFlags(to)
+  if (flags.touchesClientAuth) {
+    clearRouteError('client')
+  }
+  if (flags.touchesManagementAuth || (!to.path.startsWith('/client') && !to.path.startsWith('/login'))) {
+    clearRouteError('management')
+  }
 
   logRouteTrace('beforeEach:start', {
     to: to.fullPath,
@@ -313,6 +317,7 @@ router.onError((error, to) => {
   })
 
   reportRuntimeError(`router:${to.fullPath}`, classification, error)
+  reportGlobalAppError(`router:${to.fullPath}`, classification, error)
 })
 
 export { resolveSafeRedirect }

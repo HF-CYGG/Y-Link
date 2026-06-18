@@ -15,12 +15,16 @@ import {
   getBrowserStorage,
   resolveUserScopedStorageKey,
 } from '@/utils/storage-user-scope'
+import { calculateDiscountedPriceText, normalizeDiscountRateText } from '@/utils/o2o-price'
 
 export interface ClientCartSnapshotItem {
   productId: string
   productCode: string
   productName: string
   defaultPrice: string
+  originalPrice: string
+  discountRate: string
+  discountedPrice: string
   thumbnail: string | null
   limitPerUser: number
   availableStock: number
@@ -68,7 +72,10 @@ const normalizeSnapshotItems = (items: unknown): ClientCartSnapshotItem[] => {
       const productId = typeof row.productId === 'string' ? row.productId : ''
       const productCode = typeof row.productCode === 'string' ? row.productCode : ''
       const productName = typeof row.productName === 'string' ? row.productName : ''
-      const defaultPrice = normalizePrice(row.defaultPrice)
+      const originalPrice = normalizePrice(row.originalPrice ?? row.defaultPrice)
+      const discountRate = normalizeDiscountRateText(row.discountRate as string | number | null | undefined)
+      const discountedPrice = normalizePrice(row.discountedPrice ?? calculateDiscountedPriceText(originalPrice, discountRate))
+      const defaultPrice = discountedPrice
       const thumbnail = typeof row.thumbnail === 'string' ? row.thumbnail : null
       const limitPerUser = Number.isFinite(row.limitPerUser) ? Number(row.limitPerUser) : 0
       const availableStock = Number.isFinite(row.availableStock) ? Number(row.availableStock) : 0
@@ -85,6 +92,9 @@ const normalizeSnapshotItems = (items: unknown): ClientCartSnapshotItem[] => {
         productCode,
         productName,
         defaultPrice,
+        originalPrice,
+        discountRate,
+        discountedPrice,
         thumbnail,
         limitPerUser: Math.max(0, Math.floor(limitPerUser)),
         availableStock: Math.max(0, Math.floor(availableStock)),

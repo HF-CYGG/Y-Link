@@ -170,6 +170,7 @@ const serialForm = reactive<{
     limitQty: number
     clientPreorderUpdateLimit: number
     storeBusinessHoursText: string
+    mallAnnouncementText: string
   }
   customerService: {
     workdayStart: string
@@ -200,6 +201,7 @@ const serialForm = reactive<{
     // 客户端改单次数上限默认值，与后端默认配置保持一致，避免页面首屏空值。
     clientPreorderUpdateLimit: 3,
     storeBusinessHoursText: '10:00 - 22:00',
+    mallAnnouncementText: '库存实时刷新，请以下单结果为准',
   },
   customerService: {
     workdayStart: '10:00',
@@ -406,6 +408,7 @@ const snapshotForm = () =>
       limitQty: Number(serialForm.o2o.limitQty),
       clientPreorderUpdateLimit: Number(serialForm.o2o.clientPreorderUpdateLimit),
       storeBusinessHoursText: serialForm.o2o.storeBusinessHoursText.trim(),
+      mallAnnouncementText: serialForm.o2o.mallAnnouncementText.trim(),
     },
     customerService: {
       workdayStart: serialForm.customerService.workdayStart,
@@ -570,6 +573,7 @@ const applyO2oRules = (config: O2oRuleConfigRecord) => {
   serialForm.o2o.limitQty = config.limitQty
   serialForm.o2o.clientPreorderUpdateLimit = config.clientPreorderUpdateLimit
   serialForm.o2o.storeBusinessHoursText = config.storeBusinessHoursText
+  serialForm.o2o.mallAnnouncementText = config.mallAnnouncementText
 }
 
 const applyCustomerServiceConfigs = (config: CustomerServiceConfigRecord) => {
@@ -1301,6 +1305,7 @@ const handleSubmit = async () => {
       limitQty: Number(serialForm.o2o.limitQty),
       clientPreorderUpdateLimit: Number(serialForm.o2o.clientPreorderUpdateLimit),
       storeBusinessHoursText: serialForm.o2o.storeBusinessHoursText.trim(),
+      mallAnnouncementText: serialForm.o2o.mallAnnouncementText.trim(),
     })
     const customerServiceResult = await updateCustomerServiceConfigs({
       enabled: currentCustomerServiceConfig.enabled,

@@ -11,7 +11,7 @@ import { computed, nextTick, onBeforeUnmount, onDeactivated, onMounted, reactive
 import { useRoute } from 'vue-router'
 
 import { ArrowDown, ArrowRight, Search, ShoppingCart } from '@element-plus/icons-vue'
-import { getO2oMallProducts, type O2oMallProduct } from '@/api/modules/o2o'
+import { getO2oMallProducts, getO2oMallStorefront, type O2oMallProduct } from '@/api/modules/o2o'
 import { BaseRequestState } from '@/components/common'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useClientAuthStore, useClientCartStore, useClientCatalogStore } from '@/store'
@@ -19,6 +19,7 @@ import pinia from '@/store/pinia'
 import { normalizeRequestError } from '@/utils/error'
 import { useDevice } from '@/composables/useDevice'
 import { resolveProductPlaceholder } from '@/utils/product-placeholder'
+import { resolveO2oPriceView } from '@/utils/o2o-price'
 
 import ClientCartView from './ClientCartView.vue'
 import ClientCheckoutView from './ClientCheckoutView.vue'
@@ -35,6 +36,13 @@ interface ProductCategoryGroup {
 interface ProductSearchEntry {
   product: O2oMallProduct
   searchText: string
+}
+
+type ProductSortMode = 'default' | 'recommended'
+
+interface ProductSortOption {
+  value: ProductSortMode
+  label: string
 }
 
 interface MallBrowseIndexSnapshot {
@@ -63,6 +71,10 @@ const activeCategoryKey = computed({
   get: () => clientCatalogStore.activeCategoryKey,
   set: (value: string) => clientCatalogStore.setActiveCategoryKey(value),
 })
+const sortMode = computed<ProductSortMode>({
+  get: () => clientCatalogStore.sortMode,
+  set: (value) => clientCatalogStore.setSortMode(value),
+})
 const detailVisible = ref(false)
 const detailQty = ref(1)
 const detailProduct = ref<O2oMallProduct | null>(null)
@@ -73,8 +85,10 @@ const settlePulsing = ref(false)
 const searchInputFocused = ref(false)
 const mobileSearchVisible = ref(false)
 const mobileSearchInputRef = ref<HTMLInputElement | null>(null)
+const sortModeAnimating = ref(false)
 const isMallRoute = computed(() => route.path.startsWith('/client/mall'))
 const shouldShowMobileSearchEntry = computed(() => isPhone.value && isMallRoute.value)
+const productCardElementMap = new Map<string, HTMLElement>()
 
 const listScrollerRef = ref<HTMLElement | null>(null)
 const sectionRefMap = reactive<Record<string, HTMLElement | null>>({})
@@ -102,6 +116,7 @@ clientCatalogStore.initialize(clientAuthStore.currentUser?.id)
 
 const products = computed(() => clientCatalogStore.products)
 const storeBusinessHoursText = computed(() => clientCatalogStore.storefront.businessHoursText || '10:00 - 22:00')
+const mallAnnouncementText = computed(() => clientCatalogStore.storefront.mallAnnouncementText?.trim() ?? '')
 const normalizedKeyword = computed(() => keyword.value.trim().toLowerCase())
 const hasKeyword = computed(() => normalizedKeyword.value.length > 0)
 const hasRenderableProducts = computed(() => products.value.length > 0)
@@ -111,6 +126,48 @@ const blockingRequestError = computed(() => {
 const passiveRefreshErrorMessage = computed(() => {
   return hasRenderableProducts.value ? requestError.value?.message ?? '' : ''
 })
+
+const productSortOptions: ProductSortOption[] = [
+  { value: 'default', label: '默认' },
+  { value: 'recommended', label: '推荐' },
+]
+
+const resolveSoldQty = (product: Pick<O2oMallProduct, 'soldQty'>) => {
+  return Math.max(0, Math.floor(Number(product.soldQty ?? 0)))
+}
+
+const resolveRecommendedSortBucket = (product: O2oMallProduct) => {
+  if (resolveSoldQty(product) > 0) {
+    return 0
+  }
+  return product.o2oRecommended ? 1 : 2
+}
+
+const originalProductIndexMap = computed(() => {
+  return new Map(products.value.map((product, index) => [String(product.id), index]))
+})
+
+const sortProductsForDisplay = (items: O2oMallProduct[]) => {
+  if (sortMode.value !== 'recommended') {
+    return items
+  }
+  const indexMap = originalProductIndexMap.value
+  return [...items].sort((prev, next) => {
+    const prevBucket = resolveRecommendedSortBucket(prev)
+    const nextBucket = resolveRecommendedSortBucket(next)
+    const bucketDiff = prevBucket - nextBucket
+    if (bucketDiff !== 0) {
+      return bucketDiff
+    }
+    if (prevBucket === 0) {
+      const soldDiff = resolveSoldQty(next) - resolveSoldQty(prev)
+      if (soldDiff !== 0) {
+        return soldDiff
+      }
+    }
+    return (indexMap.get(String(prev.id)) ?? 0) - (indexMap.get(String(next.id)) ?? 0)
+  })
+}
 
 const classifyProduct = (product: O2oMallProduct) => {
   return product.tags && product.tags.length > 0 ? product.tags : ['默认标签']
@@ -156,7 +213,12 @@ const mallBrowseIndex = computed<MallBrowseIndexSnapshot>(() => {
     })
   })
 
-  const categoryGroups = [...groupMap.values()].sort((prev, next) => prev.label.localeCompare(next.label, 'zh-Hans-CN'))
+  const categoryGroups = [...groupMap.values()]
+    .map((group) => ({
+      ...group,
+      items: sortProductsForDisplay(group.items),
+    }))
+    .sort((prev, next) => prev.label.localeCompare(next.label, 'zh-Hans-CN'))
   return {
     categoryGroups,
     categoryOptions: [{ key: 'all', label: '全部', count: products.value.length }].concat(
@@ -178,6 +240,8 @@ const categoryGroups = computed(() => mallBrowseIndex.value.categoryGroups)
 const categoryOptions = computed(() => mallBrowseIndex.value.categoryOptions)
 const searchMode = computed(() => hasKeyword.value)
 const largeDatasetMode = computed(() => products.value.length > 100)
+const useRecommendedAllProductFlow = computed(() => sortMode.value === 'recommended' && activeCategoryKey.value === 'all' && !largeDatasetMode.value)
+const recommendedAllProducts = computed(() => sortProductsForDisplay(products.value))
 
 const searchResults = computed(() => {
   if (!normalizedKeyword.value) {
@@ -190,7 +254,7 @@ const searchResults = computed(() => {
       matchedProducts.push(entry.product)
     }
   })
-  return matchedProducts
+  return sortProductsForDisplay(matchedProducts)
 })
 
 const bottomSelectedQty = computed(() => clientCartStore.totalQty)
@@ -203,7 +267,7 @@ const miniCartTotalAmount = computed(() => {
 })
 const activeCategoryItems = computed(() => {
   if (activeCategoryKey.value === 'all') {
-    return products.value
+    return sortProductsForDisplay(products.value)
   }
   return mallBrowseIndex.value.categoryItemMap.get(activeCategoryKey.value) ?? []
 })
@@ -286,6 +350,15 @@ const warmupProductImages = (items: O2oMallProduct[]) => {
   globalThis.window.setTimeout(warmup, DEFAULT_PRODUCT_IMAGE_WARMUP_DELAY_MS)
 }
 
+const refreshStorefrontConfig = async () => {
+  try {
+    const storefront = await getO2oMallStorefront()
+    clientCatalogStore.setStorefront(storefront)
+  } catch (error) {
+    console.warn('刷新客户端商城公告配置失败，继续使用本地缓存', error)
+  }
+}
+
 watch(
   () => clientAuthStore.currentUser?.id,
   (nextClientUserId) => {
@@ -299,6 +372,7 @@ const loadProducts = async (force = false) => {
   // 这样从订单页返回商城页时可以“秒开”，同时避免旧库存继续污染购物车状态。
   if (!force && clientCatalogStore.products.length > 0 && clientCatalogStore.isFresh) {
     requestError.value = null
+    await refreshStorefrontConfig()
     clientCartStore.syncWithCatalog(clientCatalogStore.products)
     warmupProductImages(clientCatalogStore.products)
     return
@@ -359,6 +433,79 @@ const openMobileSearch = async () => {
 
 const closeMobileSearch = () => {
   mobileSearchVisible.value = false
+}
+
+const setProductCardRef = (productId: string | number, element: unknown) => {
+  const normalizedProductId = String(productId)
+  if (element instanceof HTMLElement) {
+    productCardElementMap.set(normalizedProductId, element)
+    return
+  }
+  productCardElementMap.delete(normalizedProductId)
+}
+
+const captureProductCardRects = () => {
+  const rectMap = new Map<string, DOMRect>()
+  productCardElementMap.forEach((element, productId) => {
+    rectMap.set(productId, element.getBoundingClientRect())
+  })
+  return rectMap
+}
+
+const animateProductCardReorder = (previousRects: Map<string, DOMRect>) => {
+  const viewportWidth = globalThis.window?.innerWidth ?? 1280
+  if (globalThis.window?.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+    return 0
+  }
+  const duration = isPhone.value ? 190 : viewportWidth < 1024 ? 240 : 300
+  const maxPhoneDistance = isPhone.value ? Math.max(240, (globalThis.window?.innerHeight ?? 480) * 0.72) : Number.POSITIVE_INFINITY
+  productCardElementMap.forEach((element, productId) => {
+    const previousRect = previousRects.get(productId)
+    if (!previousRect) {
+      return
+    }
+    const currentRect = element.getBoundingClientRect()
+    const deltaX = previousRect.left - currentRect.left
+    const deltaY = previousRect.top - currentRect.top
+    const distance = Math.hypot(deltaX, deltaY)
+    if (distance < 1) {
+      return
+    }
+    const firstFrame = distance > maxPhoneDistance
+      ? { opacity: 0.78, transform: 'translateY(8px)' }
+      : { opacity: 0.92, transform: `translate(${deltaX}px, ${deltaY}px)` }
+    element.animate(
+      [
+        firstFrame,
+        { opacity: 1, transform: 'translate(0, 0)' },
+      ],
+      {
+        duration,
+        easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+      },
+    )
+  })
+  return duration
+}
+
+const handleSortModeChange = async (nextMode: ProductSortMode) => {
+  if (sortMode.value === nextMode || sortModeAnimating.value) {
+    return
+  }
+  const previousRects = captureProductCardRects()
+  sortModeAnimating.value = true
+  sortMode.value = nextMode
+  await nextTick()
+  try {
+    const animationDuration = animateProductCardReorder(previousRects)
+    if (animationDuration > 0) {
+      await new Promise((resolve) => globalThis.window.setTimeout(resolve, animationDuration))
+    }
+  } finally {
+    sortModeAnimating.value = false
+    await nextTick()
+    handleProductListScroll()
+  }
 }
 
 const changeDetailQty = (delta: number) => {
@@ -613,7 +760,7 @@ const handleProductListScroll = () => {
 }
 
 const isCategorySyncTemporarilyBlocked = () => {
-  return searchMode.value || largeDatasetMode.value || scrollingByCategoryClick.value
+  return searchMode.value || largeDatasetMode.value || useRecommendedAllProductFlow.value || scrollingByCategoryClick.value
 }
 
 const getPendingLockedCategory = (scroller: HTMLElement): string | 'target-hit' | null => {
@@ -784,9 +931,9 @@ onBeforeUnmount(() => {
           <p class="mall-hero-card__title mt-1 text-xl font-semibold text-slate-900">商城</p>
           <p class="mall-hero-card__desc mt-1 text-sm text-slate-500">浏览标签、查看库存并快速加入购物车</p>
         </div>
-        <output v-else class="mall-hero-card__compact-banner" aria-live="polite">
+        <output v-else-if="mallAnnouncementText" class="mall-hero-card__compact-banner" aria-live="polite">
           <span class="mall-hero-card__compact-badge">公告</span>
-          <p class="mall-hero-card__compact-text">库存实时刷新，请以下单结果为准</p>
+          <p class="mall-hero-card__compact-text">{{ mallAnnouncementText }}</p>
         </output>
         <button
           type="button"
@@ -800,7 +947,7 @@ onBeforeUnmount(() => {
       <div v-if="!isPhone" class="mall-hero-card__meta-grid mt-4 grid gap-3 sm:grid-cols-3">
         <div class="mall-hero-card__meta-item rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700">营业时间：{{ storeBusinessHoursText }}</div>
         <div class="mall-hero-card__meta-item rounded-2xl bg-[var(--ylink-color-surface-muted)] px-3 py-3 text-sm text-slate-700">提货须知：请在订单有效期内到店核销</div>
-        <div class="mall-hero-card__meta-item mall-hero-card__meta-item--notice rounded-2xl bg-amber-50 px-3 py-3 text-sm text-amber-700">公告：库存实时刷新，请以下单结果为准</div>
+        <div v-if="mallAnnouncementText" class="mall-hero-card__meta-item mall-hero-card__meta-item--notice rounded-2xl bg-amber-50 px-3 py-3 text-sm text-amber-700">公告：{{ mallAnnouncementText }}</div>
       </div>
       <div
         v-if="passiveRefreshErrorMessage"
@@ -837,10 +984,27 @@ onBeforeUnmount(() => {
       @retry="keyword = ''"
     />
 
-    <section
-      v-else-if="searchMode"
-      class="mall-search-results space-y-3 rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-4 shadow-[var(--ylink-shadow-soft)]"
-    >
+    <template v-else>
+      <div v-if="searchMode" class="mall-sort-row">
+        <div class="mall-sort-control" :class="{ 'is-animating': sortModeAnimating }" role="group" aria-label="商品排序">
+          <button
+            v-for="option in productSortOptions"
+            :key="option.value"
+            type="button"
+            class="mall-sort-control__button"
+            :class="{ 'is-active': sortMode === option.value }"
+            :disabled="sortModeAnimating"
+            @click="handleSortModeChange(option.value)"
+          >
+            {{ option.label }}
+          </button>
+        </div>
+      </div>
+
+      <section
+        v-if="searchMode"
+        class="mall-search-results space-y-3 rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-4 shadow-[var(--ylink-shadow-soft)]"
+      >
       <div class="mall-search-launcher-wrap mall-search-launcher-wrap--inside">
         <div class="mall-search-toolbar mall-search-toolbar--minimal" :class="{ 'is-focused': searchInputFocused }">
           <span class="mall-search-launcher__icon">
@@ -865,11 +1029,16 @@ onBeforeUnmount(() => {
           </button>
         </div>
       </div>
-      <header class="flex items-center justify-between">
+      <header class="flex items-center justify-between gap-3">
         <p class="text-sm font-semibold text-slate-700">搜索结果 {{ searchResults.length }} 条</p>
       </header>
       <div class="client-product-grid mall-product-grid">
-        <article v-for="product in searchResults" :key="product.id" class="client-product-card">
+        <article
+          v-for="product in searchResults"
+          :key="product.id"
+          :ref="(el) => setProductCardRef(`search:${product.id}`, el)"
+          class="client-product-card"
+        >
           <button type="button" class="client-product-card__image-button" @click="openProductImagePreview(product)">
             <img
               :src="resolveProductThumbnail(product)"
@@ -882,7 +1051,10 @@ onBeforeUnmount(() => {
           <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
             <div class="client-product-card__content">
               <p class="client-product-card__name">{{ product.productName }}</p>
-              <p class="client-product-card__price">¥{{ Number(product.defaultPrice).toFixed(2) }}</p>
+              <p class="client-product-card__price">¥{{ Number(resolveO2oPriceView(product).discountedPrice).toFixed(2) }}</p>
+              <p v-if="resolveO2oPriceView(product).isDiscounted" class="client-product-card__price-extra">
+                原价 ¥{{ Number(resolveO2oPriceView(product).originalPrice).toFixed(2) }} · {{ resolveO2oPriceView(product).discountLabel }}
+              </p>
               <p v-if="product.detailContent" class="client-product-card__desc">{{ product.detailContent }}</p>
               <div class="client-product-card__meta">
                 <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">
@@ -890,6 +1062,9 @@ onBeforeUnmount(() => {
                 </span>
                 <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">
                   已预订 {{ product.preOrderedStock }}
+                </span>
+                <span class="rounded-full bg-slate-100 px-2 py-1 text-slate-600">
+                  已售 {{ resolveSoldQty(product) }}
                 </span>
               </div>
             </div>
@@ -924,6 +1099,21 @@ onBeforeUnmount(() => {
           </button>
         </div>
       </div>
+      <div class="mall-sort-row mall-sort-row--category">
+        <div class="mall-sort-control" :class="{ 'is-animating': sortModeAnimating }" role="group" aria-label="商品排序">
+          <button
+            v-for="option in productSortOptions"
+            :key="option.value"
+            type="button"
+            class="mall-sort-control__button"
+            :class="{ 'is-active': sortMode === option.value }"
+            :disabled="sortModeAnimating"
+            @click="handleSortModeChange(option.value)"
+          >
+            {{ option.label }}
+          </button>
+        </div>
+      </div>
       <aside class="mall-browse-categories overflow-y-auto pr-1 sm:pr-2 hide-scrollbar">
         <button
           v-for="category in categoryOptions"
@@ -940,7 +1130,12 @@ onBeforeUnmount(() => {
 
       <div v-if="largeDatasetMode" class="mall-browse-list mall-browse-list--virtual overflow-y-auto pr-1" v-bind="virtualContainerProps">
         <div v-bind="virtualWrapperProps" class="client-product-grid mall-product-grid mall-virtual-wrapper">
-          <article v-for="row in virtualRows" :key="row.index" class="client-product-card mb-2">
+          <article
+            v-for="row in virtualRows"
+            :key="row.data.id"
+            :ref="(el) => setProductCardRef(`virtual:${row.data.id}`, el)"
+            class="client-product-card mb-2"
+          >
             <button type="button" class="client-product-card__image-button" @click="openProductImagePreview(row.data)">
               <img
                 :src="resolveProductThumbnail(row.data)"
@@ -953,11 +1148,15 @@ onBeforeUnmount(() => {
             <button type="button" class="client-product-card__body" @click="openProductDetail(row.data)">
               <div class="client-product-card__content">
                 <p class="client-product-card__name">{{ row.data.productName }}</p>
-                <p class="client-product-card__price">¥{{ Number(row.data.defaultPrice).toFixed(2) }}</p>
+                <p class="client-product-card__price">¥{{ Number(resolveO2oPriceView(row.data).discountedPrice).toFixed(2) }}</p>
+                <p v-if="resolveO2oPriceView(row.data).isDiscounted" class="client-product-card__price-extra">
+                  原价 ¥{{ Number(resolveO2oPriceView(row.data).originalPrice).toFixed(2) }} · {{ resolveO2oPriceView(row.data).discountLabel }}
+                </p>
                 <p v-if="row.data.detailContent" class="client-product-card__desc">{{ row.data.detailContent }}</p>
                 <div class="client-product-card__meta">
                   <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ row.data.availableStock }}</span>
                   <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">已预订 {{ row.data.preOrderedStock }}</span>
+                  <span class="rounded-full bg-slate-100 px-2 py-1 text-slate-600">已售 {{ resolveSoldQty(row.data) }}</span>
                 </div>
               </div>
             </button>
@@ -974,17 +1173,17 @@ onBeforeUnmount(() => {
         @wheel.passive="handleCategoryManualInterrupt"
         @touchstart.passive="handleCategoryManualInterrupt"
       >
-        <section
-          v-for="group in categoryGroups"
-          :key="group.key"
-          :ref="(el) => setSectionRef(group.key, el)"
-          class="mall-category-section mb-4"
-        >
+        <section v-if="useRecommendedAllProductFlow" class="mall-category-section mb-4">
           <header class="mall-category-section__header sticky top-0 z-10 mb-2 rounded-lg bg-white/95 px-1 py-1.5 text-sm font-semibold text-slate-700 backdrop-blur-sm">
-            {{ group.label }}
+            推荐排序
           </header>
           <div class="client-product-grid mall-product-grid">
-            <article v-for="product in group.items" :key="product.id" class="client-product-card">
+            <article
+              v-for="product in recommendedAllProducts"
+              :key="product.id"
+              :ref="(el) => setProductCardRef(`recommended:${product.id}`, el)"
+              class="client-product-card"
+            >
               <button type="button" class="client-product-card__image-button" @click="openProductImagePreview(product)">
                 <img
                   :src="resolveProductThumbnail(product)"
@@ -997,11 +1196,15 @@ onBeforeUnmount(() => {
               <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
                 <div class="client-product-card__content">
                   <p class="client-product-card__name">{{ product.productName }}</p>
-                  <p class="client-product-card__price">¥{{ Number(product.defaultPrice).toFixed(2) }}</p>
+                  <p class="client-product-card__price">¥{{ Number(resolveO2oPriceView(product).discountedPrice).toFixed(2) }}</p>
+                  <p v-if="resolveO2oPriceView(product).isDiscounted" class="client-product-card__price-extra">
+                    原价 ¥{{ Number(resolveO2oPriceView(product).originalPrice).toFixed(2) }} · {{ resolveO2oPriceView(product).discountLabel }}
+                  </p>
                   <p v-if="product.detailContent" class="client-product-card__desc">{{ product.detailContent }}</p>
                   <div class="client-product-card__meta">
                     <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ product.availableStock }}</span>
                     <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">已预订 {{ product.preOrderedStock }}</span>
+                    <span class="rounded-full bg-slate-100 px-2 py-1 text-slate-600">已售 {{ resolveSoldQty(product) }}</span>
                   </div>
                 </div>
               </button>
@@ -1009,9 +1212,56 @@ onBeforeUnmount(() => {
             </article>
           </div>
         </section>
+        <template v-else>
+          <section
+            v-for="group in categoryGroups"
+            :key="group.key"
+            :ref="(el) => setSectionRef(group.key, el)"
+            class="mall-category-section mb-4"
+          >
+            <header class="mall-category-section__header sticky top-0 z-10 mb-2 rounded-lg bg-white/95 px-1 py-1.5 text-sm font-semibold text-slate-700 backdrop-blur-sm">
+              {{ group.label }}
+            </header>
+            <div class="client-product-grid mall-product-grid">
+              <article
+                v-for="product in group.items"
+                :key="product.id"
+                :ref="(el) => setProductCardRef(`${group.key}:${product.id}`, el)"
+                class="client-product-card"
+              >
+                <button type="button" class="client-product-card__image-button" @click="openProductImagePreview(product)">
+                  <img
+                    :src="resolveProductThumbnail(product)"
+                    :alt="product.productName"
+                    class="client-product-card__cover"
+                    loading="lazy"
+                    decoding="async"
+                  />
+                </button>
+                <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
+                  <div class="client-product-card__content">
+                    <p class="client-product-card__name">{{ product.productName }}</p>
+                    <p class="client-product-card__price">¥{{ Number(resolveO2oPriceView(product).discountedPrice).toFixed(2) }}</p>
+                    <p v-if="resolveO2oPriceView(product).isDiscounted" class="client-product-card__price-extra">
+                      原价 ¥{{ Number(resolveO2oPriceView(product).originalPrice).toFixed(2) }} · {{ resolveO2oPriceView(product).discountLabel }}
+                    </p>
+                    <p v-if="product.detailContent" class="client-product-card__desc">{{ product.detailContent }}</p>
+                    <div class="client-product-card__meta">
+                      <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ product.availableStock }}</span>
+                      <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">已预订 {{ product.preOrderedStock }}</span>
+                      <span class="rounded-full bg-slate-100 px-2 py-1 text-slate-600">已售 {{ resolveSoldQty(product) }}</span>
+                    </div>
+                  </div>
+                </button>
+                <button type="button" class="client-product-card__add-button" @click="quickAdd(product)">+ 加购</button>
+              </article>
+            </div>
+          </section>
+        </template>
         <div class="mall-category-bottom-spacer" :style="{ height: `${listViewportBottomSpacer}px` }" aria-hidden="true"></div>
       </div>
     </section>
+    </template>
 
     <div class="mini-cart-backdrop" :class="{ 'is-expanded': miniCartVisible }" @click="miniCartVisible = false"></div>
     <div class="mini-cart-wrapper" :class="{ 'is-expanded': miniCartVisible }">
@@ -1052,7 +1302,10 @@ onBeforeUnmount(() => {
               <article v-for="item in clientCartStore.items" :key="`mini-${item.productId}`" class="cart-item">
                 <div class="item-main">
                   <p class="item-name">{{ item.productName }}</p>
-                  <p class="item-price">¥{{ Number(item.defaultPrice).toFixed(2) }}</p>
+                  <p class="item-price">¥{{ Number(resolveO2oPriceView(item).discountedPrice).toFixed(2) }}</p>
+                  <p v-if="resolveO2oPriceView(item).isDiscounted" class="client-product-card__price-extra">
+                    原价 ¥{{ Number(resolveO2oPriceView(item).originalPrice).toFixed(2) }} · {{ resolveO2oPriceView(item).discountLabel }}
+                  </p>
                 </div>
                 <div class="item-stepper">
                   <button type="button" class="step-btn" @click="clientCartStore.incrementQty(item.productId, -1)">-</button>
@@ -1102,11 +1355,15 @@ onBeforeUnmount(() => {
         </button>
         <div class="space-y-2 flex-shrink-0">
           <p class="text-lg font-semibold text-slate-900">{{ detailProduct.productName }}</p>
-          <p class="text-sm font-bold text-[var(--ylink-color-primary-strong)]">¥{{ Number(detailProduct.defaultPrice).toFixed(2) }}</p>
+          <p class="text-sm font-bold text-[var(--ylink-color-primary-strong)]">¥{{ Number(resolveO2oPriceView(detailProduct).discountedPrice).toFixed(2) }}</p>
+          <p v-if="resolveO2oPriceView(detailProduct).isDiscounted" class="client-product-card__price-extra">
+            原价 ¥{{ Number(resolveO2oPriceView(detailProduct).originalPrice).toFixed(2) }} · {{ resolveO2oPriceView(detailProduct).discountLabel }}
+          </p>
           <p class="text-sm text-slate-500">{{ detailProduct.detailContent || '暂无商品描述' }}</p>
           <div class="flex flex-wrap gap-2 text-xs">
             <span class="rounded-full bg-emerald-50 px-3 py-1 text-emerald-600">可预订 {{ detailProduct.availableStock }}</span>
             <span class="rounded-full bg-amber-50 px-3 py-1 text-amber-600">已预订 {{ detailProduct.preOrderedStock }}</span>
+            <span class="rounded-full bg-slate-100 px-3 py-1 text-slate-600">已售 {{ resolveSoldQty(detailProduct) }}</span>
             <span class="rounded-full bg-slate-100 px-3 py-1 text-slate-600">限购 {{ detailProduct.limitPerUser }}</span>
           </div>
         </div>
@@ -1214,6 +1471,16 @@ onBeforeUnmount(() => {
   max-height: clamp(18rem, calc(100dvh - var(--mall-floating-bottom-clearance) - 13.5rem), 42rem);
 }
 
+.mall-browse-categories {
+  grid-column: 1;
+  grid-row: 2;
+}
+
+.mall-browse-list {
+  grid-column: 2;
+  grid-row: 2;
+}
+
 .mall-product-grid {
   align-content: start;
 }
@@ -1302,6 +1569,13 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
   gap: 0.35rem;
   font-size: 0.75rem;
+}
+
+.client-product-card__price-extra {
+  margin-top: 0.1rem;
+  color: #94a3b8;
+  font-size: 0.76rem;
+  line-height: 1.25;
 }
 
 .client-product-card__cover {
@@ -1469,8 +1743,74 @@ onBeforeUnmount(() => {
 }
 
 .mall-search-launcher-wrap--browse {
-  grid-column: 1 / -1;
+  grid-column: 2;
+  grid-row: 1;
   margin-bottom: 0.15rem;
+}
+
+.mall-sort-row {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  margin-top: -0.1rem;
+  margin-bottom: 0.1rem;
+}
+
+.mall-sort-row--category {
+  grid-column: 1;
+  grid-row: 1;
+  align-self: center;
+  justify-content: flex-start;
+  margin: 0;
+}
+
+.mall-sort-control {
+  display: inline-flex;
+  max-width: 100%;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 0.18rem;
+  border: 1px solid rgba(203, 213, 225, 0.9);
+  border-radius: 9999px;
+  background: rgba(248, 250, 252, 0.94);
+  padding: 0.18rem;
+  box-shadow: 0 6px 14px rgba(15, 23, 42, 0.05);
+}
+
+.mall-sort-control__button {
+  height: 1.85rem;
+  min-width: 3.15rem;
+  border: none;
+  border-radius: 9999px;
+  background: transparent;
+  color: #64748b;
+  font-size: 0.72rem;
+  font-weight: 700;
+  padding: 0 0.72rem;
+  transition:
+    background var(--ylink-motion-normal) var(--ylink-motion-ease),
+    color var(--ylink-motion-normal) var(--ylink-motion-ease),
+    transform var(--ylink-motion-fast) var(--ylink-motion-ease);
+}
+
+.mall-sort-control__button.is-active {
+  background: var(--ylink-color-primary-strong);
+  color: #ffffff;
+  box-shadow: 0 8px 16px rgba(13, 116, 109, 0.18);
+}
+
+.mall-sort-control__button:disabled {
+  cursor: wait;
+}
+
+.mall-sort-control__button:not(:disabled):active {
+  transform: scale(0.96);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mall-sort-control__button {
+    transition: none;
+  }
 }
 
 .mall-mobile-search-trigger {
@@ -2130,6 +2470,33 @@ onBeforeUnmount(() => {
 
   .mall-search-launcher-wrap--browse {
     margin-bottom: 0.05rem;
+  }
+
+  .mall-sort-row {
+    justify-content: flex-start;
+    margin-bottom: 0.05rem;
+  }
+
+  .mall-sort-control {
+    padding: 0.16rem;
+  }
+
+  .mall-sort-row--category .mall-sort-control {
+    width: 100%;
+    flex-direction: column;
+    border-radius: 0.9rem;
+  }
+
+  .mall-sort-control__button {
+    height: 1.72rem;
+    min-width: 2.85rem;
+    font-size: 0.68rem;
+    padding: 0 0.58rem;
+  }
+
+  .mall-sort-row--category .mall-sort-control__button {
+    width: 100%;
+    min-width: 0;
   }
 
   .mall-search-toolbar {

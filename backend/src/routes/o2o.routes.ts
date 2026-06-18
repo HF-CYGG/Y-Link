@@ -146,6 +146,15 @@ o2oRouter.get(
   }),
 )
 
+// 商城门店展示配置：用于客户端命中商品目录缓存时轻量刷新营业时间与公告，不强制重拉商品列表。
+o2oRouter.get(
+  '/mall/storefront',
+  asyncHandler(async (_req, res) => {
+    const data = await o2oPreorderService.getMallStorefrontConfig()
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
 // 提交预订单：必须走客户端独立鉴权，避免与后台管理鉴权体系混用。
 o2oRouter.post(
   '/mall/preorders',

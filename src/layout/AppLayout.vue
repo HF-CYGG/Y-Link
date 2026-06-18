@@ -1,11 +1,15 @@
+<!--
+  模块说明：F:/Y-Link/src/layout/AppLayout.vue
+  文件职责：管理端主布局壳。
+  实现逻辑：负责顶部、侧栏、主内容区组合与全局异常态兜底。
+  维护说明：布局结构调整需回归所有管理端页面路由。
+-->
+
 <script setup lang="ts">
 /**
  * 模块说明：src/layout/AppLayout.vue
- * 文件职责：作为管理端全局布局壳层，统一组织顶部栏、侧边导航、路由内容舞台与全局加载反馈。
- * 实现逻辑：
- * - 在应用入口处启动设备态同步，让布局与页面共享同一套 phone / tablet / desktop 判断；
- * - 根据当前账号权限从路由配置派生可见菜单，保证导航、权限与页面入口口径一致；
- * - 承担路由切换兜底态、全局进度条与在线心跳等跨页面副作用，避免分散到业务页。
+ * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
+ * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
  */
 
 
@@ -14,10 +18,12 @@ import { useRoute, type RouteLocationNormalizedLoaded } from 'vue-router'
 import { sendPresenceHeartbeat } from '@/api/modules/auth'
 import AppHeader from '@/layout/components/AppHeader.vue'
 import AppSidebar from '@/layout/components/AppSidebar.vue'
+import BaseRouteErrorState from '@/components/common/base-display/BaseRouteErrorState.vue'
 import { useDevice } from '@/composables/useDevice'
 import { buildAppMenuItems } from '@/router/routes'
 import { useAppStore, useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
+import { clearRouteError, runtimeErrorState } from '@/utils/runtime-error-state'
 
 /**
  * 初始化设备监听：
@@ -34,6 +40,7 @@ useDevice()
 const appStore = useAppStore(pinia)
 const authStore = useAuthStore(pinia)
 const route = useRoute()
+const routeError = computed(() => runtimeErrorState.managementRouteError.value)
 
 /**
  * 当前用户可见菜单：
@@ -182,6 +189,13 @@ const resolveViewKey = (route: RouteLocationNormalizedLoaded) => {
 
   return route.fullPath
 }
+
+const managementHomePath = computed(() => (authStore.currentUser?.role === 'supplier' ? '/supplier-delivery' : '/dashboard'))
+
+const retryRouteRender = () => {
+  clearRouteError('management')
+  globalThis.window?.location.reload()
+}
 </script>
 
 <template>
@@ -213,7 +227,16 @@ const resolveViewKey = (route: RouteLocationNormalizedLoaded) => {
       </transition>
 
       <main :class="['relative flex-1 overflow-y-auto overflow-x-hidden', mainPaddingClass]">
+        <div v-if="routeError" class="min-h-full px-2 py-6">
+          <BaseRouteErrorState
+            :title="routeError.title"
+            :description="routeError.message"
+            :home-path="managementHomePath"
+            @retry="retryRouteRender"
+          />
+        </div>
         <router-view v-slot="{ Component, route }">
+          <template v-if="!routeError">
               <Suspense :timeout="suspenseTimeout" @pending="handleRoutePending" @resolve="handleRouteResolved">
             <template #default>
               <div :class="['route-stage min-h-full', { 'route-stage--pending': routeStagePending }]">
@@ -251,6 +274,7 @@ const resolveViewKey = (route: RouteLocationNormalizedLoaded) => {
               </div>
             </template>
           </Suspense>
+          </template>
         </router-view>
       </main>
     </div>

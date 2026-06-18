@@ -33,6 +33,10 @@ export interface O2oMallProduct {
   productCode: string
   productName: string
   defaultPrice: string
+  originalPrice: string
+  discountRate: string
+  discountedPrice: string
+  o2oRecommended: boolean
   tags: string[]
   thumbnail: string | null
   detailContent: string | null
@@ -40,6 +44,7 @@ export interface O2oMallProduct {
   currentStock: number
   preOrderedStock: number
   availableStock: number
+  soldQty: number
 }
 
 /**
@@ -49,6 +54,7 @@ export interface O2oMallProduct {
  */
 export interface O2oMallStorefrontConfig {
   businessHoursText: string
+  mallAnnouncementText: string
 }
 
 /**
@@ -110,6 +116,11 @@ export interface O2oPreorderDetailItem {
   productCode: string
   productName: string
   defaultPrice: string
+  originalPrice: string
+  discountRate: string
+  discountedPrice: string
+  unitPrice?: string
+  lineAmount?: string
   qty: number
   returnedQty: number
   availableReturnQty: number
@@ -189,6 +200,7 @@ export interface O2oPreorderDetail {
     totalQty: number
     totalItemCount: number
   }
+  storefront?: O2oMallStorefrontConfig
   qrPayload: string
 }
 
@@ -310,6 +322,13 @@ export const getO2oMallProducts = (config?: RequestConfig) =>
   request<O2oMallProductsResult>({
     method: 'GET',
     url: '/o2o/mall/products',
+    ...config,
+  })
+
+export const getO2oMallStorefront = (config?: RequestConfig) =>
+  request<O2oMallStorefrontConfig>({
+    method: 'GET',
+    url: '/o2o/mall/storefront',
     ...config,
   })
 

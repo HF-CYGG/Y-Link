@@ -44,6 +44,7 @@ import {
   normalizeSubmitNumber,
   normalizeSubmitText,
 } from '@/utils/submit-feedback'
+import { calculateDiscountedPriceText, normalizeDiscountRateText } from '@/utils/o2o-price'
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 import {
   compareProductCode,
@@ -85,14 +86,23 @@ interface ProductForm {
   productName: string
   pinyinAbbr: string
   defaultPrice: number
+  discountRate: number
   currentStock: number
   isActive: boolean
   tagIds: string[]
 }
 
+type DiscountEditMode = 'rate' | 'price'
+
 const BATCH_CREATE_MAX_ROWS = 50
 const batchCreateRowSeed = ref(0)
 const batchCreateRows = ref<BatchCreateProductFormRow[]>([])
+const discountEditMode = ref<DiscountEditMode>('rate')
+
+const discountEditModeOptions = [
+  { label: '按折扣', value: 'rate' },
+  { label: '按折后价', value: 'price' },
+]
 
 /**
  * 产品表单模型：
@@ -105,6 +115,7 @@ const createDefaultForm = (): ProductForm => ({
   productName: '',
   pinyinAbbr: '',
   defaultPrice: 0,
+  discountRate: 10,
   currentStock: 0,
   isActive: true,
   tagIds: [] as string[],
@@ -125,6 +136,26 @@ const createBatchCreateFormRow = (): BatchCreateProductFormRow => {
  * - 默认按产品编码正序排列；
  * - 支持正序/倒序切换，移动端卡片与桌面表格共用同一排序结果。
  */
+const formatDiscountRateLabel = (value: string | number) => {
+  return `${normalizeDiscountRateText(value).replace(/\.0$/, '')}折`
+}
+
+const normalizeDiscountRateNumber = (value: unknown) => {
+  return Number(normalizeDiscountRateText(typeof value === 'number' ? value : Number(value)))
+}
+
+const resolveDiscountRateFromDiscountedPrice = (originalPrice: unknown, discountedPrice: unknown) => {
+  const original = normalizeSubmitNumber(originalPrice, { fallback: 0, min: 0 })
+  const discounted = normalizeSubmitNumber(discountedPrice, { fallback: original, min: 0 })
+
+  if (original <= 0) {
+    return 10
+  }
+
+  const rawRate = (discounted / original) * 10
+  return normalizeDiscountRateNumber(Math.round(rawRate * 10) / 10)
+}
+
 const displayProducts = computed(() => {
   const sortedProducts = [...products.value]
   sortedProducts.sort((prev, next) => {
@@ -154,6 +185,19 @@ const rules: FormRules = {
   ],
   productName: [{ required: true, message: '请输入产品名称', trigger: 'blur' }],
   defaultPrice: [{ required: true, message: '请输入默认售价', trigger: 'blur' }],
+  discountRate: [
+    {
+      validator: (_rule, value, callback) => {
+        const discountRate = Number(value)
+        if (!Number.isFinite(discountRate) || discountRate < 1 || discountRate > 10) {
+          callback(new Error('折扣必须在 1.0 到 10.0 折之间'))
+          return
+        }
+        callback()
+      },
+      trigger: ['blur', 'change'],
+    },
+  ],
 }
 
 /**
@@ -253,6 +297,7 @@ const buildEditForm = (row: ProductRecord): ProductForm => ({
   productName: row.productName,
   pinyinAbbr: row.pinyinAbbr,
   defaultPrice: Number(row.defaultPrice),
+  discountRate: Number(row.discountRate || 10),
   currentStock: Number(row.currentStock) || 0,
   isActive: row.isActive,
   tagIds: row.tagIds,
@@ -273,6 +318,11 @@ const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProdu
     fallback: 0,
     min: 0,
   })
+  const normalizedDiscountRate = normalizeDiscountRateNumber(normalizeSubmitNumber(currentForm.discountRate, {
+    fallback: 10,
+    min: 1,
+    max: 10,
+  }))
   const normalizedCurrentStock = normalizeSubmitNumber(currentForm.currentStock, {
     fallback: 0,
     min: 0,
@@ -286,6 +336,7 @@ const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProdu
     productName: normalizedProductName,
     pinyinAbbr: normalizedPinyinAbbr,
     defaultPrice: normalizedDefaultPrice,
+    discountRate: normalizedDiscountRate,
     currentStock: normalizedCurrentStock,
     isActive: currentForm.isActive,
     tagIds: resolvedTagIds,
@@ -364,6 +415,36 @@ const {
     }
     await reloadProducts()
   },
+})
+
+const discountRateOptions = computed(() => {
+  return Array.from({ length: 91 }, (_item, index) => {
+    const value = Math.round((10 - index * 0.1) * 10) / 10
+    const discountedPrice = calculateDiscountedPriceText(form.value.defaultPrice, value)
+    return {
+      label: `${formatDiscountRateLabel(value)} / ¥${discountedPrice}`,
+      value,
+    }
+  })
+})
+
+const discountedPricePreview = computed(() => {
+  return calculateDiscountedPriceText(form.value.defaultPrice, form.value.discountRate)
+})
+
+const discountedPriceInput = computed({
+  get: () => Number(discountedPricePreview.value),
+  set: (value: number) => {
+    form.value.discountRate = resolveDiscountRateFromDiscountedPrice(form.value.defaultPrice, value)
+  },
+})
+
+const minimumDiscountedPrice = computed(() => {
+  return Number(calculateDiscountedPriceText(form.value.defaultPrice, 1))
+})
+
+const maximumDiscountedPrice = computed(() => {
+  return Math.max(Number(form.value.defaultPrice) || 0, minimumDiscountedPrice.value)
 })
 
 const reloadProducts = async () => {
@@ -544,6 +625,11 @@ const handleBatchCreate = async () => {
           fallback: 0,
           min: 0,
         }),
+        discountRate: normalizeSubmitNumber(row.discountRate, {
+          fallback: 10,
+          min: 1,
+          max: 10,
+        }),
         currentStock: normalizeSubmitNumber(row.currentStock, {
           fallback: 0,
           min: 0,
@@ -676,6 +762,7 @@ onActivated(() => {
           :data="displayProducts"
           class="h-full w-full"
           stripe
+          border
           row-key="id"
           table-layout="auto"
           :default-sort="{ prop: 'productCode', order: 'ascending' }"
@@ -949,6 +1036,43 @@ onActivated(() => {
               placeholder="请输入售价"
             />
           </el-form-item>
+          <el-form-item label="折扣设置" prop="discountRate">
+            <div class="product-discount-editor">
+              <el-segmented
+                v-model="discountEditMode"
+                :options="discountEditModeOptions"
+                class="product-discount-editor__mode"
+              />
+              <el-select
+                v-if="discountEditMode === 'rate'"
+                v-model="form.discountRate"
+                filterable
+                class="w-full"
+                placeholder="请选择折扣"
+              >
+                <el-option
+                  v-for="option in discountRateOptions"
+                  :key="option.value"
+                  :label="option.label"
+                  :value="option.value"
+                />
+              </el-select>
+              <PassiveNumberInput
+                v-else
+                v-model="discountedPriceInput"
+                :min="minimumDiscountedPrice"
+                :max="maximumDiscountedPrice"
+                :precision="2"
+                :step="1"
+                class="w-full"
+                placeholder="请输入折后价格"
+                :disabled="Number(form.defaultPrice) <= 0"
+              />
+              <p class="product-discount-editor__hint">
+                当前折扣 {{ formatDiscountRateLabel(form.discountRate) }}，折后价 ¥{{ discountedPricePreview }}。折后价会按一位小数折扣反算保存。
+              </p>
+            </div>
+          </el-form-item>
           <el-form-item label="当前库存" prop="currentStock">
             <PassiveNumberInput
               v-model="form.currentStock"
@@ -992,5 +1116,24 @@ onActivated(() => {
 <style scoped>
 .mobile-product-card {
   transition: transform 0.25s ease, box-shadow 0.25s ease;
+}
+
+.product-discount-editor {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.product-discount-editor__mode {
+  align-self: flex-start;
+}
+
+.product-discount-editor__hint {
+  margin: 0;
+  color: rgb(100 116 139);
+  font-size: 12px;
+  line-height: 1.6;
 }
 </style>

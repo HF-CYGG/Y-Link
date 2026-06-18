@@ -20,6 +20,7 @@ import pinia from '@/store/pinia'
 
 
 import { showAppSuccess, showAppWarning } from '@/utils/app-alert'
+import { resolveO2oPriceView } from '@/utils/o2o-price'
 
 const props = defineProps<{
   standalone?: boolean
@@ -158,7 +159,10 @@ const handleBack = () => {
                   />
                   <div class="min-w-0">
                     <p class="truncate text-sm font-semibold text-slate-900">{{ item.productName }}</p>
-                    <p class="mt-1 text-sm font-bold text-teal-600">¥{{ Number(item.defaultPrice).toFixed(2) }}</p>
+                    <p class="mt-1 text-sm font-bold text-teal-600">¥{{ Number(resolveO2oPriceView(item).discountedPrice).toFixed(2) }}</p>
+                    <p v-if="resolveO2oPriceView(item).isDiscounted" class="mt-0.5 text-xs text-slate-400">
+                      原价 ¥{{ Number(resolveO2oPriceView(item).originalPrice).toFixed(2) }} · {{ resolveO2oPriceView(item).discountLabel }}
+                    </p>
                     <p class="text-xs text-slate-400 mt-1">可预订 {{ item.availableStock }} · 限购 {{ item.limitPerUser }}</p>
                   </div>
                 </div>

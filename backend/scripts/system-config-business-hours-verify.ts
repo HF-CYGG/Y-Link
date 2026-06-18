@@ -44,6 +44,7 @@ type O2oRulesPayload = {
   limitQty: number
   clientPreorderUpdateLimit: number
   storeBusinessHoursText: string
+  mallAnnouncementText: string
 }
 
 type CustomerServicePayload = {
@@ -68,7 +69,13 @@ type MallProductsPayload = {
   }>
   storefront: {
     businessHoursText: string
+    mallAnnouncementText: string
   }
+}
+
+type MallStorefrontPayload = {
+  businessHoursText: string
+  mallAnnouncementText: string
 }
 
 function pass(message: string) {
@@ -208,6 +215,7 @@ async function main() {
           limitQty: initialO2oRules.limitQty,
           clientPreorderUpdateLimit: initialO2oRules.clientPreorderUpdateLimit,
           storeBusinessHoursText: '09:30 - 21:30',
+          mallAnnouncementText: '配置联动验证公告',
         }),
       }),
       '更新 O2O 店铺营业时间配置',
@@ -215,12 +223,24 @@ async function main() {
     assert.equal(updatedO2oRules.config.storeBusinessHoursText, '09:30 - 21:30', '更新后店铺营业时间应立即返回新值')
     pass('管理员可更新 O2O 店铺营业时间配置')
 
+    assert.equal(updatedO2oRules.config.mallAnnouncementText, '配置联动验证公告', '更新后商城公告应立即返回新值')
+
     const updatedMallConfig = await expectJsonOkResponse<MallProductsPayload>(
       await fetch(`${baseUrl}/api/o2o/mall/products`),
       '读取客户端商城商品与门店信息',
     )
     assert.equal(updatedMallConfig.storefront.businessHoursText, '09:30 - 21:30', '客户端商城应返回最新店铺营业时间')
     pass('客户端商城接口可透出最新店铺营业时间')
+
+    assert.equal(updatedMallConfig.storefront.mallAnnouncementText, '配置联动验证公告', '客户端商城商品接口应返回最新商城公告')
+
+    const updatedStorefrontConfig = await expectJsonOkResponse<MallStorefrontPayload>(
+      await fetch(`${baseUrl}/api/o2o/mall/storefront`),
+      '读取客户端商城门店展示配置',
+    )
+    assert.equal(updatedStorefrontConfig.businessHoursText, '09:30 - 21:30', '客户端商城门店配置接口应返回最新店铺营业时间')
+    assert.equal(updatedStorefrontConfig.mallAnnouncementText, '配置联动验证公告', '客户端商城门店配置接口应返回最新商城公告')
+    pass('客户端商城门店配置接口可轻量透出最新公告')
 
     const currentCustomerService = await expectJsonOkResponse<CustomerServicePayload>(
       await fetch(`${baseUrl}/api/system-configs/customer-service`, {

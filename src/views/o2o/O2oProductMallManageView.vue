@@ -19,6 +19,7 @@ import { getTagList, type Tag } from '@/api/modules/tag'
 import { uploadImage } from '@/api/modules/upload'
  import { compressImageForUpload } from '@/utils/image-upload'
 import { resolveProductPlaceholder } from '@/utils/product-placeholder'
+import { calculateDiscountedPriceText, normalizeDiscountRateText, resolveO2oPriceView } from '@/utils/o2o-price'
 import {
   createProduct,
   getProductList,
@@ -38,13 +39,17 @@ type O2oProductFormState = {
   productCode: string
   productName: string
   defaultPrice: number
+  discountRate: number
   isActive: boolean
   o2oStatus: 'listed' | 'unlisted'
+  o2oRecommended: boolean
   thumbnail: string
   detailContent: string
   limitPerUser: number
   currentStock: number
 }
+
+type DiscountEditMode = 'rate' | 'price'
 
 const loading = ref(false)
 const submitting = ref(false)
@@ -75,8 +80,10 @@ const form = reactive<O2oProductFormState>({
   productCode: '',
   productName: '',
   defaultPrice: 0,
+  discountRate: 10,
   isActive: true,
   o2oStatus: 'listed',
+  o2oRecommended: false,
   thumbnail: '',
   detailContent: '',
   limitPerUser: 5,
@@ -88,6 +95,11 @@ const uploadingThumbnail = ref(false)
 const uploadProgress = ref(0)
 const uploadProgressVisible = ref(false)
 const thumbnailDragActive = ref(false)
+const discountEditMode = ref<DiscountEditMode>('rate')
+const discountEditModeOptions = [
+  { label: '按折扣', value: 'rate' },
+  { label: '按折后价', value: 'price' },
+]
 
 const configuredThumbnailUrl = computed(() => {
   return localPreviewUrl.value || form.thumbnail.trim()
@@ -138,6 +150,56 @@ const formatProductPrice = (price: string | number) => {
   return `¥${Number(price).toFixed(2)}`
 }
 
+const formatDiscountRateLabel = (value: string | number) => {
+  return `${normalizeDiscountRateText(value).replace(/\.0$/, '')}折`
+}
+
+const normalizeDiscountRateNumber = (value: unknown) => {
+  return Number(normalizeDiscountRateText(typeof value === 'number' ? value : Number(value)))
+}
+
+const resolveDiscountRateFromDiscountedPrice = (originalPrice: unknown, discountedPrice: unknown) => {
+  const original = Math.max(0, Number(originalPrice) || 0)
+  const discounted = Math.max(0, Number(discountedPrice) || 0)
+  if (original <= 0) {
+    return 10
+  }
+
+  const clampedDiscounted = Math.min(original, Math.max(original * 0.1, discounted))
+  const rawRate = (clampedDiscounted / original) * 10
+  return normalizeDiscountRateNumber(Math.round(rawRate * 10) / 10)
+}
+
+const discountRateOptions = computed(() => {
+  return Array.from({ length: 91 }, (_item, index) => {
+    const value = Math.round((10 - index * 0.1) * 10) / 10
+    const discountedPrice = calculateDiscountedPriceText(form.defaultPrice, value)
+    return {
+      label: `${formatDiscountRateLabel(value)} / ¥${discountedPrice}`,
+      value,
+    }
+  })
+})
+
+const discountedPricePreview = computed(() => {
+  return calculateDiscountedPriceText(form.defaultPrice, form.discountRate)
+})
+
+const discountedPriceInput = computed({
+  get: () => Number(discountedPricePreview.value),
+  set: (value: number) => {
+    form.discountRate = resolveDiscountRateFromDiscountedPrice(form.defaultPrice, value)
+  },
+})
+
+const minimumDiscountedPrice = computed(() => {
+  return Number(calculateDiscountedPriceText(form.defaultPrice, 1))
+})
+
+const maximumDiscountedPrice = computed(() => {
+  return Math.max(Number(form.defaultPrice) || 0, minimumDiscountedPrice.value)
+})
+
 watch(
   () => form.isActive,
   (isActive) => {
@@ -157,12 +219,15 @@ const resetForm = () => {
   form.productCode = ''
   form.productName = ''
   form.defaultPrice = 0
+  form.discountRate = 10
   form.isActive = true
   form.o2oStatus = 'listed'
+  form.o2oRecommended = false
   form.thumbnail = ''
   form.detailContent = ''
   form.limitPerUser = 5
   form.currentStock = 0
+  discountEditMode.value = 'rate'
 
   if (localPreviewUrl.value) {
     URL.revokeObjectURL(localPreviewUrl.value)
@@ -374,8 +439,10 @@ const openEditDialog = (product: ProductRecord) => {
   form.productCode = product.productCode
   form.productName = product.productName
   form.defaultPrice = Number(product.defaultPrice)
+  form.discountRate = Number(product.discountRate || 10)
   form.isActive = product.isActive
   form.o2oStatus = product.o2oStatus
+  form.o2oRecommended = product.o2oRecommended
   form.thumbnail = product.thumbnail ?? ''
   form.detailContent = product.detailContent ?? ''
   form.limitPerUser = product.limitPerUser
@@ -446,8 +513,10 @@ const handleSubmit = async () => {
         productCode: form.productCode.trim() || undefined,
         productName: form.productName.trim(),
         defaultPrice: Number(form.defaultPrice) || 0,
+        discountRate: Number(form.discountRate) || 10,
         isActive: form.isActive,
         o2oStatus: form.o2oStatus,
+        o2oRecommended: form.o2oRecommended,
         thumbnail: finalThumbnail,
         detailContent: form.detailContent.trim() || null,
         limitPerUser: Math.max(1, Math.floor(form.limitPerUser)),
@@ -459,8 +528,10 @@ const handleSubmit = async () => {
         productCode: form.productCode.trim() || undefined,
         productName: form.productName.trim(),
         defaultPrice: Number(form.defaultPrice) || 0,
+        discountRate: Number(form.discountRate) || 10,
         isActive: form.isActive,
         o2oStatus: form.o2oStatus,
+        o2oRecommended: form.o2oRecommended,
         thumbnail: finalThumbnail,
         detailContent: form.detailContent.trim() || null,
         limitPerUser: Math.max(1, Math.floor(form.limitPerUser)),
@@ -603,6 +674,9 @@ onMounted(async () => {
                   <el-tag :type="getMallStatusTagType(product)" size="small" effect="light">
                     {{ getMallStatusLabel(product) }}
                   </el-tag>
+                  <el-tag v-if="product.o2oRecommended" type="success" size="small" effect="light">
+                    推荐
+                  </el-tag>
                 </div>
               </div>
             </div>
@@ -611,7 +685,7 @@ onMounted(async () => {
               <div>
                 <p class="mall-mobile-card__section-label">建议单价</p>
                 <p class="mall-mobile-card__price">
-                  {{ formatProductPrice(product.defaultPrice) }}
+                  {{ formatProductPrice(resolveO2oPriceView(product).discountedPrice) }}
                 </p>
               </div>
               <div class="mall-mobile-card__limit">
@@ -678,7 +752,12 @@ onMounted(async () => {
         </el-table-column>
         <el-table-column label="单价" min-width="108">
           <template #default="{ row }">
-            <span class="font-semibold text-teal-600">{{ formatProductPrice(row.defaultPrice) }}</span>
+            <div class="leading-5">
+              <div class="font-semibold text-teal-600">{{ formatProductPrice(resolveO2oPriceView(row).discountedPrice) }}</div>
+              <div v-if="resolveO2oPriceView(row).isDiscounted" class="text-xs text-slate-400">
+                原价 {{ formatProductPrice(resolveO2oPriceView(row).originalPrice) }} · {{ resolveO2oPriceView(row).discountLabel }}
+              </div>
+            </div>
           </template>
         </el-table-column>
         <el-table-column label="库存信息" min-width="190">
@@ -700,6 +779,12 @@ onMounted(async () => {
               :disabled="!canManageProducts || !row.isActive"
               @change="toggleListed(row, $event ? 'listed' : 'unlisted')"
             />
+          </template>
+        </el-table-column>
+        <el-table-column label="推荐" width="88" align="center">
+          <template #default="{ row }">
+            <el-tag v-if="row.o2oRecommended" type="success" size="small">推荐</el-tag>
+            <span v-else class="text-xs text-slate-400">否</span>
           </template>
         </el-table-column>
         <el-table-column label="预览图" min-width="110">
@@ -737,17 +822,17 @@ onMounted(async () => {
     <BizCrudDialogShell
       v-model="dialogVisible"
       :title="dialogTitle"
-      height-mode="auto"
+      height-mode="scroll"
       phone-width="94%"
-      tablet-width="720px"
-      desktop-width="720px"
+      tablet-width="760px"
+      desktop-width="820px"
       :confirm-loading="submitting"
       confirm-text="保存"
       dialog-class="o2o-mall-product-edit-dialog"
       @confirm="handleSubmit"
     >
       <template #default="{ isPhone }">
-      <el-form :label-width="isPhone ? '92px' : '110px'">
+      <el-form class="o2o-product-edit-form" :label-width="isPhone ? '92px' : '110px'">
         <el-row :gutter="16">
           <el-col :span="isPhone ? 24 : 12">
             <el-form-item label="商品编码">
@@ -767,6 +852,45 @@ onMounted(async () => {
               <PassiveNumberInput v-model="form.defaultPrice" :min="0" :precision="2" style="width: 100%" :disabled="!!form.id" />
             </el-form-item>
           </el-col>
+          <el-col :span="isPhone ? 24 : 12">
+            <el-form-item label="折扣设置">
+              <div class="o2o-discount-editor">
+                <el-segmented
+                  v-model="discountEditMode"
+                  :options="discountEditModeOptions"
+                  class="o2o-discount-editor__mode"
+                />
+                <el-select
+                  v-if="discountEditMode === 'rate'"
+                  v-model="form.discountRate"
+                  filterable
+                  class="w-full"
+                  placeholder="请选择折扣"
+                >
+                  <el-option
+                    v-for="option in discountRateOptions"
+                    :key="option.value"
+                    :label="option.label"
+                    :value="option.value"
+                  />
+                </el-select>
+                <PassiveNumberInput
+                  v-else
+                  v-model="discountedPriceInput"
+                  :min="minimumDiscountedPrice"
+                  :max="maximumDiscountedPrice"
+                  :precision="2"
+                  :step="1"
+                  class="w-full"
+                  placeholder="请输入折后价格"
+                  :disabled="Number(form.defaultPrice) <= 0"
+                />
+                <p class="o2o-discount-editor__hint">
+                  {{ formatDiscountRateLabel(form.discountRate) }} · 折后价 ¥{{ discountedPricePreview }}
+                </p>
+              </div>
+            </el-form-item>
+          </el-col>
         </el-row>
 
         <el-row :gutter="16">
@@ -784,7 +908,7 @@ onMounted(async () => {
         </el-row>
 
         <el-form-item label="商品状态" class="mb-4">
-          <div class="w-full rounded-xl bg-slate-50 border border-slate-100 p-3">
+          <div class="product-status-card w-full rounded-xl bg-slate-50 border border-slate-100 p-3">
             <div class="flex items-center justify-between mb-2">
               <span class="text-sm font-medium text-slate-700">基础状态</span>
               <el-switch v-model="form.isActive" active-text="启用" inactive-text="停用" inline-prompt />
@@ -801,86 +925,101 @@ onMounted(async () => {
                 :disabled="!form.isActive"
               />
             </div>
+            <div class="mt-2 flex items-center justify-between">
+              <span class="text-sm font-medium text-slate-700">推荐商品</span>
+              <el-switch
+                v-model="form.o2oRecommended"
+                active-text="推荐"
+                inactive-text="普通"
+                inline-prompt
+              />
+            </div>
             <p class="mt-2 text-xs text-slate-400">注释：基础状态启用且商城展示上架，商品才会在客户端大厅中展示；重新启用后仍需人工重新上架。</p>
           </div>
         </el-form-item>
 
-        <el-form-item label="商品预览图">
-          <div
-            class="avatar-uploader-wrap"
-            :class="{ 'is-drag-active': thumbnailDragActive }"
-            @dragenter.prevent="handleThumbnailDragEnter"
-            @dragover.prevent="handleThumbnailDragEnter"
-            @dragleave.prevent="handleThumbnailDragLeave"
-            @drop.prevent="handleThumbnailDrop"
-          >
-            <el-upload
-              class="avatar-uploader"
-              drag
-              action=""
-              :http-request="handleCustomUpload"
-              :show-file-list="false"
-              accept="image/*"
-              :disabled="uploadingThumbnail"
-            >
+        <el-row :gutter="16" class="product-media-row">
+          <el-col :span="isPhone ? 24 : 12">
+            <el-form-item label="商品预览图">
               <div
-                class="avatar-uploader__content"
-                :class="{ 'has-image': hasConfiguredThumbnail, 'is-empty': !hasConfiguredThumbnail }"
+                class="avatar-uploader-wrap"
+                :class="{ 'is-drag-active': thumbnailDragActive }"
+                @dragenter.prevent="handleThumbnailDragEnter"
+                @dragover.prevent="handleThumbnailDragEnter"
+                @dragleave.prevent="handleThumbnailDragLeave"
+                @drop.prevent="handleThumbnailDrop"
               >
-                <el-image
-                  v-if="hasConfiguredThumbnail"
-                  :src="displayThumbnail"
-                  :preview-src-list="currentPreviewImageList"
-                  preview-teleported
-                  fit="cover"
-                  class="avatar avatar--full"
-                  alt="商品预览"
-                />
-                <div v-else class="avatar-uploader__empty-state">
-                  <div class="avatar-uploader__preview-shell" :class="{ 'is-empty': !hasConfiguredThumbnail }">
-                    <el-icon class="avatar-uploader__empty-icon"><UploadFilled /></el-icon>
-                  </div>
-                  <div class="avatar-uploader__text">
-                    <p class="avatar-uploader__title">{{ uploadingThumbnail ? '正在上传图片' : thumbnailDragActive ? '松手即可上传' : '拖拽或点击上传' }}</p>
-                    <p class="avatar-uploader__hint">{{ thumbnailDragActive ? '已识别到图片拖入' : '推荐 800x800 方形图' }}</p>
-                  </div>
-                </div>
-              </div>
-            </el-upload>
-          </div>
-          <Transition name="thumbnail-progress-fade">
-            <div v-if="uploadProgressVisible" class="mt-3 w-full">
-              <el-progress :percentage="uploadProgress" :stroke-width="6" :status="uploadProgressStatus" :show-text="false" />
-            </div>
-          </Transition>
-          <div class="thumbnail-actions mt-3 w-full">
-            <span class="thumbnail-actions__hint">
-              {{ hasConfiguredThumbnail ? '点击图片可查看大图' : '上传完成后可点击图片查看大图' }}
-            </span>
-            <el-popconfirm
-              width="240"
-              title="确认删除当前预览图吗？"
-              confirm-button-text="删除"
-              cancel-button-text="取消"
-              @confirm="handleRemoveThumbnail"
-            >
-              <template #reference>
-                <el-button
-                  plain
-                  :icon="Delete"
-                  :disabled="!hasConfiguredThumbnail || uploadingThumbnail"
-                  class="thumbnail-remove-button"
+                <el-upload
+                  class="avatar-uploader"
+                  drag
+                  action=""
+                  :http-request="handleCustomUpload"
+                  :show-file-list="false"
+                  accept="image/*"
+                  :disabled="uploadingThumbnail"
                 >
-                  删除预览图
-                </el-button>
-              </template>
-            </el-popconfirm>
-          </div>
-          <p class="mt-2 w-full text-xs text-slate-400">列表缩略图与编辑区预览图都已统一接入系统图片预览器。</p>
-        </el-form-item>
-        <el-form-item label="详情内容">
-          <el-input v-model="form.detailContent" type="textarea" :rows="6" placeholder="请输入客户端商品详情说明" />
-        </el-form-item>
+                  <div
+                    class="avatar-uploader__content"
+                    :class="{ 'has-image': hasConfiguredThumbnail, 'is-empty': !hasConfiguredThumbnail }"
+                  >
+                    <el-image
+                      v-if="hasConfiguredThumbnail"
+                      :src="displayThumbnail"
+                      :preview-src-list="currentPreviewImageList"
+                      preview-teleported
+                      fit="cover"
+                      class="avatar avatar--full"
+                      alt="商品预览"
+                      @click.stop
+                    />
+                    <div v-else class="avatar-uploader__empty-state">
+                      <div class="avatar-uploader__preview-shell" :class="{ 'is-empty': !hasConfiguredThumbnail }">
+                        <el-icon class="avatar-uploader__empty-icon"><UploadFilled /></el-icon>
+                      </div>
+                      <div class="avatar-uploader__text">
+                        <p class="avatar-uploader__title">{{ uploadingThumbnail ? '正在上传图片' : thumbnailDragActive ? '松手即可上传' : '拖拽或点击上传' }}</p>
+                        <p class="avatar-uploader__hint">{{ thumbnailDragActive ? '已识别到图片拖入' : '推荐 800x800 方形图' }}</p>
+                      </div>
+                    </div>
+                  </div>
+                </el-upload>
+              </div>
+              <Transition name="thumbnail-progress-fade">
+                <div v-if="uploadProgressVisible" class="thumbnail-progress">
+                  <el-progress :percentage="uploadProgress" :stroke-width="6" :status="uploadProgressStatus" :show-text="false" />
+                </div>
+              </Transition>
+              <div class="thumbnail-actions">
+                <span class="thumbnail-actions__hint">
+                  {{ hasConfiguredThumbnail ? '点击图片可查看大图' : '上传完成后可点击图片查看大图' }}
+                </span>
+                <el-popconfirm
+                  width="240"
+                  title="确认删除当前预览图吗？"
+                  confirm-button-text="删除"
+                  cancel-button-text="取消"
+                  @confirm="handleRemoveThumbnail"
+                >
+                  <template #reference>
+                    <el-button
+                      plain
+                      :icon="Delete"
+                      :disabled="!hasConfiguredThumbnail || uploadingThumbnail"
+                      class="thumbnail-remove-button"
+                    >
+                      删除预览图
+                    </el-button>
+                  </template>
+                </el-popconfirm>
+              </div>
+            </el-form-item>
+          </el-col>
+          <el-col :span="isPhone ? 24 : 12">
+            <el-form-item label="详情内容">
+              <el-input v-model="form.detailContent" type="textarea" :rows="isPhone ? 5 : 9" placeholder="请输入客户端商品详情说明" />
+            </el-form-item>
+          </el-col>
+        </el-row>
       </el-form>
       </template>
     </BizCrudDialogShell>
@@ -975,13 +1114,84 @@ onMounted(async () => {
   row-gap: 0.5rem;
 }
 
+:global(.o2o-mall-product-edit-dialog .el-dialog__body) {
+  overflow-x: hidden;
+}
+
+.o2o-product-edit-form {
+  width: 100%;
+  min-width: 0;
+  overflow-x: clip;
+}
+
+.o2o-product-edit-form :deep(.el-row) {
+  margin-right: 0 !important;
+  margin-left: 0 !important;
+  row-gap: 0.2rem;
+}
+
+.o2o-product-edit-form :deep(.el-form-item) {
+  margin-bottom: 0.72rem;
+}
+
+.o2o-product-edit-form :deep(.el-form-item__label) {
+  padding-right: 1rem;
+  color: rgb(71 85 105);
+}
+
+.o2o-product-edit-form :deep(.el-form-item__content) {
+  min-width: 0;
+}
+
+.product-status-card {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.product-status-card > div {
+  min-width: 0;
+}
+
+.o2o-discount-editor {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.o2o-discount-editor__mode {
+  align-self: flex-start;
+}
+
+.o2o-discount-editor__hint {
+  margin: 0;
+  color: rgb(100 116 139);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .avatar-uploader :deep(.el-upload),
 .avatar-uploader__content {
   width: 100%;
 }
 
+.product-media-row :deep(.el-textarea__inner) {
+  min-height: 240px !important;
+}
+
+.o2o-product-edit-form .avatar-uploader-wrap,
+.o2o-product-edit-form .thumbnail-actions,
+.o2o-product-edit-form .thumbnail-progress {
+  width: 240px;
+  max-width: 100%;
+}
+
 .avatar-uploader :deep(.el-upload-dragger) {
+  width: 100%;
   padding: 0;
+  overflow: hidden;
+  border-radius: 14px;
 }
 
 .avatar-uploader__empty-state,
@@ -995,16 +1205,23 @@ onMounted(async () => {
 .avatar-uploader__preview-shell {
   display: grid;
   place-items: center;
-  width: 120px;
-  height: 120px;
+  width: 100%;
+  min-height: 160px;
   border-radius: 20px;
   background: rgb(248 250 252);
 }
 
 .avatar--full {
   width: 100%;
-  height: 240px;
+  aspect-ratio: 1 / 1;
+  height: auto;
+  max-height: 240px;
   object-fit: cover;
+}
+
+.thumbnail-actions {
+  margin-top: 0.55rem;
+  justify-content: space-between;
 }
 
 .thumbnail-actions__hint,
@@ -1028,6 +1245,20 @@ onMounted(async () => {
 }
 
 @media (max-width: 640px) {
+  .o2o-product-edit-form :deep(.el-form-item__label) {
+    padding-right: 0.75rem;
+  }
+
+  .product-media-row :deep(.el-textarea__inner) {
+    min-height: 140px !important;
+  }
+
+  .o2o-product-edit-form .avatar-uploader-wrap,
+  .o2o-product-edit-form .thumbnail-actions,
+  .o2o-product-edit-form .thumbnail-progress {
+    width: 100%;
+  }
+
   .mall-pagination-bar {
     justify-content: flex-start;
   }

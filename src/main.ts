@@ -23,6 +23,7 @@ import { useAuthStore, useClientAuthStore, useThemeStore } from '@/store'
 import { classifyRuntimeError, classifyWindowErrorEvent } from '@/utils/runtime-error-guard'
 import { reportRuntimeError } from '@/utils/runtime-error-presenter'
 import pinia from '@/store/pinia'
+import { reportGlobalAppError } from '@/utils/runtime-error-state'
 
 /**
  * 开发态统一预加载 Element Plus 全量样式：
@@ -50,9 +51,15 @@ app.config.warnHandler = (message, _instance, trace) => {
   console.warn(`[vue warn] ${message}${trace}`)
 }
 
+/**
+ * Vue 组件运行时异常统一上报：
+ * - 入口层继续保留控制台输出与顶部告警；
+ * - 同时把错误分发到运行时状态中心，便于布局壳层做页面级兜底。
+ */
 app.config.errorHandler = (error, _instance, info) => {
   const classification = classifyRuntimeError(error)
   reportRuntimeError(`Vue ${info}`, classification, error)
+  reportGlobalAppError(`vue:${info}`, classification, error)
 }
 
 // 统一日期/时间中文化，避免日期面板出现英文月份与星期。
@@ -126,17 +133,24 @@ const installSessionReloginBridge = () => {
 
 installSessionReloginBridge()
 
+/**
+ * 浏览器原生全局异常桥接：
+ * - 捕获脚本异常与未处理 Promise 拒绝，统一复用运行时分类器；
+ * - 在资源更新、脚本异常等场景下，保持与 Vue errorHandler 相同的提示和页面兜底口径。
+ */
 if (globalThis.window !== undefined) {
   window.addEventListener('error', (event: ErrorEvent | Event) => {
     const classification = classifyWindowErrorEvent(event)
     event.preventDefault()
     reportRuntimeError('window.onerror', classification, event)
+    reportGlobalAppError('window.onerror', classification, event)
   }, true)
 
   window.addEventListener('unhandledrejection', (event) => {
     const classification = classifyRuntimeError(event.reason)
     event.preventDefault()
     reportRuntimeError('unhandledrejection', classification, event.reason)
+    reportGlobalAppError('unhandledrejection', classification, event.reason)
   })
 }
 

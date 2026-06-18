@@ -11,6 +11,7 @@
  */
 
 import type { O2oMallProduct, O2oMallStorefrontConfig } from '@/api/modules/o2o'
+import { calculateDiscountedPriceText, normalizeDiscountRateText } from '@/utils/o2o-price'
 import {
   clearLegacyScopedStorageKey,
   getBrowserStorage,
@@ -22,6 +23,7 @@ export interface ClientCatalogSnapshot {
   storefront: O2oMallStorefrontConfig
   activeCategoryKey: string
   keyword: string
+  sortMode: ClientCatalogSortMode
   updatedAt: number
 }
 
@@ -34,7 +36,10 @@ export interface ClientCatalogDataSnapshot {
 export interface ClientCatalogBrowseContextSnapshot {
   activeCategoryKey: string
   keyword: string
+  sortMode: ClientCatalogSortMode
 }
+
+export type ClientCatalogSortMode = 'default' | 'recommended'
 
 // 统一抽出客户端账号作用域类型，避免同一联合类型在多个持久化函数签名里重复展开。
 type ClientCatalogStorageScopeId = string | number | null | undefined
@@ -61,6 +66,11 @@ const normalizePrice = (value: unknown) => {
   return '0.00'
 }
 
+const normalizeNonNegativeInteger = (value: unknown) => {
+  const parsed = typeof value === 'number' ? value : Number.parseFloat(String(value ?? ''))
+  return Number.isFinite(parsed) ? Math.max(0, Math.floor(parsed)) : 0
+}
+
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const normalizeProducts = (products: unknown): O2oMallProduct[] => {
   if (!Array.isArray(products)) {
@@ -83,7 +93,11 @@ const normalizeProducts = (products: unknown): O2oMallProduct[] => {
         id,
         productCode,
         productName,
-        defaultPrice: normalizePrice(row.defaultPrice),
+        defaultPrice: normalizePrice(row.discountedPrice ?? row.defaultPrice),
+        originalPrice: normalizePrice(row.originalPrice ?? row.defaultPrice),
+        discountRate: normalizeDiscountRateText(row.discountRate as string | number | null | undefined),
+        discountedPrice: normalizePrice(row.discountedPrice ?? calculateDiscountedPriceText((row.originalPrice ?? row.defaultPrice) as string | number | null | undefined, row.discountRate as string | number | null | undefined)),
+        o2oRecommended: row.o2oRecommended === true || row.o2oRecommended === 1 || row.o2oRecommended === '1' || row.o2oRecommended === 'true',
         tags: Array.isArray(row.tags) ? row.tags.map(String) : [],
         thumbnail: typeof row.thumbnail === 'string' ? row.thumbnail : null,
         detailContent: typeof row.detailContent === 'string' ? row.detailContent : null,
@@ -91,6 +105,7 @@ const normalizeProducts = (products: unknown): O2oMallProduct[] => {
         currentStock: Number.isFinite(row.currentStock) ? Number(row.currentStock) : 0,
         preOrderedStock: Number.isFinite(row.preOrderedStock) ? Number(row.preOrderedStock) : 0,
         availableStock: Number.isFinite(row.availableStock) ? Number(row.availableStock) : 0,
+        soldQty: normalizeNonNegativeInteger(row.soldQty),
       } satisfies O2oMallProduct
     })
     .filter((item): item is O2oMallProduct => item !== null)
@@ -104,6 +119,7 @@ const normalizeStorefront = (value: unknown): O2oMallStorefrontConfig => {
   if (!value || typeof value !== 'object') {
     return {
       businessHoursText: '10:00 - 22:00',
+      mallAnnouncementText: '',
     }
   }
   const row = value as Record<string, unknown>
@@ -112,6 +128,7 @@ const normalizeStorefront = (value: unknown): O2oMallStorefrontConfig => {
     : '10:00 - 22:00'
   return {
     businessHoursText,
+    mallAnnouncementText: typeof row.mallAnnouncementText === 'string' ? row.mallAnnouncementText.trim() : '',
   }
 }
 
@@ -121,6 +138,10 @@ const normalizeActiveCategoryKey = (value: unknown) => {
 
 const normalizeKeyword = (value: unknown) => {
   return typeof value === 'string' ? value : ''
+}
+
+const normalizeSortMode = (value: unknown): ClientCatalogSortMode => {
+  return value === 'recommended' ? 'recommended' : 'default'
 }
 
 const readScopedJson = (storage: Storage, scopedKey: string | null): Record<string, unknown> | null => {
@@ -171,6 +192,7 @@ export const readPersistedClientCatalogSnapshot = (
       storefront: normalizeStorefront(sourceData?.storefront),
       activeCategoryKey: normalizeActiveCategoryKey(sourceContext?.activeCategoryKey),
       keyword: normalizeKeyword(sourceContext?.keyword),
+      sortMode: normalizeSortMode(sourceContext?.sortMode),
       updatedAt: normalizeUpdatedAt(sourceData?.updatedAt),
     }
   } catch (error) {

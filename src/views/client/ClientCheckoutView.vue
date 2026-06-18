@@ -23,6 +23,7 @@ import pinia from '@/store/pinia'
 import { normalizeRequestError } from '@/utils/error'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
+import { resolveO2oPriceView } from '@/utils/o2o-price'
 import {
   buildClientPreorderSubmitIntentKey,
   clearClientPreorderSubmitLock,
@@ -443,7 +444,10 @@ const handleSubmit = async () => {
         >
           <div class="min-w-0">
             <p class="truncate text-sm font-semibold text-slate-900">{{ item.productName }}</p>
-            <p class="mt-1 text-sm font-bold text-teal-600">¥{{ Number(item.defaultPrice).toFixed(2) }}</p>
+            <p class="mt-1 text-sm font-bold text-teal-600">¥{{ Number(resolveO2oPriceView(item).discountedPrice).toFixed(2) }}</p>
+            <p v-if="resolveO2oPriceView(item).isDiscounted" class="mt-0.5 text-xs text-slate-400">
+              原价 ¥{{ Number(resolveO2oPriceView(item).originalPrice).toFixed(2) }} · {{ resolveO2oPriceView(item).discountLabel }}
+            </p>
           </div>
           <span class="text-sm font-semibold text-slate-700">x {{ item.qty }}</span>
         </article>

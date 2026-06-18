@@ -15,6 +15,7 @@ import { defineStore } from 'pinia'
 import type { O2oMallProduct, O2oMallProductsResult, O2oMallStorefrontConfig } from '@/api/modules/o2o'
 import {
   clearPersistedClientCatalogSnapshot,
+  type ClientCatalogSortMode,
   persistClientCatalogBrowseContextSnapshot,
   persistClientCatalogDataSnapshot,
   readPersistedClientCatalogSnapshot,
@@ -30,9 +31,11 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
   const products = ref<O2oMallProduct[]>([])
   const storefront = ref<O2oMallStorefrontConfig>({
     businessHoursText: '10:00 - 22:00',
+    mallAnnouncementText: '',
   })
   const activeCategoryKey = ref('all')
   const keyword = ref('')
+  const sortMode = ref<ClientCatalogSortMode>('default')
   const updatedAt = ref(0)
   const initialized = ref(false)
 
@@ -61,6 +64,7 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
     persistClientCatalogBrowseContextSnapshot(clientUserId.value, {
       activeCategoryKey: activeCategoryKey.value,
       keyword: keyword.value,
+      sortMode: sortMode.value,
     })
   }
 
@@ -82,9 +86,11 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
     products.value = []
     storefront.value = {
       businessHoursText: '10:00 - 22:00',
+      mallAnnouncementText: '',
     }
     activeCategoryKey.value = 'all'
     keyword.value = ''
+    sortMode.value = 'default'
     updatedAt.value = 0
   }
 
@@ -122,6 +128,7 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
       storefront.value = snapshot.storefront
       activeCategoryKey.value = snapshot.activeCategoryKey
       keyword.value = snapshot.keyword
+      sortMode.value = snapshot.sortMode
       updatedAt.value = snapshot.updatedAt
     }
     initialized.value = true
@@ -133,12 +140,31 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
         nextCatalog,
         {
           businessHoursText: storefront.value.businessHoursText || '10:00 - 22:00',
+          mallAnnouncementText: storefront.value.mallAnnouncementText || '',
         },
         { touchUpdatedAt: true },
       )
       return
     }
-    replaceCatalogData(nextCatalog.list, nextCatalog.storefront, { touchUpdatedAt: true })
+    replaceCatalogData(
+      nextCatalog.list,
+      {
+        businessHoursText: nextCatalog.storefront.businessHoursText || '10:00 - 22:00',
+        mallAnnouncementText: nextCatalog.storefront.mallAnnouncementText || '',
+      },
+      { touchUpdatedAt: true },
+    )
+  }
+
+  const setStorefront = (nextStorefront: O2oMallStorefrontConfig) => {
+    replaceCatalogData(
+      products.value,
+      {
+        businessHoursText: nextStorefront.businessHoursText || '10:00 - 22:00',
+        mallAnnouncementText: nextStorefront.mallAnnouncementText || '',
+      },
+      { touchUpdatedAt: false },
+    )
   }
 
   const applyPreorderSubmission = (submittedItems: Array<{ productId: string | number; qty: number }>) => {
@@ -195,6 +221,11 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
     persistBrowseContextSnapshot()
   }
 
+  const setSortMode = (value: ClientCatalogSortMode) => {
+    sortMode.value = value === 'recommended' ? 'recommended' : 'default'
+    persistBrowseContextSnapshot()
+  }
+
   const clearAll = () => {
     const currentClientUserId = clientUserId.value
     resetState()
@@ -209,14 +240,17 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
     storefront,
     activeCategoryKey,
     keyword,
+    sortMode,
     updatedAt,
     initialized,
     isFresh,
     initialize,
     setProducts,
+    setStorefront,
     applyPreorderSubmission,
     setActiveCategoryKey,
     setKeyword,
+    setSortMode,
     clearAll,
   }
 })

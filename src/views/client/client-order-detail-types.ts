@@ -15,6 +15,9 @@ export interface EditableOrderItem {
   productCode: string
   productName: string
   defaultPrice: string
+  originalPrice: string
+  discountRate: string
+  unitPrice: string
   qty: number
   originalQty: number
   maxQty: number

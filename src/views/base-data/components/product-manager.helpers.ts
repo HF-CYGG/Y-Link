@@ -15,6 +15,7 @@ export interface BatchCreateProductFormRow {
   productName: string
   pinyinAbbr: string
   defaultPrice: number
+  discountRate: number
   currentStock: number
   isActive: boolean
   tagIds: Array<string | number>
@@ -31,6 +32,7 @@ export const createBatchCreateRow = (rowId: string): BatchCreateProductFormRow =
   productName: '',
   pinyinAbbr: '',
   defaultPrice: 0,
+  discountRate: 10,
   currentStock: 0,
   isActive: true,
   tagIds: [],
@@ -79,6 +81,10 @@ export const validateBatchCreateRows = (rows: BatchCreateProductFormRow[]): stri
 
     if (!Number.isFinite(row.defaultPrice) || row.defaultPrice < 0) {
       return `第 ${index + 1} 行默认售价必须大于等于 0`
+    }
+
+    if (!Number.isFinite(row.discountRate) || row.discountRate < 1 || row.discountRate > 10) {
+      return `第 ${index + 1} 行商品折扣必须在 1.0 到 10.0 之间`
     }
 
     if (!Number.isFinite(row.currentStock) || row.currentStock < 0 || !Number.isInteger(row.currentStock)) {

@@ -101,6 +101,12 @@ const DEFAULT_SYSTEM_CONFIGS = [
     remark: '客户端商城展示的店铺营业时间文案',
   },
   {
+    configKey: 'o2o.mall_announcement_text',
+    configValue: '库存实时刷新，请以下单结果为准',
+    configGroup: 'o2o',
+    remark: '客户端商城公告文案，留空时隐藏公告块',
+  },
+  {
     configKey: 'verification.mobile.enabled',
     configValue: '0',
     configGroup: 'verification',
@@ -326,6 +332,7 @@ export interface O2oRuleConfigRecord {
   limitQty: number
   clientPreorderUpdateLimit: number
   storeBusinessHoursText: string
+  mallAnnouncementText: string
   updatedAt: Date
 }
 
@@ -336,6 +343,7 @@ export interface UpdateO2oRuleConfigsInput {
   limitQty: number
   clientPreorderUpdateLimit?: number
   storeBusinessHoursText: string
+  mallAnnouncementText: string
 }
 
 export type VerificationChannelType = 'mobile' | 'email'
@@ -443,6 +451,7 @@ class SystemConfigService {
     'o2o.limit_qty',
     'o2o.client_preorder_update_limit',
     'o2o.store_business_hours_text',
+    'o2o.mall_announcement_text',
   ] as const
   private readonly clientDepartmentConfigKey = 'client.department.options'
   private readonly verificationConfigKeys = [
@@ -1449,6 +1458,7 @@ class SystemConfigService {
     if (!storeBusinessHoursText) {
       throw new BizError('线上预订配置缺失：o2o.store_business_hours_text', 500)
     }
+    const mallAnnouncementText = getRequiredConfigValue('o2o.mall_announcement_text').trim()
     const updatedAt = rows.map((row) => row.updatedAt).sort((a, b) => b.getTime() - a.getTime())[0]
 
     return {
@@ -1458,6 +1468,7 @@ class SystemConfigService {
       limitQty,
       clientPreorderUpdateLimit,
       storeBusinessHoursText,
+      mallAnnouncementText,
       updatedAt,
     }
   }
@@ -1510,12 +1521,18 @@ class SystemConfigService {
         throw new BizError('线上预订配置缺失，请联系管理员补齐配置', 500)
       }
 
+      const mallAnnouncementText = input.mallAnnouncementText.trim()
+      if (mallAnnouncementText.length > 500) {
+        throw new BizError('商城公告长度不能超过 500 个字符', 400)
+      }
+
       const targetMap = new Map<string, string>([
         ['o2o.auto_cancel_enabled', input.autoCancelEnabled ? '1' : '0'],
         ['o2o.auto_cancel_hours', String(input.autoCancelHours)],
         ['o2o.limit_enabled', input.limitEnabled ? '1' : '0'],
         ['o2o.limit_qty', String(input.limitQty)],
         ['o2o.store_business_hours_text', storeBusinessHoursText],
+        ['o2o.mall_announcement_text', mallAnnouncementText],
       ])
       if (input.clientPreorderUpdateLimit !== undefined) {
         targetMap.set('o2o.client_preorder_update_limit', String(input.clientPreorderUpdateLimit))
@@ -1526,7 +1543,7 @@ class SystemConfigService {
       const repo = manager.getRepository(SystemConfig)
       for (const row of lockedRows) {
         const targetValue = targetMap.get(row.configKey)
-        if (!targetValue || targetValue === row.configValue) {
+        if (targetValue === undefined || targetValue === row.configValue) {
           continue
         }
         await repo.update({ id: row.id }, { configValue: targetValue })

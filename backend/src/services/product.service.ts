@@ -20,6 +20,7 @@ import { isRetryableSqliteLockError, isUniqueConstraintError } from '../utils/da
 import { BizError } from '../utils/errors.js'
 import { generateProductCode } from '../utils/id-generator.js'
 import { normalizeLegacyUploadUrl } from '../utils/upload-storage.js'
+import { assertDiscountRateInRange, calculateDiscountedPrice, normalizeDiscountRate } from '../utils/discount-price.js'
 
 export interface ProductQuery {
   keyword?: string
@@ -35,8 +36,10 @@ export interface CreateProductInput {
   productName: string
   pinyinAbbr?: string
   defaultPrice?: number
+  discountRate?: number
   isActive?: boolean
   o2oStatus?: 'listed' | 'unlisted'
+  o2oRecommended?: boolean
   thumbnail?: string | null
   detailContent?: string | null
   limitPerUser?: number
@@ -50,8 +53,10 @@ export interface UpdateProductInput {
   productName?: string
   pinyinAbbr?: string
   defaultPrice?: number
+  discountRate?: number
   isActive?: boolean
   o2oStatus?: 'listed' | 'unlisted'
+  o2oRecommended?: boolean
   thumbnail?: string | null
   detailContent?: string | null
   limitPerUser?: number
@@ -77,8 +82,11 @@ export interface ProductView {
   productName: string
   pinyinAbbr: string
   defaultPrice: string
+  discountRate: string
+  discountedPrice: string
   isActive: boolean
   o2oStatus: 'listed' | 'unlisted'
+  o2oRecommended: boolean
   thumbnail: string | null
   detailContent: string | null
   limitPerUser: number
@@ -445,8 +453,11 @@ export class ProductService {
         productName: product.productName,
         pinyinAbbr: product.pinyinAbbr || '',
         defaultPrice: normalizeDecimalText(product.defaultPrice),
+        discountRate: normalizeDiscountRate(product.discountRate),
+        discountedPrice: calculateDiscountedPrice(product.defaultPrice, product.discountRate),
         isActive: Boolean(product.isActive),
         o2oStatus: product.o2oStatus ?? 'unlisted',
+        o2oRecommended: Boolean(product.o2oRecommended),
         thumbnail: normalizeProductThumbnailUrl(product.thumbnail) ?? null,
         detailContent: product.detailContent ?? null,
         limitPerUser: Number(product.limitPerUser ?? 5),
@@ -555,6 +566,17 @@ export class ProductService {
     return normalizeDecimalText(value)
   }
 
+  private readOptionalDiscountRate(value: number | undefined, label: string): string | undefined {
+    if (value === undefined) {
+      return undefined
+    }
+    try {
+      return assertDiscountRateInRange(value, label)
+    } catch (error) {
+      throw new BizError(error instanceof Error ? error.message : `${label}不合法`, 400)
+    }
+  }
+
   private readOptionalInteger(
     value: number | undefined,
     label: string,
@@ -630,6 +652,10 @@ export class ProductService {
     if (normalizedPrice !== undefined) {
       normalizedInput.defaultPrice = Number(normalizedPrice)
     }
+    const normalizedDiscountRate = this.readOptionalDiscountRate(input.discountRate, '商品折扣')
+    if (normalizedDiscountRate !== undefined) {
+      normalizedInput.discountRate = Number(normalizedDiscountRate)
+    }
 
     const normalizedLimitPerUser = this.readOptionalInteger(
       input.limitPerUser,
@@ -691,8 +717,14 @@ export class ProductService {
     if (typeof input.defaultPrice === 'number') {
       product.defaultPrice = this.readOptionalPrice(input.defaultPrice, '默认单价') as string
     }
+    if (typeof input.discountRate === 'number') {
+      product.discountRate = this.readOptionalDiscountRate(input.discountRate, '商品折扣') as string
+    }
     if (typeof input.isActive === 'boolean') {
       product.isActive = input.isActive
+    }
+    if (typeof input.o2oRecommended === 'boolean') {
+      product.o2oRecommended = input.o2oRecommended
     }
     this.applyO2oStatusUpdate(product, input)
     this.applyContentUpdate(product, input)
@@ -776,8 +808,10 @@ export class ProductService {
       productName: input.productName,
       pinyinAbbr: input.pinyinAbbr ?? '',
       defaultPrice: this.readOptionalPrice(input.defaultPrice, '默认单价') ?? '0.00',
+      discountRate: this.readOptionalDiscountRate(input.discountRate, '商品折扣') ?? '10.0',
       isActive,
       o2oStatus: resolveEffectiveO2oStatus(isActive, input.o2oStatus),
+      o2oRecommended: input.o2oRecommended ?? false,
       thumbnail: normalizeProductThumbnailUrl(input.thumbnail) ?? null,
       detailContent: input.detailContent ?? null,
       limitPerUser: input.limitPerUser ?? 5,

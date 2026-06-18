@@ -58,13 +58,16 @@ const SQLITE_REQUIRED_ORDER_ITEM_COLUMNS = ['unit_price', 'line_amount']
 const SQLITE_LEGACY_OUTBOUND_ITEM_FALLBACK_UNIT_PRICE = 0.01
 const SQLITE_LEGACY_OUTBOUND_ITEM_FALLBACK_LINE_AMOUNT = 0
 const SQLITE_REQUIRED_PRODUCT_COLUMNS = [
+  'discount_rate',
   'o2o_status',
+  'o2o_recommended',
   'thumbnail',
   'detail_content',
   'limit_per_user',
   'current_stock',
   'pre_ordered_stock',
 ]
+const SQLITE_REQUIRED_O2O_PREORDER_ITEM_COLUMNS = ['original_price', 'discount_rate', 'unit_price', 'line_amount']
 
 const SQLITE_REQUIRED_CLIENT_USER_COLUMNS = [
   'mobile',
@@ -262,6 +265,57 @@ async function normalizeSqliteOutboundItemColumns(dataSource: DataSource): Promi
   }
 }
 
+async function normalizeSqliteO2oDiscountColumns(dataSource: DataSource): Promise<void> {
+  const productColumnSet = await listSqliteTableColumns(dataSource, 'base_product')
+  if (productColumnSet.size > 0 && !productColumnSet.has('discount_rate')) {
+    await dataSource.query(`ALTER TABLE "base_product" ADD COLUMN "discount_rate" decimal(3, 1) NOT NULL DEFAULT 10.0`)
+  }
+  if (productColumnSet.size > 0 && !productColumnSet.has('o2o_recommended')) {
+    await dataSource.query(`ALTER TABLE "base_product" ADD COLUMN "o2o_recommended" tinyint NOT NULL DEFAULT 0`)
+  }
+
+  const itemColumnSet = await listSqliteTableColumns(dataSource, 'o2o_preorder_item')
+  if (itemColumnSet.size === 0) {
+    return
+  }
+  if (!itemColumnSet.has('original_price')) {
+    await dataSource.query(`ALTER TABLE "o2o_preorder_item" ADD COLUMN "original_price" decimal(12, 2) NOT NULL DEFAULT 0.00`)
+  }
+  if (!itemColumnSet.has('discount_rate')) {
+    await dataSource.query(`ALTER TABLE "o2o_preorder_item" ADD COLUMN "discount_rate" decimal(3, 1) NOT NULL DEFAULT 10.0`)
+  }
+  if (!itemColumnSet.has('unit_price')) {
+    await dataSource.query(`ALTER TABLE "o2o_preorder_item" ADD COLUMN "unit_price" decimal(12, 2) NOT NULL DEFAULT 0.00`)
+  }
+  if (!itemColumnSet.has('line_amount')) {
+    await dataSource.query(`ALTER TABLE "o2o_preorder_item" ADD COLUMN "line_amount" decimal(14, 2) NOT NULL DEFAULT 0.00`)
+  }
+
+  await dataSource.query(`
+    UPDATE "o2o_preorder_item"
+    SET
+      "original_price" = printf('%.2f', CAST(COALESCE((
+        SELECT "default_price"
+        FROM "base_product"
+        WHERE "base_product"."id" = "o2o_preorder_item"."product_id"
+      ), 0) AS REAL)),
+      "discount_rate" = printf('%.1f', CAST(COALESCE((
+        SELECT "discount_rate"
+        FROM "base_product"
+        WHERE "base_product"."id" = "o2o_preorder_item"."product_id"
+      ), 10.0) AS REAL))
+    WHERE CAST(COALESCE("original_price", 0) AS REAL) <= 0
+  `)
+
+  await dataSource.query(`
+    UPDATE "o2o_preorder_item"
+    SET
+      "unit_price" = printf('%.2f', ROUND(CAST(COALESCE("original_price", 0) AS REAL) * CAST(COALESCE("discount_rate", 10.0) AS REAL) / 10.0, 2)),
+      "line_amount" = printf('%.2f', ROUND(CAST(COALESCE("qty", 0) AS REAL) * ROUND(CAST(COALESCE("original_price", 0) AS REAL) * CAST(COALESCE("discount_rate", 10.0) AS REAL) / 10.0, 2), 2))
+    WHERE CAST(COALESCE("unit_price", 0) AS REAL) <= 0 OR CAST(COALESCE("line_amount", 0) AS REAL) <= 0
+  `)
+}
+
 export function resolveSqliteDatabasePath(sqliteDbPath = env.SQLITE_DB_PATH): string {
   return path.isAbsolute(sqliteDbPath)
     ? sqliteDbPath
@@ -361,6 +415,11 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
     return true
   }
 
+  const o2oPreorderItemColumnSet = await listSqliteTableColumns(dataSource, 'o2o_preorder_item')
+  if (SQLITE_REQUIRED_O2O_PREORDER_ITEM_COLUMNS.some((column) => !o2oPreorderItemColumnSet.has(column))) {
+    return true
+  }
+
   const o2oReturnRequestColumnSet = await listSqliteTableColumns(dataSource, 'o2o_return_request')
   if (SQLITE_REQUIRED_O2O_RETURN_REQUEST_COLUMNS.some((column) => !o2oReturnRequestColumnSet.has(column))) {
     return true
@@ -381,6 +440,7 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
 export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): Promise<DatabaseSchemaInitResult> {
   if (env.DB_TYPE === 'sqlite') {
     await normalizeSqliteOutboundItemColumns(dataSource)
+    await normalizeSqliteO2oDiscountColumns(dataSource)
   }
 
   // DB_SYNC=true 时直接走 TypeORM 同步，便于本地快速调试实体结构。

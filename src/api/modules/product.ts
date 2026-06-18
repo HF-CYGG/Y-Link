@@ -5,6 +5,7 @@
  */
 
 import { request, type RequestConfig } from '@/api/http'
+import { calculateDiscountedPriceText, normalizeDiscountRateText } from '@/utils/o2o-price'
 
 /**
  * 产品实体（前端消费版）：
@@ -17,8 +18,11 @@ export interface ProductRecord {
   productName: string
   pinyinAbbr: string
   defaultPrice: string
+  discountRate: string
+  discountedPrice: string
   isActive: boolean
   o2oStatus: 'listed' | 'unlisted'
+  o2oRecommended: boolean
   thumbnail: string | null
   detailContent: string | null
   limitPerUser: number
@@ -34,8 +38,10 @@ export interface CreateProductDto {
   productName: string
   pinyinAbbr?: string
   defaultPrice?: number
+  discountRate?: number
   isActive?: boolean
   o2oStatus?: 'listed' | 'unlisted'
+  o2oRecommended?: boolean
   thumbnail?: string | null
   detailContent?: string | null
   limitPerUser?: number
@@ -49,8 +55,10 @@ export interface UpdateProductDto {
   productName?: string
   pinyinAbbr?: string
   defaultPrice?: number
+  discountRate?: number
   isActive?: boolean
   o2oStatus?: 'listed' | 'unlisted'
+  o2oRecommended?: boolean
   thumbnail?: string | null
   detailContent?: string | null
   limitPerUser?: number
@@ -102,8 +110,11 @@ interface ProductRawRecord {
   productName?: PrimitiveValue
   pinyinAbbr?: PrimitiveValue
   defaultPrice?: PrimitiveValue
+  discountRate?: PrimitiveValue
+  discountedPrice?: PrimitiveValue
   isActive?: PrimitiveValue
   o2oStatus?: PrimitiveValue
+  o2oRecommended?: PrimitiveValue
   thumbnail?: PrimitiveValue
   detailContent?: PrimitiveValue
   limitPerUser?: PrimitiveValue
@@ -162,6 +173,14 @@ const normalizeDecimal = (value: PrimitiveValue, fallback = '0.00'): string => {
   return Number.isFinite(normalizedNumber) ? normalizedNumber.toFixed(2) : fallback
 }
 
+const normalizeDiscountRate = (value: PrimitiveValue, fallback = '10.0'): string => {
+  const normalizedValue = normalizeText(value)
+  if (!normalizedValue) {
+    return fallback
+  }
+  return normalizeDiscountRateText(normalizedValue)
+}
+
 const normalizeInteger = (value: PrimitiveValue, fallback = 0): number => {
   const normalized = Number(normalizeText(value))
   if (!Number.isFinite(normalized)) {
@@ -190,8 +209,11 @@ const normalizeProductRecord = (record: ProductRawRecord): ProductRecord => {
     productName: normalizeText(record.productName),
     pinyinAbbr: normalizeText(record.pinyinAbbr),
     defaultPrice: normalizeDecimal(record.defaultPrice),
+    discountRate: normalizeDiscountRate(record.discountRate),
+    discountedPrice: normalizeDecimal(record.discountedPrice ?? calculateDiscountedPriceText(record.defaultPrice as string | number | null | undefined, record.discountRate as string | number | null | undefined)),
     isActive: normalizeBoolean(record.isActive),
     o2oStatus: normalizeText(record.o2oStatus, 'unlisted') === 'listed' ? 'listed' : 'unlisted',
+    o2oRecommended: normalizeBoolean(record.o2oRecommended),
     thumbnail: normalizeText(record.thumbnail) || null,
     detailContent: normalizeText(record.detailContent) || null,
     limitPerUser: normalizeInteger(record.limitPerUser, 5),

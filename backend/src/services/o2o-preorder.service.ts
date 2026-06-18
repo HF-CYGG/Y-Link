@@ -40,6 +40,13 @@ import { notificationService } from './notification.service.js'
 import { auditService } from './audit.service.js'
 import type { PaginationResult } from '../types/api.js'
 import type { RequestMeta } from '../utils/request-meta.js'
+import {
+  buildDiscountPriceSnapshot,
+  calculateDiscountedPrice,
+  formatMoneyFromCents,
+  normalizeDiscountRate,
+  parseMoneyToCents,
+} from '../utils/discount-price.js'
 
 export interface SubmitPreorderItemInput {
   productId: string | number
@@ -181,6 +188,11 @@ export interface O2oPreorderDetailItemView {
   productCode: string
   productName: string
   defaultPrice: string
+  originalPrice: string
+  discountRate: string
+  discountedPrice: string
+  unitPrice: string
+  lineAmount: string
   qty: number
   returnedQty: number
   availableReturnQty: number
@@ -230,6 +242,10 @@ export interface O2oPreorderDetailView {
     totalAmount: string
     totalQty: number
     totalItemCount: number
+  }
+  storefront: {
+    businessHoursText: string
+    mallAnnouncementText: string
   }
   qrPayload: string
 }
@@ -347,6 +363,38 @@ class O2oPreorderService {
     const integerPart = Math.floor(absoluteCents / 100)
     const decimalPart = String(absoluteCents % 100).padStart(2, '0')
     return `${sign}${integerPart}.${decimalPart}`
+  }
+
+  private buildPreorderItemSnapshot(product: BaseProduct, qty: number) {
+    return buildDiscountPriceSnapshot(product.defaultPrice, product.discountRate, qty)
+  }
+
+  private hasPreorderItemSnapshotValue(value: string | number | null | undefined) {
+    return value !== null && value !== undefined && String(value).trim() !== ''
+  }
+
+  private resolvePreorderItemSnapshot(item: O2oPreorderItem) {
+    const productOriginalPrice = item.product?.defaultPrice ?? '0.00'
+    const originalPrice =
+      this.hasPreorderItemSnapshotValue(item.originalPrice)
+        ? this.normalizeDecimalText(item.originalPrice)
+        : this.normalizeDecimalText(productOriginalPrice)
+    const discountRate = normalizeDiscountRate(item.discountRate ?? item.product?.discountRate ?? '10.0')
+    const unitPrice =
+      this.hasPreorderItemSnapshotValue(item.unitPrice)
+        ? this.normalizeDecimalText(item.unitPrice)
+        : calculateDiscountedPrice(originalPrice, discountRate)
+    const fallbackLineAmount = formatMoneyFromCents(parseMoneyToCents(unitPrice) * Math.max(0, Number(item.qty ?? 0)))
+    const lineAmount =
+      this.hasPreorderItemSnapshotValue(item.lineAmount)
+        ? this.normalizeDecimalText(item.lineAmount)
+        : fallbackLineAmount
+    return {
+      originalPrice,
+      discountRate,
+      unitPrice,
+      lineAmount,
+    }
   }
 
   private normalizeVerifyCode(value: string) {
@@ -660,8 +708,9 @@ class O2oPreorderService {
         throw new BizError('商品不存在，无法生成对应出库单', 409)
       }
       const qty = Number(row.qty ?? 0)
-      const unitPriceCents = this.parseMoneyToCents(product.defaultPrice)
-      const lineAmountCents = qty * unitPriceCents
+      const snapshot = this.resolvePreorderItemSnapshot(row)
+      const unitPriceCents = parseMoneyToCents(snapshot.unitPrice)
+      const lineAmountCents = parseMoneyToCents(snapshot.lineAmount)
       totalQty += qty
       totalAmountCents += lineAmountCents
       itemEntities.push(
@@ -670,8 +719,8 @@ class O2oPreorderService {
           productId: product.id,
           productNameSnapshot: product.productName,
           qty: qty.toFixed(2),
-          unitPrice: this.formatCentsToMoney(unitPriceCents),
-          lineAmount: this.formatCentsToMoney(lineAmountCents),
+          unitPrice: formatMoneyFromCents(unitPriceCents),
+          lineAmount: formatMoneyFromCents(lineAmountCents),
           remark: `线上预订核销，预订单号：${input.preorder.showNo}`,
         }),
       )
@@ -1111,29 +1160,34 @@ class O2oPreorderService {
       currentItems.push(item)
       requestItemsByRequestId.set(requestId, currentItems)
     })
-    let totalAmountNumber = 0
+    let totalAmountCents = 0
     const normalizedItems = items.map((item) => {
-      const unitPrice = Number(item.product?.defaultPrice ?? 0)
-      const lineAmount = unitPrice * Number(item.qty ?? 0)
+      const snapshot = this.resolvePreorderItemSnapshot(item)
       const totalQty = Math.max(0, Number(item.qty ?? 0))
       const returnedQty = Math.min(totalQty, Math.max(0, Number(returnedQtyMap.get(String(item.productId)) ?? 0)))
-      totalAmountNumber += lineAmount
+      totalAmountCents += parseMoneyToCents(snapshot.lineAmount)
       return {
         id: String(item.id),
         productId: String(item.productId),
         productCode: item.product?.productCode ?? '',
         productName: item.product?.productName ?? '',
-        defaultPrice: this.normalizeDecimalText(unitPrice),
+        defaultPrice: snapshot.unitPrice,
+        originalPrice: snapshot.originalPrice,
+        discountRate: snapshot.discountRate,
+        discountedPrice: snapshot.unitPrice,
+        unitPrice: snapshot.unitPrice,
+        lineAmount: snapshot.lineAmount,
         qty: totalQty,
         returnedQty,
         availableReturnQty: Math.max(0, totalQty - returnedQty),
-        subTotal: this.normalizeDecimalText(lineAmount),
+        subTotal: snapshot.lineAmount,
       }
     })
     const nowMs = Date.now()
-    const totalAmount = this.normalizeDecimalText(totalAmountNumber)
+    const totalAmount = formatMoneyFromCents(totalAmountCents)
     const updateCount = this.normalizeOrderUpdateCount(order.updateCount)
     const resolvedPickupContact = order.pickupContact?.trim() || clientUser?.realName?.trim() || clientUser?.mobile?.trim() || null
+    const o2oRules = await systemConfigService.getO2oRuleConfigs()
     return {
       order: {
         statusReport: this.resolveOrderStatusReport(order, nowMs),
@@ -1187,6 +1241,10 @@ class O2oPreorderService {
         totalQty: order.totalQty,
         totalItemCount: normalizedItems.length,
       },
+      storefront: {
+        businessHoursText: o2oRules.storeBusinessHoursText,
+        mallAnnouncementText: o2oRules.mallAnnouncementText,
+      },
       qrPayload: `y-link://o2o/verify/${order.verifyCode}`,
     }
   }
@@ -1226,6 +1284,13 @@ class O2oPreorderService {
       fallbackItem.productId = productId
       fallbackItem.qty = groupedQtyByProductId.get(productId) ?? 0
       fallbackItem.product = product
+      if (product) {
+        const snapshot = this.buildPreorderItemSnapshot(product, fallbackItem.qty)
+        fallbackItem.originalPrice = snapshot.originalPrice
+        fallbackItem.discountRate = snapshot.discountRate
+        fallbackItem.unitPrice = snapshot.unitPrice
+        fallbackItem.lineAmount = snapshot.lineAmount
+      }
       return fallbackItem
     })
   }
@@ -1238,7 +1303,7 @@ class O2oPreorderService {
       .createQueryBuilder('item')
       .leftJoin('item.product', 'product')
       .select('item.orderId', 'orderId')
-      .addSelect('SUM(item.qty * COALESCE(product.defaultPrice, 0))', 'totalAmount')
+      .addSelect('SUM(CASE WHEN COALESCE(item.lineAmount, 0) > 0 THEN item.lineAmount ELSE item.qty * COALESCE(item.unitPrice, product.defaultPrice, 0) END)', 'totalAmount')
       .where('item.orderId IN (:...orderIds)', { orderIds })
       .groupBy('item.orderId')
       .getRawMany<{ orderId: string; totalAmount: O2oNumericLike }>()
@@ -1324,6 +1389,29 @@ class O2oPreorderService {
     return summaryMap
   }
 
+  private async resolveProductSoldQtyMap(productIds: string[]) {
+    if (!productIds.length) {
+      return new Map<string, number>()
+    }
+
+    const soldRows = await this.preorderItemRepo
+      .createQueryBuilder('item')
+      .leftJoin('item.order', 'preorder')
+      .select('item.productId', 'productId')
+      .addSelect('SUM(item.qty)', 'soldQty')
+      .where('item.productId IN (:...productIds)', { productIds })
+      .andWhere('preorder.status = :status', { status: 'verified' })
+      .groupBy('item.productId')
+      .getRawMany<{ productId: string; soldQty: O2oNumericLike }>()
+
+    return new Map(
+      soldRows.map((item) => [
+        String(item.productId),
+        Math.max(0, Number(item.soldQty ?? 0)),
+      ]),
+    )
+  }
+
   /**
    * 统一构建订单摘要视图：
    * - 列表页与“单条摘要刷新”接口复用同一套聚合口径，避免金额、退货统计和状态报告在不同接口间漂移；
@@ -1398,6 +1486,7 @@ class O2oPreorderService {
         list: [],
         storefront: {
           businessHoursText: o2oRules.storeBusinessHoursText,
+          mallAnnouncementText: o2oRules.mallAnnouncementText,
         },
       }
     }
@@ -1407,6 +1496,7 @@ class O2oPreorderService {
       where: { productId: In(productIds) },
       relations: { tag: true },
     })
+    const soldQtyMap = await this.resolveProductSoldQtyMap(productIds)
 
     const productTagMap = new Map<string, string[]>()
     relations.forEach((relation) => {
@@ -1424,6 +1514,10 @@ class O2oPreorderService {
         productCode: item.productCode,
         productName: item.productName,
         defaultPrice: item.defaultPrice,
+        originalPrice: this.normalizeDecimalText(item.defaultPrice),
+        discountRate: normalizeDiscountRate(item.discountRate),
+        discountedPrice: calculateDiscountedPrice(item.defaultPrice, item.discountRate),
+        o2oRecommended: Boolean(item.o2oRecommended),
         tags: productTagMap.get(String(item.id)) ?? [],
         thumbnail: item.thumbnail,
         detailContent: item.detailContent,
@@ -1431,10 +1525,20 @@ class O2oPreorderService {
         currentStock: Number(item.currentStock ?? 0),
         preOrderedStock: Number(item.preOrderedStock ?? 0),
         availableStock: Math.max(0, Number(item.currentStock ?? 0) - Number(item.preOrderedStock ?? 0)),
+        soldQty: Math.max(0, Math.floor(soldQtyMap.get(String(item.id)) ?? 0)),
       })),
       storefront: {
         businessHoursText: o2oRules.storeBusinessHoursText,
+        mallAnnouncementText: o2oRules.mallAnnouncementText,
       },
+    }
+  }
+
+  async getMallStorefrontConfig() {
+    const o2oRules = await systemConfigService.getO2oRuleConfigs()
+    return {
+      businessHoursText: o2oRules.storeBusinessHoursText,
+      mallAnnouncementText: o2oRules.mallAnnouncementText,
     }
   }
 
@@ -1626,11 +1730,18 @@ class O2oPreorderService {
         }),
       )
       const itemEntities = normalizedItems.map((item) =>
-        manager.getRepository(O2oPreorderItem).create({
-          orderId: savedOrder.id,
-          productId: item.productId,
-          qty: item.qty,
-        }),
+        (() => {
+          const snapshot = this.buildPreorderItemSnapshot(this.getRequiredProduct(productMap, item.productId), item.qty)
+          return manager.getRepository(O2oPreorderItem).create({
+            orderId: savedOrder.id,
+            productId: item.productId,
+            qty: item.qty,
+            originalPrice: snapshot.originalPrice,
+            discountRate: snapshot.discountRate,
+            unitPrice: snapshot.unitPrice,
+            lineAmount: snapshot.lineAmount,
+          })
+        })(),
       )
       await manager.getRepository(O2oPreorderItem).save(itemEntities)
 
@@ -1849,19 +1960,29 @@ class O2oPreorderService {
     existingItems: O2oPreorderItem[],
     normalizedItems: Array<{ productId: string; qty: number }>,
     nextQtyMap: Map<string, number>,
+    productMap: Map<string, BaseProduct>,
   ) {
     const orderItemRepo = manager.getRepository(O2oPreorderItem)
     const existingItemMap = new Map(existingItems.map((item) => [String(item.productId), item]))
     const nextItemEntities = normalizedItems.map((item) => {
       const existedItem = existingItemMap.get(item.productId)
+      const snapshot = this.buildPreorderItemSnapshot(this.getRequiredProduct(productMap, item.productId), item.qty)
       if (existedItem) {
         existedItem.qty = item.qty
+        existedItem.originalPrice = snapshot.originalPrice
+        existedItem.discountRate = snapshot.discountRate
+        existedItem.unitPrice = snapshot.unitPrice
+        existedItem.lineAmount = snapshot.lineAmount
         return existedItem
       }
       return orderItemRepo.create({
         orderId: String(order.id),
         productId: item.productId,
         qty: item.qty,
+        originalPrice: snapshot.originalPrice,
+        discountRate: snapshot.discountRate,
+        unitPrice: snapshot.unitPrice,
+        lineAmount: snapshot.lineAmount,
       })
     })
     await orderItemRepo.save(nextItemEntities)
@@ -1914,7 +2035,7 @@ class O2oPreorderService {
         nextQtyMap,
         productMap,
       )
-      await this.saveUpdatedPreorderItemsInManager(manager, order, existingItems, normalizedItems, nextQtyMap)
+      await this.saveUpdatedPreorderItemsInManager(manager, order, existingItems, normalizedItems, nextQtyMap, productMap)
 
       order.totalQty = totalQty
       order.remark = normalizedRemark
@@ -1965,7 +2086,7 @@ class O2oPreorderService {
         nextQtyMap,
         productMap,
       )
-      await this.saveUpdatedPreorderItemsInManager(manager, order, existingItems, normalizedItems, nextQtyMap)
+      await this.saveUpdatedPreorderItemsInManager(manager, order, existingItems, normalizedItems, nextQtyMap, productMap)
 
       order.totalQty = totalQty
       order.remark = normalizedRemark

@@ -1,10 +1,7 @@
 /**
  * 模块说明：src/store/modules/client-cart.ts
- * 文件职责：维护客户端购物车的内存态、按账号隔离持久化与加购数量校验，是客户端下单链路的购物车真源。
- * 实现逻辑：
- * - 购物车条目统一通过 Store 管理，页面层只发起加购、改量、清空等动作，不直接操作缓存；
- * - 结合本地存储按客户端账号恢复与清理购物车，避免浏览器切换账号后出现串号；
- * - 在写入购物车前统一校验商品、数量与库存约束，减少商城页、购物车页重复判断。
+ * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
+ * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
  */
 
 import { computed, ref } from 'vue'
@@ -12,6 +9,7 @@ import { defineStore } from 'pinia'
 
 import type { O2oMallProduct } from '@/api/modules/o2o'
 import { showAppWarning } from '@/utils/app-alert'
+import { resolveO2oPriceView } from '@/utils/o2o-price'
 import {
   clearPersistedClientCartSnapshot,
   persistClientCartSnapshot,
@@ -24,6 +22,9 @@ export interface ClientCartItem {
   productCode: string
   productName: string
   defaultPrice: string
+  originalPrice: string
+  discountRate: string
+  discountedPrice: string
   thumbnail: string | null
   limitPerUser: number
   availableStock: number
@@ -44,11 +45,15 @@ const toMaxQty = (item: Pick<ClientCartItem, 'availableStock' | 'limitPerUser'>)
 }
 
 const createCartItemFromProduct = (product: O2oMallProduct, qty: number): ClientCartItem => {
+  const price = resolveO2oPriceView(product)
   return {
     productId: product.id,
     productCode: product.productCode,
     productName: product.productName,
-    defaultPrice: product.defaultPrice,
+    defaultPrice: price.unitPrice,
+    originalPrice: price.originalPrice,
+    discountRate: price.discountRate,
+    discountedPrice: price.discountedPrice,
     thumbnail: product.thumbnail,
     limitPerUser: Math.max(0, Number(product.limitPerUser ?? 0)),
     availableStock: Math.max(0, Number(product.availableStock ?? 0)),
@@ -93,6 +98,9 @@ export const useClientCartStore = defineStore('client-cart', () => {
       productCode: item.productCode,
       productName: item.productName,
       defaultPrice: item.defaultPrice,
+      originalPrice: item.originalPrice,
+      discountRate: item.discountRate,
+      discountedPrice: item.discountedPrice,
       thumbnail: item.thumbnail,
       limitPerUser: item.limitPerUser,
       availableStock: item.availableStock,
@@ -178,7 +186,10 @@ export const useClientCartStore = defineStore('client-cart', () => {
           ...item,
           productCode: latest.productCode,
           productName: latest.productName,
-          defaultPrice: latest.defaultPrice,
+          defaultPrice: resolveO2oPriceView(latest).unitPrice,
+          originalPrice: resolveO2oPriceView(latest).originalPrice,
+          discountRate: resolveO2oPriceView(latest).discountRate,
+          discountedPrice: resolveO2oPriceView(latest).discountedPrice,
           thumbnail: latest.thumbnail,
           availableStock: Math.max(0, Number(latest.availableStock ?? 0)),
           preOrderedStock: Math.max(0, Number(latest.preOrderedStock ?? 0)),

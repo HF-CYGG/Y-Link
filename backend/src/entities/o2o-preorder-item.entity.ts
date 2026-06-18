@@ -25,6 +25,18 @@ export class O2oPreorderItem {
   @Column({ name: 'qty', type: 'int', default: 0, comment: '预订数量' })
   qty!: number
 
+  @Column({ name: 'original_price', type: 'decimal', precision: 12, scale: 2, default: 0, comment: '下单原价快照' })
+  originalPrice!: string
+
+  @Column({ name: 'discount_rate', type: 'decimal', precision: 3, scale: 1, default: 10.0, comment: '下单折扣快照' })
+  discountRate!: string
+
+  @Column({ name: 'unit_price', type: 'decimal', precision: 12, scale: 2, default: 0, comment: '下单折后单价快照' })
+  unitPrice!: string
+
+  @Column({ name: 'line_amount', type: 'decimal', precision: 14, scale: 2, default: 0, comment: '下单行金额快照' })
+  lineAmount!: string
+
   // 明细项随订单删除级联清理，避免订单取消或清理后残留孤立 item。
   @ManyToOne(() => O2oPreorder, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'order_id' })
