@@ -59,6 +59,7 @@ const { activeTab, activeComponent, handleTabChange } = useRouteBoundWorkbenchTa
     :tabs="tabs"
     :active-tab="activeTab"
     :active-component="activeComponent"
+    compact-on-phone
     @tab-change="handleTabChange"
   />
 </template>

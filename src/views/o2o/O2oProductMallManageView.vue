@@ -14,7 +14,7 @@ import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 
 import type { TableInstance, UploadRequestOptions } from 'element-plus'
 import { Delete, UploadFilled } from '@element-plus/icons-vue'
-import { BizCrudDialogShell, PageContainer, PassiveNumberInput } from '@/components/common'
+import { BizCrudDialogShell, PageContainer, PageToolbarCard, PassiveNumberInput } from '@/components/common'
 import { getTagList, type Tag } from '@/api/modules/tag'
 import { uploadImage } from '@/api/modules/upload'
  import { compressImageForUpload } from '@/utils/image-upload'
@@ -497,6 +497,22 @@ const handleBatchUpdateStatus = async (enabled: boolean) => {
   }
 }
 
+const handleCompactBatchCommand = (command: string | number | object) => {
+  if (command === 'list') {
+    void handleBatchUpdateStatus(true)
+    return
+  }
+
+  if (command === 'unlist') {
+    void handleBatchUpdateStatus(false)
+    return
+  }
+
+  if (command === 'clear') {
+    void clearSelection()
+  }
+}
+
 // 详细注释：提交商品表单（新增/编辑），处理图片上传逻辑并构造对应 payload 发起请求。
 const handleSubmit = async () => {
   if (!form.productName.trim()) {
@@ -553,14 +569,13 @@ onMounted(async () => {
 
 <template>
   <PageContainer title="线上商品大厅" description="维护客户端可见商品，支持上/下架、预览图、详情文案与库存配置">
-    <div class="apple-card flex min-w-0 flex-col gap-3 p-4">
-      <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div class="min-w-0 flex-1">
-        <div class="flex w-full flex-wrap gap-2.5">
+    <PageToolbarCard compact content-class="product-toolbar-content" actions-class="product-toolbar-actions" :action-stretch-on-phone="false">
+      <template #default>
+        <div class="product-toolbar-search flex w-full flex-wrap gap-2.5">
           <el-input
             v-model="keyword"
             placeholder="搜索产品名称/拼音/编码"
-            :class="isPhone ? '!w-full' : isTablet ? '!w-[240px]' : '!w-[300px]'"
+            :class="isPhone ? 'product-toolbar-search__keyword' : isTablet ? '!w-[240px]' : '!w-[300px]'"
             clearable
             @clear="handleSearch"
             @keyup.enter="handleSearch"
@@ -569,7 +584,7 @@ onMounted(async () => {
             v-model="searchTagId"
             placeholder="按标签筛选"
             clearable
-            :class="isPhone ? '!w-full' : isTablet ? '!w-[200px]' : '!w-[220px]'"
+            :class="isPhone ? 'product-toolbar-search__tag' : isTablet ? '!w-[200px]' : '!w-[220px]'"
             @change="handleSearch"
           >
             <el-option
@@ -579,16 +594,42 @@ onMounted(async () => {
               :value="tag.id"
             />
           </el-select>
-          <el-button :class="isPhone ? 'w-full' : ''" type="primary" icon="Search" @click="handleSearch">搜索</el-button>
+          <el-button :class="isPhone ? 'product-toolbar-search__submit' : ''" type="primary" icon="Search" @click="handleSearch">搜索</el-button>
         </div>
-        </div>
+      </template>
 
-        <div class="flex shrink-0 flex-wrap items-center justify-end gap-2">
+      <template #actions>
+        <div v-if="isPhone" class="product-toolbar-action-row">
+          <el-tag v-if="canManageProducts" type="info">已选 {{ selectedProductCount }} 项</el-tag>
+          <el-tag v-else type="info">当前为只读模式</el-tag>
+          <template v-if="canManageProducts">
+            <el-dropdown
+              trigger="click"
+              :disabled="!selectedProductCount || batchSubmitting"
+              @command="handleCompactBatchCommand"
+            >
+              <el-button size="small" :disabled="!selectedProductCount" :loading="batchSubmitting">
+                批量操作
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="list" :disabled="!selectedProductCount">批量上架</el-dropdown-item>
+                  <el-dropdown-item command="unlist" :disabled="!selectedProductCount">批量下架</el-dropdown-item>
+                  <el-dropdown-item command="clear" :disabled="!selectedProductCount">清空选择</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+            <el-button size="small" type="primary" plain @click="openBatchCreateDialog">
+              批量新增
+            </el-button>
+            <el-button size="small" type="primary" icon="Plus" @click="openCreateDialog">新增产品</el-button>
+          </template>
+        </div>
+        <div v-else class="flex shrink-0 flex-wrap items-center justify-end gap-2">
           <el-tag v-if="canManageProducts" type="info">已选 {{ selectedProductCount }} 项</el-tag>
           <el-tag v-else type="info">当前为只读模式</el-tag>
           <el-button
             v-if="canManageProducts"
-            :class="isPhone ? 'w-full' : ''"
             :disabled="!selectedProductCount"
             :loading="batchSubmitting"
             @click="handleBatchUpdateStatus(true)"
@@ -597,25 +638,24 @@ onMounted(async () => {
           </el-button>
           <el-button
             v-if="canManageProducts"
-            :class="isPhone ? 'w-full' : ''"
             :disabled="!selectedProductCount"
             :loading="batchSubmitting"
             @click="handleBatchUpdateStatus(false)"
           >
             批量下架
           </el-button>
-          <el-button v-if="canManageProducts" :class="isPhone ? 'w-full' : ''" :disabled="!selectedProductCount" @click="clearSelection">
+          <el-button v-if="canManageProducts" :disabled="!selectedProductCount" @click="clearSelection">
             清空选择
           </el-button>
-          <el-button v-if="canManageProducts" :class="isPhone ? 'w-full' : ''" type="primary" plain @click="openBatchCreateDialog">
+          <el-button v-if="canManageProducts" type="primary" plain @click="openBatchCreateDialog">
             批量新增
           </el-button>
-          <el-button v-if="canManageProducts" :class="isPhone ? 'w-full' : ''" type="primary" icon="Plus" @click="openCreateDialog">新增产品</el-button>
+          <el-button v-if="canManageProducts" type="primary" icon="Plus" @click="openCreateDialog">新增产品</el-button>
         </div>
-      </div>
-    </div>
+      </template>
+    </PageToolbarCard>
 
-    <div class="mt-4 rounded-3xl bg-white p-4 shadow-sm">
+    <div class="product-list-surface mt-3 rounded-3xl bg-white p-3 shadow-sm sm:mt-4 sm:p-4">
       <div
         v-if="isPhone"
         v-loading="loading"
@@ -693,28 +733,13 @@ onMounted(async () => {
               </div>
             </div>
 
-            <div class="mall-mobile-card__stock-grid">
-              <div class="mall-mobile-card__stock-item">
-                <span class="mall-mobile-card__stock-label">当前库存</span>
-                <span class="mall-mobile-card__stock-value">{{ product.currentStock }}</span>
-              </div>
-              <div class="mall-mobile-card__stock-item">
-                <span class="mall-mobile-card__stock-label">已预订</span>
-                <span class="mall-mobile-card__stock-value">{{ product.preOrderedStock }}</span>
-              </div>
-              <div class="mall-mobile-card__stock-item is-highlight">
-                <span class="mall-mobile-card__stock-label">可用库存</span>
-                <span class="mall-mobile-card__stock-value">{{ product.availableStock }}</span>
-              </div>
+            <div class="mall-mobile-card__stock-summary">
+              <span>库存：当前 {{ product.currentStock }}</span>
+              <span>已预订 {{ product.preOrderedStock }}</span>
+              <span>可用 {{ product.availableStock }}</span>
             </div>
 
             <div class="mall-mobile-card__footer">
-              <div class="mall-mobile-card__footer-copy">
-                <span class="mall-mobile-card__section-label">商城展示</span>
-                <span class="mall-mobile-card__footer-hint">
-                  {{ product.isActive ? '支持直接切换上下架' : '商品停用时不可上架' }}
-                </span>
-              </div>
               <el-switch
                 :model-value="product.o2oStatus === 'listed'"
                 inline-prompt
@@ -1028,44 +1053,77 @@ onMounted(async () => {
 </template>
 
 <style scoped>
+.product-toolbar-search__keyword {
+  width: 100% !important;
+}
+
+.product-toolbar-search__tag {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.product-toolbar-search__submit {
+  width: 92px;
+  flex: 0 0 92px;
+}
+
+.product-toolbar-action-row {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+@media (max-width: 640px) {
+  :deep(.product-toolbar-actions) {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .product-toolbar-search {
+    gap: 0.5rem;
+  }
+}
+
 .mall-mobile-list,
-.mall-mobile-card,
-.mall-mobile-card__footer-copy {
+.mall-mobile-card {
   display: flex;
   flex-direction: column;
 }
 
 .mall-mobile-list,
 .mall-mobile-card {
-  gap: 0.9rem;
+  gap: 0.7rem;
 }
 
 .mall-mobile-card {
-  padding: 1rem;
+  padding: 0.75rem;
   border: 1px solid rgb(226 232 240);
-  border-radius: 22px;
+  border-radius: 18px;
 }
 
 .mall-mobile-card__head,
 .mall-mobile-card__price-strip,
 .mall-mobile-card__footer {
   display: flex;
-  gap: 0.75rem;
+  gap: 0.6rem;
   justify-content: space-between;
 }
 
 .mall-mobile-card__tag-row {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.45rem;
-  margin-top: 0.7rem;
+  gap: 0.35rem;
+  margin-top: 0.45rem;
 }
 
 .mall-mobile-card__thumb {
-  width: 80px;
-  height: 80px;
+  width: 64px;
+  height: 64px;
   flex: 0 0 auto;
-  border-radius: 18px;
+  border-radius: 14px;
   overflow: hidden;
 }
 
@@ -1075,9 +1133,13 @@ onMounted(async () => {
   color: rgb(15 23 42);
 }
 
+.mall-mobile-card__title {
+  font-size: 15px;
+  line-height: 1.35;
+}
+
 .mall-mobile-card__code,
 .mall-mobile-card__section-label,
-.mall-mobile-card__footer-hint,
 .mall-table-product-cell__code {
   color: rgb(100 116 139);
 }
@@ -1087,16 +1149,17 @@ onMounted(async () => {
   color: rgb(13 148 136);
 }
 
-.mall-mobile-card__stock-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.65rem;
+.mall-mobile-card__stock-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.7rem;
+  color: rgb(100 116 139);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
-.mall-mobile-card__stock-item {
-  padding: 0.75rem;
-  border-radius: 16px;
-  background: rgb(248 250 252);
+.mall-mobile-card__footer {
+  justify-content: flex-end;
 }
 
 .mall-pagination-bar {

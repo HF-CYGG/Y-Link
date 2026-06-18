@@ -24,6 +24,7 @@ interface Props {
   actionsClass?: string
   actionStretchOnPhone?: boolean
   stackActionsOnTablet?: boolean
+  compact?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -31,6 +32,7 @@ const props = withDefaults(defineProps<Props>(), {
   actionsClass: '',
   actionStretchOnPhone: true,
   stackActionsOnTablet: false,
+  compact: false,
 })
 
 const slots = useSlots()
@@ -49,16 +51,19 @@ const hasActions = computed(() => Boolean(slots.actions))
  * - 桌面端允许左右分区，兼顾筛选区与快捷操作的并列展示。
  */
 const wrapperClass = computed(() => {
+  const gapClass = props.compact ? 'gap-2 sm:gap-3' : 'gap-3'
+
   if (!hasActions.value) {
-    return ['flex flex-col gap-3', props.contentClass]
+    return ['flex flex-col', gapClass, props.contentClass]
   }
 
   if (appStore.isTablet && props.stackActionsOnTablet) {
-    return ['flex flex-col gap-3', props.contentClass]
+    return ['flex flex-col', gapClass, props.contentClass]
   }
 
   return [
-    'flex flex-col gap-3',
+    'flex flex-col',
+    gapClass,
     'sm:flex-row sm:items-start sm:justify-between',
     props.contentClass,
   ]
@@ -71,7 +76,8 @@ const wrapperClass = computed(() => {
  */
 const actionContainerClass = computed(() => {
   return [
-    'flex items-center gap-2',
+    'flex items-center',
+    props.compact ? 'gap-1.5 sm:gap-2' : 'gap-2',
     appStore.isPhone && props.actionStretchOnPhone ? 'w-full flex-wrap' : 'shrink-0 flex-wrap justify-end',
     props.actionsClass,
   ]
@@ -79,7 +85,7 @@ const actionContainerClass = computed(() => {
 </script>
 
 <template>
-  <div class="apple-card flex min-w-0 flex-col gap-3 p-4">
+  <div :class="['apple-card flex min-w-0 flex-col', props.compact ? 'gap-2 p-3 sm:gap-3 sm:p-4' : 'gap-3 p-4']">
     <div :class="wrapperClass">
       <div class="min-w-0 flex-1">
         <slot :is-phone="appStore.isPhone" :is-tablet="appStore.isTablet" :is-desktop="appStore.isDesktop" />

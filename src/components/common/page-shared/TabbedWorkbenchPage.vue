@@ -28,6 +28,7 @@ interface Props {
   componentCacheKeyPrefix?: string
   cardClass?: string
   contentClass?: string
+  compactOnPhone?: boolean
 }
 
 const props = withDefaults(defineProps<Props>(), {
@@ -36,6 +37,7 @@ const props = withDefaults(defineProps<Props>(), {
   componentCacheKeyPrefix: '',
   cardClass: '',
   contentClass: '',
+  compactOnPhone: false,
 })
 
 const emit = defineEmits<{
@@ -63,6 +65,7 @@ const resolvedComponentCacheKey = computed(() => {
     <div
       :class="[
         'supplier-workbench-shell overflow-hidden rounded-[30px] border border-slate-200/70 bg-white/95 shadow-[0_18px_48px_-40px_rgba(15,23,42,0.22)] dark:border-slate-700/80 dark:bg-slate-800/95',
+        props.compactOnPhone ? 'supplier-workbench-shell--compact-mobile' : '',
         props.cardClass,
       ]"
     >
@@ -191,9 +194,33 @@ const resolvedComponentCacheKey = computed(() => {
     background: linear-gradient(180deg, rgba(248, 250, 252, 0.92), rgba(255, 255, 255, 0.98));
   }
 
+  .supplier-workbench-shell--compact-mobile .supplier-workbench-shell__hero {
+    padding: 1rem 1rem 0.65rem;
+  }
+
+  .supplier-workbench-shell--compact-mobile .embedded-page {
+    padding: 0.75rem;
+  }
+
+  .supplier-workbench-shell--compact-mobile .supplier-workbench-shell__hero :deep(h2) {
+    font-size: 1rem;
+  }
+
+  .supplier-workbench-shell--compact-mobile .supplier-workbench-shell__hero :deep(p) {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-height: 1.45;
+  }
+
   .supplier-workbench-shell :deep(.el-tabs__item) {
     padding: 0.78rem 0.82rem;
     font-size: 0.92rem;
+  }
+
+  .supplier-workbench-shell--compact-mobile :deep(.el-tabs__item) {
+    padding: 0.62rem 0.76rem;
   }
 }
 

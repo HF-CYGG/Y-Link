@@ -573,6 +573,22 @@ const handleBatchUpdateStatus = async (isActive: boolean) => {
   }
 }
 
+const handleCompactBatchCommand = (command: string | number | object) => {
+  if (command === 'activate') {
+    void handleBatchUpdateStatus(true)
+    return
+  }
+
+  if (command === 'deactivate') {
+    void handleBatchUpdateStatus(false)
+    return
+  }
+
+  if (command === 'clear') {
+    void clearSelection()
+  }
+}
+
 const openBatchCreateDialog = () => {
   if (!ensurePermission('products:manage', '批量新增产品')) {
     return
@@ -683,13 +699,13 @@ onActivated(() => {
 
 <template>
   <div class="product-manager flex min-w-0 flex-col gap-4">
-    <PageToolbarCard>
+    <PageToolbarCard compact content-class="product-toolbar-content" actions-class="product-toolbar-actions" :action-stretch-on-phone="false">
       <template #default="{ isPhone, isTablet }">
-        <div class="flex w-full flex-wrap gap-2.5">
+        <div class="product-toolbar-search flex w-full flex-wrap gap-2.5">
           <el-input
             v-model="searchKeyword"
             placeholder="搜索产品名称/拼音/编码"
-            :class="isPhone ? '!w-full' : isTablet ? '!w-[240px]' : '!w-[300px]'"
+            :class="isPhone ? 'product-toolbar-search__keyword' : isTablet ? '!w-[240px]' : '!w-[300px]'"
             clearable
             @clear="handleSearch"
             @keyup.enter="handleSearch"
@@ -698,7 +714,7 @@ onActivated(() => {
             v-model="searchTagId"
             placeholder="按标签筛选"
             clearable
-            :class="isPhone ? '!w-full' : isTablet ? '!w-[200px]' : '!w-[220px]'"
+            :class="isPhone ? 'product-toolbar-search__tag' : isTablet ? '!w-[200px]' : '!w-[220px]'"
             @change="handleSearch"
           >
             <el-option
@@ -708,17 +724,42 @@ onActivated(() => {
               :value="tag.id"
             />
           </el-select>
-          <el-button :class="isPhone ? 'w-full' : ''" type="primary" icon="Search" @click="handleSearch">搜索</el-button>
+          <el-button :class="isPhone ? 'product-toolbar-search__submit' : ''" type="primary" icon="Search" @click="handleSearch">搜索</el-button>
         </div>
       </template>
 
       <template #actions="{ isPhone }">
-        <div class="flex w-full flex-wrap justify-end gap-2">
+        <div v-if="isPhone" class="product-toolbar-action-row">
+          <el-tag v-if="canManageProducts" type="info">已选 {{ selectedProductCount }} 项</el-tag>
+          <el-tag v-else type="info">当前为只读模式</el-tag>
+          <template v-if="canManageProducts">
+            <el-dropdown
+              trigger="click"
+              :disabled="!selectedProductCount || batchSubmitting"
+              @command="handleCompactBatchCommand"
+            >
+              <el-button size="small" :disabled="!selectedProductCount" :loading="batchSubmitting">
+                批量操作
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="activate" :disabled="!selectedProductCount">批量启用</el-dropdown-item>
+                  <el-dropdown-item command="deactivate" :disabled="!selectedProductCount">批量停用</el-dropdown-item>
+                  <el-dropdown-item command="clear" :disabled="!selectedProductCount">清空选择</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+            <el-button size="small" type="primary" plain @click="openBatchCreateDialog">
+              批量新增
+            </el-button>
+            <el-button size="small" type="primary" icon="Plus" @click="handleAdd">新增产品</el-button>
+          </template>
+        </div>
+        <div v-else class="flex w-full flex-wrap justify-end gap-2">
           <el-tag v-if="canManageProducts" type="info">已选 {{ selectedProductCount }} 项</el-tag>
           <el-tag v-else type="info">当前为只读模式</el-tag>
           <el-button
             v-if="canManageProducts"
-            :class="isPhone ? 'w-full' : ''"
             :disabled="!selectedProductCount"
             :loading="batchSubmitting"
             @click="handleBatchUpdateStatus(true)"
@@ -727,20 +768,19 @@ onActivated(() => {
           </el-button>
           <el-button
             v-if="canManageProducts"
-            :class="isPhone ? 'w-full' : ''"
             :disabled="!selectedProductCount"
             :loading="batchSubmitting"
             @click="handleBatchUpdateStatus(false)"
           >
             批量停用
           </el-button>
-          <el-button v-if="canManageProducts" :class="isPhone ? 'w-full' : ''" :disabled="!selectedProductCount" @click="clearSelection">
+          <el-button v-if="canManageProducts" :disabled="!selectedProductCount" @click="clearSelection">
             清空选择
           </el-button>
-          <el-button v-if="canManageProducts" :class="isPhone ? 'w-full' : ''" type="primary" plain @click="openBatchCreateDialog">
+          <el-button v-if="canManageProducts" type="primary" plain @click="openBatchCreateDialog">
             批量新增
           </el-button>
-          <el-button v-if="canManageProducts" :class="isPhone ? 'w-full' : ''" type="primary" icon="Plus" @click="handleAdd">新增产品</el-button>
+          <el-button v-if="canManageProducts" type="primary" icon="Plus" @click="handleAdd">新增产品</el-button>
         </div>
       </template>
     </PageToolbarCard>
@@ -833,8 +873,8 @@ onActivated(() => {
       </template>
 
       <template #card="{ item }">
-        <div class="apple-card mobile-product-card min-w-0 p-4">
-          <div class="mb-3 flex items-center justify-between">
+        <div class="apple-card mobile-product-card min-w-0 p-3">
+          <div class="mb-2 flex items-center justify-between gap-2">
             <el-checkbox
               v-if="canManageProducts"
               :model-value="selectedProductIds.includes(item.id)"
@@ -846,24 +886,21 @@ onActivated(() => {
               {{ item.isActive ? '启用' : '停用' }}
             </el-tag>
           </div>
-          <div class="flex items-start justify-between gap-3">
+          <div class="flex items-start justify-between gap-2">
             <div class="min-w-0">
-              <h4 class="truncate text-base font-semibold text-slate-800 dark:text-slate-100">
+              <h4 class="truncate text-[15px] font-semibold leading-5 text-slate-800 dark:text-slate-100">
                 {{ item.productName }}
               </h4>
-              <p class="mt-1 break-all text-sm text-slate-500 dark:text-slate-400">{{ item.productCode }}</p>
+              <p class="mt-0.5 break-all text-xs leading-5 text-slate-500 dark:text-slate-400">{{ item.productCode }}</p>
             </div>
             <div class="text-right">
               <span class="font-medium text-red-500">¥{{ Number(item.defaultPrice).toFixed(2) }}</span>
             </div>
           </div>
-          <div class="mt-2 text-xs text-slate-500 dark:text-slate-400">
-            拼音简写：{{ item.pinyinAbbr || '-' }}
-          </div>
-          <div class="mt-1 text-xs text-slate-500 dark:text-slate-400">
+          <div class="mt-1 text-xs leading-5 text-slate-500 dark:text-slate-400">
             库存：当前 {{ item.currentStock }} / 可用 {{ item.availableStock }}
           </div>
-          <div class="mt-3 flex flex-wrap gap-1">
+          <div v-if="item.tags.length" class="product-mobile-tag-row mt-2 flex flex-wrap gap-1">
             <el-tag
               v-for="tag in item.tags"
               :key="tag.id"
@@ -875,7 +912,7 @@ onActivated(() => {
               {{ tag.tagName }}
             </el-tag>
           </div>
-          <div v-if="canManageProducts" class="mt-3 flex flex-wrap justify-end gap-2 border-t border-slate-100 pt-3 dark:border-white/10">
+          <div v-if="canManageProducts" class="mt-2 flex flex-wrap justify-end gap-2 border-t border-slate-100 pt-2 dark:border-white/10">
             <el-button size="small" :loading="editLoading && editingProductId === item.id" @click="handleEditProduct(item)">
               编辑
             </el-button>
@@ -1118,6 +1155,11 @@ onActivated(() => {
   transition: transform 0.25s ease, box-shadow 0.25s ease;
 }
 
+.product-mobile-tag-row {
+  max-height: 48px;
+  overflow: hidden;
+}
+
 .product-discount-editor {
   display: flex;
   width: 100%;
@@ -1135,5 +1177,55 @@ onActivated(() => {
   color: rgb(100 116 139);
   font-size: 12px;
   line-height: 1.6;
+}
+
+@media (max-width: 640px) {
+  .product-manager {
+    gap: 0.75rem;
+  }
+
+  .product-toolbar-search {
+    gap: 0.5rem;
+  }
+
+  .product-toolbar-search__keyword {
+    width: 100% !important;
+  }
+
+  .product-toolbar-search__tag {
+    flex: 1 1 0;
+    min-width: 0;
+  }
+
+  .product-toolbar-search__submit {
+    width: 92px;
+    flex: 0 0 92px;
+  }
+
+  :deep(.product-toolbar-actions) {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .product-toolbar-action-row {
+    display: grid;
+    width: 100%;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.5rem;
+    align-items: center;
+  }
+
+  .product-toolbar-action-row > .el-button {
+    min-width: 0;
+  }
+
+  .product-toolbar-action-row > .el-button:nth-last-child(-n + 2) {
+    grid-column: span 1;
+  }
+
+  .product-toolbar-action-row > .el-button:last-child {
+    width: 100%;
+  }
 }
 </style>
