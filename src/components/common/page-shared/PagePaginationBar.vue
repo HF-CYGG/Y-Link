@@ -1,11 +1,15 @@
+<!--
+  模块说明：F:/Y-Link/src/components/common/page-shared/PagePaginationBar.vue
+  文件职责：分页条组件。
+  实现逻辑：封装分页信息展示与页码切换事件，统一分页交互样式。
+  维护说明：分页参数命名变更需同步 API 分页契约。
+-->
+
 <script setup lang="ts">
 /**
  * 模块说明：src/components/common/page-shared/PagePaginationBar.vue
- * 文件职责：提供页面底部分页条共享壳，统一分页信息展示、翻页交互和多端对齐方式。
- * 实现逻辑：
- * - 对 `currentPage`、`pageSize`、`total` 等分页状态做统一承载，减少列表页重复拼装 Element Plus 分页条；
- * - 根据设备态自动切换布局对齐和间距，让分页区在手机端与桌面端都保持稳定可读；
- * - 把页码变更事件继续向外透传，业务页面仍然掌握真实查询参数与数据刷新节奏。
+ * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
+ * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
  */
 
 

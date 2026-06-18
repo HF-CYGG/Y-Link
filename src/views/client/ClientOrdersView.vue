@@ -842,6 +842,7 @@ onBeforeUnmount(() => {
                   v-for="metaFact in card.metaFacts"
                   :key="metaFact.key"
                   class="order-list-card__meta-pill"
+                  :class="`order-list-card__meta-pill--${metaFact.key}`"
                 >
                   {{ metaFact.label }}
                 </span>
@@ -1050,6 +1051,16 @@ onBeforeUnmount(() => {
     gap: 0.45rem;
   }
 
+  .order-list-card__meta-pill:not(.order-list-card__meta-pill--createdAt, .order-list-card__meta-pill--amount) {
+    display: none;
+  }
+
+  .order-list-card__meta-pill {
+    padding: 0.32rem 0.66rem;
+    font-size: 0.72rem;
+    line-height: 1.1rem;
+  }
+
   .order-list-card__header {
     gap: 0.65rem;
   }
@@ -1059,8 +1070,7 @@ onBeforeUnmount(() => {
   }
 
   .order-list-card__status-row {
-    gap: 0.45rem;
-    margin-top: 0.65rem;
+    display: none;
   }
 
   .order-list-card__summary {

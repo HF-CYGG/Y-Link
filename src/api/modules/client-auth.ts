@@ -39,14 +39,13 @@ export interface ClientSafeProfile {
 
 /**
  * 客户端登录成功结果：
- * - 包含 Token、过期时间及用户信息。
- * - verificationChannel 指示最终采用的验证方式。
+ * - 主链路改为 HttpOnly Cookie 会话，因此响应体不再回传 token；
+ * - 前端只消费过期时间、用户资料和当前认证模式。
  */
 export interface ClientAuthSuccessResult {
   expiresAt: string
   user: ClientSafeProfile
   verificationChannel: 'captcha' | 'sms' | 'email'
-  authMode: 'cookie'
 }
 
 export type ClientRegisterResult = ClientAuthSuccessResult
