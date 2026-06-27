@@ -165,6 +165,8 @@ async function main() {
     assert.equal(preorder.items[0]?.unitPrice, '8.80')
     assert.equal(preorder.items[0]?.subTotal, '17.60')
     assert.equal(preorder.items[0]?.lineAmount, '17.60')
+    const preorderSkuId = preorder.items[0]?.skuId ?? null
+    assert.ok(preorderSkuId, 'default SKU preorder should preserve skuId snapshot')
     pass('下单时写入折扣价格快照')
 
     const mallConfigAfterPendingPreorder = await o2oPreorderService.listMallProducts()
@@ -205,7 +207,7 @@ async function main() {
 
     const returnRequest = await o2oPreorderService.createReturnRequest(clientAuth, preorder.order.id, {
       reason: '已售数量回归验证',
-      items: [{ productId: product.id, qty: 1 }],
+      items: [{ productId: product.id, skuId: preorderSkuId, qty: 1 }],
     })
     await o2oPreorderService.verifyByCode(returnRequest.verifyCode, adminActor)
     const mallConfigAfterVerifiedReturn = await o2oPreorderService.listMallProducts()
