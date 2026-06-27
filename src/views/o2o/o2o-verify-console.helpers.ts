@@ -20,9 +20,12 @@ export const ORDER_TYPE_LABEL_MAP = {
 } as const
 
 export interface EditableOnsiteOrderItem {
+  itemKey: string
   productId: string
+  skuId: string | null
   productCode: string
   productName: string
+  specText: string | null
   defaultPrice: string
   qty: number
   originalQty: number
@@ -98,6 +101,23 @@ export const resolveEditableItemMaxQty = (product: ProductRecord, originalQty = 
   return Math.max(0, Number(product.availableStock ?? 0) + originalQty)
 }
 
+export const resolveEditableLineKey = (productId: string, skuId?: string | null) => skuId || productId
+
+const resolveProductSku = (product: ProductRecord, skuId?: string | null) => {
+  if (!skuId) {
+    return null
+  }
+  return product.skus?.find((sku) => sku.id === skuId) ?? null
+}
+
+const resolveEditableLineMaxQty = (product: ProductRecord, skuId: string | null, originalQty = 0) => {
+  const sku = resolveProductSku(product, skuId)
+  if (!sku) {
+    return resolveEditableItemMaxQty(product, originalQty)
+  }
+  return Math.max(0, Number(sku.availableStock ?? 0) + originalQty)
+}
+
 /**
  * 把订单详情转换为现场改单表单项：
  * - 保留历史订单中已不在可售目录里的商品，避免旧单无法编辑；
@@ -109,15 +129,20 @@ export const buildOnsiteEditableItemsFromDetail = (
 ) => {
   const productMap = new Map(productCatalog.map((item) => [item.id, item]))
   return detail.items.map((item) => {
+    const skuId = item.skuId ? String(item.skuId) : null
+    const itemKey = resolveEditableLineKey(item.productId, skuId)
     const product = productMap.get(item.productId)
-    const maxQty = product ? resolveEditableItemMaxQty(product, item.qty) : item.qty
+    const maxQty = product ? resolveEditableLineMaxQty(product, skuId, item.qty) : item.qty
     const unavailableReason = product
       ? null
       : '当前商品已不在可售目录中，仅支持减少或删除原有数量'
     return {
+      itemKey,
       productId: item.productId,
+      skuId,
       productCode: item.productCode,
       productName: item.productName,
+      specText: item.specText ?? null,
       defaultPrice: item.defaultPrice,
       qty: item.qty,
       originalQty: item.qty,

@@ -252,6 +252,7 @@ const handleSubmit = async () => {
 
   const submitItemSnapshot = selectedItems.value.map((item) => ({
     productId: item.productId,
+    skuId: item.skuId,
     qty: item.qty,
   }))
   const submitRemark = remark.value.trim() || undefined
@@ -287,7 +288,7 @@ const handleSubmit = async () => {
         })
 
         submitItemSnapshot.forEach((item) => {
-          clientCartStore.removeItem(String(item.productId))
+          clientCartStore.removeItem(String(item.skuId || item.productId))
         })
         clientCatalogStore.applyPreorderSubmission(submitItemSnapshot)
         clientCartStore.syncWithCatalog(clientCatalogStore.products)
@@ -439,11 +440,12 @@ const handleSubmit = async () => {
         <p class="mb-3 text-sm font-semibold text-slate-700">商品明细</p>
         <article
           v-for="item in selectedItems"
-          :key="item.productId"
+          :key="item.skuId || item.productId"
           class="mb-2 flex items-center justify-between rounded-xl bg-slate-50 px-3 py-2"
         >
           <div class="min-w-0">
             <p class="truncate text-sm font-semibold text-slate-900">{{ item.productName }}</p>
+            <p v-if="item.specText" class="mt-0.5 text-xs text-slate-400">{{ item.specText }}</p>
             <p class="mt-1 text-sm font-bold text-teal-600">¥{{ Number(resolveO2oPriceView(item).discountedPrice).toFixed(2) }}</p>
             <p v-if="resolveO2oPriceView(item).isDiscounted" class="mt-0.5 text-xs text-slate-400">
               原价 ¥{{ Number(resolveO2oPriceView(item).originalPrice).toFixed(2) }} · {{ resolveO2oPriceView(item).discountLabel }}

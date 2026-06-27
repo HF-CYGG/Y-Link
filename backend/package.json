@@ -33,6 +33,7 @@
     "feedback:customer-service:verify": "tsx scripts/feedback-customer-service-verify.ts",
     "client-staff-directory:verify": "tsx scripts/client-staff-directory-verify.ts",
     "o2o:discount-price:verify": "tsx scripts/o2o-discount-price-verify.ts",
+    "o2o:sku-selection:verify": "tsx scripts/o2o-sku-selection-verify.ts",
     "o2o:verify": "tsx scripts/o2o-preorder-verify.ts",
     "order-query:baseline:verify": "tsx scripts/order-query-baseline-verify.ts",
     "reports:contract:verify": "tsx scripts/report-center-contract-verify.ts",

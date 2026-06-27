@@ -19,16 +19,16 @@ import { calculateDiscountedPriceText, normalizeDiscountRateText } from '@/utils
 
 export interface ClientCartSnapshotItem {
   productId: string
-  productCode: string
+  skuId: string | null
   productName: string
+  thumbnail: string | null
+  specText: string | null
   defaultPrice: string
   originalPrice: string
   discountRate: string
   discountedPrice: string
-  thumbnail: string | null
   limitPerUser: number
   availableStock: number
-  preOrderedStock: number
   qty: number
   selected: boolean
 }
@@ -70,35 +70,35 @@ const normalizeSnapshotItems = (items: unknown): ClientCartSnapshotItem[] => {
 
       const row = item as Record<string, unknown>
       const productId = typeof row.productId === 'string' ? row.productId : ''
-      const productCode = typeof row.productCode === 'string' ? row.productCode : ''
+      const skuId = typeof row.skuId === 'string' && row.skuId.trim() ? row.skuId.trim() : null
       const productName = typeof row.productName === 'string' ? row.productName : ''
+      const thumbnail = typeof row.thumbnail === 'string' && row.thumbnail.trim() ? row.thumbnail.trim() : null
+      const specText = typeof row.specText === 'string' && row.specText.trim() ? row.specText.trim() : null
       const originalPrice = normalizePrice(row.originalPrice ?? row.defaultPrice)
       const discountRate = normalizeDiscountRateText(row.discountRate as string | number | null | undefined)
       const discountedPrice = normalizePrice(row.discountedPrice ?? calculateDiscountedPriceText(originalPrice, discountRate))
       const defaultPrice = discountedPrice
-      const thumbnail = typeof row.thumbnail === 'string' ? row.thumbnail : null
       const limitPerUser = Number.isFinite(row.limitPerUser) ? Number(row.limitPerUser) : 0
       const availableStock = Number.isFinite(row.availableStock) ? Number(row.availableStock) : 0
-      const preOrderedStock = Number.isFinite(row.preOrderedStock) ? Number(row.preOrderedStock) : 0
       const qty = Number.isFinite(row.qty) ? Math.max(0, Math.floor(Number(row.qty))) : 0
       const selected = row.selected !== false
 
-      if (!productId || !productCode || !productName || qty <= 0) {
+      if (!productId || !productName || qty <= 0) {
         return null
       }
 
       return {
         productId,
-        productCode,
+        skuId,
         productName,
+        thumbnail,
+        specText,
         defaultPrice,
         originalPrice,
         discountRate,
         discountedPrice,
-        thumbnail,
         limitPerUser: Math.max(0, Math.floor(limitPerUser)),
         availableStock: Math.max(0, Math.floor(availableStock)),
-        preOrderedStock: Math.max(0, Math.floor(preOrderedStock)),
         qty,
         selected,
       } satisfies ClientCartSnapshotItem

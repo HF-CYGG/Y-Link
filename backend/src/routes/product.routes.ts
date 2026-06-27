@@ -63,6 +63,24 @@ const optionalGeneratedProductCodeSchema = z.preprocess((value) => {
   return value
 }, z.string().min(1).optional())
 
+const productSpecGroupSchema = z.object({
+  name: z.string().trim().min(1).max(32),
+  values: z.array(z.string().trim().min(1).max(64)).min(1),
+})
+
+const productSkuSchema = z.object({
+  id: productTagIdSchema.optional(),
+  skuCode: z.string().trim().min(1).max(96).optional(),
+  specValues: z.record(z.string().trim().min(1).max(32), z.string().trim().min(1).max(64)).optional(),
+  defaultPrice: optionalNonNegativeNumberSchema,
+  discountRate: z.number().min(1).max(10).optional(),
+  currentStock: z.number().int().nonnegative().optional(),
+  preOrderedStock: z.number().int().nonnegative().optional(),
+  isActive: optionalBooleanSchema,
+  thumbnail: z.string().max(255).nullable().optional(),
+  sortOrder: z.number().int().nonnegative().optional(),
+})
+
 const createProductSchema = z.object({
   productCode: optionalGeneratedProductCodeSchema,
   productName: z.string().trim().min(1, 'productName 不能为空'),
@@ -78,6 +96,8 @@ const createProductSchema = z.object({
   currentStock: z.number().int().nonnegative().optional(),
   preOrderedStock: z.number().int().nonnegative().optional(),
   tagIds: z.array(productTagIdSchema).optional(),
+  specGroups: z.array(productSpecGroupSchema).optional(),
+  skus: z.array(productSkuSchema).optional(),
 })
 
 const updateProductSchema = z.object({
@@ -95,6 +115,8 @@ const updateProductSchema = z.object({
   currentStock: z.number().int().nonnegative().optional(),
   preOrderedStock: z.number().int().nonnegative().optional(),
   tagIds: z.array(productTagIdSchema).optional(),
+  specGroups: z.array(productSpecGroupSchema).optional(),
+  skus: z.array(productSkuSchema).optional(),
 })
 
 const batchUpdateProductSchema = z

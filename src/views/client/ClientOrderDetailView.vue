@@ -55,6 +55,7 @@ import {
   O2O_RETURN_REASON_MAX_LENGTH,
   createEmptyVoucherEditableFields,
   type EditableOrderItem,
+  type EditableOrderProductOption,
   type OrderVoucherEditableFields,
   type VoucherOrientation,
 } from '@/views/client/client-order-detail-types'
@@ -84,6 +85,8 @@ const ORDER_TYPE_LABEL_MAP = {
 } as const
 const DETAIL_AUTO_REFRESH_INTERVAL_MS = 15 * 1000
 const DETAIL_REFRESH_NOTICE_MS = 3200
+const ADD_PRODUCT_SKU_SEPARATOR = '::'
+const resolveOrderLineKey = (productId: string, skuId?: string | null) => skuId || productId
 const clientOrderRefreshSourceId = `client-order-detail-${Math.random().toString(36).slice(2)}`
 
 const route = useRoute()
@@ -537,10 +540,13 @@ const selectedReturnItems = computed(() => {
     return []
   }
   return detail.value.items
-    .map((item) => ({
-      ...item,
-      selectedQty: Math.max(0, Math.min(item.availableReturnQty, Number(returnQtyMap.value[item.productId] ?? 0))),
-    }))
+    .map((item) => {
+      const itemKey = resolveOrderLineKey(item.productId, item.skuId)
+      return {
+        ...item,
+        selectedQty: Math.max(0, Math.min(item.availableReturnQty, Number(returnQtyMap.value[itemKey] ?? 0))),
+      }
+    })
     .filter((item) => item.selectedQty > 0)
 })
 
@@ -561,8 +567,25 @@ const editableOrderTotalAmount = computed(() => {
 })
 
 const editableProductOptions = computed(() => {
-  const selectedProductIdSet = new Set(editOrderItems.value.map((item) => item.productId))
-  return mallProducts.value.filter((item) => !selectedProductIdSet.has(item.id))
+  const selectedItemKeySet = new Set(editOrderItems.value.map((item) => item.itemKey))
+  return mallProducts.value.flatMap((product): EditableOrderProductOption[] => {
+    const activeSkus = product.skus?.filter((sku) => sku.isActive !== false) ?? []
+    if (activeSkus.length) {
+      return activeSkus
+        .filter((sku) => !selectedItemKeySet.has(resolveOrderLineKey(product.id, sku.id)))
+        .map((sku) => ({
+          value: `${product.id}${ADD_PRODUCT_SKU_SEPARATOR}${sku.id}`,
+          label: `${product.productName} / ${sku.specText}`,
+        }))
+    }
+    if (selectedItemKeySet.has(resolveOrderLineKey(product.id, null))) {
+      return []
+    }
+    return [{
+      value: product.id,
+      label: product.productName,
+    }]
+  })
 })
 
 const canSubmitOrderEdit = computed(() => {
@@ -593,21 +616,49 @@ const toEditableItemMaxQty = (product: O2oMallProduct, originalQty = 0) => {
   return Math.max(0, Number(product.availableStock ?? 0) + originalQty)
 }
 
+const resolveMallProductSku = (product: O2oMallProduct, skuId?: string | null) => {
+  if (!skuId) {
+    return null
+  }
+  return product.skus?.find((sku) => sku.id === skuId) ?? null
+}
+
+const parseAddProductSelection = (value: string) => {
+  const [productId, skuId] = value.split(ADD_PRODUCT_SKU_SEPARATOR)
+  return {
+    productId: productId?.trim() ?? '',
+    skuId: skuId?.trim() || null,
+  }
+}
+
+const toEditableLineMaxQty = (product: O2oMallProduct, skuId: string | null, originalQty = 0) => {
+  const sku = resolveMallProductSku(product, skuId)
+  if (!sku) {
+    return toEditableItemMaxQty(product, originalQty)
+  }
+  return Math.max(0, Number(sku.availableStock ?? 0) + originalQty)
+}
+
 const buildEditableItemsFromDetail = (nextDetail: O2oPreorderDetail, existingItems: EditableOrderItem[] = []) => {
   const productMap = new Map(mallProducts.value.map((item) => [item.id, item]))
-  const draftQtyMap = new Map(existingItems.map((item) => [item.productId, item.qty]))
+  const draftQtyMap = new Map(existingItems.map((item) => [item.itemKey, item.qty]))
   return nextDetail.items.map((item) => {
+    const skuId = item.skuId ? String(item.skuId) : null
+    const itemKey = resolveOrderLineKey(item.productId, skuId)
     const product = productMap.get(item.productId)
-    const maxQty = product ? toEditableItemMaxQty(product, item.qty) : item.qty
+    const maxQty = product ? toEditableLineMaxQty(product, skuId, item.qty) : item.qty
     const priceView = resolveO2oPriceView(item)
     const unavailableReason = product
       ? null
       : '当前商品已不在可售目录中，仅支持减少或删除原有数量'
-    const draftQty = draftQtyMap.get(item.productId)
+    const draftQty = draftQtyMap.get(itemKey)
     return {
+      itemKey,
       productId: item.productId,
+      skuId,
       productCode: item.productCode,
       productName: item.productName,
+      specText: item.specText ?? null,
       originalPrice: priceView.originalPrice,
       discountRate: priceView.discountRate,
       unitPrice: item.unitPrice ?? priceView.unitPrice,
@@ -707,9 +758,9 @@ const handleVoucherOrientationChange = (value: VoucherOrientation) => {
   voucherOrientation.value = value
 }
 
-const updateEditItemQty = (productId: string, value: number | null | undefined) => {
+const updateEditItemQty = (itemKey: string, value: number | null | undefined) => {
   editOrderItems.value = editOrderItems.value.map((item) => {
-    if (item.productId !== productId) {
+    if (item.itemKey !== itemKey) {
       return item
     }
     const normalizedQty = Math.max(0, Math.min(item.maxQty, Math.floor(Number(value ?? 0))))
@@ -720,17 +771,18 @@ const updateEditItemQty = (productId: string, value: number | null | undefined) 
   })
 }
 
-const removeEditItem = (productId: string) => {
-  editOrderItems.value = editOrderItems.value.filter((item) => item.productId !== productId)
+const removeEditItem = (itemKey: string) => {
+  editOrderItems.value = editOrderItems.value.filter((item) => item.itemKey !== itemKey)
 }
 
 const addEditProduct = () => {
-  const productId = editAddProductId.value.trim()
+  const { productId, skuId } = parseAddProductSelection(editAddProductId.value.trim())
   if (!productId) {
     showAppWarning('请先选择要加入订单的商品')
     return
   }
-  if (editOrderItems.value.some((item) => item.productId === productId)) {
+  const itemKey = resolveOrderLineKey(productId, skuId)
+  if (editOrderItems.value.some((item) => item.itemKey === itemKey)) {
     showAppWarning('该商品已在当前订单中')
     return
   }
@@ -739,18 +791,26 @@ const addEditProduct = () => {
     showAppWarning('未找到可加入的商品')
     return
   }
-  const maxQty = toEditableItemMaxQty(product, 0)
+  const sku = resolveMallProductSku(product, skuId)
+  if (skuId && (!sku || sku.isActive === false)) {
+    showAppWarning('该商品规格当前不可售')
+    return
+  }
+  const maxQty = toEditableLineMaxQty(product, skuId, 0)
   if (maxQty <= 0) {
     showAppWarning('该商品当前库存不足，暂不可加入订单')
     return
   }
-  const priceView = resolveO2oPriceView(product)
+  const priceView = resolveO2oPriceView(sku ?? product)
   editOrderItems.value = [
     ...editOrderItems.value,
     {
+      itemKey,
       productId: product.id,
+      skuId,
       productCode: product.productCode,
       productName: product.productName,
+      specText: sku?.specText ?? null,
       originalPrice: priceView.originalPrice,
       discountRate: priceView.discountRate,
       unitPrice: priceView.unitPrice,
@@ -764,28 +824,28 @@ const addEditProduct = () => {
   editAddProductId.value = ''
 }
 
-const updateReturnQty = (productId: string, value: number | undefined, maxQty: number) => {
+const updateReturnQty = (itemKey: string, value: number | undefined, maxQty: number) => {
   const nextQty = Math.max(0, Math.min(maxQty, Math.floor(Number(value ?? 0))))
   if (nextQty <= 0) {
     const nextQtyMap = { ...returnQtyMap.value }
-    delete nextQtyMap[productId]
+    delete nextQtyMap[itemKey]
     returnQtyMap.value = nextQtyMap
     return
   }
   returnQtyMap.value = {
     ...returnQtyMap.value,
-    [productId]: nextQty,
+    [itemKey]: nextQty,
   }
 }
 
 // 详细注释：Element Plus 的数字输入框在清空、回填和边界切换时可能抛出 undefined / null，
 // 这里统一先做一次前置归一化，再复用既有数量更新逻辑，避免模板事件参数退化成隐式 any。
 const handleReturnQtyChange = (
-  productId: string,
+  itemKey: string,
   maxQty: number,
   value: number | null | undefined,
 ) => {
-  updateReturnQty(productId, value ?? undefined, maxQty)
+  updateReturnQty(itemKey, value ?? undefined, maxQty)
 }
 
 const renderQrCode = async () => {
@@ -1176,7 +1236,7 @@ const handleSubmitOrderEdit = async () => {
   const normalizedItems = editOrderItems.value
     .map((item) => ({
       productId: item.productId,
-      productName: item.productName,
+      skuId: item.skuId,
       qty: Math.max(0, Math.floor(Number(item.qty ?? 0))),
     }))
     .filter((item) => item.qty > 0)
@@ -1214,6 +1274,7 @@ const handleSubmitOrderEdit = async () => {
       remark: editRemark.value.trim() || undefined,
       items: normalizedItems.map((item) => ({
         productId: item.productId,
+        skuId: item.skuId,
         qty: item.qty,
       })),
     })
@@ -1296,6 +1357,7 @@ const handleSubmitReturnRequest = async () => {
       reason: normalizedReason,
       items: selectedReturnItems.value.map((item) => ({
         productId: item.productId,
+        skuId: item.skuId,
         qty: item.selectedQty,
       })),
     })
@@ -1754,7 +1816,7 @@ onBeforeUnmount(() => {
       @update:visible="editDialogVisible = $event"
       @update:edit-remark="editRemark = $event"
       @update:edit-add-product-id="editAddProductId = $event"
-      @update:item-qty="updateEditItemQty($event.productId, $event.value)"
+      @update:item-qty="updateEditItemQty($event.itemKey, $event.value)"
       @remove-item="removeEditItem"
       @add-product="addEditProduct"
       @submit="handleSubmitOrderEdit"
@@ -1807,7 +1869,7 @@ onBeforeUnmount(() => {
       :can-submit-return-request="canSubmitReturnRequest"
       @update:visible="returnDialogVisible = $event"
       @update:return-reason="returnReason = $event"
-      @update:return-qty="handleReturnQtyChange($event.productId, $event.maxQty, $event.value)"
+      @update:return-qty="handleReturnQtyChange($event.itemKey, $event.maxQty, $event.value)"
       @submit="handleSubmitReturnRequest"
       @closed="handleReturnDialogClosed"
     />

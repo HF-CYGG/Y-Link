@@ -167,7 +167,7 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
     )
   }
 
-  const applyPreorderSubmission = (submittedItems: Array<{ productId: string | number; qty: number }>) => {
+  const applyPreorderSubmission = (submittedItems: Array<{ productId: string | number; skuId?: string | number | null; qty: number }>) => {
     if (!products.value.length || !submittedItems.length) {
       return
     }
@@ -177,13 +177,18 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
     // - `preOrderedStock` 增加本次预订数量；
     // - `availableStock` 重新按“现货库存 - 预订占用”即时回算。
     const preorderQtyMap = new Map<string, number>()
+    const skuPreorderQtyMap = new Map<string, number>()
     submittedItems.forEach((item) => {
       const normalizedProductId = String(item.productId ?? '').trim()
+      const normalizedSkuId = item.skuId === null || item.skuId === undefined ? '' : String(item.skuId).trim()
       const normalizedQty = Math.max(0, Math.floor(Number(item.qty ?? 0)))
       if (!normalizedProductId || normalizedQty <= 0) {
         return
       }
       preorderQtyMap.set(normalizedProductId, (preorderQtyMap.get(normalizedProductId) ?? 0) + normalizedQty)
+      if (normalizedSkuId) {
+        skuPreorderQtyMap.set(normalizedSkuId, (skuPreorderQtyMap.get(normalizedSkuId) ?? 0) + normalizedQty)
+      }
     })
     if (!preorderQtyMap.size) {
       return
@@ -198,10 +203,23 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
       hasPatchedProduct = true
       const nextPreOrderedStock = Math.max(0, Number(product.preOrderedStock ?? 0) + patchQty)
       const nextAvailableStock = Math.max(0, Number(product.currentStock ?? 0) - nextPreOrderedStock)
+      const nextSkus = (product.skus ?? []).map((sku) => {
+        const skuPatchQty = skuPreorderQtyMap.get(String(sku.id)) ?? 0
+        if (!skuPatchQty) {
+          return sku
+        }
+        const nextSkuPreOrderedStock = Math.max(0, Number(sku.preOrderedStock ?? 0) + skuPatchQty)
+        return {
+          ...sku,
+          preOrderedStock: nextSkuPreOrderedStock,
+          availableStock: Math.max(0, Number(sku.currentStock ?? 0) - nextSkuPreOrderedStock),
+        }
+      })
       return {
         ...product,
         preOrderedStock: nextPreOrderedStock,
         availableStock: nextAvailableStock,
+        skus: nextSkus,
       }
     })
     if (!hasPatchedProduct) {

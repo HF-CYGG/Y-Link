@@ -16,6 +16,7 @@ import {
   UpdateDateColumn,
 } from 'typeorm'
 import { BizOutboundOrderItem } from './biz-outbound-order-item.entity.js'
+import { BaseProductSku } from './base-product-sku.entity.js'
 import { entityColumnOptions } from './entity-column-options.js'
 import { RelProductTag } from './rel-product-tag.entity.js'
 
@@ -90,4 +91,7 @@ export class BaseProduct {
   // 出库明细引用产品，保留反向关系便于统计查询。
   @OneToMany(() => BizOutboundOrderItem, (item) => item.product)
   orderItems?: Relation<BizOutboundOrderItem[]>
+
+  @OneToMany(() => BaseProductSku, (sku) => sku.product)
+  skus?: Relation<BaseProductSku[]>
 }

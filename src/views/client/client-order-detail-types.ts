@@ -11,9 +11,12 @@ export const O2O_RETURN_REASON_MAX_LENGTH = 500
 export const O2O_PREORDER_REMARK_MAX_LENGTH = 255
 
 export interface EditableOrderItem {
+  itemKey: string
   productId: string
+  skuId: string | null
   productCode: string
   productName: string
+  specText: string | null
   defaultPrice: string
   originalPrice: string
   discountRate: string
@@ -22,6 +25,11 @@ export interface EditableOrderItem {
   originalQty: number
   maxQty: number
   unavailableReason: string | null
+}
+
+export interface EditableOrderProductOption {
+  value: string
+  label: string
 }
 
 export interface OrderVoucherEditableFields {

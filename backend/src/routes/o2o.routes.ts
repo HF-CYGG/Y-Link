@@ -23,23 +23,29 @@ import { extractRequestMeta } from '../utils/request-meta.js'
 import { CLIENT_USER_ACCOUNT_TYPES } from '../entities/client-user.entity.js'
 import { assertPermanentDeletePassword } from '../utils/permanent-delete-password.js'
 
+const preorderItemSchema = z.object({
+  productId: z.union([z.string(), z.number()]),
+  skuId: z.union([z.string(), z.number()]).nullable().optional(),
+  qty: z.number().int().positive(),
+})
+
 const submitPreorderSchema = z.object({
   // 详细注释：客户端必须显式传入“是否系统申请”，避免服务端继续使用默认值导致语义失真。
   isSystemApplied: z.boolean(),
   // 详细注释：提货人由客户端显式填写后传入服务端，避免继续退回为账号默认名导致代领场景失真。
   pickupContact: z.string().trim().min(1).max(32),
   remark: z.string().max(O2O_PREORDER_REMARK_MAX_LENGTH).optional(),
-  items: z.array(z.object({ productId: z.union([z.string(), z.number()]), qty: z.number().int().positive() })).min(1),
+  items: z.array(preorderItemSchema).min(1),
 })
 
 const updateMyPreorderSchema = z.object({
   remark: z.string().max(O2O_PREORDER_REMARK_MAX_LENGTH).optional(),
-  items: z.array(z.object({ productId: z.union([z.string(), z.number()]), qty: z.number().int().positive() })).min(1),
+  items: z.array(preorderItemSchema).min(1),
 })
 
 const onsiteAdjustPreorderSchema = z.object({
   remark: z.string().max(O2O_PREORDER_REMARK_MAX_LENGTH).optional(),
-  items: z.array(z.object({ productId: z.union([z.string(), z.number()]), qty: z.number().int().positive() })).min(1),
+  items: z.array(preorderItemSchema).min(1),
 })
 
 const inboundSchema = z.object({
@@ -114,7 +120,7 @@ const deleteConsoleOrderSchema = z.object({
 
 const submitReturnRequestSchema = z.object({
   reason: z.string().trim().min(1).max(O2O_RETURN_REASON_MAX_LENGTH),
-  items: z.array(z.object({ productId: z.union([z.string(), z.number()]), qty: z.number().int().positive() })).min(1),
+  items: z.array(preorderItemSchema).min(1),
 })
 
 const rejectReturnRequestSchema = z.object({

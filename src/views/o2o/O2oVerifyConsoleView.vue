@@ -48,6 +48,7 @@ import {
   O2O_PREORDER_REMARK_MAX_LENGTH,
   O2O_RETURN_REJECT_REASON_MAX_LENGTH,
   ORDER_TYPE_LABEL_MAP,
+  resolveEditableLineKey,
   resolveEditableItemMaxQty,
   type EditableOnsiteOrderItem,
 } from '@/views/o2o/o2o-verify-console.helpers'
@@ -67,6 +68,13 @@ const { hasPermission, ensurePermission } = usePermissionAction()
 const verifyDetailRequest = useStableRequest()
 const productCatalogRequest = useStableRequest()
 const lastRouteVerifyKey = ref('')
+
+interface OnsiteProductOption {
+  value: string
+  label: string
+}
+
+const ONSITE_PRODUCT_SKU_SEPARATOR = '::'
 
 const productCatalog = ref<ProductRecord[]>([])
 const productCatalogLoading = ref(false)
@@ -246,8 +254,25 @@ const scanActionHint = computed(() => {
 })
 
 const onsiteEditableProductOptions = computed(() => {
-  const selectedProductIdSet = new Set(onsiteOrderItems.value.map((item) => item.productId))
-  return productCatalog.value.filter((item) => !selectedProductIdSet.has(item.id))
+  const selectedItemKeySet = new Set(onsiteOrderItems.value.map((item) => item.itemKey))
+  return productCatalog.value.flatMap((product): OnsiteProductOption[] => {
+    const activeSkus = product.skus?.filter((sku) => sku.isActive !== false) ?? []
+    if (activeSkus.length) {
+      return activeSkus
+        .filter((sku) => !selectedItemKeySet.has(resolveEditableLineKey(product.id, sku.id ?? null)))
+        .map((sku) => ({
+          value: `${product.id}${ONSITE_PRODUCT_SKU_SEPARATOR}${sku.id}`,
+          label: `${product.productName} / ${sku.specText ?? '默认规格'}`,
+        }))
+    }
+    if (selectedItemKeySet.has(resolveEditableLineKey(product.id, null))) {
+      return []
+    }
+    return [{
+      value: product.id,
+      label: product.productName,
+    }]
+  })
 })
 
 const onsiteTotalQty = computed(() => {
@@ -261,6 +286,21 @@ const onsiteTotalAmount = computed(() => {
 const canSubmitOnsiteAdjust = computed(() => {
   return onsiteTotalQty.value > 0 && canOpenOnsiteAdjust.value && !onsiteAdjustSubmitting.value
 })
+
+const parseOnsiteProductSelection = (value: string) => {
+  const [productId, skuId] = value.split(ONSITE_PRODUCT_SKU_SEPARATOR)
+  return {
+    productId: productId?.trim() ?? '',
+    skuId: skuId?.trim() || null,
+  }
+}
+
+const resolveOnsiteProductSku = (product: ProductRecord, skuId?: string | null) => {
+  if (!skuId) {
+    return null
+  }
+  return product.skus?.find((sku) => sku.id === skuId) ?? null
+}
 
 const focusInput = async () => {
   await nextTick()
@@ -485,9 +525,9 @@ const handleSubmitReject = async () => {
   }
 }
 
-const updateOnsiteItemQty = (productId: string, value: number | null | undefined) => {
+const updateOnsiteItemQty = (itemKey: string, value: number | null | undefined) => {
   onsiteOrderItems.value = onsiteOrderItems.value.map((item) => {
-    if (item.productId !== productId) {
+    if (item.itemKey !== itemKey) {
       return item
     }
     const normalizedQty = Math.max(0, Math.min(item.maxQty, Math.floor(Number(value ?? 0))))
@@ -498,17 +538,18 @@ const updateOnsiteItemQty = (productId: string, value: number | null | undefined
   })
 }
 
-const removeOnsiteItem = (productId: string) => {
-  onsiteOrderItems.value = onsiteOrderItems.value.filter((item) => item.productId !== productId)
+const removeOnsiteItem = (itemKey: string) => {
+  onsiteOrderItems.value = onsiteOrderItems.value.filter((item) => item.itemKey !== itemKey)
 }
 
 const addOnsiteProduct = () => {
-  const productId = onsiteAddProductId.value.trim()
+  const { productId, skuId } = parseOnsiteProductSelection(onsiteAddProductId.value.trim())
   if (!productId) {
     showAppWarning('请先选择要加入订单的商品')
     return
   }
-  if (onsiteOrderItems.value.some((item) => item.productId === productId)) {
+  const itemKey = resolveEditableLineKey(productId, skuId)
+  if (onsiteOrderItems.value.some((item) => item.itemKey === itemKey)) {
     showAppWarning('该商品已在当前订单中')
     return
   }
@@ -519,7 +560,12 @@ const addOnsiteProduct = () => {
     return
   }
 
-  const maxQty = resolveEditableItemMaxQty(product, 0)
+  const sku = resolveOnsiteProductSku(product, skuId)
+  if (skuId && (!sku || sku.isActive === false)) {
+    showAppWarning('该商品规格当前不可售')
+    return
+  }
+  const maxQty = sku ? Math.max(0, Number(sku.availableStock ?? 0)) : resolveEditableItemMaxQty(product, 0)
   if (maxQty <= 0) {
     showAppWarning('该商品当前库存不足，暂不可加入订单')
     return
@@ -528,10 +574,13 @@ const addOnsiteProduct = () => {
   onsiteOrderItems.value = [
     ...onsiteOrderItems.value,
     {
+      itemKey,
       productId: product.id,
+      skuId,
       productCode: product.productCode,
       productName: product.productName,
-      defaultPrice: product.defaultPrice,
+      specText: sku?.specText ?? null,
+      defaultPrice: String(sku?.discountedPrice ?? product.defaultPrice),
       qty: 1,
       originalQty: 0,
       maxQty,
@@ -573,7 +622,7 @@ const handleSubmitOnsiteAdjust = async () => {
   const normalizedItems = onsiteOrderItems.value
     .map((item) => ({
       productId: item.productId,
-      productName: item.productName,
+      skuId: item.skuId,
       qty: Math.max(0, Math.floor(Number(item.qty ?? 0))),
     }))
     .filter((item) => item.qty > 0)
@@ -608,6 +657,7 @@ const handleSubmitOnsiteAdjust = async () => {
       remark: onsiteRemark.value.trim() || undefined,
       items: normalizedItems.map((item) => ({
         productId: item.productId,
+        skuId: item.skuId,
         qty: item.qty,
       })),
     })
@@ -1136,10 +1186,10 @@ watch(
                 :loading="productCatalogLoading"
               >
                 <el-option
-                  v-for="product in onsiteEditableProductOptions"
-                  :key="product.id"
-                  :label="`${product.productName}（剩余 ${product.availableStock} 件）`"
-                  :value="product.id"
+                  v-for="option in onsiteEditableProductOptions"
+                  :key="option.value"
+                  :label="option.label"
+                  :value="option.value"
                 />
               </el-select>
             </div>
@@ -1151,12 +1201,13 @@ watch(
         <div class="space-y-3">
           <div
             v-for="item in onsiteOrderItems"
-            :key="item.productId"
+            :key="item.itemKey"
             class="rounded-3xl border border-slate-100 bg-white px-4 py-4"
           >
             <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
               <div class="min-w-0 flex-1">
                 <p class="text-sm font-semibold text-slate-900">{{ item.productName }}</p>
+                <p v-if="item.specText" class="mt-1 text-xs leading-5 text-slate-500">{{ item.specText }}</p>
                 <p class="mt-1 text-xs leading-5 text-slate-400">
                   原数量 {{ item.originalQty }} 件，当前最多可改为 {{ item.maxQty }} 件
                 </p>
@@ -1174,10 +1225,10 @@ watch(
                     :step="1"
                     :precision="0"
                     class="w-full"
-                    @update:model-value="updateOnsiteItemQty(item.productId, $event)"
+                    @update:model-value="updateOnsiteItemQty(item.itemKey, $event)"
                   />
                 </div>
-                <el-button text type="danger" @click="removeOnsiteItem(item.productId)">移除</el-button>
+                <el-button text type="danger" @click="removeOnsiteItem(item.itemKey)">移除</el-button>
               </div>
             </div>
           </div>

@@ -17,7 +17,7 @@ import { Delete, UploadFilled } from '@element-plus/icons-vue'
 import { BizCrudDialogShell, PageContainer, PageToolbarCard, PassiveNumberInput } from '@/components/common'
 import { getTagList, type Tag } from '@/api/modules/tag'
 import { uploadImage } from '@/api/modules/upload'
- import { compressImageForUpload } from '@/utils/image-upload'
+import { compressImageForUpload } from '@/utils/image-upload'
 import { resolveProductPlaceholder } from '@/utils/product-placeholder'
 import { calculateDiscountedPriceText, normalizeDiscountRateText, resolveO2oPriceView } from '@/utils/o2o-price'
 import {
@@ -26,6 +26,7 @@ import {
   updateProduct,
   type CreateProductDto,
   type ProductRecord,
+  type ProductSkuRecord,
   type UpdateProductDto,
 } from '@/api/modules/product'
 import { useDevice } from '@/composables/useDevice'
@@ -40,6 +41,8 @@ type O2oProductFormState = {
   productName: string
   defaultPrice: number
   discountRate: number
+  skus: EditableProductSku[]
+  selectedSkuId: string
   isActive: boolean
   o2oStatus: 'listed' | 'unlisted'
   o2oRecommended: boolean
@@ -47,6 +50,25 @@ type O2oProductFormState = {
   detailContent: string
   limitPerUser: number
   currentStock: number
+}
+
+type EditableProductSku = {
+  localId: string
+  id?: string
+  productId?: string
+  skuCode: string
+  specValues: Record<string, string>
+  specText: string
+  defaultPrice: number
+  originalPrice?: string
+  discountRate: number
+  discountedPrice?: string
+  currentStock: number
+  preOrderedStock: number
+  availableStock: number
+  isActive: boolean
+  thumbnail: string
+  sortOrder: number
 }
 
 type DiscountEditMode = 'rate' | 'price'
@@ -81,6 +103,8 @@ const form = reactive<O2oProductFormState>({
   productName: '',
   defaultPrice: 0,
   discountRate: 10,
+  skus: [],
+  selectedSkuId: '',
   isActive: true,
   o2oStatus: 'listed',
   o2oRecommended: false,
@@ -95,11 +119,110 @@ const uploadingThumbnail = ref(false)
 const uploadProgress = ref(0)
 const uploadProgressVisible = ref(false)
 const thumbnailDragActive = ref(false)
+const skuThumbnailPreviewUrls = reactive<Record<string, string>>({})
+const uploadingSkuThumbnail = ref(false)
+const skuUploadProgress = ref(0)
+const skuUploadProgressVisible = ref(false)
+const skuThumbnailDragActive = ref(false)
 const discountEditMode = ref<DiscountEditMode>('rate')
 const discountEditModeOptions = [
   { label: '按折扣', value: 'rate' },
   { label: '按折后价', value: 'price' },
 ]
+
+const resolveSkuLocalId = (sku: ProductSkuRecord, index: number) => {
+  const preferredId = typeof sku.id === 'string' && sku.id.trim()
+    ? sku.id.trim()
+    : typeof sku.skuCode === 'string' && sku.skuCode.trim()
+      ? sku.skuCode.trim()
+      : `sku-${index + 1}`
+  return `${preferredId}-${index}`
+}
+
+const normalizeSkuSpecValues = (specValues: ProductSkuRecord['specValues']) => {
+  if (!specValues || typeof specValues !== 'object') {
+    return {}
+  }
+
+  return Object.fromEntries(
+    Object.entries(specValues)
+      .map(([key, value]) => [key.trim(), String(value ?? '').trim()])
+      .filter(([key, value]) => key && value),
+  )
+}
+
+const normalizeSkuInteger = (value: unknown) => {
+  const normalized = Number(value)
+  if (!Number.isFinite(normalized)) {
+    return 0
+  }
+  return Math.max(0, Math.floor(normalized))
+}
+
+const resolveEditableSkuPrice = (sku: ProductSkuRecord, productDefaultPrice: number) => {
+  const candidates = [sku.defaultPrice, sku.originalPrice, sku.discountedPrice, productDefaultPrice]
+  for (const candidate of candidates) {
+    const normalized = Number(candidate)
+    if (Number.isFinite(normalized) && normalized > 0) {
+      return normalized
+    }
+  }
+
+  return 0
+}
+
+const normalizeEditableSku = (sku: ProductSkuRecord, index: number, productDefaultPrice: number): EditableProductSku => {
+  return {
+    localId: resolveSkuLocalId(sku, index),
+    id: typeof sku.id === 'string' && sku.id.trim() ? sku.id.trim() : undefined,
+    productId: typeof sku.productId === 'string' && sku.productId.trim() ? sku.productId.trim() : undefined,
+    skuCode: typeof sku.skuCode === 'string' ? sku.skuCode.trim() : '',
+    specValues: normalizeSkuSpecValues(sku.specValues),
+    specText: typeof sku.specText === 'string' ? sku.specText.trim() : '',
+    defaultPrice: resolveEditableSkuPrice(sku, productDefaultPrice),
+    originalPrice: typeof sku.originalPrice === 'string' && sku.originalPrice.trim() ? sku.originalPrice.trim() : undefined,
+    discountRate: normalizeDiscountRateNumber(sku.discountRate ?? 10),
+    discountedPrice: typeof sku.discountedPrice === 'string' && sku.discountedPrice.trim() ? sku.discountedPrice.trim() : undefined,
+    currentStock: normalizeSkuInteger(sku.currentStock),
+    preOrderedStock: normalizeSkuInteger(sku.preOrderedStock),
+    availableStock: normalizeSkuInteger(sku.availableStock),
+    isActive: sku.isActive !== false,
+    thumbnail: typeof sku.thumbnail === 'string' ? sku.thumbnail.trim() : '',
+    sortOrder: normalizeSkuInteger(sku.sortOrder ?? index),
+  }
+}
+
+const resolveSkuDisplayLabel = (sku: EditableProductSku, index: number) => {
+  const specLabel = sku.specText || Object.values(sku.specValues).filter(Boolean).join(' / ')
+  return specLabel || sku.skuCode || `规格 ${index + 1}`
+}
+
+const clearSkuThumbnailPreview = (skuLocalId: string) => {
+  const previewUrl = skuThumbnailPreviewUrls[skuLocalId]
+  if (!previewUrl) {
+    return
+  }
+
+  URL.revokeObjectURL(previewUrl)
+  delete skuThumbnailPreviewUrls[skuLocalId]
+}
+
+const clearAllSkuThumbnailPreviews = () => {
+  Object.keys(skuThumbnailPreviewUrls).forEach((skuLocalId) => {
+    clearSkuThumbnailPreview(skuLocalId)
+  })
+}
+
+const skuSelectOptions = computed(() => {
+  return form.skus.map((sku, index) => ({
+    label: resolveSkuDisplayLabel(sku, index),
+    value: sku.localId,
+  }))
+})
+
+const selectedSkuForEdit = computed(() => {
+  return form.skus.find((sku) => sku.localId === form.selectedSkuId) ?? null
+})
 
 const configuredThumbnailUrl = computed(() => {
   return localPreviewUrl.value || form.thumbnail.trim()
@@ -117,12 +240,49 @@ const currentPreviewImageList = computed(() => {
   return displayThumbnail.value ? [displayThumbnail.value] : []
 })
 
+const configuredSkuThumbnailUrl = computed(() => {
+  if (!selectedSkuForEdit.value) {
+    return ''
+  }
+
+  return skuThumbnailPreviewUrls[selectedSkuForEdit.value.localId] || selectedSkuForEdit.value.thumbnail.trim()
+})
+
+const displaySkuThumbnail = computed(() => {
+  return configuredSkuThumbnailUrl.value ? resolveProductPlaceholder(configuredSkuThumbnailUrl.value) : ''
+})
+
+const hasConfiguredSkuThumbnail = computed(() => {
+  return Boolean(configuredSkuThumbnailUrl.value)
+})
+
+const currentSkuPreviewImageList = computed(() => {
+  return displaySkuThumbnail.value ? [displaySkuThumbnail.value] : []
+})
+
 const uploadProgressStatus = computed(() => {
   return uploadProgress.value >= 100 ? 'success' : undefined
 })
 
+const skuUploadProgressStatus = computed(() => {
+  return skuUploadProgress.value >= 100 ? 'success' : undefined
+})
+
 const dialogTitle = computed(() => {
   return form.id ? '编辑线上商品' : '新增线上商品'
+})
+
+const activeDiscountPrice = computed(() => {
+  return selectedSkuForEdit.value?.defaultPrice || form.defaultPrice
+})
+
+const discountScopeLabel = computed(() => {
+  if (!selectedSkuForEdit.value) {
+    return '当前正在编辑主商品默认折扣'
+  }
+
+  const selectedIndex = form.skus.findIndex((sku) => sku.localId === selectedSkuForEdit.value?.localId)
+  return `当前正在编辑 ${resolveSkuDisplayLabel(selectedSkuForEdit.value, Math.max(selectedIndex, 0))} 的折扣`
 })
 
 /**
@@ -173,7 +333,7 @@ const resolveDiscountRateFromDiscountedPrice = (originalPrice: unknown, discount
 const discountRateOptions = computed(() => {
   return Array.from({ length: 91 }, (_item, index) => {
     const value = Math.round((10 - index * 0.1) * 10) / 10
-    const discountedPrice = calculateDiscountedPriceText(form.defaultPrice, value)
+    const discountedPrice = calculateDiscountedPriceText(activeDiscountPrice.value, value)
     return {
       label: `${formatDiscountRateLabel(value)} / ¥${discountedPrice}`,
       value,
@@ -181,23 +341,38 @@ const discountRateOptions = computed(() => {
   })
 })
 
-const discountedPricePreview = computed(() => {
-  return calculateDiscountedPriceText(form.defaultPrice, form.discountRate)
+const skuDiscountRateInput = computed({
+  get: () => {
+    return selectedSkuForEdit.value ? selectedSkuForEdit.value.discountRate : form.discountRate
+  },
+  set: (value: number) => {
+    const normalizedValue = normalizeDiscountRateNumber(value)
+    if (selectedSkuForEdit.value) {
+      selectedSkuForEdit.value.discountRate = normalizedValue
+      return
+    }
+
+    form.discountRate = normalizedValue
+  },
 })
 
-const discountedPriceInput = computed({
+const discountedPricePreview = computed(() => {
+  return calculateDiscountedPriceText(activeDiscountPrice.value, skuDiscountRateInput.value)
+})
+
+const skuDiscountedPriceInput = computed({
   get: () => Number(discountedPricePreview.value),
   set: (value: number) => {
-    form.discountRate = resolveDiscountRateFromDiscountedPrice(form.defaultPrice, value)
+    skuDiscountRateInput.value = resolveDiscountRateFromDiscountedPrice(activeDiscountPrice.value, value)
   },
 })
 
 const minimumDiscountedPrice = computed(() => {
-  return Number(calculateDiscountedPriceText(form.defaultPrice, 1))
+  return Number(calculateDiscountedPriceText(activeDiscountPrice.value, 1))
 })
 
 const maximumDiscountedPrice = computed(() => {
-  return Math.max(Number(form.defaultPrice) || 0, minimumDiscountedPrice.value)
+  return Math.max(Number(activeDiscountPrice.value) || 0, minimumDiscountedPrice.value)
 })
 
 watch(
@@ -206,6 +381,22 @@ watch(
     if (!isActive) {
       form.o2oStatus = 'unlisted'
     }
+  },
+)
+
+watch(
+  () => form.skus.map((sku) => sku.localId).join('|'),
+  (skuKey) => {
+    if (!skuKey) {
+      form.selectedSkuId = ''
+      return
+    }
+
+    if (form.selectedSkuId && form.skus.some((sku) => sku.localId === form.selectedSkuId)) {
+      return
+    }
+
+    form.selectedSkuId = ''
   },
 )
 
@@ -220,6 +411,8 @@ const resetForm = () => {
   form.productName = ''
   form.defaultPrice = 0
   form.discountRate = 10
+  form.skus = []
+  form.selectedSkuId = ''
   form.isActive = true
   form.o2oStatus = 'listed'
   form.o2oRecommended = false
@@ -233,9 +426,13 @@ const resetForm = () => {
     URL.revokeObjectURL(localPreviewUrl.value)
   }
   localPreviewUrl.value = ''
+  clearAllSkuThumbnailPreviews()
   uploadingThumbnail.value = false
   uploadProgress.value = 0
   uploadProgressVisible.value = false
+  uploadingSkuThumbnail.value = false
+  skuUploadProgress.value = 0
+  skuUploadProgressVisible.value = false
 }
 
 // 详细注释：加载商品列表，支持按名称、拼音、编码与标签筛选，刷新商城大厅商品数据。
@@ -429,6 +626,97 @@ const handleRemoveThumbnail = () => {
   showAppSuccess('已移除商品预览图')
 }
 
+const handleSkuThumbnailDragEnter = () => {
+  if (uploadingSkuThumbnail.value || !selectedSkuForEdit.value) {
+    return
+  }
+  skuThumbnailDragActive.value = true
+}
+
+const handleSkuThumbnailDragLeave = (event: DragEvent) => {
+  const nextTarget = event.relatedTarget
+  if (nextTarget instanceof Node && event.currentTarget instanceof Node && event.currentTarget.contains(nextTarget)) {
+    return
+  }
+  skuThumbnailDragActive.value = false
+}
+
+const handleSkuThumbnailDrop = () => {
+  skuThumbnailDragActive.value = false
+}
+
+const handleSkuThumbnailUpload = async (options: UploadRequestOptions) => {
+  const sku = selectedSkuForEdit.value
+  if (!sku) {
+    showAppWarning('请先选择要维护规格图的 SKU')
+    return
+  }
+
+  const skuLocalId = sku.localId
+  skuThumbnailDragActive.value = false
+  uploadingSkuThumbnail.value = true
+  skuUploadProgress.value = 0
+  skuUploadProgressVisible.value = true
+
+  let uploadStage: 'compress' | 'upload' = 'compress'
+  try {
+    const { file: compressedUploadFile } = await compressImageForUpload(options.file)
+
+    clearSkuThumbnailPreview(skuLocalId)
+    skuThumbnailPreviewUrls[skuLocalId] = URL.createObjectURL(compressedUploadFile)
+
+    uploadStage = 'upload'
+    const uploadResult = await uploadImage(compressedUploadFile, {
+      onUploadProgress: (event) => {
+        if (!event.total || event.total <= 0) {
+          return
+        }
+        const nextProgress = Math.min(99, Math.max(1, Math.round((event.loaded / event.total) * 100)))
+        skuUploadProgress.value = nextProgress
+      },
+    })
+
+    const targetSku = form.skus.find((item) => item.localId === skuLocalId)
+    if (targetSku) {
+      targetSku.thumbnail = uploadResult.url
+    }
+
+    skuUploadProgress.value = 100
+    options.onSuccess?.(uploadResult)
+    showAppSuccess('规格预览图上传完成')
+    globalThis.window.setTimeout(() => {
+      skuUploadProgressVisible.value = false
+      skuUploadProgress.value = 0
+    }, 520)
+  } catch (error) {
+    console.error(uploadStage === 'compress' ? '规格图压缩失败:' : '规格图上传失败:', error)
+    const fallbackMessage = uploadStage === 'compress' ? '规格图处理失败，请重试' : '规格图上传失败，请重试'
+    showAppError(error instanceof Error && error.message.trim() ? error.message : fallbackMessage)
+    skuUploadProgress.value = 0
+    skuUploadProgressVisible.value = false
+  } finally {
+    uploadingSkuThumbnail.value = false
+  }
+}
+
+const handleRemoveSkuThumbnail = () => {
+  const sku = selectedSkuForEdit.value
+  if (!sku) {
+    showAppWarning('请先选择要删除规格图的 SKU')
+    return
+  }
+  if (uploadingSkuThumbnail.value) {
+    showAppWarning('规格预览图正在上传，请稍后再删除')
+    return
+  }
+
+  clearSkuThumbnailPreview(sku.localId)
+  sku.thumbnail = ''
+  skuUploadProgress.value = 0
+  skuUploadProgressVisible.value = false
+  showAppSuccess('已移除规格预览图')
+}
+
 // 详细注释：打开编辑商品弹窗，将商品记录字段回显到表单模型中。
 const openEditDialog = (product: ProductRecord) => {
   if (!ensurePermission('products:manage', '编辑产品')) {
@@ -440,6 +728,8 @@ const openEditDialog = (product: ProductRecord) => {
   form.productName = product.productName
   form.defaultPrice = Number(product.defaultPrice)
   form.discountRate = Number(product.discountRate || 10)
+  form.skus = (product.skus ?? []).map((sku, index) => normalizeEditableSku(sku, index, Number(product.defaultPrice)))
+  form.selectedSkuId = ''
   form.isActive = product.isActive
   form.o2oStatus = product.o2oStatus
   form.o2oRecommended = product.o2oRecommended
@@ -513,6 +803,26 @@ const handleCompactBatchCommand = (command: string | number | object) => {
   }
 }
 
+const buildSkuSubmitPayload = (): ProductSkuRecord[] => {
+  return form.skus.map((sku) => ({
+    id: sku.id || undefined,
+    productId: sku.productId || undefined,
+    skuCode: sku.skuCode || undefined,
+    specValues: { ...sku.specValues },
+    specText: sku.specText || undefined,
+    defaultPrice: sku.defaultPrice,
+    originalPrice: sku.originalPrice,
+    discountRate: sku.discountRate,
+    discountedPrice: calculateDiscountedPriceText(sku.defaultPrice, sku.discountRate),
+    currentStock: sku.currentStock,
+    preOrderedStock: sku.preOrderedStock,
+    availableStock: sku.availableStock,
+    isActive: sku.isActive,
+    thumbnail: sku.thumbnail.trim() || null,
+    sortOrder: sku.sortOrder,
+  }))
+}
+
 // 详细注释：提交商品表单（新增/编辑），处理图片上传逻辑并构造对应 payload 发起请求。
 const handleSubmit = async () => {
   if (!form.productName.trim()) {
@@ -533,6 +843,7 @@ const handleSubmit = async () => {
         isActive: form.isActive,
         o2oStatus: form.o2oStatus,
         o2oRecommended: form.o2oRecommended,
+        skus: buildSkuSubmitPayload(),
         thumbnail: finalThumbnail,
         detailContent: form.detailContent.trim() || null,
         limitPerUser: Math.max(1, Math.floor(form.limitPerUser)),
@@ -548,6 +859,7 @@ const handleSubmit = async () => {
         isActive: form.isActive,
         o2oStatus: form.o2oStatus,
         o2oRecommended: form.o2oRecommended,
+        skus: buildSkuSubmitPayload(),
         thumbnail: finalThumbnail,
         detailContent: form.detailContent.trim() || null,
         limitPerUser: Math.max(1, Math.floor(form.limitPerUser)),
@@ -880,6 +1192,22 @@ onMounted(async () => {
           <el-col :span="isPhone ? 24 : 12">
             <el-form-item label="折扣设置">
               <div class="o2o-discount-editor">
+                <el-select
+                  v-model="form.selectedSkuId"
+                  clearable
+                  filterable
+                  class="w-full"
+                  placeholder="未选择 SKU 时沿用主商品折扣"
+                  :disabled="!form.skus.length"
+                >
+                  <el-option label="主商品默认折扣" value="" />
+                  <el-option
+                    v-for="option in skuSelectOptions"
+                    :key="option.value"
+                    :label="option.label"
+                    :value="option.value"
+                  />
+                </el-select>
                 <el-segmented
                   v-model="discountEditMode"
                   :options="discountEditModeOptions"
@@ -887,7 +1215,7 @@ onMounted(async () => {
                 />
                 <el-select
                   v-if="discountEditMode === 'rate'"
-                  v-model="form.discountRate"
+                  v-model="skuDiscountRateInput"
                   filterable
                   class="w-full"
                   placeholder="请选择折扣"
@@ -901,7 +1229,7 @@ onMounted(async () => {
                 </el-select>
                 <PassiveNumberInput
                   v-else
-                  v-model="discountedPriceInput"
+                  v-model="skuDiscountedPriceInput"
                   :min="minimumDiscountedPrice"
                   :max="maximumDiscountedPrice"
                   :precision="2"
@@ -911,7 +1239,7 @@ onMounted(async () => {
                   :disabled="Number(form.defaultPrice) <= 0"
                 />
                 <p class="o2o-discount-editor__hint">
-                  {{ formatDiscountRateLabel(form.discountRate) }} · 折后价 ¥{{ discountedPricePreview }}
+                  {{ discountScopeLabel }} · {{ formatDiscountRateLabel(skuDiscountRateInput) }} · 折后价 ¥{{ discountedPricePreview }}
                 </p>
               </div>
             </el-form-item>
@@ -1036,6 +1364,92 @@ onMounted(async () => {
                     </el-button>
                   </template>
                 </el-popconfirm>
+              </div>
+              <div class="sku-thumbnail-panel">
+                <div class="sku-thumbnail-panel__header">
+                  <div>
+                    <p class="sku-thumbnail-panel__title">规格预览图</p>
+                    <p class="sku-thumbnail-panel__subtitle">
+                      {{ selectedSkuForEdit ? '上传结果只会写入当前 SKU 的 thumbnail' : '先选择一个 SKU，再上传对应规格图' }}
+                    </p>
+                  </div>
+                  <el-tag v-if="selectedSkuForEdit" size="small" effect="light" type="info">
+                    {{ skuSelectOptions.find((option) => option.value === form.selectedSkuId)?.label }}
+                  </el-tag>
+                </div>
+                <div
+                  class="avatar-uploader-wrap"
+                  :class="{ 'is-drag-active': skuThumbnailDragActive, 'is-disabled': !selectedSkuForEdit }"
+                  @dragenter.prevent="handleSkuThumbnailDragEnter"
+                  @dragover.prevent="handleSkuThumbnailDragEnter"
+                  @dragleave.prevent="handleSkuThumbnailDragLeave"
+                  @drop.prevent="handleSkuThumbnailDrop"
+                >
+                  <el-upload
+                    class="avatar-uploader"
+                    drag
+                    action=""
+                    :http-request="handleSkuThumbnailUpload"
+                    :show-file-list="false"
+                    accept="image/*"
+                    :disabled="uploadingSkuThumbnail || !selectedSkuForEdit"
+                  >
+                    <div
+                      class="avatar-uploader__content"
+                      :class="{ 'has-image': hasConfiguredSkuThumbnail, 'is-empty': !hasConfiguredSkuThumbnail }"
+                    >
+                      <el-image
+                        v-if="hasConfiguredSkuThumbnail"
+                        :src="displaySkuThumbnail"
+                        :preview-src-list="currentSkuPreviewImageList"
+                        preview-teleported
+                        fit="cover"
+                        class="avatar avatar--full"
+                        alt="规格预览图"
+                        @click.stop
+                      />
+                      <div v-else class="avatar-uploader__empty-state">
+                        <div class="avatar-uploader__preview-shell" :class="{ 'is-empty': !hasConfiguredSkuThumbnail }">
+                          <el-icon class="avatar-uploader__empty-icon"><UploadFilled /></el-icon>
+                        </div>
+                        <div class="avatar-uploader__text">
+                          <p class="avatar-uploader__title">
+                            {{ !selectedSkuForEdit ? '先选择需要维护的 SKU' : uploadingSkuThumbnail ? '正在上传规格图' : skuThumbnailDragActive ? '松手即可上传规格图' : '拖拽或点击上传规格图' }}
+                          </p>
+                          <p class="avatar-uploader__hint">{{ selectedSkuForEdit ? '规格图会覆盖当前 SKU 的缩略图' : '未选 SKU 时仍保留主商品图配置' }}</p>
+                        </div>
+                      </div>
+                    </div>
+                  </el-upload>
+                </div>
+                <Transition name="thumbnail-progress-fade">
+                  <div v-if="skuUploadProgressVisible" class="thumbnail-progress">
+                    <el-progress :percentage="skuUploadProgress" :stroke-width="6" :status="skuUploadProgressStatus" :show-text="false" />
+                  </div>
+                </Transition>
+                <div class="thumbnail-actions">
+                  <span class="thumbnail-actions__hint">
+                    {{ hasConfiguredSkuThumbnail ? '当前预览图来自选中 SKU' : '未上传规格图时，客户端仍可继续显示主商品图' }}
+                  </span>
+                  <el-popconfirm
+                    width="240"
+                    title="确认删除当前 SKU 规格图吗？"
+                    confirm-button-text="删除"
+                    cancel-button-text="取消"
+                    @confirm="handleRemoveSkuThumbnail"
+                  >
+                    <template #reference>
+                      <el-button
+                        plain
+                        :icon="Delete"
+                        :disabled="!selectedSkuForEdit || !hasConfiguredSkuThumbnail || uploadingSkuThumbnail"
+                        class="thumbnail-remove-button"
+                      >
+                        删除规格图
+                      </el-button>
+                    </template>
+                  </el-popconfirm>
+                </div>
               </div>
             </el-form-item>
           </el-col>
@@ -1248,6 +1662,41 @@ onMounted(async () => {
 .o2o-product-edit-form .thumbnail-progress {
   width: 240px;
   max-width: 100%;
+}
+
+.sku-thumbnail-panel {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 1rem;
+}
+
+.sku-thumbnail-panel__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.sku-thumbnail-panel__title,
+.sku-thumbnail-panel__subtitle {
+  margin: 0;
+}
+
+.sku-thumbnail-panel__title {
+  font-size: 13px;
+  font-weight: 600;
+  color: rgb(15 23 42);
+}
+
+.sku-thumbnail-panel__subtitle {
+  margin-top: 0.2rem;
+  font-size: 12px;
+  line-height: 1.5;
+  color: rgb(100 116 139);
+}
+
+.avatar-uploader-wrap.is-disabled {
+  opacity: 0.72;
 }
 
 .avatar-uploader :deep(.el-upload-dragger) {

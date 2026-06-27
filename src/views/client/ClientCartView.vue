@@ -18,7 +18,6 @@ import { useClientMallSnapshotRefresh } from '@/composables/useClientMallSnapsho
 import { useClientAuthStore, useClientCartStore } from '@/store'
 import pinia from '@/store/pinia'
 
-
 import { showAppSuccess, showAppWarning } from '@/utils/app-alert'
 import { resolveO2oPriceView } from '@/utils/o2o-price'
 
@@ -37,6 +36,8 @@ const clientCartStore = useClientCartStore(pinia)
 const { syncing: catalogSyncing, refreshMallSnapshot } = useClientMallSnapshotRefresh()
 const checkoutPending = ref(false)
 
+const resolveCartItemKey = (item: { productId: string; skuId?: string | null }) => item.skuId || item.productId
+
 onMounted(() => {
   clientCartStore.initialize(clientAuthStore.currentUser?.id)
   // 购物车页优先展示本地快照，再静默拉取最新库存，避免把首屏等待绑定到目录同步上。
@@ -46,7 +47,6 @@ onMounted(() => {
 const selectedCount = computed(() => clientCartStore.selectedValidItems.length)
 const totalAmount = computed(() => clientCartStore.selectedValidItems.reduce((sum, item) => sum + Math.max(0, Number(item.defaultPrice || 0)) * item.qty, 0))
 
-// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const removeSelected = () => {
   if (!selectedCount.value) {
     showAppWarning('请先选择商品')
@@ -146,7 +146,7 @@ const handleBack = () => {
           <TransitionGroup name="cart-list-flow" tag="div" class="space-y-3">
             <article
               v-for="item in clientCartStore.validItems"
-              :key="`valid-${item.productId}`"
+              :key="`valid-${resolveCartItemKey(item)}`"
               class="rounded-xl bg-[var(--ylink-color-surface-soft)] px-3 py-3 border border-slate-100"
             >
               <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -155,10 +155,11 @@ const handleBack = () => {
                     type="checkbox"
                     :checked="item.selected"
                     class="mt-1 w-4 h-4 rounded text-teal-600 focus:ring-teal-500 cursor-pointer"
-                    @change="clientCartStore.toggleItemSelected(item.productId, ($event.target as HTMLInputElement).checked)"
+                    @change="clientCartStore.toggleItemSelected(resolveCartItemKey(item), ($event.target as HTMLInputElement).checked)"
                   />
                   <div class="min-w-0">
                     <p class="truncate text-sm font-semibold text-slate-900">{{ item.productName }}</p>
+                    <p v-if="item.specText" class="mt-0.5 text-xs text-slate-400">{{ item.specText }}</p>
                     <p class="mt-1 text-sm font-bold text-teal-600">¥{{ Number(resolveO2oPriceView(item).discountedPrice).toFixed(2) }}</p>
                     <p v-if="resolveO2oPriceView(item).isDiscounted" class="mt-0.5 text-xs text-slate-400">
                       原价 ¥{{ Number(resolveO2oPriceView(item).originalPrice).toFixed(2) }} · {{ resolveO2oPriceView(item).discountLabel }}
@@ -167,13 +168,13 @@ const handleBack = () => {
                   </div>
                 </div>
                 <div class="flex items-center justify-end gap-3 sm:w-auto w-full">
-                  <button type="button" class="client-cart-qty-btn" @click="clientCartStore.incrementQty(item.productId, -1)">-</button>
+                  <button type="button" class="client-cart-qty-btn" @click="clientCartStore.incrementQty(resolveCartItemKey(item), -1)">-</button>
                   <span class="min-w-8 text-center text-sm font-medium">
                     <Transition name="cart-qty-pop" mode="out-in">
-                      <span :key="`drawer-qty-${item.productId}-${item.qty}`">{{ item.qty }}</span>
+                      <span :key="`drawer-qty-${resolveCartItemKey(item)}-${item.qty}`">{{ item.qty }}</span>
                     </Transition>
                   </span>
-                  <button type="button" class="client-cart-qty-btn" @click="clientCartStore.incrementQty(item.productId, 1)">+</button>
+                  <button type="button" class="client-cart-qty-btn" @click="clientCartStore.incrementQty(resolveCartItemKey(item), 1)">+</button>
                 </div>
               </div>
             </article>
@@ -188,14 +189,14 @@ const handleBack = () => {
           <TransitionGroup name="cart-list-flow" tag="div" class="space-y-2">
             <article
               v-for="item in clientCartStore.invalidItems"
-              :key="`invalid-${item.productId}`"
+              :key="`invalid-${resolveCartItemKey(item)}`"
               class="flex flex-col gap-3 rounded-xl bg-rose-50 px-3 py-3 border border-rose-100 sm:flex-row sm:items-center sm:justify-between"
             >
               <div class="min-w-0">
                 <p class="text-sm font-semibold text-rose-700">{{ item.productName }}</p>
                 <p class="text-xs text-rose-500 mt-1">当前不可预订，请移除后继续</p>
               </div>
-              <button type="button" class="self-end text-xs font-medium text-rose-600 bg-white px-3 py-1.5 rounded-full border border-rose-200 hover:bg-rose-50 sm:self-auto" @click="clientCartStore.removeItem(item.productId)">移除</button>
+              <button type="button" class="self-end text-xs font-medium text-rose-600 bg-white px-3 py-1.5 rounded-full border border-rose-200 hover:bg-rose-50 sm:self-auto" @click="clientCartStore.removeItem(resolveCartItemKey(item))">移除</button>
             </article>
           </TransitionGroup>
         </div>

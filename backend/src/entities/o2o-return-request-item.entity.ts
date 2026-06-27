@@ -6,6 +6,7 @@
 
 import { Column, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn, type Relation } from 'typeorm'
 import { BaseProduct } from './base-product.entity.js'
+import { BaseProductSku } from './base-product-sku.entity.js'
 import { O2oReturnRequest } from './o2o-return-request.entity.js'
 import { entityColumnOptions } from './entity-column-options.js'
 
@@ -22,6 +23,16 @@ export class O2oReturnRequestItem {
   @Column({ name: 'product_id', ...entityColumnOptions.foreignId, comment: '商品ID' })
   productId!: string
 
+  @Index('idx_o2o_return_request_item_sku_id')
+  @Column({ name: 'sku_id', ...entityColumnOptions.foreignId, nullable: true, comment: 'SKU ID' })
+  skuId!: string | null
+
+  @Column({ name: 'sku_code_snapshot', type: 'varchar', length: 96, nullable: true, comment: '退货 SKU 编码快照' })
+  skuCodeSnapshot!: string | null
+
+  @Column({ name: 'spec_text_snapshot', type: 'varchar', length: 255, nullable: true, comment: '退货规格文本快照' })
+  specTextSnapshot!: string | null
+
   @Column({ name: 'qty', type: 'int', default: 0, comment: '退货数量' })
   qty!: number
 
@@ -32,4 +43,8 @@ export class O2oReturnRequestItem {
   @ManyToOne(() => BaseProduct, { onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'product_id' })
   product?: Relation<BaseProduct>
+
+  @ManyToOne(() => BaseProductSku, { onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'sku_id' })
+  sku?: Relation<BaseProductSku>
 }

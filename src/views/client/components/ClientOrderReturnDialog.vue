@@ -25,7 +25,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (event: 'update:visible', value: boolean): void
   (event: 'update:returnReason', value: string): void
-  (event: 'update:returnQty', payload: { productId: string; maxQty: number; value: number | null | undefined }): void
+  (event: 'update:returnQty', payload: { itemKey: string; productId: string; skuId: string | null; maxQty: number; value: number | null | undefined }): void
   (event: 'submit'): void
   (event: 'closed'): void
 }>()
@@ -37,6 +37,8 @@ const handleDialogVisibleChange = (value: boolean) => {
 const handleReturnReasonChange = (value: string) => {
   emit('update:returnReason', value)
 }
+
+const resolveReturnItemKey = (productId: string, skuId?: string | null) => skuId || productId
 </script>
 
 <template>
@@ -71,6 +73,7 @@ const handleReturnReasonChange = (value: string) => {
           <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
             <div>
               <p class="text-sm font-semibold text-slate-900">{{ item.productName }}</p>
+              <p v-if="item.specText" class="mt-1 text-xs leading-5 text-slate-500">{{ item.specText }}</p>
               <p class="mt-1 text-xs leading-5 text-slate-400">
                 原订 {{ item.qty }} 件，当前可退 {{ item.availableReturnQty }} 件
               </p>
@@ -81,13 +84,13 @@ const handleReturnReasonChange = (value: string) => {
             <div class="w-full md:w-44">
               <p class="mb-2 text-xs text-slate-400">本次退货数量</p>
               <el-input-number
-                :model-value="Number(props.returnQtyMap[item.productId] ?? 0)"
+                :model-value="Number(props.returnQtyMap[resolveReturnItemKey(item.productId, item.skuId)] ?? 0)"
                 :min="0"
                 :max="item.availableReturnQty"
                 :step="1"
                 :precision="0"
                 class="w-full"
-                @update:model-value="emit('update:returnQty', { productId: item.productId, maxQty: item.availableReturnQty, value: $event })"
+                @update:model-value="emit('update:returnQty', { itemKey: resolveReturnItemKey(item.productId, item.skuId), productId: item.productId, skuId: item.skuId, maxQty: item.availableReturnQty, value: $event })"
               />
             </div>
           </div>

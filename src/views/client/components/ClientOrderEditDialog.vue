@@ -8,8 +8,8 @@
  * 维护说明：若改单弹层新增字段，优先在这里扩展展示，再回到父页面补齐状态与提交载荷。
  */
 
-import type { O2oMallProduct, O2oPreorderDetail } from '@/api/modules/o2o'
-import type { EditableOrderItem } from '@/views/client/client-order-detail-types'
+import type { O2oPreorderDetail } from '@/api/modules/o2o'
+import type { EditableOrderItem, EditableOrderProductOption } from '@/views/client/client-order-detail-types'
 
 const props = defineProps<{
   visible: boolean
@@ -22,7 +22,7 @@ const props = defineProps<{
   editRemark: string
   editAddProductId: string
   editOrderItems: EditableOrderItem[]
-  editableProductOptions: O2oMallProduct[]
+  editableProductOptions: EditableOrderProductOption[]
   editableOrderTotalQty: number
   editableOrderTotalAmount: number
   canSubmitOrderEdit: boolean
@@ -32,8 +32,8 @@ const emit = defineEmits<{
   (event: 'update:visible', value: boolean): void
   (event: 'update:editRemark', value: string): void
   (event: 'update:editAddProductId', value: string): void
-  (event: 'update:itemQty', payload: { productId: string; value: number | null | undefined }): void
-  (event: 'remove-item', productId: string): void
+  (event: 'update:itemQty', payload: { itemKey: string; value: number | null | undefined }): void
+  (event: 'remove-item', itemKey: string): void
   (event: 'add-product'): void
   (event: 'submit'): void
   (event: 'closed'): void
@@ -90,10 +90,10 @@ const handleAddProductIdChange = (value: string) => {
               @update:model-value="handleAddProductIdChange"
             >
               <el-option
-                v-for="product in editableProductOptions"
-                :key="product.id"
-                :label="`${product.productName}（剩余 ${product.availableStock} 件）`"
-                :value="product.id"
+                v-for="option in editableProductOptions"
+                :key="option.value"
+                :label="option.label"
+                :value="option.value"
               />
             </el-select>
           </div>
@@ -105,12 +105,13 @@ const handleAddProductIdChange = (value: string) => {
       <div class="space-y-3">
         <div
           v-for="item in editOrderItems"
-          :key="item.productId"
+          :key="item.itemKey"
           class="rounded-3xl border border-slate-100 bg-white px-4 py-4"
         >
           <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
             <div class="min-w-0 flex-1">
               <p class="text-sm font-semibold text-slate-900">{{ item.productName }}</p>
+              <p v-if="item.specText" class="mt-1 text-xs leading-5 text-slate-500">{{ item.specText }}</p>
               <p class="mt-1 text-xs leading-5 text-slate-400">
                 原数量 {{ item.originalQty }} 件，当前最多可改为 {{ item.maxQty }} 件
               </p>
@@ -128,10 +129,10 @@ const handleAddProductIdChange = (value: string) => {
                   :step="1"
                   :precision="0"
                   class="w-full"
-                  @update:model-value="emit('update:itemQty', { productId: item.productId, value: $event })"
+                  @update:model-value="emit('update:itemQty', { itemKey: item.itemKey, value: $event })"
                 />
               </div>
-              <el-button text type="danger" @click="emit('remove-item', item.productId)">移除</el-button>
+              <el-button text type="danger" @click="emit('remove-item', item.itemKey)">移除</el-button>
             </div>
           </div>
         </div>
