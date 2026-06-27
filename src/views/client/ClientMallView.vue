@@ -207,6 +207,8 @@ const resolveSortedActivePreviewSkus = (product: Pick<O2oMallProduct, 'skus'>) =
     })
 }
 
+const hasSkuAvailableStock = (sku: Pick<O2oMallSku, 'availableStock'>) => Math.max(0, Number(sku.availableStock ?? 0)) > 0
+
 const resolveHallProductPreviewSku = (product: Pick<O2oMallProduct, 'o2oRecommended' | 'skus'>) => {
   const sortedPreviewSkus = resolveSortedActivePreviewSkus(product)
   if (!sortedPreviewSkus.length) {
@@ -216,12 +218,10 @@ const resolveHallProductPreviewSku = (product: Pick<O2oMallProduct, 'o2oRecommen
   const recommendedPreviewSkus = product.o2oRecommended
     ? sortedPreviewSkus
     : sortedPreviewSkus.filter((sku) => sku.o2oRecommended === true)
+  const candidateSkus = recommendedPreviewSkus.length ? recommendedPreviewSkus : sortedPreviewSkus
+  const stockPreferredSkus = candidateSkus.filter(hasSkuAvailableStock)
 
-  if (recommendedPreviewSkus.length === 1) {
-    return recommendedPreviewSkus[0]
-  }
-
-  return sortedPreviewSkus[0]
+  return stockPreferredSkus[0] ?? candidateSkus[0] ?? sortedPreviewSkus[0]
 }
 
 const resolveHallProductThumbnail = (product: Pick<O2oMallProduct, 'productName' | 'productCode' | 'thumbnail' | 'o2oRecommended' | 'skus'>) => {
@@ -231,6 +231,10 @@ const resolveHallProductThumbnail = (product: Pick<O2oMallProduct, 'productName'
 
 const resolveProductThumbnail = (product: Pick<O2oMallProduct, 'productName' | 'productCode' | 'thumbnail' | 'o2oRecommended' | 'skus'>) => {
   return resolveHallProductThumbnail(product)
+}
+
+const resolveProductPriceView = (product: O2oMallProduct) => {
+  return resolveO2oPriceView(resolveHallProductPreviewSku(product) ?? product)
 }
 
 const resolveDetailProductThumbnail = (product: Pick<O2oMallProduct, 'productName' | 'productCode' | 'thumbnail'>) => {
@@ -271,7 +275,7 @@ const resolveCurrentDetailPreOrderedStock = (product: O2oMallProduct) => {
 const resolveActiveSkus = (product: O2oMallProduct | null): O2oMallSku[] => product?.skus?.filter((sku) => sku.isActive !== false) ?? []
 
 const resolveDefaultSku = (product: O2oMallProduct | null): O2oMallSku | null => {
-  return resolveActiveSkus(product)[0] ?? null
+  return product ? resolveHallProductPreviewSku(product) : null
 }
 
 const detailMaxQty = computed(() => {
@@ -745,7 +749,7 @@ const quickAdd = (product: O2oMallProduct) => {
     openProductDetail(product)
     return
   }
-  const addedQty = clientCartStore.addProduct(product, 1, activeSkus[0] ?? resolveDefaultSku(product))
+  const addedQty = clientCartStore.addProduct(product, 1, resolveDefaultSku(product))
   if (addedQty <= 0) {
     return
   }
@@ -1283,9 +1287,9 @@ onBeforeUnmount(() => {
           <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
             <div class="client-product-card__content">
               <p class="client-product-card__name">{{ product.productName }}</p>
-              <p class="client-product-card__price">¥{{ Number(resolveO2oPriceView(product).discountedPrice).toFixed(2) }}</p>
-              <p v-if="resolveO2oPriceView(product).isDiscounted" class="client-product-card__price-extra">
-                原价 ¥{{ Number(resolveO2oPriceView(product).originalPrice).toFixed(2) }} · {{ resolveO2oPriceView(product).discountLabel }}
+              <p class="client-product-card__price">¥{{ Number(resolveProductPriceView(product).discountedPrice).toFixed(2) }}</p>
+              <p v-if="resolveProductPriceView(product).isDiscounted" class="client-product-card__price-extra">
+                原价 ¥{{ Number(resolveProductPriceView(product).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(product).discountLabel }}
               </p>
               <p v-if="product.detailContent" class="client-product-card__desc">{{ product.detailContent }}</p>
               <div class="client-product-card__meta">
@@ -1389,9 +1393,9 @@ onBeforeUnmount(() => {
             <button type="button" class="client-product-card__body" @click="openProductDetail(row.data)">
               <div class="client-product-card__content">
                 <p class="client-product-card__name">{{ row.data.productName }}</p>
-                <p class="client-product-card__price">¥{{ Number(resolveO2oPriceView(row.data).discountedPrice).toFixed(2) }}</p>
-                <p v-if="resolveO2oPriceView(row.data).isDiscounted" class="client-product-card__price-extra">
-                  原价 ¥{{ Number(resolveO2oPriceView(row.data).originalPrice).toFixed(2) }} · {{ resolveO2oPriceView(row.data).discountLabel }}
+                <p class="client-product-card__price">¥{{ Number(resolveProductPriceView(row.data).discountedPrice).toFixed(2) }}</p>
+                <p v-if="resolveProductPriceView(row.data).isDiscounted" class="client-product-card__price-extra">
+                  原价 ¥{{ Number(resolveProductPriceView(row.data).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(row.data).discountLabel }}
                 </p>
                 <p v-if="row.data.detailContent" class="client-product-card__desc">{{ row.data.detailContent }}</p>
                 <div class="client-product-card__meta">
@@ -1437,9 +1441,9 @@ onBeforeUnmount(() => {
               <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
                 <div class="client-product-card__content">
                   <p class="client-product-card__name">{{ product.productName }}</p>
-                  <p class="client-product-card__price">¥{{ Number(resolveO2oPriceView(product).discountedPrice).toFixed(2) }}</p>
-                  <p v-if="resolveO2oPriceView(product).isDiscounted" class="client-product-card__price-extra">
-                    原价 ¥{{ Number(resolveO2oPriceView(product).originalPrice).toFixed(2) }} · {{ resolveO2oPriceView(product).discountLabel }}
+                  <p class="client-product-card__price">¥{{ Number(resolveProductPriceView(product).discountedPrice).toFixed(2) }}</p>
+                  <p v-if="resolveProductPriceView(product).isDiscounted" class="client-product-card__price-extra">
+                    原价 ¥{{ Number(resolveProductPriceView(product).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(product).discountLabel }}
                   </p>
                   <p v-if="product.detailContent" class="client-product-card__desc">{{ product.detailContent }}</p>
                   <div class="client-product-card__meta">
@@ -1482,9 +1486,9 @@ onBeforeUnmount(() => {
                 <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
                   <div class="client-product-card__content">
                     <p class="client-product-card__name">{{ product.productName }}</p>
-                    <p class="client-product-card__price">¥{{ Number(resolveO2oPriceView(product).discountedPrice).toFixed(2) }}</p>
-                    <p v-if="resolveO2oPriceView(product).isDiscounted" class="client-product-card__price-extra">
-                      原价 ¥{{ Number(resolveO2oPriceView(product).originalPrice).toFixed(2) }} · {{ resolveO2oPriceView(product).discountLabel }}
+                    <p class="client-product-card__price">¥{{ Number(resolveProductPriceView(product).discountedPrice).toFixed(2) }}</p>
+                    <p v-if="resolveProductPriceView(product).isDiscounted" class="client-product-card__price-extra">
+                      原价 ¥{{ Number(resolveProductPriceView(product).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(product).discountLabel }}
                     </p>
                     <p v-if="product.detailContent" class="client-product-card__desc">{{ product.detailContent }}</p>
                     <div class="client-product-card__meta">

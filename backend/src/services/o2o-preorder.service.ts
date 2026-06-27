@@ -663,6 +663,28 @@ class O2oPreorderService {
     return { skuMap, skuByProductMap }
   }
 
+  private resolveMallPreviewSku<T extends {
+    availableStock: number
+    isActive: boolean
+    o2oRecommended: boolean
+    sortOrder: number
+  }>(skuViews: T[], productRecommended: boolean): T | null {
+    const sortedActiveSkus = skuViews
+      .filter((sku) => sku.isActive)
+      .slice()
+      .sort((leftSku, rightSku) => leftSku.sortOrder - rightSku.sortOrder)
+    if (!sortedActiveSkus.length) {
+      return null
+    }
+
+    const recommendedPreviewSkus = productRecommended
+      ? sortedActiveSkus
+      : sortedActiveSkus.filter((sku) => sku.o2oRecommended)
+    const candidateSkus = recommendedPreviewSkus.length ? recommendedPreviewSkus : sortedActiveSkus
+    const stockPreferredSkus = candidateSkus.filter((sku) => sku.availableStock > 0)
+    return stockPreferredSkus[0] ?? candidateSkus[0] ?? sortedActiveSkus[0] ?? null
+  }
+
   private async generateReturnRequestNo(manager = AppDataSource.manager): Promise<string> {
     // 退货申请单号采用独立前缀，便于核销台与线下门店快速区分“取货码 / 退货码”。
     const dateText = new Date().toISOString().slice(0, 10).replaceAll('-', '')
@@ -1661,14 +1683,19 @@ class O2oPreorderService {
         const preOrderedStock = skuViews.length
           ? activeSkuViews.reduce((sum, sku) => sum + sku.preOrderedStock, 0)
           : Number(item.preOrderedStock ?? 0)
+        const previewSku = this.resolveMallPreviewSku(skuViews, Boolean(item.o2oRecommended))
+        const defaultPrice = previewSku?.defaultPrice ?? item.defaultPrice
+        const originalPrice = previewSku?.originalPrice ?? this.normalizeDecimalText(item.defaultPrice)
+        const discountRate = previewSku?.discountRate ?? normalizeDiscountRate(item.discountRate)
+        const discountedPrice = previewSku?.discountedPrice ?? calculateDiscountedPrice(item.defaultPrice, item.discountRate)
         return {
           id: String(item.id),
           productCode: item.productCode,
           productName: item.productName,
-          defaultPrice: item.defaultPrice,
-          originalPrice: this.normalizeDecimalText(item.defaultPrice),
-          discountRate: normalizeDiscountRate(item.discountRate),
-          discountedPrice: calculateDiscountedPrice(item.defaultPrice, item.discountRate),
+          defaultPrice,
+          originalPrice,
+          discountRate,
+          discountedPrice,
           o2oRecommended: Boolean(item.o2oRecommended),
           tags: productTagMap.get(String(item.id)) ?? [],
           thumbnail: item.thumbnail,

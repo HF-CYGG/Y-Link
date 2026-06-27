@@ -143,6 +143,58 @@ async function main() {
     assert.equal(mallSku.availableStock, 7)
     pass('商城接口返回 SKU 价格与可售库存')
 
+    const previewProduct = await productService.create({
+      productName: `规格预览商品-${verifySeed}`,
+      pinyinAbbr: 'GGYL',
+      defaultPrice: 30,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'listed',
+      currentStock: 4,
+      limitPerUser: 4,
+      specGroups: [{ name: '颜色', values: ['缺货红', '现货绿'] }],
+      skus: [
+        {
+          skuCode: `SKU-PREVIEW-OUT-${verifySeed}`,
+          specValues: { 颜色: '缺货红' },
+          defaultPrice: 18,
+          discountRate: 10,
+          currentStock: 0,
+          isActive: true,
+          o2oRecommended: true,
+          sortOrder: 1,
+        },
+        {
+          skuCode: `SKU-PREVIEW-IN-${verifySeed}`,
+          specValues: { 颜色: '现货绿' },
+          defaultPrice: 25,
+          discountRate: 8,
+          currentStock: 4,
+          isActive: true,
+          o2oRecommended: true,
+          sortOrder: 2,
+        },
+      ],
+    } as Parameters<typeof productService.create>[0])
+    const previewMallProducts = await o2oPreorderService.listMallProducts()
+    const previewMallProduct = previewMallProducts.list.find((item) => item.id === previewProduct.id) as unknown as {
+      defaultPrice: string
+      originalPrice: string
+      discountRate: string
+      discountedPrice: string
+      availableStock: number
+      skus?: Array<{ skuCode: string; availableStock: number; o2oRecommended: boolean }>
+    } | undefined
+    assert.ok(previewMallProduct)
+    assert.equal(previewMallProduct.defaultPrice, '25.00')
+    assert.equal(previewMallProduct.originalPrice, '25.00')
+    assert.equal(previewMallProduct.discountRate, '8.0')
+    assert.equal(previewMallProduct.discountedPrice, '20.00')
+    assert.equal(previewMallProduct.availableStock, 4)
+    assert.equal(previewMallProduct.skus?.find((sku) => sku.skuCode.startsWith('SKU-PREVIEW-OUT-'))?.availableStock, 0)
+    assert.equal(previewMallProduct.skus?.find((sku) => sku.skuCode.startsWith('SKU-PREVIEW-IN-'))?.o2oRecommended, true)
+    pass('商城商品级价格跟随有库存的推荐 SKU')
+
     const clientAuth = await registerAndLoginClient(clientAuthService)
     const preorder = await o2oPreorderService.submit(clientAuth, {
       items: [{ productId: product.id, skuId: targetSku.id, qty: 2 }],
