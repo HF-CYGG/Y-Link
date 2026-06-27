@@ -1649,6 +1649,7 @@ class O2oPreorderService {
             preOrderedStock,
             availableStock: Math.max(0, currentStock - preOrderedStock),
             isActive: Boolean(sku.isActive),
+            o2oRecommended: Boolean(sku.o2oRecommended),
             thumbnail: sku.thumbnail ?? item.thumbnail,
             sortOrder: Number(sku.sortOrder ?? 0),
           }

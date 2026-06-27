@@ -17,6 +17,7 @@ const existingRows = [
     currentStock: 12,
     isActive: false,
     thumbnail: '/uploads/sku-red-standard.png',
+    o2oRecommended: true,
   },
 ]
 
@@ -50,14 +51,16 @@ assert.deepEqual(
     currentStock: 12,
     isActive: false,
     thumbnail: '/uploads/sku-red-standard.png',
+    o2oRecommended: true,
   },
-  '已存在的同规格 SKU 应保留价格、库存、启停、图片和 id',
+  '已存在的同规格 SKU 应保留价格、库存、启停、图片、推荐状态和 id',
 )
 assert.equal(generatedRows[1].defaultPrice, 9, '新增 SKU 应继承主商品默认售价')
 assert.equal(generatedRows[1].discountRate, 10, '新增 SKU 应继承主商品默认折扣')
 assert.equal(generatedRows[1].currentStock, 0, '新增 SKU 应使用默认库存')
 assert.equal(generatedRows[1].isActive, true, '新增 SKU 默认启用')
 assert.equal(generatedRows[1].thumbnail, null, '新增 SKU 默认不写入规格图，展示时回退主商品图')
+assert.equal(generatedRows[1].o2oRecommended, false, '新增 SKU 默认不做规格推荐')
 
 const colorOnlyRows = buildSkuMatrixRows({
   colors: ['黑色', '白色'],
@@ -86,6 +89,7 @@ const extractedDimensions = extractSkuDimensionValues([
     discountRate: 10,
     currentStock: 1,
     isActive: true,
+    o2oRecommended: false,
   },
 ])
 

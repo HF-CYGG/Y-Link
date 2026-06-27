@@ -151,11 +151,19 @@ const resolveSoldQty = (product: Pick<O2oMallProduct, 'soldQty'>) => {
   return Math.max(0, Math.floor(Number(product.soldQty ?? 0)))
 }
 
+const isSkuRecommended = (sku: O2oMallSku, product: O2oMallProduct) => {
+  return product.o2oRecommended || sku.o2oRecommended === true
+}
+
+const isProductRecommended = (product: O2oMallProduct) => {
+  return product.o2oRecommended || (product.skus ?? []).some((sku) => sku.isActive !== false && sku.o2oRecommended === true)
+}
+
 const resolveRecommendedSortBucket = (product: O2oMallProduct) => {
   if (resolveSoldQty(product) > 0) {
     return 0
   }
-  return product.o2oRecommended ? 1 : 2
+  return isProductRecommended(product) ? 1 : 2
 }
 
 const originalProductIndexMap = computed(() => {
@@ -188,12 +196,76 @@ const classifyProduct = (product: O2oMallProduct) => {
   return product.tags && product.tags.length > 0 ? product.tags : ['默认标签']
 }
 
-const resolveProductThumbnail = (product: Pick<O2oMallProduct, 'productName' | 'productCode' | 'thumbnail'>) => {
-  return resolveProductPlaceholder(product.thumbnail)
+const resolveSortedActivePreviewSkus = (product: Pick<O2oMallProduct, 'skus'>) => {
+  return (product.skus ?? [])
+    .filter((sku) => sku.isActive !== false)
+    .slice()
+    .sort((leftSku, rightSku) => {
+      const leftOrder = Number.isFinite(Number(leftSku.sortOrder)) ? Number(leftSku.sortOrder) : 0
+      const rightOrder = Number.isFinite(Number(rightSku.sortOrder)) ? Number(rightSku.sortOrder) : 0
+      return leftOrder - rightOrder
+    })
+}
+
+const resolveHallProductPreviewSku = (product: Pick<O2oMallProduct, 'o2oRecommended' | 'skus'>) => {
+  const sortedPreviewSkus = resolveSortedActivePreviewSkus(product)
+  if (!sortedPreviewSkus.length) {
+    return null
+  }
+
+  const recommendedPreviewSkus = product.o2oRecommended
+    ? sortedPreviewSkus
+    : sortedPreviewSkus.filter((sku) => sku.o2oRecommended === true)
+
+  if (recommendedPreviewSkus.length === 1) {
+    return recommendedPreviewSkus[0]
+  }
+
+  return sortedPreviewSkus[0]
+}
+
+const resolveHallProductThumbnail = (product: Pick<O2oMallProduct, 'productName' | 'productCode' | 'thumbnail' | 'o2oRecommended' | 'skus'>) => {
+  const previewSku = resolveHallProductPreviewSku(product)
+  return resolveProductPlaceholder(previewSku?.thumbnail || product.thumbnail)
+}
+
+const resolveProductThumbnail = (product: Pick<O2oMallProduct, 'productName' | 'productCode' | 'thumbnail' | 'o2oRecommended' | 'skus'>) => {
+  return resolveHallProductThumbnail(product)
 }
 
 const resolveDetailProductThumbnail = (product: Pick<O2oMallProduct, 'productName' | 'productCode' | 'thumbnail'>) => {
   return resolveProductPlaceholder(selectedDetailSku.value?.thumbnail || product.thumbnail)
+}
+
+const resolveCurrentDetailSpecText = () => {
+  const sku = selectedDetailSku.value
+  return sku?.specText?.trim() || sku?.skuCode?.trim() || ''
+}
+
+const resolveCurrentDetailDisplayName = (product: O2oMallProduct) => {
+  const specText = resolveCurrentDetailSpecText()
+  return specText ? `${product.productName} · ${specText}` : product.productName
+}
+
+const resolveCurrentDetailDescription = (product: O2oMallProduct) => {
+  const specText = resolveCurrentDetailSpecText()
+  const detailContent = product.detailContent?.trim()
+  if (!specText) {
+    return detailContent || '暂无商品描述'
+  }
+  return detailContent ? `${detailContent} · 当前规格：${specText}` : `当前规格：${specText}`
+}
+
+const resolveCurrentDetailPriceView = (product: O2oMallProduct) => {
+  return resolveO2oPriceView(selectedDetailSku.value ?? product)
+}
+
+const resolveCurrentDetailAvailableStock = (product: O2oMallProduct) => {
+  return Math.max(0, Number(selectedDetailSku.value?.availableStock ?? product.availableStock ?? 0))
+}
+
+const resolveCurrentDetailPreOrderedStock = (product: O2oMallProduct) => {
+  return Math.max(0, Number(selectedDetailSku.value?.preOrderedStock ?? product.preOrderedStock ?? 0))
 }
 
 const resolveActiveSkus = (product: O2oMallProduct | null): O2oMallSku[] => product?.skus?.filter((sku) => sku.isActive !== false) ?? []
@@ -209,7 +281,7 @@ const detailMaxQty = computed(() => {
 })
 
 // 商城图片预览统一走同一套状态，避免商品卡和详情抽屉各自维护一套弹层开关。
-const openProductImagePreview = (product: Pick<O2oMallProduct, 'productName' | 'productCode' | 'thumbnail'>) => {
+const openProductImagePreview = (product: O2oMallProduct) => {
   previewImageUrl.value = resolveProductThumbnail(product)
   imagePreviewVisible.value = true
 }
@@ -1516,7 +1588,7 @@ onBeforeUnmount(() => {
         <button type="button" class="client-detail-image-button" @click="openDetailImagePreview">
           <img
             :src="resolveDetailProductThumbnail(detailProduct)"
-            :alt="detailProduct.productName"
+            :alt="resolveCurrentDetailDisplayName(detailProduct)"
             class="h-44 sm:h-56 w-full rounded-2xl object-cover flex-shrink-0"
             loading="lazy"
             decoding="async"
@@ -1524,15 +1596,15 @@ onBeforeUnmount(() => {
           <span class="client-detail-image-button__hint">点击查看大图</span>
         </button>
         <div class="space-y-2 flex-shrink-0">
-          <p class="text-lg font-semibold text-slate-900">{{ detailProduct.productName }}</p>
-          <p class="text-sm font-bold text-[var(--ylink-color-primary-strong)]">¥{{ Number(resolveO2oPriceView(detailProduct).discountedPrice).toFixed(2) }}</p>
-          <p v-if="resolveO2oPriceView(detailProduct).isDiscounted" class="client-product-card__price-extra">
-            原价 ¥{{ Number(resolveO2oPriceView(detailProduct).originalPrice).toFixed(2) }} · {{ resolveO2oPriceView(detailProduct).discountLabel }}
+          <p class="text-lg font-semibold text-slate-900">{{ resolveCurrentDetailDisplayName(detailProduct) }}</p>
+          <p class="text-sm font-bold text-[var(--ylink-color-primary-strong)]">¥{{ Number(resolveCurrentDetailPriceView(detailProduct).discountedPrice).toFixed(2) }}</p>
+          <p v-if="resolveCurrentDetailPriceView(detailProduct).isDiscounted" class="client-product-card__price-extra">
+            原价 ¥{{ Number(resolveCurrentDetailPriceView(detailProduct).originalPrice).toFixed(2) }} · {{ resolveCurrentDetailPriceView(detailProduct).discountLabel }}
           </p>
-          <p class="text-sm text-slate-500">{{ detailProduct.detailContent || '暂无商品描述' }}</p>
+          <p class="text-sm text-slate-500">{{ resolveCurrentDetailDescription(detailProduct) }}</p>
           <div class="flex flex-wrap gap-2 text-xs">
-            <span class="rounded-full bg-emerald-50 px-3 py-1 text-emerald-600">可预订 {{ detailProduct.availableStock }}</span>
-            <span class="rounded-full bg-amber-50 px-3 py-1 text-amber-600">已预订 {{ detailProduct.preOrderedStock }}</span>
+            <span class="rounded-full bg-emerald-50 px-3 py-1 text-emerald-600">可预订 {{ resolveCurrentDetailAvailableStock(detailProduct) }}</span>
+            <span class="rounded-full bg-amber-50 px-3 py-1 text-amber-600">已预订 {{ resolveCurrentDetailPreOrderedStock(detailProduct) }}</span>
             <span class="rounded-full bg-slate-100 px-3 py-1 text-slate-600">已售 {{ resolveSoldQty(detailProduct) }}</span>
             <span class="rounded-full bg-slate-100 px-3 py-1 text-slate-600">限购 {{ detailProduct.limitPerUser }}</span>
           </div>
@@ -1544,13 +1616,28 @@ onBeforeUnmount(() => {
               v-for="sku in detailProduct.skus"
               :key="sku.id"
               type="button"
-              class="flex min-h-11 flex-col items-start rounded-lg border bg-white px-3 py-2 text-left text-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
+              class="relative flex min-h-11 flex-col items-start rounded-lg border bg-white px-3 py-2 pr-14 text-left text-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
               :class="selectedDetailSku?.id === sku.id ? 'border-cyan-500 bg-cyan-50' : 'border-slate-200'"
               :disabled="sku.isActive === false || sku.availableStock <= 0"
               @click="selectDetailSku(sku)"
             >
+              <span
+                v-if="isSkuRecommended(sku, detailProduct)"
+                class="sku-recommend-badge absolute right-2 top-2 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-700"
+              >
+                推荐
+              </span>
               <span>{{ sku.specText || '默认规格' }}</span>
-              <small class="text-xs text-slate-500">¥{{ Number(sku.discountedPrice).toFixed(2) }} · 库存 {{ sku.availableStock }}</small>
+              <small class="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
+                <strong class="text-[var(--ylink-color-primary-strong)]">¥{{ Number(resolveO2oPriceView(sku).discountedPrice).toFixed(2) }}</strong>
+                <template v-if="resolveO2oPriceView(sku).isDiscounted">
+                  <span class="sku-discount-badge rounded-full bg-rose-50 px-1.5 py-0.5 text-[11px] font-semibold text-rose-600">
+                    {{ resolveO2oPriceView(sku).discountLabel }}
+                  </span>
+                  <span class="text-slate-400 line-through">¥{{ Number(resolveO2oPriceView(sku).originalPrice).toFixed(2) }}</span>
+                </template>
+                <span>库存 {{ sku.availableStock }}</span>
+              </small>
             </button>
           </div>
         </div>

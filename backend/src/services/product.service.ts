@@ -95,6 +95,7 @@ export interface ProductSkuInput {
   currentStock?: number
   preOrderedStock?: number
   isActive?: boolean
+  o2oRecommended?: boolean
   thumbnail?: string | null
   sortOrder?: number
 }
@@ -118,6 +119,7 @@ export interface ProductSkuView {
   preOrderedStock: number
   availableStock: number
   isActive: boolean
+  o2oRecommended: boolean
   thumbnail: string | null
   sortOrder: number
 }
@@ -527,6 +529,7 @@ export class ProductService {
       currentStock: Number(product.currentStock ?? 0),
       preOrderedStock: Number(product.preOrderedStock ?? 0),
       isActive: true,
+      o2oRecommended: false,
       thumbnail: product.thumbnail,
       sortOrder: 0,
     }]
@@ -575,6 +578,7 @@ export class ProductService {
       currentStock,
       preOrderedStock,
       isActive: input.isActive !== false,
+      o2oRecommended: input.o2oRecommended === true,
       thumbnail: thumbnail ?? null,
       sortOrder: this.readOptionalInteger(input.sortOrder, 'SKU 排序', 0, PRODUCT_FIELD_LIMITS.maxStock) ?? index,
     })
@@ -608,6 +612,9 @@ export class ProductService {
         }
         if (skuInput.thumbnail === undefined) {
           skuEntity.thumbnail = matchedSku.thumbnail
+        }
+        if (skuInput.o2oRecommended === undefined) {
+          skuEntity.o2oRecommended = matchedSku.o2oRecommended
         }
         if (skuInput.sortOrder === undefined) {
           skuEntity.sortOrder = matchedSku.sortOrder
@@ -802,6 +809,7 @@ export class ProductService {
       preOrderedStock,
       availableStock: Math.max(0, currentStock - preOrderedStock),
       isActive: Boolean(sku.isActive),
+      o2oRecommended: Boolean(sku.o2oRecommended),
       thumbnail: normalizeProductThumbnailUrl(sku.thumbnail) ?? null,
       sortOrder: Number(sku.sortOrder ?? 0),
     }

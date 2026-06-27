@@ -1,5 +1,5 @@
 <!--
-  文件用途：承载产品中心共享工作台页面，统一组织“基础信息”和“线上展示”两个产品治理视角。
+  文件用途：承载产品中心共享工作台页面，统一组织“基础资料”和“线上展示”两个产品治理视角。
   核心职责：负责标签工作台外壳、路由到标签的映射、异步子页面装配以及统一页面入口编排。
   设计原因：将两个相对重量级的产品治理子页收口到同一工作台中，并通过异步组件拆分降低主壳层首包体积。
   页面边界：当前文件只管理产品中心层级的导航和承载，不直接实现标签维护、商品编辑、图片上传等具体业务细节。
@@ -17,7 +17,7 @@ type ProductCenterTab = ProductCenterTabKey
 
 // 定义工作台顶部标签，名称需要与下方映射配置中的标签键保持一致。
 const tabs = [
-  { label: '基础信息', name: 'basic' },
+  { label: '基础资料', name: 'basic' },
   { label: '线上展示', name: 'o2o' },
 ] as const
 
@@ -55,7 +55,7 @@ const { activeTab, activeComponent, handleTabChange } = useRouteBoundWorkbenchTa
   <!-- 统一工作台外壳负责展示标题、说明、标签栏和当前激活的业务组件。 -->
   <TabbedWorkbenchPage
     title="产品中心"
-    description="统一管理产品基础资料、库存信息与线上展示配置，减少多页来回切换。"
+    description="基础资料维护编码、售价、库存、标签与规格；线上展示维护客户端上架、图片、详情、限购和推荐。"
     :tabs="tabs"
     :active-tab="activeTab"
     :active-component="activeComponent"

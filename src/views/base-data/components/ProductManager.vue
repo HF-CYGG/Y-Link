@@ -136,6 +136,11 @@ const BATCH_CREATE_MAX_ROWS = 50
 const batchCreateRowSeed = ref(0)
 const batchCreateRows = ref<BatchCreateProductFormRow[]>([])
 const discountEditMode = ref<DiscountEditMode>('rate')
+const skuDiscountEditModes = ref<Record<string, DiscountEditMode>>({})
+const skuThumbnailDragActiveId = ref('')
+const skuThumbnailUploadProgresses = ref<Record<string, number>>({})
+const skuThumbnailUploadStatuses = ref<Record<string, 'success' | 'exception' | undefined>>({})
+const skuThumbnailUploadClearTimers = ref<Record<string, number>>({})
 const isSkuDialog = ref(false)
 
 const discountEditModeOptions = [
@@ -363,7 +368,7 @@ const buildSkuSpecValues = (sku: ProductSkuForm, index: number): Record<string, 
   return { 规格: String(sku.specText ?? '').trim() || `规格${index + 1}` }
 }
 
-const isImplicitDefaultSku = (row: ProductRecord) => {
+const isProductImplicitDefaultSku = (row: ProductRecord) => {
   if (!row.skus || row.skus.length !== 1) {
     return false
   }
@@ -376,7 +381,7 @@ const isImplicitDefaultSku = (row: ProductRecord) => {
 }
 
 const buildEditForm = (row: ProductRecord): ProductForm => {
-  const skus = row.skus?.length && !isImplicitDefaultSku(row)
+  const skus = row.skus?.length && !isProductImplicitDefaultSku(row)
     ? row.skus.map((sku) => ({
         id: sku.id,
         specValues: sku.specValues ?? {},
@@ -387,6 +392,7 @@ const buildEditForm = (row: ProductRecord): ProductForm => {
         discountRate: Number(sku.discountRate ?? row.discountRate),
         currentStock: Number(sku.currentStock ?? 0),
         isActive: sku.isActive !== false,
+        o2oRecommended: sku.o2oRecommended === true,
         thumbnail: sku.thumbnail ?? null,
       }))
     : []
@@ -454,6 +460,7 @@ const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProdu
           discountRate: normalizeSubmitNumber(sku.discountRate, { fallback: normalizedDiscountRate, min: 1, max: 10 }),
           currentStock: normalizeSubmitNumber(sku.currentStock, { fallback: 0, min: 0, integer: true }),
           isActive: sku.isActive !== false,
+          o2oRecommended: sku.o2oRecommended === true,
           thumbnail: typeof sku.thumbnail === 'string' && sku.thumbnail.trim() ? sku.thumbnail.trim() : null,
           sortOrder: index,
         }))
@@ -603,17 +610,89 @@ const resolveSkuThumbnail = (row: ProductSkuForm) => {
   return skuThumbnail || form.value.productThumbnail || ''
 }
 
+const resolveSkuFormKey = (row: ProductSkuForm) => {
+  return row.id || row.specText || `${row.color || ''}-${row.style || ''}`
+}
+
+const clearSkuThumbnailUploadTimer = (key: string) => {
+  const timer = skuThumbnailUploadClearTimers.value[key]
+  if (timer) {
+    globalThis.window.clearTimeout(timer)
+    delete skuThumbnailUploadClearTimers.value[key]
+  }
+}
+
+const setSkuThumbnailUploadProgress = (
+  row: ProductSkuForm,
+  percentage: number,
+  status?: 'success' | 'exception',
+) => {
+  const key = resolveSkuFormKey(row)
+  clearSkuThumbnailUploadTimer(key)
+  skuThumbnailUploadProgresses.value[key] = Math.min(100, Math.max(0, Math.round(percentage)))
+  skuThumbnailUploadStatuses.value[key] = status
+}
+
+const clearSkuThumbnailUploadProgress = (row: ProductSkuForm) => {
+  const key = resolveSkuFormKey(row)
+  clearSkuThumbnailUploadTimer(key)
+  delete skuThumbnailUploadProgresses.value[key]
+  delete skuThumbnailUploadStatuses.value[key]
+}
+
+const deferClearSkuThumbnailUploadProgress = (row: ProductSkuForm, delay = 900) => {
+  const key = resolveSkuFormKey(row)
+  clearSkuThumbnailUploadTimer(key)
+  skuThumbnailUploadClearTimers.value[key] = globalThis.window.setTimeout(() => {
+    delete skuThumbnailUploadProgresses.value[key]
+    delete skuThumbnailUploadStatuses.value[key]
+    delete skuThumbnailUploadClearTimers.value[key]
+  }, delay)
+}
+
+const isSkuThumbnailUploading = (row: ProductSkuForm) => {
+  const key = resolveSkuFormKey(row)
+  return key in skuThumbnailUploadProgresses.value && skuThumbnailUploadStatuses.value[key] !== 'success' && skuThumbnailUploadStatuses.value[key] !== 'exception'
+}
+
+const resolveSkuThumbnailUploadProgress = (row: ProductSkuForm) => {
+  return skuThumbnailUploadProgresses.value[resolveSkuFormKey(row)] ?? 0
+}
+
+const resolveSkuThumbnailUploadProgressStatus = (row: ProductSkuForm) => {
+  return skuThumbnailUploadStatuses.value[resolveSkuFormKey(row)]
+}
+
+const currentSkuPreviewImageList = (row: ProductSkuForm) => {
+  const thumbnail = resolveSkuThumbnail(row)
+  return thumbnail ? [thumbnail] : []
+}
+
 const handleSkuThumbnailUpload = async (row: ProductSkuForm, options: UploadRequestOptions) => {
   const file = options.file
   try {
+    setSkuThumbnailUploadProgress(row, 8)
     const { file: compressedUploadFile } = await compressImageForUpload(file)
-    const uploadResult = await uploadImage(compressedUploadFile)
+    setSkuThumbnailUploadProgress(row, 12)
+    const uploadResult = await uploadImage(compressedUploadFile, {
+      onUploadProgress: (event) => {
+        if (!event.total || event.total <= 0) {
+          return
+        }
+        const uploadProgress = Math.round((event.loaded / event.total) * 87)
+        setSkuThumbnailUploadProgress(row, Math.min(99, 12 + uploadProgress))
+      },
+    })
     row.thumbnail = uploadResult.url
+    setSkuThumbnailUploadProgress(row, 100, 'success')
     options.onSuccess?.(uploadResult)
     showAppSuccess('规格图上传完成')
+    deferClearSkuThumbnailUploadProgress(row)
   } catch (error) {
     console.error('规格图上传失败:', error)
+    setSkuThumbnailUploadProgress(row, 100, 'exception')
     showAppError(error instanceof Error && error.message.trim() ? error.message : '规格图上传失败，请重试')
+    deferClearSkuThumbnailUploadProgress(row, 1800)
   }
 }
 
@@ -621,9 +700,90 @@ const buildSkuThumbnailUploadRequest = (row: ProductSkuForm) => {
   return (options: UploadRequestOptions) => handleSkuThumbnailUpload(row, options)
 }
 
+const handleSkuThumbnailDragEnter = (row: ProductSkuForm) => {
+  skuThumbnailDragActiveId.value = resolveSkuFormKey(row)
+}
+
+const handleSkuThumbnailDragLeave = (row: ProductSkuForm) => {
+  if (skuThumbnailDragActiveId.value === resolveSkuFormKey(row)) {
+    skuThumbnailDragActiveId.value = ''
+  }
+}
+
+const handleSkuThumbnailDrop = (row: ProductSkuForm, event: DragEvent) => {
+  skuThumbnailDragActiveId.value = ''
+  if (isSkuThumbnailUploading(row)) {
+    showAppWarning('规格图正在上传，请稍后再试')
+    return
+  }
+  const file = event.dataTransfer?.files?.[0]
+  if (!file || !file.type.startsWith('image/')) {
+    return
+  }
+  void handleSkuThumbnailUpload(row, {
+    file,
+    action: '',
+    method: 'post',
+    filename: 'file',
+    data: {},
+    headers: {},
+    withCredentials: false,
+    onProgress: () => undefined,
+    onSuccess: () => undefined,
+    onError: () => undefined,
+  } as unknown as UploadRequestOptions)
+}
+
 const handleRemoveSkuThumbnail = (row: ProductSkuForm) => {
+  if (isSkuThumbnailUploading(row)) {
+    showAppWarning('规格图正在上传，请稍后再删除')
+    return
+  }
+  clearSkuThumbnailUploadProgress(row)
   row.thumbnail = null
   showAppSuccess('已移除规格预览图')
+}
+
+const resolveSkuDiscountedPriceInput = (row: ProductSkuForm) => {
+  return Number(calculateDiscountedPriceText(row.defaultPrice ?? 0, row.discountRate ?? 10))
+}
+
+const updateSkuDiscountedPriceInput = (row: ProductSkuForm, value: number | null) => {
+  row.discountRate = resolveDiscountRateFromDiscountedPrice(row.defaultPrice ?? 0, value ?? 0)
+}
+
+const resolveSkuDiscountEditMode = (row: ProductSkuForm) => {
+  return skuDiscountEditModes.value[resolveSkuFormKey(row)] ?? 'rate'
+}
+
+const handleSkuDiscountEditModeChange = (row: ProductSkuForm, value: unknown) => {
+  skuDiscountEditModes.value[resolveSkuFormKey(row)] = value === 'price' ? 'price' : 'rate'
+}
+
+const isImplicitDefaultSku = (sku: ProductSkuForm) => {
+  const specValues = sku.specValues ?? {}
+  const specText = String(sku.specText ?? '').trim()
+  return (!specText || specText === '默认规格') && (!Object.keys(specValues).length || specValues.规格 === '默认规格')
+}
+
+const hasMultipleEditableSkus = computed(() => {
+  return form.value.skus.length > 1 || form.value.skus.some((sku) => !isImplicitDefaultSku(sku))
+})
+
+const ensureSkuConfigRows = () => {
+  if (form.value.skus.length) {
+    return
+  }
+  form.value.skus = [{
+    specValues: { 规格: '默认规格' },
+    specText: '默认规格',
+    defaultPrice: Number(form.value.defaultPrice) || 0,
+    discountRate: normalizeDiscountRateNumber(form.value.discountRate),
+    currentStock: Number(form.value.currentStock) || 0,
+    isActive: form.value.isActive,
+    o2oRecommended: false,
+    thumbnail: form.value.productThumbnail,
+  }]
 }
 
 const discountedPricePreview = computed(() => {
@@ -692,6 +852,7 @@ const handleOpenSkuConfig = (row: ProductRecord) => {
     return
   }
   form.value = buildEditForm(row)
+  ensureSkuConfigRows()
   isSkuDialog.value = true
   dialogVisible.value = true
 }
@@ -1047,12 +1208,12 @@ onActivated(() => {
             />
             <el-table-column label="产品名称" prop="productName" min-width="220" show-overflow-tooltip />
             <el-table-column label="拼音首字母" prop="pinyinAbbr" width="120" show-overflow-tooltip />
-            <el-table-column label="默认售价" prop="defaultPrice" width="132">
+            <el-table-column label="基础售价" prop="defaultPrice" width="132">
               <template #default="{ row }">
                 ¥{{ Number(row.defaultPrice).toFixed(2) }}
               </template>
             </el-table-column>
-            <el-table-column label="库存数量" min-width="170">
+            <el-table-column label="基础库存" min-width="170">
               <template #default="{ row }">
                 <div class="leading-5">
                   <div>当前库存：{{ row.currentStock }}</div>
@@ -1217,12 +1378,12 @@ onActivated(() => {
                   <el-input v-model="row.pinyinAbbr" placeholder="可选" />
                 </template>
               </el-table-column>
-              <el-table-column label="默认售价" min-width="150">
+              <el-table-column label="基础售价" min-width="150">
                 <template #default="{ row }">
                   <PassiveNumberInput v-model="row.defaultPrice" :min="0" :precision="2" :step="1" class="w-full" />
                 </template>
               </el-table-column>
-              <el-table-column label="当前库存" min-width="150">
+              <el-table-column label="基础库存" min-width="150">
                 <template #default="{ row }">
                   <PassiveNumberInput v-model="row.currentStock" :min="0" :step="1" :precision="0" class="w-full" />
                 </template>
@@ -1317,43 +1478,103 @@ onActivated(() => {
           </div>
 
           <div v-if="form.skus.length" class="flex flex-col gap-3">
-            <h3 class="text-sm font-semibold text-slate-800 dark:text-slate-200">规格明细</h3>
+            <h3 class="text-sm font-semibold text-slate-800 dark:text-slate-200">规格基础配置</h3>
             <div class="sku-scroll rounded-xl border border-slate-200 dark:border-white/10" style="overflow-x: auto">
               <el-table native-scrollbar :data="form.skus" size="small" class="sku-table w-full">
                 <el-table-column prop="specText" label="规格" min-width="150" show-overflow-tooltip />
-                <el-table-column label="预览图" width="112" align="center">
+                <el-table-column label="规格图" width="112" align="center">
                   <template #default="{ row }">
-                    <div class="sku-thumb-uploader">
+                    <div
+                      class="sku-thumb-uploader"
+                      :class="{ 'is-drag-active': skuThumbnailDragActiveId === resolveSkuFormKey(row) }"
+                      @dragenter.prevent="handleSkuThumbnailDragEnter(row)"
+                      @dragover.prevent="handleSkuThumbnailDragEnter(row)"
+                      @dragleave.prevent="handleSkuThumbnailDragLeave(row)"
+                      @drop.prevent="handleSkuThumbnailDrop(row, $event)"
+                    >
                       <el-upload
                         action=""
                         :http-request="buildSkuThumbnailUploadRequest(row)"
                         :show-file-list="false"
                         accept="image/*"
+                        :disabled="isSkuThumbnailUploading(row)"
                       >
-                        <button type="button" class="sku-thumb-button">
-                          <img v-if="resolveSkuThumbnail(row)" :src="resolveSkuThumbnail(row)" alt="规格预览图" />
+                        <button type="button" class="sku-thumb-button" :class="{ 'is-uploading': isSkuThumbnailUploading(row) }">
+                          <el-image
+                            v-if="resolveSkuThumbnail(row) && !isSkuThumbnailUploading(row)"
+                            :src="resolveSkuThumbnail(row)"
+                            :preview-src-list="currentSkuPreviewImageList(row)"
+                            preview-teleported
+                            fit="cover"
+                            class="sku-thumb-image"
+                            alt="规格预览图"
+                            @click.stop
+                          />
+                          <template v-else-if="isSkuThumbnailUploading(row)">
+                            <span class="sku-thumb-progress-label">{{ resolveSkuThumbnailUploadProgress(row) }}%</span>
+                            <el-progress
+                              class="sku-thumb-progress sku-thumb-progress-overlay"
+                              :percentage="resolveSkuThumbnailUploadProgress(row)"
+                              :status="resolveSkuThumbnailUploadProgressStatus(row)"
+                              :stroke-width="4"
+                              :show-text="false"
+                            />
+                          </template>
                           <span v-else>上传</span>
                         </button>
                       </el-upload>
-                      <el-button v-if="row.thumbnail" type="danger" link @click="handleRemoveSkuThumbnail(row)">移除</el-button>
+                      <button
+                        v-if="row.thumbnail && !isSkuThumbnailUploading(row)"
+                        type="button"
+                        class="sku-thumb-remove"
+                        aria-label="删除规格预览图"
+                        @click.stop="handleRemoveSkuThumbnail(row)"
+                      >
+                        ×
+                      </button>
                     </div>
                   </template>
                 </el-table-column>
-                <el-table-column label="售价" width="132">
+                <el-table-column label="基础售价" width="132">
                   <template #default="{ row }">
                     <PassiveNumberInput v-model="row.defaultPrice" class="w-full" :controls="false" :min="0" :precision="2" :step="1" placeholder="售价" />
                   </template>
                 </el-table-column>
-                <el-table-column label="折扣" width="150">
+                <el-table-column label="默认折扣" width="174">
                   <template #default="{ row }">
-                    <el-select v-model="row.discountRate" filterable class="sku-discount-select w-full" placeholder="折扣">
+                    <div class="sku-discount-editor">
+                      <el-segmented
+                        :model-value="resolveSkuDiscountEditMode(row)"
+                        :options="discountEditModeOptions"
+                        class="sku-discount-editor__mode"
+                        @update:model-value="handleSkuDiscountEditModeChange(row, $event)"
+                      />
+                      <el-select
+                        v-if="resolveSkuDiscountEditMode(row) === 'rate'"
+                        v-model="row.discountRate"
+                        filterable
+                        class="sku-discount-select w-full"
+                        placeholder="折扣"
+                      >
                       <el-option
                         v-for="option in buildDiscountRateOptions(row.defaultPrice)"
                         :key="option.value"
                         :label="option.label"
                         :value="option.value"
                       />
-                    </el-select>
+                      </el-select>
+                      <PassiveNumberInput
+                        v-else
+                        :model-value="resolveSkuDiscountedPriceInput(row)"
+                        :min="Number(calculateDiscountedPriceText(row.defaultPrice || 0, 1))"
+                        :max="Math.max(Number(row.defaultPrice) || 0, Number(calculateDiscountedPriceText(row.defaultPrice || 0, 1)))"
+                        :precision="2"
+                        :step="1"
+                        class="w-full"
+                        placeholder="折后价"
+                        @update:model-value="updateSkuDiscountedPriceInput(row, $event)"
+                      />
+                    </div>
                   </template>
                 </el-table-column>
                 <el-table-column label="库存" width="132">
@@ -1385,62 +1606,67 @@ onActivated(() => {
           <el-form-item label="拼音简写" prop="pinyinAbbr">
             <el-input v-model="form.pinyinAbbr" placeholder="请输入拼音简写(可选)" />
           </el-form-item>
-          <el-form-item label="默认售价" prop="defaultPrice">
-            <PassiveNumberInput
-              v-model="form.defaultPrice"
-              :min="0"
-              :precision="2"
-              :step="1"
-              class="w-full"
-              placeholder="请输入售价"
-            />
-          </el-form-item>
-          <el-form-item label="折扣设置" prop="discountRate">
-            <div class="product-discount-editor">
-              <el-segmented
-                v-model="discountEditMode"
-                :options="discountEditModeOptions"
-                class="product-discount-editor__mode"
-              />
-              <el-select
-                v-if="discountEditMode === 'rate'"
-                v-model="form.discountRate"
-                filterable
-                class="w-full"
-                placeholder="请选择折扣"
-              >
-                <el-option
-                  v-for="option in discountRateOptions"
-                  :key="option.value"
-                  :label="option.label"
-                  :value="option.value"
-                />
-              </el-select>
+          <div v-if="hasMultipleEditableSkus" class="sku-owned-fields-hint">
+            该商品已启用多规格，价格、库存和折扣请在规格配置中维护。
+          </div>
+          <template v-else>
+            <el-form-item label="基础售价" prop="defaultPrice">
               <PassiveNumberInput
-                v-else
-                v-model="discountedPriceInput"
-                :min="minimumDiscountedPrice"
-                :max="maximumDiscountedPrice"
+                v-model="form.defaultPrice"
+                :min="0"
                 :precision="2"
                 :step="1"
                 class="w-full"
-                placeholder="请输入折后价格"
-                :disabled="Number(form.defaultPrice) <= 0"
+                placeholder="请输入售价"
               />
-              <p class="product-discount-editor__hint">
-                当前折扣 {{ formatDiscountRateLabel(form.discountRate) }}，折后价 ¥{{ discountedPricePreview }}。折后价会按一位小数折扣反算保存。
-              </p>
-            </div>
-          </el-form-item>
-          <el-form-item label="当前库存" prop="currentStock">
-            <PassiveNumberInput
-              v-model="form.currentStock"
-              :min="0"
-              :step="1"
-              class="w-full"
-              placeholder="请输入当前库存"
-            />
-          </el-form-item>
+            </el-form-item>
+            <el-form-item label="基础折扣" prop="discountRate">
+              <div class="product-discount-editor">
+                <el-segmented
+                  v-model="discountEditMode"
+                  :options="discountEditModeOptions"
+                  class="product-discount-editor__mode"
+                />
+                <el-select
+                  v-if="discountEditMode === 'rate'"
+                  v-model="form.discountRate"
+                  filterable
+                  class="w-full"
+                  placeholder="请选择折扣"
+                >
+                  <el-option
+                    v-for="option in discountRateOptions"
+                    :key="option.value"
+                    :label="option.label"
+                    :value="option.value"
+                  />
+                </el-select>
+                <PassiveNumberInput
+                  v-else
+                  v-model="discountedPriceInput"
+                  :min="minimumDiscountedPrice"
+                  :max="maximumDiscountedPrice"
+                  :precision="2"
+                  :step="1"
+                  class="w-full"
+                  placeholder="请输入折后价格"
+                  :disabled="Number(form.defaultPrice) <= 0"
+                />
+                <p class="product-discount-editor__hint">
+                  基础折扣作为商品默认值保存；线上展示策略请在“线上展示”中维护。当前折后价 ¥{{ discountedPricePreview }}。
+                </p>
+              </div>
+            </el-form-item>
+            <el-form-item label="基础库存" prop="currentStock">
+              <PassiveNumberInput
+                v-model="form.currentStock"
+                :min="0"
+                :step="1"
+                class="w-full"
+                placeholder="请输入基础库存"
+              />
+            </el-form-item>
+          </template>
           <el-form-item label="关联标签" prop="tagIds">
             <el-select
               v-model="form.tagIds"
@@ -1460,10 +1686,10 @@ onActivated(() => {
               />
             </el-select>
           </el-form-item>
-          <el-form-item label="状态" prop="isActive">
+          <el-form-item label="基础状态" prop="isActive">
             <el-switch v-model="form.isActive" active-text="启用" inactive-text="停用" />
             <p class="mt-2 text-xs leading-5 text-slate-400">
-              商品停用后会自动从线上预订中下架；重新启用后仍需人工重新上架，避免误恢复到客户端大厅。
+              基础状态控制商品是否可被线上展示引用；客户端上架、推荐和图文内容请在“线上展示”中维护。
             </p>
           </el-form-item>
         </el-form>
@@ -1501,6 +1727,17 @@ onActivated(() => {
   line-height: 1.6;
 }
 
+.sku-owned-fields-hint {
+  margin-bottom: 16px;
+  border: 1px solid rgb(226 232 240);
+  border-radius: 8px;
+  background: rgb(248 250 252);
+  padding: 12px 14px;
+  color: rgb(100 116 139);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 .sku-dims {
   display: grid;
   gap: 8px;
@@ -1529,12 +1766,22 @@ onActivated(() => {
 }
 
 .sku-thumb-uploader {
+  position: relative;
   display: grid;
   justify-items: center;
   gap: 4px;
+  width: 54px;
+  margin: 0 auto;
+}
+
+.sku-thumb-uploader.is-drag-active .sku-thumb-button {
+  border-color: rgb(15 118 110);
+  background: rgb(240 253 250);
+  color: rgb(15 118 110);
 }
 
 .sku-thumb-button {
+  position: relative;
   display: grid;
   width: 54px;
   height: 54px;
@@ -1554,9 +1801,69 @@ onActivated(() => {
   object-fit: cover;
 }
 
+.sku-thumb-image {
+  width: 100%;
+  height: 100%;
+}
+
+.sku-thumb-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border: 1px solid rgb(254 202 202);
+  border-radius: 999px;
+  background: rgb(255 255 255);
+  color: rgb(239 68 68);
+  font-size: 14px;
+  line-height: 1;
+  box-shadow: 0 2px 8px rgb(15 23 42 / 12%);
+  cursor: pointer;
+}
+
 .sku-thumb-button:hover {
   border-color: rgb(15 118 110);
   color: rgb(15 118 110);
+}
+
+.sku-thumb-button.is-uploading {
+  cursor: progress;
+  opacity: 0.72;
+}
+
+.sku-thumb-progress {
+  width: 40px;
+}
+
+.sku-thumb-progress-overlay {
+  position: absolute;
+  right: 7px;
+  bottom: 8px;
+  left: 7px;
+  width: auto;
+}
+
+.sku-thumb-progress-label {
+  transform: translateY(-4px);
+  color: rgb(15 118 110);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.sku-thumb-button.is-uploading .sku-thumb-progress :deep(.el-progress-bar__outer) {
+  background: rgb(204 251 241);
+}
+
+.sku-discount-editor {
+  display: grid;
+  gap: 6px;
+}
+
+.sku-discount-editor__mode {
+  justify-self: start;
 }
 
 @media (max-width: 640px) {

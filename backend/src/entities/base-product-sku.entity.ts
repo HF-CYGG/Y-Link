@@ -52,6 +52,9 @@ export class BaseProductSku {
   @Column({ name: 'is_active', ...entityColumnOptions.booleanFlag, default: 1, comment: 'SKU 是否启用' })
   isActive!: boolean
 
+  @Column({ name: 'o2o_recommended', ...entityColumnOptions.booleanFlag, default: 0, comment: 'SKU 是否推荐到 O2O 商城' })
+  o2oRecommended!: boolean
+
   @Column({ name: 'thumbnail', type: 'varchar', length: 255, nullable: true, comment: 'SKU 图片' })
   thumbnail!: string | null
 

@@ -20,6 +20,7 @@ export interface ProductSkuMatrixRow {
   discountRate?: number
   currentStock?: number
   isActive?: boolean
+  o2oRecommended?: boolean
   thumbnail?: string | null
 }
 
@@ -126,6 +127,7 @@ export const buildSkuMatrixRows = ({
       discountRate: matchedRow?.discountRate ?? defaults.discountRate,
       currentStock: matchedRow?.currentStock ?? defaults.currentStock,
       isActive: matchedRow?.isActive ?? true,
+      o2oRecommended: matchedRow?.o2oRecommended ?? false,
       thumbnail: matchedRow?.thumbnail ?? null,
     }
   }))

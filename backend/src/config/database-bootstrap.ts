@@ -68,6 +68,7 @@ const SQLITE_REQUIRED_PRODUCT_COLUMNS = [
   'current_stock',
   'pre_ordered_stock',
 ]
+const SQLITE_REQUIRED_PRODUCT_SKU_COLUMNS = ['o2o_recommended']
 const SQLITE_REQUIRED_O2O_PREORDER_ITEM_COLUMNS = [
   'original_price',
   'discount_rate',
@@ -320,6 +321,9 @@ async function normalizeSqliteO2oDiscountColumns(dataSource: DataSource): Promis
 
   const skuTableColumnSet = await listSqliteTableColumns(dataSource, 'base_product_sku')
   if (skuTableColumnSet.size > 0) {
+    if (!skuTableColumnSet.has('o2o_recommended')) {
+      await dataSource.query(`ALTER TABLE "base_product_sku" ADD COLUMN "o2o_recommended" tinyint NOT NULL DEFAULT 0`)
+    }
     await dataSource.query(`
       INSERT INTO "base_product_sku" (
         "product_id",
@@ -331,6 +335,7 @@ async function normalizeSqliteO2oDiscountColumns(dataSource: DataSource): Promis
         "current_stock",
         "pre_ordered_stock",
         "is_active",
+        "o2o_recommended",
         "thumbnail",
         "sort_order"
       )
@@ -344,6 +349,7 @@ async function normalizeSqliteO2oDiscountColumns(dataSource: DataSource): Promis
         "base_product"."current_stock",
         "base_product"."pre_ordered_stock",
         "base_product"."is_active",
+        0,
         "base_product"."thumbnail",
         0
       FROM "base_product"
@@ -528,6 +534,11 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
 
   const productColumnSet = await listSqliteTableColumns(dataSource, 'base_product')
   if (SQLITE_REQUIRED_PRODUCT_COLUMNS.some((column) => !productColumnSet.has(column))) {
+    return true
+  }
+
+  const productSkuColumnSet = await listSqliteTableColumns(dataSource, 'base_product_sku')
+  if (SQLITE_REQUIRED_PRODUCT_SKU_COLUMNS.some((column) => !productSkuColumnSet.has(column))) {
     return true
   }
 
