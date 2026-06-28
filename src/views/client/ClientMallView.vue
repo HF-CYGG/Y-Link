@@ -1337,7 +1337,6 @@ onBeforeUnmount(() => {
               <p v-if="resolveProductPriceView(product).isDiscounted" class="client-product-card__price-extra">
                 原价 ¥{{ Number(resolveProductPriceView(product).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(product).discountLabel }}
               </p>
-              <p v-if="resolveProductCardDisplay(product).description" class="client-product-card__desc">{{ resolveProductCardDisplay(product).description }}</p>
               <div class="client-product-card__meta">
                 <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">
                   可预订 {{ product.availableStock }}
@@ -1443,7 +1442,6 @@ onBeforeUnmount(() => {
                 <p v-if="resolveProductPriceView(row.data).isDiscounted" class="client-product-card__price-extra">
                   原价 ¥{{ Number(resolveProductPriceView(row.data).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(row.data).discountLabel }}
                 </p>
-                <p v-if="resolveProductCardDisplay(row.data).description" class="client-product-card__desc">{{ resolveProductCardDisplay(row.data).description }}</p>
                 <div class="client-product-card__meta">
                   <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ row.data.availableStock }}</span>
                   <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">已预订 {{ row.data.preOrderedStock }}</span>
@@ -1491,7 +1489,6 @@ onBeforeUnmount(() => {
                   <p v-if="resolveProductPriceView(product).isDiscounted" class="client-product-card__price-extra">
                     原价 ¥{{ Number(resolveProductPriceView(product).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(product).discountLabel }}
                   </p>
-                  <p v-if="resolveProductCardDisplay(product).description" class="client-product-card__desc">{{ resolveProductCardDisplay(product).description }}</p>
                   <div class="client-product-card__meta">
                     <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ product.availableStock }}</span>
                     <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">已预订 {{ product.preOrderedStock }}</span>
@@ -1536,7 +1533,6 @@ onBeforeUnmount(() => {
                     <p v-if="resolveProductPriceView(product).isDiscounted" class="client-product-card__price-extra">
                       原价 ¥{{ Number(resolveProductPriceView(product).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(product).discountLabel }}
                     </p>
-                    <p v-if="resolveProductCardDisplay(product).description" class="client-product-card__desc">{{ resolveProductCardDisplay(product).description }}</p>
                     <div class="client-product-card__meta">
                       <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ product.availableStock }}</span>
                       <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">已预订 {{ product.preOrderedStock }}</span>
@@ -2061,9 +2057,10 @@ onBeforeUnmount(() => {
 }
 
 .client-product-card {
+  box-sizing: border-box;
   display: grid;
   grid-template-columns: 3.9rem minmax(0, 1fr) auto;
-  min-height: 6.55rem;
+  min-height: 6.8rem;
   align-items: center;
   gap: 0.68rem;
   border-radius: 0.85rem;
@@ -2074,6 +2071,7 @@ onBeforeUnmount(() => {
 
 .client-product-card__image-button {
   display: inline-flex;
+  align-self: stretch;
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
@@ -2084,7 +2082,9 @@ onBeforeUnmount(() => {
 
 .client-product-card__body {
   display: block;
+  align-self: stretch;
   min-width: 0;
+  height: 100%;
   border: none;
   background: transparent;
   text-align: left;
@@ -2092,8 +2092,12 @@ onBeforeUnmount(() => {
 }
 
 .client-product-card__content {
+  display: flex;
+  height: 100%;
   min-width: 0;
   flex: 1;
+  flex-direction: column;
+  justify-content: space-between;
   text-align: left;
 }
 
@@ -2117,34 +2121,30 @@ onBeforeUnmount(() => {
   line-height: 1.16;
 }
 
-.client-product-card__desc {
-  margin-top: 0.14rem;
-  overflow: hidden;
-  color: #64748b;
-  font-size: 0.74rem;
-  line-height: 1.28;
-  display: -webkit-box;
-  line-clamp: 1;
-  -webkit-line-clamp: 1;
-  -webkit-box-orient: vertical;
-}
-
 .client-product-card__meta {
   margin-top: 0.4rem;
-  display: flex;
+  display: grid;
+  grid-template-columns: max-content max-content;
   min-width: 0;
-  flex-wrap: wrap;
-  gap: 0.26rem;
+  align-items: center;
+  gap: 0.26rem 0.32rem;
   overflow: visible;
   font-size: 0.72rem;
 }
 
 .client-product-card__meta > span {
-  flex: 0 0 auto;
-  overflow: visible;
+  overflow: hidden;
+  max-width: 5.4rem;
   padding: 0.2rem 0.42rem !important;
   line-height: 1.12;
+  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.client-product-card__meta > span:first-child {
+  grid-column: 1 / -1;
+  justify-self: start;
+  max-width: 100%;
 }
 
 .client-product-card__price-extra {
@@ -2525,6 +2525,7 @@ onBeforeUnmount(() => {
 .client-product-card__add-button {
   height: 1.95rem;
   align-self: center;
+  justify-self: end;
   border-radius: 9999px;
   border: none;
   background: var(--ylink-color-primary-strong);
@@ -3599,12 +3600,6 @@ onBeforeUnmount(() => {
 
   .client-product-card__price {
     font-size: 0.88rem;
-  }
-
-  .client-product-card__desc {
-    margin-top: 0.1rem;
-    font-size: 0.72rem;
-    line-height: 1.24;
   }
 
   .client-product-card__meta {

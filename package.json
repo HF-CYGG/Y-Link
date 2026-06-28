@@ -25,6 +25,7 @@
     "verify:image-upload-compression": "node ./scripts/verify-image-upload-compression.mjs",
     "verify:mall-catalog-performance": "node ./scripts/verify-mall-catalog-performance.mjs",
     "verify:docker-base-image": "node ./scripts/verify-docker-base-image.mjs",
+    "verify:client-detail-layout": "node ./scripts/verify-client-detail-layout.mjs",
     "verify:text-encoding": "node ./scripts/verify-text-encoding.mjs",
     "verify:performance:budget": "node ./scripts/verify-enterprise-page-performance.mjs",
     "verify:performance:core-paths": "node ./scripts/verify-enterprise-core-paths.mjs",
