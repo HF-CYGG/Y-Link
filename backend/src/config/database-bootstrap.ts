@@ -166,6 +166,54 @@ async function listSqliteUniqueIndexes(dataSource: DataSource, tableName: string
   return new Set(indexes.filter((index) => Number(index.unique) === 1).map((index) => index.name))
 }
 
+async function listSqliteIndexes(dataSource: DataSource, tableName: string): Promise<Set<string>> {
+  const indexes: Array<{ name: string }> = await dataSource.query(`PRAGMA index_list('${tableName}')`)
+  return new Set(indexes.map((index) => index.name))
+}
+
+async function ensureSqliteIndex(
+  dataSource: DataSource,
+  tableName: string,
+  indexName: string,
+  createIndexSql: string,
+): Promise<void> {
+  const tableColumnSet = await listSqliteTableColumns(dataSource, tableName)
+  if (tableColumnSet.size === 0) {
+    return
+  }
+  const indexSet = await listSqliteIndexes(dataSource, tableName)
+  if (!indexSet.has(indexName)) {
+    await dataSource.query(createIndexSql)
+  }
+}
+
+async function ensureSqliteMallCatalogIndexes(dataSource: DataSource): Promise<void> {
+  await ensureSqliteIndex(
+    dataSource,
+    'base_product',
+    'idx_base_product_mall_list',
+    `CREATE INDEX IF NOT EXISTS "idx_base_product_mall_list" ON "base_product" ("is_active", "o2o_status", "id")`,
+  )
+  await ensureSqliteIndex(
+    dataSource,
+    'base_product_sku',
+    'idx_base_product_sku_mall_list',
+    `CREATE INDEX IF NOT EXISTS "idx_base_product_sku_mall_list" ON "base_product_sku" ("product_id", "is_active", "sort_order", "id")`,
+  )
+  await ensureSqliteIndex(
+    dataSource,
+    'o2o_preorder_item',
+    'idx_o2o_preorder_item_product_order',
+    `CREATE INDEX IF NOT EXISTS "idx_o2o_preorder_item_product_order" ON "o2o_preorder_item" ("product_id", "order_id")`,
+  )
+  await ensureSqliteIndex(
+    dataSource,
+    'o2o_preorder_item',
+    'idx_o2o_preorder_item_sku_order',
+    `CREATE INDEX IF NOT EXISTS "idx_o2o_preorder_item_sku_order" ON "o2o_preorder_item" ("sku_id", "order_id")`,
+  )
+}
+
 function serializeSqliteNumericLiteral(value: number, fractionDigits = 2): string {
   // SQLite DDL 的 DEFAULT 子句不能使用参数占位符，因此这里先把内部常量收敛为有限数字，再序列化成 SQL 数值字面量。
   if (!Number.isFinite(value)) {
@@ -607,6 +655,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   if (env.DB_TYPE === 'sqlite') {
     await normalizeSqliteOutboundItemColumns(dataSource)
     await normalizeSqliteO2oDiscountColumns(dataSource)
+    await ensureSqliteMallCatalogIndexes(dataSource)
   }
 
   // DB_SYNC=true 时直接走 TypeORM 同步，便于本地快速调试实体结构。

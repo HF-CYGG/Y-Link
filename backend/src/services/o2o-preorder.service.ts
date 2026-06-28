@@ -1603,6 +1603,19 @@ class O2oPreorderService {
     // 同时把允许对客户端公开的门店展示配置一并返回，避免客户端误调后台系统配置接口。
     const o2oRules = await systemConfigService.getO2oRuleConfigs()
     const products = await this.productRepo.find({
+      select: {
+        id: true,
+        productCode: true,
+        productName: true,
+        defaultPrice: true,
+        discountRate: true,
+        o2oRecommended: true,
+        thumbnail: true,
+        detailContent: true,
+        limitPerUser: true,
+        currentStock: true,
+        preOrderedStock: true,
+      },
       where: { isActive: true, o2oStatus: 'listed' },
       order: { id: 'DESC' },
     })
@@ -1623,6 +1636,21 @@ class O2oPreorderService {
       relations: { tag: true },
     })
     const skus = await AppDataSource.manager.getRepository(BaseProductSku).find({
+      select: {
+        id: true,
+        productId: true,
+        skuCode: true,
+        specValuesJson: true,
+        specText: true,
+        defaultPrice: true,
+        discountRate: true,
+        currentStock: true,
+        preOrderedStock: true,
+        isActive: true,
+        o2oRecommended: true,
+        thumbnail: true,
+        sortOrder: true,
+      },
       where: { productId: In(productIds) },
       order: { productId: 'ASC', sortOrder: 'ASC', id: 'ASC' },
     })

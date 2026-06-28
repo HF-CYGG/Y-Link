@@ -22,6 +22,7 @@ const skuSpecValuesJsonColumnOptions = entityColumnOptions.isSqlite ? { default:
 
 @Entity({ name: 'base_product_sku' })
 @Index('idx_base_product_sku_product_id', ['productId'])
+@Index('idx_base_product_sku_mall_list', ['productId', 'isActive', 'sortOrder', 'id'])
 @Index('uk_base_product_sku_code', ['skuCode'], { unique: true })
 export class BaseProductSku {
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })

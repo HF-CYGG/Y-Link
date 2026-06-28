@@ -38,6 +38,12 @@ interface ProductSearchEntry {
   searchText: string
 }
 
+interface ProductCardDisplay {
+  thumbnail: string
+  priceView: ReturnType<typeof resolveO2oPriceView>
+  description: string
+}
+
 type ProductSortMode = 'default' | 'recommended'
 
 interface ProductSortOption {
@@ -115,6 +121,7 @@ const CATEGORY_VIEWPORT_ACTIVATE_OFFSET = 28
 const CATEGORY_BOTTOM_VISIBLE_PADDING = 56
 const DEFAULT_PRODUCT_IMAGE_WARMUP_BATCH = 12
 const DEFAULT_PRODUCT_IMAGE_WARMUP_DELAY_MS = 180
+const PRODUCT_CARD_SEARCH_DETAIL_MAX_LENGTH = 80
 
 // 商城页属于高频返回页面，初始化时优先恢复购物车与目录缓存，避免每次进入都重置上下文。
 clientCartStore.initialize(clientAuthStore.currentUser?.id)
@@ -229,12 +236,45 @@ const resolveHallProductThumbnail = (product: Pick<O2oMallProduct, 'productName'
   return resolveProductPlaceholder(previewSku?.thumbnail || product.thumbnail)
 }
 
-const resolveProductThumbnail = (product: Pick<O2oMallProduct, 'productName' | 'productCode' | 'thumbnail' | 'o2oRecommended' | 'skus'>) => {
-  return resolveHallProductThumbnail(product)
+const normalizeProductCardDescription = (product: Pick<O2oMallProduct, 'detailContent'>) => product.detailContent?.trim() ?? ''
+
+const normalizeProductCardSearchText = (product: O2oMallProduct, categoryKeys: string[]) => {
+  const boundedDetailText = normalizeProductCardDescription(product).slice(0, PRODUCT_CARD_SEARCH_DETAIL_MAX_LENGTH)
+  return [
+    product.productName,
+    product.productCode,
+    boundedDetailText,
+    ...categoryKeys,
+  ].filter(Boolean).join(' ').toLowerCase()
+}
+
+const buildProductCardDisplay = (product: O2oMallProduct): ProductCardDisplay => {
+  const previewSku = resolveHallProductPreviewSku(product)
+  return {
+    thumbnail: resolveHallProductThumbnail(product),
+    priceView: resolveO2oPriceView(previewSku ?? product),
+    description: normalizeProductCardDescription(product),
+  }
+}
+
+const productCardDisplayMap = computed(() => {
+  const displayMap = new Map<string, ProductCardDisplay>()
+  products.value.forEach((product) => {
+    displayMap.set(String(product.id), buildProductCardDisplay(product))
+  })
+  return displayMap
+})
+
+const resolveProductCardDisplay = (product: O2oMallProduct) => {
+  return productCardDisplayMap.value.get(String(product.id)) ?? buildProductCardDisplay(product)
+}
+
+const resolveProductThumbnail = (product: O2oMallProduct) => {
+  return resolveProductCardDisplay(product).thumbnail
 }
 
 const resolveProductPriceView = (product: O2oMallProduct) => {
-  return resolveO2oPriceView(resolveHallProductPreviewSku(product) ?? product)
+  return resolveProductCardDisplay(product).priceView
 }
 
 const resolveDetailProductThumbnail = (product: Pick<O2oMallProduct, 'productName' | 'productCode' | 'thumbnail'>) => {
@@ -317,7 +357,7 @@ const mallBrowseIndex = computed<MallBrowseIndexSnapshot>(() => {
     searchEntries.push({
       product,
       // 搜索索引预先拼好常用字段，减少用户每次输入关键字时的字符串拼接成本。
-      searchText: `${product.productName} ${product.productCode} ${product.detailContent ?? ''} ${categoryKeys.join(' ')}`.toLowerCase(),
+      searchText: normalizeProductCardSearchText(product, categoryKeys),
     })
     categoryKeys.forEach((key) => {
       const grouped = groupMap.get(key)
@@ -450,18 +490,19 @@ const warmupProductImages = (items: O2oMallProduct[]) => {
   if (warmupBatch <= 0) {
     return
   }
-  const warmupCandidates = items.filter((item) => Boolean(item.thumbnail)).slice(0, warmupBatch)
-  if (!warmupCandidates.length) {
+  const warmupImageUrls = [...new Set(
+    items
+      .map((item) => resolveProductCardDisplay(item).thumbnail)
+      .filter((thumbnail): thumbnail is string => Boolean(thumbnail)),
+  )].slice(0, warmupBatch)
+  if (!warmupImageUrls.length) {
     return
   }
   // 非微信场景仍只预热首屏附近的小批量图片，主链路继续由模板内 loading="lazy" 负责。
   const warmup = () => {
-    warmupCandidates.forEach((item) => {
-      if (!item.thumbnail) {
-        return
-      }
+    warmupImageUrls.forEach((thumbnail) => {
       const image = new Image()
-      image.src = item.thumbnail
+      image.src = thumbnail
     })
   }
   if (typeof globalThis.window.requestIdleCallback === 'function') {
@@ -1296,7 +1337,7 @@ onBeforeUnmount(() => {
               <p v-if="resolveProductPriceView(product).isDiscounted" class="client-product-card__price-extra">
                 原价 ¥{{ Number(resolveProductPriceView(product).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(product).discountLabel }}
               </p>
-              <p v-if="product.detailContent" class="client-product-card__desc">{{ product.detailContent }}</p>
+              <p v-if="resolveProductCardDisplay(product).description" class="client-product-card__desc">{{ resolveProductCardDisplay(product).description }}</p>
               <div class="client-product-card__meta">
                 <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">
                   可预订 {{ product.availableStock }}
@@ -1402,7 +1443,7 @@ onBeforeUnmount(() => {
                 <p v-if="resolveProductPriceView(row.data).isDiscounted" class="client-product-card__price-extra">
                   原价 ¥{{ Number(resolveProductPriceView(row.data).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(row.data).discountLabel }}
                 </p>
-                <p v-if="row.data.detailContent" class="client-product-card__desc">{{ row.data.detailContent }}</p>
+                <p v-if="resolveProductCardDisplay(row.data).description" class="client-product-card__desc">{{ resolveProductCardDisplay(row.data).description }}</p>
                 <div class="client-product-card__meta">
                   <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ row.data.availableStock }}</span>
                   <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">已预订 {{ row.data.preOrderedStock }}</span>
@@ -1450,7 +1491,7 @@ onBeforeUnmount(() => {
                   <p v-if="resolveProductPriceView(product).isDiscounted" class="client-product-card__price-extra">
                     原价 ¥{{ Number(resolveProductPriceView(product).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(product).discountLabel }}
                   </p>
-                  <p v-if="product.detailContent" class="client-product-card__desc">{{ product.detailContent }}</p>
+                  <p v-if="resolveProductCardDisplay(product).description" class="client-product-card__desc">{{ resolveProductCardDisplay(product).description }}</p>
                   <div class="client-product-card__meta">
                     <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ product.availableStock }}</span>
                     <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">已预订 {{ product.preOrderedStock }}</span>
@@ -1495,7 +1536,7 @@ onBeforeUnmount(() => {
                     <p v-if="resolveProductPriceView(product).isDiscounted" class="client-product-card__price-extra">
                       原价 ¥{{ Number(resolveProductPriceView(product).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(product).discountLabel }}
                     </p>
-                    <p v-if="product.detailContent" class="client-product-card__desc">{{ product.detailContent }}</p>
+                    <p v-if="resolveProductCardDisplay(product).description" class="client-product-card__desc">{{ resolveProductCardDisplay(product).description }}</p>
                     <div class="client-product-card__meta">
                       <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ product.availableStock }}</span>
                       <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">已预订 {{ product.preOrderedStock }}</span>

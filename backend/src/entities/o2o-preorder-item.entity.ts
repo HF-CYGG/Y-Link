@@ -11,6 +11,8 @@ import { O2oPreorder } from './o2o-preorder.entity.js'
 import { entityColumnOptions } from './entity-column-options.js'
 
 @Entity({ name: 'o2o_preorder_item' })
+@Index('idx_o2o_preorder_item_product_order', ['productId', 'orderId'])
+@Index('idx_o2o_preorder_item_sku_order', ['skuId', 'orderId'])
 export class O2oPreorderItem {
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })
   id!: string
