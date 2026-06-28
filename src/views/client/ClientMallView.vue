@@ -10,7 +10,7 @@ import { useVirtualList } from '@vueuse/core'
 import { computed, nextTick, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
-import { ArrowDown, ArrowRight, Search, ShoppingCart } from '@element-plus/icons-vue'
+import { ArrowDown, ArrowRight, Close, Search, ShoppingCart } from '@element-plus/icons-vue'
 import { getO2oMallProducts, getO2oMallStorefront, type O2oMallProduct, type O2oMallSku } from '@/api/modules/o2o'
 import { BaseRequestState } from '@/components/common'
 import { useStableRequest } from '@/composables/useStableRequest'
@@ -1588,35 +1588,44 @@ onBeforeUnmount(() => {
       :with-header="false"
       class="client-drawer-responsive"
     >
-      <section v-if="detailProduct" class="space-y-4 pb-2 max-w-[480px] mx-auto h-full max-h-[85vh] flex flex-col">
-        <button type="button" class="client-detail-image-button" @click="openDetailImagePreview">
-          <img
-            :src="resolveDetailProductThumbnail(detailProduct)"
-            :alt="resolveCurrentDetailDisplayName(detailProduct)"
-            class="h-44 sm:h-56 w-full rounded-2xl object-cover flex-shrink-0"
-            loading="lazy"
-            decoding="async"
-          />
-          <span class="client-detail-image-button__hint">点击查看大图</span>
-        </button>
-        <div class="space-y-2 flex-shrink-0">
-          <p class="text-lg font-semibold text-slate-900">{{ resolveCurrentDetailDisplayName(detailProduct) }}</p>
-          <p class="text-sm font-bold text-[var(--ylink-color-primary-strong)]">¥{{ Number(resolveCurrentDetailPriceView(detailProduct).discountedPrice).toFixed(2) }}</p>
-          <p v-if="resolveCurrentDetailPriceView(detailProduct).isDiscounted" class="client-product-card__price-extra">
-            原价 ¥{{ Number(resolveCurrentDetailPriceView(detailProduct).originalPrice).toFixed(2) }} · {{ resolveCurrentDetailPriceView(detailProduct).discountLabel }}
-          </p>
-          <p class="text-sm text-slate-500">{{ resolveCurrentDetailDescription(detailProduct) }}</p>
-          <div class="flex flex-wrap gap-2 text-xs">
-            <span class="rounded-full bg-emerald-50 px-3 py-1 text-emerald-600">可预订 {{ resolveCurrentDetailAvailableStock(detailProduct) }}</span>
-            <span class="rounded-full bg-amber-50 px-3 py-1 text-amber-600">已预订 {{ resolveCurrentDetailPreOrderedStock(detailProduct) }}</span>
-            <span class="rounded-full bg-slate-100 px-3 py-1 text-slate-600">已售 {{ resolveSoldQty(detailProduct) }}</span>
-            <span class="rounded-full bg-slate-100 px-3 py-1 text-slate-600">限购 {{ detailProduct.limitPerUser }}</span>
-          </div>
-        </div>
-        <div v-if="detailProduct.skus?.length" class="flex-shrink-0 rounded-xl bg-slate-50 p-3">
-          <p class="mb-2 text-sm font-bold text-slate-700">选择规格</p>
-          <div class="grid gap-2">
-            <button
+      <section v-if="detailProduct" class="client-detail-panel">
+        <div class="client-detail-scroll">
+          <header class="client-detail-header">
+            <div class="client-detail-summary">
+              <p class="client-detail-title">{{ resolveCurrentDetailDisplayName(detailProduct) }}</p>
+              <p class="client-detail-price">¥{{ Number(resolveCurrentDetailPriceView(detailProduct).discountedPrice).toFixed(2) }}</p>
+              <p v-if="resolveCurrentDetailPriceView(detailProduct).isDiscounted" class="client-product-card__price-extra">
+                原价 ¥{{ Number(resolveCurrentDetailPriceView(detailProduct).originalPrice).toFixed(2) }} · {{ resolveCurrentDetailPriceView(detailProduct).discountLabel }}
+              </p>
+              <p class="client-detail-desc">{{ resolveCurrentDetailDescription(detailProduct) }}</p>
+              <div class="client-detail-tags">
+                <span>可预订 {{ resolveCurrentDetailAvailableStock(detailProduct) }}</span>
+                <span>已预订 {{ resolveCurrentDetailPreOrderedStock(detailProduct) }}</span>
+                <span>已售 {{ resolveSoldQty(detailProduct) }}</span>
+                <span>限购 {{ detailProduct.limitPerUser }}</span>
+              </div>
+            </div>
+            <div class="client-detail-side-actions">
+              <button type="button" class="client-detail-thumb-button" aria-label="Preview product image" @click="openDetailImagePreview">
+                <img
+                  :src="resolveDetailProductThumbnail(detailProduct)"
+                  :alt="resolveCurrentDetailDisplayName(detailProduct)"
+                  loading="lazy"
+                  decoding="async"
+                />
+                <span>查看大图</span>
+              </button>
+              <button type="button" class="client-detail-close-button" aria-label="Close product detail" @click="detailVisible = false">
+                <ElIcon>
+                  <Close />
+                </ElIcon>
+              </button>
+            </div>
+          </header>
+          <div v-if="detailProduct.skus?.length" class="client-detail-sku-section">
+            <p class="client-detail-section-title">选择规格</p>
+            <div class="grid gap-2">
+              <button
               v-for="sku in detailProduct.skus"
               :key="sku.id"
               type="button"
@@ -1642,21 +1651,23 @@ onBeforeUnmount(() => {
                 </template>
                 <span>库存 {{ sku.availableStock }}</span>
               </small>
-            </button>
+              </button>
+            </div>
           </div>
         </div>
-        <div class="flex-1 overflow-y-auto"></div>
-        <div class="flex items-center justify-between rounded-2xl bg-slate-100 px-3 py-2 flex-shrink-0 mt-auto">
-          <span class="text-sm text-slate-600">数量</span>
-          <div class="flex items-center gap-2">
-            <button type="button" class="client-qty-button" @click="changeDetailQty(-1)">-</button>
-            <span class="min-w-8 text-center text-sm font-semibold">{{ detailQty }}</span>
-            <button type="button" class="client-qty-button" @click="changeDetailQty(1)">+</button>
+        <footer class="client-detail-action-bar">
+          <div class="client-detail-qty-row">
+            <span>数量</span>
+            <div class="client-detail-qty-control">
+              <button type="button" class="client-qty-button" aria-label="减少数量" @click="changeDetailQty(-1)">-</button>
+              <span>{{ detailQty }}</span>
+              <button type="button" class="client-qty-button" aria-label="增加数量" @click="changeDetailQty(1)">+</button>
+            </div>
           </div>
-        </div>
-        <button type="button" class="h-11 w-full rounded-full bg-slate-900 text-sm font-semibold text-white flex-shrink-0" @click="addCurrentDetailToCart">
-          加入购物车
-        </button>
+          <button type="button" class="client-detail-cart-button" @click="addCurrentDetailToCart">
+            加入购物车
+          </button>
+        </footer>
       </section>
     </ElDrawer>
 
@@ -2099,6 +2110,244 @@ onBeforeUnmount(() => {
   object-fit: cover;
 }
 
+.client-detail-panel {
+  display: flex;
+  width: min(100%, 30rem);
+  height: min(86dvh, calc(100dvh - env(safe-area-inset-top, 0px) - 0.75rem));
+  max-height: calc(100dvh - env(safe-area-inset-top, 0px) - 0.75rem);
+  min-height: 0;
+  flex-direction: column;
+  margin: 0 auto;
+}
+
+.client-detail-scroll {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0.1rem 0.1rem 1rem;
+}
+
+.client-detail-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.85rem;
+  align-items: start;
+}
+
+.client-detail-summary {
+  min-width: 0;
+  padding-top: 0.15rem;
+}
+
+.client-detail-title {
+  color: #0f172a;
+  font-size: 1.12rem;
+  font-weight: 700;
+  line-height: 1.32;
+  word-break: break-word;
+}
+
+.client-detail-price {
+  margin-top: 0.48rem;
+  color: var(--ylink-color-primary-strong);
+  font-size: 1.02rem;
+  font-weight: 800;
+  line-height: 1.1;
+}
+
+.client-detail-desc {
+  margin-top: 0.55rem;
+  color: #64748b;
+  font-size: 0.86rem;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.client-detail-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.48rem;
+  margin-top: 0.75rem;
+  color: #475569;
+  font-size: 0.75rem;
+}
+
+.client-detail-tags span {
+  border-radius: 9999px;
+  background: #f1f5f9;
+  line-height: 1;
+  padding: 0.45rem 0.72rem;
+}
+
+.client-detail-tags span:first-child {
+  background: #ecfdf5;
+  color: #059669;
+}
+
+.client-detail-tags span:nth-child(2) {
+  background: #fffbeb;
+  color: #b45309;
+}
+
+.client-detail-side-actions {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 0.38rem;
+  align-items: start;
+  flex-shrink: 0;
+  padding-top: 0.42rem;
+}
+
+.client-detail-close-button {
+  display: inline-flex;
+  width: 1.9rem;
+  height: 1.9rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(203, 213, 225, 0.75);
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.9);
+  color: #64748b;
+  box-shadow: none;
+  font-size: 0.78rem;
+}
+
+.client-detail-close-button:active,
+.client-detail-thumb-button:active,
+.client-detail-cart-button:active {
+  transform: scale(0.98);
+}
+
+.client-detail-thumb-button {
+  position: relative;
+  display: block;
+  width: 5rem;
+  height: 5rem;
+  overflow: hidden;
+  border: 1px solid rgba(203, 213, 225, 0.88);
+  border-radius: 1.15rem;
+  background: #f8fafc;
+  padding: 0;
+  box-shadow: 0 12px 26px rgba(15, 23, 42, 0.1);
+}
+
+.client-detail-thumb-button img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.client-detail-thumb-button span {
+  position: absolute;
+  right: 0.35rem;
+  bottom: 0.35rem;
+  border-radius: 9999px;
+  background: rgba(15, 23, 42, 0.72);
+  color: #ffffff;
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0.28rem 0.42rem;
+}
+
+.client-detail-sku-section {
+  margin-top: 1rem;
+  border-radius: 1rem;
+  background: #f8fafc;
+  padding: 0.85rem;
+}
+
+.client-detail-section-title {
+  margin-bottom: 0.6rem;
+  color: #334155;
+  font-size: 0.9rem;
+  font-weight: 800;
+}
+
+.client-detail-action-bar {
+  flex-shrink: 0;
+  border-top: 1px solid rgba(226, 232, 240, 0.9);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.9), #ffffff 18%),
+    #ffffff;
+  padding: 0.72rem 0.1rem max(0.85rem, env(safe-area-inset-bottom, 0px));
+}
+
+.client-detail-qty-row {
+  display: flex;
+  min-height: 3rem;
+  align-items: center;
+  justify-content: space-between;
+  border-radius: 1rem;
+  background: #f1f5f9;
+  color: #475569;
+  font-size: 0.9rem;
+  padding: 0.48rem 0.75rem;
+}
+
+.client-detail-qty-control {
+  display: flex;
+  align-items: center;
+  gap: 0.62rem;
+}
+
+.client-detail-qty-control span {
+  min-width: 1.7rem;
+  color: #0f172a;
+  font-size: 0.95rem;
+  font-weight: 800;
+  text-align: center;
+}
+
+.client-detail-cart-button {
+  width: 100%;
+  min-height: 2.9rem;
+  margin-top: 0.75rem;
+  border: none;
+  border-radius: 9999px;
+  background: #0f172a;
+  color: #ffffff;
+  font-size: 0.92rem;
+  font-weight: 800;
+}
+
+@media (max-width: 640px) {
+  .client-detail-panel {
+    width: 100%;
+    height: min(88dvh, calc(100dvh - env(safe-area-inset-top, 0px) - 0.5rem));
+    max-height: calc(100dvh - env(safe-area-inset-top, 0px) - 0.5rem);
+  }
+
+  .client-detail-scroll {
+    padding-bottom: 0.85rem;
+  }
+
+  .client-detail-header {
+    gap: 0.68rem;
+  }
+
+  .client-detail-title {
+    font-size: 1.04rem;
+  }
+
+  .client-detail-thumb-button {
+    width: 4.65rem;
+    height: 4.65rem;
+    border-radius: 1rem;
+  }
+
+  .client-detail-sku-section {
+    margin-top: 0.85rem;
+    padding: 0.75rem;
+  }
+
+  .client-detail-action-bar {
+    padding-bottom: max(1rem, calc(env(safe-area-inset-bottom, 0px) + 0.65rem));
+  }
+}
+
 .client-detail-image-button {
   position: relative;
   display: block;
@@ -2206,12 +2455,14 @@ onBeforeUnmount(() => {
 }
 
 .client-qty-button {
-  height: 1.85rem;
-  width: 1.85rem;
+  height: 2.55rem;
+  width: 2.55rem;
   border-radius: 9999px;
   border: none;
   background: var(--ylink-color-primary-strong);
   color: #ffffff;
+  font-size: 1.05rem;
+  font-weight: 800;
 }
 
 .mall-search-launcher-wrap {
