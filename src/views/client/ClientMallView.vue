@@ -241,7 +241,12 @@ const resolveDetailProductThumbnail = (product: Pick<O2oMallProduct, 'productNam
   return resolveProductPlaceholder(selectedDetailSku.value?.thumbnail || product.thumbnail)
 }
 
+const resolveActiveSkus = (product: O2oMallProduct | null): O2oMallSku[] => product?.skus?.filter((sku) => sku.isActive !== false) ?? []
+
 const resolveCurrentDetailSpecText = () => {
+  if (resolveActiveSkus(detailProduct.value).length <= 1) {
+    return ''
+  }
   const sku = selectedDetailSku.value
   return sku?.specText?.trim() || sku?.skuCode?.trim() || ''
 }
@@ -272,11 +277,11 @@ const resolveCurrentDetailPreOrderedStock = (product: O2oMallProduct) => {
   return Math.max(0, Number(selectedDetailSku.value?.preOrderedStock ?? product.preOrderedStock ?? 0))
 }
 
-const resolveActiveSkus = (product: O2oMallProduct | null): O2oMallSku[] => product?.skus?.filter((sku) => sku.isActive !== false) ?? []
-
 const resolveDefaultSku = (product: O2oMallProduct | null): O2oMallSku | null => {
   return product ? resolveHallProductPreviewSku(product) : null
 }
+
+const hasDetailSkuChoices = computed(() => resolveActiveSkus(detailProduct.value).length > 1)
 
 const detailMaxQty = computed(() => {
   const limit = Math.max(0, Number(detailProduct.value?.limitPerUser ?? 0))
@@ -1588,7 +1593,11 @@ onBeforeUnmount(() => {
       :with-header="false"
       class="client-drawer-responsive"
     >
-      <section v-if="detailProduct" class="client-detail-panel">
+      <section
+        v-if="detailProduct"
+        class="client-detail-panel"
+        :class="{ 'client-detail-panel--compact': !hasDetailSkuChoices }"
+      >
         <div class="client-detail-scroll">
           <header class="client-detail-header">
             <div class="client-detail-summary">
@@ -1615,14 +1624,20 @@ onBeforeUnmount(() => {
                 />
                 <span>查看大图</span>
               </button>
-              <button type="button" class="client-detail-close-button" aria-label="Close product detail" @click="detailVisible = false">
+              <button
+                v-if="hasDetailSkuChoices"
+                type="button"
+                class="client-detail-close-button"
+                aria-label="Close product detail"
+                @click="detailVisible = false"
+              >
                 <ElIcon>
                   <Close />
                 </ElIcon>
               </button>
             </div>
           </header>
-          <div v-if="detailProduct.skus?.length" class="client-detail-sku-section">
+          <div v-if="hasDetailSkuChoices" class="client-detail-sku-section">
             <p class="client-detail-section-title">选择规格</p>
             <div class="grid gap-2">
               <button
@@ -2128,6 +2143,22 @@ onBeforeUnmount(() => {
   padding: 0.1rem 0.1rem 1rem;
 }
 
+.client-detail-panel--compact {
+  height: auto;
+  max-height: min(72dvh, calc(100dvh - env(safe-area-inset-top, 0px) - 0.75rem));
+}
+
+.client-detail-panel--compact .client-detail-scroll {
+  flex: 0 1 auto;
+  overflow-y: visible;
+  padding-bottom: 0.55rem;
+}
+
+.client-detail-panel--compact .client-detail-action-bar {
+  border-top: 0;
+  padding-top: 0.3rem;
+}
+
 .client-detail-header {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -2320,8 +2351,17 @@ onBeforeUnmount(() => {
     max-height: calc(100dvh - env(safe-area-inset-top, 0px) - 0.5rem);
   }
 
+  .client-detail-panel--compact {
+    height: auto;
+    max-height: min(68dvh, calc(100dvh - env(safe-area-inset-top, 0px) - 0.5rem));
+  }
+
   .client-detail-scroll {
     padding-bottom: 0.85rem;
+  }
+
+  .client-detail-panel--compact .client-detail-scroll {
+    padding-bottom: 0.45rem;
   }
 
   .client-detail-header {
