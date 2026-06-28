@@ -18,6 +18,8 @@ import {
 import { BaseProduct } from './base-product.entity.js'
 import { entityColumnOptions } from './entity-column-options.js'
 
+const skuSpecValuesJsonColumnOptions = entityColumnOptions.isSqlite ? { default: '{}' } : {}
+
 @Entity({ name: 'base_product_sku' })
 @Index('idx_base_product_sku_product_id', ['productId'])
 @Index('uk_base_product_sku_code', ['skuCode'], { unique: true })
@@ -31,7 +33,7 @@ export class BaseProductSku {
   @Column({ name: 'sku_code', type: 'varchar', length: 96, comment: 'SKU 编码' })
   skuCode!: string
 
-  @Column({ name: 'spec_values_json', type: 'text', default: '{}', comment: '规格值 JSON' })
+  @Column({ name: 'spec_values_json', type: 'text', ...skuSpecValuesJsonColumnOptions, comment: '规格值 JSON' })
   specValuesJson!: string
 
   @Column({ name: 'spec_text', type: 'varchar', length: 255, default: '默认规格', comment: '规格展示文本' })
