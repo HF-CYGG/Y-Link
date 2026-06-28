@@ -2,8 +2,6 @@
 # 文件职责：定义在一个容器内同时打包运行 Node 后端与 Nginx 前端的构建过程
 # 维护说明：若后端或前端构建依赖环境发生改变（如 Node 版本升级），需同步修改此处
 
-# syntax=docker/dockerfile:1
-
 # ------------------------------
 # 文件说明：Y-Link 单镜像 onebox 构建文件。
 # 实现逻辑：
@@ -12,7 +10,9 @@
 # 3. 最后把前端、后端、Nginx 与入口脚本组装进同一运行镜像；
 # 4. 容器启动后由 `entrypoint.sh` 同时拉起 Node 后端与 Nginx 反向代理。
 # ------------------------------
-FROM --platform=$BUILDPLATFORM node:20-bookworm-slim AS frontend-build
+ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:20-bookworm-slim
+
+FROM --platform=$BUILDPLATFORM ${Y_LINK_NODE_IMAGE} AS frontend-build
 WORKDIR /app
 COPY package*.json ./
 COPY .npmrc ./
@@ -32,7 +32,7 @@ RUN npm run build
 # ------------------------------
 # 后端构建阶段：编译服务端 TypeScript 代码。
 # ------------------------------
-FROM node:20-bookworm-slim AS backend-build
+FROM ${Y_LINK_NODE_IMAGE} AS backend-build
 WORKDIR /backend
 COPY backend/package*.json ./
 COPY backend/.npmrc ./.npmrc
@@ -44,7 +44,7 @@ RUN npm run build
 # ------------------------------
 # 后端运行时依赖阶段：仅保留生产依赖，减小最终镜像体积。
 # ------------------------------
-FROM node:20-bookworm-slim AS backend-prod-deps
+FROM ${Y_LINK_NODE_IMAGE} AS backend-prod-deps
 WORKDIR /backend
 COPY backend/package*.json ./
 COPY backend/.npmrc ./.npmrc
@@ -53,7 +53,7 @@ RUN npm ci --omit=dev
 # ------------------------------
 # onebox 运行阶段：在同一容器中组合 Node 后端与 Nginx。
 # ------------------------------
-FROM node:20-bookworm-slim AS runtime
+FROM ${Y_LINK_NODE_IMAGE} AS runtime
 
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nginx ca-certificates tzdata \

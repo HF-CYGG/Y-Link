@@ -186,6 +186,7 @@ PERMANENT_DELETE_PASSWORD=请改成仅管理员知晓的删除密码
 | 上传图片 404 | 未挂载或未保留 `/app/uploads` | 增加 `/app/uploads` 读写挂载 |
 | 日志时间显示 `+0000` 或 `Z` | 容器时区未配置，或仍在使用旧镜像 | 添加 `TZ=Asia/Shanghai`，拉取新镜像并重建容器 |
 | 日志 IP 总是 `10.255.0.1` | 容器只看到了 Docker/1Panel 的上一跳地址 | 确认 1Panel 反向代理传递 `X-Forwarded-For`，并使用新版镜像 |
+| 构建时报 Docker Hub `429 Too Many Requests` | 构建平台匿名拉取 Docker Hub 基础镜像被限流 | 默认 Dockerfile 已改用公开镜像源；若平台仍受限，可设置构建参数 `Y_LINK_NODE_IMAGE=你的私有 Node 20 bookworm-slim 镜像` |
 
 新版 nginx 访问日志会优先显示可信代理传来的真实用户 IP，并在同一行保留 `proxy="..." xff="..." real="..."` 便于排查。若 `xff="-"` 或为空，说明上游没有把真实 IP 传给容器，应用无法凭空还原用户 IP。
 

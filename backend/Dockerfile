@@ -1,12 +1,12 @@
-# syntax=docker/dockerfile:1
-
 # ------------------------------
 # 文件说明：Y-Link 后端镜像构建文件。
 # 实现逻辑：
 # - 构建阶段复制 backend 独立 `.npmrc`，使用官方 npm 源安装完整依赖并编译 TypeScript；
 # - 运行阶段仅保留生产依赖、编译产物与 SQL 模板，兼顾体积与 sqlite3 兼容性。
 # ------------------------------
-FROM node:20-bookworm-slim AS build
+ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:20-bookworm-slim
+
+FROM ${Y_LINK_NODE_IMAGE} AS build
 
 WORKDIR /app
 
@@ -32,7 +32,7 @@ RUN npm run build \
 # - 继续使用相同发行版，避免 sqlite3 二进制兼容问题；
 # - 默认将 SQLite 数据落到 /app/data、上传图片落到 /app/uploads，便于通过 volume 持久化。
 # ------------------------------
-FROM node:20-bookworm-slim AS runtime
+FROM ${Y_LINK_NODE_IMAGE} AS runtime
 
 WORKDIR /app
 
