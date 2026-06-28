@@ -1,6 +1,7 @@
 {
   "name": "y-link-backend",
   "version": "1.0.0",
+  "license": "GPL-3.0-only",
   "private": true,
   "type": "module",
   "scripts": {
@@ -32,6 +33,7 @@
     "feedback:customer-service:verify": "tsx scripts/feedback-customer-service-verify.ts",
     "client-staff-directory:verify": "tsx scripts/client-staff-directory-verify.ts",
     "o2o:discount-price:verify": "tsx scripts/o2o-discount-price-verify.ts",
+    "o2o:sku-selection:verify": "tsx scripts/o2o-sku-selection-verify.ts",
     "o2o:verify": "tsx scripts/o2o-preorder-verify.ts",
     "order-query:baseline:verify": "tsx scripts/order-query-baseline-verify.ts",
     "reports:contract:verify": "tsx scripts/report-center-contract-verify.ts",
@@ -63,6 +65,7 @@
     "@tootallnate/once": "^3.0.1",
     "ip-address": "^10.2.0",
     "node-gyp": "^12.3.0",
-    "tar": "^7.5.15"
+    "tar": "^7.5.19",
+    "uuid": "^11.1.1"
   }
 }

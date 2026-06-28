@@ -13,6 +13,7 @@ import type { O2oClientOrderType } from '@/api/modules/o2o'
 
 export interface ClientPreorderSubmitItemInput {
   productId: string | number
+  skuId?: string | number | null
   qty: number
 }
 
@@ -62,10 +63,14 @@ const normalizeItemsForFingerprint = (items: ClientPreorderSubmitItemInput[]) =>
   return items
     .map((item) => ({
       productId: String(item.productId ?? '').trim(),
+      skuId: item.skuId === null || item.skuId === undefined ? '' : String(item.skuId).trim(),
       qty: Math.max(0, Math.floor(Number(item.qty ?? 0))),
     }))
     .filter((item) => item.productId && item.qty > 0)
-    .sort((prev, next) => prev.productId.localeCompare(next.productId, 'en'))
+    .sort((prev, next) => {
+      const productCompare = prev.productId.localeCompare(next.productId, 'en')
+      return productCompare || prev.skuId.localeCompare(next.skuId, 'en')
+    })
 }
 
 export const buildClientPreorderSubmitIntentKey = (input: ClientPreorderSubmitIntentInput) => {

@@ -86,11 +86,29 @@ const validateImageBeforeUpload = async (file: File): Promise<UploadImageDimensi
   }
 
   const dimensions = await readImageDimensions(file)
-  if (dimensions.width > IMAGE_UPLOAD_MAX_WIDTH || dimensions.height > IMAGE_UPLOAD_MAX_HEIGHT) {
-    throw new Error(`图片尺寸过大，宽高不能超过 ${IMAGE_UPLOAD_MAX_WIDTH}x${IMAGE_UPLOAD_MAX_HEIGHT} 像素`)
+  return dimensions
+}
+
+const isImageOversizedForUpload = (dimensions: UploadImageDimensions) => {
+  return dimensions.width > IMAGE_UPLOAD_MAX_WIDTH || dimensions.height > IMAGE_UPLOAD_MAX_HEIGHT
+}
+
+const resolveImageUploadResizeMaxEdge = (dimensions: UploadImageDimensions, fileSize: number) => {
+  if (isImageOversizedForUpload(dimensions)) {
+    return IMAGE_UPLOAD_MAX_WIDTH
   }
 
-  return dimensions
+  if (fileSize > IMAGE_UPLOAD_TARGET_MAX_SIZE_MB * 1024 * 1024) {
+    return IMAGE_UPLOAD_FIRST_PASS_MAX_EDGE
+  }
+
+  return Math.max(dimensions.width, dimensions.height)
+}
+
+const assertCompressedDimensionsWithinLimit = (dimensions: UploadImageDimensions) => {
+  if (isImageOversizedForUpload(dimensions)) {
+    throw new Error(`图片自动压缩后仍超过 ${IMAGE_UPLOAD_MAX_WIDTH}x${IMAGE_UPLOAD_MAX_HEIGHT} 像素，请更换图片`)
+  }
 }
 
 /**
@@ -99,34 +117,44 @@ const validateImageBeforeUpload = async (file: File): Promise<UploadImageDimensi
  * - 第二轮只在第一轮仍未达标时启用，作为 1MB 目标的兜底。
  */
 export const compressImageForUpload = async (file: File): Promise<CompressedUploadImageResult> => {
-  const dimensions = await validateImageBeforeUpload(file)
+  const sourceDimensions = await validateImageBeforeUpload(file)
+  const normalizedMimeType = file.type.toLowerCase()
+  const shouldResizeDimensions = sourceDimensions.width > IMAGE_UPLOAD_MAX_WIDTH || sourceDimensions.height > IMAGE_UPLOAD_MAX_HEIGHT
 
   /**
    * 动图 GIF 不参与浏览器端压缩：
    * - 避免动画帧丢失或回退成静态图；
    * - 仅对常规照片类格式执行“压到 1MB 左右”的策略。
    */
-  if (!COMPRESSIBLE_IMAGE_MIME_TYPES.has(file.type.toLowerCase())) {
-    return { file, compressed: false, dimensions }
+  if (!COMPRESSIBLE_IMAGE_MIME_TYPES.has(normalizedMimeType)) {
+    if (shouldResizeDimensions) {
+      throw new Error(`图片尺寸过大，宽高不能超过 ${IMAGE_UPLOAD_MAX_WIDTH}x${IMAGE_UPLOAD_MAX_HEIGHT} 像素`)
+    }
+
+    return { file, compressed: false, dimensions: sourceDimensions }
   }
 
-  if (file.size <= IMAGE_UPLOAD_TARGET_MAX_SIZE_MB * 1024 * 1024) {
-    return { file, compressed: false, dimensions }
+  if (file.size <= IMAGE_UPLOAD_TARGET_MAX_SIZE_MB * 1024 * 1024 && !shouldResizeDimensions) {
+    return { file, compressed: false, dimensions: sourceDimensions }
   }
 
+  const resizeMaxEdge = resolveImageUploadResizeMaxEdge(sourceDimensions, file.size)
   const firstPassResult = await imageCompression(file, {
     maxSizeMB: IMAGE_UPLOAD_TARGET_MAX_SIZE_MB,
-    maxWidthOrHeight: IMAGE_UPLOAD_FIRST_PASS_MAX_EDGE,
+    maxWidthOrHeight: resizeMaxEdge,
     useWebWorker: true,
     initialQuality: 0.92,
     maxIteration: 12,
   })
+  const firstPassUploadFile = createUploadFile(firstPassResult, file)
+  const firstPassDimensions = await readImageDimensions(firstPassUploadFile)
+  assertCompressedDimensionsWithinLimit(firstPassDimensions)
 
   if (firstPassResult.size <= IMAGE_UPLOAD_TARGET_MAX_SIZE_MB * 1024 * 1024) {
     return {
-      file: createUploadFile(firstPassResult, file),
+      file: firstPassUploadFile,
       compressed: true,
-      dimensions,
+      dimensions: firstPassDimensions,
     }
   }
 
@@ -137,10 +165,13 @@ export const compressImageForUpload = async (file: File): Promise<CompressedUplo
     initialQuality: 0.86,
     maxIteration: 14,
   })
+  const compressedUploadFile = createUploadFile(secondPassResult, file)
+  const compressedDimensions = await readImageDimensions(compressedUploadFile)
+  assertCompressedDimensionsWithinLimit(compressedDimensions)
 
   return {
-    file: createUploadFile(secondPassResult, file),
+    file: compressedUploadFile,
     compressed: true,
-    dimensions,
+    dimensions: compressedDimensions,
   }
 }

@@ -11,6 +11,7 @@ import { env } from './env.js'
 
 const SQLITE_REQUIRED_TABLES = [
   'base_product',
+  'base_product_sku',
   'base_tag',
   'rel_product_tag',
   'biz_outbound_order',
@@ -67,7 +68,17 @@ const SQLITE_REQUIRED_PRODUCT_COLUMNS = [
   'current_stock',
   'pre_ordered_stock',
 ]
-const SQLITE_REQUIRED_O2O_PREORDER_ITEM_COLUMNS = ['original_price', 'discount_rate', 'unit_price', 'line_amount']
+const SQLITE_REQUIRED_PRODUCT_SKU_COLUMNS = ['o2o_recommended']
+const SQLITE_REQUIRED_O2O_PREORDER_ITEM_COLUMNS = [
+  'original_price',
+  'discount_rate',
+  'unit_price',
+  'line_amount',
+  'sku_id',
+  'sku_code_snapshot',
+  'spec_text_snapshot',
+  'sku_image_snapshot',
+]
 
 const SQLITE_REQUIRED_CLIENT_USER_COLUMNS = [
   'mobile',
@@ -122,6 +133,11 @@ const SQLITE_REQUIRED_O2O_PREORDER_COLUMNS = [
   'deleted_by_display_name',
 ]
 const SQLITE_REQUIRED_O2O_RETURN_REQUEST_COLUMNS = ['handled_at', 'handled_by', 'rejected_reason']
+const SQLITE_REQUIRED_O2O_RETURN_REQUEST_ITEM_COLUMNS = [
+  'sku_id',
+  'sku_code_snapshot',
+  'spec_text_snapshot',
+]
 const SQLITE_REQUIRED_BIZ_INBOUND_ORDER_COLUMNS = [
   'cancel_reason',
   'cancelled_at',
@@ -290,6 +306,146 @@ async function normalizeSqliteO2oDiscountColumns(dataSource: DataSource): Promis
   if (!itemColumnSet.has('line_amount')) {
     await dataSource.query(`ALTER TABLE "o2o_preorder_item" ADD COLUMN "line_amount" decimal(14, 2) NOT NULL DEFAULT 0.00`)
   }
+  if (!itemColumnSet.has('sku_id')) {
+    await dataSource.query(`ALTER TABLE "o2o_preorder_item" ADD COLUMN "sku_id" integer NULL`)
+  }
+  if (!itemColumnSet.has('sku_code_snapshot')) {
+    await dataSource.query(`ALTER TABLE "o2o_preorder_item" ADD COLUMN "sku_code_snapshot" varchar(96) NULL`)
+  }
+  if (!itemColumnSet.has('spec_text_snapshot')) {
+    await dataSource.query(`ALTER TABLE "o2o_preorder_item" ADD COLUMN "spec_text_snapshot" varchar(255) NULL`)
+  }
+  if (!itemColumnSet.has('sku_image_snapshot')) {
+    await dataSource.query(`ALTER TABLE "o2o_preorder_item" ADD COLUMN "sku_image_snapshot" varchar(255) NULL`)
+  }
+
+  const skuTableColumnSet = await listSqliteTableColumns(dataSource, 'base_product_sku')
+  if (skuTableColumnSet.size > 0) {
+    if (!skuTableColumnSet.has('o2o_recommended')) {
+      await dataSource.query(`ALTER TABLE "base_product_sku" ADD COLUMN "o2o_recommended" tinyint NOT NULL DEFAULT 0`)
+    }
+    await dataSource.query(`
+      INSERT INTO "base_product_sku" (
+        "product_id",
+        "sku_code",
+        "spec_values_json",
+        "spec_text",
+        "default_price",
+        "discount_rate",
+        "current_stock",
+        "pre_ordered_stock",
+        "is_active",
+        "o2o_recommended",
+        "thumbnail",
+        "sort_order"
+      )
+      SELECT
+        "base_product"."id",
+        'SKU-' || "base_product"."id",
+        '{}',
+        '默认规格',
+        "base_product"."default_price",
+        "base_product"."discount_rate",
+        "base_product"."current_stock",
+        "base_product"."pre_ordered_stock",
+        "base_product"."is_active",
+        0,
+        "base_product"."thumbnail",
+        0
+      FROM "base_product"
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM "base_product_sku"
+        WHERE "base_product_sku"."product_id" = "base_product"."id"
+      )
+    `)
+  }
+
+  const returnItemColumnSet = await listSqliteTableColumns(dataSource, 'o2o_return_request_item')
+  if (returnItemColumnSet.size > 0 && !returnItemColumnSet.has('sku_id')) {
+    await dataSource.query(`ALTER TABLE "o2o_return_request_item" ADD COLUMN "sku_id" integer NULL`)
+  }
+  if (returnItemColumnSet.size > 0 && !returnItemColumnSet.has('sku_code_snapshot')) {
+    await dataSource.query(`ALTER TABLE "o2o_return_request_item" ADD COLUMN "sku_code_snapshot" varchar(96) NULL`)
+  }
+  if (returnItemColumnSet.size > 0 && !returnItemColumnSet.has('spec_text_snapshot')) {
+    await dataSource.query(`ALTER TABLE "o2o_return_request_item" ADD COLUMN "spec_text_snapshot" varchar(255) NULL`)
+  }
+
+  if (skuTableColumnSet.size > 0) {
+    await dataSource.query(`
+      UPDATE "o2o_preorder_item"
+      SET
+        "sku_id" = (
+          SELECT "id"
+          FROM "base_product_sku"
+          WHERE "base_product_sku"."product_id" = "o2o_preorder_item"."product_id"
+          ORDER BY "sort_order" ASC, "id" ASC
+          LIMIT 1
+        ),
+        "sku_code_snapshot" = COALESCE("sku_code_snapshot", (
+          SELECT "sku_code"
+          FROM "base_product_sku"
+          WHERE "base_product_sku"."product_id" = "o2o_preorder_item"."product_id"
+          ORDER BY "sort_order" ASC, "id" ASC
+          LIMIT 1
+        )),
+        "spec_text_snapshot" = COALESCE("spec_text_snapshot", (
+          SELECT "spec_text"
+          FROM "base_product_sku"
+          WHERE "base_product_sku"."product_id" = "o2o_preorder_item"."product_id"
+          ORDER BY "sort_order" ASC, "id" ASC
+          LIMIT 1
+        )),
+        "sku_image_snapshot" = COALESCE("sku_image_snapshot", (
+          SELECT "thumbnail"
+          FROM "base_product_sku"
+          WHERE "base_product_sku"."product_id" = "o2o_preorder_item"."product_id"
+          ORDER BY "sort_order" ASC, "id" ASC
+          LIMIT 1
+        ))
+      WHERE "sku_id" IS NULL
+        AND EXISTS (
+          SELECT 1
+          FROM "base_product_sku"
+          WHERE "base_product_sku"."product_id" = "o2o_preorder_item"."product_id"
+        )
+    `)
+
+    if (returnItemColumnSet.size > 0) {
+      await dataSource.query(`
+        UPDATE "o2o_return_request_item"
+        SET
+          "sku_id" = (
+            SELECT "id"
+            FROM "base_product_sku"
+            WHERE "base_product_sku"."product_id" = "o2o_return_request_item"."product_id"
+            ORDER BY "sort_order" ASC, "id" ASC
+            LIMIT 1
+          ),
+          "sku_code_snapshot" = COALESCE("sku_code_snapshot", (
+            SELECT "sku_code"
+            FROM "base_product_sku"
+            WHERE "base_product_sku"."product_id" = "o2o_return_request_item"."product_id"
+            ORDER BY "sort_order" ASC, "id" ASC
+            LIMIT 1
+          )),
+          "spec_text_snapshot" = COALESCE("spec_text_snapshot", (
+            SELECT "spec_text"
+            FROM "base_product_sku"
+            WHERE "base_product_sku"."product_id" = "o2o_return_request_item"."product_id"
+            ORDER BY "sort_order" ASC, "id" ASC
+            LIMIT 1
+          ))
+        WHERE "sku_id" IS NULL
+          AND EXISTS (
+            SELECT 1
+            FROM "base_product_sku"
+            WHERE "base_product_sku"."product_id" = "o2o_return_request_item"."product_id"
+          )
+      `)
+    }
+  }
 
   await dataSource.query(`
     UPDATE "o2o_preorder_item"
@@ -381,6 +537,11 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
     return true
   }
 
+  const productSkuColumnSet = await listSqliteTableColumns(dataSource, 'base_product_sku')
+  if (SQLITE_REQUIRED_PRODUCT_SKU_COLUMNS.some((column) => !productSkuColumnSet.has(column))) {
+    return true
+  }
+
   const clientUserColumnSet = await listSqliteTableColumns(dataSource, 'client_user')
   if (SQLITE_REQUIRED_CLIENT_USER_COLUMNS.some((column) => !clientUserColumnSet.has(column))) {
     return true
@@ -422,6 +583,11 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
 
   const o2oReturnRequestColumnSet = await listSqliteTableColumns(dataSource, 'o2o_return_request')
   if (SQLITE_REQUIRED_O2O_RETURN_REQUEST_COLUMNS.some((column) => !o2oReturnRequestColumnSet.has(column))) {
+    return true
+  }
+
+  const o2oReturnRequestItemColumnSet = await listSqliteTableColumns(dataSource, 'o2o_return_request_item')
+  if (SQLITE_REQUIRED_O2O_RETURN_REQUEST_ITEM_COLUMNS.some((column) => !o2oReturnRequestItemColumnSet.has(column))) {
     return true
   }
 

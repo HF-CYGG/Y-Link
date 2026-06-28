@@ -189,6 +189,8 @@ export default defineConfig(({ command, mode }) => {
      * - 配合业务路由懒加载，避免低频功能污染高频首屏共享缓存。
      */
     build: {
+      modulePreload: false,
+      cssCodeSplit: false,
       rollupOptions: {
         output: {
           manualChunks(id) {

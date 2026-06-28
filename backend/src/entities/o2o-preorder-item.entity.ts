@@ -6,6 +6,7 @@
 
 import { Column, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn, type Relation } from 'typeorm'
 import { BaseProduct } from './base-product.entity.js'
+import { BaseProductSku } from './base-product-sku.entity.js'
 import { O2oPreorder } from './o2o-preorder.entity.js'
 import { entityColumnOptions } from './entity-column-options.js'
 
@@ -24,6 +25,19 @@ export class O2oPreorderItem {
 
   @Column({ name: 'qty', type: 'int', default: 0, comment: '预订数量' })
   qty!: number
+
+  @Index('idx_o2o_preorder_item_sku_id')
+  @Column({ name: 'sku_id', ...entityColumnOptions.foreignId, nullable: true, comment: 'SKU ID' })
+  skuId!: string | null
+
+  @Column({ name: 'sku_code_snapshot', type: 'varchar', length: 96, nullable: true, comment: '下单 SKU 编码快照' })
+  skuCodeSnapshot!: string | null
+
+  @Column({ name: 'spec_text_snapshot', type: 'varchar', length: 255, nullable: true, comment: '下单规格文本快照' })
+  specTextSnapshot!: string | null
+
+  @Column({ name: 'sku_image_snapshot', type: 'varchar', length: 255, nullable: true, comment: '下单 SKU 图片快照' })
+  skuImageSnapshot!: string | null
 
   @Column({ name: 'original_price', type: 'decimal', precision: 12, scale: 2, default: 0, comment: '下单原价快照' })
   originalPrice!: string
@@ -46,4 +60,8 @@ export class O2oPreorderItem {
   @ManyToOne(() => BaseProduct, { onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'product_id' })
   product?: Relation<BaseProduct>
+
+  @ManyToOne(() => BaseProductSku, { onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'sku_id' })
+  sku?: Relation<BaseProductSku>
 }

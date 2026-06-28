@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto'
 import { Brackets, type EntityManager, In, LessThanOrEqual, Not } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
+import { BaseProductSku } from '../entities/base-product-sku.entity.js'
 import { RelProductTag } from '../entities/rel-product-tag.entity.js'
 import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
@@ -50,6 +51,7 @@ import {
 
 export interface SubmitPreorderItemInput {
   productId: string | number
+  skuId?: string | number | null
   qty: number
 }
 
@@ -89,6 +91,7 @@ export interface UpdateOnsitePreorderInput {
 
 export interface SubmitReturnRequestItemInput {
   productId: string | number
+  skuId?: string | number | null
   qty: number
 }
 
@@ -185,8 +188,12 @@ export interface O2oPreorderSummaryView {
 export interface O2oPreorderDetailItemView {
   id: string
   productId: string
+  skuId: string | null
   productCode: string
   productName: string
+  skuCode: string | null
+  specText: string | null
+  skuImage: string | null
   defaultPrice: string
   originalPrice: string
   discountRate: string
@@ -253,8 +260,11 @@ export interface O2oPreorderDetailView {
 export interface O2oReturnRequestItemView {
   id: string
   productId: string
+  skuId: string | null
   productCode: string
   productName: string
+  skuCode: string | null
+  specText: string | null
   qty: number
 }
 
@@ -367,6 +377,17 @@ class O2oPreorderService {
 
   private buildPreorderItemSnapshot(product: BaseProduct, qty: number) {
     return buildDiscountPriceSnapshot(product.defaultPrice, product.discountRate, qty)
+  }
+
+  private buildPreorderSkuItemSnapshot(product: BaseProduct, sku: BaseProductSku, qty: number) {
+    const priceSnapshot = buildDiscountPriceSnapshot(sku.defaultPrice, sku.discountRate, qty)
+    return {
+      ...priceSnapshot,
+      skuId: String(sku.id),
+      skuCode: sku.skuCode,
+      specText: sku.specText || '默认规格',
+      skuImage: sku.thumbnail ?? product.thumbnail ?? null,
+    }
   }
 
   private hasPreorderItemSnapshotValue(value: string | number | null | undefined) {
@@ -567,17 +588,23 @@ class O2oPreorderService {
     if (!Array.isArray(items) || !items.length) {
       throw new BizError('至少选择一个商品', 400)
     }
-    const mergedQtyMap = new Map<string, number>()
+    const mergedQtyMap = new Map<string, { productId: string; skuId: string | null; qty: number }>()
     items.forEach((item) => {
       const productId = String(item.productId).trim()
+      const skuId = item.skuId === null || item.skuId === undefined ? null : String(item.skuId).trim() || null
       const qty = Math.floor(Number(item.qty))
       if (!productId || !Number.isInteger(qty) || qty <= 0) {
         throw new BizError('商品数量必须为正整数', 400)
       }
-      const currentQty = mergedQtyMap.get(productId) ?? 0
-      mergedQtyMap.set(productId, currentQty + qty)
+      const mergeKey = `${productId}::${skuId ?? ''}`
+      const current = mergedQtyMap.get(mergeKey)
+      mergedQtyMap.set(mergeKey, {
+        productId,
+        skuId,
+        qty: (current?.qty ?? 0) + qty,
+      })
     })
-    return [...mergedQtyMap.entries()].map(([productId, qty]) => ({ productId, qty }))
+    return [...mergedQtyMap.values()]
   }
 
   private resolveProductLimitQty(product: BaseProduct, o2oRules: Awaited<ReturnType<typeof systemConfigService.getO2oRuleConfigs>>) {
@@ -592,6 +619,70 @@ class O2oPreorderService {
       throw new BizError('存在无效商品', 400)
     }
     return product
+  }
+
+  private buildOrderItemKey(productId: string, skuId: string | null) {
+    return `${productId}::${skuId ?? ''}`
+  }
+
+  private buildPreorderItemKey(item: Pick<O2oPreorderItem, 'productId' | 'skuId'>) {
+    return this.buildOrderItemKey(String(item.productId), item.skuId ? String(item.skuId) : null)
+  }
+
+  private getRequiredSku(
+    skuMap: Map<string, BaseProductSku>,
+    skuByProductMap: Map<string, BaseProductSku[]>,
+    productId: string,
+    skuId: string | null,
+  ) {
+    if (skuId) {
+      const sku = skuMap.get(skuId)
+      if (!sku || String(sku.productId) !== productId) {
+        throw new BizError('存在无效规格', 400)
+      }
+      return sku
+    }
+    const fallbackSku = (skuByProductMap.get(productId) ?? []).find((sku) => Boolean(sku.isActive))
+    if (!fallbackSku) {
+      throw new BizError('商品暂无可售规格', 409)
+    }
+    return fallbackSku
+  }
+
+  private groupSkusByProduct(skus: BaseProductSku[]) {
+    const skuMap = new Map<string, BaseProductSku>()
+    const skuByProductMap = new Map<string, BaseProductSku[]>()
+    skus.forEach((sku) => {
+      const skuId = String(sku.id)
+      const productId = String(sku.productId)
+      skuMap.set(skuId, sku)
+      const currentSkus = skuByProductMap.get(productId) ?? []
+      currentSkus.push(sku)
+      skuByProductMap.set(productId, currentSkus)
+    })
+    return { skuMap, skuByProductMap }
+  }
+
+  private resolveMallPreviewSku<T extends {
+    availableStock: number
+    isActive: boolean
+    o2oRecommended: boolean
+    sortOrder: number
+  }>(skuViews: T[], productRecommended: boolean): T | null {
+    const sortedActiveSkus = skuViews
+      .filter((sku) => sku.isActive)
+      .slice()
+      .sort((leftSku, rightSku) => leftSku.sortOrder - rightSku.sortOrder)
+    if (!sortedActiveSkus.length) {
+      return null
+    }
+
+    const recommendedPreviewSkus = productRecommended
+      ? sortedActiveSkus
+      : sortedActiveSkus.filter((sku) => sku.o2oRecommended)
+    const candidateSkus = recommendedPreviewSkus.length ? recommendedPreviewSkus : sortedActiveSkus
+    const stockPreferredSkus = candidateSkus.filter((sku) => sku.availableStock > 0)
+    return stockPreferredSkus[0] ?? candidateSkus[0] ?? sortedActiveSkus[0] ?? null
   }
 
   private async generateReturnRequestNo(manager = AppDataSource.manager): Promise<string> {
@@ -717,7 +808,7 @@ class O2oPreorderService {
         itemRepo.create({
           lineNo: index + 1,
           productId: product.id,
-          productNameSnapshot: product.productName,
+          productNameSnapshot: row.specTextSnapshot ? `${product.productName}（${row.specTextSnapshot}）` : product.productName,
           qty: qty.toFixed(2),
           unitPrice: formatMoneyFromCents(unitPriceCents),
           lineAmount: formatMoneyFromCents(lineAmountCents),
@@ -827,6 +918,16 @@ class O2oPreorderService {
       const beforeCurrentStock = Number(product.currentStock ?? 0)
       const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
       product.preOrderedStock = Math.max(0, beforePreOrderedStock - qty)
+      if (row.skuId) {
+        const sku = await manager.getRepository(BaseProductSku).findOne({
+          where: { id: String(row.skuId) },
+          lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+        })
+        if (sku) {
+          sku.preOrderedStock = Math.max(0, Number(sku.preOrderedStock ?? 0) - qty)
+          await manager.getRepository(BaseProductSku).save(sku)
+        }
+      }
       await manager.getRepository(BaseProduct).save(product)
       await manager.getRepository(InventoryLog).save(
         manager.getRepository(InventoryLog).create({
@@ -1003,6 +1104,16 @@ class O2oPreorderService {
       const beforeCurrentStock = Number(product.currentStock ?? 0)
       const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
       product.preOrderedStock = Math.max(0, beforePreOrderedStock - row.qty)
+      if (row.skuId) {
+        const sku = await manager.getRepository(BaseProductSku).findOne({
+          where: { id: String(row.skuId) },
+          lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+        })
+        if (sku) {
+          sku.preOrderedStock = Math.max(0, Number(sku.preOrderedStock ?? 0) - Number(row.qty ?? 0))
+          await manager.getRepository(BaseProductSku).save(sku)
+        }
+      }
       await manager.getRepository(BaseProduct).save(product)
       await manager.getRepository(InventoryLog).save(
         manager.getRepository(InventoryLog).create({
@@ -1080,8 +1191,10 @@ class O2oPreorderService {
         return
       }
       const productId = String(item.productId)
-      const currentQty = returnedQtyMap.get(productId) ?? 0
-      returnedQtyMap.set(productId, currentQty + Math.max(0, Number(item.qty ?? 0)))
+      const skuId = item.skuId ? String(item.skuId) : null
+      const itemKey = this.buildOrderItemKey(productId, skuId)
+      const currentQty = returnedQtyMap.get(itemKey) ?? 0
+      returnedQtyMap.set(itemKey, currentQty + Math.max(0, Number(item.qty ?? 0)))
     })
     return { returnRequests, returnedQtyMap, requestItemRows }
   }
@@ -1108,8 +1221,11 @@ class O2oPreorderService {
       items: requestItems.map((item) => ({
         id: String(item.id),
         productId: String(item.productId),
+        skuId: item.skuId ? String(item.skuId) : null,
         productCode: item.product?.productCode ?? '',
         productName: item.product?.productName ?? '',
+        skuCode: item.skuCodeSnapshot ?? null,
+        specText: item.specTextSnapshot ?? null,
         qty: Number(item.qty ?? 0),
       })),
     }
@@ -1164,13 +1280,22 @@ class O2oPreorderService {
     const normalizedItems = items.map((item) => {
       const snapshot = this.resolvePreorderItemSnapshot(item)
       const totalQty = Math.max(0, Number(item.qty ?? 0))
-      const returnedQty = Math.min(totalQty, Math.max(0, Number(returnedQtyMap.get(String(item.productId)) ?? 0)))
+      const itemKey = this.buildPreorderItemKey(item)
+      const legacyProductReturnedQty = item.skuId ? 0 : Number(returnedQtyMap.get(String(item.productId)) ?? 0)
+      const returnedQty = Math.min(
+        totalQty,
+        Math.max(0, Number(returnedQtyMap.get(itemKey) ?? legacyProductReturnedQty)),
+      )
       totalAmountCents += parseMoneyToCents(snapshot.lineAmount)
       return {
         id: String(item.id),
         productId: String(item.productId),
+        skuId: item.skuId ? String(item.skuId) : null,
         productCode: item.product?.productCode ?? '',
         productName: item.product?.productName ?? '',
+        skuCode: item.skuCodeSnapshot ?? null,
+        specText: item.specTextSnapshot ?? null,
+        skuImage: item.skuImageSnapshot ?? null,
         defaultPrice: snapshot.unitPrice,
         originalPrice: snapshot.originalPrice,
         discountRate: snapshot.discountRate,
@@ -1497,6 +1622,10 @@ class O2oPreorderService {
       where: { productId: In(productIds) },
       relations: { tag: true },
     })
+    const skus = await AppDataSource.manager.getRepository(BaseProductSku).find({
+      where: { productId: In(productIds) },
+      order: { productId: 'ASC', sortOrder: 'ASC', id: 'ASC' },
+    })
     const soldQtyMap = await this.resolveProductSoldQtyMap(productIds)
 
     const productTagMap = new Map<string, string[]>()
@@ -1508,26 +1637,77 @@ class O2oPreorderService {
       }
       productTagMap.set(productId, currentTags)
     })
+    const skuByProductMap = new Map<string, BaseProductSku[]>()
+    skus.forEach((sku) => {
+      const productId = String(sku.productId)
+      const currentSkus = skuByProductMap.get(productId) ?? []
+      currentSkus.push(sku)
+      skuByProductMap.set(productId, currentSkus)
+    })
 
     return {
-      list: products.map((item) => ({
-        id: String(item.id),
-        productCode: item.productCode,
-        productName: item.productName,
-        defaultPrice: item.defaultPrice,
-        originalPrice: this.normalizeDecimalText(item.defaultPrice),
-        discountRate: normalizeDiscountRate(item.discountRate),
-        discountedPrice: calculateDiscountedPrice(item.defaultPrice, item.discountRate),
-        o2oRecommended: Boolean(item.o2oRecommended),
-        tags: productTagMap.get(String(item.id)) ?? [],
-        thumbnail: item.thumbnail,
-        detailContent: item.detailContent,
-        limitPerUser: Number(item.limitPerUser ?? 5),
-        currentStock: Number(item.currentStock ?? 0),
-        preOrderedStock: Number(item.preOrderedStock ?? 0),
-        availableStock: Math.max(0, Number(item.currentStock ?? 0) - Number(item.preOrderedStock ?? 0)),
-        soldQty: Math.max(0, Math.floor(soldQtyMap.get(String(item.id)) ?? 0)),
-      })),
+      list: products.map((item) => {
+        const productSkus = skuByProductMap.get(String(item.id)) ?? []
+        const skuViews = productSkus.map((sku) => {
+          const currentStock = Math.max(0, Number(sku.currentStock ?? 0))
+          const preOrderedStock = Math.max(0, Number(sku.preOrderedStock ?? 0))
+          return {
+            id: String(sku.id),
+            productId: String(sku.productId),
+            skuCode: sku.skuCode,
+            specText: sku.specText || '默认规格',
+            specValues: (() => {
+              try {
+                return JSON.parse(sku.specValuesJson || '{}') as Record<string, string>
+              } catch {
+                return {}
+              }
+            })(),
+            defaultPrice: this.normalizeDecimalText(sku.defaultPrice),
+            originalPrice: this.normalizeDecimalText(sku.defaultPrice),
+            discountRate: normalizeDiscountRate(sku.discountRate),
+            discountedPrice: calculateDiscountedPrice(sku.defaultPrice, sku.discountRate),
+            currentStock,
+            preOrderedStock,
+            availableStock: Math.max(0, currentStock - preOrderedStock),
+            isActive: Boolean(sku.isActive),
+            o2oRecommended: Boolean(sku.o2oRecommended),
+            thumbnail: sku.thumbnail ?? item.thumbnail,
+            sortOrder: Number(sku.sortOrder ?? 0),
+          }
+        })
+        const activeSkuViews = skuViews.filter((sku) => sku.isActive)
+        const currentStock = skuViews.length
+          ? activeSkuViews.reduce((sum, sku) => sum + sku.currentStock, 0)
+          : Number(item.currentStock ?? 0)
+        const preOrderedStock = skuViews.length
+          ? activeSkuViews.reduce((sum, sku) => sum + sku.preOrderedStock, 0)
+          : Number(item.preOrderedStock ?? 0)
+        const previewSku = this.resolveMallPreviewSku(skuViews, Boolean(item.o2oRecommended))
+        const defaultPrice = previewSku?.defaultPrice ?? item.defaultPrice
+        const originalPrice = previewSku?.originalPrice ?? this.normalizeDecimalText(item.defaultPrice)
+        const discountRate = previewSku?.discountRate ?? normalizeDiscountRate(item.discountRate)
+        const discountedPrice = previewSku?.discountedPrice ?? calculateDiscountedPrice(item.defaultPrice, item.discountRate)
+        return {
+          id: String(item.id),
+          productCode: item.productCode,
+          productName: item.productName,
+          defaultPrice,
+          originalPrice,
+          discountRate,
+          discountedPrice,
+          o2oRecommended: Boolean(item.o2oRecommended),
+          tags: productTagMap.get(String(item.id)) ?? [],
+          thumbnail: item.thumbnail,
+          detailContent: item.detailContent,
+          limitPerUser: Number(item.limitPerUser ?? 5),
+          currentStock,
+          preOrderedStock,
+          availableStock: Math.max(0, currentStock - preOrderedStock),
+          soldQty: Math.max(0, Math.floor(soldQtyMap.get(String(item.id)) ?? 0)),
+          skus: skuViews,
+        }
+      }),
       storefront: {
         businessHoursText: o2oRules.storeBusinessHoursText,
         mallAnnouncementText: o2oRules.mallAnnouncementText,
@@ -1611,8 +1791,9 @@ class O2oPreorderService {
     const pendingQtyMap = new Map<string, number>()
     pendingReturnItems.forEach((item) => {
       const productId = String(item.productId)
-      const currentQty = pendingQtyMap.get(productId) ?? 0
-      pendingQtyMap.set(productId, currentQty + Math.max(0, Number(item.qty ?? 0)))
+      const itemKey = this.buildOrderItemKey(productId, item.skuId ? String(item.skuId) : null)
+      const currentQty = pendingQtyMap.get(itemKey) ?? 0
+      pendingQtyMap.set(itemKey, currentQty + Math.max(0, Number(item.qty ?? 0)))
     })
     return pendingQtyMap
   }
@@ -1622,31 +1803,37 @@ class O2oPreorderService {
   private validateReturnRequestItems(
     orderItems: O2oPreorderItem[],
     pendingQtyMap: Map<string, number>,
-    normalizedItems: Array<{ productId: string; qty: number }>,
+    normalizedItems: Array<{ productId: string; skuId: string | null; qty: number }>,
   ) {
-    const orderItemMap = new Map(orderItems.map((item) => [String(item.productId), item]))
-    const mergedRequestQtyMap = new Map<string, number>()
+    const orderItemMap = new Map(orderItems.map((item) => [this.buildPreorderItemKey(item), item]))
+    const mergedRequestQtyMap = new Map<string, { productId: string; skuId: string | null; qty: number }>()
     normalizedItems.forEach((item) => {
-      const currentQty = mergedRequestQtyMap.get(item.productId) ?? 0
-      mergedRequestQtyMap.set(item.productId, currentQty + item.qty)
+      const itemKey = this.buildOrderItemKey(item.productId, item.skuId)
+      const current = mergedRequestQtyMap.get(itemKey)
+      mergedRequestQtyMap.set(itemKey, {
+        productId: item.productId,
+        skuId: item.skuId,
+        qty: (current?.qty ?? 0) + item.qty,
+      })
     })
 
     let totalQty = 0
-    for (const [productId, requestQty] of mergedRequestQtyMap) {
-      const orderItem = orderItemMap.get(productId)
+    for (const [itemKey, requestItem] of mergedRequestQtyMap) {
+      const productId = requestItem.productId
+      const orderItem = orderItemMap.get(itemKey)
       if (!orderItem) {
         throw new BizError('存在不属于当前订单的商品，无法申请退货', 409)
       }
       const orderQty = Math.max(0, Number(orderItem.qty ?? 0))
-      const pendingQty = Math.max(0, Number(pendingQtyMap.get(productId) ?? 0))
+      const pendingQty = Math.max(0, Number(pendingQtyMap.get(itemKey) ?? 0))
       const availableReturnQty = Math.max(0, orderQty - pendingQty)
       if (availableReturnQty <= 0) {
         throw new BizError(`商品「${orderItem.product?.productName ?? productId}」暂无可退数量`, 409)
       }
-      if (requestQty > availableReturnQty) {
+      if (requestItem.qty > availableReturnQty) {
         throw new BizError(`商品「${orderItem.product?.productName ?? productId}」最多可退 ${availableReturnQty} 件`, 409)
       }
-      totalQty += requestQty
+      totalQty += requestItem.qty
     }
 
     return { mergedRequestQtyMap, totalQty }
@@ -1671,17 +1858,26 @@ class O2oPreorderService {
         throw new BizError('存在无效商品', 400)
       }
       const productMap = new Map(products.map((item) => [String(item.id), item]))
+      const skus = await manager.getRepository(BaseProductSku).find({
+        where: { productId: In(productIds) },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
+      const { skuMap, skuByProductMap } = this.groupSkusByProduct(skus)
       let totalQty = 0
       for (const row of normalizedItems) {
         const product = this.getRequiredProduct(productMap, row.productId)
+        const sku = this.getRequiredSku(skuMap, skuByProductMap, row.productId, row.skuId)
         if (!product.isActive || product.o2oStatus !== 'listed') {
           throw new BizError(`商品「${product.productName}」已下架，不可预订`, 409)
         }
+        if (!sku.isActive) {
+          throw new BizError(`规格「${sku.specText}」已下架，不可预订`, 409)
+        }
         // 预订库存不直接扣 currentStock，而是先增加 preOrderedStock 占位，
         // 这样线下真正核销时再把现货库存扣减，符合“线上预留、线下履约”的业务模型。
-        const availableStock = Number(product.currentStock ?? 0) - Number(product.preOrderedStock ?? 0)
+        const availableStock = Number(sku.currentStock ?? 0) - Number(sku.preOrderedStock ?? 0)
         if (availableStock < row.qty) {
-          throw new BizError(`商品「${product.productName}」库存不足`, 409)
+          throw new BizError(`规格「${sku.specText}」库存不足`, 409)
         }
         const limitQty = this.resolveProductLimitQty(product, o2oRules)
         if (o2oRules.limitEnabled && row.qty > limitQty) {
@@ -1732,10 +1928,16 @@ class O2oPreorderService {
       )
       const itemEntities = normalizedItems.map((item) =>
         (() => {
-          const snapshot = this.buildPreorderItemSnapshot(this.getRequiredProduct(productMap, item.productId), item.qty)
+          const product = this.getRequiredProduct(productMap, item.productId)
+          const sku = this.getRequiredSku(skuMap, skuByProductMap, item.productId, item.skuId)
+          const snapshot = this.buildPreorderSkuItemSnapshot(product, sku, item.qty)
           return manager.getRepository(O2oPreorderItem).create({
             orderId: savedOrder.id,
             productId: item.productId,
+            skuId: snapshot.skuId,
+            skuCodeSnapshot: snapshot.skuCode,
+            specTextSnapshot: snapshot.specText,
+            skuImageSnapshot: snapshot.skuImage,
             qty: item.qty,
             originalPrice: snapshot.originalPrice,
             discountRate: snapshot.discountRate,
@@ -1748,11 +1950,15 @@ class O2oPreorderService {
 
       for (const row of normalizedItems) {
         const product = this.getRequiredProduct(productMap, row.productId)
+        const sku = this.getRequiredSku(skuMap, skuByProductMap, row.productId, row.skuId)
         const beforeCurrentStock = Number(product.currentStock ?? 0)
         const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
+        const beforeSkuPreOrderedStock = Number(sku.preOrderedStock ?? 0)
         // 下单成功后只增加预订占用库存，不减少现货库存；
         // 真正出库动作发生在 verifyByCode。
         product.preOrderedStock = beforePreOrderedStock + row.qty
+        sku.preOrderedStock = beforeSkuPreOrderedStock + row.qty
+        await manager.getRepository(BaseProductSku).save(sku)
         await manager.getRepository(BaseProduct).save(product)
         await manager.getRepository(InventoryLog).save(
           manager.getRepository(InventoryLog).create({
@@ -1851,9 +2057,11 @@ class O2oPreorderService {
   }
 
   private validateUpdatedPreorderItems(
-    normalizedItems: Array<{ productId: string; qty: number }>,
+    normalizedItems: Array<{ productId: string; skuId: string | null; qty: number }>,
     existingQtyMap: Map<string, number>,
     productMap: Map<string, BaseProduct>,
+    skuMap: Map<string, BaseProductSku>,
+    skuByProductMap: Map<string, BaseProductSku[]>,
     o2oRules: Awaited<ReturnType<typeof systemConfigService.getO2oRuleConfigs>>,
   ) {
     let totalQty = 0
@@ -1862,22 +2070,27 @@ class O2oPreorderService {
       if (!product) {
         throw new BizError('存在无效商品，无法修改订单', 400)
       }
-      const originalQty = existingQtyMap.get(row.productId) ?? 0
+      const sku = this.getRequiredSku(skuMap, skuByProductMap, row.productId, row.skuId)
+      const itemKey = this.buildOrderItemKey(row.productId, String(sku.id))
+      const originalQty = existingQtyMap.get(itemKey) ?? 0
+      if (!sku.isActive && row.qty > originalQty) {
+        throw new BizError(`规格「${sku.specText}」已下架，不能增加数量`, 409)
+      }
       if (!product.isActive || product.o2oStatus !== 'listed') {
         if (originalQty <= 0) {
-          throw new BizError(`商品「${product.productName}」已下架，不可加入订单`, 409)
+          throw new BizError(`商品「${product.productName}」已下架，不能加入订单`, 409)
         }
         if (row.qty > originalQty) {
-          throw new BizError(`商品「${product.productName}」已下架，当前只能维持或减少原有数量`, 409)
+          throw new BizError(`商品「${product.productName}」已下架，只能维持或减少原有数量`, 409)
         }
       }
 
       const effectiveAvailableStock = Math.max(
         0,
-        Number(product.currentStock ?? 0) - Number(product.preOrderedStock ?? 0) + originalQty,
+        Number(sku.currentStock ?? 0) - Number(sku.preOrderedStock ?? 0) + originalQty,
       )
       if (effectiveAvailableStock < row.qty) {
-        throw new BizError(`商品「${product.productName}」库存不足，当前最多可保留 ${effectiveAvailableStock} 件`, 409)
+        throw new BizError(`规格「${sku.specText}」库存不足，当前最多可保留 ${effectiveAvailableStock} 件`, 409)
       }
 
       const limitQty = this.resolveProductLimitQty(product, o2oRules)
@@ -1904,23 +2117,30 @@ class O2oPreorderService {
     order: O2oPreorder,
     existingQtyMap: Map<string, number>,
     nextQtyMap: Map<string, number>,
+    itemKeyMap: Map<string, { productId: string; skuId: string | null }>,
     productMap: Map<string, BaseProduct>,
+    skuMap: Map<string, BaseProductSku>,
   ) {
     const productRepo = manager.getRepository(BaseProduct)
+    const skuRepo = manager.getRepository(BaseProductSku)
     const inventoryLogRepo = manager.getRepository(InventoryLog)
     const changedProductIds = [...new Set([...existingQtyMap.keys(), ...nextQtyMap.keys()])]
 
-    for (const productId of changedProductIds) {
-      const previousQty = existingQtyMap.get(productId) ?? 0
-      const nextQty = nextQtyMap.get(productId) ?? 0
+    for (const itemKey of changedProductIds) {
+      const itemRef = itemKeyMap.get(itemKey)
+      if (!itemRef) {
+        continue
+      }
+      const previousQty = existingQtyMap.get(itemKey) ?? 0
+      const nextQty = nextQtyMap.get(itemKey) ?? 0
       const deltaQty = nextQty - previousQty
       if (deltaQty === 0) {
         continue
       }
 
-      const product = productMap.get(productId)
+      const product = productMap.get(itemRef.productId)
         ?? await productRepo.findOne({
-          where: { id: productId },
+          where: { id: itemRef.productId },
           lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
         })
       if (!product) {
@@ -1933,6 +2153,13 @@ class O2oPreorderService {
       product.preOrderedStock = deltaQty > 0
         ? beforePreOrderedStock + deltaQty
         : Math.max(0, beforePreOrderedStock - changeQty)
+      const sku = itemRef.skuId ? skuMap.get(itemRef.skuId) : null
+      if (sku) {
+        sku.preOrderedStock = deltaQty > 0
+          ? Number(sku.preOrderedStock ?? 0) + deltaQty
+          : Math.max(0, Number(sku.preOrderedStock ?? 0) - changeQty)
+        await skuRepo.save(sku)
+      }
 
       await productRepo.save(product)
       await inventoryLogRepo.save(
@@ -1959,17 +2186,26 @@ class O2oPreorderService {
     manager: EntityManager,
     order: O2oPreorder,
     existingItems: O2oPreorderItem[],
-    normalizedItems: Array<{ productId: string; qty: number }>,
+    normalizedItems: Array<{ productId: string; skuId: string | null; qty: number }>,
     nextQtyMap: Map<string, number>,
     productMap: Map<string, BaseProduct>,
+    skuMap: Map<string, BaseProductSku>,
+    skuByProductMap: Map<string, BaseProductSku[]>,
   ) {
     const orderItemRepo = manager.getRepository(O2oPreorderItem)
-    const existingItemMap = new Map(existingItems.map((item) => [String(item.productId), item]))
+    const existingItemMap = new Map(existingItems.map((item) => [this.buildPreorderItemKey(item), item]))
     const nextItemEntities = normalizedItems.map((item) => {
-      const existedItem = existingItemMap.get(item.productId)
-      const snapshot = this.buildPreorderItemSnapshot(this.getRequiredProduct(productMap, item.productId), item.qty)
+      const product = this.getRequiredProduct(productMap, item.productId)
+      const sku = this.getRequiredSku(skuMap, skuByProductMap, item.productId, item.skuId)
+      const itemKey = this.buildOrderItemKey(item.productId, String(sku.id))
+      const existedItem = existingItemMap.get(itemKey)
+      const snapshot = this.buildPreorderSkuItemSnapshot(product, sku, item.qty)
       if (existedItem) {
         existedItem.qty = item.qty
+        existedItem.skuId = snapshot.skuId
+        existedItem.skuCodeSnapshot = snapshot.skuCode
+        existedItem.specTextSnapshot = snapshot.specText
+        existedItem.skuImageSnapshot = snapshot.skuImage
         existedItem.originalPrice = snapshot.originalPrice
         existedItem.discountRate = snapshot.discountRate
         existedItem.unitPrice = snapshot.unitPrice
@@ -1979,6 +2215,10 @@ class O2oPreorderService {
       return orderItemRepo.create({
         orderId: String(order.id),
         productId: item.productId,
+        skuId: snapshot.skuId,
+        skuCodeSnapshot: snapshot.skuCode,
+        specTextSnapshot: snapshot.specText,
+        skuImageSnapshot: snapshot.skuImage,
         qty: item.qty,
         originalPrice: snapshot.originalPrice,
         discountRate: snapshot.discountRate,
@@ -1988,7 +2228,7 @@ class O2oPreorderService {
     })
     await orderItemRepo.save(nextItemEntities)
 
-    const removedItems = existingItems.filter((item) => !nextQtyMap.has(String(item.productId)))
+    const removedItems = existingItems.filter((item) => !nextQtyMap.has(this.buildPreorderItemKey(item)))
     if (removedItems.length) {
       await orderItemRepo.remove(removedItems)
     }
@@ -2016,13 +2256,36 @@ class O2oPreorderService {
         where: { orderId: String(order.id) },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
-      const existingQtyMap = new Map(existingItems.map((item) => [String(item.productId), Math.max(0, Number(item.qty ?? 0))]))
+      const existingQtyMap = new Map(existingItems.map((item) => [this.buildPreorderItemKey(item), Math.max(0, Number(item.qty ?? 0))]))
 
-      const productIds = [...new Set(normalizedItems.map((item) => item.productId))]
+      const productIds = [...new Set([
+        ...normalizedItems.map((item) => item.productId),
+        ...existingItems.map((item) => String(item.productId)),
+      ])]
       const productMap = await this.loadEditableOrderProductsInManager(manager, productIds)
-      const totalQty = this.validateUpdatedPreorderItems(normalizedItems, existingQtyMap, productMap, o2oRules)
+      const skus = await manager.getRepository(BaseProductSku).find({
+        where: { productId: In(productIds) },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
+      const { skuMap, skuByProductMap } = this.groupSkusByProduct(skus)
+      const normalizedItemRefs = normalizedItems.map((item) => {
+        const sku = this.getRequiredSku(skuMap, skuByProductMap, item.productId, item.skuId)
+        return {
+          productId: item.productId,
+          skuId: String(sku.id),
+          qty: item.qty,
+          itemKey: this.buildOrderItemKey(item.productId, String(sku.id)),
+        }
+      })
+      const itemKeyMap = new Map<string, { productId: string; skuId: string | null }>()
+      existingItems.forEach((item) => itemKeyMap.set(this.buildPreorderItemKey(item), {
+        productId: String(item.productId),
+        skuId: item.skuId ? String(item.skuId) : null,
+      }))
+      normalizedItemRefs.forEach((item) => itemKeyMap.set(item.itemKey, { productId: item.productId, skuId: item.skuId }))
+      const totalQty = this.validateUpdatedPreorderItems(normalizedItems, existingQtyMap, productMap, skuMap, skuByProductMap, o2oRules)
 
-      const nextQtyMap = new Map(normalizedItems.map((item) => [item.productId, item.qty]))
+      const nextQtyMap = new Map(normalizedItemRefs.map((item) => [item.itemKey, item.qty]))
       await this.applyPreorderItemStockDeltaInManager(
         manager,
         {
@@ -2034,9 +2297,11 @@ class O2oPreorderService {
         order,
         existingQtyMap,
         nextQtyMap,
+        itemKeyMap,
         productMap,
+        skuMap,
       )
-      await this.saveUpdatedPreorderItemsInManager(manager, order, existingItems, normalizedItems, nextQtyMap, productMap)
+      await this.saveUpdatedPreorderItemsInManager(manager, order, existingItems, normalizedItems, nextQtyMap, productMap, skuMap, skuByProductMap)
 
       order.totalQty = totalQty
       order.remark = normalizedRemark
@@ -2068,11 +2333,34 @@ class O2oPreorderService {
         where: { orderId: String(order.id) },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
-      const existingQtyMap = new Map(existingItems.map((item) => [String(item.productId), Math.max(0, Number(item.qty ?? 0))]))
-      const productIds = [...new Set(normalizedItems.map((item) => item.productId))]
+      const existingQtyMap = new Map(existingItems.map((item) => [this.buildPreorderItemKey(item), Math.max(0, Number(item.qty ?? 0))]))
+      const productIds = [...new Set([
+        ...normalizedItems.map((item) => item.productId),
+        ...existingItems.map((item) => String(item.productId)),
+      ])]
       const productMap = await this.loadEditableOrderProductsInManager(manager, productIds)
-      const totalQty = this.validateUpdatedPreorderItems(normalizedItems, existingQtyMap, productMap, o2oRules)
-      const nextQtyMap = new Map(normalizedItems.map((item) => [item.productId, item.qty]))
+      const skus = await manager.getRepository(BaseProductSku).find({
+        where: { productId: In(productIds) },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
+      const { skuMap, skuByProductMap } = this.groupSkusByProduct(skus)
+      const normalizedItemRefs = normalizedItems.map((item) => {
+        const sku = this.getRequiredSku(skuMap, skuByProductMap, item.productId, item.skuId)
+        return {
+          productId: item.productId,
+          skuId: String(sku.id),
+          qty: item.qty,
+          itemKey: this.buildOrderItemKey(item.productId, String(sku.id)),
+        }
+      })
+      const itemKeyMap = new Map<string, { productId: string; skuId: string | null }>()
+      existingItems.forEach((item) => itemKeyMap.set(this.buildPreorderItemKey(item), {
+        productId: String(item.productId),
+        skuId: item.skuId ? String(item.skuId) : null,
+      }))
+      normalizedItemRefs.forEach((item) => itemKeyMap.set(item.itemKey, { productId: item.productId, skuId: item.skuId }))
+      const totalQty = this.validateUpdatedPreorderItems(normalizedItems, existingQtyMap, productMap, skuMap, skuByProductMap, o2oRules)
+      const nextQtyMap = new Map(normalizedItemRefs.map((item) => [item.itemKey, item.qty]))
 
       await this.applyPreorderItemStockDeltaInManager(
         manager,
@@ -2085,9 +2373,11 @@ class O2oPreorderService {
         order,
         existingQtyMap,
         nextQtyMap,
+        itemKeyMap,
         productMap,
+        skuMap,
       )
-      await this.saveUpdatedPreorderItemsInManager(manager, order, existingItems, normalizedItems, nextQtyMap, productMap)
+      await this.saveUpdatedPreorderItemsInManager(manager, order, existingItems, normalizedItems, nextQtyMap, productMap, skuMap, skuByProductMap)
 
       order.totalQty = totalQty
       order.remark = normalizedRemark
@@ -2194,6 +2484,7 @@ class O2oPreorderService {
     }
     const normalizedItems = input.items.map((item) => ({
       productId: String(item.productId).trim(),
+      skuId: item.skuId === null || item.skuId === undefined ? null : String(item.skuId).trim() || null,
       qty: Math.floor(Number(item.qty)),
     }))
     normalizedItems.forEach((item) => {
@@ -2242,13 +2533,18 @@ class O2oPreorderService {
           totalQty,
         }),
       )
-      const requestItemEntities = [...mergedRequestQtyMap.entries()].map(([productId, qty]) =>
-        returnRequestItemRepo.create({
+      const orderItemMap = new Map(orderItems.map((item) => [this.buildPreorderItemKey(item), item]))
+      const requestItemEntities = [...mergedRequestQtyMap.entries()].map(([itemKey, requestItem]) => {
+        const orderItem = orderItemMap.get(itemKey)
+        return returnRequestItemRepo.create({
           returnRequestId: String(savedRequest.id),
-          productId,
-          qty,
-        }),
-      )
+          productId: requestItem.productId,
+          skuId: requestItem.skuId,
+          skuCodeSnapshot: orderItem?.skuCodeSnapshot ?? null,
+          specTextSnapshot: orderItem?.specTextSnapshot ?? null,
+          qty: requestItem.qty,
+        })
+      })
       await returnRequestItemRepo.save(requestItemEntities)
       if (order.businessStatus !== 'after_sale') {
         order.businessStatus = 'after_sale'
@@ -2642,14 +2938,22 @@ class O2oPreorderService {
       where: { orderId: String(order.id) },
       lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
     })
-    const orderItemMap = new Map(orderItems.map((item) => [String(item.productId), item]))
+    const orderItemMap = new Map(orderItems.map((item) => [this.buildPreorderItemKey(item), item]))
     const productIds = [...new Set(requestItems.map((item) => String(item.productId)))]
     const products = await manager.getRepository(BaseProduct).find({
       where: { id: In(productIds) },
       lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
     })
     const productMap = new Map(products.map((item) => [String(item.id), item]))
-    return { requestItems, orderItemMap, productMap }
+    const skuIds = [...new Set(requestItems.map((item) => item.skuId ? String(item.skuId) : '').filter(Boolean))]
+    const skus = skuIds.length
+      ? await manager.getRepository(BaseProductSku).find({
+          where: { id: In(skuIds) },
+          lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+        })
+      : []
+    const skuMap = new Map(skus.map((item) => [String(item.id), item]))
+    return { requestItems, orderItemMap, productMap, skuMap }
   }
 
   // 详细注释：每个退货商品都单独核对订单数量与商品库存，
@@ -2661,9 +2965,12 @@ class O2oPreorderService {
     requestItem: O2oReturnRequestItem,
     orderItemMap: Map<string, O2oPreorderItem>,
     productMap: Map<string, BaseProduct>,
+    skuMap: Map<string, BaseProductSku>,
   ) {
     const product = productMap.get(String(requestItem.productId))
-    const orderItem = orderItemMap.get(String(requestItem.productId))
+    const itemKey = this.buildOrderItemKey(String(requestItem.productId), requestItem.skuId ? String(requestItem.skuId) : null)
+    const orderItem = orderItemMap.get(itemKey)
+    const sku = requestItem.skuId ? skuMap.get(String(requestItem.skuId)) : null
     if (!product || !orderItem) {
       throw new BizError('存在已失效商品，无法核销退货', 409)
     }
@@ -2677,6 +2984,10 @@ class O2oPreorderService {
     const beforePreOrderedStock = Math.max(0, Number(product.preOrderedStock ?? 0))
     if (returnRequest.sourceOrderStatus === 'pending') {
       product.preOrderedStock = Math.max(0, beforePreOrderedStock - requestQty)
+      if (sku) {
+        sku.preOrderedStock = Math.max(0, Number(sku.preOrderedStock ?? 0) - requestQty)
+        await manager.getRepository(BaseProductSku).save(sku)
+      }
       await manager.getRepository(BaseProduct).save(product)
       await manager.getRepository(InventoryLog).save(
         manager.getRepository(InventoryLog).create({
@@ -2697,6 +3008,10 @@ class O2oPreorderService {
       )
     } else {
       product.currentStock = beforeCurrentStock + requestQty
+      if (sku) {
+        sku.currentStock = Math.max(0, Number(sku.currentStock ?? 0)) + requestQty
+        await manager.getRepository(BaseProductSku).save(sku)
+      }
       await manager.getRepository(BaseProduct).save(product)
       await manager.getRepository(InventoryLog).save(
         manager.getRepository(InventoryLog).create({
@@ -2741,7 +3056,7 @@ class O2oPreorderService {
     }
     await this.assertReturnRequestSourceOrderStatus(manager, returnRequest, order)
 
-    const { requestItems, orderItemMap, productMap } = await this.loadReturnVerificationContext(
+    const { requestItems, orderItemMap, productMap, skuMap } = await this.loadReturnVerificationContext(
       manager,
       returnRequest,
       order,
@@ -2754,6 +3069,7 @@ class O2oPreorderService {
         requestItem,
         orderItemMap,
         productMap,
+        skuMap,
       )
     }
 
@@ -2845,6 +3161,14 @@ class O2oPreorderService {
       lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
     })
     const productMap = new Map(products.map((item) => [String(item.id), item]))
+    const skuIds = [...new Set(items.map((item) => item.skuId ? String(item.skuId) : '').filter(Boolean))]
+    const skus = skuIds.length
+      ? await manager.getRepository(BaseProductSku).find({
+          where: { id: In(skuIds) },
+          lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+        })
+      : []
+    const skuMap = new Map(skus.map((item) => [String(item.id), item]))
     for (const row of items) {
       const verifyQty = Math.max(0, Number(row.qty ?? 0))
       if (verifyQty <= 0) {
@@ -2861,6 +3185,17 @@ class O2oPreorderService {
       }
       product.currentStock = beforeCurrentStock - verifyQty
       product.preOrderedStock = beforePreOrderedStock - verifyQty
+      const sku = row.skuId ? skuMap.get(String(row.skuId)) : null
+      if (sku) {
+        const beforeSkuCurrentStock = Number(sku.currentStock ?? 0)
+        const beforeSkuPreOrderedStock = Number(sku.preOrderedStock ?? 0)
+        if (beforeSkuCurrentStock < verifyQty || beforeSkuPreOrderedStock < verifyQty) {
+          throw new BizError(`规格「${sku.specText}」库存异常，请先补货后再核销`, 409)
+        }
+        sku.currentStock = beforeSkuCurrentStock - verifyQty
+        sku.preOrderedStock = beforeSkuPreOrderedStock - verifyQty
+        await manager.getRepository(BaseProductSku).save(sku)
+      }
       await manager.getRepository(BaseProduct).save(product)
       await manager.getRepository(InventoryLog).save(
         manager.getRepository(InventoryLog).create({

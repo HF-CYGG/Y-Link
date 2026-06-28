@@ -566,6 +566,7 @@ async function main() {
         limitQty: number
         clientPreorderUpdateLimit: number
         storeBusinessHoursText: string
+        mallAnnouncementText: string
       }
     }>(
       () =>
@@ -588,6 +589,7 @@ async function main() {
           limitQty: number
           clientPreorderUpdateLimit: number
           storeBusinessHoursText: string
+          mallAnnouncementText: string
         }
         changed: boolean
       }
@@ -606,6 +608,7 @@ async function main() {
             limitQty: o2oRuleConfigs.limitQty,
             clientPreorderUpdateLimit: o2oRuleConfigs.clientPreorderUpdateLimit,
             storeBusinessHoursText: o2oRuleConfigs.storeBusinessHoursText,
+            mallAnnouncementText: o2oRuleConfigs.mallAnnouncementText,
           }),
         }),
       '系统配置 O2O 规则更新',

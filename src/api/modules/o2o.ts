@@ -45,6 +45,26 @@ export interface O2oMallProduct {
   preOrderedStock: number
   availableStock: number
   soldQty: number
+  skus?: O2oMallSku[]
+}
+
+export interface O2oMallSku {
+  id: string
+  productId: string
+  skuCode: string
+  specValues: Record<string, string>
+  specText: string
+  defaultPrice: string
+  originalPrice: string
+  discountRate: string
+  discountedPrice: string
+  currentStock: number
+  preOrderedStock: number
+  availableStock: number
+  isActive: boolean
+  o2oRecommended: boolean
+  thumbnail: string | null
+  sortOrder: number
 }
 
 /**
@@ -113,8 +133,12 @@ interface O2oMyOrderListRawResult {
 export interface O2oPreorderDetailItem {
   id: string
   productId: string
+  skuId: string | null
   productCode: string
   productName: string
+  skuCode: string | null
+  specText: string | null
+  skuImage: string | null
   defaultPrice: string
   originalPrice: string
   discountRate: string
@@ -130,8 +154,11 @@ export interface O2oPreorderDetailItem {
 export interface O2oReturnRequestItem {
   id: string
   productId: string
+  skuId: string | null
   productCode: string
   productName: string
+  skuCode: string | null
+  specText: string | null
   qty: number
 }
 
@@ -245,23 +272,24 @@ export interface SubmitO2oPreorderPayload {
   remark?: string
   items: Array<{
     productId: string | number
+    skuId?: string | number | null
     qty: number
   }>
 }
 
 export interface SubmitO2oReturnRequestPayload {
   reason: string
-  items: Array<{ productId: string | number; qty: number }>
+  items: Array<{ productId: string | number; skuId?: string | number | null; qty: number }>
 }
 
 export interface UpdateMyO2oPreorderPayload {
   remark?: string
-  items: Array<{ productId: string | number; qty: number }>
+  items: Array<{ productId: string | number; skuId?: string | number | null; qty: number }>
 }
 
 export interface UpdateConsoleO2oPreorderPayload {
   remark?: string
-  items: Array<{ productId: string | number; qty: number }>
+  items: Array<{ productId: string | number; skuId?: string | number | null; qty: number }>
 }
 
 export interface UpdateO2oComplianceFlagsPayload {

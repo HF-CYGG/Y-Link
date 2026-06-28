@@ -2,6 +2,7 @@
   "name": "y-link",
   "private": true,
   "version": "0.0.0",
+  "license": "GPL-3.0-only",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -18,6 +19,10 @@
     "verify:unit:functional": "node ./scripts/verify-unit-functional-suite.mjs",
     "verify:frontend:low-frequency-imports": "node ./scripts/verify-frontend-low-frequency-heavy-imports.mjs",
     "verify:db:concurrency": "node ./scripts/run-verify-db-concurrency.mjs",
+    "verify:product-sku-matrix": "node ./scripts/verify-product-sku-matrix.mjs",
+    "verify:product-sku-layout": "node ./scripts/verify-product-sku-layout.mjs",
+    "verify:o2o-sku-editor": "node ./scripts/verify-o2o-sku-editor.mjs",
+    "verify:image-upload-compression": "node ./scripts/verify-image-upload-compression.mjs",
     "verify:text-encoding": "node ./scripts/verify-text-encoding.mjs",
     "verify:performance:budget": "node ./scripts/verify-enterprise-page-performance.mjs",
     "verify:performance:core-paths": "node ./scripts/verify-enterprise-core-paths.mjs",

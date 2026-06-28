@@ -9,6 +9,7 @@
 import { In, type EntityManager, type Repository } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
+import { BaseProductSku } from '../entities/base-product-sku.entity.js'
 import { RelProductTag } from '../entities/rel-product-tag.entity.js'
 import { BaseTag } from '../entities/base-tag.entity.js'
 import { BizInboundOrderItem } from '../entities/biz-inbound-order-item.entity.js'
@@ -46,6 +47,8 @@ export interface CreateProductInput {
   currentStock?: number
   preOrderedStock?: number
   tagIds?: Array<string | number>
+  specGroups?: ProductSpecGroupInput[]
+  skus?: ProductSkuInput[]
 }
 
 export interface UpdateProductInput {
@@ -63,6 +66,8 @@ export interface UpdateProductInput {
   currentStock?: number
   preOrderedStock?: number
   tagIds?: Array<string | number>
+  specGroups?: ProductSpecGroupInput[]
+  skus?: ProductSkuInput[]
 }
 
 export interface BatchUpdateProductInput {
@@ -74,6 +79,49 @@ export interface ProductTagView {
   id: string
   tagName: string
   tagCode: string | null
+}
+
+export interface ProductSpecGroupInput {
+  name: string
+  values: string[]
+}
+
+export interface ProductSkuInput {
+  id?: string | number
+  skuCode?: string
+  specValues?: Record<string, string>
+  defaultPrice?: number
+  discountRate?: number
+  currentStock?: number
+  preOrderedStock?: number
+  isActive?: boolean
+  o2oRecommended?: boolean
+  thumbnail?: string | null
+  sortOrder?: number
+}
+
+export interface ProductSpecGroupView {
+  name: string
+  values: string[]
+}
+
+export interface ProductSkuView {
+  id: string
+  productId: string
+  skuCode: string
+  specValues: Record<string, string>
+  specText: string
+  defaultPrice: string
+  originalPrice: string
+  discountRate: string
+  discountedPrice: string
+  currentStock: number
+  preOrderedStock: number
+  availableStock: number
+  isActive: boolean
+  o2oRecommended: boolean
+  thumbnail: string | null
+  sortOrder: number
 }
 
 export interface ProductView {
@@ -95,6 +143,8 @@ export interface ProductView {
   availableStock: number
   tagIds: string[]
   tags: ProductTagView[]
+  specGroups: ProductSpecGroupView[]
+  skus: ProductSkuView[]
 }
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
@@ -126,6 +176,51 @@ const normalizeProductCodeInput = (value: string | null | undefined): string => 
 
 const normalizeProductThumbnailUrl = (value: string | null | undefined) => {
   return normalizeLegacyUploadUrl('products', value)
+}
+
+const normalizeSpecTextValue = (value: unknown): string => {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+const normalizeSpecValuesRecord = (value: unknown): Record<string, string> => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {}
+  }
+
+  const normalized: Record<string, string> = {}
+  Object.entries(value as Record<string, unknown>).forEach(([key, rawValue]) => {
+    const normalizedKey = normalizeSpecTextValue(key)
+    const normalizedValue = normalizeSpecTextValue(rawValue)
+    if (normalizedKey && normalizedValue) {
+      normalized[normalizedKey] = normalizedValue
+    }
+  })
+  return normalized
+}
+
+const parseSpecValuesJson = (value: string | null | undefined): Record<string, string> => {
+  if (!value) {
+    return {}
+  }
+  try {
+    return normalizeSpecValuesRecord(JSON.parse(value))
+  } catch {
+    return {}
+  }
+}
+
+const buildSpecText = (specValues: Record<string, string>, specGroups: ProductSpecGroupInput[] = []): string => {
+  const orderedNames = specGroups
+    .map((group) => normalizeSpecTextValue(group.name))
+    .filter(Boolean)
+  const values = [
+    ...orderedNames.map((name) => specValues[name]).filter(Boolean),
+    ...Object.entries(specValues)
+      .filter(([name]) => !orderedNames.includes(name))
+      .map(([, value]) => value)
+      .filter(Boolean),
+  ]
+  return values.length ? values.join(' / ') : '默认规格'
 }
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
@@ -297,6 +392,11 @@ export class ProductService {
       if (Array.isArray(input.tagIds)) {
         await this.replaceProductTags(saved.id, input.tagIds, manager)
       }
+      if (Array.isArray(input.skus) || Array.isArray(input.specGroups)) {
+        await this.replaceProductSkus(saved, input, manager)
+      } else if (this.shouldSyncDefaultProductSku(input)) {
+        await this.syncDefaultProductSkuFields(saved, manager)
+      }
       return this.buildProductView(saved, manager)
     })
   }
@@ -403,6 +503,201 @@ export class ProductService {
     await relationRepo.save(rows)
   }
 
+  private normalizeSpecGroups(input: ProductSpecGroupInput[] | undefined): ProductSpecGroupInput[] {
+    if (!Array.isArray(input)) {
+      return []
+    }
+    return input
+      .map((group) => ({
+        name: normalizeSpecTextValue(group?.name),
+        values: Array.isArray(group?.values)
+          ? [...new Set(group.values.map(normalizeSpecTextValue).filter(Boolean))]
+          : [],
+      }))
+      .filter((group) => group.name && group.values.length)
+  }
+
+  private normalizeSkuInputs(product: BaseProduct, input: CreateProductInput | UpdateProductInput): ProductSkuInput[] {
+    if (Array.isArray(input.skus) && input.skus.length) {
+      return input.skus
+    }
+    return [{
+      skuCode: `${product.productCode}-DEFAULT`,
+      specValues: {},
+      defaultPrice: Number(product.defaultPrice ?? 0),
+      discountRate: Number(product.discountRate ?? 10),
+      currentStock: Number(product.currentStock ?? 0),
+      preOrderedStock: Number(product.preOrderedStock ?? 0),
+      isActive: true,
+      o2oRecommended: false,
+      thumbnail: product.thumbnail,
+      sortOrder: 0,
+    }]
+  }
+
+  private buildProductSkuEntity(
+    product: BaseProduct,
+    input: ProductSkuInput,
+    specGroups: ProductSpecGroupInput[],
+    index: number,
+    repo: Repository<BaseProductSku>,
+  ): BaseProductSku {
+    const specValues = normalizeSpecValuesRecord(input.specValues)
+    const specText = buildSpecText(specValues, specGroups)
+    const defaultPrice = this.readOptionalPrice(input.defaultPrice, 'SKU 原价')
+      ?? normalizeDecimalText(product.defaultPrice)
+    const discountRate = this.readOptionalDiscountRate(input.discountRate, 'SKU 折扣')
+      ?? normalizeDiscountRate(product.discountRate)
+    const currentStock = this.readOptionalInteger(
+      input.currentStock,
+      'SKU 物理库存',
+      0,
+      PRODUCT_FIELD_LIMITS.maxStock,
+    ) ?? 0
+    const preOrderedStock = this.readOptionalInteger(
+      input.preOrderedStock,
+      'SKU 预订库存',
+      0,
+      PRODUCT_FIELD_LIMITS.maxStock,
+    ) ?? 0
+    this.assertStockRelation(currentStock, preOrderedStock)
+
+    const rawSkuCode = normalizeSpecTextValue(input.skuCode) || `${product.productCode}-SKU-${index + 1}`
+    const skuCode = this.readLimitedText(rawSkuCode, 'SKU 编码', 96, { required: true }) as string
+    const thumbnail = typeof input.thumbnail === 'string' || input.thumbnail === null
+      ? normalizeProductThumbnailUrl(input.thumbnail)
+      : product.thumbnail
+
+    return repo.create({
+      productId: product.id,
+      skuCode,
+      specValuesJson: JSON.stringify(specValues),
+      specText,
+      defaultPrice,
+      discountRate,
+      currentStock,
+      preOrderedStock,
+      isActive: input.isActive !== false,
+      o2oRecommended: input.o2oRecommended === true,
+      thumbnail: thumbnail ?? null,
+      sortOrder: this.readOptionalInteger(input.sortOrder, 'SKU 排序', 0, PRODUCT_FIELD_LIMITS.maxStock) ?? index,
+    })
+  }
+
+  private async replaceProductSkus(
+    product: BaseProduct,
+    input: CreateProductInput | UpdateProductInput,
+    manager = AppDataSource.manager,
+  ): Promise<void> {
+    const skuRepo = manager.getRepository(BaseProductSku)
+    const specGroups = this.normalizeSpecGroups(input.specGroups)
+    const skuInputs = this.normalizeSkuInputs(product, input)
+    const existingSkus = await skuRepo.find({ where: { productId: product.id } })
+    const existingSkuById = new Map(existingSkus.map((sku) => [String(sku.id), sku]))
+    const existingSkuByCode = new Map(existingSkus.map((sku) => [sku.skuCode, sku]))
+    const skuEntities = skuInputs.map((skuInput, index) => {
+      const skuEntity = this.buildProductSkuEntity(product, skuInput, specGroups, index, skuRepo)
+      const matchedSku = (skuInput.id ? existingSkuById.get(String(skuInput.id)) : undefined)
+        ?? existingSkuByCode.get(skuEntity.skuCode)
+      if (matchedSku && String(matchedSku.productId) === String(product.id)) {
+        skuEntity.id = matchedSku.id
+        if (skuInput.skuCode === undefined) {
+          skuEntity.skuCode = matchedSku.skuCode
+        }
+        if (skuInput.currentStock === undefined) {
+          skuEntity.currentStock = matchedSku.currentStock
+        }
+        if (skuInput.preOrderedStock === undefined) {
+          skuEntity.preOrderedStock = matchedSku.preOrderedStock
+        }
+        if (skuInput.thumbnail === undefined) {
+          skuEntity.thumbnail = matchedSku.thumbnail
+        }
+        if (skuInput.o2oRecommended === undefined) {
+          skuEntity.o2oRecommended = matchedSku.o2oRecommended
+        }
+        if (skuInput.sortOrder === undefined) {
+          skuEntity.sortOrder = matchedSku.sortOrder
+        }
+        this.assertStockRelation(skuEntity.currentStock, skuEntity.preOrderedStock)
+      }
+      return skuEntity
+    })
+    const specTextSet = new Set<string>()
+    const skuCodeSet = new Set<string>()
+    skuEntities.forEach((sku) => {
+      if (specTextSet.has(sku.specText)) {
+        throw new BizError(`SKU 规格组合「${sku.specText}」重复`, 409)
+      }
+      if (skuCodeSet.has(sku.skuCode)) {
+        throw new BizError(`SKU 编码「${sku.skuCode}」重复`, 409)
+      }
+      specTextSet.add(sku.specText)
+      skuCodeSet.add(sku.skuCode)
+    })
+
+    const savedSkus = await skuRepo.save(skuEntities)
+    const savedSkuIdSet = new Set(savedSkus.map((sku) => String(sku.id)))
+    const inactiveLegacySkus = existingSkus
+      .filter((sku) => !savedSkuIdSet.has(String(sku.id)))
+      .map((sku) => {
+        sku.isActive = false
+        return sku
+      })
+    if (inactiveLegacySkus.length) {
+      await skuRepo.save(inactiveLegacySkus)
+    }
+
+    const summarySkus = [...savedSkus, ...inactiveLegacySkus]
+    product.currentStock = summarySkus.reduce((sum, sku) => sum + Math.max(0, Number(sku.currentStock ?? 0)), 0)
+    product.preOrderedStock = summarySkus.reduce((sum, sku) => sum + Math.max(0, Number(sku.preOrderedStock ?? 0)), 0)
+    await manager.getRepository(BaseProduct).save(product)
+  }
+
+  private shouldSyncDefaultProductSku(input: UpdateProductInput): boolean {
+    return input.defaultPrice !== undefined
+      || input.discountRate !== undefined
+      || input.currentStock !== undefined
+      || input.isActive !== undefined
+      || input.thumbnail !== undefined
+  }
+
+  private isDefaultProductSku(sku: BaseProductSku): boolean {
+    const specValues = parseSpecValuesJson(sku.specValuesJson)
+    return Object.keys(specValues).length === 0 || sku.specText === '默认规格'
+  }
+
+  private async syncDefaultProductSkuFields(product: BaseProduct, manager = AppDataSource.manager): Promise<void> {
+    const skuRepo = manager.getRepository(BaseProductSku)
+    const skus = await skuRepo.find({ where: { productId: product.id } })
+    if (!skus.length) {
+      await this.replaceProductSkus(product, {}, manager)
+      return
+    }
+    if (skus.length > 1) {
+      return
+    }
+    const [sku] = skus
+    if (sku && this.isDefaultProductSku(sku)) {
+      sku.defaultPrice = normalizeDecimalText(product.defaultPrice)
+      sku.discountRate = normalizeDiscountRate(product.discountRate)
+      sku.currentStock = Math.max(0, Number(product.currentStock ?? 0))
+      sku.isActive = Boolean(product.isActive)
+      sku.thumbnail = product.thumbnail ?? null
+      this.assertStockRelation(sku.currentStock, sku.preOrderedStock)
+      await skuRepo.save(sku)
+      product.currentStock = Math.max(0, Number(sku.currentStock ?? 0))
+      product.preOrderedStock = Math.max(0, Number(sku.preOrderedStock ?? 0))
+      await manager.getRepository(BaseProduct).save(product)
+      return
+    }
+    if (!sku || (sku.specText && sku.specText !== '默认规格')) {
+      return
+    }
+    sku.discountRate = normalizeDiscountRate(product.discountRate)
+    await skuRepo.save(sku)
+  }
+
   private async buildProductView(product: BaseProduct, manager = AppDataSource.manager): Promise<ProductView> {
     const [view] = await this.buildProductViews([product], manager)
     if (!view) {
@@ -430,6 +725,14 @@ export class ProductService {
         id: 'ASC',
       },
     })
+    const skus = await manager.getRepository(BaseProductSku).find({
+      where: { productId: In(productIds) },
+      order: {
+        productId: 'ASC',
+        sortOrder: 'ASC',
+        id: 'ASC',
+      },
+    })
 
     const productTagMap = new Map<string, ProductTagView[]>()
     relations.forEach((relation) => {
@@ -442,10 +745,22 @@ export class ProductService {
       })
       productTagMap.set(productId, currentTags)
     })
+    const productSkuMap = new Map<string, ProductSkuView[]>()
+    skus.forEach((sku) => {
+      const productId = normalizeEntityId(sku.productId)
+      const currentSkus = productSkuMap.get(productId) ?? []
+      currentSkus.push(this.buildProductSkuView(sku))
+      productSkuMap.set(productId, currentSkus)
+    })
 
     return products.map((product) => {
       const productId = normalizeEntityId(product.id)
       const tags = productTagMap.get(productId) ?? []
+      const productSkus = productSkuMap.get(productId) ?? []
+      const skuCurrentStock = productSkus.reduce((sum, sku) => sum + sku.currentStock, 0)
+      const skuPreOrderedStock = productSkus.reduce((sum, sku) => sum + sku.preOrderedStock, 0)
+      const currentStock = productSkus.length ? skuCurrentStock : Number(product.currentStock ?? 0)
+      const preOrderedStock = productSkus.length ? skuPreOrderedStock : Number(product.preOrderedStock ?? 0)
 
       return {
         id: productId,
@@ -461,13 +776,57 @@ export class ProductService {
         thumbnail: normalizeProductThumbnailUrl(product.thumbnail) ?? null,
         detailContent: product.detailContent ?? null,
         limitPerUser: Number(product.limitPerUser ?? 5),
-        currentStock: Number(product.currentStock ?? 0),
-        preOrderedStock: Number(product.preOrderedStock ?? 0),
-        availableStock: Math.max(0, Number(product.currentStock ?? 0) - Number(product.preOrderedStock ?? 0)),
+        currentStock,
+        preOrderedStock,
+        availableStock: Math.max(0, currentStock - preOrderedStock),
         tagIds: tags.map((tag) => tag.id),
         tags,
+        specGroups: this.buildSpecGroupsFromSkus(productSkus),
+        skus: productSkus,
       }
     })
+  }
+
+  private buildProductSkuView(sku: BaseProductSku): ProductSkuView {
+    const specValues = parseSpecValuesJson(sku.specValuesJson)
+    const originalPrice = normalizeDecimalText(sku.defaultPrice)
+    const discountRate = normalizeDiscountRate(sku.discountRate)
+    const discountedPrice = calculateDiscountedPrice(originalPrice, discountRate)
+    const currentStock = Math.max(0, Number(sku.currentStock ?? 0))
+    const preOrderedStock = Math.max(0, Number(sku.preOrderedStock ?? 0))
+
+    return {
+      id: normalizeEntityId(sku.id),
+      productId: normalizeEntityId(sku.productId),
+      skuCode: sku.skuCode,
+      specValues,
+      specText: sku.specText || buildSpecText(specValues),
+      defaultPrice: originalPrice,
+      originalPrice,
+      discountRate,
+      discountedPrice,
+      currentStock,
+      preOrderedStock,
+      availableStock: Math.max(0, currentStock - preOrderedStock),
+      isActive: Boolean(sku.isActive),
+      o2oRecommended: Boolean(sku.o2oRecommended),
+      thumbnail: normalizeProductThumbnailUrl(sku.thumbnail) ?? null,
+      sortOrder: Number(sku.sortOrder ?? 0),
+    }
+  }
+
+  private buildSpecGroupsFromSkus(skus: ProductSkuView[]): ProductSpecGroupView[] {
+    const groupValueMap = new Map<string, string[]>()
+    skus.forEach((sku) => {
+      Object.entries(sku.specValues).forEach(([name, value]) => {
+        const currentValues = groupValueMap.get(name) ?? []
+        if (value && !currentValues.includes(value)) {
+          currentValues.push(value)
+        }
+        groupValueMap.set(name, currentValues)
+      })
+    })
+    return [...groupValueMap.entries()].map(([name, values]) => ({ name, values }))
   }
 
   private assertNoDuplicateProductCodesInBatch(inputs: CreateProductInput[]): void {
@@ -501,6 +860,7 @@ export class ProductService {
 
         const saved = await repo.save(product)
         await this.replaceProductTags(saved.id, normalizedCreateInput.tagIds ?? [], manager)
+        await this.replaceProductSkus(saved, normalizedCreateInput, manager)
         return this.buildProductView(saved, manager)
       } catch (error) {
         lastError = error

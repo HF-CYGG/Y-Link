@@ -10,7 +10,7 @@
  * - 若后续目录缓存要按更多业务维度分片，可继续复用统一的作用域 key 工具。
  */
 
-import type { O2oMallProduct, O2oMallStorefrontConfig } from '@/api/modules/o2o'
+import type { O2oMallProduct, O2oMallSku, O2oMallStorefrontConfig } from '@/api/modules/o2o'
 import { calculateDiscountedPriceText, normalizeDiscountRateText } from '@/utils/o2o-price'
 import {
   clearLegacyScopedStorageKey,
@@ -72,13 +72,63 @@ const normalizeNonNegativeInteger = (value: unknown) => {
 }
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
+const normalizeBoolean = (value: unknown) => value === true || value === 1 || value === '1' || value === 'true'
+
+const normalizeSkuRecords = (skus: unknown): O2oMallSku[] => {
+  if (!Array.isArray(skus)) {
+    return []
+  }
+
+  return skus
+    .map((item): O2oMallSku | null => {
+      if (!item || typeof item !== 'object') {
+        return null
+      }
+      const row = item as Record<string, unknown>
+      const id = typeof row.id === 'string' ? row.id : ''
+      const productId = typeof row.productId === 'string' ? row.productId : ''
+      if (!id || !productId) {
+        return null
+      }
+      const originalPrice = normalizePrice(row.originalPrice ?? row.defaultPrice)
+      const discountRate = normalizeDiscountRateText(row.discountRate as string | number | null | undefined)
+      const specValues = row.specValues && typeof row.specValues === 'object'
+        ? Object.fromEntries(
+          Object.entries(row.specValues as Record<string, unknown>)
+            .map(([key, value]) => [key, String(value ?? '')])
+            .filter(([key, value]) => key && value),
+        )
+        : {}
+
+      return {
+        id,
+        productId,
+        skuCode: typeof row.skuCode === 'string' ? row.skuCode : '',
+        specValues,
+        specText: typeof row.specText === 'string' && row.specText.trim() ? row.specText : '默认规格',
+        defaultPrice: normalizePrice(row.defaultPrice ?? row.originalPrice),
+        originalPrice,
+        discountRate,
+        discountedPrice: normalizePrice(row.discountedPrice ?? calculateDiscountedPriceText(originalPrice, discountRate)),
+        currentStock: normalizeNonNegativeInteger(row.currentStock),
+        preOrderedStock: normalizeNonNegativeInteger(row.preOrderedStock),
+        availableStock: normalizeNonNegativeInteger(row.availableStock),
+        isActive: row.isActive === false || row.isActive === 0 || row.isActive === '0' || row.isActive === 'false' ? false : true,
+        o2oRecommended: normalizeBoolean(row.o2oRecommended),
+        thumbnail: typeof row.thumbnail === 'string' ? row.thumbnail : null,
+        sortOrder: normalizeNonNegativeInteger(row.sortOrder),
+      } satisfies O2oMallSku
+    })
+    .filter((item): item is O2oMallSku => item !== null)
+}
+
 const normalizeProducts = (products: unknown): O2oMallProduct[] => {
   if (!Array.isArray(products)) {
     return []
   }
 
   return products
-    .map((item) => {
+    .map((item): O2oMallProduct | null => {
       if (!item || typeof item !== 'object') {
         return null
       }
@@ -97,7 +147,7 @@ const normalizeProducts = (products: unknown): O2oMallProduct[] => {
         originalPrice: normalizePrice(row.originalPrice ?? row.defaultPrice),
         discountRate: normalizeDiscountRateText(row.discountRate as string | number | null | undefined),
         discountedPrice: normalizePrice(row.discountedPrice ?? calculateDiscountedPriceText((row.originalPrice ?? row.defaultPrice) as string | number | null | undefined, row.discountRate as string | number | null | undefined)),
-        o2oRecommended: row.o2oRecommended === true || row.o2oRecommended === 1 || row.o2oRecommended === '1' || row.o2oRecommended === 'true',
+        o2oRecommended: normalizeBoolean(row.o2oRecommended),
         tags: Array.isArray(row.tags) ? row.tags.map(String) : [],
         thumbnail: typeof row.thumbnail === 'string' ? row.thumbnail : null,
         detailContent: typeof row.detailContent === 'string' ? row.detailContent : null,
@@ -106,6 +156,7 @@ const normalizeProducts = (products: unknown): O2oMallProduct[] => {
         preOrderedStock: Number.isFinite(row.preOrderedStock) ? Number(row.preOrderedStock) : 0,
         availableStock: Number.isFinite(row.availableStock) ? Number(row.availableStock) : 0,
         soldQty: normalizeNonNegativeInteger(row.soldQty),
+        skus: normalizeSkuRecords(row.skus),
       } satisfies O2oMallProduct
     })
     .filter((item): item is O2oMallProduct => item !== null)

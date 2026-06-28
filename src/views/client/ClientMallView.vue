@@ -11,7 +11,7 @@ import { computed, nextTick, onBeforeUnmount, onDeactivated, onMounted, reactive
 import { useRoute } from 'vue-router'
 
 import { ArrowDown, ArrowRight, Search, ShoppingCart } from '@element-plus/icons-vue'
-import { getO2oMallProducts, getO2oMallStorefront, type O2oMallProduct } from '@/api/modules/o2o'
+import { getO2oMallProducts, getO2oMallStorefront, type O2oMallProduct, type O2oMallSku } from '@/api/modules/o2o'
 import { BaseRequestState } from '@/components/common'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useClientAuthStore, useClientCartStore, useClientCatalogStore } from '@/store'
@@ -78,6 +78,7 @@ const sortMode = computed<ProductSortMode>({
 const detailVisible = ref(false)
 const detailQty = ref(1)
 const detailProduct = ref<O2oMallProduct | null>(null)
+const selectedDetailSku = ref<O2oMallSku | null>(null)
 const imagePreviewVisible = ref(false)
 const previewImageUrl = ref('')
 const miniCartVisible = ref(false)
@@ -150,11 +151,19 @@ const resolveSoldQty = (product: Pick<O2oMallProduct, 'soldQty'>) => {
   return Math.max(0, Math.floor(Number(product.soldQty ?? 0)))
 }
 
+const isSkuRecommended = (sku: O2oMallSku, product: O2oMallProduct) => {
+  return product.o2oRecommended || sku.o2oRecommended === true
+}
+
+const isProductRecommended = (product: O2oMallProduct) => {
+  return product.o2oRecommended || (product.skus ?? []).some((sku) => sku.isActive !== false && sku.o2oRecommended === true)
+}
+
 const resolveRecommendedSortBucket = (product: O2oMallProduct) => {
   if (resolveSoldQty(product) > 0) {
     return 0
   }
-  return product.o2oRecommended ? 1 : 2
+  return isProductRecommended(product) ? 1 : 2
 }
 
 const originalProductIndexMap = computed(() => {
@@ -187,13 +196,105 @@ const classifyProduct = (product: O2oMallProduct) => {
   return product.tags && product.tags.length > 0 ? product.tags : ['默认标签']
 }
 
-const resolveProductThumbnail = (product: Pick<O2oMallProduct, 'productName' | 'productCode' | 'thumbnail'>) => {
-  return resolveProductPlaceholder(product.thumbnail)
+const resolveSortedActivePreviewSkus = (product: Pick<O2oMallProduct, 'skus'>) => {
+  return (product.skus ?? [])
+    .filter((sku) => sku.isActive !== false)
+    .slice()
+    .sort((leftSku, rightSku) => {
+      const leftOrder = Number.isFinite(Number(leftSku.sortOrder)) ? Number(leftSku.sortOrder) : 0
+      const rightOrder = Number.isFinite(Number(rightSku.sortOrder)) ? Number(rightSku.sortOrder) : 0
+      return leftOrder - rightOrder
+    })
 }
 
+const hasSkuAvailableStock = (sku: Pick<O2oMallSku, 'availableStock'>) => Math.max(0, Number(sku.availableStock ?? 0)) > 0
+
+const resolveHallProductPreviewSku = (product: Pick<O2oMallProduct, 'o2oRecommended' | 'skus'>) => {
+  const sortedPreviewSkus = resolveSortedActivePreviewSkus(product)
+  if (!sortedPreviewSkus.length) {
+    return null
+  }
+
+  const recommendedPreviewSkus = product.o2oRecommended
+    ? sortedPreviewSkus
+    : sortedPreviewSkus.filter((sku) => sku.o2oRecommended === true)
+  const candidateSkus = recommendedPreviewSkus.length ? recommendedPreviewSkus : sortedPreviewSkus
+  const stockPreferredSkus = candidateSkus.filter(hasSkuAvailableStock)
+
+  return stockPreferredSkus[0] ?? candidateSkus[0] ?? sortedPreviewSkus[0]
+}
+
+const resolveHallProductThumbnail = (product: Pick<O2oMallProduct, 'productName' | 'productCode' | 'thumbnail' | 'o2oRecommended' | 'skus'>) => {
+  const previewSku = resolveHallProductPreviewSku(product)
+  return resolveProductPlaceholder(previewSku?.thumbnail || product.thumbnail)
+}
+
+const resolveProductThumbnail = (product: Pick<O2oMallProduct, 'productName' | 'productCode' | 'thumbnail' | 'o2oRecommended' | 'skus'>) => {
+  return resolveHallProductThumbnail(product)
+}
+
+const resolveProductPriceView = (product: O2oMallProduct) => {
+  return resolveO2oPriceView(resolveHallProductPreviewSku(product) ?? product)
+}
+
+const resolveDetailProductThumbnail = (product: Pick<O2oMallProduct, 'productName' | 'productCode' | 'thumbnail'>) => {
+  return resolveProductPlaceholder(selectedDetailSku.value?.thumbnail || product.thumbnail)
+}
+
+const resolveCurrentDetailSpecText = () => {
+  const sku = selectedDetailSku.value
+  return sku?.specText?.trim() || sku?.skuCode?.trim() || ''
+}
+
+const resolveCurrentDetailDisplayName = (product: O2oMallProduct) => {
+  const specText = resolveCurrentDetailSpecText()
+  return specText ? `${product.productName} · ${specText}` : product.productName
+}
+
+const resolveCurrentDetailDescription = (product: O2oMallProduct) => {
+  const specText = resolveCurrentDetailSpecText()
+  const detailContent = product.detailContent?.trim()
+  if (!specText) {
+    return detailContent || '暂无商品描述'
+  }
+  return detailContent ? `${detailContent} · 当前规格：${specText}` : `当前规格：${specText}`
+}
+
+const resolveCurrentDetailPriceView = (product: O2oMallProduct) => {
+  return resolveO2oPriceView(selectedDetailSku.value ?? product)
+}
+
+const resolveCurrentDetailAvailableStock = (product: O2oMallProduct) => {
+  return Math.max(0, Number(selectedDetailSku.value?.availableStock ?? product.availableStock ?? 0))
+}
+
+const resolveCurrentDetailPreOrderedStock = (product: O2oMallProduct) => {
+  return Math.max(0, Number(selectedDetailSku.value?.preOrderedStock ?? product.preOrderedStock ?? 0))
+}
+
+const resolveActiveSkus = (product: O2oMallProduct | null): O2oMallSku[] => product?.skus?.filter((sku) => sku.isActive !== false) ?? []
+
+const resolveDefaultSku = (product: O2oMallProduct | null): O2oMallSku | null => {
+  return product ? resolveHallProductPreviewSku(product) : null
+}
+
+const detailMaxQty = computed(() => {
+  const limit = Math.max(0, Number(detailProduct.value?.limitPerUser ?? 0))
+  const stock = Math.max(0, Number(selectedDetailSku.value?.availableStock ?? detailProduct.value?.availableStock ?? 0))
+  return Math.max(0, Math.min(stock, limit || stock))
+})
+
 // 商城图片预览统一走同一套状态，避免商品卡和详情抽屉各自维护一套弹层开关。
-const openProductImagePreview = (product: Pick<O2oMallProduct, 'productName' | 'productCode' | 'thumbnail'>) => {
+const openProductImagePreview = (product: O2oMallProduct) => {
   previewImageUrl.value = resolveProductThumbnail(product)
+  imagePreviewVisible.value = true
+}
+
+const openDetailImagePreview = () => {
+  if (!detailProduct.value) {
+    return
+  }
+  previewImageUrl.value = resolveDetailProductThumbnail(detailProduct.value)
   imagePreviewVisible.value = true
 }
 
@@ -451,6 +552,7 @@ const setSectionRef = (key: string, element: unknown) => {
 
 const openProductDetail = (product: O2oMallProduct) => {
   detailProduct.value = product
+  selectedDetailSku.value = resolveDefaultSku(product)
   detailQty.value = 1
   detailVisible.value = true
 }
@@ -611,7 +713,7 @@ const changeDetailQty = (delta: number) => {
   if (!detailProduct.value) {
     return
   }
-  const maxQty = Math.max(0, Math.min(detailProduct.value.availableStock, detailProduct.value.limitPerUser))
+  const maxQty = detailMaxQty.value
   const nextQty = Math.min(maxQty, Math.max(1, detailQty.value + delta))
   if (detailQty.value === maxQty && delta > 0) {
     if (maxQty >= detailProduct.value.limitPerUser) {
@@ -623,11 +725,16 @@ const changeDetailQty = (delta: number) => {
   detailQty.value = nextQty
 }
 
+const selectDetailSku = (sku: O2oMallSku) => {
+  selectedDetailSku.value = sku
+  detailQty.value = Math.min(Math.max(1, detailQty.value), Math.max(1, detailMaxQty.value))
+}
+
 const addCurrentDetailToCart = () => {
   if (!detailProduct.value) {
     return
   }
-  const addedQty = clientCartStore.addProduct(detailProduct.value, detailQty.value)
+  const addedQty = clientCartStore.addProduct(detailProduct.value, detailQty.value, selectedDetailSku.value)
   if (addedQty <= 0) {
     return
   }
@@ -637,7 +744,12 @@ const addCurrentDetailToCart = () => {
 }
 
 const quickAdd = (product: O2oMallProduct) => {
-  const addedQty = clientCartStore.addProduct(product, 1)
+  const activeSkus = resolveActiveSkus(product)
+  if (activeSkus.length > 1) {
+    openProductDetail(product)
+    return
+  }
+  const addedQty = clientCartStore.addProduct(product, 1, resolveDefaultSku(product))
   if (addedQty <= 0) {
     return
   }
@@ -1175,9 +1287,9 @@ onBeforeUnmount(() => {
           <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
             <div class="client-product-card__content">
               <p class="client-product-card__name">{{ product.productName }}</p>
-              <p class="client-product-card__price">¥{{ Number(resolveO2oPriceView(product).discountedPrice).toFixed(2) }}</p>
-              <p v-if="resolveO2oPriceView(product).isDiscounted" class="client-product-card__price-extra">
-                原价 ¥{{ Number(resolveO2oPriceView(product).originalPrice).toFixed(2) }} · {{ resolveO2oPriceView(product).discountLabel }}
+              <p class="client-product-card__price">¥{{ Number(resolveProductPriceView(product).discountedPrice).toFixed(2) }}</p>
+              <p v-if="resolveProductPriceView(product).isDiscounted" class="client-product-card__price-extra">
+                原价 ¥{{ Number(resolveProductPriceView(product).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(product).discountLabel }}
               </p>
               <p v-if="product.detailContent" class="client-product-card__desc">{{ product.detailContent }}</p>
               <div class="client-product-card__meta">
@@ -1281,9 +1393,9 @@ onBeforeUnmount(() => {
             <button type="button" class="client-product-card__body" @click="openProductDetail(row.data)">
               <div class="client-product-card__content">
                 <p class="client-product-card__name">{{ row.data.productName }}</p>
-                <p class="client-product-card__price">¥{{ Number(resolveO2oPriceView(row.data).discountedPrice).toFixed(2) }}</p>
-                <p v-if="resolveO2oPriceView(row.data).isDiscounted" class="client-product-card__price-extra">
-                  原价 ¥{{ Number(resolveO2oPriceView(row.data).originalPrice).toFixed(2) }} · {{ resolveO2oPriceView(row.data).discountLabel }}
+                <p class="client-product-card__price">¥{{ Number(resolveProductPriceView(row.data).discountedPrice).toFixed(2) }}</p>
+                <p v-if="resolveProductPriceView(row.data).isDiscounted" class="client-product-card__price-extra">
+                  原价 ¥{{ Number(resolveProductPriceView(row.data).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(row.data).discountLabel }}
                 </p>
                 <p v-if="row.data.detailContent" class="client-product-card__desc">{{ row.data.detailContent }}</p>
                 <div class="client-product-card__meta">
@@ -1329,9 +1441,9 @@ onBeforeUnmount(() => {
               <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
                 <div class="client-product-card__content">
                   <p class="client-product-card__name">{{ product.productName }}</p>
-                  <p class="client-product-card__price">¥{{ Number(resolveO2oPriceView(product).discountedPrice).toFixed(2) }}</p>
-                  <p v-if="resolveO2oPriceView(product).isDiscounted" class="client-product-card__price-extra">
-                    原价 ¥{{ Number(resolveO2oPriceView(product).originalPrice).toFixed(2) }} · {{ resolveO2oPriceView(product).discountLabel }}
+                  <p class="client-product-card__price">¥{{ Number(resolveProductPriceView(product).discountedPrice).toFixed(2) }}</p>
+                  <p v-if="resolveProductPriceView(product).isDiscounted" class="client-product-card__price-extra">
+                    原价 ¥{{ Number(resolveProductPriceView(product).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(product).discountLabel }}
                   </p>
                   <p v-if="product.detailContent" class="client-product-card__desc">{{ product.detailContent }}</p>
                   <div class="client-product-card__meta">
@@ -1374,9 +1486,9 @@ onBeforeUnmount(() => {
                 <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
                   <div class="client-product-card__content">
                     <p class="client-product-card__name">{{ product.productName }}</p>
-                    <p class="client-product-card__price">¥{{ Number(resolveO2oPriceView(product).discountedPrice).toFixed(2) }}</p>
-                    <p v-if="resolveO2oPriceView(product).isDiscounted" class="client-product-card__price-extra">
-                      原价 ¥{{ Number(resolveO2oPriceView(product).originalPrice).toFixed(2) }} · {{ resolveO2oPriceView(product).discountLabel }}
+                    <p class="client-product-card__price">¥{{ Number(resolveProductPriceView(product).discountedPrice).toFixed(2) }}</p>
+                    <p v-if="resolveProductPriceView(product).isDiscounted" class="client-product-card__price-extra">
+                      原价 ¥{{ Number(resolveProductPriceView(product).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(product).discountLabel }}
                     </p>
                     <p v-if="product.detailContent" class="client-product-card__desc">{{ product.detailContent }}</p>
                     <div class="client-product-card__meta">
@@ -1432,7 +1544,7 @@ onBeforeUnmount(() => {
 
             <TransitionGroup name="cart-item-flow" tag="div" class="item-list">
               <div v-if="clientCartStore.items.length === 0" key="mini-empty" class="empty-state">购物车还是空的，去挑挑好物吧</div>
-              <article v-for="item in clientCartStore.items" :key="`mini-${item.productId}`" class="cart-item">
+              <article v-for="item in clientCartStore.items" :key="`mini-${item.skuId || item.productId}`" class="cart-item">
                 <div class="item-main">
                   <p class="item-name">{{ item.productName }}</p>
                   <p class="item-price">¥{{ Number(resolveO2oPriceView(item).discountedPrice).toFixed(2) }}</p>
@@ -1441,13 +1553,14 @@ onBeforeUnmount(() => {
                   </p>
                 </div>
                 <div class="item-stepper">
-                  <button type="button" class="step-btn" @click="clientCartStore.incrementQty(item.productId, -1)">-</button>
+                  <p v-if="item.specText" class="text-xs text-slate-500">{{ item.specText }}</p>
+                  <button type="button" class="step-btn" @click="clientCartStore.incrementQty(item.skuId || item.productId, -1)">-</button>
                   <span class="step-val">
                     <Transition name="qty-pop" mode="out-in">
-                      <span :key="`mini-qty-${item.productId}-${item.qty}`" class="step-val__num">{{ item.qty }}</span>
+                      <span :key="`mini-qty-${item.skuId || item.productId}-${item.qty}`" class="step-val__num">{{ item.qty }}</span>
                     </Transition>
                   </span>
-                  <button type="button" class="step-btn" @click="clientCartStore.incrementQty(item.productId, 1)">+</button>
+                  <button type="button" class="step-btn" @click="clientCartStore.incrementQty(item.skuId || item.productId, 1)">+</button>
                 </div>
               </article>
             </TransitionGroup>
@@ -1476,10 +1589,10 @@ onBeforeUnmount(() => {
       class="client-drawer-responsive"
     >
       <section v-if="detailProduct" class="space-y-4 pb-2 max-w-[480px] mx-auto h-full max-h-[85vh] flex flex-col">
-        <button type="button" class="client-detail-image-button" @click="openProductImagePreview(detailProduct)">
+        <button type="button" class="client-detail-image-button" @click="openDetailImagePreview">
           <img
-            :src="resolveProductThumbnail(detailProduct)"
-            :alt="detailProduct.productName"
+            :src="resolveDetailProductThumbnail(detailProduct)"
+            :alt="resolveCurrentDetailDisplayName(detailProduct)"
             class="h-44 sm:h-56 w-full rounded-2xl object-cover flex-shrink-0"
             loading="lazy"
             decoding="async"
@@ -1487,17 +1600,49 @@ onBeforeUnmount(() => {
           <span class="client-detail-image-button__hint">点击查看大图</span>
         </button>
         <div class="space-y-2 flex-shrink-0">
-          <p class="text-lg font-semibold text-slate-900">{{ detailProduct.productName }}</p>
-          <p class="text-sm font-bold text-[var(--ylink-color-primary-strong)]">¥{{ Number(resolveO2oPriceView(detailProduct).discountedPrice).toFixed(2) }}</p>
-          <p v-if="resolveO2oPriceView(detailProduct).isDiscounted" class="client-product-card__price-extra">
-            原价 ¥{{ Number(resolveO2oPriceView(detailProduct).originalPrice).toFixed(2) }} · {{ resolveO2oPriceView(detailProduct).discountLabel }}
+          <p class="text-lg font-semibold text-slate-900">{{ resolveCurrentDetailDisplayName(detailProduct) }}</p>
+          <p class="text-sm font-bold text-[var(--ylink-color-primary-strong)]">¥{{ Number(resolveCurrentDetailPriceView(detailProduct).discountedPrice).toFixed(2) }}</p>
+          <p v-if="resolveCurrentDetailPriceView(detailProduct).isDiscounted" class="client-product-card__price-extra">
+            原价 ¥{{ Number(resolveCurrentDetailPriceView(detailProduct).originalPrice).toFixed(2) }} · {{ resolveCurrentDetailPriceView(detailProduct).discountLabel }}
           </p>
-          <p class="text-sm text-slate-500">{{ detailProduct.detailContent || '暂无商品描述' }}</p>
+          <p class="text-sm text-slate-500">{{ resolveCurrentDetailDescription(detailProduct) }}</p>
           <div class="flex flex-wrap gap-2 text-xs">
-            <span class="rounded-full bg-emerald-50 px-3 py-1 text-emerald-600">可预订 {{ detailProduct.availableStock }}</span>
-            <span class="rounded-full bg-amber-50 px-3 py-1 text-amber-600">已预订 {{ detailProduct.preOrderedStock }}</span>
+            <span class="rounded-full bg-emerald-50 px-3 py-1 text-emerald-600">可预订 {{ resolveCurrentDetailAvailableStock(detailProduct) }}</span>
+            <span class="rounded-full bg-amber-50 px-3 py-1 text-amber-600">已预订 {{ resolveCurrentDetailPreOrderedStock(detailProduct) }}</span>
             <span class="rounded-full bg-slate-100 px-3 py-1 text-slate-600">已售 {{ resolveSoldQty(detailProduct) }}</span>
             <span class="rounded-full bg-slate-100 px-3 py-1 text-slate-600">限购 {{ detailProduct.limitPerUser }}</span>
+          </div>
+        </div>
+        <div v-if="detailProduct.skus?.length" class="flex-shrink-0 rounded-xl bg-slate-50 p-3">
+          <p class="mb-2 text-sm font-bold text-slate-700">选择规格</p>
+          <div class="grid gap-2">
+            <button
+              v-for="sku in detailProduct.skus"
+              :key="sku.id"
+              type="button"
+              class="relative flex min-h-11 flex-col items-start rounded-lg border bg-white px-3 py-2 pr-14 text-left text-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
+              :class="selectedDetailSku?.id === sku.id ? 'border-cyan-500 bg-cyan-50' : 'border-slate-200'"
+              :disabled="sku.isActive === false || sku.availableStock <= 0"
+              @click="selectDetailSku(sku)"
+            >
+              <span
+                v-if="isSkuRecommended(sku, detailProduct)"
+                class="sku-recommend-badge absolute right-2 top-2 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-700"
+              >
+                推荐
+              </span>
+              <span>{{ sku.specText || '默认规格' }}</span>
+              <small class="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
+                <strong class="text-[var(--ylink-color-primary-strong)]">¥{{ Number(resolveO2oPriceView(sku).discountedPrice).toFixed(2) }}</strong>
+                <template v-if="resolveO2oPriceView(sku).isDiscounted">
+                  <span class="sku-discount-badge rounded-full bg-rose-50 px-1.5 py-0.5 text-[11px] font-semibold text-rose-600">
+                    {{ resolveO2oPriceView(sku).discountLabel }}
+                  </span>
+                  <span class="text-slate-400 line-through">¥{{ Number(resolveO2oPriceView(sku).originalPrice).toFixed(2) }}</span>
+                </template>
+                <span>库存 {{ sku.availableStock }}</span>
+              </small>
+            </button>
           </div>
         </div>
         <div class="flex-1 overflow-y-auto"></div>

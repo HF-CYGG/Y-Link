@@ -31,6 +31,31 @@ export interface ProductRecord {
   availableStock: number
   tagIds: string[]
   tags: { id: string; tagName: string; tagCode: string | null }[]
+  skus?: ProductSkuRecord[]
+}
+
+export interface ProductSpecGroup {
+  name: string
+  values: string[]
+}
+
+export interface ProductSkuRecord {
+  id?: string
+  productId?: string
+  skuCode?: string
+  specValues?: Record<string, string>
+  specText?: string
+  defaultPrice?: string | number
+  originalPrice?: string
+  discountRate?: string | number
+  discountedPrice?: string
+  currentStock?: number
+  preOrderedStock?: number
+  availableStock?: number
+  isActive?: boolean
+  o2oRecommended?: boolean
+  thumbnail?: string | null
+  sortOrder?: number
 }
 
 export interface CreateProductDto {
@@ -48,6 +73,8 @@ export interface CreateProductDto {
   currentStock?: number
   preOrderedStock?: number
   tagIds?: Array<string | number>
+  specGroups?: ProductSpecGroup[]
+  skus?: ProductSkuRecord[]
 }
 
 export interface UpdateProductDto {
@@ -65,6 +92,8 @@ export interface UpdateProductDto {
   currentStock?: number
   preOrderedStock?: number
   tagIds?: Array<string | number>
+  specGroups?: ProductSpecGroup[]
+  skus?: ProductSkuRecord[]
 }
 
 export interface BatchUpdateProductDto {
@@ -123,6 +152,7 @@ interface ProductRawRecord {
   availableStock?: PrimitiveValue
   tagIds?: PrimitiveValue[]
   tags?: ProductTagRawRecord[] | null
+  skus?: ProductSkuRecord[] | null
 }
 
 interface ProductDetailRawResult {
@@ -222,6 +252,7 @@ const normalizeProductRecord = (record: ProductRawRecord): ProductRecord => {
     availableStock: normalizeInteger(record.availableStock, 0),
     tagIds,
     tags,
+    skus: Array.isArray(record.skus) ? record.skus : [],
   }
 }
 
