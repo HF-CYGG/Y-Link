@@ -9,9 +9,15 @@ import path from 'node:path'
 import type { DataSource } from 'typeorm'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { ClientFeedbackMessage, type ClientFeedbackMessageAttachment } from '../entities/client-feedback-message.entity.js'
-import { buildUploadPublicUrl, ensureUploadCategoryDir, type UploadCategory } from './upload-storage.js'
+import {
+  buildUploadPublicUrl,
+  ensureUploadCategoryDir,
+  UPLOAD_PUBLIC_FILE_NAME_MATCHER,
+  type UploadCategory,
+} from './upload-storage.js'
 
 const LEGACY_UPLOAD_URL_MATCHER = /^\/uploads\/([^/]+)$/
+const RESERVED_UPLOAD_ROOT_NAMES = new Set<UploadCategory>(['products', 'client-feedback'])
 
 export interface UploadMigrationResult {
   productThumbnailUpdatedCount: number
@@ -25,7 +31,14 @@ const resolveLegacyUploadFileName = (url?: string | null) => {
     return null
   }
   const match = LEGACY_UPLOAD_URL_MATCHER.exec(normalizedUrl)
-  return match?.[1] ?? null
+  const fileName = match?.[1]?.trim()
+  if (!fileName || RESERVED_UPLOAD_ROOT_NAMES.has(fileName as UploadCategory)) {
+    return null
+  }
+  if (!UPLOAD_PUBLIC_FILE_NAME_MATCHER.test(fileName)) {
+    return null
+  }
+  return fileName
 }
 
 const moveLegacyUploadFileIfNeeded = (
@@ -37,10 +50,18 @@ const moveLegacyUploadFileIfNeeded = (
   const targetDir = ensureUploadCategoryDir(category)
   const targetFilePath = path.resolve(targetDir, fileName)
 
+  if (path.dirname(legacyFilePath) !== uploadsRootDir || path.dirname(targetFilePath) !== targetDir) {
+    return false
+  }
   if (fs.existsSync(targetFilePath)) {
     return false
   }
   if (!fs.existsSync(legacyFilePath)) {
+    return false
+  }
+
+  const legacyFileStat = fs.lstatSync(legacyFilePath)
+  if (!legacyFileStat.isFile()) {
     return false
   }
 
