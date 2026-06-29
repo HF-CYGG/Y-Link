@@ -22,10 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-      ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
-      ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
+      HAS_DOCKERHUB_CREDS: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+      HAS_ACR_CREDS: ${{ secrets.ACR_USERNAME != '' && secrets.ACR_PASSWORD != '' }}
     steps:
       - name: 检出代码
         uses: actions/checkout@v6
@@ -33,35 +31,79 @@ jobs:
       - name: 计算镜像仓库与推送规则
         id: prepare
         shell: bash
+        env:
+          DOCKERHUB_NAMESPACE_VAR: ${{ vars.DOCKERHUB_NAMESPACE }}
+          ACR_REGISTRY_VAR: ${{ vars.ACR_REGISTRY }}
+          ACR_NAMESPACE_VAR: ${{ vars.ACR_NAMESPACE }}
+          ACR_PUSH_MODE_VAR: ${{ vars.ACR_PUSH_MODE }}
+          DEFAULT_ACR_REGISTRY: crpi-9gmsq2s17re73ia9.cn-qingdao.personal.cr.aliyuncs.com
+          DEFAULT_ACR_NAMESPACE: yyh163
         run: |
-          namespace="${{ vars.DOCKERHUB_NAMESPACE }}"
+          set -euo pipefail
+
+          write_output() {
+            local key="$1"
+            local value="$2"
+            if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+              echo "Invalid output key: $key" >&2
+              exit 1
+            fi
+            if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+              echo "Invalid multiline value for output: $key" >&2
+              exit 1
+            fi
+            printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT"
+          }
+
+          namespace="${DOCKERHUB_NAMESPACE_VAR:-}"
           if [ -z "$namespace" ]; then
-            namespace="${{ github.repository_owner }}"
+            namespace="${GITHUB_REPOSITORY_OWNER}"
           fi
-          namespace="$(echo "$namespace" | tr '[:upper:]' '[:lower:]')"
-          echo "namespace=$namespace" >> "$GITHUB_OUTPUT"
+          namespace="$(printf '%s' "$namespace" | tr '[:upper:]' '[:lower:]')"
+          if [[ ! "$namespace" =~ ^[a-z0-9]+([._-][a-z0-9]+)*$ ]]; then
+            echo "Invalid DOCKERHUB_NAMESPACE; only Docker namespace characters are allowed." >&2
+            exit 1
+          fi
+          write_output "namespace" "$namespace"
 
-          gh_owner="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
-          echo "gh_owner=$gh_owner" >> "$GITHUB_OUTPUT"
+          gh_owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+          write_output "gh_owner" "$gh_owner"
 
-          acr_registry="${{ vars.ACR_REGISTRY }}"
+          acr_registry="${ACR_REGISTRY_VAR:-}"
           if [ -z "$acr_registry" ]; then
-            acr_registry="crpi-9gmsq2s17re73ia9.cn-qingdao.personal.cr.aliyuncs.com"
+            acr_registry="$DEFAULT_ACR_REGISTRY"
           fi
-          acr_namespace="${{ vars.ACR_NAMESPACE }}"
+          acr_namespace="${ACR_NAMESPACE_VAR:-}"
           if [ -z "$acr_namespace" ]; then
-            acr_namespace="yyh163"
+            acr_namespace="$DEFAULT_ACR_NAMESPACE"
           fi
-          acr_push_mode="${{ vars.ACR_PUSH_MODE }}"
+          acr_push_mode="${ACR_PUSH_MODE_VAR:-}"
           if [ -z "$acr_push_mode" ]; then
             acr_push_mode="release_tag_only"
           fi
-          echo "acr_registry=$acr_registry" >> "$GITHUB_OUTPUT"
-          echo "acr_namespace=$acr_namespace" >> "$GITHUB_OUTPUT"
-          echo "acr_push_mode=$acr_push_mode" >> "$GITHUB_OUTPUT"
+
+          if [[ ! "$acr_registry" =~ ^[a-z0-9][a-z0-9.-]*\.aliyuncs\.com$ ]]; then
+            echo "Invalid ACR_REGISTRY; only Aliyun ACR registry hosts are allowed." >&2
+            exit 1
+          fi
+          if [[ ! "$acr_namespace" =~ ^[a-z0-9]+([._-][a-z0-9]+)*$ ]]; then
+            echo "Invalid ACR_NAMESPACE; only registry namespace characters are allowed." >&2
+            exit 1
+          fi
+          case "$acr_push_mode" in
+            all|release_tag_only)
+              ;;
+            *)
+              echo "Unsupported ACR_PUSH_MODE=$acr_push_mode, fallback to release_tag_only"
+              acr_push_mode="release_tag_only"
+              ;;
+          esac
+          write_output "acr_registry" "$acr_registry"
+          write_output "acr_namespace" "$acr_namespace"
+          write_output "acr_push_mode" "$acr_push_mode"
 
           acr_enabled="false"
-          if [ -n "${ACR_USERNAME}" ] && [ -n "${ACR_PASSWORD}" ]; then
+          if [ "${HAS_ACR_CREDS}" = "true" ]; then
             case "$acr_push_mode" in
               all)
                 acr_enabled="true"
@@ -71,22 +113,16 @@ jobs:
                   acr_enabled="true"
                 fi
                 ;;
-              *)
-                echo "Unsupported ACR_PUSH_MODE=$acr_push_mode, fallback to release_tag_only"
-                if [[ "${GITHUB_REF}" == refs/tags/release-v* ]]; then
-                  acr_enabled="true"
-                fi
-                ;;
             esac
           fi
-          echo "acr_enabled=$acr_enabled" >> "$GITHUB_OUTPUT"
+          write_output "acr_enabled" "$acr_enabled"
 
           frontend_images="ghcr.io/${gh_owner}/y-link-frontend"
           backend_images="ghcr.io/${gh_owner}/y-link-backend"
           onebox_images="ghcr.io/${gh_owner}/y-link-onebox"
 
           # Docker Hub 可选推送
-          if [ -n "${DOCKERHUB_USERNAME}" ] && [ -n "${DOCKERHUB_TOKEN}" ]; then
+          if [ "${HAS_DOCKERHUB_CREDS}" = "true" ]; then
             frontend_images="docker.io/${namespace}/y-link-frontend"$'\n'"${frontend_images}"
             backend_images="docker.io/${namespace}/y-link-backend"$'\n'"${backend_images}"
             onebox_images="docker.io/${namespace}/y-link-onebox"$'\n'"${onebox_images}"
@@ -119,11 +155,11 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: 登录 Docker Hub
-        if: ${{ env.DOCKERHUB_USERNAME != '' && env.DOCKERHUB_TOKEN != '' }}
+        if: ${{ env.HAS_DOCKERHUB_CREDS == 'true' }}
         uses: docker/login-action@v4
         with:
-          username: ${{ env.DOCKERHUB_USERNAME }}
-          password: ${{ env.DOCKERHUB_TOKEN }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: 登录 GitHub Container Registry
         uses: docker/login-action@v4
@@ -137,8 +173,8 @@ jobs:
         uses: docker/login-action@v4
         with:
           registry: ${{ steps.prepare.outputs.acr_registry }}
-          username: ${{ env.ACR_USERNAME }}
-          password: ${{ env.ACR_PASSWORD }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
 
       - name: 生成前端镜像元数据
         id: frontend_meta
