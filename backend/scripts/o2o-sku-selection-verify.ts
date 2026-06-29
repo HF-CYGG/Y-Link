@@ -196,6 +196,20 @@ async function main() {
     pass('商城商品级价格跟随有库存的推荐 SKU')
 
     const clientAuth = await registerAndLoginClient(clientAuthService)
+    await assert.rejects(
+      () => o2oPreorderService.submit(clientAuth, {
+        items: [
+          { productId: product.id, qty: 3 },
+          { productId: product.id, skuId: otherSku.id, qty: 3 },
+        ],
+        remark: '规格别名超库存验证',
+        pickupContact: '规格验证提货人',
+        isSystemApplied: false,
+      }),
+      /库存不足/,
+    )
+    pass('下单前合并省略 SKU 与显式 SKU 后校验库存')
+
     const preorder = await o2oPreorderService.submit(clientAuth, {
       items: [{ productId: product.id, skuId: targetSku.id, qty: 2 }],
       remark: '规格 SKU 下单验证',
@@ -271,6 +285,20 @@ async function main() {
     assert.equal(defaultProductAfterUpdate.skus[0]?.discountRate, '8.0')
     assert.equal(defaultProductAfterUpdate.skus[0]?.availableStock, 6)
     pass('默认 SKU 商品主表单价格与库存同步到 SKU')
+
+    await assert.rejects(
+      () => o2oPreorderService.submit(clientAuth, {
+        items: [
+          { productId: defaultProduct.id, qty: 3 },
+          { productId: defaultProduct.id, skuId: defaultSkuId, qty: 3 },
+        ],
+        remark: '规格别名限购验证',
+        pickupContact: '规格验证提货人',
+        isSystemApplied: false,
+      }),
+      /超过限购数量/,
+    )
+    pass('下单前按商品聚合省略 SKU 与显式 SKU 后校验限购')
 
     const updatedPreorder = await o2oPreorderService.updateMyOrder(clientAuth, preorder.order.id, {
       items: [
