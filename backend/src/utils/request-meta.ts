@@ -3,7 +3,7 @@
  * 文件职责：从 Express 请求对象中提取审计与风控所需的来源信息，统一输出 IP、UA 与客户端风险标识。
  * 实现逻辑：
  * 1. 先对风险标识请求头做裁剪与白名单校验，拦截非法格式值进入后续链路；
- * 2. 仅在应用显式启用可信代理时才信任 `x-forwarded-for`，避免伪造来源 IP；
+ * 2. 来源 IP 统一使用 Express 基于 trust proxy 计算后的 req.ip，不直接解析可伪造的 x-forwarded-for；
  * 3. 最终返回审计服务可直接复用的请求元信息对象，减少各模块自行解析请求头。
  */
 
@@ -36,33 +36,13 @@ const normalizeRiskHeader = (headerValue: unknown) => {
 
 /**
  * 提取请求侧元信息：
- * - 默认不信任 x-forwarded-for，防止客户端伪造来源 IP；
- * - 仅在应用显式启用可信代理（trust proxy）时，才读取 x-forwarded-for 首个 IP；
- * - 否则回退使用 Express 提供的 req.ip，保障审计链路安全一致。
+ * - 不直接读取 x-forwarded-for 首个值，防止客户端预置伪造 IP 后被风控信任；
+ * - 来源 IP 统一交给 Express 的 trust proxy 规则计算，未配置可信代理时 req.ip 会回退到直连地址；
+ * - 保障审计与频控使用同一套不可由匿名请求任意指定的来源口径。
  */
 export function extractRequestMeta(req: Request): RequestMeta {
-  // Express 默认 trust proxy=false；只有显式配置可信代理后才允许信任代理头。
-  const trustProxySetting = req.app.get('trust proxy')
-  const isTrustedProxyEnabled =
-    trustProxySetting !== false &&
-    trustProxySetting !== undefined &&
-    trustProxySetting !== null &&
-    trustProxySetting !== 0 &&
-    trustProxySetting !== '0' &&
-    trustProxySetting !== ''
-
-  let forwardedIp: string | undefined
-  if (isTrustedProxyEnabled) {
-    const forwardedFor = req.headers['x-forwarded-for']
-    if (typeof forwardedFor === 'string') {
-      forwardedIp = forwardedFor.split(',')[0]?.trim()
-    } else if (Array.isArray(forwardedFor)) {
-      forwardedIp = forwardedFor[0]?.split(',')[0]?.trim()
-    }
-  }
-
   return {
-    ipAddress: forwardedIp || req.ip || null,
+    ipAddress: req.ip || null,
     userAgent: typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : null,
     clientRiskBrowserId: normalizeRiskHeader(req.headers['x-client-risk-browser-id']),
     clientRiskSessionId: normalizeRiskHeader(req.headers['x-client-risk-session-id']),

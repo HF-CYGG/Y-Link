@@ -190,6 +190,12 @@ const FAILURE_RESET_WINDOW_MS = {
 
 const LOGIN_REMAINING_WARNING_RATIO = 0.2
 const REGISTER_REMAINING_WARNING_THRESHOLD = 3
+const MAX_RATE_LIMIT_BUCKETS = 10000
+const MAX_FAILURE_STATE_BUCKETS = 5000
+const STORE_CLEANUP_INTERVAL_MS = 60 * 1000
+const MAX_RATE_LIMIT_WINDOW_MS = Math.max(...Object.values(RATE_LIMIT_RULES).map((rule) => rule.windowMs))
+
+let lastStoreCleanupAt = 0
 
 /**
  * 内存态时间窗口记录：
@@ -212,6 +218,44 @@ const normalizeClientRiskSessionId = (meta?: RequestMeta) => meta?.clientRiskSes
 export class AuthSecurityService {
   private trimRateLimitWindow(timestamps: number[], windowMs: number, nowMs: number) {
     return timestamps.filter((timestamp) => nowMs - timestamp < windowMs)
+  }
+
+  private cleanupStores(nowMs: number) {
+    if (nowMs - lastStoreCleanupAt < STORE_CLEANUP_INTERVAL_MS) {
+      return
+    }
+    lastStoreCleanupAt = nowMs
+
+    for (const [key, timestamps] of requestWindowStore) {
+      const activeWindow = this.trimRateLimitWindow(timestamps, MAX_RATE_LIMIT_WINDOW_MS, nowMs)
+      if (activeWindow.length) {
+        requestWindowStore.set(key, activeWindow)
+      } else {
+        requestWindowStore.delete(key)
+      }
+    }
+
+    for (const [key, state] of failureStateStore) {
+      const isExpired =
+        state.lockedUntil <= nowMs &&
+        nowMs - state.lastFailedAt >= Math.max(...Object.values(FAILURE_RESET_WINDOW_MS))
+      if (isExpired) {
+        failureStateStore.delete(key)
+      }
+    }
+
+    this.evictOldestEntries(requestWindowStore, MAX_RATE_LIMIT_BUCKETS)
+    this.evictOldestEntries(failureStateStore, MAX_FAILURE_STATE_BUCKETS)
+  }
+
+  private evictOldestEntries(store: Map<string, unknown>, maxSize: number) {
+    while (store.size > maxSize) {
+      const oldestKey = store.keys().next().value
+      if (oldestKey === undefined) {
+        return
+      }
+      store.delete(oldestKey)
+    }
   }
 
   private async recordRiskEvent(input: {
@@ -244,6 +288,7 @@ export class AuthSecurityService {
     },
   ): Promise<RateLimitConsumeResult> {
     const nowMs = Date.now()
+    this.cleanupStores(nowMs)
     const existing = requestWindowStore.get(bucketKey) ?? []
     const activeWindow = this.trimRateLimitWindow(existing, rule.windowMs, nowMs)
     if (activeWindow.length >= rule.maxRequests) {
@@ -263,6 +308,7 @@ export class AuthSecurityService {
     }
     activeWindow.push(nowMs)
     requestWindowStore.set(bucketKey, activeWindow)
+    this.evictOldestEntries(requestWindowStore, MAX_RATE_LIMIT_BUCKETS)
     return {
       remainingRequests: Math.max(0, rule.maxRequests - activeWindow.length),
       maxRequests: rule.maxRequests,
@@ -314,6 +360,7 @@ export class AuthSecurityService {
     subjectKey: string,
   ): Promise<LoginFailureRecordResult> {
     const nowMs = Date.now()
+    this.cleanupStores(nowMs)
     for (const storeKey of [sourceKey, subjectKey]) {
       const current = this.getFailureState(storeKey, scope, nowMs)
       const next: FailureState = current
@@ -333,6 +380,7 @@ export class AuthSecurityService {
       }
       failureStateStore.set(storeKey, next)
     }
+    this.evictOldestEntries(failureStateStore, MAX_FAILURE_STATE_BUCKETS)
 
     const currentSubjectState = failureStateStore.get(subjectKey)
     const remainingAttempts = Math.max(0, FAILURE_LOCK_THRESHOLD[scope] - (currentSubjectState?.count ?? 0))
