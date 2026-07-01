@@ -127,6 +127,7 @@ jobs:
             backend_images="docker.io/${namespace}/y-link-backend"$'\n'"${backend_images}"
             onebox_images="docker.io/${namespace}/y-link-onebox"$'\n'"${onebox_images}"
           fi
+          echo "dockerhub_enabled=$dockerhub_enabled" >> "$GITHUB_OUTPUT"
 
           # 阿里云 ACR 可选推送
           # onebox 默认推到 y-link，方便直接用于部署
