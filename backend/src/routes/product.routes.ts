@@ -77,6 +77,7 @@ const productSkuSchema = z.object({
   currentStock: z.number().int().nonnegative().optional(),
   preOrderedStock: z.number().int().nonnegative().optional(),
   isActive: optionalBooleanSchema,
+  isCurrent: optionalBooleanSchema,
   o2oRecommended: optionalBooleanSchema,
   thumbnail: z.string().max(255).nullable().optional(),
   sortOrder: z.number().int().nonnegative().optional(),

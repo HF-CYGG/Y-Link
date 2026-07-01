@@ -142,6 +142,10 @@ export interface InventoryLogView {
 
 type O2oNumericLike = string | number | null
 
+const isDatabaseFlagEnabled = (value: unknown): boolean => {
+  return value !== false && value !== 0 && value !== '0' && value !== 'false'
+}
+
 export interface MyOrderListQuery {
   status?: 'pending' | 'verified' | 'cancelled'
   keyword?: string
@@ -642,11 +646,15 @@ class O2oPreorderService {
       }
       return sku
     }
-    const fallbackSku = (skuByProductMap.get(productId) ?? []).find((sku) => Boolean(sku.isActive))
+    const fallbackSku = (skuByProductMap.get(productId) ?? []).find((sku) => this.isCurrentActiveSku(sku))
     if (!fallbackSku) {
       throw new BizError('商品暂无可售规格', 409)
     }
     return fallbackSku
+  }
+
+  private isCurrentActiveSku(sku: Pick<BaseProductSku, 'isActive' | 'isCurrent'>): boolean {
+    return isDatabaseFlagEnabled(sku.isCurrent) && isDatabaseFlagEnabled(sku.isActive)
   }
 
   private groupSkusByProduct(skus: BaseProductSku[]) {
@@ -666,11 +674,12 @@ class O2oPreorderService {
   private resolveMallPreviewSku<T extends {
     availableStock: number
     isActive: boolean
+    isCurrent?: boolean
     o2oRecommended: boolean
     sortOrder: number
   }>(skuViews: T[], productRecommended: boolean): T | null {
     const sortedActiveSkus = skuViews
-      .filter((sku) => sku.isActive)
+      .filter((sku) => isDatabaseFlagEnabled(sku.isCurrent) && isDatabaseFlagEnabled(sku.isActive))
       .slice()
       .sort((leftSku, rightSku) => leftSku.sortOrder - rightSku.sortOrder)
     if (!sortedActiveSkus.length) {
@@ -915,37 +924,40 @@ class O2oPreorderService {
       if (!product) {
         continue
       }
+      const sku = row.skuId
+        ? await manager.getRepository(BaseProductSku).findOne({
+            where: { id: String(row.skuId) },
+            lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+          })
+        : null
       const beforeCurrentStock = Number(product.currentStock ?? 0)
       const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
-      product.preOrderedStock = Math.max(0, beforePreOrderedStock - qty)
-      if (row.skuId) {
-        const sku = await manager.getRepository(BaseProductSku).findOne({
-          where: { id: String(row.skuId) },
-          lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
-        })
-        if (sku) {
-          sku.preOrderedStock = Math.max(0, Number(sku.preOrderedStock ?? 0) - qty)
-          await manager.getRepository(BaseProductSku).save(sku)
-        }
+      const shouldSyncProductStock = !sku || this.isCurrentActiveSku(sku)
+      if (sku) {
+        sku.preOrderedStock = Math.max(0, Number(sku.preOrderedStock ?? 0) - qty)
+        await manager.getRepository(BaseProductSku).save(sku)
       }
-      await manager.getRepository(BaseProduct).save(product)
-      await manager.getRepository(InventoryLog).save(
-        manager.getRepository(InventoryLog).create({
-          productId: product.id,
-          changeType: 'preorder_release',
-          changeQty: qty,
-          beforeCurrentStock,
-          afterCurrentStock: beforeCurrentStock,
-          beforePreorderedStock: beforePreOrderedStock,
-          afterPreorderedStock: product.preOrderedStock,
-          operatorType: 'admin',
-          operatorId: actor.userId,
-          operatorName: actor.displayName,
-          refType: 'o2o_preorder',
-          refId: String(order.id),
-          remark: `管理员删除订单池订单，释放预订库存；订单号：${order.showNo}`,
-        }),
-      )
+      if (shouldSyncProductStock) {
+        product.preOrderedStock = Math.max(0, beforePreOrderedStock - qty)
+        await manager.getRepository(BaseProduct).save(product)
+        await manager.getRepository(InventoryLog).save(
+          manager.getRepository(InventoryLog).create({
+            productId: product.id,
+            changeType: 'preorder_release',
+            changeQty: qty,
+            beforeCurrentStock,
+            afterCurrentStock: beforeCurrentStock,
+            beforePreorderedStock: beforePreOrderedStock,
+            afterPreorderedStock: product.preOrderedStock,
+            operatorType: 'admin',
+            operatorId: actor.userId,
+            operatorName: actor.displayName,
+            refType: 'o2o_preorder',
+            refId: String(order.id),
+            remark: `管理员删除订单池订单，释放预订库存；订单号：${order.showNo}`,
+          }),
+        )
+      }
       releasedQty += qty
     }
     return releasedQty
@@ -1101,37 +1113,40 @@ class O2oPreorderService {
       if (!product) {
         continue
       }
+      const sku = row.skuId
+        ? await manager.getRepository(BaseProductSku).findOne({
+            where: { id: String(row.skuId) },
+            lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+          })
+        : null
       const beforeCurrentStock = Number(product.currentStock ?? 0)
       const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
-      product.preOrderedStock = Math.max(0, beforePreOrderedStock - row.qty)
-      if (row.skuId) {
-        const sku = await manager.getRepository(BaseProductSku).findOne({
-          where: { id: String(row.skuId) },
-          lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
-        })
-        if (sku) {
-          sku.preOrderedStock = Math.max(0, Number(sku.preOrderedStock ?? 0) - Number(row.qty ?? 0))
-          await manager.getRepository(BaseProductSku).save(sku)
-        }
+      const shouldSyncProductStock = !sku || this.isCurrentActiveSku(sku)
+      if (sku) {
+        sku.preOrderedStock = Math.max(0, Number(sku.preOrderedStock ?? 0) - Number(row.qty ?? 0))
+        await manager.getRepository(BaseProductSku).save(sku)
       }
-      await manager.getRepository(BaseProduct).save(product)
-      await manager.getRepository(InventoryLog).save(
-        manager.getRepository(InventoryLog).create({
-          productId: product.id,
-          changeType: 'preorder_release',
-          changeQty: row.qty,
-          beforeCurrentStock,
-          afterCurrentStock: beforeCurrentStock,
-          beforePreorderedStock: beforePreOrderedStock,
-          afterPreorderedStock: product.preOrderedStock,
-          operatorType: input.operatorType,
-          operatorId: input.operatorId ?? null,
-          operatorName: input.operatorName ?? null,
-          refType: 'o2o_preorder',
-          refId: input.order.id,
-          remark: input.logRemark ?? null,
-        }),
-      )
+      if (shouldSyncProductStock) {
+        product.preOrderedStock = Math.max(0, beforePreOrderedStock - row.qty)
+        await manager.getRepository(BaseProduct).save(product)
+        await manager.getRepository(InventoryLog).save(
+          manager.getRepository(InventoryLog).create({
+            productId: product.id,
+            changeType: 'preorder_release',
+            changeQty: row.qty,
+            beforeCurrentStock,
+            afterCurrentStock: beforeCurrentStock,
+            beforePreorderedStock: beforePreOrderedStock,
+            afterPreorderedStock: product.preOrderedStock,
+            operatorType: input.operatorType,
+            operatorId: input.operatorId ?? null,
+            operatorName: input.operatorName ?? null,
+            refType: 'o2o_preorder',
+            refId: input.order.id,
+            remark: input.logRemark ?? null,
+          }),
+        )
+      }
     }
     input.order.status = 'cancelled'
     input.order.cancelReason = input.cancelReason
@@ -1647,11 +1662,12 @@ class O2oPreorderService {
         currentStock: true,
         preOrderedStock: true,
         isActive: true,
+        isCurrent: true,
         o2oRecommended: true,
         thumbnail: true,
         sortOrder: true,
       },
-      where: { productId: In(productIds) },
+      where: { productId: In(productIds), isCurrent: true },
       order: { productId: 'ASC', sortOrder: 'ASC', id: 'ASC' },
     })
     const soldQtyMap = await this.resolveProductSoldQtyMap(productIds)
@@ -1675,7 +1691,8 @@ class O2oPreorderService {
 
     return {
       list: products.map((item) => {
-        const productSkus = skuByProductMap.get(String(item.id)) ?? []
+        const productSkus = (skuByProductMap.get(String(item.id)) ?? [])
+          .filter((sku) => isDatabaseFlagEnabled(sku.isCurrent))
         const skuViews = productSkus.map((sku) => {
           const currentStock = Math.max(0, Number(sku.currentStock ?? 0))
           const preOrderedStock = Math.max(0, Number(sku.preOrderedStock ?? 0))
@@ -1698,13 +1715,14 @@ class O2oPreorderService {
             currentStock,
             preOrderedStock,
             availableStock: Math.max(0, currentStock - preOrderedStock),
-            isActive: Boolean(sku.isActive),
+            isActive: isDatabaseFlagEnabled(sku.isActive),
+            isCurrent: isDatabaseFlagEnabled(sku.isCurrent),
             o2oRecommended: Boolean(sku.o2oRecommended),
             thumbnail: sku.thumbnail ?? item.thumbnail,
             sortOrder: Number(sku.sortOrder ?? 0),
           }
         })
-        const activeSkuViews = skuViews.filter((sku) => sku.isActive)
+        const activeSkuViews = skuViews.filter((sku) => isDatabaseFlagEnabled(sku.isCurrent) && isDatabaseFlagEnabled(sku.isActive))
         const currentStock = skuViews.length
           ? activeSkuViews.reduce((sum, sku) => sum + sku.currentStock, 0)
           : Number(item.currentStock ?? 0)
@@ -1898,7 +1916,7 @@ class O2oPreorderService {
         if (!product.isActive || product.o2oStatus !== 'listed') {
           throw new BizError(`商品「${product.productName}」已下架，不可预订`, 409)
         }
-        if (!sku.isActive) {
+        if (!this.isCurrentActiveSku(sku)) {
           throw new BizError(`规格「${sku.specText}」已下架，不可预订`, 409)
         }
         // 预订库存不直接扣 currentStock，而是先增加 preOrderedStock 占位，
@@ -2101,7 +2119,7 @@ class O2oPreorderService {
       const sku = this.getRequiredSku(skuMap, skuByProductMap, row.productId, row.skuId)
       const itemKey = this.buildOrderItemKey(row.productId, String(sku.id))
       const originalQty = existingQtyMap.get(itemKey) ?? 0
-      if (!sku.isActive && row.qty > originalQty) {
+      if (!this.isCurrentActiveSku(sku) && row.qty > originalQty) {
         throw new BizError(`规格「${sku.specText}」已下架，不能增加数量`, 409)
       }
       if (!product.isActive || product.o2oStatus !== 'listed') {
@@ -2178,10 +2196,8 @@ class O2oPreorderService {
       const beforeCurrentStock = Number(product.currentStock ?? 0)
       const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
       const changeQty = Math.abs(deltaQty)
-      product.preOrderedStock = deltaQty > 0
-        ? beforePreOrderedStock + deltaQty
-        : Math.max(0, beforePreOrderedStock - changeQty)
       const sku = itemRef.skuId ? skuMap.get(itemRef.skuId) : null
+      const shouldSyncProductStock = !sku || this.isCurrentActiveSku(sku)
       if (sku) {
         sku.preOrderedStock = deltaQty > 0
           ? Number(sku.preOrderedStock ?? 0) + deltaQty
@@ -2189,24 +2205,29 @@ class O2oPreorderService {
         await skuRepo.save(sku)
       }
 
-      await productRepo.save(product)
-      await inventoryLogRepo.save(
-        inventoryLogRepo.create({
-          productId: product.id,
-          changeType: deltaQty > 0 ? 'preorder_hold' : 'preorder_release',
-          changeQty,
-          beforeCurrentStock,
-          afterCurrentStock: beforeCurrentStock,
-          beforePreorderedStock: beforePreOrderedStock,
-          afterPreorderedStock: product.preOrderedStock,
-          operatorType: operator.operatorType,
-          operatorId: operator.operatorId,
-          operatorName: operator.operatorName,
-          refType: 'o2o_preorder',
-          refId: String(order.id),
-          remark: operator.logRemark,
-        }),
-      )
+      if (shouldSyncProductStock) {
+        product.preOrderedStock = deltaQty > 0
+          ? beforePreOrderedStock + deltaQty
+          : Math.max(0, beforePreOrderedStock - changeQty)
+        await productRepo.save(product)
+        await inventoryLogRepo.save(
+          inventoryLogRepo.create({
+            productId: product.id,
+            changeType: deltaQty > 0 ? 'preorder_hold' : 'preorder_release',
+            changeQty,
+            beforeCurrentStock,
+            afterCurrentStock: beforeCurrentStock,
+            beforePreorderedStock: beforePreOrderedStock,
+            afterPreorderedStock: product.preOrderedStock,
+            operatorType: operator.operatorType,
+            operatorId: operator.operatorId,
+            operatorName: operator.operatorName,
+            refType: 'o2o_preorder',
+            refId: String(order.id),
+            remark: operator.logRemark,
+          }),
+        )
+      }
     }
   }
 
@@ -3010,54 +3031,59 @@ class O2oPreorderService {
 
     const beforeCurrentStock = Math.max(0, Number(product.currentStock ?? 0))
     const beforePreOrderedStock = Math.max(0, Number(product.preOrderedStock ?? 0))
+    const shouldSyncProductStock = !sku || this.isCurrentActiveSku(sku)
     if (returnRequest.sourceOrderStatus === 'pending') {
-      product.preOrderedStock = Math.max(0, beforePreOrderedStock - requestQty)
       if (sku) {
         sku.preOrderedStock = Math.max(0, Number(sku.preOrderedStock ?? 0) - requestQty)
         await manager.getRepository(BaseProductSku).save(sku)
       }
-      await manager.getRepository(BaseProduct).save(product)
-      await manager.getRepository(InventoryLog).save(
-        manager.getRepository(InventoryLog).create({
-          productId: product.id,
-          changeType: 'preorder_release',
-          changeQty: requestQty,
-          beforeCurrentStock,
-          afterCurrentStock: beforeCurrentStock,
-          beforePreorderedStock: beforePreOrderedStock,
-          afterPreorderedStock: product.preOrderedStock,
-          operatorType: 'admin',
-          operatorId: actor.userId,
-          operatorName: actor.displayName,
-          refType: 'o2o_return_request',
-          refId: String(returnRequest.id),
-          remark: `退货核销释放预订库存，退货单号：${returnRequest.returnNo}`,
-        }),
-      )
+      if (shouldSyncProductStock) {
+        product.preOrderedStock = Math.max(0, beforePreOrderedStock - requestQty)
+        await manager.getRepository(BaseProduct).save(product)
+        await manager.getRepository(InventoryLog).save(
+          manager.getRepository(InventoryLog).create({
+            productId: product.id,
+            changeType: 'preorder_release',
+            changeQty: requestQty,
+            beforeCurrentStock,
+            afterCurrentStock: beforeCurrentStock,
+            beforePreorderedStock: beforePreOrderedStock,
+            afterPreorderedStock: product.preOrderedStock,
+            operatorType: 'admin',
+            operatorId: actor.userId,
+            operatorName: actor.displayName,
+            refType: 'o2o_return_request',
+            refId: String(returnRequest.id),
+            remark: `退货核销释放预订库存，退货单号：${returnRequest.returnNo}`,
+          }),
+        )
+      }
     } else {
-      product.currentStock = beforeCurrentStock + requestQty
       if (sku) {
         sku.currentStock = Math.max(0, Number(sku.currentStock ?? 0)) + requestQty
         await manager.getRepository(BaseProductSku).save(sku)
       }
-      await manager.getRepository(BaseProduct).save(product)
-      await manager.getRepository(InventoryLog).save(
-        manager.getRepository(InventoryLog).create({
-          productId: product.id,
-          changeType: 'preorder_return_inbound',
-          changeQty: requestQty,
-          beforeCurrentStock,
-          afterCurrentStock: product.currentStock,
-          beforePreorderedStock: beforePreOrderedStock,
-          afterPreorderedStock: beforePreOrderedStock,
-          operatorType: 'admin',
-          operatorId: actor.userId,
-          operatorName: actor.displayName,
-          refType: 'o2o_return_request',
-          refId: String(returnRequest.id),
-          remark: `退货核销重新入库，退货单号：${returnRequest.returnNo}`,
-        }),
-      )
+      if (shouldSyncProductStock) {
+        product.currentStock = beforeCurrentStock + requestQty
+        await manager.getRepository(BaseProduct).save(product)
+        await manager.getRepository(InventoryLog).save(
+          manager.getRepository(InventoryLog).create({
+            productId: product.id,
+            changeType: 'preorder_return_inbound',
+            changeQty: requestQty,
+            beforeCurrentStock,
+            afterCurrentStock: product.currentStock,
+            beforePreorderedStock: beforePreOrderedStock,
+            afterPreorderedStock: beforePreOrderedStock,
+            operatorType: 'admin',
+            operatorId: actor.userId,
+            operatorName: actor.displayName,
+            refType: 'o2o_return_request',
+            refId: String(returnRequest.id),
+            remark: `退货核销重新入库，退货单号：${returnRequest.returnNo}`,
+          }),
+        )
+      }
     }
 
     orderItem.qty = currentOrderQty - requestQty
@@ -3206,14 +3232,13 @@ class O2oPreorderService {
       if (!product) {
         throw new BizError('商品不存在，无法核销', 409)
       }
+      const sku = row.skuId ? skuMap.get(String(row.skuId)) : null
+      const shouldSyncProductStock = !sku || this.isCurrentActiveSku(sku)
       const beforeCurrentStock = Number(product.currentStock ?? 0)
       const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
-      if (beforeCurrentStock < verifyQty || beforePreOrderedStock < verifyQty) {
+      if (shouldSyncProductStock && (beforeCurrentStock < verifyQty || beforePreOrderedStock < verifyQty)) {
         throw new BizError(`商品「${product.productName}」库存异常，请先补货后再核销`, 409)
       }
-      product.currentStock = beforeCurrentStock - verifyQty
-      product.preOrderedStock = beforePreOrderedStock - verifyQty
-      const sku = row.skuId ? skuMap.get(String(row.skuId)) : null
       if (sku) {
         const beforeSkuCurrentStock = Number(sku.currentStock ?? 0)
         const beforeSkuPreOrderedStock = Number(sku.preOrderedStock ?? 0)
@@ -3224,23 +3249,27 @@ class O2oPreorderService {
         sku.preOrderedStock = beforeSkuPreOrderedStock - verifyQty
         await manager.getRepository(BaseProductSku).save(sku)
       }
-      await manager.getRepository(BaseProduct).save(product)
-      await manager.getRepository(InventoryLog).save(
-        manager.getRepository(InventoryLog).create({
-          productId: product.id,
-          changeType: 'preorder_verify',
-          changeQty: verifyQty,
-          beforeCurrentStock,
-          afterCurrentStock: product.currentStock,
-          beforePreorderedStock: beforePreOrderedStock,
-          afterPreorderedStock: product.preOrderedStock,
-          operatorType: 'admin',
-          operatorId: actor.userId,
-          operatorName: actor.displayName,
-          refType: 'o2o_preorder',
-          refId: order.id,
-        }),
-      )
+      if (shouldSyncProductStock) {
+        product.currentStock = beforeCurrentStock - verifyQty
+        product.preOrderedStock = beforePreOrderedStock - verifyQty
+        await manager.getRepository(BaseProduct).save(product)
+        await manager.getRepository(InventoryLog).save(
+          manager.getRepository(InventoryLog).create({
+            productId: product.id,
+            changeType: 'preorder_verify',
+            changeQty: verifyQty,
+            beforeCurrentStock,
+            afterCurrentStock: product.currentStock,
+            beforePreorderedStock: beforePreOrderedStock,
+            afterPreorderedStock: product.preOrderedStock,
+            operatorType: 'admin',
+            operatorId: actor.userId,
+            operatorName: actor.displayName,
+            refType: 'o2o_preorder',
+            refId: order.id,
+          }),
+        )
+      }
     }
     order.status = 'verified'
     order.verifiedAt = new Date()

@@ -23,6 +23,7 @@ const skuSpecValuesJsonColumnOptions = entityColumnOptions.isSqlite ? { default:
 @Entity({ name: 'base_product_sku' })
 @Index('idx_base_product_sku_product_id', ['productId'])
 @Index('idx_base_product_sku_mall_list', ['productId', 'isActive', 'sortOrder', 'id'])
+@Index('idx_base_product_sku_current_mall_list', ['productId', 'isCurrent', 'isActive', 'sortOrder', 'id'])
 @Index('uk_base_product_sku_code', ['skuCode'], { unique: true })
 export class BaseProductSku {
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })
@@ -54,6 +55,9 @@ export class BaseProductSku {
 
   @Column({ name: 'is_active', ...entityColumnOptions.booleanFlag, default: 1, comment: 'SKU 是否启用' })
   isActive!: boolean
+
+  @Column({ name: 'is_current', ...entityColumnOptions.booleanFlag, default: 1, comment: 'SKU current matrix marker' })
+  isCurrent!: boolean
 
   @Column({ name: 'o2o_recommended', ...entityColumnOptions.booleanFlag, default: 0, comment: 'SKU 是否推荐到 O2O 商城' })
   o2oRecommended!: boolean

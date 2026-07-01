@@ -53,6 +53,7 @@ export interface ProductSkuRecord {
   preOrderedStock?: number
   availableStock?: number
   isActive?: boolean
+  isCurrent?: boolean
   o2oRecommended?: boolean
   thumbnail?: string | null
   sortOrder?: number

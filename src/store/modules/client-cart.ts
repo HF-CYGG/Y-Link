@@ -44,8 +44,10 @@ const toMaxQty = (item: Pick<ClientCartItem, 'availableStock' | 'limitPerUser'>)
   return Math.min(stock, limit)
 }
 
+const isCartSkuAvailable = (sku: Pick<O2oMallSku, 'isCurrent' | 'isActive'> | null | undefined) => !!sku && sku.isCurrent !== false && sku.isActive !== false
+
 const resolveDefaultSku = (product: O2oMallProduct): O2oMallSku | null => {
-  const activeSkus = (product.skus ?? []).filter((sku) => sku.isActive !== false)
+  const activeSkus = (product.skus ?? []).filter(isCartSkuAvailable)
   return activeSkus[0] ?? null
 }
 
@@ -57,7 +59,7 @@ const resolveCartItemThumbnail = (product: Pick<O2oMallProduct, 'thumbnail'>, sk
 }
 
 const createCartItemFromProduct = (product: O2oMallProduct, qty: number, sku: O2oMallSku | null = resolveDefaultSku(product)): ClientCartItem => {
-  const skuUnavailable = (product.skus?.length ?? 0) > 0 && (!sku || sku.isActive === false)
+  const skuUnavailable = (product.skus?.length ?? 0) > 0 && !isCartSkuAvailable(sku)
   const productPrice = resolveO2oPriceView(product)
   const price = skuUnavailable ? productPrice : (sku ?? productPrice)
   const skuId = skuUnavailable ? null : (sku?.id ?? null)
@@ -198,7 +200,7 @@ export const useClientCartStore = defineStore('client-cart', () => {
           return item
         }
         const latestSku = item.skuId
-          ? latest.skus?.find((sku) => sku.id === item.skuId && sku.isActive !== false) ?? null
+          ? latest.skus?.find((sku) => sku.id === item.skuId && isCartSkuAvailable(sku)) ?? null
           : resolveDefaultSku(latest)
         const productPrice = resolveO2oPriceView(latest)
         const latestPrice = latestSku ?? productPrice

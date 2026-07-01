@@ -1,0 +1,3 @@
+- [x] Task 1: Optimize product list card alignment
+- [x] Task 2: Optimize detail drawer compact mode layout
+- [x] Task 1: Fix internal alignment after height unification
