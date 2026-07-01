@@ -655,6 +655,28 @@ class O2oPreorderService {
 
   private isCurrentActiveSku(sku: Pick<BaseProductSku, 'isActive' | 'isCurrent'>): boolean {
     return isDatabaseFlagEnabled(sku.isCurrent) && isDatabaseFlagEnabled(sku.isActive)
+  /**
+   * 将可省略的 skuId 先解析为真实 SKU，再按 productId + 真实 skuId 合并。
+   * 这样可以避免“未传 skuId”和“显式传默认 skuId”指向同一规格时绕过库存或限购聚合校验。
+   */
+  private canonicalizePreorderItems(
+    normalizedItems: Array<{ productId: string; skuId: string | null; qty: number }>,
+    skuMap: Map<string, BaseProductSku>,
+    skuByProductMap: Map<string, BaseProductSku[]>,
+  ) {
+    const mergedQtyMap = new Map<string, { productId: string; skuId: string; qty: number }>()
+    normalizedItems.forEach((item) => {
+      const sku = this.getRequiredSku(skuMap, skuByProductMap, item.productId, item.skuId)
+      const skuId = String(sku.id)
+      const itemKey = this.buildOrderItemKey(item.productId, skuId)
+      const current = mergedQtyMap.get(itemKey)
+      mergedQtyMap.set(itemKey, {
+        productId: item.productId,
+        skuId,
+        qty: (current?.qty ?? 0) + item.qty,
+      })
+    })
+    return [...mergedQtyMap.values()]
   }
 
   private groupSkusByProduct(skus: BaseProductSku[]) {
@@ -1909,8 +1931,10 @@ class O2oPreorderService {
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
       const { skuMap, skuByProductMap } = this.groupSkusByProduct(skus)
+      const canonicalItems = this.canonicalizePreorderItems(normalizedItems, skuMap, skuByProductMap)
+      const productQtyMap = new Map<string, number>()
       let totalQty = 0
-      for (const row of normalizedItems) {
+      for (const row of canonicalItems) {
         const product = this.getRequiredProduct(productMap, row.productId)
         const sku = this.getRequiredSku(skuMap, skuByProductMap, row.productId, row.skuId)
         if (!product.isActive || product.o2oStatus !== 'listed') {
@@ -1925,8 +1949,10 @@ class O2oPreorderService {
         if (availableStock < row.qty) {
           throw new BizError(`规格「${sku.specText}」库存不足`, 409)
         }
+        const productQty = (productQtyMap.get(row.productId) ?? 0) + row.qty
+        productQtyMap.set(row.productId, productQty)
         const limitQty = this.resolveProductLimitQty(product, o2oRules)
-        if (o2oRules.limitEnabled && row.qty > limitQty) {
+        if (o2oRules.limitEnabled && productQty > limitQty) {
           throw new BizError(`商品「${product.productName}」超过限购数量`, 409)
         }
         totalQty += row.qty
@@ -1972,7 +1998,7 @@ class O2oPreorderService {
           timeoutAt,
         }),
       )
-      const itemEntities = normalizedItems.map((item) =>
+      const itemEntities = canonicalItems.map((item) =>
         (() => {
           const product = this.getRequiredProduct(productMap, item.productId)
           const sku = this.getRequiredSku(skuMap, skuByProductMap, item.productId, item.skuId)
@@ -1994,7 +2020,7 @@ class O2oPreorderService {
       )
       await manager.getRepository(O2oPreorderItem).save(itemEntities)
 
-      for (const row of normalizedItems) {
+      for (const row of canonicalItems) {
         const product = this.getRequiredProduct(productMap, row.productId)
         const sku = this.getRequiredSku(skuMap, skuByProductMap, row.productId, row.skuId)
         const beforeCurrentStock = Number(product.currentStock ?? 0)
@@ -2111,6 +2137,7 @@ class O2oPreorderService {
     o2oRules: Awaited<ReturnType<typeof systemConfigService.getO2oRuleConfigs>>,
   ) {
     let totalQty = 0
+    const productQtyMap = new Map<string, number>()
     normalizedItems.forEach((row) => {
       const product = productMap.get(row.productId)
       if (!product) {
@@ -2139,8 +2166,10 @@ class O2oPreorderService {
         throw new BizError(`规格「${sku.specText}」库存不足，当前最多可保留 ${effectiveAvailableStock} 件`, 409)
       }
 
+      const productQty = (productQtyMap.get(row.productId) ?? 0) + row.qty
+      productQtyMap.set(row.productId, productQty)
       const limitQty = this.resolveProductLimitQty(product, o2oRules)
-      if (o2oRules.limitEnabled && row.qty > limitQty) {
+      if (o2oRules.limitEnabled && productQty > limitQty) {
         throw new BizError(`商品「${product.productName}」超过限购数量`, 409)
       }
       totalQty += row.qty
@@ -2317,7 +2346,8 @@ class O2oPreorderService {
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
       const { skuMap, skuByProductMap } = this.groupSkusByProduct(skus)
-      const normalizedItemRefs = normalizedItems.map((item) => {
+      const canonicalItems = this.canonicalizePreorderItems(normalizedItems, skuMap, skuByProductMap)
+      const normalizedItemRefs = canonicalItems.map((item) => {
         const sku = this.getRequiredSku(skuMap, skuByProductMap, item.productId, item.skuId)
         return {
           productId: item.productId,
@@ -2332,7 +2362,7 @@ class O2oPreorderService {
         skuId: item.skuId ? String(item.skuId) : null,
       }))
       normalizedItemRefs.forEach((item) => itemKeyMap.set(item.itemKey, { productId: item.productId, skuId: item.skuId }))
-      const totalQty = this.validateUpdatedPreorderItems(normalizedItems, existingQtyMap, productMap, skuMap, skuByProductMap, o2oRules)
+      const totalQty = this.validateUpdatedPreorderItems(canonicalItems, existingQtyMap, productMap, skuMap, skuByProductMap, o2oRules)
 
       const nextQtyMap = new Map(normalizedItemRefs.map((item) => [item.itemKey, item.qty]))
       await this.applyPreorderItemStockDeltaInManager(
@@ -2350,7 +2380,7 @@ class O2oPreorderService {
         productMap,
         skuMap,
       )
-      await this.saveUpdatedPreorderItemsInManager(manager, order, existingItems, normalizedItems, nextQtyMap, productMap, skuMap, skuByProductMap)
+      await this.saveUpdatedPreorderItemsInManager(manager, order, existingItems, canonicalItems, nextQtyMap, productMap, skuMap, skuByProductMap)
 
       order.totalQty = totalQty
       order.remark = normalizedRemark
@@ -2393,7 +2423,8 @@ class O2oPreorderService {
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
       const { skuMap, skuByProductMap } = this.groupSkusByProduct(skus)
-      const normalizedItemRefs = normalizedItems.map((item) => {
+      const canonicalItems = this.canonicalizePreorderItems(normalizedItems, skuMap, skuByProductMap)
+      const normalizedItemRefs = canonicalItems.map((item) => {
         const sku = this.getRequiredSku(skuMap, skuByProductMap, item.productId, item.skuId)
         return {
           productId: item.productId,
@@ -2408,7 +2439,7 @@ class O2oPreorderService {
         skuId: item.skuId ? String(item.skuId) : null,
       }))
       normalizedItemRefs.forEach((item) => itemKeyMap.set(item.itemKey, { productId: item.productId, skuId: item.skuId }))
-      const totalQty = this.validateUpdatedPreorderItems(normalizedItems, existingQtyMap, productMap, skuMap, skuByProductMap, o2oRules)
+      const totalQty = this.validateUpdatedPreorderItems(canonicalItems, existingQtyMap, productMap, skuMap, skuByProductMap, o2oRules)
       const nextQtyMap = new Map(normalizedItemRefs.map((item) => [item.itemKey, item.qty]))
 
       await this.applyPreorderItemStockDeltaInManager(
@@ -2426,7 +2457,7 @@ class O2oPreorderService {
         productMap,
         skuMap,
       )
-      await this.saveUpdatedPreorderItemsInManager(manager, order, existingItems, normalizedItems, nextQtyMap, productMap, skuMap, skuByProductMap)
+      await this.saveUpdatedPreorderItemsInManager(manager, order, existingItems, canonicalItems, nextQtyMap, productMap, skuMap, skuByProductMap)
 
       order.totalQty = totalQty
       order.remark = normalizedRemark

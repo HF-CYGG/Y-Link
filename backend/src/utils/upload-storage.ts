@@ -78,6 +78,16 @@ export const buildUploadPublicUrl = (category: UploadCategory, fileName: string)
   return `/uploads/${category}/${fileName}`
 }
 
+export const UPLOAD_PUBLIC_FILE_NAME_MATCHER =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(?:jpg|jpeg|png|webp|gif)$/i
+
+export const isUploadPublicUrlForCategory = (category: UploadCategory, value: string) => {
+  const normalizedValue = value.trim()
+  const escapedCategory = category.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const match = new RegExp(`^/uploads/${escapedCategory}/([^/]+)$`).exec(normalizedValue)
+  return Boolean(match?.[1] && UPLOAD_PUBLIC_FILE_NAME_MATCHER.test(match[1]))
+}
+
 /**
  * 根据图片文件头识别真实内容类型：
  * - JPEG 识别 `FF D8 FF`；

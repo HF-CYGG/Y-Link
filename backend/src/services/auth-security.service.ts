@@ -190,6 +190,12 @@ const FAILURE_RESET_WINDOW_MS = {
 
 const LOGIN_REMAINING_WARNING_RATIO = 0.2
 const REGISTER_REMAINING_WARNING_THRESHOLD = 3
+const MAX_RATE_LIMIT_BUCKETS = 10000
+const MAX_FAILURE_STATE_BUCKETS = 5000
+const STORE_CLEANUP_INTERVAL_MS = 60 * 1000
+const MAX_RATE_LIMIT_WINDOW_MS = Math.max(...Object.values(RATE_LIMIT_RULES).map((rule) => rule.windowMs))
+
+let lastStoreCleanupAt = 0
 
 /**
  * 内存态时间窗口记录：
@@ -201,17 +207,53 @@ const requestWindowStore = new Map<string, number[]>()
 /**
  * 登录失败态：
  * - 管理端继续按“来源 IP”和“账号/手机号”记录；
- * - 客户端优先按“浏览器会话/浏览器实例”和“账号/手机号”记录，降低共享公网 IP 的误伤。
+ * - 客户端公共认证接口按“来源 IP”和“账号/手机号”记录，避免信任未认证请求可随意伪造的浏览器风险请求头。
  */
 const failureStateStore = new Map<string, FailureState>()
 
 const normalizeRiskSource = (meta?: RequestMeta) => meta?.ipAddress?.trim() || 'unknown-ip'
-const normalizeClientRiskBrowserId = (meta?: RequestMeta) => meta?.clientRiskBrowserId?.trim() || ''
-const normalizeClientRiskSessionId = (meta?: RequestMeta) => meta?.clientRiskSessionId?.trim() || ''
 
 export class AuthSecurityService {
   private trimRateLimitWindow(timestamps: number[], windowMs: number, nowMs: number) {
     return timestamps.filter((timestamp) => nowMs - timestamp < windowMs)
+  }
+
+  private cleanupStores(nowMs: number) {
+    if (nowMs - lastStoreCleanupAt < STORE_CLEANUP_INTERVAL_MS) {
+      return
+    }
+    lastStoreCleanupAt = nowMs
+
+    for (const [key, timestamps] of requestWindowStore) {
+      const activeWindow = this.trimRateLimitWindow(timestamps, MAX_RATE_LIMIT_WINDOW_MS, nowMs)
+      if (activeWindow.length) {
+        requestWindowStore.set(key, activeWindow)
+      } else {
+        requestWindowStore.delete(key)
+      }
+    }
+
+    for (const [key, state] of failureStateStore) {
+      const isExpired =
+        state.lockedUntil <= nowMs &&
+        nowMs - state.lastFailedAt >= Math.max(...Object.values(FAILURE_RESET_WINDOW_MS))
+      if (isExpired) {
+        failureStateStore.delete(key)
+      }
+    }
+
+    this.evictOldestEntries(requestWindowStore, MAX_RATE_LIMIT_BUCKETS)
+    this.evictOldestEntries(failureStateStore, MAX_FAILURE_STATE_BUCKETS)
+  }
+
+  private evictOldestEntries(store: Map<string, unknown>, maxSize: number) {
+    while (store.size > maxSize) {
+      const oldestKey = store.keys().next().value
+      if (oldestKey === undefined) {
+        return
+      }
+      store.delete(oldestKey)
+    }
   }
 
   private async recordRiskEvent(input: {
@@ -244,6 +286,7 @@ export class AuthSecurityService {
     },
   ): Promise<RateLimitConsumeResult> {
     const nowMs = Date.now()
+    this.cleanupStores(nowMs)
     const existing = requestWindowStore.get(bucketKey) ?? []
     const activeWindow = this.trimRateLimitWindow(existing, rule.windowMs, nowMs)
     if (activeWindow.length >= rule.maxRequests) {
@@ -263,6 +306,7 @@ export class AuthSecurityService {
     }
     activeWindow.push(nowMs)
     requestWindowStore.set(bucketKey, activeWindow)
+    this.evictOldestEntries(requestWindowStore, MAX_RATE_LIMIT_BUCKETS)
     return {
       remainingRequests: Math.max(0, rule.maxRequests - activeWindow.length),
       maxRequests: rule.maxRequests,
@@ -314,6 +358,7 @@ export class AuthSecurityService {
     subjectKey: string,
   ): Promise<LoginFailureRecordResult> {
     const nowMs = Date.now()
+    this.cleanupStores(nowMs)
     for (const storeKey of [sourceKey, subjectKey]) {
       const current = this.getFailureState(storeKey, scope, nowMs)
       const next: FailureState = current
@@ -333,6 +378,7 @@ export class AuthSecurityService {
       }
       failureStateStore.set(storeKey, next)
     }
+    this.evictOldestEntries(failureStateStore, MAX_FAILURE_STATE_BUCKETS)
 
     const currentSubjectState = failureStateStore.get(subjectKey)
     const remainingAttempts = Math.max(0, FAILURE_LOCK_THRESHOLD[scope] - (currentSubjectState?.count ?? 0))
@@ -373,24 +419,11 @@ export class AuthSecurityService {
   }
 
   private resolveClientRiskActor(requestMeta?: RequestMeta): ClientRiskActor {
-    const sessionRiskId = normalizeClientRiskSessionId(requestMeta)
-    if (sessionRiskId) {
-      return {
-        source: sessionRiskId,
-        sourceType: 'session',
-        bucketSegment: `session:${sessionRiskId}`,
-      }
-    }
-
-    const browserRiskId = normalizeClientRiskBrowserId(requestMeta)
-    if (browserRiskId) {
-      return {
-        source: browserRiskId,
-        sourceType: 'browser',
-        bucketSegment: `browser:${browserRiskId}`,
-      }
-    }
-
+    /**
+     * 客户端风控请求头来自未认证客户端，不能作为频控桶或登录失败锁定的主键。
+     * 这里保留 RequestMeta 中的浏览器/会话标识供审计排查使用，但认证防护主链路只按服务端解析出的 IP 聚合，
+     * 避免攻击者轮换 `x-client-risk-session-id` / `x-client-risk-browser-id` 绕过失败态或制造无界内存键。
+     */
     const ipAddress = normalizeRiskSource(requestMeta)
     return {
       source: ipAddress,
