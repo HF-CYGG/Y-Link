@@ -162,8 +162,10 @@ const isSkuRecommended = (sku: O2oMallSku, product: O2oMallProduct) => {
   return product.o2oRecommended || sku.o2oRecommended === true
 }
 
+const isCurrentActiveSku = (sku: Pick<O2oMallSku, 'isCurrent' | 'isActive'>) => sku.isCurrent !== false && sku.isActive !== false
+
 const isProductRecommended = (product: O2oMallProduct) => {
-  return product.o2oRecommended || (product.skus ?? []).some((sku) => sku.isActive !== false && sku.o2oRecommended === true)
+  return product.o2oRecommended || (product.skus ?? []).some((sku) => isCurrentActiveSku(sku) && sku.o2oRecommended === true)
 }
 
 const resolveRecommendedSortBucket = (product: O2oMallProduct) => {
@@ -205,7 +207,7 @@ const classifyProduct = (product: O2oMallProduct) => {
 
 const resolveSortedActivePreviewSkus = (product: Pick<O2oMallProduct, 'skus'>) => {
   return (product.skus ?? [])
-    .filter((sku) => sku.isActive !== false)
+    .filter(isCurrentActiveSku)
     .slice()
     .sort((leftSku, rightSku) => {
       const leftOrder = Number.isFinite(Number(leftSku.sortOrder)) ? Number(leftSku.sortOrder) : 0
@@ -281,7 +283,7 @@ const resolveDetailProductThumbnail = (product: Pick<O2oMallProduct, 'productNam
   return resolveProductPlaceholder(selectedDetailSku.value?.thumbnail || product.thumbnail)
 }
 
-const resolveActiveSkus = (product: O2oMallProduct | null): O2oMallSku[] => product?.skus?.filter((sku) => sku.isActive !== false) ?? []
+const resolveActiveSkus = (product: O2oMallProduct | null): O2oMallSku[] => product?.skus?.filter(isCurrentActiveSku) ?? []
 
 const resolveCurrentDetailSpecText = () => {
   if (resolveActiveSkus(detailProduct.value).length <= 1) {
@@ -1333,11 +1335,12 @@ onBeforeUnmount(() => {
           <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
             <div class="client-product-card__content">
               <p class="client-product-card__name">{{ product.productName }}</p>
-              <p class="client-product-card__price">¥{{ Number(resolveProductPriceView(product).discountedPrice).toFixed(2) }}</p>
-              <p v-if="resolveProductPriceView(product).isDiscounted" class="client-product-card__price-extra">
-                原价 ¥{{ Number(resolveProductPriceView(product).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(product).discountLabel }}
-              </p>
-              <p v-if="resolveProductCardDisplay(product).description" class="client-product-card__desc">{{ resolveProductCardDisplay(product).description }}</p>
+              <div class="client-product-card__price-wrap">
+                <p class="client-product-card__price">¥{{ Number(resolveProductPriceView(product).discountedPrice).toFixed(2) }}</p>
+                <p v-if="resolveProductPriceView(product).isDiscounted" class="client-product-card__price-extra">
+                  原价 ¥{{ Number(resolveProductPriceView(product).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(product).discountLabel }}
+                </p>
+              </div>
               <div class="client-product-card__meta">
                 <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">
                   可预订 {{ product.availableStock }}
@@ -1439,11 +1442,12 @@ onBeforeUnmount(() => {
             <button type="button" class="client-product-card__body" @click="openProductDetail(row.data)">
               <div class="client-product-card__content">
                 <p class="client-product-card__name">{{ row.data.productName }}</p>
-                <p class="client-product-card__price">¥{{ Number(resolveProductPriceView(row.data).discountedPrice).toFixed(2) }}</p>
-                <p v-if="resolveProductPriceView(row.data).isDiscounted" class="client-product-card__price-extra">
-                  原价 ¥{{ Number(resolveProductPriceView(row.data).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(row.data).discountLabel }}
-                </p>
-                <p v-if="resolveProductCardDisplay(row.data).description" class="client-product-card__desc">{{ resolveProductCardDisplay(row.data).description }}</p>
+                <div class="client-product-card__price-wrap">
+                  <p class="client-product-card__price">¥{{ Number(resolveProductPriceView(row.data).discountedPrice).toFixed(2) }}</p>
+                  <p v-if="resolveProductPriceView(row.data).isDiscounted" class="client-product-card__price-extra">
+                    原价 ¥{{ Number(resolveProductPriceView(row.data).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(row.data).discountLabel }}
+                  </p>
+                </div>
                 <div class="client-product-card__meta">
                   <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ row.data.availableStock }}</span>
                   <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">已预订 {{ row.data.preOrderedStock }}</span>
@@ -1487,11 +1491,12 @@ onBeforeUnmount(() => {
               <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
                 <div class="client-product-card__content">
                   <p class="client-product-card__name">{{ product.productName }}</p>
-                  <p class="client-product-card__price">¥{{ Number(resolveProductPriceView(product).discountedPrice).toFixed(2) }}</p>
-                  <p v-if="resolveProductPriceView(product).isDiscounted" class="client-product-card__price-extra">
-                    原价 ¥{{ Number(resolveProductPriceView(product).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(product).discountLabel }}
-                  </p>
-                  <p v-if="resolveProductCardDisplay(product).description" class="client-product-card__desc">{{ resolveProductCardDisplay(product).description }}</p>
+                  <div class="client-product-card__price-wrap">
+                    <p class="client-product-card__price">¥{{ Number(resolveProductPriceView(product).discountedPrice).toFixed(2) }}</p>
+                    <p v-if="resolveProductPriceView(product).isDiscounted" class="client-product-card__price-extra">
+                      原价 ¥{{ Number(resolveProductPriceView(product).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(product).discountLabel }}
+                    </p>
+                  </div>
                   <div class="client-product-card__meta">
                     <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ product.availableStock }}</span>
                     <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">已预订 {{ product.preOrderedStock }}</span>
@@ -1532,11 +1537,12 @@ onBeforeUnmount(() => {
                 <button type="button" class="client-product-card__body" @click="openProductDetail(product)">
                   <div class="client-product-card__content">
                     <p class="client-product-card__name">{{ product.productName }}</p>
-                    <p class="client-product-card__price">¥{{ Number(resolveProductPriceView(product).discountedPrice).toFixed(2) }}</p>
-                    <p v-if="resolveProductPriceView(product).isDiscounted" class="client-product-card__price-extra">
-                      原价 ¥{{ Number(resolveProductPriceView(product).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(product).discountLabel }}
-                    </p>
-                    <p v-if="resolveProductCardDisplay(product).description" class="client-product-card__desc">{{ resolveProductCardDisplay(product).description }}</p>
+                    <div class="client-product-card__price-wrap">
+                      <p class="client-product-card__price">¥{{ Number(resolveProductPriceView(product).discountedPrice).toFixed(2) }}</p>
+                      <p v-if="resolveProductPriceView(product).isDiscounted" class="client-product-card__price-extra">
+                        原价 ¥{{ Number(resolveProductPriceView(product).originalPrice).toFixed(2) }} · {{ resolveProductPriceView(product).discountLabel }}
+                      </p>
+                    </div>
                     <div class="client-product-card__meta">
                       <span class="rounded-full bg-[var(--ylink-color-primary-weak)] px-2 py-1 text-[var(--ylink-color-primary-strong)]">可预订 {{ product.availableStock }}</span>
                       <span class="rounded-full bg-amber-50 px-2 py-1 text-amber-700">已预订 {{ product.preOrderedStock }}</span>
@@ -1640,7 +1646,7 @@ onBeforeUnmount(() => {
         :class="{ 'client-detail-panel--compact': !hasDetailSkuChoices }"
       >
         <div class="client-detail-scroll">
-          <header class="client-detail-header">
+          <header v-if="hasDetailSkuChoices" class="client-detail-header client-detail-header--split">
             <div class="client-detail-summary">
               <p class="client-detail-title">{{ resolveCurrentDetailDisplayName(detailProduct) }}</p>
               <p class="client-detail-price">¥{{ Number(resolveCurrentDetailPriceView(detailProduct).discountedPrice).toFixed(2) }}</p>
@@ -1656,17 +1662,7 @@ onBeforeUnmount(() => {
               </div>
             </div>
             <div class="client-detail-side-actions">
-              <button type="button" class="client-detail-thumb-button" aria-label="Preview product image" @click="openDetailImagePreview">
-                <img
-                  :src="resolveDetailProductThumbnail(detailProduct)"
-                  :alt="resolveCurrentDetailDisplayName(detailProduct)"
-                  loading="lazy"
-                  decoding="async"
-                />
-                <span>查看大图</span>
-              </button>
               <button
-                v-if="hasDetailSkuChoices"
                 type="button"
                 class="client-detail-close-button"
                 aria-label="Close product detail"
@@ -1676,18 +1672,64 @@ onBeforeUnmount(() => {
                   <Close />
                 </ElIcon>
               </button>
+              <button type="button" class="client-detail-thumb-button" aria-label="Preview product image" @click="openDetailImagePreview">
+                <img
+                  :src="resolveDetailProductThumbnail(detailProduct)"
+                  :alt="resolveCurrentDetailDisplayName(detailProduct)"
+                  loading="lazy"
+                  decoding="async"
+                />
+                <span>查看大图</span>
+              </button>
+            </div>
+          </header>
+          <header v-else class="client-detail-header client-detail-header--hero">
+            <div class="client-detail-hero">
+              <img
+                :src="resolveDetailProductThumbnail(detailProduct)"
+                :alt="resolveCurrentDetailDisplayName(detailProduct)"
+                class="client-detail-hero-image"
+                loading="lazy"
+                decoding="async"
+                @click="openDetailImagePreview"
+              />
+              <span class="client-detail-hero-tip" @click="openDetailImagePreview">查看大图</span>
+              <button
+                type="button"
+                class="client-detail-hero-close"
+                aria-label="Close product detail"
+                @click="detailVisible = false"
+              >
+                <ElIcon>
+                  <Close />
+                </ElIcon>
+              </button>
+            </div>
+            <div class="client-detail-summary">
+              <p class="client-detail-title">{{ resolveCurrentDetailDisplayName(detailProduct) }}</p>
+              <p class="client-detail-price">¥{{ Number(resolveCurrentDetailPriceView(detailProduct).discountedPrice).toFixed(2) }}</p>
+              <p v-if="resolveCurrentDetailPriceView(detailProduct).isDiscounted" class="client-product-card__price-extra">
+                原价 ¥{{ Number(resolveCurrentDetailPriceView(detailProduct).originalPrice).toFixed(2) }} · {{ resolveCurrentDetailPriceView(detailProduct).discountLabel }}
+              </p>
+              <p class="client-detail-desc">{{ resolveCurrentDetailDescription(detailProduct) }}</p>
+              <div class="client-detail-tags">
+                <span>可预订 {{ resolveCurrentDetailAvailableStock(detailProduct) }}</span>
+                <span>已预订 {{ resolveCurrentDetailPreOrderedStock(detailProduct) }}</span>
+                <span>已售 {{ resolveSoldQty(detailProduct) }}</span>
+                <span>限购 {{ detailProduct.limitPerUser }}</span>
+              </div>
             </div>
           </header>
           <div v-if="hasDetailSkuChoices" class="client-detail-sku-section">
             <p class="client-detail-section-title">选择规格</p>
             <div class="grid gap-2">
               <button
-              v-for="sku in detailProduct.skus"
+              v-for="sku in resolveActiveSkus(detailProduct)"
               :key="sku.id"
               type="button"
               class="relative flex min-h-11 flex-col items-start rounded-lg border bg-white px-3 py-2 pr-14 text-left text-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
               :class="selectedDetailSku?.id === sku.id ? 'border-cyan-500 bg-cyan-50' : 'border-slate-200'"
-              :disabled="sku.isActive === false || sku.availableStock <= 0"
+              :disabled="sku.availableStock <= 0"
               @click="selectDetailSku(sku)"
             >
               <span
@@ -2061,10 +2103,11 @@ onBeforeUnmount(() => {
 }
 
 .client-product-card {
+  box-sizing: border-box;
   display: grid;
   grid-template-columns: 3.9rem minmax(0, 1fr) auto;
-  min-height: 6.55rem;
-  align-items: center;
+  min-height: 6.8rem;
+  align-items: stretch;
   gap: 0.68rem;
   border-radius: 0.85rem;
   border: 1px solid var(--ylink-color-border);
@@ -2074,6 +2117,7 @@ onBeforeUnmount(() => {
 
 .client-product-card__image-button {
   display: inline-flex;
+  align-self: center;
   flex-shrink: 0;
   align-items: center;
   justify-content: center;
@@ -2084,7 +2128,9 @@ onBeforeUnmount(() => {
 
 .client-product-card__body {
   display: block;
+  align-self: stretch;
   min-width: 0;
+  height: 100%;
   border: none;
   background: transparent;
   text-align: left;
@@ -2092,8 +2138,12 @@ onBeforeUnmount(() => {
 }
 
 .client-product-card__content {
+  display: flex;
+  height: 100%;
   min-width: 0;
   flex: 1;
+  flex-direction: column;
+  justify-content: space-between;
   text-align: left;
 }
 
@@ -2109,6 +2159,13 @@ onBeforeUnmount(() => {
   word-break: keep-all;
 }
 
+.client-product-card__price-wrap {
+  display: flex;
+  min-height: 2.6rem;
+  flex-direction: column;
+  justify-content: flex-start;
+}
+
 .client-product-card__price {
   margin-top: 0.1rem;
   color: var(--ylink-color-primary-strong);
@@ -2117,34 +2174,30 @@ onBeforeUnmount(() => {
   line-height: 1.16;
 }
 
-.client-product-card__desc {
-  margin-top: 0.14rem;
-  overflow: hidden;
-  color: #64748b;
-  font-size: 0.74rem;
-  line-height: 1.28;
-  display: -webkit-box;
-  line-clamp: 1;
-  -webkit-line-clamp: 1;
-  -webkit-box-orient: vertical;
-}
-
 .client-product-card__meta {
-  margin-top: 0.4rem;
-  display: flex;
+  margin-top: auto;
+  display: grid;
+  grid-template-columns: max-content max-content;
   min-width: 0;
-  flex-wrap: wrap;
-  gap: 0.26rem;
+  align-items: center;
+  gap: 0.26rem 0.32rem;
   overflow: visible;
   font-size: 0.72rem;
 }
 
 .client-product-card__meta > span {
-  flex: 0 0 auto;
-  overflow: visible;
+  overflow: hidden;
+  max-width: 5.4rem;
   padding: 0.2rem 0.42rem !important;
   line-height: 1.12;
+  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.client-product-card__meta > span:first-child {
+  grid-column: 1 / -1;
+  justify-self: start;
+  max-width: 100%;
 }
 
 .client-product-card__price-extra {
@@ -2169,7 +2222,7 @@ onBeforeUnmount(() => {
 .client-detail-panel {
   display: flex;
   width: min(100%, 30rem);
-  height: min(86dvh, calc(100dvh - env(safe-area-inset-top, 0px) - 0.75rem));
+  height: 100%;
   max-height: calc(100dvh - env(safe-area-inset-top, 0px) - 0.75rem);
   min-height: 0;
   flex-direction: column;
@@ -2185,12 +2238,11 @@ onBeforeUnmount(() => {
 }
 
 .client-detail-panel--compact {
-  height: auto;
   max-height: min(72dvh, calc(100dvh - env(safe-area-inset-top, 0px) - 0.75rem));
 }
 
 .client-detail-panel--compact .client-detail-scroll {
-  flex: 0 1 auto;
+  flex: 1;
   overflow-y: visible;
   padding-bottom: 0.55rem;
 }
@@ -2200,11 +2252,72 @@ onBeforeUnmount(() => {
   padding-top: 0.3rem;
 }
 
-.client-detail-header {
+.client-detail-header--hero {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.client-detail-header--split {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 0.85rem;
   align-items: start;
+}
+
+.client-detail-hero {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  border-radius: 1rem;
+  overflow: hidden;
+  background: #f8fafc;
+  flex-shrink: 0;
+}
+
+.client-detail-hero-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  cursor: pointer;
+  display: block;
+}
+
+.client-detail-hero-close {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  z-index: 10;
+  display: inline-flex;
+  width: 1.9rem;
+  height: 1.9rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(203, 213, 225, 0.75);
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.9);
+  color: #64748b;
+  box-shadow: none;
+  font-size: 0.78rem;
+}
+
+.client-detail-hero-tip {
+  position: absolute;
+  right: 0.5rem;
+  bottom: 0.5rem;
+  border-radius: 9999px;
+  background: rgba(15, 23, 42, 0.72);
+  color: #ffffff;
+  font-size: 0.62rem;
+  font-weight: 700;
+  line-height: 1;
+  padding: 0.28rem 0.42rem;
+  cursor: pointer;
+}
+
+.client-detail-hero-close:active,
+.client-detail-cart-button:active {
+  transform: scale(0.98);
 }
 
 .client-detail-summary {
@@ -2263,32 +2376,12 @@ onBeforeUnmount(() => {
 }
 
 .client-detail-side-actions {
-  display: grid;
-  grid-template-columns: auto auto;
-  gap: 0.38rem;
-  align-items: start;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.5rem;
   flex-shrink: 0;
-  padding-top: 0.42rem;
-}
-
-.client-detail-close-button {
-  display: inline-flex;
-  width: 1.9rem;
-  height: 1.9rem;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid rgba(203, 213, 225, 0.75);
-  border-radius: 9999px;
-  background: rgba(255, 255, 255, 0.9);
-  color: #64748b;
-  box-shadow: none;
-  font-size: 0.78rem;
-}
-
-.client-detail-close-button:active,
-.client-detail-thumb-button:active,
-.client-detail-cart-button:active {
-  transform: scale(0.98);
+  padding-top: 0.15rem;
 }
 
 .client-detail-thumb-button {
@@ -2324,6 +2417,25 @@ onBeforeUnmount(() => {
   padding: 0.28rem 0.42rem;
 }
 
+.client-detail-close-button {
+  display: inline-flex;
+  width: 1.9rem;
+  height: 1.9rem;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(203, 213, 225, 0.75);
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.9);
+  color: #64748b;
+  box-shadow: none;
+  font-size: 0.78rem;
+}
+
+.client-detail-close-button:active,
+.client-detail-thumb-button:active {
+  transform: scale(0.98);
+}
+
 .client-detail-sku-section {
   margin-top: 1rem;
   border-radius: 1rem;
@@ -2344,7 +2456,7 @@ onBeforeUnmount(() => {
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.9), #ffffff 18%),
     #ffffff;
-  padding: 0.72rem 0.1rem max(0.85rem, env(safe-area-inset-bottom, 0px));
+  padding: 0.72rem 0.1rem 1rem;
 }
 
 .client-detail-qty-row {
@@ -2388,12 +2500,12 @@ onBeforeUnmount(() => {
 @media (max-width: 640px) {
   .client-detail-panel {
     width: 100%;
-    height: min(88dvh, calc(100dvh - env(safe-area-inset-top, 0px) - 0.5rem));
+    height: 100%;
     max-height: calc(100dvh - env(safe-area-inset-top, 0px) - 0.5rem);
   }
 
   .client-detail-panel--compact {
-    height: auto;
+    height: 100%;
     max-height: min(68dvh, calc(100dvh - env(safe-area-inset-top, 0px) - 0.5rem));
   }
 
@@ -2403,6 +2515,7 @@ onBeforeUnmount(() => {
 
   .client-detail-panel--compact .client-detail-scroll {
     padding-bottom: 0.45rem;
+    min-height: 20dvh;
   }
 
   .client-detail-header {
@@ -2411,12 +2524,6 @@ onBeforeUnmount(() => {
 
   .client-detail-title {
     font-size: 1.04rem;
-  }
-
-  .client-detail-thumb-button {
-    width: 4.65rem;
-    height: 4.65rem;
-    border-radius: 1rem;
   }
 
   .client-detail-sku-section {
@@ -2525,6 +2632,7 @@ onBeforeUnmount(() => {
 .client-product-card__add-button {
   height: 1.95rem;
   align-self: center;
+  justify-self: end;
   border-radius: 9999px;
   border: none;
   background: var(--ylink-color-primary-strong);
@@ -3601,12 +3709,6 @@ onBeforeUnmount(() => {
     font-size: 0.88rem;
   }
 
-  .client-product-card__desc {
-    margin-top: 0.1rem;
-    font-size: 0.72rem;
-    line-height: 1.24;
-  }
-
   .client-product-card__meta {
     margin-top: 0.34rem;
     gap: 0.22rem;
@@ -3708,6 +3810,13 @@ onBeforeUnmount(() => {
   .mall-browse-panel.is-recommended-flow {
     --mall-category-rail-width: 0px;
     grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (min-width: 641px) {
+  :deep(.client-drawer-responsive .el-drawer) {
+    border-top-left-radius: 1.5rem;
+    border-bottom-left-radius: 1.5rem;
   }
 }
 </style>

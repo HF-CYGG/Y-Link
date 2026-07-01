@@ -114,6 +114,7 @@ const normalizeSkuRecords = (skus: unknown): O2oMallSku[] => {
         preOrderedStock: normalizeNonNegativeInteger(row.preOrderedStock),
         availableStock: normalizeNonNegativeInteger(row.availableStock),
         isActive: row.isActive === false || row.isActive === 0 || row.isActive === '0' || row.isActive === 'false' ? false : true,
+        isCurrent: row.isCurrent === false || row.isCurrent === 0 || row.isCurrent === '0' || row.isCurrent === 'false' ? false : true,
         o2oRecommended: normalizeBoolean(row.o2oRecommended),
         thumbnail: typeof row.thumbnail === 'string' ? row.thumbnail : null,
         sortOrder: normalizeNonNegativeInteger(row.sortOrder),

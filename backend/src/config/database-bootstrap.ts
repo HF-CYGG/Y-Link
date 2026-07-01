@@ -68,7 +68,7 @@ const SQLITE_REQUIRED_PRODUCT_COLUMNS = [
   'current_stock',
   'pre_ordered_stock',
 ]
-const SQLITE_REQUIRED_PRODUCT_SKU_COLUMNS = ['o2o_recommended']
+const SQLITE_REQUIRED_PRODUCT_SKU_COLUMNS = ['o2o_recommended', 'is_current']
 const SQLITE_REQUIRED_O2O_PREORDER_ITEM_COLUMNS = [
   'original_price',
   'discount_rate',
@@ -199,6 +199,12 @@ async function ensureSqliteMallCatalogIndexes(dataSource: DataSource): Promise<v
     'base_product_sku',
     'idx_base_product_sku_mall_list',
     `CREATE INDEX IF NOT EXISTS "idx_base_product_sku_mall_list" ON "base_product_sku" ("product_id", "is_active", "sort_order", "id")`,
+  )
+  await ensureSqliteIndex(
+    dataSource,
+    'base_product_sku',
+    'idx_base_product_sku_current_mall_list',
+    `CREATE INDEX IF NOT EXISTS "idx_base_product_sku_current_mall_list" ON "base_product_sku" ("product_id", "is_current", "is_active", "sort_order", "id")`,
   )
   await ensureSqliteIndex(
     dataSource,
@@ -372,6 +378,15 @@ async function normalizeSqliteO2oDiscountColumns(dataSource: DataSource): Promis
     if (!skuTableColumnSet.has('o2o_recommended')) {
       await dataSource.query(`ALTER TABLE "base_product_sku" ADD COLUMN "o2o_recommended" tinyint NOT NULL DEFAULT 0`)
     }
+    if (!skuTableColumnSet.has('is_current')) {
+      await dataSource.query(`ALTER TABLE "base_product_sku" ADD COLUMN "is_current" tinyint NOT NULL DEFAULT 1`)
+      await dataSource.query(`
+        UPDATE "base_product_sku"
+        SET "is_current" = 0,
+            "o2o_recommended" = 0
+        WHERE "is_active" = 0
+      `)
+    }
     await dataSource.query(`
       INSERT INTO "base_product_sku" (
         "product_id",
@@ -383,6 +398,7 @@ async function normalizeSqliteO2oDiscountColumns(dataSource: DataSource): Promis
         "current_stock",
         "pre_ordered_stock",
         "is_active",
+        "is_current",
         "o2o_recommended",
         "thumbnail",
         "sort_order"
@@ -397,6 +413,7 @@ async function normalizeSqliteO2oDiscountColumns(dataSource: DataSource): Promis
         "base_product"."current_stock",
         "base_product"."pre_ordered_stock",
         "base_product"."is_active",
+        1,
         0,
         "base_product"."thumbnail",
         0

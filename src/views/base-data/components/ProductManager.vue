@@ -369,10 +369,11 @@ const buildSkuSpecValues = (sku: ProductSkuForm, index: number): Record<string, 
 }
 
 const isProductImplicitDefaultSku = (row: ProductRecord) => {
-  if (!row.skus || row.skus.length !== 1) {
+  const currentSkus = (row.skus ?? []).filter((sku) => sku.isCurrent !== false)
+  if (currentSkus.length !== 1) {
     return false
   }
-  const [sku] = row.skus
+  const [sku] = currentSkus
   const specValues = sku?.specValues ?? {}
   return Boolean(
     sku
@@ -381,8 +382,9 @@ const isProductImplicitDefaultSku = (row: ProductRecord) => {
 }
 
 const buildEditForm = (row: ProductRecord): ProductForm => {
-  const skus = row.skus?.length && !isProductImplicitDefaultSku(row)
-    ? row.skus.map((sku) => ({
+  const currentSkus = (row.skus ?? []).filter((sku) => sku.isCurrent !== false)
+  const skus = currentSkus.length && !isProductImplicitDefaultSku(row)
+    ? currentSkus.map((sku) => ({
         id: sku.id,
         specValues: sku.specValues ?? {},
         specText: sku.specText,
@@ -392,6 +394,7 @@ const buildEditForm = (row: ProductRecord): ProductForm => {
         discountRate: Number(sku.discountRate ?? row.discountRate),
         currentStock: Number(sku.currentStock ?? 0),
         isActive: sku.isActive !== false,
+        isCurrent: true,
         o2oRecommended: sku.o2oRecommended === true,
         thumbnail: sku.thumbnail ?? null,
       }))
@@ -460,11 +463,12 @@ const buildSubmitPayload = async (currentForm: ProductForm): Promise<CreateProdu
           discountRate: normalizeSubmitNumber(sku.discountRate, { fallback: normalizedDiscountRate, min: 1, max: 10 }),
           currentStock: normalizeSubmitNumber(sku.currentStock, { fallback: 0, min: 0, integer: true }),
           isActive: sku.isActive !== false,
+          isCurrent: true,
           o2oRecommended: sku.o2oRecommended === true,
           thumbnail: typeof sku.thumbnail === 'string' && sku.thumbnail.trim() ? sku.thumbnail.trim() : null,
           sortOrder: index,
         }))
-      : undefined,
+      : [],
   }
 }
 

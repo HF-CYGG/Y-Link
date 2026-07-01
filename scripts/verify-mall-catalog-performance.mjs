@@ -9,6 +9,7 @@ const skuEntitySource = read('backend/src/entities/base-product-sku.entity.ts')
 const preorderItemEntitySource = read('backend/src/entities/o2o-preorder-item.entity.ts')
 const bootstrapSource = read('backend/src/config/database-bootstrap.ts')
 const migrationSource = read('backend/sql/030_mall_catalog_performance_indexes.sql')
+const skuCurrentMigrationSource = read('backend/sql/031_base_product_sku_current_matrix.sql')
 
 const assertIncludes = (source, needle, message) => {
   assert.ok(source.includes(needle), message)
@@ -41,6 +42,11 @@ assertIncludes(
   'base_product_sku should have a composite mall-list index for product SKU scans',
 )
 assertIncludes(
+  skuEntitySource,
+  "idx_base_product_sku_current_mall_list",
+  'base_product_sku should have a current/active composite index for product SKU scans',
+)
+assertIncludes(
   preorderItemEntitySource,
   "idx_o2o_preorder_item_product_order",
   'o2o_preorder_item should have a composite product/order index for sold quantity aggregation',
@@ -63,6 +69,11 @@ assertIncludes(
 )
 assertIncludes(
   bootstrapSource,
+  'idx_base_product_sku_current_mall_list',
+  'SQLite bootstrap should include the current/active SKU index',
+)
+assertIncludes(
+  bootstrapSource,
   'idx_o2o_preorder_item_product_order',
   'SQLite bootstrap should include the preorder item product/order index',
 )
@@ -76,6 +87,11 @@ assertIncludes(
   migrationSource,
   'idx_base_product_sku_mall_list',
   'MySQL migration should create the mall-list SKU index',
+)
+assertIncludes(
+  skuCurrentMigrationSource,
+  'idx_base_product_sku_current_mall_list',
+  'MySQL migration should create the current/active SKU index',
 )
 assertIncludes(
   migrationSource,

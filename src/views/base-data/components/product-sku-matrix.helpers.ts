@@ -20,6 +20,7 @@ export interface ProductSkuMatrixRow {
   discountRate?: number
   currentStock?: number
   isActive?: boolean
+  isCurrent?: boolean
   o2oRecommended?: boolean
   thumbnail?: string | null
 }
@@ -109,9 +110,11 @@ export const buildSkuMatrixRows = ({
   const styleValues = normalizedStyles.length ? normalizedStyles : ['']
   const existingRowMap = new Map<string, ProductSkuMatrixRow>()
 
-  existingRows.forEach((row) => {
-    existingRowMap.set(buildSkuMatrixKey(resolveSkuMatrixColor(row), resolveSkuMatrixStyle(row)), row)
-  })
+  existingRows
+    .filter((row) => row.isCurrent !== false)
+    .forEach((row) => {
+      existingRowMap.set(buildSkuMatrixKey(resolveSkuMatrixColor(row), resolveSkuMatrixStyle(row)), row)
+    })
 
   return colorValues.flatMap((color) => styleValues.map((style) => {
     const matchedRow = existingRowMap.get(buildSkuMatrixKey(color, style))
@@ -127,6 +130,7 @@ export const buildSkuMatrixRows = ({
       discountRate: matchedRow?.discountRate ?? defaults.discountRate,
       currentStock: matchedRow?.currentStock ?? defaults.currentStock,
       isActive: matchedRow?.isActive ?? true,
+      isCurrent: true,
       o2oRecommended: matchedRow?.o2oRecommended ?? false,
       thumbnail: matchedRow?.thumbnail ?? null,
     }

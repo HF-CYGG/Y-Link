@@ -95,6 +95,7 @@ export interface ProductSkuInput {
   currentStock?: number
   preOrderedStock?: number
   isActive?: boolean
+  isCurrent?: boolean
   o2oRecommended?: boolean
   thumbnail?: string | null
   sortOrder?: number
@@ -119,6 +120,7 @@ export interface ProductSkuView {
   preOrderedStock: number
   availableStock: number
   isActive: boolean
+  isCurrent: boolean
   o2oRecommended: boolean
   thumbnail: string | null
   sortOrder: number
@@ -224,6 +226,22 @@ const buildSpecText = (specValues: Record<string, string>, specGroups: ProductSp
 }
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
+const buildSpecValuesKey = (specValues: Record<string, string>): string => {
+  const entries = Object.entries(specValues)
+    .map(([name, value]) => [normalizeSpecTextValue(name), normalizeSpecTextValue(value)] as const)
+    .filter(([name, value]) => name && value)
+    .sort(([leftName], [rightName]) => leftName.localeCompare(rightName))
+  return JSON.stringify(entries)
+}
+
+const buildSkuEntitySpecValuesKey = (sku: Pick<BaseProductSku, 'specValuesJson'>): string => {
+  return buildSpecValuesKey(parseSpecValuesJson(sku.specValuesJson))
+}
+
+const isDatabaseFlagEnabled = (value: unknown): boolean => {
+  return value !== false && value !== 0 && value !== '0' && value !== 'false'
+}
+
 const PRODUCT_CODE_CONSTRAINT_MATCHER = {
   mysqlConstraint: 'uk_base_product_code',
   sqliteColumns: ['base_product.product_code'],
@@ -529,6 +547,7 @@ export class ProductService {
       currentStock: Number(product.currentStock ?? 0),
       preOrderedStock: Number(product.preOrderedStock ?? 0),
       isActive: true,
+      isCurrent: true,
       o2oRecommended: false,
       thumbnail: product.thumbnail,
       sortOrder: 0,
@@ -578,6 +597,7 @@ export class ProductService {
       currentStock,
       preOrderedStock,
       isActive: input.isActive !== false,
+      isCurrent: input.isCurrent !== false,
       o2oRecommended: input.o2oRecommended === true,
       thumbnail: thumbnail ?? null,
       sortOrder: this.readOptionalInteger(input.sortOrder, 'SKU 排序', 0, PRODUCT_FIELD_LIMITS.maxStock) ?? index,
@@ -593,12 +613,46 @@ export class ProductService {
     const specGroups = this.normalizeSpecGroups(input.specGroups)
     const skuInputs = this.normalizeSkuInputs(product, input)
     const existingSkus = await skuRepo.find({ where: { productId: product.id } })
-    const existingSkuById = new Map(existingSkus.map((sku) => [String(sku.id), sku]))
-    const existingSkuByCode = new Map(existingSkus.map((sku) => [sku.skuCode, sku]))
+    const currentExistingSkus = existingSkus.filter((sku) => isDatabaseFlagEnabled(sku.isCurrent))
+    const existingSkuById = new Map(currentExistingSkus.map((sku) => [String(sku.id), sku]))
+    const existingSkuBySpecKey = new Map<string, BaseProductSku>()
+    currentExistingSkus.forEach((sku) => {
+      existingSkuBySpecKey.set(buildSkuEntitySpecValuesKey(sku), sku)
+    })
+    const existingSkuCodeSet = new Set(existingSkus.map((sku) => sku.skuCode))
+    const usedSkuCodeSet = new Set<string>()
+
+    const allocateSkuCode = (sku: BaseProductSku, matchedSku: BaseProductSku | undefined, skuInput: ProductSkuInput) => {
+      const isMatchedOwner = matchedSku?.skuCode === sku.skuCode
+      const conflictsWithExisting = existingSkuCodeSet.has(sku.skuCode) && !isMatchedOwner
+      const conflictsWithBatch = usedSkuCodeSet.has(sku.skuCode)
+      if (!conflictsWithExisting && !conflictsWithBatch) {
+        usedSkuCodeSet.add(sku.skuCode)
+        return
+      }
+
+      if (skuInput.skuCode !== undefined) {
+        throw new BizError(`SKU code ${sku.skuCode} already exists`, 409)
+      }
+
+      const baseCode = sku.skuCode.slice(0, 88)
+      let suffix = 2
+      let nextCode = `${baseCode}-${suffix}`
+      while (existingSkuCodeSet.has(nextCode) || usedSkuCodeSet.has(nextCode)) {
+        suffix += 1
+        nextCode = `${baseCode}-${suffix}`
+      }
+      sku.skuCode = nextCode
+      usedSkuCodeSet.add(nextCode)
+    }
+
     const skuEntities = skuInputs.map((skuInput, index) => {
       const skuEntity = this.buildProductSkuEntity(product, skuInput, specGroups, index, skuRepo)
-      const matchedSku = (skuInput.id ? existingSkuById.get(String(skuInput.id)) : undefined)
-        ?? existingSkuByCode.get(skuEntity.skuCode)
+      const specKey = buildSkuEntitySpecValuesKey(skuEntity)
+      const matchedById = skuInput.id ? existingSkuById.get(String(skuInput.id)) : undefined
+      const matchedSku = matchedById && buildSkuEntitySpecValuesKey(matchedById) === specKey
+        ? matchedById
+        : existingSkuBySpecKey.get(specKey)
       if (matchedSku && String(matchedSku.productId) === String(product.id)) {
         skuEntity.id = matchedSku.id
         if (skuInput.skuCode === undefined) {
@@ -613,6 +667,9 @@ export class ProductService {
         if (skuInput.thumbnail === undefined) {
           skuEntity.thumbnail = matchedSku.thumbnail
         }
+        if (skuInput.isActive === undefined) {
+          skuEntity.isActive = matchedSku.isActive
+        }
         if (skuInput.o2oRecommended === undefined) {
           skuEntity.o2oRecommended = matchedSku.o2oRecommended
         }
@@ -621,6 +678,8 @@ export class ProductService {
         }
         this.assertStockRelation(skuEntity.currentStock, skuEntity.preOrderedStock)
       }
+      skuEntity.isCurrent = true
+      allocateSkuCode(skuEntity, matchedSku, skuInput)
       return skuEntity
     })
     const specTextSet = new Set<string>()
@@ -642,13 +701,15 @@ export class ProductService {
       .filter((sku) => !savedSkuIdSet.has(String(sku.id)))
       .map((sku) => {
         sku.isActive = false
+        sku.isCurrent = false
+        sku.o2oRecommended = false
         return sku
       })
     if (inactiveLegacySkus.length) {
       await skuRepo.save(inactiveLegacySkus)
     }
 
-    const summarySkus = [...savedSkus, ...inactiveLegacySkus]
+    const summarySkus = savedSkus.filter((sku) => isDatabaseFlagEnabled(sku.isCurrent) && isDatabaseFlagEnabled(sku.isActive))
     product.currentStock = summarySkus.reduce((sum, sku) => sum + Math.max(0, Number(sku.currentStock ?? 0)), 0)
     product.preOrderedStock = summarySkus.reduce((sum, sku) => sum + Math.max(0, Number(sku.preOrderedStock ?? 0)), 0)
     await manager.getRepository(BaseProduct).save(product)
@@ -669,7 +730,8 @@ export class ProductService {
 
   private async syncDefaultProductSkuFields(product: BaseProduct, manager = AppDataSource.manager): Promise<void> {
     const skuRepo = manager.getRepository(BaseProductSku)
-    const skus = await skuRepo.find({ where: { productId: product.id } })
+    const skus = (await skuRepo.find({ where: { productId: product.id } }))
+      .filter((sku) => isDatabaseFlagEnabled(sku.isCurrent))
     if (!skus.length) {
       await this.replaceProductSkus(product, {}, manager)
       return
@@ -683,6 +745,7 @@ export class ProductService {
       sku.discountRate = normalizeDiscountRate(product.discountRate)
       sku.currentStock = Math.max(0, Number(product.currentStock ?? 0))
       sku.isActive = Boolean(product.isActive)
+      sku.isCurrent = true
       sku.thumbnail = product.thumbnail ?? null
       this.assertStockRelation(sku.currentStock, sku.preOrderedStock)
       await skuRepo.save(sku)
@@ -756,9 +819,10 @@ export class ProductService {
     return products.map((product) => {
       const productId = normalizeEntityId(product.id)
       const tags = productTagMap.get(productId) ?? []
-      const productSkus = productSkuMap.get(productId) ?? []
-      const skuCurrentStock = productSkus.reduce((sum, sku) => sum + sku.currentStock, 0)
-      const skuPreOrderedStock = productSkus.reduce((sum, sku) => sum + sku.preOrderedStock, 0)
+      const productSkus = (productSkuMap.get(productId) ?? []).filter((sku) => isDatabaseFlagEnabled(sku.isCurrent))
+      const activeCurrentSkus = productSkus.filter((sku) => isDatabaseFlagEnabled(sku.isActive))
+      const skuCurrentStock = activeCurrentSkus.reduce((sum, sku) => sum + sku.currentStock, 0)
+      const skuPreOrderedStock = activeCurrentSkus.reduce((sum, sku) => sum + sku.preOrderedStock, 0)
       const currentStock = productSkus.length ? skuCurrentStock : Number(product.currentStock ?? 0)
       const preOrderedStock = productSkus.length ? skuPreOrderedStock : Number(product.preOrderedStock ?? 0)
 
@@ -808,7 +872,8 @@ export class ProductService {
       currentStock,
       preOrderedStock,
       availableStock: Math.max(0, currentStock - preOrderedStock),
-      isActive: Boolean(sku.isActive),
+      isActive: isDatabaseFlagEnabled(sku.isActive),
+      isCurrent: isDatabaseFlagEnabled(sku.isCurrent),
       o2oRecommended: Boolean(sku.o2oRecommended),
       thumbnail: normalizeProductThumbnailUrl(sku.thumbnail) ?? null,
       sortOrder: Number(sku.sortOrder ?? 0),
