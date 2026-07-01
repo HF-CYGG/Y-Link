@@ -87,6 +87,15 @@ const formatSliceValue = (value: NumericLike, valueType: PieValueType): string =
   return `¥${formatAmount(value)}`
 }
 
+const escapeTooltipHtml = (value: unknown): string => {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
 const resolvePieLegendColor = (index: number): string => {
   return piePalette[index % piePalette.length]
 }
@@ -118,7 +127,7 @@ const buildPieOption = (slices: DashboardPieSlice[], valueType: PieValueType): E
         const rawValue = normalizedParams.value
         const normalizedValue = typeof rawValue === 'number' || typeof rawValue === 'string' ? rawValue : 0
         return [
-          `<div style="font-weight:600;margin-bottom:4px;">${normalizedParams.name}</div>`,
+          `<div style="font-weight:600;margin-bottom:4px;">${escapeTooltipHtml(normalizedParams.name)}</div>`,
           `<div>占比：${percent}%</div>`,
           `<div>${valueType === 'count' ? '单数' : '金额'}：${formatSliceValue(normalizedValue, valueType)}</div>`,
         ].join('')
