@@ -655,6 +655,8 @@ class O2oPreorderService {
 
   private isCurrentActiveSku(sku: Pick<BaseProductSku, 'isActive' | 'isCurrent'>): boolean {
     return isDatabaseFlagEnabled(sku.isCurrent) && isDatabaseFlagEnabled(sku.isActive)
+  }
+
   /**
    * 将可省略的 skuId 先解析为真实 SKU，再按 productId + 真实 skuId 合并。
    * 这样可以避免“未传 skuId”和“显式传默认 skuId”指向同一规格时绕过库存或限购聚合校验。

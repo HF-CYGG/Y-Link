@@ -120,14 +120,16 @@ jobs:
           frontend_images="ghcr.io/${gh_owner}/y-link-frontend"
           backend_images="ghcr.io/${gh_owner}/y-link-backend"
           onebox_images="ghcr.io/${gh_owner}/y-link-onebox"
+          dockerhub_enabled="false"
 
           # Docker Hub 可选推送
           if [ "${HAS_DOCKERHUB_CREDS}" = "true" ]; then
+            dockerhub_enabled="true"
             frontend_images="docker.io/${namespace}/y-link-frontend"$'\n'"${frontend_images}"
             backend_images="docker.io/${namespace}/y-link-backend"$'\n'"${backend_images}"
             onebox_images="docker.io/${namespace}/y-link-onebox"$'\n'"${onebox_images}"
           fi
-          echo "dockerhub_enabled=$dockerhub_enabled" >> "$GITHUB_OUTPUT"
+          write_output "dockerhub_enabled" "$dockerhub_enabled"
 
           # 阿里云 ACR 可选推送
           # onebox 默认推到 y-link，方便直接用于部署
