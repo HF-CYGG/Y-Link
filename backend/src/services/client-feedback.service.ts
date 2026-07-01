@@ -38,6 +38,7 @@ import type { AuthUserContext } from '../types/auth.js'
 import type { ClientAuthContext } from '../types/client-auth.js'
 import { isUniqueConstraintError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
+import { isUploadPublicUrlForCategory } from '../utils/upload-storage.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
 import {
@@ -372,6 +373,9 @@ class ClientFeedbackService {
       }
       if (url.length > CLIENT_FEEDBACK_ATTACHMENT_URL_MAX_LENGTH) {
         throw new BizError(`附件地址长度不能超过 ${CLIENT_FEEDBACK_ATTACHMENT_URL_MAX_LENGTH} 个字符`, 400)
+      }
+      if (!isUploadPublicUrlForCategory('client-feedback', url)) {
+        throw new BizError(`第 ${index + 1} 个附件地址必须来自反馈附件上传接口`, 400)
       }
       if (mimeType && mimeType.length > CLIENT_FEEDBACK_ATTACHMENT_MIME_TYPE_MAX_LENGTH) {
         throw new BizError(`附件类型长度不能超过 ${CLIENT_FEEDBACK_ATTACHMENT_MIME_TYPE_MAX_LENGTH} 个字符`, 400)
