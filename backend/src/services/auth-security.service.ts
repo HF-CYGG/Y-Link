@@ -207,13 +207,11 @@ const requestWindowStore = new Map<string, number[]>()
 /**
  * 登录失败态：
  * - 管理端继续按“来源 IP”和“账号/手机号”记录；
- * - 客户端优先按“浏览器会话/浏览器实例”和“账号/手机号”记录，降低共享公网 IP 的误伤。
+ * - 客户端公共认证接口按“来源 IP”和“账号/手机号”记录，避免信任未认证请求可随意伪造的浏览器风险请求头。
  */
 const failureStateStore = new Map<string, FailureState>()
 
 const normalizeRiskSource = (meta?: RequestMeta) => meta?.ipAddress?.trim() || 'unknown-ip'
-const normalizeClientRiskBrowserId = (meta?: RequestMeta) => meta?.clientRiskBrowserId?.trim() || ''
-const normalizeClientRiskSessionId = (meta?: RequestMeta) => meta?.clientRiskSessionId?.trim() || ''
 
 export class AuthSecurityService {
   private trimRateLimitWindow(timestamps: number[], windowMs: number, nowMs: number) {
@@ -421,24 +419,11 @@ export class AuthSecurityService {
   }
 
   private resolveClientRiskActor(requestMeta?: RequestMeta): ClientRiskActor {
-    const sessionRiskId = normalizeClientRiskSessionId(requestMeta)
-    if (sessionRiskId) {
-      return {
-        source: sessionRiskId,
-        sourceType: 'session',
-        bucketSegment: `session:${sessionRiskId}`,
-      }
-    }
-
-    const browserRiskId = normalizeClientRiskBrowserId(requestMeta)
-    if (browserRiskId) {
-      return {
-        source: browserRiskId,
-        sourceType: 'browser',
-        bucketSegment: `browser:${browserRiskId}`,
-      }
-    }
-
+    /**
+     * 客户端风控请求头来自未认证客户端，不能作为频控桶或登录失败锁定的主键。
+     * 这里保留 RequestMeta 中的浏览器/会话标识供审计排查使用，但认证防护主链路只按服务端解析出的 IP 聚合，
+     * 避免攻击者轮换 `x-client-risk-session-id` / `x-client-risk-browser-id` 绕过失败态或制造无界内存键。
+     */
     const ipAddress = normalizeRiskSource(requestMeta)
     return {
       source: ipAddress,
