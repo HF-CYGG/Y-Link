@@ -50,7 +50,8 @@ const registerSchema = z
   })
   .superRefine((payload, ctx) => {
     if (payload.accountType === 'personal') {
-      if (!payload.username?.trim()) {
+      const isTeacherRegister = Boolean(payload.staffNo?.trim())
+      if (!isTeacherRegister && !payload.username?.trim()) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ['username'],
@@ -61,32 +62,10 @@ const registerSchema = z
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ['account'],
-          message: '个人注册必须填写手机号或邮箱',
+          message: isTeacherRegister ? '教师注册必须填写手机号或邮箱' : '个人注册必须填写手机号或邮箱',
         })
       }
       return
-    }
-
-    if (!payload.staffNo?.trim()) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['staffNo'],
-        message: '部门注册必须填写教职工号',
-      })
-    }
-    if (payload.username?.trim()) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['username'],
-        message: '部门注册姓名由教职工目录自动匹配，请勿自行填写',
-      })
-    }
-    if (payload.departmentName?.trim()) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ['departmentName'],
-        message: '部门注册所属部门由教职工目录自动匹配，请勿自行选择',
-      })
     }
   })
 

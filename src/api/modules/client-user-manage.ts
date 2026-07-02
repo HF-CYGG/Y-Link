@@ -16,6 +16,7 @@ import type { PaginationQueryInput, PaginationResult } from '@/types/api'
  */
 export type ClientUserStatus = 'enabled' | 'disabled'
 export type ClientUserAccountType = 'personal' | 'department'
+export type ClientUserProfileKind = 'personal' | 'teacher' | 'department'
 
 /**
  * 客户端用户管理资料：
@@ -32,6 +33,7 @@ export interface ClientUserManageProfile {
   realName: string
   departmentName: string
   accountType: ClientUserAccountType
+  profileKind: ClientUserProfileKind
   staffNo: string | null
   staffVerified: boolean
   status: ClientUserStatus
@@ -49,6 +51,7 @@ export interface ClientUserListQuery extends PaginationQueryInput {
   keyword?: string
   status?: ClientUserStatus
   accountType?: ClientUserAccountType
+  profileKind?: ClientUserProfileKind
   departmentName?: string
   staffNo?: string
 }
@@ -79,10 +82,12 @@ export interface ResetClientUserPasswordPayload {
  * - 不走客户端自助注册风控，而是走后台受权治理接口。
  */
 export interface CreateClientUserPayload {
-  username: string
+  profileKind?: ClientUserProfileKind
+  username?: string
   mobile?: string
   email?: string
   departmentName?: string
+  staffNo?: string
   password: string
   status: ClientUserStatus
 }

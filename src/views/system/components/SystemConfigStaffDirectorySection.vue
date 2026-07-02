@@ -461,7 +461,7 @@ const handleBatchDelete = async () => {
   const selectedIds = selectedRecords.value.map((item) => item.id)
   const linkedDepartmentAccountCount = selectedRegisteredStaffAccountCount.value
   const linkedDepartmentAccountText = linkedDepartmentAccountCount > 0
-    ? `，其中会影响 ${linkedDepartmentAccountCount} 个已注册部门账号的工号校验状态`
+    ? `，其中会影响 ${linkedDepartmentAccountCount} 个已绑定客户端账号的工号校验状态`
     : ''
 
   try {
@@ -476,7 +476,7 @@ const handleBatchDelete = async () => {
     )
     const result = await deleteClientStaffDirectoryBatch({ ids: selectedIds })
     const linkedDepartmentAccountSummary = result.summary.linkedDepartmentAccounts > 0
-      ? `，同步回收 ${result.summary.linkedDepartmentAccounts} 个已注册部门账号的工号校验`
+      ? `，同步回收 ${result.summary.linkedDepartmentAccounts} 个已绑定客户端账号的工号校验`
       : ''
     showAppSuccess(`已删除 ${result.summary.deleted} 条教职工目录记录${linkedDepartmentAccountSummary}`)
     if (records.value.length === selectedIds.length && queryForm.page > 1) {

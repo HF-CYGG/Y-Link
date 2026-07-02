@@ -11,7 +11,7 @@ import { requirePermission, requireRole } from '../middleware/auth.middleware.js
 import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 import { CLIENT_USER_ACCOUNT_TYPES, CLIENT_USER_STATUSES } from '../entities/client-user.entity.js'
-import { clientUserManageService } from '../services/client-user-manage.service.js'
+import { CLIENT_USER_PROFILE_KINDS, clientUserManageService } from '../services/client-user-manage.service.js'
 
 const updateClientUserStatusSchema = z.object({
   status: z.enum(CLIENT_USER_STATUSES),
@@ -26,10 +26,12 @@ const updateClientUserSchema = z.object({
 })
 
 const createClientUserSchema = z.object({
-  username: z.string().trim().min(1).max(128),
+  profileKind: z.enum(CLIENT_USER_PROFILE_KINDS).optional(),
+  username: z.string().trim().max(128).optional(),
   mobile: z.string().trim().max(20).optional(),
   email: z.string().trim().max(128).optional(),
   departmentName: z.string().trim().max(128).optional(),
+  staffNo: z.string().trim().max(64).optional(),
   password: z.string().min(8, '登录密码至少 8 位').max(50, '登录密码长度不能超过 50 位'),
   status: z.enum(CLIENT_USER_STATUSES),
 })
@@ -56,12 +58,18 @@ clientUserManageRouter.get(
       && CLIENT_USER_ACCOUNT_TYPES.includes(req.query.accountType as (typeof CLIENT_USER_ACCOUNT_TYPES)[number])
         ? (req.query.accountType as (typeof CLIENT_USER_ACCOUNT_TYPES)[number])
         : undefined
+    const profileKind =
+      typeof req.query.profileKind === 'string'
+      && CLIENT_USER_PROFILE_KINDS.includes(req.query.profileKind as (typeof CLIENT_USER_PROFILE_KINDS)[number])
+        ? (req.query.profileKind as (typeof CLIENT_USER_PROFILE_KINDS)[number])
+        : undefined
     const data = await clientUserManageService.list({
       page: Number.isFinite(page) && page > 0 ? page : 1,
       pageSize: Number.isFinite(pageSize) && pageSize > 0 ? Math.min(pageSize, 100) : 20,
       keyword: typeof req.query.keyword === 'string' ? req.query.keyword : undefined,
       status,
       accountType,
+      profileKind,
       departmentName: typeof req.query.departmentName === 'string' ? req.query.departmentName : undefined,
       staffNo: typeof req.query.staffNo === 'string' ? req.query.staffNo : undefined,
     })

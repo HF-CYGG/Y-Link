@@ -8,7 +8,7 @@
  */
 
 import dayjs from 'dayjs'
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { BizCrudDialogShell, BizResponsiveDataCollectionShell, PageContainer, PagePaginationBar, PageToolbarCard } from '@/components/common'
 import {
@@ -18,14 +18,14 @@ import {
   updateClientUser,
   updateClientUserStatus,
   type CreateClientUserPayload,
-  type ClientUserAccountType,
+  type ClientUserProfileKind,
   type ClientUserManageProfile,
   type ClientUserStatus,
   type ResetClientUserPasswordPayload,
   type ClientUserListQuery,
   type UpdateClientUserPayload,
 } from '@/api/modules/client-user-manage'
-import { getClientDepartmentConfigs } from '@/api/modules/system-config'
+import { getClientDepartmentConfigs, type ClientDepartmentTreeNode } from '@/api/modules/system-config'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
@@ -34,13 +34,19 @@ import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
 
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 
+type DepartmentTreeSelectOption = {
+  value: string
+  label: string
+  children?: DepartmentTreeSelectOption[]
+}
+
 const listRequest = useStableRequest()
 const { hasPermission, ensurePermission } = usePermissionAction()
 
 const searchForm = reactive({
   keyword: '',
   status: '' as '' | ClientUserStatus,
-  accountType: '' as '' | ClientUserAccountType,
+  profileKind: '' as '' | ClientUserProfileKind,
   departmentName: '',
   staffNo: '',
 })
@@ -60,6 +66,7 @@ const canResetUserPassword = computed(() => hasPermission('users:reset_password'
 const canCreateUser = computed(() => hasPermission('users:create'))
 const canOperateUsers = computed(() => canEditUser.value || canToggleUser.value || canResetUserPassword.value)
 const departmentOptions = ref<string[]>([])
+const departmentTree = ref<ClientDepartmentTreeNode[]>([])
 const departmentPathLookup = ref<Record<string, string>>({})
 const departmentOptionsLoading = ref(false)
 
@@ -67,7 +74,9 @@ const createVisible = ref(false)
 const createSubmitting = ref(false)
 const createFormRef = ref<FormInstance>()
 const createForm = reactive({
+  profileKind: 'personal' as ClientUserProfileKind,
   username: '',
+  staffNo: '',
   mobile: '',
   email: '',
   departmentName: '',
@@ -76,8 +85,48 @@ const createForm = reactive({
   status: 'enabled' as ClientUserStatus,
 })
 
+const isCreateTeacherProfile = computed(() => createForm.profileKind === 'teacher')
+const isCreateDepartmentProfile = computed(() => createForm.profileKind === 'department')
+const isCreatePersonalProfile = computed(() => createForm.profileKind === 'personal')
+const createUsernameLabel = computed(() => (isCreateDepartmentProfile.value ? '账号名称' : '用户名'))
+const createDepartmentRequired = computed(() => isCreateDepartmentProfile.value)
+const createContactRequired = computed(() => isCreatePersonalProfile.value)
+
 const createRules: FormRules = {
-  username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
+  profileKind: [{ required: true, message: '请选择创建类型', trigger: 'change' }],
+  username: [
+    {
+      validator: (_rule, value: string, callback) => {
+        if (!isCreateTeacherProfile.value && !value.trim()) {
+          callback(new Error(isCreateDepartmentProfile.value ? '请输入账号名称' : '请输入用户名'))
+          return
+        }
+        callback()
+      },
+      trigger: 'blur',
+    },
+  ],
+  staffNo: [
+    {
+      validator: (_rule, value: string, callback) => {
+        if (!isCreateTeacherProfile.value) {
+          callback()
+          return
+        }
+        const normalized = value.trim()
+        if (!normalized) {
+          callback(new Error('请输入教职工号'))
+          return
+        }
+        if (!/^[A-Za-z0-9-]{4,32}$/.test(normalized)) {
+          callback(new Error('教职工号仅支持字母、数字和短横线（4-32位）'))
+          return
+        }
+        callback()
+      },
+      trigger: 'blur',
+    },
+  ],
   mobile: [
     {
       validator: (_rule, value: string, callback) => {
@@ -85,7 +134,7 @@ const createRules: FormRules = {
           callback(new Error('手机号格式不正确'))
           return
         }
-        if (!value.trim() && !createForm.email.trim()) {
+        if (createContactRequired.value && !value.trim() && !createForm.email.trim()) {
           callback(new Error('手机号和邮箱至少保留一项'))
           return
         }
@@ -101,13 +150,25 @@ const createRules: FormRules = {
           callback(new Error('邮箱格式不正确'))
           return
         }
-        if (!value.trim() && !createForm.mobile.trim()) {
+        if (createContactRequired.value && !value.trim() && !createForm.mobile.trim()) {
           callback(new Error('手机号和邮箱至少保留一项'))
           return
         }
         callback()
       },
       trigger: 'blur',
+    },
+  ],
+  departmentName: [
+    {
+      validator: (_rule, value: string, callback) => {
+        if (createDepartmentRequired.value && !value.trim()) {
+          callback(new Error('请选择部门共享账号所属部门'))
+          return
+        }
+        callback()
+      },
+      trigger: 'change',
     },
   ],
   password: [
@@ -138,6 +199,7 @@ const editSubmitting = ref(false)
 const editFormRef = ref<FormInstance>()
 const editForm = reactive({
   id: '',
+  profileKind: 'personal' as ClientUserProfileKind,
   username: '',
   mobile: '',
   email: '',
@@ -154,7 +216,7 @@ const editRules: FormRules = {
           callback(new Error('手机号格式不正确'))
           return
         }
-        if (!value.trim() && !editForm.email.trim()) {
+        if (editForm.profileKind === 'personal' && !value.trim() && !editForm.email.trim()) {
           callback(new Error('手机号和邮箱至少保留一项'))
           return
         }
@@ -170,7 +232,7 @@ const editRules: FormRules = {
           callback(new Error('邮箱格式不正确'))
           return
         }
-        if (!value.trim() && !editForm.mobile.trim()) {
+        if (editForm.profileKind === 'personal' && !value.trim() && !editForm.mobile.trim()) {
           callback(new Error('手机号和邮箱至少保留一项'))
           return
         }
@@ -224,16 +286,26 @@ const getStatusLabel = (status: ClientUserStatus) => {
   return status === 'enabled' ? '启用' : '停用'
 }
 
-const getAccountTypeLabel = (accountType: ClientUserAccountType) => {
-  return accountType === 'department' ? '部门账户' : '个人账户'
+const getProfileKindLabel = (profileKind: ClientUserProfileKind) => {
+  if (profileKind === 'teacher') return '教师账号'
+  if (profileKind === 'department') return '部门共享账号'
+  return '个人账号'
 }
 
-const getAccountTypeTagType = (accountType: ClientUserAccountType) => {
-  return accountType === 'department' ? 'warning' : 'info'
+const getProfileKindTagType = (profileKind: ClientUserProfileKind) => {
+  if (profileKind === 'teacher') return 'success'
+  if (profileKind === 'department') return 'warning'
+  return 'info'
+}
+
+const getStaffNoLabel = (profileKind: ClientUserProfileKind) => {
+  return profileKind === 'department' ? '账号编号' : '教职工号'
 }
 
 const resetCreateForm = () => {
+  createForm.profileKind = 'personal'
   createForm.username = ''
+  createForm.staffNo = ''
   createForm.mobile = ''
   createForm.email = ''
   createForm.departmentName = ''
@@ -245,6 +317,7 @@ const resetCreateForm = () => {
 
 const resetEditForm = () => {
   editForm.id = ''
+  editForm.profileKind = 'personal'
   editForm.username = ''
   editForm.mobile = ''
   editForm.email = ''
@@ -255,10 +328,10 @@ const resetEditForm = () => {
 
 const normalizeOptionalText = (value: unknown) => (typeof value === 'string' ? value.trim() : '')
 
-const buildDepartmentPathLookup = (tree: Array<{ label: string; children: Array<{ label: string; children: unknown[] }> }>) => {
+const buildDepartmentPathLookup = (tree: ClientDepartmentTreeNode[]) => {
   const pathMap: Record<string, string> = {}
   const labelPathMap = new Map<string, string[]>()
-  const walk = (nodes: Array<{ label: string; children: unknown[] }>, parentPath = '') => {
+  const walk = (nodes: ClientDepartmentTreeNode[], parentPath = '') => {
     nodes.forEach((node) => {
       const currentPath = parentPath ? `${parentPath}-${node.label}` : node.label
       pathMap[currentPath] = currentPath
@@ -266,7 +339,7 @@ const buildDepartmentPathLookup = (tree: Array<{ label: string; children: Array<
       paths.push(currentPath)
       labelPathMap.set(node.label, paths)
       if (Array.isArray(node.children) && node.children.length > 0) {
-        walk(node.children as Array<{ label: string; children: unknown[] }>, currentPath)
+        walk(node.children, currentPath)
       }
     })
   }
@@ -287,6 +360,33 @@ const resolveDepartmentPathDisplay = (value: unknown) => {
   return departmentPathLookup.value[normalized] ?? normalized
 }
 
+const departmentTreeSelectOptions = computed(() => {
+  const buildOptions = (nodes: ClientDepartmentTreeNode[], parentPath = ''): DepartmentTreeSelectOption[] => {
+    return nodes
+      .map((node) => {
+        const label = String(node.label ?? '').trim()
+        if (!label) {
+          return null
+        }
+        const value = parentPath ? `${parentPath}-${label}` : label
+        const children = buildOptions(Array.isArray(node.children) ? node.children : [], value)
+        return {
+          value,
+          label,
+          ...(children.length > 0 ? { children } : {}),
+        }
+      })
+      .filter((item): item is DepartmentTreeSelectOption => Boolean(item))
+  }
+
+  return buildOptions(departmentTree.value)
+})
+const departmentTreeSelectProps = {
+  value: 'value',
+  label: 'label',
+  children: 'children',
+} as const
+
 const buildQueryParams = (): ClientUserListQuery => {
   const params: ClientUserListQuery = {
     page: listState.query.page,
@@ -299,8 +399,8 @@ const buildQueryParams = (): ClientUserListQuery => {
   if (searchForm.status) {
     params.status = searchForm.status
   }
-  if (searchForm.accountType) {
-    params.accountType = searchForm.accountType
+  if (searchForm.profileKind) {
+    params.profileKind = searchForm.profileKind
   }
   if (searchForm.departmentName.trim()) {
     params.departmentName = searchForm.departmentName.trim()
@@ -340,8 +440,12 @@ const loadDepartmentOptions = async () => {
   try {
     const result = await getClientDepartmentConfigs()
     departmentOptions.value = result.options
+    departmentTree.value = result.tree
     departmentPathLookup.value = buildDepartmentPathLookup(result.tree)
   } catch (error) {
+    departmentOptions.value = []
+    departmentTree.value = []
+    departmentPathLookup.value = {}
     showAppError(extractErrorMessage(error, '加载部门配置失败'))
   } finally {
     departmentOptionsLoading.value = false
@@ -364,7 +468,7 @@ const handleOpenCreate = () => {
 const handleReset = () => {
   searchForm.keyword = ''
   searchForm.status = ''
-  searchForm.accountType = ''
+  searchForm.profileKind = ''
   searchForm.departmentName = ''
   searchForm.staffNo = ''
   handleSearch()
@@ -382,6 +486,7 @@ const handleOpenEdit = (row: ClientUserManageProfile) => {
   editVisible.value = true
   resetEditForm()
   editForm.id = row.id
+  editForm.profileKind = row.profileKind
   editForm.username = row.username
   editForm.mobile = row.mobile || ''
   editForm.email = row.email || ''
@@ -398,14 +503,28 @@ const handleSubmitCreate = async () => {
     return
   }
 
+  const normalizedProfileKind = createForm.profileKind
   const normalizedUsername = createForm.username.trim()
-  if (!normalizedUsername) {
-    showAppWarning('请输入用户名')
+  if (normalizedProfileKind !== 'teacher' && !normalizedUsername) {
+    showAppWarning(normalizedProfileKind === 'department' ? '请输入账号名称' : '请输入用户名')
+    return
+  }
+  const normalizedStaffNo = createForm.staffNo.trim()
+  if (normalizedProfileKind === 'teacher' && !normalizedStaffNo) {
+    showAppWarning('请输入教职工号')
     return
   }
   const normalizedMobile = createForm.mobile.trim()
   const normalizedEmail = createForm.email.trim().toLowerCase()
   const normalizedDepartmentName = normalizeOptionalText(createForm.departmentName)
+  if (normalizedProfileKind === 'personal' && !normalizedMobile && !normalizedEmail) {
+    showAppWarning('手机号和邮箱至少保留一项')
+    return
+  }
+  if (normalizedProfileKind === 'department' && !normalizedDepartmentName) {
+    showAppWarning('请选择部门共享账号所属部门')
+    return
+  }
   if (normalizedDepartmentName && !departmentOptions.value.includes(normalizedDepartmentName)) {
     showAppWarning('请选择系统配置中的部门选项')
     return
@@ -414,7 +533,9 @@ const handleSubmitCreate = async () => {
   createSubmitting.value = true
   try {
     const payload: CreateClientUserPayload = {
-      username: normalizedUsername,
+      profileKind: normalizedProfileKind,
+      username: normalizedUsername || undefined,
+      staffNo: normalizedStaffNo || undefined,
       mobile: normalizedMobile || undefined,
       email: normalizedEmail || undefined,
       departmentName: normalizedDepartmentName || undefined,
@@ -592,6 +713,23 @@ onMounted(() => {
   void loadDepartmentOptions()
   void loadData()
 })
+
+watch(
+  () => createForm.profileKind,
+  (profileKind) => {
+    if (profileKind === 'teacher') {
+      createForm.username = ''
+      createForm.departmentName = ''
+    }
+    if (profileKind === 'personal') {
+      createForm.staffNo = ''
+    }
+    if (profileKind === 'department') {
+      createForm.staffNo = ''
+    }
+    createFormRef.value?.clearValidate()
+  },
+)
 </script>
 
 <template>
@@ -619,14 +757,15 @@ onMounted(() => {
               <el-option label="停用" value="disabled" />
             </el-select>
             <el-select
-              v-model="searchForm.accountType"
-              placeholder="账号类型"
+              v-model="searchForm.profileKind"
+              placeholder="账号身份"
               clearable
               :class="isPhone ? '!w-full' : isTablet ? '!w-[180px]' : '!w-[188px]'"
               @change="handleSearch"
             >
-              <el-option label="个人账户" value="personal" />
-              <el-option label="部门账户" value="department" />
+              <el-option label="个人账号" value="personal" />
+              <el-option label="教师账号" value="teacher" />
+              <el-option label="部门共享账号" value="department" />
             </el-select>
             <el-select
               v-model="searchForm.departmentName"
@@ -657,7 +796,7 @@ onMounted(() => {
       </PageToolbarCard>
 
       <div class="rounded-2xl border border-dashed border-brand/20 bg-brand/5 px-4 py-3 text-sm leading-6 text-slate-600 dark:border-brand/20 dark:bg-brand/10 dark:text-slate-300">
-        这里管理的是客户端注册用户与后台手动新增的客户端账号，不包含系统后台账号。手动新增入口属于管理端治理动作，不受客户端注册风控影响；密码修改采用二次确认，修改成功后目标用户当前登录会话会立即失效。
+        这里管理的是个人账号、教师账号和部门共享账号，不包含系统后台账号。部门共享账号只能从管理端创建；密码修改采用二次确认，修改成功后目标用户当前登录会话会立即失效。
       </div>
 
       <div class="apple-card flex min-h-0 flex-1 flex-col p-3 sm:p-4 xl:p-5">
@@ -676,12 +815,12 @@ onMounted(() => {
               <el-table-column prop="username" label="用户名" min-width="180" show-overflow-tooltip />
               <el-table-column prop="mobile" label="手机号" min-width="140" show-overflow-tooltip />
               <el-table-column prop="email" label="邮箱" min-width="220" show-overflow-tooltip />
-              <el-table-column label="账号类型" width="120">
+              <el-table-column label="账号身份" width="132">
                 <template #default="{ row }">
-                  <el-tag :type="getAccountTypeTagType(row.accountType)" effect="light">{{ getAccountTypeLabel(row.accountType) }}</el-tag>
+                  <el-tag :type="getProfileKindTagType(row.profileKind)" effect="light">{{ getProfileKindLabel(row.profileKind) }}</el-tag>
                 </template>
               </el-table-column>
-              <el-table-column prop="staffNo" label="教职工号" min-width="140" show-overflow-tooltip>
+              <el-table-column prop="staffNo" label="工号/编号" min-width="140" show-overflow-tooltip>
                 <template #default="{ row }">{{ row.staffNo || '-' }}</template>
               </el-table-column>
               <el-table-column prop="departmentName" label="部门" min-width="160" show-overflow-tooltip>
@@ -731,11 +870,11 @@ onMounted(() => {
 
               <div class="grid gap-2 rounded-2xl bg-slate-50 p-3 text-sm text-slate-600 dark:bg-white/5 dark:text-slate-300">
                 <div class="flex items-center justify-between gap-3">
-                  <span class="text-slate-400">账号类型</span>
-                  <el-tag :type="getAccountTypeTagType(item.accountType)" effect="light">{{ getAccountTypeLabel(item.accountType) }}</el-tag>
+                  <span class="text-slate-400">账号身份</span>
+                  <el-tag :type="getProfileKindTagType(item.profileKind)" effect="light">{{ getProfileKindLabel(item.profileKind) }}</el-tag>
                 </div>
                 <div class="flex items-center justify-between gap-3">
-                  <span class="text-slate-400">教职工号</span>
+                  <span class="text-slate-400">{{ getStaffNoLabel(item.profileKind) }}</span>
                   <span class="text-right break-all">{{ item.staffNo || '-' }}</span>
                 </div>
                 <div class="flex items-center justify-between gap-3">
@@ -798,31 +937,54 @@ onMounted(() => {
       @closed="resetCreateForm"
     >
       <div class="mb-4 rounded-2xl bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-500 dark:bg-white/5 dark:text-slate-400">
-        手动新增仅走管理端治理接口，不受客户端自助注册风控限制；但用户名、手机号、邮箱仍会按现有客户端账号口径做唯一性校验。
+        个人账号保持现有创建规则；教师账号按教职工目录回填姓名和部门；部门共享账号由管理端选择部门并设置账号编号。
       </div>
       <el-form ref="createFormRef" :model="createForm" :rules="createRules" label-position="top">
-        <el-form-item label="用户名" prop="username">
-          <el-input v-model.trim="createForm.username" placeholder="请输入用户名" />
+        <el-form-item label="创建类型" prop="profileKind">
+          <el-segmented
+            v-model="createForm.profileKind"
+            :options="[
+              { label: '个人账号', value: 'personal' },
+              { label: '教师账号', value: 'teacher' },
+              { label: '部门共享账号', value: 'department' },
+            ]"
+            class="w-full"
+          />
+        </el-form-item>
+        <el-form-item v-if="!isCreateTeacherProfile" :label="createUsernameLabel" prop="username">
+          <el-input v-model.trim="createForm.username" :placeholder="isCreateDepartmentProfile ? '请输入部门共享账号名称' : '请输入用户名'" />
+        </el-form-item>
+        <el-form-item v-if="isCreateTeacherProfile" label="教职工号" prop="staffNo">
+          <el-input
+            v-model.trim="createForm.staffNo"
+            placeholder="请输入教职工号"
+          />
         </el-form-item>
         <div class="grid gap-4 md:grid-cols-2">
           <el-form-item label="手机号" prop="mobile">
-            <el-input v-model.trim="createForm.mobile" placeholder="请输入手机号" />
+            <el-input v-model.trim="createForm.mobile" :placeholder="createContactRequired ? '请输入手机号' : '可选，用于登录或找回密码'" />
           </el-form-item>
           <el-form-item label="邮箱" prop="email">
-            <el-input v-model.trim="createForm.email" placeholder="请输入邮箱" />
+            <el-input v-model.trim="createForm.email" :placeholder="createContactRequired ? '请输入邮箱' : '可选，用于登录或找回密码'" />
           </el-form-item>
         </div>
-        <el-form-item label="所属部门" prop="departmentName">
-          <el-select
+        <el-form-item v-if="!isCreateTeacherProfile" :label="createDepartmentRequired ? '所属部门' : '所属部门（选填）'" prop="departmentName">
+          <el-tree-select
             v-model="createForm.departmentName"
-            placeholder="请选择所属部门（选填）"
+            :placeholder="createDepartmentRequired ? '请选择部门共享账号所属部门' : '请选择所属部门（选填）'"
             class="w-full"
             clearable
             filterable
+            check-strictly
+            node-key="value"
+            :data="departmentTreeSelectOptions"
+            :props="departmentTreeSelectProps"
             :loading="departmentOptionsLoading"
-          >
-            <el-option v-for="department in departmentOptions" :key="department" :label="department" :value="department" />
-          </el-select>
+            :disabled="departmentOptionsLoading || departmentOptions.length === 0"
+          />
+          <p v-if="departmentOptions.length === 0 && !departmentOptionsLoading" class="mt-2 text-xs text-amber-600">
+            暂无可选部门，请先在“部门配置”中维护部门。
+          </p>
         </el-form-item>
         <div class="grid gap-4 md:grid-cols-2">
           <el-form-item label="登录密码" prop="password">

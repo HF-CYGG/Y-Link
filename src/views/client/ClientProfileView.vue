@@ -49,7 +49,17 @@ const profileForm = reactive({
 })
 
 const isDepartmentAccount = computed(() => clientAuthStore.currentUser?.accountType === 'department')
-const accountTypeLabel = computed(() => (isDepartmentAccount.value ? '部门账户' : '个人账户'))
+const isTeacherAccount = computed(() => (
+  clientAuthStore.currentUser?.accountType === 'personal'
+  && Boolean(clientAuthStore.currentUser?.staffVerified)
+  && Boolean(clientAuthStore.currentUser?.staffNo?.trim())
+))
+const isDirectoryManagedAccount = computed(() => isDepartmentAccount.value || isTeacherAccount.value)
+const accountTypeLabel = computed(() => {
+  if (isDepartmentAccount.value) return '部门共享账号'
+  return isTeacherAccount.value ? '教师账号' : '个人账号'
+})
+const staffNoLabel = computed(() => (isDepartmentAccount.value ? '账号编号' : '教职工号'))
 const displayName = computed(() => (
   clientAuthStore.currentUser?.username
   || clientAuthStore.currentUser?.realName
@@ -116,8 +126,8 @@ const profileRules: FormRules = {
 }
 
 const openProfileDialog = () => {
-  if (isDepartmentAccount.value) {
-    showAppInfo('部门账户资料由管理员或教职工目录维护，客户端仅支持查看')
+  if (isDirectoryManagedAccount.value) {
+    showAppInfo('教师或部门账户资料由管理员或教职工目录维护，客户端仅支持查看')
     return
   }
   profileForm.username = clientAuthStore.currentUser?.username || clientAuthStore.currentUser?.account || clientAuthStore.currentUser?.realName || ''
@@ -204,11 +214,11 @@ const submitUpdateProfile = async () => {
         <div>
           <p class="text-base font-semibold text-slate-900">资料信息</p>
           <p class="mt-1 text-xs text-slate-400">
-            {{ isDepartmentAccount ? '部门账户资料由管理员或教职工目录维护，客户端仅展示身份信息' : '个人账户可维护姓名、手机号与邮箱，后续可用联系方式登录' }}
+            {{ isDirectoryManagedAccount ? '教师或部门账户资料由管理员或教职工目录维护，客户端仅展示身份信息' : '个人账户可维护姓名、手机号与邮箱，后续可用联系方式登录' }}
           </p>
         </div>
         <button
-          v-if="!isDepartmentAccount"
+          v-if="!isDirectoryManagedAccount"
           type="button"
           class="profile-action-button"
           @click="openProfileDialog"
@@ -225,15 +235,15 @@ const submitUpdateProfile = async () => {
         {{ displayName }}
       </p>
 
-      <template v-if="isDepartmentAccount">
-        <p class="mt-4 text-xs text-slate-400">教职工号</p>
+      <template v-if="isDirectoryManagedAccount">
+        <p class="mt-4 text-xs text-slate-400">{{ staffNoLabel }}</p>
         <p class="mt-1 text-base font-semibold text-slate-900">{{ displayStaffNo }}</p>
 
         <p class="mt-4 text-xs text-slate-400">部门</p>
         <p class="mt-1 text-base font-semibold text-slate-900">{{ displayDepartmentName }}</p>
       </template>
 
-      <template v-else>
+      <template v-if="!isDepartmentAccount">
         <p class="mt-4 text-xs text-slate-400">手机号</p>
         <p class="mt-1 text-base font-semibold text-slate-900">{{ clientAuthStore.currentUser?.mobile || '-' }}</p>
 

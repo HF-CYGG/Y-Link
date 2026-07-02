@@ -210,8 +210,7 @@ export class ClientStaffDirectoryService {
       .createQueryBuilder('user')
       .select('user.staffNo', 'staffNo')
       .addSelect('COUNT(user.id)', 'count')
-      .where('user.accountType = :accountType', { accountType: 'department' })
-      .andWhere('user.staffNo IN (:...staffNos)', { staffNos: normalizedStaffNos })
+      .where('user.staffNo IN (:...staffNos)', { staffNos: normalizedStaffNos })
       .groupBy('user.staffNo')
       .getRawMany<{ staffNo: string; count: string | number }>()
 
@@ -239,7 +238,7 @@ export class ClientStaffDirectoryService {
         .createQueryBuilder()
         .update(ClientUser)
         .set({ staffVerified: false })
-        .where('accountType = :accountType', { accountType: 'department' })
+        .where('accountType = :accountType', { accountType: 'personal' })
         .andWhere('staffNo = :staffNo', { staffNo: before.staffNo })
         .execute()
     }
@@ -253,7 +252,7 @@ export class ClientStaffDirectoryService {
           departmentName: after.departmentName,
           staffVerified: true,
         })
-        .where('accountType = :accountType', { accountType: 'department' })
+        .where('accountType = :accountType', { accountType: 'personal' })
         .andWhere('staffNo = :staffNo', { staffNo: after.staffNo })
         .execute()
     }
@@ -568,7 +567,7 @@ export class ClientStaffDirectoryService {
         .createQueryBuilder()
         .update(ClientUser)
         .set({ staffVerified: false })
-        .where('accountType = :accountType', { accountType: 'department' })
+        .where('accountType = :accountType', { accountType: 'personal' })
         .andWhere('staffNo IN (:...staffNos)', { staffNos: normalizedInactiveStaffNos })
         .execute()
     }
@@ -597,7 +596,7 @@ export class ClientStaffDirectoryService {
           ...realNameParams,
           ...departmentParams,
           true,
-          'department',
+          'personal',
           ...staffNoParams,
         ],
       )
@@ -715,20 +714,18 @@ export class ClientStaffDirectoryService {
         EXISTS (
           SELECT 1
           FROM client_user linked_user
-          WHERE linked_user.account_type = :linkedAccountType
-            AND linked_user.staff_no = directory.staff_no
+          WHERE linked_user.staff_no = directory.staff_no
         )
-      `, { linkedAccountType: 'department' })
+      `)
     }
     if (query.registrationStatus === 'unregistered') {
       qb.andWhere(`
         NOT EXISTS (
           SELECT 1
           FROM client_user linked_user
-          WHERE linked_user.account_type = :linkedAccountType
-            AND linked_user.staff_no = directory.staff_no
+          WHERE linked_user.staff_no = directory.staff_no
         )
-      `, { linkedAccountType: 'department' })
+      `)
     }
 
     const [list, total] = await qb

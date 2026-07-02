@@ -31,6 +31,7 @@
     "task7:verify": "tsx scripts/task7-verify.ts",
     "task8:verify": "tsx scripts/task8-verify.ts",
     "feedback:customer-service:verify": "tsx scripts/feedback-customer-service-verify.ts",
+    "client-auth:department-governance:verify": "tsx scripts/client-auth-department-governance-verify.ts",
     "client-staff-directory:verify": "tsx scripts/client-staff-directory-verify.ts",
     "product:sku-current:verify": "tsx scripts/product-sku-current-verify.ts",
     "o2o:discount-price:verify": "tsx scripts/o2o-discount-price-verify.ts",

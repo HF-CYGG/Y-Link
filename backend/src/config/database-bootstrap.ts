@@ -8,6 +8,8 @@ import fs from 'node:fs'
 import path from 'node:path'
 import type { DataSource } from 'typeorm'
 import { env } from './env.js'
+import { ClientStaffDirectory } from '../entities/client-staff-directory.entity.js'
+import { ClientUser } from '../entities/client-user.entity.js'
 
 const SQLITE_REQUIRED_TABLES = [
   'base_product',
@@ -572,6 +574,54 @@ export interface DatabaseSchemaInitResult {
   reason: 'forced_by_db_sync' | 'mysql_external' | 'sqlite_schema_ready' | 'sqlite_schema_bootstrap'
 }
 
+export async function migrateLegacyDepartmentAccountsToTeacherProfiles(
+  dataSource: DataSource,
+): Promise<{ migratedCount: number }> {
+  const userRepo = dataSource.getRepository(ClientUser)
+  const directoryRepo = dataSource.getRepository(ClientStaffDirectory)
+  const legacyUsers = await userRepo
+    .createQueryBuilder('user')
+    .where('user.accountType = :accountType', { accountType: 'department' })
+    .andWhere("user.staffNo IS NOT NULL AND user.staffNo <> ''")
+    .getMany()
+  if (legacyUsers.length === 0) {
+    return { migratedCount: 0 }
+  }
+
+  const staffNos = [...new Set(legacyUsers.map((user) => user.staffNo?.trim()).filter((item): item is string => Boolean(item)))]
+  if (staffNos.length === 0) {
+    return { migratedCount: 0 }
+  }
+
+  const activeStaffList = await directoryRepo
+    .createQueryBuilder('directory')
+    .where('directory.status = :status', { status: 'active' })
+    .andWhere('directory.staffNo IN (:...staffNos)', { staffNos })
+    .getMany()
+  const activeStaffMap = new Map(activeStaffList.map((item) => [item.staffNo, item]))
+  const usersToMigrate: ClientUser[] = []
+
+  for (const user of legacyUsers) {
+    const staffNo = user.staffNo?.trim() ?? ''
+    const matchedStaff = activeStaffMap.get(staffNo)
+    if (!matchedStaff) {
+      continue
+    }
+    user.accountType = 'personal'
+    user.realName = matchedStaff.realName
+    user.departmentName = matchedStaff.departmentName
+    user.staffVerified = true
+    usersToMigrate.push(user)
+  }
+
+  if (usersToMigrate.length === 0) {
+    return { migratedCount: 0 }
+  }
+
+  await userRepo.save(usersToMigrate, { chunk: 100 })
+  return { migratedCount: usersToMigrate.length }
+}
+
 async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<boolean> {
   const existingTables: Array<{ name: string }> = await dataSource.query(
     `
@@ -678,6 +728,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   // DB_SYNC=true 时直接走 TypeORM 同步，便于本地快速调试实体结构。
   if (env.DB_SYNC === true) {
     await dataSource.synchronize()
+    await migrateLegacyDepartmentAccountsToTeacherProfiles(dataSource)
     return {
       action: 'synchronized',
       reason: 'forced_by_db_sync',
@@ -685,6 +736,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   }
 
   if (env.DB_TYPE !== 'sqlite') {
+    await migrateLegacyDepartmentAccountsToTeacherProfiles(dataSource)
     return {
       action: 'skipped',
       reason: 'mysql_external',
@@ -693,6 +745,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
 
   const needSynchronize = await shouldSynchronizeSqliteSchema(dataSource)
   if (!needSynchronize) {
+    await migrateLegacyDepartmentAccountsToTeacherProfiles(dataSource)
     return {
       action: 'skipped',
       reason: 'sqlite_schema_ready',
@@ -701,6 +754,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
 
   // SQLite 现有本地库在认证系统接入后，需要自动补齐新表与开单留痕字段。
   await dataSource.synchronize()
+  await migrateLegacyDepartmentAccountsToTeacherProfiles(dataSource)
   return {
     action: 'synchronized',
     reason: 'sqlite_schema_bootstrap',
