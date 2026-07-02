@@ -14,6 +14,7 @@ import { CLIENT_USER_ACCOUNT_TYPES, ClientUser, type ClientUserAccountType } fro
 import { ClientUserSession } from '../entities/client-user-session.entity.js'
 import type { ClientAuthContext } from '../types/client-auth.js'
 import { BizError } from '../utils/errors.js'
+import { isUniqueConstraintError } from '../utils/database-errors.js'
 import {
   type NormalizedClientAccount,
   normalizeClientAccount,
@@ -280,7 +281,7 @@ class ClientAuthService {
   private normalizeStaffNo(value: string | null | undefined): string {
     const normalized = value?.trim() ?? ''
     if (!normalized) {
-      throw new BizError('部门账户必须填写教职工号', 400)
+      throw new BizError('请填写教职工号', 400)
     }
     if (!this.staffNoPattern.test(normalized)) {
       throw new BizError('教职工号格式不正确，仅支持字母、数字和短横线（4-32位）', 400)
@@ -335,8 +336,12 @@ class ClientAuthService {
     input: ClientRegisterInput,
     validationMode: ClientValidationMode,
     account: ReturnType<ClientAuthService['resolveAccount']> | null,
+    options: { forceVerificationCode?: boolean } = {},
   ) {
     if (!account) {
+      if (options.forceVerificationCode) {
+        throw new BizError('教师注册必须填写手机号或邮箱', 400)
+      }
       this.verifyCaptchaIfRequired(input)
       return
     }
@@ -352,12 +357,18 @@ class ClientAuthService {
       )
       return
     }
+    if (options.forceVerificationCode) {
+      throw new BizError(`${account.channel === 'email' ? '邮箱' : '手机'}验证码通道未启用，请联系管理员`, 400)
+    }
     this.verifyCaptchaIfRequired(input)
   }
 
   private async assertRegisterIdentifiersAvailable(
     account: ReturnType<ClientAuthService['resolveAccount']> | null,
-    username: ReturnType<typeof normalizeClientUsername> | null,
+    profile: {
+      usernameValue: string
+      staffNo: string | null
+    },
   ) {
     if (account) {
       const existedByAccount = await this.findUserByAnyIdentifier({
@@ -366,22 +377,57 @@ class ClientAuthService {
         normalizedValue: account.account,
       })
       if (existedByAccount) {
-        throw new BizError('该手机号或邮箱已被占用', 409)
+        throw new BizError(account.channel === 'email' ? '该邮箱已被占用' : '该手机号已被占用', 409)
       }
     }
 
-    if (!username) {
-      return
+    if (profile.staffNo) {
+      const existedByStaffNo = await this.userRepo.findOne({
+        where: { staffNo: profile.staffNo },
+        select: ['id'],
+      })
+      if (existedByStaffNo) {
+        throw new BizError('该教职工号已被占用', 409)
+      }
     }
 
+    const username = normalizeClientUsername(profile.usernameValue)
     const existedByUsername = await this.findUserByAnyIdentifier({
       channel: 'username',
       rawValue: username.value,
       normalizedValue: username.normalizedValue,
     })
     if (existedByUsername) {
-      throw new BizError('该用户名已被占用', 409)
+      throw new BizError('该姓名已被占用', 409)
     }
+  }
+
+  private rethrowRegisterUniqueConstraintError(error: unknown): never {
+    if (
+      isUniqueConstraintError(error, {
+        mysqlConstraint: 'uk_client_user_mobile',
+        sqliteColumns: ['client_user.mobile'],
+      })
+    ) {
+      throw new BizError('该手机号已被占用', 409)
+    }
+    if (
+      isUniqueConstraintError(error, {
+        mysqlConstraint: 'uk_client_user_email',
+        sqliteColumns: ['client_user.email'],
+      })
+    ) {
+      throw new BizError('该邮箱已被占用', 409)
+    }
+    if (
+      isUniqueConstraintError(error, {
+        mysqlConstraint: 'uk_client_user_staff_no',
+        sqliteColumns: ['client_user.staff_no'],
+      })
+    ) {
+      throw new BizError('该教职工号已被占用', 409)
+    }
+    throw error
   }
 
   private async resolveDepartmentRegistrationProfile(
@@ -395,6 +441,33 @@ class ClientAuthService {
     staffVerified: boolean
   }> {
     if (accountType !== 'department') {
+      if (input.staffNo?.trim()) {
+        const staffNo = this.normalizeStaffNo(input.staffNo)
+        const existedByStaffNo = await this.userRepo.findOne({
+          where: { staffNo },
+          select: ['id'],
+        })
+        if (existedByStaffNo) {
+          throw new BizError('该教职工号已被占用', 409)
+        }
+
+        const matchedStaff = await this.clientStaffDirectoryRepo.findOne({
+          where: { staffNo, status: 'active' },
+        })
+        if (!matchedStaff) {
+          throw new BizError('教职工号未在学校目录中登记，请联系管理员核验', 409)
+        }
+
+        const usernameValue = this.assertRealName(matchedStaff.realName)
+        const departmentName = await systemConfigService.assertClientDepartmentOption(matchedStaff.departmentName)
+        return {
+          usernameValue,
+          departmentName,
+          staffNo,
+          staffVerified: true,
+        }
+      }
+
       if (!username) {
         throw new BizError('个人注册必须填写真实姓名', 400)
       }
@@ -412,7 +485,7 @@ class ClientAuthService {
       select: ['id'],
     })
     if (existedByStaffNo) {
-      throw new BizError('该教职工号已绑定其他账号', 409)
+      throw new BizError('该教职工号已被占用', 409)
     }
 
     const matchedStaff = await this.clientStaffDirectoryRepo.findOne({
@@ -474,7 +547,7 @@ class ClientAuthService {
     }
 
     const existedByStaffNo = await this.userRepo.findOne({
-      where: { staffNo, accountType: 'department' },
+      where: { staffNo },
       select: ['id'],
     })
 
@@ -512,34 +585,47 @@ class ClientAuthService {
 
   async register(input: ClientRegisterInput, _requestMeta?: RequestMeta) {
     const accountType = this.normalizeAccountType(input.accountType)
-    const account = accountType === 'department'
+    if (accountType === 'department') {
+      throw new BizError('部门账号请联系管理员创建', 403)
+    }
+
+    const isTeacherRegister = Boolean(input.staffNo?.trim())
+    const account = isTeacherRegister
       ? this.resolveOptionalContactAccount(input.account)
       : this.resolveAccount(input.account ?? '')
-    const username = accountType === 'department'
+    if (isTeacherRegister && !account) {
+      throw new BizError('教师注册必须填写手机号或邮箱', 400)
+    }
+    const username = isTeacherRegister
       ? null
       : normalizeClientUsername(this.assertRealName(input.username ?? ''))
     const password = assertClientPasswordPolicy(input.password)
     const capabilities = await this.getVerificationCapabilities()
     const validationMode = account ? capabilities.registerValidationModes[account.channel] : 'captcha'
-    this.verifyRegisterChallenge(input, validationMode, account)
-    await this.assertRegisterIdentifiersAvailable(account, username)
     const registerProfile = await this.resolveDepartmentRegistrationProfile(accountType, input, username)
     await authSecurityService.guardClientRegisterAccountRequest(_requestMeta, account?.account ?? registerProfile.staffNo ?? registerProfile.usernameValue)
+    this.verifyRegisterChallenge(input, validationMode, account, { forceVerificationCode: isTeacherRegister })
+    await this.assertRegisterIdentifiersAvailable(account, registerProfile)
 
-    const user = await this.userRepo.save(
-      this.userRepo.create({
-        mobile: account?.mobile ?? undefined,
-        email: account?.email ?? undefined,
-        passwordHash: await hashPassword(password),
-        // 当前账号体系下，用户名与登录账号分离，支持用户自定义用户名。
-        realName: registerProfile.usernameValue,
-        departmentName: registerProfile.departmentName ?? undefined,
-        accountType,
-        staffNo: registerProfile.staffNo ?? undefined,
-        staffVerified: registerProfile.staffVerified,
-        status: 'enabled',
-      }),
-    )
+    let user: ClientUser
+    try {
+      user = await this.userRepo.save(
+        this.userRepo.create({
+          mobile: account?.mobile ?? undefined,
+          email: account?.email ?? undefined,
+          passwordHash: await hashPassword(password),
+          // 当前账号体系下，用户名与登录账号分离，支持用户自定义用户名。
+          realName: registerProfile.usernameValue,
+          departmentName: registerProfile.departmentName ?? undefined,
+          accountType: 'personal',
+          staffNo: registerProfile.staffNo ?? undefined,
+          staffVerified: registerProfile.staffVerified,
+          status: 'enabled',
+        }),
+      )
+    } catch (error) {
+      this.rethrowRegisterUniqueConstraintError(error)
+    }
     const session = await this.createSessionForUser(user)
     return {
       token: session.token,
@@ -568,8 +654,8 @@ class ClientAuthService {
         detail: { reason: 'user_not_found' },
       })
       const loginErrorMessage = loginFailureResult.shouldWarnRemaining
-        ? `用户名或密码错误（还可尝试 ${loginFailureResult.remainingAttempts} 次）`
-        : '用户名或密码错误'
+        ? `用户名不存在（还可尝试 ${loginFailureResult.remainingAttempts} 次）`
+        : '用户名不存在'
       throw new BizError(loginErrorMessage, 401)
     }
     if (user.status !== 'enabled') {
@@ -775,8 +861,8 @@ class ClientAuthService {
     if (!user) {
       throw new BizError('当前用户不存在', 404)
     }
-    if (user.accountType === 'department') {
-      throw new BizError('部门账户资料由管理员或教职工目录维护，不支持在客户端自助修改', 403)
+    if (user.accountType === 'department' || (user.accountType === 'personal' && user.staffVerified && Boolean(user.staffNo?.trim()))) {
+      throw new BizError('教师或部门账户资料由管理员或教职工目录维护，不支持在客户端自助修改', 403)
     }
 
     const username = normalizeClientUsername(this.assertRealName(input.username))

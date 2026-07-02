@@ -197,7 +197,7 @@ const registerAccountChannel = computed(() => resolveAccountChannel(registerForm
 const isRegisterMode = computed(() => activeMode.value !== 'login')
 const isDepartmentRegisterMode = computed(() => activeMode.value === 'register-department')
 const registerAccountType = computed<ClientAccountType>(() => {
-  return isDepartmentRegisterMode.value ? 'department' : 'personal'
+  return 'personal'
 })
 const modeToggleSliderTransform = computed(() => {
   return `translateX(${AUTH_MODE_SEQUENCE.indexOf(activeMode.value) * 100}%)`
@@ -516,7 +516,7 @@ const applyStaffLookupResult = (staffNo: string, result: Awaited<ReturnType<type
 
   if (result.isRegistered) {
     staffLookup.status = 'registered'
-    staffLookup.message = '该教职工号已注册部门账号，不能重复注册。'
+    staffLookup.message = '该教职工号已被占用，不能重复注册。'
     return
   }
 
@@ -598,11 +598,18 @@ const clearLoginFeedback = () => {
 const applyLoginFeedbackFromError = (message: string, status?: number) => {
   clearLoginFeedback()
 
+  if (status === 401 && /用户名不存在/.test(message)) {
+    loginFeedbackTitle.value = '用户名不存在'
+    loginFeedbackDescription.value = '未找到与当前姓名、手机号、邮箱或工号匹配的客户端账号，请检查输入或先完成注册。'
+    loginFeedbackType.value = 'warning'
+    return
+  }
+
   if (status === 401 && /用户名或密码错误/.test(message)) {
     loginFeedbackTitle.value = '账号或密码不正确'
     loginFeedbackDescription.value = forgotPasswordAvailable.value
-      ? '请检查用户名、手机号、邮箱和密码后重试；如果忘记密码，可直接进入找回密码。'
-      : '请检查用户名、手机号、邮箱和密码后重试；当前系统未启用自助找回密码，请联系管理员手动修改密码。'
+      ? '请检查姓名、手机号、邮箱、工号和密码后重试；如果忘记密码，可直接进入找回密码。'
+      : '请检查姓名、手机号、邮箱、工号和密码后重试；当前系统未启用自助找回密码，请联系管理员手动修改密码。'
     loginFeedbackType.value = 'warning'
     loginFeedbackShowForgotAction.value = forgotPasswordAvailable.value
     return
@@ -643,8 +650,9 @@ const clearRegisterFeedback = () => {
 const applyRegisterFeedbackFromError = (message: string, status?: number) => {
   clearRegisterFeedback()
 
-  if (status === 409 && /该手机号或邮箱已被占用/.test(message)) {
-    registerFeedbackTitle.value = '该手机号或邮箱已注册'
+  if (status === 409 && /该手机号已被占用|该邮箱已被占用|该手机号或邮箱已被占用/.test(message)) {
+    const isEmailOccupied = /邮箱/.test(message) && !/手机号/.test(message)
+    registerFeedbackTitle.value = isEmailOccupied ? '该邮箱已注册' : '该手机号已注册'
     registerFeedbackDescription.value = forgotPasswordAvailable.value
       ? '当前账号已经创建过客户端账号，可直接切换到登录；如果忘记密码，也可以进入找回密码流程。'
       : '当前账号已经创建过客户端账号，可直接切换到登录；当前系统未启用自助找回密码，请联系管理员手动修改密码。'
@@ -654,9 +662,16 @@ const applyRegisterFeedbackFromError = (message: string, status?: number) => {
     return
   }
 
-  if (status === 409 && /该用户名已被占用/.test(message)) {
-    registerFeedbackTitle.value = '用户名已被占用'
-    registerFeedbackDescription.value = '请更换一个新的用户名后再试，当前手机号或邮箱仍可继续作为登录账号使用。'
+  if (status === 409 && /该姓名已被占用|该用户名已被占用/.test(message)) {
+    registerFeedbackTitle.value = '姓名已被占用'
+    registerFeedbackDescription.value = '该姓名已经创建过客户端账号，请核对姓名是否填写正确；如需继续使用，请联系管理员处理。'
+    registerFeedbackType.value = 'warning'
+    return
+  }
+
+  if (status === 409 && /该教职工号已被占用|教职工号已绑定/.test(message)) {
+    registerFeedbackTitle.value = '教职工号已被占用'
+    registerFeedbackDescription.value = '该教职工号已经绑定其他客户端账号，请核对输入或联系管理员处理。'
     registerFeedbackType.value = 'warning'
     return
   }
@@ -798,7 +813,7 @@ const warmupClientPostLoginTargets = (redirectPath: string) => {
 // 详细注释：提交登录表单。首先进行基础校验，然后调用 auth store 登录，成功后优先跳转，再在空闲时预热高频相邻页面。
 const handleLogin = async () => {
   if (!validateLoginAccount(loginForm.account)) {
-    showAppWarning('请输入用户名、手机号或邮箱')
+    showAppWarning('请输入姓名、手机号、邮箱或工号')
     return
   }
   if (!validateLoginPassword(loginForm.password)) {
@@ -842,11 +857,11 @@ const handleLogin = async () => {
           warmupClientPostLoginTargets(redirectPath.value)
         },
         onError: async (error) => {
-          const normalizedError = normalizeRequestError(error, '登录失败，请检查用户名、手机号、邮箱、密码和验证码后重试')
+          const normalizedError = normalizeRequestError(error, '登录失败，请检查姓名、手机号、邮箱、工号、密码和验证码后重试')
           applySecurityHintFromMessage(normalizedError.message)
           applyLoginFeedbackFromError(normalizedError.message, normalizedError.status)
           showAppError(normalizedError.message)
-          if (/用户名或密码错误|图形验证码|锁定|稍后|重试/.test(normalizedError.message)) {
+          if (/用户名不存在|用户名或密码错误|图形验证码|锁定|稍后|重试/.test(normalizedError.message)) {
             loginCaptchaVisible.value = true
             loginForm.captcha = ''
             await refreshCaptcha(true)
@@ -863,7 +878,7 @@ const handleLogin = async () => {
   }
 }
 
-// 部门注册只校验工号本身；姓名和部门必须由后端教职工目录反查，前端不再提供自选入口。
+// 教师注册只校验工号本身；姓名和部门必须由后端教职工目录反查，前端不再提供自选入口。
 const validateDepartmentRegisterFields = () => {
   if (!isDepartmentRegisterMode.value) {
     return true
@@ -883,11 +898,11 @@ const validateDepartmentRegisterFields = () => {
     return false
   }
   if (staffLookup.status === 'registered') {
-    showAppWarning('该教职工号已注册部门账号，不能重复注册')
+    showAppWarning('该教职工号已被占用，不能重复注册')
     return false
   }
   if (staffLookup.status !== 'matched') {
-    showAppWarning('教职工号未匹配到有效目录，暂不能注册部门账号')
+    showAppWarning('教职工号未匹配到有效目录，暂不能注册教师账号')
     return false
   }
   return true
@@ -895,6 +910,10 @@ const validateDepartmentRegisterFields = () => {
 
 // 注册验证码校验与部门字段校验拆开维护，便于后续继续扩展不同通道策略。
 const validateRegisterChallengeFields = () => {
+  if (isDepartmentRegisterMode.value && !registerUsesVerificationCode.value) {
+    showAppWarning('教师注册需要启用短信或邮箱验证码，请联系管理员')
+    return false
+  }
   if (registerUsesVerificationCode.value) {
     if (!registerForm.verificationCode.trim()) {
       showAppWarning('请输入手机/邮箱验证码')
@@ -913,8 +932,8 @@ const validateRegisterChallengeFields = () => {
 const validateRegisterBeforeSubmit = () => {
   const accountChannel = resolveAccountChannel(registerForm.account)
   if (isDepartmentRegisterMode.value) {
-    if (registerForm.account.trim() && !accountChannel) {
-      showAppWarning('手机号或邮箱为选填项；如填写，请输入正确格式')
+    if (!accountChannel) {
+      showAppWarning('教师注册必须填写正确格式的手机号或邮箱')
       return null
     }
   } else {
@@ -1031,7 +1050,7 @@ const handleRegister = async () => {
           void showCriticalErrorDialog(normalizedError, {
             title: '注册失败',
             fallback: '注册失败，请检查信息后重试',
-            operation: activeMode.value === 'register-department' ? '部门账号注册' : '个人账号注册',
+            operation: activeMode.value === 'register-department' ? '教师账号注册' : '个人账号注册',
           })
           registerForm.captcha = ''
           await refreshCaptcha(true)
@@ -1169,7 +1188,7 @@ onUnmounted(() => {
               :class="{ 'is-active': activeMode === 'register-department' }"
               @click="switchMode('register-department')"
             >
-              部门注册
+              教师注册
             </button>
           </div>
 
@@ -1223,7 +1242,7 @@ onUnmounted(() => {
                 :class="{ 'form-block--login-compact': isCompactLoginLayout }"
               >
                 <h2 class="block-title">欢迎回来</h2>
-                <p class="block-subtitle">请输入用户名、手机号或邮箱与密码登录客户端</p>
+                <p class="block-subtitle">请输入姓名、手机号、邮箱或工号与密码登录客户端</p>
 
                 <el-alert
                   v-if="loginFeedbackTitle"
@@ -1252,7 +1271,7 @@ onUnmounted(() => {
                   class="mt-6 space-y-4"
                   :class="{ 'login-form--compact': isCompactLoginLayout }"
                 >
-                  <el-input v-model="loginForm.account" placeholder="用户名 / 手机号 / 邮箱" class="geo-input" size="large" clearable>
+                  <el-input v-model="loginForm.account" placeholder="姓名 / 手机号 / 邮箱 / 工号" class="geo-input" size="large" clearable>
                     <template #prefix>
                       <el-icon class="input-icon"><User /></el-icon>
                     </template>
@@ -1467,11 +1486,11 @@ onUnmounted(() => {
               </div>
 
               <div v-else ref="formBlockRef" key="register-department" class="form-block">
-                <h2 class="block-title">创建部门账号</h2>
-                <p class="block-subtitle">填写教职工号后，系统会自动匹配姓名和所属部门</p>
+                <h2 class="block-title">创建教师账号</h2>
+                <p class="block-subtitle">填写教职工号、手机号或邮箱，并通过验证码后创建教师账号</p>
                 <el-alert class="register-channel-alert" type="info" :closable="false" show-icon>
                   <template #title>
-                    部门账号仅按教职工目录注册，姓名和部门由系统自动带出；手机号和邮箱可选，用于登录或找回密码。
+                    教师账号按教职工目录回填姓名和部门，注册后仍按个人/散客流程下单；部门共享账号请联系管理员创建。
                   </template>
                 </el-alert>
 
@@ -1550,7 +1569,7 @@ onUnmounted(() => {
                     </div>
                   </transition>
 
-                  <el-input v-model="registerForm.account" placeholder="手机号或邮箱（选填）" class="geo-input" size="large" clearable>
+                  <el-input v-model="registerForm.account" placeholder="手机号或邮箱" class="geo-input" size="large" clearable>
                     <template #prefix>
                       <el-icon class="input-icon"><User /></el-icon>
                     </template>
@@ -1645,7 +1664,7 @@ onUnmounted(() => {
                       />
                     </button>
                   </div>
-                  <el-button class="submit-btn" native-type="submit" :loading="isLoading">立即注册部门账号</el-button>
+                  <el-button class="submit-btn" native-type="submit" :loading="isLoading">立即注册教师账号</el-button>
                 </el-form>
               </div>
             </transition>

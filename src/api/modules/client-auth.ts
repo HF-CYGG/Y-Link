@@ -112,7 +112,7 @@ export const getClientAuthCapabilities = (config?: RequestConfig) =>
   })
 
 /**
- * 部门注册时按教职工号精确查询目录：
+ * 教师注册时按教职工号精确查询目录：
  * - 只返回 active 目录记录；
  * - 用于前端展示姓名和部门确认，不允许前端自行提交这些字段。
  */
@@ -248,7 +248,7 @@ export const clientChangePassword = (data: { currentPassword: string; newPasswor
 
 /**
  * 客户端更新个人资料：
- * - 仅允许个人账户维护姓名、手机号与邮箱；部门账户身份资料由管理端或教职工目录维护。
+ * - 仅允许普通个人账户维护姓名、手机号与邮箱；教师与部门共享账号身份资料由管理端或教职工目录维护。
  */
 export const clientUpdateProfile = (data: {
   username: string

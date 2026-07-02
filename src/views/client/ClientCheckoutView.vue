@@ -176,14 +176,21 @@ const currentRealName = computed(() => (
   || clientAuthStore.currentUser?.account?.trim()
   || '未设置'
 ))
-const currentAccountTypeLabel = computed(() => (
-  clientAuthStore.currentUser?.accountType === 'department' ? '部门账户' : '散客账户'
+const isTeacherAccount = computed(() => (
+  clientAuthStore.currentUser?.accountType === 'personal'
+  && Boolean(clientAuthStore.currentUser?.staffVerified)
+  && Boolean(clientAuthStore.currentUser?.staffNo?.trim())
 ))
+const currentAccountTypeLabel = computed(() => {
+  if (clientAuthStore.currentUser?.accountType === 'department') return '部门共享账号'
+  return isTeacherAccount.value ? '教师账号' : '散客账号'
+})
 const currentDepartmentName = computed(() => clientAuthStore.currentUser?.departmentName?.trim() || '')
 const currentStaffNo = computed(() => clientAuthStore.currentUser?.staffNo?.trim() || '')
+const currentStaffNoLabel = computed(() => (isDepartmentOrder.value ? '账号编号' : '教职工号'))
 const currentStaffVerifiedText = computed(() => {
   if (!isDepartmentOrder.value) {
-    return '个人账号无需工号核验'
+    return isTeacherAccount.value ? '教师身份已核验，散客下单无需部门核验' : '个人账号无需工号核验'
   }
   return clientAuthStore.currentUser?.staffVerified ? '已完成工号核验' : '待人工核验'
 })
@@ -196,7 +203,7 @@ const pickupContactInputHint = computed(() => (
   isDepartmentOrder.value ? '部门账号提货人按实名锁定，不可更改' : '可编辑并自动记忆'
 ))
 const currentAccountOrderHint = computed(() => (
-  isDepartmentOrder.value ? '当前为部门账户，可提交部门订单' : '当前为散客下单'
+  isDepartmentOrder.value ? '当前为部门共享账号，可提交部门订单' : '当前按散客下单'
 ))
 const orderTypeDescription = computed(() => {
   if (isDepartmentOrder.value) {
@@ -204,7 +211,9 @@ const orderTypeDescription = computed(() => {
       ? `当前账号为部门账号，下单后将自动归入部门：${currentDepartmentName.value}`
       : '当前账号为部门账号，请先在个人资料中完善部门信息'
   }
-  return '当前账号为个人账号，下单后自动按散客归属处理'
+  return isTeacherAccount.value
+    ? '当前账号为教师账号，下单后仍自动按散客归属处理'
+    : '当前账号为个人账号，下单后自动按散客归属处理'
 })
 
 const systemApplyStatusText = computed(() => {
@@ -372,11 +381,11 @@ const handleSubmit = async () => {
           </div>
           <div class="flex items-center gap-2">
             <span class="font-medium text-slate-600">所属部门</span>
-            <span class="truncate">{{ isDepartmentOrder ? (clientAuthStore.currentUser?.departmentName || '未设置部门') : '个人账号不适用' }}</span>
+            <span class="truncate">{{ isDepartmentOrder || isTeacherAccount ? (clientAuthStore.currentUser?.departmentName || '未设置部门') : '个人账号不适用' }}</span>
           </div>
           <div class="flex items-center gap-2">
-            <span class="font-medium text-slate-600">教职工号</span>
-            <span class="truncate">{{ isDepartmentOrder ? (clientAuthStore.currentUser?.staffNo || '未设置工号') : '个人账号不适用' }}</span>
+            <span class="font-medium text-slate-600">{{ currentStaffNoLabel }}</span>
+            <span class="truncate">{{ isDepartmentOrder || isTeacherAccount ? (clientAuthStore.currentUser?.staffNo || '未设置编号') : '个人账号不适用' }}</span>
           </div>
           <div class="flex items-center gap-2">
             <span class="font-medium text-slate-600">工号核验</span>
