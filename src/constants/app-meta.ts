@@ -1,5 +1,5 @@
 export const APP_META = {
-  version: 'v1.4.71',
+  version: 'v1.4.95',
   developer: 'by_夜喵cats',
   repositoryLabel: 'GitHub',
   repositoryUrl: 'https://github.com/HF-CYGG/Y-Link',
