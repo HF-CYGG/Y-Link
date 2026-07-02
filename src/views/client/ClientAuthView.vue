@@ -1258,7 +1258,7 @@ onUnmounted(() => {
             </template>
           </el-alert>
 
-          <div ref="formWrapperRef" class="form-wrapper" :style="{ height: formWrapperHeight }">
+          <div ref="formWrapperRef" class="form-wrapper" :class="{ 'is-animating': formAnimating }" :style="{ height: formWrapperHeight }">
             <transition
               name="auth-fade"
               @before-enter="handleFormBeforeEnter"
@@ -2156,10 +2156,13 @@ onUnmounted(() => {
 }
 
 .form-wrapper {
-  overflow: hidden;
   transition: height 0.35s cubic-bezier(0.25, 1, 0.5, 1);
   will-change: height;
   position: relative;
+}
+
+.form-wrapper.is-animating {
+  overflow: hidden;
 }
 
 .form-block {
