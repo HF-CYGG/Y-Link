@@ -654,8 +654,8 @@ class ClientAuthService {
         detail: { reason: 'user_not_found' },
       })
       const loginErrorMessage = loginFailureResult.shouldWarnRemaining
-        ? `用户名不存在（还可尝试 ${loginFailureResult.remainingAttempts} 次）`
-        : '用户名不存在'
+        ? `用户名或密码错误（还可尝试 ${loginFailureResult.remainingAttempts} 次）`
+        : '用户名或密码错误'
       throw new BizError(loginErrorMessage, 401)
     }
     if (user.status !== 'enabled') {

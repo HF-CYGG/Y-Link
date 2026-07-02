@@ -598,13 +598,6 @@ const clearLoginFeedback = () => {
 const applyLoginFeedbackFromError = (message: string, status?: number) => {
   clearLoginFeedback()
 
-  if (status === 401 && /用户名不存在/.test(message)) {
-    loginFeedbackTitle.value = '用户名不存在'
-    loginFeedbackDescription.value = '未找到与当前姓名、手机号、邮箱或工号匹配的客户端账号，请检查输入或先完成注册。'
-    loginFeedbackType.value = 'warning'
-    return
-  }
-
   if (status === 401 && /用户名或密码错误/.test(message)) {
     loginFeedbackTitle.value = '账号或密码不正确'
     loginFeedbackDescription.value = forgotPasswordAvailable.value
@@ -861,7 +854,7 @@ const handleLogin = async () => {
           applySecurityHintFromMessage(normalizedError.message)
           applyLoginFeedbackFromError(normalizedError.message, normalizedError.status)
           showAppError(normalizedError.message)
-          if (/用户名不存在|用户名或密码错误|图形验证码|锁定|稍后|重试/.test(normalizedError.message)) {
+          if (/用户名或密码错误|图形验证码|锁定|稍后|重试/.test(normalizedError.message)) {
             loginCaptchaVisible.value = true
             loginForm.captcha = ''
             await refreshCaptcha(true)

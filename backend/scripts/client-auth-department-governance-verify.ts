@@ -66,7 +66,7 @@ async function expectBizError(action: () => Promise<unknown>, scene: string, mes
       error.message.includes(messageIncludes),
       `${scene} 错误信息应包含“${messageIncludes}”，实际为: ${error.message}`,
     )
-    return
+    return error.message
   }
   assert.fail(`${scene} 应失败但实际成功`)
 }
@@ -351,7 +351,7 @@ async function main() {
     )
     pass('教师注册目录姓名被占用时返回明确提示')
 
-    const sessionCountBeforeMissingLogin = await AppDataSource.getRepository(ClientUserSession).count()
+    const sessionCountBeforeFailedLogin = await AppDataSource.getRepository(ClientUserSession).count()
     const missingLoginCases = [
       { account: '不存在姓名', ipAddress: '192.0.2.11' },
       { account: '13900009999', ipAddress: '192.0.2.12' },
@@ -359,7 +359,7 @@ async function main() {
       { account: 'T4040', ipAddress: '192.0.2.14' },
     ]
     for (const missingLoginCase of missingLoginCases) {
-      await expectBizError(
+      const missingLoginMessage = await expectBizError(
         () =>
           clientAuthService.login(
             {
@@ -374,15 +374,35 @@ async function main() {
             },
           ),
         `不存在账号登录 ${missingLoginCase.account}`,
-        '用户名不存在',
+        '用户名或密码错误',
       )
+      assert.doesNotMatch(missingLoginMessage, /用户名不存在/, '登录查无用户不应向公开入口暴露账号不存在')
     }
+
+    const wrongPasswordMessage = await expectBizError(
+      () =>
+        clientAuthService.login(
+          {
+            account: '13800001001',
+            password: `${clientPassword}_wrong`,
+          },
+          {
+            ipAddress: '192.0.2.15',
+            userAgent: 'client-auth-department-governance-verify',
+            clientRiskBrowserId: null,
+            clientRiskSessionId: null,
+          },
+        ),
+      '已存在账号密码错误登录',
+      '用户名或密码错误',
+    )
+    assert.doesNotMatch(wrongPasswordMessage, /用户名不存在/, '密码错误分支不应出现账号不存在提示')
     assert.equal(
       await AppDataSource.getRepository(ClientUserSession).count(),
-      sessionCountBeforeMissingLogin,
-      '查无用户登录失败不应新增客户端会话',
+      sessionCountBeforeFailedLogin,
+      '查无用户或密码错误登录失败不应新增客户端会话',
     )
-    pass('登录输入不存在的姓名、手机号、邮箱或工号时返回用户名不存在且不创建会话')
+    pass('登录输入不存在账号或错误密码时返回统一公开错误且不创建会话')
 
     const product = await productService.create({
       productName: `治理验证商品${verifySeed}`,
