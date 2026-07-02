@@ -1491,12 +1491,23 @@ onActivated(() => {
                   <template #default="{ row }">
                     <div
                       class="sku-thumb-uploader"
-                      :class="{ 'is-drag-active': skuThumbnailDragActiveId === resolveSkuFormKey(row) }"
+                      :class="{
+                        'is-drag-active': skuThumbnailDragActiveId === resolveSkuFormKey(row),
+                      }"
                       @dragenter.prevent="handleSkuThumbnailDragEnter(row)"
                       @dragover.prevent="handleSkuThumbnailDragEnter(row)"
                       @dragleave.prevent="handleSkuThumbnailDragLeave(row)"
                       @drop.prevent="handleSkuThumbnailDrop(row, $event)"
                     >
+                      <PassivePreviewImage
+                        v-if="resolveSkuThumbnail(row) && !isSkuThumbnailUploading(row)"
+                        :src="resolveSkuThumbnail(row)"
+                        :preview-images="currentSkuPreviewImageList(row)"
+                        fit="cover"
+                        class="sku-thumb-image sku-thumb-preview-trigger"
+                        alt="规格预览图"
+                        dialog-title="规格预览图"
+                      />
                       <el-upload
                         action=""
                         :http-request="buildSkuThumbnailUploadRequest(row)"
@@ -1504,17 +1515,13 @@ onActivated(() => {
                         accept="image/*"
                         :disabled="isSkuThumbnailUploading(row)"
                       >
-                        <button type="button" class="sku-thumb-button" :class="{ 'is-uploading': isSkuThumbnailUploading(row) }">
-                          <PassivePreviewImage
-                            v-if="resolveSkuThumbnail(row) && !isSkuThumbnailUploading(row)"
-                            :src="resolveSkuThumbnail(row)"
-                            :preview-images="currentSkuPreviewImageList(row)"
-                            fit="cover"
-                            class="sku-thumb-image"
-                            alt="规格预览图"
-                            dialog-title="规格预览图"
-                          />
-                          <template v-else-if="isSkuThumbnailUploading(row)">
+                        <button
+                          v-if="!resolveSkuThumbnail(row) || isSkuThumbnailUploading(row)"
+                          type="button"
+                          class="sku-thumb-button"
+                          :class="{ 'is-uploading': isSkuThumbnailUploading(row) }"
+                        >
+                          <template v-if="isSkuThumbnailUploading(row)">
                             <span class="sku-thumb-progress-label">{{ resolveSkuThumbnailUploadProgress(row) }}%</span>
                             <el-progress
                               class="sku-thumb-progress sku-thumb-progress-overlay"
@@ -1526,6 +1533,7 @@ onActivated(() => {
                           </template>
                           <span v-else>上传</span>
                         </button>
+                        <button v-else type="button" class="sku-thumb-replace-button">更换</button>
                       </el-upload>
                       <button
                         v-if="row.thumbnail && !isSkuThumbnailUploading(row)"
@@ -1784,6 +1792,11 @@ onActivated(() => {
   color: rgb(15 118 110);
 }
 
+.sku-thumb-uploader.is-drag-active .sku-thumb-preview-trigger {
+  outline: 2px solid rgb(15 118 110);
+  outline-offset: 2px;
+}
+
 .sku-thumb-button {
   position: relative;
   display: grid;
@@ -1808,6 +1821,7 @@ onActivated(() => {
 .sku-thumb-image {
   width: 100%;
   height: 100%;
+  border-radius: 8px;
 }
 
 .sku-thumb-remove {
@@ -1831,6 +1845,28 @@ onActivated(() => {
 .sku-thumb-button:hover {
   border-color: rgb(15 118 110);
   color: rgb(15 118 110);
+}
+
+.sku-thumb-replace-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 54px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid rgb(204 251 241);
+  border-radius: 999px;
+  background: rgb(240 253 250);
+  color: rgb(15 118 110);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.sku-thumb-replace-button:hover {
+  border-color: rgb(15 118 110);
+  background: rgb(204 251 241);
 }
 
 .sku-thumb-button.is-uploading {

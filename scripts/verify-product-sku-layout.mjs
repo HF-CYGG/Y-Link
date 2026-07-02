@@ -21,6 +21,7 @@ const mainDialog = sliceBetween('v-model="dialogVisible"', '</BizCrudDialogShell
 const skuDialog = sliceBetween('v-if="isSkuDialog"', '<el-form v-else')
 const mobileActions = sliceBetween('class="product-mobile-actions', '</div>')
 const skuThumbButton = sliceBetween('class="sku-thumb-button"', '</button>')
+const skuThumbUpload = sliceBetween('<el-upload', '</el-upload>')
 
 assertSourceIncludes('handleOpenSkuConfig(row)', 'desktop operation column should expose SKU config action')
 assertSourceIncludes('handleOpenSkuConfig(item)', 'mobile card actions should expose SKU config action')
@@ -52,6 +53,9 @@ assert.ok(skuDialog.includes('sku-thumb-remove'), 'SKU image cell should render 
 assert.ok(skuDialog.includes('<el-progress'), 'SKU image cell should show upload progress')
 assert.ok(skuThumbButton.includes('<el-progress'), 'SKU image upload progress should stay inside the dashed image box')
 assert.ok(skuThumbButton.includes('sku-thumb-progress-overlay'), 'SKU image upload progress should use an in-box overlay')
+assert.ok(!skuThumbButton.includes('PassivePreviewImage'), 'SKU preview trigger should not be nested inside the upload button')
+assert.ok(!skuThumbUpload.includes('PassivePreviewImage'), 'SKU preview trigger should not be nested inside the upload component')
+assert.ok(skuDialog.includes('sku-thumb-preview-trigger'), 'SKU image cell should keep preview and upload triggers separated')
 assert.ok(source.includes('skuThumbnailUploadProgresses'), 'SKU image upload progress should be tracked per row')
 assert.ok(source.includes('resolveSkuThumbnailUploadProgress(row)'), 'SKU image cell should read the current row progress')
 assert.ok(source.includes('onUploadProgress'), 'SKU image upload should forward real upload progress events')
