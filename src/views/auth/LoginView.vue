@@ -995,18 +995,12 @@ const handleSubmit = async () => {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .geo-blob {
-    animation: none !important;
-  }
-  
+  .login-shell,
+  .geo-blob,
   .form-title,
   .form-subtitle,
-  .geo-input-1,
-  .geo-input-2,
-  .geo-submit {
-    animation: none !important;
-  }
-
+  [class*='geo-input-'],
+  .geo-submit,
   .geo-input :deep(.el-input__wrapper.is-focus) {
     animation: none !important;
   }
