@@ -162,8 +162,6 @@ onMounted(() => {
   if (globalThis.document) {
     globalThis.document.addEventListener('visibilitychange', handleVisibilityChange)
   }
-  setupPresenceHeartbeat()
-  void sendPresenceHeartbeatSafely()
 })
 
 onBeforeUnmount(() => {

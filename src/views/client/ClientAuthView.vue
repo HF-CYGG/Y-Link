@@ -1748,6 +1748,19 @@ onUnmounted(() => {
 
 <style scoped>
 .client-auth-page {
+  --ca-fg: #0f172a;
+  --ca-sub: #475569;
+  --ca-muted: #64748b;
+  --ca-chip-bg: rgba(13, 148, 136, 0.22);
+  --ca-chip-text: #0f172a;
+  --ca-bg: rgba(255, 255, 255, 0.55);
+  --ca-border: rgba(255, 255, 255, 0.7);
+  --ca-hover-bg: rgba(255, 255, 255, 0.8);
+  --ca-hover-bd: rgba(255, 255, 255, 0.9);
+  --ca-focus-bg: #ffffff;
+  --ca-focus-bd: #0d9488;
+  --ca-ring: 0 0 0 1px #0d9488, 0 4px 14px rgba(13, 148, 136, 0.1);
+
   min-height: 100dvh;
   display: flex;
   align-items: center;
@@ -1759,6 +1772,21 @@ onUnmounted(() => {
 }
 
 /* 动态几何背景层 (硬件加速流体动画 - Apple/Fluent 设计美学) */
+:global(.dark .client-auth-page) {
+  --ca-fg: #f8fafc;
+  --ca-sub: #cbd5e1;
+  --ca-muted: #94a3b8;
+  --ca-chip-bg: rgba(20, 184, 166, 0.18);
+  --ca-chip-text: #ccfbf1;
+  --ca-bg: rgba(0, 0, 0, 0.25);
+  --ca-border: rgba(255, 255, 255, 0.08);
+  --ca-hover-bg: rgba(0, 0, 0, 0.45);
+  --ca-hover-bd: rgba(255, 255, 255, 0.15);
+  --ca-focus-bg: rgba(0, 0, 0, 0.6);
+  --ca-focus-bd: #14b8a6;
+  --ca-ring: 0 0 0 1px #14b8a6, 0 4px 14px rgba(20, 184, 166, 0.15);
+}
+
 .geo-animation-layer {
   position: absolute;
   inset: 0;
@@ -1768,10 +1796,6 @@ onUnmounted(() => {
   background-color: #f8fafc;
 }
 
-:global(.dark) .geo-animation-layer {
-  background-color: #000000;
-}
-
 .geo-blob {
   position: absolute;
   border-radius: 50%;
@@ -1779,11 +1803,6 @@ onUnmounted(() => {
   opacity: 0.35;
   will-change: transform;
   animation: blob-float 25s cubic-bezier(0.4, 0, 0.2, 1) infinite alternate;
-}
-
-:global(.dark) .geo-blob {
-  opacity: 0.25;
-  filter: blur(140px);
 }
 
 .blob-1 {
@@ -1843,10 +1862,6 @@ onUnmounted(() => {
   background: rgba(255, 255, 255, 0.02);
 }
 
-:global(.dark) .glass-overlay {
-  background: rgba(0, 0, 0, 0.05);
-}
-
 .auth-shell {
   position: relative;
   z-index: 10;
@@ -1877,7 +1892,7 @@ onUnmounted(() => {
   }
 }
 
-:global(.dark) .auth-shell {
+:global(.dark .auth-shell) {
   background: rgba(17, 17, 18, 0.75);
   box-shadow: 
     0 20px 40px rgba(0, 0, 0, 0.2),
@@ -1895,10 +1910,6 @@ onUnmounted(() => {
   position: relative;
   /* 移除 overflow: hidden 允许几何体稍微溢出面板（外层 .auth-shell 仍有圆角限制） */
   border-right: 1px solid rgba(0, 0, 0, 0.06);
-}
-
-:global(.dark) .brand-panel {
-  border-right: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .geo-decor-wrapper {
@@ -2046,10 +2057,6 @@ onUnmounted(() => {
   transform: translate3d(15px, -15px, 0);
 }
 
-:global(.dark) .geo-text {
-  -webkit-text-stroke: 1.5px rgba(20, 184, 166, 0.25);
-}
-
 .geo-fade-enter-active,
 .geo-fade-leave-active {
   transition: opacity 0.4s ease, filter 0.4s ease;
@@ -2070,8 +2077,8 @@ onUnmounted(() => {
 .brand-tag {
   display: inline-block;
   padding: 6px 14px;
-  background: rgba(13, 148, 136, 0.22);
-  color: #0f172a;
+  background: var(--ca-chip-bg);
+  color: var(--ca-chip-text);
   border-radius: 8px;
   font-size: 12px;
   font-weight: 700;
@@ -2085,18 +2092,18 @@ onUnmounted(() => {
   line-height: 1.25;
   letter-spacing: -0.02em;
   margin-bottom: 24px;
-  color: #0f172a;
+  color: var(--ca-fg);
 }
 
 .brand-desc {
   font-size: 15px;
   line-height: 1.8;
-  color: #475569;
+  color: var(--ca-sub);
   max-width: 90%;
 }
 
 .brand-footer {
-  color: #94a3b8;
+  color: var(--ca-muted);
   position: relative;
   z-index: 1;
 }
@@ -2184,7 +2191,7 @@ onUnmounted(() => {
   box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.02);
 }
 
-:global(.dark) .mode-toggle {
+:global(.dark .mode-toggle) {
   background: rgba(0, 0, 0, 0.3);
   border-color: rgba(255, 255, 255, 0.05);
   box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.2);
@@ -2202,7 +2209,7 @@ onUnmounted(() => {
   transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
-:global(.dark) .toggle-slider {
+:global(.dark .toggle-slider) {
   background: rgba(255, 255, 255, 0.15);
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
@@ -2214,7 +2221,7 @@ onUnmounted(() => {
   padding: 10px 0;
   font-size: 14px;
   font-weight: 600;
-  color: #64748b;
+  color: var(--ca-muted);
   border: none;
   background: transparent;
   cursor: pointer;
@@ -2222,7 +2229,7 @@ onUnmounted(() => {
 }
 
 .toggle-btn.is-active {
-  color: #0f172a;
+  color: var(--ca-fg);
 }
 
 .success-pill {
@@ -2234,12 +2241,6 @@ onUnmounted(() => {
   padding: 12px 14px;
   font-size: 13px;
   line-height: 1.6;
-}
-
-:global(.dark) .success-pill {
-  background: rgba(20, 184, 166, 0.1);
-  border-color: rgba(20, 184, 166, 0.15);
-  color: #5eead4;
 }
 
 .register-feedback-alert {
@@ -2258,14 +2259,14 @@ onUnmounted(() => {
 .block-title {
   font-size: 26px;
   font-weight: 700;
-  color: #0f172a;
+  color: var(--ca-fg);
   margin-bottom: 6px;
   letter-spacing: -0.5px;
 }
 
 .block-subtitle {
   font-size: 13px;
-  color: #475569;
+  color: var(--ca-sub);
   margin-bottom: 24px;
 }
 
@@ -2276,92 +2277,57 @@ onUnmounted(() => {
 .geo-input :deep(.el-input__wrapper) {
   height: 52px;
   border-radius: 14px;
-  background-color: rgba(255, 255, 255, 0.55);
-  border: 1px solid rgba(255, 255, 255, 0.7);
+  background-color: var(--ca-bg);
+  border: 1px solid var(--ca-border);
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.02) !important;
   padding: 0 16px;
   transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
-:global(.dark) .geo-input :deep(.el-input__wrapper) {
-  background-color: rgba(0, 0, 0, 0.25);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-}
-
 .geo-input :deep(.el-input__wrapper:hover) {
-  background-color: rgba(255, 255, 255, 0.8);
-  border-color: rgba(255, 255, 255, 0.9);
+  background-color: var(--ca-hover-bg);
+  border-color: var(--ca-hover-bd);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04) !important;
 }
 
-:global(.dark) .geo-input :deep(.el-input__wrapper:hover) {
-  background-color: rgba(0, 0, 0, 0.45);
-  border-color: rgba(255, 255, 255, 0.15);
-}
-
 .geo-input :deep(.el-input__wrapper.is-focus) {
-  background-color: #ffffff;
-  border-color: #0d9488;
-  box-shadow: 0 0 0 1px #0d9488, 0 4px 14px rgba(13, 148, 136, 0.1) !important;
-}
-
-:global(.dark) .geo-input :deep(.el-input__wrapper.is-focus) {
-  background-color: rgba(0, 0, 0, 0.6);
-  border-color: #14b8a6;
-  box-shadow: 0 0 0 1px #14b8a6, 0 4px 14px rgba(20, 184, 166, 0.15) !important;
+  background-color: var(--ca-focus-bg);
+  border-color: var(--ca-focus-bd);
+  box-shadow: var(--ca-ring) !important;
 }
 
 .geo-input :deep(.el-input__inner) {
-  color: #0f172a;
+  color: var(--ca-fg);
   font-weight: 500;
   font-size: 14px;
 }
 
-:global(.dark) .geo-input :deep(.el-input__inner) {
-  color: #f8fafc;
+:global(.dark .geo-input .el-input__inner) {
+  color: var(--ca-fg);
 }
 
 .geo-input-select :deep(.el-select__wrapper),
 .geo-input-select :deep(.el-tree-select__wrapper) {
   min-height: 52px;
   border-radius: 14px;
-  background-color: rgba(255, 255, 255, 0.55);
-  border: 1px solid rgba(255, 255, 255, 0.7);
+  background-color: var(--ca-bg);
+  border: 1px solid var(--ca-border);
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.02) !important;
   transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
-:global(.dark) .geo-input-select :deep(.el-select__wrapper),
-:global(.dark) .geo-input-select :deep(.el-tree-select__wrapper) {
-  background-color: rgba(0, 0, 0, 0.25);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-}
-
 .geo-input-select :deep(.el-select__wrapper:hover),
 .geo-input-select :deep(.el-tree-select__wrapper:hover) {
-  background-color: rgba(255, 255, 255, 0.8);
-  border-color: rgba(255, 255, 255, 0.9);
+  background-color: var(--ca-hover-bg);
+  border-color: var(--ca-hover-bd);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04) !important;
-}
-
-:global(.dark) .geo-input-select :deep(.el-select__wrapper:hover),
-:global(.dark) .geo-input-select :deep(.el-tree-select__wrapper:hover) {
-  background-color: rgba(0, 0, 0, 0.45);
-  border-color: rgba(255, 255, 255, 0.15);
 }
 
 .geo-input-select :deep(.el-select__wrapper.is-focused),
 .geo-input-select :deep(.el-tree-select__wrapper.is-focused) {
-  background-color: #ffffff;
-  border-color: #0d9488;
-  box-shadow: 0 0 0 1px #0d9488, 0 4px 14px rgba(13, 148, 136, 0.1) !important;
-}
-
-:global(.dark) .geo-input-select :deep(.el-select__wrapper.is-focused),
-:global(.dark) .geo-input-select :deep(.el-tree-select__wrapper.is-focused) {
-  background-color: rgba(0, 0, 0, 0.6);
-  border-color: #14b8a6;
-  box-shadow: 0 0 0 1px #14b8a6, 0 4px 14px rgba(20, 184, 166, 0.15) !important;
+  background-color: var(--ca-focus-bg);
+  border-color: var(--ca-focus-bd);
+  box-shadow: var(--ca-ring) !important;
 }
 
 .geo-input-select :deep(.el-select__placeholder),
@@ -2404,7 +2370,7 @@ onUnmounted(() => {
 
 .input-icon {
   font-size: 18px;
-  color: #94a3b8;
+  color: var(--ca-muted);
 }
 
 .geo-input :deep(.el-input__wrapper.is-focus .input-icon) {
@@ -2480,11 +2446,6 @@ onUnmounted(() => {
     border-color 0.24s ease,
     box-shadow 0.24s ease;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.02);
-}
-
-:global(.dark) .staff-lookup-card {
-  background: rgba(0, 0, 0, 0.2);
-  border-color: rgba(255, 255, 255, 0.08);
 }
 
 .staff-lookup-card.is-loading::before {
@@ -2574,7 +2535,7 @@ onUnmounted(() => {
 }
 
 .staff-lookup-card__grid span {
-  color: #94a3b8;
+  color: var(--ca-muted);
   font-size: 11px;
   line-height: 1.4;
 }
@@ -2641,11 +2602,6 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-:global(.dark) .captcha-box {
-  background: rgba(0, 0, 0, 0.2);
-  border-color: rgba(255, 255, 255, 0.05);
-}
-
 .captcha-box--placeholder {
   border-color: transparent;
   background: transparent;
@@ -2655,10 +2611,6 @@ onUnmounted(() => {
   background: rgba(255, 255, 255, 0.6);
   border-color: rgba(255, 255, 255, 0.9);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.02);
-}
-
-:global(.dark) .captcha-box:hover {
-  background: rgba(0, 0, 0, 0.4);
 }
 
 .captcha-box:active {
@@ -2672,7 +2624,7 @@ onUnmounted(() => {
 
 .captcha-loading {
   font-size: 12px;
-  color: #64748b;
+  color: var(--ca-muted);
 }
 
 .captcha-render {
@@ -2689,7 +2641,7 @@ onUnmounted(() => {
   margin-top: -6px;
   font-size: 12px;
   line-height: 1.6;
-  color: #64748b;
+  color: var(--ca-muted);
 }
 
 .capability-alert__content {
@@ -2712,7 +2664,7 @@ onUnmounted(() => {
 
 .forgot-link {
   font-size: 13px;
-  color: #64748b;
+  color: var(--ca-muted);
   text-decoration: none;
   transition: color 0.2s;
 }
@@ -2809,10 +2761,6 @@ onUnmounted(() => {
     border-bottom: 1px solid rgba(0, 0, 0, 0.02); /* 淡化底部边界线 */
   }
 
-  :global(.dark) .brand-panel {
-    border-bottom: 1px solid rgba(255, 255, 255, 0.02);
-  }
-
   .brand-title {
     font-size: 28px;
     margin-bottom: 8px;
@@ -2901,8 +2849,34 @@ onUnmounted(() => {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .geo-blob {
+  .client-auth-page *,
+  .client-auth-page *::before,
+  .client-auth-page *::after {
     animation: none !important;
+    transition: none !important;
   }
+
+  .wrapper-main,
+  .wrapper-sub,
+  .brand-panel:is(.is-username-focus, .is-password-focus, .is-register-mode) :is(.wrapper-main, .wrapper-sub) {
+    opacity: 1 !important;
+    transform: none !important;
+  }
+
+  .geo-decor,
+  .brand-panel:is(.is-username-focus, .is-password-focus, .is-register-mode) :is(.circle-main, .circle-sub) {
+    border-radius: 50% !important;
+    box-shadow: none !important;
+    transform: none !important;
+  }
+
+  :is(.geo-fade-enter-from, .geo-fade-leave-to, .auth-fade-enter-from, .auth-fade-leave-to, .staff-lookup-enter-from, .staff-lookup-leave-to),
+  :is(.staff-lookup-enter-from, .staff-lookup-leave-to) .staff-lookup-card {
+    filter: none !important;
+    grid-template-rows: 1fr !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+
 }
 </style>
