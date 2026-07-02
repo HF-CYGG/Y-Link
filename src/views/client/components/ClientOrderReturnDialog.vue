@@ -9,6 +9,7 @@
  */
 
 import type { O2oPreorderDetail } from '@/api/modules/o2o'
+import { PassiveNumberInput } from '@/components/common'
 
 const props = defineProps<{
   visible: boolean
@@ -83,7 +84,7 @@ const resolveReturnItemKey = (productId: string, skuId?: string | null) => skuId
             </div>
             <div class="w-full md:w-44">
               <p class="mb-2 text-xs text-slate-400">本次退货数量</p>
-              <el-input-number
+              <PassiveNumberInput
                 :model-value="Number(props.returnQtyMap[resolveReturnItemKey(item.productId, item.skuId)] ?? 0)"
                 :min="0"
                 :max="item.availableReturnQty"

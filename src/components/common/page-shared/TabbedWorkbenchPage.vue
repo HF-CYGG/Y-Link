@@ -12,6 +12,7 @@
  */
 import { computed, type Component } from 'vue'
 import { PageContainer } from '@/components/common'
+import PassiveSegmentedTabs from './PassiveSegmentedTabs.vue'
 
 interface WorkbenchTabOption {
   label: string
@@ -83,14 +84,12 @@ const resolvedComponentCacheKey = computed(() => {
           </div>
 
           <div class="supplier-workbench-shell__tab-wrap">
-            <el-tabs :model-value="props.activeTab" @tab-change="handleTabChange">
-              <el-tab-pane
-                v-for="tab in props.tabs"
-                :key="tab.name"
-                :label="tab.label"
-                :name="tab.name"
-              />
-            </el-tabs>
+            <PassiveSegmentedTabs
+              :model-value="props.activeTab"
+              :tabs="props.tabs"
+              aria-label="工作台标签"
+              @tab-change="handleTabChange"
+            />
           </div>
         </div>
       </div>
@@ -142,51 +141,12 @@ const resolvedComponentCacheKey = computed(() => {
 }
 
 /* 统一工作台标签视觉：
- * - 改为与系统配置页一致的下划线标签风格，避免同站点里出现两套切换语言；
- * - 保留 Element Plus 原生 active bar 与键盘可访问性，仅做轻量收口。
+ * - 改为共享被动标签组件，避免 Element Plus Tabs 在可滚动标签区注册非被动 wheel 监听；
+ * - 继续保持下划线标签风格与键盘可访问性，不改变产品中心、用户中心等工作台的切换契约。
  */
-.supplier-workbench-shell :deep(.el-tabs__header) {
-  margin: 0;
-}
-
-.supplier-workbench-shell :deep(.el-tabs__nav-scroll) {
-  overflow: auto;
-  padding-bottom: 0;
-}
-
-.supplier-workbench-shell :deep(.el-tabs__nav) {
-  display: inline-flex;
-  gap: 0;
-  padding: 0;
-}
-
-.supplier-workbench-shell :deep(.el-tabs__item) {
-  height: auto;
-  border-radius: 0;
-  padding: 0.85rem 1.15rem;
-  color: rgb(51 65 85);
-  font-weight: 600;
-  line-height: 1.2;
-  transition:
-    color 0.16s ease,
-    opacity 0.16s ease;
-}
-
-.supplier-workbench-shell :deep(.el-tabs__item:hover) {
-  color: rgb(15 23 42);
-}
-
-.supplier-workbench-shell :deep(.el-tabs__item.is-active) {
-  color: rgb(15 118 110);
-}
-
-.supplier-workbench-shell :deep(.el-tabs__active-bar) {
-  background-color: rgb(13 148 136);
-  height: 2px;
-}
-
-.supplier-workbench-shell :deep(.el-tabs__content) {
-  display: none;
+.supplier-workbench-shell :deep(.passive-segmented-tabs) {
+  width: auto;
+  max-width: 100%;
 }
 
 @media (max-width: 767px) {
@@ -214,19 +174,8 @@ const resolvedComponentCacheKey = computed(() => {
     line-height: 1.45;
   }
 
-  .supplier-workbench-shell :deep(.el-tabs__item) {
-    padding: 0.78rem 0.82rem;
-    font-size: 0.92rem;
-  }
-
-  .supplier-workbench-shell--compact-mobile :deep(.el-tabs__item) {
+  .supplier-workbench-shell--compact-mobile :deep(.passive-segmented-tabs .el-segmented__item-label) {
     padding: 0.62rem 0.76rem;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .supplier-workbench-shell :deep(.el-tabs__item) {
-    transition: none;
   }
 }
 </style>

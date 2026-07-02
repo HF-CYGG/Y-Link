@@ -34,6 +34,7 @@ import {
   BizCrudDialogShell,
   BizResponsiveDataCollectionShell,
   PassiveNumberInput,
+  PassivePreviewImage,
   PageToolbarCard,
 } from '@/components/common'
 import { useCrudManager } from '@/composables/useCrudManager'
@@ -1504,15 +1505,14 @@ onActivated(() => {
                         :disabled="isSkuThumbnailUploading(row)"
                       >
                         <button type="button" class="sku-thumb-button" :class="{ 'is-uploading': isSkuThumbnailUploading(row) }">
-                          <el-image
+                          <PassivePreviewImage
                             v-if="resolveSkuThumbnail(row) && !isSkuThumbnailUploading(row)"
                             :src="resolveSkuThumbnail(row)"
-                            :preview-src-list="currentSkuPreviewImageList(row)"
-                            preview-teleported
+                            :preview-images="currentSkuPreviewImageList(row)"
                             fit="cover"
                             class="sku-thumb-image"
                             alt="规格预览图"
-                            @click.stop
+                            dialog-title="规格预览图"
                           />
                           <template v-else-if="isSkuThumbnailUploading(row)">
                             <span class="sku-thumb-progress-label">{{ resolveSkuThumbnailUploadProgress(row) }}%</span>
