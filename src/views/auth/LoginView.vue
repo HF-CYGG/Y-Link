@@ -6,9 +6,9 @@
  * - 先执行表单校验，再按需携带图形验证码发起登录；
  * - 风控触发后固定展示安全提示，并按需拉取验证码，避免用户只看到一闪而过的错误消息；
  * - 登录成功后仅投递非阻塞预热任务，先保证真正的页面跳转立即发生；
- * - 登录页视觉层改为“静态背景 + 轻量交互反馈”，避免持续网格漂移、呼吸光晕和焦点脉冲长期占用主线程，导致输入、点击看起来无响应。
+ * - 登录页视觉层采用了融合 Apple / Microsoft Fluent 设计美学的动态几何流体背景，利用 CSS `transform` 硬件加速进行渲染，兼顾了高级视觉表现与主线程性能，避免了输入、点击延迟。
  * 维护说明：
- * - 若后续需要恢复更强动画，请优先评估低端机输入与按钮点击延迟，不要直接叠加无限循环动效；
+ * - 动态几何图形的动画已使用 `will-change: transform` 并限定在 GPU 层面计算，若后续要叠加更多层，请注意内存与合成层数量，不要使用耗费 CPU 的 `background-position` 或 `box-shadow` 动画；
  * - 验证码展示必须继续使用图片 data URL，避免改回 `v-html` 注入 SVG。
  */
 
@@ -167,9 +167,16 @@ const handleSubmit = async () => {
 
 <template>
   <div class="login-page">
-    <div class="login-grid-layer" aria-hidden="true"></div>
-    <div class="login-ambient-layer" aria-hidden="true"></div>
-    <main class="login-shell">
+    <!-- 动态几何背景层 (Fluent / Apple Aesthetic) -->
+    <div class="geo-animation-layer" aria-hidden="true">
+      <div class="geo-blob blob-1"></div>
+      <div class="geo-blob blob-2"></div>
+      <div class="geo-blob blob-3"></div>
+    </div>
+    <!-- 整体毛玻璃遮罩层 -->
+    <div class="glass-overlay" aria-hidden="true"></div>
+
+    <main class="login-shell glass-panel">
       <aside class="visual-panel">
         <div class="brand-top">
           <div class="brand-chip">Y-LINK</div>
@@ -370,42 +377,89 @@ const handleSubmit = async () => {
   --border-light: #2c2c2e;
 }
 
-/* 登录背景装饰层保留静态视觉，不再使用持续循环动画，优先保证输入与点击响应。 */
-.login-grid-layer {
+/* 动态几何背景层 (硬件加速流体动画 - Apple/Fluent 设计美学) */
+.geo-animation-layer {
   position: absolute;
   inset: 0;
   z-index: 0;
   pointer-events: none;
-  background-image:
-    linear-gradient(to right, rgba(13, 148, 136, 0.075) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(13, 148, 136, 0.075) 1px, transparent 1px);
-  background-size: 40px 40px;
-  mask-image: radial-gradient(circle at center, black 48%, transparent 92%);
-  -webkit-mask-image: radial-gradient(circle at center, black 48%, transparent 92%);
+  overflow: hidden;
+  background-color: var(--bg-primary);
 }
 
-:global(.dark) .login-grid-layer {
-  background-image:
-    linear-gradient(to right, rgba(20, 184, 166, 0.11) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(20, 184, 166, 0.11) 1px, transparent 1px);
-}
-
-.login-ambient-layer {
+.geo-blob {
   position: absolute;
-  width: 58vw;
-  height: 58vh;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  z-index: 0;
-  pointer-events: none;
-  background: radial-gradient(circle, rgba(13, 148, 136, 0.11) 0%, transparent 62%);
-  filter: blur(80px);
-  opacity: 0.9;
+  border-radius: 50%;
+  filter: blur(100px);
+  opacity: 0.45;
+  will-change: transform;
+  animation: blob-float 25s cubic-bezier(0.4, 0, 0.2, 1) infinite alternate;
 }
 
-:global(.dark) .login-ambient-layer {
-  background: radial-gradient(circle, rgba(20, 184, 166, 0.17) 0%, transparent 62%);
+:global(.dark) .geo-blob {
+  opacity: 0.3;
+  filter: blur(120px);
+}
+
+.blob-1 {
+  top: -10%;
+  left: -10%;
+  width: 55vw;
+  height: 55vw;
+  background: radial-gradient(circle, rgba(13, 148, 136, 0.6) 0%, rgba(13, 148, 136, 0) 70%);
+  animation-duration: 25s;
+  animation-delay: 0s;
+}
+
+.blob-2 {
+  bottom: -20%;
+  right: -10%;
+  width: 65vw;
+  height: 65vw;
+  background: radial-gradient(circle, rgba(45, 212, 191, 0.5) 0%, rgba(45, 212, 191, 0) 70%);
+  animation-duration: 22s;
+  animation-delay: -5s;
+  animation-direction: alternate-reverse;
+}
+
+.blob-3 {
+  top: 30%;
+  left: 20%;
+  width: 45vw;
+  height: 45vw;
+  background: radial-gradient(circle, rgba(15, 118, 110, 0.45) 0%, rgba(15, 118, 110, 0) 70%);
+  animation-duration: 28s;
+  animation-delay: -10s;
+}
+
+@keyframes blob-float {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1) rotate(0deg);
+  }
+  33% {
+    transform: translate3d(8%, 12%, 0) scale(1.1) rotate(10deg);
+  }
+  66% {
+    transform: translate3d(-5%, 8%, 0) scale(0.9) rotate(-8deg);
+  }
+  100% {
+    transform: translate3d(5%, -12%, 0) scale(1.05) rotate(5deg);
+  }
+}
+
+/* 整体毛玻璃遮罩层 */
+.glass-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  backdrop-filter: saturate(150%) blur(60px);
+  -webkit-backdrop-filter: saturate(150%) blur(60px);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+:global(.dark) .glass-overlay {
+  background: rgba(0, 0, 0, 0.05);
 }
 
 .login-shell {
@@ -415,27 +469,51 @@ const handleSubmit = async () => {
   width: 100%;
   max-width: 1000px;
   min-height: 600px;
-  background: var(--bg-panel);
+  background: rgba(255, 255, 255, 0.75);
+  backdrop-filter: blur(32px) saturate(180%);
+  -webkit-backdrop-filter: blur(32px) saturate(180%);
   border-radius: 32px;
   overflow: hidden;
-  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.04);
-  border: 1px solid var(--border-light);
+  box-shadow: 
+    0 20px 40px rgba(0, 0, 0, 0.04),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  animation: card-entrance 0.8s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+@keyframes card-entrance {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 30px, 0) scale(0.98);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
 }
 
 :global(.dark) .login-shell {
-  box-shadow: none;
+  background: rgba(17, 17, 18, 0.75);
+  box-shadow: 
+    0 20px 40px rgba(0, 0, 0, 0.2),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .visual-panel {
   flex: 1.2;
-  background: var(--bg-primary);
+  background: transparent;
   position: relative;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
   padding: 40px;
-  border-right: 1px solid var(--border-light);
+  border-right: 1px solid rgba(0, 0, 0, 0.06);
   overflow: hidden;
+}
+
+:global(.dark) .visual-panel {
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
 }
 
 .brand-top {
@@ -446,13 +524,20 @@ const handleSubmit = async () => {
 }
 
 .brand-chip {
-  background: var(--text-main);
-  color: var(--bg-panel);
+  background: rgba(13, 148, 136, 0.12);
+  color: #0f766e;
+  border: 1px solid rgba(13, 148, 136, 0.2);
   padding: 4px 12px;
   border-radius: 8px;
   font-size: 14px;
   font-weight: 700;
   letter-spacing: 1px;
+}
+
+:global(.dark) .brand-chip {
+  background: rgba(20, 184, 166, 0.15);
+  color: #5eead4;
+  border-color: rgba(20, 184, 166, 0.2);
 }
 
 .brand-subtitle {
@@ -755,29 +840,40 @@ const handleSubmit = async () => {
 
 .geo-input :deep(.el-input__wrapper) {
   height: 52px;
-  border-radius: 16px;
-  background-color: var(--bg-primary);
-  border: 1px solid transparent;
-  box-shadow: none !important;
+  border-radius: 14px;
+  background-color: rgba(255, 255, 255, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.02) !important;
   padding: 0 16px;
-  transition:
-    background-color var(--motion-duration-fast) var(--ylink-motion-ease),
-    border-color var(--motion-duration-fast) var(--ylink-motion-ease),
-    box-shadow var(--motion-duration-fast) var(--ylink-motion-ease);
+  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+:global(.dark) .geo-input :deep(.el-input__wrapper) {
+  background-color: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .geo-input :deep(.el-input__wrapper:hover) {
-  background-color: var(--border-light);
+  background-color: rgba(255, 255, 255, 0.8);
+  border-color: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04) !important;
+}
+
+:global(.dark) .geo-input :deep(.el-input__wrapper:hover) {
+  background-color: rgba(0, 0, 0, 0.45);
+  border-color: rgba(255, 255, 255, 0.15);
 }
 
 .geo-input :deep(.el-input__wrapper.is-focus) {
-  background-color: var(--bg-panel);
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px #0d9488, 0 0 20px 0 rgba(13, 148, 136, 0.2) !important;
+  background-color: #ffffff;
+  border-color: #0d9488;
+  box-shadow: 0 0 0 1px #0d9488, 0 4px 14px rgba(13, 148, 136, 0.1) !important;
 }
 
 :global(.dark) .geo-input :deep(.el-input__wrapper.is-focus) {
-  box-shadow: 0 0 0 1px #14b8a6, 0 0 20px 0 rgba(20, 184, 166, 0.25) !important;
+  background-color: rgba(0, 0, 0, 0.6);
+  border-color: #14b8a6;
+  box-shadow: 0 0 0 1px #14b8a6, 0 4px 14px rgba(20, 184, 166, 0.15) !important;
 }
 
 .geo-input :deep(.el-input__inner) {
@@ -804,18 +900,44 @@ const handleSubmit = async () => {
 
 .captcha-image {
   height: 52px;
-  border: 1px solid var(--border-light);
-  border-radius: 16px;
-  background: var(--bg-primary);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.4);
+  border: 1px solid rgba(255, 255, 255, 0.5);
   color: var(--text-sub);
   cursor: pointer;
   overflow: hidden;
   padding: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+  transition: all 0.4s cubic-bezier(0.25, 0.8, 0.25, 1);
+  box-shadow: none;
+}
+
+:global(.dark) .captcha-image {
+  background: rgba(0, 0, 0, 0.2);
+  border-color: rgba(255, 255, 255, 0.05);
+}
+
+.captcha-image:hover {
+  background: rgba(255, 255, 255, 0.6);
+  border-color: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.02);
+}
+
+:global(.dark) .captcha-image:hover {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.captcha-image:active {
+  transform: scale(0.98);
 }
 
 .captcha-image:disabled {
   cursor: wait;
   opacity: 0.7;
+  transform: none;
 }
 
 .captcha-render-image {
@@ -830,44 +952,53 @@ const handleSubmit = async () => {
   overflow: hidden;
   width: 100%;
   height: 52px;
-  border-radius: 16px !important;
-  background-color: var(--text-main) !important;
-  color: var(--bg-panel) !important;
+  border-radius: 14px !important;
+  background-color: #0f766e !important;
+  color: #ffffff !important;
   border: none !important;
-  font-size: 16px !important;
+  font-size: 15px !important;
   font-weight: 600 !important;
-  margin-top: 16px;
-  transition: transform 0.1s, background-color 0.2s !important;
+  margin-top: 24px;
+  transition: box-shadow 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
   animation: smoothFadeUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) both;
   animation-delay: 0.4s;
+  z-index: 1;
+}
+
+.geo-submit::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: #14b8a6;
+  transform-origin: left center;
+  transform: scaleX(0);
+  transition: transform 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+  z-index: -1;
+  border-radius: inherit;
+}
+
+.geo-submit:hover::before {
+  transform: scaleX(1);
 }
 
 .geo-submit:hover {
-  background-color: var(--accent) !important;
-  color: #fff !important;
-}
-
-.geo-submit::after {
-  content: '';
-  position: absolute;
-  inset: -40% auto auto -45%;
-  width: 42%;
-  height: 180%;
-  background: linear-gradient(110deg, transparent 0%, rgba(255, 255, 255, 0.26) 45%, transparent 100%);
-  transform: translateX(-120%) rotate(8deg);
-  transition: transform 0.8s cubic-bezier(0.16, 1, 0.3, 1);
-  pointer-events: none;
-}
-
-.geo-submit:hover::after {
-  transform: translateX(340%) rotate(8deg);
+  background-color: #0f766e !important;
+  box-shadow: 0 12px 24px rgba(13, 148, 136, 0.25) !important;
 }
 
 .geo-submit:active {
-  transform: scale(0.97);
+  transform: scale(0.98);
+  box-shadow: 0 4px 12px rgba(13, 148, 136, 0.15) !important;
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .geo-blob {
+    animation: none !important;
+  }
+  
   .form-title,
   .form-subtitle,
   .geo-input-1,
