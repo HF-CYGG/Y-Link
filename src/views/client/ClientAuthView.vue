@@ -2803,11 +2803,11 @@ onUnmounted(() => {
     max-height: 280px;
     overflow: hidden; /* 移动端限制高度并裁剪流体 */
     border-right: none;
-    border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+    border-bottom: 1px solid rgba(0, 0, 0, 0.02); /* 淡化底部边界线 */
   }
 
   :global(.dark) .brand-panel {
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.02);
   }
 
   .brand-title {
@@ -2817,60 +2817,63 @@ onUnmounted(() => {
 
   .brand-subtitle {
     font-size: 14px;
+    margin-top: 12px; /* 增加副标题上方留白 */
+    opacity: 0.8;
   }
 
   .brand-footer {
     display: none;
   }
 
-  /* 移动端：缩小流体几何与位移范围 */
+  /* 移动端：缩小流体几何与位移范围，深度防遮挡 */
   .wrapper-main {
-    width: 200px;
-    height: 200px;
-    top: -20px;
-    right: -20px;
+    width: 160px;
+    height: 160px;
+    top: -10px;
+    right: 0px;
   }
 
   .wrapper-sub {
-    width: 140px;
-    height: 140px;
-    bottom: -20px;
-    left: -20px;
+    width: 110px;
+    height: 110px;
+    bottom: 0px;
+    left: 0px;
   }
 
   .geo-text {
-    font-size: 2rem;
+    font-size: 1.4rem; /* 进一步缩小线框字，完美嵌入几何体 */
     -webkit-text-stroke-width: 1px;
   }
 
   .wrapper-main .geo-text {
-    transform: translate3d(-8px, 8px, 0);
+    transform: translate3d(-4px, 4px, 0);
   }
 
   .wrapper-sub .geo-text {
-    transform: translate3d(8px, -8px, 0);
+    transform: translate3d(4px, -4px, 0);
   }
 
-  /* 移动端交互坐标覆写 */
+  /* 移动端交互坐标覆写：极限压缩下方的位移，防止触碰底边裁切线 */
   .brand-panel.is-username-focus .wrapper-main {
-    transform: translate3d(-10px, 10px, 0) scale(1.05);
+    transform: translate3d(-5px, 5px, 0) scale(1.05);
   }
   .brand-panel.is-username-focus .wrapper-sub {
-    transform: translate3d(10px, -10px, 0) scale(0.95);
+    transform: translate3d(5px, -5px, 0) scale(0.95);
   }
 
   .brand-panel.is-password-focus .wrapper-main {
-    transform: translate3d(5px, -10px, 0) scale(1.1);
+    transform: translate3d(5px, -5px, 0) scale(1.05);
   }
   .brand-panel.is-password-focus .wrapper-sub {
-    transform: translate3d(-10px, 10px, 0) scale(0.9);
+    /* 重点修复：向上方移动，避免 "SAFE" 被裁切 */
+    transform: translate3d(-5px, -10px, 0) scale(0.9);
   }
 
   .brand-panel.is-register-mode .wrapper-main {
-    transform: translate3d(-40px, 40px, 0) scale(1.15);
+    transform: translate3d(-20px, 20px, 0) scale(1.1);
   }
   .brand-panel.is-register-mode .wrapper-sub {
-    transform: translate3d(20px, -30px, 0) scale(1.05);
+    transform: translate3d(10px, -20px, 0) scale(1.05);
   }
 
   .form-panel {
@@ -2882,7 +2885,7 @@ onUnmounted(() => {
   }
 
   .auth-mode-toggle {
-    margin-bottom: 32px;
+    margin-bottom: 24px; /* 稍微拉近与下方的距离，优化留白 */
   }
 
   .auth-welcome {
