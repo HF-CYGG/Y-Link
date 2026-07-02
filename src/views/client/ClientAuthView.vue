@@ -156,6 +156,8 @@ const formWrapperRef = ref<HTMLElement | null>(null)
 const formBlockRef = ref<HTMLElement | null>(null)
 const formWrapperHeight = ref('auto')
 const formAnimating = ref(false)
+const usernameFocused = ref(false)
+const passwordFocused = ref(false)
 const authCapabilities = ref<ClientAuthCapabilities | null>(null)
 const captcha = reactive<ClientCaptchaState>({
   captchaId: '',
@@ -196,6 +198,20 @@ const redirectPath = computed(() => {
 const registerAccountChannel = computed(() => resolveAccountChannel(registerForm.account))
 const isRegisterMode = computed(() => activeMode.value !== 'login')
 const isDepartmentRegisterMode = computed(() => activeMode.value === 'register-department')
+
+const geoMainText = computed(() => {
+  if (isRegisterMode.value) return 'HI'
+  if (usernameFocused.value) return 'ID'
+  if (passwordFocused.value) return 'KEY'
+  return 'Y'
+})
+
+const geoSubText = computed(() => {
+  if (isRegisterMode.value) return 'NEW'
+  if (usernameFocused.value) return 'USER'
+  if (passwordFocused.value) return 'SAFE'
+  return 'LINK'
+})
 const registerAccountType = computed<ClientAccountType>(() => {
   return 'personal'
 })
@@ -1131,13 +1147,38 @@ onUnmounted(() => {
 
 <template>
   <div class="client-auth-page">
-    <div class="bg-shape shape-1"></div>
-    <div class="bg-shape shape-2"></div>
+    <!-- 动态几何背景层 (Fluent / Apple Aesthetic) -->
+    <div class="geo-animation-layer" aria-hidden="true">
+      <div class="geo-blob blob-1"></div>
+      <div class="geo-blob blob-2"></div>
+      <div class="geo-blob blob-3"></div>
+    </div>
+    <!-- 整体毛玻璃遮罩层 -->
+    <div class="glass-overlay" aria-hidden="true"></div>
 
     <main class="auth-shell">
-      <aside class="brand-panel">
-        <div class="geo-decor circle-main"></div>
-        <div class="geo-decor circle-sub"></div>
+      <aside 
+        class="brand-panel"
+        :class="{
+          'is-username-focus': usernameFocused,
+          'is-password-focus': passwordFocused,
+          'is-register-mode': isRegisterMode
+        }"
+      >
+        <div class="geo-decor-wrapper wrapper-main">
+          <div class="geo-decor circle-main">
+            <Transition name="geo-fade" mode="out-in">
+              <span :key="geoMainText" class="geo-text">{{ geoMainText }}</span>
+            </Transition>
+          </div>
+        </div>
+        <div class="geo-decor-wrapper wrapper-sub">
+          <div class="geo-decor circle-sub">
+            <Transition name="geo-fade" mode="out-in">
+              <span :key="geoSubText" class="geo-text">{{ geoSubText }}</span>
+            </Transition>
+          </div>
+        </div>
 
         <div class="brand-content">
           <div class="brand-tag">Y-LINK CLIENT</div>
@@ -1264,13 +1305,30 @@ onUnmounted(() => {
                   class="mt-6 space-y-4"
                   :class="{ 'login-form--compact': isCompactLoginLayout }"
                 >
-                  <el-input v-model="loginForm.account" placeholder="姓名 / 手机号 / 邮箱 / 工号" class="geo-input" size="large" clearable>
+                  <el-input 
+                    v-model="loginForm.account" 
+                    placeholder="姓名 / 手机号 / 邮箱 / 工号" 
+                    class="geo-input" 
+                    size="large" 
+                    clearable
+                    @focus="usernameFocused = true"
+                    @blur="usernameFocused = false"
+                  >
                     <template #prefix>
                       <el-icon class="input-icon"><User /></el-icon>
                     </template>
                   </el-input>
 
-                  <el-input v-model="loginForm.password" placeholder="密码" type="password" class="geo-input" size="large" show-password>
+                  <el-input 
+                    v-model="loginForm.password" 
+                    placeholder="密码" 
+                    type="password" 
+                    class="geo-input" 
+                    size="large" 
+                    show-password
+                    @focus="passwordFocused = true"
+                    @blur="passwordFocused = false"
+                  >
                     <template #prefix>
                       <el-icon class="input-icon"><Lock /></el-icon>
                     </template>
@@ -1378,7 +1436,15 @@ onUnmounted(() => {
                     </template>
                   </el-input>
 
-                  <el-input v-model="registerForm.account" placeholder="登录账号（手机号或邮箱）" class="geo-input" size="large" clearable>
+                  <el-input 
+                    v-model="registerForm.account" 
+                    placeholder="登录账号（手机号或邮箱）" 
+                    class="geo-input" 
+                    size="large" 
+                    clearable
+                    @focus="usernameFocused = true"
+                    @blur="usernameFocused = false"
+                  >
                     <template #prefix>
                       <el-icon class="input-icon"><User /></el-icon>
                     </template>
@@ -1437,6 +1503,8 @@ onUnmounted(() => {
                     class="geo-input"
                     size="large"
                     show-password
+                    @focus="passwordFocused = true"
+                    @blur="passwordFocused = false"
                   >
                     <template #prefix>
                       <el-icon class="input-icon"><Lock /></el-icon>
@@ -1562,7 +1630,15 @@ onUnmounted(() => {
                     </div>
                   </transition>
 
-                  <el-input v-model="registerForm.account" placeholder="手机号或邮箱" class="geo-input" size="large" clearable>
+                  <el-input 
+                    v-model="registerForm.account" 
+                    placeholder="手机号或邮箱" 
+                    class="geo-input" 
+                    size="large" 
+                    clearable
+                    @focus="usernameFocused = true"
+                    @blur="usernameFocused = false"
+                  >
                     <template #prefix>
                       <el-icon class="input-icon"><User /></el-icon>
                     </template>
@@ -1620,6 +1696,8 @@ onUnmounted(() => {
                     class="geo-input"
                     size="large"
                     show-password
+                    @focus="passwordFocused = true"
+                    @blur="passwordFocused = false"
                   >
                     <template #prefix>
                       <el-icon class="input-icon"><Lock /></el-icon>
@@ -1680,29 +1758,93 @@ onUnmounted(() => {
   padding: 24px;
 }
 
-.bg-shape {
+/* 动态几何背景层 (硬件加速流体动画 - Apple/Fluent 设计美学) */
+.geo-animation-layer {
   position: absolute;
-  filter: blur(100px);
+  inset: 0;
   z-index: 0;
   pointer-events: none;
+  overflow: hidden;
+  background-color: #f8fafc;
 }
 
-.shape-1 {
-  width: 60vw;
-  height: 60vw;
-  background: rgba(13, 148, 136, 0.05);
-  top: -20%;
-  left: -20%;
+:global(.dark) .geo-animation-layer {
+  background-color: #000000;
+}
+
+.geo-blob {
+  position: absolute;
   border-radius: 50%;
+  filter: blur(120px);
+  opacity: 0.35;
+  will-change: transform;
+  animation: blob-float 25s cubic-bezier(0.4, 0, 0.2, 1) infinite alternate;
 }
 
-.shape-2 {
-  width: 50vw;
-  height: 50vw;
-  background: rgba(56, 189, 248, 0.05);
-  bottom: -10%;
+:global(.dark) .geo-blob {
+  opacity: 0.25;
+  filter: blur(140px);
+}
+
+.blob-1 {
+  top: -10%;
+  left: -10%;
+  width: 55vw;
+  height: 55vw;
+  background: radial-gradient(circle, rgba(13, 148, 136, 0.5) 0%, rgba(13, 148, 136, 0) 70%);
+  animation-duration: 25s;
+  animation-delay: 0s;
+}
+
+.blob-2 {
+  bottom: -20%;
   right: -10%;
-  border-radius: 50%;
+  width: 65vw;
+  height: 65vw;
+  background: radial-gradient(circle, rgba(56, 189, 248, 0.4) 0%, rgba(56, 189, 248, 0) 70%);
+  animation-duration: 22s;
+  animation-delay: -5s;
+  animation-direction: alternate-reverse;
+}
+
+.blob-3 {
+  top: 30%;
+  left: 20%;
+  width: 45vw;
+  height: 45vw;
+  background: radial-gradient(circle, rgba(15, 118, 110, 0.35) 0%, rgba(15, 118, 110, 0) 70%);
+  animation-duration: 28s;
+  animation-delay: -10s;
+}
+
+@keyframes blob-float {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1) rotate(0deg);
+  }
+  33% {
+    transform: translate3d(8%, 12%, 0) scale(1.1) rotate(10deg);
+  }
+  66% {
+    transform: translate3d(-5%, 8%, 0) scale(0.9) rotate(-8deg);
+  }
+  100% {
+    transform: translate3d(5%, -12%, 0) scale(1.05) rotate(5deg);
+  }
+}
+
+/* 整体毛玻璃遮罩层 */
+.glass-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  backdrop-filter: saturate(150%) blur(60px);
+  -webkit-backdrop-filter: saturate(150%) blur(60px);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+:global(.dark) .glass-overlay {
+  background: rgba(0, 0, 0, 0.05);
 }
 
 .auth-shell {
@@ -1712,44 +1854,211 @@ onUnmounted(() => {
   width: 100%;
   max-width: 960px;
   min-height: 600px;
-  background: #ffffff;
+  background: rgba(255, 255, 255, 0.75);
+  backdrop-filter: blur(32px) saturate(180%);
+  -webkit-backdrop-filter: blur(32px) saturate(180%);
   border-radius: 32px;
-  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.04), 0 1px 3px rgba(0, 0, 0, 0.02);
+  box-shadow: 
+    0 20px 40px rgba(0, 0, 0, 0.04),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.5);
   overflow: hidden;
+  animation: card-entrance 0.8s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+@keyframes card-entrance {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 30px, 0) scale(0.98);
+  }
+  100% {
+    opacity: 1;
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+}
+
+:global(.dark) .auth-shell {
+  background: rgba(17, 17, 18, 0.75);
+  box-shadow: 
+    0 20px 40px rgba(0, 0, 0, 0.2),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .brand-panel {
   flex: 1;
-  background: linear-gradient(135deg, #f0fdfa 0%, #f8fafc 100%);
+  background: transparent;
   padding: 48px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
   position: relative;
-  overflow: hidden;
+  /* 移除 overflow: hidden 允许几何体稍微溢出面板（外层 .auth-shell 仍有圆角限制） */
+  border-right: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+:global(.dark) .brand-panel {
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.geo-decor-wrapper {
+  position: absolute;
+  pointer-events: none;
+  transition: transform 0.8s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.8s cubic-bezier(0.22, 1, 0.36, 1);
+  z-index: 0;
+}
+
+/* 初始进场弹性动画 */
+.wrapper-main {
+  top: 10%;
+  right: 5%;
+  width: 300px;
+  height: 300px;
+  animation: geo-entrance 1s cubic-bezier(0.34, 1.56, 0.64, 1) backwards;
+}
+
+.wrapper-sub {
+  bottom: 15%;
+  left: 5%;
+  width: 220px;
+  height: 220px;
+  animation: geo-entrance 1.2s cubic-bezier(0.34, 1.56, 0.64, 1) 0.1s backwards;
+}
+
+@keyframes geo-entrance {
+  0% {
+    opacity: 0;
+    transform: scale(0.5) translate3d(0, 50px, 0);
+  }
+  100% {
+    opacity: 1;
+    transform: scale(1) translate3d(0, 0, 0);
+  }
+}
+
+/* 交互状态响应：登录输入用户名 */
+.brand-panel.is-username-focus .wrapper-main {
+  transform: translate3d(-15px, 25px, 0) scale(1.08);
+}
+.brand-panel.is-username-focus .wrapper-sub {
+  transform: translate3d(25px, -15px, 0) scale(0.92);
+}
+.brand-panel.is-username-focus .circle-main {
+  border-radius: 50% 50% 30% 70% / 60% 40% 60% 40%;
+  box-shadow: 0 0 40px rgba(13, 148, 136, 0.2);
+}
+.brand-panel.is-username-focus .circle-sub {
+  border-radius: 70% 30% 50% 50% / 40% 60% 40% 60%;
+  box-shadow: 0 0 30px rgba(13, 148, 136, 0.15);
+}
+
+/* 交互状态响应：登录输入密码 (错位分离) */
+.brand-panel.is-password-focus .wrapper-main {
+  transform: translate3d(10px, -30px, 0) scale(1.15);
+}
+.brand-panel.is-password-focus .wrapper-sub {
+  transform: translate3d(-20px, 20px, 0) scale(0.85);
+}
+.brand-panel.is-password-focus .circle-main {
+  border-radius: 30% 70% 50% 50% / 50% 50% 70% 30%;
+  box-shadow: 0 0 50px rgba(13, 148, 136, 0.25);
+}
+.brand-panel.is-password-focus .circle-sub {
+  border-radius: 50% 50% 70% 30% / 30% 70% 50% 50%;
+  box-shadow: 0 0 40px rgba(13, 148, 136, 0.2);
+}
+
+/* 交互状态响应：注册模式 (包裹欢迎字样) */
+.brand-panel.is-register-mode .wrapper-main {
+  transform: translate3d(-80px, 100px, 0) scale(1.35);
+}
+.brand-panel.is-register-mode .wrapper-sub {
+  transform: translate3d(50px, -60px, 0) scale(1.15);
+}
+.brand-panel.is-register-mode .circle-main {
+  border-radius: 30% 70% 70% 30% / 30% 30% 70% 70%;
+  box-shadow: 0 0 60px rgba(13, 148, 136, 0.15);
+}
+.brand-panel.is-register-mode .circle-sub {
+  border-radius: 60% 40% 30% 70% / 60% 30% 70% 40%;
+  box-shadow: 0 0 40px rgba(13, 148, 136, 0.1);
 }
 
 .geo-decor {
-  position: absolute;
+  width: 100%;
+  height: 100%;
   border-radius: 50%;
-  pointer-events: none;
+  will-change: transform, border-radius, box-shadow;
+  transition: all 1.2s cubic-bezier(0.16, 1, 0.3, 1);
+  animation: geo-decor-float 15s cubic-bezier(0.4, 0, 0.2, 1) infinite alternate;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+@keyframes geo-decor-float {
+  0% {
+    transform: translate3d(0, 0, 0) scale(1) rotate(0deg);
+    border-radius: 60% 40% 30% 70% / 60% 30% 70% 40%;
+  }
+  50% {
+    border-radius: 30% 60% 70% 40% / 50% 60% 30% 60%;
+  }
+  100% {
+    transform: translate3d(-10px, 15px, 0) scale(1.05) rotate(10deg);
+    border-radius: 40% 60% 70% 30% / 40% 40% 60% 50%;
+  }
 }
 
 .circle-main {
-  width: 300px;
-  height: 300px;
-  background: rgba(13, 148, 136, 0.04);
-  border: 1px solid rgba(13, 148, 136, 0.08);
-  top: -50px;
-  right: -80px;
+  background: rgba(13, 148, 136, 0.06);
+  border: 1px solid rgba(13, 148, 136, 0.12);
+  animation-duration: 20s;
 }
 
 .circle-sub {
-  width: 200px;
-  height: 200px;
-  background: rgba(13, 148, 136, 0.03);
-  bottom: 10%;
-  left: -50px;
+  background: rgba(13, 148, 136, 0.05);
+  border: 1px solid rgba(13, 148, 136, 0.1);
+  animation-duration: 16s;
+  animation-direction: alternate-reverse;
+}
+
+.geo-text {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 3.5rem;
+  font-weight: 800;
+  color: transparent;
+  -webkit-text-stroke: 1.5px rgba(13, 148, 136, 0.3);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.wrapper-main .geo-text {
+  transform: translate3d(-15px, 15px, 0);
+}
+
+.wrapper-sub .geo-text {
+  transform: translate3d(15px, -15px, 0);
+}
+
+:global(.dark) .geo-text {
+  -webkit-text-stroke: 1.5px rgba(20, 184, 166, 0.25);
+}
+
+.geo-fade-enter-active,
+.geo-fade-leave-active {
+  transition: opacity 0.4s ease, filter 0.4s ease;
+}
+
+.geo-fade-enter-from,
+.geo-fade-leave-to {
+  opacity: 0;
+  filter: blur(8px);
 }
 
 .brand-content {
@@ -1830,7 +2139,7 @@ onUnmounted(() => {
 
 .form-panel {
   flex: 1.1;
-  background: #ffffff;
+  background: transparent;
   padding: 48px;
   display: flex;
   align-items: flex-start;
@@ -1864,10 +2173,18 @@ onUnmounted(() => {
 .mode-toggle {
   position: relative;
   display: flex;
-  background: #f1f5f9;
+  background: rgba(0, 0, 0, 0.03);
   padding: 5px;
   border-radius: 16px;
   margin-bottom: 40px;
+  border: 1px solid rgba(0, 0, 0, 0.04);
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.02);
+}
+
+:global(.dark) .mode-toggle {
+  background: rgba(0, 0, 0, 0.3);
+  border-color: rgba(255, 255, 255, 0.05);
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.2);
 }
 
 .toggle-slider {
@@ -1878,8 +2195,13 @@ onUnmounted(() => {
   height: calc(100% - 10px);
   background: #ffffff;
   border-radius: 12px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
-  transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.04);
+  transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+:global(.dark) .toggle-slider {
+  background: rgba(255, 255, 255, 0.15);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 }
 
 .toggle-btn {
@@ -1903,11 +2225,18 @@ onUnmounted(() => {
 .success-pill {
   margin-bottom: 20px;
   border-radius: 16px;
-  background: rgba(13, 148, 136, 0.18);
-  color: #0f172a;
+  background: rgba(13, 148, 136, 0.12);
+  border: 1px solid rgba(13, 148, 136, 0.2);
+  color: #0f766e;
   padding: 12px 14px;
   font-size: 13px;
   line-height: 1.6;
+}
+
+:global(.dark) .success-pill {
+  background: rgba(20, 184, 166, 0.1);
+  border-color: rgba(20, 184, 166, 0.15);
+  color: #5eead4;
 }
 
 .register-feedback-alert {
@@ -1944,24 +2273,39 @@ onUnmounted(() => {
 .geo-input :deep(.el-input__wrapper) {
   height: 52px;
   border-radius: 14px;
-  background-color: #f8fafc;
-  border: 1px solid transparent;
-  box-shadow: none !important;
+  background-color: rgba(255, 255, 255, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.02) !important;
   padding: 0 16px;
-  transition:
-    background-color var(--ylink-motion-normal) var(--ylink-motion-ease),
-    border-color var(--ylink-motion-normal) var(--ylink-motion-ease),
-    box-shadow var(--ylink-motion-normal) var(--ylink-motion-ease);
+  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+:global(.dark) .geo-input :deep(.el-input__wrapper) {
+  background-color: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .geo-input :deep(.el-input__wrapper:hover) {
-  background-color: #f1f5f9;
+  background-color: rgba(255, 255, 255, 0.8);
+  border-color: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04) !important;
+}
+
+:global(.dark) .geo-input :deep(.el-input__wrapper:hover) {
+  background-color: rgba(0, 0, 0, 0.45);
+  border-color: rgba(255, 255, 255, 0.15);
 }
 
 .geo-input :deep(.el-input__wrapper.is-focus) {
   background-color: #ffffff;
   border-color: #0d9488;
-  box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.1) !important;
+  box-shadow: 0 0 0 1px #0d9488, 0 4px 14px rgba(13, 148, 136, 0.1) !important;
+}
+
+:global(.dark) .geo-input :deep(.el-input__wrapper.is-focus) {
+  background-color: rgba(0, 0, 0, 0.6);
+  border-color: #14b8a6;
+  box-shadow: 0 0 0 1px #14b8a6, 0 4px 14px rgba(20, 184, 166, 0.15) !important;
 }
 
 .geo-input :deep(.el-input__inner) {
@@ -1970,29 +2314,51 @@ onUnmounted(() => {
   font-size: 14px;
 }
 
+:global(.dark) .geo-input :deep(.el-input__inner) {
+  color: #f8fafc;
+}
+
 .geo-input-select :deep(.el-select__wrapper),
 .geo-input-select :deep(.el-tree-select__wrapper) {
   min-height: 52px;
   border-radius: 14px;
-  background-color: #f8fafc;
-  border: 1px solid transparent;
-  box-shadow: none !important;
-  transition:
-    background-color var(--ylink-motion-normal) var(--ylink-motion-ease),
-    border-color var(--ylink-motion-normal) var(--ylink-motion-ease),
-    box-shadow var(--ylink-motion-normal) var(--ylink-motion-ease);
+  background-color: rgba(255, 255, 255, 0.55);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.02) !important;
+  transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+:global(.dark) .geo-input-select :deep(.el-select__wrapper),
+:global(.dark) .geo-input-select :deep(.el-tree-select__wrapper) {
+  background-color: rgba(0, 0, 0, 0.25);
+  border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .geo-input-select :deep(.el-select__wrapper:hover),
 .geo-input-select :deep(.el-tree-select__wrapper:hover) {
-  background-color: #f1f5f9;
+  background-color: rgba(255, 255, 255, 0.8);
+  border-color: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04) !important;
+}
+
+:global(.dark) .geo-input-select :deep(.el-select__wrapper:hover),
+:global(.dark) .geo-input-select :deep(.el-tree-select__wrapper:hover) {
+  background-color: rgba(0, 0, 0, 0.45);
+  border-color: rgba(255, 255, 255, 0.15);
 }
 
 .geo-input-select :deep(.el-select__wrapper.is-focused),
 .geo-input-select :deep(.el-tree-select__wrapper.is-focused) {
   background-color: #ffffff;
   border-color: #0d9488;
-  box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.1) !important;
+  box-shadow: 0 0 0 1px #0d9488, 0 4px 14px rgba(13, 148, 136, 0.1) !important;
+}
+
+:global(.dark) .geo-input-select :deep(.el-select__wrapper.is-focused),
+:global(.dark) .geo-input-select :deep(.el-tree-select__wrapper.is-focused) {
+  background-color: rgba(0, 0, 0, 0.6);
+  border-color: #14b8a6;
+  box-shadow: 0 0 0 1px #14b8a6, 0 4px 14px rgba(20, 184, 166, 0.15) !important;
 }
 
 .geo-input-select :deep(.el-select__placeholder),
@@ -2100,9 +2466,9 @@ onUnmounted(() => {
   gap: 12px;
   min-height: 88px;
   padding: 14px 15px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid rgba(255, 255, 255, 0.6);
   border-radius: 16px;
-  background: #f8fafc;
+  background: rgba(255, 255, 255, 0.45);
   overflow: hidden;
   backface-visibility: hidden;
   transform: translateZ(0);
@@ -2110,7 +2476,12 @@ onUnmounted(() => {
     background-color 0.24s ease,
     border-color 0.24s ease,
     box-shadow 0.24s ease;
-  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.03);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.02);
+}
+
+:global(.dark) .staff-lookup-card {
+  background: rgba(0, 0, 0, 0.2);
+  border-color: rgba(255, 255, 255, 0.08);
 }
 
 .staff-lookup-card.is-loading::before {
@@ -2254,16 +2625,22 @@ onUnmounted(() => {
 .captcha-box {
   width: 120px;
   height: 52px;
-  background: #f8fafc;
+  background: rgba(255, 255, 255, 0.4);
   border-radius: 14px;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   user-select: none;
-  transition: background 0.2s, border-color 0.2s, transform 0.2s;
-  border: 1px dashed #e2e8f0;
+  transition: all 0.4s cubic-bezier(0.25, 0.8, 0.25, 1);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  box-shadow: none;
   overflow: hidden;
+}
+
+:global(.dark) .captcha-box {
+  background: rgba(0, 0, 0, 0.2);
+  border-color: rgba(255, 255, 255, 0.05);
 }
 
 .captcha-box--placeholder {
@@ -2272,8 +2649,17 @@ onUnmounted(() => {
 }
 
 .captcha-box:hover {
-  background: #f1f5f9;
-  transform: translateY(-1px);
+  background: rgba(255, 255, 255, 0.6);
+  border-color: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.02);
+}
+
+:global(.dark) .captcha-box:hover {
+  background: rgba(0, 0, 0, 0.4);
+}
+
+.captcha-box:active {
+  transform: scale(0.98);
 }
 
 .captcha-box:disabled {
@@ -2337,6 +2723,8 @@ onUnmounted(() => {
 }
 
 .submit-btn {
+  position: relative;
+  overflow: hidden;
   width: 100%;
   height: 52px;
   border-radius: 14px !important;
@@ -2346,20 +2734,37 @@ onUnmounted(() => {
   font-size: 15px !important;
   font-weight: 600 !important;
   margin-top: 24px;
-  transition:
-    background-color var(--motion-duration-fast) var(--ylink-motion-ease),
-    box-shadow var(--motion-duration-fast) var(--ylink-motion-ease),
-    transform var(--motion-duration-fast) var(--ylink-motion-ease) !important;
+  transition: box-shadow 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
+  z-index: 1;
+}
+
+.submit-btn::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: #14b8a6; /* 亮绿色填充 */
+  transform-origin: left center;
+  transform: scaleX(0);
+  transition: transform 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+  z-index: -1;
+  border-radius: inherit;
+}
+
+.submit-btn:hover::before {
+  transform: scaleX(1);
 }
 
 .submit-btn:hover {
-  background-color: #0f766e !important;
-  box-shadow: 0 8px 20px rgba(13, 148, 136, 0.2) !important;
-  transform: translateY(-1px);
+  background-color: #0f766e !important; /* 保持原底色，让伪元素覆盖 */
+  box-shadow: 0 12px 24px rgba(13, 148, 136, 0.25) !important;
 }
 
 .submit-btn:active {
-  transform: translateY(1px);
+  transform: scale(0.98);
+  box-shadow: 0 4px 12px rgba(13, 148, 136, 0.15) !important;
 }
 
 .auth-fade-enter-active,
@@ -2392,24 +2797,106 @@ onUnmounted(() => {
   }
 
   .brand-panel {
-    padding: 40px 24px;
+    padding: 32px 24px;
     flex: none;
+    min-height: 240px;
+    max-height: 280px;
+    overflow: hidden; /* 移动端限制高度并裁剪流体 */
+    border-right: none;
+    border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+  }
+
+  :global(.dark) .brand-panel {
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
   }
 
   .brand-title {
-    font-size: 32px;
+    font-size: 28px;
+    margin-bottom: 8px;
+  }
+
+  .brand-subtitle {
+    font-size: 14px;
   }
 
   .brand-footer {
     display: none;
   }
 
+  /* 移动端：缩小流体几何与位移范围 */
+  .wrapper-main {
+    width: 200px;
+    height: 200px;
+    top: -20px;
+    right: -20px;
+  }
+
+  .wrapper-sub {
+    width: 140px;
+    height: 140px;
+    bottom: -20px;
+    left: -20px;
+  }
+
+  .geo-text {
+    font-size: 2rem;
+    -webkit-text-stroke-width: 1px;
+  }
+
+  .wrapper-main .geo-text {
+    transform: translate3d(-8px, 8px, 0);
+  }
+
+  .wrapper-sub .geo-text {
+    transform: translate3d(8px, -8px, 0);
+  }
+
+  /* 移动端交互坐标覆写 */
+  .brand-panel.is-username-focus .wrapper-main {
+    transform: translate3d(-10px, 10px, 0) scale(1.05);
+  }
+  .brand-panel.is-username-focus .wrapper-sub {
+    transform: translate3d(10px, -10px, 0) scale(0.95);
+  }
+
+  .brand-panel.is-password-focus .wrapper-main {
+    transform: translate3d(5px, -10px, 0) scale(1.1);
+  }
+  .brand-panel.is-password-focus .wrapper-sub {
+    transform: translate3d(-10px, 10px, 0) scale(0.9);
+  }
+
+  .brand-panel.is-register-mode .wrapper-main {
+    transform: translate3d(-40px, 40px, 0) scale(1.15);
+  }
+  .brand-panel.is-register-mode .wrapper-sub {
+    transform: translate3d(20px, -30px, 0) scale(1.05);
+  }
+
   .form-panel {
-    padding: 40px 24px;
+    padding: 32px 20px;
+  }
+
+  .auth-form {
+    padding: 0;
+  }
+
+  .auth-mode-toggle {
+    margin-bottom: 32px;
+  }
+
+  .auth-welcome {
+    margin-bottom: 24px;
   }
 
   .register-feedback-alert__actions {
     gap: 4px 10px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .geo-blob {
+    animation: none !important;
   }
 }
 </style>
