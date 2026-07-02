@@ -25,7 +25,7 @@ import {
   type ClientUserListQuery,
   type UpdateClientUserPayload,
 } from '@/api/modules/client-user-manage'
-import { getClientDepartmentConfigs } from '@/api/modules/system-config'
+import { getClientDepartmentConfigs, type ClientDepartmentTreeNode } from '@/api/modules/system-config'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
@@ -33,6 +33,12 @@ import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
 
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
+
+type DepartmentTreeSelectOption = {
+  value: string
+  label: string
+  children?: DepartmentTreeSelectOption[]
+}
 
 const listRequest = useStableRequest()
 const { hasPermission, ensurePermission } = usePermissionAction()
@@ -60,6 +66,7 @@ const canResetUserPassword = computed(() => hasPermission('users:reset_password'
 const canCreateUser = computed(() => hasPermission('users:create'))
 const canOperateUsers = computed(() => canEditUser.value || canToggleUser.value || canResetUserPassword.value)
 const departmentOptions = ref<string[]>([])
+const departmentTree = ref<ClientDepartmentTreeNode[]>([])
 const departmentPathLookup = ref<Record<string, string>>({})
 const departmentOptionsLoading = ref(false)
 
@@ -321,10 +328,10 @@ const resetEditForm = () => {
 
 const normalizeOptionalText = (value: unknown) => (typeof value === 'string' ? value.trim() : '')
 
-const buildDepartmentPathLookup = (tree: Array<{ label: string; children: Array<{ label: string; children: unknown[] }> }>) => {
+const buildDepartmentPathLookup = (tree: ClientDepartmentTreeNode[]) => {
   const pathMap: Record<string, string> = {}
   const labelPathMap = new Map<string, string[]>()
-  const walk = (nodes: Array<{ label: string; children: unknown[] }>, parentPath = '') => {
+  const walk = (nodes: ClientDepartmentTreeNode[], parentPath = '') => {
     nodes.forEach((node) => {
       const currentPath = parentPath ? `${parentPath}-${node.label}` : node.label
       pathMap[currentPath] = currentPath
@@ -332,7 +339,7 @@ const buildDepartmentPathLookup = (tree: Array<{ label: string; children: Array<
       paths.push(currentPath)
       labelPathMap.set(node.label, paths)
       if (Array.isArray(node.children) && node.children.length > 0) {
-        walk(node.children as Array<{ label: string; children: unknown[] }>, currentPath)
+        walk(node.children, currentPath)
       }
     })
   }
@@ -352,6 +359,33 @@ const resolveDepartmentPathDisplay = (value: unknown) => {
   }
   return departmentPathLookup.value[normalized] ?? normalized
 }
+
+const departmentTreeSelectOptions = computed(() => {
+  const buildOptions = (nodes: ClientDepartmentTreeNode[], parentPath = ''): DepartmentTreeSelectOption[] => {
+    return nodes
+      .map((node) => {
+        const label = String(node.label ?? '').trim()
+        if (!label) {
+          return null
+        }
+        const value = parentPath ? `${parentPath}-${label}` : label
+        const children = buildOptions(Array.isArray(node.children) ? node.children : [], value)
+        return {
+          value,
+          label,
+          ...(children.length > 0 ? { children } : {}),
+        }
+      })
+      .filter((item): item is DepartmentTreeSelectOption => Boolean(item))
+  }
+
+  return buildOptions(departmentTree.value)
+})
+const departmentTreeSelectProps = {
+  value: 'value',
+  label: 'label',
+  children: 'children',
+} as const
 
 const buildQueryParams = (): ClientUserListQuery => {
   const params: ClientUserListQuery = {
@@ -406,8 +440,12 @@ const loadDepartmentOptions = async () => {
   try {
     const result = await getClientDepartmentConfigs()
     departmentOptions.value = result.options
+    departmentTree.value = result.tree
     departmentPathLookup.value = buildDepartmentPathLookup(result.tree)
   } catch (error) {
+    departmentOptions.value = []
+    departmentTree.value = []
+    departmentPathLookup.value = {}
     showAppError(extractErrorMessage(error, '加载部门配置失败'))
   } finally {
     departmentOptionsLoading.value = false
@@ -931,16 +969,22 @@ watch(
           </el-form-item>
         </div>
         <el-form-item v-if="!isCreateTeacherProfile" :label="createDepartmentRequired ? '所属部门' : '所属部门（选填）'" prop="departmentName">
-          <el-select
+          <el-tree-select
             v-model="createForm.departmentName"
             :placeholder="createDepartmentRequired ? '请选择部门共享账号所属部门' : '请选择所属部门（选填）'"
             class="w-full"
             clearable
             filterable
+            check-strictly
+            node-key="value"
+            :data="departmentTreeSelectOptions"
+            :props="departmentTreeSelectProps"
             :loading="departmentOptionsLoading"
-          >
-            <el-option v-for="department in departmentOptions" :key="department" :label="department" :value="department" />
-          </el-select>
+            :disabled="departmentOptionsLoading || departmentOptions.length === 0"
+          />
+          <p v-if="departmentOptions.length === 0 && !departmentOptionsLoading" class="mt-2 text-xs text-amber-600">
+            暂无可选部门，请先在“部门配置”中维护部门。
+          </p>
         </el-form-item>
         <div class="grid gap-4 md:grid-cols-2">
           <el-form-item label="登录密码" prop="password">
