@@ -1786,6 +1786,11 @@ onActivated(() => {
   margin: 0 auto;
 }
 
+.sku-thumb-preview-trigger {
+  width: 54px;
+  height: 54px;
+}
+
 .sku-thumb-uploader.is-drag-active .sku-thumb-button {
   border-color: rgb(15 118 110);
   background: rgb(240 253 250);
