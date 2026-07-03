@@ -200,14 +200,16 @@ const isRegisterMode = computed(() => activeMode.value !== 'login')
 const isDepartmentRegisterMode = computed(() => activeMode.value === 'register-department')
 
 const geoMainText = computed(() => {
-  if (isRegisterMode.value) return 'HI'
+  if (activeMode.value === 'register-personal') return 'HI'
+  if (activeMode.value === 'register-department') return 'TEA' // 教师注册：TEA (Teacher)
   if (usernameFocused.value) return 'ID'
   if (passwordFocused.value) return 'KEY'
   return 'Y'
 })
 
 const geoSubText = computed(() => {
-  if (isRegisterMode.value) return 'NEW'
+  if (activeMode.value === 'register-personal') return 'NEW'
+  if (activeMode.value === 'register-department') return 'DEPT' // 教师注册：DEPT (Department)
   if (usernameFocused.value) return 'USER'
   if (passwordFocused.value) return 'SAFE'
   return 'LINK'
@@ -1162,11 +1164,13 @@ onUnmounted(() => {
         :class="{
           'is-username-focus': usernameFocused,
           'is-password-focus': passwordFocused,
-          'is-register-mode': isRegisterMode
+          'is-register-personal': activeMode === 'register-personal',
+          'is-register-department': activeMode === 'register-department'
         }"
       >
         <div class="geo-decor-wrapper wrapper-main">
           <div class="geo-decor circle-main">
+            <div class="glass-specular" aria-hidden="true"></div>
             <Transition name="geo-fade" mode="out-in">
               <span :key="geoMainText" class="geo-text">{{ geoMainText }}</span>
             </Transition>
@@ -1174,6 +1178,7 @@ onUnmounted(() => {
         </div>
         <div class="geo-decor-wrapper wrapper-sub">
           <div class="geo-decor circle-sub">
+            <div class="glass-specular" aria-hidden="true"></div>
             <Transition name="geo-fade" mode="out-in">
               <span :key="geoSubText" class="geo-text">{{ geoSubText }}</span>
             </Transition>
@@ -1794,12 +1799,12 @@ onUnmounted(() => {
   pointer-events: none;
   overflow: hidden;
   background-color: #f8fafc;
+  filter: blur(100px);
 }
 
 .geo-blob {
   position: absolute;
   border-radius: 50%;
-  filter: blur(120px);
   opacity: 0.35;
   will-change: transform;
   animation: blob-float 25s cubic-bezier(0.4, 0, 0.2, 1) infinite alternate;
@@ -1908,31 +1913,35 @@ onUnmounted(() => {
   flex-direction: column;
   justify-content: space-between;
   position: relative;
-  /* 移除 overflow: hidden 允许几何体稍微溢出面板（外层 .auth-shell 仍有圆角限制） */
-  border-right: 1px solid rgba(0, 0, 0, 0.06);
+  border-right: 1px solid rgba(255, 255, 255, 0.6);
+}
+
+:global(.dark .brand-panel) {
+  border-right-color: rgba(255, 255, 255, 0.06);
 }
 
 .geo-decor-wrapper {
   position: absolute;
   pointer-events: none;
-  transition: transform 0.8s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.8s cubic-bezier(0.22, 1, 0.36, 1);
   z-index: 0;
+  will-change: transform;
+  transition: transform 1.2s cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 /* 初始进场弹性动画 */
 .wrapper-main {
-  top: 10%;
+  top: 11%;
   right: 5%;
-  width: 300px;
-  height: 300px;
+  width: 290px;
+  height: 290px;
   animation: geo-entrance 1s cubic-bezier(0.34, 1.56, 0.64, 1) backwards;
 }
 
 .wrapper-sub {
-  bottom: 15%;
-  left: 5%;
-  width: 220px;
-  height: 220px;
+  bottom: 16%;
+  left: 6%;
+  width: 210px;
+  height: 210px;
   animation: geo-entrance 1.2s cubic-bezier(0.34, 1.56, 0.64, 1) 0.1s backwards;
 }
 
@@ -1947,125 +1956,214 @@ onUnmounted(() => {
   }
 }
 
-/* 交互状态响应：登录输入用户名 */
+/* 交互状态：用户名聚焦 (ID / USER) */
 .brand-panel.is-username-focus .wrapper-main {
-  transform: translate3d(-15px, 25px, 0) scale(1.08);
+  transform: translate3d(-18px, 15px, 0) scale(1.06);
 }
 .brand-panel.is-username-focus .wrapper-sub {
   transform: translate3d(25px, -15px, 0) scale(0.92);
 }
-.brand-panel.is-username-focus .circle-main {
-  border-radius: 50% 50% 30% 70% / 60% 40% 60% 40%;
-  box-shadow: 0 0 40px rgba(13, 148, 136, 0.2);
-}
-.brand-panel.is-username-focus .circle-sub {
-  border-radius: 70% 30% 50% 50% / 40% 60% 40% 60%;
-  box-shadow: 0 0 30px rgba(13, 148, 136, 0.15);
-}
 
-/* 交互状态响应：登录输入密码 (错位分离) */
+/* 交互状态：密码聚焦 (KEY / SAFE) */
 .brand-panel.is-password-focus .wrapper-main {
-  transform: translate3d(10px, -30px, 0) scale(1.15);
+  transform: translate3d(15px, -25px, 0) scale(1.12);
 }
 .brand-panel.is-password-focus .wrapper-sub {
-  transform: translate3d(-20px, 20px, 0) scale(0.85);
-}
-.brand-panel.is-password-focus .circle-main {
-  border-radius: 30% 70% 50% 50% / 50% 50% 70% 30%;
-  box-shadow: 0 0 50px rgba(13, 148, 136, 0.25);
-}
-.brand-panel.is-password-focus .circle-sub {
-  border-radius: 50% 50% 70% 30% / 30% 70% 50% 50%;
-  box-shadow: 0 0 40px rgba(13, 148, 136, 0.2);
+  transform: translate3d(-20px, 15px, 0) scale(0.86);
 }
 
-/* 交互状态响应：注册模式 (包裹欢迎字样) */
-.brand-panel.is-register-mode .wrapper-main {
-  transform: translate3d(-80px, 100px, 0) scale(1.35);
-}
-.brand-panel.is-register-mode .wrapper-sub {
-  transform: translate3d(50px, -60px, 0) scale(1.15);
-}
-.brand-panel.is-register-mode .circle-main {
-  border-radius: 30% 70% 70% 30% / 30% 30% 70% 70%;
-  box-shadow: 0 0 60px rgba(13, 148, 136, 0.15);
-}
-.brand-panel.is-register-mode .circle-sub {
-  border-radius: 60% 40% 30% 70% / 60% 30% 70% 40%;
-  box-shadow: 0 0 40px rgba(13, 148, 136, 0.1);
+/* ========================================================= 
+   个人注册状态：亲和液态 (is-register-personal) 
+   ========================================================= */ 
+.brand-panel.is-register-personal .wrapper-main { 
+  /* 大幅舒展，向下移动包裹欢迎词 */ 
+  transform: translate3d(-50px, 75px, 0) scale(1.26) rotate(-5deg); 
+} 
+
+.brand-panel.is-register-personal .circle-main { 
+  /* 柔软不对称的液态水滴超椭圆 */ 
+  border-radius: 28% 72% 65% 35% / 35% 32% 68% 65%; 
+  background: linear-gradient(135deg, rgba(13, 148, 136, 0.18) 0%, rgba(255, 255, 255, 0.22) 100%); 
+} 
+
+.brand-panel.is-register-personal .wrapper-sub { 
+  transform: translate3d(40px, -45px, 0) scale(1.15); 
+} 
+
+.brand-panel.is-register-personal .circle-sub { 
+  border-radius: 68% 32% 35% 65% / 65% 38% 62% 35%; 
+} 
+
+
+/* ========================================================= 
+   教师注册状态：严谨学术徽章 (is-register-department) 
+   ========================================================= */ 
+.brand-panel.is-register-department .wrapper-main { 
+  /* 呈现高雅的倾斜陈列，大小与位置精细契合 */ 
+  transform: translate3d(-40px, 60px, 0) scale(1.24) rotate(15deg); 
+} 
+
+.brand-panel.is-register-department .circle-main { 
+  /* 极其高贵的双尖叶形/菱形超椭圆 (Academic Crest Squircle) */ 
+  border-radius: 22% 78% 22% 78% / 78% 22% 78% 22%; 
+  
+  /* 略带权威感的常春藤深碧绿微调，增强质感深度 */ 
+  background: linear-gradient( 
+    135deg, 
+    rgba(15, 118, 110, 0.22) 0%, 
+    rgba(255, 255, 255, 0.25) 100% 
+  ); 
+  box-shadow: 
+    0 35px 70px -15px rgba(15, 118, 110, 0.12), 
+    inset 0 1.5px 2px rgba(255, 255, 255, 0.8); 
+} 
+
+.brand-panel.is-register-department .wrapper-sub { 
+  /* 互补咬合交叉位移 */ 
+  transform: translate3d(30px, -50px, 0) scale(1.16) rotate(-15deg); 
+} 
+
+.brand-panel.is-register-department .circle-sub { 
+  /* 与主几何体反向咬合的菱形超椭圆 */ 
+  border-radius: 78% 22% 78% 22% / 22% 78% 22% 78%; 
+  background: linear-gradient( 
+    135deg, 
+    rgba(56, 189, 248, 0.16) 0%, 
+    rgba(255, 255, 255, 0.18) 100% 
+  ); 
 }
 
+/* 2. 内层 Decor：专职负责 Squircle 圆角形态切换，以及无限微漂浮 */
 .geo-decor {
   width: 100%;
   height: 100%;
-  border-radius: 50%;
-  will-change: transform, border-radius, box-shadow;
-  transition: all 1.2s cubic-bezier(0.16, 1, 0.3, 1);
-  animation: geo-decor-float 15s cubic-bezier(0.4, 0, 0.2, 1) infinite alternate;
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
-  position: relative;
+  will-change: border-radius, background, box-shadow;
+  
+  background: linear-gradient(
+    135deg,
+    rgba(255, 255, 255, 0.28) 0%,
+    rgba(255, 255, 255, 0.08) 100%
+  );
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  box-shadow:
+    0 25px 50px -12px rgba(13, 148, 136, 0.05),
+    inset 0 1px 1.5px rgba(255, 255, 255, 0.35);
+
+  transition:
+    border-radius 1.2s cubic-bezier(0.16, 1, 0.3, 1),
+    background 1.2s cubic-bezier(0.16, 1, 0.3, 1),
+    box-shadow 1.2s cubic-bezier(0.16, 1, 0.3, 1);
+    
+  animation: apple-fluid-float 18s cubic-bezier(0.4, 0, 0.2, 1) infinite alternate;
 }
 
-@keyframes geo-decor-float {
-  0% {
-    transform: translate3d(0, 0, 0) scale(1) rotate(0deg);
-    border-radius: 60% 40% 30% 70% / 60% 30% 70% 40%;
-  }
-  50% {
-    border-radius: 30% 60% 70% 40% / 50% 60% 30% 60%;
-  }
-  100% {
-    transform: translate3d(-10px, 15px, 0) scale(1.05) rotate(10deg);
-    border-radius: 40% 60% 70% 30% / 40% 40% 60% 50%;
-  }
-}
+/* 3. 各种状态下，主/次几何体的超椭圆（Squircle）圆角变形设定 */
 
+/* 默认状态 */
 .circle-main {
-  background: rgba(13, 148, 136, 0.06);
-  border: 1px solid rgba(13, 148, 136, 0.12);
-  animation-duration: 20s;
+  border-radius: 62% 38% 62% 38% / 45% 48% 52% 55%;
+  background: linear-gradient(135deg, rgba(13, 148, 136, 0.16) 0%, rgba(255, 255, 255, 0.15) 100%);
+  animation-duration: 22s;
 }
-
 .circle-sub {
-  background: rgba(13, 148, 136, 0.05);
-  border: 1px solid rgba(13, 148, 136, 0.1);
+  border-radius: 38% 62% 45% 55% / 50% 42% 58% 50%;
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.12) 0%, rgba(255, 255, 255, 0.12) 100%);
   animation-duration: 16s;
   animation-direction: alternate-reverse;
 }
 
-.geo-text {
+/* 用户名聚焦形态 */
+.brand-panel.is-username-focus .circle-main {
+  border-radius: 38% 62% 45% 55% / 55% 38% 62% 45%;
+}
+.brand-panel.is-username-focus .circle-sub {
+  border-radius: 55% 45% 55% 45% / 45% 55% 45% 55%;
+}
+
+/* 密码聚焦形态：安全密封舱 (Highly Symmetric Capsule) */
+.brand-panel.is-password-focus .circle-main {
+  border-radius: 46% 46% 46% 46% / 46% 46% 46% 46%;
+  background: linear-gradient(135deg, rgba(13, 148, 136, 0.22) 0%, rgba(255, 255, 255, 0.22) 100%);
+}
+.brand-panel.is-password-focus .circle-sub {
+  border-radius: 50% 50% 65% 35% / 35% 65% 35% 65%;
+}
+
+
+
+/* 4. 边缘高光折射反射层 */
+.glass-specular {
   position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 3.5rem;
+  top: 6%;
+  left: 10%;
+  width: 40%;
+  height: 22%;
+  border-radius: 50%;
+  background: radial-gradient(ellipse at center, rgba(255, 255, 255, 0.45) 0%, rgba(255, 255, 255, 0) 70%);
+  pointer-events: none;
+  opacity: 0.8;
+}
+
+/* 5. 纯物理无感位移漂浮动画：仅作用于子级的 transform，实现 120Hz 极限流畅 */
+@keyframes apple-fluid-float {
+  0% {
+    transform: translate3d(0, 0, 0) rotate(0deg);
+  }
+  50% {
+    transform: translate3d(8px, -12px, 0) rotate(3.5deg);
+  }
+  100% {
+    transform: translate3d(-5px, 6px, 0) rotate(-3deg);
+  }
+}
+
+.geo-text {
+  position: relative;
+  z-index: 2;
+  font-size: 3.2rem;
   font-weight: 800;
+  letter-spacing: -0.02em;
   color: transparent;
-  -webkit-text-stroke: 1.5px rgba(13, 148, 136, 0.3);
-  letter-spacing: 0.1em;
+  -webkit-text-stroke: 1.2px rgba(13, 148, 136, 0.45);
+  text-shadow: 0 4px 12px rgba(255, 255, 255, 0.6);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", sans-serif;
   text-transform: uppercase;
 }
 
-.wrapper-main .geo-text {
-  transform: translate3d(-15px, 15px, 0);
+:global(.dark .geo-decor) {
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0.02) 100%);
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow:
+    0 30px 60px rgba(0, 0, 0, 0.35),
+    inset 0 1px 1.5px rgba(255, 255, 255, 0.18);
 }
 
-.wrapper-sub .geo-text {
-  transform: translate3d(15px, -15px, 0);
+:global(.dark .geo-text) {
+  -webkit-text-stroke: 1.2px rgba(20, 184, 166, 0.6);
+  text-shadow: none;
 }
 
 .geo-fade-enter-active,
 .geo-fade-leave-active {
-  transition: opacity 0.4s ease, filter 0.4s ease;
+  transition: opacity 0.5s cubic-bezier(0.16, 1, 0.3, 1),
+              transform 0.5s cubic-bezier(0.16, 1, 0.3, 1),
+              filter 0.5s ease;
 }
 
-.geo-fade-enter-from,
 .geo-fade-leave-to {
   opacity: 0;
-  filter: blur(8px);
+  transform: scale(1.1) translate3d(0, -8px, 0);
+  filter: blur(4px);
+}
+
+.geo-fade-enter-from {
+  opacity: 0;
+  transform: scale(0.85) translate3d(0, 8px, 0);
+  filter: blur(4px);
 }
 
 .brand-content {
@@ -2689,7 +2787,8 @@ onUnmounted(() => {
   font-size: 15px !important;
   font-weight: 600 !important;
   margin-top: 24px;
-  transition: box-shadow 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
+  transition: box-shadow 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), 
+              transform 0.2s cubic-bezier(0.34, 1.56, 0.64, 1) !important;
   z-index: 1;
 }
 
@@ -2714,17 +2813,19 @@ onUnmounted(() => {
 
 .submit-btn:hover {
   background-color: #0f766e !important; /* 保持原底色，让伪元素覆盖 */
-  box-shadow: 0 12px 24px rgba(13, 148, 136, 0.25) !important;
+  transform: translate3d(0, -2px, 0);
+  box-shadow: 0 10px 20px rgba(13, 148, 136, 0.3) !important;
 }
 
 .submit-btn:active {
-  transform: scale(0.98);
-  box-shadow: 0 4px 12px rgba(13, 148, 136, 0.15) !important;
+  transform: scale(0.96) translate3d(0, 1px, 0) !important;
+  box-shadow: 0 4px 8px rgba(13, 148, 136, 0.15) !important;
 }
 
 .auth-fade-enter-active,
 .auth-fade-leave-active {
-  transition: opacity 0.35s ease;
+  transition: opacity 0.35s cubic-bezier(0.25, 1, 0.5, 1),
+              transform 0.35s cubic-bezier(0.25, 1, 0.5, 1);
 }
 
 .auth-fade-enter-active {
@@ -2740,9 +2841,14 @@ onUnmounted(() => {
   pointer-events: none;
 }
 
-.auth-fade-enter-from,
+.auth-fade-enter-from {
+  opacity: 0;
+  transform: scale(0.97) translate3d(12px, 0, 0);
+}
+
 .auth-fade-leave-to {
   opacity: 0;
+  transform: scale(0.97) translate3d(-12px, 0, 0);
 }
 
 @media (max-width: 860px) {
