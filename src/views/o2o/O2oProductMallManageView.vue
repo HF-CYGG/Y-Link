@@ -13,7 +13,7 @@
 import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 
 import type { TableInstance } from 'element-plus'
-import { BizCrudDialogShell, PageContainer, PageToolbarCard, PassiveNumberInput } from '@/components/common'
+import { BizCrudDialogShell, PageContainer, PageToolbarCard, PassiveNumberInput, PassivePreviewImage } from '@/components/common'
 import { getTagList, type Tag } from '@/api/modules/tag'
 import { resolveProductPlaceholder } from '@/utils/product-placeholder'
 import { calculateDiscountedPriceText, normalizeDiscountRateText, resolveO2oPriceView } from '@/utils/o2o-price'
@@ -699,12 +699,13 @@ onMounted(async () => {
               </el-checkbox>
             </div>
             <div class="mall-mobile-card__head">
-              <el-image
+              <PassivePreviewImage
                 :src="resolveProductPlaceholder(product.thumbnail)"
-                :preview-src-list="product.thumbnail ? [resolveProductPlaceholder(product.thumbnail)] : []"
-                preview-teleported
+                :preview-images="product.thumbnail ? [resolveProductPlaceholder(product.thumbnail)] : []"
                 fit="cover"
                 class="mall-mobile-card__thumb"
+                alt="商品预览图"
+                dialog-title="商品预览图"
               />
 
               <div class="min-w-0 flex-1">
@@ -838,11 +839,12 @@ onMounted(async () => {
         </el-table-column>
         <el-table-column label="预览图" min-width="110">
           <template #default="{ row }">
-            <el-image
+            <PassivePreviewImage
               :src="resolveProductPlaceholder(row.thumbnail)"
-              :preview-src-list="row.thumbnail ? [resolveProductPlaceholder(row.thumbnail)] : []"
-              preview-teleported
+              :preview-images="row.thumbnail ? [resolveProductPlaceholder(row.thumbnail)] : []"
               fit="cover"
+              alt="商品预览图"
+              dialog-title="商品预览图"
               style="width: 72px; height: 72px; border-radius: 16px"
             />
           </template>

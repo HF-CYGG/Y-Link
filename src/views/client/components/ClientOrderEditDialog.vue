@@ -9,6 +9,7 @@
  */
 
 import type { O2oPreorderDetail } from '@/api/modules/o2o'
+import { PassiveNumberInput } from '@/components/common'
 import type { EditableOrderItem, EditableOrderProductOption } from '@/views/client/client-order-detail-types'
 
 const props = defineProps<{
@@ -122,7 +123,7 @@ const handleAddProductIdChange = (value: string) => {
             <div class="flex flex-col gap-3 sm:flex-row sm:items-center">
               <div class="w-full sm:w-44">
                 <p class="mb-2 text-xs text-slate-400">修改后数量</p>
-                <el-input-number
+                <PassiveNumberInput
                   :model-value="item.qty"
                   :min="0"
                   :max="item.maxQty"
