@@ -47,7 +47,7 @@ import {
   type FeedbackServicePresence,
   type SupportAssignableUser,
 } from '@/api/modules/customer-service-feedback'
-import { PageContainer } from '@/components/common'
+import { PageContainer, PassiveSegmentedTabs } from '@/components/common'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
@@ -68,6 +68,11 @@ const authStore = useAuthStore(pinia)
 
 type WorkbenchQuickViewKey = 'all' | 'pending' | 'processing' | 'urgent' | 'unassigned' | 'sla_risk' | 'waiting_staff_reply'
 type DetailTabKey = 'conversation' | 'issue' | 'internal'
+const detailTabs = [
+  { label: '会话记录', name: 'conversation' },
+  { label: '工单信息', name: 'issue' },
+  { label: '内部协同', name: 'internal' },
+] as const
 type WorkbenchScrollbarLike = {
   wrapRef?: HTMLElement | null
   setScrollTop?: (value: number) => void
@@ -130,6 +135,12 @@ const draftTrackingSuspended = ref(false)
 const hasUnsavedReplyDraft = ref(false)
 const hasUnsavedIssueDraft = ref(false)
 const hasUnsavedInternalRemarkDraft = ref(false)
+
+const handleDetailTabChange = (value: string | number) => {
+  if (value === 'conversation' || value === 'issue' || value === 'internal') {
+    activeDetailTab.value = value
+  }
+}
 
 /**
  * - 关键字覆盖标题、Issue 编号、用户、订单号和标签；
@@ -1848,11 +1859,14 @@ onBeforeUnmount(() => {
               </div>
             </div>
 
-            <el-tabs v-model="activeDetailTab" class="cs-detail-tabs cs-detail-tabs--header-only mt-5" stretch>
-              <el-tab-pane label="会话记录" name="conversation" />
-              <el-tab-pane label="工单信息" name="issue" />
-              <el-tab-pane label="内部协同" name="internal" />
-            </el-tabs>
+            <PassiveSegmentedTabs
+              :model-value="activeDetailTab"
+              :tabs="detailTabs"
+              class="cs-detail-tabs mt-5"
+              block
+              aria-label="客服详情标签"
+              @tab-change="handleDetailTabChange"
+            />
 
             <div class="cs-detail-tab-stage mt-4 xl:min-h-0 xl:flex-1">
               <Transition name="cs-detail-tab-switch" mode="out-in">
@@ -2415,25 +2429,19 @@ onBeforeUnmount(() => {
   flex-direction: column;
 }
 
-.cs-detail-tabs--header-only :deep(.el-tabs__content) {
-  display: none;
-}
-
-.cs-detail-tabs :deep(.el-tabs__header) {
-  margin: 0;
-}
-
-.cs-detail-tabs :deep(.el-tabs__nav-wrap::after) {
-  background-color: rgba(226, 232, 240, 0.9);
-}
-
-.cs-detail-tabs :deep(.el-tabs__item) {
-  height: 2.75rem;
+.cs-detail-tabs :deep(.el-segmented__item) {
   color: rgb(100 116 139);
   font-weight: 600;
 }
 
-.cs-detail-tabs :deep(.el-tabs__item.is-active) {
+.cs-detail-tabs :deep(.el-segmented__item-label) {
+  display: flex;
+  min-height: 2.75rem;
+  align-items: center;
+  justify-content: center;
+}
+
+.cs-detail-tabs :deep(.el-segmented__item.is-selected) {
   color: rgb(13 148 136);
 }
 

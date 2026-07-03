@@ -27,6 +27,7 @@
     "verify:docker-base-image": "node ./scripts/verify-docker-base-image.mjs",
     "verify:onebox:uploads": "node ./scripts/verify-onebox-upload-serving.mjs",
     "verify:client-detail-layout": "node ./scripts/verify-client-detail-layout.mjs",
+    "verify:passive-wheel": "node ./scripts/verify-passive-wheel-listeners.mjs",
     "verify:text-encoding": "node ./scripts/verify-text-encoding.mjs",
     "verify:performance:budget": "node ./scripts/verify-enterprise-page-performance.mjs",
     "verify:performance:core-paths": "node ./scripts/verify-enterprise-core-paths.mjs",
