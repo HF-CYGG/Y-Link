@@ -2172,6 +2172,7 @@ onBeforeUnmount(() => {
   font-size: 0.92rem;
   font-weight: 700;
   line-height: 1.16;
+  font-variant-numeric: tabular-nums;
 }
 
 .client-product-card__meta {
@@ -3818,5 +3819,275 @@ onBeforeUnmount(() => {
     border-top-left-radius: 1.5rem;
     border-bottom-left-radius: 1.5rem;
   }
+}
+
+/* =========================================================
+   Apple VisionOS / Windows 11 Acrylic Panel Paradigm
+   ========================================================= */
+
+/* --------------------------------------------------------- 
+   2. 托盘内边距与网格间距优化 (Apple Grid Breathability) 
+   --------------------------------------------------------- */ 
+
+/* 大托盘底座：适度外扩四周内边距，给边缘留白 */ 
+.mall-browse-panel { 
+  padding: 1rem !important; 
+  background: rgba(255, 255, 255, 0.45) !important; 
+  backdrop-filter: blur(24px) saturate(150%) !important; 
+  -webkit-backdrop-filter: blur(24px) saturate(150%) !important; 
+  border: 1px solid rgba(255, 255, 255, 0.6) !important; 
+  border-radius: 1.6rem !important; 
+  box-shadow: 
+    inset 0 1px 2px rgba(255, 255, 255, 0.5), 
+    0 12px 36px -12px rgba(15, 23, 42, 0.05) !important; 
+} 
+
+@media (min-width: 768px) { 
+  .mall-browse-panel { 
+    padding: 1.5rem 1.6rem !important; /* 桌面端更宽绰，给几何体呼吸感 */ 
+    --mall-browse-gap: 1.5rem; /* 分类栏和网格栏推开 24px */ 
+  } 
+} 
+
+/* ========================================================= 
+   Apple 级滚动边界羽化 (Apple Scroll Edge Feathering) 
+   ========================================================= */ 
+
+/* --------------------------------------------------------- 
+   1. 滚动区域：双向渐变遮罩 (Zero-clipping WebKit Mask) 
+   为商品卡片滚动提供极致丝滑的羽化边缘。
+   顶部和底部各留出 1.5rem（24px）的无缝羽化淡出区，让卡片像在迷雾中升起又消融。
+   --------------------------------------------------------- */ 
+.mall-browse-list { 
+  /* 启用双向线性渐变遮罩：上下两端羽化淡出 */ 
+  -webkit-mask-image: linear-gradient( 
+    to bottom, 
+    transparent 0%,           /* 顶部透明起点 */
+    #000 1.5rem,              /* 顶部 24px 范围渐变淡入 */ 
+    #000 calc(100% - 1.5rem), /* 中间部分保持完全显示 */ 
+    transparent 100%          /* 底部 24px 范围渐变淡出 */ 
+  ) !important; 
+  
+  mask-image: linear-gradient( 
+    to bottom, 
+    transparent 0%, 
+    #000 1.5rem, 
+    #000 calc(100% - 1.5rem), 
+    transparent 100% 
+  ) !important; 
+} 
+
+/* 重新配置网格间距，稍微紧凑一点以适应卡片内容 */ 
+.client-product-grid { 
+  display: grid; 
+  grid-template-columns: minmax(0, 1fr); 
+  gap: 0.5rem; /* 移动端保持更紧凑的 8px */ 
+} 
+
+@media (min-width: 768px) { 
+  .client-product-grid { 
+    grid-template-columns: repeat(2, minmax(0, 1fr)); 
+    gap: 0.6rem !important; /* 中屏卡片间距收缩至 9.6px */ 
+  } 
+} 
+
+@media (min-width: 1200px) { 
+  .client-product-grid { 
+    grid-template-columns: repeat(3, minmax(0, 1fr)); 
+    gap: 0.75rem !important; /* 大屏卡片间距收缩至 12px，使网格排布更加精致 */ 
+  } 
+} 
+
+/* 适配分类标题的边距与磨砂模糊过渡 (Frosted Glass Sticky Header) */ 
+.mall-category-section__header { 
+  position: sticky; 
+  top: 0; 
+  z-index: 10; 
+  margin-bottom: 0.65rem !important; /* 配合网格收缩，减少标题下方空白 */ 
+  padding: 0.5rem 0.75rem !important; /* 增加小幅留白 */ 
+  border-radius: 0.75rem; 
+  
+  /* 恢复为完全透明背景，放弃磨砂吸顶，配合外层的双向渐变遮罩 */ 
+  background: transparent !important; 
+  backdrop-filter: none !important; 
+  -webkit-backdrop-filter: none !important; 
+  border-bottom: none !important; 
+  
+  color: #1e293b !important; 
+  font-weight: 750; 
+  
+  /* 告诉浏览器准备进行独立硬件图层复合，提升滚动帧率 */ 
+  will-change: transform; 
+} 
+
+/* ---------------------------------------------------------
+   2. 悬浮的物理亚克力商品卡片 (Floating Acrylic Product Card)
+   纯白实体卡片，叠在微彩色折射的托盘上，边界感与悬浮感瞬间拉满！
+   --------------------------------------------------------- */
+.client-product-card {
+  /* 100% 不透明的高亮白，与背景的半透磨砂拉开绝对色差 */
+  background: #ffffff !important;
+  
+  /* 极细的白色高光包边（Rim Light），模拟压克力倒角折射 */
+  border: 1px solid rgba(255, 255, 255, 0.85) !important;
+  border-radius: 1.15rem !important;
+  
+  /* 散落式的物理阴影，烘托卡片悬浮于玻璃面板之上的高度感 */
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.02),
+    0 12px 24px -10px rgba(15, 23, 42, 0.06) !important;
+  transition: all 0.35s cubic-bezier(0.16, 1, 0.3, 1) !important;
+}
+
+/* 悬停高度抬升动效 */
+.client-product-card:hover {
+  transform: translate3d(0, -3px, 0) scale(1.005);
+  background: #ffffff !important;
+  border-color: rgba(13, 148, 136, 0.25) !important; /* 触碰时微透品牌绿 */
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.02),
+    0 20px 32px -8px rgba(15, 23, 42, 0.08) !important;
+}
+
+/* 商品略缩图占位符高亮柔化 */
+.client-product-card__cover {
+  border-radius: 0.85rem;
+  background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%) !important;
+  border: 1px solid rgba(0, 0, 0, 0.015) !important;
+}
+
+/* ========================================================= 
+   Apple macOS Sidebar & Breathing Grid Refinement 
+   ========================================================= */ 
+
+/* --------------------------------------------------------- 
+   1. 侧边栏重构 (macOS 无界侧边栏体系 - 彻底消除卡片违和感) 
+   --------------------------------------------------------- */ 
+
+/* 真正的无界侧边栏：彻底去除实体分割线，纯靠“空间留白（Negative Space）”划定控制域 */ 
+.mall-browse-categories { 
+  border-right: none !important; /* 移除生硬的物理边界线 */
+  padding-right: 1.25rem !important; /* 稍微加大留白，用空气感代替线条 */ 
+  max-height: clamp(28rem, calc(100dvh - var(--client-tab-bar-clearance, 5.5rem) - 5.1rem), 48rem); 
+} 
+
+/* 未激活项：纯白实体卡片，配合白色高光包边与散落环境软影，实现极致的弱边界感 */ 
+.mall-browse-categories .mall-category-button:not(.bg-\[var\(--ylink-color-primary-strong\)\]) { 
+  background: #ffffff !important; 
+  border: 1px solid rgba(255, 255, 255, 0.85) !important; /* 白色高光包边（Rim Light），无灰色硬线 */
+  box-shadow: 
+    0 1px 2px rgba(15, 23, 42, 0.02), /* 极弱的顶层接触影 */
+    0 8px 16px -6px rgba(15, 23, 42, 0.04) !important; /* 散落开来的环境软投影 */
+  color: #334155 !important; 
+  font-weight: 500;
+  border-radius: 0.75rem !important; 
+  margin-bottom: 0.35rem !important; 
+  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1) !important; 
+} 
+
+/* 悬停响应：边缘微微透出品牌绿，轻微上浮 */ 
+.mall-browse-categories .mall-category-button:not(.bg-\[var\(--ylink-color-primary-strong\)\]):hover { 
+  background: #ffffff !important; 
+  border-color: rgba(13, 148, 136, 0.15) !important; /* 悬浮时透出极淡品牌色边界 */
+  color: #0f172a !important; 
+  transform: translateY(-1px) translateX(2px); 
+  box-shadow: 
+    0 1px 3px rgba(0, 0, 0, 0.02), 
+    0 12px 24px -8px rgba(15, 23, 42, 0.06) !important; 
+} 
+
+/* 激活标签：采用富有品牌特色、饱满圆润的胶囊微光块 */ 
+.mall-browse-categories .mall-category-button.bg-\[var\(--ylink-color-primary-strong\)\] { 
+  background: #0d9488 !important; 
+  border: 1px solid transparent !important; /* 保持 1px 边框位，彻底解决切换标签时的像素级布局抖动 */
+  color: #ffffff !important; 
+  border-radius: 0.75rem !important; 
+  box-shadow: 
+    0 8px 16px -3px rgba(13, 148, 136, 0.22), 
+    0 2px 6px -2px rgba(13, 148, 136, 0.1) !important; 
+  transform: scale(1.02) translateX(2px); 
+} 
+
+/* ---------------------------------------------------------
+   4. 检索、排序组件白净化（配合半透托盘）
+   --------------------------------------------------------- */
+
+/* 搜索框：纯白底色，在折射托盘上极为醒目 */
+.mall-search-toolbar {
+  background: #ffffff !important;
+  border: 1px solid rgba(148, 163, 184, 0.15) !important;
+}
+
+/* ========================================================= 
+   分段选择器：iOS 17 标准高对比物理音轨 (iOS Segmented Control) 
+   ========================================================= */ 
+
+/* 1. 滑块音盘轨道：加深底色，营造精致的下沉物理滑槽 */ 
+.mall-sort-control { 
+  background: rgba(100, 116, 139, 0.12) !important; 
+  border: 1px solid rgba(148, 163, 184, 0.22) !important; 
+  padding: 2.5px !important; /* 紧凑贴合边界 */ 
+  box-shadow: 
+    inset 0 1px 2px rgba(15, 23, 42, 0.04), /* 下凹内阴影 */ 
+    0 1px 0 rgba(255, 255, 255, 0.8) !important; /* 底部高光亮线，产生凹槽折射感 */ 
+} 
+
+/* 2. 未激活选项文字：适当加深色值，提升在强光下的易读性 */ 
+.mall-sort-control__button { 
+  color: #475569 !important; /* 略深的 Slate 灰 */ 
+  font-weight: 600; 
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important; 
+} 
+
+/* 悬停反馈 */ 
+.mall-sort-control__button:hover { 
+  color: #0f172a !important; 
+} 
+
+/* 3. 激活状态：强化边缘接触阴影，凸显悬浮厚度 */ 
+.mall-sort-control__button.is-active { 
+  background: #ffffff !important; 
+  color: #0f172a !important; 
+  font-weight: 700; 
+  box-shadow: 
+    0 3px 8px rgba(15, 23, 42, 0.12), 
+    0 1px 3px rgba(15, 23, 42, 0.04) !important; 
+} 
+
+/* =========================================================
+   5. 顶部公告面板 & 悬浮购物车 (Liquid Glass & Acrylic 规范)
+   ========================================================= */
+
+/* 顶部 Hero Card：Apple 液态半透玻璃 */
+.mall-hero-card {
+  background: rgba(255, 255, 255, 0.55) !important;
+  backdrop-filter: blur(24px) saturate(165%);
+  -webkit-backdrop-filter: blur(24px) saturate(165%);
+  border: 1px solid rgba(255, 255, 255, 0.55) !important;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.01),
+    0 16px 36px -12px rgba(15, 23, 42, 0.03) !important;
+  border-radius: 1.6rem !important;
+}
+
+/* 内层置顶指示框 */
+.mall-hero-card__meta-item {
+  background: rgba(241, 245, 249, 0.45) !important;
+  border: 1px solid rgba(255, 255, 255, 0.6) !important;
+  border-radius: 1.1rem !important;
+}
+
+/* 底部悬浮购物车 (Fluent Acrylic 压克力材料规范) */
+.mini-cart-card {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.82), rgba(255, 255, 255, 0.58)),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.28), rgba(255, 255, 255, 0.06)) !important;
+  backdrop-filter: blur(32px) saturate(150%) !important;
+  -webkit-backdrop-filter: blur(32px) saturate(150%) !important;
+  border: 1px solid rgba(255, 255, 255, 0.55) !important;
+  box-shadow:
+    0 20px 48px -10px rgba(15, 23, 42, 0.12),
+    0 4px 12px -2px rgba(15, 23, 42, 0.06),
+    inset 0 1px 0 rgba(255, 255, 255, 0.6) !important;
 }
 </style>
