@@ -3967,9 +3967,16 @@ onBeforeUnmount(() => {
 /* 真正的无界侧边栏：彻底去除实体分割线，纯靠“空间留白（Negative Space）”划定控制域 */ 
 .mall-browse-categories { 
   border-right: none !important; /* 移除生硬的物理边界线 */
-  padding-right: 1.25rem !important; /* 稍微加大留白，用空气感代替线条 */ 
+  /* padding-right: 1.25rem !important; 移除全局 padding-right，避免在移动端挤压标签 */ 
   max-height: clamp(28rem, calc(100dvh - var(--client-tab-bar-clearance, 5.5rem) - 5.1rem), 48rem); 
 } 
+
+/* 仅在桌面端应用 macOS 风格的呼吸感留白，保护移动端有限的宽度 */
+@media (min-width: 768px) {
+  .mall-browse-categories {
+    padding-right: 1.25rem !important; 
+  }
+}
 
 /* 未激活项：纯白实体卡片，配合白色高光包边与散落环境软影，实现极致的弱边界感 */ 
 .mall-browse-categories .mall-category-button:not(.bg-\[var\(--ylink-color-primary-strong\)\]) { 
