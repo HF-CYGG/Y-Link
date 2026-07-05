@@ -66,11 +66,15 @@
   --ylink-motion-ease: cubic-bezier(0.22, 1, 0.36, 1);
 
   font-family:
-    'PingFang SC',
-    'Microsoft YaHei',
+    Inter,
     -apple-system,
     BlinkMacSystemFont,
+    'PingFang SC',
+    'SF Pro Text',
     'Segoe UI',
+    Roboto,
+    'Helvetica Neue',
+    'Microsoft YaHei',
     sans-serif;
   line-height: 1.5;
   font-weight: 400;
