@@ -95,7 +95,7 @@ export interface ClientUpdateProfileInput {
   email?: string
 }
 
-export type ClientValidationMode = 'captcha' | 'verification_code'
+export type ClientValidationMode = 'captcha' | 'verification_code' | 'unavailable'
 
 export interface ClientDepartmentOptionNode {
   id: string
@@ -170,8 +170,8 @@ class ClientAuthService {
         email: emailEnabled,
       },
       registerValidationModes: {
-        mobile: mobileEnabled ? 'verification_code' : 'captcha',
-        email: emailEnabled ? 'verification_code' : 'captcha',
+        mobile: mobileEnabled ? 'verification_code' : 'unavailable',
+        email: emailEnabled ? 'verification_code' : 'unavailable',
       },
       forgotPasswordEnabled: mobileEnabled && emailEnabled,
       departmentTree: departmentConfigs.tree,
@@ -339,6 +339,9 @@ class ClientAuthService {
     if (!account) {
       this.verifyCaptchaIfRequired(input)
       return
+    }
+    if (validationMode === 'unavailable') {
+      throw new BizError(`${account.channel === 'email' ? '邮箱' : '手机'}验证码通道未启用，暂不支持使用该账号注册`, 400)
     }
     if (validationMode === 'verification_code') {
       this.verifyCodeIfRequired(

@@ -54,7 +54,7 @@ export interface ClientVerificationCodeSendResult {
   expireSeconds: number
 }
 
-export type ClientValidationMode = 'captcha' | 'verification_code'
+export type ClientValidationMode = 'captcha' | 'verification_code' | 'unavailable'
 
 export interface ClientDepartmentOptionNode {
   id: string
@@ -146,7 +146,7 @@ export const sendClientVerificationCode = (payload: ClientVerificationCodeSendIn
 
 /**
  * 客户端注册：
- * - 支持图形验证码或短信/邮件验证码。
+ * - 手机/邮箱注册必须使用已启用的短信/邮件验证码，不再允许降级为图形验证码。
  */
 export const clientRegister = (payload: {
   username?: string

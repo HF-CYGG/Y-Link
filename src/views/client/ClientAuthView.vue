@@ -207,9 +207,10 @@ const registerValidationMode = computed<ClientValidationMode>(() => {
   if (!channel) {
     return 'captcha'
   }
-  return authCapabilities.value?.registerValidationModes[channel] ?? 'captcha'
+  return authCapabilities.value?.registerValidationModes[channel] ?? 'unavailable'
 })
 const registerUsesVerificationCode = computed(() => registerValidationMode.value === 'verification_code')
+const isRegisterChannelUnavailable = computed(() => registerValidationMode.value === 'unavailable')
 const shouldPrepareCaptcha = computed(() => isRegisterMode.value || loginCaptchaVisible.value)
 const isCapabilityHintVisible = computed(() => capabilityLoading.value && !authCapabilities.value)
 const isCapabilityFallbackVisible = computed(() => !capabilityLoading.value && !!capabilityErrorMessage.value && !authCapabilities.value)
@@ -724,8 +725,12 @@ const startRegisterVerificationCountdown = (seconds: number) => {
 }
 
 const handleSendRegisterVerificationCode = async () => {
+  if (isRegisterChannelUnavailable.value) {
+    showAppWarning('当前手机号或邮箱验证码通道未启用，暂不支持注册该账号')
+    return
+  }
   if (!registerUsesVerificationCode.value) {
-    showAppWarning('当前账号类型未启用验证码注册，请根据页面提示使用图片验证码完成注册')
+    showAppWarning('当前账号类型未启用短信/邮箱验证码注册')
     return
   }
   const channel = resolveAccountChannel(registerForm.account)
@@ -895,6 +900,10 @@ const validateDepartmentRegisterFields = () => {
 
 // 注册验证码校验与部门字段校验拆开维护，便于后续继续扩展不同通道策略。
 const validateRegisterChallengeFields = () => {
+  if (isRegisterChannelUnavailable.value) {
+    showAppWarning('当前手机号或邮箱验证码通道未启用，暂不支持注册该账号')
+    return false
+  }
   if (registerUsesVerificationCode.value) {
     if (!registerForm.verificationCode.trim()) {
       showAppWarning('请输入手机/邮箱验证码')
@@ -1067,6 +1076,12 @@ watch(
 )
 
 watch(registerValidationMode, (mode) => {
+  if (mode === 'unavailable') {
+    resetRegisterVerificationTimer()
+    registerForm.verificationCode = ''
+    registerForm.captcha = ''
+    return
+  }
   if (mode !== 'verification_code') {
     resetRegisterVerificationTimer()
     registerForm.verificationCode = ''
@@ -1375,7 +1390,7 @@ onUnmounted(() => {
                   <div class="captcha-row">
                     <el-input
                       v-model="registerForm.captcha"
-                      :placeholder="registerUsesVerificationCode ? '先输入图形验证码，再发送手机/邮箱验证码' : '图形验证码'"
+                      :placeholder="isRegisterChannelUnavailable ? '当前通道暂不支持注册' : registerUsesVerificationCode ? '先输入图形验证码，再发送手机/邮箱验证码' : '图形验证码'"
                       class="geo-input flex-1"
                       size="large"
                       clearable
@@ -1558,7 +1573,7 @@ onUnmounted(() => {
                   <div class="captcha-row">
                     <el-input
                       v-model="registerForm.captcha"
-                      :placeholder="registerUsesVerificationCode ? '先输入图形验证码，再发送手机/邮箱验证码' : '图形验证码'"
+                      :placeholder="isRegisterChannelUnavailable ? '当前通道暂不支持注册' : registerUsesVerificationCode ? '先输入图形验证码，再发送手机/邮箱验证码' : '图形验证码'"
                       class="geo-input flex-1"
                       size="large"
                       clearable
