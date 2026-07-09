@@ -406,30 +406,9 @@ class ClientAuthService {
       }
     }
 
-    const staffNo = this.normalizeStaffNo(input.staffNo)
-    const existedByStaffNo = await this.userRepo.findOne({
-      where: { staffNo },
-      select: ['id'],
-    })
-    if (existedByStaffNo) {
-      throw new BizError('该教职工号已绑定其他账号', 409)
-    }
-
-    const matchedStaff = await this.clientStaffDirectoryRepo.findOne({
-      where: { staffNo, status: 'active' },
-    })
-    if (!matchedStaff) {
-      throw new BizError('教职工号未在学校目录中登记，请联系管理员核验', 409)
-    }
-
-    const usernameValue = this.assertRealName(matchedStaff.realName)
-    const departmentName = await systemConfigService.assertClientDepartmentOption(matchedStaff.departmentName)
-    return {
-      usernameValue,
-      departmentName,
-      staffNo,
-      staffVerified: true,
-    }
+    this.normalizeStaffNo(input.staffNo)
+    // 部门账号绑定的是教职工身份，公开注册无法证明提交者拥有该工号；必须转为管理员核验/开通。
+    throw new BizError('部门账号需由管理员核验身份后开通，请联系管理员处理', 403)
   }
 
   private resolveRegisterVerificationChannel(
@@ -459,32 +438,9 @@ class ClientAuthService {
   }
 
   async lookupStaffDirectoryForRegister(staffNoInput: string): Promise<ClientStaffDirectoryLookupResult> {
-    const staffNo = this.normalizeStaffNo(staffNoInput)
-    const matchedStaff = await this.clientStaffDirectoryRepo.findOne({
-      where: { staffNo, status: 'active' },
-    })
-    if (!matchedStaff) {
-      return {
-        matched: false,
-        staffNo,
-        realName: null,
-        departmentName: null,
-        isRegistered: false,
-      }
-    }
-
-    const existedByStaffNo = await this.userRepo.findOne({
-      where: { staffNo, accountType: 'department' },
-      select: ['id'],
-    })
-
-    return {
-      matched: true,
-      staffNo,
-      realName: matchedStaff.realName,
-      departmentName: matchedStaff.departmentName,
-      isRegistered: Boolean(existedByStaffNo),
-    }
+    this.normalizeStaffNo(staffNoInput)
+    // 安全边界：公开注册页不能按工号反查教职工目录，否则会泄露姓名/部门并帮助攻击者确认可抢占身份。
+    throw new BizError('部门账号需由管理员核验身份后开通，请联系管理员处理', 403)
   }
 
   private async createSessionForUser(user: ClientUser) {

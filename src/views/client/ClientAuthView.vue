@@ -105,7 +105,7 @@ const AUTH_MODE_QUERY_TAB_MAP: Record<AuthMode, 'login' | 'register-personal' | 
   'register-personal': 'register-personal',
   'register-department': 'register-department',
 }
-const AUTH_MODE_SEQUENCE: AuthMode[] = ['login', 'register-personal', 'register-department']
+const AUTH_MODE_SEQUENCE: AuthMode[] = ['login', 'register-personal']
 
 interface ClientCaptchaState {
   captchaId: string
@@ -262,10 +262,7 @@ const isCompactLoginLayout = computed(() => {
 // - 兼容历史 `register` 链接，默认回落到个人注册；
 // - 点击顶部切换器后同步刷新当前路由 query，保证刷新与分享链接能恢复正确表单。
 const resolveAuthModeFromQueryTab = (tab: unknown): AuthMode => {
-  if (tab === 'register-department') {
-    return 'register-department'
-  }
-  if (tab === 'register-personal' || tab === 'register') {
+  if (tab === 'register-personal' || tab === 'register' || tab === 'register-department') {
     return 'register-personal'
   }
   return 'login'
@@ -1163,14 +1160,6 @@ onUnmounted(() => {
             >
               个人注册
             </button>
-            <button
-              type="button"
-              class="toggle-btn"
-              :class="{ 'is-active': activeMode === 'register-department' }"
-              @click="switchMode('register-department')"
-            >
-              部门注册
-            </button>
           </div>
 
           <div v-if="successTip" class="success-pill">
@@ -1862,7 +1851,7 @@ onUnmounted(() => {
   position: absolute;
   top: 5px;
   left: 5px;
-  width: calc((100% - 10px) / 3);
+  width: calc((100% - 10px) / 2);
   height: calc(100% - 10px);
   background: #ffffff;
   border-radius: 12px;
