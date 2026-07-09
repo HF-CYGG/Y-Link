@@ -1739,7 +1739,9 @@ class SystemConfigService {
     })
   }
 
-  async getVerificationProviderConfigs(options: { maskSensitiveValues?: boolean } = {}): Promise<VerificationProviderConfigsResult> {
+  async getVerificationProviderConfigs(
+    options: { maskSensitiveValues?: boolean } = { maskSensitiveValues: true },
+  ): Promise<VerificationProviderConfigsResult> {
     const map = await this.loadVerificationConfigMap()
     return {
       mobile: this.formatVerificationProviderConfig('mobile', map, options),

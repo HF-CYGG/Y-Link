@@ -279,7 +279,7 @@ systemConfigRouter.get(
   '/verification-providers',
   requirePermission('system_configs:view'),
   asyncHandler(async (_req, res) => {
-    const data = await systemConfigService.getVerificationProviderConfigs()
+    const data = await systemConfigService.getVerificationProviderConfigs({ maskSensitiveValues: true })
     res.json({
       code: 0,
       message: 'ok',
