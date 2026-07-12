@@ -42,6 +42,7 @@ const registerSchema = z
     account: z.string().trim().max(128).optional(),
     accountType: z.enum(['personal', 'department']),
     staffNo: z.string().trim().max(64).optional(),
+    inviteCode: z.string().trim().min(1).max(32).optional(),
     password: clientPasswordSchema('密码'),
     departmentName: z.string().optional(),
     verificationCode: z.string().trim().min(4).max(8).optional(),
@@ -51,6 +52,9 @@ const registerSchema = z
   .superRefine((payload, ctx) => {
     if (payload.accountType === 'personal') {
       const isTeacherRegister = Boolean(payload.staffNo?.trim())
+      if (isTeacherRegister && !payload.inviteCode) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['inviteCode'], message: '请输入 8 位教师邀请码' })
+      }
       if (!isTeacherRegister && !payload.username?.trim()) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -58,7 +62,7 @@ const registerSchema = z
           message: '个人注册必须填写真实姓名',
         })
       }
-      if (!payload.account?.trim()) {
+      if (!isTeacherRegister && !payload.account?.trim()) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ['account'],
@@ -74,10 +78,6 @@ const loginSchema = z.object({
   password: z.string().min(1),
   captchaId: z.string().trim().min(1).optional(),
   captchaCode: z.string().trim().min(1).optional(),
-})
-
-const staffDirectoryLookupSchema = z.object({
-  staffNo: z.string().trim().min(1).max(64),
 })
 
 const forgotVerifySchema = z.object({
@@ -110,6 +110,14 @@ const updateProfileSchema = z.object({
   username: z.string().trim().min(1).max(128),
   mobile: z.string().trim().max(20).optional(),
   email: z.string().trim().max(128).optional(),
+  currentPassword: z.string().min(1),
+  mobileVerificationCode: z.string().trim().min(4).max(8).optional(),
+  emailVerificationCode: z.string().trim().min(4).max(8).optional(),
+})
+
+const profileVerificationCodeSendSchema = z.object({
+  channel: z.enum(['mobile', 'email']),
+  target: z.string().trim().min(1).max(128),
 })
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
@@ -127,17 +135,6 @@ clientAuthRouter.get(
   '/capabilities',
   asyncHandler(async (_req, res) => {
     const data = await clientAuthService.getCapabilities()
-    res.json({ code: 0, message: 'ok', data })
-  }),
-)
-
-clientAuthRouter.get(
-  '/staff-directory/lookup',
-  asyncHandler(async (req, res) => {
-    const payload = staffDirectoryLookupSchema.parse(req.query)
-    await authSecurityService.guardStaffDirectoryLookupRequest(extractRequestMeta(req), payload.staffNo)
-    const data = await clientAuthService.lookupStaffDirectoryForRegister(payload.staffNo)
-    res.setHeader('Cache-Control', 'no-store')
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -313,5 +310,24 @@ clientAuthRouter.patch(
     await authSecurityService.guardClientProfileUpdateRequest(requestMeta, authReq.clientAuth.userId)
     const data = await clientAuthService.updateProfile(authReq.clientAuth, updateProfileSchema.parse(req.body))
     res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+clientAuthRouter.post(
+  '/profile/verification-code/send',
+  requireClientAuth,
+  asyncHandler(async (req, res) => {
+    const authReq = req as ClientAuthenticatedRequest
+    const payload = profileVerificationCodeSendSchema.parse(req.body)
+    const target = normalizeClientVerificationTarget(payload.channel, payload.target)
+    const requestMeta = extractRequestMeta(req)
+    await authSecurityService.guardVerificationCodeSendRequest(requestMeta, target, payload.channel)
+    const data = await verificationCodeService.sendCode({
+      channel: payload.channel,
+      target,
+      scene: 'profile_update',
+      requestMeta,
+    })
+    res.json({ code: 0, message: 'ok', data: { ...data, userId: authReq.clientAuth.userId } })
   }),
 )

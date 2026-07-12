@@ -22,8 +22,9 @@ import {
 } from './system-config.service.js'
 import { auditService } from './audit.service.js'
 import { EphemeralTicketStore } from '../utils/ephemeral-ticket-store.js'
+import { safeHttpRequest } from '../utils/safe-http-request.js'
 
-type VerificationScene = 'register' | 'forgot_password' | 'test'
+type VerificationScene = 'register' | 'forgot_password' | 'profile_update' | 'test'
 
 interface VerificationCodeTicket {
   channel: VerificationChannelType
@@ -42,16 +43,27 @@ const verificationTicketStore = new EphemeralTicketStore<VerificationCodeTicket>
 const buildTicketKey = (channel: VerificationChannelType, target: string, scene: VerificationScene) => `${channel}:${scene}:${target}`
 
 export class VerificationCodeService {
+  constructor(
+    private readonly httpRequest: typeof safeHttpRequest = safeHttpRequest,
+  ) {}
+
   /**
    * 提炼测试发送审计摘要：
    * - 审计日志仅保留通道、地址和模板是否配置等治理信息；
    * - 不记录完整请求头/请求体模板，避免把敏感第三方凭证写入审计表。
    */
   private buildProviderAuditSummary(config: VerificationProviderConfigRecord) {
+    let endpoint: { protocol: string; hostname: string; port: string; configured: boolean }
+    try {
+      const url = new URL(config.apiUrl)
+      endpoint = { protocol: url.protocol, hostname: url.hostname, port: url.port, configured: true }
+    } catch {
+      endpoint = { protocol: '', hostname: '', port: '', configured: Boolean(config.apiUrl.trim()) }
+    }
     return {
       enabled: config.enabled,
       httpMethod: config.httpMethod,
-      apiUrl: config.apiUrl,
+      endpoint,
       hasHeadersTemplate: Boolean(config.headersTemplate.trim()),
       hasBodyTemplate: Boolean(config.bodyTemplate.trim()),
       hasSuccessMatch: Boolean(config.successMatch.trim()),
@@ -116,36 +128,25 @@ export class VerificationCodeService {
       throw new BizError('验证码平台请求头模板不是合法 JSON，请联系管理员修正', 500)
     }
 
-    const requestInit: RequestInit = {
-      method: config.httpMethod,
-      headers,
-    }
-
-    if (config.httpMethod !== 'GET') {
-      requestInit.body = renderedBodyText
-    }
-
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), env.VERIFICATION_CODE_REQUEST_TIMEOUT_MS)
-
-    requestInit.signal = controller.signal
-
-    let response: Response
+    let response: Awaited<ReturnType<typeof safeHttpRequest>>
     let responseText: string
     try {
-      response = await fetch(providerUrl, requestInit)
-      responseText = await response.text()
+      response = await this.httpRequest(providerUrl, {
+        method: config.httpMethod,
+        headers,
+        body: config.httpMethod === 'GET' ? undefined : renderedBodyText,
+        timeoutMs: env.VERIFICATION_CODE_REQUEST_TIMEOUT_MS,
+      })
+      responseText = response.body.toString('utf8')
     } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError') {
+      if (error instanceof Error && /超时/.test(error.message)) {
         throw new BizError(`验证码平台请求超时（>${env.VERIFICATION_CODE_REQUEST_TIMEOUT_MS}ms）`, 504)
       }
       throw new BizError('验证码平台请求失败，请稍后重试', 502)
-    } finally {
-      clearTimeout(timeout)
     }
 
-    if (!response.ok) {
-      throw new BizError(`验证码平台请求失败（HTTP ${response.status}）`, 502)
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw new BizError(`验证码平台请求失败（HTTP ${response.statusCode}）`, 502)
     }
     if (config.successMatch.trim() && !responseText.includes(config.successMatch.trim())) {
       throw new BizError('验证码平台返回结果未命中成功标识，请检查平台配置', 502)

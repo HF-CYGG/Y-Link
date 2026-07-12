@@ -5,6 +5,7 @@
  */
 
 import { Router } from 'express'
+import path from 'node:path'
 import { z } from 'zod'
 import { requireClientAuth } from '../middleware/client-auth.middleware.js'
 import type { ClientAuthenticatedRequest } from '../types/client-auth.js'
@@ -18,9 +19,6 @@ import {
 } from '../entities/client-feedback-conversation.entity.js'
 import {
   clientFeedbackService,
-  CLIENT_FEEDBACK_ATTACHMENT_MIME_TYPE_MAX_LENGTH,
-  CLIENT_FEEDBACK_ATTACHMENT_NAME_MAX_LENGTH,
-  CLIENT_FEEDBACK_ATTACHMENT_URL_MAX_LENGTH,
   CLIENT_FEEDBACK_CONTACT_PREFERENCE_MAX_LENGTH,
   CLIENT_FEEDBACK_MAX_ATTACHMENTS_PER_MESSAGE,
   CLIENT_FEEDBACK_CATEGORY_MAX_LENGTH,
@@ -33,11 +31,7 @@ import {
   CLIENT_FEEDBACK_SUBJECT_MAX_LENGTH,
 } from '../services/client-feedback.service.js'
 import { BizError } from '../utils/errors.js'
-import {
-  buildUploadPublicUrl,
-  createCategorizedImageUpload,
-  finalizeUploadedImageFile,
-} from '../utils/upload-storage.js'
+import { createCategorizedImageUpload, finalizeUploadedImageFile } from '../utils/upload-storage.js'
 
 /**
  * 客户端会话列表分页上限：
@@ -54,16 +48,8 @@ const listMyConversationsSchema = z.object({
 })
 
 const feedbackAttachmentSchema = z.object({
-  name: z.string().trim().min(1).max(CLIENT_FEEDBACK_ATTACHMENT_NAME_MAX_LENGTH),
-  url: z.string().trim().min(1).max(CLIENT_FEEDBACK_ATTACHMENT_URL_MAX_LENGTH),
-  mimeType: z.string().trim().max(CLIENT_FEEDBACK_ATTACHMENT_MIME_TYPE_MAX_LENGTH).nullable().optional(),
-  size: z.number().int().min(0).nullable().optional(),
-}).transform((attachment) => ({
-  name: attachment.name,
-  url: attachment.url,
-  mimeType: attachment.mimeType ?? null,
-  size: attachment.size ?? null,
-}))
+  id: z.coerce.string().trim().min(1).max(64),
+})
 
 const createConversationSchema = z.object({
   issueType: z.enum(CLIENT_FEEDBACK_ISSUE_TYPES).optional(),
@@ -130,23 +116,37 @@ authenticatedClientFeedbackRouter.post(
   '/attachments',
   feedbackAttachmentUpload.single('file'),
   asyncHandler(async (req, res) => {
+    const authReq = req as ClientAuthenticatedRequest
     if (!req.file) {
       throw new BizError('文件上传失败', 400)
     }
     // 反馈附件同样需要先经过真实图片内容校验，再生成可回填数据库的正式 URL。
     const finalizedFile = await finalizeUploadedImageFile('client-feedback', req.file)
+    const attachment = await clientFeedbackService.createClientAttachment({
+      storageName: finalizedFile.fileName,
+      originalName: req.file.originalname,
+      mimeType: finalizedFile.mimeType || null,
+      sizeBytes: typeof finalizedFile.size === 'number' ? finalizedFile.size : null,
+    }, authReq.clientAuth)
     res.json({
       code: 0,
       message: 'ok',
       data: {
-        attachment: {
-          name: req.file.originalname,
-          url: buildUploadPublicUrl('client-feedback', finalizedFile.fileName),
-          mimeType: finalizedFile.mimeType || null,
-          size: typeof finalizedFile.size === 'number' ? finalizedFile.size : null,
-        },
+        attachment,
       },
     })
+  }),
+)
+
+authenticatedClientFeedbackRouter.get(
+  '/attachments/:id',
+  asyncHandler(async (req, res) => {
+    const authReq = req as ClientAuthenticatedRequest
+    const attachment = await clientFeedbackService.getAttachmentForClient(String(req.params.id), authReq.clientAuth)
+    res.setHeader('Cache-Control', 'private, no-store')
+    res.setHeader('X-Content-Type-Options', 'nosniff')
+    if (attachment.mimeType) res.type(attachment.mimeType)
+    res.sendFile(path.resolve(process.cwd(), 'uploads', 'client-feedback', path.basename(attachment.storageName)))
   }),
 )
 
@@ -155,7 +155,11 @@ authenticatedClientFeedbackRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const payload = createConversationSchema.parse(req.body)
-    const data = await clientFeedbackService.createConversation(payload, authReq.clientAuth, extractRequestMeta(req))
+    const attachments = await clientFeedbackService.resolveOwnedAttachmentReferences(
+      payload.attachments?.map((item) => item.id) ?? [],
+      authReq.clientAuth,
+    )
+    const data = await clientFeedbackService.createConversation({ ...payload, attachments }, authReq.clientAuth, extractRequestMeta(req))
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -174,9 +178,13 @@ authenticatedClientFeedbackRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const payload = appendMessageSchema.parse(req.body)
+    const attachments = await clientFeedbackService.resolveOwnedAttachmentReferences(
+      payload.attachments?.map((item) => item.id) ?? [],
+      authReq.clientAuth,
+    )
     const data = await clientFeedbackService.appendClientMessage(
       req.params.id,
-      payload,
+      { ...payload, attachments },
       authReq.clientAuth,
       extractRequestMeta(req),
     )

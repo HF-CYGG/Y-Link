@@ -159,6 +159,7 @@ const envSchema = z.object({
   INIT_ADMIN_DISPLAY_NAME: z.string().trim().min(1).default('系统管理员'),
   PERMANENT_DELETE_PASSWORD: z.string().optional().transform(normalizeOptionalString),
   VERIFICATION_CODE_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(8000),
+  INVITE_CODE_PEPPER: z.string().optional().transform(normalizeOptionalString),
 })
 
 const parsed = envSchema.safeParse(process.env)

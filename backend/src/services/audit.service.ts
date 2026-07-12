@@ -8,6 +8,7 @@
 
 import type { EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
+import { escapeCsvCell } from '../utils/csv-security.js'
 import { SysAuditLog } from '../entities/sys-audit-log.entity.js'
 import type { AuditResultStatus, AuthUserContext } from '../types/auth.js'
 import type { RequestMeta } from '../utils/request-meta.js'
@@ -145,10 +146,7 @@ export class AuditService {
     return [headers, ...rows]
       .map((row) =>
         row
-          .map((cell) => {
-            const normalized = String(cell ?? '').replaceAll('"', '""')
-            return `"${normalized}"`
-          })
+          .map(escapeCsvCell)
           .join(','),
       )
       .join('\n')

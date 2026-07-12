@@ -34,16 +34,13 @@ import { tagRouter } from './routes/tag.routes.js'
 import { uploadRouter } from './routes/upload.routes.js'
 import { userRouter } from './routes/user.routes.js'
 import { inboundRouter } from './routes/inbound.routes.js'
-import { maskDatabaseRuntimeOverride, readDatabaseRuntimeOverride } from './config/database-runtime-override.js'
-import {
-  buildEffectiveDatabaseSummary,
-  buildRuntimeOverrideStatusSummary,
-} from './utils/effective-database.js'
 import { BizError } from './utils/errors.js'
 
 const UPLOAD_CACHE_CONTROL_VALUE = 'public, max-age=31536000, immutable'
 const UPLOAD_CONTENT_SECURITY_POLICY_VALUE = "default-src 'none'; img-src 'self' data:; style-src 'none'; sandbox"
-const API_JSON_BODY_LIMIT = '64mb'
+const PUBLIC_JSON_BODY_LIMIT = '256kb'
+const PROTECTED_JSON_BODY_LIMIT = '1mb'
+const STAFF_DIRECTORY_IMPORT_JSON_BODY_LIMIT = '8mb'
 
 /**
  * 上传静态资源头部策略：
@@ -101,7 +98,7 @@ export function createApp() {
       return
     }
 
-    const uploadCategories = ['products', 'client-feedback'] as const
+    const uploadCategories = ['products'] as const
     const matchedCategory = uploadCategories.find((category) => {
       return fs.existsSync(path.resolve(uploadsDir, category, normalizedRequestPath))
     })
@@ -119,9 +116,12 @@ export function createApp() {
   // - 继续直接暴露图片访问能力，前端数据库内仍只保存 `/uploads/...` 相对路径；
   // - 对图片返回长期缓存与基础安全头，减少商品列表/反馈详情重复拉取压力；
   // - 历史 `/uploads/<file>` 会先在上方被内部改写到分类目录，因此不会破坏旧路径兼容。
+  app.use('/uploads/client-feedback', (_req, res) => {
+    res.status(404).json({ code: 404, message: '资源不存在' })
+  })
   app.use(
-    '/uploads',
-    express.static(uploadsDir, {
+    '/uploads/products',
+    express.static(path.resolve(uploadsDir, 'products'), {
       etag: true,
       immutable: true,
       maxAge: '365d',
@@ -137,33 +137,25 @@ export function createApp() {
    * - 批量导入上千条记录时，默认 100 KB 容量会被轻易撑爆，导致 body-parser 直接抛 `PayloadTooLargeError`；
    * - 这里统一放宽到与文件上传场景相同的 8 MB，覆盖系统配置大文本与批量导入确认请求。
    */
-  app.use(express.json({ limit: API_JSON_BODY_LIMIT }))
-
   app.get('/health', (_req, res) => {
-    const activeOverride = maskDatabaseRuntimeOverride(readDatabaseRuntimeOverride())
-    const effectiveDatabase = buildEffectiveDatabaseSummary(activeOverride)
-    const runtimeOverrideStatus = buildRuntimeOverrideStatusSummary(activeOverride)
-    res.json({
-      code: 0,
-      message: 'ok',
-      data: {
-        status: 'UP',
-        database: {
-          effectiveDatabase,
-          runtimeOverrideStatus,
-        },
-      },
-    })
+    res.json({ status: 'UP' })
   })
 
   // 认证接口允许匿名访问，其中 logout / me 已在子路由内部再次做鉴权。
-  app.use('/api/auth', authRouter)
-  app.use('/api/client-auth', clientAuthRouter)
-  app.use('/api/client-feedback', clientFeedbackRouter)
-  app.use('/api/o2o', o2oRouter)
+  const publicJsonParser = express.json({ limit: PUBLIC_JSON_BODY_LIMIT })
+  app.use('/api/auth', publicJsonParser, authRouter)
+  app.use('/api/client-auth', publicJsonParser, clientAuthRouter)
+  app.use('/api/client-feedback', publicJsonParser, clientFeedbackRouter)
+  app.use('/api/o2o', publicJsonParser, o2oRouter)
 
   // 业务主系统统一要求先登录再访问，且管理端写操作必须通过 CSRF 校验。
-  app.use('/api', requireAuth, requireAdminCsrf)
+  const protectedJsonParser = express.json({ limit: PROTECTED_JSON_BODY_LIMIT })
+  const staffDirectoryImportJsonParser = express.json({ limit: STAFF_DIRECTORY_IMPORT_JSON_BODY_LIMIT })
+  app.use('/api', requireAuth, requireAdminCsrf, (req, res, next) => {
+    const isStaffDirectoryJsonImport = req.path === '/system-configs/client-staff-directory/import'
+      || req.path === '/system-configs/client-staff-directory/import/preview'
+    return (isStaffDirectoryJsonImport ? staffDirectoryImportJsonParser : protectedJsonParser)(req, res, next)
+  })
 
   app.use('/api/upload', uploadRouter)
 

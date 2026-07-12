@@ -18,6 +18,7 @@ import pinia from '@/store/pinia'
 import { redirectToClientLogin } from '@/utils/client-auth-navigation'
 import {
   clientChangePassword,
+  sendClientProfileVerificationCode,
 } from '@/api/modules/client-auth'
 import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 import {
@@ -46,7 +47,11 @@ const profileForm = reactive({
   username: '',
   mobile: '',
   email: '',
+  currentPassword: '',
+  mobileVerificationCode: '',
+  emailVerificationCode: '',
 })
+const profileCodeSending = ref<'mobile' | 'email' | ''>('')
 
 const isDepartmentAccount = computed(() => clientAuthStore.currentUser?.accountType === 'department')
 const isTeacherAccount = computed(() => (
@@ -91,6 +96,7 @@ const rules: FormRules = {
 
 const profileRules: FormRules = {
   username: [{ required: true, message: '请输入姓名', trigger: 'blur' }],
+  currentPassword: [{ required: true, message: '请输入当前密码', trigger: 'blur' }],
   mobile: [
     {
       validator: (_rule, value: string, callback) => {
@@ -126,13 +132,16 @@ const profileRules: FormRules = {
 }
 
 const openProfileDialog = () => {
-  if (isDirectoryManagedAccount.value) {
-    showAppInfo('教师或部门账户资料由管理员或教职工目录维护，客户端仅支持查看')
+  if (isDepartmentAccount.value) {
+    showAppInfo('部门账户资料由管理员维护，客户端仅支持查看')
     return
   }
   profileForm.username = clientAuthStore.currentUser?.username || clientAuthStore.currentUser?.account || clientAuthStore.currentUser?.realName || ''
   profileForm.mobile = clientAuthStore.currentUser?.mobile || ''
   profileForm.email = clientAuthStore.currentUser?.email || ''
+  profileForm.currentPassword = ''
+  profileForm.mobileVerificationCode = ''
+  profileForm.emailVerificationCode = ''
   profileDialogVisible.value = true
   profileFormRef.value?.clearValidate()
 }
@@ -190,6 +199,9 @@ const submitUpdateProfile = async () => {
       username: normalizedUsername,
       mobile: normalizedMobile || undefined,
       email: normalizedEmail || undefined,
+      currentPassword: profileForm.currentPassword,
+      mobileVerificationCode: profileForm.mobileVerificationCode || undefined,
+      emailVerificationCode: profileForm.emailVerificationCode || undefined,
     })
     showAppSuccess('资料更新成功')
     profileDialogVisible.value = false
@@ -197,6 +209,23 @@ const submitUpdateProfile = async () => {
     showAppError(error.message || '资料更新失败')
   } finally {
     profileSubmitting.value = false
+  }
+}
+
+const sendProfileCode = async (channel: 'mobile' | 'email') => {
+  const target = channel === 'mobile' ? profileForm.mobile.trim() : profileForm.email.trim().toLowerCase()
+  if (!target) {
+    showAppWarning(channel === 'mobile' ? '请先填写新手机号' : '请先填写新邮箱')
+    return
+  }
+  try {
+    profileCodeSending.value = channel
+    await sendClientProfileVerificationCode({ channel, target })
+    showAppSuccess('验证码已发送')
+  } catch (error: any) {
+    showAppError(error.message || '验证码发送失败；若通道未配置，可仅凭当前密码保存为未验证联系方式')
+  } finally {
+    profileCodeSending.value = ''
   }
 }
 
@@ -214,11 +243,11 @@ const submitUpdateProfile = async () => {
         <div>
           <p class="text-base font-semibold text-slate-900">资料信息</p>
           <p class="mt-1 text-xs text-slate-400">
-            {{ isDirectoryManagedAccount ? '教师或部门账户资料由管理员或教职工目录维护，客户端仅展示身份信息' : '个人账户可维护姓名、手机号与邮箱，后续可用联系方式登录' }}
+            {{ isDepartmentAccount ? '部门账户资料由管理员维护' : '修改联系方式需要当前密码；未验证联系方式不能用于找回密码' }}
           </p>
         </div>
         <button
-          v-if="!isDirectoryManagedAccount"
+          v-if="!isDepartmentAccount"
           type="button"
           class="profile-action-button"
           @click="openProfileDialog"
@@ -245,10 +274,20 @@ const submitUpdateProfile = async () => {
 
       <template v-if="!isDepartmentAccount">
         <p class="mt-4 text-xs text-slate-400">手机号</p>
-        <p class="mt-1 text-base font-semibold text-slate-900">{{ clientAuthStore.currentUser?.mobile || '-' }}</p>
+        <p class="mt-1 flex items-center gap-2 text-base font-semibold text-slate-900">
+          {{ clientAuthStore.currentUser?.mobile || '-' }}
+          <el-tag size="small" :type="clientAuthStore.currentUser?.mobileVerifiedAt ? 'success' : 'info'">
+            {{ clientAuthStore.currentUser?.mobileVerifiedAt ? '已验证' : '未验证' }}
+          </el-tag>
+        </p>
 
         <p class="mt-4 text-xs text-slate-400">邮箱</p>
-        <p class="mt-1 text-base font-semibold text-slate-900">{{ clientAuthStore.currentUser?.email || '-' }}</p>
+        <p class="mt-1 flex items-center gap-2 text-base font-semibold text-slate-900">
+          {{ clientAuthStore.currentUser?.email || '-' }}
+          <el-tag size="small" :type="clientAuthStore.currentUser?.emailVerifiedAt ? 'success' : 'info'">
+            {{ clientAuthStore.currentUser?.emailVerifiedAt ? '已验证' : '未验证' }}
+          </el-tag>
+        </p>
       </template>
     </div>
 
@@ -331,13 +370,28 @@ const submitUpdateProfile = async () => {
     >
       <el-form ref="profileFormRef" :model="profileForm" :rules="profileRules" label-position="top" @submit.prevent>
         <el-form-item label="姓名" prop="username">
-          <el-input v-model="profileForm.username" placeholder="请输入真实姓名" />
+          <el-input v-model="profileForm.username" :disabled="isTeacherAccount" placeholder="请输入真实姓名" />
         </el-form-item>
         <el-form-item label="手机号" prop="mobile">
           <el-input v-model="profileForm.mobile" placeholder="请输入手机号" />
         </el-form-item>
         <el-form-item label="邮箱" prop="email">
           <el-input v-model="profileForm.email" placeholder="请输入邮箱" />
+        </el-form-item>
+        <el-form-item label="当前密码" prop="currentPassword">
+          <el-input v-model="profileForm.currentPassword" type="password" show-password placeholder="修改资料必须验证当前密码" />
+        </el-form-item>
+        <el-form-item label="新手机号验证码（通道启用时必填）">
+          <div class="flex w-full gap-2">
+            <el-input v-model="profileForm.mobileVerificationCode" maxlength="8" placeholder="手机号验证码" />
+            <el-button :loading="profileCodeSending === 'mobile'" @click="sendProfileCode('mobile')">发送</el-button>
+          </div>
+        </el-form-item>
+        <el-form-item label="新邮箱验证码（通道启用时必填）">
+          <div class="flex w-full gap-2">
+            <el-input v-model="profileForm.emailVerificationCode" maxlength="8" placeholder="邮箱验证码" />
+            <el-button :loading="profileCodeSending === 'email'" @click="sendProfileCode('email')">发送</el-button>
+          </div>
         </el-form-item>
       </el-form>
     </BizCrudDialogShell>

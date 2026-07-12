@@ -73,7 +73,7 @@ const extractPermissionCodes = (source: string): Set<string> => {
 
 const extractMountedRouters = (appSource: string): MountedRouter[] => {
   const mounts: MountedRouter[] = []
-  const mountPattern = /app\.use\(\s*'([^']+)'\s*,\s*(\w+)\s*\)/g
+  const mountPattern = /app\.use\(\s*'([^']+)'\s*,\s*(?:\w+\s*,\s*)*(\w+Router)\s*\)/g
   let match: RegExpExecArray | null
 
   while ((match = mountPattern.exec(appSource)) !== null) {
@@ -148,6 +148,18 @@ const extractRouteContracts = (filePath: string, routerName: string): RouteContr
     let permissionMatch: RegExpExecArray | null
     while ((permissionMatch = permissionPattern.exec(block.argsText)) !== null) {
       permissions.push(...extractStringLiterals(permissionMatch[1]))
+    }
+    const spreadHelperMatch = /\.\.\.(\w+)\(/.exec(block.argsText)
+    if (permissions.length === 0 && spreadHelperMatch?.[1]) {
+      const escapedHelperName = spreadHelperMatch[1].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const helperMatch = new RegExp(String.raw`const\s+${escapedHelperName}\s*=\s*[\s\S]*?=>\s*\[([\s\S]*?)\n\]`).exec(source)
+      if (helperMatch?.[1]) {
+        const helperPermissionPattern = /requirePermission\(([\s\S]*?)\)/g
+        let helperPermissionMatch: RegExpExecArray | null
+        while ((helperPermissionMatch = helperPermissionPattern.exec(helperMatch[1])) !== null) {
+          permissions.push(...extractStringLiterals(helperPermissionMatch[1]))
+        }
+      }
     }
 
     const roles: string[] = []

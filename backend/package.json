@@ -15,6 +15,7 @@
     "permission:regression:verify": "tsx scripts/permission-regression-verify.ts",
     "release:verify": "tsx scripts/release-full-regression-verify.ts",
     "security:hardening:verify": "tsx scripts/security-hardening-verify.ts",
+    "security:findings:verify": "tsx scripts/security-findings-remediation-verify.ts",
     "spec:fix-order-product-tag-consistency:verify": "tsx scripts/fix-order-product-tag-consistency-verify.ts",
     "task1:verify": "tsx scripts/task1-verify.ts",
     "task2:verify": "tsx scripts/task2-verify.ts",
