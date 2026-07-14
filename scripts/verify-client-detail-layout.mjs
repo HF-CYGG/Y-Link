@@ -11,6 +11,10 @@ assertIncludes(':size="isPhone ? \'auto\' : \'400px\'"', 'PC product detail draw
 assertIncludes('client-detail-header', 'detail layout should keep the compact header structure')
 assertIncludes('client-detail-side-actions', 'detail layout should keep the image preview action in the compact side column')
 assertIncludes('client-detail-action-bar', 'detail layout should keep the single quantity and cart action area')
+assertIncludes('client-detail-sku-groups', 'detail layout should group SKU values by specification dimension')
+assertIncludes('client-detail-sku-options', 'detail layout should wrap compact specification options instead of stacking full SKU cards')
+assertIncludes('client-detail-sku-option', 'detail layout should keep a dedicated compact option style')
+assertIncludes('detailSkuSpecGroups', 'detail layout should render the dynamic SKU group model')
 assertIncludes('@media (max-width: 640px)', 'detail layout should retain mobile height safeguards')
 assertIncludes('grid-template-columns: 3.9rem minmax(0, 1fr) auto;', 'client product card should keep the established three-column compact width')
 assertIncludes('box-sizing: border-box;', 'client product card should measure the card size with border and padding included')
@@ -33,6 +37,7 @@ assert.ok(!source.includes('client-detail-desktop-grid'), '400px drawer should n
 assert.ok(!source.includes('client-detail-media-card'), '400px drawer should not duplicate a desktop media card')
 assert.ok(!source.includes('client-detail-desktop-actions'), '400px drawer should not duplicate desktop-only actions')
 assert.ok(!source.includes('grid-template-columns: minmax(13.5rem'), '400px drawer should not keep the previous wide-grid columns')
+assert.ok(!source.includes('v-for="sku in resolveActiveSkus(detailProduct)"'), 'detail drawer should not render one vertical card per full SKU combination')
 assert.ok(!source.includes('class="client-product-card__desc"'), 'client product cards should not render product detail descriptions')
 assert.ok(!source.includes('.client-product-card__desc'), 'client product cards should not keep description-only card styles')
 
