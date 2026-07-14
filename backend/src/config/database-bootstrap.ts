@@ -10,6 +10,9 @@ import type { DataSource } from 'typeorm'
 import { env } from './env.js'
 import { ClientStaffDirectory } from '../entities/client-staff-directory.entity.js'
 import { ClientUser } from '../entities/client-user.entity.js'
+import { ClientFeedbackAttachment } from '../entities/client-feedback-attachment.entity.js'
+import { ClientFeedbackConversation } from '../entities/client-feedback-conversation.entity.js'
+import { ClientFeedbackMessage, type ClientFeedbackMessageAttachment } from '../entities/client-feedback-message.entity.js'
 
 const SQLITE_REQUIRED_TABLES = [
   'base_product',
@@ -34,11 +37,63 @@ const SQLITE_REQUIRED_TABLES = [
   'biz_inbound_order_item',
   'client_feedback_conversation',
   'client_feedback_message',
+  'client_feedback_attachment',
   'notification_rule',
   'notification_event',
   'notification_inbox',
   'notification_dispatch',
 ]
+
+async function migrateLegacyFeedbackAttachments(dataSource: DataSource) {
+  if (env.DB_TYPE !== 'sqlite') return
+  await dataSource.transaction(async (manager) => {
+    const messageRepo = manager.getRepository(ClientFeedbackMessage)
+    const conversationRepo = manager.getRepository(ClientFeedbackConversation)
+    const attachmentRepo = manager.getRepository(ClientFeedbackAttachment)
+    const messages = await messageRepo.createQueryBuilder('message')
+      .where("message.attachmentJson IS NOT NULL AND message.attachmentJson <> '[]'")
+      .getMany()
+    for (const message of messages) {
+      let items: ClientFeedbackMessageAttachment[]
+      try {
+        const parsed = JSON.parse(message.attachmentJson) as unknown
+        items = Array.isArray(parsed) ? parsed as ClientFeedbackMessageAttachment[] : []
+      } catch {
+        items = []
+      }
+      if (!items.length || items.every((item) => item.url?.startsWith('/api/client-feedback/attachments/'))) continue
+      const conversation = await conversationRepo.findOne({ where: { id: message.conversationId } })
+      if (!conversation) {
+        message.attachmentJson = '[]'
+        await messageRepo.save(message)
+        continue
+      }
+      const migrated: ClientFeedbackMessageAttachment[] = []
+      for (const item of items) {
+        if (item.url?.startsWith('/api/client-feedback/attachments/')) {
+          migrated.push(item)
+          continue
+        }
+        const match = /^\/uploads\/client-feedback\/([^/?#]+)$/.exec(item.url?.trim() || '')
+        if (!match?.[1]) continue
+        const storageName = path.basename(match[1])
+        const record = await attachmentRepo.save(attachmentRepo.create({
+          ownerClientUserId: conversation.clientUserId,
+          conversationId: conversation.id,
+          messageId: message.id,
+          storageName,
+          originalName: item.name?.trim().slice(0, 255) || storageName,
+          mimeType: item.mimeType?.trim().slice(0, 128) || null,
+          sizeBytes: typeof item.size === 'number' ? item.size : null,
+          expiresAt: null,
+        }))
+        migrated.push({ ...item, url: `/api/client-feedback/attachments/${record.id}` })
+      }
+      message.attachmentJson = JSON.stringify(migrated)
+      await messageRepo.save(message)
+    }
+  })
+}
 
 const SQLITE_REQUIRED_ORDER_COLUMNS = [
   'creator_user_id',
@@ -92,8 +147,14 @@ const SQLITE_REQUIRED_CLIENT_USER_COLUMNS = [
   'staff_verified',
   'status',
   'last_login_at',
+  'mobile_verified_at',
+  'email_verified_at',
 ]
-const SQLITE_REQUIRED_CLIENT_STAFF_DIRECTORY_COLUMNS = ['staff_no', 'real_name', 'department_name', 'status']
+const SQLITE_REQUIRED_CLIENT_STAFF_DIRECTORY_COLUMNS = [
+  'staff_no', 'real_name', 'department_name', 'status',
+  'invite_code_digest', 'invite_issued_at', 'invite_expires_at', 'invite_used_at',
+  'invite_failed_attempts', 'invite_locked_until',
+]
 const SQLITE_REQUIRED_SYS_USER_COLUMNS = ['email']
 const SQLITE_REQUIRED_CLIENT_FEEDBACK_CONVERSATION_COLUMNS = [
   'client_account_type',
@@ -729,6 +790,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   if (env.DB_SYNC === true) {
     await dataSource.synchronize()
     await migrateLegacyDepartmentAccountsToTeacherProfiles(dataSource)
+    await migrateLegacyFeedbackAttachments(dataSource)
     return {
       action: 'synchronized',
       reason: 'forced_by_db_sync',
@@ -746,6 +808,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   const needSynchronize = await shouldSynchronizeSqliteSchema(dataSource)
   if (!needSynchronize) {
     await migrateLegacyDepartmentAccountsToTeacherProfiles(dataSource)
+    await migrateLegacyFeedbackAttachments(dataSource)
     return {
       action: 'skipped',
       reason: 'sqlite_schema_ready',
@@ -755,6 +818,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   // SQLite 现有本地库在认证系统接入后，需要自动补齐新表与开单留痕字段。
   await dataSource.synchronize()
   await migrateLegacyDepartmentAccountsToTeacherProfiles(dataSource)
+  await migrateLegacyFeedbackAttachments(dataSource)
   return {
     action: 'synchronized',
     reason: 'sqlite_schema_bootstrap',

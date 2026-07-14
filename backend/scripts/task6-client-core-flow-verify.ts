@@ -23,6 +23,7 @@ import { AppDataSource } from '../src/config/data-source.js'
 import { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } from '../src/config/database-bootstrap.js'
 import { BaseProduct } from '../src/entities/base-product.entity.js'
 import { O2oPreorder } from '../src/entities/o2o-preorder.entity.js'
+import { SystemConfig } from '../src/entities/system-config.entity.js'
 import { authService } from '../src/services/auth.service.js'
 import { clientAuthService } from '../src/services/client-auth.service.js'
 import { o2oPreorderService } from '../src/services/o2o-preorder.service.js'
@@ -160,7 +161,7 @@ const registerAndLoginClient = async (seed: number): Promise<ClientAuthContext> 
   return clientAuthService.resolveClientByToken(loginResult.token)
 }
 
-const createListedProduct = async (suffix: string, stock: number) => {
+const createListedProduct = async (suffix: string, stock: number, limitPerUser = 20) => {
   const normalizedSuffix = suffix.replaceAll(/[^a-zA-Z0-9]/g, '').slice(-10) || 'TASK6'
   return productService.create({
     productName: `Task6客户端样本商品-${suffix}`,
@@ -169,7 +170,7 @@ const createListedProduct = async (suffix: string, stock: number) => {
     isActive: true,
     o2oStatus: 'listed',
     currentStock: stock,
-    limitPerUser: 20,
+    limitPerUser,
   })
 }
 
@@ -318,18 +319,26 @@ const measurePreorderScenario = async (clientAuth: ClientAuthContext) => {
   const product = await createListedProduct(`preorder-${Date.now()}`, 400)
   const submitSamples: number[] = []
   const orderIds: string[] = []
+  const configRepo = AppDataSource.getRepository(SystemConfig)
+  const limitConfig = await configRepo.findOneByOrFail({ configKey: 'o2o.limit_qty' })
+  const originalLimitQty = limitConfig.configValue
+  await configRepo.update({ id: limitConfig.id }, { configValue: '20' })
 
-  for (let index = 0; index < 5; index += 1) {
-    const startedAt = performance.now()
-    const detail = await o2oPreorderService.submit(clientAuth, {
-      isSystemApplied: false,
-      pickupContact: 'Task6下单联系人',
-      items: [{ productId: product.id, qty: 2 }],
-      remark: `Task6 预定性能样本-${index + 1}`,
-    })
-    submitSamples.push(Number((performance.now() - startedAt).toFixed(2)))
-    orderIds.push(detail.order.id)
-    assert.equal(detail.order.status, 'pending')
+  try {
+    for (let index = 0; index < 5; index += 1) {
+      const startedAt = performance.now()
+      const detail = await o2oPreorderService.submit(clientAuth, {
+        isSystemApplied: false,
+        pickupContact: 'Task6下单联系人',
+        items: [{ productId: product.id, qty: 2 }],
+        remark: `Task6 预定性能样本-${index + 1}`,
+      })
+      submitSamples.push(Number((performance.now() - startedAt).toFixed(2)))
+      orderIds.push(detail.order.id)
+      assert.equal(detail.order.status, 'pending')
+    }
+  } finally {
+    await configRepo.update({ id: limitConfig.id }, { configValue: originalLimitQty })
   }
 
   const refreshedProduct = await AppDataSource.getRepository(BaseProduct).findOneByOrFail({ id: product.id })
@@ -357,7 +366,7 @@ const measurePreorderScenario = async (clientAuth: ClientAuthContext) => {
 }
 
 const seedOrdersForQueryScenario = async (clientAuth: ClientAuthContext) => {
-  const product = await createListedProduct(`query-${Date.now()}`, 1000)
+  const product = await createListedProduct(`query-${Date.now()}`, 1000, 999)
   for (let index = 0; index < 30; index += 1) {
     await o2oPreorderService.submit(clientAuth, {
       isSystemApplied: false,
@@ -590,11 +599,19 @@ const writeReport = (status: 'passed' | 'failed', errorMessage: string | null = 
 
 const main = async () => {
   await ensureReady()
-  const clientAuth = await measureRegistrationScenario()
-  await measureMallScenario()
-  await measurePreorderScenario(clientAuth)
-  await measureOrderQueryScenario(clientAuth)
-  await measureOrderEditScenario(clientAuth)
+  const configRepo = AppDataSource.getRepository(SystemConfig)
+  const limitConfig = await configRepo.findOneByOrFail({ configKey: 'o2o.limit_qty' })
+  const originalLimitQty = limitConfig.configValue
+  await configRepo.update({ id: limitConfig.id }, { configValue: '999' })
+  try {
+    const clientAuth = await measureRegistrationScenario()
+    await measureMallScenario()
+    await measurePreorderScenario(clientAuth)
+    await measureOrderQueryScenario(clientAuth)
+    await measureOrderEditScenario(clientAuth)
+  } finally {
+    await configRepo.update({ id: limitConfig.id }, { configValue: originalLimitQty })
+  }
 }
 
 try {

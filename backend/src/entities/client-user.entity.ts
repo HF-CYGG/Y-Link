@@ -20,6 +20,12 @@ export class ClientUser {
   @Column({ name: 'email', type: 'varchar', length: 128, nullable: true, comment: '邮箱（邮箱注册时必填）' })
   email!: string | null
 
+  @Column({ name: 'mobile_verified_at', ...entityColumnOptions.timestamp, nullable: true })
+  mobileVerifiedAt!: Date | null
+
+  @Column({ name: 'email_verified_at', ...entityColumnOptions.timestamp, nullable: true })
+  emailVerifiedAt!: Date | null
+
   @Column({ name: 'password_hash', type: 'varchar', length: 255, select: false, comment: '密码哈希' })
   passwordHash!: string
 

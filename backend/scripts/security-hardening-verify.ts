@@ -295,20 +295,11 @@ async function main() {
     )
     pass('邮件通知 provider 内网地址被前置拦截')
 
-    let limited = false
-    for (let index = 0; index < 25; index += 1) {
-      const response = await fetch(`${baseUrl}/api/client-auth/staff-directory/lookup?staffNo=SEC-${index}`, {
-        headers: { 'x-forwarded-for': '203.0.113.10' },
-      })
-      if (response.status === 429) {
-        const payload = await readJson(response)
-        assert.equal(payload.code, 429, '工号目录限流业务码应为 429')
-        limited = true
-        break
-      }
-    }
-    assert.equal(limited, true, '工号目录查询应触发匿名频控')
-    pass('匿名工号目录查询已接入频控')
+    const removedLookupResponse = await fetch(`${baseUrl}/api/client-auth/staff-directory/lookup?staffNo=SEC-0001`)
+    const removedLookupPayload = await readJson(removedLookupResponse)
+    assert.ok([401, 404].includes(removedLookupResponse.status), '匿名工号目录查询应被移除或由统一鉴权拒绝')
+    assert.ok(removedLookupPayload.data == null, '匿名工号目录查询不得泄露实名、部门或注册状态')
+    pass('匿名工号目录查询已移除且不再泄露目录信息')
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()))
     if (AppDataSource.isInitialized) {

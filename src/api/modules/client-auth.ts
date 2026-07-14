@@ -35,6 +35,8 @@ export interface ClientSafeProfile {
   staffVerified: boolean
   status: string
   lastLoginAt: string | null
+  mobileVerifiedAt: string | null
+  emailVerifiedAt: string | null
 }
 
 /**
@@ -81,14 +83,6 @@ export interface ClientAuthCapabilities {
   departmentOptions: string[]
 }
 
-export interface ClientStaffDirectoryLookupResult {
-  matched: boolean
-  staffNo: string
-  realName: string | null
-  departmentName: string | null
-  isRegistered: boolean
-}
-
 /**
  * 获取图形验证码：
  * - 用于客户端注册、登录、找回密码时的防刷。
@@ -116,14 +110,6 @@ export const getClientAuthCapabilities = (config?: RequestConfig) =>
  * - 只返回 active 目录记录；
  * - 用于前端展示姓名和部门确认，不允许前端自行提交这些字段。
  */
-export const lookupClientStaffDirectory = (staffNo: string, config?: RequestConfig) =>
-  request<ClientStaffDirectoryLookupResult>({
-    method: 'GET',
-    url: '/client-auth/staff-directory/lookup',
-    params: { staffNo },
-    ...config,
-  })
-
 export interface ClientVerificationCodeSendInput {
   channel: 'mobile' | 'email'
   target: string
@@ -153,6 +139,7 @@ export const clientRegister = (payload: {
   account?: string
   accountType: ClientAccountType
   staffNo?: string
+  inviteCode?: string
   password: string
   verificationCode?: string
   captchaId?: string
@@ -254,6 +241,9 @@ export const clientUpdateProfile = (data: {
   username: string
   mobile?: string
   email?: string
+  currentPassword: string
+  mobileVerificationCode?: string
+  emailVerificationCode?: string
 }, config?: RequestConfig) =>
   request<ClientSafeProfile>({
     method: 'PATCH',
@@ -261,3 +251,13 @@ export const clientUpdateProfile = (data: {
     data,
     ...config,
   })
+
+export const sendClientProfileVerificationCode = (
+  data: { channel: 'mobile' | 'email'; target: string },
+  config?: RequestConfig,
+) => request<ClientVerificationCodeSendResult>({
+  method: 'POST',
+  url: '/client-auth/profile/verification-code/send',
+  data,
+  ...config,
+})

@@ -19,6 +19,7 @@ process.env.DB_TYPE = 'sqlite'
 process.env.DB_SYNC = 'false'
 process.env.SQLITE_DB_PATH = sqlitePath
 process.env.INIT_ADMIN_PASSWORD = adminPassword
+process.env.INVITE_CODE_PEPPER ||= `verify-pepper-${verifySeed}-minimum-32-bytes`
 
 type JsonPayload = {
   code?: number
@@ -779,6 +780,61 @@ async function main() {
 
     const importedRecord = importResult.list.find((item) => item.staffNo === 'HY1001')
     assert.ok(importedRecord, '应能找到 HY1001 记录')
+
+    const inviteSetResult = await expectJsonOkResponse<{ record: { inviteStatus: string; inviteExpiresAt: string } }>(
+      await fetch(`${baseUrl}/api/system-configs/client-staff-directory/${importedRecord.id}/invite-code`, {
+        method: 'PUT',
+        headers: { Authorization: `Bearer ${adminLogin.token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ inviteCode: '12345678' }),
+      }),
+      '管理员设置教师邀请码',
+    )
+    assert.equal(inviteSetResult.record.inviteStatus, 'active')
+    const { ClientStaffDirectory } = await import('../src/entities/client-staff-directory.entity.js')
+    const inviteRow = await AppDataSource.getRepository(ClientStaffDirectory).createQueryBuilder('directory')
+      .addSelect('directory.inviteCodeDigest')
+      .where('directory.id = :id', { id: importedRecord.id })
+      .getOneOrFail()
+    assert.equal(inviteRow.inviteCodeDigest?.length, 64)
+    assert.notEqual(inviteRow.inviteCodeDigest, '12345678')
+    pass('管理员可设置 8 位邀请码且数据库仅保存 HMAC 摘要')
+
+    const teacherPassword = `Teacher_${verifySeed}_Aa1!`
+    await expectJsonOkResponse(
+      await fetch(`${baseUrl}/api/client-auth/register`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          accountType: 'personal',
+          staffNo: importedRecord.staffNo,
+          inviteCode: '12345678',
+          password: teacherPassword,
+        }),
+      }),
+      '教师使用工号和邀请码注册',
+    )
+    const reusedInviteResponse = await fetch(`${baseUrl}/api/client-auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        accountType: 'personal',
+        staffNo: importedRecord.staffNo,
+        inviteCode: '12345678',
+        password: teacherPassword,
+      }),
+    })
+    const reusedInvitePayload = await readJson(reusedInviteResponse)
+    assert.equal(reusedInviteResponse.status, 400)
+    assert.equal(reusedInvitePayload.message, '工号或邀请码无效')
+    await expectJsonOkResponse(
+      await fetch(`${baseUrl}/api/client-auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ account: importedRecord.staffNo, password: teacherPassword }),
+      }),
+      '教师使用工号登录',
+    )
+    pass('教师邀请码仅可使用一次且工号可直接登录')
 
     const editableDepartmentName = importedRecord.departmentName
 

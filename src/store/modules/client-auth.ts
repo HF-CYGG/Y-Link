@@ -129,6 +129,8 @@ export const useClientAuthStore = defineStore('client-auth', () => {
       staffVerified: Boolean(user.staffVerified),
       status: user.status,
       lastLoginAt: null,
+      mobileVerifiedAt: null,
+      emailVerifiedAt: null,
     }
   }
 
@@ -259,6 +261,9 @@ export const useClientAuthStore = defineStore('client-auth', () => {
     username: string
     mobile?: string
     email?: string
+    currentPassword: string
+    mobileVerificationCode?: string
+    emailVerificationCode?: string
   }) => {
     const profile = await clientUpdateProfile(payload)
     currentUser.value = profile

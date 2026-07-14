@@ -10,7 +10,7 @@
  * - 若前端需要独立的会话标签、附件或评价体系，请在现有会话/消息模型上平滑扩展，避免破坏当前接口语义。
  */
 
-import type { EntityManager } from 'typeorm'
+import { In, LessThan, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { resolvePermissionsByRole } from '../constants/auth-permissions.js'
 import {
@@ -38,7 +38,6 @@ import type { AuthUserContext } from '../types/auth.js'
 import type { ClientAuthContext } from '../types/client-auth.js'
 import { isUniqueConstraintError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
-import { isUploadPublicUrlForCategory } from '../utils/upload-storage.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
 import {
@@ -48,6 +47,7 @@ import {
 } from './customer-service-realtime.service.js'
 import { systemConfigService } from './system-config.service.js'
 import { notificationService } from './notification.service.js'
+import { ClientFeedbackAttachment } from '../entities/client-feedback-attachment.entity.js'
 
 export const CLIENT_FEEDBACK_SUBJECT_MAX_LENGTH = 128
 export const CLIENT_FEEDBACK_CATEGORY_MAX_LENGTH = 32
@@ -292,6 +292,67 @@ class ClientFeedbackService {
 
   private readonly sysUserRepo = AppDataSource.getRepository(SysUser)
 
+  private readonly attachmentRepo = AppDataSource.getRepository(ClientFeedbackAttachment)
+
+  async createClientAttachment(input: {
+    storageName: string
+    originalName: string
+    mimeType: string | null
+    sizeBytes: number | null
+  }, clientAuth: ClientAuthContext) {
+    await this.attachmentRepo.delete({ expiresAt: LessThan(new Date()) })
+    const attachment = await this.attachmentRepo.save(this.attachmentRepo.create({
+      ownerClientUserId: clientAuth.userId,
+      conversationId: null,
+      messageId: null,
+      storageName: input.storageName,
+      originalName: input.originalName.slice(0, 255),
+      mimeType: input.mimeType,
+      sizeBytes: input.sizeBytes,
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    }))
+    return {
+      id: String(attachment.id),
+      name: attachment.originalName,
+      url: `/api/client-feedback/attachments/${attachment.id}`,
+      mimeType: attachment.mimeType,
+      size: attachment.sizeBytes,
+      expiresAt: attachment.expiresAt,
+    }
+  }
+
+  async resolveOwnedAttachmentReferences(ids: string[], clientAuth: ClientAuthContext): Promise<ClientFeedbackMessageAttachment[]> {
+    const normalizedIds = [...new Set(ids.map((id) => id.trim()).filter(Boolean))]
+    if (!normalizedIds.length) return []
+    const rows = await this.attachmentRepo.find({ where: { id: In(normalizedIds) } })
+    const now = new Date()
+    if (rows.length !== normalizedIds.length || rows.some((row) => String(row.ownerClientUserId) !== String(clientAuth.userId) || Boolean(row.messageId) || (row.expiresAt && row.expiresAt <= now))) {
+      throw new BizError('反馈附件不存在、已过期或无权使用', 403)
+    }
+    const byId = new Map(rows.map((row) => [String(row.id), row]))
+    return normalizedIds.map((id) => {
+      const row = byId.get(id)!
+      return {
+        name: row.originalName,
+        url: `/api/client-feedback/attachments/${row.id}`,
+        mimeType: row.mimeType,
+        size: row.sizeBytes,
+      }
+    })
+  }
+
+  async getAttachmentForClient(id: string, clientAuth: ClientAuthContext) {
+    const attachment = await this.attachmentRepo.findOne({ where: { id, ownerClientUserId: clientAuth.userId } })
+    if (!attachment || (attachment.expiresAt && attachment.expiresAt <= new Date())) throw new BizError('反馈附件不存在', 404)
+    return attachment
+  }
+
+  async getAttachmentForCustomerService(id: string) {
+    const attachment = await this.attachmentRepo.findOne({ where: { id } })
+    if (!attachment) throw new BizError('反馈附件不存在', 404)
+    return attachment
+  }
+
   private parseJsonArray<T>(rawValue: string | null | undefined, fallback: T[]): T[] {
     const text = rawValue?.trim()
     if (!text) {
@@ -374,7 +435,7 @@ class ClientFeedbackService {
       if (url.length > CLIENT_FEEDBACK_ATTACHMENT_URL_MAX_LENGTH) {
         throw new BizError(`附件地址长度不能超过 ${CLIENT_FEEDBACK_ATTACHMENT_URL_MAX_LENGTH} 个字符`, 400)
       }
-      if (!isUploadPublicUrlForCategory('client-feedback', url)) {
+      if (!/^\/api\/client-feedback\/attachments\/[^/?#]+$/.test(url)) {
         throw new BizError(`第 ${index + 1} 个附件地址必须来自反馈附件上传接口`, 400)
       }
       if (mimeType && mimeType.length > CLIENT_FEEDBACK_ATTACHMENT_MIME_TYPE_MAX_LENGTH) {
@@ -571,7 +632,9 @@ class ClientFeedbackService {
       content: message.content,
       attachments: this.parseJsonArray<ClientFeedbackMessageAttachment>(message.attachmentJson, []).map((item) => ({
         name: item?.name?.trim() || '',
-        url: item?.url?.trim() || '',
+        url: viewer.scope === 'service'
+          ? (item?.url?.trim() || '').replace('/api/client-feedback/attachments/', '/api/customer-service/attachments/')
+          : item?.url?.trim() || '',
         mimeType: item?.mimeType?.trim() || null,
         size: typeof item?.size === 'number' && Number.isFinite(item.size) ? item.size : null,
       }))
@@ -754,6 +817,16 @@ class ClientFeedbackService {
         serviceReadAt: writer.senderType === 'service' || writer.senderType === 'system' ? now : null,
       }),
     )
+
+    const attachmentIds = attachments
+      .map((attachment) => /\/api\/client-feedback\/attachments\/([^/?#]+)/.exec(attachment.url)?.[1] ?? '')
+      .filter(Boolean)
+    if (attachmentIds.length) {
+      await manager.getRepository(ClientFeedbackAttachment).update(
+        { id: In(attachmentIds) },
+        { conversationId: conversation.id, messageId: message.id, expiresAt: null },
+      )
+    }
 
     conversation.lastMessagePreview = this.previewMessage(content)
     conversation.lastMessageAt = now

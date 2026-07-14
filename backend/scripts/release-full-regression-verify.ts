@@ -185,11 +185,11 @@ async function main() {
     assert.ok(address && typeof address === 'object' && typeof address.port === 'number', '回归服务端口获取失败')
     const baseUrl = `http://127.0.0.1:${address.port}`
 
-    const health = await expectJsonOk<{ data: { status: string } }>(
-      () => fetch(`${baseUrl}/health`),
-      '健康检查',
-    )
+    const healthResponse = await fetch(`${baseUrl}/health`)
+    assert.equal(healthResponse.status, 200, '健康检查 HTTP 状态码异常')
+    const health = await healthResponse.json() as { status?: string; database?: unknown }
     assert.equal(health.status, 'UP')
+    assert.equal(health.database, undefined, '公开健康检查不得返回数据库拓扑')
     pass('后端健康检查通过')
 
     const adminLogin = await expectJsonOk<{

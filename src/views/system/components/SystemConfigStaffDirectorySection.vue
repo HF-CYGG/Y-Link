@@ -19,6 +19,9 @@ import {
   previewClientStaffDirectoryImportFile,
   updateClientStaffDirectoryRecord,
   updateClientStaffDirectoryStatus,
+  setClientStaffDirectoryInviteCode,
+  resetClientStaffDirectoryInviteCode,
+  disableClientStaffDirectoryInviteCode,
   type ImportClientStaffDirectoryPreviewResult,
   type ImportClientStaffDirectoryPreviewRow,
   type ClientStaffDirectoryRecord,
@@ -36,6 +39,9 @@ const props = defineProps<{
 }>()
 
 type StaffDirectoryDialogMode = 'create' | 'edit'
+const getInviteStatusLabel = (status: ClientStaffDirectoryRecord['inviteStatus']) => ({
+  not_set: '未设置', active: '有效', expired: '已过期', used: '已使用', locked: '已锁定',
+}[status])
 type DepartmentTreeSelectOption = {
   value: string
   label: string
@@ -450,6 +456,49 @@ const handleToggleStatus = async (record: ClientStaffDirectoryRecord) => {
   }
 }
 
+const handleSetInviteCode = async (record: ClientStaffDirectoryRecord) => {
+  try {
+    const result = await ElMessageBox.prompt('请输入新的 8 位数字邀请码', `设置邀请码：${record.staffNo}`, {
+      inputPattern: /^\d{8}$/,
+      inputErrorMessage: '邀请码必须是 8 位数字',
+      confirmButtonText: '保存',
+      cancelButtonText: '取消',
+    })
+    await setClientStaffDirectoryInviteCode(record.id, result.value)
+    showAppSuccess('邀请码已设置，24 小时内有效')
+    await loadList()
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    showAppError(extractErrorMessage(error, '邀请码设置失败'))
+  }
+}
+
+const handleResetInviteCode = async (record: ClientStaffDirectoryRecord) => {
+  try {
+    await ElMessageBox.confirm('重置后旧邀请码立即失效，是否继续？', `重置邀请码：${record.staffNo}`, { type: 'warning' })
+    const result = await resetClientStaffDirectoryInviteCode(record.id)
+    await ElMessageBox.alert(`新邀请码：${result.inviteCode}\n请立即安全告知教师，关闭后将不再显示。`, '邀请码仅展示一次', {
+      confirmButtonText: '我已记录',
+    })
+    await loadList()
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    showAppError(extractErrorMessage(error, '邀请码重置失败'))
+  }
+}
+
+const handleDisableInviteCode = async (record: ClientStaffDirectoryRecord) => {
+  try {
+    await ElMessageBox.confirm('禁用后当前邀请码立即失效，是否继续？', `禁用邀请码：${record.staffNo}`, { type: 'warning' })
+    await disableClientStaffDirectoryInviteCode(record.id)
+    showAppSuccess('邀请码已禁用')
+    await loadList()
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    showAppError(extractErrorMessage(error, '邀请码禁用失败'))
+  }
+}
+
 const handleSelectionChange = (value: ClientStaffDirectoryRecord[]) => {
   selectedRecords.value = value
 }
@@ -637,13 +686,24 @@ onMounted(() => {
           </el-tag>
         </template>
       </el-table-column>
+      <el-table-column label="邀请码" min-width="150">
+        <template #default="{ row }">
+          <el-tag :type="row.inviteStatus === 'active' ? 'success' : row.inviteStatus === 'locked' ? 'danger' : 'info'">
+            {{ getInviteStatusLabel(row.inviteStatus) }}
+          </el-tag>
+          <div v-if="row.inviteExpiresAt" class="mt-1 text-xs text-slate-400">{{ dayjs(row.inviteExpiresAt).format('MM-DD HH:mm') }}</div>
+        </template>
+      </el-table-column>
       <el-table-column label="更新时间" min-width="170">
         <template #default="{ row }">{{ dayjs(row.updatedAt).format('YYYY-MM-DD HH:mm:ss') }}</template>
       </el-table-column>
-      <el-table-column v-if="canUpdateConfigs" label="操作" fixed="right" width="180" align="right">
+      <el-table-column v-if="canUpdateConfigs" label="操作" fixed="right" width="330" align="right">
         <template #default="{ row }">
           <div class="flex items-center justify-end gap-3">
             <el-button link type="primary" :disabled="actionDisabled" @click="handleOpenEdit(row)">编辑</el-button>
+            <el-button link type="primary" :disabled="actionDisabled" @click="handleSetInviteCode(row)">设码</el-button>
+            <el-button link type="primary" :disabled="actionDisabled" @click="handleResetInviteCode(row)">重置</el-button>
+            <el-button link type="danger" :disabled="actionDisabled || row.inviteStatus === 'not_set'" @click="handleDisableInviteCode(row)">禁用码</el-button>
             <el-button
               link
               :type="row.status === 'active' ? 'warning' : 'success'"

@@ -17,6 +17,7 @@ process.env.DB_TYPE = 'sqlite'
 process.env.DB_SYNC = 'false'
 process.env.SQLITE_DB_PATH = sqlitePath
 process.env.INIT_ADMIN_PASSWORD = adminPassword
+process.env.INVITE_CODE_PEPPER ||= `governance-pepper-${verifySeed}-minimum-32-bytes`
 
 type CapturedVerification = {
   channel: 'mobile' | 'email'
@@ -71,9 +72,8 @@ async function expectBizError(action: () => Promise<unknown>, scene: string, mes
   assert.fail(`${scene} 应失败但实际成功`)
 }
 
-function installVerificationFetchStub(captured: CapturedVerification[]) {
-  const originalFetch = globalThis.fetch
-  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+function createVerificationRequestStub(captured: CapturedVerification[]) {
+  return async (_input: string | URL, init?: { body?: string | Buffer }) => {
     const bodyText = String(init?.body ?? '{}')
     const payload = JSON.parse(bodyText) as Partial<CapturedVerification>
     assert.equal(typeof payload.code, 'string', '验证码平台请求体应包含 code')
@@ -83,10 +83,11 @@ function installVerificationFetchStub(captured: CapturedVerification[]) {
       target: String(payload.target),
       code: String(payload.code),
     })
-    return new Response('ok', { status: 200 })
-  }) as typeof fetch
-  return () => {
-    globalThis.fetch = originalFetch
+    return {
+      statusCode: 200,
+      headers: {},
+      body: Buffer.from('ok'),
+    }
   }
 }
 
@@ -115,7 +116,6 @@ async function main() {
   await AppDataSource.initialize()
 
   const capturedVerifications: CapturedVerification[] = []
-  const restoreFetch = installVerificationFetchStub(capturedVerifications)
 
   try {
     await initializeDatabaseSchemaIfNeeded(AppDataSource)
@@ -156,14 +156,16 @@ async function main() {
       adminAuth,
     )
 
-    await clientStaffDirectoryService.create(
+    const teacherOneDirectory = await clientStaffDirectoryService.create(
       { staffNo: 'T1001', realName: '张老师', departmentName: '资产处', status: 'active' },
       adminAuth,
     )
-    await clientStaffDirectoryService.create(
+    const teacherTwoDirectory = await clientStaffDirectoryService.create(
       { staffNo: 'T1002', realName: '李老师', departmentName: '信息中心', status: 'active' },
       adminAuth,
     )
+    await clientStaffDirectoryService.setInviteCode(teacherOneDirectory.record.id, '12345678', adminAuth)
+    await clientStaffDirectoryService.setInviteCode(teacherTwoDirectory.record.id, '87654321', adminAuth)
 
     const publicDepartmentCaptcha = await clientAuthService.createCaptcha()
     await expectBizError(
@@ -189,14 +191,15 @@ async function main() {
           staffNo: 'T1001',
           username: '张老师',
           account: '',
+          inviteCode: '',
           password: clientPassword,
           captchaId: publicDepartmentCaptcha.captchaId,
           captchaCode: '000000',
         }),
-      '教师注册缺少手机号或邮箱',
-      '教师注册必须填写手机号或邮箱',
+      '教师注册缺少邀请码',
+      '工号或邀请码无效',
     )
-    pass('教师注册缺少手机号或邮箱会失败')
+    pass('教师注册缺少邀请码会失败')
 
     await expectBizError(
       () =>
@@ -204,15 +207,16 @@ async function main() {
           accountType: 'personal',
           staffNo: 'T1001',
           username: '张老师',
-          account: '13800001001',
+          account: '',
+          inviteCode: '00000000',
           password: clientPassword,
           captchaId: publicDepartmentCaptcha.captchaId,
           captchaCode: '000000',
         }),
-      '教师注册缺少短信验证码',
-      '验证码',
+      '教师注册邀请码错误',
+      '工号或邀请码无效',
     )
-    pass('教师注册必须走短信或邮箱验证码')
+    pass('教师注册错误邀请码会失败')
 
     const sendResult = await clientAuthService.createCaptcha()
     await clientAuthService.verifyCaptchaBeforeVerificationSend({
@@ -222,7 +226,8 @@ async function main() {
       captchaId: sendResult.captchaId,
       captchaCode: sendResult.captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6),
     })
-    const { verificationCodeService } = await import('../src/services/verification-code.service.js')
+    const { VerificationCodeService } = await import('../src/services/verification-code.service.js')
+    const verificationCodeService = new VerificationCodeService(createVerificationRequestStub(capturedVerifications))
     const issueRegisterVerificationCode = async (target: string, channel: 'mobile' | 'email' = 'mobile') => {
       await verificationCodeService.sendCode({
         channel,
@@ -245,8 +250,8 @@ async function main() {
       accountType: 'personal',
       staffNo: 'T1001',
       account: '13800001001',
+      inviteCode: '12345678',
       password: clientPassword,
-      verificationCode: capturedMobileCode,
     })
     assert.equal(teacherRegisterResult.user.accountType, 'personal')
     assert.equal(teacherRegisterResult.user.username, '张老师')
@@ -310,12 +315,13 @@ async function main() {
         clientAuthService.register({
           accountType: 'personal',
           staffNo: 'T9999',
+          inviteCode: '11112222',
           account: '13800001999',
           password: clientPassword,
           verificationCode: capturedMobileCode,
         }),
       '教师注册工号不存在',
-      '教职工号未在学校目录中登记',
+      '工号或邀请码无效',
     )
     pass('教师注册工号不存在会失败')
 
@@ -324,24 +330,27 @@ async function main() {
         clientAuthService.register({
           accountType: 'personal',
           staffNo: 'T1001',
+          inviteCode: '12345678',
           account: '13800001002',
           password: clientPassword,
           verificationCode: capturedMobileCode,
         }),
       '教师注册工号重复绑定',
-      '该教职工号已被占用',
+      '工号或邀请码无效',
     )
     pass('教师注册工号已绑定会失败')
 
-    await clientStaffDirectoryService.create(
+    const duplicateNameDirectory = await clientStaffDirectoryService.create(
       { staffNo: 'T1003', realName: '张老师', departmentName: '资产处', status: 'active' },
       adminAuth,
     )
+    await clientStaffDirectoryService.setInviteCode(duplicateNameDirectory.record.id, '11223344', adminAuth)
     await expectBizError(
       async () =>
         clientAuthService.register({
           accountType: 'personal',
           staffNo: 'T1003',
+          inviteCode: '11223344',
           account: '13800001012',
           password: clientPassword,
           verificationCode: await issueRegisterVerificationCode('13800001012'),
@@ -508,7 +517,6 @@ async function main() {
     )
     pass('旧部门账号命中教职工目录后可迁移为教师账号，历史订单不回改')
   } finally {
-    restoreFetch()
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()
     }

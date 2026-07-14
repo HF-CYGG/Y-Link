@@ -6,7 +6,7 @@
  * 3. 关键认证动作会结合审计日志、图形验证码和系统配置，兼顾安全性、可维护性与业务扩展空间。
  */
 
-import { LessThan } from 'typeorm'
+import { LessThan, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { env } from '../config/env.js'
 import { ClientStaffDirectory } from '../entities/client-staff-directory.entity.js'
@@ -31,6 +31,12 @@ import { captchaService } from './captcha.service.js'
 import { systemConfigService } from './system-config.service.js'
 import { verificationCodeService } from './verification-code.service.js'
 import { EphemeralTicketStore } from '../utils/ephemeral-ticket-store.js'
+import {
+  STAFF_INVITE_LOCK_MS,
+  STAFF_INVITE_MAX_FAILURES,
+  STAFF_INVITE_CODE_PATTERN,
+  verifyStaffInviteCode,
+} from '../utils/staff-invite-code.js'
 
 interface ResetTicket {
   userId: string
@@ -50,6 +56,7 @@ export interface ClientRegisterInput {
   account?: string
   accountType: ClientUserAccountType
   staffNo?: string
+  inviteCode?: string
   password: string
   departmentName?: string
   verificationCode?: string
@@ -94,6 +101,9 @@ export interface ClientUpdateProfileInput {
   username: string
   mobile?: string
   email?: string
+  currentPassword: string
+  mobileVerificationCode?: string
+  emailVerificationCode?: string
 }
 
 export type ClientValidationMode = 'captcha' | 'verification_code'
@@ -135,6 +145,8 @@ export interface ClientAuthSessionResult {
     staffVerified: boolean
     status: string
     lastLoginAt: Date | null
+    mobileVerifiedAt: Date | null
+    emailVerifiedAt: Date | null
   }
   verificationChannel: 'captcha' | 'sms' | 'email'
 }
@@ -267,6 +279,8 @@ class ClientAuthService {
       staffVerified: Boolean(user.staffVerified),
       status: user.status,
       lastLoginAt: user.lastLoginAt,
+      mobileVerifiedAt: user.mobileVerifiedAt,
+      emailVerifiedAt: user.emailVerifiedAt,
     }
   }
 
@@ -387,7 +401,7 @@ class ClientAuthService {
         select: ['id'],
       })
       if (existedByStaffNo) {
-        throw new BizError('该教职工号已被占用', 409)
+        throw new BizError('工号或邀请码无效', 400)
       }
     }
 
@@ -443,19 +457,11 @@ class ClientAuthService {
     if (accountType !== 'department') {
       if (input.staffNo?.trim()) {
         const staffNo = this.normalizeStaffNo(input.staffNo)
-        const existedByStaffNo = await this.userRepo.findOne({
-          where: { staffNo },
-          select: ['id'],
-        })
-        if (existedByStaffNo) {
-          throw new BizError('该教职工号已被占用', 409)
-        }
-
         const matchedStaff = await this.clientStaffDirectoryRepo.findOne({
           where: { staffNo, status: 'active' },
         })
         if (!matchedStaff) {
-          throw new BizError('教职工号未在学校目录中登记，请联系管理员核验', 409)
+          throw new BizError('工号或邀请码无效', 400)
         }
 
         const usernameValue = this.assertRealName(matchedStaff.realName)
@@ -480,19 +486,11 @@ class ClientAuthService {
     }
 
     const staffNo = this.normalizeStaffNo(input.staffNo)
-    const existedByStaffNo = await this.userRepo.findOne({
-      where: { staffNo },
-      select: ['id'],
-    })
-    if (existedByStaffNo) {
-      throw new BizError('该教职工号已被占用', 409)
-    }
-
     const matchedStaff = await this.clientStaffDirectoryRepo.findOne({
       where: { staffNo, status: 'active' },
     })
     if (!matchedStaff) {
-      throw new BizError('教职工号未在学校目录中登记，请联系管理员核验', 409)
+      throw new BizError('工号或邀请码无效', 400)
     }
 
     const usernameValue = this.assertRealName(matchedStaff.realName)
@@ -583,6 +581,57 @@ class ClientAuthService {
     }
   }
 
+  private buildLockedDirectoryQuery(manager: EntityManager, staffNo: string) {
+    const query = manager.getRepository(ClientStaffDirectory)
+      .createQueryBuilder('directory')
+      .addSelect('directory.inviteCodeDigest')
+      .where('directory.staffNo = :staffNo', { staffNo })
+    if (AppDataSource.options.type === 'mysql') query.setLock('pessimistic_write')
+    return query
+  }
+
+  private isUsableStaffInvite(record: ClientStaffDirectory | null, inviteCode: string, now: Date): boolean {
+    return Boolean(
+      record
+      && record.status === 'active'
+      && record.inviteCodeDigest
+      && record.inviteExpiresAt
+      && record.inviteExpiresAt > now
+      && !record.inviteUsedAt
+      && (!record.inviteLockedUntil || record.inviteLockedUntil <= now)
+      && STAFF_INVITE_CODE_PATTERN.test(inviteCode.trim())
+      && verifyStaffInviteCode(record.staffNo, inviteCode, record.inviteCodeDigest),
+    )
+  }
+
+  private async guardStaffInviteAttempt(staffNo: string, inviteCode: string, requestMeta?: RequestMeta) {
+    const result = await AppDataSource.transaction(async (manager) => {
+      const record = await this.buildLockedDirectoryQuery(manager, staffNo).getOne()
+      const now = new Date()
+      if (this.isUsableStaffInvite(record, inviteCode, now)) return true
+      if (record) {
+        record.inviteFailedAttempts = Number(record.inviteFailedAttempts || 0) + 1
+        if (record.inviteFailedAttempts >= STAFF_INVITE_MAX_FAILURES) {
+          record.inviteLockedUntil = new Date(now.getTime() + STAFF_INVITE_LOCK_MS)
+          record.inviteFailedAttempts = 0
+        }
+        await manager.getRepository(ClientStaffDirectory).save(record)
+      }
+      return false
+    })
+    if (result) return
+    await auditService.safeRecord({
+      actionType: 'client.auth.staff_invite.failed',
+      actionLabel: '教师邀请码校验失败',
+      targetType: 'client_staff_directory',
+      targetCode: staffNo,
+      resultStatus: 'failed',
+      requestMeta,
+      detail: { reason: 'invalid_or_unavailable' },
+    })
+    throw new BizError('工号或邀请码无效', 400)
+  }
+
   async register(input: ClientRegisterInput, _requestMeta?: RequestMeta) {
     const accountType = this.normalizeAccountType(input.accountType)
     if (accountType === 'department') {
@@ -593,9 +642,6 @@ class ClientAuthService {
     const account = isTeacherRegister
       ? this.resolveOptionalContactAccount(input.account)
       : this.resolveAccount(input.account ?? '')
-    if (isTeacherRegister && !account) {
-      throw new BizError('教师注册必须填写手机号或邮箱', 400)
-    }
     const username = isTeacherRegister
       ? null
       : normalizeClientUsername(this.assertRealName(input.username ?? ''))
@@ -604,16 +650,27 @@ class ClientAuthService {
     const validationMode = account ? capabilities.registerValidationModes[account.channel] : 'captcha'
     const registerProfile = await this.resolveDepartmentRegistrationProfile(accountType, input, username)
     await authSecurityService.guardClientRegisterAccountRequest(_requestMeta, account?.account ?? registerProfile.staffNo ?? registerProfile.usernameValue)
-    this.verifyRegisterChallenge(input, validationMode, account, { forceVerificationCode: isTeacherRegister })
+    if (isTeacherRegister) {
+      await this.guardStaffInviteAttempt(registerProfile.staffNo ?? '', input.inviteCode ?? '', _requestMeta)
+    } else {
+      this.verifyRegisterChallenge(input, validationMode, account)
+    }
     await this.assertRegisterIdentifiersAvailable(account, registerProfile)
 
     let user: ClientUser
     try {
-      user = await this.userRepo.save(
-        this.userRepo.create({
+      const passwordHash = await hashPassword(password)
+      user = isTeacherRegister
+        ? await AppDataSource.transaction(async (manager) => {
+          const directory = await this.buildLockedDirectoryQuery(manager, registerProfile.staffNo ?? '').getOne()
+          const now = new Date()
+          if (!directory || !this.isUsableStaffInvite(directory, input.inviteCode ?? '', now)) throw new BizError('工号或邀请码无效', 400)
+          const saved = await manager.getRepository(ClientUser).save(manager.getRepository(ClientUser).create({
           mobile: account?.mobile ?? undefined,
           email: account?.email ?? undefined,
-          passwordHash: await hashPassword(password),
+          mobileVerifiedAt: null,
+          emailVerifiedAt: null,
+          passwordHash,
           // 当前账号体系下，用户名与登录账号分离，支持用户自定义用户名。
           realName: registerProfile.usernameValue,
           departmentName: registerProfile.departmentName ?? undefined,
@@ -621,8 +678,35 @@ class ClientAuthService {
           staffNo: registerProfile.staffNo ?? undefined,
           staffVerified: registerProfile.staffVerified,
           status: 'enabled',
-        }),
-      )
+          }))
+          directory.inviteUsedAt = now
+          directory.inviteFailedAttempts = 0
+          directory.inviteLockedUntil = null
+          await manager.getRepository(ClientStaffDirectory).save(directory)
+          await auditService.record({
+            actionType: 'client.auth.staff_invite.used',
+            actionLabel: '教师邀请码注册成功',
+            targetType: 'client_staff_directory',
+            targetId: directory.id,
+            targetCode: directory.staffNo,
+            requestMeta: _requestMeta,
+            detail: { clientUserId: saved.id },
+          }, manager)
+          return saved
+        })
+        : await this.userRepo.save(this.userRepo.create({
+          mobile: account?.mobile ?? undefined,
+          email: account?.email ?? undefined,
+          mobileVerifiedAt: account?.channel === 'mobile' && validationMode === 'verification_code' ? new Date() : null,
+          emailVerifiedAt: account?.channel === 'email' && validationMode === 'verification_code' ? new Date() : null,
+          passwordHash,
+          realName: registerProfile.usernameValue,
+          departmentName: registerProfile.departmentName ?? undefined,
+          accountType: 'personal',
+          staffNo: registerProfile.staffNo ?? undefined,
+          staffVerified: registerProfile.staffVerified,
+          status: 'enabled',
+        }))
     } catch (error) {
       this.rethrowRegisterUniqueConstraintError(error)
     }
@@ -707,7 +791,12 @@ class ClientAuthService {
     )
     const user = await this.userRepo
       .createQueryBuilder('user')
-      .where('user.mobile = :account OR user.email = :account', { account: account.account })
+      .where(
+        account.channel === 'mobile'
+          ? 'user.mobile = :account AND user.mobileVerifiedAt IS NOT NULL'
+          : 'user.email = :account AND user.emailVerifiedAt IS NOT NULL',
+        { account: account.account },
+      )
       .getOne()
     if (!user) {
       // 找回密码不直接暴露“账号是否已注册”，降低批量枚举账号的风险。
@@ -857,15 +946,20 @@ class ClientAuthService {
   }
 
   async updateProfile(auth: ClientAuthContext, input: ClientUpdateProfileInput) {
-    const user = await this.userRepo.findOne({ where: { id: auth.userId } })
+    const user = await this.userRepo.createQueryBuilder('user')
+      .addSelect('user.passwordHash')
+      .where('user.id = :id', { id: auth.userId })
+      .getOne()
     if (!user) {
       throw new BizError('当前用户不存在', 404)
     }
-    if (user.accountType === 'department' || (user.accountType === 'personal' && user.staffVerified && Boolean(user.staffNo?.trim()))) {
-      throw new BizError('教师或部门账户资料由管理员或教职工目录维护，不支持在客户端自助修改', 403)
-    }
+    if (user.accountType === 'department') throw new BizError('部门账号资料由管理员维护', 403)
+    if (!(await verifyPassword(input.currentPassword, user.passwordHash))) throw new BizError('当前密码错误', 400)
 
-    const username = normalizeClientUsername(this.assertRealName(input.username))
+    const isDirectoryTeacher = user.staffVerified && Boolean(user.staffNo?.trim())
+    const username = isDirectoryTeacher
+      ? normalizeClientUsername(user.realName)
+      : normalizeClientUsername(this.assertRealName(input.username))
     const mobile = input.mobile?.trim()
       ? normalizeClientVerificationTarget('mobile', input.mobile)
       : null
@@ -880,9 +974,27 @@ class ClientAuthService {
     const checks = this.buildProfileUniquenessChecks(username, mobile, email)
     await this.ensureProfileIdentifiersUnique(checks, user.id)
 
+    const mobileChanged = mobile !== user.mobile
+    const emailChanged = email !== user.email
+    const capabilities = await this.getVerificationCapabilities()
+    if (mobileChanged && mobile && capabilities.channels.mobile) {
+      if (!input.mobileVerificationCode) throw new BizError('请输入新手机号验证码', 400)
+      verificationCodeService.verifyCode({
+        channel: 'mobile', target: mobile, scene: 'profile_update', code: input.mobileVerificationCode,
+      })
+    }
+    if (emailChanged && email && capabilities.channels.email) {
+      if (!input.emailVerificationCode) throw new BizError('请输入新邮箱验证码', 400)
+      verificationCodeService.verifyCode({
+        channel: 'email', target: email, scene: 'profile_update', code: input.emailVerificationCode,
+      })
+    }
+
     user.realName = username.value
     user.mobile = mobile
     user.email = email
+    if (mobileChanged) user.mobileVerifiedAt = mobile && capabilities.channels.mobile ? new Date() : null
+    if (emailChanged) user.emailVerifiedAt = email && capabilities.channels.email ? new Date() : null
 
     const savedUser = await this.userRepo.save(user)
     return this.toClientProfile(savedUser)

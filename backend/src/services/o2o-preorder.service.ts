@@ -1917,6 +1917,13 @@ class O2oPreorderService {
 
     const o2oRules = await systemConfigService.getO2oRuleConfigs()
     const detail = await AppDataSource.transaction(async (manager) => {
+      const clientUser = await manager.getRepository(ClientUser).findOne({
+        where: { id: auth.userId },
+        select: ['id', 'realName', 'accountType', 'departmentName', 'staffNo'],
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
+      if (!clientUser) throw new BizError('客户端账号不存在，请重新登录后再试', 401)
+      const pendingProductQtyMap = await this.loadPendingProductQtyMap(manager, auth.userId)
       // 事务内完成“查商品 -> 校验库存/限购 -> 写订单 -> 占用预订库存 -> 记录库存日志”，
       // 确保任一步失败都能整体回滚，避免只生成订单或只扣预订库存的脏状态。
       const productIds = [...new Set(normalizedItems.map((item) => item.productId))]
@@ -1954,19 +1961,12 @@ class O2oPreorderService {
         const productQty = (productQtyMap.get(row.productId) ?? 0) + row.qty
         productQtyMap.set(row.productId, productQty)
         const limitQty = this.resolveProductLimitQty(product, o2oRules)
-        if (o2oRules.limitEnabled && productQty > limitQty) {
+        if (o2oRules.limitEnabled && (pendingProductQtyMap.get(row.productId) ?? 0) + productQty > limitQty) {
           throw new BizError(`商品「${product.productName}」超过限购数量`, 409)
         }
         totalQty += row.qty
       }
 
-      const clientUser = await manager.getRepository(ClientUser).findOne({
-        where: { id: auth.userId },
-        select: ['id', 'realName', 'accountType', 'departmentName', 'staffNo'],
-      })
-      if (!clientUser) {
-        throw new BizError('客户端账号不存在，请重新登录后再试', 401)
-      }
       // 订单归属由服务端按当前登录账号强制判定：
       // - 部门账号一律沉淀为部门单；
       // - 个人账号一律沉淀为散客单；
@@ -2130,6 +2130,21 @@ class O2oPreorderService {
     return new Map<string, BaseProduct>(products.map((item: BaseProduct) => [String(item.id), item]))
   }
 
+  private async loadPendingProductQtyMap(manager: EntityManager, clientUserId: string, excludeOrderId?: string) {
+    const query = manager.getRepository(O2oPreorderItem)
+      .createQueryBuilder('item')
+      .innerJoin(O2oPreorder, 'pendingOrder', 'pendingOrder.id = item.orderId')
+      .select('item.productId', 'productId')
+      .addSelect('SUM(item.qty)', 'totalQty')
+      .where('pendingOrder.clientUserId = :clientUserId', { clientUserId })
+      .andWhere('pendingOrder.status = :status', { status: 'pending' })
+      .andWhere('pendingOrder.isDeleted = :isDeleted', { isDeleted: false })
+      .groupBy('item.productId')
+    if (excludeOrderId) query.andWhere('pendingOrder.id <> :excludeOrderId', { excludeOrderId })
+    const rows = await query.getRawMany<{ productId: string; totalQty: string | number }>()
+    return new Map(rows.map((row) => [String(row.productId), Math.max(0, Number(row.totalQty ?? 0))]))
+  }
+
   private validateUpdatedPreorderItems(
     normalizedItems: Array<{ productId: string; skuId: string | null; qty: number }>,
     existingQtyMap: Map<string, number>,
@@ -2137,6 +2152,7 @@ class O2oPreorderService {
     skuMap: Map<string, BaseProductSku>,
     skuByProductMap: Map<string, BaseProductSku[]>,
     o2oRules: Awaited<ReturnType<typeof systemConfigService.getO2oRuleConfigs>>,
+    pendingProductQtyMap: Map<string, number>,
   ) {
     let totalQty = 0
     const productQtyMap = new Map<string, number>()
@@ -2171,7 +2187,7 @@ class O2oPreorderService {
       const productQty = (productQtyMap.get(row.productId) ?? 0) + row.qty
       productQtyMap.set(row.productId, productQty)
       const limitQty = this.resolveProductLimitQty(product, o2oRules)
-      if (o2oRules.limitEnabled && productQty > limitQty) {
+      if (o2oRules.limitEnabled && (pendingProductQtyMap.get(row.productId) ?? 0) + productQty > limitQty) {
         throw new BizError(`商品「${product.productName}」超过限购数量`, 409)
       }
       totalQty += row.qty
@@ -2330,6 +2346,11 @@ class O2oPreorderService {
       if (!order) {
         throw new BizError('预订单不存在', 404)
       }
+      await manager.getRepository(ClientUser).findOne({
+        where: { id: order.clientUserId },
+        select: ['id'],
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
       await this.assertCanUpdateOrderInManager(manager, order)
 
       const existingItems = await orderItemRepo.find({
@@ -2364,7 +2385,8 @@ class O2oPreorderService {
         skuId: item.skuId ? String(item.skuId) : null,
       }))
       normalizedItemRefs.forEach((item) => itemKeyMap.set(item.itemKey, { productId: item.productId, skuId: item.skuId }))
-      const totalQty = this.validateUpdatedPreorderItems(canonicalItems, existingQtyMap, productMap, skuMap, skuByProductMap, o2oRules)
+      const pendingProductQtyMap = await this.loadPendingProductQtyMap(manager, order.clientUserId, String(order.id))
+      const totalQty = this.validateUpdatedPreorderItems(canonicalItems, existingQtyMap, productMap, skuMap, skuByProductMap, o2oRules, pendingProductQtyMap)
 
       const nextQtyMap = new Map(normalizedItemRefs.map((item) => [item.itemKey, item.qty]))
       await this.applyPreorderItemStockDeltaInManager(
@@ -2408,6 +2430,11 @@ class O2oPreorderService {
       if (!order) {
         throw new BizError('预订单不存在', 404)
       }
+      await manager.getRepository(ClientUser).findOne({
+        where: { id: order.clientUserId },
+        select: ['id'],
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
       await this.assertCanOnsiteAdjustOrderInManager(manager, order)
 
       const existingItems = await orderItemRepo.find({
@@ -2441,7 +2468,8 @@ class O2oPreorderService {
         skuId: item.skuId ? String(item.skuId) : null,
       }))
       normalizedItemRefs.forEach((item) => itemKeyMap.set(item.itemKey, { productId: item.productId, skuId: item.skuId }))
-      const totalQty = this.validateUpdatedPreorderItems(canonicalItems, existingQtyMap, productMap, skuMap, skuByProductMap, o2oRules)
+      const pendingProductQtyMap = await this.loadPendingProductQtyMap(manager, order.clientUserId, String(order.id))
+      const totalQty = this.validateUpdatedPreorderItems(canonicalItems, existingQtyMap, productMap, skuMap, skuByProductMap, o2oRules, pendingProductQtyMap)
       const nextQtyMap = new Map(normalizedItemRefs.map((item) => [item.itemKey, item.qty]))
 
       await this.applyPreorderItemStockDeltaInManager(

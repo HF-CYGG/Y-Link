@@ -499,6 +499,7 @@ async function main() {
     const initialAttachment = await expectJsonOk<{
       data: {
         attachment: {
+          id: string
           name: string
           url: string
           mimeType: string | null
@@ -519,7 +520,7 @@ async function main() {
       },
       '客户端上传建单附件',
     )
-    assert.match(initialAttachment.attachment.url, /^\/uploads\//)
+    assert.match(initialAttachment.attachment.url, /^\/api\/client-feedback\/attachments\//)
     assert.equal(initialAttachment.attachment.mimeType, 'image/png')
     pass('客户端上传建单附件通过')
 
@@ -852,7 +853,7 @@ async function main() {
       },
       '客户端上传补充说明附件',
     )
-    assert.match(replyAttachment.attachment.url, /^\/uploads\//)
+    assert.match(replyAttachment.attachment.url, /^\/api\/client-feedback\/attachments\//)
     pass('客户端上传补充说明附件通过')
 
     await expectJsonOk<{
@@ -926,7 +927,7 @@ async function main() {
     assert.ok(serviceDetailAfterClientReply.messages.some((item) => item.senderType === 'client' && /问题仍偶发出现/.test(item.content)))
     assert.ok(
       serviceDetailAfterClientReply.messages.some(
-        (item) => item.senderType === 'client' && Array.isArray(item.attachments) && item.attachments[0]?.url === replyAttachment.attachment.url,
+        (item) => item.senderType === 'client' && Array.isArray(item.attachments) && item.attachments[0]?.url === replyAttachment.attachment.url.replace('/api/client-feedback/', '/api/customer-service/'),
       ),
     )
     pass('客服回读未读清零、内部备注、附件与消息链路通过')
