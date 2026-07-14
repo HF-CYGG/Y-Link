@@ -1,8 +1,9 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/client/ClientMallView.vue
- * 文件职责：承载客户端商城的商品浏览、标签联动、加购与结算入口能力。
- * 维护说明：重点维护“左侧标签高亮 <-> 右侧分组定位”一致性，避免快速切换时出现错位与回跳。
+ * 文件职责：承载客户端商城的商品浏览、标签联动、分组规格选择、加购与结算入口能力。
+ * 实现逻辑：商品详情按 SKU 的真实规格维度逐组展示选项，选择上层规格后只保留下层已配置组合，并由完整 SKU 统一驱动图片、价格与库存摘要。
+ * 维护说明：重点维护“左侧标签高亮 <-> 右侧分组定位”一致性；规格选择不得虚构未配置组合，也不能绕过现有 SKU 库存与购物车校验。
  */
 
 
@@ -20,6 +21,10 @@ import { normalizeRequestError } from '@/utils/error'
 import { useDevice } from '@/composables/useDevice'
 import { resolveProductPlaceholder } from '@/utils/product-placeholder'
 import { resolveO2oPriceView } from '@/utils/o2o-price'
+import {
+  buildClientSkuSelectionModel,
+  resolveClientSkuSelection,
+} from './client-sku-selector.helpers'
 
 import ClientCartView from './ClientCartView.vue'
 import ClientCheckoutView from './ClientCheckoutView.vue'
@@ -158,10 +163,6 @@ const resolveSoldQty = (product: Pick<O2oMallProduct, 'soldQty'>) => {
   return Math.max(0, Math.floor(Number(product.soldQty ?? 0)))
 }
 
-const isSkuRecommended = (sku: O2oMallSku, product: O2oMallProduct) => {
-  return product.o2oRecommended || sku.o2oRecommended === true
-}
-
 const isCurrentActiveSku = (sku: Pick<O2oMallSku, 'isCurrent' | 'isActive'>) => sku.isCurrent !== false && sku.isActive !== false
 
 const isProductRecommended = (product: O2oMallProduct) => {
@@ -283,7 +284,7 @@ const resolveDetailProductThumbnail = (product: Pick<O2oMallProduct, 'productNam
   return resolveProductPlaceholder(selectedDetailSku.value?.thumbnail || product.thumbnail)
 }
 
-const resolveActiveSkus = (product: O2oMallProduct | null): O2oMallSku[] => product?.skus?.filter(isCurrentActiveSku) ?? []
+const resolveActiveSkus = (product: O2oMallProduct | null): O2oMallSku[] => product ? resolveSortedActivePreviewSkus(product) : []
 
 const resolveCurrentDetailSpecText = () => {
   if (resolveActiveSkus(detailProduct.value).length <= 1) {
@@ -324,6 +325,11 @@ const resolveDefaultSku = (product: O2oMallProduct | null): O2oMallSku | null =>
 }
 
 const hasDetailSkuChoices = computed(() => resolveActiveSkus(detailProduct.value).length > 1)
+
+const detailSkuSpecGroups = computed(() => buildClientSkuSelectionModel(
+  resolveActiveSkus(detailProduct.value),
+  selectedDetailSku.value,
+))
 
 const detailMaxQty = computed(() => {
   const limit = Math.max(0, Number(detailProduct.value?.limitPerUser ?? 0))
@@ -776,6 +782,18 @@ const changeDetailQty = (delta: number) => {
 const selectDetailSku = (sku: O2oMallSku) => {
   selectedDetailSku.value = sku
   detailQty.value = Math.min(Math.max(1, detailQty.value), Math.max(1, detailMaxQty.value))
+}
+
+const selectDetailSkuOption = (groupName: string, optionValue: string) => {
+  const nextSku = resolveClientSkuSelection(
+    resolveActiveSkus(detailProduct.value),
+    selectedDetailSku.value,
+    groupName,
+    optionValue,
+  )
+  if (nextSku) {
+    selectDetailSku(nextSku)
+  }
 }
 
 const addCurrentDetailToCart = () => {
@@ -1722,34 +1740,24 @@ onBeforeUnmount(() => {
           </header>
           <div v-if="hasDetailSkuChoices" class="client-detail-sku-section">
             <p class="client-detail-section-title">选择规格</p>
-            <div class="grid gap-2">
-              <button
-              v-for="sku in resolveActiveSkus(detailProduct)"
-              :key="sku.id"
-              type="button"
-              class="relative flex min-h-11 flex-col items-start rounded-lg border bg-white px-3 py-2 pr-14 text-left text-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
-              :class="selectedDetailSku?.id === sku.id ? 'border-cyan-500 bg-cyan-50' : 'border-slate-200'"
-              :disabled="sku.availableStock <= 0"
-              @click="selectDetailSku(sku)"
-            >
-              <span
-                v-if="isSkuRecommended(sku, detailProduct)"
-                class="sku-recommend-badge absolute right-2 top-2 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-700"
-              >
-                推荐
-              </span>
-              <span>{{ sku.specText || '默认规格' }}</span>
-              <small class="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
-                <strong class="text-[var(--ylink-color-primary-strong)]">¥{{ Number(resolveO2oPriceView(sku).discountedPrice).toFixed(2) }}</strong>
-                <template v-if="resolveO2oPriceView(sku).isDiscounted">
-                  <span class="sku-discount-badge rounded-full bg-rose-50 px-1.5 py-0.5 text-[11px] font-semibold text-rose-600">
-                    {{ resolveO2oPriceView(sku).discountLabel }}
-                  </span>
-                  <span class="text-slate-400 line-through">¥{{ Number(resolveO2oPriceView(sku).originalPrice).toFixed(2) }}</span>
-                </template>
-                <span>库存 {{ sku.availableStock }}</span>
-              </small>
-              </button>
+            <div class="client-detail-sku-groups">
+              <div v-for="group in detailSkuSpecGroups" :key="group.name" class="client-detail-sku-group">
+                <p class="client-detail-sku-group-title">{{ group.name }}</p>
+                <div class="client-detail-sku-options">
+                  <ElButton
+                    v-for="option in group.options"
+                    :key="`${group.name}-${option.value}`"
+                    class="client-detail-sku-option"
+                    :class="{ 'is-selected': option.selected }"
+                    :disabled="option.disabled"
+                    :aria-pressed="option.selected"
+                    plain
+                    @click="selectDetailSkuOption(group.name, option.value)"
+                  >
+                    {{ option.value }}
+                  </ElButton>
+                </div>
+              </div>
             </div>
           </div>
         </div>
@@ -2449,6 +2457,55 @@ onBeforeUnmount(() => {
   color: #334155;
   font-size: 0.9rem;
   font-weight: 800;
+}
+
+.client-detail-sku-groups {
+  display: grid;
+  gap: 0.85rem;
+}
+
+.client-detail-sku-group {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.client-detail-sku-group-title {
+  margin: 0;
+  color: #64748b;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.client-detail-sku-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.client-detail-sku-option.el-button {
+  min-width: 3.25rem;
+  min-height: 2.25rem;
+  margin: 0;
+  border-color: #dbe4ee;
+  border-radius: 0.7rem;
+  background: #ffffff;
+  color: #334155;
+  font-weight: 700;
+  padding: 0.45rem 0.8rem;
+}
+
+.client-detail-sku-option.el-button.is-selected {
+  border-color: var(--ylink-color-primary, #0f766e);
+  background: rgba(13, 148, 136, 0.1);
+  color: var(--ylink-color-primary-strong, #0f766e);
+  box-shadow: inset 0 0 0 1px rgba(13, 148, 136, 0.2);
+}
+
+.client-detail-sku-option.el-button.is-disabled {
+  border-color: #e2e8f0;
+  background: #f1f5f9;
+  color: #94a3b8;
+  opacity: 0.72;
 }
 
 .client-detail-action-bar {
