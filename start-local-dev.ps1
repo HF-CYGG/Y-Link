@@ -828,10 +828,7 @@ try {
 
   $backendListeningPids = @(Get-ListeningProcessIds -Port $BackendPort)
   $frontendListeningPids = @(Get-ListeningProcessIds -Port $FrontendPort)
-  $effectiveDatabase = Get-BackendDatabaseSummary -HealthUrl "http://127.0.0.1:$BackendPort/health"
-  if (-not $effectiveDatabase) {
-    $effectiveDatabase = Get-FallbackEffectiveDatabaseSummary -BackendEnvFilePath $EffectiveBackendEnvFile
-  }
+  $effectiveDatabase = Get-FallbackEffectiveDatabaseSummary -BackendEnvFilePath $EffectiveBackendEnvFile
 
   @{
     backendShellPid = $backendProcess.Id

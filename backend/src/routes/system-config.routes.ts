@@ -49,6 +49,9 @@ const verificationProviderChannelSchema = z.object({
   headersTemplate: z.string().max(5000),
   bodyTemplate: z.string().max(10000),
   successMatch: z.string().max(500),
+  clearApiUrl: z.boolean().optional(),
+  clearHeadersTemplate: z.boolean().optional(),
+  clearBodyTemplate: z.boolean().optional(),
 })
 
 const updateVerificationProviderConfigsSchema = z.object({
@@ -124,6 +127,7 @@ const testVerificationProviderSchema = z.object({
 })
 
 const clientStaffDirectoryStatusSchema = z.enum(CLIENT_STAFF_DIRECTORY_STATUSES)
+const clientStaffInviteCodeSchema = z.object({ inviteCode: z.string().regex(/^\d{8}$/, '邀请码必须是 8 位数字') })
 const clientStaffDirectoryRegistrationStatusSchema = z.enum(['registered', 'unregistered'])
 
 const clientStaffDirectoryRecordSchema = z.object({
@@ -436,6 +440,41 @@ systemConfigRouter.patch(
       message: 'ok',
       data,
     })
+  }),
+)
+
+systemConfigRouter.put(
+  '/client-staff-directory/:id/invite-code',
+  requirePermission('system_configs:update'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = clientStaffInviteCodeSchema.parse(req.body)
+    const data = await clientStaffDirectoryService.setInviteCode(String(req.params.id), payload.inviteCode, authReq.auth, extractRequestMeta(req))
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+systemConfigRouter.post(
+  '/client-staff-directory/:id/invite-code/reset',
+  requirePermission('system_configs:update'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const data = await clientStaffDirectoryService.resetInviteCode(String(req.params.id), authReq.auth, extractRequestMeta(req))
+    res.setHeader('Cache-Control', 'no-store')
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+systemConfigRouter.delete(
+  '/client-staff-directory/:id/invite-code',
+  requirePermission('system_configs:update'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const data = await clientStaffDirectoryService.disableInviteCode(String(req.params.id), authReq.auth, extractRequestMeta(req))
+    res.json({ code: 0, message: 'ok', data })
   }),
 )
 

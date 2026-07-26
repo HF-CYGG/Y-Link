@@ -358,6 +358,7 @@ export interface VerificationProviderConfigRecord {
   updatedAt: Date
   headersTemplateMasked?: boolean
   bodyTemplateMasked?: boolean
+  apiUrlMasked?: boolean
 }
 
 export interface VerificationProviderConfigsResult {
@@ -372,6 +373,9 @@ export interface VerificationProviderConfigInput {
   headersTemplate: string
   bodyTemplate: string
   successMatch: string
+  clearApiUrl?: boolean
+  clearHeadersTemplate?: boolean
+  clearBodyTemplate?: boolean
 }
 
 export interface UpdateVerificationProviderConfigsInput {
@@ -662,10 +666,12 @@ class SystemConfigService {
   private sanitizeVerificationConfigForAudit(config: VerificationProviderConfigRecord): VerificationProviderConfigRecord {
     return {
       ...config,
+      apiUrl: this.maskSensitiveConfigValue(config.apiUrl),
       headersTemplate: this.maskSensitiveConfigValue(config.headersTemplate),
       bodyTemplate: this.maskSensitiveConfigValue(config.bodyTemplate),
       headersTemplateMasked: Boolean(config.headersTemplate.trim()),
       bodyTemplateMasked: Boolean(config.bodyTemplate.trim()),
+      apiUrlMasked: Boolean(config.apiUrl.trim()),
     }
   }
 
@@ -751,14 +757,18 @@ class SystemConfigService {
     persistedValue: string,
     channelLabel: string,
     fieldLabel: string,
+    clearValue = false,
   ) {
+    if (clearValue) return ''
     if (this.isSensitivePlaceholder(nextValue)) {
       if (!persistedValue.trim()) {
         throw new BizError(`${channelLabel}${fieldLabel}当前没有可保留的历史值，请重新填写真实内容`, 400)
       }
       return persistedValue
     }
-    return nextValue.trim()
+    const normalized = nextValue.trim()
+    if (!normalized && persistedValue.trim()) return persistedValue
+    return normalized
   }
 
   private normalizeVerificationProviderInput(
@@ -768,7 +778,13 @@ class SystemConfigService {
   ): VerificationProviderConfigInput {
     const channelLabel = channelType === 'mobile' ? '短信验证码平台' : '邮箱验证码平台'
     const method = channel.httpMethod === 'GET' ? 'GET' : 'POST'
-    const apiUrl = channel.apiUrl.trim()
+    const apiUrl = this.resolveSensitiveVerificationFieldValue(
+      channel.apiUrl,
+      existingConfig.apiUrl,
+      channelLabel,
+      'API 地址',
+      Boolean(channel.clearApiUrl),
+    )
     if (channel.enabled && !apiUrl) {
       throw new BizError(`${channelLabel}已启用时必须填写 API 地址`, 400)
     }
@@ -784,6 +800,7 @@ class SystemConfigService {
           existingConfig.headersTemplate,
           channelLabel,
           '请求头模板',
+          Boolean(channel.clearHeadersTemplate),
         ),
         channelLabel,
       ),
@@ -793,6 +810,7 @@ class SystemConfigService {
           existingConfig.bodyTemplate,
           channelLabel,
           '请求体模板',
+          Boolean(channel.clearBodyTemplate),
         ),
         channelLabel,
       ),
@@ -1221,13 +1239,14 @@ class SystemConfigService {
     return {
       enabled: this.parseNonNegativeInteger(enabledConfig.configValue, `${keyPrefix}.enabled`) > 0,
       httpMethod,
-      apiUrl: urlConfig.configValue,
+      apiUrl: options.maskSensitiveValues ? this.maskSensitiveConfigValue(urlConfig.configValue) : urlConfig.configValue,
       headersTemplate: options.maskSensitiveValues ? this.maskSensitiveConfigValue(headersConfig.configValue) : headersConfig.configValue,
       bodyTemplate: options.maskSensitiveValues ? this.maskSensitiveConfigValue(bodyConfig.configValue) : bodyConfig.configValue,
       successMatch: successConfig.configValue,
       updatedAt,
       headersTemplateMasked: options.maskSensitiveValues ? Boolean(headersConfig.configValue.trim()) : false,
       bodyTemplateMasked: options.maskSensitiveValues ? Boolean(bodyConfig.configValue.trim()) : false,
+      apiUrlMasked: options.maskSensitiveValues ? Boolean(urlConfig.configValue.trim()) : false,
     }
   }
 
@@ -1739,7 +1758,7 @@ class SystemConfigService {
     })
   }
 
-  async getVerificationProviderConfigs(options: { maskSensitiveValues?: boolean } = {}): Promise<VerificationProviderConfigsResult> {
+  async getVerificationProviderConfigs(options: { maskSensitiveValues?: boolean } = { maskSensitiveValues: true }): Promise<VerificationProviderConfigsResult> {
     const map = await this.loadVerificationConfigMap()
     return {
       mobile: this.formatVerificationProviderConfig('mobile', map, options),
@@ -1763,6 +1782,7 @@ class SystemConfigService {
       updatedAt: new Date(),
       headersTemplateMasked: false,
       bodyTemplateMasked: false,
+      apiUrlMasked: false,
     }
   }
 

@@ -1212,107 +1212,41 @@ onMounted(() => {
                 @precheck="handlePrecheck"
               />
 
-              <section v-if="hasEnteredStepFlow && activeStepKey === 'create'" class="apple-card space-y-5 p-5 sm:p-6">
-          <div class="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-4 dark:border-white/5">
-            <div>
-              <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">第 2 步：创建迁移任务</h2>
-              <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                当前配置已通过预检，可以把这次迁移计划保存为任务，随后再进入执行与核验阶段。
-              </p>
-            </div>
-            <el-tag :type="hasCreatedTask ? 'success' : 'info'" effect="light">
-              {{ hasCreatedTask ? '已有迁移任务' : '等待创建任务' }}
-            </el-tag>
-          </div>
-
-          <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(320px,0.9fr)]">
-            <div class="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-4 dark:border-white/10 dark:bg-slate-900/20">
-              <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100">本次任务配置摘要</h3>
-              <div class="mt-4 grid gap-3 sm:grid-cols-2">
-                <div class="rounded-2xl bg-white px-4 py-3 dark:bg-slate-950/40">
-                  <p class="text-xs text-slate-400">目标主机</p>
-                  <p class="mt-1 break-all text-sm font-medium text-slate-700 dark:text-slate-200">
-                    {{ normalizedTargetPreview.host || '-' }}:{{ normalizedTargetPreview.port }}
-                  </p>
+              <section
+                v-if="hasEnteredStepFlow && activeStepKey === 'create'"
+                class="apple-card space-y-4 p-5 sm:p-6"
+              >
+                <div class="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">第 2 步：创建迁移任务</h2>
+                    <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                      沿用第 1 步已通过预检的配置，Schema 同步固定关闭。
+                    </p>
+                  </div>
+                  <el-tag :type="hasCreatedTask ? 'success' : 'info'" effect="light">
+                    {{ hasCreatedTask ? '已有迁移任务' : '等待创建任务' }}
+                  </el-tag>
                 </div>
-                <div class="rounded-2xl bg-white px-4 py-3 dark:bg-slate-950/40">
-                  <p class="text-xs text-slate-400">目标数据库</p>
-                  <p class="mt-1 break-all text-sm font-medium text-slate-700 dark:text-slate-200">
-                    {{ normalizedTargetPreview.database || '-' }}
-                  </p>
-                </div>
-                <div class="rounded-2xl bg-white px-4 py-3 dark:bg-slate-950/40">
-                  <p class="text-xs text-slate-400">连接账号</p>
-                  <p class="mt-1 break-all text-sm font-medium text-slate-700 dark:text-slate-200">
-                    {{ normalizedTargetPreview.user || '-' }}
-                  </p>
-                </div>
-                <div class="rounded-2xl bg-white px-4 py-3 dark:bg-slate-950/40">
-                  <p class="text-xs text-slate-400">最近预检结果</p>
-                  <p class="mt-1 text-sm font-medium text-slate-700 dark:text-slate-200">
-                    {{ precheckResult?.canProceed ? '已通过，可创建任务' : '尚未通过' }}
-                  </p>
-                </div>
-              </div>
 
-              <div class="mt-4 flex flex-wrap gap-2">
-                <el-tag :type="migrationForm.initializeSchema ? 'success' : 'info'" effect="light">
-                  {{ migrationForm.initializeSchema ? '初始化表结构' : '不初始化表结构' }}
-                </el-tag>
-                <el-tag :type="migrationForm.clearTargetBeforeImport ? 'warning' : 'info'" effect="light">
-                  {{ migrationForm.clearTargetBeforeImport ? '导入前清空目标表' : '保留目标表原数据' }}
-                </el-tag>
-                <el-tag :type="migrationForm.createSqliteBackup ? 'success' : 'info'" effect="light">
-                  {{ migrationForm.createSqliteBackup ? '执行前备份 SQLite' : '不创建 SQLite 备份' }}
-                </el-tag>
-                <el-tag :type="migrationForm.switchAfterSuccess ? 'warning' : 'info'" effect="light">
-                  {{ migrationForm.switchAfterSuccess ? '成功后自动写入切换配置' : '成功后不自动切换' }}
-                </el-tag>
-                <el-tag type="info" effect="light">
-                  Schema 同步固定关闭
-                </el-tag>
-              </div>
+                <div class="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-4 text-sm text-slate-600 dark:border-white/10 dark:bg-slate-900/20 dark:text-slate-300">
+                  <p class="break-all">
+                    目标：{{ normalizedTargetPreview.host || '-' }}:{{ normalizedTargetPreview.port }}/{{ normalizedTargetPreview.database || '-' }}
+                  </p>
+                  <p class="mt-2 break-all">账号：{{ normalizedTargetPreview.user || '-' }}</p>
+                  <p class="mt-2">备注：{{ migrationForm.note.trim() || '未填写' }}</p>
+                </div>
 
-              <el-alert
-                class="mt-4"
-                title="创建任务前提示"
-                type="info"
-                :closable="false"
-                show-icon
-                description="如果你还想调整目标库地址、选项开关或备注，请先回到第 1 步重新预检，再创建任务。"
-              />
-            </div>
-
-            <div class="rounded-2xl border border-slate-200/80 bg-white p-4 dark:border-white/10 dark:bg-slate-950/30">
-              <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100">提交任务</h3>
-              <p class="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">
-                任务创建后会保留目标库配置、迁移选项和预检上下文，供后续执行、切换和审计追溯使用。
-              </p>
-              <div class="mt-4 rounded-2xl bg-slate-50 px-4 py-3 text-sm leading-6 text-slate-600 dark:bg-slate-900/40 dark:text-slate-300">
-                {{ migrationForm.note.trim() || '当前未填写迁移备注，建议补充本次迁移用途或环境信息。' }}
-              </div>
-              <div class="mt-4 flex flex-wrap gap-2">
-                <el-button @click="handleOpenStep('precheck', true)">返回第 1 步调整</el-button>
-                <el-button
-                  type="success"
-                  :loading="taskCreating"
-                  :disabled="!canOperateMigration || pageLoading"
-                  @click="handleCreateTask"
-                >
-                  创建迁移任务
-                </el-button>
-              </div>
-              <el-alert
-                v-if="hasCreatedTask"
-                class="mt-4"
-                title="任务已创建"
-                type="success"
-                :closable="false"
-                show-icon
-                :description="`当前共有 ${taskList.length} 条迁移任务记录，可继续进入第 3 步执行并核验。`"
-              />
-            </div>
-          </div>
+                <div class="flex flex-wrap gap-2">
+                  <el-button @click="handleOpenStep('precheck', true)">返回调整</el-button>
+                  <el-button
+                    type="success"
+                    :loading="taskCreating"
+                    :disabled="!canOperateMigration || pageLoading"
+                    @click="handleCreateTask"
+                  >
+                    创建迁移任务
+                  </el-button>
+                </div>
               </section>
 
               <DatabaseMigrationRunSection

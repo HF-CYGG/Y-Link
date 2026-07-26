@@ -20,6 +20,7 @@ services:
       INIT_ADMIN_USERNAME: ${INIT_ADMIN_USERNAME:-admin}
       INIT_ADMIN_DISPLAY_NAME: ${INIT_ADMIN_DISPLAY_NAME:-系统管理员}
       INIT_ADMIN_PASSWORD: ${INIT_ADMIN_PASSWORD:?请在启动前配置 INIT_ADMIN_PASSWORD 私有强密码}
+      INVITE_CODE_PEPPER: ${INVITE_CODE_PEPPER:-}
     volumes:
       - y_link_sqlite_data:/app/data
       # 上传图片默认落在 `/app/uploads`，这里显式持久化，避免容器重建后商品图丢失。

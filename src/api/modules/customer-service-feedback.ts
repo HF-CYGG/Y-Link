@@ -39,6 +39,7 @@ export interface FeedbackIssuePriorityMeta {
 }
 
 export interface FeedbackConversationMessageAttachment {
+  id?: string
   name: string
   url: string
   mimeType: string | null
@@ -1210,7 +1211,7 @@ export const createClientFeedbackConversation = async (input: CreateClientFeedba
       contactPreference: input.contactPreference,
       tags: input.tags,
       sourceLabel: '客户端反馈页',
-      attachments: input.attachments ?? [],
+      attachments: (input.attachments ?? []).map((attachment) => ({ id: attachment.id })),
     },
   })
   return mapConversation(response.conversation)
@@ -1225,7 +1226,7 @@ export const appendClientFeedbackMessage = async (
     method: 'POST',
     data: {
       content: input.body,
-      attachments: input.attachments ?? [],
+      attachments: (input.attachments ?? []).map((attachment) => ({ id: attachment.id })),
     },
   })
 }

@@ -29,6 +29,7 @@ const updateNotificationRuleSchema = z.object({
   externalTriggerMode: z.enum(NOTIFICATION_EXTERNAL_TRIGGER_MODES).optional().default('all_management_offline'),
   watchedUserIds: z.array(idValueSchema).max(200).optional().default([]),
   feishuWebhookUrl: looseTextSchema(500),
+  clearFeishuWebhook: z.boolean().optional(),
   feishuSignSecret: looseTextSchema(256),
   emailSubjectPrefix: looseTextSchema(128),
 })

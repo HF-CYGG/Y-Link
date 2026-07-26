@@ -2,7 +2,7 @@
  * 模块说明：src/store/modules/database-maintenance.ts
  * 文件职责：维护数据库迁移期间的全局只读状态，并独立轮询公开健康检查确认维护开始与结束。
  * 实现逻辑：
- * - 通过 `/health.data.maintenance` 同步服务端只读状态，供根组件和 HTTP 层共享；
+ * - 通过 `/health.maintenance` 同步服务端只读状态，供根组件和 HTTP 层共享；
  * - 已确认进入维护后把状态保存在会话存储中，后端重启断线期间不因轮询失败误清除横幅；
  * - 只有健康检查明确返回 `readOnly=false` 时才结束维护，业务码 50301 也可立即激活维护态。
  * 维护说明：
@@ -22,13 +22,10 @@ const DATABASE_MAINTENANCE_POLL_TIMEOUT_MS = 5_000
 
 interface DatabaseMaintenancePublicState {
   readOnly: boolean
-  message: string | null
 }
 
 interface DatabaseMaintenanceHealthResponse {
-  data?: {
-    maintenance?: DatabaseMaintenancePublicState
-  }
+  maintenance?: DatabaseMaintenancePublicState
 }
 
 const readPersistedMaintenanceState = () => {
@@ -71,39 +68,22 @@ const resolveHealthCheckUrl = () => {
 }
 
 export const useDatabaseMaintenanceStore = defineStore('database-maintenance', () => {
-  const persistedState = readPersistedMaintenanceState()
-  const isReadOnly = ref(persistedState)
+  const isReadOnly = ref(readPersistedMaintenanceState())
 
   let pollingTimer: number | null = null
   let pollingInFlight = false
 
   /**
-   * 激活只读维护：
-   * - 既可由健康检查触发，也可由 HTTP 层识别 50301 后即时触发；
-   * - 重复激活只更新阶段，不会清空已确认状态。
+   * 同步只读维护：
+   * - true 既可由健康检查触发，也可由 HTTP 层识别 50301 后即时触发；
+   * - false 仅由成功解析的健康检查传入，网络错误与重启断线不会误清除状态。
    */
-  const activateMaintenance = () => {
-    isReadOnly.value = true
-    persistMaintenanceState(true)
+  const setMaintenanceState = (readOnly: boolean) => {
+    isReadOnly.value = readOnly
+    persistMaintenanceState(readOnly)
   }
 
-  /**
-   * 明确结束维护：
-   * - 仅供成功解析的健康检查调用；
-   * - 网络错误、超时或后端重启断线都不能调用此方法。
-   */
-  const confirmMaintenanceEnded = () => {
-    isReadOnly.value = false
-    persistMaintenanceState(false)
-  }
-
-  const syncMaintenanceState = (maintenance: DatabaseMaintenancePublicState) => {
-    if (maintenance.readOnly) {
-      activateMaintenance()
-      return
-    }
-    confirmMaintenanceEnded()
-  }
+  const activateMaintenance = () => setMaintenanceState(true)
 
   const pollMaintenanceState = async () => {
     if (pollingInFlight || globalThis.window === undefined) {
@@ -115,24 +95,18 @@ export const useDatabaseMaintenanceStore = defineStore('database-maintenance', (
     const timeout = globalThis.window.setTimeout(() => controller.abort(), DATABASE_MAINTENANCE_POLL_TIMEOUT_MS)
     try {
       const response = await globalThis.window.fetch(resolveHealthCheckUrl(), {
-        method: 'GET',
-        credentials: 'include',
         cache: 'no-store',
-        headers: {
-          Accept: 'application/json',
-        },
         signal: controller.signal,
       })
       if (!response.ok) {
-        throw new Error(`健康检查返回 HTTP ${response.status}`)
+        return
       }
 
       const payload = await response.json() as DatabaseMaintenanceHealthResponse
-      const maintenance = payload.data?.maintenance
-      if (!maintenance || typeof maintenance.readOnly !== 'boolean') {
-        throw new Error('健康检查缺少数据库维护状态')
+      const readOnly = payload.maintenance?.readOnly
+      if (typeof readOnly === 'boolean') {
+        setMaintenanceState(readOnly)
       }
-      syncMaintenanceState(maintenance)
     } catch {
       // 已进入维护后必须保留状态；重启窗口中的短暂断线属于预期现象。
     } finally {
@@ -147,9 +121,7 @@ export const useDatabaseMaintenanceStore = defineStore('database-maintenance', (
     }
 
     void pollMaintenanceState()
-    pollingTimer = globalThis.window.setInterval(() => {
-      void pollMaintenanceState()
-    }, DATABASE_MAINTENANCE_POLL_INTERVAL_MS)
+    pollingTimer = globalThis.window.setInterval(pollMaintenanceState, DATABASE_MAINTENANCE_POLL_INTERVAL_MS)
   }
 
   const stopPolling = () => {
@@ -162,7 +134,6 @@ export const useDatabaseMaintenanceStore = defineStore('database-maintenance', (
 
   return {
     isReadOnly,
-    message: DATABASE_MAINTENANCE_READ_ONLY_MESSAGE,
     activateMaintenance,
     pollMaintenanceState,
     startPolling,

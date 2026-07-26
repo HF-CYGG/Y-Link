@@ -74,7 +74,6 @@ import {
   type ClientAccountType,
   getClientAuthCapabilities,
   getClientCaptcha,
-  lookupClientStaffDirectory,
   type ClientAuthCapabilities,
   type ClientRegisterResult,
   type ClientValidationMode,
@@ -113,8 +112,6 @@ interface ClientCaptchaState {
   expiresInSeconds: number
 }
 
-type StaffLookupStatus = 'idle' | 'typing' | 'loading' | 'matched' | 'registered' | 'not_found' | 'error'
-
 const router = useRouter()
 const route = useRoute()
 const clientAuthStore = useClientAuthStore(pinia)
@@ -123,7 +120,6 @@ const { runLatest: runLatestCapabilityRequest, cancel: cancelCapabilityRequest }
 const { runLatest: runLatestLoginRequest, cancel: cancelLoginRequest } = useStableRequest()
 const { runLatest: runLatestRegisterRequest, cancel: cancelRegisterRequest } = useStableRequest()
 const { runLatest: runLatestVerificationCodeRequest, cancel: cancelVerificationCodeRequest } = useStableRequest()
-const { runLatest: runLatestStaffLookupRequest, cancel: cancelStaffLookupRequest } = useStableRequest()
 const { runWithGate } = useIdempotentAction()
 
 // 登录 / 注册模式切换：
@@ -151,7 +147,6 @@ const registerVerificationCountdown = ref(0)
 let registerVerificationTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let captchaExpireTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let capabilityDeferredTimer: ReturnType<typeof globalThis.setTimeout> | null = null
-let staffLookupTimer: ReturnType<typeof globalThis.setTimeout> | null = null
 const formWrapperRef = ref<HTMLElement | null>(null)
 const formBlockRef = ref<HTMLElement | null>(null)
 const formWrapperHeight = ref('auto')
@@ -164,14 +159,6 @@ const captcha = reactive<ClientCaptchaState>({
   captchaSvg: '',
   expiresInSeconds: 0,
 })
-const staffLookup = reactive({
-  status: 'idle' as StaffLookupStatus,
-  staffNo: '',
-  realName: '',
-  departmentName: '',
-  message: '',
-})
-
 const loginForm = reactive({
   account: '',
   password: '',
@@ -182,6 +169,7 @@ const registerForm = reactive({
   username: '',
   account: '',
   staffNo: '',
+  inviteCode: '',
   department: '',
   password: '',
   confirmPassword: '',
@@ -232,16 +220,6 @@ const shouldPrepareCaptcha = computed(() => isRegisterMode.value || loginCaptcha
 const isCapabilityHintVisible = computed(() => capabilityLoading.value && !authCapabilities.value)
 const isCapabilityFallbackVisible = computed(() => !capabilityLoading.value && !!capabilityErrorMessage.value && !authCapabilities.value)
 const forgotPasswordAvailable = computed(() => authCapabilities.value?.forgotPasswordEnabled ?? false)
-const isStaffLookupVisible = computed(() => {
-  return isDepartmentRegisterMode.value && Boolean(registerForm.staffNo.trim()) && staffLookup.status !== 'idle'
-})
-const staffLookupTone = computed(() => {
-  if (staffLookup.status === 'matched') return 'success'
-  if (staffLookup.status === 'registered') return 'warning'
-  if (staffLookup.status === 'not_found' || staffLookup.status === 'error') return 'danger'
-  return 'info'
-})
-
 // 安全说明：后端返回的是 SVG 字符串，这里统一转为 data URL 图片渲染，
 // 避免通过 v-html 直接把未信任的 SVG 片段注入到页面 DOM 中。
 const captchaImageSrc = computed(() => {
@@ -502,89 +480,6 @@ const resolveAccountChannel = (account: string): 'mobile' | 'email' | null => {
     return validateEmail(normalized) ? 'email' : null
   }
   return validateMobile(normalized) ? 'mobile' : null
-}
-
-const clearStaffLookupTimer = () => {
-  if (staffLookupTimer) {
-    globalThis.clearTimeout(staffLookupTimer)
-    staffLookupTimer = null
-  }
-}
-
-const resetStaffLookup = () => {
-  clearStaffLookupTimer()
-  cancelStaffLookupRequest()
-  staffLookup.status = 'idle'
-  staffLookup.staffNo = ''
-  staffLookup.realName = ''
-  staffLookup.departmentName = ''
-  staffLookup.message = ''
-}
-
-const applyStaffLookupResult = (staffNo: string, result: Awaited<ReturnType<typeof lookupClientStaffDirectory>>) => {
-  staffLookup.staffNo = staffNo
-  staffLookup.realName = result.realName ?? ''
-  staffLookup.departmentName = result.departmentName ?? ''
-
-  if (!result.matched) {
-    staffLookup.status = 'not_found'
-    staffLookup.message = '未找到该教职工号，请确认输入或联系管理员导入目录。'
-    return
-  }
-
-  if (result.isRegistered) {
-    staffLookup.status = 'registered'
-    staffLookup.message = '该教职工号已被占用，不能重复注册。'
-    return
-  }
-
-  staffLookup.status = 'matched'
-  staffLookup.message = '已匹配到姓名和部门，请确认无误后继续注册。'
-}
-
-const scheduleStaffDirectoryLookup = (staffNoInput: string) => {
-  clearStaffLookupTimer()
-  cancelStaffLookupRequest()
-  const normalizedStaffNo = staffNoInput.trim()
-  staffLookup.staffNo = normalizedStaffNo
-  staffLookup.realName = ''
-  staffLookup.departmentName = ''
-
-  if (!isDepartmentRegisterMode.value || !normalizedStaffNo) {
-    resetStaffLookup()
-    return
-  }
-
-  if (!validateStaffNo(normalizedStaffNo)) {
-    staffLookup.status = 'typing'
-    staffLookup.message = '请输入 4-32 位教职工号，支持字母、数字和短横线。'
-    return
-  }
-
-  staffLookup.status = 'typing'
-  staffLookup.message = '系统将自动匹配姓名和部门。'
-  staffLookupTimer = globalThis.setTimeout(() => {
-    staffLookupTimer = null
-    staffLookup.status = 'loading'
-    staffLookup.message = '正在匹配教职工目录...'
-    void runLatestStaffLookupRequest({
-      executor: (signal) => lookupClientStaffDirectory(normalizedStaffNo, { signal }),
-      onSuccess: (result) => {
-        if (registerForm.staffNo.trim() !== normalizedStaffNo || !isDepartmentRegisterMode.value) {
-          return
-        }
-        applyStaffLookupResult(normalizedStaffNo, result)
-      },
-      onError: (error) => {
-        if (registerForm.staffNo.trim() !== normalizedStaffNo || !isDepartmentRegisterMode.value) {
-          return
-        }
-        const normalizedError = normalizeRequestError(error, '工号匹配失败，请稍后重试')
-        staffLookup.status = 'error'
-        staffLookup.message = normalizedError.message
-      },
-    })
-  }, 450)
 }
 
 const normalizeInputText = (value: string) => {
@@ -889,7 +784,7 @@ const handleLogin = async () => {
   }
 }
 
-// 教师注册只校验工号本身；姓名和部门必须由后端教职工目录反查，前端不再提供自选入口。
+// 教师注册只提交工号与一次性邀请码；姓名和部门由后端目录在注册事务中绑定。
 const validateDepartmentRegisterFields = () => {
   if (!isDepartmentRegisterMode.value) {
     return true
@@ -903,17 +798,8 @@ const validateDepartmentRegisterFields = () => {
     showAppWarning('教职工号仅支持字母、数字和短横线（4-32位）')
     return false
   }
-  if (staffLookup.staffNo !== normalizedStaffNo || staffLookup.status === 'typing' || staffLookup.status === 'loading') {
-    showAppWarning('请等待系统完成工号匹配后再注册')
-    scheduleStaffDirectoryLookup(normalizedStaffNo)
-    return false
-  }
-  if (staffLookup.status === 'registered') {
-    showAppWarning('该教职工号已被占用，不能重复注册')
-    return false
-  }
-  if (staffLookup.status !== 'matched') {
-    showAppWarning('教职工号未匹配到有效目录，暂不能注册教师账号')
+  if (!/^\d{8}$/.test(registerForm.inviteCode.trim())) {
+    showAppWarning('请输入管理员提供的 8 位数字邀请码')
     return false
   }
   return true
@@ -921,10 +807,7 @@ const validateDepartmentRegisterFields = () => {
 
 // 注册验证码校验与部门字段校验拆开维护，便于后续继续扩展不同通道策略。
 const validateRegisterChallengeFields = () => {
-  if (isDepartmentRegisterMode.value && !registerUsesVerificationCode.value) {
-    showAppWarning('教师注册需要启用短信或邮箱验证码，请联系管理员')
-    return false
-  }
+  if (isDepartmentRegisterMode.value) return true
   if (registerUsesVerificationCode.value) {
     if (!registerForm.verificationCode.trim()) {
       showAppWarning('请输入手机/邮箱验证码')
@@ -943,8 +826,8 @@ const validateRegisterChallengeFields = () => {
 const validateRegisterBeforeSubmit = () => {
   const accountChannel = resolveAccountChannel(registerForm.account)
   if (isDepartmentRegisterMode.value) {
-    if (!accountChannel) {
-      showAppWarning('教师注册必须填写正确格式的手机号或邮箱')
+    if (registerForm.account.trim() && !accountChannel) {
+      showAppWarning('选填联系方式格式不正确')
       return null
     }
   } else {
@@ -985,10 +868,11 @@ const buildRegisterRequestPayload = (registeredAccount: string, registeredUserna
     account: registeredAccount || undefined,
     accountType: registerAccountType.value,
     staffNo: isDepartmentRegisterMode.value ? registerForm.staffNo.trim() : undefined,
+    inviteCode: isDepartmentRegisterMode.value ? registerForm.inviteCode.trim() : undefined,
     password: registerForm.password,
-    verificationCode: registerUsesVerificationCode.value ? normalizeInputText(registerForm.verificationCode) : undefined,
-    captchaId: registerUsesVerificationCode.value ? undefined : captcha.captchaId,
-    captchaCode: registerUsesVerificationCode.value ? undefined : normalizeInputText(registerForm.captcha),
+    verificationCode: !isDepartmentRegisterMode.value && registerUsesVerificationCode.value ? normalizeInputText(registerForm.verificationCode) : undefined,
+    captchaId: !isDepartmentRegisterMode.value && !registerUsesVerificationCode.value ? captcha.captchaId : undefined,
+    captchaCode: !isDepartmentRegisterMode.value && !registerUsesVerificationCode.value ? normalizeInputText(registerForm.captcha) : undefined,
   }
 }
 
@@ -1009,6 +893,7 @@ const resetRegisterStateAfterSuccess = (registeredAccount: string, registerRemai
   registerForm.verificationCode = ''
   registerForm.username = ''
   registerForm.staffNo = ''
+  registerForm.inviteCode = ''
   registerForm.password = ''
   registerForm.confirmPassword = ''
   registerForm.department = ''
@@ -1103,17 +988,6 @@ watch(registerValidationMode, (mode) => {
   }
 })
 
-watch(
-  () => [activeMode.value, registerForm.staffNo] as const,
-  ([mode, staffNo]) => {
-    if (mode !== 'register-department') {
-      resetStaffLookup()
-      return
-    }
-    scheduleStaffDirectoryLookup(staffNo)
-  },
-)
-
 watch(shouldPrepareCaptcha, (shouldShowCaptcha) => {
   if (shouldShowCaptcha) {
     void ensureCaptchaReady()
@@ -1136,12 +1010,10 @@ onUnmounted(() => {
   cancelLoginRequest()
   cancelRegisterRequest()
   cancelVerificationCodeRequest()
-  cancelStaffLookupRequest()
   if (capabilityDeferredTimer) {
     globalThis.clearTimeout(capabilityDeferredTimer)
     capabilityDeferredTimer = null
   }
-  clearStaffLookupTimer()
   resetRegisterVerificationTimer()
   clearCaptcha()
 })
@@ -1455,7 +1327,7 @@ onUnmounted(() => {
                     </template>
                   </el-input>
 
-                  <div class="captcha-row">
+                  <div v-if="!isDepartmentRegisterMode" class="captcha-row">
                     <el-input
                       v-model="registerForm.captcha"
                       :placeholder="registerUsesVerificationCode ? '先输入图形验证码，再发送手机/邮箱验证码' : '图形验证码'"
@@ -1479,8 +1351,8 @@ onUnmounted(() => {
                       />
                     </button>
                   </div>
-                  <p class="captcha-hint-text">{{ captchaHintText }}</p>
-                  <div v-if="registerUsesVerificationCode" class="captcha-row">
+                  <p v-if="!isDepartmentRegisterMode" class="captcha-hint-text">{{ captchaHintText }}</p>
+                  <div v-if="!isDepartmentRegisterMode && registerUsesVerificationCode" class="captcha-row">
                     <el-input v-model="registerForm.verificationCode" placeholder="手机/邮箱验证码" class="geo-input flex-1" size="large" clearable>
                       <template #prefix>
                         <el-icon class="input-icon"><Message /></el-icon>
@@ -1605,39 +1477,21 @@ onUnmounted(() => {
                     </template>
                   </el-input>
 
-                  <transition name="staff-lookup">
-                    <div v-if="isStaffLookupVisible" class="staff-lookup-slot">
-                      <div
-                        class="staff-lookup-card"
-                        :class="[`staff-lookup-card--${staffLookupTone}`, { 'is-loading': staffLookup.status === 'loading' }]"
-                      >
-                        <div class="staff-lookup-card__icon">
-                          <span v-if="staffLookup.status === 'loading'" class="staff-lookup-spinner"></span>
-                          <span v-else-if="staffLookup.status === 'matched'">✓</span>
-                          <span v-else-if="staffLookup.status === 'registered'">!</span>
-                          <span v-else-if="staffLookup.status === 'not_found' || staffLookup.status === 'error'">×</span>
-                          <span v-else>…</span>
-                        </div>
-                        <div class="staff-lookup-card__content">
-                          <div class="staff-lookup-card__message">{{ staffLookup.message }}</div>
-                          <div v-if="staffLookup.realName || staffLookup.departmentName" class="staff-lookup-card__grid">
-                            <div>
-                              <span>姓名</span>
-                              <strong>{{ staffLookup.realName || '-' }}</strong>
-                            </div>
-                            <div>
-                              <span>部门</span>
-                              <strong>{{ staffLookup.departmentName || '-' }}</strong>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </transition>
+                  <el-input
+                    v-model="registerForm.inviteCode"
+                    placeholder="8 位数字邀请码"
+                    maxlength="8"
+                    inputmode="numeric"
+                    class="geo-input"
+                    size="large"
+                    clearable
+                  >
+                    <template #prefix><el-icon class="input-icon"><Key /></el-icon></template>
+                  </el-input>
 
                   <el-input 
                     v-model="registerForm.account" 
-                    placeholder="手机号或邮箱" 
+                    placeholder="手机号或邮箱（选填）"
                     class="geo-input" 
                     size="large" 
                     clearable
@@ -1648,7 +1502,7 @@ onUnmounted(() => {
                       <el-icon class="input-icon"><User /></el-icon>
                     </template>
                   </el-input>
-                  <div class="captcha-row">
+                  <div v-if="!isDepartmentRegisterMode" class="captcha-row">
                     <el-input
                       v-model="registerForm.captcha"
                       :placeholder="registerUsesVerificationCode ? '先输入图形验证码，再发送手机/邮箱验证码' : '图形验证码'"
@@ -1672,8 +1526,8 @@ onUnmounted(() => {
                       />
                     </button>
                   </div>
-                  <p class="captcha-hint-text">{{ captchaHintText }}</p>
-                  <div v-if="registerUsesVerificationCode" class="captcha-row">
+                  <p v-if="!isDepartmentRegisterMode" class="captcha-hint-text">{{ captchaHintText }}</p>
+                  <div v-if="!isDepartmentRegisterMode && registerUsesVerificationCode" class="captcha-row">
                     <el-input v-model="registerForm.verificationCode" placeholder="手机/邮箱验证码" class="geo-input flex-1" size="large" clearable>
                       <template #prefix>
                         <el-icon class="input-icon"><Message /></el-icon>

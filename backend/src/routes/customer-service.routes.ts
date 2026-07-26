@@ -5,6 +5,7 @@
  */
 
 import { Router } from 'express'
+import path from 'node:path'
 import { z } from 'zod'
 import { requirePermission } from '../middleware/auth.middleware.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
@@ -115,6 +116,18 @@ const updateInternalRemarkSchema = z.object({
 })
 
 export const customerServiceRouter = Router()
+
+customerServiceRouter.get(
+  '/attachments/:id',
+  requirePermission('customer_service:view'),
+  asyncHandler(async (req, res) => {
+    const attachment = await clientFeedbackService.getAttachmentForCustomerService(String(req.params.id))
+    res.setHeader('Cache-Control', 'private, no-store')
+    res.setHeader('X-Content-Type-Options', 'nosniff')
+    if (attachment.mimeType) res.type(attachment.mimeType)
+    res.sendFile(path.resolve(process.cwd(), 'uploads', 'client-feedback', path.basename(attachment.storageName)))
+  }),
+)
 
 customerServiceRouter.get(
   '/assignees',

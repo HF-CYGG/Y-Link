@@ -16,6 +16,9 @@ export interface OrderSerialConfigRecord {
   current: number
   width: number
   updatedAt: string
+  apiUrlMasked?: boolean
+  headersTemplateMasked?: boolean
+  bodyTemplateMasked?: boolean
 }
 
 export interface OrderSerialConfigsResult {
@@ -71,6 +74,9 @@ export interface VerificationProviderChannelConfig {
   headersTemplate: string
   bodyTemplate: string
   successMatch: string
+  clearApiUrl?: boolean
+  clearHeadersTemplate?: boolean
+  clearBodyTemplate?: boolean
   updatedAt: string
 }
 
@@ -192,6 +198,8 @@ export interface ClientStaffDirectoryRecord {
   status: ClientStaffDirectoryStatus
   isRegistered: boolean
   linkedClientUserCount: number
+  inviteStatus: 'not_set' | 'active' | 'expired' | 'used' | 'locked'
+  inviteExpiresAt: string | null
   createdAt: string
   updatedAt: string
 }
@@ -407,6 +415,25 @@ export const updateClientStaffDirectoryStatus = (id: string, status: ClientStaff
     method: 'PATCH',
     url: `/system-configs/client-staff-directory/${id}/status`,
     data: { status },
+  })
+
+export const setClientStaffDirectoryInviteCode = (id: string, inviteCode: string) =>
+  request<SaveClientStaffDirectoryResult>({
+    method: 'PUT',
+    url: `/system-configs/client-staff-directory/${id}/invite-code`,
+    data: { inviteCode },
+  })
+
+export const resetClientStaffDirectoryInviteCode = (id: string) =>
+  request<{ inviteCode: string; expiresAt: string }>({
+    method: 'POST',
+    url: `/system-configs/client-staff-directory/${id}/invite-code/reset`,
+  })
+
+export const disableClientStaffDirectoryInviteCode = (id: string) =>
+  request<SaveClientStaffDirectoryResult>({
+    method: 'DELETE',
+    url: `/system-configs/client-staff-directory/${id}/invite-code`,
   })
 
 export const deleteClientStaffDirectoryBatch = (payload: DeleteClientStaffDirectoryBatchPayload) =>

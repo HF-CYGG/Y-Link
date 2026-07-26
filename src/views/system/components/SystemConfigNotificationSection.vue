@@ -92,7 +92,7 @@ const getTestBlockedReason = (rule: NotificationRuleRecord, channel: TestChannel
   if (channel === 'feishu' && !rule.feishuEnabled) {
     return '请先勾选飞书外发渠道，再执行测试'
   }
-  if (channel === 'feishu' && !rule.feishuWebhookUrl?.trim()) {
+  if (channel === 'feishu' && !rule.feishuWebhookUrl?.trim() && !rule.feishuWebhookConfigured) {
     return '请先填写飞书 Webhook 地址'
   }
   return ''
@@ -371,7 +371,7 @@ const handleTestSend = async (rule: NotificationRuleRecord, channel: TestChannel
                   <el-input
                     v-model.trim="rule.feishuWebhookUrl"
                     maxlength="500"
-                    placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..."
+                    :placeholder="rule.feishuWebhookConfigured ? '已配置，留空保存将保留原值' : 'https://open.feishu.cn/open-apis/bot/v2/hook/...'"
                     :disabled="loading || saving || !canUpdateConfigs || !rule.feishuEnabled"
                     class="w-full"
                   />

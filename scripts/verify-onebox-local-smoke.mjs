@@ -216,7 +216,12 @@ const verifyOneboxEndpoints = async () => {
 
   const healthResponse = await fetch(`${oneboxBaseUrl}/health`)
   const healthJson = await healthResponse.json()
-  if (!healthResponse.ok || healthJson?.data?.status !== 'UP') {
+  if (
+    !healthResponse.ok
+    || healthJson?.status !== 'UP'
+    || typeof healthJson?.maintenance?.readOnly !== 'boolean'
+    || healthJson?.database !== undefined
+  ) {
     throw new Error('onebox /health 反代结果异常')
   }
 

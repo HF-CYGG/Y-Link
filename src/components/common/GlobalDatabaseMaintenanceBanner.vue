@@ -12,7 +12,10 @@
  */
 -->
 <script setup lang="ts">
-import { useDatabaseMaintenanceStore } from '@/store/modules/database-maintenance'
+import {
+  DATABASE_MAINTENANCE_READ_ONLY_MESSAGE,
+  useDatabaseMaintenanceStore,
+} from '@/store/modules/database-maintenance'
 
 const maintenanceStore = useDatabaseMaintenanceStore()
 </script>
@@ -25,7 +28,7 @@ const maintenanceStore = useDatabaseMaintenanceStore()
     aria-live="assertive"
   >
     <el-alert
-      :title="maintenanceStore.message"
+      :title="DATABASE_MAINTENANCE_READ_ONLY_MESSAGE"
       type="warning"
       effect="dark"
       :closable="false"

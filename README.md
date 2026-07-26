@@ -156,6 +156,7 @@ INIT_ADMIN_PASSWORD=请改成你自己的强密码
 TZ=Asia/Shanghai
 # 建议配置：永久删除订单/送货单时的二次门禁密码。
 PERMANENT_DELETE_PASSWORD=请改成仅管理员知晓的删除密码
+INVITE_CODE_PEPPER=请生成至少32个随机字节的教师邀请码密钥
 ```
 
 要求：

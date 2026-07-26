@@ -27,6 +27,7 @@ services:
       - INIT_ADMIN_USERNAME=${INIT_ADMIN_USERNAME:-admin}
       - INIT_ADMIN_DISPLAY_NAME=${INIT_ADMIN_DISPLAY_NAME:-系统管理员}
       - INIT_ADMIN_PASSWORD=${INIT_ADMIN_PASSWORD:?请在容器面板环境变量中手动配置 INIT_ADMIN_PASSWORD 私有强密码}
+      - INVITE_CODE_PEPPER=${INVITE_CODE_PEPPER:-}
     ports:
       - "${BACKEND_PORT:-3001}:3001"
     volumes:

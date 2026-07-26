@@ -22,6 +22,7 @@ export interface NotificationRuleRecord {
   externalTriggerMode: NotificationExternalTriggerMode
   watchedUserIds: string[]
   feishuWebhookUrl: string
+  feishuWebhookConfigured: boolean
   feishuSignSecretMasked: boolean
   feishuSignSecret?: string
   emailSubjectPrefix: string
@@ -57,6 +58,7 @@ export interface UpdateNotificationRulesPayload {
     externalTriggerMode: NotificationExternalTriggerMode
     watchedUserIds: string[]
     feishuWebhookUrl: string
+    clearFeishuWebhook?: boolean
     feishuSignSecret: string
     emailSubjectPrefix: string
   }>

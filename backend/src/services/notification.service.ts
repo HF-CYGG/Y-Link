@@ -23,6 +23,7 @@ import { detectUnsafeHost, formatUnsafeHostReason } from '../utils/safe-network.
 import { hashSessionToken } from '../utils/session-token.js'
 import { auditService } from './audit.service.js'
 import { systemConfigService } from './system-config.service.js'
+import { safeHttpRequest } from '../utils/safe-http-request.js'
 
 export const NOTIFICATION_EVENT_TYPES = [
   'o2o_preorder_created',
@@ -76,6 +77,7 @@ export interface NotificationRuleRecord {
   externalTriggerMode: NotificationExternalTriggerMode
   watchedUserIds: string[]
   feishuWebhookUrl: string
+  feishuWebhookConfigured: boolean
   feishuSignSecretMasked: boolean
   emailSubjectPrefix: string
   updatedAt: Date
@@ -92,6 +94,7 @@ export interface UpdateNotificationRuleInput {
   externalTriggerMode: NotificationExternalTriggerMode
   watchedUserIds: string[]
   feishuWebhookUrl: string
+  clearFeishuWebhook?: boolean
   feishuSignSecret: string
   emailSubjectPrefix: string
 }
@@ -277,7 +280,8 @@ function toRuleRecord(row: NotificationRule): NotificationRuleRecord {
     feishuEnabled: row.feishuEnabled > 0,
     externalTriggerMode: row.externalTriggerMode,
     watchedUserIds: parseJsonStringArray(row.watchedUserIdsJson),
-    feishuWebhookUrl: row.feishuWebhookUrl?.trim() || '',
+    feishuWebhookUrl: '',
+    feishuWebhookConfigured: Boolean(row.feishuWebhookUrl?.trim()),
     feishuSignSecretMasked: Boolean(row.feishuSignSecret?.trim()),
     emailSubjectPrefix: row.emailSubjectPrefix?.trim() || '',
     updatedAt: row.updatedAt,
@@ -407,7 +411,7 @@ export class NotificationService {
 
   private normalizeRuleDraft(
     row: UpdateNotificationRuleInput,
-    persistedRule: Pick<NotificationRule, 'ruleCode' | 'ruleName' | 'feishuSignSecret'>,
+    persistedRule: Pick<NotificationRule, 'ruleCode' | 'ruleName' | 'feishuSignSecret' | 'feishuWebhookUrl'>,
   ): NormalizedNotificationRuleDraft {
     if (!NOTIFICATION_EXTERNAL_TRIGGER_MODES.includes(row.externalTriggerMode)) {
       throw new BizError('外发时机配置不合法', 400)
@@ -417,7 +421,11 @@ export class NotificationService {
     const watchedUserIds = row.watchedUserIds.map((item) => normalizeId(item)).filter(Boolean)
     const emailRecipientAdminUserIds = row.emailRecipientAdminUserIds.map((item) => normalizeId(item)).filter(Boolean)
     const emailRecipientSupplierUserIds = row.emailRecipientSupplierUserIds.map((item) => normalizeId(item)).filter(Boolean)
-    const feishuWebhookUrl = normalizeFeishuWebhookUrl(row.feishuWebhookUrl)
+    const feishuWebhookUrl = row.clearFeishuWebhook
+      ? ''
+      : row.feishuWebhookUrl.trim()
+        ? normalizeFeishuWebhookUrl(row.feishuWebhookUrl)
+        : (persistedRule.feishuWebhookUrl?.trim() || '')
     const emailSubjectPrefix = row.emailSubjectPrefix.trim().slice(0, 128) || '[Y-Link]'
 
     if (row.externalTriggerMode === 'watched_accounts_offline' && watchedUserIds.length === 0) {
@@ -781,25 +789,24 @@ export class NotificationService {
       .replaceAll(/\{\{\s*subject\s*\}\}/g, subject)
       .replaceAll(/\{\{\s*content\s*\}\}/g, content)
 
-    const requestInit: RequestInit = {
-      method: provider.httpMethod,
-      headers,
-      body: provider.httpMethod === 'GET' ? undefined : body,
-    }
-
     try {
-      const response = await fetch(providerApiUrl, requestInit)
-      const responseText = await response.text()
+      const response = await safeHttpRequest(providerApiUrl, {
+        method: provider.httpMethod,
+        headers,
+        body: provider.httpMethod === 'GET' ? undefined : body,
+        timeoutMs: 8_000,
+      })
+      const responseText = response.body.toString('utf8')
       const successMatch = provider.successMatch.trim()
-      if (!response.ok || (successMatch && !responseText.includes(successMatch))) {
+      if (response.statusCode < 200 || response.statusCode >= 300 || (successMatch && !responseText.includes(successMatch))) {
         return {
-          status: response.status,
+          status: response.statusCode,
           ok: false,
-          errorMessage: `邮件网关返回异常(HTTP ${response.status})`,
+          errorMessage: `邮件网关返回异常(HTTP ${response.statusCode})`,
         }
       }
       return {
-        status: response.status,
+        status: response.statusCode,
         ok: true,
       }
     } catch (error) {
@@ -840,17 +847,12 @@ export class NotificationService {
         errorMessage: error instanceof BizError ? error.message : '飞书 Webhook 地址不安全',
       }
     }
-    const abortController = new AbortController()
-    const timeout = setTimeout(() => {
-      abortController.abort()
-    }, FEISHU_WEBHOOK_TIMEOUT_MS)
-
     try {
       const normalizedSecret = signSecret?.trim() || ''
       const signedPart = normalizedSecret ? this.buildFeishuSignature(normalizedSecret) : null
-      const response = await fetch(safeWebhookUrl, {
+      const response = await safeHttpRequest(safeWebhookUrl, {
         method: 'POST',
-        signal: abortController.signal,
+        timeoutMs: FEISHU_WEBHOOK_TIMEOUT_MS,
         headers: {
           'Content-Type': 'application/json',
         },
@@ -862,7 +864,7 @@ export class NotificationService {
           },
         }),
       })
-      const text = await response.text()
+      const text = response.body.toString('utf8')
       let feishuCode: number | null = null
       let feishuMsg = ''
       try {
@@ -873,18 +875,18 @@ export class NotificationService {
         // 非 JSON 响应时走兜底文案
       }
 
-      if (!response.ok) {
+      if (response.statusCode < 200 || response.statusCode >= 300) {
         return {
-          status: response.status,
+          status: response.statusCode,
           ok: false,
           errorMessage: feishuCode !== null
-            ? `飞书 Webhook 返回异常(HTTP ${response.status}, code=${feishuCode}${feishuMsg ? `, msg=${feishuMsg}` : ''})`
-            : `飞书 Webhook 返回异常(HTTP ${response.status})`,
+            ? `飞书 Webhook 返回异常(HTTP ${response.statusCode}, code=${feishuCode}${feishuMsg ? `, msg=${feishuMsg}` : ''})`
+            : `飞书 Webhook 返回异常(HTTP ${response.statusCode})`,
         }
       }
       if (feishuCode !== 0 && !/\"code\"\s*:\s*0/.test(text)) {
         return {
-          status: response.status,
+          status: response.statusCode,
           ok: false,
           errorMessage: feishuCode !== null
             ? `飞书 Webhook 返回非成功响应(code=${feishuCode}${feishuMsg ? `, msg=${feishuMsg}` : ''})`
@@ -892,11 +894,11 @@ export class NotificationService {
         }
       }
       return {
-        status: response.status,
+        status: response.statusCode,
         ok: true,
       }
     } catch (error) {
-      if (error instanceof DOMException && error.name === 'AbortError') {
+      if (error instanceof Error && /超时/.test(error.message)) {
         return {
           status: 504,
           ok: false,
@@ -908,8 +910,6 @@ export class NotificationService {
         ok: false,
         errorMessage: error instanceof Error ? error.message : String(error),
       }
-    } finally {
-      clearTimeout(timeout)
     }
   }
 
@@ -926,6 +926,7 @@ export class NotificationService {
         ruleCode: true,
         ruleName: true,
         feishuSignSecret: true,
+        feishuWebhookUrl: true,
       },
     })
     if (!persistedRule) {
@@ -957,6 +958,7 @@ export class NotificationService {
         externalTriggerMode: normalizedDraft.externalTriggerMode,
         watchedUserIds: normalizedDraft.watchedUserIds,
         feishuWebhookUrl: normalizedDraft.feishuWebhookUrl,
+        feishuWebhookConfigured: Boolean(normalizedDraft.feishuWebhookUrl),
         feishuSignSecretMasked: Boolean(normalizedDraft.feishuSignSecret),
         emailSubjectPrefix: normalizedDraft.emailSubjectPrefix,
         updatedAt: new Date(),

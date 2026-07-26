@@ -420,11 +420,19 @@ const createHttpClient = (baseUrl) => {
 const readHealth = async (baseUrl) => {
   const response = await fetchWithTimeout(`${baseUrl}/health`, {}, 5000)
   const payload = await parseJsonResponse(response, 'GET /health')
-  if (response.status !== 200 || payload?.code !== 0 || payload?.data?.status !== 'UP') {
+  if (response.status !== 200 || payload?.status !== 'UP') {
     throw new VerificationError(
-      `/health 异常：HTTP ${response.status}，code=${payload?.code ?? 'unknown'}，status=${payload?.data?.status ?? 'unknown'}`,
+      `/health 异常：HTTP ${response.status}，status=${payload?.status ?? 'unknown'}`,
     )
   }
+  return payload
+}
+
+const readRuntimeOverrideState = async (client) => {
+  const { payload } = await client.request('/api/data-maintenance/db-migration/runtime-override')
+  assert.equal(payload?.code, 0, '数据库运行时状态接口必须成功')
+  assert.ok(payload?.data?.effectiveDatabase, '数据库运行时状态接口缺少 effectiveDatabase')
+  assert.ok(payload?.data?.runtimeOverrideStatus, '数据库运行时状态接口缺少 runtimeOverrideStatus')
   return payload.data
 }
 
@@ -450,6 +458,33 @@ const waitFor = async (label, probe, options = {}) => {
     `${label} 超时（${timeoutMs}ms）${lastError ? `；最后错误：${lastError instanceof Error ? lastError.message : String(lastError)}` : ''}`,
   )
 }
+
+const waitForRuntimeState = async ({
+  baseUrl,
+  client,
+  label,
+  dbType,
+  readOnly,
+  phase,
+  intervalMs = 500,
+}) =>
+  await waitFor(
+    label,
+    async () => {
+      const health = await readHealth(baseUrl)
+      if (health.maintenance?.readOnly !== readOnly) {
+        return null
+      }
+      if (phase !== undefined && health.maintenance?.phase !== phase) {
+        return null
+      }
+      const runtimeState = await readRuntimeOverrideState(client)
+      return runtimeState.effectiveDatabase?.dbType === dbType
+        ? { health, runtimeState }
+        : null
+    },
+    { intervalMs },
+  )
 
 const normalizeComparableNumber = (value) => {
   const normalized = String(value).trim()
@@ -865,20 +900,20 @@ const assertIsolatedComposeResources = async (composeEnv) => {
   )
 }
 
-const assertMySqlRuntime = async (composeEnv, health) => {
-  assert.equal(health.database?.effectiveDatabase?.dbType, 'mysql', '/health 未确认 MySQL 实际生效')
+const assertMySqlRuntime = async (composeEnv, runtimeState) => {
+  assert.equal(runtimeState.effectiveDatabase?.dbType, 'mysql', '管理员运行时状态未确认 MySQL 实际生效')
   assert.equal(
-    health.database?.effectiveDatabase?.source,
+    runtimeState.effectiveDatabase?.source,
     'runtime_override',
-    '/health 未确认运行时覆盖已被当前进程加载',
+    '管理员运行时状态未确认运行时覆盖已被当前进程加载',
   )
   assert.match(
-    String(health.database?.effectiveDatabase?.summary ?? ''),
+    String(runtimeState.effectiveDatabase?.summary ?? ''),
     /^mysql:3306\/y_link_migration_verify$/,
-    '/health 返回的 MySQL 目标不是隔离验收库',
+    '管理员运行时状态返回的 MySQL 目标不是隔离验收库',
   )
   assert.equal(
-    health.database?.runtimeOverrideStatus?.pendingRestart,
+    runtimeState.runtimeOverrideStatus?.pendingRestart,
     false,
     '迁移成功后运行时覆盖仍处于待重启状态',
   )
@@ -907,10 +942,10 @@ const assertMySqlRuntime = async (composeEnv, health) => {
 
 const waitForInitialService = async (baseUrl) => {
   const health = await waitFor(
-    'onebox 初始 SQLite 服务就绪',
+    'onebox 初始服务就绪',
     async () => {
       const current = await readHealth(baseUrl)
-      return current.database?.effectiveDatabase?.dbType === 'sqlite' ? current : null
+      return current.status === 'UP' ? current : null
     },
     {
       intervalMs: 1000,
@@ -961,22 +996,20 @@ const assertWriteBarrier = async (client) => {
   assert.ok(retryAfter, '维护期间写屏障必须返回 Retry-After')
 }
 
-const assertReturnedToSqlite = async (baseUrl) => {
-  const health = await waitFor(
-    '失败任务退出维护态并保持 SQLite',
-    async () => {
-      const current = await readHealth(baseUrl)
-      if (current.maintenance?.readOnly !== false) {
-        return null
-      }
-      return current.database?.effectiveDatabase?.dbType === 'sqlite' ? current : null
-    },
-    {
-      intervalMs: 500,
-    },
+const assertReturnedToSqlite = async (baseUrl, client) => {
+  const state = await waitForRuntimeState({
+    baseUrl,
+    client,
+    label: '失败任务退出维护态并保持 SQLite',
+    dbType: 'sqlite',
+    readOnly: false,
+  })
+  assert.equal(
+    state.runtimeState.effectiveDatabase?.source,
+    'environment',
+    '失败回退后不应加载 MySQL 运行时覆盖',
   )
-  assert.equal(health.database?.effectiveDatabase?.source, 'environment', '失败回退后不应加载 MySQL 运行时覆盖')
-  return health
+  return state
 }
 
 const assertFailedTaskWithoutRestart = async ({
@@ -995,7 +1028,7 @@ const assertFailedTaskWithoutRestart = async ({
   assert.equal(terminalTask.status, 'failed', `${label}任务终态必须为 failed，实际=${terminalTask.status}`)
   assert.match(String(terminalTask.errorMessage ?? ''), errorPattern, `${label}任务没有记录预期阻断原因`)
   assert.ok(!String(terminalTask.errorMessage ?? '').includes(mysqlPassword), `${label}任务错误信息泄露密码`)
-  await assertReturnedToSqlite(baseUrl)
+  await assertReturnedToSqlite(baseUrl, client)
   const finalState = await getOneboxContainerState(composeEnv)
   assert.equal(finalState.containerId, initialState.containerId, `${label}不应替换 onebox 容器`)
   assert.equal(finalState.restartCount, initialState.restartCount, `${label}不应触发 onebox 重启`)
@@ -1044,20 +1077,14 @@ const runSuccessScenario = async ({ baseUrl, client, composeEnv, baselineSnapsho
   )
   assertFullTableValidationPassed(terminalTask, fixtureManifest)
 
-  const finalHealth = await waitFor(
-    'MySQL 生效且维护态结束',
-    async () => {
-      const current = await readHealth(baseUrl)
-      if (current.maintenance?.readOnly !== false) {
-        return null
-      }
-      return current.database?.effectiveDatabase?.dbType === 'mysql' ? current : null
-    },
-    {
-      intervalMs: 500,
-    },
-  )
-  await assertMySqlRuntime(composeEnv, finalHealth)
+  const finalState = await waitForRuntimeState({
+    baseUrl,
+    client,
+    label: 'MySQL 生效且维护态结束',
+    dbType: 'mysql',
+    readOnly: false,
+  })
+  await assertMySqlRuntime(composeEnv, finalState.runtimeState)
   await client.login()
   await assertMigrationAuditExists(client, 'database_migration.automatic_succeeded', createdTask.id)
   const mysqlSnapshot = await readExportSnapshot(client)
@@ -1082,7 +1109,7 @@ const runWrongConnectionScenario = async ({ baseUrl, client, composeEnv, baselin
     [...initialTaskIds, createdTask.id].sort(),
     '错误连接任务列表没有保留唯一失败任务记录',
   )
-  await assertReturnedToSqlite(baseUrl)
+  await assertReturnedToSqlite(baseUrl, client)
   const finalState = await getOneboxContainerState(composeEnv)
   assert.equal(finalState.containerId, initialState.containerId, '错误连接失败不应替换 onebox 容器')
   assert.equal(finalState.restartCount, initialState.restartCount, '错误连接失败不应触发 onebox 重启')
@@ -1166,7 +1193,7 @@ const runNonEmptyTargetScenario = async ({ baseUrl, client, composeEnv, baseline
     await runMySqlQuery(composeEnv, 'SELECT COUNT(*) FROM migration_guard WHERE marker = "keep-existing-data";'),
   )
   assert.equal(guardCount, 1, '非空目标库保护失败：既有 guard 数据被修改')
-  await assertReturnedToSqlite(baseUrl)
+  await assertReturnedToSqlite(baseUrl, client)
   const finalState = await getOneboxContainerState(composeEnv)
   assert.equal(finalState.containerId, initialState.containerId, '非空目标库失败不应替换 onebox 容器')
   assert.equal(finalState.restartCount, initialState.restartCount, '非空目标库失败不应触发 onebox 重启')
@@ -1212,18 +1239,14 @@ const runDuplicateTaskScenario = async ({ baseUrl, client, composeEnv, baselineS
   const terminalTask = await waitForTaskTerminal(client, firstTask.id)
   assert.equal(terminalTask.status, 'succeeded', `首个自动迁移任务未成功：${terminalTask.status}`)
   assertFullTableValidationPassed(terminalTask, fixtureManifest)
-  const finalHealth = await waitFor(
-    '重复任务阻断后首任务完成并解除维护',
-    async () => {
-      const current = await readHealth(baseUrl)
-      return current.maintenance?.readOnly === false
-        && current.database?.effectiveDatabase?.dbType === 'mysql'
-        ? current
-        : null
-    },
-    { intervalMs: 500 },
-  )
-  await assertMySqlRuntime(composeEnv, finalHealth)
+  const finalRuntimeState = await waitForRuntimeState({
+    baseUrl,
+    client,
+    label: '重复任务阻断后首任务完成并解除维护',
+    dbType: 'mysql',
+    readOnly: false,
+  })
+  await assertMySqlRuntime(composeEnv, finalRuntimeState.runtimeState)
   await client.login()
   assert.deepEqual(await readExportSnapshot(client), baselineSnapshot, '重复任务阻断后首任务迁移内容不一致')
   log('重复任务断言通过：第二个任务被拒绝，首任务仍完成强校验与 MySQL 切换')
@@ -1268,18 +1291,14 @@ const runExecutionInterruptionScenario = async ({
     finalState.restartCount >= initialState.restartCount + 2,
     `执行中断续跑与最终切换至少需要两次重启，实际 ${initialState.restartCount} -> ${finalState.restartCount}`,
   )
-  const finalHealth = await waitFor(
-    '执行中断续跑后 MySQL 生效且维护解除',
-    async () => {
-      const current = await readHealth(baseUrl)
-      return current.maintenance?.readOnly === false
-        && current.database?.effectiveDatabase?.dbType === 'mysql'
-        ? current
-        : null
-    },
-    { intervalMs: 500 },
-  )
-  await assertMySqlRuntime(composeEnv, finalHealth)
+  const finalRuntimeState = await waitForRuntimeState({
+    baseUrl,
+    client,
+    label: '执行中断续跑后 MySQL 生效且维护解除',
+    dbType: 'mysql',
+    readOnly: false,
+  })
+  await assertMySqlRuntime(composeEnv, finalRuntimeState.runtimeState)
   await client.login()
   assert.deepEqual(await readExportSnapshot(client), baselineSnapshot, '执行中断续跑后迁移内容不一致')
   log('执行中断断言通过：onebox 自动拉起、任务安全续跑、强校验和最终切换均完成')
@@ -1310,21 +1329,15 @@ const runFailureRollbackScenario = async ({ baseUrl, client, composeEnv, baselin
     finalState.restartCount >= initialState.restartCount + 3,
     `自动迁移、两次 MySQL 启动失败与 SQLite 回退至少需要 3 次容器重启，实际 ${initialState.restartCount} -> ${finalState.restartCount}`,
   )
-  const health = await waitFor(
-    '连续启动失败后 SQLite 自动回退并解除维护',
-    async () => {
-      const current = await readHealth(baseUrl)
-      return current.database?.effectiveDatabase?.dbType === 'sqlite'
-        && current.maintenance?.readOnly === false
-        ? current
-        : null
-    },
-    {
-      intervalMs: 500,
-    },
-  )
+  const rollbackState = await waitForRuntimeState({
+    baseUrl,
+    client,
+    label: '连续启动失败后 SQLite 自动回退并解除维护',
+    dbType: 'sqlite',
+    readOnly: false,
+  })
   assert.equal(
-    health.database?.effectiveDatabase?.source,
+    rollbackState.runtimeState.effectiveDatabase?.source,
     'runtime_override',
     '自动回退后必须由持久化 SQLite 运行时覆盖生效',
   )
@@ -1355,18 +1368,15 @@ const runVerifyingEmergencyRollbackScenario = async ({
   })
   await waitForMaintenanceReadOnly(baseUrl, client, createdTask.id)
   await waitForOneboxRestart(composeEnv, initialState.restartCount, client, createdTask.id)
-  await waitFor(
-    'MySQL 重启后进入 verifying 维护阶段',
-    async () => {
-      const current = await readHealth(baseUrl)
-      return current.database?.effectiveDatabase?.dbType === 'mysql'
-        && current.maintenance?.readOnly === true
-        && current.maintenance?.phase === 'verifying'
-        ? current
-        : null
-    },
-    { intervalMs: 100 },
-  )
+  await waitForRuntimeState({
+    baseUrl,
+    client,
+    label: 'MySQL 重启后进入 verifying 维护阶段',
+    dbType: 'mysql',
+    readOnly: true,
+    phase: 'verifying',
+    intervalMs: 100,
+  })
 
   const rollbackResult = await client.request('/api/data-maintenance/db-migration/rollback', {
     method: 'POST',
@@ -1382,18 +1392,14 @@ const runVerifyingEmergencyRollbackScenario = async ({
   assert.equal(terminalTask.status, 'rolled_back', 'verifying 阶段紧急回退后任务必须为 rolled_back')
   assert.ok(terminalTask.cancelRequestedAt, '紧急回退任务必须持久化 cancelRequestedAt')
 
-  const finalHealth = await waitFor(
-    'verifying 紧急回退后 SQLite 生效且维护解除',
-    async () => {
-      const current = await readHealth(baseUrl)
-      return current.database?.effectiveDatabase?.dbType === 'sqlite'
-        && current.maintenance?.readOnly === false
-        ? current
-        : null
-    },
-    { intervalMs: 500 },
-  )
-  assert.equal(finalHealth.database?.effectiveDatabase?.source, 'runtime_override')
+  const finalRuntimeState = await waitForRuntimeState({
+    baseUrl,
+    client,
+    label: 'verifying 紧急回退后 SQLite 生效且维护解除',
+    dbType: 'sqlite',
+    readOnly: false,
+  })
+  assert.equal(finalRuntimeState.runtimeState.effectiveDatabase?.source, 'runtime_override')
   await client.login()
   await assertMigrationAuditExists(client, 'database_migration.automatic_rolled_back', createdTask.id)
   assert.deepEqual(await readExportSnapshot(client), baselineSnapshot, 'verifying 紧急回退后 SQLite 内容发生变化')
@@ -1485,6 +1491,17 @@ const run = async () => {
     await waitForInitialService(baseUrl)
     const client = createHttpClient(baseUrl)
     await client.login()
+    const initialRuntimeState = await readRuntimeOverrideState(client)
+    assert.equal(
+      initialRuntimeState.effectiveDatabase?.dbType,
+      'sqlite',
+      '管理员运行时状态未确认 onebox 初始使用 SQLite',
+    )
+    assert.equal(
+      initialRuntimeState.effectiveDatabase?.source,
+      'environment',
+      'onebox 初始 SQLite 不应来自运行时覆盖',
+    )
     const fixtureManifest = await runFullEntityFixtureCommand(composeEnv)
     const baselineSnapshot = await readExportSnapshot(client)
     log(`SQLite 全实体夹具已就绪：${fixtureManifest.tableCount} 张实体表全部非空`)

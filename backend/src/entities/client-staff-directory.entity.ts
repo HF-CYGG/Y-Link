@@ -22,6 +22,24 @@ export class ClientStaffDirectory {
   @Column({ name: 'status', type: 'varchar', length: 16, default: 'active', comment: '目录状态' })
   status!: ClientStaffDirectoryStatus
 
+  @Column({ name: 'invite_code_digest', type: 'varchar', length: 64, nullable: true, select: false })
+  inviteCodeDigest!: string | null
+
+  @Column({ name: 'invite_issued_at', ...entityColumnOptions.timestamp, nullable: true })
+  inviteIssuedAt!: Date | null
+
+  @Column({ name: 'invite_expires_at', ...entityColumnOptions.timestamp, nullable: true })
+  inviteExpiresAt!: Date | null
+
+  @Column({ name: 'invite_used_at', ...entityColumnOptions.timestamp, nullable: true })
+  inviteUsedAt!: Date | null
+
+  @Column({ name: 'invite_failed_attempts', type: 'int', default: 0 })
+  inviteFailedAttempts!: number
+
+  @Column({ name: 'invite_locked_until', ...entityColumnOptions.timestamp, nullable: true })
+  inviteLockedUntil!: Date | null
+
   @CreateDateColumn({ name: 'created_at', ...entityColumnOptions.timestamp })
   createdAt!: Date
 
