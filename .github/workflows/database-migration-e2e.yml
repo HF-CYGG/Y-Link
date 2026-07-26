@@ -1,0 +1,76 @@
+name: 数据库自动迁移端到端验收
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/database-migration-e2e.yml"
+      - "backend/src/**"
+      - "backend/package*.json"
+      - "docker/compose.verify-db-migration.yml"
+      - "docker/onebox/**"
+      - "Dockerfile.onebox"
+      - "scripts/verify-db-migration-timeout.test.mjs"
+      - "scripts/verify-db-migration.mjs"
+      - "package.json"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/database-migration-e2e.yml"
+      - "backend/src/**"
+      - "backend/package*.json"
+      - "docker/compose.verify-db-migration.yml"
+      - "docker/onebox/**"
+      - "Dockerfile.onebox"
+      - "scripts/verify-db-migration-timeout.test.mjs"
+      - "scripts/verify-db-migration.mjs"
+      - "package.json"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: database-migration-e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: 严格验收（${{ matrix.scenario }}）
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario:
+          - success
+          - wrong-connection
+          - old-version
+          - wrong-charset
+          - insufficient-permissions
+          - non-empty-target
+          - duplicate-task
+          - content-tamper
+          - execution-interruption
+          - verifying-emergency-rollback
+          - failure-rollback
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 固定 Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: 检查 Docker Compose
+        run: docker compose version
+
+      - name: 验证 Docker 前置门禁超时
+        run: npm run verify:db:migration:timeout
+
+      - name: 运行 SQLite 到 MySQL 严格验收
+        env:
+          Y_LINK_DB_MIGRATION_SCENARIO: ${{ matrix.scenario }}
+          Y_LINK_DB_MIGRATION_TIMEOUT_MS: "300000"
+        run: npm run verify:db:migration

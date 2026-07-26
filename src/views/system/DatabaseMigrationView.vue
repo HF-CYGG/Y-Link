@@ -1,8 +1,15 @@
 <!--
-  文件用途：承载管理端“数据库迁移助手”页面，面向系统治理场景提供数据库迁移闭环入口。
-  核心职责：负责串联迁移预检、任务创建、执行核验、运行时切换、SQLite 回退以及迁移状态展示等步骤。
-  设计原因：通过渐进式步骤界面把高风险数据库操作拆成清晰阶段，帮助管理员先判断环境，再逐步完成迁移，降低误操作概率。
-  页面边界：当前文件负责迁移助手页面级流程编排与状态承接，具体分区展示逻辑继续下沉到各个迁移区块组件中。
+/**
+ * 模块说明：src/views/system/DatabaseMigrationView.vue
+ * 文件职责：承载管理端 SQLite 到 MySQL 自动迁移主入口，并保留手动迁移与紧急回退治理能力。
+ * 实现逻辑：
+ * - 首屏以“一键自动迁移”收集最小目标库信息，由后端自动完成备份、迁移、重启衔接与校验；
+ * - 自动请求只提交 target 与 note，Schema 同步固定关闭且不向用户暴露选择；
+ * - 原预检、任务执行、手动切换和回退流程完整保留，并统一收进高级/应急折叠区。
+ * 维护说明：
+ * - 自动任务新增状态时需同步 API 枚举、状态文案、标签颜色与执行按钮门禁；
+ * - 紧急回退入口不能移出管理员权限与确认弹窗保护，自动迁移也不能在前端拼装后端治理选项。
+ */
 -->
 <script setup lang="ts">
 import dayjs from 'dayjs'
@@ -17,6 +24,7 @@ import DatabaseMigrationSwitchSection from '@/views/system/components/DatabaseMi
 import {
   applyDatabaseMigrationSwitch,
   clearDatabaseMigrationRuntimeOverride,
+  createAutomaticSQLiteToMySqlMigrationTask,
   createSQLiteToMySqlMigrationTask,
   getDatabaseMigrationRuntimeOverrideState,
   getSQLiteToMySqlMigrationTaskDetail,
@@ -32,6 +40,7 @@ import {
   type SQLiteToMySqlPrecheckResult,
   type SQLiteToMySqlTaskRecord,
 } from '@/api/modules/data-maintenance'
+import { PassiveNumberInput } from '@/components/common'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
@@ -85,7 +94,6 @@ const migrationForm = reactive<MigrationFormState>({
     user: '',
     password: '',
     database: '',
-    dbSync: false,
   },
   allowTargetWithData: false,
   initializeSchema: true,
@@ -105,6 +113,7 @@ const migrationForm = reactive<MigrationFormState>({
 const pageLoading = ref(true)
 const precheckLoading = ref(false)
 const taskCreating = ref(false)
+const automaticTaskCreating = ref(false)
 const taskRunningId = ref('')
 const switchingTaskId = ref('')
 const rollbackLoading = ref(false)
@@ -114,6 +123,7 @@ const runtimeState = ref<DatabaseRuntimeOverrideStateResult | null>(null)
 const precheckResult = ref<SQLiteToMySqlPrecheckResult | null>(null)
 const taskList = ref<SQLiteToMySqlTaskRecord[]>([])
 const selectedTaskId = ref('')
+const advancedPanels = ref<string[]>([])
 
 /**
  * 权限控制：
@@ -440,7 +450,7 @@ const buildNormalizedTarget = (): MySqlMigrationTarget => {
     user: migrationForm.target.user.trim(),
     password: migrationForm.target.password,
     database: migrationForm.target.database.trim(),
-    dbSync: Boolean(migrationForm.target.dbSync),
+    dbSync: false,
   }
 }
 
@@ -644,6 +654,58 @@ const handleCreateTask = async () => {
 }
 
 /**
+ * 一键自动迁移：
+ * - 只校验连接目标并提交 target + note；
+ * - 后端自动完成预检、双备份、迁移、重启等待、校验与失败收口；
+ * - 接口返回后只在本地插入任务记录，不强制立即刷新，避免后端进入重启窗口时产生误报。
+ */
+const handleCreateAutomaticTask = async () => {
+  if (!ensurePermission('db_migration:operate', '一键自动迁移')) {
+    return
+  }
+  if (!validateTargetForm()) {
+    return
+  }
+
+  const target = buildNormalizedTarget()
+  delete (target as { dbSync?: boolean }).dbSync
+  try {
+    await ElMessageBox.confirm(
+      `确认把当前 SQLite 自动迁移到 ${target.host}:${target.port}/${target.database} 吗？系统将进入全局只读维护，自动完成备份、迁移、重启衔接与校验。`,
+      '确认一键自动迁移',
+      {
+        type: 'warning',
+        confirmButtonText: '确认并开始',
+        cancelButtonText: '取消',
+      },
+    )
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') {
+      return
+    }
+  }
+
+  automaticTaskCreating.value = true
+  try {
+    const task = await createAutomaticSQLiteToMySqlMigrationTask({
+      target,
+      note: migrationForm.note.trim() || undefined,
+    })
+    upsertTaskRecord(task)
+    selectedTaskId.value = task.id
+    showAppSuccess('自动迁移任务已提交，系统进入只读维护后会在全局横幅中持续提示')
+  } catch (error) {
+    void showCriticalErrorDialog(error, {
+      title: '启动一键自动迁移失败',
+      fallback: '启动一键自动迁移失败',
+      operation: '创建自动数据库迁移任务',
+    })
+  } finally {
+    automaticTaskCreating.value = false
+  }
+}
+
+/**
  * 执行迁移任务：
  * - 二次确认后调用后端执行；
  * - 成功后刷新任务列表与运行时覆盖状态。
@@ -654,6 +716,10 @@ const handleRunTask = async (task: SQLiteToMySqlTaskRecord) => {
   }
   if (task.readState === 'corrupted') {
     showAppWarning('该迁移任务文件已损坏，请先修复或删除该任务文件后再尝试执行')
+    return
+  }
+  if (task.mode === 'automatic') {
+    showAppWarning('自动迁移任务由系统后台编排，不能通过手动执行入口重复启动')
     return
   }
 
@@ -879,6 +945,9 @@ const getIssueTagType = (level: DatabaseMigrationIssue['level']) => {
  * - 保证列表与详情区域文案一致。
  */
 const getTaskStatusLabel = (status: SQLiteToMySqlTaskRecord['status']) => {
+  if (status === 'queued') {
+    return '排队中'
+  }
   if (status === 'prechecked') {
     return '待执行'
   }
@@ -888,6 +957,15 @@ const getTaskStatusLabel = (status: SQLiteToMySqlTaskRecord['status']) => {
   if (status === 'succeeded') {
     return '已成功'
   }
+  if (status === 'restart_pending') {
+    return '等待重启'
+  }
+  if (status === 'verifying') {
+    return '校验中'
+  }
+  if (status === 'rolled_back') {
+    return '已回退'
+  }
   return '已失败'
 }
 
@@ -895,7 +973,7 @@ const getTaskStatusTagType = (status: SQLiteToMySqlTaskRecord['status']) => {
   if (status === 'succeeded') {
     return 'success'
   }
-  if (status === 'running') {
+  if (status === 'running' || status === 'restart_pending' || status === 'verifying') {
     return 'warning'
   }
   if (status === 'failed') {
@@ -1027,39 +1105,114 @@ onMounted(() => {
       <el-alert v-else-if="loadError" :title="loadError" type="error" :closable="false" show-icon />
 
       <template v-if="canViewMigration">
-        <DatabaseMigrationOverviewSection
-          :effective-database-summary="effectiveDatabaseSummary"
-          :beginner-guide="beginnerGuide"
-          :migration-recommendation-tag="migrationRecommendationTag"
-          :migration-recommendation-label="migrationRecommendationLabel"
-          :active-runtime-mode-label="activeRuntimeModeLabel"
-          :get-runtime-mode-tag-type="getRuntimeModeTagType"
-          :page-loading="pageLoading"
-          @enter-flow="handleEnterStepFlow"
-        />
+        <section class="apple-card p-5 sm:p-6">
+          <div class="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 class="text-xl font-semibold text-slate-800 dark:text-slate-100">一键自动迁移</h2>
+              <p class="mt-2 text-sm text-slate-500 dark:text-slate-400">
+                自动完成预检、只读维护、快照、迁移、强校验、onebox 重启与失败回退。
+              </p>
+            </div>
+            <el-tag type="success">推荐入口</el-tag>
+          </div>
 
-        <DatabaseMigrationStepFlowSection
-          :has-entered-step-flow="hasEnteredStepFlow"
-          :active-step-key="activeStepKey"
-          :step-flow-cards="stepFlowCards"
-          @open-step="handleOpenStep($event.stepKey, $event.unlocked)"
-        />
+          <el-form label-position="top" class="mt-5 grid gap-x-4 sm:grid-cols-2 lg:grid-cols-3">
+              <el-form-item label="MySQL 主机">
+                <el-input v-model="migrationForm.target.host" placeholder="mysql.internal" />
+              </el-form-item>
+              <el-form-item label="端口">
+                <PassiveNumberInput
+                  v-model="migrationForm.target.port"
+                  :min="1"
+                  :max="65535"
+                  :controls="false"
+                  class="!w-full"
+                />
+              </el-form-item>
+              <el-form-item label="用户名">
+                <el-input v-model="migrationForm.target.user" placeholder="请输入 MySQL 用户名" />
+              </el-form-item>
+              <el-form-item label="密码">
+                <el-input
+                  v-model="migrationForm.target.password"
+                  type="password"
+                  show-password
+                  placeholder="请输入 MySQL 密码"
+                />
+              </el-form-item>
+              <el-form-item label="数据库名">
+                <el-input v-model="migrationForm.target.database" placeholder="独立 utf8mb4 空库" />
+              </el-form-item>
+              <el-form-item label="备注（可选）" class="sm:col-span-2">
+                <el-input
+                  v-model="migrationForm.note"
+                  maxlength="500"
+                  placeholder="本次迁移说明"
+                />
+              </el-form-item>
+            </el-form>
 
-        <DatabaseMigrationPrecheckSection
-          :has-entered-step-flow="hasEnteredStepFlow"
-          :active-step-key="activeStepKey"
-          :page-loading="pageLoading"
-          :precheck-loading="precheckLoading"
-          :precheck-result="precheckResult"
-          :migration-form="migrationForm"
-          :format-date-time="formatDateTime"
-          :format-table-summary="formatTableSummary"
-          :get-issue-tag-type="getIssueTagType"
-          :get-issue-plain-language="getIssuePlainLanguage"
-          @precheck="handlePrecheck"
-        />
+            <div class="flex justify-end">
+              <el-button
+                type="primary"
+                size="large"
+                :loading="automaticTaskCreating"
+                :disabled="!canOperateMigration || pageLoading"
+                @click="handleCreateAutomaticTask"
+              >
+                一键开始自动迁移
+              </el-button>
+            </div>
+        </section>
 
-        <section v-if="hasEnteredStepFlow && activeStepKey === 'create'" class="apple-card space-y-5 p-5 sm:p-6">
+        <el-collapse v-model="advancedPanels" class="apple-card !border-0 px-5 sm:px-6">
+          <el-collapse-item name="manual">
+            <template #title>
+              <div class="flex min-w-0 flex-1 flex-wrap items-center justify-between gap-3 py-4 pr-3">
+                <div class="min-w-0 text-left">
+                  <div class="text-base font-semibold text-slate-800 dark:text-slate-100">高级 / 应急操作</div>
+                  <div class="mt-1 text-sm font-normal text-slate-500 dark:text-slate-400">
+                    手动预检、创建与执行任务，以及切换、SQLite 回退和运行时覆盖治理
+                  </div>
+                </div>
+                <el-tag type="warning" effect="light">谨慎操作</el-tag>
+              </div>
+            </template>
+
+            <div class="flex min-w-0 flex-col gap-4 pb-5">
+              <DatabaseMigrationOverviewSection
+                :effective-database-summary="effectiveDatabaseSummary"
+                :beginner-guide="beginnerGuide"
+                :migration-recommendation-tag="migrationRecommendationTag"
+                :migration-recommendation-label="migrationRecommendationLabel"
+                :active-runtime-mode-label="activeRuntimeModeLabel"
+                :get-runtime-mode-tag-type="getRuntimeModeTagType"
+                :page-loading="pageLoading"
+                @enter-flow="handleEnterStepFlow"
+              />
+
+              <DatabaseMigrationStepFlowSection
+                :has-entered-step-flow="hasEnteredStepFlow"
+                :active-step-key="activeStepKey"
+                :step-flow-cards="stepFlowCards"
+                @open-step="handleOpenStep($event.stepKey, $event.unlocked)"
+              />
+
+              <DatabaseMigrationPrecheckSection
+                :has-entered-step-flow="hasEnteredStepFlow"
+                :active-step-key="activeStepKey"
+                :page-loading="pageLoading"
+                :precheck-loading="precheckLoading"
+                :precheck-result="precheckResult"
+                :migration-form="migrationForm"
+                :format-date-time="formatDateTime"
+                :format-table-summary="formatTableSummary"
+                :get-issue-tag-type="getIssueTagType"
+                :get-issue-plain-language="getIssuePlainLanguage"
+                @precheck="handlePrecheck"
+              />
+
+              <section v-if="hasEnteredStepFlow && activeStepKey === 'create'" class="apple-card space-y-5 p-5 sm:p-6">
           <div class="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-4 dark:border-white/5">
             <div>
               <h2 class="text-base font-semibold text-slate-800 dark:text-slate-100">第 2 步：创建迁移任务</h2>
@@ -1115,8 +1268,8 @@ onMounted(() => {
                 <el-tag :type="migrationForm.switchAfterSuccess ? 'warning' : 'info'" effect="light">
                   {{ migrationForm.switchAfterSuccess ? '成功后自动写入切换配置' : '成功后不自动切换' }}
                 </el-tag>
-                <el-tag :type="migrationForm.target.dbSync ? 'warning' : 'info'" effect="light">
-                  {{ migrationForm.target.dbSync ? '启用 Schema 同步' : '关闭 Schema 同步' }}
+                <el-tag type="info" effect="light">
+                  Schema 同步固定关闭
                 </el-tag>
               </div>
 
@@ -1160,9 +1313,9 @@ onMounted(() => {
               />
             </div>
           </div>
-        </section>
+              </section>
 
-        <DatabaseMigrationRunSection
+              <DatabaseMigrationRunSection
           :has-entered-step-flow="hasEnteredStepFlow"
           :active-step-key="activeStepKey"
           :task-list="taskList"
@@ -1178,9 +1331,9 @@ onMounted(() => {
           :get-task-read-state-tag-type="getTaskReadStateTagType"
           @select-task="handleSelectTask"
           @run-task="handleRunTask"
-        />
+              />
 
-        <DatabaseMigrationSwitchSection
+              <DatabaseMigrationSwitchSection
           :has-entered-step-flow="hasEnteredStepFlow"
           :active-step-key="activeStepKey"
           :has-prepared-mysql-switch="hasPreparedMysqlSwitch"
@@ -1198,7 +1351,10 @@ onMounted(() => {
           @switch-task="handleSwitchToTask"
           @rollback="handleRollbackToSqlite"
           @clear-override="handleClearRuntimeOverride"
-        />
+              />
+            </div>
+          </el-collapse-item>
+        </el-collapse>
       </template>
     </div>
   </PageContainer>

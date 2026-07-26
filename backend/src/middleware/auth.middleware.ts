@@ -8,6 +8,7 @@
  */
 
 import type { NextFunction, Request, Response } from 'express'
+import { databaseMaintenanceModeService } from '../services/database-maintenance-mode.service.js'
 import type { PermissionCode } from '../constants/auth-permissions.js'
 import { auditService } from '../services/audit.service.js'
 import type { AuthenticatedRequest, UserRole } from '../types/auth.js'
@@ -110,7 +111,14 @@ export async function requireAuth(req: Request, _res: Response, next: NextFuncti
     const auth = await authService.resolveAuthUserByToken(credential.token)
     auth.authSource = credential.source
     ;(req as AuthenticatedRequest).auth = auth
-    await authService.touchSessionActivity(auth.sessionToken).catch(() => undefined)
+    const releaseActivityLease = databaseMaintenanceModeService.registerInFlightWrite()
+    if (releaseActivityLease) {
+      try {
+        await authService.touchSessionActivity(auth.sessionToken).catch(() => undefined)
+      } finally {
+        releaseActivityLease()
+      }
+    }
     next()
   } catch (error) {
     next(error)

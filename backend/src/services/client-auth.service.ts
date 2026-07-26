@@ -28,6 +28,7 @@ import { generateSessionToken } from '../utils/token.js'
 import { auditService } from './audit.service.js'
 import { authSecurityService } from './auth-security.service.js'
 import { captchaService } from './captcha.service.js'
+import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { systemConfigService } from './system-config.service.js'
 import { verificationCodeService } from './verification-code.service.js'
 import { EphemeralTicketStore } from '../utils/ephemeral-ticket-store.js'
@@ -759,12 +760,19 @@ class ClientAuthService {
     }
     const threshold = new Date(now.getTime() - CLIENT_SESSION_ACTIVITY_WRITE_INTERVAL_MS)
     if (!session.lastAccessAt || session.lastAccessAt < threshold) {
-      await this.sessionRepo
-        .createQueryBuilder()
-        .update(ClientUserSession)
-        .set({ lastAccessAt: now })
-        .where('id = :id', { id: session.id })
-        .execute()
+      const releaseActivityLease = databaseMaintenanceModeService.registerInFlightWrite()
+      if (releaseActivityLease) {
+        try {
+          await this.sessionRepo
+            .createQueryBuilder()
+            .update(ClientUserSession)
+            .set({ lastAccessAt: now })
+            .where('id = :id', { id: session.id })
+            .execute()
+        } finally {
+          releaseActivityLease()
+        }
+      }
     }
     return {
       userId: session.user.id,

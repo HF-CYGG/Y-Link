@@ -6,11 +6,12 @@
  * 3. 查询与导出共用同一套筛选口径，保证后台展示结果与导出结果保持一致。
  */
 
-import type { EntityManager } from 'typeorm'
+import { IsNull, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { SysAuditLog } from '../entities/sys-audit-log.entity.js'
-import type { AuditResultStatus, AuthUserContext } from '../types/auth.js'
+import type { AuditResultStatus } from '../types/auth.js'
 import type { RequestMeta } from '../utils/request-meta.js'
+import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 
 export interface CreateAuditLogInput {
   actionType: string
@@ -19,7 +20,11 @@ export interface CreateAuditLogInput {
   targetId?: string | null
   targetCode?: string | null
   resultStatus?: AuditResultStatus
-  actor?: Pick<AuthUserContext, 'userId' | 'username' | 'displayName'> | null
+  actor?: {
+    userId: string | null
+    username: string
+    displayName: string
+  } | null
   requestMeta?: RequestMeta
   detail?: Record<string, unknown> | null
 }
@@ -36,6 +41,14 @@ export interface AuditLogListQuery {
 export interface AuditLogPageQuery extends AuditLogListQuery {
   page: number
   pageSize: number
+}
+
+export interface SafeAuditRecordOptions {
+  /**
+   * 仅供数据库迁移控制面在只读维护期间记录终态或紧急回退事件。
+   * 普通业务审计不得启用，且非 database_migration 动作即使传入也不会放行。
+   */
+  allowDuringDatabaseMaintenance?: boolean
 }
 
 /**
@@ -94,11 +107,50 @@ export class AuditService {
     return repository.save(entity)
   }
 
-  async safeRecord(input: CreateAuditLogInput): Promise<void> {
+  private shouldPauseSafeRecord(input: CreateAuditLogInput, options: SafeAuditRecordOptions): boolean {
+    if (!databaseMaintenanceModeService.isReadOnly()) {
+      return false
+    }
+    return !(
+      options.allowDuringDatabaseMaintenance === true
+      && input.actionType.startsWith('database_migration.')
+    )
+  }
+
+  async safeRecord(input: CreateAuditLogInput, options: SafeAuditRecordOptions = {}): Promise<void> {
+    if (this.shouldPauseSafeRecord(input, options)) {
+      return
+    }
     try {
       await this.record(input)
     } catch (error) {
       console.error('[y-link-backend] audit log write failed:', error)
+    }
+  }
+
+  /**
+   * 为可重入 finalizer 提供幂等审计：
+   * - 以动作、目标类型和目标 ID 作为迁移终态的稳定键；
+   * - 仅用于同一任务只能出现一次的终态事件，普通业务审计仍使用 safeRecord。
+   */
+  async safeRecordOnce(input: CreateAuditLogInput, options: SafeAuditRecordOptions = {}): Promise<void> {
+    if (this.shouldPauseSafeRecord(input, options)) {
+      return
+    }
+    try {
+      const repository = AppDataSource.getRepository(SysAuditLog)
+      const existing = await repository.exists({
+        where: {
+          actionType: input.actionType,
+          targetType: input.targetType,
+          targetId: input.targetId ?? IsNull(),
+        },
+      })
+      if (!existing) {
+        await this.record(input)
+      }
+    } catch (error) {
+      console.error('[y-link-backend] idempotent audit log write failed:', error)
     }
   }
 

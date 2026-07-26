@@ -119,7 +119,10 @@ function bootstrapEnvFiles(): {
    * - 只覆盖数据库相关字段，不污染其他业务配置；
    * - 优先级最高，保证切换/回退动作具备确定性。
    */
-  const runtimeDatabaseOverrideEnvValues = loadDatabaseRuntimeOverrideEnvValues()
+  const skipRuntimeDatabaseOverride = process.env.Y_LINK_SKIP_DATABASE_RUNTIME_OVERRIDE === 'true'
+  const runtimeDatabaseOverrideEnvValues = skipRuntimeDatabaseOverride
+    ? null
+    : loadDatabaseRuntimeOverrideEnvValues()
   const runtimeDatabaseOverrideLoaded = Boolean(runtimeDatabaseOverrideEnvValues)
   if (runtimeDatabaseOverrideEnvValues) {
     Object.entries(runtimeDatabaseOverrideEnvValues).forEach(([key, value]) => {

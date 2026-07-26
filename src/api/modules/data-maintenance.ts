@@ -27,6 +27,23 @@ export interface MySqlMigrationTarget {
 }
 
 /**
+ * 自动迁移目标库参数：
+ * - 自动流程只接受连接目标，不允许页面透传 DB_SYNC；
+ * - Schema 同步策略由后端固定治理，避免用户在一键入口改变数据库结构安全边界。
+ */
+export type AutomaticMySqlMigrationTarget = Omit<MySqlMigrationTarget, 'dbSync'>
+
+/**
+ * 一键自动迁移参数：
+ * - payload 只包含 target 与可选备注；
+ * - 备份、建表、迁移、校验、切换和重启阶段均由后端自动任务编排。
+ */
+export interface CreateAutomaticSQLiteToMySqlTaskPayload {
+  target: AutomaticMySqlMigrationTarget
+  note?: string
+}
+
+/**
  * 迁移预检请求参数：
  * - allowTargetWithData 为 true 时，允许目标库已有业务表数据，但页面仍应给出高风险提示。
  */
@@ -136,12 +153,19 @@ export interface SQLiteToMySqlPrecheckResult {
 
 /**
  * 迁移任务状态：
- * - prechecked：已创建，待执行；
- * - running：正在迁移；
- * - succeeded：迁移成功；
- * - failed：迁移失败。
+ * - queued / prechecked：自动任务排队中或旧手动任务待执行；
+ * - running / restart_pending / verifying：正在迁移、等待重启或重启后校验；
+ * - succeeded / failed / rolled_back：自动闭环成功、失败或已完成紧急回退。
  */
-export type DatabaseMigrationTaskStatus = 'prechecked' | 'running' | 'succeeded' | 'failed'
+export type DatabaseMigrationTaskStatus =
+  | 'queued'
+  | 'prechecked'
+  | 'running'
+  | 'restart_pending'
+  | 'verifying'
+  | 'succeeded'
+  | 'failed'
+  | 'rolled_back'
 
 /**
  * 迁移任务文件读取状态：
@@ -163,6 +187,8 @@ export interface SQLiteToMySqlTaskRecord {
   startedAt?: string
   finishedAt?: string
   note?: string
+  mode?: 'manual' | 'automatic'
+  resumeCount?: number
   source: {
     sqlitePath: string
   }
@@ -179,6 +205,11 @@ export interface SQLiteToMySqlTaskRecord {
     fileName: string
     filePath: string
     fileSizeBytes?: number
+  }
+  immutableSnapshotFile?: {
+    fileName: string
+    filePath: string
+    fileSizeBytes: number
   }
   jsonSnapshotFile?: {
     fileName: string
@@ -205,10 +236,21 @@ export interface SQLiteToMySqlTaskRecord {
         targetRowCount: number
         matched: boolean
         blocking: boolean
+        sourceSha256?: string
+        targetSha256?: string
+        structureMatched?: boolean
+        autoIncrementMatched?: boolean
+        constraintsMatched?: boolean
       }>
     }
   }
   errorMessage?: string
+  rollbackResult?: {
+    rolledBackAt: string
+    sourceSqlitePath: string
+    mysqlStartupAttempts: number
+    message: string
+  }
   readState: DatabaseMigrationTaskReadState
   recordFileName?: string
   recordFilePath?: string
@@ -399,6 +441,20 @@ export const createSQLiteToMySqlMigrationTask = (payload: CreateSQLiteToMySqlTas
   request<SQLiteToMySqlTaskRecord>({
     method: 'POST',
     url: '/data-maintenance/db-migration/tasks',
+    data: payload,
+  })
+
+/**
+ * 创建一键自动迁移任务：
+ * - 页面仅提交目标连接与备注，不暴露 DB_SYNC 或手动阶段开关；
+ * - 后端接管备份、迁移、重启等待、校验和成功/失败收口。
+ */
+export const createAutomaticSQLiteToMySqlMigrationTask = (
+  payload: CreateAutomaticSQLiteToMySqlTaskPayload,
+) =>
+  request<SQLiteToMySqlTaskRecord>({
+    method: 'POST',
+    url: '/data-maintenance/db-migration/automatic-tasks',
     data: payload,
   })
 

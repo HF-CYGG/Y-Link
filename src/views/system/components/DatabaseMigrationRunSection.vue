@@ -68,6 +68,13 @@ const emit = defineEmits<{
               </el-tag>
             </template>
           </el-table-column>
+          <el-table-column label="模式" width="96" align="center">
+            <template #default="{ row }">
+              <el-tag :type="row.mode === 'automatic' ? 'success' : 'info'" effect="plain">
+                {{ row.mode === 'automatic' ? '自动' : '手动' }}
+              </el-tag>
+            </template>
+          </el-table-column>
           <el-table-column label="文件状态" width="110" align="center">
             <template #default="{ row }">
               <el-tag :type="getTaskReadStateTagType(row.readState)" effect="light">
@@ -91,7 +98,7 @@ const emit = defineEmits<{
                   size="small"
                   type="primary"
                   :loading="taskRunningId === row.id"
-                  :disabled="!canOperateMigration || row.readState === 'corrupted' || row.status === 'running' || row.status === 'succeeded'"
+                  :disabled="!canOperateMigration || row.mode === 'automatic' || row.readState === 'corrupted' || !['prechecked', 'failed'].includes(row.status)"
                   @click.stop="emit('run-task', row)"
                 >
                   执行
@@ -136,6 +143,9 @@ const emit = defineEmits<{
               <el-descriptions-item label="当前阶段">
                 {{ selectedTask.progress.currentStage || '-' }}
               </el-descriptions-item>
+              <el-descriptions-item label="任务模式">
+                {{ selectedTask.mode === 'automatic' ? '一键自动迁移' : '手动迁移' }}
+              </el-descriptions-item>
               <el-descriptions-item label="SQLite 源路径">
                 {{ selectedTask.source.sqlitePath }}
               </el-descriptions-item>
@@ -176,8 +186,14 @@ const emit = defineEmits<{
               <el-descriptions-item label="JSON 快照文件">
                 {{ selectedTask.jsonSnapshotFile?.filePath || '-' }}
               </el-descriptions-item>
+              <el-descriptions-item label="不可变 SQLite 快照">
+                {{ selectedTask.immutableSnapshotFile?.filePath || '-' }}
+              </el-descriptions-item>
               <el-descriptions-item label="失败原因">
                 {{ selectedTask.errorMessage || '-' }}
+              </el-descriptions-item>
+              <el-descriptions-item v-if="selectedTask.rollbackResult" label="自动回退结果">
+                {{ selectedTask.rollbackResult.message }}
               </el-descriptions-item>
               <el-descriptions-item label="任务文件状态">
                 <el-tag :type="getTaskReadStateTagType(selectedTask.readState)" effect="light">

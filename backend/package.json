@@ -12,6 +12,7 @@
     "audit:prod:mysql": "node scripts/audit-mysql-production.mjs",
     "verify:db:concurrency": "node ../scripts/run-verify-db-concurrency.mjs",
     "verify:db:concurrency:raw": "tsx scripts/verify-db-concurrency.ts",
+    "verify:db:migration:foundation": "tsx scripts/database-migration-foundation-verify.ts",
     "permission:regression:verify": "tsx scripts/permission-regression-verify.ts",
     "release:verify": "tsx scripts/release-full-regression-verify.ts",
     "security:hardening:verify": "tsx scripts/security-hardening-verify.ts",

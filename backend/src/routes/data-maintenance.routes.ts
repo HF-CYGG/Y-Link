@@ -57,6 +57,11 @@ const createSqliteToMysqlTaskSchema = sqliteToMysqlPrecheckSchema.extend({
   note: z.string().trim().max(500).optional(),
 })
 
+const createAutomaticSqliteToMysqlTaskSchema = z.object({
+  target: mysqlMigrationTargetSchema.omit({ dbSync: true }).strict(),
+  note: z.string().trim().max(500).optional(),
+}).strict()
+
 const applyDatabaseSwitchSchema = z
   .object({
     taskId: z.string().trim().min(1).optional(),
@@ -107,6 +112,38 @@ dataMaintenanceRouter.post(
     const payload = importPayloadSchema.parse(req.body)
     const data = await dataMaintenanceService.importJson(payload as any, authReq.auth, extractRequestMeta(req))
     res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+dataMaintenanceRouter.post(
+  '/db-migration/automatic-tasks',
+  requirePermission('db_migration:operate'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = createAutomaticSqliteToMysqlTaskSchema.parse(req.body)
+    const requestMeta = extractRequestMeta(req)
+    const data = await databaseMigrationService.createAutomaticSQLiteToMySqlTask(
+      payload,
+      authReq.auth,
+      requestMeta,
+    )
+    res.status(202).json({ code: 0, message: 'accepted', data })
+
+    setImmediate(() => {
+      void databaseMigrationService
+        .runAutomaticSQLiteToMySqlTask(data.id, authReq.auth, requestMeta)
+        .catch((error) => {
+          const rawMessage = error instanceof Error ? error.message : String(error)
+          const errorMessage = payload.target.password
+            ? rawMessage.replaceAll(payload.target.password, '***')
+            : rawMessage
+          console.error('[database-migration] 自动迁移后台任务失败', {
+            taskId: data.id,
+            errorMessage,
+          })
+        })
+    })
   }),
 )
 

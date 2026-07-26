@@ -1,0 +1,103 @@
+#
+# 文件说明：SQLite -> MySQL 自动迁移端到端验收专用编排。
+# 实现逻辑：
+# 1. 固定使用 MySQL 8.4，并在独立 utf8mb4 数据库中执行迁移；
+# 2. onebox 初始只连接隔离卷内的 SQLite，迁移目标只能是本编排内部的 mysql 服务；
+# 3. 所有网络、数据卷与容器均由验收脚本生成的 Compose project 隔离，结束后统一销毁；
+# 4. MySQL 只接入内部网络且不发布宿主机端口；onebox 额外接入项目隔离 bridge，
+#    仅向 127.0.0.1 发布验收入口，兼容 Docker Desktop 对 internal 网络发布端口的限制。
+# 维护说明：
+# - 本文件不是部署模板，只允许通过 `npm run verify:db:migration` 调用；
+# - 不要把真实数据库地址或密码写入本文件，验收凭据由脚本每次随机生成并仅注入当前进程。
+#
+
+services:
+  mysql:
+    image: ${Y_LINK_VERIFY_MYSQL_IMAGE:-mysql:8.4}
+    environment:
+      MYSQL_ROOT_PASSWORD: ${Y_LINK_VERIFY_MYSQL_ROOT_PASSWORD:?必须由严格验收脚本注入临时 MySQL root 密码}
+      MYSQL_DATABASE: y_link_migration_verify
+      MYSQL_USER: y_link_verify
+      MYSQL_PASSWORD: ${Y_LINK_VERIFY_MYSQL_PASSWORD:?必须由严格验收脚本注入临时 MySQL 业务账号密码}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+    volumes:
+      - verify_mysql_data:/var/lib/mysql
+    networks:
+      - verify_migration_internal
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - MYSQL_PWD="$${MYSQL_PASSWORD}" mysqladmin ping --silent -h 127.0.0.1 -u"$${MYSQL_USER}"
+      interval: 3s
+      timeout: 3s
+      retries: 40
+      start_period: 10s
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+
+  onebox:
+    build:
+      context: ..
+      dockerfile: Dockerfile.onebox
+    environment:
+      NODE_ENV: production
+      APP_PROFILE: verify-db-migration
+      PORT: 3001
+      TZ: Asia/Shanghai
+      NO_COLOR: "1"
+      LOG_COLOR: "false"
+      DB_TYPE: sqlite
+      SQLITE_DB_PATH: /app/data/y-link.sqlite
+      DB_SYNC: "false"
+      Y_LINK_DATA_DIR: /app/data
+      Y_LINK_AUTOMATIC_DB_MIGRATION_ENABLED: "true"
+      Y_LINK_DB_MIGRATION_E2E: "true"
+      Y_LINK_DB_MIGRATION_TEST_FAIL_MYSQL_STARTUP_ATTEMPTS: ${Y_LINK_VERIFY_MYSQL_STARTUP_FAILURES:-0}
+      Y_LINK_DB_MIGRATION_E2E_TAMPER_TARGET: ${Y_LINK_VERIFY_TAMPER_TARGET:-false}
+      Y_LINK_DB_MIGRATION_E2E_INTERRUPT_ONCE: ${Y_LINK_VERIFY_INTERRUPT_ONCE:-false}
+      Y_LINK_DB_MIGRATION_E2E_VERIFY_DELAY_MS: ${Y_LINK_VERIFY_FINALIZER_DELAY_MS:-0}
+      INIT_ADMIN_USERNAME: admin
+      INIT_ADMIN_DISPLAY_NAME: 自动迁移验收管理员
+      INIT_ADMIN_PASSWORD: ${Y_LINK_VERIFY_ADMIN_PASSWORD:?必须由严格验收脚本注入临时管理员密码}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${Y_LINK_VERIFY_ONEBOX_PORT:?必须由严格验收脚本注入本机空闲端口}:80"
+    volumes:
+      - verify_onebox_data:/app/data
+      - verify_onebox_uploads:/app/uploads
+    networks:
+      verify_migration_host_access:
+        priority: 1000
+      verify_migration_internal:
+        priority: 100
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1/health').then((response)=>process.exit(response.ok?0:1)).catch(()=>process.exit(1))
+      interval: 3s
+      timeout: 3s
+      retries: 60
+      start_period: 20s
+    restart: unless-stopped
+    stop_grace_period: 10s
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  verify_migration_internal:
+    internal: true
+  verify_migration_host_access:
+    driver: bridge
+
+volumes:
+  verify_mysql_data:
+  verify_onebox_data:
+  verify_onebox_uploads:

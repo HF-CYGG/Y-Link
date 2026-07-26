@@ -15,6 +15,7 @@ import path from 'node:path'
 import fs from 'node:fs'
 import { ZodError } from 'zod'
 import { requireAdminCsrf, requireAuth } from './middleware/auth.middleware.js'
+import { databaseMaintenanceWriteBarrier } from './middleware/database-maintenance.middleware.js'
 import { errorHandler, notFoundHandler } from './middleware/error-handler.js'
 import { authRouter } from './routes/auth.routes.js'
 import { auditLogRouter } from './routes/audit-log.routes.js'
@@ -40,6 +41,7 @@ import {
   buildRuntimeOverrideStatusSummary,
 } from './utils/effective-database.js'
 import { BizError } from './utils/errors.js'
+import { databaseMaintenanceModeService } from './services/database-maintenance-mode.service.js'
 
 const UPLOAD_CACHE_CONTROL_VALUE = 'public, max-age=31536000, immutable'
 const UPLOAD_CONTENT_SECURITY_POLICY_VALUE = "default-src 'none'; img-src 'self' data:; style-src 'none'; sandbox"
@@ -137,6 +139,7 @@ export function createApp() {
    * - 批量导入上千条记录时，默认 100 KB 容量会被轻易撑爆，导致 body-parser 直接抛 `PayloadTooLargeError`；
    * - 这里统一放宽到与文件上传场景相同的 8 MB，覆盖系统配置大文本与批量导入确认请求。
    */
+  app.use(databaseMaintenanceWriteBarrier)
   app.use(express.json({ limit: API_JSON_BODY_LIMIT }))
 
   app.get('/health', (_req, res) => {
@@ -152,6 +155,7 @@ export function createApp() {
           effectiveDatabase,
           runtimeOverrideStatus,
         },
+        maintenance: databaseMaintenanceModeService.getPublicState(),
       },
     })
   })
