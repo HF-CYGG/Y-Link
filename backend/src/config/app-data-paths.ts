@@ -12,6 +12,8 @@
 
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+// 有意作为启动前置副作用导入：任何持久化路径冻结前必须先完成 env 文件装载。
+import './env-file-bootstrap.js'
 
 export interface AppDataPaths {
   rootDir: string

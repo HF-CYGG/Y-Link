@@ -5,6 +5,7 @@
  * 实现逻辑：
  * - 首屏以“一键自动迁移”收集最小目标库信息，由后端自动完成备份、迁移、重启衔接与校验；
  * - 自动请求只提交 target 与 note，Schema 同步固定关闭且不向用户暴露选择；
+ * - 自动任务采用无重叠递归轮询，跨越 onebox 重启断线持续静默刷新，进入终态后自动停止；
  * - 原预检、任务执行、手动切换和回退流程完整保留，并统一收进高级/应急折叠区。
  * 维护说明：
  * - 自动任务新增状态时需同步 API 枚举、状态文案、标签颜色与执行按钮门禁；
@@ -13,13 +14,11 @@
 -->
 <script setup lang="ts">
 import dayjs from 'dayjs'
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { PageContainer, PageToolbarCard } from '@/components/common'
-import DatabaseMigrationOverviewSection from '@/views/system/components/DatabaseMigrationOverviewSection.vue'
 import DatabaseMigrationPrecheckSection from '@/views/system/components/DatabaseMigrationPrecheckSection.vue'
 import DatabaseMigrationRunSection from '@/views/system/components/DatabaseMigrationRunSection.vue'
-import DatabaseMigrationStepFlowSection from '@/views/system/components/DatabaseMigrationStepFlowSection.vue'
 import DatabaseMigrationSwitchSection from '@/views/system/components/DatabaseMigrationSwitchSection.vue'
 import {
   applyDatabaseMigrationSwitch,
@@ -43,7 +42,7 @@ import {
 import { PassiveNumberInput } from '@/components/common'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
-import { extractErrorMessage } from '@/utils/error'
+import { extractErrorMessage, normalizeRequestError } from '@/utils/error'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 import {
@@ -81,6 +80,13 @@ type MigrationStepKey = 'precheck' | 'create' | 'run' | 'switch'
 const { hasPermission, ensurePermission } = usePermissionAction()
 const overviewRequest = useStableRequest()
 const taskDetailRequest = useStableRequest()
+const AUTOMATIC_MIGRATION_POLL_INTERVAL_MS = 2_000
+const AUTOMATIC_MIGRATION_ACTIVE_STATUSES: SQLiteToMySqlTaskRecord['status'][] = [
+  'queued',
+  'running',
+  'restart_pending',
+  'verifying',
+]
 
 /**
  * 表单默认值：
@@ -143,6 +149,10 @@ const selectedTask = computed(() => {
   return taskList.value.find((item) => item.id === selectedTaskId.value) ?? null
 })
 
+const latestAutomaticTask = computed(() => {
+  return taskList.value.find((item) => item.mode === 'automatic') ?? null
+})
+
 /**
  * 当前可用于“切换到 MySQL”的成功任务：
  * - 优先使用用户当前选中的成功任务；
@@ -186,18 +196,6 @@ const effectiveDatabaseSummary = computed(() => {
 
 const runtimeOverrideStatus = computed(() => {
   return runtimeState.value?.runtimeOverrideStatus ?? null
-})
-
-const beginnerGuide = computed(() => {
-  return runtimeState.value?.beginnerGuide ?? null
-})
-
-const migrationRecommendationTag = computed(() => {
-  return effectiveDatabaseSummary.value?.dbType === 'mysql' ? 'success' : 'warning'
-})
-
-const migrationRecommendationLabel = computed(() => {
-  return effectiveDatabaseSummary.value?.dbType === 'mysql' ? '当前无需重复迁移' : '建议先执行预检'
 })
 
 /**
@@ -261,137 +259,14 @@ const getRecommendedStepKey = (): MigrationStepKey => {
 }
 
 /**
- * 步骤卡片标签类型：
- * - 已完成统一显示成功态；
- * - 已解锁但未完成时，根据当前步骤风险提示决定展示信息态或提醒态；
- * - 未解锁统一保持信息态，避免过度制造紧张感。
+ * 高级手动入口只保留必要的四步导航，完成态与详细结果由各操作区展示。
  */
-const resolveStepTagType = (completed: boolean, unlocked: boolean, unlockedPendingType: 'info' | 'warning'): 'success' | 'info' | 'warning' => {
-  if (completed) {
-    return 'success'
-  }
-  if (!unlocked) {
-    return 'info'
-  }
-  return unlockedPendingType
-}
-
-/**
- * 步骤卡片状态文案：
- * - 把原本模板层里多处三元表达式收口成可复用函数；
- * - 既降低认知复杂度，也避免不同步骤出现相同条件却不同文案的问题。
- */
-const resolveStepStatusLabel = (
-  completed: boolean,
-  unlocked: boolean,
-  completedLabel: string,
-  unlockedLabel: string,
-  lockedLabel: string,
-): string => {
-  if (completed) {
-    return completedLabel
-  }
-  return unlocked ? unlockedLabel : lockedLabel
-}
-
-type MigrationStepCard = {
-  key: MigrationStepKey
-  order: string
-  title: string
-  description: string
-  unlocked: boolean
-  completed: boolean
-  statusLabel: string
-  tagType: 'success' | 'info' | 'warning'
-}
-
-const createStepFlowCard = (input: {
-  key: MigrationStepKey
-  order: string
-  title: string
-  description: string
-  unlocked: boolean
-  completed: boolean
-  completedLabel: string
-  unlockedLabel: string
-  lockedLabel: string
-  unlockedPendingType: 'info' | 'warning'
-}): MigrationStepCard => {
-  return {
-    key: input.key,
-    order: input.order,
-    title: input.title,
-    description: input.description,
-    unlocked: input.unlocked,
-    completed: input.completed,
-    statusLabel: resolveStepStatusLabel(
-      input.completed,
-      input.unlocked,
-      input.completedLabel,
-      input.unlockedLabel,
-      input.lockedLabel,
-    ),
-    tagType: resolveStepTagType(input.completed, input.unlocked, input.unlockedPendingType),
-  }
-}
-
-/**
- * 步骤导航卡片：
- * - 把“是否解锁、是否完成、当前状态标签”统一收口；
- * - 模板只负责渲染，不再在多个位置散落条件判断。
- */
-const stepFlowCards = computed(() => {
-  return [
-    createStepFlowCard({
-      key: 'precheck',
-      order: '第 1 步',
-      title: '填写目标库并执行预检',
-      description: '先校验 SQLite 源文件、MySQL 连通性和目标库风险，再决定是否继续。',
-      unlocked: true,
-      completed: hasPrecheckPassed.value,
-      completedLabel: '已完成',
-      unlockedLabel: precheckResult.value ? '待处理问题' : '待开始',
-      lockedLabel: '未解锁',
-      unlockedPendingType: precheckResult.value ? 'warning' : 'info',
-    }),
-    createStepFlowCard({
-      key: 'create',
-      order: '第 2 步',
-      title: '创建迁移任务',
-      description: '基于预检通过的配置落盘任务，准备进入正式迁移。',
-      unlocked: hasPrecheckPassed.value,
-      completed: hasCreatedTask.value,
-      completedLabel: '已创建任务',
-      unlockedLabel: '待创建',
-      lockedLabel: '未解锁',
-      unlockedPendingType: 'info',
-    }),
-    createStepFlowCard({
-      key: 'run',
-      order: '第 3 步',
-      title: '执行迁移并核验结果',
-      description: '运行任务、查看迁移进度、确认导入结果和迁后校验。',
-      unlocked: hasCreatedTask.value,
-      completed: hasSucceededTask.value,
-      completedLabel: '已有成功任务',
-      unlockedLabel: '可执行',
-      lockedLabel: '未解锁',
-      unlockedPendingType: 'warning',
-    }),
-    createStepFlowCard({
-      key: 'switch',
-      order: '第 4 步',
-      title: '切换到 MySQL 或回退 SQLite',
-      description: '仅在成功任务确认无误后操作，并结合重启完成数据库切换闭环。',
-      unlocked: hasSucceededTask.value,
-      completed: hasPreparedMysqlSwitch.value,
-      completedLabel: '已准备切换',
-      unlockedLabel: '待最终操作',
-      lockedLabel: '未解锁',
-      unlockedPendingType: 'warning',
-    }),
-  ]
-})
+const manualStepOptions = computed(() => [
+  { key: 'precheck' as const, label: '1. 预检', unlocked: true },
+  { key: 'create' as const, label: '2. 创建任务', unlocked: hasPrecheckPassed.value },
+  { key: 'run' as const, label: '3. 执行与校验', unlocked: hasCreatedTask.value },
+  { key: 'switch' as const, label: '4. 切换或回退', unlocked: true },
+])
 
 /**
  * 进入步骤向导：
@@ -506,12 +381,48 @@ const upsertTaskRecord = (task: SQLiteToMySqlTaskRecord) => {
   const nextList = [...taskList.value]
   const targetIndex = nextList.findIndex((item) => item.id === task.id)
   if (targetIndex >= 0) {
+    if (nextList[targetIndex]!.updatedAt > task.updatedAt) {
+      return
+    }
     nextList.splice(targetIndex, 1, task)
   } else {
     nextList.unshift(task)
   }
   nextList.sort((prev, next) => next.updatedAt.localeCompare(prev.updatedAt))
   taskList.value = nextList
+}
+
+const applyOverviewState = (
+  tasks: SQLiteToMySqlTaskRecord[],
+  runtime: DatabaseRuntimeOverrideStateResult,
+) => {
+  const mergedTasks = [...tasks]
+  for (const currentTask of taskList.value) {
+    const targetIndex = mergedTasks.findIndex((task) => task.id === currentTask.id)
+    if (targetIndex < 0) {
+      mergedTasks.push(currentTask)
+    } else if (currentTask.updatedAt > mergedTasks[targetIndex]!.updatedAt) {
+      mergedTasks.splice(targetIndex, 1, currentTask)
+    }
+  }
+  mergedTasks.sort((prev, next) => next.updatedAt.localeCompare(prev.updatedAt))
+  taskList.value = mergedTasks
+  runtimeState.value = runtime
+
+  if (!selectedTaskId.value && mergedTasks.length > 0) {
+    selectedTaskId.value = mergedTasks[0]!.id
+  }
+  if (selectedTaskId.value && !mergedTasks.some((item) => item.id === selectedTaskId.value)) {
+    selectedTaskId.value = mergedTasks[0]?.id ?? ''
+  }
+}
+
+const isActiveAutomaticTask = (task: SQLiteToMySqlTaskRecord | null | undefined) => {
+  return task?.mode === 'automatic' && AUTOMATIC_MIGRATION_ACTIVE_STATUSES.includes(task.status)
+}
+
+const findActiveAutomaticTask = () => {
+  return taskList.value.find((task) => isActiveAutomaticTask(task)) ?? null
 }
 
 /**
@@ -532,6 +443,118 @@ const refreshSelectedTaskDetail = async () => {
       showAppWarning(extractErrorMessage(error, '刷新任务详情失败'))
     },
   })
+}
+
+/**
+ * 自动任务静默轮询：
+ * - 使用请求结束后再递归 setTimeout 的方式，保证慢请求和重启断线期间不会叠加请求；
+ * - 每轮同时刷新任务列表、运行时状态和当前自动任务详情，不触发 toast；
+ * - queued/running/restart_pending/verifying 持续轮询，终态自动停止。
+ */
+let automaticTaskPollTimer: ReturnType<typeof setTimeout> | null = null
+let automaticTaskPollInFlight = false
+let automaticTaskPollRestartRequested = false
+let automaticTaskPollingPageActive = false
+let automaticTaskInitialLoadCompleted = false
+let automaticTaskPollTaskId = ''
+let automaticTaskTerminalOverviewFailures = 0
+let automaticTaskPollController: AbortController | null = null
+
+const clearAutomaticTaskPollTimer = () => {
+  if (automaticTaskPollTimer !== null) {
+    clearTimeout(automaticTaskPollTimer)
+    automaticTaskPollTimer = null
+  }
+}
+
+const runAutomaticTaskPoll = async () => {
+  if (!automaticTaskPollingPageActive || automaticTaskPollInFlight) {
+    return
+  }
+
+  automaticTaskPollInFlight = true
+  let shouldContinue = true
+  const requestedTaskId = automaticTaskPollTaskId || findActiveAutomaticTask()?.id || ''
+  const controller = new AbortController()
+  automaticTaskPollController = controller
+  try {
+    const [overviewResult, detailResult] = await Promise.allSettled([
+      Promise.all([
+        getSQLiteToMySqlMigrationTasks({ signal: controller.signal }),
+        getDatabaseMigrationRuntimeOverrideState({ signal: controller.signal }),
+      ]),
+      requestedTaskId
+        ? getSQLiteToMySqlMigrationTaskDetail(requestedTaskId, { signal: controller.signal })
+        : Promise.resolve<SQLiteToMySqlTaskRecord | null>(null),
+    ])
+    if (!automaticTaskPollingPageActive) {
+      return
+    }
+    if (overviewResult.status === 'fulfilled') {
+      applyOverviewState(...overviewResult.value)
+      loadError.value = ''
+    }
+    if (detailResult.status === 'fulfilled' && detailResult.value) {
+      upsertTaskRecord(detailResult.value)
+    }
+    const requestedTask = taskList.value.find((task) => task.id === requestedTaskId)
+    const activeTask = isActiveAutomaticTask(requestedTask) ? requestedTask : findActiveAutomaticTask()
+    if (overviewResult.status === 'fulfilled') {
+      automaticTaskPollTaskId = activeTask?.id ?? ''
+      automaticTaskTerminalOverviewFailures = 0
+      shouldContinue = Boolean(activeTask)
+    } else {
+      automaticTaskPollTaskId = requestedTaskId
+      const normalizedError = normalizeRequestError(overviewResult.reason)
+      const terminalTaskConfirmed = Boolean(requestedTaskId)
+        && Boolean(requestedTask)
+        && !isActiveAutomaticTask(requestedTask)
+      automaticTaskTerminalOverviewFailures = terminalTaskConfirmed
+        ? automaticTaskTerminalOverviewFailures + 1
+        : 0
+      const retryable = ![401, 403, 404].includes(normalizedError.status ?? 0)
+        && (!terminalTaskConfirmed || automaticTaskTerminalOverviewFailures < 3)
+      shouldContinue = retryable
+      if (!retryable) {
+        loadError.value = normalizedError.message
+      }
+    }
+  } catch {
+    // 轮询错误只代表服务暂时不可达；重启窗口继续静默重试，不重复弹出错误提示。
+  } finally {
+    if (automaticTaskPollController === controller) {
+      automaticTaskPollController = null
+    }
+    automaticTaskPollInFlight = false
+    if (!automaticTaskPollingPageActive) {
+      return
+    }
+    const restartImmediately = automaticTaskPollRestartRequested
+    automaticTaskPollRestartRequested = false
+    if (restartImmediately || shouldContinue) {
+      clearAutomaticTaskPollTimer()
+      automaticTaskPollTimer = setTimeout(
+        runAutomaticTaskPoll,
+        restartImmediately ? 0 : AUTOMATIC_MIGRATION_POLL_INTERVAL_MS,
+      )
+    }
+  }
+}
+
+const startAutomaticTaskPolling = (taskId = '', delayMs = 0) => {
+  if (!automaticTaskPollingPageActive) {
+    return
+  }
+  if (taskId) {
+    automaticTaskPollTaskId = taskId
+    automaticTaskTerminalOverviewFailures = 0
+  }
+  clearAutomaticTaskPollTimer()
+  if (automaticTaskPollInFlight) {
+    automaticTaskPollRestartRequested = true
+    return
+  }
+  automaticTaskPollTimer = setTimeout(runAutomaticTaskPoll, delayMs)
 }
 
 /**
@@ -556,15 +579,7 @@ const loadOverview = async () => {
       return { tasks, runtime }
     },
     onSuccess: async (result) => {
-      taskList.value = result.tasks
-      runtimeState.value = result.runtime
-
-      if (!selectedTaskId.value && result.tasks.length > 0) {
-        selectedTaskId.value = result.tasks[0].id
-      }
-      if (selectedTaskId.value && !result.tasks.some((item) => item.id === selectedTaskId.value)) {
-        selectedTaskId.value = result.tasks[0]?.id ?? ''
-      }
+      applyOverviewState(result.tasks, result.runtime)
       await refreshSelectedTaskDetail()
     },
     onError: (error) => {
@@ -693,6 +708,7 @@ const handleCreateAutomaticTask = async () => {
     })
     upsertTaskRecord(task)
     selectedTaskId.value = task.id
+    startAutomaticTaskPolling(task.id)
     showAppSuccess('自动迁移任务已提交，系统进入只读维护后会在全局横幅中持续提示')
   } catch (error) {
     void showCriticalErrorDialog(error, {
@@ -1062,9 +1078,45 @@ const formatTableSummary = (tables: DatabaseMigrationTableStat[]) => {
   return `${tables.length} 张表 / ${tables.reduce((total, item) => total + item.rowCount, 0)} 行`
 }
 
-onMounted(() => {
-  void loadOverview()
+onMounted(async () => {
+  automaticTaskPollingPageActive = true
+  await loadOverview()
+  automaticTaskInitialLoadCompleted = true
+  if (!automaticTaskPollingPageActive) {
+    return
+  }
+  const activeTask = findActiveAutomaticTask()
+  if (activeTask || loadError.value) {
+    startAutomaticTaskPolling(activeTask?.id, AUTOMATIC_MIGRATION_POLL_INTERVAL_MS)
+  }
 })
+
+onActivated(async () => {
+  automaticTaskPollingPageActive = true
+  if (automaticTaskInitialLoadCompleted) {
+    pageLoading.value = false
+    await loadOverview()
+    if (!automaticTaskPollingPageActive) {
+      return
+    }
+    const activeTask = findActiveAutomaticTask()
+    if (activeTask || loadError.value) {
+      startAutomaticTaskPolling(activeTask?.id, AUTOMATIC_MIGRATION_POLL_INTERVAL_MS)
+    }
+  }
+})
+
+const stopAutomaticTaskPolling = () => {
+  automaticTaskPollingPageActive = false
+  pageLoading.value = false
+  automaticTaskPollRestartRequested = false
+  automaticTaskPollController?.abort()
+  automaticTaskPollController = null
+  clearAutomaticTaskPollTimer()
+}
+
+onDeactivated(stopAutomaticTaskPolling)
+onBeforeUnmount(stopAutomaticTaskPolling)
 </script>
 
 <template>
@@ -1114,6 +1166,26 @@ onMounted(() => {
               </p>
             </div>
             <el-tag type="success">推荐入口</el-tag>
+          </div>
+
+          <div class="mt-4 grid gap-3 rounded-2xl bg-slate-50 p-4 text-sm dark:bg-slate-900/30 sm:grid-cols-2">
+            <div>
+              <p class="text-slate-400">当前数据库</p>
+              <p class="mt-1 font-medium text-slate-700 dark:text-slate-200">
+                {{ effectiveDatabaseSummary?.displayName || '正在读取...' }}
+              </p>
+              <p class="mt-1 text-xs text-slate-500">{{ activeRuntimeModeLabel }}</p>
+            </div>
+            <div>
+              <p class="text-slate-400">最近自动任务</p>
+              <template v-if="latestAutomaticTask">
+                <el-tag class="mt-1" :type="getTaskStatusTagType(latestAutomaticTask.status)" effect="light">
+                  {{ getTaskStatusLabel(latestAutomaticTask.status) }}
+                </el-tag>
+                <p class="mt-1 text-xs text-slate-500">{{ latestAutomaticTask.progress.currentStage }}</p>
+              </template>
+              <p v-else class="mt-1 font-medium text-slate-700 dark:text-slate-200">尚未创建</p>
+            </div>
           </div>
 
           <el-form label-position="top" class="mt-5 grid gap-x-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -1180,23 +1252,26 @@ onMounted(() => {
             </template>
 
             <div class="flex min-w-0 flex-col gap-4 pb-5">
-              <DatabaseMigrationOverviewSection
-                :effective-database-summary="effectiveDatabaseSummary"
-                :beginner-guide="beginnerGuide"
-                :migration-recommendation-tag="migrationRecommendationTag"
-                :migration-recommendation-label="migrationRecommendationLabel"
-                :active-runtime-mode-label="activeRuntimeModeLabel"
-                :get-runtime-mode-tag-type="getRuntimeModeTagType"
-                :page-loading="pageLoading"
-                @enter-flow="handleEnterStepFlow"
-              />
+              <el-button
+                v-if="!hasEnteredStepFlow"
+                type="primary"
+                :disabled="pageLoading"
+                @click="handleEnterStepFlow"
+              >
+                进入手动预检流程
+              </el-button>
 
-              <DatabaseMigrationStepFlowSection
-                :has-entered-step-flow="hasEnteredStepFlow"
-                :active-step-key="activeStepKey"
-                :step-flow-cards="stepFlowCards"
-                @open-step="handleOpenStep($event.stepKey, $event.unlocked)"
-              />
+              <div v-if="hasEnteredStepFlow" class="apple-card flex flex-wrap gap-2 p-4">
+                <el-button
+                  v-for="step in manualStepOptions"
+                  :key="step.key"
+                  :type="activeStepKey === step.key ? 'primary' : undefined"
+                  :disabled="!step.unlocked"
+                  @click="handleOpenStep(step.key, step.unlocked)"
+                >
+                  {{ step.label }}
+                </el-button>
+              </div>
 
               <DatabaseMigrationPrecheckSection
                 :has-entered-step-flow="hasEnteredStepFlow"

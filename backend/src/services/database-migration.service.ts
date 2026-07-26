@@ -3128,6 +3128,8 @@ export class DatabaseMigrationService {
           validationPassed: task.result.validation.passed,
           resumeCount: task.resumeCount ?? 0,
         },
+      }, {
+        allowDuringDatabaseMaintenance: true,
       })
 
       setTimeout(() => {

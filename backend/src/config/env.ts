@@ -4,33 +4,17 @@
  * 维护说明：数据库切换后的“应用生效”依赖本文件在启动阶段读取覆盖配置，因此修改优先级时必须同步检查切换/回退接口。
  */
 
-import fs from 'node:fs'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
-import dotenv from 'dotenv'
 import { z } from 'zod'
+import {
+  backendRootDir,
+  envFileBootstrap,
+  resolveEnvFilePath,
+} from './env-file-bootstrap.js'
 import {
   getDatabaseRuntimeOverrideFilePath,
   loadDatabaseRuntimeOverrideEnvValues,
   readDatabaseRuntimeOverride,
 } from './database-runtime-override.js'
-
-/**
- * 后端根目录：
- * - 所有 profile/env 文件都相对 backend 根目录解析；
- * - 避免因为从不同工作目录启动进程而导致读取错位。
- */
-const backendRootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
-
-/**
- * 启动前先记录系统/命令行已经注入的环境变量键名。
- * 这样可以实现以下优先级：
- * 1. `.env` 作为基础默认值；
- * 2. 外部进程注入的环境变量可覆盖 `.env`；
- * 3. `.env.<profile>` 用于显式切换 profile，优先级高于外部继承变量；
- * 4. `ENV_FILE` 指向的自定义 env 文件优先级最高，便于强制切换到独立本地环境。
- */
-const initialProcessEnvKeys = new Set(Object.keys(process.env))
 
 function normalizeOptionalString(value: string | undefined): string | undefined {
   if (typeof value !== 'string') {
@@ -58,61 +42,7 @@ function sanitizeProfileName(profile: string): string {
   return profile.replaceAll(/[^a-zA-Z0-9_-]/g, '-')
 }
 
-function resolveEnvFilePath(filePath: string): string {
-  return path.isAbsolute(filePath) ? filePath : path.resolve(backendRootDir, filePath)
-}
-
-function loadEnvFile(
-  filePath: string,
-  loadedFiles: string[],
-  options?: {
-    overrideExternal?: boolean
-  },
-): void {
-  if (!fs.existsSync(filePath)) {
-    return
-  }
-
-  const parsed = dotenv.parse(fs.readFileSync(filePath))
-
-  for (const [key, value] of Object.entries(parsed)) {
-    // profile/env file 是显式环境切换入口，因此允许覆盖外部继承变量；
-    // 基础 `.env` 仍仅补默认值，避免意外覆盖系统级配置。
-    if (options?.overrideExternal || !initialProcessEnvKeys.has(key)) {
-      process.env[key] = value
-    }
-  }
-
-  loadedFiles.push(filePath)
-}
-
-function bootstrapEnvFiles(): {
-  requestedProfile: string | undefined
-  requestedEnvFile: string | undefined
-  loadedFiles: string[]
-  runtimeDatabaseOverrideLoaded: boolean
-} {
-  const loadedFiles: string[] = []
-
-  // 先加载 backend/.env，作为所有环境的基础默认值。
-  loadEnvFile(path.resolve(backendRootDir, '.env'), loadedFiles)
-
-  // 再根据 profile 加载覆盖文件，例如 `.env.local-dev`。
-  const requestedProfile = normalizeOptionalString(process.env.APP_PROFILE)
-  if (requestedProfile) {
-    loadEnvFile(path.resolve(backendRootDir, `.env.${requestedProfile}`), loadedFiles, {
-      overrideExternal: true,
-    })
-  }
-
-  // 最后加载显式指定的 env 文件，便于本地调试或 CI 进行定制覆盖。
-  const requestedEnvFile = normalizeOptionalString(process.env.ENV_FILE)
-  if (requestedEnvFile) {
-    loadEnvFile(resolveEnvFilePath(requestedEnvFile), loadedFiles, {
-      overrideExternal: true,
-    })
-  }
-
+function loadRuntimeDatabaseOverride(): boolean {
   /**
    * 最后加载数据库运行时覆盖配置：
    * - 用于“SQLite -> MySQL”切换后的下次重启生效；
@@ -128,18 +58,12 @@ function bootstrapEnvFiles(): {
     Object.entries(runtimeDatabaseOverrideEnvValues).forEach(([key, value]) => {
       process.env[key] = value
     })
-    loadedFiles.push(getDatabaseRuntimeOverrideFilePath())
+    envFileBootstrap.loadedFiles.push(getDatabaseRuntimeOverrideFilePath())
   }
-
-  return {
-    requestedProfile,
-    requestedEnvFile,
-    loadedFiles,
-    runtimeDatabaseOverrideLoaded,
-  }
+  return runtimeDatabaseOverrideLoaded
 }
 
-const envBootstrap = bootstrapEnvFiles()
+const runtimeDatabaseOverrideLoaded = loadRuntimeDatabaseOverride()
 
 // 使用 zod 对环境变量做强约束，避免启动后才暴露配置错误。
 const envSchema = z.object({
@@ -194,12 +118,12 @@ const runtimeDatabaseOverride = readDatabaseRuntimeOverride()
 
 export const envLoadContext = {
   backendRootDir,
-  loadedFiles: envBootstrap.loadedFiles,
-  requestedProfile: envBootstrap.requestedProfile,
-  requestedEnvFile: envBootstrap.requestedEnvFile
-    ? resolveEnvFilePath(envBootstrap.requestedEnvFile)
+  loadedFiles: envFileBootstrap.loadedFiles,
+  requestedProfile: envFileBootstrap.requestedProfile,
+  requestedEnvFile: envFileBootstrap.requestedEnvFile
+    ? resolveEnvFilePath(envFileBootstrap.requestedEnvFile)
     : undefined,
-  runtimeDatabaseOverrideLoaded: envBootstrap.runtimeDatabaseOverrideLoaded,
+  runtimeDatabaseOverrideLoaded,
   runtimeDatabaseOverride: runtimeDatabaseOverride
     ? {
         filePath: getDatabaseRuntimeOverrideFilePath(),

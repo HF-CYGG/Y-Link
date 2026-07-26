@@ -9,7 +9,7 @@ import path from 'node:path'
 import { randomUUID } from 'node:crypto'
 import multer from 'multer'
 import type { Express } from 'express'
-import sharp from 'sharp'
+import sharp, { type Metadata } from 'sharp'
 import { BizError } from './errors.js'
 
 export type UploadCategory = 'products' | 'client-feedback'
@@ -187,7 +187,7 @@ const validateImageDimensions = async (
   buffer: Buffer,
   detectedContent: DetectedImageContent,
 ): Promise<ValidatedImageDimensions> => {
-  let metadata: sharp.Metadata
+  let metadata: Metadata
   try {
     metadata = await createSharpInput(buffer, detectedContent.mimeType).metadata()
   } catch {

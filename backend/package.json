@@ -13,6 +13,7 @@
     "verify:db:concurrency": "node ../scripts/run-verify-db-concurrency.mjs",
     "verify:db:concurrency:raw": "tsx scripts/verify-db-concurrency.ts",
     "verify:db:migration:foundation": "tsx scripts/database-migration-foundation-verify.ts",
+    "verify:app-data-paths:env-file": "tsx scripts/app-data-paths-env-file-verify.ts",
     "permission:regression:verify": "tsx scripts/permission-regression-verify.ts",
     "release:verify": "tsx scripts/release-full-regression-verify.ts",
     "security:hardening:verify": "tsx scripts/security-hardening-verify.ts",
@@ -50,7 +51,7 @@
     "multer": "^2.2.0",
     "mysql2": "^3.15.2",
     "reflect-metadata": "^0.2.2",
-    "sharp": "^0.34.5",
+    "sharp": "^0.35.3",
     "typeorm": "^0.3.29",
     "uuid": "^11.1.1",
     "zod": "^3.25.76"
@@ -67,6 +68,7 @@
   },
   "overrides": {
     "@tootallnate/once": "^3.0.1",
+    "brace-expansion": "5.0.8",
     "ip-address": "^10.2.0",
     "node-gyp": "^12.3.0",
     "tar": "^7.5.19",
