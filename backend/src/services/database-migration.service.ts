@@ -2361,19 +2361,35 @@ export class DatabaseMigrationService {
   ): Promise<void> {
     if (
       !this.isAutomaticMigrationE2EEnabled()
-      || process.env.Y_LINK_DB_MIGRATION_E2E_FAIL_CUTOVER_TASK_WRITE_ONCE !== 'true'
+      || process.env.Y_LINK_DB_MIGRATION_E2E_FAIL_CUTOVER_TASK_WRITES_PERSISTENT !== 'true'
       || task.mode !== 'automatic'
-      || task.status !== 'restart_pending'
     ) {
       return
     }
-    const markerFilePath = path.resolve(appDataPaths.runtimeDir, 'e2e-cutover-task-write-failed-once')
+    const markerFilePath = path.resolve(appDataPaths.runtimeDir, 'e2e-cutover-task-write-failure-active')
     await fs.mkdir(appDataPaths.runtimeDir, { recursive: true })
+    if (task.status === 'restart_pending') {
+      try {
+        const markerHandle = await fs.open(markerFilePath, 'wx', 0o600)
+        try {
+          await markerHandle.writeFile(task.id, 'utf8')
+          await markerHandle.sync()
+        } finally {
+          await markerHandle.close()
+        }
+      } catch (error) {
+        if (!(error && typeof error === 'object' && 'code' in error && error.code === 'EEXIST')) {
+          throw error
+        }
+      }
+    }
     try {
-      const markerHandle = await fs.open(markerFilePath, 'wx', 0o600)
-      await markerHandle.close()
+      const activeTaskId = (await fs.readFile(markerFilePath, 'utf8')).trim()
+      if (activeTaskId !== task.id) {
+        return
+      }
     } catch (error) {
-      if (error && typeof error === 'object' && 'code' in error && error.code === 'EEXIST') {
+      if (isFileNotFoundError(error)) {
         return
       }
       throw error
@@ -3206,7 +3222,18 @@ export class DatabaseMigrationService {
       task.errorMessage = task.target.password
         ? rawErrorMessage.replaceAll(task.target.password, '***')
         : rawErrorMessage
-      await this.writeTaskRecord(task)
+      let failureTaskWriteError: unknown
+      try {
+        await this.writeTaskRecord(task)
+      } catch (taskWriteError) {
+        // 失败状态是重要留痕，但不能成为恢复 SQLite 写入、释放迁移锁和删除凭据的前置条件。
+        // 磁盘满或 tasks 目录只读时，继续完成清理可避免旧 running 记录在重启后被锁文件重新激活。
+        failureTaskWriteError = taskWriteError
+        console.error('[database-migration] 自动迁移失败状态无法持久化，将继续执行资源清理', {
+          taskId: task.id,
+          errorMessage: formatUnknownErrorMessage(taskWriteError),
+        })
+      }
       if (!cancelledByAdmin) {
         if (maintenanceStarted && cutoverRollbackSucceeded) {
           await databaseMaintenanceModeService.finishReadOnly(task.id)
@@ -3232,6 +3259,12 @@ export class DatabaseMigrationService {
         }, {
           allowDuringDatabaseMaintenance: true,
         })
+      }
+      if (failureTaskWriteError) {
+        throw new AggregateError(
+          [error, failureTaskWriteError],
+          '自动迁移失败，SQLite 写入与迁移资源已恢复，但失败任务状态未能持久化',
+        )
       }
       throw error
     } finally {

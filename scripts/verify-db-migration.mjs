@@ -277,7 +277,7 @@ const buildComposeEnvironment = (oneboxPort) => ({
   Y_LINK_VERIFY_MYSQL_IMAGE: scenario === 'old-version' ? 'mysql:8.0.15' : 'mysql:8.4',
   Y_LINK_VERIFY_TAMPER_TARGET: scenario === 'content-tamper' ? 'true' : 'false',
   Y_LINK_VERIFY_INTERRUPT_ONCE: scenario === 'execution-interruption' ? 'true' : 'false',
-  Y_LINK_VERIFY_FAIL_CUTOVER_TASK_WRITE_ONCE: scenario === 'cutover-persistence-failure' ? 'true' : 'false',
+  Y_LINK_VERIFY_FAIL_CUTOVER_TASK_WRITES_PERSISTENT: scenario === 'cutover-persistence-failure' ? 'true' : 'false',
   Y_LINK_VERIFY_FINALIZER_DELAY_MS: scenario === 'verifying-emergency-rollback' ? '10000' : '0',
 })
 
@@ -1043,6 +1043,78 @@ const assertCutoverArtifactsAbsent = async (composeEnv, runtimeState, label) => 
   )
 }
 
+const assertAutomaticFailureCleanupArtifactsAbsent = async (composeEnv, taskId, label) => {
+  await waitFor(
+    `${label}迁移锁与凭据清理`,
+    async () => {
+      const result = await runCompose(
+        [
+          'exec',
+          '-T',
+          'onebox',
+          'sh',
+          '-ec',
+          'test ! -e /app/data/database-migration/automatic-migration.lock && test ! -e "/app/data/database-migration/secrets/$1.json"',
+          'assert-cleanup',
+          taskId,
+        ],
+        {
+          capture: true,
+          allowFailure: true,
+          env: composeEnv,
+        },
+      )
+      return result.code === 0
+    },
+  )
+}
+
+const waitForPersistentTaskWriteFailureCleanup = async ({
+  baseUrl,
+  client,
+  taskId,
+}) => {
+  const deadline = Date.now() + defaultTimeoutMs
+  let lastError
+  while (Date.now() < deadline) {
+    let currentTask
+    try {
+      currentTask = await readMigrationTask(client, taskId)
+    } catch (error) {
+      lastError = error
+      await delay(500)
+      continue
+    }
+    if (terminalTaskStatuses.has(currentTask.status)) {
+      throw new VerificationError(
+        `持续任务写盘故障不应成功落盘终态，实际=${currentTask.status} ${currentTask.errorMessage ?? ''}`,
+      )
+    }
+    try {
+      const health = await readHealth(baseUrl)
+      const runtimeState = await readRuntimeOverrideState(client)
+      if (
+        health.maintenance?.readOnly === false
+        && runtimeState.effectiveDatabase?.dbType === 'sqlite'
+        && runtimeState.effectiveDatabase?.source === 'environment'
+      ) {
+        return {
+          currentTask,
+          runtimeState,
+        }
+      }
+    } catch (error) {
+      lastError = error
+    }
+    await delay(500)
+  }
+  throw new VerificationError(
+    `持续任务写盘故障后的清理超时（${defaultTimeoutMs}ms）${
+      lastError ? `；最后错误：${lastError instanceof Error ? lastError.message : String(lastError)}` : ''
+    }`,
+  )
+}
+
 const assertFailedTaskWithoutRestart = async ({
   baseUrl,
   client,
@@ -1336,23 +1408,67 @@ const runExecutionInterruptionScenario = async ({
 }
 
 const runCutoverPersistenceFailureScenario = async (context) => {
-  const terminalTask = await assertFailedTaskWithoutRestart({
-    ...context,
-    errorPattern: /切换任务状态持久化故障/,
-    label: '切换任务状态持久化失败',
+  const initialState = await getOneboxContainerState(context.composeEnv)
+  const createdTask = await createAutomaticTask(context.client, {
+    ...mysqlTarget,
+    password: mysqlPassword,
+  })
+  await waitForMaintenanceReadOnly(context.baseUrl, context.client, createdTask.id)
+  const { currentTask, runtimeState } = await waitForPersistentTaskWriteFailureCleanup({
+    baseUrl: context.baseUrl,
+    client: context.client,
+    taskId: createdTask.id,
   })
   assert.equal(
-    terminalTask.result?.runtimeOverrideApplied,
-    false,
-    '切换任务状态持久化失败后不得宣称运行时覆盖已应用',
+    currentTask.status,
+    'running',
+    '失败状态持续无法写盘时，磁盘任务应保持最后一次成功持久化的 running 状态',
   )
-  const runtimeState = await readRuntimeOverrideState(context.client)
   await assertCutoverArtifactsAbsent(
     context.composeEnv,
     runtimeState,
     '切换任务状态持久化失败',
   )
-  log('切换任务状态持久化失败断言通过：MySQL 覆盖与 cutover marker 已撤销，SQLite 写入恢复且 onebox 未重启')
+  await assertAutomaticFailureCleanupArtifactsAbsent(
+    context.composeEnv,
+    createdTask.id,
+    '切换任务状态持久化失败',
+  )
+  const finalState = await getOneboxContainerState(context.composeEnv)
+  assert.equal(finalState.containerId, initialState.containerId, '持续任务写盘故障不应替换 onebox 容器')
+  assert.equal(finalState.restartCount, initialState.restartCount, '持续任务写盘故障不应触发 onebox 重启')
+  await context.client.login()
+  await waitFor(
+    '持续任务写盘故障审计落库',
+    async () => {
+      try {
+        await assertMigrationAuditExists(
+          context.client,
+          'database_migration.run_automatic_task_failed',
+          createdTask.id,
+        )
+        return true
+      } catch {
+        return null
+      }
+    },
+  )
+  const heartbeat = await context.client.request('/api/auth/presence/heartbeat', {
+    method: 'POST',
+  })
+  assert.equal(heartbeat.payload?.code, 0, '持续任务写盘故障清理后必须恢复普通写请求')
+  assert.deepEqual(
+    await readExportSnapshot(context.client),
+    context.baselineSnapshot,
+    '持续任务写盘故障清理后 SQLite 业务内容发生变化',
+  )
+  const verifiedManifest = await runFullEntityFixtureCommand(context.composeEnv, true)
+  assertFixtureCountsNotReduced(
+    verifiedManifest.tableCounts,
+    context.fixtureManifest.tableCounts,
+    '持续任务写盘故障清理后全实体夹具发生数据丢失',
+  )
+  log('持续任务写盘故障断言通过：状态落盘失败未阻断维护态、迁移锁、凭据与切换文件清理')
 }
 
 const runFailureRollbackScenario = async ({ baseUrl, client, composeEnv, baselineSnapshot, fixtureManifest }) => {
