@@ -42,8 +42,7 @@ const buildReportQuery = (query: Record<string, unknown>): ReportQueryInput => (
   fields: parseStringListQuery(query.fields),
 })
 
-const handleReportQuery = (type: ReportType) => [
-  requirePermission('reports:view'),
+const handleReportQuery = (type: ReportType) =>
   asyncHandler(async (req, res) => {
     const data = await reportService.query(type, buildReportQuery(req.query as Record<string, unknown>))
     res.json({
@@ -51,14 +50,13 @@ const handleReportQuery = (type: ReportType) => [
       message: 'ok',
       data,
     })
-  }),
-]
+  })
 
-reportRouter.get('/inventory', ...handleReportQuery('inventory'))
-reportRouter.get('/tag-sales', ...handleReportQuery('tag-sales'))
-reportRouter.get('/kingdee', ...handleReportQuery('kingdee'))
-reportRouter.get('/walkin', ...handleReportQuery('walkin'))
-reportRouter.get('/outbound-flow', ...handleReportQuery('outbound-flow'))
+reportRouter.get('/inventory', requirePermission('reports:view'), handleReportQuery('inventory'))
+reportRouter.get('/tag-sales', requirePermission('reports:view'), handleReportQuery('tag-sales'))
+reportRouter.get('/kingdee', requirePermission('reports:view'), handleReportQuery('kingdee'))
+reportRouter.get('/walkin', requirePermission('reports:view'), handleReportQuery('walkin'))
+reportRouter.get('/outbound-flow', requirePermission('reports:view'), handleReportQuery('outbound-flow'))
 
 reportRouter.get(
   '/:type/export',

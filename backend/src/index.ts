@@ -10,6 +10,16 @@ import { AppDataSource } from './config/data-source.js'
 import { maskDatabaseRuntimeOverride, readDatabaseRuntimeOverride } from './config/database-runtime-override.js'
 import { env, envLoadContext } from './config/env.js'
 import { authService } from './services/auth.service.js'
+import {
+  assertDatabaseMigrationE2EStartupAllowed,
+  completeDatabaseMigrationCutoverStartup,
+  handleDatabaseMigrationCutoverStartupFailure,
+  handleDatabaseMigrationCutoverStartupSuccess,
+  readDatabaseMigrationCutoverMarker,
+  type DatabaseMigrationCutoverStartupSuccessResult,
+} from './services/database-migration-cutover.service.js'
+import { databaseMaintenanceModeService } from './services/database-maintenance-mode.service.js'
+import { databaseMigrationService } from './services/database-migration.service.js'
 import { notificationService } from './services/notification.service.js'
 import { o2oPreorderService } from './services/o2o-preorder.service.js'
 import { systemConfigService } from './services/system-config.service.js'
@@ -130,7 +140,7 @@ const probeHealthEndpoint = async (port: number): Promise<boolean> => {
   }
 }
 
-const runStartupDiagnostics = async (port: number) => {
+const runStartupDiagnostics = async (port: number): Promise<boolean> => {
   logBanner('启动自检')
   logLine('RUNTIME', `pid=${process.pid} node=${process.version} platform=${process.platform}/${process.arch} timezone=${resolveLogTimeZone()}`)
 
@@ -161,18 +171,41 @@ const runStartupDiagnostics = async (port: number) => {
     logLine('CHECK SUMMARY', 'startup checks completed with warnings', 'warn')
   }
   console.log(paint('='.repeat(72), 'dim'))
+  return healthOk
 }
 
-async function bootstrap(): Promise<void> {
-  logBanner('启动阶段')
-  logLine('STEP', 'prepare runtime context')
-  prepareDatabaseRuntime()
-  logLine('STEP', 'initialize datasource')
-  await AppDataSource.initialize()
-  installSqliteTransactionQueue(AppDataSource)
-  logLine('STEP', 'initialize database schema')
-  const schemaInitResult = await initializeDatabaseSchemaIfNeeded(AppDataSource)
-  logLine('SCHEMA', `action=${schemaInitResult.action} reason=${schemaInitResult.reason}`)
+const logCutoverStartupResult = (
+  cutoverStartupResult: DatabaseMigrationCutoverStartupSuccessResult,
+): void => {
+  if (cutoverStartupResult.action === 'mysql_finalized') {
+    logLine('DB CUTOVER', `task=${cutoverStartupResult.taskId} MySQL 启动校验已完成`, 'success')
+  } else if (cutoverStartupResult.action === 'rollback_finalized') {
+    logLine('DB CUTOVER', `task=${cutoverStartupResult.taskId} SQLite 自动回退已确认`, 'warn')
+  } else if (
+    cutoverStartupResult.action === 'awaiting_mysql_finalizer'
+    || cutoverStartupResult.action === 'awaiting_rollback_finalizer'
+  ) {
+    logLine(
+      'DB CUTOVER',
+      `task=${cutoverStartupResult.marker.taskId} finalizer=${cutoverStartupResult.action}，保留维护状态等待主迁移服务接管`,
+      'warn',
+    )
+  } else if (cutoverStartupResult.action === 'rollback_restart_pending') {
+    logLine(
+      'DB CUTOVER',
+      `task=${cutoverStartupResult.marker.taskId} 紧急取消已持久化，准备重启恢复 SQLite`,
+      'warn',
+    )
+  } else if (cutoverStartupResult.action === 'database_type_mismatch') {
+    logLine(
+      'DB CUTOVER',
+      `task=${cutoverStartupResult.marker?.taskId ?? 'unknown'} marker 与当前数据库类型不一致，已保留维护状态`,
+      'error',
+    )
+  }
+}
+
+const runMutableStartupBootstrap = async () => {
   logLine('STEP', 'migrate legacy upload references')
   const uploadMigrationResult = await migrateLegacyUploadReferences(AppDataSource)
   logLine(
@@ -187,61 +220,154 @@ async function bootstrap(): Promise<void> {
   logLine('STEP', 'ensure default notification rules')
   await notificationService.ensureDefaultRules()
 
+  return {
+    adminBootstrap,
+    configBootstrap,
+  }
+}
+
+type MutableStartupBootstrapResult = Awaited<ReturnType<typeof runMutableStartupBootstrap>>
+
+const logMutableStartupBootstrapResult = (
+  result: MutableStartupBootstrapResult,
+): void => {
+  const { adminBootstrap, configBootstrap } = result
+  logLine(
+    'ADMIN',
+    `username=${adminBootstrap.username} displayName=${adminBootstrap.displayName} initialized=${adminBootstrap.initialized}`,
+    adminBootstrap.initialized ? 'success' : 'info',
+  )
+  logLine(
+    'ADMIN BOOTSTRAP',
+    `privatePasswordApplied=${adminBootstrap.usedPrivateBootstrapPassword} rotatedLegacyDefault=${adminBootstrap.rotatedLegacyDefaultPassword}`,
+    adminBootstrap.usedPrivateBootstrapPassword ? 'success' : 'info',
+  )
+  logLine(
+    'SYSTEM CONFIG',
+    `inserted=${configBootstrap.insertedCount}/${configBootstrap.totalCount}`,
+    configBootstrap.insertedCount > 0 ? 'success' : 'info',
+  )
+  if (adminBootstrap.initialized) {
+    logLine('INIT CREDENTIAL', `username=${adminBootstrap.username} password=***`, 'warn')
+    logLine('SECURITY', '管理员初始化已要求使用私有密码，首次登录后仍建议立即改密。', 'warn')
+  }
+  if (adminBootstrap.rotatedLegacyDefaultPassword) {
+    logLine('SECURITY', '已检测并迁移历史默认管理员口令，请改用私有初始化密码重新登录。', 'warn')
+  }
+}
+
+async function bootstrap(): Promise<void> {
+  logBanner('启动阶段')
+  logLine('STEP', 'prepare runtime context')
+  prepareDatabaseRuntime()
+  logLine('STEP', 'initialize datasource')
+  await AppDataSource.initialize()
+  installSqliteTransactionQueue(AppDataSource)
+  const cutoverMarkerAtStartup = readDatabaseMigrationCutoverMarker()
+  let mutableStartupBootstrapResult: MutableStartupBootstrapResult | null = null
+  if (!cutoverMarkerAtStartup) {
+    logLine('STEP', 'initialize database schema')
+    const schemaInitResult = await initializeDatabaseSchemaIfNeeded(AppDataSource)
+    logLine('SCHEMA', `action=${schemaInitResult.action} reason=${schemaInitResult.reason}`)
+    mutableStartupBootstrapResult = await runMutableStartupBootstrap()
+  } else {
+    await databaseMaintenanceModeService.beginReadOnly({
+      taskId: cutoverMarkerAtStartup.taskId,
+      phase: cutoverMarkerAtStartup.status === 'rollback_pending' ? 'rollback_verifying' : 'verifying',
+    })
+    logLine(
+      'DB CUTOVER',
+      `task=${cutoverMarkerAtStartup.taskId} 已进入无 schema/业务写入启动模式，先完成不可变快照验收`,
+      'warn',
+    )
+  }
+
   const app = createApp()
-  app.listen(env.PORT, () => {
-    o2oPreorderService.startTimeoutRecycleLoop()
-    const activeOverride = maskDatabaseRuntimeOverride(readDatabaseRuntimeOverride())
-    const effectiveDatabase = buildEffectiveDatabaseSummary(activeOverride)
-    const runtimeOverrideStatus = buildRuntimeOverrideStatusSummary(activeOverride)
-    logBanner('服务启动完成')
-    logLine('LISTEN', `http://127.0.0.1:${env.PORT}`, 'success')
-    logLine(
-      'PROFILE',
-      `${env.APP_PROFILE} (envFiles=${
-        envLoadContext.loadedFiles.length ? envLoadContext.loadedFiles.join(', ') : '(none)'
-      })`,
-    )
-    if (envLoadContext.runtimeDatabaseOverride) {
-      logLine(
-        'DB OVERRIDE',
-        `loaded=${envLoadContext.runtimeDatabaseOverride.filePath} dbType=${envLoadContext.runtimeDatabaseOverride.dbType} updatedAt=${envLoadContext.runtimeDatabaseOverride.updatedAt}`,
-        'warn',
-      )
+  await new Promise<void>((resolve, reject) => {
+    const server = app.listen(env.PORT)
+    const onError = (error: Error) => {
+      reject(error)
     }
+    server.once('error', onError)
+    server.once('listening', () => {
+      server.off('error', onError)
+      resolve()
+    })
+  })
+
+  const activeOverride = maskDatabaseRuntimeOverride(readDatabaseRuntimeOverride())
+  const effectiveDatabase = buildEffectiveDatabaseSummary(activeOverride)
+  const runtimeOverrideStatus = buildRuntimeOverrideStatusSummary(activeOverride)
+  logBanner('服务启动完成')
+  logLine('LISTEN', `http://127.0.0.1:${env.PORT}`, 'success')
+  logLine(
+    'PROFILE',
+    `${env.APP_PROFILE} (envFiles=${
+      envLoadContext.loadedFiles.length ? envLoadContext.loadedFiles.join(', ') : '(none)'
+    })`,
+  )
+  if (envLoadContext.runtimeDatabaseOverride) {
     logLine(
-      'DATABASE',
-      `actual=${effectiveDatabase.displayName} target=${effectiveDatabase.summary} source=${effectiveDatabase.sourceLabel}`,
+      'DB OVERRIDE',
+      `loaded=${envLoadContext.runtimeDatabaseOverride.filePath} dbType=${envLoadContext.runtimeDatabaseOverride.dbType} updatedAt=${envLoadContext.runtimeDatabaseOverride.updatedAt}`,
+      'warn',
     )
-    logLine(
-      'DB OVERRIDE STATUS',
-      `${runtimeOverrideStatus.statusLabel}（pendingRestart=${runtimeOverrideStatus.pendingRestart}）`,
-      runtimeOverrideStatus.pendingRestart ? 'warn' : 'info',
+  }
+  logLine(
+    'DATABASE',
+    `actual=${effectiveDatabase.displayName} target=${effectiveDatabase.summary} source=${effectiveDatabase.sourceLabel}`,
+  )
+  logLine(
+    'DB OVERRIDE STATUS',
+    `${runtimeOverrideStatus.statusLabel}（pendingRestart=${runtimeOverrideStatus.pendingRestart}）`,
+    runtimeOverrideStatus.pendingRestart ? 'warn' : 'info',
+  )
+  if (mutableStartupBootstrapResult) {
+    logMutableStartupBootstrapResult(mutableStartupBootstrapResult)
+  }
+  console.log(paint('='.repeat(72), 'dim'))
+
+  const healthOk = await runStartupDiagnostics(env.PORT)
+  if (!healthOk && cutoverMarkerAtStartup) {
+    throw new Error('数据库切换后的 HTTP 健康自检未通过，禁止确认切换成功')
+  }
+
+  // 切换启动时，故障注入必须发生在数据源与 HTTP 健康检查之后、任何业务写入之前，
+  // 以覆盖 onebox 启动失败自动回退路径，同时不污染待验收的 MySQL 数据。
+  assertDatabaseMigrationE2EStartupAllowed(env.DB_TYPE)
+  const cutoverStartupResult = await handleDatabaseMigrationCutoverStartupSuccess({
+    activeDatabaseType: env.DB_TYPE,
+  })
+  logCutoverStartupResult(cutoverStartupResult)
+  if (cutoverStartupResult.action === 'rollback_restart_pending') {
+    setTimeout(() => {
+      process.exit(75)
+    }, 250)
+    return
+  }
+
+  if (
+    cutoverMarkerAtStartup
+    && (
+      cutoverStartupResult.action === 'mysql_finalized'
+      || cutoverStartupResult.action === 'rollback_finalized'
     )
-    logLine(
-      'ADMIN',
-      `username=${adminBootstrap.username} displayName=${adminBootstrap.displayName} initialized=${adminBootstrap.initialized}`,
-      adminBootstrap.initialized ? 'success' : 'info',
-    )
-    logLine(
-      'ADMIN BOOTSTRAP',
-      `privatePasswordApplied=${adminBootstrap.usedPrivateBootstrapPassword} rotatedLegacyDefault=${adminBootstrap.rotatedLegacyDefaultPassword}`,
-      adminBootstrap.usedPrivateBootstrapPassword ? 'success' : 'info',
-    )
-    logLine(
-      'SYSTEM CONFIG',
-      `inserted=${configBootstrap.insertedCount}/${configBootstrap.totalCount}`,
-      configBootstrap.insertedCount > 0 ? 'success' : 'info',
-    )
-    if (adminBootstrap.initialized) {
-      // 安全加固：禁止在启动日志输出明文密码，避免被日志采集系统或终端历史泄露。
-      logLine('INIT CREDENTIAL', `username=${adminBootstrap.username} password=***`, 'warn')
-      logLine('SECURITY', '管理员初始化已要求使用私有密码，首次登录后仍建议立即改密。', 'warn')
+  ) {
+    logLine('STEP', 'initialize database schema after cutover verification')
+    const schemaInitResult = await initializeDatabaseSchemaIfNeeded(AppDataSource)
+    logLine('SCHEMA', `action=${schemaInitResult.action} reason=${schemaInitResult.reason}`)
+    mutableStartupBootstrapResult = await runMutableStartupBootstrap()
+    logMutableStartupBootstrapResult(mutableStartupBootstrapResult)
+    await completeDatabaseMigrationCutoverStartup(cutoverStartupResult.taskId)
+  }
+
+  o2oPreorderService.startTimeoutRecycleLoop()
+  void databaseMigrationService.resumeInterruptedAutomaticMigrationAfterStartup().then((taskId) => {
+    if (taskId) {
+      logLine('DB MIGRATION', `task=${taskId} 已调度自动续跑`, 'warn')
     }
-    if (adminBootstrap.rotatedLegacyDefaultPassword) {
-      logLine('SECURITY', '已检测并迁移历史默认管理员口令，请改用私有初始化密码重新登录。', 'warn')
-    }
-    console.log(paint('='.repeat(72), 'dim'))
-    void runStartupDiagnostics(env.PORT)
+  }).catch((error) => {
+    console.error(paint('[y-link-backend] resume automatic database migration failed:', 'red'), error)
   })
 }
 
@@ -250,5 +376,22 @@ try {
 } catch (error) {
   logBanner('服务启动失败')
   console.error(paint('[y-link-backend] bootstrap failed:', 'red'), error)
-  process.exit(1)
+  let exitCode = 1
+  try {
+    const cutoverFailureResult = await handleDatabaseMigrationCutoverStartupFailure({
+      activeDatabaseType: env.DB_TYPE,
+      error,
+    })
+    if (cutoverFailureResult.handled) {
+      exitCode = cutoverFailureResult.exitCode
+      logLine(
+        'DB CUTOVER',
+        `task=${cutoverFailureResult.marker.taskId} action=${cutoverFailureResult.action} attempts=${cutoverFailureResult.marker.attempts}，请求 onebox 计划重启`,
+        'warn',
+      )
+    }
+  } catch (cutoverError) {
+    console.error(paint('[y-link-backend] database cutover recovery failed:', 'red'), cutoverError)
+  }
+  process.exit(exitCode)
 }

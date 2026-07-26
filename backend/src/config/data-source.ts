@@ -124,6 +124,9 @@ export function createDataSourceOptions(runtimeOverride?: DatabaseRuntimeOverrid
     username: databaseConfig.DB_USER,
     password: databaseConfig.DB_PASSWORD ?? '',
     database: databaseConfig.DB_NAME,
+    // SQLite 与现有 API 都按 UTC 解释无时区 datetime；显式固定 MySQL
+    // 会话解析时区，避免 onebox 使用 Asia/Shanghai 时序列化后平移 8 小时。
+    timezone: 'Z',
     ...commonOptions,
   }
 }

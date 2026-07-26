@@ -124,9 +124,9 @@ const emit = defineEmits<{
           <div class="flex items-center justify-between gap-3">
             <div>
               <div class="text-sm font-medium text-slate-700 dark:text-slate-200">目标库启用 Schema 同步</div>
-              <div class="mt-1 text-xs text-slate-500 dark:text-slate-400">仅在你明确知道该环境允许自动同步结构时再开启</div>
+              <div class="mt-1 text-xs text-slate-500 dark:text-slate-400">DB_SYNC 由系统固定关闭，不作为迁移页面的用户选项</div>
             </div>
-            <el-switch v-model="migrationForm.target.dbSync" />
+            <el-tag type="info" effect="light">固定关闭</el-tag>
           </div>
         </div>
 

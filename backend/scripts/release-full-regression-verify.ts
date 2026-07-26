@@ -8,6 +8,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import sharp from 'sharp'
 
 const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
@@ -187,9 +188,14 @@ async function main() {
 
     const healthResponse = await fetch(`${baseUrl}/health`)
     assert.equal(healthResponse.status, 200, '健康检查 HTTP 状态码异常')
-    const health = await healthResponse.json() as { status?: string; database?: unknown }
+    const health = await healthResponse.json() as {
+      status?: string
+      database?: unknown
+      maintenance?: { readOnly?: boolean }
+    }
     assert.equal(health.status, 'UP')
     assert.equal(health.database, undefined, '公开健康检查不得返回数据库拓扑')
+    assert.equal(typeof health.maintenance?.readOnly, 'boolean', '公开健康检查必须返回脱敏维护状态')
     pass('后端健康检查通过')
 
     const adminLogin = await expectJsonOk<{
@@ -384,10 +390,14 @@ async function main() {
      * - 既验证 `multer` 接入是否可用；
      * - 也验证返回的静态访问 URL 可被后续业务直接消费。
      */
-    const uploadBuffer = Buffer.from(
-      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8Xw8AAoMBgM2PumoAAAAASUVORK5CYII=',
-      'base64',
-    )
+    const uploadBuffer = await sharp({
+      create: {
+        width: 2,
+        height: 2,
+        channels: 3,
+        background: { r: 30, g: 120, b: 210 },
+      },
+    }).png().toBuffer()
     const uploadForm = new FormData()
     uploadForm.append('file', new Blob([uploadBuffer], { type: 'image/png' }), 'release-verify.png')
 

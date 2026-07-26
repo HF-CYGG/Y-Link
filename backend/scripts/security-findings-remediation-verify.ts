@@ -50,7 +50,16 @@ async function main() {
   assert.doesNotMatch(notificationService, /feishuWebhookUrl:\s*row\.feishuWebhookUrl/, '通知规则读取不得返回完整 Webhook')
   requirePattern(feedbackRoutes, /attachments\/:id/, '反馈附件必须通过鉴权接口读取')
   requirePattern(o2oService, /SUM\([^)]*item[^)]*qty|SUM\([^)]*qty/i, 'O2O 限购必须累计待处理订单数量')
-  requirePattern(appSource, /res\.json\(\{\s*status:\s*['"]UP['"]\s*\}\)/, '公开健康检查必须只返回 UP')
+  requirePattern(
+    appSource,
+    /res\.json\(\{\s*status:\s*['"]UP['"],\s*maintenance:\s*databaseMaintenanceModeService\.getPublicState\(\),?\s*\}\)/,
+    '公开健康检查只能返回 UP 与脱敏维护状态',
+  )
+  assert.doesNotMatch(
+    appSource,
+    /effectiveDatabase|runtimeOverrideStatus/,
+    '公开健康检查不得重新暴露数据库拓扑或运行时覆盖详情',
+  )
   assert.doesNotMatch(appSource, /express\.json\(\{\s*limit:\s*API_JSON_BODY_LIMIT/, '不得保留认证前全局 64 MiB JSON parser')
   assert.doesNotMatch(appSource, /express\.static\(uploadsDir/, '不得公开整个 uploads 根目录')
   const migration = read('sql/032_security_findings_remediation.sql')

@@ -38,6 +38,8 @@ import type { AuthUserContext } from '../types/auth.js'
 import type { ClientAuthContext } from '../types/client-auth.js'
 import { isUniqueConstraintError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
+import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
+import { isUploadPublicUrlForCategory } from '../utils/upload-storage.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
 import {
@@ -1121,6 +1123,16 @@ class ClientFeedbackService {
   }
 
   async getMyConversationDetail(clientAuth: ClientAuthContext, id: string): Promise<ClientFeedbackConversationDetail> {
+    if (databaseMaintenanceModeService.isReadOnly()) {
+      const conversation = await this.requireOwnedConversation(id, clientAuth, AppDataSource.manager)
+      const messages = (await this.loadConversationMessages(AppDataSource.manager, conversation.id))
+        .filter((message) => !message.internalOnly)
+      return {
+        conversation: this.buildConversationSummary(conversation),
+        messages: messages.map((message) => this.buildMessageView(message, { scope: 'client', userId: clientAuth.userId })),
+      }
+    }
+
     const result = await AppDataSource.transaction(async (manager) => {
       const conversation = await this.requireOwnedConversation(id, clientAuth, manager)
       const readChanged = await this.markConversationReadForClient(manager, conversation)
@@ -1500,6 +1512,16 @@ class ClientFeedbackService {
   }
 
   async getServiceConversationDetail(id: string, actor: AuthUserContext): Promise<ClientFeedbackConversationDetail> {
+    if (databaseMaintenanceModeService.isReadOnly()) {
+      const conversation = await this.requireConversationById(id, AppDataSource.manager)
+      const messages = await this.loadConversationMessages(AppDataSource.manager, conversation.id)
+      return {
+        conversation: this.buildConversationSummary(conversation, actor.userId),
+        messages: messages.map((message) => this.buildMessageView(message, { scope: 'service', userId: actor.userId })),
+        internalRemark: this.buildInternalRemarkView(conversation),
+      }
+    }
+
     const result = await AppDataSource.transaction(async (manager) => {
       const conversation = await this.requireConversationById(id, manager)
       const readChanged = await this.markConversationReadForService(manager, conversation)

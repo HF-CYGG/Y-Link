@@ -13,8 +13,13 @@ import { useAppStore } from '@/store/modules/app'
 import { clearPersistedAuthState, getAdminCsrfToken } from '@/utils/auth-storage'
 import { getClientRiskHeaderSnapshot } from '@/utils/client-auth-risk'
 import { clearPersistedClientAuthState } from '@/utils/client-auth-storage'
-import { normalizeRequestError, unwrapApiResponse } from '@/utils/error'
+import { AppRequestError, normalizeRequestError, unwrapApiResponse } from '@/utils/error'
 import pinia from '@/store/pinia'
+import {
+  DATABASE_MAINTENANCE_READ_ONLY_CODE,
+  DATABASE_MAINTENANCE_READ_ONLY_MESSAGE,
+  useDatabaseMaintenanceStore,
+} from '@/store/modules/database-maintenance'
 
 export const SESSION_RELOGIN_EVENT = 'y-link:session-relogin'
 
@@ -119,6 +124,22 @@ const isAdminRequest = (url?: string) => {
 const isSafeRequestMethod = (method?: string) => {
   const normalizedMethod = (method ?? 'GET').toUpperCase()
   return ['GET', 'HEAD', 'OPTIONS'].includes(normalizedMethod)
+}
+
+/**
+ * 维护期间允许继续提交的治理入口：
+ * - 紧急回退与清除运行时覆盖是维护失败后的恢复通道；
+ * - 最终权限、角色与 CSRF 仍由后端校验，前端放行不等于授权。
+ */
+const isMaintenanceRecoveryWrite = (method?: string, url?: string) => {
+  const normalizedMethod = (method ?? 'GET').toUpperCase()
+  const normalizedUrl = normalizeRequestUrl(url).split('?')[0]?.replace(/\/+$/, '') ?? ''
+
+  if (normalizedMethod === 'POST' && /\/data-maintenance\/db-migration\/rollback$/.test(normalizedUrl)) {
+    return true
+  }
+  return normalizedMethod === 'DELETE'
+    && /\/data-maintenance\/db-migration\/runtime-override$/.test(normalizedUrl)
 }
 
 /**
@@ -241,6 +262,18 @@ http.interceptors.request.use(
     const appStore = useAppStore(pinia)
     appStore.startLoading()
 
+    const databaseMaintenanceStore = useDatabaseMaintenanceStore(pinia)
+    if (
+      databaseMaintenanceStore.isReadOnly
+      && !isSafeRequestMethod(config.method)
+      && !isMaintenanceRecoveryWrite(config.method, config.url)
+    ) {
+      throw new AppRequestError(DATABASE_MAINTENANCE_READ_ONLY_MESSAGE, {
+        code: DATABASE_MAINTENANCE_READ_ONLY_CODE,
+        status: 503,
+      })
+    }
+
     return attachAdminCsrfHeader(attachClientRiskHeaders(config))
   },
   (error) => {
@@ -259,12 +292,19 @@ http.interceptors.response.use(
   (response: AxiosResponse<ApiResponse<unknown>>) => {
     const appStore = useAppStore(pinia)
     appStore.endLoading()
+    if (response.data?.code === DATABASE_MAINTENANCE_READ_ONLY_CODE) {
+      useDatabaseMaintenanceStore(pinia).activateMaintenance()
+    }
     return response
   },
   (error) => {
     const appStore = useAppStore(pinia)
     appStore.endLoading()
     const normalizedError = normalizeRequestError(error)
+
+    if (normalizedError.code === DATABASE_MAINTENANCE_READ_ONLY_CODE) {
+      useDatabaseMaintenanceStore(pinia).activateMaintenance()
+    }
 
     if (shouldForceRelogin(normalizedError, error?.config?.url)) {
       redirectToLogin(isClientRequest(error?.config?.url) ? 'client' : 'admin')

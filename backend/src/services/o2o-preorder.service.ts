@@ -37,6 +37,7 @@ import { BizError } from '../utils/errors.js'
 import { generateOrderUuid } from '../utils/id-generator.js'
 import { orderSerialService, type OrderSerialRecalibrationResult } from './order-serial.service.js'
 import { systemConfigService } from './system-config.service.js'
+import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { notificationService } from './notification.service.js'
 import { auditService } from './audit.service.js'
 import type { PaginationResult } from '../types/api.js'
@@ -3420,70 +3421,93 @@ class O2oPreorderService {
       return
     }
     this.timeoutRecycleLoopTimer = globalThis.setInterval(() => {
+      if (databaseMaintenanceModeService.isReadOnly()) {
+        return
+      }
       void this.cancelTimeoutOrders({ skipRecentMs: O2O_TIMEOUT_RECYCLE_RECENT_WINDOW_MS }).catch(() => undefined)
     }, O2O_TIMEOUT_BACKGROUND_RECYCLE_INTERVAL_MS)
   }
 
+  async stopTimeoutRecycleLoop(): Promise<void> {
+    if (this.timeoutRecycleLoopTimer !== null) {
+      globalThis.clearInterval(this.timeoutRecycleLoopTimer)
+      this.timeoutRecycleLoopTimer = null
+    }
+    const inFlightRecycle = this.cancelTimeoutOrdersInFlight
+    if (inFlightRecycle) {
+      await inFlightRecycle
+    }
+  }
+
   async cancelTimeoutOrders(options?: { skipRecentMs?: number }) {
-    const config = await systemConfigService.getO2oRuleConfigs()
-    if (!config.autoCancelEnabled) {
-      this.lastCancelTimeoutOrdersAt = Date.now()
-      this.lastCancelTimeoutOrdersResult = { cancelledCount: 0 }
-      return this.lastCancelTimeoutOrdersResult
-    }
-    const normalizedSkipRecentMs = Math.max(0, Number(options?.skipRecentMs ?? 0))
-    const nowMs = Date.now()
-    if (this.cancelTimeoutOrdersInFlight !== null) {
-      return this.cancelTimeoutOrdersInFlight
-    }
-    if (
-      normalizedSkipRecentMs > 0 &&
-      nowMs - this.lastCancelTimeoutOrdersAt < normalizedSkipRecentMs
-    ) {
+    const releaseMaintenanceLease = databaseMaintenanceModeService.registerInFlightWrite()
+    if (!releaseMaintenanceLease) {
       return this.lastCancelTimeoutOrdersResult
     }
 
-    const recyclePromise = (async () => {
-      let cancelledCount = 0
-      // 分批循环回收，避免单次只处理 100 条导致仍有超时订单残留。
-      // 这样即使门店长时间未触发查询，也能在下一次入口访问时尽量回收完整。
-      while (true) {
-        const timeoutOrders = await this.preorderRepo.find({
-          where: {
-            status: 'pending',
-            isDeleted: false,
-            timeoutAt: LessThanOrEqual(new Date()),
-          },
-          take: 100,
-        })
-        if (!timeoutOrders.length) {
-          break
-        }
-        await AppDataSource.transaction(async (manager) => {
-          for (const order of timeoutOrders) {
-            const cancelled = await this.cancelTimedOutOrderInManager(manager, order)
-            if (cancelled) {
-              cancelledCount += 1
-            }
-          }
-        })
-        if (timeoutOrders.length < 100) {
-          break
-        }
-      }
-      return { cancelledCount }
-    })()
-
-    this.cancelTimeoutOrdersInFlight = recyclePromise
     try {
-      const result = await recyclePromise
-      this.lastCancelTimeoutOrdersAt = Date.now()
-      this.lastCancelTimeoutOrdersResult = result
-      return result
-    } finally {
-      if (this.cancelTimeoutOrdersInFlight === recyclePromise) {
-        this.cancelTimeoutOrdersInFlight = null
+      const config = await systemConfigService.getO2oRuleConfigs()
+      if (!config.autoCancelEnabled) {
+        this.lastCancelTimeoutOrdersAt = Date.now()
+        this.lastCancelTimeoutOrdersResult = { cancelledCount: 0 }
+        return this.lastCancelTimeoutOrdersResult
       }
+      const normalizedSkipRecentMs = Math.max(0, Number(options?.skipRecentMs ?? 0))
+      const nowMs = Date.now()
+      if (this.cancelTimeoutOrdersInFlight !== null) {
+        return this.cancelTimeoutOrdersInFlight
+      }
+      if (
+        normalizedSkipRecentMs > 0 &&
+        nowMs - this.lastCancelTimeoutOrdersAt < normalizedSkipRecentMs
+      ) {
+        return this.lastCancelTimeoutOrdersResult
+      }
+
+      const recyclePromise = (async () => {
+        let cancelledCount = 0
+        // 分批循环回收，避免单次只处理 100 条导致仍有超时订单残留。
+        // 这样即使门店长时间未触发查询，也能在下一次入口访问时尽量回收完整。
+        while (true) {
+          const timeoutOrders = await this.preorderRepo.find({
+            where: {
+              status: 'pending',
+              isDeleted: false,
+              timeoutAt: LessThanOrEqual(new Date()),
+            },
+            take: 100,
+          })
+          if (!timeoutOrders.length) {
+            break
+          }
+          await AppDataSource.transaction(async (manager) => {
+            for (const order of timeoutOrders) {
+              const cancelled = await this.cancelTimedOutOrderInManager(manager, order)
+              if (cancelled) {
+                cancelledCount += 1
+              }
+            }
+          })
+          if (timeoutOrders.length < 100) {
+            break
+          }
+        }
+        return { cancelledCount }
+      })()
+
+      this.cancelTimeoutOrdersInFlight = recyclePromise
+      try {
+        const result = await recyclePromise
+        this.lastCancelTimeoutOrdersAt = Date.now()
+        this.lastCancelTimeoutOrdersResult = result
+        return result
+      } finally {
+        if (this.cancelTimeoutOrdersInFlight === recyclePromise) {
+          this.cancelTimeoutOrdersInFlight = null
+        }
+      }
+    } finally {
+      releaseMaintenanceLease()
     }
   }
 

@@ -28,6 +28,8 @@ export DB_USER="${DB_USER:-root}"
 export DB_PASSWORD="${DB_PASSWORD:-}"
 export DB_NAME="${DB_NAME:-y_link}"
 export DB_SYNC="${DB_SYNC:-false}"
+export Y_LINK_DATA_DIR="${Y_LINK_DATA_DIR:-/app/data}"
+export Y_LINK_AUTOMATIC_DB_MIGRATION_ENABLED="${Y_LINK_AUTOMATIC_DB_MIGRATION_ENABLED:-true}"
 export INIT_ADMIN_USERNAME="${INIT_ADMIN_USERNAME:-admin}"
 export INIT_ADMIN_DISPLAY_NAME="${INIT_ADMIN_DISPLAY_NAME:-系统管理员}"
 export PERMANENT_DELETE_PASSWORD="${PERMANENT_DELETE_PASSWORD:-}"
@@ -81,9 +83,17 @@ trap cleanup INT TERM
 # 进程守护：任一关键进程退出，都让容器退出并交给平台自动重启。
 while :; do
   if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
-    echo "[onebox] backend exited unexpectedly"
+    set +e
+    wait "$BACKEND_PID"
+    BACKEND_STATUS=$?
+    set -e
     kill -TERM "$NGINX_PID" 2>/dev/null || true
     wait "$NGINX_PID" 2>/dev/null || true
+    if [ "$BACKEND_STATUS" -eq 75 ]; then
+      echo "[onebox] backend requested planned database migration restart (exit=75)"
+      exit 75
+    fi
+    echo "[onebox] backend exited unexpectedly (exit=${BACKEND_STATUS})" >&2
     exit 1
   fi
 

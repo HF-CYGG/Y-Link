@@ -138,7 +138,8 @@ const ensureReady = async () => {
 const registerAndLoginClient = async (seed: number): Promise<ClientAuthContext> => {
   const registerCaptcha = await clientAuthService.createCaptcha()
   const account = `1${String(seed).slice(-10)}`
-  const username = `核心用户${toChineseDigits(String(seed).slice(-6))}`
+  // 姓名现已受全局唯一约束；使用与手机号一致的 10 位时间种子，避免短时间重复验收撞上旧夹具。
+  const username = `核心用户${toChineseDigits(String(seed).slice(-10))}`
   const password = `Task6@${String(seed).slice(-6)}`
 
   const registerResult = await clientAuthService.register({

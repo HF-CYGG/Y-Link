@@ -5,8 +5,7 @@
  */
 
 import fs from 'node:fs'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { appDataPaths } from './app-data-paths.js'
 
 export type DatabaseOverrideMode = 'sqlite' | 'mysql'
 
@@ -46,9 +45,8 @@ export interface DatabaseRuntimeOverrideFile {
  * - 与业务数据库文件、备份文件同属后端可写目录；
  * - 不依赖当前 shell 工作目录，避免从 monorepo 根目录启动时路径错位。
  */
-const backendRootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')
-const runtimeDir = path.resolve(backendRootDir, 'data', 'runtime')
-const runtimeOverrideFilePath = path.resolve(runtimeDir, 'database-runtime-override.json')
+const runtimeDir = appDataPaths.runtimeDir
+const runtimeOverrideFilePath = appDataPaths.runtimeOverrideFile
 const runtimeOverrideTempFilePath = `${runtimeOverrideFilePath}.tmp`
 
 /**
@@ -341,7 +339,10 @@ export async function writeDatabaseRuntimeOverride(payload: DatabaseRuntimeOverr
   }
 
   // 先写临时文件再替换正式文件，尽量避免进程中断时留下半截 JSON。
-  fs.writeFileSync(runtimeOverrideTempFilePath, JSON.stringify(normalizedPayload, null, 2), 'utf8')
+  fs.writeFileSync(runtimeOverrideTempFilePath, JSON.stringify(normalizedPayload, null, 2), {
+    encoding: 'utf8',
+    mode: 0o600,
+  })
   try {
     fs.renameSync(runtimeOverrideTempFilePath, runtimeOverrideFilePath)
   } catch {
@@ -349,6 +350,11 @@ export async function writeDatabaseRuntimeOverride(payload: DatabaseRuntimeOverr
       fs.unlinkSync(runtimeOverrideFilePath)
     }
     fs.renameSync(runtimeOverrideTempFilePath, runtimeOverrideFilePath)
+  }
+  try {
+    fs.chmodSync(runtimeOverrideFilePath, 0o600)
+  } catch {
+    // Windows 不保证支持 POSIX 权限位；onebox/Linux 会正常限制为进程用户可读写。
   }
   return normalizedPayload
 }
