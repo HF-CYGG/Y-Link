@@ -1394,6 +1394,7 @@ export class DatabaseMigrationService {
 
   private async writeTaskRecordWithoutLock(task: InternalMigrationTaskRecord): Promise<void> {
     const filePath = await this.getTaskFilePath(task.id)
+    await this.maybeFailAutomaticCutoverTaskWriteE2E(task)
     if (task.mode === 'automatic') {
       try {
         const existingTask = JSON.parse(await fs.readFile(filePath, 'utf8')) as InternalMigrationTaskRecord
@@ -2355,6 +2356,31 @@ export class DatabaseMigrationService {
     )
   }
 
+  private async maybeFailAutomaticCutoverTaskWriteE2E(
+    task: InternalMigrationTaskRecord,
+  ): Promise<void> {
+    if (
+      !this.isAutomaticMigrationE2EEnabled()
+      || process.env.Y_LINK_DB_MIGRATION_E2E_FAIL_CUTOVER_TASK_WRITE_ONCE !== 'true'
+      || task.mode !== 'automatic'
+      || task.status !== 'restart_pending'
+    ) {
+      return
+    }
+    const markerFilePath = path.resolve(appDataPaths.runtimeDir, 'e2e-cutover-task-write-failed-once')
+    await fs.mkdir(appDataPaths.runtimeDir, { recursive: true })
+    try {
+      const markerHandle = await fs.open(markerFilePath, 'wx', 0o600)
+      await markerHandle.close()
+    } catch (error) {
+      if (error && typeof error === 'object' && 'code' in error && error.code === 'EEXIST') {
+        return
+      }
+      throw error
+    }
+    throw new Error('隔离验收按计划注入切换任务状态持久化故障')
+  }
+
   private async maybeDelayAutomaticMigrationFinalizerE2E(taskId: string): Promise<void> {
     if (!this.isAutomaticMigrationE2EEnabled()) {
       return
@@ -2926,6 +2952,7 @@ export class DatabaseMigrationService {
     let snapshotDataSource: DataSource | null = null
     let targetDataSource: DataSource | null = null
     let cutoverPrepared = false
+    let cutoverRollbackSucceeded = true
     let maintenanceStarted = false
     let cancelledByAdmin = false
     try {
@@ -3082,18 +3109,23 @@ export class DatabaseMigrationService {
       task.result = {
         importedTables,
         importedRows: importedTables.reduce((sum, item) => sum + item.rowCount, 0),
-        runtimeOverrideApplied: true,
+        runtimeOverrideApplied: false,
         validation: validationResult,
       }
 
       await this.updateAutomaticTaskStage(task, 'switching', '强校验通过，正在写入 MySQL 切换标记')
       const cutoverModule = await import('./database-migration-cutover.service.js')
       this.assertAutomaticTaskNotCancelled(task.id)
-      await cutoverModule.createDatabaseMigrationCutoverMarker({
-        taskId: task.id,
-        sourceSqlitePath: task.source.sqlitePath,
-      })
+      // marker、运行时覆盖和 restart_pending 任务状态共同组成切换提交阶段；
+      // 任一项未完成都必须恢复切换前覆盖，禁止留下无任务状态约束的 MySQL 启动配置。
+      const previousRuntimeOverride = readDatabaseRuntimeOverride()
+      let cutoverMarkerCreated = false
       try {
+        await cutoverModule.createDatabaseMigrationCutoverMarker({
+          taskId: task.id,
+          sourceSqlitePath: task.source.sqlitePath,
+        })
+        cutoverMarkerCreated = true
         this.assertAutomaticTaskNotCancelled(task.id)
         await this.writeMysqlRuntimeOverride(
           task.target,
@@ -3101,19 +3133,41 @@ export class DatabaseMigrationService {
           task.id,
           '一键自动迁移强校验通过，准备 onebox 重启切换',
         )
+        task.result.runtimeOverrideApplied = true
         this.assertAutomaticTaskNotCancelled(task.id)
+
+        task.status = 'restart_pending'
+        task.updatedAt = new Date().toISOString()
+        task.progress.currentStage = '切换配置已持久化，等待 onebox 计划重启'
+        task.errorMessage = undefined
+        await this.writeTaskRecord(task)
+        this.assertAutomaticTaskNotCancelled(task.id)
+        cutoverPrepared = true
       } catch (error) {
-        await cutoverModule.clearDatabaseMigrationCutoverMarker()
+        if (error instanceof AutomaticMigrationCancelledError || !cutoverMarkerCreated) {
+          throw error
+        }
+        try {
+          // 必须先恢复覆盖再清 marker；反向执行时若进程在两步之间退出，
+          // 会留下没有 cutover 协调标记的 MySQL 覆盖，下一次启动将直接误切库。
+          if (previousRuntimeOverride) {
+            await writeDatabaseRuntimeOverride(previousRuntimeOverride)
+          } else {
+            await clearDatabaseRuntimeOverride()
+          }
+          cutoverModule.clearDatabaseMigrationCutoverMarker()
+          if (task.result) {
+            task.result.runtimeOverrideApplied = false
+          }
+        } catch (rollbackError) {
+          cutoverRollbackSucceeded = false
+          throw new AggregateError(
+            [error, rollbackError],
+            '自动迁移切换持久化失败，且未能完整撤销运行时覆盖与切换标记',
+          )
+        }
         throw error
       }
-
-      task.status = 'restart_pending'
-      task.updatedAt = new Date().toISOString()
-      task.progress.currentStage = '切换配置已持久化，等待 onebox 计划重启'
-      task.errorMessage = undefined
-      await this.writeTaskRecord(task)
-      this.assertAutomaticTaskNotCancelled(task.id)
-      cutoverPrepared = true
 
       await auditService.safeRecord({
         actionType: 'database_migration.automatic_restart_pending',
@@ -3137,24 +3191,31 @@ export class DatabaseMigrationService {
       }, 250)
     } catch (error) {
       cancelledByAdmin = error instanceof AutomaticMigrationCancelledError
+      if (cancelledByAdmin && !cutoverPrepared && task.result) {
+        task.result.runtimeOverrideApplied = false
+      }
       task.status = 'failed'
       task.updatedAt = new Date().toISOString()
       task.finishedAt = new Date().toISOString()
       task.progress.currentStage = error instanceof AutomaticMigrationCancelledError
         ? '自动迁移已由管理员取消，正在执行紧急回退'
-        : '自动迁移失败，已恢复正常写入'
+        : cutoverRollbackSucceeded
+          ? '自动迁移失败，已恢复正常写入'
+          : '自动迁移失败，切换持久化撤销未完成，系统保持只读等待人工处理'
       const rawErrorMessage = formatUnknownErrorMessage(error)
       task.errorMessage = task.target.password
         ? rawErrorMessage.replaceAll(task.target.password, '***')
         : rawErrorMessage
       await this.writeTaskRecord(task)
       if (!cancelledByAdmin) {
-        if (maintenanceStarted) {
+        if (maintenanceStarted && cutoverRollbackSucceeded) {
           await databaseMaintenanceModeService.finishReadOnly(task.id)
         }
-        o2oPreorderService.startTimeoutRecycleLoop()
-        await this.releaseAutomaticMigrationLock(task.id)
-        await fs.rm(this.getTaskSecretFilePath(task.id), { force: true })
+        if (cutoverRollbackSucceeded) {
+          o2oPreorderService.startTimeoutRecycleLoop()
+          await this.releaseAutomaticMigrationLock(task.id)
+          await fs.rm(this.getTaskSecretFilePath(task.id), { force: true })
+        }
         await auditService.safeRecord({
           actionType: 'database_migration.run_automatic_task_failed',
           actionLabel: '一键自动数据库迁移失败',
@@ -3168,6 +3229,8 @@ export class DatabaseMigrationService {
             errorMessage: task.errorMessage,
             resumeCount: task.resumeCount ?? 0,
           },
+        }, {
+          allowDuringDatabaseMaintenance: true,
         })
       }
       throw error
@@ -3182,6 +3245,7 @@ export class DatabaseMigrationService {
         !cutoverPrepared
         && !cancelledByAdmin
         && maintenanceStarted
+        && cutoverRollbackSucceeded
         && databaseMaintenanceModeService.isReadOnly()
       ) {
         await databaseMaintenanceModeService.finishReadOnly(task.id)

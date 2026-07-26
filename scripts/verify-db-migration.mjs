@@ -5,7 +5,7 @@
  * - 首先检查 Docker CLI、Docker Compose 与 Docker daemon，任一不可用都明确失败，不允许跳过即通过；
  * - 每次运行生成独立 Compose project、随机测试凭据、临时卷和 internal 网络，迁移目标固定为编排内 MySQL；
  * - 默认覆盖自动任务 API、维护只读屏障、/health 横幅、容器自动重启、MySQL 实际生效与业务快照一致性；
- * - 可用 Y_LINK_DB_MIGRATION_SCENARIO 运行错误连接、非空目标库及连续启动失败自动回退断言。
+ * - 可用 Y_LINK_DB_MIGRATION_SCENARIO 运行错误连接、非空目标库、切换持久化失败及连续启动失败自动回退断言。
  * 维护说明：
  * - 禁止把外部数据库参数接入本脚本，避免验收命令误伤开发库或生产库；
  * - 后端契约变化时必须更新这里的真实 HTTP 断言，不能降级为源码字符串匹配或 skip-as-pass。
@@ -40,6 +40,7 @@ const allowedScenarios = new Set([
   'duplicate-task',
   'content-tamper',
   'execution-interruption',
+  'cutover-persistence-failure',
   'verifying-emergency-rollback',
   'failure-rollback',
 ])
@@ -276,6 +277,7 @@ const buildComposeEnvironment = (oneboxPort) => ({
   Y_LINK_VERIFY_MYSQL_IMAGE: scenario === 'old-version' ? 'mysql:8.0.15' : 'mysql:8.4',
   Y_LINK_VERIFY_TAMPER_TARGET: scenario === 'content-tamper' ? 'true' : 'false',
   Y_LINK_VERIFY_INTERRUPT_ONCE: scenario === 'execution-interruption' ? 'true' : 'false',
+  Y_LINK_VERIFY_FAIL_CUTOVER_TASK_WRITE_ONCE: scenario === 'cutover-persistence-failure' ? 'true' : 'false',
   Y_LINK_VERIFY_FINALIZER_DELAY_MS: scenario === 'verifying-emergency-rollback' ? '10000' : '0',
 })
 
@@ -1012,6 +1014,35 @@ const assertReturnedToSqlite = async (baseUrl, client) => {
   return state
 }
 
+const assertCutoverArtifactsAbsent = async (composeEnv, runtimeState, label) => {
+  assert.equal(runtimeState.activeOverride, null, `${label}后不得残留数据库运行时覆盖`)
+  assert.equal(
+    runtimeState.runtimeOverrideStatus?.hasOverrideFile,
+    false,
+    `${label}后运行时覆盖文件必须不存在`,
+  )
+  assert.equal(
+    runtimeState.runtimeOverrideStatus?.pendingRestart,
+    false,
+    `${label}后不得留下待重启数据库切换`,
+  )
+  await runCompose(
+    [
+      'exec',
+      '-T',
+      'onebox',
+      'sh',
+      '-ec',
+      'test ! -e /app/data/runtime/database-runtime-override.json && test ! -e /app/data/runtime/database-migration-cutover.json',
+    ],
+    {
+      capture: true,
+      env: composeEnv,
+      label: `${label}切换持久化残留断言`,
+    },
+  )
+}
+
 const assertFailedTaskWithoutRestart = async ({
   baseUrl,
   client,
@@ -1304,6 +1335,26 @@ const runExecutionInterruptionScenario = async ({
   log('执行中断断言通过：onebox 自动拉起、任务安全续跑、强校验和最终切换均完成')
 }
 
+const runCutoverPersistenceFailureScenario = async (context) => {
+  const terminalTask = await assertFailedTaskWithoutRestart({
+    ...context,
+    errorPattern: /切换任务状态持久化故障/,
+    label: '切换任务状态持久化失败',
+  })
+  assert.equal(
+    terminalTask.result?.runtimeOverrideApplied,
+    false,
+    '切换任务状态持久化失败后不得宣称运行时覆盖已应用',
+  )
+  const runtimeState = await readRuntimeOverrideState(context.client)
+  await assertCutoverArtifactsAbsent(
+    context.composeEnv,
+    runtimeState,
+    '切换任务状态持久化失败',
+  )
+  log('切换任务状态持久化失败断言通过：MySQL 覆盖与 cutover marker 已撤销，SQLite 写入恢复且 onebox 未重启')
+}
+
 const runFailureRollbackScenario = async ({ baseUrl, client, composeEnv, baselineSnapshot, fixtureManifest }) => {
   const initialState = await getOneboxContainerState(composeEnv)
   const createdTask = await createAutomaticTask(client, {
@@ -1447,6 +1498,10 @@ const runSelectedScenario = async (context) => {
   }
   if (scenario === 'execution-interruption') {
     await runExecutionInterruptionScenario(context)
+    return
+  }
+  if (scenario === 'cutover-persistence-failure') {
+    await runCutoverPersistenceFailureScenario(context)
     return
   }
   if (scenario === 'verifying-emergency-rollback') {

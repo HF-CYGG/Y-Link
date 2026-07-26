@@ -52,6 +52,7 @@ jobs:
           - duplicate-task
           - content-tamper
           - execution-interruption
+          - cutover-persistence-failure
           - verifying-emergency-rollback
           - failure-rollback
     steps:
