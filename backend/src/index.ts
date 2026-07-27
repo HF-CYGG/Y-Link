@@ -15,7 +15,7 @@ import {
   completeDatabaseMigrationCutoverStartup,
   handleDatabaseMigrationCutoverStartupFailure,
   handleDatabaseMigrationCutoverStartupSuccess,
-  readDatabaseMigrationCutoverMarker,
+  inspectDatabaseMigrationCutoverMarker,
   type DatabaseMigrationCutoverStartupSuccessResult,
 } from './services/database-migration-cutover.service.js'
 import { databaseMaintenanceModeService } from './services/database-maintenance-mode.service.js'
@@ -263,7 +263,21 @@ async function bootstrap(): Promise<void> {
   logLine('STEP', 'initialize datasource')
   await AppDataSource.initialize()
   installSqliteTransactionQueue(AppDataSource)
-  const cutoverMarkerAtStartup = readDatabaseMigrationCutoverMarker()
+  const cutoverMarkerInspection = inspectDatabaseMigrationCutoverMarker()
+  if (cutoverMarkerInspection.state === 'corrupted') {
+    const recoveryTaskId = (
+      databaseMaintenanceModeService.getActiveTaskId()
+      ?? readDatabaseRuntimeOverride()?.sourceTaskId
+    )
+    if (recoveryTaskId) {
+      await databaseMaintenanceModeService.beginReadOnly({
+        taskId: recoveryTaskId,
+        phase: 'control_state_corrupted',
+      })
+    }
+    throw new Error('数据库迁移切换标记存在但已损坏，已禁止启动期 schema 与业务写入')
+  }
+  const cutoverMarkerAtStartup = cutoverMarkerInspection.marker
   let mutableStartupBootstrapResult: MutableStartupBootstrapResult | null = null
   if (!cutoverMarkerAtStartup) {
     logLine('STEP', 'initialize database schema')
@@ -361,10 +375,14 @@ async function bootstrap(): Promise<void> {
     await completeDatabaseMigrationCutoverStartup(cutoverStartupResult.taskId)
   }
 
-  o2oPreorderService.startTimeoutRecycleLoop()
   void databaseMigrationService.resumeInterruptedAutomaticMigrationAfterStartup().then((taskId) => {
     if (taskId) {
       logLine('DB MIGRATION', `task=${taskId} 已调度自动续跑`, 'warn')
+    }
+    if (!databaseMaintenanceModeService.isReadOnly()) {
+      o2oPreorderService.startTimeoutRecycleLoop()
+    } else {
+      logLine('DB MIGRATION', '数据库仍处于只读维护，后台写任务保持暂停', 'warn')
     }
   }).catch((error) => {
     console.error(paint('[y-link-backend] resume automatic database migration failed:', 'red'), error)
