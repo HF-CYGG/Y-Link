@@ -42,6 +42,11 @@ export interface DatabaseMigrationCutoverMarker {
   lastError: string | null
 }
 
+export type DatabaseMigrationCutoverMarkerInspection =
+  | { state: 'absent'; marker: null }
+  | { state: 'healthy'; marker: DatabaseMigrationCutoverMarker }
+  | { state: 'corrupted'; marker: null }
+
 export interface CreateDatabaseMigrationCutoverMarkerInput {
   taskId: string
   sourceSqlitePath: string
@@ -326,13 +331,32 @@ export function createDatabaseMigrationCutoverMarker(
 }
 
 export function readDatabaseMigrationCutoverMarker(): DatabaseMigrationCutoverMarker | null {
+  return inspectDatabaseMigrationCutoverMarker().marker
+}
+
+export function inspectDatabaseMigrationCutoverMarker(): DatabaseMigrationCutoverMarkerInspection {
   if (!fs.existsSync(markerFilePath)) {
-    return null
+    return {
+      state: 'absent',
+      marker: null,
+    }
   }
   try {
-    return normalizeMarker(JSON.parse(fs.readFileSync(markerFilePath, 'utf8')))
+    const marker = normalizeMarker(JSON.parse(fs.readFileSync(markerFilePath, 'utf8')))
+    return marker
+      ? {
+          state: 'healthy',
+          marker,
+        }
+      : {
+          state: 'corrupted',
+          marker: null,
+        }
   } catch {
-    return null
+    return {
+      state: 'corrupted',
+      marker: null,
+    }
   }
 }
 
@@ -464,7 +488,8 @@ export async function handleDatabaseMigrationCutoverStartupSuccess(input: {
       ...toFinalizationInput(marker),
       deferMaintenanceFinish: true,
     })
-    if (readFinalizerTaskStatus(finalizerResult) === 'rolled_back') {
+    const finalizerTaskStatus = readFinalizerTaskStatus(finalizerResult)
+    if (finalizerTaskStatus === 'restart_pending' || finalizerTaskStatus === 'rolled_back') {
       marker = markDatabaseMigrationCutover({
         status: 'rollback_pending',
       })
@@ -530,5 +555,29 @@ export async function completeDatabaseMigrationCutoverStartup(taskId: string): P
   if (databaseMaintenanceModeService.isReadOnly()) {
     throw new Error('数据库切换启动补数完成后未能解除只读维护')
   }
-  clearDatabaseMigrationCutoverMarker()
+  try {
+    clearDatabaseMigrationCutoverMarker()
+  } catch (error) {
+    try {
+      await databaseMaintenanceModeService.beginReadOnly({
+        taskId: normalizedTaskId,
+        phase: 'control_cleanup_failed',
+      })
+    } catch (maintenanceError) {
+      console.error('[database-migration] 切换 marker 清理失败，且无法恢复只读维护', {
+        taskId: normalizedTaskId,
+        markerCleanupError: error instanceof Error ? error.message : String(error),
+        maintenanceError: maintenanceError instanceof Error ? maintenanceError.message : String(maintenanceError),
+      })
+      throw new AggregateError(
+        [error, maintenanceError],
+        '数据库切换 marker 清理失败，且无法恢复只读维护',
+      )
+    }
+    console.error('[database-migration] 切换 marker 清理失败，已恢复只读维护等待人工处理', {
+      taskId: normalizedTaskId,
+      errorMessage: error instanceof Error ? error.message : String(error),
+    })
+    throw error
+  }
 }

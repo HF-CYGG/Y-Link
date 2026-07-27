@@ -41,6 +41,12 @@ const allowedScenarios = new Set([
   'content-tamper',
   'execution-interruption',
   'cutover-persistence-failure',
+  'switching-emergency-rollback',
+  'cutover-cancel-persistence-failure',
+  'rollback-finalizer-persistence-failure',
+  'task-creation-persistence-failure',
+  'corrupted-active-task',
+  'corrupted-cutover-marker',
   'verifying-emergency-rollback',
   'failure-rollback',
 ])
@@ -273,11 +279,27 @@ const buildComposeEnvironment = (oneboxPort) => ({
   Y_LINK_VERIFY_ADMIN_PASSWORD: adminPassword,
   Y_LINK_VERIFY_MYSQL_PASSWORD: mysqlPassword,
   Y_LINK_VERIFY_MYSQL_ROOT_PASSWORD: mysqlRootPassword,
-  Y_LINK_VERIFY_MYSQL_STARTUP_FAILURES: scenario === 'failure-rollback' ? '2' : '0',
   Y_LINK_VERIFY_MYSQL_IMAGE: scenario === 'old-version' ? 'mysql:8.0.15' : 'mysql:8.4',
   Y_LINK_VERIFY_TAMPER_TARGET: scenario === 'content-tamper' ? 'true' : 'false',
   Y_LINK_VERIFY_INTERRUPT_ONCE: scenario === 'execution-interruption' ? 'true' : 'false',
   Y_LINK_VERIFY_FAIL_CUTOVER_TASK_WRITES_PERSISTENT: scenario === 'cutover-persistence-failure' ? 'true' : 'false',
+  Y_LINK_VERIFY_CUTOVER_CANCEL_WINDOW_MS: (
+    scenario === 'switching-emergency-rollback'
+    || scenario === 'cutover-cancel-persistence-failure'
+    || scenario === 'corrupted-active-task'
+    || scenario === 'corrupted-cutover-marker'
+  ) ? '15000' : '0',
+  Y_LINK_VERIFY_FAIL_CANCEL_TASK_WRITE: scenario === 'cutover-cancel-persistence-failure' ? 'true' : 'false',
+  Y_LINK_VERIFY_FAIL_ROLLBACK_FINALIZER_TASK_WRITE: (
+    scenario === 'rollback-finalizer-persistence-failure'
+  ) ? 'true' : 'false',
+  Y_LINK_VERIFY_FAIL_INITIAL_TASK_WRITE: (
+    scenario === 'task-creation-persistence-failure'
+  ) ? 'true' : 'false',
+  Y_LINK_VERIFY_MYSQL_STARTUP_FAILURES: (
+    scenario === 'failure-rollback'
+    || scenario === 'rollback-finalizer-persistence-failure'
+  ) ? '2' : '0',
   Y_LINK_VERIFY_FINALIZER_DELAY_MS: scenario === 'verifying-emergency-rollback' ? '10000' : '0',
 })
 
@@ -1069,6 +1091,93 @@ const assertAutomaticFailureCleanupArtifactsAbsent = async (composeEnv, taskId, 
   )
 }
 
+const waitForCutoverCancelWindow = async (composeEnv, taskId) => {
+  await waitFor(
+    'MySQL 覆盖写入后的紧急取消测试窗口',
+    async () => {
+      const result = await runCompose(
+        [
+          'exec',
+          '-T',
+          'onebox',
+          'sh',
+          '-ec',
+          'test -f "/app/data/runtime/e2e-cutover-cancel-window-$1"',
+          'wait-cutover-cancel-window',
+          taskId,
+        ],
+        {
+          capture: true,
+          allowFailure: true,
+          env: composeEnv,
+        },
+      )
+      return result.code === 0
+    },
+    {
+      intervalMs: 100,
+      timeoutMs: 60_000,
+    },
+  )
+}
+
+const assertAutomaticControlArtifactsPresent = async (composeEnv, taskId, label) => {
+  await runCompose(
+    [
+      'exec',
+      '-T',
+      'onebox',
+      'sh',
+      '-ec',
+      [
+        'test -s /app/data/runtime/database-runtime-override.json',
+        'test -s /app/data/runtime/database-migration-cutover.json',
+        'test -s /app/data/runtime/maintenance-state.json',
+        'test -s /app/data/database-migration/automatic-migration.lock',
+        'test -s "/app/data/database-migration/secrets/$1.json"',
+      ].join(' && '),
+      'assert-control-artifacts',
+      taskId,
+    ],
+    {
+      capture: true,
+      env: composeEnv,
+      label: `${label}控制面文件保留断言`,
+    },
+  )
+}
+
+const assertRollbackFinalizationArtifactsAbsent = async (composeEnv, taskId, label) => {
+  await waitFor(
+    `${label}回退收尾文件清理`,
+    async () => {
+      const result = await runCompose(
+        [
+          'exec',
+          '-T',
+          'onebox',
+          'sh',
+          '-ec',
+          [
+            'test ! -e /app/data/runtime/database-migration-cutover.json',
+            'test ! -e /app/data/runtime/maintenance-state.json',
+            'test ! -e /app/data/database-migration/automatic-migration.lock',
+            'test ! -e "/app/data/database-migration/secrets/$1.json"',
+          ].join(' && '),
+          'assert-rollback-finalization-cleanup',
+          taskId,
+        ],
+        {
+          capture: true,
+          allowFailure: true,
+          env: composeEnv,
+        },
+      )
+      return result.code === 0
+    },
+  )
+}
+
 const waitForPersistentTaskWriteFailureCleanup = async ({
   baseUrl,
   client,
@@ -1471,6 +1580,374 @@ const runCutoverPersistenceFailureScenario = async (context) => {
   log('持续任务写盘故障断言通过：状态落盘失败未阻断维护态、迁移锁、凭据与切换文件清理')
 }
 
+const runSwitchingEmergencyRollbackScenario = async ({
+  baseUrl,
+  client,
+  composeEnv,
+  baselineSnapshot,
+}) => {
+  const initialState = await getOneboxContainerState(composeEnv)
+  const createdTask = await createAutomaticTask(client, {
+    ...mysqlTarget,
+    password: mysqlPassword,
+  })
+  await waitForMaintenanceReadOnly(baseUrl, client, createdTask.id)
+  await waitForCutoverCancelWindow(composeEnv, createdTask.id)
+
+  const foreignTaskRollback = await client.request('/api/data-maintenance/db-migration/rollback', {
+    method: 'POST',
+    expectedStatuses: [409],
+    body: {
+      taskId: 'non-existent-automatic-task',
+      reason: 'E2E：验证任意任务 ID 不能触发活动覆盖清理',
+    },
+  })
+  assert.equal(foreignTaskRollback.response.status, 409, '任意任务 ID 必须被活动任务所有权校验阻断')
+  await assertAutomaticControlArtifactsPresent(composeEnv, createdTask.id, '错误任务 ID 回退被阻断后')
+
+  const mismatchRollback = await client.request('/api/data-maintenance/db-migration/rollback', {
+    method: 'POST',
+    expectedStatuses: [409],
+    body: {
+      taskId: createdTask.id,
+      sqlitePath: '/app/data/forbidden-rollback.sqlite',
+      reason: 'E2E：验证活动自动回退不能覆盖源 SQLite 路径',
+    },
+  })
+  assert.equal(mismatchRollback.response.status, 409, '活动自动回退的自定义 SQLite 路径必须被拒绝')
+  await assertAutomaticControlArtifactsPresent(composeEnv, createdTask.id, '拒绝错误 SQLite 路径后')
+
+  const rollbackResult = await client.request('/api/data-maintenance/db-migration/rollback', {
+    method: 'POST',
+    body: {
+      taskId: createdTask.id,
+      reason: 'E2E：切换窗口紧急回退',
+    },
+  })
+  assert.equal(rollbackResult.payload?.code, 0, '切换窗口紧急回退接口必须成功')
+  assert.equal(
+    rollbackResult.payload?.data?.activeOverride?.config?.DB_TYPE,
+    'sqlite',
+    '切换窗口紧急回退必须持久化 SQLite 覆盖',
+  )
+  assert.equal(
+    rollbackResult.payload?.data?.activeOverride?.config?.DB_SYNC,
+    false,
+    '自动迁移回退必须固定 DB_SYNC=false',
+  )
+
+  const pendingTask = await readMigrationTask(client, createdTask.id)
+  assert.equal(pendingTask.status, 'restart_pending', 'SQLite 真正重启验收前不得提前标记 rolled_back')
+
+  await waitForOneboxRestart(composeEnv, initialState.restartCount, client, createdTask.id)
+  const terminalTask = await waitForTaskTerminal(client, createdTask.id)
+  assert.equal(terminalTask.status, 'rolled_back', 'SQLite 重启验收后任务必须标记 rolled_back')
+  const finalRuntimeState = await waitForRuntimeState({
+    baseUrl,
+    client,
+    label: '切换窗口紧急回退后 SQLite 生效且维护解除',
+    dbType: 'sqlite',
+    readOnly: false,
+  })
+  assert.equal(finalRuntimeState.runtimeState.effectiveDatabase?.source, 'runtime_override')
+  assert.deepEqual(await readExportSnapshot(client), baselineSnapshot, '切换窗口紧急回退后 SQLite 内容发生变化')
+  log('切换窗口紧急回退断言通过：路径保护、持久化握手、重启后终态与 SQLite 内容一致')
+}
+
+const runCutoverCancelPersistenceFailureScenario = async ({
+  baseUrl,
+  client,
+  composeEnv,
+  baselineSnapshot,
+}) => {
+  const initialState = await getOneboxContainerState(composeEnv)
+  const createdTask = await createAutomaticTask(client, {
+    ...mysqlTarget,
+    password: mysqlPassword,
+  })
+  await waitForMaintenanceReadOnly(baseUrl, client, createdTask.id)
+  await waitForCutoverCancelWindow(composeEnv, createdTask.id)
+
+  const rollbackResult = await client.request('/api/data-maintenance/db-migration/rollback', {
+    method: 'POST',
+    expectedStatuses: [500],
+    body: {
+      taskId: createdTask.id,
+      reason: 'E2E：注入取消意图持久化失败',
+    },
+  })
+  assert.equal(rollbackResult.response.status, 500, '取消意图写盘失败必须明确返回失败')
+
+  const returnedState = await assertReturnedToSqlite(baseUrl, client)
+  await assertCutoverArtifactsAbsent(composeEnv, returnedState.runtimeState, '取消意图写盘失败补偿')
+  await assertAutomaticFailureCleanupArtifactsAbsent(
+    composeEnv,
+    createdTask.id,
+    '取消意图写盘失败补偿',
+  )
+  const beforeForcedRestart = await getOneboxContainerState(composeEnv)
+  assert.equal(
+    beforeForcedRestart.restartCount,
+    initialState.restartCount,
+    '取消意图写盘失败不应触发 MySQL 切换重启',
+  )
+
+  await runCompose(['restart', 'onebox'], {
+    env: composeEnv,
+    label: '强制重启 onebox 验证失败任务不会意外续跑',
+  })
+  await waitForInitialService(baseUrl)
+  await client.login()
+  const afterRestartState = await waitForRuntimeState({
+    baseUrl,
+    client,
+    label: '取消持久化失败后的强制重启仍使用 SQLite',
+    dbType: 'sqlite',
+    readOnly: false,
+  })
+  assert.equal(afterRestartState.runtimeState.effectiveDatabase?.source, 'environment')
+  assert.deepEqual(await readExportSnapshot(client), baselineSnapshot, '强制重启后 SQLite 内容发生变化')
+  log('取消意图写盘失败断言通过：切换已补偿、资源已清理且重启后未意外续跑')
+}
+
+const runRollbackFinalizerPersistenceFailureScenario = async ({
+  baseUrl,
+  client,
+  composeEnv,
+  baselineSnapshot,
+}) => {
+  const createdTask = await createAutomaticTask(client, {
+    ...mysqlTarget,
+    password: mysqlPassword,
+  })
+  await waitForMaintenanceReadOnly(baseUrl, client, createdTask.id)
+
+  const finalRuntimeState = await waitForRuntimeState({
+    baseUrl,
+    client,
+    label: '回退终态写盘失败后 SQLite 仍完成启动收尾',
+    dbType: 'sqlite',
+    readOnly: false,
+  })
+  assert.equal(finalRuntimeState.runtimeState.effectiveDatabase?.source, 'runtime_override')
+  const persistedTask = await readMigrationTask(client, createdTask.id)
+  assert.notEqual(
+    persistedTask.status,
+    'rolled_back',
+    '持续故障注入下任务文件不应伪装成已成功写入 rolled_back',
+  )
+  await assertRollbackFinalizationArtifactsAbsent(
+    composeEnv,
+    createdTask.id,
+    '回退终态写盘失败',
+  )
+  await client.login()
+  await assertMigrationAuditExists(client, 'database_migration.automatic_rolled_back', createdTask.id)
+  assert.deepEqual(await readExportSnapshot(client), baselineSnapshot, '回退终态写盘失败后 SQLite 内容发生变化')
+  log('回退终态写盘失败断言通过：SQLite 服务恢复、维护解除且控制面未进入启动循环')
+}
+
+const assertTaskCreationArtifactsAbsent = async (composeEnv, label) => {
+  await runCompose(
+    [
+      'exec',
+      '-T',
+      'onebox',
+      'node',
+      '-e',
+      [
+        "const fs = require('node:fs')",
+        "const lock = '/app/data/database-migration/automatic-migration.lock'",
+        "const secrets = '/app/data/database-migration/secrets'",
+        "const secretFiles = fs.existsSync(secrets) ? fs.readdirSync(secrets).filter((name) => name.endsWith('.json')) : []",
+        'if (fs.existsSync(lock) || secretFiles.length > 0) process.exit(1)',
+      ].join(';'),
+    ],
+    {
+      capture: true,
+      env: composeEnv,
+      label: `${label}任务密钥与自动迁移锁清理断言`,
+    },
+  )
+}
+
+const runTaskCreationPersistenceFailureScenario = async ({
+  client,
+  composeEnv,
+}) => {
+  const initialTaskIds = await readMigrationTaskIds(client)
+  const manualTarget = {
+    ...mysqlTarget,
+    password: mysqlPassword,
+    dbSync: false,
+  }
+  const automaticTarget = {
+    ...mysqlTarget,
+    password: mysqlPassword,
+  }
+
+  const manualResult = await client.request('/api/data-maintenance/db-migration/tasks', {
+    method: 'POST',
+    expectedStatuses: [500],
+    body: {
+      target: manualTarget,
+      allowTargetWithData: false,
+      initializeSchema: true,
+      clearTargetBeforeImport: false,
+      switchAfterSuccess: false,
+      note: 'E2E：手动任务首次写盘失败后清理密钥',
+    },
+    timeoutMs: 60_000,
+  })
+  assert.equal(manualResult.response.status, 500, '手动任务首次写盘故障必须返回 HTTP 500')
+  assert.deepEqual(await readMigrationTaskIds(client), initialTaskIds, '手动任务首次写盘失败后不得留下任务记录')
+  await assertTaskCreationArtifactsAbsent(composeEnv, '手动任务首次写盘失败后')
+
+  const automaticResult = await client.request(
+    '/api/data-maintenance/db-migration/automatic-tasks',
+    {
+      method: 'POST',
+      expectedStatuses: [500],
+      body: {
+        target: automaticTarget,
+        note: 'E2E：自动任务首次写盘失败后清理密钥与锁',
+      },
+      timeoutMs: 60_000,
+    },
+  )
+  assert.equal(automaticResult.response.status, 500, '自动任务首次写盘故障必须返回 HTTP 500')
+  assert.deepEqual(await readMigrationTaskIds(client), initialTaskIds, '自动任务首次写盘失败后不得留下任务记录')
+  await assertTaskCreationArtifactsAbsent(composeEnv, '自动任务首次写盘失败后')
+  log('任务首次写盘失败断言通过：手动任务密钥、自动任务密钥与自动迁移锁均未残留')
+}
+
+const runCorruptedActiveTaskScenario = async ({
+  baseUrl,
+  client,
+  composeEnv,
+}) => {
+  const createdTask = await createAutomaticTask(client, {
+    ...mysqlTarget,
+    password: mysqlPassword,
+  })
+  await waitForMaintenanceReadOnly(baseUrl, client, createdTask.id)
+  await waitForCutoverCancelWindow(composeEnv, createdTask.id)
+  await runCompose(
+    [
+      'exec',
+      '-T',
+      'onebox',
+      'node',
+      '-e',
+      "require('node:fs').writeFileSync(process.argv[1], '{', 'utf8')",
+      `/app/data/database-migration/tasks/${createdTask.id}.json`,
+    ],
+    {
+      env: composeEnv,
+      label: '损坏活动自动迁移任务文件',
+    },
+  )
+
+  const rollbackResult = await client.request('/api/data-maintenance/db-migration/rollback', {
+    method: 'POST',
+    expectedStatuses: [409],
+    body: {
+      taskId: createdTask.id,
+      reason: 'E2E：损坏任务文件时保持故障关闭',
+    },
+  })
+  assert.equal(rollbackResult.response.status, 409, '损坏活动任务必须阻断紧急回退')
+  await assertAutomaticControlArtifactsPresent(composeEnv, createdTask.id, '活动任务损坏后')
+  const health = await readHealth(baseUrl)
+  assert.equal(health.maintenance?.readOnly, true, '活动任务损坏后必须保持只读维护')
+  log('损坏活动任务断言通过：回退被阻断且覆盖、marker、维护、锁和密钥均保持原状')
+}
+
+const runCorruptedCutoverMarkerScenario = async ({
+  baseUrl,
+  client,
+  composeEnv,
+}) => {
+  const initialState = await getOneboxContainerState(composeEnv)
+  const createdTask = await createAutomaticTask(client, {
+    ...mysqlTarget,
+    password: mysqlPassword,
+  })
+  await waitForMaintenanceReadOnly(baseUrl, client, createdTask.id)
+  await waitForCutoverCancelWindow(composeEnv, createdTask.id)
+  await runCompose(
+    [
+      'exec',
+      '-T',
+      'onebox',
+      'node',
+      '-e',
+      "require('node:fs').writeFileSync(process.argv[1], '{', 'utf8')",
+      '/app/data/runtime/database-migration-cutover.json',
+    ],
+    {
+      env: composeEnv,
+      label: '损坏活动数据库切换 marker',
+    },
+  )
+  await runCompose(['restart', 'onebox'], {
+    env: composeEnv,
+    label: '重启 onebox 验证损坏 marker 故障关闭',
+  })
+
+  await waitFor(
+    '损坏 marker 启动失败并进入受控重启',
+    async () => {
+      const state = await getOneboxContainerState(composeEnv)
+      return state.restartCount > initialState.restartCount ? state : null
+    },
+    {
+      intervalMs: 250,
+      timeoutMs: 60_000,
+    },
+  )
+
+  const logsResult = await runCompose(
+    ['logs', '--no-color', '--tail', '200', 'onebox'],
+    {
+      capture: true,
+      env: composeEnv,
+      label: '读取损坏 marker 启动日志',
+    },
+  )
+  assert.match(
+    `${logsResult.stdout}\n${logsResult.stderr}`,
+    /数据库迁移切换标记存在但已损坏，已禁止启动期 schema 与业务写入/,
+    '损坏 marker 启动必须给出故障关闭日志',
+  )
+  await runCompose(
+    [
+      'run',
+      '--rm',
+      '--no-deps',
+      '--entrypoint',
+      'sh',
+      'onebox',
+      '-ec',
+      [
+        'test -s /app/data/runtime/database-runtime-override.json',
+        'test -s /app/data/runtime/database-migration-cutover.json',
+        'test -s /app/data/runtime/maintenance-state.json',
+        'test -s /app/data/database-migration/automatic-migration.lock',
+        'test -s "/app/data/database-migration/secrets/$1.json"',
+      ].join(' && '),
+      'assert-corrupted-marker-control-artifacts',
+      createdTask.id,
+    ],
+    {
+      capture: true,
+      env: composeEnv,
+      label: '损坏 marker 启动后控制面文件保留断言',
+    },
+  )
+  log('损坏 marker 启动断言通过：禁止 schema/业务写入并保留覆盖、维护、锁和凭据等待人工恢复')
+}
+
 const runFailureRollbackScenario = async ({ baseUrl, client, composeEnv, baselineSnapshot, fixtureManifest }) => {
   const initialState = await getOneboxContainerState(composeEnv)
   const createdTask = await createAutomaticTask(client, {
@@ -1618,6 +2095,30 @@ const runSelectedScenario = async (context) => {
   }
   if (scenario === 'cutover-persistence-failure') {
     await runCutoverPersistenceFailureScenario(context)
+    return
+  }
+  if (scenario === 'switching-emergency-rollback') {
+    await runSwitchingEmergencyRollbackScenario(context)
+    return
+  }
+  if (scenario === 'cutover-cancel-persistence-failure') {
+    await runCutoverCancelPersistenceFailureScenario(context)
+    return
+  }
+  if (scenario === 'rollback-finalizer-persistence-failure') {
+    await runRollbackFinalizerPersistenceFailureScenario(context)
+    return
+  }
+  if (scenario === 'task-creation-persistence-failure') {
+    await runTaskCreationPersistenceFailureScenario(context)
+    return
+  }
+  if (scenario === 'corrupted-active-task') {
+    await runCorruptedActiveTaskScenario(context)
+    return
+  }
+  if (scenario === 'corrupted-cutover-marker') {
+    await runCorruptedCutoverMarkerScenario(context)
     return
   }
   if (scenario === 'verifying-emergency-rollback') {

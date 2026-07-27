@@ -53,6 +53,12 @@ jobs:
           - content-tamper
           - execution-interruption
           - cutover-persistence-failure
+          - switching-emergency-rollback
+          - cutover-cancel-persistence-failure
+          - rollback-finalizer-persistence-failure
+          - task-creation-persistence-failure
+          - corrupted-active-task
+          - corrupted-cutover-marker
           - verifying-emergency-rollback
           - failure-rollback
     steps:
