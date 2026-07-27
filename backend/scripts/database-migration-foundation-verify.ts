@@ -25,6 +25,31 @@ import {
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'y-link-db-migration-foundation-'))
 
 try {
+  const backendIndexSource = fs.readFileSync(path.resolve(import.meta.dirname, '../src/index.ts'), 'utf8')
+  const resumeCallIndex = backendIndexSource.indexOf(
+    'databaseMigrationService.resumeInterruptedAutomaticMigrationAfterStartup()',
+  )
+  const resumeChainSource = backendIndexSource.slice(resumeCallIndex, resumeCallIndex + 1_500)
+  const catchIndex = resumeChainSource.indexOf('.catch(')
+  const finallyIndex = resumeChainSource.indexOf('.finally(')
+  const readOnlyGuardIndex = resumeChainSource.indexOf(
+    'if (!databaseMaintenanceModeService.isReadOnly())',
+  )
+  const timeoutRecycleStartIndex = resumeChainSource.indexOf(
+    'o2oPreorderService.startTimeoutRecycleLoop()',
+  )
+  assert.ok(resumeCallIndex >= 0, '启动入口必须恢复意外中断的自动迁移任务')
+  assert.ok(catchIndex >= 0, '自动迁移恢复异常必须记录并收敛')
+  assert.ok(finallyIndex > catchIndex, '自动迁移恢复成功或失败后都必须进入统一后台任务恢复分支')
+  assert.ok(
+    readOnlyGuardIndex > finallyIndex,
+    '后台任务恢复必须在 finally 中复核数据库只读维护状态',
+  )
+  assert.ok(
+    timeoutRecycleStartIndex > readOnlyGuardIndex,
+    '非只读状态下必须在统一恢复分支启动 O2O 超时回收',
+  )
+
   const paths = resolveAppDataPaths(tempRoot)
   assert.equal(paths.rootDir, path.resolve(tempRoot))
   assert.equal(paths.databaseMigrationDir, path.join(path.resolve(tempRoot), 'database-migration'))

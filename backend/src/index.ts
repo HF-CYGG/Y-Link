@@ -379,13 +379,14 @@ async function bootstrap(): Promise<void> {
     if (taskId) {
       logLine('DB MIGRATION', `task=${taskId} 已调度自动续跑`, 'warn')
     }
+  }).catch((error) => {
+    console.error(paint('[y-link-backend] resume automatic database migration failed:', 'red'), error)
+  }).finally(() => {
     if (!databaseMaintenanceModeService.isReadOnly()) {
       o2oPreorderService.startTimeoutRecycleLoop()
     } else {
       logLine('DB MIGRATION', '数据库仍处于只读维护，后台写任务保持暂停', 'warn')
     }
-  }).catch((error) => {
-    console.error(paint('[y-link-backend] resume automatic database migration failed:', 'red'), error)
   })
 }
 
