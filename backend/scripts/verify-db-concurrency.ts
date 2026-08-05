@@ -9,6 +9,7 @@
  */
 
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import { createConnection } from 'mysql2/promise'
 
 const VERIFY_TEMP_DATABASE_NAME = 'y_link_verify_db_concurrency'
@@ -177,10 +178,22 @@ async function dropVerifyDatabase(config: VerifyMysqlRuntimeConfig) {
 }
 
 async function verifyOrderSerialConcurrency() {
-  const [{ AppDataSource }, { systemConfigService }, { orderSerialService }] = await Promise.all([
+  const [
+    { AppDataSource },
+    { systemConfigService },
+    { orderSerialService },
+    { o2oPreorderService },
+    { productService },
+    { ClientUser },
+    { O2oPreorder },
+  ] = await Promise.all([
     import('../src/config/data-source.js'),
     import('../src/services/system-config.service.js'),
     import('../src/services/order-serial.service.js'),
+    import('../src/services/o2o-preorder.service.js'),
+    import('../src/services/product.service.js'),
+    import('../src/entities/client-user.entity.js'),
+    import('../src/entities/o2o-preorder.entity.js'),
   ])
 
   await AppDataSource.initialize()
@@ -215,6 +228,92 @@ async function verifyOrderSerialConcurrency() {
     assert.equal(walkinConfig.current, Math.max(...walkinSerials))
     assert.equal(departmentConfig.current, Math.max(...departmentSerials))
     pass('并发写入后的 current 值与最终流水一致，没有发生回退或跳号')
+
+    const clientUserRepo = AppDataSource.getRepository(ClientUser)
+    const clientUser = await clientUserRepo.save(clientUserRepo.create({
+      mobile: `1${Date.now().toString().slice(-10)}`,
+      email: null,
+      mobileVerifiedAt: new Date(),
+      emailVerifiedAt: null,
+      passwordHash: 'verify-only',
+      realName: '事务详情读取验证用户',
+      departmentName: '测试部门',
+      accountType: 'department',
+      staffNo: `VERIFY-${Date.now()}`,
+      staffVerified: true,
+      status: 'enabled',
+      lastLoginAt: null,
+    }))
+    const preorderRepo = AppDataSource.getRepository(O2oPreorder)
+    const preorder = await preorderRepo.save(preorderRepo.create({
+      showNo: `TX-${Date.now()}`,
+      clientUserId: String(clientUser.id),
+      verifyCode: randomUUID(),
+      status: 'pending',
+      clientOrderType: 'department',
+      departmentNameSnapshot: '测试部门',
+      staffNoSnapshot: clientUser.staffNo,
+      isSystemApplied: false,
+      hasCustomerOrder: false,
+      pickupContact: '事务验证',
+      totalQty: 0,
+      remark: null,
+      timeoutAt: new Date(Date.now() + 30 * 60 * 1000),
+    }))
+    const updatedDetail = await o2oPreorderService.updateComplianceFlagsByAdmin({
+      orderId: String(preorder.id),
+      hasCustomerOrder: true,
+      isSystemApplied: true,
+    })
+    assert.equal(updatedDetail.order.hasCustomerOrder, true)
+    assert.equal(updatedDetail.order.isSystemApplied, true)
+    pass('事务内详情读取复现通过：返回值使用同一 manager，可见未提交的最新写入')
+
+    const returnProduct = await productService.create({
+      productName: `MySQL 退货详情验证商品-${Date.now()}`,
+      pinyinAbbr: 'MYSQLTH',
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'listed',
+      currentStock: 5,
+      limitPerUser: 5,
+    } as Parameters<typeof productService.create>[0])
+    const returnSkuId = returnProduct.skus[0]?.id
+    assert.ok(returnSkuId)
+    const clientAuth = {
+      userId: String(clientUser.id),
+      account: clientUser.mobile ?? clientUser.staffNo ?? '',
+      mobile: clientUser.mobile ?? '',
+      email: clientUser.email ?? '',
+      realName: clientUser.realName,
+      accountType: clientUser.accountType,
+      staffNo: clientUser.staffNo,
+      sessionToken: 'verify-db-concurrency-client',
+    }
+    const returnOrder = await o2oPreorderService.submit(clientAuth, {
+      items: [{ productId: returnProduct.id, skuId: returnSkuId, qty: 1 }],
+      remark: 'MySQL 事务内退货详情验证',
+      pickupContact: '并发验收',
+      isSystemApplied: false,
+    })
+    await o2oPreorderService.verifyByCode(returnOrder.order.verifyCode, {
+      userId: '1',
+      username: 'verify-admin',
+      displayName: '并发验收管理员',
+      role: 'admin',
+      permissions: ['orders:create'],
+      status: 'enabled',
+      sessionToken: 'verify-db-concurrency-admin',
+      authSource: 'bearer',
+    })
+    const returnRequest = await o2oPreorderService.createReturnRequest(clientAuth, returnOrder.order.id, {
+      reason: 'MySQL 事务内退货详情验证',
+      items: [{ productId: returnProduct.id, skuId: returnSkuId, qty: 1 }],
+    })
+    assert.equal(returnRequest.items.length, 1)
+    assert.equal(returnRequest.items[0]?.skuId, returnSkuId)
+    pass('事务内退货详情读取复现通过：新建明细在提交前即可由同一 manager 返回')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()

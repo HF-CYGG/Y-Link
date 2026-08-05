@@ -38,11 +38,13 @@ CREATE TABLE IF NOT EXISTS `biz_inbound_order_item` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '入库明细ID',
   `order_id` BIGINT UNSIGNED NOT NULL COMMENT '入库主单ID',
   `product_id` BIGINT UNSIGNED NOT NULL COMMENT '商品ID',
+  `sku_id` BIGINT UNSIGNED DEFAULT NULL COMMENT '入库SKU ID',
   `product_name_snapshot` VARCHAR(255) NOT NULL COMMENT '商品名称快照',
   `qty` DECIMAL(10,2) NOT NULL DEFAULT 0.00 COMMENT '入库数量',
   PRIMARY KEY (`id`),
   KEY `idx_biz_inbound_item_order_id` (`order_id`),
   KEY `idx_biz_inbound_item_product_id` (`product_id`),
+  KEY `idx_biz_inbound_item_sku_id` (`sku_id`),
   CONSTRAINT `fk_biz_inbound_item_order_id` FOREIGN KEY (`order_id`) REFERENCES `biz_inbound_order` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT,
   CONSTRAINT `fk_biz_inbound_item_product_id` FOREIGN KEY (`product_id`) REFERENCES `base_product` (`id`) ON DELETE RESTRICT ON UPDATE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='入库明细表';

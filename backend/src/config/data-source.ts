@@ -36,6 +36,7 @@ import { NotificationRule } from '../entities/notification-rule.entity.js'
 import { NotificationEvent } from '../entities/notification-event.entity.js'
 import { NotificationInbox } from '../entities/notification-inbox.entity.js'
 import { NotificationDispatch } from '../entities/notification-dispatch.entity.js'
+import { AuthRiskState } from '../entities/auth-risk-state.entity.js'
 
 export const appEntities = [
   BaseProduct,
@@ -65,6 +66,7 @@ export const appEntities = [
   NotificationEvent,
   NotificationInbox,
   NotificationDispatch,
+  AuthRiskState,
 ]
 
 function resolveEffectiveDatabaseConfig(

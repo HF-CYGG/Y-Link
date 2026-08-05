@@ -5,9 +5,10 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { Brackets } from 'typeorm'
+import { Brackets, In, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
+import { BaseProductSku } from '../entities/base-product-sku.entity.js'
 import { BizInboundOrder } from '../entities/biz-inbound-order.entity.js'
 import { BizInboundOrderItem } from '../entities/biz-inbound-order-item.entity.js'
 import { InventoryLog } from '../entities/inventory-log.entity.js'
@@ -18,6 +19,7 @@ import type { RequestMeta } from '../utils/request-meta.js'
 
 export interface SubmitInboundItemInput {
   productId: string
+  skuId?: string | null
   qty: number
 }
 
@@ -94,6 +96,7 @@ class InboundService {
 
     const normalizedItems = items.map((item) => ({
       productId: String(item.productId).trim(),
+      skuId: item.skuId === null || item.skuId === undefined ? null : String(item.skuId).trim() || null,
       qty: Math.floor(Number(item.qty)),
     }))
 
@@ -104,6 +107,66 @@ class InboundService {
     })
 
     return normalizedItems
+  }
+
+  private isCurrentActiveSku(sku: Pick<BaseProductSku, 'isActive' | 'isCurrent'>): boolean {
+    const isEnabled = (value: unknown) => value !== false && value !== 0 && value !== '0' && value !== 'false'
+    return isEnabled(sku.isActive) && isEnabled(sku.isCurrent)
+  }
+
+  /**
+   * 为每一条入库明细锁定真实 SKU：
+   * - 新版调用方必须显式提交 skuId；
+   * - 兼容旧客户端时，仅在商品只有一个当前启用 SKU，或存在唯一“默认规格”时自动补齐；
+   * - 多规格商品不允许静默选中任意 SKU，避免把库存记到错误规格。
+   */
+  private async resolveInboundItemsWithSku(
+    items: ReturnType<InboundService['normalizeSupplierInboundItems']>,
+    productMap: Map<string, BaseProduct>,
+    manager: EntityManager,
+  ) {
+    const productIds = [...new Set(items.map((item) => item.productId))]
+    const skus = productIds.length
+      ? await manager.getRepository(BaseProductSku).find({ where: { productId: In(productIds) } })
+      : []
+    const skuById = new Map(skus.map((sku) => [String(sku.id), sku]))
+    const activeSkusByProduct = new Map<string, BaseProductSku[]>()
+    skus.filter((sku) => this.isCurrentActiveSku(sku)).forEach((sku) => {
+      const current = activeSkusByProduct.get(String(sku.productId)) ?? []
+      current.push(sku)
+      activeSkusByProduct.set(String(sku.productId), current)
+    })
+    activeSkusByProduct.forEach((rows) => rows.sort((left, right) => {
+      return Number(left.sortOrder ?? 0) - Number(right.sortOrder ?? 0) || Number(left.id) - Number(right.id)
+    }))
+
+    return items.map((item) => {
+      const product = productMap.get(item.productId)
+      if (!product) {
+        throw new BizError('存在无效或停用商品', 400)
+      }
+      if (item.skuId) {
+        const sku = skuById.get(item.skuId)
+        if (!sku || String(sku.productId) !== item.productId || !this.isCurrentActiveSku(sku)) {
+          throw new BizError(`商品“${product.productName}”的入库规格无效或已退役，请重新选择`, 409)
+        }
+        return { ...item, skuId: String(sku.id) }
+      }
+
+      const candidates = activeSkusByProduct.get(item.productId) ?? []
+      const defaultCandidates = candidates.filter((sku) => {
+        return sku.specText === '默认规格' || sku.specValuesJson === '{}'
+      })
+      const resolvedSku = candidates.length === 1
+        ? candidates[0]
+        : defaultCandidates.length === 1
+          ? defaultCandidates[0]
+          : null
+      if (!resolvedSku) {
+        throw new BizError(`商品“${product.productName}”存在多个规格，请明确选择入库 SKU`, 400)
+      }
+      return { ...item, skuId: String(resolvedSku.id) }
+    })
   }
 
   private async loadActiveProductsByIds(productIds: string[], manager = AppDataSource.manager) {
@@ -194,9 +257,10 @@ class InboundService {
     return AppDataSource.transaction(async (manager) => {
       const productIds = [...new Set(normalizedItems.map((item) => item.productId))]
       const productMap = await this.loadActiveProductsByIds(productIds, manager)
+      const resolvedItems = await this.resolveInboundItemsWithSku(normalizedItems, productMap, manager)
       
       let totalQty = 0
-      normalizedItems.forEach((item) => {
+      resolvedItems.forEach((item) => {
         totalQty += item.qty
       })
 
@@ -213,7 +277,7 @@ class InboundService {
         }),
       )
 
-      const itemEntities = normalizedItems.map((item) => {
+      const itemEntities = resolvedItems.map((item) => {
         const product = productMap.get(item.productId)
         if (!product) {
           throw new BizError('存在无效或停用商品', 400)
@@ -222,6 +286,7 @@ class InboundService {
         return manager.getRepository(BizInboundOrderItem).create({
           orderId: savedOrder.id,
           productId: item.productId,
+          skuId: item.skuId,
           productNameSnapshot: product.productName,
           qty: String(item.qty),
         })
@@ -245,7 +310,7 @@ class InboundService {
         },
       }, manager)
 
-      return this.detailById(savedOrder.id)
+      return this.detailById(savedOrder.id, manager)
     })
   }
 
@@ -257,12 +322,13 @@ class InboundService {
       const order = await this.findSupplierMutableOrder(orderId, actor, '改单', manager)
       const productIds = [...new Set(normalizedItems.map((item) => item.productId))]
       const productMap = await this.loadActiveProductsByIds(productIds, manager)
+      const resolvedItems = await this.resolveInboundItemsWithSku(normalizedItems, productMap, manager)
 
-      const nextTotalQty = normalizedItems.reduce((sum, item) => sum + item.qty, 0)
+      const nextTotalQty = resolvedItems.reduce((sum, item) => sum + item.qty, 0)
 
       await manager.getRepository(BizInboundOrderItem).delete({ orderId: order.id })
 
-      const nextItems = normalizedItems.map((item) => {
+      const nextItems = resolvedItems.map((item) => {
         const product = productMap.get(item.productId)
         if (!product) {
           throw new BizError('存在无效或停用商品', 400)
@@ -271,6 +337,7 @@ class InboundService {
         return manager.getRepository(BizInboundOrderItem).create({
           orderId: order.id,
           productId: item.productId,
+          skuId: item.skuId,
           productNameSnapshot: product.productName,
           qty: String(item.qty),
         })
@@ -490,11 +557,12 @@ class InboundService {
 
       const productIds = [...new Set(normalizedItems.map((item) => item.productId))]
       const productMap = await this.loadActiveProductsByIds(productIds, manager)
-      const nextTotalQty = normalizedItems.reduce((sum, item) => sum + item.qty, 0)
+      const resolvedItems = await this.resolveInboundItemsWithSku(normalizedItems, productMap, manager)
+      const nextTotalQty = resolvedItems.reduce((sum, item) => sum + item.qty, 0)
 
       await manager.getRepository(BizInboundOrderItem).delete({ orderId: order.id })
 
-      const nextItems = normalizedItems.map((item) => {
+      const nextItems = resolvedItems.map((item) => {
         const product = productMap.get(item.productId)
         if (!product) {
           throw new BizError('存在无效或停用商品', 400)
@@ -503,6 +571,7 @@ class InboundService {
         return manager.getRepository(BizInboundOrderItem).create({
           orderId: order.id,
           productId: item.productId,
+          skuId: item.skuId,
           productNameSnapshot: product.productName,
           qty: String(item.qty),
         })
@@ -622,12 +691,12 @@ class InboundService {
     }
   }
 
-  async detailById(id: string) {
-    const order = await this.inboundRepo.findOne({ where: { id } })
+  async detailById(id: string, manager: EntityManager = AppDataSource.manager) {
+    const order = await manager.getRepository(BizInboundOrder).findOne({ where: { id } })
     if (!order) {
       throw new BizError('送货单不存在', 404)
     }
-    const items = await this.inboundItemRepo.find({ where: { orderId: id } })
+    const items = await manager.getRepository(BizInboundOrderItem).find({ where: { orderId: id }, relations: { sku: true } })
     return { order, items }
   }
 
@@ -647,7 +716,7 @@ class InboundService {
     if (!order) {
       throw new BizError('核销码无效或送货单不存在', 404)
     }
-    const items = await this.inboundItemRepo.find({ where: { orderId: order.id } })
+    const items = await this.inboundItemRepo.find({ where: { orderId: order.id }, relations: { sku: true } })
     return { order, items }
   }
 
@@ -668,7 +737,7 @@ class InboundService {
     if (!order) {
       throw new BizError('送货单号无效或送货单不存在', 404)
     }
-    const items = await this.inboundItemRepo.find({ where: { orderId: order.id } })
+    const items = await this.inboundItemRepo.find({ where: { orderId: order.id }, relations: { sku: true } })
     return { order, items }
   }
 
@@ -697,7 +766,10 @@ class InboundService {
         throw new BizError('该送货单已取消', 409)
       }
 
-      const items = await manager.getRepository(BizInboundOrderItem).find({ where: { orderId: order.id } })
+      const items = await manager.getRepository(BizInboundOrderItem).find({
+        where: { orderId: order.id },
+        relations: { sku: true },
+      })
 
       for (const row of items) {
         const product = await manager.getRepository(BaseProduct).findOne({
@@ -706,10 +778,24 @@ class InboundService {
         })
         if (!product) continue
 
+        if (!row.skuId) {
+          throw new BizError(`商品“${product.productName}”的入库明细缺少 SKU，请先现场改单后再核销`, 409)
+        }
+        const sku = await manager.getRepository(BaseProductSku).findOne({
+          where: { id: String(row.skuId) },
+          lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+        })
+        if (!sku || String(sku.productId) !== String(product.id) || !this.isCurrentActiveSku(sku)) {
+          throw new BizError(`商品“${product.productName}”的入库 SKU 已失效，请先现场改单后再核销`, 409)
+        }
+
         const qty = Number(row.qty)
         const beforeCurrentStock = Number(product.currentStock ?? 0)
+        const beforeSkuCurrentStock = Number(sku.currentStock ?? 0)
         
         product.currentStock = beforeCurrentStock + qty
+        sku.currentStock = beforeSkuCurrentStock + qty
+        await manager.getRepository(BaseProductSku).save(sku)
         await manager.getRepository(BaseProduct).save(product)
 
         await manager.getRepository(InventoryLog).save(

@@ -11,6 +11,7 @@
  */
 
 import express from 'express'
+import { rateLimit } from 'express-rate-limit'
 import path from 'node:path'
 import fs from 'node:fs'
 import { ZodError } from 'zod'
@@ -37,6 +38,7 @@ import { userRouter } from './routes/user.routes.js'
 import { inboundRouter } from './routes/inbound.routes.js'
 import { BizError } from './utils/errors.js'
 import { databaseMaintenanceModeService } from './services/database-maintenance-mode.service.js'
+import { DatabaseRateLimitStore } from './services/persistent-risk-state.service.js'
 
 const UPLOAD_CACHE_CONTROL_VALUE = 'public, max-age=31536000, immutable'
 const UPLOAD_CONTENT_SECURITY_POLICY_VALUE = "default-src 'none'; img-src 'self' data:; style-src 'none'; sandbox"
@@ -62,6 +64,28 @@ export function createApp() {
   const app = express()
   app.set('trust proxy', 'loopback, linklocal, uniquelocal')
   app.disable('x-powered-by')
+
+  const createPublicAuthLimiter = (prefix: string, limit: number, limitedPaths: ReadonlySet<string>) => rateLimit({
+    windowMs: 5 * 60 * 1000,
+    limit,
+    standardHeaders: 'draft-8',
+    legacyHeaders: false,
+    skip: (req) => !limitedPaths.has(req.path),
+    store: new DatabaseRateLimitStore(prefix),
+    handler: (_req, res) => {
+      res.status(429).json({ code: 429, message: '认证请求过于频繁，请稍后再试' })
+    },
+  })
+  const adminAuthLimiter = createPublicAuthLimiter('express-admin-auth', 60, new Set(['/captcha', '/login']))
+  const clientAuthLimiter = createPublicAuthLimiter('express-client-auth', 180, new Set([
+    '/captcha',
+    '/capabilities',
+    '/verification-code/send',
+    '/register',
+    '/login',
+    '/forgot-password/verify',
+    '/forgot-password/reset',
+  ]))
 
   app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff')
@@ -150,8 +174,8 @@ export function createApp() {
 
   // 认证接口允许匿名访问，其中 logout / me 已在子路由内部再次做鉴权。
   const publicJsonParser = express.json({ limit: PUBLIC_JSON_BODY_LIMIT })
-  app.use('/api/auth', publicJsonParser, authRouter)
-  app.use('/api/client-auth', publicJsonParser, clientAuthRouter)
+  app.use('/api/auth', adminAuthLimiter, publicJsonParser, authRouter)
+  app.use('/api/client-auth', clientAuthLimiter, publicJsonParser, clientAuthRouter)
   app.use('/api/client-feedback', publicJsonParser, clientFeedbackRouter)
   app.use('/api/o2o', publicJsonParser, o2oRouter)
 

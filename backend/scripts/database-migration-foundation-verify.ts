@@ -102,6 +102,9 @@ try {
   assert.equal(restoredService.getPublicState().phase, 'snapshotting')
 
   assert.equal(shouldAllowWriteDuringDatabaseMaintenance('GET', '/api/products'), true)
+  assert.equal(shouldAllowWriteDuringDatabaseMaintenance('GET', '/api/auth/captcha'), false)
+  assert.equal(shouldAllowWriteDuringDatabaseMaintenance('HEAD', '/api/client-auth/captcha'), false)
+  assert.equal(shouldAllowWriteDuringDatabaseMaintenance('OPTIONS', '/api/client-auth/capabilities'), false)
   assert.equal(shouldAllowWriteDuringDatabaseMaintenance('POST', '/api/products'), false)
   assert.equal(
     shouldAllowWriteDuringDatabaseMaintenance('POST', '/api/data-maintenance/db-migration/rollback'),

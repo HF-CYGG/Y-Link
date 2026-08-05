@@ -7,6 +7,7 @@
 import { Column, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn, type Relation } from 'typeorm'
 import { BizInboundOrder } from './biz-inbound-order.entity.js'
 import { BaseProduct } from './base-product.entity.js'
+import { BaseProductSku } from './base-product-sku.entity.js'
 import { entityColumnOptions } from './entity-column-options.js'
 
 @Entity({ name: 'biz_inbound_order_item' })
@@ -34,6 +35,15 @@ export class BizInboundOrderItem {
   })
   productId!: string
 
+  @Index('idx_biz_inbound_item_sku_id')
+  @Column({
+    name: 'sku_id',
+    ...entityColumnOptions.foreignId,
+    nullable: true,
+    comment: '关联商品 SKU ID；历史明细允许为空，新建明细必须写入',
+  })
+  skuId!: string | null
+
   @Column({
     name: 'product_name_snapshot',
     type: 'varchar',
@@ -55,4 +65,8 @@ export class BizInboundOrderItem {
   @ManyToOne(() => BaseProduct, { onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'product_id' })
   product?: Relation<BaseProduct>
+
+  @ManyToOne(() => BaseProductSku, { onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'sku_id' })
+  sku?: Relation<BaseProductSku>
 }

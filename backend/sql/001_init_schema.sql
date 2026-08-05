@@ -123,6 +123,21 @@ CREATE TABLE IF NOT EXISTS `system_configs` (
   KEY `idx_system_configs_group` (`config_group`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='系统配置表';
 
+CREATE TABLE IF NOT EXISTS `auth_risk_state` (
+  `bucket_digest` VARCHAR(64) NOT NULL COMMENT '风控桶键 SHA-256 摘要',
+  `state_type` VARCHAR(24) NOT NULL COMMENT 'rate_limit/login_failure',
+  `request_timestamps_json` LONGTEXT DEFAULT NULL COMMENT '有界请求时间戳窗口',
+  `failure_count` INT NOT NULL DEFAULT 0 COMMENT '登录失败次数',
+  `first_failed_at` DATETIME(6) DEFAULT NULL,
+  `last_failed_at` DATETIME(6) DEFAULT NULL,
+  `locked_until` DATETIME(6) DEFAULT NULL,
+  `expires_at` DATETIME(6) NOT NULL COMMENT '状态过期时间',
+  `created_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+  `updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
+  PRIMARY KEY (`bucket_digest`),
+  KEY `idx_auth_risk_state_expires_at` (`expires_at`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='共享认证风控状态';
+
 CREATE TABLE IF NOT EXISTS `biz_outbound_order` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '出库主单ID',
   `order_uuid` CHAR(36) NOT NULL COMMENT '系统唯一UUID',
@@ -226,11 +241,13 @@ CREATE TABLE IF NOT EXISTS `biz_inbound_order_item` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '入库明细ID',
   `order_id` BIGINT UNSIGNED NOT NULL COMMENT '入库主单ID',
   `product_id` BIGINT UNSIGNED NOT NULL COMMENT '商品ID',
+  `sku_id` BIGINT UNSIGNED DEFAULT NULL COMMENT '入库SKU ID',
   `product_name_snapshot` VARCHAR(255) NOT NULL COMMENT '商品名称快照',
   `qty` DECIMAL(10,2) NOT NULL DEFAULT 0.00 COMMENT '入库数量',
   PRIMARY KEY (`id`),
   KEY `idx_biz_inbound_item_order_id` (`order_id`),
   KEY `idx_biz_inbound_item_product_id` (`product_id`),
+  KEY `idx_biz_inbound_item_sku_id` (`sku_id`),
   CONSTRAINT `fk_biz_inbound_item_order_id` FOREIGN KEY (`order_id`) REFERENCES `biz_inbound_order` (`id`) ON DELETE CASCADE ON UPDATE RESTRICT,
   CONSTRAINT `fk_biz_inbound_item_product_id` FOREIGN KEY (`product_id`) REFERENCES `base_product` (`id`) ON DELETE RESTRICT ON UPDATE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='入库明细表';

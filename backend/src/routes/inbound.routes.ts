@@ -25,6 +25,7 @@ const submitInboundSchema = z.object({
   items: z.array(
     z.object({
       productId: z.string().min(1),
+      skuId: z.string().min(1).nullable().optional(),
       qty: z.number().int().positive(),
     }),
   ).min(1, '至少选择一个商品'),
@@ -48,6 +49,7 @@ const updateSupplierInboundSchema = z.object({
   items: z.array(
     z.object({
       productId: z.string().min(1),
+      skuId: z.string().min(1).nullable().optional(),
       qty: z.number().int().positive(),
     }),
   ).min(1, '至少选择一个商品'),

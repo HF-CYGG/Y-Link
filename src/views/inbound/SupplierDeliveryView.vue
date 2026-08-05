@@ -33,6 +33,7 @@ const products = ref<ProductRecord[]>([])
 interface DeliveryItemRow {
   uid: string
   productId: string
+  skuId: string
   qty: number
 }
 
@@ -41,10 +42,19 @@ const itemUidSeed = ref(0)
 const createDeliveryItemRow = (): DeliveryItemRow => ({
   uid: `delivery-item-${itemUidSeed.value++}`,
   productId: '',
+  skuId: '',
   qty: 1,
 })
 
 const getProductOptionValue = (product: ProductRecord) => String(product.id)
+const getActiveProductSkus = (productId: string) => {
+  return (products.value.find((product) => String(product.id) === String(productId))?.skus ?? [])
+    .filter((sku) => sku.id && sku.isActive !== false && sku.isCurrent !== false)
+}
+const handleProductChange = (item: DeliveryItemRow) => {
+  const candidates = getActiveProductSkus(item.productId)
+  item.skuId = candidates.length === 1 ? String(candidates[0]?.id ?? '') : ''
+}
 
 // 供货单明细
 const items = ref<DeliveryItemRow[]>([])
@@ -63,7 +73,7 @@ const totalQty = computed(() => {
 
 // 统计已选择商品行数，辅助右侧信息面板展示当前录入进度
 const selectedCount = computed(() => {
-  return items.value.filter((item) => item.productId).length
+  return items.value.filter((item) => item.productId && item.skuId).length
 })
 
 // 录入完成度：用于侧边辅助区展示当前选择进度，帮助供货方快速判断是否仍有空行待补全。
@@ -141,7 +151,7 @@ const handleSubmit = async () => {
   }
 
   // 仅提交“商品已选中且数量>0”的有效行，避免空行污染数据
-  const validItems = items.value.filter((item) => item.productId && item.qty > 0)
+  const validItems = items.value.filter((item) => item.productId && item.skuId && item.qty > 0)
   if (!validItems.length) {
     showAppWarning('请至少添加一件有效的送货商品')
     return
@@ -157,16 +167,21 @@ const handleSubmit = async () => {
     return
   }
 
-  // 按商品 ID 聚合数量，兼容同一商品被多次录入的场景。
+  // 按商品 + SKU 聚合数量，兼容同一规格被多次录入的场景。
   const uniqueItems = new Map<string, number>()
   for (const item of validItems) {
     const productId = String(item.productId).trim()
-    uniqueItems.set(productId, (uniqueItems.get(productId) || 0) + item.qty)
+    const skuId = String(item.skuId).trim()
+    const key = `${productId}:${skuId}`
+    uniqueItems.set(key, (uniqueItems.get(key) || 0) + item.qty)
   }
 
   const submitData = {
     remark: remark.value.trim(),
-    items: Array.from(uniqueItems.entries()).map(([productId, qty]) => ({ productId, qty })),
+    items: Array.from(uniqueItems.entries()).map(([key, qty]) => {
+      const [productId, skuId] = key.split(':')
+      return { productId, skuId, qty }
+    }),
   }
 
   submitting.value = true
@@ -260,6 +275,7 @@ onMounted(() => {
                       :disabled="hasNoProducts"
                       empty-text="暂无可送货商品"
                       class="w-full"
+                      @change="handleProductChange(item)"
                     >
                       <el-option
                         v-for="product in products"
@@ -270,6 +286,22 @@ onMounted(() => {
                         <span class="float-left">{{ product.productName }}</span>
                         <span class="float-right text-sm text-slate-400">{{ product.productCode }}</span>
                       </el-option>
+                    </el-select>
+                  </div>
+                  <div class="flex-1">
+                    <el-select
+                      v-model="item.skuId"
+                      placeholder="请选择规格"
+                      filterable
+                      :disabled="!item.productId"
+                      class="w-full"
+                    >
+                      <el-option
+                        v-for="sku in getActiveProductSkus(item.productId)"
+                        :key="String(sku.id)"
+                        :label="`${sku.specText || '默认规格'}（${sku.skuCode || sku.id}）`"
+                        :value="String(sku.id)"
+                      />
                     </el-select>
                   </div>
                   <div class="w-full lg:w-36">

@@ -42,6 +42,7 @@ const SQLITE_REQUIRED_TABLES = [
   'notification_event',
   'notification_inbox',
   'notification_dispatch',
+  'auth_risk_state',
 ]
 
 async function migrateLegacyFeedbackAttachments(dataSource: DataSource) {
@@ -213,6 +214,7 @@ const SQLITE_REQUIRED_BIZ_INBOUND_ORDER_COLUMNS = [
   'deleted_by_username',
   'deleted_by_display_name',
 ]
+const SQLITE_REQUIRED_BIZ_INBOUND_ORDER_ITEM_COLUMNS = ['sku_id']
 const SQLITE_REQUIRED_NOTIFICATION_RULE_COLUMNS = [
   'email_recipient_admin_user_ids_json',
   'email_recipient_supplier_user_ids_json',
@@ -600,6 +602,34 @@ async function normalizeSqliteO2oDiscountColumns(dataSource: DataSource): Promis
   `)
 }
 
+async function normalizeSqliteInboundSkuColumn(dataSource: DataSource): Promise<void> {
+  const itemColumnSet = await listSqliteTableColumns(dataSource, 'biz_inbound_order_item')
+  if (itemColumnSet.size === 0) {
+    return
+  }
+  if (!itemColumnSet.has('sku_id')) {
+    await dataSource.query(`ALTER TABLE "biz_inbound_order_item" ADD COLUMN "sku_id" integer NULL`)
+  }
+
+  // 历史入库明细没有 SKU 维度；迁移时优先绑定“默认规格”，其次绑定排序最前的当前启用 SKU。
+  await dataSource.query(`
+    UPDATE "biz_inbound_order_item"
+    SET "sku_id" = (
+      SELECT "sku"."id"
+      FROM "base_product_sku" AS "sku"
+      WHERE "sku"."product_id" = "biz_inbound_order_item"."product_id"
+        AND "sku"."is_active" = 1
+        AND "sku"."is_current" = 1
+      ORDER BY
+        CASE WHEN "sku"."spec_text" = '默认规格' OR "sku"."spec_values_json" = '{}' THEN 0 ELSE 1 END,
+        "sku"."sort_order" ASC,
+        "sku"."id" ASC
+      LIMIT 1
+    )
+    WHERE "sku_id" IS NULL
+  `)
+}
+
 export function resolveSqliteDatabasePath(sqliteDbPath = env.SQLITE_DB_PATH): string {
   return path.isAbsolute(sqliteDbPath)
     ? sqliteDbPath
@@ -772,6 +802,11 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
     return true
   }
 
+  const inboundOrderItemColumnSet = await listSqliteTableColumns(dataSource, 'biz_inbound_order_item')
+  if (SQLITE_REQUIRED_BIZ_INBOUND_ORDER_ITEM_COLUMNS.some((column) => !inboundOrderItemColumnSet.has(column))) {
+    return true
+  }
+
   const notificationRuleColumnSet = await listSqliteTableColumns(dataSource, 'notification_rule')
   if (SQLITE_REQUIRED_NOTIFICATION_RULE_COLUMNS.some((column) => !notificationRuleColumnSet.has(column))) {
     return true
@@ -783,6 +818,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   if (env.DB_TYPE === 'sqlite') {
     await normalizeSqliteOutboundItemColumns(dataSource)
     await normalizeSqliteO2oDiscountColumns(dataSource)
+    await normalizeSqliteInboundSkuColumn(dataSource)
     await ensureSqliteMallCatalogIndexes(dataSource)
   }
 

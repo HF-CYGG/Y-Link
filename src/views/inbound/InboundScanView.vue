@@ -48,6 +48,7 @@ const products = ref<ProductRecord[]>([])
 interface EditItemRow {
   uid: string
   productId: string
+  skuId: string
   qty: number
 }
 
@@ -55,10 +56,19 @@ const editUidSeed = ref(0)
 const createEditRow = (): EditItemRow => ({
   uid: `inbound-scan-edit-${editUidSeed.value++}`,
   productId: '',
+  skuId: '',
   qty: 1,
 })
 
 const getProductOptionValue = (product: ProductRecord) => String(product.id)
+const getActiveProductSkus = (productId: string) => {
+  return (products.value.find((product) => String(product.id) === String(productId))?.skus ?? [])
+    .filter((sku) => sku.id && sku.isActive !== false && sku.isCurrent !== false)
+}
+const handleEditProductChange = (item: EditItemRow) => {
+  const candidates = getActiveProductSkus(item.productId)
+  item.skuId = candidates.length === 1 ? String(candidates[0]?.id ?? '') : ''
+}
 
 const editForm = reactive({
   orderId: '',
@@ -183,6 +193,7 @@ const hydrateEditForm = (detail: InboundOrderDetail) => {
   editForm.items = detail.items.map((item) => ({
     uid: `inbound-scan-edit-${editUidSeed.value++}`,
     productId: String(item.productId),
+    skuId: String(item.skuId ?? ''),
     qty: Number(item.qty) || 1,
   }))
 
@@ -214,6 +225,14 @@ const ensureProductOptionsFromDetail = (detail: InboundOrderDetail) => {
       availableStock: 0,
       tagIds: [],
       tags: [],
+      skus: item.skuId ? [{
+        id: String(item.skuId),
+        productId: String(item.productId),
+        specText: '历史规格',
+        skuCode: String(item.skuId),
+        isActive: true,
+        isCurrent: true,
+      }] : [],
     }))
 
   if (fallbackProducts.length) {
@@ -388,7 +407,7 @@ const handleRemoveEditItem = (index: number) => {
 }
 
 const buildEditPayload = () => {
-  const validItems = editForm.items.filter((item) => item.productId && item.qty > 0)
+  const validItems = editForm.items.filter((item) => item.productId && item.skuId && item.qty > 0)
   if (!validItems.length) {
     throw new Error('请至少保留一件有效商品')
   }
@@ -396,12 +415,17 @@ const buildEditPayload = () => {
   const mergedItems = new Map<string, number>()
   validItems.forEach((item) => {
     const productId = String(item.productId).trim()
-    mergedItems.set(productId, (mergedItems.get(productId) || 0) + item.qty)
+    const skuId = String(item.skuId).trim()
+    const key = `${productId}:${skuId}`
+    mergedItems.set(key, (mergedItems.get(key) || 0) + item.qty)
   })
 
   return {
     remark: editForm.remark.trim(),
-    items: Array.from(mergedItems.entries()).map(([productId, qty]) => ({ productId, qty })),
+    items: Array.from(mergedItems.entries()).map(([key, qty]) => {
+      const [productId, skuId] = key.split(':')
+      return { productId, skuId, qty }
+    }),
   }
 }
 
@@ -410,7 +434,7 @@ const handleSubmitEdit = async () => {
     return
   }
 
-  let payload: { remark: string; items: Array<{ productId: string; qty: number }> }
+  let payload: { remark: string; items: Array<{ productId: string; skuId: string; qty: number }> }
   try {
     payload = buildEditPayload()
   } catch (error) {
@@ -767,6 +791,7 @@ onBeforeUnmount(() => {
                 class="w-full"
                 placeholder="请选择商品"
                 :loading="editProductsLoading"
+                @change="handleEditProductChange(item)"
               >
                 <el-option
                   v-for="product in products"
@@ -777,6 +802,22 @@ onBeforeUnmount(() => {
                   <span class="float-left">{{ product.productName }}</span>
                   <span class="float-right text-sm text-slate-400">{{ product.productCode }}</span>
                 </el-option>
+              </el-select>
+            </div>
+            <div class="flex-1">
+              <el-select
+                v-model="item.skuId"
+                filterable
+                class="w-full"
+                placeholder="请选择规格"
+                :disabled="!item.productId"
+              >
+                <el-option
+                  v-for="sku in getActiveProductSkus(item.productId)"
+                  :key="String(sku.id)"
+                  :label="`${sku.specText || '默认规格'}（${sku.skuCode || sku.id}）`"
+                  :value="String(sku.id)"
+                />
               </el-select>
             </div>
             <div class="w-full lg:w-36">
@@ -818,7 +859,7 @@ onBeforeUnmount(() => {
       <template #footer>
         <div class="flex justify-between gap-3">
           <div class="text-sm leading-6 text-slate-500 dark:text-slate-400">
-            当前共 {{ editForm.items.filter((item) => item.productId && item.qty > 0).length }} 行有效商品
+            当前共 {{ editForm.items.filter((item) => item.productId && item.skuId && item.qty > 0).length }} 行有效规格
           </div>
           <div class="flex justify-end gap-3">
             <el-button @click="editDialogVisible = false">取消</el-button>

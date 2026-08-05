@@ -723,7 +723,7 @@ class ClientAuthService {
   async login(input: ClientLoginInput, requestMeta?: RequestMeta) {
     const account = this.resolveLoginAccount(input.account)
     const password = input.password.trim()
-    if (authSecurityService.isClientLoginCaptchaRequired(requestMeta, account.normalizedValue)) {
+    if (await authSecurityService.isClientLoginCaptchaRequired(requestMeta, account.normalizedValue)) {
       this.verifyCaptchaIfRequired(input)
     }
     const user = await this.findUserWithPasswordByAccount(account)
@@ -765,7 +765,7 @@ class ClientAuthService {
       throw new BizError(loginErrorMessage, 401)
     }
     const session = await this.createSessionForUser(user)
-    authSecurityService.clearClientLoginFailures(requestMeta, account.normalizedValue)
+    await authSecurityService.clearClientLoginFailures(requestMeta, account.normalizedValue)
     return {
       token: session.token,
       expiresAt: session.expiresAt,

@@ -25,6 +25,11 @@ async function main() {
   const notificationService = read('src/services/notification.service.ts')
   const feedbackRoutes = read('src/routes/client-feedback.routes.ts')
   const o2oService = read('src/services/o2o-preorder.service.ts')
+  const o2oRoutes = read('src/routes/o2o.routes.ts')
+  const inboundEntity = read('src/entities/biz-inbound-order-item.entity.ts')
+  const authRiskEntity = read('src/entities/auth-risk-state.entity.ts')
+  const authSecurityService = read('src/services/auth-security.service.ts')
+  const persistentRiskStateService = read('src/services/persistent-risk-state.service.ts')
 
   requirePattern(staffEntity, /invite_code_digest/, '教职工目录必须保存不可逆邀请码摘要')
   requirePattern(staffEntity, /invite_locked_until/, '教职工目录必须持久化邀请码锁定状态')
@@ -50,6 +55,13 @@ async function main() {
   assert.doesNotMatch(notificationService, /feishuWebhookUrl:\s*row\.feishuWebhookUrl/, '通知规则读取不得返回完整 Webhook')
   requirePattern(feedbackRoutes, /attachments\/:id/, '反馈附件必须通过鉴权接口读取')
   requirePattern(o2oService, /SUM\([^)]*item[^)]*qty|SUM\([^)]*qty/i, 'O2O 限购必须累计待处理订单数量')
+  assert.doesNotMatch(o2oService, /shouldSyncProductStock/, 'SKU 核销和释放不得跳过商品汇总库存记账')
+  requirePattern(inboundEntity, /name:\s*'sku_id'/, '入库明细必须持久化 SKU ID')
+  requirePattern(o2oRoutes, /o2oAdminRouter\.use\(requireAuth,\s*requireAdminCsrf\)/, 'O2O 管理端子路由必须统一启用 CSRF')
+  requirePattern(appSource, /rateLimit\(/, '公共认证入口必须接入 express-rate-limit')
+  requirePattern(authRiskEntity, /bucket_digest/, '认证风控状态必须持久化摘要桶键')
+  requirePattern(persistentRiskStateService, /createHash\('sha256'\)/, '风控桶键落库前必须哈希')
+  assert.doesNotMatch(authSecurityService, /new Map</, '认证风控不得继续使用无界进程内 Map')
   requirePattern(
     appSource,
     /res\.json\(\{\s*status:\s*['"]UP['"],\s*maintenance:\s*databaseMaintenanceModeService\.getPublicState\(\),?\s*\}\)/,
@@ -65,6 +77,9 @@ async function main() {
   const migration = read('sql/032_security_findings_remediation.sql')
   requirePattern(migration, /client_feedback_attachment/, '迁移必须创建反馈附件归属表')
   requirePattern(migration, /mobile_verified_at/, '迁移必须包含联系方式验证字段')
+  const inventorySecurityMigration = read('sql/033_inventory_security_invariants.sql')
+  requirePattern(inventorySecurityMigration, /auth_risk_state/, '迁移必须创建共享认证风控状态表')
+  requirePattern(inventorySecurityMigration, /biz_inbound_order_item[\s\S]*sku_id/, '迁移必须补齐入库 SKU 外键')
 
   console.log('OK 15 项 Codex Security 修复契约均已关闭')
 }

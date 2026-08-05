@@ -1284,8 +1284,9 @@ class SystemConfigService {
     }
   }
 
-  async ensureDefaultConfigs(): Promise<{ insertedCount: number; totalCount: number }> {
-    const existingConfigs = await this.configRepo.find({
+  async ensureDefaultConfigs(manager: EntityManager = AppDataSource.manager): Promise<{ insertedCount: number; totalCount: number }> {
+    const configRepo = manager.getRepository(SystemConfig)
+    const existingConfigs = await configRepo.find({
       where: DEFAULT_SYSTEM_CONFIGS.map((config) => ({ configKey: config.configKey })),
       select: {
         id: true,
@@ -1297,7 +1298,7 @@ class SystemConfigService {
     const missingConfigs = DEFAULT_SYSTEM_CONFIGS.filter((config) => !existingKeySet.has(config.configKey))
 
     if (missingConfigs.length > 0) {
-      await this.configRepo.insert(missingConfigs)
+      await configRepo.insert(missingConfigs)
     }
 
     const legacyUpdateEntries: Array<{ id: string; configValue: string }> = []
@@ -1315,7 +1316,7 @@ class SystemConfigService {
     if (legacyUpdateEntries.length > 0) {
       await Promise.all(
         legacyUpdateEntries.map((item) =>
-          this.configRepo.update(
+          configRepo.update(
             { id: item.id },
             {
               configValue: item.configValue,
@@ -1441,9 +1442,9 @@ class SystemConfigService {
     })
   }
 
-  async getO2oRuleConfigs(): Promise<O2oRuleConfigRecord> {
-    await this.ensureDefaultConfigs()
-    const rows = await this.configRepo.find({
+  async getO2oRuleConfigs(manager: EntityManager = AppDataSource.manager): Promise<O2oRuleConfigRecord> {
+    await this.ensureDefaultConfigs(manager)
+    const rows = await manager.getRepository(SystemConfig).find({
       where: this.o2oConfigKeys.map((key) => ({ configKey: key })),
       select: {
         configKey: true,
@@ -1557,7 +1558,7 @@ class SystemConfigService {
         targetMap.set('o2o.client_preorder_update_limit', String(input.clientPreorderUpdateLimit))
       }
 
-      const before = await this.getO2oRuleConfigs()
+      const before = await this.getO2oRuleConfigs(manager)
       let changed = false
       const repo = manager.getRepository(SystemConfig)
       for (const row of lockedRows) {
@@ -1569,7 +1570,7 @@ class SystemConfigService {
         changed = true
       }
 
-      const config = await this.getO2oRuleConfigs()
+      const config = await this.getO2oRuleConfigs(manager)
 
       if (changed) {
         await auditService.record(

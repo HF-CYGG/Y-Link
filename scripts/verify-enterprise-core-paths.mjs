@@ -10,7 +10,6 @@ import path from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
-import { resolveTsxCliPath } from './process-runner-utils.mjs'
 
 /**
  * 核心路径自动化验证脚本：
@@ -33,7 +32,6 @@ const runtimeBudgetReportPath = path.join(runtimeRoot, 'enterprise-core-path-run
 const backendPort = Number(process.env.Y_LINK_PERF_VERIFY_BACKEND_PORT ?? 3301)
 const backendBaseUrl = `http://127.0.0.1:${backendPort}`
 const apiBaseUrl = `${backendBaseUrl}/api`
-const tsxCliPath = resolveTsxCliPath(backendRoot)
 // 性能验证使用隔离数据库，不应继续依赖历史默认弱口令，避免被后端安全策略直接拒绝。
 const defaultVerifyPassword = ['PerfVerify', '@', '2026', 'Core'].join('')
 const defaultSystemUserPassword = ['PerfSystem', '@', '2026', 'Flow'].join('')
@@ -192,7 +190,7 @@ const startIsolatedBackend = async () => {
 
   const stdoutChunks = []
   const stderrChunks = []
-  const backendProcess = spawn(process.execPath, [tsxCliPath, 'src/index.ts'], {
+  const backendProcess = spawn(process.execPath, ['--import', 'tsx', 'src/index.ts'], {
     cwd: backendRoot,
     env: {
       ...process.env,

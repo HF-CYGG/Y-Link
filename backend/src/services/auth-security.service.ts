@@ -2,23 +2,17 @@
  * 模块说明：backend/src/services/auth-security.service.ts
  * 文件职责：集中承接认证风控能力，包括频率限制、失败计数、临时锁定与异常审计。
  * 维护说明：
- * - 当前实现为单实例内存风控，适合现阶段单机/本地部署；
- * - 若后续升级多实例部署，应优先迁移到 Redis 等共享存储；
+ * - 风控桶键先做不可逆摘要，再持久化到数据库供多实例共享；
+ * - 时间窗内容有严格上限并按 expires_at 清理，避免匿名输入制造无界内存状态；
  * - 认证类接口应统一先经过本服务的 guard，再进入具体业务服务。
  */
 
 import type { RequestMeta } from '../utils/request-meta.js'
 import { BizError } from '../utils/errors.js'
 import { auditService } from './audit.service.js'
+import { persistentRiskStateService, type PersistentFailureState } from './persistent-risk-state.service.js'
 
 type FailureScope = 'admin-login' | 'client-login'
-
-interface FailureState {
-  count: number
-  firstFailedAt: number
-  lastFailedAt: number
-  lockedUntil: number
-}
 
 interface RateLimitConsumeResult {
   remainingRequests: number
@@ -190,72 +184,9 @@ const FAILURE_RESET_WINDOW_MS = {
 
 const LOGIN_REMAINING_WARNING_RATIO = 0.2
 const REGISTER_REMAINING_WARNING_THRESHOLD = 3
-const MAX_RATE_LIMIT_BUCKETS = 10000
-const MAX_FAILURE_STATE_BUCKETS = 5000
-const STORE_CLEANUP_INTERVAL_MS = 60 * 1000
-const MAX_RATE_LIMIT_WINDOW_MS = Math.max(...Object.values(RATE_LIMIT_RULES).map((rule) => rule.windowMs))
-
-let lastStoreCleanupAt = 0
-
-/**
- * 内存态时间窗口记录：
- * - key 一般由“接口 + 浏览器会话/浏览器实例/IP”或“接口 + 账号/手机号”组成；
- * - value 记录请求时间戳，用于滑动窗口频率限制。
- */
-const requestWindowStore = new Map<string, number[]>()
-
-/**
- * 登录失败态：
- * - 管理端继续按“来源 IP”和“账号/手机号”记录；
- * - 客户端公共认证接口按“来源 IP”和“账号/手机号”记录，避免信任未认证请求可随意伪造的浏览器风险请求头。
- */
-const failureStateStore = new Map<string, FailureState>()
-
 const normalizeRiskSource = (meta?: RequestMeta) => meta?.ipAddress?.trim() || 'unknown-ip'
 
 export class AuthSecurityService {
-  private trimRateLimitWindow(timestamps: number[], windowMs: number, nowMs: number) {
-    return timestamps.filter((timestamp) => nowMs - timestamp < windowMs)
-  }
-
-  private cleanupStores(nowMs: number) {
-    if (nowMs - lastStoreCleanupAt < STORE_CLEANUP_INTERVAL_MS) {
-      return
-    }
-    lastStoreCleanupAt = nowMs
-
-    for (const [key, timestamps] of requestWindowStore) {
-      const activeWindow = this.trimRateLimitWindow(timestamps, MAX_RATE_LIMIT_WINDOW_MS, nowMs)
-      if (activeWindow.length) {
-        requestWindowStore.set(key, activeWindow)
-      } else {
-        requestWindowStore.delete(key)
-      }
-    }
-
-    for (const [key, state] of failureStateStore) {
-      const isExpired =
-        state.lockedUntil <= nowMs &&
-        nowMs - state.lastFailedAt >= Math.max(...Object.values(FAILURE_RESET_WINDOW_MS))
-      if (isExpired) {
-        failureStateStore.delete(key)
-      }
-    }
-
-    this.evictOldestEntries(requestWindowStore, MAX_RATE_LIMIT_BUCKETS)
-    this.evictOldestEntries(failureStateStore, MAX_FAILURE_STATE_BUCKETS)
-  }
-
-  private evictOldestEntries(store: Map<string, unknown>, maxSize: number) {
-    while (store.size > maxSize) {
-      const oldestKey = store.keys().next().value
-      if (oldestKey === undefined) {
-        return
-      }
-      store.delete(oldestKey)
-    }
-  }
-
   private async recordRiskEvent(input: {
     actionType: string
     actionLabel: string
@@ -286,11 +217,10 @@ export class AuthSecurityService {
     },
   ): Promise<RateLimitConsumeResult> {
     const nowMs = Date.now()
-    this.cleanupStores(nowMs)
-    const existing = requestWindowStore.get(bucketKey) ?? []
-    const activeWindow = this.trimRateLimitWindow(existing, rule.windowMs, nowMs)
-    if (activeWindow.length >= rule.maxRequests) {
-      const waitMs = rule.windowMs - (nowMs - activeWindow[0])
+    const consumed = await persistentRiskStateService.consumeWindow(bucketKey, rule.windowMs, nowMs)
+    if (consumed.totalHits > rule.maxRequests) {
+      await persistentRiskStateService.decrementWindow(bucketKey, rule.windowMs, nowMs)
+      const waitMs = Math.max(1, (consumed.resetTime?.getTime() ?? nowMs + rule.windowMs) - nowMs)
       const riskDetail: Record<string, unknown> = {
         reason: 'rate_limit',
         waitSeconds: Math.max(1, Math.ceil(waitMs / 1000)),
@@ -304,25 +234,14 @@ export class AuthSecurityService {
       })
       throw new BizError(`${rule.blockMessage}（约 ${Math.max(1, Math.ceil(waitMs / 1000))} 秒后重试）`, 429)
     }
-    activeWindow.push(nowMs)
-    requestWindowStore.set(bucketKey, activeWindow)
-    this.evictOldestEntries(requestWindowStore, MAX_RATE_LIMIT_BUCKETS)
     return {
-      remainingRequests: Math.max(0, rule.maxRequests - activeWindow.length),
+      remainingRequests: Math.max(0, rule.maxRequests - consumed.totalHits),
       maxRequests: rule.maxRequests,
     }
   }
 
   private getFailureState(storeKey: string, scope: FailureScope, nowMs: number) {
-    const state = failureStateStore.get(storeKey)
-    if (!state) {
-      return null
-    }
-    if (nowMs - state.lastFailedAt >= FAILURE_RESET_WINDOW_MS[scope] && state.lockedUntil <= nowMs) {
-      failureStateStore.delete(storeKey)
-      return null
-    }
-    return state
+    return persistentRiskStateService.readFailure(storeKey, FAILURE_RESET_WINDOW_MS[scope], nowMs)
   }
 
   private async assertFailureNotLocked(
@@ -332,7 +251,7 @@ export class AuthSecurityService {
     targetCode: string,
   ) {
     const nowMs = Date.now()
-    const state = this.getFailureState(storeKey, scope, nowMs)
+    const state = await this.getFailureState(storeKey, scope, nowMs)
     if (!state || state.lockedUntil <= nowMs) {
       return
     }
@@ -358,29 +277,18 @@ export class AuthSecurityService {
     subjectKey: string,
   ): Promise<LoginFailureRecordResult> {
     const nowMs = Date.now()
-    this.cleanupStores(nowMs)
+    let currentSubjectState: PersistentFailureState | null = null
     for (const storeKey of [sourceKey, subjectKey]) {
-      const current = this.getFailureState(storeKey, scope, nowMs)
-      const next: FailureState = current
-        ? {
-            ...current,
-            count: current.count + 1,
-            lastFailedAt: nowMs,
-          }
-        : {
-            count: 1,
-            firstFailedAt: nowMs,
-            lastFailedAt: nowMs,
-            lockedUntil: 0,
-          }
-      if (next.count >= FAILURE_LOCK_THRESHOLD[scope]) {
-        next.lockedUntil = nowMs + FAILURE_LOCK_MS[scope]
-      }
-      failureStateStore.set(storeKey, next)
+      const next = await persistentRiskStateService.recordFailure(
+        storeKey,
+        FAILURE_RESET_WINDOW_MS[scope],
+        FAILURE_LOCK_THRESHOLD[scope],
+        FAILURE_LOCK_MS[scope],
+        nowMs,
+      )
+      if (storeKey === subjectKey) currentSubjectState = next
     }
-    this.evictOldestEntries(failureStateStore, MAX_FAILURE_STATE_BUCKETS)
 
-    const currentSubjectState = failureStateStore.get(subjectKey)
     const remainingAttempts = Math.max(0, FAILURE_LOCK_THRESHOLD[scope] - (currentSubjectState?.count ?? 0))
     const shouldWarnRemaining =
       remainingAttempts > 0 &&
@@ -407,14 +315,14 @@ export class AuthSecurityService {
     }
   }
 
-  private clearLoginFailures(sourceKey: string, subjectKey: string) {
-    failureStateStore.delete(sourceKey)
-    failureStateStore.delete(subjectKey)
+  private async clearLoginFailures(sourceKey: string, subjectKey: string) {
+    await persistentRiskStateService.resetFailure(sourceKey)
+    await persistentRiskStateService.resetFailure(subjectKey)
   }
 
-  private hasActiveFailures(scope: FailureScope, storeKey: string) {
+  private async hasActiveFailures(scope: FailureScope, storeKey: string) {
     const nowMs = Date.now()
-    const state = this.getFailureState(storeKey, scope, nowMs)
+    const state = await this.getFailureState(storeKey, scope, nowMs)
     return Boolean(state && state.count > 0)
   }
 
@@ -511,12 +419,12 @@ export class AuthSecurityService {
     })
   }
 
-  isAdminLoginCaptchaRequired(requestMeta: RequestMeta | undefined, username: string) {
+  async isAdminLoginCaptchaRequired(requestMeta: RequestMeta | undefined, username: string) {
     const source = normalizeRiskSource(requestMeta)
     const normalizedUsername = username.trim().toLowerCase()
     return (
-      this.hasActiveFailures('admin-login', `admin-login:ip:${source}`) ||
-      this.hasActiveFailures('admin-login', `admin-login:user:${normalizedUsername}`)
+      await this.hasActiveFailures('admin-login', `admin-login:ip:${source}`) ||
+      await this.hasActiveFailures('admin-login', `admin-login:user:${normalizedUsername}`)
     )
   }
 
@@ -532,10 +440,10 @@ export class AuthSecurityService {
     )
   }
 
-  clearAdminLoginFailures(requestMeta: RequestMeta | undefined, username: string) {
+  async clearAdminLoginFailures(requestMeta: RequestMeta | undefined, username: string) {
     const source = normalizeRiskSource(requestMeta)
     const normalizedUsername = username.trim().toLowerCase()
-    this.clearLoginFailures(`admin-login:ip:${source}`, `admin-login:user:${normalizedUsername}`)
+    await this.clearLoginFailures(`admin-login:ip:${source}`, `admin-login:user:${normalizedUsername}`)
   }
 
   async guardClientCaptchaRequest(requestMeta: RequestMeta | undefined) {
@@ -683,11 +591,11 @@ export class AuthSecurityService {
     await this.assertFailureNotLocked('client-login', `client-login:account:${accountKey}`, requestMeta, accountKey)
   }
 
-  isClientLoginCaptchaRequired(requestMeta: RequestMeta | undefined, accountKey: string) {
+  async isClientLoginCaptchaRequired(requestMeta: RequestMeta | undefined, accountKey: string) {
     const riskActor = this.resolveClientRiskActor(requestMeta)
     return (
-      this.hasActiveFailures('client-login', `client-login:${riskActor.bucketSegment}`) ||
-      this.hasActiveFailures('client-login', `client-login:account:${accountKey}`)
+      await this.hasActiveFailures('client-login', `client-login:${riskActor.bucketSegment}`) ||
+      await this.hasActiveFailures('client-login', `client-login:account:${accountKey}`)
     )
   }
 
@@ -702,9 +610,9 @@ export class AuthSecurityService {
     )
   }
 
-  clearClientLoginFailures(requestMeta: RequestMeta | undefined, accountKey: string) {
+  async clearClientLoginFailures(requestMeta: RequestMeta | undefined, accountKey: string) {
     const riskActor = this.resolveClientRiskActor(requestMeta)
-    this.clearLoginFailures(`client-login:${riskActor.bucketSegment}`, `client-login:account:${accountKey}`)
+    await this.clearLoginFailures(`client-login:${riskActor.bucketSegment}`, `client-login:account:${accountKey}`)
   }
 
   async guardClientChangePasswordRequest(requestMeta: RequestMeta | undefined, userId: string) {

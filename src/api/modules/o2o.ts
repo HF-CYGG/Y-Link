@@ -563,7 +563,7 @@ export const verifyO2oPreorder = (verifyCode: string) =>
     data: { verifyCode },
   })
 
-export const inboundO2oStock = (payload: { productId: string; qty: number; remark?: string }) =>
+export const inboundO2oStock = (payload: { productId: string; skuId?: string | null; qty: number; remark?: string }) =>
   request<O2oInboundResult>({
     method: 'POST',
     url: '/o2o/inbound',
