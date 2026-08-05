@@ -1849,7 +1849,7 @@ class O2oPreorderService {
     if (orderItems.length || totalQty <= 0) {
       return orderItems
     }
-    return this.buildFallbackOrderItemsFromInventoryLog(orderId)
+    return this.buildFallbackOrderItemsFromInventoryLog(orderId, manager)
   }
 
   // 详细注释：同一订单允许多次退货，但门店尚未核销完成的申请需要先占住可退数量，
@@ -2667,7 +2667,7 @@ class O2oPreorderService {
         order.businessStatus = 'after_sale'
         await orderRepo.save(order)
       }
-      return this.buildReturnRequestDetail(savedRequest)
+      return this.buildReturnRequestDetail(savedRequest, manager)
     })
   }
 

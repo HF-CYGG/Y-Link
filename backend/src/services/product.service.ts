@@ -671,9 +671,9 @@ export class ProductService {
         if (skuInput.currentStock === undefined) {
           skuEntity.currentStock = matchedSku.currentStock
         }
-        if (skuInput.preOrderedStock === undefined) {
-          skuEntity.preOrderedStock = matchedSku.preOrderedStock
-        }
+        // 预订占用只能由 O2O 订单生命周期记账。商品编辑即使回传或伪造该字段，
+        // 也必须以已加锁的数据库值为准，避免先把占用改成 0 再停用 SKU。
+        skuEntity.preOrderedStock = matchedSku.preOrderedStock
         if (skuInput.thumbnail === undefined) {
           skuEntity.thumbnail = matchedSku.thumbnail
         }

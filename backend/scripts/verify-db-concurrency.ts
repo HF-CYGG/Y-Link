@@ -183,6 +183,7 @@ async function verifyOrderSerialConcurrency() {
     { systemConfigService },
     { orderSerialService },
     { o2oPreorderService },
+    { productService },
     { ClientUser },
     { O2oPreorder },
   ] = await Promise.all([
@@ -190,6 +191,7 @@ async function verifyOrderSerialConcurrency() {
     import('../src/services/system-config.service.js'),
     import('../src/services/order-serial.service.js'),
     import('../src/services/o2o-preorder.service.js'),
+    import('../src/services/product.service.js'),
     import('../src/entities/client-user.entity.js'),
     import('../src/entities/o2o-preorder.entity.js'),
   ])
@@ -266,6 +268,52 @@ async function verifyOrderSerialConcurrency() {
     assert.equal(updatedDetail.order.hasCustomerOrder, true)
     assert.equal(updatedDetail.order.isSystemApplied, true)
     pass('事务内详情读取复现通过：返回值使用同一 manager，可见未提交的最新写入')
+
+    const returnProduct = await productService.create({
+      productName: `MySQL 退货详情验证商品-${Date.now()}`,
+      pinyinAbbr: 'MYSQLTH',
+      defaultPrice: 10,
+      discountRate: 10,
+      isActive: true,
+      o2oStatus: 'listed',
+      currentStock: 5,
+      limitPerUser: 5,
+    } as Parameters<typeof productService.create>[0])
+    const returnSkuId = returnProduct.skus[0]?.id
+    assert.ok(returnSkuId)
+    const clientAuth = {
+      userId: String(clientUser.id),
+      account: clientUser.mobile ?? clientUser.staffNo ?? '',
+      mobile: clientUser.mobile ?? '',
+      email: clientUser.email ?? '',
+      realName: clientUser.realName,
+      accountType: clientUser.accountType,
+      staffNo: clientUser.staffNo,
+      sessionToken: 'verify-db-concurrency-client',
+    }
+    const returnOrder = await o2oPreorderService.submit(clientAuth, {
+      items: [{ productId: returnProduct.id, skuId: returnSkuId, qty: 1 }],
+      remark: 'MySQL 事务内退货详情验证',
+      pickupContact: '并发验收',
+      isSystemApplied: false,
+    })
+    await o2oPreorderService.verifyByCode(returnOrder.order.verifyCode, {
+      userId: '1',
+      username: 'verify-admin',
+      displayName: '并发验收管理员',
+      role: 'admin',
+      permissions: ['orders:create'],
+      status: 'enabled',
+      sessionToken: 'verify-db-concurrency-admin',
+      authSource: 'bearer',
+    })
+    const returnRequest = await o2oPreorderService.createReturnRequest(clientAuth, returnOrder.order.id, {
+      reason: 'MySQL 事务内退货详情验证',
+      items: [{ productId: returnProduct.id, skuId: returnSkuId, qty: 1 }],
+    })
+    assert.equal(returnRequest.items.length, 1)
+    assert.equal(returnRequest.items[0]?.skuId, returnSkuId)
+    pass('事务内退货详情读取复现通过：新建明细在提交前即可由同一 manager 返回')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()

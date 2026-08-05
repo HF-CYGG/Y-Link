@@ -39,17 +39,24 @@ interface DatabaseMaintenanceModeServiceOptions {
 }
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
+const DATABASE_MUTATING_AUTH_PATHS = new Set([
+  '/api/auth/captcha',
+  '/api/client-auth/captcha',
+  '/api/client-auth/capabilities',
+])
 function normalizeRequestPath(requestPath: string): string {
   return requestPath.split('?')[0]?.replace(/\/+$/, '') || '/'
 }
 
 export function shouldAllowWriteDuringDatabaseMaintenance(method: string, requestPath: string): boolean {
   const normalizedMethod = method.toUpperCase()
+  const normalizedPath = normalizeRequestPath(requestPath)
   if (SAFE_METHODS.has(normalizedMethod)) {
-    return true
+    // 这些认证读取入口会经过数据库持久化限流或验证码风控，语义上属于写请求。
+    // 维护期必须在进入限流器前阻断，保证 SQLite 快照窗口没有未登记写入。
+    return !DATABASE_MUTATING_AUTH_PATHS.has(normalizedPath)
   }
 
-  const normalizedPath = normalizeRequestPath(requestPath)
   if (normalizedPath === '/api/data-maintenance/db-migration/rollback' && normalizedMethod === 'POST') {
     return true
   }

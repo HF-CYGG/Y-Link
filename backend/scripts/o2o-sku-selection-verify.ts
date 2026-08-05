@@ -249,6 +249,30 @@ async function main() {
     )
     pass('SKU 仍有预订占用时拒绝退役，避免占用库存从商品汇总中消失')
 
+    await assert.rejects(
+      () => productService.update(product.id, {
+        skus: [
+          {
+            id: targetSku.id,
+            specValues: { 颜色: '天空蓝', 款式: '六寸-五层' },
+            defaultPrice: 16,
+            currentStock: 7,
+            preOrderedStock: 0,
+            isActive: false,
+          },
+          {
+            id: otherSku.id,
+            specValues: { 颜色: '冰川白', 款式: '六寸-三层' },
+            defaultPrice: 12,
+            currentStock: 5,
+            isActive: true,
+          },
+        ],
+      } as Parameters<typeof productService.update>[1]),
+      /仍有 2 件预订占用/,
+    )
+    pass('客户端伪造 SKU 占用为零时仍拒绝停用，退役保护以锁定的数据库状态为准')
+
     await productService.update(product.id, {
       skus: [
         {
