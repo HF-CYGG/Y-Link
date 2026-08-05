@@ -19,6 +19,7 @@ const isInboundShowNo = (value: string) => /^IN\d{12}$/i.test(value.trim())
  */
 export interface SubmitInboundItemInput {
   productId: string
+  skuId: string
   qty: number
 }
 
@@ -89,6 +90,12 @@ export interface InboundOrderItem {
   id: string
   orderId: string
   productId: string
+  skuId: string | null
+  sku?: {
+    id: string
+    skuCode: string
+    specText: string
+  } | null
   productNameSnapshot: string
   qty: string
 }

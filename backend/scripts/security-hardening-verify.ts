@@ -96,16 +96,25 @@ function readCookieValueFromResponse(response: Response, cookieName: string): st
   return match?.[1] ? decodeURIComponent(match[1]) : null
 }
 
-async function loginAdmin(baseUrl: string): Promise<{ token: string; user: LoginResult['user'] }> {
+async function loginAdmin(baseUrl: string): Promise<{
+  token: string
+  user: LoginResult['user']
+  sessionCookie: string
+  csrfCookie: string
+}> {
   const response = await fetch(`${baseUrl}/api/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username: 'admin', password: adminPassword }),
   })
   const data = await expectJsonOkResponse<LoginResult>(response, '管理员登录')
-  const token = data.token ?? readCookieValueFromResponse(response, 'y_link_admin_session')
+  const sessionCookie = readCookieValueFromResponse(response, 'y_link_admin_session')
+  const csrfCookie = readCookieValueFromResponse(response, 'y_link_admin_csrf')
+  const token = data.token ?? sessionCookie
   assert.ok(token, '管理员登录未返回可用会话')
-  return { token, user: data.user }
+  assert.ok(sessionCookie, '管理员登录未写入会话 Cookie')
+  assert.ok(csrfCookie, '管理员登录未写入 CSRF Cookie')
+  return { token, user: data.user, sessionCookie, csrfCookie }
 }
 
 function cleanupSqliteFile() {
@@ -132,6 +141,7 @@ async function main() {
   const { SysUserSession } = await import('../src/entities/sys-user-session.entity.js')
   const { ClientUser } = await import('../src/entities/client-user.entity.js')
   const { ClientUserSession } = await import('../src/entities/client-user-session.entity.js')
+  const { AuthRiskState } = await import('../src/entities/auth-risk-state.entity.js')
   const { SystemConfig } = await import('../src/entities/system-config.entity.js')
   const { SysUser } = await import('../src/entities/sys-user.entity.js')
   const { authService } = await import('../src/services/auth.service.js')
@@ -167,6 +177,13 @@ async function main() {
     const adminLogin = await loginAdmin(baseUrl)
     const adminAuth = await authService.resolveAuthUserByToken(adminLogin.token)
 
+    const riskStates = await AppDataSource.getRepository(AuthRiskState).find()
+    assert.ok(riskStates.length >= 2, 'Express 入口与细粒度登录风控均应写入共享状态')
+    assert.equal(riskStates.every((state) => /^[a-f0-9]{64}$/.test(state.bucketDigest)), true)
+    assert.equal(riskStates.some((state) => state.requestTimestampsJson?.includes('127.0.0.1')), false)
+    assert.equal(riskStates.some((state) => state.requestTimestampsJson?.includes('admin')), false)
+    pass('认证限流状态已使用摘要桶键持久化，未落库原始账号或 IP')
+
     const adminSession = await AppDataSource.getRepository(SysUserSession).findOne({
       where: { userId: adminAuth.userId },
       order: { createdAt: 'DESC' },
@@ -188,6 +205,32 @@ async function main() {
       401,
     )
     pass('管理端停止支持 query access_token，Bearer 仍可用')
+
+    const adminCookieHeader = `y_link_admin_session=${encodeURIComponent(adminLogin.sessionCookie)}; y_link_admin_csrf=${encodeURIComponent(adminLogin.csrfCookie)}`
+    const o2oInboundBody = JSON.stringify({ productId: '999999', skuId: '999999', qty: 1 })
+    await expectJsonStatus(
+      () => fetch(`${baseUrl}/api/o2o/inbound`, {
+        method: 'POST',
+        headers: { Cookie: adminCookieHeader, 'Content-Type': 'application/json' },
+        body: o2oInboundBody,
+      }),
+      'O2O 管理端写接口缺少 CSRF',
+      403,
+    )
+    await expectJsonStatus(
+      () => fetch(`${baseUrl}/api/o2o/inbound`, {
+        method: 'POST',
+        headers: {
+          Cookie: adminCookieHeader,
+          'Content-Type': 'application/json',
+          'x-csrf-token': adminLogin.csrfCookie,
+        },
+        body: o2oInboundBody,
+      }),
+      'O2O 管理端写接口携带 CSRF 后进入业务校验',
+      404,
+    )
+    pass('O2O 管理端子路由统一执行 CSRF 校验')
 
     const clientToken = generateSessionToken()
     const clientUser = await AppDataSource.getRepository(ClientUser).save(

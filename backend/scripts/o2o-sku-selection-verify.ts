@@ -234,6 +234,21 @@ async function main() {
     assert.equal(mallProductAfterSubmit?.skus?.find((sku) => sku.id === targetSku.id)?.availableStock, 5)
     pass('下单后按 SKU 占用库存')
 
+    await assert.rejects(
+      () => productService.update(product.id, {
+        specGroups: [{ name: '颜色', values: ['冰川白'] }],
+        skus: [{
+          id: otherSku.id,
+          specValues: { 颜色: '冰川白', 款式: '六寸-三层' },
+          defaultPrice: 12,
+          currentStock: 5,
+          isActive: true,
+        }],
+      } as Parameters<typeof productService.update>[1]),
+      /仍有 2 件预订占用/,
+    )
+    pass('SKU 仍有预订占用时拒绝退役，避免占用库存从商品汇总中消失')
+
     await productService.update(product.id, {
       skus: [
         {
@@ -323,29 +338,6 @@ async function main() {
     assert.equal(mallProductAfterUpdate?.skus?.find((sku) => sku.id === otherSku.id)?.preOrderedStock, 1)
     pass('改单后按 SKU 维持独立占用')
 
-    await productService.update(product.id, {
-      skus: [
-        {
-          id: targetSku.id,
-          specValues: { 颜色: '天空蓝', 款式: '六寸-五层' },
-          defaultPrice: 16,
-          currentStock: 7,
-          isActive: true,
-        },
-      ],
-    } as Parameters<typeof productService.update>[1])
-    const productAfterRemovingOccupiedSku = await productService.detail(product.id)
-    assert.equal(productAfterRemovingOccupiedSku.preOrderedStock, 3)
-    assert.equal(productAfterRemovingOccupiedSku.skus.find((sku) => sku.id === otherSku.id), undefined)
-    const mallProductsAfterRemovingOccupiedSku = await o2oPreorderService.listMallProducts()
-    const mallProductAfterRemovingOccupiedSku = mallProductsAfterRemovingOccupiedSku.list.find((item) => item.id === product.id) as unknown as {
-      availableStock: number
-      skus?: Array<{ id: string; isActive: boolean; availableStock: number }>
-    } | undefined
-    assert.equal(mallProductAfterRemovingOccupiedSku?.availableStock, 4)
-    assert.equal(mallProductAfterRemovingOccupiedSku?.skus?.find((sku) => sku.id === otherSku.id), undefined)
-    pass('删除仍有占用的 SKU 后仅按当前 SKU 汇总商城库存')
-
     const inactiveProduct = await productService.create({
       productName: `停用规格商品-${verifySeed}`,
       pinyinAbbr: 'TYGG',
@@ -385,15 +377,18 @@ async function main() {
       skus?: Array<{ id: string; preOrderedStock: number }>
     } | undefined
     assert.equal(mallProductAfterCancel?.skus?.find((sku) => sku.id === targetSku.id)?.preOrderedStock, 3)
-    assert.equal(mallProductAfterCancel?.skus?.find((sku) => sku.id === otherSku.id), undefined)
-    pass('撤回后仅返回当前 SKU 占用')
+    assert.equal(mallProductAfterCancel?.skus?.find((sku) => sku.id === otherSku.id)?.preOrderedStock, 1)
+    pass('撤回后只释放目标 SKU 占用，其他规格占用保持不变')
 
     const adminActor = {
       userId: '1',
       username: 'admin',
       displayName: '验证管理员',
-      roles: ['admin'],
-      permissions: ['orders:verify'],
+      role: 'admin',
+      permissions: ['orders:create'],
+      status: 'enabled',
+      sessionToken: 'sku-verify-admin',
+      authSource: 'bearer',
     } satisfies AuthUserContext
 
     await o2oPreorderService.verifyByCode(updatedPreorder.order.verifyCode, adminActor)
@@ -403,8 +398,9 @@ async function main() {
     } | undefined
     assert.equal(mallProductAfterVerify?.skus?.find((sku) => sku.id === targetSku.id)?.currentStock, 4)
     assert.equal(mallProductAfterVerify?.skus?.find((sku) => sku.id === targetSku.id)?.preOrderedStock, 0)
-    assert.equal(mallProductAfterVerify?.skus?.find((sku) => sku.id === otherSku.id), undefined)
-    pass('核销后按当前 SKU 扣减现货与占用库存')
+    assert.equal(mallProductAfterVerify?.skus?.find((sku) => sku.id === otherSku.id)?.currentStock, 4)
+    assert.equal(mallProductAfterVerify?.skus?.find((sku) => sku.id === otherSku.id)?.preOrderedStock, 0)
+    pass('核销后按两个当前 SKU 分别扣减现货与占用库存')
 
     const returnRequest = await o2oPreorderService.createReturnRequest(clientAuth, updatedPreorder.order.id, {
       reason: '规格 SKU 退货验证',
@@ -417,8 +413,8 @@ async function main() {
       skus?: Array<{ id: string; currentStock: number }>
     } | undefined
     assert.equal(mallProductAfterReturn?.skus?.find((sku) => sku.id === targetSku.id)?.currentStock, 5)
-    assert.equal(mallProductAfterReturn?.skus?.find((sku) => sku.id === otherSku.id), undefined)
-    pass('退货核销后仅在当前 SKU 列表回补对应规格')
+    assert.equal(mallProductAfterReturn?.skus?.find((sku) => sku.id === otherSku.id)?.currentStock, 4)
+    pass('退货核销后仅回补目标规格，其他规格库存保持不变')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()

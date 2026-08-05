@@ -7,7 +7,7 @@
 import { Router } from 'express'
 import { z } from 'zod'
 import { requireClientAuth } from '../middleware/client-auth.middleware.js'
-import { requireAuth, requirePermission, requireRole } from '../middleware/auth.middleware.js'
+import { requireAdminCsrf, requireAuth, requirePermission, requireRole } from '../middleware/auth.middleware.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 import type { ClientAuthenticatedRequest } from '../types/client-auth.js'
 import { auditService } from '../services/audit.service.js'
@@ -50,6 +50,7 @@ const onsiteAdjustPreorderSchema = z.object({
 
 const inboundSchema = z.object({
   productId: z.string().trim().min(1),
+  skuId: z.string().trim().min(1).nullable().optional(),
   qty: z.number().int().positive(),
   remark: z.string().max(255).optional(),
 })
@@ -142,6 +143,10 @@ const BUSINESS_STATUS_LABEL_MAP = {
 } as const
 
 export const o2oRouter = Router()
+const o2oAdminRouter = Router()
+
+// 管理端 O2O 接口统一在子路由入口完成登录态和 CSRF 校验，避免新增接口时遗漏写操作保护。
+o2oAdminRouter.use(requireAuth, requireAdminCsrf)
 
 // 商城商品列表：客户端免登录可访问，用于展示当前上架商品与可预订库存。
 o2oRouter.get(
@@ -309,9 +314,8 @@ o2oRouter.post(
 )
 
 // 管理端扫码前可先读取核销详情，便于展示订单内容与状态确认。
-o2oRouter.get(
+o2oAdminRouter.get(
   '/verify/show-no/:showNo',
-  requireAuth,
   requirePermission('orders:view'),
   asyncHandler(async (req, res) => {
     const data = await o2oPreorderService.getVerifyDetailByShowNo(req.params.showNo)
@@ -320,9 +324,8 @@ o2oRouter.get(
 )
 
 // 管理端订单查询：支持按状态分类与关键字查询，供“订单查询”页面展示。
-o2oRouter.get(
+o2oAdminRouter.get(
   '/orders',
-  requireAuth,
   requirePermission('orders:view'),
   asyncHandler(async (req, res) => {
     const query = consoleOrderQuerySchema.parse(req.query)
@@ -332,9 +335,8 @@ o2oRouter.get(
 )
 
 // 管理端订单详情：用于查询页右侧展示订单状态报告与进度。
-o2oRouter.get(
+o2oAdminRouter.get(
   '/orders/:id',
-  requireAuth,
   requirePermission('orders:view'),
   asyncHandler(async (req, res) => {
     const data = await o2oPreorderService.detailById(req.params.id)
@@ -343,9 +345,8 @@ o2oRouter.get(
 )
 
 // 管理员删除订单池订单：服务层统一处理关联出库单、库存占用、流水回拨与审计。
-o2oRouter.delete(
+o2oAdminRouter.delete(
   '/orders/:id',
-  requireAuth,
   requirePermission('orders:delete'),
   requireRole('admin'),
   asyncHandler(async (req, res) => {
@@ -365,9 +366,8 @@ o2oRouter.delete(
 )
 
 // 管理端更新订单“商家特殊状态”，用于向用户同步特殊进度，不改变核心核销主状态。
-o2oRouter.patch(
+o2oAdminRouter.patch(
   '/orders/:id/business-status',
-  requireAuth,
   requirePermission('orders:update'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
@@ -411,9 +411,8 @@ o2oRouter.patch(
 )
 
 // 门店现场改单：仅允许后台工作人员对待核销订单按实际领取情况调整商品、数量与备注。
-o2oRouter.patch(
+o2oAdminRouter.patch(
   '/orders/:id/onsite-adjust',
-  requireAuth,
   requirePermission('orders:update'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
@@ -456,9 +455,8 @@ o2oRouter.patch(
 )
 
 // 管理端更新订单“商家留言”，用于补充特殊场景说明并在客户端详情可见。
-o2oRouter.patch(
+o2oAdminRouter.patch(
   '/orders/:id/merchant-message',
-  requireAuth,
   requirePermission('orders:update'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
@@ -502,9 +500,8 @@ o2oRouter.patch(
 )
 
 // 管理端可在核销台编辑“是否有出库单/系统申请”，仅部门单适用。
-o2oRouter.patch(
+o2oAdminRouter.patch(
   '/orders/:id/compliance-flags',
-  requireAuth,
   requirePermission('orders:update'),
   asyncHandler(async (req, res) => {
     const payload = complianceFlagsSchema.parse(req.body)
@@ -518,9 +515,8 @@ o2oRouter.patch(
 )
 
 // 管理端扫码前可先读取核销详情，便于展示订单内容与状态确认。
-o2oRouter.get(
+o2oAdminRouter.get(
   '/verify/:verifyCode',
-  requireAuth,
   requirePermission('orders:view'),
   asyncHandler(async (req, res) => {
     const data = await o2oPreorderService.getVerifyDetail(req.params.verifyCode)
@@ -529,9 +525,8 @@ o2oRouter.get(
 )
 
 // 管理端可拒绝待处理退货申请，并强制记录拒绝原因供后续查询与审计追溯。
-o2oRouter.post(
+o2oAdminRouter.post(
   '/return-requests/:id/reject',
-  requireAuth,
   requirePermission('orders:update'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
@@ -567,9 +562,8 @@ o2oRouter.post(
 )
 
 // 核销动作属于后台“出库确认”，因此要求后台登录 + 订单创建权限。
-o2oRouter.post(
+o2oAdminRouter.post(
   '/verify',
-  requireAuth,
   requirePermission('orders:create'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
@@ -604,22 +598,26 @@ o2oRouter.post(
 )
 
 // 入库动作由后台工作人员执行，用于补货与库存修正。
-o2oRouter.post(
+o2oAdminRouter.post(
   '/inbound',
-  requireAuth,
   requirePermission('products:manage'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = inboundSchema.parse(req.body)
-    const data = await o2oPreorderService.inboundStock(payload.productId, payload.qty, authReq.auth, payload.remark)
+    const data = await o2oPreorderService.inboundStock(
+      payload.productId,
+      payload.qty,
+      authReq.auth,
+      payload.remark,
+      payload.skuId,
+    )
     res.json({ code: 0, message: 'ok', data })
   }),
 )
 
 // 库存日志用于后台追踪预订占用、核销出库、手工入库与超时释放等变化记录。
-o2oRouter.get(
+o2oAdminRouter.get(
   '/inventory/logs',
-  requireAuth,
   requirePermission('orders:view'),
   asyncHandler(async (req, res) => {
     const query = inventoryLogQuerySchema.parse(req.query)
@@ -632,3 +630,5 @@ o2oRouter.get(
     res.json({ code: 0, message: 'ok', data })
   }),
 )
+
+o2oRouter.use(o2oAdminRouter)

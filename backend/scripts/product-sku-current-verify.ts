@@ -88,6 +88,7 @@ async function main() {
   const { o2oPreorderService } = await import('../src/services/o2o-preorder.service.js')
   const { productService } = await import('../src/services/product.service.js')
   const { systemConfigService } = await import('../src/services/system-config.service.js')
+  const { ClientUser } = await import('../src/entities/client-user.entity.js')
 
   prepareDatabaseRuntime()
   await AppDataSource.initialize()
@@ -158,10 +159,25 @@ async function main() {
     assert.ok(stockMallProduct)
     assert.equal(stockMallProduct.currentStock, 7)
     assert.deepEqual(stockMallProduct.skus?.map((sku) => sku.specText), ['Blue'])
+    const clientRepo = AppDataSource.getRepository(ClientUser)
+    const verifyClient = await clientRepo.save(clientRepo.create({
+      mobile: `1${Date.now().toString().slice(-10)}`,
+      email: null,
+      mobileVerifiedAt: null,
+      emailVerifiedAt: null,
+      passwordHash: 'verify-only',
+      realName: 'Verify Client',
+      departmentName: '',
+      accountType: 'personal',
+      staffNo: null,
+      staffVerified: false,
+      status: 'enabled',
+      lastLoginAt: null,
+    }))
     await assert.rejects(
       () => o2oPreorderService.submit(
         {
-          userId: `missing-client-${verifySeed}`,
+          userId: String(verifyClient.id),
           account: 'verify-client',
           mobile: '',
           email: '',

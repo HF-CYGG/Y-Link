@@ -220,6 +220,7 @@ const main = () => {
     .map((fileName) => path.join(routesRoot, fileName))
 
   const routeContracts: RouteContract[] = []
+  const protectedMountRouterNames = new Set(protectedMounts.map((mount) => mount.routerName))
   routeFiles.forEach((filePath) => {
     const source = readUtf8(filePath)
     const routerExportMatch = source.match(/export const (\w+)\s*=\s*Router\(\)/)
@@ -227,14 +228,23 @@ const main = () => {
       return
     }
 
-    const routerName = routerExportMatch[1]
-    assert.ok(routerNameToMount.has(routerName), `${path.basename(filePath)} 导出的 ${routerName} 未在 app.ts 中挂载`)
-    routeContracts.push(...extractRouteContracts(filePath, routerName))
+    const exportedRouterName = routerExportMatch[1]
+    const exportedMount = routerNameToMount.get(exportedRouterName)
+    assert.ok(exportedMount, `${path.basename(filePath)} 导出的 ${exportedRouterName} 未在 app.ts 中挂载`)
+    const declaredRouterNames = [...source.matchAll(/(?:export\s+)?const\s+(\w+)\s*=\s*Router\(\)/g)]
+      .map((match) => match[1])
+    declaredRouterNames.forEach((routerName) => {
+      if (!routerNameToMount.has(routerName) && exportedMount) {
+        routerNameToMount.set(routerName, exportedMount)
+      }
+      const authGatePattern = new RegExp(String.raw`${routerName}\.use\([^)]*requireAuth`)
+      if (authGatePattern.test(source)) protectedMountRouterNames.add(routerName)
+      routeContracts.push(...extractRouteContracts(filePath, routerName))
+    })
   })
 
   assert.ok(routeContracts.length > 0, '未解析到任何具体路由定义，无法执行权限契约校验')
 
-  const protectedMountRouterNames = new Set(protectedMounts.map((mount) => mount.routerName))
   const governanceRoutesMissingPermissions = routeContracts.filter((route) => {
     return protectedMountRouterNames.has(route.routerName) && route.permissions.length === 0
   })

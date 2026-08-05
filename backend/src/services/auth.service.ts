@@ -213,7 +213,7 @@ export class AuthService {
     })
 
     // 登录成功后清空该来源与该账号的失败计数，避免历史失败导致后续误锁。
-    authSecurityService.clearAdminLoginFailures(requestMeta, username)
+    await authSecurityService.clearAdminLoginFailures(requestMeta, username)
     return data
   }
 

@@ -399,7 +399,10 @@ export class ProductService {
   async update(id: string, input: UpdateProductInput): Promise<ProductView> {
     return AppDataSource.transaction(async (manager) => {
       const repo = manager.getRepository(BaseProduct)
-      const product = await repo.findOne({ where: { id } })
+      const product = await repo.findOne({
+        where: { id },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
       if (!product) {
         throw new BizError('产品不存在', 404)
       }
@@ -612,7 +615,14 @@ export class ProductService {
     const skuRepo = manager.getRepository(BaseProductSku)
     const specGroups = this.normalizeSpecGroups(input.specGroups)
     const skuInputs = this.normalizeSkuInputs(product, input)
-    const existingSkus = await skuRepo.find({ where: { productId: product.id } })
+    const existingSkuQuery = skuRepo
+      .createQueryBuilder('sku')
+      .where('sku.productId = :productId', { productId: product.id })
+      .orderBy('sku.id', 'ASC')
+    if (manager.connection.options.type !== 'sqlite') {
+      existingSkuQuery.setLock('pessimistic_write')
+    }
+    const existingSkus = await existingSkuQuery.getMany()
     const currentExistingSkus = existingSkus.filter((sku) => isDatabaseFlagEnabled(sku.isCurrent))
     const existingSkuById = new Map(currentExistingSkus.map((sku) => [String(sku.id), sku]))
     const existingSkuBySpecKey = new Map<string, BaseProductSku>()
@@ -693,18 +703,24 @@ export class ProductService {
       }
       specTextSet.add(sku.specText)
       skuCodeSet.add(sku.skuCode)
+      if (!isDatabaseFlagEnabled(sku.isActive) && Number(sku.preOrderedStock ?? 0) > 0) {
+        throw new BizError(`SKU「${sku.specText}」仍有 ${sku.preOrderedStock} 件预订占用，释放或核销完成前不能停用`, 409)
+      }
     })
 
-    const savedSkus = await skuRepo.save(skuEntities)
-    const savedSkuIdSet = new Set(savedSkus.map((sku) => String(sku.id)))
+    const nextSkuIdSet = new Set(skuEntities.filter((sku) => sku.id).map((sku) => String(sku.id)))
     const inactiveLegacySkus = existingSkus
-      .filter((sku) => !savedSkuIdSet.has(String(sku.id)))
+      .filter((sku) => !nextSkuIdSet.has(String(sku.id)))
       .map((sku) => {
+        if (Number(sku.preOrderedStock ?? 0) > 0) {
+          throw new BizError(`SKU「${sku.specText}」仍有 ${sku.preOrderedStock} 件预订占用，释放或核销完成前不能退役`, 409)
+        }
         sku.isActive = false
         sku.isCurrent = false
         sku.o2oRecommended = false
         return sku
       })
+    const savedSkus = await skuRepo.save(skuEntities)
     if (inactiveLegacySkus.length) {
       await skuRepo.save(inactiveLegacySkus)
     }

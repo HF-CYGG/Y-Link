@@ -61,7 +61,7 @@ authRouter.post(
     const requestMeta = extractRequestMeta(req)
     // 管理端登录先经过频控与锁定校验，再进入账号密码校验。
     await authSecurityService.guardAdminLoginRequest(requestMeta, payload.username)
-    if (authSecurityService.isAdminLoginCaptchaRequired(requestMeta, payload.username)) {
+    if (await authSecurityService.isAdminLoginCaptchaRequired(requestMeta, payload.username)) {
       if (!payload.captchaId?.trim() || !payload.captchaCode?.trim()) {
         throw new BizError('当前登录环境需要图形验证码', 428)
       }
