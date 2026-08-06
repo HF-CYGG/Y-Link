@@ -1647,8 +1647,11 @@ class SystemConfigService {
     return result
   }
 
-  async getCustomerServiceConfigs(options?: { skipCachePopulate?: boolean }): Promise<CustomerServiceConfigRecord> {
-    const baseConfig = await this.getCustomerServiceBaseConfig(options)
+  async getCustomerServiceConfigs(
+    manager: EntityManager = AppDataSource.manager,
+    options?: { skipCachePopulate?: boolean },
+  ): Promise<CustomerServiceConfigRecord> {
+    const baseConfig = await this.getCustomerServiceBaseConfig(manager, options)
     return {
       ...baseConfig,
       availability: this.computeCustomerServiceAvailability(
@@ -1669,17 +1672,21 @@ class SystemConfigService {
   /**
    * 只读、可缓存的客服配置静态部分：与 getO2oRuleConfigs 同一套写时失效 + 短 TTL 策略，
    * 以及同样的 skipCachePopulate 语义（事务内回读刚写入的未提交值时不发布进共享缓存）。
+   * 必须接收调用方的事务 manager 才能读取——若固定用 this.configRepo（默认连接），
+   * 在 updateCustomerServiceConfigs 的事务内回读会走另一条连接，在事务提交前看到的还是旧值，
+   * 导致返回给调用方的“新配置”和审计 after 字段都错误地停留在旧值上。
    * availability 依赖的实时在线状态由调用方 getCustomerServiceConfigs 每次单独计算，不经过这层缓存。
    */
   private async getCustomerServiceBaseConfig(
+    manager: EntityManager = AppDataSource.manager,
     options?: { skipCachePopulate?: boolean },
   ): Promise<Omit<CustomerServiceConfigRecord, 'availability'>> {
     const cached = this.customerServiceBaseConfigCache
     if (cached && cached.expiresAtMs > Date.now()) {
       return cached.value
     }
-    await this.ensureDefaultConfigs()
-    const rows = await this.configRepo.find({
+    await this.ensureDefaultConfigs(manager)
+    const rows = await manager.getRepository(SystemConfig).find({
       where: this.customerServiceConfigKeys.map((key) => ({ configKey: key })),
       select: {
         configKey: true,
@@ -1805,7 +1812,7 @@ class SystemConfigService {
         ['customer_service.offline_faq_json', JSON.stringify(offlineFaqs)],
         ['customer_service.sse_keepalive_seconds', String(input.sseKeepaliveSeconds)],
       ])
-      const before = await this.getCustomerServiceConfigs()
+      const before = await this.getCustomerServiceConfigs(manager)
       let changed = false
       const repo = manager.getRepository(SystemConfig)
       for (const row of lockedRows) {
@@ -1821,7 +1828,7 @@ class SystemConfigService {
       // 这里读到的值属于本事务尚未提交的写入，暂不发布进共享缓存（skipCachePopulate），
       // 缓存改在事务成功提交后统一发布（见方法末尾），避免事务回滚时缓存仍返回未落库的值。
       this.invalidateCustomerServiceConfigCache()
-      const config = await this.getCustomerServiceConfigs({ skipCachePopulate: true })
+      const config = await this.getCustomerServiceConfigs(manager, { skipCachePopulate: true })
       if (changed) {
         await auditService.record(
           {
