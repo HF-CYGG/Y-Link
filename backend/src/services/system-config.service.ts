@@ -1462,8 +1462,15 @@ class SystemConfigService {
    *   锁定的事务内，逐次回源查询会不必要地拉长锁持有时间；
    * - 配置变更走 updateO2oRuleConfigs，其内部会在写入后立即调用 invalidateO2oRuleConfigCache
    *   保证“改完立刻读到新值”；TTL 只是兜底，防止遗漏的写路径导致缓存长期陈旧。
+   * @param options.skipCachePopulate 读到的值不应写入共享缓存时传 true——典型场景是在一个仍在写入
+   *   system_configs 的事务内“回读刚写入的新值”：此时事务尚未提交，若把这次读到的值直接放进进程级
+   *   缓存，一旦事务后续失败回滚，缓存会在 TTL 窗口内向其它调用方返回从未真正落库的值。
+   *   这种场景下应由调用方在事务成功提交后，用确认落库的结果显式发布缓存（见 updateO2oRuleConfigs）。
    */
-  async getO2oRuleConfigs(manager: EntityManager = AppDataSource.manager): Promise<O2oRuleConfigRecord> {
+  async getO2oRuleConfigs(
+    manager: EntityManager = AppDataSource.manager,
+    options?: { skipCachePopulate?: boolean },
+  ): Promise<O2oRuleConfigRecord> {
     const cached = this.o2oRuleConfigCache
     if (cached && cached.expiresAtMs > Date.now()) {
       return cached.value
@@ -1516,12 +1523,18 @@ class SystemConfigService {
       mallAnnouncementText,
       updatedAt,
     }
-    this.o2oRuleConfigCache = { value: record, expiresAtMs: Date.now() + SystemConfigService.CONFIG_CACHE_TTL_MS }
+    if (!options?.skipCachePopulate) {
+      this.o2oRuleConfigCache = { value: record, expiresAtMs: Date.now() + SystemConfigService.CONFIG_CACHE_TTL_MS }
+    }
     return record
   }
 
   private invalidateO2oRuleConfigCache(): void {
     this.o2oRuleConfigCache = null
+  }
+
+  private publishO2oRuleConfigCache(record: O2oRuleConfigRecord): void {
+    this.o2oRuleConfigCache = { value: record, expiresAtMs: Date.now() + SystemConfigService.CONFIG_CACHE_TTL_MS }
   }
 
   async updateO2oRuleConfigs(
@@ -1555,7 +1568,7 @@ class SystemConfigService {
     }
 
     await this.ensureDefaultConfigs()
-    return AppDataSource.transaction(async (manager) => {
+    const result = await AppDataSource.transaction(async (manager) => {
       const useForUpdate = manager.connection.options.type === 'mysql'
       const placeholders = this.o2oConfigKeys.map(() => '?').join(', ')
       const lockedRows: Array<{ id: string; configKey: string; configValue: string; updatedAt: string }> = await manager.query(
@@ -1601,9 +1614,12 @@ class SystemConfigService {
         changed = true
       }
 
-      // 写入后立即失效缓存，确保紧接着的“读取新值”不会命中写入前缓存的旧记录。
+      // 写入后立即失效缓存，确保紧接着的“读取新值”不会命中写入前缓存的旧记录；
+      // 这里读到的值属于本事务尚未提交的写入，暂不发布进共享缓存（skipCachePopulate），
+      // 避免事务后续失败回滚时，缓存在 TTL 窗口内向其它调用方返回从未真正落库的值——
+      // 缓存改在事务成功提交后，用确认落库的结果统一发布（见方法末尾）。
       this.invalidateO2oRuleConfigCache()
-      const config = await this.getO2oRuleConfigs(manager)
+      const config = await this.getO2oRuleConfigs(manager, { skipCachePopulate: true })
 
       if (changed) {
         await auditService.record(
@@ -1625,10 +1641,14 @@ class SystemConfigService {
 
       return { config, changed }
     })
+
+    // 事务已成功提交，此时 result.config 才是确认落库的值，可以安全发布进共享缓存。
+    this.publishO2oRuleConfigCache(result.config)
+    return result
   }
 
-  async getCustomerServiceConfigs(): Promise<CustomerServiceConfigRecord> {
-    const baseConfig = await this.getCustomerServiceBaseConfig()
+  async getCustomerServiceConfigs(options?: { skipCachePopulate?: boolean }): Promise<CustomerServiceConfigRecord> {
+    const baseConfig = await this.getCustomerServiceBaseConfig(options)
     return {
       ...baseConfig,
       availability: this.computeCustomerServiceAvailability(
@@ -1642,11 +1662,18 @@ class SystemConfigService {
     this.customerServiceBaseConfigCache = null
   }
 
+  private publishCustomerServiceConfigCache(value: Omit<CustomerServiceConfigRecord, 'availability'>): void {
+    this.customerServiceBaseConfigCache = { value, expiresAtMs: Date.now() + SystemConfigService.CONFIG_CACHE_TTL_MS }
+  }
+
   /**
-   * 只读、可缓存的客服配置静态部分：与 getO2oRuleConfigs 同一套写时失效 + 短 TTL 策略。
+   * 只读、可缓存的客服配置静态部分：与 getO2oRuleConfigs 同一套写时失效 + 短 TTL 策略，
+   * 以及同样的 skipCachePopulate 语义（事务内回读刚写入的未提交值时不发布进共享缓存）。
    * availability 依赖的实时在线状态由调用方 getCustomerServiceConfigs 每次单独计算，不经过这层缓存。
    */
-  private async getCustomerServiceBaseConfig(): Promise<Omit<CustomerServiceConfigRecord, 'availability'>> {
+  private async getCustomerServiceBaseConfig(
+    options?: { skipCachePopulate?: boolean },
+  ): Promise<Omit<CustomerServiceConfigRecord, 'availability'>> {
     const cached = this.customerServiceBaseConfigCache
     if (cached && cached.expiresAtMs > Date.now()) {
       return cached.value
@@ -1712,9 +1739,8 @@ class SystemConfigService {
         keepaliveConfig.updatedAt,
       ].sort((a, b) => b.getTime() - a.getTime())[0],
     }
-    this.customerServiceBaseConfigCache = {
-      value: baseConfig,
-      expiresAtMs: Date.now() + SystemConfigService.CONFIG_CACHE_TTL_MS,
+    if (!options?.skipCachePopulate) {
+      this.publishCustomerServiceConfigCache(baseConfig)
     }
     return baseConfig
   }
@@ -1752,7 +1778,7 @@ class SystemConfigService {
     }
 
     await this.ensureDefaultConfigs()
-    return AppDataSource.transaction(async (manager) => {
+    const result = await AppDataSource.transaction(async (manager) => {
       const useForUpdate = manager.connection.options.type === 'mysql'
       const placeholders = this.customerServiceConfigKeys.map(() => '?').join(', ')
       const lockedRows: Array<{ id: string; configKey: string; configValue: string; updatedAt: string }> = await manager.query(
@@ -1791,9 +1817,11 @@ class SystemConfigService {
         changed = true
       }
 
-      // 写入后立即失效缓存，确保紧接着的“读取新值”不会命中写入前缓存的旧记录。
+      // 写入后立即失效缓存，确保紧接着的“读取新值”不会命中写入前缓存的旧记录；
+      // 这里读到的值属于本事务尚未提交的写入，暂不发布进共享缓存（skipCachePopulate），
+      // 缓存改在事务成功提交后统一发布（见方法末尾），避免事务回滚时缓存仍返回未落库的值。
       this.invalidateCustomerServiceConfigCache()
-      const config = await this.getCustomerServiceConfigs()
+      const config = await this.getCustomerServiceConfigs({ skipCachePopulate: true })
       if (changed) {
         await auditService.record(
           {
@@ -1813,6 +1841,12 @@ class SystemConfigService {
       }
       return { config, changed }
     })
+
+    // 事务已成功提交，此时才把确认落库的静态配置部分发布进共享缓存；
+    // availability 依赖实时在线状态，从不进入这层缓存，因此发布前需要先剔除它。
+    const { availability: _availability, ...baseConfigToPublish } = result.config
+    this.publishCustomerServiceConfigCache(baseConfigToPublish)
+    return result
   }
 
   async getVerificationProviderConfigs(options: { maskSensitiveValues?: boolean } = { maskSensitiveValues: true }): Promise<VerificationProviderConfigsResult> {
