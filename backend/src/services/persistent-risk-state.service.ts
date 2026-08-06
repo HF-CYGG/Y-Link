@@ -1,6 +1,15 @@
 /**
  * 模块说明：为认证风控与 Express 入口限流提供跨实例共享的数据库状态。
  * 安全约束：桶键在落库前统一做 SHA-256，不持久化原始账号、手机号或 IP。
+ * 实现要点：
+ * - 行的“确保存在”与“加锁读改写”拆成两步：先在事务外用一条独立提交的
+ *   `INSERT ... ON DUPLICATE KEY IGNORE` 确保桶存在，再进入事务对已存在的行 `SELECT ... FOR UPDATE`。
+ *   这是为了避开 InnoDB 文档明确警示的场景——两个事务并发插入同一个尚不存在的唯一键会互相
+ *   等待对方的间隙锁而死锁；拆开后，事务内命中的永远是“已存在的行”，只是普通行锁排队。
+ * - consumeWindow 在已知调用方限额（maxRequests）时，一旦当前窗口已达上限就不再写入新时间戳，
+ *   避免“被拒绝的请求反而比被放行的请求多消耗一次写事务”这种成本倒挂。
+ * - 过期状态的清理（cleanupExpired）不再挂在请求路径上，改为独立的后台定时任务，
+ *   避免个别请求承担范围删除的延迟，也避免其与请求事务竞争同一批行的加锁顺序。
  */
 
 import { createHash } from 'node:crypto'
@@ -8,6 +17,8 @@ import { LessThanOrEqual, type EntityManager } from 'typeorm'
 import type { ClientRateLimitInfo, Options, Store } from 'express-rate-limit'
 import { AppDataSource } from '../config/data-source.js'
 import { AuthRiskState } from '../entities/auth-risk-state.entity.js'
+import { isRetryableTransactionLockError } from '../utils/database-errors.js'
+import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 
 export interface PersistentFailureState {
   count: number
@@ -18,8 +29,7 @@ export interface PersistentFailureState {
 
 const CLEANUP_INTERVAL_MS = 60 * 1000
 const MAX_TIMESTAMPS_PER_BUCKET = 1000
-
-let lastCleanupAt = 0
+const LOCK_RETRY_ATTEMPTS = 3
 
 const digestBucketKey = (bucketKey: string) => createHash('sha256').update(bucketKey).digest('hex')
 
@@ -37,20 +47,18 @@ const parseTimestamps = (value: string | null): number[] => {
 }
 
 class PersistentRiskStateService {
-  private async cleanupExpired(now: Date) {
-    if (now.getTime() - lastCleanupAt < CLEANUP_INTERVAL_MS) return
-    lastCleanupAt = now.getTime()
-    await AppDataSource.getRepository(AuthRiskState).delete({ expiresAt: LessThanOrEqual(now) })
-  }
+  private cleanupLoopTimer: ReturnType<typeof globalThis.setInterval> | null = null
 
-  private async loadLockedState(
-    manager: EntityManager,
+  /**
+   * 在事务外单独执行并立即提交，确保桶键对应的行存在。
+   * 不要把这一步挪回调用方所在的事务里——见文件头说明的死锁场景。
+   */
+  private async ensureStateRowExists(
     bucketDigest: string,
     stateType: AuthRiskState['stateType'],
     expiresAt: Date,
-  ) {
-    const repository = manager.getRepository(AuthRiskState)
-    await repository
+  ): Promise<void> {
+    await AppDataSource.getRepository(AuthRiskState)
       .createQueryBuilder()
       .insert()
       .values({
@@ -65,7 +73,17 @@ class PersistentRiskStateService {
       })
       .orIgnore()
       .execute()
+  }
 
+  private async loadLockedState(
+    manager: EntityManager,
+    bucketDigest: string,
+    stateType: AuthRiskState['stateType'],
+    expiresAt: Date,
+  ) {
+    await this.ensureStateRowExists(bucketDigest, stateType, expiresAt)
+
+    const repository = manager.getRepository(AuthRiskState)
     const query = repository
       .createQueryBuilder('state')
       .where('state.bucketDigest = :bucketDigest', { bucketDigest })
@@ -79,27 +97,61 @@ class PersistentRiskStateService {
     return state
   }
 
-  async consumeWindow(bucketKey: string, windowMs: number, nowMs = Date.now()): Promise<ClientRateLimitInfo> {
-    const now = new Date(nowMs)
-    await this.cleanupExpired(now)
-    return AppDataSource.transaction(async (manager) => {
-      const state = await this.loadLockedState(
-        manager,
-        digestBucketKey(`rate_limit:${bucketKey}`),
-        'rate_limit',
-        new Date(nowMs + windowMs),
-      )
-      const activeTimestamps = parseTimestamps(state.requestTimestampsJson)
-        .filter((timestamp) => nowMs - timestamp < windowMs)
-      activeTimestamps.push(nowMs)
-      state.requestTimestampsJson = JSON.stringify(activeTimestamps)
-      state.expiresAt = new Date(activeTimestamps[0] + windowMs)
-      await manager.getRepository(AuthRiskState).save(state)
-      return {
-        totalHits: activeTimestamps.length,
-        resetTime: new Date(activeTimestamps[0] + windowMs),
+  /** 对偶发的死锁/锁等待超时做有界重试，与仓库内其它事务重试点（如 order-serial.service.ts）保持同一模式。 */
+  private async runWithLockRetry<T>(operation: () => Promise<T>): Promise<T> {
+    let lastError: unknown
+    for (let attempt = 1; attempt <= LOCK_RETRY_ATTEMPTS; attempt += 1) {
+      try {
+        return await operation()
+      } catch (error) {
+        lastError = error
+        if (attempt < LOCK_RETRY_ATTEMPTS && isRetryableTransactionLockError(error)) {
+          continue
+        }
+        throw error
       }
-    })
+    }
+    throw lastError
+  }
+
+  /**
+   * @param maxRequests 调用方已知的限额时传入：一旦当前窗口命中数已达到该值，直接返回“视同再命中一次”的结果，
+   *   不再落库新时间戳，避免超限请求反复触发写事务。不传时保持“总是追加并写入”的旧行为。
+   */
+  async consumeWindow(
+    bucketKey: string,
+    windowMs: number,
+    nowMs = Date.now(),
+    maxRequests?: number,
+  ): Promise<ClientRateLimitInfo> {
+    return this.runWithLockRetry(() =>
+      AppDataSource.transaction(async (manager) => {
+        const state = await this.loadLockedState(
+          manager,
+          digestBucketKey(`rate_limit:${bucketKey}`),
+          'rate_limit',
+          new Date(nowMs + windowMs),
+        )
+        const activeTimestamps = parseTimestamps(state.requestTimestampsJson)
+          .filter((timestamp) => nowMs - timestamp < windowMs)
+
+        if (typeof maxRequests === 'number' && activeTimestamps.length >= maxRequests) {
+          return {
+            totalHits: activeTimestamps.length + 1,
+            resetTime: new Date((activeTimestamps[0] ?? nowMs) + windowMs),
+          }
+        }
+
+        activeTimestamps.push(nowMs)
+        state.requestTimestampsJson = JSON.stringify(activeTimestamps)
+        state.expiresAt = new Date(activeTimestamps[0] + windowMs)
+        await manager.getRepository(AuthRiskState).save(state)
+        return {
+          totalHits: activeTimestamps.length,
+          resetTime: new Date(activeTimestamps[0] + windowMs),
+        }
+      }),
+    )
   }
 
   async readWindow(bucketKey: string, windowMs: number, nowMs = Date.now()): Promise<ClientRateLimitInfo | undefined> {
@@ -121,23 +173,25 @@ class PersistentRiskStateService {
 
   async decrementWindow(bucketKey: string, windowMs: number, nowMs = Date.now()): Promise<void> {
     const bucketDigest = digestBucketKey(`rate_limit:${bucketKey}`)
-    await AppDataSource.transaction(async (manager) => {
-      const repository = manager.getRepository(AuthRiskState)
-      const query = repository.createQueryBuilder('state').where('state.bucketDigest = :bucketDigest', { bucketDigest })
-      if (AppDataSource.options.type === 'mysql') query.setLock('pessimistic_write')
-      const state = await query.getOne()
-      if (!state || state.stateType !== 'rate_limit') return
-      const activeTimestamps = parseTimestamps(state.requestTimestampsJson)
-        .filter((timestamp) => nowMs - timestamp < windowMs)
-      activeTimestamps.pop()
-      if (!activeTimestamps.length) {
-        await repository.delete({ bucketDigest })
-        return
-      }
-      state.requestTimestampsJson = JSON.stringify(activeTimestamps)
-      state.expiresAt = new Date(activeTimestamps[0] + windowMs)
-      await repository.save(state)
-    })
+    await this.runWithLockRetry(() =>
+      AppDataSource.transaction(async (manager) => {
+        const repository = manager.getRepository(AuthRiskState)
+        const query = repository.createQueryBuilder('state').where('state.bucketDigest = :bucketDigest', { bucketDigest })
+        if (AppDataSource.options.type === 'mysql') query.setLock('pessimistic_write')
+        const state = await query.getOne()
+        if (!state || state.stateType !== 'rate_limit') return
+        const activeTimestamps = parseTimestamps(state.requestTimestampsJson)
+          .filter((timestamp) => nowMs - timestamp < windowMs)
+        activeTimestamps.pop()
+        if (!activeTimestamps.length) {
+          await repository.delete({ bucketDigest })
+          return
+        }
+        state.requestTimestampsJson = JSON.stringify(activeTimestamps)
+        state.expiresAt = new Date(activeTimestamps[0] + windowMs)
+        await repository.save(state)
+      }),
+    )
   }
 
   async resetWindow(bucketKey: string): Promise<void> {
@@ -170,39 +224,72 @@ class PersistentRiskStateService {
     nowMs = Date.now(),
   ): Promise<PersistentFailureState> {
     const now = new Date(nowMs)
-    await this.cleanupExpired(now)
-    return AppDataSource.transaction(async (manager) => {
-      const state = await this.loadLockedState(
-        manager,
-        digestBucketKey(`login_failure:${bucketKey}`),
-        'login_failure',
-        new Date(nowMs + resetWindowMs),
-      )
-      const previousLastFailedAt = state.lastFailedAt?.getTime() ?? 0
-      const previousLockedUntil = state.lockedUntil?.getTime() ?? 0
-      const shouldReset = previousLastFailedAt === 0
-        || (nowMs - previousLastFailedAt >= resetWindowMs && previousLockedUntil <= nowMs)
-      state.failureCount = shouldReset ? 1 : state.failureCount + 1
-      state.firstFailedAt = shouldReset ? now : (state.firstFailedAt ?? now)
-      state.lastFailedAt = now
-      if (state.failureCount >= lockThreshold) {
-        state.lockedUntil = new Date(nowMs + lockMs)
-      }
-      state.expiresAt = new Date(Math.max(nowMs + resetWindowMs, state.lockedUntil?.getTime() ?? 0))
-      await manager.getRepository(AuthRiskState).save(state)
-      return {
-        count: state.failureCount,
-        firstFailedAt: state.firstFailedAt.getTime(),
-        lastFailedAt: nowMs,
-        lockedUntil: state.lockedUntil?.getTime() ?? 0,
-      }
-    })
+    return this.runWithLockRetry(() =>
+      AppDataSource.transaction(async (manager) => {
+        const state = await this.loadLockedState(
+          manager,
+          digestBucketKey(`login_failure:${bucketKey}`),
+          'login_failure',
+          new Date(nowMs + resetWindowMs),
+        )
+        const previousLastFailedAt = state.lastFailedAt?.getTime() ?? 0
+        const previousLockedUntil = state.lockedUntil?.getTime() ?? 0
+        const shouldReset = previousLastFailedAt === 0
+          || (nowMs - previousLastFailedAt >= resetWindowMs && previousLockedUntil <= nowMs)
+        state.failureCount = shouldReset ? 1 : state.failureCount + 1
+        state.firstFailedAt = shouldReset ? now : (state.firstFailedAt ?? now)
+        state.lastFailedAt = now
+        if (state.failureCount >= lockThreshold) {
+          state.lockedUntil = new Date(nowMs + lockMs)
+        }
+        state.expiresAt = new Date(Math.max(nowMs + resetWindowMs, state.lockedUntil?.getTime() ?? 0))
+        await manager.getRepository(AuthRiskState).save(state)
+        return {
+          count: state.failureCount,
+          firstFailedAt: state.firstFailedAt.getTime(),
+          lastFailedAt: nowMs,
+          lockedUntil: state.lockedUntil?.getTime() ?? 0,
+        }
+      }),
+    )
   }
 
   async resetFailure(bucketKey: string): Promise<void> {
     await AppDataSource.getRepository(AuthRiskState).delete({
       bucketDigest: digestBucketKey(`login_failure:${bucketKey}`),
     })
+  }
+
+  private async cleanupExpired(): Promise<void> {
+    const releaseMaintenanceLease = databaseMaintenanceModeService.registerInFlightWrite()
+    if (!releaseMaintenanceLease) {
+      return
+    }
+    try {
+      await AppDataSource.getRepository(AuthRiskState).delete({ expiresAt: LessThanOrEqual(new Date()) })
+    } finally {
+      releaseMaintenanceLease()
+    }
+  }
+
+  /** 启动周期性过期清理：幂等，重复调用不会叠加多个定时器。 */
+  startCleanupLoop(): void {
+    if (this.cleanupLoopTimer !== null) {
+      return
+    }
+    this.cleanupLoopTimer = globalThis.setInterval(() => {
+      if (databaseMaintenanceModeService.isReadOnly()) {
+        return
+      }
+      void this.cleanupExpired().catch(() => undefined)
+    }, CLEANUP_INTERVAL_MS)
+  }
+
+  stopCleanupLoop(): void {
+    if (this.cleanupLoopTimer !== null) {
+      globalThis.clearInterval(this.cleanupLoopTimer)
+      this.cleanupLoopTimer = null
+    }
   }
 }
 
@@ -212,6 +299,7 @@ export class DatabaseRateLimitStore implements Store {
   localKeys = false
   readonly prefix: string
   private windowMs = 60 * 1000
+  private limit: number | undefined
 
   constructor(prefix: string) {
     this.prefix = prefix
@@ -219,6 +307,9 @@ export class DatabaseRateLimitStore implements Store {
 
   init(options: Options) {
     this.windowMs = options.windowMs
+    // limit 也可能是按请求动态计算的中间件函数；仅在配置为固定数值时才能提前捕获用于“超限不写”优化，
+    // 函数形式的限额退回旧行为（总是追加），不影响正确性，只是少了这一层写放大优化。
+    this.limit = typeof options.limit === 'number' ? options.limit : undefined
   }
 
   get(key: string) {
@@ -226,7 +317,7 @@ export class DatabaseRateLimitStore implements Store {
   }
 
   increment(key: string) {
-    return persistentRiskStateService.consumeWindow(`${this.prefix}:${key}`, this.windowMs)
+    return persistentRiskStateService.consumeWindow(`${this.prefix}:${key}`, this.windowMs, Date.now(), this.limit)
   }
 
   decrement(key: string) {

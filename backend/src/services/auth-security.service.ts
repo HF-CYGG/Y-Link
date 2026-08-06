@@ -217,9 +217,10 @@ export class AuthSecurityService {
     },
   ): Promise<RateLimitConsumeResult> {
     const nowMs = Date.now()
-    const consumed = await persistentRiskStateService.consumeWindow(bucketKey, rule.windowMs, nowMs)
+    // 传入 rule.maxRequests 后，已达上限的窗口不会再写入新时间戳，
+    // 因此这里不需要再像早期实现那样在超限分支里额外调用 decrementWindow “补写”一次回退。
+    const consumed = await persistentRiskStateService.consumeWindow(bucketKey, rule.windowMs, nowMs, rule.maxRequests)
     if (consumed.totalHits > rule.maxRequests) {
-      await persistentRiskStateService.decrementWindow(bucketKey, rule.windowMs, nowMs)
       const waitMs = Math.max(1, (consumed.resetTime?.getTime() ?? nowMs + rule.windowMs) - nowMs)
       const riskDetail: Record<string, unknown> = {
         reason: 'rate_limit',
@@ -244,29 +245,42 @@ export class AuthSecurityService {
     return persistentRiskStateService.readFailure(storeKey, FAILURE_RESET_WINDOW_MS[scope], nowMs)
   }
 
-  private async assertFailureNotLocked(
+  /**
+   * 合并“是否已被锁定”与“是否需要图形验证码”两次判断：
+   * - 两者此前分别由 assertFailureNotLocked 与 hasActiveFailures 各自读取同一批 storeKey，
+   *   每次登录请求因此产生 2N 次重复查询（N 为 storeKey 数量）；
+   * - 这里改为对每个 storeKey 只读一次失败态，并行发起，结果同时供锁定判断与验证码判断复用。
+   */
+  private async assertLoginNotLockedAndCaptchaRequired(
     scope: FailureScope,
-    storeKey: string,
+    storeKeys: string[],
     requestMeta: RequestMeta | undefined,
     targetCode: string,
-  ) {
+  ): Promise<{ captchaRequired: boolean }> {
     const nowMs = Date.now()
-    const state = await this.getFailureState(storeKey, scope, nowMs)
-    if (!state || state.lockedUntil <= nowMs) {
-      return
+    const states = await Promise.all(storeKeys.map((storeKey) => this.getFailureState(storeKey, scope, nowMs)))
+
+    for (const state of states) {
+      if (!state || state.lockedUntil <= nowMs) {
+        continue
+      }
+      const waitSeconds = Math.max(1, Math.ceil((state.lockedUntil - nowMs) / 1000))
+      await this.recordRiskEvent({
+        actionType: 'auth.guard.locked',
+        actionLabel: '认证请求被临时锁定',
+        targetCode,
+        requestMeta,
+        detail: {
+          scope,
+          waitSeconds,
+        },
+      })
+      throw new BizError(`尝试次数过多，已临时锁定，请 ${waitSeconds} 秒后再试`, 429)
     }
-    const waitSeconds = Math.max(1, Math.ceil((state.lockedUntil - nowMs) / 1000))
-    await this.recordRiskEvent({
-      actionType: 'auth.guard.locked',
-      actionLabel: '认证请求被临时锁定',
-      targetCode,
-      requestMeta,
-      detail: {
-        scope,
-        waitSeconds,
-      },
-    })
-    throw new BizError(`尝试次数过多，已临时锁定，请 ${waitSeconds} 秒后再试`, 429)
+
+    return {
+      captchaRequired: states.some((state) => Boolean(state && state.count > 0)),
+    }
   }
 
   private async recordLoginFailure(
@@ -318,12 +332,6 @@ export class AuthSecurityService {
   private async clearLoginFailures(sourceKey: string, subjectKey: string) {
     await persistentRiskStateService.resetFailure(sourceKey)
     await persistentRiskStateService.resetFailure(subjectKey)
-  }
-
-  private async hasActiveFailures(scope: FailureScope, storeKey: string) {
-    const nowMs = Date.now()
-    const state = await this.getFailureState(storeKey, scope, nowMs)
-    return Boolean(state && state.count > 0)
   }
 
   private resolveClientRiskActor(requestMeta?: RequestMeta): ClientRiskActor {
@@ -395,7 +403,7 @@ export class AuthSecurityService {
     return primaryConsumeResult
   }
 
-  async guardAdminLoginRequest(requestMeta: RequestMeta | undefined, username: string) {
+  async guardAdminLoginRequest(requestMeta: RequestMeta | undefined, username: string): Promise<{ captchaRequired: boolean }> {
     const source = normalizeRiskSource(requestMeta)
     const normalizedUsername = username.trim().toLowerCase()
     await this.consumeRateLimit(`admin-login:ip:${source}`, RATE_LIMIT_RULES.adminLoginByIp, {
@@ -405,8 +413,12 @@ export class AuthSecurityService {
       requestMeta,
       detail: { source },
     })
-    await this.assertFailureNotLocked('admin-login', `admin-login:ip:${source}`, requestMeta, normalizedUsername)
-    await this.assertFailureNotLocked('admin-login', `admin-login:user:${normalizedUsername}`, requestMeta, normalizedUsername)
+    return this.assertLoginNotLockedAndCaptchaRequired(
+      'admin-login',
+      [`admin-login:ip:${source}`, `admin-login:user:${normalizedUsername}`],
+      requestMeta,
+      normalizedUsername,
+    )
   }
 
   async guardAdminCaptchaRequest(requestMeta: RequestMeta | undefined) {
@@ -417,15 +429,6 @@ export class AuthSecurityService {
       requestMeta,
       detail: { source },
     })
-  }
-
-  async isAdminLoginCaptchaRequired(requestMeta: RequestMeta | undefined, username: string) {
-    const source = normalizeRiskSource(requestMeta)
-    const normalizedUsername = username.trim().toLowerCase()
-    return (
-      await this.hasActiveFailures('admin-login', `admin-login:ip:${source}`) ||
-      await this.hasActiveFailures('admin-login', `admin-login:user:${normalizedUsername}`)
-    )
   }
 
   async recordAdminLoginFailure(requestMeta: RequestMeta | undefined, username: string) {
@@ -578,7 +581,7 @@ export class AuthSecurityService {
     })
   }
 
-  async guardClientLoginRequest(requestMeta: RequestMeta | undefined, accountKey: string) {
+  async guardClientLoginRequest(requestMeta: RequestMeta | undefined, accountKey: string): Promise<{ captchaRequired: boolean }> {
     const riskActor = this.resolveClientRiskActor(requestMeta)
     await this.consumeClientSourceRateLimit('client-login', RATE_LIMIT_RULES.clientLoginBySource, RATE_LIMIT_RULES.clientLoginByIpFallback, {
       actionType: 'client.auth.guard.login',
@@ -587,15 +590,11 @@ export class AuthSecurityService {
       requestMeta,
       detail: {},
     })
-    await this.assertFailureNotLocked('client-login', `client-login:${riskActor.bucketSegment}`, requestMeta, accountKey)
-    await this.assertFailureNotLocked('client-login', `client-login:account:${accountKey}`, requestMeta, accountKey)
-  }
-
-  async isClientLoginCaptchaRequired(requestMeta: RequestMeta | undefined, accountKey: string) {
-    const riskActor = this.resolveClientRiskActor(requestMeta)
-    return (
-      await this.hasActiveFailures('client-login', `client-login:${riskActor.bucketSegment}`) ||
-      await this.hasActiveFailures('client-login', `client-login:account:${accountKey}`)
+    return this.assertLoginNotLockedAndCaptchaRequired(
+      'client-login',
+      [`client-login:${riskActor.bucketSegment}`, `client-login:account:${accountKey}`],
+      requestMeta,
+      accountKey,
     )
   }
 

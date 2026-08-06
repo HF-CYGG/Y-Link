@@ -88,6 +88,25 @@ export function isRetryableSqliteLockError(error: unknown): boolean {
 }
 
 /**
+ * 识别 MySQL 死锁（ER_LOCK_DEADLOCK / errno 1213）与锁等待超时（ER_LOCK_WAIT_TIMEOUT / errno 1205）。
+ * 两者都属于“事务本身没错，只是这次撞上了并发争用”，上层按既有的有界重试模式重试一次即可自愈。
+ */
+export function isRetryableMysqlLockError(error: unknown): boolean {
+  if (!isQueryFailedError(error)) {
+    return false
+  }
+
+  const driverError = getDriverError(error)
+  return driverError.code === 'ER_LOCK_DEADLOCK' || driverError.errno === 1213
+    || driverError.code === 'ER_LOCK_WAIT_TIMEOUT' || driverError.errno === 1205
+}
+
+/** 跨方言的可重试锁冲突判断：SQLite 忙锁与 MySQL 死锁/锁等待超时都属于“重试即可自愈”的瞬时错误。 */
+export function isRetryableTransactionLockError(error: unknown): boolean {
+  return isRetryableSqliteLockError(error) || isRetryableMysqlLockError(error)
+}
+
+/**
  * 面向接口层输出业务可理解的数据库错误，避免底层 SQL 文本直接泄露到前端。
  */
 export function mapDatabaseErrorToBizError(error: unknown): BizError | null {
