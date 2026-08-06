@@ -1462,18 +1462,22 @@ class SystemConfigService {
    *   锁定的事务内，逐次回源查询会不必要地拉长锁持有时间；
    * - 配置变更走 updateO2oRuleConfigs，其内部会在写入后立即调用 invalidateO2oRuleConfigCache
    *   保证“改完立刻读到新值”；TTL 只是兜底，防止遗漏的写路径导致缓存长期陈旧。
-   * @param options.skipCachePopulate 读到的值不应写入共享缓存时传 true——典型场景是在一个仍在写入
-   *   system_configs 的事务内“回读刚写入的新值”：此时事务尚未提交，若把这次读到的值直接放进进程级
-   *   缓存，一旦事务后续失败回滚，缓存会在 TTL 窗口内向其它调用方返回从未真正落库的值。
-   *   这种场景下应由调用方在事务成功提交后，用确认落库的结果显式发布缓存（见 updateO2oRuleConfigs）。
+   *
+   * 传入事务 manager 时（isTransactionalManager 为真）一律绕过缓存，读与写都不经过它：
+   * - 绕过读：事务内的调用方通常已经用 FOR UPDATE 锁定了这些行，要的就是“锁定行的真实当前值”。
+   *   多实例部署下，本实例的缓存可能是其它实例更新配置之前的旧值，若此时返回缓存，
+   *   updateO2oRuleConfigs 写入审计的 before 快照就会与实际被覆盖的配置不一致。
+   * - 绕过写：事务尚未提交，把未提交值放进进程级缓存后，一旦事务回滚，
+   *   缓存会在 TTL 窗口内向其它调用方返回从未真正落库的值。
+   *   缓存改由调用方在事务成功提交后，用确认落库的结果显式发布（见 updateO2oRuleConfigs 末尾）。
    */
-  async getO2oRuleConfigs(
-    manager: EntityManager = AppDataSource.manager,
-    options?: { skipCachePopulate?: boolean },
-  ): Promise<O2oRuleConfigRecord> {
-    const cached = this.o2oRuleConfigCache
-    if (cached && cached.expiresAtMs > Date.now()) {
-      return cached.value
+  async getO2oRuleConfigs(manager: EntityManager = AppDataSource.manager): Promise<O2oRuleConfigRecord> {
+    const isTransactional = this.isTransactionalManager(manager)
+    if (!isTransactional) {
+      const cached = this.o2oRuleConfigCache
+      if (cached && cached.expiresAtMs > Date.now()) {
+        return cached.value
+      }
     }
     await this.ensureDefaultConfigs(manager)
     const rows = await manager.getRepository(SystemConfig).find({
@@ -1523,10 +1527,20 @@ class SystemConfigService {
       mallAnnouncementText,
       updatedAt,
     }
-    if (!options?.skipCachePopulate) {
-      this.o2oRuleConfigCache = { value: record, expiresAtMs: Date.now() + SystemConfigService.CONFIG_CACHE_TTL_MS }
+    if (!isTransactional) {
+      this.publishO2oRuleConfigCache(record)
     }
     return record
+  }
+
+  /**
+   * 判断是否处于调用方开启的事务上下文中。
+   * TypeORM 的 AppDataSource.transaction() 会为回调创建独立的 EntityManager，
+   * 与 AppDataSource.manager 不是同一个实例；据此即可识别“事务内读取”，
+   * 无需依赖调用方逐处传参，避免遗漏。
+   */
+  private isTransactionalManager(manager: EntityManager): boolean {
+    return manager !== AppDataSource.manager
   }
 
   private invalidateO2oRuleConfigCache(): void {
@@ -1614,12 +1628,12 @@ class SystemConfigService {
         changed = true
       }
 
-      // 写入后立即失效缓存，确保紧接着的“读取新值”不会命中写入前缓存的旧记录；
-      // 这里读到的值属于本事务尚未提交的写入，暂不发布进共享缓存（skipCachePopulate），
-      // 避免事务后续失败回滚时，缓存在 TTL 窗口内向其它调用方返回从未真正落库的值——
-      // 缓存改在事务成功提交后，用确认落库的结果统一发布（见方法末尾）。
+      // 传入事务 manager 的读取会自动绕过缓存（读与写都不经过），因此这里拿到的一定是
+      // 本事务锁定行的真实值，也不会把未提交的写入泄露进共享缓存；
+      // 仍然显式失效一次，是为了让"本次更新已发生"立刻对其它请求可见，
+      // 避免它们在事务提交前继续命中写入前的旧缓存。缓存在事务提交后统一发布（见方法末尾）。
       this.invalidateO2oRuleConfigCache()
-      const config = await this.getO2oRuleConfigs(manager, { skipCachePopulate: true })
+      const config = await this.getO2oRuleConfigs(manager)
 
       if (changed) {
         await auditService.record(
@@ -1647,11 +1661,8 @@ class SystemConfigService {
     return result
   }
 
-  async getCustomerServiceConfigs(
-    manager: EntityManager = AppDataSource.manager,
-    options?: { skipCachePopulate?: boolean },
-  ): Promise<CustomerServiceConfigRecord> {
-    const baseConfig = await this.getCustomerServiceBaseConfig(manager, options)
+  async getCustomerServiceConfigs(manager: EntityManager = AppDataSource.manager): Promise<CustomerServiceConfigRecord> {
+    const baseConfig = await this.getCustomerServiceBaseConfig(manager)
     return {
       ...baseConfig,
       availability: this.computeCustomerServiceAvailability(
@@ -1670,8 +1681,8 @@ class SystemConfigService {
   }
 
   /**
-   * 只读、可缓存的客服配置静态部分：与 getO2oRuleConfigs 同一套写时失效 + 短 TTL 策略，
-   * 以及同样的 skipCachePopulate 语义（事务内回读刚写入的未提交值时不发布进共享缓存）。
+   * 只读、可缓存的客服配置静态部分：与 getO2oRuleConfigs 完全同构——
+   * 同一套写时失效 + 短 TTL 策略，以及同样的“事务 manager 一律绕过缓存”规则（读与写都绕过）。
    * 必须接收调用方的事务 manager 才能读取——若固定用 this.configRepo（默认连接），
    * 在 updateCustomerServiceConfigs 的事务内回读会走另一条连接，在事务提交前看到的还是旧值，
    * 导致返回给调用方的“新配置”和审计 after 字段都错误地停留在旧值上。
@@ -1679,11 +1690,13 @@ class SystemConfigService {
    */
   private async getCustomerServiceBaseConfig(
     manager: EntityManager = AppDataSource.manager,
-    options?: { skipCachePopulate?: boolean },
   ): Promise<Omit<CustomerServiceConfigRecord, 'availability'>> {
-    const cached = this.customerServiceBaseConfigCache
-    if (cached && cached.expiresAtMs > Date.now()) {
-      return cached.value
+    const isTransactional = this.isTransactionalManager(manager)
+    if (!isTransactional) {
+      const cached = this.customerServiceBaseConfigCache
+      if (cached && cached.expiresAtMs > Date.now()) {
+        return cached.value
+      }
     }
     await this.ensureDefaultConfigs(manager)
     const rows = await manager.getRepository(SystemConfig).find({
@@ -1746,7 +1759,7 @@ class SystemConfigService {
         keepaliveConfig.updatedAt,
       ].sort((a, b) => b.getTime() - a.getTime())[0],
     }
-    if (!options?.skipCachePopulate) {
+    if (!isTransactional) {
       this.publishCustomerServiceConfigCache(baseConfig)
     }
     return baseConfig
@@ -1824,11 +1837,12 @@ class SystemConfigService {
         changed = true
       }
 
-      // 写入后立即失效缓存，确保紧接着的“读取新值”不会命中写入前缓存的旧记录；
-      // 这里读到的值属于本事务尚未提交的写入，暂不发布进共享缓存（skipCachePopulate），
-      // 缓存改在事务成功提交后统一发布（见方法末尾），避免事务回滚时缓存仍返回未落库的值。
+      // 传入事务 manager 的读取会自动绕过缓存（读与写都不经过），因此这里拿到的一定是
+      // 本事务锁定行的真实值，也不会把未提交的写入泄露进共享缓存；
+      // 仍然显式失效一次，是为了让"本次更新已发生"立刻对其它请求可见。
+      // 缓存在事务提交后统一发布（见方法末尾）。
       this.invalidateCustomerServiceConfigCache()
-      const config = await this.getCustomerServiceConfigs(manager, { skipCachePopulate: true })
+      const config = await this.getCustomerServiceConfigs(manager)
       if (changed) {
         await auditService.record(
           {
