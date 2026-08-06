@@ -42,7 +42,9 @@ FROM nginx:1.27-alpine AS runtime
 
 ENV TZ=Asia/Shanghai
 
-RUN apk add --no-cache tzdata
+RUN apk add --no-cache tzdata \
+  && mkdir -p /var/cache/nginx/ylink-public \
+  && chown -R nginx:nginx /var/cache/nginx/ylink-public
 
 # 使用可模板化站点配置：
 # - 处理 Vue Router history 路由回退；

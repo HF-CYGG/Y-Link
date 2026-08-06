@@ -68,6 +68,8 @@ FROM ${Y_LINK_NODE_IMAGE} AS runtime
 
 RUN apt-get update \
   && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nginx ca-certificates tzdata \
+  && mkdir -p /var/cache/nginx/ylink-public \
+  && chown -R www-data:www-data /var/cache/nginx/ylink-public \
   && rm -f /etc/nginx/sites-enabled/default \
   && rm -f /etc/nginx/conf.d/default.conf \
   && rm -rf /var/lib/apt/lists/*
