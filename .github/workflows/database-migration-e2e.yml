@@ -36,31 +36,27 @@ concurrency:
 
 jobs:
   verify:
-    name: 严格验收（${{ matrix.scenario }}）
+    name: 严格验收（分片 ${{ matrix.shard }}/6）
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 75
     strategy:
       fail-fast: false
+      # 单个 PR 最多占用两个托管 Runner，避免数据库矩阵挤压其他工作流。
+      max-parallel: 2
       matrix:
-        scenario:
-          - success
-          - wrong-connection
-          - old-version
-          - wrong-charset
-          - insufficient-permissions
-          - non-empty-target
-          - duplicate-task
-          - content-tamper
-          - execution-interruption
-          - cutover-persistence-failure
-          - switching-emergency-rollback
-          - cutover-cancel-persistence-failure
-          - rollback-finalizer-persistence-failure
-          - task-creation-persistence-failure
-          - corrupted-active-task
-          - corrupted-cutover-marker
-          - verifying-emergency-rollback
-          - failure-rollback
+        include:
+          - shard: 1
+            scenarios: success wrong-connection old-version
+          - shard: 2
+            scenarios: wrong-charset insufficient-permissions non-empty-target
+          - shard: 3
+            scenarios: duplicate-task content-tamper execution-interruption
+          - shard: 4
+            scenarios: cutover-persistence-failure switching-emergency-rollback cutover-cancel-persistence-failure
+          - shard: 5
+            scenarios: rollback-finalizer-persistence-failure task-creation-persistence-failure corrupted-active-task
+          - shard: 6
+            scenarios: corrupted-cutover-marker verifying-emergency-rollback failure-rollback
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
@@ -76,8 +72,28 @@ jobs:
       - name: 验证 Docker 前置门禁超时
         run: npm run verify:db:migration:timeout
 
-      - name: 运行 SQLite 到 MySQL 严格验收
+      - name: 运行分片内 SQLite 到 MySQL 严格验收
+        shell: bash
         env:
-          Y_LINK_DB_MIGRATION_SCENARIO: ${{ matrix.scenario }}
+          Y_LINK_DB_MIGRATION_SCENARIOS: ${{ matrix.scenarios }}
           Y_LINK_DB_MIGRATION_TIMEOUT_MS: "300000"
-        run: npm run verify:db:migration
+        run: |
+          set -uo pipefail
+
+          failures=()
+          for scenario in $Y_LINK_DB_MIGRATION_SCENARIOS; do
+            echo "::group::数据库迁移场景：${scenario}"
+            if Y_LINK_DB_MIGRATION_SCENARIO="$scenario" npm run verify:db:migration; then
+              printf -- '- ✅ `%s`\n' "$scenario" >> "$GITHUB_STEP_SUMMARY"
+            else
+              exit_code=$?
+              failures+=("${scenario}:${exit_code}")
+              printf -- '- ❌ `%s`（退出码 %s）\n' "$scenario" "$exit_code" >> "$GITHUB_STEP_SUMMARY"
+            fi
+            echo "::endgroup::"
+          done
+
+          if (( ${#failures[@]} > 0 )); then
+            printf '失败场景：%s\n' "${failures[*]}" >&2
+            exit 1
+          fi
