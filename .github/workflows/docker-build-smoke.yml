@@ -54,7 +54,13 @@ jobs:
 
     steps:
       - name: 检出仓库
-        uses: actions/checkout@v6
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "https://github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --no-tags --prune --depth=1 origin "$GITHUB_REF"
+          git checkout --force --detach FETCH_HEAD
 
       - name: 检查 Docker 与 Compose
         run: |
