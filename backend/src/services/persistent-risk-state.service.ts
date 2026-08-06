@@ -30,6 +30,9 @@ export interface PersistentFailureState {
 const CLEANUP_INTERVAL_MS = 60 * 1000
 const MAX_TIMESTAMPS_PER_BUCKET = 1000
 const LOCK_RETRY_ATTEMPTS = 3
+// "确保行存在 → 加锁读取"之间行被清理任务删除时的重试次数。
+// 正常情况下第一次就会命中；这里留出余量只是为了兜住极端时序，不需要很大。
+const STATE_ROW_LOAD_ATTEMPTS = 3
 
 const digestBucketKey = (bucketKey: string) => createHash('sha256').update(bucketKey).digest('hex')
 
@@ -50,51 +53,80 @@ class PersistentRiskStateService {
   private cleanupLoopTimer: ReturnType<typeof globalThis.setInterval> | null = null
 
   /**
-   * 在事务外单独执行并立即提交，确保桶键对应的行存在。
+   * 在事务外单独执行并立即提交，确保桶键对应的行存在且未处于"已过期"状态。
    * 不要把这一步挪回调用方所在的事务里——见文件头说明的死锁场景。
+   *
+   * 命中已存在行时必须顺带把 expires_at 向后延展（而不是 orIgnore 直接跳过）：
+   * 后台 cleanupExpired 删除的正是 expires_at <= now 的行，若这里对一个"已存在但已过期"的桶
+   * 什么都不做，清理任务就可能在调用方的加锁 SELECT 之前把它删掉，
+   * 使随后的加锁查询扑空。用 GREATEST/MAX 只向后延展、不缩短，
+   * 避免把 login_failure 桶中比 resetWindow 更长的锁定期提前截断。
    */
   private async ensureStateRowExists(
     bucketDigest: string,
     stateType: AuthRiskState['stateType'],
     expiresAt: Date,
   ): Promise<void> {
-    await AppDataSource.getRepository(AuthRiskState)
-      .createQueryBuilder()
-      .insert()
-      .values({
-        bucketDigest,
-        stateType,
-        requestTimestampsJson: stateType === 'rate_limit' ? '[]' : null,
-        failureCount: 0,
-        firstFailedAt: null,
-        lastFailedAt: null,
-        lockedUntil: null,
-        expiresAt,
-      })
-      .orIgnore()
-      .execute()
+    const repository = AppDataSource.getRepository(AuthRiskState)
+    const isMysql = AppDataSource.options.type === 'mysql'
+    const initialTimestampsJson = stateType === 'rate_limit' ? '[]' : null
+
+    if (isMysql) {
+      await repository.query(
+        `INSERT INTO auth_risk_state
+           (bucket_digest, state_type, request_timestamps_json, failure_count, first_failed_at, last_failed_at, locked_until, expires_at)
+         VALUES (?, ?, ?, 0, NULL, NULL, NULL, ?)
+         ON DUPLICATE KEY UPDATE expires_at = GREATEST(expires_at, VALUES(expires_at))`,
+        [bucketDigest, stateType, initialTimestampsJson, expiresAt],
+      )
+      return
+    }
+
+    await repository.query(
+      `INSERT INTO auth_risk_state
+         (bucket_digest, state_type, request_timestamps_json, failure_count, first_failed_at, last_failed_at, locked_until, expires_at)
+       VALUES (?, ?, ?, 0, NULL, NULL, NULL, ?)
+       ON CONFLICT(bucket_digest) DO UPDATE SET expires_at = MAX(auth_risk_state.expires_at, excluded.expires_at)`,
+      [bucketDigest, stateType, initialTimestampsJson, expiresAt],
+    )
   }
 
+  /**
+   * 确保行存在后再加锁读取。
+   * 即便 ensureStateRowExists 已经把 expires_at 向后延展，"确保存在"与"加锁读取"仍是两条语句，
+   * 极端时序下（例如清理任务恰好读到延展前的旧值）加锁查询仍可能扑空。
+   * 这里对扑空做有界重试，而不是让 getOneOrFail 抛出 EntityNotFoundError——
+   * 那是非锁冲突异常，runWithLockRetry 不会重试，会让登录/验证码请求直接 500。
+   */
   private async loadLockedState(
     manager: EntityManager,
     bucketDigest: string,
     stateType: AuthRiskState['stateType'],
     expiresAt: Date,
   ) {
-    await this.ensureStateRowExists(bucketDigest, stateType, expiresAt)
-
     const repository = manager.getRepository(AuthRiskState)
-    const query = repository
-      .createQueryBuilder('state')
-      .where('state.bucketDigest = :bucketDigest', { bucketDigest })
-    if (AppDataSource.options.type === 'mysql') {
-      query.setLock('pessimistic_write')
+
+    for (let attempt = 1; attempt <= STATE_ROW_LOAD_ATTEMPTS; attempt += 1) {
+      await this.ensureStateRowExists(bucketDigest, stateType, expiresAt)
+
+      const query = repository
+        .createQueryBuilder('state')
+        .where('state.bucketDigest = :bucketDigest', { bucketDigest })
+      if (AppDataSource.options.type === 'mysql') {
+        query.setLock('pessimistic_write')
+      }
+      const state = await query.getOne()
+      if (!state) {
+        // 行在"确保存在"与"加锁读取"之间被清理任务删除，重新确保后再试。
+        continue
+      }
+      if (state.stateType !== stateType) {
+        throw new Error('风控状态桶类型冲突')
+      }
+      return state
     }
-    const state = await query.getOneOrFail()
-    if (state.stateType !== stateType) {
-      throw new Error('风控状态桶类型冲突')
-    }
-    return state
+
+    throw new Error(`风控状态桶 ${bucketDigest} 在 ${STATE_ROW_LOAD_ATTEMPTS} 次尝试内反复被清理，无法加锁读取`)
   }
 
   /** 对偶发的死锁/锁等待超时做有界重试，与仓库内其它事务重试点（如 order-serial.service.ts）保持同一模式。 */

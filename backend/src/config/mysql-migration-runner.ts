@@ -7,35 +7,40 @@
  *   导致缺表故障只能在业务接口报错时才被发现（例如认证接口依赖的 auth_risk_state 表）。
  * - assertMysqlRequiredTablesExist：只读校验一组关键表是否存在，缺失则直接抛错阻止服务启动，
  *   把“运行时才 500”变成“启动即失败 + 明确的修复指引”。这一层无副作用、始终执行。
- *   报错文案会区分“全新空库”（缺全部必需表，从 001 顺序执行到最新编号是安全的）与
- *   “已执行过部分迁移的存量库”（只缺少数表，绝不能笼统建议“从头重跑”，因为部分历史脚本非幂等），
- *   并按 TABLE_INTRODUCING_SCRIPT 给出每张缺失表对应的具体脚本，而不是让运维自己猜。
+ *   报错文案会区分“全新空库”（缺全部必需表，只能走 DB_SYNC=true 实体同步）与
+ *   “已执行过部分迁移的存量库”（只缺少数表，按 TABLE_INTRODUCING_SCRIPT 精确执行那一个脚本），
+ *   而不是让运维自己猜。backend/sql/ 下的脚本已全部改造为幂等写法、可安全单独重放，
+ *   但该目录仍是增量历史而非经过验证的全量基线，因此任何场景都不建议“从 001 顺序跑到最新编号”。
  * - runMysqlSchemaMigrations：仅当环境变量 DB_AUTO_MIGRATE=true 时才会执行，默认关闭。
- *   **重要边界**：backend/sql/ 目录下 33 个历史脚本的幂等性并不一致——
- *   部分早期脚本（006/008/014/015/016，见 NON_IDEMPOTENT_HISTORICAL_SCRIPTS）用裸
- *   `ALTER TABLE ADD COLUMN` 未加 `IF NOT EXISTS`/`information_schema` 判断，重复执行会直接报错；
- *   005 更是一个只应人工触发的破坏性回滚脚本（会删除 004 生成的备份表）。
- *   因此这里不做“扫描目录、执行全部未记录文件”的通用回放，而是维护一份人工审计过的
- *   AUTO_MIGRATABLE_FILES 白名单，只有确认幂等安全的文件才会被自动执行；
- *   其余脚本仍需按 README 指引由运维人工执行一次。
+ *   整段"读已应用记录 + 执行脚本 + 写入记录"由 MySQL advisory lock 串行化，
+ *   保证多个实例同时以 DB_AUTO_MIGRATE=true 启动时不会并发执行同一个脚本。
+ *   **重要边界**：这里不做"扫描目录、执行全部未记录文件"的通用回放，而是维护一份
+ *   人工审计过的 AUTO_MIGRATABLE_FILES 白名单，只有确认幂等安全的文件才会被自动执行；
+ *   005 是只应人工触发的破坏性回滚脚本（会删除 004 生成的备份表），始终排除在外。
  * 维护说明：
  * - 新增迁移文件若要加入自动执行范围，必须先人工确认其为幂等写法
- *   （CREATE TABLE IF NOT EXISTS / information_schema 判断 + PREPARE-EXECUTE 动态 DDL /
- *   ADD COLUMN IF NOT EXISTS），再追加到 AUTO_MIGRATABLE_FILES；
+ *   （CREATE TABLE IF NOT EXISTS / information_schema 判断 + PREPARE-EXECUTE 动态 DDL），
+ *   再追加到 AUTO_MIGRATABLE_FILES；不要使用 MariaDB 专有的 ADD COLUMN IF NOT EXISTS；
  * - 新增强依赖的关键表时，请同步补充 MYSQL_REQUIRED_TABLES 与 TABLE_INTRODUCING_SCRIPT，
  *   并保持与 database-bootstrap.ts 的 SQLITE_REQUIRED_TABLES 口径一致；
- * - 若发现新的非幂等历史脚本，请同步补充 NON_IDEMPOTENT_HISTORICAL_SCRIPTS，
- *   避免报错文案继续误导运维“可以安全重放”。
+ * - 若引入新的不可重放脚本，请同步补充 NON_IDEMPOTENT_HISTORICAL_SCRIPTS，
+ *   避免报错文案误导运维"可以安全重放"。
  */
 
 import fs from 'node:fs'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
-import type { DataSource } from 'typeorm'
+import type { DataSource, QueryRunner } from 'typeorm'
 import { env } from './env.js'
 
 const SQL_DIR = path.resolve(process.cwd(), 'sql')
 const MIGRATION_TABLE = 'schema_migrations'
+// GET_LOCK 的锁名在同一 MySQL 服务端是全局的（不区分 database），
+// 因此必须把库名拼进锁名，否则同一实例上部署的多套 Y-Link 库会互相阻塞迁移。
+const buildMigrationAdvisoryLockName = (databaseName: string) => `y_link:schema_migration:${databaseName}`
+// 等待锁的上限：迁移本身很快，等待超过这个时长通常意味着另一实例卡住或存在长事务，
+// 此时宁可 fail-fast 让运维介入，也不要无限期挂起启动流程。
+const MIGRATION_ADVISORY_LOCK_TIMEOUT_SECONDS = 60
 
 // 启动自检覆盖的关键表：均为认证、核心库存与出入库主链路强依赖的表，
 // 任一缺失都意味着对应业务接口会在运行时直接报错，因此选择在启动期就失败。
@@ -66,25 +71,13 @@ const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
   auth_risk_state: '033_inventory_security_invariants.sql',
 }
 
-// 已人工审计确认为非幂等（裸 ALTER TABLE ADD COLUMN，未做 information_schema/IF NOT EXISTS 判断）的
-// 历史脚本：对已经执行过一次的数据库重复执行会直接报“字段已存在”错误，绝不能在报错指引里笼统建议
-// “从 001 到最新编号顺序重跑一遍”。005 是只应人工触发的破坏性回滚脚本，同样排除在“可重放”建议之外。
+// 不可重复执行的历史脚本。
+// 原先 006/008/014/015/016 因裸 ALTER TABLE ADD COLUMN 也在此列，已改造为
+// information_schema 判断 + PREPARE 动态 DDL，可安全重放，因此不再列入。
+// 005 是只应人工触发的破坏性回滚脚本（会删除 004 生成的备份表），必须始终排除在"可重放"建议之外。
 const NON_IDEMPOTENT_HISTORICAL_SCRIPTS = [
   '005_task8_history_order_type_mapping_rollback.sql（人工回滚脚本，正常部署不要执行）',
-  '006_o2o_preorder_schema.sql',
-  '008_o2o_preorder_business_status.sql',
-  '014_o2o_preorder_client_order_type.sql',
-  '015_o2o_preorder_is_system_applied.sql',
-  '016_o2o_preorder_has_customer_order.sql',
 ]
-
-/**
- * 使用 `ADD COLUMN IF NOT EXISTS` 等 MariaDB 专有语法的历史脚本（MySQL 8 会直接报语法错误）。
- * 这是"不能建议顺序执行 backend/sql/ 初始化全新 MySQL 库"的另一个硬性原因：
- * 即使跳过非幂等问题，这些脚本在 MySQL 8 上也根本无法执行。
- * 仅作为常量登记在此，供维护者理解报错文案为何不推荐脚本回放；修复它们属于独立的迁移基线治理工作。
- */
-const MARIADB_ONLY_SYNTAX_SCRIPT_COUNT = 18
 
 // 已人工审计确认幂等、可安全自动执行的迁移文件白名单。
 // 只在这里追加——不要把整个 sql/ 目录当成可自动回放的历史，见文件头说明。
@@ -173,9 +166,53 @@ async function ensureMigrationTrackingTable(dataSource: DataSource): Promise<voi
 }
 
 /**
+ * 用 MySQL advisory lock（GET_LOCK）串行化"检查 + 执行"整段流程。
+ *
+ * 多实例同时以 DB_AUTO_MIGRATE=true 启动时，两边都可能读到某个脚本尚未应用并同时执行它。
+ * 即使脚本内部用 information_schema 判断做了幂等，"判断"与"ALTER TABLE"仍是两条独立语句，
+ * 两个实例可能都通过了判断、各自生成同一条 ADD COLUMN，后执行者因重复列而启动失败。
+ * 因此互斥必须覆盖整段流程，而不是依赖脚本自身的幂等判断。
+ *
+ * 使用 GET_LOCK 而非迁移记录抢占，是因为它由 MySQL 服务端统一仲裁、连接断开即自动释放，
+ * 不会因某个实例中途崩溃而留下需要人工清理的死锁记录。
+ */
+async function withMysqlAdvisoryLock<T>(
+  dataSource: DataSource,
+  lockName: string,
+  timeoutSeconds: number,
+  operation: (queryRunner: QueryRunner) => Promise<T>,
+): Promise<T> {
+  // GET_LOCK 与 RELEASE_LOCK 必须落在同一条连接上，否则释放不掉；
+  // 这里显式取一个 queryRunner 独占整段流程，并把它交给 operation，
+  // 让"读已应用记录 / 执行脚本 / 写入记录"都走这条持锁连接，避免连接池分派带来的歧义。
+  const queryRunner = dataSource.createQueryRunner()
+  await queryRunner.connect()
+  try {
+    const acquiredRows = await queryRunner.query('SELECT GET_LOCK(?, ?) AS acquired', [lockName, timeoutSeconds])
+    const acquired = Number(acquiredRows?.[0]?.acquired ?? 0)
+    if (acquired !== 1) {
+      throw new Error(
+        `[启动失败] 等待 MySQL 迁移互斥锁 ${lockName} 超时（${timeoutSeconds} 秒）。`
+        + '通常意味着另一个实例正在执行自动迁移；请等待其完成后重启本实例。'
+        + '若确认没有其它实例在迁移，请检查是否有长事务占用该锁。',
+      )
+    }
+
+    try {
+      return await operation(queryRunner)
+    } finally {
+      await queryRunner.query('SELECT RELEASE_LOCK(?)', [lockName])
+    }
+  } finally {
+    await queryRunner.release()
+  }
+}
+
+/**
  * 执行 AUTO_MIGRATABLE_FILES 白名单中尚未记录为已应用的迁移脚本：
  * - 默认关闭（见 env.DB_AUTO_MIGRATE），需要运维显式开启；
  * - 只处理白名单内的文件，不扫描整个 sql/ 目录，避免误执行非幂等或破坏性历史脚本；
+ * - 整段"检查已应用记录 + 执行脚本 + 写入记录"由 advisory lock 串行化，支持多实例同时启动；
  * - 每个文件内的语句顺序执行，全部成功后才写入执行记录；
  * - 单个文件内某条语句失败会中止本次启动，日志会指出具体文件名，避免带着不完整结构继续运行。
  */
@@ -185,7 +222,20 @@ export async function runMysqlSchemaMigrations(dataSource: DataSource): Promise<
   }
 
   await ensureMigrationTrackingTable(dataSource)
-  const appliedRows: Array<{ filename: string }> = await dataSource.query(
+
+  return withMysqlAdvisoryLock(
+    dataSource,
+    buildMigrationAdvisoryLockName(env.DB_NAME),
+    MIGRATION_ADVISORY_LOCK_TIMEOUT_SECONDS,
+    (queryRunner) => applyPendingMigrations(queryRunner),
+  )
+}
+
+/** 实际的迁移执行体；必须在 withMysqlAdvisoryLock 内调用，保证跨实例互斥。 */
+async function applyPendingMigrations(queryRunner: QueryRunner): Promise<{ appliedFiles: string[] }> {
+  // 已应用记录必须在持锁之后再读：若在锁外读取，另一个实例可能在我们拿到锁之前刚写入记录，
+  // 我们仍会拿着过期的快照重复执行脚本。
+  const appliedRows: Array<{ filename: string }> = await queryRunner.query(
     `SELECT filename FROM ${MIGRATION_TABLE}`,
   )
   const appliedSet = new Set(appliedRows.map((row) => row.filename))
@@ -206,7 +256,7 @@ export async function runMysqlSchemaMigrations(dataSource: DataSource): Promise<
 
     try {
       for (const statement of statements) {
-        await dataSource.query(statement)
+        await queryRunner.query(statement)
       }
     } catch (error) {
       throw new Error(
@@ -216,7 +266,7 @@ export async function runMysqlSchemaMigrations(dataSource: DataSource): Promise<
       )
     }
 
-    await dataSource.query(
+    await queryRunner.query(
       `INSERT INTO ${MIGRATION_TABLE} (filename, checksum) VALUES (?, ?)
        ON DUPLICATE KEY UPDATE checksum = VALUES(checksum), applied_at = CURRENT_TIMESTAMP(6)`,
       [filename, checksum],
@@ -252,8 +302,10 @@ export async function assertMysqlRequiredTablesExist(dataSource: DataSource): Pr
   }
 
   // 全新空库与存量库的恢复手段完全不同，必须分开给指引：
-  // - 全新空库只能用 DB_SYNC=true 让 TypeORM 按实体建表，不能建议顺序执行 backend/sql/
-  //   （见 NON_IDEMPOTENT_HISTORICAL_SCRIPTS / MARIADB_ONLY_SYNTAX_SCRIPTS 说明，那条路走不通）；
+  // - 全新空库只能用 DB_SYNC=true 让 TypeORM 按实体建表。backend/sql/ 里的脚本虽已全部改造为
+  //   幂等写法（原先 18 个脚本使用的 MariaDB 专有 ADD COLUMN IF NOT EXISTS 已清除），
+  //   但该目录始终是按时间累积的增量记录，从未作为完整基线在真实 MySQL 8 空库上端到端验证过，
+  //   因此不能建议"从 001 顺序执行到最新编号"；
   // - 存量库只缺个别表时，则要精确指向补建该表的那一个脚本，绝不能笼统建议“从头重跑”。
   const isFreshDatabase = missingTables.length === MYSQL_REQUIRED_TABLES.length
   const missingTableGuide = missingTables
@@ -268,16 +320,16 @@ export async function assertMysqlRequiredTablesExist(dataSource: DataSource): Pr
       + '  2) 启动一次后端服务，等待日志出现 action=synchronized reason=forced_by_db_sync；\n'
       + '  3) 建表完成后把 DB_SYNC 改回 false 并重启，避免后续每次启动都同步实体结构。\n'
       + '\n'
-      + '请勿按编号顺序执行 backend/sql/ 下的脚本来初始化全新库：这些脚本是历史增量记录，\n'
-      + `并非经过验证的全量基线——其中 ${MARIADB_ONLY_SYNTAX_SCRIPT_COUNT} 个脚本使用 MariaDB 专有的\n`
-      + '`ADD COLUMN IF NOT EXISTS` 语法，在 MySQL 8 上会直接报语法错误，无法完成从零建库。'
+      + '请勿按编号顺序执行 backend/sql/ 下的脚本来初始化全新库：这些脚本是按时间累积的历史增量记录，\n'
+      + '并非经过验证的全量基线。它们虽已全部改造为幂等写法（可安全单独重放以补建缺失对象），\n'
+      + '但脚本间的顺序依赖、以及数据回填语句对历史数据的假设，都未在空库上端到端验证过。'
     : '当前数据库只缺少上面列出的少数表，属于已初始化过、但缺少后续增量的存量库：\n'
-      + '请只执行上面“缺失表 → 脚本”列表中列出的那一个目标脚本，不要无差别地从 001 重新执行一遍。\n'
-      + 'backend/sql/ 目录内脚本的幂等性并不一致，以下脚本使用裸 ALTER TABLE ADD COLUMN，\n'
-      + '对已执行过的库重复执行会直接报“字段已存在”错误：\n'
-      + NON_IDEMPOTENT_HISTORICAL_SCRIPTS.map((item) => `  - ${item}`).join('\n') + '\n'
-      + '如果对当前库到底执行到哪个版本没有把握，建议先用 SHOW TABLES / information_schema.COLUMNS\n'
-      + '核对现状，确认从哪个脚本继续，避免中途因重复列报错扩大故障范围。'
+      + '请执行上面“缺失表 → 脚本”列表中列出的目标脚本。这些脚本已全部改造为幂等写法\n'
+      + '（information_schema 判断 + PREPARE 动态 DDL / CREATE TABLE IF NOT EXISTS），\n'
+      + '即使目标脚本是复合脚本、其中部分列或表已经存在，也只会补建真正缺失的对象，不会因重复报错。\n'
+      + '\n'
+      + '仍需人工判断、不要随流程执行的脚本：\n'
+      + NON_IDEMPOTENT_HISTORICAL_SCRIPTS.map((item) => `  - ${item}`).join('\n')
 
   throw new Error(
     `[启动失败] MySQL 数据库缺少必需表：${missingTables.join(', ')}。\n`

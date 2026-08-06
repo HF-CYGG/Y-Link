@@ -79,29 +79,156 @@ CREATE TABLE IF NOT EXISTS `client_feedback_message` (
   KEY `idx_client_feedback_message_sender_type` (`sender_type`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='客户端反馈消息表';
 
-ALTER TABLE `client_feedback_conversation`
-  ADD COLUMN IF NOT EXISTS `issue_type` varchar(16) NOT NULL DEFAULT 'suggestion' COMMENT 'Issue 类型' AFTER `category`,
-  ADD COLUMN IF NOT EXISTS `source_code` varchar(32) NOT NULL DEFAULT 'client_portal' COMMENT '反馈来源编码' AFTER `issue_type`,
-  ADD COLUMN IF NOT EXISTS `order_ref` varchar(64) DEFAULT NULL COMMENT '关联订单号/业务单号' AFTER `source_code`,
-  ADD COLUMN IF NOT EXISTS `expected_result` longtext NOT NULL COMMENT '期望结果描述' AFTER `subject`,
-  ADD COLUMN IF NOT EXISTS `actual_result` longtext NOT NULL COMMENT '实际结果描述' AFTER `expected_result`,
-  ADD COLUMN IF NOT EXISTS `reproduction_steps` longtext DEFAULT NULL COMMENT '复现步骤描述' AFTER `actual_result`,
-  ADD COLUMN IF NOT EXISTS `contact_preference` varchar(64) DEFAULT NULL COMMENT '联系偏好' AFTER `reproduction_steps`,
-  ADD COLUMN IF NOT EXISTS `tag_json` longtext NOT NULL COMMENT '结构化问题标签 JSON 文本' AFTER `contact_preference`,
-  ADD COLUMN IF NOT EXISTS `source_label` varchar(64) NOT NULL DEFAULT '客户端反馈页' COMMENT '反馈来源入口文案' AFTER `tag_json`,
-  ADD COLUMN IF NOT EXISTS `internal_remark` longtext DEFAULT NULL COMMENT '客服内部备注' AFTER `closed_at`,
-  ADD COLUMN IF NOT EXISTS `internal_remark_updated_at` datetime(6) DEFAULT NULL COMMENT '内部备注更新时间' AFTER `internal_remark`,
-  ADD COLUMN IF NOT EXISTS `internal_remark_by_user_id` bigint unsigned DEFAULT NULL COMMENT '内部备注更新人 ID' AFTER `internal_remark_updated_at`,
-  ADD COLUMN IF NOT EXISTS `internal_remark_by_username` varchar(64) DEFAULT NULL COMMENT '内部备注更新人账号快照' AFTER `internal_remark_by_user_id`,
-  ADD COLUMN IF NOT EXISTS `internal_remark_by_display_name` varchar(64) DEFAULT NULL COMMENT '内部备注更新人姓名快照' AFTER `internal_remark_by_username`,
-  ADD COLUMN IF NOT EXISTS `client_satisfaction_level` varchar(16) DEFAULT NULL COMMENT '客户端满意度评价档位' AFTER `internal_remark_by_display_name`,
-  ADD COLUMN IF NOT EXISTS `client_satisfaction_comment` longtext DEFAULT NULL COMMENT '客户端满意度补充说明' AFTER `client_satisfaction_level`,
-  ADD COLUMN IF NOT EXISTS `client_satisfaction_rated_at` datetime(6) DEFAULT NULL COMMENT '客户端满意度评价时间' AFTER `client_satisfaction_comment`;
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'client_feedback_conversation' AND COLUMN_NAME = 'issue_type') = 0,
+  'ALTER TABLE `client_feedback_conversation` ADD COLUMN `issue_type` varchar(16) NOT NULL DEFAULT ''suggestion'' COMMENT ''Issue 类型'' AFTER `category`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
-ALTER TABLE `client_feedback_message`
-  ADD COLUMN IF NOT EXISTS `internal_only` tinyint(1) NOT NULL DEFAULT 0 COMMENT '是否仅客服内部可见' AFTER `message_type`,
-  ADD COLUMN IF NOT EXISTS `attachment_json` longtext NOT NULL COMMENT '消息附件 JSON 文本' AFTER `content`;
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'client_feedback_conversation' AND COLUMN_NAME = 'source_code') = 0,
+  'ALTER TABLE `client_feedback_conversation` ADD COLUMN `source_code` varchar(32) NOT NULL DEFAULT ''client_portal'' COMMENT ''反馈来源编码'' AFTER `issue_type`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'client_feedback_conversation' AND COLUMN_NAME = 'order_ref') = 0,
+  'ALTER TABLE `client_feedback_conversation` ADD COLUMN `order_ref` varchar(64) DEFAULT NULL COMMENT ''关联订单号/业务单号'' AFTER `source_code`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'client_feedback_conversation' AND COLUMN_NAME = 'expected_result') = 0,
+  'ALTER TABLE `client_feedback_conversation` ADD COLUMN `expected_result` longtext NOT NULL COMMENT ''期望结果描述'' AFTER `subject`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'client_feedback_conversation' AND COLUMN_NAME = 'actual_result') = 0,
+  'ALTER TABLE `client_feedback_conversation` ADD COLUMN `actual_result` longtext NOT NULL COMMENT ''实际结果描述'' AFTER `expected_result`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'client_feedback_conversation' AND COLUMN_NAME = 'reproduction_steps') = 0,
+  'ALTER TABLE `client_feedback_conversation` ADD COLUMN `reproduction_steps` longtext DEFAULT NULL COMMENT ''复现步骤描述'' AFTER `actual_result`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'client_feedback_conversation' AND COLUMN_NAME = 'contact_preference') = 0,
+  'ALTER TABLE `client_feedback_conversation` ADD COLUMN `contact_preference` varchar(64) DEFAULT NULL COMMENT ''联系偏好'' AFTER `reproduction_steps`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'client_feedback_conversation' AND COLUMN_NAME = 'tag_json') = 0,
+  'ALTER TABLE `client_feedback_conversation` ADD COLUMN `tag_json` longtext NOT NULL COMMENT ''结构化问题标签 JSON 文本'' AFTER `contact_preference`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'client_feedback_conversation' AND COLUMN_NAME = 'source_label') = 0,
+  'ALTER TABLE `client_feedback_conversation` ADD COLUMN `source_label` varchar(64) NOT NULL DEFAULT ''客户端反馈页'' COMMENT ''反馈来源入口文案'' AFTER `tag_json`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'client_feedback_conversation' AND COLUMN_NAME = 'internal_remark') = 0,
+  'ALTER TABLE `client_feedback_conversation` ADD COLUMN `internal_remark` longtext DEFAULT NULL COMMENT ''客服内部备注'' AFTER `closed_at`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'client_feedback_conversation' AND COLUMN_NAME = 'internal_remark_updated_at') = 0,
+  'ALTER TABLE `client_feedback_conversation` ADD COLUMN `internal_remark_updated_at` datetime(6) DEFAULT NULL COMMENT ''内部备注更新时间'' AFTER `internal_remark`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'client_feedback_conversation' AND COLUMN_NAME = 'internal_remark_by_user_id') = 0,
+  'ALTER TABLE `client_feedback_conversation` ADD COLUMN `internal_remark_by_user_id` bigint unsigned DEFAULT NULL COMMENT ''内部备注更新人 ID'' AFTER `internal_remark_updated_at`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'client_feedback_conversation' AND COLUMN_NAME = 'internal_remark_by_username') = 0,
+  'ALTER TABLE `client_feedback_conversation` ADD COLUMN `internal_remark_by_username` varchar(64) DEFAULT NULL COMMENT ''内部备注更新人账号快照'' AFTER `internal_remark_by_user_id`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'client_feedback_conversation' AND COLUMN_NAME = 'internal_remark_by_display_name') = 0,
+  'ALTER TABLE `client_feedback_conversation` ADD COLUMN `internal_remark_by_display_name` varchar(64) DEFAULT NULL COMMENT ''内部备注更新人姓名快照'' AFTER `internal_remark_by_username`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'client_feedback_conversation' AND COLUMN_NAME = 'client_satisfaction_level') = 0,
+  'ALTER TABLE `client_feedback_conversation` ADD COLUMN `client_satisfaction_level` varchar(16) DEFAULT NULL COMMENT ''客户端满意度评价档位'' AFTER `internal_remark_by_display_name`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'client_feedback_conversation' AND COLUMN_NAME = 'client_satisfaction_comment') = 0,
+  'ALTER TABLE `client_feedback_conversation` ADD COLUMN `client_satisfaction_comment` longtext DEFAULT NULL COMMENT ''客户端满意度补充说明'' AFTER `client_satisfaction_level`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'client_feedback_conversation' AND COLUMN_NAME = 'client_satisfaction_rated_at') = 0,
+  'ALTER TABLE `client_feedback_conversation` ADD COLUMN `client_satisfaction_rated_at` datetime(6) DEFAULT NULL COMMENT ''客户端满意度评价时间'' AFTER `client_satisfaction_comment`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'client_feedback_message' AND COLUMN_NAME = 'internal_only') = 0,
+  'ALTER TABLE `client_feedback_message` ADD COLUMN `internal_only` tinyint(1) NOT NULL DEFAULT 0 COMMENT ''是否仅客服内部可见'' AFTER `message_type`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'client_feedback_message' AND COLUMN_NAME = 'attachment_json') = 0,
+  'ALTER TABLE `client_feedback_message` ADD COLUMN `attachment_json` longtext NOT NULL COMMENT ''消息附件 JSON 文本'' AFTER `content`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 INSERT INTO `system_configs` (`config_key`, `config_value`, `config_group`, `remark`)
 SELECT 'customer_service.enabled', '1', 'customer_service', '客户端反馈入口启用开关'
 WHERE NOT EXISTS (

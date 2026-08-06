@@ -17,31 +17,25 @@
 （`backend/src/commands/prepare-mysql-migration-schema.ts`）与 `npm run verify:db:concurrency`
 流水线（对 `mysql:8.4` 真实建库）都走这条路径。
 
-## 为什么不能顺序回放
+## 每个脚本都幂等，但整目录不是基线
 
-两类硬性问题使得"从 001 执行到最新编号"在 MySQL 8 上无法走通：
+**单个脚本可以安全重放。** 本目录下所有脚本均已改造为幂等写法
+（`information_schema` 判断 + `PREPARE` 动态 DDL / `CREATE TABLE IF NOT EXISTS` /
+`ON DUPLICATE KEY UPDATE`），重复执行只会补建真正缺失的对象，不会报"字段已存在"。
 
-**1. MariaDB 专有语法（18 个脚本，MySQL 8 直接语法错误）**
+历史上的两类障碍已清除：
 
-以下脚本使用 `ADD COLUMN IF NOT EXISTS` —— 这是 MariaDB 语法，MySQL 8 不支持：
+- **MariaDB 专有语法**：`001 / 002 / 003 / 007 / 011 / 012 / 013 / 019 / 020 / 021 /
+  022 / 023 / 024 / 025 / 026 / 027 / 029 / 031` 共 18 个脚本曾使用
+  `ADD COLUMN IF NOT EXISTS`（MySQL 8 直接语法错误），已全部改写为动态 DDL
+- **裸 `ADD COLUMN`**：`006 / 008 / 014 / 015 / 016` 重复执行会报"字段已存在"，同样已改造
 
-```
-001, 002, 003, 007, 011, 012, 013, 019, 020, 021,
-022, 023, 024, 025, 026, 027, 029, 031
-```
+**但"从 001 顺序执行到最新编号"仍不是受支持的初始化方式**，原因有两条：
 
-**2. 非幂等的裸 `ADD COLUMN`（对已执行过的库重复执行会报"字段已存在"）**
-
-```
-006_o2o_preorder_schema.sql
-008_o2o_preorder_business_status.sql
-014_o2o_preorder_client_order_type.sql
-015_o2o_preorder_is_system_applied.sql
-016_o2o_preorder_has_customer_order.sql
-```
-
-另外 `005_task8_history_order_type_mapping_rollback.sql` 是只应人工触发的**破坏性回滚脚本**
-（会删除 004 生成的备份表），正常部署流程不要执行。
+1. 本目录是按时间累积的增量记录，从未作为一份完整基线在真实 MySQL 8 空库上端到端验证过。
+   脚本间的顺序依赖、以及数据回填 `UPDATE` 对历史数据的假设，都没有校验过
+2. `005_task8_history_order_type_mapping_rollback.sql` 是只应人工触发的破坏性回滚脚本
+   （会删除 004 生成的备份表），正常部署流程不要执行
 
 ## 已有库缺少某张表时怎么办
 
@@ -49,8 +43,14 @@
 （见 `backend/src/config/mysql-migration-runner.ts` 的 `TABLE_INTRODUCING_SCRIPT`）。
 **只执行那一个目标脚本**，不要从 001 重跑。
 
+这些脚本都是幂等的：即便目标脚本是复合脚本（例如 `006` 既给 `base_product` 补列、
+又建 `o2o_preorder` 等表），其中部分列/表已经存在也不会报错，只会补建真正缺失的对象。
+若目标脚本依赖更早脚本引入的列（例如 `026` 的回填 `UPDATE` 依赖 `006` 的价格列），
+执行报错时按报错提示的缺失对象向前补执行对应脚本即可，无需从 001 重跑。
+
 若缺的仅是 `auth_risk_state`，也可以设置 `DB_AUTO_MIGRATE=true` 后重启，
 由服务自动执行白名单内已核实幂等的脚本（当前仅 `033_inventory_security_invariants.sql`）。
+该自动执行流程由 MySQL advisory lock 串行化，多实例同时启动也不会并发执行同一脚本。
 
 ## 新增迁移脚本的要求
 

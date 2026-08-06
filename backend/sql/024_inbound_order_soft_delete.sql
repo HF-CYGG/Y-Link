@@ -7,13 +7,45 @@
 -- 3) 幂等补列，兼容已部署数据库重复执行。
 -- =============================================
 
-ALTER TABLE `biz_inbound_order`
-  ADD COLUMN IF NOT EXISTS `is_deleted` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否已删除（软删除）' AFTER `verified_by_display_name`,
-  ADD COLUMN IF NOT EXISTS `deleted_at` DATETIME(3) NULL COMMENT '删除时间' AFTER `is_deleted`,
-  ADD COLUMN IF NOT EXISTS `deleted_by_user_id` BIGINT UNSIGNED NULL COMMENT '删除操作人ID' AFTER `deleted_at`,
-  ADD COLUMN IF NOT EXISTS `deleted_by_username` VARCHAR(64) NULL COMMENT '删除操作账号快照' AFTER `deleted_by_user_id`,
-  ADD COLUMN IF NOT EXISTS `deleted_by_display_name` VARCHAR(128) NULL COMMENT '删除操作姓名快照' AFTER `deleted_by_username`;
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_inbound_order' AND COLUMN_NAME = 'is_deleted') = 0,
+  'ALTER TABLE `biz_inbound_order` ADD COLUMN `is_deleted` TINYINT(1) NOT NULL DEFAULT 0 COMMENT ''是否已删除（软删除）'' AFTER `verified_by_display_name`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_inbound_order' AND COLUMN_NAME = 'deleted_at') = 0,
+  'ALTER TABLE `biz_inbound_order` ADD COLUMN `deleted_at` DATETIME(3) NULL COMMENT ''删除时间'' AFTER `is_deleted`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_inbound_order' AND COLUMN_NAME = 'deleted_by_user_id') = 0,
+  'ALTER TABLE `biz_inbound_order` ADD COLUMN `deleted_by_user_id` BIGINT UNSIGNED NULL COMMENT ''删除操作人ID'' AFTER `deleted_at`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_inbound_order' AND COLUMN_NAME = 'deleted_by_username') = 0,
+  'ALTER TABLE `biz_inbound_order` ADD COLUMN `deleted_by_username` VARCHAR(64) NULL COMMENT ''删除操作账号快照'' AFTER `deleted_by_user_id`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_inbound_order' AND COLUMN_NAME = 'deleted_by_display_name') = 0,
+  'ALTER TABLE `biz_inbound_order` ADD COLUMN `deleted_by_display_name` VARCHAR(128) NULL COMMENT ''删除操作姓名快照'' AFTER `deleted_by_username`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 SET @idx_biz_inbound_is_deleted_exists := (
   SELECT COUNT(1)
   FROM information_schema.statistics

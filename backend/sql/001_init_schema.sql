@@ -250,21 +250,109 @@ CREATE TABLE IF NOT EXISTS `biz_inbound_order_item` (
   CONSTRAINT `fk_biz_inbound_item_product_id` FOREIGN KEY (`product_id`) REFERENCES `base_product` (`id`) ON DELETE RESTRICT ON UPDATE RESTRICT
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='入库明细表';
 
-ALTER TABLE `biz_outbound_order`
-  ADD COLUMN IF NOT EXISTS `creator_user_id` BIGINT UNSIGNED DEFAULT NULL COMMENT '开单用户ID',
-  ADD COLUMN IF NOT EXISTS `creator_username` VARCHAR(64) DEFAULT NULL COMMENT '开单账号快照',
-  ADD COLUMN IF NOT EXISTS `creator_display_name` VARCHAR(64) DEFAULT NULL COMMENT '开单姓名快照',
-  ADD COLUMN IF NOT EXISTS `is_deleted` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否已删除（软删除）',
-  ADD COLUMN IF NOT EXISTS `deleted_at` DATETIME(3) DEFAULT NULL COMMENT '删除时间',
-  ADD COLUMN IF NOT EXISTS `deleted_by_user_id` BIGINT UNSIGNED DEFAULT NULL COMMENT '删除操作用户ID',
-  ADD COLUMN IF NOT EXISTS `deleted_by_username` VARCHAR(64) DEFAULT NULL COMMENT '删除操作账号快照',
-  ADD COLUMN IF NOT EXISTS `deleted_by_display_name` VARCHAR(64) DEFAULT NULL COMMENT '删除操作姓名快照',
-  ADD COLUMN IF NOT EXISTS `order_type` VARCHAR(32) NOT NULL DEFAULT 'walkin' COMMENT '订单类型',
-  ADD COLUMN IF NOT EXISTS `has_customer_order` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否有客户订单',
-  ADD COLUMN IF NOT EXISTS `is_system_applied` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否系统申请',
-  ADD COLUMN IF NOT EXISTS `issuer_name` VARCHAR(64) DEFAULT NULL COMMENT '出单人',
-  ADD COLUMN IF NOT EXISTS `customer_department_name` VARCHAR(128) DEFAULT NULL COMMENT '客户部门名称';
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_outbound_order' AND COLUMN_NAME = 'creator_user_id') = 0,
+  'ALTER TABLE `biz_outbound_order` ADD COLUMN `creator_user_id` BIGINT UNSIGNED DEFAULT NULL COMMENT ''开单用户ID''',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_outbound_order' AND COLUMN_NAME = 'creator_username') = 0,
+  'ALTER TABLE `biz_outbound_order` ADD COLUMN `creator_username` VARCHAR(64) DEFAULT NULL COMMENT ''开单账号快照''',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_outbound_order' AND COLUMN_NAME = 'creator_display_name') = 0,
+  'ALTER TABLE `biz_outbound_order` ADD COLUMN `creator_display_name` VARCHAR(64) DEFAULT NULL COMMENT ''开单姓名快照''',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_outbound_order' AND COLUMN_NAME = 'is_deleted') = 0,
+  'ALTER TABLE `biz_outbound_order` ADD COLUMN `is_deleted` TINYINT(1) NOT NULL DEFAULT 0 COMMENT ''是否已删除（软删除）''',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_outbound_order' AND COLUMN_NAME = 'deleted_at') = 0,
+  'ALTER TABLE `biz_outbound_order` ADD COLUMN `deleted_at` DATETIME(3) DEFAULT NULL COMMENT ''删除时间''',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_outbound_order' AND COLUMN_NAME = 'deleted_by_user_id') = 0,
+  'ALTER TABLE `biz_outbound_order` ADD COLUMN `deleted_by_user_id` BIGINT UNSIGNED DEFAULT NULL COMMENT ''删除操作用户ID''',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_outbound_order' AND COLUMN_NAME = 'deleted_by_username') = 0,
+  'ALTER TABLE `biz_outbound_order` ADD COLUMN `deleted_by_username` VARCHAR(64) DEFAULT NULL COMMENT ''删除操作账号快照''',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_outbound_order' AND COLUMN_NAME = 'deleted_by_display_name') = 0,
+  'ALTER TABLE `biz_outbound_order` ADD COLUMN `deleted_by_display_name` VARCHAR(64) DEFAULT NULL COMMENT ''删除操作姓名快照''',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_outbound_order' AND COLUMN_NAME = 'order_type') = 0,
+  'ALTER TABLE `biz_outbound_order` ADD COLUMN `order_type` VARCHAR(32) NOT NULL DEFAULT ''walkin'' COMMENT ''订单类型''',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_outbound_order' AND COLUMN_NAME = 'has_customer_order') = 0,
+  'ALTER TABLE `biz_outbound_order` ADD COLUMN `has_customer_order` TINYINT(1) NOT NULL DEFAULT 0 COMMENT ''是否有客户订单''',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_outbound_order' AND COLUMN_NAME = 'is_system_applied') = 0,
+  'ALTER TABLE `biz_outbound_order` ADD COLUMN `is_system_applied` TINYINT(1) NOT NULL DEFAULT 0 COMMENT ''是否系统申请''',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_outbound_order' AND COLUMN_NAME = 'issuer_name') = 0,
+  'ALTER TABLE `biz_outbound_order` ADD COLUMN `issuer_name` VARCHAR(64) DEFAULT NULL COMMENT ''出单人''',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_outbound_order' AND COLUMN_NAME = 'customer_department_name') = 0,
+  'ALTER TABLE `biz_outbound_order` ADD COLUMN `customer_department_name` VARCHAR(128) DEFAULT NULL COMMENT ''客户部门名称''',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 INSERT INTO `system_configs` (`config_key`, `config_value`, `config_group`, `remark`)
 VALUES
   ('order.serial.department.start', '1', 'order_serial', '部门单号起始值'),
