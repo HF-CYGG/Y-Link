@@ -21,14 +21,12 @@ CREATE TABLE IF NOT EXISTS `base_product` (
   UNIQUE KEY `uk_base_product_code` (`product_code`),
   KEY `idx_base_product_name` (`product_name`),
   KEY `idx_base_product_pinyin_abbr` (`pinyin_abbr`),
-  KEY `idx_base_product_is_active` (`is_active`),
-  CONSTRAINT `ck_base_product_non_negative` CHECK (
-    `default_price` >= 0
-    AND `limit_per_user` >= 1
-    AND `current_stock` >= 0
-    AND `pre_ordered_stock` >= 0
-    AND `pre_ordered_stock` <= `current_stock`
-  )
+  KEY `idx_base_product_is_active` (`is_active`)
+  -- 注意：`ck_base_product_non_negative` 不在这里定义。
+  -- 该约束同时引用 `limit_per_user` / `current_stock` / `pre_ordered_stock`，
+  -- 而这三列由 006_o2o_preorder_schema.sql 后续补充，本表此刻并不存在这些列；
+  -- 在此定义会让 MySQL 8 直接报 error 3820（CHECK 引用不存在的列）而无法建表。
+  -- 完整约束由 018_task4_business_field_constraints.sql 在建列之后幂等添加。
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='基础资料-产品表';
 
 CREATE TABLE IF NOT EXISTS `base_tag` (

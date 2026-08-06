@@ -78,6 +78,14 @@ const NON_IDEMPOTENT_HISTORICAL_SCRIPTS = [
   '016_o2o_preorder_has_customer_order.sql',
 ]
 
+/**
+ * 使用 `ADD COLUMN IF NOT EXISTS` 等 MariaDB 专有语法的历史脚本（MySQL 8 会直接报语法错误）。
+ * 这是"不能建议顺序执行 backend/sql/ 初始化全新 MySQL 库"的另一个硬性原因：
+ * 即使跳过非幂等问题，这些脚本在 MySQL 8 上也根本无法执行。
+ * 仅作为常量登记在此，供维护者理解报错文案为何不推荐脚本回放；修复它们属于独立的迁移基线治理工作。
+ */
+const MARIADB_ONLY_SYNTAX_SCRIPT_COUNT = 18
+
 // 已人工审计确认幂等、可安全自动执行的迁移文件白名单。
 // 只在这里追加——不要把整个 sql/ 目录当成可自动回放的历史，见文件头说明。
 const AUTO_MIGRATABLE_FILES = [
@@ -243,35 +251,40 @@ export async function assertMysqlRequiredTablesExist(dataSource: DataSource): Pr
     return
   }
 
-  // 全新空库：一张必需表都不存在，说明这个数据库从未跑过任何迁移，从 001 顺序执行到最新编号是安全的
-  // （每个脚本对这个库而言都是“第一次执行”，不会撞上非幂等脚本的“字段已存在”报错）。
-  // 存量库：只是缺少上面列出的少数表，说明这个库已经执行过部分迁移——此时绝不能笼统建议“从头重跑”，
-  // 因为 006/008/014/015/016 等脚本是裸 ADD COLUMN，对已执行过的库重放会直接报错，延长故障恢复时间。
+  // 全新空库与存量库的恢复手段完全不同，必须分开给指引：
+  // - 全新空库只能用 DB_SYNC=true 让 TypeORM 按实体建表，不能建议顺序执行 backend/sql/
+  //   （见 NON_IDEMPOTENT_HISTORICAL_SCRIPTS / MARIADB_ONLY_SYNTAX_SCRIPTS 说明，那条路走不通）；
+  // - 存量库只缺个别表时，则要精确指向补建该表的那一个脚本，绝不能笼统建议“从头重跑”。
   const isFreshDatabase = missingTables.length === MYSQL_REQUIRED_TABLES.length
   const missingTableGuide = missingTables
     .map((table) => `  - ${table} → backend/sql/${TABLE_INTRODUCING_SCRIPT[table] ?? '（未登记，请检查 mysql-migration-runner.ts 的 TABLE_INTRODUCING_SCRIPT）'}`)
     .join('\n')
 
   const scenarioGuide = isFreshDatabase
-    ? '当前数据库缺少全部必需表，属于全新空库（从未执行过任何迁移）：\n'
-      + '可以从 001 开始按文件名数字前缀顺序执行到最新编号，例如：\n'
-      + '  mysql -h<host> -u<user> -p <database> < backend/sql/001_init_schema.sql\n'
-      + '  ...（按顺序执行到最新编号，跳过 *_rollback.sql 这类需人工判断是否执行的回滚脚本）\n'
-      + '  mysql -h<host> -u<user> -p <database> < backend/sql/033_inventory_security_invariants.sql'
-    : '当前数据库只缺少上面列出的少数表，属于已执行过部分迁移的存量库：\n'
-      + '不要无差别地从 001 重新执行一遍——backend/sql/ 目录内脚本的幂等性并不一致，以下脚本使用裸\n'
-      + 'ALTER TABLE ADD COLUMN，对已执行过的库重复执行会直接报“字段已存在”错误：\n'
+    ? '当前数据库缺少全部必需表，属于全新空库（从未初始化过）。\n'
+      + '请使用 TypeORM 实体同步完成首次建表——这是目前唯一经过验证的全新 MySQL 初始化方式\n'
+      + '（SQLite→MySQL 迁移向导与 verify:db:concurrency 流水线都走这条路径）：\n'
+      + '  1) 为后端设置环境变量 DB_SYNC=true（compose 部署可在 .env.docker.mysql 中设置）；\n'
+      + '  2) 启动一次后端服务，等待日志出现 action=synchronized reason=forced_by_db_sync；\n'
+      + '  3) 建表完成后把 DB_SYNC 改回 false 并重启，避免后续每次启动都同步实体结构。\n'
+      + '\n'
+      + '请勿按编号顺序执行 backend/sql/ 下的脚本来初始化全新库：这些脚本是历史增量记录，\n'
+      + `并非经过验证的全量基线——其中 ${MARIADB_ONLY_SYNTAX_SCRIPT_COUNT} 个脚本使用 MariaDB 专有的\n`
+      + '`ADD COLUMN IF NOT EXISTS` 语法，在 MySQL 8 上会直接报语法错误，无法完成从零建库。'
+    : '当前数据库只缺少上面列出的少数表，属于已初始化过、但缺少后续增量的存量库：\n'
+      + '请只执行上面“缺失表 → 脚本”列表中列出的那一个目标脚本，不要无差别地从 001 重新执行一遍。\n'
+      + 'backend/sql/ 目录内脚本的幂等性并不一致，以下脚本使用裸 ALTER TABLE ADD COLUMN，\n'
+      + '对已执行过的库重复执行会直接报“字段已存在”错误：\n'
       + NON_IDEMPOTENT_HISTORICAL_SCRIPTS.map((item) => `  - ${item}`).join('\n') + '\n'
-      + '请只执行上面“缺失表 → 脚本”列表中列出的目标脚本本身；如果对当前库到底执行到哪个版本没有把握，\n'
-      + '建议先用 SHOW TABLES / information_schema.COLUMNS 核对现状，或联系熟悉该库迁移历史的同事，\n'
-      + '确认从哪个脚本继续，避免中途因重复列报错扩大故障范围。'
+      + '如果对当前库到底执行到哪个版本没有把握，建议先用 SHOW TABLES / information_schema.COLUMNS\n'
+      + '核对现状，确认从哪个脚本继续，避免中途因重复列报错扩大故障范围。'
 
   throw new Error(
     `[启动失败] MySQL 数据库缺少必需表：${missingTables.join(', ')}。\n`
     + '这些表分别由以下迁移脚本创建：\n'
     + `${missingTableGuide}\n\n`
     + `${scenarioGuide}\n\n`
-    + '也可以设置环境变量 DB_AUTO_MIGRATE=true 后重启服务，由服务自动执行白名单内已核实幂等的脚本'
-    + '（当前仅 033_inventory_security_invariants.sql）；不在白名单内的脚本仍需按上述方式人工判断执行。',
+    + '若缺失的仅是 auth_risk_state，也可以设置环境变量 DB_AUTO_MIGRATE=true 后重启服务，'
+    + '由服务自动执行白名单内已核实幂等的脚本（当前仅 033_inventory_security_invariants.sql）。',
   )
 }
