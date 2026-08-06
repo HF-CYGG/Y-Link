@@ -1,0 +1,297 @@
+# 模块说明：Docker 镜像构建与 Onebox 升级冒烟验收
+# 文件职责：在真实 Docker daemon 中构建全部交付镜像，并验证旧 SQLite 数据卷升级后的 Onebox 可用性
+# 维护说明：该工作流只构建本地 CI 镜像，不登录仓库、不推送镜像，也不接触任何正式数据库
+
+name: docker-build-smoke
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/docker-build-smoke.yml"
+      - "Dockerfile"
+      - "Dockerfile.onebox"
+      - "backend/Dockerfile"
+      - "backend/Dockerfile.mysql"
+      - "backend/package*.json"
+      - "backend/src/**"
+      - "compose*.yml"
+      - "docker/**"
+      - "package*.json"
+      - "src/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/docker-build-smoke.yml"
+      - "Dockerfile"
+      - "Dockerfile.onebox"
+      - "backend/Dockerfile"
+      - "backend/Dockerfile.mysql"
+      - "backend/package*.json"
+      - "backend/src/**"
+      - "compose*.yml"
+      - "docker/**"
+      - "package*.json"
+      - "src/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docker-build-smoke-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-smoke:
+    name: 构建全部镜像并验证 Onebox 升级
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      DOCKER_BUILDKIT: "1"
+      BUILDKIT_PROGRESS: plain
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v6
+
+      - name: 检查 Docker 与 Compose
+        run: |
+          set -euo pipefail
+          docker version
+          docker compose version
+          docker info
+
+      - name: 生成隔离验收凭据
+        shell: bash
+        run: |
+          set -euo pipefail
+          admin_password="$(openssl rand -hex 24)Aa1!"
+          delete_password="$(openssl rand -hex 24)Bb2!"
+          mysql_password="$(openssl rand -hex 24)Cc3!"
+          mysql_root_password="$(openssl rand -hex 24)Dd4!"
+          invite_pepper="$(openssl rand -hex 32)"
+          for value in "$admin_password" "$delete_password" "$mysql_password" "$mysql_root_password" "$invite_pepper"; do
+            echo "::add-mask::$value"
+          done
+          {
+            echo "CI_ADMIN_PASSWORD=$admin_password"
+            echo "CI_DELETE_PASSWORD=$delete_password"
+            echo "CI_MYSQL_PASSWORD=$mysql_password"
+            echo "CI_MYSQL_ROOT_PASSWORD=$mysql_root_password"
+            echo "CI_INVITE_PEPPER=$invite_pepper"
+          } >> "$GITHUB_ENV"
+
+      - name: 校验全部 Compose 配置
+        run: |
+          set -euo pipefail
+          export INIT_ADMIN_PASSWORD="$CI_ADMIN_PASSWORD"
+          export PERMANENT_DELETE_PASSWORD="$CI_DELETE_PASSWORD"
+          export INVITE_CODE_PEPPER="$CI_INVITE_PEPPER"
+          export MYSQL_PASSWORD="$CI_MYSQL_PASSWORD"
+          export MYSQL_ROOT_PASSWORD="$CI_MYSQL_ROOT_PASSWORD"
+          export DB_HOST=127.0.0.1
+          export DB_USER=ylink
+          export DB_PASSWORD="$CI_MYSQL_PASSWORD"
+          export DB_NAME=y_link
+          export Y_LINK_VERIFY_MYSQL_ROOT_PASSWORD="$CI_MYSQL_ROOT_PASSWORD"
+          export Y_LINK_VERIFY_MYSQL_PASSWORD="$CI_MYSQL_PASSWORD"
+          export Y_LINK_VERIFY_ADMIN_PASSWORD="$CI_ADMIN_PASSWORD"
+          export Y_LINK_VERIFY_ONEBOX_PORT=18080
+          docker compose -f compose.onebox.yml config --quiet
+          docker compose -f compose.onebox.yml -f compose.onebox.mysql.yml config --quiet
+          docker compose -f compose.mysql.yml config --quiet
+          docker compose -f compose.cloud.yml config --quiet
+          docker compose -f docker/compose.verify-db-migration.yml config --quiet
+
+      - name: 构建前端镜像
+        run: docker build --pull --file Dockerfile --tag ylink-frontend:ci .
+
+      - name: 构建 SQLite 后端镜像
+        run: docker build --pull --file backend/Dockerfile --tag ylink-backend-sqlite:ci backend
+
+      - name: 构建 MySQL 后端镜像
+        run: docker build --pull --file backend/Dockerfile.mysql --tag ylink-backend-mysql:ci backend
+
+      - name: 构建 Onebox 镜像
+        run: docker build --pull --file Dockerfile.onebox --tag ylink-onebox:ci .
+
+      - name: 校验镜像运行依赖
+        run: |
+          set -euo pipefail
+          docker run --rm --add-host backend:127.0.0.1 ylink-frontend:ci nginx -t
+          docker run --rm --entrypoint node ylink-backend-sqlite:ci -e "require('sqlite3'); console.log('SQLite runtime dependency OK')"
+          docker run --rm --entrypoint node ylink-backend-mysql:ci -e "require('mysql2'); console.log('MySQL runtime dependency OK')"
+
+      - name: 创建旧版 SQLite 数据卷
+        run: |
+          set -euo pipefail
+          docker volume create ylink_ci_onebox_data >/dev/null
+          docker volume create ylink_ci_onebox_uploads >/dev/null
+          docker run --rm -i \
+            --volume ylink_ci_onebox_data:/app/data \
+            --entrypoint node \
+            ylink-onebox:ci - <<'NODE'
+          const sqlite3 = require('/app/backend/node_modules/sqlite3')
+          const database = new sqlite3.Database('/app/data/y-link.sqlite')
+          database.exec(`
+            CREATE TABLE base_product (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              product_code varchar(64) NOT NULL,
+              product_name varchar(128) NOT NULL,
+              pinyin_abbr varchar(64) NOT NULL,
+              default_price decimal(12,2) NOT NULL DEFAULT 0,
+              is_active tinyint NOT NULL DEFAULT 1,
+              thumbnail varchar(255),
+              limit_per_user integer NOT NULL DEFAULT 5,
+              current_stock integer NOT NULL DEFAULT 7,
+              pre_ordered_stock integer NOT NULL DEFAULT 0,
+              created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO base_product (
+              id, product_code, product_name, pinyin_abbr, default_price, is_active, current_stock
+            ) VALUES (1, 'LEGACY-DOCKER-1', 'Docker Legacy Product', 'DLP', 12.50, 1, 7);
+
+            CREATE TABLE biz_inbound_order (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              show_no varchar(48) NOT NULL,
+              verify_code varchar(64) NOT NULL,
+              supplier_id INTEGER NOT NULL,
+              supplier_name varchar(128),
+              status varchar(32) NOT NULL,
+              total_qty decimal(10,2) NOT NULL DEFAULT 0,
+              remark varchar(255),
+              created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+              updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            INSERT INTO biz_inbound_order (
+              id, show_no, verify_code, supplier_id, status, total_qty
+            ) VALUES (1, 'LEGACY-DOCKER-IN-1', 'legacy-docker-verify', 1, 'pending', 3);
+
+            CREATE TABLE biz_inbound_order_item (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              order_id INTEGER NOT NULL,
+              product_id INTEGER NOT NULL,
+              product_name_snapshot varchar(255) NOT NULL,
+              qty decimal(10,2) NOT NULL DEFAULT 0
+            );
+            INSERT INTO biz_inbound_order_item (
+              id, order_id, product_id, product_name_snapshot, qty
+            ) VALUES (1, 1, 1, 'Docker Legacy Product', 3);
+
+            CREATE TABLE o2o_preorder (id INTEGER PRIMARY KEY AUTOINCREMENT);
+          `, (error) => {
+            database.close()
+            if (error) {
+              console.error(error)
+              process.exitCode = 1
+            }
+          })
+          NODE
+
+      - name: 启动新 Onebox 并等待健康
+        run: |
+          set -euo pipefail
+          docker run --detach \
+            --name ylink-onebox-smoke \
+            --publish 127.0.0.1::80 \
+            --env NODE_ENV=production \
+            --env DB_TYPE=sqlite \
+            --env DB_SYNC=false \
+            --env SQLITE_DB_PATH=/app/data/y-link.sqlite \
+            --env Y_LINK_DATA_DIR=/app/data \
+            --env SQLITE_SYNCHRONOUS=FULL \
+            --env INIT_ADMIN_USERNAME=admin \
+            --env INIT_ADMIN_PASSWORD="$CI_ADMIN_PASSWORD" \
+            --env PERMANENT_DELETE_PASSWORD="$CI_DELETE_PASSWORD" \
+            --env INVITE_CODE_PEPPER="$CI_INVITE_PEPPER" \
+            --volume ylink_ci_onebox_data:/app/data \
+            --volume ylink_ci_onebox_uploads:/app/uploads \
+            ylink-onebox:ci
+
+          port="$(docker port ylink-onebox-smoke 80/tcp | awk -F: 'NR == 1 { print $NF }')"
+          test -n "$port"
+          echo "YLINK_SMOKE_PORT=$port" >> "$GITHUB_ENV"
+
+          for attempt in $(seq 1 90); do
+            state="$(docker inspect --format '{{.State.Status}}' ylink-onebox-smoke)"
+            health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' ylink-onebox-smoke)"
+            if [ "$state" = "exited" ] || [ "$state" = "dead" ]; then
+              docker logs ylink-onebox-smoke
+              exit 1
+            fi
+            if [ "$health" = "healthy" ]; then
+              break
+            fi
+            if [ "$attempt" -eq 90 ]; then
+              docker logs ylink-onebox-smoke
+              exit 1
+            fi
+            sleep 2
+          done
+
+      - name: 验证旧库升级、WAL 与页面代理
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error "http://127.0.0.1:${YLINK_SMOKE_PORT}/health" --output /tmp/ylink-health.json
+          node -e "const body=require('/tmp/ylink-health.json'); if(body.status!=='UP') process.exit(1)"
+          curl --fail --silent --show-error "http://127.0.0.1:${YLINK_SMOKE_PORT}/" | grep -q '<div id="app"'
+          docker exec ylink-onebox-smoke nginx -t
+
+          docker exec -i ylink-onebox-smoke node - <<'NODE'
+          const sqlite3 = require('/app/backend/node_modules/sqlite3')
+          const database = new sqlite3.Database('/app/data/y-link.sqlite')
+          const query = (sql) => new Promise((resolve, reject) => {
+            database.all(sql, (error, rows) => error ? reject(error) : resolve(rows))
+          })
+          ;(async () => {
+            const journalMode = await query('PRAGMA journal_mode')
+            const integrity = await query('PRAGMA integrity_check')
+            const skus = await query('SELECT id, current_stock AS currentStock FROM base_product_sku WHERE product_id = 1')
+            const inboundItems = await query('SELECT sku_id AS skuId FROM biz_inbound_order_item WHERE id = 1')
+            if (String(journalMode[0]?.journal_mode).toLowerCase() !== 'wal') throw new Error('SQLite 未启用 WAL')
+            if (String(integrity[0]?.integrity_check).toLowerCase() !== 'ok') throw new Error('SQLite integrity_check 未通过')
+            if (skus.length !== 1 || Number(skus[0]?.currentStock) !== 7) throw new Error('历史商品默认 SKU 升级失败')
+            if (String(inboundItems[0]?.skuId) !== String(skus[0]?.id)) throw new Error('历史入库明细 SKU 回填失败')
+            console.log('Onebox legacy SQLite upgrade, WAL and integrity OK')
+          })().finally(() => database.close()).catch((error) => {
+            console.error(error)
+            process.exitCode = 1
+          })
+          NODE
+
+      - name: 验证优雅停机与持久化重启
+        run: |
+          set -euo pipefail
+          docker stop --time 30 ylink-onebox-smoke >/dev/null
+          exit_code="$(docker inspect --format '{{.State.ExitCode}}' ylink-onebox-smoke)"
+          test "$exit_code" = "0"
+          docker start ylink-onebox-smoke >/dev/null
+
+          for attempt in $(seq 1 90); do
+            health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' ylink-onebox-smoke)"
+            if [ "$health" = "healthy" ]; then
+              break
+            fi
+            if [ "$attempt" -eq 90 ]; then
+              docker logs ylink-onebox-smoke
+              exit 1
+            fi
+            sleep 2
+          done
+
+          curl --fail --silent --show-error "http://127.0.0.1:${YLINK_SMOKE_PORT}/health" --output /tmp/ylink-health-restarted.json
+          node -e "const body=require('/tmp/ylink-health-restarted.json'); if(body.status!=='UP') process.exit(1)"
+          docker exec ylink-onebox-smoke node -e "const fs=require('node:fs'); if(!fs.existsSync('/app/data/y-link.sqlite')) process.exit(1)"
+
+      - name: 输出容器日志
+        if: always()
+        run: docker logs ylink-onebox-smoke 2>&1 || true
+
+      - name: 清理隔离容器与卷
+        if: always()
+        run: |
+          docker rm --force ylink-onebox-smoke >/dev/null 2>&1 || true
+          docker volume rm ylink_ci_onebox_data ylink_ci_onebox_uploads >/dev/null 2>&1 || true
