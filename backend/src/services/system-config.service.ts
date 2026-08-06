@@ -484,6 +484,16 @@ class SystemConfigService {
     'customer_service.sse_keepalive_seconds',
   ] as const
   /**
+   * 默认配置是否已在本进程内确认过存在：
+   * - system_configs 里的默认行只会被插入，不会被应用代码删除，因此“已存在”是单调事实；
+   * - 确认过一次后，后续调用不再需要每次都发起一条含数十个 OR 分支的存在性校验查询。
+   */
+  private defaultConfigsEnsured = false
+  private static readonly CONFIG_CACHE_TTL_MS = 5_000
+  private o2oRuleConfigCache: { value: O2oRuleConfigRecord; expiresAtMs: number } | null = null
+  // 只缓存客服配置中来自数据库的静态部分；availability 依赖实时在线人数，每次都要重新计算，不能一并缓存。
+  private customerServiceBaseConfigCache: { value: Omit<CustomerServiceConfigRecord, 'availability'>; expiresAtMs: number } | null = null
+  /**
    * 系统治理配置写操作强制管理员：
    * - 与路由层 requireRole('admin') 形成双重门禁；
    * - 若发生越权调用，统一记录失败审计，便于后续排查权限绕过或路由误配。
@@ -1285,6 +1295,9 @@ class SystemConfigService {
   }
 
   async ensureDefaultConfigs(manager: EntityManager = AppDataSource.manager): Promise<{ insertedCount: number; totalCount: number }> {
+    if (this.defaultConfigsEnsured) {
+      return { insertedCount: 0, totalCount: DEFAULT_SYSTEM_CONFIGS.length }
+    }
     const configRepo = manager.getRepository(SystemConfig)
     const existingConfigs = await configRepo.find({
       where: DEFAULT_SYSTEM_CONFIGS.map((config) => ({ configKey: config.configKey })),
@@ -1326,6 +1339,7 @@ class SystemConfigService {
       )
     }
 
+    this.defaultConfigsEnsured = true
     return {
       insertedCount: missingConfigs.length,
       totalCount: DEFAULT_SYSTEM_CONFIGS.length,
@@ -1442,7 +1456,18 @@ class SystemConfigService {
     })
   }
 
+  /**
+   * 写时失效 + 短 TTL 兜底的配置读取：
+   * - buildOrderDetail 等热路径在同一次调用里会读两次、且常发生在库存行已被 pessimistic_write
+   *   锁定的事务内，逐次回源查询会不必要地拉长锁持有时间；
+   * - 配置变更走 updateO2oRuleConfigs，其内部会在写入后立即调用 invalidateO2oRuleConfigCache
+   *   保证“改完立刻读到新值”；TTL 只是兜底，防止遗漏的写路径导致缓存长期陈旧。
+   */
   async getO2oRuleConfigs(manager: EntityManager = AppDataSource.manager): Promise<O2oRuleConfigRecord> {
+    const cached = this.o2oRuleConfigCache
+    if (cached && cached.expiresAtMs > Date.now()) {
+      return cached.value
+    }
     await this.ensureDefaultConfigs(manager)
     const rows = await manager.getRepository(SystemConfig).find({
       where: this.o2oConfigKeys.map((key) => ({ configKey: key })),
@@ -1481,7 +1506,7 @@ class SystemConfigService {
     const mallAnnouncementText = getRequiredConfigValue('o2o.mall_announcement_text').trim()
     const updatedAt = rows.map((row) => row.updatedAt).sort((a, b) => b.getTime() - a.getTime())[0]
 
-    return {
+    const record: O2oRuleConfigRecord = {
       autoCancelEnabled,
       autoCancelHours,
       limitEnabled,
@@ -1491,6 +1516,12 @@ class SystemConfigService {
       mallAnnouncementText,
       updatedAt,
     }
+    this.o2oRuleConfigCache = { value: record, expiresAtMs: Date.now() + SystemConfigService.CONFIG_CACHE_TTL_MS }
+    return record
+  }
+
+  private invalidateO2oRuleConfigCache(): void {
+    this.o2oRuleConfigCache = null
   }
 
   async updateO2oRuleConfigs(
@@ -1570,6 +1601,8 @@ class SystemConfigService {
         changed = true
       }
 
+      // 写入后立即失效缓存，确保紧接着的“读取新值”不会命中写入前缓存的旧记录。
+      this.invalidateO2oRuleConfigCache()
       const config = await this.getO2oRuleConfigs(manager)
 
       if (changed) {
@@ -1595,6 +1628,29 @@ class SystemConfigService {
   }
 
   async getCustomerServiceConfigs(): Promise<CustomerServiceConfigRecord> {
+    const baseConfig = await this.getCustomerServiceBaseConfig()
+    return {
+      ...baseConfig,
+      availability: this.computeCustomerServiceAvailability(
+        baseConfig,
+        customerServiceRealtimeService.buildServiceSessionSnapshot().serviceConnectionCount,
+      ),
+    }
+  }
+
+  private invalidateCustomerServiceConfigCache(): void {
+    this.customerServiceBaseConfigCache = null
+  }
+
+  /**
+   * 只读、可缓存的客服配置静态部分：与 getO2oRuleConfigs 同一套写时失效 + 短 TTL 策略。
+   * availability 依赖的实时在线状态由调用方 getCustomerServiceConfigs 每次单独计算，不经过这层缓存。
+   */
+  private async getCustomerServiceBaseConfig(): Promise<Omit<CustomerServiceConfigRecord, 'availability'>> {
+    const cached = this.customerServiceBaseConfigCache
+    if (cached && cached.expiresAtMs > Date.now()) {
+      return cached.value
+    }
     await this.ensureDefaultConfigs()
     const rows = await this.configRepo.find({
       where: this.customerServiceConfigKeys.map((key) => ({ configKey: key })),
@@ -1656,13 +1712,11 @@ class SystemConfigService {
         keepaliveConfig.updatedAt,
       ].sort((a, b) => b.getTime() - a.getTime())[0],
     }
-    return {
-      ...baseConfig,
-      availability: this.computeCustomerServiceAvailability(
-        baseConfig,
-        customerServiceRealtimeService.buildServiceSessionSnapshot().serviceConnectionCount,
-      ),
+    this.customerServiceBaseConfigCache = {
+      value: baseConfig,
+      expiresAtMs: Date.now() + SystemConfigService.CONFIG_CACHE_TTL_MS,
     }
+    return baseConfig
   }
 
   async updateCustomerServiceConfigs(
@@ -1737,6 +1791,8 @@ class SystemConfigService {
         changed = true
       }
 
+      // 写入后立即失效缓存，确保紧接着的“读取新值”不会命中写入前缓存的旧记录。
+      this.invalidateCustomerServiceConfigCache()
       const config = await this.getCustomerServiceConfigs()
       if (changed) {
         await auditService.record(
