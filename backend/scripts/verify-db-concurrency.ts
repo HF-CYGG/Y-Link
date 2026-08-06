@@ -180,6 +180,7 @@ async function dropVerifyDatabase(config: VerifyMysqlRuntimeConfig) {
 async function verifyOrderSerialConcurrency() {
   const [
     { AppDataSource },
+    { initializeDatabaseInfrastructure },
     { systemConfigService },
     { orderSerialService },
     { o2oPreorderService },
@@ -188,6 +189,7 @@ async function verifyOrderSerialConcurrency() {
     { O2oPreorder },
   ] = await Promise.all([
     import('../src/config/data-source.js'),
+    import('../src/database/database-strategy.js'),
     import('../src/services/system-config.service.js'),
     import('../src/services/order-serial.service.js'),
     import('../src/services/o2o-preorder.service.js'),
@@ -198,6 +200,7 @@ async function verifyOrderSerialConcurrency() {
 
   await AppDataSource.initialize()
   try {
+    await initializeDatabaseInfrastructure(AppDataSource)
     await AppDataSource.synchronize()
     await systemConfigService.ensureDefaultConfigs()
     pass('固定 MySQL 临时库已完成建表与默认配置初始化')

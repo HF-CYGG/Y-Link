@@ -12,7 +12,10 @@ import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BusinessSequence } from '../entities/business-sequence.entity.js'
 import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
 import { SystemConfig } from '../entities/system-config.entity.js'
-import { isRetryableSqliteLockError } from '../utils/database-errors.js'
+import {
+  isRetryableMysqlTransactionError,
+  isRetryableSqliteLockError,
+} from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
 
 const ORDER_TYPE_VALUES = ['department', 'walkin'] as const
@@ -85,7 +88,14 @@ class OrderSerialService {
         )
       } catch (error) {
         lastError = error
-        if (attempt < 3 && isRetryableSqliteLockError(error)) {
+        const retryable = isRetryableSqliteLockError(error)
+          || isRetryableMysqlTransactionError(error)
+        if (attempt < 3 && retryable) {
+          // MySQL 要求死锁/锁等待超时后重放完整事务；短抖动避免同一批请求
+          // 立即按原节奏再次争抢相同行锁。流水号事务没有事务外副作用，回滚后可安全重试。
+          await new Promise((resolve) => {
+            setTimeout(resolve, attempt * 15 + Math.floor(Math.random() * 20))
+          })
           continue
         }
         throw error
@@ -128,7 +138,7 @@ class OrderSerialService {
     const config = await this.loadSerialConfig(serialRule.configKeyPrefix, manager)
     this.assertSerialWidth(config.width)
 
-    let sequence = await this.loadSequenceForUpdate(serialRule.sequenceKey, manager)
+    let sequence = await this.loadSequenceForUpdateIfPresent(serialRule.sequenceKey, manager)
     if (!sequence) {
       // 仅首次升级/首次使用时聚合历史占用；正常生成永远只读取单行 sequence。
       const occupancy = await this.loadOccupancySnapshotWithManager(orderType, manager, config.width)
@@ -170,7 +180,7 @@ class OrderSerialService {
     this.assertSerialWidth(config.width)
     const removedSerial = this.parseSerialFromShowNo(showNo, serialRule.prefix)
 
-    let sequence = await this.loadSequenceForUpdate(serialRule.sequenceKey, manager)
+    let sequence = await this.loadSequenceForUpdateIfPresent(serialRule.sequenceKey, manager)
     if (!sequence) {
       const occupancy = await this.loadOccupancySnapshotWithManager(orderType, manager, config.width)
       await this.ensureSequenceRow(
@@ -209,7 +219,7 @@ class OrderSerialService {
     const serialRule = ORDER_SERIAL_RULES[orderType]
     const config = await this.loadSerialConfig(serialRule.configKeyPrefix, manager)
     this.assertSerialWidth(config.width)
-    const existingSequence = await this.loadSequenceForUpdate(serialRule.sequenceKey, manager)
+    const existingSequence = await this.loadSequenceForUpdateIfPresent(serialRule.sequenceKey, manager)
     const beforeCurrent = Math.max(
       config.current,
       existingSequence
@@ -252,6 +262,22 @@ class OrderSerialService {
       query.setLock('pessimistic_write')
     }
     return query.getOne()
+  }
+
+  /**
+   * MySQL 对不存在的唯一键执行 `SELECT ... FOR UPDATE` 会锁住索引间隙。
+   * 两种流水首次并发初始化时，如果都先锁空隙再插入各自的键，就可能形成
+   * gap-lock 转换死锁。先做一致性无关的无锁存在性判断，仅在记录确实存在时
+   * 再获取行锁；缺行分支则先用幂等 INSERT 建行，随后锁定真实记录。
+   */
+  private async loadSequenceForUpdateIfPresent(sequenceKey: string, manager: EntityManager) {
+    if (manager.connection.options.type === 'mysql') {
+      const exists = await manager.getRepository(BusinessSequence).existsBy({ sequenceKey })
+      if (!exists) {
+        return null
+      }
+    }
+    return this.loadSequenceForUpdate(sequenceKey, manager)
   }
 
   private async ensureSequenceRow(manager: EntityManager, sequenceKey: string, currentValue: number): Promise<void> {
