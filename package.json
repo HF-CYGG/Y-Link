@@ -26,6 +26,7 @@
     "verify:o2o-sku-editor": "node ./scripts/verify-o2o-sku-editor.mjs",
     "verify:image-upload-compression": "node ./scripts/verify-image-upload-compression.mjs",
     "verify:mall-catalog-performance": "node ./scripts/verify-mall-catalog-performance.mjs",
+    "verify:o2o:public-read-cache": "node ./scripts/verify-o2o-public-read-cache.mjs",
     "verify:docker-base-image": "node ./scripts/verify-docker-base-image.mjs",
     "verify:onebox:uploads": "node ./scripts/verify-onebox-upload-serving.mjs",
     "verify:client-detail-layout": "node ./scripts/verify-client-detail-layout.mjs",
@@ -39,6 +40,7 @@
     "verify:quality:all": "node ./scripts/verify-quality-full-suite.mjs",
     "verify:all": "node ./scripts/verify-quality-full-suite.mjs",
     "verify:onebox:smoke": "node ./scripts/verify-onebox-local-smoke.mjs",
+    "verify:onebox:dual-db-performance": "node ./scripts/verify-onebox-dual-db-performance.mjs",
     "verify:govern-routing-dockerize": "node ./scripts/verify-govern-routing-and-dockerize.mjs"
   },
   "dependencies": {

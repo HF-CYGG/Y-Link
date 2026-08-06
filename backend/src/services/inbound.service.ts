@@ -16,6 +16,7 @@ import { auditService } from './audit.service.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
 import type { RequestMeta } from '../utils/request-meta.js'
+import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
 
 export interface SubmitInboundItemInput {
   productId: string
@@ -748,7 +749,7 @@ class InboundService {
     if (!normalizedCode) {
       throw new BizError('核销码不能为空', 400)
     }
-    return AppDataSource.transaction(async (manager) => {
+    const result = await AppDataSource.transaction(async (manager) => {
       const order = await manager.getRepository(BizInboundOrder).findOne({
         where: { verifyCode: normalizedCode },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
@@ -841,6 +842,8 @@ class InboundService {
       }, manager)
       return { order: savedOrder, items }
     })
+    invalidateMallCatalogReadCache()
+    return result
   }
 
   // 管理端查看所有入库单

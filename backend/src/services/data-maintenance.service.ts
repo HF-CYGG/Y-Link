@@ -7,11 +7,12 @@
  * 3. 对商品、客户端用户、预订单等关键表补服务层边界校验，减少只靠前端校验的风险。
  */
 
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
+import { DataSource } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
-import { resolveSqliteDatabasePath } from '../config/database-bootstrap.js'
-import { env } from '../config/env.js'
+import { runDatabaseExclusive } from '../database/transaction-coordinator.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { ClientUser } from '../entities/client-user.entity.js'
 import { InventoryLog } from '../entities/inventory-log.entity.js'
@@ -64,15 +65,47 @@ class DataMaintenanceService {
 
   async createSqliteBackup(actor: AuthUserContext, requestMeta?: RequestMeta) {
     const adminActor = await this.assertAdminActor(actor, requestMeta, 'data_maintenance.backup_sqlite', '创建 SQLite 物理备份')
-    if (env.DB_TYPE !== 'sqlite') {
+    if (AppDataSource.options.type !== 'sqlite') {
       throw new BizError('当前环境不是 SQLite，无法执行物理备份', 400)
     }
-    const sourcePath = resolveSqliteDatabasePath()
+    const sourcePath = path.resolve(String(AppDataSource.options.database))
     const backupDir = path.resolve(process.cwd(), 'data', 'backup')
-    await fs.mkdir(backupDir, { recursive: true })
-    const fileName = `y-link-backup-${new Date().toISOString().replaceAll(/[:.]/g, '-')}.sqlite`
+    await fs.mkdir(backupDir, { recursive: true, mode: 0o700 })
+    await fs.chmod(backupDir, 0o700)
+    const fileName = `y-link-backup-${new Date().toISOString().replaceAll(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}.sqlite`
     const targetPath = path.resolve(backupDir, fileName)
-    await fs.copyFile(sourcePath, targetPath)
+
+    // WAL 模式下已提交数据可能仍位于 `-wal` 文件，直接 copyFile 主库会产生缺行备份。
+    // `VACUUM INTO` 由 SQLite 自身生成一致性快照，并与应用写队列共用独占租约。
+    const quotedTargetPath = `'${targetPath.replaceAll("'", "''")}'`
+    try {
+      await runDatabaseExclusive(AppDataSource, async () => {
+        await AppDataSource.query(`VACUUM INTO ${quotedTargetPath}`)
+      })
+
+      const backupDataSource = new DataSource({
+        type: 'sqlite',
+        database: targetPath,
+        entities: [],
+        synchronize: false,
+      })
+      try {
+        await backupDataSource.initialize()
+        const integrityRows = await backupDataSource.query('PRAGMA integrity_check') as Array<Record<string, unknown>>
+        const integrityResult = String(integrityRows[0]?.integrity_check ?? '')
+        if (integrityResult !== 'ok') {
+          throw new Error(`SQLite 备份完整性校验失败：${integrityResult || 'unknown'}`)
+        }
+      } finally {
+        if (backupDataSource.isInitialized) {
+          await backupDataSource.destroy()
+        }
+      }
+      await fs.chmod(targetPath, 0o600)
+    } catch (error) {
+      await fs.rm(targetPath, { force: true })
+      throw error
+    }
     await auditService.safeRecord({
       actionType: 'data_maintenance.backup_sqlite',
       actionLabel: '创建 SQLite 物理备份',

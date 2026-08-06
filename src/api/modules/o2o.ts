@@ -268,6 +268,8 @@ export interface O2oInventoryLog {
 export type O2oInventoryLogListQuery = PaginationQueryInput
 
 export interface SubmitO2oPreorderPayload {
+  /** 同一次下单及其弱网重试必须复用同一请求键。 */
+  clientRequestId: string
   isSystemApplied: boolean
   pickupContact: string
   remark?: string

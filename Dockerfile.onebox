@@ -10,7 +10,8 @@
 # 3. 最后把前端、后端、Nginx 与入口脚本组装进同一运行镜像；
 # 4. 容器启动后由 `entrypoint.sh` 同时拉起 Node 后端与 Nginx 反向代理。
 # ------------------------------
-ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:20-bookworm-slim
+# Onebox 默认依赖 sqlite3，Node 主版本必须与其 N-API 发行产物联合验收。
+ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:22-bookworm-slim
 
 FROM --platform=$BUILDPLATFORM ${Y_LINK_NODE_IMAGE} AS frontend-build
 WORKDIR /app
@@ -46,9 +47,19 @@ RUN npm run build
 # ------------------------------
 FROM ${Y_LINK_NODE_IMAGE} AS backend-prod-deps
 WORKDIR /backend
+# 官方 Node 镜像已内置 /usr/local/include/node；显式复用本地头文件，
+# 避免 sqlite3 回退 node-gyp 时还需外网下载与运行时完全匹配的 Node headers。
+ENV npm_config_nodedir=/usr/local
+# sqlite3 在新 Node ABI 尚无预编译包时会自动回退 node-gyp；构建工具只存在于该中间层，
+# 最终运行镜像不会携带编译器。缺失这些工具会让 optional sqlite3 被 npm 静默跳过，
+# 直到 Onebox 启动时才报 DriverPackageNotInstalled。
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 make g++ \
+  && rm -rf /var/lib/apt/lists/*
 COPY backend/package*.json ./
 COPY backend/.npmrc ./.npmrc
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev \
+  && node -e "require('sqlite3')"
 
 # ------------------------------
 # onebox 运行阶段：在同一容器中组合 Node 后端与 Nginx。
@@ -66,6 +77,7 @@ ENV TZ=Asia/Shanghai
 WORKDIR /app
 
 COPY --from=frontend-build /app/dist /usr/share/nginx/html
+COPY docker/nginx/onebox-nginx.conf /etc/nginx/nginx.conf
 COPY docker/nginx/onebox.conf /etc/nginx/conf.d/default.conf
 
 COPY --from=backend-build /backend/dist /app/backend/dist

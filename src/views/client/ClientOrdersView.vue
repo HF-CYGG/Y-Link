@@ -13,7 +13,7 @@
  */
 
 
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { RefreshRight } from '@element-plus/icons-vue'
 import {
@@ -108,6 +108,8 @@ clientOrderStore.initialize(clientAuthStore.currentUser?.id)
 let disposeClientOrderRefresh: () => void = () => {}
 let refreshMarkCleanupTimer: ReturnType<typeof globalThis.setTimeout> | null = null
 let autoRefreshTimer: ReturnType<typeof globalThis.setInterval> | null = null
+let pageRuntimeActive = false
+let hasActivatedOnce = false
 const clientOrderRefreshSourceId = `client-orders-${Math.random().toString(36).slice(2)}`
 const runLatestListRequest = runLatest
 
@@ -481,6 +483,10 @@ const refreshSingleOrderSummary = async (orderId: string, options?: { silent?: b
 
 const startClientOrderRefreshSubscription = () => {
   disposeClientOrderRefresh()
+  disposeClientOrderRefresh = () => {}
+  if (!pageRuntimeActive) {
+    return
+  }
   disposeClientOrderRefresh = subscribeClientOrderRefresh(async (event) => {
     if (event.sourceId === clientOrderRefreshSourceId || !event.orderId) {
       return
@@ -490,9 +496,15 @@ const startClientOrderRefreshSubscription = () => {
 }
 
 const handleVisibilityChange = () => {
-  if (globalThis.document?.visibilityState === 'visible') {
-    void triggerSilentOrderRefresh()
+  if (!pageRuntimeActive) {
+    return
   }
+  if (globalThis.document?.visibilityState === 'hidden') {
+    scheduleAutoRefresh()
+    return
+  }
+  scheduleAutoRefresh()
+  void triggerSilentOrderRefresh()
 }
 
 const scheduleAutoRefresh = () => {
@@ -500,9 +512,37 @@ const scheduleAutoRefresh = () => {
     globalThis.clearInterval(autoRefreshTimer)
     autoRefreshTimer = null
   }
+  if (!pageRuntimeActive || globalThis.document?.visibilityState === 'hidden') {
+    return
+  }
   autoRefreshTimer = globalThis.setInterval(() => {
     void triggerSilentOrderRefresh()
   }, ORDER_AUTO_REFRESH_INTERVAL_MS)
+}
+
+const activatePageRuntime = () => {
+  if (pageRuntimeActive) {
+    return
+  }
+  pageRuntimeActive = true
+  globalThis.document?.addEventListener('visibilitychange', handleVisibilityChange)
+  startClientOrderRefreshSubscription()
+  scheduleAutoRefresh()
+  if (hasActivatedOnce && globalThis.document?.visibilityState !== 'hidden') {
+    void triggerSilentOrderRefresh()
+  }
+  hasActivatedOnce = true
+}
+
+const deactivatePageRuntime = () => {
+  if (!pageRuntimeActive) {
+    return
+  }
+  pageRuntimeActive = false
+  globalThis.document?.removeEventListener('visibilitychange', handleVisibilityChange)
+  scheduleAutoRefresh()
+  disposeClientOrderRefresh()
+  disposeClientOrderRefresh = () => {}
 }
 
 const loadOrders = async (force = false, options?: { append?: boolean; silent?: boolean; preserveScroll?: boolean }) => {
@@ -683,15 +723,20 @@ watch(
 )
 
 onMounted(async () => {
-  startClientOrderRefreshSubscription()
   syncStoreWithCurrentUser()
-  globalThis.document?.addEventListener('visibilitychange', handleVisibilityChange)
-  scheduleAutoRefresh()
   const hadCachedOrders = clientOrderStore.orders.length > 0
   await loadOrders()
   if (hadCachedOrders) {
     void loadOrders(true, { silent: true, preserveScroll: true })
   }
+})
+
+onActivated(() => {
+  activatePageRuntime()
+})
+
+onDeactivated(() => {
+  deactivatePageRuntime()
 })
 
 onBeforeUnmount(() => {
@@ -703,12 +748,7 @@ onBeforeUnmount(() => {
     globalThis.clearTimeout(refreshMarkCleanupTimer)
     refreshMarkCleanupTimer = null
   }
-  if (autoRefreshTimer !== null) {
-    globalThis.clearInterval(autoRefreshTimer)
-    autoRefreshTimer = null
-  }
-  disposeClientOrderRefresh()
-  globalThis.document?.removeEventListener('visibilitychange', handleVisibilityChange)
+  deactivatePageRuntime()
 })
 </script>
 

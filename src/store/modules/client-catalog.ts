@@ -2,7 +2,7 @@
  * 模块说明：src/store/modules/client-catalog.ts
  * 文件职责：维护客户端商城商品目录、分类/搜索上下文与本地缓存，并承接下单成功后的局部库存回写。
  * 实现逻辑：
- * - 商品目录缓存按客户端账号隔离，支持商城页快速恢复列表、分类与搜索上下文；
+ * - 公开商品卡片使用一份轻量公共快照，分类与搜索上下文仍按客户端账号隔离；
  * - 页面层刷新商品目录时统一通过 Store 落盘，避免不同页面各自维护一份商品快照；
  * - 预订单提交成功后，仅按已提交商品局部修正预订库存与可预订库存，减少返回商城时的整页等待。
  * 维护说明：
@@ -18,6 +18,7 @@ import {
   type ClientCatalogSortMode,
   persistClientCatalogBrowseContextSnapshot,
   persistClientCatalogDataSnapshot,
+  persistClientCatalogStorefrontSnapshot,
   readPersistedClientCatalogSnapshot,
 } from '@/utils/client-catalog-storage'
 
@@ -38,8 +39,15 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
   const sortMode = ref<ClientCatalogSortMode>('default')
   const updatedAt = ref(0)
   const initialized = ref(false)
+  const requiresNetworkRefresh = ref(false)
 
-  const isFresh = computed(() => Date.now() - updatedAt.value <= CLIENT_CATALOG_CACHE_TTL_MS)
+  const isFreshNow = () => {
+    return !requiresNetworkRefresh.value
+      && updatedAt.value > 0
+      && Date.now() - updatedAt.value <= CLIENT_CATALOG_CACHE_TTL_MS
+  }
+  // 保留只读状态供调试面板或模板消费；请求前应调用 isFreshNow()，避免 Date.now() 被 computed 缓存。
+  const isFresh = computed(() => isFreshNow())
 
   const persistCatalogDataSnapshot = () => {
     if (!clientUserId.value) {
@@ -71,13 +79,16 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
   const replaceCatalogData = (
     nextProducts: O2oMallProduct[],
     nextStorefront: O2oMallStorefrontConfig,
-    options: { touchUpdatedAt: boolean },
+    options: { touchUpdatedAt: boolean; markComplete?: boolean },
   ) => {
     products.value = nextProducts
     storefront.value = nextStorefront
     if (options.touchUpdatedAt) {
       // 只要商品列表发生真实刷新，就更新时间戳，让页面层能判断当前缓存是否仍可复用。
       updatedAt.value = Date.now()
+    }
+    if (options.markComplete) {
+      requiresNetworkRefresh.value = false
     }
     persistCatalogDataSnapshot()
   }
@@ -92,6 +103,7 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
     keyword.value = ''
     sortMode.value = 'default'
     updatedAt.value = 0
+    requiresNetworkRefresh.value = false
   }
 
   const normalizeClientUserId = (value: string | number | null | undefined): string => {
@@ -130,6 +142,7 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
       keyword.value = snapshot.keyword
       sortMode.value = snapshot.sortMode
       updatedAt.value = snapshot.updatedAt
+      requiresNetworkRefresh.value = snapshot.requiresNetworkRefresh
     }
     initialized.value = true
   }
@@ -142,7 +155,7 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
           businessHoursText: storefront.value.businessHoursText || '10:00 - 22:00',
           mallAnnouncementText: storefront.value.mallAnnouncementText || '',
         },
-        { touchUpdatedAt: true },
+        { touchUpdatedAt: true, markComplete: true },
       )
       return
     }
@@ -152,19 +165,18 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
         businessHoursText: nextCatalog.storefront.businessHoursText || '10:00 - 22:00',
         mallAnnouncementText: nextCatalog.storefront.mallAnnouncementText || '',
       },
-      { touchUpdatedAt: true },
+      { touchUpdatedAt: true, markComplete: true },
     )
   }
 
   const setStorefront = (nextStorefront: O2oMallStorefrontConfig) => {
-    replaceCatalogData(
-      products.value,
-      {
-        businessHoursText: nextStorefront.businessHoursText || '10:00 - 22:00',
-        mallAnnouncementText: nextStorefront.mallAnnouncementText || '',
-      },
-      { touchUpdatedAt: false },
-    )
+    const normalizedStorefront = {
+      businessHoursText: nextStorefront.businessHoursText || '10:00 - 22:00',
+      mallAnnouncementText: nextStorefront.mallAnnouncementText || '',
+    }
+    storefront.value = normalizedStorefront
+    // 公告刷新只写独立小快照，避免重新序列化整份商品/SKU 目录。
+    persistClientCatalogStorefrontSnapshot(normalizedStorefront)
   }
 
   const applyPreorderSubmission = (submittedItems: Array<{ productId: string | number; skuId?: string | number | null; qty: number }>) => {
@@ -262,6 +274,7 @@ export const useClientCatalogStore = defineStore('client-catalog', () => {
     updatedAt,
     initialized,
     isFresh,
+    isFreshNow,
     initialize,
     setProducts,
     setStorefront,

@@ -4,7 +4,7 @@
  * 维护重点：调整订单状态或库存相关流程时，需要同步核对客户端可见状态、审计记录以及事务内的库存回滚规则。
  */
 
-import { Router } from 'express'
+import { Router, type Request, type Response } from 'express'
 import { z } from 'zod'
 import { requireClientAuth } from '../middleware/client-auth.middleware.js'
 import { requireAdminCsrf, requireAuth, requirePermission, requireRole } from '../middleware/auth.middleware.js'
@@ -18,6 +18,7 @@ import {
   O2O_RETURN_REASON_MAX_LENGTH,
   O2O_RETURN_REJECT_REASON_MAX_LENGTH,
   o2oPreorderService,
+  type O2oPublicJsonSnapshot,
 } from '../services/o2o-preorder.service.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 import { CLIENT_USER_ACCOUNT_TYPES } from '../entities/client-user.entity.js'
@@ -30,6 +31,13 @@ const preorderItemSchema = z.object({
 })
 
 const submitPreorderSchema = z.object({
+  // 客户端请求键由同一次下单意图持续复用，服务端用数据库唯一约束完成最终防重。
+  clientRequestId: z
+    .string()
+    .trim()
+    .min(16)
+    .max(64)
+    .regex(/^[A-Za-z0-9:_-]+$/, '下单请求键格式不正确'),
   // 详细注释：客户端必须显式传入“是否系统申请”，避免服务端继续使用默认值导致语义失真。
   isSystemApplied: z.boolean(),
   // 详细注释：提货人由客户端显式填写后传入服务端，避免继续退回为账号默认名导致代领场景失真。
@@ -142,6 +150,34 @@ const BUSINESS_STATUS_LABEL_MAP = {
   verify_failed: '核销失败',
 } as const
 
+const matchesIfNoneMatch = (request: Request, etag: string): boolean => {
+  const rawHeader = request.headers['if-none-match']
+  if (typeof rawHeader !== 'string') {
+    return false
+  }
+  const normalizedEtag = etag.replace(/^W\//, '')
+  return rawHeader.split(',').some((candidate) => {
+    const normalizedCandidate = candidate.trim().replace(/^W\//, '')
+    return normalizedCandidate === '*' || normalizedCandidate === normalizedEtag
+  })
+}
+
+const sendPublicJsonSnapshot = <T>(
+  req: Request,
+  res: Response,
+  snapshot: O2oPublicJsonSnapshot<T>,
+  cacheControl: string,
+): void => {
+  res.setHeader('Cache-Control', cacheControl)
+  res.setHeader('ETag', snapshot.etag)
+  res.vary('Accept-Encoding')
+  if (matchesIfNoneMatch(req, snapshot.etag)) {
+    res.status(304).end()
+    return
+  }
+  res.status(200).type('application/json; charset=utf-8').send(snapshot.responseBody)
+}
+
 export const o2oRouter = Router()
 const o2oAdminRouter = Router()
 
@@ -151,18 +187,28 @@ o2oAdminRouter.use(requireAuth, requireAdminCsrf)
 // 商城商品列表：客户端免登录可访问，用于展示当前上架商品与可预订库存。
 o2oRouter.get(
   '/mall/products',
-  asyncHandler(async (_req, res) => {
-    const data = await o2oPreorderService.listMallProducts()
-    res.json({ code: 0, message: 'ok', data })
+  asyncHandler(async (req, res) => {
+    const snapshot = await o2oPreorderService.getMallProductsPublicSnapshot()
+    sendPublicJsonSnapshot(
+      req,
+      res,
+      snapshot,
+      'public, max-age=2, stale-while-revalidate=30, stale-if-error=60',
+    )
   }),
 )
 
 // 商城门店展示配置：用于客户端命中商品目录缓存时轻量刷新营业时间与公告，不强制重拉商品列表。
 o2oRouter.get(
   '/mall/storefront',
-  asyncHandler(async (_req, res) => {
-    const data = await o2oPreorderService.getMallStorefrontConfig()
-    res.json({ code: 0, message: 'ok', data })
+  asyncHandler(async (req, res) => {
+    const snapshot = await o2oPreorderService.getMallStorefrontPublicSnapshot()
+    sendPublicJsonSnapshot(
+      req,
+      res,
+      snapshot,
+      'public, max-age=5, stale-while-revalidate=60, stale-if-error=120',
+    )
   }),
 )
 

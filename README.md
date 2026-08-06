@@ -350,7 +350,58 @@ INIT_ADMIN_PASSWORD='请改成你自己的强密码' PERMANENT_DELETE_PASSWORD='
 
 已有 SQLite 数据时，优先使用管理端“系统管理 -> 数据库迁移”功能迁移，不建议手工拼接导入。
 
-新库直接使用 MySQL 时，可参考：
+#### Onebox 先试运行、后启用 MySQL
+
+仓库提供 [compose.onebox.yml](./compose.onebox.yml)，同一套 Onebox 可分两阶段部署，不需要再启动第二套 Y-Link 应用：
+
+```bash
+# 1. 首次部署：默认只启动 Onebox + SQLite
+cp .env.onebox.example .env
+# 编辑 .env，至少填写 INIT_ADMIN_PASSWORD
+docker compose -f compose.onebox.yml up -d ylink
+
+# 2. 正式启用：以后再叠加同一私有网络中的 MySQL 8.4
+# 先在 .env 中填写 MYSQL_PASSWORD 与 MYSQL_ROOT_PASSWORD
+docker compose -f compose.onebox.yml -f compose.onebox.mysql.yml up -d mysql
+```
+
+MySQL 健康后，在管理端“系统管理 -> 数据库迁移”填写：`host=mysql`、`port=3306`、`database=y_link`、`user=ylink` 和 `.env` 中的 `MYSQL_PASSWORD`。自动任务会冻结写入、生成一致性 SQLite 快照、复制并校验数据、写入运行时覆盖，然后让同一个 Onebox 计划重启到 MySQL。
+
+如果 MySQL 不是由可选叠加文件启动：安装在 Linux 宿主机时向导可填写 `host.docker.internal`，远程 MySQL 则填写 Onebox 容器可访问的 DNS 名称或 IP。`compose.onebox.yml` 已补齐 Linux 的 `host-gateway` 映射；无论目标在哪里，都不要把数据库公网端口开放给所有来源。
+
+迁移前应在 `.env` 中一并确认 `DB_POOL_SIZE`、`DB_CONNECT_TIMEOUT_MS`、`DB_ACQUIRE_TIMEOUT_MS`、`DB_IDLE_TIMEOUT_MS`、`DB_QUEUE_LIMIT` 与 `DB_MAX_QUERY_MS`。这些参数由 Onebox 容器持续保留，切换后同一个进程会用它们建立 MySQL 连接池；单实例默认连接池为 20，多个应用副本时必须按“实例数 × 每实例连接池”计算总连接数，并给 MySQL 运维连接留出余量。
+
+切换到 MySQL 并产生第一笔新业务写入后，旧 SQLite 已经是历史快照，系统会禁用“直接清除覆盖/回到旧 SQLite”。如需回退，必须恢复 MySQL 备份或执行受控反向迁移，避免静默丢单。
+
+运行边界：SQLite 模式固定为单 Onebox、单应用进程、本地持久化磁盘，100 个突发下单会进入有界写队列串行完成；需要持续百人并发写、第二个应用副本，或管理员接口 `GET /api/data-maintenance/database/performance` 中 `writeCoordinator.pendingWrites`、等待超时持续升高时，应迁移到 MySQL。万人浏览仍应由 Nginx/CDN 缓存吸收，不能把所有目录请求直接压到任一数据库。
+
+#### 新库直接使用外置 MySQL
+
+全新部署可使用 [compose.mysql.yml](./compose.mysql.yml) 与 [.env.docker.mysql.example](./.env.docker.mysql.example)。先创建 MySQL 8.4 的空库和专用账号，库字符集使用 `utf8mb4`；再复制环境变量模板并填写连接信息、管理员密码以及连接池参数。
+
+全新空库第一次启动可临时设置 `DB_SYNC=true` 创建当前版本的完整实体结构；后端健康后必须立即改回 `DB_SYNC=false` 并重建容器。`backend/sql/001_init_schema.sql` 只代表历史基础结构，不能单独当作当前版本的完整初始化脚本。存量 MySQL 禁止开启 `DB_SYNC=true`，必须先备份、停止业务写入，在预发演练后按版本号顺序执行尚未应用的增量 SQL，再以 `DB_SYNC=false` 启动应用。
+
+```bash
+cp .env.docker.mysql.example .env.docker.mysql
+# 编辑连接信息、强密码，并仅在确认目标库为空时临时设置 DB_SYNC=true
+docker compose --env-file .env.docker.mysql -f compose.mysql.yml up -d backend
+docker compose --env-file .env.docker.mysql -f compose.mysql.yml ps
+
+# /health 正常后，把 DB_SYNC 改回 false，再重建并启动完整应用
+docker compose --env-file .env.docker.mysql -f compose.mysql.yml up -d --force-recreate backend frontend
+```
+
+本轮高并发升级至少包含：
+
+- `034_high_concurrency_indexes.sql`：订单、库存日志、通知收件箱和会话清理索引；
+- `035_o2o_idempotency_business_sequence.sql`：O2O 下单幂等键与并发安全业务序列；
+- `036_notification_outbox.sql`：通知事件领取/重试字段、索引与投递去重约束；该脚本会合并历史重复收件箱的已读状态、保留最早记录并删除重复行，必须先备份并停止所有旧/新应用进程及通知 Worker，同时预留 DDL 窗口。
+
+通知 Outbox 对站内收件箱和数据库投递记录做唯一键去重；邮件、飞书等外部通道采用 **at-least-once（至少一次）** 交付。若第三方已经接收成功、但进程在写回 `sent` 状态前异常退出，恢复后可能再次投递；需要严格防重时，应同时为第三方通道配置其支持的幂等键或去重能力。
+
+升级顺序固定为“备份 -> 停止应用和业务写入 -> 按 `034`、`035`、`036` 顺序执行 -> 启动新版本”。商城目录缓存复用既有 `030_mall_catalog_performance_indexes.sql` 与本轮 `034` 索引，本轮没有额外 catalog 表结构脚本。实际升级清单仍以 `backend/sql/` 中“当前线上版本之后、目标版本之前”的增量脚本为准，不能只挑最后一个脚本执行。执行完成后再启动应用，并通过 `/health`、登录、商品查询、下单、通知重试链路验收。
+
+相关文件：
 
 - [compose.mysql.yml](./compose.mysql.yml)
 - [.env.docker.mysql.example](./.env.docker.mysql.example)

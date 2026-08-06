@@ -16,6 +16,7 @@ import { BaseProduct } from '../entities/base-product.entity.js'
 import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import {
+  isRetryableMysqlTransactionError,
   isRetryableSqliteLockError,
   isUniqueConstraintError,
 } from '../utils/database-errors.js'
@@ -645,6 +646,10 @@ export class OrderService {
         }
 
         if (this.shouldRetrySubmitError(error, attempt)) {
+          const backoffMs = 25 * (2 ** (attempt - 1)) + Math.floor(Math.random() * 25)
+          await new Promise<void>((resolve) => {
+            setTimeout(resolve, backoffMs)
+          })
           continue
         }
 
@@ -802,7 +807,11 @@ export class OrderService {
   private shouldRetrySubmitError(error: unknown, attempt: number) {
     return (
       attempt < ORDER_SUBMIT_MAX_RETRY
-      && (isUniqueConstraintError(error, SHOW_NO_CONSTRAINT_MATCHER) || isRetryableSqliteLockError(error))
+      && (
+        isUniqueConstraintError(error, SHOW_NO_CONSTRAINT_MATCHER)
+        || isRetryableSqliteLockError(error)
+        || isRetryableMysqlTransactionError(error)
+      )
     )
   }
 

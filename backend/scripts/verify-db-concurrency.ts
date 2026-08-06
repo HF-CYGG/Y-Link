@@ -292,6 +292,7 @@ async function verifyOrderSerialConcurrency() {
       sessionToken: 'verify-db-concurrency-client',
     }
     const returnOrder = await o2oPreorderService.submit(clientAuth, {
+      clientRequestId: 'db-concurrency-return-0001',
       items: [{ productId: returnProduct.id, skuId: returnSkuId, qty: 1 }],
       remark: 'MySQL 事务内退货详情验证',
       pickupContact: '并发验收',

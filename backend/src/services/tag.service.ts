@@ -12,6 +12,7 @@ import { BaseTag } from '../entities/base-tag.entity.js'
 import { RelProductTag } from '../entities/rel-product-tag.entity.js'
 import { isUniqueConstraintError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
+import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
 
 export interface CreateTagInput {
   tagName: string
@@ -147,7 +148,9 @@ export class TagService {
     } catch (error) {
       this.mapTagWriteError(error)
     }
-    return this.buildTagView(saved)
+    const result = this.buildTagView(saved)
+    invalidateMallCatalogReadCache()
+    return result
   }
 
   async update(id: string, input: UpdateTagInput): Promise<TagView> {
@@ -173,7 +176,9 @@ export class TagService {
     } catch (error) {
       this.mapTagWriteError(error)
     }
-    return this.buildTagView(saved)
+    const result = this.buildTagView(saved)
+    invalidateMallCatalogReadCache()
+    return result
   }
 
   async delete(id: string): Promise<void> {
@@ -194,6 +199,7 @@ export class TagService {
     if (!result.affected) {
       throw new BizError('标签不存在', 404)
     }
+    invalidateMallCatalogReadCache()
   }
 
   async findByIds(ids: string[]): Promise<BaseTag[]> {

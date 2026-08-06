@@ -8,6 +8,7 @@
 
 import { AppDataSource } from '../config/data-source.js'
 import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
+import { BusinessSequence } from '../entities/business-sequence.entity.js'
 import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
 import { SystemConfig } from '../entities/system-config.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
@@ -16,6 +17,7 @@ import { detectUnsafeHost, formatUnsafeHostReason } from '../utils/safe-network.
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
 import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
+import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
 import type { EntityManager } from 'typeorm'
 
 const CLIENT_DEPARTMENT_NODE_LIMIT = 3000
@@ -1284,6 +1286,77 @@ class SystemConfigService {
     }
   }
 
+  private async lockOrderSerialSequences(
+    manager: EntityManager,
+    configList: OrderSerialConfigRecord[],
+  ): Promise<Map<OrderSerialType, BusinessSequence>> {
+    for (const config of configList) {
+      if (manager.connection.options.type === 'mysql') {
+        await manager.query(
+          `
+            INSERT INTO business_sequence (sequence_key, current_value, created_at, updated_at)
+            VALUES (?, ?, UTC_TIMESTAMP(6), UTC_TIMESTAMP(6))
+            ON DUPLICATE KEY UPDATE sequence_key = sequence_key
+          `,
+          [ORDER_SERIAL_META[config.orderType].keyPrefix, config.current],
+        )
+      } else {
+        await manager.query(
+          `
+            INSERT OR IGNORE INTO business_sequence (sequence_key, current_value, created_at, updated_at)
+            VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+          `,
+          [ORDER_SERIAL_META[config.orderType].keyPrefix, config.current],
+        )
+      }
+    }
+
+    const sequenceKeys = ORDER_SERIAL_TYPES.map((orderType) => ORDER_SERIAL_META[orderType].keyPrefix)
+    const query = manager.getRepository(BusinessSequence)
+      .createQueryBuilder('sequence')
+      .where('sequence.sequenceKey IN (:...sequenceKeys)', { sequenceKeys })
+      .orderBy('sequence.sequenceKey', 'ASC')
+    if (manager.connection.options.type === 'mysql') {
+      query.setLock('pessimistic_write')
+    }
+    const sequences = await query.getMany()
+    if (sequences.length !== ORDER_SERIAL_TYPES.length) {
+      throw new BizError('订单流水序列缺失，请联系管理员修复数据库', 500)
+    }
+    return new Map(
+      sequences.map((sequence) => {
+        const orderType = ORDER_SERIAL_TYPES.find(
+          (candidate) => ORDER_SERIAL_META[candidate].keyPrefix === sequence.sequenceKey,
+        )
+        if (!orderType) {
+          throw new BizError(`发现未知订单流水序列：${sequence.sequenceKey}`, 500)
+        }
+        return [orderType, sequence]
+      }),
+    )
+  }
+
+  private applySequenceTruth(
+    configList: OrderSerialConfigRecord[],
+    sequences: Map<OrderSerialType, BusinessSequence>,
+  ): OrderSerialConfigRecord[] {
+    return configList.map((config) => {
+      const sequence = sequences.get(config.orderType)
+      if (!sequence) {
+        return config
+      }
+      const current = this.parseNonNegativeInteger(
+        String(sequence.currentValue),
+        `${ORDER_SERIAL_META[config.orderType].keyPrefix} 流水序列异常`,
+      )
+      return {
+        ...config,
+        current,
+        updatedAt: sequence.updatedAt > config.updatedAt ? sequence.updatedAt : config.updatedAt,
+      }
+    })
+  }
+
   async ensureDefaultConfigs(manager: EntityManager = AppDataSource.manager): Promise<{ insertedCount: number; totalCount: number }> {
     const configRepo = manager.getRepository(SystemConfig)
     const existingConfigs = await configRepo.find({
@@ -1346,7 +1419,21 @@ class SystemConfigService {
     })
 
     const configMap = new Map(rows.map((row) => [row.configKey, row]))
-    const list = ORDER_SERIAL_TYPES.map((orderType) => this.formatConfigRecord(orderType, configMap))
+    const configList = ORDER_SERIAL_TYPES.map((orderType) => this.formatConfigRecord(orderType, configMap))
+    const sequenceRows = await AppDataSource.getRepository(BusinessSequence).find({
+      where: ORDER_SERIAL_TYPES.map((orderType) => ({
+        sequenceKey: ORDER_SERIAL_META[orderType].keyPrefix,
+      })),
+    })
+    const sequenceMap = new Map(
+      sequenceRows.map((sequence) => {
+        const orderType = ORDER_SERIAL_TYPES.find(
+          (candidate) => ORDER_SERIAL_META[candidate].keyPrefix === sequence.sequenceKey,
+        )
+        return orderType ? [orderType, sequence] : null
+      }).filter((entry): entry is [OrderSerialType, BusinessSequence] => entry !== null),
+    )
+    const list = this.applySequenceTruth(configList, sequenceMap)
     return { list }
   }
 
@@ -1390,7 +1477,11 @@ class SystemConfigService {
         ]),
       )
 
-      const beforeList = ORDER_SERIAL_TYPES.map((orderType) => this.formatConfigRecord(orderType, rowMap))
+      const configBeforeList = ORDER_SERIAL_TYPES.map((orderType) => this.formatConfigRecord(orderType, rowMap))
+      // 锁顺序固定为 system_configs -> business_sequence，与生成单号保持一致，
+      // 避免管理员更新与下单并发时形成双真源或死锁。
+      const sequences = await this.lockOrderSerialSequences(manager, configBeforeList)
+      const beforeList = this.applySequenceTruth(configBeforeList, sequences)
       await this.assertOrderSerialCurrentSafety(manager, beforeList, input)
       const targetMap = new Map<string, string>()
 
@@ -1415,7 +1506,24 @@ class SystemConfigService {
         changedCount += 1
       }
 
-      const afterList = ORDER_SERIAL_TYPES.map((orderType) => this.formatConfigRecord(orderType, rowMap))
+      for (const orderType of ORDER_SERIAL_TYPES) {
+        const sequence = sequences.get(orderType)
+        if (!sequence) {
+          throw new BizError(`订单流水序列缺失：${orderType}`, 500)
+        }
+        const targetCurrent = input[orderType].current
+        if (Number(sequence.currentValue) === targetCurrent) {
+          continue
+        }
+        sequence.currentValue = targetCurrent
+        await manager.getRepository(BusinessSequence).save(sequence)
+        changedCount += 1
+      }
+
+      const afterList = this.applySequenceTruth(
+        ORDER_SERIAL_TYPES.map((orderType) => this.formatConfigRecord(orderType, rowMap)),
+        sequences,
+      )
 
       if (changedCount > 0) {
         await auditService.record(
@@ -1524,7 +1632,7 @@ class SystemConfigService {
     }
 
     await this.ensureDefaultConfigs()
-    return AppDataSource.transaction(async (manager) => {
+    const result = await AppDataSource.transaction(async (manager) => {
       const useForUpdate = manager.connection.options.type === 'mysql'
       const placeholders = this.o2oConfigKeys.map(() => '?').join(', ')
       const lockedRows: Array<{ id: string; configKey: string; configValue: string; updatedAt: string }> = await manager.query(
@@ -1592,6 +1700,10 @@ class SystemConfigService {
 
       return { config, changed }
     })
+    if (result.changed) {
+      invalidateMallCatalogReadCache()
+    }
+    return result
   }
 
   async getCustomerServiceConfigs(): Promise<CustomerServiceConfigRecord> {

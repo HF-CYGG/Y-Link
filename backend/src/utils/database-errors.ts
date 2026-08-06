@@ -88,11 +88,30 @@ export function isRetryableSqliteLockError(error: unknown): boolean {
 }
 
 /**
+ * MySQL 要求在死锁或锁等待超时后重放完整事务，而不是只重试失败 SQL。
+ * 调用方必须先具备持久化幂等键，才能使用该判断执行有限重试。
+ */
+export function isRetryableMysqlTransactionError(error: unknown): boolean {
+  if (!isQueryFailedError(error)) {
+    return false
+  }
+  const driverError = getDriverError(error)
+  return driverError.code === 'ER_LOCK_DEADLOCK'
+    || driverError.errno === 1213
+    || driverError.code === 'ER_LOCK_WAIT_TIMEOUT'
+    || driverError.errno === 1205
+}
+
+/**
  * 面向接口层输出业务可理解的数据库错误，避免底层 SQL 文本直接泄露到前端。
  */
 export function mapDatabaseErrorToBizError(error: unknown): BizError | null {
   if (isUniqueConstraintError(error)) {
     return new BizError('数据写入冲突，请刷新后重试', 409)
+  }
+
+  if (isRetryableMysqlTransactionError(error) || isRetryableSqliteLockError(error)) {
+    return new BizError('数据库当前繁忙，请稍后重试', 503)
   }
 
   if (isQueryFailedError(error)) {

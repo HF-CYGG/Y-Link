@@ -1044,6 +1044,19 @@ class ClientFeedbackService {
             manager,
           )
 
+          await notificationService.emitEvent({
+            eventType: 'customer_service_client_message_created',
+            sourceType: 'client_feedback_conversation',
+            sourceId: conversation.id,
+            payload: {
+              conversationNo: conversation.conversationNo,
+              sourceUserId: clientAuth.userId,
+              sourceUserDisplayName: clientSnapshot.clientUsername || clientSnapshot.clientAccount,
+              summary: content.slice(0, 100),
+            },
+            requestMeta,
+          }, manager)
+
           return {
             conversation,
             message,
@@ -1067,18 +1080,6 @@ class ClientFeedbackService {
 
     const messageView = this.buildMessageView(result.message, { scope: 'client', userId: clientAuth.userId })
     this.publishConversationEvent('conversation_created', result.conversation, { source: 'client_create' }, messageView)
-    await notificationService.emitEvent({
-      eventType: 'customer_service_client_message_created',
-      sourceType: 'client_feedback_conversation',
-      sourceId: result.conversation.id,
-      payload: {
-        conversationNo: result.conversation.conversationNo,
-        sourceUserId: clientAuth.userId,
-        sourceUserDisplayName: clientSnapshot.clientUsername || clientSnapshot.clientAccount,
-        summary: content.slice(0, 100),
-      },
-      requestMeta,
-    })
     return {
       conversation: this.buildConversationSummary(result.conversation),
       message: messageView,
@@ -1207,23 +1208,23 @@ class ClientFeedbackService {
         },
         manager,
       )
+      await notificationService.emitEvent({
+        eventType: 'customer_service_client_message_created',
+        sourceType: 'client_feedback_conversation',
+        sourceId: conversation.id,
+        payload: {
+          conversationNo: conversation.conversationNo,
+          sourceUserId: clientAuth.userId,
+          sourceUserDisplayName: clientSnapshot.clientUsername || clientSnapshot.clientAccount,
+          summary: content.slice(0, 100),
+        },
+        requestMeta,
+      }, manager)
       return { conversation, message }
     })
 
     const messageView = this.buildMessageView(result.message, { scope: 'client', userId: clientAuth.userId })
     this.publishConversationEvent('message_created', result.conversation, { senderType: 'client' }, messageView)
-    await notificationService.emitEvent({
-      eventType: 'customer_service_client_message_created',
-      sourceType: 'client_feedback_conversation',
-      sourceId: result.conversation.id,
-      payload: {
-        conversationNo: result.conversation.conversationNo,
-        sourceUserId: clientAuth.userId,
-        sourceUserDisplayName: clientSnapshot.clientUsername || clientSnapshot.clientAccount,
-        summary: content.slice(0, 100),
-      },
-      requestMeta,
-    })
     return {
       conversation: this.buildConversationSummary(result.conversation),
       message: messageView,
