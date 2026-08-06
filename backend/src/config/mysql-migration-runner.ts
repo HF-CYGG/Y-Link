@@ -7,10 +7,13 @@
  *   导致缺表故障只能在业务接口报错时才被发现（例如认证接口依赖的 auth_risk_state 表）。
  * - assertMysqlRequiredTablesExist：只读校验一组关键表是否存在，缺失则直接抛错阻止服务启动，
  *   把“运行时才 500”变成“启动即失败 + 明确的修复指引”。这一层无副作用、始终执行。
+ *   报错文案会区分“全新空库”（缺全部必需表，从 001 顺序执行到最新编号是安全的）与
+ *   “已执行过部分迁移的存量库”（只缺少数表，绝不能笼统建议“从头重跑”，因为部分历史脚本非幂等），
+ *   并按 TABLE_INTRODUCING_SCRIPT 给出每张缺失表对应的具体脚本，而不是让运维自己猜。
  * - runMysqlSchemaMigrations：仅当环境变量 DB_AUTO_MIGRATE=true 时才会执行，默认关闭。
  *   **重要边界**：backend/sql/ 目录下 33 个历史脚本的幂等性并不一致——
- *   部分早期脚本（如 006/008/014/015/016/017）用裸 `ALTER TABLE ADD COLUMN` 未加
- *   `IF NOT EXISTS`/`information_schema` 判断，重复执行会直接报错；
+ *   部分早期脚本（006/008/014/015/016，见 NON_IDEMPOTENT_HISTORICAL_SCRIPTS）用裸
+ *   `ALTER TABLE ADD COLUMN` 未加 `IF NOT EXISTS`/`information_schema` 判断，重复执行会直接报错；
  *   005 更是一个只应人工触发的破坏性回滚脚本（会删除 004 生成的备份表）。
  *   因此这里不做“扫描目录、执行全部未记录文件”的通用回放，而是维护一份人工审计过的
  *   AUTO_MIGRATABLE_FILES 白名单，只有确认幂等安全的文件才会被自动执行；
@@ -19,8 +22,10 @@
  * - 新增迁移文件若要加入自动执行范围，必须先人工确认其为幂等写法
  *   （CREATE TABLE IF NOT EXISTS / information_schema 判断 + PREPARE-EXECUTE 动态 DDL /
  *   ADD COLUMN IF NOT EXISTS），再追加到 AUTO_MIGRATABLE_FILES；
- * - 新增强依赖的关键表时，请同步补充 MYSQL_REQUIRED_TABLES，保持与 database-bootstrap.ts 的
- *   SQLITE_REQUIRED_TABLES 口径一致。
+ * - 新增强依赖的关键表时，请同步补充 MYSQL_REQUIRED_TABLES 与 TABLE_INTRODUCING_SCRIPT，
+ *   并保持与 database-bootstrap.ts 的 SQLITE_REQUIRED_TABLES 口径一致；
+ * - 若发现新的非幂等历史脚本，请同步补充 NON_IDEMPOTENT_HISTORICAL_SCRIPTS，
+ *   避免报错文案继续误导运维“可以安全重放”。
  */
 
 import fs from 'node:fs'
@@ -44,6 +49,33 @@ const MYSQL_REQUIRED_TABLES = [
   'biz_inbound_order',
   'biz_inbound_order_item',
   'auth_risk_state',
+]
+
+// 每个必需表由哪个迁移脚本创建，用于在报错时给出精确指引，而不是笼统建议“从头跑一遍”。
+// auth_risk_state 现同时存在于 001（供全新库一次建齐）与 033（供存量库补建），
+// 这里指向 033，因为它也是 AUTO_MIGRATABLE_FILES 白名单里唯一可自动执行的脚本。
+const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
+  base_product: '001_init_schema.sql',
+  sys_user: '001_init_schema.sql',
+  sys_user_session: '001_init_schema.sql',
+  biz_inbound_order: '001_init_schema.sql',
+  biz_inbound_order_item: '001_init_schema.sql',
+  o2o_preorder: '006_o2o_preorder_schema.sql',
+  o2o_preorder_item: '006_o2o_preorder_schema.sql',
+  base_product_sku: '028_o2o_product_sku_selection.sql',
+  auth_risk_state: '033_inventory_security_invariants.sql',
+}
+
+// 已人工审计确认为非幂等（裸 ALTER TABLE ADD COLUMN，未做 information_schema/IF NOT EXISTS 判断）的
+// 历史脚本：对已经执行过一次的数据库重复执行会直接报“字段已存在”错误，绝不能在报错指引里笼统建议
+// “从 001 到最新编号顺序重跑一遍”。005 是只应人工触发的破坏性回滚脚本，同样排除在“可重放”建议之外。
+const NON_IDEMPOTENT_HISTORICAL_SCRIPTS = [
+  '005_task8_history_order_type_mapping_rollback.sql（人工回滚脚本，正常部署不要执行）',
+  '006_o2o_preorder_schema.sql',
+  '008_o2o_preorder_business_status.sql',
+  '014_o2o_preorder_client_order_type.sql',
+  '015_o2o_preorder_is_system_applied.sql',
+  '016_o2o_preorder_has_customer_order.sql',
 ]
 
 // 已人工审计确认幂等、可安全自动执行的迁移文件白名单。
@@ -211,13 +243,35 @@ export async function assertMysqlRequiredTablesExist(dataSource: DataSource): Pr
     return
   }
 
+  // 全新空库：一张必需表都不存在，说明这个数据库从未跑过任何迁移，从 001 顺序执行到最新编号是安全的
+  // （每个脚本对这个库而言都是“第一次执行”，不会撞上非幂等脚本的“字段已存在”报错）。
+  // 存量库：只是缺少上面列出的少数表，说明这个库已经执行过部分迁移——此时绝不能笼统建议“从头重跑”，
+  // 因为 006/008/014/015/016 等脚本是裸 ADD COLUMN，对已执行过的库重放会直接报错，延长故障恢复时间。
+  const isFreshDatabase = missingTables.length === MYSQL_REQUIRED_TABLES.length
+  const missingTableGuide = missingTables
+    .map((table) => `  - ${table} → backend/sql/${TABLE_INTRODUCING_SCRIPT[table] ?? '（未登记，请检查 mysql-migration-runner.ts 的 TABLE_INTRODUCING_SCRIPT）'}`)
+    .join('\n')
+
+  const scenarioGuide = isFreshDatabase
+    ? '当前数据库缺少全部必需表，属于全新空库（从未执行过任何迁移）：\n'
+      + '可以从 001 开始按文件名数字前缀顺序执行到最新编号，例如：\n'
+      + '  mysql -h<host> -u<user> -p <database> < backend/sql/001_init_schema.sql\n'
+      + '  ...（按顺序执行到最新编号，跳过 *_rollback.sql 这类需人工判断是否执行的回滚脚本）\n'
+      + '  mysql -h<host> -u<user> -p <database> < backend/sql/033_inventory_security_invariants.sql'
+    : '当前数据库只缺少上面列出的少数表，属于已执行过部分迁移的存量库：\n'
+      + '不要无差别地从 001 重新执行一遍——backend/sql/ 目录内脚本的幂等性并不一致，以下脚本使用裸\n'
+      + 'ALTER TABLE ADD COLUMN，对已执行过的库重复执行会直接报“字段已存在”错误：\n'
+      + NON_IDEMPOTENT_HISTORICAL_SCRIPTS.map((item) => `  - ${item}`).join('\n') + '\n'
+      + '请只执行上面“缺失表 → 脚本”列表中列出的目标脚本本身；如果对当前库到底执行到哪个版本没有把握，\n'
+      + '建议先用 SHOW TABLES / information_schema.COLUMNS 核对现状，或联系熟悉该库迁移历史的同事，\n'
+      + '确认从哪个脚本继续，避免中途因重复列报错扩大故障范围。'
+
   throw new Error(
     `[启动失败] MySQL 数据库缺少必需表：${missingTables.join(', ')}。\n`
-    + '请在目标数据库上按文件名数字前缀顺序执行 backend/sql/ 目录下的迁移脚本（脚本均为幂等设计，重复执行安全），例如：\n'
-    + '  mysql -h<host> -u<user> -p <database> < backend/sql/001_init_schema.sql\n'
-    + '  ...（按顺序执行到最新编号，注意跳过 *_rollback.sql 这类需人工判断是否执行的脚本）\n'
-    + '  mysql -h<host> -u<user> -p <database> < backend/sql/033_inventory_security_invariants.sql\n'
-    + '若缺失的仅是 auth_risk_state 表，也可以设置环境变量 DB_AUTO_MIGRATE=true 后重启服务，'
-    + '由服务自动执行 033 号迁移脚本（其余历史脚本仍需人工执行）。',
+    + '这些表分别由以下迁移脚本创建：\n'
+    + `${missingTableGuide}\n\n`
+    + `${scenarioGuide}\n\n`
+    + '也可以设置环境变量 DB_AUTO_MIGRATE=true 后重启服务，由服务自动执行白名单内已核实幂等的脚本'
+    + '（当前仅 033_inventory_security_invariants.sql）；不在白名单内的脚本仍需按上述方式人工判断执行。',
   )
 }
