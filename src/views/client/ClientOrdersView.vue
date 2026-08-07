@@ -34,7 +34,12 @@ import {
 } from '@/constants/o2o-order-status'
 import { useClientAuthStore, useClientOrderStore } from '@/store'
 import pinia from '@/store/pinia'
-import { notifyClientOrderRefresh, subscribeClientOrderRefresh } from '@/utils/client-order-refresh'
+import {
+  buildClientOrderSilentRefreshPlan,
+  mergeClientOrderRefreshPages,
+  notifyClientOrderRefresh,
+  subscribeClientOrderRefresh,
+} from '@/utils/client-order-refresh'
 import { buildClientOrderSummaryFromDetail } from '@/utils/client-order-summary'
 import { formatDateTime } from '@/utils/date-time'
 import { normalizeRequestError } from '@/utils/error'
@@ -420,14 +425,34 @@ const syncStoreWithCurrentUser = () => {
   effectiveKeyword.value = clientOrderStore.keyword
 }
 
-// 详细注释：静默轮询会临时扩大本次请求的 pageSize，
-// 这样列表顶部即使插入了几条新订单，也尽量不把用户当前视野附近的旧卡片挤出结果窗口。
-const buildSilentRefreshQuery = () => {
+// 详细注释：静默轮询需要覆盖当前已加载范围并额外保留一页缓冲；
+// 超过接口单页上限时按页读取，避免 pageSize > 50 被后端拒绝后静默刷新永久失效。
+const fetchSilentRefreshOrders = async (signal: AbortSignal) => {
   const logicalPageSize = clientOrderStore.pageSize || DEFAULT_ORDER_PAGE_SIZE
-  const loadedCount = Math.max(clientOrderStore.orders.length, logicalPageSize)
-  return {
+  const plan = buildClientOrderSilentRefreshPlan({
+    loadedCount: clientOrderStore.orders.length,
+    logicalPageSize,
+  })
+  const buildQuery = (page: number) => ({
     ...buildListQuery(1),
-    pageSize: loadedCount + logicalPageSize,
+    page,
+    pageSize: plan.requestPageSize,
+  })
+  const firstPageResult = await getMyO2oPreorders(buildQuery(1), { signal })
+  const availablePageCount = Math.max(1, Math.ceil(firstPageResult.total / plan.requestPageSize))
+  const requestPageCount = Math.min(plan.requestPageCount, availablePageCount)
+  const remainingPageResults = await Promise.all(
+    Array.from({ length: Math.max(0, requestPageCount - 1) }, (_, index) =>
+      getMyO2oPreorders(buildQuery(index + 2), { signal }),
+    ),
+  )
+
+  return {
+    ...firstPageResult,
+    records: mergeClientOrderRefreshPages(
+      [firstPageResult.records, ...remainingPageResults.map((result) => result.records)],
+      plan.targetRecordCount,
+    ),
   }
 }
 
@@ -574,10 +599,9 @@ const loadOrders = async (force = false, options?: { append?: boolean; silent?: 
   }
   await runLatestListRequest({
     executor: (signal) =>
-      getMyO2oPreorders(
-        silent && !append ? buildSilentRefreshQuery() : buildListQuery(targetPage),
-        { signal },
-      ),
+      silent && !append
+        ? fetchSilentRefreshOrders(signal)
+        : getMyO2oPreorders(buildListQuery(targetPage), { signal }),
     onSuccess: async (result) => {
       if (append) {
         clientOrderStore.appendOrders(result.records.map(normalizeSummaryDisplayShowNo), {
