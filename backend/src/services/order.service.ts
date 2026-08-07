@@ -9,6 +9,7 @@
  */
 
 import { AppDataSource } from '../config/data-source.js'
+import { runInTransaction } from '../config/transaction-runner.js'
 import { Brackets, type EntityManager } from 'typeorm'
 import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
@@ -347,7 +348,7 @@ export class OrderService {
       throw new BizError('请填写业务单号完成二次确认')
     }
 
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const orderRepo = manager.getRepository(BizOutboundOrder)
       const order = await orderRepo.findOne({ where: { id } })
       if (!order) {
@@ -401,7 +402,7 @@ export class OrderService {
    * - 保留主单与明细原始数据，恢复后可继续查询与查看详情。
    */
   async restoreById(id: string, actor: AuthUserContext, requestMeta?: RequestMeta): Promise<OrderSummaryView> {
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const orderRepo = manager.getRepository(BizOutboundOrder)
       const order = await orderRepo.findOne({ where: { id } })
       if (!order) {
@@ -462,7 +463,7 @@ export class OrderService {
       throw new BizError('请填写业务单号完成二次确认')
     }
 
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const orderRepo = manager.getRepository(BizOutboundOrder)
       const order = await orderRepo.findOne({ where: { id } })
       if (!order) {
@@ -543,7 +544,7 @@ export class OrderService {
     let lastError: unknown
     for (let attempt = 1; attempt <= ORDER_SUBMIT_MAX_RETRY; attempt += 1) {
       try {
-        return await AppDataSource.transaction(async (manager) => {
+        return await runInTransaction(async (manager) => {
           const orderRepo = manager.getRepository(BizOutboundOrder)
           const itemRepo = manager.getRepository(BizOutboundOrderItem)
           const productRepo = manager.getRepository(BaseProduct)

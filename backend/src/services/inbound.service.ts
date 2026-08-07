@@ -7,6 +7,7 @@
 import { randomUUID } from 'node:crypto'
 import { Brackets, In, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
+import { runInTransaction } from '../config/transaction-runner.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { BaseProductSku } from '../entities/base-product-sku.entity.js'
 import { BizInboundOrder } from '../entities/biz-inbound-order.entity.js'
@@ -254,7 +255,7 @@ class InboundService {
     this.assertSupplierActor(actor)
     const normalizedItems = this.normalizeSupplierInboundItems(input.items)
 
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const productIds = [...new Set(normalizedItems.map((item) => item.productId))]
       const productMap = await this.loadActiveProductsByIds(productIds, manager)
       const resolvedItems = await this.resolveInboundItemsWithSku(normalizedItems, productMap, manager)
@@ -318,7 +319,7 @@ class InboundService {
   async updateSupplierDelivery(actor: AuthUserContext, orderId: string, input: UpdateSupplierInboundInput, requestMeta?: RequestMeta) {
     const normalizedItems = this.normalizeSupplierInboundItems(input.items)
 
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const order = await this.findSupplierMutableOrder(orderId, actor, '改单', manager)
       const productIds = [...new Set(normalizedItems.map((item) => item.productId))]
       const productMap = await this.loadActiveProductsByIds(productIds, manager)
@@ -378,7 +379,7 @@ class InboundService {
       throw new BizError('请填写撤销原因', 400)
     }
 
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const order = await this.findSupplierMutableOrder(orderId, actor, '撤销', manager)
       const items = await manager.getRepository(BizInboundOrderItem).find({ where: { orderId: order.id } })
 
@@ -414,7 +415,7 @@ class InboundService {
   }
 
   async softDeleteSupplierDelivery(actor: AuthUserContext, orderId: string, requestMeta?: RequestMeta) {
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const order = await this.findSupplierOwnedOrder(orderId, actor, manager)
       if (this.isDeleted(order)) {
         throw new BizError(`送货单“${order.showNo}”已删除，请勿重复删除`, 409)
@@ -451,7 +452,7 @@ class InboundService {
   }
 
   async restoreSupplierDelivery(actor: AuthUserContext, orderId: string, requestMeta?: RequestMeta) {
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const order = await this.findSupplierOwnedOrder(orderId, actor, manager)
       if (!this.isDeleted(order)) {
         throw new BizError(`送货单“${order.showNo}”未删除，无需恢复`, 409)
@@ -488,7 +489,7 @@ class InboundService {
   }
 
   async purgeSupplierDelivery(actor: AuthUserContext, orderId: string, confirmShowNo?: string, requestMeta?: RequestMeta) {
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const order = await this.findSupplierOwnedOrder(orderId, actor, manager)
       if (!this.isDeleted(order)) {
         throw new BizError(`送货单“${order.showNo}”未删除，请先删除后再永久删除`, 409)
@@ -528,7 +529,7 @@ class InboundService {
     this.assertAdminInboundActor(actor)
     const normalizedItems = this.normalizeSupplierInboundItems(input.items)
 
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const normalizedOrderId = String(orderId).trim()
       if (!normalizedOrderId) {
         throw new BizError('送货单不存在', 404)
@@ -748,7 +749,7 @@ class InboundService {
     if (!normalizedCode) {
       throw new BizError('核销码不能为空', 400)
     }
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const order = await manager.getRepository(BizInboundOrder).findOne({
         where: { verifyCode: normalizedCode },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },

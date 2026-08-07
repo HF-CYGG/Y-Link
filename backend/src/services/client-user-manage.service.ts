@@ -7,6 +7,7 @@
  */
 
 import { AppDataSource } from '../config/data-source.js'
+import { runInTransaction } from '../config/transaction-runner.js'
 import {
   CLIENT_USER_ACCOUNT_TYPES,
   CLIENT_USER_STATUSES,
@@ -241,7 +242,7 @@ export class ClientUserManageService {
       staffVerified = true
     }
 
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const userRepo = manager.getRepository(ClientUser)
 
       if (profileKind === 'teacher') {
@@ -400,7 +401,7 @@ export class ClientUserManageService {
       throw new BizError('客户端用户状态非法', 400)
     }
 
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const userRepo = manager.getRepository(ClientUser)
       const sessionRepo = manager.getRepository(ClientUserSession)
       const user = await userRepo.findOne({ where: { id } })
@@ -457,7 +458,7 @@ export class ClientUserManageService {
     const email = this.normalizeEmail(input.email)
     const departmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName)
 
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const userRepo = manager.getRepository(ClientUser)
       const sessionRepo = manager.getRepository(ClientUserSession)
       const user = await userRepo.findOne({ where: { id } })
@@ -533,7 +534,7 @@ export class ClientUserManageService {
       throw new BizError('新密码不能为空', 400)
     }
 
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const userRepo = manager.getRepository(ClientUser)
       const sessionRepo = manager.getRepository(ClientUserSession)
       const user = await userRepo

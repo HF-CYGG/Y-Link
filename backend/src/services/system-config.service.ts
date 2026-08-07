@@ -7,6 +7,7 @@
  */
 
 import { AppDataSource } from '../config/data-source.js'
+import { runInTransaction } from '../config/transaction-runner.js'
 import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
 import { SystemConfig } from '../entities/system-config.entity.js'
@@ -1374,7 +1375,7 @@ class SystemConfigService {
     this.validateInputValue('walkin', input.walkin)
     await this.ensureDefaultConfigs()
 
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const keys = this.getOrderSerialAllKeys()
       const placeholders = keys.map(() => '?').join(', ')
       const useForUpdate = manager.connection.options.type === 'mysql'
@@ -1582,7 +1583,7 @@ class SystemConfigService {
     }
 
     await this.ensureDefaultConfigs()
-    const result = await AppDataSource.transaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const useForUpdate = manager.connection.options.type === 'mysql'
       const placeholders = this.o2oConfigKeys.map(() => '?').join(', ')
       const lockedRows: Array<{ id: string; configKey: string; configValue: string; updatedAt: string }> = await manager.query(
@@ -1798,7 +1799,7 @@ class SystemConfigService {
     }
 
     await this.ensureDefaultConfigs()
-    const result = await AppDataSource.transaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const useForUpdate = manager.connection.options.type === 'mysql'
       const placeholders = this.customerServiceConfigKeys.map(() => '?').join(', ')
       const lockedRows: Array<{ id: string; configKey: string; configValue: string; updatedAt: string }> = await manager.query(
@@ -1930,7 +1931,7 @@ class SystemConfigService {
       : this.buildTreeFromOptions(input.options ?? [])
     const normalizedOptions = this.buildClientDepartmentOptionsFromTree(normalizedTree)
     await this.ensureDefaultConfigs()
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const useForUpdate = manager.connection.options.type === 'mysql'
       const lockedRows: Array<{ id: string; configKey: string; configValue: string; updatedAt: string }> = await manager.query(
         `
@@ -2104,7 +2105,7 @@ class SystemConfigService {
       }
     }
 
-    return manager ? execute(manager) : AppDataSource.transaction(execute)
+    return manager ? execute(manager) : runInTransaction(execute)
   }
 
   async assertClientDepartmentOption(departmentName?: string) {
@@ -2134,7 +2135,7 @@ class SystemConfigService {
     const normalizedMobile = this.normalizeVerificationProviderInput('mobile', input.mobile, persistedConfigs.mobile)
     const normalizedEmail = this.normalizeVerificationProviderInput('email', input.email, persistedConfigs.email)
 
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const useForUpdate = manager.connection.options.type === 'mysql'
       const placeholders = this.verificationConfigKeys.map(() => '?').join(', ')
       const lockedRows: Array<{ id: string; configKey: string; configValue: string; updatedAt: string }> = await manager.query(

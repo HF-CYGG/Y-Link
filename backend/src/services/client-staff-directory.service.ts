@@ -6,6 +6,7 @@
  * 3. 目录状态变化后会批量同步已绑定的部门账号实名校验状态，保证历史账号数据与目录口径一致。
  */
 import { AppDataSource } from '../config/data-source.js'
+import { runInTransaction } from '../config/transaction-runner.js'
 import ExcelJS from 'exceljs'
 import {
   CLIENT_STAFF_DIRECTORY_STATUSES,
@@ -776,7 +777,7 @@ export class ClientStaffDirectoryService {
     const status = this.normalizeStatus(input.status)
     const departmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName)
 
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       await this.assertUniqueStaffNo(manager, staffNo)
       const repo = manager.getRepository(ClientStaffDirectory)
       const entity = repo.create({
@@ -819,7 +820,7 @@ export class ClientStaffDirectoryService {
     const realName = this.normalizeRealName(input.realName)
     const departmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName)
 
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const repo = manager.getRepository(ClientStaffDirectory)
       const record = await repo.findOne({ where: { id } })
       if (!record) {
@@ -872,7 +873,7 @@ export class ClientStaffDirectoryService {
     requestMeta?: RequestMeta,
   ): Promise<{ record: ClientStaffDirectoryRecord }> {
     const status = this.normalizeStatus(input.status)
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const repo = manager.getRepository(ClientStaffDirectory)
       const record = await repo.findOne({ where: { id } })
       if (!record) {
@@ -912,7 +913,7 @@ export class ClientStaffDirectoryService {
     requestMeta?: RequestMeta,
   ): Promise<{ record: ClientStaffDirectoryRecord }> {
     const inviteCode = normalizeStaffInviteCode(inviteCodeInput)
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const repo = manager.getRepository(ClientStaffDirectory)
       const record = await repo.findOne({ where: { id } })
       if (!record) throw new BizError('教职工目录记录不存在', 404)
@@ -955,7 +956,7 @@ export class ClientStaffDirectoryService {
   }
 
   async disableInviteCode(id: string, actor: AuthUserContext, requestMeta?: RequestMeta) {
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const repo = manager.getRepository(ClientStaffDirectory)
       const record = await repo.findOne({ where: { id } })
       if (!record) throw new BizError('教职工目录记录不存在', 404)
@@ -989,7 +990,7 @@ export class ClientStaffDirectoryService {
       throw new BizError('请先选择要删除的教职工目录记录', 400)
     }
 
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const repo = manager.getRepository(ClientStaffDirectory)
       const records = await repo.find({
         where: {
@@ -1084,7 +1085,7 @@ export class ClientStaffDirectoryService {
     list: ClientStaffDirectoryRecord[]
   }> {
     const rows = await this.resolveImportDepartmentRows(this.normalizeImportRows(input))
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const repo = manager.getRepository(ClientStaffDirectory)
       const resolvedRows = rows
       const existingMap = await this.loadExistingByStaffNos(manager, resolvedRows.map((item) => item.staffNo))
