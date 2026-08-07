@@ -4,13 +4,45 @@
 -- 维护说明：适用于增量升级场景；若调整单号配置键名或订单字段，请同步更新本脚本。
 -- =============================================
 
-ALTER TABLE `biz_outbound_order`
-  ADD COLUMN IF NOT EXISTS `order_type` VARCHAR(32) NOT NULL DEFAULT 'walkin' COMMENT '订单类型',
-  ADD COLUMN IF NOT EXISTS `has_customer_order` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否有客户订单',
-  ADD COLUMN IF NOT EXISTS `is_system_applied` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否系统申请',
-  ADD COLUMN IF NOT EXISTS `issuer_name` VARCHAR(64) DEFAULT NULL COMMENT '出单人',
-  ADD COLUMN IF NOT EXISTS `customer_department_name` VARCHAR(128) DEFAULT NULL COMMENT '客户部门名称';
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_outbound_order' AND COLUMN_NAME = 'order_type') = 0,
+  'ALTER TABLE `biz_outbound_order` ADD COLUMN `order_type` VARCHAR(32) NOT NULL DEFAULT ''walkin'' COMMENT ''订单类型''',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_outbound_order' AND COLUMN_NAME = 'has_customer_order') = 0,
+  'ALTER TABLE `biz_outbound_order` ADD COLUMN `has_customer_order` TINYINT(1) NOT NULL DEFAULT 0 COMMENT ''是否有客户订单''',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_outbound_order' AND COLUMN_NAME = 'is_system_applied') = 0,
+  'ALTER TABLE `biz_outbound_order` ADD COLUMN `is_system_applied` TINYINT(1) NOT NULL DEFAULT 0 COMMENT ''是否系统申请''',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_outbound_order' AND COLUMN_NAME = 'issuer_name') = 0,
+  'ALTER TABLE `biz_outbound_order` ADD COLUMN `issuer_name` VARCHAR(64) DEFAULT NULL COMMENT ''出单人''',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_outbound_order' AND COLUMN_NAME = 'customer_department_name') = 0,
+  'ALTER TABLE `biz_outbound_order` ADD COLUMN `customer_department_name` VARCHAR(128) DEFAULT NULL COMMENT ''客户部门名称''',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 CREATE TABLE IF NOT EXISTS `system_configs` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '配置主键',
   `config_key` VARCHAR(128) NOT NULL COMMENT '配置键',

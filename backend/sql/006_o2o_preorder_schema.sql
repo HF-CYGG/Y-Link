@@ -2,15 +2,59 @@
 -- 文件说明：backend/sql/006_o2o_preorder_schema.sql
 -- 文件职责：为 O2O 预订场景补齐商品扩展字段、客户端账号、预订单与库存流水表结构。
 -- 维护说明：若调整 O2O 商品字段或预订单实体，请同步更新本脚本与 SQLite bootstrap 检查项。
+-- 幂等性：本脚本为复合脚本（先给 base_product 补列，再建 O2O 相关表）。
+--   加列部分使用 information_schema 判断 + PREPARE 动态 DDL，建表部分使用 CREATE TABLE IF NOT EXISTS，
+--   因此整体可安全重复执行。这一点很关键：当存量库已补过列、却在建表阶段中断时，
+--   必须能够重跑本脚本补齐缺失的表，而不是在第一条 ALTER 上就因重复列报错。
 -- =============================================
 
-ALTER TABLE `base_product`
-  ADD COLUMN `o2o_status` VARCHAR(16) NOT NULL DEFAULT 'unlisted' COMMENT '线上预订状态',
-  ADD COLUMN `thumbnail` VARCHAR(255) NULL COMMENT '预览图地址',
-  ADD COLUMN `detail_content` TEXT NULL COMMENT '商品详情',
-  ADD COLUMN `limit_per_user` INT NOT NULL DEFAULT 5 COMMENT '单人限购数量',
-  ADD COLUMN `current_stock` INT NOT NULL DEFAULT 0 COMMENT '物理库存',
-  ADD COLUMN `pre_ordered_stock` INT NOT NULL DEFAULT 0 COMMENT '已预订库存';
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'base_product' AND COLUMN_NAME = 'o2o_status') = 0,
+  'ALTER TABLE `base_product` ADD COLUMN `o2o_status` VARCHAR(16) NOT NULL DEFAULT ''unlisted'' COMMENT ''线上预订状态''',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'base_product' AND COLUMN_NAME = 'thumbnail') = 0,
+  'ALTER TABLE `base_product` ADD COLUMN `thumbnail` VARCHAR(255) NULL COMMENT ''预览图地址''',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'base_product' AND COLUMN_NAME = 'detail_content') = 0,
+  'ALTER TABLE `base_product` ADD COLUMN `detail_content` TEXT NULL COMMENT ''商品详情''',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'base_product' AND COLUMN_NAME = 'limit_per_user') = 0,
+  'ALTER TABLE `base_product` ADD COLUMN `limit_per_user` INT NOT NULL DEFAULT 5 COMMENT ''单人限购数量''',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'base_product' AND COLUMN_NAME = 'current_stock') = 0,
+  'ALTER TABLE `base_product` ADD COLUMN `current_stock` INT NOT NULL DEFAULT 0 COMMENT ''物理库存''',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'base_product' AND COLUMN_NAME = 'pre_ordered_stock') = 0,
+  'ALTER TABLE `base_product` ADD COLUMN `pre_ordered_stock` INT NOT NULL DEFAULT 0 COMMENT ''已预订库存''',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 CREATE TABLE IF NOT EXISTS `client_user` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
