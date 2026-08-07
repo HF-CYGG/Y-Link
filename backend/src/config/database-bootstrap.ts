@@ -13,6 +13,7 @@ import { ClientUser } from '../entities/client-user.entity.js'
 import { ClientFeedbackAttachment } from '../entities/client-feedback-attachment.entity.js'
 import { ClientFeedbackConversation } from '../entities/client-feedback-conversation.entity.js'
 import { ClientFeedbackMessage, type ClientFeedbackMessageAttachment } from '../entities/client-feedback-message.entity.js'
+import { assertMysqlRequiredTablesExist, runMysqlSchemaMigrations } from './mysql-migration-runner.js'
 
 const SQLITE_REQUIRED_TABLES = [
   'base_product',
@@ -1022,9 +1023,18 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   }
 
   if (env.DB_TYPE !== 'sqlite') {
+    // MySQL 结构此前被视为完全由运维外部管理，启动阶段不做任何校验；
+    // 一旦运维忘记手动执行 backend/sql/ 下的增量脚本，缺表故障只会在业务接口报错时才暴露
+    // （例如认证接口依赖的 auth_risk_state 表缺失会导致登录接口直接 500）。
+    // 这里补上两层保障：按需自动执行迁移脚本，随后做一次只读自检，缺表则直接阻止启动。
+    const migrationResult = await runMysqlSchemaMigrations(dataSource)
+    if (migrationResult.appliedFiles.length > 0) {
+      console.log(`[y-link-backend] MySQL 迁移脚本已自动执行：${migrationResult.appliedFiles.join(', ')}`)
+    }
+    await assertMysqlRequiredTablesExist(dataSource)
     await migrateLegacyDepartmentAccountsToTeacherProfiles(dataSource)
     return {
-      action: 'skipped',
+      action: migrationResult.appliedFiles.length > 0 ? 'synchronized' : 'skipped',
       reason: 'mysql_external',
     }
   }

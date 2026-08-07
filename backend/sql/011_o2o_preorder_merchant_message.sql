@@ -4,5 +4,10 @@
 -- 维护说明：若留言长度上限调整，请同步更新实体定义、路由校验和服务层标准化逻辑。
 -- =============================================
 
-ALTER TABLE `o2o_preorder`
-ADD COLUMN IF NOT EXISTS `merchant_message` VARCHAR(500) NULL COMMENT '商家留言' AFTER `business_status`;
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'o2o_preorder' AND COLUMN_NAME = 'merchant_message') = 0,
+  'ALTER TABLE `o2o_preorder` ADD COLUMN `merchant_message` VARCHAR(500) NULL COMMENT ''商家留言'' AFTER `business_status`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;

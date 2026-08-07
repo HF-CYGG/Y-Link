@@ -486,6 +486,16 @@ class SystemConfigService {
     'customer_service.sse_keepalive_seconds',
   ] as const
   /**
+   * 默认配置是否已在本进程内确认过存在：
+   * - system_configs 里的默认行只会被插入，不会被应用代码删除，因此“已存在”是单调事实；
+   * - 确认过一次后，后续调用不再需要每次都发起一条含数十个 OR 分支的存在性校验查询。
+   */
+  private defaultConfigsEnsured = false
+  private static readonly CONFIG_CACHE_TTL_MS = 5_000
+  private o2oRuleConfigCache: { value: O2oRuleConfigRecord; expiresAtMs: number } | null = null
+  // 只缓存客服配置中来自数据库的静态部分；availability 依赖实时在线人数，每次都要重新计算，不能一并缓存。
+  private customerServiceBaseConfigCache: { value: Omit<CustomerServiceConfigRecord, 'availability'>; expiresAtMs: number } | null = null
+  /**
    * 系统治理配置写操作强制管理员：
    * - 与路由层 requireRole('admin') 形成双重门禁；
    * - 若发生越权调用，统一记录失败审计，便于后续排查权限绕过或路由误配。
@@ -1358,6 +1368,9 @@ class SystemConfigService {
   }
 
   async ensureDefaultConfigs(manager: EntityManager = AppDataSource.manager): Promise<{ insertedCount: number; totalCount: number }> {
+    if (this.defaultConfigsEnsured) {
+      return { insertedCount: 0, totalCount: DEFAULT_SYSTEM_CONFIGS.length }
+    }
     const configRepo = manager.getRepository(SystemConfig)
     const existingConfigs = await configRepo.find({
       where: DEFAULT_SYSTEM_CONFIGS.map((config) => ({ configKey: config.configKey })),
@@ -1399,6 +1412,7 @@ class SystemConfigService {
       )
     }
 
+    this.defaultConfigsEnsured = true
     return {
       insertedCount: missingConfigs.length,
       totalCount: DEFAULT_SYSTEM_CONFIGS.length,
@@ -1550,7 +1564,29 @@ class SystemConfigService {
     })
   }
 
+  /**
+   * 写时失效 + 短 TTL 兜底的配置读取：
+   * - buildOrderDetail 等热路径在同一次调用里会读两次、且常发生在库存行已被 pessimistic_write
+   *   锁定的事务内，逐次回源查询会不必要地拉长锁持有时间；
+   * - 配置变更走 updateO2oRuleConfigs，其内部会在写入后立即调用 invalidateO2oRuleConfigCache
+   *   保证“改完立刻读到新值”；TTL 只是兜底，防止遗漏的写路径导致缓存长期陈旧。
+   *
+   * 传入事务 manager 时（isTransactionalManager 为真）一律绕过缓存，读与写都不经过它：
+   * - 绕过读：事务内的调用方通常已经用 FOR UPDATE 锁定了这些行，要的就是“锁定行的真实当前值”。
+   *   多实例部署下，本实例的缓存可能是其它实例更新配置之前的旧值，若此时返回缓存，
+   *   updateO2oRuleConfigs 写入审计的 before 快照就会与实际被覆盖的配置不一致。
+   * - 绕过写：事务尚未提交，把未提交值放进进程级缓存后，一旦事务回滚，
+   *   缓存会在 TTL 窗口内向其它调用方返回从未真正落库的值。
+   *   缓存改由调用方在事务成功提交后，用确认落库的结果显式发布（见 updateO2oRuleConfigs 末尾）。
+   */
   async getO2oRuleConfigs(manager: EntityManager = AppDataSource.manager): Promise<O2oRuleConfigRecord> {
+    const isTransactional = this.isTransactionalManager(manager)
+    if (!isTransactional) {
+      const cached = this.o2oRuleConfigCache
+      if (cached && cached.expiresAtMs > Date.now()) {
+        return cached.value
+      }
+    }
     await this.ensureDefaultConfigs(manager)
     const rows = await manager.getRepository(SystemConfig).find({
       where: this.o2oConfigKeys.map((key) => ({ configKey: key })),
@@ -1589,7 +1625,7 @@ class SystemConfigService {
     const mallAnnouncementText = getRequiredConfigValue('o2o.mall_announcement_text').trim()
     const updatedAt = rows.map((row) => row.updatedAt).sort((a, b) => b.getTime() - a.getTime())[0]
 
-    return {
+    const record: O2oRuleConfigRecord = {
       autoCancelEnabled,
       autoCancelHours,
       limitEnabled,
@@ -1599,6 +1635,28 @@ class SystemConfigService {
       mallAnnouncementText,
       updatedAt,
     }
+    if (!isTransactional) {
+      this.publishO2oRuleConfigCache(record)
+    }
+    return record
+  }
+
+  /**
+   * 判断是否处于调用方开启的事务上下文中。
+   * TypeORM 的 AppDataSource.transaction() 会为回调创建独立的 EntityManager，
+   * 与 AppDataSource.manager 不是同一个实例；据此即可识别“事务内读取”，
+   * 无需依赖调用方逐处传参，避免遗漏。
+   */
+  private isTransactionalManager(manager: EntityManager): boolean {
+    return manager !== AppDataSource.manager
+  }
+
+  private invalidateO2oRuleConfigCache(): void {
+    this.o2oRuleConfigCache = null
+  }
+
+  private publishO2oRuleConfigCache(record: O2oRuleConfigRecord): void {
+    this.o2oRuleConfigCache = { value: record, expiresAtMs: Date.now() + SystemConfigService.CONFIG_CACHE_TTL_MS }
   }
 
   async updateO2oRuleConfigs(
@@ -1678,6 +1736,11 @@ class SystemConfigService {
         changed = true
       }
 
+      // 传入事务 manager 的读取会自动绕过缓存（读与写都不经过），因此这里拿到的一定是
+      // 本事务锁定行的真实值，也不会把未提交的写入泄露进共享缓存；
+      // 仍然显式失效一次，是为了让"本次更新已发生"立刻对其它请求可见，
+      // 避免它们在事务提交前继续命中写入前的旧缓存。缓存在事务提交后统一发布（见方法末尾）。
+      this.invalidateO2oRuleConfigCache()
       const config = await this.getO2oRuleConfigs(manager)
 
       if (changed) {
@@ -1703,12 +1766,51 @@ class SystemConfigService {
     if (result.changed) {
       invalidateMallCatalogReadCache()
     }
+
+    // 事务已成功提交，此时 result.config 才是确认落库的值，可以安全发布进共享缓存。
+    this.publishO2oRuleConfigCache(result.config)
     return result
   }
 
-  async getCustomerServiceConfigs(): Promise<CustomerServiceConfigRecord> {
-    await this.ensureDefaultConfigs()
-    const rows = await this.configRepo.find({
+  async getCustomerServiceConfigs(manager: EntityManager = AppDataSource.manager): Promise<CustomerServiceConfigRecord> {
+    const baseConfig = await this.getCustomerServiceBaseConfig(manager)
+    return {
+      ...baseConfig,
+      availability: this.computeCustomerServiceAvailability(
+        baseConfig,
+        customerServiceRealtimeService.buildServiceSessionSnapshot().serviceConnectionCount,
+      ),
+    }
+  }
+
+  private invalidateCustomerServiceConfigCache(): void {
+    this.customerServiceBaseConfigCache = null
+  }
+
+  private publishCustomerServiceConfigCache(value: Omit<CustomerServiceConfigRecord, 'availability'>): void {
+    this.customerServiceBaseConfigCache = { value, expiresAtMs: Date.now() + SystemConfigService.CONFIG_CACHE_TTL_MS }
+  }
+
+  /**
+   * 只读、可缓存的客服配置静态部分：与 getO2oRuleConfigs 完全同构——
+   * 同一套写时失效 + 短 TTL 策略，以及同样的“事务 manager 一律绕过缓存”规则（读与写都绕过）。
+   * 必须接收调用方的事务 manager 才能读取——若固定用 this.configRepo（默认连接），
+   * 在 updateCustomerServiceConfigs 的事务内回读会走另一条连接，在事务提交前看到的还是旧值，
+   * 导致返回给调用方的“新配置”和审计 after 字段都错误地停留在旧值上。
+   * availability 依赖的实时在线状态由调用方 getCustomerServiceConfigs 每次单独计算，不经过这层缓存。
+   */
+  private async getCustomerServiceBaseConfig(
+    manager: EntityManager = AppDataSource.manager,
+  ): Promise<Omit<CustomerServiceConfigRecord, 'availability'>> {
+    const isTransactional = this.isTransactionalManager(manager)
+    if (!isTransactional) {
+      const cached = this.customerServiceBaseConfigCache
+      if (cached && cached.expiresAtMs > Date.now()) {
+        return cached.value
+      }
+    }
+    await this.ensureDefaultConfigs(manager)
+    const rows = await manager.getRepository(SystemConfig).find({
       where: this.customerServiceConfigKeys.map((key) => ({ configKey: key })),
       select: {
         configKey: true,
@@ -1768,13 +1870,10 @@ class SystemConfigService {
         keepaliveConfig.updatedAt,
       ].sort((a, b) => b.getTime() - a.getTime())[0],
     }
-    return {
-      ...baseConfig,
-      availability: this.computeCustomerServiceAvailability(
-        baseConfig,
-        customerServiceRealtimeService.buildServiceSessionSnapshot().serviceConnectionCount,
-      ),
+    if (!isTransactional) {
+      this.publishCustomerServiceConfigCache(baseConfig)
     }
+    return baseConfig
   }
 
   async updateCustomerServiceConfigs(
@@ -1810,7 +1909,7 @@ class SystemConfigService {
     }
 
     await this.ensureDefaultConfigs()
-    return AppDataSource.transaction(async (manager) => {
+    const result = await AppDataSource.transaction(async (manager) => {
       const useForUpdate = manager.connection.options.type === 'mysql'
       const placeholders = this.customerServiceConfigKeys.map(() => '?').join(', ')
       const lockedRows: Array<{ id: string; configKey: string; configValue: string; updatedAt: string }> = await manager.query(
@@ -1837,7 +1936,7 @@ class SystemConfigService {
         ['customer_service.offline_faq_json', JSON.stringify(offlineFaqs)],
         ['customer_service.sse_keepalive_seconds', String(input.sseKeepaliveSeconds)],
       ])
-      const before = await this.getCustomerServiceConfigs()
+      const before = await this.getCustomerServiceConfigs(manager)
       let changed = false
       const repo = manager.getRepository(SystemConfig)
       for (const row of lockedRows) {
@@ -1849,7 +1948,12 @@ class SystemConfigService {
         changed = true
       }
 
-      const config = await this.getCustomerServiceConfigs()
+      // 传入事务 manager 的读取会自动绕过缓存（读与写都不经过），因此这里拿到的一定是
+      // 本事务锁定行的真实值，也不会把未提交的写入泄露进共享缓存；
+      // 仍然显式失效一次，是为了让"本次更新已发生"立刻对其它请求可见。
+      // 缓存在事务提交后统一发布（见方法末尾）。
+      this.invalidateCustomerServiceConfigCache()
+      const config = await this.getCustomerServiceConfigs(manager)
       if (changed) {
         await auditService.record(
           {
@@ -1869,6 +1973,12 @@ class SystemConfigService {
       }
       return { config, changed }
     })
+
+    // 事务已成功提交，此时才把确认落库的静态配置部分发布进共享缓存；
+    // availability 依赖实时在线状态，从不进入这层缓存，因此发布前需要先剔除它。
+    const { availability: _availability, ...baseConfigToPublish } = result.config
+    this.publishCustomerServiceConfigCache(baseConfigToPublish)
+    return result
   }
 
   async getVerificationProviderConfigs(options: { maskSensitiveValues?: boolean } = { maskSensitiveValues: true }): Promise<VerificationProviderConfigsResult> {

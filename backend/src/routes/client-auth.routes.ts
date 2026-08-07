@@ -216,8 +216,8 @@ clientAuthRouter.post(
       allowUsername: true,
       fieldLabel: '账号',
     }).normalizedValue
-    await authSecurityService.guardClientLoginRequest(requestMeta, normalizedAccount)
-    const data = await clientAuthService.login(payload, requestMeta)
+    const { captchaRequired } = await authSecurityService.guardClientLoginRequest(requestMeta, normalizedAccount)
+    const data = await clientAuthService.login(payload, requestMeta, captchaRequired)
     setClientAuthCookie(req, res, {
       sessionToken: data.token,
       expiresAt: data.expiresAt,

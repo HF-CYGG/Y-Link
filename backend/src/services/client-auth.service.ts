@@ -720,10 +720,15 @@ class ClientAuthService {
     } satisfies ClientAuthSessionResult
   }
 
-  async login(input: ClientLoginInput, requestMeta?: RequestMeta) {
+  /**
+   * captchaRequired 由路由层的 authSecurityService.guardClientLoginRequest 一并算出并传入，
+   * 避免这里再对同一批风控 storeKey 重复发起一次数据库读取；
+   * 默认 false 是为了兼容验收脚本等直接调用本方法、不经过路由守卫的场景。
+   */
+  async login(input: ClientLoginInput, requestMeta?: RequestMeta, captchaRequired = false) {
     const account = this.resolveLoginAccount(input.account)
     const password = input.password.trim()
-    if (await authSecurityService.isClientLoginCaptchaRequired(requestMeta, account.normalizedValue)) {
+    if (captchaRequired) {
       this.verifyCaptchaIfRequired(input)
     }
     const user = await this.findUserWithPasswordByAccount(account)

@@ -4,9 +4,13 @@
 -- 维护说明：该字段只影响商城展示排序，不改变库存、价格、下单或核销口径。
 -- =============================================
 
-ALTER TABLE `base_product`
-  ADD COLUMN IF NOT EXISTS `o2o_recommended` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否手动推荐到 O2O 商城' AFTER `o2o_status`;
-
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'base_product' AND COLUMN_NAME = 'o2o_recommended') = 0,
+  'ALTER TABLE `base_product` ADD COLUMN `o2o_recommended` TINYINT(1) NOT NULL DEFAULT 0 COMMENT ''是否手动推荐到 O2O 商城'' AFTER `o2o_status`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 UPDATE `base_product`
 SET `o2o_recommended` = 0
 WHERE `o2o_recommended` IS NULL;

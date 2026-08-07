@@ -24,6 +24,7 @@ import { databaseMaintenanceModeService } from './services/database-maintenance-
 import { databaseMigrationService } from './services/database-migration.service.js'
 import { notificationService } from './services/notification.service.js'
 import { o2oPreorderService } from './services/o2o-preorder.service.js'
+import { persistentRiskStateService } from './services/persistent-risk-state.service.js'
 import { systemConfigService } from './services/system-config.service.js'
 import { migrateLegacyUploadReferences } from './utils/upload-migration.js'
 import { registerRuntimeShutdownHandler } from './runtime/runtime-shutdown.js'
@@ -451,6 +452,7 @@ async function bootstrap(): Promise<void> {
     notificationService.startOutboxWorker()
     if (!databaseMaintenanceModeService.isReadOnly()) {
       o2oPreorderService.startTimeoutRecycleLoop()
+      persistentRiskStateService.startCleanupLoop()
     } else {
       logLine('DB MIGRATION', '数据库仍处于只读维护，后台写任务保持暂停', 'warn')
     }

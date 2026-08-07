@@ -103,6 +103,19 @@ export function isRetryableMysqlTransactionError(error: unknown): boolean {
 }
 
 /**
+ * 识别 MySQL 死锁（ER_LOCK_DEADLOCK / errno 1213）与锁等待超时（ER_LOCK_WAIT_TIMEOUT / errno 1205）。
+ * 兼容既有调用名称；真正重试仍必须在具备幂等保证的完整事务边界执行。
+ */
+export function isRetryableMysqlLockError(error: unknown): boolean {
+  return isRetryableMysqlTransactionError(error)
+}
+
+/** 跨方言的可重试锁冲突判断：SQLite 忙锁与 MySQL 死锁/锁等待超时都属于“重试即可自愈”的瞬时错误。 */
+export function isRetryableTransactionLockError(error: unknown): boolean {
+  return isRetryableSqliteLockError(error) || isRetryableMysqlLockError(error)
+}
+
+/**
  * 面向接口层输出业务可理解的数据库错误，避免底层 SQL 文本直接泄露到前端。
  */
 export function mapDatabaseErrorToBizError(error: unknown): BizError | null {

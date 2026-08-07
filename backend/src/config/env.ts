@@ -92,6 +92,9 @@ const envSchema = z.object({
   SQLITE_JOURNAL_SIZE_LIMIT_BYTES: z.coerce.number().int().min(1_048_576).max(1_073_741_824).default(67_108_864),
   SQLITE_WRITE_QUEUE_MAX_PENDING: z.coerce.number().int().min(1).max(10_000).default(256),
   SQLITE_WRITE_QUEUE_TIMEOUT_MS: z.coerce.number().int().min(250).max(60_000).default(5000),
+  // 是否在启动阶段自动执行 backend/sql/ 下已核实幂等的增量迁移脚本（仅覆盖白名单内文件，
+  // 见 mysql-migration-runner.ts）；默认关闭，避免无人值守地对生产数据库执行结构变更。
+  DB_AUTO_MIGRATE: z.string().optional().transform(parseBoolean),
   AUTH_TOKEN_TTL_HOURS: z.coerce.number().int().positive().default(168),
   INIT_ADMIN_USERNAME: z.string().trim().min(1).default('admin'),
   // 管理员初始化密码不再提供内置默认值，必须在需要时由私有配置显式提供。
