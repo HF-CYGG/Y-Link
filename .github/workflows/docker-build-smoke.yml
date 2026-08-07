@@ -276,9 +276,24 @@ jobs:
           test "$exit_code" = "0"
           docker start ylink-onebox-smoke >/dev/null
 
+          # 容器重启瞬间可能短暂保留上一次的 healthy 状态；必须重新解析宿主机端口，
+          # 并以宿主机实际可访问的 /health 作为重启完成门禁，避免端口转发尚未恢复时误判。
+          restarted_port="$(docker port ylink-onebox-smoke 80/tcp | awk -F: 'NR == 1 { print $NF }')"
+          test -n "$restarted_port"
+
           for attempt in $(seq 1 90); do
+            state="$(docker inspect --format '{{.State.Status}}' ylink-onebox-smoke)"
             health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' ylink-onebox-smoke)"
-            if [ "$health" = "healthy" ]; then
+            if [ "$state" = "exited" ] || [ "$state" = "dead" ]; then
+              docker logs ylink-onebox-smoke
+              exit 1
+            fi
+            if [ "$state" = "running" ] \
+              && [ "$health" = "healthy" ] \
+              && curl --fail --silent \
+                "http://127.0.0.1:${restarted_port}/health" \
+                --output /tmp/ylink-health-restarted.json \
+              && node -e "const body=require('/tmp/ylink-health-restarted.json'); if(body.status!=='UP') process.exit(1)"; then
               break
             fi
             if [ "$attempt" -eq 90 ]; then
@@ -288,8 +303,6 @@ jobs:
             sleep 2
           done
 
-          curl --fail --silent --show-error "http://127.0.0.1:${YLINK_SMOKE_PORT}/health" --output /tmp/ylink-health-restarted.json
-          node -e "const body=require('/tmp/ylink-health-restarted.json'); if(body.status!=='UP') process.exit(1)"
           docker exec ylink-onebox-smoke node -e "const fs=require('node:fs'); if(!fs.existsSync('/app/data/y-link.sqlite')) process.exit(1)"
 
       - name: 输出容器日志
