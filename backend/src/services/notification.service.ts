@@ -2,6 +2,7 @@ import { createHash, createHmac, randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
 import { In, MoreThan, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
+import { runInTransaction } from '../config/transaction-runner.js'
 import {
   NotificationRule,
   NOTIFICATION_EXTERNAL_TRIGGER_MODES,
@@ -542,7 +543,7 @@ export class NotificationService {
     }
 
     let changed = false
-    await AppDataSource.transaction(async (manager) => {
+    await runInTransaction(async (manager) => {
       const txRuleRepo = manager.getRepository(NotificationRule)
       const txSystemConfigRepo = manager.getRepository(SystemConfig)
       await this.ensureOnlineWindowConfig(manager)

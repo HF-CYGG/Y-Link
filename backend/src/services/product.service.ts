@@ -8,6 +8,7 @@
 
 import { In, type EntityManager, type Repository } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
+import { runInTransaction } from '../config/transaction-runner.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { BaseProductSku } from '../entities/base-product-sku.entity.js'
 import { RelProductTag } from '../entities/rel-product-tag.entity.js'
@@ -364,7 +365,7 @@ export class ProductService {
   }
 
   async create(input: CreateProductInput): Promise<ProductView> {
-    const result = await AppDataSource.transaction((manager) => this.createWithManager(input, manager))
+    const result = await runInTransaction((manager) => this.createWithManager(input, manager))
     invalidateMallCatalogReadCache()
     return result
   }
@@ -379,7 +380,7 @@ export class ProductService {
 
     this.assertNoDuplicateProductCodesInBatch(inputs)
 
-    const result = await AppDataSource.transaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const createdProducts: ProductView[] = []
 
       for (let index = 0; index < inputs.length; index += 1) {
@@ -402,7 +403,7 @@ export class ProductService {
   }
 
   async update(id: string, input: UpdateProductInput): Promise<ProductView> {
-    const result = await AppDataSource.transaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const repo = manager.getRepository(BaseProduct)
       const product = await repo.findOne({
         where: { id },
@@ -438,7 +439,7 @@ export class ProductService {
       throw new BizError('至少提供一个可更新字段')
     }
 
-    const result = await AppDataSource.transaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const repo = manager.getRepository(BaseProduct)
       const products = await repo.find({
         where: { id: In(productIds) },
@@ -461,7 +462,7 @@ export class ProductService {
   }
 
   async delete(id: string): Promise<void> {
-    await AppDataSource.transaction(async (manager) => {
+    await runInTransaction(async (manager) => {
       const productRepo = manager.getRepository(BaseProduct)
       const product = await productRepo.findOne({
         where: { id },

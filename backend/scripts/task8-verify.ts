@@ -6,12 +6,10 @@
  * - 数据源相关模块必须用 `await import()` 动态加载：ESM 的静态 import 会在模块体执行前完成求值，
  *   若改回静态 import，下面这几行 process.env 赋值就会晚于 env.ts / data-source.ts 的初始化而完全失效，
  *   脚本会连到开发者的默认库 data/y-link.sqlite 上跑，既污染本地数据、又会因残留数据在重跑时报错。
- *
- * 已知未决问题：`verifyConcurrentSerialAndDrilldown` 目前在 SQLite 下无法通过。
- * TypeORM 的 sqlite 驱动只持有一条连接，16 个并发 `orderService.submit` 的写事务会在这条连接上重叠，
- * 先报 `cannot start a transaction within a transaction`、退避重试后又报 `no such savepoint`。
- * 这不是本脚本的问题，而是"SQLite 部署下并发写事务"这一production 缺陷的暴露：
- * 要真正修好需要把全部 80 处 `AppDataSource.transaction(...)` 收口到一个串行化入口，属于独立改造。
+ * - `verifyConcurrentSerialAndDrilldown` 是 SQLite 并发写事务串行化（issue #36）的回归守卫：
+ *   它并发提交 16 笔出库单，若哪天写事务绕过了 `runInTransaction` 闸门、直接调用
+ *   `AppDataSource.transaction`，这一项就会重新报
+ *   `cannot start a transaction within a transaction` 或 `no such savepoint`。
  */
 
 import 'reflect-metadata'
@@ -245,14 +243,17 @@ const verifyConcurrentSerialAndDrilldown = async () => {
   assert.equal(productDrilldown.records.length >= 1, true)
   assert.equal(productDrilldown.records.every((record) => record.orderType === 'walkin'), true)
 
+  // 看板的"客户"维度取的是申请部门（`COALESCE(NULLIF(TRIM(customerDepartmentName), ''), '散客')`），
+  // 散客单没有部门、统一归到 `散客` 这一个桶里——不是按订单的 customerName 逐个成桶。
+  // 因此这里要按桶名 `散客` 下钻，早先按 `散客1` 查是查不到任何记录的。
   const customerDrilldown = await dashboardService.getCustomerRankDrilldown({
-    customerName: '散客1',
+    customerName: '散客',
     startDate: todayText,
     endDate: todayText,
     orderType: 'walkin',
   })
   assert.equal(customerDrilldown.records.length >= 1, true)
-  assert.equal(customerDrilldown.records[0]?.showNo.startsWith('hyyz'), true)
+  assert.equal(customerDrilldown.records.every((record) => record.showNo.startsWith('hyyz')), true)
 
   const tagAggregate = await dashboardService.getTagAggregate({
     tagId: analyticsTag.id,

@@ -7,7 +7,7 @@
  */
 
 import type { EntityManager } from 'typeorm'
-import { AppDataSource } from '../config/data-source.js'
+import { runInTransaction } from '../config/transaction-runner.js'
 import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BusinessSequence } from '../entities/business-sequence.entity.js'
 import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
@@ -83,7 +83,7 @@ class OrderSerialService {
     let lastError: unknown
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
-        return await AppDataSource.transaction((transactionManager) =>
+        return await runInTransaction(async (transactionManager) =>
           this.generateOrderNoWithManager(normalizedOrderType, transactionManager),
         )
       } catch (error) {
@@ -114,7 +114,7 @@ class OrderSerialService {
     if (manager) {
       return this.rollbackCurrentIfMatchesWithManager(normalizedOrderType, showNo, manager)
     }
-    return AppDataSource.transaction((transactionManager) =>
+    return runInTransaction((transactionManager) =>
       this.rollbackCurrentIfMatchesWithManager(normalizedOrderType, showNo, transactionManager),
     )
   }
@@ -128,7 +128,7 @@ class OrderSerialService {
     if (manager) {
       return this.recalibrateCurrentFromOccupancyWithManager(normalizedOrderType, manager)
     }
-    return AppDataSource.transaction((transactionManager) =>
+    return runInTransaction((transactionManager) =>
       this.recalibrateCurrentFromOccupancyWithManager(normalizedOrderType, transactionManager),
     )
   }

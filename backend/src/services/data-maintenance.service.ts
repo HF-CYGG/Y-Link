@@ -12,6 +12,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import { DataSource } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
+import { runInTransaction } from '../config/transaction-runner.js'
 import { runDatabaseExclusive } from '../database/transaction-coordinator.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { ClientUser } from '../entities/client-user.entity.js'
@@ -197,7 +198,7 @@ class DataMaintenanceService {
     const adminActor = await this.assertAdminActor(actor, requestMeta, 'data_maintenance.import_json', '导入 JSON 数据')
     const normalizedPayload = validateExportPayload(payload)
     const importSummary: ImportSummary = buildImportSummary(normalizedPayload)
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       await manager.getRepository(InventoryLog).clear()
       await manager.getRepository(O2oPreorderItem).clear()
       await manager.getRepository(O2oPreorder).clear()

@@ -9,6 +9,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { Brackets, type EntityManager, In, Not } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
+import { runInTransaction } from '../config/transaction-runner.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { BaseProductSku } from '../entities/base-product-sku.entity.js'
 import { RelProductTag } from '../entities/rel-product-tag.entity.js'
@@ -429,7 +430,7 @@ class O2oPreorderService {
       : 1
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       try {
-        return await AppDataSource.transaction(work)
+        return await runInTransaction(work)
       } catch (error) {
         if (attempt >= maxAttempts || !isRetryableMysqlTransactionError(error)) {
           throw error
@@ -2819,7 +2820,7 @@ class O2oPreorderService {
     const normalizedRemark = this.normalizePreorderRemark(input.remark)
     const o2oRules = await systemConfigService.getO2oRuleConfigs()
 
-    const result = await AppDataSource.transaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const orderRepo = manager.getRepository(O2oPreorder)
       const orderItemRepo = manager.getRepository(O2oPreorderItem)
 
@@ -2905,7 +2906,7 @@ class O2oPreorderService {
     const normalizedRemark = this.normalizePreorderRemark(input.remark)
     const o2oRules = await systemConfigService.getO2oRuleConfigs()
 
-    const result = await AppDataSource.transaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const orderRepo = manager.getRepository(O2oPreorder)
       const orderItemRepo = manager.getRepository(O2oPreorderItem)
       const order = await orderRepo.findOne({
@@ -3088,7 +3089,7 @@ class O2oPreorderService {
         throw new BizError('退货数量必须为正整数', 400)
       }
     })
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const orderRepo = manager.getRepository(O2oPreorder)
       const order = await orderRepo.findOne({
         where: { id: orderId, clientUserId: auth.userId, isDeleted: false },
@@ -3276,7 +3277,7 @@ class O2oPreorderService {
   }
 
   async markCustomerOrderPrintedByClient(auth: ClientAuthContext, orderId: string) {
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const orderRepo = manager.getRepository(O2oPreorder)
       const order = await orderRepo.findOne({
         where: { id: orderId, clientUserId: auth.userId, isDeleted: false },
@@ -3301,7 +3302,7 @@ class O2oPreorderService {
     if (typeof input.hasCustomerOrder !== 'boolean' && typeof input.isSystemApplied !== 'boolean') {
       throw new BizError('请至少传入一个可更新字段', 400)
     }
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const orderRepo = manager.getRepository(O2oPreorder)
       const order = await orderRepo.findOne({
         where: { id: input.orderId, isDeleted: false },
@@ -3338,7 +3339,7 @@ class O2oPreorderService {
       throw new BizError('请填写订单号完成二次确认', 400)
     }
 
-    const result = await AppDataSource.transaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const preorderRepo = manager.getRepository(O2oPreorder)
       const preorderItemRepo = manager.getRepository(O2oPreorderItem)
       const returnRequestRepo = manager.getRepository(O2oReturnRequest)
@@ -3440,7 +3441,7 @@ class O2oPreorderService {
   }
 
   async cancelMyOrder(auth: ClientAuthContext, id: string) {
-    await AppDataSource.transaction(async (manager) => {
+    await runInTransaction(async (manager) => {
       const order = await manager.getRepository(O2oPreorder).findOne({
         where: { id, isDeleted: false },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
@@ -3693,7 +3694,7 @@ class O2oPreorderService {
 
   async rejectReturnRequest(input: RejectReturnRequestInput, actor: AuthUserContext) {
     const normalizedRejectReason = this.normalizeReturnRejectReason(input.rejectReason)
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const returnRequestRepo = manager.getRepository(O2oReturnRequest)
       const orderRepo = manager.getRepository(O2oPreorder)
       const returnRequest = await returnRequestRepo.findOne({
@@ -3830,7 +3831,7 @@ class O2oPreorderService {
 
   async verifyByCode(verifyCode: string, actor: AuthUserContext) {
     const normalizedVerifyCode = this.normalizeVerifyCode(verifyCode)
-    const result = await AppDataSource.transaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const returnRequest = await manager.getRepository(O2oReturnRequest).findOne({
         where: { verifyCode: normalizedVerifyCode },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
@@ -3862,7 +3863,7 @@ class O2oPreorderService {
     if (!Number.isInteger(normalizedQty) || normalizedQty <= 0) {
       throw new BizError('入库数量必须为正整数', 400)
     }
-    const result = await AppDataSource.transaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const product = await manager.getRepository(BaseProduct).findOne({
         where: { id: productId },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
@@ -3984,7 +3985,7 @@ class O2oPreorderService {
         // - SQLite 由单写事务串行处理；
         // - 单次最多处理 5 个小批次，避免后台任务长期占住 SQLite 写队列或 MySQL 行锁。
         for (let batchIndex = 0; batchIndex < O2O_TIMEOUT_RECYCLE_MAX_BATCHES; batchIndex += 1) {
-          const batchResult = await AppDataSource.transaction(async (manager) => {
+          const batchResult = await runInTransaction(async (manager) => {
             const timeoutQuery = manager.getRepository(O2oPreorder)
               .createQueryBuilder('order')
               .where('order.status = :status', { status: 'pending' })

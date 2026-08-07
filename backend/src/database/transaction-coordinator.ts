@@ -129,6 +129,7 @@ const SYNCHRONOUS_MANAGER_FACTORY_METHODS = new Set([
 class BoundedSerialWriteQueue {
   private active = false
   private readonly pending: QueueEntry[] = []
+  private readonly idleWaiters: Array<() => void> = []
   private completedWrites = 0
   private rejectedWrites = 0
   private timedOutWrites = 0
@@ -185,6 +186,15 @@ class BoundedSerialWriteQueue {
     }
   }
 
+  async waitForIdle(): Promise<void> {
+    if (!this.active && this.pending.length === 0) {
+      return
+    }
+    await new Promise<void>((resolve) => {
+      this.idleWaiters.push(resolve)
+    })
+  }
+
   private createReleaseLease(waitMs = 0): ReleaseLease {
     let released = false
     this.totalWaitMs += waitMs
@@ -202,6 +212,7 @@ class BoundedSerialWriteQueue {
     const next = this.pending.shift()
     if (!next) {
       this.active = false
+      this.idleWaiters.splice(0).forEach((resolve) => resolve())
       return
     }
     if (next.timeout) {
@@ -284,6 +295,13 @@ export class TransactionCoordinator {
       serializeWrites: true,
       ...this.writeQueue.snapshot(),
     }
+  }
+
+  async waitForIdle(): Promise<void> {
+    if (!this.options.serializeWrites) {
+      return
+    }
+    await this.writeQueue.waitForIdle()
   }
 
   private patchDataSourceTransaction(): void {
