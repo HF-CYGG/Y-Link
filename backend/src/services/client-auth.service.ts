@@ -8,6 +8,7 @@
 
 import { LessThan, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
+import { runInTransaction } from '../config/transaction-runner.js'
 import { env } from '../config/env.js'
 import { ClientStaffDirectory } from '../entities/client-staff-directory.entity.js'
 import { CLIENT_USER_ACCOUNT_TYPES, ClientUser, type ClientUserAccountType } from '../entities/client-user.entity.js'
@@ -563,7 +564,7 @@ class ClientAuthService {
     const now = new Date()
     const expiresAt = new Date(now.getTime() + env.AUTH_TOKEN_TTL_HOURS * 60 * 60 * 1000)
     const token = generateSessionToken()
-    await AppDataSource.transaction(async (manager) => {
+    await runInTransaction(async (manager) => {
       await manager.getRepository(ClientUserSession).delete({ expiresAt: LessThan(now) })
       user.lastLoginAt = now
       await manager.getRepository(ClientUser).save(user)
@@ -606,7 +607,7 @@ class ClientAuthService {
   }
 
   private async guardStaffInviteAttempt(staffNo: string, inviteCode: string, requestMeta?: RequestMeta) {
-    const result = await AppDataSource.transaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const record = await this.buildLockedDirectoryQuery(manager, staffNo).getOne()
       const now = new Date()
       if (this.isUsableStaffInvite(record, inviteCode, now)) return true
@@ -662,7 +663,7 @@ class ClientAuthService {
     try {
       const passwordHash = await hashPassword(password)
       user = isTeacherRegister
-        ? await AppDataSource.transaction(async (manager) => {
+        ? await runInTransaction(async (manager) => {
           const directory = await this.buildLockedDirectoryQuery(manager, registerProfile.staffNo ?? '').getOne()
           const now = new Date()
           if (!directory || !this.isUsableStaffInvite(directory, input.inviteCode ?? '', now)) throw new BizError('工号或邀请码无效', 400)
@@ -833,7 +834,7 @@ class ClientAuthService {
       throw new BizError('用户不存在', 404)
     }
     user.passwordHash = await hashPassword(newPassword)
-    await AppDataSource.transaction(async (manager) => {
+    await runInTransaction(async (manager) => {
       await manager.getRepository(ClientUser).save(user)
       await manager.getRepository(ClientUserSession).delete({ userId: user.id })
     })
@@ -915,7 +916,7 @@ class ClientAuthService {
     const newPassword = assertClientPasswordPolicy(input.newPassword, '新密码')
 
     user.passwordHash = await hashPassword(newPassword)
-    await AppDataSource.transaction(async (manager) => {
+    await runInTransaction(async (manager) => {
       await manager.getRepository(ClientUser).save(user)
       await manager.getRepository(ClientUserSession).delete({ userId: user.id })
     })

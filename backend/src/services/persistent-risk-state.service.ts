@@ -16,6 +16,7 @@ import { createHash } from 'node:crypto'
 import { LessThanOrEqual, type EntityManager } from 'typeorm'
 import type { ClientRateLimitInfo, Options, Store } from 'express-rate-limit'
 import { AppDataSource } from '../config/data-source.js'
+import { runInTransaction } from '../config/transaction-runner.js'
 import { AuthRiskState } from '../entities/auth-risk-state.entity.js'
 import { isRetryableTransactionLockError } from '../utils/database-errors.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
@@ -157,7 +158,7 @@ class PersistentRiskStateService {
     maxRequests?: number,
   ): Promise<ClientRateLimitInfo> {
     return this.runWithLockRetry(() =>
-      AppDataSource.transaction(async (manager) => {
+      runInTransaction(async (manager) => {
         const state = await this.loadLockedState(
           manager,
           digestBucketKey(`rate_limit:${bucketKey}`),
@@ -206,7 +207,7 @@ class PersistentRiskStateService {
   async decrementWindow(bucketKey: string, windowMs: number, nowMs = Date.now()): Promise<void> {
     const bucketDigest = digestBucketKey(`rate_limit:${bucketKey}`)
     await this.runWithLockRetry(() =>
-      AppDataSource.transaction(async (manager) => {
+      runInTransaction(async (manager) => {
         const repository = manager.getRepository(AuthRiskState)
         const query = repository.createQueryBuilder('state').where('state.bucketDigest = :bucketDigest', { bucketDigest })
         if (AppDataSource.options.type === 'mysql') query.setLock('pessimistic_write')
@@ -257,7 +258,7 @@ class PersistentRiskStateService {
   ): Promise<PersistentFailureState> {
     const now = new Date(nowMs)
     return this.runWithLockRetry(() =>
-      AppDataSource.transaction(async (manager) => {
+      runInTransaction(async (manager) => {
         const state = await this.loadLockedState(
           manager,
           digestBucketKey(`login_failure:${bucketKey}`),
