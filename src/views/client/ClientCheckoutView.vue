@@ -275,11 +275,11 @@ const handleSubmit = async () => {
   })
 
   const activeSubmitLock = readActiveClientPreorderSubmitLock(clientAuthStore.currentUser?.id)
-  if (activeSubmitLock?.intentKey === submitIntentKey) {
-    showAppInfo('相同预订单正在确认中，请勿重复提交')
-    return
-  }
-  const submitRequestKey = createClientPreorderSubmitLock(clientAuthStore.currentUser?.id, submitIntentKey)
+  // 上一次请求若因超时/断网处于“结果未知”，本次必须复用同一请求键。
+  // 同时发生的连点仍由 runWithGate 拦截；复用请求键是为了让稍后的人工重试命中服务端原订单。
+  const submitRequestKey = activeSubmitLock?.intentKey === submitIntentKey
+    ? activeSubmitLock.requestKey
+    : createClientPreorderSubmitLock(clientAuthStore.currentUser?.id, submitIntentKey)
 
   const runResult = await runWithGate({
     actionKey: 'client-checkout-submit',
@@ -290,6 +290,7 @@ const handleSubmit = async () => {
       submitting.value = true
       try {
         const result = await submitO2oPreorder({
+          clientRequestId: submitRequestKey,
           isSystemApplied: isDepartmentOrder.value ? Boolean(departmentSystemApplyChoice.value) : false,
           pickupContact: normalizedPickupContact,
           remark: submitRemark,

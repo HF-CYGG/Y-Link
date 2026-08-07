@@ -1142,15 +1142,24 @@ const scheduleDetailAutoRefresh = () => {
     globalThis.clearInterval(detailAutoRefreshTimer)
     detailAutoRefreshTimer = null
   }
+  if (globalThis.document?.visibilityState === 'hidden') {
+    return
+  }
   detailAutoRefreshTimer = globalThis.setInterval(() => {
     void triggerSilentDetailRefresh()
   }, DETAIL_AUTO_REFRESH_INTERVAL_MS)
 }
 
 const handleVisibilityChange = () => {
-  if (globalThis.document.visibilityState === 'visible') {
-    void triggerSilentDetailRefresh()
+  if (globalThis.document.visibilityState === 'hidden') {
+    if (detailAutoRefreshTimer !== null) {
+      globalThis.clearInterval(detailAutoRefreshTimer)
+      detailAutoRefreshTimer = null
+    }
+    return
   }
+  scheduleDetailAutoRefresh()
+  void triggerSilentDetailRefresh()
 }
 
 // 详细注释：撤回订单操作，弹出二次确认，调用接口后刷新本地状态及二维码。

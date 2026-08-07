@@ -1,0 +1,72 @@
+#
+# 文件说明：Y-Link Onebox 渐进式部署编排。
+# 实现逻辑：
+# 1. 默认只启动 ylink，使用持久化卷内的 SQLite，适合首次试运行；
+# 2. MySQL 放在可选叠加文件 compose.onebox.mysql.yml 中，客户正式启用时再安装；
+# 3. SQLite -> MySQL 仍通过管理端自动迁移执行，迁移成功后同一个 ylink 容器加载运行时覆盖并重启；
+# 4. 可选 MySQL 不发布宿主机端口；也可由 ylink 经宿主机网关或受控网络连接外部 MySQL。
+#
+services:
+  ylink:
+    build:
+      context: .
+      dockerfile: Dockerfile.onebox
+    environment:
+      NODE_ENV: production
+      TZ: ${TZ:-Asia/Shanghai}
+      PORT: 3001
+      DB_TYPE: sqlite
+      SQLITE_DB_PATH: /app/data/y-link.sqlite
+      DB_SYNC: "false"
+      Y_LINK_DATA_DIR: /app/data
+      Y_LINK_AUTOMATIC_DB_MIGRATION_ENABLED: ${Y_LINK_AUTOMATIC_DB_MIGRATION_ENABLED:-true}
+      SQLITE_SYNCHRONOUS: ${SQLITE_SYNCHRONOUS:-FULL}
+      SQLITE_BUSY_TIMEOUT_MS: ${SQLITE_BUSY_TIMEOUT_MS:-5000}
+      SQLITE_CACHE_SIZE_KIB: ${SQLITE_CACHE_SIZE_KIB:-65536}
+      SQLITE_WRITE_QUEUE_MAX_PENDING: ${SQLITE_WRITE_QUEUE_MAX_PENDING:-256}
+      SQLITE_WRITE_QUEUE_TIMEOUT_MS: ${SQLITE_WRITE_QUEUE_TIMEOUT_MS:-5000}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-20}
+      DB_CONNECT_TIMEOUT_MS: ${DB_CONNECT_TIMEOUT_MS:-5000}
+      DB_ACQUIRE_TIMEOUT_MS: ${DB_ACQUIRE_TIMEOUT_MS:-3000}
+      DB_IDLE_TIMEOUT_MS: ${DB_IDLE_TIMEOUT_MS:-60000}
+      DB_QUEUE_LIMIT: ${DB_QUEUE_LIMIT:-100}
+      DB_MAX_QUERY_MS: ${DB_MAX_QUERY_MS:-200}
+      INIT_ADMIN_USERNAME: ${INIT_ADMIN_USERNAME:-admin}
+      INIT_ADMIN_DISPLAY_NAME: ${INIT_ADMIN_DISPLAY_NAME:-系统管理员}
+      INIT_ADMIN_PASSWORD: ${INIT_ADMIN_PASSWORD:?请先在 .env 中配置 INIT_ADMIN_PASSWORD 私有强密码}
+      PERMANENT_DELETE_PASSWORD: ${PERMANENT_DELETE_PASSWORD:-}
+      INVITE_CODE_PEPPER: ${INVITE_CODE_PEPPER:-}
+    ports:
+      - "${Y_LINK_PORT:-8080}:80"
+    volumes:
+      - y_link_onebox_data:/app/data
+      - y_link_onebox_uploads:/app/uploads
+    extra_hosts:
+      # Linux 上把 MySQL 安装在宿主机时，可在迁移向导中使用 host.docker.internal。
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1/health').then((response)=>process.exit(response.ok?0:1)).catch(()=>process.exit(1))
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    restart: unless-stopped
+    stop_grace_period: 30s
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    networks:
+      - y_link_internal
+
+volumes:
+  y_link_onebox_data:
+  y_link_onebox_uploads:
+
+networks:
+  y_link_internal:
+    driver: bridge

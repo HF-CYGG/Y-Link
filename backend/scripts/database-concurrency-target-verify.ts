@@ -71,7 +71,8 @@ const reportPath =
   || path.resolve(concurrencyRoot, `${target}-${runId}.report.json`)
 
 const thresholds = {
-  mixedScenarioUsers: 20,
+  // 同时覆盖目标容量：100 人突发下单/查询。SQLite 预期有界排队，MySQL 预期并发提交。
+  mixedScenarioUsers: 100,
   maxUnexpectedErrorRate: 0.03,
   maxAverageResponseMs: 1200,
   maxP95ResponseMs: 2500,
@@ -149,22 +150,39 @@ async function prepareTargetEnvironment() {
   process.env.INIT_ADMIN_DISPLAY_NAME = 'Database Concurrency Admin'
 
   if (target === 'sqlite') {
-    const sourcePath = process.env.Y_LINK_DB_CONCURRENCY_SQLITE_SOURCE?.trim()
-      || path.resolve(backendRoot, 'data', 'y-link.sqlite')
-    const sqlitePath = process.env.Y_LINK_DB_CONCURRENCY_SQLITE_PATH?.trim()
-      || path.resolve(concurrencyRoot, `sqlite-${runId}.sqlite`)
+    const configuredSourcePath = process.env.Y_LINK_DB_CONCURRENCY_SQLITE_SOURCE?.trim()
+    const configuredTargetPath = process.env.Y_LINK_DB_CONCURRENCY_SQLITE_PATH?.trim()
+    const sourcePath = configuredSourcePath ? path.resolve(configuredSourcePath) : null
+    const sqlitePath = configuredTargetPath
+      ? path.resolve(configuredTargetPath)
+      : path.resolve(concurrencyRoot, `sqlite-${runId}.sqlite`)
     fs.mkdirSync(path.dirname(sqlitePath), { recursive: true })
-    if (fs.existsSync(sourcePath)) {
+    if (sourcePath && !fs.existsSync(sourcePath)) {
+      throw new Error(`SQLite 并发验收源快照不存在：${sourcePath}`)
+    }
+    if (sourcePath && sourcePath === sqlitePath) {
+      throw new Error('SQLite 并发验收的源快照与目标临时库不能是同一路径')
+    }
+    if (configuredTargetPath && fs.existsSync(sqlitePath)) {
+      throw new Error('显式指定的 SQLite 并发验收目标已存在；为避免覆盖数据，请改用新的临时路径')
+    }
+    if (sourcePath) {
       fs.copyFileSync(sourcePath, sqlitePath)
+    } else {
+      // 默认永远创建全新隔离库，禁止静默复制 backend/data/y-link.sqlite 这类真实试运行数据。
+      for (const suffix of ['', '-wal', '-shm']) {
+        fs.rmSync(`${sqlitePath}${suffix}`, { force: true })
+      }
     }
     process.env.DB_TYPE = 'sqlite'
-    process.env.DB_SYNC = 'false'
+    process.env.DB_SYNC = sourcePath ? 'false' : 'true'
     process.env.SQLITE_DB_PATH = sqlitePath
     report.database = {
       type: 'sqlite',
       sourcePath,
       sqlitePath,
-      sourceCopied: fs.existsSync(sourcePath),
+      sourceCopied: Boolean(sourcePath),
+      freshSchema: !sourcePath,
     }
     return null
   }
@@ -268,6 +286,7 @@ async function seedClientSessions(dataSource: { getRepository: Function }, count
   const { ClientUserSession } = await import('../src/entities/client-user-session.entity.js')
   const { hashPassword } = await import('../src/utils/password.js')
   const { generateSessionToken } = await import('../src/utils/token.js')
+  const { hashSessionToken } = await import('../src/utils/session-token.js')
   const userRepo = dataSource.getRepository(ClientUser)
   const sessionRepo = dataSource.getRepository(ClientUserSession)
   const numericSeed = runId.replaceAll(/\D/g, '').slice(-8).padStart(8, '0')
@@ -294,7 +313,7 @@ async function seedClientSessions(dataSource: { getRepository: Function }, count
     const saved = await userRepo.save(user)
     const token = generateSessionToken()
     await sessionRepo.save(sessionRepo.create({
-      sessionToken: token,
+      sessionToken: hashSessionToken(token),
       userId: saved.id,
       expiresAt,
       lastAccessAt: now,
@@ -393,20 +412,14 @@ async function setupFixtures(
   requestJson: ReturnType<typeof makeRequest>,
   dataSource: { getRepository: Function },
 ) {
-  const adminLogin = await requestJson<{
-    code: number
-    data: { token: string; user: { username: string; role: string } }
-  }>({
-    label: 'admin login',
-    method: 'POST',
-    pathname: '/api/auth/login',
-    body: {
-      username: 'admin',
-      password: process.env.INIT_ADMIN_PASSWORD,
-    },
+  // HTTP 登录只下发 HttpOnly Cookie，不再把 session token 暴露在 JSON 中。
+  // 并发脚本用服务层创建隔离测试会话，再以 Bearer 兼容入口调用其余 API。
+  const { authService } = await import('../src/services/auth.service.js')
+  const adminLogin = await authService.login({
+    username: 'admin',
+    password: process.env.INIT_ADMIN_PASSWORD ?? '',
   })
-  assert.equal(adminLogin.response.status, 200, 'admin login failed')
-  const adminToken = adminLogin.payload.data.token
+  const adminToken = adminLogin.token
 
   const supplierPassword = `Supplier_${runId}_Aa1!`
   const supplier = await requestJson<{ code: number; data: { username: string } }>({
@@ -424,16 +437,10 @@ async function setupFixtures(
   })
   assert.equal(supplier.response.status, 200, 'supplier create failed')
 
-  const supplierLogin = await requestJson<{ code: number; data: { token: string } }>({
-    label: 'supplier login',
-    method: 'POST',
-    pathname: '/api/auth/login',
-    body: {
-      username: `dbc_supplier_${runId}`,
-      password: supplierPassword,
-    },
+  const supplierLogin = await authService.login({
+    username: `dbc_supplier_${runId}`,
+    password: supplierPassword,
   })
-  assert.equal(supplierLogin.response.status, 200, 'supplier login failed')
 
   const clientTokens = await seedClientSessions(dataSource, thresholds.mixedScenarioUsers)
 
@@ -444,7 +451,7 @@ async function setupFixtures(
 
   return {
     adminToken,
-    supplierToken: supplierLogin.payload.data.token,
+    supplierToken: supplierLogin.token,
     clientTokens,
   }
 }
@@ -543,6 +550,7 @@ async function runScenarios(
         token,
         expectedStatuses: [200, 409],
         body: {
+          clientRequestId: `dbc-stock-race-${target}-${runId}-${index}`,
           isSystemApplied: false,
           pickupContact: `client-${index + 1}`,
           items: [{ productId: stockRaceProduct.id, qty: 1 }],
@@ -573,6 +581,7 @@ async function runScenarios(
     pathname: '/api/o2o/mall/preorders',
     token: fixtures.clientTokens[0],
     body: {
+      clientRequestId: `dbc-verify-race-${target}-${runId}`,
       isSystemApplied: false,
       pickupContact: 'verify-client',
       items: [{ productId: verifyProduct.id, qty: 2 }],
@@ -765,6 +774,7 @@ async function runScenarios(
           token,
           expectedStatuses: [200, 409],
           body: {
+            clientRequestId: `dbc-mixed-preorder-${target}-${runId}-${index}`,
             isSystemApplied: false,
             pickupContact: `mixed-${index + 1}`,
             items: [{ productId: mixedProduct.id, qty: 1 }],
@@ -874,19 +884,148 @@ async function main() {
   try {
     const { createApp } = await import('../src/app.js')
     const { AppDataSource } = await import('../src/config/data-source.js')
+    const { env } = await import('../src/config/env.js')
     const { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } = await import('../src/config/database-bootstrap.js')
-    const { installSqliteTransactionQueue } = await import('../src/utils/sqlite-transaction-queue.js')
+    const { initializeDatabaseInfrastructure } = await import('../src/database/database-strategy.js')
+    const { getCurrentTransactionManager, getTransactionCoordinator } = await import('../src/database/transaction-coordinator.js')
     const { authService } = await import('../src/services/auth.service.js')
+    const { orderSerialService } = await import('../src/services/order-serial.service.js')
     const { systemConfigService } = await import('../src/services/system-config.service.js')
 
     dataSource = AppDataSource
     prepareDatabaseRuntime()
     await AppDataSource.initialize()
-    installSqliteTransactionQueue(AppDataSource)
+    await initializeDatabaseInfrastructure(AppDataSource)
+
+    await AppDataSource.transaction(async (manager) => {
+      assert.equal(getCurrentTransactionManager(AppDataSource), manager, '事务上下文必须暴露当前 manager')
+      if (target === 'mysql') {
+        const managerConnection = await manager.query('SELECT CONNECTION_ID() AS connectionId') as Array<{ connectionId: string | number }>
+        const delegatedConnection = await AppDataSource.query('SELECT CONNECTION_ID() AS connectionId') as Array<{ connectionId: string | number }>
+        assert.equal(
+          String(delegatedConnection[0]?.connectionId),
+          String(managerConnection[0]?.connectionId),
+          '事务内 DataSource.query 必须委派给当前 manager，不能另取连接池连接',
+        )
+      }
+      await AppDataSource.transaction(async (nestedManager) => {
+        assert.equal(nestedManager, manager, '嵌套事务必须复用外层 manager')
+      })
+    })
+    addCheck('transaction manager reuse passed', {
+      databaseType: AppDataSource.options.type,
+    })
+
+    const coordinator = getTransactionCoordinator(AppDataSource)
+    assert.ok(coordinator, 'transaction coordinator must be installed')
+    if (target === 'sqlite') {
+      const journalModeRows: Array<{ journal_mode: string }> = await AppDataSource.query('PRAGMA journal_mode')
+      const foreignKeyRows: Array<{ foreign_keys: number }> = await AppDataSource.query('PRAGMA foreign_keys')
+      const busyTimeoutRows: Array<{ timeout: number }> = await AppDataSource.query('PRAGMA busy_timeout')
+      assert.equal(journalModeRows[0]?.journal_mode?.toLowerCase(), 'wal', 'SQLite journal_mode must be WAL')
+      assert.equal(Number(foreignKeyRows[0]?.foreign_keys), 1, 'SQLite foreign_keys must be enabled')
+      assert.equal(Number(busyTimeoutRows[0]?.timeout), env.SQLITE_BUSY_TIMEOUT_MS, 'SQLite busy_timeout must match runtime config')
+      assert.equal(coordinator.snapshot().serializeWrites, true, 'SQLite writes must be serialized')
+
+      // sqlite3/TypeORM 在单 DataSource 内复用同一连接。事务外的另一请求必须等待活动事务结束，
+      // 否则 QueryBuilder 可能误读同连接上的未提交状态并把脏数据写入商城缓存。
+      await AppDataSource.query('CREATE TEMP TABLE IF NOT EXISTS transaction_isolation_probe (id INTEGER PRIMARY KEY)')
+      await AppDataSource.query('DELETE FROM transaction_isolation_probe')
+      let signalTransactionStarted!: () => void
+      let releaseTransaction!: () => void
+      const transactionStarted = new Promise<void>((resolve) => {
+        signalTransactionStarted = resolve
+      })
+      const transactionRelease = new Promise<void>((resolve) => {
+        releaseTransaction = resolve
+      })
+      const heldTransaction = AppDataSource.transaction(async (manager) => {
+        await manager.query('INSERT INTO transaction_isolation_probe (id) VALUES (1)')
+        signalTransactionStarted()
+        await transactionRelease
+        throw new Error('rollback transaction isolation probe')
+      }).catch((error: unknown) => {
+        assert.match(String(error), /rollback transaction isolation probe/)
+      })
+      await transactionStarted
+      let outsideReadSettled = false
+      const outsideRead = AppDataSource
+        .createQueryBuilder()
+        .select('COUNT(*)', 'count')
+        .from('transaction_isolation_probe', 'probe')
+        .clone()
+        .getRawOne<{ count: string | number }>()
+        .then((row) => {
+          outsideReadSettled = true
+          return Number(row?.count ?? -1)
+        })
+      await new Promise<void>((resolve) => setTimeout(resolve, 30))
+      assert.equal(outsideReadSettled, false, 'SQLite 事务外 QueryBuilder 读取必须等待活动事务释放连接')
+      assert.ok(coordinator.snapshot().pendingWrites >= 1, 'SQLite 事务期间的外部读取必须进入有界队列')
+      releaseTransaction()
+      await heldTransaction
+      assert.equal(await outsideRead, 0, 'SQLite 事务回滚后，事务外 QueryBuilder 不得观察到未提交行')
+      await AppDataSource.query('DROP TABLE transaction_isolation_probe')
+
+      addCheck('sqlite infrastructure pragmas passed', {
+        journalMode: journalModeRows[0]?.journal_mode,
+        foreignKeys: foreignKeyRows[0]?.foreign_keys,
+        busyTimeoutMs: busyTimeoutRows[0]?.timeout,
+        coordinator: coordinator.snapshot(),
+      })
+    } else {
+      assert.equal(coordinator.snapshot().serializeWrites, false, 'MySQL writes must not be globally serialized')
+      addCheck('mysql transaction coordinator passed', {
+        coordinator: coordinator.snapshot(),
+      })
+    }
+
     await initializeDatabaseSchemaIfNeeded(AppDataSource)
     await authService.ensureDefaultAdmin()
     await ensureKnownAdmin(AppDataSource)
     await systemConfigService.ensureDefaultConfigs()
+
+    // 管理端下调 current 时必须与 business_sequence 同事务更新。先只分配、不落订单，
+    // 模拟管理员清空历史占用后的合法回退；下一号应从新 current 继续。
+    for (let index = 0; index < 5; index += 1) {
+      await orderSerialService.generateOrderNo('walkin')
+    }
+    const serialsBeforeLowering = await systemConfigService.getOrderSerialConfigs()
+    const departmentSerial = serialsBeforeLowering.list.find((item) => item.orderType === 'department')
+    const walkinSerial = serialsBeforeLowering.list.find((item) => item.orderType === 'walkin')
+    assert.ok(departmentSerial && walkinSerial)
+    await systemConfigService.updateOrderSerialConfigs(
+      {
+        department: {
+          start: departmentSerial.start,
+          current: departmentSerial.current,
+          width: departmentSerial.width,
+        },
+        walkin: {
+          start: walkinSerial.start,
+          current: 1,
+          width: walkinSerial.width,
+        },
+      },
+      {
+        userId: 'db-concurrency-admin',
+        username: 'admin',
+        displayName: 'Database Concurrency Admin',
+        role: 'admin',
+        permissions: [],
+        status: 'enabled',
+        sessionToken: 'db-concurrency-session',
+        authSource: 'bearer',
+      },
+    )
+    const serialsAfterLowering = await systemConfigService.getOrderSerialConfigs()
+    assert.equal(serialsAfterLowering.list.find((item) => item.orderType === 'walkin')?.current, 1)
+    assert.equal(await orderSerialService.generateOrderNo('walkin'), 'hyyz000002')
+    addCheck('business sequence admin lowering passed', {
+      beforeCurrent: walkinSerial.current,
+      loweredCurrent: 1,
+      nextShowNo: 'hyyz000002',
+    })
 
     const app = createApp()
     server = app.listen(0, '127.0.0.1')
@@ -896,11 +1035,12 @@ async function main() {
     const baseUrl = `http://127.0.0.1:${address.port}`
     const requestJson = makeRequest(baseUrl)
 
-    const health = await requestJson<{ code: number; data: { status: string } }>({
+    const health = await requestJson<{ status: string }>({
       label: 'health',
       pathname: '/health',
     })
-    assert.equal(health.payload.data.status, 'UP')
+    assert.equal(health.response.status, 200)
+    assert.equal(health.payload.status, 'UP')
 
     const fixtures = await setupFixtures(requestJson, AppDataSource)
     await runScenarios(requestJson, fixtures, AppDataSource)

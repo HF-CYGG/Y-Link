@@ -39,6 +39,7 @@ import { inboundRouter } from './routes/inbound.routes.js'
 import { BizError } from './utils/errors.js'
 import { databaseMaintenanceModeService } from './services/database-maintenance-mode.service.js'
 import { DatabaseRateLimitStore } from './services/persistent-risk-state.service.js'
+import { AppDataSource } from './config/data-source.js'
 
 const UPLOAD_CACHE_CONTROL_VALUE = 'public, max-age=31536000, immutable'
 const UPLOAD_CONTENT_SECURITY_POLICY_VALUE = "default-src 'none'; img-src 'self' data:; style-src 'none'; sandbox"
@@ -65,17 +66,25 @@ export function createApp() {
   app.set('trust proxy', 'loopback, linklocal, uniquelocal')
   app.disable('x-powered-by')
 
-  const createPublicAuthLimiter = (prefix: string, limit: number, limitedPaths: ReadonlySet<string>) => rateLimit({
-    windowMs: 5 * 60 * 1000,
-    limit,
-    standardHeaders: 'draft-8',
-    legacyHeaders: false,
-    skip: (req) => !limitedPaths.has(req.path),
-    store: new DatabaseRateLimitStore(prefix),
-    handler: (_req, res) => {
-      res.status(429).json({ code: 429, message: '认证请求过于频繁，请稍后再试' })
-    },
-  })
+  const createPublicAuthLimiter = (prefix: string, limit: number, limitedPaths: ReadonlySet<string>) => {
+    // SQLite Onebox 只有一个写者。验证码/能力探测等匿名 GET 若每次都落库，
+    // 会与订单事务争用唯一写槽；单进程模式使用 express-rate-limit 自带的有界内存桶即可。
+    // MySQL 模式继续使用数据库共享桶，未来多实例接入 Redis 时只需替换这里的 Provider。
+    const sharedStore = AppDataSource.options.type === 'mysql'
+      ? new DatabaseRateLimitStore(prefix)
+      : undefined
+    return rateLimit({
+      windowMs: 5 * 60 * 1000,
+      limit,
+      standardHeaders: 'draft-8',
+      legacyHeaders: false,
+      skip: (req) => !limitedPaths.has(req.path),
+      ...(sharedStore ? { store: sharedStore } : {}),
+      handler: (_req, res) => {
+        res.status(429).json({ code: 429, message: '认证请求过于频繁，请稍后再试' })
+      },
+    })
+  }
   const adminAuthLimiter = createPublicAuthLimiter('express-admin-auth', 60, new Set(['/captcha', '/login']))
   const clientAuthLimiter = createPublicAuthLimiter('express-client-auth', 180, new Set([
     '/captcha',

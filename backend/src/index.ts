@@ -5,10 +5,12 @@
  */
 
 import { createApp } from './app.js'
+import type { Server } from 'node:http'
 import { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } from './config/database-bootstrap.js'
 import { AppDataSource } from './config/data-source.js'
 import { maskDatabaseRuntimeOverride, readDatabaseRuntimeOverride } from './config/database-runtime-override.js'
 import { env, envLoadContext } from './config/env.js'
+import { initializeDatabaseInfrastructure } from './database/database-strategy.js'
 import { authService } from './services/auth.service.js'
 import {
   assertDatabaseMigrationE2EStartupAllowed,
@@ -25,7 +27,7 @@ import { o2oPreorderService } from './services/o2o-preorder.service.js'
 import { persistentRiskStateService } from './services/persistent-risk-state.service.js'
 import { systemConfigService } from './services/system-config.service.js'
 import { migrateLegacyUploadReferences } from './utils/upload-migration.js'
-import { installSqliteTransactionQueue } from './utils/sqlite-transaction-queue.js'
+import { registerRuntimeShutdownHandler } from './runtime/runtime-shutdown.js'
 import {
   buildEffectiveDatabaseSummary,
   buildRuntimeOverrideStatusSummary,
@@ -125,6 +127,67 @@ const logLine = (label: string, value: string, tone: 'info' | 'success' | 'warn'
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
+
+let activeHttpServer: Server | null = null
+let shutdownPromise: Promise<void> | null = null
+
+const shutdownRuntime = (reason: string, exitCode: number): Promise<void> => {
+  if (shutdownPromise) {
+    return shutdownPromise
+  }
+  shutdownPromise = (async () => {
+    logLine('SHUTDOWN', `reason=${reason}，停止接收新请求并等待后台事务完成`, 'warn')
+    const server = activeHttpServer
+    const serverClosed = server
+      ? new Promise<void>((resolve) => {
+          server.close(() => resolve())
+          server.closeIdleConnections?.()
+        })
+      : Promise.resolve()
+
+    let backgroundStopped = false
+    const backgroundStop = Promise.allSettled([
+      notificationService.stopOutboxWorker(),
+      o2oPreorderService.stopTimeoutRecycleLoop(),
+    ]).then(() => {
+      backgroundStopped = true
+    })
+    await Promise.race([backgroundStop, sleep(18_000)])
+    if (!backgroundStopped) {
+      logLine('SHUTDOWN', '后台事务在 18 秒内未结束，将进入强制收口', 'warn')
+    }
+
+    let serverStopped = false
+    await Promise.race([
+      serverClosed.then(() => {
+        serverStopped = true
+      }),
+      sleep(4_000),
+    ])
+    if (!serverStopped) {
+      server?.closeAllConnections?.()
+      await Promise.race([serverClosed, sleep(1_000)])
+    }
+
+    if (AppDataSource.isInitialized) {
+      await AppDataSource.destroy().catch((error) => {
+        console.error(paint('[y-link-backend] datasource shutdown failed:', 'red'), error)
+      })
+    }
+    activeHttpServer = null
+    process.exit(exitCode)
+  })()
+  return shutdownPromise
+}
+
+registerRuntimeShutdownHandler(shutdownRuntime)
+
+process.once('SIGTERM', () => {
+  void shutdownRuntime('SIGTERM', 0)
+})
+process.once('SIGINT', () => {
+  void shutdownRuntime('SIGINT', 0)
+})
 
 const probeHealthEndpoint = async (port: number): Promise<boolean> => {
   const controller = new AbortController()
@@ -263,7 +326,7 @@ async function bootstrap(): Promise<void> {
   prepareDatabaseRuntime()
   logLine('STEP', 'initialize datasource')
   await AppDataSource.initialize()
-  installSqliteTransactionQueue(AppDataSource)
+  await initializeDatabaseInfrastructure(AppDataSource)
   const cutoverMarkerInspection = inspectDatabaseMigrationCutoverMarker()
   if (cutoverMarkerInspection.state === 'corrupted') {
     const recoveryTaskId = (
@@ -300,7 +363,9 @@ async function bootstrap(): Promise<void> {
   const app = createApp()
   await new Promise<void>((resolve, reject) => {
     const server = app.listen(env.PORT)
+    activeHttpServer = server
     const onError = (error: Error) => {
+      activeHttpServer = null
       reject(error)
     }
     server.once('error', onError)
@@ -356,7 +421,7 @@ async function bootstrap(): Promise<void> {
   logCutoverStartupResult(cutoverStartupResult)
   if (cutoverStartupResult.action === 'rollback_restart_pending') {
     setTimeout(() => {
-      process.exit(75)
+      void shutdownRuntime('database_cutover_rollback', 75)
     }, 250)
     return
   }
@@ -383,6 +448,8 @@ async function bootstrap(): Promise<void> {
   }).catch((error) => {
     console.error(paint('[y-link-backend] resume automatic database migration failed:', 'red'), error)
   }).finally(() => {
+    // 通知 outbox 定时器在维护期只空转检查，不领取新任务；维护 drain 会等待已领取批次释放。
+    notificationService.startOutboxWorker()
     if (!databaseMaintenanceModeService.isReadOnly()) {
       o2oPreorderService.startTimeoutRecycleLoop()
       persistentRiskStateService.startCleanupLoop()
@@ -414,5 +481,5 @@ try {
   } catch (cutoverError) {
     console.error(paint('[y-link-backend] database cutover recovery failed:', 'red'), cutoverError)
   }
-  process.exit(exitCode)
+  await shutdownRuntime('bootstrap_failure', exitCode)
 }

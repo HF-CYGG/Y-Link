@@ -23,6 +23,7 @@ import { BizError } from '../utils/errors.js'
 import { generateProductCode } from '../utils/id-generator.js'
 import { normalizeLegacyUploadUrl } from '../utils/upload-storage.js'
 import { assertDiscountRateInRange, calculateDiscountedPrice, normalizeDiscountRate } from '../utils/discount-price.js'
+import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
 
 export interface ProductQuery {
   keyword?: string
@@ -364,7 +365,9 @@ export class ProductService {
   }
 
   async create(input: CreateProductInput): Promise<ProductView> {
-    return runInTransaction((manager) => this.createWithManager(input, manager))
+    const result = await runInTransaction((manager) => this.createWithManager(input, manager))
+    invalidateMallCatalogReadCache()
+    return result
   }
 
   async batchCreate(inputs: CreateProductInput[]): Promise<ProductView[]> {
@@ -377,7 +380,7 @@ export class ProductService {
 
     this.assertNoDuplicateProductCodesInBatch(inputs)
 
-    return runInTransaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const createdProducts: ProductView[] = []
 
       for (let index = 0; index < inputs.length; index += 1) {
@@ -395,10 +398,12 @@ export class ProductService {
 
       return createdProducts
     })
+    invalidateMallCatalogReadCache()
+    return result
   }
 
   async update(id: string, input: UpdateProductInput): Promise<ProductView> {
-    return runInTransaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const repo = manager.getRepository(BaseProduct)
       const product = await repo.findOne({
         where: { id },
@@ -421,6 +426,8 @@ export class ProductService {
       }
       return this.buildProductView(saved, manager)
     })
+    invalidateMallCatalogReadCache()
+    return result
   }
 
   async batchUpdate(input: BatchUpdateProductInput): Promise<ProductView[]> {
@@ -432,7 +439,7 @@ export class ProductService {
       throw new BizError('至少提供一个可更新字段')
     }
 
-    return runInTransaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const repo = manager.getRepository(BaseProduct)
       const products = await repo.find({
         where: { id: In(productIds) },
@@ -450,6 +457,8 @@ export class ProductService {
       const saved = await repo.save(products)
       return this.buildProductViews(saved, manager)
     })
+    invalidateMallCatalogReadCache()
+    return result
   }
 
   async delete(id: string): Promise<void> {
@@ -492,6 +501,7 @@ export class ProductService {
         throw new BizError('产品不存在', 404)
       }
     })
+    invalidateMallCatalogReadCache()
   }
 
   private async replaceProductTags(

@@ -21,10 +21,17 @@ services:
       DB_PASSWORD: ${DB_PASSWORD:-}
       DB_NAME: ${DB_NAME}
       DB_SYNC: ${DB_SYNC:-false}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-20}
+      DB_CONNECT_TIMEOUT_MS: ${DB_CONNECT_TIMEOUT_MS:-5000}
+      DB_ACQUIRE_TIMEOUT_MS: ${DB_ACQUIRE_TIMEOUT_MS:-3000}
+      DB_IDLE_TIMEOUT_MS: ${DB_IDLE_TIMEOUT_MS:-60000}
+      DB_QUEUE_LIMIT: ${DB_QUEUE_LIMIT:-100}
+      DB_MAX_QUERY_MS: ${DB_MAX_QUERY_MS:-200}
       DB_AUTO_MIGRATE: ${DB_AUTO_MIGRATE:-false}
       INIT_ADMIN_USERNAME: ${INIT_ADMIN_USERNAME:-admin}
       INIT_ADMIN_DISPLAY_NAME: ${INIT_ADMIN_DISPLAY_NAME:-系统管理员}
       INIT_ADMIN_PASSWORD: ${INIT_ADMIN_PASSWORD:?请在容器面板环境变量中手动配置 INIT_ADMIN_PASSWORD 私有强密码}
+      PERMANENT_DELETE_PASSWORD: ${PERMANENT_DELETE_PASSWORD:-}
       INVITE_CODE_PEPPER: ${INVITE_CODE_PEPPER:-}
     ports:
       - "${BACKEND_PORT:-3001}:3001"
@@ -44,6 +51,11 @@ services:
       retries: 6
       start_period: 10s
     restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+    stop_grace_period: 30s
 
   frontend:
     build:
@@ -66,6 +78,10 @@ services:
       retries: 6
       start_period: 5s
     restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
 
 volumes:
   y_link_mysql_uploads_data:

@@ -121,12 +121,15 @@ const freshConversationIds = ref<string[]>([])
 const freshMessageIds = ref<string[]>([])
 let realtimeConnection: FeedbackRealtimeConnection | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
-let refreshTimer: ReturnType<typeof setInterval> | null = null
+let refreshTimer: ReturnType<typeof setTimeout> | null = null
 let freshConversationTimer: ReturnType<typeof setTimeout> | null = null
 let freshMessageTimer: ReturnType<typeof setTimeout> | null = null
 let lifecycleToken = 0
 let refreshInFlight = false
 let pendingRefresh = false
+let workbenchComponentActive = false
+const CUSTOMER_SERVICE_FALLBACK_POLL_MIN_MS = 25_000
+const CUSTOMER_SERVICE_FALLBACK_POLL_MAX_MS = 35_000
 const listRequest = useStableRequest()
 const detailRequest = useStableRequest()
 const presenceRequest = useStableRequest()
@@ -1323,14 +1326,26 @@ const refreshWorkbenchData = async (
  */
 const startRefreshPolling = (currentToken: number) => {
   if (refreshTimer) {
-    clearInterval(refreshTimer)
+    clearTimeout(refreshTimer)
   }
-  refreshTimer = setInterval(() => {
-    if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
+  const scheduleNextRefresh = () => {
+    if (
+      !isWorkbenchResident.value
+      || currentToken !== lifecycleToken
+      || globalThis.document?.visibilityState === 'hidden'
+    ) {
+      refreshTimer = null
       return
     }
-    void refreshWorkbenchData(currentToken, { refreshPresence: true })
-  }, 8000)
+    const delay = CUSTOMER_SERVICE_FALLBACK_POLL_MIN_MS
+      + Math.floor(Math.random() * (CUSTOMER_SERVICE_FALLBACK_POLL_MAX_MS - CUSTOMER_SERVICE_FALLBACK_POLL_MIN_MS + 1))
+    refreshTimer = setTimeout(async () => {
+      refreshTimer = null
+      await refreshWorkbenchData(currentToken, { refreshPresence: true })
+      scheduleNextRefresh()
+    }, delay)
+  }
+  scheduleNextRefresh()
 }
 
 const handleRealtimeConversation = async (
@@ -1377,7 +1392,7 @@ const handleRealtimeConversation = async (
  * - 页面离开但组件被 keep-alive 缓存时，也必须主动释放在线占位；
  * - 统一收口后可以避免重连定时器在离页后继续把客服重新拉回在线。
  */
-const disposeRealtime = () => {
+const disposeRealtimeConnection = () => {
   realtimeConnection?.close()
   realtimeConnection = null
 
@@ -1385,9 +1400,13 @@ const disposeRealtime = () => {
     clearTimeout(reconnectTimer)
     reconnectTimer = null
   }
+}
+
+const disposeRealtime = () => {
+  disposeRealtimeConnection()
 
   if (refreshTimer) {
-    clearInterval(refreshTimer)
+    clearTimeout(refreshTimer)
     refreshTimer = null
   }
 
@@ -1403,9 +1422,14 @@ const disposeRealtime = () => {
 }
 
 const connectRealtime = (currentToken: number) => {
-  disposeRealtime()
+  // 重连只替换 SSE 本身；兜底轮询与页面高亮计时必须继续保留。
+  disposeRealtimeConnection()
 
-  if (!isWorkbenchResident.value || currentToken !== lifecycleToken) {
+  if (
+    !isWorkbenchResident.value
+    || currentToken !== lifecycleToken
+    || globalThis.document?.visibilityState === 'hidden'
+  ) {
     return
   }
 
@@ -1469,6 +1493,9 @@ const connectRealtime = (currentToken: number) => {
  * - 通过生命周期令牌拦截旧请求回流，避免离页后旧异步任务重新接管连接。
  */
 const enterWorkbench = async () => {
+  if (!workbenchComponentActive || globalThis.document?.visibilityState === 'hidden') {
+    return
+  }
   lifecycleToken += 1
   const currentToken = lifecycleToken
   isWorkbenchResident.value = true
@@ -1540,7 +1567,12 @@ watch(
 watch(
   () => authStore.currentUser?.id,
   (currentUserId, previousUserId) => {
-    if (currentUserId && currentUserId !== previousUserId && isWorkbenchResident.value) {
+    if (
+      currentUserId
+      && currentUserId !== previousUserId
+      && workbenchComponentActive
+      && globalThis.document?.visibilityState !== 'hidden'
+    ) {
       void enterWorkbench()
       return
     }
@@ -1551,15 +1583,38 @@ watch(
   },
 )
 
-onActivated(() => {
+const handleVisibilityChange = () => {
+  if (!workbenchComponentActive) {
+    return
+  }
+  if (globalThis.document?.visibilityState === 'hidden') {
+    leaveWorkbench()
+    reconnectTip.value = '页面进入后台后已释放在线状态，返回页面会自动续接。'
+    return
+  }
   void enterWorkbench()
+}
+
+onActivated(() => {
+  if (workbenchComponentActive) {
+    return
+  }
+  workbenchComponentActive = true
+  globalThis.document?.addEventListener('visibilitychange', handleVisibilityChange)
+  if (globalThis.document?.visibilityState !== 'hidden') {
+    void enterWorkbench()
+  }
 })
 
 onDeactivated(() => {
+  workbenchComponentActive = false
+  globalThis.document?.removeEventListener('visibilitychange', handleVisibilityChange)
   leaveWorkbench()
 })
 
 onBeforeUnmount(() => {
+  workbenchComponentActive = false
+  globalThis.document?.removeEventListener('visibilitychange', handleVisibilityChange)
   leaveWorkbench()
 })
 </script>

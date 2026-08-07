@@ -4,9 +4,9 @@
  * 实现逻辑：
  * - 按“当前客户端账号 + 提交意图摘要”生成稳定指纹，用于识别是否为同一笔预订意图；
  * - 在提交开始时写入短时 pending 锁，若用户短时间内重复打开结算页再提交，会直接命中拦截；
- * - 锁仅保留短时间窗口，既能拦截高并发误触，也不会长期阻塞用户下一次真实下单。
+ * - 弱网结果不明确时延长保留请求键，用户再次提交相同意图会复用同一键并由服务端返回原订单。
  * 维护说明：
- * - 若后续服务端正式接入 O2O 预订单幂等键，可继续复用本文件生成的 `requestKey` 与 `intentKey`；
+ * - `requestKey` 已作为服务端 O2O 预订单幂等键，禁止在一次结果未明确的重试中重新生成；
  * - 若客户端需要跨标签页共享提交锁，可把 `sessionStorage` 升级为 `localStorage` 并补充广播同步。
  */
 import type { O2oClientOrderType } from '@/api/modules/o2o'
@@ -33,7 +33,9 @@ interface ClientPreorderSubmitLockSnapshot {
 }
 
 const CLIENT_PREORDER_SUBMIT_LOCK_KEY_PREFIX = 'ylink:client:preorder:submit-lock:'
-const CLIENT_PREORDER_SUBMIT_LOCK_TTL_MS = 20 * 1000
+// 请求超时、移动网络切换和页面重新进入可能持续数分钟；保留 30 分钟可覆盖人工重试窗口。
+// 明确成功或明确失败都会立即清理，不会阻止用户完成后一笔内容相同的新订单。
+const CLIENT_PREORDER_SUBMIT_LOCK_TTL_MS = 30 * 60 * 1000
 type ClientPreorderSubmitUserId = string | number | null | undefined
 
 const normalizeClientUserId = (value: ClientPreorderSubmitUserId) => {
@@ -139,7 +141,9 @@ export const createClientPreorderSubmitLock = (
   intentKey: string,
 ) => {
   const storage = getSubmitLockStorage()
-  const requestKey = `client-preorder-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+  const requestKey = globalThis.crypto?.randomUUID
+    ? globalThis.crypto.randomUUID()
+    : `client-preorder-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
 
   if (storage) {
     const snapshot: ClientPreorderSubmitLockSnapshot = {

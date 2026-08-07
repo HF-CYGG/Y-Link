@@ -339,6 +339,10 @@ export interface DatabaseRuntimeOverrideStateResult {
     nextStep: string
     riskTip: string
   }
+  rollbackSafety: {
+    directSqliteRollbackAllowed: boolean
+    reason: string
+  }
 }
 
 /**

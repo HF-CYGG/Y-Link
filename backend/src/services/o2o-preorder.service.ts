@@ -6,8 +6,8 @@
  * 3. 关键写操作会联动单号服务、系统配置与通知能力，保证库存、状态和派发消息在同一业务语义下收口。
  */
 
-import { randomUUID } from 'node:crypto'
-import { Brackets, type EntityManager, In, LessThanOrEqual, Not } from 'typeorm'
+import { createHash, randomUUID } from 'node:crypto'
+import { Brackets, type EntityManager, In, Not } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
@@ -35,12 +35,20 @@ import { O2oReturnRequestItem } from '../entities/o2o-return-request-item.entity
 import type { AuthUserContext } from '../types/auth.js'
 import type { ClientAuthContext } from '../types/client-auth.js'
 import { BizError } from '../utils/errors.js'
+import {
+  isRetryableMysqlTransactionError,
+  isUniqueConstraintError,
+} from '../utils/database-errors.js'
 import { generateOrderUuid } from '../utils/id-generator.js'
 import { orderSerialService, type OrderSerialRecalibrationResult } from './order-serial.service.js'
 import { systemConfigService } from './system-config.service.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { notificationService } from './notification.service.js'
 import { auditService } from './audit.service.js'
+import {
+  invalidateMallCatalogReadCache,
+  readMallCatalogRevision,
+} from './mall-catalog-revision.service.js'
 import type { PaginationResult } from '../types/api.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import {
@@ -58,6 +66,7 @@ export interface SubmitPreorderItemInput {
 }
 
 export interface SubmitPreorderInput {
+  clientRequestId: string
   items: SubmitPreorderItemInput[]
   remark?: string
   isSystemApplied: boolean
@@ -143,6 +152,71 @@ export interface InventoryLogView {
 }
 
 type O2oNumericLike = string | number | null
+
+export interface O2oMallSkuView {
+  id: string
+  productId: string
+  skuCode: string
+  specText: string
+  specValues: Record<string, string>
+  defaultPrice: string
+  originalPrice: string
+  discountRate: string
+  discountedPrice: string
+  currentStock: number
+  preOrderedStock: number
+  availableStock: number
+  isActive: boolean
+  isCurrent: boolean
+  o2oRecommended: boolean
+  thumbnail: string | null
+  sortOrder: number
+}
+
+export interface O2oMallProductView {
+  id: string
+  productCode: string
+  productName: string
+  defaultPrice: string
+  originalPrice: string
+  discountRate: string
+  discountedPrice: string
+  o2oRecommended: boolean
+  tags: string[]
+  thumbnail: string | null
+  detailContent: string | null
+  limitPerUser: number
+  currentStock: number
+  preOrderedStock: number
+  availableStock: number
+  soldQty: number
+  skus: O2oMallSkuView[]
+}
+
+export interface O2oMallStorefrontView {
+  businessHoursText: string
+  mallAnnouncementText: string
+}
+
+export interface O2oMallProductsView {
+  list: O2oMallProductView[]
+  storefront: O2oMallStorefrontView
+}
+
+export interface O2oPublicJsonSnapshot<T> {
+  data: T
+  /** 已序列化完整 API 响应，避免万人浏览时每个请求重复 JSON.stringify 大目录。 */
+  responseBody: string
+  etag: string
+  generatedAt: number
+}
+
+interface TimedPublicSnapshot<T> {
+  revision: number
+  freshUntil: number
+  staleUntil: number
+  snapshot: O2oPublicJsonSnapshot<T>
+}
 
 const isDatabaseFlagEnabled = (value: unknown): boolean => {
   return value !== false && value !== 0 && value !== '0' && value !== 'false'
@@ -311,6 +385,16 @@ const LIKE_ESCAPE_CHAR = String.raw`\\`
 const LIKE_SPECIAL_CHAR_PATTERN = /[%_\\]/g
 const O2O_TIMEOUT_RECYCLE_RECENT_WINDOW_MS = 15 * 1000
 const O2O_TIMEOUT_BACKGROUND_RECYCLE_INTERVAL_MS = 60 * 1000
+const O2O_TIMEOUT_RECYCLE_BATCH_SIZE = 20
+const O2O_TIMEOUT_RECYCLE_MAX_BATCHES = 5
+// L1 只保留“目录 + 门店配置”两个固定槽位，因此内存占用有明确上界。
+const O2O_MALL_CATALOG_FRESH_TTL_MS = 2_000
+const O2O_MALL_CATALOG_STALE_TTL_MS = 30_000
+const O2O_MALL_STOREFRONT_FRESH_TTL_MS = 5_000
+const O2O_MALL_STOREFRONT_STALE_TTL_MS = 60_000
+// 销量是展示统计，不参与下单正确性；单独缓存以避免反复扫描全部历史核销明细。
+const O2O_MALL_SOLD_QTY_TTL_MS = 60_000
+const MYSQL_IDEMPOTENT_TRANSACTION_MAX_ATTEMPTS = 3
 
 class O2oPreorderService {
   private readonly productRepo = AppDataSource.getRepository(BaseProduct)
@@ -324,6 +408,42 @@ class O2oPreorderService {
   private lastCancelTimeoutOrdersAt = 0
   private lastCancelTimeoutOrdersResult = { cancelledCount: 0 }
   private timeoutRecycleLoopTimer: ReturnType<typeof globalThis.setInterval> | null = null
+  private mallProductsCache: TimedPublicSnapshot<O2oMallProductsView> | null = null
+  private mallProductsRefreshInFlight: Promise<O2oPublicJsonSnapshot<O2oMallProductsView>> | null = null
+  private mallProductsRefreshRevision: number | null = null
+  private mallStorefrontCache: TimedPublicSnapshot<O2oMallStorefrontView> | null = null
+  private mallStorefrontRefreshInFlight: Promise<O2oPublicJsonSnapshot<O2oMallStorefrontView>> | null = null
+  private mallStorefrontRefreshRevision: number | null = null
+  private mallSoldQtyRevision = 1
+  private mallSoldQtyCache: { key: string; revision: number; expiresAt: number; data: Map<string, number> } | null = null
+  private mallSoldQtyRefreshInFlight: Promise<{ key: string; revision: number; data: Map<string, number> }> | null = null
+
+  /**
+   * MySQL 死锁/锁等待超时后必须重放完整事务，不能只重试失败 SQL。
+   * 该入口只用于已持久化 clientRequestId 的下单流程；SQLite 由单写协调器处理，不在此重试。
+   */
+  private async runIdempotentSubmitTransaction<T>(
+    work: (manager: EntityManager) => Promise<T>,
+  ): Promise<T> {
+    const maxAttempts = AppDataSource.options.type === 'mysql'
+      ? MYSQL_IDEMPOTENT_TRANSACTION_MAX_ATTEMPTS
+      : 1
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        return await runInTransaction(work)
+      } catch (error) {
+        if (attempt >= maxAttempts || !isRetryableMysqlTransactionError(error)) {
+          throw error
+        }
+        const baseDelayMs = 25 * (2 ** (attempt - 1))
+        const jitterMs = Math.floor(Math.random() * 25)
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, baseDelayMs + jitterMs)
+        })
+      }
+    }
+    throw new Error('下单事务重试次数已耗尽')
+  }
 
   /**
    * 客户端改单次数上限：
@@ -514,6 +634,50 @@ class O2oPreorderService {
     return normalizedValue
   }
 
+  private normalizeClientRequestId(value: string | null | undefined): string {
+    const normalizedValue = value?.trim() ?? ''
+    if (!/^[A-Za-z0-9:_-]{16,64}$/.test(normalizedValue)) {
+      throw new BizError('下单请求键格式不正确，请刷新页面后重试', 400)
+    }
+    return normalizedValue
+  }
+
+  /**
+   * 对服务端已经归一化的提交参数生成摘要：
+   * - 排序后再摘要，避免相同商品仅因数组顺序变化被误判为不同请求；
+   * - 摘要只用于判断同一 clientRequestId 是否被不同载荷复用，不存放任何用户明文。
+   */
+  private buildClientRequestHash(
+    input: Pick<SubmitPreorderInput, 'isSystemApplied' | 'pickupContact'>,
+    normalizedRemark: string | null,
+    normalizedItems: Array<{ productId: string; skuId: string | null; qty: number }>,
+  ): string {
+    const items = normalizedItems
+      .map((item) => ({ ...item }))
+      .sort((left, right) => {
+        const productCompare = this.compareEntityIds(left.productId, right.productId)
+        return productCompare || this.compareEntityIds(left.skuId ?? '', right.skuId ?? '')
+      })
+    return createHash('sha256')
+      .update(JSON.stringify({
+        isSystemApplied: Boolean(input.isSystemApplied),
+        pickupContact: String(input.pickupContact ?? '').trim(),
+        remark: normalizedRemark,
+        items,
+      }))
+      .digest('hex')
+  }
+
+  private assertIdempotentRequestMatches(order: O2oPreorder, clientRequestHash: string): void {
+    if (!order.clientRequestHash || order.clientRequestHash !== clientRequestHash) {
+      throw new BizError('该下单请求键已被其他内容使用，请刷新结算页后重试', 409)
+    }
+  }
+
+  private compareEntityIds(left: string, right: string): number {
+    return left.localeCompare(right, 'en', { numeric: true, sensitivity: 'base' })
+  }
+
   // 提货人必须按客户端本次填写结果落单：
   // - 统一去首尾空格并校验长度；
   // - 不允许继续由服务端静默回退成账号名，否则无法区分“本人账号”和“实际提货人”。
@@ -680,7 +844,90 @@ class O2oPreorderService {
         qty: (current?.qty ?? 0) + item.qty,
       })
     })
-    return [...mergedQtyMap.values()]
+    return [...mergedQtyMap.values()].sort((left, right) => {
+      const productCompare = this.compareEntityIds(left.productId, right.productId)
+      return productCompare || this.compareEntityIds(left.skuId, right.skuId)
+    })
+  }
+
+  /** 按主键固定顺序锁定本次提交涉及的商品，降低交叉下单时的死锁概率。 */
+  private async loadSubmitProductsInManager(manager: EntityManager, productIds: string[]) {
+    const normalizedProductIds = [...new Set(productIds)].sort((left, right) => this.compareEntityIds(left, right))
+    const query = manager.getRepository(BaseProduct)
+      .createQueryBuilder('product')
+      .where('product.id IN (:...productIds)', { productIds: normalizedProductIds })
+      .orderBy('product.id', 'ASC')
+    if (manager.connection.options.type !== 'sqlite') {
+      query.setLock('pessimistic_write')
+    }
+    const products = await query.getMany()
+    if (products.length !== normalizedProductIds.length) {
+      throw new BizError('存在无效商品', 400)
+    }
+    return new Map(products.map((item) => [String(item.id), item]))
+  }
+
+  /**
+   * 先把兼容旧客户端的空 skuId 解析成确定 SKU，再只锁定最终选中的 SKU：
+   * - 显式 skuId 不再连带锁住同商品下的其他规格；
+   * - 空 skuId 只做一次无锁候选解析，随后重新锁定并校验最终 SKU，退役竞态会被正常拒绝。
+   */
+  private async resolveAndLockSubmitSkusInManager(
+    manager: EntityManager,
+    normalizedItems: Array<{ productId: string; skuId: string | null; qty: number }>,
+  ) {
+    const skuRepo = manager.getRepository(BaseProductSku)
+    const explicitSkuIds = [...new Set(normalizedItems.map((item) => item.skuId).filter((item): item is string => Boolean(item)))]
+      .sort((left, right) => this.compareEntityIds(left, right))
+    const fallbackProductIds = [...new Set(normalizedItems.filter((item) => !item.skuId).map((item) => item.productId))]
+      .sort((left, right) => this.compareEntityIds(left, right))
+
+    const candidateSkus: BaseProductSku[] = []
+    if (explicitSkuIds.length) {
+      candidateSkus.push(...await skuRepo.createQueryBuilder('sku')
+        .where('sku.id IN (:...skuIds)', { skuIds: explicitSkuIds })
+        .orderBy('sku.productId', 'ASC')
+        .addOrderBy('sku.id', 'ASC')
+        .getMany())
+    }
+    if (fallbackProductIds.length) {
+      candidateSkus.push(...await skuRepo.createQueryBuilder('sku')
+        .where('sku.productId IN (:...productIds)', { productIds: fallbackProductIds })
+        .andWhere('sku.isCurrent = :isCurrent', { isCurrent: true })
+        .andWhere('sku.isActive = :isActive', { isActive: true })
+        .orderBy('sku.productId', 'ASC')
+        .addOrderBy('sku.sortOrder', 'ASC')
+        .addOrderBy('sku.id', 'ASC')
+        .getMany())
+    }
+
+    const candidateMaps = this.groupSkusByProduct(candidateSkus)
+    const canonicalItems = this.canonicalizePreorderItems(
+      normalizedItems,
+      candidateMaps.skuMap,
+      candidateMaps.skuByProductMap,
+    )
+    const selectedSkuIds = [...new Set(canonicalItems.map((item) => item.skuId))]
+      .sort((left, right) => this.compareEntityIds(left, right))
+    const lockQuery = skuRepo.createQueryBuilder('sku')
+      .where('sku.id IN (:...skuIds)', { skuIds: selectedSkuIds })
+      .orderBy('sku.productId', 'ASC')
+      .addOrderBy('sku.id', 'ASC')
+    if (manager.connection.options.type !== 'sqlite') {
+      lockQuery.setLock('pessimistic_write')
+    }
+    const lockedSkus = await lockQuery.getMany()
+    if (lockedSkus.length !== selectedSkuIds.length) {
+      throw new BizError('存在无效规格', 400)
+    }
+    const lockedMaps = this.groupSkusByProduct(lockedSkus)
+    canonicalItems.forEach((item) => {
+      this.getRequiredSku(lockedMaps.skuMap, lockedMaps.skuByProductMap, item.productId, item.skuId)
+    })
+    return {
+      canonicalItems,
+      ...lockedMaps,
+    }
   }
 
   private groupSkusByProduct(skus: BaseProductSku[]) {
@@ -1130,31 +1377,68 @@ class O2oPreorderService {
     if (input.order.status !== 'pending') {
       return false
     }
-    const items = await manager.getRepository(O2oPreorderItem).find({ where: { orderId: input.order.id } })
+    const orderRepo = manager.getRepository(O2oPreorder)
+    // 状态先用 compare-and-set 领取；库存释放任一步失败都会随事务一起回滚。
+    // 这道数据库门禁保证多 Worker、手工撤回与核销竞态下只有一个调用方能够释放库存。
+    const claimResult = await orderRepo.update(
+      { id: input.order.id, status: 'pending' },
+      { status: 'cancelled', cancelReason: input.cancelReason },
+    )
+    if ((claimResult.affected ?? 0) !== 1) {
+      return false
+    }
+
+    const items = await manager.getRepository(O2oPreorderItem)
+      .createQueryBuilder('item')
+      .where('item.orderId = :orderId', { orderId: input.order.id })
+      .orderBy('item.productId', 'ASC')
+      .addOrderBy('item.skuId', 'ASC')
+      .addOrderBy('item.id', 'ASC')
+      .getMany()
+    const productIds = [...new Set(items.map((item) => String(item.productId)))]
+      .sort((left, right) => this.compareEntityIds(left, right))
+    const productQuery = manager.getRepository(BaseProduct)
+      .createQueryBuilder('product')
+      .where('product.id IN (:...productIds)', { productIds })
+      .orderBy('product.id', 'ASC')
+    if (manager.connection.options.type !== 'sqlite') {
+      productQuery.setLock('pessimistic_write')
+    }
+    const products = productIds.length ? await productQuery.getMany() : []
+    const productMap = new Map(products.map((product) => [String(product.id), product]))
+    if (productMap.size !== productIds.length) {
+      throw new BizError('订单关联商品缺失，已停止取消以保护库存一致性', 409)
+    }
+
+    const skuIds = [...new Set(items.map((item) => item.skuId ? String(item.skuId) : '').filter(Boolean))]
+      .sort((left, right) => this.compareEntityIds(left, right))
+    const skuQuery = manager.getRepository(BaseProductSku)
+      .createQueryBuilder('sku')
+      .where('sku.id IN (:...skuIds)', { skuIds })
+      .orderBy('sku.productId', 'ASC')
+      .addOrderBy('sku.id', 'ASC')
+    if (manager.connection.options.type !== 'sqlite') {
+      skuQuery.setLock('pessimistic_write')
+    }
+    const skus = skuIds.length ? await skuQuery.getMany() : []
+    const skuMap = new Map(skus.map((sku) => [String(sku.id), sku]))
+    if (skuMap.size !== skuIds.length) {
+      throw new BizError('订单关联规格缺失，已停止取消以保护库存一致性', 409)
+    }
+
+    const inventoryLogRepo = manager.getRepository(InventoryLog)
+    const inventoryLogs: InventoryLog[] = []
     for (const row of items) {
-      const product = await manager.getRepository(BaseProduct).findOne({
-        where: { id: row.productId },
-        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
-      })
-      if (!product) {
-        continue
-      }
-      const sku = row.skuId
-        ? await manager.getRepository(BaseProductSku).findOne({
-            where: { id: String(row.skuId) },
-            lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
-          })
-        : null
+      const product = this.getRequiredProduct(productMap, String(row.productId))
+      const sku = row.skuId ? skuMap.get(String(row.skuId)) ?? null : null
       const beforeCurrentStock = Number(product.currentStock ?? 0)
       const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
       if (sku) {
         sku.preOrderedStock = Math.max(0, Number(sku.preOrderedStock ?? 0) - Number(row.qty ?? 0))
-        await manager.getRepository(BaseProductSku).save(sku)
       }
       product.preOrderedStock = Math.max(0, beforePreOrderedStock - row.qty)
-      await manager.getRepository(BaseProduct).save(product)
-      await manager.getRepository(InventoryLog).save(
-        manager.getRepository(InventoryLog).create({
+      inventoryLogs.push(
+        inventoryLogRepo.create({
           productId: product.id,
           changeType: 'preorder_release',
           changeQty: row.qty,
@@ -1171,9 +1455,17 @@ class O2oPreorderService {
         }),
       )
     }
+    if (skus.length) {
+      await manager.getRepository(BaseProductSku).save(skus)
+    }
+    if (products.length) {
+      await manager.getRepository(BaseProduct).save(products)
+    }
+    if (inventoryLogs.length) {
+      await inventoryLogRepo.save(inventoryLogs)
+    }
     input.order.status = 'cancelled'
     input.order.cancelReason = input.cancelReason
-    await manager.getRepository(O2oPreorder).save(input.order)
     return true
   }
 
@@ -1564,28 +1856,87 @@ class O2oPreorderService {
     return summaryMap
   }
 
-  private async resolveProductSoldQtyMap(productIds: string[]) {
+  private createPublicJsonSnapshot<T>(data: T): O2oPublicJsonSnapshot<T> {
+    const responseBody = JSON.stringify({ code: 0, message: 'ok', data })
+    return {
+      data,
+      responseBody,
+      etag: `"${createHash('sha256').update(responseBody).digest('base64url')}"`,
+      generatedAt: Date.now(),
+    }
+  }
+
+  /**
+   * 目录写路径提交后立即淘汰当前进程缓存；soldQtyChanged 用于同时清掉较长 TTL 的销量聚合。
+   * 对外仅递增一个固定大小的修订号，不保存商品 id 集合，避免无界内存增长。
+   */
+  private invalidateMallReadCache(options?: { soldQtyChanged?: boolean }) {
+    invalidateMallCatalogReadCache()
+    this.mallProductsCache = null
+    this.mallStorefrontCache = null
+    if (options?.soldQtyChanged) {
+      this.mallSoldQtyRevision = this.mallSoldQtyRevision >= Number.MAX_SAFE_INTEGER ? 1 : this.mallSoldQtyRevision + 1
+      this.mallSoldQtyCache = null
+    }
+  }
+
+  private async resolveProductSoldQtyMap(productIds: string[]): Promise<Map<string, number>> {
     if (!productIds.length) {
       return new Map<string, number>()
     }
 
-    const soldRows = await this.preorderItemRepo
-      .createQueryBuilder('item')
-      .leftJoin('item.order', 'preorder')
-      .select('item.productId', 'productId')
-      .addSelect('SUM(item.qty)', 'soldQty')
-      .where('item.productId IN (:...productIds)', { productIds })
-      .andWhere('preorder.status = :status', { status: 'verified' })
-      .groupBy('item.productId')
-      .getRawMany<{ productId: string; soldQty: O2oNumericLike }>()
+    const cacheKey = [...productIds].map(String).sort().join(',')
+    const revision = this.mallSoldQtyRevision
+    const now = Date.now()
+    if (
+      this.mallSoldQtyCache?.key === cacheKey
+      && this.mallSoldQtyCache.revision === revision
+      && this.mallSoldQtyCache.expiresAt > now
+    ) {
+      return this.mallSoldQtyCache.data
+    }
+    if (this.mallSoldQtyRefreshInFlight) {
+      const activeResult = await this.mallSoldQtyRefreshInFlight
+      if (activeResult.key === cacheKey && activeResult.revision === revision) {
+        return activeResult.data
+      }
+      return this.resolveProductSoldQtyMap(productIds)
+    }
 
-    // 退货核销会同步扣减原预订单明细 qty，因此已核销订单明细本身就是净销量。
-    return new Map(
-      soldRows.map((item) => [
-        String(item.productId),
-        Math.max(0, Number(item.soldQty ?? 0)),
-      ]),
-    )
+    const refresh = (async () => {
+      const soldRows = await this.preorderItemRepo
+        .createQueryBuilder('item')
+        .leftJoin('item.order', 'preorder')
+        .select('item.productId', 'productId')
+        .addSelect('SUM(item.qty)', 'soldQty')
+        .where('item.productId IN (:...productIds)', { productIds })
+        .andWhere('preorder.status = :status', { status: 'verified' })
+        .groupBy('item.productId')
+        .getRawMany<{ productId: string; soldQty: O2oNumericLike }>()
+
+      // 退货核销会同步扣减原预订单明细 qty，因此已核销订单明细本身就是净销量。
+      const data = new Map(
+        soldRows.map((item) => [
+          String(item.productId),
+          Math.max(0, Number(item.soldQty ?? 0)),
+        ]),
+      )
+      this.mallSoldQtyCache = {
+        key: cacheKey,
+        revision,
+        expiresAt: Date.now() + O2O_MALL_SOLD_QTY_TTL_MS,
+        data,
+      }
+      return { key: cacheKey, revision, data }
+    })()
+    this.mallSoldQtyRefreshInFlight = refresh
+    try {
+      return (await refresh).data
+    } finally {
+      if (this.mallSoldQtyRefreshInFlight === refresh) {
+        this.mallSoldQtyRefreshInFlight = null
+      }
+    }
   }
 
   /**
@@ -1648,7 +1999,7 @@ class O2oPreorderService {
     return summary
   }
 
-  async listMallProducts() {
+  private async buildMallProductsUncached(): Promise<O2oMallProductsView> {
     // 商城端只暴露“可售且已上架”的商品，并把库存口径统一换算成前端直接可用的 availableStock。
     // 同时把允许对客户端公开的门店展示配置一并返回，避免客户端误调后台系统配置接口。
     const o2oRules = await systemConfigService.getO2oRuleConfigs()
@@ -1796,12 +2147,106 @@ class O2oPreorderService {
     }
   }
 
-  async getMallStorefrontConfig() {
+  private async loadMallStorefrontConfig(): Promise<O2oMallStorefrontView> {
     const o2oRules = await systemConfigService.getO2oRuleConfigs()
     return {
       businessHoursText: o2oRules.storeBusinessHoursText,
       mallAnnouncementText: o2oRules.mallAnnouncementText,
     }
+  }
+
+  async getMallProductsPublicSnapshot(): Promise<O2oPublicJsonSnapshot<O2oMallProductsView>> {
+    const now = Date.now()
+    const revision = readMallCatalogRevision()
+    const cached = this.mallProductsCache
+    if (cached?.revision === revision && cached.freshUntil > now) {
+      return cached.snapshot
+    }
+
+    if (this.mallProductsRefreshInFlight && this.mallProductsRefreshRevision !== revision) {
+      // 写事务可能在旧刷新进行中提交；先等待旧查询退出，再按新修订号重建，绝不把旧快照当作提交后结果返回。
+      await this.mallProductsRefreshInFlight.catch(() => undefined)
+      return this.getMallProductsPublicSnapshot()
+    }
+
+    if (!this.mallProductsRefreshInFlight) {
+      const refreshRevision = revision
+      this.mallProductsRefreshRevision = refreshRevision
+      const refresh = (async () => {
+        try {
+          const data = await this.buildMallProductsUncached()
+          const snapshot = this.createPublicJsonSnapshot(data)
+          this.mallProductsCache = {
+            revision: refreshRevision,
+            freshUntil: Date.now() + O2O_MALL_CATALOG_FRESH_TTL_MS,
+            staleUntil: Date.now() + O2O_MALL_CATALOG_STALE_TTL_MS,
+            snapshot,
+          }
+          return snapshot
+        } finally {
+          this.mallProductsRefreshInFlight = null
+          this.mallProductsRefreshRevision = null
+        }
+      })()
+      this.mallProductsRefreshInFlight = refresh
+    }
+
+    // 同一修订号的旧快照可在后台刷新期间短暂复用，避免 TTL 边界瞬间击穿数据库。
+    if (cached?.revision === revision && cached.staleUntil > now) {
+      void this.mallProductsRefreshInFlight.catch(() => undefined)
+      return cached.snapshot
+    }
+    return this.mallProductsRefreshInFlight
+  }
+
+  async listMallProducts(): Promise<O2oMallProductsView> {
+    return (await this.getMallProductsPublicSnapshot()).data
+  }
+
+  async getMallStorefrontPublicSnapshot(): Promise<O2oPublicJsonSnapshot<O2oMallStorefrontView>> {
+    const now = Date.now()
+    const revision = readMallCatalogRevision()
+    const cached = this.mallStorefrontCache
+    if (cached?.revision === revision && cached.freshUntil > now) {
+      return cached.snapshot
+    }
+
+    if (this.mallStorefrontRefreshInFlight && this.mallStorefrontRefreshRevision !== revision) {
+      await this.mallStorefrontRefreshInFlight.catch(() => undefined)
+      return this.getMallStorefrontPublicSnapshot()
+    }
+
+    if (!this.mallStorefrontRefreshInFlight) {
+      const refreshRevision = revision
+      this.mallStorefrontRefreshRevision = refreshRevision
+      const refresh = (async () => {
+        try {
+          const data = await this.loadMallStorefrontConfig()
+          const snapshot = this.createPublicJsonSnapshot(data)
+          this.mallStorefrontCache = {
+            revision: refreshRevision,
+            freshUntil: Date.now() + O2O_MALL_STOREFRONT_FRESH_TTL_MS,
+            staleUntil: Date.now() + O2O_MALL_STOREFRONT_STALE_TTL_MS,
+            snapshot,
+          }
+          return snapshot
+        } finally {
+          this.mallStorefrontRefreshInFlight = null
+          this.mallStorefrontRefreshRevision = null
+        }
+      })()
+      this.mallStorefrontRefreshInFlight = refresh
+    }
+
+    if (cached?.revision === revision && cached.staleUntil > now) {
+      void this.mallStorefrontRefreshInFlight.catch(() => undefined)
+      return cached.snapshot
+    }
+    return this.mallStorefrontRefreshInFlight
+  }
+
+  async getMallStorefrontConfig(): Promise<O2oMallStorefrontView> {
+    return (await this.getMallStorefrontPublicSnapshot()).data
   }
 
   private async generatePreorderShowNo(
@@ -1923,100 +2368,110 @@ class O2oPreorderService {
   async submit(auth: ClientAuthContext, input: SubmitPreorderInput) {
     const normalizedItems = this.normalizePreorderItems(input.items)
     const normalizedRemark = this.normalizePreorderRemark(input.remark)
+    const normalizedClientRequestId = this.normalizeClientRequestId(input.clientRequestId)
+    const clientRequestHash = this.buildClientRequestHash(input, normalizedRemark, normalizedItems)
     // 详细注释：是否系统申请必须以客户端本次明确选择为准，不再使用服务端默认兜底。
     const normalizedIsSystemApplied = Boolean(input.isSystemApplied)
 
+    const fastExistingOrder = await this.preorderRepo.findOne({
+      where: {
+        clientUserId: auth.userId,
+        clientRequestId: normalizedClientRequestId,
+      },
+    })
+    if (fastExistingOrder) {
+      this.assertIdempotentRequestMatches(fastExistingOrder, clientRequestHash)
+      return this.buildOrderDetail(fastExistingOrder)
+    }
+
     const o2oRules = await systemConfigService.getO2oRuleConfigs()
-    const detail = await runInTransaction(async (manager) => {
-      const clientUser = await manager.getRepository(ClientUser).findOne({
-        where: { id: auth.userId },
-        select: ['id', 'realName', 'accountType', 'departmentName', 'staffNo'],
-        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
-      })
-      if (!clientUser) throw new BizError('客户端账号不存在，请重新登录后再试', 401)
-      const pendingProductQtyMap = await this.loadPendingProductQtyMap(manager, auth.userId)
-      // 事务内完成“查商品 -> 校验库存/限购 -> 写订单 -> 占用预订库存 -> 记录库存日志”，
-      // 确保任一步失败都能整体回滚，避免只生成订单或只扣预订库存的脏状态。
-      const productIds = [...new Set(normalizedItems.map((item) => item.productId))]
-      const products = await manager.getRepository(BaseProduct).find({
-        where: { id: In(productIds) },
-        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
-      })
-      if (products.length !== productIds.length) {
-        throw new BizError('存在无效商品', 400)
-      }
-      const productMap = new Map(products.map((item) => [String(item.id), item]))
-      const skus = await manager.getRepository(BaseProductSku).find({
-        where: { productId: In(productIds) },
-        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
-      })
-      const { skuMap, skuByProductMap } = this.groupSkusByProduct(skus)
-      const canonicalItems = this.canonicalizePreorderItems(normalizedItems, skuMap, skuByProductMap)
-      const productQtyMap = new Map<string, number>()
-      let totalQty = 0
-      for (const row of canonicalItems) {
-        const product = this.getRequiredProduct(productMap, row.productId)
-        const sku = this.getRequiredSku(skuMap, skuByProductMap, row.productId, row.skuId)
-        if (!product.isActive || product.o2oStatus !== 'listed') {
-          throw new BizError(`商品「${product.productName}」已下架，不可预订`, 409)
-        }
-        if (!this.isCurrentActiveSku(sku)) {
-          throw new BizError(`规格「${sku.specText}」已下架，不可预订`, 409)
-        }
-        // 预订库存不直接扣 currentStock，而是先增加 preOrderedStock 占位，
-        // 这样线下真正核销时再把现货库存扣减，符合“线上预留、线下履约”的业务模型。
-        const availableStock = Number(sku.currentStock ?? 0) - Number(sku.preOrderedStock ?? 0)
-        if (availableStock < row.qty) {
-          throw new BizError(`规格「${sku.specText}」库存不足`, 409)
-        }
-        const productQty = (productQtyMap.get(row.productId) ?? 0) + row.qty
-        productQtyMap.set(row.productId, productQty)
-        const limitQty = this.resolveProductLimitQty(product, o2oRules)
-        if (o2oRules.limitEnabled && (pendingProductQtyMap.get(row.productId) ?? 0) + productQty > limitQty) {
-          throw new BizError(`商品「${product.productName}」超过限购数量`, 409)
-        }
-        totalQty += row.qty
-      }
+    let transactionResult: { orderId: string; created: boolean }
+    try {
+      transactionResult = await this.runIdempotentSubmitTransaction(async (manager) => {
+        const preorderRepo = manager.getRepository(O2oPreorder)
+        const clientUser = await manager.getRepository(ClientUser).findOne({
+          where: { id: auth.userId },
+          select: ['id', 'realName', 'accountType', 'departmentName', 'staffNo'],
+          lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+        })
+        if (!clientUser) throw new BizError('客户端账号不存在，请重新登录后再试', 401)
 
-      // 订单归属由服务端按当前登录账号强制判定：
-      // - 部门账号一律沉淀为部门单；
-      // - 个人账号一律沉淀为散客单；
-      // - 这样可避免客户端伪造归属类型，保持账号身份与订单归属一致。
-      const normalizedClientOrderType = this.normalizeClientOrderType(clientUser.accountType === 'department' ? 'department' : 'walkin')
-      const departmentNameSnapshot = this.resolveDepartmentNameSnapshot(normalizedClientOrderType, clientUser)
-      const staffNoSnapshot = this.resolveStaffNoSnapshot(normalizedClientOrderType, clientUser)
-      const normalizedPickupContact = this.normalizePickupContact(
-        normalizedClientOrderType === 'department'
-          ? (clientUser.realName || auth.realName)
-          : input.pickupContact,
-      )
+        // 先锁客户端账号再复查请求键，使同一账号的两个并发重试在进入库存锁前完成串行化。
+        const existedOrder = await preorderRepo.findOne({
+          where: {
+            clientUserId: auth.userId,
+            clientRequestId: normalizedClientRequestId,
+          },
+        })
+        if (existedOrder) {
+          this.assertIdempotentRequestMatches(existedOrder, clientRequestHash)
+          return { orderId: String(existedOrder.id), created: false }
+        }
 
-      // verifyCode 既用于用户端展示二维码，也作为管理端核销入口的核心识别码。
-      const showNo = await this.generatePreorderShowNo(normalizedClientOrderType, manager)
-      const timeoutAt = o2oRules.autoCancelEnabled ? new Date(Date.now() + o2oRules.autoCancelHours * 60 * 60 * 1000) : null
-      const savedOrder = await manager.getRepository(O2oPreorder).save(
-        manager.getRepository(O2oPreorder).create({
-          showNo,
-          clientUserId: auth.userId,
-          verifyCode: randomUUID(),
-          status: 'pending',
-          clientOrderType: normalizedClientOrderType,
-          departmentNameSnapshot,
-          staffNoSnapshot,
-          isSystemApplied: normalizedIsSystemApplied,
-          hasCustomerOrder: false,
-          pickupContact: normalizedPickupContact,
-          totalQty,
-          remark: normalizedRemark,
-          timeoutAt,
-        }),
-      )
-      const itemEntities = canonicalItems.map((item) =>
-        (() => {
+        const pendingProductQtyMap = await this.loadPendingProductQtyMap(manager, auth.userId)
+        const productIds = [...new Set(normalizedItems.map((item) => item.productId))]
+        const productMap = await this.loadSubmitProductsInManager(manager, productIds)
+        const { canonicalItems, skuMap, skuByProductMap } = await this.resolveAndLockSubmitSkusInManager(manager, normalizedItems)
+        const productQtyMap = new Map<string, number>()
+        let totalQty = 0
+        for (const row of canonicalItems) {
+          const product = this.getRequiredProduct(productMap, row.productId)
+          const sku = this.getRequiredSku(skuMap, skuByProductMap, row.productId, row.skuId)
+          if (!product.isActive || product.o2oStatus !== 'listed') {
+            throw new BizError(`商品「${product.productName}」已下架，不可预订`, 409)
+          }
+          if (!this.isCurrentActiveSku(sku)) {
+            throw new BizError(`规格「${sku.specText}」已下架，不可预订`, 409)
+          }
+          const availableStock = Number(sku.currentStock ?? 0) - Number(sku.preOrderedStock ?? 0)
+          if (availableStock < row.qty) {
+            throw new BizError(`规格「${sku.specText}」库存不足`, 409)
+          }
+          const productQty = (productQtyMap.get(row.productId) ?? 0) + row.qty
+          productQtyMap.set(row.productId, productQty)
+          const limitQty = this.resolveProductLimitQty(product, o2oRules)
+          if (o2oRules.limitEnabled && (pendingProductQtyMap.get(row.productId) ?? 0) + productQty > limitQty) {
+            throw new BizError(`商品「${product.productName}」超过限购数量`, 409)
+          }
+          totalQty += row.qty
+        }
+
+        const normalizedClientOrderType = this.normalizeClientOrderType(clientUser.accountType === 'department' ? 'department' : 'walkin')
+        const departmentNameSnapshot = this.resolveDepartmentNameSnapshot(normalizedClientOrderType, clientUser)
+        const staffNoSnapshot = this.resolveStaffNoSnapshot(normalizedClientOrderType, clientUser)
+        const normalizedPickupContact = this.normalizePickupContact(
+          normalizedClientOrderType === 'department'
+            ? (clientUser.realName || auth.realName)
+            : input.pickupContact,
+        )
+
+        const showNo = await this.generatePreorderShowNo(normalizedClientOrderType, manager)
+        const timeoutAt = o2oRules.autoCancelEnabled ? new Date(Date.now() + o2oRules.autoCancelHours * 60 * 60 * 1000) : null
+        const savedOrder = await preorderRepo.save(
+          preorderRepo.create({
+            showNo,
+            clientUserId: auth.userId,
+            clientRequestId: normalizedClientRequestId,
+            clientRequestHash,
+            verifyCode: randomUUID(),
+            status: 'pending',
+            clientOrderType: normalizedClientOrderType,
+            departmentNameSnapshot,
+            staffNoSnapshot,
+            isSystemApplied: normalizedIsSystemApplied,
+            hasCustomerOrder: false,
+            pickupContact: normalizedPickupContact,
+            totalQty,
+            remark: normalizedRemark,
+            timeoutAt,
+          }),
+        )
+        const preorderItemRepo = manager.getRepository(O2oPreorderItem)
+        const itemEntities = canonicalItems.map((item) => {
           const product = this.getRequiredProduct(productMap, item.productId)
           const sku = this.getRequiredSku(skuMap, skuByProductMap, item.productId, item.skuId)
           const snapshot = this.buildPreorderSkuItemSnapshot(product, sku, item.qty)
-          return manager.getRepository(O2oPreorderItem).create({
+          return preorderItemRepo.create({
             orderId: savedOrder.id,
             productId: item.productId,
             skuId: snapshot.skuId,
@@ -2029,24 +2484,19 @@ class O2oPreorderService {
             unitPrice: snapshot.unitPrice,
             lineAmount: snapshot.lineAmount,
           })
-        })(),
-      )
-      await manager.getRepository(O2oPreorderItem).save(itemEntities)
+        })
+        await preorderItemRepo.save(itemEntities)
 
-      for (const row of canonicalItems) {
-        const product = this.getRequiredProduct(productMap, row.productId)
-        const sku = this.getRequiredSku(skuMap, skuByProductMap, row.productId, row.skuId)
-        const beforeCurrentStock = Number(product.currentStock ?? 0)
-        const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
-        const beforeSkuPreOrderedStock = Number(sku.preOrderedStock ?? 0)
-        // 下单成功后只增加预订占用库存，不减少现货库存；
-        // 真正出库动作发生在 verifyByCode。
-        product.preOrderedStock = beforePreOrderedStock + row.qty
-        sku.preOrderedStock = beforeSkuPreOrderedStock + row.qty
-        await manager.getRepository(BaseProductSku).save(sku)
-        await manager.getRepository(BaseProduct).save(product)
-        await manager.getRepository(InventoryLog).save(
-          manager.getRepository(InventoryLog).create({
+        const inventoryLogRepo = manager.getRepository(InventoryLog)
+        const inventoryLogs: InventoryLog[] = []
+        for (const row of canonicalItems) {
+          const product = this.getRequiredProduct(productMap, row.productId)
+          const sku = this.getRequiredSku(skuMap, skuByProductMap, row.productId, row.skuId)
+          const beforeCurrentStock = Number(product.currentStock ?? 0)
+          const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
+          product.preOrderedStock = beforePreOrderedStock + row.qty
+          sku.preOrderedStock = Number(sku.preOrderedStock ?? 0) + row.qty
+          inventoryLogs.push(inventoryLogRepo.create({
             productId: product.id,
             changeType: 'preorder_hold',
             changeQty: row.qty,
@@ -2059,21 +2509,48 @@ class O2oPreorderService {
             operatorName: auth.realName,
             refType: 'o2o_preorder',
             refId: savedOrder.id,
-          }),
-        )
+          }))
+        }
+        await manager.getRepository(BaseProductSku).save([...skuMap.values()])
+        await manager.getRepository(BaseProduct).save([...productMap.values()])
+        await inventoryLogRepo.save(inventoryLogs)
+        await notificationService.emitEvent({
+          eventType: 'o2o_preorder_created',
+          sourceType: 'o2o_preorder',
+          sourceId: String(savedOrder.id),
+          payload: {
+            showNo: savedOrder.showNo,
+            sourceUserId: auth.userId,
+            sourceUserDisplayName: auth.realName || auth.account,
+          },
+        }, manager)
+        return { orderId: String(savedOrder.id), created: true }
+      })
+    } catch (error) {
+      if (!isUniqueConstraintError(error, {
+        mysqlConstraint: 'uk_o2o_preorder_client_request',
+        sqliteColumns: ['o2o_preorder.client_request_id'],
+      })) {
+        throw error
       }
-      return this.detailById(savedOrder.id, manager)
-    })
-    await notificationService.emitEvent({
-      eventType: 'o2o_preorder_created',
-      sourceType: 'o2o_preorder',
-      sourceId: detail.order.id,
-      payload: {
-        showNo: detail.order.showNo,
-        sourceUserId: auth.userId,
-        sourceUserDisplayName: auth.realName || auth.account,
-      },
-    })
+      const existedOrder = await this.preorderRepo.findOne({
+        where: {
+          clientUserId: auth.userId,
+          clientRequestId: normalizedClientRequestId,
+        },
+      })
+      if (!existedOrder) {
+        throw error
+      }
+      this.assertIdempotentRequestMatches(existedOrder, clientRequestHash)
+      transactionResult = { orderId: String(existedOrder.id), created: false }
+    }
+
+    // 完整详情读取移出库存事务，避免商品、SKU 行锁覆盖退货统计、门店配置等只读查询。
+    if (transactionResult.created) {
+      this.invalidateMallReadCache()
+    }
+    const detail = await this.detailById(transactionResult.orderId)
     return detail
   }
 
@@ -2343,7 +2820,7 @@ class O2oPreorderService {
     const normalizedRemark = this.normalizePreorderRemark(input.remark)
     const o2oRules = await systemConfigService.getO2oRuleConfigs()
 
-    return runInTransaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const orderRepo = manager.getRepository(O2oPreorder)
       const orderItemRepo = manager.getRepository(O2oPreorderItem)
 
@@ -2420,15 +2897,16 @@ class O2oPreorderService {
       await orderRepo.save(order)
       return this.buildOrderDetail(order, manager)
     })
+    this.invalidateMallReadCache()
+    return result
   }
 
   async updateOrderOnsite(auth: AuthUserContext, input: UpdateOnsitePreorderInput) {
-    await this.cancelTimeoutOrders()
     const normalizedItems = this.normalizePreorderItems(input.items)
     const normalizedRemark = this.normalizePreorderRemark(input.remark)
     const o2oRules = await systemConfigService.getO2oRuleConfigs()
 
-    return runInTransaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const orderRepo = manager.getRepository(O2oPreorder)
       const orderItemRepo = manager.getRepository(O2oPreorderItem)
       const order = await orderRepo.findOne({
@@ -2502,6 +2980,8 @@ class O2oPreorderService {
       await orderRepo.save(order)
       return this.buildOrderDetail(order, manager)
     })
+    this.invalidateMallReadCache()
+    return result
   }
 
   async listMyOrders(auth: ClientAuthContext, query?: Partial<MyOrderListQuery>): Promise<PaginationResult<O2oPreorderSummaryView>> {
@@ -2595,7 +3075,6 @@ class O2oPreorderService {
   }
 
   async createReturnRequest(auth: ClientAuthContext, orderId: string, input: SubmitReturnRequestInput) {
-    await this.cancelTimeoutOrders()
     const normalizedReason = this.normalizeReturnReason(input.reason)
     if (!Array.isArray(input.items) || !input.items.length) {
       throw new BizError('至少选择一个商品申请退货', 400)
@@ -2798,7 +3277,6 @@ class O2oPreorderService {
   }
 
   async markCustomerOrderPrintedByClient(auth: ClientAuthContext, orderId: string) {
-    await this.cancelTimeoutOrders()
     return runInTransaction(async (manager) => {
       const orderRepo = manager.getRepository(O2oPreorder)
       const order = await orderRepo.findOne({
@@ -2861,7 +3339,7 @@ class O2oPreorderService {
       throw new BizError('请填写订单号完成二次确认', 400)
     }
 
-    return runInTransaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const preorderRepo = manager.getRepository(O2oPreorder)
       const preorderItemRepo = manager.getRepository(O2oPreorderItem)
       const returnRequestRepo = manager.getRepository(O2oReturnRequest)
@@ -2958,10 +3436,11 @@ class O2oPreorderService {
         outboundSerialRolledBack,
       }
     })
+    this.invalidateMallReadCache({ soldQtyChanged: result.status === 'verified' })
+    return result
   }
 
   async cancelMyOrder(auth: ClientAuthContext, id: string) {
-    await this.cancelTimeoutOrders()
     await runInTransaction(async (manager) => {
       const order = await manager.getRepository(O2oPreorder).findOne({
         where: { id, isDeleted: false },
@@ -2995,6 +3474,7 @@ class O2oPreorderService {
         throw new BizError('当前预订单不可撤回', 409)
       }
     })
+    this.invalidateMallReadCache()
     return this.getMyOrderDetail(auth, id)
   }
 
@@ -3351,8 +3831,7 @@ class O2oPreorderService {
 
   async verifyByCode(verifyCode: string, actor: AuthUserContext) {
     const normalizedVerifyCode = this.normalizeVerifyCode(verifyCode)
-    await this.cancelTimeoutOrders()
-    return runInTransaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const returnRequest = await manager.getRepository(O2oReturnRequest).findOne({
         where: { verifyCode: normalizedVerifyCode },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
@@ -3369,6 +3848,8 @@ class O2oPreorderService {
       }
       return this.verifyPreorderInManager(manager, order, actor)
     })
+    this.invalidateMallReadCache({ soldQtyChanged: true })
+    return result
   }
 
   async inboundStock(
@@ -3382,7 +3863,7 @@ class O2oPreorderService {
     if (!Number.isInteger(normalizedQty) || normalizedQty <= 0) {
       throw new BizError('入库数量必须为正整数', 400)
     }
-    return runInTransaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const product = await manager.getRepository(BaseProduct).findOne({
         where: { id: productId },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
@@ -3445,6 +3926,8 @@ class O2oPreorderService {
         preOrderedStock: product.preOrderedStock,
       }
     })
+    this.invalidateMallReadCache()
+    return result
   }
 
   startTimeoutRecycleLoop() {
@@ -3497,29 +3980,39 @@ class O2oPreorderService {
 
       const recyclePromise = (async () => {
         let cancelledCount = 0
-        // 分批循环回收，避免单次只处理 100 条导致仍有超时订单残留。
-        // 这样即使门店长时间未触发查询，也能在下一次入口访问时尽量回收完整。
-        while (true) {
-          const timeoutOrders = await this.preorderRepo.find({
-            where: {
-              status: 'pending',
-              isDeleted: false,
-              timeoutAt: LessThanOrEqual(new Date()),
-            },
-            take: 100,
-          })
-          if (!timeoutOrders.length) {
-            break
-          }
-          await runInTransaction(async (manager) => {
-            for (const order of timeoutOrders) {
+        // 每批都在事务内重新读取并锁定最新状态：
+        // - MySQL 用 SKIP LOCKED 允许多个 Worker 安全分摊；
+        // - SQLite 由单写事务串行处理；
+        // - 单次最多处理 5 个小批次，避免后台任务长期占住 SQLite 写队列或 MySQL 行锁。
+        for (let batchIndex = 0; batchIndex < O2O_TIMEOUT_RECYCLE_MAX_BATCHES; batchIndex += 1) {
+          const batchResult = await runInTransaction(async (manager) => {
+            const timeoutQuery = manager.getRepository(O2oPreorder)
+              .createQueryBuilder('order')
+              .where('order.status = :status', { status: 'pending' })
+              .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
+              .andWhere('order.timeoutAt IS NOT NULL')
+              .andWhere('order.timeoutAt <= :now', { now: new Date() })
+              .orderBy('order.timeoutAt', 'ASC')
+              .addOrderBy('order.id', 'ASC')
+              .take(O2O_TIMEOUT_RECYCLE_BATCH_SIZE)
+            if (manager.connection.options.type !== 'sqlite') {
+              timeoutQuery.setLock('pessimistic_write').setOnLocked('skip_locked')
+            }
+            const lockedOrders = await timeoutQuery.getMany()
+            let batchCancelledCount = 0
+            for (const order of lockedOrders) {
               const cancelled = await this.cancelTimedOutOrderInManager(manager, order)
               if (cancelled) {
-                cancelledCount += 1
+                batchCancelledCount += 1
               }
             }
+            return {
+              selectedCount: lockedOrders.length,
+              cancelledCount: batchCancelledCount,
+            }
           })
-          if (timeoutOrders.length < 100) {
+          cancelledCount += batchResult.cancelledCount
+          if (batchResult.selectedCount < O2O_TIMEOUT_RECYCLE_BATCH_SIZE) {
             break
           }
         }
@@ -3531,6 +4024,9 @@ class O2oPreorderService {
         const result = await recyclePromise
         this.lastCancelTimeoutOrdersAt = Date.now()
         this.lastCancelTimeoutOrdersResult = result
+        if (result.cancelledCount > 0) {
+          this.invalidateMallReadCache()
+        }
         return result
       } finally {
         if (this.cancelTimeoutOrdersInFlight === recyclePromise) {
