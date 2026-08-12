@@ -10,10 +10,11 @@
 # 3. 安装完成后分别执行根目录与后端 `npm audit`，确保 CI 使用官方审计口径；
 # 4. 先做写事务闸门静态契约检查——纯静态、无任何运行时依赖，最快暴露绕过闸门的新代码；
 # 5. 再跑 MySQL 启动结构契约，确保漏执行 035/036 时会在对外服务前阻断；
-# 6. 接着跑 `task8:verify` 守住 SQLite 并发写事务（只依赖本地 SQLite，秒级完成，失败即止，
+# 6. 接着跑 `transaction-coordinator:verify`，覆盖 QueryRunner 长事务租约、异常 release 与原始事务 SQL 门禁；
+# 7. 再跑 `task8:verify` 守住 SQLite 业务并发写事务（两者只依赖本地 SQLite，失败即止，
 #    不必先花时间拉起 Docker MySQL）；
-# 7. 最后复用统一命令 `npm run verify:db:concurrency` 覆盖 MySQL 侧；
-# 8. MySQL 临时环境由脚本内部自动通过 Docker Compose 准备与清理，避免 CI 额外维护服务编排。
+# 8. 最后复用统一命令 `npm run verify:db:concurrency` 覆盖 MySQL 侧；
+# 9. MySQL 临时环境由脚本内部自动通过 Docker Compose 准备与清理，避免 CI 额外维护服务编排。
 #
 name: verify-db-concurrency
 
@@ -70,6 +71,9 @@ jobs:
 
       - name: 执行 MySQL 启动结构契约验收
         run: npm --prefix ./backend run verify:mysql:schema-contract
+
+      - name: 执行 SQLite 事务协调器入口覆盖回归
+        run: npm --prefix ./backend run transaction-coordinator:verify
 
       # SQLite 侧的并发写事务回归：并发提交 16 笔出库单，若哪天写事务绕过
       # `runInTransaction` 闸门、直接调用 `AppDataSource.transaction`，这一步会立刻报

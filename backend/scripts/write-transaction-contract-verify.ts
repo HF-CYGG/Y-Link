@@ -18,17 +18,16 @@
  *    既避免代码删改后条目退化成死条目，也避免一条豁免顺带放行同文件（乃至同函数）内新增的其它调用；
  * 5. 顺带确认 runInTransaction 确实被服务层广泛使用，防止闸门被整体架空后本门禁仍然“通过”。
  *
- * 门禁挡住的到底是什么（#35 引入事务协调器之后）：
+ * 门禁挡住的到底是什么（#41 收口事务协调器入口之后）：
  * `transaction-coordinator.ts` 会 patch `dataSource.transaction` / `query` / queryBuilder /
- * 全局 EntityManager，因此直接调用 `AppDataSource.transaction` 在协调器装好之后确实也会被串行化。
- * 但仍有两个缺口需要本门禁把守：
- * 1. **`queryRunner.startTransaction()` 完全不在 patch 覆盖范围内**（协调器没有 patch
- *    `createQueryRunner`），走这条路的写事务至今仍会绕过串行化；
- * 2. **`query('BEGIN')` 这类原始事务控制 SQL 同样不受保护**——`patchDataSourceQuery` 只按单条语句
- *    获取租约，`BEGIN` 返回后租约即释放，后续事务语句仍可与其它写入交错；
- * 3. `runInTransaction` 会先 `initializeDatabaseInfrastructure` 再开事务，直接调用则不保证这个次序——
+ * 全局 EntityManager 与 `createQueryRunner`：QueryRunner 生命周期会跨语句持有租约，原始事务控制 SQL
+ * 则由运行时明确拒绝。因此本门禁现在承担“更早失败 + 保证初始化次序 + 约束业务入口”的职责：
+ * 1. `runInTransaction` 会先 `initializeDatabaseInfrastructure` 再开事务，直接调用不保证这个次序——
  *    协调器尚未装好时开的事务不受任何保护。
- * 换言之：约定「一律走 runInTransaction」不是风格偏好，而是这两处保证的唯一来源。
+ * 2. 原始事务 SQL 虽会在协调器安装后被运行时拒绝，但静态门禁可在 CI 中指出具体源码位置，
+ *    避免把错误推迟到对应分支首次运行。
+ * 3. 业务层仍应统一走 `runInTransaction`；QueryRunner 仅供确需固定连接或手动批次边界的基础设施代码使用，
+ *    且必须显式登记豁免原因。
  *
  * 为什么用 AST 而不是正则：
  * 初版按行正则匹配 `identifier.transaction(`，有两个可被绕过的口子——
@@ -44,8 +43,8 @@
  * 已知边界（不要把本门禁当成完备证明）：
  * 事务控制 SQL 的识别依赖静态求值，唯一判不了的是「整条 SQL 以无法静态解析的值开头」——
  * 例如 `` `${verb} TRANSACTION` ``，或 SQL 由函数参数、配置、数据库内容传入。
- * 这是静态分析的固有边界，靠加规则堵不住；真正收口需要在协调器侧接管
- * `createQueryRunner` 与跨语句租约（见 issue #41）。
+ * 这是静态分析的固有边界，靠加规则堵不住；协调器已在运行时拒绝动态原始事务 SQL，并接管
+ * `createQueryRunner` 的跨语句租约（见 issue #41）。静态门禁仍负责未初始化数据源与代码规范的前置保护。
  *
  * 维护说明：
  * - 新增写事务请一律调用 `runInTransaction`（backend/src/config/transaction-runner.ts）；
@@ -64,11 +63,10 @@ const TRANSACTION_ENTRY_METHODS = new Set(['transaction', 'startTransaction'])
 
 /**
  * 事务控制 SQL：直接 `query('BEGIN')` 同样能开启事务，且完全不经过上面那两个方法。
- * 这条路比方法调用更危险——协调器的 `patchDataSourceQuery` 只按**单条语句**获取租约，
- * `BEGIN` 返回后租约即释放，后续事务语句仍可与其它写入交错，等于没有任何串行化保护。
+ * 协调器安装后会在运行时拒绝这条路；静态门禁继续负责在 CI 中提前给出源码位置。
  */
 const TRANSACTION_CONTROL_SQL_PATTERN =
-  /^(BEGIN|START\s+TRANSACTION|COMMIT|ROLLBACK|SAVEPOINT|RELEASE\s+SAVEPOINT|SET\s+TRANSACTION)\b/i
+  /^(BEGIN|START\s+TRANSACTION|COMMIT|END(?:\s+TRANSACTION)?|ROLLBACK|SAVEPOINT|RELEASE(?:\s+SAVEPOINT)?|SET\s+TRANSACTION)\b/i
 
 /**
  * 去掉 SQL 的前导空白与注释后再判定关键字。
@@ -94,6 +92,10 @@ const stripLeadingSqlNoise = (sql: string): string => {
         return ''
       }
       rest = trimmed.slice(end + 1)
+      continue
+    }
+    if (trimmed.startsWith(';')) {
+      rest = trimmed.slice(1)
       continue
     }
     return trimmed
@@ -263,6 +265,18 @@ const ALLOWED_DIRECT_TRANSACTION_CALLS: Array<{
     reason:
       '协调器安装点本身：它正是把 dataSource.transaction 接管为串行化实现的地方，'
       + '必须直接触碰原方法（先 bind 保留原实现，再覆写），无法经由 runInTransaction',
+  },
+  {
+    relativePath: 'src/database/transaction-coordinator.ts',
+    receiver: 'queryRunner',
+    method: 'startTransaction',
+    enclosingFunction: 'wrapQueryRunner',
+    // 两处：绑定原生命周期方法留作安全转发，以及把持有长事务租约的包装实现写回门面。
+    expectedCount: 2,
+    reason:
+      '协调器的 QueryRunner 接管实现：先保留 TypeORM 原始 startTransaction，'
+      + '再用跨 start/commit/rollback/release 生命周期持有租约的包装方法替换；'
+      + '这是保护 QueryRunner 入口本身，不能反向调用业务层 runInTransaction',
   },
   {
     relativePath: 'src/config/database-bootstrap.ts',
