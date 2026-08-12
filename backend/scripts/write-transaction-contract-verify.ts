@@ -6,8 +6,8 @@
  * 2. 覆盖两类入口——`xxx.transaction(...)`（DataSource / EntityManager）与
  *    `xxx.startTransaction(...)`（QueryRunner），两者都能开启真实事务；
  * 3. 逐条比对 ALLOWED_DIRECT_TRANSACTION_CALLS 白名单，未登记的一律判定为违规；
- * 4. 反向校验白名单本身：每条登记项都必须仍能在代码中命中，避免代码删改后白名单变成死条目、
- *    把本该拦截的新调用悄悄放行；
+ * 4. 白名单键为「文件 + 所在函数 + 接收者 + 方法名」四元组，并校验每个键命中的调用数量精确等于登记值——
+ *    既避免代码删改后条目退化成死条目，也避免一条豁免顺带放行同文件（乃至同函数）内新增的其它调用；
  * 5. 顺带确认 runInTransaction 确实被服务层广泛使用，防止闸门被整体架空后本门禁仍然“通过”。
  *
  * 为什么用 AST 而不是正则：
@@ -41,6 +41,7 @@ type TransactionCall = {
   line: number
   receiver: string
   method: string
+  enclosingFunction: string
   text: string
 }
 
@@ -59,18 +60,26 @@ const ALLOWED_DIRECT_TRANSACTION_CALLS: Array<{
   relativePath: string
   receiver: string
   method: string
+  /** 调用所在的函数/方法名，把豁免绑定到具体调用点而非整个文件。 */
+  enclosingFunction: string
+  /** 该键预期命中的调用数量，必须精确相等——多出来的同名调用就是未登记的新增。 */
+  expectedCount: number
   reason: string
 }> = [
   {
     relativePath: TRANSACTION_RUNNER_FILE,
     receiver: 'AppDataSource',
     method: 'transaction',
+    enclosingFunction: 'execute',
+    expectedCount: 1,
     reason: '闸门自身的实现：串行化排队之后最终要落到真正的 TypeORM 事务上',
   },
   {
     relativePath: 'src/config/database-bootstrap.ts',
     receiver: 'dataSource',
     method: 'transaction',
+    enclosingFunction: 'migrateLegacyFeedbackAttachments',
+    expectedCount: 1,
     reason:
       'migrateLegacyFeedbackAttachments 属于启动期一次性数据迁移，'
       + '运行在服务开始接受请求之前，不存在与业务写事务并发重叠的可能；'
@@ -80,6 +89,8 @@ const ALLOWED_DIRECT_TRANSACTION_CALLS: Array<{
     relativePath: 'src/services/database-migration.service.ts',
     receiver: 'queryRunner',
     method: 'startTransaction',
+    enclosingFunction: 'migrateSingleTableByPrimaryKey',
+    expectedCount: 1,
     reason:
       'migrateSingleTableByPrimaryKey 面向的是迁移目标库 targetDataSource（独立于 AppDataSource 的外部 MySQL 连接），'
       + '不走本进程的 SQLite 数据源，闸门的串行化对它既不适用也无意义；'
@@ -89,6 +100,8 @@ const ALLOWED_DIRECT_TRANSACTION_CALLS: Array<{
     relativePath: 'src/commands/seed-database-migration-e2e.ts',
     receiver: 'queryRunner',
     method: 'startTransaction',
+    enclosingFunction: 'main',
+    expectedCount: 1,
     reason:
       '迁移 E2E 夹具播种命令，作为一次性 CLI 独占进程运行，不与线上请求并发；'
       + '需要在同一 QueryRunner 上串接 PRAGMA 设置与批量播种，无法交由闸门代管',
@@ -113,6 +126,33 @@ const listTypeScriptFiles = (dir: string): string[] => {
 
 const toRelativePath = (filePath: string) =>
   path.relative(backendRoot, filePath).split(path.sep).join('/')
+
+/**
+ * 沿 AST 向上找到调用所在的函数/方法名，用于把豁免绑定到**具体调用点**而非整个文件。
+ * 覆盖具名函数、类方法，以及赋给具名变量的函数/箭头函数（本仓库常见写法）。
+ * 找不到具名宿主时回退为 '<module>'（顶层语句）。
+ */
+const resolveEnclosingFunctionName = (node: ts.Node, sourceFile: ts.SourceFile): string => {
+  let current: ts.Node | undefined = node.parent
+  while (current) {
+    if (
+      (ts.isFunctionDeclaration(current) || ts.isMethodDeclaration(current))
+      && current.name
+    ) {
+      return current.name.getText(sourceFile)
+    }
+    if (
+      (ts.isArrowFunction(current) || ts.isFunctionExpression(current))
+      && current.parent
+      && ts.isVariableDeclaration(current.parent)
+      && ts.isIdentifier(current.parent.name)
+    ) {
+      return current.parent.name.text
+    }
+    current = current.parent
+  }
+  return '<module>'
+}
 
 /**
  * 遍历 AST 收集事务入口调用。
@@ -144,6 +184,7 @@ const collectTransactionCalls = (): TransactionCall[] => {
             line: line + 1,
             receiver,
             method: methodName,
+            enclosingFunction: resolveEnclosingFunctionName(node, sourceFile),
             text: node.getText(sourceFile).split('\n')[0].trim(),
           })
         }
@@ -194,14 +235,17 @@ const main = () => {
   )
 
   const calls = collectTransactionCalls()
-  const isAllowed = (call: TransactionCall) =>
-    ALLOWED_DIRECT_TRANSACTION_CALLS.some(
-      (allowed) => allowed.relativePath === call.relativePath
-        && allowed.receiver === call.receiver
-        && allowed.method === call.method,
-    )
 
-  const violations = calls.filter((call) => !isAllowed(call))
+  // 豁免键包含所在函数：一条豁免只覆盖它登记的那个调用点，
+  // 而不是"同文件内所有同名调用"——否则在已豁免的文件里新增一个来源完全不同的
+  // queryRunner.startTransaction()（例如 runner 来自 AppDataSource 的 SQLite 连接），
+  // 会白蹭现有豁免直接通过，重新引入 issue #36 的并发事务错误。
+  const callKey = (item: { relativePath: string; receiver: string; method: string; enclosingFunction: string }) =>
+    `${item.relativePath}::${item.enclosingFunction}::${item.receiver}.${item.method}`
+
+  const allowedByKey = new Map(ALLOWED_DIRECT_TRANSACTION_CALLS.map((item) => [callKey(item), item]))
+
+  const violations = calls.filter((call) => !allowedByKey.has(callKey(call)))
   assert.equal(
     violations.length,
     0,
@@ -212,25 +256,30 @@ const main = () => {
     + '确有理由直接使用的，请在本脚本的 ALLOWED_DIRECT_TRANSACTION_CALLS 中登记并写明原因。\n'
     + '违规位置：\n'
     + violations
-      .map((call) => `  - ${call.relativePath}:${call.line}  ${call.receiver}.${call.method}(…)`)
+      .map((call) => `  - ${call.relativePath}:${call.line}  ${call.enclosingFunction}() 内 ${call.receiver}.${call.method}(…)`)
       .join('\n'),
   )
 
-  // 反向校验：白名单条目必须仍能命中真实代码。
-  // 否则代码删改后白名单会退化成死条目，将来同名文件里新增的直调会被它默默放行。
-  const staleAllowances = ALLOWED_DIRECT_TRANSACTION_CALLS.filter(
-    (allowed) => !calls.some(
-      (call) => call.relativePath === allowed.relativePath
-        && call.receiver === allowed.receiver
-        && call.method === allowed.method,
-    ),
-  )
+  // 逐条校验白名单键命中的调用数量必须**精确等于**登记值：
+  // - 命中 0 处 → 死条目，代码已删改，留着会在将来误放行同位置的新调用；
+  // - 命中多于登记值 → 同一函数内新增了未登记的调用，同样必须显式登记原因后才放行。
+  const countMismatches = ALLOWED_DIRECT_TRANSACTION_CALLS
+    .map((allowed) => ({
+      allowed,
+      actual: calls.filter((call) => callKey(call) === callKey(allowed)).length,
+    }))
+    .filter(({ allowed, actual }) => actual !== allowed.expectedCount)
+
   assert.equal(
-    staleAllowances.length,
+    countMismatches.length,
     0,
-    '白名单存在已失效条目，请从 ALLOWED_DIRECT_TRANSACTION_CALLS 中移除，避免将来误放行新的直调：\n'
-    + staleAllowances
-      .map((item) => `  - ${item.relativePath}（${item.receiver}.${item.method}）`)
+    '白名单条目命中的调用数量与登记值不一致。\n'
+    + '命中 0 处说明条目已失效，请移除，否则将来同位置的新调用会被它误放行；\n'
+    + '命中多于登记值说明同一函数内新增了未登记的事务调用，请确认其数据源与并发场景后再登记。\n'
+    + countMismatches
+      .map(({ allowed, actual }) =>
+        `  - ${allowed.relativePath} ${allowed.enclosingFunction}() ${allowed.receiver}.${allowed.method}`
+        + `：登记 ${allowed.expectedCount} 处，实际命中 ${actual} 处`)
       .join('\n'),
   )
 
@@ -246,9 +295,9 @@ const main = () => {
   const byMethod = [...TRANSACTION_ENTRY_METHODS]
     .map((method) => `${method}: ${calls.filter((call) => call.method === method).length}`)
     .join('，')
-  log(`AST 扫描到 ${calls.length} 处事务入口调用（${byMethod}），全部为已登记豁免`)
+  log(`AST 扫描到 ${calls.length} 处事务入口调用（${byMethod}），全部命中已登记豁免且数量精确匹配`)
   ALLOWED_DIRECT_TRANSACTION_CALLS.forEach((item) => {
-    log(`  豁免 ${item.relativePath}（${item.receiver}.${item.method}）：${item.reason}`)
+    log(`  豁免 ${item.relativePath} ${item.enclosingFunction}()（${item.receiver}.${item.method} × ${item.expectedCount}）：${item.reason}`)
   })
   log(`runInTransaction 调用点 ${runInTransactionUsages} 处，闸门处于生效状态`)
 }
