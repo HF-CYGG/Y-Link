@@ -8,9 +8,11 @@
  *    这类直接下发事务控制 SQL 的写法；三者都能开启真实事务。
  *    前两类在**成员引用处**记账而非调用处，因此 `const start = qr.startTransaction.bind(qr)`
  *    这种先绑定再调用、以及赋值给变量的别名写法同样会被捕获；
- *    第三类不只认字面量：会静态求出首参的**可知前缀**，覆盖常量变量、多跳别名、
- *    字符串拼接、三元分支，以及模板字符串的 head——事务控制 SQL 必然以关键字开头，
+ *    第三类不只认字面量：会静态求出首参的**可知前缀**，覆盖常量变量、变量重新赋值、
+ *    多跳别名、字符串拼接、三元分支，以及模板字符串的 head——事务控制 SQL 必然以关键字开头，
  *    而模板的 head 是字面的，`` `BEGIN ${x}` `` 因此也能判定；
+ *    判定前会剥掉 SQL 的前导注释（`/* … *​/` 与 `--`），因为数据库会先忽略注释再执行；
+ *    成员名解析同时接受点号与字符串下标（`ds.query` 与 `ds['query']` 是同一个 API）；
  * 3. 逐条比对 ALLOWED_DIRECT_TRANSACTION_CALLS 白名单，未登记的一律判定为违规；
  * 4. 白名单键为「文件 + 所在函数 + 接收者 + 方法名」四元组，并校验每个键命中的调用数量精确等于登记值——
  *    既避免代码删改后条目退化成死条目，也避免一条豁免顺带放行同文件（乃至同函数）内新增的其它调用；
@@ -66,46 +68,89 @@ const TRANSACTION_ENTRY_METHODS = new Set(['transaction', 'startTransaction'])
  * `BEGIN` 返回后租约即释放，后续事务语句仍可与其它写入交错，等于没有任何串行化保护。
  */
 const TRANSACTION_CONTROL_SQL_PATTERN =
-  /^\s*(BEGIN|START\s+TRANSACTION|COMMIT|ROLLBACK|SAVEPOINT|RELEASE\s+SAVEPOINT|SET\s+TRANSACTION)\b/i
+  /^(BEGIN|START\s+TRANSACTION|COMMIT|ROLLBACK|SAVEPOINT|RELEASE\s+SAVEPOINT|SET\s+TRANSACTION)\b/i
 
 /**
- * 在使用点可见的作用域内查找 `const NAME = <初始化表达式>`，用于把
- * `const sql = 'BEGIN'; await ds.query(sql)` 这类一层间接解开。
- * 从使用点向上逐层找，命中最近的那个声明，避免被同名的无关变量误导。
+ * 去掉 SQL 的前导空白与注释后再判定关键字。
+ * 数据库会先忽略注释再执行，因此 `'/* maintenance *​/ BEGIN'` 与 `'BEGIN'` 运行语义完全相同，
+ * 只按空白跳过会漏掉这种写法。`--` 行注释同理。
  */
-const resolveConstInitializer = (
+const stripLeadingSqlNoise = (sql: string): string => {
+  let rest = sql
+  for (;;) {
+    const trimmed = rest.replace(/^\s+/, '')
+    if (trimmed.startsWith('/*')) {
+      const end = trimmed.indexOf('*/')
+      // 注释未闭合：后面的内容无法判定，按原样返回交给正则（必然不匹配关键字）。
+      if (end === -1) {
+        return trimmed
+      }
+      rest = trimmed.slice(end + 2)
+      continue
+    }
+    if (trimmed.startsWith('--')) {
+      const end = trimmed.indexOf('\n')
+      if (end === -1) {
+        return ''
+      }
+      rest = trimmed.slice(end + 1)
+      continue
+    }
+    return trimmed
+  }
+}
+
+/**
+ * 收集标识符在使用点可能持有的**全部**候选表达式。
+ *
+ * 只取声明处的初始化表达式是不够的：`let sql = 'SELECT 1'; sql = 'BEGIN'; ds.query(sql)`
+ * 里真正执行的是重新赋值后的值。因此这里把「声明初始化」与「作用域内对该名字的所有赋值」
+ * 一并收集，任一候选命中事务关键字即判定为事务入口——在门禁场景下宁可多报也不能漏报。
+ *
+ * 从使用点向上逐层找，命中最近的那个作用域，避免被同名的无关变量误导。
+ */
+const collectIdentifierCandidates = (
   identifier: ts.Identifier,
-  sourceFile: ts.SourceFile,
-): ts.Expression | undefined => {
+): ts.Expression[] => {
   const name = identifier.text
   let scope: ts.Node | undefined = identifier.parent
 
   while (scope) {
-    let found: ts.Expression | undefined
+    const candidates: ts.Expression[] = []
+    let declaredHere = false
+
     ts.forEachChild(scope, function scan(node): void {
-      if (found) {
-        return
-      }
       if (
         ts.isVariableDeclaration(node)
         && ts.isIdentifier(node.name)
         && node.name.text === name
-        && node.initializer
       ) {
-        found = node.initializer
-        return
+        declaredHere = true
+        if (node.initializer) {
+          candidates.push(node.initializer)
+        }
       }
-      // 只在当前作用域的语句层面下钻，不进入嵌套函数体——那不是同一个作用域。
-      if (!ts.isFunctionLike(node)) {
-        ts.forEachChild(node, scan)
+      // 重新赋值：`sql = 'BEGIN'`（含 `+=` 这类复合赋值的右值）
+      if (
+        ts.isBinaryExpression(node)
+        && ts.isIdentifier(node.left)
+        && node.left.text === name
+        && (node.operatorToken.kind === ts.SyntaxKind.EqualsToken
+          || node.operatorToken.kind === ts.SyntaxKind.PlusEqualsToken)
+      ) {
+        candidates.push(node.right)
       }
+      // 赋值可能发生在嵌套闭包里，所以这里要下钻进函数体；
+      // 而作用域归属仍由外层 while 逐层向上的顺序保证。
+      ts.forEachChild(node, scan)
     })
-    if (found) {
-      return found
+
+    if (declaredHere || candidates.length > 0) {
+      return candidates
     }
     scope = scope.parent
   }
-  return undefined
+  return []
 }
 
 /**
@@ -138,8 +183,8 @@ const collectStaticSqlPrefixes = (
     return node.head.text ? [node.head.text] : []
   }
   if (ts.isIdentifier(node)) {
-    const initializer = resolveConstInitializer(node, sourceFile)
-    return initializer ? collectStaticSqlPrefixes(initializer, sourceFile, seen) : []
+    return collectIdentifierCandidates(node)
+      .flatMap((candidate) => collectStaticSqlPrefixes(candidate, sourceFile, seen))
   }
   // 字符串拼接：左侧决定开头。
   if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
@@ -164,6 +209,7 @@ const readTransactionControlSql = (
     return undefined
   }
   return collectStaticSqlPrefixes(first, sourceFile)
+    .map(stripLeadingSqlNoise)
     .find((prefix) => TRANSACTION_CONTROL_SQL_PATTERN.test(prefix))
 }
 
@@ -272,6 +318,35 @@ const toRelativePath = (filePath: string) =>
   path.relative(backendRoot, filePath).split(path.sep).join('/')
 
 /**
+ * 取成员访问的成员名，同时覆盖点号与字符串下标两种写法：
+ * `ds.query` 与 `ds['query']` 在运行时是同一个 API，判定时必须一视同仁。
+ * 非成员访问、或下标不是字符串字面量（无法静态判定）时返回 undefined。
+ */
+const readAccessedMemberName = (node: ts.Node): string | undefined => {
+  if (ts.isPropertyAccessExpression(node)) {
+    return node.name.text
+  }
+  if (
+    ts.isElementAccessExpression(node)
+    && node.argumentExpression
+    && ts.isStringLiteralLike(node.argumentExpression)
+  ) {
+    return node.argumentExpression.text
+  }
+  return undefined
+}
+
+/** 取成员访问的接收者短名，供白名单以稳定名称登记。 */
+const readReceiverName = (
+  accessNode: ts.PropertyAccessExpression | ts.ElementAccessExpression,
+  sourceFile: ts.SourceFile,
+): string => {
+  const receiverNode = accessNode.expression
+  const nestedName = readAccessedMemberName(receiverNode)
+  return nestedName ?? receiverNode.getText(sourceFile)
+}
+
+/**
  * 沿 AST 向上找到调用所在的函数/方法名，用于把豁免绑定到**具体调用点**而非整个文件。
  * 覆盖具名函数、类方法，以及赋给具名变量的函数/箭头函数（本仓库常见写法）。
  * 找不到具名宿主时回退为 '<module>'（顶层语句）。
@@ -316,52 +391,39 @@ const collectTransactionCalls = (): TransactionCall[] => {
       // 只认调用会被一层间接绕过：`const start = qr.startTransaction.bind(qr); await start()`
       // 里，唯一的调用表达式是 `.bind(...)` 和 `start()`，事务方法本身从未出现在被调用位置。
       // 改为在引用处记账后，绑定、赋值给变量、作为回调传出去等写法都会在引用点被捕获。
-      const methodName = ts.isPropertyAccessExpression(node)
-        ? node.name.text
-        // 兼容 `qr['startTransaction']` 这类元素访问写法
-        : (ts.isElementAccessExpression(node)
-          && node.argumentExpression
-          && ts.isStringLiteralLike(node.argumentExpression)
-          ? node.argumentExpression.text
-          : undefined)
+      const memberName = readAccessedMemberName(node)
 
       // 原始事务控制 SQL：`xxx.query('BEGIN')` 等价于开启事务，必须与方法入口同等对待。
-      if (
-        ts.isCallExpression(node)
-        && ts.isPropertyAccessExpression(node.expression)
-        && node.expression.name.text === 'query'
-      ) {
-        const sqlText = readTransactionControlSql(node, sourceFile)
-        if (sqlText) {
-          const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile))
-          const receiverNode = node.expression.expression
-          calls.push({
-            relativePath,
-            line: line + 1,
-            receiver: ts.isPropertyAccessExpression(receiverNode)
-              ? receiverNode.name.text
-              : receiverNode.getText(sourceFile),
-            method: `query:${sqlText.trim().split(/\s+/)[0].toUpperCase()}`,
-            enclosingFunction: resolveEnclosingFunctionName(node, sourceFile),
-            text: node.getText(sourceFile).split('\n')[0].trim(),
-          })
+      // 被调用者同样要接受 `xxx['query'](...)`——运行时是同一个 API。
+      if (ts.isCallExpression(node)) {
+        const calleeName = readAccessedMemberName(node.expression)
+        if (calleeName === 'query') {
+          const sqlText = readTransactionControlSql(node, sourceFile)
+          if (sqlText) {
+            const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile))
+            const callee = node.expression as ts.PropertyAccessExpression | ts.ElementAccessExpression
+            calls.push({
+              relativePath,
+              line: line + 1,
+              receiver: readReceiverName(callee, sourceFile),
+              method: `query:${sqlText.trim().split(/\s+/)[0].toUpperCase()}`,
+              enclosingFunction: resolveEnclosingFunctionName(node, sourceFile),
+              text: node.getText(sourceFile).split('\n')[0].trim(),
+            })
+          }
         }
       }
 
-      if (methodName && TRANSACTION_ENTRY_METHODS.has(methodName)) {
+      if (memberName && TRANSACTION_ENTRY_METHODS.has(memberName)) {
         const accessNode = node as ts.PropertyAccessExpression | ts.ElementAccessExpression
         const { line } = sourceFile.getLineAndCharacterOfPosition(accessNode.getStart(sourceFile))
-        // receiver 取最末一段标识符：`this.foo.transaction` 记为 foo，
-        // 便于白名单以稳定的短名称登记，同时仍能区分同文件内的不同接收者。
-        const receiverNode = accessNode.expression
-        const receiver = ts.isPropertyAccessExpression(receiverNode)
-          ? receiverNode.name.text
-          : receiverNode.getText(sourceFile)
         calls.push({
           relativePath,
           line: line + 1,
-          receiver,
-          method: methodName,
+          // receiver 取最末一段标识符：`this.foo.transaction` 记为 foo，
+          // 便于白名单以稳定的短名称登记，同时仍能区分同文件内的不同接收者。
+          receiver: readReceiverName(accessNode, sourceFile),
+          method: memberName,
           enclosingFunction: resolveEnclosingFunctionName(accessNode, sourceFile),
           text: accessNode.getText(sourceFile).split('\n')[0].trim(),
         })
