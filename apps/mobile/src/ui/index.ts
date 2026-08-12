@@ -8,3 +8,4 @@ export * from './ErrorState';
 export * from './LoadingState';
 export * from './Skeleton';
 export * from './SectionHeader';
+export * from './Checkbox';
