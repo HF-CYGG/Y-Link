@@ -151,6 +151,7 @@ const run = async () => {
   )
 
   const departmentOwnedResult = await o2oPreorderService.submit(clientAuth, {
+    clientRequestId: 'o2o-verify-department-owned-01',
     items: [{ productId: product.id, qty: 1 }],
     remark: '部门账号归属强制判定验证',
     isSystemApplied: false,
@@ -164,6 +165,7 @@ const run = async () => {
   log('服务端会按部门账号强制判定订单归属通过')
 
   const departmentSnapshotPreorder = await o2oPreorderService.submit(clientAuth, {
+    clientRequestId: 'o2o-verify-department-snapshot-01',
     items: [{ productId: product.id, qty: 1 }],
     remark: '部门快照固化验证',
     isSystemApplied: true,
@@ -195,17 +197,37 @@ const run = async () => {
   )
 
   const productStateBeforeRegularPreorder = await productRepo.findOneByOrFail({ id: product.id })
-  const preorderResult = await o2oPreorderService.submit(clientAuth, {
+  const idempotentSubmitPayload = {
+    clientRequestId: 'o2o-verify-manual-cancel-0001',
     items: [{ productId: product.id, qty: 2 }],
     remark: '自动化验证',
     isSystemApplied: false,
     pickupContact: '脚本提货人-A',
-  })
+  }
+  const idempotentSubmitResults = await Promise.all(
+    Array.from({ length: 10 }, () => o2oPreorderService.submit(clientAuth, idempotentSubmitPayload)),
+  )
+  const preorderResult = idempotentSubmitResults[0]
+  assert.ok(preorderResult)
+  assert.equal(new Set(idempotentSubmitResults.map((item) => item.order.id)).size, 1)
+  assert.equal(await preorderRepo.count({
+    where: {
+      clientUserId: clientAuth.userId,
+      clientRequestId: idempotentSubmitPayload.clientRequestId,
+    },
+  }), 1)
+  await expectBizError(
+    () => o2oPreorderService.submit(clientAuth, {
+      ...idempotentSubmitPayload,
+      items: [{ productId: product.id, qty: 3 }],
+    }),
+    '请求键已被其他内容使用',
+  )
   assert.equal(preorderResult.order.status, 'pending')
   assert.equal(preorderResult.order.pickupContact, expectedDepartmentPickupContact)
   const heldProduct = await productRepo.findOneByOrFail({ id: product.id })
   assert.equal(heldProduct.preOrderedStock, productStateBeforeRegularPreorder.preOrderedStock + 2)
-  log('客户端下单与库存预占通过')
+  log('客户端并发幂等下单与单次库存预占通过')
 
   const otherClientAuth = await registerAndLoginClient(Date.now() + 1)
   await expectBizError(() => o2oPreorderService.cancelMyOrder(otherClientAuth, preorderResult.order.id), '无权撤回他人订单')
@@ -237,6 +259,7 @@ const run = async () => {
   log('手动撤回原因持久化通过')
 
   const timeoutPreorder = await o2oPreorderService.submit(clientAuth, {
+    clientRequestId: 'o2o-verify-timeout-cancel-001',
     items: [{ productId: product.id, qty: 1 }],
     remark: '超时取消验证',
     isSystemApplied: false,
@@ -248,13 +271,21 @@ const run = async () => {
       timeoutAt: new Date(Date.now() - 60 * 1000),
     },
   )
-  const timeoutCancelResult = await o2oPreorderService.cancelTimeoutOrders()
-  assert.ok(timeoutCancelResult.cancelledCount >= 1)
+  const timeoutCancelResults = await Promise.all(
+    Array.from({ length: 5 }, () => o2oPreorderService.cancelTimeoutOrders()),
+  )
+  assert.ok(timeoutCancelResults.some((result) => result.cancelledCount >= 1))
   const timeoutDetail = await o2oPreorderService.detailById(timeoutPreorder.order.id)
   assert.equal(timeoutDetail.order.status, 'cancelled')
   assert.equal(timeoutDetail.order.statusReport.cancelReason, 'timeout')
   assert.equal(timeoutDetail.order.statusReport.scenario, 'timeout_cancelled')
-  log('超时自动取消原因输出通过')
+  assert.equal(await inventoryLogRepo.count({
+    where: {
+      refId: timeoutPreorder.order.id,
+      changeType: 'preorder_release',
+    },
+  }), 1)
+  log('超时订单并发回收 CAS 与单次库存释放通过')
 
   const adminPassword = process.env.Y_LINK_VERIFY_ADMIN_PASSWORD?.trim()
   const adminLogin =
@@ -279,6 +310,7 @@ const run = async () => {
   log('部门订单下单快照会稳定继承到正式出库单通过')
 
   const verifiedPreorder = await o2oPreorderService.submit(clientAuth, {
+    clientRequestId: 'o2o-verify-completed-order-001',
     items: [{ productId: product.id, qty: 2 }],
     remark: '核销后不可撤回验证',
     isSystemApplied: false,

@@ -198,6 +198,7 @@ async function main() {
     const clientAuth = await registerAndLoginClient(clientAuthService)
     await assert.rejects(
       () => o2oPreorderService.submit(clientAuth, {
+        clientRequestId: 'sku-verify-overstock-0001',
         items: [
           { productId: product.id, qty: 3 },
           { productId: product.id, skuId: otherSku.id, qty: 3 },
@@ -211,6 +212,7 @@ async function main() {
     pass('下单前合并省略 SKU 与显式 SKU 后校验库存')
 
     const preorder = await o2oPreorderService.submit(clientAuth, {
+      clientRequestId: 'sku-verify-submit-000001',
       items: [{ productId: product.id, skuId: targetSku.id, qty: 2 }],
       remark: '规格 SKU 下单验证',
       pickupContact: '规格验证提货人',
@@ -327,6 +329,7 @@ async function main() {
 
     await assert.rejects(
       () => o2oPreorderService.submit(clientAuth, {
+        clientRequestId: 'sku-verify-limit-0000001',
         items: [
           { productId: defaultProduct.id, qty: 3 },
           { productId: defaultProduct.id, skuId: defaultSkuId, qty: 3 },
@@ -390,6 +393,7 @@ async function main() {
     pass('全停用 SKU 商品在商城不展示可售库存')
 
     const cancelPreorder = await o2oPreorderService.submit(clientAuth, {
+      clientRequestId: 'sku-verify-cancel-000001',
       items: [{ productId: product.id, skuId: targetSku.id, qty: 1 }],
       remark: '规格 SKU 撤回验证',
       pickupContact: '规格验证提货人',

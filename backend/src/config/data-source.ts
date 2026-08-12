@@ -9,6 +9,7 @@ import { DataSource, type DataSourceOptions } from 'typeorm'
 import { resolveSqliteDatabasePath } from './database-bootstrap.js'
 import { env } from './env.js'
 import type { DatabaseRuntimeOverrideConfig } from './database-runtime-override.js'
+import { databasePerformanceLogger } from '../database/database-performance-logger.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { BaseProductSku } from '../entities/base-product-sku.entity.js'
 import { BaseTag } from '../entities/base-tag.entity.js'
@@ -37,6 +38,7 @@ import { NotificationEvent } from '../entities/notification-event.entity.js'
 import { NotificationInbox } from '../entities/notification-inbox.entity.js'
 import { NotificationDispatch } from '../entities/notification-dispatch.entity.js'
 import { AuthRiskState } from '../entities/auth-risk-state.entity.js'
+import { BusinessSequence } from '../entities/business-sequence.entity.js'
 
 export const appEntities = [
   BaseProduct,
@@ -67,6 +69,7 @@ export const appEntities = [
   NotificationInbox,
   NotificationDispatch,
   AuthRiskState,
+  BusinessSequence,
 ]
 
 function resolveEffectiveDatabaseConfig(
@@ -99,7 +102,10 @@ export function createDataSourceOptions(runtimeOverride?: DatabaseRuntimeOverrid
     logging: false,
     entities: appEntities,
     synchronize: databaseConfig.DB_SYNC ?? false,
-  } satisfies Pick<DataSourceOptions, 'logging' | 'entities' | 'synchronize'>
+    // 只记录超过阈值的慢查询，不把 SQL 与参数全量写入日志。
+    maxQueryExecutionTime: env.DB_MAX_QUERY_MS,
+    logger: databasePerformanceLogger,
+  } satisfies Pick<DataSourceOptions, 'logging' | 'entities' | 'synchronize' | 'maxQueryExecutionTime' | 'logger'>
 
   // 通过 DB_TYPE 切换数据库方言：
   // - sqlite：默认用于一体化部署，数据库落盘为本地文件；
@@ -111,6 +117,9 @@ export function createDataSourceOptions(runtimeOverride?: DatabaseRuntimeOverrid
     return {
       type: 'sqlite',
       database: resolveSqliteDatabasePath(databaseConfig.SQLITE_DB_PATH),
+      // TypeORM 在连接建立阶段先启用 WAL 与 busy_timeout；启动策略随后会再次校验并补齐其余 PRAGMA。
+      enableWAL: true,
+      busyTimeout: env.SQLITE_BUSY_TIMEOUT_MS,
       ...commonOptions,
     }
   }
@@ -126,6 +135,20 @@ export function createDataSourceOptions(runtimeOverride?: DatabaseRuntimeOverrid
     username: databaseConfig.DB_USER,
     password: databaseConfig.DB_PASSWORD ?? '',
     database: databaseConfig.DB_NAME,
+    connectorPackage: 'mysql2',
+    charset: 'utf8mb4',
+    connectTimeout: env.DB_CONNECT_TIMEOUT_MS,
+    poolSize: env.DB_POOL_SIZE,
+    multipleStatements: false,
+    extra: {
+      waitForConnections: true,
+      connectionLimit: env.DB_POOL_SIZE,
+      maxIdle: env.DB_POOL_SIZE,
+      idleTimeout: env.DB_IDLE_TIMEOUT_MS,
+      queueLimit: env.DB_QUEUE_LIMIT,
+      enableKeepAlive: true,
+      keepAliveInitialDelay: 0,
+    },
     // SQLite 与现有 API 都按 UTC 解释无时区 datetime；显式固定 MySQL
     // 会话解析时区，避免 onebox 使用 Asia/Shanghai 时序列化后平移 8 小时。
     timezone: 'Z',

@@ -7,7 +7,7 @@
  * - 详情区的状态文案必须复用共享状态配置，避免“主动撤回”被错误展示成普通取消。
  */
 
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { PageContainer } from '@/components/common'
@@ -114,6 +114,8 @@ const departmentOptionsLoading = ref(false)
 let autoRefreshTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let secondTickTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let reminderAudioContext: AudioContext | null = null
+let pageRuntimeActive = false
+let hasActivatedOnce = false
 
 const query = reactive({
   keyword: '',
@@ -1156,7 +1158,7 @@ const scheduleAutoRefresh = () => {
     globalThis.clearInterval(autoRefreshTimer)
     autoRefreshTimer = null
   }
-  if (!autoRefreshEnabled.value) {
+  if (!pageRuntimeActive || globalThis.document?.visibilityState === 'hidden' || !autoRefreshEnabled.value) {
     return
   }
   autoRefreshTimer = globalThis.setInterval(() => {
@@ -1166,6 +1168,25 @@ const scheduleAutoRefresh = () => {
     }
     void loadOrders({ silent: true })
   }, pollIntervalSeconds.value * 1000)
+}
+
+const stopSecondTick = () => {
+  if (secondTickTimer === null) {
+    return
+  }
+  globalThis.clearInterval(secondTickTimer)
+  secondTickTimer = null
+}
+
+const scheduleSecondTick = () => {
+  stopSecondTick()
+  if (!pageRuntimeActive || globalThis.document?.visibilityState === 'hidden') {
+    return
+  }
+  secondTickTimer = globalThis.setInterval(() => {
+    nowMs.value = Date.now()
+    pruneTransientMarks()
+  }, 1000)
 }
 
 const handleAutoRefreshChange = () => {
@@ -1186,31 +1207,59 @@ const handleSoundSwitchChange = () => {
 }
 
 const handleVisibilityChange = () => {
-  if (globalThis.document.visibilityState === 'visible' && autoRefreshEnabled.value && !listLoading.value && !detailLoading.value) {
+  if (!pageRuntimeActive) {
+    return
+  }
+  if (globalThis.document.visibilityState === 'hidden') {
+    scheduleAutoRefresh()
+    stopSecondTick()
+    return
+  }
+  scheduleAutoRefresh()
+  scheduleSecondTick()
+  if (autoRefreshEnabled.value && !listLoading.value && !detailLoading.value) {
     void loadOrders({ silent: true })
   }
 }
 
+const activatePageRuntime = () => {
+  if (pageRuntimeActive) {
+    return
+  }
+  pageRuntimeActive = true
+  globalThis.document?.addEventListener('visibilitychange', handleVisibilityChange)
+  scheduleAutoRefresh()
+  scheduleSecondTick()
+  if (hasActivatedOnce && globalThis.document?.visibilityState !== 'hidden' && !listLoading.value && !detailLoading.value) {
+    void loadOrders({ silent: true })
+  }
+  hasActivatedOnce = true
+}
+
+const deactivatePageRuntime = () => {
+  if (!pageRuntimeActive) {
+    return
+  }
+  pageRuntimeActive = false
+  globalThis.document?.removeEventListener('visibilitychange', handleVisibilityChange)
+  scheduleAutoRefresh()
+  stopSecondTick()
+}
+
 onMounted(async () => {
   await Promise.all([loadOrders(), loadDepartmentOptions()])
-  scheduleAutoRefresh()
-  globalThis.document?.addEventListener('visibilitychange', handleVisibilityChange)
-  secondTickTimer = globalThis.setInterval(() => {
-    nowMs.value = Date.now()
-    pruneTransientMarks()
-  }, 1000)
+})
+
+onActivated(() => {
+  activatePageRuntime()
+})
+
+onDeactivated(() => {
+  deactivatePageRuntime()
 })
 
 onBeforeUnmount(() => {
-  globalThis.document?.removeEventListener('visibilitychange', handleVisibilityChange)
-  if (autoRefreshTimer !== null) {
-    globalThis.clearInterval(autoRefreshTimer)
-    autoRefreshTimer = null
-  }
-  if (secondTickTimer !== null) {
-    globalThis.clearInterval(secondTickTimer)
-    secondTickTimer = null
-  }
+  deactivatePageRuntime()
   // 清理音频上下文，避免内存泄漏
   if (reminderAudioContext && reminderAudioContext.state !== 'closed') {
     reminderAudioContext.close().catch(() => undefined)

@@ -165,6 +165,7 @@ const seedOrdersForBaseline = async (clientAuth: ClientAuthContext) => {
   // 生成 60 条订单样本，覆盖 pending/verified/cancelled 三种状态。
   for (let index = 0; index < 60; index += 1) {
     await o2oPreorderService.submit(clientAuth, {
+      clientRequestId: `order-query-baseline-${String(index).padStart(4, '0')}`,
       // 基线场景只验证订单查询性能，不需要额外引入“系统申请”变量。
       isSystemApplied: false,
       // 当前 O2O 下单已强制要求显式提货人，脚本同步补齐，避免继续沿用旧版最小入参。

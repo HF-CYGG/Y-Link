@@ -10,7 +10,10 @@
 # - 构建阶段复制仓库级 `.npmrc`，强制使用官方 npm 源安装依赖并产出 Vite 静态资源；
 # - 运行阶段通过 Nginx 托管静态资源，并把 `/api` 代理到同编排的后端服务。
 # ------------------------------
-FROM --platform=$BUILDPLATFORM node:20-bookworm-slim AS build
+# sqlite3@5 的 N-API 预编译产物在 Node 22 LTS 上稳定可用；升级 Node 主版本前必须先通过 Onebox SQLite 冒烟。
+ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:22-bookworm-slim
+
+FROM --platform=$BUILDPLATFORM ${Y_LINK_NODE_IMAGE} AS build
 
 WORKDIR /app
 
@@ -39,12 +42,15 @@ FROM nginx:1.27-alpine AS runtime
 
 ENV TZ=Asia/Shanghai
 
-RUN apk add --no-cache tzdata
+RUN apk add --no-cache tzdata \
+  && mkdir -p /var/cache/nginx/ylink-public \
+  && chown -R nginx:nginx /var/cache/nginx/ylink-public
 
 # 使用可模板化站点配置：
 # - 处理 Vue Router history 路由回退；
 # - 默认代理到同编排 backend:3001，并通过延迟解析降低启动阶段 DNS 瞬态失败风险。
 COPY docker/nginx/default.conf.template /etc/nginx/templates/default.conf.template
+COPY docker/nginx/nginx.conf /etc/nginx/nginx.conf
 COPY --from=build /app/dist /usr/share/nginx/html
 
 EXPOSE 80

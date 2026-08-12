@@ -10,6 +10,16 @@
  *    既避免代码删改后条目退化成死条目，也避免一条豁免顺带放行同文件（乃至同函数）内新增的其它调用；
  * 5. 顺带确认 runInTransaction 确实被服务层广泛使用，防止闸门被整体架空后本门禁仍然“通过”。
  *
+ * 门禁挡住的到底是什么（#35 引入事务协调器之后）：
+ * `transaction-coordinator.ts` 会 patch `dataSource.transaction` / `query` / queryBuilder /
+ * 全局 EntityManager，因此直接调用 `AppDataSource.transaction` 在协调器装好之后确实也会被串行化。
+ * 但仍有两个缺口需要本门禁把守：
+ * 1. **`queryRunner.startTransaction()` 完全不在 patch 覆盖范围内**（协调器没有 patch
+ *    `createQueryRunner`），走这条路的写事务至今仍会绕过串行化；
+ * 2. `runInTransaction` 会先 `initializeDatabaseInfrastructure` 再开事务，直接调用则不保证这个次序——
+ *    协调器尚未装好时开的事务不受任何保护。
+ * 换言之：约定「一律走 runInTransaction」不是风格偏好，而是这两处保证的唯一来源。
+ *
  * 为什么用 AST 而不是正则：
  * 初版按行正则匹配 `identifier.transaction(`，有两个可被绕过的口子——
  * 把链式调用换行（`AppDataSource` 与 `.transaction(` 分处两行）就匹配不到；
@@ -70,9 +80,11 @@ const ALLOWED_DIRECT_TRANSACTION_CALLS: Array<{
     relativePath: TRANSACTION_RUNNER_FILE,
     receiver: 'AppDataSource',
     method: 'transaction',
-    enclosingFunction: 'execute',
+    enclosingFunction: 'runInTransaction',
     expectedCount: 1,
-    reason: '闸门自身的实现：串行化排队之后最终要落到真正的 TypeORM 事务上',
+    reason:
+      '闸门自身的实现：先 initializeDatabaseInfrastructure 装好事务协调器，'
+      + '再落到（已被协调器接管的）TypeORM 事务上',
   },
   {
     relativePath: 'src/config/database-bootstrap.ts',

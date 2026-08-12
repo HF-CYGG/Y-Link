@@ -25,15 +25,24 @@ type VendorChunkRule = {
 const VENDOR_CHUNK_RULES: VendorChunkRule[] = [
   {
     chunkName: 'framework',
-    packageNames: ['vue', 'vue-router', 'pinia'],
+    // `@vue/runtime-*` 也必须显式归入框架块；否则图表组件依赖 Vue 时，
+    // Rolldown 可能把运行时吸进 charting，最终迫使入口 HTML 预加载整包 ECharts。
+    packageNames: ['vue', '@vue', 'vue-router', 'pinia'],
   },
   {
     chunkName: 'ui-kit',
     packageNames: ['element-plus', '@element-plus', '@vueuse', 'dayjs'],
   },
   {
+    // 入口长期使用的 HTTP 客户端保留稳定 vendor 名称；其余未命中的依赖交给 Rolldown 按动态调用图拆分。
+    chunkName: 'vendor',
+    packageNames: ['axios'],
+  },
+  {
     chunkName: 'charting',
-    packageNames: ['echarts', 'vue-echarts', 'zrender'],
+    // 只把纯 ECharts 引擎放入低频重包；vue-echarts 留给动态 BaseEChart 路由块，
+    // 避免其 Vue 组件包装层把渲染运行时重新导出到 charting 并污染入口依赖图。
+    packageNames: ['echarts', 'zrender'],
   },
   {
     chunkName: 'pdf-export',
@@ -60,7 +69,7 @@ const resolveVendorChunk = (normalizedId: string) => {
     }
   }
 
-  return 'vendor'
+  return undefined
 }
 
 /**
@@ -189,8 +198,11 @@ export default defineConfig(({ command, mode }) => {
      * - 配合业务路由懒加载，避免低频功能污染高频首屏共享缓存。
      */
     build: {
-      modulePreload: false,
-      cssCodeSplit: false,
+      // 恢复 Vite 的静态依赖预加载，让入口和当前路由所需的公共块并行下载；
+      // charting/pdf/扫码等重包仍由独立动态路由引用，不会写入入口 HTML 的 preload 列表。
+      modulePreload: true,
+      // 页面样式跟随异步路由拆分，避免管理端低频工作台 CSS 阻塞客户端商城首屏。
+      cssCodeSplit: true,
       rollupOptions: {
         output: {
           manualChunks(id) {

@@ -424,6 +424,7 @@ async function main() {
     })
     const teacherAuth = await clientAuthService.resolveClientByToken(teacherRegisterResult.token)
     const teacherPreorder = await o2oPreorderService.submit(teacherAuth, {
+      clientRequestId: 'department-govern-teacher-001',
       isSystemApplied: false,
       pickupContact: '教师账号领取',
       items: [{ productId: product.id, qty: 1 }],
@@ -454,6 +455,7 @@ async function main() {
     })
     const departmentAuth = await clientAuthService.resolveClientByToken(departmentLogin.token)
     const departmentPreorder = await o2oPreorderService.submit(departmentAuth, {
+      clientRequestId: 'department-govern-shared-0001',
       isSystemApplied: false,
       pickupContact: '部门共享账号领取',
       items: [{ productId: product.id, qty: 1 }],

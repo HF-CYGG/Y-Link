@@ -13,7 +13,7 @@ import { ClientUser } from '../entities/client-user.entity.js'
 import { ClientFeedbackAttachment } from '../entities/client-feedback-attachment.entity.js'
 import { ClientFeedbackConversation } from '../entities/client-feedback-conversation.entity.js'
 import { ClientFeedbackMessage, type ClientFeedbackMessageAttachment } from '../entities/client-feedback-message.entity.js'
-import { assertMysqlRequiredTablesExist, runMysqlSchemaMigrations } from './mysql-migration-runner.js'
+import { assertMysqlRequiredSchemaExists, runMysqlSchemaMigrations } from './mysql-migration-runner.js'
 
 const SQLITE_REQUIRED_TABLES = [
   'base_product',
@@ -44,6 +44,7 @@ const SQLITE_REQUIRED_TABLES = [
   'notification_inbox',
   'notification_dispatch',
   'auth_risk_state',
+  'business_sequence',
 ]
 
 async function migrateLegacyFeedbackAttachments(dataSource: DataSource) {
@@ -181,6 +182,8 @@ const SQLITE_REQUIRED_CLIENT_FEEDBACK_CONVERSATION_COLUMNS = [
 ]
 const SQLITE_REQUIRED_CLIENT_FEEDBACK_MESSAGE_COLUMNS = ['internal_only', 'attachment_json']
 const SQLITE_REQUIRED_O2O_PREORDER_COLUMNS = [
+  'client_request_id',
+  'client_request_hash',
   'cancel_reason',
   'business_status',
   'merchant_message',
@@ -221,6 +224,14 @@ const SQLITE_REQUIRED_NOTIFICATION_RULE_COLUMNS = [
   'email_recipient_supplier_user_ids_json',
   'feishu_sign_secret',
 ]
+const SQLITE_REQUIRED_NOTIFICATION_EVENT_COLUMNS = [
+  'attempt_count',
+  'next_attempt_at',
+  'processing_started_at',
+  'processing_owner',
+  'processed_at',
+]
+const SQLITE_REQUIRED_NOTIFICATION_DISPATCH_COLUMNS = ['dedupe_key', 'last_attempt_at']
 
 async function listSqliteTableColumns(dataSource: DataSource, tableName: string): Promise<Set<string>> {
   const columns: Array<{ name: string }> = await dataSource.query(`PRAGMA table_info('${tableName}')`)
@@ -250,6 +261,94 @@ async function ensureSqliteIndex(
   const indexSet = await listSqliteIndexes(dataSource, tableName)
   if (!indexSet.has(indexName)) {
     await dataSource.query(createIndexSql)
+  }
+}
+
+async function normalizeSqliteNotificationOutbox(dataSource: DataSource): Promise<void> {
+  const inboxColumns = await listSqliteTableColumns(dataSource, 'notification_inbox')
+  const inboxUniqueIndexes = inboxColumns.size
+    ? await listSqliteUniqueIndexes(dataSource, 'notification_inbox')
+    : new Set<string>()
+  if (
+    inboxColumns.has('event_id')
+    && inboxColumns.has('user_id')
+    && !inboxUniqueIndexes.has('uk_notification_inbox_event_user')
+  ) {
+    // 历史同步实现可能为同一事件/账号写入重复收件箱；合并已读状态后保留最早一条。
+    await dataSource.query(`
+      UPDATE "notification_inbox"
+      SET
+        "is_read" = (
+          SELECT MAX("duplicate"."is_read")
+          FROM "notification_inbox" AS "duplicate"
+          WHERE "duplicate"."event_id" = "notification_inbox"."event_id"
+            AND "duplicate"."user_id" = "notification_inbox"."user_id"
+        ),
+        "read_at" = (
+          SELECT MAX("duplicate"."read_at")
+          FROM "notification_inbox" AS "duplicate"
+          WHERE "duplicate"."event_id" = "notification_inbox"."event_id"
+            AND "duplicate"."user_id" = "notification_inbox"."user_id"
+        )
+      WHERE "id" IN (
+        SELECT MIN("id")
+        FROM "notification_inbox"
+        GROUP BY "event_id", "user_id"
+        HAVING COUNT(*) > 1
+      )
+    `)
+    await dataSource.query(`
+      DELETE FROM "notification_inbox"
+      WHERE EXISTS (
+        SELECT 1
+        FROM "notification_inbox" AS "older"
+        WHERE "older"."event_id" = "notification_inbox"."event_id"
+          AND "older"."user_id" = "notification_inbox"."user_id"
+          AND "older"."id" < "notification_inbox"."id"
+      )
+    `)
+    await ensureSqliteIndex(
+      dataSource,
+      'notification_inbox',
+      'uk_notification_inbox_event_user',
+      `CREATE UNIQUE INDEX IF NOT EXISTS "uk_notification_inbox_event_user" ON "notification_inbox" ("event_id", "user_id")`,
+    )
+  }
+
+  const dispatchColumns = await listSqliteTableColumns(dataSource, 'notification_dispatch')
+  const dispatchUniqueIndexes = dispatchColumns.size
+    ? await listSqliteUniqueIndexes(dataSource, 'notification_dispatch')
+    : new Set<string>()
+  if (
+    dispatchColumns.has('dedupe_key')
+    && !dispatchUniqueIndexes.has('uk_notification_dispatch_event_channel_target')
+  ) {
+    await dataSource.query(`
+      DELETE FROM "notification_dispatch"
+      WHERE "dedupe_key" IS NOT NULL
+        AND EXISTS (
+          SELECT 1
+          FROM "notification_dispatch" AS "keeper"
+          WHERE "keeper"."event_id" = "notification_dispatch"."event_id"
+            AND "keeper"."channel" = "notification_dispatch"."channel"
+            AND "keeper"."dedupe_key" = "notification_dispatch"."dedupe_key"
+            AND (
+              CASE WHEN "keeper"."status" = 'sent' THEN 0 ELSE 1 END
+                < CASE WHEN "notification_dispatch"."status" = 'sent' THEN 0 ELSE 1 END
+              OR (
+                CASE WHEN "keeper"."status" = 'sent' THEN 0 ELSE 1 END
+                  = CASE WHEN "notification_dispatch"."status" = 'sent' THEN 0 ELSE 1 END
+                AND "keeper"."id" < "notification_dispatch"."id"
+              )
+            )
+        )
+    `)
+    await ensureSqliteIndex(
+      dataSource,
+      'notification_dispatch',
+      'uk_notification_dispatch_event_channel_target',
+      `CREATE UNIQUE INDEX IF NOT EXISTS "uk_notification_dispatch_event_channel_target" ON "notification_dispatch" ("event_id", "channel", "dedupe_key")`,
+    )
   }
 }
 
@@ -283,6 +382,48 @@ async function ensureSqliteMallCatalogIndexes(dataSource: DataSource): Promise<v
     'o2o_preorder_item',
     'idx_o2o_preorder_item_sku_order',
     `CREATE INDEX IF NOT EXISTS "idx_o2o_preorder_item_sku_order" ON "o2o_preorder_item" ("sku_id", "order_id")`,
+  )
+  await ensureSqliteIndex(
+    dataSource,
+    'o2o_preorder',
+    'idx_o2o_preorder_client_deleted_id',
+    `CREATE INDEX IF NOT EXISTS "idx_o2o_preorder_client_deleted_id" ON "o2o_preorder" ("client_user_id", "is_deleted", "id")`,
+  )
+  await ensureSqliteIndex(
+    dataSource,
+    'o2o_preorder',
+    'idx_o2o_preorder_client_deleted_status_id',
+    `CREATE INDEX IF NOT EXISTS "idx_o2o_preorder_client_deleted_status_id" ON "o2o_preorder" ("client_user_id", "is_deleted", "status", "id")`,
+  )
+  await ensureSqliteIndex(
+    dataSource,
+    'o2o_preorder',
+    'idx_o2o_preorder_pending_timeout_partial',
+    `CREATE INDEX IF NOT EXISTS "idx_o2o_preorder_pending_timeout_partial" ON "o2o_preorder" ("timeout_at", "id") WHERE "status" = 'pending' AND "is_deleted" = 0`,
+  )
+  await ensureSqliteIndex(
+    dataSource,
+    'inventory_log',
+    'idx_inventory_log_ref_lookup',
+    `CREATE INDEX IF NOT EXISTS "idx_inventory_log_ref_lookup" ON "inventory_log" ("ref_type", "ref_id", "change_type", "id")`,
+  )
+  await ensureSqliteIndex(
+    dataSource,
+    'inventory_log',
+    'idx_inventory_log_product_created',
+    `CREATE INDEX IF NOT EXISTS "idx_inventory_log_product_created" ON "inventory_log" ("product_id", "created_at", "id")`,
+  )
+  await ensureSqliteIndex(
+    dataSource,
+    'notification_inbox',
+    'idx_notification_inbox_user_unread_id',
+    `CREATE INDEX IF NOT EXISTS "idx_notification_inbox_user_unread_id" ON "notification_inbox" ("user_id", "is_read", "id")`,
+  )
+  await ensureSqliteIndex(
+    dataSource,
+    'client_user_session',
+    'idx_client_user_session_expires_id',
+    `CREATE INDEX IF NOT EXISTS "idx_client_user_session_expires_id" ON "client_user_session" ("expires_at", "id")`,
   )
 }
 
@@ -612,6 +753,22 @@ async function normalizeSqliteInboundSkuColumn(dataSource: DataSource): Promise<
     await dataSource.query(`ALTER TABLE "biz_inbound_order_item" ADD COLUMN "sku_id" integer NULL`)
   }
 
+  const skuColumnSet = await listSqliteTableColumns(dataSource, 'base_product_sku')
+  const requiredSkuColumns = [
+    'id',
+    'product_id',
+    'is_active',
+    'is_current',
+    'spec_text',
+    'spec_values_json',
+    'sort_order',
+  ]
+  if (requiredSkuColumns.some((column) => !skuColumnSet.has(column))) {
+    // 009 时代的旧库可能已有入库明细，却尚未引入 SKU 表。先补 sku_id 让
+    // synchronize 能升级结构，待 SKU 表创建完成后再执行下面的历史回填。
+    return
+  }
+
   // 历史入库明细没有 SKU 维度；迁移时优先绑定“默认规格”，其次绑定排序最前的当前启用 SKU。
   await dataSource.query(`
     UPDATE "biz_inbound_order_item"
@@ -782,6 +939,10 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
   if (SQLITE_REQUIRED_O2O_PREORDER_COLUMNS.some((column) => !o2oPreorderColumnSet.has(column))) {
     return true
   }
+  const o2oPreorderUniqueIndexSet = await listSqliteUniqueIndexes(dataSource, 'o2o_preorder')
+  if (!o2oPreorderUniqueIndexSet.has('uk_o2o_preorder_client_request')) {
+    return true
+  }
 
   const o2oPreorderItemColumnSet = await listSqliteTableColumns(dataSource, 'o2o_preorder_item')
   if (SQLITE_REQUIRED_O2O_PREORDER_ITEM_COLUMNS.some((column) => !o2oPreorderItemColumnSet.has(column))) {
@@ -812,6 +973,26 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
   if (SQLITE_REQUIRED_NOTIFICATION_RULE_COLUMNS.some((column) => !notificationRuleColumnSet.has(column))) {
     return true
   }
+
+  const notificationEventColumnSet = await listSqliteTableColumns(dataSource, 'notification_event')
+  if (SQLITE_REQUIRED_NOTIFICATION_EVENT_COLUMNS.some((column) => !notificationEventColumnSet.has(column))) {
+    return true
+  }
+
+  const notificationDispatchColumnSet = await listSqliteTableColumns(dataSource, 'notification_dispatch')
+  if (SQLITE_REQUIRED_NOTIFICATION_DISPATCH_COLUMNS.some((column) => !notificationDispatchColumnSet.has(column))) {
+    return true
+  }
+
+  const notificationInboxUniqueIndexSet = await listSqliteUniqueIndexes(dataSource, 'notification_inbox')
+  if (!notificationInboxUniqueIndexSet.has('uk_notification_inbox_event_user')) {
+    return true
+  }
+
+  const notificationDispatchUniqueIndexSet = await listSqliteUniqueIndexes(dataSource, 'notification_dispatch')
+  if (!notificationDispatchUniqueIndexSet.has('uk_notification_dispatch_event_channel_target')) {
+    return true
+  }
   return false
 }
 
@@ -820,12 +1001,19 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
     await normalizeSqliteOutboundItemColumns(dataSource)
     await normalizeSqliteO2oDiscountColumns(dataSource)
     await normalizeSqliteInboundSkuColumn(dataSource)
-    await ensureSqliteMallCatalogIndexes(dataSource)
+    await normalizeSqliteNotificationOutbox(dataSource)
   }
 
   // DB_SYNC=true 时直接走 TypeORM 同步，便于本地快速调试实体结构。
   if (env.DB_SYNC === true) {
     await dataSource.synchronize()
+    if (env.DB_TYPE === 'sqlite') {
+      // synchronize 可能刚创建 SKU 表；先为历史商品补默认 SKU，再让入库明细绑定它。
+      await normalizeSqliteO2oDiscountColumns(dataSource)
+      await normalizeSqliteInboundSkuColumn(dataSource)
+      // 索引可能依赖本次 synchronize 才补齐的列，必须在结构升级后创建。
+      await ensureSqliteMallCatalogIndexes(dataSource)
+    }
     await migrateLegacyDepartmentAccountsToTeacherProfiles(dataSource)
     await migrateLegacyFeedbackAttachments(dataSource)
     return {
@@ -838,12 +1026,13 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
     // MySQL 结构此前被视为完全由运维外部管理，启动阶段不做任何校验；
     // 一旦运维忘记手动执行 backend/sql/ 下的增量脚本，缺表故障只会在业务接口报错时才暴露
     // （例如认证接口依赖的 auth_risk_state 表缺失会导致登录接口直接 500）。
-    // 这里补上两层保障：按需自动执行迁移脚本，随后做一次只读自检，缺表则直接阻止启动。
+    // 这里补上两层保障：按需自动执行迁移脚本，随后对关键表、列和索引做只读契约自检，
+    // 任一必需结构缺失或索引形状不符都直接阻止启动。
     const migrationResult = await runMysqlSchemaMigrations(dataSource)
     if (migrationResult.appliedFiles.length > 0) {
       console.log(`[y-link-backend] MySQL 迁移脚本已自动执行：${migrationResult.appliedFiles.join(', ')}`)
     }
-    await assertMysqlRequiredTablesExist(dataSource)
+    await assertMysqlRequiredSchemaExists(dataSource)
     await migrateLegacyDepartmentAccountsToTeacherProfiles(dataSource)
     return {
       action: migrationResult.appliedFiles.length > 0 ? 'synchronized' : 'skipped',
@@ -853,6 +1042,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
 
   const needSynchronize = await shouldSynchronizeSqliteSchema(dataSource)
   if (!needSynchronize) {
+    await ensureSqliteMallCatalogIndexes(dataSource)
     await migrateLegacyDepartmentAccountsToTeacherProfiles(dataSource)
     await migrateLegacyFeedbackAttachments(dataSource)
     return {
@@ -863,6 +1053,9 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
 
   // SQLite 现有本地库在认证系统接入后，需要自动补齐新表与开单留痕字段。
   await dataSource.synchronize()
+  await normalizeSqliteO2oDiscountColumns(dataSource)
+  await normalizeSqliteInboundSkuColumn(dataSource)
+  await ensureSqliteMallCatalogIndexes(dataSource)
   await migrateLegacyDepartmentAccountsToTeacherProfiles(dataSource)
   await migrateLegacyFeedbackAttachments(dataSource)
   return {

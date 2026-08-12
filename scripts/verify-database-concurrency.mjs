@@ -20,6 +20,7 @@ const targets = ['sqlite', 'mysql']
 const runTarget = (target) =>
   new Promise((resolve) => {
     const targetReportPath = path.join(concurrencyRoot, `${target}-${runId}.report.json`)
+    const configuredSqliteSource = process.env.Y_LINK_DB_CONCURRENCY_SQLITE_SOURCE?.trim()
     const child = spawn(process.execPath, [tsxCliPath, targetScriptPath], {
       cwd: backendRoot,
       env: {
@@ -27,9 +28,12 @@ const runTarget = (target) =>
         Y_LINK_DB_CONCURRENCY_RUN_ID: runId,
         Y_LINK_DB_CONCURRENCY_TARGET: target,
         Y_LINK_DB_CONCURRENCY_REPORT_PATH: targetReportPath,
-        Y_LINK_DB_CONCURRENCY_SQLITE_SOURCE:
-          process.env.Y_LINK_DB_CONCURRENCY_SQLITE_SOURCE ?? path.join(backendRoot, 'data', 'y-link.sqlite'),
         Y_LINK_DB_CONCURRENCY_SQLITE_PATH: path.join(concurrencyRoot, `${target}-${runId}.sqlite`),
+        // 默认创建全新隔离 SQLite；只有调用方明确提供离线快照时才复制，
+        // 绝不把 backend/data/y-link.sqlite 这类真实试运行数据当作可变测试夹具。
+        ...(configuredSqliteSource
+          ? { Y_LINK_DB_CONCURRENCY_SQLITE_SOURCE: configuredSqliteSource }
+          : {}),
       },
       stdio: 'inherit',
       shell: false,
