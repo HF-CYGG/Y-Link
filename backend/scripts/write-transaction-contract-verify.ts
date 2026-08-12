@@ -87,6 +87,17 @@ const ALLOWED_DIRECT_TRANSACTION_CALLS: Array<{
       + '再落到（已被协调器接管的）TypeORM 事务上',
   },
   {
+    relativePath: 'src/database/transaction-coordinator.ts',
+    receiver: 'dataSource',
+    method: 'transaction',
+    enclosingFunction: 'patchDataSourceTransaction',
+    // 两处：绑定原方法留作后续转发，以及把包装后的实现写回 dataSource.transaction。
+    expectedCount: 2,
+    reason:
+      '协调器安装点本身：它正是把 dataSource.transaction 接管为串行化实现的地方，'
+      + '必须直接触碰原方法（先 bind 保留原实现，再覆写），无法经由 runInTransaction',
+  },
+  {
     relativePath: 'src/config/database-bootstrap.ts',
     receiver: 'dataSource',
     method: 'transaction',
@@ -180,26 +191,36 @@ const collectTransactionCalls = (): TransactionCall[] => {
     const relativePath = toRelativePath(filePath)
 
     const visit = (node: ts.Node): void => {
-      if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
-        const methodName = node.expression.name.text
-        if (TRANSACTION_ENTRY_METHODS.has(methodName)) {
-          const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile))
-          // receiver 取最末一段标识符：`this.foo.transaction()` 记为 foo，
-          // 便于白名单以稳定的短名称登记，同时仍能区分同文件内的不同接收者。
-          const receiverNode = node.expression.expression
-          const receiverText = receiverNode.getText(sourceFile)
-          const receiver = ts.isPropertyAccessExpression(receiverNode)
-            ? receiverNode.name.text
-            : receiverText
-          calls.push({
-            relativePath,
-            line: line + 1,
-            receiver,
-            method: methodName,
-            enclosingFunction: resolveEnclosingFunctionName(node, sourceFile),
-            text: node.getText(sourceFile).split('\n')[0].trim(),
-          })
-        }
+      // 记录的是「对事务方法的成员引用」，而不是「对事务方法的调用」。
+      // 只认调用会被一层间接绕过：`const start = qr.startTransaction.bind(qr); await start()`
+      // 里，唯一的调用表达式是 `.bind(...)` 和 `start()`，事务方法本身从未出现在被调用位置。
+      // 改为在引用处记账后，绑定、赋值给变量、作为回调传出去等写法都会在引用点被捕获。
+      const methodName = ts.isPropertyAccessExpression(node)
+        ? node.name.text
+        // 兼容 `qr['startTransaction']` 这类元素访问写法
+        : (ts.isElementAccessExpression(node)
+          && node.argumentExpression
+          && ts.isStringLiteralLike(node.argumentExpression)
+          ? node.argumentExpression.text
+          : undefined)
+
+      if (methodName && TRANSACTION_ENTRY_METHODS.has(methodName)) {
+        const accessNode = node as ts.PropertyAccessExpression | ts.ElementAccessExpression
+        const { line } = sourceFile.getLineAndCharacterOfPosition(accessNode.getStart(sourceFile))
+        // receiver 取最末一段标识符：`this.foo.transaction` 记为 foo，
+        // 便于白名单以稳定的短名称登记，同时仍能区分同文件内的不同接收者。
+        const receiverNode = accessNode.expression
+        const receiver = ts.isPropertyAccessExpression(receiverNode)
+          ? receiverNode.name.text
+          : receiverNode.getText(sourceFile)
+        calls.push({
+          relativePath,
+          line: line + 1,
+          receiver,
+          method: methodName,
+          enclosingFunction: resolveEnclosingFunctionName(accessNode, sourceFile),
+          text: accessNode.getText(sourceFile).split('\n')[0].trim(),
+        })
       }
       ts.forEachChild(node, visit)
     }
