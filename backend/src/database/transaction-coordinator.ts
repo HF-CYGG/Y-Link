@@ -3,14 +3,15 @@
  * 文件职责：提供数据库无关的事务上下文复用，以及 SQLite 单写者的有界串行协调。
  * 实现逻辑：
  * - AsyncLocalStorage 记录当前事务 manager，嵌套 `DataSource.transaction` 复用同一 manager；
- * - SQLite 的显式事务、Repository/QueryBuilder/SQL 读写共用一把有界连接锁；
+ * - SQLite 的显式事务、QueryRunner、Repository/QueryBuilder/SQL 读写共用一把有界连接锁；
+ * - QueryRunner 在 start/commit/rollback/release 生命周期内持有同一租约，原始事务控制 SQL 被运行时拒绝；
  * - 队列满或等待超时返回可重试的 503，防止高峰期形成无界 Promise/内存堆积。
  * 维护说明：业务层仍应优先显式透传 manager；这里的自动委派是兼容旧调用的安全兜底，不替代清晰的事务边界。
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { performance } from 'node:perf_hooks'
-import type { DataSource, EntityManager } from 'typeorm'
+import type { DataSource, EntityManager, QueryRunner } from 'typeorm'
 import { DatabaseOverloadedError } from './database-errors.js'
 
 type TransactionHandler = (manager: EntityManager) => Promise<unknown>
@@ -21,6 +22,13 @@ interface TransactionExecutionContext {
   dataSource: DataSource
   manager?: EntityManager
   ownsWriteLease: boolean
+  writeLeaseToken?: symbol
+}
+
+interface QueryRunnerLeaseState {
+  release?: ReleaseLease
+  borrowedLeaseToken?: symbol
+  allowedTransactionControlDepth: number
 }
 
 interface QueueEntry {
@@ -126,6 +134,19 @@ const SYNCHRONOUS_MANAGER_FACTORY_METHODS = new Set([
   'createQueryBuilder',
 ])
 
+/**
+ * 原始事务控制 SQL 无法在 DataSource.query 的多次调用之间可靠识别所有者：
+ * BEGIN 返回后，调用方的 await 延续不会继承协调器内部创建的 AsyncLocalStorage 上下文。
+ * 因此不能靠“遇到 BEGIN 后一直持锁”猜测后续 COMMIT 属于谁，只能要求使用具备对象身份的
+ * DataSource.transaction 或 QueryRunner 生命周期 API。
+ */
+const TRANSACTION_CONTROL_SQL_PATTERN =
+  /^(?:(?:\s+)|(?:;\s*)|(?:--[^\r\n]*(?:\r?\n|$))|(?:\/\*[\s\S]*?\*\/))*(?:BEGIN\b|START\s+TRANSACTION\b|COMMIT\b|END(?:\s+TRANSACTION)?\b|ROLLBACK\b|SAVEPOINT\b|RELEASE(?:\s+SAVEPOINT)?\b|SET\s+TRANSACTION\b)/i
+
+const isTransactionControlSql = (query: string): boolean => {
+  return TRANSACTION_CONTROL_SQL_PATTERN.test(query)
+}
+
 class BoundedSerialWriteQueue {
   private active = false
   private readonly pending: QueueEntry[] = []
@@ -227,6 +248,8 @@ export class TransactionCoordinator {
   private readonly writeQueue: BoundedSerialWriteQueue
   private installed = false
   private readonly wrappedQueryBuilders = new WeakSet<object>()
+  private readonly wrappedQueryRunners = new WeakSet<object>()
+  private readonly queryRunnerLeaseStates = new WeakMap<object, QueryRunnerLeaseState>()
 
   constructor(
     readonly dataSource: DataSource,
@@ -243,6 +266,7 @@ export class TransactionCoordinator {
       return
     }
     this.patchDataSourceTransaction()
+    this.patchDataSourceCreateQueryRunner()
     this.patchDataSourceQuery()
     this.patchDataSourceQueryBuilder()
     this.patchGlobalEntityManager()
@@ -264,12 +288,14 @@ export class TransactionCoordinator {
     }
 
     const release = await this.writeQueue.acquire()
+    const writeLeaseToken = Symbol('transaction-coordinator-write-lease')
     try {
       return await transactionContextStorage.run(
         {
           dataSource: this.dataSource,
           manager: activeContext?.dataSource === this.dataSource ? activeContext.manager : undefined,
           ownsWriteLease: true,
+          writeLeaseToken,
         },
         work,
       )
@@ -328,12 +354,19 @@ export class TransactionCoordinator {
       }
 
       return this.runExclusive(async () => {
+        const writeLeaseContext = transactionContextStorage.getStore()
         const wrappedHandler: TransactionHandler = async (manager) => {
           return transactionContextStorage.run(
             {
               dataSource,
               manager,
-              ownsWriteLease: this.options.serializeWrites,
+              ownsWriteLease: Boolean(
+                writeLeaseContext?.dataSource === dataSource
+                && writeLeaseContext.ownsWriteLease,
+              ),
+              writeLeaseToken: writeLeaseContext?.dataSource === dataSource
+                ? writeLeaseContext.writeLeaseToken
+                : undefined,
             },
             () => handler(manager),
           )
@@ -343,6 +376,244 @@ export class TransactionCoordinator {
           : originalTransaction(isolationOrHandler, wrappedHandler)
       })
     }) as DataSource['transaction']
+  }
+
+  private createQueryRunnerFacade(queryRunner: QueryRunner): QueryRunner {
+    // TypeORM sqlite 驱动会让每次 createQueryRunner() 返回同一个实例。若直接在该实例上
+    // 记录租约，两个并发调用方会被误判成同一 QueryRunner 的嵌套事务。这里为每次调用
+    // 创建一个轻量逻辑门面：底层仍复用唯一 SQLite 连接，但事务深度、manager、广播器和
+    // 协调器租约均按调用方对象隔离，再由有界队列保证同一时刻只有一个门面进入事务。
+    const facade = Object.create(Object.getPrototypeOf(queryRunner)) as QueryRunner
+    const source = queryRunner as unknown as Record<string, unknown>
+    const target = facade as unknown as Record<string, unknown>
+    Object.assign(target, source, {
+      isReleased: false,
+      isTransactionActive: false,
+      data: {},
+      loadedTables: [],
+      loadedViews: [],
+      sqlMemoryMode: false,
+      transactionDepth: 0,
+      transactionPromise: null,
+      cachedTablePaths: {},
+    })
+
+    const sqlInMemory = source.sqlInMemory
+    if (sqlInMemory && typeof sqlInMemory === 'object') {
+      const SqlInMemoryConstructor = (sqlInMemory as { constructor: new () => unknown }).constructor
+      target.sqlInMemory = new SqlInMemoryConstructor()
+    }
+
+    const broadcaster = source.broadcaster
+    if (broadcaster && typeof broadcaster === 'object') {
+      const BroadcasterConstructor = (
+        broadcaster as { constructor: new (owner: QueryRunner) => unknown }
+      ).constructor
+      target.broadcaster = new BroadcasterConstructor(facade)
+    }
+
+    target.manager = this.dataSource.createEntityManager(facade)
+    return facade
+  }
+
+  private patchDataSourceCreateQueryRunner(): void {
+    const dataSource = this.dataSource
+    const originalCreateQueryRunner = dataSource.createQueryRunner.bind(dataSource) as DataSource['createQueryRunner']
+    dataSource.createQueryRunner = ((
+      ...args: Parameters<DataSource['createQueryRunner']>
+    ): QueryRunner => {
+      const queryRunner = originalCreateQueryRunner(...args)
+      return this.options.serializeWrites
+        ? this.wrapQueryRunner(this.createQueryRunnerFacade(queryRunner))
+        : queryRunner
+    }) as DataSource['createQueryRunner']
+  }
+
+  private async acquireQueryRunnerLease(state: QueryRunnerLeaseState): Promise<void> {
+    if (state.release || state.borrowedLeaseToken) {
+      return
+    }
+
+    const activeContext = transactionContextStorage.getStore()
+    if (
+      activeContext?.dataSource === this.dataSource
+      && activeContext.ownsWriteLease
+    ) {
+      if (!activeContext.writeLeaseToken) {
+        throw new Error('当前 SQLite 写租约缺少所有者标识，无法安全借给 QueryRunner')
+      }
+      state.borrowedLeaseToken = activeContext.writeLeaseToken
+      return
+    }
+
+    state.release = await this.writeQueue.acquire()
+  }
+
+  private releaseQueryRunnerLease(state: QueryRunnerLeaseState): void {
+    const release = state.release
+    state.release = undefined
+    state.borrowedLeaseToken = undefined
+    release?.()
+  }
+
+  private assertQueryRunnerLeaseAccess(state: QueryRunnerLeaseState): void {
+    if (!state.borrowedLeaseToken) {
+      return
+    }
+
+    const activeContext = transactionContextStorage.getStore()
+    if (
+      activeContext?.dataSource !== this.dataSource
+      || activeContext.writeLeaseToken !== state.borrowedLeaseToken
+    ) {
+      throw new Error(
+        'QueryRunner 事务已逃逸其所属的 SQLite 写租约上下文；'
+        + '请在同一个 transaction/runDatabaseExclusive 回调内完成提交、回滚或 release',
+      )
+    }
+  }
+
+  private async allowQueryRunnerTransactionControl<T>(
+    state: QueryRunnerLeaseState,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    state.allowedTransactionControlDepth += 1
+    try {
+      return await work()
+    } finally {
+      state.allowedTransactionControlDepth -= 1
+    }
+  }
+
+  private wrapQueryRunner(queryRunner: QueryRunner): QueryRunner {
+    if (!this.options.serializeWrites || this.wrappedQueryRunners.has(queryRunner)) {
+      return queryRunner
+    }
+
+    this.wrappedQueryRunners.add(queryRunner)
+    const state: QueryRunnerLeaseState = {
+      allowedTransactionControlDepth: 0,
+    }
+    this.queryRunnerLeaseStates.set(queryRunner, state)
+
+    const originalStartTransaction = queryRunner.startTransaction.bind(queryRunner)
+    const originalCommitTransaction = queryRunner.commitTransaction.bind(queryRunner)
+    const originalRollbackTransaction = queryRunner.rollbackTransaction.bind(queryRunner)
+    const originalRelease = queryRunner.release.bind(queryRunner)
+    const originalQuery = queryRunner.query.bind(queryRunner) as (
+      query: string,
+      parameters?: unknown[],
+      useStructuredResult?: boolean,
+    ) => Promise<unknown>
+
+    queryRunner.startTransaction = async (isolationLevel?: IsolationLevel): Promise<void> => {
+      const isRootTransaction = !state.release && !state.borrowedLeaseToken
+      if (isRootTransaction) {
+        await this.acquireQueryRunnerLease(state)
+      } else {
+        this.assertQueryRunnerLeaseAccess(state)
+      }
+
+      try {
+        await this.allowQueryRunnerTransactionControl(
+          state,
+          () => originalStartTransaction(isolationLevel),
+        )
+      } catch (error) {
+        // BeforeTransactionStart 或参数校验失败时数据库尚未进入事务，可立即归还租约。
+        // 若 BEGIN 已成功而后续广播失败，QueryRunner 仍处于活动态，保留租约并交给
+        // rollback/release 清理，不能为了避免队列卡住而让其它请求进入未结束事务。
+        if (isRootTransaction && !queryRunner.isTransactionActive) {
+          this.releaseQueryRunnerLease(state)
+        }
+        throw error
+      }
+    }
+
+    queryRunner.commitTransaction = async (): Promise<void> => {
+      this.assertQueryRunnerLeaseAccess(state)
+      try {
+        await this.allowQueryRunnerTransactionControl(state, originalCommitTransaction)
+      } finally {
+        if (!queryRunner.isTransactionActive) {
+          this.releaseQueryRunnerLease(state)
+        }
+      }
+    }
+
+    queryRunner.rollbackTransaction = async (): Promise<void> => {
+      this.assertQueryRunnerLeaseAccess(state)
+      try {
+        await this.allowQueryRunnerTransactionControl(state, originalRollbackTransaction)
+      } finally {
+        if (!queryRunner.isTransactionActive) {
+          this.releaseQueryRunnerLease(state)
+        }
+      }
+    }
+
+    queryRunner.release = async (): Promise<void> => {
+      let rollbackError: unknown
+      if (queryRunner.isTransactionActive && (state.release || state.borrowedLeaseToken)) {
+        try {
+          // release 是最后的异常清理边界。即使借入租约的回调已经逃逸，也必须优先
+          // 在同一 QueryRunner 上回滚，而不是把仍有活动事务的连接交还给后续请求。
+          await this.allowQueryRunnerTransactionControl(state, originalRollbackTransaction)
+        } catch (error) {
+          rollbackError = error
+        }
+        if (queryRunner.isTransactionActive) {
+          throw new Error(
+            'QueryRunner.release 无法回滚仍在活动的 SQLite 事务，写租约已保留以阻止数据交错',
+            { cause: rollbackError },
+          )
+        }
+      }
+
+      try {
+        await originalRelease()
+      } finally {
+        if (!queryRunner.isTransactionActive) {
+          this.releaseQueryRunnerLease(state)
+        }
+      }
+
+      if (rollbackError) {
+        throw rollbackError
+      }
+    }
+
+    queryRunner.query = (async (
+      query: string,
+      parameters?: unknown[],
+      useStructuredResult?: boolean,
+    ): Promise<unknown> => {
+      if (
+        state.allowedTransactionControlDepth === 0
+        && isTransactionControlSql(query)
+      ) {
+        throw new Error(
+          '禁止通过 QueryRunner.query 直接控制事务边界；'
+          + '请使用 startTransaction/commitTransaction/rollbackTransaction，以便协调器跨语句持有写租约',
+        )
+      }
+
+      const execute = () => originalQuery(query, parameters, useStructuredResult)
+      if (state.release) {
+        return execute()
+      }
+      if (state.borrowedLeaseToken) {
+        // 生命周期方法内部会临时放行 TypeORM 自己发出的 BEGIN/COMMIT/ROLLBACK，
+        // 普通调用则必须仍处在借出租约的同一异步上下文中。
+        if (state.allowedTransactionControlDepth === 0) {
+          this.assertQueryRunnerLeaseAccess(state)
+        }
+        return execute()
+      }
+      return this.runExclusive(execute)
+    }) as QueryRunner['query']
+
+    return queryRunner
   }
 
   private patchDataSourceQuery(): void {
@@ -357,6 +628,12 @@ export class TransactionCoordinator {
       parameters?: unknown[],
       queryRunner?: unknown,
     ): Promise<unknown> => {
+      if (this.options.serializeWrites && isTransactionControlSql(query)) {
+        throw new Error(
+          '禁止通过 DataSource.query 直接控制事务边界；'
+          + '请使用 DataSource.transaction，或使用由 createQueryRunner 创建的 QueryRunner 生命周期 API',
+        )
+      }
       const activeContext = transactionContextStorage.getStore()
       if (
         !queryRunner
@@ -367,6 +644,15 @@ export class TransactionCoordinator {
         // 将看不到未提交写入并逃逸当前事务。统一委派给当前 manager，
         // 与 Repository/QueryBuilder 的兼容兜底保持同一隔离边界。
         return activeContext.manager.query(query, parameters)
+      }
+      if (queryRunner) {
+        // EntityManager.query 会把自身 QueryRunner 作为第三参回传给 DataSource.query。
+        // 该 QueryRunner 已按对象身份持有整段事务租约，不能再按单条语句入队，否则会等待自己而死锁。
+        return originalQuery(
+          query,
+          parameters,
+          this.wrapQueryRunner(queryRunner as QueryRunner),
+        )
       }
       const execute = () => originalQuery(query, parameters, queryRunner)
       // TypeORM sqlite 驱动在一个 DataSource 内复用单 QueryRunner/连接。
@@ -459,7 +745,21 @@ export class TransactionCoordinator {
         continue
       }
       queryBuilder[methodName] = (...args: unknown[]) => {
-        return this.runExclusive(async () => originalTerminal.apply(value, args))
+        const execute = async () => originalTerminal.apply(value, args)
+        // QueryRunner.manager.createQueryBuilder 会把已持有事务租约的 QueryRunner 注入 builder。
+        // 若这里再按 terminal 单独排队，builder 会等待自己的长事务租约而死锁。
+        const queryRunner = queryBuilder.queryRunner
+        if (queryRunner && typeof queryRunner === 'object') {
+          const state = this.queryRunnerLeaseStates.get(queryRunner)
+          if (state?.release) {
+            return execute()
+          }
+          if (state?.borrowedLeaseToken) {
+            this.assertQueryRunnerLeaseAccess(state)
+            return execute()
+          }
+        }
+        return this.runExclusive(execute)
       }
     }
 

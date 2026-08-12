@@ -12,6 +12,7 @@
     "audit:prod:mysql": "node scripts/audit-mysql-production.mjs",
     "verify:db:concurrency": "node ../scripts/run-verify-db-concurrency.mjs",
     "verify:db:concurrency:raw": "tsx scripts/verify-db-concurrency.ts",
+    "transaction-coordinator:verify": "node --import tsx scripts/transaction-coordinator-verify.ts",
     "verify:mysql:schema-contract": "node --import tsx scripts/mysql-schema-contract-verify.ts",
     "verify:db:migration:foundation": "tsx scripts/database-migration-foundation-verify.ts",
     "verify:app-data-paths:env-file": "tsx scripts/app-data-paths-env-file-verify.ts",
