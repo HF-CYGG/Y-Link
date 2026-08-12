@@ -72,6 +72,12 @@ const main = async () => {
   // - 防止系统治理接口被误挂到匿名区，或新增路由时漏接权限中间件。
   await runNpmScript('后端路由权限契约检查', 'task2:route-contract:verify', backendRoot)
 
+  // 写事务闸门契约门禁：
+  // - 静态校验所有写事务都经由 runInTransaction，未登记的 TypeORM 事务直调一律拦下；
+  // - SQLite 只有一条连接，绕过闸门会让并发写事务重叠（issue #36），
+  //   这里把"CI 跑完才发现"提前到"改完代码立刻发现"。
+  await runNpmScript('后端写事务闸门契约检查', 'write-transaction:contract:verify', backendRoot)
+
   // O2O 关键功能脚本：覆盖预订单核心链路，属于当前项目最关键业务路径之一。
   await runNpmScript('后端 O2O 功能回归', 'o2o:verify', backendRoot)
 

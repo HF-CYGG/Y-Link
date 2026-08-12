@@ -8,11 +8,12 @@
 # 1. 在手动触发、主分支推送或拉取请求时执行；
 # 2. 安装根目录与后端依赖前，显式把 npm registry 固定为官方源；
 # 3. 安装完成后分别执行根目录与后端 `npm audit`，确保 CI 使用官方审计口径；
-# 4. 先跑 MySQL 启动结构契约，确保漏执行 035/036 时会在对外服务前阻断；
-# 5. 再跑 `task8:verify` 守住 SQLite 并发写事务（只依赖本地 SQLite，秒级完成，失败即止，
+# 4. 先做写事务闸门静态契约检查——纯静态、无任何运行时依赖，最快暴露绕过闸门的新代码；
+# 5. 再跑 MySQL 启动结构契约，确保漏执行 035/036 时会在对外服务前阻断；
+# 6. 接着跑 `task8:verify` 守住 SQLite 并发写事务（只依赖本地 SQLite，秒级完成，失败即止，
 #    不必先花时间拉起 Docker MySQL）；
-# 6. 最后复用统一命令 `npm run verify:db:concurrency` 覆盖 MySQL 侧；
-# 7. MySQL 临时环境由脚本内部自动通过 Docker Compose 准备与清理，避免 CI 额外维护服务编排。
+# 7. 最后复用统一命令 `npm run verify:db:concurrency` 覆盖 MySQL 侧；
+# 8. MySQL 临时环境由脚本内部自动通过 Docker Compose 准备与清理，避免 CI 额外维护服务编排。
 #
 name: verify-db-concurrency
 
@@ -61,6 +62,11 @@ jobs:
 
       - name: 执行后端依赖安全审计
         run: npm --prefix ./backend audit --audit-level=high
+
+      # 写事务闸门的静态契约门禁：纯静态解析、秒级完成、无任何运行时依赖，
+      # 因此排在所有运行时验收之前——绕过闸门的新代码在这里就会被拦下。
+      - name: 执行写事务闸门契约检查
+        run: npm --prefix ./backend run write-transaction:contract:verify
 
       - name: 执行 MySQL 启动结构契约验收
         run: npm --prefix ./backend run verify:mysql:schema-contract
