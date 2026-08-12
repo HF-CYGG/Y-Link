@@ -80,6 +80,12 @@ const main = async () => {
   // - 防止系统配置页新增白名单治理后，后续改动把目录接口或权限链路悄悄带坏。
   await runNpmScript('后端教职工目录治理回归', 'client-staff-directory:verify', backendRoot)
 
+  // 双流水单号与 SQLite 并发写事务回归：
+  // - 并发提交 16 笔出库单，守住 issue #36 修复的写事务串行化——若写事务绕过
+  //   `runInTransaction` 闸门直接调用 `AppDataSource.transaction`，这一步会立刻失败；
+  // - 同时覆盖 Task8 迁移脚本、凭证打印链路与看板下钻的静态与运行态契约。
+  await runNpmScript('后端双流水单号与并发写事务回归', 'task8:verify', backendRoot)
+
   log('\n[unit-functional] 单元功能测试套件执行完成')
 }
 
