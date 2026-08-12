@@ -1,4 +1,4 @@
-export type ApiClientErrorKind = 'http' | 'business' | 'network' | 'timeout' | 'canceled'
+export type ApiClientErrorKind = 'aborted' | 'timeout' | 'network' | 'http' | 'business'
 
 export interface ApiClientErrorOptions {
   kind: ApiClientErrorKind

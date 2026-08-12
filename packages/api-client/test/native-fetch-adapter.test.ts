@@ -49,12 +49,27 @@ test('允许单次请求覆盖超时并归一化为 timeout 错误', async () =>
   })
 
   await assert.rejects(
-    adapter.request({ method: 'GET', path: '/slow', timeoutMs: 5 }),
+    adapter.request({ method: 'GET', url: '/slow', timeoutMs: 5 }),
     (error: unknown) => error instanceof ApiClientError && error.kind === 'timeout',
   )
 })
 
-test('外部 AbortSignal 主动取消归一化为 canceled 错误', async () => {
+test('token 获取永不 settle 时仍按请求超时返回 timeout 错误', async () => {
+  const adapter = createNativeFetchAdapter({
+    baseUrl: 'https://api.example.com',
+    getAccessToken: () => new Promise<string>(() => {}),
+    fetch: async () => jsonResponse({ code: 0, message: 'ok', data: true }),
+  })
+  const result = await Promise.race([
+    adapter.request({ method: 'GET', url: '/profile', timeoutMs: 5 }).catch((error: unknown) => error),
+    new Promise<'not-settled'>((resolve) => setTimeout(() => resolve('not-settled'), 50)),
+  ])
+
+  assert.ok(result instanceof ApiClientError)
+  assert.equal(result.kind, 'timeout')
+})
+
+test('外部 AbortSignal 主动取消归一化为 aborted 错误', async () => {
   const fetch = (_input: string | URL | Request, init?: RequestInit) => {
     return new Promise<Response>((_resolve, reject) => {
       init?.signal?.addEventListener('abort', () => {
@@ -69,7 +84,7 @@ test('外部 AbortSignal 主动取消归一化为 canceled 错误', async () => 
   const controller = new AbortController()
   const request = adapter.request({
     method: 'GET',
-    path: '/profile',
+    url: '/profile',
     signal: controller.signal,
   })
 
@@ -77,7 +92,38 @@ test('外部 AbortSignal 主动取消归一化为 canceled 错误', async () => 
 
   await assert.rejects(
     request,
-    (error: unknown) => error instanceof ApiClientError && error.kind === 'canceled',
+    (error: unknown) => error instanceof ApiClientError && error.kind === 'aborted',
+  )
+})
+
+test('外部 abort 先于 timeout 时保留 aborted 终止原因', async () => {
+  let notifyFetchStarted: (() => void) | undefined
+  const fetchStarted = new Promise<void>((resolve) => {
+    notifyFetchStarted = resolve
+  })
+  const adapter = createNativeFetchAdapter({
+    baseUrl: 'https://api.example.com',
+    fetch: async () => {
+      notifyFetchStarted?.()
+      return new Promise<Response>((_resolve, reject) => {
+        setTimeout(() => reject(new DOMException('延迟取消', 'AbortError')), 25)
+      })
+    },
+  })
+  const controller = new AbortController()
+  const request = adapter.request({
+    method: 'GET',
+    url: '/profile',
+    signal: controller.signal,
+    timeoutMs: 10,
+  })
+
+  await fetchStarted
+  controller.abort()
+
+  await assert.rejects(
+    request,
+    (error: unknown) => error instanceof ApiClientError && error.kind === 'aborted',
   )
 })
 
@@ -91,7 +137,7 @@ test('按需注入 Bearer Authorization 且保留显式 headers', async () => {
 
   await adapter.request({
     method: 'GET',
-    path: '/client-auth/me',
+    url: '/client-auth/me',
     headers: { 'X-Trace-Id': 'trace-1' },
   })
 
@@ -107,11 +153,11 @@ test('仅在调用方显式传入 key 时添加 Idempotency-Key', async () => {
     fetch: recorder.fetch,
   })
 
-  await adapter.request({ method: 'POST', path: '/orders', body: { skuId: 1 } })
+  await adapter.request({ method: 'POST', url: '/orders', data: { skuId: 1 } })
   await adapter.request({
     method: 'POST',
-    path: '/orders',
-    body: { skuId: 1 },
+    url: '/orders',
+    data: { skuId: 1 },
     idempotencyKey: 'checkout-1',
   })
 
@@ -121,7 +167,7 @@ test('仅在调用方显式传入 key 时添加 Idempotency-Key', async () => {
   assert.equal(secondHeaders.get('Idempotency-Key'), 'checkout-1')
 })
 
-test('编码 query 标量和数组并忽略 null 与 undefined', async () => {
+test('编码 params 标量并忽略 null 与 undefined', async () => {
   const recorder = createFetchRecorder(jsonResponse({ code: 0, message: 'ok', data: [] }))
   const adapter = createNativeFetchAdapter({
     baseUrl: 'https://api.example.com/api/',
@@ -130,12 +176,11 @@ test('编码 query 标量和数组并忽略 null 与 undefined', async () => {
 
   await adapter.request({
     method: 'GET',
-    path: '/items',
-    query: {
+    url: '/items',
+    params: {
       search: '中文 空格',
       page: 2,
       enabled: false,
-      tags: ['a/b', 'c'],
       empty: null,
       missing: undefined,
     },
@@ -143,7 +188,7 @@ test('编码 query 标量和数组并忽略 null 与 undefined', async () => {
 
   assert.equal(
     recorder.calls[0]?.input,
-    'https://api.example.com/api/items?search=%E4%B8%AD%E6%96%87+%E7%A9%BA%E6%A0%BC&page=2&enabled=false&tags=a%2Fb&tags=c',
+    'https://api.example.com/api/items?search=%E4%B8%AD%E6%96%87+%E7%A9%BA%E6%A0%BC&page=2&enabled=false',
   )
 })
 
@@ -156,8 +201,8 @@ test('JSON 序列化请求体并解包成功响应 data', async () => {
 
   const result = await adapter.request<{ id: number }>({
     method: 'POST',
-    path: '/orders',
-    body: { skuId: 3 },
+    url: '/orders',
+    data: { skuId: 3 },
   })
 
   assert.deepEqual(result, { id: 7 })
@@ -172,7 +217,7 @@ test('非 2xx 响应归一化为 http 错误', async () => {
   })
 
   await assert.rejects(
-    adapter.request({ method: 'GET', path: '/health' }),
+    adapter.request({ method: 'GET', url: '/health' }),
     (error: unknown) => {
       assert.ok(error instanceof ApiClientError)
       assert.equal(error.kind, 'http')
@@ -191,7 +236,7 @@ test('2xx 中的非零业务码归一化为 business 错误', async () => {
   })
 
   await assert.rejects(
-    adapter.request({ method: 'POST', path: '/orders', body: {} }),
+    adapter.request({ method: 'POST', url: '/orders', data: {} }),
     (error: unknown) => {
       assert.ok(error instanceof ApiClientError)
       assert.equal(error.kind, 'business')
@@ -213,7 +258,7 @@ test('fetch 通道异常归一化为 network 错误', async () => {
   })
 
   await assert.rejects(
-    adapter.request({ method: 'GET', path: '/items' }),
+    adapter.request({ method: 'GET', url: '/items' }),
     (error: unknown) => {
       assert.ok(error instanceof ApiClientError)
       assert.equal(error.kind, 'network')
@@ -235,7 +280,7 @@ test('401 只归一化错误且不刷新或重放请求', async () => {
   })
 
   await assert.rejects(
-    adapter.request({ method: 'GET', path: '/client-auth/me' }),
+    adapter.request({ method: 'GET', url: '/client-auth/me' }),
     (error: unknown) => error instanceof ApiClientError
       && error.kind === 'http'
       && error.status === 401,

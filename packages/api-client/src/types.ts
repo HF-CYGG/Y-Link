@@ -1,20 +1,12 @@
-export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD'
-
-export type HttpQueryPrimitive = string | number | boolean
-
-export type HttpQueryValue =
-  | HttpQueryPrimitive
-  | null
-  | undefined
-  | readonly (HttpQueryPrimitive | null | undefined)[]
+export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 
 export interface HttpRequestConfig {
   method: HttpMethod
-  path: string
-  query?: Readonly<Record<string, HttpQueryValue>>
-  body?: unknown
-  headers?: Readonly<Record<string, string>>
+  url: string
+  params?: Record<string, string | number | boolean | null | undefined>
+  data?: unknown
   signal?: AbortSignal
+  headers?: Record<string, string>
   timeoutMs?: number
   idempotencyKey?: string
 }

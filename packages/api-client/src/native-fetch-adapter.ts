@@ -1,7 +1,6 @@
 import { ApiClientError } from './errors.ts'
 import type {
   HttpAdapter,
-  HttpQueryValue,
   HttpRequestConfig,
 } from './types.ts'
 
@@ -36,27 +35,28 @@ const isApiEnvelope = <T>(value: unknown): value is ApiEnvelope<T> => {
     && 'data' in value
 }
 
-const appendQueryValue = (searchParams: URLSearchParams, key: string, value: HttpQueryValue) => {
-  const values = Array.isArray(value) ? value : [value]
-  for (const item of values) {
-    if (item !== null && item !== undefined) {
-      searchParams.append(key, String(item))
-    }
+const appendParamValue = (
+  searchParams: URLSearchParams,
+  key: string,
+  value: string | number | boolean | null | undefined,
+) => {
+  if (value !== null && value !== undefined) {
+    searchParams.append(key, String(value))
   }
 }
 
 const buildRequestUrl = (
   baseUrl: string,
-  path: string,
-  query?: HttpRequestConfig['query'],
+  requestUrl: string,
+  params?: HttpRequestConfig['params'],
 ) => {
   const normalizedBaseUrl = `${baseUrl.replace(/\/+$/, '')}/`
-  const normalizedPath = path.replace(/^\/+/, '')
-  const url = new URL(normalizedPath, normalizedBaseUrl)
+  const normalizedRequestUrl = requestUrl.replace(/^\/+/, '')
+  const url = new URL(normalizedRequestUrl, normalizedBaseUrl)
 
-  if (query) {
-    for (const [key, value] of Object.entries(query)) {
-      appendQueryValue(url.searchParams, key, value)
+  if (params) {
+    for (const [key, value] of Object.entries(params)) {
+      appendParamValue(url.searchParams, key, value)
     }
   }
 
@@ -74,6 +74,33 @@ const parseResponsePayload = async (response: Response): Promise<unknown> => {
   } catch {
     return text
   }
+}
+
+const awaitWithAbort = <T>(value: T | PromiseLike<T>, signal: AbortSignal): Promise<T> => {
+  if (signal.aborted) {
+    return Promise.reject(signal.reason)
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const handleAbort = () => {
+      reject(signal.reason)
+    }
+    const cleanup = () => {
+      signal.removeEventListener('abort', handleAbort)
+    }
+
+    signal.addEventListener('abort', handleAbort, { once: true })
+    Promise.resolve(value).then(
+      (result) => {
+        cleanup()
+        resolve(result)
+      },
+      (error: unknown) => {
+        cleanup()
+        reject(error)
+      },
+    )
+  })
 }
 
 const pickHttpErrorDetails = (payload: unknown, response: Response) => {
@@ -101,12 +128,23 @@ export const createNativeFetchAdapter = (options: NativeFetchAdapterOptions): Ht
   return {
     async request<T>(config: HttpRequestConfig): Promise<T> {
       const controller = new AbortController()
-      let timedOut = false
-      let externallyCanceled = config.signal?.aborted ?? false
+      let terminationKind: 'aborted' | 'timeout' | undefined
+      let timeoutId: ReturnType<typeof setTimeout> | undefined
+
+      const terminate = (kind: 'aborted' | 'timeout', reason: unknown) => {
+        if (terminationKind) {
+          return
+        }
+
+        terminationKind = kind
+        if (kind === 'aborted' && timeoutId) {
+          clearTimeout(timeoutId)
+        }
+        controller.abort(reason)
+      }
 
       const handleExternalAbort = () => {
-        externallyCanceled = true
-        controller.abort(config.signal?.reason)
+        terminate('aborted', config.signal?.reason)
       }
 
       if (config.signal) {
@@ -117,15 +155,16 @@ export const createNativeFetchAdapter = (options: NativeFetchAdapterOptions): Ht
         }
       }
 
-      const timeoutMs = config.timeoutMs ?? defaultTimeoutMs
-      const timeoutId = setTimeout(() => {
-        timedOut = true
-        controller.abort(new DOMException('请求超时', 'TimeoutError'))
-      }, timeoutMs)
+      if (!terminationKind) {
+        const timeoutMs = config.timeoutMs ?? defaultTimeoutMs
+        timeoutId = setTimeout(() => {
+          terminate('timeout', new DOMException('请求超时', 'TimeoutError'))
+        }, timeoutMs)
+      }
 
       try {
         const headers = new Headers(config.headers)
-        const accessToken = await options.getAccessToken?.()
+        const accessToken = await awaitWithAbort(options.getAccessToken?.(), controller.signal)
         if (accessToken && !headers.has('Authorization')) {
           headers.set('Authorization', `Bearer ${accessToken}`)
         }
@@ -142,16 +181,19 @@ export const createNativeFetchAdapter = (options: NativeFetchAdapterOptions): Ht
           headers,
           signal: controller.signal,
         }
-        if (config.body !== undefined) {
+        if (config.data !== undefined) {
           if (!headers.has('Content-Type')) {
             headers.set('Content-Type', 'application/json')
           }
-          requestInit.body = JSON.stringify(config.body)
+          requestInit.body = JSON.stringify(config.data)
         }
 
-        const response = await fetchImplementation(
-          buildRequestUrl(options.baseUrl, config.path, config.query),
-          requestInit,
+        const response = await awaitWithAbort(
+          fetchImplementation(
+            buildRequestUrl(options.baseUrl, config.url, config.params),
+            requestInit,
+          ),
+          controller.signal,
         )
         const payload = await parseResponsePayload(response)
 
@@ -182,27 +224,29 @@ export const createNativeFetchAdapter = (options: NativeFetchAdapterOptions): Ht
 
         return payload as T
       } catch (error) {
-        if (error instanceof ApiClientError) {
-          throw error
-        }
-        if (timedOut) {
+        if (terminationKind === 'timeout') {
           throw new ApiClientError('请求超时', {
             kind: 'timeout',
             cause: error,
           })
         }
-        if (externallyCanceled || config.signal?.aborted) {
+        if (terminationKind === 'aborted') {
           throw new ApiClientError('请求已取消', {
-            kind: 'canceled',
+            kind: 'aborted',
             cause: error,
           })
+        }
+        if (error instanceof ApiClientError) {
+          throw error
         }
         throw new ApiClientError('网络请求失败', {
           kind: 'network',
           cause: error,
         })
       } finally {
-        clearTimeout(timeoutId)
+        if (timeoutId) {
+          clearTimeout(timeoutId)
+        }
         config.signal?.removeEventListener('abort', handleExternalAbort)
       }
     },
