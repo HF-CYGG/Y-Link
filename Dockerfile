@@ -27,6 +27,7 @@ COPY index.html ./
 COPY public ./public
 COPY scripts ./scripts
 COPY src ./src
+COPY packages/shared-types ./packages/shared-types
 COPY tsconfig.json ./
 COPY tsconfig.app.json ./
 COPY tsconfig.node.json ./
