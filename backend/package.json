@@ -23,6 +23,7 @@
     "task2:verify": "tsx scripts/task2-verify.ts",
     "task2:governance:verify": "tsx scripts/task2-governance-verify.ts",
     "task2:route-contract:verify": "tsx scripts/task2-route-permission-contract-verify.ts",
+    "write-transaction:contract:verify": "tsx scripts/write-transaction-contract-verify.ts",
     "task3:verify": "tsx scripts/task3-verify.ts",
     "task4:verify": "tsx scripts/task4-verify.ts",
     "task4:upload-security:verify": "tsx scripts/task4-upload-security-verify.ts",

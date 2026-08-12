@@ -8,7 +8,7 @@
 # 1. 在手动触发、主分支推送或拉取请求时执行；
 # 2. 安装根目录与后端依赖前，显式把 npm registry 固定为官方源；
 # 3. 安装完成后分别执行根目录与后端 `npm audit`，确保 CI 使用官方审计口径；
-# 4. 先跑 `task8:verify` 守住 SQLite 并发写事务（只依赖本地 SQLite，秒级完成，失败即止，
+# 4. 先做写事务闸门静态契约检查，再跑 `task8:verify` 守住 SQLite 并发写事务（只依赖本地 SQLite，秒级完成，失败即止，
 #    不必先花时间拉起 Docker MySQL）；
 # 5. 最后复用统一命令 `npm run verify:db:concurrency` 覆盖 MySQL 侧；
 # 6. MySQL 临时环境由脚本内部自动通过 Docker Compose 准备与清理，避免 CI 额外维护服务编排。
@@ -60,6 +60,11 @@ jobs:
 
       - name: 执行后端依赖安全审计
         run: npm --prefix ./backend audit --audit-level=high
+
+      # 写事务闸门的静态契约门禁：秒级完成、无任何运行时依赖，
+      # 因此排在所有运行时验收之前——绕过闸门的新代码在这里就会被拦下。
+      - name: 执行写事务闸门契约检查
+        run: npm --prefix ./backend run write-transaction:contract:verify
 
       # SQLite 侧的并发写事务回归：并发提交 16 笔出库单，若哪天写事务绕过
       # `runInTransaction` 闸门、直接调用 `AppDataSource.transaction`，这一步会立刻报
