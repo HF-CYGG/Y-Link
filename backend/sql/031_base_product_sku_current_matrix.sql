@@ -1,9 +1,13 @@
 -- Add an explicit current-matrix marker for SKU rows.
 -- Historical SKU rows stay in the table for snapshots, but no longer participate in current stock or mall selection.
 
-ALTER TABLE `base_product_sku`
-  ADD COLUMN IF NOT EXISTS `is_current` TINYINT(1) NOT NULL DEFAULT 1 COMMENT 'Whether this SKU belongs to the current spec matrix' AFTER `is_active`;
-
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'base_product_sku' AND COLUMN_NAME = 'is_current') = 0,
+  'ALTER TABLE `base_product_sku` ADD COLUMN `is_current` TINYINT(1) NOT NULL DEFAULT 1 COMMENT ''Whether this SKU belongs to the current spec matrix'' AFTER `is_active`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 UPDATE `base_product_sku`
 SET `is_current` = 0,
     `o2o_recommended` = 0

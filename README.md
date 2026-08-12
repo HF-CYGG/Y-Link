@@ -466,7 +466,7 @@ Y-Link
 | --- | --- |
 | `/app/data` | 容器内 SQLite 数据目录，必须持久化 |
 | `/app/uploads` | 容器内上传文件目录，必须持久化 |
-| `backend/sql` | MySQL 初始化和结构升级脚本 |
+| `backend/sql` | MySQL 历史增量迁移脚本（用于给已有库补齐特定变更；全新空库请用 `DB_SYNC=true` 初始化，详见 `.env.docker.mysql.example`） |
 | `backend/data` | 本地开发 SQLite 数据目录 |
 | `docs` | 使用指南、迁移手册、维护文档 |
 

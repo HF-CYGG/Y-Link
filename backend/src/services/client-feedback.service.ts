@@ -12,6 +12,7 @@
 
 import { In, LessThan, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
+import { runInTransaction } from '../config/transaction-runner.js'
 import { resolvePermissionsByRole } from '../constants/auth-permissions.js'
 import {
   ClientFeedbackConversation,
@@ -972,7 +973,7 @@ class ClientFeedbackService {
     let lastError: unknown
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
-        result = await AppDataSource.transaction(async (manager) => {
+        result = await runInTransaction(async (manager) => {
           const conversationRepo = manager.getRepository(ClientFeedbackConversation)
           const conversation = await conversationRepo.save(
             conversationRepo.create({
@@ -1133,7 +1134,7 @@ class ClientFeedbackService {
       }
     }
 
-    const result = await AppDataSource.transaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const conversation = await this.requireOwnedConversation(id, clientAuth, manager)
       const readChanged = await this.markConversationReadForClient(manager, conversation)
       const messages = (await this.loadConversationMessages(manager, conversation.id))
@@ -1169,7 +1170,7 @@ class ClientFeedbackService {
     const attachments = this.normalizeAttachments(input.attachments)
     const clientSnapshot = await this.getClientUserSnapshot(clientAuth.userId)
 
-    const result = await AppDataSource.transaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const conversation = await this.requireOwnedConversation(id, clientAuth, manager)
       if (conversation.status === 'closed') {
         throw new BizError('当前反馈会话已关闭，请新建反馈后继续沟通', 400)
@@ -1237,7 +1238,7 @@ class ClientFeedbackService {
   ) {
     const clientSnapshot = await this.getClientUserSnapshot(clientAuth.userId)
 
-    const result = await AppDataSource.transaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const conversation = await this.requireOwnedConversation(id, clientAuth, manager)
       if (conversation.status === 'closed') {
         return {
@@ -1314,7 +1315,7 @@ class ClientFeedbackService {
   ) {
     const clientSnapshot = await this.getClientUserSnapshot(clientAuth.userId)
 
-    const result = await AppDataSource.transaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const conversation = await this.requireOwnedConversation(id, clientAuth, manager)
       if (conversation.status === 'closed') {
         return {
@@ -1397,7 +1398,7 @@ class ClientFeedbackService {
       CLIENT_FEEDBACK_SATISFACTION_COMMENT_MAX_LENGTH,
     )
 
-    const result = await AppDataSource.transaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const conversation = await this.requireOwnedConversation(id, clientAuth, manager)
       if (conversation.status !== 'resolved' && conversation.status !== 'closed') {
         throw new BizError('当前反馈单尚未进入可评价阶段', 400)
@@ -1522,7 +1523,7 @@ class ClientFeedbackService {
       }
     }
 
-    const result = await AppDataSource.transaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const conversation = await this.requireConversationById(id, manager)
       const readChanged = await this.markConversationReadForService(manager, conversation)
       const messages = await this.loadConversationMessages(manager, conversation.id)
@@ -1553,7 +1554,7 @@ class ClientFeedbackService {
     const content = this.normalizeMessageContent(input.content)
     const attachments = this.normalizeAttachments(input.attachments)
 
-    const result = await AppDataSource.transaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const conversation = await this.requireConversationById(id, manager)
       if (conversation.status === 'closed') {
         throw new BizError('当前反馈会话已关闭，请先重新打开后再回复', 400)
@@ -1616,7 +1617,7 @@ class ClientFeedbackService {
       throw new BizError('反馈会话状态非法', 400)
     }
 
-    const result = await AppDataSource.transaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const conversation = await this.requireConversationById(id, manager)
       this.ensureConversationOwnedByActor(conversation, actor)
       if (conversation.status === input.status) {
@@ -1717,7 +1718,7 @@ class ClientFeedbackService {
     requestMeta?: RequestMeta,
   ) {
     const targetUserId = input.assigneeUserId.trim()
-    const result = await AppDataSource.transaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const conversation = await this.requireConversationById(id, manager)
       const targetUser = await this.requireAssignableServiceUser(targetUserId, manager)
       const beforeAssignee = {
@@ -1836,7 +1837,7 @@ class ClientFeedbackService {
     actor: AuthUserContext,
     requestMeta?: RequestMeta,
   ) {
-    const result = await AppDataSource.transaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const conversation = await this.requireConversationById(id, manager)
       const before = this.buildConversationFields(conversation)
       const subjectBefore = conversation.subject
@@ -1941,7 +1942,7 @@ class ClientFeedbackService {
       CLIENT_FEEDBACK_INTERNAL_REMARK_MAX_LENGTH,
     )
 
-    const result = await AppDataSource.transaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const conversation = await this.requireConversationById(id, manager)
       const before = this.buildInternalRemarkView(conversation)
       const beforeContent = before?.content ?? null

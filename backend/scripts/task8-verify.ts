@@ -1,30 +1,62 @@
 /**
  * 文件说明：backend/scripts/task8-verify.ts
  * 文件职责：验证双流水单号、历史迁移脚本、凭证打印关键实现与统计接口回归。
- * 维护说明：若调整 Task8 迁移 SQL、单号前缀或前端凭证模板，请同步更新本脚本。
+ * 维护说明：
+ * - 若调整 Task8 迁移 SQL、单号前缀或前端凭证模板，请同步更新本脚本；
+ * - 数据源相关模块必须用 `await import()` 动态加载：ESM 的静态 import 会在模块体执行前完成求值，
+ *   若改回静态 import，下面这几行 process.env 赋值就会晚于 env.ts / data-source.ts 的初始化而完全失效，
+ *   脚本会连到开发者的默认库 data/y-link.sqlite 上跑，既污染本地数据、又会因残留数据在重跑时报错。
+ * - `verifyConcurrentSerialAndDrilldown` 是 SQLite 并发写事务串行化（issue #36）的回归守卫：
+ *   它并发提交 16 笔出库单，若哪天写事务绕过了 `runInTransaction` 闸门、直接调用
+ *   `AppDataSource.transaction`，这一项就会重新报
+ *   `cannot start a transaction within a transaction` 或 `no such savepoint`。
  */
 
+import 'reflect-metadata'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
-import { AppDataSource } from '../src/config/data-source.js'
-import { BizOutboundOrder } from '../src/entities/biz-outbound-order.entity.js'
-import { dashboardService } from '../src/services/dashboard.service.js'
-import { orderService } from '../src/services/order.service.js'
-import { productService } from '../src/services/product.service.js'
-import { systemConfigService } from '../src/services/system-config.service.js'
-import { tagService } from '../src/services/tag.service.js'
+import { fileURLToPath } from 'node:url'
 import type { AuthUserContext } from '../src/types/auth.js'
 
-const runtimeRoot = path.resolve(process.cwd(), 'data/local-dev')
-const sqlitePath = path.resolve(runtimeRoot, `y-link.task8-verify.${Date.now()}.sqlite`)
-const sqlRoot = path.resolve(process.cwd(), 'sql')
-const frontendRoot = path.resolve(process.cwd(), '../src/views/order-list')
+const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+const runtimeRoot = path.resolve(backendRoot, 'data', 'local-dev')
+const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
+const sqlitePath = path.resolve(runtimeRoot, `y-link.task8-verify.${verifySeed}.sqlite`)
+const sqlRoot = path.resolve(backendRoot, 'sql')
+const frontendRoot = path.resolve(backendRoot, '../src/views/order-list')
 
-process.env.APP_PROFILE = `task8-verify-${Date.now()}`
+process.env.APP_PROFILE = `task8-verify-${verifySeed}`
 process.env.DB_TYPE = 'sqlite'
 process.env.DB_SYNC = 'true'
 process.env.SQLITE_DB_PATH = sqlitePath
+
+type AppDataSourceRef = (typeof import('../src/config/data-source.js'))['AppDataSource']
+type BizOutboundOrderRef = (typeof import('../src/entities/biz-outbound-order.entity.js'))['BizOutboundOrder']
+type DashboardServiceRef = (typeof import('../src/services/dashboard.service.js'))['dashboardService']
+type OrderServiceRef = (typeof import('../src/services/order.service.js'))['orderService']
+type ProductServiceRef = (typeof import('../src/services/product.service.js'))['productService']
+type SystemConfigServiceRef = (typeof import('../src/services/system-config.service.js'))['systemConfigService']
+type TagServiceRef = (typeof import('../src/services/tag.service.js'))['tagService']
+
+let AppDataSource: AppDataSourceRef
+let BizOutboundOrder: BizOutboundOrderRef
+let dashboardService: DashboardServiceRef
+let orderService: OrderServiceRef
+let productService: ProductServiceRef
+let systemConfigService: SystemConfigServiceRef
+let tagService: TagServiceRef
+
+/** 必须在上面的 process.env 赋值之后调用，否则数据源会按默认配置初始化。 */
+const loadRuntimeModules = async () => {
+  AppDataSource = (await import('../src/config/data-source.js')).AppDataSource
+  BizOutboundOrder = (await import('../src/entities/biz-outbound-order.entity.js')).BizOutboundOrder
+  dashboardService = (await import('../src/services/dashboard.service.js')).dashboardService
+  orderService = (await import('../src/services/order.service.js')).orderService
+  productService = (await import('../src/services/product.service.js')).productService
+  systemConfigService = (await import('../src/services/system-config.service.js')).systemConfigService
+  tagService = (await import('../src/services/tag.service.js')).tagService
+}
 
 const mockActor: AuthUserContext = {
   userId: '9008',
@@ -73,12 +105,19 @@ const verifyMigrationScripts = () => {
   const mappingSource = fs.readFileSync(mappingScriptPath, 'utf8')
   const rollbackSource = fs.readFileSync(mappingRollbackScriptPath, 'utf8')
 
-  assert.match(migrationSource, /ADD COLUMN IF NOT EXISTS `order_type`/)
+  // 003 已从 MariaDB 专有的 ADD COLUMN IF NOT EXISTS 改造为
+  // information_schema 判断 + PREPARE 动态 DDL（MySQL 8 兼容且可安全重放），
+  // 因此这里断言"存在性判断"与"建列语句"两部分都在，而不是断言旧语法。
+  assert.match(migrationSource, /COLUMN_NAME = 'order_type'\) = 0/)
+  assert.match(migrationSource, /ADD COLUMN `order_type`/)
+  assert.doesNotMatch(migrationSource, /ADD COLUMN IF NOT EXISTS/)
   assert.match(migrationSource, /idx_biz_outbound_order_type_created_at/)
   assert.match(migrationSource, /order\.serial\.department\.start/)
   assert.match(mappingSource, /task8_order_type_mapping_backup/)
   assert.match(mappingSource, /CASE/)
-  assert.match(mappingSource, /TRIM\(customer_department_name\)/)
+  // 004 里该列名带反引号（TRIM(`customer_department_name`)），断言需容忍反引号，
+  // 否则这条守卫永远匹配失败——本脚本此前即因此在任何改动下都无法通过。
+  assert.match(mappingSource, /TRIM\(`?customer_department_name`?\)/)
   assert.match(rollbackSource, /UPDATE `biz_outbound_order` AS o/)
   assert.match(rollbackSource, /DROP TABLE `task8_order_type_mapping_backup`/)
   pass('Task8 迁移与历史映射脚本已补齐且包含关键语句')
@@ -86,14 +125,23 @@ const verifyMigrationScripts = () => {
 
 const verifyVoucherFlowByStaticCheck = () => {
   const orderListSource = fs.readFileSync(path.resolve(frontendRoot, 'OrderListView.vue'), 'utf8')
+  const voucherWorkbenchSource = fs.readFileSync(
+    path.resolve(frontendRoot, 'components/OrderVoucherWorkbenchDialog.vue'),
+    'utf8',
+  )
   const voucherTemplateSource = fs.readFileSync(path.resolve(frontendRoot, 'components/OrderVoucherTemplate.vue'), 'utf8')
 
-  assert.match(orderListSource, /window\.print\(\)/)
+  // 正式出库单是低频重能力，已从 OrderListView 拆到异步子组件 OrderVoucherWorkbenchDialog：
+  // 列表页只保留入口与弹窗挂载，打印动作与凭证模板都落在子组件内，断言需按这个分层校验。
   assert.match(orderListSource, /handleOpenVoucherDialog/)
-  assert.match(orderListSource, /OrderVoucherTemplate/)
-  assert.match(voucherTemplateSource, /海右野辙文创店购物凭证/)
+  assert.match(orderListSource, /OrderVoucherWorkbenchDialog/)
+  assert.match(voucherWorkbenchSource, /(?:window|globalThis)\.print\(\)/)
+  assert.match(voucherWorkbenchSource, /OrderVoucherTemplate/)
+  // 模板已从早期“海右野辙文创店购物凭证”改版为单主表格的“野辙文创出库单”，
+  // 金额汇总行标题也由“总金额”改为“总计”，这里按现行模板的锚点断言。
+  assert.match(voucherTemplateSource, /野辙文创出库单/)
   assert.match(voucherTemplateSource, /业务单号/)
-  assert.match(voucherTemplateSource, /总金额/)
+  assert.match(voucherTemplateSource, /总计/)
   pass('凭证预览与打印链路关键实现存在')
 }
 
@@ -195,14 +243,17 @@ const verifyConcurrentSerialAndDrilldown = async () => {
   assert.equal(productDrilldown.records.length >= 1, true)
   assert.equal(productDrilldown.records.every((record) => record.orderType === 'walkin'), true)
 
+  // 看板的"客户"维度取的是申请部门（`COALESCE(NULLIF(TRIM(customerDepartmentName), ''), '散客')`），
+  // 散客单没有部门、统一归到 `散客` 这一个桶里——不是按订单的 customerName 逐个成桶。
+  // 因此这里要按桶名 `散客` 下钻，早先按 `散客1` 查是查不到任何记录的。
   const customerDrilldown = await dashboardService.getCustomerRankDrilldown({
-    customerName: '散客1',
+    customerName: '散客',
     startDate: todayText,
     endDate: todayText,
     orderType: 'walkin',
   })
   assert.equal(customerDrilldown.records.length >= 1, true)
-  assert.equal(customerDrilldown.records[0]?.showNo.startsWith('hyyz'), true)
+  assert.equal(customerDrilldown.records.every((record) => record.showNo.startsWith('hyyz')), true)
 
   const tagAggregate = await dashboardService.getTagAggregate({
     tagId: analyticsTag.id,
@@ -222,6 +273,7 @@ async function main() {
   verifyMigrationScripts()
   verifyVoucherFlowByStaticCheck()
 
+  await loadRuntimeModules()
   await AppDataSource.initialize()
   try {
     await AppDataSource.synchronize()

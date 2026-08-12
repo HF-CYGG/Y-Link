@@ -8,6 +8,7 @@
 
 import { In, type EntityManager, type Repository } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
+import { runInTransaction } from '../config/transaction-runner.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { BaseProductSku } from '../entities/base-product-sku.entity.js'
 import { RelProductTag } from '../entities/rel-product-tag.entity.js'
@@ -363,7 +364,7 @@ export class ProductService {
   }
 
   async create(input: CreateProductInput): Promise<ProductView> {
-    return AppDataSource.transaction((manager) => this.createWithManager(input, manager))
+    return runInTransaction((manager) => this.createWithManager(input, manager))
   }
 
   async batchCreate(inputs: CreateProductInput[]): Promise<ProductView[]> {
@@ -376,7 +377,7 @@ export class ProductService {
 
     this.assertNoDuplicateProductCodesInBatch(inputs)
 
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const createdProducts: ProductView[] = []
 
       for (let index = 0; index < inputs.length; index += 1) {
@@ -397,7 +398,7 @@ export class ProductService {
   }
 
   async update(id: string, input: UpdateProductInput): Promise<ProductView> {
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const repo = manager.getRepository(BaseProduct)
       const product = await repo.findOne({
         where: { id },
@@ -431,7 +432,7 @@ export class ProductService {
       throw new BizError('至少提供一个可更新字段')
     }
 
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const repo = manager.getRepository(BaseProduct)
       const products = await repo.find({
         where: { id: In(productIds) },
@@ -452,7 +453,7 @@ export class ProductService {
   }
 
   async delete(id: string): Promise<void> {
-    await AppDataSource.transaction(async (manager) => {
+    await runInTransaction(async (manager) => {
       const productRepo = manager.getRepository(BaseProduct)
       const product = await productRepo.findOne({
         where: { id },
@@ -757,10 +758,16 @@ export class ProductService {
     }
     const [sku] = skus
     if (sku && this.isDefaultProductSku(sku)) {
+      const nextIsActive = Boolean(product.isActive)
+      // 与 replaceProductSkus 里的停用/退役守卫保持同一口径：唯一默认 SKU 仍有在途预订占用时，
+      // 不允许通过商品级 isActive 字段间接把它停用，否则会重新制造出“非活跃 SKU 仍持有占用”的状态。
+      if (!nextIsActive && isDatabaseFlagEnabled(sku.isActive) && Number(sku.preOrderedStock ?? 0) > 0) {
+        throw new BizError(`SKU「${sku.specText}」仍有 ${sku.preOrderedStock} 件预订占用，释放或核销完成前不能停用`, 409)
+      }
       sku.defaultPrice = normalizeDecimalText(product.defaultPrice)
       sku.discountRate = normalizeDiscountRate(product.discountRate)
       sku.currentStock = Math.max(0, Number(product.currentStock ?? 0))
-      sku.isActive = Boolean(product.isActive)
+      sku.isActive = nextIsActive
       sku.isCurrent = true
       sku.thumbnail = product.thumbnail ?? null
       this.assertStockRelation(sku.currentStock, sku.preOrderedStock)
