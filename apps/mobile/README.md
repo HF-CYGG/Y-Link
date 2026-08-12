@@ -6,6 +6,7 @@ Y-Link 的独立 Expo 移动端工程。当前阶段只建立可运行的路由�
 
 - Node.js：`22.13.1`
 - 包管理器：npm；本目录使用独立 `package.json` 与 `package-lock.json`
+- 依赖源：本目录 `.npmrc` 固定官方 npm registry；lockfile 保留 tarball `resolved` 与 `integrity` 供 CI 校验
 - Expo SDK：`~57.0.0`
 - React Native：`0.86.x`
 - React：`19.2.3`
@@ -23,6 +24,7 @@ npm --prefix apps/mobile install
 ```bash
 npm --prefix apps/mobile run android
 npm --prefix apps/mobile run dependencies:check
+npm --prefix apps/mobile run test:db
 npm --prefix apps/mobile run typecheck
 npm --prefix apps/mobile run export:android
 ```
@@ -35,7 +37,7 @@ npm --prefix apps/mobile run export:android
 - `src/app/providers/`：Safe Area 与 TanStack Query 等应用级 Provider；`QueryClient` 在模块级创建，避免渲染时重建。
 - `src/features/`：按认证、商城、购物车、结算、订单、反馈、个人中心拆分业务边界。
 - `src/stores/`：Zustand 客户端状态；服务端缓存应留给 TanStack Query。
-- `src/db/`：SQLite 打开函数与 `PRAGMA user_version` 迁移框架；迁移版本必须是正安全整数且不可重复，允许跳号但始终严格升序执行。迁移只能由初始化链单一入口串行触发，当前不创建业务表、不自动 hydration。
+- `src/db/`：SQLite 打开函数与 `PRAGMA user_version` 迁移框架；数据库当前版本限定为 `0..2147483647` 整数，迁移版本限定为 `1..2147483647` 且不可重复，允许跳号但始终严格升序执行。数据库版本高于代码最高已知迁移时会拒绝降级运行；空迁移清单仅允许版本 `0`。迁移只能由初始化链单一入口串行触发，当前不创建业务表、不自动 hydration。
 - `src/platform/`：安全存储和相机、图片选择、通知、Deep Link 的平台抽象。
 - `src/components/`、`src/ui/`、`src/theme/`：共享组件、无业务语义 UI 与设计令牌。
 - `src/sync/`：未来离线同步与冲突处理边界；当前不运行同步任务。

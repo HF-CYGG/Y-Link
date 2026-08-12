@@ -24,6 +24,16 @@ interface ApiEnvelope<T> {
   data: T
 }
 
+const RELATIVE_API_PATH_REQUIRED_MESSAGE = '请求地址必须使用相对 API 路径'
+const ABSOLUTE_URL_PATTERN = /^[a-z][a-z\d+.-]*:/i
+const PROTOCOL_RELATIVE_URL_PATTERN = /^[\\/]{2}/
+
+const createInvalidRequestUrlError = () => {
+  return new ApiClientError(RELATIVE_API_PATH_REQUIRED_MESSAGE, {
+    kind: 'network',
+  })
+}
+
 const isRecord = (value: unknown): value is Record<string, unknown> => {
   return typeof value === 'object' && value !== null
 }
@@ -50,9 +60,22 @@ const buildRequestUrl = (
   requestUrl: string,
   params?: HttpRequestConfig['params'],
 ) => {
+  const requestUrlForValidation = requestUrl.trimStart()
+  if (
+    ABSOLUTE_URL_PATTERN.test(requestUrlForValidation)
+    || PROTOCOL_RELATIVE_URL_PATTERN.test(requestUrlForValidation)
+  ) {
+    throw createInvalidRequestUrlError()
+  }
+
   const normalizedBaseUrl = `${baseUrl.replace(/\/+$/, '')}/`
   const normalizedRequestUrl = requestUrl.replace(/^\/+/, '')
-  const url = new URL(normalizedRequestUrl, normalizedBaseUrl)
+  const base = new URL(normalizedBaseUrl)
+  const url = new URL(normalizedRequestUrl, base)
+
+  if (url.origin !== base.origin) {
+    throw createInvalidRequestUrlError()
+  }
 
   if (params) {
     for (const [key, value] of Object.entries(params)) {
@@ -180,6 +203,7 @@ export const createNativeFetchAdapter = (options: NativeFetchAdapterOptions): Ht
       }
 
       try {
+        const requestUrl = buildRequestUrl(options.baseUrl, config.url, config.params)
         const headers = new Headers(config.headers)
         const accessToken = await awaitFactoryWithAbort(
           () => options.getAccessToken?.(),
@@ -210,7 +234,7 @@ export const createNativeFetchAdapter = (options: NativeFetchAdapterOptions): Ht
 
         const response = await awaitWithAbort(
           fetchImplementation(
-            buildRequestUrl(options.baseUrl, config.url, config.params),
+            requestUrl,
             requestInit,
           ),
           controller.signal,

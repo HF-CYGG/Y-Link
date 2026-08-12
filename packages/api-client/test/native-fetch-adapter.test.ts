@@ -201,6 +201,43 @@ test('按需注入 Bearer Authorization 且保留显式 headers', async () => {
   assert.equal(headers.get('X-Trace-Id'), 'trace-1')
 })
 
+const unsafeAbsoluteUrls = [
+  ['绝对跨源 URL', 'https://evil.example.com/profile'],
+  ['协议变化 URL', 'http://api.example.com/profile'],
+  ['端口变化 URL', 'https://api.example.com:8443/profile'],
+  ['protocol-relative URL', '//evil.example.com/profile'],
+] as const
+
+for (const [scenario, unsafeUrl] of unsafeAbsoluteUrls) {
+  test(`拒绝${scenario}且不读取或外泄 token`, async () => {
+    let tokenFactoryCalls = 0
+    let fetchCalls = 0
+    const adapter = createNativeFetchAdapter({
+      baseUrl: 'https://api.example.com/api',
+      getAccessToken: () => {
+        tokenFactoryCalls += 1
+        return 'mobile-secret-token'
+      },
+      fetch: async () => {
+        fetchCalls += 1
+        return jsonResponse({ code: 0, message: 'ok', data: true })
+      },
+    })
+
+    await assert.rejects(
+      adapter.request({ method: 'GET', url: unsafeUrl }),
+      (error: unknown) => {
+        assert.ok(error instanceof ApiClientError)
+        assert.equal(error.kind, 'network')
+        assert.match(error.message, /相对 API 路径/)
+        return true
+      },
+    )
+    assert.equal(tokenFactoryCalls, 0)
+    assert.equal(fetchCalls, 0)
+  })
+}
+
 test('仅在调用方显式传入 key 时添加 Idempotency-Key', async () => {
   const recorder = createFetchRecorder(jsonResponse({ code: 0, message: 'ok', data: true }))
   const adapter = createNativeFetchAdapter({
