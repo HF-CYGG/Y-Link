@@ -5,7 +5,7 @@
  * - SQLite 一体化部署由 database-bootstrap.ts 里的 normalizeSqlite* 系列函数在启动期自动补齐结构；
  *   而 MySQL 一直被视为“外部管理”的数据库，此前启动阶段完全不校验 backend/sql/ 是否已执行，
  *   导致缺表故障只能在业务接口报错时才被发现（例如认证接口依赖的 auth_risk_state 表）。
- * - assertMysqlRequiredTablesExist：只读校验一组关键表是否存在，缺失则直接抛错阻止服务启动，
+ * - assertMysqlRequiredSchemaExists：只读校验一组关键表、列与索引定义，缺失或形状不符时直接抛错阻止服务启动，
  *   把“运行时才 500”变成“启动即失败 + 明确的修复指引”。这一层无副作用、始终执行。
  *   报错文案会区分“全新空库”（缺全部必需表，只能走 DB_SYNC=true 实体同步）与
  *   “已执行过部分迁移的存量库”（只缺少数表，按 TABLE_INTRODUCING_SCRIPT 精确执行那一个脚本），
@@ -21,7 +21,8 @@
  * - 新增迁移文件若要加入自动执行范围，必须先人工确认其为幂等写法
  *   （CREATE TABLE IF NOT EXISTS / information_schema 判断 + PREPARE-EXECUTE 动态 DDL），
  *   再追加到 AUTO_MIGRATABLE_FILES；不要使用 MariaDB 专有的 ADD COLUMN IF NOT EXISTS；
- * - 新增强依赖的关键表时，请同步补充 MYSQL_REQUIRED_TABLES 与 TABLE_INTRODUCING_SCRIPT，
+ * - 新增强依赖的关键结构时，请同步补充 MYSQL_REQUIRED_TABLES / MYSQL_REQUIRED_COLUMNS /
+ *   MYSQL_REQUIRED_INDEXES 及其迁移脚本映射，
  *   并保持与 database-bootstrap.ts 的 SQLITE_REQUIRED_TABLES 口径一致；
  * - 若引入新的不可重放脚本，请同步补充 NON_IDEMPOTENT_HISTORICAL_SCRIPTS，
  *   避免报错文案误导运维"可以安全重放"。
@@ -53,7 +54,11 @@ const MYSQL_REQUIRED_TABLES = [
   'o2o_preorder_item',
   'biz_inbound_order',
   'biz_inbound_order_item',
+  'notification_event',
+  'notification_inbox',
+  'notification_dispatch',
   'auth_risk_state',
+  'business_sequence',
 ]
 
 // 每个必需表由哪个迁移脚本创建，用于在报错时给出精确指引，而不是笼统建议“从头跑一遍”。
@@ -68,8 +73,83 @@ const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
   o2o_preorder: '006_o2o_preorder_schema.sql',
   o2o_preorder_item: '006_o2o_preorder_schema.sql',
   base_product_sku: '028_o2o_product_sku_selection.sql',
+  notification_event: '020_notification_center_and_user_email.sql',
+  notification_inbox: '020_notification_center_and_user_email.sql',
+  notification_dispatch: '020_notification_center_and_user_email.sql',
   auth_risk_state: '033_inventory_security_invariants.sql',
+  business_sequence: '035_o2o_idempotency_business_sequence.sql',
 }
+
+interface MysqlRequiredColumn {
+  tableName: string
+  columnName: string
+  introducingScript: string
+}
+
+interface MysqlRequiredIndex {
+  tableName: string
+  indexName: string
+  columns: readonly string[]
+  unique: boolean
+  introducingScript: string
+}
+
+// 只列会被当前业务代码直接读写、缺失后必然导致运行时失败的增量字段。
+// 表不存在时由 MYSQL_REQUIRED_TABLES 先给出建表脚本，避免同一张缺表重复打印多条缺列提示。
+const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
+  { tableName: 'o2o_preorder', columnName: 'client_request_id', introducingScript: '035_o2o_idempotency_business_sequence.sql' },
+  { tableName: 'o2o_preorder', columnName: 'client_request_hash', introducingScript: '035_o2o_idempotency_business_sequence.sql' },
+  { tableName: 'business_sequence', columnName: 'sequence_key', introducingScript: '035_o2o_idempotency_business_sequence.sql' },
+  { tableName: 'business_sequence', columnName: 'current_value', introducingScript: '035_o2o_idempotency_business_sequence.sql' },
+  { tableName: 'business_sequence', columnName: 'created_at', introducingScript: '035_o2o_idempotency_business_sequence.sql' },
+  { tableName: 'business_sequence', columnName: 'updated_at', introducingScript: '035_o2o_idempotency_business_sequence.sql' },
+  { tableName: 'notification_event', columnName: 'attempt_count', introducingScript: '036_notification_outbox.sql' },
+  { tableName: 'notification_event', columnName: 'next_attempt_at', introducingScript: '036_notification_outbox.sql' },
+  { tableName: 'notification_event', columnName: 'processing_started_at', introducingScript: '036_notification_outbox.sql' },
+  { tableName: 'notification_event', columnName: 'processing_owner', introducingScript: '036_notification_outbox.sql' },
+  { tableName: 'notification_event', columnName: 'processed_at', introducingScript: '036_notification_outbox.sql' },
+  { tableName: 'notification_dispatch', columnName: 'dedupe_key', introducingScript: '036_notification_outbox.sql' },
+  { tableName: 'notification_dispatch', columnName: 'last_attempt_at', introducingScript: '036_notification_outbox.sql' },
+]
+
+// 不只按索引名判断，还校验列顺序与唯一性，避免旧库中存在同名但错误的索引时误判为可启动。
+const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
+  {
+    tableName: 'o2o_preorder',
+    indexName: 'uk_o2o_preorder_client_request',
+    columns: ['client_user_id', 'client_request_id'],
+    unique: true,
+    introducingScript: '035_o2o_idempotency_business_sequence.sql',
+  },
+  {
+    tableName: 'notification_event',
+    indexName: 'idx_notification_event_pending_claim',
+    columns: ['status', 'next_attempt_at', 'id'],
+    unique: false,
+    introducingScript: '036_notification_outbox.sql',
+  },
+  {
+    tableName: 'notification_event',
+    indexName: 'idx_notification_event_processing_recovery',
+    columns: ['status', 'processing_started_at', 'id'],
+    unique: false,
+    introducingScript: '036_notification_outbox.sql',
+  },
+  {
+    tableName: 'notification_inbox',
+    indexName: 'uk_notification_inbox_event_user',
+    columns: ['event_id', 'user_id'],
+    unique: true,
+    introducingScript: '036_notification_outbox.sql',
+  },
+  {
+    tableName: 'notification_dispatch',
+    indexName: 'uk_notification_dispatch_event_channel_target',
+    columns: ['event_id', 'channel', 'dedupe_key'],
+    unique: true,
+    introducingScript: '036_notification_outbox.sql',
+  },
+]
 
 // 不可重复执行的历史脚本。
 // 原先 006/008/014/015/016 因裸 ALTER TABLE ADD COLUMN 也在此列，已改造为
@@ -277,27 +357,88 @@ async function applyPendingMigrations(queryRunner: QueryRunner): Promise<{ appli
   return { appliedFiles }
 }
 
-/**
- * 启动期只读自检：确认核心业务表已存在。
- * - 缺表时直接抛错阻止服务对外提供服务，避免“认证接口运行时才 500”这种故障模式；
- * - 错误信息附带具体的修复命令，运维无需再去翻查文档定位缺哪张表；
- * - 无论 DB_AUTO_MIGRATE 是否开启都会执行，因为白名单只覆盖 033，
- *   若缺失的是白名单之外的表（例如运维从未执行过 001/019/028 等），自动迁移不会补齐，必须人工介入。
- */
-export async function assertMysqlRequiredTablesExist(dataSource: DataSource): Promise<void> {
+interface MysqlTableRow {
+  TABLE_NAME: string
+}
+
+interface MysqlColumnRow extends MysqlTableRow {
+  COLUMN_NAME: string
+}
+
+interface MysqlIndexRow extends MysqlColumnRow {
+  INDEX_NAME: string
+  SEQ_IN_INDEX: number | string
+  NON_UNIQUE: number | string
+}
+
+const schemaObjectKey = (tableName: string, objectName: string) => `${tableName}.${objectName}`
+
+/** 启动期只读自检：确认当前代码会直接依赖的 MySQL 表、字段与索引结构均已落地。 */
+export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): Promise<void> {
   if (env.DB_TYPE !== 'mysql') {
     return
   }
 
-  const rows: Array<{ TABLE_NAME: string }> = await dataSource.query(
+  const tableRows: MysqlTableRow[] = await dataSource.query(
     `SELECT TABLE_NAME FROM information_schema.TABLES
      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (${MYSQL_REQUIRED_TABLES.map(() => '?').join(', ')})`,
     MYSQL_REQUIRED_TABLES,
   )
-  const existingSet = new Set(rows.map((row) => row.TABLE_NAME))
-  const missingTables = MYSQL_REQUIRED_TABLES.filter((table) => !existingSet.has(table))
+  const existingTableSet = new Set(tableRows.map((row) => row.TABLE_NAME))
+  const missingTables = MYSQL_REQUIRED_TABLES.filter((table) => !existingTableSet.has(table))
 
-  if (missingTables.length === 0) {
+  const requiredColumnsOnExistingTables = MYSQL_REQUIRED_COLUMNS.filter((requirement) => (
+    existingTableSet.has(requirement.tableName)
+  ))
+  const requiredColumnTables = [...new Set(requiredColumnsOnExistingTables.map((item) => item.tableName))]
+  const requiredColumnNames = [...new Set(requiredColumnsOnExistingTables.map((item) => item.columnName))]
+  const columnRows: MysqlColumnRow[] = requiredColumnsOnExistingTables.length > 0
+    ? await dataSource.query(
+        `SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND TABLE_NAME IN (${requiredColumnTables.map(() => '?').join(', ')})
+           AND COLUMN_NAME IN (${requiredColumnNames.map(() => '?').join(', ')})`,
+        [...requiredColumnTables, ...requiredColumnNames],
+      )
+    : []
+  const existingColumnSet = new Set(columnRows.map((row) => schemaObjectKey(row.TABLE_NAME, row.COLUMN_NAME)))
+  const missingColumns = requiredColumnsOnExistingTables.filter((requirement) => (
+    !existingColumnSet.has(schemaObjectKey(requirement.tableName, requirement.columnName))
+  ))
+
+  const requiredIndexesOnExistingTables = MYSQL_REQUIRED_INDEXES.filter((requirement) => (
+    existingTableSet.has(requirement.tableName)
+  ))
+  const requiredIndexTables = [...new Set(requiredIndexesOnExistingTables.map((item) => item.tableName))]
+  const requiredIndexNames = [...new Set(requiredIndexesOnExistingTables.map((item) => item.indexName))]
+  const indexRows: MysqlIndexRow[] = requiredIndexesOnExistingTables.length > 0
+    ? await dataSource.query(
+        `SELECT TABLE_NAME, INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX, NON_UNIQUE
+         FROM information_schema.STATISTICS
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND TABLE_NAME IN (${requiredIndexTables.map(() => '?').join(', ')})
+           AND INDEX_NAME IN (${requiredIndexNames.map(() => '?').join(', ')})
+         ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX`,
+        [...requiredIndexTables, ...requiredIndexNames],
+      )
+    : []
+  const actualIndexes = new Map<string, { columns: string[]; unique: boolean }>()
+  for (const row of indexRows) {
+    const key = schemaObjectKey(row.TABLE_NAME, row.INDEX_NAME)
+    const current = actualIndexes.get(key) ?? { columns: [], unique: Number(row.NON_UNIQUE) === 0 }
+    current.columns[Number(row.SEQ_IN_INDEX) - 1] = row.COLUMN_NAME
+    current.unique = current.unique && Number(row.NON_UNIQUE) === 0
+    actualIndexes.set(key, current)
+  }
+  const invalidIndexes = requiredIndexesOnExistingTables.filter((requirement) => {
+    const actual = actualIndexes.get(schemaObjectKey(requirement.tableName, requirement.indexName))
+    return !actual
+      || actual.unique !== requirement.unique
+      || actual.columns.length !== requirement.columns.length
+      || requirement.columns.some((column, index) => actual.columns[index] !== column)
+  })
+
+  if (missingTables.length === 0 && missingColumns.length === 0 && invalidIndexes.length === 0) {
     return
   }
 
@@ -306,11 +447,35 @@ export async function assertMysqlRequiredTablesExist(dataSource: DataSource): Pr
   //   幂等写法（原先 18 个脚本使用的 MariaDB 专有 ADD COLUMN IF NOT EXISTS 已清除），
   //   但该目录始终是按时间累积的增量记录，从未作为完整基线在真实 MySQL 8 空库上端到端验证过，
   //   因此不能建议"从 001 顺序执行到最新编号"；
-  // - 存量库只缺个别表时，则要精确指向补建该表的那一个脚本，绝不能笼统建议“从头重跑”。
+  // - 存量库只缺个别结构对象时，则要精确指向维护该对象的脚本，绝不能笼统建议“从头重跑”。
   const isFreshDatabase = missingTables.length === MYSQL_REQUIRED_TABLES.length
-  const missingTableGuide = missingTables
-    .map((table) => `  - ${table} → backend/sql/${TABLE_INTRODUCING_SCRIPT[table] ?? '（未登记，请检查 mysql-migration-runner.ts 的 TABLE_INTRODUCING_SCRIPT）'}`)
+  const missingObjectGuide = [
+    ...missingTables.map((table) => ({
+      label: `表 ${table}`,
+      script: TABLE_INTRODUCING_SCRIPT[table]
+        ?? '（未登记，请检查 mysql-migration-runner.ts 的 TABLE_INTRODUCING_SCRIPT）',
+    })),
+    ...missingColumns.map((requirement) => ({
+      label: `字段 ${requirement.tableName}.${requirement.columnName}`,
+      script: requirement.introducingScript,
+    })),
+    ...invalidIndexes.map((requirement) => ({
+      label: `索引 ${requirement.tableName}.${requirement.indexName}`,
+      script: requirement.introducingScript,
+    })),
+  ]
+    .map(({ label, script }) => `  - ${label} → backend/sql/${script}`)
     .join('\n')
+
+  const problemSummary = [
+    missingTables.length > 0 ? `缺少必需表：${missingTables.join(', ')}` : null,
+    missingColumns.length > 0
+      ? `缺少必需字段：${missingColumns.map((item) => `${item.tableName}.${item.columnName}`).join(', ')}`
+      : null,
+    invalidIndexes.length > 0
+      ? `缺少或定义不匹配的必需索引：${invalidIndexes.map((item) => `${item.tableName}.${item.indexName}`).join(', ')}`
+      : null,
+  ].filter((item): item is string => Boolean(item)).join('；')
 
   const scenarioGuide = isFreshDatabase
     ? '当前数据库缺少全部必需表，属于全新空库（从未初始化过）。\n'
@@ -323,8 +488,8 @@ export async function assertMysqlRequiredTablesExist(dataSource: DataSource): Pr
       + '请勿按编号顺序执行 backend/sql/ 下的脚本来初始化全新库：这些脚本是按时间累积的历史增量记录，\n'
       + '并非经过验证的全量基线。它们虽已全部改造为幂等写法（可安全单独重放以补建缺失对象），\n'
       + '但脚本间的顺序依赖、以及数据回填语句对历史数据的假设，都未在空库上端到端验证过。'
-    : '当前数据库只缺少上面列出的少数表，属于已初始化过、但缺少后续增量的存量库：\n'
-      + '请执行上面“缺失表 → 脚本”列表中列出的目标脚本。这些脚本已全部改造为幂等写法\n'
+    : '当前数据库已初始化，但缺少上面列出的后续增量结构：\n'
+      + '请执行上面“结构对象 → 脚本”列表中列出的目标脚本。这些脚本已全部改造为幂等写法\n'
       + '（information_schema 判断 + PREPARE 动态 DDL / CREATE TABLE IF NOT EXISTS），\n'
       + '即使目标脚本是复合脚本、其中部分列或表已经存在，也只会补建真正缺失的对象，不会因重复报错。\n'
       + '\n'
@@ -332,11 +497,12 @@ export async function assertMysqlRequiredTablesExist(dataSource: DataSource): Pr
       + NON_IDEMPOTENT_HISTORICAL_SCRIPTS.map((item) => `  - ${item}`).join('\n')
 
   throw new Error(
-    `[启动失败] MySQL 数据库缺少必需表：${missingTables.join(', ')}。\n`
-    + '这些表分别由以下迁移脚本创建：\n'
-    + `${missingTableGuide}\n\n`
+    `[启动失败] MySQL 数据库结构不完整：${problemSummary}。\n`
+    + '缺失或不匹配的结构分别由以下迁移脚本维护：\n'
+    + `${missingObjectGuide}\n\n`
     + `${scenarioGuide}\n\n`
-    + '若缺失的仅是 auth_risk_state，也可以设置环境变量 DB_AUTO_MIGRATE=true 后重启服务，'
-    + '由服务自动执行白名单内已核实幂等的脚本（当前仅 033_inventory_security_invariants.sql）。',
+    + '若缺失的仅是 033 引入的 auth_risk_state，可以设置环境变量 DB_AUTO_MIGRATE=true 后重启服务，'
+    + '由服务自动执行白名单内已核实可在启动期运行的脚本。035/036 不会在启动期自动执行：'
+    + '036 包含历史通知去重和唯一索引 DDL，必须按“备份 → 停止所有应用与通知 Worker → 执行脚本 → 启动新版本”完成。',
   )
 }

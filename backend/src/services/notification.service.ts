@@ -1,4 +1,5 @@
-import { createHmac } from 'node:crypto'
+import { createHash, createHmac, randomUUID } from 'node:crypto'
+import { hostname } from 'node:os'
 import { In, MoreThan, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
@@ -23,6 +24,7 @@ import type { RequestMeta } from '../utils/request-meta.js'
 import { detectUnsafeHost, formatUnsafeHostReason } from '../utils/safe-network.js'
 import { hashSessionToken } from '../utils/session-token.js'
 import { auditService } from './audit.service.js'
+import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { systemConfigService } from './system-config.service.js'
 import { safeHttpRequest } from '../utils/safe-http-request.js'
 
@@ -45,6 +47,11 @@ const MAX_ONLINE_WINDOW_SECONDS = 3600
 const HEARTBEAT_WRITE_INTERVAL_MS = 60 * 1000
 const FEISHU_WEBHOOK_TIMEOUT_MS = 10 * 1000
 const FEISHU_WEBHOOK_ALLOWED_HOSTS = new Set(['open.feishu.cn', 'open.larksuite.com'])
+const NOTIFICATION_OUTBOX_INTERVAL_MS = 1_000
+const NOTIFICATION_OUTBOX_BATCH_SIZE = 3
+const NOTIFICATION_OUTBOX_MAX_ATTEMPTS = 5
+const NOTIFICATION_OUTBOX_STALE_CLAIM_MS = 10 * 60 * 1000
+const NOTIFICATION_OUTBOX_RETRY_DELAYS_MS = [5_000, 30_000, 2 * 60_000, 5 * 60_000] as const
 export const FEISHU_SIGN_SECRET_PLACEHOLDER = '[已配置签名密钥，保存时保留原值]'
 
 const DEFAULT_RULES: Array<{
@@ -170,6 +177,21 @@ interface NormalizedNotificationRuleDraft {
   emailSubjectPrefix: string
 }
 
+interface ClaimedNotificationEvent {
+  id: string
+  eventType: NotificationEventType
+  sourceType: string
+  sourceId: string
+  payloadJson: string
+  attemptCount: number
+}
+
+interface NotificationDispatchAttemptResult {
+  attempted: boolean
+  sent: boolean
+  retryableFailure: boolean
+}
+
 function parseJsonStringArray(raw: string | null | undefined): string[] {
   const text = String(raw ?? '').trim()
   if (!text) {
@@ -202,6 +224,20 @@ function normalizeFeishuSignSecretInput(secret: string): string | null {
 
 function normalizeId(value: string | number | null | undefined): string {
   return String(value ?? '').trim()
+}
+
+function buildDispatchDedupeKey(channel: NotificationDispatchChannel, destination: string): string {
+  const normalizedDestination = channel === 'email'
+    ? destination.trim().toLowerCase()
+    : destination.trim()
+  return createHash('sha256')
+    .update(`${channel}\n${normalizedDestination}`)
+    .digest('hex')
+}
+
+function resolveNotificationRetryDelayMs(attemptCount: number): number {
+  const index = Math.max(0, Math.min(NOTIFICATION_OUTBOX_RETRY_DELAYS_MS.length - 1, attemptCount - 1))
+  return NOTIFICATION_OUTBOX_RETRY_DELAYS_MS[index] ?? NOTIFICATION_OUTBOX_RETRY_DELAYS_MS.at(-1) ?? 300_000
 }
 
 function maskFeishuWebhookTarget(webhookUrl: string): string {
@@ -297,6 +333,9 @@ export class NotificationService {
   private readonly userRepo = AppDataSource.getRepository(SysUser)
   private readonly sessionRepo = AppDataSource.getRepository(SysUserSession)
   private readonly systemConfigRepo = AppDataSource.getRepository(SystemConfig)
+  private readonly outboxWorkerId = `${hostname()}:${process.pid}:${randomUUID()}`.slice(0, 128)
+  private outboxTimer: ReturnType<typeof globalThis.setInterval> | null = null
+  private outboxRunInFlight: Promise<number> | null = null
 
   private normalizeOnlineWindowSeconds(value: number): number {
     if (!Number.isFinite(value) || !Number.isInteger(value)) {
@@ -1073,31 +1112,56 @@ export class NotificationService {
     return output
   }
 
-  async emitEvent(input: EmitNotificationEventInput): Promise<void> {
-    await this.ensureDefaultRules()
-    const allRuleRows = await this.ruleRepo.find({
-      where: DEFAULT_RULES.map((item) => ({ ruleCode: item.ruleCode })),
-      order: { id: 'ASC' },
-    })
-    const matchedRules = allRuleRows
-      .map((row) => ({
-        rule: toRuleRecord(row),
-        feishuSignSecret: row.feishuSignSecret?.trim() || null,
-      }))
-      .filter((item) => item.rule.enabled && item.rule.eventType === input.eventType)
-    if (!matchedRules.length) {
-      return
-    }
-
-    const message = this.buildNotificationMessage(input.eventType, input.payload)
-    const event = await this.eventRepo.save(this.eventRepo.create({
+  async emitEvent(input: EmitNotificationEventInput, manager?: EntityManager): Promise<void> {
+    // 下单/客服请求热路径只做一次短持久化；规则展开和外部 HTTP 由后台 Worker 完成。
+    // 调用方可传业务事务 manager，使“业务成功”与“事件入库”具备同一提交边界。
+    const eventRepo = manager?.getRepository(NotificationEvent) ?? this.eventRepo
+    await eventRepo.insert(eventRepo.create({
       eventType: input.eventType,
       sourceType: input.sourceType,
       sourceId: input.sourceId,
       payloadJson: JSON.stringify(input.payload),
       status: 'pending',
+      attemptCount: 0,
+      nextAttemptAt: null,
+      processingStartedAt: null,
+      processingOwner: null,
+      processedAt: null,
       errorMessage: null,
     }))
+  }
+
+  private async processClaimedOutboxEvent(event: ClaimedNotificationEvent): Promise<void> {
+    if (!NOTIFICATION_EVENT_TYPES.includes(event.eventType)) {
+      throw new Error(`不支持的通知事件类型: ${event.eventType}`)
+    }
+    const parsedPayload = JSON.parse(event.payloadJson) as unknown
+    if (!parsedPayload || typeof parsedPayload !== 'object' || Array.isArray(parsedPayload)) {
+      throw new Error('通知事件载荷不是 JSON 对象')
+    }
+    const input = {
+      eventType: event.eventType,
+      sourceType: event.sourceType,
+      sourceId: event.sourceId,
+      payload: parsedPayload as NotificationEventPayload,
+    }
+    const allRuleRows = await this.ruleRepo.find({
+      where: { eventType: event.eventType, enabled: 1 },
+      order: { id: 'ASC' },
+    })
+    const matchedRules = allRuleRows.map((row) => {
+      const internalFeishuWebhookUrl = row.feishuWebhookUrl?.trim() || ''
+      return {
+        rule: {
+          ...toRuleRecord(row),
+          // 公共规则 DTO 始终隐藏 Webhook；真实地址只存在于本次 Worker 内部对象。
+          feishuWebhookUrl: internalFeishuWebhookUrl,
+        },
+        feishuSignSecret: row.feishuSignSecret?.trim() || null,
+      }
+    })
+
+    const message = this.buildNotificationMessage(input.eventType, input.payload)
 
     try {
       const ruleRecipients = await Promise.all(
@@ -1130,10 +1194,17 @@ export class NotificationService {
         }
       }
       if (inboxRows.length) {
-        await this.inboxRepo.save(inboxRows)
+        await this.inboxRepo.createQueryBuilder()
+          .insert()
+          .into(NotificationInbox)
+          .values(inboxRows)
+          .orIgnore()
+          .execute()
       }
 
       const dispatchDedupKeys = new Set<string>()
+      let hasRetryableFailure = false
+      let hasTerminalFailure = false
       for (const item of ruleRecipients) {
         const allowExternal = await this.shouldTriggerExternal(item.rule)
         let emailSent = 0
@@ -1147,7 +1218,6 @@ export class NotificationService {
           targetType: 'notification_rule',
           targetId: item.rule.id,
           targetCode: item.rule.ruleCode,
-          requestMeta: input.requestMeta,
           detail: {
             eventId: event.id,
             eventType: input.eventType,
@@ -1166,80 +1236,60 @@ export class NotificationService {
         if (item.rule.emailEnabled) {
           for (const user of item.emailUsers) {
             const email = user.email?.trim() || ''
-            const fallbackTarget = (email || user.username).trim()
-            if (!email || !isValidEmail(email)) {
-              const fallbackDispatchKey = `email:${fallbackTarget}`
-              if (!fallbackTarget || dispatchDedupKeys.has(fallbackDispatchKey)) {
-                continue
-              }
-              await this.dispatchRepo.save(this.dispatchRepo.create({
-                eventId: event.id,
-                channel: 'email',
-                target: fallbackTarget,
-                status: 'failed',
-                attemptCount: 1,
-                errorMessage: '接收账号未配置有效邮箱',
-                responseCode: null,
-                sentAt: null,
-              }))
-              dispatchDedupKeys.add(`email:${fallbackTarget}`)
-              emailFailed += 1
+            const destination = (email || user.username).trim()
+            if (!destination) {
               continue
             }
-            const emailDispatchKey = `email:${email}`
+            const emailDispatchKey = `email:${buildDispatchDedupeKey('email', destination)}`
             if (dispatchDedupKeys.has(emailDispatchKey)) {
               continue
             }
-            const subject = `${item.rule.emailSubjectPrefix || '[Y-Link]'} ${message.title}`
-            const sendResult = await this.sendEmailByVerificationProvider(email, subject, message.content)
-            await this.dispatchRepo.save(this.dispatchRepo.create({
+            dispatchDedupKeys.add(emailDispatchKey)
+            await this.refreshEventClaim(event.id)
+            const result = await this.attemptExternalDispatch({
               eventId: event.id,
               channel: 'email',
-              target: email,
-              status: sendResult.ok ? 'sent' : 'failed',
-              attemptCount: 1,
-              errorMessage: sendResult.ok ? null : (sendResult.errorMessage ?? '邮件发送失败'),
-              responseCode: sendResult.status,
-              sentAt: sendResult.ok ? new Date() : null,
-            }))
-            dispatchDedupKeys.add(emailDispatchKey)
-            if (sendResult.ok) {
-              emailSent += 1
-            } else {
-              emailFailed += 1
-            }
+              destination,
+              storedTarget: destination,
+              permanentlyInvalid: !email || !isValidEmail(email),
+              invalidReason: '接收账号未配置有效邮箱',
+              send: () => this.sendEmailByVerificationProvider(
+                email,
+                `${item.rule.emailSubjectPrefix || '[Y-Link]'} ${message.title}`,
+                message.content,
+              ),
+            })
+            if (result.sent) emailSent += 1
+            else emailFailed += 1
+            hasRetryableFailure ||= result.retryableFailure
+            hasTerminalFailure ||= !result.sent && !result.retryableFailure
           }
         }
 
         if (item.rule.feishuEnabled && item.rule.feishuWebhookUrl) {
           const feishuWebhookUrl = item.rule.feishuWebhookUrl.trim()
-          const feishuDispatchKey = `feishu:${feishuWebhookUrl}`
-          const maskedFeishuWebhookTarget = maskFeishuWebhookTarget(feishuWebhookUrl)
+          const feishuDispatchKey = `feishu:${buildDispatchDedupeKey('feishu', feishuWebhookUrl)}`
           if (!feishuWebhookUrl || dispatchDedupKeys.has(feishuDispatchKey)) {
             continue
           }
-          const sendResult = await this.sendFeishuWebhook(
-            feishuWebhookUrl,
-            message.title,
-            message.content,
-            item.feishuSignSecret,
-          )
-          await this.dispatchRepo.save(this.dispatchRepo.create({
+          dispatchDedupKeys.add(feishuDispatchKey)
+          await this.refreshEventClaim(event.id)
+          const result = await this.attemptExternalDispatch({
             eventId: event.id,
             channel: 'feishu',
-            target: maskedFeishuWebhookTarget,
-            status: sendResult.ok ? 'sent' : 'failed',
-            attemptCount: 1,
-            errorMessage: sendResult.ok ? null : (sendResult.errorMessage ?? '飞书发送失败'),
-            responseCode: sendResult.status,
-            sentAt: sendResult.ok ? new Date() : null,
-          }))
-          dispatchDedupKeys.add(feishuDispatchKey)
-          if (sendResult.ok) {
-            feishuSent += 1
-          } else {
-            feishuFailed += 1
-          }
+            destination: feishuWebhookUrl,
+            storedTarget: maskFeishuWebhookTarget(feishuWebhookUrl),
+            send: () => this.sendFeishuWebhook(
+              feishuWebhookUrl,
+              message.title,
+              message.content,
+              item.feishuSignSecret,
+            ),
+          })
+          if (result.sent) feishuSent += 1
+          else feishuFailed += 1
+          hasRetryableFailure ||= result.retryableFailure
+          hasTerminalFailure ||= !result.sent && !result.retryableFailure
         }
 
         await auditService.safeRecord({
@@ -1248,7 +1298,6 @@ export class NotificationService {
           targetType: 'notification_rule',
           targetId: item.rule.id,
           targetCode: item.rule.ruleCode,
-          requestMeta: input.requestMeta,
           detail: {
             eventId: event.id,
             eventType: input.eventType,
@@ -1260,23 +1309,394 @@ export class NotificationService {
         })
       }
 
-      event.status = 'processed'
-      event.errorMessage = null
-      await this.eventRepo.save(event)
+      if (hasRetryableFailure && event.attemptCount + 1 < NOTIFICATION_OUTBOX_MAX_ATTEMPTS) {
+        await this.finishEventClaim(event, 'pending', '一个或多个通知外发通道暂时失败')
+      } else if (hasRetryableFailure || hasTerminalFailure) {
+        await this.finishEventClaim(event, 'failed', '一个或多个通知外发通道已达到重试上限')
+      } else {
+        await this.finishEventClaim(event, 'processed', null)
+      }
     } catch (error) {
-      event.status = 'failed'
-      event.errorMessage = error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500)
-      await this.eventRepo.save(event)
+      const nextStatus = event.attemptCount + 1 < NOTIFICATION_OUTBOX_MAX_ATTEMPTS ? 'pending' : 'failed'
+      await this.finishEventClaim(
+        event,
+        nextStatus,
+        error instanceof Error ? error.message : String(error),
+      )
+    }
+  }
+
+  startOutboxWorker(): void {
+    if (this.outboxTimer !== null) {
+      return
+    }
+    const trigger = () => {
+      void this.runOutboxOnce().catch((error) => {
+        console.error('[notification-outbox] 后台处理周期失败', error)
+      })
+    }
+    this.outboxTimer = globalThis.setInterval(trigger, NOTIFICATION_OUTBOX_INTERVAL_MS)
+    this.outboxTimer.unref?.()
+    queueMicrotask(trigger)
+  }
+
+  async stopOutboxWorker(): Promise<void> {
+    if (this.outboxTimer !== null) {
+      globalThis.clearInterval(this.outboxTimer)
+      this.outboxTimer = null
+    }
+    if (this.outboxRunInFlight) {
+      await this.outboxRunInFlight
+    }
+  }
+
+  /**
+   * 单周期入口也供专项验证调用。维护租约在检查与计数之间不包含 await：
+   * 迁移要么阻止本周期开始，要么等待当前批次释放后再截取快照。
+   */
+  async runOutboxOnce(): Promise<number> {
+    if (this.outboxRunInFlight) {
+      return this.outboxRunInFlight
+    }
+    if (databaseMaintenanceModeService.isReadOnly()) {
+      return 0
+    }
+    const releaseMaintenanceLease = databaseMaintenanceModeService.registerInFlightWrite()
+    if (!releaseMaintenanceLease) {
+      return 0
+    }
+
+    const work = this.processOutboxBatch()
+    this.outboxRunInFlight = work
+    try {
+      return await work
+    } finally {
+      if (this.outboxRunInFlight === work) {
+        this.outboxRunInFlight = null
+      }
+      releaseMaintenanceLease()
+    }
+  }
+
+  private async processOutboxBatch(): Promise<number> {
+    const staleBefore = new Date(Date.now() - NOTIFICATION_OUTBOX_STALE_CLAIM_MS)
+    // 旧版本曾在“领取”时先增加 attempt_count。若第 5 次领取后进程崩溃，
+    // 该次数并不代表一次已经完成的失败，不能直接把尚未展开收件箱的事件判死。
+    // 先把这种陈旧租约恢复成至多 4 次已完成失败，再由正常 CAS 流程重新领取。
+    const staleLegacyRows: Array<{ id: string | number }> = await this.eventRepo.createQueryBuilder('event')
+      .select('event.id', 'id')
+      .where('status = :processing', { processing: 'processing' })
+      .andWhere('attempt_count >= :maxAttempts', { maxAttempts: NOTIFICATION_OUTBOX_MAX_ATTEMPTS })
+      .andWhere('processing_started_at <= :staleBefore', { staleBefore })
+      .take(NOTIFICATION_OUTBOX_BATCH_SIZE * 4)
+      .getRawMany()
+    const staleLegacyIds = staleLegacyRows.map((row) => normalizeId(row.id)).filter(Boolean)
+    if (staleLegacyIds.length) {
+      await this.eventRepo.createQueryBuilder()
+        .update(NotificationEvent)
+        .set({
+          status: 'pending',
+          attemptCount: NOTIFICATION_OUTBOX_MAX_ATTEMPTS - 1,
+          processingOwner: null,
+          processingStartedAt: null,
+          nextAttemptAt: new Date(),
+          errorMessage: '已恢复升级前遗留的通知处理租约',
+        })
+        .where('id IN (:...staleLegacyIds)', { staleLegacyIds })
+        .andWhere('status = :processing', { processing: 'processing' })
+        .andWhere('attempt_count >= :maxAttempts', { maxAttempts: NOTIFICATION_OUTBOX_MAX_ATTEMPTS })
+        .andWhere('processing_started_at <= :staleBefore', { staleBefore })
+        .execute()
+    }
+
+    // 先只读探测，命中后才执行 UPDATE，避免空闲 Onebox 每秒制造一次 SQLite WAL 写事务。
+    // pending 且达到上限表示这些失败均已完整记录，可以安全转入终态。
+    const exhaustedRows: Array<{ id: string | number }> = await this.eventRepo.createQueryBuilder('event')
+      .select('event.id', 'id')
+      .where('status = :pending AND attempt_count >= :maxAttempts', {
+        pending: 'pending',
+        maxAttempts: NOTIFICATION_OUTBOX_MAX_ATTEMPTS,
+      })
+      .take(NOTIFICATION_OUTBOX_BATCH_SIZE * 4)
+      .getRawMany()
+    const exhaustedIds = exhaustedRows.map((row) => normalizeId(row.id)).filter(Boolean)
+    if (exhaustedIds.length) {
+      // 对历史异常 pending 记录做终态收口，避免永久热循环。
+      await this.eventRepo.createQueryBuilder()
+        .update(NotificationEvent)
+        .set({
+          status: 'failed',
+          processingOwner: null,
+          processingStartedAt: null,
+          nextAttemptAt: null,
+          errorMessage: '通知事件已达到最大重试次数',
+        })
+        .where('id IN (:...exhaustedIds)', { exhaustedIds })
+        .andWhere('status = :pending AND attempt_count >= :maxAttempts', {
+          pending: 'pending',
+          maxAttempts: NOTIFICATION_OUTBOX_MAX_ATTEMPTS,
+        })
+        .execute()
+    }
+
+    let processedCount = 0
+    for (let index = 0; index < NOTIFICATION_OUTBOX_BATCH_SIZE; index += 1) {
+      if (databaseMaintenanceModeService.isReadOnly()) {
+        break
+      }
+      const event = await this.claimNextOutboxEvent()
+      if (!event) {
+        break
+      }
+      try {
+        await this.processClaimedOutboxEvent(event)
+      } catch (error) {
+        await this.finishEventClaim(
+          event,
+          event.attemptCount + 1 < NOTIFICATION_OUTBOX_MAX_ATTEMPTS ? 'pending' : 'failed',
+          error instanceof Error ? error.message : String(error),
+        )
+      }
+      processedCount += 1
+    }
+    return processedCount
+  }
+
+  private async claimNextOutboxEvent(): Promise<ClaimedNotificationEvent | null> {
+    const now = new Date()
+    const staleBefore = new Date(now.getTime() - NOTIFICATION_OUTBOX_STALE_CLAIM_MS)
+    const candidates: Array<{ id: string | number }> = await this.eventRepo
+      .createQueryBuilder('event')
+      .select('event.id', 'id')
+      .where(
+        '(event.status = :pending AND event.attemptCount < :maxAttempts AND (event.nextAttemptAt IS NULL OR event.nextAttemptAt <= :now))',
+        { pending: 'pending', maxAttempts: NOTIFICATION_OUTBOX_MAX_ATTEMPTS, now },
+      )
+      .orWhere(
+        '(event.status = :processing AND event.attemptCount < :maxAttempts AND event.processingStartedAt <= :staleBefore)',
+        { processing: 'processing', staleBefore },
+      )
+      .orderBy('event.id', 'ASC')
+      .take(NOTIFICATION_OUTBOX_BATCH_SIZE * 4)
+      .getRawMany()
+
+    for (const candidate of candidates) {
+      const eventId = normalizeId(candidate.id)
+      if (!eventId) {
+        continue
+      }
+      // 候选读取允许并发；真正归属由带旧状态和到期条件的 UPDATE CAS 决定。
+      const claim = await this.eventRepo.createQueryBuilder()
+        .update(NotificationEvent)
+        .set({
+          status: 'processing',
+          processingOwner: this.outboxWorkerId,
+          processingStartedAt: now,
+          nextAttemptAt: null,
+          processedAt: null,
+          errorMessage: null,
+        })
+        .where('id = :eventId', { eventId })
+        .andWhere('attempt_count < :maxAttempts', { maxAttempts: NOTIFICATION_OUTBOX_MAX_ATTEMPTS })
+        .andWhere(
+          '((status = :pending AND (next_attempt_at IS NULL OR next_attempt_at <= :now)) OR (status = :processing AND processing_started_at <= :staleBefore))',
+          { pending: 'pending', processing: 'processing', now, staleBefore },
+        )
+        .execute()
+      if (claim.affected !== 1) {
+        continue
+      }
+
+      const row = await this.eventRepo.findOne({
+        where: {
+          id: eventId,
+          status: 'processing',
+          processingOwner: this.outboxWorkerId,
+        },
+        select: {
+          id: true,
+          eventType: true,
+          sourceType: true,
+          sourceId: true,
+          payloadJson: true,
+          attemptCount: true,
+        },
+      })
+      if (row) {
+        return {
+          id: normalizeId(row.id),
+          eventType: row.eventType as NotificationEventType,
+          sourceType: row.sourceType,
+          sourceId: row.sourceId,
+          payloadJson: row.payloadJson,
+          attemptCount: Number(row.attemptCount ?? 0),
+        }
+      }
+    }
+    return null
+  }
+
+  private async refreshEventClaim(eventId: string): Promise<void> {
+    const result = await this.eventRepo.update(
+      {
+        id: eventId,
+        status: 'processing',
+        processingOwner: this.outboxWorkerId,
+      },
+      { processingStartedAt: new Date() },
+    )
+    if (result.affected !== 1) {
+      throw new Error('通知事件处理租约已失效')
+    }
+  }
+
+  private async attemptExternalDispatch(input: {
+    eventId: string
+    channel: NotificationDispatchChannel
+    destination: string
+    storedTarget: string
+    permanentlyInvalid?: boolean
+    invalidReason?: string
+    send: () => Promise<{ status: number; ok: boolean; errorMessage?: string }>
+  }): Promise<NotificationDispatchAttemptResult> {
+    const dedupeKey = buildDispatchDedupeKey(input.channel, input.destination)
+    await this.dispatchRepo.createQueryBuilder()
+      .insert()
+      .into(NotificationDispatch)
+      .values({
+        eventId: input.eventId,
+        channel: input.channel,
+        target: input.storedTarget,
+        dedupeKey,
+        status: 'pending',
+        attemptCount: 0,
+        errorMessage: null,
+        responseCode: null,
+        sentAt: null,
+        lastAttemptAt: null,
+      })
+      .orIgnore()
+      .execute()
+
+    const dispatch = await this.dispatchRepo.findOne({
+      where: {
+        eventId: input.eventId,
+        channel: input.channel,
+        dedupeKey,
+      },
+    })
+    if (!dispatch) {
+      return { attempted: false, sent: false, retryableFailure: false }
+    }
+    if (dispatch.status === 'sent') {
+      return { attempted: false, sent: true, retryableFailure: false }
+    }
+    const persistedFailureCount = Number(dispatch.attemptCount ?? 0)
+    if (dispatch.status !== 'processing' && persistedFailureCount >= NOTIFICATION_OUTBOX_MAX_ATTEMPTS) {
+      return { attempted: false, sent: false, retryableFailure: false }
+    }
+
+    const now = new Date()
+    // attempt_count 只统计已经返回失败的投递。processing 表示上次进程可能在
+    // 外部调用前后崩溃；允许事件租约恢复后重试，避免“领取即耗尽”造成静默漏通知。
+    const completedFailureCount = dispatch.status === 'processing'
+      ? Math.min(persistedFailureCount, NOTIFICATION_OUTBOX_MAX_ATTEMPTS - 1)
+      : persistedFailureCount
+    const nextAttemptCount = completedFailureCount + 1
+    const claim = await this.dispatchRepo.update(
+      { id: dispatch.id, attemptCount: dispatch.attemptCount, status: dispatch.status },
+      {
+        status: 'processing',
+        attemptCount: completedFailureCount,
+        lastAttemptAt: now,
+        errorMessage: null,
+      },
+    )
+    if (claim.affected !== 1) {
+      const latest = await this.dispatchRepo.findOneBy({ id: dispatch.id })
+      return {
+        attempted: false,
+        sent: latest?.status === 'sent',
+        retryableFailure: latest?.status !== 'sent'
+          && Number(latest?.attemptCount ?? 0) < NOTIFICATION_OUTBOX_MAX_ATTEMPTS,
+      }
+    }
+
+    const sendResult = input.permanentlyInvalid
+      ? {
+          status: 400,
+          ok: false,
+          errorMessage: input.invalidReason || '外发目标配置无效',
+        }
+      : await input.send()
+    if (sendResult.ok) {
+      await this.dispatchRepo.update(
+        { id: dispatch.id, status: 'processing' },
+        {
+          status: 'sent',
+          errorMessage: null,
+          responseCode: sendResult.status,
+          sentAt: new Date(),
+        },
+      )
+      return { attempted: true, sent: true, retryableFailure: false }
+    }
+
+    const canRetry = !input.permanentlyInvalid && nextAttemptCount < NOTIFICATION_OUTBOX_MAX_ATTEMPTS
+    await this.dispatchRepo.update(
+      { id: dispatch.id, status: 'processing' },
+      {
+        status: 'failed',
+        attemptCount: input.permanentlyInvalid ? NOTIFICATION_OUTBOX_MAX_ATTEMPTS : nextAttemptCount,
+        errorMessage: (sendResult.errorMessage ?? '通知外发失败').slice(0, 500),
+        responseCode: sendResult.status,
+        sentAt: null,
+      },
+    )
+    return { attempted: true, sent: false, retryableFailure: canRetry }
+  }
+
+  private async finishEventClaim(
+    event: ClaimedNotificationEvent,
+    status: 'pending' | 'processed' | 'failed',
+    errorMessage: string | null,
+  ): Promise<void> {
+    const now = new Date()
+    const completedFailureCount = status === 'processed'
+      ? event.attemptCount
+      : Math.min(NOTIFICATION_OUTBOX_MAX_ATTEMPTS, event.attemptCount + 1)
+    const retryDelayMs = status === 'pending'
+      ? resolveNotificationRetryDelayMs(completedFailureCount)
+      : 0
+    const finalErrorMessage = errorMessage?.slice(0, 500) ?? null
+    await this.eventRepo.update(
+      {
+        id: event.id,
+        status: 'processing',
+        processingOwner: this.outboxWorkerId,
+      },
+      {
+        status,
+        processingOwner: null,
+        processingStartedAt: null,
+        nextAttemptAt: status === 'pending' ? new Date(now.getTime() + retryDelayMs) : null,
+        processedAt: status === 'processed' ? now : null,
+        errorMessage: finalErrorMessage,
+        attemptCount: completedFailureCount,
+      },
+    )
+
+    if (status === 'failed') {
       await auditService.safeRecord({
         actionType: 'notification.event.process',
         actionLabel: '通知事件处理失败',
         targetType: 'notification_event',
         targetId: event.id,
         targetCode: event.eventType,
-        requestMeta: input.requestMeta,
         resultStatus: 'failed',
         detail: {
-          errorMessage: event.errorMessage,
+          attemptCount: completedFailureCount,
+          errorMessage: finalErrorMessage,
         },
       })
     }

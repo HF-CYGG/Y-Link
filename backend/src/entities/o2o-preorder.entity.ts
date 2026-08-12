@@ -42,8 +42,9 @@ export type O2oClientOrderType = (typeof O2O_CLIENT_ORDER_TYPES)[number]
 @Entity({ name: 'o2o_preorder' })
 @Index('idx_o2o_preorder_client_id', ['clientUserId', 'id'])
 @Index('idx_o2o_preorder_client_status_id', ['clientUserId', 'status', 'id'])
-@Index('idx_o2o_preorder_status_timeout_at', ['status', 'timeoutAt'])
+@Index('idx_o2o_preorder_due_claim', ['status', 'isDeleted', 'timeoutAt', 'id'])
 @Index('idx_o2o_preorder_is_deleted', ['isDeleted'])
+@Index('uk_o2o_preorder_client_request', ['clientUserId', 'clientRequestId'], { unique: true })
 export class O2oPreorder {
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })
   id!: string
@@ -55,6 +56,18 @@ export class O2oPreorder {
   @Index('idx_o2o_preorder_client_user_id')
   @Column({ name: 'client_user_id', ...entityColumnOptions.foreignId, comment: '客户端用户ID' })
   clientUserId!: string
+
+  /**
+   * 客户端提交请求键：
+   * - 与 clientUserId 组成唯一约束，网络超时后的同请求重试只会命中原订单；
+   * - 保持 nullable 以兼容升级前已经存在的历史订单，新提交路径必须写入非空值。
+   */
+  @Column({ name: 'client_request_id', type: 'varchar', length: 64, nullable: true, comment: '客户端下单幂等请求键' })
+  clientRequestId!: string | null
+
+  /** 同一请求键对应的规范化载荷摘要，用于阻断“同键不同参数”的误复用。 */
+  @Column({ name: 'client_request_hash', type: 'varchar', length: 64, nullable: true, comment: '客户端下单请求摘要' })
+  clientRequestHash!: string | null
 
   @Index('uk_o2o_preorder_verify_code', { unique: true })
   @Column({ name: 'verify_code', type: 'varchar', length: 64, comment: '核销码' })

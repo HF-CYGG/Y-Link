@@ -2,6 +2,8 @@ import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, Update
 import { entityColumnOptions } from './entity-column-options.js'
 
 @Entity({ name: 'notification_inbox' })
+@Index('idx_notification_inbox_user_unread_id', ['userId', 'isRead', 'id'])
+@Index('uk_notification_inbox_event_user', ['eventId', 'userId'], { unique: true })
 export class NotificationInbox {
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })
   id!: string

@@ -11,6 +11,7 @@ import type { NextFunction, Request, Response } from 'express'
 import multer from 'multer'
 import { mapDatabaseErrorToBizError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
+import { DatabaseOverloadedError } from '../database/database-errors.js'
 
 /**
  * 全局 404 处理中间件：
@@ -31,8 +32,20 @@ export function notFoundHandler(_req: Request, res: Response): void {
  * - 针对数据库级别的约束异常（如外键或唯一性冲突），通过映射器转换为对用户友好的错误提示，并掩盖底层 SQL 细节；
  * - 其他未知异常统一返回 500 状态码，并在控制台记录堆栈。
  */
-export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction): void {
+export function errorHandler(err: unknown, _req: Request, res: Response, next: NextFunction): void {
+  // 流式 Excel 等响应一旦开始写入，就不能再追加 JSON 错误体。交给 Express
+  // 默认错误处理关闭连接，让客户端下载明确失败而不是得到一个损坏且伪装成功的文件。
+  if (res.headersSent) {
+    next(err)
+    return
+  }
+
   if (err instanceof BizError) {
+    if (err instanceof DatabaseOverloadedError || err.statusCode === 503) {
+      // 明确告诉浏览器/反向代理这是瞬时过载，便于幂等请求按秒级退避重试，
+      // 同时避免高峰期客户端立即重放形成重试风暴。
+      res.setHeader('Retry-After', '1')
+    }
     res.status(err.statusCode).json({
       code: err.statusCode,
       message: err.message,

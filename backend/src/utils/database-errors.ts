@@ -88,17 +88,26 @@ export function isRetryableSqliteLockError(error: unknown): boolean {
 }
 
 /**
- * 识别 MySQL 死锁（ER_LOCK_DEADLOCK / errno 1213）与锁等待超时（ER_LOCK_WAIT_TIMEOUT / errno 1205）。
- * 两者都属于“事务本身没错，只是这次撞上了并发争用”，上层按既有的有界重试模式重试一次即可自愈。
+ * MySQL 要求在死锁或锁等待超时后重放完整事务，而不是只重试失败 SQL。
+ * 调用方必须先具备持久化幂等键，才能使用该判断执行有限重试。
  */
-export function isRetryableMysqlLockError(error: unknown): boolean {
+export function isRetryableMysqlTransactionError(error: unknown): boolean {
   if (!isQueryFailedError(error)) {
     return false
   }
-
   const driverError = getDriverError(error)
-  return driverError.code === 'ER_LOCK_DEADLOCK' || driverError.errno === 1213
-    || driverError.code === 'ER_LOCK_WAIT_TIMEOUT' || driverError.errno === 1205
+  return driverError.code === 'ER_LOCK_DEADLOCK'
+    || driverError.errno === 1213
+    || driverError.code === 'ER_LOCK_WAIT_TIMEOUT'
+    || driverError.errno === 1205
+}
+
+/**
+ * 识别 MySQL 死锁（ER_LOCK_DEADLOCK / errno 1213）与锁等待超时（ER_LOCK_WAIT_TIMEOUT / errno 1205）。
+ * 兼容既有调用名称；真正重试仍必须在具备幂等保证的完整事务边界执行。
+ */
+export function isRetryableMysqlLockError(error: unknown): boolean {
+  return isRetryableMysqlTransactionError(error)
 }
 
 /** 跨方言的可重试锁冲突判断：SQLite 忙锁与 MySQL 死锁/锁等待超时都属于“重试即可自愈”的瞬时错误。 */
@@ -112,6 +121,10 @@ export function isRetryableTransactionLockError(error: unknown): boolean {
 export function mapDatabaseErrorToBizError(error: unknown): BizError | null {
   if (isUniqueConstraintError(error)) {
     return new BizError('数据写入冲突，请刷新后重试', 409)
+  }
+
+  if (isRetryableMysqlTransactionError(error) || isRetryableSqliteLockError(error)) {
+    return new BizError('数据库当前繁忙，请稍后重试', 503)
   }
 
   if (isQueryFailedError(error)) {

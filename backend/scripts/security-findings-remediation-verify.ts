@@ -64,8 +64,8 @@ async function main() {
   assert.doesNotMatch(authSecurityService, /new Map</, '认证风控不得继续使用无界进程内 Map')
   requirePattern(
     appSource,
-    /res\.json\(\{\s*status:\s*['"]UP['"],\s*maintenance:\s*databaseMaintenanceModeService\.getPublicState\(\),?\s*\}\)/,
-    '公开健康检查只能返回 UP 与脱敏维护状态',
+    /status:\s*['"]UP['"][\s\S]*maintenance:\s*databaseMaintenanceModeService\.getPublicState\(\)[\s\S]*writeCoordinator:/,
+    '公开健康检查必须返回 UP、脱敏维护状态与无敏感信息的写队列水位',
   )
   assert.doesNotMatch(
     appSource,

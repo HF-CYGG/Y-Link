@@ -10,7 +10,7 @@
  * - 会话补充说明、消息时间线等深度操作统一放在详情页维护。
  */
 
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import {
@@ -45,6 +45,8 @@ const realtimeState = ref<'connecting' | 'online' | 'offline'>('offline')
 const reconnectTip = ref('进入页面后会自动同步最新会话进展。')
 let realtimeConnection: FeedbackRealtimeConnection | null = null
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+let pageRuntimeActive = false
+let hasActivatedOnce = false
 
 const currentClientUser = computed(() => clientAuthStore.currentUser)
 const summary = computed(() => summarizeClientFeedbackConversations(conversations.value))
@@ -135,7 +137,13 @@ const loadConversations = async () => {
   }
 }
 
-const connectRealtime = () => {
+const isRealtimeEligible = () => {
+  return pageRuntimeActive
+    && globalThis.document?.visibilityState !== 'hidden'
+    && Boolean(currentClientUser.value?.id)
+}
+
+const stopRealtime = (tip = '页面暂未显示，已暂停实时连接。') => {
   realtimeConnection?.close()
   realtimeConnection = null
 
@@ -144,22 +152,43 @@ const connectRealtime = () => {
     reconnectTimer = null
   }
 
+  realtimeState.value = 'offline'
+  reconnectTip.value = tip
+}
+
+const connectRealtime = () => {
+  stopRealtime()
+  if (!isRealtimeEligible()) {
+    return
+  }
+
   realtimeState.value = 'connecting'
   realtimeConnection = openFeedbackRealtimeStream('client', {
     onOpen: (payload) => {
+      if (!isRealtimeEligible()) {
+        return
+      }
       availability.value = payload.availability ?? availability.value
       realtimeState.value = payload.availability?.isOnline ? 'online' : 'offline'
       reconnectTip.value = '已恢复在线连接，后续消息会自动同步到会话列表。'
     },
     onConversation: async () => {
+      if (!isRealtimeEligible()) {
+        return
+      }
       await loadConversations()
       reconnectTip.value = '检测到会话有新进展，列表已自动刷新。'
     },
     onError: () => {
+      if (!isRealtimeEligible()) {
+        return
+      }
       realtimeState.value = 'offline'
       reconnectTip.value = '实时连接已中断，系统正在尝试自动续接...'
       reconnectTimer = setTimeout(() => {
-        connectRealtime()
+        if (isRealtimeEligible()) {
+          connectRealtime()
+        }
       }, 3000)
     },
   })
@@ -170,12 +199,15 @@ watch(
   async () => {
     if (!currentClientUser.value?.id) {
       conversations.value = []
+      stopRealtime('登录状态已失效，实时连接已释放。')
       return
     }
     try {
       await loadPortalConfig()
       await loadConversations()
-      connectRealtime()
+      if (isRealtimeEligible()) {
+        connectRealtime()
+      }
     } catch (error) {
       showAppError(extractErrorMessage(error, '反馈中心初始化失败，请稍后重试'))
     }
@@ -189,19 +221,68 @@ onMounted(async () => {
   try {
     await loadPortalConfig()
     await loadConversations()
-    connectRealtime()
   } catch (error) {
     showAppError(extractErrorMessage(error, '反馈中心加载失败，请稍后重试'))
   }
 })
 
-onBeforeUnmount(() => {
-  realtimeConnection?.close()
-  realtimeConnection = null
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer)
-    reconnectTimer = null
+const resumePageRuntime = async (refreshData: boolean) => {
+  if (!isRealtimeEligible()) {
+    return
   }
+  connectRealtime()
+  if (!refreshData) {
+    return
+  }
+  try {
+    await Promise.all([loadPortalConfig(), loadConversations()])
+  } catch (error) {
+    if (isRealtimeEligible()) {
+      showAppError(extractErrorMessage(error, '反馈中心刷新失败，请稍后重试'))
+    }
+  }
+}
+
+const handleVisibilityChange = () => {
+  if (!pageRuntimeActive) {
+    return
+  }
+  if (globalThis.document?.visibilityState === 'hidden') {
+    stopRealtime('页面进入后台，已暂停实时连接。')
+    return
+  }
+  void resumePageRuntime(true)
+}
+
+const activatePageRuntime = () => {
+  if (pageRuntimeActive) {
+    return
+  }
+  pageRuntimeActive = true
+  globalThis.document?.addEventListener('visibilitychange', handleVisibilityChange)
+  void resumePageRuntime(hasActivatedOnce)
+  hasActivatedOnce = true
+}
+
+const deactivatePageRuntime = () => {
+  if (!pageRuntimeActive) {
+    return
+  }
+  pageRuntimeActive = false
+  globalThis.document?.removeEventListener('visibilitychange', handleVisibilityChange)
+  stopRealtime('离开反馈中心后已释放实时连接，返回页面会自动续接。')
+}
+
+onActivated(() => {
+  activatePageRuntime()
+})
+
+onDeactivated(() => {
+  deactivatePageRuntime()
+})
+
+onBeforeUnmount(() => {
+  deactivatePageRuntime()
 })
 </script>
 

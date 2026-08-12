@@ -13,7 +13,7 @@
  */
 
 
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { RefreshRight } from '@element-plus/icons-vue'
 import {
@@ -34,7 +34,12 @@ import {
 } from '@/constants/o2o-order-status'
 import { useClientAuthStore, useClientOrderStore } from '@/store'
 import pinia from '@/store/pinia'
-import { notifyClientOrderRefresh, subscribeClientOrderRefresh } from '@/utils/client-order-refresh'
+import {
+  buildClientOrderSilentRefreshPlan,
+  mergeClientOrderRefreshPages,
+  notifyClientOrderRefresh,
+  subscribeClientOrderRefresh,
+} from '@/utils/client-order-refresh'
 import { buildClientOrderSummaryFromDetail } from '@/utils/client-order-summary'
 import { formatDateTime } from '@/utils/date-time'
 import { normalizeRequestError } from '@/utils/error'
@@ -108,6 +113,8 @@ clientOrderStore.initialize(clientAuthStore.currentUser?.id)
 let disposeClientOrderRefresh: () => void = () => {}
 let refreshMarkCleanupTimer: ReturnType<typeof globalThis.setTimeout> | null = null
 let autoRefreshTimer: ReturnType<typeof globalThis.setInterval> | null = null
+let pageRuntimeActive = false
+let hasActivatedOnce = false
 const clientOrderRefreshSourceId = `client-orders-${Math.random().toString(36).slice(2)}`
 const runLatestListRequest = runLatest
 
@@ -418,14 +425,34 @@ const syncStoreWithCurrentUser = () => {
   effectiveKeyword.value = clientOrderStore.keyword
 }
 
-// 详细注释：静默轮询会临时扩大本次请求的 pageSize，
-// 这样列表顶部即使插入了几条新订单，也尽量不把用户当前视野附近的旧卡片挤出结果窗口。
-const buildSilentRefreshQuery = () => {
+// 详细注释：静默轮询需要覆盖当前已加载范围并额外保留一页缓冲；
+// 超过接口单页上限时按页读取，避免 pageSize > 50 被后端拒绝后静默刷新永久失效。
+const fetchSilentRefreshOrders = async (signal: AbortSignal) => {
   const logicalPageSize = clientOrderStore.pageSize || DEFAULT_ORDER_PAGE_SIZE
-  const loadedCount = Math.max(clientOrderStore.orders.length, logicalPageSize)
-  return {
+  const plan = buildClientOrderSilentRefreshPlan({
+    loadedCount: clientOrderStore.orders.length,
+    logicalPageSize,
+  })
+  const buildQuery = (page: number) => ({
     ...buildListQuery(1),
-    pageSize: loadedCount + logicalPageSize,
+    page,
+    pageSize: plan.requestPageSize,
+  })
+  const firstPageResult = await getMyO2oPreorders(buildQuery(1), { signal })
+  const availablePageCount = Math.max(1, Math.ceil(firstPageResult.total / plan.requestPageSize))
+  const requestPageCount = Math.min(plan.requestPageCount, availablePageCount)
+  const remainingPageResults = await Promise.all(
+    Array.from({ length: Math.max(0, requestPageCount - 1) }, (_, index) =>
+      getMyO2oPreorders(buildQuery(index + 2), { signal }),
+    ),
+  )
+
+  return {
+    ...firstPageResult,
+    records: mergeClientOrderRefreshPages(
+      [firstPageResult.records, ...remainingPageResults.map((result) => result.records)],
+      plan.targetRecordCount,
+    ),
   }
 }
 
@@ -481,6 +508,10 @@ const refreshSingleOrderSummary = async (orderId: string, options?: { silent?: b
 
 const startClientOrderRefreshSubscription = () => {
   disposeClientOrderRefresh()
+  disposeClientOrderRefresh = () => {}
+  if (!pageRuntimeActive) {
+    return
+  }
   disposeClientOrderRefresh = subscribeClientOrderRefresh(async (event) => {
     if (event.sourceId === clientOrderRefreshSourceId || !event.orderId) {
       return
@@ -490,9 +521,15 @@ const startClientOrderRefreshSubscription = () => {
 }
 
 const handleVisibilityChange = () => {
-  if (globalThis.document?.visibilityState === 'visible') {
-    void triggerSilentOrderRefresh()
+  if (!pageRuntimeActive) {
+    return
   }
+  if (globalThis.document?.visibilityState === 'hidden') {
+    scheduleAutoRefresh()
+    return
+  }
+  scheduleAutoRefresh()
+  void triggerSilentOrderRefresh()
 }
 
 const scheduleAutoRefresh = () => {
@@ -500,9 +537,37 @@ const scheduleAutoRefresh = () => {
     globalThis.clearInterval(autoRefreshTimer)
     autoRefreshTimer = null
   }
+  if (!pageRuntimeActive || globalThis.document?.visibilityState === 'hidden') {
+    return
+  }
   autoRefreshTimer = globalThis.setInterval(() => {
     void triggerSilentOrderRefresh()
   }, ORDER_AUTO_REFRESH_INTERVAL_MS)
+}
+
+const activatePageRuntime = () => {
+  if (pageRuntimeActive) {
+    return
+  }
+  pageRuntimeActive = true
+  globalThis.document?.addEventListener('visibilitychange', handleVisibilityChange)
+  startClientOrderRefreshSubscription()
+  scheduleAutoRefresh()
+  if (hasActivatedOnce && globalThis.document?.visibilityState !== 'hidden') {
+    void triggerSilentOrderRefresh()
+  }
+  hasActivatedOnce = true
+}
+
+const deactivatePageRuntime = () => {
+  if (!pageRuntimeActive) {
+    return
+  }
+  pageRuntimeActive = false
+  globalThis.document?.removeEventListener('visibilitychange', handleVisibilityChange)
+  scheduleAutoRefresh()
+  disposeClientOrderRefresh()
+  disposeClientOrderRefresh = () => {}
 }
 
 const loadOrders = async (force = false, options?: { append?: boolean; silent?: boolean; preserveScroll?: boolean }) => {
@@ -534,10 +599,9 @@ const loadOrders = async (force = false, options?: { append?: boolean; silent?: 
   }
   await runLatestListRequest({
     executor: (signal) =>
-      getMyO2oPreorders(
-        silent && !append ? buildSilentRefreshQuery() : buildListQuery(targetPage),
-        { signal },
-      ),
+      silent && !append
+        ? fetchSilentRefreshOrders(signal)
+        : getMyO2oPreorders(buildListQuery(targetPage), { signal }),
     onSuccess: async (result) => {
       if (append) {
         clientOrderStore.appendOrders(result.records.map(normalizeSummaryDisplayShowNo), {
@@ -683,15 +747,20 @@ watch(
 )
 
 onMounted(async () => {
-  startClientOrderRefreshSubscription()
   syncStoreWithCurrentUser()
-  globalThis.document?.addEventListener('visibilitychange', handleVisibilityChange)
-  scheduleAutoRefresh()
   const hadCachedOrders = clientOrderStore.orders.length > 0
   await loadOrders()
   if (hadCachedOrders) {
     void loadOrders(true, { silent: true, preserveScroll: true })
   }
+})
+
+onActivated(() => {
+  activatePageRuntime()
+})
+
+onDeactivated(() => {
+  deactivatePageRuntime()
 })
 
 onBeforeUnmount(() => {
@@ -703,12 +772,7 @@ onBeforeUnmount(() => {
     globalThis.clearTimeout(refreshMarkCleanupTimer)
     refreshMarkCleanupTimer = null
   }
-  if (autoRefreshTimer !== null) {
-    globalThis.clearInterval(autoRefreshTimer)
-    autoRefreshTimer = null
-  }
-  disposeClientOrderRefresh()
-  globalThis.document?.removeEventListener('visibilitychange', handleVisibilityChange)
+  deactivatePageRuntime()
 })
 </script>
 
