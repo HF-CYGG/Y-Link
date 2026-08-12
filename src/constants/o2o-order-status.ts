@@ -6,6 +6,20 @@
  * - 若新增状态，需同步补全 type、label、class、report config 与判定函数，避免页面出现空文案。
  */
 
+import type {
+  ClientOrderReportScenario,
+  O2oOrderBusinessStatus,
+  O2oOrderCancelReason,
+  O2oOrderStatus,
+} from '../../packages/shared-types/src/index'
+
+export type {
+  ClientOrderReportScenario,
+  O2oOrderBusinessStatus,
+  O2oOrderCancelReason,
+  O2oOrderStatus,
+} from '../../packages/shared-types/src/index'
+
 export const O2O_ORDER_STATUSES = ['pending', 'verified', 'cancelled'] as const
 export const O2O_ORDER_BUSINESS_STATUSES = [
   'preparing',
@@ -21,11 +35,6 @@ export const O2O_ORDER_BUSINESS_STATUSES = [
   'verify_failed',
 ] as const
 export const O2O_ORDER_TIMEOUT_SOON_WINDOW_MS = 2 * 60 * 60 * 1000
-
-export type O2oOrderStatus = (typeof O2O_ORDER_STATUSES)[number]
-export type O2oOrderBusinessStatus = (typeof O2O_ORDER_BUSINESS_STATUSES)[number]
-export type ClientOrderReportScenario = 'pending' | 'timeout_soon' | 'cancelled' | 'timeout_cancelled' | 'verified'
-export type O2oOrderCancelReason = 'timeout' | 'manual'
 
 export interface ClientOrderStatusReportLike {
   scenario?: ClientOrderReportScenario

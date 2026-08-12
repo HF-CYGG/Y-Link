@@ -6,82 +6,51 @@
 
 import { request } from '@/api/http'
 import type { RequestConfig } from '@/api/http'
+import type {
+  ClientAuthCapabilities,
+  ClientAuthSuccessResult,
+  ClientCaptchaResult,
+  ClientChangePasswordInput,
+  ClientForgotPasswordVerifyInput,
+  ClientForgotPasswordVerifyResult,
+  ClientLoginInput,
+  ClientProfileVerificationCodeSendInput,
+  ClientProfileVerificationCodeSendResult,
+  ClientRegisterInput,
+  ClientRegisterResult,
+  ClientResetPasswordInput,
+  ClientSafeProfile,
+  ClientUpdateProfileInput,
+  ClientVerificationCodeSendInput,
+  ClientVerificationCodeSendResult,
+} from '../../../packages/shared-types/src/index'
 
-export type ClientAccountType = 'personal' | 'department'
-
-export interface ClientCaptchaResult {
-  captchaId: string
-  captchaSvg: string
-  expiresInSeconds: number
-}
-
-/**
- * 客户端安全用户资料：
- * - 不包含密码等敏感信息。
- * - 包含用户的基本身份和联系方式。
- */
-export interface ClientSafeProfile {
-  id: string
-  account: string
-  // `username` 是前端应优先消费的用户名字段；
-  // `realName` 保留给旧页面做兼容别名，当前与 username 保持同值。
-  username: string
-  mobile: string
-  email: string
-  realName: string
-  departmentName: string | null
-  accountType: ClientAccountType
-  staffNo: string | null
-  staffVerified: boolean
-  status: string
-  lastLoginAt: string | null
-  mobileVerifiedAt: string | null
-  emailVerifiedAt: string | null
-}
-
-/**
- * 客户端登录成功结果：
- * - 主链路改为 HttpOnly Cookie 会话，因此响应体不再回传 token；
- * - 前端只消费过期时间、用户资料和当前认证模式。
- */
-export interface ClientAuthSuccessResult {
-  expiresAt: string
-  user: ClientSafeProfile
-  verificationChannel: 'captcha' | 'sms' | 'email'
-}
-
-export type ClientRegisterResult = ClientAuthSuccessResult
-
-export interface ClientVerificationCodeSendResult {
-  expireSeconds: number
-}
-
-export type ClientValidationMode = 'captcha' | 'verification_code'
-
-export interface ClientDepartmentOptionNode {
-  id: string
-  label: string
-  children: ClientDepartmentOptionNode[]
-}
-
-/**
- * 客户端认证能力配置：
- * - 动态下发当前系统支持的注册、登录和找回密码验证方式。
- */
-export interface ClientAuthCapabilities {
-  channels: {
-    mobile: boolean
-    email: boolean
-  }
-  registerValidationModes: {
-    mobile: ClientValidationMode
-    email: ClientValidationMode
-  }
-  forgotPasswordEnabled: boolean
-  departmentTree: ClientDepartmentOptionNode[]
-  departmentRootOptions: string[]
-  departmentOptions: string[]
-}
+export type {
+  ClientAccountType,
+  ClientAuthCapabilities,
+  ClientAuthMode,
+  ClientAuthSuccessResult,
+  ClientCaptchaResult,
+  ClientChangePasswordInput,
+  ClientDepartmentOptionNode,
+  ClientForgotPasswordVerifyInput,
+  ClientForgotPasswordVerifyResult,
+  ClientLoginInput,
+  ClientProfileVerificationCodeSendInput,
+  ClientProfileVerificationCodeSendResult,
+  ClientRegisterInput,
+  ClientRegisterResult,
+  ClientResetPasswordInput,
+  ClientSafeProfile,
+  ClientStaffDirectoryLookupResult,
+  ClientUpdateProfileInput,
+  ClientValidationMode,
+  ClientVerificationCodeSendInput,
+  ClientVerificationCodeSendResult,
+  ClientVerificationChannel,
+  ClientVerificationScene,
+  ClientVerificationTargetChannel,
+} from '../../../packages/shared-types/src/index'
 
 /**
  * 获取图形验证码：
@@ -106,19 +75,6 @@ export const getClientAuthCapabilities = (config?: RequestConfig) =>
   })
 
 /**
- * 教师注册时按教职工号精确查询目录：
- * - 只返回 active 目录记录；
- * - 用于前端展示姓名和部门确认，不允许前端自行提交这些字段。
- */
-export interface ClientVerificationCodeSendInput {
-  channel: 'mobile' | 'email'
-  target: string
-  scene: 'register' | 'forgot_password'
-  captchaId: string
-  captchaCode: string
-}
-
-/**
  * 发送验证码（短信/邮件）：
  * - 用于注册或找回密码时的身份验证。
  */
@@ -134,17 +90,7 @@ export const sendClientVerificationCode = (payload: ClientVerificationCodeSendIn
  * 客户端注册：
  * - 支持图形验证码或短信/邮件验证码。
  */
-export const clientRegister = (payload: {
-  username?: string
-  account?: string
-  accountType: ClientAccountType
-  staffNo?: string
-  inviteCode?: string
-  password: string
-  verificationCode?: string
-  captchaId?: string
-  captchaCode?: string
-}, config?: RequestConfig) =>
+export const clientRegister = (payload: ClientRegisterInput, config?: RequestConfig) =>
   request<ClientRegisterResult>({
     method: 'POST',
     url: '/client-auth/register',
@@ -157,7 +103,7 @@ export const clientRegister = (payload: {
  * - 账号支持用户名、手机号或邮箱。
  */
 export const clientLogin = (
-  payload: { account: string; password: string; captchaId?: string; captchaCode?: string },
+  payload: ClientLoginInput,
   config?: RequestConfig,
 ) =>
   request<ClientAuthSuccessResult>({
@@ -171,13 +117,8 @@ export const clientLogin = (
  * 验证找回密码身份：
  * - 提交账号和验证码，获取用于重置密码的临时 Token。
  */
-export const verifyClientForgotPassword = (payload: {
-  account: string
-  verificationCode?: string
-  captchaId?: string
-  captchaCode?: string
-}, config?: RequestConfig) =>
-  request<{ resetToken: string; expiresInSeconds: number }>({
+export const verifyClientForgotPassword = (payload: ClientForgotPasswordVerifyInput, config?: RequestConfig) =>
+  request<ClientForgotPasswordVerifyResult>({
     method: 'POST',
     url: '/client-auth/forgot-password/verify',
     data: payload,
@@ -189,7 +130,7 @@ export const verifyClientForgotPassword = (payload: {
  * - 依赖 verifyClientForgotPassword 颁发的 resetToken。
  */
 export const resetClientPassword = (
-  payload: { account: string; resetToken: string; newPassword: string },
+  payload: ClientResetPasswordInput,
   config?: RequestConfig,
 ) =>
   request<boolean>({
@@ -225,7 +166,7 @@ export const clientLogout = (config?: RequestConfig) =>
  * 客户端本人修改密码：
  * - 成功后需重新登录。
  */
-export const clientChangePassword = (data: { currentPassword: string; newPassword: string }, config?: RequestConfig) =>
+export const clientChangePassword = (data: ClientChangePasswordInput, config?: RequestConfig) =>
   request<boolean>({
     method: 'POST',
     url: '/client-auth/change-password',
@@ -237,14 +178,7 @@ export const clientChangePassword = (data: { currentPassword: string; newPasswor
  * 客户端更新个人资料：
  * - 仅允许普通个人账户维护姓名、手机号与邮箱；教师与部门共享账号身份资料由管理端或教职工目录维护。
  */
-export const clientUpdateProfile = (data: {
-  username: string
-  mobile?: string
-  email?: string
-  currentPassword: string
-  mobileVerificationCode?: string
-  emailVerificationCode?: string
-}, config?: RequestConfig) =>
+export const clientUpdateProfile = (data: ClientUpdateProfileInput, config?: RequestConfig) =>
   request<ClientSafeProfile>({
     method: 'PATCH',
     url: '/client-auth/profile',
@@ -253,9 +187,9 @@ export const clientUpdateProfile = (data: {
   })
 
 export const sendClientProfileVerificationCode = (
-  data: { channel: 'mobile' | 'email'; target: string },
+  data: ClientProfileVerificationCodeSendInput,
   config?: RequestConfig,
-) => request<ClientVerificationCodeSendResult>({
+) => request<ClientProfileVerificationCodeSendResult>({
   method: 'POST',
   url: '/client-auth/profile/verification-code/send',
   data,

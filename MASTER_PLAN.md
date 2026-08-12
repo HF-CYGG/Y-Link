@@ -1,13 +1,13 @@
 # Y-Link Mobile 多端开发总方案
 
-版本：v1.1
+版本：v1.2
 日期：2026-08-13
-当前状态：第一阶段（Mobile Bootstrap）
+当前状态：Contract Foundation 已建立，Mobile 尚未接入共享包或真实 API
 
 ## 0. 优先级与当前阶段硬边界
 
 1. 仓库根 `AGENTS.md` 与用户当前任务始终优先于本文。本文是路线说明，不能放宽其中的权限、子 agent、Git、风险操作或验证边界，也不构成任何执行授权。
-2. 第一阶段只交付 Expo 路由占位、providers、SecureStore/SQLite 基础、平台能力接口、共享包骨架和 CI；不新增或修改后端 API、数据库、认证会话、购物车、订单、库存、退货等业务。
+2. 当前 Contract Foundation 只校准跨端纯 TypeScript DTO、传输无关 API modules 与 Web 渐进 re-export；不新增或修改后端 API、数据库、认证会话、服务端购物车、订单幂等、库存或退货状态机。
 3. 相机、相册、通知、正式 Deep Link、完整 401 refresh、服务端购物车、EAS 发布、正式包名与签名均为后续路线；当前未配置、未实现，不得按已交付能力对外承诺。
 
 ## 1. 项目目标
@@ -21,20 +21,20 @@ Y-Link 保留现有 Vue Web 管理端、Web 客户端和 Express/TypeORM 后端�
 - 跨端能力只有在契约稳定后才进入 `packages/*`；
 - 第一阶段不改变现有 Web、后端、Docker/Compose 或数据库运行方式。
 
-## 2. 第一阶段交付状态
+## 2. Bootstrap 与 Contract Foundation 交付状态
 
-| 范围 | 第一阶段口径 |
+| 范围 | 当前口径 |
 | --- | --- |
 | `apps/mobile` | 独立 Expo package 与 lockfile；路由和页面仅为占位，不接真实业务 API |
 | Providers | `SafeAreaProvider` 与稳定的 TanStack Query `QueryClient` 基础 |
 | 本地能力 | SecureStore 字符串包装、SQLite 版本迁移框架，不创建业务表 |
 | 平台能力 | 相机、相册、通知、Deep Link 仅定义未配置接口和统一错误 |
-| `packages/shared-types` | 空白规范入口；本阶段不迁移 Web/后端 DTO |
-| `packages/api-client` | 传输无关接口、Web bridge 与 Native fetch adapter；401 只归一化错误并保留 TODO |
+| `packages/shared-types` | Auth、Catalog、O2O Order/Return、Feedback 与 Common 客户端 Contract 真源 |
+| `packages/api-client` | 传输无关接口、业务 modules、Web bridge 与 Native fetch adapter；401 只归一化错误并保留 TODO |
 | 其他共享包 | `domain`、`validation`、`design-tokens` 的最小边界骨架 |
 | CI | Mobile 与共享基础两个独立 job；只做依赖、类型、测试和 Android JS bundle export |
 
-第一阶段明确没有真实登录、商城、购物车、订单、反馈或同步闭环。页面能打开只代表导航与工程骨架成立，不代表业务可用。
+当前仍没有 Mobile 真实登录、商城、购物车、订单、反馈或同步闭环。页面能打开只代表导航与工程骨架成立，共享 Contract 存在也不代表 Mobile 已接入业务。
 
 ## 3. 当前与未来技术栈
 
@@ -66,7 +66,7 @@ Y-Link/
 ├─ apps/mobile/                 独立 Expo package 与 package-lock.json
 ├─ packages/
 │  ├─ api-client/               传输无关 HTTP 契约与 adapter
-│  ├─ shared-types/             稳定契约类型入口，第一阶段为空
+│  ├─ shared-types/             已核对的稳定客户端契约类型入口
 │  ├─ domain/                   纯函数边界
 │  ├─ validation/               校验模块边界
 │  └─ design-tokens/            最小跨端 primitive tokens
@@ -88,7 +88,7 @@ Y-Link/
 
 ### 5.2 共享包
 
-- `shared-types` 只接受已核对、稳定、跨端确有需要的契约；本阶段不搬 DTO；
+- `shared-types` 只接受已由现行 route/service/entity 核对、稳定且跨端确有需要的契约；当前已迁移 Auth、Catalog、O2O Order/Return、Feedback 与 Common 低风险 DTO；
 - `api-client` 不含 UI、SecureStore 生命周期或业务状态机；
 - Native adapter 可注入 Bearer token、处理超时/取消与显式幂等键，但不实现 401 refresh/replay；
 - `domain` 不依赖 UI、网络、存储或运行时全局对象；
@@ -96,6 +96,12 @@ Y-Link/
 - `design-tokens` 仅提供 primitive tokens，不替代 Mobile 主题层。
 
 ## 6. 后续产品路线
+
+### Contract Foundation（已完成）
+
+以当前运行代码为事实来源建立 `shared-types` 和 `api-client` modules，现有 Web 通过 import/re-export 渐进消费共享类型，API URL、Cookie/CSRF 和页面返回结构保持不变。字段地图与 UI 计算边界见 `docs/project-context/61-Mobile-API-Contract.md`。
+
+此阶段只让 Contract 在仓库内可用；`apps/mobile` 尚未解决独立 package 对共享包的版本化消费方式，也没有接入真实 API。
 
 ### 第二阶段：Feature Mock
 
@@ -145,6 +151,6 @@ node --experimental-strip-types --test packages/api-client/test/*.test.ts
 - 文档与真实代码不一致时以代码为准，并在任务范围允许时同步修正文档；
 - 每轮交付必须记录实际命令、结果、未验证项和残余风险。
 
-## 9. 阶段完成定义
+## 9. 当前完成定义
 
-第一阶段完成只表示：独立 Mobile 工程、占位路由、基础 providers、本地/平台接口、共享包骨架和限定 CI 已落库并通过相应静态验证。它不表示 Android 业务 App、后端移动会话、服务端购物车、原生能力、签名产物或发布链路已经完成。
+Mobile Bootstrap 与 Contract Foundation 完成只表示：独立 Mobile 工程、基础 providers、本地/平台接口、已核对的共享客户端类型、传输无关 API modules 和限定 CI 已落库并通过相应静态验证。它不表示 Android 业务 App 已接入共享包/真实 API，也不表示后端移动会话、服务端购物车、原生能力、签名产物或发布链路已经完成。

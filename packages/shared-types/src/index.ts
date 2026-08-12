@@ -1,7 +1,8 @@
-/**
- * Y-Link 跨端共享类型的规范入口。
- *
- * 第一阶段只建立包边界，不复制 Web 或后端 DTO。经过接口契约核对后，
- * 再按业务域从此入口显式导出稳定的跨端类型。
- */
-export {}
+/** Y-Link Web 与 Mobile 共用的纯 TypeScript 客户端 Contract 入口。 */
+export * from './auth.ts'
+export * from './catalog.ts'
+export * from './common.ts'
+export * from './feedback.ts'
+export * from './o2o-status.ts'
+export * from './orders.ts'
+export * from './returns.ts'
