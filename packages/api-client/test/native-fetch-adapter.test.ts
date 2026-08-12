@@ -69,6 +69,28 @@ test('token 获取永不 settle 时仍按请求超时返回 timeout 错误', asy
   assert.equal(result.kind, 'timeout')
 })
 
+test('Response body 永不关闭时仍按请求超时返回 timeout 错误', async () => {
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('{"code":0'))
+    },
+  })
+  const adapter = createNativeFetchAdapter({
+    baseUrl: 'https://api.example.com',
+    fetch: async () => new Response(body, {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }),
+  })
+  const result = await Promise.race([
+    adapter.request({ method: 'GET', url: '/stream', timeoutMs: 5 }).catch((error: unknown) => error),
+    new Promise<'not-settled'>((resolve) => setTimeout(() => resolve('not-settled'), 50)),
+  ])
+
+  assert.ok(result instanceof ApiClientError)
+  assert.equal(result.kind, 'timeout')
+})
+
 test('外部 AbortSignal 主动取消归一化为 aborted 错误', async () => {
   const fetch = (_input: string | URL | Request, init?: RequestInit) => {
     return new Promise<Response>((_resolve, reject) => {
@@ -94,6 +116,39 @@ test('外部 AbortSignal 主动取消归一化为 aborted 错误', async () => {
     request,
     (error: unknown) => error instanceof ApiClientError && error.kind === 'aborted',
   )
+})
+
+test('预先 aborted 的请求不调用会 reject 的 token factory', async () => {
+  const controller = new AbortController()
+  controller.abort()
+  let tokenFactoryCalls = 0
+  const unhandledRejections: unknown[] = []
+  const handleUnhandledRejection = (reason: unknown) => {
+    unhandledRejections.push(reason)
+  }
+  process.on('unhandledRejection', handleUnhandledRejection)
+
+  try {
+    const adapter = createNativeFetchAdapter({
+      baseUrl: 'https://api.example.com',
+      getAccessToken: () => {
+        tokenFactoryCalls += 1
+        return Promise.reject(new Error('token factory 不应被调用'))
+      },
+      fetch: async () => jsonResponse({ code: 0, message: 'ok', data: true }),
+    })
+
+    await assert.rejects(
+      adapter.request({ method: 'GET', url: '/profile', signal: controller.signal }),
+      (error: unknown) => error instanceof ApiClientError && error.kind === 'aborted',
+    )
+    await new Promise<void>((resolve) => setImmediate(resolve))
+
+    assert.equal(tokenFactoryCalls, 0)
+    assert.deepEqual(unhandledRejections, [])
+  } finally {
+    process.off('unhandledRejection', handleUnhandledRejection)
+  }
 })
 
 test('外部 abort 先于 timeout 时保留 aborted 终止原因', async () => {

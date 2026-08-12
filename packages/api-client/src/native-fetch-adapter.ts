@@ -63,8 +63,8 @@ const buildRequestUrl = (
   return url.toString()
 }
 
-const parseResponsePayload = async (response: Response): Promise<unknown> => {
-  const text = await response.text()
+const parseResponsePayload = async (response: Response, signal: AbortSignal): Promise<unknown> => {
+  const text = await awaitWithAbort(response.text(), signal)
   if (!text) {
     return undefined
   }
@@ -77,7 +77,9 @@ const parseResponsePayload = async (response: Response): Promise<unknown> => {
 }
 
 const awaitWithAbort = <T>(value: T | PromiseLike<T>, signal: AbortSignal): Promise<T> => {
+  const promise = Promise.resolve(value)
   if (signal.aborted) {
+    void promise.catch(() => undefined)
     return Promise.reject(signal.reason)
   }
 
@@ -90,7 +92,7 @@ const awaitWithAbort = <T>(value: T | PromiseLike<T>, signal: AbortSignal): Prom
     }
 
     signal.addEventListener('abort', handleAbort, { once: true })
-    Promise.resolve(value).then(
+    promise.then(
       (result) => {
         cleanup()
         resolve(result)
@@ -101,6 +103,21 @@ const awaitWithAbort = <T>(value: T | PromiseLike<T>, signal: AbortSignal): Prom
       },
     )
   })
+}
+
+const awaitFactoryWithAbort = <T>(
+  factory: () => T | PromiseLike<T>,
+  signal: AbortSignal,
+): Promise<T> => {
+  if (signal.aborted) {
+    return Promise.reject(signal.reason)
+  }
+
+  try {
+    return awaitWithAbort(factory(), signal)
+  } catch (error) {
+    return Promise.reject(error)
+  }
 }
 
 const pickHttpErrorDetails = (payload: unknown, response: Response) => {
@@ -164,7 +181,10 @@ export const createNativeFetchAdapter = (options: NativeFetchAdapterOptions): Ht
 
       try {
         const headers = new Headers(config.headers)
-        const accessToken = await awaitWithAbort(options.getAccessToken?.(), controller.signal)
+        const accessToken = await awaitFactoryWithAbort(
+          () => options.getAccessToken?.(),
+          controller.signal,
+        )
         if (accessToken && !headers.has('Authorization')) {
           headers.set('Authorization', `Bearer ${accessToken}`)
         }
@@ -195,7 +215,7 @@ export const createNativeFetchAdapter = (options: NativeFetchAdapterOptions): Ht
           ),
           controller.signal,
         )
-        const payload = await parseResponsePayload(response)
+        const payload = await parseResponsePayload(response, controller.signal)
 
         if (!response.ok) {
           const details = pickHttpErrorDetails(payload, response)
