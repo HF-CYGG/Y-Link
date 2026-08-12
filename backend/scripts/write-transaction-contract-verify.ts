@@ -3,8 +3,11 @@
  * 文件职责：静态校验「写事务必须经由 runInTransaction 闸门」这一契约，防止新代码绕过 SQLite 串行化。
  * 实现逻辑：
  * 1. 用 TypeScript 编译器 API 把 `src/**\/*.ts` 解析成 AST，遍历出所有事务入口调用；
- * 2. 覆盖两类入口——`xxx.transaction(...)`（DataSource / EntityManager）与
- *    `xxx.startTransaction(...)`（QueryRunner），两者都能开启真实事务；
+ * 2. 覆盖三类入口——`xxx.transaction`（DataSource / EntityManager）、
+ *    `xxx.startTransaction`（QueryRunner），以及 `xxx.query('BEGIN' | 'START TRANSACTION' | ...)`
+ *    这类直接下发事务控制 SQL 的写法；三者都能开启真实事务。
+ *    前两类在**成员引用处**记账而非调用处，因此 `const start = qr.startTransaction.bind(qr)`
+ *    这种先绑定再调用、以及赋值给变量的别名写法同样会被捕获；
  * 3. 逐条比对 ALLOWED_DIRECT_TRANSACTION_CALLS 白名单，未登记的一律判定为违规；
  * 4. 白名单键为「文件 + 所在函数 + 接收者 + 方法名」四元组，并校验每个键命中的调用数量精确等于登记值——
  *    既避免代码删改后条目退化成死条目，也避免一条豁免顺带放行同文件（乃至同函数）内新增的其它调用；
@@ -16,7 +19,9 @@
  * 但仍有两个缺口需要本门禁把守：
  * 1. **`queryRunner.startTransaction()` 完全不在 patch 覆盖范围内**（协调器没有 patch
  *    `createQueryRunner`），走这条路的写事务至今仍会绕过串行化；
- * 2. `runInTransaction` 会先 `initializeDatabaseInfrastructure` 再开事务，直接调用则不保证这个次序——
+ * 2. **`query('BEGIN')` 这类原始事务控制 SQL 同样不受保护**——`patchDataSourceQuery` 只按单条语句
+ *    获取租约，`BEGIN` 返回后租约即释放，后续事务语句仍可与其它写入交错；
+ * 3. `runInTransaction` 会先 `initializeDatabaseInfrastructure` 再开事务，直接调用则不保证这个次序——
  *    协调器尚未装好时开的事务不受任何保护。
  * 换言之：约定「一律走 runInTransaction」不是风格偏好，而是这两处保证的唯一来源。
  *
@@ -45,6 +50,29 @@ import ts from 'typescript'
 
 /** 能开启真实事务的方法名：DataSource/EntityManager 走 transaction，QueryRunner 走 startTransaction。 */
 const TRANSACTION_ENTRY_METHODS = new Set(['transaction', 'startTransaction'])
+
+/**
+ * 事务控制 SQL：直接 `query('BEGIN')` 同样能开启事务，且完全不经过上面那两个方法。
+ * 这条路比方法调用更危险——协调器的 `patchDataSourceQuery` 只按**单条语句**获取租约，
+ * `BEGIN` 返回后租约即释放，后续事务语句仍可与其它写入交错，等于没有任何串行化保护。
+ */
+const TRANSACTION_CONTROL_SQL_PATTERN =
+  /^\s*(BEGIN|START\s+TRANSACTION|COMMIT|ROLLBACK|SAVEPOINT|RELEASE\s+SAVEPOINT|SET\s+TRANSACTION)\b/i
+
+/** 取调用首参的字面量文本；动态拼接的 SQL 无法静态判定，返回 undefined。 */
+const readLiteralArgument = (node: ts.CallExpression): string | undefined => {
+  const [first] = node.arguments
+  if (!first) {
+    return undefined
+  }
+  if (ts.isStringLiteralLike(first)) {
+    return first.text
+  }
+  if (ts.isNoSubstitutionTemplateLiteral(first)) {
+    return first.text
+  }
+  return undefined
+}
 
 type TransactionCall = {
   relativePath: string
@@ -203,6 +231,29 @@ const collectTransactionCalls = (): TransactionCall[] => {
           && ts.isStringLiteralLike(node.argumentExpression)
           ? node.argumentExpression.text
           : undefined)
+
+      // 原始事务控制 SQL：`xxx.query('BEGIN')` 等价于开启事务，必须与方法入口同等对待。
+      if (
+        ts.isCallExpression(node)
+        && ts.isPropertyAccessExpression(node.expression)
+        && node.expression.name.text === 'query'
+      ) {
+        const sqlText = readLiteralArgument(node)
+        if (sqlText && TRANSACTION_CONTROL_SQL_PATTERN.test(sqlText)) {
+          const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile))
+          const receiverNode = node.expression.expression
+          calls.push({
+            relativePath,
+            line: line + 1,
+            receiver: ts.isPropertyAccessExpression(receiverNode)
+              ? receiverNode.name.text
+              : receiverNode.getText(sourceFile),
+            method: `query:${sqlText.trim().split(/\s+/)[0].toUpperCase()}`,
+            enclosingFunction: resolveEnclosingFunctionName(node, sourceFile),
+            text: node.getText(sourceFile).split('\n')[0].trim(),
+          })
+        }
+      }
 
       if (methodName && TRANSACTION_ENTRY_METHODS.has(methodName)) {
         const accessNode = node as ts.PropertyAccessExpression | ts.ElementAccessExpression
