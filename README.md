@@ -14,6 +14,33 @@ Y-Link 是一套面向文创、非遗、门店和活动场景的库存管理系�
 
 技术栈：Vue 3、TypeScript、Element Plus、Pinia、Express、TypeORM。默认使用 SQLite，支持迁移到 MySQL。
 
+## Mobile 第一阶段状态
+
+仓库新增了独立的 `apps/mobile` Expo 工程和 `packages/*` 跨端基础骨架。Mobile 固定使用 Node.js `22.13.1`；第一阶段只提供路由占位、基础 providers、SecureStore/SQLite 包装、未配置的平台能力接口与 CI，不改变现有 Vue Web、Express 后端、数据库或部署方式。
+
+当前 Mobile 尚未接入真实 API，也没有实现正式登录会话、服务端购物车、订单、库存、退货、相机、相册、通知或 Deep Link。未运行模拟器或真机验证时，只能依据 SQLite migration 专项测试、typecheck 与 Android JS bundle export 判断工程基础，不代表设备交互、签名 APK 或发布链路可用。
+
+主要目录：
+
+- `apps/mobile`：独立 Expo package，使用自己的 `package.json` 和 `package-lock.json`；
+- `packages/api-client`：传输无关 HTTP 契约与 Native/Web adapter；
+- `packages/shared-types`：空白规范入口，第一阶段不迁移现有 DTO；
+- `packages/domain`、`packages/validation`、`packages/design-tokens`：最小共享边界骨架。
+
+常用命令：
+
+```bash
+npm --prefix apps/mobile ci
+npm --prefix apps/mobile run dependencies:check
+npm --prefix apps/mobile run test:db
+npm --prefix apps/mobile run typecheck
+npm --prefix apps/mobile run export:android
+node ./node_modules/typescript/bin/tsc -p packages/tsconfig.json --noEmit
+node --experimental-strip-types --test packages/api-client/test/*.test.ts
+```
+
+Mobile 未启用根 npm workspaces，当前也不能直接跨目录导入 `packages/*`。详细边界见 [`docs/project-context/60-移动端工程与共享基础.md`](./docs/project-context/60-移动端工程与共享基础.md)。
+
 ## 快速入口
 
 - [版本发布历史与更新日志](./docs/版本发布历史与更新日志.md)
@@ -448,6 +475,8 @@ Y-Link
 │  ├─ src/services/             业务服务
 │  ├─ sql/                      初始化和迁移 SQL
 │  └─ scripts/                  后端验证脚本
+├─ apps/mobile/                 独立 Expo Mobile 工程与 lockfile
+├─ packages/                    尚未接入 Mobile 的跨端基础包骨架
 ├─ docker/
 │  ├─ nginx/                    Nginx 配置
 │  └─ onebox/                   onebox 入口脚本
@@ -468,6 +497,8 @@ Y-Link
 | `/app/uploads` | 容器内上传文件目录，必须持久化 |
 | `backend/sql` | MySQL 初始化和结构升级脚本 |
 | `backend/data` | 本地开发 SQLite 数据目录 |
+| `apps/mobile` | Mobile 路由占位、providers、本地与平台能力基础 |
+| `packages` | API client、共享类型、领域、校验与设计 token 边界 |
 | `docs` | 使用指南、迁移手册、维护文档 |
 
 ## 安全说明
@@ -483,4 +514,5 @@ Y-Link
 - [Y-Link 使用指南](./docs/Y-Link使用指南.md)
 - [数据库迁移演练与验收手册](./docs/Y-Link数据库迁移向导演练与验收手册.md)
 - [企业级维护与二开白皮书](./docs/Y-Link企业级维护与二开白皮书.md)
+- [移动端工程与共享基础](./docs/project-context/60-移动端工程与共享基础.md)
 - [GitHub Wiki](https://github.com/HF-CYGG/Y-Link/wiki)

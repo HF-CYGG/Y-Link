@@ -1,0 +1,76 @@
+name: Mobile 基础检查
+
+on:
+  pull_request:
+    paths:
+      - "apps/mobile/**"
+      - "packages/**"
+      - ".github/workflows/mobile-check.yml"
+  push:
+    paths:
+      - "apps/mobile/**"
+      - "packages/**"
+      - ".github/workflows/mobile-check.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mobile:
+    name: Mobile 工程
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js 22.13.1
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.13.1"
+          cache: npm
+          cache-dependency-path: apps/mobile/package-lock.json
+
+      - name: 安装 Mobile 依赖
+        run: npm --prefix apps/mobile ci
+
+      - name: 检查 Expo 依赖一致性
+        run: npm --prefix apps/mobile run dependencies:check
+
+      - name: 验证 SQLite 迁移框架
+        run: npm --prefix apps/mobile run test:db
+
+      - name: 检查 Mobile TypeScript
+        run: npm --prefix apps/mobile run typecheck
+
+      - name: 导出 Android bundle
+        run: npm --prefix apps/mobile run export:android
+
+  foundations:
+    name: 共享基础
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js 22.13.1
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.13.1"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: 安装根依赖
+        run: npm ci
+
+      - name: 检查共享包 TypeScript
+        run: node ./node_modules/typescript/bin/tsc -p packages/tsconfig.json --noEmit
+
+      - name: 运行 Native API client 测试
+        run: node --experimental-strip-types --test packages/api-client/test/*.test.ts
