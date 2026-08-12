@@ -59,5 +59,8 @@ jobs:
       - name: 执行后端依赖安全审计
         run: npm --prefix ./backend audit --audit-level=high
 
+      - name: 执行 MySQL 启动结构契约验收
+        run: npm --prefix ./backend run verify:mysql:schema-contract
+
       - name: 执行数据库并发验收
         run: npm run verify:db:concurrency
