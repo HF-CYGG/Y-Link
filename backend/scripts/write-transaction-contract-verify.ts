@@ -8,6 +8,9 @@
  *    这类直接下发事务控制 SQL 的写法；三者都能开启真实事务。
  *    前两类在**成员引用处**记账而非调用处，因此 `const start = qr.startTransaction.bind(qr)`
  *    这种先绑定再调用、以及赋值给变量的别名写法同样会被捕获；
+ *    第三类不只认字面量：会静态求出首参的**可知前缀**，覆盖常量变量、多跳别名、
+ *    字符串拼接、三元分支，以及模板字符串的 head——事务控制 SQL 必然以关键字开头，
+ *    而模板的 head 是字面的，`` `BEGIN ${x}` `` 因此也能判定；
  * 3. 逐条比对 ALLOWED_DIRECT_TRANSACTION_CALLS 白名单，未登记的一律判定为违规；
  * 4. 白名单键为「文件 + 所在函数 + 接收者 + 方法名」四元组，并校验每个键命中的调用数量精确等于登记值——
  *    既避免代码删改后条目退化成死条目，也避免一条豁免顺带放行同文件（乃至同函数）内新增的其它调用；
@@ -36,6 +39,12 @@
  * `*-contract-verify.ts` 承担（参见 task2-route-permission-contract-verify.ts）。这里沿用同一范式，
  * 避免为单条规则引入整套 lint 工具链及其对存量代码的连带改造。
  *
+ * 已知边界（不要把本门禁当成完备证明）：
+ * 事务控制 SQL 的识别依赖静态求值，唯一判不了的是「整条 SQL 以无法静态解析的值开头」——
+ * 例如 `` `${verb} TRANSACTION` ``，或 SQL 由函数参数、配置、数据库内容传入。
+ * 这是静态分析的固有边界，靠加规则堵不住；真正收口需要在协调器侧接管
+ * `createQueryRunner` 与跨语句租约（见 issue #41）。
+ *
  * 维护说明：
  * - 新增写事务请一律调用 `runInTransaction`（backend/src/config/transaction-runner.ts）；
  * - 确有理由直接使用 TypeORM 事务 API 时，必须在 ALLOWED_DIRECT_TRANSACTION_CALLS 中登记并写明原因，
@@ -59,19 +68,103 @@ const TRANSACTION_ENTRY_METHODS = new Set(['transaction', 'startTransaction'])
 const TRANSACTION_CONTROL_SQL_PATTERN =
   /^\s*(BEGIN|START\s+TRANSACTION|COMMIT|ROLLBACK|SAVEPOINT|RELEASE\s+SAVEPOINT|SET\s+TRANSACTION)\b/i
 
-/** 取调用首参的字面量文本；动态拼接的 SQL 无法静态判定，返回 undefined。 */
-const readLiteralArgument = (node: ts.CallExpression): string | undefined => {
+/**
+ * 在使用点可见的作用域内查找 `const NAME = <初始化表达式>`，用于把
+ * `const sql = 'BEGIN'; await ds.query(sql)` 这类一层间接解开。
+ * 从使用点向上逐层找，命中最近的那个声明，避免被同名的无关变量误导。
+ */
+const resolveConstInitializer = (
+  identifier: ts.Identifier,
+  sourceFile: ts.SourceFile,
+): ts.Expression | undefined => {
+  const name = identifier.text
+  let scope: ts.Node | undefined = identifier.parent
+
+  while (scope) {
+    let found: ts.Expression | undefined
+    ts.forEachChild(scope, function scan(node): void {
+      if (found) {
+        return
+      }
+      if (
+        ts.isVariableDeclaration(node)
+        && ts.isIdentifier(node.name)
+        && node.name.text === name
+        && node.initializer
+      ) {
+        found = node.initializer
+        return
+      }
+      // 只在当前作用域的语句层面下钻，不进入嵌套函数体——那不是同一个作用域。
+      if (!ts.isFunctionLike(node)) {
+        ts.forEachChild(node, scan)
+      }
+    })
+    if (found) {
+      return found
+    }
+    scope = scope.parent
+  }
+  return undefined
+}
+
+/**
+ * 求出表达式**静态可知的前缀**候选。
+ *
+ * 只求前缀而非完整值，是因为事务控制 SQL 必然以关键字开头：
+ * `` `BEGIN ${x}` `` 的 head 是字面的 'BEGIN '，据此即可判定；
+ * 真正判不了的只剩「整条 SQL 以变量开头」这一种，那是静态分析的固有边界。
+ *
+ * 返回数组是为了覆盖三元表达式的两个分支。
+ */
+const collectStaticSqlPrefixes = (
+  node: ts.Expression,
+  sourceFile: ts.SourceFile,
+  seen = new Set<ts.Node>(),
+): string[] => {
+  if (seen.has(node)) {
+    return []
+  }
+  seen.add(node)
+
+  if (ts.isParenthesizedExpression(node) || ts.isAsExpression(node) || ts.isSatisfiesExpression(node)) {
+    return collectStaticSqlPrefixes(node.expression, sourceFile, seen)
+  }
+  if (ts.isStringLiteralLike(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+    return [node.text]
+  }
+  // 模板字符串：只有 head 是静态的，但对"以关键字开头"的判定这已足够。
+  if (ts.isTemplateExpression(node)) {
+    return node.head.text ? [node.head.text] : []
+  }
+  if (ts.isIdentifier(node)) {
+    const initializer = resolveConstInitializer(node, sourceFile)
+    return initializer ? collectStaticSqlPrefixes(initializer, sourceFile, seen) : []
+  }
+  // 字符串拼接：左侧决定开头。
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    return collectStaticSqlPrefixes(node.left, sourceFile, seen)
+  }
+  if (ts.isConditionalExpression(node)) {
+    return [
+      ...collectStaticSqlPrefixes(node.whenTrue, sourceFile, seen),
+      ...collectStaticSqlPrefixes(node.whenFalse, sourceFile, seen),
+    ]
+  }
+  return []
+}
+
+/** 取调用首参中命中事务控制关键字的静态前缀；判不了则返回 undefined。 */
+const readTransactionControlSql = (
+  node: ts.CallExpression,
+  sourceFile: ts.SourceFile,
+): string | undefined => {
   const [first] = node.arguments
   if (!first) {
     return undefined
   }
-  if (ts.isStringLiteralLike(first)) {
-    return first.text
-  }
-  if (ts.isNoSubstitutionTemplateLiteral(first)) {
-    return first.text
-  }
-  return undefined
+  return collectStaticSqlPrefixes(first, sourceFile)
+    .find((prefix) => TRANSACTION_CONTROL_SQL_PATTERN.test(prefix))
 }
 
 type TransactionCall = {
@@ -238,8 +331,8 @@ const collectTransactionCalls = (): TransactionCall[] => {
         && ts.isPropertyAccessExpression(node.expression)
         && node.expression.name.text === 'query'
       ) {
-        const sqlText = readLiteralArgument(node)
-        if (sqlText && TRANSACTION_CONTROL_SQL_PATTERN.test(sqlText)) {
+        const sqlText = readTransactionControlSql(node, sourceFile)
+        if (sqlText) {
           const { line } = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile))
           const receiverNode = node.expression.expression
           calls.push({
