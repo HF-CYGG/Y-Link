@@ -36,3 +36,21 @@ backend/uploads/*
 *.sln
 *.sw?
 .agents
+
+# Mobile / Expo
+apps/mobile/.expo/
+apps/mobile/.expo-shared/
+apps/mobile/.expo-export/
+apps/mobile/.env*
+!apps/mobile/.env.example
+apps/mobile/android/.gradle/
+apps/mobile/android/build/
+apps/mobile/android/app/build/
+apps/mobile/ios/build/
+apps/mobile/ios/Pods/
+apps/mobile/**/*.jks
+apps/mobile/**/*.keystore
+apps/mobile/**/*.p8
+apps/mobile/**/*.p12
+apps/mobile/**/*.mobileprovision
+apps/mobile/credentials.json

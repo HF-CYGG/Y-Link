@@ -1,0 +1,39 @@
+{
+  "name": "y-link-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "expo-router/entry",
+  "engines": {
+    "node": "22.13.1"
+  },
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android",
+    "typecheck": "tsc --noEmit",
+    "test:db": "node --no-warnings --experimental-strip-types --test src/db/migration-runner.test.mjs",
+    "dependencies:check": "npx expo install --check",
+    "export:android": "expo export --platform android --output-dir .expo-export --clear"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.101.4",
+    "expo": "~57.0.12",
+    "expo-constants": "~57.0.10",
+    "expo-linking": "~57.0.5",
+    "expo-router": "~57.0.12",
+    "expo-secure-store": "~57.0.1",
+    "expo-sqlite": "~57.0.1",
+    "react": "19.2.3",
+    "react-native": "0.86.2",
+    "react-native-safe-area-context": "~5.7.0",
+    "react-native-screens": "~4.26.0",
+    "zustand": "^5.0.14"
+  },
+  "devDependencies": {
+    "@types/react": "~19.2.2",
+    "typescript": "~6.0.3"
+  },
+  "overrides": {
+    "react-dom": "19.2.3",
+    "react-native-worklets": "0.10.4"
+  }
+}
