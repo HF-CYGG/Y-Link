@@ -182,7 +182,7 @@ test('外部 abort 先于 timeout 时保留 aborted 终止原因', async () => {
   )
 })
 
-test('按需注入 Bearer Authorization 且保留显式 headers', async () => {
+test('只通过 token callback 注入 Bearer Authorization 且保留非认证 headers', async () => {
   const recorder = createFetchRecorder(jsonResponse({ code: 0, message: 'ok', data: true }))
   const adapter = createNativeFetchAdapter({
     baseUrl: 'https://api.example.com/api',
@@ -193,7 +193,10 @@ test('按需注入 Bearer Authorization 且保留显式 headers', async () => {
   await adapter.request({
     method: 'GET',
     url: '/client-auth/me',
-    headers: { 'X-Trace-Id': 'trace-1' },
+    headers: {
+      aUtHoRiZaTiOn: 'Bearer caller-controlled-token',
+      'X-Trace-Id': 'trace-1',
+    },
   })
 
   const headers = new Headers(recorder.calls[0]?.init?.headers)

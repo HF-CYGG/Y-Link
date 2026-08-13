@@ -14,3 +14,9 @@ export interface HttpRequestConfig {
 export interface HttpAdapter {
   request<T>(config: HttpRequestConfig): Promise<T>
 }
+
+/** 业务 API module 允许调用方控制的传输选项；不能覆盖 method/path/body。 */
+export type ApiRequestOptions = Pick<
+  HttpRequestConfig,
+  'signal' | 'headers' | 'timeoutMs' | 'idempotencyKey'
+>

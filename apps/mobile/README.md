@@ -1,6 +1,6 @@
 # Y-Link Mobile
 
-Y-Link 的独立 Expo 移动端工程。当前阶段只建立可运行的路由、Provider 和平台边界，不连接后端 API，也不代表最终视觉方案。
+Y-Link 的独立 Expo 移动端工程。当前已建立可运行的路由、Provider、平台边界和仓库级共享 Contract，但 Mobile 尚未安装或消费共享包，也未连接后端 API，不代表最终视觉方案。
 
 ## 环境与安装
 
@@ -46,7 +46,9 @@ npm --prefix apps/mobile run export:android
 
 当前页面只展示静态占位文案，不提供伪造的网络层或假 `test` 命令。需要 mock 时，应把确定性的 fixture 放在对应 `features/*` 内，并与生产数据入口隔离。
 
-未来接入 `api-client` 与 `shared-types` 时，应通过正式发布或明确的独立包安装方式消费版本，不得用跨目录相对路径直接引用根 `packages/*`。网络调用统一进入该客户端层，页面和 Store 不直接发起请求。
+仓库根 `packages/shared-types` 已提供 Auth、Catalog、O2O Order/Return、Feedback 与 Common Contract，`packages/api-client` 已提供对应传输无关 modules；字段地图见 `docs/project-context/61-Mobile-API-Contract.md`。这些能力当前只是仓库内 Contract，不代表本独立 package 已可解析或使用。
+
+未来接入时应通过正式发布或明确的独立包安装方式消费版本，不得用跨目录相对路径直接引用根 `packages/*`。网络调用统一进入该客户端层，页面和 Store 不直接发起请求；在 Native token/session 方案获批前不得接真实 Auth。
 
 ## 平台能力状态
 
@@ -60,6 +62,6 @@ npm --prefix apps/mobile run export:android
 
 ## Antigravity 修改边界
 
-在单独任务明确授权时，Antigravity 可修改：`app/**`、`src/features/**`、`src/components/**`、`src/stores/**`、`src/sync/**`、`src/theme/**`、`src/ui/**`。
+在单独任务明确授权时，Antigravity 可修改：`app/**`、`src/features/**`、`src/components/**`、`src/stores/**`、`src/sync/**`、`src/theme/**`、`src/ui/**`。可以参考 Contract Map 设计确定性的 Feature Mock，但不得自行计算最终金额、最终可下单/可退数量或库存预占结果。
 
 未经移动端平台负责人明确授权，Antigravity 禁止修改：`src/platform/**`、`src/db/**`、`src/app/providers/**`、`app.config.ts`、`eas.json`、`package.json`、`package-lock.json`，以及 `apps/mobile` 以外的任何目录。

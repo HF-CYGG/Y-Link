@@ -3,10 +3,10 @@
 ## 0. 优先级与当前阶段硬边界
 
 1. 仓库根 `AGENTS.md` 与用户当前任务始终优先于本文。本文不能放宽权限、子 agent、Git、风险操作或验证边界，也不能替代清晰的工程任务简报。
-2. 第一阶段只交付 Expo 路由占位、providers、SecureStore/SQLite 基础、平台能力接口、共享包骨架和 CI；不新增或修改后端 API、数据库、认证会话、购物车、订单、库存、退货等业务。
+2. 当前 Contract Foundation 只交付已核对的跨端类型、传输无关 API modules 与 Web 渐进 re-export；不新增或修改后端 API、数据库、认证会话、服务端购物车、订单幂等、库存或退货状态机。
 3. 相机、相册、通知、正式 Deep Link、完整 401 refresh、服务端购物车、EAS 发布、正式包名与签名均是后续路线；当前未配置、未实现。
 
-## 1. 当前第一阶段实现
+## 1. 当前工程与 Contract 实现
 
 - `apps/mobile` 是独立 npm package，拥有自己的 `package.json` 与 `package-lock.json`；
 - 根 `package.json` 未启用 npm workspaces，现有 Web 安装与构建链路保持不变；
@@ -14,13 +14,13 @@
 - `AppProviders` 组合 Safe Area 与 TanStack Query 基础，未装配真实会话或 API；
 - SecureStore 只有字符串存取包装，SQLite 只有打开与 `PRAGMA user_version` 迁移框架；
 - 相机、相册、通知和 Deep Link 只有平台能力接口与未配置错误；
-- `packages/shared-types` 是空白规范骨架，本阶段不迁移 DTO；
-- `packages/api-client` 是传输无关契约，Web adapter 是 bridge 薄包装，Native adapter 的 401 只返回规范化错误并保留 `TODO(mobile-auth)`；
+- `packages/shared-types` 已成为 Auth、Catalog、O2O Order/Return、Feedback 与 Common 客户端 Contract 真源；
+- `packages/api-client` 已提供 `client-auth`、`catalog`、`orders`、`feedback` modules 和显式 `cart` placeholder；Web adapter 是 bridge 薄包装，Native adapter 的 401 只返回规范化错误并保留 `TODO(mobile-auth)`；
 - Mobile 当前不得跨目录源码导入 `packages/*`，正式接入需要后续独立任务。
 
-## 2. 本阶段目录边界
+## 2. 目录边界
 
-第一阶段文件已经按独立任务拆分：
+Mobile 与共享基础文件按独立任务拆分：
 
 ```text
 apps/mobile/**                       Mobile 工程
@@ -35,7 +35,7 @@ packages/**                          共享基础
 
 ### `packages/shared-types`
 
-只接收经过 Web、后端与 Mobile 契约核对的稳定类型。第一阶段保持空导出；禁止为了消除类型错误复制现有 DTO 或发明字段。
+只接收经过现行 route、service、entity 与 Web 消费链核对的稳定客户端类型。已迁移类型从这里导出，Web 原 API 文件只做 import/re-export；禁止为了消除类型错误复制 DTO、放宽服务端必返字段或发明字段。
 
 ### `packages/api-client`
 
@@ -44,6 +44,7 @@ packages/**                          共享基础
 - adapter 不直接依赖 SecureStore、Zustand、React 或页面；
 - 401 当前不刷新、不重放、不退出；完整 refresh mutex 和会话清理必须等后端移动会话契约获批后实现；
 - Web adapter 不能反向依赖现有 Web 源码，只接受外部 bridge。
+- API modules 只描述 method、path、query、body 和 response；附件上传、SSE、服务端购物车与最终 Native session 均不在当前范围。
 
 ### 其他共享包
 
@@ -64,7 +65,7 @@ packages/**                          共享基础
 
 以下内容必须另行获得用户明确授权并重新读取相关项目上下文：后端移动会话、token/refresh、权限、服务端购物车、订单、库存、退货、上传、数据库迁移、并发控制和发布。不得把本文中的未来路线当作实施请求，也不得自动要求或派发 Claude/其他子 agent。
 
-## 6. 第一阶段验证
+## 6. 当前验证
 
 ```bash
 npm --prefix apps/mobile ci
@@ -76,6 +77,8 @@ npm ci
 node ./node_modules/typescript/bin/tsc -p packages/tsconfig.json --noEmit
 node --experimental-strip-types --test packages/api-client/test/*.test.ts
 ```
+
+Contract 字段与 Antigravity 使用边界见 `docs/project-context/61-Mobile-API-Contract.md`。Mobile 当前仍不得跨目录源码导入 `packages/*`。
 
 Mobile 没有笼统或虚假的通用 `test`，但已有 SQLite migration 专项 `test:db`，CI 必须运行该真实专项测试。Android export 不是模拟器、真机、签名 APK 或 EAS 发布证据。
 

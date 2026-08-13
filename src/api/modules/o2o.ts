@@ -2,235 +2,53 @@
  * 模块说明：O2O 预购业务 API 模块。
  * 文件职责：封装商城商品、预订单、退货申请、核销台查询与门店核销等 O2O 前端共享接口与类型。
  * 实现逻辑：
- * - 统一沉淀预订单详情、退货申请详情、核销结果等跨页面复用的数据结构；
- * - 让客户端订单页、管理端订单页、核销台都复用同一份类型定义，减少状态口径漂移；
+ * - 客户端目录、预订单和退货 DTO 从 shared-types import/re-export，现有页面 import path 保持不变；
+ * - 管理端核销、库存和治理专属结构继续留在 Web API 模块，避免扩大本轮迁移范围；
  * - 核销接口虽然共用一个入口，但会通过 `verifyTargetType` 和 `operationType` 明确区分取货核销与退货回库。
  * 维护说明：
- * - 本文件的枚举必须与后端实体、服务返回结构保持严格一致；
- * - 若后端新增或删减退货申请状态，需优先修改本文件，再同步消费这些类型的页面分支。
+ * - 客户端共享 DTO 必须先按后端 route/service/entity 校准，再修改 shared-types；
+ * - 若后端新增或删减状态，需同步共享 Contract、Web 常量与消费页面分支。
  */
 
 import { request, type RequestConfig } from '@/api/http'
 import type {
-  ClientOrderReportScenario,
   O2oOrderBusinessStatus,
   O2oOrderStatus,
 } from '@/constants/o2o-order-status'
 import type { ClientUserAccountType } from '@/api/modules/client-user-manage'
 import type { PaginationQueryInput, PaginationResult } from '@/types/api'
+import type {
+  O2oClientOrderType,
+  O2oMallProductsResult,
+  O2oMallStorefrontConfig,
+  O2oMyOrderListQuery,
+  O2oMyOrderListResult,
+  O2oPreorderDetail,
+  O2oPreorderSummary,
+  O2oReturnRequestDetail,
+  SubmitO2oPreorderPayload,
+  SubmitO2oReturnRequestPayload,
+  UpdateMyO2oPreorderPayload,
+} from '../../../packages/shared-types/src/index'
 
-export type O2oClientOrderType = 'department' | 'walkin'
-
-export interface O2oOrderStatusReport {
-  scenario: ClientOrderReportScenario
-  cancelReason: 'timeout' | 'manual' | null
-  timeoutReached: boolean
-  timeoutSoon: boolean
-}
-
-export interface O2oMallProduct {
-  id: string
-  productCode: string
-  productName: string
-  defaultPrice: string
-  originalPrice: string
-  discountRate: string
-  discountedPrice: string
-  o2oRecommended: boolean
-  tags: string[]
-  thumbnail: string | null
-  detailContent: string | null
-  limitPerUser: number
-  currentStock: number
-  preOrderedStock: number
-  availableStock: number
-  soldQty: number
-  skus?: O2oMallSku[]
-}
-
-export interface O2oMallSku {
-  id: string
-  productId: string
-  skuCode: string
-  specValues: Record<string, string>
-  specText: string
-  defaultPrice: string
-  originalPrice: string
-  discountRate: string
-  discountedPrice: string
-  currentStock: number
-  preOrderedStock: number
-  availableStock: number
-  isActive: boolean
-  isCurrent: boolean
-  o2oRecommended: boolean
-  thumbnail: string | null
-  sortOrder: number
-}
-
-/**
- * 商城门店展示配置：
- * - 当前先承载面向客户端公开的营业时间文案；
- * - 后续若要继续透出门店公告、提货说明等公开信息，可继续在这里扩展。
- */
-export interface O2oMallStorefrontConfig {
-  businessHoursText: string
-  mallAnnouncementText: string
-}
-
-/**
- * 商城商品列表接口返回值：
- * - `list` 继续承载商品目录；
- * - `storefront` 负责承载客户端允许公开消费的门店展示配置。
- */
-export interface O2oMallProductsResult {
-  list: O2oMallProduct[]
-  storefront: O2oMallStorefrontConfig
-}
-
-export interface O2oPreorderSummary {
-  statusReport: O2oOrderStatusReport
-  totalAmount?: string
-  expireInSeconds?: number
-  id: string
-  showNo: string
-  customerOrderShowNo?: string | null
-  verifyCode: string
-  status: O2oOrderStatus
-  businessStatus: O2oOrderBusinessStatus | null
-  hasCustomerOrder: boolean
-  isSystemApplied: boolean
-  merchantMessage: string | null
-  clientOrderType: O2oClientOrderType
-  departmentNameSnapshot: string | null
-  staffNoSnapshot: string | null
-  returnRequestCount: number
-  pendingReturnRequestCount: number
-  latestReturnRequest: {
-    id: string
-    returnNo: string
-    status: O2oReturnRequestStatus
-    createdAt: string
-    handledAt: string | null
-    rejectedReason: string | null
-  } | null
-  totalQty: number
-  timeoutAt: string | null
-  createdAt: string
-}
-
-export interface O2oMyOrderListQuery extends PaginationQueryInput {
-  status?: O2oOrderStatus
-  keyword?: string
-}
-
-interface O2oMyOrderListRawResult {
-  page: number
-  pageSize: number
-  total: number
-  list: O2oPreorderSummary[]
-}
-
-export interface O2oPreorderDetailItem {
-  id: string
-  productId: string
-  skuId: string | null
-  productCode: string
-  productName: string
-  skuCode: string | null
-  specText: string | null
-  skuImage: string | null
-  defaultPrice: string
-  originalPrice: string
-  discountRate: string
-  discountedPrice: string
-  unitPrice?: string
-  lineAmount?: string
-  qty: number
-  returnedQty: number
-  availableReturnQty: number
-  subTotal?: string
-}
-
-export interface O2oReturnRequestItem {
-  id: string
-  productId: string
-  skuId: string | null
-  productCode: string
-  productName: string
-  skuCode: string | null
-  specText: string | null
-  qty: number
-}
-
-// 退货申请已扩展为“待核销 / 已核销 / 已拒绝”三态，所有消费端都必须按真实状态分支展示。
-export type O2oReturnRequestStatus = 'pending' | 'verified' | 'rejected'
-
-export interface O2oReturnRequestDetail {
-  id: string
-  returnNo: string
-  verifyCode: string
-  status: O2oReturnRequestStatus
-  sourceOrderStatus: O2oOrderStatus
-  reason: string
-  totalQty: number
-  createdAt: string
-  handledAt: string | null
-  handledBy: string | null
-  verifiedAt: string | null
-  verifiedBy: string | null
-  rejectedReason: string | null
-  qrPayload: string
-  items: O2oReturnRequestItem[]
-}
-
-export interface O2oPreorderDetail {
-  order: {
-    statusReport: O2oOrderStatusReport
-    totalAmount?: string
-    expireInSeconds?: number
-    id: string
-    showNo: string
-    customerOrderShowNo?: string | null
-    verifyCode: string
-    status: O2oOrderStatus
-    businessStatus: O2oOrderBusinessStatus | null
-    hasCustomerOrder: boolean
-    isSystemApplied: boolean
-    pickupContact: string | null
-    merchantMessage: string | null
-    clientOrderType: O2oClientOrderType
-    departmentNameSnapshot: string | null
-    staffNoSnapshot: string | null
-    remark: string | null
-    updateCount: number
-    remainingUpdateCount: number
-    maxUpdateCount: number
-    totalQty: number
-    timeoutAt: string | null
-    verifiedAt: string | null
-    createdAt: string
-  }
-  customerProfile: {
-    id: string
-    username: string
-    realName: string | null
-    mobile: string | null
-    email: string | null
-    departmentName: string | null
-    accountType: 'personal' | 'department'
-    staffNo: string | null
-  } | null
-  items: O2oPreorderDetailItem[]
-  returnRequests: O2oReturnRequestDetail[]
-  amountSummary?: {
-    totalAmount: string
-    totalQty: number
-    totalItemCount: number
-  }
-  storefront?: O2oMallStorefrontConfig
-  qrPayload: string
-}
+export type {
+  O2oClientOrderType,
+  O2oMallProduct,
+  O2oMallProductsResult,
+  O2oMallSku,
+  O2oMallStorefrontConfig,
+  O2oMyOrderListQuery,
+  O2oOrderStatusReport,
+  O2oPreorderDetail,
+  O2oPreorderDetailItem,
+  O2oPreorderSummary,
+  O2oReturnRequestDetail,
+  O2oReturnRequestItem,
+  O2oReturnRequestStatus,
+  SubmitO2oPreorderPayload,
+  SubmitO2oReturnRequestPayload,
+  UpdateMyO2oPreorderPayload,
+} from '../../../packages/shared-types/src/index'
 
 export interface O2oVerifyDetailResult {
   verifyTargetType: 'preorder' | 'return_request'
@@ -266,29 +84,6 @@ export interface O2oInventoryLog {
 }
 
 export type O2oInventoryLogListQuery = PaginationQueryInput
-
-export interface SubmitO2oPreorderPayload {
-  /** 同一次下单及其弱网重试必须复用同一请求键。 */
-  clientRequestId: string
-  isSystemApplied: boolean
-  pickupContact: string
-  remark?: string
-  items: Array<{
-    productId: string | number
-    skuId?: string | number | null
-    qty: number
-  }>
-}
-
-export interface SubmitO2oReturnRequestPayload {
-  reason: string
-  items: Array<{ productId: string | number; skuId?: string | number | null; qty: number }>
-}
-
-export interface UpdateMyO2oPreorderPayload {
-  remark?: string
-  items: Array<{ productId: string | number; skuId?: string | number | null; qty: number }>
-}
 
 export interface UpdateConsoleO2oPreorderPayload {
   remark?: string
@@ -375,7 +170,7 @@ export const getMyO2oPreorders = async (
   params: O2oMyOrderListQuery = {},
   config?: RequestConfig,
 ): Promise<PaginationResult<O2oPreorderSummary>> => {
-  const result = await request<O2oMyOrderListRawResult>({
+  const result = await request<O2oMyOrderListResult>({
     method: 'GET',
     url: '/o2o/mall/preorders',
     params,

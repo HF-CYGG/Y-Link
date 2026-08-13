@@ -205,11 +205,14 @@ export const createNativeFetchAdapter = (options: NativeFetchAdapterOptions): Ht
       try {
         const requestUrl = buildRequestUrl(options.baseUrl, config.url, config.params)
         const headers = new Headers(config.headers)
+        // Native 会话令牌只能由受控回调注入；业务 module 传入的 Authorization
+        // 无论大小写如何都先删除，避免绕过统一会话生命周期或跨账号复用旧令牌。
+        headers.delete('Authorization')
         const accessToken = await awaitFactoryWithAbort(
           () => options.getAccessToken?.(),
           controller.signal,
         )
-        if (accessToken && !headers.has('Authorization')) {
+        if (accessToken) {
           headers.set('Authorization', `Bearer ${accessToken}`)
         }
         if (config.idempotencyKey) {

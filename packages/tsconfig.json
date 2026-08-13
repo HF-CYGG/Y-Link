@@ -4,6 +4,10 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+    "baseUrl": ".",
+    "paths": {
+      "@y-link/shared-types": ["shared-types/src/index.ts"]
+    },
     "allowImportingTsExtensions": true,
     "noEmit": true,
     "strict": true,

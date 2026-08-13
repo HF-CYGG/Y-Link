@@ -744,6 +744,7 @@ const mergeOrderSummaryFromDetail = (detail: O2oPreorderDetail) => {
   const nextSummary: O2oPreorderSummary = {
     id: nextOrder.id,
     showNo: nextOrder.showNo,
+    customerOrderShowNo: nextOrder.customerOrderShowNo,
     verifyCode: nextOrder.verifyCode,
     status: nextOrder.status,
     businessStatus: nextOrder.businessStatus,

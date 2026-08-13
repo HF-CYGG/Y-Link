@@ -41,6 +41,7 @@ import {
   subscribeClientOrderRefresh,
 } from '@/utils/client-order-refresh'
 import { buildClientOrderSummaryFromDetail } from '@/utils/client-order-summary'
+import type { PersistedO2oPreorderSummary } from '@/utils/client-order-storage'
 import { formatDateTime } from '@/utils/date-time'
 import { normalizeRequestError } from '@/utils/error'
 import { captureOrderRefreshAnchor, restoreOrderRefreshAnchor } from '@/utils/order-refresh-visual'
@@ -66,7 +67,7 @@ interface OrderStatusChip {
 }
 
 interface OrderCardPresentation {
-  order: O2oPreorderSummary
+  order: PersistedO2oPreorderSummary
   report: ClientOrderStatusReportConfig
   metaFacts: OrderMetaFact[]
   statusChips: OrderStatusChip[]
@@ -170,7 +171,7 @@ const getClientOrderTypeLabel = (order: Pick<O2oPreorderSummary, 'clientOrderTyp
   return ORDER_TYPE_LABEL_MAP[order.clientOrderType]
 }
 
-const getOrderStatusReport = (order: O2oPreorderSummary) => {
+const getOrderStatusReport = (order: PersistedO2oPreorderSummary) => {
   return getClientOrderStatusReportConfig({
     statusReport: order.statusReport,
     status: order.status,
@@ -178,7 +179,7 @@ const getOrderStatusReport = (order: O2oPreorderSummary) => {
   })
 }
 
-const getOrderStatusClassName = (order: O2oPreorderSummary) => {
+const getOrderStatusClassName = (order: PersistedO2oPreorderSummary) => {
   const scenario = order.statusReport?.scenario ?? getClientOrderReportScenario(order.status, order.timeoutAt)
   if (scenario === 'timeout_soon') {
     return 'bg-orange-50 text-orange-700'
@@ -205,11 +206,11 @@ const normalizeSummaryDisplayShowNo = (order: O2oPreorderSummary): O2oPreorderSu
   }
 }
 
-const getBusinessStatusMeta = (order: O2oPreorderSummary) => {
+const getBusinessStatusMeta = (order: PersistedO2oPreorderSummary) => {
   return getO2oOrderBusinessStatusMeta(order.businessStatus)
 }
 
-const getLatestReturnRequestMeta = (order: O2oPreorderSummary) => {
+const getLatestReturnRequestMeta = (order: PersistedO2oPreorderSummary) => {
   if (!order.latestReturnRequest) {
     return null
   }
@@ -236,7 +237,7 @@ const formatOrderDateTime = (value?: string | null, fallback = '-') => {
 
 // 详细注释：静默刷新时只高亮真正新增或摘要发生变化的订单卡片，
 // 避免每次轮询都让整列卡片出现重复动画，分散用户注意力。
-const hasOrderCardChanged = (previous: O2oPreorderSummary | undefined, next: O2oPreorderSummary) => {
+const hasOrderCardChanged = (previous: PersistedO2oPreorderSummary | undefined, next: O2oPreorderSummary) => {
   if (!previous) {
     return true
   }
@@ -297,7 +298,7 @@ const markRefreshedOrders = (orderIds: string[]) => {
 }
 
 // 详细注释：订单摘要信息压缩成可换行的小标签，减少原先“每项一整行”带来的高度浪费。
-const buildOrderMetaFacts = (order: O2oPreorderSummary): OrderMetaFact[] => {
+const buildOrderMetaFacts = (order: PersistedO2oPreorderSummary): OrderMetaFact[] => {
   const facts: OrderMetaFact[] = [
     {
       key: 'createdAt',
@@ -330,7 +331,7 @@ const buildOrderMetaFacts = (order: O2oPreorderSummary): OrderMetaFact[] => {
 
 // 详细注释：主状态、业务状态、退货状态与释放时间统一抽象为横向 chip，移动端优先用横向空间承载状态信息。
 const buildOrderStatusChips = (
-  order: O2oPreorderSummary,
+  order: PersistedO2oPreorderSummary,
   report: ClientOrderStatusReportConfig,
   businessStatusMeta: ReturnType<typeof getO2oOrderBusinessStatusMeta>,
   latestReturnRequestMeta: LatestReturnRequestMeta | null,
@@ -372,7 +373,7 @@ const buildOrderStatusChips = (
 
 // 详细注释：辅助说明收口成一段紧凑摘要，把原来分散在多块卡片中的补充状态压缩为可阅读的一段文本。
 const buildOrderAssistSummary = (
-  order: O2oPreorderSummary,
+  order: PersistedO2oPreorderSummary,
   businessStatusMeta: ReturnType<typeof getO2oOrderBusinessStatusMeta>,
   latestReturnRequestMeta: LatestReturnRequestMeta | null,
 ) => {
@@ -679,7 +680,7 @@ const clearKeyword = () => {
 }
 
 // 详细注释：执行撤回订单，二次确认后请求撤回，并更新 Store 中的订单状态。
-const handleRecallOrder = async (order: O2oPreorderSummary) => {
+const handleRecallOrder = async (order: PersistedO2oPreorderSummary) => {
   if (order.status !== 'pending') {
     showAppWarning('当前订单状态不可撤回')
     return
