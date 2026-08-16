@@ -20,7 +20,9 @@ WORKDIR /app
 # 先安装依赖，充分利用层缓存。
 COPY package*.json ./
 COPY .npmrc ./
-RUN npm ci
+# 根 lockfile 同时服务 Web、Mobile 与共享包；前端镜像只安装根 Web 依赖，
+# 避免把 Expo/React Native workspace 依赖带入静态站点构建层。
+RUN npm ci --workspaces=false
 
 # 复制前端源码与构建配置后执行生产打包。
 COPY index.html ./

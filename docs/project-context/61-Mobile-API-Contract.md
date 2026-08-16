@@ -13,7 +13,7 @@
 3. entity 的状态枚举、可空性和持久化字段；
 4. 现有 Web API 类型与页面消费方式。
 
-正式跨端客户端类型入口是 `packages/shared-types/src/index.ts`。`packages/api-client/src/modules/*` 只描述 method、path、query、body 和 response type，不依赖 Vue、React、Pinia、Zustand 或 Router。
+正式跨端客户端类型 package 是 `@ylink/shared-types`，源码真源位于 `packages/shared-types/src/index.ts`。`@ylink/api-client` 的 `packages/api-client/src/modules/*` 只描述 method、path、query、body 和 response type，不依赖 Vue、React、Pinia、Zustand 或 Router。
 
 现有 Web 仍使用原来的 `src/api/http.ts`、Cookie 和 CSRF 行为。已迁移的 Web 文件只 import/re-export 共享类型，未切换请求 adapter、URL 或响应转换逻辑。
 
@@ -185,13 +185,13 @@ UI 可展示 `status`、`reason`、`rejectedReason`、`totalQty` 和 item `qty`�
 
 ## 10. Antigravity 使用边界
 
-Antigravity 可以把本文和 `packages/shared-types` 作为字段命名、可空性与展示口径参考，但当前 `apps/mobile` 仍是独立 package，不能用跨目录相对路径导入 `packages/*`。在正式包解析/构建策略与 Native 会话方案落地前：
+Antigravity 可以把本文和 `@ylink/shared-types` 作为字段命名、可空性与展示口径参考。Mobile 已通过根 npm workspace 正式解析 `@ylink/shared-types` 与 `@ylink/api-client`，但只能使用 package 名称，不能用跨目录相对路径导入 `packages/*`。在 Native 会话方案与真实接口接入任务获批前：
 
-- 可以基于已确认字段设计 Feature Mock 和展示组件；
+- 可以基于已确认字段设计 Feature Mock 和展示组件，并从 `@ylink/shared-types` 导入纯类型；
 - 不得由 UI 自行计算最终可下单数量、最终订单金额、最终退货数量或库存预占结果；
-- 不得直接从页面、Store 或 mock 发起真实 API；
+- 不得直接从页面、Store 或 mock 调用 `@ylink/api-client` 发起真实 API；
 - 不得把 `authMode: 'cookie'` 当作最终 Native 登录方案；
 - 不得实现服务端购物车、refresh/replay、附件上传或 SSE；
 - 不得发明 staff directory HTTP route 或新的正式 DTO 字段。
 
-下一步应先单独确定 Mobile 如何版本化消费 `shared-types` / `api-client`，再设计 Native Auth Contract；两者都完成前不开始真实 Mobile API 接入。
+共享 package 消费基础已经建立；下一步仍必须单独设计并审查 Native Auth Contract。该契约获批前不开始真实 Mobile API 接入，也不把当前 `api-client` 的可解析性解释为会话方案已经确定。

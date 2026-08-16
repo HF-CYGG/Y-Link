@@ -14,32 +14,33 @@ Y-Link 是一套面向文创、非遗、门店和活动场景的库存管理系�
 
 技术栈：Vue 3、TypeScript、Element Plus、Pinia、Express、TypeORM。默认使用 SQLite，支持迁移到 MySQL。
 
-## Mobile 第一阶段状态
+## Mobile 工程基础状态
 
-仓库新增了独立的 `apps/mobile` Expo 工程和 `packages/*` 跨端基础骨架。Mobile 固定使用 Node.js `22.13.1`；第一阶段只提供路由占位、基础 providers、SecureStore/SQLite 包装、未配置的平台能力接口与 CI，不改变现有 Vue Web、Express 后端、数据库或部署方式。
+仓库包含 `apps/mobile` Expo 工程和 `packages/*` 跨端基础。Mobile 固定使用 Node.js `22.13.1`；根 npm workspace 让 Mobile 通过正式 package dependency 消费共享 Contract，同时不改变现有 Vue Web、Express 后端、数据库或部署方式。
 
 当前 Mobile 尚未接入真实 API，也没有实现正式登录会话、服务端购物车、订单、库存、退货、相机、相册、通知或 Deep Link。未运行模拟器或真机验证时，只能依据 SQLite migration 专项测试、typecheck 与 Android JS bundle export 判断工程基础，不代表设备交互、签名 APK 或发布链路可用。
 
 主要目录：
 
-- `apps/mobile`：独立 Expo package，使用自己的 `package.json` 和 `package-lock.json`；
-- `packages/api-client`：传输无关 HTTP 契约与 Native/Web adapter；
-- `packages/shared-types`：空白规范入口，第一阶段不迁移现有 DTO；
-- `packages/domain`、`packages/validation`、`packages/design-tokens`：最小共享边界骨架。
+- `apps/mobile`：根 npm workspace 中的 Expo package，自身保留 manifest，依赖统一锁定在根 `package-lock.json`；
+- `packages/api-client`：`@ylink/api-client`，传输无关 HTTP 契约与 Native/Web adapter；
+- `packages/shared-types`：`@ylink/shared-types`，已核对的跨端客户端 Contract 真源；
+- `packages/domain`、`packages/validation`、`packages/design-tokens`：已纳入 workspace 的最小共享边界，尚未由 Mobile 消费。
 
 常用命令：
 
 ```bash
-npm --prefix apps/mobile ci
-npm --prefix apps/mobile run dependencies:check
-npm --prefix apps/mobile run test:db
-npm --prefix apps/mobile run typecheck
-npm --prefix apps/mobile run export:android
+npm ci
+npm run verify:mobile:workspace
+npm --workspace y-link-mobile run dependencies:check
+npm --workspace y-link-mobile run test:db
+npm --workspace y-link-mobile run typecheck
+npm --workspace y-link-mobile run export:android
 node ./node_modules/typescript/bin/tsc -p packages/tsconfig.json --noEmit
 node --experimental-strip-types --test packages/api-client/test/*.test.ts
 ```
 
-Mobile 未启用根 npm workspaces，当前也不能直接跨目录导入 `packages/*`。详细边界见 [`docs/project-context/60-移动端工程与共享基础.md`](./docs/project-context/60-移动端工程与共享基础.md)。
+开发者、GitHub Actions 与 Expo/EAS 构建入口统一使用根 workspace 与根 lockfile。Mobile 只能通过 `@ylink/*` package 名称消费共享包，禁止用相对路径跨目录导入 `packages/*`。详细边界见 [`docs/project-context/60-移动端工程与共享基础.md`](./docs/project-context/60-移动端工程与共享基础.md)。
 
 ## 快速入口
 
@@ -526,8 +527,8 @@ Y-Link
 │  ├─ src/services/             业务服务
 │  ├─ sql/                      初始化和迁移 SQL
 │  └─ scripts/                  后端验证脚本
-├─ apps/mobile/                 独立 Expo Mobile 工程与 lockfile
-├─ packages/                    尚未接入 Mobile 的跨端基础包骨架
+├─ apps/mobile/                 根 npm workspace 中的 Expo Mobile 工程
+├─ packages/                    @ylink 跨端共享 packages
 ├─ docker/
 │  ├─ nginx/                    Nginx 配置
 │  └─ onebox/                   onebox 入口脚本

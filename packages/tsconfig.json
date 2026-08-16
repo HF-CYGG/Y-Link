@@ -6,7 +6,7 @@
     "moduleResolution": "NodeNext",
     "baseUrl": ".",
     "paths": {
-      "@y-link/shared-types": ["shared-types/src/index.ts"]
+      "@ylink/shared-types": ["shared-types/src/index.ts"]
     },
     "allowImportingTsExtensions": true,
     "noEmit": true,

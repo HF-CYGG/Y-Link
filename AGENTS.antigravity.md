@@ -37,14 +37,16 @@ src/**
 packages/**
 .github/**
 apps/mobile/src/api/**
+apps/mobile/src/contracts/**
 apps/mobile/src/db/**
 apps/mobile/src/platform/**
 apps/mobile/src/stores/**
 apps/mobile/src/sync/**
 apps/mobile/package.json
-apps/mobile/package-lock.json
 apps/mobile/app.config.ts
 apps/mobile/eas.json
+package.json
+package-lock.json
 ```
 
 根配置、Docker/Compose、数据库文件、签名和凭据同样禁止修改。用户另行明确授权时，仍需服从根 `AGENTS.md` 的风险与验证规则。

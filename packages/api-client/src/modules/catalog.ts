@@ -1,7 +1,7 @@
 import type {
   O2oMallProductsResult,
   O2oMallStorefrontConfig,
-} from '@y-link/shared-types'
+} from '@ylink/shared-types'
 
 import type { ApiRequestOptions, HttpAdapter } from '../types.ts'
 

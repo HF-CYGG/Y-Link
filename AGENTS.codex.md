@@ -8,15 +8,15 @@
 
 ## 1. 当前工程与 Contract 实现
 
-- `apps/mobile` 是独立 npm package，拥有自己的 `package.json` 与 `package-lock.json`；
-- 根 `package.json` 未启用 npm workspaces，现有 Web 安装与构建链路保持不变；
-- Expo Router 当前只提供登录、商城、订单、反馈和个人中心等轻量占位路由；
+- `apps/mobile` 是根 npm workspace 中的独立 Expo package，自身保留 `package.json`，依赖统一锁定在根 `package-lock.json`；
+- 根 `package.json` 只纳入 `apps/mobile` 与 `packages/*` workspaces；Web Docker 显式使用 `--workspaces=false`，不安装 Mobile 依赖；
+- Expo Router 当前提供登录、商城、订单、反馈和个人中心的 Feature Mock，不调用真实 API；
 - `AppProviders` 组合 Safe Area 与 TanStack Query 基础，未装配真实会话或 API；
 - SecureStore 只有字符串存取包装，SQLite 只有打开与 `PRAGMA user_version` 迁移框架；
 - 相机、相册、通知和 Deep Link 只有平台能力接口与未配置错误；
 - `packages/shared-types` 已成为 Auth、Catalog、O2O Order/Return、Feedback 与 Common 客户端 Contract 真源；
 - `packages/api-client` 已提供 `client-auth`、`catalog`、`orders`、`feedback` modules 和显式 `cart` placeholder；Web adapter 是 bridge 薄包装，Native adapter 的 401 只返回规范化错误并保留 `TODO(mobile-auth)`；
-- Mobile 当前不得跨目录源码导入 `packages/*`，正式接入需要后续独立任务。
+- Mobile 已直接依赖 `@ylink/shared-types` 与 `@ylink/api-client`，只能通过 package 名称消费，不得用相对路径跨目录导入 `packages/*`。
 
 ## 2. 目录边界
 
@@ -51,6 +51,7 @@ packages/**                          共享基础
 - `domain` 仅允许无 UI、网络、存储副作用的纯函数；
 - `validation` 的模块文件当前是占位，正式 Zod schema 需有真实契约；
 - `design-tokens` 只提供原始 token，不承担组件或主题逻辑。
+- 三者已使用 `@ylink/*` 包名纳入根 workspace，但尚未由 Mobile 声明依赖或消费。
 
 ## 4. Mobile 基础规则
 
@@ -68,17 +69,17 @@ packages/**                          共享基础
 ## 6. 当前验证
 
 ```bash
-npm --prefix apps/mobile ci
-npm --prefix apps/mobile run dependencies:check
-npm --prefix apps/mobile run test:db
-npm --prefix apps/mobile run typecheck
-npm --prefix apps/mobile run export:android
 npm ci
+npm run verify:mobile:workspace
+npm --workspace y-link-mobile run dependencies:check
+npm --workspace y-link-mobile run test:db
+npm --workspace y-link-mobile run typecheck
+npm --workspace y-link-mobile run export:android
 node ./node_modules/typescript/bin/tsc -p packages/tsconfig.json --noEmit
 node --experimental-strip-types --test packages/api-client/test/*.test.ts
 ```
 
-Contract 字段与 Antigravity 使用边界见 `docs/project-context/61-Mobile-API-Contract.md`。Mobile 当前仍不得跨目录源码导入 `packages/*`。
+Contract 字段与 Antigravity 使用边界见 `docs/project-context/61-Mobile-API-Contract.md`。Mobile 的共享包消费入口是 `@ylink/*`，不是 `../../packages/*`；`apps/mobile/src/contracts/shared-packages.ts` 只证明包解析与标准错误边界，不创建网络 adapter 或真实请求。
 
 Mobile 没有笼统或虚假的通用 `test`，但已有 SQLite migration 专项 `test:db`，CI 必须运行该真实专项测试。Android export 不是模拟器、真机、签名 APK 或 EAS 发布证据。
 

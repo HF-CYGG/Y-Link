@@ -1,8 +1,8 @@
 # Y-Link Mobile 多端开发总方案
 
-版本：v1.2
+版本：v1.3
 日期：2026-08-13
-当前状态：Contract Foundation 已建立，Mobile 尚未接入共享包或真实 API
+当前状态：Shared Package Consumption Foundation 已建立，Mobile 尚未接入真实 API
 
 ## 0. 优先级与当前阶段硬边界
 
@@ -25,14 +25,15 @@ Y-Link 保留现有 Vue Web 管理端、Web 客户端和 Express/TypeORM 后端�
 
 | 范围 | 当前口径 |
 | --- | --- |
-| `apps/mobile` | 独立 Expo package 与 lockfile；路由和页面仅为占位，不接真实业务 API |
+| `apps/mobile` | 根 npm workspace 中的 Expo package；统一使用根 lockfile，不接真实业务 API |
 | Providers | `SafeAreaProvider` 与稳定的 TanStack Query `QueryClient` 基础 |
 | 本地能力 | SecureStore 字符串包装、SQLite 版本迁移框架，不创建业务表 |
 | 平台能力 | 相机、相册、通知、Deep Link 仅定义未配置接口和统一错误 |
 | `packages/shared-types` | Auth、Catalog、O2O Order/Return、Feedback 与 Common 客户端 Contract 真源 |
 | `packages/api-client` | 传输无关接口、业务 modules、Web bridge 与 Native fetch adapter；401 只归一化错误并保留 TODO |
 | 其他共享包 | `domain`、`validation`、`design-tokens` 的最小边界骨架 |
-| CI | Mobile 与共享基础两个独立 job；只做依赖、类型、测试和 Android JS bundle export |
+| 依赖模型 | Mobile 直接依赖 `@ylink/shared-types` 与 `@ylink/api-client`；开发者、CI、EAS 共用根 workspace/lockfile |
+| CI | Mobile 与共享基础两个独立 job；均从根 `npm ci` 安装，只做依赖、类型、测试和 Android JS bundle export |
 
 当前仍没有 Mobile 真实登录、商城、购物车、订单、反馈或同步闭环。页面能打开只代表导航与工程骨架成立，共享 Contract 存在也不代表 Mobile 已接入业务。
 
@@ -44,7 +45,7 @@ Y-Link 保留现有 Vue Web 管理端、Web 客户端和 Express/TypeORM 后端�
 - TanStack Query、Zustand；
 - `expo-secure-store`、`expo-sqlite`；
 - `react-native-safe-area-context`、`react-native-screens`；
-- Node.js `22.13.1` 与 npm 独立安装。
+- Node.js `22.13.1` 与根 npm workspace 统一安装。
 
 ### 3.2 后续候选能力
 
@@ -63,7 +64,7 @@ Y-Link 保留现有 Vue Web 管理端、Web 客户端和 Express/TypeORM 后端�
 Y-Link/
 ├─ src/                         现有 Vue Web，保持原位
 ├─ backend/                     现有 Express / TypeORM 后端
-├─ apps/mobile/                 独立 Expo package 与 package-lock.json
+├─ apps/mobile/                 根 npm workspace 中的 Expo package
 ├─ packages/
 │  ├─ api-client/               传输无关 HTTP 契约与 adapter
 │  ├─ shared-types/             已核对的稳定客户端契约类型入口
@@ -73,7 +74,7 @@ Y-Link/
 └─ .github/workflows/mobile-check.yml
 ```
 
-第一阶段不启用根 npm workspaces。`apps/mobile` 使用自己的 `package.json` 和 `package-lock.json`，不得跨目录源码导入 `packages/*`。根依赖只用于现有 Web 和共享包独立类型检查；任何正式共享包接入都必须另立任务并明确解析、发布或构建策略。
+根 `package.json` 只声明 `apps/mobile` 与 `packages/*` 两类 workspace，Web、Mobile 与共享包统一锁定在根 `package-lock.json`。开发者和 GitHub Actions 从仓库根执行 `npm ci`；EAS CLI 仍从 `apps/mobile` 启动，但按 Expo monorepo 规则使用同一根 workspace/lockfile。Mobile 只能通过 `@ylink/*` package 名称导入共享包，不得使用跨目录相对源码路径。前端 Docker build 使用 `npm ci --workspaces=false`，避免把 Expo/React Native 依赖带入 Web 镜像。
 
 ## 5. 架构边界
 
@@ -101,15 +102,19 @@ Y-Link/
 
 以当前运行代码为事实来源建立 `shared-types` 和 `api-client` modules，现有 Web 通过 import/re-export 渐进消费共享类型，API URL、Cookie/CSRF 和页面返回结构保持不变。字段地图与 UI 计算边界见 `docs/project-context/61-Mobile-API-Contract.md`。
 
-此阶段只让 Contract 在仓库内可用；`apps/mobile` 尚未解决独立 package 对共享包的版本化消费方式，也没有接入真实 API。
+此阶段只让 Contract 在仓库内可用；没有接入真实 API。
+
+### Shared Package Consumption Foundation（当前已建立）
+
+Mobile 通过根 npm workspace 正式依赖 `@ylink/shared-types` 与 `@ylink/api-client`，并由 `scripts/verify-mobile-workspace.mjs` 校验 manifest、lockfile、workspace 解析与 Mobile 最小 Contract 边界。`@ylink/domain`、`@ylink/validation` 与 `@ylink/design-tokens` 已使用相同包身份纳入 workspace，但尚未加入 Mobile 依赖，也没有触发 UI 或业务迁移。
 
 ### 第二阶段：Feature Mock
 
-在 Antigravity 允许目录内完善登录、商城、订单、反馈和个人中心的 mock UI。mock 必须在 feature 内闭环，不能跨目录导入尚未接入 Mobile 的共享包，也不能发明正式 API 字段。
+在 Antigravity 允许目录内完善登录、商城、订单、反馈和个人中心的 mock UI。mock 必须在 feature 内闭环；可通过 `@ylink/shared-types` 引用已确认的纯类型，但不能使用相对路径跨目录导入、调用真实 API 或发明正式字段。
 
 ### 第三阶段：真实接口接入
 
-需先单独完成并审查 Native 认证契约、服务端 API 兼容性、401 refresh 策略和共享类型接入方式。任何后端、数据库或安全边界变化都需要用户明确授权，并运行对应后端验证。
+需先单独完成并审查 Native 认证契约、服务端 API 兼容性与 401 refresh 策略。任何后端、数据库或安全边界变化都需要用户明确授权，并运行对应后端验证。
 
 ### 第四阶段：业务闭环
 
@@ -121,16 +126,17 @@ Y-Link/
 
 ## 7. CI 与验收
 
-第一阶段 Mobile CI 只验证本次独立工程与共享基础，不调用 Docker、数据库迁移、EAS，也不读取 secrets。
+Mobile CI 只验证工程、workspace 与共享基础，不调用 Docker、数据库迁移、EAS，也不读取 secrets。
 
 Mobile job：
 
 ```bash
-npm --prefix apps/mobile ci
-npm --prefix apps/mobile run dependencies:check
-npm --prefix apps/mobile run test:db
-npm --prefix apps/mobile run typecheck
-npm --prefix apps/mobile run export:android
+npm ci
+npm run verify:mobile:workspace
+npm --workspace y-link-mobile run dependencies:check
+npm --workspace y-link-mobile run test:db
+npm --workspace y-link-mobile run typecheck
+npm --workspace y-link-mobile run export:android
 ```
 
 Foundations job：
@@ -153,4 +159,4 @@ node --experimental-strip-types --test packages/api-client/test/*.test.ts
 
 ## 9. 当前完成定义
 
-Mobile Bootstrap 与 Contract Foundation 完成只表示：独立 Mobile 工程、基础 providers、本地/平台接口、已核对的共享客户端类型、传输无关 API modules 和限定 CI 已落库并通过相应静态验证。它不表示 Android 业务 App 已接入共享包/真实 API，也不表示后端移动会话、服务端购物车、原生能力、签名产物或发布链路已经完成。
+Mobile Bootstrap、Contract Foundation 与 Shared Package Consumption Foundation 完成只表示：Mobile 工程、基础 providers、本地/平台接口、已核对的共享客户端类型、传输无关 API modules、统一 workspace/lockfile 和限定 CI 已建立。它不表示 Android 业务 App 已接入真实 API，也不表示后端移动会话、服务端购物车、原生能力、签名产物或发布链路已经完成。
