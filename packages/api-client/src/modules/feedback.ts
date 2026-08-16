@@ -9,7 +9,7 @@ import type {
   ClientFeedbackSatisfactionResult,
   CreateClientFeedbackConversationInput,
   SubmitClientFeedbackSatisfactionInput,
-} from '@y-link/shared-types'
+} from '@ylink/shared-types'
 
 import type { ApiRequestOptions, HttpAdapter } from '../types.ts'
 

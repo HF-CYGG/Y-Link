@@ -7,7 +7,7 @@
 # 实现逻辑：
 # 1. 在手动触发、主分支推送或拉取请求时执行；
 # 2. 安装根目录与后端依赖前，显式把 npm registry 固定为官方源；
-# 3. 安装完成后分别执行根目录与后端 `npm audit`，确保 CI 使用官方审计口径；
+# 3. 安装完成后分别执行根 Web（显式排除 workspaces）与后端 `npm audit`，确保 CI 使用官方审计口径；
 # 4. 先做写事务闸门静态契约检查——纯静态、无任何运行时依赖，最快暴露绕过闸门的新代码；
 # 5. 再跑 MySQL 启动结构契约，确保漏执行 035/036 时会在对外服务前阻断；
 # 6. 接着跑 `transaction-coordinator:verify`，覆盖 QueryRunner 长事务租约、异常 release 与原始事务 SQL 门禁；
@@ -52,14 +52,14 @@ jobs:
             package-lock.json
             backend/package-lock.json
 
-      - name: 安装根目录依赖
-        run: npm ci
+      - name: 安装根 Web 依赖
+        run: npm ci --workspaces=false
 
       - name: 安装后端依赖
         run: npm --prefix ./backend ci
 
-      - name: 执行前端依赖安全审计
-        run: npm audit --audit-level=high
+      - name: 执行 Web 依赖安全审计
+        run: npm audit --package-lock-only --workspaces=false --audit-level=high
 
       - name: 执行后端依赖安全审计
         run: npm --prefix ./backend audit --audit-level=high

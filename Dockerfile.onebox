@@ -17,7 +17,8 @@ FROM --platform=$BUILDPLATFORM ${Y_LINK_NODE_IMAGE} AS frontend-build
 WORKDIR /app
 COPY package*.json ./
 COPY .npmrc ./
-RUN npm ci
+# 根 lockfile 同时服务 Web、Mobile 与共享包；Onebox 前端阶段只安装 Web 依赖。
+RUN npm ci --workspaces=false
 COPY index.html ./
 COPY public ./public
 COPY scripts ./scripts

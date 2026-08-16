@@ -15,7 +15,7 @@ import type {
   ClientUpdateProfileInput,
   ClientVerificationCodeSendInput,
   ClientVerificationCodeSendResult,
-} from '@y-link/shared-types'
+} from '@ylink/shared-types'
 
 import type { ApiRequestOptions, HttpAdapter } from '../types.ts'
 

@@ -1,11 +1,15 @@
 {
   "build": {
     "development": {
+      "node": "22.13.1",
       "distribution": "internal"
     },
     "preview": {
+      "node": "22.13.1",
       "distribution": "internal"
     },
-    "production": {}
+    "production": {
+      "node": "22.13.1"
+    }
   }
 }

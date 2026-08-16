@@ -7,7 +7,7 @@ import type {
   SubmitO2oPreorderPayload,
   SubmitO2oReturnRequestPayload,
   UpdateMyO2oPreorderPayload,
-} from '@y-link/shared-types'
+} from '@ylink/shared-types'
 
 import type { ApiRequestOptions, HttpAdapter } from '../types.ts'
 
