@@ -4,6 +4,7 @@ import test from 'node:test'
 import { createCatalogApi } from '../src/modules/catalog.ts'
 import { createClientAuthApi } from '../src/modules/client-auth.ts'
 import { createFeedbackApi } from '../src/modules/feedback.ts'
+import { createMobileAuthApi } from '../src/modules/mobile-auth.ts'
 import { createOrdersApi } from '../src/modules/orders.ts'
 import type { ApiRequestOptions, HttpAdapter, HttpRequestConfig } from '../src/types.ts'
 
@@ -37,6 +38,116 @@ test('client-auth module 固定真实认证路径并透传请求控制选项', a
     { method: 'GET', url: '/client-auth/captcha', signal },
     { method: 'POST', url: '/client-auth/login', data: login, timeoutMs: 3_000 },
     { method: 'POST', url: '/client-auth/login', data: login, timeoutMs: 1_000 },
+  ])
+})
+
+test('mobile-auth module 固定 v1 Bearer 会话路径且 refresh 显式禁用 access 注入', async () => {
+  const { adapter, requests } = createRecordingAdapter()
+  const api = createMobileAuthApi(adapter)
+  const device = {
+    deviceId: '0f2c0000-0000-4000-8000-000000000001',
+    deviceName: 'Pixel 8',
+    platform: 'android' as const,
+    appVersion: '1.0.0',
+  }
+  const login = { account: 'demo@example.com', password: 'not-a-real-secret', device }
+  const refresh = {
+    refreshToken: `ylmr_${'a'.repeat(64)}`,
+    device: { deviceId: device.deviceId, appVersion: '1.0.1' },
+  }
+
+  await api.getCaptcha()
+  await api.login(login)
+  await api.refresh(refresh, { timeoutMs: 5_000 })
+  await api.logout()
+  await api.logoutAll({ scope: 'others' })
+  await api.getMe()
+  await api.listSessions()
+  await api.revokeSession('session/1')
+
+  assert.deepEqual(requests, [
+    { method: 'GET', url: '/v1/mobile-auth/captcha', auth: 'none' },
+    { method: 'POST', url: '/v1/mobile-auth/login', data: login, auth: 'none' },
+    {
+      method: 'POST',
+      url: '/v1/mobile-auth/refresh',
+      data: refresh,
+      auth: 'none',
+      timeoutMs: 5_000,
+    },
+    { method: 'POST', url: '/v1/mobile-auth/logout' },
+    {
+      method: 'POST',
+      url: '/v1/mobile-auth/logout-all',
+      params: { scope: 'others' },
+    },
+    { method: 'GET', url: '/v1/mobile-auth/me' },
+    { method: 'GET', url: '/v1/mobile-auth/sessions' },
+    { method: 'DELETE', url: '/v1/mobile-auth/sessions/session%2F1' },
+  ])
+})
+
+test('mobile-auth module 覆盖所有公开、资料与密码端点，且仅公开端点禁用 access 注入', async () => {
+  const { adapter, requests } = createRecordingAdapter()
+  const api = createMobileAuthApi(adapter)
+  const device = {
+    deviceId: '0f2c0000-0000-4000-8000-000000000001',
+    deviceName: 'Pixel 8',
+    platform: 'android' as const,
+    appVersion: '1.0.0',
+  }
+  const register = { accountType: 'personal' as const, password: 'not-a-real-secret', device }
+  const profile = { username: '新昵称', currentPassword: 'not-a-real-secret' }
+  const changePassword = {
+    currentPassword: 'not-a-real-secret',
+    newPassword: 'another-not-a-real-secret',
+    device,
+  }
+  const forgotPassword = { account: 'demo@example.com', verificationCode: '123456' }
+  const resetPassword = {
+    account: 'demo@example.com',
+    resetToken: 'reset-token',
+    newPassword: 'another-not-a-real-secret',
+  }
+  const verificationCode = {
+    channel: 'email' as const,
+    target: 'demo@example.com',
+    scene: 'register' as const,
+    captchaId: 'captcha-id',
+    captchaCode: '1234',
+  }
+
+  await api.getCapabilities()
+  await api.sendVerificationCode(verificationCode)
+  await api.register(register)
+  await api.updateProfile(profile)
+  await api.changePassword(changePassword)
+  await api.verifyForgotPassword(forgotPassword)
+  await api.resetPassword(resetPassword)
+
+  assert.deepEqual(requests, [
+    { method: 'GET', url: '/v1/mobile-auth/capabilities', auth: 'none' },
+    {
+      method: 'POST',
+      url: '/v1/mobile-auth/verification-code',
+      data: verificationCode,
+      auth: 'none',
+    },
+    { method: 'POST', url: '/v1/mobile-auth/register', data: register, auth: 'none' },
+    { method: 'PATCH', url: '/v1/mobile-auth/profile', data: profile },
+    { method: 'POST', url: '/v1/mobile-auth/change-password', data: changePassword },
+    {
+      method: 'POST',
+      url: '/v1/mobile-auth/forgot-password/verify',
+      data: forgotPassword,
+      auth: 'none',
+    },
+    {
+      method: 'POST',
+      url: '/v1/mobile-auth/forgot-password/reset',
+      data: resetPassword,
+      auth: 'none',
+    },
   ])
 })
 

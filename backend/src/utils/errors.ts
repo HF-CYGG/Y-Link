@@ -6,10 +6,20 @@
 
 export class BizError extends Error {
   statusCode: number
+  code: number
+  data: unknown
+  retryAfterSeconds?: number
 
-  constructor(message: string, statusCode = 400) {
+  constructor(
+    message: string,
+    statusCode = 400,
+    options: { code?: number; data?: unknown; retryAfterSeconds?: number } = {},
+  ) {
     super(message)
     this.name = 'BizError'
     this.statusCode = statusCode
+    this.code = options.code ?? statusCode
+    this.data = options.data ?? null
+    this.retryAfterSeconds = options.retryAfterSeconds
   }
 }

@@ -13,7 +13,7 @@
 # 6. 接着跑 `transaction-coordinator:verify`，覆盖 QueryRunner 长事务租约、异常 release 与原始事务 SQL 门禁；
 # 7. 再跑 `task8:verify` 守住 SQLite 业务并发写事务（两者只依赖本地 SQLite，失败即止，
 #    不必先花时间拉起 Docker MySQL）；
-# 8. 最后复用统一命令 `npm run verify:db:concurrency` 覆盖 MySQL 侧；
+# 8. 运行 Mobile Auth SQLite 专项 Gate，再复用统一命令覆盖订单并发与 Mobile Auth MySQL G-1～G-7；
 # 9. MySQL 临时环境由脚本内部自动通过 Docker Compose 准备与清理，避免 CI 额外维护服务编排。
 #
 name: verify-db-concurrency
@@ -82,5 +82,8 @@ jobs:
       - name: 执行 SQLite 并发写事务回归
         run: npm --prefix ./backend run task8:verify
 
-      - name: 执行数据库并发验收
+      - name: 执行 Mobile Auth SQLite G-1～G-7 专项验收
+        run: npm --prefix ./backend run mobile-auth:contract:verify
+
+      - name: 执行订单并发与 Mobile Auth MySQL G-1～G-7 专项验收
         run: npm run verify:db:concurrency

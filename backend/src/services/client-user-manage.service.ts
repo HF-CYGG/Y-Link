@@ -17,6 +17,7 @@ import {
 } from '../entities/client-user.entity.js'
 import { ClientStaffDirectory } from '../entities/client-staff-directory.entity.js'
 import { ClientUserSession } from '../entities/client-user-session.entity.js'
+import { ClientMobileSession } from '../entities/client-mobile-session.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
 import { assertClientPasswordPolicy, hashPassword } from '../utils/password.js'
@@ -404,6 +405,7 @@ export class ClientUserManageService {
     return runInTransaction(async (manager) => {
       const userRepo = manager.getRepository(ClientUser)
       const sessionRepo = manager.getRepository(ClientUserSession)
+      const mobileSessionRepo = manager.getRepository(ClientMobileSession)
       const user = await userRepo.findOne({ where: { id } })
       if (!user) {
         throw new BizError('客户端用户不存在', 404)
@@ -419,6 +421,11 @@ export class ClientUserManageService {
 
       if (status !== 'enabled') {
         await sessionRepo.delete({ userId: savedUser.id })
+        await mobileSessionRepo.createQueryBuilder()
+          .update(ClientMobileSession)
+          .set({ revokedAt: new Date(), revokeReason: 'account_disabled' })
+          .where('client_user_id = :userId AND revoked_at IS NULL', { userId: savedUser.id })
+          .execute()
       }
 
       await auditService.record(
@@ -461,6 +468,7 @@ export class ClientUserManageService {
     return runInTransaction(async (manager) => {
       const userRepo = manager.getRepository(ClientUser)
       const sessionRepo = manager.getRepository(ClientUserSession)
+      const mobileSessionRepo = manager.getRepository(ClientMobileSession)
       const user = await userRepo.findOne({ where: { id } })
       if (!user) {
         throw new BizError('客户端用户不存在', 404)
@@ -496,9 +504,16 @@ export class ClientUserManageService {
       const savedUser = await userRepo.save(user)
 
       let revokedSessionCount = 0
+      let revokedMobileSessionCount = 0
       if (savedUser.status !== 'enabled') {
         const deletedSessions = await sessionRepo.delete({ userId: savedUser.id })
         revokedSessionCount = deletedSessions.affected ?? 0
+        const revokedMobileSessions = await mobileSessionRepo.createQueryBuilder()
+          .update(ClientMobileSession)
+          .set({ revokedAt: new Date(), revokeReason: 'account_disabled' })
+          .where('client_user_id = :userId AND revoked_at IS NULL', { userId: savedUser.id })
+          .execute()
+        revokedMobileSessionCount = revokedMobileSessions.affected ?? 0
       }
 
       await auditService.record(
@@ -514,6 +529,7 @@ export class ClientUserManageService {
             before,
             after: sanitizeClientUserProfile(savedUser),
             revokedSessionCount,
+            revokedMobileSessionCount,
           },
         },
         manager,
@@ -537,6 +553,7 @@ export class ClientUserManageService {
     return runInTransaction(async (manager) => {
       const userRepo = manager.getRepository(ClientUser)
       const sessionRepo = manager.getRepository(ClientUserSession)
+      const mobileSessionRepo = manager.getRepository(ClientMobileSession)
       const user = await userRepo
         .createQueryBuilder('user')
         .addSelect('user.passwordHash')
@@ -549,6 +566,11 @@ export class ClientUserManageService {
       user.passwordHash = await hashPassword(newPassword)
       const savedUser = await userRepo.save(user)
       const deletedSessions = await sessionRepo.delete({ userId: savedUser.id })
+      const revokedMobileSessions = await mobileSessionRepo.createQueryBuilder()
+        .update(ClientMobileSession)
+        .set({ revokedAt: new Date(), revokeReason: 'password_reset' })
+        .where('client_user_id = :userId AND revoked_at IS NULL', { userId: savedUser.id })
+        .execute()
 
       await auditService.record(
         {
@@ -562,6 +584,7 @@ export class ClientUserManageService {
           detail: {
             departmentName: savedUser.departmentName,
             revokedSessionCount: deletedSessions.affected ?? 0,
+            revokedMobileSessionCount: revokedMobileSessions.affected ?? 0,
           },
         },
         manager,

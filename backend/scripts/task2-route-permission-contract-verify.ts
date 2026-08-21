@@ -48,6 +48,7 @@ const EXPECTED_PUBLIC_ROUTE_PREFIXES = new Set([
   '/api/client-auth',
   '/api/client-feedback',
   '/api/o2o',
+  '/api/v1/mobile-auth',
 ])
 
 const log = (message: string) => {

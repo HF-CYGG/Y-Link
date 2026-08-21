@@ -12,7 +12,7 @@ export interface NotificationRuleRecord {
   id: string
   ruleCode: string
   ruleName: string
-  eventType: 'o2o_preorder_created' | 'customer_service_client_message_created'
+  eventType: 'o2o_preorder_created' | 'customer_service_client_message_created' | 'mobile_refresh_replay_detected'
   enabled: boolean
   recipientUserIds: string[]
   emailRecipientAdminUserIds: string[]

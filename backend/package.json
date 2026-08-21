@@ -38,6 +38,8 @@
     "task8:verify": "tsx scripts/task8-verify.ts",
     "feedback:customer-service:verify": "tsx scripts/feedback-customer-service-verify.ts",
     "client-auth:department-governance:verify": "tsx scripts/client-auth-department-governance-verify.ts",
+    "mobile-auth:token:verify": "node --import tsx scripts/mobile-auth-token-unit-verify.ts",
+    "mobile-auth:contract:verify": "tsx scripts/mobile-auth-contract-verify.ts",
     "client-staff-directory:verify": "tsx scripts/client-staff-directory-verify.ts",
     "product:sku-current:verify": "tsx scripts/product-sku-current-verify.ts",
     "inventory:invariants:verify": "tsx scripts/inventory-invariants-verify.ts",

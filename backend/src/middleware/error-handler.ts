@@ -9,9 +9,20 @@
 
 import type { NextFunction, Request, Response } from 'express'
 import multer from 'multer'
-import { mapDatabaseErrorToBizError } from '../utils/database-errors.js'
+import { isQueryFailedError, mapDatabaseErrorToBizError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
 import { DatabaseOverloadedError } from '../database/database-errors.js'
+
+const toSafeDatabaseLog = (error: unknown) => {
+  if (!isQueryFailedError(error)) return { name: 'DatabaseError' }
+  const driverError = (error.driverError ?? {}) as { code?: unknown; errno?: unknown; sqlState?: unknown }
+  return {
+    name: 'QueryFailedError',
+    code: typeof driverError.code === 'string' ? driverError.code.slice(0, 64) : null,
+    errno: typeof driverError.errno === 'number' ? driverError.errno : null,
+    sqlState: typeof driverError.sqlState === 'string' ? driverError.sqlState.slice(0, 16) : null,
+  }
+}
 
 /**
  * 全局 404 处理中间件：
@@ -41,15 +52,18 @@ export function errorHandler(err: unknown, _req: Request, res: Response, next: N
   }
 
   if (err instanceof BizError) {
+    if (err.retryAfterSeconds !== undefined) {
+      res.setHeader('Retry-After', String(err.retryAfterSeconds))
+    }
     if (err instanceof DatabaseOverloadedError || err.statusCode === 503) {
       // 明确告诉浏览器/反向代理这是瞬时过载，便于幂等请求按秒级退避重试，
       // 同时避免高峰期客户端立即重放形成重试风暴。
       res.setHeader('Retry-After', '1')
     }
     res.status(err.statusCode).json({
-      code: err.statusCode,
+      code: err.code,
       message: err.message,
-      data: null,
+      data: err.data,
     })
     return
   }
@@ -85,7 +99,8 @@ export function errorHandler(err: unknown, _req: Request, res: Response, next: N
 
   const mappedDatabaseError = mapDatabaseErrorToBizError(err)
   if (mappedDatabaseError) {
-    console.error('[y-link-backend] database error:', err)
+    // QueryFailedError 会携带 SQL 与 parameters；Mobile 会话参数包含完整 token hash，禁止原样记录。
+    console.error('[y-link-backend] database error:', toSafeDatabaseLog(err))
     res.status(mappedDatabaseError.statusCode).json({
       code: mappedDatabaseError.statusCode,
       message: mappedDatabaseError.message,

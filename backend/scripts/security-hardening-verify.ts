@@ -178,7 +178,8 @@ async function main() {
     const adminAuth = await authService.resolveAuthUserByToken(adminLogin.token)
 
     const riskStates = await AppDataSource.getRepository(AuthRiskState).find()
-    assert.ok(riskStates.length >= 2, 'Express 入口与细粒度登录风控均应写入共享状态')
+    // SQLite 单进程的 Express 外层限流按 app.ts 设计使用内存桶；这里只要求细粒度登录风控落共享摘要状态。
+    assert.ok(riskStates.length >= 1, '细粒度登录风控应写入共享状态')
     assert.equal(riskStates.every((state) => /^[a-f0-9]{64}$/.test(state.bucketDigest)), true)
     assert.equal(riskStates.some((state) => state.requestTimestampsJson?.includes('127.0.0.1')), false)
     assert.equal(riskStates.some((state) => state.requestTimestampsJson?.includes('admin')), false)

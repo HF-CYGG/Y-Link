@@ -7,9 +7,10 @@
  * - 认证类接口应统一先经过本服务的 guard，再进入具体业务服务。
  */
 
+import type { EntityManager } from 'typeorm'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { BizError } from '../utils/errors.js'
-import { auditService } from './audit.service.js'
+import { auditService, type CreateAuditLogInput } from './audit.service.js'
 import { persistentRiskStateService, type PersistentFailureState } from './persistent-risk-state.service.js'
 
 type FailureScope = 'admin-login' | 'client-login'
@@ -36,6 +37,7 @@ interface RateLimitRule {
   maxRequests: number
   windowMs: number
   blockMessage: string
+  errorCode?: number
 }
 
 interface ClientRiskActor {
@@ -165,6 +167,18 @@ const RATE_LIMIT_RULES = {
     windowMs: 10 * 60 * 1000,
     blockMessage: '当前网络下工号目录查询过于频繁，请稍后再试',
   },
+  mobileRefreshBySession: {
+    maxRequests: 60,
+    windowMs: 60 * 60 * 1000,
+    blockMessage: '令牌刷新过于频繁，请稍后重试',
+    errorCode: 42900,
+  },
+  mobileRefreshByIpFallback: {
+    maxRequests: 600,
+    windowMs: 60 * 60 * 1000,
+    blockMessage: '当前网络下刷新请求过于频繁，请稍后重试',
+    errorCode: 42900,
+  },
 } as const satisfies Record<string, RateLimitRule>
 
 const FAILURE_LOCK_THRESHOLD = {
@@ -193,8 +207,8 @@ export class AuthSecurityService {
     targetCode?: string | null
     requestMeta?: RequestMeta
     detail?: Record<string, unknown>
-  }) {
-    await auditService.safeRecord({
+  }, manager?: EntityManager) {
+    const record: CreateAuditLogInput = {
       actionType: input.actionType,
       actionLabel: input.actionLabel,
       targetType: 'security_guard',
@@ -202,7 +216,12 @@ export class AuthSecurityService {
       resultStatus: 'failed',
       requestMeta: input.requestMeta,
       detail: input.detail ?? null,
-    })
+    }
+    if (manager) {
+      await auditService.record(record, manager)
+      return
+    }
+    await auditService.safeRecord(record)
   }
 
   private async consumeRateLimit(
@@ -214,12 +233,22 @@ export class AuthSecurityService {
       targetCode?: string | null
       requestMeta?: RequestMeta
       detail?: Record<string, unknown>
+      auditOnLimit?: boolean
     },
+    manager?: EntityManager,
   ): Promise<RateLimitConsumeResult> {
     const nowMs = Date.now()
     // 传入 rule.maxRequests 后，已达上限的窗口不会再写入新时间戳，
     // 因此这里不需要再像早期实现那样在超限分支里额外调用 decrementWindow “补写”一次回退。
-    const consumed = await persistentRiskStateService.consumeWindow(bucketKey, rule.windowMs, nowMs, rule.maxRequests)
+    const consumed = manager
+      ? await persistentRiskStateService.consumePreparedWindow(
+          manager,
+          bucketKey,
+          rule.windowMs,
+          nowMs,
+          rule.maxRequests,
+        )
+      : await persistentRiskStateService.consumeWindow(bucketKey, rule.windowMs, nowMs, rule.maxRequests)
     if (consumed.totalHits > rule.maxRequests) {
       const waitMs = Math.max(1, (consumed.resetTime?.getTime() ?? nowMs + rule.windowMs) - nowMs)
       const riskDetail: Record<string, unknown> = {
@@ -229,11 +258,21 @@ export class AuthSecurityService {
       if (auditInput.detail) {
         Object.assign(riskDetail, auditInput.detail)
       }
-      await this.recordRiskEvent({
-        ...auditInput,
-        detail: riskDetail,
+      if (auditInput.auditOnLimit !== false) {
+        await this.recordRiskEvent({
+          actionType: auditInput.actionType,
+          actionLabel: auditInput.actionLabel,
+          targetCode: auditInput.targetCode,
+          requestMeta: auditInput.requestMeta,
+          detail: riskDetail,
+        }, manager)
+      }
+      const retryAfterSeconds = Math.max(1, Math.ceil(waitMs / 1000))
+      throw new BizError(`${rule.blockMessage}（约 ${retryAfterSeconds} 秒后重试）`, 429, {
+        code: rule.errorCode,
+        data: rule.errorCode ? { retryAfterSeconds } : null,
+        retryAfterSeconds,
       })
-      throw new BizError(`${rule.blockMessage}（约 ${Math.max(1, Math.ceil(waitMs / 1000))} 秒后重试）`, 429)
     }
     return {
       remainingRequests: Math.max(0, rule.maxRequests - consumed.totalHits),
@@ -648,6 +687,37 @@ export class AuthSecurityService {
       requestMeta,
       detail: { source, dimension: 'user' },
     })
+  }
+
+  /** Mobile refresh 先由服务层完成重放判定，再调用这里；无匹配会话时只进入 IP 兜底桶。 */
+  async prepareMobileRefreshRequest(sessionId: string) {
+    const rule = RATE_LIMIT_RULES.mobileRefreshBySession
+    await persistentRiskStateService.prepareWindow(
+      `mobile-refresh:session:${sessionId}`,
+      rule.windowMs,
+    )
+  }
+
+  async guardMobileRefreshRequest(
+    requestMeta: RequestMeta | undefined,
+    sessionId?: string,
+    manager?: EntityManager,
+  ) {
+    const source = normalizeRiskSource(requestMeta)
+    const rule = sessionId
+      ? RATE_LIMIT_RULES.mobileRefreshBySession
+      : RATE_LIMIT_RULES.mobileRefreshByIpFallback
+    const bucket = sessionId
+      ? `mobile-refresh:session:${sessionId}`
+      : `mobile-refresh:ip-fallback:${source}`
+    await this.consumeRateLimit(bucket, rule, {
+      actionType: 'mobile_auth.guard.refresh',
+      actionLabel: 'Mobile 刷新令牌频控',
+      targetCode: sessionId ?? null,
+      requestMeta,
+      detail: { dimension: sessionId ? 'session' : 'ip_fallback', source },
+      auditOnLimit: Boolean(sessionId),
+    }, manager)
   }
 }
 

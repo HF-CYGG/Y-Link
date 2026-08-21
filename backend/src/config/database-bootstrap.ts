@@ -28,6 +28,7 @@ const SQLITE_REQUIRED_TABLES = [
   'system_configs',
   'client_user',
   'client_user_session',
+  'client_mobile_session',
   'client_staff_directory',
   'o2o_preorder',
   'o2o_preorder_item',
@@ -46,6 +47,45 @@ const SQLITE_REQUIRED_TABLES = [
   'auth_risk_state',
   'business_sequence',
 ]
+
+/**
+ * Mobile Auth 表包含 refresh 血缘与安全索引，不能依赖 TypeORM synchronize 在存量 SQLite
+ * 上隐式猜测迁移。这里用固定、幂等 DDL 先补表和索引，再进入既有结构检查。
+ */
+async function ensureSqliteMobileSessionSchema(dataSource: DataSource): Promise<void> {
+  await dataSource.query(`
+    CREATE TABLE IF NOT EXISTS client_mobile_session (
+      id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+      client_user_id INTEGER NOT NULL,
+      device_id varchar(64) NOT NULL,
+      device_name varchar(64),
+      platform varchar(16) NOT NULL,
+      app_version varchar(32),
+      access_token_hash varchar(64) NOT NULL,
+      access_expires_at datetime NOT NULL,
+      refresh_token_hash varchar(64) NOT NULL,
+      refresh_expires_at datetime NOT NULL,
+      previous_refresh_token_hash varchar(64),
+      previous_refresh_grace_until datetime,
+      refresh_generation integer NOT NULL DEFAULT (0),
+      absolute_expires_at datetime NOT NULL,
+      last_ip varchar(64),
+      last_access_at datetime NOT NULL,
+      created_at datetime NOT NULL DEFAULT (datetime('now')),
+      revoked_at datetime,
+      revoke_reason varchar(64),
+      CONSTRAINT fk_client_mobile_session_user
+        FOREIGN KEY (client_user_id) REFERENCES client_user (id) ON DELETE CASCADE
+    )
+  `)
+  await dataSource.query('CREATE UNIQUE INDEX IF NOT EXISTS uk_client_mobile_session_access_hash ON client_mobile_session (access_token_hash)')
+  await dataSource.query('CREATE UNIQUE INDEX IF NOT EXISTS uk_client_mobile_session_refresh_hash ON client_mobile_session (refresh_token_hash)')
+  await dataSource.query('CREATE INDEX IF NOT EXISTS idx_client_mobile_session_previous_refresh_hash ON client_mobile_session (previous_refresh_token_hash)')
+  await dataSource.query('CREATE INDEX IF NOT EXISTS idx_client_mobile_session_user_active ON client_mobile_session (client_user_id, revoked_at, last_access_at)')
+  await dataSource.query('CREATE INDEX IF NOT EXISTS idx_client_mobile_session_user_device ON client_mobile_session (client_user_id, device_id)')
+  await dataSource.query('CREATE INDEX IF NOT EXISTS idx_client_mobile_session_cleanup ON client_mobile_session (revoked_at, absolute_expires_at, id)')
+  await dataSource.query('CREATE INDEX IF NOT EXISTS idx_client_mobile_session_refresh_expiry ON client_mobile_session (revoked_at, refresh_expires_at, id)')
+}
 
 async function migrateLegacyFeedbackAttachments(dataSource: DataSource) {
   if (env.DB_TYPE !== 'sqlite') return
@@ -998,6 +1038,7 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
 
 export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): Promise<DatabaseSchemaInitResult> {
   if (env.DB_TYPE === 'sqlite') {
+    await ensureSqliteMobileSessionSchema(dataSource)
     await normalizeSqliteOutboundItemColumns(dataSource)
     await normalizeSqliteO2oDiscountColumns(dataSource)
     await normalizeSqliteInboundSkuColumn(dataSource)
