@@ -22,6 +22,7 @@ import { SysAuditLog } from '../entities/sys-audit-log.entity.js'
 import { SystemConfig } from '../entities/system-config.entity.js'
 import { ClientUser } from '../entities/client-user.entity.js'
 import { ClientUserSession } from '../entities/client-user-session.entity.js'
+import { ClientMobileSession } from '../entities/client-mobile-session.entity.js'
 import { ClientStaffDirectory } from '../entities/client-staff-directory.entity.js'
 import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
 import { O2oPreorderItem } from '../entities/o2o-preorder-item.entity.js'
@@ -53,6 +54,7 @@ export const appEntities = [
   SystemConfig,
   ClientUser,
   ClientUserSession,
+  ClientMobileSession,
   ClientStaffDirectory,
   O2oPreorder,
   O2oPreorderItem,

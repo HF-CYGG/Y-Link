@@ -39,6 +39,7 @@ type TestFeedback = {
 const eventLabelMap: Record<NotificationRuleRecord['eventType'], string> = {
   o2o_preorder_created: '新预订单',
   customer_service_client_message_created: '新客服消息',
+  mobile_refresh_replay_detected: 'Mobile 会话安全告警',
 }
 
 const hasManagementUsers = computed(() => props.managementUsers.length > 0)

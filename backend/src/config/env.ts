@@ -96,6 +96,13 @@ const envSchema = z.object({
   // 见 mysql-migration-runner.ts）；默认关闭，避免无人值守地对生产数据库执行结构变更。
   DB_AUTO_MIGRATE: z.string().optional().transform(parseBoolean),
   AUTH_TOKEN_TTL_HOURS: z.coerce.number().int().positive().default(168),
+  MOBILE_ACCESS_TTL_MINUTES: z.coerce.number().int().min(1).max(1440).default(15),
+  MOBILE_REFRESH_TTL_DAYS: z.coerce.number().int().min(1).max(365).default(30),
+  MOBILE_SESSION_ABSOLUTE_TTL_DAYS: z.coerce.number().int().min(1).max(730).default(90),
+  MOBILE_REFRESH_GRACE_SECONDS: z.coerce.number().int().min(1).max(600).default(60),
+  MOBILE_MAX_ACTIVE_SESSIONS: z.coerce.number().int().min(1).max(100).default(10),
+  MOBILE_REFRESH_ROTATION_RATE_LIMIT: z.coerce.number().int().min(1).max(1000).default(10),
+  MOBILE_REFRESH_ROTATION_RATE_WINDOW_SECONDS: z.coerce.number().int().min(1).max(3600).default(60),
   INIT_ADMIN_USERNAME: z.string().trim().min(1).default('admin'),
   // 管理员初始化密码不再提供内置默认值，必须在需要时由私有配置显式提供。
   INIT_ADMIN_PASSWORD: z.string().min(6).optional().transform(normalizeOptionalString),

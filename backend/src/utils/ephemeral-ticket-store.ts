@@ -74,6 +74,17 @@ export class EphemeralTicketStore<TTicket> {
   }
 
   /**
+   * 原子取出并删除一次性票据：JavaScript 单线程内 `get + delete` 不会被另一调用交错，
+   * 适用于重置密码这类“最多消费一次”的安全凭证。
+   */
+  take(key: string, now = Date.now()) {
+    const ticket = this.get(key, now)
+    if (!ticket) return undefined
+    this.store.delete(key)
+    return ticket
+  }
+
+  /**
    * 删除票据：
    * - 用于验证码核验成功、重置密码完成等“单次消费即作废”的场景。
    */

@@ -31,11 +31,12 @@ import { safeHttpRequest } from '../utils/safe-http-request.js'
 export const NOTIFICATION_EVENT_TYPES = [
   'o2o_preorder_created',
   'customer_service_client_message_created',
+  'mobile_refresh_replay_detected',
 ] as const
 
 export type NotificationEventType = (typeof NOTIFICATION_EVENT_TYPES)[number]
 
-type NotificationRuleCode = 'preorder_created_rule' | 'customer_service_message_rule'
+type NotificationRuleCode = 'preorder_created_rule' | 'customer_service_message_rule' | 'mobile_refresh_replay_rule'
 
 const MANAGEMENT_ROLES: Array<SysUser['role']> = ['admin', 'operator', 'supplier']
 const ADMIN_MANAGEMENT_ROLES: Array<SysUser['role']> = ['admin', 'operator']
@@ -68,6 +69,11 @@ const DEFAULT_RULES: Array<{
     ruleCode: 'customer_service_message_rule',
     ruleName: '新客服消息通知规则',
     eventType: 'customer_service_client_message_created',
+  },
+  {
+    ruleCode: 'mobile_refresh_replay_rule',
+    ruleName: 'Mobile 刷新令牌重放安全告警',
+    eventType: 'mobile_refresh_replay_detected',
   },
 ]
 
@@ -150,6 +156,8 @@ interface NotificationEventPayload {
   sourceUserDisplayName?: string
   sourceUserId?: string
   summary?: string
+  generation?: number
+  trigger?: 'prev_expired' | 'burst'
 }
 
 interface EmitNotificationEventInput {
@@ -716,6 +724,13 @@ export class NotificationService {
       return {
         title: `新预订单 ${showNo}`,
         content: `系统收到新的线上预订单，业务单号：${showNo}。请尽快处理。`,
+      }
+    }
+
+    if (eventType === 'mobile_refresh_replay_detected') {
+      return {
+        title: 'Mobile 会话安全告警',
+        content: `系统检测到异常刷新令牌活动并已撤销相关会话（触发类型：${payload.trigger ?? 'unknown'}，代数：${payload.generation ?? '-'}）。`,
       }
     }
 

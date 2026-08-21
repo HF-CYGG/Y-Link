@@ -59,6 +59,7 @@ const MYSQL_REQUIRED_TABLES = [
   'notification_dispatch',
   'auth_risk_state',
   'business_sequence',
+  'client_mobile_session',
 ]
 
 // 每个必需表由哪个迁移脚本创建，用于在报错时给出精确指引，而不是笼统建议“从头跑一遍”。
@@ -78,6 +79,7 @@ const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
   notification_dispatch: '020_notification_center_and_user_email.sql',
   auth_risk_state: '033_inventory_security_invariants.sql',
   business_sequence: '035_o2o_idempotency_business_sequence.sql',
+  client_mobile_session: '037_mobile_auth_session.sql',
 }
 
 interface MysqlRequiredColumn {
@@ -97,6 +99,24 @@ interface MysqlRequiredIndex {
 // 只列会被当前业务代码直接读写、缺失后必然导致运行时失败的增量字段。
 // 表不存在时由 MYSQL_REQUIRED_TABLES 先给出建表脚本，避免同一张缺表重复打印多条缺列提示。
 const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
+  { tableName: 'client_mobile_session', columnName: 'client_user_id', introducingScript: '037_mobile_auth_session.sql' },
+  { tableName: 'client_mobile_session', columnName: 'device_id', introducingScript: '037_mobile_auth_session.sql' },
+  { tableName: 'client_mobile_session', columnName: 'device_name', introducingScript: '037_mobile_auth_session.sql' },
+  { tableName: 'client_mobile_session', columnName: 'platform', introducingScript: '037_mobile_auth_session.sql' },
+  { tableName: 'client_mobile_session', columnName: 'app_version', introducingScript: '037_mobile_auth_session.sql' },
+  { tableName: 'client_mobile_session', columnName: 'access_token_hash', introducingScript: '037_mobile_auth_session.sql' },
+  { tableName: 'client_mobile_session', columnName: 'access_expires_at', introducingScript: '037_mobile_auth_session.sql' },
+  { tableName: 'client_mobile_session', columnName: 'refresh_token_hash', introducingScript: '037_mobile_auth_session.sql' },
+  { tableName: 'client_mobile_session', columnName: 'refresh_expires_at', introducingScript: '037_mobile_auth_session.sql' },
+  { tableName: 'client_mobile_session', columnName: 'previous_refresh_token_hash', introducingScript: '037_mobile_auth_session.sql' },
+  { tableName: 'client_mobile_session', columnName: 'previous_refresh_grace_until', introducingScript: '037_mobile_auth_session.sql' },
+  { tableName: 'client_mobile_session', columnName: 'refresh_generation', introducingScript: '037_mobile_auth_session.sql' },
+  { tableName: 'client_mobile_session', columnName: 'absolute_expires_at', introducingScript: '037_mobile_auth_session.sql' },
+  { tableName: 'client_mobile_session', columnName: 'last_ip', introducingScript: '037_mobile_auth_session.sql' },
+  { tableName: 'client_mobile_session', columnName: 'last_access_at', introducingScript: '037_mobile_auth_session.sql' },
+  { tableName: 'client_mobile_session', columnName: 'created_at', introducingScript: '037_mobile_auth_session.sql' },
+  { tableName: 'client_mobile_session', columnName: 'revoked_at', introducingScript: '037_mobile_auth_session.sql' },
+  { tableName: 'client_mobile_session', columnName: 'revoke_reason', introducingScript: '037_mobile_auth_session.sql' },
   { tableName: 'o2o_preorder', columnName: 'client_request_id', introducingScript: '035_o2o_idempotency_business_sequence.sql' },
   { tableName: 'o2o_preorder', columnName: 'client_request_hash', introducingScript: '035_o2o_idempotency_business_sequence.sql' },
   { tableName: 'business_sequence', columnName: 'sequence_key', introducingScript: '035_o2o_idempotency_business_sequence.sql' },
@@ -114,6 +134,55 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
 
 // 不只按索引名判断，还校验列顺序与唯一性，避免旧库中存在同名但错误的索引时误判为可启动。
 const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
+  {
+    tableName: 'client_mobile_session',
+    indexName: 'uk_client_mobile_session_access_hash',
+    columns: ['access_token_hash'],
+    unique: true,
+    introducingScript: '037_mobile_auth_session.sql',
+  },
+  {
+    tableName: 'client_mobile_session',
+    indexName: 'uk_client_mobile_session_refresh_hash',
+    columns: ['refresh_token_hash'],
+    unique: true,
+    introducingScript: '037_mobile_auth_session.sql',
+  },
+  {
+    tableName: 'client_mobile_session',
+    indexName: 'idx_client_mobile_session_previous_refresh_hash',
+    columns: ['previous_refresh_token_hash'],
+    unique: false,
+    introducingScript: '037_mobile_auth_session.sql',
+  },
+  {
+    tableName: 'client_mobile_session',
+    indexName: 'idx_client_mobile_session_user_active',
+    columns: ['client_user_id', 'revoked_at', 'last_access_at'],
+    unique: false,
+    introducingScript: '037_mobile_auth_session.sql',
+  },
+  {
+    tableName: 'client_mobile_session',
+    indexName: 'idx_client_mobile_session_user_device',
+    columns: ['client_user_id', 'device_id'],
+    unique: false,
+    introducingScript: '037_mobile_auth_session.sql',
+  },
+  {
+    tableName: 'client_mobile_session',
+    indexName: 'idx_client_mobile_session_cleanup',
+    columns: ['revoked_at', 'absolute_expires_at', 'id'],
+    unique: false,
+    introducingScript: '037_mobile_auth_session.sql',
+  },
+  {
+    tableName: 'client_mobile_session',
+    indexName: 'idx_client_mobile_session_refresh_expiry',
+    columns: ['revoked_at', 'refresh_expires_at', 'id'],
+    unique: false,
+    introducingScript: '037_mobile_auth_session.sql',
+  },
   {
     tableName: 'o2o_preorder',
     indexName: 'uk_o2o_preorder_client_request',
@@ -163,6 +232,7 @@ const NON_IDEMPOTENT_HISTORICAL_SCRIPTS = [
 // 只在这里追加——不要把整个 sql/ 目录当成可自动回放的历史，见文件头说明。
 const AUTO_MIGRATABLE_FILES = [
   '033_inventory_security_invariants.sql',
+  '037_mobile_auth_session.sql',
 ]
 
 /**
@@ -311,6 +381,74 @@ export async function runMysqlSchemaMigrations(dataSource: DataSource): Promise<
   )
 }
 
+/**
+ * 自动迁移脚本只有在其负责的关键列/索引真实存在后才允许写 tracking。
+ * 这不会猜测性修复人工创建的部分表，而是避免 `CREATE TABLE IF NOT EXISTS`
+ * 对异常同名表无操作后仍被误记为“已应用”。
+ */
+async function assertAutoMigrationResult(queryRunner: QueryRunner, filename: string): Promise<void> {
+  const requiredColumns = MYSQL_REQUIRED_COLUMNS.filter((item) => item.introducingScript === filename)
+  const requiredIndexes = MYSQL_REQUIRED_INDEXES.filter((item) => item.introducingScript === filename)
+  if (requiredColumns.length === 0 && requiredIndexes.length === 0) return
+
+  const tableNames = [...new Set([
+    ...requiredColumns.map((item) => item.tableName),
+    ...requiredIndexes.map((item) => item.tableName),
+  ])]
+  const columnNames = [...new Set(requiredColumns.map((item) => item.columnName))]
+  const columnRows: MysqlColumnRow[] = requiredColumns.length > 0
+    ? await queryRunner.query(
+        `SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND TABLE_NAME IN (${tableNames.map(() => '?').join(', ')})
+           AND COLUMN_NAME IN (${columnNames.map(() => '?').join(', ')})`,
+        [...tableNames, ...columnNames],
+      )
+    : []
+  const existingColumns = new Set(columnRows.map((row) => schemaObjectKey(row.TABLE_NAME, row.COLUMN_NAME)))
+  const missingColumns = requiredColumns.filter((item) => (
+    !existingColumns.has(schemaObjectKey(item.tableName, item.columnName))
+  ))
+
+  const indexNames = [...new Set(requiredIndexes.map((item) => item.indexName))]
+  const indexRows: MysqlIndexRow[] = requiredIndexes.length > 0
+    ? await queryRunner.query(
+        `SELECT TABLE_NAME, INDEX_NAME, COLUMN_NAME, SEQ_IN_INDEX, NON_UNIQUE
+         FROM information_schema.STATISTICS
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND TABLE_NAME IN (${tableNames.map(() => '?').join(', ')})
+           AND INDEX_NAME IN (${indexNames.map(() => '?').join(', ')})
+         ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX`,
+        [...tableNames, ...indexNames],
+      )
+    : []
+  const actualIndexes = new Map<string, { columns: string[]; unique: boolean }>()
+  for (const row of indexRows) {
+    const key = schemaObjectKey(row.TABLE_NAME, row.INDEX_NAME)
+    const current = actualIndexes.get(key) ?? { columns: [], unique: Number(row.NON_UNIQUE) === 0 }
+    current.columns[Number(row.SEQ_IN_INDEX) - 1] = row.COLUMN_NAME
+    current.unique = current.unique && Number(row.NON_UNIQUE) === 0
+    actualIndexes.set(key, current)
+  }
+  const invalidIndexes = requiredIndexes.filter((requirement) => {
+    const actual = actualIndexes.get(schemaObjectKey(requirement.tableName, requirement.indexName))
+    return !actual
+      || actual.unique !== requirement.unique
+      || actual.columns.length !== requirement.columns.length
+      || requirement.columns.some((column, index) => actual.columns[index] !== column)
+  })
+  if (missingColumns.length === 0 && invalidIndexes.length === 0) return
+
+  const missingLabels = [
+    ...missingColumns.map((item) => `字段 ${item.tableName}.${item.columnName}`),
+    ...invalidIndexes.map((item) => `索引 ${item.tableName}.${item.indexName}`),
+  ]
+  throw new Error(
+    `[启动失败] 自动迁移 ${filename} 执行后结构仍不完整，未写入迁移记录：${missingLabels.join('、')}。`
+    + '请先人工核查并修复异常的部分表结构，再重启服务。',
+  )
+}
+
 /** 实际的迁移执行体；必须在 withMysqlAdvisoryLock 内调用，保证跨实例互斥。 */
 async function applyPendingMigrations(queryRunner: QueryRunner): Promise<{ appliedFiles: string[] }> {
   // 已应用记录必须在持锁之后再读：若在锁外读取，另一个实例可能在我们拿到锁之前刚写入记录，
@@ -338,6 +476,7 @@ async function applyPendingMigrations(queryRunner: QueryRunner): Promise<{ appli
       for (const statement of statements) {
         await queryRunner.query(statement)
       }
+      await assertAutoMigrationResult(queryRunner, filename)
     } catch (error) {
       throw new Error(
         `[启动失败] 自动执行 MySQL 迁移脚本 ${filename} 失败，服务已阻止启动，请人工核查该脚本执行状态后重启：${
@@ -501,7 +640,7 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
     + '缺失或不匹配的结构分别由以下迁移脚本维护：\n'
     + `${missingObjectGuide}\n\n`
     + `${scenarioGuide}\n\n`
-    + '若缺失的仅是 033 引入的 auth_risk_state，可以设置环境变量 DB_AUTO_MIGRATE=true 后重启服务，'
+    + '若缺失的是 033 引入的 auth_risk_state 或 037 引入的 client_mobile_session，可以设置环境变量 DB_AUTO_MIGRATE=true 后重启服务，'
     + '由服务自动执行白名单内已核实可在启动期运行的脚本。035/036 不会在启动期自动执行：'
     + '036 包含历史通知去重和唯一索引 DDL，必须按“备份 → 停止所有应用与通知 Worker → 执行脚本 → 启动新版本”完成。',
   )

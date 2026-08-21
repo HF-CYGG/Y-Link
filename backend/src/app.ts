@@ -21,6 +21,7 @@ import { errorHandler, notFoundHandler } from './middleware/error-handler.js'
 import { authRouter } from './routes/auth.routes.js'
 import { auditLogRouter } from './routes/audit-log.routes.js'
 import { clientAuthRouter } from './routes/client-auth.routes.js'
+import { mobileAuthRouter } from './routes/mobile-auth.routes.js'
 import { clientFeedbackRouter } from './routes/client-feedback.routes.js'
 import { clientUserManageRouter } from './routes/client-user-manage.routes.js'
 import { customerServiceRouter } from './routes/customer-service.routes.js'
@@ -66,7 +67,12 @@ export function createApp() {
   app.set('trust proxy', 'loopback, linklocal, uniquelocal')
   app.disable('x-powered-by')
 
-  const createPublicAuthLimiter = (prefix: string, limit: number, limitedPaths: ReadonlySet<string>) => {
+  const createPublicAuthLimiter = (
+    prefix: string,
+    limit: number,
+    limitedPaths: ReadonlySet<string>,
+    errorCode = 429,
+  ) => {
     // SQLite Onebox 只有一个写者。验证码/能力探测等匿名 GET 若每次都落库，
     // 会与订单事务争用唯一写槽；单进程模式使用 express-rate-limit 自带的有界内存桶即可。
     // MySQL 模式继续使用数据库共享桶，未来多实例接入 Redis 时只需替换这里的 Provider。
@@ -81,7 +87,7 @@ export function createApp() {
       skip: (req) => !limitedPaths.has(req.path),
       ...(sharedStore ? { store: sharedStore } : {}),
       handler: (_req, res) => {
-        res.status(429).json({ code: 429, message: '认证请求过于频繁，请稍后再试' })
+        res.status(429).json({ code: errorCode, message: '认证请求过于频繁，请稍后再试', data: null })
       },
     })
   }
@@ -95,13 +101,22 @@ export function createApp() {
     '/forgot-password/verify',
     '/forgot-password/reset',
   ]))
+  const mobileAuthLimiter = createPublicAuthLimiter('express-mobile-auth', 180, new Set([
+    '/captcha',
+    '/capabilities',
+    '/verification-code',
+    '/register',
+    '/login',
+    '/forgot-password/verify',
+    '/forgot-password/reset',
+  ]), 42900)
 
   app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff')
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin')
     res.setHeader('X-Frame-Options', 'DENY')
     res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
-    if (req.path.startsWith('/api/auth') || req.path.startsWith('/api/client-auth')) {
+    if (req.path.startsWith('/api/auth') || req.path.startsWith('/api/client-auth') || req.path.startsWith('/api/v1/mobile-auth')) {
       res.setHeader('Cache-Control', 'no-store')
     }
     next()
@@ -185,6 +200,7 @@ export function createApp() {
   const publicJsonParser = express.json({ limit: PUBLIC_JSON_BODY_LIMIT })
   app.use('/api/auth', adminAuthLimiter, publicJsonParser, authRouter)
   app.use('/api/client-auth', clientAuthLimiter, publicJsonParser, clientAuthRouter)
+  app.use('/api/v1/mobile-auth', mobileAuthLimiter, publicJsonParser, mobileAuthRouter)
   app.use('/api/client-feedback', publicJsonParser, clientFeedbackRouter)
   app.use('/api/o2o', publicJsonParser, o2oRouter)
 

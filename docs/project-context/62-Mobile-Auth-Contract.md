@@ -39,7 +39,7 @@
 ## Goals
 
 1. 为 Native 端提供**服务端可撤销的 opaque 双令牌**会话，不引入 JWT。
-2. 弱网与多线程并发 refresh **不得误踢用户**；真实的旧 token 重放**必须被检测并撤销整条会话血缘**。
+2. 弱网 response-loss 可通过单个 `PREV` 恢复；正常多线程并发由 Native process-level single-flight 抑制，服务端对同 token storm 必须严格按 CUR/PREV fail-closed。
 3. 支持多设备登录、设备枚举、单设备登出、其他设备登出、全部登出。
 4. 保持现有已验证的安全属性不退化：token 仅存 hash、停用账号即时失效、改密使会话失效、URL 不承载 token。
 5. **不破坏现有 Web Cookie 认证**。Web 与 Native 双通道必须无二义性。
@@ -62,7 +62,7 @@
 | T2 | Access token 泄露（日志、崩溃报告、代理抓包） | 长期有效的单一 token | Access TTL 15 分钟，泄露窗口有限 |
 | T3 | Refresh token 被盗（设备被取回、备份提取） | 无 refresh 概念 | 单次使用 + 轮换 + 重放检测 + 血缘撤销 |
 | T4 | 攻击者重放已轮换的旧 refresh token | — | 超出宽限期的旧 token 命中即撤销整条会话 |
-| T5 | 弱网并发 refresh 造成合法用户被误判为攻击者 | — | 60 秒宽限窗口 + 客户端 single-flight |
+| T5 | 弱网丢响应或客户端并发 refresh 造成凭据分叉 | — | 单个 PREV 仅用于 response-loss recovery；正常并发由客户端 single-flight 抑制；服务端 storm 严格 fail-closed |
 | T6 | 设备丢失后无法定向吊销 | 只能改密全局踢下线 | 按 deviceId 的会话枚举与定向撤销 |
 | T7 | 账号被停用后旧 token 仍可用至 TTL 自然结束 | 已防护（每请求校验 status） | 保持，并扩展到 refresh 路径 |
 | T8 | 客户端伪造 deviceId 冒充其他设备 | — | deviceId **不是凭据**，只做标签；认证完全依赖 token hash |
@@ -334,12 +334,12 @@ MySQL 不支持部分唯一索引，实现方式：普通复合索引 `idx_mobil
 Request：
 ```jsonc
 {
-  "accountType": "personal",          // personal | department
+  "accountType": "personal",          // Mobile 自助注册只允许 personal；department 账号由管理员创建
   "account": "13800138000",           // 手机号或邮箱
   "username": "张三",
   "password": "********",
-  "staffNo": "T12345",                // department 类型必填
-  "inviteCode": "******",             // department 类型必填
+  "staffNo": "T12345",                // 教职工 personal 注册时使用
+  "inviteCode": "******",             // 教职工 personal 注册时必填
   "departmentName": "信息中心",
   "captchaId": "...",                 // 按 capabilities 决定
   "captchaCode": "...",
@@ -432,7 +432,7 @@ Response `200` —— **`MobileAuthSessionDTO`**：
 ### `POST /api/v1/mobile-auth/refresh`
 
 **认证**：无 Authorization 头；凭据在 body
-**幂等**：**部分幂等** —— 宽限窗口内用同一 refresh token 重试不会失败，但每次返回**新的**令牌对（见 Refresh State Machine）
+**幂等**：**有限恢复** —— 首次 CUR rotation 丢失响应时，客户端可在宽限窗口内用唯一 PREV 再恢复一次；该能力不构成并发幂等或无限重试（见 Refresh State Machine）
 **限流**：新增 `authSecurityService.guardMobileRefreshRequest(requestMeta, sessionScopeKey)`
 
 Request：
@@ -570,13 +570,15 @@ Request / Response 结构**完全复用**现有 `clientAuthService.updateProfile
 | **RG-1** | **同一 session 的 refresh 必须串行执行。** 服务端对同一会话行的 refresh 判定与轮换不得并行进入。MySQL 用 `SELECT ... FOR UPDATE` 持有行锁；SQLite 由 TransactionCoordinator 单写队列天然串行。 | 服务端 | T-10、T-70 |
 | **RG-2** | **`refresh_generation` 单调递增。** 每次成功轮换必须 `+1`，不得回退、不得跳变、不得复用。该值是客户端判定凭据新旧的唯一依据。 | 服务端 | T-03、T-10 |
 | **RG-3** | **`CUR` 与 `PREV` 的转换必须事务原子。** `PREV←CUR`、`CUR←new`、`GRACE_UNTIL←now+grace`、`generation++` 四项写入必须在**同一事务的同一条 UPDATE** 中完成，不得拆成多条语句。中途崩溃只能是「全部生效」或「全部未生效」。 | 服务端 | T-71 |
-| **RG-4** | **`PREV` 仅在 grace window 内可被接受。** 窗口外命中 `PREV` 一律判为重放，撤销会话。窗口边界用服务端时间判定，不接受任何客户端传入的时间参数。 | 服务端 | T-11、T-12 |
-| **RG-5** | **grace 不是正常并发机制。** grace 是**异常路径的容错兜底**，正常运行时命中率应接近 0。实现不得把 grace 当作「支持并发 refresh」的设计依据，客户端不得依赖 grace 来简化并发控制。命中 grace 必须在审计中标记 `viaGrace: true` 以便观测真实命中率。 | 双端 | T-11 + 监控 |
+| **RG-4** | **`PREV` 仅在 grace window 内可被接受。** refresh authorization 以真正获得数据库锁时的 session state 为准；锁内只接受当前 CUR 或唯一合法 PREV。窗口外命中 `PREV` 一律判为重放，撤销会话。禁止 concurrent cohort、accepted-token set、多代历史、请求到达时 reservation 或其他额外 admission。 | 服务端 | T-10、T-11、T-12 |
+| **RG-5** | **grace 不是正常并发机制。** grace 的主要用途仅是 **response-loss recovery**，正常运行时命中率应接近 0。实现不得把 grace 当作「支持并发 refresh」的设计依据，客户端不得依赖 grace 来简化并发控制。命中 grace 必须在审计中标记 `viaGrace: true` 以便观测真实命中率。 | 双端 | T-11 + 监控 |
 | **RG-6** | **Native 必须实现 process-level single-flight refresh。** 全进程唯一的 refresh Promise，所有并发 401 共享同一次刷新。这是防止 grace 被高频触发的**第一道也是主要防线**（见 HTTP Adapter Policy A-1）。 | 客户端 | T-60 |
 | **RG-7** | **SecureStore 凭据更新必须串行。** 凭据写入需经一个串行化队列（互斥锁），禁止两次 refresh 的写入交错。配合单键原子写（SecureStore Contract），保证本地永远是一份自洽的完整凭据束。 | 客户端 | T-65、T-72 |
 | **RG-8** | **响应中必须携带 `generation`。** 每个签发令牌的响应（login / register / refresh / change-password）都必须返回当前 `refresh_generation`，供客户端做新旧判定。 | 双端 | T-03、T-73 |
 | **RG-9** | **客户端不得让较旧 generation 覆盖较新凭据。** 写入 SecureStore 前必须比较：若待写入的 `generation` **小于等于**本地已存 `generation`，则**丢弃该次写入**。这是 RG-7 之外针对乱序响应的第二道防护 —— 网络乱序可能让先发出的 refresh 后返回。 | 客户端 | T-73 |
 | **RG-10** | **异常高频 rotation 必须撤销 session 并写安全审计。** 观测窗口内 `refresh_generation` 增量超过 `MOBILE_REFRESH_ROTATION_RATE_LIMIT`，判定为异常，撤销会话（`revoke_reason='refresh_replay_detected'`，`trigger='burst'`），返回 `40113`，写 `refresh_replay_detected` 审计并触发告警。 | 服务端 | T-14 |
+
+**并发职责边界（v1.3 erratum）**：Native process-level single-flight 是正常并发抑制机制；服务端单个 PREV grace 是 response-loss recovery 机制。对于携带同一初始 refresh token 的 N 路并发，服务端不得因“同时到达”授予额外资格：至少一个请求成功，严格 CUR + 单 PREV 模型下成功数不得超过两个，其余请求按明确 Auth/replay 错误 fail-closed。极端 storm 导致 session 被重放规则撤销是允许的安全结果。
 
 **RG-6 / RG-9 的关系**：RG-6 消除同一进程内的并发；RG-9 兜住 RG-6 失效或响应乱序的残余情况。两者不可互相替代 —— 只有 RG-6 而无 RG-9，乱序响应会让旧凭据覆盖新凭据，导致下一次 refresh 命中 grace 甚至被判重放。
 
@@ -619,9 +621,9 @@ Request / Response 结构**完全复用**现有 `clientAuthService.updateProfile
 理想做法是"宽限期内返回**当初那次轮换签发的同一对令牌**"，但服务端**只存 hash、不存明文**（I-T4），物理上无法复现那对明文令牌。在"缓存明文换幂等"与"再轮换一次"之间：
 
 - **缓存明文**：违反 I-T4，且内存缓存不跨进程重启、不跨多实例，SQLite 单实例下勉强可行、MySQL 多实例下失效。**否决。**
-- **再轮换一次**：不违反任何不变式。代价是并发的两个线程各自拿到不同的、都有效的令牌对。
+- **再轮换一次**：不违反任何不变式。它只为首次 CUR rotation 的响应丢失提供一次恢复机会；不是并发 fan-out 的 admission 机制。
 
-选择后者。收敛性论证：线程 A 拿到 R2（此时 CUR=R2），线程 B 用 R1 命中宽限 → 轮换为 R3（PREV=R2，宽限重置）。A 手上的 R2 成为 PREV 且处于新宽限期内，仍可用。客户端的 SecureStore 单键原子写（见 SecureStore Contract）保证最终只保留一份最新凭据，下一次 refresh 用最新的即命中 MATCH_CUR，状态收敛。
+选择后者。恢复性论证：服务端完成 R1→R2 但客户端未收到响应时，客户端仍持 R1；R1 此时是唯一 PREV，重试可轮换为 R3 并重新取得有效凭据。任何请求都必须以获得数据库锁时的 CUR/PREV 状态重新授权，不得按 HTTP 到达时状态保留跨代资格。
 
 **安全阀 SV-1（即 RG-10）**：若 `MOBILE_REFRESH_ROTATION_RATE_WINDOW_SECONDS`（默认 60 秒）内 `refresh_generation` 增长超过 `MOBILE_REFRESH_ROTATION_RATE_LIMIT`（默认 10），判定为异常抖动 —— 要么是客户端 single-flight（RG-6）失效，要么是攻击者与用户在同时使用同一条血缘。此时**撤销会话**，`revoke_reason='refresh_replay_detected'`，`trigger='burst'`，返回 `40113`，写审计并告警。这为"再轮换"策略提供了兜底上界，防止无限乒乓。
 
@@ -631,7 +633,7 @@ Request / Response 结构**完全复用**现有 `clientAuthService.updateProfile
 
 **S1 正常 refresh** —— access 过期 → 单请求 refresh → MATCH_CUR → 轮换 → 200。
 
-**S2 两个 App 线程同时 refresh** —— 客户端 single-flight 应拦下第二个。若未拦下：先到者 MATCH_CUR 轮换；后到者 MATCH_PREV_IN_GRACE 轮换。两者都 200，SecureStore 后写者胜出，下轮收敛。**不误踢。**
+**S2 多个 App 线程同时 refresh** —— 客户端 single-flight 应把它们合并为一次请求。若客户端防线失效，服务端严格串行仲裁：一次 CUR、最多一次合法 PREV 可成功，后续旧 token 不得获得 cohort admission，按 Auth/replay 规则 fail-closed；storm 导致 session 撤销属于允许的安全结果。
 
 **S3 弱网重试（客户端未收到响应）** —— 服务端已轮换，客户端仍持 R1 重发 → MATCH_PREV_IN_GRACE → 200。**不误踢。**
 
@@ -1046,10 +1048,10 @@ mobileRefreshByIpFallback: {
 |---|---|---|
 | G-1 | **row lock / CAS** | MySQL 走 `SELECT ... FOR UPDATE` 真实行锁；SQLite 走 TransactionCoordinator 单写队列。**完全不同的两条代码路径**，行为不可互推 |
 | G-2 | **concurrent refresh** | 并发语义的核心。SQLite 的串行化会掩盖 MySQL 下的锁等待、死锁与超时 |
-| G-3 | **rotation** | CAS 的 `affected` 判定在两库的驱动返回值语义需分别确认 |
-| G-4 | **replay** | 依赖 `previous_refresh_token_hash` 索引查询与事务可见性，两库隔离级别不同 |
-| G-5 | **revoke** | 批量撤销在 MySQL 下涉及多行锁，SQLite 下无 |
-| G-6 | **password change** | 跨表事务（`client_mobile_session` + `client_user_session` + `client_user`），MySQL 下存在死锁风险 |
+| G-3 | **rotation** | CAS 的 `affected` 判定与 CUR/PREV/grace/generation 原子迁移在两库的驱动返回值语义需分别确认 |
+| G-4 | **previous-token grace** | 依赖 `previous_refresh_token_hash` 索引查询、grace 时间边界与事务可见性，两库隔离级别不同 |
+| G-5 | **replay detection** | grace 外重放必须原子撤销 token family、写审计并创建告警 Outbox |
+| G-6 | **revoke / password change** | 批量撤销与跨表事务（`client_mobile_session` + `client_user_session` + `client_user`）在 MySQL 下存在多行锁与死锁风险 |
 | G-7 | **disabled account** | JOIN 查询计划与索引命中在两库不同 |
 
 ### 硬性声明
@@ -1086,7 +1088,7 @@ Codex 必须交付以下测试矩阵，建议落在 `backend/scripts/mobile-auth
 
 | # | 用例 | 动作 | 断言 |
 |---|---|---|---|
-| T-10 | **并发 refresh（同 token）** | 同一 refresh token 并发 10 次 | **全部 200**（无一 401）；无会话被撤销；`generation` 增长 ≤ 10 |
+| T-10 | **同 token 并发 refresh 安全性** | 同一初始 refresh token 并发 10 次 | 服务端按锁内状态串行/原子仲裁；`1 <= success <= 2`；成功响应 generation 唯一、严格递增且不 fork/回退；其余请求以明确 Auth/replay 错误 fail-closed，不得出现 500、约束错误、死锁泄露或部分写入；不创建 concurrent cohort；若 replay 规则撤销 session，必须验证撤销状态与审计 |
 | T-11 | 宽限窗口内重试 | refresh 成功后，用旧 token 在 30 秒内再 refresh | 200；会话未撤销；审计 `viaGrace=true` |
 | T-12 | **宽限窗口后重放** | refresh 成功后，等待 > 60 秒，用旧 token refresh | 401 `40113`；会话 `revoked_at` 非空、`revoke_reason='refresh_replay_detected'`；审计已写 |
 | T-13 | token family 撤销 | T-12 之后 | 该会话的 access 与当前 refresh **全部失效**（401） |
@@ -1352,7 +1354,7 @@ A-4 中建议 `false`，理由是避免 `updateCount` 配额争议；但严格�
 过于明确（"检测到账号可能被盗用"）易引发恐慌与客服量；过于模糊（"登录已过期"）会让真实受害者错过处置时机。**默认："出于安全考虑，您的登录已被重置，请重新登录。"** 需产品定稿。
 
 **Q10 —— MySQL 验证环境的可用时间点（新增，实现前必须回答）。**
-Q8 已裁定「实现 PR 必须双通过」，但截至本文定稿，Docker + MySQL 8.4 环境在当前工作机上仍不可用（上一轮 Delta 实测 `verify:db:concurrency` 无法执行）。**这是 Mobile Auth 实现的排期前置条件** —— 需要总线明确环境何时就绪，否则实现完成后将卡在合入门禁。建议在 Codex 开工前解决。
+本地 MySQL 环境当前不可用，但仓库现有 `verify-db-concurrency` GitHub Actions 已确认能够实际运行 MySQL 8.4。实现 PR 必须在该 workflow 中执行独立的 Mobile Auth G-1～G-7 专项断言；订单并发测试不能替代 Auth 断言。**CI MySQL 环境是 Auth MySQL Gate 的权威执行环境**，只有该 Gate 实际成功后，Auth Implementation PR 才允许进入 Ready / Merge 状态。
 
 ### 与 Delta 遗留决策的关系
 
@@ -1372,3 +1374,5 @@ Q8 已裁定「实现 PR 必须双通过」，但截至本文定稿，Docker + M
 |---|---|---|---|
 | v1.0 | 2026-08-13 | `60eda61` | 初版设计定稿 |
 | v1.1 | 2026-08-13 | `f84762c` | 总线最终仲裁校准：新增 Decision Log；R-B3 改为「Authorization 存在即独占、失败禁止回退 Cookie」；新增 RG-1 ~ RG-10 十条 refresh 硬性不变量；轮换速率阈值改为可配置安全参数；新增 MySQL Gate 章节；T-W 系列扩充至 8 条；新增 T-67/68、T-70 ~ T-76；关闭 Q1/Q5/Q8，新增 Q10 |
+| v1.2 | 2026-08-16 | `e1b34db` | 实现准备校准：Q10 明确本地 MySQL 不可用，CI MySQL 8.4 是 Auth G-1～G-7 权威 Gate，订单并发测试不可替代认证断言 |
+| v1.3 | 2026-08-21 | `e1b34db` | 修正 T-10/G-2 矛盾：保留 strict CUR/PREV；同 token 并发不再要求全成功；PREV grace 限定为 response-loss recovery；明确拒绝 admission cohort |
