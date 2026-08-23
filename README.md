@@ -102,6 +102,32 @@ node --experimental-strip-types --test packages/api-client/test/*.test.ts
   </tr>
 </table>
 
+### Mobile 端课程表页面预览
+
+<table>
+  <tr>
+    <th width="50%">图 10：课程表（浅色）</th>
+    <th width="50%">图 11：课程表（深色）</th>
+  </tr>
+  <tr>
+    <td align="center"><img src="./docs/photo/readme-preview/mobile-schedule-light.webp" alt="Mobile 课程表浅色模式" width="235" /></td>
+    <td align="center"><img src="./docs/photo/readme-preview/mobile-schedule-dark.webp" alt="Mobile 课程表深色模式" width="235" /></td>
+  </tr>
+</table>
+
+<table>
+  <tr>
+    <th width="33.33%">图 12：导入课程</th>
+    <th width="33.33%">图 13：课程详情</th>
+    <th width="33.33%">图 14：添加课程</th>
+  </tr>
+  <tr>
+    <td align="center"><img src="./docs/photo/readme-preview/mobile-import-course.webp" alt="Mobile 导入课程页面" width="235" /></td>
+    <td align="center"><img src="./docs/photo/readme-preview/mobile-course-detail.webp" alt="Mobile 课程详情页面" width="235" /></td>
+    <td align="center"><img src="./docs/photo/readme-preview/mobile-add-course.webp" alt="Mobile 添加课程页面" width="235" /></td>
+  </tr>
+</table>
+
 ## 推荐部署：1Panel 单镜像
 
 新手优先使用 onebox 单镜像。它把前端、后端、Nginx 放在同一个容器里，1Panel 只需要创建一个容器。
