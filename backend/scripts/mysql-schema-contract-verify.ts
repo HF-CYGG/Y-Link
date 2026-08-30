@@ -1,6 +1,6 @@
 /**
  * 文件说明：MySQL 启动结构契约回归验证。
- * 实现逻辑：使用只读 DataSource 替身模拟完整库、漏执行 035、漏执行 036 及同名错误索引，
+ * 实现逻辑：使用只读 DataSource 替身模拟完整库、漏执行 035/036/038 及同名错误索引，
  * 确认服务会在对外启动前阻断，并给出精确的增量脚本指引。
  */
 
@@ -19,8 +19,10 @@ const REQUIRED_TABLES = [
   'sys_user',
   'sys_user_session',
   'client_user',
+  'client_feedback_conversation',
   'o2o_preorder',
   'o2o_preorder_item',
+  'biz_outbound_order',
   'biz_inbound_order',
   'biz_inbound_order_item',
   'notification_event',
@@ -45,7 +47,16 @@ const REQUIRED_COLUMNS = [
   ['notification_dispatch', 'dedupe_key'],
   ['notification_dispatch', 'last_attempt_at'],
   ['client_user', 'department_node_id'],
+  ['o2o_preorder', 'department_name_snapshot'],
+  ['client_feedback_conversation', 'department_name_snapshot'],
+  ['biz_outbound_order', 'customer_department_name'],
 ] as const
+
+const REQUIRED_COLUMN_LENGTHS = new Map<string, number>([
+  ['o2o_preorder.department_name_snapshot', 271],
+  ['client_feedback_conversation.department_name_snapshot', 271],
+  ['biz_outbound_order.customer_department_name', 271],
+])
 
 interface IndexFixture {
   tableName: string
@@ -96,6 +107,7 @@ const REQUIRED_INDEXES: readonly IndexFixture[] = [
 interface SchemaFixture {
   tables: Set<string>
   columns: Set<string>
+  columnLengths: Map<string, number | null>
   indexes: Map<string, IndexFixture>
 }
 
@@ -105,6 +117,10 @@ function createCompleteFixture(): SchemaFixture {
   return {
     tables: new Set(REQUIRED_TABLES),
     columns: new Set(REQUIRED_COLUMNS.map(([tableName, columnName]) => objectKey(tableName, columnName))),
+    columnLengths: new Map(REQUIRED_COLUMNS.map(([tableName, columnName]) => {
+      const key = objectKey(tableName, columnName)
+      return [key, REQUIRED_COLUMN_LENGTHS.get(key) ?? null]
+    })),
     indexes: new Map(REQUIRED_INDEXES.map((index) => [objectKey(index.tableName, index.indexName), {
       ...index,
       columns: [...index.columns],
@@ -125,6 +141,7 @@ function createDataSource(fixture: SchemaFixture): DataSource {
             return {
               TABLE_NAME: key.slice(0, separatorIndex),
               COLUMN_NAME: key.slice(separatorIndex + 1),
+              CHARACTER_MAXIMUM_LENGTH: fixture.columnLengths.get(key) ?? null,
             }
           })
           .filter((row) => fixture.tables.has(row.TABLE_NAME))
@@ -191,6 +208,16 @@ await expectSchemaFailure(missingOutboxColumn, [
   '036_notification_outbox.sql',
   '停止所有应用与通知 Worker',
 ])
+
+for (const [columnKey] of REQUIRED_COLUMN_LENGTHS) {
+  const shortDepartmentPathColumn = createCompleteFixture()
+  shortDepartmentPathColumn.columnLengths.set(columnKey, 128)
+  await expectSchemaFailure(shortDepartmentPathColumn, [
+    `字段 ${columnKey}`,
+    '字符容量不足',
+    '038_department_path_capacity.sql',
+  ])
+}
 
 const malformedOutboxIndex = createCompleteFixture()
 malformedOutboxIndex.indexes.set(

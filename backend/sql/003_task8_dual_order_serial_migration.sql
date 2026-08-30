@@ -39,7 +39,7 @@ PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 SET @ddl = IF(
   (SELECT COUNT(*) FROM information_schema.COLUMNS
    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_outbound_order' AND COLUMN_NAME = 'customer_department_name') = 0,
-  'ALTER TABLE `biz_outbound_order` ADD COLUMN `customer_department_name` VARCHAR(128) DEFAULT NULL COMMENT ''客户部门名称''',
+  'ALTER TABLE `biz_outbound_order` ADD COLUMN `customer_department_name` VARCHAR(271) DEFAULT NULL COMMENT ''客户部门完整路径''',
   'SELECT 1'
 );
 PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;

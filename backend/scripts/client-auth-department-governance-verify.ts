@@ -106,6 +106,7 @@ async function main() {
   const { authService } = await import('../src/services/auth.service.js')
   const { clientAuthService } = await import('../src/services/client-auth.service.js')
   const { clientStaffDirectoryService } = await import('../src/services/client-staff-directory.service.js')
+  const { clientFeedbackService } = await import('../src/services/client-feedback.service.js')
   const { clientUserManageService } = await import('../src/services/client-user-manage.service.js')
   const { o2oPreorderService } = await import('../src/services/o2o-preorder.service.js')
   const { productService } = await import('../src/services/product.service.js')
@@ -125,6 +126,17 @@ async function main() {
 
     const adminLogin = await authService.login({ username: 'admin', password: adminPassword })
     const adminAuth = await authService.resolveAuthUserByToken(adminLogin.token)
+    const longDepartmentLabels = [
+      '第一级部门路径容量验证节点甲乙丙丁戊',
+      '第二级部门路径容量验证节点甲乙丙丁戊',
+      '第三级部门路径容量验证节点甲乙丙丁戊',
+      '第四级部门路径容量验证节点甲乙丙丁戊',
+      '第五级部门路径容量验证节点甲乙丙丁戊',
+      '第六级部门路径容量验证节点甲乙丙丁戊',
+      '第七级部门路径容量验证节点甲乙丙丁戊',
+    ] as const
+    const longDepartmentPath = longDepartmentLabels.join('-')
+    assert.ok(longDepartmentPath.length > 128 && longDepartmentPath.length <= 271, '验证用部门路径应覆盖 128 到 271 字符容量')
 
     await systemConfigService.updateClientDepartmentConfigs(
       {
@@ -134,6 +146,31 @@ async function main() {
           { id: 'dept_logistics', label: '后勤处', children: [] },
           { id: 'dept_finance', label: '财务处', children: [] },
           { id: 'dept_hr', label: '人事处', children: [] },
+          {
+            id: 'dept_long_1',
+            label: longDepartmentLabels[0],
+            children: [{
+              id: 'dept_long_2',
+              label: longDepartmentLabels[1],
+              children: [{
+                id: 'dept_long_3',
+                label: longDepartmentLabels[2],
+                children: [{
+                  id: 'dept_long_4',
+                  label: longDepartmentLabels[3],
+                  children: [{
+                    id: 'dept_long_5',
+                    label: longDepartmentLabels[4],
+                    children: [{
+                      id: 'dept_long_6',
+                      label: longDepartmentLabels[5],
+                      children: [{ id: 'dept_long_7', label: longDepartmentLabels[6], children: [] }],
+                    }],
+                  }],
+                }],
+              }],
+            }],
+          },
         ],
       },
       adminAuth,
@@ -159,6 +196,27 @@ async function main() {
     const departmentConfigRepo = AppDataSource.getRepository(SystemConfig)
     const persistedDepartmentConfig = await departmentConfigRepo.findOneByOrFail({ configKey: 'client.department.options' })
     const persistedDepartmentConfigValue = persistedDepartmentConfig.configValue
+    await systemConfigService.updateClientDepartmentConfigs(
+      {
+        tree: [{ id: 'dept_flat_hyphen', label: '研发-平台', children: [] }],
+      },
+      adminAuth,
+    )
+    const flatModernTreeWithHyphen = await systemConfigService.getClientDepartmentConfigs()
+    assert.deepEqual(
+      flatModernTreeWithHyphen.tree,
+      [{ id: 'dept_flat_hyphen', label: '研发-平台', children: [] }],
+      '携带稳定 ID 的现代平级 tree 不得被当成旧扁平路径拆分',
+    )
+    await expectBizError(
+      () => systemConfigService.updateClientDepartmentConfigs(
+        { options: flatModernTreeWithHyphen.options },
+        adminAuth,
+      ),
+      '旧 options 保存仅含平级连字符标签的现代部门树',
+      '旧 options',
+    )
+    await departmentConfigRepo.update({ id: persistedDepartmentConfig.id }, { configValue: persistedDepartmentConfigValue })
     await departmentConfigRepo.update(
       { id: persistedDepartmentConfig.id },
       { configValue: JSON.stringify(['旧机构-旧部门']) },
@@ -293,6 +351,66 @@ async function main() {
       '批量开户应创建全部预检可创建项',
     )
     assert.equal(firstDepartmentBatch.skipped.length, 0)
+    const configBeforeLegacyOptionsSave = await systemConfigService.getClientDepartmentConfigs()
+    const legacyOptionsSaveResult = await systemConfigService.updateClientDepartmentConfigs(
+      { options: configBeforeLegacyOptionsSave.options },
+      adminAuth,
+    )
+    assert.equal(legacyOptionsSaveResult.changed, false, '旧 options 入口原样保存不应改变部门节点身份')
+    assert.deepEqual(
+      legacyOptionsSaveResult.config.tree,
+      configBeforeLegacyOptionsSave.tree,
+      '旧 options 入口必须按完整路径保留已有节点 ID',
+    )
+    await systemConfigService.updateClientDepartmentConfigs(
+      {
+        tree: [
+          ...configBeforeLegacyOptionsSave.tree,
+          { id: 'dept_hyphen_literal', label: '研发-平台', children: [] },
+          {
+            id: 'dept_hyphen_parent',
+            label: '研发',
+            children: [{ id: 'dept_hyphen_child', label: '平台', children: [] }],
+          },
+        ],
+      },
+      adminAuth,
+    )
+    const ambiguousDepartmentProfile = await clientUserManageService.createProfile(
+      {
+        profileKind: 'department',
+        username: '含连字符部门共享账号',
+        departmentNodeId: 'dept_hyphen_literal',
+        password: clientPassword,
+        status: 'disabled',
+      },
+      adminAuth,
+    ) as ClientManageProfile
+    const ambiguousDepartmentConfig = await systemConfigService.getClientDepartmentConfigs()
+    await expectBizError(
+      () => systemConfigService.updateClientDepartmentConfigs(
+        { options: ambiguousDepartmentConfig.options },
+        adminAuth,
+      ),
+      '旧 options 保存含连字符的歧义部门树',
+      '旧 options',
+    )
+    const configAfterAmbiguousOptionsBlocked = await systemConfigService.getClientDepartmentConfigs()
+    assert.deepEqual(
+      configAfterAmbiguousOptionsBlocked.tree,
+      ambiguousDepartmentConfig.tree,
+      '旧 options 无法无歧义表示部门树时必须在改写前阻断',
+    )
+    const ambiguousDepartmentAccountAfterBlocked = await AppDataSource.getRepository(ClientUser).findOneByOrFail({
+      id: ambiguousDepartmentProfile.id,
+    })
+    assert.equal(ambiguousDepartmentAccountAfterBlocked.departmentNodeId, 'dept_hyphen_literal')
+    assert.equal(ambiguousDepartmentAccountAfterBlocked.status, 'disabled')
+    await systemConfigService.updateClientDepartmentConfigs(
+      { tree: configBeforeLegacyOptionsSave.tree },
+      adminAuth,
+    )
+    await AppDataSource.getRepository(ClientUser).delete({ id: ambiguousDepartmentProfile.id })
     const departmentAccountHashBeforeSkip = await AppDataSource.getRepository(ClientUser)
       .createQueryBuilder('user')
       .addSelect('user.passwordHash')
@@ -690,6 +808,46 @@ async function main() {
     assert.equal(departmentPreorder.order.departmentNameSnapshot, '后勤处')
     assert.equal(departmentPreorder.order.staffNoSnapshot, departmentProfile.staffNo)
     pass('管理端创建的部门共享账号可按部门订单下单')
+
+    const longDepartmentProfile = await clientUserManageService.createProfile(
+      {
+        profileKind: 'department',
+        username: '长路径部门共享账号',
+        departmentNodeId: 'dept_long_7',
+        password: clientPassword,
+        status: 'enabled',
+      },
+      adminAuth,
+    ) as ClientManageProfile
+    assert.equal(longDepartmentProfile.departmentName, longDepartmentPath)
+    const longDepartmentLogin = await clientAuthService.login({
+      account: longDepartmentProfile.staffNo ?? '',
+      password: clientPassword,
+    })
+    const longDepartmentAuth = await clientAuthService.resolveClientByToken(longDepartmentLogin.token)
+    const longDepartmentPreorder = await o2oPreorderService.submit(longDepartmentAuth, {
+      clientRequestId: 'department-govern-long-path-0001',
+      isSystemApplied: false,
+      pickupContact: '长路径部门共享账号领取',
+      items: [{ productId: product.id, qty: 1 }],
+    })
+    assert.equal(longDepartmentPreorder.order.departmentNameSnapshot, longDepartmentPath)
+    const longDepartmentFeedback = await clientFeedbackService.createConversation(
+      {
+        subject: '长路径部门快照容量验证',
+        content: '验证客服会话完整保留部门路径。',
+      },
+      longDepartmentAuth,
+    )
+    assert.equal(longDepartmentFeedback.conversation.departmentNameSnapshot, longDepartmentPath)
+    await o2oPreorderService.verifyByCode(longDepartmentPreorder.order.verifyCode, adminAuth)
+    const { BizOutboundOrder } = await import('../src/entities/biz-outbound-order.entity.js')
+    const longDepartmentOutboundOrder = await AppDataSource.getRepository(BizOutboundOrder).findOneByOrFail({
+      idempotencyKey: `o2o-preorder-verify:${longDepartmentPreorder.order.id}`,
+    })
+    assert.equal(longDepartmentOutboundOrder.customerDepartmentName, longDepartmentPath)
+    await clientUserManageService.updateStatus(longDepartmentProfile.id, 'disabled', adminAuth)
+    pass('超过 128 字符的部门完整路径可贯穿账号、预订单、客服快照与正式出库单')
 
     const disabledFinanceDepartmentProfile = await clientUserManageService.createProfile(
       {

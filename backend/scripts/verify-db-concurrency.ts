@@ -218,10 +218,22 @@ async function verifyOrderSerialConcurrency() {
 
     await AppDataSource.query('ALTER TABLE client_user DROP INDEX uk_client_user_department_node_id')
     await AppDataSource.query('ALTER TABLE client_user DROP COLUMN department_node_id')
+    await AppDataSource.query('ALTER TABLE o2o_preorder DROP COLUMN department_name_snapshot')
+    await AppDataSource.query('ALTER TABLE o2o_preorder DROP COLUMN client_order_type')
+    await AppDataSource.query(
+      "ALTER TABLE client_feedback_conversation MODIFY COLUMN department_name_snapshot VARCHAR(128) NOT NULL DEFAULT ''",
+    )
+    await AppDataSource.query(
+      'ALTER TABLE biz_outbound_order MODIFY COLUMN customer_department_name VARCHAR(128) NULL',
+    )
     const migrationResult = await runMysqlSchemaMigrations(AppDataSource)
     assert.ok(
       migrationResult.appliedFiles.includes('037_department_account_node_binding.sql'),
       '真实 MySQL 临时库应执行 037 补回部门节点字段与唯一索引',
+    )
+    assert.ok(
+      migrationResult.appliedFiles.includes('038_department_path_capacity.sql'),
+      '真实 MySQL 临时库应执行 038 扩展部门路径快照容量',
     )
     await assertMysqlRequiredSchemaExists(AppDataSource)
     const restoredDepartmentNodeIndexes = await AppDataSource.query(
@@ -242,7 +254,36 @@ async function verifyOrderSerialConcurrency() {
         NON_UNIQUE: 0,
       }],
     )
-    pass('真实 MySQL 临时库已执行 037 并恢复部门节点唯一约束')
+    const departmentPathCapacityRows = await AppDataSource.query(
+      `SELECT TABLE_NAME, COLUMN_NAME, CHARACTER_MAXIMUM_LENGTH
+       FROM information_schema.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND (
+           (TABLE_NAME = 'o2o_preorder' AND COLUMN_NAME = 'department_name_snapshot')
+           OR (TABLE_NAME = 'client_feedback_conversation' AND COLUMN_NAME = 'department_name_snapshot')
+           OR (TABLE_NAME = 'biz_outbound_order' AND COLUMN_NAME = 'customer_department_name')
+         )`,
+    ) as Array<{ TABLE_NAME: string; COLUMN_NAME: string; CHARACTER_MAXIMUM_LENGTH: number | string }>
+    assert.equal(departmentPathCapacityRows.length, 3)
+    assert.equal(
+      departmentPathCapacityRows.every((column) => Number(column.CHARACTER_MAXIMUM_LENGTH) >= 271),
+      true,
+      '038 必须把部门路径的三个下游快照列统一扩展至至少 271 字符',
+    )
+    await AppDataSource.query(
+      "ALTER TABLE o2o_preorder ADD COLUMN client_order_type VARCHAR(16) NOT NULL DEFAULT 'walkin'",
+    )
+    await AppDataSource.query(
+      "DELETE FROM schema_migrations WHERE filename = '038_department_path_capacity.sql'",
+    )
+    const replayedPathCapacityMigration = await runMysqlSchemaMigrations(AppDataSource)
+    assert.deepEqual(
+      replayedPathCapacityMigration.appliedFiles,
+      ['038_department_path_capacity.sql'],
+      '038 安全重放时应仅重新记录该幂等迁移',
+    )
+    await assertMysqlRequiredSchemaExists(AppDataSource)
+    pass('真实 MySQL 临时库已执行 037/038，恢复部门节点唯一约束与路径快照容量')
 
     const concurrencyActor = {
       userId: '1',

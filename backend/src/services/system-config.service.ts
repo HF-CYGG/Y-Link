@@ -883,7 +883,11 @@ class SystemConfigService {
       .filter((segment) => segment.length > 0)
   }
 
-  private buildTreeFromOptions(options: string[], useLegacyStableIds = false): ClientDepartmentTreeNode[] {
+  private buildTreeFromOptions(
+    options: string[],
+    useLegacyStableIds = false,
+    existingNodeIdsByPath = new Map<string, string>(),
+  ): ClientDepartmentTreeNode[] {
     const rootNodes: ClientDepartmentTreeNode[] = []
     const findOrCreateNode = (nodes: ClientDepartmentTreeNode[], label: string, seed: string) => {
       const existingNode = nodes.find((node) => node.label === label)
@@ -891,7 +895,8 @@ class SystemConfigService {
         return existingNode
       }
       const node: ClientDepartmentTreeNode = {
-        id: useLegacyStableIds ? this.createLegacyDepartmentNodeId(seed) : this.createDepartmentNodeId(seed),
+        id: existingNodeIdsByPath.get(seed)
+          ?? (useLegacyStableIds ? this.createLegacyDepartmentNodeId(seed) : this.createDepartmentNodeId(seed)),
         label,
         children: [],
       }
@@ -957,6 +962,28 @@ class SystemConfigService {
     }
     walk(tree)
     return paths
+  }
+
+  /**
+   * 旧 options 用连字符分隔层级，无法区分“标签本身含 -”与“父子路径”。
+   * 这类树若继续走 options 会静默改变拓扑或丢失节点 ID，因此必须要求调用方改用 tree。
+   */
+  private assertLegacyOptionsCanRepresentTree(tree: ClientDepartmentTreeNode[]) {
+    const seenPaths = new Set<string>()
+    const walk = (nodes: ClientDepartmentTreeNode[], parentPath = '') => {
+      for (const node of nodes) {
+        if (node.label.includes('-')) {
+          throw new BizError('当前部门树包含连字符标签，旧 options 无法无歧义保存，请改用 tree 参数', 400)
+        }
+        const currentPath = parentPath ? `${parentPath}-${node.label}` : node.label
+        if (seenPaths.has(currentPath)) {
+          throw new BizError('当前部门树存在重复完整路径，旧 options 无法唯一保留节点 ID，请改用 tree 参数', 400)
+        }
+        seenPaths.add(currentPath)
+        walk(node.children, currentPath)
+      }
+    }
+    walk(tree)
   }
 
   private buildClientDepartmentOptionsFromTree(tree: ClientDepartmentTreeNode[]): string[] {
@@ -1072,7 +1099,12 @@ class SystemConfigService {
         const node = item as Partial<ClientDepartmentTreeNode> & { name?: string; title?: string }
         return String(node.label ?? node.name ?? node.title ?? '').trim()
       })
+      const rawTreeHasStableNodeId = rawTree.some((item) => {
+        const node = item as Partial<ClientDepartmentTreeNode>
+        return typeof node.id === 'string' && node.id.trim().length > 0
+      })
       const isLegacyFlatTree = rawTree.length > 0
+        && !rawTreeHasStableNodeId
         && rawTreeLabels.some((label) => label.includes('-'))
         && rawTree.every((item) => {
           const node = item as Partial<ClientDepartmentTreeNode>
@@ -2116,10 +2148,9 @@ class SystemConfigService {
     requestMeta?: RequestMeta,
   ): Promise<{ config: ClientDepartmentConfigRecord; changed: boolean }> {
     await this.assertAdminActor(actor, requestMeta, 'system_config.update_client_departments', '更新客户端部门配置')
-    const normalizedTree = Array.isArray(input.tree)
+    const submittedTree = Array.isArray(input.tree)
       ? this.normalizeClientDepartmentTree(input.tree)
-      : this.buildTreeFromOptions(input.options ?? [])
-    const normalizedOptions = this.buildClientDepartmentOptionsFromTree(normalizedTree)
+      : null
     await this.ensureDefaultConfigs()
     return runInTransaction(async (manager) => {
       const useForUpdate = manager.connection.options.type === 'mysql'
@@ -2144,6 +2175,17 @@ class SystemConfigService {
       }
 
       const beforePaths = this.buildClientDepartmentPathMap(before.tree)
+      if (submittedTree === null) {
+        this.assertLegacyOptionsCanRepresentTree(before.tree)
+      }
+      const existingNodeIdsByPath = new Map(
+        [...beforePaths.entries()].map(([departmentNodeId, departmentPath]) => [departmentPath, departmentNodeId]),
+      )
+      // options 是旧入口，不携带节点 ID。必须在锁定当前配置后按完整路径复用旧 ID，
+      // 否则无改动保存也会把已绑定账号的节点误判为删除。新路径仍生成新 ID。
+      const normalizedTree = submittedTree
+        ?? this.buildTreeFromOptions(input.options ?? [], false, existingNodeIdsByPath)
+      const normalizedOptions = this.buildClientDepartmentOptionsFromTree(normalizedTree)
       const afterPaths = this.buildClientDepartmentPathMap(normalizedTree)
       const affectedDepartmentNodeIds = [...new Set([...beforePaths.keys(), ...afterPaths.keys()])].filter((departmentNodeId) => {
         const beforePath = beforePaths.get(departmentNodeId)

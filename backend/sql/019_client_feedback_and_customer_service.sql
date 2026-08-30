@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS `client_feedback_conversation` (
   `client_user_id` bigint unsigned NOT NULL COMMENT '客户端用户 ID',
   `client_username` varchar(128) NOT NULL COMMENT '客户端用户名快照',
   `client_account` varchar(128) NOT NULL COMMENT '客户端账号快照',
-  `department_name_snapshot` varchar(128) NOT NULL DEFAULT '' COMMENT '客户端部门快照',
+  `department_name_snapshot` varchar(271) NOT NULL DEFAULT '' COMMENT '客户端部门完整路径快照',
   `category` varchar(32) NOT NULL DEFAULT 'general' COMMENT '反馈分类',
   `issue_type` varchar(16) NOT NULL DEFAULT 'suggestion' COMMENT 'Issue 类型',
   `source_code` varchar(32) NOT NULL DEFAULT 'client_portal' COMMENT '反馈来源编码',
