@@ -6,7 +6,7 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
-import type { DataSource } from 'typeorm'
+import type { DataSource, EntityManager } from 'typeorm'
 import { env } from './env.js'
 import { ClientStaffDirectory } from '../entities/client-staff-directory.entity.js'
 import { ClientUser } from '../entities/client-user.entity.js'
@@ -14,6 +14,7 @@ import { ClientFeedbackAttachment } from '../entities/client-feedback-attachment
 import { ClientFeedbackConversation } from '../entities/client-feedback-conversation.entity.js'
 import { ClientFeedbackMessage, type ClientFeedbackMessageAttachment } from '../entities/client-feedback-message.entity.js'
 import { assertMysqlRequiredSchemaExists, runMysqlSchemaMigrations } from './mysql-migration-runner.js'
+import { BizError } from '../utils/errors.js'
 
 const SQLITE_REQUIRED_TABLES = [
   'base_product',
@@ -145,6 +146,7 @@ const SQLITE_REQUIRED_CLIENT_USER_COLUMNS = [
   'email',
   'real_name',
   'department_name',
+  'department_node_id',
   'account_type',
   'staff_no',
   'staff_verified',
@@ -241,6 +243,29 @@ async function listSqliteTableColumns(dataSource: DataSource, tableName: string)
 async function listSqliteUniqueIndexes(dataSource: DataSource, tableName: string): Promise<Set<string>> {
   const indexes: Array<{ name: string; unique: number }> = await dataSource.query(`PRAGMA index_list('${tableName}')`)
   return new Set(indexes.filter((index) => Number(index.unique) === 1).map((index) => index.name))
+}
+
+/**
+ * SQLite 不能只按索引名判断结构已就绪：同名索引可能在历史手工维护时被建到了错误列上。
+ * 这里同时校验 unique 标记和 `PRAGMA index_info` 返回的有序列定义。
+ */
+async function hasSqliteUniqueIndexShape(
+  dataSource: DataSource,
+  tableName: string,
+  indexName: string,
+  expectedColumns: string[],
+): Promise<boolean> {
+  const indexes: Array<{ name: string; unique: number }> = await dataSource.query(`PRAGMA index_list('${tableName}')`)
+  const target = indexes.find((index) => index.name === indexName)
+  if (!target || Number(target.unique) !== 1) {
+    return false
+  }
+  const columns: Array<{ seqno: number; name: string }> = await dataSource.query(`PRAGMA index_info('${indexName}')`)
+  const actualColumns = columns
+    .sort((left, right) => Number(left.seqno) - Number(right.seqno))
+    .map((column) => column.name)
+  return actualColumns.length === expectedColumns.length
+    && actualColumns.every((column, index) => column === expectedColumns[index])
 }
 
 async function listSqliteIndexes(dataSource: DataSource, tableName: string): Promise<Set<string>> {
@@ -826,29 +851,64 @@ export interface DatabaseSchemaInitResult {
 export async function migrateLegacyDepartmentAccountsToTeacherProfiles(
   dataSource: DataSource,
 ): Promise<{ migratedCount: number }> {
-  const userRepo = dataSource.getRepository(ClientUser)
-  const directoryRepo = dataSource.getRepository(ClientStaffDirectory)
-  const legacyUsers = await userRepo
+  const { runInTransaction } = await import('./transaction-runner.js')
+  return runInTransaction(async (manager) => {
+    const migrations = await collectLegacyDepartmentTeacherMigrations(manager)
+    if (migrations.length === 0) {
+      return { migratedCount: 0 }
+    }
+    const userRepo = manager.getRepository(ClientUser)
+    for (const migration of migrations) {
+      const user = await userRepo.findOneByOrFail({ id: migration.userId })
+      user.accountType = 'personal'
+      user.realName = migration.realName
+      user.departmentName = migration.departmentName
+      user.departmentNodeId = null
+      user.staffVerified = true
+      await userRepo.save(user)
+    }
+    return { migratedCount: migrations.length }
+  })
+}
+
+interface LegacyDepartmentTeacherMigration {
+  userId: string
+  realName: string
+  departmentName: string
+}
+
+async function collectLegacyDepartmentTeacherMigrations(
+  manager: EntityManager,
+): Promise<LegacyDepartmentTeacherMigration[]> {
+  const usePessimisticLock = manager.connection.options.type === 'mysql'
+  const legacyUsersQuery = manager.getRepository(ClientUser)
     .createQueryBuilder('user')
     .where('user.accountType = :accountType', { accountType: 'department' })
+    .andWhere('user.departmentNodeId IS NULL')
     .andWhere("user.staffNo IS NOT NULL AND user.staffNo <> ''")
-    .getMany()
+  if (usePessimisticLock) {
+    legacyUsersQuery.setLock('pessimistic_write')
+  }
+  const legacyUsers = await legacyUsersQuery.getMany()
   if (legacyUsers.length === 0) {
-    return { migratedCount: 0 }
+    return []
   }
 
   const staffNos = [...new Set(legacyUsers.map((user) => user.staffNo?.trim()).filter((item): item is string => Boolean(item)))]
   if (staffNos.length === 0) {
-    return { migratedCount: 0 }
+    return []
   }
 
-  const activeStaffList = await directoryRepo
+  const activeStaffQuery = manager.getRepository(ClientStaffDirectory)
     .createQueryBuilder('directory')
     .where('directory.status = :status', { status: 'active' })
     .andWhere('directory.staffNo IN (:...staffNos)', { staffNos })
-    .getMany()
+  if (usePessimisticLock) {
+    activeStaffQuery.setLock('pessimistic_write')
+  }
+  const activeStaffList = await activeStaffQuery.getMany()
   const activeStaffMap = new Map(activeStaffList.map((item) => [item.staffNo, item]))
-  const usersToMigrate: ClientUser[] = []
+  const migrations: LegacyDepartmentTeacherMigration[] = []
 
   for (const user of legacyUsers) {
     const staffNo = user.staffNo?.trim() ?? ''
@@ -856,19 +916,123 @@ export async function migrateLegacyDepartmentAccountsToTeacherProfiles(
     if (!matchedStaff) {
       continue
     }
-    user.accountType = 'personal'
-    user.realName = matchedStaff.realName
-    user.departmentName = matchedStaff.departmentName
-    user.staffVerified = true
-    usersToMigrate.push(user)
+    migrations.push({
+      userId: user.id,
+      realName: matchedStaff.realName,
+      departmentName: matchedStaff.departmentName,
+    })
   }
+  return migrations
+}
 
-  if (usersToMigrate.length === 0) {
-    return { migratedCount: 0 }
-  }
+/**
+ * 将存量部门共享账号绑定到部门树的稳定节点：
+ * - 先完整预检，任一空部门、无法定位、重复映射或重复节点ID都不写入；
+ * - 个人/教师账号始终清空节点绑定，避免历史部门账号转教师后占用部门唯一键；
+ * - 不修改账号状态、密码或历史订单快照。
+ */
+export async function migrateDepartmentAccountNodeBindings(
+  dataSource: DataSource,
+): Promise<{ migratedCount: number }> {
+  return migrateClientUserDepartmentGovernance(dataSource)
+}
 
-  await userRepo.save(usersToMigrate, { chunk: 100 })
-  return { migratedCount: usersToMigrate.length }
+/**
+ * 统一完成旧部门账号转教师、非部门节点清理与剩余部门账号节点回填。
+ * 预检阶段不写库；只有所有迁移目标均可解析且没有重复绑定时，才通过一次事务提交全部变化。
+ */
+export async function migrateClientUserDepartmentGovernance(
+  dataSource: DataSource,
+): Promise<{ migratedCount: number }> {
+  // 不能在模块顶层静态引入 systemConfigService：其依赖 AppDataSource，而本文件会在数据源装配期被读取。
+  // 仅在数据源已初始化且确实需要回填时加载，避免启动依赖环；不得在事务外读取配置或账号计划。
+  const { systemConfigService } = await import('../services/system-config.service.js')
+  // 与业务写入一致走统一事务闸门，避免 SQLite 单连接下绕过串行协调器。
+  // 动态加载是为了避免 bootstrap -> transaction-runner -> data-source 的模块初始化环。
+  const { runInTransaction } = await import('./transaction-runner.js')
+  return runInTransaction(async (manager) => {
+    const usePessimisticLock = manager.connection.options.type === 'mysql'
+    // 所有输入读取、迁移计划和校验都必须在同一事务快照中完成；校验失败时回调抛错，零写入提交。
+    const config = await systemConfigService.getClientDepartmentConfigs(manager, { lockForUpdate: true })
+    const nodeIdSet = new Set<string>()
+    const collectNodeIds = (nodes: typeof config.tree) => {
+      for (const node of nodes) {
+        if (!node.id?.trim() || node.id.length > 128) {
+          throw new BizError('部门共享账号节点回填已阻止：部门树存在无效节点ID，请先修复部门配置', 409)
+        }
+        if (nodeIdSet.has(node.id)) {
+          throw new BizError('部门共享账号节点回填已阻止：部门树存在重复节点ID，请先修复部门配置', 409)
+        }
+        nodeIdSet.add(node.id)
+        collectNodeIds(node.children)
+      }
+    }
+    collectNodeIds(config.tree)
+
+    const teacherMigrations = await collectLegacyDepartmentTeacherMigrations(manager)
+    const teacherMigrationUserIds = new Set(teacherMigrations.map((item) => item.userId))
+    const departmentUsersQuery = manager.getRepository(ClientUser)
+      .createQueryBuilder('user')
+      .where('user.accountType = :accountType', { accountType: 'department' })
+    if (usePessimisticLock) {
+      departmentUsersQuery.setLock('pessimistic_write')
+    }
+    const departmentUsers = await departmentUsersQuery.getMany()
+    // 已有稳定节点绑定的账号属于新部门共享账号，启动迁移不能因其 staffNo
+    // 恰好命中目录而转教师或按显示路径重新映射。
+    const remainingDepartmentUsers = departmentUsers.filter(
+      (user) => !teacherMigrationUserIds.has(user.id) && !user.departmentNodeId,
+    )
+    const mappings: Array<{ user: ClientUser; departmentNodeId: string }> = []
+    let emptyDepartmentCount = 0
+    let unresolvedDepartmentCount = 0
+    for (const user of remainingDepartmentUsers) {
+      if (!user.departmentName?.trim()) {
+        emptyDepartmentCount += 1
+        continue
+      }
+      try {
+        const resolved = await systemConfigService.resolveClientDepartmentReference(
+          { departmentName: user.departmentName },
+          manager,
+          config,
+        )
+        mappings.push({ user, departmentNodeId: resolved.departmentNodeId })
+      } catch {
+        unresolvedDepartmentCount += 1
+      }
+    }
+    const duplicateNodeCount = mappings.length - new Set(mappings.map((item) => item.departmentNodeId)).size
+    if (emptyDepartmentCount > 0 || unresolvedDepartmentCount > 0 || duplicateNodeCount > 0) {
+      throw new BizError(
+        `部门共享账号节点回填已阻止：空部门 ${emptyDepartmentCount} 条、无法映射 ${unresolvedDepartmentCount} 条、节点重复 ${duplicateNodeCount} 条；未改写任何账号数据`,
+        409,
+      )
+    }
+
+    const userRepo = manager.getRepository(ClientUser)
+    await userRepo
+      .createQueryBuilder()
+      .update(ClientUser)
+      .set({ departmentNodeId: null })
+      .where('account_type <> :accountType AND department_node_id IS NOT NULL', { accountType: 'department' })
+      .execute()
+    for (const migration of teacherMigrations) {
+      const user = await userRepo.findOneByOrFail({ id: migration.userId })
+      user.accountType = 'personal'
+      user.realName = migration.realName
+      user.departmentName = migration.departmentName
+      user.departmentNodeId = null
+      user.staffVerified = true
+      await userRepo.save(user)
+    }
+    for (const mapping of mappings) {
+      const user = await userRepo.findOneByOrFail({ id: mapping.user.id })
+      user.departmentNodeId = mapping.departmentNodeId
+      await userRepo.save(user)
+    }
+    return { migratedCount: teacherMigrations.length + mappings.length }
+  })
 }
 
 async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<boolean> {
@@ -911,7 +1075,15 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
     return true
   }
   const clientUserUniqueIndexSet = await listSqliteUniqueIndexes(dataSource, 'client_user')
-  if (!clientUserUniqueIndexSet.has('uk_client_user_staff_no')) {
+  if (
+    !clientUserUniqueIndexSet.has('uk_client_user_staff_no')
+    || !await hasSqliteUniqueIndexShape(
+      dataSource,
+      'client_user',
+      'uk_client_user_department_node_id',
+      ['department_node_id'],
+    )
+  ) {
     return true
   }
 
@@ -1014,7 +1186,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
       // 索引可能依赖本次 synchronize 才补齐的列，必须在结构升级后创建。
       await ensureSqliteMallCatalogIndexes(dataSource)
     }
-    await migrateLegacyDepartmentAccountsToTeacherProfiles(dataSource)
+    await migrateClientUserDepartmentGovernance(dataSource)
     await migrateLegacyFeedbackAttachments(dataSource)
     return {
       action: 'synchronized',
@@ -1033,7 +1205,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
       console.log(`[y-link-backend] MySQL 迁移脚本已自动执行：${migrationResult.appliedFiles.join(', ')}`)
     }
     await assertMysqlRequiredSchemaExists(dataSource)
-    await migrateLegacyDepartmentAccountsToTeacherProfiles(dataSource)
+    await migrateClientUserDepartmentGovernance(dataSource)
     return {
       action: migrationResult.appliedFiles.length > 0 ? 'synchronized' : 'skipped',
       reason: 'mysql_external',
@@ -1043,7 +1215,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   const needSynchronize = await shouldSynchronizeSqliteSchema(dataSource)
   if (!needSynchronize) {
     await ensureSqliteMallCatalogIndexes(dataSource)
-    await migrateLegacyDepartmentAccountsToTeacherProfiles(dataSource)
+    await migrateClientUserDepartmentGovernance(dataSource)
     await migrateLegacyFeedbackAttachments(dataSource)
     return {
       action: 'skipped',
@@ -1056,7 +1228,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   await normalizeSqliteO2oDiscountColumns(dataSource)
   await normalizeSqliteInboundSkuColumn(dataSource)
   await ensureSqliteMallCatalogIndexes(dataSource)
-  await migrateLegacyDepartmentAccountsToTeacherProfiles(dataSource)
+  await migrateClientUserDepartmentGovernance(dataSource)
   await migrateLegacyFeedbackAttachments(dataSource)
   return {
     action: 'synchronized',

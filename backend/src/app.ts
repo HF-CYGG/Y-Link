@@ -61,7 +61,27 @@ function applyUploadStaticResponseHeaders(res: express.Response): void {
   res.setHeader('Content-Security-Policy', UPLOAD_CONTENT_SECURITY_POLICY_VALUE)
 }
 
-export function createApp() {
+export interface CreateAppOptions {
+  /**
+   * 仅供隔离验证以较低阈值覆盖 Express 入口限流；常规启动不传入，保持生产门槛不变。
+   */
+  publicAuthRateLimits?: {
+    admin?: number
+    client?: number
+  }
+}
+
+function resolvePublicAuthRateLimit(limit: number | undefined, fallback: number, label: string): number {
+  if (limit === undefined) {
+    return fallback
+  }
+  if (!Number.isInteger(limit) || limit < 1) {
+    throw new Error(`${label} 认证入口限流阈值必须是正整数`)
+  }
+  return limit
+}
+
+export function createApp(options: CreateAppOptions = {}) {
   const app = express()
   app.set('trust proxy', 'loopback, linklocal, uniquelocal')
   app.disable('x-powered-by')
@@ -85,8 +105,15 @@ export function createApp() {
       },
     })
   }
-  const adminAuthLimiter = createPublicAuthLimiter('express-admin-auth', 60, new Set(['/captcha', '/login']))
-  const clientAuthLimiter = createPublicAuthLimiter('express-client-auth', 180, new Set([
+  const adminAuthLimiter = createPublicAuthLimiter(
+    'express-admin-auth',
+    resolvePublicAuthRateLimit(options.publicAuthRateLimits?.admin, 60, '管理端'),
+    new Set(['/captcha', '/login']),
+  )
+  const clientAuthLimiter = createPublicAuthLimiter(
+    'express-client-auth',
+    resolvePublicAuthRateLimit(options.publicAuthRateLimits?.client, 180, '客户端'),
+    new Set([
     '/captcha',
     '/capabilities',
     '/verification-code/send',
@@ -94,7 +121,8 @@ export function createApp() {
     '/login',
     '/forgot-password/verify',
     '/forgot-password/reset',
-  ]))
+    ]),
+  )
 
   app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff')

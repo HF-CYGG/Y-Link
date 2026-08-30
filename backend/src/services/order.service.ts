@@ -182,7 +182,7 @@ const O2O_VERIFIED_PREORDER_IDEMPOTENCY_KEY_PREFIX = 'o2o-preorder-verify:'
 const ORDER_FIELD_LIMITS = {
   idempotencyKey: 128,
   issuerName: 64,
-  customerDepartmentName: 128,
+  customerDepartmentName: 271,
   customerName: 128,
   orderRemark: 500,
   itemRemark: 200,

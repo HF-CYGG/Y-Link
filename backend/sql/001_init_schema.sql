@@ -144,7 +144,7 @@ CREATE TABLE IF NOT EXISTS `biz_outbound_order` (
   `has_customer_order` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否有客户订单',
   `is_system_applied` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否系统申请',
   `issuer_name` VARCHAR(64) DEFAULT NULL COMMENT '出单人',
-  `customer_department_name` VARCHAR(128) DEFAULT NULL COMMENT '客户部门名称',
+  `customer_department_name` VARCHAR(271) DEFAULT NULL COMMENT '客户部门完整路径',
   `idempotency_key` VARCHAR(128) NOT NULL COMMENT '幂等键（防重复提交）',
   `customer_name` VARCHAR(128) DEFAULT NULL COMMENT '客户名称',
   `remark` VARCHAR(500) DEFAULT NULL COMMENT '备注',
@@ -349,7 +349,7 @@ PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 SET @ddl = IF(
   (SELECT COUNT(*) FROM information_schema.COLUMNS
    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_outbound_order' AND COLUMN_NAME = 'customer_department_name') = 0,
-  'ALTER TABLE `biz_outbound_order` ADD COLUMN `customer_department_name` VARCHAR(128) DEFAULT NULL COMMENT ''客户部门名称''',
+  'ALTER TABLE `biz_outbound_order` ADD COLUMN `customer_department_name` VARCHAR(271) DEFAULT NULL COMMENT ''客户部门完整路径''',
   'SELECT 1'
 );
 PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;

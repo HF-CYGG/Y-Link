@@ -15,7 +15,7 @@ PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 SET @ddl = IF(
   (SELECT COUNT(*) FROM information_schema.COLUMNS
    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'o2o_preorder' AND COLUMN_NAME = 'department_name_snapshot') = 0,
-  'ALTER TABLE `o2o_preorder` ADD COLUMN `department_name_snapshot` VARCHAR(128) NULL COMMENT ''下单时部门名称快照''',
+  'ALTER TABLE `o2o_preorder` ADD COLUMN `department_name_snapshot` VARCHAR(271) NULL COMMENT ''下单时部门完整路径快照''',
   'SELECT 1'
 );
 PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;

@@ -49,8 +49,9 @@
 若目标脚本依赖更早脚本引入的列（例如 `026` 的回填 `UPDATE` 依赖 `006` 的价格列），
 执行报错时按报错提示的缺失对象向前补执行对应脚本即可，无需从 001 重跑。
 
-若缺的仅是 `auth_risk_state`，也可以设置 `DB_AUTO_MIGRATE=true` 后重启，
-由服务自动执行白名单内已核实幂等的脚本（当前仅 `033_inventory_security_invariants.sql`）。
+若缺失对象由已审核的自动迁移脚本维护，也可以设置 `DB_AUTO_MIGRATE=true` 后重启，
+由服务自动执行白名单内的 `033_inventory_security_invariants.sql`、
+`037_department_account_node_binding.sql` 与 `038_department_path_capacity.sql`。
 该自动执行流程由 MySQL advisory lock 串行化，多实例同时启动也不会并发执行同一脚本。
 
 `035`/`036` 不加入启动期自动迁移白名单：尤其 `036` 会合并历史通知、清理重复投递并创建唯一索引，
