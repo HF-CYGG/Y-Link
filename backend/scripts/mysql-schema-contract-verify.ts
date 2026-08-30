@@ -18,6 +18,7 @@ const REQUIRED_TABLES = [
   'base_product_sku',
   'sys_user',
   'sys_user_session',
+  'client_user',
   'o2o_preorder',
   'o2o_preorder_item',
   'biz_inbound_order',
@@ -43,6 +44,7 @@ const REQUIRED_COLUMNS = [
   ['notification_event', 'processed_at'],
   ['notification_dispatch', 'dedupe_key'],
   ['notification_dispatch', 'last_attempt_at'],
+  ['client_user', 'department_node_id'],
 ] as const
 
 interface IndexFixture {
@@ -81,6 +83,12 @@ const REQUIRED_INDEXES: readonly IndexFixture[] = [
     tableName: 'notification_dispatch',
     indexName: 'uk_notification_dispatch_event_channel_target',
     columns: ['event_id', 'channel', 'dedupe_key'],
+    unique: true,
+  },
+  {
+    tableName: 'client_user',
+    indexName: 'uk_client_user_department_node_id',
+    columns: ['department_node_id'],
     unique: true,
   },
 ]
@@ -160,6 +168,13 @@ missingSequence.tables.delete('business_sequence')
 await expectSchemaFailure(missingSequence, [
   '表 business_sequence',
   '035_o2o_idempotency_business_sequence.sql',
+])
+
+const missingClientUser = createCompleteFixture()
+missingClientUser.tables.delete('client_user')
+await expectSchemaFailure(missingClientUser, [
+  '表 client_user',
+  '006_o2o_preorder_schema.sql',
 ])
 
 const missingIdempotencyColumn = createCompleteFixture()

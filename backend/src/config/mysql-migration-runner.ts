@@ -50,6 +50,7 @@ const MYSQL_REQUIRED_TABLES = [
   'base_product_sku',
   'sys_user',
   'sys_user_session',
+  'client_user',
   'o2o_preorder',
   'o2o_preorder_item',
   'biz_inbound_order',
@@ -72,6 +73,7 @@ const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
   biz_inbound_order_item: '001_init_schema.sql',
   o2o_preorder: '006_o2o_preorder_schema.sql',
   o2o_preorder_item: '006_o2o_preorder_schema.sql',
+  client_user: '006_o2o_preorder_schema.sql',
   base_product_sku: '028_o2o_product_sku_selection.sql',
   notification_event: '020_notification_center_and_user_email.sql',
   notification_inbox: '020_notification_center_and_user_email.sql',
@@ -110,6 +112,7 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
   { tableName: 'notification_event', columnName: 'processed_at', introducingScript: '036_notification_outbox.sql' },
   { tableName: 'notification_dispatch', columnName: 'dedupe_key', introducingScript: '036_notification_outbox.sql' },
   { tableName: 'notification_dispatch', columnName: 'last_attempt_at', introducingScript: '036_notification_outbox.sql' },
+  { tableName: 'client_user', columnName: 'department_node_id', introducingScript: '037_department_account_node_binding.sql' },
 ]
 
 // 不只按索引名判断，还校验列顺序与唯一性，避免旧库中存在同名但错误的索引时误判为可启动。
@@ -149,6 +152,13 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
     unique: true,
     introducingScript: '036_notification_outbox.sql',
   },
+  {
+    tableName: 'client_user',
+    indexName: 'uk_client_user_department_node_id',
+    columns: ['department_node_id'],
+    unique: true,
+    introducingScript: '037_department_account_node_binding.sql',
+  },
 ]
 
 // 不可重复执行的历史脚本。
@@ -163,6 +173,7 @@ const NON_IDEMPOTENT_HISTORICAL_SCRIPTS = [
 // 只在这里追加——不要把整个 sql/ 目录当成可自动回放的历史，见文件头说明。
 const AUTO_MIGRATABLE_FILES = [
   '033_inventory_security_invariants.sql',
+  '037_department_account_node_binding.sql',
 ]
 
 /**

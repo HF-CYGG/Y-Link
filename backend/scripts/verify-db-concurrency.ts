@@ -118,6 +118,7 @@ function configureRuntimeEnv(config: VerifyMysqlRuntimeConfig) {
   process.env.DB_PASSWORD = config.password
   process.env.DB_NAME = VERIFY_TEMP_DATABASE_NAME
   process.env.DB_SYNC = 'true'
+  process.env.DB_AUTO_MIGRATE = 'true'
 }
 
 function parseSerial(showNo: string, prefix: string): number {
@@ -186,7 +187,12 @@ async function verifyOrderSerialConcurrency() {
     { o2oPreorderService },
     { productService },
     { ClientUser },
+    { ClientStaffDirectory },
+    { SysAuditLog },
     { O2oPreorder },
+    { clientUserManageService },
+    { migrateClientUserDepartmentGovernance },
+    { assertMysqlRequiredSchemaExists, runMysqlSchemaMigrations },
   ] = await Promise.all([
     import('../src/config/data-source.js'),
     import('../src/database/database-strategy.js'),
@@ -195,7 +201,12 @@ async function verifyOrderSerialConcurrency() {
     import('../src/services/o2o-preorder.service.js'),
     import('../src/services/product.service.js'),
     import('../src/entities/client-user.entity.js'),
+    import('../src/entities/client-staff-directory.entity.js'),
+    import('../src/entities/sys-audit-log.entity.js'),
     import('../src/entities/o2o-preorder.entity.js'),
+    import('../src/services/client-user-manage.service.js'),
+    import('../src/config/database-bootstrap.js'),
+    import('../src/config/mysql-migration-runner.js'),
   ])
 
   await AppDataSource.initialize()
@@ -204,6 +215,188 @@ async function verifyOrderSerialConcurrency() {
     await AppDataSource.synchronize()
     await systemConfigService.ensureDefaultConfigs()
     pass('固定 MySQL 临时库已完成建表与默认配置初始化')
+
+    await AppDataSource.query('ALTER TABLE client_user DROP INDEX uk_client_user_department_node_id')
+    await AppDataSource.query('ALTER TABLE client_user DROP COLUMN department_node_id')
+    const migrationResult = await runMysqlSchemaMigrations(AppDataSource)
+    assert.ok(
+      migrationResult.appliedFiles.includes('037_department_account_node_binding.sql'),
+      '真实 MySQL 临时库应执行 037 补回部门节点字段与唯一索引',
+    )
+    await assertMysqlRequiredSchemaExists(AppDataSource)
+    const restoredDepartmentNodeIndexes = await AppDataSource.query(
+      `SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE
+       FROM information_schema.STATISTICS
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'client_user'
+         AND INDEX_NAME = 'uk_client_user_department_node_id'`,
+    ) as Array<{ INDEX_NAME: string; COLUMN_NAME: string; NON_UNIQUE: number }>
+    assert.deepEqual(
+      restoredDepartmentNodeIndexes.map((index) => ({
+        ...index,
+        NON_UNIQUE: Number(index.NON_UNIQUE),
+      })),
+      [{
+        INDEX_NAME: 'uk_client_user_department_node_id',
+        COLUMN_NAME: 'department_node_id',
+        NON_UNIQUE: 0,
+      }],
+    )
+    pass('真实 MySQL 临时库已执行 037 并恢复部门节点唯一约束')
+
+    const concurrencyActor = {
+      userId: '1',
+      username: 'verify-admin',
+      displayName: '并发验收管理员',
+      role: 'admin',
+      permissions: ['system_configs:update'],
+      status: 'enabled',
+      sessionToken: 'verify-db-concurrency-admin',
+      authSource: 'bearer',
+    } as const
+    await systemConfigService.updateClientDepartmentConfigs({
+      tree: [
+        { id: 'dept_mysql_batch', label: 'MySQL 批量并发部门', children: [] },
+        { id: 'dept_mysql_single', label: 'MySQL 单个并发部门', children: [] },
+        { id: 'dept_mysql_cross', label: 'MySQL 跨入口并发部门', children: [] },
+        { id: 'dept_mysql_bound', label: 'MySQL 已绑定部门', children: [] },
+      ],
+    }, concurrencyActor)
+    const departmentPassword = `Department_${Date.now()}_Aa1!`
+    const [firstBatch, secondBatch] = await Promise.all([
+      clientUserManageService.createDepartmentAccountsBatch({
+        status: 'enabled',
+        items: [{ departmentNodeId: 'dept_mysql_batch', account: 'DEPT-0B0C0D0E0F', initialPassword: departmentPassword }],
+      }, concurrencyActor),
+      clientUserManageService.createDepartmentAccountsBatch({
+        status: 'enabled',
+        items: [{ departmentNodeId: 'dept_mysql_batch', account: 'DEPT-1B1C1D1E1F', initialPassword: departmentPassword }],
+      }, concurrencyActor),
+    ])
+    assert.equal(firstBatch.created.length + secondBatch.created.length, 1, '同部门并发批量开户最多只能创建一个账号')
+    assert.equal(firstBatch.skipped.length + secondBatch.skipped.length, 1, '同部门并发批量开户的另一请求必须受控跳过')
+
+    const singleCreateResults = await Promise.allSettled([
+      clientUserManageService.createProfile({
+        profileKind: 'department',
+        username: 'MySQL 单个并发账号甲',
+        departmentNodeId: 'dept_mysql_single',
+        password: departmentPassword,
+        status: 'enabled',
+      }, concurrencyActor),
+      clientUserManageService.createProfile({
+        profileKind: 'department',
+        username: 'MySQL 单个并发账号乙',
+        departmentNodeId: 'dept_mysql_single',
+        password: departmentPassword,
+        status: 'enabled',
+      }, concurrencyActor),
+    ])
+    assert.equal(singleCreateResults.filter((result) => result.status === 'fulfilled').length, 1, '同部门并发单个开户最多只能创建一个账号')
+    const singleCreateConflict = singleCreateResults.find((result) => result.status === 'rejected')
+    assert.ok(singleCreateConflict && singleCreateConflict.status === 'rejected', '同部门并发单个开户应有一个受控冲突')
+    assert.equal((singleCreateConflict.reason as { statusCode?: number }).statusCode, 409, '并发单个开户冲突必须映射为 409')
+
+    const concurrentDepartmentUsers = await AppDataSource.getRepository(ClientUser)
+      .createQueryBuilder('user')
+      .addSelect('user.passwordHash')
+      .where('user.departmentNodeId IN (:...departmentNodeIds)', {
+        departmentNodeIds: ['dept_mysql_batch', 'dept_mysql_single'],
+      })
+      .getMany()
+    assert.equal(concurrentDepartmentUsers.length, 2, '批量与单个竞争场景各只能保留一个部门账号')
+    assert.equal(concurrentDepartmentUsers.every((user) => user.passwordHash !== departmentPassword), true, '数据库不得保存部门初始密码明文')
+    const concurrentCreateAudits = await AppDataSource.getRepository(SysAuditLog).find({
+      where: { actionType: 'client_user.create', targetType: 'client_user' },
+    })
+    const concurrentUserIds = new Set(concurrentDepartmentUsers.map((user) => user.id))
+    const concurrentUserCreateAudits = concurrentCreateAudits.filter((audit) => concurrentUserIds.has(audit.targetId ?? ''))
+    assert.equal(concurrentUserCreateAudits.length, 2, '每个真实创建的账号只能有一条创建审计')
+    assert.equal(new Set(concurrentUserCreateAudits.map((audit) => audit.targetId)).size, 2, '并发失败或跳过不得制造重复创建审计')
+    assert.equal(concurrentUserCreateAudits.every((audit) => !audit.detailJson?.includes(departmentPassword)), true, '部门初始密码不得写入审计详情')
+    pass('真实 MySQL Promise.all 竞争下部门账号唯一、冲突受控且审计不重复不含明文')
+
+    const crossEntryResults = await Promise.allSettled([
+      clientUserManageService.createDepartmentAccountsBatch({
+        status: 'enabled',
+        items: [{ departmentNodeId: 'dept_mysql_cross', account: 'DEPT-2B2C2D2E2F', initialPassword: departmentPassword }],
+      }, concurrencyActor),
+      clientUserManageService.createProfile({
+        profileKind: 'department',
+        username: 'MySQL 跨入口单建账号',
+        departmentNodeId: 'dept_mysql_cross',
+        password: departmentPassword,
+        status: 'enabled',
+      }, concurrencyActor),
+    ])
+    const crossEntryUsers = await AppDataSource.getRepository(ClientUser)
+      .createQueryBuilder('user')
+      .addSelect('user.passwordHash')
+      .where('user.departmentNodeId = :departmentNodeId', { departmentNodeId: 'dept_mysql_cross' })
+      .getMany()
+    assert.equal(crossEntryUsers.length, 1, '批量与单建抢占同一部门时只能创建一个账号')
+    assert.notEqual(crossEntryUsers[0]!.passwordHash, departmentPassword, '跨入口并发创建不得保存初始密码明文')
+    const batchCrossResult = crossEntryResults[0]
+    const singleCrossResult = crossEntryResults[1]
+    assert.equal(batchCrossResult.status, 'fulfilled', '跨入口竞争中的批量请求应受控创建或跳过')
+    if (batchCrossResult.status === 'fulfilled' && batchCrossResult.value.created.length === 1) {
+      assert.equal(singleCrossResult.status, 'rejected', '批量请求先创建时单建请求必须受控冲突')
+      assert.equal((singleCrossResult as PromiseRejectedResult).reason.statusCode, 409)
+    } else {
+      assert.equal(batchCrossResult.status === 'fulfilled' ? batchCrossResult.value.skipped.length : 0, 1)
+      assert.equal(singleCrossResult.status, 'fulfilled', '单建请求先创建时批量请求必须受控跳过')
+    }
+    const crossEntryAudits = await AppDataSource.getRepository(SysAuditLog).find({
+      where: { actionType: 'client_user.create', targetType: 'client_user', targetId: crossEntryUsers[0]!.id },
+    })
+    assert.equal(crossEntryAudits.length, 1, '跨入口竞争最终账号只能产生一条创建审计')
+    assert.equal(crossEntryAudits.every((audit) => !audit.detailJson?.includes(departmentPassword)), true)
+    pass('真实 MySQL 批量与单建跨入口竞争同一节点时唯一约束、跳过或 409 与审计均正确')
+
+    const legacyDepartmentUser = await AppDataSource.getRepository(ClientUser).save(
+      AppDataSource.getRepository(ClientUser).create({
+        realName: 'MySQL 存量旧部门账号',
+        mobile: '13800009991',
+        email: null,
+        passwordHash: 'verify-only',
+        departmentName: 'MySQL 教职工部门',
+        departmentNodeId: null,
+        accountType: 'department',
+        staffNo: 'MYSQL-LEGACY-0001',
+        staffVerified: true,
+        status: 'enabled',
+        lastLoginAt: null,
+      }),
+    )
+    const boundDepartmentUser = await AppDataSource.getRepository(ClientUser).save(
+      AppDataSource.getRepository(ClientUser).create({
+        realName: 'MySQL 已绑定部门账号',
+        mobile: '13800009992',
+        email: null,
+        passwordHash: 'verify-only',
+        departmentName: 'MySQL 已绑定部门',
+        departmentNodeId: 'dept_mysql_bound',
+        accountType: 'department',
+        staffNo: 'MYSQL-BOUND-0001',
+        staffVerified: true,
+        status: 'enabled',
+        lastLoginAt: null,
+      }),
+    )
+    await AppDataSource.getRepository(ClientStaffDirectory).save([
+      { staffNo: 'MYSQL-LEGACY-0001', realName: 'MySQL 旧教师', departmentName: 'MySQL 教职工部门', status: 'active' },
+      { staffNo: 'MYSQL-BOUND-0001', realName: 'MySQL 不应覆盖教师', departmentName: 'MySQL 教职工部门', status: 'active' },
+    ])
+    const legacyMigrationResult = await migrateClientUserDepartmentGovernance(AppDataSource)
+    assert.equal(legacyMigrationResult.migratedCount, 1, '真实 MySQL 启动迁移只能转换未绑定旧部门账号')
+    const migratedLegacyDepartmentUser = await AppDataSource.getRepository(ClientUser).findOneByOrFail({ id: legacyDepartmentUser.id })
+    const unchangedBoundDepartmentUser = await AppDataSource.getRepository(ClientUser).findOneByOrFail({ id: boundDepartmentUser.id })
+    assert.equal(migratedLegacyDepartmentUser.accountType, 'personal')
+    assert.equal(migratedLegacyDepartmentUser.departmentNodeId, null)
+    assert.equal(unchangedBoundDepartmentUser.accountType, 'department')
+    assert.equal(unchangedBoundDepartmentUser.departmentNodeId, 'dept_mysql_bound')
+    assert.equal(unchangedBoundDepartmentUser.realName, 'MySQL 已绑定部门账号')
+    pass('真实 MySQL 启动迁移保留已绑定部门账号，仅转换未绑定存量账号')
 
     const walkinTasks = Array.from({ length: CONCURRENCY_SIZE }, () => orderSerialService.generateOrderNo('walkin'))
     const departmentTasks = Array.from({ length: CONCURRENCY_SIZE }, () => orderSerialService.generateOrderNo('department'))

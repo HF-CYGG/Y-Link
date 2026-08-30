@@ -154,7 +154,7 @@ async function main() {
   prepareDatabaseRuntime()
   await AppDataSource.initialize()
 
-  const app = createApp()
+  const app = createApp({ publicAuthRateLimits: { admin: 3 } })
   const server = app.listen(0, '127.0.0.1')
 
   try {
@@ -174,11 +174,32 @@ async function main() {
     assert.ok(address && typeof address === 'object' && typeof address.port === 'number', '未能获取验证服务端口')
     const baseUrl = `http://127.0.0.1:${address.port}`
 
+    const expressLimiterResponses = []
+    for (let requestIndex = 0; requestIndex < 4; requestIndex += 1) {
+      expressLimiterResponses.push(await fetch(`${baseUrl}/api/auth/captcha`, {
+        headers: { 'x-forwarded-for': '198.51.100.77' },
+      }))
+    }
+    assert.deepEqual(
+      expressLimiterResponses.map((response) => response.status),
+      [200, 200, 200, 429],
+      'SQLite 下 Express 认证入口内存限流必须在受控阈值后返回 429',
+    )
+    const expressLimiterPayload = await readJson(expressLimiterResponses[3]!)
+    assert.equal(expressLimiterPayload.code, 429, 'Express 认证入口限流应返回统一 429 业务码')
+    pass('SQLite 下 Express 认证入口内存限流在 /api/auth/captcha 生效')
+
     const adminLogin = await loginAdmin(baseUrl)
     const adminAuth = await authService.resolveAuthUserByToken(adminLogin.token)
 
     const riskStates = await AppDataSource.getRepository(AuthRiskState).find()
-    assert.ok(riskStates.length >= 2, 'Express 入口与细粒度登录风控均应写入共享状态')
+    const expectedPersistentRiskStateCount = AppDataSource.options.type === 'mysql' ? 2 : 1
+    assert.ok(
+      riskStates.length >= expectedPersistentRiskStateCount,
+      AppDataSource.options.type === 'mysql'
+        ? 'MySQL 模式下 Express 入口与细粒度登录风控均应写入共享状态'
+        : 'SQLite 模式下细粒度登录风控应写入共享状态，Express 入口限流使用进程内状态',
+    )
     assert.equal(riskStates.every((state) => /^[a-f0-9]{64}$/.test(state.bucketDigest)), true)
     assert.equal(riskStates.some((state) => state.requestTimestampsJson?.includes('127.0.0.1')), false)
     assert.equal(riskStates.some((state) => state.requestTimestampsJson?.includes('admin')), false)

@@ -110,6 +110,22 @@ try {
     '依赖新列的商城索引必须在结构升级后创建',
   )
 
+  await AppDataSource.query('DROP INDEX uk_client_user_department_node_id')
+  await AppDataSource.query('CREATE UNIQUE INDEX uk_client_user_department_node_id ON client_user (real_name)')
+  const indexRepairResult = await initializeDatabaseSchemaIfNeeded(AppDataSource)
+  assert.equal(indexRepairResult.action, 'synchronized', '客户端用户节点唯一索引列形状错误时必须触发安全结构补齐')
+  const clientUserIndexes = await AppDataSource.query('PRAGMA index_list(client_user)') as Array<{ name: string; unique: number }>
+  assert.ok(
+    clientUserIndexes.some((index) => index.name === 'uk_client_user_department_node_id' && Number(index.unique) === 1),
+    '结构补齐后必须恢复部门节点唯一索引',
+  )
+  const repairedDepartmentNodeIndex = await AppDataSource.query('PRAGMA index_info(uk_client_user_department_node_id)') as Array<{ seqno: number; name: string }>
+  assert.deepEqual(
+    repairedDepartmentNodeIndex.sort((left, right) => Number(left.seqno) - Number(right.seqno)).map((column) => column.name),
+    ['department_node_id'],
+    '结构补齐后部门节点唯一索引必须精确绑定 department_node_id，不能只按索引名称误判',
+  )
+
   console.log('OK SQLite 旧库结构、默认 SKU、入库关联与商城索引升级验收通过')
 } finally {
   if (dataSource?.isInitialized) {

@@ -10,6 +10,7 @@ import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BusinessSequence } from '../entities/business-sequence.entity.js'
+import { ClientUser } from '../entities/client-user.entity.js'
 import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
 import { SystemConfig } from '../entities/system-config.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
@@ -20,6 +21,7 @@ import { auditService } from './audit.service.js'
 import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
 import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
 import type { EntityManager } from 'typeorm'
+import { createHash } from 'node:crypto'
 
 const CLIENT_DEPARTMENT_NODE_LIMIT = 3000
 
@@ -405,6 +407,12 @@ export interface ClientDepartmentTreeNode {
   id: string
   label: string
   children: ClientDepartmentTreeNode[]
+}
+
+export interface ResolvedClientDepartmentNode {
+  departmentNodeId: string
+  departmentName: string
+  label: string
 }
 
 export interface UpdateClientDepartmentConfigsInput {
@@ -836,6 +844,16 @@ class SystemConfigService {
     return `dept_${normalizedSeed || 'node'}_${Math.random().toString(36).slice(2, 8)}`
   }
 
+  /**
+   * 仅用于读取未持久化 ID 的旧部门配置：同一路径在每次解析中必须得到同一节点ID，
+   * 这样管理员 preview 后提交的 nodeId 不会因下一次读取而失效。新建节点仍沿用随机 ID，
+   * 避免不同新节点因路径短期相同而意外复用身份。
+   */
+  private createLegacyDepartmentNodeId(fullPath: string) {
+    const digest = createHash('sha256').update(fullPath, 'utf8').digest('hex').slice(0, 24)
+    return `legacy_dept_${digest}`
+  }
+
   private normalizeDepartmentLabel(value: unknown) {
     const label = typeof value === 'string' ? value.trim() : ''
     if (!label) {
@@ -847,6 +865,17 @@ class SystemConfigService {
     return label
   }
 
+  private normalizeDepartmentNodeId(value: unknown) {
+    const id = typeof value === 'string' ? value.trim() : ''
+    if (!id) {
+      throw new BizError('部门节点ID不能为空', 400)
+    }
+    if (id.length > 128) {
+      throw new BizError('部门节点ID长度不能超过 128 个字符', 400)
+    }
+    return id
+  }
+
   private readDepartmentPathSegments(value: string): string[] {
     return value
       .split('-')
@@ -854,7 +883,7 @@ class SystemConfigService {
       .filter((segment) => segment.length > 0)
   }
 
-  private buildTreeFromOptions(options: string[]): ClientDepartmentTreeNode[] {
+  private buildTreeFromOptions(options: string[], useLegacyStableIds = false): ClientDepartmentTreeNode[] {
     const rootNodes: ClientDepartmentTreeNode[] = []
     const findOrCreateNode = (nodes: ClientDepartmentTreeNode[], label: string, seed: string) => {
       const existingNode = nodes.find((node) => node.label === label)
@@ -862,7 +891,7 @@ class SystemConfigService {
         return existingNode
       }
       const node: ClientDepartmentTreeNode = {
-        id: this.createDepartmentNodeId(seed),
+        id: useLegacyStableIds ? this.createLegacyDepartmentNodeId(seed) : this.createDepartmentNodeId(seed),
         label,
         children: [],
       }
@@ -870,13 +899,14 @@ class SystemConfigService {
       return node
     }
 
-    options.forEach((option, optionIndex) => {
+    options.forEach((option) => {
       const segments = this.readDepartmentPathSegments(option)
       let currentNodes = rootNodes
       let currentPath = ''
-      segments.forEach((segment, segmentIndex) => {
+      segments.forEach((segment) => {
         currentPath = currentPath ? `${currentPath}-${segment}` : segment
-        const node = findOrCreateNode(currentNodes, segment, `${currentPath}-${optionIndex + 1}-${segmentIndex + 1}`)
+        // 旧配置节点的身份只由规范化后的完整路径决定，不能掺入 options 顺序或分段序号。
+        const node = findOrCreateNode(currentNodes, segment, currentPath)
         currentNodes = node.children
       })
     })
@@ -911,6 +941,19 @@ class SystemConfigService {
           walk(node.children, currentPath)
         }
       })
+    }
+    walk(tree)
+    return paths
+  }
+
+  private buildClientDepartmentPathMap(tree: ClientDepartmentTreeNode[]): Map<string, string> {
+    const paths = new Map<string, string>()
+    const walk = (nodes: ClientDepartmentTreeNode[], parentPath = '') => {
+      for (const node of nodes) {
+        const departmentName = parentPath ? `${parentPath}-${node.label}` : node.label
+        paths.set(node.id, departmentName)
+        walk(node.children, departmentName)
+      }
     }
     walk(tree)
     return paths
@@ -958,15 +1001,32 @@ class SystemConfigService {
     }
   }
 
-  private normalizeClientDepartmentTree(tree: ClientDepartmentTreeNode[], depth = 1, parentPath = ''): ClientDepartmentTreeNode[] {
+  private normalizeClientDepartmentTree(
+    tree: ClientDepartmentTreeNode[],
+    depth = 1,
+    parentPath = '',
+    seenNodeIds = new Set<string>(),
+    missingNodeIdStrategy: 'random' | 'legacy_path' = 'random',
+  ): ClientDepartmentTreeNode[] {
     if (depth > 8) {
       throw new BizError('部门层级最多支持 8 级', 400)
     }
     const normalizedTree = tree.map((node, index) => {
       const label = this.normalizeDepartmentLabel(node.label)
-      const id = String(node.id ?? '').trim() || this.createDepartmentNodeId(`${label}-${depth}-${index + 1}`)
       const currentPath = parentPath ? `${parentPath}-${label}` : label
-      const children = Array.isArray(node.children) ? this.normalizeClientDepartmentTree(node.children, depth + 1, currentPath) : []
+      const id = this.normalizeDepartmentNodeId(
+        String(node.id ?? '').trim()
+          || (missingNodeIdStrategy === 'legacy_path'
+            ? this.createLegacyDepartmentNodeId(currentPath)
+            : this.createDepartmentNodeId(`${label}-${depth}-${index + 1}`)),
+      )
+      if (seenNodeIds.has(id)) {
+        throw new BizError(`部门节点ID“${id}”重复，请修复部门树后再保存`, 400)
+      }
+      seenNodeIds.add(id)
+      const children = Array.isArray(node.children)
+        ? this.normalizeClientDepartmentTree(node.children, depth + 1, currentPath, seenNodeIds, missingNodeIdStrategy)
+        : []
       return {
         id,
         label,
@@ -985,7 +1045,7 @@ class SystemConfigService {
     try {
       const parsed = JSON.parse(raw)
       if (Array.isArray(parsed) && parsed.every((item) => typeof item === 'string')) {
-        const tree = this.buildTreeFromOptions(parsed)
+        const tree = this.buildTreeFromOptions(parsed, true)
         const options = this.buildClientDepartmentOptionsFromTree(tree)
         return {
           tree,
@@ -1000,7 +1060,7 @@ class SystemConfigService {
         rawTree = (parsed as { tree: unknown[] }).tree
       } else if (parsed && typeof parsed === 'object' && Array.isArray((parsed as { options?: unknown[] }).options)) {
         const optionList = (parsed as { options: unknown[] }).options.filter((item): item is string => typeof item === 'string')
-        const tree = this.buildTreeFromOptions(optionList)
+        const tree = this.buildTreeFromOptions(optionList, true)
         const options = this.buildClientDepartmentOptionsFromTree(tree)
         return { tree, options }
       }
@@ -1019,7 +1079,7 @@ class SystemConfigService {
           return !Array.isArray(node.children) || node.children.length === 0
         })
       if (isLegacyFlatTree) {
-        const tree = this.buildTreeFromOptions(rawTreeLabels)
+        const tree = this.buildTreeFromOptions(rawTreeLabels, true)
         const options = this.buildClientDepartmentOptionsFromTree(tree)
         return { tree, options }
       }
@@ -1032,10 +1092,13 @@ class SystemConfigService {
           children: Array.isArray(node.children) ? node.children.map((child) => normalizeRawTreeNode(child)) : [],
         }
       }
-      const tree = this.normalizeClientDepartmentTree(rawTree.map((item) => normalizeRawTreeNode(item)))
+      const tree = this.normalizeClientDepartmentTree(rawTree.map((item) => normalizeRawTreeNode(item)), 1, '', new Set(), 'legacy_path')
       const options = this.buildClientDepartmentOptionsFromTree(tree)
       return { tree, options }
-    } catch {
+    } catch (error) {
+      if (error instanceof BizError) {
+        throw error
+      }
       throw new BizError('客户端部门配置格式非法', 500)
     }
   }
@@ -2010,9 +2073,25 @@ class SystemConfigService {
     }
   }
 
-  async getClientDepartmentConfigs(): Promise<ClientDepartmentConfigRecord> {
-    await this.ensureDefaultConfigs()
-    const row = await this.configRepo.findOne({
+  async getClientDepartmentConfigs(
+    manager?: EntityManager,
+    options: { lockForUpdate?: boolean } = {},
+  ): Promise<ClientDepartmentConfigRecord> {
+    await this.ensureDefaultConfigs(manager)
+    const repository = manager ? manager.getRepository(SystemConfig) : this.configRepo
+    const useForUpdate = Boolean(manager && options.lockForUpdate && manager.connection.options.type === 'mysql')
+    const lockedRows: Array<{ id: string; configValue: string; updatedAt: Date | string }> = useForUpdate
+      ? await manager!.query(
+        `
+          SELECT id, config_value AS configValue, updated_at AS updatedAt
+          FROM system_configs
+          WHERE config_key = ?
+          FOR UPDATE
+        `,
+        [this.clientDepartmentConfigKey],
+      )
+      : []
+    const row = lockedRows[0] ?? await repository.findOne({
       where: { configKey: this.clientDepartmentConfigKey },
       select: {
         id: true,
@@ -2027,7 +2106,7 @@ class SystemConfigService {
     return {
       tree: parsedConfig.tree,
       options: parsedConfig.options,
-      updatedAt: row.updatedAt,
+      updatedAt: new Date(row.updatedAt),
     }
   }
 
@@ -2064,12 +2143,48 @@ class SystemConfigService {
         updatedAt: new Date(row.updatedAt),
       }
 
+      const beforePaths = this.buildClientDepartmentPathMap(before.tree)
+      const afterPaths = this.buildClientDepartmentPathMap(normalizedTree)
+      const affectedDepartmentNodeIds = [...new Set([...beforePaths.keys(), ...afterPaths.keys()])].filter((departmentNodeId) => {
+        const beforePath = beforePaths.get(departmentNodeId)
+        return beforePath !== afterPaths.get(departmentNodeId)
+      })
+      const departmentAccountRepo = manager.getRepository(ClientUser)
+      const affectedDepartmentAccounts = affectedDepartmentNodeIds.length === 0
+        ? []
+        : await (() => {
+          const query = departmentAccountRepo
+            .createQueryBuilder('user')
+            .where('user.accountType = :accountType', { accountType: 'department' })
+            .andWhere('user.departmentNodeId IN (:...departmentNodeIds)', { departmentNodeIds: affectedDepartmentNodeIds })
+          if (useForUpdate) {
+            query.setLock('pessimistic_write')
+          }
+          return query.getMany()
+        })()
+      const enabledDeletedBinding = affectedDepartmentAccounts.find((account) => (
+        account.status === 'enabled' && !afterPaths.has(account.departmentNodeId ?? '')
+      ))
+      if (enabledDeletedBinding) {
+        throw new BizError('该部门已绑定已启用部门共享账号，请先停用或重新绑定账号后再删除部门', 409)
+      }
+      const synchronizedDepartmentAccounts = affectedDepartmentAccounts.filter((account) => {
+        const nextDepartmentName = afterPaths.get(account.departmentNodeId ?? '')
+        return Boolean(nextDepartmentName) && nextDepartmentName !== account.departmentName
+      })
+
       const targetValue = JSON.stringify({
         tree: normalizedTree,
       })
       let changed = false
       if (row.configValue !== targetValue) {
         await manager.getRepository(SystemConfig).update({ id: row.id }, { configValue: targetValue })
+        for (const account of synchronizedDepartmentAccounts) {
+          account.departmentName = afterPaths.get(account.departmentNodeId ?? '')!
+        }
+        if (synchronizedDepartmentAccounts.length > 0) {
+          await departmentAccountRepo.save(synchronizedDepartmentAccounts)
+        }
         changed = true
       }
 
@@ -2090,6 +2205,12 @@ class SystemConfigService {
             detail: {
               before,
               after: config,
+              departmentAccountSynchronization: {
+                updatedAccountIds: synchronizedDepartmentAccounts.map((account) => account.id),
+                orphanedAccountIds: affectedDepartmentAccounts
+                  .filter((account) => !afterPaths.has(account.departmentNodeId ?? ''))
+                  .map((account) => account.id),
+              },
             },
           },
           manager,
@@ -2234,6 +2355,74 @@ class SystemConfigService {
       throw new BizError(`部门“${normalizedDepartment}”不在可选范围内，请重新选择`, 400)
     }
     return normalizedDepartment
+  }
+
+  async resolveClientDepartmentNode(
+    departmentNodeId: string,
+    manager?: EntityManager,
+    config?: ClientDepartmentConfigRecord,
+  ): Promise<ResolvedClientDepartmentNode> {
+    const normalizedNodeId = this.normalizeDepartmentNodeId(departmentNodeId)
+    const currentConfig = config ?? await this.getClientDepartmentConfigs(manager)
+    const walk = (nodes: ClientDepartmentTreeNode[], parentPath = ''): ResolvedClientDepartmentNode | null => {
+      for (const node of nodes) {
+        const departmentName = parentPath ? `${parentPath}-${node.label}` : node.label
+        if (node.id === normalizedNodeId) {
+          return { departmentNodeId: node.id, departmentName, label: node.label }
+        }
+        const childResult = walk(node.children, departmentName)
+        if (childResult) {
+          return childResult
+        }
+      }
+      return null
+    }
+    const resolved = walk(currentConfig.tree)
+    if (!resolved) {
+      throw new BizError('指定部门节点不存在或已被删除，请刷新后重试', 400)
+    }
+    return resolved
+  }
+
+  async resolveClientDepartmentReference(input: {
+    departmentNodeId?: string
+    departmentName?: string
+  }, manager?: EntityManager, config?: ClientDepartmentConfigRecord): Promise<ResolvedClientDepartmentNode> {
+    if (input.departmentNodeId?.trim()) {
+      return this.resolveClientDepartmentNode(input.departmentNodeId, manager, config)
+    }
+    const currentConfig = config ?? await this.getClientDepartmentConfigs(manager)
+    const rawDepartmentName = input.departmentName?.trim() ?? ''
+    let normalizedDepartmentName = rawDepartmentName
+    if (rawDepartmentName && !currentConfig.options.includes(rawDepartmentName)) {
+      const matchedPaths = this.findDepartmentPathsByLabel(currentConfig.tree, rawDepartmentName)
+      if (matchedPaths.length === 1) {
+        normalizedDepartmentName = matchedPaths[0]
+      } else if (matchedPaths.length > 1) {
+        throw new BizError(`部门“${rawDepartmentName}”存在多个同名节点，请使用完整部门路径`, 400)
+      } else {
+        throw new BizError(`部门“${rawDepartmentName}”不在可选范围内，请重新选择`, 400)
+      }
+    }
+    if (!normalizedDepartmentName) {
+      throw new BizError('部门共享账号必须选择所属部门', 400)
+    }
+    const walk = (nodes: ClientDepartmentTreeNode[], parentPath = ''): ResolvedClientDepartmentNode | null => {
+      for (const node of nodes) {
+        const departmentName = parentPath ? `${parentPath}-${node.label}` : node.label
+        if (departmentName === normalizedDepartmentName) {
+          return { departmentNodeId: node.id, departmentName, label: node.label }
+        }
+        const childResult = walk(node.children, departmentName)
+        if (childResult) return childResult
+      }
+      return null
+    }
+    const resolved = walk(currentConfig.tree)
+    if (!resolved) {
+      throw new BizError('部门配置缺少稳定节点ID，请重新保存部门树后重试', 500)
+    }
+    return resolved
   }
 
   async updateVerificationProviderConfigs(

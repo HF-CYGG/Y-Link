@@ -32,6 +32,7 @@ export interface ClientUserManageProfile {
   email: string
   realName: string
   departmentName: string
+  departmentNodeId: string | null
   accountType: ClientUserAccountType
   profileKind: ClientUserProfileKind
   staffNo: string | null
@@ -87,6 +88,7 @@ export interface CreateClientUserPayload {
   mobile?: string
   email?: string
   departmentName?: string
+  departmentNodeId?: string
   staffNo?: string
   password: string
   status: ClientUserStatus
@@ -100,7 +102,42 @@ export interface UpdateClientUserPayload {
   mobile?: string
   email?: string
   departmentName?: string
+  departmentNodeId?: string
   status: ClientUserStatus
+}
+
+export interface DepartmentAccountBatchPreviewPayload {
+  departmentNodeIds: string[]
+}
+
+export interface DepartmentAccountBatchPreviewDepartment {
+  departmentNodeId: string
+  departmentName: string
+}
+
+export interface DepartmentAccountBatchSkippedDepartment extends DepartmentAccountBatchPreviewDepartment {
+  id: string
+  account: string
+  status: ClientUserStatus
+}
+
+export interface DepartmentAccountBatchPreviewResult {
+  creatable: DepartmentAccountBatchPreviewDepartment[]
+  skipped: DepartmentAccountBatchSkippedDepartment[]
+}
+
+export interface CreateDepartmentAccountBatchPayload {
+  status: ClientUserStatus
+  items: Array<{
+    departmentNodeId: string
+    account: string
+    initialPassword: string
+  }>
+}
+
+export interface CreateDepartmentAccountBatchResult {
+  created: Array<DepartmentAccountBatchPreviewDepartment & { id: string; account: string; status: ClientUserStatus }>
+  skipped: DepartmentAccountBatchSkippedDepartment[]
 }
 
 /**
@@ -133,6 +170,24 @@ export const createClientUser = (payload: CreateClientUserPayload) =>
   request<ClientUserManageProfile>({
     method: 'POST',
     url: '/client-users',
+    data: payload,
+  })
+
+export const previewDepartmentAccountBatch = (
+  payload: DepartmentAccountBatchPreviewPayload,
+  requestConfig: RequestConfig = {},
+) =>
+  request<DepartmentAccountBatchPreviewResult>({
+    ...requestConfig,
+    method: 'POST',
+    url: '/client-users/department-accounts/batch/preview',
+    data: payload,
+  })
+
+export const createDepartmentAccountBatch = (payload: CreateDepartmentAccountBatchPayload) =>
+  request<CreateDepartmentAccountBatchResult>({
+    method: 'POST',
+    url: '/client-users/department-accounts/batch',
     data: payload,
   })
 
