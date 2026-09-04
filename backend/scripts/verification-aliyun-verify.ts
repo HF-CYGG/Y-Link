@@ -418,6 +418,33 @@ async function main() {
     await thrownSendService.verify({ target: '13800004444', scene: 'test', code: '123456' })
     assert.equal((await recordRepo.findOneByOrFail({ outId: thrownSendRecord.outId })).verificationStatus, 'passed')
 
+    await assert.rejects(
+      () => thrownSendService.send({ target: '13800004445', scene: 'forgot_password', config: dypnsConfig }),
+      /短信验证码发送服务暂不可用/,
+    )
+    const failedBeforeGenericRecord = await recordRepo.createQueryBuilder('record')
+      .where('record.targetMasked = :targetMasked', { targetMasked: '138****4445' })
+      .orderBy('record.createdAt', 'DESC')
+      .getOneOrFail()
+    assert.equal(failedBeforeGenericRecord.sendStatus, 'failed')
+    assert.equal(
+      await thrownSendService.invalidateActiveForTarget({ target: '13800004445', scene: 'forgot_password' }),
+      1,
+      '可能被成功回执恢复的失败发送记录也必须被 Generic 作废',
+    )
+    await thrownSendService.applyReceipt({
+      outId: failedBeforeGenericRecord.outId,
+      bizId: 'biz-late-after-generic',
+      deliveryStatus: 'delivered',
+      errorCode: null,
+      errorMessage: null,
+      sentAt: new Date(),
+      reportedAt: new Date(),
+    })
+    const failedAfterGenericReceipt = await recordRepo.findOneByOrFail({ id: failedBeforeGenericRecord.id })
+    assert.equal(failedAfterGenericReceipt.sendStatus, 'failed', '迟到成功回执不得恢复已被 Generic 作废的失败发送记录')
+    assert.equal(failedAfterGenericReceipt.providerErrorCode, 'SUPERSEDED_BY_GENERIC')
+
     let checkResponse = { code: 'OK', success: true, verifyResult: 'REJECT', message: '验证码 654321 无效' }
     const nonPassService = new SmsVerificationRecordService({
       async send() { return { code: 'OK', success: true, bizId: 'biz-non-pass' } },
@@ -539,6 +566,41 @@ async function main() {
     const supersededAfterLateReceipt = await recordRepo.findOneByOrFail({ id: supersededPendingSendRecord.id })
     assert.equal(supersededAfterLateReceipt.sendStatus, 'failed', '迟到的成功回执不得恢复已被 Generic 取代的 PNVS 发送状态')
     assert.equal(supersededAfterLateReceipt.providerErrorCode, 'SUPERSEDED_BY_GENERIC')
+
+    let notifyFailedReceiptSendStarted!: () => void
+    let releaseFailedReceiptSend!: () => void
+    const failedReceiptSendStarted = new Promise<void>((resolve) => { notifyFailedReceiptSendStarted = resolve })
+    const failedReceiptSendRelease = new Promise<void>((resolve) => { releaseFailedReceiptSend = resolve })
+    const failedReceiptRaceService = new SmsVerificationRecordService({
+      async send() {
+        notifyFailedReceiptSendStarted()
+        await failedReceiptSendRelease
+        return { code: 'OK', success: true, bizId: 'biz-failed-receipt-race' }
+      },
+      async check() { return { code: 'OK', success: true, verifyResult: 'PASS' } },
+    }, recordRepo)
+    const inFlightFailedReceiptSend = failedReceiptRaceService.send({ target: '13800006670', scene: 'test', config: dypnsConfig })
+    await failedReceiptSendStarted
+    const failedReceiptPendingRecord = await recordRepo.createQueryBuilder('record')
+      .where('record.targetMasked = :targetMasked', { targetMasked: '138****6670' })
+      .orderBy('record.createdAt', 'DESC')
+      .getOneOrFail()
+    await failedReceiptRaceService.applyReceipt({
+      outId: failedReceiptPendingRecord.outId,
+      bizId: 'biz-failed-receipt-race',
+      deliveryStatus: 'failed',
+      errorCode: 'DELIVERY_REJECTED',
+      errorMessage: '运营商拒绝接收',
+      sentAt: new Date(),
+      reportedAt: new Date(),
+    })
+    releaseFailedReceiptSend()
+    await inFlightFailedReceiptSend
+    const failedReceiptAfterAccepted = await recordRepo.findOneByOrFail({ id: failedReceiptPendingRecord.id })
+    assert.equal(failedReceiptAfterAccepted.sendStatus, 'sent')
+    assert.equal(failedReceiptAfterAccepted.deliveryStatus, 'failed')
+    assert.equal(failedReceiptAfterAccepted.providerErrorCode, 'DELIVERY_REJECTED', '迟到发送成功响应不得清除先到达的失败回执错误码')
+    assert.equal(failedReceiptAfterAccepted.providerErrorMessage, '运营商拒绝接收', '迟到发送成功响应不得清除先到达的失败回执原因')
 
     let notifyNewerPnvsCheckStarted!: () => void
     let releaseNewerPnvsCheck!: () => void

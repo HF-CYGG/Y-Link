@@ -137,13 +137,15 @@ export class SmsVerificationRecordService {
         .set({
           sendStatus: 'sent',
           bizId: acceptedBizId,
-          providerErrorCode: null,
-          providerErrorMessage: null,
+          // 回执可能早于发送响应到达；已落库的送达失败原因必须保留给管理端排查。
+          providerErrorCode: () => 'CASE WHEN delivery_status = :deliveryFailed THEN provider_error_code ELSE NULL END',
+          providerErrorMessage: () => 'CASE WHEN delivery_status = :deliveryFailed THEN provider_error_message ELSE NULL END',
           sentAt: acceptedAt,
         })
         .where('id = :id', { id: record.id })
         .andWhere('send_status = :pending', { pending: 'pending' })
         .andWhere('expires_at > :acceptedAt', { acceptedAt })
+        .setParameters({ deliveryFailed: 'failed' })
         .execute()
       if (Number(acceptedUpdate.affected ?? 0) !== 1) {
         throw new BizError('本次短信验证码已被更新的验证码请求取代，请使用最新验证码', 409)
@@ -311,7 +313,8 @@ export class SmsVerificationRecordService {
       .where('channel = :channel', { channel: 'mobile' })
       .andWhere('scene = :scene', { scene: input.scene })
       .andWhere('target_digest = :targetDigest', { targetDigest: createTargetDigest(input.target.trim()) })
-      .andWhere('send_status IN (:...activeSendStatuses)', { activeSendStatuses: ['pending', 'sent'] })
+      // 请求异常暂记 failed 的记录仍可能被后续成功回执恢复，因此也必须持久化为不可恢复的取代状态。
+      .andWhere('send_status IN (:...supersedableSendStatuses)', { supersedableSendStatuses: ['pending', 'sent', 'failed'] })
       .andWhere('expires_at > :now', { now })
       .andWhere('verification_status <> :passed', { passed: 'passed' })
       .execute()
