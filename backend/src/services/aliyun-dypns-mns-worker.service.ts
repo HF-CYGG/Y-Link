@@ -101,6 +101,15 @@ function readFirstString(root: UnknownRecord, keys: string[], maxLength = 500): 
   return null
 }
 
+function readFirstExpiration(root: UnknownRecord, keys: string[]): unknown {
+  for (const key of keys) {
+    const value = root[key]
+    if (typeof value === 'number' && Number.isFinite(value)) return value
+    if (typeof value === 'string' && value.trim() && value.length <= 128) return value
+  }
+  return null
+}
+
 function parseAliyunDateTime(value: string): Date | null {
   const normalized = value.trim()
   const chinaDateTime = /^(\d{4})-(\d{2})-(\d{2})\s(\d{2}):(\d{2}):(\d{2})$/.exec(normalized)
@@ -123,9 +132,22 @@ function parseAliyunDateTime(value: string): Date | null {
   return Number.isFinite(parsed) ? new Date(parsed) : null
 }
 
+function parseAliyunExpiration(value: unknown): number {
+  const numericValue = typeof value === 'number'
+    ? value
+    : typeof value === 'string' && /^\d+$/.test(value.trim())
+      ? Number(value.trim())
+      : Number.NaN
+  if (Number.isSafeInteger(numericValue) && numericValue > 0) {
+    const milliseconds = numericValue < 1_000_000_000_000 ? numericValue * 1000 : numericValue
+    return Number.isFinite(new Date(milliseconds).getTime()) ? milliseconds : Number.NaN
+  }
+  return typeof value === 'string' ? (parseAliyunDateTime(value)?.getTime() ?? Number.NaN) : Number.NaN
+}
+
 function decodeReceiptBody(value: unknown): unknown {
-  if (isRecord(value)) return value
   if (Buffer.isBuffer(value)) value = value.toString('utf8')
+  if (isRecord(value)) return value
   if (typeof value !== 'string') throw new Error('回执消息体不是字符串')
   const source = value.trim()
   if (!source) throw new Error('回执消息体为空')
@@ -179,8 +201,8 @@ function readStsResponse(response: unknown): StsCredentials {
   if (!accessKeyId || !accessKeySecret || !securityToken) {
     throw new Error('阿里云 MNS 临时凭证响应缺少必要字段')
   }
-  const expiresRaw = readFirstString(data, ['Expiration', 'expiration', 'ExpireTime', 'expireTime'], 128)
-  const parsedExpiration = expiresRaw ? (parseAliyunDateTime(expiresRaw)?.getTime() ?? Number.NaN) : Number.NaN
+  const expiresRaw = readFirstExpiration(data, ['Expiration', 'expiration', 'ExpireTime', 'expireTime'])
+  const parsedExpiration = parseAliyunExpiration(expiresRaw)
   if (!Number.isFinite(parsedExpiration)) {
     throw new Error('阿里云 MNS 临时凭证响应缺少有效到期时间')
   }

@@ -5,6 +5,7 @@ CREATE TABLE IF NOT EXISTS `sms_verification_record` (
   `biz_id` VARCHAR(128) NULL COMMENT '阿里云业务标识',
   `channel` VARCHAR(16) NOT NULL DEFAULT 'mobile' COMMENT '验证码通道',
   `scene` VARCHAR(32) NOT NULL COMMENT '验证码业务场景',
+  `scheme_name` VARCHAR(20) NOT NULL DEFAULT '' COMMENT '发送时的阿里云方案名称',
   `target_digest` CHAR(64) NOT NULL COMMENT '手机号 HMAC 摘要',
   `target_masked` VARCHAR(32) NOT NULL COMMENT '脱敏手机号展示值',
   `send_status` VARCHAR(16) NOT NULL DEFAULT 'pending' COMMENT '发送受理状态',
@@ -20,6 +21,11 @@ CREATE TABLE IF NOT EXISTS `sms_verification_record` (
   `updated_at` DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6) ON UPDATE CURRENT_TIMESTAMP(6),
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+SET @ddl = CASE WHEN (SELECT COUNT(*) FROM information_schema.COLUMNS
+  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'sms_verification_record' AND COLUMN_NAME = 'scheme_name') = 0
+  THEN 'ALTER TABLE `sms_verification_record` ADD COLUMN `scheme_name` VARCHAR(20) NOT NULL DEFAULT '''' COMMENT ''发送时的阿里云方案名称'' AFTER `scene`' ELSE 'SELECT 1' END;
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 SET @ddl = CASE WHEN (SELECT COUNT(*) FROM information_schema.STATISTICS
   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'sms_verification_record' AND INDEX_NAME = 'uk_sms_verification_record_out_id') = 0

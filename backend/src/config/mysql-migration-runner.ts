@@ -139,6 +139,12 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
     minCharacterMaximumLength: 271,
   },
   { tableName: 'sms_verification_record', columnName: 'out_id', introducingScript: '039_aliyun_pnvs_sms_verification.sql' },
+  {
+    tableName: 'sms_verification_record',
+    columnName: 'scheme_name',
+    introducingScript: '039_aliyun_pnvs_sms_verification.sql',
+    minCharacterMaximumLength: 20,
+  },
   { tableName: 'sms_verification_record', columnName: 'target_digest', introducingScript: '039_aliyun_pnvs_sms_verification.sql' },
   { tableName: 'sms_verification_record', columnName: 'delivery_status', introducingScript: '039_aliyun_pnvs_sms_verification.sql' },
 ]

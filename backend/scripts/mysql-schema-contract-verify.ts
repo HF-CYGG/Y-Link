@@ -52,6 +52,7 @@ const REQUIRED_COLUMNS = [
   ['client_feedback_conversation', 'department_name_snapshot'],
   ['biz_outbound_order', 'customer_department_name'],
   ['sms_verification_record', 'out_id'],
+  ['sms_verification_record', 'scheme_name'],
   ['sms_verification_record', 'target_digest'],
   ['sms_verification_record', 'delivery_status'],
 ] as const
@@ -60,6 +61,7 @@ const REQUIRED_COLUMN_LENGTHS = new Map<string, number>([
   ['o2o_preorder.department_name_snapshot', 271],
   ['client_feedback_conversation.department_name_snapshot', 271],
   ['biz_outbound_order.customer_department_name', 271],
+  ['sms_verification_record.scheme_name', 20],
 ])
 
 interface IndexFixture {
@@ -232,13 +234,23 @@ await expectSchemaFailure(missingOutboxColumn, [
   '停止所有应用与通知 Worker',
 ])
 
+const missingSmsSchemeColumn = createCompleteFixture()
+missingSmsSchemeColumn.columns.delete(objectKey('sms_verification_record', 'scheme_name'))
+await expectSchemaFailure(missingSmsSchemeColumn, [
+  '字段 sms_verification_record.scheme_name',
+  '039_aliyun_pnvs_sms_verification.sql',
+])
+
 for (const [columnKey] of REQUIRED_COLUMN_LENGTHS) {
-  const shortDepartmentPathColumn = createCompleteFixture()
-  shortDepartmentPathColumn.columnLengths.set(columnKey, 128)
-  await expectSchemaFailure(shortDepartmentPathColumn, [
+  const shortRequiredColumn = createCompleteFixture()
+  shortRequiredColumn.columnLengths.set(columnKey, 1)
+  const introducingScript = columnKey === 'sms_verification_record.scheme_name'
+    ? '039_aliyun_pnvs_sms_verification.sql'
+    : '038_department_path_capacity.sql'
+  await expectSchemaFailure(shortRequiredColumn, [
     `字段 ${columnKey}`,
     '字符容量不足',
-    '038_department_path_capacity.sql',
+    introducingScript,
   ])
 }
 

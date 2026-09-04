@@ -207,6 +207,7 @@ export class VerificationCodeService {
         scene: input.scene,
         config: this.toAliyunDypnsConfig(provider),
       })
+      verificationTicketStore.delete(buildTicketKey(input.channel, normalizedTarget, input.scene))
       return result
     }
     const code = this.buildCode()
@@ -318,26 +319,25 @@ export class VerificationCodeService {
     code: string
   }): Promise<void> {
     const normalizedTarget = normalizeClientVerificationTarget(input.channel, input.target)
-    const configs = await systemConfigService.getVerificationProviderConfigs({ maskSensitiveValues: false })
-    const provider = configs[input.channel]
-    if (input.channel === 'mobile' && provider.providerType === 'aliyun_dypns') {
+    const key = buildTicketKey(input.channel, normalizedTarget, input.scene)
+    const ticket = verificationTicketStore.get(key)
+    if (ticket) {
+      if (ticket.code !== input.code.trim()) {
+        throw new BizError('验证码错误，请重新输入', 400)
+      }
+      verificationTicketStore.delete(key)
+      return
+    }
+    const canLookupDypnsRecord = (env.VERIFICATION_TICKET_HMAC_SECRET?.trim().length ?? 0) >= 32
+    if (input.channel === 'mobile' && canLookupDypnsRecord) {
       await this.smsRecordService.verify({
         target: normalizedTarget,
         scene: input.scene,
         code: input.code,
-        schemeName: provider.aliyunSchemeName,
       })
       return
     }
-    const key = buildTicketKey(input.channel, normalizedTarget, input.scene)
-    const ticket = verificationTicketStore.get(key)
-    if (!ticket) {
-      throw new BizError('验证码不存在或已过期，请重新获取', 400)
-    }
-    if (ticket.code !== input.code.trim()) {
-      throw new BizError('验证码错误，请重新输入', 400)
-    }
-    verificationTicketStore.delete(key)
+    throw new BizError('验证码不存在或已过期，请重新获取', 400)
   }
 }
 

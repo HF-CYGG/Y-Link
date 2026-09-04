@@ -36,6 +36,9 @@ export class SmsVerificationRecord {
   @Column({ name: 'scene', type: 'varchar', length: 32, comment: '验证码业务场景' })
   scene!: 'register' | 'forgot_password' | 'profile_update' | 'test'
 
+  @Column({ name: 'scheme_name', type: 'varchar', length: 20, default: '', comment: '发送时的阿里云方案名称' })
+  schemeName!: string
+
   @Column({ name: 'target_digest', type: 'varchar', length: 64, comment: '手机号 HMAC 摘要' })
   targetDigest!: string
 

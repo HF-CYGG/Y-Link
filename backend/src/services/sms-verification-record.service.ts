@@ -68,7 +68,6 @@ export interface VerifyDypnsVerificationInput {
   target: string
   scene: VerificationScene
   code: string
-  schemeName: string
 }
 
 export interface SmsReceiptUpdateInput {
@@ -95,6 +94,7 @@ export class SmsVerificationRecordService {
       bizId: null,
       channel: 'mobile',
       scene: input.scene,
+      schemeName: input.config.schemeName.trim(),
       targetDigest: createTargetDigest(target),
       targetMasked: maskMobileVerificationTarget(target),
       sendStatus: 'pending',
@@ -175,7 +175,7 @@ export class SmsVerificationRecordService {
         countryCode: '86',
         outId: record.outId,
         verifyCode: input.code.trim(),
-        schemeName: input.schemeName,
+        schemeName: record.schemeName,
       })
       if (result.code === 'OK' && result.success === true && result.verifyResult === 'PASS') {
         const updateResult = await this.recordRepo.createQueryBuilder()
