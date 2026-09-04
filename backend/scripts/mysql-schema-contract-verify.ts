@@ -1,6 +1,6 @@
 /**
  * 文件说明：MySQL 启动结构契约回归验证。
- * 实现逻辑：使用只读 DataSource 替身模拟完整库、漏执行 035/036/038 及同名错误索引，
+ * 实现逻辑：使用只读 DataSource 替身模拟完整库、漏执行 035/036/038/039 及同名错误索引，
  * 确认服务会在对外启动前阻断，并给出精确的增量脚本指引。
  */
 
@@ -30,6 +30,7 @@ const REQUIRED_TABLES = [
   'notification_dispatch',
   'auth_risk_state',
   'business_sequence',
+  'sms_verification_record',
 ] as const
 
 const REQUIRED_COLUMNS = [
@@ -50,6 +51,9 @@ const REQUIRED_COLUMNS = [
   ['o2o_preorder', 'department_name_snapshot'],
   ['client_feedback_conversation', 'department_name_snapshot'],
   ['biz_outbound_order', 'customer_department_name'],
+  ['sms_verification_record', 'out_id'],
+  ['sms_verification_record', 'target_digest'],
+  ['sms_verification_record', 'delivery_status'],
 ] as const
 
 const REQUIRED_COLUMN_LENGTHS = new Map<string, number>([
@@ -101,6 +105,18 @@ const REQUIRED_INDEXES: readonly IndexFixture[] = [
     indexName: 'uk_client_user_department_node_id',
     columns: ['department_node_id'],
     unique: true,
+  },
+  {
+    tableName: 'sms_verification_record',
+    indexName: 'uk_sms_verification_record_out_id',
+    columns: ['out_id'],
+    unique: true,
+  },
+  {
+    tableName: 'sms_verification_record',
+    indexName: 'idx_sms_verification_record_lookup',
+    columns: ['channel', 'scene', 'target_digest', 'expires_at'],
+    unique: false,
   },
 ]
 
@@ -194,6 +210,13 @@ await expectSchemaFailure(missingClientUser, [
   '006_o2o_preorder_schema.sql',
 ])
 
+const missingSmsVerificationRecord = createCompleteFixture()
+missingSmsVerificationRecord.tables.delete('sms_verification_record')
+await expectSchemaFailure(missingSmsVerificationRecord, [
+  '表 sms_verification_record',
+  '039_aliyun_pnvs_sms_verification.sql',
+])
+
 const missingIdempotencyColumn = createCompleteFixture()
 missingIdempotencyColumn.columns.delete(objectKey('o2o_preorder', 'client_request_hash'))
 await expectSchemaFailure(missingIdempotencyColumn, [
@@ -232,6 +255,21 @@ malformedOutboxIndex.indexes.set(
 await expectSchemaFailure(malformedOutboxIndex, [
   '索引 notification_dispatch.uk_notification_dispatch_event_channel_target',
   '036_notification_outbox.sql',
+])
+
+const malformedSmsOutIdIndex = createCompleteFixture()
+malformedSmsOutIdIndex.indexes.set(
+  objectKey('sms_verification_record', 'uk_sms_verification_record_out_id'),
+  {
+    tableName: 'sms_verification_record',
+    indexName: 'uk_sms_verification_record_out_id',
+    columns: ['biz_id'],
+    unique: true,
+  },
+)
+await expectSchemaFailure(malformedSmsOutIdIndex, [
+  '索引 sms_verification_record.uk_sms_verification_record_out_id',
+  '039_aliyun_pnvs_sms_verification.sql',
 ])
 
 console.log('[mysql-schema-contract-verify] MySQL 启动结构契约验证通过')

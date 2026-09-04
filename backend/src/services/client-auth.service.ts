@@ -176,8 +176,8 @@ class ClientAuthService {
       systemConfigService.getVerificationProviderConfigs(),
       systemConfigService.getClientDepartmentConfigs(),
     ])
-    const mobileEnabled = configs.mobile.enabled
-    const emailEnabled = configs.email.enabled
+    const mobileEnabled = configs.mobile.ready
+    const emailEnabled = configs.email.ready
 
     return {
       channels: {
@@ -188,7 +188,7 @@ class ClientAuthService {
         mobile: mobileEnabled ? 'verification_code' : 'captcha',
         email: emailEnabled ? 'verification_code' : 'captcha',
       },
-      forgotPasswordEnabled: mobileEnabled && emailEnabled,
+      forgotPasswordEnabled: mobileEnabled || emailEnabled,
       departmentTree: departmentConfigs.tree,
       departmentRootOptions: departmentConfigs.tree.map((node) => node.label),
       departmentOptions: departmentConfigs.options,
@@ -211,7 +211,7 @@ class ClientAuthService {
     this.verifyCaptchaIfRequired(input, '发送验证码前请先输入图形验证码')
   }
 
-  private verifyCodeIfRequired(
+  private async verifyCodeIfRequired(
     input: {
       verificationCode?: string
     },
@@ -225,7 +225,7 @@ class ClientAuthService {
     if (!input.verificationCode?.trim()) {
       throw new BizError(message, 400)
     }
-    verificationCodeService.verifyCode({
+    await verificationCodeService.verifyCode({
       channel: payload.channel,
       target: payload.target,
       scene: payload.scene,
@@ -348,7 +348,7 @@ class ClientAuthService {
     return normalized ? this.resolveAccount(normalized) : null
   }
 
-  private verifyRegisterChallenge(
+  private async verifyRegisterChallenge(
     input: ClientRegisterInput,
     validationMode: ClientValidationMode,
     account: ReturnType<ClientAuthService['resolveAccount']> | null,
@@ -362,7 +362,7 @@ class ClientAuthService {
       return
     }
     if (validationMode === 'verification_code') {
-      this.verifyCodeIfRequired(
+      await this.verifyCodeIfRequired(
         input,
         {
           channel: account.channel,
@@ -655,7 +655,7 @@ class ClientAuthService {
     if (isTeacherRegister) {
       await this.guardStaffInviteAttempt(registerProfile.staffNo ?? '', input.inviteCode ?? '', _requestMeta)
     } else {
-      this.verifyRegisterChallenge(input, validationMode, account)
+      await this.verifyRegisterChallenge(input, validationMode, account)
     }
     await this.assertRegisterIdentifiersAvailable(account, registerProfile)
 
@@ -783,11 +783,14 @@ class ClientAuthService {
   async verifyForgotPassword(input: ClientForgotVerifyInput, _requestMeta?: RequestMeta) {
     const capabilities = await this.getVerificationCapabilities()
     if (!capabilities.forgotPasswordEnabled) {
-      throw new BizError('当前系统未同时启用手机与邮箱验证码，暂不支持自助找回密码，请联系管理员手动修改密码', 400)
+      throw new BizError('当前系统未启用可用的手机或邮箱验证码，暂不支持自助找回密码，请联系管理员手动修改密码', 400)
     }
 
     const account = this.resolveAccount(input.account)
-    this.verifyCodeIfRequired(
+    if (!capabilities.channels[account.channel]) {
+      throw new BizError(`当前账号对应的${account.channel === 'email' ? '邮箱' : '手机'}验证码通道未启用，请联系管理员配置`, 400)
+    }
+    await this.verifyCodeIfRequired(
       input,
       {
         channel: account.channel,
@@ -991,15 +994,17 @@ class ClientAuthService {
     const mobileChanged = mobile !== user.mobile
     const emailChanged = email !== user.email
     const capabilities = await this.getVerificationCapabilities()
-    if (mobileChanged && mobile && capabilities.channels.mobile) {
+    if (mobileChanged && mobile) {
+      if (!capabilities.channels.mobile) throw new BizError('当前手机号验证码通道未启用，暂不能修改手机号', 400)
       if (!input.mobileVerificationCode) throw new BizError('请输入新手机号验证码', 400)
-      verificationCodeService.verifyCode({
+      await verificationCodeService.verifyCode({
         channel: 'mobile', target: mobile, scene: 'profile_update', code: input.mobileVerificationCode,
       })
     }
-    if (emailChanged && email && capabilities.channels.email) {
+    if (emailChanged && email) {
+      if (!capabilities.channels.email) throw new BizError('当前邮箱验证码通道未启用，暂不能修改邮箱', 400)
       if (!input.emailVerificationCode) throw new BizError('请输入新邮箱验证码', 400)
-      verificationCodeService.verifyCode({
+      await verificationCodeService.verifyCode({
         channel: 'email', target: email, scene: 'profile_update', code: input.emailVerificationCode,
       })
     }

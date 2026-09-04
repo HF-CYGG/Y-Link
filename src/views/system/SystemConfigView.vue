@@ -41,6 +41,7 @@ import {
   type CustomerServiceConfigRecord,
   type O2oRuleConfigRecord,
   type OrderSerialConfigRecord,
+  type SmsVerificationProviderType,
   type VerificationProviderConfigsResult,
 } from '@/api/modules/system-config'
 import { usePermissionAction } from '@/composables/usePermissionAction'
@@ -75,6 +76,18 @@ type VerificationFormValue = {
   headersTemplate: string
   bodyTemplate: string
   successMatch: string
+}
+
+type MobileVerificationFormValue = VerificationFormValue & {
+  providerType: SmsVerificationProviderType
+  aliyunSignName: string
+  aliyunSchemeName: string
+  aliyunTemplates: {
+    register: string
+    forgotPassword: string
+    profileUpdate: string
+    test: string
+  }
 }
 
 type ConfigSectionKey =
@@ -178,7 +191,7 @@ const serialForm = reactive<{
     workdayWeekdays: number[]
   }
   verification: {
-    mobile: VerificationFormValue
+    mobile: MobileVerificationFormValue
     email: VerificationFormValue
   }
   clientDepartmentTree: DepartmentTreeNode[]
@@ -211,11 +224,20 @@ const serialForm = reactive<{
   verification: {
     mobile: {
       enabled: false,
+      providerType: 'generic_http',
       httpMethod: 'POST',
       apiUrl: '',
       headersTemplate: '{"Content-Type":"application/json"}',
       bodyTemplate: '{"mobile":"{{target}}","code":"{{code}}","scene":"{{scene}}"}',
       successMatch: '',
+      aliyunSignName: '',
+      aliyunSchemeName: '',
+      aliyunTemplates: {
+        register: '',
+        forgotPassword: '',
+        profileUpdate: '',
+        test: '',
+      },
     },
     email: {
       enabled: false,
@@ -418,11 +440,20 @@ const snapshotForm = () =>
     verification: {
       mobile: {
         enabled: Boolean(serialForm.verification.mobile.enabled),
+        providerType: serialForm.verification.mobile.providerType,
         httpMethod: serialForm.verification.mobile.httpMethod,
         apiUrl: serialForm.verification.mobile.apiUrl.trim(),
         headersTemplate: serialForm.verification.mobile.headersTemplate.trim(),
         bodyTemplate: serialForm.verification.mobile.bodyTemplate.trim(),
         successMatch: serialForm.verification.mobile.successMatch.trim(),
+        aliyunSignName: serialForm.verification.mobile.aliyunSignName.trim(),
+        aliyunSchemeName: serialForm.verification.mobile.aliyunSchemeName.trim(),
+        aliyunTemplates: {
+          register: serialForm.verification.mobile.aliyunTemplates.register.trim(),
+          forgotPassword: serialForm.verification.mobile.aliyunTemplates.forgotPassword.trim(),
+          profileUpdate: serialForm.verification.mobile.aliyunTemplates.profileUpdate.trim(),
+          test: serialForm.verification.mobile.aliyunTemplates.test.trim(),
+        },
       },
       email: {
         enabled: Boolean(serialForm.verification.email.enabled),
@@ -586,11 +617,15 @@ const applyCustomerServiceConfigs = (config: CustomerServiceConfigRecord) => {
 const applyVerificationConfigs = (config: VerificationProviderConfigsResult) => {
   verificationConfigMap.value = config
   serialForm.verification.mobile.enabled = config.mobile.enabled
+  serialForm.verification.mobile.providerType = config.mobile.providerType
   serialForm.verification.mobile.httpMethod = config.mobile.httpMethod
   serialForm.verification.mobile.apiUrl = config.mobile.apiUrl
   serialForm.verification.mobile.headersTemplate = config.mobile.headersTemplate
   serialForm.verification.mobile.bodyTemplate = config.mobile.bodyTemplate
   serialForm.verification.mobile.successMatch = config.mobile.successMatch
+  serialForm.verification.mobile.aliyunSignName = config.mobile.aliyunSignName
+  serialForm.verification.mobile.aliyunSchemeName = config.mobile.aliyunSchemeName
+  serialForm.verification.mobile.aliyunTemplates = { ...config.mobile.aliyunTemplates }
 
   serialForm.verification.email.enabled = config.email.enabled
   serialForm.verification.email.httpMethod = config.email.httpMethod
@@ -668,6 +703,25 @@ const validateVerificationConfigs = () => {
   for (const channel of channels) {
     const label = getVerificationChannelLabel(channel)
     const config = serialForm.verification[channel]
+    const mobileConfig = serialForm.verification.mobile
+    if (channel === 'mobile' && mobileConfig.providerType === 'aliyun_dypns') {
+      if (mobileConfig.enabled && !mobileConfig.aliyunSignName.trim()) {
+        showTopWarning(`${label}启用阿里云 PNVS 时必须填写短信签名`)
+        return false
+      }
+      const requiredTemplates = [
+        ['注册', mobileConfig.aliyunTemplates.register],
+        ['找回密码', mobileConfig.aliyunTemplates.forgotPassword],
+        ['资料修改', mobileConfig.aliyunTemplates.profileUpdate],
+        ['测试', mobileConfig.aliyunTemplates.test],
+      ] as const
+      const missingTemplate = requiredTemplates.find(([, templateCode]) => mobileConfig.enabled && !templateCode.trim())
+      if (missingTemplate) {
+        showTopWarning(`${label}启用阿里云 PNVS 时必须填写${missingTemplate[0]}模板码`)
+        return false
+      }
+      continue
+    }
     if (config.enabled && !config.apiUrl.trim()) {
       showTopWarning(`${label}已启用时必须填写 API 地址`)
       return false
@@ -986,6 +1040,24 @@ const validateSingleVerificationConfig = (channel: 'mobile' | 'email') => {
     showTopWarning(`${label}未启用，无法发送测试消息`)
     return false
   }
+  const mobileConfig = serialForm.verification.mobile
+  if (channel === 'mobile' && mobileConfig.providerType === 'aliyun_dypns') {
+    if (!mobileConfig.aliyunSignName.trim()) {
+      showTopWarning(`${label}未填写阿里云短信签名，无法发送测试消息`)
+      return false
+    }
+    const missingTemplate = [
+      ['注册', mobileConfig.aliyunTemplates.register],
+      ['找回密码', mobileConfig.aliyunTemplates.forgotPassword],
+      ['资料修改', mobileConfig.aliyunTemplates.profileUpdate],
+      ['测试', mobileConfig.aliyunTemplates.test],
+    ].find(([, templateCode]) => !templateCode.trim())
+    if (missingTemplate) {
+      showTopWarning(`${label}未填写阿里云${missingTemplate[0]}模板码，无法发送测试消息`)
+      return false
+    }
+    return true
+  }
   if (!config.apiUrl.trim()) {
     showTopWarning(`${label}未填写 API 地址，无法发送测试消息`)
     return false
@@ -1000,13 +1072,28 @@ const validateSingleVerificationConfig = (channel: 'mobile' | 'email') => {
 }
 
 const buildVerificationChannelPayload = (channel: 'mobile' | 'email') => {
-  return {
+  const commonConfig = {
     enabled: serialForm.verification[channel].enabled,
     httpMethod: serialForm.verification[channel].httpMethod,
     apiUrl: serialForm.verification[channel].apiUrl.trim(),
     headersTemplate: serialForm.verification[channel].headersTemplate.trim(),
     bodyTemplate: serialForm.verification[channel].bodyTemplate.trim(),
     successMatch: serialForm.verification[channel].successMatch.trim(),
+  }
+  if (channel === 'email') {
+    return commonConfig
+  }
+  return {
+    ...commonConfig,
+    providerType: serialForm.verification.mobile.providerType,
+    aliyunSignName: serialForm.verification.mobile.aliyunSignName.trim(),
+    aliyunSchemeName: serialForm.verification.mobile.aliyunSchemeName.trim(),
+    aliyunTemplates: {
+      register: serialForm.verification.mobile.aliyunTemplates.register.trim(),
+      forgotPassword: serialForm.verification.mobile.aliyunTemplates.forgotPassword.trim(),
+      profileUpdate: serialForm.verification.mobile.aliyunTemplates.profileUpdate.trim(),
+      test: serialForm.verification.mobile.aliyunTemplates.test.trim(),
+    },
   }
 }
 
@@ -1037,7 +1124,11 @@ const handleTestVerificationSend = async (channel: 'mobile' | 'email') => {
       target: promptResult.value.trim(),
       config: buildVerificationChannelPayload(channel),
     })
-    showTopSuccess(`${channel === 'mobile' ? '测试短信' : '测试邮件'}已发送至 ${result.target}`)
+    if ('provider' in result && result.provider === 'aliyun_dypns') {
+      showTopSuccess(`测试短信已受理，目标：${result.targetMasked}，outId：${result.outId}，bizId：${result.bizId || '-'}`)
+    } else if ('target' in result) {
+      showTopSuccess(`${channel === 'mobile' ? '测试短信' : '测试邮件'}已发送至 ${result.target}`)
+    }
   } catch (error) {
     if (error === 'cancel' || error === 'close') {
       return
@@ -1321,11 +1412,20 @@ const handleSubmit = async () => {
     const verificationResult = await updateVerificationProviderConfigs({
       mobile: {
         enabled: serialForm.verification.mobile.enabled,
+        providerType: serialForm.verification.mobile.providerType,
         httpMethod: serialForm.verification.mobile.httpMethod,
         apiUrl: serialForm.verification.mobile.apiUrl.trim(),
         headersTemplate: serialForm.verification.mobile.headersTemplate.trim(),
         bodyTemplate: serialForm.verification.mobile.bodyTemplate.trim(),
         successMatch: serialForm.verification.mobile.successMatch.trim(),
+        aliyunSignName: serialForm.verification.mobile.aliyunSignName.trim(),
+        aliyunSchemeName: serialForm.verification.mobile.aliyunSchemeName.trim(),
+        aliyunTemplates: {
+          register: serialForm.verification.mobile.aliyunTemplates.register.trim(),
+          forgotPassword: serialForm.verification.mobile.aliyunTemplates.forgotPassword.trim(),
+          profileUpdate: serialForm.verification.mobile.aliyunTemplates.profileUpdate.trim(),
+          test: serialForm.verification.mobile.aliyunTemplates.test.trim(),
+        },
       },
       email: {
         enabled: serialForm.verification.email.enabled,
@@ -1540,6 +1640,7 @@ onActivated(() => {
                 <SystemConfigVerificationSection
                   v-else-if="activeSection === 'verification'"
                   :verification-form="serialForm.verification"
+                  :mobile-provider-status="verificationConfigMap?.mobile ?? null"
                   :can-update-configs="canUpdateConfigs"
                   :can-test-verification-providers="canTestVerificationProviders"
                   :loading="activeSectionInteractionLoading"
