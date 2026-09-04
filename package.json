@@ -48,7 +48,8 @@
     "verify:onebox:dual-db-performance": "node ./scripts/verify-onebox-dual-db-performance.mjs",
     "verify:govern-routing-dockerize": "node ./scripts/verify-govern-routing-and-dockerize.mjs",
     "verify:mobile:workspace": "node --no-warnings --experimental-strip-types ./scripts/verify-mobile-workspace.mjs",
-    "verify:verification:pnvs-frontend": "node ./scripts/verify-verification-pnvs-frontend.mjs"
+    "verify:verification:pnvs-frontend": "node ./scripts/verify-verification-pnvs-frontend.mjs",
+    "verify:notification-rule:webhook-preservation": "node ./scripts/verify-notification-rule-webhook-validation.mjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.2",

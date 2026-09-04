@@ -686,7 +686,7 @@ const validateNotificationRules = () => {
       showTopWarning(`规则“${rule.ruleName}”启用邮箱提醒时必须选择邮件接收账号`)
       return false
     }
-    if (rule.feishuEnabled && !rule.feishuWebhookUrl.trim()) {
+    if (rule.feishuEnabled && !rule.feishuWebhookUrl.trim() && !rule.feishuWebhookConfigured) {
       showTopWarning(`规则“${rule.ruleName}”启用飞书提醒时必须填写 Webhook 地址`)
       return false
     }
