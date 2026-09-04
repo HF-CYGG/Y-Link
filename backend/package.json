@@ -20,6 +20,7 @@
     "release:verify": "tsx scripts/release-full-regression-verify.ts",
     "security:hardening:verify": "tsx scripts/security-hardening-verify.ts",
     "security:findings:verify": "tsx scripts/security-findings-remediation-verify.ts",
+    "verification:aliyun:verify": "tsx scripts/verification-aliyun-verify.ts",
     "spec:fix-order-product-tag-consistency:verify": "tsx scripts/fix-order-product-tag-consistency-verify.ts",
     "task1:verify": "tsx scripts/task1-verify.ts",
     "task2:verify": "tsx scripts/task2-verify.ts",
@@ -54,6 +55,9 @@
     "uploads:legacy:inspect": "tsx scripts/inspect-legacy-upload-urls.ts"
   },
   "dependencies": {
+    "@alicloud/dypnsapi20170525": "^2.0.0",
+    "@alicloud/mns": "^1.2.0",
+    "@alicloud/pop-core": "^1.8.0",
     "dotenv": "^16.6.1",
     "exceljs": "^4.4.0",
     "express": "^4.21.2",

@@ -23,8 +23,9 @@ import {
 import { auditService } from './audit.service.js'
 import { EphemeralTicketStore } from '../utils/ephemeral-ticket-store.js'
 import { safeHttpRequest } from '../utils/safe-http-request.js'
-
-type VerificationScene = 'register' | 'forgot_password' | 'profile_update' | 'test'
+import { maskMobileVerificationTarget, smsVerificationRecordService, type SmsVerificationRecordService } from './sms-verification-record.service.js'
+import type { AliyunDypnsProviderConfig } from './aliyun-dypns-sms.service.js'
+import type { VerificationScene } from './system-config.service.js'
 
 interface VerificationCodeTicket {
   channel: VerificationChannelType
@@ -45,6 +46,7 @@ const buildTicketKey = (channel: VerificationChannelType, target: string, scene:
 export class VerificationCodeService {
   constructor(
     private readonly httpRequest: typeof safeHttpRequest = safeHttpRequest,
+    private readonly smsRecordService: Pick<SmsVerificationRecordService, 'send' | 'verify' | 'invalidateActiveForTarget'> = smsVerificationRecordService,
   ) {}
 
   /**
@@ -62,11 +64,27 @@ export class VerificationCodeService {
     }
     return {
       enabled: config.enabled,
+      ready: config.ready,
       httpMethod: config.httpMethod,
       endpoint,
       hasHeadersTemplate: Boolean(config.headersTemplate.trim()),
       hasBodyTemplate: Boolean(config.bodyTemplate.trim()),
       hasSuccessMatch: Boolean(config.successMatch.trim()),
+      providerType: config.providerType,
+      aliyun: config.providerType === 'aliyun_dypns'
+        ? {
+            signNameConfigured: Boolean(config.aliyunSignName.trim()),
+            schemeNameConfigured: Boolean(config.aliyunSchemeName.trim()),
+            templateConfigured: Object.fromEntries(
+              Object.entries(config.aliyunTemplates).map(([scene, templateCode]) => [scene, Boolean(templateCode.trim())]),
+            ),
+            credentialsConfigured: config.credentialsConfigured,
+            ticketHmacConfigured: config.ticketHmacConfigured,
+            mnsEnabled: config.mnsEnabled,
+            mnsConfigured: config.mnsConfigured,
+            statusError: config.statusError,
+          }
+        : undefined,
     }
   }
 
@@ -74,15 +92,25 @@ export class VerificationCodeService {
     return String(randomInt(100000, 1000000))
   }
 
-  private normalizeProviderConfig(config: VerificationProviderConfigInput): VerificationProviderConfigRecord {
+  private normalizeProviderConfig(config: VerificationProviderConfigRecord): VerificationProviderConfigRecord {
     return {
       enabled: Boolean(config.enabled),
+      ready: Boolean(config.ready),
       httpMethod: config.httpMethod === 'GET' ? 'GET' : 'POST',
       apiUrl: config.apiUrl.trim(),
       headersTemplate: config.headersTemplate.trim(),
       bodyTemplate: config.bodyTemplate.trim(),
       successMatch: config.successMatch.trim(),
       updatedAt: new Date(),
+      providerType: config.providerType,
+      aliyunSignName: config.aliyunSignName.trim(),
+      aliyunSchemeName: config.aliyunSchemeName.trim(),
+      aliyunTemplates: config.aliyunTemplates,
+      credentialsConfigured: config.credentialsConfigured,
+      ticketHmacConfigured: config.ticketHmacConfigured,
+      mnsEnabled: config.mnsEnabled,
+      mnsConfigured: config.mnsConfigured,
+      statusError: config.statusError,
     }
   }
 
@@ -153,6 +181,14 @@ export class VerificationCodeService {
     }
   }
 
+  private toAliyunDypnsConfig(config: VerificationProviderConfigRecord): AliyunDypnsProviderConfig {
+    return {
+      signName: config.aliyunSignName,
+      schemeName: config.aliyunSchemeName,
+      templates: config.aliyunTemplates,
+    }
+  }
+
   async sendCode(input: {
     channel: VerificationChannelType
     target: string
@@ -162,6 +198,18 @@ export class VerificationCodeService {
     const normalizedTarget = normalizeClientVerificationTarget(input.channel, input.target)
     const configs = await systemConfigService.getVerificationProviderConfigs({ maskSensitiveValues: false })
     const provider = configs[input.channel]
+    if (!provider.ready) {
+      throw new BizError(provider.statusError ?? '当前验证码通道未就绪，请联系管理员配置', 400)
+    }
+    if (input.channel === 'mobile' && provider.providerType === 'aliyun_dypns') {
+      const result = await this.smsRecordService.send({
+        target: normalizedTarget,
+        scene: input.scene,
+        config: this.toAliyunDypnsConfig(provider),
+      })
+      verificationTicketStore.delete(buildTicketKey(input.channel, normalizedTarget, input.scene))
+      return result
+    }
     const code = this.buildCode()
     await this.sendByProvider(provider, {
       target: normalizedTarget,
@@ -169,6 +217,13 @@ export class VerificationCodeService {
       scene: input.scene,
       ip: input.requestMeta?.ipAddress?.trim() || '',
     })
+    if (input.channel === 'mobile' && (env.VERIFICATION_TICKET_HMAC_SECRET?.trim().length ?? 0) >= 32) {
+      // 通用短信发送成功后必须持久化作废同手机号、同场景的旧 PNVS 记录，避免本地票据消费后回退核验旧动态码。
+      await this.smsRecordService.invalidateActiveForTarget({
+        target: normalizedTarget,
+        scene: input.scene,
+      })
+    }
     verificationTicketStore.set(buildTicketKey(input.channel, normalizedTarget, input.scene), {
       channel: input.channel,
       target: normalizedTarget,
@@ -177,6 +232,7 @@ export class VerificationCodeService {
       expiresAt: Date.now() + CODE_EXPIRE_MS,
     })
     return {
+      provider: 'generic_http' as const,
       expireSeconds: Math.floor(CODE_EXPIRE_MS / 1000),
     }
   }
@@ -189,10 +245,36 @@ export class VerificationCodeService {
     requestMeta?: RequestMeta
   }) {
     const normalizedTarget = normalizeClientVerificationTarget(input.channel, input.target)
-    const code = this.buildCode()
     const resolvedConfig = await systemConfigService.resolveVerificationProviderConfigInput(input.channel, input.config)
     const normalizedConfig = this.normalizeProviderConfig(resolvedConfig)
     try {
+      if (!normalizedConfig.ready) {
+        throw new BizError(normalizedConfig.statusError ?? '当前验证码通道未就绪，请联系管理员配置', 400)
+      }
+      if (input.channel === 'mobile' && normalizedConfig.providerType === 'aliyun_dypns') {
+        const data = await this.smsRecordService.send({
+          target: normalizedTarget,
+          scene: 'test',
+          config: this.toAliyunDypnsConfig(normalizedConfig),
+        })
+        await auditService.safeRecord({
+          actionType: 'system_config.test_verification_provider',
+          actionLabel: '测试验证码平台发送',
+          targetType: 'verification_provider',
+          targetCode: input.channel,
+          actor: input.actor,
+          requestMeta: input.requestMeta,
+          detail: {
+            channel: input.channel,
+            target: maskMobileVerificationTarget(normalizedTarget),
+            provider: this.buildProviderAuditSummary(normalizedConfig),
+            outId: data.outId,
+            bizId: data.bizId,
+          },
+        })
+        return data
+      }
+      const code = this.buildCode()
       await this.sendByProvider(normalizedConfig, {
         target: normalizedTarget,
         code,
@@ -208,13 +290,13 @@ export class VerificationCodeService {
         requestMeta: input.requestMeta,
         detail: {
           channel: input.channel,
-          target: normalizedTarget,
+          target: input.channel === 'mobile' ? maskMobileVerificationTarget(normalizedTarget) : '[已脱敏邮箱]',
           provider: this.buildProviderAuditSummary(normalizedConfig),
         },
       })
       return {
         channel: input.channel,
-        target: normalizedTarget,
+        target: input.channel === 'mobile' ? maskMobileVerificationTarget(normalizedTarget) : '[已脱敏邮箱]',
         code,
       }
     } catch (error) {
@@ -228,7 +310,7 @@ export class VerificationCodeService {
         resultStatus: 'failed',
         detail: {
           channel: input.channel,
-          target: normalizedTarget,
+          target: input.channel === 'mobile' ? maskMobileVerificationTarget(normalizedTarget) : '[已脱敏邮箱]',
           provider: this.buildProviderAuditSummary(normalizedConfig),
           errorMessage: error instanceof Error ? error.message : String(error),
         },
@@ -237,22 +319,32 @@ export class VerificationCodeService {
     }
   }
 
-  verifyCode(input: {
+  async verifyCode(input: {
     channel: VerificationChannelType
     target: string
     scene: VerificationScene
     code: string
-  }) {
+  }): Promise<void> {
     const normalizedTarget = normalizeClientVerificationTarget(input.channel, input.target)
     const key = buildTicketKey(input.channel, normalizedTarget, input.scene)
     const ticket = verificationTicketStore.get(key)
-    if (!ticket) {
-      throw new BizError('验证码不存在或已过期，请重新获取', 400)
+    if (ticket) {
+      if (ticket.code !== input.code.trim()) {
+        throw new BizError('验证码错误，请重新输入', 400)
+      }
+      verificationTicketStore.delete(key)
+      return
     }
-    if (ticket.code !== input.code.trim()) {
-      throw new BizError('验证码错误，请重新输入', 400)
+    const canLookupDypnsRecord = (env.VERIFICATION_TICKET_HMAC_SECRET?.trim().length ?? 0) >= 32
+    if (input.channel === 'mobile' && canLookupDypnsRecord) {
+      await this.smsRecordService.verify({
+        target: normalizedTarget,
+        scene: input.scene,
+        code: input.code,
+      })
+      return
     }
-    verificationTicketStore.delete(key)
+    throw new BizError('验证码不存在或已过期，请重新获取', 400)
   }
 }
 

@@ -1,0 +1,784 @@
+/**
+ * 阿里云 PNVS 短信验证码专项验证：
+ * - 使用临时 SQLite，不访问阿里云或 MNS；
+ * - 覆盖系统配置默认值、脱敏就绪态、服务端动态码和回执落库契约；
+ * - 外部 SDK 均通过依赖注入替身驱动，避免专项验证产生真实发送。
+ */
+
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const runId = `${process.pid}-${Date.now()}`
+const runtimeDir = path.join(os.tmpdir(), `ylink-aliyun-pnvs-${runId}`)
+const sqlitePath = path.join(runtimeDir, 'verification.sqlite')
+const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+
+const requiredRuntimeVariables = [
+  'VERIFICATION_CODE_REQUEST_TIMEOUT_MS',
+  'ALIBABA_CLOUD_ACCESS_KEY_ID',
+  'ALIBABA_CLOUD_ACCESS_KEY_SECRET',
+  'VERIFICATION_TICKET_HMAC_SECRET',
+  'ALIYUN_DYPNS_MNS_ENABLED',
+]
+
+for (const composePath of ['compose.yml', 'compose.cloud.yml', 'compose.mysql.yml', 'compose.onebox.yml']) {
+  const composeContent = fs.readFileSync(path.join(projectRoot, composePath), 'utf8')
+  for (const variableName of requiredRuntimeVariables) {
+    const bindingPattern = new RegExp(
+      `^\\s*(?:-\\s*)?${variableName}(?::|=)\\s*\\$\\{${variableName}(?::-[^}]*)?\\}\\s*$`,
+      'm',
+    )
+    assert.match(composeContent, bindingPattern, `${composePath} 必须把 ${variableName} 透传给后端容器`)
+  }
+}
+
+for (const envTemplatePath of ['.env.docker.cloud.example', '.env.docker.mysql.example', '.env.onebox.example']) {
+  const envTemplateContent = fs.readFileSync(path.join(projectRoot, envTemplatePath), 'utf8')
+  for (const variableName of requiredRuntimeVariables) {
+    assert.match(
+      envTemplateContent,
+      new RegExp(`^${variableName}=`, 'm'),
+      `${envTemplatePath} 必须声明 ${variableName}`,
+    )
+  }
+}
+
+process.env.NODE_ENV = 'test'
+process.env.APP_PROFILE = `aliyun-pnvs-${runId}`
+process.env.DB_TYPE = 'sqlite'
+process.env.DB_SYNC = 'true'
+process.env.SQLITE_DB_PATH = sqlitePath
+process.env.Y_LINK_DATA_DIR = runtimeDir
+process.env.INIT_ADMIN_PASSWORD = `Pnvs_${runId}_Aa1!`
+process.env.VERIFICATION_CODE_REQUEST_TIMEOUT_MS = '4321'
+process.env.VERIFICATION_TICKET_HMAC_SECRET = `pnvs-ticket-${runId}-minimum-32-characters-secret`
+process.env.ALIBABA_CLOUD_ACCESS_KEY_ID = 'test-access-key-id'
+process.env.ALIBABA_CLOUD_ACCESS_KEY_SECRET = 'test-access-key-secret'
+process.env.ALIYUN_DYPNS_MNS_ENABLED = 'true'
+
+async function main() {
+  fs.mkdirSync(runtimeDir, { recursive: true })
+  const { AppDataSource } = await import('../src/config/data-source.js')
+  const { prepareDatabaseRuntime, initializeDatabaseSchemaIfNeeded } = await import('../src/config/database-bootstrap.js')
+  const { systemConfigService } = await import('../src/services/system-config.service.js')
+
+  try {
+    prepareDatabaseRuntime()
+    await AppDataSource.initialize()
+    await initializeDatabaseSchemaIfNeeded(AppDataSource)
+    await systemConfigService.ensureDefaultConfigs()
+
+    const configs = await systemConfigService.getVerificationProviderConfigs()
+    const mobile = configs.mobile as unknown as { providerType?: string; ready?: boolean }
+    assert.equal(mobile.providerType, 'generic_http', '旧数据库默认短信提供方必须兼容 generic_http')
+    assert.equal(mobile.ready, false, '未启用或未配置地址的默认短信通道不得标记为就绪')
+
+    const { SystemConfig } = await import('../src/entities/system-config.entity.js')
+    const { SmsVerificationRecord } = await import('../src/entities/sms-verification-record.entity.js')
+    const { SmsVerificationRecordService } = await import('../src/services/sms-verification-record.service.js')
+    const { VerificationCodeService } = await import('../src/services/verification-code.service.js')
+    const { AliyunDypnsMnsWorkerService } = await import('../src/services/aliyun-dypns-mns-worker.service.js')
+    const { AliyunDypnsSmsProvider } = await import('../src/services/aliyun-dypns-sms.service.js')
+    const { clientAuthService } = await import('../src/services/client-auth.service.js')
+    const { databaseMaintenanceModeService } = await import('../src/services/database-maintenance-mode.service.js')
+    const configRepo = AppDataSource.getRepository(SystemConfig)
+    const recordRepo = AppDataSource.getRepository(SmsVerificationRecord)
+    await configRepo.createQueryBuilder().update(SystemConfig)
+      .set({ configValue: 'https://example.com/legacy-sms-provider' })
+      .where('config_key = :key', { key: 'verification.mobile.api_url' })
+      .execute()
+    const switchedConfig = await systemConfigService.resolveVerificationProviderConfigInput('mobile', {
+      enabled: false,
+      httpMethod: 'POST',
+      apiUrl: '',
+      headersTemplate: '',
+      bodyTemplate: '',
+      successMatch: '',
+      providerType: 'aliyun_dypns',
+    })
+    assert.equal(switchedConfig.providerType, 'aliyun_dypns')
+    assert.equal(switchedConfig.apiUrl, 'https://example.com/legacy-sms-provider', '切换阿里云短信时不得清空旧 HTTP 配置')
+    assert.equal('accessKeyId' in switchedConfig, false, '配置读取不得返回阿里云访问密钥')
+    const sentRequests: Array<Record<string, unknown>> = []
+    const checkedRequests: Array<Record<string, unknown>> = []
+    let verifyResult = 'PASS'
+    let providerSendRequest: Record<string, unknown> | null = null
+    let providerCheckRequest: Record<string, unknown> | null = null
+    let providerSendRuntime: Record<string, unknown> | null = null
+    let providerCheckRuntime: Record<string, unknown> | null = null
+    const sdkProvider = new AliyunDypnsSmsProvider(() => ({
+      async sendSmsVerifyCodeWithOptions(request, runtime) {
+        providerSendRequest = request as unknown as Record<string, unknown>
+        providerSendRuntime = runtime as Record<string, unknown>
+        return { body: { code: 'OK', success: true, model: { bizId: 'sdk-biz-id' } } }
+      },
+      async checkSmsVerifyCodeWithOptions(request, runtime) {
+        providerCheckRequest = request as unknown as Record<string, unknown>
+        providerCheckRuntime = runtime as Record<string, unknown>
+        return { body: { code: 'OK', success: true, model: { verifyResult: 'PASS' } } }
+      },
+    }))
+    const sdkOutId = '11111111-2222-4333-8444-555555555555'
+    await sdkProvider.send({
+      phoneNumber: '13800001111', countryCode: '86', outId: sdkOutId, scene: 'register',
+      config: {
+        signName: 'Y-Link 测试签名', schemeName: 'verify-scheme',
+        templates: { register: 'SMS_REGISTER', forgotPassword: 'SMS_FORGOT', profileUpdate: 'SMS_PROFILE', test: 'SMS_TEST' },
+      },
+    })
+    assert.deepEqual({ ...providerSendRequest }, {
+      phoneNumber: '13800001111', countryCode: '86', outId: sdkOutId, signName: 'Y-Link 测试签名', schemeName: 'verify-scheme',
+      templateCode: 'SMS_REGISTER', templateParam: '{"code":"##code##","min":"5"}', codeLength: 6, validTime: 300,
+      interval: 60, returnVerifyCode: false, duplicatePolicy: 1, codeType: 1, autoRetry: 1,
+    }, '动态码发送必须固定使用 PNVS 服务端生成参数')
+    assert.deepEqual({ ...providerSendRuntime }, { connectTimeout: 4321, readTimeout: 4321 }, 'PNVS 发送必须遵守统一验证码请求超时')
+    await sdkProvider.check({ phoneNumber: '13800001111', countryCode: '86', outId: sdkOutId, verifyCode: '123456', schemeName: 'verify-scheme' })
+    assert.deepEqual({ ...providerCheckRequest }, {
+      phoneNumber: '13800001111', countryCode: '86', outId: sdkOutId, verifyCode: '123456', schemeName: 'verify-scheme',
+    }, '动态码核验必须复用手机号、国家码、服务名和 outId')
+    assert.deepEqual({ ...providerCheckRuntime }, { connectTimeout: 4321, readTimeout: 4321 }, 'PNVS 核验必须遵守统一验证码请求超时')
+    const recordService = new SmsVerificationRecordService({
+      async send(input) {
+        sentRequests.push({ ...input })
+        return { code: 'OK', success: true, bizId: 'biz-verify-001' }
+      },
+      async check(input) {
+        checkedRequests.push({ ...input })
+        return { code: 'OK', success: true, verifyResult }
+      },
+    })
+    const genericCodes: string[] = []
+    const verificationService = new VerificationCodeService(async (_url, init) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as { code?: string }
+      if (body.code) genericCodes.push(body.code)
+      return { statusCode: 200, headers: {}, body: Buffer.from('ok') }
+    }, recordService)
+    const dypnsConfig = {
+      signName: 'Y-Link 测试签名',
+      schemeName: '',
+      templates: { register: 'SMS_REGISTER', forgotPassword: 'SMS_FORGOT', profileUpdate: 'SMS_PROFILE', test: 'SMS_TEST' },
+    }
+
+    await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: '1' }).where('config_key = :key', { key: 'verification.mobile.enabled' }).execute()
+    await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'aliyun_dypns' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
+    const unavailableCapabilities = await clientAuthService.getCapabilities()
+    assert.equal(unavailableCapabilities.channels.mobile, false, '配置不完整的短信通道不得声明为可发送')
+    assert.equal(
+      unavailableCapabilities.registerValidationModes.mobile,
+      'verification_code',
+      '已启用但未就绪的短信通道不得把注册校验降级为图形验证码',
+    )
+    await assert.rejects(
+      () => clientAuthService.register({
+        accountType: 'personal',
+        username: '未就绪通道',
+        account: '13800009999',
+        password: `PnvsClient_${runId}_Aa1!`,
+        verificationCode: '123456',
+      }),
+      /阿里云 PNVS 短信签名或场景模板码未配置完整/,
+      '注册必须明确拒绝已启用但未就绪的验证码通道',
+    )
+    await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'Y-Link 测试签名' }).where('config_key = :key', { key: 'verification.mobile.aliyun_sign_name' }).execute()
+    await Promise.all([
+      ['verification.mobile.aliyun_template_register', 'SMS_REGISTER'],
+      ['verification.mobile.aliyun_template_forgot_password', 'SMS_FORGOT'],
+      ['verification.mobile.aliyun_template_profile_update', 'SMS_PROFILE'],
+      ['verification.mobile.aliyun_template_test', 'SMS_TEST'],
+    ].map(([key, value]) => configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: value }).where('config_key = :key', { key }).execute()))
+    await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'scheme-before-switch' }).where('config_key = :key', { key: 'verification.mobile.aliyun_scheme_name' }).execute()
+    const readyConfigs = await systemConfigService.getVerificationProviderConfigs()
+    assert.equal(readyConfigs.mobile.ready, true, '阿里云短信只有启用、签名、模板、AK 和 HMAC 均就绪时才可用')
+    assert.equal((await clientAuthService.getCapabilities()).channels.mobile, true, '客户端能力必须基于 provider ready 而不是单独 enabled')
+
+    await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: '0' }).where('config_key = :key', { key: 'verification.mobile.enabled' }).execute()
+    await assert.rejects(
+      () => verificationService.sendCode({ channel: 'mobile', target: '13800001111', scene: 'register' }),
+      /未就绪/,
+      '公共发送必须拒绝已关闭的阿里云短信通道',
+    )
+    await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: '1' }).where('config_key = :key', { key: 'verification.mobile.enabled' }).execute()
+
+    const superseded = await verificationService.sendCode({ channel: 'mobile', target: '13800001111', scene: 'register' })
+    const sent = await verificationService.sendCode({ channel: 'mobile', target: '13800001111', scene: 'register' })
+    assert.equal(sent.provider, 'aliyun_dypns')
+    assert.equal('code' in sent, false, '阿里云动态码发送结果不得向调用方返回验证码')
+    assert.match(sent.outId, /^[0-9a-f-]{36}$/i)
+    assert.equal(sent.targetMasked, '138****1111')
+    assert.deepEqual(sentRequests.at(-1), {
+      phoneNumber: '13800001111',
+      countryCode: '86',
+      outId: sent.outId,
+      scene: 'register',
+      config: {
+        signName: 'Y-Link 测试签名',
+        schemeName: 'scheme-before-switch',
+        templates: { register: 'SMS_REGISTER', forgotPassword: 'SMS_FORGOT', profileUpdate: 'SMS_PROFILE', test: 'SMS_TEST' },
+      },
+    })
+    const acceptedRecord = await recordRepo.findOneByOrFail({ outId: sent.outId })
+    assert.equal(acceptedRecord.sendStatus, 'sent')
+    assert.equal(acceptedRecord.schemeName, 'scheme-before-switch', '发送记录必须保存当次 SchemeName 快照')
+    assert.equal(JSON.stringify(acceptedRecord).includes('13800001111'), false, '记录不得保存完整手机号')
+    assert.equal(JSON.stringify(acceptedRecord).includes('123456'), false, '记录不得保存验证码')
+
+    await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'generic_http' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
+    await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'scheme-after-switch' }).where('config_key = :key', { key: 'verification.mobile.aliyun_scheme_name' }).execute()
+    await verificationService.verifyCode({ channel: 'mobile', target: '13800001111', scene: 'register', code: '123456' })
+    assert.deepEqual(checkedRequests[0], {
+      phoneNumber: '13800001111', countryCode: '86', outId: sent.outId, verifyCode: '123456', schemeName: 'scheme-before-switch',
+    }, '核验必须使用发送时保存的 Provider 与 SchemeName，而不是当前管理端配置')
+    assert.equal((await recordRepo.findOneByOrFail({ outId: sent.outId })).verificationStatus, 'passed')
+    const checkedAfterLatestPass = checkedRequests.length
+    await assert.rejects(
+      () => verificationService.verifyCode({ channel: 'mobile', target: '13800001111', scene: 'register', code: '123456' }),
+      /验证码已完成核验/,
+      '最新验证码通过后不得回退核验更早的 PNVS 记录',
+    )
+    assert.equal(checkedRequests.length, checkedAfterLatestPass, '重复核验必须在调用阿里云前被拒绝')
+    assert.equal((await recordRepo.findOneByOrFail({ outId: superseded.outId })).verificationStatus, 'pending', '更早记录不得被回退消费')
+    await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'aliyun_dypns' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
+    await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: '' }).where('config_key = :key', { key: 'verification.mobile.aliyun_scheme_name' }).execute()
+
+    const receiptWorker = new AliyunDypnsMnsWorkerService(recordService)
+    const officialReportTime = '2026-09-04 10:20:30'
+    assert.equal(await receiptWorker.applyReceiptMessage(Buffer.from(JSON.stringify({
+      send_time: '2026-09-04 10:19:30',
+      report_time: officialReportTime,
+      success: true,
+      sms_size: '70',
+      err_msg: '',
+      err_code: '',
+      phone_number: '13800001111',
+      biz_id: acceptedRecord.bizId,
+      out_id: sent.outId,
+    })).toString('base64')), 'updated', '官方扁平 DypnsSmsVerifyReport 必须作为主路径受理')
+    assert.equal(
+      (await recordRepo.findOneByOrFail({ outId: sent.outId })).reportedAt?.toISOString(),
+      '2026-09-04T02:20:30.000Z',
+      '官方 report_time 必须按 Asia/Shanghai 解析并落库',
+    )
+    assert.equal(await receiptWorker.applyReceiptMessage({
+      messageType: 'DypnsSmsVerifyReport',
+      data: { out_id: sent.outId, delivery_status: 'DELIVERED' },
+    }), 'malformed', '缺少官方必填字段的兼容结构必须作为毒消息拒绝')
+    assert.equal((await recordRepo.findOneByOrFail({ outId: sent.outId })).deliveryStatus, 'delivered')
+    assert.equal(await receiptWorker.applyReceiptMessage(Buffer.from(JSON.stringify({
+      messageType: 'DypnsSmsVerifyReport',
+      data: { out_id: sent.outId, delivery_status: 'SUCCESS' },
+    })).toString('base64')), 'malformed', 'Base64 解码后仍必须严格校验官方平铺字段')
+    assert.equal(await receiptWorker.applyReceiptMessage('{"__proto__":{"polluted":true}}'), 'malformed', '回执原型键必须拒绝')
+
+    const deletedMessages: Array<{ queueName: string; receiptHandle: string }> = []
+    const rpcRequests: Array<{ action: string; params: Record<string, unknown> }> = []
+    let mnsClientInput: Record<string, unknown> | null = null
+    const bufferReceiptRecord = await recordService.send({ target: '13800007777', scene: 'test', config: dypnsConfig })
+    const injectedMnsWorker = new AliyunDypnsMnsWorkerService(recordService, {
+      createPopClient: (input) => {
+        assert.equal(input.accessKeyId, 'test-access-key-id')
+        assert.equal(input.accessKeySecret, 'test-access-key-secret')
+        return {
+          async request(action, params) {
+            rpcRequests.push({ action, params: params as Record<string, unknown> })
+            return {
+              Code: 'OK',
+              MessageTokenDTO: {
+                AccessKeyId: 'temporary-key-id',
+                AccessKeySecret: 'temporary-key-secret',
+                SecurityToken: 'temporary-security-token',
+                ExpireTime: Math.floor(Date.now() / 1000) + 3600,
+              },
+            }
+          },
+        }
+      },
+      createMnsClient: (input) => {
+        mnsClientInput = { ...input }
+        return {
+          async batchReceiveMessage(queueName, numOfMessages, waitSeconds) {
+            assert.equal(queueName, 'Alicom-Queue-1873897471328909-DypnsSmsVerifyReport')
+            assert.equal(numOfMessages, 10)
+            assert.equal(waitSeconds, 5)
+            return {
+              body: [{
+                ReceiptHandle: 'receipt-handle-001',
+                MessageBody: Buffer.from(JSON.stringify({
+                  send_time: '2026-09-04 10:19:30',
+                  report_time: '2026-09-04 10:20:30',
+                  success: true,
+                  sms_size: '70',
+                  err_msg: '',
+                  err_code: '',
+                  phone_number: '13800007777',
+                  biz_id: bufferReceiptRecord.bizId,
+                  out_id: bufferReceiptRecord.outId,
+                })),
+              }, {
+                ReceiptHandle: 'receipt-handle-unknown',
+                MessageBody: Buffer.from(JSON.stringify({
+                  send_time: '2026-09-04 10:19:30',
+                  report_time: '2026-09-04 10:20:30',
+                  success: false,
+                  sms_size: '70',
+                  err_msg: '投递失败',
+                  err_code: 'DELIVERY_FAILED',
+                  phone_number: '13800002222',
+                  biz_id: 'external-biz-id',
+                  out_id: 'external-out-id-1',
+                })).toString('base64'),
+              }],
+            }
+          },
+          async deleteMessage(queueName, receiptHandle) {
+            deletedMessages.push({ queueName, receiptHandle })
+            return {}
+          },
+        }
+      },
+    })
+    assert.equal(injectedMnsWorker.getStatus().configured, true, '已配置凭证的 MNS 状态必须可用')
+    assert.equal(await injectedMnsWorker.runOnce(), 2, 'MNS worker 必须兼容 SDK 直接返回的消息数组并处理未知 outId')
+    assert.deepEqual(rpcRequests, [{
+      action: 'QueryTokenForMnsQueue',
+      params: {
+        MessageType: 'DypnsSmsVerifyReport',
+        QueueName: 'Alicom-Queue-1873897471328909-DypnsSmsVerifyReport',
+        RegionId: 'cn-hangzhou',
+      },
+    }], 'STS 请求必须绑定固定短信回执队列')
+    assert.equal(mnsClientInput?.accountId, '1943695596114318')
+    assert.equal(mnsClientInput?.endpoint, 'https://1943695596114318.mns.cn-hangzhou.aliyuncs.com')
+    assert.equal(mnsClientInput?.securityToken, 'temporary-security-token')
+    assert.equal((await recordRepo.findOneByOrFail({ outId: bufferReceiptRecord.outId })).deliveryStatus, 'delivered', 'Buffer 形态的 MessageBody 必须先转为文本再解析')
+    assert.deepEqual(deletedMessages, [{
+      queueName: 'Alicom-Queue-1873897471328909-DypnsSmsVerifyReport',
+      receiptHandle: 'receipt-handle-001',
+    }, {
+      queueName: 'Alicom-Queue-1873897471328909-DypnsSmsVerifyReport',
+      receiptHandle: 'receipt-handle-unknown',
+    }], '成功或未知 outId 的确定性回执必须确认删除')
+
+    const listedReceipts = await recordService.listReceipts({ page: 1, pageSize: 20, scene: 'register', deliveryStatus: 'delivered' })
+    assert.equal(listedReceipts.items.length, 1)
+    assert.deepEqual(Object.keys(listedReceipts.items[0] ?? {}).sort(), [
+      'bizId', 'createdAt', 'deliveryStatus', 'errorCode', 'outId', 'reportedAt',
+      'scene', 'sendStatus', 'sentAt', 'targetMasked', 'verificationStatus', 'verifiedAt',
+    ].sort(), '回执查询只允许返回脱敏状态字段')
+
+    const unknownResult = await verificationService.sendCode({ channel: 'mobile', target: '13800001111', scene: 'forgot_password' })
+    verifyResult = 'UNKNOWN'
+    await assert.rejects(
+      () => verificationService.verifyCode({ channel: 'mobile', target: '13800001111', scene: 'forgot_password', code: '111111' }),
+      /验证码校验未通过，请重新获取后再试/,
+    )
+    assert.equal((await recordRepo.findOneByOrFail({ outId: unknownResult.outId })).verificationStatus, 'failed')
+
+    for (const sendFailure of [
+      { code: 'INVALID_TEMPLATE', success: true, message: '发送失败' },
+      { code: 'OK', success: false, message: '发送失败' },
+    ]) {
+      const failedSendService = new SmsVerificationRecordService({
+        async send() { return sendFailure },
+        async check() { return { code: 'OK', success: true, verifyResult: 'PASS' } },
+      }, recordRepo)
+      await assert.rejects(
+        () => failedSendService.send({ target: '13800003333', scene: 'test', config: dypnsConfig }),
+        /短信验证码发送失败/,
+        'Send 只有 Code=OK 且 Success=true 才能受理',
+      )
+    }
+    const thrownSendService = new SmsVerificationRecordService({
+      async send() { throw new Error('上游回显验证码 654321') },
+      async check() { return { code: 'OK', success: true, verifyResult: 'PASS' } },
+    }, recordRepo)
+    await assert.rejects(
+      () => thrownSendService.send({ target: '13800004444', scene: 'test', config: dypnsConfig }),
+      /短信验证码发送服务暂不可用/,
+      'Send 抛错必须落失败状态而不透传上游错误',
+    )
+    const thrownSendRecord = await recordRepo.createQueryBuilder('record').orderBy('record.createdAt', 'DESC').getOneOrFail()
+    assert.equal(thrownSendRecord.providerErrorMessage?.includes('654321'), false, '发送失败记录不得保存验证码文本')
+    const recoveredSentAt = new Date('2026-09-04T02:19:30.000Z')
+    await thrownSendService.applyReceipt({
+      outId: thrownSendRecord.outId,
+      bizId: 'biz-recovered-after-timeout',
+      deliveryStatus: 'delivered',
+      errorCode: null,
+      errorMessage: null,
+      sentAt: recoveredSentAt,
+      reportedAt: new Date('2026-09-04T02:20:30.000Z'),
+    })
+    const recoveredSendRecord = await recordRepo.findOneByOrFail({ outId: thrownSendRecord.outId })
+    assert.equal(recoveredSendRecord.sendStatus, 'sent', '成功送达回执必须恢复响应途中失败的发送受理状态')
+    assert.equal(recoveredSendRecord.sentAt?.toISOString(), recoveredSentAt.toISOString(), '恢复受理状态时必须补齐回执中的发送时间')
+    assert.equal(recoveredSendRecord.providerErrorCode, null, '成功送达后必须清除先前的发送请求错误')
+    await thrownSendService.verify({ target: '13800004444', scene: 'test', code: '123456' })
+    assert.equal((await recordRepo.findOneByOrFail({ outId: thrownSendRecord.outId })).verificationStatus, 'passed')
+
+    await assert.rejects(
+      () => thrownSendService.send({ target: '13800004445', scene: 'forgot_password', config: dypnsConfig }),
+      /短信验证码发送服务暂不可用/,
+    )
+    const failedBeforeGenericRecord = await recordRepo.createQueryBuilder('record')
+      .where('record.targetMasked = :targetMasked', { targetMasked: '138****4445' })
+      .orderBy('record.createdAt', 'DESC')
+      .getOneOrFail()
+    assert.equal(failedBeforeGenericRecord.sendStatus, 'failed')
+    assert.equal(
+      await thrownSendService.invalidateActiveForTarget({ target: '13800004445', scene: 'forgot_password' }),
+      1,
+      '可能被成功回执恢复的失败发送记录也必须被 Generic 作废',
+    )
+    await thrownSendService.applyReceipt({
+      outId: failedBeforeGenericRecord.outId,
+      bizId: 'biz-late-after-generic',
+      deliveryStatus: 'delivered',
+      errorCode: null,
+      errorMessage: null,
+      sentAt: new Date(),
+      reportedAt: new Date(),
+    })
+    const failedAfterGenericReceipt = await recordRepo.findOneByOrFail({ id: failedBeforeGenericRecord.id })
+    assert.equal(failedAfterGenericReceipt.sendStatus, 'failed', '迟到成功回执不得恢复已被 Generic 作废的失败发送记录')
+    assert.equal(failedAfterGenericReceipt.providerErrorCode, 'SUPERSEDED_BY_GENERIC')
+
+    let checkResponse = { code: 'OK', success: true, verifyResult: 'REJECT', message: '验证码 654321 无效' }
+    const nonPassService = new SmsVerificationRecordService({
+      async send() { return { code: 'OK', success: true, bizId: 'biz-non-pass' } },
+      async check() { return checkResponse },
+    }, recordRepo)
+    const nonPassRecord = await nonPassService.send({ target: '13800005555', scene: 'test', config: dypnsConfig })
+    await assert.rejects(
+      () => nonPassService.verify({ target: '13800005555', scene: 'test', code: '654321' }),
+      /验证码校验未通过/,
+      'Code=OK、Success=true 且 VerifyResult=REJECT 时必须返回可重试的验证码错误',
+    )
+    const rejectedRecord = await recordRepo.findOneByOrFail({ outId: nonPassRecord.outId })
+    assert.equal(rejectedRecord.providerErrorCode, 'REJECT', 'REJECT 业务失败不得记录成顶层 OK')
+    assert.equal(rejectedRecord.providerErrorMessage?.includes('654321'), false, '核验失败记录不得保存验证码文本')
+    await nonPassService.applyReceipt({
+      outId: nonPassRecord.outId,
+      bizId: nonPassRecord.bizId,
+      deliveryStatus: 'delivered',
+      errorCode: null,
+      errorMessage: null,
+      sentAt: rejectedRecord.sentAt ?? new Date(),
+      reportedAt: new Date(),
+    })
+    assert.equal(
+      (await recordRepo.findOneByOrFail({ outId: nonPassRecord.outId })).providerErrorCode,
+      'REJECT',
+      '迟到的成功送达回执不得清除已记录的验证码核验错误',
+    )
+    checkResponse = { code: 'CHECK_FAILED', success: true, verifyResult: 'PASS', message: '失败' }
+    await assert.rejects(
+      () => nonPassService.verify({ target: '13800005555', scene: 'test', code: '654321' }),
+      /验证码校验服务暂不可用/,
+      'Check 即使返回 PASS，也必须同时满足 Code=OK 与 Success=true',
+    )
+    checkResponse = { code: 'OK', success: false, verifyResult: 'PASS', message: '失败' }
+    await assert.rejects(
+      () => nonPassService.verify({ target: '13800005555', scene: 'test', code: '654321' }),
+      /验证码校验服务暂不可用/,
+      'Check 的 Success=false 不能形成成功路径',
+    )
+
+    const checkResolvers: Array<() => void> = []
+    const concurrentVerifyService = new SmsVerificationRecordService({
+      async send() { return { code: 'OK', success: true, bizId: 'biz-concurrent' } },
+      async check() {
+        await new Promise<void>((resolve) => checkResolvers.push(resolve))
+        return { code: 'OK', success: true, verifyResult: 'PASS' }
+      },
+    }, recordRepo)
+    await concurrentVerifyService.send({ target: '13800006666', scene: 'profile_update', config: dypnsConfig })
+    const concurrentResultsPromise = Promise.allSettled([
+      concurrentVerifyService.verify({ target: '13800006666', scene: 'profile_update', code: '123456' }),
+      concurrentVerifyService.verify({ target: '13800006666', scene: 'profile_update', code: '123456' }),
+    ])
+    for (let attempt = 0; attempt < 20 && checkResolvers.length < 2; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+    assert.equal(checkResolvers.length, 2, '并发核验必须在状态更新前同时进入远端检查')
+    checkResolvers.splice(0).forEach((resolve) => resolve())
+    const concurrentResults = await concurrentResultsPromise
+    assert.equal(concurrentResults.filter((result) => result.status === 'fulfilled').length, 1, '并发 PASS 只能有一个请求消耗验证码')
+    assert.equal(concurrentResults.filter((result) => result.status === 'rejected').length, 1, '并发重复核验必须失败')
+
+    let notifySupersessionCheckStarted!: () => void
+    let releaseSupersessionCheck!: () => void
+    const supersessionCheckStarted = new Promise<void>((resolve) => { notifySupersessionCheckStarted = resolve })
+    const supersessionCheckRelease = new Promise<void>((resolve) => { releaseSupersessionCheck = resolve })
+    const supersessionRaceService = new SmsVerificationRecordService({
+      async send() { return { code: 'OK', success: true, bizId: 'biz-supersession-race' } },
+      async check() {
+        notifySupersessionCheckStarted()
+        await supersessionCheckRelease
+        return { code: 'OK', success: true, verifyResult: 'PASS' }
+      },
+    }, recordRepo)
+    const supersessionRaceRecord = await supersessionRaceService.send({ target: '13800006667', scene: 'forgot_password', config: dypnsConfig })
+    const inFlightSupersededVerify = supersessionRaceService.verify({ target: '13800006667', scene: 'forgot_password', code: '123456' })
+    await supersessionCheckStarted
+    await supersessionRaceService.invalidateActiveForTarget({ target: '13800006667', scene: 'forgot_password' })
+    releaseSupersessionCheck()
+    await assert.rejects(inFlightSupersededVerify, /验证码已完成核验/, '已被新 Provider 作废的在途 PNVS 核验不得重新写成 PASS')
+    const supersededDuringCheckRecord = await recordRepo.findOneByOrFail({ outId: supersessionRaceRecord.outId })
+    assert.equal(supersededDuringCheckRecord.verificationStatus, 'failed')
+    assert.equal(supersededDuringCheckRecord.providerErrorCode, 'SUPERSEDED_BY_GENERIC')
+
+    let notifyPendingPnvsSendStarted!: () => void
+    let releasePendingPnvsSend!: () => void
+    const pendingPnvsSendStarted = new Promise<void>((resolve) => { notifyPendingPnvsSendStarted = resolve })
+    const pendingPnvsSendRelease = new Promise<void>((resolve) => { releasePendingPnvsSend = resolve })
+    const pendingPnvsRaceService = new SmsVerificationRecordService({
+      async send() {
+        notifyPendingPnvsSendStarted()
+        await pendingPnvsSendRelease
+        return { code: 'OK', success: true, bizId: 'biz-pending-pnvs-race' }
+      },
+      async check() { return { code: 'OK', success: true, verifyResult: 'PASS' } },
+    }, recordRepo)
+    const inFlightPendingPnvsSend = pendingPnvsRaceService.send({ target: '13800006669', scene: 'forgot_password', config: dypnsConfig })
+    await pendingPnvsSendStarted
+    await pendingPnvsRaceService.invalidateActiveForTarget({ target: '13800006669', scene: 'forgot_password' })
+    releasePendingPnvsSend()
+    await assert.rejects(inFlightPendingPnvsSend, /已被更新的验证码请求取代/, 'Generic 作废后，在途 PNVS 发送成功响应不得把记录恢复为 sent')
+    const supersededPendingSendRecord = await recordRepo.createQueryBuilder('record')
+      .where('record.targetMasked = :targetMasked', { targetMasked: '138****6669' })
+      .orderBy('record.createdAt', 'DESC')
+      .getOneOrFail()
+    assert.equal(supersededPendingSendRecord.sendStatus, 'failed')
+    assert.equal(supersededPendingSendRecord.verificationStatus, 'failed')
+    assert.equal(supersededPendingSendRecord.providerErrorCode, 'SUPERSEDED_BY_GENERIC')
+    await pendingPnvsRaceService.applyReceipt({
+      outId: supersededPendingSendRecord.outId,
+      bizId: 'biz-pending-pnvs-race',
+      deliveryStatus: 'delivered',
+      errorCode: null,
+      errorMessage: null,
+      sentAt: new Date(),
+      reportedAt: new Date(),
+    })
+    const supersededAfterLateReceipt = await recordRepo.findOneByOrFail({ id: supersededPendingSendRecord.id })
+    assert.equal(supersededAfterLateReceipt.sendStatus, 'failed', '迟到的成功回执不得恢复已被 Generic 取代的 PNVS 发送状态')
+    assert.equal(supersededAfterLateReceipt.providerErrorCode, 'SUPERSEDED_BY_GENERIC')
+
+    let notifyFailedReceiptSendStarted!: () => void
+    let releaseFailedReceiptSend!: () => void
+    const failedReceiptSendStarted = new Promise<void>((resolve) => { notifyFailedReceiptSendStarted = resolve })
+    const failedReceiptSendRelease = new Promise<void>((resolve) => { releaseFailedReceiptSend = resolve })
+    const failedReceiptRaceService = new SmsVerificationRecordService({
+      async send() {
+        notifyFailedReceiptSendStarted()
+        await failedReceiptSendRelease
+        return { code: 'OK', success: true, bizId: 'biz-failed-receipt-race' }
+      },
+      async check() { return { code: 'OK', success: true, verifyResult: 'PASS' } },
+    }, recordRepo)
+    const inFlightFailedReceiptSend = failedReceiptRaceService.send({ target: '13800006670', scene: 'test', config: dypnsConfig })
+    await failedReceiptSendStarted
+    const failedReceiptPendingRecord = await recordRepo.createQueryBuilder('record')
+      .where('record.targetMasked = :targetMasked', { targetMasked: '138****6670' })
+      .orderBy('record.createdAt', 'DESC')
+      .getOneOrFail()
+    await failedReceiptRaceService.applyReceipt({
+      outId: failedReceiptPendingRecord.outId,
+      bizId: 'biz-failed-receipt-race',
+      deliveryStatus: 'failed',
+      errorCode: 'DELIVERY_REJECTED',
+      errorMessage: '运营商拒绝接收',
+      sentAt: new Date(),
+      reportedAt: new Date(),
+    })
+    releaseFailedReceiptSend()
+    await inFlightFailedReceiptSend
+    const failedReceiptAfterAccepted = await recordRepo.findOneByOrFail({ id: failedReceiptPendingRecord.id })
+    assert.equal(failedReceiptAfterAccepted.sendStatus, 'sent')
+    assert.equal(failedReceiptAfterAccepted.deliveryStatus, 'failed')
+    assert.equal(failedReceiptAfterAccepted.providerErrorCode, 'DELIVERY_REJECTED', '迟到发送成功响应不得清除先到达的失败回执错误码')
+    assert.equal(failedReceiptAfterAccepted.providerErrorMessage, '运营商拒绝接收', '迟到发送成功响应不得清除先到达的失败回执原因')
+
+    let notifyNewerPnvsCheckStarted!: () => void
+    let releaseNewerPnvsCheck!: () => void
+    const newerPnvsCheckStarted = new Promise<void>((resolve) => { notifyNewerPnvsCheckStarted = resolve })
+    const newerPnvsCheckRelease = new Promise<void>((resolve) => { releaseNewerPnvsCheck = resolve })
+    const newerPnvsRaceService = new SmsVerificationRecordService({
+      async send() { return { code: 'OK', success: true, bizId: 'biz-newer-pnvs-race' } },
+      async check() {
+        notifyNewerPnvsCheckStarted()
+        await newerPnvsCheckRelease
+        return { code: 'OK', success: true, verifyResult: 'PASS' }
+      },
+    }, recordRepo)
+    const olderPnvsRaceRecord = await newerPnvsRaceService.send({ target: '13800006668', scene: 'register', config: dypnsConfig })
+    const inFlightOlderPnvsVerify = newerPnvsRaceService.verify({ target: '13800006668', scene: 'register', code: '123456' })
+    await newerPnvsCheckStarted
+    const newerPnvsRaceRecord = await recordService.send({ target: '13800006668', scene: 'register', config: dypnsConfig })
+    releaseNewerPnvsCheck()
+    await assert.rejects(inFlightOlderPnvsVerify, /验证码已完成核验/, '新 PNVS 记录受理后，在途旧 PNVS 核验不得再提交 PASS')
+    assert.notEqual((await recordRepo.findOneByOrFail({ outId: olderPnvsRaceRecord.outId })).verificationStatus, 'passed')
+    assert.equal((await recordRepo.findOneByOrFail({ outId: newerPnvsRaceRecord.outId })).verificationStatus, 'pending')
+
+    const oldRecordAt = new Date(Date.now() - 91 * 24 * 60 * 60 * 1000)
+    const oldTerminalRecord = await recordRepo.save(recordRepo.create({
+      outId: 'cleanup-terminal-record', bizId: null, channel: 'mobile', scene: 'test', targetDigest: 'a'.repeat(64), targetMasked: '138****7777',
+      sendStatus: 'sent', deliveryStatus: 'delivered', verificationStatus: 'pending', providerErrorCode: null, providerErrorMessage: null,
+      sentAt: oldRecordAt, reportedAt: oldRecordAt, verifiedAt: null, expiresAt: oldRecordAt,
+    }))
+    const oldExpiredPendingRecord = await recordRepo.save(recordRepo.create({
+      outId: 'cleanup-pending-record', bizId: null, channel: 'mobile', scene: 'test', targetDigest: 'b'.repeat(64), targetMasked: '138****8888',
+      sendStatus: 'sent', deliveryStatus: 'pending', verificationStatus: 'pending', providerErrorCode: null, providerErrorMessage: null,
+      sentAt: oldRecordAt, reportedAt: null, verifiedAt: null, expiresAt: oldRecordAt,
+    }))
+    const oldUnexpiredPendingRecord = await recordRepo.save(recordRepo.create({
+      outId: 'cleanup-unexpired-pending-record', bizId: null, channel: 'mobile', scene: 'test', targetDigest: 'c'.repeat(64), targetMasked: '138****9999',
+      sendStatus: 'sent', deliveryStatus: 'pending', verificationStatus: 'pending', providerErrorCode: null, providerErrorMessage: null,
+      sentAt: oldRecordAt, reportedAt: null, verifiedAt: null, expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+    }))
+    const recentExpiredPendingRecord = await recordRepo.save(recordRepo.create({
+      outId: 'cleanup-recent-expired-pending-record', bizId: null, channel: 'mobile', scene: 'test', targetDigest: 'd'.repeat(64), targetMasked: '138****0000',
+      sendStatus: 'sent', deliveryStatus: 'pending', verificationStatus: 'pending', providerErrorCode: null, providerErrorMessage: null,
+      sentAt: new Date(), reportedAt: null, verifiedAt: null, expiresAt: oldRecordAt,
+    }))
+    await recordRepo.update({ id: oldTerminalRecord.id }, { createdAt: oldRecordAt })
+    await recordRepo.update({ id: oldExpiredPendingRecord.id }, { createdAt: oldRecordAt })
+    await recordRepo.update({ id: oldUnexpiredPendingRecord.id }, { createdAt: oldRecordAt })
+    assert.equal(await recordService.cleanupExpiredRecords(), 2, '90 天清理必须删除终态或已过期的记录')
+    assert.equal(await recordRepo.findOneBy({ id: oldTerminalRecord.id }), null)
+    assert.equal(await recordRepo.findOneBy({ id: oldExpiredPendingRecord.id }), null, '已过期 pending 记录不得无限保留')
+    assert.notEqual(await recordRepo.findOneBy({ id: oldUnexpiredPendingRecord.id }), null, '未过期 pending 记录不得被 90 天清理误删')
+    assert.notEqual(await recordRepo.findOneBy({ id: recentExpiredPendingRecord.id }), null, '不足 90 天的记录不得被清理')
+
+    const buildMnsSdk = (
+      batchReceiveMessage: () => Promise<unknown>,
+      deleteMessage: (queueName: string, receiptHandle: string) => Promise<unknown>,
+      expireTime: string | number = String(Date.now() + 60 * 60 * 1000),
+    ) => ({
+      createPopClient: () => ({
+        async request() {
+          return {
+            Code: 'OK',
+            MessageTokenDTO: {
+              AccessKeyId: 'temporary-key-id', AccessKeySecret: 'temporary-key-secret', SecurityToken: 'temporary-security-token',
+              ExpireTime: expireTime,
+            },
+          }
+        },
+      }),
+      createMnsClient: () => ({ batchReceiveMessage, deleteMessage }),
+    })
+    const emptyQueueWorker = new AliyunDypnsMnsWorkerService(recordService, buildMnsSdk(
+      async () => {
+        const error = new Error('Message not exist')
+        error.name = 'MNSMessageNotExistError'
+        throw error
+      },
+      async () => { throw new Error('空队列不应删除消息') },
+    ))
+    assert.equal(await emptyQueueWorker.runOnce(), 0, 'MessageNotExist 必须作为正常空队列处理')
+
+    const textExpirationWorker = new AliyunDypnsMnsWorkerService(recordService, buildMnsSdk(
+      async () => {
+        const error = new Error('Message not exist')
+        error.name = 'MNSMessageNotExistError'
+        throw error
+      },
+      async () => { throw new Error('空队列不应删除消息') },
+      '2099-01-01 00:00:00',
+    ))
+    assert.equal(await textExpirationWorker.runOnce(), 0, 'STS 到期时间必须继续兼容阿里云示例中的北京时间字符串')
+
+    const dbFailureDeletes: string[] = []
+    const dbFailureWorker = new AliyunDypnsMnsWorkerService({
+      async applyReceipt() { throw new Error('数据库暂态失败') },
+      async cleanupExpiredRecords() { return 0 },
+    }, buildMnsSdk(
+      async () => ({ body: [{ ReceiptHandle: 'db-failure-handle', MessageBody: Buffer.from(JSON.stringify({
+        send_time: '2026-09-04 10:19:30', report_time: '2026-09-04 10:20:30', success: true, sms_size: '70', err_msg: '', err_code: '',
+        phone_number: '13800001111', biz_id: acceptedRecord.bizId, out_id: sent.outId,
+      })).toString('base64') }] }),
+      async (_queueName, receiptHandle) => { dbFailureDeletes.push(receiptHandle); return {} },
+    ))
+    await assert.rejects(() => dbFailureWorker.runOnce(), /数据库暂态失败/, '数据库暂态失败必须使消息保留')
+    assert.deepEqual(dbFailureDeletes, [], '数据库异常时不得确认删除回执消息')
+
+    const maintenanceDeletes: string[] = []
+    const maintenanceTaskId = `maintenance-${runId}`
+    const maintenanceWorker = new AliyunDypnsMnsWorkerService(recordService, buildMnsSdk(
+      async () => {
+        await databaseMaintenanceModeService.beginReadOnly({ taskId: maintenanceTaskId, phase: 'verification-test' })
+        return { body: [{ ReceiptHandle: 'maintenance-handle', MessageBody: Buffer.from(JSON.stringify({
+          send_time: '2026-09-04 10:19:30', report_time: '2026-09-04 10:20:30', success: true, sms_size: '70', err_msg: '', err_code: '',
+          phone_number: '13800001111', biz_id: acceptedRecord.bizId, out_id: sent.outId,
+        })).toString('base64') }] }
+      },
+      async (_queueName, receiptHandle) => { maintenanceDeletes.push(receiptHandle); return {} },
+    ))
+    try {
+      assert.equal(await maintenanceWorker.runOnce(), 1)
+      assert.deepEqual(maintenanceDeletes, [], '维护切换后未取得写租约时不得确认删除消息')
+    } finally {
+      await databaseMaintenanceModeService.finishReadOnly(maintenanceTaskId)
+    }
+
+    await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'generic_http' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
+    await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'https://example.com/verification' }).where('config_key = :key', { key: 'verification.mobile.api_url' }).execute()
+    const genericResult = await verificationService.sendCode({ channel: 'mobile', target: '13800002222', scene: 'register' })
+    assert.equal(genericResult.provider, 'generic_http', 'generic_http 既有发送逻辑必须保持可用')
+    assert.equal(genericCodes.length, 1, 'generic_http 仍应使用内存票据生成验证码')
+    const checkedBeforeGenericVerify = checkedRequests.length
+    await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'aliyun_dypns' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
+    await verificationService.verifyCode({ channel: 'mobile', target: '13800002222', scene: 'register', code: genericCodes[0] ?? '' })
+    assert.equal(checkedRequests.length, checkedBeforeGenericVerify, 'HTTP 验证码必须按发送时 Provider 本地核验，不能受配置切换影响')
+
+    await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'generic_http' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
+    await verificationService.sendCode({ channel: 'mobile', target: '13800008888', scene: 'profile_update' })
+    const obsoleteGenericCode = genericCodes.at(-1) ?? ''
+    await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'aliyun_dypns' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
+    const latestDypnsResult = await verificationService.sendCode({ channel: 'mobile', target: '13800008888', scene: 'profile_update' })
+    verifyResult = 'UNKNOWN'
+    await assert.rejects(
+      () => verificationService.verifyCode({ channel: 'mobile', target: '13800008888', scene: 'profile_update', code: obsoleteGenericCode }),
+      /验证码校验未通过/,
+      '后发 PNVS 验证码必须使同场景旧 HTTP 票据失效',
+    )
+    assert.equal(checkedRequests.at(-1)?.outId, latestDypnsResult.outId, '后发 PNVS 验证码必须进入阿里云核验')
+    verifyResult = 'PASS'
+    await verificationService.verifyCode({ channel: 'mobile', target: '13800008888', scene: 'profile_update', code: '123456' })
+
+    const obsoleteDypnsResult = await verificationService.sendCode({ channel: 'mobile', target: '13800009998', scene: 'forgot_password' })
+    await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'generic_http' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
+    await verificationService.sendCode({ channel: 'mobile', target: '13800009998', scene: 'forgot_password' })
+    const latestGenericCode = genericCodes.at(-1) ?? ''
+    const checkedBeforeLatestGenericVerify = checkedRequests.length
+    await verificationService.verifyCode({ channel: 'mobile', target: '13800009998', scene: 'forgot_password', code: latestGenericCode })
+    await assert.rejects(
+      () => verificationService.verifyCode({ channel: 'mobile', target: '13800009998', scene: 'forgot_password', code: '123456' }),
+      /验证码不存在或已过期/,
+      '后发 HTTP 验证码通过后不得回退核验更早的 PNVS 记录',
+    )
+    assert.equal(checkedRequests.length, checkedBeforeLatestGenericVerify, '已被 HTTP 发送取代的 PNVS 记录不得再调用阿里云核验')
+    const obsoleteDypnsRecord = await recordRepo.findOneByOrFail({ outId: obsoleteDypnsResult.outId })
+    assert.equal(obsoleteDypnsRecord.verificationStatus, 'failed', 'HTTP 发送成功后必须把旧 PNVS 记录标记为失效')
+    assert.equal(obsoleteDypnsRecord.providerErrorCode, 'SUPERSEDED_BY_GENERIC')
+    assert.ok(obsoleteDypnsRecord.expiresAt.getTime() <= Date.now(), '失效 PNVS 记录不得继续处于有效期内')
+  } finally {
+    if (AppDataSource.isInitialized) {
+      await AppDataSource.destroy()
+    }
+  }
+}
+
+main()
+  .then(() => console.log('OK 阿里云 PNVS 短信验证码专项验证通过'))
+  .catch((error) => {
+    console.error('[verification-aliyun] 验证失败:', error)
+    process.exitCode = 1
+  })
+  .finally(() => {
+    fs.rmSync(runtimeDir, { recursive: true, force: true })
+  })
