@@ -157,6 +157,24 @@ async function main() {
 
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: '1' }).where('config_key = :key', { key: 'verification.mobile.enabled' }).execute()
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'aliyun_dypns' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
+    const unavailableCapabilities = await clientAuthService.getCapabilities()
+    assert.equal(unavailableCapabilities.channels.mobile, false, '配置不完整的短信通道不得声明为可发送')
+    assert.equal(
+      unavailableCapabilities.registerValidationModes.mobile,
+      'verification_code',
+      '已启用但未就绪的短信通道不得把注册校验降级为图形验证码',
+    )
+    await assert.rejects(
+      () => clientAuthService.register({
+        accountType: 'personal',
+        username: '未就绪通道',
+        account: '13800009999',
+        password: `PnvsClient_${runId}_Aa1!`,
+        verificationCode: '123456',
+      }),
+      /阿里云 PNVS 短信签名或场景模板码未配置完整/,
+      '注册必须明确拒绝已启用但未就绪的验证码通道',
+    )
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'Y-Link 测试签名' }).where('config_key = :key', { key: 'verification.mobile.aliyun_sign_name' }).execute()
     await Promise.all([
       ['verification.mobile.aliyun_template_register', 'SMS_REGISTER'],
@@ -552,6 +570,23 @@ async function main() {
     assert.equal(checkedRequests.at(-1)?.outId, latestDypnsResult.outId, '后发 PNVS 验证码必须进入阿里云核验')
     verifyResult = 'PASS'
     await verificationService.verifyCode({ channel: 'mobile', target: '13800008888', scene: 'profile_update', code: '123456' })
+
+    const obsoleteDypnsResult = await verificationService.sendCode({ channel: 'mobile', target: '13800009998', scene: 'forgot_password' })
+    await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'generic_http' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
+    await verificationService.sendCode({ channel: 'mobile', target: '13800009998', scene: 'forgot_password' })
+    const latestGenericCode = genericCodes.at(-1) ?? ''
+    const checkedBeforeLatestGenericVerify = checkedRequests.length
+    await verificationService.verifyCode({ channel: 'mobile', target: '13800009998', scene: 'forgot_password', code: latestGenericCode })
+    await assert.rejects(
+      () => verificationService.verifyCode({ channel: 'mobile', target: '13800009998', scene: 'forgot_password', code: '123456' }),
+      /验证码不存在或已过期/,
+      '后发 HTTP 验证码通过后不得回退核验更早的 PNVS 记录',
+    )
+    assert.equal(checkedRequests.length, checkedBeforeLatestGenericVerify, '已被 HTTP 发送取代的 PNVS 记录不得再调用阿里云核验')
+    const obsoleteDypnsRecord = await recordRepo.findOneByOrFail({ outId: obsoleteDypnsResult.outId })
+    assert.equal(obsoleteDypnsRecord.verificationStatus, 'failed', 'HTTP 发送成功后必须把旧 PNVS 记录标记为失效')
+    assert.equal(obsoleteDypnsRecord.providerErrorCode, 'SUPERSEDED_BY_GENERIC')
+    assert.ok(obsoleteDypnsRecord.expiresAt.getTime() <= Date.now(), '失效 PNVS 记录不得继续处于有效期内')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()

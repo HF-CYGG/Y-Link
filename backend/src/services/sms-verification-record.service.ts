@@ -70,6 +70,11 @@ export interface VerifyDypnsVerificationInput {
   code: string
 }
 
+export interface InvalidateDypnsVerificationInput {
+  target: string
+  scene: VerificationScene
+}
+
 export interface SmsReceiptUpdateInput {
   outId: string
   bizId?: string | null
@@ -239,6 +244,26 @@ export class SmsVerificationRecordService {
       }
       throw new BizError('验证码校验服务暂不可用，请稍后重试', 502)
     }
+  }
+
+  async invalidateActiveForTarget(input: InvalidateDypnsVerificationInput): Promise<number> {
+    const now = new Date()
+    const result = await this.recordRepo.createQueryBuilder()
+      .update(SmsVerificationRecord)
+      .set({
+        verificationStatus: 'failed',
+        providerErrorCode: 'SUPERSEDED_BY_GENERIC',
+        providerErrorMessage: null,
+        expiresAt: now,
+      })
+      .where('channel = :channel', { channel: 'mobile' })
+      .andWhere('scene = :scene', { scene: input.scene })
+      .andWhere('target_digest = :targetDigest', { targetDigest: createTargetDigest(input.target.trim()) })
+      .andWhere('send_status = :sendStatus', { sendStatus: 'sent' })
+      .andWhere('expires_at > :now', { now })
+      .andWhere('verification_status <> :passed', { passed: 'passed' })
+      .execute()
+    return Number(result.affected ?? 0)
   }
 
   async applyReceipt(input: SmsReceiptUpdateInput): Promise<'updated' | 'unknown' | 'mismatched' | 'deferred'> {

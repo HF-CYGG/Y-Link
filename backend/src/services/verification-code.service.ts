@@ -46,7 +46,7 @@ const buildTicketKey = (channel: VerificationChannelType, target: string, scene:
 export class VerificationCodeService {
   constructor(
     private readonly httpRequest: typeof safeHttpRequest = safeHttpRequest,
-    private readonly smsRecordService: Pick<SmsVerificationRecordService, 'send' | 'verify'> = smsVerificationRecordService,
+    private readonly smsRecordService: Pick<SmsVerificationRecordService, 'send' | 'verify' | 'invalidateActiveForTarget'> = smsVerificationRecordService,
   ) {}
 
   /**
@@ -217,6 +217,13 @@ export class VerificationCodeService {
       scene: input.scene,
       ip: input.requestMeta?.ipAddress?.trim() || '',
     })
+    if (input.channel === 'mobile' && (env.VERIFICATION_TICKET_HMAC_SECRET?.trim().length ?? 0) >= 32) {
+      // 通用短信发送成功后必须持久化作废同手机号、同场景的旧 PNVS 记录，避免本地票据消费后回退核验旧动态码。
+      await this.smsRecordService.invalidateActiveForTarget({
+        target: normalizedTarget,
+        scene: input.scene,
+      })
+    }
     verificationTicketStore.set(buildTicketKey(input.channel, normalizedTarget, input.scene), {
       channel: input.channel,
       target: normalizedTarget,

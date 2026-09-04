@@ -30,7 +30,7 @@ import { auditService } from './audit.service.js'
 import { authSecurityService } from './auth-security.service.js'
 import { captchaService } from './captcha.service.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
-import { systemConfigService } from './system-config.service.js'
+import { systemConfigService, type VerificationProviderConfigsResult } from './system-config.service.js'
 import { verificationCodeService } from './verification-code.service.js'
 import { EphemeralTicketStore } from '../utils/ephemeral-ticket-store.js'
 import {
@@ -131,6 +131,11 @@ export interface ClientAuthCapabilities {
   departmentOptions: string[]
 }
 
+interface ClientAuthVerificationContext {
+  capabilities: ClientAuthCapabilities
+  providers: VerificationProviderConfigsResult
+}
+
 export interface ClientAuthSessionResult {
   token: string
   expiresAt: Date
@@ -171,7 +176,7 @@ class ClientAuthService {
   private readonly controlNameCharsPattern = /[\u0000-\u001F\u007F-\u009F]/g
   private readonly normalizableNameSeparatorPattern = /[•・･‧∙⋅·﹒]/g
 
-  private async getVerificationCapabilities(): Promise<ClientAuthCapabilities> {
+  private async getVerificationContext(): Promise<ClientAuthVerificationContext> {
     const [configs, departmentConfigs] = await Promise.all([
       systemConfigService.getVerificationProviderConfigs(),
       systemConfigService.getClientDepartmentConfigs(),
@@ -180,18 +185,37 @@ class ClientAuthService {
     const emailEnabled = configs.email.ready
 
     return {
-      channels: {
-        mobile: mobileEnabled,
-        email: emailEnabled,
+      providers: configs,
+      capabilities: {
+        channels: {
+          mobile: mobileEnabled,
+          email: emailEnabled,
+        },
+        registerValidationModes: {
+          // 管理员已启用通道就代表注册必须使用验证码；配置异常只能失败关闭，不能降级为图形验证码。
+          mobile: configs.mobile.enabled ? 'verification_code' : 'captcha',
+          email: configs.email.enabled ? 'verification_code' : 'captcha',
+        },
+        forgotPasswordEnabled: mobileEnabled || emailEnabled,
+        departmentTree: departmentConfigs.tree,
+        departmentRootOptions: departmentConfigs.tree.map((node) => node.label),
+        departmentOptions: departmentConfigs.options,
       },
-      registerValidationModes: {
-        mobile: mobileEnabled ? 'verification_code' : 'captcha',
-        email: emailEnabled ? 'verification_code' : 'captcha',
-      },
-      forgotPasswordEnabled: mobileEnabled || emailEnabled,
-      departmentTree: departmentConfigs.tree,
-      departmentRootOptions: departmentConfigs.tree.map((node) => node.label),
-      departmentOptions: departmentConfigs.options,
+    }
+  }
+
+  private async getVerificationCapabilities(): Promise<ClientAuthCapabilities> {
+    return (await this.getVerificationContext()).capabilities
+  }
+
+  private assertRegisterVerificationChannelReady(
+    account: ReturnType<ClientAuthService['resolveAccount']> | null,
+    providers: VerificationProviderConfigsResult,
+  ) {
+    if (!account) return
+    const provider = providers[account.channel]
+    if (provider.enabled && !provider.ready) {
+      throw new BizError(provider.statusError ?? '当前验证码通道未就绪，请联系管理员配置', 503)
     }
   }
 
@@ -648,13 +672,15 @@ class ClientAuthService {
       ? null
       : normalizeClientUsername(this.assertRealName(input.username ?? ''))
     const password = assertClientPasswordPolicy(input.password)
-    const capabilities = await this.getVerificationCapabilities()
+    const verificationContext = await this.getVerificationContext()
+    const capabilities = verificationContext.capabilities
     const validationMode = account ? capabilities.registerValidationModes[account.channel] : 'captcha'
     const registerProfile = await this.resolveDepartmentRegistrationProfile(accountType, input, username)
     await authSecurityService.guardClientRegisterAccountRequest(_requestMeta, account?.account ?? registerProfile.staffNo ?? registerProfile.usernameValue)
     if (isTeacherRegister) {
       await this.guardStaffInviteAttempt(registerProfile.staffNo ?? '', input.inviteCode ?? '', _requestMeta)
     } else {
+      this.assertRegisterVerificationChannelReady(account, verificationContext.providers)
       await this.verifyRegisterChallenge(input, validationMode, account)
     }
     await this.assertRegisterIdentifiersAvailable(account, registerProfile)
