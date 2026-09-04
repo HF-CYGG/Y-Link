@@ -503,6 +503,27 @@ async function main() {
     assert.equal(supersededDuringCheckRecord.verificationStatus, 'failed')
     assert.equal(supersededDuringCheckRecord.providerErrorCode, 'SUPERSEDED_BY_GENERIC')
 
+    let notifyNewerPnvsCheckStarted!: () => void
+    let releaseNewerPnvsCheck!: () => void
+    const newerPnvsCheckStarted = new Promise<void>((resolve) => { notifyNewerPnvsCheckStarted = resolve })
+    const newerPnvsCheckRelease = new Promise<void>((resolve) => { releaseNewerPnvsCheck = resolve })
+    const newerPnvsRaceService = new SmsVerificationRecordService({
+      async send() { return { code: 'OK', success: true, bizId: 'biz-newer-pnvs-race' } },
+      async check() {
+        notifyNewerPnvsCheckStarted()
+        await newerPnvsCheckRelease
+        return { code: 'OK', success: true, verifyResult: 'PASS' }
+      },
+    }, recordRepo)
+    const olderPnvsRaceRecord = await newerPnvsRaceService.send({ target: '13800006668', scene: 'register', config: dypnsConfig })
+    const inFlightOlderPnvsVerify = newerPnvsRaceService.verify({ target: '13800006668', scene: 'register', code: '123456' })
+    await newerPnvsCheckStarted
+    const newerPnvsRaceRecord = await recordService.send({ target: '13800006668', scene: 'register', config: dypnsConfig })
+    releaseNewerPnvsCheck()
+    await assert.rejects(inFlightOlderPnvsVerify, /验证码已完成核验/, '新 PNVS 记录受理后，在途旧 PNVS 核验不得再提交 PASS')
+    assert.notEqual((await recordRepo.findOneByOrFail({ outId: olderPnvsRaceRecord.outId })).verificationStatus, 'passed')
+    assert.equal((await recordRepo.findOneByOrFail({ outId: newerPnvsRaceRecord.outId })).verificationStatus, 'pending')
+
     const oldRecordAt = new Date(Date.now() - 91 * 24 * 60 * 60 * 1000)
     const oldTerminalRecord = await recordRepo.save(recordRepo.create({
       outId: 'cleanup-terminal-record', bizId: null, channel: 'mobile', scene: 'test', targetDigest: 'a'.repeat(64), targetMasked: '138****7777',

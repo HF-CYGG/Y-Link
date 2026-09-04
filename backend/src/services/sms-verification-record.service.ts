@@ -162,10 +162,11 @@ export class SmsVerificationRecordService {
 
   async verify(input: VerifyDypnsVerificationInput): Promise<void> {
     const target = input.target.trim()
+    const targetDigest = createTargetDigest(target)
     const record = await this.recordRepo.createQueryBuilder('record')
       .where('record.channel = :channel', { channel: 'mobile' })
       .andWhere('record.scene = :scene', { scene: input.scene })
-      .andWhere('record.targetDigest = :targetDigest', { targetDigest: createTargetDigest(target) })
+      .andWhere('record.targetDigest = :targetDigest', { targetDigest })
       .andWhere('record.sendStatus = :sendStatus', { sendStatus: 'sent' })
       .andWhere('record.expiresAt > :now', { now: new Date() })
       .orderBy('record.createdAt', 'DESC')
@@ -199,6 +200,25 @@ export class SmsVerificationRecordService {
           .where('id = :id', { id: record.id })
           .andWhere('verification_status <> :passed', { passed: 'passed' })
           .andWhere('expires_at > :verifiedAt', { verifiedAt })
+          .andWhere(`id = (
+            SELECT latest_record.id
+            FROM (
+              SELECT candidate.id
+              FROM sms_verification_record candidate
+              WHERE candidate.channel = :latestChannel
+                AND candidate.scene = :latestScene
+                AND candidate.target_digest = :latestTargetDigest
+                AND candidate.send_status = :latestSendStatus
+                AND candidate.expires_at > :verifiedAt
+              ORDER BY candidate.created_at DESC, candidate.id DESC
+              LIMIT 1
+            ) latest_record
+          )`, {
+            latestChannel: 'mobile',
+            latestScene: input.scene,
+            latestTargetDigest: targetDigest,
+            latestSendStatus: 'sent',
+          })
           .execute()
         if (Number(updateResult.affected ?? 0) !== 1) {
           throw new BizError('验证码已完成核验，请勿重复提交', 400)
