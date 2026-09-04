@@ -444,6 +444,28 @@ async function main() {
     assert.equal(concurrentResults.filter((result) => result.status === 'fulfilled').length, 1, '并发 PASS 只能有一个请求消耗验证码')
     assert.equal(concurrentResults.filter((result) => result.status === 'rejected').length, 1, '并发重复核验必须失败')
 
+    let notifySupersessionCheckStarted!: () => void
+    let releaseSupersessionCheck!: () => void
+    const supersessionCheckStarted = new Promise<void>((resolve) => { notifySupersessionCheckStarted = resolve })
+    const supersessionCheckRelease = new Promise<void>((resolve) => { releaseSupersessionCheck = resolve })
+    const supersessionRaceService = new SmsVerificationRecordService({
+      async send() { return { code: 'OK', success: true, bizId: 'biz-supersession-race' } },
+      async check() {
+        notifySupersessionCheckStarted()
+        await supersessionCheckRelease
+        return { code: 'OK', success: true, verifyResult: 'PASS' }
+      },
+    }, recordRepo)
+    const supersessionRaceRecord = await supersessionRaceService.send({ target: '13800006667', scene: 'forgot_password', config: dypnsConfig })
+    const inFlightSupersededVerify = supersessionRaceService.verify({ target: '13800006667', scene: 'forgot_password', code: '123456' })
+    await supersessionCheckStarted
+    await supersessionRaceService.invalidateActiveForTarget({ target: '13800006667', scene: 'forgot_password' })
+    releaseSupersessionCheck()
+    await assert.rejects(inFlightSupersededVerify, /验证码已完成核验/, '已被新 Provider 作废的在途 PNVS 核验不得重新写成 PASS')
+    const supersededDuringCheckRecord = await recordRepo.findOneByOrFail({ outId: supersessionRaceRecord.outId })
+    assert.equal(supersededDuringCheckRecord.verificationStatus, 'failed')
+    assert.equal(supersededDuringCheckRecord.providerErrorCode, 'SUPERSEDED_BY_GENERIC')
+
     const oldRecordAt = new Date(Date.now() - 91 * 24 * 60 * 60 * 1000)
     const oldTerminalRecord = await recordRepo.save(recordRepo.create({
       outId: 'cleanup-terminal-record', bizId: null, channel: 'mobile', scene: 'test', targetDigest: 'a'.repeat(64), targetMasked: '138****7777',

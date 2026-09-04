@@ -186,16 +186,18 @@ export class SmsVerificationRecordService {
         schemeName: record.schemeName,
       })
       if (result.code === 'OK' && result.success === true && result.verifyResult === 'PASS') {
+        const verifiedAt = new Date()
         const updateResult = await this.recordRepo.createQueryBuilder()
           .update(SmsVerificationRecord)
           .set({
           verificationStatus: 'passed',
           providerErrorCode: null,
           providerErrorMessage: null,
-          verifiedAt: new Date(),
+          verifiedAt,
           })
           .where('id = :id', { id: record.id })
           .andWhere('verification_status <> :passed', { passed: 'passed' })
+          .andWhere('expires_at > :verifiedAt', { verifiedAt })
           .execute()
         if (Number(updateResult.affected ?? 0) !== 1) {
           throw new BizError('验证码已完成核验，请勿重复提交', 400)
