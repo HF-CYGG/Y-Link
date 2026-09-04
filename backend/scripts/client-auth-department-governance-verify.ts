@@ -582,6 +582,293 @@ async function main() {
       assert.ok(capturedCode, `应捕获 ${target} 的注册验证码`)
       return capturedCode
     }
+
+    const usernameRuleMessage = '用户名仅支持 2-20 位中文或英文字母，不能包含空格、数字或特殊字符'
+    const { normalizePersonalClientUsername } = await import('../src/utils/client-auth-account.js')
+    const {
+      CLIENT_PERSONAL_USERNAME_RULE_MESSAGE: sharedUsernameRuleMessage,
+      normalizePersonalClientUsername: normalizeSharedPersonalClientUsername,
+    } = await import('@ylink/validation/auth')
+    const resolveBackendUsernameRule = (value: string) => {
+      try {
+        return { value: normalizePersonalClientUsername(value).value, isValid: true, message: '' }
+      } catch (error) {
+        assert.ok(error instanceof Error, '后端用户名校验失败时应返回 Error')
+        return { value: value.normalize('NFKC'), isValid: false, message: error.message }
+      }
+    }
+    const validTwentyCharUsername = '甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲'
+    assert.equal([...validTwentyCharUsername].length, 20, '前后端一致性验收必须包含 20 位合法用户名')
+    for (const usernameValue of [
+      '张三',
+      'Alice',
+      '张Alice',
+      'Ａｌｉｃｅ',
+      validTwentyCharUsername,
+      '',
+      '张',
+      '甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲',
+      '张 三',
+      ' Alice ',
+      '　Ａｌｉｃｅ　',
+      '张3',
+      '张·三',
+      '张_@-/()',
+      '张😀',
+    ]) {
+      const sharedResult = normalizeSharedPersonalClientUsername(usernameValue)
+      assert.deepEqual(
+        resolveBackendUsernameRule(usernameValue),
+        { ...sharedResult, message: sharedResult.isValid ? '' : sharedUsernameRuleMessage },
+        `前后端个人用户名规则结果必须一致：${usernameValue || '空值'}`,
+      )
+    }
+    assert.equal(sharedUsernameRuleMessage, usernameRuleMessage, '共享与后端必须使用同一用户名错误文案')
+    const personalUsernameRegistrationCases = [
+      { username: 'Alice', account: '13800001101', expectedUsername: 'Alice' },
+      { username: '张Alice', account: '13800001102', expectedUsername: '张Alice' },
+      { username: 'Ｂｏｂ', account: '13800001103', expectedUsername: 'Bob' },
+    ] as const
+    for (const testCase of personalUsernameRegistrationCases) {
+      const result = await clientAuthService.register({
+        accountType: 'personal',
+        username: testCase.username,
+        account: testCase.account,
+        password: clientPassword,
+        verificationCode: await issueRegisterVerificationCode(testCase.account),
+      })
+      assert.equal(result.user.username, testCase.expectedUsername, `${testCase.username} 应按新用户名规则注册成功`)
+    }
+    pass('个人自助注册允许中文、英文、中英混合及 NFKC 归一化后的用户名')
+
+    const invalidPersonalUsernameCases = [
+      '张',
+      '甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲甲',
+      '张 三',
+      ' Alice ',
+      '　Ａｌｉｃｅ　',
+      '张3',
+      '张·三',
+      '张_@-/()',
+      '张😀',
+    ] as const
+    for (const [index, username] of invalidPersonalUsernameCases.entries()) {
+      const account = `138000011${String(index + 5).padStart(2, '0')}`
+      await expectBizError(
+        () => clientAuthService.register({
+          accountType: 'personal',
+          username,
+          account,
+          password: clientPassword,
+          verificationCode: undefined,
+        }),
+        `个人注册拒绝非法用户名 ${username}`,
+        usernameRuleMessage,
+      )
+    }
+    pass('后端直接调用注册接口仍拒绝长度、空格、数字和特殊字符用户名')
+
+    const { createApp } = await import('../src/app.js')
+    const httpProfileLogin = await clientAuthService.login({
+      account: '13800001101',
+      password: clientPassword,
+    })
+    const httpApp = createApp({ publicAuthRateLimits: { admin: 1000, client: 1000 } })
+    const httpServer = await new Promise<ReturnType<typeof httpApp.listen>>((resolve) => {
+      const server = httpApp.listen(0, '127.0.0.1', () => resolve(server))
+    })
+    try {
+      const serverAddress = httpServer.address()
+      assert.ok(serverAddress && typeof serverAddress !== 'string', 'HTTP 验证服务器应分配本地端口')
+      const invalidHttpUsernames = [
+        ' Alice ',
+        '甲'.repeat(21),
+        '甲'.repeat(129),
+      ]
+      for (const [index, username] of invalidHttpUsernames.entries()) {
+        const response = await fetch(`http://127.0.0.1:${serverAddress.port}/api/client-auth/register`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            accountType: 'personal',
+            username,
+            account: `1380000119${index}`,
+            password: clientPassword,
+          }),
+        })
+        const body = await response.json() as { message?: string }
+        assert.equal(response.status, 400, '绕过前端直接访问 HTTP 注册接口必须被后端拒绝')
+        assert.equal(body.message, usernameRuleMessage, 'HTTP 注册接口的空格及长度越界必须返回统一用户名规则文案')
+      }
+      for (const username of ['甲'.repeat(21), '甲'.repeat(129)]) {
+        const response = await fetch(`http://127.0.0.1:${serverAddress.port}/api/client-auth/profile`, {
+          method: 'PATCH',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${httpProfileLogin.token}`,
+          },
+          body: JSON.stringify({
+            username,
+            mobile: '13800001101',
+            currentPassword: clientPassword,
+          }),
+        })
+        const body = await response.json() as { message?: string }
+        assert.equal(response.status, 400, 'HTTP 资料更新接口必须拒绝 21/129 字符用户名')
+        assert.equal(body.message, usernameRuleMessage, 'HTTP 资料更新接口的长度越界必须返回统一用户名规则文案')
+      }
+    } finally {
+      await new Promise<void>((resolve, reject) => httpServer.close((error) => error ? reject(error) : resolve()))
+    }
+    pass('HTTP 注册接口绕过前端时仍由后端权威拒绝非法用户名')
+
+    const legacyUsername = '历史 账号1'
+    const legacyUsernameUser = await AppDataSource.getRepository(ClientUser).save(
+      AppDataSource.getRepository(ClientUser).create({
+        realName: legacyUsername,
+        mobile: '13800001120',
+        email: null,
+        passwordHash: await hashPassword(clientPassword),
+        accountType: 'personal',
+        staffVerified: false,
+        status: 'enabled',
+      }),
+    )
+    const legacyEmail = 'legacy-username@example.com'
+    await verificationCodeService.sendCode({
+      channel: 'email',
+      target: legacyEmail,
+      scene: 'profile_update',
+    })
+    const legacyProfileCode = [...capturedVerifications].reverse().find((item) => item.target === legacyEmail)?.code
+    assert.ok(legacyProfileCode, '应捕获历史用户名资料更新邮箱验证码')
+    const legacyProfile = await clientAuthService.updateProfile(
+      {
+        userId: legacyUsernameUser.id,
+        mobile: legacyUsernameUser.mobile ?? '',
+        email: '',
+        account: legacyUsername,
+        realName: legacyUsername,
+        accountType: 'personal',
+        staffNo: null,
+        sessionToken: 'client-username-legacy-profile-test',
+      },
+      {
+        username: legacyUsername,
+        mobile: legacyUsernameUser.mobile ?? undefined,
+        email: legacyEmail,
+        currentPassword: clientPassword,
+        emailVerificationCode: legacyProfileCode,
+      },
+    )
+    assert.equal(legacyProfile.username, legacyUsername, '历史非法用户名仅更新联系方式时必须保持原值')
+    assert.equal(legacyProfile.email, legacyEmail, '历史非法用户名仅更新联系方式时仍应允许保存新联系方式')
+    await expectBizError(
+      () => clientAuthService.updateProfile(
+        {
+          userId: legacyUsernameUser.id,
+          mobile: legacyUsernameUser.mobile ?? '',
+          email: legacyEmail,
+          account: legacyUsername,
+          realName: legacyUsername,
+          accountType: 'personal',
+          staffNo: null,
+          sessionToken: 'client-username-legacy-profile-space-test',
+        },
+        {
+          username: ` ${legacyUsername} `,
+          mobile: legacyUsernameUser.mobile ?? undefined,
+          email: legacyEmail,
+          currentPassword: clientPassword,
+        },
+      ),
+      '历史非法用户名添加首尾空格属于实际改名',
+      usernameRuleMessage,
+    )
+    await expectBizError(
+      () => clientAuthService.updateProfile(
+        {
+          userId: legacyUsernameUser.id,
+          mobile: legacyUsernameUser.mobile ?? '',
+          email: legacyEmail,
+          account: legacyUsername,
+          realName: legacyUsername,
+          accountType: 'personal',
+          staffNo: null,
+          sessionToken: 'client-username-legacy-profile-test',
+        },
+        {
+          username: '张_三',
+          mobile: legacyUsernameUser.mobile ?? undefined,
+          email: legacyEmail,
+          currentPassword: clientPassword,
+        },
+      ),
+      '历史非法用户名实际改名为非法值',
+      usernameRuleMessage,
+    )
+    pass('历史非法用户名可仅更新联系方式，实际改名仍按新规则拦截')
+
+    const duplicateLegacyUser = await AppDataSource.getRepository(ClientUser).save(
+      AppDataSource.getRepository(ClientUser).create({
+        realName: legacyUsername,
+        mobile: '13800001121',
+        email: null,
+        passwordHash: await hashPassword(clientPassword),
+        accountType: 'personal',
+        staffVerified: false,
+        status: 'enabled',
+      }),
+    )
+    const duplicateLegacyEmail = 'legacy-username-duplicate@example.com'
+    await verificationCodeService.sendCode({
+      channel: 'email',
+      target: duplicateLegacyEmail,
+      scene: 'profile_update',
+    })
+    const duplicateLegacyProfileCode = [...capturedVerifications].reverse().find((item) => item.target === duplicateLegacyEmail)?.code
+    assert.ok(duplicateLegacyProfileCode, '应捕获历史重复用户名资料更新邮箱验证码')
+    const duplicateLegacyProfile = await clientAuthService.updateProfile(
+      {
+        userId: duplicateLegacyUser.id,
+        mobile: duplicateLegacyUser.mobile ?? '',
+        email: '',
+        account: legacyUsername,
+        realName: legacyUsername,
+        accountType: 'personal',
+        staffNo: null,
+        sessionToken: 'client-username-legacy-duplicate-profile-test',
+      },
+      {
+        username: legacyUsername,
+        mobile: duplicateLegacyUser.mobile ?? undefined,
+        email: duplicateLegacyEmail,
+        currentPassword: clientPassword,
+        emailVerificationCode: duplicateLegacyProfileCode,
+      },
+    )
+    assert.equal(duplicateLegacyProfile.username, legacyUsername, '历史重复用户名未改名时必须保留原值')
+    assert.equal(duplicateLegacyProfile.email, duplicateLegacyEmail, '历史重复用户名未改名时必须允许更新联系方式')
+    pass('历史重复用户名未改名时跳过用户名唯一性检查并允许更新联系方式')
+
+    const webAuthSource = fs.readFileSync(path.resolve(backendRoot, '..', 'src', 'views', 'client', 'ClientAuthView.vue'), 'utf8')
+    const webProfileSource = fs.readFileSync(path.resolve(backendRoot, '..', 'src', 'views', 'client', 'ClientProfileView.vue'), 'utf8')
+    const mobileRegisterSource = fs.readFileSync(path.resolve(backendRoot, '..', 'apps', 'mobile', 'app', '(auth)', 'register.tsx'), 'utf8')
+    const mobileProfileSource = fs.readFileSync(path.resolve(backendRoot, '..', 'apps', 'mobile', 'app', '(tabs)', 'profile.tsx'), 'utf8')
+    for (const [scene, source] of [
+      ['Vue Web 注册', webAuthSource],
+      ['Vue Web 资料', webProfileSource],
+      ['React Native 注册', mobileRegisterSource],
+      ['React Native 资料', mobileProfileSource],
+    ] as const) {
+      assert.match(source, /@ylink\/validation\/auth/, `${scene} 必须消费共享用户名规则模块`)
+      assert.match(source, /getPersonalClientUsernameRuleHint/, `${scene} 必须调用共享用户名即时提示函数`)
+    }
+    assert.match(webAuthSource, /registerUsernameRuleHint/, 'Vue Web 注册页必须在输入时计算用户名规则提示')
+    assert.match(webProfileSource, /profileUsernameRuleHint/, 'Vue Web 资料页必须在输入时计算用户名规则提示')
+    assert.match(mobileRegisterSource, /usernameRuleHint/, 'React Native 注册页必须在输入时计算用户名规则提示')
+    assert.match(mobileProfileSource, /usernameRuleHint/, 'React Native 资料页必须在输入时计算用户名规则提示')
+    pass('Vue Web 与 React Native 注册、资料页面均提供一致的用户名即时提示')
     await verificationCodeService.sendCode({
       channel: 'mobile',
       target: '13800001001',
@@ -703,6 +990,52 @@ async function main() {
       '该姓名已被占用',
     )
     pass('教师注册目录姓名被占用时返回明确提示')
+
+    // 教师资料中的姓名以目录绑定值为准。即使历史数据中存在同名客户端，
+    // 旧客户端提交了不同 username，也不能因无关的姓名查重阻断联系方式更新。
+    const teacherProfileUser = await AppDataSource.getRepository(ClientUser).findOneByOrFail({ staffNo: 'T1001' })
+    await AppDataSource.getRepository(ClientUser).save(
+      AppDataSource.getRepository(ClientUser).create({
+        realName: teacherProfileUser.realName,
+        mobile: '13800001013',
+        email: null,
+        passwordHash: await hashPassword(clientPassword),
+        accountType: 'personal',
+        staffVerified: false,
+        status: 'enabled',
+      }),
+    )
+    const teacherProfileEmail = 'teacher-profile@example.com'
+    await verificationCodeService.sendCode({
+      channel: 'email',
+      target: teacherProfileEmail,
+      scene: 'profile_update',
+    })
+    const teacherProfileEmailCode = [...capturedVerifications].reverse()
+      .find((item) => item.target === teacherProfileEmail)?.code
+    assert.ok(teacherProfileEmailCode, '应捕获教师资料更新邮箱验证码')
+    const updatedTeacherProfile = await clientAuthService.updateProfile(
+      {
+        userId: teacherProfileUser.id,
+        mobile: teacherProfileUser.mobile ?? '',
+        email: teacherProfileUser.email ?? '',
+        account: teacherProfileUser.mobile ?? teacherProfileUser.realName,
+        realName: teacherProfileUser.realName,
+        accountType: 'personal',
+        staffNo: teacherProfileUser.staffNo,
+        sessionToken: 'client-teacher-profile-update-test',
+      },
+      {
+        username: '客户端不应覆盖教师目录姓名',
+        mobile: teacherProfileUser.mobile ?? undefined,
+        email: teacherProfileEmail,
+        currentPassword: clientPassword,
+        emailVerificationCode: teacherProfileEmailCode,
+      },
+    )
+    assert.equal(updatedTeacherProfile.username, teacherProfileUser.realName, '教师资料更新必须保留目录姓名')
+    assert.equal(updatedTeacherProfile.email, teacherProfileEmail, '同名历史数据不得阻断教师联系方式更新')
+    pass('教师资料更新跳过无关用户名查重并保留目录姓名')
 
     const sessionCountBeforeFailedLogin = await AppDataSource.getRepository(ClientUserSession).count()
     const missingLoginCases = [

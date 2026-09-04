@@ -44,6 +44,7 @@
     "o2o:discount-price:verify": "tsx scripts/o2o-discount-price-verify.ts",
     "o2o:sku-selection:verify": "tsx scripts/o2o-sku-selection-verify.ts",
     "o2o:verify": "tsx scripts/o2o-preorder-verify.ts",
+    "o2o:governance:route:verify": "tsx scripts/o2o-governance-route-verify.ts",
     "o2o:public-cache:unit:verify": "node --import tsx scripts/o2o-public-cache-unit-verify.ts",
     "o2o:public-cache:integration:verify": "tsx scripts/o2o-public-catalog-cache-verify.ts",
     "notification:outbox:static:verify": "node scripts/notification-outbox-static-verify.mjs",

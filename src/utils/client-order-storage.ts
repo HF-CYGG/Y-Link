@@ -18,6 +18,7 @@ import {
   type ClientOrderReportScenario,
   type O2oOrderBusinessStatus,
   type O2oOrderCancelReason,
+  type O2oOrderCancellationSource,
 } from '@/constants/o2o-order-status'
 
 /**
@@ -109,6 +110,11 @@ const normalizeStatusReport = (
   return {
     scenario,
     cancelReason,
+    cancellationSource: rawStatusReport?.cancellationSource === 'client' || rawStatusReport?.cancellationSource === 'admin' || rawStatusReport?.cancellationSource === 'system'
+      ? rawStatusReport.cancellationSource as O2oOrderCancellationSource
+      : null,
+    cancellationRemark: typeof rawStatusReport?.cancellationRemark === 'string' ? rawStatusReport.cancellationRemark : null,
+    cancelledAt: typeof rawStatusReport?.cancelledAt === 'string' ? rawStatusReport.cancelledAt : null,
     timeoutReached: rawStatusReport?.timeoutReached === true,
     timeoutSoon: rawStatusReport?.timeoutSoon === true,
   }

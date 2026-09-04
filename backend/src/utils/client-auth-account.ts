@@ -21,6 +21,9 @@ interface NormalizeClientAccountOptions {
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const MOBILE_PATTERN = /^1\d{10}$/
+const PERSONAL_USERNAME_PATTERN = /^[\p{Script=Han}A-Za-z]{2,20}$/u
+
+export const CLIENT_PERSONAL_USERNAME_RULE_MESSAGE = '用户名仅支持 2-20 位中文或英文字母，不能包含空格、数字或特殊字符'
 
 /**
  * 统一归一化客户端登录/注册账号：
@@ -86,6 +89,26 @@ export function normalizeClientUsername(username: string): {
   return {
     value: trimmedUsername,
     normalizedValue: trimmedUsername.toLowerCase(),
+  }
+}
+
+/**
+ * 个人客户端用户名仅用于公开自助注册和个人资料中的实际改名：
+ * - 先按 Unicode NFKC 合并全角兼容字符，再直接校验全部字符；
+ * - 首尾空白同样属于禁止字符，不能通过裁剪后绕过规则；
+ * - 不用于登录标识解析、教师目录回填、部门共享账号或历史账号回写。
+ */
+export function normalizePersonalClientUsername(username: string): {
+  value: string
+  normalizedValue: string
+} {
+  const value = username.normalize('NFKC')
+  if (!PERSONAL_USERNAME_PATTERN.test(value)) {
+    throw new BizError(CLIENT_PERSONAL_USERNAME_RULE_MESSAGE, 400)
+  }
+  return {
+    value,
+    normalizedValue: value.toLowerCase(),
   }
 }
 

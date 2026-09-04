@@ -127,6 +127,22 @@ const deleteConsoleOrderSchema = z.object({
   permanentDeletePassword: z.string().optional(),
 })
 
+const adminCancelOrderSchema = z.object({
+  reason: z.string().trim().min(2, '取消原因至少 2 个字符').max(200, '取消原因不能超过 200 个字符'),
+})
+
+const batchPurgeCancelledOrdersSchema = z.object({
+  orders: z.array(z.object({ id: z.string().trim().min(1), confirmShowNo: z.string().trim().min(1, '请填写订单号完成二次确认') }))
+    .min(1).max(50).superRefine((orders, context) => {
+      const ids = new Set<string>()
+      orders.forEach((order, index) => {
+        if (ids.has(order.id)) context.addIssue({ code: z.ZodIssueCode.custom, path: [index, 'id'], message: '订单 ID 不可重复' })
+        ids.add(order.id)
+      })
+    }),
+  permanentDeletePassword: z.string().optional(),
+})
+
 const submitReturnRequestSchema = z.object({
   reason: z.string().trim().min(1).max(O2O_RETURN_REASON_MAX_LENGTH),
   items: z.array(preorderItemSchema).min(1),
@@ -274,7 +290,7 @@ o2oRouter.post(
   requireClientAuth,
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
-    const data = await o2oPreorderService.cancelMyOrder(authReq.clientAuth, req.params.id)
+    const data = await o2oPreorderService.cancelMyOrder(authReq.clientAuth, req.params.id, extractRequestMeta(req))
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -365,6 +381,35 @@ o2oAdminRouter.get(
   requirePermission('orders:view'),
   asyncHandler(async (req, res) => {
     const data = await o2oPreorderService.getVerifyDetailByShowNo(req.params.showNo)
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+o2oAdminRouter.post(
+  '/orders/:id/cancel',
+  requirePermission('orders:update'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = adminCancelOrderSchema.parse(req.body ?? {})
+    const data = await o2oPreorderService.cancelOrderByAdmin({
+      orderId: req.params.id,
+      reason: payload.reason,
+      actor: authReq.auth,
+      requestMeta: extractRequestMeta(req),
+    })
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+o2oAdminRouter.post(
+  '/orders/batch-purge-cancelled',
+  requirePermission('orders:delete'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = batchPurgeCancelledOrdersSchema.parse(req.body ?? {})
+    assertPermanentDeletePassword(payload.permanentDeletePassword)
+    const data = await o2oPreorderService.batchPurgeCancelledOrders({ orders: payload.orders, actor: authReq.auth, requestMeta: extractRequestMeta(req) })
     res.json({ code: 0, message: 'ok', data })
   }),
 )

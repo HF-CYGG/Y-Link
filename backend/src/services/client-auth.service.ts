@@ -19,6 +19,7 @@ import { isUniqueConstraintError } from '../utils/database-errors.js'
 import {
   type NormalizedClientAccount,
   normalizeClientAccount,
+  normalizePersonalClientUsername,
   normalizeClientVerificationTarget,
   normalizeClientUsername,
 } from '../utils/client-auth-account.js'
@@ -646,7 +647,7 @@ class ClientAuthService {
       : this.resolveAccount(input.account ?? '')
     const username = isTeacherRegister
       ? null
-      : normalizeClientUsername(this.assertRealName(input.username ?? ''))
+      : normalizePersonalClientUsername(input.username ?? '')
     const password = assertClientPasswordPolicy(input.password)
     const capabilities = await this.getVerificationCapabilities()
     const validationMode = account ? capabilities.registerValidationModes[account.channel] : 'captcha'
@@ -922,16 +923,21 @@ class ClientAuthService {
     })
   }
 
-  private buildProfileUniquenessChecks(username: ReturnType<typeof normalizeClientUsername>, mobile: string | null, email: string | null) {
+  private buildProfileUniquenessChecks(
+    username: ReturnType<typeof normalizeClientUsername>,
+    mobile: string | null,
+    email: string | null,
+    includeUsername: boolean,
+  ) {
     return [
-      {
+      ...(includeUsername ? [{
         value: {
           channel: 'username' as const,
           rawValue: username.value,
           normalizedValue: username.normalizedValue,
         },
         message: '该用户名已被其他用户使用',
-      },
+      }] : []),
       { value: mobile, message: '该手机号已被其他用户使用' },
       { value: email, message: '该邮箱已被其他用户使用' },
     ]
@@ -971,9 +977,13 @@ class ClientAuthService {
     if (!(await verifyPassword(input.currentPassword, user.passwordHash))) throw new BizError('当前密码错误', 400)
 
     const isDirectoryTeacher = user.staffVerified && Boolean(user.staffNo?.trim())
-    const username = isDirectoryTeacher
-      ? normalizeClientUsername(user.realName)
-      : normalizeClientUsername(this.assertRealName(input.username))
+    const storedUsername = normalizeClientUsername(user.realName)
+    // 历史不合规用户名只在客户端原样回传时兼容；任何字符变化都按新的
+    // 个人用户名规则校验，避免通过首尾空格或兼容字符绕过实际改名约束。
+    const usernameUnchanged = input.username === user.realName
+    const username = isDirectoryTeacher || usernameUnchanged
+      ? storedUsername
+      : normalizePersonalClientUsername(input.username)
     const mobile = input.mobile?.trim()
       ? normalizeClientVerificationTarget('mobile', input.mobile)
       : null
@@ -985,7 +995,7 @@ class ClientAuthService {
       throw new BizError('手机号和邮箱至少保留一项', 400)
     }
 
-    const checks = this.buildProfileUniquenessChecks(username, mobile, email)
+    const checks = this.buildProfileUniquenessChecks(username, mobile, email, !isDirectoryTeacher && !usernameUnchanged)
     await this.ensureProfileIdentifiersUnique(checks, user.id)
 
     const mobileChanged = mobile !== user.mobile
@@ -1004,7 +1014,7 @@ class ClientAuthService {
       })
     }
 
-    user.realName = username.value
+    if (!isDirectoryTeacher && !usernameUnchanged) user.realName = username.value
     user.mobile = mobile
     user.email = email
     if (mobileChanged) user.mobileVerifiedAt = mobile && capabilities.channels.mobile ? new Date() : null

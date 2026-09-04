@@ -35,6 +35,9 @@ const REQUIRED_TABLES = [
 const REQUIRED_COLUMNS = [
   ['o2o_preorder', 'client_request_id'],
   ['o2o_preorder', 'client_request_hash'],
+  ['o2o_preorder', 'cancellation_source'],
+  ['o2o_preorder', 'cancellation_remark'],
+  ['o2o_preorder', 'cancelled_at'],
   ['business_sequence', 'sequence_key'],
   ['business_sequence', 'current_value'],
   ['business_sequence', 'created_at'],
@@ -199,6 +202,13 @@ missingIdempotencyColumn.columns.delete(objectKey('o2o_preorder', 'client_reques
 await expectSchemaFailure(missingIdempotencyColumn, [
   '字段 o2o_preorder.client_request_hash',
   '035_o2o_idempotency_business_sequence.sql',
+])
+
+const missingCancellationSource = createCompleteFixture()
+missingCancellationSource.columns.delete(objectKey('o2o_preorder', 'cancellation_source'))
+await expectSchemaFailure(missingCancellationSource, [
+  '字段 o2o_preorder.cancellation_source',
+  '039_o2o_preorder_governance.sql',
 ])
 
 const missingOutboxColumn = createCompleteFixture()

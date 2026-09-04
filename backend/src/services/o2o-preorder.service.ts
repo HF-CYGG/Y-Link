@@ -24,6 +24,7 @@ import {
   O2oPreorder,
   type O2oPreorderBusinessStatus,
   type O2oPreorderCancelReason,
+  type O2oPreorderCancellationSource,
   type O2oPreorderStatus,
 } from '../entities/o2o-preorder.entity.js'
 import { O2oPreorderItem } from '../entities/o2o-preorder-item.entity.js'
@@ -119,6 +120,33 @@ export interface RejectReturnRequestInput {
 export interface DeleteConsolePreorderInput {
   orderId: string
   confirmShowNo: string
+}
+
+export interface CancelOrderByAdminInput {
+  orderId: string
+  reason: string
+  actor: AuthUserContext
+  requestMeta: RequestMeta
+}
+
+export interface BatchPurgeCancelledPreorderInput {
+  orders: Array<{ id: string; confirmShowNo: string }>
+  actor: AuthUserContext
+  requestMeta: RequestMeta
+}
+
+export interface BatchPurgeCancelledPreorderResult {
+  id: string
+  showNo?: string
+  outcome: 'deleted' | 'skipped' | 'failed'
+  code: string
+  message: string
+}
+
+export interface BatchPurgeCancelledPreordersView {
+  batchId: string
+  summary: { requested: number; deleted: number; skipped: number; failed: number }
+  results: BatchPurgeCancelledPreorderResult[]
 }
 
 export interface DeletedConsolePreorderView {
@@ -233,6 +261,9 @@ export interface O2oPreorderSummaryView {
   statusReport: {
     scenario: 'pending' | 'verified' | 'cancelled' | 'timeout_soon' | 'timeout_cancelled'
     cancelReason: 'timeout' | 'manual' | null
+    cancellationSource: O2oPreorderCancellationSource | null
+    cancellationRemark: string | null
+    cancelledAt: Date | null
     timeoutReached: boolean
     timeoutSoon: boolean
   }
@@ -983,8 +1014,7 @@ class O2oPreorderService {
   }
 
   private resolveCancelledOrderReason(
-    order: Pick<O2oPreorder, 'status' | 'timeoutAt' | 'cancelReason'>,
-    nowMs = Date.now(),
+    order: Pick<O2oPreorder, 'status' | 'cancelReason'>,
   ): O2oPreorderCancelReason | null {
     if (order.status !== 'cancelled') {
       return null
@@ -992,21 +1022,26 @@ class O2oPreorderService {
     if (order.cancelReason === 'manual' || order.cancelReason === 'timeout') {
       return order.cancelReason
     }
-    return this.isOrderTimeoutReached(order, nowMs) ? 'timeout' : 'manual'
+    // 旧数据可能没有记录取消原因。取消发生后再根据当前时间推断会误把
+    // 历史人工取消归为超时取消，因此未知原因必须保持为空并中性展示。
+    return null
   }
 
   private resolveOrderStatusReport(
-    order: Pick<O2oPreorder, 'status' | 'timeoutAt' | 'cancelReason'>,
+    order: Pick<O2oPreorder, 'status' | 'timeoutAt' | 'cancelReason' | 'cancellationSource' | 'cancellationRemark' | 'cancelledAt'>,
     nowMs = Date.now(),
   ) {
     const timeoutAtMs = order.timeoutAt ? order.timeoutAt.getTime() : null
     const timeoutReached = Boolean(timeoutAtMs && timeoutAtMs <= nowMs)
     const timeoutSoon = Boolean(timeoutAtMs && timeoutAtMs > nowMs && timeoutAtMs - nowMs <= 2 * 60 * 60 * 1000)
-    const cancelReason = this.resolveCancelledOrderReason(order, nowMs)
+    const cancelReason = this.resolveCancelledOrderReason(order)
     if (order.status === 'verified') {
       return {
         scenario: 'verified' as const,
         cancelReason: null,
+        cancellationSource: null,
+        cancellationRemark: null,
+        cancelledAt: null,
         timeoutReached,
         timeoutSoon: false,
       }
@@ -1015,6 +1050,9 @@ class O2oPreorderService {
       return {
         scenario: 'timeout_cancelled' as const,
         cancelReason: 'timeout' as const,
+        cancellationSource: order.cancellationSource ?? null,
+        cancellationRemark: order.cancellationRemark ?? null,
+        cancelledAt: order.cancelledAt ?? null,
         timeoutReached,
         timeoutSoon: false,
       }
@@ -1022,7 +1060,10 @@ class O2oPreorderService {
     if (order.status === 'cancelled') {
       return {
         scenario: 'cancelled' as const,
-        cancelReason: cancelReason ?? 'manual',
+        cancelReason,
+        cancellationSource: order.cancellationSource ?? null,
+        cancellationRemark: order.cancellationRemark ?? null,
+        cancelledAt: order.cancelledAt ?? null,
         timeoutReached,
         timeoutSoon: false,
       }
@@ -1031,6 +1072,9 @@ class O2oPreorderService {
       return {
         scenario: 'timeout_soon' as const,
         cancelReason: null,
+        cancellationSource: null,
+        cancellationRemark: null,
+        cancelledAt: null,
         timeoutReached,
         timeoutSoon: true,
       }
@@ -1038,6 +1082,9 @@ class O2oPreorderService {
     return {
       scenario: 'pending' as const,
       cancelReason: null,
+      cancellationSource: null,
+      cancellationRemark: null,
+      cancelledAt: null,
       timeoutReached,
       timeoutSoon: false,
     }
@@ -1368,6 +1415,8 @@ class O2oPreorderService {
     input: {
       order: O2oPreorder
       cancelReason: O2oPreorderCancelReason
+      cancellationSource: O2oPreorderCancellationSource
+      cancellationRemark: string
       operatorType: 'system' | 'client' | 'admin'
       operatorId?: string | null
       operatorName?: string | null
@@ -1382,7 +1431,13 @@ class O2oPreorderService {
     // 这道数据库门禁保证多 Worker、手工撤回与核销竞态下只有一个调用方能够释放库存。
     const claimResult = await orderRepo.update(
       { id: input.order.id, status: 'pending' },
-      { status: 'cancelled', cancelReason: input.cancelReason },
+      {
+        status: 'cancelled',
+        cancelReason: input.cancelReason,
+        cancellationSource: input.cancellationSource,
+        cancellationRemark: input.cancellationRemark,
+        cancelledAt: new Date(),
+      },
     )
     if ((claimResult.affected ?? 0) !== 1) {
       return false
@@ -1466,6 +1521,9 @@ class O2oPreorderService {
     }
     input.order.status = 'cancelled'
     input.order.cancelReason = input.cancelReason
+    input.order.cancellationSource = input.cancellationSource
+    input.order.cancellationRemark = input.cancellationRemark
+    input.order.cancelledAt = new Date()
     return true
   }
 
@@ -1480,6 +1538,8 @@ class O2oPreorderService {
     const cancelled = await this.cancelOrderInManager(manager, {
       order,
       cancelReason: 'timeout',
+      cancellationSource: 'system',
+      cancellationRemark: '订单超时自动取消',
       operatorType: 'system',
       operatorName: 'auto_cancel',
       logRemark: '订单超时自动取消，释放预订库存',
@@ -1487,6 +1547,21 @@ class O2oPreorderService {
     if (!cancelled) {
       return false
     }
+    await auditService.record({
+      actionType: 'o2o.preorder.cancel_by_system',
+      actionLabel: '系统超时取消预订单',
+      targetType: 'o2o_order',
+      targetId: String(order.id),
+      targetCode: order.showNo,
+      actor: null,
+      detail: {
+        previousStatus: 'pending',
+        nextStatus: 'cancelled',
+        cancellationSource: 'system',
+        cancellationRemark: '订单超时自动取消',
+        releasedQty: order.totalQty,
+      },
+    }, manager)
     return true
   }
 
@@ -2263,13 +2338,7 @@ class O2oPreorderService {
 
   // 详细注释：创建退货申请前，需要先统一校验订单是否仍处于允许售后的窗口。
   // 待取货订单若已超时，需要先走自动取消逻辑，避免继续基于脏状态申请退货。
-  private async assertCanCreateReturnRequestForOrder(
-    manager: typeof AppDataSource.manager,
-    order: O2oPreorder,
-  ) {
-    if (await this.cancelTimedOutOrderInManager(manager, order)) {
-      throw new BizError('订单已超时取消，无法申请退货', 409)
-    }
+  private assertCanCreateReturnRequestForOrder(order: O2oPreorder) {
     if (order.status === 'cancelled') {
       throw new BizError('已取消订单不可申请退货', 409)
     }
@@ -2555,9 +2624,6 @@ class O2oPreorderService {
   }
 
   private async assertCanUpdateOrderInManager(manager: EntityManager, order: O2oPreorder) {
-    if (await this.cancelTimedOutOrderInManager(manager, order)) {
-      throw new BizError('订单已超时取消，无法修改', 409)
-    }
     if (order.status === 'verified') {
       throw new BizError('订单已核销，无法修改', 409)
     }
@@ -2582,9 +2648,6 @@ class O2oPreorderService {
   }
 
   private async assertCanOnsiteAdjustOrderInManager(manager: EntityManager, order: O2oPreorder) {
-    if (await this.cancelTimedOutOrderInManager(manager, order)) {
-      throw new BizError('订单已超时取消，无法现场改单', 409)
-    }
     if (order.status === 'verified') {
       throw new BizError('订单已核销，无法现场改单', 409)
     }
@@ -2836,6 +2899,9 @@ class O2oPreorderService {
         select: ['id'],
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
+      if (await this.cancelTimedOutOrderInManager(manager, order)) {
+        return { timedOut: true as const, detail: null }
+      }
       await this.assertCanUpdateOrderInManager(manager, order)
 
       const existingItems = await orderItemRepo.find({
@@ -2895,10 +2961,13 @@ class O2oPreorderService {
       order.remark = normalizedRemark
       order.updateCount = this.normalizeOrderUpdateCount(order.updateCount) + 1
       await orderRepo.save(order)
-      return this.buildOrderDetail(order, manager)
+      return { timedOut: false as const, detail: await this.buildOrderDetail(order, manager) }
     })
     this.invalidateMallReadCache()
-    return result
+    if (result.timedOut) {
+      throw new BizError('订单已超时取消，无法修改', 409)
+    }
+    return result.detail
   }
 
   async updateOrderOnsite(auth: AuthUserContext, input: UpdateOnsitePreorderInput) {
@@ -2921,6 +2990,9 @@ class O2oPreorderService {
         select: ['id'],
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
+      if (await this.cancelTimedOutOrderInManager(manager, order)) {
+        return { timedOut: true as const, detail: null }
+      }
       await this.assertCanOnsiteAdjustOrderInManager(manager, order)
 
       const existingItems = await orderItemRepo.find({
@@ -2978,10 +3050,13 @@ class O2oPreorderService {
       order.totalQty = totalQty
       order.remark = normalizedRemark
       await orderRepo.save(order)
-      return this.buildOrderDetail(order, manager)
+      return { timedOut: false as const, detail: await this.buildOrderDetail(order, manager) }
     })
     this.invalidateMallReadCache()
-    return result
+    if (result.timedOut) {
+      throw new BizError('订单已超时取消，无法现场改单', 409)
+    }
+    return result.detail
   }
 
   async listMyOrders(auth: ClientAuthContext, query?: Partial<MyOrderListQuery>): Promise<PaginationResult<O2oPreorderSummaryView>> {
@@ -3089,7 +3164,7 @@ class O2oPreorderService {
         throw new BizError('退货数量必须为正整数', 400)
       }
     })
-    return runInTransaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const orderRepo = manager.getRepository(O2oPreorder)
       const order = await orderRepo.findOne({
         where: { id: orderId, clientUserId: auth.userId, isDeleted: false },
@@ -3098,7 +3173,10 @@ class O2oPreorderService {
       if (!order) {
         throw new BizError('预订单不存在', 404)
       }
-      await this.assertCanCreateReturnRequestForOrder(manager, order)
+      if (await this.cancelTimedOutOrderInManager(manager, order)) {
+        return { timedOut: true as const, detail: null }
+      }
+      this.assertCanCreateReturnRequestForOrder(order)
 
       const orderItems = await this.loadOrderItemsForReturn(
         manager,
@@ -3147,8 +3225,13 @@ class O2oPreorderService {
         order.businessStatus = 'after_sale'
         await orderRepo.save(order)
       }
-      return this.buildReturnRequestDetail(savedRequest, manager)
+      return { timedOut: false as const, detail: await this.buildReturnRequestDetail(savedRequest, manager) }
     })
+    if (result.timedOut) {
+      this.invalidateMallReadCache()
+      throw new BizError('订单已超时取消，无法申请退货', 409)
+    }
+    return result.detail
   }
 
   async listConsoleOrders(input: {
@@ -3440,8 +3523,8 @@ class O2oPreorderService {
     return result
   }
 
-  async cancelMyOrder(auth: ClientAuthContext, id: string) {
-    await runInTransaction(async (manager) => {
+  async cancelMyOrder(auth: ClientAuthContext, id: string, requestMeta?: RequestMeta) {
+    const result = await runInTransaction(async (manager) => {
       const order = await manager.getRepository(O2oPreorder).findOne({
         where: { id, isDeleted: false },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
@@ -3453,18 +3536,26 @@ class O2oPreorderService {
         throw new BizError('无权撤回他人订单', 403)
       }
       if (await this.cancelTimedOutOrderInManager(manager, order)) {
-        throw new BizError('订单已超时取消，无法撤回', 409)
+        return { timedOut: true }
       }
       if (order.status === 'verified') {
         throw new BizError('订单已核销，无法撤回', 409)
       }
       if (order.status === 'cancelled') {
         const cancelReason = this.resolveCancelledOrderReason(order)
-        throw new BizError(cancelReason === 'timeout' ? '订单已超时取消，无法重复撤回' : '订单已撤回，请勿重复操作', 409)
+        if (cancelReason === 'timeout') {
+          throw new BizError('订单已超时取消，无法重复撤回', 409)
+        }
+        throw new BizError(
+          order.cancellationSource === 'client' ? '订单已撤回，请勿重复操作' : '订单已取消，无法撤回',
+          409,
+        )
       }
       const cancelled = await this.cancelOrderInManager(manager, {
         order,
         cancelReason: 'manual',
+        cancellationSource: 'client',
+        cancellationRemark: '客户主动撤回',
         operatorType: 'client',
         operatorId: String(auth.userId),
         operatorName: auth.realName || auth.mobile,
@@ -3473,9 +3564,131 @@ class O2oPreorderService {
       if (!cancelled) {
         throw new BizError('当前预订单不可撤回', 409)
       }
+      await auditService.record({
+        actionType: 'o2o.preorder.cancel_by_client',
+        actionLabel: '客户端撤回预订单',
+        targetType: 'o2o_order',
+        targetId: String(order.id),
+        targetCode: order.showNo,
+        actor: { userId: String(auth.userId), username: auth.account, displayName: auth.realName || auth.mobile },
+        requestMeta,
+        detail: {
+          previousStatus: 'pending',
+          nextStatus: 'cancelled',
+          cancellationSource: 'client',
+          cancellationRemark: '客户主动撤回',
+          releasedQty: order.totalQty,
+        },
+      }, manager)
+      return { timedOut: false }
     })
     this.invalidateMallReadCache()
+    if (result.timedOut) {
+      throw new BizError('订单已超时取消，无法撤回', 409)
+    }
     return this.getMyOrderDetail(auth, id)
+  }
+
+  async cancelOrderByAdmin(input: CancelOrderByAdminInput) {
+    const reason = input.reason.trim()
+    if (reason.length < 2 || reason.length > 200) {
+      throw new BizError('取消原因长度应为 2-200 个字符', 400)
+    }
+    const result = await runInTransaction(async (manager) => {
+      const order = await manager.getRepository(O2oPreorder).findOne({
+        where: { id: input.orderId, isDeleted: false },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
+      if (!order) {
+        throw new BizError('预订单不存在', 404)
+      }
+      if (await this.cancelTimedOutOrderInManager(manager, order)) {
+        return { timedOut: true }
+      }
+      if (order.status === 'verified') {
+        throw new BizError('订单已核销，无法取消', 409)
+      }
+      if (order.status === 'cancelled') {
+        throw new BizError('订单已取消，无法重复取消', 409)
+      }
+      const cancelled = await this.cancelOrderInManager(manager, {
+        order,
+        cancelReason: 'manual',
+        cancellationSource: 'admin',
+        cancellationRemark: reason,
+        operatorType: 'admin',
+        operatorId: input.actor.userId,
+        operatorName: input.actor.displayName,
+        logRemark: `管理端取消订单，原因：${reason}`,
+      })
+      if (!cancelled) {
+        throw new BizError('订单状态已变化，请刷新后重试', 409)
+      }
+      await auditService.record({
+        actionType: 'o2o.preorder.cancel_by_admin',
+        actionLabel: '管理端取消预订单',
+        targetType: 'o2o_order',
+        targetId: String(order.id),
+        targetCode: order.showNo,
+        actor: input.actor,
+        requestMeta: input.requestMeta,
+        detail: {
+          previousStatus: 'pending',
+          nextStatus: 'cancelled',
+          reason,
+          releasedQty: order.totalQty,
+          cancellationSource: 'admin',
+        },
+      }, manager)
+      return { timedOut: false }
+    })
+    this.invalidateMallReadCache()
+    if (result.timedOut) {
+      throw new BizError('订单已超时取消，无法人工取消', 409)
+    }
+    return this.detailById(input.orderId)
+  }
+
+  async batchPurgeCancelledOrders(input: BatchPurgeCancelledPreorderInput): Promise<BatchPurgeCancelledPreordersView> {
+    if (input.orders.length < 1 || input.orders.length > 50) throw new BizError('批量永久删除订单数量应为 1-50 项', 400)
+    const orders = input.orders.map((item) => ({ id: item.id.trim(), confirmShowNo: item.confirmShowNo.trim() }))
+    if (orders.some((item) => !item.id || !item.confirmShowNo)) throw new BizError('订单 ID 与二次确认订单号不能为空', 400)
+    if (new Set(orders.map((item) => item.id)).size !== orders.length) throw new BizError('订单 ID 不可重复', 400)
+    const batchId = randomUUID()
+    const results: BatchPurgeCancelledPreorderResult[] = []
+    for (const item of orders) {
+      try {
+        results.push(await runInTransaction(async (manager): Promise<BatchPurgeCancelledPreorderResult> => {
+          const preorderRepo = manager.getRepository(O2oPreorder)
+          const order = await preorderRepo.findOne({ where: { id: item.id }, lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' } })
+          if (!order) return { id: item.id, outcome: 'failed', code: 'ORDER_NOT_FOUND', message: '订单不存在' }
+          if (order.showNo !== item.confirmShowNo) return { id: item.id, showNo: order.showNo, outcome: 'failed', code: 'SHOW_NO_MISMATCH', message: '二次确认订单号不匹配' }
+          if (order.isDeleted || order.status !== 'cancelled') return { id: item.id, showNo: order.showNo, outcome: 'skipped', code: 'ORDER_NOT_CANCELLED', message: '订单当前不是可永久删除的已取消状态' }
+          const [returnRequestCount, linkedOutboundOrder] = await Promise.all([
+            manager.getRepository(O2oReturnRequest).count({ where: { orderId: String(order.id) } }),
+            this.loadLinkedOutboundOrderInManager(manager, String(order.id)),
+          ])
+          if (returnRequestCount > 0) return { id: item.id, showNo: order.showNo, outcome: 'skipped', code: 'RETURN_REQUEST_EXISTS', message: '订单存在退货申请，无法永久删除' }
+          if (linkedOutboundOrder) return { id: item.id, showNo: order.showNo, outcome: 'skipped', code: 'OUTBOUND_ORDER_EXISTS', message: '订单关联正式出库单，无法永久删除' }
+          const preorderItems = await manager.getRepository(O2oPreorderItem).find({ where: { orderId: String(order.id) } })
+          await auditService.record({
+            actionType: 'o2o.preorder.purge_cancelled', actionLabel: '批量永久删除已取消预订单', targetType: 'o2o_order', targetId: String(order.id), targetCode: order.showNo, actor: input.actor, requestMeta: input.requestMeta,
+            detail: { batchId, snapshot: { status: order.status, cancelReason: order.cancelReason, cancellationSource: order.cancellationSource, cancellationRemark: order.cancellationRemark, cancelledAt: order.cancelledAt, totalQty: order.totalQty, itemCount: preorderItems.length } },
+          }, manager)
+          await manager.getRepository(O2oPreorderItem).delete({ orderId: String(order.id) })
+          const deleted = await preorderRepo.delete({ id: String(order.id), status: 'cancelled', isDeleted: false })
+          if ((deleted.affected ?? 0) !== 1) throw new BizError('订单状态已变化，请刷新后重试', 409)
+          return { id: item.id, showNo: order.showNo, outcome: 'deleted', code: 'DELETED', message: '已永久删除' }
+        }))
+      } catch (error) {
+        results.push({ id: item.id, outcome: 'failed', code: error instanceof BizError ? 'BUSINESS_ERROR' : 'PURGE_FAILED', message: error instanceof BizError ? error.message : '永久删除失败，请稍后重试' })
+      }
+    }
+    const summary = { requested: orders.length, deleted: results.filter((item) => item.outcome === 'deleted').length, skipped: results.filter((item) => item.outcome === 'skipped').length, failed: results.filter((item) => item.outcome === 'failed').length }
+    // 单笔删除及其审计已在各自事务内提交；汇总日志属于辅助索引，失败时不能
+    // 把已完成的物理删除伪装成整批失败，否则客户端重试会丢失首次结果语义。
+    await auditService.safeRecord({ actionType: 'o2o.preorder.purge_cancelled_batch', actionLabel: '批量永久删除已取消预订单汇总', targetType: 'o2o_order_batch', targetId: batchId, actor: input.actor, requestMeta: input.requestMeta, detail: { batchId, summary, results } })
+    return { batchId, summary, results }
   }
 
   private async markOrderAfterSaleStageInManager(
@@ -3497,15 +3710,11 @@ class O2oPreorderService {
   // 详细注释：退货核销必须与原订单当前状态交叉校验。
   // 申请快照是“待取货”时，只允许对仍待取货的订单释放预订库存；
   // 申请快照是“已取货”时，只允许对仍已取货的订单执行重新入库。
-  private async assertReturnRequestSourceOrderStatus(
-    manager: typeof AppDataSource.manager,
+  private assertReturnRequestSourceOrderStatus(
     returnRequest: O2oReturnRequest,
     order: O2oPreorder,
   ) {
     if (returnRequest.sourceOrderStatus === 'pending') {
-      if (await this.cancelTimedOutOrderInManager(manager, order)) {
-        throw new BizError('原订单已超时取消，退货申请无需再核销', 409)
-      }
       if (order.status !== 'pending') {
         throw new BizError('原订单状态已变化，请重新确认后再处理该退货申请', 409)
       }
@@ -3638,7 +3847,7 @@ class O2oPreorderService {
     manager: typeof AppDataSource.manager,
     returnRequest: O2oReturnRequest,
     actor: AuthUserContext,
-  ): Promise<O2oVerifyResultView> {
+  ): Promise<O2oVerifyResultView | null> {
     if (returnRequest.status !== 'pending') {
       if (returnRequest.status === 'rejected') {
         throw new BizError('退货申请已拒绝，不可继续回库核销', 409)
@@ -3652,7 +3861,13 @@ class O2oPreorderService {
     if (!order) {
       throw new BizError('原预订单不存在，无法核销退货', 404)
     }
-    await this.assertReturnRequestSourceOrderStatus(manager, returnRequest, order)
+    if (
+      returnRequest.sourceOrderStatus === 'pending'
+      && await this.cancelTimedOutOrderInManager(manager, order)
+    ) {
+      return null
+    }
+    this.assertReturnRequestSourceOrderStatus(returnRequest, order)
 
     const { requestItems, orderItemMap, productMap, skuMap } = await this.loadReturnVerificationContext(
       manager,
@@ -3675,6 +3890,9 @@ class O2oPreorderService {
     if (returnRequest.sourceOrderStatus === 'pending' && order.totalQty <= 0) {
       order.status = 'cancelled'
       order.cancelReason = 'manual'
+      order.cancellationSource = 'system'
+      order.cancellationRemark = '退货核销后订单已无剩余商品'
+      order.cancelledAt = new Date()
     }
     await this.markOrderAfterSaleStageInManager(manager, order, String(returnRequest.id))
 
@@ -3737,9 +3955,6 @@ class O2oPreorderService {
     order: O2oPreorder,
     actor: AuthUserContext,
   ): Promise<O2oVerifyResultView> {
-    if (await this.cancelTimedOutOrderInManager(manager, order)) {
-      throw new BizError('预订单已超时取消，库存已释放，不可继续核销', 409)
-    }
     if (order.status !== 'pending') {
       throw new BizError('当前预订单不可核销', 409)
     }
@@ -3837,7 +4052,10 @@ class O2oPreorderService {
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
       if (returnRequest) {
-        return this.verifyReturnRequestInManager(manager, returnRequest, actor)
+        const detail = await this.verifyReturnRequestInManager(manager, returnRequest, actor)
+        return detail
+          ? { timedOut: null, detail }
+          : { timedOut: 'return_request' as const, detail: null }
       }
       const order = await manager.getRepository(O2oPreorder).findOne({
         where: { verifyCode: normalizedVerifyCode, isDeleted: false },
@@ -3846,10 +4064,19 @@ class O2oPreorderService {
       if (!order) {
         throw new BizError('核销单不存在', 404)
       }
-      return this.verifyPreorderInManager(manager, order, actor)
+      if (await this.cancelTimedOutOrderInManager(manager, order)) {
+        return { timedOut: 'preorder' as const, detail: null }
+      }
+      return { timedOut: null, detail: await this.verifyPreorderInManager(manager, order, actor) }
     })
-    this.invalidateMallReadCache({ soldQtyChanged: true })
-    return result
+    this.invalidateMallReadCache({ soldQtyChanged: result.timedOut === null })
+    if (result.timedOut === 'return_request') {
+      throw new BizError('原订单已超时取消，退货申请无需再核销', 409)
+    }
+    if (result.timedOut === 'preorder') {
+      throw new BizError('预订单已超时取消，库存已释放，不可继续核销', 409)
+    }
+    return result.detail
   }
 
   async inboundStock(

@@ -10,6 +10,11 @@
 
 import { computed, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import {
+  CLIENT_PERSONAL_USERNAME_RULE_MESSAGE,
+  getPersonalClientUsernameRuleHint,
+  normalizePersonalClientUsername,
+} from '@ylink/validation/auth'
 
 import type { FormInstance, FormRules } from 'element-plus'
 import { BizCrudDialogShell } from '@/components/common'
@@ -73,6 +78,17 @@ const displayName = computed(() => (
 ))
 const displayDepartmentName = computed(() => clientAuthStore.currentUser?.departmentName?.trim() || '未设置')
 const displayStaffNo = computed(() => clientAuthStore.currentUser?.staffNo?.trim() || '未登记')
+const storedProfileUsername = computed(() => (
+  clientAuthStore.currentUser?.username
+  || clientAuthStore.currentUser?.account
+  || clientAuthStore.currentUser?.realName
+  || ''
+))
+const profileUsernameUnchanged = computed(() => profileForm.username === storedProfileUsername.value)
+const profileUsernameRuleHint = computed(() => {
+  if (isTeacherAccount.value || profileUsernameUnchanged.value) return ''
+  return getPersonalClientUsernameRuleHint(profileForm.username)
+})
 
 const rules: FormRules = {
   currentPassword: [{ required: true, message: '请输入原密码', trigger: 'blur' }],
@@ -95,7 +111,20 @@ const rules: FormRules = {
 }
 
 const profileRules: FormRules = {
-  username: [{ required: true, message: '请输入姓名', trigger: 'blur' }],
+  username: [{
+    validator: (_rule, value: string, callback) => {
+      if (isTeacherAccount.value || value === storedProfileUsername.value) {
+        callback()
+        return
+      }
+      if (!normalizePersonalClientUsername(value).isValid) {
+        callback(new Error(CLIENT_PERSONAL_USERNAME_RULE_MESSAGE))
+        return
+      }
+      callback()
+    },
+    trigger: ['blur', 'change'],
+  }],
   currentPassword: [{ required: true, message: '请输入当前密码', trigger: 'blur' }],
   mobile: [
     {
@@ -185,9 +214,16 @@ const submitUpdateProfile = async () => {
   const valid = await profileFormRef.value.validate().catch(() => false)
   if (!valid) return
 
-  const normalizedUsername = profileForm.username.trim()
+  const normalizedPersonalUsername = normalizePersonalClientUsername(profileForm.username)
+  const normalizedUsername = profileUsernameUnchanged.value || isTeacherAccount.value
+    ? storedProfileUsername.value
+    : normalizedPersonalUsername.value
   if (!normalizedUsername) {
-    showAppWarning('请输入姓名')
+    showAppWarning(CLIENT_PERSONAL_USERNAME_RULE_MESSAGE)
+    return
+  }
+  if (!profileUsernameUnchanged.value && !isTeacherAccount.value && !normalizedPersonalUsername.isValid) {
+    showAppWarning(CLIENT_PERSONAL_USERNAME_RULE_MESSAGE)
     return
   }
   const normalizedMobile = profileForm.mobile.trim()
@@ -369,8 +405,9 @@ const sendProfileCode = async (channel: 'mobile' | 'email') => {
       @confirm="submitUpdateProfile"
     >
       <el-form ref="profileFormRef" :model="profileForm" :rules="profileRules" label-position="top" @submit.prevent>
-        <el-form-item label="姓名" prop="username">
-          <el-input v-model="profileForm.username" :disabled="isTeacherAccount" placeholder="请输入真实姓名" />
+        <el-form-item label="用户名" prop="username">
+          <el-input v-model="profileForm.username" :disabled="isTeacherAccount" placeholder="请输入 2-20 位中文或英文字母" />
+          <p v-if="profileUsernameRuleHint" class="input-rule-hint" role="alert">{{ profileUsernameRuleHint }}</p>
         </el-form-item>
         <el-form-item label="手机号" prop="mobile">
           <el-input v-model="profileForm.mobile" placeholder="请输入手机号" />
