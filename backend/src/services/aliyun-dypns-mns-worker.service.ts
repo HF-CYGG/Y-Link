@@ -220,6 +220,7 @@ function parseOfficialFlatReceipt(root: UnknownRecord): {
   deliveryStatus: SmsVerificationDeliveryStatus
   errorCode: string | null
   errorMessage: string | null
+  sentAt: Date
   reportedAt: Date
 } | null {
   const allowedFields = new Set(['send_time', 'report_time', 'success', 'sms_size', 'err_msg', 'err_code', 'phone_number', 'biz_id', 'out_id'])
@@ -235,9 +236,10 @@ function parseOfficialFlatReceipt(root: UnknownRecord): {
   const phoneNumber = asBoundedString(root.phone_number, 32)
   const bizId = asNonEmptyString(root.biz_id, 128)
   const outId = asNonEmptyString(root.out_id, 64)
+  const sentAt = sendTime ? parseAliyunDateTime(sendTime) : null
   const reportedAt = reportTime ? parseAliyunDateTime(reportTime) : null
   if (
-    !sendTime || !parseAliyunDateTime(sendTime) || !reportedAt || !smsSize || !phoneNumber || !bizId || !outId
+    !sentAt || !reportedAt || !smsSize || !phoneNumber || !bizId || !outId
     || typeof root.success !== 'boolean' || errMessage === null || errCode === null
   ) {
     return null
@@ -248,6 +250,7 @@ function parseOfficialFlatReceipt(root: UnknownRecord): {
     deliveryStatus: root.success ? 'delivered' : 'failed',
     errorCode: errCode || null,
     errorMessage: errMessage || null,
+    sentAt,
     reportedAt,
   }
 }

@@ -15,9 +15,14 @@ const ALIYUN_DYPNS_ENDPOINT = 'dypnsapi.aliyuncs.com'
 export const DYPNS_CODE_EXPIRE_SECONDS = 300
 const require = createRequire(import.meta.url)
 
+type DypnsRuntimeOptions = {
+  connectTimeout: number
+  readTimeout: number
+}
+
 type DypnsSdkClient = {
-  sendSmsVerifyCode(request: SendSmsVerifyCodeRequest): Promise<{ body?: { code?: string; success?: boolean; message?: string; model?: { bizId?: string } } }>
-  checkSmsVerifyCode(request: CheckSmsVerifyCodeRequest): Promise<{ body?: { code?: string; success?: boolean; message?: string; model?: { verifyResult?: string } } }>
+  sendSmsVerifyCodeWithOptions(request: SendSmsVerifyCodeRequest, runtime: DypnsRuntimeOptions): Promise<{ body?: { code?: string; success?: boolean; message?: string; model?: { bizId?: string } } }>
+  checkSmsVerifyCodeWithOptions(request: CheckSmsVerifyCodeRequest, runtime: DypnsRuntimeOptions): Promise<{ body?: { code?: string; success?: boolean; message?: string; model?: { verifyResult?: string } } }>
 }
 
 type DypnsSdkClientConstructor = new (config: Record<string, string>) => DypnsSdkClient
@@ -80,6 +85,13 @@ function getSafeProviderMessage(message: unknown): string {
     .slice(0, 300)
 }
 
+function createDypnsRuntimeOptions(): DypnsRuntimeOptions {
+  return {
+    connectTimeout: env.VERIFICATION_CODE_REQUEST_TIMEOUT_MS,
+    readTimeout: env.VERIFICATION_CODE_REQUEST_TIMEOUT_MS,
+  }
+}
+
 export class AliyunDypnsSmsProvider implements AliyunDypnsSmsApi {
   constructor(
     private readonly createClient: () => DypnsSdkClient = () => {
@@ -100,7 +112,7 @@ export class AliyunDypnsSmsProvider implements AliyunDypnsSmsApi {
     if (!signName) {
       throw new BizError('阿里云 PNVS 短信签名未配置，无法发送验证码', 500)
     }
-    const response = await this.createClient().sendSmsVerifyCode(new SendSmsVerifyCodeRequest({
+    const response = await this.createClient().sendSmsVerifyCodeWithOptions(new SendSmsVerifyCodeRequest({
       phoneNumber: input.phoneNumber,
       countryCode: input.countryCode,
       outId: input.outId,
@@ -115,7 +127,7 @@ export class AliyunDypnsSmsProvider implements AliyunDypnsSmsApi {
       duplicatePolicy: 1,
       codeType: 1,
       autoRetry: 1,
-    }))
+    }), createDypnsRuntimeOptions())
     const body = response.body
     return {
       code: body?.code,
@@ -126,13 +138,13 @@ export class AliyunDypnsSmsProvider implements AliyunDypnsSmsApi {
   }
 
   async check(input: CheckAliyunDypnsSmsInput) {
-    const response = await this.createClient().checkSmsVerifyCode(new CheckSmsVerifyCodeRequest({
+    const response = await this.createClient().checkSmsVerifyCodeWithOptions(new CheckSmsVerifyCodeRequest({
       phoneNumber: input.phoneNumber,
       countryCode: input.countryCode,
       outId: input.outId,
       schemeName: input.schemeName.trim() || undefined,
       verifyCode: input.verifyCode,
-    }))
+    }), createDypnsRuntimeOptions())
     const body = response.body
     return {
       code: body?.code,

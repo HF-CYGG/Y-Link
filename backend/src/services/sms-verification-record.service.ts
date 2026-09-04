@@ -81,6 +81,7 @@ export interface SmsReceiptUpdateInput {
   deliveryStatus: SmsVerificationDeliveryStatus
   errorCode?: string | null
   errorMessage?: string | null
+  sentAt: Date
   reportedAt: Date
 }
 
@@ -283,13 +284,31 @@ export class SmsVerificationRecordService {
       if (reportedBizId && record.bizId && reportedBizId !== record.bizId) {
         return 'mismatched'
       }
-      await this.recordRepo.update({ id: record.id }, {
-        deliveryStatus: input.deliveryStatus,
-        bizId: record.bizId ?? reportedBizId,
-        providerErrorCode: input.errorCode?.trim().slice(0, 128) || null,
-        providerErrorMessage: sanitizeProviderErrorMessage(input.errorMessage),
-        reportedAt: input.reportedAt,
-      })
+      const receiptDelivered = input.deliveryStatus === 'delivered' ? 1 : 0
+      const receiptErrorCode = input.errorCode?.trim().slice(0, 128) || null
+      const receiptErrorMessage = sanitizeProviderErrorMessage(input.errorMessage)
+      await this.recordRepo.createQueryBuilder()
+        .update(SmsVerificationRecord)
+        .set({
+          deliveryStatus: input.deliveryStatus,
+          bizId: record.bizId ?? reportedBizId,
+          // 成功回执是阿里云已受理并送达的权威证据，可恢复响应途中失败的发送记录。
+          sendStatus: () => `CASE WHEN :receiptDelivered = 1 THEN 'sent' ELSE send_status END`,
+          sentAt: () => 'CASE WHEN :receiptDelivered = 1 AND sent_at IS NULL THEN :receiptSentAt ELSE sent_at END',
+          // 单字段兼容期内优先保留核验错误，避免迟到回执把 REJECT/UNKNOWN 等用户侧失败原因清空。
+          providerErrorCode: () => 'CASE WHEN verification_status = :verificationFailed THEN provider_error_code ELSE :receiptErrorCode END',
+          providerErrorMessage: () => 'CASE WHEN verification_status = :verificationFailed THEN provider_error_message ELSE :receiptErrorMessage END',
+          reportedAt: input.reportedAt,
+        })
+        .where('id = :id', { id: record.id })
+        .setParameters({
+          receiptDelivered,
+          receiptSentAt: input.sentAt,
+          verificationFailed: 'failed',
+          receiptErrorCode,
+          receiptErrorMessage,
+        })
+        .execute()
       return 'updated'
     } finally {
       releaseMaintenanceLease()

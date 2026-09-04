@@ -53,6 +53,7 @@ process.env.DB_SYNC = 'true'
 process.env.SQLITE_DB_PATH = sqlitePath
 process.env.Y_LINK_DATA_DIR = runtimeDir
 process.env.INIT_ADMIN_PASSWORD = `Pnvs_${runId}_Aa1!`
+process.env.VERIFICATION_CODE_REQUEST_TIMEOUT_MS = '4321'
 process.env.VERIFICATION_TICKET_HMAC_SECRET = `pnvs-ticket-${runId}-minimum-32-characters-secret`
 process.env.ALIBABA_CLOUD_ACCESS_KEY_ID = 'test-access-key-id'
 process.env.ALIBABA_CLOUD_ACCESS_KEY_SECRET = 'test-access-key-secret'
@@ -106,13 +107,17 @@ async function main() {
     let verifyResult = 'PASS'
     let providerSendRequest: Record<string, unknown> | null = null
     let providerCheckRequest: Record<string, unknown> | null = null
+    let providerSendRuntime: Record<string, unknown> | null = null
+    let providerCheckRuntime: Record<string, unknown> | null = null
     const sdkProvider = new AliyunDypnsSmsProvider(() => ({
-      async sendSmsVerifyCode(request) {
+      async sendSmsVerifyCodeWithOptions(request, runtime) {
         providerSendRequest = request as unknown as Record<string, unknown>
+        providerSendRuntime = runtime as Record<string, unknown>
         return { body: { code: 'OK', success: true, model: { bizId: 'sdk-biz-id' } } }
       },
-      async checkSmsVerifyCode(request) {
+      async checkSmsVerifyCodeWithOptions(request, runtime) {
         providerCheckRequest = request as unknown as Record<string, unknown>
+        providerCheckRuntime = runtime as Record<string, unknown>
         return { body: { code: 'OK', success: true, model: { verifyResult: 'PASS' } } }
       },
     }))
@@ -129,10 +134,12 @@ async function main() {
       templateCode: 'SMS_REGISTER', templateParam: '{"code":"##code##","min":"5"}', codeLength: 6, validTime: 300,
       interval: 60, returnVerifyCode: false, duplicatePolicy: 1, codeType: 1, autoRetry: 1,
     }, '动态码发送必须固定使用 PNVS 服务端生成参数')
+    assert.deepEqual({ ...providerSendRuntime }, { connectTimeout: 4321, readTimeout: 4321 }, 'PNVS 发送必须遵守统一验证码请求超时')
     await sdkProvider.check({ phoneNumber: '13800001111', countryCode: '86', outId: sdkOutId, verifyCode: '123456', schemeName: 'verify-scheme' })
     assert.deepEqual({ ...providerCheckRequest }, {
       phoneNumber: '13800001111', countryCode: '86', outId: sdkOutId, verifyCode: '123456', schemeName: 'verify-scheme',
     }, '动态码核验必须复用手机号、国家码、服务名和 outId')
+    assert.deepEqual({ ...providerCheckRuntime }, { connectTimeout: 4321, readTimeout: 4321 }, 'PNVS 核验必须遵守统一验证码请求超时')
     const recordService = new SmsVerificationRecordService({
       async send(input) {
         sentRequests.push({ ...input })
@@ -394,6 +401,22 @@ async function main() {
     )
     const thrownSendRecord = await recordRepo.createQueryBuilder('record').orderBy('record.createdAt', 'DESC').getOneOrFail()
     assert.equal(thrownSendRecord.providerErrorMessage?.includes('654321'), false, '发送失败记录不得保存验证码文本')
+    const recoveredSentAt = new Date('2026-09-04T02:19:30.000Z')
+    await thrownSendService.applyReceipt({
+      outId: thrownSendRecord.outId,
+      bizId: 'biz-recovered-after-timeout',
+      deliveryStatus: 'delivered',
+      errorCode: null,
+      errorMessage: null,
+      sentAt: recoveredSentAt,
+      reportedAt: new Date('2026-09-04T02:20:30.000Z'),
+    })
+    const recoveredSendRecord = await recordRepo.findOneByOrFail({ outId: thrownSendRecord.outId })
+    assert.equal(recoveredSendRecord.sendStatus, 'sent', '成功送达回执必须恢复响应途中失败的发送受理状态')
+    assert.equal(recoveredSendRecord.sentAt?.toISOString(), recoveredSentAt.toISOString(), '恢复受理状态时必须补齐回执中的发送时间')
+    assert.equal(recoveredSendRecord.providerErrorCode, null, '成功送达后必须清除先前的发送请求错误')
+    await thrownSendService.verify({ target: '13800004444', scene: 'test', code: '123456' })
+    assert.equal((await recordRepo.findOneByOrFail({ outId: thrownSendRecord.outId })).verificationStatus, 'passed')
 
     let checkResponse = { code: 'OK', success: true, verifyResult: 'REJECT', message: '验证码 654321 无效' }
     const nonPassService = new SmsVerificationRecordService({
@@ -409,6 +432,20 @@ async function main() {
     const rejectedRecord = await recordRepo.findOneByOrFail({ outId: nonPassRecord.outId })
     assert.equal(rejectedRecord.providerErrorCode, 'REJECT', 'REJECT 业务失败不得记录成顶层 OK')
     assert.equal(rejectedRecord.providerErrorMessage?.includes('654321'), false, '核验失败记录不得保存验证码文本')
+    await nonPassService.applyReceipt({
+      outId: nonPassRecord.outId,
+      bizId: nonPassRecord.bizId,
+      deliveryStatus: 'delivered',
+      errorCode: null,
+      errorMessage: null,
+      sentAt: rejectedRecord.sentAt ?? new Date(),
+      reportedAt: new Date(),
+    })
+    assert.equal(
+      (await recordRepo.findOneByOrFail({ outId: nonPassRecord.outId })).providerErrorCode,
+      'REJECT',
+      '迟到的成功送达回执不得清除已记录的验证码核验错误',
+    )
     checkResponse = { code: 'CHECK_FAILED', success: true, verifyResult: 'PASS', message: '失败' }
     await assert.rejects(
       () => nonPassService.verify({ target: '13800005555', scene: 'test', code: '654321' }),
