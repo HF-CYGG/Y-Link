@@ -503,6 +503,43 @@ async function main() {
     assert.equal(supersededDuringCheckRecord.verificationStatus, 'failed')
     assert.equal(supersededDuringCheckRecord.providerErrorCode, 'SUPERSEDED_BY_GENERIC')
 
+    let notifyPendingPnvsSendStarted!: () => void
+    let releasePendingPnvsSend!: () => void
+    const pendingPnvsSendStarted = new Promise<void>((resolve) => { notifyPendingPnvsSendStarted = resolve })
+    const pendingPnvsSendRelease = new Promise<void>((resolve) => { releasePendingPnvsSend = resolve })
+    const pendingPnvsRaceService = new SmsVerificationRecordService({
+      async send() {
+        notifyPendingPnvsSendStarted()
+        await pendingPnvsSendRelease
+        return { code: 'OK', success: true, bizId: 'biz-pending-pnvs-race' }
+      },
+      async check() { return { code: 'OK', success: true, verifyResult: 'PASS' } },
+    }, recordRepo)
+    const inFlightPendingPnvsSend = pendingPnvsRaceService.send({ target: '13800006669', scene: 'forgot_password', config: dypnsConfig })
+    await pendingPnvsSendStarted
+    await pendingPnvsRaceService.invalidateActiveForTarget({ target: '13800006669', scene: 'forgot_password' })
+    releasePendingPnvsSend()
+    await assert.rejects(inFlightPendingPnvsSend, /已被更新的验证码请求取代/, 'Generic 作废后，在途 PNVS 发送成功响应不得把记录恢复为 sent')
+    const supersededPendingSendRecord = await recordRepo.createQueryBuilder('record')
+      .where('record.targetMasked = :targetMasked', { targetMasked: '138****6669' })
+      .orderBy('record.createdAt', 'DESC')
+      .getOneOrFail()
+    assert.equal(supersededPendingSendRecord.sendStatus, 'failed')
+    assert.equal(supersededPendingSendRecord.verificationStatus, 'failed')
+    assert.equal(supersededPendingSendRecord.providerErrorCode, 'SUPERSEDED_BY_GENERIC')
+    await pendingPnvsRaceService.applyReceipt({
+      outId: supersededPendingSendRecord.outId,
+      bizId: 'biz-pending-pnvs-race',
+      deliveryStatus: 'delivered',
+      errorCode: null,
+      errorMessage: null,
+      sentAt: new Date(),
+      reportedAt: new Date(),
+    })
+    const supersededAfterLateReceipt = await recordRepo.findOneByOrFail({ id: supersededPendingSendRecord.id })
+    assert.equal(supersededAfterLateReceipt.sendStatus, 'failed', '迟到的成功回执不得恢复已被 Generic 取代的 PNVS 发送状态')
+    assert.equal(supersededAfterLateReceipt.providerErrorCode, 'SUPERSEDED_BY_GENERIC')
+
     let notifyNewerPnvsCheckStarted!: () => void
     let releaseNewerPnvsCheck!: () => void
     const newerPnvsCheckStarted = new Promise<void>((resolve) => { notifyNewerPnvsCheckStarted = resolve })

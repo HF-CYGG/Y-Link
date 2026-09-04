@@ -130,28 +130,56 @@ export class SmsVerificationRecordService {
         })
         throw new BizError('短信验证码发送失败，请稍后重试', 502)
       }
-      await this.recordRepo.update({ id: record.id }, {
-        sendStatus: 'sent',
-        bizId: result.bizId?.trim().slice(0, 128) || null,
-        providerErrorCode: null,
-        providerErrorMessage: null,
-        sentAt: new Date(),
-      })
+      const acceptedAt = new Date()
+      const acceptedBizId = result.bizId?.trim().slice(0, 128) || null
+      const acceptedUpdate = await this.recordRepo.createQueryBuilder()
+        .update(SmsVerificationRecord)
+        .set({
+          sendStatus: 'sent',
+          bizId: acceptedBizId,
+          providerErrorCode: null,
+          providerErrorMessage: null,
+          sentAt: acceptedAt,
+        })
+        .where('id = :id', { id: record.id })
+        .andWhere('send_status = :pending', { pending: 'pending' })
+        .andWhere('expires_at > :acceptedAt', { acceptedAt })
+        .execute()
+      if (Number(acceptedUpdate.affected ?? 0) !== 1) {
+        throw new BizError('本次短信验证码已被更新的验证码请求取代，请使用最新验证码', 409)
+      }
       return {
         provider: 'aliyun_dypns' as const,
         outId,
-        bizId: result.bizId?.trim() || null,
+        bizId: acceptedBizId,
         targetMasked: record.targetMasked,
         expireSeconds: DYPNS_CODE_EXPIRE_SECONDS,
       }
     } catch (error) {
-      const latestRecord = await this.recordRepo.findOne({ where: { id: record.id }, select: { id: true, sendStatus: true } })
-      if (latestRecord?.sendStatus !== 'failed') {
-        await this.recordRepo.update({ id: record.id }, {
+      const latestRecord = await this.recordRepo.findOne({
+        where: { id: record.id },
+        select: { id: true, outId: true, bizId: true, targetMasked: true, sendStatus: true, expiresAt: true },
+      })
+      if (latestRecord?.sendStatus === 'sent' && latestRecord.expiresAt.getTime() > Date.now()) {
+        return {
+          provider: 'aliyun_dypns' as const,
+          outId: latestRecord.outId,
+          bizId: latestRecord.bizId,
+          targetMasked: latestRecord.targetMasked,
+          expireSeconds: DYPNS_CODE_EXPIRE_SECONDS,
+        }
+      }
+      if (latestRecord?.sendStatus === 'pending') {
+        await this.recordRepo.createQueryBuilder()
+          .update(SmsVerificationRecord)
+          .set({
           sendStatus: 'failed',
           providerErrorCode: 'REQUEST_FAILED',
           providerErrorMessage: sanitizeProviderErrorMessage(error instanceof Error ? error.message : error, target),
-        })
+          })
+          .where('id = :id', { id: record.id })
+          .andWhere('send_status = :pending', { pending: 'pending' })
+          .execute()
       }
       if (error instanceof BizError) {
         throw error
@@ -274,6 +302,7 @@ export class SmsVerificationRecordService {
     const result = await this.recordRepo.createQueryBuilder()
       .update(SmsVerificationRecord)
       .set({
+        sendStatus: 'failed',
         verificationStatus: 'failed',
         providerErrorCode: 'SUPERSEDED_BY_GENERIC',
         providerErrorMessage: null,
@@ -282,7 +311,7 @@ export class SmsVerificationRecordService {
       .where('channel = :channel', { channel: 'mobile' })
       .andWhere('scene = :scene', { scene: input.scene })
       .andWhere('target_digest = :targetDigest', { targetDigest: createTargetDigest(input.target.trim()) })
-      .andWhere('send_status = :sendStatus', { sendStatus: 'sent' })
+      .andWhere('send_status IN (:...activeSendStatuses)', { activeSendStatuses: ['pending', 'sent'] })
       .andWhere('expires_at > :now', { now })
       .andWhere('verification_status <> :passed', { passed: 'passed' })
       .execute()
@@ -313,8 +342,8 @@ export class SmsVerificationRecordService {
           deliveryStatus: input.deliveryStatus,
           bizId: record.bizId ?? reportedBizId,
           // 成功回执是阿里云已受理并送达的权威证据，可恢复响应途中失败的发送记录。
-          sendStatus: () => `CASE WHEN :receiptDelivered = 1 THEN 'sent' ELSE send_status END`,
-          sentAt: () => 'CASE WHEN :receiptDelivered = 1 AND sent_at IS NULL THEN :receiptSentAt ELSE sent_at END',
+          sendStatus: () => `CASE WHEN :receiptDelivered = 1 AND verification_status <> :verificationFailed THEN 'sent' ELSE send_status END`,
+          sentAt: () => 'CASE WHEN :receiptDelivered = 1 AND verification_status <> :verificationFailed AND sent_at IS NULL THEN :receiptSentAt ELSE sent_at END',
           // 单字段兼容期内优先保留核验错误，避免迟到回执把 REJECT/UNKNOWN 等用户侧失败原因清空。
           providerErrorCode: () => 'CASE WHEN verification_status = :verificationFailed THEN provider_error_code ELSE :receiptErrorCode END',
           providerErrorMessage: () => 'CASE WHEN verification_status = :verificationFailed THEN provider_error_message ELSE :receiptErrorMessage END',
