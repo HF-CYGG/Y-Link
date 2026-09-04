@@ -194,7 +194,12 @@ export class SmsVerificationRecordService {
         }
         return
       }
-      const providerCode = String(result.code ?? result.verifyResult ?? 'UNKNOWN').slice(0, 128)
+      const providerAccepted = result.code === 'OK' && result.success === true
+      const providerCode = String(
+        providerAccepted
+          ? (result.verifyResult ?? 'UNKNOWN')
+          : (result.code === 'OK' ? 'REQUEST_FAILED' : (result.code ?? 'REQUEST_FAILED')),
+      ).slice(0, 128)
       const updateResult = await this.recordRepo.createQueryBuilder()
         .update(SmsVerificationRecord)
         .set({
@@ -208,7 +213,7 @@ export class SmsVerificationRecordService {
       if (Number(updateResult.affected ?? 0) !== 1) {
         throw new BizError('验证码已完成核验，请勿重复提交', 400)
       }
-      if (result.verifyResult === 'UNKNOWN') {
+      if (providerAccepted) {
         throw new BizError('验证码校验未通过，请重新获取后再试', 400)
       }
       throw new BizError('验证码校验服务暂不可用，请稍后重试', 502)

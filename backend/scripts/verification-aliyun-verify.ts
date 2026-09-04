@@ -9,10 +9,42 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const runId = `${process.pid}-${Date.now()}`
 const runtimeDir = path.join(os.tmpdir(), `ylink-aliyun-pnvs-${runId}`)
 const sqlitePath = path.join(runtimeDir, 'verification.sqlite')
+const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
+
+const requiredRuntimeVariables = [
+  'VERIFICATION_CODE_REQUEST_TIMEOUT_MS',
+  'ALIBABA_CLOUD_ACCESS_KEY_ID',
+  'ALIBABA_CLOUD_ACCESS_KEY_SECRET',
+  'VERIFICATION_TICKET_HMAC_SECRET',
+  'ALIYUN_DYPNS_MNS_ENABLED',
+]
+
+for (const composePath of ['compose.yml', 'compose.cloud.yml', 'compose.mysql.yml', 'compose.onebox.yml']) {
+  const composeContent = fs.readFileSync(path.join(projectRoot, composePath), 'utf8')
+  for (const variableName of requiredRuntimeVariables) {
+    const bindingPattern = new RegExp(
+      `^\\s*(?:-\\s*)?${variableName}(?::|=)\\s*\\$\\{${variableName}(?::-[^}]*)?\\}\\s*$`,
+      'm',
+    )
+    assert.match(composeContent, bindingPattern, `${composePath} 必须把 ${variableName} 透传给后端容器`)
+  }
+}
+
+for (const envTemplatePath of ['.env.docker.cloud.example', '.env.docker.mysql.example', '.env.onebox.example']) {
+  const envTemplateContent = fs.readFileSync(path.join(projectRoot, envTemplatePath), 'utf8')
+  for (const variableName of requiredRuntimeVariables) {
+    assert.match(
+      envTemplateContent,
+      new RegExp(`^${variableName}=`, 'm'),
+      `${envTemplatePath} 必须声明 ${variableName}`,
+    )
+  }
+}
 
 process.env.NODE_ENV = 'test'
 process.env.APP_PROFILE = `aliyun-pnvs-${runId}`
@@ -349,10 +381,12 @@ async function main() {
     const nonPassRecord = await nonPassService.send({ target: '13800005555', scene: 'test', config: dypnsConfig })
     await assert.rejects(
       () => nonPassService.verify({ target: '13800005555', scene: 'test', code: '654321' }),
-      /验证码校验服务暂不可用/,
-      'Code=OK、Success=true 但 VerifyResult 非 PASS 时绝不能成功',
+      /验证码校验未通过/,
+      'Code=OK、Success=true 且 VerifyResult=REJECT 时必须返回可重试的验证码错误',
     )
-    assert.equal((await recordRepo.findOneByOrFail({ outId: nonPassRecord.outId })).providerErrorMessage?.includes('654321'), false, '核验失败记录不得保存验证码文本')
+    const rejectedRecord = await recordRepo.findOneByOrFail({ outId: nonPassRecord.outId })
+    assert.equal(rejectedRecord.providerErrorCode, 'REJECT', 'REJECT 业务失败不得记录成顶层 OK')
+    assert.equal(rejectedRecord.providerErrorMessage?.includes('654321'), false, '核验失败记录不得保存验证码文本')
     checkResponse = { code: 'CHECK_FAILED', success: true, verifyResult: 'PASS', message: '失败' }
     await assert.rejects(
       () => nonPassService.verify({ target: '13800005555', scene: 'test', code: '654321' }),
