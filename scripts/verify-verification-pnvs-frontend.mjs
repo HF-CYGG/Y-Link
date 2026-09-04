@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs'
 const apiSource = readFileSync('src/api/modules/system-config.ts', 'utf8')
 const viewSource = readFileSync('src/views/system/SystemConfigView.vue', 'utf8')
 const sectionSource = readFileSync('src/views/system/components/SystemConfigVerificationSection.vue', 'utf8')
+const forgotPasswordSource = readFileSync('src/views/client/ClientForgotPasswordView.vue', 'utf8')
 
 const assertIncludes = (source, needle, message) => {
   assert.ok(source.includes(needle), message)
@@ -57,5 +58,8 @@ assertIncludes(sectionSource, 'getSmsVerificationReceipts', '短信回执 UI 应
 assertIncludes(sectionSource, '任一可用通道', '找回密码文案应说明短信或邮箱任一通道可用即可')
 assert.ok(!sectionSource.includes('完整手机号'), '短信回执 UI 不应声明或展示完整手机号')
 assert.ok(!sectionSource.includes('errorMessage'), '短信回执 UI 不应读取第三方错误详情')
+
+assertIncludes(forgotPasswordSource, '手机或邮箱任一验证码通道', '找回密码页应说明任一验证码通道可用即可')
+assert.ok(!forgotPasswordSource.includes('同时启用手机与邮箱'), '找回密码页不得继续要求同时启用手机与邮箱验证码')
 
 console.log('[verify:verification-pnvs-frontend] 阿里云 PNVS 配置与短信回执前端契约验证通过')
