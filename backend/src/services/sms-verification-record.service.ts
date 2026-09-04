@@ -161,12 +161,15 @@ export class SmsVerificationRecordService {
       .andWhere('record.scene = :scene', { scene: input.scene })
       .andWhere('record.targetDigest = :targetDigest', { targetDigest: createTargetDigest(target) })
       .andWhere('record.sendStatus = :sendStatus', { sendStatus: 'sent' })
-      .andWhere('record.verificationStatus <> :passed', { passed: 'passed' })
       .andWhere('record.expiresAt > :now', { now: new Date() })
       .orderBy('record.createdAt', 'DESC')
+      .addOrderBy('record.id', 'DESC')
       .getOne()
     if (!record) {
       throw new BizError('验证码不存在或已过期，请重新获取', 400)
+    }
+    if (record.verificationStatus === 'passed') {
+      throw new BizError('验证码已完成核验，请勿重复提交', 400)
     }
 
     try {

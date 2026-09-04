@@ -177,12 +177,13 @@ async function main() {
     )
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: '1' }).where('config_key = :key', { key: 'verification.mobile.enabled' }).execute()
 
+    const superseded = await verificationService.sendCode({ channel: 'mobile', target: '13800001111', scene: 'register' })
     const sent = await verificationService.sendCode({ channel: 'mobile', target: '13800001111', scene: 'register' })
     assert.equal(sent.provider, 'aliyun_dypns')
     assert.equal('code' in sent, false, '阿里云动态码发送结果不得向调用方返回验证码')
     assert.match(sent.outId, /^[0-9a-f-]{36}$/i)
     assert.equal(sent.targetMasked, '138****1111')
-    assert.deepEqual(sentRequests[0], {
+    assert.deepEqual(sentRequests.at(-1), {
       phoneNumber: '13800001111',
       countryCode: '86',
       outId: sent.outId,
@@ -206,11 +207,14 @@ async function main() {
       phoneNumber: '13800001111', countryCode: '86', outId: sent.outId, verifyCode: '123456', schemeName: 'scheme-before-switch',
     }, '核验必须使用发送时保存的 Provider 与 SchemeName，而不是当前管理端配置')
     assert.equal((await recordRepo.findOneByOrFail({ outId: sent.outId })).verificationStatus, 'passed')
+    const checkedAfterLatestPass = checkedRequests.length
     await assert.rejects(
       () => verificationService.verifyCode({ channel: 'mobile', target: '13800001111', scene: 'register', code: '123456' }),
-      /验证码不存在或已过期|验证码已完成核验/,
-      '已通过的验证码不得再次使用',
+      /验证码已完成核验/,
+      '最新验证码通过后不得回退核验更早的 PNVS 记录',
     )
+    assert.equal(checkedRequests.length, checkedAfterLatestPass, '重复核验必须在调用阿里云前被拒绝')
+    assert.equal((await recordRepo.findOneByOrFail({ outId: superseded.outId })).verificationStatus, 'pending', '更早记录不得被回退消费')
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: 'aliyun_dypns' }).where('config_key = :key', { key: 'verification.mobile.provider_type' }).execute()
     await configRepo.createQueryBuilder().update(SystemConfig).set({ configValue: '' }).where('config_key = :key', { key: 'verification.mobile.aliyun_scheme_name' }).execute()
 
