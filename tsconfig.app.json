@@ -7,7 +7,8 @@
     "types": ["vite/client"],
     "baseUrl": ".",
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@ylink/validation/*": ["./packages/validation/src/*"]
     },
 
     /* Linting */

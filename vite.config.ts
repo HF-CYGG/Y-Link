@@ -151,6 +151,8 @@ export default defineConfig(({ command, mode }) => {
       // 统一配置路径别名，提升模块导入可读性并降低相对路径层级复杂度
       alias: {
         '@': fileURLToPath(new URL('./src', import.meta.url)),
+        // Web CI 仅安装根依赖，不创建 npm workspace 链接；共享校验源码需在该模式下直接参与解析。
+        '@ylink/validation': fileURLToPath(new URL('./packages/validation/src', import.meta.url)),
       },
     },
     /**
