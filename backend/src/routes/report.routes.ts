@@ -10,6 +10,7 @@ import { requirePermission } from '../middleware/auth.middleware.js'
 import { reportService, REPORT_TYPES, type ReportQueryInput, type ReportType } from '../services/report.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
+import type { AuthenticatedRequest } from '../types/auth.js'
 
 export const reportRouter = Router()
 
@@ -62,6 +63,7 @@ reportRouter.get(
   '/:type/export',
   requirePermission('reports:export'),
   asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
     const type = parseReportType(req.params.type)
     const fileName = `report-${type}-${new Date().toISOString().slice(0, 19).replaceAll(/[:T]/g, '-')}.xlsx`
     await reportService.exportExcel(
@@ -73,6 +75,7 @@ reportRouter.get(
         res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
         res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`)
       },
+      authReq.auth.userId,
     )
   }),
 )

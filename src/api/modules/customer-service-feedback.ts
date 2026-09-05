@@ -1130,15 +1130,17 @@ export const resolveFeedbackAttachmentUrl = (url?: string | null) => {
   return origin ? new URL(normalizedUrl.replace(/^\//, ''), `${origin}/`).toString() : normalizedUrl
 }
 
-export const getClientFeedbackPortalConfig = async (): Promise<FeedbackPortalConfig> => {
+export const getClientFeedbackPortalConfig = async (requestConfig: RequestConfig = {}): Promise<FeedbackPortalConfig> => {
   return request<FeedbackPortalConfig>({
+    ...requestConfig,
     url: '/client-feedback/portal-config',
     method: 'GET',
   })
 }
 
-export const listClientFeedbackConversations = async (): Promise<FeedbackConversationRecord[]> => {
+export const listClientFeedbackConversations = async (requestConfig: RequestConfig = {}): Promise<FeedbackConversationRecord[]> => {
   const response = await request<BackendListResult<BackendConversationSummary>>({
+    ...requestConfig,
     url: '/client-feedback/conversations',
     method: 'GET',
     params: {

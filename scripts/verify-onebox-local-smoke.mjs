@@ -22,9 +22,11 @@ const __dirname = path.dirname(__filename)
 const projectRoot = path.resolve(__dirname, '..')
 const backendRoot = path.join(projectRoot, 'backend')
 const frontendDistRoot = path.join(projectRoot, 'dist')
-const runtimeRoot = path.join(projectRoot, '.local-dev')
+const runtimeRoot = process.env.Y_LINK_ONEBOX_SMOKE_RUNTIME_DIR?.trim()
+  || path.join(projectRoot, '.local-dev')
 const sqliteRoot = path.join(backendRoot, 'data', 'local-dev')
-const sqliteFilePath = path.join(sqliteRoot, 'y-link.onebox-smoke.sqlite')
+const sqliteFilePath = process.env.SQLITE_DB_PATH?.trim()
+  || path.join(sqliteRoot, 'y-link.onebox-smoke.sqlite')
 
 const backendPort = Number(process.env.Y_LINK_ONEBOX_BACKEND_PORT ?? 3310)
 const oneboxPort = Number(process.env.Y_LINK_ONEBOX_PORT ?? 18080)
@@ -281,11 +283,12 @@ const run = async () => {
     env: {
       ...process.env,
       NODE_ENV: 'production',
-      APP_PROFILE: 'onebox-smoke',
+      APP_PROFILE: process.env.APP_PROFILE?.trim() || 'onebox-smoke',
       PORT: String(backendPort),
       DB_TYPE: 'sqlite',
       SQLITE_DB_PATH: sqliteFilePath,
       DB_SYNC: 'false',
+      Y_LINK_DATA_DIR: process.env.Y_LINK_DATA_DIR?.trim() || path.join(runtimeRoot, 'data'),
       INIT_ADMIN_PASSWORD: verifyAdminSecret,
     },
     stdio: ['ignore', backendStdout, backendStderr],

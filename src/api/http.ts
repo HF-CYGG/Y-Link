@@ -12,7 +12,7 @@ import type { ApiResponse } from '@/types/api'
 import { useAppStore } from '@/store/modules/app'
 import { clearPersistedAuthState, getAdminCsrfToken } from '@/utils/auth-storage'
 import { getClientRiskHeaderSnapshot } from '@/utils/client-auth-risk'
-import { clearPersistedClientAuthState } from '@/utils/client-auth-storage'
+import { clearPersistedClientAuthState, getClientCsrfToken } from '@/utils/client-auth-storage'
 import { AppRequestError, normalizeRequestError, unwrapApiResponse } from '@/utils/error'
 import pinia from '@/store/pinia'
 import {
@@ -34,6 +34,10 @@ export type SessionReloginDetail = {
  * - 避免业务层直接依赖完整 Axios 配置，保持模块边界清晰。
  */
 export type RequestConfig = Pick<AxiosRequestConfig, 'signal'>
+
+type ClientCsrfRetryConfig = InternalAxiosRequestConfig & {
+  __yLinkClientCsrfRefreshAttempted?: boolean
+}
 
 /**
  * 归一化请求地址：
@@ -186,6 +190,32 @@ const attachClientRiskHeaders = (config: InternalAxiosRequestConfig) => {
 }
 
 /**
+ * 客户端 Cookie 会话的 CSRF 头由请求层统一注入，避免每个受保护 API 各自遗漏。
+ * 仅一次补发后的重试会覆盖旧值；原始请求的其它头（包括幂等键）保持不变。
+ */
+const attachClientCsrfHeader = (config: ClientCsrfRetryConfig) => {
+  if (!isClientRequest(config.url) || isSafeRequestMethod(config.method)) {
+    return config
+  }
+
+  if (!config.headers['x-client-csrf-token'] || config.__yLinkClientCsrfRefreshAttempted) {
+    const csrfToken = getClientCsrfToken()
+    if (csrfToken) {
+      config.headers['x-client-csrf-token'] = csrfToken
+    }
+  }
+
+  return config
+}
+
+const isClientCsrfMissingResponse = (error: unknown): error is { config: ClientCsrfRetryConfig; response: { status: number; data?: { data?: { reason?: unknown } } } } => {
+  if (!axios.isAxiosError(error)) {
+    return false
+  }
+  return error.response?.status === 403 && error.response.data?.data?.reason === 'CLIENT_CSRF_MISSING'
+}
+
+/**
  * 统一跳回登录页：
  * - 先清空本地登录态，避免刷新后继续带着失效 token；
  * - 被动会话失效优先走 SPA 内部路由替换，避免首屏或首批接口偶发 401 时造成整页重刷；
@@ -274,7 +304,7 @@ http.interceptors.request.use(
       })
     }
 
-    return attachAdminCsrfHeader(attachClientRiskHeaders(config))
+    return attachClientCsrfHeader(attachAdminCsrfHeader(attachClientRiskHeaders(config)))
   },
   (error) => {
     const appStore = useAppStore(pinia)
@@ -300,6 +330,17 @@ http.interceptors.response.use(
   (error) => {
     const appStore = useAppStore(pinia)
     appStore.endLoading()
+
+    const retryConfig = isClientCsrfMissingResponse(error) ? error.config : null
+    if (
+      retryConfig
+      && !retryConfig.__yLinkClientCsrfRefreshAttempted
+      && !isSessionProbeRequest(retryConfig.url)
+    ) {
+      retryConfig.__yLinkClientCsrfRefreshAttempted = true
+      return http.get('/client-auth/me').then(() => http.request(retryConfig))
+    }
+
     const normalizedError = normalizeRequestError(error)
 
     if (normalizedError.code === DATABASE_MAINTENANCE_READ_ONLY_CODE) {

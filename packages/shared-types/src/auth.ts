@@ -8,6 +8,7 @@ export type ClientVerificationScene = 'register' | 'forgot_password'
 
 export interface ClientCaptchaResult {
   captchaId: string
+  captchaImage?: string
   captchaSvg: string
   expiresInSeconds: number
 }
@@ -29,6 +30,8 @@ export interface ClientSafeProfile {
   lastLoginAt: string | null
   mobileVerifiedAt: string | null
   emailVerifiedAt: string | null
+  /** 联系方式或身份资料变更后，当前及其它客户端会话已被服务端撤销。 */
+  requiresRelogin?: boolean
 }
 
 /** 登录和注册成功时的真实 Cookie 会话响应。 */

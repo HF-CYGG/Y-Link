@@ -15,6 +15,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { resolveAppDataPaths } from '../src/config/app-data-paths.js'
+import { DatabaseOperationGate } from '../src/database/operation-gate.js'
 import {
   DatabaseMaintenanceModeService,
   MAINTENANCE_READ_ONLY_CODE,
@@ -25,16 +26,15 @@ import {
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'y-link-db-migration-foundation-'))
 
 try {
-  const backendIndexSource = fs.readFileSync(path.resolve(import.meta.dirname, '../src/index.ts'), 'utf8')
+  const thinEntry = fs.readFileSync(path.resolve(import.meta.dirname, '../src/index.ts'), 'utf8')
+  assert.doesNotMatch(thinEntry, /^import\s.*(?:app|data-source|env)\.js/m, '启动入口不能静态加载业务数据库图')
+  const backendIndexSource = fs.readFileSync(path.resolve(import.meta.dirname, '../src/runtime/business-runtime.ts'), 'utf8')
   const resumeCallIndex = backendIndexSource.indexOf(
     'databaseMigrationService.resumeInterruptedAutomaticMigrationAfterStartup()',
   )
   const resumeChainSource = backendIndexSource.slice(resumeCallIndex, resumeCallIndex + 1_500)
   const catchIndex = resumeChainSource.indexOf('.catch(')
   const finallyIndex = resumeChainSource.indexOf('.finally(')
-  const readOnlyGuardIndex = resumeChainSource.indexOf(
-    'if (!databaseMaintenanceModeService.isReadOnly())',
-  )
   const timeoutRecycleStartIndex = resumeChainSource.indexOf(
     'o2oPreorderService.startTimeoutRecycleLoop()',
   )
@@ -42,12 +42,8 @@ try {
   assert.ok(catchIndex >= 0, '自动迁移恢复异常必须记录并收敛')
   assert.ok(finallyIndex > catchIndex, '自动迁移恢复成功或失败后都必须进入统一后台任务恢复分支')
   assert.ok(
-    readOnlyGuardIndex > finallyIndex,
-    '后台任务恢复必须在 finally 中复核数据库只读维护状态',
-  )
-  assert.ok(
-    timeoutRecycleStartIndex > readOnlyGuardIndex,
-    '非只读状态下必须在统一恢复分支启动 O2O 超时回收',
+    timeoutRecycleStartIndex > finallyIndex,
+    '统一恢复分支必须登记 O2O 后台恢复意图，由 gate 决定何时恢复计时器',
   )
 
   const paths = resolveAppDataPaths(tempRoot)
@@ -56,8 +52,10 @@ try {
   assert.equal(paths.runtimeDir, path.join(path.resolve(tempRoot), 'runtime'))
   assert.equal(paths.maintenanceStateFile, path.join(path.resolve(tempRoot), 'runtime', 'maintenance-state.json'))
 
+  const operationGate = new DatabaseOperationGate()
   const service = new DatabaseMaintenanceModeService({
     stateFilePath: paths.maintenanceStateFile,
+    operationGate,
   })
   assert.deepEqual(service.getPublicState(), {
     readOnly: false,
@@ -65,8 +63,8 @@ try {
     message: null,
   })
 
-  const releaseInFlightActivity = service.registerInFlightWrite()
-  assert.ok(releaseInFlightActivity, '维护开始前必须能够获取数据库活动租约')
+  let releaseInFlightActivity!: () => void
+  const activeOperation = operationGate.runOperation(() => new Promise<void>((resolve) => { releaseInFlightActivity = resolve }))
   let drainCompleted = false
   const beginReadOnlyPromise = service.beginReadOnly({
     taskId: 'automatic-task-secret-id',
@@ -79,6 +77,7 @@ try {
   assert.equal(drainCompleted, false, '只读冻结不得越过已获取的数据库活动租约')
   assert.equal(service.registerInFlightWrite(), null, '冻结后不得再获取数据库写活动租约')
   releaseInFlightActivity()
+  await activeOperation
   await beginReadOnlyPromise
   assert.equal(drainCompleted, true)
   assert.equal(service.isReadOnly(), true)
@@ -94,6 +93,7 @@ try {
 
   const restoredService = new DatabaseMaintenanceModeService({
     stateFilePath: paths.maintenanceStateFile,
+    operationGate: new DatabaseOperationGate(),
   })
   assert.equal(restoredService.isReadOnly(), true)
   assert.equal(restoredService.getPublicState().phase, 'draining_writes')
@@ -130,6 +130,7 @@ try {
   fs.mkdirSync(blockedStatePath)
   const failedPersistService = new DatabaseMaintenanceModeService({
     stateFilePath: blockedStatePath,
+    operationGate: new DatabaseOperationGate(),
   })
   const originalConsoleError = console.error
   console.error = () => undefined
@@ -145,8 +146,8 @@ try {
   }
   assert.equal(
     failedPersistService.isReadOnly(),
-    false,
-    '维护状态持久化失败后必须同步回滚进程内只读状态',
+    true,
+    '控制路径已损坏时必须保持只读，不能把目录或损坏文件当作状态不存在',
   )
 
   console.log('database migration foundation verify: passed')

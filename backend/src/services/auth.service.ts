@@ -6,7 +6,7 @@
  * 3. 认证过程会联动风控服务和审计服务，兼顾登录安全、问题追溯与后续治理扩展。
  */
 
-import { LessThan, MoreThan } from 'typeorm'
+import { LessThan, MoreThan, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { env } from '../config/env.js'
@@ -16,11 +16,17 @@ import { SysUserSession } from '../entities/sys-user-session.entity.js'
 import type { AuthUserContext, UserSafeProfile } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
 import type { RequestMeta } from '../utils/request-meta.js'
-import { assertAdminPasswordPolicy, hashPassword, verifyPassword } from '../utils/password.js'
+import {
+  assertAdminPasswordPolicy,
+  hashPassword,
+  verifyPassword,
+  verifyPasswordForNonexistentAccount,
+} from '../utils/password.js'
 import { hashSessionToken } from '../utils/session-token.js'
 import { generateSessionToken } from '../utils/token.js'
 import { auditService } from './audit.service.js'
 import { authSecurityService } from './auth-security.service.js'
+import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
 
 export interface LoginInput {
   username: string
@@ -35,6 +41,13 @@ export interface LoginInput {
 export interface ChangeOwnPasswordInput {
   currentPassword: string
   newPassword: string
+}
+
+interface AdminLoginSecuritySnapshot {
+  passwordHash: string
+  username: string
+  role: SysUser['role']
+  status: SysUser['status']
 }
 
 const LEGACY_DEFAULT_BOOTSTRAP_PASSWORD = ['Admin', '@', '123456'].join('')
@@ -89,6 +102,34 @@ export class AuthService {
       .getOne()
   }
 
+  private buildLoginSecuritySnapshot(user: SysUser): AdminLoginSecuritySnapshot {
+    return {
+      passwordHash: user.passwordHash,
+      username: user.username,
+      role: user.role,
+      status: user.status,
+    }
+  }
+
+  private async lockUserForSession(manager: EntityManager, userId: string): Promise<SysUser | null> {
+    const query = manager.getRepository(SysUser)
+      .createQueryBuilder('user')
+      .addSelect('user.passwordHash')
+      .where('user.id = :userId', { userId })
+    if (manager.connection.options.type === 'mysql') {
+      query.setLock('pessimistic_write')
+    }
+    return query.getOne()
+  }
+
+  private isLoginSecuritySnapshotCurrent(user: SysUser, snapshot: AdminLoginSecuritySnapshot): boolean {
+    return user.passwordHash === snapshot.passwordHash
+      && user.username === snapshot.username
+      && user.role === snapshot.role
+      && user.status === snapshot.status
+      && user.status === 'enabled'
+  }
+
   async login(
     input: LoginInput,
     requestMeta?: RequestMeta,
@@ -103,6 +144,7 @@ export class AuthService {
     const user = await this.findUserWithPasswordByUsername(username)
 
     if (!user) {
+      await verifyPasswordForNonexistentAccount(password)
       await authSecurityService.recordAdminLoginFailure(requestMeta, username)
       await auditService.safeRecord({
         actionType: 'auth.login',
@@ -116,27 +158,6 @@ export class AuthService {
         },
       })
       throw new BizError('账号或密码错误', 401)
-    }
-
-    if (user.status !== 'enabled') {
-      await auditService.safeRecord({
-        actionType: 'auth.login',
-        actionLabel: '用户登录',
-        targetType: 'session',
-        targetId: user.id,
-        targetCode: user.username,
-        actor: {
-          userId: user.id,
-          username: user.username,
-          displayName: user.displayName,
-        },
-        resultStatus: 'failed',
-        requestMeta,
-        detail: {
-          reason: 'user_disabled',
-        },
-      })
-      throw new BizError('当前账号已停用，请联系管理员', 403)
     }
 
     const passwordMatched = await verifyPassword(password, user.passwordHash)
@@ -162,20 +183,48 @@ export class AuthService {
       throw new BizError('账号或密码错误', 401)
     }
 
+    if (user.status !== 'enabled') {
+      await auditService.safeRecord({
+        actionType: 'auth.login',
+        actionLabel: '用户登录',
+        targetType: 'session',
+        targetId: user.id,
+        targetCode: user.username,
+        actor: {
+          userId: user.id,
+          username: user.username,
+          displayName: user.displayName,
+        },
+        resultStatus: 'failed',
+        requestMeta,
+        detail: {
+          reason: 'user_disabled' },
+      })
+      throw new BizError('当前账号已停用，请联系管理员', 403)
+    }
+
     const now = new Date()
     const expiresAt = new Date(now.getTime() + env.AUTH_TOKEN_TTL_HOURS * 60 * 60 * 1000)
     const token = generateSessionToken()
+    const securitySnapshot = this.buildLoginSecuritySnapshot(user)
 
     const data = await runInTransaction(async (manager) => {
       const sessionRepo = manager.getRepository(SysUserSession)
       const userRepo = manager.getRepository(SysUser)
 
+      // 密码散列校验保持在事务外；签发前在同一事务内锁定账号并复核安全快照。
+      // 这样改密、停用或角色变更与会话插入必然形成明确先后，晚到的旧校验结果不能重新创建会话。
+      const lockedUser = await this.lockUserForSession(manager, user.id)
+      if (!lockedUser || !this.isLoginSecuritySnapshotCurrent(lockedUser, securitySnapshot)) {
+        throw new BizError('账号或密码错误', 401)
+      }
+
       await sessionRepo.delete({
         expiresAt: LessThan(now),
       })
 
-      user.lastLoginAt = now
-      const savedUser = await userRepo.save(user)
+      lockedUser.lastLoginAt = now
+      const savedUser = await userRepo.save(lockedUser)
       const session = await sessionRepo.save(
         sessionRepo.create({
           sessionToken: hashSessionToken(token),
@@ -247,6 +296,7 @@ export class AuthService {
         manager,
       )
     })
+    customerServiceRealtimeService.disconnectBySessionHash('service', hashSessionToken(auth.sessionToken))
   }
 
   async me(auth: AuthUserContext): Promise<UserSafeProfile> {
@@ -347,6 +397,7 @@ export class AuthService {
         manager,
       )
     })
+    customerServiceRealtimeService.disconnectByOwner('service', user.id)
   }
 
   async resolveAuthUserByToken(sessionToken: string): Promise<AuthUserContext> {

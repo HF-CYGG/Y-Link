@@ -40,6 +40,8 @@ import { BizError } from './utils/errors.js'
 import { databaseMaintenanceModeService } from './services/database-maintenance-mode.service.js'
 import { DatabaseRateLimitStore } from './services/persistent-risk-state.service.js'
 import { AppDataSource } from './config/data-source.js'
+import { configureHttpSecurity } from './utils/http-security.js'
+import { databaseRescueRouter } from './routes/database-rescue.routes.js'
 
 const UPLOAD_CACHE_CONTROL_VALUE = 'public, max-age=31536000, immutable'
 const UPLOAD_CONTENT_SECURITY_POLICY_VALUE = "default-src 'none'; img-src 'self' data:; style-src 'none'; sandbox"
@@ -83,8 +85,7 @@ function resolvePublicAuthRateLimit(limit: number | undefined, fallback: number,
 
 export function createApp(options: CreateAppOptions = {}) {
   const app = express()
-  app.set('trust proxy', 'loopback, linklocal, uniquelocal')
-  app.disable('x-powered-by')
+  configureHttpSecurity(app)
 
   const createPublicAuthLimiter = (prefix: string, limit: number, limitedPaths: ReadonlySet<string>) => {
     // SQLite Onebox 只有一个写者。验证码/能力探测等匿名 GET 若每次都落库，
@@ -123,17 +124,6 @@ export function createApp(options: CreateAppOptions = {}) {
     '/forgot-password/reset',
     ]),
   )
-
-  app.use((req, res, next) => {
-    res.setHeader('X-Content-Type-Options', 'nosniff')
-    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin')
-    res.setHeader('X-Frame-Options', 'DENY')
-    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
-    if (req.path.startsWith('/api/auth') || req.path.startsWith('/api/client-auth')) {
-      res.setHeader('Cache-Control', 'no-store')
-    }
-    next()
-  })
 
   // 确保 uploads 目录存在
   const uploadsDir = path.resolve(process.cwd(), 'uploads')
@@ -200,6 +190,8 @@ export function createApp(options: CreateAppOptions = {}) {
    * - 批量导入上千条记录时，默认 100 KB 容量会被轻易撑爆，导致 body-parser 直接抛 `PayloadTooLargeError`；
    * - 这里统一放宽到与文件上传场景相同的 8 MB，覆盖系统配置大文本与批量导入确认请求。
    */
+  // 救援身份独立于业务数据库和维护准入，不允许借用普通管理员会话。
+  app.use('/api/database-rescue', databaseRescueRouter)
   app.use(databaseMaintenanceWriteBarrier)
 
   app.get('/health', (_req, res) => {

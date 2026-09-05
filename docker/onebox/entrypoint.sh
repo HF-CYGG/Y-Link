@@ -17,6 +17,8 @@ ln -sf /dev/stdout /var/log/nginx/access.log
 ln -sf /dev/stderr /var/log/nginx/error.log
 
 export PORT="${PORT:-3001}"
+export Y_LINK_TRUST_PROXY="${Y_LINK_TRUST_PROXY:-127.0.0.1,::1}"
+export Y_LINK_FORCE_SECURE_COOKIES="${Y_LINK_FORCE_SECURE_COOKIES:-false}"
 export TZ="${TZ:-Asia/Shanghai}"
 export LOG_COLOR="${LOG_COLOR:-true}"
 export FORCE_COLOR="${FORCE_COLOR:-1}"
@@ -60,6 +62,9 @@ export PERMANENT_DELETE_PASSWORD
 # 统一替换 nginx 反向代理端口，确保与后端实际监听端口保持一致。
 sed "s/__BACKEND_PORT__/${PORT}/g" /etc/nginx/conf.d/default.conf > /etc/nginx/conf.d/default.runtime.conf
 mv /etc/nginx/conf.d/default.runtime.conf /etc/nginx/conf.d/default.conf
+
+sh /usr/local/bin/ylink-proxy-boundary
+nginx -t
 
 echo "[onebox] starting backend on 127.0.0.1:${PORT}"
 node /app/backend/dist/index.js &

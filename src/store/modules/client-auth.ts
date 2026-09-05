@@ -266,6 +266,11 @@ export const useClientAuthStore = defineStore('client-auth', () => {
     emailVerificationCode?: string
   }) => {
     const profile = await clientUpdateProfile(payload)
+    if (profile.requiresRelogin) {
+      clearAuthState()
+      initialized.value = true
+      return profile
+    }
     currentUser.value = profile
     persistClientAuthState({
       user: toUserSnapshot(profile),

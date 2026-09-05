@@ -1,9 +1,10 @@
 /**
  * 模块说明：backend/src/database/transaction-coordinator.ts
- * 文件职责：提供数据库无关的事务上下文复用，以及 SQLite 单写者的有界串行协调。
+ * 文件职责：提供数据库无关的写入准入与事务上下文复用，以及 SQLite 单写者的有界串行协调。
  * 实现逻辑：
  * - AsyncLocalStorage 记录当前事务 manager，嵌套 `DataSource.transaction` 复用同一 manager；
  * - SQLite 的显式事务、QueryRunner、Repository/QueryBuilder/SQL 读写共用一把有界连接锁；
+ * - SQLite/MySQL 的所有写入口共用 operation gate，MySQL 只检查准入而不串行连接池；
  * - QueryRunner 在 start/commit/rollback/release 生命周期内持有同一租约，原始事务控制 SQL 被运行时拒绝；
  * - 队列满或等待超时返回可重试的 503，防止高峰期形成无界 Promise/内存堆积。
  * 维护说明：业务层仍应优先显式透传 manager；这里的自动委派是兼容旧调用的安全兜底，不替代清晰的事务边界。
@@ -13,6 +14,11 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import { performance } from 'node:perf_hooks'
 import type { DataSource, EntityManager, QueryRunner } from 'typeorm'
 import { DatabaseOverloadedError } from './database-errors.js'
+import {
+  databaseOperationGate,
+  type DatabaseOperationGate,
+  type DatabaseOperationLease,
+} from './operation-gate.js'
 
 type TransactionHandler = (manager: EntityManager) => Promise<unknown>
 type IsolationLevel = 'READ UNCOMMITTED' | 'READ COMMITTED' | 'REPEATABLE READ' | 'SERIALIZABLE'
@@ -23,11 +29,13 @@ interface TransactionExecutionContext {
   manager?: EntityManager
   ownsWriteLease: boolean
   writeLeaseToken?: symbol
+  valid: boolean
 }
 
 interface QueryRunnerLeaseState {
   release?: ReleaseLease
   borrowedLeaseToken?: symbol
+  operationLease?: DatabaseOperationLease
   allowedTransactionControlDepth: number
 }
 
@@ -42,6 +50,7 @@ export interface TransactionCoordinatorOptions {
   serializeWrites: boolean
   maxPendingWrites: number
   writeQueueTimeoutMs: number
+  operationGate?: DatabaseOperationGate
 }
 
 export interface TransactionCoordinatorSnapshot {
@@ -147,6 +156,83 @@ const isTransactionControlSql = (query: string): boolean => {
   return TRANSACTION_CONTROL_SQL_PATTERN.test(query)
 }
 
+const READ_ONLY_SQL_COMMANDS = new Set(['SELECT', 'SHOW', 'DESCRIBE', 'DESC', 'EXPLAIN'])
+const SQL_COMMANDS = new Set([...READ_ONLY_SQL_COMMANDS, 'INSERT', 'UPDATE', 'DELETE', 'REPLACE', 'MERGE'])
+
+/** 提取顶层 SQL 命令；无法确定时按写操作处理，避免冻结窗口误放行。 */
+const resolveSqlCommand = (query: string): string | null => {
+  let depth = 0
+  let quote: "'" | '"' | '`' | null = null
+  let lineComment = false
+  let blockComment = false
+  let firstCommand: string | null = null
+
+  for (let index = 0; index < query.length; index += 1) {
+    const char = query[index]
+    const next = query[index + 1]
+    if (lineComment) {
+      if (char === '\n' || char === '\r') lineComment = false
+      continue
+    }
+    if (blockComment) {
+      if (char === '*' && next === '/') {
+        blockComment = false
+        index += 1
+      }
+      continue
+    }
+    if (quote) {
+      if (char === quote) {
+        if (next === quote && quote !== '`') index += 1
+        else quote = null
+      } else if (char === '\\' && quote !== '`') {
+        index += 1
+      }
+      continue
+    }
+    if (char === '-' && next === '-') {
+      lineComment = true
+      index += 1
+      continue
+    }
+    if (char === '/' && next === '*') {
+      blockComment = true
+      index += 1
+      continue
+    }
+    if (char === "'" || char === '"' || char === '`') {
+      quote = char
+      continue
+    }
+    if (char === '(') {
+      depth += 1
+      continue
+    }
+    if (char === ')') {
+      depth = Math.max(0, depth - 1)
+      continue
+    }
+    if (depth !== 0 || !/[A-Za-z]/.test(char ?? '')) continue
+
+    let end = index + 1
+    while (end < query.length && /[A-Za-z_]/.test(query[end] ?? '')) end += 1
+    const token = query.slice(index, end).toUpperCase()
+    index = end - 1
+    if (!firstCommand) {
+      firstCommand = token
+      if (token !== 'WITH') return token
+      continue
+    }
+    if (firstCommand === 'WITH' && SQL_COMMANDS.has(token)) return token
+  }
+  return firstCommand
+}
+
+const isReadOnlySql = (query: string): boolean => {
+  const command = resolveSqlCommand(query)
+  return command !== null && READ_ONLY_SQL_COMMANDS.has(command)
+}
+
 class BoundedSerialWriteQueue {
   private active = false
   private readonly pending: QueueEntry[] = []
@@ -246,6 +332,7 @@ class BoundedSerialWriteQueue {
 
 export class TransactionCoordinator {
   private readonly writeQueue: BoundedSerialWriteQueue
+  private readonly operationGate: DatabaseOperationGate
   private installed = false
   private readonly wrappedQueryBuilders = new WeakSet<object>()
   private readonly wrappedQueryRunners = new WeakSet<object>()
@@ -255,6 +342,7 @@ export class TransactionCoordinator {
     readonly dataSource: DataSource,
     readonly options: TransactionCoordinatorOptions,
   ) {
+    this.operationGate = options.operationGate ?? databaseOperationGate
     this.writeQueue = new BoundedSerialWriteQueue(
       options.maxPendingWrites,
       options.writeQueueTimeoutMs,
@@ -275,7 +363,7 @@ export class TransactionCoordinator {
 
   getCurrentManager(): EntityManager | undefined {
     const context = transactionContextStorage.getStore()
-    return context?.dataSource === this.dataSource ? context.manager : undefined
+    return context?.valid && context.dataSource === this.dataSource ? context.manager : undefined
   }
 
   async runExclusive<T>(work: () => Promise<T>): Promise<T> {
@@ -283,7 +371,7 @@ export class TransactionCoordinator {
       return work()
     }
     const activeContext = transactionContextStorage.getStore()
-    if (activeContext?.dataSource === this.dataSource && activeContext.ownsWriteLease) {
+    if (activeContext?.valid && activeContext.dataSource === this.dataSource && activeContext.ownsWriteLease) {
       return work()
     }
 
@@ -293,9 +381,10 @@ export class TransactionCoordinator {
       return await transactionContextStorage.run(
         {
           dataSource: this.dataSource,
-          manager: activeContext?.dataSource === this.dataSource ? activeContext.manager : undefined,
+          manager: activeContext?.valid && activeContext.dataSource === this.dataSource ? activeContext.manager : undefined,
           ownsWriteLease: true,
           writeLeaseToken,
+          valid: true,
         },
         work,
       )
@@ -348,32 +437,40 @@ export class TransactionCoordinator {
         throw new Error('事务回调缺失')
       }
 
-      const activeContext = transactionContextStorage.getStore()
-      if (activeContext?.dataSource === dataSource && activeContext.manager) {
-        return handler(activeContext.manager)
-      }
+      return this.operationGate.runWrite(async () => {
+        const activeContext = transactionContextStorage.getStore()
+        if (activeContext?.valid && activeContext.dataSource === dataSource && activeContext.manager) {
+          return handler(activeContext.manager)
+        }
 
-      return this.runExclusive(async () => {
-        const writeLeaseContext = transactionContextStorage.getStore()
-        const wrappedHandler: TransactionHandler = async (manager) => {
-          return transactionContextStorage.run(
-            {
+        return this.runExclusive(async () => {
+          const writeLeaseContext = transactionContextStorage.getStore()
+          const wrappedHandler: TransactionHandler = async (manager) => {
+            const transactionContext: TransactionExecutionContext = {
               dataSource,
               manager,
               ownsWriteLease: Boolean(
-                writeLeaseContext?.dataSource === dataSource
+                writeLeaseContext?.valid
+                && writeLeaseContext.dataSource === dataSource
                 && writeLeaseContext.ownsWriteLease,
               ),
-              writeLeaseToken: writeLeaseContext?.dataSource === dataSource
+              writeLeaseToken: writeLeaseContext?.valid && writeLeaseContext.dataSource === dataSource
                 ? writeLeaseContext.writeLeaseToken
                 : undefined,
-            },
-            () => handler(manager),
-          )
-        }
-        return typeof isolationOrHandler === 'function'
-          ? originalTransaction(wrappedHandler)
-          : originalTransaction(isolationOrHandler, wrappedHandler)
+              valid: true,
+            }
+            return transactionContextStorage.run(transactionContext, async () => {
+              try {
+                return await handler(manager)
+              } finally {
+                transactionContext.valid = false
+              }
+            })
+          }
+          return typeof isolationOrHandler === 'function'
+            ? originalTransaction(wrappedHandler)
+            : originalTransaction(isolationOrHandler, wrappedHandler)
+        })
       })
     }) as DataSource['transaction']
   }
@@ -423,9 +520,9 @@ export class TransactionCoordinator {
       ...args: Parameters<DataSource['createQueryRunner']>
     ): QueryRunner => {
       const queryRunner = originalCreateQueryRunner(...args)
-      return this.options.serializeWrites
-        ? this.wrapQueryRunner(this.createQueryRunnerFacade(queryRunner))
-        : queryRunner
+      return this.wrapQueryRunner(
+        this.options.serializeWrites ? this.createQueryRunnerFacade(queryRunner) : queryRunner,
+      )
     }) as DataSource['createQueryRunner']
   }
 
@@ -486,7 +583,7 @@ export class TransactionCoordinator {
   }
 
   private wrapQueryRunner(queryRunner: QueryRunner): QueryRunner {
-    if (!this.options.serializeWrites || this.wrappedQueryRunners.has(queryRunner)) {
+    if (this.wrappedQueryRunners.has(queryRunner)) {
       return queryRunner
     }
 
@@ -507,10 +604,20 @@ export class TransactionCoordinator {
     ) => Promise<unknown>
 
     queryRunner.startTransaction = async (isolationLevel?: IsolationLevel): Promise<void> => {
-      const isRootTransaction = !state.release && !state.borrowedLeaseToken
+      const isRootTransaction = !state.operationLease
       if (isRootTransaction) {
-        await this.acquireQueryRunnerLease(state)
+        state.operationLease = this.operationGate.acquireIndependentOperation()
+        if (this.options.serializeWrites) {
+          try {
+            await this.acquireQueryRunnerLease(state)
+          } catch (error) {
+            state.operationLease.release()
+            state.operationLease = undefined
+            throw error
+          }
+        }
       } else {
+        this.operationGate.assertLeaseActive(state.operationLease!)
         this.assertQueryRunnerLeaseAccess(state)
       }
 
@@ -525,36 +632,47 @@ export class TransactionCoordinator {
         // rollback/release 清理，不能为了避免队列卡住而让其它请求进入未结束事务。
         if (isRootTransaction && !queryRunner.isTransactionActive) {
           this.releaseQueryRunnerLease(state)
+          state.operationLease?.release()
+          state.operationLease = undefined
         }
         throw error
       }
     }
 
     queryRunner.commitTransaction = async (): Promise<void> => {
+      if (state.operationLease) this.operationGate.assertLeaseActive(state.operationLease)
       this.assertQueryRunnerLeaseAccess(state)
       try {
         await this.allowQueryRunnerTransactionControl(state, originalCommitTransaction)
       } finally {
         if (!queryRunner.isTransactionActive) {
           this.releaseQueryRunnerLease(state)
+          state.operationLease?.release()
+          state.operationLease = undefined
         }
       }
     }
 
     queryRunner.rollbackTransaction = async (): Promise<void> => {
+      if (state.operationLease) this.operationGate.assertLeaseActive(state.operationLease)
       this.assertQueryRunnerLeaseAccess(state)
       try {
         await this.allowQueryRunnerTransactionControl(state, originalRollbackTransaction)
       } finally {
         if (!queryRunner.isTransactionActive) {
           this.releaseQueryRunnerLease(state)
+          state.operationLease?.release()
+          state.operationLease = undefined
         }
       }
     }
 
     queryRunner.release = async (): Promise<void> => {
       let rollbackError: unknown
-      if (queryRunner.isTransactionActive && (state.release || state.borrowedLeaseToken)) {
+      if (
+        queryRunner.isTransactionActive
+        && (state.operationLease || state.release || state.borrowedLeaseToken)
+      ) {
         try {
           // release 是最后的异常清理边界。即使借入租约的回调已经逃逸，也必须优先
           // 在同一 QueryRunner 上回滚，而不是把仍有活动事务的连接交还给后续请求。
@@ -564,7 +682,7 @@ export class TransactionCoordinator {
         }
         if (queryRunner.isTransactionActive) {
           throw new Error(
-            'QueryRunner.release 无法回滚仍在活动的 SQLite 事务，写租约已保留以阻止数据交错',
+            'QueryRunner.release 无法回滚仍在活动的事务，operation/写租约已保留以阻止数据交错',
             { cause: rollbackError },
           )
         }
@@ -575,6 +693,8 @@ export class TransactionCoordinator {
       } finally {
         if (!queryRunner.isTransactionActive) {
           this.releaseQueryRunnerLease(state)
+          state.operationLease?.release()
+          state.operationLease = undefined
         }
       }
 
@@ -599,6 +719,13 @@ export class TransactionCoordinator {
       }
 
       const execute = () => originalQuery(query, parameters, useStructuredResult)
+      if (state.operationLease) {
+        if (state.allowedTransactionControlDepth > 0) {
+          return execute()
+        }
+        this.operationGate.assertLeaseActive(state.operationLease)
+        return execute()
+      }
       if (state.release) {
         return execute()
       }
@@ -610,7 +737,9 @@ export class TransactionCoordinator {
         }
         return execute()
       }
-      return this.runExclusive(execute)
+      return isReadOnlySql(query)
+        ? this.runExclusive(execute)
+        : this.operationGate.runWrite(() => this.runExclusive(execute))
     }) as QueryRunner['query']
 
     return queryRunner
@@ -628,7 +757,7 @@ export class TransactionCoordinator {
       parameters?: unknown[],
       queryRunner?: unknown,
     ): Promise<unknown> => {
-      if (this.options.serializeWrites && isTransactionControlSql(query)) {
+      if (isTransactionControlSql(query)) {
         throw new Error(
           '禁止通过 DataSource.query 直接控制事务边界；'
           + '请使用 DataSource.transaction，或使用由 createQueryRunner 创建的 QueryRunner 生命周期 API',
@@ -637,7 +766,8 @@ export class TransactionCoordinator {
       const activeContext = transactionContextStorage.getStore()
       if (
         !queryRunner
-        && activeContext?.dataSource === dataSource
+        && activeContext?.valid
+        && activeContext.dataSource === dataSource
         && activeContext.manager
       ) {
         // MySQL 下全局 DataSource.query 会另取池连接；事务回调里若误用它，
@@ -658,9 +788,9 @@ export class TransactionCoordinator {
       // TypeORM sqlite 驱动在一个 DataSource 内复用单 QueryRunner/连接。
       // 若只排队写语句，另一请求的全局 SELECT 可能在活动事务中交错，
       // 从而看到未提交数据。因此 SQLite 单连接模式下读写都经过同一有界协调器。
-      return this.options.serializeWrites
+      return isReadOnlySql(query)
         ? this.runExclusive(execute)
-        : execute()
+        : this.operationGate.runWrite(() => this.runExclusive(execute))
     }) as DataSource['query']
   }
 
@@ -671,7 +801,7 @@ export class TransactionCoordinator {
     ) => unknown
     dataSource.createQueryBuilder = ((...args: unknown[]): unknown => {
       const activeContext = transactionContextStorage.getStore()
-      if (activeContext?.dataSource === dataSource && activeContext.manager) {
+      if (activeContext?.valid && activeContext.dataSource === dataSource && activeContext.manager) {
         // EntityManager.createQueryBuilder 本身会回调 DataSource.createQueryBuilder。
         // 不能在这里再次调用 manager.createQueryBuilder，否则会无限递归；应直接把
         // 当前事务 QueryRunner 注入原始 DataSource 工厂。
@@ -700,7 +830,8 @@ export class TransactionCoordinator {
       managerRecord[methodName] = (...args: unknown[]) => {
         const activeContext = transactionContextStorage.getStore()
         if (
-          activeContext?.dataSource === this.dataSource
+          activeContext?.valid
+          && activeContext.dataSource === this.dataSource
           && activeContext.manager
           && activeContext.manager !== this.dataSource.manager
         ) {
@@ -718,19 +849,21 @@ export class TransactionCoordinator {
             : result
         }
 
-        if (!this.options.serializeWrites) {
+        if (SYNCHRONOUS_MANAGER_FACTORY_METHODS.has(methodName)) {
           return execute()
         }
-        if (!SYNCHRONOUS_MANAGER_FACTORY_METHODS.has(methodName)) {
-          return this.runExclusive(async () => execute())
-        }
-        return execute()
+        const coordinatedExecute = async () => execute()
+        const isWrite = WRITE_MANAGER_METHODS.has(methodName)
+          || (methodName === 'query' && !isReadOnlySql(String(args[0] ?? '')))
+        return isWrite
+          ? this.operationGate.runWrite(() => this.runExclusive(coordinatedExecute))
+          : this.runExclusive(coordinatedExecute)
       }
     }
   }
 
   private wrapQueryBuilder(value: unknown): unknown {
-    if (!this.options.serializeWrites || !value || typeof value !== 'object') {
+    if (!value || typeof value !== 'object') {
       return value
     }
     if (this.wrappedQueryBuilders.has(value)) {
@@ -751,6 +884,10 @@ export class TransactionCoordinator {
         const queryRunner = queryBuilder.queryRunner
         if (queryRunner && typeof queryRunner === 'object') {
           const state = this.queryRunnerLeaseStates.get(queryRunner)
+          if (state?.operationLease) {
+            this.operationGate.assertLeaseActive(state.operationLease)
+            return execute()
+          }
           if (state?.release) {
             return execute()
           }
@@ -759,7 +896,11 @@ export class TransactionCoordinator {
             return execute()
           }
         }
-        return this.runExclusive(execute)
+        const queryType = (queryBuilder.expressionMap as { queryType?: unknown } | undefined)?.queryType
+        const isWrite = typeof queryType === 'string' && queryType !== 'select'
+        return isWrite
+          ? this.operationGate.runWrite(() => this.runExclusive(execute))
+          : this.runExclusive(execute)
       }
     }
 

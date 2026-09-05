@@ -1,0 +1,6 @@
+# 仅用于分体部署的本机排障；与 compose.yml / compose.mysql.yml / compose.cloud.yml 叠加。
+# 默认部署不发布后端；此覆盖仍只允许宿主机环回连接。
+services:
+  backend:
+    ports:
+      - "127.0.0.1:${Y_LINK_BACKEND_DEBUG_PORT:-3001}:3001"

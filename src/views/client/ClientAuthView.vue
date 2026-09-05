@@ -108,6 +108,7 @@ const AUTH_MODE_SEQUENCE: AuthMode[] = ['login', 'register-personal', 'register-
 
 interface ClientCaptchaState {
   captchaId: string
+  captchaImage: string
   captchaSvg: string
   expiresInSeconds: number
 }
@@ -158,6 +159,7 @@ const passwordFocused = ref(false)
 const authCapabilities = ref<ClientAuthCapabilities | null>(null)
 const captcha = reactive<ClientCaptchaState>({
   captchaId: '',
+  captchaImage: '',
   captchaSvg: '',
   expiresInSeconds: 0,
 })
@@ -222,12 +224,11 @@ const shouldPrepareCaptcha = computed(() => isRegisterMode.value || loginCaptcha
 const isCapabilityHintVisible = computed(() => capabilityLoading.value && !authCapabilities.value)
 const isCapabilityFallbackVisible = computed(() => !capabilityLoading.value && !!capabilityErrorMessage.value && !authCapabilities.value)
 const forgotPasswordAvailable = computed(() => authCapabilities.value?.forgotPasswordEnabled ?? false)
-// 安全说明：后端返回的是 SVG 字符串，这里统一转为 data URL 图片渲染，
-// 避免通过 v-html 直接把未信任的 SVG 片段注入到页面 DOM 中。
+// 优先使用后端 PNG data URL；旧服务返回 SVG 时仍以图片地址方式渲染，避免 v-html 注入。
 const captchaImageSrc = computed(() => {
-  return captcha.captchaSvg
+  return captcha.captchaImage || (captcha.captchaSvg
     ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(captcha.captchaSvg)}`
-    : ''
+    : '')
 })
 
 const captchaHintText = computed(() => {
@@ -418,6 +419,7 @@ const refreshCaptcha = async (silent = false) => {
     executor: (signal) => getClientCaptcha({ signal }),
     onSuccess: (result) => {
       captcha.captchaId = result.captchaId
+      captcha.captchaImage = result.captchaImage ?? ''
       captcha.captchaSvg = result.captchaSvg
       captcha.expiresInSeconds = result.expiresInSeconds
       if (captchaExpireTimer) {
@@ -452,6 +454,7 @@ const refreshCaptcha = async (silent = false) => {
 
 const clearCaptcha = () => {
   captcha.captchaId = ''
+  captcha.captchaImage = ''
   captcha.captchaSvg = ''
   captcha.expiresInSeconds = 0
   if (captchaExpireTimer) {
@@ -461,7 +464,7 @@ const clearCaptcha = () => {
 }
 
 const ensureCaptchaReady = async () => {
-  if (captcha.captchaId && captcha.captchaSvg) {
+  if (captcha.captchaId && (captcha.captchaImage || captcha.captchaSvg)) {
     return
   }
   await refreshCaptcha(true)

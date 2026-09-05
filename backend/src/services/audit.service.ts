@@ -45,6 +45,8 @@ export interface AuditLogPageQuery extends AuditLogListQuery {
 }
 
 export interface SafeAuditRecordOptions {
+  /** 恢复协议的最终审计失败必须阻止解除维护，不能按辅助日志吞掉异常。 */
+  requireSuccess?: boolean
   /**
    * 仅供数据库迁移控制面在只读维护期间记录终态或紧急回退事件。
    * 普通业务审计不得启用，且非 database_migration 动作即使传入也不会放行。
@@ -136,6 +138,7 @@ export class AuditService {
    */
   async safeRecordOnce(input: CreateAuditLogInput, options: SafeAuditRecordOptions = {}): Promise<void> {
     if (this.shouldPauseSafeRecord(input, options)) {
+      if (options.requireSuccess) throw new Error('AUDIT_WRITE_NOT_ADMITTED')
       return
     }
     try {
@@ -151,6 +154,7 @@ export class AuditService {
         await this.record(input)
       }
     } catch (error) {
+      if (options.requireSuccess) throw error
       console.error('[y-link-backend] idempotent audit log write failed:', error)
     }
   }
