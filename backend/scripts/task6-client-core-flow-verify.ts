@@ -19,16 +19,6 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
-import { AppDataSource } from '../src/config/data-source.js'
-import { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } from '../src/config/database-bootstrap.js'
-import { BaseProduct } from '../src/entities/base-product.entity.js'
-import { O2oPreorder } from '../src/entities/o2o-preorder.entity.js'
-import { SystemConfig } from '../src/entities/system-config.entity.js'
-import { authService } from '../src/services/auth.service.js'
-import { clientAuthService } from '../src/services/client-auth.service.js'
-import { o2oPreorderService } from '../src/services/o2o-preorder.service.js'
-import { productService } from '../src/services/product.service.js'
-import { systemConfigService } from '../src/services/system-config.service.js'
 import type { ClientAuthContext } from '../src/types/client-auth.js'
 
 interface ScenarioMetric {
@@ -53,6 +43,42 @@ const backendRoot = path.resolve(scriptsRoot, '..')
 const projectRoot = path.resolve(backendRoot, '..')
 const runtimeRoot = path.resolve(projectRoot, '.local-dev')
 const reportPath = path.resolve(runtimeRoot, 'client-core-flow-task6.report.json')
+const sqliteRoot = path.resolve(backendRoot, 'data', 'local-dev')
+const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
+const sqlitePath = path.resolve(sqliteRoot, `task6-client-core-flow-${verifySeed}.sqlite`)
+const adminPassword = `Task6Admin_${verifySeed}_Aa1!`
+
+// 必须先于后端运行时模块加载：env.ts 在模块初始化时固化数据库配置。
+process.env.APP_PROFILE = `task6-client-core-flow-${verifySeed}`
+process.env.DB_TYPE = 'sqlite'
+process.env.DB_SYNC = 'false'
+process.env.SQLITE_DB_PATH = sqlitePath
+process.env.INIT_ADMIN_PASSWORD = adminPassword
+process.env.Y_LINK_SKIP_DATABASE_RUNTIME_OVERRIDE = 'true'
+
+const [
+  { AppDataSource },
+  { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime },
+  { BaseProduct },
+  { O2oPreorder },
+  { SystemConfig },
+  { authService },
+  { clientAuthService },
+  { o2oPreorderService },
+  { productService },
+  { systemConfigService },
+] = await Promise.all([
+  import('../src/config/data-source.js'),
+  import('../src/config/database-bootstrap.js'),
+  import('../src/entities/base-product.entity.js'),
+  import('../src/entities/o2o-preorder.entity.js'),
+  import('../src/entities/system-config.entity.js'),
+  import('../src/services/auth.service.js'),
+  import('../src/services/client-auth.service.js'),
+  import('../src/services/o2o-preorder.service.js'),
+  import('../src/services/product.service.js'),
+  import('../src/services/system-config.service.js'),
+])
 
 const clientOrderDetailViewPath = path.resolve(projectRoot, 'src', 'views', 'client', 'ClientOrderDetailView.vue')
 const clientOrdersViewPath = path.resolve(projectRoot, 'src', 'views', 'client', 'ClientOrdersView.vue')
@@ -80,6 +106,23 @@ const log = (message: string) => {
 }
 
 const readText = (filePath: string) => fs.readFileSync(filePath, 'utf8')
+
+const cleanupSqliteFiles = () => {
+  for (const filePath of [sqlitePath, `${sqlitePath}-shm`, `${sqlitePath}-wal`]) {
+    if (!fs.existsSync(filePath)) {
+      continue
+    }
+    try {
+      fs.rmSync(filePath, { force: true })
+    } catch (error) {
+      console.warn(
+        `[task6-client-core-flow] 临时 SQLite 清理失败，已忽略：${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      )
+    }
+  }
+}
 
 const pushRegressionCheck = (title: string, detail: Record<string, unknown>) => {
   regressionChecks.push({
@@ -627,9 +670,13 @@ try {
   writeReport('failed', message)
   // eslint-disable-next-line no-console
   console.error('[task6-client-core-flow] Task 6 五场景验收失败：', error)
-  process.exit(1)
+  process.exitCode = 1
 } finally {
-  if (AppDataSource.isInitialized) {
-    await AppDataSource.destroy()
+  try {
+    if (AppDataSource.isInitialized) {
+      await AppDataSource.destroy()
+    }
+  } finally {
+    cleanupSqliteFiles()
   }
 }
