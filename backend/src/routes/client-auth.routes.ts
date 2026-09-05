@@ -154,7 +154,10 @@ clientAuthRouter.post(
     if (payload.scene === 'forgot_password') {
       const capabilities = await clientAuthService.getCapabilities()
       if (!capabilities.forgotPasswordEnabled) {
-        throw new BizError('当前系统未同时启用手机与邮箱验证码，暂不支持自助找回密码，请联系管理员手动修改密码', 400)
+        throw new BizError('当前系统未启用可用的手机或邮箱验证码，暂不支持自助找回密码，请联系管理员手动修改密码', 400)
+      }
+      if (!capabilities.channels[payload.channel]) {
+        throw new BizError(`当前${payload.channel === 'email' ? '邮箱' : '手机'}验证码通道未启用，请联系管理员配置`, 400)
       }
     }
     // 发送频控与验证码落库统一使用归一化目标，避免邮箱大小写被拆成多个风控桶。

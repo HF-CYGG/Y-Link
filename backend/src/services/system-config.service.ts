@@ -7,6 +7,7 @@
  */
 
 import { AppDataSource } from '../config/data-source.js'
+import { env } from '../config/env.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BusinessSequence } from '../entities/business-sequence.entity.js'
@@ -116,6 +117,48 @@ const DEFAULT_SYSTEM_CONFIGS = [
     configValue: '0',
     configGroup: 'verification',
     remark: '短信验证码平台启用开关',
+  },
+  {
+    configKey: 'verification.mobile.provider_type',
+    configValue: 'generic_http',
+    configGroup: 'verification',
+    remark: '短信验证码提供方类型（generic_http 或 aliyun_dypns）',
+  },
+  {
+    configKey: 'verification.mobile.aliyun_sign_name',
+    configValue: '',
+    configGroup: 'verification',
+    remark: '阿里云 PNVS 短信签名',
+  },
+  {
+    configKey: 'verification.mobile.aliyun_scheme_name',
+    configValue: '',
+    configGroup: 'verification',
+    remark: '阿里云 PNVS 验证服务名称（可选）',
+  },
+  {
+    configKey: 'verification.mobile.aliyun_template_register',
+    configValue: '',
+    configGroup: 'verification',
+    remark: '阿里云 PNVS 注册短信模板码',
+  },
+  {
+    configKey: 'verification.mobile.aliyun_template_forgot_password',
+    configValue: '',
+    configGroup: 'verification',
+    remark: '阿里云 PNVS 找回密码短信模板码',
+  },
+  {
+    configKey: 'verification.mobile.aliyun_template_profile_update',
+    configValue: '',
+    configGroup: 'verification',
+    remark: '阿里云 PNVS 资料修改短信模板码',
+  },
+  {
+    configKey: 'verification.mobile.aliyun_template_test',
+    configValue: '',
+    configGroup: 'verification',
+    remark: '阿里云 PNVS 测试短信模板码',
   },
   {
     configKey: 'verification.mobile.http_method',
@@ -352,15 +395,34 @@ export interface UpdateO2oRuleConfigsInput {
 }
 
 export type VerificationChannelType = 'mobile' | 'email'
+export type SmsVerificationProviderType = 'generic_http' | 'aliyun_dypns'
+export type VerificationScene = 'register' | 'forgot_password' | 'profile_update' | 'test'
+
+export interface AliyunDypnsTemplateConfig {
+  register: string
+  forgotPassword: string
+  profileUpdate: string
+  test: string
+}
 
 export interface VerificationProviderConfigRecord {
   enabled: boolean
+  ready: boolean
   httpMethod: 'POST' | 'GET'
   apiUrl: string
   headersTemplate: string
   bodyTemplate: string
   successMatch: string
   updatedAt: Date
+  providerType: SmsVerificationProviderType
+  aliyunSignName: string
+  aliyunSchemeName: string
+  aliyunTemplates: AliyunDypnsTemplateConfig
+  credentialsConfigured: boolean
+  ticketHmacConfigured: boolean
+  mnsEnabled: boolean
+  mnsConfigured: boolean
+  statusError: string | null
   headersTemplateMasked?: boolean
   bodyTemplateMasked?: boolean
   apiUrlMasked?: boolean
@@ -381,6 +443,10 @@ export interface VerificationProviderConfigInput {
   clearApiUrl?: boolean
   clearHeadersTemplate?: boolean
   clearBodyTemplate?: boolean
+  providerType?: SmsVerificationProviderType
+  aliyunSignName?: string
+  aliyunSchemeName?: string
+  aliyunTemplates?: Partial<AliyunDypnsTemplateConfig>
 }
 
 export interface UpdateVerificationProviderConfigsInput {
@@ -471,6 +537,13 @@ class SystemConfigService {
   private readonly clientDepartmentConfigKey = 'client.department.options'
   private readonly verificationConfigKeys = [
     'verification.mobile.enabled',
+    'verification.mobile.provider_type',
+    'verification.mobile.aliyun_sign_name',
+    'verification.mobile.aliyun_scheme_name',
+    'verification.mobile.aliyun_template_register',
+    'verification.mobile.aliyun_template_forgot_password',
+    'verification.mobile.aliyun_template_profile_update',
+    'verification.mobile.aliyun_template_test',
     'verification.mobile.http_method',
     'verification.mobile.api_url',
     'verification.mobile.headers_template',
@@ -757,9 +830,9 @@ class SystemConfigService {
     return new Map(rows.map((row) => [row.configKey, row]))
   }
 
-  private async loadVerificationConfigMap() {
-    await this.ensureDefaultConfigs()
-    const rows = await this.configRepo.find({
+  private async loadVerificationConfigMap(manager: EntityManager = AppDataSource.manager) {
+    await this.ensureDefaultConfigs(manager)
+    const rows = await manager.getRepository(SystemConfig).find({
       where: this.verificationConfigKeys.map((key) => ({ configKey: key })),
       select: {
         configKey: true,
@@ -799,6 +872,9 @@ class SystemConfigService {
   ): VerificationProviderConfigInput {
     const channelLabel = channelType === 'mobile' ? '短信验证码平台' : '邮箱验证码平台'
     const method = channel.httpMethod === 'GET' ? 'GET' : 'POST'
+    const providerType: SmsVerificationProviderType = channelType === 'mobile'
+      ? (channel.providerType === 'aliyun_dypns' ? 'aliyun_dypns' : channel.providerType === 'generic_http' ? 'generic_http' : existingConfig.providerType)
+      : 'generic_http'
     const apiUrl = this.resolveSensitiveVerificationFieldValue(
       channel.apiUrl,
       existingConfig.apiUrl,
@@ -806,10 +882,43 @@ class SystemConfigService {
       'API 地址',
       Boolean(channel.clearApiUrl),
     )
-    if (channel.enabled && !apiUrl) {
+    if (channel.enabled && providerType === 'generic_http' && !apiUrl) {
       throw new BizError(`${channelLabel}已启用时必须填写 API 地址`, 400)
     }
-    this.validateVerificationApiUrl(apiUrl, channelLabel)
+    if (providerType === 'generic_http') {
+      this.validateVerificationApiUrl(apiUrl, channelLabel)
+    }
+
+    const normalizeAliyunText = (value: string | undefined, persisted: string, fieldLabel: string, maxLength: number) => {
+      const normalized = value === undefined ? persisted.trim() : value.trim()
+      if (normalized.length > maxLength) {
+        throw new BizError(`${fieldLabel}长度不能超过 ${maxLength} 个字符`, 400)
+      }
+      return normalized
+    }
+    const aliyunSignName = normalizeAliyunText(
+      channel.aliyunSignName,
+      existingConfig.aliyunSignName,
+      '阿里云 PNVS 短信签名',
+      128,
+    )
+    const aliyunSchemeName = normalizeAliyunText(
+      channel.aliyunSchemeName,
+      existingConfig.aliyunSchemeName,
+      '阿里云 PNVS 验证服务名称',
+      20,
+    )
+    const aliyunTemplates: AliyunDypnsTemplateConfig = {
+      register: normalizeAliyunText(channel.aliyunTemplates?.register, existingConfig.aliyunTemplates.register, '阿里云 PNVS 注册模板码', 128),
+      forgotPassword: normalizeAliyunText(channel.aliyunTemplates?.forgotPassword, existingConfig.aliyunTemplates.forgotPassword, '阿里云 PNVS 找回密码模板码', 128),
+      profileUpdate: normalizeAliyunText(channel.aliyunTemplates?.profileUpdate, existingConfig.aliyunTemplates.profileUpdate, '阿里云 PNVS 资料修改模板码', 128),
+      test: normalizeAliyunText(channel.aliyunTemplates?.test, existingConfig.aliyunTemplates.test, '阿里云 PNVS 测试模板码', 128),
+    }
+    if (channel.enabled && providerType === 'aliyun_dypns') {
+      if (!aliyunSignName || Object.values(aliyunTemplates).some((templateCode) => !templateCode)) {
+        throw new BizError('启用阿里云 PNVS 短信时必须填写签名和全部场景模板码', 400)
+      }
+    }
 
     return {
       enabled: channel.enabled,
@@ -836,6 +945,10 @@ class SystemConfigService {
         channelLabel,
       ),
       successMatch: channel.successMatch.trim(),
+      providerType,
+      aliyunSignName,
+      aliyunSchemeName,
+      aliyunTemplates,
     }
   }
 
@@ -1325,16 +1438,30 @@ class SystemConfigService {
   ): VerificationProviderConfigRecord {
     const keyPrefix = `verification.${channel}`
     const enabledConfig = configMap.get(`${keyPrefix}.enabled`)
+    const providerTypeConfig = channel === 'mobile' ? configMap.get(`${keyPrefix}.provider_type`) : undefined
+    const aliyunSignNameConfig = channel === 'mobile' ? configMap.get(`${keyPrefix}.aliyun_sign_name`) : undefined
+    const aliyunSchemeNameConfig = channel === 'mobile' ? configMap.get(`${keyPrefix}.aliyun_scheme_name`) : undefined
+    const aliyunTemplateRegisterConfig = channel === 'mobile' ? configMap.get(`${keyPrefix}.aliyun_template_register`) : undefined
+    const aliyunTemplateForgotPasswordConfig = channel === 'mobile' ? configMap.get(`${keyPrefix}.aliyun_template_forgot_password`) : undefined
+    const aliyunTemplateProfileUpdateConfig = channel === 'mobile' ? configMap.get(`${keyPrefix}.aliyun_template_profile_update`) : undefined
+    const aliyunTemplateTestConfig = channel === 'mobile' ? configMap.get(`${keyPrefix}.aliyun_template_test`) : undefined
     const methodConfig = configMap.get(`${keyPrefix}.http_method`)
     const urlConfig = configMap.get(`${keyPrefix}.api_url`)
     const headersConfig = configMap.get(`${keyPrefix}.headers_template`)
     const bodyConfig = configMap.get(`${keyPrefix}.body_template`)
     const successConfig = configMap.get(`${keyPrefix}.success_match`)
-    if (!enabledConfig || !methodConfig || !urlConfig || !headersConfig || !bodyConfig || !successConfig) {
+    if (
+      !enabledConfig || !methodConfig || !urlConfig || !headersConfig || !bodyConfig || !successConfig
+      || (channel === 'mobile' && (
+        !providerTypeConfig || !aliyunSignNameConfig || !aliyunSchemeNameConfig || !aliyunTemplateRegisterConfig
+        || !aliyunTemplateForgotPasswordConfig || !aliyunTemplateProfileUpdateConfig || !aliyunTemplateTestConfig
+      ))
+    ) {
       throw new BizError('验证码平台配置缺失，请联系管理员补齐配置', 500)
     }
 
     const httpMethod = methodConfig.configValue === 'GET' ? 'GET' : 'POST'
+    const providerType: SmsVerificationProviderType = providerTypeConfig?.configValue === 'aliyun_dypns' ? 'aliyun_dypns' : 'generic_http'
     const updatedAt = [
       enabledConfig.updatedAt,
       methodConfig.updatedAt,
@@ -1342,16 +1469,66 @@ class SystemConfigService {
       headersConfig.updatedAt,
       bodyConfig.updatedAt,
       successConfig.updatedAt,
-    ].sort((a, b) => b.getTime() - a.getTime())[0]
+      providerTypeConfig?.updatedAt,
+      aliyunSignNameConfig?.updatedAt,
+      aliyunSchemeNameConfig?.updatedAt,
+      aliyunTemplateRegisterConfig?.updatedAt,
+      aliyunTemplateForgotPasswordConfig?.updatedAt,
+      aliyunTemplateProfileUpdateConfig?.updatedAt,
+      aliyunTemplateTestConfig?.updatedAt,
+    ].filter((value): value is Date => Boolean(value)).sort((a, b) => b.getTime() - a.getTime())[0]
+
+    const enabled = this.parseNonNegativeInteger(enabledConfig.configValue, `${keyPrefix}.enabled`) > 0
+    const credentialsConfigured = Boolean(env.ALIBABA_CLOUD_ACCESS_KEY_ID && env.ALIBABA_CLOUD_ACCESS_KEY_SECRET)
+    const ticketHmacConfigured = (env.VERIFICATION_TICKET_HMAC_SECRET?.length ?? 0) >= 32
+    const mnsEnabled = env.ALIYUN_DYPNS_MNS_ENABLED
+    const mnsConfigured = !mnsEnabled || credentialsConfigured
+    let statusError: string | null = null
+    const aliyunTemplateReady = Object.values({
+      register: aliyunTemplateRegisterConfig?.configValue ?? '',
+      forgotPassword: aliyunTemplateForgotPasswordConfig?.configValue ?? '',
+      profileUpdate: aliyunTemplateProfileUpdateConfig?.configValue ?? '',
+      test: aliyunTemplateTestConfig?.configValue ?? '',
+    }).every((templateCode) => templateCode.trim().length > 0)
+    const aliyunConfigReady = Boolean(aliyunSignNameConfig?.configValue.trim()) && aliyunTemplateReady
+    const ready = providerType === 'generic_http'
+      ? enabled && Boolean(urlConfig.configValue.trim())
+      : enabled && aliyunConfigReady && credentialsConfigured && ticketHmacConfigured
+    if (enabled && providerType === 'generic_http' && !urlConfig.configValue.trim()) {
+      statusError = `${channel === 'mobile' ? '短信' : '邮箱'}验证码平台 API 未配置`
+    } else if (enabled && providerType === 'aliyun_dypns' && !aliyunConfigReady) {
+      statusError = '阿里云 PNVS 短信签名或场景模板码未配置完整'
+    } else if (enabled && providerType === 'aliyun_dypns' && !credentialsConfigured) {
+      statusError = '阿里云 PNVS 凭证未配置，无法发送或核验短信验证码'
+    } else if (enabled && providerType === 'aliyun_dypns' && !ticketHmacConfigured) {
+      statusError = '验证码 HMAC 密钥未配置或长度不足，无法安全关联短信核验记录'
+    } else if (mnsEnabled && !mnsConfigured) {
+      statusError = '已启用阿里云 MNS 回执，但阿里云访问凭证未配置'
+    }
 
     return {
-      enabled: this.parseNonNegativeInteger(enabledConfig.configValue, `${keyPrefix}.enabled`) > 0,
+      enabled,
+      ready,
       httpMethod,
       apiUrl: options.maskSensitiveValues ? this.maskSensitiveConfigValue(urlConfig.configValue) : urlConfig.configValue,
       headersTemplate: options.maskSensitiveValues ? this.maskSensitiveConfigValue(headersConfig.configValue) : headersConfig.configValue,
       bodyTemplate: options.maskSensitiveValues ? this.maskSensitiveConfigValue(bodyConfig.configValue) : bodyConfig.configValue,
       successMatch: successConfig.configValue,
       updatedAt,
+      providerType,
+      aliyunSignName: aliyunSignNameConfig?.configValue ?? '',
+      aliyunSchemeName: aliyunSchemeNameConfig?.configValue ?? '',
+      aliyunTemplates: {
+        register: aliyunTemplateRegisterConfig?.configValue ?? '',
+        forgotPassword: aliyunTemplateForgotPasswordConfig?.configValue ?? '',
+        profileUpdate: aliyunTemplateProfileUpdateConfig?.configValue ?? '',
+        test: aliyunTemplateTestConfig?.configValue ?? '',
+      },
+      credentialsConfigured,
+      ticketHmacConfigured,
+      mnsEnabled,
+      mnsConfigured,
+      statusError,
       headersTemplateMasked: options.maskSensitiveValues ? Boolean(headersConfig.configValue.trim()) : false,
       bodyTemplateMasked: options.maskSensitiveValues ? Boolean(bodyConfig.configValue.trim()) : false,
       apiUrlMasked: options.maskSensitiveValues ? Boolean(urlConfig.configValue.trim()) : false,
@@ -2077,8 +2254,11 @@ class SystemConfigService {
     return result
   }
 
-  async getVerificationProviderConfigs(options: { maskSensitiveValues?: boolean } = { maskSensitiveValues: true }): Promise<VerificationProviderConfigsResult> {
-    const map = await this.loadVerificationConfigMap()
+  async getVerificationProviderConfigs(
+    options: { maskSensitiveValues?: boolean } = { maskSensitiveValues: true },
+    manager: EntityManager = AppDataSource.manager,
+  ): Promise<VerificationProviderConfigsResult> {
+    const map = await this.loadVerificationConfigMap(manager)
     return {
       mobile: this.formatVerificationProviderConfig('mobile', map, options),
       email: this.formatVerificationProviderConfig('email', map, options),
@@ -2091,14 +2271,49 @@ class SystemConfigService {
   ): Promise<VerificationProviderConfigRecord> {
     const currentConfigs = await this.getVerificationProviderConfigs({ maskSensitiveValues: false })
     const normalizedInput = this.normalizeVerificationProviderInput(channelType, input, currentConfigs[channelType])
+    const providerType = normalizedInput.providerType ?? 'generic_http'
+    const credentialsConfigured = Boolean(env.ALIBABA_CLOUD_ACCESS_KEY_ID && env.ALIBABA_CLOUD_ACCESS_KEY_SECRET)
+    const ticketHmacConfigured = (env.VERIFICATION_TICKET_HMAC_SECRET?.length ?? 0) >= 32
+    const templates = {
+      register: normalizedInput.aliyunTemplates?.register ?? '',
+      forgotPassword: normalizedInput.aliyunTemplates?.forgotPassword ?? '',
+      profileUpdate: normalizedInput.aliyunTemplates?.profileUpdate ?? '',
+      test: normalizedInput.aliyunTemplates?.test ?? '',
+    }
+    const aliyunConfigReady = Boolean(normalizedInput.aliyunSignName?.trim())
+      && Object.values(templates).every((templateCode) => templateCode.trim().length > 0)
+    const ready = providerType === 'generic_http'
+      ? normalizedInput.enabled && Boolean(normalizedInput.apiUrl.trim())
+      : normalizedInput.enabled && aliyunConfigReady && credentialsConfigured && ticketHmacConfigured
+    const statusError = !normalizedInput.enabled
+      ? null
+      : providerType === 'generic_http' && !normalizedInput.apiUrl.trim()
+        ? `${channelType === 'mobile' ? '短信' : '邮箱'}验证码平台 API 未配置`
+        : providerType === 'aliyun_dypns' && !aliyunConfigReady
+          ? '阿里云 PNVS 短信签名或场景模板码未配置完整'
+          : providerType === 'aliyun_dypns' && !credentialsConfigured
+            ? '阿里云 PNVS 凭证未配置，无法发送或核验短信验证码'
+            : providerType === 'aliyun_dypns' && !ticketHmacConfigured
+              ? '验证码 HMAC 密钥未配置或长度不足，无法安全关联短信核验记录'
+              : null
     return {
       enabled: normalizedInput.enabled,
+      ready,
       httpMethod: normalizedInput.httpMethod,
       apiUrl: normalizedInput.apiUrl,
       headersTemplate: normalizedInput.headersTemplate,
       bodyTemplate: normalizedInput.bodyTemplate,
       successMatch: normalizedInput.successMatch,
       updatedAt: new Date(),
+      providerType,
+      aliyunSignName: normalizedInput.aliyunSignName ?? '',
+      aliyunSchemeName: normalizedInput.aliyunSchemeName ?? '',
+      aliyunTemplates: templates,
+      credentialsConfigured,
+      ticketHmacConfigured,
+      mnsEnabled: env.ALIYUN_DYPNS_MNS_ENABLED,
+      mnsConfigured: !env.ALIYUN_DYPNS_MNS_ENABLED || credentialsConfigured,
+      statusError,
       headersTemplateMasked: false,
       bodyTemplateMasked: false,
       apiUrlMasked: false,
@@ -2473,10 +2688,6 @@ class SystemConfigService {
     requestMeta?: RequestMeta,
   ): Promise<{ config: VerificationProviderConfigsResult; changed: boolean }> {
     await this.assertAdminActor(actor, requestMeta, 'system_config.update_verification_providers', '更新验证码平台配置')
-    const persistedConfigs = await this.getVerificationProviderConfigs({ maskSensitiveValues: false })
-    const normalizedMobile = this.normalizeVerificationProviderInput('mobile', input.mobile, persistedConfigs.mobile)
-    const normalizedEmail = this.normalizeVerificationProviderInput('email', input.email, persistedConfigs.email)
-
     return runInTransaction(async (manager) => {
       const useForUpdate = manager.connection.options.type === 'mysql'
       const placeholders = this.verificationConfigKeys.map(() => '?').join(', ')
@@ -2494,8 +2705,27 @@ class SystemConfigService {
         throw new BizError('验证码平台配置缺失，请联系管理员补齐配置', 500)
       }
 
+      const lockedConfigMap = this.buildVerificationConfigMap(lockedRows.map((row) => ({
+        configKey: row.configKey,
+        configValue: row.configValue,
+        updatedAt: new Date(row.updatedAt),
+      })))
+      const before = {
+        mobile: this.formatVerificationProviderConfig('mobile', lockedConfigMap, { maskSensitiveValues: false }),
+        email: this.formatVerificationProviderConfig('email', lockedConfigMap, { maskSensitiveValues: false }),
+      }
+      const normalizedMobile = this.normalizeVerificationProviderInput('mobile', input.mobile, before.mobile)
+      const normalizedEmail = this.normalizeVerificationProviderInput('email', input.email, before.email)
+
       const targetMap = new Map<string, string>([
         ['verification.mobile.enabled', normalizedMobile.enabled ? '1' : '0'],
+        ['verification.mobile.provider_type', normalizedMobile.providerType ?? 'generic_http'],
+        ['verification.mobile.aliyun_sign_name', normalizedMobile.aliyunSignName ?? ''],
+        ['verification.mobile.aliyun_scheme_name', normalizedMobile.aliyunSchemeName ?? ''],
+        ['verification.mobile.aliyun_template_register', normalizedMobile.aliyunTemplates?.register ?? ''],
+        ['verification.mobile.aliyun_template_forgot_password', normalizedMobile.aliyunTemplates?.forgotPassword ?? ''],
+        ['verification.mobile.aliyun_template_profile_update', normalizedMobile.aliyunTemplates?.profileUpdate ?? ''],
+        ['verification.mobile.aliyun_template_test', normalizedMobile.aliyunTemplates?.test ?? ''],
         ['verification.mobile.http_method', normalizedMobile.httpMethod],
         ['verification.mobile.api_url', normalizedMobile.apiUrl],
         ['verification.mobile.headers_template', normalizedMobile.headersTemplate],
@@ -2509,7 +2739,6 @@ class SystemConfigService {
         ['verification.email.success_match', normalizedEmail.successMatch],
       ])
 
-      const before = await this.getVerificationProviderConfigs({ maskSensitiveValues: false })
       let changed = false
       const repo = manager.getRepository(SystemConfig)
       for (const row of lockedRows) {
@@ -2521,7 +2750,8 @@ class SystemConfigService {
         changed = true
       }
 
-      const config = await this.getVerificationProviderConfigs({ maskSensitiveValues: true })
+      // 必须复用当前事务的 manager；MySQL 的全局仓库连接看不到尚未提交的更新。
+      const config = await this.getVerificationProviderConfigs({ maskSensitiveValues: true }, manager)
       if (changed) {
         await auditService.record(
           {

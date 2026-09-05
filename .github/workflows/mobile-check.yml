@@ -5,20 +5,16 @@ on:
     paths:
       - "apps/mobile/**"
       - "packages/**"
-      - "package.json"
-      - "package-lock.json"
       - ".npmrc"
       - "scripts/verify-mobile-workspace.mjs"
-      - ".github/workflows/mobile-check.yml"
   push:
+    branches:
+      - main
     paths:
       - "apps/mobile/**"
       - "packages/**"
-      - "package.json"
-      - "package-lock.json"
       - ".npmrc"
       - "scripts/verify-mobile-workspace.mjs"
-      - ".github/workflows/mobile-check.yml"
   workflow_dispatch:
 
 permissions:
