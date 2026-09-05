@@ -50,8 +50,11 @@ const MYSQL_REQUIRED_TABLES = [
   'base_product_sku',
   'sys_user',
   'sys_user_session',
+  'client_user',
+  'client_feedback_conversation',
   'o2o_preorder',
   'o2o_preorder_item',
+  'biz_outbound_order',
   'biz_inbound_order',
   'biz_inbound_order_item',
   'notification_event',
@@ -64,7 +67,7 @@ const MYSQL_REQUIRED_TABLES = [
 
 // 每个必需表由哪个迁移脚本创建，用于在报错时给出精确指引，而不是笼统建议“从头跑一遍”。
 // auth_risk_state 现同时存在于 001（供全新库一次建齐）与 033（供存量库补建），
-// 这里指向 033，因为它也是 AUTO_MIGRATABLE_FILES 白名单里唯一可自动执行的脚本。
+// 这里指向 033，因为它是白名单中专门为存量库补建该表的自动迁移脚本。
 const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
   base_product: '001_init_schema.sql',
   sys_user: '001_init_schema.sql',
@@ -73,6 +76,9 @@ const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
   biz_inbound_order_item: '001_init_schema.sql',
   o2o_preorder: '006_o2o_preorder_schema.sql',
   o2o_preorder_item: '006_o2o_preorder_schema.sql',
+  client_user: '006_o2o_preorder_schema.sql',
+  client_feedback_conversation: '019_client_feedback_and_customer_service.sql',
+  biz_outbound_order: '001_init_schema.sql',
   base_product_sku: '028_o2o_product_sku_selection.sql',
   notification_event: '020_notification_center_and_user_email.sql',
   notification_inbox: '020_notification_center_and_user_email.sql',
@@ -86,6 +92,7 @@ interface MysqlRequiredColumn {
   tableName: string
   columnName: string
   introducingScript: string
+  minCharacterMaximumLength?: number
 }
 
 interface MysqlRequiredIndex {
@@ -130,6 +137,25 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
   { tableName: 'notification_event', columnName: 'processed_at', introducingScript: '036_notification_outbox.sql' },
   { tableName: 'notification_dispatch', columnName: 'dedupe_key', introducingScript: '036_notification_outbox.sql' },
   { tableName: 'notification_dispatch', columnName: 'last_attempt_at', introducingScript: '036_notification_outbox.sql' },
+  { tableName: 'client_user', columnName: 'department_node_id', introducingScript: '037_department_account_node_binding.sql' },
+  {
+    tableName: 'o2o_preorder',
+    columnName: 'department_name_snapshot',
+    introducingScript: '038_department_path_capacity.sql',
+    minCharacterMaximumLength: 271,
+  },
+  {
+    tableName: 'client_feedback_conversation',
+    columnName: 'department_name_snapshot',
+    introducingScript: '038_department_path_capacity.sql',
+    minCharacterMaximumLength: 271,
+  },
+  {
+    tableName: 'biz_outbound_order',
+    columnName: 'customer_department_name',
+    introducingScript: '038_department_path_capacity.sql',
+    minCharacterMaximumLength: 271,
+  },
 ]
 
 // 不只按索引名判断，还校验列顺序与唯一性，避免旧库中存在同名但错误的索引时误判为可启动。
@@ -218,6 +244,13 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
     unique: true,
     introducingScript: '036_notification_outbox.sql',
   },
+  {
+    tableName: 'client_user',
+    indexName: 'uk_client_user_department_node_id',
+    columns: ['department_node_id'],
+    unique: true,
+    introducingScript: '037_department_account_node_binding.sql',
+  },
 ]
 
 // 不可重复执行的历史脚本。
@@ -233,6 +266,8 @@ const NON_IDEMPOTENT_HISTORICAL_SCRIPTS = [
 const AUTO_MIGRATABLE_FILES = [
   '033_inventory_security_invariants.sql',
   '037_mobile_auth_session.sql',
+  '037_department_account_node_binding.sql',
+  '038_department_path_capacity.sql',
 ]
 
 /**
@@ -502,9 +537,11 @@ interface MysqlTableRow {
 
 interface MysqlColumnRow extends MysqlTableRow {
   COLUMN_NAME: string
+  CHARACTER_MAXIMUM_LENGTH: number | string | null
 }
 
-interface MysqlIndexRow extends MysqlColumnRow {
+interface MysqlIndexRow extends MysqlTableRow {
+  COLUMN_NAME: string
   INDEX_NAME: string
   SEQ_IN_INDEX: number | string
   NON_UNIQUE: number | string
@@ -533,7 +570,7 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
   const requiredColumnNames = [...new Set(requiredColumnsOnExistingTables.map((item) => item.columnName))]
   const columnRows: MysqlColumnRow[] = requiredColumnsOnExistingTables.length > 0
     ? await dataSource.query(
-        `SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS
+        `SELECT TABLE_NAME, COLUMN_NAME, CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS
          WHERE TABLE_SCHEMA = DATABASE()
            AND TABLE_NAME IN (${requiredColumnTables.map(() => '?').join(', ')})
            AND COLUMN_NAME IN (${requiredColumnNames.map(() => '?').join(', ')})`,
@@ -541,9 +578,17 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
       )
     : []
   const existingColumnSet = new Set(columnRows.map((row) => schemaObjectKey(row.TABLE_NAME, row.COLUMN_NAME)))
+  const existingColumnMap = new Map(columnRows.map((row) => [schemaObjectKey(row.TABLE_NAME, row.COLUMN_NAME), row]))
   const missingColumns = requiredColumnsOnExistingTables.filter((requirement) => (
     !existingColumnSet.has(schemaObjectKey(requirement.tableName, requirement.columnName))
   ))
+  const undersizedColumns = requiredColumnsOnExistingTables.filter((requirement) => {
+    if (requirement.minCharacterMaximumLength === undefined) {
+      return false
+    }
+    const row = existingColumnMap.get(schemaObjectKey(requirement.tableName, requirement.columnName))
+    return Boolean(row) && Number(row?.CHARACTER_MAXIMUM_LENGTH ?? 0) < requirement.minCharacterMaximumLength
+  })
 
   const requiredIndexesOnExistingTables = MYSQL_REQUIRED_INDEXES.filter((requirement) => (
     existingTableSet.has(requirement.tableName)
@@ -577,7 +622,12 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
       || requirement.columns.some((column, index) => actual.columns[index] !== column)
   })
 
-  if (missingTables.length === 0 && missingColumns.length === 0 && invalidIndexes.length === 0) {
+  if (
+    missingTables.length === 0
+    && missingColumns.length === 0
+    && undersizedColumns.length === 0
+    && invalidIndexes.length === 0
+  ) {
     return
   }
 
@@ -598,6 +648,10 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
       label: `字段 ${requirement.tableName}.${requirement.columnName}`,
       script: requirement.introducingScript,
     })),
+    ...undersizedColumns.map((requirement) => ({
+      label: `字段 ${requirement.tableName}.${requirement.columnName} 字符容量不足（至少 ${requirement.minCharacterMaximumLength}）`,
+      script: requirement.introducingScript,
+    })),
     ...invalidIndexes.map((requirement) => ({
       label: `索引 ${requirement.tableName}.${requirement.indexName}`,
       script: requirement.introducingScript,
@@ -610,6 +664,9 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
     missingTables.length > 0 ? `缺少必需表：${missingTables.join(', ')}` : null,
     missingColumns.length > 0
       ? `缺少必需字段：${missingColumns.map((item) => `${item.tableName}.${item.columnName}`).join(', ')}`
+      : null,
+    undersizedColumns.length > 0
+      ? `字符容量不足的必需字段：${undersizedColumns.map((item) => `${item.tableName}.${item.columnName}`).join(', ')}`
       : null,
     invalidIndexes.length > 0
       ? `缺少或定义不匹配的必需索引：${invalidIndexes.map((item) => `${item.tableName}.${item.indexName}`).join(', ')}`
@@ -640,7 +697,7 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
     + '缺失或不匹配的结构分别由以下迁移脚本维护：\n'
     + `${missingObjectGuide}\n\n`
     + `${scenarioGuide}\n\n`
-    + '若缺失的是 033 引入的 auth_risk_state 或 037 引入的 client_mobile_session，可以设置环境变量 DB_AUTO_MIGRATE=true 后重启服务，'
+    + '若上面只涉及 033、037_mobile_auth_session、037_department_account_node_binding 或 038 维护的结构，可以设置环境变量 DB_AUTO_MIGRATE=true 后重启服务，'
     + '由服务自动执行白名单内已核实可在启动期运行的脚本。035/036 不会在启动期自动执行：'
     + '036 包含历史通知去重和唯一索引 DDL，必须按“备份 → 停止所有应用与通知 Worker → 执行脚本 → 启动新版本”完成。',
   )

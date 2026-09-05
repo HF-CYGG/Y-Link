@@ -1,19 +1,23 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/system/ClientUserManageView.vue
- * 文件职责：管理端对客户端用户进行查询、手动新增、启停与密码重置。
+ * 文件职责：管理端对客户端用户进行查询、单个治理、部门共享账号批量开户、启停与密码重置。
  * 维护说明：
  * - 客户端用户与管理端用户分开治理，避免字段语义和操作入口混淆；
  * - 手动新增入口仅服务管理端受权治理，不经过客户端自助注册风控。
+ * - 批量部门账号的明文凭据只保留在当前弹窗内，关闭后必须清理并撤销下载链接。
  */
 
 import dayjs from 'dayjs'
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
+import { onBeforeRouteLeave } from 'vue-router'
 import { ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { BizCrudDialogShell, BizResponsiveDataCollectionShell, PageContainer, PagePaginationBar, PageToolbarCard } from '@/components/common'
 import {
   createClientUser,
+  createDepartmentAccountBatch,
   getClientUserList,
+  previewDepartmentAccountBatch,
   resetClientUserPassword,
   updateClientUser,
   updateClientUserStatus,
@@ -21,6 +25,9 @@ import {
   type ClientUserProfileKind,
   type ClientUserManageProfile,
   type ClientUserStatus,
+  type CreateDepartmentAccountBatchResult,
+  type DepartmentAccountBatchPreviewResult,
+  type DepartmentAccountBatchSkippedDepartment,
   type ResetClientUserPasswordPayload,
   type ClientUserListQuery,
   type UpdateClientUserPayload,
@@ -28,16 +35,34 @@ import {
 import { getClientDepartmentConfigs, type ClientDepartmentTreeNode } from '@/api/modules/system-config'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
-import { extractErrorMessage } from '@/utils/error'
+import { extractErrorMessage, normalizeRequestError } from '@/utils/error'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { applyPaginatedResult, createPaginatedListState } from '@/utils/list'
 
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
+import {
+  buildDepartmentAccountCsv,
+  createDepartmentAccountCredentials,
+  createDepartmentAccountCsvFilename,
+  isDepartmentAccountBatchOperationCurrent,
+  mergeDepartmentAccountBatchSkipped,
+  reconcileDepartmentAccountBatch,
+  reconcileDepartmentAccountBatchResult,
+  type DepartmentAccountCredential,
+  type DepartmentAccountBatchRecoveryResult,
+  type DepartmentAccountBatchOperationSnapshot,
+} from './client-user-department-batch'
 
 type DepartmentTreeSelectOption = {
   value: string
   label: string
+  fullPath: string
   children?: DepartmentTreeSelectOption[]
+}
+
+type DepartmentNodeMeta = {
+  departmentNodeId: string
+  departmentName: string
 }
 
 const listRequest = useStableRequest()
@@ -68,6 +93,7 @@ const canOperateUsers = computed(() => canEditUser.value || canToggleUser.value 
 const departmentOptions = ref<string[]>([])
 const departmentTree = ref<ClientDepartmentTreeNode[]>([])
 const departmentPathLookup = ref<Record<string, string>>({})
+const departmentNodeLookup = ref<Record<string, DepartmentNodeMeta>>({})
 const departmentOptionsLoading = ref(false)
 
 const createVisible = ref(false)
@@ -80,6 +106,7 @@ const createForm = reactive({
   mobile: '',
   email: '',
   departmentName: '',
+  departmentNodeId: '',
   password: '',
   confirmPassword: '',
   status: 'enabled' as ClientUserStatus,
@@ -159,7 +186,7 @@ const createRules: FormRules = {
       trigger: 'blur',
     },
   ],
-  departmentName: [
+  departmentNodeId: [
     {
       validator: (_rule, value: string, callback) => {
         if (createDepartmentRequired.value && !value.trim()) {
@@ -204,6 +231,7 @@ const editForm = reactive({
   mobile: '',
   email: '',
   departmentName: '',
+  departmentNodeId: '',
   status: 'enabled' as ClientUserStatus,
 })
 
@@ -309,6 +337,7 @@ const resetCreateForm = () => {
   createForm.mobile = ''
   createForm.email = ''
   createForm.departmentName = ''
+  createForm.departmentNodeId = ''
   createForm.password = ''
   createForm.confirmPassword = ''
   createForm.status = 'enabled'
@@ -322,6 +351,7 @@ const resetEditForm = () => {
   editForm.mobile = ''
   editForm.email = ''
   editForm.departmentName = ''
+  editForm.departmentNodeId = ''
   editForm.status = 'enabled'
   editFormRef.value?.clearValidate()
 }
@@ -352,6 +382,22 @@ const buildDepartmentPathLookup = (tree: ClientDepartmentTreeNode[]) => {
   return pathMap
 }
 
+const buildDepartmentNodeLookup = (tree: ClientDepartmentTreeNode[]) => {
+  const lookup: Record<string, DepartmentNodeMeta> = {}
+  const walk = (nodes: ClientDepartmentTreeNode[], parentPath = '') => {
+    nodes.forEach((node) => {
+      const label = String(node.label ?? '').trim()
+      const nodeId = String(node.id ?? '').trim()
+      if (!label || !nodeId) return
+      const departmentName = parentPath ? `${parentPath}-${label}` : label
+      lookup[nodeId] = { departmentNodeId: nodeId, departmentName }
+      walk(Array.isArray(node.children) ? node.children : [], departmentName)
+    })
+  }
+  walk(tree)
+  return lookup
+}
+
 const resolveDepartmentPathDisplay = (value: unknown) => {
   const normalized = normalizeOptionalText(value)
   if (!normalized) {
@@ -368,11 +414,14 @@ const departmentTreeSelectOptions = computed(() => {
         if (!label) {
           return null
         }
-        const value = parentPath ? `${parentPath}-${label}` : label
-        const children = buildOptions(Array.isArray(node.children) ? node.children : [], value)
+        const fullPath = parentPath ? `${parentPath}-${label}` : label
+        const value = String(node.id ?? '').trim()
+        if (!value) return null
+        const children = buildOptions(Array.isArray(node.children) ? node.children : [], fullPath)
         return {
           value,
           label,
+          fullPath,
           ...(children.length > 0 ? { children } : {}),
         }
       })
@@ -386,6 +435,384 @@ const departmentTreeSelectProps = {
   label: 'label',
   children: 'children',
 } as const
+
+const departmentAccountBatchVisible = ref(false)
+const departmentAccountBatchSubmitting = ref(false)
+const departmentAccountBatchPreviewLoading = ref(false)
+const departmentAccountBatchNodeIds = ref<string[]>([])
+const departmentAccountBatchStatus = ref<ClientUserStatus>('enabled')
+const departmentAccountBatchPreview = ref<DepartmentAccountBatchPreviewResult | null>(null)
+const departmentAccountBatchCredentials = ref<DepartmentAccountCredential[]>([])
+const departmentAccountBatchCreatedCredentials = ref<DepartmentAccountCredential[]>([])
+const departmentAccountBatchUnconfirmedCredentials = ref<DepartmentAccountCredential[]>([])
+const departmentAccountBatchSkipped = ref<DepartmentAccountBatchSkippedDepartment[]>([])
+const departmentAccountBatchInitialSkipped = ref<DepartmentAccountBatchSkippedDepartment[]>([])
+const departmentAccountBatchRecovery = ref<DepartmentAccountBatchRecoveryResult | null>(null)
+let departmentAccountBatchCsvUrl: string | null = null
+let departmentAccountBatchEpoch = 0
+let departmentAccountBatchController: AbortController | null = null
+
+const selectedDepartmentAccountBatchNodes = computed(() => {
+  return departmentAccountBatchNodeIds.value
+    .map((nodeId) => departmentNodeLookup.value[nodeId])
+    .filter((item): item is DepartmentNodeMeta => Boolean(item))
+})
+const isDepartmentAccountBatchSelectionValid = computed(() => {
+  return (
+    departmentAccountBatchNodeIds.value.length >= 1 &&
+    departmentAccountBatchNodeIds.value.length <= 100 &&
+    selectedDepartmentAccountBatchNodes.value.length === departmentAccountBatchNodeIds.value.length
+  )
+})
+const hasDepartmentAccountBatchResults = computed(() => departmentAccountBatchCreatedCredentials.value.length > 0)
+const isEditingOrphanedDepartmentAccount = computed(() => {
+  return editForm.profileKind === 'department' && (!editForm.departmentNodeId || !departmentNodeLookup.value[editForm.departmentNodeId])
+})
+
+const getDepartmentAccountBatchOperationSnapshot = (): DepartmentAccountBatchOperationSnapshot => ({
+  epoch: departmentAccountBatchEpoch,
+  visible: departmentAccountBatchVisible.value,
+  departmentNodeIds: [...departmentAccountBatchNodeIds.value],
+})
+
+const isCurrentDepartmentAccountBatchOperation = (snapshot: DepartmentAccountBatchOperationSnapshot) => {
+  return isDepartmentAccountBatchOperationCurrent(snapshot, getDepartmentAccountBatchOperationSnapshot())
+}
+
+const invalidateDepartmentAccountBatchOperation = () => {
+  departmentAccountBatchEpoch += 1
+  departmentAccountBatchController?.abort()
+  departmentAccountBatchController = null
+  return departmentAccountBatchEpoch
+}
+
+const revokeDepartmentAccountBatchCsvUrl = () => {
+  if (departmentAccountBatchCsvUrl) {
+    URL.revokeObjectURL(departmentAccountBatchCsvUrl)
+    departmentAccountBatchCsvUrl = null
+  }
+}
+
+const clearDepartmentAccountBatchSensitiveState = () => {
+  invalidateDepartmentAccountBatchOperation()
+  revokeDepartmentAccountBatchCsvUrl()
+  departmentAccountBatchNodeIds.value = []
+  departmentAccountBatchStatus.value = 'enabled'
+  departmentAccountBatchPreview.value = null
+  departmentAccountBatchCredentials.value = []
+  departmentAccountBatchCreatedCredentials.value = []
+  departmentAccountBatchUnconfirmedCredentials.value = []
+  departmentAccountBatchSkipped.value = []
+  departmentAccountBatchInitialSkipped.value = []
+  departmentAccountBatchRecovery.value = null
+  departmentAccountBatchPreviewLoading.value = false
+  departmentAccountBatchSubmitting.value = false
+}
+
+const invalidateDepartmentAccountBatchPreview = () => {
+  invalidateDepartmentAccountBatchOperation()
+  departmentAccountBatchPreview.value = null
+  departmentAccountBatchCredentials.value = []
+  departmentAccountBatchCreatedCredentials.value = []
+  departmentAccountBatchUnconfirmedCredentials.value = []
+  departmentAccountBatchSkipped.value = []
+  departmentAccountBatchInitialSkipped.value = []
+  departmentAccountBatchRecovery.value = null
+  departmentAccountBatchPreviewLoading.value = false
+}
+
+const downloadDepartmentAccountCsv = (snapshot?: DepartmentAccountBatchOperationSnapshot) => {
+  if (snapshot && !isCurrentDepartmentAccountBatchOperation(snapshot)) {
+    return
+  }
+  if (departmentAccountBatchCreatedCredentials.value.length === 0) {
+    showAppWarning('当前没有可下载的新增账号凭据')
+    return
+  }
+  revokeDepartmentAccountBatchCsvUrl()
+  const csv = buildDepartmentAccountCsv(departmentAccountBatchCreatedCredentials.value)
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+  departmentAccountBatchCsvUrl = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = departmentAccountBatchCsvUrl
+  anchor.download = createDepartmentAccountCsvFilename()
+  anchor.style.display = 'none'
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  window.setTimeout(revokeDepartmentAccountBatchCsvUrl, 0)
+}
+
+const handleOpenDepartmentAccountBatch = () => {
+  if (!ensurePermission('users:create', '批量创建部门账号')) {
+    return
+  }
+  clearDepartmentAccountBatchSensitiveState()
+  departmentAccountBatchVisible.value = true
+  departmentAccountBatchEpoch += 1
+}
+
+const handleDepartmentAccountBatchModelValueUpdate = (visible: boolean) => {
+  if (!visible && departmentAccountBatchSubmitting.value) {
+    showAppWarning('批量创建或恢复核对进行中，暂不能关闭弹窗，以免丢失本次凭据')
+    return
+  }
+  departmentAccountBatchVisible.value = visible
+}
+
+const handleDepartmentAccountBatchSelectionChange = (nodeIds: string[]) => {
+  if (nodeIds.length > 100) {
+    departmentAccountBatchNodeIds.value = nodeIds.slice(0, 100)
+    showAppWarning('一次最多选择 100 个部门，已保留前 100 个选择')
+  }
+  invalidateDepartmentAccountBatchPreview()
+}
+
+const handlePreviewDepartmentAccountBatch = async () => {
+  if (!ensurePermission('users:create', '批量创建部门账号')) {
+    return
+  }
+  if (!isDepartmentAccountBatchSelectionValid.value) {
+    showAppWarning('请选择 1 至 100 个有效部门节点')
+    return
+  }
+  if (departmentOptionsLoading.value || departmentTree.value.length === 0) {
+    showAppWarning('暂无可用部门配置，请先在“部门配置”中维护部门')
+    return
+  }
+
+  const operationEpoch = invalidateDepartmentAccountBatchOperation()
+  const controller = new AbortController()
+  departmentAccountBatchController = controller
+  const snapshot: DepartmentAccountBatchOperationSnapshot = {
+    epoch: operationEpoch,
+    visible: departmentAccountBatchVisible.value,
+    departmentNodeIds: [...departmentAccountBatchNodeIds.value],
+  }
+  departmentAccountBatchPreviewLoading.value = true
+  try {
+    const preview = await previewDepartmentAccountBatch({ departmentNodeIds: snapshot.departmentNodeIds }, { signal: controller.signal })
+    if (!isCurrentDepartmentAccountBatchOperation(snapshot)) {
+      return
+    }
+    departmentAccountBatchPreview.value = preview
+    departmentAccountBatchCredentials.value = createDepartmentAccountCredentials(preview.creatable)
+    departmentAccountBatchInitialSkipped.value = preview.skipped
+    departmentAccountBatchSkipped.value = preview.skipped
+    departmentAccountBatchRecovery.value = null
+    if (preview.creatable.length === 0) {
+      showAppWarning('所选部门均已存在共享账号，已跳过且不会修改原账号状态或密码')
+    }
+  } catch (error) {
+    if (isCurrentDepartmentAccountBatchOperation(snapshot) && !controller.signal.aborted) {
+      showAppError(extractErrorMessage(error, '部门账号预检失败'))
+    }
+  } finally {
+    if (departmentAccountBatchController === controller) {
+      departmentAccountBatchController = null
+    }
+    if (isCurrentDepartmentAccountBatchOperation(snapshot)) {
+      departmentAccountBatchPreviewLoading.value = false
+    }
+  }
+}
+
+const applyDepartmentAccountBatchReconciliation = async (
+  confirmedCredentials: DepartmentAccountCredential[],
+  unconfirmedCredentials: DepartmentAccountCredential[],
+  skipped: DepartmentAccountBatchSkippedDepartment[],
+  snapshot: DepartmentAccountBatchOperationSnapshot,
+) => {
+  if (!isCurrentDepartmentAccountBatchOperation(snapshot)) {
+    return false
+  }
+  departmentAccountBatchCreatedCredentials.value = confirmedCredentials
+  departmentAccountBatchUnconfirmedCredentials.value = unconfirmedCredentials
+  departmentAccountBatchCredentials.value = unconfirmedCredentials
+  departmentAccountBatchSkipped.value = skipped
+  if (confirmedCredentials.length > 0) {
+    downloadDepartmentAccountCsv(snapshot)
+  }
+  void loadData()
+  return isCurrentDepartmentAccountBatchOperation(snapshot)
+}
+
+const reconcileDepartmentAccountBatchAfterTransportFailure = async (submissionSnapshot: DepartmentAccountBatchOperationSnapshot) => {
+  if (!isCurrentDepartmentAccountBatchOperation(submissionSnapshot)) {
+    return
+  }
+  const generatedCredentials = [...departmentAccountBatchCredentials.value]
+  const initialSkipped = [...departmentAccountBatchInitialSkipped.value]
+  if (submissionSnapshot.departmentNodeIds.length === 0 || generatedCredentials.length === 0) return
+
+  const operationEpoch = invalidateDepartmentAccountBatchOperation()
+  const controller = new AbortController()
+  departmentAccountBatchController = controller
+  const snapshot: DepartmentAccountBatchOperationSnapshot = {
+    epoch: operationEpoch,
+    visible: departmentAccountBatchVisible.value,
+    departmentNodeIds: [...submissionSnapshot.departmentNodeIds],
+  }
+  departmentAccountBatchPreviewLoading.value = true
+  try {
+    const refreshedPreview = await previewDepartmentAccountBatch({ departmentNodeIds: snapshot.departmentNodeIds }, { signal: controller.signal })
+    if (!isCurrentDepartmentAccountBatchOperation(snapshot)) {
+      return
+    }
+    const generatedNodeIds = new Set(generatedCredentials.map((item) => item.departmentNodeId))
+    const scopedPreview = {
+      creatable: refreshedPreview.creatable.filter((item) => generatedNodeIds.has(item.departmentNodeId)),
+      skipped: refreshedPreview.skipped.filter((item) => generatedNodeIds.has(item.departmentNodeId)),
+    }
+    const recovery = reconcileDepartmentAccountBatch(scopedPreview, generatedCredentials)
+    departmentAccountBatchPreview.value = refreshedPreview
+    departmentAccountBatchSkipped.value = mergeDepartmentAccountBatchSkipped(initialSkipped, refreshedPreview.skipped)
+    departmentAccountBatchRecovery.value = recovery
+    if (recovery.state === 'completed') {
+      const applied = await applyDepartmentAccountBatchReconciliation(
+        recovery.completed,
+        [],
+        mergeDepartmentAccountBatchSkipped(initialSkipped, refreshedPreview.skipped),
+        snapshot,
+      )
+      if (applied) {
+        showAppSuccess(`已确认 ${recovery.completed.length} 个部门共享账号，凭据已自动下载`)
+      }
+      return
+    }
+    if (recovery.state === 'not_committed') {
+      departmentAccountBatchCredentials.value = recovery.pending
+      departmentAccountBatchUnconfirmedCredentials.value = []
+      showAppWarning('已重新预检：本次请求未提交，可使用同一组凭据安全重试')
+      return
+    }
+    const applied = await applyDepartmentAccountBatchReconciliation(
+      recovery.completed,
+      recovery.unconfirmed,
+      mergeDepartmentAccountBatchSkipped(initialSkipped, refreshedPreview.skipped),
+      snapshot,
+    )
+    if (applied) {
+      showAppWarning('预检结果存在混合状态、账号不一致或路径无效：仅已确认凭据已下载，未确认项需人工核对')
+    }
+  } catch (error) {
+    if (isCurrentDepartmentAccountBatchOperation(snapshot) && !controller.signal.aborted) {
+      departmentAccountBatchRecovery.value = {
+        state: 'conflict',
+        completed: [],
+        pending: [],
+        unconfirmed: generatedCredentials,
+        reason: '网络异常后恢复预检失败，无法确认本次凭据是否已生效，需人工核对',
+      }
+      departmentAccountBatchUnconfirmedCredentials.value = generatedCredentials
+      departmentAccountBatchCredentials.value = generatedCredentials
+      showAppWarning(`网络异常后无法完成恢复预检：${extractErrorMessage(error, '请人工核对')}`)
+    }
+  } finally {
+    if (departmentAccountBatchController === controller) {
+      departmentAccountBatchController = null
+    }
+    if (isCurrentDepartmentAccountBatchOperation(snapshot)) {
+      departmentAccountBatchPreviewLoading.value = false
+    }
+  }
+}
+
+const handleSubmitDepartmentAccountBatch = async () => {
+  if (!ensurePermission('users:create', '批量创建部门账号')) {
+    return
+  }
+  if (!departmentAccountBatchPreview.value) {
+    await handlePreviewDepartmentAccountBatch()
+    return
+  }
+  if (departmentAccountBatchSubmitting.value) {
+    return
+  }
+  if (departmentAccountBatchRecovery.value?.state === 'conflict') {
+    showAppWarning('当前结果需要人工核对，不能自动重试；请关闭弹窗清除凭据后重新预检')
+    return
+  }
+  if (departmentAccountBatchCredentials.value.length === 0) {
+    showAppWarning('没有待创建账号；所选部门均已跳过')
+    return
+  }
+
+  const pendingCredentials = [...departmentAccountBatchCredentials.value]
+  const initialSkipped = [...departmentAccountBatchInitialSkipped.value]
+  const operationEpoch = invalidateDepartmentAccountBatchOperation()
+  const snapshot: DepartmentAccountBatchOperationSnapshot = {
+    epoch: operationEpoch,
+    visible: departmentAccountBatchVisible.value,
+    departmentNodeIds: [...departmentAccountBatchNodeIds.value],
+  }
+  departmentAccountBatchSubmitting.value = true
+  try {
+    const result: CreateDepartmentAccountBatchResult = await createDepartmentAccountBatch({
+      status: departmentAccountBatchStatus.value,
+      items: pendingCredentials.map((item) => ({
+        departmentNodeId: item.departmentNodeId,
+        account: item.account,
+        initialPassword: item.initialPassword,
+      })),
+    })
+    if (!isCurrentDepartmentAccountBatchOperation(snapshot)) {
+      return
+    }
+    const reconciliation = reconcileDepartmentAccountBatchResult(result, pendingCredentials)
+    const mergedSkipped = mergeDepartmentAccountBatchSkipped(initialSkipped, result.skipped)
+    departmentAccountBatchRecovery.value =
+      reconciliation.state === 'conflict'
+        ? {
+            state: 'conflict',
+            completed: reconciliation.confirmed,
+            pending: [],
+            unconfirmed: reconciliation.unconfirmed,
+            reason: reconciliation.reason,
+          }
+        : null
+    const applied = await applyDepartmentAccountBatchReconciliation(
+      reconciliation.confirmed,
+      reconciliation.unconfirmed,
+      mergedSkipped,
+      snapshot,
+    )
+    if (!applied) {
+      return
+    }
+    if (reconciliation.state === 'confirmed') {
+      showAppSuccess(`已确认 ${reconciliation.confirmed.length} 个部门共享账号，凭据已自动下载`)
+      return
+    }
+    showAppWarning('服务端回包存在待核对项：仅已确认凭据已下载，未确认凭据不得自动重试')
+  } catch (error) {
+    const normalizedError = normalizeRequestError(error, '批量创建部门账号失败')
+    const isRecoverableTransportFailure =
+      !normalizedError.status ||
+      [408, 502, 503, 504].includes(normalizedError.status) ||
+      (normalizedError.status >= 500 && /超时|timeout|gateway|网关/i.test(normalizedError.message))
+    if (isRecoverableTransportFailure && isCurrentDepartmentAccountBatchOperation(snapshot)) {
+      showAppWarning('批量请求网络异常或超时，正在按原部门和账号重新预检恢复结果')
+      await reconcileDepartmentAccountBatchAfterTransportFailure(snapshot)
+      if (departmentAccountBatchVisible.value) {
+        departmentAccountBatchSubmitting.value = false
+      }
+      return
+    }
+    if (!isCurrentDepartmentAccountBatchOperation(snapshot)) {
+      return
+    }
+    invalidateDepartmentAccountBatchPreview()
+    departmentAccountBatchSubmitting.value = false
+    void showCriticalErrorDialog(error, {
+      title: '批量创建部门账号失败',
+      fallback: '批量创建部门账号失败',
+      operation: '批量创建部门账号',
+    })
+  } finally {
+    departmentAccountBatchSubmitting.value = false
+  }
+}
 
 const buildQueryParams = (): ClientUserListQuery => {
   const params: ClientUserListQuery = {
@@ -442,10 +869,12 @@ const loadDepartmentOptions = async () => {
     departmentOptions.value = result.options
     departmentTree.value = result.tree
     departmentPathLookup.value = buildDepartmentPathLookup(result.tree)
+    departmentNodeLookup.value = buildDepartmentNodeLookup(result.tree)
   } catch (error) {
     departmentOptions.value = []
     departmentTree.value = []
     departmentPathLookup.value = {}
+    departmentNodeLookup.value = {}
     showAppError(extractErrorMessage(error, '加载部门配置失败'))
   } finally {
     departmentOptionsLoading.value = false
@@ -491,6 +920,7 @@ const handleOpenEdit = (row: ClientUserManageProfile) => {
   editForm.mobile = row.mobile || ''
   editForm.email = row.email || ''
   editForm.departmentName = resolveDepartmentPathDisplay(row.departmentName)
+  editForm.departmentNodeId = row.departmentNodeId || ''
   editForm.status = row.status
 }
 
@@ -517,15 +947,20 @@ const handleSubmitCreate = async () => {
   const normalizedMobile = createForm.mobile.trim()
   const normalizedEmail = createForm.email.trim().toLowerCase()
   const normalizedDepartmentName = normalizeOptionalText(createForm.departmentName)
+  const normalizedDepartmentNodeId = normalizeOptionalText(createForm.departmentNodeId)
   if (normalizedProfileKind === 'personal' && !normalizedMobile && !normalizedEmail) {
     showAppWarning('手机号和邮箱至少保留一项')
     return
   }
-  if (normalizedProfileKind === 'department' && !normalizedDepartmentName) {
+  if (normalizedProfileKind === 'department' && !normalizedDepartmentNodeId) {
     showAppWarning('请选择部门共享账号所属部门')
     return
   }
-  if (normalizedDepartmentName && !departmentOptions.value.includes(normalizedDepartmentName)) {
+  if (normalizedProfileKind === 'department' && !departmentNodeLookup.value[normalizedDepartmentNodeId]) {
+    showAppWarning('请选择当前部门树中的有效部门节点')
+    return
+  }
+  if (normalizedProfileKind === 'personal' && normalizedDepartmentName && !departmentOptions.value.includes(normalizedDepartmentName)) {
     showAppWarning('请选择系统配置中的部门选项')
     return
   }
@@ -538,7 +973,8 @@ const handleSubmitCreate = async () => {
       staffNo: normalizedStaffNo || undefined,
       mobile: normalizedMobile || undefined,
       email: normalizedEmail || undefined,
-      departmentName: normalizedDepartmentName || undefined,
+      departmentName: normalizedProfileKind === 'personal' ? normalizedDepartmentName || undefined : undefined,
+      departmentNodeId: normalizedProfileKind === 'department' ? normalizedDepartmentNodeId : undefined,
       password: createForm.password,
       status: createForm.status,
     }
@@ -576,7 +1012,12 @@ const handleSubmitEdit = async () => {
   const normalizedMobile = editForm.mobile.trim()
   const normalizedEmail = editForm.email.trim().toLowerCase()
   const normalizedDepartmentName = normalizeOptionalText(editForm.departmentName)
-  if (normalizedDepartmentName && !departmentOptions.value.includes(normalizedDepartmentName)) {
+  const normalizedDepartmentNodeId = normalizeOptionalText(editForm.departmentNodeId)
+  if (editForm.profileKind === 'department' && !departmentNodeLookup.value[normalizedDepartmentNodeId]) {
+    showAppWarning('该部门共享账号的原绑定已失效，请选择当前部门树中的有效节点后再保存')
+    return
+  }
+  if (editForm.profileKind !== 'department' && normalizedDepartmentName && !departmentOptions.value.includes(normalizedDepartmentName)) {
     showAppWarning('请选择系统配置中的部门选项')
     return
   }
@@ -587,7 +1028,8 @@ const handleSubmitEdit = async () => {
       username: normalizedUsername,
       mobile: normalizedMobile || undefined,
       email: normalizedEmail || undefined,
-      departmentName: normalizedDepartmentName || undefined,
+      departmentName: editForm.profileKind === 'department' ? undefined : normalizedDepartmentName || undefined,
+      departmentNodeId: editForm.profileKind === 'department' ? normalizedDepartmentNodeId : undefined,
       status: editForm.status,
     }
     await updateClientUser(editForm.id, payload)
@@ -720,16 +1162,60 @@ watch(
     if (profileKind === 'teacher') {
       createForm.username = ''
       createForm.departmentName = ''
+      createForm.departmentNodeId = ''
     }
     if (profileKind === 'personal') {
       createForm.staffNo = ''
     }
     if (profileKind === 'department') {
       createForm.staffNo = ''
+      createForm.departmentName = ''
     }
     createFormRef.value?.clearValidate()
   },
 )
+
+watch(
+  () => departmentAccountBatchNodeIds.value,
+  (nodeIds) => {
+    if (nodeIds.length > 100) {
+      departmentAccountBatchNodeIds.value = nodeIds.slice(0, 100)
+      showAppWarning('一次最多选择 100 个部门，已保留前 100 个选择')
+      return
+    }
+    invalidateDepartmentAccountBatchPreview()
+  },
+)
+
+watch(departmentAccountBatchStatus, () => {
+  invalidateDepartmentAccountBatchPreview()
+})
+
+watch(departmentAccountBatchVisible, (visible) => {
+  if (!visible) {
+    clearDepartmentAccountBatchSensitiveState()
+  }
+})
+
+onBeforeRouteLeave(() => {
+  if (departmentAccountBatchSubmitting.value) {
+    showAppWarning('请等待创建/核对完成后再离开')
+    return false
+  }
+  departmentAccountBatchVisible.value = false
+  clearDepartmentAccountBatchSensitiveState()
+  return true
+})
+
+onDeactivated(() => {
+  departmentAccountBatchVisible.value = false
+  clearDepartmentAccountBatchSensitiveState()
+})
+
+onBeforeUnmount(() => {
+  departmentAccountBatchVisible.value = false
+  clearDepartmentAccountBatchSensitiveState()
+})
 </script>
 
 <template>
@@ -790,6 +1276,9 @@ watch(
             <el-button :class="isPhone ? 'w-full' : ''" icon="Refresh" @click="handleReset">重置</el-button>
             <el-button v-if="canCreateUser" :class="isPhone ? 'w-full' : ''" type="primary" icon="Plus" @click="handleOpenCreate">
               新增用户
+            </el-button>
+            <el-button v-if="canCreateUser" :class="isPhone ? 'w-full' : ''" icon="UserFilled" @click="handleOpenDepartmentAccountBatch">
+              批量创建部门账号
             </el-button>
           </div>
         </template>
@@ -968,10 +1457,10 @@ watch(
             <el-input v-model.trim="createForm.email" :placeholder="createContactRequired ? '请输入邮箱' : '可选，用于登录或找回密码'" />
           </el-form-item>
         </div>
-        <el-form-item v-if="!isCreateTeacherProfile" :label="createDepartmentRequired ? '所属部门' : '所属部门（选填）'" prop="departmentName">
+        <el-form-item v-if="isCreateDepartmentProfile" label="所属部门" prop="departmentNodeId">
           <el-tree-select
-            v-model="createForm.departmentName"
-            :placeholder="createDepartmentRequired ? '请选择部门共享账号所属部门' : '请选择所属部门（选填）'"
+            v-model="createForm.departmentNodeId"
+            placeholder="请选择部门共享账号所属部门"
             class="w-full"
             clearable
             filterable
@@ -985,6 +1474,18 @@ watch(
           <p v-if="departmentOptions.length === 0 && !departmentOptionsLoading" class="mt-2 text-xs text-amber-600">
             暂无可选部门，请先在“部门配置”中维护部门。
           </p>
+        </el-form-item>
+        <el-form-item v-else-if="!isCreateTeacherProfile" label="所属部门（选填）" prop="departmentName">
+          <el-select
+            v-model="createForm.departmentName"
+            placeholder="请选择所属部门（选填）"
+            class="w-full"
+            clearable
+            filterable
+            :loading="departmentOptionsLoading"
+          >
+            <el-option v-for="department in departmentOptions" :key="department" :label="department" :value="department" />
+          </el-select>
         </el-form-item>
         <div class="grid gap-4 md:grid-cols-2">
           <el-form-item label="登录密码" prop="password">
@@ -1042,7 +1543,31 @@ watch(
             <el-input v-model.trim="editForm.email" placeholder="请输入邮箱" />
           </el-form-item>
         </div>
-        <el-form-item label="所属部门" prop="departmentName">
+        <el-alert
+          v-if="isEditingOrphanedDepartmentAccount"
+          class="mb-4"
+          title="当前部门绑定已失效"
+          type="warning"
+          :closable="false"
+          show-icon
+          description="该共享账号不能沿用旧部门路径保存，请选择当前部门树中的有效节点。"
+        />
+        <el-form-item v-if="editForm.profileKind === 'department'" label="所属部门" prop="departmentNodeId">
+          <el-tree-select
+            v-model="editForm.departmentNodeId"
+            placeholder="请选择当前有效部门"
+            class="w-full"
+            clearable
+            filterable
+            check-strictly
+            node-key="value"
+            :data="departmentTreeSelectOptions"
+            :props="departmentTreeSelectProps"
+            :loading="departmentOptionsLoading"
+            :disabled="departmentOptionsLoading || departmentOptions.length === 0"
+          />
+        </el-form-item>
+        <el-form-item v-else label="所属部门" prop="departmentName">
           <el-select
             v-model="editForm.departmentName"
             placeholder="请选择所属部门（选填）"
@@ -1101,6 +1626,155 @@ watch(
           />
         </el-form-item>
       </el-form>
+    </BizCrudDialogShell>
+
+    <BizCrudDialogShell
+      :model-value="departmentAccountBatchVisible"
+      title="批量创建部门账号"
+      height-mode="scroll"
+      phone-width="96%"
+      tablet-width="720px"
+      desktop-width="820px"
+      :confirm-loading="departmentAccountBatchSubmitting || departmentAccountBatchPreviewLoading"
+      :confirm-text="departmentAccountBatchPreview ? '确认创建待创建账号' : '开始预检'"
+      @update:model-value="handleDepartmentAccountBatchModelValueUpdate"
+      @confirm="handleSubmitDepartmentAccountBatch"
+      @closed="clearDepartmentAccountBatchSensitiveState"
+    >
+      <div class="space-y-4">
+        <el-alert type="info" :closable="false" show-icon>
+          <template #title>先预检，再创建</template>
+          已存在的部门共享账号无论启用或停用都会跳过，不会重置密码或改变状态。创建成功后凭据仅在当前弹窗展示一次并自动下载。
+        </el-alert>
+
+        <template v-if="!departmentAccountBatchPreview">
+          <el-form label-position="top">
+            <el-form-item label="选择部门（1 至 100 个）">
+              <el-tree-select
+                v-model="departmentAccountBatchNodeIds"
+                class="w-full"
+                placeholder="请选择需要创建共享账号的精确部门节点"
+                clearable
+                filterable
+                multiple
+                show-checkbox
+                check-strictly
+                node-key="value"
+                :data="departmentTreeSelectOptions"
+                :props="departmentTreeSelectProps"
+                :loading="departmentOptionsLoading"
+                :disabled="departmentOptionsLoading || departmentTree.length === 0"
+                @change="handleDepartmentAccountBatchSelectionChange"
+              />
+              <p v-if="departmentTree.length === 0 && !departmentOptionsLoading" class="mt-2 text-xs text-amber-600">
+                暂无部门配置，请先在“部门配置”中维护部门树后再批量开户。
+              </p>
+            </el-form-item>
+            <div class="rounded-xl bg-slate-50 px-3 py-2 text-sm text-slate-600 dark:bg-white/5 dark:text-slate-300">
+              已选 {{ departmentAccountBatchNodeIds.length }} / 100 个部门；父节点不会自动包含下级。
+              <ul v-if="selectedDepartmentAccountBatchNodes.length" class="mt-2 list-disc space-y-1 pl-5 break-all">
+                <li v-for="department in selectedDepartmentAccountBatchNodes" :key="department.departmentNodeId">{{ department.departmentName }}</li>
+              </ul>
+            </div>
+            <el-form-item class="mt-4" label="创建后的账号状态">
+              <el-radio-group v-model="departmentAccountBatchStatus">
+                <el-radio value="enabled">启用</el-radio>
+                <el-radio value="disabled">停用</el-radio>
+              </el-radio-group>
+            </el-form-item>
+          </el-form>
+        </template>
+
+        <template v-else>
+          <el-alert
+            v-if="departmentAccountBatchRecovery"
+            :type="departmentAccountBatchRecovery.state === 'completed' ? 'success' : departmentAccountBatchRecovery.state === 'not_committed' ? 'warning' : 'error'"
+            :closable="false"
+            show-icon
+            :title="departmentAccountBatchRecovery.reason"
+          />
+
+          <div class="grid gap-3 sm:grid-cols-2">
+            <div class="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900 dark:border-emerald-400/30 dark:bg-emerald-500/10 dark:text-emerald-100">
+              <div class="font-semibold">待创建：{{ departmentAccountBatchPreview.creatable.length }}</div>
+              <div class="mt-1">将生成独立账号和强密码，并在单次事务内创建。</div>
+            </div>
+            <div class="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-400/30 dark:bg-amber-500/10 dark:text-amber-100">
+              <div class="font-semibold">已存在并跳过：{{ departmentAccountBatchSkipped.length }}</div>
+              <div class="mt-1">跳过不影响已有账号的状态和密码。</div>
+            </div>
+          </div>
+
+          <div v-if="departmentAccountBatchPreview.creatable.length" class="rounded-xl border border-slate-200 p-3 dark:border-white/10">
+            <div class="mb-2 text-sm font-semibold text-slate-800 dark:text-slate-100">待创建部门</div>
+            <ul class="space-y-1 text-sm text-slate-600 dark:text-slate-300">
+              <li v-for="department in departmentAccountBatchPreview.creatable" :key="department.departmentNodeId" class="break-all">
+                {{ department.departmentName }}
+              </li>
+            </ul>
+          </div>
+
+          <div v-if="departmentAccountBatchSkipped.length" class="rounded-xl border border-slate-200 p-3 dark:border-white/10">
+            <div class="mb-2 text-sm font-semibold text-slate-800 dark:text-slate-100">已存在并跳过</div>
+            <el-table :data="departmentAccountBatchSkipped" size="small" max-height="180" table-layout="auto">
+              <el-table-column prop="departmentName" label="部门路径" min-width="220" show-overflow-tooltip />
+              <el-table-column prop="account" label="现有账号" min-width="160" />
+              <el-table-column label="状态" width="100">
+                <template #default="{ row }">{{ row.status === 'enabled' ? '启用' : '停用' }}</template>
+              </el-table-column>
+            </el-table>
+          </div>
+
+          <div v-if="hasDepartmentAccountBatchResults" class="rounded-xl border border-emerald-200 p-3 dark:border-emerald-400/30">
+            <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+              <div class="text-sm font-semibold text-emerald-800 dark:text-emerald-100">已确认凭据（关闭弹窗后不可恢复）</div>
+              <el-button size="small" type="primary" plain @click="downloadDepartmentAccountCsv">重新下载 CSV</el-button>
+            </div>
+            <div class="max-h-72 overflow-auto" aria-label="新增部门共享账号凭据列表">
+              <el-table :data="departmentAccountBatchCreatedCredentials" size="small" table-layout="auto">
+                <el-table-column prop="departmentName" label="部门路径" min-width="220" show-overflow-tooltip />
+                <el-table-column prop="account" label="登录账号" min-width="160" />
+                <el-table-column prop="initialPassword" label="初始密码（可手动复制）" min-width="220" show-overflow-tooltip />
+              </el-table>
+            </div>
+          </div>
+
+          <div v-if="departmentAccountBatchUnconfirmedCredentials.length" class="rounded-xl border border-rose-200 p-3 dark:border-rose-400/30">
+            <div class="mb-2 text-sm font-semibold text-rose-800 dark:text-rose-100">待人工核对（密码未确认有效，不会下载）</div>
+            <div class="max-h-56 overflow-auto" aria-label="待人工核对的部门共享账号凭据列表">
+              <el-table :data="departmentAccountBatchUnconfirmedCredentials" size="small" table-layout="auto">
+                <el-table-column prop="departmentName" label="部门路径" min-width="220" show-overflow-tooltip />
+                <el-table-column prop="account" label="登录账号" min-width="160" />
+                <el-table-column prop="initialPassword" label="待核对初始密码（可手动复制）" min-width="240" show-overflow-tooltip />
+              </el-table>
+            </div>
+          </div>
+        </template>
+      </div>
+
+      <template #footer="{ close }">
+        <span class="flex flex-wrap justify-end gap-2">
+          <el-button @click="close">关闭并清除凭据</el-button>
+          <el-button v-if="hasDepartmentAccountBatchResults" type="primary" plain @click="downloadDepartmentAccountCsv">重新下载凭据 CSV</el-button>
+          <el-button
+            v-if="departmentAccountBatchPreview && departmentAccountBatchCredentials.length > 0 && !hasDepartmentAccountBatchResults && departmentAccountBatchRecovery?.state !== 'conflict'"
+            type="primary"
+            :loading="departmentAccountBatchSubmitting || departmentAccountBatchPreviewLoading"
+            @click="handleSubmitDepartmentAccountBatch"
+          >
+            {{ departmentAccountBatchRecovery?.state === 'not_committed' ? '使用相同凭据重试' : '确认创建待创建账号' }}
+          </el-button>
+          <el-button
+            v-else-if="!departmentAccountBatchPreview"
+            type="primary"
+            :loading="departmentAccountBatchPreviewLoading"
+            :disabled="!isDepartmentAccountBatchSelectionValid"
+            @click="handlePreviewDepartmentAccountBatch"
+          >
+            开始预检
+          </el-button>
+        </span>
+      </template>
     </BizCrudDialogShell>
   </PageContainer>
 </template>

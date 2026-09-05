@@ -78,7 +78,7 @@ export class ClientFeedbackConversation {
   @Column({ name: 'client_account', type: 'varchar', length: 128, comment: '客户端账号快照' })
   clientAccount!: string
 
-  @Column({ name: 'department_name_snapshot', type: 'varchar', length: 128, default: '', comment: '客户端部门快照' })
+  @Column({ name: 'department_name_snapshot', type: 'varchar', length: 271, default: '', comment: '客户端部门完整路径快照' })
   departmentNameSnapshot!: string
 
   @Column({ name: 'client_account_type', type: 'varchar', length: 16, default: 'personal', comment: '客户端账号类型快照' })

@@ -20,6 +20,7 @@ import { ClientUserSession } from '../entities/client-user-session.entity.js'
 import { ClientMobileSession } from '../entities/client-mobile-session.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
+import { isUniqueConstraintError } from '../utils/database-errors.js'
 import { assertClientPasswordPolicy, hashPassword } from '../utils/password.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
@@ -48,6 +49,7 @@ export interface CreateClientUserInput {
   mobile?: string
   email?: string
   departmentName?: string
+  departmentNodeId?: string
   staffNo?: string
   password: string
   status: ClientUserStatus
@@ -58,6 +60,7 @@ export interface UpdateClientUserInput {
   mobile?: string
   email?: string
   departmentName?: string
+  departmentNodeId?: string
   status: ClientUserStatus
 }
 
@@ -69,6 +72,7 @@ export interface ClientUserManageSafeProfile {
   email: string
   realName: string
   departmentName: string
+  departmentNodeId: string | null
   accountType: ClientUserAccountType
   profileKind: ClientUserProfileKind
   staffNo: string | null
@@ -77,6 +81,35 @@ export interface ClientUserManageSafeProfile {
   lastLoginAt: Date | null
   createdAt: Date
   updatedAt: Date
+}
+
+export interface DepartmentAccountPreviewInput {
+  departmentNodeIds: string[]
+}
+
+export interface DepartmentAccountBatchInput {
+  status: ClientUserStatus
+  items: Array<{
+    departmentNodeId: string
+    account: string
+    initialPassword: string
+  }>
+}
+
+export interface DepartmentAccountBatchCreatedItem {
+  id: string
+  departmentNodeId: string
+  departmentName: string
+  account: string
+  status: ClientUserStatus
+}
+
+export interface DepartmentAccountBatchSkippedItem {
+  id: string
+  departmentNodeId: string
+  departmentName: string
+  account: string
+  status: ClientUserStatus
 }
 
 export const CLIENT_USER_PROFILE_KINDS = ['personal', 'teacher', 'department'] as const
@@ -104,6 +137,7 @@ const sanitizeClientUserProfile = (user: ClientUser): ClientUserManageSafeProfil
     email: user.email ?? '',
     realName: normalizedUsername,
     departmentName: user.departmentName ?? '',
+    departmentNodeId: user.departmentNodeId ?? null,
     accountType: user.accountType,
     profileKind: deriveClientUserProfileKind(user),
     staffNo: user.staffNo ?? null,
@@ -165,6 +199,225 @@ export class ClientUserManageService {
     throw new BizError('部门共享账号编号生成失败，请重试', 500)
   }
 
+  private normalizeDepartmentAccountNo(value: string) {
+    const account = value.trim()
+    if (!/^DEPT-[A-F0-9]{10}$/.test(account)) {
+      throw new BizError('部门共享账号编号格式非法', 400)
+    }
+    return account
+  }
+
+  private async assertDepartmentNodeUnbound(departmentNodeId: string, manager: EntityManager, excludedUserId?: string) {
+    const existing = await manager.getRepository(ClientUser)
+      .createQueryBuilder('user')
+      .where('user.departmentNodeId = :departmentNodeId', { departmentNodeId })
+      .getOne()
+    if (existing && existing.id !== excludedUserId) {
+      throw new BizError('该部门已存在共享账号，不能重复创建或绑定', 409)
+    }
+  }
+
+  private async findClientUserForUpdate(id: string, manager: EntityManager) {
+    const query = manager.getRepository(ClientUser)
+      .createQueryBuilder('user')
+      .where('user.id = :id', { id })
+    if (manager.connection.options.type === 'mysql') {
+      query.setLock('pessimistic_write')
+    }
+    return query.getOne()
+  }
+
+  /** 批量最多 100 项时按 4 路有界并发预生成密码哈希，避免把昂贵 scrypt 留在数据库事务内。 */
+  private async hashDepartmentAccountPasswords(items: Array<{ initialPassword: string }>) {
+    const hashes: string[] = []
+    const concurrency = 4
+    for (let offset = 0; offset < items.length; offset += concurrency) {
+      const batch = items.slice(offset, offset + concurrency)
+      const batchHashes = await Promise.all(batch.map((item) => hashPassword(item.initialPassword)))
+      hashes.push(...batchHashes)
+    }
+    return hashes
+  }
+
+  private async resolveDepartmentAccountNodes(departmentNodeIds: string[]) {
+    if (departmentNodeIds.length < 1 || departmentNodeIds.length > 100) {
+      throw new BizError('一次最多可处理 100 个部门节点', 400)
+    }
+    const normalizedIds = departmentNodeIds.map((item) => item.trim())
+    if (normalizedIds.some((item) => !item)) {
+      throw new BizError('部门节点ID不能为空', 400)
+    }
+    if (new Set(normalizedIds).size !== normalizedIds.length) {
+      throw new BizError('部门节点不能重复', 400)
+    }
+    return Promise.all(normalizedIds.map((departmentNodeId) => systemConfigService.resolveClientDepartmentNode(departmentNodeId)))
+  }
+
+  async previewDepartmentAccounts(input: DepartmentAccountPreviewInput): Promise<{
+    creatable: Array<{ departmentNodeId: string; departmentName: string }>
+    skipped: DepartmentAccountBatchSkippedItem[]
+  }> {
+    const nodes = await this.resolveDepartmentAccountNodes(input.departmentNodeIds)
+    const nodeIds = nodes.map((node) => node.departmentNodeId)
+    const existingUsers = nodeIds.length === 0 ? [] : await this.userRepo
+      .createQueryBuilder('user')
+      .where('user.departmentNodeId IN (:...nodeIds)', { nodeIds })
+      .getMany()
+    const existingByNodeId = new Map(existingUsers.map((user) => [user.departmentNodeId, user]))
+    const creatable: Array<{ departmentNodeId: string; departmentName: string }> = []
+    const skipped: DepartmentAccountBatchSkippedItem[] = []
+    for (const node of nodes) {
+      const existing = existingByNodeId.get(node.departmentNodeId)
+      if (!existing) {
+        creatable.push({ departmentNodeId: node.departmentNodeId, departmentName: node.departmentName })
+        continue
+      }
+      skipped.push({
+        id: existing.id,
+        departmentNodeId: node.departmentNodeId,
+        departmentName: node.departmentName,
+        account: existing.staffNo ?? existing.realName,
+        status: existing.status,
+      })
+    }
+    return { creatable, skipped }
+  }
+
+  async createDepartmentAccountsBatch(
+    input: DepartmentAccountBatchInput,
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ): Promise<{ created: DepartmentAccountBatchCreatedItem[]; skipped: DepartmentAccountBatchSkippedItem[] }> {
+    if (!CLIENT_USER_STATUSES.includes(input.status)) {
+      throw new BizError('客户端用户状态非法', 400)
+    }
+    if (input.items.length < 1 || input.items.length > 100) {
+      throw new BizError('一次最多可创建 100 个部门共享账号', 400)
+    }
+    const requestedDepartmentNodeIds = input.items.map((item) => item.departmentNodeId.trim())
+    if (requestedDepartmentNodeIds.some((departmentNodeId) => !departmentNodeId)) {
+      throw new BizError('部门节点ID不能为空', 400)
+    }
+    if (new Set(requestedDepartmentNodeIds).size !== requestedDepartmentNodeIds.length) {
+      throw new BizError('部门节点不能重复', 400)
+    }
+    const passwordCheckedItems = input.items.map((item, index) => ({
+      departmentNodeId: requestedDepartmentNodeIds[index]!,
+      account: this.normalizeDepartmentAccountNo(item.account),
+      initialPassword: assertClientPasswordPolicy(item.initialPassword, '初始密码'),
+    }))
+    const passwordHashes = await this.hashDepartmentAccountPasswords(passwordCheckedItems)
+    if (new Set(passwordCheckedItems.map((item) => item.account)).size !== passwordCheckedItems.length) {
+      throw new BizError('部门共享账号编号不能重复', 400)
+    }
+
+    try {
+      return await runInTransaction(async (manager) => {
+        const userRepo = manager.getRepository(ClientUser)
+        const latestDepartmentConfig = await systemConfigService.getClientDepartmentConfigs(manager, { lockForUpdate: true })
+        const normalizedItems = passwordCheckedItems.map((item, index) => {
+          const resolved = systemConfigService.resolveClientDepartmentNode(item.departmentNodeId, manager, latestDepartmentConfig)
+          return { item, index, resolved }
+        })
+        const resolvedItems = await Promise.all(normalizedItems.map(async ({ item, index, resolved }) => {
+          const department = await resolved
+          return {
+            departmentNodeId: department.departmentNodeId,
+            departmentName: department.departmentName,
+            account: item.account,
+            passwordHash: passwordHashes[index]!,
+          }
+        }))
+        const nodeIds = resolvedItems.map((item) => item.departmentNodeId)
+        const existingUsersQuery = userRepo
+          .createQueryBuilder('user')
+          .where('user.departmentNodeId IN (:...nodeIds)', { nodeIds })
+        if (manager.connection.options.type === 'mysql') {
+          existingUsersQuery.setLock('pessimistic_write')
+        }
+        const existingUsers = await existingUsersQuery.getMany()
+        const existingByNodeId = new Map(existingUsers.map((user) => [user.departmentNodeId, user]))
+        const created: DepartmentAccountBatchCreatedItem[] = []
+        const skipped: DepartmentAccountBatchSkippedItem[] = []
+
+        for (const item of resolvedItems) {
+          const existing = existingByNodeId.get(item.departmentNodeId)
+          if (existing) {
+            skipped.push({
+              id: existing.id,
+              departmentNodeId: item.departmentNodeId,
+              departmentName: item.departmentName,
+              account: existing.staffNo ?? existing.realName,
+              status: existing.status,
+            })
+            continue
+          }
+          const duplicatedAccount = await this.findUserByAnyIdentifier(item.account, manager)
+          if (duplicatedAccount) {
+            throw new BizError('该账号编号已被其他客户端用户使用', 409)
+          }
+          const savedUser = await userRepo.save(userRepo.create({
+            realName: item.account,
+            mobile: null,
+            email: null,
+            departmentName: item.departmentName,
+            departmentNodeId: item.departmentNodeId,
+            accountType: 'department',
+            staffNo: item.account,
+            staffVerified: true,
+            status: input.status,
+            passwordHash: item.passwordHash,
+            lastLoginAt: null,
+          }))
+          const createdItem: DepartmentAccountBatchCreatedItem = {
+            id: savedUser.id,
+            departmentNodeId: item.departmentNodeId,
+            departmentName: item.departmentName,
+            account: item.account,
+            status: savedUser.status,
+          }
+          created.push(createdItem)
+          await auditService.record({
+            actionType: 'client_user.create',
+            actionLabel: '批量新增部门共享账号',
+            targetType: 'client_user',
+            targetId: savedUser.id,
+            targetCode: item.account,
+            actor,
+            requestMeta,
+            detail: {
+              accountType: 'department',
+              departmentNodeId: item.departmentNodeId,
+              departmentName: item.departmentName,
+              status: savedUser.status,
+              createdBy: 'admin_department_account_batch',
+            },
+          }, manager)
+        }
+
+        await auditService.record({
+          actionType: 'client_user.create_department_accounts_batch',
+          actionLabel: '批量创建部门共享账号',
+          targetType: 'client_user_batch',
+          targetCode: `created:${created.length};skipped:${skipped.length}`,
+          actor,
+          requestMeta,
+          detail: {
+            createdCount: created.length,
+            skippedCount: skipped.length,
+            departmentNodeIds: resolvedItems.map((item) => item.departmentNodeId),
+          },
+        }, manager)
+        return { created, skipped }
+      })
+    } catch (error) {
+      if (isUniqueConstraintError(error)) {
+        throw new BizError('部门或账号已被并发占用，请刷新后重试', 409)
+      }
+      throw error
+    }
+  }
+
   private async findActiveStaffDirectory(staffNo: string, manager: EntityManager) {
     return manager.getRepository(ClientStaffDirectory).findOne({
       where: { staffNo, status: 'active' },
@@ -214,6 +467,8 @@ export class ClientUserManageService {
     const mobile = this.normalizeMobile(input.mobile)
     const email = this.normalizeEmail(input.email)
     const password = assertClientPasswordPolicy(input.password, '登录密码')
+    // scrypt 属于高开销 CPU 操作，必须在锁定部门配置和账号行之前完成。
+    const passwordHash = await hashPassword(password)
     let staffNo = profileKind === 'teacher'
       ? this.normalizeStaffNo(input.staffNo, '教职工号')
       : null
@@ -235,15 +490,12 @@ export class ClientUserManageService {
       throw new BizError('手机号和邮箱至少保留一项', 400)
     }
     if (profileKind === 'department') {
-      departmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName)
-      if (!departmentName) {
-        throw new BizError('部门共享账号必须选择所属部门', 400)
-      }
       accountType = 'department'
       staffVerified = true
     }
 
-    return runInTransaction(async (manager) => {
+    try {
+      return await runInTransaction(async (manager) => {
       const userRepo = manager.getRepository(ClientUser)
 
       if (profileKind === 'teacher') {
@@ -257,6 +509,20 @@ export class ClientUserManageService {
       }
       if (profileKind === 'department' && !staffNo) {
         staffNo = await this.generateUniqueDepartmentAccountNo(manager)
+      }
+
+      const latestDepartmentConfig = profileKind === 'department'
+        ? await systemConfigService.getClientDepartmentConfigs(manager, { lockForUpdate: true })
+        : null
+      const resolvedDepartment = profileKind === 'department'
+        ? await systemConfigService.resolveClientDepartmentReference(input, manager, latestDepartmentConfig!)
+        : null
+      if (resolvedDepartment) {
+        departmentName = resolvedDepartment.departmentName
+      }
+      const departmentNodeId = resolvedDepartment?.departmentNodeId ?? null
+      if (departmentNodeId) {
+        await this.assertDepartmentNodeUnbound(departmentNodeId, manager)
       }
 
       if (staffNo) {
@@ -290,11 +556,12 @@ export class ClientUserManageService {
         mobile,
         email,
         departmentName,
+        departmentNodeId,
         accountType,
         staffNo: staffNo ?? undefined,
         staffVerified,
         status: input.status,
-        passwordHash: await hashPassword(password),
+        passwordHash,
         lastLoginAt: null,
       })
       const savedUser = await userRepo.save(createdUser)
@@ -313,6 +580,7 @@ export class ClientUserManageService {
             mobile: savedUser.mobile,
             email: savedUser.email,
             departmentName: savedUser.departmentName,
+            departmentNodeId: savedUser.departmentNodeId,
             profileKind: deriveClientUserProfileKind(savedUser),
             accountType: savedUser.accountType,
             staffNo: savedUser.staffNo,
@@ -325,8 +593,14 @@ export class ClientUserManageService {
         manager,
       )
 
-      return sanitizeClientUserProfile(savedUser)
-    })
+        return sanitizeClientUserProfile(savedUser)
+      })
+    } catch (error) {
+      if (profileKind === 'department' && isUniqueConstraintError(error)) {
+        throw new BizError('部门或账号已被并发占用，请刷新后重试', 409)
+      }
+      throw error
+    }
   }
 
   async list(query: ClientUserListQuery): Promise<{
@@ -406,13 +680,29 @@ export class ClientUserManageService {
       const userRepo = manager.getRepository(ClientUser)
       const sessionRepo = manager.getRepository(ClientUserSession)
       const mobileSessionRepo = manager.getRepository(ClientMobileSession)
-      const user = await userRepo.findOne({ where: { id } })
+      // 与部门树保存、批量开户保持相同的“先配置、后账号”锁顺序，避免 MySQL 交叉等待。
+      const latestDepartmentConfig = await systemConfigService.getClientDepartmentConfigs(manager, { lockForUpdate: true })
+      const user = await this.findClientUserForUpdate(id, manager)
       if (!user) {
         throw new BizError('客户端用户不存在', 404)
       }
 
       if (user.status === status) {
         return sanitizeClientUserProfile(user)
+      }
+
+      if (status === 'enabled' && user.accountType === 'department') {
+        if (!user.departmentNodeId) {
+          throw new BizError('部门共享账号所属部门已不存在，请先重新绑定有效部门后再启用', 409)
+        }
+        try {
+          await systemConfigService.resolveClientDepartmentNode(user.departmentNodeId, manager, latestDepartmentConfig)
+        } catch (error) {
+          if (error instanceof BizError) {
+            throw new BizError('部门共享账号所属部门已不存在，请先重新绑定有效部门后再启用', 409)
+          }
+          throw error
+        }
       }
 
       const previousStatus = user.status
@@ -463,13 +753,14 @@ export class ClientUserManageService {
     const username = this.normalizeUsername(input.username)
     const mobile = this.normalizeMobile(input.mobile)
     const email = this.normalizeEmail(input.email)
-    const departmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName)
 
     return runInTransaction(async (manager) => {
       const userRepo = manager.getRepository(ClientUser)
       const sessionRepo = manager.getRepository(ClientUserSession)
       const mobileSessionRepo = manager.getRepository(ClientMobileSession)
-      const user = await userRepo.findOne({ where: { id } })
+      // 先锁定部门配置再锁账号行，和部门树更新及批量开户维持一致的锁顺序。
+      const latestDepartmentConfig = await systemConfigService.getClientDepartmentConfigs(manager, { lockForUpdate: true })
+      const user = await this.findClientUserForUpdate(id, manager)
       if (!user) {
         throw new BizError('客户端用户不存在', 404)
       }
@@ -477,31 +768,49 @@ export class ClientUserManageService {
         throw new BizError('手机号和邮箱至少保留一项', 400)
       }
 
-      const duplicatedUsernameUser = await this.findUserByAnyIdentifier(username)
+      const duplicatedUsernameUser = await this.findUserByAnyIdentifier(username, manager)
       if (duplicatedUsernameUser && duplicatedUsernameUser.id !== user.id) {
         throw new BizError('该用户名已被其他客户端用户使用', 409)
       }
 
       if (mobile) {
-        const duplicatedMobileUser = await this.findUserByAnyIdentifier(mobile)
+        const duplicatedMobileUser = await this.findUserByAnyIdentifier(mobile, manager)
         if (duplicatedMobileUser && duplicatedMobileUser.id !== user.id) {
           throw new BizError('该手机号已被其他客户端用户使用', 409)
         }
       }
       if (email) {
-        const duplicatedEmailUser = await this.findUserByAnyIdentifier(email)
+        const duplicatedEmailUser = await this.findUserByAnyIdentifier(email, manager)
         if (duplicatedEmailUser && duplicatedEmailUser.id !== user.id) {
           throw new BizError('该邮箱已被其他客户端用户使用', 409)
         }
       }
 
       const before = sanitizeClientUserProfile(user)
+      const profileKind = deriveClientUserProfileKind(user)
+      const resolvedDepartment = profileKind === 'department'
+        ? await systemConfigService.resolveClientDepartmentReference(input, manager, latestDepartmentConfig)
+        : null
       user.realName = username
       user.mobile = mobile
       user.email = email
-      user.departmentName = departmentName
+      user.departmentName = profileKind === 'department'
+        ? resolvedDepartment!.departmentName
+        : await systemConfigService.assertClientDepartmentOption(input.departmentName)
+      user.departmentNodeId = resolvedDepartment?.departmentNodeId ?? null
+      if (user.departmentNodeId) {
+        await this.assertDepartmentNodeUnbound(user.departmentNodeId, manager, user.id)
+      }
       user.status = input.status
-      const savedUser = await userRepo.save(user)
+      let savedUser: ClientUser
+      try {
+        savedUser = await userRepo.save(user)
+      } catch (error) {
+        if (isUniqueConstraintError(error)) {
+          throw new BizError('部门或账号已被并发占用，请刷新后重试', 409)
+        }
+        throw error
+      }
 
       let revokedSessionCount = 0
       let revokedMobileSessionCount = 0

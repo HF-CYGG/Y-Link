@@ -94,7 +94,7 @@ export class O2oPreorder {
 
   // departmentNameSnapshot 只在“部门订”时记录下单当时的部门名称，
   // 避免用户之后修改个人资料导致历史订单归属被串改。
-  @Column({ name: 'department_name_snapshot', type: 'varchar', length: 128, nullable: true, comment: '下单时部门名称快照' })
+  @Column({ name: 'department_name_snapshot', type: 'varchar', length: 271, nullable: true, comment: '下单时部门完整路径快照' })
   departmentNameSnapshot!: string | null
 
   @Column({ name: 'staff_no_snapshot', type: 'varchar', length: 64, nullable: true, comment: '下单时工号快照' })

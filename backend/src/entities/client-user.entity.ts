@@ -32,8 +32,12 @@ export class ClientUser {
   @Column({ name: 'real_name', type: 'varchar', length: 128, comment: '用户名（兼容历史 real_name 列）' })
   realName!: string
 
-  @Column({ name: 'department_name', type: 'varchar', length: 128, default: '', comment: '所属部门' })
+  @Column({ name: 'department_name', type: 'varchar', length: 271, default: '', comment: '所属部门完整路径（最多 8 级，每级 32 字符）' })
   departmentName!: string
+
+  @Index('uk_client_user_department_node_id', { unique: true })
+  @Column({ name: 'department_node_id', type: 'varchar', length: 128, nullable: true, comment: '部门共享账号绑定的稳定部门节点ID' })
+  departmentNodeId!: string | null
 
   @Column({ name: 'account_type', type: 'varchar', length: 16, default: 'personal', comment: '账号类型' })
   accountType!: ClientUserAccountType

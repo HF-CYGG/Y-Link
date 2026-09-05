@@ -110,6 +110,7 @@ const [
   { clientAuthService },
   { systemConfigService },
   { VerificationCodeService },
+  { createApp },
   { requireClientAuth },
   { requireMobileAuth },
   { BizError },
@@ -135,6 +136,7 @@ const [
   import('../src/services/client-auth.service.js'),
   import('../src/services/system-config.service.js'),
   import('../src/services/verification-code.service.js'),
+  import('../src/app.js'),
   import('../src/middleware/client-auth.middleware.js'),
   import('../src/middleware/mobile-auth.middleware.js'),
   import('../src/utils/errors.js'),
@@ -945,6 +947,35 @@ try {
   }
   assert.equal(await invokeMiddleware(requireClientAuth as never, mobileBearerWins), undefined)
   assert.equal((mobileBearerWins as { clientAuth?: { userId: string } }).clientAuth?.userId, mobileBoundaryUser.id)
+  const webLogoutMobile = await mobileSessionService.createForUser(mobileBoundaryUser, device(52))
+  const app = createApp()
+  const server = app.listen(0, '127.0.0.1')
+  try {
+    if (!server.listening) {
+      await new Promise<void>((resolve, reject) => {
+        server.once('listening', resolve)
+        server.once('error', reject)
+      })
+    }
+    const address = server.address()
+    assert.ok(address && typeof address === 'object')
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/client-auth/logout`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${webLogoutMobile.accessToken}` },
+    })
+    assert.equal(response.status, 200)
+    assert.equal(response.headers.get('set-cookie'), null, 'Mobile Bearer 登出不应清除无关 Web Cookie')
+    await assert.rejects(
+      mobileSessionService.resolveAccess(webLogoutMobile.accessToken, 'after-web-logout'),
+      expectBizErrorCode(40101),
+    )
+    assert.equal((await loadSessionWithSecrets(webLogoutMobile.session.id)).revokeReason, 'user_logout')
+  } finally {
+    await new Promise<void>((resolve, reject) => {
+      server.close((error) => (error ? reject(error) : resolve()))
+    })
+  }
+  pass('T-W9', 'Mobile Bearer 经过 Web logout 时撤销真实 Mobile session 且不清除 Web Cookie')
   const mobileCookieOnly = {
     headers: { cookie: `y_link_client_session=${mobileBoundary.accessToken}` },
     path: '/me',

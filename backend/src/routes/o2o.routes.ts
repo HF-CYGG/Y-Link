@@ -84,7 +84,7 @@ const consoleOrderQuerySchema = z.object({
   status: z.enum(['pending', 'verified', 'cancelled']).optional(),
   keyword: z.string().trim().max(64).optional(),
   accountType: z.enum(CLIENT_USER_ACCOUNT_TYPES).optional(),
-  departmentName: z.string().trim().max(128).optional(),
+  departmentName: z.string().trim().max(271).optional(),
   staffNo: z.string().trim().max(64).optional(),
   startTime: z.string().trim().max(32).optional(),
   endTime: z.string().trim().max(32).optional(),

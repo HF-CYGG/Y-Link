@@ -8,6 +8,7 @@ import { Router } from 'express'
 import { z } from 'zod'
 import { requireClientAuth } from '../middleware/client-auth.middleware.js'
 import type { ClientAuthenticatedRequest } from '../types/client-auth.js'
+import type { MobileAuthenticatedRequest } from '../types/mobile-auth.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
 import {
@@ -21,6 +22,7 @@ import {
 } from '../utils/password.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 import { clientAuthService } from '../services/client-auth.service.js'
+import { mobileSessionService } from '../services/mobile-session.service.js'
 import { authSecurityService } from '../services/auth-security.service.js'
 import { verificationCodeService } from '../services/verification-code.service.js'
 import { clearClientAuthCookie, setClientAuthCookie } from '../utils/client-auth-cookie.js'
@@ -281,9 +283,13 @@ clientAuthRouter.post(
   '/logout',
   requireClientAuth,
   asyncHandler(async (req, res) => {
-    const authReq = req as ClientAuthenticatedRequest
-    await clientAuthService.logout(authReq.clientAuth)
-    clearClientAuthCookie(req, res)
+    const authReq = req as ClientAuthenticatedRequest & Partial<MobileAuthenticatedRequest>
+    if (authReq.mobileAuth) {
+      await mobileSessionService.revokeCurrent(authReq.mobileAuth, extractRequestMeta(req))
+    } else {
+      await clientAuthService.logout(authReq.clientAuth)
+      clearClientAuthCookie(req, res)
+    }
     res.json({ code: 0, message: 'ok', data: true })
   }),
 )
