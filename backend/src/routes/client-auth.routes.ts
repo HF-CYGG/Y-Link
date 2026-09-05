@@ -38,7 +38,8 @@ const clientPasswordSchema = (fieldLabel = '密码') =>
 
 const registerSchema = z
   .object({
-    username: z.string().trim().max(128).optional(),
+    // 保留原始字符交给服务校验，不能先 trim 后绕过空格禁用规则。
+    username: z.string().max(128).optional(),
     account: z.string().trim().max(128).optional(),
     accountType: z.enum(['personal', 'department']),
     staffNo: z.string().trim().max(64).optional(),

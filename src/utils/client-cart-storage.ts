@@ -31,6 +31,7 @@ export interface ClientCartSnapshotItem {
   availableStock: number
   qty: number
   selected: boolean
+  availabilityStatus: 'available' | 'out_of_stock' | 'product_unavailable' | 'sku_unavailable'
 }
 
 // 统一抽出客户端账号作用域类型，避免同一联合类型在读/写/清理函数签名中重复展开。
@@ -82,6 +83,12 @@ const normalizeSnapshotItems = (items: unknown): ClientCartSnapshotItem[] => {
       const availableStock = Number.isFinite(row.availableStock) ? Number(row.availableStock) : 0
       const qty = Number.isFinite(row.qty) ? Math.max(0, Math.floor(Number(row.qty))) : 0
       const selected = row.selected !== false
+      const availabilityStatus = row.availabilityStatus === 'product_unavailable'
+        || row.availabilityStatus === 'sku_unavailable'
+        || row.availabilityStatus === 'out_of_stock'
+        || row.availabilityStatus === 'available'
+        ? row.availabilityStatus
+        : (availableStock > 0 ? 'available' : 'out_of_stock')
 
       if (!productId || !productName || qty <= 0) {
         return null
@@ -101,6 +108,7 @@ const normalizeSnapshotItems = (items: unknown): ClientCartSnapshotItem[] => {
         availableStock: Math.max(0, Math.floor(availableStock)),
         qty,
         selected,
+        availabilityStatus,
       } satisfies ClientCartSnapshotItem
     })
     .filter((item): item is ClientCartSnapshotItem => item !== null)

@@ -21,6 +21,7 @@ import {
   normalizeClientAccount,
   normalizeClientVerificationTarget,
   normalizeClientUsername,
+  normalizePersonalRegistrationUsername,
 } from '../utils/client-auth-account.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { assertClientPasswordPolicy, hashPassword, verifyPassword } from '../utils/password.js'
@@ -438,7 +439,7 @@ class ClientAuthService {
       normalizedValue: username.normalizedValue,
     })
     if (existedByUsername) {
-      throw new BizError('该姓名已被占用', 409)
+      throw new BizError('该姓名已被占用，请联系管理员处理', 409)
     }
   }
 
@@ -670,7 +671,7 @@ class ClientAuthService {
       : this.resolveAccount(input.account ?? '')
     const username = isTeacherRegister
       ? null
-      : normalizeClientUsername(this.assertRealName(input.username ?? ''))
+      : normalizePersonalRegistrationUsername(input.username ?? '')
     const password = assertClientPasswordPolicy(input.password)
     const verificationContext = await this.getVerificationContext()
     const capabilities = verificationContext.capabilities
@@ -1000,9 +1001,10 @@ class ClientAuthService {
     if (!(await verifyPassword(input.currentPassword, user.passwordHash))) throw new BizError('当前密码错误', 400)
 
     const isDirectoryTeacher = user.staffVerified && Boolean(user.staffNo?.trim())
-    const username = isDirectoryTeacher
+    // 目录账号及未改名的历史账号保持原值；新姓名遵循注册规则，避免英文用户名无法维护资料。
+    const username = isDirectoryTeacher || input.username === user.realName
       ? normalizeClientUsername(user.realName)
-      : normalizeClientUsername(this.assertRealName(input.username))
+      : normalizePersonalRegistrationUsername(input.username)
     const mobile = input.mobile?.trim()
       ? normalizeClientVerificationTarget('mobile', input.mobile)
       : null
