@@ -1,0 +1,33 @@
+# Onebox 可选 MySQL 叠加层。只有正式启用 MySQL 时才加载本文件，因此强密码
+# 校验不会阻塞首次 SQLite 试运行。
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-y_link}
+      MYSQL_USER: ${MYSQL_USER:-ylink}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?请先在 .env 中配置 MYSQL_PASSWORD 私有强密码}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?请先在 .env 中配置 MYSQL_ROOT_PASSWORD 私有强密码}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      # 应用日志仍可使用 Asia/Shanghai；数据库 CURRENT_TIMESTAMP 与 mysql2 统一按 UTC。
+      - --default-time-zone=+00:00
+    volumes:
+      - y_link_onebox_mysql:/var/lib/mysql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - MYSQL_PWD="$${MYSQL_PASSWORD}" mysqladmin ping -h 127.0.0.1 -u "$${MYSQL_USER}" --silent
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+    stop_grace_period: 30s
+    networks:
+      - y_link_internal
+
+volumes:
+  y_link_onebox_mysql:

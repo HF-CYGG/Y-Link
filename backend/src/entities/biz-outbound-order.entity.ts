@@ -50,9 +50,9 @@ export class BizOutboundOrder {
   @Column({
     name: 'customer_department_name',
     type: 'varchar',
-    length: 128,
+    length: 271,
     nullable: true,
-    comment: '客户部门名称',
+    comment: '客户部门完整路径',
   })
   customerDepartmentName!: string | null
 

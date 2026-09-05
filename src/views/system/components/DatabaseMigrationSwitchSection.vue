@@ -8,9 +8,10 @@
  * 维护说明：切换类动作始终属于高风险操作，扩展时优先保持状态展示与按钮分区清晰可见。
  */
 
+import { computed } from 'vue'
 import type { DatabaseRuntimeOverrideStateResult, SQLiteToMySqlTaskRecord } from '@/api/modules/data-maintenance'
 
-defineProps<{
+const props = defineProps<{
   hasEnteredStepFlow: boolean
   activeStepKey: 'precheck' | 'create' | 'run' | 'switch'
   hasPreparedMysqlSwitch: boolean
@@ -26,6 +27,10 @@ defineProps<{
   formatDateTime: (value?: string | null) => string
   getRuntimeModeTagType: () => 'info' | 'success' | 'warning'
 }>()
+
+const directSqliteRollbackAllowed = computed(() => {
+  return props.runtimeState?.rollbackSafety?.directSqliteRollbackAllowed !== false
+})
 
 const emit = defineEmits<{
   (event: 'switch-task', task: SQLiteToMySqlTaskRecord): void
@@ -130,7 +135,7 @@ const emit = defineEmits<{
         <div class="rounded-2xl border border-slate-200/80 bg-white p-4 dark:border-white/10 dark:bg-slate-950/30">
           <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100">最终操作面板</h3>
           <p class="mt-2 text-sm leading-6 text-slate-500 dark:text-slate-400">
-            优先确认已选任务是否成功、迁后校验是否正常，再执行切换。若验证异常，可直接写入回退配置恢复到 SQLite。
+            优先确认已选任务是否成功、迁后校验是否正常，再执行切换。只有迁移只读验收窗口内可以安全恢复 SQLite；MySQL 开放业务写入后必须从 MySQL 备份恢复或执行受控反向迁移。
           </p>
 
           <div class="mt-4 rounded-2xl bg-slate-50 px-4 py-3 dark:bg-slate-900/40">
@@ -152,7 +157,7 @@ const emit = defineEmits<{
             <el-button
               type="warning"
               :loading="rollbackLoading"
-              :disabled="!canOperateMigration || pageLoading"
+              :disabled="!canOperateMigration || pageLoading || !directSqliteRollbackAllowed"
               @click="emit('rollback')"
             >
               回退到 SQLite
@@ -161,12 +166,22 @@ const emit = defineEmits<{
               type="danger"
               plain
               :loading="clearOverrideLoading"
-              :disabled="!canOperateMigration || pageLoading"
+              :disabled="!canOperateMigration || pageLoading || !directSqliteRollbackAllowed"
               @click="emit('clear-override')"
             >
               清空运行时覆盖
             </el-button>
           </div>
+
+          <el-alert
+            v-if="!directSqliteRollbackAllowed"
+            class="mt-4"
+            title="已禁止直接回退旧 SQLite"
+            type="error"
+            :closable="false"
+            show-icon
+            :description="runtimeState?.rollbackSafety?.reason"
+          />
 
           <el-alert
             v-if="!selectedSucceededTask"

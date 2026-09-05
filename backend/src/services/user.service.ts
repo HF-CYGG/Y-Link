@@ -7,6 +7,7 @@
  */
 
 import { AppDataSource } from '../config/data-source.js'
+import { runInTransaction } from '../config/transaction-runner.js'
 import { SysUser } from '../entities/sys-user.entity.js'
 import { SysUserSession } from '../entities/sys-user-session.entity.js'
 import type { AuthUserContext, UserRole, UserSafeProfile, UserStatus } from '../types/auth.js'
@@ -126,7 +127,7 @@ export class UserService {
       throw new BizError('姓名不能为空', 400)
     }
     try {
-      return await AppDataSource.transaction(async (manager) => {
+      return await runInTransaction(async (manager) => {
         const userRepo = manager.getRepository(SysUser)
         const passwordHash = await hashPassword(password)
         const entity = userRepo.create({
@@ -188,7 +189,7 @@ export class UserService {
       throw new BizError('姓名不能为空', 400)
     }
     try {
-      return await AppDataSource.transaction(async (manager) => {
+      return await runInTransaction(async (manager) => {
         const userRepo = manager.getRepository(SysUser)
         const sessionRepo = manager.getRepository(SysUserSession)
         const user = await userRepo.findOne({ where: { id } })
@@ -263,7 +264,7 @@ export class UserService {
     actor: AuthUserContext,
     requestMeta?: RequestMeta,
   ): Promise<UserSafeProfile> {
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const userRepo = manager.getRepository(SysUser)
       const user = await userRepo.findOne({ where: { id } })
       if (!user) {
@@ -328,7 +329,7 @@ export class UserService {
       throw new BizError('请使用本人修改密码入口处理自己的密码', 400)
     }
 
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const userRepo = manager.getRepository(SysUser)
       const sessionRepo = manager.getRepository(SysUserSession)
       const user = await userRepo.findOne({ where: { id } })

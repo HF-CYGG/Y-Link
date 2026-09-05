@@ -8,7 +8,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'v
 import { ElMessageBox } from 'element-plus'
 import { CameraFilled } from '@element-plus/icons-vue'
 import { PageContainer, PassiveNumberInput, UnifiedScanDialog } from '@/components/common'
-import { getProductList, type ProductRecord } from '@/api/modules/product'
+import { getProductList, type ProductRecord, type ProductSkuRecord } from '@/api/modules/product'
 import { getO2oInventoryLogsPaged, inboundO2oStock, type O2oInventoryLog } from '@/api/modules/o2o'
 import { useCameraQrScanner } from '@/composables/useCameraQrScanner'
 import { extractErrorMessage } from '@/utils/error'
@@ -23,10 +23,14 @@ type InboundScanMode = 'scan_plus_one' | 'scan_input_qty'
 
 // 本次入库清单中的最小单元。这里故意只保留入库所需关键字段，
 // 避免把整个商品对象塞进清单，减少状态同步复杂度。
+// skuId 为空字符串代表“该商品仅默认规格，后端可自行兜底”；
+// 只要商品存在多个可入库规格，就必须显式携带 skuId，避免库存记到错误的规格上。
 interface InboundDraftItem {
   productId: string
   productCode: string
   productName: string
+  skuId: string
+  skuLabel: string
   qty: number
 }
 
@@ -35,6 +39,8 @@ interface InboundDraftItem {
 interface BatchInboundResultItem {
   productId: string
   productName: string
+  skuId: string
+  skuLabel: string
   qty: number
   success: boolean
   message?: string
@@ -54,6 +60,7 @@ const scanPanelRef = ref<HTMLElement | null>(null)
 const scanCode = ref('')
 const scanMode = ref<InboundScanMode>('scan_plus_one')
 const recognizedProductId = ref('')
+const recognizedSkuId = ref('')
 const pendingManualQty = ref(1)
 const scanInputRef = ref<{ focus: () => void } | null>(null)
 const listRemark = ref('')
@@ -70,6 +77,7 @@ let inventoryLogPanelHeightFrame = 0
 
 const manualForm = reactive({
   productId: '',
+  skuId: '',
   qty: 1,
   remark: '',
 })
@@ -111,6 +119,37 @@ const manualSelectedProduct = computed(() => {
   }
   return productMap.value.get(manualForm.productId) ?? null
 })
+
+// 取某个商品当前可入库的 SKU（活跃且为当前版本）。
+// 入库只应写入仍在售卖的规格，退役规格不再出现在候选列表中。
+const getActiveProductSkus = (productId: string): ProductSkuRecord[] => {
+  return (productMap.value.get(productId)?.skus ?? [])
+    .filter((sku) => sku.id && sku.isActive !== false && sku.isCurrent !== false)
+}
+
+const formatSkuLabel = (sku: ProductSkuRecord) => `${sku.specText || '默认规格'}（${sku.skuCode || sku.id}）`
+
+// 商品只有唯一可入库规格时自动选中，避免多规格改造前的单规格商品多一次点击；
+// 存在多个规格时必须留空，强制用户显式选择，防止库存记到错误的规格上。
+const resolveAutoSkuId = (productId: string) => {
+  const candidates = getActiveProductSkus(productId)
+  return candidates.length === 1 ? String(candidates[0]?.id ?? '') : ''
+}
+
+// 扫码识别出的商品当前可选规格，驱动“当前识别商品”面板里的规格选择器。
+const recognizedProductSkus = computed(() => {
+  return recognizedProductId.value ? getActiveProductSkus(recognizedProductId.value) : []
+})
+
+// 扫码识别的商品若存在多个规格，必须先选规格才允许加入清单。
+const recognizedSkuRequired = computed(() => recognizedProductSkus.value.length > 1)
+const recognizedSkuReady = computed(() => !recognizedSkuRequired.value || Boolean(recognizedSkuId.value))
+
+// 手动选择商品对应的可选规格，驱动手动入口的规格选择器。
+const manualProductSkus = computed(() => {
+  return manualForm.productId ? getActiveProductSkus(manualForm.productId) : []
+})
+const manualSkuRequired = computed(() => manualProductSkus.value.length > 1)
 
 // 本次清单的摘要指标：
 // - totalSkuCount：商品种类数
@@ -184,22 +223,30 @@ const inventoryLogPanelStyle = computed(() => {
 
 const setRecognizedProduct = (product: ProductRecord | null) => {
   recognizedProductId.value = product?.id ?? ''
+  recognizedSkuId.value = product ? resolveAutoSkuId(product.id) : ''
 }
+
+// 清单行以“商品+规格”为唯一键：同一商品的不同规格必须落成不同行，
+// 否则会把不同规格的入库数量错误地累加到同一行上。
+const buildInboundRowKey = (productId: string, skuId: string) => `${productId}:${skuId}`
 
 // 把商品加入“本次入库清单”：
 // - 若不存在则新增；
 // - 若已存在则累加数量。
 // 这是“扫码即+1”和“批量补货”共享的核心入口。
-const upsertInboundListItem = (product: ProductRecord, qty: number) => {
+const upsertInboundListItem = (product: ProductRecord, qty: number, skuId: string, skuLabel: string) => {
   if (!Number.isInteger(qty) || qty <= 0) {
     return
   }
-  const existed = inboundList.value.find((item) => item.productId === product.id)
+  const rowKey = buildInboundRowKey(product.id, skuId)
+  const existed = inboundList.value.find((item) => buildInboundRowKey(item.productId, item.skuId) === rowKey)
   if (!existed) {
     inboundList.value.push({
       productId: product.id,
       productCode: product.productCode,
       productName: product.productName,
+      skuId,
+      skuLabel,
       qty,
     })
     return
@@ -209,8 +256,9 @@ const upsertInboundListItem = (product: ProductRecord, qty: number) => {
 
 // 允许用户在清单表格里直接改数量。
 // 这里故意不允许改成 0，避免用户误触导致“看起来像还在清单里但其实无效”。
-const updateInboundListItemQty = (productId: string, qty: number) => {
-  const target = inboundList.value.find((item) => item.productId === productId)
+const updateInboundListItemQty = (productId: string, skuId: string, qty: number) => {
+  const rowKey = buildInboundRowKey(productId, skuId)
+  const target = inboundList.value.find((item) => buildInboundRowKey(item.productId, item.skuId) === rowKey)
   if (!target) {
     return
   }
@@ -223,8 +271,9 @@ const updateInboundListItemQty = (productId: string, qty: number) => {
 }
 
 // 单条删除清单项。
-const removeInboundListItem = (productId: string) => {
-  inboundList.value = inboundList.value.filter((item) => item.productId !== productId)
+const removeInboundListItem = (productId: string, skuId: string) => {
+  const rowKey = buildInboundRowKey(productId, skuId)
+  inboundList.value = inboundList.value.filter((item) => buildInboundRowKey(item.productId, item.skuId) !== rowKey)
 }
 
 // 整体清空前做二次确认，防止仓管连续扫了一堆后误清空。
@@ -308,22 +357,30 @@ const recognizeByCode = (rawCode: string) => {
 }
 
 // 扫码主入口：
-// - 在“扫码即+1”模式下，识别成功后立即入清单；
-// - 在“扫码后输入数量”模式下，仅先选中商品，等待用户输入数量。
+// - 在“扫码即+1”模式下，若商品规格唯一可确定则立即入清单；
+//   若商品存在多个规格，扫码只能识别到商品本身，无法替用户判断具体规格，
+//   此时必须停在“当前识别商品”面板，等待用户手动选择规格后再加入；
+// - 在“扫码后输入数量”模式下，仅先选中商品，等待用户选规格、输入数量。
 const handleScanSubmit = () => {
   const product = recognizeByCode(scanCode.value)
   if (!product) {
     return
   }
   if (scanMode.value === 'scan_plus_one') {
-    upsertInboundListItem(product, 1)
-    showAppSuccess(`已加入：${product.productName} +1`)
+    if (recognizedSkuReady.value) {
+      const sku = recognizedProductSkus.value.find((item) => String(item.id) === recognizedSkuId.value)
+      upsertInboundListItem(product, 1, recognizedSkuId.value, sku ? formatSkuLabel(sku) : '')
+      showAppSuccess(`已加入：${product.productName} +1`)
+      scanCode.value = ''
+      focusScanInput()
+      return
+    }
+    showAppWarning(`商品「${product.productName}」存在多个规格，请先在下方选择规格`)
     scanCode.value = ''
-    focusScanInput()
     return
   }
   pendingManualQty.value = 1
-  showAppSuccess(`已识别商品：${product.productName}，请输入数量后加入清单`)
+  showAppSuccess(`已识别商品：${product.productName}，请选择规格并输入数量后加入清单`)
   scanCode.value = ''
   focusScanInput()
 }
@@ -366,7 +423,12 @@ const increaseQuickQty = (step: number) => {
       showAppWarning('请先扫描识别商品')
       return
     }
-    upsertInboundListItem(recognizedProduct.value, step)
+    if (!recognizedSkuReady.value) {
+      showAppWarning('该商品存在多个规格，请先选择规格')
+      return
+    }
+    const sku = recognizedProductSkus.value.find((item) => String(item.id) === recognizedSkuId.value)
+    upsertInboundListItem(recognizedProduct.value, step, recognizedSkuId.value, sku ? formatSkuLabel(sku) : '')
     showAppSuccess(`已加入：${recognizedProduct.value.productName} +${step}`)
     return
   }
@@ -379,13 +441,23 @@ const addRecognizedProductWithQty = () => {
     showAppWarning('请先扫码识别商品')
     return
   }
+  if (!recognizedSkuReady.value) {
+    showAppWarning('该商品存在多个规格，请先选择规格')
+    return
+  }
   const normalizedQty = Math.floor(Number(pendingManualQty.value))
   if (!Number.isInteger(normalizedQty) || normalizedQty <= 0) {
     showAppWarning('数量必须为正整数')
     return
   }
-  upsertInboundListItem(recognizedProduct.value, normalizedQty)
+  const sku = recognizedProductSkus.value.find((item) => String(item.id) === recognizedSkuId.value)
+  upsertInboundListItem(recognizedProduct.value, normalizedQty, recognizedSkuId.value, sku ? formatSkuLabel(sku) : '')
   showAppSuccess(`已加入：${recognizedProduct.value.productName} +${normalizedQty}`)
+}
+
+// 手动选择商品后，若唯一规格则自动选中，否则清空待用户手动选择。
+const handleManualProductChange = () => {
+  manualForm.skuId = manualForm.productId ? resolveAutoSkuId(manualForm.productId) : ''
 }
 
 // 兼容老流程：手动选商品后加入“本次清单”。
@@ -399,11 +471,16 @@ const addManualToInboundList = () => {
     showAppWarning('商品不存在，请刷新后重试')
     return
   }
+  if (manualSkuRequired.value && !manualForm.skuId) {
+    showAppWarning('该商品存在多个规格，请先选择规格')
+    return
+  }
   if (!Number.isInteger(manualForm.qty) || manualForm.qty <= 0) {
     showAppWarning('数量必须为正整数')
     return
   }
-  upsertInboundListItem(product, manualForm.qty)
+  const sku = manualProductSkus.value.find((item) => String(item.id) === manualForm.skuId)
+  upsertInboundListItem(product, manualForm.qty, manualForm.skuId, sku ? formatSkuLabel(sku) : '')
   setRecognizedProduct(product)
   showAppSuccess(`已加入清单：${product.productName} +${manualForm.qty}`)
 }
@@ -415,6 +492,10 @@ const handleSingleInbound = async () => {
     showAppWarning('请选择商品')
     return
   }
+  if (manualSkuRequired.value && !manualForm.skuId) {
+    showAppWarning('该商品存在多个规格，请先选择规格')
+    return
+  }
   if (!Number.isInteger(manualForm.qty) || manualForm.qty <= 0) {
     showAppWarning('入库数量必须为正整数')
     return
@@ -423,6 +504,7 @@ const handleSingleInbound = async () => {
   try {
     await inboundO2oStock({
       productId: manualForm.productId,
+      skuId: manualForm.skuId || undefined,
       qty: manualForm.qty,
       remark: manualForm.remark.trim() || undefined,
     })
@@ -447,20 +529,23 @@ const handleBatchConfirmInbound = async () => {
     return
   }
   confirmingBatch.value = true
-  const successIds = new Set<string>()
+  const successKeys = new Set<string>()
   const resultDetails: BatchInboundResultItem[] = []
   try {
     for (const item of inboundList.value) {
       try {
         await inboundO2oStock({
           productId: item.productId,
+          skuId: item.skuId || undefined,
           qty: item.qty,
           remark: listRemark.value.trim() || undefined,
         })
-        successIds.add(item.productId)
+        successKeys.add(buildInboundRowKey(item.productId, item.skuId))
         resultDetails.push({
           productId: item.productId,
           productName: item.productName,
+          skuId: item.skuId,
+          skuLabel: item.skuLabel,
           qty: item.qty,
           success: true,
         })
@@ -468,6 +553,8 @@ const handleBatchConfirmInbound = async () => {
         resultDetails.push({
           productId: item.productId,
           productName: item.productName,
+          skuId: item.skuId,
+          skuLabel: item.skuLabel,
           qty: item.qty,
           success: false,
           message: extractErrorMessage(error, '入库失败'),
@@ -476,7 +563,7 @@ const handleBatchConfirmInbound = async () => {
     }
     const successCount = resultDetails.filter((item) => item.success).length
     const failedCount = resultDetails.length - successCount
-    inboundList.value = inboundList.value.filter((item) => !successIds.has(item.productId))
+    inboundList.value = inboundList.value.filter((item) => !successKeys.has(buildInboundRowKey(item.productId, item.skuId)))
     batchInboundResult.value = {
       successCount,
       failedCount,
@@ -598,6 +685,17 @@ onBeforeUnmount(() => {
               当前库存 {{ recognizedProduct.currentStock }}，预订 {{ recognizedProduct.preOrderedStock }}，可用
               {{ recognizedProduct.availableStock }}
             </p>
+            <div v-if="recognizedSkuRequired" class="mt-3">
+              <p class="text-xs text-rose-500">该商品存在多个规格，请先选择规格再入库</p>
+              <el-select v-model="recognizedSkuId" filterable placeholder="请选择规格" style="width: 100%" class="mt-1">
+                <el-option
+                  v-for="sku in recognizedProductSkus"
+                  :key="String(sku.id)"
+                  :label="`${sku.specText || '默认规格'}（可用 ${sku.availableStock ?? 0}）`"
+                  :value="String(sku.id)"
+                />
+              </el-select>
+            </div>
             <div v-if="scanMode === 'scan_input_qty'" class="mt-3">
               <PassiveNumberInput v-model="pendingManualQty" :min="1" :step="1" style="width: 100%" />
               <el-button class="mt-2 w-full" type="primary" @click="addRecognizedProductWithQty">加入清单</el-button>
@@ -616,12 +714,23 @@ onBeforeUnmount(() => {
                 filterable
                 :loading="loading"
                 style="width: 100%"
+                @change="handleManualProductChange"
               >
                 <el-option
                   v-for="product in products"
                   :key="product.id"
                   :label="`${product.productName}（可用 ${product.availableStock}）`"
                   :value="product.id"
+                />
+              </el-select>
+            </el-form-item>
+            <el-form-item v-if="manualProductSkus.length" label="规格">
+              <el-select v-model="manualForm.skuId" filterable placeholder="请选择规格" style="width: 100%">
+                <el-option
+                  v-for="sku in manualProductSkus"
+                  :key="String(sku.id)"
+                  :label="`${sku.specText || '默认规格'}（可用 ${sku.availableStock ?? 0}）`"
+                  :value="String(sku.id)"
                 />
               </el-select>
             </el-form-item>
@@ -661,9 +770,19 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="table-scroll-wrap mt-4">
-          <el-table native-scrollbar :data="inboundList" row-key="productId" empty-text="请先扫码或手动加入商品">
+          <el-table
+            native-scrollbar
+            :data="inboundList"
+            :row-key="(row: InboundDraftItem) => `${row.productId}:${row.skuId}`"
+            empty-text="请先扫码或手动加入商品"
+          >
             <el-table-column prop="productCode" label="商品编码" min-width="130" />
             <el-table-column prop="productName" label="商品名称" min-width="150" />
+            <el-table-column label="规格" min-width="140">
+              <template #default="{ row }">
+                {{ row.skuLabel || '默认规格' }}
+              </template>
+            </el-table-column>
             <el-table-column label="数量" width="160">
               <template #default="{ row }">
                 <PassiveNumberInput
@@ -672,13 +791,13 @@ onBeforeUnmount(() => {
                   :step="1"
                   size="small"
                   style="width: 120px"
-                  @change="(value: number | null) => updateInboundListItemQty(row.productId, Number(value ?? 1))"
+                  @change="(value: number | null) => updateInboundListItemQty(row.productId, row.skuId, Number(value ?? 1))"
                 />
               </template>
             </el-table-column>
             <el-table-column label="操作" width="100" fixed="right">
               <template #default="{ row }">
-                <el-button type="danger" link @click="removeInboundListItem(row.productId)">删除</el-button>
+                <el-button type="danger" link @click="removeInboundListItem(row.productId, row.skuId)">删除</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -708,8 +827,11 @@ onBeforeUnmount(() => {
         <div v-if="batchInboundResult" class="mt-4 rounded-2xl border border-slate-100 bg-slate-50 p-3 text-sm">
           <p class="font-semibold text-slate-800">本次结果：成功 {{ batchInboundResult.successCount }} 条，失败 {{ batchInboundResult.failedCount }} 条</p>
           <ul v-if="batchInboundResult.failedCount" class="mt-2 space-y-1 text-xs text-rose-500">
-            <li v-for="item in batchInboundResult.details.filter((detail) => !detail.success)" :key="item.productId">
-              {{ item.productName }}（{{ item.qty }}件）：{{ item.message }}
+            <li
+              v-for="item in batchInboundResult.details.filter((detail) => !detail.success)"
+              :key="`${item.productId}:${item.skuId}`"
+            >
+              {{ item.productName }}（{{ item.skuLabel || '默认规格' }}，{{ item.qty }}件）：{{ item.message }}
             </li>
           </ul>
         </div>

@@ -21,7 +21,7 @@ const assertPattern = (pattern, message) => {
 }
 
 const createDepartmentField = source.match(
-  /<el-form-item v-if="!isCreateTeacherProfile"[\s\S]*?prop="departmentName"[\s\S]*?<\/el-form-item>/,
+  /<el-form-item v-if="isCreateDepartmentProfile"[\s\S]*?prop="departmentNodeId"[\s\S]*?<\/el-form-item>/,
 )?.[0]
 
 if (!createDepartmentField) {
@@ -32,7 +32,7 @@ assertIncludes('type ClientDepartmentTreeNode', 'ClientDepartmentTreeNode type m
 assertIncludes('const departmentTree = ref<ClientDepartmentTreeNode[]>([])', 'department tree state must be stored')
 assertIncludes('type DepartmentTreeSelectOption', 'tree select option type must be declared')
 assertIncludes('const departmentTreeSelectOptions = computed(() =>', 'tree select options must be computed')
-assertIncludes('const value = parentPath ? `${parentPath}-${label}` : label', 'child department value must keep full path')
+assertIncludes("const value = String(node.id ?? '').trim()", 'tree select must use stable department node id as value')
 assertIncludes('const departmentTreeSelectProps = {', 'tree select props must be defined')
 assertPattern(/departmentTree\.value\s*=\s*result\.tree/, 'loadDepartmentOptions must store result.tree')
 
@@ -41,7 +41,7 @@ if (!createDepartmentField.includes('<el-tree-select')) {
 }
 
 for (const [needle, message] of [
-  ['v-model="createForm.departmentName"', 'create tree select must bind createForm.departmentName'],
+  ['v-model="createForm.departmentNodeId"', 'create tree select must bind createForm.departmentNodeId'],
   ['filterable', 'create tree select must be filterable'],
   ['clearable', 'create tree select must be clearable'],
   ['check-strictly', 'create tree select must allow selecting parent departments'],

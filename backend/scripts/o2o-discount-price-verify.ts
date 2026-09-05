@@ -153,6 +153,7 @@ async function main() {
 
     const clientAuth = await registerAndLoginClient(clientAuthService)
     const preorder = await o2oPreorderService.submit(clientAuth, {
+      clientRequestId: 'discount-price-order-0001',
       items: [{ productId: product.id, qty: 2 }],
       remark: '折扣快照验证',
       pickupContact: '折扣验证提货人',

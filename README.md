@@ -14,6 +14,34 @@ Y-Link 是一套面向文创、非遗、门店和活动场景的库存管理系�
 
 技术栈：Vue 3、TypeScript、Element Plus、Pinia、Express、TypeORM。默认使用 SQLite，支持迁移到 MySQL。
 
+## Mobile 工程基础状态
+
+仓库包含 `apps/mobile` Expo 工程和 `packages/*` 跨端基础。Mobile 固定使用 Node.js `22.13.1`；根 npm workspace 让 Mobile 通过正式 package dependency 消费共享 Contract，同时不改变现有 Vue Web、Express 后端、数据库或部署方式。
+
+当前 Mobile 尚未接入真实 API，也没有实现正式登录会话、服务端购物车、订单、库存、退货、相机、相册、通知或 Deep Link。未运行模拟器或真机验证时，只能依据 SQLite migration 专项测试、typecheck 与 Android JS bundle export 判断工程基础，不代表设备交互、签名 APK 或发布链路可用。
+
+主要目录：
+
+- `apps/mobile`：根 npm workspace 中的 Expo package，自身保留 manifest，依赖统一锁定在根 `package-lock.json`；
+- `packages/api-client`：`@ylink/api-client`，传输无关 HTTP 契约与 Native/Web adapter；
+- `packages/shared-types`：`@ylink/shared-types`，已核对的跨端客户端 Contract 真源；
+- `packages/domain`、`packages/validation`、`packages/design-tokens`：已纳入 workspace 的最小共享边界，尚未由 Mobile 消费。
+
+常用命令：
+
+```bash
+npm ci
+npm run verify:mobile:workspace
+npm --workspace y-link-mobile run dependencies:check
+npm --workspace y-link-mobile run test:db
+npm --workspace y-link-mobile run typecheck
+npm --workspace y-link-mobile run export:android
+node ./node_modules/typescript/bin/tsc -p packages/tsconfig.json --noEmit
+node --experimental-strip-types --test packages/api-client/test/*.test.ts
+```
+
+开发者、GitHub Actions 与 Expo/EAS 构建入口统一使用根 workspace 与根 lockfile。Mobile 只能通过 `@ylink/*` package 名称消费共享包，禁止用相对路径跨目录导入 `packages/*`。详细边界见 [`docs/project-context/60-移动端工程与共享基础.md`](./docs/project-context/60-移动端工程与共享基础.md)。
+
 ## 快速入口
 
 - [版本发布历史与更新日志](./docs/版本发布历史与更新日志.md)
@@ -350,7 +378,58 @@ INIT_ADMIN_PASSWORD='请改成你自己的强密码' PERMANENT_DELETE_PASSWORD='
 
 已有 SQLite 数据时，优先使用管理端“系统管理 -> 数据库迁移”功能迁移，不建议手工拼接导入。
 
-新库直接使用 MySQL 时，可参考：
+#### Onebox 先试运行、后启用 MySQL
+
+仓库提供 [compose.onebox.yml](./compose.onebox.yml)，同一套 Onebox 可分两阶段部署，不需要再启动第二套 Y-Link 应用：
+
+```bash
+# 1. 首次部署：默认只启动 Onebox + SQLite
+cp .env.onebox.example .env
+# 编辑 .env，至少填写 INIT_ADMIN_PASSWORD
+docker compose -f compose.onebox.yml up -d ylink
+
+# 2. 正式启用：以后再叠加同一私有网络中的 MySQL 8.4
+# 先在 .env 中填写 MYSQL_PASSWORD 与 MYSQL_ROOT_PASSWORD
+docker compose -f compose.onebox.yml -f compose.onebox.mysql.yml up -d mysql
+```
+
+MySQL 健康后，在管理端“系统管理 -> 数据库迁移”填写：`host=mysql`、`port=3306`、`database=y_link`、`user=ylink` 和 `.env` 中的 `MYSQL_PASSWORD`。自动任务会冻结写入、生成一致性 SQLite 快照、复制并校验数据、写入运行时覆盖，然后让同一个 Onebox 计划重启到 MySQL。
+
+如果 MySQL 不是由可选叠加文件启动：安装在 Linux 宿主机时向导可填写 `host.docker.internal`，远程 MySQL 则填写 Onebox 容器可访问的 DNS 名称或 IP。`compose.onebox.yml` 已补齐 Linux 的 `host-gateway` 映射；无论目标在哪里，都不要把数据库公网端口开放给所有来源。
+
+迁移前应在 `.env` 中一并确认 `DB_POOL_SIZE`、`DB_CONNECT_TIMEOUT_MS`、`DB_ACQUIRE_TIMEOUT_MS`、`DB_IDLE_TIMEOUT_MS`、`DB_QUEUE_LIMIT` 与 `DB_MAX_QUERY_MS`。这些参数由 Onebox 容器持续保留，切换后同一个进程会用它们建立 MySQL 连接池；单实例默认连接池为 20，多个应用副本时必须按“实例数 × 每实例连接池”计算总连接数，并给 MySQL 运维连接留出余量。
+
+切换到 MySQL 并产生第一笔新业务写入后，旧 SQLite 已经是历史快照，系统会禁用“直接清除覆盖/回到旧 SQLite”。如需回退，必须恢复 MySQL 备份或执行受控反向迁移，避免静默丢单。
+
+运行边界：SQLite 模式固定为单 Onebox、单应用进程、本地持久化磁盘，100 个突发下单会进入有界写队列串行完成；需要持续百人并发写、第二个应用副本，或管理员接口 `GET /api/data-maintenance/database/performance` 中 `writeCoordinator.pendingWrites`、等待超时持续升高时，应迁移到 MySQL。万人浏览仍应由 Nginx/CDN 缓存吸收，不能把所有目录请求直接压到任一数据库。
+
+#### 新库直接使用外置 MySQL
+
+全新部署可使用 [compose.mysql.yml](./compose.mysql.yml) 与 [.env.docker.mysql.example](./.env.docker.mysql.example)。先创建 MySQL 8.4 的空库和专用账号，库字符集使用 `utf8mb4`；再复制环境变量模板并填写连接信息、管理员密码以及连接池参数。
+
+全新空库第一次启动可临时设置 `DB_SYNC=true` 创建当前版本的完整实体结构；后端健康后必须立即改回 `DB_SYNC=false` 并重建容器。`backend/sql/001_init_schema.sql` 只代表历史基础结构，不能单独当作当前版本的完整初始化脚本。存量 MySQL 禁止开启 `DB_SYNC=true`，必须先备份、停止业务写入，在预发演练后按版本号顺序执行尚未应用的增量 SQL，再以 `DB_SYNC=false` 启动应用。
+
+```bash
+cp .env.docker.mysql.example .env.docker.mysql
+# 编辑连接信息、强密码，并仅在确认目标库为空时临时设置 DB_SYNC=true
+docker compose --env-file .env.docker.mysql -f compose.mysql.yml up -d backend
+docker compose --env-file .env.docker.mysql -f compose.mysql.yml ps
+
+# /health 正常后，把 DB_SYNC 改回 false，再重建并启动完整应用
+docker compose --env-file .env.docker.mysql -f compose.mysql.yml up -d --force-recreate backend frontend
+```
+
+本轮高并发升级至少包含：
+
+- `034_high_concurrency_indexes.sql`：订单、库存日志、通知收件箱和会话清理索引；
+- `035_o2o_idempotency_business_sequence.sql`：O2O 下单幂等键与并发安全业务序列；
+- `036_notification_outbox.sql`：通知事件领取/重试字段、索引与投递去重约束；该脚本会合并历史重复收件箱的已读状态、保留最早记录并删除重复行，必须先备份并停止所有旧/新应用进程及通知 Worker，同时预留 DDL 窗口。
+
+通知 Outbox 对站内收件箱和数据库投递记录做唯一键去重；邮件、飞书等外部通道采用 **at-least-once（至少一次）** 交付。若第三方已经接收成功、但进程在写回 `sent` 状态前异常退出，恢复后可能再次投递；需要严格防重时，应同时为第三方通道配置其支持的幂等键或去重能力。
+
+升级顺序固定为“备份 -> 停止应用和业务写入 -> 按 `034`、`035`、`036` 顺序执行 -> 启动新版本”。商城目录缓存复用既有 `030_mall_catalog_performance_indexes.sql` 与本轮 `034` 索引，本轮没有额外 catalog 表结构脚本。实际升级清单仍以 `backend/sql/` 中“当前线上版本之后、目标版本之前”的增量脚本为准，不能只挑最后一个脚本执行。执行完成后再启动应用，并通过 `/health`、登录、商品查询、下单、通知重试链路验收。
+
+相关文件：
 
 - [compose.mysql.yml](./compose.mysql.yml)
 - [.env.docker.mysql.example](./.env.docker.mysql.example)
@@ -426,10 +505,30 @@ npm run local:dev
 | `npm --prefix backend run release:verify` | 后端发布回归 |
 | `npm run verify:onebox:smoke` | onebox 冒烟验证 |
 | `npm run verify:db:concurrency` | SQLite 副本 + MySQL 临时库并发验收 |
+| `npm run verify:db:migration:timeout` | 数据库迁移 Docker 前置门禁超时验证 |
+| `npm run verify:db:migration` | SQLite -> MySQL 隔离环境端到端验收 |
 | `npm run verify:performance` | 性能预算验证 |
 | `npm run verify:all` | 全量质量验证 |
 
 `verify:db:concurrency` 默认会通过 Docker 拉起 MySQL 8.4 临时环境。没有 Docker 时，可提供 `VERIFY_DB_CONCURRENCY_MYSQL_*` 连接到自备 MySQL。
+
+GitHub Pull Request 只自动运行短时的 `verify` 必要检查，包括文本编码、Web/后端构建、MySQL 结构契约、路由权限契约和写事务闸门。以下耗时验证改为在本地按改动范围执行，不再占用每个 PR 的托管 Runner：
+
+```bash
+# 数据库并发、迁移和发布前功能回归
+npm run verify:db:concurrency
+npm run verify:db:migration:timeout
+npm run verify:db:migration
+npm run verify:release
+
+# Docker 交付镜像构建
+docker build --file Dockerfile --tag ylink-frontend:local .
+docker build --file backend/Dockerfile --tag ylink-backend-sqlite:local backend
+docker build --file backend/Dockerfile.mysql --tag ylink-backend-mysql:local backend
+docker build --file Dockerfile.onebox --tag ylink-onebox:local .
+```
+
+涉及依赖变更时，再在本地执行 `npm audit --omit=dev` 与 `npm --prefix backend audit --omit=dev`。Mobile 工作流只在 `apps/mobile/**`、`packages/**`、`.npmrc` 或其专用检查脚本变化时触发；仅修改 Web、后端或根锁文件不会启动 Mobile 构建。
 
 ## 项目结构
 
@@ -448,6 +547,8 @@ Y-Link
 │  ├─ src/services/             业务服务
 │  ├─ sql/                      初始化和迁移 SQL
 │  └─ scripts/                  后端验证脚本
+├─ apps/mobile/                 根 npm workspace 中的 Expo Mobile 工程
+├─ packages/                    @ylink 跨端共享 packages
 ├─ docker/
 │  ├─ nginx/                    Nginx 配置
 │  └─ onebox/                   onebox 入口脚本
@@ -466,8 +567,10 @@ Y-Link
 | --- | --- |
 | `/app/data` | 容器内 SQLite 数据目录，必须持久化 |
 | `/app/uploads` | 容器内上传文件目录，必须持久化 |
-| `backend/sql` | MySQL 初始化和结构升级脚本 |
+| `backend/sql` | MySQL 历史增量迁移脚本（用于给已有库补齐特定变更；全新空库请用 `DB_SYNC=true` 初始化，详见 `.env.docker.mysql.example`） |
 | `backend/data` | 本地开发 SQLite 数据目录 |
+| `apps/mobile` | Mobile 路由占位、providers、本地与平台能力基础 |
+| `packages` | API client、共享类型、领域、校验与设计 token 边界 |
 | `docs` | 使用指南、迁移手册、维护文档 |
 
 ## 安全说明
@@ -483,4 +586,5 @@ Y-Link
 - [Y-Link 使用指南](./docs/Y-Link使用指南.md)
 - [数据库迁移演练与验收手册](./docs/Y-Link数据库迁移向导演练与验收手册.md)
 - [企业级维护与二开白皮书](./docs/Y-Link企业级维护与二开白皮书.md)
+- [移动端工程与共享基础](./docs/project-context/60-移动端工程与共享基础.md)
 - [GitHub Wiki](https://github.com/HF-CYGG/Y-Link/wiki)

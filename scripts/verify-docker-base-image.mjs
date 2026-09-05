@@ -2,8 +2,10 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
 const dockerfiles = [
+  'Dockerfile',
   'Dockerfile.onebox',
   'backend/Dockerfile',
+  'backend/Dockerfile.mysql',
 ]
 
 for (const filePath of dockerfiles) {
@@ -13,8 +15,8 @@ for (const filePath of dockerfiles) {
     `${filePath} should expose Y_LINK_NODE_IMAGE build arg for registry mirror override`,
   )
   assert.ok(
-    !source.includes('FROM node:20-bookworm-slim'),
-    `${filePath} should not pull node:20-bookworm-slim directly from Docker Hub`,
+    !/FROM\s+(?:--platform=\S+\s+)?node:20-bookworm-slim/.test(source),
+    `${filePath} should not use the EOL Node 20 base image directly`,
   )
   assert.ok(
     source.includes('${Y_LINK_NODE_IMAGE}'),

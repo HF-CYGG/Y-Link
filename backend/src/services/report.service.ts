@@ -11,6 +11,7 @@
  */
 
 import ExcelJS from 'exceljs'
+import type { Writable } from 'node:stream'
 import { In } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
@@ -46,10 +47,11 @@ export interface ReportQueryResult extends PaginationResult<ReportRow> {
   title: string
   fields: ReportFieldDefinition[]
   availableFields: ReportFieldDefinition[]
+  /** 仅供流式导出内部使用，普通分页 API 不返回。 */
+  nextCursor?: string | null
 }
 
 export interface ReportExportResult {
-  buffer: Buffer
   fileName: string
 }
 
@@ -62,7 +64,13 @@ interface ResolvedReportQuery {
   fields: ReportFieldDefinition[]
 }
 
+interface KeysetQueryOptions {
+  enabled: true
+  cursor?: string
+}
+
 interface OrderItemReportRaw {
+  rowId?: string | number
   createdAt: Date | string
   showNo: string | null
   orderType: string | null
@@ -80,6 +88,7 @@ interface OrderItemReportRaw {
 }
 
 interface OutboundFlowRaw {
+  rowId?: string | number
   createdAt: Date | string
   showNo: string | null
   orderType: string | null
@@ -96,6 +105,7 @@ interface OutboundFlowRaw {
 
 const DATE_MS = 24 * 60 * 60 * 1000
 const MAX_PAGE_SIZE = 100
+const EXPORT_BATCH_SIZE = 500
 
 const REPORT_TITLE_MAP: Record<ReportType, string> = {
   inventory: '库存一览表',
@@ -244,28 +254,61 @@ export class ReportService {
     return this.queryOrderItemReport(type, query)
   }
 
-  async exportExcel(type: ReportType, input: ReportQueryInput): Promise<ReportExportResult> {
+  async exportExcel(
+    type: ReportType,
+    input: ReportQueryInput,
+    output: Writable,
+    onReady?: () => void,
+  ): Promise<ReportExportResult> {
     const query = this.resolveQuery(type, input)
-    const allRowsQuery = {
-      ...query,
-      page: 1,
-      pageSize: Number.MAX_SAFE_INTEGER,
-    }
-    const result =
-      type === 'inventory'
-        ? await this.queryInventory(type, allRowsQuery)
+    const fetchBatch = (cursor?: string) => {
+      const batchQuery: ResolvedReportQuery = {
+        ...query,
+        page: 1,
+        pageSize: EXPORT_BATCH_SIZE,
+      }
+      const keyset: KeysetQueryOptions = { enabled: true, cursor }
+      return type === 'inventory'
+        ? this.queryInventory(type, batchQuery, undefined, keyset)
         : type === 'outbound-flow'
-          ? await this.queryOutboundFlow(type, allRowsQuery)
-          : await this.queryOrderItemReport(type, allRowsQuery)
+          ? this.queryOutboundFlow(type, batchQuery, undefined, keyset)
+          : this.queryOrderItemReport(type, batchQuery, undefined, keyset)
+    }
 
-    const workbook = new ExcelJS.Workbook()
+    // 首批数据库查询完成前不创建 ZIP/写响应。这样输入或首查询失败仍可返回
+    // 结构化错误；首批最后一个主键也锚定导出上界，后续新插入不会混入。
+    let result = await fetchBatch()
+    onReady?.()
+    const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
+      stream: output,
+      useStyles: true,
+      useSharedStrings: false,
+    })
     workbook.creator = 'Y-Link'
     workbook.created = new Date()
     const worksheet = workbook.addWorksheet(REPORT_TITLE_MAP[type])
-    this.fillWorksheet(worksheet, result.title, result.fields, result.list, input)
-    const buffer = await workbook.xlsx.writeBuffer()
+    this.initializeWorksheet(worksheet, REPORT_TITLE_MAP[type], query.fields, input)
+
+    let exportedRows = 0
+    while (true) {
+      result.list.forEach((row) => this.appendWorksheetRow(worksheet, query.fields, row))
+      exportedRows += result.list.length
+      if (result.list.length < EXPORT_BATCH_SIZE || !result.nextCursor) {
+        break
+      }
+      if (output.destroyed) {
+        throw new Error('报表下载连接已关闭')
+      }
+      result = await fetchBatch(result.nextCursor)
+    }
+
+    worksheet.autoFilter = {
+      from: { row: 5, column: 1 },
+      to: { row: Math.max(5, exportedRows + 5), column: Math.max(query.fields.length, 1) },
+    }
+    worksheet.commit()
+    await workbook.commit()
     return {
-      buffer: Buffer.from(buffer),
       fileName: `report-${type}-${new Date().toISOString().slice(0, 19).replaceAll(/[:T]/g, '-')}.xlsx`,
     }
   }
@@ -319,7 +362,12 @@ export class ReportService {
     return uniqueFields.map((field) => availableFieldMap.get(field) as ReportFieldDefinition)
   }
 
-  private async queryInventory(type: ReportType, query: ResolvedReportQuery): Promise<ReportQueryResult> {
+  private async queryInventory(
+    type: ReportType,
+    query: ResolvedReportQuery,
+    knownTotal?: number,
+    keyset?: KeysetQueryOptions,
+  ): Promise<ReportQueryResult> {
     const productRepo = AppDataSource.getRepository(BaseProduct)
     const relationRepo = AppDataSource.getRepository(RelProductTag)
     const productIdsByTags = await this.resolveProductIdsByTagIds(query.tagIds)
@@ -331,7 +379,15 @@ export class ReportService {
     if (productIdsByTags.length > 0) {
       qb.andWhere('product.id IN (:...productIds)', { productIds: productIdsByTags })
     }
-    const products = await qb.orderBy('product.id', 'DESC').getMany()
+    if (keyset?.cursor) {
+      qb.andWhere('product.id < :cursorId', { cursorId: keyset.cursor })
+    }
+    const total = keyset ? 0 : (knownTotal ?? await qb.clone().getCount())
+    qb.orderBy('product.id', 'DESC').take(query.pageSize)
+    if (!keyset) {
+      qb.skip((query.page - 1) * query.pageSize)
+    }
+    const products = await qb.getMany()
     const relations = products.length > 0
       ? await relationRepo.find({
           where: { productId: In(products.map((product) => String(product.id))) },
@@ -356,11 +412,21 @@ export class ReportService {
       }
     })
 
-    const pagedRows = rows.slice((query.page - 1) * query.pageSize, query.page * query.pageSize)
-    return this.buildResult(type, query, pagedRows, rows.length)
+    return this.buildResult(
+      type,
+      query,
+      rows,
+      total,
+      keyset ? String(products.at(-1)?.id ?? '') || null : undefined,
+    )
   }
 
-  private async queryOrderItemReport(type: ReportType, query: ResolvedReportQuery): Promise<ReportQueryResult> {
+  private async queryOrderItemReport(
+    type: ReportType,
+    query: ResolvedReportQuery,
+    knownTotal?: number,
+    keyset?: KeysetQueryOptions,
+  ): Promise<ReportQueryResult> {
     const productIdsByTags = await this.resolveProductIdsByTagIds(query.tagIds)
     if (query.tagIds.length > 0 && productIdsByTags.length === 0) {
       return this.buildResult(type, query, [], 0)
@@ -369,7 +435,8 @@ export class ReportService {
     const baseQb = AppDataSource.getRepository(BizOutboundOrderItem)
       .createQueryBuilder('item')
       .innerJoin(BizOutboundOrder, 'order', 'order.id = item.orderId')
-      .select('order.createdAt', 'createdAt')
+      .select('item.id', 'rowId')
+      .addSelect('order.createdAt', 'createdAt')
       .addSelect('order.showNo', 'showNo')
       .addSelect('order.orderType', 'orderType')
       .addSelect('item.productId', 'productId')
@@ -400,24 +467,42 @@ export class ReportService {
     if (productIdsByTags.length > 0) {
       baseQb.andWhere('item.productId IN (:...productIds)', { productIds: productIdsByTags })
     }
+    if (keyset?.cursor) {
+      baseQb.andWhere('item.id < :cursorId', { cursorId: keyset.cursor })
+    }
 
-    const total = await baseQb.clone().getCount()
-    const rawRows = await baseQb
-      .orderBy('order.createdAt', 'DESC')
-      .addOrderBy('order.id', 'DESC')
-      .addOrderBy('item.lineNo', 'ASC')
-      .skip((query.page - 1) * query.pageSize)
-      .take(query.pageSize)
-      .getRawMany<OrderItemReportRaw>()
+    const total = keyset ? 0 : (knownTotal ?? await baseQb.clone().getCount())
+    if (keyset) {
+      baseQb.orderBy('item.id', 'DESC')
+    } else {
+      baseQb
+        .orderBy('order.createdAt', 'DESC')
+        .addOrderBy('order.id', 'DESC')
+        .addOrderBy('item.lineNo', 'ASC')
+        .skip((query.page - 1) * query.pageSize)
+    }
+    const rawRows = await baseQb.take(query.pageSize).getRawMany<OrderItemReportRaw>()
     const tagMap = await this.loadProductTagMap(rawRows.map((row) => String(row.productId ?? '').trim()).filter(Boolean))
     const rows = rawRows.map((row) => this.buildOrderItemReportRow(row, tagMap))
-    return this.buildResult(type, query, rows, total)
+    return this.buildResult(
+      type,
+      query,
+      rows,
+      total,
+      keyset ? String(rawRows.at(-1)?.rowId ?? '') || null : undefined,
+    )
   }
 
-  private async queryOutboundFlow(type: ReportType, query: ResolvedReportQuery): Promise<ReportQueryResult> {
+  private async queryOutboundFlow(
+    type: ReportType,
+    query: ResolvedReportQuery,
+    knownTotal?: number,
+    keyset?: KeysetQueryOptions,
+  ): Promise<ReportQueryResult> {
     const qb = AppDataSource.getRepository(BizOutboundOrder)
       .createQueryBuilder('order')
-      .select('order.createdAt', 'createdAt')
+      .select('order.id', 'rowId')
+      .addSelect('order.createdAt', 'createdAt')
       .addSelect('order.showNo', 'showNo')
       .addSelect('order.orderType', 'orderType')
       .addSelect('order.totalAmount', 'totalAmount')
@@ -437,14 +522,19 @@ export class ReportService {
     if (query.endExclusive) {
       qb.andWhere('order.createdAt < :endExclusive', { endExclusive: query.endExclusive })
     }
+    if (keyset?.cursor) {
+      qb.andWhere('order.id < :cursorId', { cursorId: keyset.cursor })
+    }
 
-    const total = await qb.clone().getCount()
-    const rawRows = await qb
-      .orderBy('order.createdAt', 'DESC')
-      .addOrderBy('order.id', 'DESC')
-      .skip((query.page - 1) * query.pageSize)
-      .take(query.pageSize)
-      .getRawMany<OutboundFlowRaw>()
+    const total = keyset ? 0 : (knownTotal ?? await qb.clone().getCount())
+    qb.orderBy('order.id', 'DESC').take(query.pageSize)
+    if (!keyset) {
+      qb
+        .orderBy('order.createdAt', 'DESC')
+        .addOrderBy('order.id', 'DESC')
+        .skip((query.page - 1) * query.pageSize)
+    }
+    const rawRows = await qb.getRawMany<OutboundFlowRaw>()
     const rows = rawRows.map((row) => ({
       time: formatDateTime(row.createdAt),
       showNo: normalizeText(row.showNo),
@@ -459,7 +549,13 @@ export class ReportService {
       isSystemApplied: row.orderType === 'department' ? getFlagLabel(row.isSystemApplied) : '不适用',
       recordStatus: normalizeBoolean(row.isDeleted) ? '已删除' : '正常',
     }))
-    return this.buildResult(type, query, rows, total)
+    return this.buildResult(
+      type,
+      query,
+      rows,
+      total,
+      keyset ? String(rawRows.at(-1)?.rowId ?? '') || null : undefined,
+    )
   }
 
   private buildOrderItemReportRow(raw: OrderItemReportRaw, tagMap: Map<string, string[]>): ReportRow {
@@ -481,8 +577,14 @@ export class ReportService {
     }
   }
 
-  private buildResult(type: ReportType, query: ResolvedReportQuery, rows: ReportRow[], total: number): ReportQueryResult {
-    return {
+  private buildResult(
+    type: ReportType,
+    query: ResolvedReportQuery,
+    rows: ReportRow[],
+    total: number,
+    nextCursor?: string | null,
+  ): ReportQueryResult {
+    const result: ReportQueryResult = {
       type,
       title: REPORT_TITLE_MAP[type],
       page: query.page,
@@ -492,6 +594,10 @@ export class ReportService {
       availableFields: this.getFieldDefinitions(type),
       list: rows.map((row) => projectSelectedRow(row, query.fields)),
     }
+    if (nextCursor !== undefined) {
+      result.nextCursor = nextCursor
+    }
+    return result
   }
 
   private async resolveProductIdsByTagIds(tagIds: string[]): Promise<string[]> {
@@ -533,11 +639,10 @@ export class ReportService {
     return tagMap
   }
 
-  private fillWorksheet(
+  private initializeWorksheet(
     worksheet: ExcelJS.Worksheet,
     title: string,
     fields: ReportFieldDefinition[],
-    rows: ReportRow[],
     query: ReportQueryInput,
   ) {
     const columnCount = Math.max(fields.length, 1)
@@ -572,23 +677,29 @@ export class ReportService {
       }
     })
 
-    rows.forEach((row) => {
-      const values = fields.map((field) => row[field.key] ?? '')
-      const nextRow = worksheet.addRow(values)
-      fields.forEach((field, index) => {
-        const cell = nextRow.getCell(index + 1)
-        cell.alignment = { vertical: 'middle', horizontal: field.numeric ? 'right' : 'left' }
-        cell.border = {
-          bottom: { style: 'thin', color: { argb: 'FFE2E8F0' } },
-        }
-      })
-    })
-
     worksheet.views = [{ state: 'frozen', ySplit: 5 }]
-    worksheet.autoFilter = {
-      from: { row: 5, column: 1 },
-      to: { row: Math.max(5, rows.length + 5), column: columnCount },
-    }
+    worksheet.getRow(1).commit()
+    worksheet.getRow(2).commit()
+    worksheet.getRow(3).commit()
+    worksheet.getRow(4).commit()
+    headerRow.commit()
+  }
+
+  private appendWorksheetRow(
+    worksheet: ExcelJS.Worksheet,
+    fields: ReportFieldDefinition[],
+    row: ReportRow,
+  ): void {
+    const values = fields.map((field) => row[field.key] ?? '')
+    const nextRow = worksheet.addRow(values)
+    fields.forEach((field, index) => {
+      const cell = nextRow.getCell(index + 1)
+      cell.alignment = { vertical: 'middle', horizontal: field.numeric ? 'right' : 'left' }
+      cell.border = {
+        bottom: { style: 'thin', color: { argb: 'FFE2E8F0' } },
+      }
+    })
+    nextRow.commit()
   }
 }
 

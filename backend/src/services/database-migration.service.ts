@@ -40,6 +40,7 @@ import {
 import { auditService } from './audit.service.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { o2oPreorderService } from './o2o-preorder.service.js'
+import { requestRuntimeShutdown } from '../runtime/runtime-shutdown.js'
 
 type MigrationIssueLevel = 'info' | 'warning' | 'error'
 type MigrationTaskStatus =
@@ -266,6 +267,10 @@ export interface DatabaseRuntimeOverrideStateResult {
     recommendedAction: string
     nextStep: string
     riskTip: string
+  }
+  rollbackSafety: {
+    directSqliteRollbackAllowed: boolean
+    reason: string
   }
 }
 
@@ -3380,7 +3385,10 @@ export class DatabaseMigrationService {
       })
 
       setTimeout(() => {
-        process.exit(cutoverModule.PLANNED_DATABASE_MIGRATION_EXIT_CODE)
+        void requestRuntimeShutdown(
+          'database_cutover_restart',
+          cutoverModule.PLANNED_DATABASE_MIGRATION_EXIT_CODE,
+        )
       }, 250)
     } catch (error) {
       if (error instanceof AutomaticMigrationCancelledError && !automaticRollbackPrepared) {
@@ -4406,8 +4414,29 @@ export class DatabaseMigrationService {
   private async schedulePlannedAutomaticMigrationRestart(): Promise<void> {
     const cutoverModule = await import('./database-migration-cutover.service.js')
     setTimeout(() => {
-      process.exit(cutoverModule.PLANNED_DATABASE_MIGRATION_EXIT_CODE)
+      void requestRuntimeShutdown(
+        'database_rollback_restart',
+        cutoverModule.PLANNED_DATABASE_MIGRATION_EXIT_CODE,
+      )
     }, 250)
+  }
+
+  /**
+   * MySQL 已经作为当前进程的活动数据库后，旧 SQLite 不再接收新写入。
+   * 此时直接清理覆盖或写回 SQLite 覆盖会让重启后的应用读取过期快照，造成迁移后订单静默丢失。
+   * 只有仍处于自动迁移只读/验收窗口、且 stopAutomaticMigrationForEmergencyAction 已确认任务所有权时，
+   * 才允许走原有的紧急回退链路。
+   */
+  private assertDirectSqliteRollbackIsSafe(
+    stoppedAutomaticTask: { taskId: string; sourceSqlitePath: string } | null,
+  ): void {
+    if (stoppedAutomaticTask || AppDataSource.options.type !== 'mysql') {
+      return
+    }
+    throw new BizError(
+      'MySQL 已正式接管业务写入，旧 SQLite 已不再同步。为避免丢失迁移后的订单，禁止直接回退；请从 MySQL 备份恢复，或在停止写入后执行受控反向迁移。',
+      409,
+    )
   }
 
   private async writeMysqlRuntimeOverride(
@@ -4443,12 +4472,26 @@ export class DatabaseMigrationService {
     const activeOverride = maskDatabaseRuntimeOverride(readDatabaseRuntimeOverride())
     const effectiveDatabase = buildEffectiveDatabaseSummary(activeOverride)
     const runtimeOverrideStatus = buildRuntimeOverrideStatusSummary(activeOverride)
+    const cutoverModule = await import('./database-migration-cutover.service.js')
+    const cutoverMarker = cutoverModule.readDatabaseMigrationCutoverMarker()
+    const emergencyCutoverWindow = Boolean(
+      cutoverMarker
+      && databaseMaintenanceModeService.isReadOnly()
+      && ['mysql_pending', 'verifying', 'rollback_pending'].includes(cutoverMarker.status),
+    )
+    const directSqliteRollbackAllowed = AppDataSource.options.type !== 'mysql' || emergencyCutoverWindow
     return {
       filePath: appDataPaths.runtimeOverrideFile,
       activeOverride,
       effectiveDatabase,
       runtimeOverrideStatus,
       beginnerGuide: buildBeginnerGuide(effectiveDatabase, runtimeOverrideStatus),
+      rollbackSafety: {
+        directSqliteRollbackAllowed,
+        reason: directSqliteRollbackAllowed
+          ? '当前仍处于 SQLite 或受控迁移验收窗口，可按迁移任务执行安全回退。'
+          : 'MySQL 已正式接管业务写入，旧 SQLite 已停止同步；直接回退会丢失迁移后的订单。',
+      },
     }
   }
 
@@ -4513,6 +4556,7 @@ export class DatabaseMigrationService {
       input.taskId,
       input.sqlitePath,
     )
+    this.assertDirectSqliteRollbackIsSafe(stoppedAutomaticTask)
 
     if (input.clearOnly) {
       if (stoppedAutomaticTask) {
@@ -4652,6 +4696,7 @@ export class DatabaseMigrationService {
   ): Promise<{ cleared: boolean; restartRequired: true }> {
     const adminActor = await this.assertAdminActor(actor, requestMeta, 'database_migration.clear_override', '清理数据库运行时覆盖配置')
     const stoppedAutomaticTask = await this.stopAutomaticMigrationForEmergencyAction()
+    this.assertDirectSqliteRollbackIsSafe(stoppedAutomaticTask)
     if (stoppedAutomaticTask) {
       await auditService.safeRecord({
         actionType: 'database_migration.clear_override',

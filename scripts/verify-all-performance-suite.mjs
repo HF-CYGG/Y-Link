@@ -41,6 +41,8 @@ const runNpmScript = async (title, scriptName, cwd) => {
 }
 
 const main = async () => {
+  await runNpmScript('Onebox 双库性能契约', 'verify:onebox:dual-db-performance', projectRoot)
+
   // 前端性能套件：包含 build + 预算校验 + 核心路径回归，属于页面性能与交互性能主入口。
   await runNpmScript('前端性能套件', 'verify:performance', projectRoot)
 

@@ -4,7 +4,7 @@
  * 维护说明：维护时重点关注配置项默认值、通道模板字段约束与前后端配置结构对齐。
  */
 
-import { request } from '@/api/http'
+import { request, type RequestConfig } from '@/api/http'
 
 export type OrderSerialType = 'department' | 'walkin'
 
@@ -67,6 +67,19 @@ export interface UpdateO2oRuleConfigsResult {
   changed: boolean
 }
 
+export type SmsVerificationProviderType = 'generic_http' | 'aliyun_dypns'
+export type VerificationScene = 'register' | 'forgot_password' | 'profile_update' | 'test'
+export type SmsVerificationSendStatus = 'pending' | 'sent' | 'failed'
+export type SmsVerificationDeliveryStatus = 'pending' | 'delivered' | 'failed'
+export type SmsVerificationResultStatus = 'pending' | 'passed' | 'failed'
+
+export interface AliyunDypnsTemplateConfig {
+  register: string
+  forgotPassword: string
+  profileUpdate: string
+  test: string
+}
+
 export interface VerificationProviderChannelConfig {
   enabled: boolean
   httpMethod: 'POST' | 'GET'
@@ -80,8 +93,21 @@ export interface VerificationProviderChannelConfig {
   updatedAt: string
 }
 
+export interface VerificationProviderMobileChannelConfig extends VerificationProviderChannelConfig {
+  providerType: SmsVerificationProviderType
+  aliyunSignName: string
+  aliyunSchemeName: string
+  aliyunTemplates: AliyunDypnsTemplateConfig
+  credentialsConfigured: boolean
+  ticketHmacConfigured: boolean
+  mnsEnabled: boolean
+  mnsConfigured: boolean
+  ready: boolean
+  statusError: string | null
+}
+
 export interface VerificationProviderConfigsResult {
-  mobile: VerificationProviderChannelConfig
+  mobile: VerificationProviderMobileChannelConfig
   email: VerificationProviderChannelConfig
 }
 
@@ -94,8 +120,15 @@ export interface VerificationProviderChannelInput {
   successMatch: string
 }
 
+export interface VerificationProviderMobileChannelInput extends VerificationProviderChannelInput {
+  providerType: SmsVerificationProviderType
+  aliyunSignName: string
+  aliyunSchemeName: string
+  aliyunTemplates: AliyunDypnsTemplateConfig
+}
+
 export interface UpdateVerificationProviderConfigsPayload {
-  mobile: VerificationProviderChannelInput
+  mobile: VerificationProviderMobileChannelInput
   email: VerificationProviderChannelInput
 }
 
@@ -156,13 +189,56 @@ export interface UpdateCustomerServiceConfigsResult {
 export interface TestVerificationProviderPayload {
   channel: 'mobile' | 'email'
   target: string
-  config: VerificationProviderChannelInput
+  config: VerificationProviderChannelInput | VerificationProviderMobileChannelInput
 }
 
-export interface TestVerificationProviderResult {
+export interface GenericTestVerificationProviderResult {
   channel: 'mobile' | 'email'
   target: string
   code: string
+}
+
+export interface AliyunTestVerificationProviderResult {
+  provider: 'aliyun_dypns'
+  outId: string
+  bizId: string | null
+  targetMasked: string
+  expireSeconds: number
+}
+
+export type TestVerificationProviderResult =
+  | GenericTestVerificationProviderResult
+  | AliyunTestVerificationProviderResult
+
+export interface SmsVerificationReceiptQuery {
+  page: number
+  pageSize: number
+  scene?: VerificationScene
+  deliveryStatus?: SmsVerificationDeliveryStatus
+  startDate?: string
+  endDate?: string
+}
+
+export interface SmsVerificationReceiptRecord {
+  outId: string
+  bizId: string | null
+  scene: VerificationScene
+  targetMasked: string
+  sendStatus: SmsVerificationSendStatus
+  deliveryStatus: SmsVerificationDeliveryStatus
+  verificationStatus: SmsVerificationResultStatus
+  errorCode: string | null
+  sentAt: string | null
+  reportedAt: string | null
+  verifiedAt: string | null
+  createdAt: string
+}
+
+export interface SmsVerificationReceiptListResult {
+  items: SmsVerificationReceiptRecord[]
+  total: number
+  page: number
+  pageSize: number
 }
 
 export interface ClientDepartmentConfigRecord {
@@ -345,6 +421,21 @@ export const getVerificationProviderConfigs = () =>
   request<VerificationProviderConfigsResult>({
     method: 'GET',
     url: '/system-configs/verification-providers',
+  })
+
+/**
+ * 查询最近短信回执：
+ * - 仅返回脱敏目标、平台业务号和状态时间，不接收或暴露完整手机号与错误详情。
+ */
+export const getSmsVerificationReceipts = (
+  params: SmsVerificationReceiptQuery,
+  requestConfig: RequestConfig = {},
+) =>
+  request<SmsVerificationReceiptListResult>({
+    ...requestConfig,
+    method: 'GET',
+    url: '/system-configs/verification-providers/sms-receipts',
+    params,
   })
 
 /**

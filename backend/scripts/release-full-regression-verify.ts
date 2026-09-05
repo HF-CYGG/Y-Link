@@ -245,6 +245,28 @@ async function main() {
     assert.ok(adminProfile.permissions.includes('products:manage'))
     pass('管理端鉴权态读取通过')
 
+    const databasePerformance = await expectJsonOk<{
+      data: {
+        engine: string
+        supportsConcurrentWriters: boolean
+        supportsMultipleApiInstances: boolean
+        writeCoordinator: unknown
+      }
+    }>(
+      () =>
+        fetch(`${baseUrl}/api/data-maintenance/database/performance`, {
+          headers: {
+            Authorization: `Bearer ${adminToken}`,
+          },
+        }),
+      '管理员数据库性能摘要读取',
+    )
+    assert.equal(databasePerformance.engine, 'sqlite')
+    assert.equal(databasePerformance.supportsConcurrentWriters, false)
+    assert.equal(databasePerformance.supportsMultipleApiInstances, false)
+    assert.ok(Object.hasOwn(databasePerformance, 'writeCoordinator'))
+    pass('管理员数据库性能摘要读取通过')
+
     const createdOperator = await expectJsonOk<{
       data: {
         id: string
@@ -1083,6 +1105,7 @@ async function main() {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
+            clientRequestId: 'release-full-preorder-0001',
             items: [{ productId: createdProduct.id, qty: 2 }],
             isSystemApplied: false,
             pickupContact: clientUsername,

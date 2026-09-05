@@ -7,7 +7,9 @@
 # - 仅适用于 DB_TYPE=mysql 的公网或正式部署；
 # - 如需 SQLite 一体化部署，继续使用 backend/Dockerfile。
 # ------------------------------
-FROM node:20-bookworm-slim AS build
+ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:22-bookworm-slim
+
+FROM ${Y_LINK_NODE_IMAGE} AS build
 
 WORKDIR /app
 
@@ -21,7 +23,7 @@ RUN npm run build \
   && npm prune --omit=dev \
   && npm uninstall sqlite3
 
-FROM node:20-bookworm-slim AS runtime
+FROM ${Y_LINK_NODE_IMAGE} AS runtime
 
 WORKDIR /app
 

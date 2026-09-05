@@ -8,7 +8,7 @@
 
 
 import { useVirtualList } from '@vueuse/core'
-import { computed, nextTick, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
 import { ArrowDown, ArrowRight, Close, Search, ShoppingCart } from '@element-plus/icons-vue'
@@ -127,6 +127,10 @@ const CATEGORY_BOTTOM_VISIBLE_PADDING = 56
 const DEFAULT_PRODUCT_IMAGE_WARMUP_BATCH = 12
 const DEFAULT_PRODUCT_IMAGE_WARMUP_DELAY_MS = 180
 const PRODUCT_CARD_SEARCH_DETAIL_MAX_LENGTH = 80
+const STOREFRONT_REFRESH_MIN_INTERVAL_MS = 60_000
+let lastStorefrontRefreshAt = 0
+let mallRuntimeActive = false
+let hasActivatedOnce = false
 
 // 商城页属于高频返回页面，初始化时优先恢复购物车与目录缓存，避免每次进入都重置上下文。
 clientCartStore.initialize(clientAuthStore.currentUser?.id)
@@ -520,10 +524,14 @@ const warmupProductImages = (items: O2oMallProduct[]) => {
   globalThis.window.setTimeout(warmup, DEFAULT_PRODUCT_IMAGE_WARMUP_DELAY_MS)
 }
 
-const refreshStorefrontConfig = async () => {
+const refreshStorefrontConfig = async (force = false) => {
+  if (!force && lastStorefrontRefreshAt && Date.now() - lastStorefrontRefreshAt < STOREFRONT_REFRESH_MIN_INTERVAL_MS) {
+    return
+  }
   try {
     const storefront = await getO2oMallStorefront()
     clientCatalogStore.setStorefront(storefront)
+    lastStorefrontRefreshAt = Date.now()
   } catch (error) {
     console.warn('刷新客户端商城公告配置失败，继续使用本地缓存', error)
   }
@@ -559,7 +567,7 @@ watch([mallAnnouncementText, isPhone], () => {
 const loadProducts = async (force = false) => {
   // 如果缓存仍在有效期内，则直接复用本地目录快照，并只同步购物车库存信息。
   // 这样从订单页返回商城页时可以“秒开”，同时避免旧库存继续污染购物车状态。
-  if (!force && clientCatalogStore.products.length > 0 && clientCatalogStore.isFresh) {
+  if (!force && clientCatalogStore.products.length > 0 && clientCatalogStore.isFreshNow()) {
     requestError.value = null
     await refreshStorefrontConfig()
     clientCartStore.syncWithCatalog(clientCatalogStore.products)
@@ -576,6 +584,7 @@ const loadProducts = async (force = false) => {
       // 1. 目录 Store 负责商品列表、分类与搜索上下文；
       // 2. 购物车 Store 负责把已选商品映射到最新库存/限购规则。
       clientCatalogStore.setProducts(result)
+      lastStorefrontRefreshAt = Date.now()
       clientCartStore.syncWithCatalog(result.list)
       warmupProductImages(result.list)
       const activeExists = categoryOptions.value.some((option) => option.key === activeCategoryKey.value)
@@ -1111,13 +1120,39 @@ watch(
   },
 )
 
+const activateMallRuntime = () => {
+  if (mallRuntimeActive) {
+    return
+  }
+  mallRuntimeActive = true
+  globalThis.window.addEventListener('resize', handleMallViewportResize, { passive: true })
+  if (hasActivatedOnce && globalThis.document?.visibilityState !== 'hidden') {
+    // KeepAlive 返回时只在 TTL 过期或轻量快照尚未补全时重拉，避免每次切页都请求完整目录。
+    void loadProducts().then(syncMallViewportAfterRender)
+  }
+  hasActivatedOnce = true
+}
+
+const deactivateMallRuntime = () => {
+  if (!mallRuntimeActive) {
+    return
+  }
+  mallRuntimeActive = false
+  clearCategoryUnlockTimer()
+  globalThis.window.removeEventListener('resize', handleMallViewportResize)
+}
+
+onActivated(() => {
+  activateMallRuntime()
+})
+
 onDeactivated(() => {
+  deactivateMallRuntime()
   mobileSearchVisible.value = false
   searchInputFocused.value = false
 })
 
 onMounted(async () => {
-  globalThis.window.addEventListener('resize', handleMallViewportResize, { passive: true })
   const hasHydratedCatalog = products.value.length > 0
   if (hasHydratedCatalog) {
     // 已有缓存时先把现有内容稳定渲染出来，再后台刷新，避免首屏等待被网络重新拉长。
@@ -1137,8 +1172,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  clearCategoryUnlockTimer()
-  globalThis.window.removeEventListener('resize', handleMallViewportResize)
+  deactivateMallRuntime()
 })
 </script>
 

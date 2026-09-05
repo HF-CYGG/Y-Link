@@ -9,6 +9,7 @@
  */
 
 import { AppDataSource } from '../config/data-source.js'
+import { runInTransaction } from '../config/transaction-runner.js'
 import { Brackets, type EntityManager } from 'typeorm'
 import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
@@ -16,6 +17,7 @@ import { BaseProduct } from '../entities/base-product.entity.js'
 import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import {
+  isRetryableMysqlTransactionError,
   isRetryableSqliteLockError,
   isUniqueConstraintError,
 } from '../utils/database-errors.js'
@@ -180,7 +182,7 @@ const O2O_VERIFIED_PREORDER_IDEMPOTENCY_KEY_PREFIX = 'o2o-preorder-verify:'
 const ORDER_FIELD_LIMITS = {
   idempotencyKey: 128,
   issuerName: 64,
-  customerDepartmentName: 128,
+  customerDepartmentName: 271,
   customerName: 128,
   orderRemark: 500,
   itemRemark: 200,
@@ -347,7 +349,7 @@ export class OrderService {
       throw new BizError('请填写业务单号完成二次确认')
     }
 
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const orderRepo = manager.getRepository(BizOutboundOrder)
       const order = await orderRepo.findOne({ where: { id } })
       if (!order) {
@@ -401,7 +403,7 @@ export class OrderService {
    * - 保留主单与明细原始数据，恢复后可继续查询与查看详情。
    */
   async restoreById(id: string, actor: AuthUserContext, requestMeta?: RequestMeta): Promise<OrderSummaryView> {
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const orderRepo = manager.getRepository(BizOutboundOrder)
       const order = await orderRepo.findOne({ where: { id } })
       if (!order) {
@@ -462,7 +464,7 @@ export class OrderService {
       throw new BizError('请填写业务单号完成二次确认')
     }
 
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const orderRepo = manager.getRepository(BizOutboundOrder)
       const order = await orderRepo.findOne({ where: { id } })
       if (!order) {
@@ -543,7 +545,7 @@ export class OrderService {
     let lastError: unknown
     for (let attempt = 1; attempt <= ORDER_SUBMIT_MAX_RETRY; attempt += 1) {
       try {
-        return await AppDataSource.transaction(async (manager) => {
+        return await runInTransaction(async (manager) => {
           const orderRepo = manager.getRepository(BizOutboundOrder)
           const itemRepo = manager.getRepository(BizOutboundOrderItem)
           const productRepo = manager.getRepository(BaseProduct)
@@ -645,6 +647,10 @@ export class OrderService {
         }
 
         if (this.shouldRetrySubmitError(error, attempt)) {
+          const backoffMs = 25 * (2 ** (attempt - 1)) + Math.floor(Math.random() * 25)
+          await new Promise<void>((resolve) => {
+            setTimeout(resolve, backoffMs)
+          })
           continue
         }
 
@@ -802,7 +808,11 @@ export class OrderService {
   private shouldRetrySubmitError(error: unknown, attempt: number) {
     return (
       attempt < ORDER_SUBMIT_MAX_RETRY
-      && (isUniqueConstraintError(error, SHOW_NO_CONSTRAINT_MATCHER) || isRetryableSqliteLockError(error))
+      && (
+        isUniqueConstraintError(error, SHOW_NO_CONSTRAINT_MATCHER)
+        || isRetryableSqliteLockError(error)
+        || isRetryableMysqlTransactionError(error)
+      )
     )
   }
 

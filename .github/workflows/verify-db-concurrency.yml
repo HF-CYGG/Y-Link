@@ -1,17 +1,8 @@
-# 模块说明：GitHub Actions 数据库并发验收流水线
-# 文件职责：在 CI 中复用项目统一入口 `npm run verify:db:concurrency`，自动准备受控 MySQL 临时环境并执行并发校验
-# 维护说明：若后续调整 Node 版本、依赖安装方式或并发验收入口，请同步更新本文件
+# 模块说明：GitHub Pull Request 必要检查
+# 文件职责：只运行 Web/后端构建和秒级关键契约，尽快确认提交具备合入基础。
+# 维护说明：Ruleset 要求的状态名是 `verify`，不得改名；Docker、数据库迁移、并发与依赖审计改在本地按改动范围执行。
 
-#
-# 文件说明：GitHub Actions 数据库并发验收工作流。
-# 实现逻辑：
-# 1. 在手动触发、主分支推送或拉取请求时执行；
-# 2. 安装根目录与后端依赖前，显式把 npm registry 固定为官方源；
-# 3. 安装完成后分别执行根目录与后端 `npm audit`，确保 CI 使用官方审计口径；
-# 4. 最后复用统一命令 `npm run verify:db:concurrency`；
-# 5. MySQL 临时环境由脚本内部自动通过 Docker Compose 准备与清理，避免 CI 额外维护服务编排。
-#
-name: verify-db-concurrency
+name: PR 必要检查
 
 on:
   pull_request:
@@ -29,8 +20,9 @@ concurrency:
 
 jobs:
   verify:
+    name: verify
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
     steps:
@@ -47,17 +39,26 @@ jobs:
             package-lock.json
             backend/package-lock.json
 
-      - name: 安装根目录依赖
-        run: npm ci
+      - name: 安装根 Web 依赖
+        run: npm ci --workspaces=false
 
       - name: 安装后端依赖
         run: npm --prefix ./backend ci
 
-      - name: 执行前端依赖安全审计
-        run: npm audit --audit-level=high
+      - name: 检查文本编码
+        run: npm run verify:text-encoding
 
-      - name: 执行后端依赖安全审计
-        run: npm --prefix ./backend audit --audit-level=high
+      - name: 构建 Web
+        run: npm run build
 
-      - name: 执行数据库并发验收
-        run: npm run verify:db:concurrency
+      - name: 构建后端
+        run: npm --prefix ./backend run build
+
+      - name: 执行 MySQL 启动结构契约验收
+        run: npm --prefix ./backend run verify:mysql:schema-contract
+
+      - name: 执行路由权限契约检查
+        run: npm --prefix ./backend run task2:route-contract:verify
+
+      - name: 执行写事务闸门契约检查
+        run: npm --prefix ./backend run write-transaction:contract:verify

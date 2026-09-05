@@ -4,11 +4,70 @@
  * 实现逻辑：
  * - 统一通过浏览器 `CustomEvent` 在当前页面广播订单变更，保证同标签页内不同模块能立即感知；
  * - 同时把最新事件写入 `localStorage`，借助 `storage` 事件让其它标签页也能收到刷新信号；
+ * - 为订单列表静默刷新提供分页计划与去重合并，确保单次请求不超过后端查询上限；
  * - 订阅方只关心“收到订单变更事件”这一件事，具体是刷新详情还是列表，由页面按自身上下文决定。
  * 维护说明：
  * - 若后续需要细分更多订单变更原因，只需在 `ClientOrderRefreshReason` 中补齐枚举即可；
+ * - `CLIENT_ORDER_QUERY_MAX_PAGE_SIZE` 必须与后端 `myOrderQuerySchema` 的最大 pageSize 保持一致；
  * - 本工具只负责广播信号，不直接发请求，避免共享层与具体业务接口耦合。
  */
+
+export const CLIENT_ORDER_QUERY_MAX_PAGE_SIZE = 50
+
+export interface ClientOrderSilentRefreshPlan {
+  requestPageSize: number
+  requestPageCount: number
+  targetRecordCount: number
+}
+
+const normalizePositiveInteger = (value: number, fallback: number) => {
+  if (!Number.isFinite(value)) {
+    return fallback
+  }
+  return Math.max(1, Math.trunc(value))
+}
+
+/**
+ * 静默刷新需要覆盖“当前已加载记录 + 一页缓冲”，用于吸收列表顶部新插入的订单。
+ * 当目标范围超过接口单页上限时改用多页读取，禁止通过超大 pageSize 绕过后端约束。
+ */
+export const buildClientOrderSilentRefreshPlan = (payload: {
+  loadedCount: number
+  logicalPageSize: number
+}): ClientOrderSilentRefreshPlan => {
+  const logicalPageSize = Math.min(
+    CLIENT_ORDER_QUERY_MAX_PAGE_SIZE,
+    normalizePositiveInteger(payload.logicalPageSize, 20),
+  )
+  const loadedCount = Math.max(0, Math.trunc(Number.isFinite(payload.loadedCount) ? payload.loadedCount : 0))
+  const targetRecordCount = Math.max(loadedCount, logicalPageSize) + logicalPageSize
+  const requestPageSize = Math.min(CLIENT_ORDER_QUERY_MAX_PAGE_SIZE, targetRecordCount)
+
+  return {
+    requestPageSize,
+    requestPageCount: Math.max(1, Math.ceil(targetRecordCount / requestPageSize)),
+    targetRecordCount,
+  }
+}
+
+/**
+ * 多页结果按服务端顺序合并，并按订单 id 去重。
+ * Offset 分页期间若恰好插入新订单，相邻页可能出现重复项；去重可避免缓存中出现重复卡片。
+ */
+export const mergeClientOrderRefreshPages = <T extends { id: string }>(
+  pages: T[][],
+  targetRecordCount: number,
+) => {
+  const recordMap = new Map<string, T>()
+  for (const page of pages) {
+    for (const record of page) {
+      if (!recordMap.has(record.id)) {
+        recordMap.set(record.id, record)
+      }
+    }
+  }
+  return Array.from(recordMap.values()).slice(0, Math.max(0, Math.trunc(targetRecordCount)))
+}
 
 export type ClientOrderRefreshReason =
   | 'verified'

@@ -20,7 +20,7 @@ const submitOrderSchema = z.object({
   hasCustomerOrder: z.boolean().optional(),
   isSystemApplied: z.boolean().optional(),
   issuerName: z.string().max(64, '出单人长度不能超过64').optional(),
-  customerDepartmentName: z.string().max(128, '客户部门名称长度不能超过128').optional(),
+  customerDepartmentName: z.string().max(271, '客户部门名称长度不能超过271').optional(),
   customerName: z.string().optional(),
   remark: z.string().optional(),
   items: z

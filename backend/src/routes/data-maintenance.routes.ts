@@ -12,6 +12,9 @@ import { dataMaintenanceService } from '../services/data-maintenance.service.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
+import { AppDataSource } from '../config/data-source.js'
+import { resolveDatabaseCapabilities } from '../database/database-capabilities.js'
+import { getTransactionCoordinator } from '../database/transaction-coordinator.js'
 
 const importPayloadSchema = z
   .object({
@@ -80,6 +83,30 @@ const rollbackDatabaseSwitchSchema = z.object({
 })
 
 export const dataMaintenanceRouter = Router()
+
+/**
+ * 数据库运行能力与 Onebox 写协调器指标只对管理员开放。
+ * 公开 `/health` 仅用于存活探测，不能暴露数据库类型、扩容能力或队列压力。
+ */
+dataMaintenanceRouter.get(
+  '/database/performance',
+  requirePermission('db_migration:view'),
+  requireRole('admin'),
+  asyncHandler(async (_req, res) => {
+    const capabilities = resolveDatabaseCapabilities(AppDataSource)
+    const transactionCoordinator = getTransactionCoordinator(AppDataSource)
+    res.json({
+      code: 0,
+      message: 'ok',
+      data: {
+        engine: capabilities.engine,
+        supportsConcurrentWriters: capabilities.supportsConcurrentWriters,
+        supportsMultipleApiInstances: capabilities.supportsMultipleApiInstances,
+        writeCoordinator: transactionCoordinator?.snapshot() ?? null,
+      },
+    })
+  }),
+)
 
 dataMaintenanceRouter.post(
   '/backup/sqlite',

@@ -17,6 +17,7 @@ import {
   clearPersistedClientOrderSnapshot,
   persistClientOrderSnapshot,
   readPersistedClientOrderSnapshot,
+  type PersistedO2oPreorderSummary,
 } from '@/utils/client-order-storage'
 import { matchesClientOrderQuery } from '@/utils/client-order-summary'
 
@@ -56,7 +57,7 @@ const normalizeClientUserId = (value: unknown): string => {
 
 export const useClientOrderStore = defineStore('client-order', () => {
   const clientUserId = ref('')
-  const orders = ref<O2oPreorderSummary[]>([])
+  const orders = ref<PersistedO2oPreorderSummary[]>([])
   const activeStatus = ref<'all' | O2oPreorderSummary['status']>('all')
   const keyword = ref('')
   const page = ref(1)

@@ -84,7 +84,7 @@ defineProps<{
         <el-form-item label="客户部门" class="mb-0">
           <el-input
             v-model="model.customerDepartmentName"
-            maxlength="128"
+            maxlength="271"
             :placeholder="model.orderType === 'department' ? '必填：客户部门名称' : '选填：散客可留空'"
           />
         </el-form-item>

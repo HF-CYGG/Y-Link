@@ -1,0 +1,16 @@
+{
+  "name": "@ylink/api-client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": "./src/index.ts",
+    "./native": "./src/native-fetch-adapter.ts",
+    "./web": "./src/web-adapter.ts"
+  },
+  "types": "./src/index.ts",
+  "dependencies": {
+    "@ylink/shared-types": "*"
+  }
+}

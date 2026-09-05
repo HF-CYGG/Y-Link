@@ -152,6 +152,7 @@ async function main() {
   pass('验证商品准备完成')
 
   const onsiteOrder = await o2oPreorderService.submit(clientAuth, {
+    clientRequestId: 'task123-onsite-00000001',
     items: [{ productId: adjustBaseProduct.id, qty: 2 }],
     remark: '待现场改单',
     pickupContact: 'Task123现场改单提货人',
@@ -207,6 +208,7 @@ async function main() {
   pass('现场改单后的核销会以修改后明细为准，且非待核销订单不可再改单')
 
   const returnOrder = await o2oPreorderService.submit(clientAuth, {
+    clientRequestId: 'task123-return-00000001',
     items: [{ productId: returnProduct.id, qty: 2 }],
     remark: '待退货拒绝验证',
     pickupContact: 'Task123退货验证提货人',

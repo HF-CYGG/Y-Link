@@ -102,6 +102,7 @@ const verifyClientGovernanceCoverage = () => {
   const errorUtilPath = path.join(projectRoot, 'src', 'utils', 'error.ts')
   const idempotentComposablePath = path.join(projectRoot, 'src', 'composables', 'useIdempotentAction.ts')
   const stableRequestPath = path.join(projectRoot, 'src', 'composables', 'useStableRequest.ts')
+  const clientOrderRefreshPath = path.join(projectRoot, 'src', 'utils', 'client-order-refresh.ts')
 
   const authViewSource = readText(authViewPath)
   const forgotViewSource = readText(forgotViewPath)
@@ -114,6 +115,7 @@ const verifyClientGovernanceCoverage = () => {
   const errorUtilSource = readText(errorUtilPath)
   const idempotentComposableSource = readText(idempotentComposablePath)
   const stableRequestSource = readText(stableRequestPath)
+  const clientOrderRefreshSource = readText(clientOrderRefreshPath)
 
   assert.match(idempotentComposableSource, /runWithGate/, '幂等门禁组合式缺失 runWithGate 导出')
   assert.match(authViewSource, /runWithGate/, '认证页未接入幂等门禁')
@@ -124,6 +126,21 @@ const verifyClientGovernanceCoverage = () => {
   assert.match(orderDetailViewSource, /useStableRequest/, '订单详情页未接入稳定请求治理')
   assert.match(errorUtilSource, /normalizeRequestError/, '错误归一化工具缺失 normalizeRequestError')
   assert.match(stableRequestSource, /requestId !== latestRequestId/, '稳定请求缺失“仅最后一次生效”保护')
+  assert.match(
+    clientOrderRefreshSource,
+    /CLIENT_ORDER_QUERY_MAX_PAGE_SIZE\s*=\s*50/,
+    '订单静默刷新未锁定后端允许的最大 pageSize=50',
+  )
+  assert.match(
+    ordersViewSource,
+    /fetchSilentRefreshOrders[\s\S]*?Promise\.all/,
+    '订单静默刷新未按接口上限补拉已加载范围',
+  )
+  assert.doesNotMatch(
+    ordersViewSource,
+    /pageSize:\s*loadedCount\s*\+\s*logicalPageSize/,
+    '订单静默刷新仍可能发送超过接口上限的 pageSize',
+  )
   assert.match(routesSource, /name: 'client-mall'[\s\S]*?preloadTargets:/, '客户端商城路由未配置预热目标')
   assert.match(routePerformanceSource, /resolveClientPostLoginWarmupTargets/, '客户端登录后预热策略未落地')
 
@@ -140,6 +157,7 @@ const verifyClientGovernanceCoverage = () => {
       errorUtilPath,
       idempotentComposablePath,
       stableRequestPath,
+      clientOrderRefreshPath,
     ],
   })
 }

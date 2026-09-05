@@ -4,11 +4,15 @@
 # - 构建阶段复制 backend 独立 `.npmrc`，使用官方 npm 源安装完整依赖并编译 TypeScript；
 # - 运行阶段仅保留生产依赖、编译产物与 SQL 模板，兼顾体积与 sqlite3 兼容性。
 # ------------------------------
-ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:20-bookworm-slim
+# SQLite 镜像固定 Node 22 LTS，避免未验收的新 ABI 让 optional sqlite3 在安装期被静默跳过。
+ARG Y_LINK_NODE_IMAGE=public.ecr.aws/docker/library/node:22-bookworm-slim
 
 FROM ${Y_LINK_NODE_IMAGE} AS build
 
 WORKDIR /app
+
+# 使 native addon 构建直接复用官方镜像自带的 Node headers，减少离线/受限网络构建失败。
+ENV npm_config_nodedir=/usr/local
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends python3 make g++ \
@@ -24,7 +28,8 @@ COPY tsconfig.json ./
 COPY src ./src
 COPY sql ./sql
 RUN npm run build \
-  && npm prune --omit=dev
+  && npm prune --omit=dev \
+  && node -e "require('sqlite3')"
 
 # ------------------------------
 # 运行阶段：仅保留生产依赖与编译产物

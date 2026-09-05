@@ -63,9 +63,16 @@ reportRouter.get(
   requirePermission('reports:export'),
   asyncHandler(async (req, res) => {
     const type = parseReportType(req.params.type)
-    const result = await reportService.exportExcel(type, buildReportQuery(req.query as Record<string, unknown>))
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-    res.setHeader('Content-Disposition', `attachment; filename="${result.fileName}"`)
-    res.send(result.buffer)
+    const fileName = `report-${type}-${new Date().toISOString().slice(0, 19).replaceAll(/[:T]/g, '-')}.xlsx`
+    await reportService.exportExcel(
+      type,
+      buildReportQuery(req.query as Record<string, unknown>),
+      res,
+      () => {
+        // 首批查询成功后才声明下载，避免参数/数据库错误被浏览器误存为损坏的 xlsx。
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`)
+      },
+    )
   }),
 )
