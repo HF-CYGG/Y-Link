@@ -505,10 +505,30 @@ npm run local:dev
 | `npm --prefix backend run release:verify` | 后端发布回归 |
 | `npm run verify:onebox:smoke` | onebox 冒烟验证 |
 | `npm run verify:db:concurrency` | SQLite 副本 + MySQL 临时库并发验收 |
+| `npm run verify:db:migration:timeout` | 数据库迁移 Docker 前置门禁超时验证 |
+| `npm run verify:db:migration` | SQLite -> MySQL 隔离环境端到端验收 |
 | `npm run verify:performance` | 性能预算验证 |
 | `npm run verify:all` | 全量质量验证 |
 
 `verify:db:concurrency` 默认会通过 Docker 拉起 MySQL 8.4 临时环境。没有 Docker 时，可提供 `VERIFY_DB_CONCURRENCY_MYSQL_*` 连接到自备 MySQL。
+
+GitHub Pull Request 只自动运行短时的 `verify` 必要检查，包括文本编码、Web/后端构建、MySQL 结构契约、路由权限契约和写事务闸门。以下耗时验证改为在本地按改动范围执行，不再占用每个 PR 的托管 Runner：
+
+```bash
+# 数据库并发、迁移和发布前功能回归
+npm run verify:db:concurrency
+npm run verify:db:migration:timeout
+npm run verify:db:migration
+npm run verify:release
+
+# Docker 交付镜像构建
+docker build --file Dockerfile --tag ylink-frontend:local .
+docker build --file backend/Dockerfile --tag ylink-backend-sqlite:local backend
+docker build --file backend/Dockerfile.mysql --tag ylink-backend-mysql:local backend
+docker build --file Dockerfile.onebox --tag ylink-onebox:local .
+```
+
+涉及依赖变更时，再在本地执行 `npm audit --omit=dev` 与 `npm --prefix backend audit --omit=dev`。Mobile 工作流只在 `apps/mobile/**`、`packages/**`、`.npmrc` 或其专用检查脚本变化时触发；仅修改 Web、后端或根锁文件不会启动 Mobile 构建。
 
 ## 项目结构
 

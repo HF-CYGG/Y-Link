@@ -63,6 +63,7 @@ const MYSQL_REQUIRED_TABLES = [
   'auth_risk_state',
   'business_sequence',
   'client_mobile_session',
+  'sms_verification_record',
 ]
 
 // 每个必需表由哪个迁移脚本创建，用于在报错时给出精确指引，而不是笼统建议“从头跑一遍”。
@@ -86,6 +87,7 @@ const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
   auth_risk_state: '033_inventory_security_invariants.sql',
   business_sequence: '035_o2o_idempotency_business_sequence.sql',
   client_mobile_session: '037_mobile_auth_session.sql',
+  sms_verification_record: '039_aliyun_pnvs_sms_verification.sql',
 }
 
 interface MysqlRequiredColumn {
@@ -156,6 +158,15 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
     introducingScript: '038_department_path_capacity.sql',
     minCharacterMaximumLength: 271,
   },
+  { tableName: 'sms_verification_record', columnName: 'out_id', introducingScript: '039_aliyun_pnvs_sms_verification.sql' },
+  {
+    tableName: 'sms_verification_record',
+    columnName: 'scheme_name',
+    introducingScript: '039_aliyun_pnvs_sms_verification.sql',
+    minCharacterMaximumLength: 20,
+  },
+  { tableName: 'sms_verification_record', columnName: 'target_digest', introducingScript: '039_aliyun_pnvs_sms_verification.sql' },
+  { tableName: 'sms_verification_record', columnName: 'delivery_status', introducingScript: '039_aliyun_pnvs_sms_verification.sql' },
 ]
 
 // 不只按索引名判断，还校验列顺序与唯一性，避免旧库中存在同名但错误的索引时误判为可启动。
@@ -251,6 +262,20 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
     unique: true,
     introducingScript: '037_department_account_node_binding.sql',
   },
+  {
+    tableName: 'sms_verification_record',
+    indexName: 'uk_sms_verification_record_out_id',
+    columns: ['out_id'],
+    unique: true,
+    introducingScript: '039_aliyun_pnvs_sms_verification.sql',
+  },
+  {
+    tableName: 'sms_verification_record',
+    indexName: 'idx_sms_verification_record_lookup',
+    columns: ['channel', 'scene', 'target_digest', 'expires_at'],
+    unique: false,
+    introducingScript: '039_aliyun_pnvs_sms_verification.sql',
+  },
 ]
 
 // 不可重复执行的历史脚本。
@@ -268,6 +293,7 @@ const AUTO_MIGRATABLE_FILES = [
   '037_mobile_auth_session.sql',
   '037_department_account_node_binding.sql',
   '038_department_path_capacity.sql',
+  '039_aliyun_pnvs_sms_verification.sql',
 ]
 
 /**

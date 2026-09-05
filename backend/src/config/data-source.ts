@@ -40,6 +40,7 @@ import { NotificationInbox } from '../entities/notification-inbox.entity.js'
 import { NotificationDispatch } from '../entities/notification-dispatch.entity.js'
 import { AuthRiskState } from '../entities/auth-risk-state.entity.js'
 import { BusinessSequence } from '../entities/business-sequence.entity.js'
+import { SmsVerificationRecord } from '../entities/sms-verification-record.entity.js'
 
 export const appEntities = [
   BaseProduct,
@@ -72,6 +73,7 @@ export const appEntities = [
   NotificationDispatch,
   AuthRiskState,
   BusinessSequence,
+  SmsVerificationRecord,
 ]
 
 function resolveEffectiveDatabaseConfig(

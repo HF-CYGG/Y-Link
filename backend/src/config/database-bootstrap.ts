@@ -47,6 +47,7 @@ const SQLITE_REQUIRED_TABLES = [
   'notification_dispatch',
   'auth_risk_state',
   'business_sequence',
+  'sms_verification_record',
 ]
 
 /**

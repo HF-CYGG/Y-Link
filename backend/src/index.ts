@@ -26,6 +26,7 @@ import { notificationService } from './services/notification.service.js'
 import { o2oPreorderService } from './services/o2o-preorder.service.js'
 import { persistentRiskStateService } from './services/persistent-risk-state.service.js'
 import { mobileSessionService } from './services/mobile-session.service.js'
+import { aliyunDypnsMnsWorkerService } from './services/aliyun-dypns-mns-worker.service.js'
 import { systemConfigService } from './services/system-config.service.js'
 import { migrateLegacyUploadReferences } from './utils/upload-migration.js'
 import { registerRuntimeShutdownHandler } from './runtime/runtime-shutdown.js'
@@ -148,6 +149,7 @@ const shutdownRuntime = (reason: string, exitCode: number): Promise<void> => {
 
     let backgroundStopped = false
     const backgroundStop = Promise.allSettled([
+      aliyunDypnsMnsWorkerService.stop(),
       notificationService.stopOutboxWorker(),
       o2oPreorderService.stopTimeoutRecycleLoop(),
       mobileSessionService.stopCleanupLoop(),
@@ -442,6 +444,9 @@ async function bootstrap(): Promise<void> {
     logMutableStartupBootstrapResult(mutableStartupBootstrapResult)
     await completeDatabaseMigrationCutoverStartup(cutoverStartupResult.taskId)
   }
+
+  // 结构与默认配置完成后再启动回执轮询；配置缺失会在启动期给出明确错误。
+  aliyunDypnsMnsWorkerService.start()
 
   void databaseMigrationService.resumeInterruptedAutomaticMigrationAfterStartup().then((taskId) => {
     if (taskId) {
