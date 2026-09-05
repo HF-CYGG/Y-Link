@@ -3671,13 +3671,15 @@ class O2oPreorderService {
           if (returnRequestCount > 0) return { id: item.id, showNo: order.showNo, outcome: 'skipped', code: 'RETURN_REQUEST_EXISTS', message: '订单存在退货申请，无法永久删除' }
           if (linkedOutboundOrder) return { id: item.id, showNo: order.showNo, outcome: 'skipped', code: 'OUTBOUND_ORDER_EXISTS', message: '订单关联正式出库单，无法永久删除' }
           const preorderItems = await manager.getRepository(O2oPreorderItem).find({ where: { orderId: String(order.id) } })
-          await auditService.record({
-            actionType: 'o2o.preorder.purge_cancelled', actionLabel: '批量永久删除已取消预订单', targetType: 'o2o_order', targetId: String(order.id), targetCode: order.showNo, actor: input.actor, requestMeta: input.requestMeta,
-            detail: { batchId, snapshot: { status: order.status, cancelReason: order.cancelReason, cancellationSource: order.cancellationSource, cancellationRemark: order.cancellationRemark, cancelledAt: order.cancelledAt, totalQty: order.totalQty, itemCount: preorderItems.length } },
-          }, manager)
           await manager.getRepository(O2oPreorderItem).delete({ orderId: String(order.id) })
           const deleted = await preorderRepo.delete({ id: String(order.id), status: 'cancelled', isDeleted: false })
           if ((deleted.affected ?? 0) !== 1) throw new BizError('订单状态已变化，请刷新后重试', 409)
+          // 与单笔删除共用占用校准，删除、流水镜像与审计必须同事务提交。
+          const serialCalibration = await orderSerialService.recalibrateCurrentFromOccupancy(order.clientOrderType, manager)
+          await auditService.record({
+            actionType: 'o2o.preorder.purge_cancelled', actionLabel: '批量永久删除已取消预订单', targetType: 'o2o_order', targetId: String(order.id), targetCode: order.showNo, actor: input.actor, requestMeta: input.requestMeta,
+            detail: { batchId, serialCalibration, snapshot: { status: order.status, cancelReason: order.cancelReason, cancellationSource: order.cancellationSource, cancellationRemark: order.cancellationRemark, cancelledAt: order.cancelledAt, totalQty: order.totalQty, itemCount: preorderItems.length } },
+          }, manager)
           return { id: item.id, showNo: order.showNo, outcome: 'deleted', code: 'DELETED', message: '已永久删除' }
         }))
       } catch (error) {

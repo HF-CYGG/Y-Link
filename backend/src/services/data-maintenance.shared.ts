@@ -12,6 +12,7 @@ import {
   O2O_CLIENT_ORDER_TYPES,
   O2O_PREORDER_BUSINESS_STATUSES,
   O2O_PREORDER_CANCEL_REASONS,
+  O2O_PREORDER_CANCELLATION_SOURCES,
   O2O_PREORDER_STATUSES,
 } from '../entities/o2o-preorder.entity.js'
 import { BizError } from '../utils/errors.js'
@@ -33,6 +34,7 @@ const PRODUCT_O2O_STATUS_SET = new Set(['listed', 'unlisted'])
 const CLIENT_USER_STATUS_SET = new Set<string>(CLIENT_USER_STATUSES)
 const PREORDER_STATUS_SET = new Set<string>(O2O_PREORDER_STATUSES)
 const PREORDER_CANCEL_REASON_SET = new Set<string>(O2O_PREORDER_CANCEL_REASONS)
+const PREORDER_CANCELLATION_SOURCE_SET = new Set<string>(O2O_PREORDER_CANCELLATION_SOURCES)
 const PREORDER_BUSINESS_STATUS_SET = new Set<string>(O2O_PREORDER_BUSINESS_STATUSES)
 const PREORDER_CLIENT_ORDER_TYPE_SET = new Set<string>(O2O_CLIENT_ORDER_TYPES)
 
@@ -216,6 +218,14 @@ function readOptionalDateText(row: Record<string, unknown>, field: string): stri
   return rawValue
 }
 
+function readOptionalValidDateText(row: Record<string, unknown>, field: string): string | null {
+  const dateText = readOptionalDateText(row, field)
+  if (dateText !== null && Number.isNaN(Date.parse(dateText))) {
+    throw new BizError(`${field} 日期非法`, 400)
+  }
+  return dateText
+}
+
 function assertEnumValue(value: string | null, label: string, candidates: Set<string>, allowNull = false): string | null {
   if (value === null) {
     if (allowNull) {
@@ -355,10 +365,12 @@ function validatePreorderRows(rows: ExportRow[]) {
     (rawRow) => {
       const status = readRequiredText(rawRow, 'status', '预订单状态', 16)
       const cancelReason = readOptionalText(rawRow, 'cancelReason', 16)
+      const cancellationSource = readOptionalText(rawRow, 'cancellationSource', 16)
       const businessStatus = readOptionalText(rawRow, 'businessStatus', 32)
       const clientOrderType = readRequiredText(rawRow, 'clientOrderType', '预订单归属类型', 16)
       assertEnumValue(status, '预订单状态', PREORDER_STATUS_SET)
       assertEnumValue(cancelReason, '预订单取消原因', PREORDER_CANCEL_REASON_SET, true)
+      assertEnumValue(cancellationSource, '预订单取消来源', PREORDER_CANCELLATION_SOURCE_SET, true)
       assertEnumValue(businessStatus, '预订单商家状态', PREORDER_BUSINESS_STATUS_SET, true)
       assertEnumValue(clientOrderType, '预订单归属类型', PREORDER_CLIENT_ORDER_TYPE_SET)
       return {
@@ -368,6 +380,9 @@ function validatePreorderRows(rows: ExportRow[]) {
         verifyCode: readRequiredText(rawRow, 'verifyCode', '预订单核销码', 64),
         status,
         cancelReason,
+        cancellationSource,
+        cancellationRemark: readOptionalText(rawRow, 'cancellationRemark', 200),
+        cancelledAt: readOptionalValidDateText(rawRow, 'cancelledAt'),
         businessStatus,
         merchantMessage: readOptionalText(rawRow, 'merchantMessage', 500),
         clientOrderType,
