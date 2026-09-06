@@ -37,13 +37,12 @@ import { captchaService } from './captcha.service.js'
 import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { systemConfigService, type VerificationProviderConfigsResult } from './system-config.service.js'
+import { clientStaffInviteCodeService } from './client-staff-invite-code.service.js'
 import { verificationCodeService } from './verification-code.service.js'
 import { EphemeralTicketStore } from '../utils/ephemeral-ticket-store.js'
 import {
   STAFF_INVITE_LOCK_MS,
   STAFF_INVITE_MAX_FAILURES,
-  STAFF_INVITE_CODE_PATTERN,
-  verifyStaffInviteCode,
 } from '../utils/staff-invite-code.js'
 
 interface ResetTicket {
@@ -679,32 +678,27 @@ class ClientAuthService {
   private buildLockedDirectoryQuery(manager: EntityManager, staffNo: string) {
     const query = manager.getRepository(ClientStaffDirectory)
       .createQueryBuilder('directory')
-      .addSelect('directory.inviteCodeDigest')
       .where('directory.staffNo = :staffNo', { staffNo })
     if (AppDataSource.options.type === 'mysql') query.setLock('pessimistic_write')
     return query
   }
 
-  private isUsableStaffInvite(record: ClientStaffDirectory | null, inviteCode: string, now: Date): boolean {
+  private isAvailableStaffDirectory(record: ClientStaffDirectory | null, now: Date): boolean {
     return Boolean(
       record
       && record.status === 'active'
-      && record.inviteCodeDigest
-      && record.inviteExpiresAt
-      && record.inviteExpiresAt > now
-      && !record.inviteUsedAt
-      && (!record.inviteLockedUntil || record.inviteLockedUntil <= now)
-      && STAFF_INVITE_CODE_PATTERN.test(inviteCode.trim())
-      && verifyStaffInviteCode(record.staffNo, inviteCode, record.inviteCodeDigest),
+      && (!record.inviteLockedUntil || record.inviteLockedUntil <= now),
     )
   }
 
   private async guardStaffInviteAttempt(staffNo: string, inviteCode: string, requestMeta?: RequestMeta) {
     const result = await runInTransaction(async (manager) => {
+      const validCode = await clientStaffInviteCodeService.verifyForRegistration(manager, inviteCode)
       const record = await this.buildLockedDirectoryQuery(manager, staffNo).getOne()
       const now = new Date()
-      if (this.isUsableStaffInvite(record, inviteCode, now)) return true
-      if (record) {
+      // 已锁定期间不续期或累加次数，保证 30 分钟到期后可重新尝试。
+      if (validCode && this.isAvailableStaffDirectory(record, now)) return true
+      if (record && (!record.inviteLockedUntil || record.inviteLockedUntil <= now)) {
         record.inviteFailedAttempts = Number(record.inviteFailedAttempts || 0) + 1
         if (record.inviteFailedAttempts >= STAFF_INVITE_MAX_FAILURES) {
           record.inviteLockedUntil = new Date(now.getTime() + STAFF_INVITE_LOCK_MS)
@@ -762,9 +756,12 @@ class ClientAuthService {
       const passwordHash = await hashPassword(password)
       user = isTeacherRegister
         ? await runInTransaction(async (manager) => {
+          const validCode = await clientStaffInviteCodeService.verifyForRegistration(manager, input.inviteCode ?? '')
           const directory = await this.buildLockedDirectoryQuery(manager, registerProfile.staffNo ?? '').getOne()
           const now = new Date()
-          if (!directory || !this.isUsableStaffInvite(directory, input.inviteCode ?? '', now)) throw new BizError('工号或邀请码无效', 400)
+          if (!directory || !validCode || !this.isAvailableStaffDirectory(directory, now)) throw new BizError('工号或邀请码无效', 400)
+          const registered = await manager.getRepository(ClientUser).existsBy({ staffNo: directory.staffNo })
+          if (registered) throw new BizError('工号或邀请码无效', 400)
           const saved = await manager.getRepository(ClientUser).save(manager.getRepository(ClientUser).create({
           mobile: account?.mobile ?? undefined,
           email: account?.email ?? undefined,
@@ -779,13 +776,12 @@ class ClientAuthService {
           staffVerified: registerProfile.staffVerified,
           status: 'enabled',
           }))
-          directory.inviteUsedAt = now
           directory.inviteFailedAttempts = 0
           directory.inviteLockedUntil = null
           await manager.getRepository(ClientStaffDirectory).save(directory)
           await auditService.record({
             actionType: 'client.auth.staff_invite.used',
-            actionLabel: '教师邀请码注册成功',
+            actionLabel: '教师统一邀请码注册成功',
             targetType: 'client_staff_directory',
             targetId: directory.id,
             targetCode: directory.staffNo,

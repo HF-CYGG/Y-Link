@@ -1,7 +1,7 @@
 /**
  * 模块说明：系统配置治理 API 模块。
- * 文件职责：封装订单流水号、O2O 规则与验证码供应商通道配置的查询与更新接口及相关类型。
- * 维护说明：维护时重点关注配置项默认值、通道模板字段约束与前后端配置结构对齐。
+ * 文件职责：封装订单流水号、O2O 规则、验证码供应商通道、客户端部门/教职工目录及统一教师邀请码的查询与更新接口及相关类型。
+ * 维护说明：维护时重点关注配置项默认值、通道模板字段约束、邀请码不回显约束与前后端配置结构对齐。
  */
 
 import { request, type RequestConfig } from '@/api/http'
@@ -274,10 +274,19 @@ export interface ClientStaffDirectoryRecord {
   status: ClientStaffDirectoryStatus
   isRegistered: boolean
   linkedClientUserCount: number
-  inviteStatus: 'not_set' | 'active' | 'expired' | 'used' | 'locked'
-  inviteExpiresAt: string | null
   createdAt: string
   updatedAt: string
+}
+
+export type ClientStaffInviteCodeStatus = 'not_set' | 'enabled' | 'disabled'
+
+export interface ClientStaffInviteCodeConfig {
+  status: ClientStaffInviteCodeStatus
+  updatedAt: string | null
+}
+
+export interface UpdateClientStaffInviteCodePayload {
+  inviteCode: string
 }
 
 export interface ClientStaffDirectoryListQuery {
@@ -480,71 +489,87 @@ export const updateClientDepartmentConfigs = (payload: UpdateClientDepartmentCon
     data: payload,
   })
 
+const clientStaffDirectoryUrl = '/system-configs/client-staff-directory'
+
 export const getClientStaffDirectoryList = (params: ClientStaffDirectoryListQuery) =>
   request<ClientStaffDirectoryListResult>({
     method: 'GET',
-    url: '/system-configs/client-staff-directory',
+    url: clientStaffDirectoryUrl,
     params,
   })
 
 export const createClientStaffDirectoryRecord = (payload: SaveClientStaffDirectoryPayload) =>
   request<SaveClientStaffDirectoryResult>({
     method: 'POST',
-    url: '/system-configs/client-staff-directory',
+    url: clientStaffDirectoryUrl,
     data: payload,
   })
 
 export const updateClientStaffDirectoryRecord = (id: string, payload: Omit<SaveClientStaffDirectoryPayload, 'status'>) =>
   request<SaveClientStaffDirectoryResult>({
     method: 'PUT',
-    url: `/system-configs/client-staff-directory/${id}`,
+    url: `${clientStaffDirectoryUrl}/${id}`,
     data: payload,
   })
 
 export const updateClientStaffDirectoryStatus = (id: string, status: ClientStaffDirectoryStatus) =>
   request<SaveClientStaffDirectoryResult>({
     method: 'PATCH',
-    url: `/system-configs/client-staff-directory/${id}/status`,
+    url: `${clientStaffDirectoryUrl}/${id}/status`,
     data: { status },
   })
 
-export const setClientStaffDirectoryInviteCode = (id: string, inviteCode: string) =>
-  request<SaveClientStaffDirectoryResult>({
+const clientStaffInviteCodeUrl = '/system-configs/client-staff-invite-code'
+
+/**
+ * 读取统一教师邀请码的公开状态：
+ * - 服务端只返回启用状态与更新时间，绝不回传邀请码明文。
+ */
+export const getClientStaffInviteCodeConfig = () =>
+  request<ClientStaffInviteCodeConfig>({
+    method: 'GET',
+    url: clientStaffInviteCodeUrl,
+  })
+
+/**
+ * 设置或替换统一教师邀请码：
+ * - 邀请码为允许前导零的 8 位数字；修改后旧码立即失效。
+ */
+export const updateClientStaffInviteCodeConfig = (payload: UpdateClientStaffInviteCodePayload) =>
+  request<ClientStaffInviteCodeConfig>({
     method: 'PUT',
-    url: `/system-configs/client-staff-directory/${id}/invite-code`,
-    data: { inviteCode },
+    url: clientStaffInviteCodeUrl,
+    data: payload,
   })
 
-export const resetClientStaffDirectoryInviteCode = (id: string) =>
-  request<{ inviteCode: string; expiresAt: string }>({
-    method: 'POST',
-    url: `/system-configs/client-staff-directory/${id}/invite-code/reset`,
-  })
-
-export const disableClientStaffDirectoryInviteCode = (id: string) =>
-  request<SaveClientStaffDirectoryResult>({
+/**
+ * 禁用统一教师邀请码：
+ * - 服务端会使当前邀请码立即失效，仍不回传明文。
+ */
+export const disableClientStaffInviteCodeConfig = () =>
+  request<ClientStaffInviteCodeConfig>({
     method: 'DELETE',
-    url: `/system-configs/client-staff-directory/${id}/invite-code`,
+    url: clientStaffInviteCodeUrl,
   })
 
 export const deleteClientStaffDirectoryBatch = (payload: DeleteClientStaffDirectoryBatchPayload) =>
   request<DeleteClientStaffDirectoryBatchResult>({
     method: 'DELETE',
-    url: '/system-configs/client-staff-directory',
+    url: clientStaffDirectoryUrl,
     data: payload,
   })
 
 export const importClientStaffDirectory = (payload: ImportClientStaffDirectoryPayload) =>
   request<ImportClientStaffDirectoryResult>({
     method: 'POST',
-    url: '/system-configs/client-staff-directory/import',
+    url: `${clientStaffDirectoryUrl}/import`,
     data: payload,
   })
 
 export const previewClientStaffDirectoryImport = (payload: ImportClientStaffDirectoryPayload) =>
   request<ImportClientStaffDirectoryPreviewResult>({
     method: 'POST',
-    url: '/system-configs/client-staff-directory/import/preview',
+    url: `${clientStaffDirectoryUrl}/import/preview`,
     data: payload,
   })
 
@@ -553,7 +578,7 @@ export const importClientStaffDirectoryFile = (file: File) => {
   formData.append('file', file)
   return request<ImportClientStaffDirectoryResult>({
     method: 'POST',
-    url: '/system-configs/client-staff-directory/import',
+    url: `${clientStaffDirectoryUrl}/import`,
     data: formData,
     headers: {
       'Content-Type': 'multipart/form-data',
@@ -566,7 +591,7 @@ export const previewClientStaffDirectoryImportFile = (file: File) => {
   formData.append('file', file)
   return request<ImportClientStaffDirectoryPreviewResult>({
     method: 'POST',
-    url: '/system-configs/client-staff-directory/import/preview',
+    url: `${clientStaffDirectoryUrl}/import/preview`,
     data: formData,
     headers: {
       'Content-Type': 'multipart/form-data',

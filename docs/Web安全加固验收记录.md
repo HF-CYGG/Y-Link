@@ -2,7 +2,20 @@
 
 日期：2026-09-06。实施分支：`codex/web-security-hardening`。主线合并基线：`78010d629bfa2f2fca386d2335cdd8b6b9623b08`。
 
-本轮保留原有认证表单动画修复和未跟踪文件，在当前工作目录实施。用户已授权本地 Git 提交；未推送、创建 PR 或部署生产环境。真实数据库验证均使用隔离测试库，没有迁移生产数据或改写历史 SQL，没有新增运行时依赖。
+本轮保留原有认证表单动画修复和未跟踪文件，在当前工作目录实施。安全修复已提交至 PR #57，未部署生产环境。真实数据库验证均使用隔离测试库，没有迁移生产数据或改写历史 SQL，没有新增运行时依赖。
+
+## 2026-09-06 合入最新主线后的验证
+
+本节对应合入 `origin/main a95d5d5`（教师统一邀请码）后的结果，优先于下方历史记录。文档冲突合并保留统一邀请码和数据库救援说明；认证服务与路由保留两侧行为。
+
+- 前端构建（`npm run verify:performance` 的构建步骤）、`npm --prefix backend run build`：通过。
+- 后端 `client-staff-invite-code:verify`、`client-staff-directory:verify`、`client-auth:department-governance:verify`：通过，覆盖统一码轮换/禁用、注册事务二次校验、并发工号唯一约束和匿名冲突提示。
+- 后端 `security:hardening:verify`、`security:auth-depth:verify`、`security:findings:verify`：通过。前一项首次运行因测试耗尽同来源认证额度而在随后登录返回 429；现已将限流场景隔离到独立应用实例，并断言变换不可信转发 IP 仍无法绕过限流，修复后复跑通过。未放宽生产限流或代理规则。
+- 后端 `task2:route-contract:verify`、`write-transaction:contract:verify`：通过，路由增至 176 条（14 public、133 admin、23 client、6 rescue）。
+- `node scripts/verify-db-migration-completion.mjs`、`node scripts/verify-db-migration-connection-test.mjs`：通过。
+- `npm run verify:performance`：前端构建通过，总产物 `4203.13 / 4200 KB`，仍超预算 `3.13 KB`；其余构建预算未报错，后续运行时性能子项因门禁停止而未执行。未修改预算。
+
+本次只验证合并与相关兼容性，未重跑完整 Docker/MySQL 故障矩阵，也未操作已有手动迁移环境。
 
 ## 2026-09-06 提交前补充验证
 

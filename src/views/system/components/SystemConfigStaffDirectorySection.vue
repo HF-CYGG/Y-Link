@@ -1,9 +1,14 @@
 <!--
-  文件说明：系统配置页中的教职工目录维护面板，负责目录查询、单条维护以及 txt/xlsx 拖拽导入预览入口。
+  模块说明：src/views/system/components/SystemConfigStaffDirectorySection.vue
+  文件职责：系统配置页中的教职工目录维护与统一教师邀请码治理面板，负责目录查询、单条维护、txt/xlsx 拖拽导入预览及统一邀请码状态维护。
   实现逻辑：
   1. 统一承接目录列表筛选、分页与启停操作，保证管理员维护入口集中在同一块配置面板内；
   2. 新增与编辑共用同一套表单校验规则，避免教职工号、实名和部门字段出现口径不一致；
   3. 批量导入支持拖拽/选择 txt、xlsx 或直接粘贴文本，先请求后端生成预览，再由管理员确认后正式入库。
+  4. 统一邀请码只显示状态和更新时间；写入受系统配置更新权限与管理员角色门禁，提交后清空输入值且不回显明文。
+  维护说明：
+  - 教职工目录继续只维护工号可注册性，不能恢复逐人邀请码字段或接口；
+  - 统一邀请码的有效性和单工号失败锁定由后端负责，前端只执行输入格式与权限门禁。
 -->
 <script setup lang="ts">
 import dayjs from 'dayjs'
@@ -19,19 +24,22 @@ import {
   previewClientStaffDirectoryImportFile,
   updateClientStaffDirectoryRecord,
   updateClientStaffDirectoryStatus,
-  setClientStaffDirectoryInviteCode,
-  resetClientStaffDirectoryInviteCode,
-  disableClientStaffDirectoryInviteCode,
+  disableClientStaffInviteCodeConfig,
+  getClientStaffInviteCodeConfig,
+  updateClientStaffInviteCodeConfig,
   type ImportClientStaffDirectoryPreviewResult,
   type ImportClientStaffDirectoryPreviewRow,
+  type ClientStaffInviteCodeConfig,
   type ClientStaffDirectoryRecord,
   type ClientStaffDirectoryRegistrationStatus,
   type ClientStaffDirectoryStatus,
   type ClientDepartmentTreeNode,
 } from '@/api/modules/system-config'
 import { extractErrorMessage } from '@/utils/error'
-
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
+import { usePermissionAction } from '@/composables/usePermissionAction'
+import { useAuthStore } from '@/store'
+import pinia from '@/store/pinia'
 
 const props = defineProps<{
   canUpdateConfigs: boolean
@@ -39,9 +47,6 @@ const props = defineProps<{
 }>()
 
 type StaffDirectoryDialogMode = 'create' | 'edit'
-const getInviteStatusLabel = (status: ClientStaffDirectoryRecord['inviteStatus']) => ({
-  not_set: '未设置', active: '有效', expired: '已过期', used: '已使用', locked: '已锁定',
-}[status])
 type DepartmentTreeSelectOption = {
   value: string
   label: string
@@ -49,6 +54,11 @@ type DepartmentTreeSelectOption = {
 }
 
 const listLoading = ref(false)
+const unifiedInviteCodeSubmitting = ref(false)
+const unifiedInviteCodeConfig = ref<ClientStaffInviteCodeConfig | null>()
+const unifiedInviteCodeForm = reactive({
+  inviteCode: '',
+})
 const records = ref<ClientStaffDirectoryRecord[]>([])
 const total = ref(0)
 const tableRef = ref<TableInstance>()
@@ -98,9 +108,12 @@ const importForm = reactive({
 const STAFF_DIRECTORY_IMPORT_FILE_ACCEPT = '.txt,.xlsx'
 const STAFF_DIRECTORY_IMPORT_MAX_FILE_SIZE = 8 * 1024 * 1024
 const STAFF_DIRECTORY_IMPORT_PREVIEW_PAGE_SIZES = [20, 50, 100]
+const authStore = useAuthStore(pinia)
+const { ensurePermission } = usePermissionAction()
 
 const dialogTitle = computed(() => (dialogMode.value === 'create' ? '新增教职工目录记录' : '编辑教职工目录记录'))
 const actionDisabled = computed(() => props.loading || listLoading.value)
+const canManageUnifiedInviteCode = () => props.canUpdateConfigs && authStore.isAdmin && Boolean(unifiedInviteCodeConfig.value)
 const hasImportPreview = computed(() => Boolean(importPreviewResult.value?.rows.length))
 const importPreviewRows = computed(() => importPreviewResult.value?.rows ?? [])
 const importPreviewTotal = computed(() => importPreviewRows.value.length)
@@ -343,6 +356,43 @@ const loadList = async () => {
   }
 }
 
+const loadUnifiedInviteCodeConfig = async () => {
+  unifiedInviteCodeConfig.value = undefined
+  try {
+    unifiedInviteCodeConfig.value = await getClientStaffInviteCodeConfig()
+  } catch (error) {
+    unifiedInviteCodeConfig.value = null
+    showAppError(extractErrorMessage(error, '加载邀请码失败'))
+  }
+}
+
+const handleUpdateUnifiedInviteCode = async (disable = false) => {
+  if (unifiedInviteCodeSubmitting.value || !canManageUnifiedInviteCode() || (disable && unifiedInviteCodeConfig.value?.status !== 'enabled') || !ensurePermission('system_configs:update', '统一邀请码维护')) {
+    return
+  }
+  const inviteCode = unifiedInviteCodeForm.inviteCode.trim()
+  if (!disable && !/^\d{8}$/.test(inviteCode)) {
+    showAppWarning('邀请码须为 8 位数字')
+    return
+  }
+  unifiedInviteCodeSubmitting.value = true
+  try {
+    if (disable) await ElMessageBox.confirm('禁用后旧码失效，是否继续？', '禁用邀请码', { type: 'warning' })
+    unifiedInviteCodeConfig.value = disable
+      ? await disableClientStaffInviteCodeConfig()
+      : await updateClientStaffInviteCodeConfig({ inviteCode })
+    unifiedInviteCodeForm.inviteCode = ''
+    showAppSuccess(disable ? '统一邀请码已禁用' : '统一邀请码已保存')
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') {
+      return
+    }
+    showAppError(extractErrorMessage(error, '操作失败'))
+  } finally {
+    unifiedInviteCodeSubmitting.value = false
+  }
+}
+
 const handleSearch = () => {
   queryForm.page = 1
   void loadList()
@@ -456,49 +506,6 @@ const handleToggleStatus = async (record: ClientStaffDirectoryRecord) => {
   }
 }
 
-const handleSetInviteCode = async (record: ClientStaffDirectoryRecord) => {
-  try {
-    const result = await ElMessageBox.prompt('请输入新的 8 位数字邀请码', `设置邀请码：${record.staffNo}`, {
-      inputPattern: /^\d{8}$/,
-      inputErrorMessage: '邀请码必须是 8 位数字',
-      confirmButtonText: '保存',
-      cancelButtonText: '取消',
-    })
-    await setClientStaffDirectoryInviteCode(record.id, result.value)
-    showAppSuccess('邀请码已设置，24 小时内有效')
-    await loadList()
-  } catch (error) {
-    if (error === 'cancel' || error === 'close') return
-    showAppError(extractErrorMessage(error, '邀请码设置失败'))
-  }
-}
-
-const handleResetInviteCode = async (record: ClientStaffDirectoryRecord) => {
-  try {
-    await ElMessageBox.confirm('重置后旧邀请码立即失效，是否继续？', `重置邀请码：${record.staffNo}`, { type: 'warning' })
-    const result = await resetClientStaffDirectoryInviteCode(record.id)
-    await ElMessageBox.alert(`新邀请码：${result.inviteCode}\n请立即安全告知教师，关闭后将不再显示。`, '邀请码仅展示一次', {
-      confirmButtonText: '我已记录',
-    })
-    await loadList()
-  } catch (error) {
-    if (error === 'cancel' || error === 'close') return
-    showAppError(extractErrorMessage(error, '邀请码重置失败'))
-  }
-}
-
-const handleDisableInviteCode = async (record: ClientStaffDirectoryRecord) => {
-  try {
-    await ElMessageBox.confirm('禁用后当前邀请码立即失效，是否继续？', `禁用邀请码：${record.staffNo}`, { type: 'warning' })
-    await disableClientStaffDirectoryInviteCode(record.id)
-    showAppSuccess('邀请码已禁用')
-    await loadList()
-  } catch (error) {
-    if (error === 'cancel' || error === 'close') return
-    showAppError(extractErrorMessage(error, '邀请码禁用失败'))
-  }
-}
-
 const handleSelectionChange = (value: ClientStaffDirectoryRecord[]) => {
   selectedRecords.value = value
 }
@@ -582,6 +589,7 @@ watch(
 onMounted(() => {
   void loadList()
   void loadDepartmentOptions()
+  void loadUnifiedInviteCodeConfig()
 })
 </script>
 
@@ -591,10 +599,7 @@ onMounted(() => {
       <div>
         <h3 class="text-base font-semibold text-slate-800 dark:text-slate-100">教职工工号库</h3>
         <p class="mt-1 text-sm text-slate-500 dark:text-slate-400">
-          用于部门账号注册时校验工号，并自动回填实名与所属部门。目录变更会同步影响已绑定的部门账号校验状态。
-        </p>
-        <p class="mt-1 text-xs text-slate-400 dark:text-slate-500">
-          是否已注册：每个教职工号最多只能对应一个部门账户，用于判断该工号是否已被注册使用。
+          教师注册时校验工号并回填实名与部门，每个工号限注册一次。目录变更会同步账号校验状态。
         </p>
       </div>
       <div class="flex flex-wrap items-center gap-2">
@@ -610,6 +615,44 @@ onMounted(() => {
         <el-button type="primary" :disabled="actionDisabled || !canUpdateConfigs" @click="handleOpenCreate">新增记录</el-button>
       </div>
     </div>
+
+    <section class="mt-4 border-t border-slate-100 pt-4 dark:border-white/5">
+      <div class="flex flex-wrap items-center gap-2">
+        <h4 class="mr-auto text-sm font-semibold text-slate-800 dark:text-slate-100">统一教师邀请码</h4>
+        <el-tag type="info">{{ unifiedInviteCodeConfig === null ? '加载失败' : unifiedInviteCodeConfig ? { not_set: '未设置', enabled: '已启用', disabled: '已禁用' }[unifiedInviteCodeConfig.status] : '-' }}</el-tag>
+        <span class="text-xs text-slate-500 dark:text-slate-400">更新时间：{{ unifiedInviteCodeConfig?.updatedAt ? dayjs(unifiedInviteCodeConfig.updatedAt).format('YYYY-MM-DD HH:mm:ss') : '-' }}</span>
+      </div>
+      <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">全体教师共用，长期有效；修改或禁用后旧码失效。</p>
+      <div class="mt-3 flex flex-wrap items-center gap-2">
+        <el-input
+          v-model="unifiedInviteCodeForm.inviteCode"
+          type="password"
+          maxlength="8"
+          inputmode="numeric"
+          autocomplete="new-password"
+          placeholder="新的 8 位数字邀请码"
+          class="!w-[260px]"
+          :disabled="!canManageUnifiedInviteCode() || unifiedInviteCodeSubmitting"
+          @keyup.enter="handleUpdateUnifiedInviteCode()"
+        />
+        <el-button
+          type="primary"
+          :loading="unifiedInviteCodeSubmitting"
+          :disabled="!canManageUnifiedInviteCode() || unifiedInviteCodeSubmitting"
+          @click="handleUpdateUnifiedInviteCode()"
+        >
+          {{ unifiedInviteCodeConfig?.status === 'enabled' ? '修改邀请码' : '设置邀请码' }}
+        </el-button>
+        <el-button
+          type="danger"
+          plain
+          :disabled="!canManageUnifiedInviteCode() || unifiedInviteCodeSubmitting || unifiedInviteCodeConfig?.status !== 'enabled'"
+          @click="handleUpdateUnifiedInviteCode(true)"
+        >
+          禁用邀请码
+        </el-button>
+      </div>
+    </section>
 
     <div class="mt-4 flex flex-wrap items-center gap-2">
       <el-input
@@ -673,7 +716,7 @@ onMounted(() => {
           <div class="flex items-center justify-center gap-1">
             <span>是否已注册</span>
             <el-tooltip
-              content="指当前教职工号是否已有部门账户注册使用。若停用或删除该记录，对应部门账户会失去工号校验通过状态。"
+              content="当前工号是否已有教师账户注册；停用或删除会影响该账户工号校验。"
               placement="top"
             >
               <span class="cursor-help text-slate-400">?</span>
@@ -686,24 +729,13 @@ onMounted(() => {
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="邀请码" min-width="150">
-        <template #default="{ row }">
-          <el-tag :type="row.inviteStatus === 'active' ? 'success' : row.inviteStatus === 'locked' ? 'danger' : 'info'">
-            {{ getInviteStatusLabel(row.inviteStatus) }}
-          </el-tag>
-          <div v-if="row.inviteExpiresAt" class="mt-1 text-xs text-slate-400">{{ dayjs(row.inviteExpiresAt).format('MM-DD HH:mm') }}</div>
-        </template>
-      </el-table-column>
       <el-table-column label="更新时间" min-width="170">
         <template #default="{ row }">{{ dayjs(row.updatedAt).format('YYYY-MM-DD HH:mm:ss') }}</template>
       </el-table-column>
-      <el-table-column v-if="canUpdateConfigs" label="操作" fixed="right" width="330" align="right">
+      <el-table-column v-if="canUpdateConfigs" label="操作" fixed="right" width="180" align="right">
         <template #default="{ row }">
           <div class="flex items-center justify-end gap-3">
             <el-button link type="primary" :disabled="actionDisabled" @click="handleOpenEdit(row)">编辑</el-button>
-            <el-button link type="primary" :disabled="actionDisabled" @click="handleSetInviteCode(row)">设码</el-button>
-            <el-button link type="primary" :disabled="actionDisabled" @click="handleResetInviteCode(row)">重置</el-button>
-            <el-button link type="danger" :disabled="actionDisabled || row.inviteStatus === 'not_set'" @click="handleDisableInviteCode(row)">禁用码</el-button>
             <el-button
               link
               :type="row.status === 'active' ? 'warning' : 'success'"

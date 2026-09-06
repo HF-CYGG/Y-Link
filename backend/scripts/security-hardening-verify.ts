@@ -2,7 +2,7 @@
  * 文件说明：backend/scripts/security-hardening-verify.ts
  * 文件职责：验证安全加固后的关键边界，覆盖会话哈希、URL token 禁用、外发 URL 拦截和匿名工号查询频控。
  * 实现逻辑：
- * - 使用独立 SQLite 临时库启动真实 Express 应用，避免污染本地开发数据；
+ * - 使用独立 SQLite 临时库启动真实 Express 应用，限流场景另建应用实例以隔离额度；
  * - 通过服务层和接口同时验证管理端、客户端与通知外发的安全收口；
  * - 所有非法外发地址都在请求发出前被业务校验拦截，不触发真实网络访问。
  * 维护说明：
@@ -154,7 +154,7 @@ async function main() {
   prepareDatabaseRuntime()
   await AppDataSource.initialize()
 
-  const app = createApp({ publicAuthRateLimits: { admin: 3 } })
+  const app = createApp()
   const server = app.listen(0, '127.0.0.1')
 
   try {
@@ -174,19 +174,37 @@ async function main() {
     assert.ok(address && typeof address === 'object' && typeof address.port === 'number', '未能获取验证服务端口')
     const baseUrl = `http://127.0.0.1:${address.port}`
 
-    const expressLimiterResponses = []
-    for (let requestIndex = 0; requestIndex < 4; requestIndex += 1) {
-      expressLimiterResponses.push(await fetch(`${baseUrl}/api/auth/captcha`, {
-        headers: { 'x-forwarded-for': '198.51.100.77' },
-      }))
+    // 限流与后续登录使用独立应用，不能依赖伪造 X-Forwarded-For 切换限流桶。
+    const limiterApp = createApp({ publicAuthRateLimits: { admin: 3 } })
+    limiterApp.set('trust proxy', false)
+    const limiterServer = limiterApp.listen(0, '127.0.0.1')
+    try {
+      if (!limiterServer.listening) {
+        await new Promise<void>((resolve, reject) => {
+          limiterServer.once('error', reject)
+          limiterServer.once('listening', resolve)
+        })
+      }
+      const limiterAddress = limiterServer.address()
+      assert.ok(limiterAddress && typeof limiterAddress === 'object')
+      const limiterBaseUrl = `http://127.0.0.1:${limiterAddress.port}`
+      const expressLimiterStatuses: number[] = []
+      for (let requestIndex = 0; requestIndex < 4; requestIndex += 1) {
+        const response = await fetch(`${limiterBaseUrl}/api/auth/captcha`, {
+          headers: { 'x-forwarded-for': `198.51.100.${77 + requestIndex}` },
+        })
+        expressLimiterStatuses.push(response.status)
+        const payload = await readJson(response)
+        if (requestIndex === 3) assert.equal(payload.code, 429, 'Express 认证入口限流应返回统一 429 业务码')
+      }
+      assert.deepEqual(
+        expressLimiterStatuses,
+        [200, 200, 200, 429],
+        'SQLite 下 Express 认证入口限流必须按真实来源计数，伪造转发 IP 不能绕过阈值',
+      )
+    } finally {
+      await new Promise<void>((resolve) => limiterServer.close(() => resolve()))
     }
-    assert.deepEqual(
-      expressLimiterResponses.map((response) => response.status),
-      [200, 200, 200, 429],
-      'SQLite 下 Express 认证入口内存限流必须在受控阈值后返回 429',
-    )
-    const expressLimiterPayload = await readJson(expressLimiterResponses[3]!)
-    assert.equal(expressLimiterPayload.code, 429, 'Express 认证入口限流应返回统一 429 业务码')
     pass('SQLite 下 Express 认证入口内存限流在 /api/auth/captcha 生效')
 
     const adminLogin = await loginAdmin(baseUrl)

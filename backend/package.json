@@ -54,6 +54,7 @@
     "feedback:attachment-cleanup:verify": "node scripts/run-feedback-attachment-cleanup-verify.mjs",
     "client-auth:department-governance:verify": "tsx scripts/client-auth-department-governance-verify.ts",
     "client-staff-directory:verify": "tsx scripts/client-staff-directory-verify.ts",
+    "client-staff-invite-code:verify": "tsx scripts/client-staff-invite-code-verify.ts",
     "product:sku-current:verify": "tsx scripts/product-sku-current-verify.ts",
     "inventory:invariants:verify": "tsx scripts/inventory-invariants-verify.ts",
     "o2o:discount-price:verify": "tsx scripts/o2o-discount-price-verify.ts",

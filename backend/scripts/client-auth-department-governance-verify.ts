@@ -76,6 +76,16 @@ async function expectBizError(action: () => Promise<unknown>, scene: string, mes
   assert.fail(`${scene} 应失败但实际成功`)
 }
 
+async function expectBizFailure(action: () => Promise<unknown>, scene: string) {
+  try {
+    await action()
+  } catch (error) {
+    assert.ok(error instanceof Error, `${scene} 应抛出 Error`)
+    return error.message
+  }
+  assert.fail(`${scene} 应失败但实际成功`)
+}
+
 function createVerificationRequestStub(captured: CapturedVerification[]) {
   return async (_input: string | URL, init?: { body?: string | Buffer }) => {
     const bodyText = String(init?.body ?? '{}')
@@ -111,15 +121,18 @@ async function main() {
   const { clientAuthService } = await import('../src/services/client-auth.service.js')
   const { clientStaffDirectoryService } = await import('../src/services/client-staff-directory.service.js')
   const { clientFeedbackService } = await import('../src/services/client-feedback.service.js')
+  const { clientStaffInviteCodeService } = await import('../src/services/client-staff-invite-code.service.js')
   const { clientUserManageService } = await import('../src/services/client-user-manage.service.js')
   const { o2oPreorderService } = await import('../src/services/o2o-preorder.service.js')
   const { productService } = await import('../src/services/product.service.js')
   const { systemConfigService } = await import('../src/services/system-config.service.js')
   const { hashPassword } = await import('../src/utils/password.js')
   const { ClientUserSession } = await import('../src/entities/client-user-session.entity.js')
+  const { installSqliteTransactionQueue } = await import('../src/utils/sqlite-transaction-queue.js')
 
   prepareDatabaseRuntime()
   await AppDataSource.initialize()
+  await installSqliteTransactionQueue(AppDataSource)
 
   const capturedVerifications: CapturedVerification[] = []
 
@@ -499,16 +512,15 @@ async function main() {
       adminAuth,
     )
 
-    const teacherOneDirectory = await clientStaffDirectoryService.create(
+    await clientStaffDirectoryService.create(
       { staffNo: 'T1001', realName: '张老师', departmentName: '资产处', status: 'active' },
       adminAuth,
     )
-    const teacherTwoDirectory = await clientStaffDirectoryService.create(
+    await clientStaffDirectoryService.create(
       { staffNo: 'T1002', realName: '李老师', departmentName: '信息中心', status: 'active' },
       adminAuth,
     )
-    await clientStaffDirectoryService.setInviteCode(teacherOneDirectory.record.id, '12345678', adminAuth)
-    await clientStaffDirectoryService.setInviteCode(teacherTwoDirectory.record.id, '87654321', adminAuth)
+    await clientStaffInviteCodeService.setInviteCode('00123456', adminAuth)
 
     const publicDepartmentCaptcha = await clientAuthService.createCaptcha()
     const clientUserCountBeforePublicDepartmentRegister = await AppDataSource.getRepository(ClientUser).count()
@@ -598,7 +610,7 @@ async function main() {
       accountType: 'personal',
       staffNo: 'T1001',
       account: '13800001001',
-      inviteCode: '12345678',
+      inviteCode: '00123456',
       password: clientPassword,
     })
     assert.equal(teacherRegisterResult.user.accountType, 'personal')
@@ -673,32 +685,30 @@ async function main() {
     )
     pass('教师注册工号不存在会失败')
 
-    await expectBizError(
+    await expectBizFailure(
       () =>
         clientAuthService.register({
           accountType: 'personal',
           staffNo: 'T1001',
-          inviteCode: '12345678',
+          inviteCode: '00123456',
           account: '13800001002',
           password: clientPassword,
           verificationCode: capturedMobileCode,
         }),
       '教师注册工号重复绑定',
-      '工号或邀请码无效',
     )
     pass('教师注册工号已绑定会失败')
 
-    const duplicateNameDirectory = await clientStaffDirectoryService.create(
+    await clientStaffDirectoryService.create(
       { staffNo: 'T1003', realName: '张老师', departmentName: '资产处', status: 'active' },
       adminAuth,
     )
-    await clientStaffDirectoryService.setInviteCode(duplicateNameDirectory.record.id, '11223344', adminAuth)
     await expectBizError(
       async () =>
         clientAuthService.register({
           accountType: 'personal',
           staffNo: 'T1003',
-          inviteCode: '11223344',
+          inviteCode: '00123456',
           account: '13800001012',
           password: clientPassword,
           verificationCode: await issueRegisterVerificationCode('13800001012'),
