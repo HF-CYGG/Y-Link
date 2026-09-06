@@ -63,12 +63,12 @@ assert.match(fallbackBlock, /proxy_set_header\s+Host\s+\$host;/, '上传资源�
 assert.match(fallbackBlock, /proxy_set_header\s+X-Real-IP\s+\$remote_addr;/, '上传资源回落代理缺少真实 IP 透传')
 assert.match(
   fallbackBlock,
-  /proxy_set_header\s+X-Forwarded-For\s+\$proxy_add_x_forwarded_for;/,
+  /proxy_set_header\s+X-Forwarded-For\s+\$remote_addr;/,
   '上传资源回落代理缺少 X-Forwarded-For 透传',
 )
 assert.match(
   fallbackBlock,
-  /proxy_set_header\s+X-Forwarded-Proto\s+\$scheme;/,
+  /proxy_set_header\s+X-Forwarded-Proto\s+\$ylink_forwarded_proto;/,
   '上传资源回落代理缺少协议透传',
 )
 

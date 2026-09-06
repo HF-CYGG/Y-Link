@@ -11,6 +11,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { installCaptchaServiceForTesting } from '../src/services/captcha.service.js'
 
 const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
@@ -28,6 +29,9 @@ process.env.DB_TYPE = 'sqlite'
 process.env.DB_SYNC = 'false'
 process.env.SQLITE_DB_PATH = sqlitePath
 process.env.INIT_ADMIN_PASSWORD = adminPassword
+
+const TEST_CAPTCHA_CODE = 'ABC123'
+installCaptchaServiceForTesting({ createCode: () => TEST_CAPTCHA_CODE })
 
 type JsonPayload = {
   code?: number
@@ -130,7 +134,7 @@ async function expectJsonOneOfStatuses(request: () => Promise<Response>, scene: 
   }
 }
 
-const readCaptchaCode = (captchaSvg: string) => captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6)
+const readCaptchaCode = (_captchaSvg: string) => TEST_CAPTCHA_CODE
 
 function cleanupSqliteFile() {
   if (!fs.existsSync(sqlitePath)) {

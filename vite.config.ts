@@ -206,6 +206,11 @@ export default defineConfig(({ command, mode }) => {
       // 页面样式跟随异步路由拆分，避免管理端低频工作台 CSS 阻塞客户端商城首屏。
       cssCodeSplit: true,
       rollupOptions: {
+        // 独立救援入口不能经过普通 App 的路由、Store 或鉴权初始化；保留多 HTML 入口让 Vite 为其构建独立依赖图。
+        input: {
+          main: fileURLToPath(new URL('./index.html', import.meta.url)),
+          rescue: fileURLToPath(new URL('./rescue.html', import.meta.url)),
+        },
         output: {
           manualChunks(id) {
             const normalizedId = id.replaceAll('\\', '/')

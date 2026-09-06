@@ -20,6 +20,7 @@ const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
 const sqlitePath = path.resolve(sqliteRoot, `o2o-governance-route-${verifySeed}.sqlite`)
 const adminPassword = `Admin_${verifySeed}_Zz9!`
 const permanentDeletePassword = `Purge_${verifySeed}_Zz9!`
+const pendingClientVerificationTargets = new Set<string>()
 
 // 必须先于任何后端模块加载：env.ts 在模块初始化时读取这些值。
 process.env.APP_PROFILE = `o2o-governance-route-${verifySeed}`
@@ -82,12 +83,11 @@ const writeHeaders = (session: CookieSession, csrf = true): Record<string, strin
 })
 
 async function registerAndLoginClient(clientAuthService: typeof import('../src/services/client-auth.service.js').clientAuthService) {
-  const captcha = await clientAuthService.createCaptcha()
-  const captchaCode = captcha.captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6)
   const account = `1${String(Date.now()).slice(-10)}`
   const password = 'ClientVerify_2026A'
+  pendingClientVerificationTargets.add(account)
   const registered = await clientAuthService.register({
-    accountType: 'personal', account, username: '路由治理测试用户', password, captchaId: captcha.captchaId, captchaCode,
+    accountType: 'personal', account, username: '路由治理测试用户', password, verificationCode: '123456',
   })
   const loginCaptcha = await clientAuthService.createCaptcha()
   const loginCaptchaCode = loginCaptcha.captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6)
@@ -99,7 +99,7 @@ async function registerAndLoginClient(clientAuthService: typeof import('../src/s
 
 async function main() {
   fs.mkdirSync(sqliteRoot, { recursive: true })
-  const [{ createApp }, { AppDataSource }, { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime }, { authService }, { userService }, { systemConfigService }, { clientAuthService }, { productService }, { o2oPreorderService }] = await Promise.all([
+  const [{ createApp }, { AppDataSource }, { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime }, { authService }, { userService }, { systemConfigService }, { clientAuthService }, { verificationCodeService }, { productService }, { o2oPreorderService }] = await Promise.all([
     import('../src/app.js'),
     import('../src/config/data-source.js'),
     import('../src/config/database-bootstrap.js'),
@@ -107,6 +107,7 @@ async function main() {
     import('../src/services/user.service.js'),
     import('../src/services/system-config.service.js'),
     import('../src/services/client-auth.service.js'),
+    import('../src/services/verification-code.service.js'),
     import('../src/services/product.service.js'),
     import('../src/services/o2o-preorder.service.js'),
   ])
@@ -116,6 +117,19 @@ async function main() {
   await initializeDatabaseSchemaIfNeeded(AppDataSource)
   const bootstrapAdmin = await authService.ensureDefaultAdmin()
   await systemConfigService.ensureDefaultConfigs()
+  // 只替换隔离脚本内的第三方验证码边界；生产注册仍必须通过已启用的验证码通道。
+  const originalProviders = systemConfigService.getVerificationProviderConfigs.bind(systemConfigService)
+  const originalVerifyCode = verificationCodeService.verifyCode.bind(verificationCodeService)
+  systemConfigService.getVerificationProviderConfigs = async () => {
+    const configs = await originalProviders()
+    return { ...configs, mobile: { ...configs.mobile, enabled: true, ready: true } }
+  }
+  verificationCodeService.verifyCode = async (input) => {
+    assert.equal(input.channel, 'mobile')
+    assert.equal(input.scene, 'register')
+    assert.equal(input.code, '123456')
+    assert.ok(pendingClientVerificationTargets.delete(input.target), '客户端注册验证码必须绑定本次手机号且只能使用一次')
+  }
   const scriptAdmin = {
     userId: String(bootstrapAdmin.id), username: bootstrapAdmin.username, displayName: bootstrapAdmin.displayName,
     role: 'admin' as const, permissions: [], status: 'enabled' as const, sessionToken: 'o2o-governance-route-script', authSource: 'bearer' as const,
@@ -223,6 +237,8 @@ async function main() {
     assert.match(overLimit.message ?? '', /最多 50|50/)
     log('批删数量 50/51 路由边界通过')
   } finally {
+    systemConfigService.getVerificationProviderConfigs = originalProviders
+    verificationCodeService.verifyCode = originalVerifyCode
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()))
     if (AppDataSource.isInitialized) await AppDataSource.destroy()
     try { fs.rmSync(sqlitePath, { force: true }) } catch { /* SQLite 句柄延迟不覆盖断言结果。 */ }

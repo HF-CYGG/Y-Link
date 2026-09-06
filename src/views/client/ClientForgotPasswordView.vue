@@ -54,6 +54,7 @@ const authCapabilities = ref<ClientAuthCapabilities | null>(null)
 const captchaLoading = ref(false)
 const captcha = reactive({
   captchaId: '',
+  captchaImage: '',
   captchaSvg: '',
   expiresInSeconds: 0,
 })
@@ -81,9 +82,9 @@ const passwordStrengthHint = CLIENT_NEW_PASSWORD_RULE_HINT
 // 安全说明：验证码接口返回的是 SVG 文本，
 // 这里统一编码成 data URL 图片，避免使用 v-html 直接注入 SVG 片段。
 const captchaImageSrc = computed(() => {
-  return captcha.captchaSvg
+  return captcha.captchaImage || (captcha.captchaSvg
     ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(captcha.captchaSvg)}`
-    : ''
+    : '')
 })
 
 const captchaHintText = computed(() => {
@@ -143,6 +144,7 @@ const refreshCaptcha = async (silent = false) => {
     executor: (signal) => getClientCaptcha({ signal }),
     onSuccess: (result) => {
       captcha.captchaId = result.captchaId
+      captcha.captchaImage = result.captchaImage ?? ''
       captcha.captchaSvg = result.captchaSvg
       captcha.expiresInSeconds = result.expiresInSeconds
       if (captchaExpireTimer) {
@@ -177,6 +179,7 @@ const refreshCaptcha = async (silent = false) => {
 
 const clearCaptcha = () => {
   captcha.captchaId = ''
+  captcha.captchaImage = ''
   captcha.captchaSvg = ''
   captcha.expiresInSeconds = 0
   if (captchaExpireTimer) {
@@ -186,7 +189,7 @@ const clearCaptcha = () => {
 }
 
 const ensureCaptchaReady = async () => {
-  if (captcha.captchaId && captcha.captchaSvg) {
+  if (captcha.captchaId && (captcha.captchaImage || captcha.captchaSvg)) {
     return
   }
   await refreshCaptcha(true)

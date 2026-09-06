@@ -2,6 +2,7 @@
 /**
  * 模块说明：src/views/client/ClientProfileView.vue
  * 文件职责：客户端个人中心页面，负责展示资料信息、编辑资料以及用户本人修改登录密码。
+ * 实现逻辑：个人用户主动改名时复用注册字符规则并执行 NFKC 规范化；历史姓名未修改及教师目录姓名保持原值。
  * 维护说明：
  * - 资料编辑与改密都属于当前登录用户自助操作；
  * - 本次改密口径需与客户端注册、找回密码保持一致，避免用户在不同入口看到不同规则；
@@ -65,6 +66,9 @@ const isTeacherAccount = computed(() => (
   && Boolean(clientAuthStore.currentUser?.staffNo?.trim())
 ))
 const isDirectoryManagedAccount = computed(() => isDepartmentAccount.value || isTeacherAccount.value)
+const currentProfileUsername = computed(() => (
+  clientAuthStore.currentUser?.username || clientAuthStore.currentUser?.realName || clientAuthStore.currentUser?.account || ''
+))
 const accountTypeLabel = computed(() => {
   if (isDepartmentAccount.value) return '部门共享账号'
   return isTeacherAccount.value ? '教师账号' : '个人账号'
@@ -78,13 +82,7 @@ const displayName = computed(() => (
 ))
 const displayDepartmentName = computed(() => clientAuthStore.currentUser?.departmentName?.trim() || '未设置')
 const displayStaffNo = computed(() => clientAuthStore.currentUser?.staffNo?.trim() || '未登记')
-const storedProfileUsername = computed(() => (
-  clientAuthStore.currentUser?.username
-  || clientAuthStore.currentUser?.account
-  || clientAuthStore.currentUser?.realName
-  || ''
-))
-const profileUsernameUnchanged = computed(() => profileForm.username === storedProfileUsername.value)
+const profileUsernameUnchanged = computed(() => profileForm.username === currentProfileUsername.value)
 const profileUsernameRuleHint = computed(() => {
   if (isTeacherAccount.value || profileUsernameUnchanged.value) return ''
   return getPersonalClientUsernameRuleHint(profileForm.username)
@@ -111,20 +109,19 @@ const rules: FormRules = {
 }
 
 const profileRules: FormRules = {
-  username: [{
-    validator: (_rule, value: string, callback) => {
-      if (isTeacherAccount.value || value === storedProfileUsername.value) {
-        callback()
-        return
-      }
-      if (!normalizePersonalClientUsername(value).isValid) {
-        callback(new Error(CLIENT_PERSONAL_USERNAME_RULE_MESSAGE))
-        return
-      }
-      callback()
+  username: [
+    { required: true, message: '请输入姓名', trigger: 'blur' },
+    {
+      validator: (_rule, value: string, callback) => {
+        if (isTeacherAccount.value || (value && value === currentProfileUsername.value)) {
+          callback()
+          return
+        }
+        callback(normalizePersonalClientUsername(value).isValid ? undefined : new Error(CLIENT_PERSONAL_USERNAME_RULE_MESSAGE))
+      },
+      trigger: ['blur', 'change'],
     },
-    trigger: ['blur', 'change'],
-  }],
+  ],
   currentPassword: [{ required: true, message: '请输入当前密码', trigger: 'blur' }],
   mobile: [
     {
@@ -165,7 +162,7 @@ const openProfileDialog = () => {
     showAppInfo('部门账户资料由管理员维护，客户端仅支持查看')
     return
   }
-  profileForm.username = clientAuthStore.currentUser?.username || clientAuthStore.currentUser?.account || clientAuthStore.currentUser?.realName || ''
+  profileForm.username = currentProfileUsername.value
   profileForm.mobile = clientAuthStore.currentUser?.mobile || ''
   profileForm.email = clientAuthStore.currentUser?.email || ''
   profileForm.currentPassword = ''
@@ -216,7 +213,7 @@ const submitUpdateProfile = async () => {
 
   const normalizedPersonalUsername = normalizePersonalClientUsername(profileForm.username)
   const normalizedUsername = profileUsernameUnchanged.value || isTeacherAccount.value
-    ? storedProfileUsername.value
+    ? currentProfileUsername.value
     : normalizedPersonalUsername.value
   if (!normalizedUsername) {
     showAppWarning(CLIENT_PERSONAL_USERNAME_RULE_MESSAGE)
@@ -231,7 +228,7 @@ const submitUpdateProfile = async () => {
 
   try {
     profileSubmitting.value = true
-    await clientAuthStore.updateProfile({
+    const profile = await clientAuthStore.updateProfile({
       username: normalizedUsername,
       mobile: normalizedMobile || undefined,
       email: normalizedEmail || undefined,
@@ -239,6 +236,12 @@ const submitUpdateProfile = async () => {
       mobileVerificationCode: profileForm.mobileVerificationCode || undefined,
       emailVerificationCode: profileForm.emailVerificationCode || undefined,
     })
+    if (profile.requiresRelogin) {
+      showAppSuccess('资料更新成功，请重新登录')
+      profileDialogVisible.value = false
+      redirectToClientLogin()
+      return
+    }
     showAppSuccess('资料更新成功')
     profileDialogVisible.value = false
   } catch (error: any) {
@@ -406,8 +409,13 @@ const sendProfileCode = async (channel: 'mobile' | 'email') => {
     >
       <el-form ref="profileFormRef" :model="profileForm" :rules="profileRules" label-position="top" @submit.prevent>
         <el-form-item label="用户名" prop="username">
-          <el-input v-model="profileForm.username" :disabled="isTeacherAccount" placeholder="请输入 2-20 位中文或英文字母" />
+          <el-input
+            v-model="profileForm.username"
+            :disabled="isTeacherAccount"
+            :placeholder="isTeacherAccount ? '姓名由教师目录维护' : CLIENT_PERSONAL_USERNAME_RULE_MESSAGE"
+          />
           <p v-if="profileUsernameRuleHint" class="input-rule-hint" role="alert">{{ profileUsernameRuleHint }}</p>
+          <div v-else-if="!isTeacherAccount" class="el-form-item__tip">{{ CLIENT_PERSONAL_USERNAME_RULE_MESSAGE }}；历史姓名未修改时可保留。</div>
         </el-form-item>
         <el-form-item label="手机号" prop="mobile">
           <el-input v-model="profileForm.mobile" placeholder="请输入手机号" />

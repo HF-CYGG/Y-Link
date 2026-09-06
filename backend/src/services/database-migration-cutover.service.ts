@@ -20,6 +20,8 @@ import {
   type DatabaseRuntimeOverrideFile,
 } from '../config/database-runtime-override.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
+import { writeControlFile, removeControlFile } from '../runtime/durable-control-file.js'
+import { prepareAutomaticDatabaseRescueRollback, completeRecoveryIntent } from '../runtime/database-rescue-control.js'
 
 export const PLANNED_DATABASE_MIGRATION_EXIT_CODE = 75
 export const DATABASE_MIGRATION_PLANNED_RESTART_EXIT_CODE = PLANNED_DATABASE_MIGRATION_EXIT_CODE
@@ -217,38 +219,7 @@ function writeMarkerAtomically(marker: DatabaseMigrationCutoverMarker): Database
     throw new Error('数据库迁移切换标记不合法，已拒绝写入磁盘')
   }
 
-  const directory = path.dirname(markerFilePath)
-  fs.mkdirSync(directory, { recursive: true, mode: 0o700 })
-  const tempFilePath = `${markerFilePath}.${process.pid}.${Date.now()}.tmp`
-  try {
-    fs.writeFileSync(tempFilePath, JSON.stringify(normalizedMarker, null, 2), {
-      encoding: 'utf8',
-      mode: 0o600,
-      flag: 'wx',
-    })
-    try {
-      fs.chmodSync(tempFilePath, 0o600)
-    } catch {
-      // Windows 不保证支持 POSIX 权限位；onebox/Linux 会正常收紧为进程用户可读写。
-    }
-    try {
-      fs.renameSync(tempFilePath, markerFilePath)
-    } catch {
-      if (fs.existsSync(markerFilePath)) {
-        fs.rmSync(markerFilePath, { force: true })
-      }
-      fs.renameSync(tempFilePath, markerFilePath)
-    }
-    try {
-      fs.chmodSync(markerFilePath, 0o600)
-    } catch {
-      // Windows 不保证支持 POSIX 权限位；onebox/Linux 会正常收紧为进程用户可读写。
-    }
-  } finally {
-    if (fs.existsSync(tempFilePath)) {
-      fs.rmSync(tempFilePath, { force: true })
-    }
-  }
+  writeControlFile(markerFilePath, normalizedMarker)
   return normalizedMarker
 }
 
@@ -386,7 +357,7 @@ export function clearDatabaseMigrationCutoverMarker(): boolean {
   if (!fs.existsSync(markerFilePath)) {
     return false
   }
-  fs.rmSync(markerFilePath, { force: true })
+  removeControlFile(markerFilePath)
   return true
 }
 
@@ -449,7 +420,7 @@ export async function handleDatabaseMigrationCutoverStartupFailure(input: {
     }
   }
 
-  await writeSqliteRollbackOverride(attemptedMarker)
+  await prepareAutomaticDatabaseRescueRollback(attemptedMarker.taskId)
   const rollbackMarker = markDatabaseMigrationCutover({
     status: 'rollback_pending',
   })
@@ -551,33 +522,9 @@ export async function completeDatabaseMigrationCutoverStartup(taskId: string): P
   if (activeMaintenanceTaskId && activeMaintenanceTaskId !== normalizedTaskId) {
     throw new Error('数据库切换标记与只读维护任务不一致，禁止解除维护')
   }
+  // 冻结状态下先清控制文件，最后才删除维护文件并开放业务；中断由启动预检续接终态。
+  clearDatabaseMigrationCutoverMarker()
+  if (marker.status === 'rollback_pending') completeRecoveryIntent(normalizedTaskId)
   await databaseMaintenanceModeService.finishReadOnly(normalizedTaskId)
-  if (databaseMaintenanceModeService.isReadOnly()) {
-    throw new Error('数据库切换启动补数完成后未能解除只读维护')
-  }
-  try {
-    clearDatabaseMigrationCutoverMarker()
-  } catch (error) {
-    try {
-      await databaseMaintenanceModeService.beginReadOnly({
-        taskId: normalizedTaskId,
-        phase: 'control_cleanup_failed',
-      })
-    } catch (maintenanceError) {
-      console.error('[database-migration] 切换 marker 清理失败，且无法恢复只读维护', {
-        taskId: normalizedTaskId,
-        markerCleanupError: error instanceof Error ? error.message : String(error),
-        maintenanceError: maintenanceError instanceof Error ? maintenanceError.message : String(maintenanceError),
-      })
-      throw new AggregateError(
-        [error, maintenanceError],
-        '数据库切换 marker 清理失败，且无法恢复只读维护',
-      )
-    }
-    console.error('[database-migration] 切换 marker 清理失败，已恢复只读维护等待人工处理', {
-      taskId: normalizedTaskId,
-      errorMessage: error instanceof Error ? error.message : String(error),
-    })
-    throw error
-  }
+  if (databaseMaintenanceModeService.isReadOnly()) throw new Error('数据库切换启动补数完成后未能解除只读维护')
 }

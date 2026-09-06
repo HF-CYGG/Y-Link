@@ -22,6 +22,7 @@ const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
 const sqliteRoot = path.resolve(backendRoot, 'data', 'local-dev')
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
 const sqlitePath = path.resolve(sqliteRoot, `o2o-sku-selection-${verifySeed}.sqlite`)
+const pendingClientVerificationTargets = new Set<string>()
 
 process.env.APP_PROFILE = `o2o-sku-selection-${verifySeed}`
 process.env.DB_TYPE = 'sqlite'
@@ -36,21 +37,20 @@ function pass(message: string) {
   console.log(`OK ${message}`)
 }
 
-function readCaptchaCode(captchaSvg: string) {
-  return captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6)
-}
+const TEST_CAPTCHA_CODE = 'ABC123'
+const readCaptchaCode = (_captchaSvg: string) => TEST_CAPTCHA_CODE
 
 async function registerAndLoginClient(clientAuthService: typeof import('../src/services/client-auth.service.js').clientAuthService): Promise<ClientAuthContext> {
   const seed = String(Date.now()).slice(-10)
+  const account = `1${seed}`
   const password = `Client@${seed.slice(-6)}`
-  const registerCaptcha = await clientAuthService.createCaptcha()
+  pendingClientVerificationTargets.add(account)
   const registerResult = await clientAuthService.register({
     accountType: 'personal',
-    account: `1${seed}`,
+    account,
     username: '规格验证用户',
     password,
-    captchaId: registerCaptcha.captchaId,
-    captchaCode: readCaptchaCode(registerCaptcha.captchaSvg),
+    verificationCode: '123456',
   })
   const loginCaptcha = await clientAuthService.createCaptcha()
   const loginResult = await clientAuthService.login({
@@ -82,12 +82,29 @@ async function main() {
   const { o2oPreorderService } = await import('../src/services/o2o-preorder.service.js')
   const { productService } = await import('../src/services/product.service.js')
   const { systemConfigService } = await import('../src/services/system-config.service.js')
+  const { verificationCodeService } = await import('../src/services/verification-code.service.js')
+  const { installCaptchaServiceForTesting } = await import('../src/services/captcha.service.js')
+
+  installCaptchaServiceForTesting({ createCode: () => TEST_CAPTCHA_CODE })
 
   prepareDatabaseRuntime()
   await AppDataSource.initialize()
+  const originalProviders = systemConfigService.getVerificationProviderConfigs.bind(systemConfigService)
+  const originalVerifyCode = verificationCodeService.verifyCode.bind(verificationCodeService)
   try {
     await initializeDatabaseSchemaIfNeeded(AppDataSource)
     await systemConfigService.ensureDefaultConfigs()
+    // 只替换隔离脚本内的第三方验证码边界；生产注册仍必须通过已启用的验证码通道。
+    systemConfigService.getVerificationProviderConfigs = async () => {
+      const configs = await originalProviders()
+      return { ...configs, mobile: { ...configs.mobile, enabled: true, ready: true } }
+    }
+    verificationCodeService.verifyCode = async (input) => {
+      assert.equal(input.channel, 'mobile')
+      assert.equal(input.scene, 'register')
+      assert.equal(input.code, '123456')
+      assert.ok(pendingClientVerificationTargets.delete(input.target), '客户端注册验证码必须绑定本次手机号且只能使用一次')
+    }
 
     const product = await productService.create({
       productName: `规格验证商品-${verifySeed}`,
@@ -444,6 +461,8 @@ async function main() {
     assert.equal(mallProductAfterReturn?.skus?.find((sku) => sku.id === otherSku.id)?.currentStock, 4)
     pass('退货核销后仅回补目标规格，其他规格库存保持不变')
   } finally {
+    systemConfigService.getVerificationProviderConfigs = originalProviders
+    verificationCodeService.verifyCode = originalVerifyCode
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()
     }

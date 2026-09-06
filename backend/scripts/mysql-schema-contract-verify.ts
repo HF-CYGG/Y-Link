@@ -233,7 +233,7 @@ const missingCancellationSource = createCompleteFixture()
 missingCancellationSource.columns.delete(objectKey('o2o_preorder', 'cancellation_source'))
 await expectSchemaFailure(missingCancellationSource, [
   '字段 o2o_preorder.cancellation_source',
-  '039_o2o_preorder_governance.sql',
+  '040_o2o_preorder_governance.sql',
 ])
 
 const missingOutboxColumn = createCompleteFixture()

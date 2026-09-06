@@ -21,6 +21,7 @@ import { O2oReturnRequest } from '../src/entities/o2o-return-request.entity.js'
 import { SysAuditLog } from '../src/entities/sys-audit-log.entity.js'
 import { authService } from '../src/services/auth.service.js'
 import { clientAuthService } from '../src/services/client-auth.service.js'
+import { installCaptchaServiceForTesting } from '../src/services/captcha.service.js'
 import { dataMaintenanceService } from '../src/services/data-maintenance.service.js'
 import { o2oPreorderService } from '../src/services/o2o-preorder.service.js'
 import { auditService } from '../src/services/audit.service.js'
@@ -62,8 +63,59 @@ const ensureSystemConfigs = async () => {
   await systemConfigService.ensureDefaultConfigs()
 }
 
-const readCaptchaCode = (captchaSvg: string) => captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6)
+const configureVerificationProviderForTesting = async (actor: AuthUserContext) => {
+  await systemConfigService.updateVerificationProviderConfigs(
+    {
+      mobile: {
+        enabled: true,
+        httpMethod: 'POST',
+        apiUrl: 'https://verification.example.com/mobile',
+        headersTemplate: '{}',
+        bodyTemplate: '{"target":"{{target}}","code":"{{code}}"}',
+        successMatch: 'ok',
+      },
+      email: {
+        enabled: false,
+        httpMethod: 'POST',
+        apiUrl: '',
+        headersTemplate: '{}',
+        bodyTemplate: '',
+        successMatch: '',
+      },
+    },
+    actor,
+  )
+}
+
+const TEST_CAPTCHA_CODE = 'ABC123'
+installCaptchaServiceForTesting({ createCode: () => TEST_CAPTCHA_CODE })
+const readCaptchaCode = (_captchaSvg: string) => TEST_CAPTCHA_CODE
 const toChineseDigits = (value: string) => value.replaceAll(/\d/g, (digit) => '零一二三四五六七八九'[Number(digit)] ?? '')
+
+type CapturedVerification = {
+  channel: 'mobile' | 'email'
+  target: string
+  code: string
+}
+
+const createVerificationRequestStub = (captured: CapturedVerification[]) => {
+  return async (_input: string | URL, init?: { body?: string | Buffer }) => {
+    const bodyText = String(init?.body ?? '{}')
+    const payload = JSON.parse(bodyText) as Partial<CapturedVerification>
+    assert.equal(typeof payload.code, 'string', '验证码平台请求体应包含 code')
+    assert.equal(typeof payload.target, 'string', '验证码平台请求体应包含 target')
+    captured.push({
+      channel: String(payload.target).includes('@') ? 'email' : 'mobile',
+      target: String(payload.target),
+      code: String(payload.code),
+    })
+    return {
+      statusCode: 200,
+      headers: {},
+      body: Buffer.from('ok'),
+    }
+  }
+}
 
 const expectBizError = async (executor: () => Promise<unknown>, expectedMessage: string) => {
   try {
@@ -88,14 +140,30 @@ const registerAndLoginClient = async (seed: number): Promise<ClientAuthContext> 
   const account = `1${String(seed).slice(-10)}`
   const username = `测试用户${toChineseDigits(String(seed).slice(-6))}`
   const password = process.env.Y_LINK_VERIFY_CLIENT_PASSWORD ?? `Client@${String(seed).slice(-6)}`
+  await clientAuthService.verifyCaptchaBeforeVerificationSend({
+    channel: 'mobile',
+    target: account,
+    scene: 'register',
+    captchaId: registerCaptcha.captchaId,
+    captchaCode: readCaptchaCode(registerCaptcha.captchaSvg),
+  })
+  const capturedVerifications: CapturedVerification[] = []
+  const { VerificationCodeService } = await import('../src/services/verification-code.service.js')
+  const verificationCodeService = new VerificationCodeService(createVerificationRequestStub(capturedVerifications))
+  await verificationCodeService.sendCode({
+    channel: 'mobile',
+    target: account,
+    scene: 'register',
+  })
+  const verificationCode = [...capturedVerifications].reverse().find((item) => item.target === account)?.code
+  assert.ok(verificationCode, '应捕获个人注册短信验证码')
 
   const registerResult = await clientAuthService.register({
     accountType: 'personal',
     account,
     username,
     password,
-    captchaId: registerCaptcha.captchaId,
-    captchaCode: readCaptchaCode(registerCaptcha.captchaSvg),
+    verificationCode,
   })
   assert.ok(registerResult.user.id)
 
@@ -114,6 +182,7 @@ const run = async () => {
   const bootstrapAdmin = await ensureReady()
   await ensureSystemConfigs()
   const scriptAdminActor = buildScriptAdminActor(bootstrapAdmin)
+  await configureVerificationProviderForTesting(scriptAdminActor)
 
   const clientAuth = await registerAndLoginClient(Date.now())
   log('客户端注册流程通过')
@@ -614,6 +683,10 @@ const run = async () => {
   }
   const verifyActor = adminAuth ?? scriptAdminActor
   const departmentSnapshotVerified = await o2oPreorderService.verifyByCode(departmentSnapshotPreorder.order.verifyCode, verifyActor)
+  const printedDepartmentOrder = await o2oPreorderService.markCustomerOrderPrintedByClient(clientAuth, departmentSnapshotPreorder.order.id)
+  assert.equal(printedDepartmentOrder.detail.order.hasCustomerOrder, true, '已核销的有效部门订单仍应支持补打出库单')
+  assert.equal((await o2oPreorderService.markCustomerOrderPrintedByClient(clientAuth, departmentSnapshotPreorder.order.id)).printedNow, false, '重复打印上报必须幂等')
+  await expectBizError(() => o2oPreorderService.markCustomerOrderPrintedByClient(clientAuth, departmentOwnedResult.order.id), '已取消订单不可标记已打印')
   const departmentSnapshotDetail = assertPreorderVerifyDetail(departmentSnapshotVerified)
   assert.equal(departmentSnapshotDetail.order.clientOrderType, 'department')
   const departmentSnapshotOutboundOrder = await outboundOrderRepo.findOne({
@@ -676,7 +749,7 @@ try {
 } catch (error) {
   console.error('\nO2O 预订验收脚本失败')
   console.error(error)
-  process.exit(1)
+  process.exitCode = 1
 } finally {
   if (AppDataSource.isInitialized) {
     await AppDataSource.destroy()

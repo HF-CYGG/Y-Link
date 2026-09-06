@@ -44,6 +44,7 @@ const captchaVisible = ref(false)
 const captchaLoading = ref(false)
 const captchaState = reactive({
   captchaId: '',
+  captchaImage: '',
   captchaSvg: '',
   expiresInSeconds: 0,
 })
@@ -62,9 +63,9 @@ const submitButtonLabel = computed(() => {
 // 安全说明：验证码后端返回的是 SVG 字符串，
 // 这里转为 data URL 图片渲染，避免通过 v-html 直接把 SVG 片段注入 DOM。
 const captchaImageSrc = computed(() => (
-  captchaState.captchaSvg
+  captchaState.captchaImage || (captchaState.captchaSvg
     ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(captchaState.captchaSvg)}`
-    : ''
+    : '')
 ))
 
 // 当后端风控触发限流/锁定时，把提示固定显示在表单顶部，
@@ -78,6 +79,7 @@ const refreshCaptcha = async () => {
   try {
     const result = await getAdminCaptcha()
     captchaState.captchaId = result.captchaId
+    captchaState.captchaImage = result.captchaImage ?? ''
     captchaState.captchaSvg = result.captchaSvg
     captchaState.expiresInSeconds = result.expiresInSeconds
     form.captcha = ''
@@ -132,6 +134,7 @@ const handleSubmit = async () => {
     securityHint.value = ''
     captchaVisible.value = false
     captchaState.captchaId = ''
+    captchaState.captchaImage = ''
     captchaState.captchaSvg = ''
     form.captcha = ''
     showAppSuccess(`欢迎回来，${result.user.displayName}`)

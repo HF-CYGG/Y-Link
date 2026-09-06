@@ -26,6 +26,7 @@ import {
   type FeedbackPortalAvailability,
   type FeedbackRealtimeConnection,
 } from '@/api/modules/customer-service-feedback'
+import { useStableRequest } from '@/composables/useStableRequest'
 import { useClientAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { formatDateTime } from '@/utils/date-time'
@@ -36,6 +37,8 @@ import { showAppError } from '@/utils/app-alert'
 
 const router = useRouter()
 const clientAuthStore = useClientAuthStore(pinia)
+const portalConfigRequest = useStableRequest()
+const conversationListRequest = useStableRequest()
 
 const loading = ref(false)
 const conversations = ref<FeedbackConversationRecord[]>([])
@@ -114,13 +117,20 @@ const handleNavigateToDetail = (conversationId: string) => {
 }
 
 const loadPortalConfig = async () => {
-  const config = await getClientFeedbackPortalConfig()
-  portalNotice.value = config.entryNotice
-  availability.value = config.availability
-  realtimeState.value = config.availability.isOnline ? 'online' : 'offline'
-  reconnectTip.value = config.availability.isOnline
-    ? '客服当前在线，进入详情页后会自动续接同一条会话。'
-    : '客服当前离线，你仍可先进入详情页留言，客服上线后会从原会话继续跟进。'
+  await portalConfigRequest.runLatest({
+    executor: (signal) => getClientFeedbackPortalConfig({ signal }),
+    onSuccess: (config) => {
+      portalNotice.value = config.entryNotice
+      availability.value = config.availability
+      realtimeState.value = config.availability.isOnline ? 'online' : 'offline'
+      reconnectTip.value = config.availability.isOnline
+        ? '客服当前在线，进入详情页后会自动续接同一条会话。'
+        : '客服当前离线，你仍可先进入详情页留言，客服上线后会从原会话继续跟进。'
+    },
+    onError: (error) => {
+      throw error
+    },
+  })
 }
 
 const loadConversations = async () => {
@@ -130,11 +140,22 @@ const loadConversations = async () => {
   }
 
   loading.value = true
-  try {
-    conversations.value = await listClientFeedbackConversations()
-  } finally {
-    loading.value = false
-  }
+  await conversationListRequest.runLatest({
+    executor: (signal) => listClientFeedbackConversations({ signal }),
+    onSuccess: (items) => {
+      conversations.value = items
+    },
+    onError: (error) => {
+      throw error
+    },
+    onFinally: () => {
+      loading.value = false
+    },
+  })
+}
+
+const refreshAuthoritativeFeedbackState = async () => {
+  await Promise.all([loadPortalConfig(), loadConversations()])
 }
 
 const isRealtimeEligible = () => {
@@ -170,14 +191,34 @@ const connectRealtime = () => {
       }
       availability.value = payload.availability ?? availability.value
       realtimeState.value = payload.availability?.isOnline ? 'online' : 'offline'
-      reconnectTip.value = '已恢复在线连接，后续消息会自动同步到会话列表。'
+      void refreshAuthoritativeFeedbackState().then(() => {
+        if (!isRealtimeEligible()) {
+          return
+        }
+        reconnectTip.value = '已恢复在线连接，并同步了最新会话列表。'
+      }).catch((error) => {
+        if (!isRealtimeEligible()) {
+          return
+        }
+        reconnectTip.value = '实时连接已恢复，但最新会话列表同步失败，请稍后重试。'
+        showAppError(extractErrorMessage(error, '反馈会话同步失败，请稍后重试'))
+      })
     },
     onConversation: async () => {
       if (!isRealtimeEligible()) {
         return
       }
-      await loadConversations()
-      reconnectTip.value = '检测到会话有新进展，列表已自动刷新。'
+      try {
+        await loadConversations()
+        if (isRealtimeEligible()) {
+          reconnectTip.value = '检测到会话有新进展，列表已自动刷新。'
+        }
+      } catch (error) {
+        if (isRealtimeEligible()) {
+          reconnectTip.value = '检测到会话有新进展，但列表同步失败，请稍后重试。'
+          showAppError(extractErrorMessage(error, '反馈会话同步失败，请稍后重试'))
+        }
+      }
     },
     onError: () => {
       if (!isRealtimeEligible()) {
@@ -270,6 +311,9 @@ const deactivatePageRuntime = () => {
   }
   pageRuntimeActive = false
   globalThis.document?.removeEventListener('visibilitychange', handleVisibilityChange)
+  portalConfigRequest.cancel()
+  conversationListRequest.cancel()
+  loading.value = false
   stopRealtime('离开反馈中心后已释放实时连接，返回页面会自动续接。')
 }
 

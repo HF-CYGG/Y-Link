@@ -74,6 +74,22 @@ export class EphemeralTicketStore<TTicket> {
   }
 
   /**
+   * 同步读取并删除单次票据：
+   * - JavaScript 单线程事件循环内不会在 get/delete 之间让出执行权；
+   * - 用于重置凭证等即使后续业务失败也不能归还的敏感票据。
+   */
+  take(key: string, now = Date.now()) {
+    this.sweepExpired(now)
+    const ticket = this.store.get(key)
+    if (!ticket || this.options.resolveExpiresAt(ticket) <= now) {
+      this.store.delete(key)
+      return undefined
+    }
+    this.store.delete(key)
+    return ticket
+  }
+
+  /**
    * 删除票据：
    * - 用于验证码核验成功、重置密码完成等“单次消费即作废”的场景。
    */

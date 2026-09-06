@@ -174,6 +174,26 @@ export type DatabaseMigrationTaskStatus =
  */
 export type DatabaseMigrationTaskReadState = 'healthy' | 'corrupted'
 
+/** 自动迁移的受控阶段，由后端编排并作为页面唯一阶段真源。 */
+export type DatabaseMigrationStage = 'freeze' | 'precheck' | 'snapshot' | 'import' | 'validate' | 'cutover'
+
+/** 后端针对当前任务显式开放的救援动作，前端不得自行推断。 */
+export type DatabaseMigrationAllowedAction = 'prepare_rollback' | 'resume_rollback'
+
+/** 自动恢复过程的最小公开状态，不包含数据库路径、凭据或其他拓扑细节。 */
+export interface DatabaseMigrationRecoveryState {
+  phase: string
+  operationId: string
+  restartAttempts: number
+}
+
+/** 自动任务仅在可信 HTTPS 或真实 Node 本机连接时一次性下发的救援凭证。 */
+export interface DatabaseRescueCredential {
+  taskId: string
+  credential: string
+  expiresAt: string
+}
+
 /**
  * 迁移任务记录：
  * - 列表接口与详情接口都返回该结构；
@@ -189,6 +209,9 @@ export interface SQLiteToMySqlTaskRecord {
   note?: string
   mode?: 'manual' | 'automatic'
   resumeCount?: number
+  stage?: DatabaseMigrationStage
+  allowedActions?: DatabaseMigrationAllowedAction[]
+  recovery?: DatabaseMigrationRecoveryState | null
   source: {
     sqlitePath: string
   }
@@ -456,7 +479,7 @@ export const createSQLiteToMySqlMigrationTask = (payload: CreateSQLiteToMySqlTas
 export const createAutomaticSQLiteToMySqlMigrationTask = (
   payload: CreateAutomaticSQLiteToMySqlTaskPayload,
 ) =>
-  request<SQLiteToMySqlTaskRecord>({
+  request<SQLiteToMySqlTaskRecord & { rescueCredential?: DatabaseRescueCredential }>({
     method: 'POST',
     url: '/data-maintenance/db-migration/automatic-tasks',
     data: payload,

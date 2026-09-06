@@ -112,6 +112,7 @@ const AUTH_MODE_SEQUENCE: AuthMode[] = ['login', 'register-personal', 'register-
 
 interface ClientCaptchaState {
   captchaId: string
+  captchaImage: string
   captchaSvg: string
   expiresInSeconds: number
 }
@@ -162,6 +163,7 @@ const passwordFocused = ref(false)
 const authCapabilities = ref<ClientAuthCapabilities | null>(null)
 const captcha = reactive<ClientCaptchaState>({
   captchaId: '',
+  captchaImage: '',
   captchaSvg: '',
   expiresInSeconds: 0,
 })
@@ -226,12 +228,11 @@ const shouldPrepareCaptcha = computed(() => isRegisterMode.value || loginCaptcha
 const isCapabilityHintVisible = computed(() => capabilityLoading.value && !authCapabilities.value)
 const isCapabilityFallbackVisible = computed(() => !capabilityLoading.value && !!capabilityErrorMessage.value && !authCapabilities.value)
 const forgotPasswordAvailable = computed(() => authCapabilities.value?.forgotPasswordEnabled ?? false)
-// 安全说明：后端返回的是 SVG 字符串，这里统一转为 data URL 图片渲染，
-// 避免通过 v-html 直接把未信任的 SVG 片段注入到页面 DOM 中。
+// 优先使用后端 PNG data URL；旧服务返回 SVG 时仍以图片地址方式渲染，避免 v-html 注入。
 const captchaImageSrc = computed(() => {
-  return captcha.captchaSvg
+  return captcha.captchaImage || (captcha.captchaSvg
     ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(captcha.captchaSvg)}`
-    : ''
+    : '')
 })
 
 const captchaHintText = computed(() => {
@@ -422,6 +423,7 @@ const refreshCaptcha = async (silent = false) => {
     executor: (signal) => getClientCaptcha({ signal }),
     onSuccess: (result) => {
       captcha.captchaId = result.captchaId
+      captcha.captchaImage = result.captchaImage ?? ''
       captcha.captchaSvg = result.captchaSvg
       captcha.expiresInSeconds = result.expiresInSeconds
       if (captchaExpireTimer) {
@@ -456,6 +458,7 @@ const refreshCaptcha = async (silent = false) => {
 
 const clearCaptcha = () => {
   captcha.captchaId = ''
+  captcha.captchaImage = ''
   captcha.captchaSvg = ''
   captcha.expiresInSeconds = 0
   if (captchaExpireTimer) {
@@ -465,7 +468,7 @@ const clearCaptcha = () => {
 }
 
 const ensureCaptchaReady = async () => {
-  if (captcha.captchaId && captcha.captchaSvg) {
+  if (captcha.captchaId && (captcha.captchaImage || captcha.captchaSvg)) {
     return
   }
   await refreshCaptcha(true)
@@ -606,6 +609,13 @@ const clearRegisterFeedback = () => {
 
 const applyRegisterFeedbackFromError = (message: string, status?: number) => {
   clearRegisterFeedback()
+
+  if (status === 409 && /当前注册信息无法使用/.test(message)) {
+    registerFeedbackTitle.value = '当前注册信息无法使用'
+    registerFeedbackDescription.value = '请确认联系方式已完成验证并核对注册信息；如仍无法注册，请联系管理员处理。'
+    registerFeedbackType.value = 'warning'
+    return
+  }
 
   if (status === 409 && /该手机号已被占用|该邮箱已被占用|该手机号或邮箱已被占用/.test(message)) {
     const isEmailOccupied = /邮箱/.test(message) && !/手机号/.test(message)
@@ -835,7 +845,7 @@ const handleLogin = async () => {
   }
 }
 
-// 教师注册只提交工号与一次性邀请码；姓名和部门由后端目录在注册事务中绑定。
+// 教师注册只提交工号与统一教师邀请码；姓名和部门由后端目录在注册事务中绑定。
 const validateDepartmentRegisterFields = () => {
   if (!isDepartmentRegisterMode.value) {
     return true
@@ -850,7 +860,7 @@ const validateDepartmentRegisterFields = () => {
     return false
   }
   if (!/^\d{8}$/.test(registerForm.inviteCode.trim())) {
-    showAppWarning('请输入管理员提供的 8 位数字邀请码')
+    showAppWarning('请输入管理员提供的统一 8 位教师邀请码')
     return false
   }
   return true
@@ -1477,7 +1487,7 @@ onUnmounted(() => {
 
               <div v-else ref="formBlockRef" key="register-department" class="form-block">
                 <h2 class="block-title">创建教师账号</h2>
-                <p class="block-subtitle">填写教职工号、手机号或邮箱，并通过验证码后创建教师账号</p>
+                <p class="block-subtitle">填写教职工号、手机号或邮箱，并输入管理员统一设置的邀请码后创建教师账号</p>
                 <el-alert class="register-channel-alert" type="info" :closable="false" show-icon>
                   <template #title>
                     教师账号按教职工目录回填姓名和部门，注册后仍按个人/散客流程下单；部门共享账号请联系管理员创建。
@@ -1531,7 +1541,7 @@ onUnmounted(() => {
 
                   <el-input
                     v-model="registerForm.inviteCode"
-                    placeholder="8 位数字邀请码"
+                    placeholder="统一 8 位教师邀请码"
                     maxlength="8"
                     inputmode="numeric"
                     class="geo-input"

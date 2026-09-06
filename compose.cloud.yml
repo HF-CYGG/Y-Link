@@ -12,6 +12,8 @@ services:
     pull_policy: always
     environment:
       - NODE_ENV=production
+      - Y_LINK_TRUST_PROXY=${Y_LINK_FRONTEND_PROXY_IP:-172.30.91.2}
+      - Y_LINK_FORCE_SECURE_COOKIES=${Y_LINK_FORCE_SECURE_COOKIES:-false}
       - PORT=3001
       - TZ=${TZ:-Asia/Shanghai}
       - LOG_COLOR=${LOG_COLOR:-true}
@@ -34,8 +36,6 @@ services:
       - ALIBABA_CLOUD_ACCESS_KEY_SECRET=${ALIBABA_CLOUD_ACCESS_KEY_SECRET:-}
       - VERIFICATION_TICKET_HMAC_SECRET=${VERIFICATION_TICKET_HMAC_SECRET:-}
       - ALIYUN_DYPNS_MNS_ENABLED=${ALIYUN_DYPNS_MNS_ENABLED:-false}
-    ports:
-      - "${BACKEND_PORT:-3001}:3001"
     volumes:
       - y_link_cloud_sqlite_data:/app/data
       # 云端镜像部署同样需要持久化 `/app/uploads`，否则图片只存在于容器临时层。
@@ -52,6 +52,8 @@ services:
       timeout: 5s
       retries: 6
       start_period: 10s
+    networks:
+      proxy_boundary: {}
     restart: unless-stopped
 
   frontend:
@@ -59,6 +61,8 @@ services:
     pull_policy: always
     environment:
       - TZ=${TZ:-Asia/Shanghai}
+      - Y_LINK_TRUSTED_EDGE_PROXIES=${Y_LINK_TRUSTED_EDGE_PROXIES:-}
+      - Y_LINK_HSTS_MAX_AGE_SECONDS=${Y_LINK_HSTS_MAX_AGE_SECONDS:-15552000}
     depends_on:
       backend:
         condition: service_healthy
@@ -72,8 +76,18 @@ services:
       timeout: 5s
       retries: 6
       start_period: 5s
+    networks:
+      proxy_boundary:
+        ipv4_address: ${Y_LINK_FRONTEND_PROXY_IP:-172.30.91.2}
     restart: unless-stopped
 
 volumes:
   y_link_cloud_sqlite_data:
   y_link_cloud_uploads_data:
+
+# 独立网络与前端固定地址共同限定 Node 的可信代理，不信任整个 RFC1918。
+networks:
+  proxy_boundary:
+    ipam:
+      config:
+        - subnet: ${Y_LINK_PROXY_NETWORK_CIDR:-172.30.91.0/24}

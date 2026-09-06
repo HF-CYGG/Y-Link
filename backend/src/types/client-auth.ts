@@ -18,6 +18,7 @@ export interface ClientAuthContext {
   accountType: 'personal' | 'department'
   staffNo: string | null
   sessionToken: string
+  authSource: 'cookie' | 'bearer'
 }
 
 export interface ClientAuthenticatedRequest extends Request {

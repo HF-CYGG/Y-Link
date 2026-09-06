@@ -44,7 +44,7 @@ authRouter.get(
   '/captcha',
   asyncHandler(async (req, res) => {
     await authSecurityService.guardAdminCaptchaRequest(extractRequestMeta(req))
-    const data = captchaService.createCaptcha()
+    const data = await captchaService.createCaptcha('admin')
     res.setHeader('Cache-Control', 'no-store')
     res.json({
       code: 0,
@@ -65,7 +65,7 @@ authRouter.post(
       if (!payload.captchaId?.trim() || !payload.captchaCode?.trim()) {
         throw new BizError('当前登录环境需要图形验证码', 428)
       }
-      captchaService.verifyCaptcha(payload.captchaId, payload.captchaCode)
+      captchaService.verifyCaptcha('admin', payload.captchaId, payload.captchaCode)
     }
     const data = await authService.login(payload, requestMeta)
     const csrfToken = generateAdminCsrfToken()
