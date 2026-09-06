@@ -71,11 +71,13 @@ NGINX_PID=$!
 
 # 容器收到停止信号时，优先优雅停止两个进程，避免残留僵尸进程。
 cleanup() {
+  trap - INT TERM
   echo "[onebox] received stop signal, shutting down..."
   kill -TERM "$NGINX_PID" 2>/dev/null || true
   kill -TERM "$BACKEND_PID" 2>/dev/null || true
   wait "$NGINX_PID" 2>/dev/null || true
   wait "$BACKEND_PID" 2>/dev/null || true
+  exit 0
 }
 
 trap cleanup INT TERM

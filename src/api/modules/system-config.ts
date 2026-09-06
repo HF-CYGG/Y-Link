@@ -1,10 +1,10 @@
 /**
  * 模块说明：系统配置治理 API 模块。
- * 文件职责：封装订单流水号、O2O 规则与验证码供应商通道配置的查询与更新接口及相关类型。
- * 维护说明：维护时重点关注配置项默认值、通道模板字段约束与前后端配置结构对齐。
+ * 文件职责：封装订单流水号、O2O 规则、验证码供应商通道、客户端部门/教职工目录及统一教师邀请码的查询与更新接口及相关类型。
+ * 维护说明：维护时重点关注配置项默认值、通道模板字段约束、邀请码不回显约束与前后端配置结构对齐。
  */
 
-import { request } from '@/api/http'
+import { request, type RequestConfig } from '@/api/http'
 
 export type OrderSerialType = 'department' | 'walkin'
 
@@ -67,6 +67,19 @@ export interface UpdateO2oRuleConfigsResult {
   changed: boolean
 }
 
+export type SmsVerificationProviderType = 'generic_http' | 'aliyun_dypns'
+export type VerificationScene = 'register' | 'forgot_password' | 'profile_update' | 'test'
+export type SmsVerificationSendStatus = 'pending' | 'sent' | 'failed'
+export type SmsVerificationDeliveryStatus = 'pending' | 'delivered' | 'failed'
+export type SmsVerificationResultStatus = 'pending' | 'passed' | 'failed'
+
+export interface AliyunDypnsTemplateConfig {
+  register: string
+  forgotPassword: string
+  profileUpdate: string
+  test: string
+}
+
 export interface VerificationProviderChannelConfig {
   enabled: boolean
   httpMethod: 'POST' | 'GET'
@@ -80,8 +93,21 @@ export interface VerificationProviderChannelConfig {
   updatedAt: string
 }
 
+export interface VerificationProviderMobileChannelConfig extends VerificationProviderChannelConfig {
+  providerType: SmsVerificationProviderType
+  aliyunSignName: string
+  aliyunSchemeName: string
+  aliyunTemplates: AliyunDypnsTemplateConfig
+  credentialsConfigured: boolean
+  ticketHmacConfigured: boolean
+  mnsEnabled: boolean
+  mnsConfigured: boolean
+  ready: boolean
+  statusError: string | null
+}
+
 export interface VerificationProviderConfigsResult {
-  mobile: VerificationProviderChannelConfig
+  mobile: VerificationProviderMobileChannelConfig
   email: VerificationProviderChannelConfig
 }
 
@@ -94,8 +120,15 @@ export interface VerificationProviderChannelInput {
   successMatch: string
 }
 
+export interface VerificationProviderMobileChannelInput extends VerificationProviderChannelInput {
+  providerType: SmsVerificationProviderType
+  aliyunSignName: string
+  aliyunSchemeName: string
+  aliyunTemplates: AliyunDypnsTemplateConfig
+}
+
 export interface UpdateVerificationProviderConfigsPayload {
-  mobile: VerificationProviderChannelInput
+  mobile: VerificationProviderMobileChannelInput
   email: VerificationProviderChannelInput
 }
 
@@ -156,13 +189,56 @@ export interface UpdateCustomerServiceConfigsResult {
 export interface TestVerificationProviderPayload {
   channel: 'mobile' | 'email'
   target: string
-  config: VerificationProviderChannelInput
+  config: VerificationProviderChannelInput | VerificationProviderMobileChannelInput
 }
 
-export interface TestVerificationProviderResult {
+export interface GenericTestVerificationProviderResult {
   channel: 'mobile' | 'email'
   target: string
   code: string
+}
+
+export interface AliyunTestVerificationProviderResult {
+  provider: 'aliyun_dypns'
+  outId: string
+  bizId: string | null
+  targetMasked: string
+  expireSeconds: number
+}
+
+export type TestVerificationProviderResult =
+  | GenericTestVerificationProviderResult
+  | AliyunTestVerificationProviderResult
+
+export interface SmsVerificationReceiptQuery {
+  page: number
+  pageSize: number
+  scene?: VerificationScene
+  deliveryStatus?: SmsVerificationDeliveryStatus
+  startDate?: string
+  endDate?: string
+}
+
+export interface SmsVerificationReceiptRecord {
+  outId: string
+  bizId: string | null
+  scene: VerificationScene
+  targetMasked: string
+  sendStatus: SmsVerificationSendStatus
+  deliveryStatus: SmsVerificationDeliveryStatus
+  verificationStatus: SmsVerificationResultStatus
+  errorCode: string | null
+  sentAt: string | null
+  reportedAt: string | null
+  verifiedAt: string | null
+  createdAt: string
+}
+
+export interface SmsVerificationReceiptListResult {
+  items: SmsVerificationReceiptRecord[]
+  total: number
+  page: number
+  pageSize: number
 }
 
 export interface ClientDepartmentConfigRecord {
@@ -198,10 +274,19 @@ export interface ClientStaffDirectoryRecord {
   status: ClientStaffDirectoryStatus
   isRegistered: boolean
   linkedClientUserCount: number
-  inviteStatus: 'not_set' | 'active' | 'expired' | 'used' | 'locked'
-  inviteExpiresAt: string | null
   createdAt: string
   updatedAt: string
+}
+
+export type ClientStaffInviteCodeStatus = 'not_set' | 'enabled' | 'disabled'
+
+export interface ClientStaffInviteCodeConfig {
+  status: ClientStaffInviteCodeStatus
+  updatedAt: string | null
+}
+
+export interface UpdateClientStaffInviteCodePayload {
+  inviteCode: string
 }
 
 export interface ClientStaffDirectoryListQuery {
@@ -348,6 +433,21 @@ export const getVerificationProviderConfigs = () =>
   })
 
 /**
+ * 查询最近短信回执：
+ * - 仅返回脱敏目标、平台业务号和状态时间，不接收或暴露完整手机号与错误详情。
+ */
+export const getSmsVerificationReceipts = (
+  params: SmsVerificationReceiptQuery,
+  requestConfig: RequestConfig = {},
+) =>
+  request<SmsVerificationReceiptListResult>({
+    ...requestConfig,
+    method: 'GET',
+    url: '/system-configs/verification-providers/sms-receipts',
+    params,
+  })
+
+/**
  * 保存验证码网关服务配置：
  */
 export const updateVerificationProviderConfigs = (payload: UpdateVerificationProviderConfigsPayload) =>
@@ -389,71 +489,87 @@ export const updateClientDepartmentConfigs = (payload: UpdateClientDepartmentCon
     data: payload,
   })
 
+const clientStaffDirectoryUrl = '/system-configs/client-staff-directory'
+
 export const getClientStaffDirectoryList = (params: ClientStaffDirectoryListQuery) =>
   request<ClientStaffDirectoryListResult>({
     method: 'GET',
-    url: '/system-configs/client-staff-directory',
+    url: clientStaffDirectoryUrl,
     params,
   })
 
 export const createClientStaffDirectoryRecord = (payload: SaveClientStaffDirectoryPayload) =>
   request<SaveClientStaffDirectoryResult>({
     method: 'POST',
-    url: '/system-configs/client-staff-directory',
+    url: clientStaffDirectoryUrl,
     data: payload,
   })
 
 export const updateClientStaffDirectoryRecord = (id: string, payload: Omit<SaveClientStaffDirectoryPayload, 'status'>) =>
   request<SaveClientStaffDirectoryResult>({
     method: 'PUT',
-    url: `/system-configs/client-staff-directory/${id}`,
+    url: `${clientStaffDirectoryUrl}/${id}`,
     data: payload,
   })
 
 export const updateClientStaffDirectoryStatus = (id: string, status: ClientStaffDirectoryStatus) =>
   request<SaveClientStaffDirectoryResult>({
     method: 'PATCH',
-    url: `/system-configs/client-staff-directory/${id}/status`,
+    url: `${clientStaffDirectoryUrl}/${id}/status`,
     data: { status },
   })
 
-export const setClientStaffDirectoryInviteCode = (id: string, inviteCode: string) =>
-  request<SaveClientStaffDirectoryResult>({
+const clientStaffInviteCodeUrl = '/system-configs/client-staff-invite-code'
+
+/**
+ * 读取统一教师邀请码的公开状态：
+ * - 服务端只返回启用状态与更新时间，绝不回传邀请码明文。
+ */
+export const getClientStaffInviteCodeConfig = () =>
+  request<ClientStaffInviteCodeConfig>({
+    method: 'GET',
+    url: clientStaffInviteCodeUrl,
+  })
+
+/**
+ * 设置或替换统一教师邀请码：
+ * - 邀请码为允许前导零的 8 位数字；修改后旧码立即失效。
+ */
+export const updateClientStaffInviteCodeConfig = (payload: UpdateClientStaffInviteCodePayload) =>
+  request<ClientStaffInviteCodeConfig>({
     method: 'PUT',
-    url: `/system-configs/client-staff-directory/${id}/invite-code`,
-    data: { inviteCode },
+    url: clientStaffInviteCodeUrl,
+    data: payload,
   })
 
-export const resetClientStaffDirectoryInviteCode = (id: string) =>
-  request<{ inviteCode: string; expiresAt: string }>({
-    method: 'POST',
-    url: `/system-configs/client-staff-directory/${id}/invite-code/reset`,
-  })
-
-export const disableClientStaffDirectoryInviteCode = (id: string) =>
-  request<SaveClientStaffDirectoryResult>({
+/**
+ * 禁用统一教师邀请码：
+ * - 服务端会使当前邀请码立即失效，仍不回传明文。
+ */
+export const disableClientStaffInviteCodeConfig = () =>
+  request<ClientStaffInviteCodeConfig>({
     method: 'DELETE',
-    url: `/system-configs/client-staff-directory/${id}/invite-code`,
+    url: clientStaffInviteCodeUrl,
   })
 
 export const deleteClientStaffDirectoryBatch = (payload: DeleteClientStaffDirectoryBatchPayload) =>
   request<DeleteClientStaffDirectoryBatchResult>({
     method: 'DELETE',
-    url: '/system-configs/client-staff-directory',
+    url: clientStaffDirectoryUrl,
     data: payload,
   })
 
 export const importClientStaffDirectory = (payload: ImportClientStaffDirectoryPayload) =>
   request<ImportClientStaffDirectoryResult>({
     method: 'POST',
-    url: '/system-configs/client-staff-directory/import',
+    url: `${clientStaffDirectoryUrl}/import`,
     data: payload,
   })
 
 export const previewClientStaffDirectoryImport = (payload: ImportClientStaffDirectoryPayload) =>
   request<ImportClientStaffDirectoryPreviewResult>({
     method: 'POST',
-    url: '/system-configs/client-staff-directory/import/preview',
+    url: `${clientStaffDirectoryUrl}/import/preview`,
     data: payload,
   })
 
@@ -462,7 +578,7 @@ export const importClientStaffDirectoryFile = (file: File) => {
   formData.append('file', file)
   return request<ImportClientStaffDirectoryResult>({
     method: 'POST',
-    url: '/system-configs/client-staff-directory/import',
+    url: `${clientStaffDirectoryUrl}/import`,
     data: formData,
     headers: {
       'Content-Type': 'multipart/form-data',
@@ -475,7 +591,7 @@ export const previewClientStaffDirectoryImportFile = (file: File) => {
   formData.append('file', file)
   return request<ImportClientStaffDirectoryPreviewResult>({
     method: 'POST',
-    url: '/system-configs/client-staff-directory/import/preview',
+    url: `${clientStaffDirectoryUrl}/import/preview`,
     data: formData,
     headers: {
       'Content-Type': 'multipart/form-data',

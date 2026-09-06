@@ -113,6 +113,7 @@ const run = async () => {
   assert.equal(savedProduct.o2oStatus, 'listed')
 
   const preorder = await o2oPreorderService.submit(clientAuth, {
+    clientRequestId: 'customer-show-no-verify-0001',
     items: [{ productId: product.id, qty: 1 }],
     remark: '正式出库单号校验',
     isSystemApplied: false,

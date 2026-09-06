@@ -7,13 +7,45 @@
 -- 3) 订单池永久删除仍走原有物理删除链路。
 -- =============================================
 
-ALTER TABLE `o2o_preorder`
-  ADD COLUMN IF NOT EXISTS `is_deleted` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '客户端可见性删除标记' AFTER `verified_by`,
-  ADD COLUMN IF NOT EXISTS `deleted_at` DATETIME(3) NULL COMMENT '客户端可见性删除时间' AFTER `is_deleted`,
-  ADD COLUMN IF NOT EXISTS `deleted_by_user_id` BIGINT UNSIGNED NULL COMMENT '客户端可见性删除操作人ID' AFTER `deleted_at`,
-  ADD COLUMN IF NOT EXISTS `deleted_by_username` VARCHAR(64) NULL COMMENT '客户端可见性删除操作账号' AFTER `deleted_by_user_id`,
-  ADD COLUMN IF NOT EXISTS `deleted_by_display_name` VARCHAR(64) NULL COMMENT '客户端可见性删除操作人名称' AFTER `deleted_by_username`;
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'o2o_preorder' AND COLUMN_NAME = 'is_deleted') = 0,
+  'ALTER TABLE `o2o_preorder` ADD COLUMN `is_deleted` TINYINT(1) NOT NULL DEFAULT 0 COMMENT ''客户端可见性删除标记'' AFTER `verified_by`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'o2o_preorder' AND COLUMN_NAME = 'deleted_at') = 0,
+  'ALTER TABLE `o2o_preorder` ADD COLUMN `deleted_at` DATETIME(3) NULL COMMENT ''客户端可见性删除时间'' AFTER `is_deleted`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'o2o_preorder' AND COLUMN_NAME = 'deleted_by_user_id') = 0,
+  'ALTER TABLE `o2o_preorder` ADD COLUMN `deleted_by_user_id` BIGINT UNSIGNED NULL COMMENT ''客户端可见性删除操作人ID'' AFTER `deleted_at`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'o2o_preorder' AND COLUMN_NAME = 'deleted_by_username') = 0,
+  'ALTER TABLE `o2o_preorder` ADD COLUMN `deleted_by_username` VARCHAR(64) NULL COMMENT ''客户端可见性删除操作账号'' AFTER `deleted_by_user_id`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'o2o_preorder' AND COLUMN_NAME = 'deleted_by_display_name') = 0,
+  'ALTER TABLE `o2o_preorder` ADD COLUMN `deleted_by_display_name` VARCHAR(64) NULL COMMENT ''客户端可见性删除操作人名称'' AFTER `deleted_by_username`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 SET @idx_o2o_preorder_is_deleted_exists := (
   SELECT COUNT(1)
   FROM information_schema.statistics

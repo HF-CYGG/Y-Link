@@ -4,14 +4,45 @@
 -- 维护说明：执行前建议先备份数据库；历史预订单会按商品当前原价和 10 折回填快照，避免后续商品改价影响旧订单金额。
 -- =============================================
 
-ALTER TABLE `base_product`
-  ADD COLUMN IF NOT EXISTS `discount_rate` DECIMAL(3,1) NOT NULL DEFAULT 10.0 COMMENT 'O2O 商品折扣' AFTER `default_price`;
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'base_product' AND COLUMN_NAME = 'discount_rate') = 0,
+  'ALTER TABLE `base_product` ADD COLUMN `discount_rate` DECIMAL(3,1) NOT NULL DEFAULT 10.0 COMMENT ''O2O 商品折扣'' AFTER `default_price`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
-ALTER TABLE `o2o_preorder_item`
-  ADD COLUMN IF NOT EXISTS `original_price` DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT '下单原价快照' AFTER `qty`,
-  ADD COLUMN IF NOT EXISTS `discount_rate` DECIMAL(3,1) NOT NULL DEFAULT 10.0 COMMENT '下单折扣快照' AFTER `original_price`,
-  ADD COLUMN IF NOT EXISTS `unit_price` DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT '下单折后单价快照' AFTER `discount_rate`,
-  ADD COLUMN IF NOT EXISTS `line_amount` DECIMAL(14,2) NOT NULL DEFAULT 0.00 COMMENT '下单行金额快照' AFTER `unit_price`;
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'o2o_preorder_item' AND COLUMN_NAME = 'original_price') = 0,
+  'ALTER TABLE `o2o_preorder_item` ADD COLUMN `original_price` DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT ''下单原价快照'' AFTER `qty`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'o2o_preorder_item' AND COLUMN_NAME = 'discount_rate') = 0,
+  'ALTER TABLE `o2o_preorder_item` ADD COLUMN `discount_rate` DECIMAL(3,1) NOT NULL DEFAULT 10.0 COMMENT ''下单折扣快照'' AFTER `original_price`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'o2o_preorder_item' AND COLUMN_NAME = 'unit_price') = 0,
+  'ALTER TABLE `o2o_preorder_item` ADD COLUMN `unit_price` DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT ''下单折后单价快照'' AFTER `discount_rate`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'o2o_preorder_item' AND COLUMN_NAME = 'line_amount') = 0,
+  'ALTER TABLE `o2o_preorder_item` ADD COLUMN `line_amount` DECIMAL(14,2) NOT NULL DEFAULT 0.00 COMMENT ''下单行金额快照'' AFTER `unit_price`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 UPDATE `base_product`
 SET `discount_rate` = 10.0

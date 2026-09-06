@@ -839,7 +839,7 @@ const handleLogin = async () => {
   }
 }
 
-// 教师注册只提交工号与一次性邀请码；姓名和部门由后端目录在注册事务中绑定。
+// 教师注册只提交工号与统一教师邀请码；姓名和部门由后端目录在注册事务中绑定。
 const validateDepartmentRegisterFields = () => {
   if (!isDepartmentRegisterMode.value) {
     return true
@@ -854,7 +854,7 @@ const validateDepartmentRegisterFields = () => {
     return false
   }
   if (!/^\d{8}$/.test(registerForm.inviteCode.trim())) {
-    showAppWarning('请输入管理员提供的 8 位数字邀请码')
+    showAppWarning('请输入管理员提供的统一 8 位教师邀请码')
     return false
   }
   return true
@@ -1480,7 +1480,7 @@ onUnmounted(() => {
 
               <div v-else ref="formBlockRef" key="register-department" class="form-block">
                 <h2 class="block-title">创建教师账号</h2>
-                <p class="block-subtitle">填写教职工号、手机号或邮箱，并通过验证码后创建教师账号</p>
+                <p class="block-subtitle">填写教职工号、手机号或邮箱，并输入管理员统一设置的邀请码后创建教师账号</p>
                 <el-alert class="register-channel-alert" type="info" :closable="false" show-icon>
                   <template #title>
                     教师账号按教职工目录回填姓名和部门，注册后仍按个人/散客流程下单；部门共享账号请联系管理员创建。
@@ -1534,7 +1534,7 @@ onUnmounted(() => {
 
                   <el-input
                     v-model="registerForm.inviteCode"
-                    placeholder="8 位数字邀请码"
+                    placeholder="统一 8 位教师邀请码"
                     maxlength="8"
                     inputmode="numeric"
                     class="geo-input"

@@ -6,13 +6,15 @@
 
 import fs from 'node:fs'
 import path from 'node:path'
-import type { DataSource } from 'typeorm'
+import type { DataSource, EntityManager } from 'typeorm'
 import { env } from './env.js'
 import { ClientStaffDirectory } from '../entities/client-staff-directory.entity.js'
 import { ClientUser } from '../entities/client-user.entity.js'
 import { ClientFeedbackAttachment } from '../entities/client-feedback-attachment.entity.js'
 import { ClientFeedbackConversation } from '../entities/client-feedback-conversation.entity.js'
 import { ClientFeedbackMessage, type ClientFeedbackMessageAttachment } from '../entities/client-feedback-message.entity.js'
+import { assertMysqlRequiredSchemaExists, runMysqlSchemaMigrations } from './mysql-migration-runner.js'
+import { BizError } from '../utils/errors.js'
 
 const SQLITE_REQUIRED_TABLES = [
   'base_product',
@@ -43,6 +45,8 @@ const SQLITE_REQUIRED_TABLES = [
   'notification_inbox',
   'notification_dispatch',
   'auth_risk_state',
+  'business_sequence',
+  'sms_verification_record',
 ]
 
 async function migrateLegacyFeedbackAttachments(dataSource: DataSource) {
@@ -143,6 +147,7 @@ const SQLITE_REQUIRED_CLIENT_USER_COLUMNS = [
   'email',
   'real_name',
   'department_name',
+  'department_node_id',
   'account_type',
   'staff_no',
   'staff_verified',
@@ -180,6 +185,8 @@ const SQLITE_REQUIRED_CLIENT_FEEDBACK_CONVERSATION_COLUMNS = [
 ]
 const SQLITE_REQUIRED_CLIENT_FEEDBACK_MESSAGE_COLUMNS = ['internal_only', 'attachment_json']
 const SQLITE_REQUIRED_O2O_PREORDER_COLUMNS = [
+  'client_request_id',
+  'client_request_hash',
   'cancel_reason',
   'business_status',
   'merchant_message',
@@ -220,6 +227,14 @@ const SQLITE_REQUIRED_NOTIFICATION_RULE_COLUMNS = [
   'email_recipient_supplier_user_ids_json',
   'feishu_sign_secret',
 ]
+const SQLITE_REQUIRED_NOTIFICATION_EVENT_COLUMNS = [
+  'attempt_count',
+  'next_attempt_at',
+  'processing_started_at',
+  'processing_owner',
+  'processed_at',
+]
+const SQLITE_REQUIRED_NOTIFICATION_DISPATCH_COLUMNS = ['dedupe_key', 'last_attempt_at']
 
 async function listSqliteTableColumns(dataSource: DataSource, tableName: string): Promise<Set<string>> {
   const columns: Array<{ name: string }> = await dataSource.query(`PRAGMA table_info('${tableName}')`)
@@ -229,6 +244,29 @@ async function listSqliteTableColumns(dataSource: DataSource, tableName: string)
 async function listSqliteUniqueIndexes(dataSource: DataSource, tableName: string): Promise<Set<string>> {
   const indexes: Array<{ name: string; unique: number }> = await dataSource.query(`PRAGMA index_list('${tableName}')`)
   return new Set(indexes.filter((index) => Number(index.unique) === 1).map((index) => index.name))
+}
+
+/**
+ * SQLite 不能只按索引名判断结构已就绪：同名索引可能在历史手工维护时被建到了错误列上。
+ * 这里同时校验 unique 标记和 `PRAGMA index_info` 返回的有序列定义。
+ */
+async function hasSqliteUniqueIndexShape(
+  dataSource: DataSource,
+  tableName: string,
+  indexName: string,
+  expectedColumns: string[],
+): Promise<boolean> {
+  const indexes: Array<{ name: string; unique: number }> = await dataSource.query(`PRAGMA index_list('${tableName}')`)
+  const target = indexes.find((index) => index.name === indexName)
+  if (!target || Number(target.unique) !== 1) {
+    return false
+  }
+  const columns: Array<{ seqno: number; name: string }> = await dataSource.query(`PRAGMA index_info('${indexName}')`)
+  const actualColumns = columns
+    .sort((left, right) => Number(left.seqno) - Number(right.seqno))
+    .map((column) => column.name)
+  return actualColumns.length === expectedColumns.length
+    && actualColumns.every((column, index) => column === expectedColumns[index])
 }
 
 async function listSqliteIndexes(dataSource: DataSource, tableName: string): Promise<Set<string>> {
@@ -249,6 +287,94 @@ async function ensureSqliteIndex(
   const indexSet = await listSqliteIndexes(dataSource, tableName)
   if (!indexSet.has(indexName)) {
     await dataSource.query(createIndexSql)
+  }
+}
+
+async function normalizeSqliteNotificationOutbox(dataSource: DataSource): Promise<void> {
+  const inboxColumns = await listSqliteTableColumns(dataSource, 'notification_inbox')
+  const inboxUniqueIndexes = inboxColumns.size
+    ? await listSqliteUniqueIndexes(dataSource, 'notification_inbox')
+    : new Set<string>()
+  if (
+    inboxColumns.has('event_id')
+    && inboxColumns.has('user_id')
+    && !inboxUniqueIndexes.has('uk_notification_inbox_event_user')
+  ) {
+    // 历史同步实现可能为同一事件/账号写入重复收件箱；合并已读状态后保留最早一条。
+    await dataSource.query(`
+      UPDATE "notification_inbox"
+      SET
+        "is_read" = (
+          SELECT MAX("duplicate"."is_read")
+          FROM "notification_inbox" AS "duplicate"
+          WHERE "duplicate"."event_id" = "notification_inbox"."event_id"
+            AND "duplicate"."user_id" = "notification_inbox"."user_id"
+        ),
+        "read_at" = (
+          SELECT MAX("duplicate"."read_at")
+          FROM "notification_inbox" AS "duplicate"
+          WHERE "duplicate"."event_id" = "notification_inbox"."event_id"
+            AND "duplicate"."user_id" = "notification_inbox"."user_id"
+        )
+      WHERE "id" IN (
+        SELECT MIN("id")
+        FROM "notification_inbox"
+        GROUP BY "event_id", "user_id"
+        HAVING COUNT(*) > 1
+      )
+    `)
+    await dataSource.query(`
+      DELETE FROM "notification_inbox"
+      WHERE EXISTS (
+        SELECT 1
+        FROM "notification_inbox" AS "older"
+        WHERE "older"."event_id" = "notification_inbox"."event_id"
+          AND "older"."user_id" = "notification_inbox"."user_id"
+          AND "older"."id" < "notification_inbox"."id"
+      )
+    `)
+    await ensureSqliteIndex(
+      dataSource,
+      'notification_inbox',
+      'uk_notification_inbox_event_user',
+      `CREATE UNIQUE INDEX IF NOT EXISTS "uk_notification_inbox_event_user" ON "notification_inbox" ("event_id", "user_id")`,
+    )
+  }
+
+  const dispatchColumns = await listSqliteTableColumns(dataSource, 'notification_dispatch')
+  const dispatchUniqueIndexes = dispatchColumns.size
+    ? await listSqliteUniqueIndexes(dataSource, 'notification_dispatch')
+    : new Set<string>()
+  if (
+    dispatchColumns.has('dedupe_key')
+    && !dispatchUniqueIndexes.has('uk_notification_dispatch_event_channel_target')
+  ) {
+    await dataSource.query(`
+      DELETE FROM "notification_dispatch"
+      WHERE "dedupe_key" IS NOT NULL
+        AND EXISTS (
+          SELECT 1
+          FROM "notification_dispatch" AS "keeper"
+          WHERE "keeper"."event_id" = "notification_dispatch"."event_id"
+            AND "keeper"."channel" = "notification_dispatch"."channel"
+            AND "keeper"."dedupe_key" = "notification_dispatch"."dedupe_key"
+            AND (
+              CASE WHEN "keeper"."status" = 'sent' THEN 0 ELSE 1 END
+                < CASE WHEN "notification_dispatch"."status" = 'sent' THEN 0 ELSE 1 END
+              OR (
+                CASE WHEN "keeper"."status" = 'sent' THEN 0 ELSE 1 END
+                  = CASE WHEN "notification_dispatch"."status" = 'sent' THEN 0 ELSE 1 END
+                AND "keeper"."id" < "notification_dispatch"."id"
+              )
+            )
+        )
+    `)
+    await ensureSqliteIndex(
+      dataSource,
+      'notification_dispatch',
+      'uk_notification_dispatch_event_channel_target',
+      `CREATE UNIQUE INDEX IF NOT EXISTS "uk_notification_dispatch_event_channel_target" ON "notification_dispatch" ("event_id", "channel", "dedupe_key")`,
+    )
   }
 }
 
@@ -282,6 +408,48 @@ async function ensureSqliteMallCatalogIndexes(dataSource: DataSource): Promise<v
     'o2o_preorder_item',
     'idx_o2o_preorder_item_sku_order',
     `CREATE INDEX IF NOT EXISTS "idx_o2o_preorder_item_sku_order" ON "o2o_preorder_item" ("sku_id", "order_id")`,
+  )
+  await ensureSqliteIndex(
+    dataSource,
+    'o2o_preorder',
+    'idx_o2o_preorder_client_deleted_id',
+    `CREATE INDEX IF NOT EXISTS "idx_o2o_preorder_client_deleted_id" ON "o2o_preorder" ("client_user_id", "is_deleted", "id")`,
+  )
+  await ensureSqliteIndex(
+    dataSource,
+    'o2o_preorder',
+    'idx_o2o_preorder_client_deleted_status_id',
+    `CREATE INDEX IF NOT EXISTS "idx_o2o_preorder_client_deleted_status_id" ON "o2o_preorder" ("client_user_id", "is_deleted", "status", "id")`,
+  )
+  await ensureSqliteIndex(
+    dataSource,
+    'o2o_preorder',
+    'idx_o2o_preorder_pending_timeout_partial',
+    `CREATE INDEX IF NOT EXISTS "idx_o2o_preorder_pending_timeout_partial" ON "o2o_preorder" ("timeout_at", "id") WHERE "status" = 'pending' AND "is_deleted" = 0`,
+  )
+  await ensureSqliteIndex(
+    dataSource,
+    'inventory_log',
+    'idx_inventory_log_ref_lookup',
+    `CREATE INDEX IF NOT EXISTS "idx_inventory_log_ref_lookup" ON "inventory_log" ("ref_type", "ref_id", "change_type", "id")`,
+  )
+  await ensureSqliteIndex(
+    dataSource,
+    'inventory_log',
+    'idx_inventory_log_product_created',
+    `CREATE INDEX IF NOT EXISTS "idx_inventory_log_product_created" ON "inventory_log" ("product_id", "created_at", "id")`,
+  )
+  await ensureSqliteIndex(
+    dataSource,
+    'notification_inbox',
+    'idx_notification_inbox_user_unread_id',
+    `CREATE INDEX IF NOT EXISTS "idx_notification_inbox_user_unread_id" ON "notification_inbox" ("user_id", "is_read", "id")`,
+  )
+  await ensureSqliteIndex(
+    dataSource,
+    'client_user_session',
+    'idx_client_user_session_expires_id',
+    `CREATE INDEX IF NOT EXISTS "idx_client_user_session_expires_id" ON "client_user_session" ("expires_at", "id")`,
   )
 }
 
@@ -611,6 +779,22 @@ async function normalizeSqliteInboundSkuColumn(dataSource: DataSource): Promise<
     await dataSource.query(`ALTER TABLE "biz_inbound_order_item" ADD COLUMN "sku_id" integer NULL`)
   }
 
+  const skuColumnSet = await listSqliteTableColumns(dataSource, 'base_product_sku')
+  const requiredSkuColumns = [
+    'id',
+    'product_id',
+    'is_active',
+    'is_current',
+    'spec_text',
+    'spec_values_json',
+    'sort_order',
+  ]
+  if (requiredSkuColumns.some((column) => !skuColumnSet.has(column))) {
+    // 009 时代的旧库可能已有入库明细，却尚未引入 SKU 表。先补 sku_id 让
+    // synchronize 能升级结构，待 SKU 表创建完成后再执行下面的历史回填。
+    return
+  }
+
   // 历史入库明细没有 SKU 维度；迁移时优先绑定“默认规格”，其次绑定排序最前的当前启用 SKU。
   await dataSource.query(`
     UPDATE "biz_inbound_order_item"
@@ -668,29 +852,64 @@ export interface DatabaseSchemaInitResult {
 export async function migrateLegacyDepartmentAccountsToTeacherProfiles(
   dataSource: DataSource,
 ): Promise<{ migratedCount: number }> {
-  const userRepo = dataSource.getRepository(ClientUser)
-  const directoryRepo = dataSource.getRepository(ClientStaffDirectory)
-  const legacyUsers = await userRepo
+  const { runInTransaction } = await import('./transaction-runner.js')
+  return runInTransaction(async (manager) => {
+    const migrations = await collectLegacyDepartmentTeacherMigrations(manager)
+    if (migrations.length === 0) {
+      return { migratedCount: 0 }
+    }
+    const userRepo = manager.getRepository(ClientUser)
+    for (const migration of migrations) {
+      const user = await userRepo.findOneByOrFail({ id: migration.userId })
+      user.accountType = 'personal'
+      user.realName = migration.realName
+      user.departmentName = migration.departmentName
+      user.departmentNodeId = null
+      user.staffVerified = true
+      await userRepo.save(user)
+    }
+    return { migratedCount: migrations.length }
+  })
+}
+
+interface LegacyDepartmentTeacherMigration {
+  userId: string
+  realName: string
+  departmentName: string
+}
+
+async function collectLegacyDepartmentTeacherMigrations(
+  manager: EntityManager,
+): Promise<LegacyDepartmentTeacherMigration[]> {
+  const usePessimisticLock = manager.connection.options.type === 'mysql'
+  const legacyUsersQuery = manager.getRepository(ClientUser)
     .createQueryBuilder('user')
     .where('user.accountType = :accountType', { accountType: 'department' })
+    .andWhere('user.departmentNodeId IS NULL')
     .andWhere("user.staffNo IS NOT NULL AND user.staffNo <> ''")
-    .getMany()
+  if (usePessimisticLock) {
+    legacyUsersQuery.setLock('pessimistic_write')
+  }
+  const legacyUsers = await legacyUsersQuery.getMany()
   if (legacyUsers.length === 0) {
-    return { migratedCount: 0 }
+    return []
   }
 
   const staffNos = [...new Set(legacyUsers.map((user) => user.staffNo?.trim()).filter((item): item is string => Boolean(item)))]
   if (staffNos.length === 0) {
-    return { migratedCount: 0 }
+    return []
   }
 
-  const activeStaffList = await directoryRepo
+  const activeStaffQuery = manager.getRepository(ClientStaffDirectory)
     .createQueryBuilder('directory')
     .where('directory.status = :status', { status: 'active' })
     .andWhere('directory.staffNo IN (:...staffNos)', { staffNos })
-    .getMany()
+  if (usePessimisticLock) {
+    activeStaffQuery.setLock('pessimistic_write')
+  }
+  const activeStaffList = await activeStaffQuery.getMany()
   const activeStaffMap = new Map(activeStaffList.map((item) => [item.staffNo, item]))
-  const usersToMigrate: ClientUser[] = []
+  const migrations: LegacyDepartmentTeacherMigration[] = []
 
   for (const user of legacyUsers) {
     const staffNo = user.staffNo?.trim() ?? ''
@@ -698,19 +917,123 @@ export async function migrateLegacyDepartmentAccountsToTeacherProfiles(
     if (!matchedStaff) {
       continue
     }
-    user.accountType = 'personal'
-    user.realName = matchedStaff.realName
-    user.departmentName = matchedStaff.departmentName
-    user.staffVerified = true
-    usersToMigrate.push(user)
+    migrations.push({
+      userId: user.id,
+      realName: matchedStaff.realName,
+      departmentName: matchedStaff.departmentName,
+    })
   }
+  return migrations
+}
 
-  if (usersToMigrate.length === 0) {
-    return { migratedCount: 0 }
-  }
+/**
+ * 将存量部门共享账号绑定到部门树的稳定节点：
+ * - 先完整预检，任一空部门、无法定位、重复映射或重复节点ID都不写入；
+ * - 个人/教师账号始终清空节点绑定，避免历史部门账号转教师后占用部门唯一键；
+ * - 不修改账号状态、密码或历史订单快照。
+ */
+export async function migrateDepartmentAccountNodeBindings(
+  dataSource: DataSource,
+): Promise<{ migratedCount: number }> {
+  return migrateClientUserDepartmentGovernance(dataSource)
+}
 
-  await userRepo.save(usersToMigrate, { chunk: 100 })
-  return { migratedCount: usersToMigrate.length }
+/**
+ * 统一完成旧部门账号转教师、非部门节点清理与剩余部门账号节点回填。
+ * 预检阶段不写库；只有所有迁移目标均可解析且没有重复绑定时，才通过一次事务提交全部变化。
+ */
+export async function migrateClientUserDepartmentGovernance(
+  dataSource: DataSource,
+): Promise<{ migratedCount: number }> {
+  // 不能在模块顶层静态引入 systemConfigService：其依赖 AppDataSource，而本文件会在数据源装配期被读取。
+  // 仅在数据源已初始化且确实需要回填时加载，避免启动依赖环；不得在事务外读取配置或账号计划。
+  const { systemConfigService } = await import('../services/system-config.service.js')
+  // 与业务写入一致走统一事务闸门，避免 SQLite 单连接下绕过串行协调器。
+  // 动态加载是为了避免 bootstrap -> transaction-runner -> data-source 的模块初始化环。
+  const { runInTransaction } = await import('./transaction-runner.js')
+  return runInTransaction(async (manager) => {
+    const usePessimisticLock = manager.connection.options.type === 'mysql'
+    // 所有输入读取、迁移计划和校验都必须在同一事务快照中完成；校验失败时回调抛错，零写入提交。
+    const config = await systemConfigService.getClientDepartmentConfigs(manager, { lockForUpdate: true })
+    const nodeIdSet = new Set<string>()
+    const collectNodeIds = (nodes: typeof config.tree) => {
+      for (const node of nodes) {
+        if (!node.id?.trim() || node.id.length > 128) {
+          throw new BizError('部门共享账号节点回填已阻止：部门树存在无效节点ID，请先修复部门配置', 409)
+        }
+        if (nodeIdSet.has(node.id)) {
+          throw new BizError('部门共享账号节点回填已阻止：部门树存在重复节点ID，请先修复部门配置', 409)
+        }
+        nodeIdSet.add(node.id)
+        collectNodeIds(node.children)
+      }
+    }
+    collectNodeIds(config.tree)
+
+    const teacherMigrations = await collectLegacyDepartmentTeacherMigrations(manager)
+    const teacherMigrationUserIds = new Set(teacherMigrations.map((item) => item.userId))
+    const departmentUsersQuery = manager.getRepository(ClientUser)
+      .createQueryBuilder('user')
+      .where('user.accountType = :accountType', { accountType: 'department' })
+    if (usePessimisticLock) {
+      departmentUsersQuery.setLock('pessimistic_write')
+    }
+    const departmentUsers = await departmentUsersQuery.getMany()
+    // 已有稳定节点绑定的账号属于新部门共享账号，启动迁移不能因其 staffNo
+    // 恰好命中目录而转教师或按显示路径重新映射。
+    const remainingDepartmentUsers = departmentUsers.filter(
+      (user) => !teacherMigrationUserIds.has(user.id) && !user.departmentNodeId,
+    )
+    const mappings: Array<{ user: ClientUser; departmentNodeId: string }> = []
+    let emptyDepartmentCount = 0
+    let unresolvedDepartmentCount = 0
+    for (const user of remainingDepartmentUsers) {
+      if (!user.departmentName?.trim()) {
+        emptyDepartmentCount += 1
+        continue
+      }
+      try {
+        const resolved = await systemConfigService.resolveClientDepartmentReference(
+          { departmentName: user.departmentName },
+          manager,
+          config,
+        )
+        mappings.push({ user, departmentNodeId: resolved.departmentNodeId })
+      } catch {
+        unresolvedDepartmentCount += 1
+      }
+    }
+    const duplicateNodeCount = mappings.length - new Set(mappings.map((item) => item.departmentNodeId)).size
+    if (emptyDepartmentCount > 0 || unresolvedDepartmentCount > 0 || duplicateNodeCount > 0) {
+      throw new BizError(
+        `部门共享账号节点回填已阻止：空部门 ${emptyDepartmentCount} 条、无法映射 ${unresolvedDepartmentCount} 条、节点重复 ${duplicateNodeCount} 条；未改写任何账号数据`,
+        409,
+      )
+    }
+
+    const userRepo = manager.getRepository(ClientUser)
+    await userRepo
+      .createQueryBuilder()
+      .update(ClientUser)
+      .set({ departmentNodeId: null })
+      .where('account_type <> :accountType AND department_node_id IS NOT NULL', { accountType: 'department' })
+      .execute()
+    for (const migration of teacherMigrations) {
+      const user = await userRepo.findOneByOrFail({ id: migration.userId })
+      user.accountType = 'personal'
+      user.realName = migration.realName
+      user.departmentName = migration.departmentName
+      user.departmentNodeId = null
+      user.staffVerified = true
+      await userRepo.save(user)
+    }
+    for (const mapping of mappings) {
+      const user = await userRepo.findOneByOrFail({ id: mapping.user.id })
+      user.departmentNodeId = mapping.departmentNodeId
+      await userRepo.save(user)
+    }
+    return { migratedCount: teacherMigrations.length + mappings.length }
+  })
 }
 
 async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<boolean> {
@@ -753,7 +1076,15 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
     return true
   }
   const clientUserUniqueIndexSet = await listSqliteUniqueIndexes(dataSource, 'client_user')
-  if (!clientUserUniqueIndexSet.has('uk_client_user_staff_no')) {
+  if (
+    !clientUserUniqueIndexSet.has('uk_client_user_staff_no')
+    || !await hasSqliteUniqueIndexShape(
+      dataSource,
+      'client_user',
+      'uk_client_user_department_node_id',
+      ['department_node_id'],
+    )
+  ) {
     return true
   }
 
@@ -779,6 +1110,10 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
 
   const o2oPreorderColumnSet = await listSqliteTableColumns(dataSource, 'o2o_preorder')
   if (SQLITE_REQUIRED_O2O_PREORDER_COLUMNS.some((column) => !o2oPreorderColumnSet.has(column))) {
+    return true
+  }
+  const o2oPreorderUniqueIndexSet = await listSqliteUniqueIndexes(dataSource, 'o2o_preorder')
+  if (!o2oPreorderUniqueIndexSet.has('uk_o2o_preorder_client_request')) {
     return true
   }
 
@@ -811,6 +1146,26 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
   if (SQLITE_REQUIRED_NOTIFICATION_RULE_COLUMNS.some((column) => !notificationRuleColumnSet.has(column))) {
     return true
   }
+
+  const notificationEventColumnSet = await listSqliteTableColumns(dataSource, 'notification_event')
+  if (SQLITE_REQUIRED_NOTIFICATION_EVENT_COLUMNS.some((column) => !notificationEventColumnSet.has(column))) {
+    return true
+  }
+
+  const notificationDispatchColumnSet = await listSqliteTableColumns(dataSource, 'notification_dispatch')
+  if (SQLITE_REQUIRED_NOTIFICATION_DISPATCH_COLUMNS.some((column) => !notificationDispatchColumnSet.has(column))) {
+    return true
+  }
+
+  const notificationInboxUniqueIndexSet = await listSqliteUniqueIndexes(dataSource, 'notification_inbox')
+  if (!notificationInboxUniqueIndexSet.has('uk_notification_inbox_event_user')) {
+    return true
+  }
+
+  const notificationDispatchUniqueIndexSet = await listSqliteUniqueIndexes(dataSource, 'notification_dispatch')
+  if (!notificationDispatchUniqueIndexSet.has('uk_notification_dispatch_event_channel_target')) {
+    return true
+  }
   return false
 }
 
@@ -819,13 +1174,20 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
     await normalizeSqliteOutboundItemColumns(dataSource)
     await normalizeSqliteO2oDiscountColumns(dataSource)
     await normalizeSqliteInboundSkuColumn(dataSource)
-    await ensureSqliteMallCatalogIndexes(dataSource)
+    await normalizeSqliteNotificationOutbox(dataSource)
   }
 
   // DB_SYNC=true 时直接走 TypeORM 同步，便于本地快速调试实体结构。
   if (env.DB_SYNC === true) {
     await dataSource.synchronize()
-    await migrateLegacyDepartmentAccountsToTeacherProfiles(dataSource)
+    if (env.DB_TYPE === 'sqlite') {
+      // synchronize 可能刚创建 SKU 表；先为历史商品补默认 SKU，再让入库明细绑定它。
+      await normalizeSqliteO2oDiscountColumns(dataSource)
+      await normalizeSqliteInboundSkuColumn(dataSource)
+      // 索引可能依赖本次 synchronize 才补齐的列，必须在结构升级后创建。
+      await ensureSqliteMallCatalogIndexes(dataSource)
+    }
+    await migrateClientUserDepartmentGovernance(dataSource)
     await migrateLegacyFeedbackAttachments(dataSource)
     return {
       action: 'synchronized',
@@ -834,16 +1196,27 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   }
 
   if (env.DB_TYPE !== 'sqlite') {
-    await migrateLegacyDepartmentAccountsToTeacherProfiles(dataSource)
+    // MySQL 结构此前被视为完全由运维外部管理，启动阶段不做任何校验；
+    // 一旦运维忘记手动执行 backend/sql/ 下的增量脚本，缺表故障只会在业务接口报错时才暴露
+    // （例如认证接口依赖的 auth_risk_state 表缺失会导致登录接口直接 500）。
+    // 这里补上两层保障：按需自动执行迁移脚本，随后对关键表、列和索引做只读契约自检，
+    // 任一必需结构缺失或索引形状不符都直接阻止启动。
+    const migrationResult = await runMysqlSchemaMigrations(dataSource)
+    if (migrationResult.appliedFiles.length > 0) {
+      console.log(`[y-link-backend] MySQL 迁移脚本已自动执行：${migrationResult.appliedFiles.join(', ')}`)
+    }
+    await assertMysqlRequiredSchemaExists(dataSource)
+    await migrateClientUserDepartmentGovernance(dataSource)
     return {
-      action: 'skipped',
+      action: migrationResult.appliedFiles.length > 0 ? 'synchronized' : 'skipped',
       reason: 'mysql_external',
     }
   }
 
   const needSynchronize = await shouldSynchronizeSqliteSchema(dataSource)
   if (!needSynchronize) {
-    await migrateLegacyDepartmentAccountsToTeacherProfiles(dataSource)
+    await ensureSqliteMallCatalogIndexes(dataSource)
+    await migrateClientUserDepartmentGovernance(dataSource)
     await migrateLegacyFeedbackAttachments(dataSource)
     return {
       action: 'skipped',
@@ -853,7 +1226,10 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
 
   // SQLite 现有本地库在认证系统接入后，需要自动补齐新表与开单留痕字段。
   await dataSource.synchronize()
-  await migrateLegacyDepartmentAccountsToTeacherProfiles(dataSource)
+  await normalizeSqliteO2oDiscountColumns(dataSource)
+  await normalizeSqliteInboundSkuColumn(dataSource)
+  await ensureSqliteMallCatalogIndexes(dataSource)
+  await migrateClientUserDepartmentGovernance(dataSource)
   await migrateLegacyFeedbackAttachments(dataSource)
   return {
     action: 'synchronized',

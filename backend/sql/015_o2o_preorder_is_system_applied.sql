@@ -4,6 +4,10 @@
 -- 维护说明：若后续调整字段默认值或语义，请同步更新实体 `o2o-preorder.entity.ts` 与路由提交校验。
 -- =============================================
 
-ALTER TABLE `o2o_preorder`
-  ADD COLUMN `is_system_applied` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否系统申请（客户端选择快照）'
-  AFTER `department_name_snapshot`;
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'o2o_preorder' AND COLUMN_NAME = 'is_system_applied') = 0,
+  'ALTER TABLE `o2o_preorder` ADD COLUMN `is_system_applied` TINYINT(1) NOT NULL DEFAULT 0 COMMENT ''是否系统申请（客户端选择快照）'' AFTER `department_name_snapshot`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;

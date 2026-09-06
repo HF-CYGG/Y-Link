@@ -13,7 +13,9 @@ import type { AuthenticatedRequest } from '../types/auth.js'
 import { systemConfigService } from '../services/system-config.service.js'
 import type { UpdateClientDepartmentConfigsInput } from '../services/system-config.service.js'
 import { verificationCodeService } from '../services/verification-code.service.js'
+import { smsVerificationRecordService } from '../services/sms-verification-record.service.js'
 import { clientStaffDirectoryService } from '../services/client-staff-directory.service.js'
+import { clientStaffInviteCodeService } from '../services/client-staff-invite-code.service.js'
 import { CLIENT_STAFF_DIRECTORY_STATUSES } from '../entities/client-staff-directory.entity.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
@@ -52,6 +54,15 @@ const verificationProviderChannelSchema = z.object({
   clearApiUrl: z.boolean().optional(),
   clearHeadersTemplate: z.boolean().optional(),
   clearBodyTemplate: z.boolean().optional(),
+  providerType: z.enum(['generic_http', 'aliyun_dypns']).optional(),
+  aliyunSignName: z.string().trim().max(128).optional(),
+  aliyunSchemeName: z.string().trim().max(20).optional(),
+  aliyunTemplates: z.object({
+    register: z.string().trim().max(128).optional(),
+    forgotPassword: z.string().trim().max(128).optional(),
+    profileUpdate: z.string().trim().max(128).optional(),
+    test: z.string().trim().max(128).optional(),
+  }).optional(),
 })
 
 const updateVerificationProviderConfigsSchema = z.object({
@@ -124,6 +135,19 @@ const testVerificationProviderSchema = z.object({
   channel: z.enum(['mobile', 'email']),
   target: z.string().trim().min(1).max(200),
   config: verificationProviderChannelSchema,
+})
+
+const smsReceiptQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).max(1_000_000).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  scene: z.enum(['register', 'forgot_password', 'profile_update', 'test']).optional(),
+  deliveryStatus: z.enum(['pending', 'delivered', 'failed']).optional(),
+  startDate: z.string().datetime({ offset: true }).optional(),
+  endDate: z.string().datetime({ offset: true }).optional(),
+}).superRefine((value, ctx) => {
+  if (value.startDate && value.endDate && new Date(value.startDate) > new Date(value.endDate)) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['endDate'], message: '结束时间不能早于开始时间' })
+  }
 })
 
 const clientStaffDirectoryStatusSchema = z.enum(CLIENT_STAFF_DIRECTORY_STATUSES)
@@ -292,6 +316,30 @@ systemConfigRouter.get(
   }),
 )
 
+systemConfigRouter.get(
+  '/verification-providers/sms-receipts',
+  requirePermission('system_configs:view'),
+  asyncHandler(async (req, res) => {
+    const payload = smsReceiptQuerySchema.parse({
+      page: readSingleQueryValue(req.query.page),
+      pageSize: readSingleQueryValue(req.query.pageSize),
+      scene: readSingleQueryValue(req.query.scene),
+      deliveryStatus: readSingleQueryValue(req.query.deliveryStatus),
+      startDate: readSingleQueryValue(req.query.startDate),
+      endDate: readSingleQueryValue(req.query.endDate),
+    })
+    const data = await smsVerificationRecordService.listReceipts({
+      page: payload.page,
+      pageSize: payload.pageSize,
+      scene: payload.scene,
+      deliveryStatus: payload.deliveryStatus,
+      startDate: payload.startDate ? new Date(payload.startDate) : undefined,
+      endDate: payload.endDate ? new Date(payload.endDate) : undefined,
+    })
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
 systemConfigRouter.put(
   '/verification-providers',
   requirePermission('system_configs:update'),
@@ -444,14 +492,46 @@ systemConfigRouter.patch(
 )
 
 systemConfigRouter.put(
-  '/client-staff-directory/:id/invite-code',
+  '/client-staff-invite-code',
   requirePermission('system_configs:update'),
   requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = clientStaffInviteCodeSchema.parse(req.body)
-    const data = await clientStaffDirectoryService.setInviteCode(String(req.params.id), payload.inviteCode, authReq.auth, extractRequestMeta(req))
+    const data = await clientStaffInviteCodeService.setInviteCode(payload.inviteCode, authReq.auth, extractRequestMeta(req))
+    res.setHeader('Cache-Control', 'no-store')
     res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+systemConfigRouter.get(
+  '/client-staff-invite-code',
+  requirePermission('system_configs:view'),
+  asyncHandler(async (_req, res) => {
+    const data = await clientStaffInviteCodeService.getConfig()
+    res.setHeader('Cache-Control', 'no-store')
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+systemConfigRouter.delete(
+  '/client-staff-invite-code',
+  requirePermission('system_configs:update'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const data = await clientStaffInviteCodeService.disableInviteCode(authReq.auth, extractRequestMeta(req))
+    res.setHeader('Cache-Control', 'no-store')
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+systemConfigRouter.put(
+  '/client-staff-directory/:id/invite-code',
+  requirePermission('system_configs:update'),
+  requireRole('admin'),
+  asyncHandler(async () => {
+    throw new BizError('已改为统一邀请码，请使用统一邀请码管理入口', 410)
   }),
 )
 
@@ -459,11 +539,8 @@ systemConfigRouter.post(
   '/client-staff-directory/:id/invite-code/reset',
   requirePermission('system_configs:update'),
   requireRole('admin'),
-  asyncHandler(async (req, res) => {
-    const authReq = req as AuthenticatedRequest
-    const data = await clientStaffDirectoryService.resetInviteCode(String(req.params.id), authReq.auth, extractRequestMeta(req))
-    res.setHeader('Cache-Control', 'no-store')
-    res.json({ code: 0, message: 'ok', data })
+  asyncHandler(async () => {
+    throw new BizError('已改为统一邀请码，请使用统一邀请码管理入口', 410)
   }),
 )
 
@@ -471,10 +548,8 @@ systemConfigRouter.delete(
   '/client-staff-directory/:id/invite-code',
   requirePermission('system_configs:update'),
   requireRole('admin'),
-  asyncHandler(async (req, res) => {
-    const authReq = req as AuthenticatedRequest
-    const data = await clientStaffDirectoryService.disableInviteCode(String(req.params.id), authReq.auth, extractRequestMeta(req))
-    res.json({ code: 0, message: 'ok', data })
+  asyncHandler(async () => {
+    throw new BizError('已改为统一邀请码，请使用统一邀请码管理入口', 410)
   }),
 )
 

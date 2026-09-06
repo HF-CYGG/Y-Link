@@ -1,6 +1,11 @@
-ALTER TABLE `sys_user`
-  ADD COLUMN IF NOT EXISTS `email` VARCHAR(128) NULL COMMENT '邮箱地址（可空且唯一）' AFTER `display_name`,
-  ADD UNIQUE KEY `uk_sys_user_email` (`email`);
+SET @ddl = IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS
+   WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'sys_user' AND COLUMN_NAME = 'email') = 0,
+  'ALTER TABLE `sys_user` ADD COLUMN `email` VARCHAR(128) NULL COMMENT ''邮箱地址（可空且唯一）'' AFTER `display_name`',
+  'SELECT 1'
+);
+PREPARE stmt FROM @ddl; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+ADD UNIQUE KEY `uk_sys_user_email` (`email`);
 
 CREATE TABLE IF NOT EXISTS `notification_rule` (
   `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '通知规则主键',

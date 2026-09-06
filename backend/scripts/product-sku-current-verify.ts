@@ -187,6 +187,7 @@ async function main() {
           sessionToken: 'verify-session',
         },
         {
+          clientRequestId: 'product-current-retired-01',
           items: [{ productId: stockProduct.id, skuId: redSku.id, qty: 1 }],
           isSystemApplied: false,
           pickupContact: 'Verify Client',

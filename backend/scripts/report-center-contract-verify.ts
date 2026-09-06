@@ -25,6 +25,7 @@ const readSource = (relativePath: string) => fs.readFileSync(path.join(projectRo
 const permissionSource = readSource('backend/src/constants/auth-permissions.ts')
 const routeSource = readSource('backend/src/routes/report.routes.ts')
 const serviceSource = readSource('backend/src/services/report.service.ts')
+const errorHandlerSource = readSource('backend/src/middleware/error-handler.ts')
 const appSource = readSource('backend/src/app.ts')
 const frontendAuthSource = readSource('src/api/modules/auth.ts')
 const frontendRouteSource = readSource('src/router/routes.ts')
@@ -48,6 +49,26 @@ for (const reportType of ['inventory', 'tag-sales', 'kingdee', 'walkin', 'outbou
 assert.match(serviceSource, /REPORT_FIELD_DEFINITIONS/, '缺少报表字段白名单定义')
 assert.match(serviceSource, /导出字段不允许/, '字段白名单未拒绝非法字段')
 assert.match(serviceSource, /parseDateOnly/, '时间范围缺少 YYYY-MM-DD 解析校验')
-assert.match(serviceSource, /new ExcelJS\.Workbook/, '报表导出未使用 ExcelJS 工作簿')
+assert.match(
+  serviceSource,
+  /new ExcelJS\.stream\.xlsx\.WorkbookWriter/,
+  '报表导出必须使用 ExcelJS 流式工作簿，避免大结果集整份驻留内存',
+)
+assert.match(serviceSource, /nextRow\.commit\(\)/, '报表导出必须逐行提交释放内存')
+assert.doesNotMatch(serviceSource, /writeBuffer\(\)/, '报表导出不得回退为整份内存 Buffer')
+assert.match(routeSource, /exportExcel\([\s\S]*?\n\s*res,/, '导出路由必须把响应流直接传给报表服务')
+assert.match(serviceSource, /KeysetQueryOptions/, '流式导出必须使用主键游标分页')
+assert.doesNotMatch(
+  serviceSource.match(/async exportExcel\([\s\S]*?\n  getFieldDefinitions/)?.[0] ?? '',
+  /\.skip\(/,
+  '流式导出不得使用深 OFFSET 分页',
+)
+assert.ok(
+  serviceSource.indexOf('let result = await fetchBatch()')
+    < serviceSource.indexOf('new ExcelJS.stream.xlsx.WorkbookWriter'),
+  '首批查询必须在开始写 xlsx 响应之前完成',
+)
+assert.match(routeSource, /\(\) => \{[\s\S]*?Content-Type/, '下载响应头必须延迟到首批查询成功后设置')
+assert.match(errorHandlerSource, /if \(res\.headersSent\)[\s\S]*?next\(err\)/, '流式响应出错后必须交给 Express 关闭连接')
 
 console.log('报表中心静态契约验证通过')

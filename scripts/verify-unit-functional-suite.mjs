@@ -72,6 +72,12 @@ const main = async () => {
   // - 防止系统治理接口被误挂到匿名区，或新增路由时漏接权限中间件。
   await runNpmScript('后端路由权限契约检查', 'task2:route-contract:verify', backendRoot)
 
+  // 写事务闸门契约门禁：
+  // - 静态校验所有写事务都经由 runInTransaction，未登记的 TypeORM 事务直调一律拦下；
+  // - SQLite 只有一条连接，绕过闸门会让并发写事务重叠（issue #36），
+  //   这里把"CI 跑完才发现"提前到"改完代码立刻发现"。
+  await runNpmScript('后端写事务闸门契约检查', 'write-transaction:contract:verify', backendRoot)
+
   // O2O 关键功能脚本：覆盖预订单核心链路，属于当前项目最关键业务路径之一。
   await runNpmScript('后端 O2O 功能回归', 'o2o:verify', backendRoot)
 
@@ -79,6 +85,17 @@ const main = async () => {
   // - 校验实名/工号目录的查询、导入、编辑、启停接口可用；
   // - 防止系统配置页新增白名单治理后，后续改动把目录接口或权限链路悄悄带坏。
   await runNpmScript('后端教职工目录治理回归', 'client-staff-directory:verify', backendRoot)
+
+  // SQLite 事务协调器入口覆盖：
+  // - QueryRunner.startTransaction 必须跨多条语句持有同一有界写租约；
+  // - release 必须回滚未结束事务，原始 BEGIN/COMMIT/ROLLBACK SQL 必须被运行时拒绝。
+  await runNpmScript('后端 SQLite 事务协调器入口覆盖回归', 'transaction-coordinator:verify', backendRoot)
+
+  // 双流水单号与 SQLite 并发写事务回归：
+  // - 并发提交 16 笔出库单，守住 issue #36 修复的写事务串行化——若写事务绕过
+  //   `runInTransaction` 闸门直接调用 `AppDataSource.transaction`，这一步会立刻失败；
+  // - 同时覆盖 Task8 迁移脚本、凭证打印链路与看板下钻的静态与运行态契约。
+  await runNpmScript('后端双流水单号与并发写事务回归', 'task8:verify', backendRoot)
 
   log('\n[unit-functional] 单元功能测试套件执行完成')
 }

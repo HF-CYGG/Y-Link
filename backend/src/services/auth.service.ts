@@ -8,6 +8,7 @@
 
 import { LessThan, MoreThan } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
+import { runInTransaction } from '../config/transaction-runner.js'
 import { env } from '../config/env.js'
 import { resolvePermissionsByRole } from '../constants/auth-permissions.js'
 import { SysUser } from '../entities/sys-user.entity.js'
@@ -165,7 +166,7 @@ export class AuthService {
     const expiresAt = new Date(now.getTime() + env.AUTH_TOKEN_TTL_HOURS * 60 * 60 * 1000)
     const token = generateSessionToken()
 
-    const data = await AppDataSource.transaction(async (manager) => {
+    const data = await runInTransaction(async (manager) => {
       const sessionRepo = manager.getRepository(SysUserSession)
       const userRepo = manager.getRepository(SysUser)
 
@@ -218,7 +219,7 @@ export class AuthService {
   }
 
   async logout(auth: AuthUserContext, requestMeta?: RequestMeta): Promise<void> {
-    await AppDataSource.transaction(async (manager) => {
+    await runInTransaction(async (manager) => {
       const sessionRepo = manager.getRepository(SysUserSession)
       const sessionTokenHash = hashSessionToken(auth.sessionToken)
       const existedSession = await sessionRepo.findOne({
@@ -317,7 +318,7 @@ export class AuthService {
       throw new BizError('当前密码错误', 400)
     }
 
-    await AppDataSource.transaction(async (manager) => {
+    await runInTransaction(async (manager) => {
       const userRepo = manager.getRepository(SysUser)
       const sessionRepo = manager.getRepository(SysUserSession)
 

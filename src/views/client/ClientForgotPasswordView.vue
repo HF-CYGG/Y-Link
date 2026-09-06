@@ -303,7 +303,7 @@ const handleSendVerificationCode = async () => {
 
 const handleVerify = async () => {
   if (!forgotPasswordAvailable.value) {
-    showAppWarning('当前系统未同时启用手机与邮箱验证码，请联系管理员手动修改密码')
+    showAppWarning('当前系统没有可用的手机或邮箱验证码通道，请联系管理员手动修改密码')
     return
   }
   if (!validateAccount(verifyForm.account)) {
@@ -445,7 +445,7 @@ onUnmounted(() => {
     <div class="forgot-password-card">
       <div class="forgot-password-header">
         <p class="forgot-password-title">找回密码</p>
-        <p class="forgot-password-desc">仅在系统同时启用手机与邮箱验证码时支持自助找回。</p>
+        <p class="forgot-password-desc">系统启用手机或邮箱任一验证码通道时，即可自助找回。</p>
       </div>
 
       <el-alert
@@ -479,7 +479,7 @@ onUnmounted(() => {
         type="warning"
         :closable="false"
         show-icon
-        title="当前系统未同时启用手机与邮箱验证码，暂不支持自助找回密码，请联系管理员手动修改密码。"
+        title="当前系统没有可用的手机或邮箱验证码通道，暂不支持自助找回密码，请联系管理员手动修改密码。"
       />
 
       <div class="step-badges">

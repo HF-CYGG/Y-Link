@@ -9,6 +9,7 @@ import { ClientUser } from './client-user.entity.js'
 import { entityColumnOptions } from './entity-column-options.js'
 
 @Entity({ name: 'client_user_session' })
+@Index('idx_client_user_session_expires_id', ['expiresAt', 'id'])
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export class ClientUserSession {
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })

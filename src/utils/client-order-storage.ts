@@ -20,10 +20,24 @@ import {
   type O2oOrderCancelReason,
 } from '@/constants/o2o-order-status'
 
+/**
+ * 历史本地快照兼容类型：
+ * - 当前服务端 Contract 中金额与剩余秒数均为必返；
+ * - 旧版本 localStorage 可能缺失它们，恢复层必须保留“未知”而不是伪造业务值；
+ * - 新请求写入的 `O2oPreorderSummary` 是该类型的严格子集。
+ */
+export type PersistedO2oPreorderSummary = Omit<
+  O2oPreorderSummary,
+  'expireInSeconds' | 'totalAmount'
+> & {
+  expireInSeconds?: number
+  totalAmount?: string
+}
+
 export interface ClientOrderSnapshot {
-  activeStatus: 'all' | O2oPreorderSummary['status']
+  activeStatus: 'all' | PersistedO2oPreorderSummary['status']
   keyword: string
-  orders: O2oPreorderSummary[]
+  orders: PersistedO2oPreorderSummary[]
   page: number
   pageSize: number
   total: number
@@ -184,7 +198,7 @@ const normalizeLatestReturnRequest = (value: unknown): O2oPreorderSummary['lates
   }
 }
 
-const normalizeOrderRow = (item: unknown): O2oPreorderSummary | null => {
+const normalizeOrderRow = (item: unknown): PersistedO2oPreorderSummary | null => {
   if (!item || typeof item !== 'object') {
     return null
   }
@@ -226,11 +240,11 @@ const normalizeOrderRow = (item: unknown): O2oPreorderSummary | null => {
 }
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
-const normalizeOrders = (orders: unknown): O2oPreorderSummary[] => {
+const normalizeOrders = (orders: unknown): PersistedO2oPreorderSummary[] => {
   if (!Array.isArray(orders)) {
     return []
   }
-  return orders.map(normalizeOrderRow).filter((item): item is O2oPreorderSummary => item !== null)
+  return orders.map(normalizeOrderRow).filter((item): item is PersistedO2oPreorderSummary => item !== null)
 }
 
 const normalizeSnapshotMeta = (value: unknown): ClientOrderSnapshotMeta => {

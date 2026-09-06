@@ -6,6 +6,7 @@
  * 3. 目录状态变化后会批量同步已绑定的部门账号实名校验状态，保证历史账号数据与目录口径一致。
  */
 import { AppDataSource } from '../config/data-source.js'
+import { runInTransaction } from '../config/transaction-runner.js'
 import ExcelJS from 'exceljs'
 import {
   CLIENT_STAFF_DIRECTORY_STATUSES,
@@ -19,14 +20,6 @@ import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
 import { In, type EntityManager, type Repository } from 'typeorm'
 import { systemConfigService } from './system-config.service.js'
-import {
-  digestStaffInviteCode,
-  generateStaffInviteCode,
-  normalizeStaffInviteCode,
-  STAFF_INVITE_TTL_MS,
-} from '../utils/staff-invite-code.js'
-
-export type StaffInviteStatus = 'not_set' | 'active' | 'expired' | 'used' | 'locked'
 
 export interface ClientStaffDirectoryListQuery {
   page: number
@@ -44,8 +37,6 @@ export interface ClientStaffDirectoryRecord {
   status: ClientStaffDirectoryStatus
   isRegistered: boolean
   linkedClientUserCount: number
-  inviteStatus: StaffInviteStatus
-  inviteExpiresAt: Date | null
   createdAt: Date
   updatedAt: Date
 }
@@ -138,16 +129,6 @@ function sanitizeRecord(
   record: ClientStaffDirectory,
   linkedClientUserCount: number,
 ): ClientStaffDirectoryRecord {
-  const now = Date.now()
-  const inviteStatus: StaffInviteStatus = record.inviteLockedUntil && record.inviteLockedUntil.getTime() > now
-    ? 'locked'
-    : record.inviteUsedAt
-      ? 'used'
-      : !record.inviteIssuedAt
-        ? 'not_set'
-        : !record.inviteExpiresAt || record.inviteExpiresAt.getTime() <= now
-          ? 'expired'
-          : 'active'
   return {
     id: record.id,
     staffNo: record.staffNo,
@@ -156,8 +137,6 @@ function sanitizeRecord(
     status: record.status,
     isRegistered: linkedClientUserCount > 0,
     linkedClientUserCount,
-    inviteStatus,
-    inviteExpiresAt: record.inviteExpiresAt,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   }
@@ -776,7 +755,7 @@ export class ClientStaffDirectoryService {
     const status = this.normalizeStatus(input.status)
     const departmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName)
 
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       await this.assertUniqueStaffNo(manager, staffNo)
       const repo = manager.getRepository(ClientStaffDirectory)
       const entity = repo.create({
@@ -819,7 +798,7 @@ export class ClientStaffDirectoryService {
     const realName = this.normalizeRealName(input.realName)
     const departmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName)
 
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const repo = manager.getRepository(ClientStaffDirectory)
       const record = await repo.findOne({ where: { id } })
       if (!record) {
@@ -872,7 +851,7 @@ export class ClientStaffDirectoryService {
     requestMeta?: RequestMeta,
   ): Promise<{ record: ClientStaffDirectoryRecord }> {
     const status = this.normalizeStatus(input.status)
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const repo = manager.getRepository(ClientStaffDirectory)
       const record = await repo.findOne({ where: { id } })
       if (!record) {
@@ -905,80 +884,6 @@ export class ClientStaffDirectoryService {
     })
   }
 
-  async setInviteCode(
-    id: string,
-    inviteCodeInput: string,
-    actor: AuthUserContext,
-    requestMeta?: RequestMeta,
-  ): Promise<{ record: ClientStaffDirectoryRecord }> {
-    const inviteCode = normalizeStaffInviteCode(inviteCodeInput)
-    return AppDataSource.transaction(async (manager) => {
-      const repo = manager.getRepository(ClientStaffDirectory)
-      const record = await repo.findOne({ where: { id } })
-      if (!record) throw new BizError('教职工目录记录不存在', 404)
-      const now = new Date()
-      record.inviteCodeDigest = digestStaffInviteCode(record.staffNo, inviteCode)
-      record.inviteIssuedAt = now
-      record.inviteExpiresAt = new Date(now.getTime() + STAFF_INVITE_TTL_MS)
-      record.inviteUsedAt = null
-      record.inviteFailedAttempts = 0
-      record.inviteLockedUntil = null
-      const saved = await repo.save(record)
-      await auditService.record({
-        actionType: 'client_staff_directory.invite.set',
-        actionLabel: '设置教师注册邀请码',
-        targetType: 'client_staff_directory',
-        targetId: saved.id,
-        targetCode: saved.staffNo,
-        actor,
-        requestMeta,
-        detail: { expiresAt: saved.inviteExpiresAt?.toISOString() ?? null },
-      }, manager)
-      return { record: await this.buildRecord(saved, manager) }
-    })
-  }
-
-  async resetInviteCode(id: string, actor: AuthUserContext, requestMeta?: RequestMeta) {
-    const inviteCode = generateStaffInviteCode()
-    const result = await this.setInviteCode(id, inviteCode, actor, requestMeta)
-    await auditService.safeRecord({
-      actionType: 'client_staff_directory.invite.reset',
-      actionLabel: '重置教师注册邀请码',
-      targetType: 'client_staff_directory',
-      targetId: id,
-      targetCode: result.record.staffNo,
-      actor,
-      requestMeta,
-      detail: { expiresAt: result.record.inviteExpiresAt?.toISOString() ?? null },
-    })
-    return { inviteCode, expiresAt: result.record.inviteExpiresAt }
-  }
-
-  async disableInviteCode(id: string, actor: AuthUserContext, requestMeta?: RequestMeta) {
-    return AppDataSource.transaction(async (manager) => {
-      const repo = manager.getRepository(ClientStaffDirectory)
-      const record = await repo.findOne({ where: { id } })
-      if (!record) throw new BizError('教职工目录记录不存在', 404)
-      record.inviteCodeDigest = null
-      record.inviteIssuedAt = null
-      record.inviteExpiresAt = null
-      record.inviteUsedAt = null
-      record.inviteFailedAttempts = 0
-      record.inviteLockedUntil = null
-      const saved = await repo.save(record)
-      await auditService.record({
-        actionType: 'client_staff_directory.invite.disable',
-        actionLabel: '禁用教师注册邀请码',
-        targetType: 'client_staff_directory',
-        targetId: saved.id,
-        targetCode: saved.staffNo,
-        actor,
-        requestMeta,
-      }, manager)
-      return { record: await this.buildRecord(saved, manager) }
-    })
-  }
-
   async deleteBatch(
     input: DeleteClientStaffDirectoryBatchInput,
     actor: AuthUserContext,
@@ -989,7 +894,7 @@ export class ClientStaffDirectoryService {
       throw new BizError('请先选择要删除的教职工目录记录', 400)
     }
 
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const repo = manager.getRepository(ClientStaffDirectory)
       const records = await repo.find({
         where: {
@@ -1084,7 +989,7 @@ export class ClientStaffDirectoryService {
     list: ClientStaffDirectoryRecord[]
   }> {
     const rows = await this.resolveImportDepartmentRows(this.normalizeImportRows(input))
-    return AppDataSource.transaction(async (manager) => {
+    return runInTransaction(async (manager) => {
       const repo = manager.getRepository(ClientStaffDirectory)
       const resolvedRows = rows
       const existingMap = await this.loadExistingByStaffNos(manager, resolvedRows.map((item) => item.staffNo))
