@@ -20,6 +20,8 @@ import { decideClientCheckoutSubmit } from '../src/views/client/client-checkout-
 
 class MemoryStorage {
   private readonly values = new Map<string, string>()
+  failOperation: 'get' | 'set' | 'remove' | null = null
+  failRemoveKey: string | null = null
 
   get length() {
     return this.values.size
@@ -30,6 +32,7 @@ class MemoryStorage {
   }
 
   getItem(key: string) {
+    if (this.failOperation === 'get') throw new DOMException('读取被拒绝', 'SecurityError')
     return this.values.get(key) ?? null
   }
 
@@ -38,10 +41,12 @@ class MemoryStorage {
   }
 
   removeItem(key: string) {
+    if (this.failOperation === 'remove' && (!this.failRemoveKey || this.failRemoveKey === key)) throw new DOMException('删除被拒绝', 'SecurityError')
     this.values.delete(key)
   }
 
   setItem(key: string, value: string) {
+    if (this.failOperation === 'set') throw new DOMException('存储配额耗尽', 'QuotaExceededError')
     this.values.set(key, String(value))
   }
 }
@@ -298,4 +303,59 @@ assertBlockedDecision(decideClientCheckoutSubmit({
   freshIntentKey: 'selection-changed-intent',
 }), 'selection_changed_after_refresh')
 
-console.log('[verify:client-cart-reconciliation] 购物车目录对账回归验证通过')
+// 浏览器缓存不是下单前置条件：失败时必须保留内存中的最新库存与原选数量。
+const unavailableStorageCart = createCart('client-storage-failure')
+unavailableStorageCart.addProduct(originalCatalogItem, 2, originalCatalogItem.skus?.[0] ?? null)
+try {
+  storage.failOperation = 'set'
+  assert.doesNotThrow(() => unavailableStorageCart.syncWithCatalog([createProduct({ availableStock: 3 })]), '配额耗尽不能将已成功的目录同步变成异常')
+  assert.equal(unavailableStorageCart.items[0]?.availableStock, 3)
+  assert.equal(unavailableStorageCart.items[0]?.qty, 2)
+  assert.equal(unavailableStorageCart.items[0]?.selected, true)
+  const snapshot = unavailableStorageCart.createSelectedCheckoutSnapshot()
+  assert.deepEqual(snapshot, [{ productId: 'product-1', skuId: 'sku-1', qty: 2 }])
+  assert.equal(decideClientCheckoutSubmit({
+    refreshSucceeded: true,
+    requestedItems: snapshot!,
+    requestedIntentKey: 'storage-failure-intent',
+    activeSubmitLock: null,
+    selectedConflictCount: unavailableStorageCart.selectedCheckoutConflicts.length,
+    freshItems: snapshot,
+    freshIntentKey: 'storage-failure-intent',
+  }).type, 'new_submit', '缓存写入失败后仍可用完整内存快照下单')
+  assert.doesNotThrow(() => unavailableStorageCart.syncWithCatalog([createProduct({ availableStock: 1 })]))
+  assert.equal(unavailableStorageCart.items[0]?.qty, 2)
+  assert.equal(unavailableStorageCart.createSelectedCheckoutSnapshot(), null, '缓存降级不能绕过真实库存不足')
+  storage.failOperation = 'remove'
+  assert.doesNotThrow(() => unavailableStorageCart.syncWithCatalog([createProduct({ availableStock: 3 })]), '历史缓存清理失败也不能阻断目录同步')
+  storage.failRemoveKey = 'y-link.client-cart.snapshot:client-storage-failure'
+  assert.doesNotThrow(() => unavailableStorageCart.clearSelectedItems(), '空购物车删除缓存失败不能阻断清理内存')
+  assert.equal(unavailableStorageCart.items.length, 0)
+  assert.doesNotThrow(() => unavailableStorageCart.clearAll(), '退出账号清理缓存失败不能阻断状态重置')
+  storage.failOperation = 'get'
+  assert.deepEqual(createCart('client-denied-read').items, [], '拒绝读取时使用空内存购物车')
+  storage.failOperation = null
+  storage.setItem('y-link.client-cart.snapshot:client-corrupt', '{invalid json')
+  storage.failOperation = 'remove'
+  storage.failRemoveKey = 'y-link.client-cart.snapshot:client-corrupt'
+  assert.deepEqual(createCart('client-corrupt').items, [], '损坏缓存且删除受限时也应完成初始化')
+  Object.defineProperty(globalThis.window, 'localStorage', {
+    configurable: true,
+    get() { throw new DOMException('存储访问被禁用', 'SecurityError') },
+  })
+  const deniedCart = createCart('client-denied-access')
+  assert.doesNotThrow(() => deniedCart.addProduct(originalCatalogItem, 1, originalCatalogItem.skus?.[0] ?? null))
+  assert.doesNotThrow(() => deniedCart.syncWithCatalog([createProduct({ availableStock: 2 })]))
+  assert.equal(deniedCart.createSelectedCheckoutSnapshot()?.[0]?.qty, 1)
+  assert.doesNotThrow(() => deniedCart.clearAll())
+} finally {
+  storage.failOperation = null
+  storage.failRemoveKey = null
+  Object.defineProperty(globalThis.window, 'localStorage', { configurable: true, value: storage })
+}
+const restoredWritableCart = createCart('client-storage-recovered')
+restoredWritableCart.addProduct(originalCatalogItem, 1, originalCatalogItem.skus?.[0] ?? null)
+assert.equal(createCart('client-storage-recovered').items[0]?.qty, 1, '恢复可写后应继续正常持久化与恢复')
+assert.equal(createCart('client-other-storage-user').items.length, 0, '降级不得退回共享账号缓存')
+
+console.log('[verify:client-cart-reconciliation] 购物车目录对账及存储故障降级回归验证通过')

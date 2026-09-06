@@ -5,6 +5,7 @@
  * 1. 购物车缓存使用 `clientUserId` 作为作用域后缀，保证同一浏览器切换账号不会读到别人的加购结果；
  * 2. 恢复时统一做结构归一化，避免旧版本或被污染的缓存把非法数量、价格写回 Store；
  * 3. 每次读写顺手清理历史单一全局 key，确保升级后不会再被旧缓存串号。
+ * 4. 存储访问、读写或清理受限时降级到内存，不把本地缓存失败传播为目录刷新或下单失败。
  * 维护说明：
  * - 若购物车快照后续新增字段，需要同步补齐 `normalizeSnapshotItems()`；
  * - 若未来购物车还要按门店、租户隔离，可在作用域 key 的拼装逻辑上继续扩展。
@@ -115,26 +116,17 @@ const normalizeSnapshotItems = (items: unknown): ClientCartSnapshotItem[] => {
 }
 
 export const readPersistedClientCartSnapshot = (clientUserId: ClientCartStorageScopeId) => {
-  const storage = getBrowserStorage('local')
-  if (!storage) {
-    return [] as ClientCartSnapshotItem[]
-  }
-
-  clearLegacyScopedStorageKey(storage, LEGACY_CLIENT_CART_SNAPSHOT_KEY)
-  const scopedKey = resolveUserScopedStorageKey(CLIENT_CART_SNAPSHOT_KEY_PREFIX, clientUserId)
-  if (!scopedKey) {
-    return [] as ClientCartSnapshotItem[]
-  }
-
-  const raw = storage.getItem(scopedKey)
-  if (!raw) {
-    return [] as ClientCartSnapshotItem[]
-  }
-
   try {
-    return normalizeSnapshotItems(JSON.parse(raw))
+    const storage = getBrowserStorage('local')
+    if (!storage) return [] as ClientCartSnapshotItem[]
+    clearLegacyScopedStorageKey(storage, LEGACY_CLIENT_CART_SNAPSHOT_KEY)
+    const scopedKey = resolveUserScopedStorageKey(CLIENT_CART_SNAPSHOT_KEY_PREFIX, clientUserId)
+    if (!scopedKey) return [] as ClientCartSnapshotItem[]
+    const raw = storage.getItem(scopedKey)
+    return raw ? normalizeSnapshotItems(JSON.parse(raw)) : [] as ClientCartSnapshotItem[]
   } catch {
-    storage.removeItem(scopedKey)
+    // 隐私策略也可能拒绝读取或删除损坏快照；清理本身必须同样可失败。
+    clearPersistedClientCartSnapshot(clientUserId)
     return [] as ClientCartSnapshotItem[]
   }
 }
@@ -143,36 +135,31 @@ export const persistClientCartSnapshot = (
   clientUserId: ClientCartStorageScopeId,
   items: ClientCartSnapshotItem[],
 ) => {
-  const storage = getBrowserStorage('local')
-  if (!storage) {
-    return
+  try {
+    const storage = getBrowserStorage('local')
+    if (!storage) return
+    clearLegacyScopedStorageKey(storage, LEGACY_CLIENT_CART_SNAPSHOT_KEY)
+    const scopedKey = resolveUserScopedStorageKey(CLIENT_CART_SNAPSHOT_KEY_PREFIX, clientUserId)
+    if (!scopedKey) return
+    if (!items.length) {
+      storage.removeItem(scopedKey)
+      return
+    }
+    storage.setItem(scopedKey, JSON.stringify(items))
+  } catch {
+    // 购物车 Store 已更新内存；配额不足或存储被禁用不能阻断成功的目录同步。
   }
-
-  clearLegacyScopedStorageKey(storage, LEGACY_CLIENT_CART_SNAPSHOT_KEY)
-  const scopedKey = resolveUserScopedStorageKey(CLIENT_CART_SNAPSHOT_KEY_PREFIX, clientUserId)
-  if (!scopedKey) {
-    return
-  }
-
-  if (!items.length) {
-    storage.removeItem(scopedKey)
-    return
-  }
-
-  storage.setItem(scopedKey, JSON.stringify(items))
 }
 
 export const clearPersistedClientCartSnapshot = (clientUserId: ClientCartStorageScopeId) => {
-  const storage = getBrowserStorage('local')
-  if (!storage) {
-    return
+  try {
+    const storage = getBrowserStorage('local')
+    if (!storage) return
+    clearLegacyScopedStorageKey(storage, LEGACY_CLIENT_CART_SNAPSHOT_KEY)
+    const scopedKey = resolveUserScopedStorageKey(CLIENT_CART_SNAPSHOT_KEY_PREFIX, clientUserId)
+    if (!scopedKey) return
+    storage.removeItem(scopedKey)
+  } catch {
+    // 缓存清理失败不能阻止退出账号时重置内存；仍按账号隔离，绝不读取历史全局 key。
   }
-
-  clearLegacyScopedStorageKey(storage, LEGACY_CLIENT_CART_SNAPSHOT_KEY)
-  const scopedKey = resolveUserScopedStorageKey(CLIENT_CART_SNAPSHOT_KEY_PREFIX, clientUserId)
-  if (!scopedKey) {
-    return
-  }
-
-  storage.removeItem(scopedKey)
 }
