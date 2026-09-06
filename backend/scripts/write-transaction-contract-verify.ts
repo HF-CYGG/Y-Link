@@ -301,6 +301,17 @@ const ALLOWED_DIRECT_TRANSACTION_CALLS: Array<{
       + '整表搬迁需要自行控制批次提交与回滚，必须直接持有 QueryRunner',
   },
   {
+    relativePath: 'src/services/client-feedback.service.ts',
+    receiver: 'queryRunner',
+    method: 'startTransaction',
+    enclosingFunction: 'runAttachmentCoordinatedTransaction',
+    expectedCount: 1,
+    reason:
+      '仅 MySQL 分支先 initializeDatabaseInfrastructure，再在同一固定连接上开启事务并持有 GET_LOCK；'
+      + '命名锁必须跨提交后的附件文件处理保持到显式释放，不能改为短生命周期 runInTransaction；'
+      + 'SQLite 分支已使用 runInTransaction，因此不会绕过单连接串行化闸门',
+  },
+  {
     relativePath: 'src/commands/seed-database-migration-e2e.ts',
     receiver: 'queryRunner',
     method: 'startTransaction',
@@ -560,5 +571,5 @@ try {
   console.log('写事务闸门契约验证通过')
 } catch (error) {
   console.error('写事务闸门契约验证失败\n', error instanceof Error ? error.message : error)
-  process.exit(1)
+  process.exitCode = 1
 }

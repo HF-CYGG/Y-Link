@@ -3,7 +3,7 @@
  * 文件职责：以隔离 SQLite 和真实服务层验证 O2O 下单库存的全有或全无语义。
  * 实现逻辑：
  * - 每次运行创建唯一临时 SQLite，动态加载数据源、初始化 Schema 与默认系统配置，避免污染本地开发库；
- * - 通过真实客户端注册登录和商品服务创建夹具，再从服务层调用下单，覆盖同账号旧页面、跨账号和混合商品请求；
+ * - 在隔离库创建账号夹具，通过真实登录和商品服务调用下单，覆盖同账号旧页面、跨账号和混合商品请求；
  * - 对 SQLite 单写协调器下的并发竞争、同请求键重试分别断言不超卖和不重复占用库存；
  * - 所有拒绝路径同时校验 HTTP 409 业务错误、订单数量及商品/SKU 预占库存不变。
  * 维护说明：
@@ -55,6 +55,8 @@ async function main() {
   const { BaseProduct } = await import('../src/entities/base-product.entity.js')
   const { BaseProductSku } = await import('../src/entities/base-product-sku.entity.js')
   const { O2oPreorder } = await import('../src/entities/o2o-preorder.entity.js')
+  const { ClientUser } = await import('../src/entities/client-user.entity.js')
+  const { hashPassword } = await import('../src/utils/password.js')
   const { BizError } = await import('../src/utils/errors.js')
   const { clientAuthService } = await import('../src/services/client-auth.service.js')
   const { o2oPreorderService } = await import('../src/services/o2o-preorder.service.js')
@@ -65,21 +67,22 @@ async function main() {
   const productRepo = AppDataSource.getRepository(BaseProduct)
   const skuRepo = AppDataSource.getRepository(BaseProductSku)
 
-  const registerAndLoginClient = async (index: number): Promise<ClientAuthContext> => {
+  const createAndLoginClient = async (index: number): Promise<ClientAuthContext> => {
     const account = `13${String((Date.now() + index) % 1_000_000_000).padStart(9, '0')}`
     const password = `Client_${verifySeed}_${index}_Aa1!`
-    const registerCaptcha = await clientAuthService.createCaptcha()
-    const registerResult = await clientAuthService.register({
+    // 库存专项不调用外部验证码通道；注册门禁由独立注册专项覆盖。
+    const clientRepo = AppDataSource.getRepository(ClientUser)
+    await clientRepo.save(clientRepo.create({
       accountType: 'personal',
-      account,
-      username: `库存验证${toChineseDigits(String(index))}`,
-      password,
-      captchaId: registerCaptcha.captchaId,
-      captchaCode: readCaptchaCode(registerCaptcha.captchaSvg),
-    })
+      mobile: account,
+      mobileVerifiedAt: new Date(),
+      realName: `库存验证${toChineseDigits(String(index))}`,
+      passwordHash: await hashPassword(password),
+      status: 'enabled',
+    }))
     const loginCaptcha = await clientAuthService.createCaptcha()
     const loginResult = await clientAuthService.login({
-      account: registerResult.user.mobile,
+      account,
       password,
       captchaId: loginCaptcha.captchaId,
       captchaCode: readCaptchaCode(loginCaptcha.captchaSvg),
@@ -139,8 +142,8 @@ async function main() {
     await initializeDatabaseSchemaIfNeeded(AppDataSource)
     await systemConfigService.ensureDefaultConfigs()
 
-    const sameAccount = await registerAndLoginClient(1)
-    const otherAccount = await registerAndLoginClient(2)
+    const sameAccount = await createAndLoginClient(1)
+    const otherAccount = await createAndLoginClient(2)
     const shared = await createListedProduct('同账号旧页面库存商品', 3)
 
     await submit(sameAccount, shared.product.id, shared.sku.id, 2, 'stock-same-page-first-0001')
@@ -168,7 +171,7 @@ async function main() {
     assert.deepEqual(await stockSnapshot(shared.product.id, shared.sku.id), otherAccountBefore.stock)
     pass('不同账号库存冲突返回 409，既有订单与预占库存不变')
 
-    const mixedAccount = await registerAndLoginClient(3)
+    const mixedAccount = await createAndLoginClient(3)
     const mixedAvailable = await createListedProduct('混合订单可用商品', 2)
     const mixedInsufficient = await createListedProduct('混合订单不足商品', 1)
     await expectStockConflict(
@@ -194,8 +197,8 @@ async function main() {
     })
     pass('混合有效和不足商品整体拒绝，不产生部分订单或部分预占')
 
-    const concurrentFirst = await registerAndLoginClient(4)
-    const concurrentSecond = await registerAndLoginClient(5)
+    const concurrentFirst = await createAndLoginClient(4)
+    const concurrentSecond = await createAndLoginClient(5)
     const concurrentProduct = await createListedProduct('并发竞争库存商品', 1)
     const concurrentResults = await Promise.allSettled([
       submit(concurrentFirst, concurrentProduct.product.id, concurrentProduct.sku.id, 1, 'stock-concurrent-first-0001'),

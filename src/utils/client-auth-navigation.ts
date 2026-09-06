@@ -10,23 +10,12 @@
  * - 该工具仅负责导航，不负责清理 store，本地状态仍由业务方先行清空。
  */
 
+import { resolveSafeLocalRedirect } from './safe-local-redirect'
+
 const CLIENT_LOGIN_PATH = '/client/login'
 
-const resolveSafeClientRedirect = (value?: string) => {
-  if (typeof value !== 'string') {
-    return ''
-  }
-
-  const normalized = value.trim()
-  if (!normalized.startsWith('/') || normalized.startsWith('//')) {
-    return ''
-  }
-
-  return normalized
-}
-
 export const redirectToClientLogin = (options?: { redirect?: string }) => {
-  const redirect = resolveSafeClientRedirect(options?.redirect)
+  const redirect = resolveSafeLocalRedirect(options?.redirect) ?? ''
   const targetPath = redirect
     ? `${CLIENT_LOGIN_PATH}?redirect=${encodeURIComponent(redirect)}`
     : CLIENT_LOGIN_PATH

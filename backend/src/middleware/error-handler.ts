@@ -12,6 +12,7 @@ import multer from 'multer'
 import { mapDatabaseErrorToBizError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
 import { DatabaseOverloadedError } from '../database/database-errors.js'
+import { DatabaseWriteFrozenError } from '../database/operation-gate.js'
 
 /**
  * 全局 404 处理中间件：
@@ -47,9 +48,9 @@ export function errorHandler(err: unknown, _req: Request, res: Response, next: N
       res.setHeader('Retry-After', '1')
     }
     res.status(err.statusCode).json({
-      code: err.statusCode,
+      code: err instanceof DatabaseWriteFrozenError ? 50301 : err.statusCode,
       message: err.message,
-      data: null,
+      data: err.data,
     })
     return
   }

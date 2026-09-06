@@ -61,14 +61,13 @@ log_format ylink_combined '$remote_addr - $remote_user [$time_local] "$request" 
                           'proxy="$realip_remote_addr" xff="$http_x_forwarded_for" real="$http_x_real_ip" '
                           'attack="$ylink_attack_class"';
 
+include /etc/nginx/ylink/edge-protocol.conf;
+
 server {
     listen 80;
     server_name _;
 
-    set_real_ip_from 127.0.0.1;
-    set_real_ip_from 10.0.0.0/8;
-    set_real_ip_from 172.16.0.0/12;
-    set_real_ip_from 192.168.0.0/16;
+    include /etc/nginx/ylink/trusted-realip.conf;
     real_ip_header X-Forwarded-For;
     real_ip_recursive on;
 
@@ -93,13 +92,7 @@ server {
         image/svg+xml;
 
     # 前端静态托管层统一补基础安全头，避免浏览器做内容嗅探或被外部页面嵌入。
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-    add_header X-Frame-Options "DENY" always;
-    add_header Permissions-Policy "camera=(), microphone=(), geolocation=()" always;
-    add_header Cross-Origin-Opener-Policy "same-origin" always;
-    add_header Cross-Origin-Resource-Policy "same-origin" always;
-    add_header Content-Security-Policy "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:; connect-src 'self' http: https: ws: wss:;" always;
+    include /etc/nginx/ylink/page-security-headers.conf;
 
     # 托管前端静态资源目录。
     root /usr/share/nginx/html;
@@ -109,12 +102,27 @@ server {
     location ~* \.(?:css|js|mjs|json|map|svg|ico|png|jpe?g|webp|gif|woff2?|ttf|otf|eot)$ {
         try_files $uri =404;
         expires 365d;
+        include /etc/nginx/ylink/page-security-headers.conf;
         add_header Cache-Control "public, max-age=31536000, immutable" always;
     }
 
     # 入口 HTML 需要及时拿到最新版本，避免用户长期缓存旧入口引用已失效的 hash 资源。
     location = /index.html {
         try_files /index.html =404;
+        include /etc/nginx/ylink/page-security-headers.conf;
+        add_header Cache-Control "no-store" always;
+    }
+
+    # 救援页是独立 Vite 入口，不能落入普通 SPA 路由或其缓存策略。
+    location = /database-rescue {
+        try_files /rescue.html =404;
+        include /etc/nginx/ylink/page-security-headers.conf;
+        add_header Cache-Control "no-store" always;
+    }
+
+    location = /rescue.html {
+        try_files /rescue.html =404;
+        include /etc/nginx/ylink/page-security-headers.conf;
         add_header Cache-Control "no-store" always;
     }
 
@@ -155,6 +163,8 @@ server {
     # - 其余路径统一回落到 index.html 交给前端路由处理。
     location / {
         try_files $uri $uri/ /index.html;
+        include /etc/nginx/ylink/page-security-headers.conf;
+        add_header Cache-Control "no-store" always;
     }
 
     # 这两个路由当前均为完全匿名且不按 Cookie 个性化的公开数据。
@@ -162,10 +172,12 @@ server {
     location = /api/o2o/mall/products {
         proxy_pass http://$backend_upstream/api/o2o/mall/products;
         proxy_http_version 1.1;
+        include /etc/nginx/ylink/proxy-security-headers.conf;
         proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $ylink_forwarded_proto;
         proxy_set_header Connection "";
         proxy_cache ylink_public_catalog;
         proxy_cache_key "$scheme$request_method$host$uri$is_args$args";
@@ -183,10 +195,12 @@ server {
     location = /api/o2o/mall/storefront {
         proxy_pass http://$backend_upstream/api/o2o/mall/storefront;
         proxy_http_version 1.1;
+        include /etc/nginx/ylink/proxy-security-headers.conf;
         proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $ylink_forwarded_proto;
         proxy_set_header Connection "";
         proxy_cache ylink_public_catalog;
         proxy_cache_key "$scheme$request_method$host$uri$is_args$args";
@@ -207,10 +221,12 @@ server {
     location ^~ /api/ {
         proxy_pass http://$backend_upstream/api/;
         proxy_http_version 1.1;
+        include /etc/nginx/ylink/proxy-security-headers.conf;
         proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $ylink_forwarded_proto;
         proxy_set_header Connection "";
     }
 
@@ -219,10 +235,12 @@ server {
     location ^~ /uploads/ {
         proxy_pass http://$backend_upstream/uploads/;
         proxy_http_version 1.1;
+        include /etc/nginx/ylink/proxy-security-headers.conf;
         proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $ylink_forwarded_proto;
         proxy_set_header Connection "";
     }
 
@@ -230,6 +248,11 @@ server {
     location = /health {
         proxy_pass http://$backend_upstream/health;
         proxy_http_version 1.1;
+        include /etc/nginx/ylink/proxy-security-headers.conf;
         proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Proto $ylink_forwarded_proto;
+        add_header Cache-Control "no-store" always;
     }
 }

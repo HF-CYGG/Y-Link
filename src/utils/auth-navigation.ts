@@ -10,23 +10,12 @@
  * - 该工具只负责导航，不负责清理 store，本地状态需由业务方先清空。
  */
 
+import { resolveSafeLocalRedirect } from './safe-local-redirect'
+
 const ADMIN_LOGIN_PATH = '/login'
 
-const resolveSafeAdminRedirect = (value?: string) => {
-  if (typeof value !== 'string') {
-    return ''
-  }
-
-  const normalized = value.trim()
-  if (!normalized.startsWith('/') || normalized.startsWith('//')) {
-    return ''
-  }
-
-  return normalized
-}
-
 export const redirectToAdminLogin = (options?: { redirect?: string }) => {
-  const redirect = resolveSafeAdminRedirect(options?.redirect)
+  const redirect = resolveSafeLocalRedirect(options?.redirect) ?? ''
   const targetPath = redirect
     ? `${ADMIN_LOGIN_PATH}?redirect=${encodeURIComponent(redirect)}`
     : ADMIN_LOGIN_PATH

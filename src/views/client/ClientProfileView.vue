@@ -2,6 +2,7 @@
 /**
  * 模块说明：src/views/client/ClientProfileView.vue
  * 文件职责：客户端个人中心页面，负责展示资料信息、编辑资料以及用户本人修改登录密码。
+ * 实现逻辑：个人用户主动改名时复用注册字符规则；历史姓名未修改及教师目录姓名保持兼容，不清洗输入。
  * 维护说明：
  * - 资料编辑与改密都属于当前登录用户自助操作；
  * - 本次改密口径需与客户端注册、找回密码保持一致，避免用户在不同入口看到不同规则；
@@ -16,6 +17,7 @@ import { BizCrudDialogShell } from '@/components/common'
 import { useClientAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { redirectToClientLogin } from '@/utils/client-auth-navigation'
+import { CLIENT_REGISTRATION_USERNAME_HINT, isPersonalRegistrationUsernameValid } from '@/utils/client-registration-policy'
 import {
   clientChangePassword,
   sendClientProfileVerificationCode,
@@ -60,6 +62,9 @@ const isTeacherAccount = computed(() => (
   && Boolean(clientAuthStore.currentUser?.staffNo?.trim())
 ))
 const isDirectoryManagedAccount = computed(() => isDepartmentAccount.value || isTeacherAccount.value)
+const currentProfileUsername = computed(() => (
+  clientAuthStore.currentUser?.username || clientAuthStore.currentUser?.realName || clientAuthStore.currentUser?.account || ''
+))
 const accountTypeLabel = computed(() => {
   if (isDepartmentAccount.value) return '部门共享账号'
   return isTeacherAccount.value ? '教师账号' : '个人账号'
@@ -95,7 +100,19 @@ const rules: FormRules = {
 }
 
 const profileRules: FormRules = {
-  username: [{ required: true, message: '请输入姓名', trigger: 'blur' }],
+  username: [
+    { required: true, message: '请输入姓名', trigger: 'blur' },
+    {
+      validator: (_rule, value: string, callback) => {
+        if (isTeacherAccount.value || (value && value === currentProfileUsername.value)) {
+          callback()
+          return
+        }
+        callback(isPersonalRegistrationUsernameValid(value) ? undefined : new Error(CLIENT_REGISTRATION_USERNAME_HINT))
+      },
+      trigger: 'blur',
+    },
+  ],
   currentPassword: [{ required: true, message: '请输入当前密码', trigger: 'blur' }],
   mobile: [
     {
@@ -136,7 +153,7 @@ const openProfileDialog = () => {
     showAppInfo('部门账户资料由管理员维护，客户端仅支持查看')
     return
   }
-  profileForm.username = clientAuthStore.currentUser?.username || clientAuthStore.currentUser?.account || clientAuthStore.currentUser?.realName || ''
+  profileForm.username = currentProfileUsername.value
   profileForm.mobile = clientAuthStore.currentUser?.mobile || ''
   profileForm.email = clientAuthStore.currentUser?.email || ''
   profileForm.currentPassword = ''
@@ -185,24 +202,25 @@ const submitUpdateProfile = async () => {
   const valid = await profileFormRef.value.validate().catch(() => false)
   if (!valid) return
 
-  const normalizedUsername = profileForm.username.trim()
-  if (!normalizedUsername) {
-    showAppWarning('请输入姓名')
-    return
-  }
   const normalizedMobile = profileForm.mobile.trim()
   const normalizedEmail = profileForm.email.trim().toLowerCase()
 
   try {
     profileSubmitting.value = true
-    await clientAuthStore.updateProfile({
-      username: normalizedUsername,
+    const profile = await clientAuthStore.updateProfile({
+      username: profileForm.username,
       mobile: normalizedMobile || undefined,
       email: normalizedEmail || undefined,
       currentPassword: profileForm.currentPassword,
       mobileVerificationCode: profileForm.mobileVerificationCode || undefined,
       emailVerificationCode: profileForm.emailVerificationCode || undefined,
     })
+    if (profile.requiresRelogin) {
+      showAppSuccess('资料更新成功，请重新登录')
+      profileDialogVisible.value = false
+      redirectToClientLogin()
+      return
+    }
     showAppSuccess('资料更新成功')
     profileDialogVisible.value = false
   } catch (error: any) {
@@ -370,7 +388,8 @@ const sendProfileCode = async (channel: 'mobile' | 'email') => {
     >
       <el-form ref="profileFormRef" :model="profileForm" :rules="profileRules" label-position="top" @submit.prevent>
         <el-form-item label="姓名" prop="username">
-          <el-input v-model="profileForm.username" :disabled="isTeacherAccount" placeholder="请输入真实姓名" />
+          <el-input v-model="profileForm.username" :disabled="isTeacherAccount" :placeholder="isTeacherAccount ? '姓名由教师目录维护' : CLIENT_REGISTRATION_USERNAME_HINT" />
+          <div v-if="!isTeacherAccount" class="el-form-item__tip">{{ CLIENT_REGISTRATION_USERNAME_HINT }}；历史姓名未修改时可保留。</div>
         </el-form-item>
         <el-form-item label="手机号" prop="mobile">
           <el-input v-model="profileForm.mobile" placeholder="请输入手机号" />

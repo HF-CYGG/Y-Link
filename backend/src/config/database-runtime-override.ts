@@ -6,6 +6,7 @@
 
 import fs from 'node:fs'
 import { appDataPaths } from './app-data-paths.js'
+import { inspectControlFile, removeControlFile, writeControlFile } from '../runtime/durable-control-file.js'
 
 export type DatabaseOverrideMode = 'sqlite' | 'mysql'
 
@@ -45,9 +46,7 @@ export interface DatabaseRuntimeOverrideFile {
  * - 与业务数据库文件、备份文件同属后端可写目录；
  * - 不依赖当前 shell 工作目录，避免从 monorepo 根目录启动时路径错位。
  */
-const runtimeDir = appDataPaths.runtimeDir
 const runtimeOverrideFilePath = appDataPaths.runtimeOverrideFile
-const runtimeOverrideTempFilePath = `${runtimeOverrideFilePath}.tmp`
 
 /**
  * 运行时覆盖文件字段边界：
@@ -281,16 +280,13 @@ function normalizeRuntimeOverrideFilePayload(input: unknown): DatabaseRuntimeOve
 }
 
 export function readDatabaseRuntimeOverride(): DatabaseRuntimeOverrideFile | null {
-  if (!fs.existsSync(runtimeOverrideFilePath)) {
-    return null
-  }
+  const inspection = inspectDatabaseRuntimeOverride()
+  if (inspection.state === 'corrupted') throw new Error('DATABASE_OVERRIDE_CORRUPTED')
+  return inspection.state === 'healthy' ? inspection.value : null
+}
 
-  try {
-    const raw = JSON.parse(fs.readFileSync(runtimeOverrideFilePath, 'utf8')) as Record<string, unknown>
-    return normalizeRuntimeOverrideFilePayload(raw)
-  } catch {
-    return null
-  }
+export function inspectDatabaseRuntimeOverride() {
+  return inspectControlFile(runtimeOverrideFilePath, normalizeRuntimeOverrideFilePayload)
 }
 
 /**
@@ -332,30 +328,12 @@ export function loadDatabaseRuntimeOverrideEnvValues(): Record<string, string> |
 }
 
 export async function writeDatabaseRuntimeOverride(payload: DatabaseRuntimeOverrideFile): Promise<DatabaseRuntimeOverrideFile> {
-  fs.mkdirSync(runtimeDir, { recursive: true })
   const normalizedPayload = normalizeRuntimeOverrideFilePayload(payload)
   if (!normalizedPayload) {
     throw new Error('数据库运行时覆盖配置不合法，已拒绝写入磁盘')
   }
 
-  // 先写临时文件再替换正式文件，尽量避免进程中断时留下半截 JSON。
-  fs.writeFileSync(runtimeOverrideTempFilePath, JSON.stringify(normalizedPayload, null, 2), {
-    encoding: 'utf8',
-    mode: 0o600,
-  })
-  try {
-    fs.renameSync(runtimeOverrideTempFilePath, runtimeOverrideFilePath)
-  } catch {
-    if (fs.existsSync(runtimeOverrideFilePath)) {
-      fs.unlinkSync(runtimeOverrideFilePath)
-    }
-    fs.renameSync(runtimeOverrideTempFilePath, runtimeOverrideFilePath)
-  }
-  try {
-    fs.chmodSync(runtimeOverrideFilePath, 0o600)
-  } catch {
-    // Windows 不保证支持 POSIX 权限位；onebox/Linux 会正常限制为进程用户可读写。
-  }
+  writeControlFile(runtimeOverrideFilePath, normalizedPayload)
   return normalizedPayload
 }
 
@@ -363,7 +341,7 @@ export async function clearDatabaseRuntimeOverride(): Promise<boolean> {
   if (!fs.existsSync(runtimeOverrideFilePath)) {
     return false
   }
-  fs.unlinkSync(runtimeOverrideFilePath)
+  removeControlFile(runtimeOverrideFilePath)
   return true
 }
 

@@ -23,11 +23,18 @@ import { customerServiceRealtimeService } from './customer-service-realtime.serv
 import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
 import type { EntityManager } from 'typeorm'
 import { createHash } from 'node:crypto'
+import { STAFF_INVITE_CONFIG_KEY } from '../utils/staff-invite-code.js'
 
 const CLIENT_DEPARTMENT_NODE_LIMIT = 3000
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const DEFAULT_SYSTEM_CONFIGS = [
+  {
+    configKey: STAFF_INVITE_CONFIG_KEY,
+    configValue: JSON.stringify({ enabled: false, digest: null }),
+    configGroup: 'client_auth',
+    remark: '教师统一注册邀请码（仅保存摘要）',
+  },
   {
     configKey: 'order.serial.department.start',
     configValue: '1',

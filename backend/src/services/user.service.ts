@@ -17,6 +17,7 @@ import { assertAdminPasswordPolicy, hashPassword } from '../utils/password.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
 import { sanitizeUserProfile } from './auth.service.js'
+import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
 
 export interface UserListQuery {
   page: number
@@ -189,7 +190,7 @@ export class UserService {
       throw new BizError('姓名不能为空', 400)
     }
     try {
-      return await runInTransaction(async (manager) => {
+      const result = await runInTransaction(async (manager) => {
         const userRepo = manager.getRepository(SysUser)
         const sessionRepo = manager.getRepository(SysUserSession)
         const user = await userRepo.findOne({ where: { id } })
@@ -202,6 +203,7 @@ export class UserService {
         }
 
         const changeSummary: Record<string, string | null> = {}
+        const roleChanged = input.role !== undefined && input.role !== user.role
 
         if (normalizedDisplayName !== undefined && normalizedDisplayName !== user.displayName) {
           changeSummary.displayNameBefore = user.displayName
@@ -224,7 +226,8 @@ export class UserService {
         }
 
         const savedUser = await userRepo.save(user)
-        if (normalizedPassword !== undefined) {
+        const sessionMustBeRevoked = normalizedPassword !== undefined || roleChanged
+        if (sessionMustBeRevoked) {
         /**
          * 安全修复：
          * - 管理端“编辑用户”也允许直接改密码；
@@ -248,8 +251,12 @@ export class UserService {
           manager,
         )
 
-        return sanitizeUserProfile(savedUser)
+        return { profile: sanitizeUserProfile(savedUser), sessionMustBeRevoked }
       })
+      if (result.sessionMustBeRevoked) {
+        customerServiceRealtimeService.disconnectByOwner('service', id)
+      }
+      return result.profile
     } catch (error) {
       if (isUniqueConstraintError(error, EMAIL_UNIQUE_CONSTRAINT_MATCHER)) {
         throw new BizError('邮箱已被其他账号使用', 409)
@@ -264,7 +271,7 @@ export class UserService {
     actor: AuthUserContext,
     requestMeta?: RequestMeta,
   ): Promise<UserSafeProfile> {
-    return runInTransaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const userRepo = manager.getRepository(SysUser)
       const user = await userRepo.findOne({ where: { id } })
       if (!user) {
@@ -276,7 +283,7 @@ export class UserService {
       }
 
       if (user.status === status) {
-        return sanitizeUserProfile(user)
+        return { profile: sanitizeUserProfile(user), sessionMustBeRevoked: false }
       }
 
       const previousStatus = user.status
@@ -304,8 +311,12 @@ export class UserService {
         manager,
       )
 
-      return sanitizeUserProfile(savedUser)
+      return { profile: sanitizeUserProfile(savedUser), sessionMustBeRevoked: status !== 'enabled' }
     })
+    if (result.sessionMustBeRevoked) {
+      customerServiceRealtimeService.disconnectByOwner('service', id)
+    }
+    return result.profile
   }
 
   /**
@@ -329,7 +340,7 @@ export class UserService {
       throw new BizError('请使用本人修改密码入口处理自己的密码', 400)
     }
 
-    return runInTransaction(async (manager) => {
+    const profile = await runInTransaction(async (manager) => {
       const userRepo = manager.getRepository(SysUser)
       const sessionRepo = manager.getRepository(SysUserSession)
       const user = await userRepo.findOne({ where: { id } })
@@ -360,6 +371,8 @@ export class UserService {
 
       return sanitizeUserProfile(savedUser)
     })
+    customerServiceRealtimeService.disconnectByOwner('service', id)
+    return profile
   }
 }
 

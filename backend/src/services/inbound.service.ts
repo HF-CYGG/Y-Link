@@ -18,6 +18,7 @@ import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
+import { MAX_DATABASE_INT, MAX_INBOUND_ORDER_ITEM_COUNT } from '../constants/web-resource-limits.js'
 
 export interface SubmitInboundItemInput {
   productId: string
@@ -95,20 +96,48 @@ class InboundService {
     if (!Array.isArray(items) || !items.length) {
       throw new BizError('至少选择一个商品', 400)
     }
+    if (items.length > MAX_INBOUND_ORDER_ITEM_COUNT) {
+      throw new BizError(`单次最多提交 ${MAX_INBOUND_ORDER_ITEM_COUNT} 条商品明细`, 400)
+    }
 
-    const normalizedItems = items.map((item) => ({
-      productId: String(item.productId).trim(),
-      skuId: item.skuId === null || item.skuId === undefined ? null : String(item.skuId).trim() || null,
-      qty: Math.floor(Number(item.qty)),
-    }))
+    const mergedItems = new Map<string, { productId: string; skuId: string | null; qty: number }>()
+    items.forEach((item) => {
+      const productId = String(item.productId).trim()
+      const skuId = item.skuId === null || item.skuId === undefined ? null : String(item.skuId).trim() || null
+      const qty = Number(item.qty)
+      const itemKey = `${productId}::${skuId ?? ''}`
+      const current = mergedItems.get(itemKey)
+      mergedItems.set(itemKey, { productId, skuId, qty: (current?.qty ?? 0) + qty })
+    })
+    const normalizedItems = [...mergedItems.values()]
 
     normalizedItems.forEach((item) => {
-      if (!item.productId || !Number.isInteger(item.qty) || item.qty <= 0) {
+      if (!item.productId || !Number.isSafeInteger(item.qty) || item.qty <= 0 || item.qty > MAX_DATABASE_INT) {
         throw new BizError('商品数量必须为正整数', 400)
       }
     })
+    this.assertInboundQuantityBounds(normalizedItems)
 
     return normalizedItems
+  }
+
+  /** 合并同商品/规格后仍须确保单条与订单合计均可安全写入数据库 INT。 */
+  private assertInboundQuantityBounds(items: Array<{ qty: number }>) {
+    if (!Array.isArray(items) || items.length === 0 || items.length > MAX_INBOUND_ORDER_ITEM_COUNT) {
+      throw new BizError(`单次最多提交 ${MAX_INBOUND_ORDER_ITEM_COUNT} 条商品明细`, 400)
+    }
+    let totalQty = 0
+    for (const item of items) {
+      const qty = Number(item.qty)
+      if (!Number.isSafeInteger(qty) || qty <= 0 || qty > MAX_DATABASE_INT) {
+        throw new BizError('商品数量必须为正整数且不超过系统上限', 400)
+      }
+      totalQty += qty
+      if (!Number.isSafeInteger(totalQty) || totalQty > MAX_DATABASE_INT) {
+        throw new BizError('送货单总数量超过系统可处理上限', 400)
+      }
+    }
+    return totalQty
   }
 
   private isCurrentActiveSku(sku: Pick<BaseProductSku, 'isActive' | 'isCurrent'>): boolean {
@@ -261,10 +290,7 @@ class InboundService {
       const productMap = await this.loadActiveProductsByIds(productIds, manager)
       const resolvedItems = await this.resolveInboundItemsWithSku(normalizedItems, productMap, manager)
       
-      let totalQty = 0
-      resolvedItems.forEach((item) => {
-        totalQty += item.qty
-      })
+      const totalQty = this.assertInboundQuantityBounds(resolvedItems)
 
       const showNo = await this.generateShowNo(manager)
       const savedOrder = await manager.getRepository(BizInboundOrder).save(
@@ -326,7 +352,7 @@ class InboundService {
       const productMap = await this.loadActiveProductsByIds(productIds, manager)
       const resolvedItems = await this.resolveInboundItemsWithSku(normalizedItems, productMap, manager)
 
-      const nextTotalQty = resolvedItems.reduce((sum, item) => sum + item.qty, 0)
+      const nextTotalQty = this.assertInboundQuantityBounds(resolvedItems)
 
       await manager.getRepository(BizInboundOrderItem).delete({ orderId: order.id })
 
@@ -560,7 +586,7 @@ class InboundService {
       const productIds = [...new Set(normalizedItems.map((item) => item.productId))]
       const productMap = await this.loadActiveProductsByIds(productIds, manager)
       const resolvedItems = await this.resolveInboundItemsWithSku(normalizedItems, productMap, manager)
-      const nextTotalQty = resolvedItems.reduce((sum, item) => sum + item.qty, 0)
+      const nextTotalQty = this.assertInboundQuantityBounds(resolvedItems)
 
       await manager.getRepository(BizInboundOrderItem).delete({ orderId: order.id })
 

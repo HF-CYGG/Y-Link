@@ -1,8 +1,12 @@
+import { createHash, timingSafeEqual } from 'node:crypto'
 import type { Request, Response } from 'express'
 import { env } from '../config/env.js'
 import { parseCookies } from './admin-auth-cookie.js'
+import { resolveSecureCookieFlag } from './http-security.js'
 
 export const CLIENT_SESSION_COOKIE_NAME = 'y_link_client_session'
+export const CLIENT_CSRF_COOKIE_NAME = 'y_link_client_csrf'
+export const CLIENT_CSRF_HEADER_NAME = 'x-client-csrf-token'
 
 interface CookieSerializeOptions {
   httpOnly?: boolean
@@ -11,36 +15,6 @@ interface CookieSerializeOptions {
   path?: string
   maxAgeSeconds?: number
   expires?: Date
-}
-
-function parseForwardedProto(headerValue: string | string[] | undefined): string | null {
-  if (typeof headerValue === 'string') {
-    const proto = headerValue.split(',')[0]?.trim().toLowerCase()
-    return proto || null
-  }
-  if (Array.isArray(headerValue)) {
-    for (const item of headerValue) {
-      const proto = item.split(',')[0]?.trim().toLowerCase()
-      if (proto) {
-        return proto
-      }
-    }
-  }
-  return null
-}
-
-function shouldUseSecureCookie(req: Request): boolean {
-  const forwardedProto = parseForwardedProto(req.headers['x-forwarded-proto'])
-  if (forwardedProto === 'https') {
-    return true
-  }
-  if (forwardedProto === 'http') {
-    return false
-  }
-  if (req.secure) {
-    return true
-  }
-  return env.NODE_ENV === 'production'
 }
 
 function buildCookieValue(name: string, value: string, options: CookieSerializeOptions): string {
@@ -86,6 +60,23 @@ function setCookie(res: Response, name: string, value: string, options: CookieSe
   appendSetCookieHeader(res, buildCookieValue(name, value, options))
 }
 
+/**
+ * 从高熵会话令牌派生客户端 CSRF 值，而不是让浏览器提交任意两个相等的外部值。
+ * 域分离前缀避免未来其它用途的 SHA-256 摘要与此值混用。
+ */
+export function deriveClientCsrfToken(sessionToken: string): string {
+  return createHash('sha256')
+    .update('y-link.client.csrf.v1\u0000')
+    .update(sessionToken)
+    .digest('base64url')
+}
+
+function equalCsrfToken(actual: string, expected: string): boolean {
+  const actualBuffer = Buffer.from(actual)
+  const expectedBuffer = Buffer.from(expected)
+  return actualBuffer.length === expectedBuffer.length && timingSafeEqual(actualBuffer, expectedBuffer)
+}
+
 export function setClientAuthCookie(
   req: Request,
   res: Response,
@@ -95,9 +86,16 @@ export function setClientAuthCookie(
   },
 ): void {
   const cookieMaxAgeSeconds = getCookieMaxAgeSeconds(payload.expiresAt)
-  const secure = shouldUseSecureCookie(req)
+  const secure = resolveSecureCookieFlag(req)
   setCookie(res, CLIENT_SESSION_COOKIE_NAME, payload.sessionToken, {
     httpOnly: true,
+    secure,
+    sameSite: 'Lax',
+    path: '/',
+    maxAgeSeconds: cookieMaxAgeSeconds,
+    expires: payload.expiresAt,
+  })
+  setCookie(res, CLIENT_CSRF_COOKIE_NAME, deriveClientCsrfToken(payload.sessionToken), {
     secure,
     sameSite: 'Lax',
     path: '/',
@@ -107,7 +105,7 @@ export function setClientAuthCookie(
 }
 
 export function clearClientAuthCookie(req: Request, res: Response): void {
-  const secure = shouldUseSecureCookie(req)
+  const secure = resolveSecureCookieFlag(req)
   setCookie(res, CLIENT_SESSION_COOKIE_NAME, '', {
     httpOnly: true,
     secure,
@@ -116,6 +114,24 @@ export function clearClientAuthCookie(req: Request, res: Response): void {
     maxAgeSeconds: 0,
     expires: new Date(0),
   })
+  setCookie(res, CLIENT_CSRF_COOKIE_NAME, '', {
+    secure,
+    sameSite: 'Lax',
+    path: '/',
+    maxAgeSeconds: 0,
+    expires: new Date(0),
+  })
+}
+
+/** 在会话探测成功后补发可读 CSRF Cookie，不重写 HttpOnly 会话 Cookie 的原始到期时间。 */
+export function ensureClientCsrfCookie(req: Request, res: Response, sessionToken: string): void {
+  const secure = resolveSecureCookieFlag(req)
+  setCookie(res, CLIENT_CSRF_COOKIE_NAME, deriveClientCsrfToken(sessionToken), {
+    secure,
+    sameSite: 'Lax',
+    path: '/',
+    maxAgeSeconds: env.AUTH_TOKEN_TTL_HOURS * 60 * 60,
+  })
 }
 
 export function readClientSessionTokenFromCookie(req: Request): string | null {
@@ -123,3 +139,20 @@ export function readClientSessionTokenFromCookie(req: Request): string | null {
   return typeof cookieValue === 'string' && cookieValue.trim() ? cookieValue.trim() : null
 }
 
+export function readClientCsrfTokenFromCookie(req: Request): string | null {
+  const cookieValue = parseCookies(req)[CLIENT_CSRF_COOKIE_NAME]
+  return typeof cookieValue === 'string' && cookieValue.trim() ? cookieValue.trim() : null
+}
+
+export function readClientCsrfHeaderToken(req: Request): string | null {
+  const headerValue = req.headers[CLIENT_CSRF_HEADER_NAME]
+  if (typeof headerValue === 'string') {
+    return headerValue.trim() || null
+  }
+  return Array.isArray(headerValue) ? headerValue[0]?.trim() || null : null
+}
+
+export function isClientCsrfTokenValid(sessionToken: string, cookieToken: string, headerToken: string): boolean {
+  const expectedToken = deriveClientCsrfToken(sessionToken)
+  return equalCsrfToken(cookieToken, expectedToken) && equalCsrfToken(headerToken, expectedToken)
+}

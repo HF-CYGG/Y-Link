@@ -31,14 +31,15 @@ process.env.INIT_ADMIN_PASSWORD = `Admin_${verifySeed}_Aa1!`
 
 import type { ClientAuthContext } from '../src/types/client-auth.js'
 import type { AuthUserContext } from '../src/types/auth.js'
+import { installCaptchaServiceForTesting } from '../src/services/captcha.service.js'
 
 function pass(message: string) {
   console.log(`OK ${message}`)
 }
 
-function readCaptchaCode(captchaSvg: string) {
-  return captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6)
-}
+const TEST_CAPTCHA_CODE = 'ABC123'
+installCaptchaServiceForTesting({ createCode: () => TEST_CAPTCHA_CODE })
+const readCaptchaCode = (_captchaSvg: string) => TEST_CAPTCHA_CODE
 
 async function registerAndLoginClient(clientAuthService: typeof import('../src/services/client-auth.service.js').clientAuthService): Promise<ClientAuthContext> {
   const seed = String(Date.now()).slice(-10)

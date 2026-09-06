@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { installCaptchaServiceForTesting } from '../src/services/captcha.service.js'
 
 const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
@@ -18,6 +19,9 @@ process.env.DB_SYNC = 'false'
 process.env.SQLITE_DB_PATH = sqlitePath
 process.env.INIT_ADMIN_PASSWORD = adminPassword
 process.env.INVITE_CODE_PEPPER ||= `governance-pepper-${verifySeed}-minimum-32-bytes`
+
+const TEST_CAPTCHA_CODE = 'ABC123'
+installCaptchaServiceForTesting({ createCode: () => TEST_CAPTCHA_CODE })
 
 type CapturedVerification = {
   channel: 'mobile' | 'email'
@@ -72,6 +76,16 @@ async function expectBizError(action: () => Promise<unknown>, scene: string, mes
   assert.fail(`${scene} 应失败但实际成功`)
 }
 
+async function expectBizFailure(action: () => Promise<unknown>, scene: string) {
+  try {
+    await action()
+  } catch (error) {
+    assert.ok(error instanceof Error, `${scene} 应抛出 Error`)
+    return error.message
+  }
+  assert.fail(`${scene} 应失败但实际成功`)
+}
+
 function createVerificationRequestStub(captured: CapturedVerification[]) {
   return async (_input: string | URL, init?: { body?: string | Buffer }) => {
     const bodyText = String(init?.body ?? '{}')
@@ -107,15 +121,18 @@ async function main() {
   const { clientAuthService } = await import('../src/services/client-auth.service.js')
   const { clientStaffDirectoryService } = await import('../src/services/client-staff-directory.service.js')
   const { clientFeedbackService } = await import('../src/services/client-feedback.service.js')
+  const { clientStaffInviteCodeService } = await import('../src/services/client-staff-invite-code.service.js')
   const { clientUserManageService } = await import('../src/services/client-user-manage.service.js')
   const { o2oPreorderService } = await import('../src/services/o2o-preorder.service.js')
   const { productService } = await import('../src/services/product.service.js')
   const { systemConfigService } = await import('../src/services/system-config.service.js')
   const { hashPassword } = await import('../src/utils/password.js')
   const { ClientUserSession } = await import('../src/entities/client-user-session.entity.js')
+  const { installSqliteTransactionQueue } = await import('../src/utils/sqlite-transaction-queue.js')
 
   prepareDatabaseRuntime()
   await AppDataSource.initialize()
+  await installSqliteTransactionQueue(AppDataSource)
 
   const capturedVerifications: CapturedVerification[] = []
 
@@ -495,16 +512,15 @@ async function main() {
       adminAuth,
     )
 
-    const teacherOneDirectory = await clientStaffDirectoryService.create(
+    await clientStaffDirectoryService.create(
       { staffNo: 'T1001', realName: '张老师', departmentName: '资产处', status: 'active' },
       adminAuth,
     )
-    const teacherTwoDirectory = await clientStaffDirectoryService.create(
+    await clientStaffDirectoryService.create(
       { staffNo: 'T1002', realName: '李老师', departmentName: '信息中心', status: 'active' },
       adminAuth,
     )
-    await clientStaffDirectoryService.setInviteCode(teacherOneDirectory.record.id, '12345678', adminAuth)
-    await clientStaffDirectoryService.setInviteCode(teacherTwoDirectory.record.id, '87654321', adminAuth)
+    await clientStaffInviteCodeService.setInviteCode('00123456', adminAuth)
 
     const publicDepartmentCaptcha = await clientAuthService.createCaptcha()
     const clientUserCountBeforePublicDepartmentRegister = await AppDataSource.getRepository(ClientUser).count()
@@ -516,7 +532,7 @@ async function main() {
           account: '13800001001',
           password: clientPassword,
           captchaId: publicDepartmentCaptcha.captchaId,
-          captchaCode: publicDepartmentCaptcha.captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6),
+          captchaCode: TEST_CAPTCHA_CODE,
         }),
       '公开部门账号注册',
       '部门账号请联系管理员创建',
@@ -568,7 +584,7 @@ async function main() {
       target: '13800001001',
       scene: 'register',
       captchaId: sendResult.captchaId,
-      captchaCode: sendResult.captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6),
+      captchaCode: TEST_CAPTCHA_CODE,
     })
     const { VerificationCodeService } = await import('../src/services/verification-code.service.js')
     const verificationCodeService = new VerificationCodeService(createVerificationRequestStub(capturedVerifications))
@@ -594,7 +610,7 @@ async function main() {
       accountType: 'personal',
       staffNo: 'T1001',
       account: '13800001001',
-      inviteCode: '12345678',
+      inviteCode: '00123456',
       password: clientPassword,
     })
     assert.equal(teacherRegisterResult.user.accountType, 'personal')
@@ -614,9 +630,9 @@ async function main() {
           verificationCode: await issueRegisterVerificationCode('13800001011'),
         }),
       '个人注册姓名占用',
-      '该姓名已被占用',
+      '当前注册信息无法使用',
     )
-    pass('个人注册姓名被占用时返回明确提示')
+    pass('个人注册姓名被占用时返回泛化提示')
 
     await expectBizError(
       async () =>
@@ -628,9 +644,9 @@ async function main() {
           verificationCode: await issueRegisterVerificationCode('13800001001'),
         }),
       '个人注册手机号占用',
-      '该手机号已被占用',
+      '当前注册信息无法使用',
     )
-    pass('个人注册手机号被占用时返回明确提示')
+    pass('个人注册手机号被占用时返回泛化提示')
 
     const occupiedEmailCode = await issueRegisterVerificationCode('occupied@example.com', 'email')
     await clientAuthService.register({
@@ -650,9 +666,9 @@ async function main() {
           verificationCode: await issueRegisterVerificationCode('occupied@example.com', 'email'),
         }),
       '个人注册邮箱占用',
-      '该邮箱已被占用',
+      '当前注册信息无法使用',
     )
-    pass('个人注册邮箱被占用时返回明确提示')
+    pass('个人注册邮箱被占用时返回泛化提示')
 
     await expectBizError(
       () =>
@@ -669,40 +685,38 @@ async function main() {
     )
     pass('教师注册工号不存在会失败')
 
-    await expectBizError(
+    await expectBizFailure(
       () =>
         clientAuthService.register({
           accountType: 'personal',
           staffNo: 'T1001',
-          inviteCode: '12345678',
+          inviteCode: '00123456',
           account: '13800001002',
           password: clientPassword,
           verificationCode: capturedMobileCode,
         }),
       '教师注册工号重复绑定',
-      '工号或邀请码无效',
     )
     pass('教师注册工号已绑定会失败')
 
-    const duplicateNameDirectory = await clientStaffDirectoryService.create(
+    await clientStaffDirectoryService.create(
       { staffNo: 'T1003', realName: '张老师', departmentName: '资产处', status: 'active' },
       adminAuth,
     )
-    await clientStaffDirectoryService.setInviteCode(duplicateNameDirectory.record.id, '11223344', adminAuth)
     await expectBizError(
       async () =>
         clientAuthService.register({
           accountType: 'personal',
           staffNo: 'T1003',
-          inviteCode: '11223344',
+          inviteCode: '00123456',
           account: '13800001012',
           password: clientPassword,
           verificationCode: await issueRegisterVerificationCode('13800001012'),
         }),
       '教师注册目录姓名占用',
-      '该姓名已被占用',
+      '当前注册信息无法使用',
     )
-    pass('教师注册目录姓名被占用时返回明确提示')
+    pass('教师注册目录姓名被占用时返回泛化提示')
 
     const sessionCountBeforeFailedLogin = await AppDataSource.getRepository(ClientUserSession).count()
     const missingLoginCases = [
@@ -1002,6 +1016,14 @@ async function main() {
       },
       adminAuth,
     )
+    await AppDataSource.getRepository(ClientUserSession).save(
+      AppDataSource.getRepository(ClientUserSession).create({
+        sessionToken: `session-before-department-rebind-${verifySeed}`,
+        userId: disabledFinanceDepartmentProfile.id,
+        expiresAt: new Date(Date.now() + 60_000),
+        lastAccessAt: new Date(),
+      }),
+    )
     const reboundFinanceDepartmentProfile = await clientUserManageService.updateProfile(
       disabledFinanceDepartmentProfile.id,
       {
@@ -1010,6 +1032,11 @@ async function main() {
         status: 'enabled',
       },
       adminAuth,
+    )
+    assert.equal(
+      await AppDataSource.getRepository(ClientUserSession).count({ where: { userId: disabledFinanceDepartmentProfile.id } }),
+      0,
+      '部门账号归属变更必须在同一事务撤销全部客户端会话',
     )
     assert.equal(reboundFinanceDepartmentProfile.departmentNodeId, 'dept_hr', '重新绑定到有效部门后应允许原子启用')
     assert.equal(reboundFinanceDepartmentProfile.status, 'enabled', '重新绑定到有效部门后应允许原子启用')

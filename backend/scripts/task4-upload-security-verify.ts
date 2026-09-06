@@ -279,7 +279,8 @@ function verifyNginxStaticAssetPolicySources() {
     assert.match(source, /gzip on;/, `${name} 未开启 gzip`)
     assert.match(source, /Cache-Control "public, max-age=31536000, immutable"/, `${name} 未设置静态长期缓存`)
     assert.match(source, /location \^~ \/uploads\//, `${name} 缺少 uploads 代理位置`)
-    assert.match(source, /Content-Security-Policy/, `${name} 未补充基础安全头`)
+    assert.match(source, /include \/etc\/nginx\/ylink\/page-security-headers\.conf;/, `${name} 未包含页面安全头`)
+    assert.match(readSource(path.resolve(workspaceRoot, 'docker/nginx/page-security-headers.conf')), /Content-Security-Policy/, `${name} 页面头片段缺少 CSP`)
   })
   pass('三套 Nginx 配置已统一补齐 gzip、长期缓存、基础安全头与 uploads 代理')
 }
