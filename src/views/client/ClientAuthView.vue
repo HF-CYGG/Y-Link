@@ -93,6 +93,7 @@ import {
   isClientNewPasswordValid,
 } from '@/utils/client-password-policy'
 import { normalizeRequestError } from '@/utils/error'
+import { CLIENT_REGISTRATION_USERNAME_HINT, isPersonalRegistrationUsernameValid } from '@/utils/client-registration-policy'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 
 import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
@@ -528,7 +529,6 @@ const validateLoginPassword = (password: string) => password.trim().length > 0
  * - 继续复用共享的新密码强度规则，保证注册与改密口径一致。
  */
 const validateRegisterPassword = (password: string) => isClientNewPasswordValid(password)
-const validateRealName = (username: string) => /^\p{Script=Han}[\p{Script=Han}·\s]{1,19}$/u.test(normalizeHumanName(username))
 const validateStaffNo = (staffNo: string) => /^[A-Za-z0-9-]{4,32}$/.test(staffNo.trim())
 const validateLoginAccount = (account: string) => account.trim().length > 0
 const resolveAccountChannel = (account: string): 'mobile' | 'email' | null => {
@@ -542,17 +542,6 @@ const resolveAccountChannel = (account: string): 'mobile' | 'email' | null => {
 
 const normalizeInputText = (value: string) => {
   return value.replaceAll(/\s+/g, ' ').trim()
-}
-
-const normalizeHumanName = (value: string) => {
-  return value
-    .normalize('NFKC')
-    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
-    .replace(/[\u0000-\u001F\u007F-\u009F]/g, '')
-    .replaceAll('　', ' ')
-    .replace(/[•・･‧∙⋅·﹒]/g, '·')
-    .replaceAll(/\s+/g, ' ')
-    .trim()
 }
 
 const applySecurityHintFromMessage = (message: string) => {
@@ -613,6 +602,13 @@ const clearRegisterFeedback = () => {
 
 const applyRegisterFeedbackFromError = (message: string, status?: number) => {
   clearRegisterFeedback()
+
+  if (status === 409 && /当前注册信息无法使用/.test(message)) {
+    registerFeedbackTitle.value = '当前注册信息无法使用'
+    registerFeedbackDescription.value = '请确认联系方式已完成验证并核对注册信息；如仍无法注册，请联系管理员处理。'
+    registerFeedbackType.value = 'warning'
+    return
+  }
 
   if (status === 409 && /该手机号已被占用|该邮箱已被占用|该手机号或邮箱已被占用/.test(message)) {
     const isEmailOccupied = /邮箱/.test(message) && !/手机号/.test(message)
@@ -889,8 +885,8 @@ const validateRegisterBeforeSubmit = () => {
       return null
     }
   } else {
-    if (!validateRealName(registerForm.username)) {
-      showAppWarning('请输入 2-20 位中文真实姓名，可包含空格或·')
+    if (!isPersonalRegistrationUsernameValid(registerForm.username)) {
+      showAppWarning(CLIENT_REGISTRATION_USERNAME_HINT)
       return null
     }
     if (!accountChannel) {
@@ -1361,7 +1357,7 @@ onUnmounted(() => {
                 <el-form @submit.prevent="handleRegister" class="space-y-4 mt-6">
                   <el-input
                     v-model="registerForm.username"
-                    placeholder="真实姓名"
+                    placeholder="用户名（2-20位中文或英文字母）"
                     class="geo-input"
                     size="large"
                     clearable

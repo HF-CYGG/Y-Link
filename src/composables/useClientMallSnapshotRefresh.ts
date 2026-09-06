@@ -28,14 +28,16 @@ export const useClientMallSnapshotRefresh = () => {
    * - 失败时返回归一化错误对象，由页面层自行决定是否展示；
    * - 不额外抛错，避免辅助刷新影响主流程。
    */
-  const refreshMallSnapshot = async (): Promise<AppRequestError | null> => {
+  const refreshMallSnapshot = async (): Promise<{ success: boolean; error: AppRequestError | null }> => {
     let requestError: AppRequestError | null = null
+    let succeeded = false
     syncing.value = true
     await runLatest({
       executor: (signal) => getO2oMallProducts({ signal }),
       onSuccess: (catalog) => {
         clientCatalogStore.setProducts(catalog)
         clientCartStore.syncWithCatalog(catalog.list)
+        succeeded = true
       },
       onError: (error) => {
         requestError = normalizeRequestError(error, '商品目录同步失败，请稍后重试')
@@ -44,7 +46,7 @@ export const useClientMallSnapshotRefresh = () => {
         syncing.value = false
       },
     })
-    return requestError
+    return { success: succeeded, error: requestError }
   }
 
   return {

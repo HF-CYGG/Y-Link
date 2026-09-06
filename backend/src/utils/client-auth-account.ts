@@ -22,6 +22,14 @@ interface NormalizeClientAccountOptions {
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const MOBILE_PATTERN = /^1\d{10}$/
 
+/** 新个人注册仅允许中文和英文字母，不先清洗非法字符后放行；历史登录不使用此规则。 */
+export function normalizePersonalRegistrationUsername(username: string) {
+  if (!/^[\p{Script=Han}A-Za-z]{2,20}$/u.test(username)) {
+    throw new BizError('用户名必须为2-20位中文或英文字母，不允许数字、空格或特殊字符', 400)
+  }
+  return normalizeClientUsername(username)
+}
+
 /**
  * 统一归一化客户端登录/注册账号：
  * - 邮箱按 RFC 常见场景统一转小写；
