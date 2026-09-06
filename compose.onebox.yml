@@ -15,6 +15,10 @@ services:
       NODE_ENV: production
       TZ: ${TZ:-Asia/Shanghai}
       PORT: 3001
+      Y_LINK_TRUST_PROXY: "127.0.0.1,::1"
+      Y_LINK_TRUSTED_EDGE_PROXIES: ${Y_LINK_TRUSTED_EDGE_PROXIES:-}
+      Y_LINK_FORCE_SECURE_COOKIES: ${Y_LINK_FORCE_SECURE_COOKIES:-false}
+      Y_LINK_HSTS_MAX_AGE_SECONDS: ${Y_LINK_HSTS_MAX_AGE_SECONDS:-15552000}
       DB_TYPE: sqlite
       SQLITE_DB_PATH: /app/data/y-link.sqlite
       DB_SYNC: "false"

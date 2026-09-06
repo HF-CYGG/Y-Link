@@ -24,6 +24,13 @@ backend/uploads/*
 .local-dev/
 .AGENTS.md
 
+# 本地测试产物；正式回归脚本继续纳入版本管理。
+/coverage/
+/test-results/
+/playwright-report/
+/.playwright-cli/
+/.playwright-mcp/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

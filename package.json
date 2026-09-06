@@ -82,6 +82,8 @@
   },
   "overrides": {
     "react-dom": "19.2.3",
-    "react-native-worklets": "0.10.4"
+    "react-native-worklets": "0.10.4",
+    "fflate": "0.8.3",
+    "postcss-selector-parser": "6.1.3"
   }
 }

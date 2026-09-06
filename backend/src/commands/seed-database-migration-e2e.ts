@@ -254,6 +254,8 @@ async function main(): Promise<void> {
       for (const metadata of orderedMetadatas) {
         await seedEmptyTable(queryRunner, metadata, firstRows)
       }
+      // 模拟历史高位记录删除后的序列空洞，迁移不能把自增状态退回 MAX(id)。
+      await queryRunner.query('UPDATE sqlite_sequence SET seq = seq + 17')
     }
     for (const metadata of orderedMetadatas) {
       const countRows = toRows(await queryRunner.query(

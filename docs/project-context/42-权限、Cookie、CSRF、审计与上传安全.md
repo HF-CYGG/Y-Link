@@ -14,6 +14,8 @@
 - `backend/src/utils/client-auth-cookie.ts`
 - `backend/src/services/audit.service.ts`
 - `backend/src/utils/safe-network.ts`
+- `backend/src/utils/http-security.ts`
+- `backend/src/routes/database-rescue.routes.ts`
 
 ## 真实入口
 
@@ -35,6 +37,14 @@
 - `requireRole` 和 `requirePermission` 在拒绝请求时会写安全审计。
 - `app.ts` 会给上传资源附加长期缓存、安全头和旧路径兼容重写逻辑。
 
+## 代理、HTTPS 与救援传输边界
+
+- Node 只通过 `Y_LINK_TRUST_PROXY` 信任明确的直接反向代理 IP/CIDR；Nginx 边缘层另以 `Y_LINK_TRUSTED_EDGE_PROXIES` 限定可影响 `X-Forwarded-Proto` 的上游地址。两者不是“信任全部内网”的开关。
+- 管理端与客户端会话 Cookie 都是 `HttpOnly + SameSite=Lax`；对应 CSRF Cookie 可读、同为 `SameSite=Lax`，写请求必须附带相应 CSRF 头。Cookie 的 `Secure` 由可信 HTTPS 请求判定，或由 `Y_LINK_FORCE_SECURE_COOKIES=true` 强制开启。
+- 局域网纯 HTTP 可在不强制 Secure Cookie 的部署中兼容普通登录和业务操作，但不能伪造 HTTPS。救援凭证签发和 `/api/database-rescue` 只接受可信 HTTPS，或没有任何转发头的真实容器/主机 loopback 连接。
+- 因此，外部 HTTP 即便被 Nginx 转到 `127.0.0.1`，也不属于“本机救援”。该边界防止外部请求借 loopback 代理获得救援能力。
+- 生产 HTTPS 请求才会按 `Y_LINK_HSTS_MAX_AGE_SECONDS` 写 HSTS；普通局域网 HTTP 不会因伪造转发头获得 HSTS。
+
 ## 关键状态/字段/快照
 
 - 管理端鉴权上下文写入 `req.auth`。
@@ -47,6 +57,7 @@
 - 角色只是兜底；大多数接口仍应以权限点为主。
 - 高风险接口除了权限，还经常叠加 `admin` 角色与永久删除密码。
 - Webhook、通知外发 URL、上传文件资源都应视为安全边界问题，而不是普通字符串处理。
+- 救援 Bearer 不复用管理端或客户端会话，响应始终 `no-store`，并按来源做一分钟窗口限流。救援 API 不接受 SQL、文件路径、数据库连接参数或普通 Cookie 登录态。
 
 ## 常见异常与排查顺序
 

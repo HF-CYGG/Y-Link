@@ -23,7 +23,7 @@ import { extractRequestMeta } from '../utils/request-meta.js'
 import { clientAuthService } from '../services/client-auth.service.js'
 import { authSecurityService } from '../services/auth-security.service.js'
 import { verificationCodeService } from '../services/verification-code.service.js'
-import { clearClientAuthCookie, setClientAuthCookie } from '../utils/client-auth-cookie.js'
+import { clearClientAuthCookie, ensureClientCsrfCookie, setClientAuthCookie } from '../utils/client-auth-cookie.js'
 
 /**
  * 客户端密码字段统一请求校验：
@@ -265,6 +265,7 @@ clientAuthRouter.post(
     }).normalizedValue
     await authSecurityService.guardClientForgotResetRequest(requestMeta, normalizedAccount)
     await clientAuthService.resetPassword(payload, requestMeta)
+    clearClientAuthCookie(req, res)
     res.json({ code: 0, message: 'ok', data: true })
   }),
 )
@@ -275,6 +276,9 @@ clientAuthRouter.get(
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const data = await clientAuthService.me(authReq.clientAuth)
+    if (authReq.clientAuth.authSource === 'cookie') {
+      ensureClientCsrfCookie(req, res, authReq.clientAuth.sessionToken)
+    }
     res.setHeader('Cache-Control', 'no-store')
     res.json({ code: 0, message: 'ok', data })
   }),
@@ -312,6 +316,9 @@ clientAuthRouter.patch(
     const requestMeta = extractRequestMeta(req)
     await authSecurityService.guardClientProfileUpdateRequest(requestMeta, authReq.clientAuth.userId)
     const data = await clientAuthService.updateProfile(authReq.clientAuth, updateProfileSchema.parse(req.body))
+    if (data.requiresRelogin) {
+      clearClientAuthCookie(req, res)
+    }
     res.json({ code: 0, message: 'ok', data })
   }),
 )

@@ -26,6 +26,7 @@ RUN npm ci --workspaces=false
 
 # 复制前端源码与构建配置后执行生产打包。
 COPY index.html ./
+COPY rescue.html ./
 COPY public ./public
 COPY scripts ./scripts
 COPY src ./src
@@ -53,6 +54,10 @@ RUN apk add --no-cache tzdata \
 # - 处理 Vue Router history 路由回退；
 # - 默认代理到同编排 backend:3001，并通过延迟解析降低启动阶段 DNS 瞬态失败风险。
 COPY docker/nginx/default.conf.template /etc/nginx/templates/default.conf.template
+COPY docker/nginx/page-security-headers.conf /etc/nginx/ylink/page-security-headers.conf
+COPY docker/nginx/proxy-security-headers.conf /etc/nginx/ylink/proxy-security-headers.conf
+COPY docker/nginx/configure-proxy-boundary.sh /docker-entrypoint.d/19-ylink-proxy-boundary.sh
+RUN chmod +x /docker-entrypoint.d/19-ylink-proxy-boundary.sh
 COPY docker/nginx/nginx.conf /etc/nginx/nginx.conf
 COPY --from=build /app/dist /usr/share/nginx/html
 

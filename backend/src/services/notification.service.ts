@@ -3,6 +3,7 @@ import { hostname } from 'node:os'
 import { In, MoreThan, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
+import { databaseOperationGate } from '../database/operation-gate.js'
 import {
   NotificationRule,
   NOTIFICATION_EXTERNAL_TRIGGER_MODES,
@@ -336,6 +337,20 @@ export class NotificationService {
   private readonly outboxWorkerId = `${hostname()}:${process.pid}:${randomUUID()}`.slice(0, 128)
   private outboxTimer: ReturnType<typeof globalThis.setInterval> | null = null
   private outboxRunInFlight: Promise<number> | null = null
+  private outboxWorkerDesired = false
+
+  constructor() {
+    databaseOperationGate.registerWorker({
+      name: 'notification-outbox',
+      pause: () => this.pauseOutboxWorker(),
+      drain: async () => {
+        if (this.outboxRunInFlight) await this.outboxRunInFlight
+      },
+      resume: () => {
+        if (this.outboxWorkerDesired) this.startOutboxTimer()
+      },
+    })
+  }
 
   private normalizeOnlineWindowSeconds(value: number): number {
     if (!Number.isFinite(value) || !Number.isInteger(value)) {
@@ -1327,6 +1342,14 @@ export class NotificationService {
   }
 
   startOutboxWorker(): void {
+    this.outboxWorkerDesired = true
+    this.startOutboxTimer()
+  }
+
+  private startOutboxTimer(): void {
+    if (databaseOperationGate.isFrozen()) {
+      return
+    }
     if (this.outboxTimer !== null) {
       return
     }
@@ -1341,12 +1364,17 @@ export class NotificationService {
   }
 
   async stopOutboxWorker(): Promise<void> {
+    this.outboxWorkerDesired = false
+    this.pauseOutboxWorker()
+    if (this.outboxRunInFlight) {
+      await this.outboxRunInFlight
+    }
+  }
+
+  private pauseOutboxWorker(): void {
     if (this.outboxTimer !== null) {
       globalThis.clearInterval(this.outboxTimer)
       this.outboxTimer = null
-    }
-    if (this.outboxRunInFlight) {
-      await this.outboxRunInFlight
     }
   }
 

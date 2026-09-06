@@ -10,7 +10,12 @@
 import type { NextFunction, Request, Response } from 'express'
 import { clientAuthService } from '../services/client-auth.service.js'
 import { BizError } from '../utils/errors.js'
-import { readClientSessionTokenFromCookie } from '../utils/client-auth-cookie.js'
+import {
+  isClientCsrfTokenValid,
+  readClientCsrfHeaderToken,
+  readClientCsrfTokenFromCookie,
+  readClientSessionTokenFromCookie,
+} from '../utils/client-auth-cookie.js'
 import type { ClientAuthenticatedRequest } from '../types/client-auth.js'
 
 const parseBearerToken = (req: Request) => {
@@ -31,14 +36,36 @@ const parseBearerToken = (req: Request) => {
   return null
 }
 
+function parseClientCredential(req: Request): { token: string; source: 'cookie' | 'bearer' } | null {
+  const cookieToken = readClientSessionTokenFromCookie(req)
+  if (cookieToken) {
+    return { token: cookieToken, source: 'cookie' }
+  }
+  const token = parseBearerToken(req)
+  return token ? { token, source: 'bearer' } : null
+}
+
+const isSafeRequestMethod = (method: string) => ['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase())
+
 export const requireClientAuth = async (req: Request, _res: Response, next: NextFunction) => {
   try {
-    const token = parseBearerToken(req)
-    if (!token) {
+    const credential = parseClientCredential(req)
+    if (!credential) {
       throw new BizError('未登录或登录状态已失效', 401)
     }
-    const auth = await clientAuthService.resolveClientByToken(token)
+    const auth = await clientAuthService.resolveClientByToken(credential.token)
+    auth.authSource = credential.source
     ;(req as ClientAuthenticatedRequest).clientAuth = auth
+    if (!isSafeRequestMethod(req.method) && credential.source === 'cookie') {
+      const cookieToken = readClientCsrfTokenFromCookie(req)
+      const headerToken = readClientCsrfHeaderToken(req)
+      if (!cookieToken || !headerToken) {
+        throw new BizError('请求安全校验失败，请刷新页面后重试', 403, { reason: 'CLIENT_CSRF_MISSING' })
+      }
+      if (!isClientCsrfTokenValid(credential.token, cookieToken, headerToken)) {
+        throw new BizError('请求安全校验失败，请刷新页面后重试', 403, { reason: 'CLIENT_CSRF_MISMATCH' })
+      }
+    }
     next()
   } catch (error) {
     next(error)

@@ -6,10 +6,12 @@
 
 export class BizError extends Error {
   statusCode: number
+  readonly data: Record<string, unknown> | null
 
-  constructor(message: string, statusCode = 400) {
+  constructor(message: string, statusCode = 400, data: Record<string, unknown> | null = null) {
     super(message)
     this.name = 'BizError'
     this.statusCode = statusCode
+    this.data = data
   }
 }

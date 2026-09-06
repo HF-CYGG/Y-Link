@@ -10,6 +10,8 @@ import { createHash, randomUUID } from 'node:crypto'
 import { Brackets, type EntityManager, In, Not } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
+import { databaseOperationGate } from '../database/operation-gate.js'
+import { MAX_DATABASE_INT, MAX_O2O_ORDER_ITEM_COUNT } from '../constants/web-resource-limits.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { BaseProductSku } from '../entities/base-product-sku.entity.js'
 import { RelProductTag } from '../entities/rel-product-tag.entity.js'
@@ -408,6 +410,7 @@ class O2oPreorderService {
   private lastCancelTimeoutOrdersAt = 0
   private lastCancelTimeoutOrdersResult = { cancelledCount: 0 }
   private timeoutRecycleLoopTimer: ReturnType<typeof globalThis.setInterval> | null = null
+  private timeoutRecycleLoopDesired = false
   private mallProductsCache: TimedPublicSnapshot<O2oMallProductsView> | null = null
   private mallProductsRefreshInFlight: Promise<O2oPublicJsonSnapshot<O2oMallProductsView>> | null = null
   private mallProductsRefreshRevision: number | null = null
@@ -417,6 +420,19 @@ class O2oPreorderService {
   private mallSoldQtyRevision = 1
   private mallSoldQtyCache: { key: string; revision: number; expiresAt: number; data: Map<string, number> } | null = null
   private mallSoldQtyRefreshInFlight: Promise<{ key: string; revision: number; data: Map<string, number> }> | null = null
+
+  constructor() {
+    databaseOperationGate.registerWorker({
+      name: 'o2o-timeout-recycle',
+      pause: () => this.pauseTimeoutRecycleLoop(),
+      drain: async () => {
+        if (this.cancelTimeoutOrdersInFlight) await this.cancelTimeoutOrdersInFlight
+      },
+      resume: () => {
+        if (this.timeoutRecycleLoopDesired) this.startTimeoutRecycleTimer()
+      },
+    })
+  }
 
   /**
    * MySQL 死锁/锁等待超时后必须重放完整事务，不能只重试失败 SQL。
@@ -758,12 +774,15 @@ class O2oPreorderService {
     if (!Array.isArray(items) || !items.length) {
       throw new BizError('至少选择一个商品', 400)
     }
+    if (items.length > MAX_O2O_ORDER_ITEM_COUNT) {
+      throw new BizError(`单次最多提交 ${MAX_O2O_ORDER_ITEM_COUNT} 条商品明细`, 400)
+    }
     const mergedQtyMap = new Map<string, { productId: string; skuId: string | null; qty: number }>()
     items.forEach((item) => {
       const productId = String(item.productId).trim()
       const skuId = item.skuId === null || item.skuId === undefined ? null : String(item.skuId).trim() || null
-      const qty = Math.floor(Number(item.qty))
-      if (!productId || !Number.isInteger(qty) || qty <= 0) {
+      const qty = Number(item.qty)
+      if (!productId || !Number.isSafeInteger(qty) || qty <= 0 || qty > MAX_DATABASE_INT) {
         throw new BizError('商品数量必须为正整数', 400)
       }
       const mergeKey = `${productId}::${skuId ?? ''}`
@@ -774,7 +793,27 @@ class O2oPreorderService {
         qty: (current?.qty ?? 0) + qty,
       })
     })
-    return [...mergedQtyMap.values()]
+    const normalizedItems = [...mergedQtyMap.values()]
+    this.assertPreorderQuantityBounds(normalizedItems)
+    return normalizedItems
+  }
+
+  /** 防御直接服务调用和 SKU 归并后的整数溢出，不能只依赖路由 Zod 校验。 */
+  private assertPreorderQuantityBounds(items: Array<{ qty: number }>) {
+    if (!Array.isArray(items) || items.length === 0 || items.length > MAX_O2O_ORDER_ITEM_COUNT) {
+      throw new BizError(`单次最多提交 ${MAX_O2O_ORDER_ITEM_COUNT} 条商品明细`, 400)
+    }
+    let totalQty = 0
+    for (const item of items) {
+      const qty = Number(item.qty)
+      if (!Number.isSafeInteger(qty) || qty <= 0 || qty > MAX_DATABASE_INT) {
+        throw new BizError('商品数量必须为正整数且不超过系统上限', 400)
+      }
+      totalQty += qty
+      if (!Number.isSafeInteger(totalQty) || totalQty > MAX_DATABASE_INT) {
+        throw new BizError('订单总数量超过系统可处理上限', 400)
+      }
+    }
   }
 
   private resolveProductLimitQty(product: BaseProduct, o2oRules: Awaited<ReturnType<typeof systemConfigService.getO2oRuleConfigs>>) {
@@ -2412,6 +2451,7 @@ class O2oPreorderService {
         const productIds = [...new Set(normalizedItems.map((item) => item.productId))]
         const productMap = await this.loadSubmitProductsInManager(manager, productIds)
         const { canonicalItems, skuMap, skuByProductMap } = await this.resolveAndLockSubmitSkusInManager(manager, normalizedItems)
+        this.assertPreorderQuantityBounds(canonicalItems)
         const productQtyMap = new Map<string, number>()
         let totalQty = 0
         for (const row of canonicalItems) {
@@ -2855,6 +2895,7 @@ class O2oPreorderService {
       })
       const { skuMap, skuByProductMap } = this.groupSkusByProduct(skus)
       const canonicalItems = this.canonicalizePreorderItems(normalizedItems, skuMap, skuByProductMap)
+      this.assertPreorderQuantityBounds(canonicalItems)
       const normalizedItemRefs = canonicalItems.map((item) => {
         const sku = this.getRequiredSku(skuMap, skuByProductMap, item.productId, item.skuId)
         return {
@@ -2939,6 +2980,7 @@ class O2oPreorderService {
       })
       const { skuMap, skuByProductMap } = this.groupSkusByProduct(skus)
       const canonicalItems = this.canonicalizePreorderItems(normalizedItems, skuMap, skuByProductMap)
+      this.assertPreorderQuantityBounds(canonicalItems)
       const normalizedItemRefs = canonicalItems.map((item) => {
         const sku = this.getRequiredSku(skuMap, skuByProductMap, item.productId, item.skuId)
         return {
@@ -3289,12 +3331,19 @@ class O2oPreorderService {
       if (order.clientOrderType !== 'department') {
         throw new BizError('散客单不适用出库单打印状态', 409)
       }
-      if (!order.hasCustomerOrder) {
+      if (order.status === 'cancelled') {
+        throw new BizError('已取消订单不可标记已打印', 409)
+      }
+      const printedNow = !order.hasCustomerOrder
+      if (printedNow) {
         order.hasCustomerOrder = true
         await orderRepo.save(order)
+        await this.syncOutboundOrderComplianceFlags(manager, String(order.id), { hasCustomerOrder: true })
       }
-      await this.syncOutboundOrderComplianceFlags(manager, String(order.id), { hasCustomerOrder: true })
-      return this.buildOrderDetail(order, manager)
+      return {
+        detail: await this.buildOrderDetail(order, manager),
+        printedNow,
+      }
     })
   }
 
@@ -3931,6 +3980,14 @@ class O2oPreorderService {
   }
 
   startTimeoutRecycleLoop() {
+    this.timeoutRecycleLoopDesired = true
+    this.startTimeoutRecycleTimer()
+  }
+
+  private startTimeoutRecycleTimer(): void {
+    if (databaseOperationGate.isFrozen()) {
+      return
+    }
     if (this.timeoutRecycleLoopTimer !== null) {
       return
     }
@@ -3943,13 +4000,18 @@ class O2oPreorderService {
   }
 
   async stopTimeoutRecycleLoop(): Promise<void> {
-    if (this.timeoutRecycleLoopTimer !== null) {
-      globalThis.clearInterval(this.timeoutRecycleLoopTimer)
-      this.timeoutRecycleLoopTimer = null
-    }
+    this.timeoutRecycleLoopDesired = false
+    this.pauseTimeoutRecycleLoop()
     const inFlightRecycle = this.cancelTimeoutOrdersInFlight
     if (inFlightRecycle) {
       await inFlightRecycle
+    }
+  }
+
+  private pauseTimeoutRecycleLoop(): void {
+    if (this.timeoutRecycleLoopTimer !== null) {
+      globalThis.clearInterval(this.timeoutRecycleLoopTimer)
+      this.timeoutRecycleLoopTimer = null
     }
   }
 

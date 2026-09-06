@@ -5,8 +5,12 @@
  * 实现逻辑：
  * - 首屏以“一键自动迁移”收集最小目标库信息，由后端自动完成备份、迁移、重启衔接与校验；
  * - 自动请求只提交 target 与 note，Schema 同步固定关闭且不向用户暴露选择；
+ * - 一键入口先执行真实预检，任务响应中的一次性救援凭证会在入列表前剥离并仅暂存当前标签页；
  * - 自动任务采用无重叠递归轮询，跨越 onebox 重启断线持续静默刷新，进入终态后自动停止；
+ * - 六阶段与救援动作严格按后端 stage/allowedActions/recovery 渲染，避免从旧状态推测可回退性；
  * - 原预检、任务执行、手动切换和回退流程完整保留，并统一收进高级/应急折叠区。
+ * - 主卡片单独提供连接测试，原位展示问题；连接参数变化会清除旧测试结果。
+ * - 任务成功、校验通过且实际运行 MySQL 后显示完成态，收起连接表单，防止重复发起迁移。
  * 维护说明：
  * - 自动任务新增状态时需同步 API 枚举、状态文案、标签颜色与执行按钮门禁；
  * - 紧急回退入口不能移出管理员权限与确认弹窗保护，自动迁移也不能在前端拼装后端治理选项。
@@ -20,6 +24,10 @@ import { PageContainer, PageToolbarCard } from '@/components/common'
 import DatabaseMigrationPrecheckSection from '@/views/system/components/DatabaseMigrationPrecheckSection.vue'
 import DatabaseMigrationRunSection from '@/views/system/components/DatabaseMigrationRunSection.vue'
 import DatabaseMigrationSwitchSection from '@/views/system/components/DatabaseMigrationSwitchSection.vue'
+import DatabaseMigrationAutomaticProgressSection from '@/views/system/components/DatabaseMigrationAutomaticProgressSection.vue'
+import DatabaseMigrationConnectionTestResult from '@/views/system/components/DatabaseMigrationConnectionTestResult.vue'
+import { useDatabaseMigrationConnectionTest } from './useDatabaseMigrationConnectionTest'
+import { isAutomaticMigrationCompleted } from './database-migration-completion'
 import {
   applyDatabaseMigrationSwitch,
   clearDatabaseMigrationRuntimeOverride,
@@ -45,6 +53,7 @@ import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage, normalizeRequestError } from '@/utils/error'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
+import { readStoredRescueCredential, storeRescueCredential } from '@/rescue/rescue-session-storage'
 import {
   DATABASE_MIGRATION_ASSISTANT_NAME,
   DATABASE_MIGRATION_CLEAR_OVERRIDE_SUCCESS,
@@ -130,6 +139,7 @@ const precheckResult = ref<SQLiteToMySqlPrecheckResult | null>(null)
 const taskList = ref<SQLiteToMySqlTaskRecord[]>([])
 const selectedTaskId = ref('')
 const advancedPanels = ref<string[]>([])
+const currentTabRescueCredentialTaskId = ref('')
 
 /**
  * 权限控制：
@@ -151,6 +161,11 @@ const selectedTask = computed(() => {
 
 const latestAutomaticTask = computed(() => {
   return taskList.value.find((item) => item.mode === 'automatic') ?? null
+})
+
+const hasCurrentTabRescueCredential = computed(() => {
+  return Boolean(latestAutomaticTask.value)
+    && currentTabRescueCredentialTaskId.value === latestAutomaticTask.value?.id
 })
 
 /**
@@ -193,6 +208,8 @@ const activeRuntimeModeLabel = computed(() => {
 const effectiveDatabaseSummary = computed(() => {
   return runtimeState.value?.effectiveDatabase ?? null
 })
+
+const automaticMigrationCompleted = computed(() => isAutomaticMigrationCompleted(latestAutomaticTask.value, runtimeState.value))
 
 const runtimeOverrideStatus = computed(() => {
   return runtimeState.value?.runtimeOverrideStatus ?? null
@@ -321,12 +338,32 @@ const hasPrecheckBlockingError = computed(() => {
 const buildNormalizedTarget = (): MySqlMigrationTarget => {
   return {
     host: migrationForm.target.host.trim(),
-    port: Number(migrationForm.target.port) || 3306,
+    port: Number(migrationForm.target.port),
     user: migrationForm.target.user.trim(),
     password: migrationForm.target.password,
     database: migrationForm.target.database.trim(),
     dbSync: false,
   }
+}
+
+const {
+  loading: connectionTestLoading,
+  result: connectionTestResult,
+  error: connectionTestError,
+  title: connectionTestTitle,
+  alertType: connectionTestAlertType,
+  testConnection,
+} = useDatabaseMigrationConnectionTest(buildNormalizedTarget, () => { precheckResult.value = null })
+
+const automaticMigrationBusy = computed(() => automaticTaskCreating.value
+  || Boolean(latestAutomaticTask.value && AUTOMATIC_MIGRATION_ACTIVE_STATUSES.includes(latestAutomaticTask.value.status)))
+
+const handleTestConnection = async () => {
+  if (automaticMigrationCompleted.value) return
+  if (connectionTestLoading.value || precheckLoading.value || automaticMigrationBusy.value) return
+  if (!ensurePermission('db_migration:view', '数据库连接测试') || !validateTargetForm()) return
+  const result = await testConnection()
+  if (result) precheckResult.value = result
 }
 
 /**
@@ -365,8 +402,8 @@ const validateTargetForm = () => {
     showAppWarning('请输入目标 MySQL 数据库名')
     return false
   }
-  if (!Number.isInteger(target.port) || target.port <= 0) {
-    showAppWarning('请输入正确的 MySQL 端口')
+  if (!Number.isInteger(target.port) || target.port <= 0 || target.port > 65535) {
+    showAppWarning('请输入 1 到 65535 之间的 MySQL 端口')
     return false
   }
   return true
@@ -598,6 +635,7 @@ const loadOverview = async () => {
  * - 成功后把结果保存在页面中，供创建任务前复核。
  */
 const handlePrecheck = async () => {
+  if (precheckLoading.value || connectionTestLoading.value || automaticMigrationBusy.value) return
   if (!canViewMigration.value) {
     showAppWarning('当前账号暂无数据库迁移查看权限')
     return
@@ -675,6 +713,8 @@ const handleCreateTask = async () => {
  * - 接口返回后只在本地插入任务记录，不强制立即刷新，避免后端进入重启窗口时产生误报。
  */
 const handleCreateAutomaticTask = async () => {
+  if (automaticMigrationCompleted.value) return
+  if (connectionTestLoading.value || precheckLoading.value || automaticMigrationBusy.value) return
   if (!ensurePermission('db_migration:operate', '一键自动迁移')) {
     return
   }
@@ -684,28 +724,54 @@ const handleCreateAutomaticTask = async () => {
 
   const target = buildNormalizedTarget()
   delete (target as { dbSync?: boolean }).dbSync
-  try {
-    await ElMessageBox.confirm(
-      `确认把当前 SQLite 自动迁移到 ${target.host}:${target.port}/${target.database} 吗？系统将进入全局只读维护，自动完成备份、迁移、重启衔接与校验。`,
-      '确认一键自动迁移',
-      {
-        type: 'warning',
-        confirmButtonText: '确认并开始',
-        cancelButtonText: '取消',
-      },
-    )
-  } catch (error) {
-    if (error === 'cancel' || error === 'close') {
-      return
-    }
-  }
-
   automaticTaskCreating.value = true
   try {
-    const task = await createAutomaticSQLiteToMySqlMigrationTask({
+    // 一键入口也必须先走真实预检；创建后端仍会在冻结写入后再次复检，避免等待期间状态变化被忽略。
+    const precheck = await testConnection()
+    if (!precheck) return
+    precheckResult.value = precheck
+    if (runtimeState.value) {
+      runtimeState.value = {
+        ...runtimeState.value,
+        activeOverride: precheck.activeRuntimeOverride,
+      }
+    }
+    if (!precheck.canProceed || precheck.issues.some((issue) => issue.level === 'error')) {
+      showAppWarning('自动迁移预检未通过，请先处理阻断问题；目标库应为专用空库。')
+      return
+    }
+
+    try {
+      await ElMessageBox.confirm(
+        `预检已通过。确认把当前 SQLite 自动迁移到 ${target.host}:${target.port}/${target.database} 吗？系统将进入全局只读维护，自动完成备份、迁移、重启衔接与校验。`,
+        '确认一键自动迁移',
+        {
+          type: 'warning',
+          confirmButtonText: '确认并开始',
+          cancelButtonText: '取消',
+        },
+      )
+    } catch (error) {
+      if (error === 'cancel' || error === 'close') {
+        return
+      }
+      throw error
+    }
+
+    const createdTask = await createAutomaticSQLiteToMySqlMigrationTask({
       target,
       note: migrationForm.note.trim() || undefined,
     })
+    // rescueCredential 属于一次性敏感响应字段，入任务列表前必须剥离，不能跟随任务对象进入响应式状态。
+    const { rescueCredential, ...task } = createdTask
+    if (rescueCredential) {
+      try {
+        storeRescueCredential(window.sessionStorage, rescueCredential)
+        currentTabRescueCredentialTaskId.value = rescueCredential.taskId
+      } catch {
+        showAppWarning('自动迁移已提交；当前浏览器无法暂存救援凭证，请在可信 HTTPS 环境下按需重新签发。')
+      }
+    }
     upsertTaskRecord(task)
     selectedTaskId.value = task.id
     startAutomaticTaskPolling(task.id)
@@ -718,6 +784,23 @@ const handleCreateAutomaticTask = async () => {
     })
   } finally {
     automaticTaskCreating.value = false
+  }
+}
+
+/**
+ * 打开独立救援页：
+ * - 凭证只留在同标签 sessionStorage，不经 URL、普通 Store 或任务详情传递；
+ * - 没有当前标签凭证时仍可进入页面手动输入，页面会由后端拒绝未许可的操作。
+ */
+const openDatabaseRescue = () => {
+  window.location.assign('/database-rescue')
+}
+
+const restoreCurrentTabRescueCredential = () => {
+  try {
+    currentTabRescueCredentialTaskId.value = readStoredRescueCredential(window.sessionStorage)?.taskId ?? ''
+  } catch {
+    currentTabRescueCredentialTaskId.value = ''
   }
 }
 
@@ -1080,6 +1163,7 @@ const formatTableSummary = (tables: DatabaseMigrationTableStat[]) => {
 
 onMounted(async () => {
   automaticTaskPollingPageActive = true
+  restoreCurrentTabRescueCredential()
   await loadOverview()
   automaticTaskInitialLoadCompleted = true
   if (!automaticTaskPollingPageActive) {
@@ -1188,7 +1272,27 @@ onBeforeUnmount(stopAutomaticTaskPolling)
             </div>
           </div>
 
-          <el-form label-position="top" class="mt-5 grid gap-x-4 sm:grid-cols-2 lg:grid-cols-3">
+          <DatabaseMigrationAutomaticProgressSection
+            :task="latestAutomaticTask"
+            :completed="automaticMigrationCompleted"
+            :has-current-tab-rescue-credential="hasCurrentTabRescueCredential"
+            @open-rescue="openDatabaseRescue"
+          />
+
+          <template v-if="!automaticMigrationCompleted">
+          <el-alert
+            class="mt-5"
+            title="目标库必须是专用空库"
+            type="warning"
+            :closable="false"
+            show-icon
+            description="目标库存在业务数据时，请先停止并创建专用空库；一键自动迁移不会提供删除目标库数据的快捷操作。"
+          />
+
+          <p class="mt-4 text-sm text-slate-500 dark:text-slate-400">
+            连接从 Y-Link 后端发起。Docker 中的 127.0.0.1 指向应用容器自身；同一 Compose 中的 MySQL 通常填写服务名 mysql。
+          </p>
+          <el-form label-position="top" :disabled="automaticMigrationBusy" class="mt-5 grid gap-x-4 sm:grid-cols-2 lg:grid-cols-3">
               <el-form-item label="MySQL 主机">
                 <el-input v-model="migrationForm.target.host" placeholder="mysql.internal" />
               </el-form-item>
@@ -1224,17 +1328,36 @@ onBeforeUnmount(stopAutomaticTaskPolling)
               </el-form-item>
             </el-form>
 
-            <div class="flex justify-end">
+            <div class="flex flex-wrap justify-end gap-3">
+              <el-button
+                size="large"
+                :loading="connectionTestLoading"
+                :disabled="!canViewMigration || pageLoading || precheckLoading || automaticMigrationBusy"
+                @click="handleTestConnection"
+              >
+                测试连接
+              </el-button>
               <el-button
                 type="primary"
                 size="large"
                 :loading="automaticTaskCreating"
-                :disabled="!canOperateMigration || pageLoading"
+                :disabled="!canOperateMigration || pageLoading || connectionTestLoading || precheckLoading || automaticMigrationBusy"
                 @click="handleCreateAutomaticTask"
               >
                 一键开始自动迁移
               </el-button>
             </div>
+            <p class="mt-3 text-right text-xs text-slate-500 dark:text-slate-400">
+              测试会检查迁移条件，并用临时表验证基础写权限；不会创建迁移任务或导入业务数据。
+            </p>
+            <DatabaseMigrationConnectionTestResult
+              :loading="connectionTestLoading"
+              :result="connectionTestResult"
+              :error="connectionTestError"
+              :title="connectionTestTitle"
+              :alert-type="connectionTestAlertType"
+            />
+          </template>
         </section>
 
         <el-collapse v-model="advancedPanels" class="apple-card !border-0 px-5 sm:px-6">

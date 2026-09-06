@@ -108,6 +108,7 @@ const AUTH_MODE_SEQUENCE: AuthMode[] = ['login', 'register-personal', 'register-
 
 interface ClientCaptchaState {
   captchaId: string
+  captchaImage: string
   captchaSvg: string
   expiresInSeconds: number
 }
@@ -147,6 +148,8 @@ const registerVerificationCountdown = ref(0)
 let registerVerificationTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let captchaExpireTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let capabilityDeferredTimer: ReturnType<typeof globalThis.setTimeout> | null = null
+let formTransitionFrame: number | null = null
+let formTransitionRunId = 0
 const formWrapperRef = ref<HTMLElement | null>(null)
 const formBlockRef = ref<HTMLElement | null>(null)
 const formWrapperHeight = ref('auto')
@@ -156,6 +159,7 @@ const passwordFocused = ref(false)
 const authCapabilities = ref<ClientAuthCapabilities | null>(null)
 const captcha = reactive<ClientCaptchaState>({
   captchaId: '',
+  captchaImage: '',
   captchaSvg: '',
   expiresInSeconds: 0,
 })
@@ -220,12 +224,11 @@ const shouldPrepareCaptcha = computed(() => isRegisterMode.value || loginCaptcha
 const isCapabilityHintVisible = computed(() => capabilityLoading.value && !authCapabilities.value)
 const isCapabilityFallbackVisible = computed(() => !capabilityLoading.value && !!capabilityErrorMessage.value && !authCapabilities.value)
 const forgotPasswordAvailable = computed(() => authCapabilities.value?.forgotPasswordEnabled ?? false)
-// 安全说明：后端返回的是 SVG 字符串，这里统一转为 data URL 图片渲染，
-// 避免通过 v-html 直接把未信任的 SVG 片段注入到页面 DOM 中。
+// 优先使用后端 PNG data URL；旧服务返回 SVG 时仍以图片地址方式渲染，避免 v-html 注入。
 const captchaImageSrc = computed(() => {
-  return captcha.captchaSvg
+  return captcha.captchaImage || (captcha.captchaSvg
     ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(captcha.captchaSvg)}`
-    : ''
+    : '')
 })
 
 const captchaHintText = computed(() => {
@@ -283,7 +286,28 @@ const syncModeQuery = async (nextMode: AuthMode) => {
 }
 
 const getElementHeight = (element: Element | HTMLElement | null | undefined) => {
-  return element instanceof HTMLElement ? element.offsetHeight : 0
+  if (!(element instanceof HTMLElement)) {
+    return 0
+  }
+
+  const computedStyle = getComputedStyle(element)
+  if (computedStyle.transform === 'none') {
+    return element.getBoundingClientRect().height
+  }
+
+  const computedHeight = Number.parseFloat(computedStyle.height)
+  if (!Number.isFinite(computedHeight) || computedHeight <= 0) {
+    return element.offsetHeight
+  }
+  if (computedStyle.boxSizing === 'border-box') {
+    return computedHeight
+  }
+
+  return computedHeight
+    + Number.parseFloat(computedStyle.paddingTop)
+    + Number.parseFloat(computedStyle.paddingBottom)
+    + Number.parseFloat(computedStyle.borderTopWidth)
+    + Number.parseFloat(computedStyle.borderBottomWidth)
 }
 
 const syncWrapperHeight = (heightMode: 'auto' | 'measured' = 'auto', element?: Element | HTMLElement | null) => {
@@ -298,6 +322,23 @@ const syncWrapperHeight = (heightMode: 'auto' | 'measured' = 'auto', element?: E
   }
 }
 
+const cancelPendingFormTransitionFrame = () => {
+  if (formTransitionFrame === null) {
+    return
+  }
+  cancelAnimationFrame(formTransitionFrame)
+  formTransitionFrame = null
+}
+
+const finishFormTransition = (runId: number) => {
+  if (runId !== formTransitionRunId) {
+    return
+  }
+  cancelPendingFormTransitionFrame()
+  formAnimating.value = false
+  syncWrapperHeight('auto')
+}
+
 const switchMode = async (nextMode: AuthMode) => {
   if (formAnimating.value) {
     return
@@ -307,8 +348,9 @@ const switchMode = async (nextMode: AuthMode) => {
     return
   }
 
+  formTransitionRunId += 1
   formAnimating.value = true
-  syncWrapperHeight('measured')
+  syncWrapperHeight('measured', formBlockRef.value)
   loginFeedbackTitle.value = ''
   loginFeedbackDescription.value = ''
   loginFeedbackShowForgotAction.value = false
@@ -320,26 +362,40 @@ const switchMode = async (nextMode: AuthMode) => {
   await syncModeQuery(nextMode)
 }
 
-const handleFormBeforeLeave = () => {
-  syncWrapperHeight('measured', formWrapperRef.value)
-}
-
-const handleFormBeforeEnter = () => {
-  syncWrapperHeight('measured', formWrapperRef.value)
-}
-
 const handleFormEnter = (element: Element) => {
-  requestAnimationFrame(() => {
+  cancelPendingFormTransitionFrame()
+  formTransitionFrame = requestAnimationFrame(() => {
+    formTransitionFrame = null
+    if (!formAnimating.value) {
+      return
+    }
     syncWrapperHeight('measured', element)
   })
 }
 
-const handleFormAfterEnter = () => {
-  formAnimating.value = false
-  syncWrapperHeight('auto')
+const handleFormAfterEnter = async () => {
+  const runId = formTransitionRunId
+  const wrapperElement = formWrapperRef.value
+  if (!wrapperElement) {
+    finishFormTransition(runId)
+    return
+  }
+
+  const heightTransitions = wrapperElement.getAnimations().filter((animation) => {
+    return 'transitionProperty' in animation
+      && (animation as CSSTransition).transitionProperty === 'height'
+  })
+  await Promise.allSettled(heightTransitions.map((animation) => animation.finished))
+
+  if (wrapperElement !== formWrapperRef.value) {
+    return
+  }
+  finishFormTransition(runId)
 }
 
 const handleFormTransitionCancelled = () => {
+  formTransitionRunId += 1
+  cancelPendingFormTransitionFrame()
   formAnimating.value = false
   syncWrapperHeight('auto')
 }
@@ -363,6 +419,7 @@ const refreshCaptcha = async (silent = false) => {
     executor: (signal) => getClientCaptcha({ signal }),
     onSuccess: (result) => {
       captcha.captchaId = result.captchaId
+      captcha.captchaImage = result.captchaImage ?? ''
       captcha.captchaSvg = result.captchaSvg
       captcha.expiresInSeconds = result.expiresInSeconds
       if (captchaExpireTimer) {
@@ -397,6 +454,7 @@ const refreshCaptcha = async (silent = false) => {
 
 const clearCaptcha = () => {
   captcha.captchaId = ''
+  captcha.captchaImage = ''
   captcha.captchaSvg = ''
   captcha.expiresInSeconds = 0
   if (captchaExpireTimer) {
@@ -406,7 +464,7 @@ const clearCaptcha = () => {
 }
 
 const ensureCaptchaReady = async () => {
-  if (captcha.captchaId && captcha.captchaSvg) {
+  if (captcha.captchaId && (captcha.captchaImage || captcha.captchaSvg)) {
     return
   }
   await refreshCaptcha(true)
@@ -1014,6 +1072,8 @@ onUnmounted(() => {
     globalThis.clearTimeout(capabilityDeferredTimer)
     capabilityDeferredTimer = null
   }
+  formTransitionRunId += 1
+  cancelPendingFormTransitionFrame()
   resetRegisterVerificationTimer()
   clearCaptcha()
 })
@@ -1138,8 +1198,6 @@ onUnmounted(() => {
           <div ref="formWrapperRef" class="form-wrapper" :class="{ 'is-animating': formAnimating }" :style="{ height: formWrapperHeight }">
             <transition
               name="auth-fade"
-              @before-enter="handleFormBeforeEnter"
-              @before-leave="handleFormBeforeLeave"
               @enter="handleFormEnter"
               @after-enter="handleFormAfterEnter"
               @enter-cancelled="handleFormTransitionCancelled"

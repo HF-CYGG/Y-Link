@@ -195,7 +195,7 @@ const submitUpdateProfile = async () => {
 
   try {
     profileSubmitting.value = true
-    await clientAuthStore.updateProfile({
+    const profile = await clientAuthStore.updateProfile({
       username: normalizedUsername,
       mobile: normalizedMobile || undefined,
       email: normalizedEmail || undefined,
@@ -203,6 +203,12 @@ const submitUpdateProfile = async () => {
       mobileVerificationCode: profileForm.mobileVerificationCode || undefined,
       emailVerificationCode: profileForm.emailVerificationCode || undefined,
     })
+    if (profile.requiresRelogin) {
+      showAppSuccess('资料更新成功，请重新登录')
+      profileDialogVisible.value = false
+      redirectToClientLogin()
+      return
+    }
     showAppSuccess('资料更新成功')
     profileDialogVisible.value = false
   } catch (error: any) {
