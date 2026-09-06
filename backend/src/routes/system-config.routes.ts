@@ -15,6 +15,7 @@ import type { UpdateClientDepartmentConfigsInput } from '../services/system-conf
 import { verificationCodeService } from '../services/verification-code.service.js'
 import { smsVerificationRecordService } from '../services/sms-verification-record.service.js'
 import { clientStaffDirectoryService } from '../services/client-staff-directory.service.js'
+import { clientStaffInviteCodeService } from '../services/client-staff-invite-code.service.js'
 import { CLIENT_STAFF_DIRECTORY_STATUSES } from '../entities/client-staff-directory.entity.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
@@ -491,14 +492,46 @@ systemConfigRouter.patch(
 )
 
 systemConfigRouter.put(
-  '/client-staff-directory/:id/invite-code',
+  '/client-staff-invite-code',
   requirePermission('system_configs:update'),
   requireRole('admin'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payload = clientStaffInviteCodeSchema.parse(req.body)
-    const data = await clientStaffDirectoryService.setInviteCode(String(req.params.id), payload.inviteCode, authReq.auth, extractRequestMeta(req))
+    const data = await clientStaffInviteCodeService.setInviteCode(payload.inviteCode, authReq.auth, extractRequestMeta(req))
+    res.setHeader('Cache-Control', 'no-store')
     res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+systemConfigRouter.get(
+  '/client-staff-invite-code',
+  requirePermission('system_configs:view'),
+  asyncHandler(async (_req, res) => {
+    const data = await clientStaffInviteCodeService.getConfig()
+    res.setHeader('Cache-Control', 'no-store')
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+systemConfigRouter.delete(
+  '/client-staff-invite-code',
+  requirePermission('system_configs:update'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const data = await clientStaffInviteCodeService.disableInviteCode(authReq.auth, extractRequestMeta(req))
+    res.setHeader('Cache-Control', 'no-store')
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+systemConfigRouter.put(
+  '/client-staff-directory/:id/invite-code',
+  requirePermission('system_configs:update'),
+  requireRole('admin'),
+  asyncHandler(async () => {
+    throw new BizError('已改为统一邀请码，请使用统一邀请码管理入口', 410)
   }),
 )
 
@@ -506,11 +539,8 @@ systemConfigRouter.post(
   '/client-staff-directory/:id/invite-code/reset',
   requirePermission('system_configs:update'),
   requireRole('admin'),
-  asyncHandler(async (req, res) => {
-    const authReq = req as AuthenticatedRequest
-    const data = await clientStaffDirectoryService.resetInviteCode(String(req.params.id), authReq.auth, extractRequestMeta(req))
-    res.setHeader('Cache-Control', 'no-store')
-    res.json({ code: 0, message: 'ok', data })
+  asyncHandler(async () => {
+    throw new BizError('已改为统一邀请码，请使用统一邀请码管理入口', 410)
   }),
 )
 
@@ -518,10 +548,8 @@ systemConfigRouter.delete(
   '/client-staff-directory/:id/invite-code',
   requirePermission('system_configs:update'),
   requireRole('admin'),
-  asyncHandler(async (req, res) => {
-    const authReq = req as AuthenticatedRequest
-    const data = await clientStaffDirectoryService.disableInviteCode(String(req.params.id), authReq.auth, extractRequestMeta(req))
-    res.json({ code: 0, message: 'ok', data })
+  asyncHandler(async () => {
+    throw new BizError('已改为统一邀请码，请使用统一邀请码管理入口', 410)
   }),
 )
 

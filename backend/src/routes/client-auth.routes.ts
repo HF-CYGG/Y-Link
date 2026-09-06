@@ -52,8 +52,8 @@ const registerSchema = z
   .superRefine((payload, ctx) => {
     if (payload.accountType === 'personal') {
       const isTeacherRegister = Boolean(payload.staffNo?.trim())
-      if (isTeacherRegister && !payload.inviteCode) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['inviteCode'], message: '请输入 8 位教师邀请码' })
+      if (isTeacherRegister && !/^\d{8}$/.test(payload.inviteCode ?? '')) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['inviteCode'], message: '请输入 8 位数字教师统一邀请码' })
       }
       if (!isTeacherRegister && !payload.username?.trim()) {
         ctx.addIssue({
