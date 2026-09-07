@@ -61,6 +61,7 @@
 /**
  * 模块说明：src/views/client/ClientAuthView.vue
  * 文件职责：客户端登录/注册总入口，负责账号登录、注册、验证码刷新与登录后回跳。
+ * 实现逻辑：复用认证 Store 与稳定请求处理登录注册；验证码行统一居中对齐，联系方式验证行通过网格展开和淡入平滑切换。
  * 维护说明：当前页面已切换为 Split-Card 一体化布局，视觉可继续调整，但登录/注册/验证码链路需保持可用。
  */
 
@@ -1414,26 +1415,35 @@ onUnmounted(() => {
                     </button>
                   </div>
                   <p v-if="!isDepartmentRegisterMode" class="captcha-hint-text">{{ captchaHintText }}</p>
-                  <div v-if="!isDepartmentRegisterMode && registerUsesVerificationCode" class="captcha-row">
-                    <el-input v-model="registerForm.verificationCode" placeholder="手机/邮箱验证码" class="geo-input flex-1" size="large" clearable>
-                      <template #prefix>
-                        <el-icon class="input-icon"><Message /></el-icon>
-                      </template>
-                    </el-input>
-                    <el-button
-                      class="verification-code-button"
-                      :disabled="verificationSending || registerVerificationCountdown > 0"
-                      @click="handleSendRegisterVerificationCode"
+                  <Transition name="verification-code">
+                    <div
+                      v-if="!isDepartmentRegisterMode && registerUsesVerificationCode"
+                      class="verification-code-reveal"
                     >
-                      {{
-                        registerVerificationCountdown > 0
-                          ? `${registerVerificationCountdown}s 后重发`
-                          : verificationSending
-                            ? '发送中'
-                            : '发送验证码'
-                      }}
-                    </el-button>
-                  </div>
+                      <div class="verification-code-reveal__inner">
+                        <div class="captcha-row">
+                          <el-input v-model="registerForm.verificationCode" placeholder="手机/邮箱验证码" class="geo-input flex-1" size="large" clearable>
+                            <template #prefix>
+                              <el-icon class="input-icon"><Message /></el-icon>
+                            </template>
+                          </el-input>
+                          <el-button
+                            class="verification-code-button"
+                            :disabled="verificationSending || registerVerificationCountdown > 0"
+                            @click="handleSendRegisterVerificationCode"
+                          >
+                            {{
+                              registerVerificationCountdown > 0
+                                ? `${registerVerificationCountdown}s 后重发`
+                                : verificationSending
+                                  ? '发送中'
+                                  : '发送验证码'
+                            }}
+                          </el-button>
+                        </div>
+                      </div>
+                    </div>
+                  </Transition>
 
                   <el-input
                     v-model="registerForm.password"
@@ -1589,26 +1599,35 @@ onUnmounted(() => {
                     </button>
                   </div>
                   <p v-if="!isDepartmentRegisterMode" class="captcha-hint-text">{{ captchaHintText }}</p>
-                  <div v-if="!isDepartmentRegisterMode && registerUsesVerificationCode" class="captcha-row">
-                    <el-input v-model="registerForm.verificationCode" placeholder="手机/邮箱验证码" class="geo-input flex-1" size="large" clearable>
-                      <template #prefix>
-                        <el-icon class="input-icon"><Message /></el-icon>
-                      </template>
-                    </el-input>
-                    <el-button
-                      class="verification-code-button"
-                      :disabled="verificationSending || registerVerificationCountdown > 0"
-                      @click="handleSendRegisterVerificationCode"
+                  <Transition name="verification-code">
+                    <div
+                      v-if="!isDepartmentRegisterMode && registerUsesVerificationCode"
+                      class="verification-code-reveal"
                     >
-                      {{
-                        registerVerificationCountdown > 0
-                          ? `${registerVerificationCountdown}s 后重发`
-                          : verificationSending
-                            ? '发送中'
-                            : '发送验证码'
-                      }}
-                    </el-button>
-                  </div>
+                      <div class="verification-code-reveal__inner">
+                        <div class="captcha-row">
+                          <el-input v-model="registerForm.verificationCode" placeholder="手机/邮箱验证码" class="geo-input flex-1" size="large" clearable>
+                            <template #prefix>
+                              <el-icon class="input-icon"><Message /></el-icon>
+                            </template>
+                          </el-input>
+                          <el-button
+                            class="verification-code-button"
+                            :disabled="verificationSending || registerVerificationCountdown > 0"
+                            @click="handleSendRegisterVerificationCode"
+                          >
+                            {{
+                              registerVerificationCountdown > 0
+                                ? `${registerVerificationCountdown}s 后重发`
+                                : verificationSending
+                                  ? '发送中'
+                                  : '发送验证码'
+                            }}
+                          </el-button>
+                        </div>
+                      </div>
+                    </div>
+                  </Transition>
 
                   <el-input
                     v-model="registerForm.password"
@@ -2583,7 +2602,38 @@ onUnmounted(() => {
 
 .captcha-row {
   display: flex;
+  align-items: center;
   gap: 12px;
+}
+
+/* 保留自然内容高度，展开时同步推动下方表单，避免淡入后布局仍然瞬移。 */
+.verification-code-reveal {
+  display: grid;
+  grid-template-rows: 1fr;
+}
+
+.verification-code-reveal__inner {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.verification-code-enter-active,
+.verification-code-leave-active {
+  transition:
+    grid-template-rows 0.28s cubic-bezier(0.25, 1, 0.5, 1),
+    margin-top 0.28s cubic-bezier(0.25, 1, 0.5, 1),
+    opacity 0.2s ease;
+}
+
+.verification-code-leave-active {
+  pointer-events: none;
+}
+
+.form-block .verification-code-enter-from,
+.form-block .verification-code-leave-to {
+  grid-template-rows: 0fr;
+  margin-top: 0;
+  opacity: 0;
 }
 
 .captcha-row--placeholder {
@@ -2892,7 +2942,7 @@ onUnmounted(() => {
     transform: none !important;
   }
 
-  :is(.geo-fade-enter-from, .geo-fade-leave-to, .auth-fade-enter-from, .auth-fade-leave-to, .staff-lookup-enter-from, .staff-lookup-leave-to),
+  :is(.geo-fade-enter-from, .geo-fade-leave-to, .auth-fade-enter-from, .auth-fade-leave-to, .staff-lookup-enter-from, .staff-lookup-leave-to, .verification-code-enter-from, .verification-code-leave-to),
   :is(.staff-lookup-enter-from, .staff-lookup-leave-to) .staff-lookup-card {
     filter: none !important;
     grid-template-rows: 1fr !important;
