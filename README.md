@@ -177,13 +177,14 @@ node --experimental-strip-types --test packages/api-client/test/*.test.ts
 
 ### 4. 环境变量
 
-至少需要手动新增一个变量：
+必须手动新增的变量只有初始管理员密码：
 
 ```env
 INIT_ADMIN_PASSWORD=请改成你自己的强密码
 TZ=Asia/Shanghai
 # 建议配置：永久删除订单/送货单时的二次门禁密码。
 PERMANENT_DELETE_PASSWORD=请改成仅管理员知晓的删除密码
+# 启用教师统一邀请码时必须配置；至少 32 个随机字节。
 INVITE_CODE_PEPPER=请生成至少32个随机字节的教师邀请码密钥
 ```
 
@@ -206,6 +207,7 @@ INVITE_CODE_PEPPER=请生成至少32个随机字节的教师邀请码密钥
 | `DB_TYPE` | `sqlite` | 默认 SQLite |
 | `SQLITE_DB_PATH` | `/app/data/y-link.sqlite` | SQLite 文件位置 |
 | `PORT` | `3001` | 容器内后端端口，通常不用改 |
+| `VERIFICATION_CODE_REQUEST_TIMEOUT_MS` | `8000` | 短信/邮件验证码平台请求超时（毫秒） |
 
 首次启动后，系统会自动创建管理员账号。已有管理员时不会覆盖原账号密码。
 
@@ -218,6 +220,65 @@ INVITE_CODE_PEPPER=请生成至少32个随机字节的教师邀请码密钥
 | `DB_SYNC` | 生产环境不建议长期启用自动同步结构 |
 | `DB_HOST` / `DB_USER` / `DB_PASSWORD` | 只有 `DB_TYPE=mysql` 时才需要 |
 | `PORT` | onebox 内部 Nginx 已按默认端口代理后端 |
+
+### 4.1 阿里云 PNVS 短信验证码
+
+短信验证码采用“后端私密凭证 + 管理端业务配置”两层设置：AccessKey 和手机号 HMAC 密钥只允许放在 1Panel 的环境变量中；短信签名、可选方案名和场景模板码才在管理端的“系统配置 -> 验证码平台”中保存。不要把 AccessKey、AccessKey Secret 或 HMAC 密钥填进管理端页面、前端 `.env` 或 Git 仓库。
+
+#### 阿里云侧准备
+
+1. 在阿里云开通[号码认证服务的短信认证](https://help.aliyun.com/zh/pnvs/user-guide/sms-authentication-service)，优先选择控制台赠送的签名和模板；赠送签名必须与赠送模板搭配使用。
+2. 创建仅供服务器调用的 RAM 用户和 AccessKey。可先授予官方的 `AliyunDypnsFullAccess`；生产环境应再按实际 API 收紧权限。
+3. 记录控制台中可用的“短信签名”和模板码。系统提供的常用模板包括：`100001`（登录/注册）、`100002`（修改绑定手机号）、`100003`（重置密码）。模板必须以当前 PNVS 控制台实际可用项为准。
+
+#### 1Panel 环境变量填写
+
+在 1Panel 的容器“环境变量”页新增以下四项。前三项是启用 PNVS 的必填项；最后一项建议保持 `false`，首次配置不需要开通 MNS 回执。
+
+```env
+ALIBABA_CLOUD_ACCESS_KEY_ID=你的RAM用户AccessKeyId
+ALIBABA_CLOUD_ACCESS_KEY_SECRET=你的RAM用户AccessKeySecret
+VERIFICATION_TICKET_HMAC_SECRET=至少32个随机字节的私有密钥
+ALIYUN_DYPNS_MNS_ENABLED=false
+```
+
+`VERIFICATION_TICKET_HMAC_SECRET` 不要手填容易猜测的文本。可在可信服务器或本机执行下列命令生成后粘贴到 1Panel：
+
+```bash
+node -e "console.log(require('node:crypto').randomBytes(48).toString('base64url'))"
+```
+
+保存变量后必须重启容器。使用 `docker run` 时通过 `-e` 传入同名变量；使用 Compose 时写入私有根目录 `.env` 或部署平台的密钥管理。仓库中的 `.env.onebox.example`、`.env.docker.cloud.example` 和 `backend/.env.example` 仅是模板，不能写入真实密钥。
+
+#### 管理端页面填写
+
+容器重启后，以有系统配置权限的管理员进入“系统配置 -> 验证码平台”，选择“阿里云 PNVS”并开启短信通道：
+
+| 页面字段 | 填写方式 |
+| --- | --- |
+| 短信签名 | 原样填写 PNVS 控制台显示、且与模板配套的签名 |
+| `SchemeName`（可选） | 可留空；填写时作为阿里云侧方案标识，发送和核验会使用同一个值 |
+| 注册模板码 | 推荐 `100001`（登录/注册） |
+| 找回密码模板码 | 推荐 `100003`（重置密码） |
+| 资料修改模板码 | 修改绑定手机号时推荐 `100002`；其他资料校验可使用当前控制台允许的通用模板 |
+| 测试模板码 | 推荐 `100001` |
+
+四个场景模板码都必须填写。若控制台只提供同一个适用模板，可以重复填写；不能填写不属于当前 PNVS 签名/模板组合的编码。系统会调用阿里云的 `SendSmsVerifyCode` 发送验证码，并调用 `CheckSmsVerifyCode` 核验；无需在前端集成阿里云 SDK。
+
+#### 验收与排错
+
+1. 刷新管理端页面后，“访问凭据”和“核验 HMAC”应显示“已配置”；“MNS 回执未启用”在初次配置时是正常状态。
+2. 保存页面配置后，使用已在阿里云绑定的测试手机号点击“发送测试短信”，确认手机收到验证码。
+3. 再验证客户端注册、找回密码和资料修改流程。
+
+常见问题：
+
+| 现象 | 处理 |
+| --- | --- |
+| 访问凭据或核验 HMAC 显示“未配置” | 检查变量名和密钥值是否完整，确认填写在后端容器而非前端，并重启容器 |
+| `403` 或无权调用 API | 检查运行中的 AccessKey 是否属于已授权 RAM 用户；确认已授予 PNVS 所需权限 |
+| 发送成功但手机未收到 | 检查签名与模板是否来自同一 PNVS 控制台配置、测试手机号是否已绑定，以及账户余额和发送记录 |
+| MNS 回执显示配置异常 | 初次使用请保持 `ALIYUN_DYPNS_MNS_ENABLED=false`；只有需要送达/失败回执时才启用，并另行配置 MNS 权限与网络连通性 |
 
 ### 5. 重启规则和资源
 
