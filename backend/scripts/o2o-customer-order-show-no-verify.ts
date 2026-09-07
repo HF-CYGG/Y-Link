@@ -16,13 +16,16 @@ import { BizOutboundOrder } from '../src/entities/biz-outbound-order.entity.js'
 import { ClientUser } from '../src/entities/client-user.entity.js'
 import { authService } from '../src/services/auth.service.js'
 import { clientAuthService } from '../src/services/client-auth.service.js'
+import { installCaptchaServiceForTesting } from '../src/services/captcha.service.js'
 import { o2oPreorderService, type O2oPreorderDetailView } from '../src/services/o2o-preorder.service.js'
 import { productService } from '../src/services/product.service.js'
 import { systemConfigService } from '../src/services/system-config.service.js'
 import type { AuthUserContext } from '../src/types/auth.js'
 import type { ClientAuthContext } from '../src/types/client-auth.js'
 
-const readCaptchaCode = (captchaSvg: string) => captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6)
+const TEST_CAPTCHA_CODE = 'ABC123'
+installCaptchaServiceForTesting({ createCode: () => TEST_CAPTCHA_CODE })
+const readCaptchaCode = (_captchaSvg: string) => TEST_CAPTCHA_CODE
 const toChineseDigits = (value: string) => value.replaceAll(/\d/g, (digit) => '零一二三四五六七八九'[Number(digit)] ?? '')
 
 const ensureReady = async () => {

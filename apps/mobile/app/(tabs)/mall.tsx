@@ -97,7 +97,7 @@ export default function MallScreen() {
           value={searchQuery}
           onChangeText={setSearchQuery}
           onClear={() => setSearchQuery('')}
-          style={styles.searchBar}
+          containerStyle={styles.searchBar}
         />
       </View>
 

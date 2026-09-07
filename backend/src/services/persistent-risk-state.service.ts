@@ -17,6 +17,7 @@ import { LessThanOrEqual, type EntityManager } from 'typeorm'
 import type { ClientRateLimitInfo, Options, Store } from 'express-rate-limit'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
+import { databaseOperationGate } from '../database/operation-gate.js'
 import { AuthRiskState } from '../entities/auth-risk-state.entity.js'
 import { isRetryableTransactionLockError } from '../utils/database-errors.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
@@ -52,6 +53,18 @@ const parseTimestamps = (value: string | null): number[] => {
 
 class PersistentRiskStateService {
   private cleanupLoopTimer: ReturnType<typeof globalThis.setInterval> | null = null
+  private cleanupLoopDesired = false
+
+  constructor() {
+    databaseOperationGate.registerWorker({
+      name: 'persistent-risk-cleanup',
+      pause: () => this.pauseCleanupLoop(),
+      drain: async () => undefined,
+      resume: () => {
+        if (this.cleanupLoopDesired) this.startCleanupTimer()
+      },
+    })
+  }
 
   /**
    * 在事务外单独执行并立即提交，确保桶键对应的行存在且未处于"已过期"状态。
@@ -187,6 +200,56 @@ class PersistentRiskStateService {
     )
   }
 
+  /**
+   * 先在业务事务外确保限流桶存在。Mobile refresh 随后会先锁 session、判定重放，
+   * 再在同一事务中锁这个已存在的桶，避免“限流先返回”掩盖应优先提交的重放撤销。
+   */
+  async prepareWindow(bucketKey: string, windowMs: number, nowMs = Date.now()): Promise<void> {
+    await this.ensureStateRowExists(
+      digestBucketKey(`rate_limit:${bucketKey}`),
+      'rate_limit',
+      new Date(nowMs + windowMs),
+    )
+  }
+
+  /** 只供已经调用 prepareWindow 的外层事务使用；不会开启嵌套事务。 */
+  async consumePreparedWindow(
+    manager: EntityManager,
+    bucketKey: string,
+    windowMs: number,
+    nowMs = Date.now(),
+    maxRequests?: number,
+  ): Promise<ClientRateLimitInfo> {
+    const bucketDigest = digestBucketKey(`rate_limit:${bucketKey}`)
+    const repository = manager.getRepository(AuthRiskState)
+    const query = repository
+      .createQueryBuilder('state')
+      .where('state.bucketDigest = :bucketDigest', { bucketDigest })
+    if (AppDataSource.options.type === 'mysql') query.setLock('pessimistic_write')
+    const state = await query.getOne()
+    if (!state || state.stateType !== 'rate_limit') {
+      throw new Error('已准备的 refresh 限流状态不存在')
+    }
+
+    const activeTimestamps = parseTimestamps(state.requestTimestampsJson)
+      .filter((timestamp) => nowMs - timestamp < windowMs)
+    if (typeof maxRequests === 'number' && activeTimestamps.length >= maxRequests) {
+      return {
+        totalHits: activeTimestamps.length + 1,
+        resetTime: new Date((activeTimestamps[0] ?? nowMs) + windowMs),
+      }
+    }
+
+    activeTimestamps.push(nowMs)
+    state.requestTimestampsJson = JSON.stringify(activeTimestamps)
+    state.expiresAt = new Date(activeTimestamps[0] + windowMs)
+    await repository.save(state)
+    return {
+      totalHits: activeTimestamps.length,
+      resetTime: new Date(activeTimestamps[0] + windowMs),
+    }
+  }
+
   async readWindow(bucketKey: string, windowMs: number, nowMs = Date.now()): Promise<ClientRateLimitInfo | undefined> {
     const repository = AppDataSource.getRepository(AuthRiskState)
     const bucketDigest = digestBucketKey(`rate_limit:${bucketKey}`)
@@ -307,6 +370,14 @@ class PersistentRiskStateService {
 
   /** 启动周期性过期清理：幂等，重复调用不会叠加多个定时器。 */
   startCleanupLoop(): void {
+    this.cleanupLoopDesired = true
+    this.startCleanupTimer()
+  }
+
+  private startCleanupTimer(): void {
+    if (databaseOperationGate.isFrozen()) {
+      return
+    }
     if (this.cleanupLoopTimer !== null) {
       return
     }
@@ -319,6 +390,11 @@ class PersistentRiskStateService {
   }
 
   stopCleanupLoop(): void {
+    this.cleanupLoopDesired = false
+    this.pauseCleanupLoop()
+  }
+
+  private pauseCleanupLoop(): void {
     if (this.cleanupLoopTimer !== null) {
       globalThis.clearInterval(this.cleanupLoopTimer)
       this.cleanupLoopTimer = null

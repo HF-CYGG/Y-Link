@@ -66,6 +66,10 @@
 
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import {
+  getPersonalClientUsernameRuleHint,
+  normalizePersonalClientUsername,
+} from '@ylink/validation/auth'
 
 import type { AxiosResponse } from 'axios'
 import { http } from '@/api/http'
@@ -108,6 +112,7 @@ const AUTH_MODE_SEQUENCE: AuthMode[] = ['login', 'register-personal', 'register-
 
 interface ClientCaptchaState {
   captchaId: string
+  captchaImage: string
   captchaSvg: string
   expiresInSeconds: number
 }
@@ -158,6 +163,7 @@ const passwordFocused = ref(false)
 const authCapabilities = ref<ClientAuthCapabilities | null>(null)
 const captcha = reactive<ClientCaptchaState>({
   captchaId: '',
+  captchaImage: '',
   captchaSvg: '',
   expiresInSeconds: 0,
 })
@@ -222,12 +228,11 @@ const shouldPrepareCaptcha = computed(() => isRegisterMode.value || loginCaptcha
 const isCapabilityHintVisible = computed(() => capabilityLoading.value && !authCapabilities.value)
 const isCapabilityFallbackVisible = computed(() => !capabilityLoading.value && !!capabilityErrorMessage.value && !authCapabilities.value)
 const forgotPasswordAvailable = computed(() => authCapabilities.value?.forgotPasswordEnabled ?? false)
-// 安全说明：后端返回的是 SVG 字符串，这里统一转为 data URL 图片渲染，
-// 避免通过 v-html 直接把未信任的 SVG 片段注入到页面 DOM 中。
+// 优先使用后端 PNG data URL；旧服务返回 SVG 时仍以图片地址方式渲染，避免 v-html 注入。
 const captchaImageSrc = computed(() => {
-  return captcha.captchaSvg
+  return captcha.captchaImage || (captcha.captchaSvg
     ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(captcha.captchaSvg)}`
-    : ''
+    : '')
 })
 
 const captchaHintText = computed(() => {
@@ -418,6 +423,7 @@ const refreshCaptcha = async (silent = false) => {
     executor: (signal) => getClientCaptcha({ signal }),
     onSuccess: (result) => {
       captcha.captchaId = result.captchaId
+      captcha.captchaImage = result.captchaImage ?? ''
       captcha.captchaSvg = result.captchaSvg
       captcha.expiresInSeconds = result.expiresInSeconds
       if (captchaExpireTimer) {
@@ -452,6 +458,7 @@ const refreshCaptcha = async (silent = false) => {
 
 const clearCaptcha = () => {
   captcha.captchaId = ''
+  captcha.captchaImage = ''
   captcha.captchaSvg = ''
   captcha.expiresInSeconds = 0
   if (captchaExpireTimer) {
@@ -461,7 +468,7 @@ const clearCaptcha = () => {
 }
 
 const ensureCaptchaReady = async () => {
-  if (captcha.captchaId && captcha.captchaSvg) {
+  if (captcha.captchaId && (captcha.captchaImage || captcha.captchaSvg)) {
     return
   }
   await refreshCaptcha(true)
@@ -525,7 +532,10 @@ const validateLoginPassword = (password: string) => password.trim().length > 0
  * - 继续复用共享的新密码强度规则，保证注册与改密口径一致。
  */
 const validateRegisterPassword = (password: string) => isClientNewPasswordValid(password)
-const validateRealName = (username: string) => /^\p{Script=Han}[\p{Script=Han}·\s]{1,19}$/u.test(normalizeHumanName(username))
+const registerUsernameRuleHint = computed(() => {
+  if (!registerForm.username) return ''
+  return getPersonalClientUsernameRuleHint(registerForm.username)
+})
 const validateStaffNo = (staffNo: string) => /^[A-Za-z0-9-]{4,32}$/.test(staffNo.trim())
 const validateLoginAccount = (account: string) => account.trim().length > 0
 const resolveAccountChannel = (account: string): 'mobile' | 'email' | null => {
@@ -539,17 +549,6 @@ const resolveAccountChannel = (account: string): 'mobile' | 'email' | null => {
 
 const normalizeInputText = (value: string) => {
   return value.replaceAll(/\s+/g, ' ').trim()
-}
-
-const normalizeHumanName = (value: string) => {
-  return value
-    .normalize('NFKC')
-    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
-    .replace(/[\u0000-\u001F\u007F-\u009F]/g, '')
-    .replaceAll('　', ' ')
-    .replace(/[•・･‧∙⋅·﹒]/g, '·')
-    .replaceAll(/\s+/g, ' ')
-    .trim()
 }
 
 const applySecurityHintFromMessage = (message: string) => {
@@ -610,6 +609,13 @@ const clearRegisterFeedback = () => {
 
 const applyRegisterFeedbackFromError = (message: string, status?: number) => {
   clearRegisterFeedback()
+
+  if (status === 409 && /当前注册信息无法使用/.test(message)) {
+    registerFeedbackTitle.value = '当前注册信息无法使用'
+    registerFeedbackDescription.value = '请确认联系方式已完成验证并核对注册信息；如仍无法注册，请联系管理员处理。'
+    registerFeedbackType.value = 'warning'
+    return
+  }
 
   if (status === 409 && /该手机号已被占用|该邮箱已被占用|该手机号或邮箱已被占用/.test(message)) {
     const isEmailOccupied = /邮箱/.test(message) && !/手机号/.test(message)
@@ -886,8 +892,8 @@ const validateRegisterBeforeSubmit = () => {
       return null
     }
   } else {
-    if (!validateRealName(registerForm.username)) {
-      showAppWarning('请输入 2-20 位中文真实姓名，可包含空格或·')
+    if (getPersonalClientUsernameRuleHint(registerForm.username)) {
+      showAppWarning(getPersonalClientUsernameRuleHint(registerForm.username))
       return null
     }
     if (!accountChannel) {
@@ -912,7 +918,7 @@ const validateRegisterBeforeSubmit = () => {
 
   return {
     registeredAccount: normalizeInputText(registerForm.account),
-    registeredUsername: isDepartmentRegisterMode.value ? '' : normalizeInputText(registerForm.username),
+    registeredUsername: isDepartmentRegisterMode.value ? '' : normalizePersonalClientUsername(registerForm.username).value,
   }
 }
 
@@ -1358,7 +1364,7 @@ onUnmounted(() => {
                 <el-form @submit.prevent="handleRegister" class="space-y-4 mt-6">
                   <el-input
                     v-model="registerForm.username"
-                    placeholder="真实姓名"
+                    placeholder="用户名（中文或英文字母，2-20 位）"
                     class="geo-input"
                     size="large"
                     clearable
@@ -1367,6 +1373,7 @@ onUnmounted(() => {
                       <el-icon class="input-icon"><User /></el-icon>
                     </template>
                   </el-input>
+                  <p v-if="registerUsernameRuleHint" class="input-rule-hint" role="alert">{{ registerUsernameRuleHint }}</p>
 
                   <el-input 
                     v-model="registerForm.account" 

@@ -21,6 +21,7 @@ import { useStableRequest } from '@/composables/useStableRequest'
 import { useAppStore, useThemeStore } from '@/store'
 import pinia from '@/store/pinia'
 import { extractErrorMessage } from '@/utils/error'
+import { escapeTooltipHtml } from '@/utils/html-escape'
 
 import { showAppError } from '@/utils/app-alert'
 
@@ -85,15 +86,6 @@ const formatSliceValue = (value: NumericLike, valueType: PieValueType): string =
     return `${formatCount(value)} 单`
   }
   return `¥${formatAmount(value)}`
-}
-
-const escapeTooltipHtml = (value: unknown): string => {
-  return String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
 }
 
 const resolvePieLegendColor = (index: number): string => {

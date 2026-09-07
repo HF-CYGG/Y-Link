@@ -15,6 +15,9 @@ import { extractRequestMeta } from '../utils/request-meta.js'
 import { AppDataSource } from '../config/data-source.js'
 import { resolveDatabaseCapabilities } from '../database/database-capabilities.js'
 import { getTransactionCoordinator } from '../database/transaction-coordinator.js'
+import { issueDatabaseRescueCredential } from '../runtime/database-rescue-control.js'
+import { isSecureOrDirectLoopback } from '../utils/http-security.js'
+import { BizError } from '../utils/errors.js'
 
 const importPayloadSchema = z
   .object({
@@ -155,7 +158,9 @@ dataMaintenanceRouter.post(
       authReq.auth,
       requestMeta,
     )
-    res.status(202).json({ code: 0, message: 'accepted', data })
+    const rescueCredential = isSecureOrDirectLoopback(req) ? issueDatabaseRescueCredential(data.id) : undefined
+    res.setHeader('Cache-Control', 'no-store')
+    res.status(202).json({ code: 0, message: 'accepted', data: { ...data, rescueCredential } })
 
     setImmediate(() => {
       void databaseMigrationService
@@ -171,6 +176,19 @@ dataMaintenanceRouter.post(
           })
         })
     })
+  }),
+)
+
+dataMaintenanceRouter.post(
+  '/db-migration/tasks/:taskId/rescue-credential',
+  requirePermission('db_migration:operate'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    if (!isSecureOrDirectLoopback(req)) throw new BizError('救援凭证需通过可信 HTTPS 或容器本地工具签发', 403)
+    await databaseMigrationService.getSQLiteToMySqlTask(req.params.taskId)
+    const data = issueDatabaseRescueCredential(req.params.taskId)
+    res.setHeader('Cache-Control', 'no-store')
+    res.json({ code: 0, message: 'ok', data })
   }),
 )
 

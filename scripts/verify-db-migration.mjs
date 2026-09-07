@@ -61,7 +61,8 @@ const acceptedTaskStatuses = new Set([
   'rolled_back',
 ])
 const defaultTimeoutMs = Number(process.env.Y_LINK_DB_MIGRATION_TIMEOUT_MS ?? 240_000)
-const dockerPrerequisiteTimeoutMs = 12_000
+// Docker Desktop 并行初始化临时 MySQL 时探测偶有延迟；仍必须在有界时间内真实返回成功。
+const dockerPrerequisiteTimeoutMs = 30_000
 const scenario = String(process.env.Y_LINK_DB_MIGRATION_SCENARIO ?? 'success').trim()
 const composeProject = `ylink-db-migration-${Date.now().toString(36)}-${process.pid}`
   .toLowerCase()
@@ -381,6 +382,7 @@ const createHttpClient = (baseUrl) => {
     } = options
     const headers = {
       Accept: 'application/json',
+      'User-Agent': 'Y-Link-Isolated-Migration-Verify',
     }
     if (body !== undefined) {
       headers['Content-Type'] = 'application/json'
@@ -446,7 +448,7 @@ const readHealth = async (baseUrl) => {
   const payload = await parseJsonResponse(response, 'GET /health')
   if (response.status !== 200 || payload?.status !== 'UP') {
     throw new VerificationError(
-      `/health 异常：HTTP ${response.status}，status=${payload?.status ?? 'unknown'}`,
+      `/health 异常：HTTP ${response.status}，status=${payload?.status ?? 'unknown'}，code=${payload?.code ?? 'none'}`,
     )
   }
   return payload
@@ -458,6 +460,34 @@ const readRuntimeOverrideState = async (client) => {
   assert.ok(payload?.data?.effectiveDatabase, '数据库运行时状态接口缺少 effectiveDatabase')
   assert.ok(payload?.data?.runtimeOverrideStatus, '数据库运行时状态接口缺少 runtimeOverrideStatus')
   return payload.data
+}
+
+const verifyWebEntryHeaders = async (baseUrl) => {
+  for (const pathname of ['/', '/login', '/client', '/database-rescue', '/rescue.html', '/__verify_missing_page__']) {
+    const response = await fetchWithTimeout(`${baseUrl}${pathname}`, { headers: {
+      'X-Forwarded-For': '203.0.113.123', 'X-Forwarded-Proto': 'https', 'X-Forwarded-Host': 'invalid.example',
+    } }, 10_000)
+    assert.equal(response.headers.get('x-content-type-options'), 'nosniff', `${pathname} 缺少 nosniff`)
+    assert.equal(response.headers.get('x-frame-options'), 'DENY', `${pathname} 缺少页面 frame 保护`)
+    assert.match(response.headers.get('content-security-policy') ?? '', /script-src 'self'/, `${pathname} 缺少页面 CSP`)
+    assert.equal(response.headers.get('strict-transport-security'), null, '纯 HTTP 入口不能受伪造转发头影响启用 HSTS')
+    const body = await response.text()
+    if (pathname.includes('rescue')) {
+      assert.match(response.headers.get('cache-control') ?? '', /no-store/)
+      assert.match(body, /assets\/rescue-[^"']+\.js/, '救援必须加载独立入口')
+    }
+  }
+  const result = await fetchWithTimeout(`${baseUrl}/api/database-rescue/status`, {
+    headers: { Authorization: 'Bearer invalid', 'X-Forwarded-Proto': 'https' },
+  }, 10_000)
+  assert.equal(result.status, 403, '未受信 HTTP 入口不能伪造 HTTPS 访问救援')
+  assert.match(result.headers.get('cache-control') ?? '', /no-store/)
+  for (const response of [result, await fetchWithTimeout(`${baseUrl}/health`, {}, 10_000)]) {
+    assert.equal(response.headers.get('content-security-policy'), "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'",
+      '代理 API 不能附加 HTML 页面 CSP')
+    assert.equal(response.headers.get('x-content-type-options'), 'nosniff', '代理安全头应只下发一次')
+  }
+  log('真实 Nginx 页面头、独立救援 HTML、无缓存及转发协议边界通过')
 }
 
 const waitFor = async (label, probe, options = {}) => {
@@ -609,7 +639,7 @@ const readMigrationTaskIds = async (client) => {
     .sort()
 }
 
-const assertMigrationAuditExists = async (client, actionType, taskId) => {
+const assertMigrationAuditExists = async (client, actionType, taskId, initiatingActor = null) => {
   const search = new URLSearchParams({
     page: '1',
     pageSize: '20',
@@ -618,11 +648,26 @@ const assertMigrationAuditExists = async (client, actionType, taskId) => {
   })
   const { payload } = await client.request(`/api/audit-logs?${search.toString()}`)
   assert.equal(payload?.code, 0, '迁移审计查询 envelope code 必须为 0')
-  assert.ok(
-    Array.isArray(payload?.data?.list) && payload.data.list.some((item) =>
-      item.actionType === actionType && item.targetId === taskId),
-    `缺少迁移终态审计：${actionType} / ${taskId}`,
-  )
+  assert.equal(payload?.data?.total, 1, `迁移终态审计必须精确一次：${actionType} / ${taskId}`)
+  assert.equal(payload.data.list.length, 1)
+  const audit = payload.data.list[0]
+  assert.equal(audit.actionType, actionType)
+  assert.equal(audit.targetId, taskId)
+  assert.equal(audit.targetCode, taskId)
+  assert.equal(audit.targetType, 'database_migration')
+  if (initiatingActor) {
+    assert.equal(audit.actorUserId, initiatingActor.id)
+    assert.equal(audit.actorUsername, initiatingActor.username)
+    assert.equal(audit.actorDisplayName, initiatingActor.displayName)
+    assert.ok(net.isIP(audit.ipAddress) > 0, '执行进程内的失败必须保留发起请求来源')
+    assert.equal(audit.userAgent, 'Y-Link-Isolated-Migration-Verify')
+  } else {
+    assert.equal(audit.actorUserId, null)
+    assert.equal(audit.actorUsername, 'system')
+    assert.equal(audit.actorDisplayName, '数据库自动迁移程序')
+    assert.equal(audit.ipAddress, null)
+    assert.equal(audit.userAgent, null)
+  }
   assert.ok(
     !JSON.stringify(payload.data.list).includes(mysqlPassword),
     `迁移终态审计泄露 MySQL 密码：${actionType}`,
@@ -1546,20 +1591,17 @@ const runCutoverPersistenceFailureScenario = async (context) => {
   const finalState = await getOneboxContainerState(context.composeEnv)
   assert.equal(finalState.containerId, initialState.containerId, '持续任务写盘故障不应替换 onebox 容器')
   assert.equal(finalState.restartCount, initialState.restartCount, '持续任务写盘故障不应触发 onebox 重启')
-  await context.client.login()
+  const initiatingActor = await context.client.login()
   await waitFor(
     '持续任务写盘故障审计落库',
     async () => {
-      try {
-        await assertMigrationAuditExists(
-          context.client,
-          'database_migration.run_automatic_task_failed',
-          createdTask.id,
-        )
-        return true
-      } catch {
-        return null
-      }
+      await assertMigrationAuditExists(
+        context.client,
+        'database_migration.run_automatic_task_failed',
+        createdTask.id,
+        initiatingActor,
+      )
+      return true
     },
   )
   const heartbeat = await context.client.request('/api/auth/presence/heartbeat', {
@@ -1678,13 +1720,19 @@ const runCutoverCancelPersistenceFailureScenario = async ({
   })
   assert.equal(rollbackResult.response.status, 500, '取消意图写盘失败必须明确返回失败')
 
-  const returnedState = await assertReturnedToSqlite(baseUrl, client)
-  await assertCutoverArtifactsAbsent(composeEnv, returnedState.runtimeState, '取消意图写盘失败补偿')
-  await assertAutomaticFailureCleanupArtifactsAbsent(
-    composeEnv,
-    createdTask.id,
-    '取消意图写盘失败补偿',
-  )
+  // 新恢复协议在任务取消写盘前已经持久化 PREPARED；不能清空控制文件或解除维护。
+  const frozen = await readHealth(baseUrl)
+  assert.equal(frozen.maintenance?.readOnly, true)
+  await runCompose(['exec', '-T', 'onebox', 'node', '--input-type=module', '-e', `
+    import assert from 'node:assert/strict';
+    import fs from 'node:fs';
+    const root = '/app/data';
+    const intent = JSON.parse(fs.readFileSync(root + '/runtime/database-recovery-intent.json', 'utf8'));
+    assert.equal(intent.phase, 'PREPARED');
+    assert.equal(intent.taskId, process.argv[1]);
+    assert.equal(JSON.parse(fs.readFileSync(root + '/runtime/maintenance-state.json', 'utf8')).readOnly, true);
+    assert.equal(JSON.parse(fs.readFileSync(root + '/database-migration/automatic-migration.lock', 'utf8')).taskId, process.argv[1]);
+  `, createdTask.id], { capture: true, env: composeEnv, label: '取消写盘中断后的恢复意图与冻结证据' })
   const beforeForcedRestart = await getOneboxContainerState(composeEnv)
   assert.equal(
     beforeForcedRestart.restartCount,
@@ -1694,10 +1742,8 @@ const runCutoverCancelPersistenceFailureScenario = async ({
 
   await runCompose(['restart', 'onebox'], {
     env: composeEnv,
-    label: '强制重启 onebox 验证失败任务不会意外续跑',
+    label: '重启 onebox 验证从持久恢复意图继续受控回退',
   })
-  await waitForInitialService(baseUrl)
-  await client.login()
   const afterRestartState = await waitForRuntimeState({
     baseUrl,
     client,
@@ -1705,9 +1751,12 @@ const runCutoverCancelPersistenceFailureScenario = async ({
     dbType: 'sqlite',
     readOnly: false,
   })
-  assert.equal(afterRestartState.runtimeState.effectiveDatabase?.source, 'environment')
+  assert.equal(afterRestartState.runtimeState.effectiveDatabase?.source, 'runtime_override')
+  assert.equal((await waitForTaskTerminal(client, createdTask.id)).status, 'rolled_back')
+  await assertRollbackFinalizationArtifactsAbsent(composeEnv, createdTask.id, '恢复意图重放完成')
+  await assertMigrationAuditExists(client, 'database_migration.automatic_rolled_back', createdTask.id)
   assert.deepEqual(await readExportSnapshot(client), baselineSnapshot, '强制重启后 SQLite 内容发生变化')
-  log('取消意图写盘失败断言通过：切换已补偿、资源已清理且重启后未意外续跑')
+  log('取消任务写盘中断通过：PREPARED 保持冻结，重启重放显式 SQLite，终态与审计精确完成')
 }
 
 const runRollbackFinalizerPersistenceFailureScenario = async ({
@@ -1722,29 +1771,33 @@ const runRollbackFinalizerPersistenceFailureScenario = async ({
   })
   await waitForMaintenanceReadOnly(baseUrl, client, createdTask.id)
 
-  const finalRuntimeState = await waitForRuntimeState({
-    baseUrl,
-    client,
-    label: '回退终态写盘失败后 SQLite 仍完成启动收尾',
-    dbType: 'sqlite',
-    readOnly: false,
+  await waitFor('持续终态写盘失败进入稳定救援', async () => {
+    const response = await fetchWithTimeout(`${baseUrl}/health`, {}, 5000)
+    const body = await response.json()
+    return response.status === 503 && body.status === 'RESCUE'
   })
-  assert.equal(finalRuntimeState.runtimeState.effectiveDatabase?.source, 'runtime_override')
-  const persistedTask = await readMigrationTask(client, createdTask.id)
-  assert.notEqual(
-    persistedTask.status,
-    'rolled_back',
-    '持续故障注入下任务文件不应伪装成已成功写入 rolled_back',
-  )
-  await assertRollbackFinalizationArtifactsAbsent(
-    composeEnv,
-    createdTask.id,
-    '回退终态写盘失败',
-  )
-  await client.login()
-  await assertMigrationAuditExists(client, 'database_migration.automatic_rolled_back', createdTask.id)
-  assert.deepEqual(await readExportSnapshot(client), baselineSnapshot, '回退终态写盘失败后 SQLite 内容发生变化')
-  log('回退终态写盘失败断言通过：SQLite 服务恢复、维护解除且控制面未进入启动循环')
+  const stableState = await getOneboxContainerState(composeEnv)
+  await delay(5000)
+  assert.equal((await getOneboxContainerState(composeEnv)).restartCount, stableState.restartCount, '持续写盘故障不能重启循环')
+  assert.equal((await fetchWithTimeout(`${baseUrl}/api/auth/me`, {}, 5000)).status, 503, '救援不能开放业务鉴权')
+  await runCompose(['exec', '-T', 'onebox', 'node', '--input-type=module', '-e', `
+    import assert from 'node:assert/strict';
+    import fs from 'node:fs';
+    import { inspectSqliteForRescue } from '/app/backend/dist/runtime/sqlite-rescue-inspection.js';
+    const root = '/app/data';
+    const taskId = process.argv[1];
+    const intent = JSON.parse(fs.readFileSync(root + '/runtime/database-recovery-intent.json', 'utf8'));
+    assert.equal(intent.taskId, taskId);
+    assert.equal(intent.sqliteRestartAttempts, 2);
+    assert.equal(intent.phase, 'VERIFYING');
+    const task = JSON.parse(fs.readFileSync(root + '/database-migration/tasks/' + taskId + '.json', 'utf8'));
+    assert.notEqual(task.status, 'rolled_back');
+    assert.equal(JSON.parse(fs.readFileSync(root + '/runtime/maintenance-state.json', 'utf8')).readOnly, true);
+    assert.equal(JSON.parse(fs.readFileSync(root + '/database-migration/automatic-migration.lock', 'utf8')).taskId, taskId);
+    const source = await inspectSqliteForRescue(intent.source.filePath);
+    assert.equal(source.sha256, intent.sourceDigest.sha256, '终态失败不能通过审计/补数改变冻结基线');
+  `, createdTask.id], { capture: true, env: composeEnv, label: '稳定救援保留冻结、锁、未完成终态与全表摘要' })
+  log('回退终态持续写盘失败通过：最多一次 SQLite 重试，稳定救援，冻结基线不变且不伪造成功')
 }
 
 const assertTaskCreationArtifactsAbsent = async (composeEnv, label) => {
@@ -1868,7 +1921,6 @@ const runCorruptedCutoverMarkerScenario = async ({
   client,
   composeEnv,
 }) => {
-  const initialState = await getOneboxContainerState(composeEnv)
   const createdTask = await createAutomaticTask(client, {
     ...mysqlTarget,
     password: mysqlPassword,
@@ -1896,10 +1948,11 @@ const runCorruptedCutoverMarkerScenario = async ({
   })
 
   await waitFor(
-    '损坏 marker 启动失败并进入受控重启',
+    '损坏 marker 后保留稳定独立救援进程',
     async () => {
-      const state = await getOneboxContainerState(composeEnv)
-      return state.restartCount > initialState.restartCount ? state : null
+      const response = await fetchWithTimeout(`${baseUrl}/health`, {}, 5000)
+      const health = await response.json()
+      return response.status === 503 && health.status === 'RESCUE' ? health : null
     },
     {
       intervalMs: 250,
@@ -1917,7 +1970,7 @@ const runCorruptedCutoverMarkerScenario = async ({
   )
   assert.match(
     `${logsResult.stdout}\n${logsResult.stderr}`,
-    /数据库迁移切换标记存在但已损坏，已禁止启动期 schema 与业务写入/,
+    /已启动受限救援控制面/,
     '损坏 marker 启动必须给出故障关闭日志',
   )
   await runCompose(
@@ -1945,11 +1998,69 @@ const runCorruptedCutoverMarkerScenario = async ({
       label: '损坏 marker 启动后控制面文件保留断言',
     },
   )
-  log('损坏 marker 启动断言通过：禁止 schema/业务写入并保留覆盖、维护、锁和凭据等待人工恢复')
+  const rescuePage = await fetchWithTimeout(`${baseUrl}/database-rescue`, {}, 5000)
+  assert.equal(rescuePage.status, 200, '数据库不可用时独立救援页面必须仍可访问')
+  assert.match(await rescuePage.text(), /assets\/rescue-[^"']+\.js/)
+  const ordinary = await fetchWithTimeout(`${baseUrl}/api/auth/me`, {}, 5000)
+  assert.equal(ordinary.status, 503, '救援模式不装配普通登录 API')
+  const rescueState = await getOneboxContainerState(composeEnv)
+  await delay(1500)
+  assert.equal((await getOneboxContainerState(composeEnv)).restartCount, rescueState.restartCount, '救援不能自动重启循环')
+
+  // 容器本地 CLI 轮换凭证，再走真实 HTTP 控制面；凭证始终留在子进程内，输出只有断言结果。
+  const requestScript = `
+    import assert from 'node:assert/strict';
+    import { issueDatabaseRescueCredential } from '/app/backend/dist/runtime/database-rescue-control.js';
+    const taskId = process.argv[1];
+    const credential = issueDatabaseRescueCredential(taskId).credential;
+    const request = async (route, options = {}, authorized = true) => {
+      const response = await fetch('http://127.0.0.1:3001/api/database-rescue/' + route, {
+        ...options, headers: { 'Content-Type': 'application/json', ...(authorized ? {Authorization: 'Bearer ' + credential} : {}), ...options.headers }
+      });
+      return { status: response.status, body: await response.json() };
+    };
+    assert.equal((await request('status', {}, false)).status, 401);
+    assert.equal((await request('status', {headers: {Authorization: 'Bearer invalid'}})).status, 401);
+    const status = await request('status');
+    assert.deepEqual(status.body.data.allowedActions, ['prepare_rollback']);
+    const prepared = await request('prepare-rollback', {method:'POST'});
+    assert.equal(prepared.status, 200);
+    const headers = {'Idempotency-Key':'rescue_marker_e2e_operation'};
+    assert.equal((await request('rollback-to-source-sqlite', {method:'POST', headers, body:JSON.stringify({nonce:'wrong'})})).status, 403);
+    const accepted = await request('rollback-to-source-sqlite', {method:'POST', headers, body:JSON.stringify({nonce:prepared.body.data.nonce})});
+    assert.equal(accepted.status, 202);
+    const replay = await request('rollback-to-source-sqlite', {method:'POST', headers, body:JSON.stringify({nonce:'consumed'})});
+    assert.equal(replay.status, 202);
+    assert.equal(replay.body.data.operationId, accepted.body.data.operationId);
+    console.log('RESCUE_HTTP_VERIFIED');
+  `
+  const controlled = await runCompose(['exec', '-T', 'onebox', 'node', '--input-type=module', '-e', requestScript, createdTask.id], {
+    capture: true, env: composeEnv, label: '通过独立 HTTP 救援控制面执行唯一回退',
+  })
+  assert.match(controlled.stdout, /RESCUE_HTTP_VERIFIED/)
+  await waitForRuntimeState({ baseUrl, client, label: '救援重启后 SQLite 生效', dbType: 'sqlite', readOnly: false })
+  const terminal = await waitForTaskTerminal(client, createdTask.id)
+  assert.equal(terminal.status, 'rolled_back')
+  await assertMigrationAuditExists(client, 'database_migration.automatic_rolled_back', createdTask.id)
+  log('损坏 marker 后独立网页/HTTP 救援、凭证拒绝、nonce/幂等、稳定进程和受控回退通过')
 }
 
 const runFailureRollbackScenario = async ({ baseUrl, client, composeEnv, baselineSnapshot, fixtureManifest }) => {
   const initialState = await getOneboxContainerState(composeEnv)
+  // 上一次已完成的恢复日志必须保留为证据，但不能阻止新任务有限重试和自动回退。
+  const priorRecoveryFixture = `
+    import { writeControlFile } from '/app/backend/dist/runtime/durable-control-file.js';
+    import { recoveryIntentPath } from '/app/backend/dist/runtime/database-rescue-control.js';
+    const timestamp = new Date().toISOString();
+    writeControlFile(recoveryIntentPath, {
+      version: 1, taskId: 'prior_completed_fixture', operationId: 'prior_completed_operation', phase: 'COMPLETED',
+      source: { filePath: '/app/data/y-link.sqlite', dev: '0', ino: '0', birthMs: 0 },
+      sourceDigest: { sha256: '0'.repeat(64), tables: [] }, createdAt: timestamp, updatedAt: timestamp, sqliteRestartAttempts: 1,
+    });
+  `
+  await runCompose(['exec', '-T', 'onebox', 'node', '--input-type=module', '-e', priorRecoveryFixture], {
+    capture: true, env: composeEnv, label: '构造上一项已完成恢复日志的隔离夹具',
+  })
   const createdTask = await createAutomaticTask(client, {
     ...mysqlTarget,
     password: mysqlPassword,
@@ -2161,6 +2272,7 @@ const run = async () => {
     await assertIsolatedComposeResources(composeEnv)
     log(`onebox 宿主机验收入口已就绪：${baseUrl}`)
     await waitForInitialService(baseUrl)
+    await verifyWebEntryHeaders(baseUrl)
     const client = createHttpClient(baseUrl)
     await client.login()
     const initialRuntimeState = await readRuntimeOverrideState(client)

@@ -30,12 +30,34 @@ const REQUIRED_TABLES = [
   'notification_dispatch',
   'auth_risk_state',
   'business_sequence',
+  'client_mobile_session',
   'sms_verification_record',
 ] as const
 
 const REQUIRED_COLUMNS = [
+  ['client_mobile_session', 'client_user_id'],
+  ['client_mobile_session', 'device_id'],
+  ['client_mobile_session', 'device_name'],
+  ['client_mobile_session', 'platform'],
+  ['client_mobile_session', 'app_version'],
+  ['client_mobile_session', 'access_token_hash'],
+  ['client_mobile_session', 'access_expires_at'],
+  ['client_mobile_session', 'refresh_token_hash'],
+  ['client_mobile_session', 'refresh_expires_at'],
+  ['client_mobile_session', 'previous_refresh_token_hash'],
+  ['client_mobile_session', 'previous_refresh_grace_until'],
+  ['client_mobile_session', 'refresh_generation'],
+  ['client_mobile_session', 'absolute_expires_at'],
+  ['client_mobile_session', 'last_ip'],
+  ['client_mobile_session', 'last_access_at'],
+  ['client_mobile_session', 'created_at'],
+  ['client_mobile_session', 'revoked_at'],
+  ['client_mobile_session', 'revoke_reason'],
   ['o2o_preorder', 'client_request_id'],
   ['o2o_preorder', 'client_request_hash'],
+  ['o2o_preorder', 'cancellation_source'],
+  ['o2o_preorder', 'cancellation_remark'],
+  ['o2o_preorder', 'cancelled_at'],
   ['business_sequence', 'sequence_key'],
   ['business_sequence', 'current_value'],
   ['business_sequence', 'created_at'],
@@ -72,6 +94,48 @@ interface IndexFixture {
 }
 
 const REQUIRED_INDEXES: readonly IndexFixture[] = [
+  {
+    tableName: 'client_mobile_session',
+    indexName: 'uk_client_mobile_session_access_hash',
+    columns: ['access_token_hash'],
+    unique: true,
+  },
+  {
+    tableName: 'client_mobile_session',
+    indexName: 'uk_client_mobile_session_refresh_hash',
+    columns: ['refresh_token_hash'],
+    unique: true,
+  },
+  {
+    tableName: 'client_mobile_session',
+    indexName: 'idx_client_mobile_session_previous_refresh_hash',
+    columns: ['previous_refresh_token_hash'],
+    unique: false,
+  },
+  {
+    tableName: 'client_mobile_session',
+    indexName: 'idx_client_mobile_session_user_active',
+    columns: ['client_user_id', 'revoked_at', 'last_access_at'],
+    unique: false,
+  },
+  {
+    tableName: 'client_mobile_session',
+    indexName: 'idx_client_mobile_session_user_device',
+    columns: ['client_user_id', 'device_id'],
+    unique: false,
+  },
+  {
+    tableName: 'client_mobile_session',
+    indexName: 'idx_client_mobile_session_cleanup',
+    columns: ['revoked_at', 'absolute_expires_at', 'id'],
+    unique: false,
+  },
+  {
+    tableName: 'client_mobile_session',
+    indexName: 'idx_client_mobile_session_refresh_expiry',
+    columns: ['revoked_at', 'refresh_expires_at', 'id'],
+    unique: false,
+  },
   {
     tableName: 'o2o_preorder',
     indexName: 'uk_o2o_preorder_client_request',
@@ -205,6 +269,13 @@ await expectSchemaFailure(missingSequence, [
   '035_o2o_idempotency_business_sequence.sql',
 ])
 
+const missingMobileSession = createCompleteFixture()
+missingMobileSession.tables.delete('client_mobile_session')
+await expectSchemaFailure(missingMobileSession, [
+  '表 client_mobile_session',
+  '037_mobile_auth_session.sql',
+])
+
 const missingClientUser = createCompleteFixture()
 missingClientUser.tables.delete('client_user')
 await expectSchemaFailure(missingClientUser, [
@@ -224,6 +295,13 @@ missingIdempotencyColumn.columns.delete(objectKey('o2o_preorder', 'client_reques
 await expectSchemaFailure(missingIdempotencyColumn, [
   '字段 o2o_preorder.client_request_hash',
   '035_o2o_idempotency_business_sequence.sql',
+])
+
+const missingCancellationSource = createCompleteFixture()
+missingCancellationSource.columns.delete(objectKey('o2o_preorder', 'cancellation_source'))
+await expectSchemaFailure(missingCancellationSource, [
+  '字段 o2o_preorder.cancellation_source',
+  '040_o2o_preorder_governance.sql',
 ])
 
 const missingOutboxColumn = createCompleteFixture()

@@ -12,6 +12,7 @@ import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 import { assertPermanentDeletePassword } from '../utils/permanent-delete-password.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
+import { MAX_DATABASE_INT, MAX_INBOUND_ORDER_ITEM_COUNT } from '../constants/web-resource-limits.js'
 
 export const inboundRouter = Router()
 
@@ -26,9 +27,9 @@ const submitInboundSchema = z.object({
     z.object({
       productId: z.string().min(1),
       skuId: z.string().min(1).nullable().optional(),
-      qty: z.number().int().positive(),
+      qty: z.number().int().positive().max(MAX_DATABASE_INT, '商品数量超过系统可处理上限'),
     }),
-  ).min(1, '至少选择一个商品'),
+  ).min(1, '至少选择一个商品').max(MAX_INBOUND_ORDER_ITEM_COUNT, '单次最多提交 200 条商品明细'),
 })
 
 const booleanQuerySchema = z.union([z.literal('true'), z.literal('false'), z.boolean()])
@@ -50,9 +51,9 @@ const updateSupplierInboundSchema = z.object({
     z.object({
       productId: z.string().min(1),
       skuId: z.string().min(1).nullable().optional(),
-      qty: z.number().int().positive(),
+      qty: z.number().int().positive().max(MAX_DATABASE_INT, '商品数量超过系统可处理上限'),
     }),
-  ).min(1, '至少选择一个商品'),
+  ).min(1, '至少选择一个商品').max(MAX_INBOUND_ORDER_ITEM_COUNT, '单次最多提交 200 条商品明细'),
 })
 
 const cancelSupplierInboundSchema = z.object({

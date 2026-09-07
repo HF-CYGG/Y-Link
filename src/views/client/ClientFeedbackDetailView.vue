@@ -437,10 +437,19 @@ const loadConversationDetail = async (
         await restoreDetailUiSnapshot(detailUiSnapshot)
       }
     },
+    onError: (error) => {
+      throw error
+    },
     onFinally: () => {
       detailLoading.value = false
       loading.value = false
     },
+  })
+}
+
+const refreshAuthoritativeConversationDetail = async (conversationId: string) => {
+  await loadConversationDetail(conversationId, {
+    preserveLocalState: true,
   })
 }
 
@@ -692,7 +701,19 @@ const connectRealtime = () => {
       }
       availability.value = payload.availability ?? availability.value
       realtimeState.value = payload.availability?.isOnline ? 'online' : 'offline'
-      reconnectTip.value = '已恢复在线连接，当前反馈单会自动同步最新消息。'
+      const conversationId = currentConversationId.value
+      void refreshAuthoritativeConversationDetail(conversationId).then(() => {
+        if (!isRealtimeEligible() || currentConversationId.value !== conversationId) {
+          return
+        }
+        reconnectTip.value = '已恢复在线连接，并同步了当前反馈单的最新状态。'
+      }).catch((error) => {
+        if (!isRealtimeEligible() || currentConversationId.value !== conversationId) {
+          return
+        }
+        reconnectTip.value = '实时连接已恢复，但当前反馈单同步失败，请稍后重试。'
+        showAppError(extractErrorMessage(error, '反馈单详情同步失败，请稍后重试'))
+      })
     },
     onConversation: async (payload) => {
       if (!isRealtimeEligible()) {
@@ -701,10 +722,17 @@ const connectRealtime = () => {
       if (payload?.conversationId !== currentConversationId.value) {
         return
       }
-      await loadConversationDetail(currentConversationId.value, {
-        preserveLocalState: true,
-      })
-      reconnectTip.value = '检测到当前反馈单有新进展，已自动刷新详情。'
+      try {
+        await refreshAuthoritativeConversationDetail(currentConversationId.value)
+        if (isRealtimeEligible()) {
+          reconnectTip.value = '检测到当前反馈单有新进展，已自动刷新详情。'
+        }
+      } catch (error) {
+        if (isRealtimeEligible()) {
+          reconnectTip.value = '检测到当前反馈单有新进展，但详情同步失败，请稍后重试。'
+          showAppError(extractErrorMessage(error, '反馈单详情同步失败，请稍后重试'))
+        }
+      }
     },
     onError: () => {
       if (!isRealtimeEligible()) {

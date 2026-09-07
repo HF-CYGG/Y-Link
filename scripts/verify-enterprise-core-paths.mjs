@@ -1,7 +1,7 @@
 /**
  * 模块说明：scripts/verify-enterprise-core-paths.mjs
- * 文件职责：承载对应业务模块能力，本次仅补充中文注释，不改动原有逻辑。
- * 维护说明：阅读时优先关注导出接口、关键分支与边界处理，便于联调和交接。
+ * 文件职责：启动隔离后端，验证管理端核心业务路径和运行时性能预算，并输出可复查报告。
+ * 维护说明：冷启动从进程创建后计时，以首次健康响应为终点；调整采样间隔时保持预算和健康判定不变。
  */
 
 import assert from 'node:assert/strict'
@@ -121,6 +121,10 @@ const readText = (filePath) => {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+// 冷启动预算以“首次健康响应”计时；50ms 仅提高观测精度，不改变 3000ms 预算或健康判定。
+const isolatedBackendHealthProbeIntervalMs = 50
+// 维持原先 60 × 500ms 约 30 秒的启动等待上限，避免缩短间隔后意外改变超时语义。
+const isolatedBackendHealthProbeMaxAttempts = 600
 
 const isSafeRequestMethod = (method = 'GET') => ['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase())
 
@@ -179,6 +183,92 @@ const pushStep = (title, durationMs, details = {}) => {
 const findVerificationStep = (title) => verificationSteps.find((step) => step.title === title)
 
 /**
+ * 等待隔离后端首次健康：
+ * - 调用方在 spawn 后立刻传入 startTime，保持冷启动计时起点不变；
+ * - 返回最后一次失败与首次成功的观测时刻，避免 500ms 轮询掩盖真实就绪窗口；
+ * - 进程退出与超时仍由调用方沿用原有错误上下文处理。
+ */
+const probeIsolatedBackendHealth = async ({
+  requestHealth,
+  isBackendExited,
+  startTime,
+  maxAttempts = isolatedBackendHealthProbeMaxAttempts,
+  intervalMs = isolatedBackendHealthProbeIntervalMs,
+  now = () => performance.now(),
+  sleepFn = sleep,
+}) => {
+  let lastFailedAtMs = null
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      const response = await requestHealth()
+      if (response.ok) {
+        const firstSuccessfulHealthAtMs = now() - startTime
+        return {
+          status: 'healthy',
+          attempts: attempt,
+          lastFailedAtMs,
+          firstSuccessfulHealthAtMs,
+        }
+      }
+    } catch {
+      // 后端尚未可用时继续等待。
+    }
+
+    lastFailedAtMs = now() - startTime
+    if (isBackendExited()) {
+      return {
+        status: 'exited',
+        attempts: attempt,
+        lastFailedAtMs,
+        firstSuccessfulHealthAtMs: null,
+      }
+    }
+
+    // 保留原有“每次失败后等待一次”的重试结构，只将采样间隔收紧为 50ms。
+    await sleepFn(intervalMs)
+  }
+
+  return {
+    status: 'timed_out',
+    attempts: maxAttempts,
+    lastFailedAtMs,
+    firstSuccessfulHealthAtMs: null,
+  }
+}
+
+/**
+ * 探测契约自检：不启动后端，以确定性时钟确认失败间隔和诊断字段不会回退。
+ */
+const verifyHealthProbeTimingContract = async () => {
+  let elapsedMs = 0
+  let requestCount = 0
+  const sleepCalls = []
+  const result = await probeIsolatedBackendHealth({
+    requestHealth: async () => {
+      requestCount += 1
+      elapsedMs += 10
+      return { ok: requestCount === 3 }
+    },
+    isBackendExited: () => false,
+    startTime: 0,
+    now: () => elapsedMs,
+    sleepFn: async (milliseconds) => {
+      sleepCalls.push(milliseconds)
+      elapsedMs += milliseconds
+    },
+  })
+
+  assert.deepEqual(sleepCalls, [isolatedBackendHealthProbeIntervalMs, isolatedBackendHealthProbeIntervalMs])
+  assert.deepEqual(result, {
+    status: 'healthy',
+    attempts: 3,
+    lastFailedAtMs: 70,
+    firstSuccessfulHealthAtMs: 130,
+  })
+}
+
+/**
  * 启动隔离后端：
  * - 直接运行 backend/src/index.ts，避免依赖用户当前是否已经手动开启本地链路；
  * - 通过独立 APP_PROFILE + SQLITE_DB_PATH 保证验证数据单独落盘；
@@ -230,39 +320,41 @@ const startIsolatedBackend = async () => {
   })
 
   const startTime = performance.now()
-  for (let attempt = 1; attempt <= 60; attempt += 1) {
-    try {
-      const response = await fetch(`${backendBaseUrl}/health`)
-      if (response.ok) {
-        pushStep('启动隔离后端', performance.now() - startTime, {
-          backendBaseUrl,
-          verifyDbPath,
-          attempts: attempt,
-        })
-        log(`[core-path] 隔离后端已就绪：${backendBaseUrl}`)
-        return {
-          backendProcess,
-          stdoutChunks,
-          stderrChunks,
-        }
-      }
-    } catch {
-      // 后端尚未可用时继续等待。
-    }
+  const healthProbeResult = await probeIsolatedBackendHealth({
+    requestHealth: () => fetch(`${backendBaseUrl}/health`),
+    isBackendExited: () => backendProcess.exitCode !== null,
+    startTime,
+  })
 
-    if (backendProcess.exitCode !== null) {
-      throw new Error(
-        [
-          `隔离后端提前退出，exitCode=${backendProcess.exitCode}`,
-          'stdout:',
-          stdoutChunks.join('').trim() || '(empty)',
-          'stderr:',
-          stderrChunks.join('').trim() || '(empty)',
-        ].join('\n'),
-      )
+  if (healthProbeResult.status === 'healthy') {
+    pushStep('启动隔离后端', healthProbeResult.firstSuccessfulHealthAtMs, {
+      backendBaseUrl,
+      verifyDbPath,
+      attempts: healthProbeResult.attempts,
+      healthProbeIntervalMs: isolatedBackendHealthProbeIntervalMs,
+      lastFailedAtMs: healthProbeResult.lastFailedAtMs === null
+        ? null
+        : Number(healthProbeResult.lastFailedAtMs.toFixed(2)),
+      firstSuccessfulHealthAtMs: Number(healthProbeResult.firstSuccessfulHealthAtMs.toFixed(2)),
+    })
+    log(`[core-path] 隔离后端已就绪：${backendBaseUrl}`)
+    return {
+      backendProcess,
+      stdoutChunks,
+      stderrChunks,
     }
+  }
 
-    await sleep(500)
+  if (healthProbeResult.status === 'exited') {
+    throw new Error(
+      [
+        `隔离后端提前退出，exitCode=${backendProcess.exitCode}`,
+        'stdout:',
+        stdoutChunks.join('').trim() || '(empty)',
+        'stderr:',
+        stderrChunks.join('').trim() || '(empty)',
+      ].join('\n'),
+    )
   }
 
   throw new Error(
@@ -1002,11 +1094,16 @@ const main = async () => {
   }
 }
 
-try {
-  await main()
-} catch (error) {
-  writeReport('failed', error instanceof Error ? error.message : String(error))
-  // eslint-disable-next-line no-console
-  console.error('\n[core-path] 核心路径自动化回归失败：', error)
-  process.exit(1)
+if (process.env.Y_LINK_PERF_VERIFY_HEALTH_PROBE_SELF_TEST === '1') {
+  await verifyHealthProbeTimingContract()
+  log('[core-path] 健康探测间隔与诊断字段自检通过')
+} else {
+  try {
+    await main()
+  } catch (error) {
+    writeReport('failed', error instanceof Error ? error.message : String(error))
+    // eslint-disable-next-line no-console
+    console.error('\n[core-path] 核心路径自动化回归失败：', error)
+    process.exit(1)
+  }
 }

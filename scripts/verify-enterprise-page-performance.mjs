@@ -205,7 +205,7 @@ const stylesheetNames = htmlTags
   .filter(Boolean)
   .map((reference) => normalizeAssetReference(reference, 'index.html stylesheet'))
 
-assert(entryModuleNames.length > 0, 'index.html 缺少 type="module" 的前端入口。')
+assert(entryModuleNames.length === 1, 'index.html 必须且只能有一个 type="module" 的前端入口。')
 assert(modulePreloadNames.length > 0, 'index.html 缺少 modulepreload；首屏依赖预加载已被关闭。')
 assert(stylesheetNames.length > 0, 'index.html 缺少首屏 stylesheet。')
 
@@ -216,7 +216,9 @@ const initialAssets = [...initialAssetNames].map((assetName) => requireAsset(ass
 const findAssetByPrefix = (prefix) => assetEntries.find((entry) => entry.name.startsWith(`${prefix}-`) && entry.name.endsWith('.js'))
 
 const totalAssetsSize = assetEntries.reduce((sum, entry) => sum + entry.size, 0)
-const entryChunk = findAssetByPrefix('index')
+// 构建器可把源入口命名为 main、index 或其他稳定名称；预算必须以 index.html 实际加载的模块为准，
+// 不能把某个历史 chunk 文件名前缀当成入口事实。
+const entryChunk = requireAsset(entryModuleNames[0], 'index.html 模块入口')
 const loginChunk = findAssetByPrefix('LoginView')
 const frameworkChunk = findAssetByPrefix('framework')
 const uiKitChunk = findAssetByPrefix('ui-kit')
@@ -246,7 +248,6 @@ const initialLoadCssSize = initialAssets
 // 保留 criticalAssets 命名作为既有双预算报告的兼容字段，但口径已修正为真实首屏图。
 const criticalAssetsSize = initialLoadAssetsSize
 
-assert(entryChunk, '缺少主入口 chunk：index-*.js')
 assert(loginChunk, '缺少登录页 chunk：LoginView-*.js')
 assert(frameworkChunk, '缺少框架基础 chunk：framework-*.js')
 assert(uiKitChunk, '缺少 UI 共享 chunk：ui-kit-*.js')

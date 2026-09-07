@@ -106,6 +106,50 @@ interface OutboundFlowRaw {
 const DATE_MS = 24 * 60 * 60 * 1000
 const MAX_PAGE_SIZE = 100
 const EXPORT_BATCH_SIZE = 500
+const MAX_REPORT_EXPORTS_PER_ACTOR = 1
+const MAX_REPORT_EXPORTS_PER_PROCESS = 4
+
+/** 流式导出在响应完全结束前持续占用数据库与网络资源，因此租约必须覆盖整个写入 Promise。 */
+export class ReportExportLeasePool {
+  private readonly activeActorCounts = new Map<string, number>()
+  private activeCount = 0
+
+  acquire(actorId: string) {
+    const normalizedActorId = actorId.trim()
+    if (!normalizedActorId) {
+      throw new BizError('导出操作者身份缺失', 401)
+    }
+    const actorActiveCount = this.activeActorCounts.get(normalizedActorId) ?? 0
+    if (actorActiveCount >= MAX_REPORT_EXPORTS_PER_ACTOR) {
+      throw new BizError('当前账号已有报表导出正在进行，请等待完成后再试', 429)
+    }
+    if (this.activeCount >= MAX_REPORT_EXPORTS_PER_PROCESS) {
+      throw new BizError('当前报表导出任务较多，请稍后重试', 429)
+    }
+
+    this.activeActorCounts.set(normalizedActorId, actorActiveCount + 1)
+    this.activeCount += 1
+    let released = false
+    return {
+      release: () => {
+        if (released) return
+        released = true
+        if (actorActiveCount === 0) {
+          this.activeActorCounts.delete(normalizedActorId)
+        } else {
+          this.activeActorCounts.set(normalizedActorId, actorActiveCount)
+        }
+        this.activeCount = Math.max(0, this.activeCount - 1)
+      },
+    }
+  }
+
+  get activeExports() {
+    return this.activeCount
+  }
+}
+
+export const reportExportLeasePool = new ReportExportLeasePool()
 
 const REPORT_TITLE_MAP: Record<ReportType, string> = {
   inventory: '库存一览表',
@@ -259,8 +303,11 @@ export class ReportService {
     input: ReportQueryInput,
     output: Writable,
     onReady?: () => void,
+    actorId?: string,
   ): Promise<ReportExportResult> {
-    const query = this.resolveQuery(type, input)
+    const lease = reportExportLeasePool.acquire(actorId ?? '')
+    try {
+      const query = this.resolveQuery(type, input)
     const fetchBatch = (cursor?: string) => {
       const batchQuery: ResolvedReportQuery = {
         ...query,
@@ -308,8 +355,12 @@ export class ReportService {
     }
     worksheet.commit()
     await workbook.commit()
-    return {
-      fileName: `report-${type}-${new Date().toISOString().slice(0, 19).replaceAll(/[:T]/g, '-')}.xlsx`,
+      return {
+        fileName: `report-${type}-${new Date().toISOString().slice(0, 19).replaceAll(/[:T]/g, '-')}.xlsx`,
+      }
+    } finally {
+      // `workbook.commit()` 才代表响应流真正结束；断线和异常同样必须归还容量。
+      lease.release()
     }
   }
 

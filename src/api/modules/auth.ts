@@ -216,6 +216,7 @@ export interface LoginPayload {
 
 export interface AdminCaptchaResult {
   captchaId: string
+  captchaImage?: string
   captchaSvg: string
   expiresInSeconds: number
 }

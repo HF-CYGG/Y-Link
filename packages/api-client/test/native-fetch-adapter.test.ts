@@ -204,6 +204,30 @@ test('只通过 token callback 注入 Bearer Authorization 且保留非认证 he
   assert.equal(headers.get('X-Trace-Id'), 'trace-1')
 })
 
+test('auth=none 不读取 access token 且删除调用方伪造的 Authorization', async () => {
+  const recorder = createFetchRecorder(jsonResponse({ code: 0, message: 'ok', data: true }))
+  let tokenFactoryCalls = 0
+  const adapter = createNativeFetchAdapter({
+    baseUrl: 'https://api.example.com/api',
+    fetch: recorder.fetch,
+    getAccessToken: () => {
+      tokenFactoryCalls += 1
+      return 'must-not-be-used'
+    },
+  })
+
+  await adapter.request({
+    method: 'POST',
+    url: '/v1/mobile-auth/refresh',
+    auth: 'none',
+    headers: { Authorization: 'Bearer caller-controlled-token' },
+    data: { refreshToken: 'redacted' },
+  })
+
+  assert.equal(tokenFactoryCalls, 0)
+  assert.equal(new Headers(recorder.calls[0]?.init?.headers).has('Authorization'), false)
+})
+
 const unsafeAbsoluteUrls = [
   ['绝对跨源 URL', 'https://evil.example.com/profile'],
   ['协议变化 URL', 'http://api.example.com/profile'],

@@ -19,16 +19,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { performance } from 'node:perf_hooks'
 import { fileURLToPath } from 'node:url'
-import { AppDataSource } from '../src/config/data-source.js'
-import { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } from '../src/config/database-bootstrap.js'
-import { BaseProduct } from '../src/entities/base-product.entity.js'
-import { O2oPreorder } from '../src/entities/o2o-preorder.entity.js'
-import { SystemConfig } from '../src/entities/system-config.entity.js'
-import { authService } from '../src/services/auth.service.js'
-import { clientAuthService } from '../src/services/client-auth.service.js'
-import { o2oPreorderService } from '../src/services/o2o-preorder.service.js'
-import { productService } from '../src/services/product.service.js'
-import { systemConfigService } from '../src/services/system-config.service.js'
+import type { AuthUserContext } from '../src/types/auth.js'
 import type { ClientAuthContext } from '../src/types/client-auth.js'
 
 interface ScenarioMetric {
@@ -53,6 +44,46 @@ const backendRoot = path.resolve(scriptsRoot, '..')
 const projectRoot = path.resolve(backendRoot, '..')
 const runtimeRoot = path.resolve(projectRoot, '.local-dev')
 const reportPath = path.resolve(runtimeRoot, 'client-core-flow-task6.report.json')
+const sqliteRoot = path.resolve(backendRoot, 'data', 'local-dev')
+const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
+const sqlitePath = path.resolve(sqliteRoot, `task6-client-core-flow-${verifySeed}.sqlite`)
+const adminPassword = `Task6Admin_${verifySeed}_Aa1!`
+
+// 必须先于后端运行时模块加载：env.ts 在模块初始化时固化数据库配置。
+process.env.APP_PROFILE = `task6-client-core-flow-${verifySeed}`
+process.env.DB_TYPE = 'sqlite'
+process.env.DB_SYNC = 'false'
+process.env.SQLITE_DB_PATH = sqlitePath
+process.env.INIT_ADMIN_PASSWORD = adminPassword
+process.env.Y_LINK_SKIP_DATABASE_RUNTIME_OVERRIDE = 'true'
+
+const [
+  { AppDataSource },
+  { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime },
+  { BaseProduct },
+  { O2oPreorder },
+  { SystemConfig },
+  { authService },
+  { clientAuthService },
+  { o2oPreorderService },
+  { productService },
+  { systemConfigService },
+  { installCaptchaServiceForTesting },
+  { VerificationCodeService },
+] = await Promise.all([
+  import('../src/config/data-source.js'),
+  import('../src/config/database-bootstrap.js'),
+  import('../src/entities/base-product.entity.js'),
+  import('../src/entities/o2o-preorder.entity.js'),
+  import('../src/entities/system-config.entity.js'),
+  import('../src/services/auth.service.js'),
+  import('../src/services/client-auth.service.js'),
+  import('../src/services/o2o-preorder.service.js'),
+  import('../src/services/product.service.js'),
+  import('../src/services/system-config.service.js'),
+  import('../src/services/captcha.service.js'),
+  import('../src/services/verification-code.service.js'),
+])
 
 const clientOrderDetailViewPath = path.resolve(projectRoot, 'src', 'views', 'client', 'ClientOrderDetailView.vue')
 const clientOrdersViewPath = path.resolve(projectRoot, 'src', 'views', 'client', 'ClientOrdersView.vue')
@@ -80,6 +111,23 @@ const log = (message: string) => {
 }
 
 const readText = (filePath: string) => fs.readFileSync(filePath, 'utf8')
+
+const cleanupSqliteFiles = () => {
+  for (const filePath of [sqlitePath, `${sqlitePath}-shm`, `${sqlitePath}-wal`]) {
+    if (!fs.existsSync(filePath)) {
+      continue
+    }
+    try {
+      fs.rmSync(filePath, { force: true })
+    } catch (error) {
+      console.warn(
+        `[task6-client-core-flow] 临时 SQLite 清理失败，已忽略：${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      )
+    }
+  }
+}
 
 const pushRegressionCheck = (title: string, detail: Record<string, unknown>) => {
   regressionChecks.push({
@@ -115,8 +163,35 @@ const buildScenarioMetric = (samples: number[]): ScenarioMetric => {
   }
 }
 
-const readCaptchaCode = (captchaSvg: string) => captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6)
+const TEST_CAPTCHA_CODE = 'ABC123'
+installCaptchaServiceForTesting({ createCode: () => TEST_CAPTCHA_CODE })
+const readCaptchaCode = (_captchaSvg: string) => TEST_CAPTCHA_CODE
 const toChineseDigits = (value: string) => value.replaceAll(/\d/g, (digit) => '零一二三四五六七八九'[Number(digit)] ?? '')
+
+type CapturedVerification = {
+  channel: 'mobile' | 'email'
+  target: string
+  code: string
+}
+
+const createVerificationRequestStub = (captured: CapturedVerification[]) => {
+  return async (_input: string | URL, init?: { body?: string | Buffer }) => {
+    const bodyText = String(init?.body ?? '{}')
+    const payload = JSON.parse(bodyText) as Partial<CapturedVerification>
+    assert.equal(typeof payload.code, 'string', '验证码平台请求体应包含 code')
+    assert.equal(typeof payload.target, 'string', '验证码平台请求体应包含 target')
+    captured.push({
+      channel: String(payload.target).includes('@') ? 'email' : 'mobile',
+      target: String(payload.target),
+      code: String(payload.code),
+    })
+    return {
+      statusCode: 200,
+      headers: {},
+      body: Buffer.from('ok'),
+    }
+  }
+}
 
 const readOptionalJson = <T>(filePath: string): T | null => {
   if (!fs.existsSync(filePath)) {
@@ -135,20 +210,68 @@ const ensureReady = async () => {
   await systemConfigService.ensureDefaultConfigs()
 }
 
+const configureVerificationProviderForTesting = async () => {
+  const actor: AuthUserContext = {
+    userId: 'task6-client-core-flow-verify-admin',
+    username: 'task6-client-core-flow-verify-admin',
+    displayName: 'Task 6 验证管理员',
+    role: 'admin',
+    permissions: [],
+    status: 'enabled',
+    sessionToken: 'task6-client-core-flow-verify-session',
+  }
+  await systemConfigService.updateVerificationProviderConfigs(
+    {
+      mobile: {
+        enabled: true,
+        httpMethod: 'POST',
+        apiUrl: 'https://verification.example.com/mobile',
+        headersTemplate: '{}',
+        bodyTemplate: '{"target":"{{target}}","code":"{{code}}"}',
+        successMatch: 'ok',
+      },
+      email: {
+        enabled: false,
+        httpMethod: 'POST',
+        apiUrl: '',
+        headersTemplate: '{}',
+        bodyTemplate: '',
+        successMatch: '',
+      },
+    },
+    actor,
+  )
+}
+
 const registerAndLoginClient = async (seed: number): Promise<ClientAuthContext> => {
   const registerCaptcha = await clientAuthService.createCaptcha()
   const account = `1${String(seed).slice(-10)}`
   // 姓名现已受全局唯一约束；使用与手机号一致的 10 位时间种子，避免短时间重复验收撞上旧夹具。
   const username = `核心用户${toChineseDigits(String(seed).slice(-10))}`
   const password = `Task6@${String(seed).slice(-6)}`
+  await clientAuthService.verifyCaptchaBeforeVerificationSend({
+    channel: 'mobile',
+    target: account,
+    scene: 'register',
+    captchaId: registerCaptcha.captchaId,
+    captchaCode: readCaptchaCode(registerCaptcha.captchaSvg),
+  })
+  const capturedVerifications: CapturedVerification[] = []
+  const verificationCodeService = new VerificationCodeService(createVerificationRequestStub(capturedVerifications))
+  await verificationCodeService.sendCode({
+    channel: 'mobile',
+    target: account,
+    scene: 'register',
+  })
+  const verificationCode = [...capturedVerifications].reverse().find((item) => item.target === account)?.code
+  assert.ok(verificationCode, '应捕获 Task 6 个人注册短信验证码')
 
   const registerResult = await clientAuthService.register({
     accountType: 'personal',
     account,
     username,
     password,
-    captchaId: registerCaptcha.captchaId,
-    captchaCode: readCaptchaCode(registerCaptcha.captchaSvg),
+    verificationCode,
   })
 
   const loginCaptcha = await clientAuthService.createCaptcha()
@@ -603,6 +726,7 @@ const writeReport = (status: 'passed' | 'failed', errorMessage: string | null = 
 
 const main = async () => {
   await ensureReady()
+  await configureVerificationProviderForTesting()
   const configRepo = AppDataSource.getRepository(SystemConfig)
   const limitConfig = await configRepo.findOneByOrFail({ configKey: 'o2o.limit_qty' })
   const originalLimitQty = limitConfig.configValue
@@ -627,9 +751,13 @@ try {
   writeReport('failed', message)
   // eslint-disable-next-line no-console
   console.error('[task6-client-core-flow] Task 6 五场景验收失败：', error)
-  process.exit(1)
+  process.exitCode = 1
 } finally {
-  if (AppDataSource.isInitialized) {
-    await AppDataSource.destroy()
+  try {
+    if (AppDataSource.isInitialized) {
+      await AppDataSource.destroy()
+    }
+  } finally {
+    cleanupSqliteFiles()
   }
 }

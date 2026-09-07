@@ -17,6 +17,7 @@ import { ArrowLeft } from '@element-plus/icons-vue'
 import { submitO2oPreorder } from '@/api/modules/o2o'
 import { useClientMallSnapshotRefresh } from '@/composables/useClientMallSnapshotRefresh'
 import { useIdempotentAction } from '@/composables/useIdempotentAction'
+import { decideClientCheckoutSubmit } from './client-checkout-submit-policy'
 import { useClientAuthStore, useClientCartStore } from '@/store'
 import { useClientCatalogStore } from '@/store/modules/client-catalog'
 import pinia from '@/store/pinia'
@@ -136,7 +137,7 @@ const handlePickupContactBlur = () => {
 
 onMounted(() => {
   clientCartStore.initialize(clientAuthStore.currentUser?.id)
-  if (!clientCartStore.selectedValidItems.length && clientCartStore.validItems.length > 0) {
+  if (!clientCartStore.selectedItems.length && clientCartStore.validItems.length > 0) {
     clientCartStore.toggleAllValidSelected(true)
   }
   restorePickupContactDraft()
@@ -166,7 +167,8 @@ watch(
   },
 )
 
-const selectedItems = computed(() => clientCartStore.selectedValidItems)
+// 结算展示和提交都必须观察全部已选行，不能把失效项过滤后静默提交剩余商品。
+const selectedItems = computed(() => clientCartStore.selectedItems)
 const totalQty = computed(() => selectedItems.value.reduce((sum, item) => sum + item.qty, 0))
 const totalAmount = computed(() => selectedItems.value.reduce((sum, item) => sum + Math.max(0, Number(item.defaultPrice || 0)) * item.qty, 0))
 const submitDisabled = computed(() => submitting.value || !selectedItems.value.length)
@@ -243,7 +245,7 @@ const handleSubmit = async () => {
   persistPickupContactDraft()
 
   if (!selectedItems.value.length) {
-    showAppWarning('请先选择可结算商品')
+    showAppWarning('请先选择商品')
     return
   }
   if (isDepartmentOrder.value && !currentDepartmentName.value) {
@@ -259,27 +261,27 @@ const handleSubmit = async () => {
     return
   }
 
-  const submitItemSnapshot = selectedItems.value.map((item) => ({
+  const submitRemark = remark.value.trim() || undefined
+  const requestedClientOrderType = enforcedClientOrderType.value
+  const requestedIsSystemApplied = isDepartmentOrder.value ? Boolean(departmentSystemApplyChoice.value) : false
+  // 必须在提交前刷新前冻结用户点击时的完整意图。若上一次响应丢失，刷新会反映出
+  // 服务端已占库存；此时只有完全相同的意图才能复用原 requestKey 查询原订单。
+  const requestedItemSnapshot = selectedItems.value.map((item) => ({
     productId: item.productId,
     skuId: item.skuId,
     qty: item.qty,
   }))
-  const submitRemark = remark.value.trim() || undefined
-  const submitIntentKey = buildClientPreorderSubmitIntentKey({
+  const requestedIntentKey = buildClientPreorderSubmitIntentKey({
     clientUserId: clientAuthStore.currentUser?.id,
-    clientOrderType: enforcedClientOrderType.value,
-    isSystemApplied: isDepartmentOrder.value ? Boolean(departmentSystemApplyChoice.value) : false,
+    clientOrderType: requestedClientOrderType,
+    isSystemApplied: requestedIsSystemApplied,
     pickupContact: normalizedPickupContact,
     remark: submitRemark,
-    items: submitItemSnapshot,
+    items: requestedItemSnapshot,
   })
-
   const activeSubmitLock = readActiveClientPreorderSubmitLock(clientAuthStore.currentUser?.id)
-  // 上一次请求若因超时/断网处于“结果未知”，本次必须复用同一请求键。
-  // 同时发生的连点仍由 runWithGate 拦截；复用请求键是为了让稍后的人工重试命中服务端原订单。
-  const submitRequestKey = activeSubmitLock?.intentKey === submitIntentKey
-    ? activeSubmitLock.requestKey
-    : createClientPreorderSubmitLock(clientAuthStore.currentUser?.id, submitIntentKey)
+  let submitIntentKey = ''
+  let submitRequestKey = ''
 
   const runResult = await runWithGate({
     actionKey: 'client-checkout-submit',
@@ -289,9 +291,45 @@ const handleSubmit = async () => {
     executor: async () => {
       submitting.value = true
       try {
+        // 提交前必须等待一次成功的最新目录刷新；失败或被取消时绝不能沿用旧快照提交。
+        const refreshResult = await refreshMallSnapshot()
+        const freshItemSnapshot = clientCartStore.createSelectedCheckoutSnapshot()
+        const freshIntentKey = freshItemSnapshot ? buildClientPreorderSubmitIntentKey({
+          clientUserId: clientAuthStore.currentUser?.id,
+          clientOrderType: requestedClientOrderType,
+          isSystemApplied: requestedIsSystemApplied,
+          pickupContact: normalizedPickupContact,
+          remark: submitRemark,
+          items: freshItemSnapshot,
+        }) : null
+        const submitDecision = decideClientCheckoutSubmit({
+          refreshSucceeded: refreshResult.success,
+          requestedItems: requestedItemSnapshot,
+          requestedIntentKey,
+          activeSubmitLock,
+          selectedConflictCount: clientCartStore.selectedCheckoutConflicts.length,
+          freshItems: freshItemSnapshot,
+          freshIntentKey,
+        })
+        if (submitDecision.type === 'blocked') {
+          const messageByReason = {
+            refresh_failed: refreshResult.error?.message || '商品目录同步失败，请稍后重试',
+            pending_intent_changed: '上一次订单提交结果仍在确认中，请先前往“我的订单”核对，勿修改商品后重复提交',
+            selected_conflicts: '已选商品的库存或规格已变化，请先返回购物车调整数量、取消选择或移除后再提交',
+            empty_snapshot: '请先选择可结算商品',
+            selection_changed_after_refresh: '商品选择在同步期间已变化，请确认购物车后重新提交',
+          } satisfies Record<typeof submitDecision.reason, string>
+          showAppWarning(messageByReason[submitDecision.reason])
+          return
+        }
+        const submitItemSnapshot = submitDecision.items
+        submitIntentKey = submitDecision.intentKey
+        submitRequestKey = submitDecision.type === 'retry_pending'
+          ? submitDecision.requestKey
+          : createClientPreorderSubmitLock(clientAuthStore.currentUser?.id, submitIntentKey)
         const result = await submitO2oPreorder({
           clientRequestId: submitRequestKey,
-          isSystemApplied: isDepartmentOrder.value ? Boolean(departmentSystemApplyChoice.value) : false,
+          isSystemApplied: requestedIsSystemApplied,
           pickupContact: normalizedPickupContact,
           remark: submitRemark,
           items: submitItemSnapshot,
@@ -344,7 +382,7 @@ const handleSubmit = async () => {
       <div class="mb-4 rounded-[1.4rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
         <p class="text-sm text-slate-500">提交前将以服务端库存与限购规则为准</p>
         <p class="mt-2 text-xs text-slate-400">
-          {{ catalogSyncing ? '正在后台同步最新库存，不影响当前填写与提交' : '进入页面后会自动同步最新库存与限购信息' }}
+          {{ catalogSyncing ? '正在后台同步最新库存；提交时会再次校验全部已选商品' : '进入页面后会自动同步最新库存与限购信息' }}
         </p>
       </div>
 
@@ -448,6 +486,17 @@ const handleSubmit = async () => {
 
       <div class="mb-4 rounded-[1.2rem] bg-white p-4 shadow-[var(--ylink-shadow-soft)]">
         <p class="mb-3 text-sm font-semibold text-slate-700">商品明细</p>
+        <div
+          v-if="clientCartStore.selectedCheckoutConflicts.length"
+          class="mb-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs text-amber-800"
+        >
+          <p class="font-semibold">以下已选商品暂不能提交，请返回购物车主动调整、取消选择或移除：</p>
+          <ul class="mt-1 list-disc space-y-1 pl-4">
+            <li v-for="conflict in clientCartStore.selectedCheckoutConflicts" :key="conflict.item.skuId || conflict.item.productId">
+              {{ conflict.item.productName }}：{{ conflict.message }}
+            </li>
+          </ul>
+        </div>
         <article
           v-for="item in selectedItems"
           :key="item.skuId || item.productId"

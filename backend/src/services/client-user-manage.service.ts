@@ -17,6 +17,7 @@ import {
 } from '../entities/client-user.entity.js'
 import { ClientStaffDirectory } from '../entities/client-staff-directory.entity.js'
 import { ClientUserSession } from '../entities/client-user-session.entity.js'
+import { ClientMobileSession } from '../entities/client-mobile-session.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
 import { isUniqueConstraintError } from '../utils/database-errors.js'
@@ -26,6 +27,7 @@ import { auditService } from './audit.service.js'
 import { systemConfigService } from './system-config.service.js'
 import type { EntityManager } from 'typeorm'
 import { randomBytes } from 'node:crypto'
+import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
 
 export interface ClientUserListQuery {
   page: number
@@ -675,9 +677,10 @@ export class ClientUserManageService {
       throw new BizError('客户端用户状态非法', 400)
     }
 
-    return runInTransaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const userRepo = manager.getRepository(ClientUser)
       const sessionRepo = manager.getRepository(ClientUserSession)
+      const mobileSessionRepo = manager.getRepository(ClientMobileSession)
       // 与部门树保存、批量开户保持相同的“先配置、后账号”锁顺序，避免 MySQL 交叉等待。
       const latestDepartmentConfig = await systemConfigService.getClientDepartmentConfigs(manager, { lockForUpdate: true })
       const user = await this.findClientUserForUpdate(id, manager)
@@ -686,7 +689,7 @@ export class ClientUserManageService {
       }
 
       if (user.status === status) {
-        return sanitizeClientUserProfile(user)
+        return { profile: sanitizeClientUserProfile(user), sessionMustBeRevoked: false }
       }
 
       if (status === 'enabled' && user.accountType === 'department') {
@@ -709,6 +712,11 @@ export class ClientUserManageService {
 
       if (status !== 'enabled') {
         await sessionRepo.delete({ userId: savedUser.id })
+        await mobileSessionRepo.createQueryBuilder()
+          .update(ClientMobileSession)
+          .set({ revokedAt: new Date(), revokeReason: 'account_disabled' })
+          .where('client_user_id = :userId AND revoked_at IS NULL', { userId: savedUser.id })
+          .execute()
       }
 
       await auditService.record(
@@ -729,8 +737,12 @@ export class ClientUserManageService {
         manager,
       )
 
-      return sanitizeClientUserProfile(savedUser)
+      return { profile: sanitizeClientUserProfile(savedUser), sessionMustBeRevoked: status !== 'enabled' }
     })
+    if (result.sessionMustBeRevoked) {
+      customerServiceRealtimeService.disconnectByOwner('client', id)
+    }
+    return result.profile
   }
 
   async updateProfile(
@@ -747,9 +759,10 @@ export class ClientUserManageService {
     const mobile = this.normalizeMobile(input.mobile)
     const email = this.normalizeEmail(input.email)
 
-    return runInTransaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const userRepo = manager.getRepository(ClientUser)
       const sessionRepo = manager.getRepository(ClientUserSession)
+      const mobileSessionRepo = manager.getRepository(ClientMobileSession)
       // 先锁定部门配置再锁账号行，和部门树更新及批量开户维持一致的锁顺序。
       const latestDepartmentConfig = await systemConfigService.getClientDepartmentConfigs(manager, { lockForUpdate: true })
       const user = await this.findClientUserForUpdate(id, manager)
@@ -779,6 +792,7 @@ export class ClientUserManageService {
       }
 
       const before = sanitizeClientUserProfile(user)
+      const previousDepartmentNodeId = user.departmentNodeId
       const profileKind = deriveClientUserProfileKind(user)
       const resolvedDepartment = profileKind === 'department'
         ? await systemConfigService.resolveClientDepartmentReference(input, manager, latestDepartmentConfig)
@@ -804,10 +818,23 @@ export class ClientUserManageService {
         throw error
       }
 
+      const identityChanged = before.realName !== savedUser.realName
+        || before.mobile !== savedUser.mobile
+        || before.email !== savedUser.email
+        || before.departmentName !== savedUser.departmentName
+        || previousDepartmentNodeId !== savedUser.departmentNodeId
+        || before.status !== savedUser.status
       let revokedSessionCount = 0
-      if (savedUser.status !== 'enabled') {
+      let revokedMobileSessionCount = 0
+      if (identityChanged) {
         const deletedSessions = await sessionRepo.delete({ userId: savedUser.id })
         revokedSessionCount = deletedSessions.affected ?? 0
+        const revokedMobileSessions = await mobileSessionRepo.createQueryBuilder()
+          .update(ClientMobileSession)
+          .set({ revokedAt: new Date(), revokeReason: savedUser.status !== 'enabled' ? 'account_disabled' : 'admin_revoke' })
+          .where('client_user_id = :userId AND revoked_at IS NULL', { userId: savedUser.id })
+          .execute()
+        revokedMobileSessionCount = revokedMobileSessions.affected ?? 0
       }
 
       await auditService.record(
@@ -823,13 +850,19 @@ export class ClientUserManageService {
             before,
             after: sanitizeClientUserProfile(savedUser),
             revokedSessionCount,
+            revokedMobileSessionCount,
+            identityChanged,
           },
         },
         manager,
       )
 
-      return sanitizeClientUserProfile(savedUser)
+      return { profile: sanitizeClientUserProfile(savedUser), identityChanged }
     })
+    if (result.identityChanged) {
+      customerServiceRealtimeService.disconnectByOwner('client', id)
+    }
+    return result.profile
   }
 
   async resetPassword(
@@ -843,9 +876,10 @@ export class ClientUserManageService {
       throw new BizError('新密码不能为空', 400)
     }
 
-    return runInTransaction(async (manager) => {
+    const profile = await runInTransaction(async (manager) => {
       const userRepo = manager.getRepository(ClientUser)
       const sessionRepo = manager.getRepository(ClientUserSession)
+      const mobileSessionRepo = manager.getRepository(ClientMobileSession)
       const user = await userRepo
         .createQueryBuilder('user')
         .addSelect('user.passwordHash')
@@ -858,6 +892,11 @@ export class ClientUserManageService {
       user.passwordHash = await hashPassword(newPassword)
       const savedUser = await userRepo.save(user)
       const deletedSessions = await sessionRepo.delete({ userId: savedUser.id })
+      const revokedMobileSessions = await mobileSessionRepo.createQueryBuilder()
+        .update(ClientMobileSession)
+        .set({ revokedAt: new Date(), revokeReason: 'password_reset' })
+        .where('client_user_id = :userId AND revoked_at IS NULL', { userId: savedUser.id })
+        .execute()
 
       await auditService.record(
         {
@@ -871,6 +910,7 @@ export class ClientUserManageService {
           detail: {
             departmentName: savedUser.departmentName,
             revokedSessionCount: deletedSessions.affected ?? 0,
+            revokedMobileSessionCount: revokedMobileSessions.affected ?? 0,
           },
         },
         manager,
@@ -878,6 +918,8 @@ export class ClientUserManageService {
 
       return sanitizeClientUserProfile(savedUser)
     })
+    customerServiceRealtimeService.disconnectByOwner('client', id)
+    return profile
   }
 }
 

@@ -12,6 +12,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { inspect } from 'node:util'
+import sharp from 'sharp'
 
 interface SseEventRecord<T = unknown> {
   event: string
@@ -36,10 +37,6 @@ process.env.INIT_ADMIN_PASSWORD = adminPassword
 function pass(message: string) {
   // eslint-disable-next-line no-console
   console.log(`✅ ${message}`)
-}
-
-function readCaptchaCode(captchaSvg: string) {
-  return captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6)
 }
 
 function toChineseDigits(value: string) {
@@ -168,11 +165,10 @@ function normalizeError(error: unknown) {
   return error instanceof Error ? error : new Error(inspect(error, { depth: 4, breakLength: 120 }))
 }
 
-function createTinyPngBlob() {
-  const pngBuffer = Buffer.from(
-    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8Xw8AAoMBgM2PumoAAAAASUVORK5CYII=',
-    'base64',
-  )
+async function createTinyPngBlob() {
+  const pngBuffer = await sharp({
+    create: { width: 1, height: 1, channels: 4, background: { r: 0, g: 128, b: 255, alpha: 1 } },
+  }).png().toBuffer()
   return new Blob([pngBuffer], { type: 'image/png' })
 }
 
@@ -320,9 +316,14 @@ async function main() {
 
   const { createApp } = await import('../src/app.js')
   const { AppDataSource } = await import('../src/config/data-source.js')
+  const { ClientUser } = await import('../src/entities/client-user.entity.js')
+  const { ClientUserSession } = await import('../src/entities/client-user-session.entity.js')
   const { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } = await import('../src/config/database-bootstrap.js')
   const { authService } = await import('../src/services/auth.service.js')
+  const { clientAuthService } = await import('../src/services/client-auth.service.js')
   const { systemConfigService } = await import('../src/services/system-config.service.js')
+  const { hashPassword } = await import('../src/utils/password.js')
+  const { hashSessionToken } = await import('../src/utils/session-token.js')
 
   prepareDatabaseRuntime()
   await AppDataSource.initialize()
@@ -396,55 +397,33 @@ async function main() {
     assert.ok(operatorLogin.user.permissions?.includes('customer_service:reply'))
     pass('客服操作员权限读取通过')
 
-    const registerCaptcha = await expectJsonOk<{ data: { captchaSvg: string; captchaId: string } }>(
-      () => fetch(`${baseUrl}/api/client-auth/captcha`),
-      '客户端注册图形验证码获取',
-    )
     const clientAccount = `13${String(Date.now()).slice(-9)}`
     const clientUsername = `反馈用户${toChineseDigits(String(Date.now()).slice(-6))}`
-
-    await expectJsonOk<{
-      data: {
-        user: {
-          id: string
-        }
-      }
-    }>(
-      () =>
-        fetch(`${baseUrl}/api/client-auth/register`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            accountType: 'personal',
-            username: clientUsername,
-            account: clientAccount,
-            password: clientPassword,
-            captchaId: registerCaptcha.captchaId,
-            captchaCode: readCaptchaCode(registerCaptcha.captchaSvg),
-          }),
-        }),
-      '客户端注册',
-    )
-    pass('客户端注册通过')
-
-    const loginCaptcha = await expectJsonOk<{ data: { captchaSvg: string; captchaId: string } }>(
-      () => fetch(`${baseUrl}/api/client-auth/captcha`),
-      '客户端登录图形验证码获取',
-    )
-    const clientLogin = await loginClientSession(
-      baseUrl,
-      {
-        account: clientAccount,
-        password: clientPassword,
-        captchaId: loginCaptcha.captchaId,
-        captchaCode: readCaptchaCode(loginCaptcha.captchaSvg),
-      },
-      '客户端登录',
-    )
+    await AppDataSource.getRepository(ClientUser).save({
+      mobile: clientAccount,
+      email: null,
+      mobileVerifiedAt: null,
+      emailVerifiedAt: null,
+      passwordHash: await hashPassword(clientPassword),
+      realName: clientUsername,
+      departmentName: '',
+      departmentNodeId: null,
+      accountType: 'personal',
+      staffNo: null,
+      staffVerified: false,
+      status: 'enabled',
+      lastLoginAt: null,
+    })
+    const clientLogin = await clientAuthService.login({
+      account: clientAccount,
+      password: clientPassword,
+    })
     const clientToken = clientLogin.token
-    pass('客户端登录通过')
+    assert.ok(
+      await AppDataSource.getRepository(ClientUserSession).findOne({ where: { sessionToken: hashSessionToken(clientToken) } }),
+      '隔离客户端会话必须已持久化为摘要',
+    )
+    pass('反馈专项客户端会话准备通过')
 
     const portalConfig = await expectJsonOk<{
       data: {
@@ -474,6 +453,13 @@ async function main() {
     assert.equal(clientConnected.eventType, 'connected')
     assert.equal(serviceConnected.eventType, 'connected')
     assert.equal(serviceConnected.availability?.isOnline, true)
+    for (const connectedEvent of [clientConnected, serviceConnected]) {
+      const payload = connectedEvent as Record<string, unknown>
+      assert.equal('subscriberId' in payload, false, 'SSE 建连事件不得暴露订阅标识')
+      assert.equal('scope' in payload, false, 'SSE 建连事件不得暴露订阅范围')
+      assert.equal('session' in payload, false, 'SSE 建连事件不得暴露会话连接快照')
+      assert.equal('occurredAt' in payload, false, 'SSE 建连事件不得暴露连接时间')
+    }
     pass('客户端与客服端 SSE 建连通过')
 
     const servicePresence = await expectJsonOk<{
@@ -509,13 +495,13 @@ async function main() {
     }>(
       () => {
         const formData = new FormData()
-        formData.append('file', createTinyPngBlob(), 'feedback-create-proof.png')
-        return fetch(`${baseUrl}/api/client-feedback/attachments`, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${clientToken}`,
-          },
-          body: formData,
+        return createTinyPngBlob().then((blob) => {
+          formData.append('file', blob, 'feedback-create-proof.png')
+          return fetch(`${baseUrl}/api/client-feedback/attachments`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${clientToken}` },
+            body: formData,
+          })
         })
       },
       '客户端上传建单附件',
@@ -523,6 +509,13 @@ async function main() {
     assert.match(initialAttachment.attachment.url, /^\/api\/client-feedback\/attachments\//)
     assert.equal(initialAttachment.attachment.mimeType, 'image/png')
     pass('客户端上传建单附件通过')
+
+    const unboundAttachmentForService = await fetch(
+      `${baseUrl}${initialAttachment.attachment.url.replace('/api/client-feedback/', '/api/customer-service/')}`,
+      { headers: { Authorization: `Bearer ${operatorToken}` } },
+    )
+    assert.equal(unboundAttachmentForService.status, 404, '客服不得读取尚未绑定消息的草稿附件')
+    pass('客服无法读取未绑定的草稿附件')
 
     const createdConversation = await expectJsonOk<{
       data: {
@@ -561,6 +554,12 @@ async function main() {
     const conversationId = createdConversation.conversation.id
     assert.ok(conversationId)
     assert.equal(createdConversation.conversation.fields.issueType, 'bug')
+    const boundAttachmentForService = await fetch(
+      `${baseUrl}${initialAttachment.attachment.url.replace('/api/client-feedback/', '/api/customer-service/')}`,
+      { headers: { Authorization: `Bearer ${operatorToken}` } },
+    )
+    assert.equal(boundAttachmentForService.status, 200, '客服应可读取已绑定到真实消息的附件')
+    assert.equal(boundAttachmentForService.headers.get('content-type')?.startsWith('image/png'), true)
     await clientStream.waitForEvent<{ eventType: string; conversationId: string }>(
       'conversation',
       (event) => event.eventType === 'conversation_created' && event.conversationId === conversationId,
@@ -842,13 +841,13 @@ async function main() {
     }>(
       () => {
         const formData = new FormData()
-        formData.append('file', createTinyPngBlob(), 'feedback-reply-proof.png')
-        return fetch(`${baseUrl}/api/client-feedback/attachments`, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${clientToken}`,
-          },
-          body: formData,
+        return createTinyPngBlob().then((blob) => {
+          formData.append('file', blob, 'feedback-reply-proof.png')
+          return fetch(`${baseUrl}/api/client-feedback/attachments`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${clientToken}` },
+            body: formData,
+          })
         })
       },
       '客户端上传补充说明附件',
