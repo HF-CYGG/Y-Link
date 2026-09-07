@@ -1,11 +1,12 @@
 /**
  * 文件说明：图形验证码服务，负责生成不可从响应文本还原答案的 PNG 验证码并校验一次性票据。
- * 实现逻辑：管理端与客户端使用独立、有界的票据存储；保留 SVG 字段仅作为 PNG 图像包装，兼容旧前端消费方式。
+ * 实现逻辑：svg-captcha 使用包内字体生成字形路径，sharp 栅格化后输出 PNG；管理端与客户端使用独立、有界的票据存储。
  * 维护说明：测试应通过构造函数注入固定验证码和渲染器，禁止从 HTTP 响应的图像或 SVG 文本反推出答案。
  */
 
 import { randomBytes, randomUUID } from 'node:crypto'
 import sharp from 'sharp'
+import svgCaptcha from 'svg-captcha'
 import { BizError } from '../utils/errors.js'
 import { EphemeralTicketStore } from '../utils/ephemeral-ticket-store.js'
 
@@ -37,34 +38,25 @@ const randomCaptchaCode = () => {
   return Array.from(buffer).map((item) => alphabet[item % alphabet.length]).join('')
 }
 
-const buildCaptchaSvg = (code: string) => {
-  const chars = code.split('')
-  const noiseLines = Array.from({ length: 5 }, (_, index) => {
-    const startX = 8 + index * 24
-    const startY = 10 + (index % 2 === 0 ? 4 : 16)
-    const endX = startX + 28
-    const endY = startY + (index % 2 === 0 ? 12 : -10)
-    return `<path d="M${startX} ${startY} L${endX} ${endY}" stroke="rgba(13,148,136,0.22)" stroke-width="1.5" stroke-linecap="round"/>`
-  }).join('')
-  const noiseDots = Array.from({ length: 12 }, (_, index) => {
-    const cx = 10 + ((index * 11) % 120)
-    const cy = 8 + ((index * 7) % 24)
-    const radius = index % 3 === 0 ? 1.4 : 1
-    return `<circle cx="${cx}" cy="${cy}" r="${radius}" fill="rgba(15,23,42,0.16)"/>`
-  }).join('')
-  const labels = chars
-    .map((char, index) => {
-      const x = 18 + index * 18
-      const y = 27 + (index % 2 === 0 ? -2 : 3)
-      const rotate = index % 2 === 0 ? -8 : 7
-      const color = index % 2 === 0 ? '#0f766e' : '#0f172a'
-      return `<text x="${x}" y="${y}" font-size="20" fill="${color}" font-family="Arial, Helvetica, sans-serif" font-weight="700" transform="rotate(${rotate} ${x} ${y})">${char}</text>`
-    })
-    .join('')
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="140" height="40" viewBox="0 0 140 40" role="img" aria-label="图形验证码"><defs><linearGradient id="captcha-bg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#f8fafc"/><stop offset="100%" stop-color="#d1fae5"/></linearGradient></defs><rect width="140" height="40" rx="10" fill="url(#captcha-bg)"/>${noiseLines}${noiseDots}${labels}</svg>`
-}
+// 包的公开函数支持指定答案，但其类型声明仅覆盖 create 等属性；在此补齐调用签名。
+// 答案继续使用 node:crypto 生成，字形、扰动和干扰线全部交由开源包处理。
+const createSvgCaptcha = svgCaptcha as typeof svgCaptcha & (
+  (text: string, options: Parameters<typeof svgCaptcha.create>[0]) => string
+)
 
-const renderCaptchaPng: CaptchaRenderer = async (svg) => sharp(Buffer.from(svg)).png().toBuffer()
+const buildCaptchaSvg = (code: string) => createSvgCaptcha(code, {
+  width: 140,
+  height: 40,
+  fontSize: 40,
+  noise: 1,
+  color: false,
+  background: '',
+})
+
+const renderCaptchaPng: CaptchaRenderer = async (svg) => sharp(Buffer.from(svg))
+  .flatten({ background: '#ecfdf5' })
+  .png()
+  .toBuffer()
 
 const wrapPngAsSvg = (pngDataUrl: string) => (
   `<svg xmlns="http://www.w3.org/2000/svg" width="140" height="40" viewBox="0 0 140 40" role="img" aria-label="图形验证码"><image width="140" height="40" href="${pngDataUrl}"/></svg>`

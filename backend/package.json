@@ -29,6 +29,7 @@
     "release:verify": "tsx scripts/release-full-regression-verify.ts",
     "security:hardening:verify": "tsx scripts/security-hardening-verify.ts",
     "security:auth-depth:verify": "node --import tsx scripts/security-hardening-auth-verify.ts",
+    "captcha:rendering:verify": "node --import tsx scripts/captcha-rendering-verify.ts",
     "security:auth-sse-final:verify": "node --import tsx scripts/auth-sse-final-regression-verify.ts",
     "security:http-boundary:verify": "node --import tsx scripts/http-security-verify.ts",
     "security:business-boundary:verify": "node --import tsx scripts/security-business-contract-verify.ts",
@@ -89,6 +90,7 @@
     "mysql2": "^3.15.2",
     "reflect-metadata": "^0.2.2",
     "sharp": "^0.35.3",
+    "svg-captcha": "1.4.0",
     "typeorm": "^0.3.29",
     "uuid": "^11.1.1",
     "zod": "^3.25.76"

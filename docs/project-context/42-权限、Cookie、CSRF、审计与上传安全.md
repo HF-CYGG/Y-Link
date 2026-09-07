@@ -36,6 +36,7 @@
 - `requireAdminCsrf` 仅对管理端非安全方法请求生效，且仅在 Cookie 会话来源下校验。
 - `requireRole` 和 `requirePermission` 在拒绝请求时会写安全审计。
 - `app.ts` 会给上传资源附加长期缓存、安全头和旧路径兼容重写逻辑。
+- 管理端与客户端图形验证码由 `captcha.service.ts` 共用生成链路：`svg-captcha` 使用包内字体绘制字符路径，`sharp` 转为 140×40 PNG，不依赖容器系统字体。答案仍由 `node:crypto` 生成；旧 `captchaSvg` 字段仅包装 PNG，不返回答案文本或字形路径。
 
 ## 代理、HTTPS 与救援传输边界
 
@@ -72,3 +73,4 @@
 - 改权限或鉴权时回归：登录、刷新恢复、写操作、越权拦截、审计记录。
 - 改上传安全时回归：新图片可访问、旧图片兼容访问、响应头正确。
 - 改 CSRF 时回归：管理端写接口在 Cookie 会话下的正常提交与失败提示。
+- 改图形验证码时执行 `npm --prefix backend run captcha:rendering:verify`，覆盖无系统字体的真实 PNG 渲染、兼容字段、作用域隔离和一次性校验。
