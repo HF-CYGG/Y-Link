@@ -37,11 +37,14 @@ RUN npm run build
 # ------------------------------
 # 后端构建阶段：编译服务端 TypeScript 代码。
 # ------------------------------
-FROM ${Y_LINK_NODE_IMAGE} AS backend-build
+# 后端编译同样固定在 $BUILDPLATFORM 上执行：tsc 是纯 JavaScript，产物与目标架构无关。
+# `--ignore-scripts` 跳过 sqlite3 / sharp 的原生编译，本阶段只需要它们的类型定义；
+# 真正与架构绑定的原生产物由下方 backend-prod-deps 阶段在目标平台安装。
+FROM --platform=$BUILDPLATFORM ${Y_LINK_NODE_IMAGE} AS backend-build
 WORKDIR /backend
 COPY backend/package*.json ./
 COPY backend/.npmrc ./.npmrc
-RUN npm ci
+RUN npm ci --ignore-scripts
 COPY backend/tsconfig.json ./
 COPY backend/src ./src
 RUN npm run build

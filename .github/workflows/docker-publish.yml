@@ -1,3 +1,13 @@
+# ------------------------------
+# 文件说明：Y-Link 多平台镜像发布流水线。
+# 实现逻辑：
+# 1. prepare 作业统一计算镜像仓库、命名空间与推送开关，通过 outputs 分发给后续作业；
+# 2. build 作业按「镜像 × 平台」矩阵并行构建，arm64 使用 GitHub 原生 ARM Runner，
+#    不再经 QEMU 指令模拟；产物以 digest 形式推入 GHCR 暂存；
+# 3. merge 作业按镜像合并各平台 digest 生成多平台 manifest，
+#    并一次性打到 GHCR / Docker Hub / 阿里云 ACR 的正式标签上。
+# 维护说明：新增镜像时需同步扩展 prepare 的镜像清单输出，以及 build / merge 的 matrix。
+# ------------------------------
 name: docker-publish
 
 on:
@@ -17,17 +27,30 @@ concurrency:
   group: docker-publish-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
-  publish:
+  # ------------------------------
+  # 计算镜像仓库与推送规则：整条流水线只计算一次，结果供所有并行作业复用。
+  # ------------------------------
+  prepare:
     runs-on: ubuntu-latest
     env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       HAS_DOCKERHUB_CREDS: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
       HAS_ACR_CREDS: ${{ secrets.ACR_USERNAME != '' && secrets.ACR_PASSWORD != '' }}
+    outputs:
+      gh_owner: ${{ steps.prepare.outputs.gh_owner }}
+      namespace: ${{ steps.prepare.outputs.namespace }}
+      acr_registry: ${{ steps.prepare.outputs.acr_registry }}
+      acr_namespace: ${{ steps.prepare.outputs.acr_namespace }}
+      acr_push_mode: ${{ steps.prepare.outputs.acr_push_mode }}
+      acr_enabled: ${{ steps.prepare.outputs.acr_enabled }}
+      dockerhub_enabled: ${{ steps.prepare.outputs.dockerhub_enabled }}
+      frontend_images: ${{ steps.prepare.outputs.frontend_images }}
+      backend_images: ${{ steps.prepare.outputs.backend_images }}
+      onebox_images: ${{ steps.prepare.outputs.onebox_images }}
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v6
-
       - name: 计算镜像仓库与推送规则
         id: prepare
         shell: bash
@@ -151,14 +174,108 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-      - name: 启用 QEMU
-        uses: docker/setup-qemu-action@v4
+  # ------------------------------
+  # 单平台构建：6 个作业并行，每个作业只负责一个镜像的一个平台。
+  # arm64 使用 GitHub 原生 ARM Runner（公共仓库免费），彻底去掉 QEMU 模拟开销；
+  # 构建产物先按 digest 推入 GHCR 暂存，正式标签交给 merge 作业统一打。
+  # ------------------------------
+  build:
+    needs: prepare
+    runs-on: ${{ matrix.platform == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [frontend, backend, onebox]
+        platform: [amd64, arm64]
+        include:
+          - image: frontend
+            context: .
+            file: ./Dockerfile
+          - image: backend
+            context: ./backend
+            file: ./backend/Dockerfile
+          - image: onebox
+            context: .
+            file: ./Dockerfile.onebox
+    env:
+      # 各平台中间产物统一暂存在 GHCR，merge 阶段再分发到其余镜像仓库。
+      STAGING_IMAGE: ghcr.io/${{ needs.prepare.outputs.gh_owner }}/y-link-${{ matrix.image }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+
+      - name: 启用 Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: 登录 GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 构建并按 digest 推送
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          platforms: linux/${{ matrix.platform }}
+          # 关闭 provenance / sbom，确保 digest 直接指向平台镜像本身，便于清单合并。
+          provenance: false
+          sbom: false
+          outputs: type=image,name=${{ env.STAGING_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          # 采用 registry 缓存：不占用 Actions Cache 的 10GB 仓库配额，
+          # 与 GHCR 同机房读写更快，且可跨分支、跨作业复用。
+          cache-from: type=registry,ref=${{ env.STAGING_IMAGE }}:buildcache-${{ matrix.platform }}
+          cache-to: type=registry,ref=${{ env.STAGING_IMAGE }}:buildcache-${{ matrix.platform }},mode=max,image-manifest=true,oci-mediatypes=true
+
+      - name: 导出 digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          digest="${{ steps.build.outputs.digest }}"
+          if [ -z "$digest" ]; then
+            echo "构建未产出 digest" >&2
+            exit 1
+          fi
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: 上传 digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.image }}-${{ matrix.platform }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # ------------------------------
+  # 合并清单：把同一镜像的各平台 digest 组装成多平台 manifest，
+  # 并按元数据规则一次性打到所有已启用的镜像仓库标签上。
+  # ------------------------------
+  merge:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [frontend, backend, onebox]
+    env:
+      STAGING_IMAGE: ghcr.io/${{ needs.prepare.outputs.gh_owner }}/y-link-${{ matrix.image }}
+    steps:
+      - name: 下载 digest
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-${{ matrix.image }}-*
+          merge-multiple: true
 
       - name: 启用 Buildx
         uses: docker/setup-buildx-action@v4
 
       - name: 登录 Docker Hub
-        if: ${{ env.HAS_DOCKERHUB_CREDS == 'true' }}
+        if: ${{ needs.prepare.outputs.dockerhub_enabled == 'true' }}
         uses: docker/login-action@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -172,78 +289,51 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 登录阿里云 ACR
-        if: ${{ steps.prepare.outputs.acr_enabled == 'true' }}
+        if: ${{ needs.prepare.outputs.acr_enabled == 'true' }}
         uses: docker/login-action@v4
         with:
-          registry: ${{ steps.prepare.outputs.acr_registry }}
+          registry: ${{ needs.prepare.outputs.acr_registry }}
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
 
-      - name: 生成前端镜像元数据
-        id: frontend_meta
+      - name: 生成镜像元数据
+        id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ steps.prepare.outputs.frontend_images }}
+          images: ${{ needs.prepare.outputs[format('{0}_images', matrix.image)] }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch
             type=ref,event=tag
             type=sha,prefix=sha-
 
-      - name: 构建并推送前端镜像
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.frontend_meta.outputs.tags }}
-          labels: ${{ steps.frontend_meta.outputs.labels }}
-          cache-from: type=gha,scope=y-link-frontend
-          cache-to: type=gha,mode=max,scope=y-link-frontend
+      - name: 合并并推送多平台清单
+        shell: bash
+        working-directory: /tmp/digests
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          sources=()
+          for digest_file in *; do
+            sources+=("${STAGING_IMAGE}@sha256:${digest_file}")
+          done
+          if [ "${#sources[@]}" -eq 0 ]; then
+            echo "没有可合并的 digest" >&2
+            exit 1
+          fi
+          mapfile -t tag_args < <(jq -r '.tags[] | "--tag", .' <<< "$DOCKER_METADATA_OUTPUT_JSON")
+          docker buildx imagetools create "${tag_args[@]}" "${sources[@]}"
 
-      - name: 生成后端镜像元数据
-        id: backend_meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ steps.prepare.outputs.backend_images }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=branch
-            type=ref,event=tag
-            type=sha,prefix=sha-
-
-      - name: 构建并推送后端镜像
-        uses: docker/build-push-action@v7
-        with:
-          context: ./backend
-          file: ./backend/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.backend_meta.outputs.tags }}
-          labels: ${{ steps.backend_meta.outputs.labels }}
-          cache-from: type=gha,scope=y-link-backend
-          cache-to: type=gha,mode=max,scope=y-link-backend
-
-      - name: 生成 onebox 镜像元数据
-        id: onebox_meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ steps.prepare.outputs.onebox_images }}
-          tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=ref,event=branch
-            type=ref,event=tag
-            type=sha,prefix=sha-
-
-      - name: 构建并推送 onebox 镜像
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          file: ./Dockerfile.onebox
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.onebox_meta.outputs.tags }}
-          labels: ${{ steps.onebox_meta.outputs.labels }}
-          cache-from: type=gha,scope=y-link-onebox
-          cache-to: type=gha,mode=max,scope=y-link-onebox
+      - name: 校验清单平台完整性
+        shell: bash
+        run: |
+          set -euo pipefail
+          primary_tag="$(jq -r '.tags[0]' <<< "$DOCKER_METADATA_OUTPUT_JSON")"
+          echo "校验 ${primary_tag}"
+          docker buildx imagetools inspect "$primary_tag" --format '{{json .Manifest}}' \
+            | jq -r '.manifests[] | "\(.platform.os)/\(.platform.architecture)"' \
+            | sort -u > /tmp/platforms.txt
+          cat /tmp/platforms.txt
+          for expected in linux/amd64 linux/arm64; do
+            grep -qx "$expected" /tmp/platforms.txt || { echo "缺少平台 $expected" >&2; exit 1; }
+          done
