@@ -47,9 +47,12 @@ jobs:
       acr_push_mode: ${{ steps.prepare.outputs.acr_push_mode }}
       acr_enabled: ${{ steps.prepare.outputs.acr_enabled }}
       dockerhub_enabled: ${{ steps.prepare.outputs.dockerhub_enabled }}
-      frontend_images: ${{ steps.prepare.outputs.frontend_images }}
-      backend_images: ${{ steps.prepare.outputs.backend_images }}
-      onebox_images: ${{ steps.prepare.outputs.onebox_images }}
+      # 三个镜像的仓库清单统一放进一个 JSON object 输出。
+      # 不要拆成 frontend_images / backend_images / onebox_images 再用
+      # needs.prepare.outputs[format('{0}_images', matrix.image)] 动态索引读取：
+      # 该写法在 needs 上下文里不会求值，会静默得到空字符串，
+      # 使 metadata-action 退化成只输出裸标签名，最终推到 docker.io/library/<tag>。
+      images_json: ${{ steps.prepare.outputs.images_json }}
     steps:
       - name: 计算镜像仓库与推送规则
         id: prepare
@@ -162,17 +165,18 @@ jobs:
             onebox_images="${acr_registry}/${acr_namespace}/y-link"$'\n'"${onebox_images}"
           fi
 
-          {
-            echo "frontend_images<<EOF"
-            echo "$frontend_images"
-            echo "EOF"
-            echo "backend_images<<EOF"
-            echo "$backend_images"
-            echo "EOF"
-            echo "onebox_images<<EOF"
-            echo "$onebox_images"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          # 输出为单行 JSON，供 merge 作业用 fromJSON(...)[matrix.image] 按镜像取用。
+          images_json="$(jq -nc \
+            --arg frontend "$frontend_images" \
+            --arg backend "$backend_images" \
+            --arg onebox "$onebox_images" \
+            '{
+              frontend: ($frontend | split("\n") | map(select(length > 0))),
+              backend: ($backend | split("\n") | map(select(length > 0))),
+              onebox: ($onebox | split("\n") | map(select(length > 0)))
+            }')"
+          write_output "images_json" "$images_json"
+          echo "镜像仓库清单: $images_json"
 
   # ------------------------------
   # 单平台构建：6 个作业并行，每个作业只负责一个镜像的一个平台。
@@ -312,7 +316,8 @@ jobs:
           # imagetools 合并出的是 image index，注解层级需要对应改成 index。
           DOCKER_METADATA_ANNOTATIONS_LEVELS: index
         with:
-          images: ${{ needs.prepare.outputs[format('{0}_images', matrix.image)] }}
+          # metadata-action 的 images 同时接受换行与逗号分隔，这里用逗号拼接。
+          images: ${{ join(fromJSON(needs.prepare.outputs.images_json)[matrix.image], ',') }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch
@@ -342,6 +347,13 @@ jobs:
           args=()
           while IFS= read -r tag; do
             [ -n "$tag" ] || continue
+            # 兜底断言：标签必须是含仓库路径的完整引用。
+            # 一旦 images 输入为空，metadata-action 只会给出裸标签名，
+            # imagetools 会把它当成 docker.io/library/<tag> 而推送失败，这里提前拦下。
+            if [[ "$tag" != */* ]]; then
+              echo "镜像标签缺少仓库地址: ${tag}；请检查 prepare 作业的 images_json 输出" >&2
+              exit 1
+            fi
             args+=(--tag "$tag")
           done <<< "$IMAGE_TAGS"
           if [ "${#args[@]}" -eq 0 ]; then
