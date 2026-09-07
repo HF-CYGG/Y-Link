@@ -66,6 +66,10 @@
 
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import {
+  getPersonalClientUsernameRuleHint,
+  normalizePersonalClientUsername,
+} from '@ylink/validation/auth'
 
 import type { AxiosResponse } from 'axios'
 import { http } from '@/api/http'
@@ -93,7 +97,6 @@ import {
   isClientNewPasswordValid,
 } from '@/utils/client-password-policy'
 import { normalizeRequestError } from '@/utils/error'
-import { CLIENT_REGISTRATION_USERNAME_HINT, isPersonalRegistrationUsernameValid } from '@/utils/client-registration-policy'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 
 import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
@@ -529,6 +532,10 @@ const validateLoginPassword = (password: string) => password.trim().length > 0
  * - 继续复用共享的新密码强度规则，保证注册与改密口径一致。
  */
 const validateRegisterPassword = (password: string) => isClientNewPasswordValid(password)
+const registerUsernameRuleHint = computed(() => {
+  if (!registerForm.username) return ''
+  return getPersonalClientUsernameRuleHint(registerForm.username)
+})
 const validateStaffNo = (staffNo: string) => /^[A-Za-z0-9-]{4,32}$/.test(staffNo.trim())
 const validateLoginAccount = (account: string) => account.trim().length > 0
 const resolveAccountChannel = (account: string): 'mobile' | 'email' | null => {
@@ -885,8 +892,8 @@ const validateRegisterBeforeSubmit = () => {
       return null
     }
   } else {
-    if (!isPersonalRegistrationUsernameValid(registerForm.username)) {
-      showAppWarning(CLIENT_REGISTRATION_USERNAME_HINT)
+    if (getPersonalClientUsernameRuleHint(registerForm.username)) {
+      showAppWarning(getPersonalClientUsernameRuleHint(registerForm.username))
       return null
     }
     if (!accountChannel) {
@@ -911,7 +918,7 @@ const validateRegisterBeforeSubmit = () => {
 
   return {
     registeredAccount: normalizeInputText(registerForm.account),
-    registeredUsername: isDepartmentRegisterMode.value ? '' : normalizeInputText(registerForm.username),
+    registeredUsername: isDepartmentRegisterMode.value ? '' : normalizePersonalClientUsername(registerForm.username).value,
   }
 }
 
@@ -1357,7 +1364,7 @@ onUnmounted(() => {
                 <el-form @submit.prevent="handleRegister" class="space-y-4 mt-6">
                   <el-input
                     v-model="registerForm.username"
-                    placeholder="用户名（2-20位中文或英文字母）"
+                    placeholder="用户名（中文或英文字母，2-20 位）"
                     class="geo-input"
                     size="large"
                     clearable
@@ -1366,6 +1373,7 @@ onUnmounted(() => {
                       <el-icon class="input-icon"><User /></el-icon>
                     </template>
                   </el-input>
+                  <p v-if="registerUsernameRuleHint" class="input-rule-hint" role="alert">{{ registerUsernameRuleHint }}</p>
 
                   <el-input 
                     v-model="registerForm.account" 

@@ -113,6 +113,17 @@ export interface DeleteO2oConsoleOrderResult {
   outboundSerialRolledBack: boolean
 }
 
+export interface CancelO2oConsoleOrderPayload { reason: string }
+export interface BatchPurgeCancelledO2oOrdersPayload {
+  orders: Array<{ id: string; confirmShowNo: string }>
+  permanentDeletePassword?: string
+}
+export interface BatchPurgeCancelledO2oOrdersResult {
+  batchId: string
+  summary: { requested: number; deleted: number; skipped: number; failed: number }
+  results: Array<{ id: string; showNo?: string; outcome: 'deleted' | 'skipped' | 'failed'; code: string; message: string }>
+}
+
 /**
  * 管理端订单池查询参数：
  * - 与后端 `/o2o/orders` 路由保持一致；
@@ -276,6 +287,12 @@ export const deleteO2oConsoleOrder = (
     data: payload,
     ...config,
   })
+
+export const cancelO2oConsoleOrder = (id: string, payload: CancelO2oConsoleOrderPayload, config?: RequestConfig) =>
+  request<O2oPreorderDetail>({ method: 'POST', url: `/o2o/orders/${id}/cancel`, data: payload, ...config })
+
+export const batchPurgeCancelledO2oOrders = (payload: BatchPurgeCancelledO2oOrdersPayload, config?: RequestConfig) =>
+  request<BatchPurgeCancelledO2oOrdersResult>({ method: 'POST', url: '/o2o/orders/batch-purge-cancelled', data: payload, ...config })
 
 export const updateO2oOrderBusinessStatus = (
   id: string,

@@ -394,7 +394,7 @@ const timelineItems = computed(() => {
       {
         key: 'cancelled',
         title: report.timelineCurrentTitle,
-        time: formatOrderDateTime(order.timeoutAt, '已取消'),
+        time: formatOrderDateTime(order.statusReport?.cancelledAt, '历史订单未留存取消时间'),
         active: true,
       },
       {
@@ -603,11 +603,18 @@ const qrDisabledHint = computed(() => {
   if (detail.value.order.status === 'verified') {
     return '订单已核销完成，二维码与取货码已停用'
   }
-  if (detail.value.order.statusReport?.cancelReason === 'manual') {
-    return '订单已撤回，二维码与取货码已停用'
-  }
-  if (currentReportScenario.value === 'timeout_cancelled') {
-    return '订单已超时取消，二维码与取货码已停用'
+  if (detail.value.order.status === 'cancelled') {
+    const cancellationSource = detail.value.order.statusReport?.cancellationSource ?? null
+    if (cancellationSource === 'client') {
+      return '订单已撤回，二维码与取货码已停用'
+    }
+    if (cancellationSource === 'admin') {
+      return '订单已由管理端取消，二维码与取货码已停用'
+    }
+    if (cancellationSource === 'system') {
+      return '订单已由系统取消，二维码与取货码已停用'
+    }
+    return '历史订单已取消，二维码与取货码已停用'
   }
   return '当前订单二维码暂不可用'
 })

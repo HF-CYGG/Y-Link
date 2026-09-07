@@ -1,19 +1,20 @@
 import React from 'react';
-import { View, TextInput, StyleSheet, TextInputProps, TouchableOpacity, Text } from 'react-native';
+import { View, TextInput, StyleSheet, TextInputProps, TouchableOpacity, Text, StyleProp, ViewStyle } from 'react-native';
 import { theme } from '../theme';
 
 export interface SearchBarProps extends TextInputProps {
   onClear?: () => void;
+  containerStyle?: StyleProp<ViewStyle>;
 }
 
-export function SearchBar({ onClear, value, style, ...props }: SearchBarProps) {
+export function SearchBar({ onClear, value, containerStyle, style, ...props }: SearchBarProps) {
   return (
-    <View style={[styles.container, style]}>
+    <View style={[styles.container, containerStyle]}>
       <View style={styles.iconPlaceholder}>
         <Text style={styles.iconText}>🔍</Text>
       </View>
       <TextInput
-        style={styles.input}
+        style={[styles.input, style]}
         value={value}
         placeholderTextColor={theme.colors.placeholder}
         returnKeyType="search"

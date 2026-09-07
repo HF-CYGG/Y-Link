@@ -15,6 +15,7 @@ export type O2oOrderBusinessStatus =
 
 export type O2oClientOrderType = 'department' | 'walkin'
 export type O2oOrderCancelReason = 'timeout' | 'manual'
+export type O2oOrderCancellationSource = 'client' | 'admin' | 'system'
 export type ClientOrderReportScenario =
   | 'pending'
   | 'timeout_soon'
@@ -25,6 +26,9 @@ export type ClientOrderReportScenario =
 export interface O2oOrderStatusReport {
   scenario: ClientOrderReportScenario
   cancelReason: O2oOrderCancelReason | null
+  cancellationSource: O2oOrderCancellationSource | null
+  cancellationRemark: string | null
+  cancelledAt: string | null
   timeoutReached: boolean
   timeoutSoon: boolean
 }

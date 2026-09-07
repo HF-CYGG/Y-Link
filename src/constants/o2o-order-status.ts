@@ -10,6 +10,7 @@ import type {
   ClientOrderReportScenario,
   O2oOrderBusinessStatus,
   O2oOrderCancelReason,
+  O2oOrderCancellationSource,
   O2oOrderStatus,
 } from '../../packages/shared-types/src/index'
 
@@ -17,6 +18,7 @@ export type {
   ClientOrderReportScenario,
   O2oOrderBusinessStatus,
   O2oOrderCancelReason,
+  O2oOrderCancellationSource,
   O2oOrderStatus,
 } from '../../packages/shared-types/src/index'
 
@@ -39,6 +41,9 @@ export const O2O_ORDER_TIMEOUT_SOON_WINDOW_MS = 2 * 60 * 60 * 1000
 export interface ClientOrderStatusReportLike {
   scenario?: ClientOrderReportScenario
   cancelReason?: O2oOrderCancelReason | null
+  cancellationSource?: O2oOrderCancellationSource | null
+  cancellationRemark?: string | null
+  cancelledAt?: string | null
 }
 
 export const O2O_ORDER_BUSINESS_STATUS_META: Record<
@@ -275,7 +280,7 @@ export const CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG: Record<
 /**
  * 客户端状态展示文案解析：
  * - 默认沿用场景配置表，保持列表页、详情页、状态卡片展示一致；
- * - 当后端明确返回 manual 时，客户端统一展示“已撤回”，避免与系统超时取消混淆；
+ * - 当后端明确返回 manual 时，再按 client/admin/system/null 区分撤回、取消与历史记录；
  * - 超时取消仍走 timeout_cancelled，保持风险提示更明确。
  */
 export const getClientOrderStatusReportConfig = (
@@ -289,12 +294,22 @@ export const getClientOrderStatusReportConfig = (
   const scenario = input.statusReport?.scenario ?? getClientOrderReportScenario(input.status, input.timeoutAt, nowMs)
   const baseConfig = CLIENT_O2O_ORDER_STATUS_REPORT_CONFIG[scenario]
   if (scenario === 'cancelled' && input.statusReport?.cancelReason === 'manual') {
+    const cancellationSource = input.statusReport.cancellationSource
+    const sourceLabel = cancellationSource === 'client'
+      ? '你'
+      : cancellationSource === 'admin'
+        ? '管理端'
+        : cancellationSource === 'system'
+          ? '系统'
+          : '历史记录'
+    const remark = input.statusReport.cancellationRemark?.trim()
+    const isClientCancellation = cancellationSource === 'client'
     return {
       ...baseConfig,
-      statusLabel: '已撤回',
-      cardTitle: '订单已撤回',
-      cardDescription: '订单已由你主动撤回，预订库存已释放。',
-      timelineCurrentTitle: '订单已撤回',
+      statusLabel: isClientCancellation ? '已撤回' : '已取消',
+      cardTitle: isClientCancellation ? '订单已撤回' : '订单已取消',
+      cardDescription: remark ? `订单已由${sourceLabel}取消：${remark}` : `订单已由${sourceLabel}取消，预订库存已释放。`,
+      timelineCurrentTitle: isClientCancellation ? '订单已撤回' : '订单已取消',
       timelineCurrentHint: '订单已关闭',
     }
   }

@@ -11,6 +11,7 @@ import type { ClientAuthenticatedRequest } from '../types/client-auth.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
 import {
+  CLIENT_PERSONAL_USERNAME_RULE_MESSAGE,
   normalizeClientAccount,
   normalizeClientVerificationTarget,
 } from '../utils/client-auth-account.js'
@@ -38,8 +39,8 @@ const clientPasswordSchema = (fieldLabel = '密码') =>
 
 const registerSchema = z
   .object({
-    // 保留原始字符交给服务校验，不能先 trim 后绕过空格禁用规则。
-    username: z.string().max(128).optional(),
+    // 不在路由层 trim：个人用户名的首尾空格也必须由权威规则拒绝。
+    username: z.string().max(128, CLIENT_PERSONAL_USERNAME_RULE_MESSAGE).optional(),
     account: z.string().trim().max(128).optional(),
     accountType: z.enum(['personal', 'department']),
     staffNo: z.string().trim().max(64).optional(),
@@ -56,11 +57,11 @@ const registerSchema = z
       if (isTeacherRegister && !/^\d{8}$/.test(payload.inviteCode ?? '')) {
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['inviteCode'], message: '请输入 8 位数字教师统一邀请码' })
       }
-      if (!isTeacherRegister && !payload.username?.trim()) {
+      if (!isTeacherRegister && !payload.username) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ['username'],
-          message: '个人注册必须填写真实姓名',
+          message: CLIENT_PERSONAL_USERNAME_RULE_MESSAGE,
         })
       }
       if (!isTeacherRegister && !payload.account?.trim()) {
@@ -108,7 +109,9 @@ const changePasswordSchema = z.object({
 })
 
 const updateProfileSchema = z.object({
-  username: z.string().trim().min(1).max(128),
+  username: z.string()
+    .min(1, CLIENT_PERSONAL_USERNAME_RULE_MESSAGE)
+    .max(128, CLIENT_PERSONAL_USERNAME_RULE_MESSAGE),
   mobile: z.string().trim().max(20).optional(),
   email: z.string().trim().max(128).optional(),
   currentPassword: z.string().min(1),
