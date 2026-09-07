@@ -214,6 +214,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # 单平台镜像的 OCI 标签必须在构建期写进 image config，
+      # 无法留到 merge 阶段补，因此这里按暂存仓库名单独生成一份元数据。
+      - name: 生成镜像标签元数据
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.STAGING_IMAGE }}
+
       - name: 构建并按 digest 推送
         id: build
         uses: docker/build-push-action@v7
@@ -221,6 +229,7 @@ jobs:
           context: ${{ matrix.context }}
           file: ${{ matrix.file }}
           platforms: linux/${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
           # 关闭 provenance / sbom，确保 digest 直接指向平台镜像本身，便于清单合并。
           provenance: false
           sbom: false
@@ -299,6 +308,9 @@ jobs:
       - name: 生成镜像元数据
         id: meta
         uses: docker/metadata-action@v6
+        env:
+          # imagetools 合并出的是 image index，注解层级需要对应改成 index。
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: index
         with:
           images: ${{ needs.prepare.outputs[format('{0}_images', matrix.image)] }}
           tags: |
@@ -310,6 +322,11 @@ jobs:
       - name: 合并并推送多平台清单
         shell: bash
         working-directory: /tmp/digests
+        env:
+          # 注意：只能用 step 的 tags 输出（完整镜像引用），
+          # DOCKER_METADATA_OUTPUT_JSON 里的 .tags 自 v6 起只是裸标签名，不含仓库地址。
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+          IMAGE_ANNOTATIONS: ${{ steps.meta.outputs.annotations }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -321,14 +338,34 @@ jobs:
             echo "没有可合并的 digest" >&2
             exit 1
           fi
-          mapfile -t tag_args < <(jq -r '.tags[] | "--tag", .' <<< "$DOCKER_METADATA_OUTPUT_JSON")
-          docker buildx imagetools create "${tag_args[@]}" "${sources[@]}"
+
+          args=()
+          while IFS= read -r tag; do
+            [ -n "$tag" ] || continue
+            args+=(--tag "$tag")
+          done <<< "$IMAGE_TAGS"
+          if [ "${#args[@]}" -eq 0 ]; then
+            echo "没有可用的镜像标签" >&2
+            exit 1
+          fi
+          while IFS= read -r annotation; do
+            [ -n "$annotation" ] || continue
+            args+=(--annotation "$annotation")
+          done <<< "$IMAGE_ANNOTATIONS"
+
+          docker buildx imagetools create "${args[@]}" "${sources[@]}"
 
       - name: 校验清单平台完整性
         shell: bash
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           set -euo pipefail
-          primary_tag="$(jq -r '.tags[0]' <<< "$DOCKER_METADATA_OUTPUT_JSON")"
+          primary_tag="$(head -n 1 <<< "$IMAGE_TAGS")"
+          if [ -z "$primary_tag" ]; then
+            echo "没有可校验的镜像标签" >&2
+            exit 1
+          fi
           echo "校验 ${primary_tag}"
           docker buildx imagetools inspect "$primary_tag" --format '{{json .Manifest}}' \
             | jq -r '.manifests[] | "\(.platform.os)/\(.platform.architecture)"' \
