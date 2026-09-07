@@ -23,7 +23,21 @@ for (const file of ['docker/nginx/default.conf', 'docker/nginx/default.conf.temp
     const body = source.slice(offset, source.indexOf('\n    }', offset))
     assert.match(body, /include \/etc\/nginx\/ylink\/page-security-headers\.conf;/, `${file} ${needle} 必须显式包含页面头`)
   }
+  if (!file.endsWith('.template')) {
+    const pagePattern = source.match(/location ~ (\^\/\(\?:database-rescue\|login\S+) \{/)
+    assert.ok(pagePattern, `${file} 缺少页面路由白名单`)
+    const pageRoute = new RegExp(pagePattern[1])
+    assert.ok(pageRoute.test('/reports'), `${file} 报表中心直链和刷新必须进入 SPA`)
+    for (const path of ['/.env', '/unknown-route', '/reports.json', '/reports-malicious']) {
+      assert.ok(!pageRoute.test(path), `${file} 不应把未知路径 ${path} 放行到 SPA`)
+    }
+  }
 }
+const pageHeaders = readFileSync('docker/nginx/page-security-headers.conf', 'utf8')
+const connectSources = pageHeaders.match(/connect-src\s+([^;]+);/)
+assert.ok(connectSources, '页面 CSP 必须显式约束网络连接来源')
+assert.deepEqual(connectSources[1].trim().split(/\s+/).sort(), ["'self'", 'https://v1.hitokoto.cn'].sort(),
+  '页面只允许同源请求和现有 HTTPS 语录服务，禁止通配放开外部连接')
 for (const file of ['compose.yml', 'compose.mysql.yml', 'compose.cloud.yml']) {
   const source = readFileSync(file, 'utf8')
   const backend = source.slice(source.indexOf('  backend:'), source.indexOf('  frontend:'))
