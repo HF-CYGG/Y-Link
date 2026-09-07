@@ -7,6 +7,7 @@
 import MNSClient from '@alicloud/mns'
 import RPCClient from '@alicloud/pop-core'
 import { env } from '../config/env.js'
+import { databaseOperationGate } from '../database/operation-gate.js'
 import type { SmsVerificationDeliveryStatus } from '../entities/sms-verification-record.entity.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { smsVerificationRecordService, type SmsVerificationRecordService } from './sms-verification-record.service.js'
@@ -271,6 +272,9 @@ export class AliyunDypnsMnsWorkerService {
   private stopping = false
   private lastRetentionCleanupAt = 0
   private cleanupTimer: ReturnType<typeof globalThis.setInterval> | null = null
+  private workerDesired = false
+  private loopDelayTimer: ReturnType<typeof globalThis.setTimeout> | null = null
+  private resolveLoopDelay: (() => void) | null = null
 
   constructor(
     private readonly recordService: Pick<SmsVerificationRecordService, 'applyReceipt' | 'cleanupExpiredRecords'> = smsVerificationRecordService,
@@ -290,7 +294,18 @@ export class AliyunDypnsMnsWorkerService {
         accessKeySecret: input.accessKeySecret,
       }),
     },
-  ) {}
+  ) {
+    databaseOperationGate.registerWorker({
+      name: 'aliyun-dypns-mns',
+      pause: () => this.pauseWorker(),
+      drain: async () => {
+        if (this.loopPromise) await this.loopPromise
+      },
+      resume: () => {
+        if (this.workerDesired) this.startWorker()
+      },
+    })
+  }
 
   getStatus() {
     const credentialsConfigured = Boolean(env.ALIBABA_CLOUD_ACCESS_KEY_ID && env.ALIBABA_CLOUD_ACCESS_KEY_SECRET)
@@ -375,36 +390,44 @@ export class AliyunDypnsMnsWorkerService {
     if (!env.ALIYUN_DYPNS_MNS_ENABLED || databaseMaintenanceModeService.isReadOnly()) {
       return 0
     }
-    this.assertMnsConfiguration()
-    if (Date.now() - this.lastRetentionCleanupAt >= RETENTION_CLEANUP_INTERVAL_MS) {
-      await this.recordService.cleanupExpiredRecords()
-      this.lastRetentionCleanupAt = Date.now()
+    const releaseMaintenanceLease = databaseMaintenanceModeService.registerInFlightWrite()
+    if (!releaseMaintenanceLease) {
+      return 0
     }
-    const client = await this.getClient()
-    let response: unknown
     try {
-      response = await client.batchReceiveMessage(DYPNS_SMS_RECEIPT_QUEUE_NAME, MNS_BATCH_SIZE, MNS_POLL_WAIT_SECONDS)
-    } catch (error) {
-      if (isMnsQueueEmptyError(error)) {
-        return 0
+      this.assertMnsConfiguration()
+      if (Date.now() - this.lastRetentionCleanupAt >= RETENTION_CLEANUP_INTERVAL_MS) {
+        await this.recordService.cleanupExpiredRecords()
+        this.lastRetentionCleanupAt = Date.now()
       }
-      throw error
+      const client = await this.getClient()
+      let response: unknown
+      try {
+        response = await client.batchReceiveMessage(DYPNS_SMS_RECEIPT_QUEUE_NAME, MNS_BATCH_SIZE, MNS_POLL_WAIT_SECONDS)
+      } catch (error) {
+        if (isMnsQueueEmptyError(error)) {
+          return 0
+        }
+        throw error
+      }
+      const messages = normalizeMnsMessages(response)
+      for (const message of messages) {
+        const outcome = await this.applyReceiptMessage(message.body)
+        if (outcome === 'deferred') {
+          continue
+        }
+        if (outcome === 'malformed') {
+          console.warn('[aliyun-dypns-mns] 已丢弃格式错误的短信回执消息')
+        } else if (outcome === 'unknown') {
+          console.warn('[aliyun-dypns-mns] 收到未知 outId 的短信回执消息，已确认删除')
+        }
+        // 只有回执持久化或确定性判定完成后才能确认删除；冻结前已准入的本周期由租约覆盖到 ACK 完成。
+        await client.deleteMessage(DYPNS_SMS_RECEIPT_QUEUE_NAME, message.receiptHandle)
+      }
+      return messages.length
+    } finally {
+      releaseMaintenanceLease()
     }
-    const messages = normalizeMnsMessages(response)
-    for (const message of messages) {
-      const outcome = await this.applyReceiptMessage(message.body)
-      if (outcome === 'deferred') {
-        continue
-      }
-      if (outcome === 'malformed') {
-        console.warn('[aliyun-dypns-mns] 已丢弃格式错误的短信回执消息')
-      } else if (outcome === 'unknown') {
-        console.warn('[aliyun-dypns-mns] 收到未知 outId 的短信回执消息，已确认删除')
-      }
-      // updated（含重复回执）、unknown 与 malformed 都是确定性结果，可以确认删除。
-      await client.deleteMessage(DYPNS_SMS_RECEIPT_QUEUE_NAME, message.receiptHandle)
-    }
-    return messages.length
   }
 
   private startRetentionCleanupLoop(): void {
@@ -422,6 +445,14 @@ export class AliyunDypnsMnsWorkerService {
   }
 
   start(): void {
+    this.workerDesired = true
+    this.startWorker()
+  }
+
+  private startWorker(): void {
+    if (databaseOperationGate.isFrozen()) {
+      return
+    }
     this.startRetentionCleanupLoop()
     if (!env.ALIYUN_DYPNS_MNS_ENABLED || this.loopPromise) {
       return
@@ -430,6 +461,9 @@ export class AliyunDypnsMnsWorkerService {
     this.stopping = false
     this.loopPromise = this.runLoop().finally(() => {
       this.loopPromise = null
+      if (this.workerDesired && !databaseOperationGate.isFrozen()) {
+        queueMicrotask(() => this.startWorker())
+      }
     })
   }
 
@@ -438,7 +472,7 @@ export class AliyunDypnsMnsWorkerService {
     while (!this.stopping) {
       try {
         if (databaseMaintenanceModeService.isReadOnly()) {
-          await new Promise((resolve) => setTimeout(resolve, 1_000))
+          await this.waitForLoopDelay(1_000)
           continue
         }
         await this.runOnce()
@@ -446,21 +480,51 @@ export class AliyunDypnsMnsWorkerService {
       } catch (error) {
         void error
         console.error('[aliyun-dypns-mns] 回执处理周期失败，将退避重试')
-        await new Promise((resolve) => setTimeout(resolve, retryDelayMs))
+        await this.waitForLoopDelay(retryDelayMs)
         retryDelayMs = Math.min(retryDelayMs * 2, 60_000)
       }
     }
   }
 
   async stop(): Promise<void> {
+    this.workerDesired = false
+    this.pauseWorker()
+    if (this.loopPromise) {
+      await this.loopPromise
+    }
+  }
+
+  private pauseWorker(): void {
     this.stopping = true
     if (this.cleanupTimer !== null) {
       globalThis.clearInterval(this.cleanupTimer)
       this.cleanupTimer = null
     }
-    if (this.loopPromise) {
-      await this.loopPromise
+    if (this.loopDelayTimer !== null) {
+      globalThis.clearTimeout(this.loopDelayTimer)
+      this.loopDelayTimer = null
     }
+    this.resolveLoopDelay?.()
+    this.resolveLoopDelay = null
+  }
+
+  private async waitForLoopDelay(delayMs: number): Promise<void> {
+    if (this.stopping) {
+      return
+    }
+    await new Promise<void>((resolve) => {
+      let settled = false
+      const finish = () => {
+        if (settled) return
+        settled = true
+        this.loopDelayTimer = null
+        this.resolveLoopDelay = null
+        resolve()
+      }
+      this.resolveLoopDelay = finish
+      this.loopDelayTimer = globalThis.setTimeout(finish, delayMs)
+      this.loopDelayTimer.unref?.()
+    })
   }
 }
 

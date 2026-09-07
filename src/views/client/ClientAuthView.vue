@@ -66,6 +66,10 @@
 
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import {
+  getPersonalClientUsernameRuleHint,
+  normalizePersonalClientUsername,
+} from '@ylink/validation/auth'
 
 import type { AxiosResponse } from 'axios'
 import { http } from '@/api/http'
@@ -108,6 +112,7 @@ const AUTH_MODE_SEQUENCE: AuthMode[] = ['login', 'register-personal', 'register-
 
 interface ClientCaptchaState {
   captchaId: string
+  captchaImage: string
   captchaSvg: string
   expiresInSeconds: number
 }
@@ -147,6 +152,8 @@ const registerVerificationCountdown = ref(0)
 let registerVerificationTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let captchaExpireTimer: ReturnType<typeof globalThis.setInterval> | null = null
 let capabilityDeferredTimer: ReturnType<typeof globalThis.setTimeout> | null = null
+let formTransitionFrame: number | null = null
+let formTransitionRunId = 0
 const formWrapperRef = ref<HTMLElement | null>(null)
 const formBlockRef = ref<HTMLElement | null>(null)
 const formWrapperHeight = ref('auto')
@@ -156,6 +163,7 @@ const passwordFocused = ref(false)
 const authCapabilities = ref<ClientAuthCapabilities | null>(null)
 const captcha = reactive<ClientCaptchaState>({
   captchaId: '',
+  captchaImage: '',
   captchaSvg: '',
   expiresInSeconds: 0,
 })
@@ -220,12 +228,11 @@ const shouldPrepareCaptcha = computed(() => isRegisterMode.value || loginCaptcha
 const isCapabilityHintVisible = computed(() => capabilityLoading.value && !authCapabilities.value)
 const isCapabilityFallbackVisible = computed(() => !capabilityLoading.value && !!capabilityErrorMessage.value && !authCapabilities.value)
 const forgotPasswordAvailable = computed(() => authCapabilities.value?.forgotPasswordEnabled ?? false)
-// 安全说明：后端返回的是 SVG 字符串，这里统一转为 data URL 图片渲染，
-// 避免通过 v-html 直接把未信任的 SVG 片段注入到页面 DOM 中。
+// 优先使用后端 PNG data URL；旧服务返回 SVG 时仍以图片地址方式渲染，避免 v-html 注入。
 const captchaImageSrc = computed(() => {
-  return captcha.captchaSvg
+  return captcha.captchaImage || (captcha.captchaSvg
     ? `data:image/svg+xml;charset=utf-8,${encodeURIComponent(captcha.captchaSvg)}`
-    : ''
+    : '')
 })
 
 const captchaHintText = computed(() => {
@@ -283,7 +290,28 @@ const syncModeQuery = async (nextMode: AuthMode) => {
 }
 
 const getElementHeight = (element: Element | HTMLElement | null | undefined) => {
-  return element instanceof HTMLElement ? element.offsetHeight : 0
+  if (!(element instanceof HTMLElement)) {
+    return 0
+  }
+
+  const computedStyle = getComputedStyle(element)
+  if (computedStyle.transform === 'none') {
+    return element.getBoundingClientRect().height
+  }
+
+  const computedHeight = Number.parseFloat(computedStyle.height)
+  if (!Number.isFinite(computedHeight) || computedHeight <= 0) {
+    return element.offsetHeight
+  }
+  if (computedStyle.boxSizing === 'border-box') {
+    return computedHeight
+  }
+
+  return computedHeight
+    + Number.parseFloat(computedStyle.paddingTop)
+    + Number.parseFloat(computedStyle.paddingBottom)
+    + Number.parseFloat(computedStyle.borderTopWidth)
+    + Number.parseFloat(computedStyle.borderBottomWidth)
 }
 
 const syncWrapperHeight = (heightMode: 'auto' | 'measured' = 'auto', element?: Element | HTMLElement | null) => {
@@ -298,6 +326,23 @@ const syncWrapperHeight = (heightMode: 'auto' | 'measured' = 'auto', element?: E
   }
 }
 
+const cancelPendingFormTransitionFrame = () => {
+  if (formTransitionFrame === null) {
+    return
+  }
+  cancelAnimationFrame(formTransitionFrame)
+  formTransitionFrame = null
+}
+
+const finishFormTransition = (runId: number) => {
+  if (runId !== formTransitionRunId) {
+    return
+  }
+  cancelPendingFormTransitionFrame()
+  formAnimating.value = false
+  syncWrapperHeight('auto')
+}
+
 const switchMode = async (nextMode: AuthMode) => {
   if (formAnimating.value) {
     return
@@ -307,8 +352,9 @@ const switchMode = async (nextMode: AuthMode) => {
     return
   }
 
+  formTransitionRunId += 1
   formAnimating.value = true
-  syncWrapperHeight('measured')
+  syncWrapperHeight('measured', formBlockRef.value)
   loginFeedbackTitle.value = ''
   loginFeedbackDescription.value = ''
   loginFeedbackShowForgotAction.value = false
@@ -320,26 +366,40 @@ const switchMode = async (nextMode: AuthMode) => {
   await syncModeQuery(nextMode)
 }
 
-const handleFormBeforeLeave = () => {
-  syncWrapperHeight('measured', formWrapperRef.value)
-}
-
-const handleFormBeforeEnter = () => {
-  syncWrapperHeight('measured', formWrapperRef.value)
-}
-
 const handleFormEnter = (element: Element) => {
-  requestAnimationFrame(() => {
+  cancelPendingFormTransitionFrame()
+  formTransitionFrame = requestAnimationFrame(() => {
+    formTransitionFrame = null
+    if (!formAnimating.value) {
+      return
+    }
     syncWrapperHeight('measured', element)
   })
 }
 
-const handleFormAfterEnter = () => {
-  formAnimating.value = false
-  syncWrapperHeight('auto')
+const handleFormAfterEnter = async () => {
+  const runId = formTransitionRunId
+  const wrapperElement = formWrapperRef.value
+  if (!wrapperElement) {
+    finishFormTransition(runId)
+    return
+  }
+
+  const heightTransitions = wrapperElement.getAnimations().filter((animation) => {
+    return 'transitionProperty' in animation
+      && (animation as CSSTransition).transitionProperty === 'height'
+  })
+  await Promise.allSettled(heightTransitions.map((animation) => animation.finished))
+
+  if (wrapperElement !== formWrapperRef.value) {
+    return
+  }
+  finishFormTransition(runId)
 }
 
 const handleFormTransitionCancelled = () => {
+  formTransitionRunId += 1
+  cancelPendingFormTransitionFrame()
   formAnimating.value = false
   syncWrapperHeight('auto')
 }
@@ -363,6 +423,7 @@ const refreshCaptcha = async (silent = false) => {
     executor: (signal) => getClientCaptcha({ signal }),
     onSuccess: (result) => {
       captcha.captchaId = result.captchaId
+      captcha.captchaImage = result.captchaImage ?? ''
       captcha.captchaSvg = result.captchaSvg
       captcha.expiresInSeconds = result.expiresInSeconds
       if (captchaExpireTimer) {
@@ -397,6 +458,7 @@ const refreshCaptcha = async (silent = false) => {
 
 const clearCaptcha = () => {
   captcha.captchaId = ''
+  captcha.captchaImage = ''
   captcha.captchaSvg = ''
   captcha.expiresInSeconds = 0
   if (captchaExpireTimer) {
@@ -406,7 +468,7 @@ const clearCaptcha = () => {
 }
 
 const ensureCaptchaReady = async () => {
-  if (captcha.captchaId && captcha.captchaSvg) {
+  if (captcha.captchaId && (captcha.captchaImage || captcha.captchaSvg)) {
     return
   }
   await refreshCaptcha(true)
@@ -470,7 +532,10 @@ const validateLoginPassword = (password: string) => password.trim().length > 0
  * - 继续复用共享的新密码强度规则，保证注册与改密口径一致。
  */
 const validateRegisterPassword = (password: string) => isClientNewPasswordValid(password)
-const validateRealName = (username: string) => /^\p{Script=Han}[\p{Script=Han}·\s]{1,19}$/u.test(normalizeHumanName(username))
+const registerUsernameRuleHint = computed(() => {
+  if (!registerForm.username) return ''
+  return getPersonalClientUsernameRuleHint(registerForm.username)
+})
 const validateStaffNo = (staffNo: string) => /^[A-Za-z0-9-]{4,32}$/.test(staffNo.trim())
 const validateLoginAccount = (account: string) => account.trim().length > 0
 const resolveAccountChannel = (account: string): 'mobile' | 'email' | null => {
@@ -484,17 +549,6 @@ const resolveAccountChannel = (account: string): 'mobile' | 'email' | null => {
 
 const normalizeInputText = (value: string) => {
   return value.replaceAll(/\s+/g, ' ').trim()
-}
-
-const normalizeHumanName = (value: string) => {
-  return value
-    .normalize('NFKC')
-    .replace(/[\u200B-\u200D\u2060\uFEFF]/g, '')
-    .replace(/[\u0000-\u001F\u007F-\u009F]/g, '')
-    .replaceAll('　', ' ')
-    .replace(/[•・･‧∙⋅·﹒]/g, '·')
-    .replaceAll(/\s+/g, ' ')
-    .trim()
 }
 
 const applySecurityHintFromMessage = (message: string) => {
@@ -555,6 +609,13 @@ const clearRegisterFeedback = () => {
 
 const applyRegisterFeedbackFromError = (message: string, status?: number) => {
   clearRegisterFeedback()
+
+  if (status === 409 && /当前注册信息无法使用/.test(message)) {
+    registerFeedbackTitle.value = '当前注册信息无法使用'
+    registerFeedbackDescription.value = '请确认联系方式已完成验证并核对注册信息；如仍无法注册，请联系管理员处理。'
+    registerFeedbackType.value = 'warning'
+    return
+  }
 
   if (status === 409 && /该手机号已被占用|该邮箱已被占用|该手机号或邮箱已被占用/.test(message)) {
     const isEmailOccupied = /邮箱/.test(message) && !/手机号/.test(message)
@@ -784,7 +845,7 @@ const handleLogin = async () => {
   }
 }
 
-// 教师注册只提交工号与一次性邀请码；姓名和部门由后端目录在注册事务中绑定。
+// 教师注册只提交工号与统一教师邀请码；姓名和部门由后端目录在注册事务中绑定。
 const validateDepartmentRegisterFields = () => {
   if (!isDepartmentRegisterMode.value) {
     return true
@@ -799,7 +860,7 @@ const validateDepartmentRegisterFields = () => {
     return false
   }
   if (!/^\d{8}$/.test(registerForm.inviteCode.trim())) {
-    showAppWarning('请输入管理员提供的 8 位数字邀请码')
+    showAppWarning('请输入管理员提供的统一 8 位教师邀请码')
     return false
   }
   return true
@@ -831,8 +892,8 @@ const validateRegisterBeforeSubmit = () => {
       return null
     }
   } else {
-    if (!validateRealName(registerForm.username)) {
-      showAppWarning('请输入 2-20 位中文真实姓名，可包含空格或·')
+    if (getPersonalClientUsernameRuleHint(registerForm.username)) {
+      showAppWarning(getPersonalClientUsernameRuleHint(registerForm.username))
       return null
     }
     if (!accountChannel) {
@@ -857,7 +918,7 @@ const validateRegisterBeforeSubmit = () => {
 
   return {
     registeredAccount: normalizeInputText(registerForm.account),
-    registeredUsername: isDepartmentRegisterMode.value ? '' : normalizeInputText(registerForm.username),
+    registeredUsername: isDepartmentRegisterMode.value ? '' : normalizePersonalClientUsername(registerForm.username).value,
   }
 }
 
@@ -1014,6 +1075,8 @@ onUnmounted(() => {
     globalThis.clearTimeout(capabilityDeferredTimer)
     capabilityDeferredTimer = null
   }
+  formTransitionRunId += 1
+  cancelPendingFormTransitionFrame()
   resetRegisterVerificationTimer()
   clearCaptcha()
 })
@@ -1138,8 +1201,6 @@ onUnmounted(() => {
           <div ref="formWrapperRef" class="form-wrapper" :class="{ 'is-animating': formAnimating }" :style="{ height: formWrapperHeight }">
             <transition
               name="auth-fade"
-              @before-enter="handleFormBeforeEnter"
-              @before-leave="handleFormBeforeLeave"
               @enter="handleFormEnter"
               @after-enter="handleFormAfterEnter"
               @enter-cancelled="handleFormTransitionCancelled"
@@ -1303,7 +1364,7 @@ onUnmounted(() => {
                 <el-form @submit.prevent="handleRegister" class="space-y-4 mt-6">
                   <el-input
                     v-model="registerForm.username"
-                    placeholder="真实姓名"
+                    placeholder="用户名（中文或英文字母，2-20 位）"
                     class="geo-input"
                     size="large"
                     clearable
@@ -1312,6 +1373,7 @@ onUnmounted(() => {
                       <el-icon class="input-icon"><User /></el-icon>
                     </template>
                   </el-input>
+                  <p v-if="registerUsernameRuleHint" class="input-rule-hint" role="alert">{{ registerUsernameRuleHint }}</p>
 
                   <el-input 
                     v-model="registerForm.account" 
@@ -1425,7 +1487,7 @@ onUnmounted(() => {
 
               <div v-else ref="formBlockRef" key="register-department" class="form-block">
                 <h2 class="block-title">创建教师账号</h2>
-                <p class="block-subtitle">填写教职工号、手机号或邮箱，并通过验证码后创建教师账号</p>
+                <p class="block-subtitle">填写教职工号、手机号或邮箱，并输入管理员统一设置的邀请码后创建教师账号</p>
                 <el-alert class="register-channel-alert" type="info" :closable="false" show-icon>
                   <template #title>
                     教师账号按教职工目录回填姓名和部门，注册后仍按个人/散客流程下单；部门共享账号请联系管理员创建。
@@ -1479,7 +1541,7 @@ onUnmounted(() => {
 
                   <el-input
                     v-model="registerForm.inviteCode"
-                    placeholder="8 位数字邀请码"
+                    placeholder="统一 8 位教师邀请码"
                     maxlength="8"
                     inputmode="numeric"
                     class="geo-input"

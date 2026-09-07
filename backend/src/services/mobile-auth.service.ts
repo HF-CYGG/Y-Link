@@ -11,9 +11,11 @@ import { ClientUserSession } from '../entities/client-user-session.entity.js'
 import type { MobileAuthContext, MobileDeviceInput } from '../types/mobile-auth.js'
 import { normalizeClientAccount } from '../utils/client-auth-account.js'
 import { BizError } from '../utils/errors.js'
+import { assertClientPasswordPolicy, hashPassword } from '../utils/password.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
 import { authSecurityService } from './auth-security.service.js'
+import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
 import {
   clientAuthService,
   type ClientChangePasswordInput,
@@ -95,7 +97,7 @@ class MobileAuthService {
   }
 
   async updateProfile(auth: MobileAuthContext, input: ClientUpdateProfileInput, requestMeta?: RequestMeta) {
-    return runInTransaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const profile = await clientAuthService.updateProfile({
         userId: auth.userId,
         account: auth.user.realName || auth.user.email || auth.user.mobile || '',
@@ -105,6 +107,7 @@ class MobileAuthService {
         accountType: auth.user.accountType,
         staffNo: auth.user.staffNo,
         sessionToken: auth.accessToken,
+        authSource: 'bearer',
       }, input, manager)
       const changedFields = [
         profile.username !== auth.user.realName ? 'username' : null,
@@ -128,6 +131,8 @@ class MobileAuthService {
       }
       return profile
     })
+    if (result.requiresRelogin) customerServiceRealtimeService.disconnectByOwner('client', auth.userId)
+    return result
   }
 
   async changePassword(
@@ -136,9 +141,11 @@ class MobileAuthService {
     requestMeta?: RequestMeta,
   ) {
     await authSecurityService.guardClientChangePasswordRequest(requestMeta, auth.userId)
-    return runInTransaction(async (manager) => {
-      const prepared = await clientAuthService.preparePasswordChange(auth.userId, input, manager)
+    const passwordHash = await hashPassword(assertClientPasswordPolicy(input.newPassword, '新密码'))
+    const result = await runInTransaction(async (manager) => {
+      const prepared = await clientAuthService.preparePasswordChange(auth.userId, input, passwordHash, manager)
       await manager.getRepository(ClientUser).update(prepared.user.id, { passwordHash: prepared.passwordHash })
+      prepared.user.passwordHash = prepared.passwordHash
       const revokedWeb = await manager.getRepository(ClientUserSession).delete({ userId: auth.userId })
       const revokedMobileCount = await mobileSessionService.revokeSessionsForUser(
         manager,
@@ -172,6 +179,8 @@ class MobileAuthService {
       }, manager)
       return credentials
     })
+    customerServiceRealtimeService.disconnectByOwner('client', auth.userId)
+    return result
   }
 
   async verifyForgotPassword(input: ClientForgotVerifyInput, requestMeta?: RequestMeta) {

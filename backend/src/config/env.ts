@@ -5,6 +5,9 @@
  */
 
 import { z } from 'zod'
+// 静态依赖先求值，确保保存基础配置后才执行本模块的 override 注入。
+import { baseDatabaseConfig } from './base-database-config.js'
+export { baseDatabaseConfig }
 import {
   backendRootDir,
   envFileBootstrap,
@@ -71,6 +74,9 @@ const envSchema = z.object({
   APP_PROFILE: z.string().trim().min(1).default('default'),
   ENV_FILE: z.string().optional().transform(normalizeOptionalString),
   PORT: z.coerce.number().default(3001),
+  Y_LINK_TRUST_PROXY: z.string().default(''),
+  Y_LINK_FORCE_SECURE_COOKIES: z.enum(['true', 'false']).default('false'),
+  Y_LINK_HSTS_MAX_AGE_SECONDS: z.coerce.number().int().min(0).max(63_072_000).default(15_552_000),
   DB_TYPE: z.enum(['sqlite', 'mysql']).default('sqlite'),
   DB_HOST: z.string().min(1).default('127.0.0.1'),
   DB_PORT: z.coerce.number().default(3306),

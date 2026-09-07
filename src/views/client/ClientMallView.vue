@@ -1091,7 +1091,7 @@ const openCartDrawer = () => {
 }
 
 const goToCheckout = () => {
-  if (!clientCartStore.selectedValidItems.length) {
+  if (!clientCartStore.selectedItems.length) {
     if (clientCartStore.validItems.length > 0) {
       // 若用户尚未主动勾选，则默认全选有效商品，减少从商城直达结算的操作成本。
       clientCartStore.toggleAllValidSelected(true)

@@ -185,6 +185,7 @@ const invokeMiddleware = async (
   middleware: (req: never, res: never, next: (error?: unknown) => void) => unknown,
   request: Record<string, unknown>,
 ) => new Promise<unknown>((resolve) => {
+  request.method ??= 'GET'
   void middleware(request as never, {} as never, (error?: unknown) => resolve(error))
 })
 
@@ -218,6 +219,33 @@ try {
   assert.equal(loginAuth.userId, loginUser.id)
   await assert.rejects(mobileSessionService.resolveAccess('malformed-bearer'), expectBizErrorCode(40100))
   pass('Login', `${VERIFY_MODE} 真实密码校验、Mobile 签发与 access authentication 通过`)
+
+  // 确定性重现：验密通过后先提交并发改密/身份变更，再恢复原登录签发。
+  for (const mutation of ['password', 'identity'] as const) {
+    const raceUser = await createUser()
+    const originalAuthenticate = clientAuthService.authenticateCredentials.bind(clientAuthService)
+    const beforeSessionCount = await AppDataSource.getRepository(ClientMobileSession).count({ where: { clientUserId: raceUser.id } })
+    clientAuthService.authenticateCredentials = async (...args) => {
+      const authenticated = await originalAuthenticate(...args)
+      if (mutation === 'password') {
+        await clientAuthService.changePassword({
+          userId: raceUser.id, account: raceUser.email ?? '', email: raceUser.email ?? '', mobile: raceUser.mobile ?? '',
+          realName: raceUser.realName, accountType: 'personal', staffNo: null, sessionToken: '', authSource: 'bearer',
+        }, { currentPassword: 'StrongPass123!', newPassword: 'ConcurrentPassword456!' })
+      } else {
+        await AppDataSource.getRepository(ClientUser).update(raceUser.id, { realName: '并发变更用户' })
+      }
+      return authenticated
+    }
+    try {
+      await assert.rejects(mobileAuthService.login({
+        account: raceUser.email ?? '', password: 'StrongPass123!', device: device(80),
+      }), expectBizErrorCode(40120), '旧认证快照不得在账号安全状态变更后签发新会话')
+      assert.equal(await AppDataSource.getRepository(ClientMobileSession).count({ where: { clientUserId: raceUser.id } }), beforeSessionCount)
+    } finally { clientAuthService.authenticateCredentials = originalAuthenticate }
+  }
+  pass('Login race', '验密后并发改密或身份变更均在锁内拒绝陈旧签发，不新增会话')
+
 
   const expiryUser = await createUser()
   const accessExpiry = await mobileSessionService.createForUser(expiryUser, device(11))
@@ -776,7 +804,10 @@ try {
   })
   assert.deepEqual(JSON.parse(profileAudit.detailJson ?? '{}').changedFields, ['username', 'email'])
   assert.equal(profileAudit.actorUserId, profileUser.id)
-  pass('Profile', 'Mobile 用户名/邮箱变更与安全审计在同一事务提交且不撤销会话')
+  assert.equal(updatedProfile.requiresRelogin, true)
+  assert.equal((await loadSessionWithSecrets(profileCredentials.session.id)).revokeReason, 'user_logout_all')
+  await assert.rejects(mobileSessionService.resolveAccess(profileCredentials.accessToken), expectBizErrorCode(40101))
+  pass('Profile', 'Mobile 身份变更、旧会话撤销与安全审计在同一事务提交')
 
   const resetUser = await createUser()
   const resetMobile = await mobileSessionService.createForUser(resetUser, device(40))
@@ -806,7 +837,7 @@ try {
     target: resetUser.email ?? '',
     scene: 'forgot_password',
   })
-  const resetTicket = await mobileAuthService.verifyForgotPassword({
+  let resetTicket = await mobileAuthService.verifyForgotPassword({
     account: resetUser.email ?? '',
     verificationCode: '123456',
   })
@@ -816,8 +847,13 @@ try {
       resetToken: resetTicket.resetToken,
       newPassword: 'ResetStrong789!',
     }),
-    (error: unknown) => error instanceof BizError && error.statusCode === 404,
+    (error: unknown) => error instanceof BizError && error.statusCode === 400,
   )
+  await assert.rejects(mobileAuthService.resetPassword({
+    account: resetUser.email ?? '', resetToken: resetTicket.resetToken, newPassword: 'ResetStrong789!',
+  }), (error: unknown) => error instanceof BizError && error.statusCode === 400)
+  await verificationService.sendCode({ channel: 'email', target: resetUser.email ?? '', scene: 'forgot_password' })
+  resetTicket = await mobileAuthService.verifyForgotPassword({ account: resetUser.email ?? '', verificationCode: '123456' })
   const resetResult = await mobileAuthService.resetPassword({
     account: resetUser.email ?? '',
     resetToken: resetTicket.resetToken,

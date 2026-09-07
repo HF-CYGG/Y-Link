@@ -10,7 +10,12 @@
 import type { NextFunction, Request, Response } from 'express'
 import { clientAuthService } from '../services/client-auth.service.js'
 import { BizError } from '../utils/errors.js'
-import { readClientSessionTokenFromCookie } from '../utils/client-auth-cookie.js'
+import {
+  isClientCsrfTokenValid,
+  readClientCsrfHeaderToken,
+  readClientCsrfTokenFromCookie,
+  readClientSessionTokenFromCookie,
+} from '../utils/client-auth-cookie.js'
 import type { ClientAuthenticatedRequest } from '../types/client-auth.js'
 import type { MobileAuthenticatedRequest } from '../types/mobile-auth.js'
 import { mobileSessionService } from '../services/mobile-session.service.js'
@@ -27,10 +32,20 @@ const parseAuthorizationBearer = (req: Request) => {
   return null
 }
 
+function parseClientCredential(req: Request): { token: string; source: 'cookie' | 'bearer' } | null {
+  const bearer = parseAuthorizationBearer(req)
+  if (bearer) return { token: bearer, source: 'bearer' }
+  const cookieToken = readClientSessionTokenFromCookie(req)
+  return cookieToken ? { token: cookieToken, source: 'cookie' } : null
+}
+
+const isSafeRequestMethod = (method: string) => ['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase())
+
 export const requireClientAuth = async (req: Request, _res: Response, next: NextFunction) => {
   try {
     // Authorization 一旦存在就独占认证决策；任何格式/令牌错误都禁止回退 Cookie。
-    const authorizationToken = parseAuthorizationBearer(req)
+    const credential = parseClientCredential(req)
+    const authorizationToken = credential?.source === 'bearer' ? credential.token : null
     if (authorizationToken && isMobileAccessToken(authorizationToken)) {
       const mobileAuth = await mobileSessionService.resolveAccess(
         authorizationToken,
@@ -47,16 +62,27 @@ export const requireClientAuth = async (req: Request, _res: Response, next: Next
         accountType: mobileAuth.user.accountType,
         staffNo: mobileAuth.user.staffNo,
         sessionToken: authorizationToken,
+        authSource: 'bearer',
       }
       next()
       return
     }
-    const token = authorizationToken ?? readClientSessionTokenFromCookie(req)
-    if (!token) {
+    if (!credential) {
       throw new BizError('未登录或登录状态已失效', 401)
     }
-    const auth = await clientAuthService.resolveClientByToken(token)
+    const auth = await clientAuthService.resolveClientByToken(credential.token)
+    auth.authSource = credential.source
     ;(req as ClientAuthenticatedRequest).clientAuth = auth
+    if (!isSafeRequestMethod(req.method) && credential.source === 'cookie') {
+      const cookieToken = readClientCsrfTokenFromCookie(req)
+      const headerToken = readClientCsrfHeaderToken(req)
+      if (!cookieToken || !headerToken) {
+        throw new BizError('请求安全校验失败，请刷新页面后重试', 403, { reason: 'CLIENT_CSRF_MISSING' })
+      }
+      if (!isClientCsrfTokenValid(credential.token, cookieToken, headerToken)) {
+        throw new BizError('请求安全校验失败，请刷新页面后重试', 403, { reason: 'CLIENT_CSRF_MISMATCH' })
+      }
+    }
     next()
   } catch (error) {
     next(error)

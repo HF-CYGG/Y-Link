@@ -24,10 +24,12 @@ import { extractRequestMeta } from '../utils/request-meta.js'
 import { CLIENT_USER_ACCOUNT_TYPES } from '../entities/client-user.entity.js'
 import { assertPermanentDeletePassword } from '../utils/permanent-delete-password.js'
 
+import { MAX_DATABASE_INT, MAX_O2O_ORDER_ITEM_COUNT } from '../constants/web-resource-limits.js'
+
 const preorderItemSchema = z.object({
   productId: z.union([z.string(), z.number()]),
   skuId: z.union([z.string(), z.number()]).nullable().optional(),
-  qty: z.number().int().positive(),
+  qty: z.number().int().positive().max(MAX_DATABASE_INT, '商品数量超过系统可处理上限'),
 })
 
 const submitPreorderSchema = z.object({
@@ -43,17 +45,17 @@ const submitPreorderSchema = z.object({
   // 详细注释：提货人由客户端显式填写后传入服务端，避免继续退回为账号默认名导致代领场景失真。
   pickupContact: z.string().trim().min(1).max(32),
   remark: z.string().max(O2O_PREORDER_REMARK_MAX_LENGTH).optional(),
-  items: z.array(preorderItemSchema).min(1),
+  items: z.array(preorderItemSchema).min(1).max(MAX_O2O_ORDER_ITEM_COUNT, '单次最多提交 200 条商品明细'),
 })
 
 const updateMyPreorderSchema = z.object({
   remark: z.string().max(O2O_PREORDER_REMARK_MAX_LENGTH).optional(),
-  items: z.array(preorderItemSchema).min(1),
+  items: z.array(preorderItemSchema).min(1).max(MAX_O2O_ORDER_ITEM_COUNT, '单次最多提交 200 条商品明细'),
 })
 
 const onsiteAdjustPreorderSchema = z.object({
   remark: z.string().max(O2O_PREORDER_REMARK_MAX_LENGTH).optional(),
-  items: z.array(preorderItemSchema).min(1),
+  items: z.array(preorderItemSchema).min(1).max(MAX_O2O_ORDER_ITEM_COUNT, '单次最多提交 200 条商品明细'),
 })
 
 const inboundSchema = z.object({
@@ -127,9 +129,25 @@ const deleteConsoleOrderSchema = z.object({
   permanentDeletePassword: z.string().optional(),
 })
 
+const adminCancelOrderSchema = z.object({
+  reason: z.string().trim().min(2, '取消原因至少 2 个字符').max(200, '取消原因不能超过 200 个字符'),
+})
+
+const batchPurgeCancelledOrdersSchema = z.object({
+  orders: z.array(z.object({ id: z.string().trim().min(1), confirmShowNo: z.string().trim().min(1, '请填写订单号完成二次确认') }))
+    .min(1).max(50).superRefine((orders, context) => {
+      const ids = new Set<string>()
+      orders.forEach((order, index) => {
+        if (ids.has(order.id)) context.addIssue({ code: z.ZodIssueCode.custom, path: [index, 'id'], message: '订单 ID 不可重复' })
+        ids.add(order.id)
+      })
+    }),
+  permanentDeletePassword: z.string().optional(),
+})
+
 const submitReturnRequestSchema = z.object({
   reason: z.string().trim().min(1).max(O2O_RETURN_REASON_MAX_LENGTH),
-  items: z.array(preorderItemSchema).min(1),
+  items: z.array(preorderItemSchema).min(1).max(MAX_O2O_ORDER_ITEM_COUNT, '单次最多提交 200 条商品明细'),
 })
 
 const rejectReturnRequestSchema = z.object({
@@ -263,8 +281,24 @@ o2oRouter.post(
   requireClientAuth,
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
-    const data = await o2oPreorderService.markCustomerOrderPrintedByClient(authReq.clientAuth, req.params.id)
-    res.json({ code: 0, message: 'ok', data })
+    const result = await o2oPreorderService.markCustomerOrderPrintedByClient(authReq.clientAuth, req.params.id)
+    if (result.printedNow) {
+      await auditService.record({
+        actionType: 'o2o.preorder.customer_order_print',
+        actionLabel: '客户端标记部门订单已打印',
+        targetType: 'o2o_order',
+        targetId: result.detail.order.id,
+        targetCode: result.detail.order.showNo,
+        actor: {
+          userId: authReq.clientAuth.userId,
+          username: authReq.clientAuth.account || authReq.clientAuth.mobile,
+          displayName: authReq.clientAuth.realName || authReq.clientAuth.account || authReq.clientAuth.mobile,
+        },
+        requestMeta: extractRequestMeta(req),
+        detail: { clientOrderType: result.detail.order.clientOrderType },
+      })
+    }
+    res.json({ code: 0, message: 'ok', data: result.detail })
   }),
 )
 
@@ -274,7 +308,7 @@ o2oRouter.post(
   requireClientAuth,
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
-    const data = await o2oPreorderService.cancelMyOrder(authReq.clientAuth, req.params.id)
+    const data = await o2oPreorderService.cancelMyOrder(authReq.clientAuth, req.params.id, extractRequestMeta(req))
     res.json({ code: 0, message: 'ok', data })
   }),
 )
@@ -365,6 +399,35 @@ o2oAdminRouter.get(
   requirePermission('orders:view'),
   asyncHandler(async (req, res) => {
     const data = await o2oPreorderService.getVerifyDetailByShowNo(req.params.showNo)
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+o2oAdminRouter.post(
+  '/orders/:id/cancel',
+  requirePermission('orders:update'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = adminCancelOrderSchema.parse(req.body ?? {})
+    const data = await o2oPreorderService.cancelOrderByAdmin({
+      orderId: req.params.id,
+      reason: payload.reason,
+      actor: authReq.auth,
+      requestMeta: extractRequestMeta(req),
+    })
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+o2oAdminRouter.post(
+  '/orders/batch-purge-cancelled',
+  requirePermission('orders:delete'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = batchPurgeCancelledOrdersSchema.parse(req.body ?? {})
+    assertPermanentDeletePassword(payload.permanentDeletePassword)
+    const data = await o2oPreorderService.batchPurgeCancelledOrders({ orders: payload.orders, actor: authReq.auth, requestMeta: extractRequestMeta(req) })
     res.json({ code: 0, message: 'ok', data })
   }),
 )

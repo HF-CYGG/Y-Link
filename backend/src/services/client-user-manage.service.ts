@@ -27,6 +27,7 @@ import { auditService } from './audit.service.js'
 import { systemConfigService } from './system-config.service.js'
 import type { EntityManager } from 'typeorm'
 import { randomBytes } from 'node:crypto'
+import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
 
 export interface ClientUserListQuery {
   page: number
@@ -676,7 +677,7 @@ export class ClientUserManageService {
       throw new BizError('客户端用户状态非法', 400)
     }
 
-    return runInTransaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const userRepo = manager.getRepository(ClientUser)
       const sessionRepo = manager.getRepository(ClientUserSession)
       const mobileSessionRepo = manager.getRepository(ClientMobileSession)
@@ -688,7 +689,7 @@ export class ClientUserManageService {
       }
 
       if (user.status === status) {
-        return sanitizeClientUserProfile(user)
+        return { profile: sanitizeClientUserProfile(user), sessionMustBeRevoked: false }
       }
 
       if (status === 'enabled' && user.accountType === 'department') {
@@ -736,8 +737,12 @@ export class ClientUserManageService {
         manager,
       )
 
-      return sanitizeClientUserProfile(savedUser)
+      return { profile: sanitizeClientUserProfile(savedUser), sessionMustBeRevoked: status !== 'enabled' }
     })
+    if (result.sessionMustBeRevoked) {
+      customerServiceRealtimeService.disconnectByOwner('client', id)
+    }
+    return result.profile
   }
 
   async updateProfile(
@@ -754,7 +759,7 @@ export class ClientUserManageService {
     const mobile = this.normalizeMobile(input.mobile)
     const email = this.normalizeEmail(input.email)
 
-    return runInTransaction(async (manager) => {
+    const result = await runInTransaction(async (manager) => {
       const userRepo = manager.getRepository(ClientUser)
       const sessionRepo = manager.getRepository(ClientUserSession)
       const mobileSessionRepo = manager.getRepository(ClientMobileSession)
@@ -787,6 +792,7 @@ export class ClientUserManageService {
       }
 
       const before = sanitizeClientUserProfile(user)
+      const previousDepartmentNodeId = user.departmentNodeId
       const profileKind = deriveClientUserProfileKind(user)
       const resolvedDepartment = profileKind === 'department'
         ? await systemConfigService.resolveClientDepartmentReference(input, manager, latestDepartmentConfig)
@@ -812,14 +818,20 @@ export class ClientUserManageService {
         throw error
       }
 
+      const identityChanged = before.realName !== savedUser.realName
+        || before.mobile !== savedUser.mobile
+        || before.email !== savedUser.email
+        || before.departmentName !== savedUser.departmentName
+        || previousDepartmentNodeId !== savedUser.departmentNodeId
+        || before.status !== savedUser.status
       let revokedSessionCount = 0
       let revokedMobileSessionCount = 0
-      if (savedUser.status !== 'enabled') {
+      if (identityChanged) {
         const deletedSessions = await sessionRepo.delete({ userId: savedUser.id })
         revokedSessionCount = deletedSessions.affected ?? 0
         const revokedMobileSessions = await mobileSessionRepo.createQueryBuilder()
           .update(ClientMobileSession)
-          .set({ revokedAt: new Date(), revokeReason: 'account_disabled' })
+          .set({ revokedAt: new Date(), revokeReason: savedUser.status !== 'enabled' ? 'account_disabled' : 'admin_revoke' })
           .where('client_user_id = :userId AND revoked_at IS NULL', { userId: savedUser.id })
           .execute()
         revokedMobileSessionCount = revokedMobileSessions.affected ?? 0
@@ -839,13 +851,18 @@ export class ClientUserManageService {
             after: sanitizeClientUserProfile(savedUser),
             revokedSessionCount,
             revokedMobileSessionCount,
+            identityChanged,
           },
         },
         manager,
       )
 
-      return sanitizeClientUserProfile(savedUser)
+      return { profile: sanitizeClientUserProfile(savedUser), identityChanged }
     })
+    if (result.identityChanged) {
+      customerServiceRealtimeService.disconnectByOwner('client', id)
+    }
+    return result.profile
   }
 
   async resetPassword(
@@ -859,7 +876,7 @@ export class ClientUserManageService {
       throw new BizError('新密码不能为空', 400)
     }
 
-    return runInTransaction(async (manager) => {
+    const profile = await runInTransaction(async (manager) => {
       const userRepo = manager.getRepository(ClientUser)
       const sessionRepo = manager.getRepository(ClientUserSession)
       const mobileSessionRepo = manager.getRepository(ClientMobileSession)
@@ -901,6 +918,8 @@ export class ClientUserManageService {
 
       return sanitizeClientUserProfile(savedUser)
     })
+    customerServiceRealtimeService.disconnectByOwner('client', id)
+    return profile
   }
 }
 

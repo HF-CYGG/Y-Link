@@ -12,6 +12,7 @@ import type { MobileAuthenticatedRequest } from '../types/mobile-auth.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { BizError } from '../utils/errors.js'
 import {
+  CLIENT_PERSONAL_USERNAME_RULE_MESSAGE,
   normalizeClientAccount,
   normalizeClientVerificationTarget,
 } from '../utils/client-auth-account.js'
@@ -25,7 +26,7 @@ import { clientAuthService } from '../services/client-auth.service.js'
 import { mobileSessionService } from '../services/mobile-session.service.js'
 import { authSecurityService } from '../services/auth-security.service.js'
 import { verificationCodeService } from '../services/verification-code.service.js'
-import { clearClientAuthCookie, setClientAuthCookie } from '../utils/client-auth-cookie.js'
+import { clearClientAuthCookie, ensureClientCsrfCookie, setClientAuthCookie } from '../utils/client-auth-cookie.js'
 
 /**
  * 客户端密码字段统一请求校验：
@@ -40,7 +41,8 @@ const clientPasswordSchema = (fieldLabel = '密码') =>
 
 const registerSchema = z
   .object({
-    username: z.string().trim().max(128).optional(),
+    // 不在路由层 trim：个人用户名的首尾空格也必须由权威规则拒绝。
+    username: z.string().max(128, CLIENT_PERSONAL_USERNAME_RULE_MESSAGE).optional(),
     account: z.string().trim().max(128).optional(),
     accountType: z.enum(['personal', 'department']),
     staffNo: z.string().trim().max(64).optional(),
@@ -54,14 +56,14 @@ const registerSchema = z
   .superRefine((payload, ctx) => {
     if (payload.accountType === 'personal') {
       const isTeacherRegister = Boolean(payload.staffNo?.trim())
-      if (isTeacherRegister && !payload.inviteCode) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['inviteCode'], message: '请输入 8 位教师邀请码' })
+      if (isTeacherRegister && !/^\d{8}$/.test(payload.inviteCode ?? '')) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['inviteCode'], message: '请输入 8 位数字教师统一邀请码' })
       }
-      if (!isTeacherRegister && !payload.username?.trim()) {
+      if (!isTeacherRegister && !payload.username) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ['username'],
-          message: '个人注册必须填写真实姓名',
+          message: CLIENT_PERSONAL_USERNAME_RULE_MESSAGE,
         })
       }
       if (!isTeacherRegister && !payload.account?.trim()) {
@@ -109,7 +111,9 @@ const changePasswordSchema = z.object({
 })
 
 const updateProfileSchema = z.object({
-  username: z.string().trim().min(1).max(128),
+  username: z.string()
+    .min(1, CLIENT_PERSONAL_USERNAME_RULE_MESSAGE)
+    .max(128, CLIENT_PERSONAL_USERNAME_RULE_MESSAGE),
   mobile: z.string().trim().max(20).optional(),
   email: z.string().trim().max(128).optional(),
   currentPassword: z.string().min(1),
@@ -267,6 +271,7 @@ clientAuthRouter.post(
     }).normalizedValue
     await authSecurityService.guardClientForgotResetRequest(requestMeta, normalizedAccount)
     await clientAuthService.resetPassword(payload, requestMeta)
+    clearClientAuthCookie(req, res)
     res.json({ code: 0, message: 'ok', data: true })
   }),
 )
@@ -277,6 +282,9 @@ clientAuthRouter.get(
   asyncHandler(async (req, res) => {
     const authReq = req as ClientAuthenticatedRequest
     const data = await clientAuthService.me(authReq.clientAuth)
+    if (authReq.clientAuth.authSource === 'cookie') {
+      ensureClientCsrfCookie(req, res, authReq.clientAuth.sessionToken)
+    }
     res.setHeader('Cache-Control', 'no-store')
     res.json({ code: 0, message: 'ok', data })
   }),
@@ -318,6 +326,9 @@ clientAuthRouter.patch(
     const requestMeta = extractRequestMeta(req)
     await authSecurityService.guardClientProfileUpdateRequest(requestMeta, authReq.clientAuth.userId)
     const data = await clientAuthService.updateProfile(authReq.clientAuth, updateProfileSchema.parse(req.body))
+    if (data.requiresRelogin) {
+      clearClientAuthCookie(req, res)
+    }
     res.json({ code: 0, message: 'ok', data })
   }),
 )

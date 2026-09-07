@@ -1,23 +1,32 @@
 /**
- * 文件说明：该文件负责图形验证码服务，统一处理验证码生成、内存暂存、过期控制与校验消费。
- * 实现逻辑：
- * 1. 使用随机字符和 SVG 模板即时生成验证码图片，避免依赖外部静态资源；
- * 2. 借助临时票据存储记录验证码内容与有效期，确保验证码具备一次性和时效性；
- * 3. 校验成功后立即销毁对应票据，降低重复提交与自动化撞库的安全风险。
+ * 文件说明：图形验证码服务，负责生成不可从响应文本还原答案的 PNG 验证码并校验一次性票据。
+ * 实现逻辑：管理端与客户端使用独立、有界的票据存储；保留 SVG 字段仅作为 PNG 图像包装，兼容旧前端消费方式。
+ * 维护说明：测试应通过构造函数注入固定验证码和渲染器，禁止从 HTTP 响应的图像或 SVG 文本反推出答案。
  */
 
 import { randomBytes, randomUUID } from 'node:crypto'
+import sharp from 'sharp'
 import { BizError } from '../utils/errors.js'
 import { EphemeralTicketStore } from '../utils/ephemeral-ticket-store.js'
+
+export type CaptchaScope = 'admin' | 'client'
 
 interface CaptchaTicket {
   code: string
   expireAt: number
 }
 
-// 详细注释：此处承接当前模块的关键状态、流程或结构定义。
+export type CaptchaRenderer = (svg: string) => Promise<Buffer>
+
+interface CaptchaServiceOptions {
+  stores?: Record<CaptchaScope, EphemeralTicketStore<CaptchaTicket>>
+  createCode?: () => string
+  renderPng?: CaptchaRenderer
+}
+
 const CAPTCHA_TTL_MS = 5 * 60 * 1000
-const captchaStore = new EphemeralTicketStore<CaptchaTicket>({
+
+const createCaptchaStore = () => new EphemeralTicketStore<CaptchaTicket>({
   maxSize: 4000,
   resolveExpiresAt: (ticket) => ticket.expireAt,
 })
@@ -55,31 +64,66 @@ const buildCaptchaSvg = (code: string) => {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="140" height="40" viewBox="0 0 140 40" role="img" aria-label="图形验证码"><defs><linearGradient id="captcha-bg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#f8fafc"/><stop offset="100%" stop-color="#d1fae5"/></linearGradient></defs><rect width="140" height="40" rx="10" fill="url(#captcha-bg)"/>${noiseLines}${noiseDots}${labels}</svg>`
 }
 
-class CaptchaService {
-  createCaptcha() {
+const renderCaptchaPng: CaptchaRenderer = async (svg) => sharp(Buffer.from(svg)).png().toBuffer()
+
+const wrapPngAsSvg = (pngDataUrl: string) => (
+  `<svg xmlns="http://www.w3.org/2000/svg" width="140" height="40" viewBox="0 0 140 40" role="img" aria-label="图形验证码"><image width="140" height="40" href="${pngDataUrl}"/></svg>`
+)
+
+export class CaptchaService {
+  private readonly stores: Record<CaptchaScope, EphemeralTicketStore<CaptchaTicket>>
+  private readonly createCode: () => string
+  private readonly renderPng: CaptchaRenderer
+
+  constructor(options: CaptchaServiceOptions = {}) {
+    this.stores = options.stores ?? {
+      admin: createCaptchaStore(),
+      client: createCaptchaStore(),
+    }
+    this.createCode = options.createCode ?? randomCaptchaCode
+    this.renderPng = options.renderPng ?? renderCaptchaPng
+  }
+
+  async createCaptcha(scope: CaptchaScope) {
     const captchaId = randomUUID()
-    const code = randomCaptchaCode()
-    captchaStore.set(captchaId, {
+    const code = this.createCode()
+    const pngBuffer = await this.renderPng(buildCaptchaSvg(code))
+    this.stores[scope].set(captchaId, {
       code,
       expireAt: Date.now() + CAPTCHA_TTL_MS,
     })
+    const captchaImage = `data:image/png;base64,${pngBuffer.toString('base64')}`
     return {
       captchaId,
-      captchaSvg: buildCaptchaSvg(code),
+      captchaImage,
+      // 兼容尚未升级的旧前端，但 SVG 中只包含 PNG 图像，没有可直接提取的验证码文本。
+      captchaSvg: wrapPngAsSvg(captchaImage),
       expiresInSeconds: Math.floor(CAPTCHA_TTL_MS / 1000),
     }
   }
 
-  verifyCaptcha(captchaId: string, captchaCode: string): void {
-    const ticket = captchaStore.get(captchaId)
+  verifyCaptcha(scope: CaptchaScope, captchaId: string, captchaCode: string): void {
+    const ticket = this.stores[scope].get(captchaId)
     if (!ticket) {
       throw new BizError('验证码已失效，请刷新后重试', 400)
     }
     if (ticket.code !== captchaCode.trim().toUpperCase()) {
       throw new BizError('验证码错误', 400)
     }
-    captchaStore.delete(captchaId)
+    this.stores[scope].delete(captchaId)
   }
 }
 
-export const captchaService = new CaptchaService()
+export let captchaService = new CaptchaService()
+
+/**
+ * 仅供同一 Node 测试进程安装可预测的验证码服务。
+ * 不接收 HTTP 入参、环境变量或运行时管理接口，因此不会形成生产答案泄露通道。
+ */
+export function installCaptchaServiceForTesting(options: CaptchaServiceOptions): () => void {
+  const previousService = captchaService
+  captchaService = new CaptchaService(options)
+  return () => {
+    captchaService = previousService
+  }
+}

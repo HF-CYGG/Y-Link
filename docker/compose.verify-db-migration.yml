@@ -43,6 +43,8 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile.onebox
+      args:
+        Y_LINK_NODE_IMAGE: ${Y_LINK_NODE_IMAGE:-public.ecr.aws/docker/library/node:22-bookworm-slim}
     environment:
       NODE_ENV: production
       APP_PROFILE: verify-db-migration

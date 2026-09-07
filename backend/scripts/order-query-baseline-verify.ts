@@ -14,6 +14,7 @@ import { BaseProduct } from '../src/entities/base-product.entity.js'
 import { O2oPreorder } from '../src/entities/o2o-preorder.entity.js'
 import { authService } from '../src/services/auth.service.js'
 import { clientAuthService } from '../src/services/client-auth.service.js'
+import { installCaptchaServiceForTesting } from '../src/services/captcha.service.js'
 import { o2oPreorderService } from '../src/services/o2o-preorder.service.js'
 import { productService } from '../src/services/product.service.js'
 import { systemConfigService } from '../src/services/system-config.service.js'
@@ -60,7 +61,9 @@ const ensureReady = async () => {
   await systemConfigService.ensureDefaultConfigs()
 }
 
-const readCaptchaCode = (captchaSvg: string) => captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6)
+const TEST_CAPTCHA_CODE = 'ABC123'
+installCaptchaServiceForTesting({ createCode: () => TEST_CAPTCHA_CODE })
+const readCaptchaCode = (_captchaSvg: string) => TEST_CAPTCHA_CODE
 const toChineseDigits = (value: string) => value.replaceAll(/\d/g, (digit) => '零一二三四五六七八九'[Number(digit)] ?? '')
 
 const registerAndLoginClient = async (seed: number): Promise<ClientAuthContext> => {

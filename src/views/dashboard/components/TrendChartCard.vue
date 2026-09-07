@@ -17,6 +17,7 @@ import BaseEChart from '@/components/charts/BaseEChart.vue'
 import type { DashboardTrendPoint } from '@/api/modules/dashboard'
 import { useThemeStore } from '@/store'
 import pinia from '@/store/pinia'
+import { escapeTooltipHtml } from '@/utils/html-escape'
 
 const props = defineProps<{
   trend: DashboardTrendPoint[]
@@ -73,7 +74,7 @@ const trendOption = computed<EChartsOption>(() => ({
       }
 
       return [
-        `<div style="font-weight:600;margin-bottom:4px;">${point.label}</div>`,
+        `<div style="font-weight:600;margin-bottom:4px;">${escapeTooltipHtml(point.label)}</div>`,
         `<div>出库单数：${point.orderCount} 单</div>`,
         `<div>出库总额：¥${formatAmount(point.amount)}</div>`,
         `<div>出库数量：${formatQty(point.totalQty)}</div>`,

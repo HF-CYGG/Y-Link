@@ -151,6 +151,8 @@ export default defineConfig(({ command, mode }) => {
       // 统一配置路径别名，提升模块导入可读性并降低相对路径层级复杂度
       alias: {
         '@': fileURLToPath(new URL('./src', import.meta.url)),
+        // Web CI 仅安装根依赖，不创建 npm workspace 链接；共享校验源码需在该模式下直接参与解析。
+        '@ylink/validation': fileURLToPath(new URL('./packages/validation/src', import.meta.url)),
       },
     },
     /**
@@ -204,6 +206,11 @@ export default defineConfig(({ command, mode }) => {
       // 页面样式跟随异步路由拆分，避免管理端低频工作台 CSS 阻塞客户端商城首屏。
       cssCodeSplit: true,
       rollupOptions: {
+        // 独立救援入口不能经过普通 App 的路由、Store 或鉴权初始化；保留多 HTML 入口让 Vite 为其构建独立依赖图。
+        input: {
+          main: fileURLToPath(new URL('./index.html', import.meta.url)),
+          rescue: fileURLToPath(new URL('./rescue.html', import.meta.url)),
+        },
         output: {
           manualChunks(id) {
             const normalizedId = id.replaceAll('\\', '/')

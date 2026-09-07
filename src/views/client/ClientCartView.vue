@@ -15,7 +15,12 @@ import { useRouter } from 'vue-router'
 
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { useClientMallSnapshotRefresh } from '@/composables/useClientMallSnapshotRefresh'
-import { useClientAuthStore, useClientCartStore } from '@/store'
+import {
+  resolveClientCartConflictMessage,
+  resolveClientCartMaxQty,
+  useClientCartStore,
+} from '@/store/modules/client-cart'
+import { useClientAuthStore } from '@/store/modules/client-auth'
 import pinia from '@/store/pinia'
 
 import { showAppSuccess, showAppWarning } from '@/utils/app-alert'
@@ -44,8 +49,8 @@ onMounted(() => {
   void refreshMallSnapshot()
 })
 
-const selectedCount = computed(() => clientCartStore.selectedValidItems.length)
-const totalAmount = computed(() => clientCartStore.selectedValidItems.reduce((sum, item) => sum + Math.max(0, Number(item.defaultPrice || 0)) * item.qty, 0))
+const selectedCount = computed(() => clientCartStore.selectedItems.length)
+const totalAmount = computed(() => clientCartStore.selectedItems.reduce((sum, item) => sum + Math.max(0, Number(item.defaultPrice || 0)) * item.qty, 0))
 
 const removeSelected = () => {
   if (!selectedCount.value) {
@@ -68,7 +73,7 @@ const goCheckout = async () => {
     return
   }
 
-  if (!clientCartStore.selectedValidItems.length) {
+  if (!clientCartStore.selectedItems.length) {
     if (clientCartStore.validItems.length > 0) {
       // 与商城页底部“去结算”保持一致：未手动勾选时默认勾选全部有效商品，再进入结算。
       clientCartStore.toggleAllValidSelected(true)
@@ -76,6 +81,11 @@ const goCheckout = async () => {
       showAppWarning('购物车暂无可结算商品')
       return
     }
+  }
+
+  if (clientCartStore.selectedCheckoutConflicts.length) {
+    showAppWarning('已选商品的库存或规格已变化，请先调整数量、取消选择或移除后再结算')
+    return
   }
 
   checkoutPending.value = true
@@ -164,7 +174,7 @@ const handleBack = () => {
                     <p v-if="resolveO2oPriceView(item).isDiscounted" class="mt-0.5 text-xs text-slate-400">
                       原价 ¥{{ Number(resolveO2oPriceView(item).originalPrice).toFixed(2) }} · {{ resolveO2oPriceView(item).discountLabel }}
                     </p>
-                    <p class="text-xs text-slate-400 mt-1">可预订 {{ item.availableStock }} · 限购 {{ item.limitPerUser }}</p>
+                    <p class="text-xs text-slate-400 mt-1">可预订 {{ resolveClientCartMaxQty(item) }} · 限购 {{ item.limitPerUser }}</p>
                   </div>
                 </div>
                 <div class="flex items-center justify-end gap-3 sm:w-auto w-full">
@@ -185,18 +195,39 @@ const handleBack = () => {
           v-if="clientCartStore.invalidItems.length"
           class="rounded-[1.2rem] bg-[var(--ylink-color-surface)] p-4 shadow-[var(--ylink-shadow-soft)]"
         >
-          <p class="mb-3 text-sm font-semibold text-slate-700">失效商品</p>
+          <p class="mb-3 text-sm font-semibold text-slate-700">需要处理的商品</p>
           <TransitionGroup name="cart-list-flow" tag="div" class="space-y-2">
             <article
               v-for="item in clientCartStore.invalidItems"
               :key="`invalid-${resolveCartItemKey(item)}`"
               class="flex flex-col gap-3 rounded-xl bg-rose-50 px-3 py-3 border border-rose-100 sm:flex-row sm:items-center sm:justify-between"
             >
-              <div class="min-w-0">
-                <p class="text-sm font-semibold text-rose-700">{{ item.productName }}</p>
-                <p class="text-xs text-rose-500 mt-1">当前不可预订，请移除后继续</p>
+              <div class="flex min-w-0 items-start gap-3">
+                <el-checkbox
+                  :model-value="item.selected"
+                  class="mt-0.5"
+                  @update:model-value="clientCartStore.toggleItemSelected(resolveCartItemKey(item), Boolean($event))"
+                />
+                <div class="min-w-0">
+                  <p class="text-sm font-semibold text-rose-700">{{ item.productName }}</p>
+                  <p v-if="item.specText" class="mt-0.5 text-xs text-rose-500">{{ item.specText }}</p>
+                  <p class="mt-1 text-xs text-rose-600">{{ resolveClientCartConflictMessage(item) }}</p>
+                  <p class="mt-1 text-xs text-rose-500">原选 {{ item.qty }} 件 · 当前可购 {{ resolveClientCartMaxQty(item) }} 件</p>
+                </div>
               </div>
-              <button type="button" class="self-end text-xs font-medium text-rose-600 bg-white px-3 py-1.5 rounded-full border border-rose-200 hover:bg-rose-50 sm:self-auto" @click="clientCartStore.removeItem(resolveCartItemKey(item))">移除</button>
+              <div class="flex flex-wrap justify-end gap-2 sm:w-auto">
+                <el-button
+                  v-if="resolveClientCartMaxQty(item) > 0"
+                  size="small"
+                  @click="clientCartStore.updateQty(resolveCartItemKey(item), resolveClientCartMaxQty(item))"
+                >
+                  调整为 {{ resolveClientCartMaxQty(item) }} 件
+                </el-button>
+                <el-button size="small" @click="clientCartStore.toggleItemSelected(resolveCartItemKey(item), !item.selected)">
+                  {{ item.selected ? '取消选择' : '重新选择' }}
+                </el-button>
+                <el-button type="danger" plain size="small" @click="clientCartStore.removeItem(resolveCartItemKey(item))">移除</el-button>
+              </div>
             </article>
           </TransitionGroup>
         </div>

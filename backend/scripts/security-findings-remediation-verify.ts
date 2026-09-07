@@ -21,6 +21,8 @@ async function main() {
   const userEntity = read('src/entities/client-user.entity.ts')
   const authRoutes = read('src/routes/client-auth.routes.ts')
   const systemRoutes = read('src/routes/system-config.routes.ts')
+  const sharedStaffInviteService = read('src/services/client-staff-invite-code.service.ts')
+  const staffInviteCodeUtils = read('src/utils/staff-invite-code.ts')
   const verificationService = read('src/services/verification-code.service.ts')
   const notificationService = read('src/services/notification.service.ts')
   const feedbackRoutes = read('src/routes/client-feedback.routes.ts')
@@ -31,12 +33,16 @@ async function main() {
   const authSecurityService = read('src/services/auth-security.service.ts')
   const persistentRiskStateService = read('src/services/persistent-risk-state.service.ts')
 
-  requirePattern(staffEntity, /invite_code_digest/, '教职工目录必须保存不可逆邀请码摘要')
+  requirePattern(staffEntity, /invite_code_digest/, '教职工目录兼容保留历史个人邀请码摘要字段')
   requirePattern(staffEntity, /invite_locked_until/, '教职工目录必须持久化邀请码锁定状态')
   requirePattern(userEntity, /mobile_verified_at/, '客户端用户必须持久化手机验证状态')
   requirePattern(userEntity, /email_verified_at/, '客户端用户必须持久化邮箱验证状态')
-  requirePattern(systemRoutes, /invite-code\/reset/, '必须提供管理员邀请码重置接口')
-  requirePattern(systemRoutes, /invite-code[\s\S]{0,300}requireRole\('admin'\)/, '邀请码接口必须有管理员门禁')
+  requirePattern(systemRoutes, /'\/client-staff-invite-code'[\s\S]{0,180}requirePermission\('system_configs:update'\)[\s\S]{0,120}requireRole\('admin'\)/, '统一邀请码写接口必须有管理员与更新权限门禁')
+  requirePattern(systemRoutes, /'\/client-staff-invite-code'[\s\S]{0,180}requirePermission\('system_configs:view'\)/, '统一邀请码读取接口必须有配置查看权限')
+  requirePattern(systemRoutes, /client-staff-directory\/:id\/invite-code[\s\S]{0,320}BizError\([^)]*410/, '旧逐人邀请码端点必须保留 410 门禁')
+  requirePattern(sharedStaffInviteService, /config\.configKey = :key', \{ key: STAFF_INVITE_CONFIG_KEY \}/, '统一邀请码必须从固定系统配置键读取')
+  requirePattern(sharedStaffInviteService, /actionType: digest === null \? 'system_config\.staff_invite\.disable' : 'system_config\.staff_invite\.set'/, '统一邀请码启停必须写入审计')
+  requirePattern(staffInviteCodeUtils, /client\.staff-invite-code:v1/, '统一邀请码摘要必须使用固定业务域隔离')
   requirePattern(authRoutes, /profile\/verification-code\/send/, '必须提供鉴权后的资料改绑验证码接口')
   assert.doesNotMatch(authRoutes, /staff-directory\/lookup[\s\S]{0,500}realName/, '匿名工号查询不得返回实名信息')
 
@@ -64,8 +70,13 @@ async function main() {
   assert.doesNotMatch(authSecurityService, /new Map</, '认证风控不得继续使用无界进程内 Map')
   requirePattern(
     appSource,
-    /status:\s*['"]UP['"][\s\S]*maintenance:\s*databaseMaintenanceModeService\.getPublicState\(\)[\s\S]*writeCoordinator:/,
-    '公开健康检查必须返回 UP、脱敏维护状态与无敏感信息的写队列水位',
+    /status:\s*['"]UP['"][\s\S]*maintenance:\s*databaseMaintenanceModeService\.getPublicState\(\)/,
+    '公开健康检查必须返回 UP 与脱敏维护状态',
+  )
+  assert.doesNotMatch(
+    appSource,
+    /app\.get\('\/health',[\s\S]{0,300}writeCoordinator/,
+    '公开健康检查不得暴露内部写协调器细节',
   )
   assert.doesNotMatch(
     appSource,

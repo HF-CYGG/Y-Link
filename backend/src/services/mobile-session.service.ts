@@ -11,6 +11,7 @@ import { Brackets, IsNull, LessThanOrEqual, MoreThan, type EntityManager } from 
 import { AppDataSource } from '../config/data-source.js'
 import { env } from '../config/env.js'
 import { runInTransaction } from '../config/transaction-runner.js'
+import { databaseOperationGate } from '../database/operation-gate.js'
 import {
   ClientMobileSession,
   type MobileSessionRevokeReason,
@@ -32,6 +33,7 @@ import { authSecurityService } from './auth-security.service.js'
 import { clientAuthService } from './client-auth.service.js'
 import { persistentRiskStateService } from './persistent-risk-state.service.js'
 import { notificationService } from './notification.service.js'
+import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 
 const ACCESS_ACTIVITY_WRITE_INTERVAL_MS = 60 * 1000
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000
@@ -105,6 +107,21 @@ const auditActorFromClientUser = (user: ClientUser) => ({
 
 export class MobileSessionService {
   private cleanupLoopTimer: ReturnType<typeof globalThis.setInterval> | null = null
+  private cleanupLoopDesired = false
+  private cleanupCyclePromise: Promise<void> | null = null
+
+  constructor() {
+    databaseOperationGate.registerWorker({
+      name: 'mobile-session-cleanup',
+      pause: () => this.pauseCleanupLoop(),
+      drain: async () => {
+        await this.cleanupCyclePromise?.catch(() => undefined)
+      },
+      resume: () => {
+        if (this.cleanupLoopDesired) this.startCleanupTimer()
+      },
+    })
+  }
 
   validateDevice(device: MobileDeviceInput): MobileDeviceInput {
     const deviceId = device.deviceId?.trim() ?? ''
@@ -177,6 +194,7 @@ export class MobileSessionService {
     transactionManager?: EntityManager,
   ): Promise<MobileSessionCredentials> {
     const device = this.validateDevice(deviceInput)
+    const securitySnapshot = clientAuthService.buildLoginSecuritySnapshot(user)
     const now = new Date()
     const absoluteExpiresAt = addMilliseconds(now, env.MOBILE_SESSION_ABSOLUTE_TTL_DAYS * 24 * 60 * 60 * 1000)
     const accessExpiresAt = minimumDate(
@@ -193,11 +211,16 @@ export class MobileSessionService {
     const createSession = async (manager: EntityManager) => {
       const userQuery = manager.getRepository(ClientUser)
         .createQueryBuilder('user')
+        .addSelect('user.passwordHash')
         .where('user.id = :userId', { userId: user.id })
       if (AppDataSource.options.type === 'mysql') userQuery.setLock('pessimistic_write')
       const lockedUser = await userQuery.getOne()
       if (!lockedUser || lockedUser.status !== 'enabled') {
         throw mobileError('当前账号已停用', 403, 40300)
+      }
+      // 与 Web 共用锁内安全快照复核，防止改密或身份变更后复用旧认证结果签发会话。
+      if (!clientAuthService.isLoginSecuritySnapshotCurrent(lockedUser, securitySnapshot)) {
+        throw mobileError('用户名或密码错误', 401, 40120)
       }
 
       const repository = manager.getRepository(ClientMobileSession)
@@ -678,17 +701,24 @@ export class MobileSessionService {
     }
 
     if (session.lastAccessAt < addMilliseconds(now, -ACCESS_ACTIVITY_WRITE_INTERVAL_MS)) {
-      await runInTransaction(async (manager) => {
-        await manager.getRepository(ClientMobileSession).createQueryBuilder()
-          .update(ClientMobileSession)
-          .set({ lastAccessAt: now })
-          .where('id = :id AND last_access_at < :threshold', {
-            id: session.id,
-            threshold: addMilliseconds(now, -ACCESS_ACTIVITY_WRITE_INTERVAL_MS),
+      const releaseActivityLease = databaseMaintenanceModeService.registerInFlightWrite()
+      if (releaseActivityLease) {
+        try {
+          await runInTransaction(async (manager) => {
+            await manager.getRepository(ClientMobileSession).createQueryBuilder()
+              .update(ClientMobileSession)
+              .set({ lastAccessAt: now })
+              .where('id = :id AND last_access_at < :threshold', {
+                id: session.id,
+                threshold: addMilliseconds(now, -ACCESS_ACTIVITY_WRITE_INTERVAL_MS),
+              })
+              .execute()
           })
-          .execute()
-      })
-      session.lastAccessAt = now
+          session.lastAccessAt = now
+        } finally {
+          releaseActivityLease()
+        }
+      }
     }
     return { userId: session.clientUserId, sessionId: session.id, accessToken: token, user: session.user, session }
   }
@@ -824,6 +854,18 @@ export class MobileSessionService {
   }
 
   async cleanupExpiredBatch(): Promise<number> {
+    const releaseMaintenanceLease = databaseMaintenanceModeService.registerInFlightWrite()
+    if (!releaseMaintenanceLease) {
+      return 0
+    }
+    try {
+      return await this.cleanupExpiredBatchWithinLease()
+    } finally {
+      releaseMaintenanceLease()
+    }
+  }
+
+  private async cleanupExpiredBatchWithinLease(): Promise<number> {
     const now = new Date()
     return runInTransaction(async (manager) => {
       const repository = manager.getRepository(ClientMobileSession)
@@ -860,27 +902,63 @@ export class MobileSessionService {
     })
   }
 
-  private async runCleanupCycle() {
-    let processed = 0
-    do {
-      processed = await this.cleanupExpiredBatch()
-      if (processed === CLEANUP_BATCH_SIZE) {
-        await new Promise((resolve) => globalThis.setTimeout(resolve, 0))
+  private runCleanupCycle(): Promise<void> {
+    if (this.cleanupCyclePromise) {
+      return this.cleanupCyclePromise
+    }
+    const cleanupCycle = (async () => {
+      const releaseMaintenanceLease = databaseMaintenanceModeService.registerInFlightWrite()
+      if (!releaseMaintenanceLease) {
+        return
       }
-    } while (processed === CLEANUP_BATCH_SIZE)
+      try {
+        let processed = 0
+        do {
+          processed = await this.cleanupExpiredBatch()
+          if (processed === CLEANUP_BATCH_SIZE) {
+            await new Promise((resolve) => globalThis.setTimeout(resolve, 0))
+          }
+        } while (processed === CLEANUP_BATCH_SIZE)
+      } finally {
+        releaseMaintenanceLease()
+      }
+    })()
+    this.cleanupCyclePromise = cleanupCycle
+    void cleanupCycle.then(() => {
+      if (this.cleanupCyclePromise === cleanupCycle) {
+        this.cleanupCyclePromise = null
+      }
+    }, () => {
+      if (this.cleanupCyclePromise === cleanupCycle) {
+        this.cleanupCyclePromise = null
+      }
+    })
+    return cleanupCycle
   }
 
   startCleanupLoop() {
-    if (this.cleanupLoopTimer) return
+    this.cleanupLoopDesired = true
+    this.startCleanupTimer()
+  }
+
+  private startCleanupTimer() {
+    if (databaseOperationGate.isFrozen() || this.cleanupLoopTimer) return
     this.cleanupLoopTimer = globalThis.setInterval(() => {
       void this.runCleanupCycle().catch(() => undefined)
     }, CLEANUP_INTERVAL_MS)
   }
 
-  stopCleanupLoop() {
-    if (!this.cleanupLoopTimer) return
-    globalThis.clearInterval(this.cleanupLoopTimer)
-    this.cleanupLoopTimer = null
+  async stopCleanupLoop(): Promise<void> {
+    this.cleanupLoopDesired = false
+    this.pauseCleanupLoop()
+    await this.cleanupCyclePromise?.catch(() => undefined)
+  }
+
+  private pauseCleanupLoop() {
+    if (this.cleanupLoopTimer) {
+      globalThis.clearInterval(this.cleanupLoopTimer)
+      this.cleanupLoopTimer = null
+    }
   }
 }
 

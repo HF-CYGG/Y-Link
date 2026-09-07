@@ -24,6 +24,8 @@ import {
   type O2oOrderStatus,
 } from '@/constants/o2o-order-status'
 import {
+  batchPurgeCancelledO2oOrders,
+  cancelO2oConsoleOrder,
   deleteO2oConsoleOrder,
   getO2oConsoleOrderDetail,
   getO2oConsoleOrders,
@@ -87,6 +89,11 @@ const RETURN_REQUEST_STATUS_META = {
 const listLoading = ref(false)
 const detailLoading = ref(false)
 const orderDeleting = ref(false)
+const adminCancelling = ref(false)
+const batchPurging = ref(false)
+const batchInteractionActive = ref(false)
+const selectedCancelledOrderIds = ref<string[]>([])
+const batchPurgeResults = ref<Array<{ id: string; showNo?: string; outcome: 'deleted' | 'skipped' | 'failed'; code: string; message: string }>>([])
 const orders = ref<O2oPreorderSummary[]>([])
 const activePool = ref<OrderPoolKey>('all')
 const activeOrderId = ref('')
@@ -130,6 +137,9 @@ const canGoVerify = computed(() => isO2oOrderPending(activeOrderDetail.value?.or
 const goVerifyButtonText = computed(() => (canGoVerify.value ? '去核销' : '不可核销'))
 const canDeleteCurrentOrder = computed(() =>
   Boolean(activeOrderDetail.value?.order.id && hasPermission('orders:delete') && authStore.currentUser?.role === 'admin'),
+)
+const canCancelCurrentOrder = computed(() =>
+  Boolean(activeOrderDetail.value?.order.status === 'pending' && hasPermission('orders:update')),
 )
 
 const formatCurrency = (value: string | number | null | undefined) => {
@@ -280,6 +290,9 @@ const poolOrderMap = computed(() => {
 })
 
 const currentPoolOrders = computed(() => poolOrderMap.value[activePool.value])
+const canBatchPurgeCancelledOrders = computed(() => activePool.value === 'cancelled' && hasPermission('orders:delete') && authStore.currentUser?.role === 'admin')
+const selectedCancelledOrders = computed(() => currentPoolOrders.value.filter((order) => selectedCancelledOrderIds.value.includes(order.id)))
+const hasVisibleCancelledSelection = computed(() => canBatchPurgeCancelledOrders.value && selectedCancelledOrders.value.length > 0)
 const detailEmptyText = computed(() => {
   if (listLoading.value) {
     return '订单加载中...'
@@ -428,6 +441,13 @@ const getReturnRequestStatusMeta = (request: O2oReturnRequestDetail) => {
   return RETURN_REQUEST_STATUS_META[request.status]
 }
 
+const getCancellationSourceLabel = (source: O2oOrderStatusReport['cancellationSource']) => {
+  if (source === 'client') return '客户端'
+  if (source === 'admin') return '管理端'
+  if (source === 'system') return '系统'
+  return '历史记录'
+}
+
 // 管理端状态选择保留门店当前对外使用的核心业务状态，并新增“已完结（交易结束）”。
 // 这样门店既能表达待接单/备货/售后，也能在不改动主状态的前提下补充交易收尾完成。
 const BUSINESS_STATUS_PICKER_ORDER: O2oOrderBusinessStatus[] = ['awaiting_shipment', 'preparing', 'ready', 'completed', 'after_sale']
@@ -519,7 +539,7 @@ const timelineItems = computed(() => {
     return [
       { key: 'created', title: '已下单', time: formatOrderDateTime(order.createdAt), active: true },
       { key: 'prepare', title: '备货中', time: formatOrderDateTime(order.timeoutAt, { fallback: '门店处理中' }), active: true },
-      { key: 'cancel', title: reportConfig.value.timelineCurrentTitle, time: formatOrderDateTime(order.timeoutAt, { fallback: '已取消' }), active: true },
+      { key: 'cancel', title: reportConfig.value.timelineCurrentTitle, time: formatOrderDateTime(order.statusReport?.cancelledAt, { fallback: '历史订单未留存取消时间' }), active: true },
       { key: 'closed', title: '订单关闭', time: reportConfig.value.timelineCurrentHint, active: true },
     ]
   }
@@ -857,6 +877,8 @@ const loadOrders = async (options?: { silent?: boolean }) => {
         markIncrementalNewOrders(incrementalNewOrders)
       }
       orders.value = latestOrders
+      const currentCancelledIds = new Set(latestOrders.filter((item) => item.status === 'cancelled').map((item) => item.id))
+      selectedCancelledOrderIds.value = selectedCancelledOrderIds.value.filter((id) => currentCancelledIds.has(id))
       if (silent) {
         const refreshedOrderIds = latestOrders
           .filter((item) => hasOrderSummaryChanged(previousOrderMap.get(item.id), item))
@@ -894,6 +916,9 @@ const handlePickOrder = async (id: string) => {
 }
 
 const handlePoolChange = async (poolKey: OrderPoolKey) => {
+  if (poolKey !== 'cancelled') {
+    selectedCancelledOrderIds.value = []
+  }
   activePool.value = poolKey
   await syncActiveOrder()
 }
@@ -960,6 +985,63 @@ const handleCopyVerifyCode = async () => {
     showAppSuccess('核销码复制成功')
   } catch {
     showAppError('复制失败，请检查浏览器权限后重试')
+  }
+}
+
+const handleCancelCurrentOrder = async () => {
+  const detail = activeOrderDetail.value
+  if (!detail?.order.id || !ensurePermission('orders:update', '取消订单')) return
+  try {
+    const prompt = await ElMessageBox.prompt('请输入取消原因（2-200 字），该说明会展示给客户。', '取消订单', {
+      inputType: 'textarea', inputPlaceholder: '请输入取消原因', inputValidator: (value: string) => {
+        const length = value.trim().length
+        return length >= 2 && length <= 200 ? true : '取消原因长度应为 2-200 个字符'
+      }, closeOnClickModal: false,
+    })
+    await ElMessageBox.confirm(`确认取消订单“${detail.order.showNo}”吗？预占库存将被释放。`, '二次确认取消', { type: 'warning', closeOnClickModal: false })
+    adminCancelling.value = true
+    const data = await cancelO2oConsoleOrder(detail.order.id, { reason: prompt.value.trim() })
+    activeOrderDetail.value = data
+    mergeOrderSummaryFromDetail(data)
+    await loadOrders({ silent: true })
+    showAppSuccess('订单已取消，预占库存已释放')
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') showAppError(extractErrorMessage(error, '取消订单失败，请稍后重试'))
+  } finally {
+    adminCancelling.value = false
+  }
+}
+
+const handleToggleCancelledSelection = (id: string, checked: boolean) => {
+  selectedCancelledOrderIds.value = checked
+    ? [...new Set([...selectedCancelledOrderIds.value, id])].slice(0, 50)
+    : selectedCancelledOrderIds.value.filter((item) => item !== id)
+}
+
+const handleSelectAllCancelled = () => {
+  selectedCancelledOrderIds.value = currentPoolOrders.value.slice(0, 50).map((order) => order.id)
+}
+
+const handleBatchPurgeCancelledOrders = async () => {
+  if (!canBatchPurgeCancelledOrders.value || !selectedCancelledOrders.value.length) return
+  const selectedSnapshot = selectedCancelledOrders.value.slice(0, 50).map((order) => ({ id: order.id, confirmShowNo: order.showNo }))
+  batchInteractionActive.value = true
+  try {
+    await ElMessageBox.confirm(`确认永久删除已选 ${selectedSnapshot.length} 笔已取消订单吗？此操作不可撤销。`, '批量永久删除确认', { type: 'error', closeOnClickModal: false })
+    const password = await ElMessageBox.prompt('请输入永久删除密码。', '永久删除密码', { inputType: 'password', closeOnClickModal: false, inputValidator: (value: string) => value.trim() ? true : '请输入永久删除密码' })
+    batchPurging.value = true
+    const data = await batchPurgeCancelledO2oOrders({ orders: selectedSnapshot, permanentDeletePassword: password.value.trim() })
+    batchPurgeResults.value = data.results.filter((item) => item.outcome !== 'deleted')
+    selectedCancelledOrderIds.value = []
+    activeOrderId.value = ''
+    activeOrderDetail.value = null
+    await loadOrders({ silent: true })
+    showAppSuccess(`批量删除完成：成功 ${data.summary.deleted}，跳过 ${data.summary.skipped}，失败 ${data.summary.failed}`)
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') showAppError(extractErrorMessage(error, '批量永久删除失败，请稍后重试'))
+  } finally {
+    batchPurging.value = false
+    batchInteractionActive.value = false
   }
 }
 
@@ -1164,7 +1246,7 @@ const scheduleAutoRefresh = () => {
   }
   autoRefreshTimer = globalThis.setInterval(() => {
     // 用户正在手动查询或刷新详情时跳过本轮轮询，避免后台静默请求抢占前台交互。
-    if (globalThis.document?.visibilityState === 'hidden' || listLoading.value || detailLoading.value) {
+    if (globalThis.document?.visibilityState === 'hidden' || listLoading.value || detailLoading.value || batchInteractionActive.value || hasVisibleCancelledSelection.value) {
       return
     }
     void loadOrders({ silent: true })
@@ -1370,6 +1452,20 @@ onBeforeUnmount(() => {
         <div class="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center">
           <el-button class="search-action-button w-full sm:w-auto" type="primary" @click="handleSearch">查询</el-button>
           <el-button class="w-full sm:w-auto" @click="handleReset">重置</el-button>
+          <template v-if="canBatchPurgeCancelledOrders">
+            <el-button class="w-full sm:w-auto" :disabled="batchPurging" @click="handleSelectAllCancelled">全选当前结果</el-button>
+            <el-button class="w-full sm:w-auto" :disabled="batchPurging || !selectedCancelledOrderIds.length" @click="selectedCancelledOrderIds = []">清空选择</el-button>
+            <el-button class="w-full sm:w-auto" type="danger" :loading="batchPurging" :disabled="!selectedCancelledOrderIds.length" @click="handleBatchPurgeCancelledOrders">删除已选（{{ selectedCancelledOrderIds.length }}/50）</el-button>
+          </template>
+        </div>
+
+        <div v-if="batchPurgeResults.length" class="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+          <p class="font-semibold">批量删除未完成项</p>
+          <ul class="mt-1 space-y-1">
+            <li v-for="result in batchPurgeResults" :key="`${result.id}:${result.code}`">
+              {{ result.showNo || result.id }}：{{ result.code }} - {{ result.message }}
+            </li>
+          </ul>
         </div>
 
         <Transition name="new-order-notice">
@@ -1383,19 +1479,25 @@ onBeforeUnmount(() => {
 
         <div ref="orderPoolListRef" class="mt-4">
           <TransitionGroup name="order-pool-refresh" tag="div" class="space-y-2">
-            <button
+            <div
               v-for="order in currentPoolOrders"
               :key="order.id"
-              type="button"
-              class="w-full rounded-2xl border px-3 py-3 text-left transition"
+              class="relative rounded-2xl border px-3 py-3 transition"
               :class="[
                 activeOrderId === order.id ? 'border-teal-200 bg-teal-50' : 'border-slate-100 bg-white hover:bg-slate-50',
                 isOrderHighlighted(order.id) ? 'order-card--new' : '',
                 isOrderRefreshed(order.id) ? 'order-card--refreshed' : '',
               ]"
               :data-order-pool-card-id="order.id"
-              @click="handlePickOrder(order.id)"
             >
+              <div v-if="canBatchPurgeCancelledOrders" class="absolute right-3 top-3 z-10">
+                <el-checkbox
+                  :model-value="selectedCancelledOrderIds.includes(order.id)"
+                  :disabled="batchInteractionActive || (!selectedCancelledOrderIds.includes(order.id) && selectedCancelledOrderIds.length >= 50)"
+                  @change="handleToggleCancelledSelection(order.id, Boolean($event))"
+                >选择</el-checkbox>
+              </div>
+              <button type="button" class="w-full text-left" @click="handlePickOrder(order.id)">
               <div class="flex min-w-0 items-start justify-between gap-2">
                 <div class="min-w-0">
                   <div class="flex min-w-0 flex-wrap items-center gap-2">
@@ -1442,7 +1544,8 @@ onBeforeUnmount(() => {
                   退货记录：{{ order.returnRequestCount > 0 ? `共 ${order.returnRequestCount} 笔${order.pendingReturnRequestCount > 0 ? `，待处理 ${order.pendingReturnRequestCount} 笔` : ''}` : '暂无' }}
                 </p>
               </div>
-            </button>
+              </button>
+            </div>
           </TransitionGroup>
           <div v-if="!listLoading && !currentPoolOrders.length" class="rounded-2xl border border-dashed border-slate-200 px-3 py-8 text-center text-sm text-slate-400">
             当前分栏暂无订单
@@ -1471,6 +1574,7 @@ onBeforeUnmount(() => {
               <el-button class="w-full" type="primary" plain :disabled="!canGoVerify" @click="handleGoVerify">{{ goVerifyButtonText }}</el-button>
               <el-button class="w-full" :loading="detailLoading" @click="handleRefreshCurrentOrder">刷新状态</el-button>
               <el-button class="w-full" @click="handleCopyVerifyCode">复制核销码</el-button>
+              <el-button v-if="canCancelCurrentOrder" class="w-full" type="warning" plain :loading="adminCancelling" :disabled="detailLoading" @click="handleCancelCurrentOrder">取消订单</el-button>
               <el-button
                 v-if="canDeleteCurrentOrder"
                 class="w-full"
@@ -1489,6 +1593,10 @@ onBeforeUnmount(() => {
             <p class="text-sm font-semibold">状态报告：{{ reportConfig.cardTitle }}</p>
             <p class="mt-1 break-words text-xs">{{ reportConfig.cardDescription }}</p>
           </div>
+          <p v-if="activeOrderDetail.order.status === 'cancelled'" class="mt-2 text-xs text-slate-500">
+            取消来源：{{ getCancellationSourceLabel(activeOrderDetail.order.statusReport.cancellationSource) }}；
+            时间：{{ formatOrderDateTime(activeOrderDetail.order.statusReport.cancelledAt, { fallback: '历史记录未留存' }) }}
+          </p>
 
           <div class="mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-1.5">
             <el-collapse v-model="detailAssistPanels" class="order-detail-assist-collapse">

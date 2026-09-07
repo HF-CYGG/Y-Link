@@ -6,6 +6,7 @@
 import crypto from 'node:crypto'
 import type { Request, Response } from 'express'
 import { env } from '../config/env.js'
+import { resolveSecureCookieFlag } from './http-security.js'
 
 /**
  * 管理端 Cookie 常量：
@@ -32,40 +33,6 @@ interface CookieSerializeOptions {
  */
 export function generateAdminCsrfToken(): string {
   return crypto.randomBytes(32).toString('base64url')
-}
-
-function shouldUseSecureCookie(): boolean {
-  return env.NODE_ENV === 'production'
-}
-
-function parseForwardedProto(headerValue: string | string[] | undefined): string | null {
-  if (typeof headerValue === 'string') {
-    const proto = headerValue.split(',')[0]?.trim().toLowerCase()
-    return proto || null
-  }
-  if (Array.isArray(headerValue)) {
-    for (const item of headerValue) {
-      const proto = item.split(',')[0]?.trim().toLowerCase()
-      if (proto) {
-        return proto
-      }
-    }
-  }
-  return null
-}
-
-function shouldUseSecureCookieByRequest(req: Request): boolean {
-  const forwardedProto = parseForwardedProto(req.headers['x-forwarded-proto'])
-  if (forwardedProto === 'https') {
-    return true
-  }
-  if (forwardedProto === 'http') {
-    return false
-  }
-  if (req.secure) {
-    return true
-  }
-  return shouldUseSecureCookie()
 }
 
 function buildCookieValue(name: string, value: string, options: CookieSerializeOptions): string {
@@ -124,7 +91,7 @@ export function setAdminAuthCookies(
   },
 ): void {
   const cookieMaxAgeSeconds = getCookieMaxAgeSeconds(payload.expiresAt)
-  const secure = shouldUseSecureCookieByRequest(req)
+  const secure = resolveSecureCookieFlag(req)
 
   /**
    * 管理端会话 Cookie 采用 HttpOnly：
@@ -156,7 +123,7 @@ export function setAdminAuthCookies(
 
 export function clearAdminAuthCookies(req: Request, res: Response): void {
   const expiredAt = new Date(0)
-  const secure = shouldUseSecureCookieByRequest(req)
+  const secure = resolveSecureCookieFlag(req)
 
   setCookie(res, ADMIN_SESSION_COOKIE_NAME, '', {
     httpOnly: true,
@@ -188,7 +155,7 @@ export function ensureAdminCsrfCookie(req: Request, res: Response): string {
 
   const csrfToken = generateAdminCsrfToken()
   setCookie(res, ADMIN_CSRF_COOKIE_NAME, csrfToken, {
-    secure: shouldUseSecureCookieByRequest(req),
+    secure: resolveSecureCookieFlag(req),
     sameSite: 'Lax',
     path: '/',
     maxAgeSeconds: env.AUTH_TOKEN_TTL_HOURS * 60 * 60,

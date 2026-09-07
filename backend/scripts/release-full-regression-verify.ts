@@ -9,6 +9,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import sharp from 'sharp'
+import { installCaptchaServiceForTesting } from '../src/services/captcha.service.js'
 
 const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
@@ -31,6 +32,9 @@ process.env.DB_SYNC = 'false'
 process.env.SQLITE_DB_PATH = sqlitePath
 process.env.INIT_ADMIN_PASSWORD = adminPassword
 
+const TEST_CAPTCHA_CODE = 'ABC123'
+installCaptchaServiceForTesting({ createCode: () => TEST_CAPTCHA_CODE })
+
 const uploadedFilePaths = new Set<string>()
 
 function pass(message: string) {
@@ -42,9 +46,7 @@ function toAbsoluteUploadPath(uploadUrl: string) {
   return path.resolve(backendRoot, normalizedRelativePath)
 }
 
-function readCaptchaCode(captchaSvg: string) {
-  return captchaSvg.replaceAll(/<[^>]*>/g, '').replaceAll(/\s+/g, '').slice(0, 6)
-}
+const readCaptchaCode = (_captchaSvg: string) => TEST_CAPTCHA_CODE
 
 function toChineseDigits(value: string) {
   return value.replaceAll(/\d/g, (digit) => '零一二三四五六七八九'[Number(digit)] ?? '')

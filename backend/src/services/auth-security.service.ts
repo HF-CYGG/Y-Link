@@ -314,7 +314,9 @@ export class AuthSecurityService {
           waitSeconds,
         },
       })
-      throw new BizError(`尝试次数过多，已临时锁定，请 ${waitSeconds} 秒后再试`, 429)
+      throw new BizError(`尝试次数过多，已临时锁定，请 ${waitSeconds} 秒后再试`, 429, {
+        retryAfterSeconds: waitSeconds,
+      })
     }
 
     return {

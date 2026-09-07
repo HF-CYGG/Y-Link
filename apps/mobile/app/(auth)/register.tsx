@@ -1,16 +1,23 @@
 import React, { useState } from 'react';
 import { View, Text, StyleSheet, KeyboardAvoidingView, Platform, ScrollView, SafeAreaView, Alert } from 'react-native';
 import { useRouter } from 'expo-router';
+import {
+  getPersonalClientUsernameRuleHint,
+  normalizePersonalClientUsername,
+} from '@ylink/validation/auth';
 import { theme } from '../../src/theme';
 import { Input, Button } from '../../src/ui';
 
 export default function RegisterScreen() {
   const router = useRouter();
+  const [username, setUsername] = useState('');
   const [phone, setPhone] = useState('');
   const [code, setCode] = useState('');
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [countdown, setCountdown] = useState(0);
+  const normalizedUsername = normalizePersonalClientUsername(username).value;
+  const usernameRuleHint = username ? getPersonalClientUsernameRuleHint(username) : '';
 
   const handleSendCode = () => {
     if (!phone) {
@@ -32,8 +39,12 @@ export default function RegisterScreen() {
   };
 
   const handleRegister = () => {
-    if (!phone || !code || !password) {
+    if (!username || !phone || !code || !password) {
       Alert.alert('提示', '请填写完整信息');
+      return;
+    }
+    if (usernameRuleHint) {
+      Alert.alert('提示', usernameRuleHint);
       return;
     }
     
@@ -60,6 +71,13 @@ export default function RegisterScreen() {
           </View>
 
           <View style={styles.form}>
+            <Input
+              label="用户名"
+              placeholder="请输入 2-20 位中文或英文字母"
+              value={username}
+              onChangeText={setUsername}
+              error={usernameRuleHint}
+            />
             <Input 
               label="手机号码" 
               placeholder="请输入手机号码" 

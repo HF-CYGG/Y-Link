@@ -93,6 +93,14 @@ export async function hashPassword(plainPassword: string): Promise<string> {
   return `${salt}:${derivedKey.toString('hex')}`
 }
 
+// 不存在账号也执行同等 scrypt 工作量，减少按登录耗时枚举账号的信号。
+let nonexistentAccountHashPromise: Promise<string> | null = null
+
+export async function verifyPasswordForNonexistentAccount(plainPassword: string): Promise<void> {
+  nonexistentAccountHashPromise ??= hashPassword('y-link-nonexistent-account-timing-only')
+  await verifyPassword(plainPassword, await nonexistentAccountHashPromise)
+}
+
 /**
  * 校验密码是否匹配：
  * - 使用 timingSafeEqual 避免因字符串比较短路引入时序侧信道；

@@ -17,6 +17,7 @@ import { LessThanOrEqual, type EntityManager } from 'typeorm'
 import type { ClientRateLimitInfo, Options, Store } from 'express-rate-limit'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
+import { databaseOperationGate } from '../database/operation-gate.js'
 import { AuthRiskState } from '../entities/auth-risk-state.entity.js'
 import { isRetryableTransactionLockError } from '../utils/database-errors.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
@@ -52,6 +53,18 @@ const parseTimestamps = (value: string | null): number[] => {
 
 class PersistentRiskStateService {
   private cleanupLoopTimer: ReturnType<typeof globalThis.setInterval> | null = null
+  private cleanupLoopDesired = false
+
+  constructor() {
+    databaseOperationGate.registerWorker({
+      name: 'persistent-risk-cleanup',
+      pause: () => this.pauseCleanupLoop(),
+      drain: async () => undefined,
+      resume: () => {
+        if (this.cleanupLoopDesired) this.startCleanupTimer()
+      },
+    })
+  }
 
   /**
    * 在事务外单独执行并立即提交，确保桶键对应的行存在且未处于"已过期"状态。
@@ -357,6 +370,14 @@ class PersistentRiskStateService {
 
   /** 启动周期性过期清理：幂等，重复调用不会叠加多个定时器。 */
   startCleanupLoop(): void {
+    this.cleanupLoopDesired = true
+    this.startCleanupTimer()
+  }
+
+  private startCleanupTimer(): void {
+    if (databaseOperationGate.isFrozen()) {
+      return
+    }
     if (this.cleanupLoopTimer !== null) {
       return
     }
@@ -369,6 +390,11 @@ class PersistentRiskStateService {
   }
 
   stopCleanupLoop(): void {
+    this.cleanupLoopDesired = false
+    this.pauseCleanupLoop()
+  }
+
+  private pauseCleanupLoop(): void {
     if (this.cleanupLoopTimer !== null) {
       globalThis.clearInterval(this.cleanupLoopTimer)
       this.cleanupLoopTimer = null

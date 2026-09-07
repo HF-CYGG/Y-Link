@@ -27,12 +27,13 @@ import { maskMobileVerificationTarget, smsVerificationRecordService, type SmsVer
 import type { AliyunDypnsProviderConfig } from './aliyun-dypns-sms.service.js'
 import type { VerificationScene } from './system-config.service.js'
 
-interface VerificationCodeTicket {
+export interface VerificationCodeTicket {
   channel: VerificationChannelType
   target: string
   scene: VerificationScene
   code: string
   expiresAt: number
+  failedAttempts: number
 }
 
 const CODE_EXPIRE_MS = 5 * 60 * 1000
@@ -42,6 +43,36 @@ const verificationTicketStore = new EphemeralTicketStore<VerificationCodeTicket>
 })
 
 const buildTicketKey = (channel: VerificationChannelType, target: string, scene: VerificationScene) => `${channel}:${scene}:${target}`
+
+/**
+ * 通用验证码的本地尝试次数治理：连续五次错误后销毁票据，防止有效期内持续撞库。
+ * 该类接受显式 store，测试可在进程内注入固定票据而不暴露任何 HTTP 答案通道。
+ */
+export class VerificationCodeAttemptStore {
+  constructor(private readonly store: EphemeralTicketStore<VerificationCodeTicket>) {}
+
+  set(key: string, ticket: VerificationCodeTicket): void {
+    this.store.set(key, ticket)
+  }
+
+  consume(key: string, code: string): boolean | null {
+    const ticket = this.store.get(key)
+    if (!ticket) {
+      return null
+    }
+    if (ticket.code !== code.trim()) {
+      ticket.failedAttempts += 1
+      if (ticket.failedAttempts >= 5) {
+        this.store.delete(key)
+      }
+      return false
+    }
+    this.store.delete(key)
+    return true
+  }
+}
+
+const verificationAttemptStore = new VerificationCodeAttemptStore(verificationTicketStore)
 
 export class VerificationCodeService {
   constructor(
@@ -224,12 +255,13 @@ export class VerificationCodeService {
         scene: input.scene,
       })
     }
-    verificationTicketStore.set(buildTicketKey(input.channel, normalizedTarget, input.scene), {
+    verificationAttemptStore.set(buildTicketKey(input.channel, normalizedTarget, input.scene), {
       channel: input.channel,
       target: normalizedTarget,
       scene: input.scene,
       code,
       expiresAt: Date.now() + CODE_EXPIRE_MS,
+      failedAttempts: 0,
     })
     return {
       provider: 'generic_http' as const,
@@ -327,12 +359,11 @@ export class VerificationCodeService {
   }): Promise<void> {
     const normalizedTarget = normalizeClientVerificationTarget(input.channel, input.target)
     const key = buildTicketKey(input.channel, normalizedTarget, input.scene)
-    const ticket = verificationTicketStore.get(key)
-    if (ticket) {
-      if (ticket.code !== input.code.trim()) {
+    const localVerificationResult = verificationAttemptStore.consume(key, input.code)
+    if (localVerificationResult !== null) {
+      if (!localVerificationResult) {
         throw new BizError('验证码错误，请重新输入', 400)
       }
-      verificationTicketStore.delete(key)
       return
     }
     const canLookupDypnsRecord = (env.VERIFICATION_TICKET_HMAC_SECRET?.trim().length ?? 0) >= 32

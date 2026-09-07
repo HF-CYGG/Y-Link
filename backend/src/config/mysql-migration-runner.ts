@@ -128,6 +128,9 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
   { tableName: 'client_mobile_session', columnName: 'revoke_reason', introducingScript: '037_mobile_auth_session.sql' },
   { tableName: 'o2o_preorder', columnName: 'client_request_id', introducingScript: '035_o2o_idempotency_business_sequence.sql' },
   { tableName: 'o2o_preorder', columnName: 'client_request_hash', introducingScript: '035_o2o_idempotency_business_sequence.sql' },
+  { tableName: 'o2o_preorder', columnName: 'cancellation_source', introducingScript: '040_o2o_preorder_governance.sql' },
+  { tableName: 'o2o_preorder', columnName: 'cancellation_remark', introducingScript: '040_o2o_preorder_governance.sql' },
+  { tableName: 'o2o_preorder', columnName: 'cancelled_at', introducingScript: '040_o2o_preorder_governance.sql' },
   { tableName: 'business_sequence', columnName: 'sequence_key', introducingScript: '035_o2o_idempotency_business_sequence.sql' },
   { tableName: 'business_sequence', columnName: 'current_value', introducingScript: '035_o2o_idempotency_business_sequence.sql' },
   { tableName: 'business_sequence', columnName: 'created_at', introducingScript: '035_o2o_idempotency_business_sequence.sql' },
@@ -294,6 +297,7 @@ const AUTO_MIGRATABLE_FILES = [
   '037_department_account_node_binding.sql',
   '038_department_path_capacity.sql',
   '039_aliyun_pnvs_sms_verification.sql',
+  '040_o2o_preorder_governance.sql',
 ]
 
 /**

@@ -23,6 +23,10 @@ const IMAGE_UPLOAD_ALLOWED_MIMES = new Set(['image/jpeg', 'image/png', 'image/we
 const IMAGE_UPLOAD_ALLOWED_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.gif'])
 const UPLOAD_ROOT_DIR = path.resolve(process.cwd(), 'uploads')
 const UPLOAD_TEMP_DIR = path.resolve(UPLOAD_ROOT_DIR, '.tmp')
+let clientFeedbackProcessingActive = 0
+const clientFeedbackProcessingWaiters: Array<() => void> = []
+const CLIENT_FEEDBACK_PROCESSING_CONCURRENCY = 2
+const CLIENT_FEEDBACK_PROCESSING_QUEUE_LIMIT = 8
 
 export interface DetectedImageContent {
   mimeType: 'image/jpeg' | 'image/png' | 'image/webp' | 'image/gif'
@@ -169,6 +173,31 @@ const cleanupUploadFileIfExists = async (filePath: string | undefined) => {
   await fs.promises.unlink(filePath)
 }
 
+/** 仅删除已验证为 UUID 正式名的反馈文件，调用方不得传入用户原始文件名或路径。 */
+export async function removeClientFeedbackUploadFile(storageName: string | null | undefined): Promise<void> {
+  const normalizedName = storageName?.trim() ?? ''
+  if (!UPLOAD_PUBLIC_FILE_NAME_MATCHER.test(normalizedName)) return
+  const targetPath = path.resolve(resolveUploadCategoryDir('client-feedback'), normalizedName)
+  if (path.dirname(targetPath) !== resolveUploadCategoryDir('client-feedback')) return
+  await cleanupUploadFileIfExists(targetPath)
+}
+
+async function runClientFeedbackImageProcessing<T>(operation: () => Promise<T>): Promise<T> {
+  if (clientFeedbackProcessingActive >= CLIENT_FEEDBACK_PROCESSING_CONCURRENCY && clientFeedbackProcessingWaiters.length >= CLIENT_FEEDBACK_PROCESSING_QUEUE_LIMIT) {
+    throw new BizError('反馈图片处理队列繁忙，请稍后重试', 429)
+  }
+  if (clientFeedbackProcessingActive >= CLIENT_FEEDBACK_PROCESSING_CONCURRENCY) {
+    await new Promise<void>((resolve) => clientFeedbackProcessingWaiters.push(resolve))
+  }
+  clientFeedbackProcessingActive += 1
+  try {
+    return await operation()
+  } finally {
+    clientFeedbackProcessingActive = Math.max(0, clientFeedbackProcessingActive - 1)
+    clientFeedbackProcessingWaiters.shift()?.()
+  }
+}
+
 const createSharpInput = (buffer: Buffer, mimeType: DetectedImageContent['mimeType']) => {
   return sharp(buffer, {
     animated: SHARP_ANIMATED_MIME_TYPES.has(mimeType),
@@ -311,6 +340,16 @@ export const finalizeUploadedImageFile = async (
     }
   } catch (error) {
     await cleanupUploadFileIfExists(tempFilePath)
+    throw error
+  }
+}
+
+/** 反馈图片的重编码独立限流，避免高成本图像处理挤占其他上传路径。 */
+export async function finalizeClientFeedbackImageFile(file: Express.Multer.File) {
+  try {
+    return await runClientFeedbackImageProcessing(() => finalizeUploadedImageFile('client-feedback', file))
+  } catch (error) {
+    await cleanupUploadFileIfExists(file.path)
     throw error
   }
 }

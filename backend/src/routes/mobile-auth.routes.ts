@@ -6,6 +6,7 @@
  * 维护说明：路由只负责 schema/HTTP 映射；refresh 状态机与撤销事务必须留在服务层。
  */
 import { Router } from 'express'
+import type { NextFunction, Request, Response } from 'express'
 import { z } from 'zod'
 import { readRequiredMobileBearer, requireMobileAuth } from '../middleware/mobile-auth.middleware.js'
 import { authSecurityService } from '../services/auth-security.service.js'
@@ -103,6 +104,35 @@ const profileSchema = z.object({
 const logoutScopeSchema = z.enum(['all', 'others']).default('all')
 
 export const mobileAuthRouter = Router()
+
+function readMobileRetryAfterSeconds(error: BizError): number {
+  if (typeof error.retryAfterSeconds === 'number' && Number.isFinite(error.retryAfterSeconds) && error.retryAfterSeconds > 0) {
+    return Math.ceil(error.retryAfterSeconds)
+  }
+  if (typeof error.data === 'object' && error.data !== null && 'retryAfterSeconds' in error.data) {
+    const value = error.data.retryAfterSeconds
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) return Math.ceil(value)
+  }
+  return 1
+}
+
+/**
+ * Mobile 仅公开 Native 协议错误码；Web 端仍由全局错误处理器保留既有 HTTP 429 响应。
+ * 所有路由末尾统一挂接，避免各端点漏写 Retry-After 或在 data 中返回不一致结构。
+ */
+export function normalizeMobileAuthHttpError(err: unknown, _req: Request, res: Response, next: NextFunction): void {
+  if (!(err instanceof BizError) || err.statusCode !== 429) {
+    next(err)
+    return
+  }
+  const retryAfterSeconds = readMobileRetryAfterSeconds(err)
+  res.setHeader('Retry-After', String(retryAfterSeconds))
+  res.status(429).json({
+    code: 42900,
+    message: err.message,
+    data: { retryAfterSeconds },
+  })
+}
 
 mobileAuthRouter.get('/captcha', asyncHandler(async (req, res) => {
   const data = await clientAuthService.createCaptcha(extractRequestMeta(req))
@@ -212,3 +242,5 @@ mobileAuthRouter.post('/change-password', requireMobileAuth, asyncHandler(async 
   )
   res.json({ code: 0, message: 'ok', data })
 }))
+
+mobileAuthRouter.use(normalizeMobileAuthHttpError)

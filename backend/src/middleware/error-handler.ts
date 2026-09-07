@@ -12,6 +12,7 @@ import multer from 'multer'
 import { isQueryFailedError, mapDatabaseErrorToBizError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
 import { DatabaseOverloadedError } from '../database/database-errors.js'
+import { DatabaseWriteFrozenError } from '../database/operation-gate.js'
 
 const toSafeDatabaseLog = (error: unknown) => {
   if (!isQueryFailedError(error)) return { name: 'DatabaseError' }
@@ -61,7 +62,7 @@ export function errorHandler(err: unknown, _req: Request, res: Response, next: N
       res.setHeader('Retry-After', '1')
     }
     res.status(err.statusCode).json({
-      code: err.code,
+      code: err instanceof DatabaseWriteFrozenError ? 50301 : err.code,
       message: err.message,
       data: err.data,
     })

@@ -1,13 +1,15 @@
 # Y-Link Mobile Native Auth Contract
 
-版本：v1.1（总线最终仲裁校准版）
-日期：2026-08-13
-基线：`origin/main` @ `f84762c`（Merge PR #44）
-状态：**已通过总线最终仲裁，交 Codex 实现**
+版本：v1.4（PR #49 实现状态同步版）
+日期：2026-09-07
+基线：PR #49 当前已知 head `a454882`；当前本地以 `origin/main` @ `809a6df` 为合入基线
+状态：**契约已同步至当前实现基线：后端 Mobile Auth、schema/migration、`/api/v1/mobile-auth/*` 端点，以及 `packages/api-client` 的 Mobile API module/native adapter 已实现；`apps/mobile` 的凭据存储、自动 refresh、请求重放与 Native Auth Client 尚未实现。**
 
 本文是 Android / iOS 共用的正式 Native 认证契约。Codex 必须**严格按本文实现**，不得自行设计认证协议、改动字段语义或调整状态机。本文与仓库根 `AGENTS.md`、`MASTER_PLAN.md`、`AGENTS.claude.md` 冲突时，以那三份为准并回报总线。
 
-本文档**只交付文档**：未修改后端生产代码、未新建实体、未新建 SQL migration、未实现 endpoint、未改动 Mobile adapter。
+本文档继续作为 Android / iOS 共用的认证契约与实现边界说明。PR #49 已落地后端 Mobile Auth 与 API client 的基础适配；本地合入 `origin/main` 的冲突修复仍由主线复核，本次不在文档中声称其已提交或 CI 已通过。凭据持久化、自动 refresh、请求重放和 Native Auth Client 不属于当前已落地范围。
+
+本轮兼容性修复：Mobile 注册、登录和改密重签共用 Web 的账号安全快照，在锁内复核密码与身份字段后签发；改密的新密码策略校验与 scrypt 派生在事务前完成，锁内仍重新验证旧密码。共享客服 SSE 按 Mobile/Web 会话来源独立查询，Mobile 复核撤销、access/absolute 有效期、账号启用状态及归属，保持只读且无跨来源回退。维护期验证码 GET、活动时间更新和会话清理均遵循写准入与排空。
 
 ---
 
@@ -541,7 +543,7 @@ Response `200`：
 **认证**：`Bearer(access)`
 **幂等**：否
 
-Request / Response 结构**完全复用**现有 `clientAuthService.updateProfile()` 的入参与投影（含 `currentPassword` 二次确认、手机号/邮箱验证码）。本契约不改动资料更新语义，仅换认证通道。
+Request / Response 结构**完全复用**现有 `clientAuthService.updateProfile()` 的入参与投影（含 `currentPassword` 二次确认、手机号/邮箱验证码）；身份字段发生变化时额外返回 `requiresRelogin: true`，无身份变化时不返回该标记。本契约不改变资料校验语义，仅明确身份变更后的会话处理。
 
 ---
 
@@ -672,7 +674,7 @@ Request / Response 结构**完全复用**现有 `clientAuthService.updateProfile
 
 ## HTTP Adapter Policy
 
-作用位置：`packages/api-client/src/native-fetch-adapter.ts:246-248` 现有 TODO。
+作用位置：`packages/api-client/src/native-fetch-adapter.ts`。基础 native adapter 已实现受控 Bearer 注入、请求封装、超时/取消与错误归一化；401 后的凭据持久化、自动 refresh 和请求重放仍由后续 Native Auth Client 负责，当前不刷新、不重放、不退出。
 
 ### 401 处理流程
 
@@ -828,10 +830,10 @@ if (response.generation <= local.generation) {
 
 **判定：采纳，并正式化如下。**
 
-`POST /api/v1/mobile-auth/change-password`，认证 `Bearer(access)`，单事务内：
+`POST /api/v1/mobile-auth/change-password`，认证 `Bearer(access)`。先在事务外校验新密码策略（`assertClientPasswordPolicy`）并派生新 hash；以下操作在单事务内完成：
 
-1. 校验 `currentPassword`（复用现有 `verifyPassword`）
-2. 校验新密码策略（复用 `assertClientPasswordPolicy`）
+1. 锁定用户并读取当前密码 hash
+2. 重新校验 `currentPassword`（复用现有 `verifyPassword`）
 3. 写入新 `password_hash`
 4. **撤销该用户全部 `client_mobile_session`**（`revoke_reason='password_changed'`）
 5. **删除该用户全部 `client_user_session`**（Web 会话，与现有 `changePassword` 行为一致）
@@ -850,7 +852,7 @@ if (response.generation <= local.generation) {
 
 `POST /api/v1/mobile-auth/forgot-password/reset` 单事务内：
 
-1. 校验 resetToken（复用现有 `EphemeralTicketStore` 票据）
+1. 原子消费 resetToken（复用现有 `EphemeralTicketStore` 票据），并校验票据绑定的 `accountKey` 与本次规范化账号一致
 2. 写入新 `password_hash`
 3. 撤销全部 `client_mobile_session`（`revoke_reason='password_reset'`）
 4. 删除全部 `client_user_session`
@@ -860,9 +862,13 @@ if (response.generation <= local.generation) {
 
 安全论证：与改密不同，重置流程中请求方**未证明持有原密码**，只证明了控制验证渠道（手机/邮箱）。此时不应自动授予会话 —— 若验证渠道本身已被攻陷，自动签发会直接把会话交给攻击者。强制重新登录增加一道密码确认。
 
-### 资料更新中的敏感变更
+`resetTicketStore.take` 消费成功后，票据无论因账号不匹配、用户校验失败、事务失败还是其他后续错误都**不恢复**；需要再次尝试必须重新完成身份验证并领取新票据。这是合入最新 `origin/main` @ `809a6df` 的一次性消费与账号绑定安全策略，避免失败路径重新放行已消费凭据。
 
-`PATCH /profile` 修改手机号或邮箱时，**不撤销会话**（现有行为，保持）。但必须写审计，且若该渠道是登录账号本身，建议在响应中提示用户检查活跃设备。
+### 资料更新与身份变更
+
+`PATCH /profile` 修改姓名、手机号或邮箱等身份字段时，必须在同一事务内保存资料并撤销该用户全部 Web 与 Mobile 会话，Mobile 侧使用 `revoke_reason='user_logout_all'`。事务提交后再断开该用户的 Mobile 实时连接，并返回 `requiresRelogin: true`，客户端随后必须重新登录。
+
+若资料请求没有产生身份字段变化，则不撤销会话、不要求重新登录，响应不返回 `requiresRelogin: true`。管理员修改客户端用户身份或组织/状态资料时同样撤销全部 Web 与 Mobile 会话，使用 `revoke_reason='admin_revoke'`，事务提交后断开实时连接；管理员将账号停用时使用既有 `revoke_reason='account_disabled'`。以上复用现有闭集枚举，不新增撤销原因。
 
 ---
 
@@ -987,7 +993,7 @@ mobileRefreshByIpFallback: {
 
 ## SQLite / MySQL Schema Requirements
 
-**本轮不执行迁移。** 以下是实现时必须产出的 schema 需求。
+**PR #49 已落地实体与迁移入口。** 以下仍是实现约束与 schema 需求；当前本地合入 `origin/main` 的冲突修复与验证状态以主线复核结果为准。
 
 ### 表定义（两库一致的逻辑结构）
 
@@ -1070,7 +1076,7 @@ MySQL 集成测试需要 Docker + MySQL 8.4（参考 `compose.verify-db-concurre
 
 Codex 必须交付以下测试矩阵，建议落在 `backend/scripts/mobile-auth-contract-verify.ts`（沿用现有 verify 脚本风格，独立 `APP_PROFILE`），并在 `package.json` 注册 `mobile-auth:contract:verify`。
 
-**执行要求**：服务端用例（T-01 ~ T-73）必须在 **SQLite 与 MySQL 两套环境下各跑一遍**并分别留存输出，见 MySQL Gate。客户端用例（T-60 ~ T-66）只需跑一次。
+**执行要求**：服务端用例（T-01 ~ T-76）必须在 **SQLite 与 MySQL 两套环境下各跑一遍**并分别留存输出，见 MySQL Gate。客户端用例（T-60 ~ T-68）只需跑一次；当前文档不把本地合入或未完成的 CI 结果视为已通过。
 
 ### 核心生命周期
 
@@ -1130,6 +1136,10 @@ Codex 必须交付以下测试矩阵，建议落在 `backend/scripts/mobile-auth
 | T-32 | 停用账号 → access | 停用后立即用 access 请求 → 403 `40300`（不等 TTL） |
 | T-33 | 停用账号 → refresh | 停用后 refresh → 403 `40300`；会话被撤销 |
 | T-34 | 管理端停用即时撤销 | 停用动作完成后直接查 DB，该用户全部 mobile 会话 `revoked_at` 非空 |
+| T-35 | 重置票据绑定与一次性消费 | 用账号 A 的 resetToken 提交账号 B；再用同一票据提交账号 A | 两次均失败；票据不恢复；必须重新完成身份验证领取新票据 |
+| T-36 | 资料无身份变化 | Mobile 资料请求只提交与现值一致的姓名、手机号、邮箱 | Web/Mobile 会话保持有效；不要求重新登录；不返回 `requiresRelogin: true` |
+| T-37 | Mobile 自行身份变更 | 修改姓名、手机号或邮箱 | 同一事务撤销全部 Web/Mobile 会话，`revoke_reason='user_logout_all'`；提交后断开 Mobile 实时连接；响应 `requiresRelogin=true` |
+| T-38 | 管理员身份变更 | 管理员修改客户端用户身份或组织资料；另测停用账号 | 普通身份变更使用 `admin_revoke` 并撤销全部 Web/Mobile 会话；停用使用 `account_disabled`；提交后断开实时连接；不新增撤销原因 |
 
 ### 协议与边界
 
@@ -1145,7 +1155,7 @@ Codex 必须交付以下测试矩阵，建议落在 `backend/scripts/mobile-auth
 
 ### Web 兼容性回归（R-B3 变更的守门）
 
-R-B3 是本契约对既有中间件的唯一行为变更，以下用例是它的守门。**这三条不通过，实现 PR 不得合入。**
+R-B3 是本契约对既有中间件的唯一行为变更，以下用例是它的守门。**这些用例不通过，实现 PR 不得合入。**
 
 | # | 场景 | 请求构造 | 断言 |
 |---|---|---|---|
@@ -1364,9 +1374,10 @@ A-4 中建议 `false`，理由是避免 `updateCount` 配额争议；但严格�
 
 ## 附：本文档的边界声明
 
-- 本文是**设计契约**，不是实现记录。文中任何 schema、字段、错误码在代码落地前均不存在。
-- 文中对现有代码的引用（行号、方法名）基于 `origin/main` @ `f84762c`。实现时若发现与实际不符，**以代码为准**并回报总线（`AGENTS.md` §0.1）。
-- 本文档交付时未修改 backend 生产代码、未新建实体、未新建 SQL migration、未实现 endpoint、未改动 Mobile adapter。
+- 本文是**认证设计契约与实现边界说明**，不是当前合入结果或 CI 报告。文中的 schema、字段、错误码和状态机约束必须与已落地实现保持一致。
+- 文中对现有代码的引用以 PR #49 head `a454882` 和当前本地合入基线 `origin/main` @ `809a6df` 为准；若冲突修复后发现与实际不符，**以代码为准**并回报总线（`AGENTS.md` §0.1）。
+- PR #49 head 已包含 backend Mobile Auth 实体、migration、service、middleware、routes，以及 `packages/api-client` 的 Mobile API module/native adapter。`apps/mobile` 的凭据存储、自动 refresh、请求重放与 Native Auth Client 尚未实现。
+- 本次仅同步契约文档；当前本地合入 `origin/main` 的后端冲突修复尚未在本文中声称已提交或 CI 通过。
 
 ### 版本历史
 
@@ -1376,3 +1387,4 @@ A-4 中建议 `false`，理由是避免 `updateCount` 配额争议；但严格�
 | v1.1 | 2026-08-13 | `f84762c` | 总线最终仲裁校准：新增 Decision Log；R-B3 改为「Authorization 存在即独占、失败禁止回退 Cookie」；新增 RG-1 ~ RG-10 十条 refresh 硬性不变量；轮换速率阈值改为可配置安全参数；新增 MySQL Gate 章节；T-W 系列扩充至 8 条；新增 T-67/68、T-70 ~ T-76；关闭 Q1/Q5/Q8，新增 Q10 |
 | v1.2 | 2026-08-16 | `e1b34db` | 实现准备校准：Q10 明确本地 MySQL 不可用，CI MySQL 8.4 是 Auth G-1～G-7 权威 Gate，订单并发测试不可替代认证断言 |
 | v1.3 | 2026-08-21 | `e1b34db` | 修正 T-10/G-2 矛盾：保留 strict CUR/PREV；同 token 并发不再要求全成功；PREV grace 限定为 response-loss recovery；明确拒绝 admission cohort |
+| v1.4 | 2026-09-07 | PR #49 `a454882` + `origin/main` `809a6df` 本地合入基线 | 同步 backend Mobile Auth/schema/端点与 API client native adapter 已落地状态；明确 apps/mobile 凭据存储与自动 refresh 尚未实现；补充 reset ticket 一次性消费和账号绑定边界；校正 Bearer 独占、锁内安全快照、事务前新密码派生、维护排空与 Mobile SSE 复核说明 |

@@ -14,6 +14,7 @@ import { hasRecoverableAdminSessionHint } from '@/utils/auth-storage'
 import { classifyRuntimeError } from '@/utils/runtime-error-guard'
 import { reportRuntimeError } from '@/utils/runtime-error-presenter'
 import { clearRouteError, reportGlobalAppError } from '@/utils/runtime-error-state'
+import { resolveSafeLocalRedirect } from '@/utils/safe-local-redirect'
 import pinia from '@/store/pinia'
 
 export const resolveDefaultManagementRedirect = (user?: Pick<UserSafeProfile, 'role'> | null) => {
@@ -30,12 +31,7 @@ const resolveSafeRedirect = (value: unknown, user?: Pick<UserSafeProfile, 'role'
     return resolveDefaultManagementRedirect(user)
   }
 
-  const normalized = value.trim()
-  if (!normalized.startsWith('/') || normalized.startsWith('//')) {
-    return resolveDefaultManagementRedirect(user)
-  }
-
-  return normalized
+  return resolveSafeLocalRedirect(value) ?? resolveDefaultManagementRedirect(user)
 }
 
 /**
@@ -48,12 +44,7 @@ const resolveSafeClientRedirect = (value: unknown) => {
     return '/client/mall'
   }
 
-  const normalized = value.trim()
-  if (!normalized.startsWith('/') || normalized.startsWith('//')) {
-    return '/client/mall'
-  }
-
-  return normalized
+  return resolveSafeLocalRedirect(value) ?? '/client/mall'
 }
 
 /**
