@@ -23,6 +23,7 @@ const projectRoot = path.resolve(scriptsRoot, '..')
 const backendRoot = path.resolve(projectRoot, 'backend')
 const composeFilePath = path.resolve(projectRoot, 'compose.verify-db-concurrency.yml')
 const rawVerifyScriptPath = path.resolve(backendRoot, 'scripts', 'verify-db-concurrency.ts')
+const mobileAuthVerifyScriptPath = path.resolve(backendRoot, 'scripts', 'mobile-auth-contract-verify.ts')
 
 const readTextValue = (...values) => {
   for (const value of values) {
@@ -143,6 +144,17 @@ const runRawVerifyScript = async (env) => {
     args: [tsxCliPath, rawVerifyScriptPath],
     cwd: backendRoot,
     env,
+    windowsHide: false,
+  })
+  await runCommand({
+    title: '执行 Mobile Auth MySQL G-1～G-7 专项验收脚本',
+    command: process.execPath,
+    args: [tsxCliPath, mobileAuthVerifyScriptPath],
+    cwd: backendRoot,
+    env: {
+      ...env,
+      MOBILE_AUTH_VERIFY_DB: 'mysql',
+    },
     windowsHide: false,
   })
 }

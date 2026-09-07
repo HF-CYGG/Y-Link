@@ -32,7 +32,7 @@
 ## 后端链路
 
 - 管理端鉴权：优先读取 HttpOnly Cookie，其次兼容 Bearer，不再接受 query token。
-- 客户端鉴权：优先读取客户端 Cookie，其次兼容 Bearer，同样不支持 query token。
+- 客户端鉴权：无 `Authorization` 时读取客户端 Cookie；只要 `Authorization` 头存在即独占认证决策，要求 Bearer 格式，Mobile access 按前缀分派，格式错误、无效或撤销均直接失败，绝不回退 Cookie。历史无前缀 Bearer 仍按 Web `client_user_session` 兼容解析；Bearer 成功时优先于同请求中的 Cookie。
 - `requireAdminCsrf` 仅对管理端非安全方法请求生效，且仅在 Cookie 会话来源下校验。
 - `requireRole` 和 `requirePermission` 在拒绝请求时会写安全审计。
 - `app.ts` 会给上传资源附加长期缓存、安全头和旧路径兼容重写逻辑。

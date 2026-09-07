@@ -24,6 +24,7 @@ import {
 import { databaseMaintenanceModeService } from '../services/database-maintenance-mode.service.js'
 import { databaseMigrationService } from '../services/database-migration.service.js'
 import { notificationService } from '../services/notification.service.js'
+import { mobileSessionService } from '../services/mobile-session.service.js'
 import { o2oPreorderService } from '../services/o2o-preorder.service.js'
 import { persistentRiskStateService } from '../services/persistent-risk-state.service.js'
 import { aliyunDypnsMnsWorkerService } from '../services/aliyun-dypns-mns-worker.service.js'
@@ -150,6 +151,7 @@ const shutdownRuntime = (reason: string, exitCode: number, exit = true): Promise
 
     // HTTP 断开不代表业务 Promise 完成；先关闭新准入，排空所有操作和 worker 才销毁连接。
     await databaseMaintenanceModeService.shutdownAndDrain()
+    await mobileSessionService.stopCleanupLoop()
     server?.closeAllConnections?.()
     await Promise.race([serverClosed, sleep(1000)])
 
@@ -445,6 +447,7 @@ export async function startBusinessRuntime(startup: { mode: 'normal' | 'cutover'
     // start 仅登记恢复意图；gate 冻结时不会启动计时器，解除维护才自动恢复。
     o2oPreorderService.startTimeoutRecycleLoop()
     persistentRiskStateService.startCleanupLoop()
+    mobileSessionService.startCleanupLoop()
     clientFeedbackService.startAttachmentCleanupWorker()
     if (databaseMaintenanceModeService.isReadOnly()) {
       logLine('DB MIGRATION', '数据库仍处于只读维护，后台写任务保持暂停', 'warn')

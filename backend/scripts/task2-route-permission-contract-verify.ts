@@ -11,11 +11,11 @@ import { fileURLToPath } from 'node:url'
 import ts from 'typescript'
 
 type Audience = 'public' | 'admin' | 'client' | 'rescue'
-type RouterRoute = { method: string; routePath: string; guards: Set<string>; permissions: string[]; sourceFile: string }
+type RouterRoute = { method: string; routePath: string; guards: Set<string>; permissions: string[]; usesMobileBearer: boolean; sourceFile: string }
 type RouterMount = { mountPath: string; targetRouter: string; guards: Set<string>; sourceFile: string }
 type RouterDefinition = { name: string; sourceFile: string; routes: RouterRoute[]; nestedMounts: RouterMount[]; inheritedGuards: Set<string> }
 type AppMount = { mountPath: string; targetRouter: string; guards: Set<string>; sourceFile: string }
-type ResolvedRoute = { method: string; path: string; audience: Audience; guards: Set<string>; permissions: string[]; sourceFile: string }
+type ResolvedRoute = { method: string; path: string; audience: Audience; guards: Set<string>; permissions: string[]; usesMobileBearer: boolean; sourceFile: string }
 
 const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const sourceRoot = path.join(backendRoot, 'src')
@@ -23,7 +23,7 @@ const appFilePath = path.join(sourceRoot, 'app.ts')
 const rescueAppFilePath = path.join(sourceRoot, 'runtime', 'rescue-app.ts')
 const permissionsFilePath = path.join(sourceRoot, 'constants', 'auth-permissions.ts')
 const GUARD_NAMES = new Set([
-  'requireAuth', 'requireAdminCsrf', 'requireClientAuth', 'requirePermission', 'requireRole', 'requireDatabaseRescueCredential',
+  'requireAuth', 'requireAdminCsrf', 'requireClientAuth', 'requireMobileAuth', 'requirePermission', 'requireRole', 'requireDatabaseRescueCredential',
 ])
 const HTTP_METHODS = new Set(['get', 'post', 'put', 'patch', 'delete', 'head', 'options'])
 const DATABASE_RESCUE_ROUTER_NAME = 'databaseRescueRouter'
@@ -38,7 +38,13 @@ const ANONYMOUS_ROUTE_ALLOWLIST = new Set<string>([
   'POST /api/client-auth/forgot-password/verify', 'POST /api/client-auth/forgot-password/reset',
   'GET /api/client-feedback/portal-config',
   'GET /api/o2o/mall/products', 'GET /api/o2o/mall/storefront', 'GET /api/o2o/mall/config', 'GET /api/o2o/mall/rules',
+  'GET /api/v1/mobile-auth/captcha', 'GET /api/v1/mobile-auth/capabilities',
+  'POST /api/v1/mobile-auth/verification-code', 'POST /api/v1/mobile-auth/register', 'POST /api/v1/mobile-auth/login',
+  'POST /api/v1/mobile-auth/refresh', 'POST /api/v1/mobile-auth/forgot-password/verify', 'POST /api/v1/mobile-auth/forgot-password/reset',
 ])
+const MOBILE_AUTH_PREFIX = '/api/v1/mobile-auth'
+/** 仅限路由处理器内显式读取 Bearer 的幂等登出；不能把整个 Mobile 前缀视为匿名。 */
+const MOBILE_BEARER_SELF_SERVICE_ALLOWLIST = new Set<string>(['POST /api/v1/mobile-auth/logout'])
 /** 已登录用户只能操作自己的会话；这些接口不属于带业务权限点的管理操作。 */
 const AUTHENTICATED_SELF_SERVICE_ALLOWLIST = new Set<string>([
   'GET /api/auth/me', 'POST /api/auth/logout',
@@ -92,6 +98,17 @@ function permissionsOf(node: ts.Node | readonly ts.Node[]): string[] {
   if (Array.isArray(node)) node.forEach(visit)
   else visit(node)
   return [...permissions]
+}
+
+function usesMobileBearerOf(node: ts.Node | readonly ts.Node[]): boolean {
+  let used = false
+  const visit = (child: ts.Node) => {
+    if (ts.isIdentifier(child) && child.text === 'readRequiredMobileBearer') used = true
+    ts.forEachChild(child, visit)
+  }
+  if (Array.isArray(node)) node.forEach(visit)
+  else visit(node)
+  return used
 }
 
 function mergeGuards(...sets: Iterable<string>[]): Set<string> {
@@ -148,7 +165,7 @@ function parseRouters(files: string[]): Map<string, RouterDefinition> {
         const routePath = staticPath(node.arguments[0], `${receiver}.${method}`)
         if (!routePath) throw new Error(`${receiver}.${method} 的首参数必须是静态字符串路径`)
         const routeArguments = node.arguments.slice(1)
-        router.routes.push({ method: method.toUpperCase(), routePath, guards: guardsOf(routeArguments), permissions: permissionsOf(routeArguments), sourceFile: filePath })
+        router.routes.push({ method: method.toUpperCase(), routePath, guards: guardsOf(routeArguments), permissions: permissionsOf(routeArguments), usesMobileBearer: usesMobileBearerOf(routeArguments), sourceFile: filePath })
       } else if (method === 'use') {
         const firstPath = staticPath(node.arguments[0], `${receiver}.use`)
         const mountPath = firstPath ?? '/'
@@ -188,7 +205,7 @@ function parseApp(appPath: string, routers: Map<string, RouterDefinition>): { mo
       const routePath = staticPath(node.arguments[0], `app.${method}`)
       if (!routePath) throw new Error(`app.${method} 必须使用静态路径`)
       const guards = guardsOf(ts.factory.createNodeArray(node.arguments.slice(1)))
-      directRoutes.push({ method: method.toUpperCase(), path: routePath, audience: audienceOf(guards), guards, permissions: permissionsOf(node.arguments.slice(1)), sourceFile: appPath })
+      directRoutes.push({ method: method.toUpperCase(), path: routePath, audience: audienceOf(guards), guards, permissions: permissionsOf(node.arguments.slice(1)), usesMobileBearer: false, sourceFile: appPath })
     }
     ts.forEachChild(node, visit)
   }
@@ -207,7 +224,7 @@ function parseApp(appPath: string, routers: Map<string, RouterDefinition>): { mo
 
 function audienceOf(guards: Set<string>): Audience {
   if (guards.has('requireDatabaseRescueCredential')) return 'rescue'
-  if (guards.has('requireClientAuth')) return 'client'
+  if (guards.has('requireClientAuth') || guards.has('requireMobileAuth')) return 'client'
   if (guards.has('requireAuth') || guards.has('requirePermission') || guards.has('requireRole')) return 'admin'
   return 'public'
 }
@@ -223,7 +240,7 @@ function resolveRoutes(routers: Map<string, RouterDefinition>, mounts: AppMount[
     const routerGuards = mergeGuards(inheritedGuards, router.inheritedGuards)
     router.routes.forEach((route) => {
       const guards = mergeGuards(routerGuards, route.guards)
-      resolved.push({ method: route.method, path: joinPath(basePath, route.routePath), audience: audienceOf(guards), guards, permissions: route.permissions, sourceFile: route.sourceFile })
+      resolved.push({ method: route.method, path: joinPath(basePath, route.routePath), audience: audienceOf(guards), guards, permissions: route.permissions, usesMobileBearer: route.usesMobileBearer, sourceFile: route.sourceFile })
     })
     router.nestedMounts.forEach((mount) => walk(mount.targetRouter, joinPath(basePath, mount.mountPath), mergeGuards(routerGuards, mount.guards), [...stack, routerName]))
   }
@@ -237,7 +254,18 @@ function assertContracts(routes: ResolvedRoute[], permissions: Set<string>) {
   assert.ok(routes.length > 0, '未解析到任何实际路由')
   routes.forEach((route) => {
     const key = `${route.method} ${route.path}`
-    if (route.audience === 'public') assert.ok(ANONYMOUS_ROUTE_ALLOWLIST.has(key), `发现未登记的匿名接口：${key}；守卫：${[...route.guards].join(',') || '无'}`)
+    const isMobileRoute = route.path === MOBILE_AUTH_PREFIX || route.path.startsWith(`${MOBILE_AUTH_PREFIX}/`)
+    const isMobileBearerSelfService = isMobileRoute && MOBILE_BEARER_SELF_SERVICE_ALLOWLIST.has(key) && route.usesMobileBearer
+    if (route.audience === 'public') {
+      assert.ok(ANONYMOUS_ROUTE_ALLOWLIST.has(key) || isMobileBearerSelfService, `发现未登记的匿名接口：${key}；守卫：${[...route.guards].join(',') || '无'}`)
+    }
+    if (isMobileRoute) {
+      if (route.audience === 'public') {
+        assert.ok(ANONYMOUS_ROUTE_ALLOWLIST.has(key) || isMobileBearerSelfService, `Mobile 匿名或 Bearer 自服务接口必须精确登记：${key}`)
+      } else {
+        assert.ok(route.guards.has('requireMobileAuth'), `Mobile 受保护接口必须使用 requireMobileAuth：${key}`)
+      }
+    }
     if (route.audience === 'admin' && route.permissions.length === 0) {
       assert.ok(AUTHENTICATED_SELF_SERVICE_ALLOWLIST.has(key), `管理端接口必须声明权限点：${key}`)
     }

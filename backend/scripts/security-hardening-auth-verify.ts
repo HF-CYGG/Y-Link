@@ -4,6 +4,7 @@
  * 实现逻辑：测试只依赖进程内可注入实现，不通过 HTTP 接口或 SVG 文本反推出验证码答案。
  */
 
+import 'reflect-metadata'
 import assert from 'node:assert/strict'
 import {
   CaptchaService,
@@ -37,17 +38,20 @@ const run = async () => {
   assert.notEqual(csrfForFirstSession, 'client-session-a', '客户端 CSRF 值不得复用会话令牌')
 
   const originalResolveClientByToken = clientAuthService.resolveClientByToken
-  clientAuthService.resolveClientByToken = async (sessionToken: string): Promise<ClientAuthContext> => ({
-    userId: 'client-user-id',
-    account: 'client-account',
-    mobile: '13800138000',
-    email: '',
-    realName: '测试用户',
-    accountType: 'personal',
-    staffNo: null,
-    sessionToken,
-    authSource: 'bearer',
-  })
+  clientAuthService.resolveClientByToken = async (sessionToken: string): Promise<ClientAuthContext> => {
+    if (sessionToken === 'invalid-bearer-session') throw new BizError('未登录或登录状态已失效', 401)
+    return {
+      userId: 'client-user-id',
+      account: 'client-account',
+      mobile: '13800138000',
+      email: '',
+      realName: '测试用户',
+      accountType: 'personal',
+      staffNo: null,
+      sessionToken,
+      authSource: 'bearer',
+    }
+  }
   const invokeClientAuth = async (request: { method: string; headers: Record<string, string | undefined> }) => {
     let middlewareError: unknown
     await requireClientAuth(request as never, {} as never, (error?: unknown) => {
@@ -84,11 +88,24 @@ const run = async () => {
       method: 'POST',
       headers: { authorization: 'Bearer bearer-only-session' },
     }), undefined, '纯 Bearer 兼容请求不应被 Cookie CSRF 规则拦截')
-    const mixedCredential = await invokeClientAuth({
+    assert.equal(await invokeClientAuth({
       method: 'POST',
       headers: { cookie: 'y_link_client_session=client-session-a', authorization: 'Bearer bearer-only-session' },
+    }), undefined, '有效 Bearer 与 Cookie 并存时必须按 Bearer 成功，不能错误触发 Cookie CSRF')
+
+    const malformedBearer = await invokeClientAuth({
+      method: 'POST',
+      headers: { cookie: 'y_link_client_session=client-session-a', authorization: 'Basic malformed' },
     })
-    assert.ok(mixedCredential instanceof BizError, '混合凭据必须按 Cookie 优先，不能绕过 CSRF')
+    assert.ok(malformedBearer instanceof BizError, '畸形 Authorization 即使有 Cookie 也必须拒绝')
+    assert.equal(malformedBearer.statusCode, 401)
+
+    const invalidBearer = await invokeClientAuth({
+      method: 'POST',
+      headers: { cookie: 'y_link_client_session=client-session-a', authorization: 'Bearer invalid-bearer-session' },
+    })
+    assert.ok(invalidBearer instanceof BizError, '无效 Bearer 即使有 Cookie 也不得回退')
+    assert.equal(invalidBearer.statusCode, 401)
   } finally {
     clientAuthService.resolveClientByToken = originalResolveClientByToken
   }

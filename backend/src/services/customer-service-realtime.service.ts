@@ -9,11 +9,13 @@ import type { Response } from 'express'
 import { In, MoreThan } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { resolvePermissionsByRole } from '../constants/auth-permissions.js'
+import { ClientMobileSession } from '../entities/client-mobile-session.entity.js'
 import { ClientUser } from '../entities/client-user.entity.js'
 import { ClientUserSession } from '../entities/client-user-session.entity.js'
 import { SysUser } from '../entities/sys-user.entity.js'
 import { SysUserSession } from '../entities/sys-user-session.entity.js'
 import { hashSessionToken } from '../utils/session-token.js'
+import { isMobileAccessToken } from '../utils/mobile-token.js'
 import { BizError } from '../utils/errors.js'
 import { CUSTOMER_SERVICE_REALTIME_POLICY } from './client-feedback-security-policy.js'
 
@@ -29,10 +31,12 @@ export interface CustomerServiceRealtimeEventPayload {
 }
 
 type RealtimeScope = 'client' | 'service'
+type ClientSessionKind = 'web' | 'mobile'
 
 interface CustomerServiceRealtimeSubscriber {
   subscriberId: string
   scope: RealtimeScope
+  clientSessionKind: ClientSessionKind | null
   ownerKey: string
   sessionHash: string
   res: Response
@@ -150,19 +154,39 @@ class CustomerServiceRealtimeService {
   private async validateSubscribers(subscribers: CustomerServiceRealtimeSubscriber[]) {
     const now = new Date()
     const validIds = new Set<string>()
-    const clientSubscribers = subscribers.filter((item) => item.scope === 'client')
+    const webClientSubscribers = subscribers.filter((item) => item.scope === 'client' && item.clientSessionKind === 'web')
+    const mobileClientSubscribers = subscribers.filter((item) => item.scope === 'client' && item.clientSessionKind === 'mobile')
     const serviceSubscribers = subscribers.filter((item) => item.scope === 'service')
-    for (const batch of [clientSubscribers, serviceSubscribers]) {
+    for (const batch of [webClientSubscribers, mobileClientSubscribers, serviceSubscribers]) {
       for (let offset = 0; offset < batch.length; offset += CUSTOMER_SERVICE_REALTIME_POLICY.validationBatchSize) {
         const slice = batch.slice(offset, offset + CUSTOMER_SERVICE_REALTIME_POLICY.validationBatchSize)
         if (!slice.length) continue
         const hashes = [...new Set(slice.map((item) => item.sessionHash))]
-        if (slice[0]?.scope === 'client') {
+        if (slice[0]?.clientSessionKind === 'web') {
           const sessions = await AppDataSource.getRepository(ClientUserSession).find({ where: { sessionToken: In(hashes), expiresAt: MoreThan(now) } })
           const users = sessions.length
             ? await AppDataSource.getRepository(ClientUser).find({ where: { id: In([...new Set(sessions.map((item) => item.userId))]), status: 'enabled' } })
             : []
           const ownerByHash = new Map(sessions.map((item) => [item.sessionToken, item.userId]))
+          const enabledUsers = new Set(users.map((item) => String(item.id)))
+          for (const subscriber of slice) {
+            if (String(ownerByHash.get(subscriber.sessionHash) ?? '') === String(subscriber.ownerKey) && enabledUsers.has(String(subscriber.ownerKey))) validIds.add(subscriber.subscriberId)
+          }
+          continue
+        }
+        if (slice[0]?.clientSessionKind === 'mobile') {
+          const sessions = await AppDataSource.getRepository(ClientMobileSession)
+            .createQueryBuilder('session')
+            .addSelect('session.accessTokenHash')
+            .where('session.access_token_hash IN (:...hashes)', { hashes })
+            .andWhere('session.revoked_at IS NULL')
+            .andWhere('session.access_expires_at > :now', { now })
+            .andWhere('session.absolute_expires_at > :now', { now })
+            .getMany()
+          const users = sessions.length
+            ? await AppDataSource.getRepository(ClientUser).find({ where: { id: In([...new Set(sessions.map((item) => item.clientUserId))]), status: 'enabled' } })
+            : []
+          const ownerByHash = new Map(sessions.map((item) => [item.accessTokenHash, item.clientUserId]))
           const enabledUsers = new Set(users.map((item) => String(item.id)))
           for (const subscriber of slice) {
             if (String(ownerByHash.get(subscriber.sessionHash) ?? '') === String(subscriber.ownerKey) && enabledUsers.has(String(subscriber.ownerKey))) validIds.add(subscriber.subscriberId)
@@ -208,6 +232,9 @@ class CustomerServiceRealtimeService {
 
   private registerSubscriber(scope: RealtimeScope, ownerKey: string, sessionToken: string, res: Response, keepaliveSeconds: number, initPayload?: CustomerServiceRealtimeInitPayloadResolver) {
     const sessionHash = hashSessionToken(sessionToken)
+    const clientSessionKind: ClientSessionKind | null = scope === 'client'
+      ? (isMobileAccessToken(sessionToken) ? 'mobile' : 'web')
+      : null
     this.assertConnectionCapacity(scope, ownerKey, sessionHash)
     this.checkConnectRateLimit(scope, sessionHash)
     const subscriberId = this.buildSubscriberId(scope)
@@ -217,7 +244,7 @@ class CustomerServiceRealtimeService {
     res.setHeader('Connection', 'keep-alive')
     res.setHeader('X-Accel-Buffering', 'no')
     res.flushHeaders()
-    const subscriber: CustomerServiceRealtimeSubscriber = { subscriberId, scope, ownerKey, sessionHash, res, heartbeatTimer: null, revalidateTimer: null, slowConsumerTimer: null, blocked: false }
+    const subscriber: CustomerServiceRealtimeSubscriber = { subscriberId, scope, clientSessionKind, ownerKey, sessionHash, res, heartbeatTimer: null, revalidateTimer: null, slowConsumerTimer: null, blocked: false }
     this.subscribers.set(subscriberId, subscriber)
     const sessionSnapshot = this.buildServiceSessionSnapshot()
     const resolvedInitPayload = typeof initPayload === 'function' ? initPayload(sessionSnapshot) : initPayload

@@ -9,6 +9,8 @@ export interface HttpRequestConfig {
   headers?: Record<string, string>
   timeoutMs?: number
   idempotencyKey?: string
+  /** access 为默认值；none 用于登录、注册与 refresh 等公开认证端点。 */
+  auth?: 'access' | 'none'
 }
 
 export interface HttpAdapter {

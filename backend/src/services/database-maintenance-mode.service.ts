@@ -52,6 +52,7 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
 const DATABASE_MUTATING_AUTH_PATHS = new Set([
   '/api/auth/captcha',
   '/api/client-auth/captcha',
+  '/api/v1/mobile-auth/captcha',
   '/api/client-auth/capabilities',
 ])
 function normalizeRequestPath(requestPath: string): string {
