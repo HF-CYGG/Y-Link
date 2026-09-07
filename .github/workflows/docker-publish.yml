@@ -1,12 +1,13 @@
 # ------------------------------
 # 文件说明：Y-Link 多平台镜像发布流水线。
 # 实现逻辑：
-# 1. prepare 作业统一计算镜像仓库、命名空间与推送开关，通过 outputs 分发给后续作业；
+# 1. prepare 作业校验仓库配置并输出推送开关，镜像仓库清单则由各作业就地解析；
 # 2. build 作业按「镜像 × 平台」矩阵并行构建，arm64 使用 GitHub 原生 ARM Runner，
 #    不再经 QEMU 指令模拟；产物以 digest 形式推入 GHCR 暂存；
 # 3. merge 作业按镜像合并各平台 digest 生成多平台 manifest，
 #    并一次性打到 GHCR / Docker Hub / 阿里云 ACR 的正式标签上。
-# 维护说明：新增镜像时需同步扩展 prepare 的镜像清单输出，以及 build / merge 的 matrix。
+# 维护说明：新增镜像时需同步扩展 build / merge 的 matrix，
+#           以及 .github/scripts/resolve-image-repositories.sh 中的镜像名白名单。
 # ------------------------------
 name: docker-publish
 
@@ -39,21 +40,21 @@ jobs:
     env:
       HAS_DOCKERHUB_CREDS: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
       HAS_ACR_CREDS: ${{ secrets.ACR_USERNAME != '' && secrets.ACR_PASSWORD != '' }}
+    # 这里只暴露不含任何 secret 的字段。
+    # 完整镜像仓库清单里含有 Docker Hub 命名空间，它与 DOCKERHUB_USERNAME 同值而被判定为 secret，
+    # 而 GitHub 会把包含 secret 的 job output 整体清空，跨作业传递时会静默变成空字符串。
+    # 因此清单改由各作业调用 .github/scripts/resolve-image-repositories.sh 就地生成。
     outputs:
       gh_owner: ${{ steps.prepare.outputs.gh_owner }}
-      namespace: ${{ steps.prepare.outputs.namespace }}
       acr_registry: ${{ steps.prepare.outputs.acr_registry }}
       acr_namespace: ${{ steps.prepare.outputs.acr_namespace }}
       acr_push_mode: ${{ steps.prepare.outputs.acr_push_mode }}
       acr_enabled: ${{ steps.prepare.outputs.acr_enabled }}
       dockerhub_enabled: ${{ steps.prepare.outputs.dockerhub_enabled }}
-      # 三个镜像的仓库清单统一放进一个 JSON object 输出。
-      # 不要拆成 frontend_images / backend_images / onebox_images 再用
-      # needs.prepare.outputs[format('{0}_images', matrix.image)] 动态索引读取：
-      # 该写法在 needs 上下文里不会求值，会静默得到空字符串，
-      # 使 metadata-action 退化成只输出裸标签名，最终推到 docker.io/library/<tag>。
-      images_json: ${{ steps.prepare.outputs.images_json }}
     steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+
       - name: 计算镜像仓库与推送规则
         id: prepare
         shell: bash
@@ -62,121 +63,7 @@ jobs:
           ACR_REGISTRY_VAR: ${{ vars.ACR_REGISTRY }}
           ACR_NAMESPACE_VAR: ${{ vars.ACR_NAMESPACE }}
           ACR_PUSH_MODE_VAR: ${{ vars.ACR_PUSH_MODE }}
-          DEFAULT_ACR_REGISTRY: crpi-9gmsq2s17re73ia9.cn-qingdao.personal.cr.aliyuncs.com
-          DEFAULT_ACR_NAMESPACE: yyh163
-        run: |
-          set -euo pipefail
-
-          write_output() {
-            local key="$1"
-            local value="$2"
-            if [[ ! "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
-              echo "Invalid output key: $key" >&2
-              exit 1
-            fi
-            if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
-              echo "Invalid multiline value for output: $key" >&2
-              exit 1
-            fi
-            printf '%s=%s\n' "$key" "$value" >> "$GITHUB_OUTPUT"
-          }
-
-          namespace="${DOCKERHUB_NAMESPACE_VAR:-}"
-          if [ -z "$namespace" ]; then
-            namespace="${GITHUB_REPOSITORY_OWNER}"
-          fi
-          namespace="$(printf '%s' "$namespace" | tr '[:upper:]' '[:lower:]')"
-          if [[ ! "$namespace" =~ ^[a-z0-9]+([._-][a-z0-9]+)*$ ]]; then
-            echo "Invalid DOCKERHUB_NAMESPACE; only Docker namespace characters are allowed." >&2
-            exit 1
-          fi
-          write_output "namespace" "$namespace"
-
-          gh_owner="$(printf '%s' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')"
-          write_output "gh_owner" "$gh_owner"
-
-          acr_registry="${ACR_REGISTRY_VAR:-}"
-          if [ -z "$acr_registry" ]; then
-            acr_registry="$DEFAULT_ACR_REGISTRY"
-          fi
-          acr_namespace="${ACR_NAMESPACE_VAR:-}"
-          if [ -z "$acr_namespace" ]; then
-            acr_namespace="$DEFAULT_ACR_NAMESPACE"
-          fi
-          acr_push_mode="${ACR_PUSH_MODE_VAR:-}"
-          if [ -z "$acr_push_mode" ]; then
-            acr_push_mode="release_tag_only"
-          fi
-
-          if [[ ! "$acr_registry" =~ ^[a-z0-9][a-z0-9.-]*\.aliyuncs\.com$ ]]; then
-            echo "Invalid ACR_REGISTRY; only Aliyun ACR registry hosts are allowed." >&2
-            exit 1
-          fi
-          if [[ ! "$acr_namespace" =~ ^[a-z0-9]+([._-][a-z0-9]+)*$ ]]; then
-            echo "Invalid ACR_NAMESPACE; only registry namespace characters are allowed." >&2
-            exit 1
-          fi
-          case "$acr_push_mode" in
-            all|release_tag_only)
-              ;;
-            *)
-              echo "Unsupported ACR_PUSH_MODE=$acr_push_mode, fallback to release_tag_only"
-              acr_push_mode="release_tag_only"
-              ;;
-          esac
-          write_output "acr_registry" "$acr_registry"
-          write_output "acr_namespace" "$acr_namespace"
-          write_output "acr_push_mode" "$acr_push_mode"
-
-          acr_enabled="false"
-          if [ "${HAS_ACR_CREDS}" = "true" ]; then
-            case "$acr_push_mode" in
-              all)
-                acr_enabled="true"
-                ;;
-              release_tag_only)
-                if [[ "${GITHUB_REF}" == refs/tags/release-v* ]]; then
-                  acr_enabled="true"
-                fi
-                ;;
-            esac
-          fi
-          write_output "acr_enabled" "$acr_enabled"
-
-          frontend_images="ghcr.io/${gh_owner}/y-link-frontend"
-          backend_images="ghcr.io/${gh_owner}/y-link-backend"
-          onebox_images="ghcr.io/${gh_owner}/y-link-onebox"
-          dockerhub_enabled="false"
-
-          # Docker Hub 可选推送
-          if [ "${HAS_DOCKERHUB_CREDS}" = "true" ]; then
-            dockerhub_enabled="true"
-            frontend_images="docker.io/${namespace}/y-link-frontend"$'\n'"${frontend_images}"
-            backend_images="docker.io/${namespace}/y-link-backend"$'\n'"${backend_images}"
-            onebox_images="docker.io/${namespace}/y-link-onebox"$'\n'"${onebox_images}"
-          fi
-          write_output "dockerhub_enabled" "$dockerhub_enabled"
-
-          # 阿里云 ACR 可选推送
-          # onebox 默认推到 y-link，方便直接用于部署
-          if [ "$acr_enabled" = "true" ]; then
-            frontend_images="${acr_registry}/${acr_namespace}/y-link-frontend"$'\n'"${frontend_images}"
-            backend_images="${acr_registry}/${acr_namespace}/y-link-backend"$'\n'"${backend_images}"
-            onebox_images="${acr_registry}/${acr_namespace}/y-link"$'\n'"${onebox_images}"
-          fi
-
-          # 输出为单行 JSON，供 merge 作业用 fromJSON(...)[matrix.image] 按镜像取用。
-          images_json="$(jq -nc \
-            --arg frontend "$frontend_images" \
-            --arg backend "$backend_images" \
-            --arg onebox "$onebox_images" \
-            '{
-              frontend: ($frontend | split("\n") | map(select(length > 0))),
-              backend: ($backend | split("\n") | map(select(length > 0))),
-              onebox: ($onebox | split("\n") | map(select(length > 0)))
-            }')"
-          write_output "images_json" "$images_json"
-          echo "镜像仓库清单: $images_json"
+        run: bash .github/scripts/resolve-image-repositories.sh
 
   # ------------------------------
   # 单平台构建：6 个作业并行，每个作业只负责一个镜像的一个平台。
@@ -277,6 +164,23 @@ jobs:
     env:
       STAGING_IMAGE: ghcr.io/${{ needs.prepare.outputs.gh_owner }}/y-link-${{ matrix.image }}
     steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+
+      # 镜像仓库清单含 Docker Hub 命名空间（被判定为 secret），不能经 job output 跨作业传递，
+      # 只能在本作业内就地生成；step output 在同一作业内不受该限制。
+      - name: 解析本镜像的推送目标
+        id: repos
+        shell: bash
+        env:
+          HAS_DOCKERHUB_CREDS: ${{ secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
+          HAS_ACR_CREDS: ${{ secrets.ACR_USERNAME != '' && secrets.ACR_PASSWORD != '' }}
+          DOCKERHUB_NAMESPACE_VAR: ${{ vars.DOCKERHUB_NAMESPACE }}
+          ACR_REGISTRY_VAR: ${{ vars.ACR_REGISTRY }}
+          ACR_NAMESPACE_VAR: ${{ vars.ACR_NAMESPACE }}
+          ACR_PUSH_MODE_VAR: ${{ vars.ACR_PUSH_MODE }}
+        run: bash .github/scripts/resolve-image-repositories.sh "${{ matrix.image }}"
+
       - name: 下载 digest
         uses: actions/download-artifact@v4
         with:
@@ -316,8 +220,7 @@ jobs:
           # imagetools 合并出的是 image index，注解层级需要对应改成 index。
           DOCKER_METADATA_ANNOTATIONS_LEVELS: index
         with:
-          # metadata-action 的 images 同时接受换行与逗号分隔，这里用逗号拼接。
-          images: ${{ join(fromJSON(needs.prepare.outputs.images_json)[matrix.image], ',') }}
+          images: ${{ steps.repos.outputs.images }}
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=ref,event=branch
@@ -328,8 +231,7 @@ jobs:
         shell: bash
         working-directory: /tmp/digests
         env:
-          # 注意：只能用 step 的 tags 输出（完整镜像引用），
-          # DOCKER_METADATA_OUTPUT_JSON 里的 .tags 自 v6 起只是裸标签名，不含仓库地址。
+          # 用 step 的 tags 输出，它始终是完整镜像引用。
           IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
           IMAGE_ANNOTATIONS: ${{ steps.meta.outputs.annotations }}
         run: |
@@ -349,9 +251,10 @@ jobs:
             [ -n "$tag" ] || continue
             # 兜底断言：标签必须是含仓库路径的完整引用。
             # 一旦 images 输入为空，metadata-action 只会给出裸标签名，
-            # imagetools 会把它当成 docker.io/library/<tag> 而推送失败，这里提前拦下。
+            # imagetools 会把它当成 docker.io/library/<tag> 推送并报 insufficient_scope，
+            # 这里提前拦下并指明排查方向。
             if [[ "$tag" != */* ]]; then
-              echo "镜像标签缺少仓库地址: ${tag}；请检查 prepare 作业的 images_json 输出" >&2
+              echo "镜像标签缺少仓库地址: ${tag}；请检查「解析本镜像的推送目标」步骤的 images 输出" >&2
               exit 1
             fi
             args+=(--tag "$tag")
