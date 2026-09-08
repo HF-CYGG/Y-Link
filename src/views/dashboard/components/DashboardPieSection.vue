@@ -40,6 +40,13 @@ const pieLoading = ref(false)
 const pieData = ref<DashboardPieDataResult | null>(null)
 /** 最近一次饼图查询的错误文案：非空时不得继续展示上一次的成功结果。 */
 const pieError = ref('')
+/**
+ * 当前展示数据对应的筛选条件签名：
+ * - 与榜单同理，不能用“有没有数据”当重入门禁；
+ * - 新区间的请求若在离页时被取消，重新进入必须补跑，否则饼图会一直停在旧区间口径上。
+ */
+const loadedFilterSignature = ref('')
+const buildFilterSignature = () => JSON.stringify(props.filter)
 const piePalette = ['#14b8a6', '#0ea5e9', '#8b5cf6', '#f97316', '#eab308', '#ef4444', '#84cc16', '#06b6d4']
 type PieValueType = 'amount' | 'count'
 type NumericLike = string | number | null | undefined
@@ -170,6 +177,8 @@ const buildPieOption = (slices: readonly DashboardPieSlice[], valueType: PieValu
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const loadPieData = async () => {
+  // 在发起请求时固定签名，回写时才能对应本次真正请求的那一组条件。
+  const requestSignature = buildFilterSignature()
   pieLoading.value = true
   pieError.value = ''
   await pieRequest.runLatest({
@@ -183,12 +192,14 @@ const loadPieData = async () => {
       ),
     onSuccess: (result) => {
       pieError.value = ''
+      loadedFilterSignature.value = requestSignature
       pieData.value = result
     },
     onError: (error) => {
       // 区间已经切到新条件，若留着上一次的成功结果，用户会把旧占比当成新筛选的结果读。
       const message = extractErrorMessage(error, '获取饼图统计失败')
       pieError.value = message
+      loadedFilterSignature.value = ''
       pieData.value = null
       showAppError(message)
     },
@@ -214,11 +225,12 @@ onBeforeUnmount(resetLoadingOnLeave)
 
 /**
  * 重新进入 keep-alive 页面时兜底：
- * - 上次请求若在离页时被取消，这里没有数据也不会再自动触发（watch 只在筛选条件变化时响应），
- *   因此需要补一次拉取，避免卡在空态。
+ * - 上次请求若在离页时被取消，watch 只在筛选条件变化时响应，不会自动补跑；
+ * - 判定以“已加载数据是否对应当前条件”为准，而不是“有没有数据”：
+ *   否则用户提交新区间后立即离页，重新进入时饼图会一直停在旧区间的占比上。
  */
 onActivated(() => {
-  if (!pieData.value && !pieLoading.value) {
+  if (loadedFilterSignature.value !== buildFilterSignature() && !pieLoading.value) {
     void loadPieData()
   }
 })

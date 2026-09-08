@@ -89,6 +89,14 @@ export const useDashboardAnalytics = () => {
   const resolvedRange = ref<DashboardAnalyticsResult['range'] | null>(null)
   /** 最近一次区间查询的错误文案：非空时页面不得继续展示上一次的成功结果。 */
   const analyticsError = ref('')
+  /**
+   * 当前展示数据对应的筛选条件签名：
+   * - 只有请求成功回写时才更新，因此可以判断“手上这份数据是不是当前条件的结果”；
+   * - 不能用“有没有数据”当重入门禁：用户提交新区间后若在请求完成前离开 keep-alive 页面，
+   *   请求会被取消，但 appliedFilter 已经是新条件，而榜单与趋势仍是旧条件的结果；
+   *   再次进入时若因“已有数据”跳过重试，点击旧榜单行却会用新区间下钻，口径就对不上了。
+   */
+  const loadedFilterSignature = ref('')
 
   // 草稿态：只跟随筛选控件，点击查询/重置后才提交到 appliedFilter。
   const draftFilter = reactive({
@@ -138,6 +146,19 @@ export const useDashboardAnalytics = () => {
     return '全部订单类型'
   })
 
+  const buildFilterSignature = () =>
+    JSON.stringify({
+      granularity: appliedFilter.value.granularity,
+      dateRange: appliedFilter.value.dateRange,
+      orderType: appliedFilter.value.orderType,
+      productSpecMode: rankOptions.productSpecMode,
+      productId: rankOptions.productId,
+      topN: rankOptions.topN,
+    })
+
+  /** 手上的数据是否已经跟不上当前筛选条件（含首次加载与被取消的请求）。 */
+  const isAnalyticsStale = computed(() => loadedFilterSignature.value !== buildFilterSignature())
+
   /** 下钻抽屉复用的筛选条件，保证明细口径与榜单一致。 */
   const drilldownFilter = computed(() => ({
     dateRange: appliedFilter.value.dateRange,
@@ -145,6 +166,8 @@ export const useDashboardAnalytics = () => {
   }))
 
   const loadAnalytics = async () => {
+    // 在发起请求时就固定签名：请求期间用户可能又改了条件，回写时必须对应本次真正请求的那一组。
+    const requestSignature = buildFilterSignature()
     analyticsLoading.value = true
     analyticsError.value = ''
     await analyticsRequest.runLatest({
@@ -162,6 +185,7 @@ export const useDashboardAnalytics = () => {
         ),
       onSuccess: (result) => {
         analyticsError.value = ''
+        loadedFilterSignature.value = requestSignature
         trend.value = result.trend ?? []
         topProducts.value = result.topProducts ?? []
         topCustomers.value = result.topCustomers ?? []
@@ -173,6 +197,7 @@ export const useDashboardAnalytics = () => {
         // 由错误文案接管展示，绝不让旧数字配新标签。
         const message = extractErrorMessage(error, '获取区间统计失败')
         analyticsError.value = message
+        loadedFilterSignature.value = ''
         trend.value = []
         topProducts.value = []
         topCustomers.value = []
@@ -225,6 +250,17 @@ export const useDashboardAnalytics = () => {
   onDeactivated(resetLoadingOnLeave)
   onBeforeUnmount(resetLoadingOnLeave)
 
+  /**
+   * 页面首次挂载与 keep-alive 重新激活时的兜底：
+   * - 以“数据是否对应当前筛选条件”为准，而不是“有没有数据”；
+   * - 这样被取消的新筛选请求在重新进入时一定会补跑，榜单与下钻不会停留在两套区间上。
+   */
+  const ensureAnalyticsReady = () => {
+    if (isAnalyticsStale.value && !analyticsLoading.value) {
+      void loadAnalytics()
+    }
+  }
+
   const handleRankOptionsChange = (next: Partial<DashboardRankOptions>) => {
     if (next.productSpecMode) {
       rankOptions.productSpecMode = next.productSpecMode
@@ -241,6 +277,8 @@ export const useDashboardAnalytics = () => {
   return {
     analyticsLoading,
     analyticsError,
+    isAnalyticsStale,
+    ensureAnalyticsReady,
     trend,
     topProducts,
     topCustomers,

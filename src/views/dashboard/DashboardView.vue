@@ -39,6 +39,7 @@ const dashboardRequest = useStableRequest()
 const {
   analyticsLoading,
   analyticsError,
+  ensureAnalyticsReady,
   trend,
   topProducts,
   topCustomers,
@@ -287,9 +288,9 @@ const ensureDashboardReady = () => {
     void loadData()
   }
   // 区间统计与概览分属两个接口，keep-alive 恢复时同样需要兜底一次。
-  if (!trend.value.length && !analyticsLoading.value) {
-    void loadAnalytics()
-  }
+  // 判定交给 ensureAnalyticsReady：它以“数据是否对应当前筛选条件”为准，
+  // 而不是“有没有数据”——否则新区间的请求被离页取消后，重新进入会一直显示旧区间的榜单。
+  ensureAnalyticsReady()
 }
 
 /**
@@ -301,6 +302,7 @@ const retryLoadData = () => {
   void loadData()
   void loadAnalytics()
 }
+
 
 onMounted(() => {
   ensureDashboardReady()
