@@ -54,6 +54,9 @@ jobs:
       - name: 构建后端
         run: npm --prefix ./backend run build
 
+      - name: 验证出站 HTTP DNS 与重定向安全边界
+        run: npm --prefix ./backend run security:safe-http:verify
+
       - name: 执行 MySQL 启动结构契约验收
         run: npm --prefix ./backend run verify:mysql:schema-contract
 
