@@ -38,6 +38,7 @@ const loadStatus = ref<'idle' | 'success' | 'error' | 'canceled'>('idle')
 const dashboardRequest = useStableRequest()
 const {
   analyticsLoading,
+  analyticsError,
   trend,
   topProducts,
   topCustomers,
@@ -504,6 +505,7 @@ onActivated(() => {
           v-model:range-value="draftFilter.rangeValue"
           v-model:order-type="draftFilter.orderType"
           :loading="analyticsLoading"
+          :error-message="analyticsError"
           :range-label="rangeLabel"
           :granularity-label="granularityLabel"
           :order-type-label="orderTypeLabel"

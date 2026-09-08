@@ -12,7 +12,7 @@
  * - 新增筛选维度时优先在本文件扩展，不要把请求逻辑下沉到图表或榜单组件内部。
  */
 
-import { computed, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onDeactivated, reactive, ref } from 'vue'
 import dayjs from 'dayjs'
 
 import {
@@ -87,6 +87,8 @@ export const useDashboardAnalytics = () => {
   const topCustomers = ref<DashboardTopCustomer[]>([])
   /** 后端回执的真实生效区间，用于标题与“当前统计区间”文案，避免前端自说自话。 */
   const resolvedRange = ref<DashboardAnalyticsResult['range'] | null>(null)
+  /** 最近一次区间查询的错误文案：非空时页面不得继续展示上一次的成功结果。 */
+  const analyticsError = ref('')
 
   // 草稿态：只跟随筛选控件，点击查询/重置后才提交到 appliedFilter。
   const draftFilter = reactive({
@@ -107,13 +109,21 @@ export const useDashboardAnalytics = () => {
     topN: DASHBOARD_TOP_N_OPTIONS[0],
   })
 
-  /** 当前统计区间文案：区间未知时不编造“本月”，等后端回执再展示。 */
+  /**
+   * 当前统计区间文案：
+   * - 优先用后端回执，未知时不编造“本月”；
+   * - 查询失败后回执会被清空，此时退回展示用户实际提交的区间，避免文案与错误提示互相矛盾。
+   */
   const rangeLabel = computed(() => {
     const range = resolvedRange.value
-    if (!range?.startDate || !range?.endDate) {
-      return '统计区间加载中'
+    if (range?.startDate && range?.endDate) {
+      return `${range.startDate} 至 ${range.endDate}`
     }
-    return `${range.startDate} 至 ${range.endDate}`
+    const requestedRange = appliedFilter.value.dateRange
+    if (requestedRange) {
+      return `${requestedRange[0]} 至 ${requestedRange[1]}`
+    }
+    return '统计区间加载中'
   })
 
   const granularityLabel = computed(() => (resolvedRange.value?.granularity === 'month' ? '按月' : '按日'))
@@ -136,6 +146,7 @@ export const useDashboardAnalytics = () => {
 
   const loadAnalytics = async () => {
     analyticsLoading.value = true
+    analyticsError.value = ''
     await analyticsRequest.runLatest({
       executor: (signal) =>
         getDashboardAnalytics(
@@ -150,19 +161,26 @@ export const useDashboardAnalytics = () => {
           { signal },
         ),
       onSuccess: (result) => {
+        analyticsError.value = ''
         trend.value = result.trend ?? []
         topProducts.value = result.topProducts ?? []
         topCustomers.value = result.topCustomers ?? []
         resolvedRange.value = result.range
       },
       onError: (error) => {
-        showAppError(extractErrorMessage(error, '获取区间统计失败'))
+        // appliedFilter 已经切到新条件，若继续留着上一次的成功结果，
+        // 用户会把旧统计当成新筛选的结果读。因此失败时一并清空数据与区间回执，
+        // 由错误文案接管展示，绝不让旧数字配新标签。
+        const message = extractErrorMessage(error, '获取区间统计失败')
+        analyticsError.value = message
+        trend.value = []
+        topProducts.value = []
+        topCustomers.value = []
+        resolvedRange.value = null
+        showAppError(message)
       },
-      onFinally: ({ status }) => {
-        // 请求被新筛选中止时不要提前收起加载态，否则会闪出一次空态。
-        if (status !== 'canceled') {
-          analyticsLoading.value = false
-        }
+      onFinally: () => {
+        analyticsLoading.value = false
       },
     })
   }
@@ -193,6 +211,20 @@ export const useDashboardAnalytics = () => {
     void loadAnalytics()
   }
 
+  /**
+   * 失活与卸载时复位加载态：
+   * - useStableRequest 的 cancel() 会把 activeController 置空，runLatest 的收尾逻辑
+   *   随后判定“当前请求已过期”而直接返回，onFinally 根本不会被调用；
+   * - 若不在这里复位，keep-alive 页面在请求未完成时离开，analyticsLoading 会永久为 true，
+   *   重新进入时 ensureDashboardReady 又因加载态为真而拒绝重试，图表会永远停在骨架屏。
+   */
+  const resetLoadingOnLeave = () => {
+    analyticsLoading.value = false
+  }
+
+  onDeactivated(resetLoadingOnLeave)
+  onBeforeUnmount(resetLoadingOnLeave)
+
   const handleRankOptionsChange = (next: Partial<DashboardRankOptions>) => {
     if (next.productSpecMode) {
       rankOptions.productSpecMode = next.productSpecMode
@@ -208,6 +240,7 @@ export const useDashboardAnalytics = () => {
 
   return {
     analyticsLoading,
+    analyticsError,
     trend,
     topProducts,
     topCustomers,

@@ -273,7 +273,26 @@ async function main() {
       () => dashboardService.getAnalytics({ ...baseRange, orderType: 'unknown' }),
       /orderType 非法/,
     )
-    pass('空区间返回空榜单，非法起止时间与非法订单类型均有明确反馈')
+
+    // JS 的 Date 对“日越界”会静默进位（2026-02-31 -> 2026-03-03、2026-04-31 -> 2026-05-01），
+    // 只靠正则校验会让这类输入悄悄查到错误区间，因此必须回写比对后拒绝。
+    await assert.rejects(
+      () => dashboardService.getAnalytics({ startDate: '2026-02-31', endDate: RANGE_END }),
+      /不是有效日期/,
+    )
+    await assert.rejects(
+      () => dashboardService.getAnalytics({ startDate: RANGE_START, endDate: '2026-04-31' }),
+      /不是有效日期/,
+    )
+    // 饼图与下钻共用同一套日期解析，同样不能放过越界日期。
+    await assert.rejects(
+      () => dashboardService.getDashboardPieData({ startDate: '2025-11-31', endDate: RANGE_END }),
+      /不是有效日期/,
+    )
+    // 闰年合法日期不能被误伤。
+    const leapDayRange = await dashboardService.getAnalytics({ startDate: '2028-02-29', endDate: '2028-02-29' })
+    assert.equal(leapDayRange.range.startDate, '2028-02-29', '闰年 2 月 29 日属于合法日期，不应被拒绝')
+    pass('空区间返回空榜单，非法起止时间、越界日历日期与非法订单类型均有明确反馈')
 
     // ---- 7. 饼图：商品维度合并 + “其他”补齐总额与占比 ----
     const pieData = await dashboardService.getDashboardPieData({ ...baseRange })

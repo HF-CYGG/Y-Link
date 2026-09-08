@@ -11,6 +11,8 @@
  * - 区间文案必须以后端返回的 range 为准，前端不得自行推断默认区间后展示。
  */
 
+import { WarningFilled } from '@element-plus/icons-vue'
+
 import type { DashboardTrendGranularity } from '@/api/modules/dashboard'
 import type { DashboardOrderTypeFilter } from '../composables/useDashboardAnalytics'
 import { useAppStore } from '@/store'
@@ -23,6 +25,8 @@ const props = defineProps<{
   rangeValue: [string, string] | []
   orderType: DashboardOrderTypeFilter
   loading: boolean
+  /** 区间查询失败时的错误文案，非空时替代“当前统计区间”提示，避免旧口径继续被当成有效结果。 */
+  errorMessage: string
   rangeLabel: string
   granularityLabel: string
   orderTypeLabel: string
@@ -105,7 +109,11 @@ const handleGranularityChange = (value: DashboardTrendGranularity) => {
       </div>
     </div>
 
-    <div class="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
+    <div v-if="props.errorMessage" class="mt-3 flex items-start gap-2 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-600 dark:bg-red-500/10 dark:text-red-400">
+      <el-icon :size="14" class="mt-0.5 shrink-0"><WarningFilled /></el-icon>
+      <span>{{ props.errorMessage }}（请调整起止时间后重试，下方图表与榜单已清空）</span>
+    </div>
+    <div v-else class="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500 dark:text-slate-400">
       <span>
         当前统计区间：
         <span class="font-semibold text-slate-700 dark:text-slate-200">{{ props.rangeLabel }}</span>

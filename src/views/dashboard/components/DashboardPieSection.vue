@@ -14,7 +14,7 @@
  */
 
 
-import { computed, ref, watch } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onDeactivated, ref, watch } from 'vue'
 import type { EChartsOption } from 'echarts'
 
 import { Document, Money } from '@element-plus/icons-vue'
@@ -38,6 +38,8 @@ const themeStore = useThemeStore(pinia)
 const pieRequest = useStableRequest()
 const pieLoading = ref(false)
 const pieData = ref<DashboardPieDataResult | null>(null)
+/** 最近一次饼图查询的错误文案：非空时不得继续展示上一次的成功结果。 */
+const pieError = ref('')
 const piePalette = ['#14b8a6', '#0ea5e9', '#8b5cf6', '#f97316', '#eab308', '#ef4444', '#84cc16', '#06b6d4']
 type PieValueType = 'amount' | 'count'
 type NumericLike = string | number | null | undefined
@@ -169,6 +171,7 @@ const buildPieOption = (slices: readonly DashboardPieSlice[], valueType: PieValu
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const loadPieData = async () => {
   pieLoading.value = true
+  pieError.value = ''
   await pieRequest.runLatest({
     executor: (signal) =>
       getDashboardPieData(
@@ -179,19 +182,46 @@ const loadPieData = async () => {
         { signal },
       ),
     onSuccess: (result) => {
+      pieError.value = ''
       pieData.value = result
     },
     onError: (error) => {
-      showAppError(extractErrorMessage(error, '获取饼图统计失败'))
+      // 区间已经切到新条件，若留着上一次的成功结果，用户会把旧占比当成新筛选的结果读。
+      const message = extractErrorMessage(error, '获取饼图统计失败')
+      pieError.value = message
+      pieData.value = null
+      showAppError(message)
     },
-    onFinally: ({ status }) => {
-      // 请求被新筛选中止时保持加载态，避免旧请求收尾时闪出一次空态。
-      if (status !== 'canceled') {
-        pieLoading.value = false
-      }
+    onFinally: () => {
+      pieLoading.value = false
     },
   })
 }
+
+/**
+ * 失活与卸载时复位加载态：
+ * - useStableRequest 的 cancel() 会把 activeController 置空，runLatest 随后判定当前请求已过期
+ *   而直接返回，onFinally 不会被调用；
+ * - 不复位的话，keep-alive 页面在请求未完成时离开，pieLoading 会永久为 true，三张饼图卡片
+ *   会一直停在骨架屏，直到用户再次改动筛选条件。
+ */
+const resetLoadingOnLeave = () => {
+  pieLoading.value = false
+}
+
+onDeactivated(resetLoadingOnLeave)
+onBeforeUnmount(resetLoadingOnLeave)
+
+/**
+ * 重新进入 keep-alive 页面时兜底：
+ * - 上次请求若在离页时被取消，这里没有数据也不会再自动触发（watch 只在筛选条件变化时响应），
+ *   因此需要补一次拉取，避免卡在空态。
+ */
+onActivated(() => {
+  if (!pieData.value && !pieLoading.value) {
+    void loadPieData()
+  }
+})
 
 watch(
   () => props.filter,
@@ -250,7 +280,7 @@ watch(
         </div>
       </div>
       <div v-else class="flex min-h-[220px] items-center justify-center rounded-xl bg-slate-50 dark:bg-slate-900/40">
-        <el-empty :image-size="64" :description="card.emptyText" />
+        <el-empty :image-size="64" :description="pieError || card.emptyText" />
       </div>
     </div>
   </div>

@@ -264,18 +264,6 @@ const normalizeRecentActivityDisplayName = (detail: Record<string, unknown>): st
   return customerName || '未填写客户'
 }
 
-const parseDateOnlyToStart = (value: string, label: string): Date => {
-  const normalized = value.trim()
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
-    throw new BizError(`${label}格式不正确，应为 YYYY-MM-DD`, 400)
-  }
-  const parsed = new Date(`${normalized}T00:00:00`)
-  if (Number.isNaN(parsed.getTime())) {
-    throw new BizError(`${label}格式不正确，应为 YYYY-MM-DD`, 400)
-  }
-  return parsed
-}
-
 /**
  * 本地日期键：
  * - 容器时区为 Asia/Shanghai，趋势分桶必须使用本地日期而不是 toISOString 的 UTC 日期；
@@ -292,6 +280,24 @@ const formatLocalMonthKey = (date: Date): string => {
   const year = date.getFullYear()
   const month = String(date.getMonth() + 1).padStart(2, '0')
   return `${year}-${month}`
+}
+
+const parseDateOnlyToStart = (value: string, label: string): Date => {
+  const normalized = value.trim()
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
+    throw new BizError(`${label}格式不正确，应为 YYYY-MM-DD`, 400)
+  }
+  const parsed = new Date(`${normalized}T00:00:00`)
+  if (Number.isNaN(parsed.getTime())) {
+    throw new BizError(`${label}格式不正确，应为 YYYY-MM-DD`, 400)
+  }
+  // JS 的 Date 只对“月份越界”返回 Invalid Date，对“日越界”会静默进位：
+  // 2026-02-31 会变成 2026-03-03、2026-04-31 会变成 2026-05-01。
+  // 若不回写比对，这类输入会悄悄查到错误区间，结束日越界时还会多算好几天。
+  if (formatLocalDateKey(parsed) !== normalized) {
+    throw new BizError(`${label}不是有效日期：${normalized}`, 400)
+  }
+  return parsed
 }
 
 /**
