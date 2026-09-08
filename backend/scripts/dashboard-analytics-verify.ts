@@ -5,43 +5,76 @@
  * - 直接用仓储写入出库主单与明细，从而精确控制 createdAt 与 productNameSnapshot，
  *   模拟 O2O 核销写入的“商品名（规格）”快照与手工开单写入的纯商品名两种真实数据形态；
  * - 断言全部围绕 issue #60 的验收标准展开：跨年区间边界、合并数量等于各规格之和、先聚合再截断、空区间与非法区间反馈。
- * 维护说明：若调整看板统计口径、区间上限或规格解析规则，请同步更新本脚本断言。
+ * 维护说明：
+ * - 本脚本会造脏数据，因此必须跑在一次性的独立 SQLite 库上，跑完即删；
+ * - 数据源相关模块必须用 `await import()` 动态加载：ESM 的静态 import 会在模块体执行前完成求值，
+ *   若改回静态 import，下面几行 process.env 赋值就会晚于 env.ts / data-source.ts 的初始化而完全失效，
+ *   脚本会连到开发者的默认库 data/y-link.sqlite 上跑，既污染本地数据，DB_TYPE 为 mysql 时更会直接写进共享库；
+ * - 若调整看板统计口径、区间上限或规格解析规则，请同步更新本脚本断言。
  */
 
+import 'reflect-metadata'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { initializeDatabaseSchemaIfNeeded } from '../src/config/database-bootstrap.js'
-import { AppDataSource } from '../src/config/data-source.js'
-import { env } from '../src/config/env.js'
-import { BizOutboundOrder } from '../src/entities/biz-outbound-order.entity.js'
-import { BizOutboundOrderItem } from '../src/entities/biz-outbound-order-item.entity.js'
-import { dashboardService } from '../src/services/dashboard.service.js'
-import { productService } from '../src/services/product.service.js'
-import { systemConfigService } from '../src/services/system-config.service.js'
+
+const currentFilePath = fileURLToPath(import.meta.url)
+const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
+const runtimeRoot = path.resolve(backendRoot, 'data', 'local-dev')
+const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
+const sqlitePath = path.resolve(runtimeRoot, `y-link.dashboard-analytics-verify.${verifySeed}.sqlite`)
+
+// 必须早于任何后端模块求值：把本次验证钉死在一次性独立库上，
+// 既不会删除开发者的业务库，也不会因为外部把 DB_TYPE 配成 mysql 而把脏数据写进共享库。
+process.env.APP_PROFILE = `dashboard-analytics-verify-${verifySeed}`
+process.env.DB_TYPE = 'sqlite'
+process.env.DB_SYNC = 'true'
+process.env.SQLITE_DB_PATH = sqlitePath
+
+type AppDataSourceRef = (typeof import('../src/config/data-source.js'))['AppDataSource']
+type BizOutboundOrderRef = (typeof import('../src/entities/biz-outbound-order.entity.js'))['BizOutboundOrder']
+type BizOutboundOrderItemRef = (typeof import('../src/entities/biz-outbound-order-item.entity.js'))['BizOutboundOrderItem']
+type DashboardServiceRef = (typeof import('../src/services/dashboard.service.js'))['dashboardService']
+type ProductServiceRef = (typeof import('../src/services/product.service.js'))['productService']
+type SystemConfigServiceRef = (typeof import('../src/services/system-config.service.js'))['systemConfigService']
+type InitializeSchemaRef = (typeof import('../src/config/database-bootstrap.js'))['initializeDatabaseSchemaIfNeeded']
+
+let AppDataSource: AppDataSourceRef
+let BizOutboundOrder: BizOutboundOrderRef
+let BizOutboundOrderItem: BizOutboundOrderItemRef
+let dashboardService: DashboardServiceRef
+let productService: ProductServiceRef
+let systemConfigService: SystemConfigServiceRef
+let initializeDatabaseSchemaIfNeeded: InitializeSchemaRef
+
+/** 必须在上面的 process.env 赋值之后调用，否则数据源会按默认配置初始化。 */
+const loadRuntimeModules = async () => {
+  const env = (await import('../src/config/env.js')).env
+  // 兜底断言：万一有人把上面的隔离逻辑改坏，也要在写入任何数据之前停下来，
+  // 而不是等到脚本把开发者的业务库或共享 MySQL 弄脏之后才发现。
+  assert.equal(env.DB_TYPE, 'sqlite', '区间分析验证只能跑在一次性 SQLite 库上')
+  assert.equal(
+    path.resolve(backendRoot, env.SQLITE_DB_PATH),
+    sqlitePath,
+    '区间分析验证的数据库未被隔离，拒绝在业务库上执行',
+  )
+
+  AppDataSource = (await import('../src/config/data-source.js')).AppDataSource
+  BizOutboundOrder = (await import('../src/entities/biz-outbound-order.entity.js')).BizOutboundOrder
+  BizOutboundOrderItem = (await import('../src/entities/biz-outbound-order-item.entity.js')).BizOutboundOrderItem
+  dashboardService = (await import('../src/services/dashboard.service.js')).dashboardService
+  productService = (await import('../src/services/product.service.js')).productService
+  systemConfigService = (await import('../src/services/system-config.service.js')).systemConfigService
+  initializeDatabaseSchemaIfNeeded = (await import('../src/config/database-bootstrap.js')).initializeDatabaseSchemaIfNeeded
+}
 
 function pass(title: string) {
   console.log(`✅ ${title}`)
 }
 
-const currentFilePath = fileURLToPath(import.meta.url)
-const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
-
 const RANGE_START = '2025-12-01'
 const RANGE_END = '2026-08-31'
-
-function resetVerifyDatabase() {
-  if (env.DB_TYPE !== 'sqlite') {
-    return
-  }
-
-  const verifyDatabasePath = path.resolve(backendRoot, env.SQLITE_DB_PATH)
-  fs.mkdirSync(path.dirname(verifyDatabasePath), { recursive: true })
-  if (fs.existsSync(verifyDatabasePath)) {
-    fs.rmSync(verifyDatabasePath, { force: true })
-  }
-}
 
 let orderSequence = 0
 
@@ -111,7 +144,8 @@ async function seedOutboundOrder(input: {
 }
 
 async function main() {
-  resetVerifyDatabase()
+  fs.mkdirSync(runtimeRoot, { recursive: true })
+  await loadRuntimeModules()
 
   await AppDataSource.initialize()
   await initializeDatabaseSchemaIfNeeded(AppDataSource)
@@ -339,6 +373,8 @@ async function main() {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()
     }
+    // 一次性库跑完即删，避免 data/local-dev 下堆积验证残留。
+    fs.rmSync(sqlitePath, { force: true })
   }
 }
 

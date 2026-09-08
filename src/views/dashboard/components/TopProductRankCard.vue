@@ -14,13 +14,14 @@
  */
 
 
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, onDeactivated, ref } from 'vue'
 
 import type { DashboardProductSpecMode, DashboardTopProduct } from '@/api/modules/dashboard'
 import { getProductList, type ProductRecord } from '@/api/modules/product'
 import TopProductDrilldownDrawer from './TopProductDrilldownDrawer.vue'
 import type { DashboardAppliedFilter, DashboardRankOptions } from '../composables/useDashboardAnalytics'
 import { DASHBOARD_TOP_N_OPTIONS } from '../composables/useDashboardAnalytics'
+import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
 
 import { showAppError, showAppWarning } from '@/utils/app-alert'
@@ -42,6 +43,7 @@ const activeProductId = ref('')
 const activeNameSnapshot = ref('')
 const productOptions = ref<ProductRecord[]>([])
 const productSearching = ref(false)
+const productSearchRequest = useStableRequest()
 
 const isSpecMode = computed(() => props.options.productSpecMode === 'spec')
 
@@ -62,25 +64,47 @@ const formatQty = (value: string | number | null | undefined): string => {
 /**
  * 商品远程检索：
  * - 复用基础资料的商品列表接口，只取启用商品，避免选到停用物料；
- * - 关键字为空时不主动拉全量，由用户输入后再查，降低首页额外请求。
+ * - 关键字为空时不主动拉全量，由用户输入后再查，降低首页额外请求；
+ * - 走 useStableRequest 并透传 signal：连续输入或中途清空时会中止在途请求，
+ *   只允许最后一次结果回写候选列表，避免慢响应盖掉新关键字的结果。
  */
 const handleProductSearch = async (keyword: string) => {
   const normalizedKeyword = keyword.trim()
   if (!normalizedKeyword) {
+    // 清空关键字时同样要中止在途请求，否则它返回后仍会把旧候选写回已清空的下拉。
+    productSearchRequest.cancel()
+    productSearching.value = false
     productOptions.value = []
     return
   }
 
   productSearching.value = true
-  try {
-    productOptions.value = await getProductList({ keyword: normalizedKeyword, isActive: true })
-  } catch (error) {
-    showAppError(extractErrorMessage(error, '检索商品失败'))
-    productOptions.value = []
-  } finally {
-    productSearching.value = false
-  }
+  await productSearchRequest.runLatest({
+    executor: (signal) => getProductList({ keyword: normalizedKeyword, isActive: true }, { signal }),
+    onSuccess: (result) => {
+      productOptions.value = result
+    },
+    onError: (error) => {
+      showAppError(extractErrorMessage(error, '检索商品失败'))
+      productOptions.value = []
+    },
+    onFinally: () => {
+      productSearching.value = false
+    },
+  })
 }
+
+/**
+ * 失活与卸载时复位检索加载态：
+ * - useStableRequest 的 cancel() 会把 activeController 置空，runLatest 随后判定请求已过期直接返回，
+ *   onFinally 不会被调用；不复位的话下拉会永远停在“加载中”。
+ */
+const resetSearchingOnLeave = () => {
+  productSearching.value = false
+}
+
+onDeactivated(resetSearchingOnLeave)
+onBeforeUnmount(resetSearchingOnLeave)
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 const handleSpecModeChange = (value: boolean) => {
