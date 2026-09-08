@@ -16,6 +16,7 @@ import dayjs from 'dayjs'
 
 import { BizResponsiveDrawerShell } from '@/components/common'
 import { getCustomerDrilldown, type CustomerDrilldownResult } from '@/api/modules/dashboard'
+import type { DashboardAppliedFilter } from '../composables/useDashboardAnalytics'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
 
@@ -24,6 +25,8 @@ import { showAppError, showAppWarning } from '@/utils/app-alert'
 const props = defineProps<{
   modelValue: boolean
   customerName: string
+  /** 当前统计区间与订单类型，保证明细口径与榜单一致。 */
+  filter: DashboardAppliedFilter
 }>()
 
 const emit = defineEmits<{
@@ -59,7 +62,15 @@ const loadData = async () => {
   loading.value = true
   data.value = null
   await request.runLatest({
-    executor: (signal) => getCustomerDrilldown(props.customerName, {}, { signal }),
+    executor: (signal) =>
+      getCustomerDrilldown(
+        props.customerName,
+        {
+          dateRange: props.filter.dateRange,
+          orderType: props.filter.orderType || undefined,
+        },
+        { signal },
+      ),
     onSuccess: (result) => {
       data.value = result
     },

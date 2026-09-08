@@ -3,9 +3,10 @@
  * 模块说明：src/views/dashboard/components/TrendChartCard.vue
  * 文件职责：负责仪表盘趋势图卡片的图表配置组装与主题适配，展示订单、金额等时间序列趋势。
  * 实现逻辑：
- * - 组件接收上层整理后的趋势点数据，只在本地完成 ECharts option 计算与视觉呈现；
+ * - 组件接收上层整理后的趋势点数据与统计区间文案，只在本地完成 ECharts option 计算与视觉呈现；
  * - 图表颜色和辅助线样式跟随主题状态切换，避免深浅主题下出现可读性下降。
  * 维护说明：
+ * - 趋势的时间区间与分桶粒度由首页筛选栏统一决定，组件内不得再写死“近 7 日”之类的口径；
  * - 若后续新增趋势维度，优先扩展数据映射与图例配置，不要把接口请求下沉到图表组件内部；
  * - 图表交互应保持克制，避免悬浮态和动画过重影响首页首屏响应。
  */
@@ -21,7 +22,14 @@ import { escapeTooltipHtml } from '@/utils/html-escape'
 
 const props = defineProps<{
   trend: DashboardTrendPoint[]
+  /** 当前统计区间文案，由上层筛选栏统一下发，避免图表标题写死“近 7 日”。 */
+  rangeLabel: string
+  /** 趋势分桶粒度文案：按日 / 按月。 */
+  granularityLabel: string
+  loading: boolean
 }>()
+
+const trendTitle = computed(() => `出库趋势（${props.granularityLabel}）`)
 const themeStore = useThemeStore(pinia)
 
 const formatAmount = (value: string | number | null | undefined): string => {
@@ -148,18 +156,25 @@ const trendOption = computed<EChartsOption>(() => ({
 <template>
   <div class="apple-card p-5 sm:p-6 xl:p-7">
     <div class="mb-5 flex items-center justify-between">
-      <h2 class="text-lg font-semibold text-slate-800 dark:text-slate-200">近 7 日出库趋势</h2>
-      <div class="text-xs text-slate-500 dark:text-slate-400">
+      <div class="min-w-0">
+        <h2 class="text-lg font-semibold text-slate-800 dark:text-slate-200">{{ trendTitle }}</h2>
+        <p class="mt-1 truncate text-xs text-slate-500 dark:text-slate-400">{{ props.rangeLabel }}</p>
+      </div>
+      <div class="shrink-0 text-xs text-slate-500 dark:text-slate-400">
         峰值：<span class="font-semibold text-slate-700 dark:text-slate-200">¥{{ peakAmount }}</span>
       </div>
     </div>
 
-    <div v-if="props.trend.length > 1">
+    <div v-if="props.loading" class="flex min-h-[260px] items-center justify-center">
+      <el-skeleton animated :rows="7" class="w-full" />
+    </div>
+
+    <div v-else-if="props.trend.length > 1">
       <BaseEChart :option="trendOption" :min-height="260" />
     </div>
 
     <div v-else class="flex min-h-[260px] items-center justify-center rounded-xl bg-slate-50 text-slate-400 dark:bg-slate-900/40">
-      <el-empty :image-size="72" description="暂无趋势数据" />
+      <el-empty :image-size="72" description="所选区间暂无趋势数据" />
     </div>
   </div>
 </template>

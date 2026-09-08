@@ -7,6 +7,7 @@
  * - 组件内部自行维护打开态监听与请求回写，但继续复用共享稳定请求能力避免旧响应覆盖新选择。
  * 维护说明：
  * - 若后续补充更多钻取字段，优先保持抽屉式延迟加载，不要把重数据回填到排行卡片本体；
+ * - 时间区间与订单类型由首页筛选栏统一下发，抽屉不得自行推断口径，否则明细会和榜单对不上；
  * - 时间维度和统计口径调整时，要同步校验标题、字段标签与接口参数是否仍一致。
  */
 
@@ -16,6 +17,7 @@ import dayjs from 'dayjs'
 
 import { BizResponsiveDrawerShell } from '@/components/common'
 import { getProductDrilldown, type ProductDrilldownResult } from '@/api/modules/dashboard'
+import type { DashboardAppliedFilter } from '../composables/useDashboardAnalytics'
 import { useStableRequest } from '@/composables/useStableRequest'
 import { extractErrorMessage } from '@/utils/error'
 
@@ -24,6 +26,10 @@ import { showAppError, showAppWarning } from '@/utils/app-alert'
 const props = defineProps<{
   modelValue: boolean
   productId: string
+  /** 细分规格模式下只看该名称快照对应的明细；合并模式传空串即看整个商品。 */
+  nameSnapshot: string
+  /** 当前统计区间与订单类型，保证明细口径与榜单一致。 */
+  filter: DashboardAppliedFilter
 }>()
 
 const emit = defineEmits<{
@@ -59,12 +65,21 @@ const loadData = async () => {
   loading.value = true
   data.value = null
   await request.runLatest({
-    executor: (signal) => getProductDrilldown(props.productId, {}, { signal }),
+    executor: (signal) =>
+      getProductDrilldown(
+        props.productId,
+        {
+          nameSnapshot: props.nameSnapshot || undefined,
+          dateRange: props.filter.dateRange,
+          orderType: props.filter.orderType || undefined,
+        },
+        { signal },
+      ),
     onSuccess: (result) => {
       data.value = result
     },
     onError: (error) => {
-      showAppError(extractErrorMessage(error, '获取Top5明细失败'))
+      showAppError(extractErrorMessage(error, '获取商品榜明细失败'))
       emit('update:modelValue', false)
     },
     onFinally: () => {
@@ -74,7 +89,7 @@ const loadData = async () => {
 }
 
 watch(
-  () => [props.modelValue, props.productId] as const,
+  () => [props.modelValue, props.productId, props.nameSnapshot] as const,
   ([visible]) => {
     if (visible) {
       void loadData()
