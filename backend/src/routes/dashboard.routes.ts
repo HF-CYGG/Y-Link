@@ -1,5 +1,5 @@
 /**
- * 文件说明：看板统计路由，提供经营概览、商品钻取、客户钻取和标签聚合等后台分析接口。
+ * 文件说明：看板统计路由，提供经营概览、区间分析、商品钻取、客户钻取和标签聚合等后台分析接口。
  * 实现逻辑：路由层统一解析时间范围和筛选条件，再调用看板服务生成聚合结果，保证不同统计接口的过滤规则一致。
  * 维护重点：调整统计口径时，需要同步核对日期范围解析、订单类型筛选以及前端图表依赖的数据结构。
  */
@@ -23,6 +23,15 @@ const dashboardFilterQuerySchema = z.object({
 
 const productDrilldownQuerySchema = dashboardFilterQuerySchema.extend({
   productId: z.string().trim().min(1, 'productId 不能为空'),
+  // 细分规格模式下只看该规格对应的名称快照，合并模式不传该参数。
+  nameSnapshot: z.string().trim().min(1).optional(),
+})
+
+const analyticsQuerySchema = dashboardFilterQuerySchema.extend({
+  granularity: z.enum(['day', 'month']).optional(),
+  productSpecMode: z.enum(['merged', 'spec']).optional(),
+  productId: z.string().trim().min(1).optional(),
+  topN: z.coerce.number().int().optional(),
 })
 
 const customerDrilldownQuerySchema = dashboardFilterQuerySchema.extend({
@@ -81,6 +90,28 @@ dashboardRouter.get(
 )
 
 dashboardRouter.get(
+  '/analytics',
+  // 区间分析与看板统计同属经营指标，统一要求 dashboard:view。
+  requirePermission('dashboard:view'),
+  asyncHandler(async (req, res) => {
+    const query = analyticsQuerySchema.parse(req.query)
+    const filter = resolveDateRangeQuery(query)
+    const data = await dashboardService.getAnalytics({
+      ...filter,
+      granularity: query.granularity,
+      productSpecMode: query.productSpecMode,
+      productId: query.productId,
+      topN: query.topN,
+    })
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+dashboardRouter.get(
   '/drilldown/products',
   // 商品下钻会暴露细粒度经营数据，统一纳入 dashboard:view。
   requirePermission('dashboard:view'),
@@ -89,6 +120,7 @@ dashboardRouter.get(
     const filter = resolveDateRangeQuery(query)
     const data = await dashboardService.getProductRankDrilldown({
       productId: query.productId,
+      nameSnapshot: query.nameSnapshot,
       ...filter,
     })
     res.json({

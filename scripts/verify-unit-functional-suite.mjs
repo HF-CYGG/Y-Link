@@ -97,6 +97,12 @@ const main = async () => {
   // - 同时覆盖 Task8 迁移脚本、凭证打印链路与看板下钻的静态与运行态契约。
   await runNpmScript('后端双流水单号与并发写事务回归', 'task8:verify', backendRoot)
 
+  // 首页区间分析回归（issue #60）：
+  // - 覆盖跨月跨年区间的边界包含、空区间与非法起止时间反馈；
+  // - 守住“商品榜默认按商品合并、可切换细分规格”的口径，以及“先完整聚合再截断 Top N”；
+  // - 同时校验趋势分桶使用本地时区，避免凌晨单据被 UTC 转换算到前一天。
+  await runNpmScript('后端首页区间分析回归', 'dashboard:analytics:verify', backendRoot)
+
   log('\n[unit-functional] 单元功能测试套件执行完成')
 }
 
