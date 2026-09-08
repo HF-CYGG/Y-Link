@@ -228,6 +228,42 @@ async function main() {
     })
     pass('商品榜默认按商品合并，开启细分规格后可按款式区分且总量守恒')
 
+    // ---- 2.1 商品改名后，历史快照的规格仍要能独立解析 ----
+    // 改名后主表是“新名称”，而历史明细快照仍是“旧名称（规格）”，前缀对不上；
+    // 若解析依赖当前主名称，榜单会把整段旧商品名当成规格标签展示。
+    const renamedProduct = await productService.create({
+      productName: '旧款笔记本',
+      defaultPrice: 15,
+      isActive: true,
+    })
+    await seedOutboundOrder({
+      createdAt: new Date(2026, 3, 8, 10, 0, 0),
+      orderType: 'walkin',
+      items: [
+        { productId: renamedProduct.id, nameSnapshot: '旧款笔记本（红色）', qty: 2, unitPrice: 15 },
+        { productId: renamedProduct.id, nameSnapshot: '旧款笔记本', qty: 1, unitPrice: 15 },
+      ],
+    })
+    await productService.update(renamedProduct.id, { productName: '新款笔记本' })
+
+    const renamedAnalytics = await dashboardService.getAnalytics({
+      ...baseRange,
+      productSpecMode: 'spec',
+      productId: renamedProduct.id,
+      topN: 20,
+    })
+    assert.equal(renamedAnalytics.topProducts.length, 2, '改名商品的两条历史快照应各占一行')
+    renamedAnalytics.topProducts.forEach((item) => {
+      assert.equal(item.productName, '新款笔记本', '商品名应展示当前主表名称')
+    })
+    const renamedSpecLabels = renamedAnalytics.topProducts.map((item) => item.specLabel).sort()
+    assert.deepEqual(
+      renamedSpecLabels,
+      ['默认规格', '红色'].sort(),
+      '改名后规格应从快照末尾独立解析为“红色”，而不是把整段旧商品名当作规格',
+    )
+    pass('商品改名后历史快照的规格仍能独立解析，不会把旧商品名当成规格')
+
     // ---- 3. 先完整聚合再截断 Top N ----
     for (let index = 0; index < 12; index += 1) {
       const fillerProduct = await productService.create({
@@ -247,7 +283,8 @@ async function main() {
     assert.equal(topFive.topProducts[0]?.productId, canvasBag.id, '合并后数量最高的商品应排在第一')
     assert.equal(topFive.topProducts[0]?.totalQty, '15.00', '榜首数量应为该商品全部规格之和，而不是被截断后的单一规格')
     const topTwenty = await dashboardService.getAnalytics({ ...baseRange, topN: 20 })
-    assert.equal(topTwenty.topProducts.length, 14, 'Top 20 应返回区间内全部 14 个商品')
+    // 帆布包、马克杯、改名笔记本 + 12 个填充商品。
+    assert.equal(topTwenty.topProducts.length, 15, 'Top 20 应返回区间内全部 15 个商品')
     pass('Top N 截断发生在完整聚合之后，切换 5/10/20 均生效')
 
     // ---- 4. 指定商品筛选与 Top N 兜底 ----
@@ -337,8 +374,9 @@ async function main() {
     assert.ok(otherSlice, '分组数超过 8 时应补一片“其他”')
 
     const pieValueSum = pieData.productPie.reduce((sum, slice) => sum + Number(slice.value), 0)
-    // 区间内金额：帆布包 15*20 + 马克杯 4*30 + 12 个填充商品各 1*5 = 300 + 120 + 60
-    assert.equal(pieValueSum.toFixed(2), '480.00', '各分片金额之和应等于区间真实总额')
+    // 区间内金额：帆布包 15*20 + 马克杯 4*30 + 改名笔记本 3*15 + 12 个填充商品各 1*5
+    //           = 300 + 120 + 45 + 60
+    assert.equal(pieValueSum.toFixed(2), '525.00', '各分片金额之和应等于区间真实总额')
     const pieRatioSum = pieData.productPie.reduce((sum, slice) => sum + Number(slice.ratio), 0)
     assert.ok(Math.abs(pieRatioSum - 100) <= 0.05, `各分片占比之和应约等于 100%，实际为 ${pieRatioSum.toFixed(2)}`)
     assert.equal(pieData.range.startDate, RANGE_START)

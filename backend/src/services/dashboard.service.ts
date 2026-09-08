@@ -303,29 +303,53 @@ const parseDateOnlyToStart = (value: string, label: string): Date => {
 /**
  * 解析规格展示文本：
  * - 出库明细表没有 SKU 外键，规格只存在于 productNameSnapshot 中；
- * - O2O 预订核销写入格式为“商品名（规格文本）”，因此优先剥离主商品名前缀再取全角括号内文本；
- * - 手工开单写入的是不含规格的商品名，统一归为“默认规格”。
+ * - O2O 预订核销写入格式为“商品名（规格文本）”，手工开单写入的是不含规格的商品名；
+ * - 解析分三级：主名称前缀匹配 → 快照末尾的全角括号 → 判定为无规格。
+ *
+ * 为什么不能只靠“剥离当前主商品名前缀”：
+ * - 商品改名后，主表是“新名称”，而历史明细快照仍是“旧名称（红色）”，前缀根本对不上；
+ * - 若此时直接把整段快照当规格返回，榜单会显示“新名称”后面挂一个旧的完整商品名标签，
+ *   而不是“红色”，跨区间做规格对比时会直接读错。
+ * - 因此前缀对不上时改从快照末尾独立解析括号内容，不依赖当前商品名。
+ *
+ * 已知无法消除的歧义：商品名本身自带尾部括号（例如“帆布包（限量版）”）且此后又改过名时，
+ * “限量版”会被当成规格。出库明细没有 SKU 字段，这种情况无从区分；要根治需要给
+ * biz_outbound_order_item 补 sku_id / spec_text_snapshot（见 issue #68）。
  */
 const resolveSpecLabel = (snapshot: string | null | undefined, masterName: string): string => {
   const normalizedSnapshot = normalizeText(snapshot, '')
   const normalizedMaster = normalizeText(masterName, '')
-  if (!normalizedSnapshot || normalizedSnapshot === normalizedMaster) {
+  if (!normalizedSnapshot) {
     return '默认规格'
   }
 
+  // 快照与当前主名称完全一致：说明没写规格后缀，且商品名自带的括号不能被误当成规格。
+  if (normalizedSnapshot === normalizedMaster) {
+    return '默认规格'
+  }
+
+  // 一级：商品未改名，剥掉主名称前缀后必须是一个完整的全角括号组才算规格，
+  // 否则像主名称“帆布”对快照“帆布包”这种前缀巧合，会把“包”误判成规格。
   if (normalizedMaster && normalizedSnapshot.startsWith(normalizedMaster)) {
     const remainder = normalizedSnapshot.slice(normalizedMaster.length).trim()
     if (!remainder) {
       return '默认规格'
     }
     const bracketMatched = /^（(.+)）$/.exec(remainder)
-    if (bracketMatched?.[1]) {
-      return bracketMatched[1].trim() || '默认规格'
+    if (bracketMatched?.[1]?.trim()) {
+      return bracketMatched[1].trim()
     }
-    return remainder
   }
 
-  return normalizedSnapshot
+  // 二级：商品已改名导致前缀对不上，从快照末尾的括号独立取规格。
+  const trailingMatched = /（([^（）]+)）\s*$/.exec(normalizedSnapshot)
+  if (trailingMatched?.[1]?.trim()) {
+    return trailingMatched[1].trim()
+  }
+
+  // 三级：既没有规格后缀，也和当前主名称对不上（多半是改名前的无规格历史单），
+  // 判定为无规格，而不是把旧商品名当成规格展示。
+  return '默认规格'
 }
 
 const resolveProductSpecMode = (value: string | undefined): DashboardProductSpecMode => {

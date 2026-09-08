@@ -63,7 +63,10 @@ const formatQty = (value: string | number | null | undefined): string => {
 
 /**
  * 商品远程检索：
- * - 复用基础资料的商品列表接口，只取启用商品，避免选到停用物料；
+ * - 复用基础资料的商品列表接口；
+ * - 不过滤启停状态：这里是历史报表的筛选维度，商品出库后被停用，其历史明细仍会被区间分析统计到，
+ *   若只查启用商品，用户就再也无法在下拉里找到它做跨年或规格对比。停用只应阻止新业务使用商品，
+ *   不该把它从历史报表里抹掉；候选项会为停用商品打上标记，避免误以为它还能开单；
  * - 关键字为空时不主动拉全量，由用户输入后再查，降低首页额外请求；
  * - 走 useStableRequest 并透传 signal：连续输入或中途清空时会中止在途请求，
  *   只允许最后一次结果回写候选列表，避免慢响应盖掉新关键字的结果。
@@ -80,7 +83,7 @@ const handleProductSearch = async (keyword: string) => {
 
   productSearching.value = true
   await productSearchRequest.runLatest({
-    executor: (signal) => getProductList({ keyword: normalizedKeyword, isActive: true }, { signal }),
+    executor: (signal) => getProductList({ keyword: normalizedKeyword }, { signal }),
     onSuccess: (result) => {
       productOptions.value = result
     },
@@ -157,7 +160,14 @@ const openDrilldown = (item: DashboardTopProduct) => {
         placeholder="全部商品（可搜索指定商品）"
         @update:model-value="handleProductChange($event as string | null)"
       >
-        <el-option v-for="product in productOptions" :key="product.id" :label="product.productName" :value="product.id" />
+        <el-option v-for="product in productOptions" :key="product.id" :label="product.productName" :value="product.id">
+          <span class="flex items-center justify-between gap-2">
+            <span class="truncate">{{ product.productName }}</span>
+            <el-tag v-if="!product.isActive" size="small" type="info" effect="plain" class="shrink-0 !px-1.5">
+              已停用
+            </el-tag>
+          </span>
+        </el-option>
       </el-select>
 
       <el-select
