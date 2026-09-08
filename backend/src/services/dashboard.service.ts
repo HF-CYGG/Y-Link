@@ -1,10 +1,11 @@
 /**
  * 模块说明：`backend/src/services/dashboard.service.ts`
- * 文件职责：负责聚合管理端工作台所需的统计、排行、近期动态与下钻数据。
+ * 文件职责：负责聚合管理端工作台所需的统计、区间分析、排行、近期动态与下钻数据。
  * 实现逻辑：
- * 1. 统计指标直接从订单、明细、产品和审计日志聚合，并统一做金额/数量格式化；
- * 2. 近期动态补齐真实订单ID与展示名称，保持“部门优先、客户兜底”的口径一致；
- * 3. 排行、饼图和下钻共享筛选解析与兜底文案，降低前端判空分支复杂度。
+ * 1. 四宫格与近期动态维持“今日/本月”固定口径，区间相关的趋势与排行统一由 getAnalytics 提供；
+ * 2. 区间过滤、订单类型过滤、软删除排除全部收敛到 applyOrderFilter，保证各接口口径一致；
+ * 3. 商品排行支持“按商品合并 / 按规格细分”两种维度，聚合在 SQL 内先完成再截断 Top N；
+ * 4. 时间分桶一律在服务层完成，不使用任何数据库方言日期函数，保证 SQLite 与 MySQL 行为一致。
  */
 
 import { AppDataSource } from '../config/data-source.js'
@@ -15,6 +16,7 @@ import { BaseProduct } from '../entities/base-product.entity.js'
 import { RelProductTag } from '../entities/rel-product-tag.entity.js'
 import { SysAuditLog } from '../entities/sys-audit-log.entity.js'
 import type {
+  DashboardAmountSumRaw,
   DashboardCustomerDetailRaw,
   DashboardCustomerSummaryRaw,
   DashboardNumericLike,
@@ -23,7 +25,10 @@ import type {
   DashboardPieOrderTypeRowRaw,
   DashboardPieProductRowRaw,
   DashboardProductDetailRaw,
+  DashboardRankCustomerRowRaw,
+  DashboardRankProductRowRaw,
   DashboardTagAggregateRaw,
+  DashboardTrendOrderRowRaw,
 } from '../types/dashboard.js'
 import { BizError } from '../utils/errors.js'
 
@@ -36,8 +41,12 @@ interface DashboardTrendPoint {
 }
 
 interface DashboardTopProduct {
+  rankKey: string
   productId: string
   productName: string
+  specLabel: string | null
+  /** 细分模式下该行对应的出库明细名称快照，供下钻精确过滤；合并模式为 null。 */
+  nameSnapshot: string | null
   totalQty: string
 }
 
@@ -55,9 +64,6 @@ interface DashboardStatsResult {
   totalProductCount: number
   monthOrderCount: number
   monthOrderAmount: string | number
-  trend7Days: DashboardTrendPoint[]
-  topProducts: DashboardTopProduct[]
-  topCustomers: DashboardTopCustomer[]
   recentActivities: DashboardRecentActivity[]
 }
 
@@ -79,16 +85,61 @@ const DATE_MS = 24 * 60 * 60 * 1000
 const ORDER_TYPE_VALUES = ['department', 'walkin'] as const
 type DashboardOrderType = (typeof ORDER_TYPE_VALUES)[number]
 
+// 区间上限：统计区间最长一年，既覆盖“年末/学期报告”场景，也避免趋势分桶扫描无界行数。
+const MAX_RANGE_DAYS = 366
+// 超过该天数时趋势默认切换为按月分桶，避免跨年区间画出数百个日点。
+const TREND_DAY_BUCKET_MAX_DAYS = 62
+// 榜单可选条数，与前端下拉保持一致；非法值一律回落到 5。
+const RANK_TOP_N_VALUES = [5, 10, 20] as const
+// 饼图最多展示的分片数，超出部分统一并入“其他”。
+const PIE_TOP_LIMIT = 8
+const PIE_OTHER_SLICE_KEY = '__other__'
+const PIE_OTHER_SLICE_LABEL = '其他'
+// 金额/数量归一化后保留两位小数，判定“是否还有其他分片”时用半个最小单位做容差。
+const PIE_OTHER_EPSILON = 0.005
+
+const PRODUCT_SPEC_MODES = ['merged', 'spec'] as const
+type DashboardProductSpecMode = (typeof PRODUCT_SPEC_MODES)[number]
+
+const TREND_GRANULARITIES = ['day', 'month'] as const
+type DashboardTrendGranularity = (typeof TREND_GRANULARITIES)[number]
+
 interface DashboardFilterInput {
   startDate?: string
   endDate?: string
   orderType?: string
 }
 
+interface DashboardAnalyticsInput extends DashboardFilterInput {
+  granularity?: string
+  productSpecMode?: string
+  productId?: string
+  topN?: number | string
+}
+
 interface DashboardResolvedFilter {
   startAt?: Date
   endExclusive?: Date
   orderType?: DashboardOrderType
+  startDate: string
+  endDate: string
+  isDefaultRange: boolean
+}
+
+interface DashboardAnalyticsResult {
+  range: {
+    startDate: string
+    endDate: string
+    granularity: DashboardTrendGranularity
+    orderType: DashboardOrderType | null
+    productSpecMode: DashboardProductSpecMode
+    productId: string | null
+    topN: number
+    isDefault: boolean
+  }
+  trend: DashboardTrendPoint[]
+  topProducts: DashboardTopProduct[]
+  topCustomers: DashboardTopCustomer[]
 }
 
 interface DashboardDrilldownOrderRecord {
@@ -140,6 +191,12 @@ interface DashboardPiePayload {
   productPie: DashboardPieSlice[]
   customerPie: DashboardPieSlice[]
   orderTypePie: DashboardPieSlice[]
+  range: {
+    startDate: string
+    endDate: string
+    orderType: DashboardOrderType | null
+    isDefault: boolean
+  }
 }
 
 /**
@@ -219,23 +276,83 @@ const parseDateOnlyToStart = (value: string, label: string): Date => {
   return parsed
 }
 
-const resolveDashboardFilter = (input: DashboardFilterInput): DashboardResolvedFilter => {
+/**
+ * 本地日期键：
+ * - 容器时区为 Asia/Shanghai，趋势分桶必须使用本地日期而不是 toISOString 的 UTC 日期；
+ * - 否则每天 00:00-08:00 的单据会被算进前一天，跨月跨年区间下该偏差会被放大。
+ */
+const formatLocalDateKey = (date: Date): string => {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+const formatLocalMonthKey = (date: Date): string => {
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  return `${year}-${month}`
+}
+
+/**
+ * 解析规格展示文本：
+ * - 出库明细表没有 SKU 外键，规格只存在于 productNameSnapshot 中；
+ * - O2O 预订核销写入格式为“商品名（规格文本）”，因此优先剥离主商品名前缀再取全角括号内文本；
+ * - 手工开单写入的是不含规格的商品名，统一归为“默认规格”。
+ */
+const resolveSpecLabel = (snapshot: string | null | undefined, masterName: string): string => {
+  const normalizedSnapshot = normalizeText(snapshot, '')
+  const normalizedMaster = normalizeText(masterName, '')
+  if (!normalizedSnapshot || normalizedSnapshot === normalizedMaster) {
+    return '默认规格'
+  }
+
+  if (normalizedMaster && normalizedSnapshot.startsWith(normalizedMaster)) {
+    const remainder = normalizedSnapshot.slice(normalizedMaster.length).trim()
+    if (!remainder) {
+      return '默认规格'
+    }
+    const bracketMatched = /^（(.+)）$/.exec(remainder)
+    if (bracketMatched?.[1]) {
+      return bracketMatched[1].trim() || '默认规格'
+    }
+    return remainder
+  }
+
+  return normalizedSnapshot
+}
+
+const resolveProductSpecMode = (value: string | undefined): DashboardProductSpecMode => {
+  const normalized = String(value ?? '').trim().toLowerCase()
+  return PRODUCT_SPEC_MODES.includes(normalized as DashboardProductSpecMode)
+    ? (normalized as DashboardProductSpecMode)
+    : 'merged'
+}
+
+const resolveTopN = (value: number | string | undefined): number => {
+  const normalized = Number(value ?? RANK_TOP_N_VALUES[0])
+  if (!Number.isFinite(normalized)) {
+    return RANK_TOP_N_VALUES[0]
+  }
+  const matched = RANK_TOP_N_VALUES.find((candidate) => candidate === Math.trunc(normalized))
+  return matched ?? RANK_TOP_N_VALUES[0]
+}
+
+/**
+ * 解析看板筛选条件：
+ * - defaultRange 为 currentMonth 时，未传区间回落到“本月 1 日至今日”，让首页各卡片默认口径一致；
+ * - defaultRange 为 all 时保持历史行为（未传区间即全量），供标签聚合等旧调用方继续使用；
+ * - 区间统一左闭右开（>= 起始日 00:00，< 结束日次日 00:00），因此结束日整天都会被覆盖。
+ */
+const resolveDashboardFilter = (
+  input: DashboardFilterInput,
+  options: { defaultRange?: 'all' | 'currentMonth' } = {},
+): DashboardResolvedFilter => {
   const normalizedStartDate = typeof input.startDate === 'string' ? input.startDate.trim() : ''
   const normalizedEndDate = typeof input.endDate === 'string' ? input.endDate.trim() : ''
 
   if ((normalizedStartDate && !normalizedEndDate) || (!normalizedStartDate && normalizedEndDate)) {
     throw new BizError('dateRange 需同时提供开始日期与结束日期', 400)
-  }
-
-  let startAt: Date | undefined
-  let endExclusive: Date | undefined
-  if (normalizedStartDate && normalizedEndDate) {
-    startAt = parseDateOnlyToStart(normalizedStartDate, '开始日期')
-    const endAt = parseDateOnlyToStart(normalizedEndDate, '结束日期')
-    if (startAt.getTime() > endAt.getTime()) {
-      throw new BizError('dateRange 不合法：开始日期不能晚于结束日期', 400)
-    }
-    endExclusive = new Date(endAt.getTime() + DATE_MS)
   }
 
   let orderType: DashboardOrderType | undefined
@@ -247,11 +364,69 @@ const resolveDashboardFilter = (input: DashboardFilterInput): DashboardResolvedF
     orderType = normalizedOrderType as DashboardOrderType
   }
 
+  if (!normalizedStartDate && !normalizedEndDate) {
+    if (options.defaultRange !== 'currentMonth') {
+      return {
+        startAt: undefined,
+        endExclusive: undefined,
+        orderType,
+        startDate: '',
+        endDate: '',
+        isDefaultRange: true,
+      }
+    }
+
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const monthStart = new Date(today.getFullYear(), today.getMonth(), 1)
+    return {
+      startAt: monthStart,
+      endExclusive: new Date(today.getTime() + DATE_MS),
+      orderType,
+      startDate: formatLocalDateKey(monthStart),
+      endDate: formatLocalDateKey(today),
+      isDefaultRange: true,
+    }
+  }
+
+  const startAt = parseDateOnlyToStart(normalizedStartDate, '开始日期')
+  const endAt = parseDateOnlyToStart(normalizedEndDate, '结束日期')
+  if (startAt.getTime() > endAt.getTime()) {
+    throw new BizError('dateRange 不合法：开始日期不能晚于结束日期', 400)
+  }
+
+  const spanDays = Math.round((endAt.getTime() - startAt.getTime()) / DATE_MS) + 1
+  if (spanDays > MAX_RANGE_DAYS) {
+    throw new BizError(`统计区间最长支持 ${MAX_RANGE_DAYS} 天，请缩小查询范围`, 400)
+  }
+
   return {
     startAt,
-    endExclusive,
+    endExclusive: new Date(endAt.getTime() + DATE_MS),
     orderType,
+    startDate: formatLocalDateKey(startAt),
+    endDate: formatLocalDateKey(endAt),
+    isDefaultRange: false,
   }
+}
+
+/**
+ * 解析趋势分桶粒度：
+ * - 显式传入时以调用方为准，用于“按月筛选就按月看趋势”的场景；
+ * - 未传入时按区间长度自适应，避免跨年区间在折线图上堆出数百个日点。
+ */
+const resolveTrendGranularity = (
+  value: string | undefined,
+  startAt: Date,
+  endExclusive: Date,
+): DashboardTrendGranularity => {
+  const normalized = String(value ?? '').trim().toLowerCase()
+  if (TREND_GRANULARITIES.includes(normalized as DashboardTrendGranularity)) {
+    return normalized as DashboardTrendGranularity
+  }
+
+  const spanDays = Math.round((endExclusive.getTime() - startAt.getTime()) / DATE_MS)
+  return spanDays > TREND_DAY_BUCKET_MAX_DAYS ? 'month' : 'day'
 }
 
 /**
@@ -278,10 +453,8 @@ export const dashboardService = {
     today.setHours(0, 0, 0, 0)
 
     const monthStart = new Date(today.getFullYear(), today.getMonth(), 1)
-    const trendStart = new Date(today.getTime() - 6 * DATE_MS)
 
     const orderRepo = AppDataSource.getRepository(BizOutboundOrder)
-    const orderItemRepo = AppDataSource.getRepository(BizOutboundOrderItem)
     const productRepo = AppDataSource.getRepository(BaseProduct)
     const auditLogRepo = AppDataSource.getRepository(SysAuditLog)
 
@@ -291,7 +464,7 @@ export const dashboardService = {
       monthOrderCount,
       monthOrderAmountResult,
       totalProductCount,
-      recentOrders,
+      recentAuditLogs,
     ] = await Promise.all([
       // 今日单数（软删除单据不计入看板）。
       orderRepo
@@ -324,81 +497,6 @@ export const dashboardService = {
         .createQueryBuilder('product')
         .where('product.isActive = :isActive', { isActive: true })
         .getCount(),
-      // 近 7 日趋势：先查最近 7 天有效订单，再在服务层按日聚合，避免数据库方言差异。
-      orderRepo
-        .createQueryBuilder('order')
-        .select(['order.createdAt AS createdAt', 'order.totalAmount AS totalAmount', 'order.totalQty AS totalQty'])
-        .where('order.createdAt >= :trendStart', { trendStart })
-        .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
-        .orderBy('order.createdAt', 'ASC')
-        .getRawMany<{ createdAt: Date | string; totalAmount: string | number; totalQty: string | number }>(),
-    ])
-    const todayOrderAmountRaw = todayOrderAmountResult?.totalAmount
-    const monthOrderAmountRaw = monthOrderAmountResult?.totalAmount
-
-    const trendMetricsMap = new Map<string, { amount: number; orderCount: number; totalQty: number }>()
-    recentOrders.forEach((order) => {
-      const createdAtDate = order.createdAt instanceof Date ? order.createdAt : new Date(order.createdAt)
-      if (Number.isNaN(createdAtDate.getTime())) {
-        return
-      }
-      const dateKey = createdAtDate.toISOString().slice(0, 10)
-      const currentMetrics = trendMetricsMap.get(dateKey) ?? {
-        amount: 0,
-        orderCount: 0,
-        totalQty: 0,
-      }
-      currentMetrics.amount += Number(order.totalAmount ?? 0)
-      currentMetrics.orderCount += 1
-      currentMetrics.totalQty += Number(order.totalQty ?? 0)
-      trendMetricsMap.set(dateKey, currentMetrics)
-    })
-
-    const trend7Days: DashboardTrendPoint[] = []
-    for (let index = 0; index < 7; index += 1) {
-      const currentDate = new Date(trendStart.getTime() + index * DATE_MS)
-      const dateKey = currentDate.toISOString().slice(0, 10)
-      const currentMetrics = trendMetricsMap.get(dateKey) ?? {
-        amount: 0,
-        orderCount: 0,
-        totalQty: 0,
-      }
-      trend7Days.push({
-        date: dateKey,
-        label: dateKey.slice(5).replace('-', '/'),
-        amount: normalizeAmount(currentMetrics.amount),
-        orderCount: currentMetrics.orderCount,
-        totalQty: normalizeQty(currentMetrics.totalQty),
-      })
-    }
-
-    const customerLabelExpr = `COALESCE(NULLIF(TRIM(order.customerDepartmentName), ''), '散客')`
-    const [topProductsRaw, topCustomersRaw, recentAuditLogs] = await Promise.all([
-      // 热门文创榜：统计本月有效出库的产品数量 Top5。
-      orderItemRepo
-        .createQueryBuilder('item')
-        .innerJoin(BizOutboundOrder, 'order', 'order.id = item.orderId')
-        .select('item.productId', 'productId')
-        .addSelect('item.productNameSnapshot', 'productName')
-        .addSelect('SUM(item.qty)', 'totalQty')
-        .where('order.createdAt >= :monthStart', { monthStart })
-        .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
-        .groupBy('item.productId')
-        .addGroupBy('item.productNameSnapshot')
-        .orderBy('SUM(item.qty)', 'DESC')
-        .limit(5)
-        .getRawMany<{ productId: string; productName: string; totalQty: string | number }>(),
-      orderRepo
-        .createQueryBuilder('order')
-        .select(customerLabelExpr, 'customerName')
-        .addSelect('SUM(order.totalAmount)', 'totalAmount')
-        .addSelect('COUNT(order.id)', 'orderCount')
-        .where('order.createdAt >= :monthStart', { monthStart })
-        .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
-        .groupBy(customerLabelExpr)
-        .orderBy('SUM(order.totalAmount)', 'DESC')
-        .limit(5)
-        .getRawMany<{ customerName: string | null; totalAmount: string | number; orderCount: string | number }>(),
       // 近期出库动态：聚合最近 10 条“新建/删除/恢复”事件，供首页时间流展示。
       auditLogRepo
         .createQueryBuilder('audit')
@@ -409,18 +507,8 @@ export const dashboardService = {
         .limit(10)
         .getMany(),
     ])
-
-    const topProducts: DashboardTopProduct[] = topProductsRaw.map((item) => ({
-      productId: String(item.productId ?? '').trim(),
-      productName: String(item.productName ?? '').trim() || '未命名文创',
-      totalQty: normalizeQty(item.totalQty),
-    }))
-
-    const topCustomers: DashboardTopCustomer[] = topCustomersRaw.map((item) => ({
-      customerName: normalizeText(item.customerName, '散客'),
-      totalAmount: normalizeAmount(item.totalAmount),
-      orderCount: Number(item.orderCount ?? 0),
-    }))
+    const todayOrderAmountRaw = todayOrderAmountResult?.totalAmount
+    const monthOrderAmountRaw = monthOrderAmountResult?.totalAmount
 
     const recentActivities: DashboardRecentActivity[] = recentAuditLogs.map((audit) => {
       const detail = parseAuditDetail(audit.detailJson)
@@ -450,21 +538,136 @@ export const dashboardService = {
       totalProductCount,
       monthOrderCount,
       monthOrderAmount: normalizeAmount(monthOrderAmountRaw),
-      trend7Days,
-      topProducts,
-      topCustomers,
       recentActivities,
     }
   },
 
+  /**
+   * 区间分析：
+   * - 首页“结构占比”筛选栏统一驱动趋势图、热门商品榜与部门榜；
+   * - 商品榜默认按商品合并，可切换为按规格细分，并支持锁定单个商品做款式横向比较；
+   * - Top N 截断发生在 SQL 聚合之后，因此合并数量恒等于该商品全部规格数量之和。
+   */
+  async getAnalytics(input: DashboardAnalyticsInput): Promise<DashboardAnalyticsResult> {
+    const filter = resolveDashboardFilter(input, { defaultRange: 'currentMonth' })
+    if (!filter.startAt || !filter.endExclusive) {
+      throw new BizError('统计区间解析失败，请重新选择起止日期', 400)
+    }
+
+    const granularity = resolveTrendGranularity(input.granularity, filter.startAt, filter.endExclusive)
+    const productSpecMode = resolveProductSpecMode(input.productSpecMode)
+    const topN = resolveTopN(input.topN)
+    const productId = normalizeText(input.productId, '')
+
+    const orderRepo = AppDataSource.getRepository(BizOutboundOrder)
+    const orderItemRepo = AppDataSource.getRepository(BizOutboundOrderItem)
+
+    // 趋势原始行：只取分桶必需的列，日期分桶放到服务层，避免引入方言日期函数。
+    // 必须走 getMany 的实体水合而不是 getRawMany：原始结果会跳过驱动的时间归一化，
+    // SQLite 会返回不带时区标记的 UTC 字符串，再被 new Date() 当成本地时间解析，导致整段趋势串日。
+    // 主键一并选出，否则 TypeORM 无法区分实体行，会把同一分钟的多张单据折叠成一条。
+    const trendRowsQb = orderRepo
+      .createQueryBuilder('order')
+      .select(['order.id', 'order.createdAt', 'order.totalAmount', 'order.totalQty'])
+      .where('1=1')
+      .orderBy('order.createdAt', 'ASC')
+    this.applyOrderFilter(trendRowsQb, filter)
+
+    // 商品榜：合并模式只按商品分组，细分模式追加名称快照分组以区分规格。
+    const productRankQb = orderItemRepo
+      .createQueryBuilder('item')
+      .innerJoin(BizOutboundOrder, 'order', 'order.id = item.orderId')
+      .leftJoin(BaseProduct, 'product', 'product.id = item.productId')
+      .select('item.productId', 'productId')
+      .addSelect('MAX(product.productName)', 'masterName')
+      .addSelect('SUM(item.qty)', 'totalQty')
+      .where('1=1')
+      .groupBy('item.productId')
+      .orderBy('SUM(item.qty)', 'DESC')
+      .addOrderBy('item.productId', 'ASC')
+      .limit(topN)
+    if (productSpecMode === 'spec') {
+      productRankQb
+        .addSelect('item.productNameSnapshot', 'snapshotName')
+        .addGroupBy('item.productNameSnapshot')
+        .addOrderBy('item.productNameSnapshot', 'ASC')
+    } else {
+      // MySQL 8 默认开启 ONLY_FULL_GROUP_BY，非分组列必须包在聚合函数里。
+      productRankQb.addSelect('MAX(item.productNameSnapshot)', 'snapshotName')
+    }
+    if (productId) {
+      productRankQb.andWhere('item.productId = :rankProductId', { rankProductId: productId })
+    }
+    this.applyOrderFilter(productRankQb, filter)
+
+    const customerLabelExpr = `COALESCE(NULLIF(TRIM(order.customerDepartmentName), ''), '散客')`
+    const customerRankQb = orderRepo
+      .createQueryBuilder('order')
+      .select(customerLabelExpr, 'customerName')
+      .addSelect('SUM(order.totalAmount)', 'totalAmount')
+      .addSelect('COUNT(order.id)', 'orderCount')
+      .where('1=1')
+      .groupBy(customerLabelExpr)
+      .orderBy('SUM(order.totalAmount)', 'DESC')
+      .addOrderBy(customerLabelExpr, 'ASC')
+      .limit(topN)
+    this.applyOrderFilter(customerRankQb, filter)
+
+    const [trendRows, productRankRows, customerRankRows] = await Promise.all([
+      trendRowsQb.getMany(),
+      productRankQb.getRawMany<DashboardRankProductRowRaw>(),
+      customerRankQb.getRawMany<DashboardRankCustomerRowRaw>(),
+    ])
+
+    const trend = this.buildTrendPoints(trendRows, filter.startAt, filter.endExclusive, granularity)
+
+    const topProducts: DashboardTopProduct[] = productRankRows.map((row) => {
+      const normalizedProductId = String(row.productId ?? '').trim()
+      const snapshotName = normalizeText(row.snapshotName, '')
+      const productName = normalizeText(row.masterName, '') || snapshotName || '未命名文创'
+      const specLabel = productSpecMode === 'spec' ? resolveSpecLabel(snapshotName, productName) : null
+      return {
+        rankKey: productSpecMode === 'spec' ? `${normalizedProductId}::${snapshotName}` : normalizedProductId,
+        productId: normalizedProductId,
+        productName,
+        specLabel,
+        nameSnapshot: productSpecMode === 'spec' ? snapshotName : null,
+        totalQty: normalizeQty(row.totalQty),
+      }
+    })
+
+    const topCustomers: DashboardTopCustomer[] = customerRankRows.map((row) => ({
+      customerName: normalizeText(row.customerName, '散客'),
+      totalAmount: normalizeAmount(row.totalAmount),
+      orderCount: Number(row.orderCount ?? 0),
+    }))
+
+    return {
+      range: {
+        startDate: filter.startDate,
+        endDate: filter.endDate,
+        granularity,
+        orderType: filter.orderType ?? null,
+        productSpecMode,
+        productId: productId || null,
+        topN,
+        isDefault: filter.isDefaultRange,
+      },
+      trend,
+      topProducts,
+      topCustomers,
+    }
+  },
+
   async getProductRankDrilldown(
-    input: { productId: string } & DashboardFilterInput,
+    input: { productId: string; nameSnapshot?: string } & DashboardFilterInput,
   ): Promise<DashboardProductRankDrilldownResult> {
     const productId = String(input.productId ?? '').trim()
     if (!productId) {
       throw new BizError('productId 不能为空', 400)
     }
 
+    const nameSnapshot = normalizeText(input.nameSnapshot, '')
     const filter = resolveDashboardFilter(input)
     const orderItemRepo = AppDataSource.getRepository(BizOutboundOrderItem)
     const productRepo = AppDataSource.getRepository(BaseProduct)
@@ -478,6 +681,7 @@ export const dashboardService = {
       .addSelect('MAX(item.productNameSnapshot)', 'productName')
       .where('item.productId = :productId', { productId })
 
+    this.applyProductSnapshotFilter(summaryQb, nameSnapshot)
     this.applyOrderFilter(summaryQb, filter)
     type DashboardProductSummaryRaw = {
       totalQty?: DashboardNumericLike
@@ -510,6 +714,7 @@ export const dashboardService = {
       .orderBy('order.createdAt', 'DESC')
       .limit(100)
 
+    this.applyProductSnapshotFilter(detailQb, nameSnapshot)
     this.applyOrderFilter(detailQb, filter)
     const detailRows = await detailQb.getRawMany<DashboardProductDetailRaw>()
 
@@ -617,31 +822,37 @@ export const dashboardService = {
     }
   },
 
+  /**
+   * 结构占比饼图：
+   * - 商品维度只按商品合并，同一商品的不同规格不再裂成多片；
+   * - 分片截断到 Top 8 后补一片“其他”，保证卡片总额等于区间真实总额、占比之和为 100%。
+   */
   async getDashboardPieData(input: DashboardFilterInput): Promise<DashboardPiePayload> {
-    const filter = resolveDashboardFilter(input)
+    const filter = resolveDashboardFilter(input, { defaultRange: 'currentMonth' })
     const orderRepo = AppDataSource.getRepository(BizOutboundOrder)
     const itemRepo = AppDataSource.getRepository(BizOutboundOrderItem)
 
     const productRowsQb = itemRepo
       .createQueryBuilder('item')
       .innerJoin(BizOutboundOrder, 'order', 'order.id = item.orderId')
+      .leftJoin(BaseProduct, 'product', 'product.id = item.productId')
       .select('item.productId', 'key')
-      .addSelect('item.productNameSnapshot', 'label')
+      .addSelect('MAX(product.productName)', 'masterLabel')
+      .addSelect('MAX(item.productNameSnapshot)', 'label')
       .addSelect('SUM(item.lineAmount)', 'value')
       .where('1=1')
       .groupBy('item.productId')
-      .addGroupBy('item.productNameSnapshot')
       .orderBy('SUM(item.lineAmount)', 'DESC')
-      .limit(8)
+      .addOrderBy('item.productId', 'ASC')
+      .limit(PIE_TOP_LIMIT)
     this.applyOrderFilter(productRowsQb, filter)
-    const productRows = await productRowsQb.getRawMany<DashboardPieProductRowRaw>()
-    const productPie = this.buildPieSlices(
-      productRows.map((row) => ({
-        key: String(row.key ?? '').trim(),
-        label: normalizeText(row.label, '未命名文创'),
-        value: Number(row.value ?? 0),
-      })),
-    )
+
+    const productTotalQb = itemRepo
+      .createQueryBuilder('item')
+      .innerJoin(BizOutboundOrder, 'order', 'order.id = item.orderId')
+      .select('SUM(item.lineAmount)', 'totalValue')
+      .where('1=1')
+    this.applyOrderFilter(productTotalQb, filter)
 
     const customerLabelExpr = `COALESCE(NULLIF(TRIM(order.customerDepartmentName), ''), '散客')`
     const customerRowsQb = orderRepo
@@ -652,16 +863,15 @@ export const dashboardService = {
       .where('1=1')
       .groupBy(customerLabelExpr)
       .orderBy('SUM(order.totalAmount)', 'DESC')
-      .limit(8)
+      .addOrderBy(customerLabelExpr, 'ASC')
+      .limit(PIE_TOP_LIMIT)
     this.applyOrderFilter(customerRowsQb, filter)
-    const customerRows = await customerRowsQb.getRawMany<DashboardPieCustomerRowRaw>()
-    const customerPie = this.buildPieSlices(
-      customerRows.map((row) => ({
-        key: normalizeText(row.key, '散客'),
-        label: normalizeText(row.label, '散客'),
-        value: Number(row.value ?? 0),
-      })),
-    )
+
+    const customerTotalQb = orderRepo
+      .createQueryBuilder('order')
+      .select('SUM(order.totalAmount)', 'totalValue')
+      .where('1=1')
+    this.applyOrderFilter(customerTotalQb, filter)
 
     const orderTypeRowsQb = orderRepo
       .createQueryBuilder('order')
@@ -670,7 +880,33 @@ export const dashboardService = {
       .where('1=1')
       .groupBy('order.orderType')
     this.applyOrderFilter(orderTypeRowsQb, filter)
-    const orderTypeRows = await orderTypeRowsQb.getRawMany<DashboardPieOrderTypeRowRaw>()
+
+    const [productRows, productTotalRaw, customerRows, customerTotalRaw, orderTypeRows] = await Promise.all([
+      productRowsQb.getRawMany<DashboardPieProductRowRaw>(),
+      productTotalQb.getRawOne<DashboardAmountSumRaw>(),
+      customerRowsQb.getRawMany<DashboardPieCustomerRowRaw>(),
+      customerTotalQb.getRawOne<DashboardAmountSumRaw>(),
+      orderTypeRowsQb.getRawMany<DashboardPieOrderTypeRowRaw>(),
+    ])
+
+    const productPie = this.buildPieSlices(
+      productRows.map((row) => ({
+        key: String(row.key ?? '').trim(),
+        label: normalizeText(row.masterLabel, '') || normalizeText(row.label, '未命名文创'),
+        value: Number(row.value ?? 0),
+      })),
+      { totalValue: Number(productTotalRaw?.totalValue ?? 0) },
+    )
+
+    const customerPie = this.buildPieSlices(
+      customerRows.map((row) => ({
+        key: normalizeText(row.key, '散客'),
+        label: normalizeText(row.label, '散客'),
+        value: Number(row.value ?? 0),
+      })),
+      { totalValue: Number(customerTotalRaw?.totalValue ?? 0) },
+    )
+
     const orderTypeMap = new Map<DashboardOrderType, number>()
     ORDER_TYPE_VALUES.forEach((orderType) => {
       orderTypeMap.set(orderType, 0)
@@ -688,13 +924,19 @@ export const dashboardService = {
         label: normalizeOrderTypeLabel(orderType),
         value: orderTypeMap.get(orderType) ?? 0,
       })),
-      normalizeCount,
+      { normalizeValue: normalizeCount },
     )
 
     return {
       productPie,
       customerPie,
       orderTypePie,
+      range: {
+        startDate: filter.startDate,
+        endDate: filter.endDate,
+        orderType: filter.orderType ?? null,
+        isDefault: filter.isDefaultRange,
+      },
     }
   },
 
@@ -713,6 +955,77 @@ export const dashboardService = {
 
   applyCustomerFilter(queryBuilder: { andWhere: (sql: string, parameters?: Record<string, unknown>) => unknown }, customerName: string): void {
     queryBuilder.andWhere(`COALESCE(NULLIF(TRIM(order.customerDepartmentName), ''), '散客') = :customerName`, { customerName })
+  },
+
+  /**
+   * 规格下钻过滤：
+   * - 细分规格模式下点击榜单项时，只看该规格对应的名称快照；
+   * - 合并模式不传该参数，保持商品维度的全量下钻。
+   */
+  applyProductSnapshotFilter(
+    queryBuilder: { andWhere: (sql: string, parameters?: Record<string, unknown>) => unknown },
+    nameSnapshot: string,
+  ): void {
+    if (!nameSnapshot) {
+      return
+    }
+    queryBuilder.andWhere('item.productNameSnapshot = :nameSnapshot', { nameSnapshot })
+  },
+
+  /**
+   * 趋势分桶：
+   * - 桶键使用本地日期/月份，避免 toISOString 的 UTC 日期在 +08 时区把凌晨单据算到前一天；
+   * - 区间内没有单据的桶补零，保证折线连续且横轴覆盖完整所选区间。
+   */
+  buildTrendPoints(
+    rows: DashboardTrendOrderRowRaw[],
+    startAt: Date,
+    endExclusive: Date,
+    granularity: DashboardTrendGranularity,
+  ): DashboardTrendPoint[] {
+    const metricsMap = new Map<string, { amount: number; orderCount: number; totalQty: number }>()
+    rows.forEach((row) => {
+      const createdAtDate = row.createdAt instanceof Date ? row.createdAt : new Date(row.createdAt)
+      if (Number.isNaN(createdAtDate.getTime())) {
+        return
+      }
+      const bucketKey = granularity === 'month' ? formatLocalMonthKey(createdAtDate) : formatLocalDateKey(createdAtDate)
+      const currentMetrics = metricsMap.get(bucketKey) ?? { amount: 0, orderCount: 0, totalQty: 0 }
+      currentMetrics.amount += Number(row.totalAmount ?? 0)
+      currentMetrics.orderCount += 1
+      currentMetrics.totalQty += Number(row.totalQty ?? 0)
+      metricsMap.set(bucketKey, currentMetrics)
+    })
+
+    const points: DashboardTrendPoint[] = []
+    const appendPoint = (bucketKey: string, label: string) => {
+      const currentMetrics = metricsMap.get(bucketKey) ?? { amount: 0, orderCount: 0, totalQty: 0 }
+      points.push({
+        date: bucketKey,
+        label,
+        amount: normalizeAmount(currentMetrics.amount),
+        orderCount: currentMetrics.orderCount,
+        totalQty: normalizeQty(currentMetrics.totalQty),
+      })
+    }
+
+    if (granularity === 'month') {
+      let monthCursor = new Date(startAt.getFullYear(), startAt.getMonth(), 1)
+      while (monthCursor.getTime() < endExclusive.getTime()) {
+        const bucketKey = formatLocalMonthKey(monthCursor)
+        appendPoint(bucketKey, bucketKey.replace('-', '/'))
+        monthCursor = new Date(monthCursor.getFullYear(), monthCursor.getMonth() + 1, 1)
+      }
+      return points
+    }
+
+    let dayCursor = new Date(startAt.getFullYear(), startAt.getMonth(), startAt.getDate())
+    while (dayCursor.getTime() < endExclusive.getTime()) {
+      const bucketKey = formatLocalDateKey(dayCursor)
+      appendPoint(bucketKey, bucketKey.slice(5).replace('-', '/'))
+      dayCursor = new Date(dayCursor.getFullYear(), dayCursor.getMonth(), dayCursor.getDate() + 1)
+    }
+    return points
   },
 
   buildDrilldownOrderRecord(row: {
@@ -741,16 +1054,36 @@ export const dashboardService = {
     }
   },
 
+  /**
+   * 组装饼图分片：
+   * - totalValue 传入区间全量总额时，被 Top N 截断掉的部分会汇总为一片“其他”；
+   * - 占比分母始终是全量总额，避免出现“分片加起来不是 100%”的误读。
+   */
   buildPieSlices(
     rows: Array<{ key: string; label: string; value: number }>,
-    normalizeValue: (value: number) => string = normalizeAmount,
+    options: { totalValue?: number; normalizeValue?: (value: number) => string } = {},
   ): DashboardPieSlice[] {
-    const totalValue = rows.reduce((sum, row) => sum + (Number.isFinite(row.value) ? row.value : 0), 0)
-    return rows.map((row) => ({
+    const normalizeValue = options.normalizeValue ?? normalizeAmount
+    const rowsTotal = rows.reduce((sum, row) => sum + (Number.isFinite(row.value) ? row.value : 0), 0)
+    const rawTotal = Number(options.totalValue)
+    const totalValue = Number.isFinite(rawTotal) && rawTotal > rowsTotal ? rawTotal : rowsTotal
+    const slices = rows.map((row) => ({
       key: row.key,
       label: row.label,
       value: normalizeValue(row.value),
       ratio: normalizeRatio(totalValue > 0 ? (row.value / totalValue) * 100 : 0),
     }))
+
+    const otherValue = totalValue - rowsTotal
+    if (otherValue > PIE_OTHER_EPSILON) {
+      slices.push({
+        key: PIE_OTHER_SLICE_KEY,
+        label: PIE_OTHER_SLICE_LABEL,
+        value: normalizeValue(otherValue),
+        ratio: normalizeRatio((otherValue / totalValue) * 100),
+      })
+    }
+
+    return slices
   }
 }

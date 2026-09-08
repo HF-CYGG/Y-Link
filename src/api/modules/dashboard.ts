@@ -1,6 +1,6 @@
 /**
  * 模块说明：`src/api/modules/dashboard.ts`
- * 文件职责：封装管理端工作台统计、排行、近期动态与下钻查询接口。
+ * 文件职责：封装管理端工作台统计、区间分析、排行、近期动态与下钻查询接口。
  * 实现逻辑：
  * 1. 统一声明看板接口返回结构，保证页面与组件消费同一份类型契约；
  * 2. 最近动态字段显式包含真实订单ID与展示名称，供工作台点击跳单与文案展示复用；
@@ -15,9 +15,6 @@ export interface DashboardStats {
   totalProductCount: number
   monthOrderCount: number
   monthOrderAmount: string | number
-  trend7Days: DashboardTrendPoint[]
-  topProducts: DashboardTopProduct[]
-  topCustomers: DashboardTopCustomer[]
   recentActivities: DashboardRecentActivity[]
 }
 
@@ -30,8 +27,14 @@ export interface DashboardTrendPoint {
 }
 
 export interface DashboardTopProduct {
+  /** 榜单行唯一键：合并模式为 productId，细分模式为 `productId::名称快照`。 */
+  rankKey: string
   productId: string
   productName: string
+  /** 合并模式为 null；细分模式为解析出的规格文本（无规格时为“默认规格”）。 */
+  specLabel: string | null
+  /** 细分模式下该行对应的出库明细名称快照，供下钻精确过滤；合并模式为 null。 */
+  nameSnapshot: string | null
   totalQty: string | number
 }
 
@@ -58,6 +61,34 @@ export interface DashboardRecentActivity {
 export interface DashboardDateFilterQuery {
   dateRange?: [string, string] | null
   orderType?: 'department' | 'walkin'
+}
+
+export type DashboardTrendGranularity = 'day' | 'month'
+export type DashboardProductSpecMode = 'merged' | 'spec'
+
+export interface DashboardAnalyticsQuery extends DashboardDateFilterQuery {
+  granularity?: DashboardTrendGranularity
+  productSpecMode?: DashboardProductSpecMode
+  productId?: string
+  topN?: number
+}
+
+export interface DashboardAnalyticsRange {
+  startDate: string
+  endDate: string
+  granularity: DashboardTrendGranularity
+  orderType: 'department' | 'walkin' | null
+  productSpecMode: DashboardProductSpecMode
+  productId: string | null
+  topN: number
+  isDefault: boolean
+}
+
+export interface DashboardAnalyticsResult {
+  range: DashboardAnalyticsRange
+  trend: DashboardTrendPoint[]
+  topProducts: DashboardTopProduct[]
+  topCustomers: DashboardTopCustomer[]
 }
 
 export interface DashboardDrilldownOrderRecord {
@@ -109,6 +140,12 @@ export interface DashboardPieDataResult {
   productPie: DashboardPieSlice[]
   customerPie: DashboardPieSlice[]
   orderTypePie: DashboardPieSlice[]
+  range: {
+    startDate: string
+    endDate: string
+    orderType: 'department' | 'walkin' | null
+    isDefault: boolean
+  }
 }
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
@@ -148,15 +185,17 @@ export const getDashboardStats = (requestConfig: RequestConfig = {}) => {
  */
 export const getProductDrilldown = (
   productId: string,
-  query: DashboardDateFilterQuery = {},
+  query: DashboardDateFilterQuery & { nameSnapshot?: string } = {},
   requestConfig: RequestConfig = {},
 ) => {
+  const nameSnapshot = query.nameSnapshot?.trim()
   return request<ProductDrilldownResult>({
     ...requestConfig,
     url: '/dashboard/drilldown/products',
     method: 'GET',
     params: {
       productId,
+      ...(nameSnapshot ? { nameSnapshot } : {}),
       ...buildDashboardDateFilterParams(query),
     },
   })
@@ -199,6 +238,39 @@ export const getTagAggregate = (
       tagId,
       ...buildDashboardDateFilterParams(query),
     },
+  })
+}
+
+/**
+ * 获取首页区间分析数据：
+ * - 由“结构占比”筛选栏统一驱动趋势图、热门商品榜与部门榜；
+ * - 商品榜默认按商品合并，可切换细分规格并锁定单个商品做款式对比。
+ */
+export const getDashboardAnalytics = (
+  query: DashboardAnalyticsQuery = {},
+  requestConfig: RequestConfig = {},
+) => {
+  const params: Record<string, string | number> = {
+    ...buildDashboardDateFilterParams(query),
+  }
+  if (query.granularity) {
+    params.granularity = query.granularity
+  }
+  if (query.productSpecMode) {
+    params.productSpecMode = query.productSpecMode
+  }
+  if (query.productId?.trim()) {
+    params.productId = query.productId.trim()
+  }
+  if (query.topN) {
+    params.topN = query.topN
+  }
+
+  return request<DashboardAnalyticsResult>({
+    ...requestConfig,
+    url: '/dashboard/analytics',
+    method: 'GET',
+    params,
   })
 }
 

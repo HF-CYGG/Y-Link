@@ -50,7 +50,31 @@ export interface DashboardTagAggregateRaw {
 export interface DashboardPieProductRowRaw {
   key: string | number
   label: string | null
+  masterLabel?: string | null
   value: DashboardNumericLike
+}
+
+export interface DashboardRankProductRowRaw {
+  productId: string | number
+  masterName: string | null
+  snapshotName: string | null
+  totalQty: DashboardNumericLike
+}
+
+export interface DashboardRankCustomerRowRaw {
+  customerName: string | null
+  totalAmount: DashboardNumericLike
+  orderCount: DashboardNumericLike
+}
+
+export interface DashboardTrendOrderRowRaw {
+  createdAt: Date | string
+  totalAmount: DashboardNumericLike
+  totalQty: DashboardNumericLike
+}
+
+export interface DashboardAmountSumRaw {
+  totalValue?: DashboardNumericLike
 }
 
 export interface DashboardPieCustomerRowRaw {

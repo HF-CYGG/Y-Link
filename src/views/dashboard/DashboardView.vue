@@ -6,7 +6,9 @@
  * 1. 页面通过看板聚合接口一次性拉取首屏所需统计、排行和近期动态，减少首屏碎片请求；
  * 2. 近期动态点击后会把真实订单ID与单号透传给出库单列表页，复用列表页既有“定位并打开详情抽屉”流程；
  * 3. 动态副标题优先展示部门名称，散客或历史日志缺部门信息时再回退客户名称；
- * 4. 页面保留 keep-alive 场景下的可恢复加载逻辑，避免请求取消后再次进入出现空白首页。
+ * 4. 页面保留 keep-alive 场景下的可恢复加载逻辑，避免请求取消后再次进入出现空白首页；
+ * 5. “结构占比”区块的统计区间筛选栏由 useDashboardAnalytics 统一维护，并同时驱动饼图、出库趋势与两个排行榜，
+ *    核心看板四宫格保持“今日/本月”固定口径，近期动态是审计事件流，两者都不随区间变化。
  */
 
 
@@ -22,6 +24,7 @@ import { buildDashboardShortcutItems } from '@/router/routes'
 import { useAppStore, useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
 import { extractErrorMessage } from '@/utils/error'
+import { useDashboardAnalytics } from './composables/useDashboardAnalytics'
 
 
 import { showAppError } from '@/utils/app-alert'
@@ -33,6 +36,24 @@ const loading = ref(false)
 const stats = ref<DashboardStats | null>(null)
 const loadStatus = ref<'idle' | 'success' | 'error' | 'canceled'>('idle')
 const dashboardRequest = useStableRequest()
+const {
+  analyticsLoading,
+  trend,
+  topProducts,
+  topCustomers,
+  draftFilter,
+  appliedFilter,
+  rankOptions,
+  rangeLabel,
+  granularityLabel,
+  orderTypeLabel,
+  loadAnalytics,
+  handleGranularityChange,
+  handleSearch: handleAnalyticsSearch,
+  handleReset: handleAnalyticsReset,
+  handleRankOptionsChange,
+} = useDashboardAnalytics()
+const DashboardFilterBar = defineAsyncComponent(() => import('./components/DashboardFilterBar.vue'))
 const DashboardPieSection = defineAsyncComponent(() => import('./components/DashboardPieSection.vue'))
 const TrendChartCard = defineAsyncComponent(() => import('./components/TrendChartCard.vue'))
 const TopProductRankCard = defineAsyncComponent(() => import('./components/TopProductRankCard.vue'))
@@ -264,6 +285,10 @@ const ensureDashboardReady = () => {
   if (!stats.value && !loading.value) {
     void loadData()
   }
+  // 区间统计与概览分属两个接口，keep-alive 恢复时同样需要兜底一次。
+  if (!trend.value.length && !analyticsLoading.value) {
+    void loadAnalytics()
+  }
 }
 
 /**
@@ -273,6 +298,7 @@ const ensureDashboardReady = () => {
  */
 const retryLoadData = () => {
   void loadData()
+  void loadAnalytics()
 }
 
 onMounted(() => {
@@ -471,16 +497,49 @@ onActivated(() => {
         </div>
       </section>
 
-      <DashboardPieSection />
+      <section class="space-y-4">
+        <h2 class="text-lg font-semibold text-slate-800 dark:text-slate-200">结构占比</h2>
+        <DashboardFilterBar
+          v-model:granularity="draftFilter.granularity"
+          v-model:range-value="draftFilter.rangeValue"
+          v-model:order-type="draftFilter.orderType"
+          :loading="analyticsLoading"
+          :range-label="rangeLabel"
+          :granularity-label="granularityLabel"
+          :order-type-label="orderTypeLabel"
+          @granularity-change="handleGranularityChange"
+          @search="handleAnalyticsSearch"
+          @reset="handleAnalyticsReset"
+        />
+        <DashboardPieSection :filter="appliedFilter" :range-label="rangeLabel" />
+      </section>
 
       <div :class="['grid gap-6 xl:gap-7', appStore.isDesktop ? 'xl:grid-cols-[1.3fr_1fr] lg:grid-cols-[1.2fr_1fr]' : 'grid-cols-1']">
         <section>
-          <TrendChartCard :trend="stats?.trend7Days ?? []" />
+          <TrendChartCard
+            :trend="trend"
+            :range-label="rangeLabel"
+            :granularity-label="granularityLabel"
+            :loading="analyticsLoading"
+          />
         </section>
 
         <section class="space-y-6">
-          <TopProductRankCard :top-products="stats?.topProducts ?? []" />
-          <TopCustomerRankCard :top-customers="stats?.topCustomers ?? []" />
+          <TopProductRankCard
+            :top-products="topProducts"
+            :options="rankOptions"
+            :filter="appliedFilter"
+            :range-label="rangeLabel"
+            :loading="analyticsLoading"
+            @update:options="handleRankOptionsChange"
+          />
+          <TopCustomerRankCard
+            :top-customers="topCustomers"
+            :options="rankOptions"
+            :filter="appliedFilter"
+            :range-label="rangeLabel"
+            :loading="analyticsLoading"
+          />
 
           <div class="apple-card p-5 sm:p-6 xl:p-7">
             <h2 class="mb-4 text-lg font-semibold text-slate-800 dark:text-slate-200">近期出库动态</h2>
