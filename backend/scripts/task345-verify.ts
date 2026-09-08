@@ -59,7 +59,14 @@ function verifyFrontendSources() {
   assert.match(orderEntrySource, /productApi\.createProduct\(\{/)
   assert.match(orderEntrySource, /productCode:\s*`Auto-\$\{globalThis\.crypto\.randomUUID\(\)\.slice\(0,\s*8\)\}`/)
 
-  assert.match(productManagerSource, /getProductDetail\(row\.id\)/)
+  // 编辑弹窗必须走详情接口回填，并且详情请求要透传 useStableRequest 下发的 signal：
+  // 少了 signal，连点不同行时旧详情会覆盖新选择（见 src/composables/useStableRequest.ts 的 runLatest）。
+  // 断言口径与 scripts/verify-enterprise-core-paths.mjs 中其他详情请求保持一致。
+  assert.match(
+    productManagerSource,
+    /executor: \(signal\) => getProductDetail\(row\.id, \{ signal \}\)/,
+    '产品编辑弹窗未走详情接口回填或未透传 signal',
+  )
   assert.match(productManagerSource, /batchUpdateProducts/)
   assert.match(productManagerSource, /留空则自动生成统一编码/)
   assert.match(productRouteSource, /productRouter\.post\(\s*'\/batch'/)
