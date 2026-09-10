@@ -15,11 +15,13 @@ import type { Writable } from 'node:stream'
 import { In } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
+import { BaseProductSku } from '../entities/base-product-sku.entity.js'
 import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
 import { RelProductTag } from '../entities/rel-product-tag.entity.js'
 import type { PaginationResult } from '../types/api.js'
 import { BizError } from '../utils/errors.js'
+import { summarizeProductInventory } from '../utils/product-inventory-summary.js'
 
 export const REPORT_TYPES = ['inventory', 'tag-sales', 'kingdee', 'walkin', 'outbound-flow'] as const
 export type ReportType = (typeof REPORT_TYPES)[number]
@@ -333,7 +335,9 @@ export class ReportService {
     })
     workbook.creator = 'Y-Link'
     workbook.created = new Date()
-    const worksheet = workbook.addWorksheet(REPORT_TITLE_MAP[type])
+    const worksheet = workbook.addWorksheet(REPORT_TITLE_MAP[type], {
+      views: [{ state: 'frozen', ySplit: 5 }],
+    })
     this.initializeWorksheet(worksheet, REPORT_TITLE_MAP[type], query.fields, input)
 
     let exportedRows = 0
@@ -439,26 +443,43 @@ export class ReportService {
       qb.skip((query.page - 1) * query.pageSize)
     }
     const products = await qb.getMany()
-    const relations = products.length > 0
-      ? await relationRepo.find({
-          where: { productId: In(products.map((product) => String(product.id))) },
+    const productIds = products.map((product) => String(product.id))
+    const [relations, skus] = products.length > 0
+      ? await Promise.all([
+        relationRepo.find({
+          where: { productId: In(productIds) },
           relations: { tag: true },
           order: { id: 'ASC' },
-        })
-      : []
+        }),
+        AppDataSource.getRepository(BaseProductSku).find({
+          select: {
+            productId: true,
+            currentStock: true,
+            preOrderedStock: true,
+            isActive: true,
+            isCurrent: true,
+          },
+          where: { productId: In(productIds) },
+        }),
+      ])
+      : [[], []]
     const tagMap = this.buildProductTagMap(relations)
+    const skuMap = new Map<string, BaseProductSku[]>()
+    skus.forEach((sku) => {
+      const productId = String(sku.productId)
+      const productSkus = skuMap.get(productId) ?? []
+      productSkus.push(sku)
+      skuMap.set(productId, productSkus)
+    })
     const rows = products.map((product) => {
       const tags = tagMap.get(String(product.id)) ?? []
-      const currentStock = Number(product.currentStock ?? 0)
-      const preOrderedStock = Number(product.preOrderedStock ?? 0)
+      const inventory = summarizeProductInventory(product, skuMap.get(String(product.id)) ?? [])
       return {
         category: tags.length > 0 ? tags.join('、') : '未分类',
         productCode: product.productCode,
         productName: product.productName,
         defaultPrice: normalizeAmount(product.defaultPrice),
-        currentStock,
-        preOrderedStock,
-        availableStock: Math.max(0, currentStock - preOrderedStock),
+        ...inventory,
         status: product.isActive ? '启用' : '停用',
       }
     })
@@ -728,7 +749,6 @@ export class ReportService {
       }
     })
 
-    worksheet.views = [{ state: 'frozen', ySplit: 5 }]
     worksheet.getRow(1).commit()
     worksheet.getRow(2).commit()
     worksheet.getRow(3).commit()
