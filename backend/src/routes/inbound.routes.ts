@@ -13,6 +13,10 @@ import { extractRequestMeta } from '../utils/request-meta.js'
 import { assertPermanentDeletePassword } from '../utils/permanent-delete-password.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 import { MAX_DATABASE_INT, MAX_INBOUND_ORDER_ITEM_COUNT } from '../constants/web-resource-limits.js'
+import { rateLimit } from 'express-rate-limit'
+import { DatabaseRateLimitStore } from '../services/persistent-risk-state.service.js'
+import { AppDataSource } from '../config/data-source.js'
+import { auditService } from '../services/audit.service.js'
 
 export const inboundRouter = Router()
 
@@ -63,6 +67,37 @@ const cancelSupplierInboundSchema = z.object({
 const permanentDeleteSupplierInboundSchema = z.object({
   confirmShowNo: z.string().trim().max(64).optional(),
   permanentDeletePassword: z.string().optional(),
+})
+
+const deleteVerifiedSupplierInboundSchema = z.object({
+  confirmShowNo: z.string().optional(),
+  permanentDeletePassword: z.string().optional(),
+})
+
+const verifiedSupplierDeleteLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  limit: 8,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  keyGenerator: (req) => `supplier:${(req as AuthenticatedRequest).auth.userId ?? 'unknown'}`,
+  ...(AppDataSource.options.type === 'mysql'
+    ? { store: new DatabaseRateLimitStore('express-inbound-verified-delete') }
+    : {}),
+  handler: async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const normalizedTargetId = String(req.params.id ?? '').trim()
+    await auditService.safeRecord({
+      actionType: 'inbound.supplier.delete_verified',
+      actionLabel: '供货方删除已入库送货单并冲销库存（频控拦截）',
+      targetType: 'biz_inbound_order',
+      targetId: normalizedTargetId && normalizedTargetId.length <= 64 ? normalizedTargetId : null,
+      actor: authReq.auth,
+      requestMeta: extractRequestMeta(req),
+      resultStatus: 'failed',
+      detail: { reason: 'rate_limited' },
+    })
+    res.status(429).json({ code: 429, message: '已入库送货单删除请求过于频繁，请稍后再试', data: null })
+  },
 })
 
 inboundRouter.post(
@@ -138,6 +173,28 @@ inboundRouter.delete(
     res.json({
       code: 0,
       message: '删除成功',
+      data: result,
+    })
+  }),
+)
+
+// 供货方：删除本人已入库送货单，并在同一事务内冲销仍可追溯且未被占用的库存。
+inboundRouter.delete(
+  '/supplier/:id/verified',
+  requirePermission('inbound:create'),
+  verifiedSupplierDeleteLimiter,
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const input = deleteVerifiedSupplierInboundSchema.parse(req.body ?? {})
+    const result = await inboundService.deleteVerifiedSupplierDelivery(
+      authReq.auth,
+      req.params.id,
+      input,
+      extractRequestMeta(req),
+    )
+    res.json({
+      code: 0,
+      message: '已入库送货单已删除，库存已冲销',
       data: result,
     })
   }),

@@ -12,6 +12,7 @@
 import { computed } from 'vue'
 import dayjs from 'dayjs'
 import type { OrderDetailResult } from '@/api/modules/order'
+import { aggregateOrderVoucherItems } from '../order-voucher-aggregation'
 
 interface OrderVoucherEditableFields {
   departmentOperator: string
@@ -72,6 +73,9 @@ const voucherCopies = computed(() => {
 
 const isLandscape = computed(() => props.orientation === 'landscape')
 
+// 明细持久化与详情继续保留原始 SKU 行；这里只为预览、打印和 PDF 生成按商品聚合的展示行。
+const voucherItems = computed(() => aggregateOrderVoucherItems(props.order.items))
+
 // 详细注释：图 2 版式的底部签字区要求位置稳定，因此在明细不足时需要补齐空白行，
 // 否则导出 PDF 时会出现签字区上浮、两联高度不一致的问题。
 const minimumRowCount = computed(() => {
@@ -79,7 +83,13 @@ const minimumRowCount = computed(() => {
 })
 
 const fillerRowCount = computed(() => {
-  return Math.max(0, minimumRowCount.value - props.order.items.length)
+  const maxCharactersPerLine = isLandscape.value ? 18 : 12
+  const wrappedLineDebt = voucherItems.value.reduce((total, item) => {
+    const longestCellLength = Math.max(getVisualLength(item.productName), getVisualLength(item.remark))
+    return total + Math.max(0, Math.ceil(longestCellLength / maxCharactersPerLine) - 1)
+  }, 0)
+
+  return Math.max(0, minimumRowCount.value - voucherItems.value.length - wrappedLineDebt)
 })
 
 const formatAmount = (value: string | number | null | undefined) => {
@@ -187,13 +197,13 @@ const printTimestamp = formatDateTime(new Date())
             <th scope="col">总价</th>
             <th scope="col">备注</th>
           </tr>
-          <tr v-for="item in props.order.items" :key="item.id">
+          <tr v-for="item in voucherItems" :key="item.key">
             <td colspan="2" class="text-left" :class="{ 'is-wrap': shouldWrapProductName(item.productName) }">
               {{ item.productName || '-' }}
             </td>
-            <td>{{ formatAmount(item.unitPrice) }}</td>
-            <td>{{ formatQty(item.qty) }}</td>
-            <td>{{ formatAmount(item.subTotal) }}</td>
+            <td>{{ item.unitPrice }}</td>
+            <td>{{ item.qty }}</td>
+            <td>{{ item.subTotal }}</td>
             <td :class="{ 'is-wrap': shouldWrapRemark(item.remark) }">{{ getItemRemark(item.remark) }}</td>
           </tr>
           <tr v-for="index in fillerRowCount" :key="`filler-${copy.key}-${index}`" class="voucher-filler-row">
@@ -204,7 +214,8 @@ const printTimestamp = formatDateTime(new Date())
             <td>&nbsp;</td>
           </tr>
           <tr class="voucher-total-row">
-            <th colspan="4" scope="rowgroup">总计</th>
+            <th colspan="3" scope="rowgroup">总计</th>
+            <td>{{ formatQty(props.order.totalQty) }}</td>
             <td>{{ formatAmount(props.order.totalAmount) }}</td>
             <td>{{ props.order.remark || '' }}</td>
           </tr>

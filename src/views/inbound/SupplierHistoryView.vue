@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/inbound/SupplierHistoryView.vue
- * 文件职责：展示供货方历史送货单列表，并支持服务端筛选分页、详情查看、改单撤销与删除恢复等状态操作。
+ * 文件职责：展示供货方历史送货单列表，并支持服务端筛选分页、详情查看、改单撤销、删除恢复与已入库库存冲销。
  * 实现逻辑：
  * - 页面采用“统计卡 + 筛选工具栏 + 列表容器 + 详情抽屉”的工作台布局，与录入页形成统一视觉语言；
  * - 历史页使用服务端筛选与分页，并通过自动同步保持库管入库、供货方删除恢复后的列表状态及时更新；
@@ -22,6 +22,7 @@ import { BizResponsiveDrawerShell, PageContainer, PagePaginationBar, PassiveNumb
 import {
   cancelSupplierDelivery,
   deleteSupplierDelivery,
+  deleteVerifiedSupplierDelivery,
   getSupplierDeliveries,
   getInboundDetail,
   permanentlyDeleteSupplierDelivery,
@@ -176,6 +177,8 @@ const emptyDescription = computed(() => {
 const canEditOrder = (order: InboundOrder) => order.status === 'pending' && !order.isDeleted
 const canCancelOrder = (order: InboundOrder) => order.status === 'pending' && !order.isDeleted
 const canSoftDeleteOrder = (order: InboundOrder) => !order.isDeleted && order.status !== 'verified'
+const canDeleteVerifiedOrder = (order: InboundOrder) => !order.isDeleted && order.status === 'verified'
+const canDeleteOrder = (order: InboundOrder) => canSoftDeleteOrder(order) || canDeleteVerifiedOrder(order)
 const canRestoreOrder = (order: InboundOrder) => order.isDeleted && order.status !== 'verified'
 const canPermanentDeleteOrder = (order: InboundOrder) => order.isDeleted && order.status !== 'verified'
 const shouldShowPendingQrCode = computed(() => {
@@ -724,6 +727,96 @@ const handleSoftDeleteOrder = async (order: InboundOrder) => {
   })
 }
 
+const promptDeleteCredentials = async (
+  showNo: string,
+  warning: string,
+  title: string,
+  continueText: string,
+  confirmText: string,
+) => {
+  const showNoResult = await runWithInteractionLock(() => ElMessageBox.prompt(
+    `${warning}\n请输入送货单号确认：${showNo}`,
+    title,
+    {
+      type: 'error',
+      confirmButtonText: continueText,
+      cancelButtonText: '取消',
+      inputPattern: new RegExp(`^${showNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
+      inputErrorMessage: '请输入完整送货单号',
+    },
+  ))
+  const passwordResult = await runWithInteractionLock(() => ElMessageBox.prompt(
+    '请输入永久删除密码，以确认此操作。',
+    title,
+    {
+      type: 'error',
+      confirmButtonText: confirmText,
+      cancelButtonText: '取消',
+      inputType: 'password',
+      inputPlaceholder: '请输入永久删除密码',
+      inputValidator: (value: string) => String(value || '').trim() ? true : '请输入永久删除密码',
+    },
+  ))
+  return {
+    confirmShowNo: showNoResult.value.trim(),
+    permanentDeletePassword: passwordResult.value.trim(),
+  }
+}
+
+const handleDeleteVerifiedOrder = async (order: InboundOrder) => {
+  if (!canDeleteVerifiedOrder(order)) {
+    showAppWarning('当前已入库送货单不可删除')
+    return
+  }
+
+  const latestDetail = await ensureLatestActionableDetail(order, '删除', canDeleteVerifiedOrder)
+  if (!latestDetail) {
+    return
+  }
+
+  let credentials: Awaited<ReturnType<typeof promptDeleteCredentials>>
+  try {
+    credentials = await promptDeleteCredentials(
+      latestDetail.order.showNo,
+      '删除将冲销对应库存；单据保留在“已删除单据”中且不可恢复。',
+      '删除已入库送货单',
+      '继续删除',
+      '删除并冲销库存',
+    )
+  } catch {
+    return
+  }
+
+  const submitDetail = await ensureLatestActionableDetail(latestDetail.order, '删除', canDeleteVerifiedOrder)
+  if (!submitDetail) {
+    return
+  }
+
+  await actionRequest.runLatest({
+    executor: (signal) => deleteVerifiedSupplierDelivery(
+      submitDetail.order.id,
+      credentials,
+      { signal },
+    ),
+    onSuccess: async (detail) => {
+      if (currentDetail.value?.order.id === detail.order.id) {
+        await applyDetailResult(detail, { openDrawer: true })
+      }
+      await loadData()
+      showAppSuccess('已入库送货单已删除，对应库存已冲销')
+    },
+    onError: (error) => {
+      showAppError(extractErrorMessage(error, '删除已入库送货单失败'))
+    },
+  })
+}
+
+const handleDeleteOrder = (order: InboundOrder) => {
+  return order.status === 'verified'
+    ? handleDeleteVerifiedOrder(order)
+    : handleSoftDeleteOrder(order)
+}
+
 const handleRestoreOrder = async (order: InboundOrder) => {
   if (!canRestoreOrder(order)) {
     showAppWarning('当前送货单不可恢复')
@@ -776,39 +869,15 @@ const handlePermanentDeleteOrder = async (order: InboundOrder) => {
     return
   }
 
-  let confirmShowNo = ''
-  let permanentDeletePassword = ''
+  let credentials: Awaited<ReturnType<typeof promptDeleteCredentials>>
   try {
-    const result = await runWithInteractionLock(() => ElMessageBox.prompt(
-      `永久删除后将清理送货单和商品明细，无法恢复。\n请输入送货单号确认：${latestDetail.order.showNo}`,
+    credentials = await promptDeleteCredentials(
+      latestDetail.order.showNo,
+      '永久删除将清理送货单和商品明细，且不可恢复。',
       '永久删除送货单',
-      {
-        type: 'error',
-        confirmButtonText: '永久删除',
-        cancelButtonText: '取消',
-        inputPattern: new RegExp(`^${latestDetail.order.showNo.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i'),
-        inputErrorMessage: '请输入完整送货单号',
-      },
-    ))
-    confirmShowNo = result.value
-    const passwordResult = await runWithInteractionLock(() => ElMessageBox.prompt(
-      '请输入容器环境变量中配置的永久删除密码。',
-      '永久删除密码',
-      {
-        type: 'error',
-        confirmButtonText: '永久删除',
-        cancelButtonText: '取消',
-        inputType: 'password',
-        inputPlaceholder: '请输入永久删除密码',
-        inputValidator: (value: string) => {
-          if (!String(value || '').trim()) {
-            return '请输入永久删除密码'
-          }
-          return true
-        },
-      },
-    ))
-    permanentDeletePassword = passwordResult.value.trim()
+      '永久删除',
+      '永久删除',
+    )
   } catch {
     return
   }
@@ -819,7 +888,7 @@ const handlePermanentDeleteOrder = async (order: InboundOrder) => {
   }
 
   await actionRequest.runLatest({
-    executor: (signal) => permanentlyDeleteSupplierDelivery(submitDetail.order.id, { confirmShowNo, permanentDeletePassword }, { signal }),
+    executor: (signal) => permanentlyDeleteSupplierDelivery(submitDetail.order.id, credentials, { signal }),
     onSuccess: async () => {
       if (currentDetail.value?.order.id === submitDetail.order.id) {
         detailVisible.value = false
@@ -1073,11 +1142,11 @@ onBeforeUnmount(() => {
                       撤销
                     </el-button>
                     <el-button
-                      v-if="canSoftDeleteOrder(row as InboundOrder)"
+                      v-if="canDeleteOrder(row as InboundOrder)"
                       class="history-detail-button"
                       link
                       type="danger"
-                      @click="handleSoftDeleteOrder(row as InboundOrder)"
+                      @click="handleDeleteOrder(row as InboundOrder)"
                     >
                       删除
                     </el-button>
@@ -1182,10 +1251,10 @@ onBeforeUnmount(() => {
                       撤销
                     </el-button>
                     <el-button
-                      v-if="canSoftDeleteOrder(currentDetail.order)"
+                      v-if="canDeleteOrder(currentDetail.order)"
                       type="danger"
                       plain
-                      @click="handleSoftDeleteOrder(currentDetail.order)"
+                      @click="handleDeleteOrder(currentDetail.order)"
                     >
                       删除
                     </el-button>

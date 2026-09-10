@@ -56,6 +56,16 @@ export interface PermanentDeleteSupplierInboundInput {
 }
 
 /**
+ * 已入库送货单删除参数：
+ * - confirmShowNo 与永久删除密码共同确认库存冲销动作；
+ * - 成功后单据保留为不可恢复的已删除入库凭证。
+ */
+export interface DeleteVerifiedSupplierInboundInput {
+  confirmShowNo?: string
+  permanentDeletePassword?: string
+}
+
+/**
  * 入库送货单模型：
  * - status: pending (待核销), verified (已核销), cancelled (已取消)
  */
@@ -212,6 +222,23 @@ export const deleteSupplierDelivery = (id: string, requestConfig: RequestConfig 
     ...requestConfig,
     method: 'DELETE',
     url: `/inbound/supplier/${id}`,
+  })
+
+/**
+ * 删除已入库送货单：
+ * - 后端确认库存仍可冲销后原子扣回商品与 SKU 库存；
+ * - 主单与明细继续保留，不能恢复或永久删除。
+ */
+export const deleteVerifiedSupplierDelivery = (
+  id: string,
+  data: DeleteVerifiedSupplierInboundInput,
+  requestConfig: RequestConfig = {},
+) =>
+  request<InboundOrderDetail>({
+    ...requestConfig,
+    method: 'DELETE',
+    url: `/inbound/supplier/${id}/verified`,
+    data,
   })
 
 /**

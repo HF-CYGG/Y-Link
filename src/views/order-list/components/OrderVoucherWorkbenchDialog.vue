@@ -21,6 +21,7 @@ import { computed, nextTick, reactive, ref, watch } from 'vue'
 import type { OrderDetailResult } from '@/api/modules/order'
 import { extractErrorMessage } from '@/utils/error'
 import { exportVoucherPdf } from '@/utils/pdf/export-voucher-pdf'
+import { aggregateOrderVoucherItems } from '../order-voucher-aggregation'
 import OrderVoucherTemplate from './OrderVoucherTemplate.vue'
 
 
@@ -78,6 +79,7 @@ const exportPdfLoading = ref(false)
 const voucherEditableForm = reactive<OrderVoucherEditableFields>(createEmptyVoucherEditableFields())
 const voucherOrientation = ref<VoucherOrientation>('landscape')
 const voucherOrientationLabel = computed(() => (voucherOrientation.value === 'landscape' ? '横版' : '竖版'))
+const voucherItemCount = computed(() => aggregateOrderVoucherItems(props.order.items).length)
 
 /**
  * 切换单据时重置补填字段：
@@ -255,7 +257,7 @@ const handleExportVoucherPdf = async () => {
             </p>
           </div>
           <div class="voucher-preview-panel__summary">
-            <span>商品 {{ props.order.items.length }} 行</span>
+            <span>商品 {{ voucherItemCount }} 行</span>
             <span>总金额 ¥{{ Number(props.order.totalAmount).toFixed(2) }}</span>
           </div>
         </div>
