@@ -1269,26 +1269,42 @@ class O2oPreorderService {
 
     const items = await manager.getRepository(O2oPreorderItem).find({
       where: { orderId: String(order.id) },
+      order: { productId: 'ASC', skuId: 'ASC', id: 'ASC' },
     })
+    const releasableItems = items.filter((row) => !(Math.max(0, Number(row.qty ?? 0)) <= 0))
+    const productIds = [...new Set(releasableItems.map((row) => String(row.productId)))]
+    const productQuery = manager.getRepository(BaseProduct)
+      .createQueryBuilder('product')
+      .where('product.id IN (:...productIds)', { productIds })
+      .orderBy('product.id', 'ASC')
+    if (manager.connection.options.type !== 'sqlite') {
+      productQuery.setLock('pessimistic_write')
+    }
+    const productMap = productIds.length
+      ? new Map((await productQuery.getMany()).map((product) => [String(product.id), product]))
+      : new Map<string, BaseProduct>()
+
+    const skuIds = [...new Set(releasableItems.flatMap((row) => row.skuId ? [String(row.skuId)] : []))]
+    const skuQuery = manager.getRepository(BaseProductSku)
+      .createQueryBuilder('sku')
+      .where('sku.id IN (:...skuIds)', { skuIds })
+      .orderBy('sku.productId', 'ASC')
+      .addOrderBy('sku.id', 'ASC')
+    if (manager.connection.options.type !== 'sqlite') {
+      skuQuery.setLock('pessimistic_write')
+    }
+    const skuMap = skuIds.length
+      ? new Map((await skuQuery.getMany()).map((sku) => [String(sku.id), sku]))
+      : new Map<string, BaseProductSku>()
+
     let releasedQty = 0
-    for (const row of items) {
+    for (const row of releasableItems) {
       const qty = Math.max(0, Number(row.qty ?? 0))
-      if (qty <= 0) {
-        continue
-      }
-      const product = await manager.getRepository(BaseProduct).findOne({
-        where: { id: String(row.productId) },
-        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
-      })
+      const product = productMap.get(String(row.productId))
       if (!product) {
         continue
       }
-      const sku = row.skuId
-        ? await manager.getRepository(BaseProductSku).findOne({
-            where: { id: String(row.skuId) },
-            lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
-          })
-        : null
+      const sku = row.skuId ? skuMap.get(String(row.skuId)) ?? null : null
       const beforeCurrentStock = Number(product.currentStock ?? 0)
       const beforePreOrderedStock = Number(product.preOrderedStock ?? 0)
       if (sku) {

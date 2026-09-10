@@ -10,8 +10,10 @@
  */
 
 import dayjs from 'dayjs'
+import { computed } from 'vue'
 import type { OrderDetailResult } from '@/api/modules/order'
 import OrderVoucherTemplate from '@/views/order-list/components/OrderVoucherTemplate.vue'
+import { aggregateOrderVoucherItems } from '@/views/order-list/order-voucher-aggregation'
 import type { OrderVoucherEditableFields, VoucherOrientation } from '@/views/client/client-order-detail-types'
 
 type VoucherEditableFieldKey = keyof OrderVoucherEditableFields
@@ -35,6 +37,8 @@ const props = defineProps<{
   enableHtml2pdfExport: boolean
   exportPdfLoading: boolean
 }>()
+
+const voucherItemCount = computed(() => aggregateOrderVoucherItems(props.voucherOrder?.items ?? []).length)
 
 const emit = defineEmits<{
   (event: 'update:visible', value: boolean): void
@@ -155,7 +159,7 @@ const emitEditableFieldUpdate = (key: VoucherEditableFieldKey, value: string | n
             </p>
           </div>
           <div class="voucher-preview-panel__summary">
-            <span>商品 {{ voucherOrder.items.length }} 行</span>
+            <span>商品 {{ voucherItemCount }} 行</span>
             <span>总金额 ¥{{ Number(voucherOrder.totalAmount).toFixed(2) }}</span>
           </div>
         </div>

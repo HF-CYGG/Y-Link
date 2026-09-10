@@ -54,6 +54,12 @@ export interface SafeAuditRecordOptions {
   allowDuringDatabaseMaintenance?: boolean
 }
 
+const truncateAuditTextByCodePoint = (value: string | null | undefined, maxLength: number): string | null => {
+  if (value == null) return null
+  const characters = Array.from(value)
+  return characters.length <= maxLength ? value : characters.slice(0, maxLength).join('')
+}
+
 /**
  * 审计日志服务：
  * - 关键动作可在事务内调用，保证“业务成功 = 留痕成功”；
@@ -103,8 +109,8 @@ export class AuditService {
       targetCode: input.targetCode ?? null,
       resultStatus: input.resultStatus ?? 'success',
       detailJson: input.detail ? JSON.stringify(input.detail) : null,
-      ipAddress: input.requestMeta?.ipAddress ?? null,
-      userAgent: input.requestMeta?.userAgent ?? null,
+      ipAddress: truncateAuditTextByCodePoint(input.requestMeta?.ipAddress, 64),
+      userAgent: truncateAuditTextByCodePoint(input.requestMeta?.userAgent, 255),
     })
 
     return repository.save(entity)
