@@ -17,7 +17,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { useRoute } from 'vue-router'
 import { CameraFilled, DocumentCopy, Search } from '@element-plus/icons-vue'
-import { BizCrudDialogShell, PageContainer, PassiveNumberInput, UnifiedScanDialog } from '@/components/common'
+import { BizCrudDialogShell, BizO2oItemSpecText, PageContainer, PassiveNumberInput, UnifiedScanDialog } from '@/components/common'
 import { useStableRequest } from '@/composables/useStableRequest'
 import {
   VERIFY_CONSOLE_O2O_ORDER_STATUS_CLASS_MAP,
@@ -998,7 +998,12 @@ watch(
 
           <template v-if="preorderDetail">
             <el-table native-scrollbar class="mt-4" :data="preorderDetail.items" row-key="id">
-              <el-table-column prop="productName" label="商品名称" min-width="180" />
+              <el-table-column prop="productName" label="商品名称" min-width="180">
+                <template #default="{ row }">
+                  <p class="break-words">{{ row.productName }}</p>
+                  <BizO2oItemSpecText :item="row" />
+                </template>
+              </el-table-column>
               <el-table-column prop="productCode" label="商品编码" min-width="140" />
               <el-table-column prop="defaultPrice" label="单价" width="120">
                 <template #default="{ row }">
@@ -1059,7 +1064,12 @@ watch(
             </div>
 
             <el-table native-scrollbar class="mt-4" :data="returnRequestDetail.items" row-key="id">
-              <el-table-column prop="productName" label="商品名称" min-width="180" />
+              <el-table-column prop="productName" label="商品名称" min-width="180">
+                <template #default="{ row }">
+                  <p class="break-words">{{ row.productName }}</p>
+                  <BizO2oItemSpecText :item="row" />
+                </template>
+              </el-table-column>
               <el-table-column prop="productCode" label="商品编码" min-width="140" />
               <el-table-column prop="qty" label="退货数量" width="110" align="right" />
             </el-table>

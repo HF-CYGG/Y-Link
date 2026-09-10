@@ -13,5 +13,6 @@
  * - 页面统一从该入口接入组合能力，避免再次回到扁平文件直引。
  */
 export { default as BizCrudDialogShell } from './BizCrudDialogShell.vue'
+export { default as BizO2oItemSpecText } from './BizO2oItemSpecText.vue'
 export { default as BizResponsiveDataCollectionShell } from './BizResponsiveDataCollectionShell.vue'
 export { default as BizResponsiveDrawerShell } from './BizResponsiveDrawerShell.vue'
