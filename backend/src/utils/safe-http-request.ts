@@ -76,15 +76,27 @@ export function assertSafeOutboundUrl(input: string | URL): URL {
 }
 
 function createSafeLookup(): LookupFunction {
-  return ((hostname: string, _options: unknown, callback: (error: NodeJS.ErrnoException | null, address?: string, family?: number) => void) => {
+  return (hostname, options, callback) => {
     void dns.lookup(hostname, { all: true, verbatim: true }).then((addresses) => {
       if (addresses.length === 0 || addresses.some((item) => !isPublicNetworkAddress(item.address))) {
-        callback(Object.assign(new Error('DNS 解析结果包含内网或保留地址'), { code: 'EACCES' }))
+        callback(Object.assign(new Error('DNS 解析结果包含内网或保留地址'), { code: 'EACCES' }), [])
         return
       }
-      callback(null, addresses[0].address, addresses[0].family)
-    }, (error: NodeJS.ErrnoException) => callback(error))
-  }) as LookupFunction
+      // 先检查完整解析集合，再筛选地址族，避免漏检另一地址族中的内网地址。
+      const family = options.family === 'IPv4' ? 4 : options.family === 'IPv6' ? 6 : (options.family ?? 0)
+      const candidates = family === 0 ? addresses : addresses.filter((item) => item.family === family)
+      if (candidates.length === 0) {
+        callback(Object.assign(new Error('DNS 解析结果不包含请求的地址族'), { code: 'ENOTFOUND' }), [])
+        return
+      }
+      // Node 自动选择地址族时使用 all=true，要求回调数组而非单地址字符串。
+      if (options.all) {
+        callback(null, candidates)
+      } else {
+        callback(null, candidates[0].address, candidates[0].family)
+      }
+    }, (error: NodeJS.ErrnoException) => callback(error, []))
+  }
 }
 
 function stripCrossOriginSensitiveHeaders(headers: Record<string, string>) {
