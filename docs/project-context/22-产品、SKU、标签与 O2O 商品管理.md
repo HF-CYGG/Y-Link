@@ -43,7 +43,8 @@
 
 ## 关键状态/字段/快照
 
-- 产品主记录会聚合 SKU 库存：`currentStock`、`preOrderedStock`。
+- 商品视图的 `currentStock`、`preOrderedStock` 只汇总当前规格矩阵中启用的 SKU；存在当前 SKU 但全部停用时汇总为 0，仅无当前 SKU（包括只剩历史 SKU）时回退商品主表字段。
+- `availableStock` 统一按 `max(0, currentStock - preOrderedStock)` 计算；商品服务与库存报表复用同一纯汇总函数，报表查询不回写商品、SKU 或 `InventoryLog`。
 - SKU 关键字段：`skuCode`、`specText`、`specValuesJson`、`defaultPrice`、`discountRate`、`thumbnail`、`o2oRecommended`、`sortOrder`。
 - 若只有一个默认 SKU，产品与 SKU 会做双向同步，避免主记录和默认 SKU 口径分裂。
 - 标签关系通过中间关联表维护，不是产品表内简单字符串。
@@ -67,3 +68,4 @@
 - 产品修改后至少回归：产品列表、详情、SKU 展示、标签展示、库存总量、O2O 商品页。
 - 涉及折扣价格时同时回归：管理端商品视图、客户端商城、购物车、订单详情。
 - 批量更新或导入后回归：SKU 去重、默认规格、缩略图、排序和总库存聚合。
+- 库存展示或汇总口径改动后运行：`npm --prefix backend run reports:inventory:verify`、`npm --prefix backend run product:sku-current:verify`、`npm --prefix backend run inventory:invariants:verify`。

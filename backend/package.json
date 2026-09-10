@@ -78,6 +78,7 @@
     "sqlite:legacy-upgrade:verify": "tsx scripts/sqlite-legacy-schema-upgrade-verify.ts",
     "order-query:baseline:verify": "tsx scripts/order-query-baseline-verify.ts",
     "reports:contract:verify": "tsx scripts/report-center-contract-verify.ts",
+    "reports:inventory:verify": "tsx scripts/report-inventory-verify.ts",
     "uploads:legacy:inspect": "tsx scripts/inspect-legacy-upload-urls.ts"
   },
   "dependencies": {

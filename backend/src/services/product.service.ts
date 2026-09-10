@@ -21,6 +21,7 @@ import type { PaginationResult } from '../types/api.js'
 import { isRetryableSqliteLockError, isUniqueConstraintError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
 import { generateProductCode } from '../utils/id-generator.js'
+import { isDatabaseFlagEnabled, summarizeProductInventory } from '../utils/product-inventory-summary.js'
 import { normalizeLegacyUploadUrl } from '../utils/upload-storage.js'
 import { assertDiscountRateInRange, calculateDiscountedPrice, normalizeDiscountRate } from '../utils/discount-price.js'
 import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
@@ -238,10 +239,6 @@ const buildSpecValuesKey = (specValues: Record<string, string>): string => {
 
 const buildSkuEntitySpecValuesKey = (sku: Pick<BaseProductSku, 'specValuesJson'>): string => {
   return buildSpecValuesKey(parseSpecValuesJson(sku.specValuesJson))
-}
-
-const isDatabaseFlagEnabled = (value: unknown): boolean => {
-  return value !== false && value !== 0 && value !== '0' && value !== 'false'
 }
 
 const PRODUCT_CODE_CONSTRAINT_MATCHER = {
@@ -852,12 +849,9 @@ export class ProductService {
     return products.map((product) => {
       const productId = normalizeEntityId(product.id)
       const tags = productTagMap.get(productId) ?? []
-      const productSkus = (productSkuMap.get(productId) ?? []).filter((sku) => isDatabaseFlagEnabled(sku.isCurrent))
-      const activeCurrentSkus = productSkus.filter((sku) => isDatabaseFlagEnabled(sku.isActive))
-      const skuCurrentStock = activeCurrentSkus.reduce((sum, sku) => sum + sku.currentStock, 0)
-      const skuPreOrderedStock = activeCurrentSkus.reduce((sum, sku) => sum + sku.preOrderedStock, 0)
-      const currentStock = productSkus.length ? skuCurrentStock : Number(product.currentStock ?? 0)
-      const preOrderedStock = productSkus.length ? skuPreOrderedStock : Number(product.preOrderedStock ?? 0)
+      const allProductSkus = productSkuMap.get(productId) ?? []
+      const productSkus = allProductSkus.filter((sku) => isDatabaseFlagEnabled(sku.isCurrent))
+      const inventory = summarizeProductInventory(product, allProductSkus)
 
       return {
         id: productId,
@@ -873,9 +867,7 @@ export class ProductService {
         thumbnail: normalizeProductThumbnailUrl(product.thumbnail) ?? null,
         detailContent: product.detailContent ?? null,
         limitPerUser: Number(product.limitPerUser ?? 5),
-        currentStock,
-        preOrderedStock,
-        availableStock: Math.max(0, currentStock - preOrderedStock),
+        ...inventory,
         tagIds: tags.map((tag) => tag.id),
         tags,
         specGroups: this.buildSpecGroupsFromSkus(productSkus),
