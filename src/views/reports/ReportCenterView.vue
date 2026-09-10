@@ -8,7 +8,7 @@
  * - 字段勾选只负责用户偏好，最终字段白名单仍由后端报表服务二次校验。
  * 维护说明：
  * - 新增报表类型时需要同步补齐本页字段定义、报表说明和后端 ReportType；
- * - 库存表第一版采用当前库存快照，不在页面层伪造月度库存回算。
+ * - 库存表展示当前且启用 SKU 的实时合计；无当前 SKU 的旧数据才回退商品主表，不在页面层重算。
  */
 
 import dayjs from 'dayjs'
@@ -37,7 +37,11 @@ interface ReportTypeOption {
 }
 
 const reportTypeOptions: ReportTypeOption[] = [
-  { label: '库存一览表', value: 'inventory', description: '按当前商品库存快照查看品类、售价、库存与状态。' },
+  {
+    label: '库存一览表',
+    value: 'inventory',
+    description: '当前库存按当前且启用的 SKU 合计；预订库存表示已占用数量；可用库存为当前库存减预订占用，最低显示为 0。',
+  },
   { label: '标签销售汇总表', value: 'tag-sales', description: '按时间段和标签查看商品销售明细，适用于品宣、联名、海右等分类查账。' },
   { label: '金蝶汇总表', value: 'kingdee', description: '仅统计部门单，包含部门、领取人、出库单与系统申请状态。' },
   { label: '散客汇总表', value: 'walkin', description: '仅统计个人购买，保留商品、数量、金额、领取人和操作人员。' },
