@@ -64,6 +64,16 @@ const main = async () => {
     projectRoot,
   )
 
+  // O2O 明细规格展示口径门禁：
+  // - 校验预订单/退货明细在客户端与管理端各查看入口都展示下单时的款式规格（issue #62）；
+  // - 防止后续改版把规格副行删掉，让同名商品的不同款式重新变得无法区分。
+  await runStep(
+    'O2O 明细规格展示口径检查',
+    process.execPath,
+    [path.join(projectRoot, 'scripts', 'verify-o2o-order-item-spec.mjs')],
+    projectRoot,
+  )
+
   // 后端类型校验作为功能脚本执行前的门禁，避免编译层问题掩盖业务问题。
   await runNpmScript('后端类型校验', 'check', backendRoot)
 

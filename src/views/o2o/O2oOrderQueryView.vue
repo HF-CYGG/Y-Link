@@ -10,7 +10,7 @@
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessageBox } from 'element-plus'
 import { useRouter } from 'vue-router'
-import { PageContainer } from '@/components/common'
+import { BizO2oItemSpecText, PageContainer } from '@/components/common'
 import { usePermissionAction } from '@/composables/usePermissionAction'
 import { useStableRequest } from '@/composables/useStableRequest'
 import {
@@ -1916,6 +1916,7 @@ onBeforeUnmount(() => {
                     >
                       <div class="min-w-0">
                         <p class="break-words text-sm font-semibold text-slate-900">{{ item.productName }}</p>
+                        <BizO2oItemSpecText :item="item" />
                         <p class="mt-1 text-xs text-slate-400">{{ item.productCode }}</p>
                       </div>
                       <p class="shrink-0 text-sm font-semibold text-slate-700">x {{ item.qty }}</p>
@@ -1938,7 +1939,12 @@ onBeforeUnmount(() => {
             <div class="hidden sm:block">
               <div class="table-scroll-wrap">
                 <el-table native-scrollbar :data="activeOrderDetail.items" row-key="id" :loading="detailLoading">
-                  <el-table-column prop="productName" label="商品名称" min-width="180" />
+                  <el-table-column prop="productName" label="商品名称" min-width="180">
+                    <template #default="{ row }">
+                      <p class="break-words">{{ row.productName }}</p>
+                      <BizO2oItemSpecText :item="row" />
+                    </template>
+                  </el-table-column>
                   <el-table-column prop="defaultPrice" label="单价" width="120">
                     <template #default="{ row }">
                       <span>¥{{ formatCurrency(row.defaultPrice) }}</span>
@@ -1960,6 +1966,7 @@ onBeforeUnmount(() => {
                 class="rounded-2xl border border-slate-100 bg-slate-50 px-3 py-3"
               >
                 <p class="break-words text-sm font-semibold text-slate-900">{{ item.productName }}</p>
+                <BizO2oItemSpecText :item="item" />
                 <div class="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500">
                   <p>单价：¥{{ formatCurrency(item.defaultPrice) }}</p>
                   <p class="text-right">数量：{{ item.qty }}</p>

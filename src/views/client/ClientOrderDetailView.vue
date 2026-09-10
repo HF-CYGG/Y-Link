@@ -27,7 +27,7 @@ import {
   type O2oReturnRequestDetail,
 } from '@/api/modules/o2o'
 import type { OrderDetailResult } from '@/api/modules/order'
-import { BaseRequestState } from '@/components/common'
+import { BaseRequestState, BizO2oItemSpecText } from '@/components/common'
 import { useStableRequest } from '@/composables/useStableRequest'
 import {
   CLIENT_O2O_ORDER_STATUS_LABEL_MAP,
@@ -48,6 +48,7 @@ import { showCriticalErrorDialog } from '@/utils/error-dialog'
 import ClientOrderEditDialog from '@/views/client/components/ClientOrderEditDialog.vue'
 import ClientOrderReturnDialog from '@/views/client/components/ClientOrderReturnDialog.vue'
 import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
+import { buildO2oItemDisplayName } from '@/utils/o2o-item-spec'
 import { normalizeDiscountRateText, resolveO2oPriceView, type O2oPriceSource } from '@/utils/o2o-price'
 import {
   DEFAULT_VOUCHER_ORIENTATION,
@@ -355,7 +356,8 @@ const voucherOrder = computed<OrderDetailResult | null>(() => {
         id: item.id,
         productId: item.productId,
         productCode: item.productCode,
-        productName: item.productName,
+        // 正式出库单落库的商品名带下单规格，这里同口径拼接，避免核销前预览与核销后打印对不上。
+        productName: buildO2oItemDisplayName(item.productName, item),
         qty: String(item.qty),
         unitPrice,
         subTotal,
@@ -1660,7 +1662,10 @@ onBeforeUnmount(() => {
               </thead>
               <tbody class="divide-y divide-slate-100 bg-white text-slate-700">
                 <tr v-for="item in detail.items" :key="item.id">
-                  <td class="px-4 py-3">{{ item.productName }}</td>
+                  <td class="px-4 py-3">
+                    <p class="break-words">{{ item.productName }}</p>
+                    <BizO2oItemSpecText :item="item" />
+                  </td>
                   <td class="px-4 py-3 text-right">
                     <p class="font-semibold text-teal-600">¥{{ resolveDiscountedUnitPrice(item) }}</p>
                     <p v-if="shouldShowDiscountMeta(item)" class="text-xs text-slate-400">
@@ -1753,7 +1758,10 @@ onBeforeUnmount(() => {
                       </thead>
                       <tbody class="divide-y divide-slate-100 text-slate-700">
                         <tr v-for="item in request.items" :key="item.id">
-                          <td class="px-4 py-3">{{ item.productName }}</td>
+                          <td class="px-4 py-3">
+                            <p class="break-words">{{ item.productName }}</p>
+                            <BizO2oItemSpecText :item="item" />
+                          </td>
                           <td class="px-4 py-3 text-right font-medium">{{ item.qty }}</td>
                         </tr>
                       </tbody>
