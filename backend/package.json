@@ -34,6 +34,7 @@
     "security:http-boundary:verify": "node --import tsx scripts/http-security-verify.ts",
     "security:business-boundary:verify": "node --import tsx scripts/security-business-contract-verify.ts",
     "security:findings:verify": "tsx scripts/security-findings-remediation-verify.ts",
+    "security:safe-http:verify": "node --import tsx scripts/safe-http-request-verify.ts",
     "verification:aliyun:verify": "tsx scripts/verification-aliyun-verify.ts",
     "spec:fix-order-product-tag-consistency:verify": "tsx scripts/fix-order-product-tag-consistency-verify.ts",
     "task1:verify": "tsx scripts/task1-verify.ts",
