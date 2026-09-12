@@ -22,7 +22,7 @@
  *   （CREATE TABLE IF NOT EXISTS / information_schema 判断 + PREPARE-EXECUTE 动态 DDL），
  *   再追加到 AUTO_MIGRATABLE_FILES；不要使用 MariaDB 专有的 ADD COLUMN IF NOT EXISTS；
  * - 新增强依赖的关键结构时，请同步补充 MYSQL_REQUIRED_TABLES / MYSQL_REQUIRED_COLUMNS /
- *   MYSQL_REQUIRED_INDEXES 及其迁移脚本映射，
+ *   MYSQL_REQUIRED_INDEXES / MYSQL_REQUIRED_FOREIGN_KEYS 及其迁移脚本映射，
  *   并保持与 database-bootstrap.ts 的 SQLITE_REQUIRED_TABLES 口径一致；
  * - 若引入新的不可重放脚本，请同步补充 NON_IDEMPOTENT_HISTORICAL_SCRIPTS，
  *   避免报错文案误导运维"可以安全重放"。
@@ -97,6 +97,10 @@ interface MysqlRequiredColumn {
   columnName: string
   introducingScript: string
   minCharacterMaximumLength?: number
+  expectedCharacterMaximumLength?: number
+  expectedDataType?: string
+  expectedColumnType?: string
+  expectedNullable?: boolean
 }
 
 interface MysqlRequiredIndex {
@@ -104,6 +108,15 @@ interface MysqlRequiredIndex {
   indexName: string
   columns: readonly string[]
   unique: boolean
+  introducingScript: string
+}
+
+interface MysqlRequiredForeignKey {
+  tableName: string
+  columnName: string
+  referencedTableName: string
+  referencedColumnName: string
+  deleteRule: string
   introducingScript: string
 }
 
@@ -133,9 +146,32 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
   { tableName: 'o2o_preorder', columnName: 'cancellation_source', introducingScript: '040_o2o_preorder_governance.sql' },
   { tableName: 'o2o_preorder', columnName: 'cancellation_remark', introducingScript: '040_o2o_preorder_governance.sql' },
   { tableName: 'o2o_preorder', columnName: 'cancelled_at', introducingScript: '040_o2o_preorder_governance.sql' },
-  { tableName: 'biz_outbound_order_item', columnName: 'sku_id', introducingScript: '041_manual_outbound_sku.sql' },
-  { tableName: 'biz_outbound_order_item', columnName: 'sku_code_snapshot', introducingScript: '041_manual_outbound_sku.sql' },
-  { tableName: 'biz_outbound_order_item', columnName: 'spec_text_snapshot', introducingScript: '041_manual_outbound_sku.sql' },
+  {
+    tableName: 'biz_outbound_order_item',
+    columnName: 'sku_id',
+    introducingScript: '041_manual_outbound_sku.sql',
+    expectedDataType: 'bigint',
+    expectedColumnType: 'bigint unsigned',
+    expectedNullable: true,
+  },
+  {
+    tableName: 'biz_outbound_order_item',
+    columnName: 'sku_code_snapshot',
+    introducingScript: '041_manual_outbound_sku.sql',
+    expectedDataType: 'varchar',
+    expectedColumnType: 'varchar(96)',
+    expectedCharacterMaximumLength: 96,
+    expectedNullable: true,
+  },
+  {
+    tableName: 'biz_outbound_order_item',
+    columnName: 'spec_text_snapshot',
+    introducingScript: '041_manual_outbound_sku.sql',
+    expectedDataType: 'varchar',
+    expectedColumnType: 'varchar(255)',
+    expectedCharacterMaximumLength: 255,
+    expectedNullable: true,
+  },
   { tableName: 'business_sequence', columnName: 'sequence_key', introducingScript: '035_o2o_idempotency_business_sequence.sql' },
   { tableName: 'business_sequence', columnName: 'current_value', introducingScript: '035_o2o_idempotency_business_sequence.sql' },
   { tableName: 'business_sequence', columnName: 'created_at', introducingScript: '035_o2o_idempotency_business_sequence.sql' },
@@ -292,6 +328,15 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
     introducingScript: '039_aliyun_pnvs_sms_verification.sql',
   },
 ]
+
+const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [{
+  tableName: 'biz_outbound_order_item',
+  columnName: 'sku_id',
+  referencedTableName: 'base_product_sku',
+  referencedColumnName: 'id',
+  deleteRule: 'SET NULL',
+  introducingScript: '041_manual_outbound_sku.sql',
+}]
 
 // 不可重复执行的历史脚本。
 // 原先 006/008/014/015/016 因裸 ALTER TABLE ADD COLUMN 也在此列，已改造为
@@ -460,23 +505,26 @@ export async function runMysqlSchemaMigrations(dataSource: DataSource): Promise<
 }
 
 /**
- * 自动迁移脚本只有在其负责的关键列/索引真实存在后才允许写 tracking。
+ * 自动迁移脚本只有在其负责的关键列/索引/外键真实存在且形状正确后才允许写 tracking。
  * 这不会猜测性修复人工创建的部分表，而是避免 `CREATE TABLE IF NOT EXISTS`
  * 对异常同名表无操作后仍被误记为“已应用”。
  */
 async function assertAutoMigrationResult(queryRunner: QueryRunner, filename: string): Promise<void> {
   const requiredColumns = MYSQL_REQUIRED_COLUMNS.filter((item) => item.introducingScript === filename)
   const requiredIndexes = MYSQL_REQUIRED_INDEXES.filter((item) => item.introducingScript === filename)
-  if (requiredColumns.length === 0 && requiredIndexes.length === 0) return
+  const requiredForeignKeys = MYSQL_REQUIRED_FOREIGN_KEYS.filter((item) => item.introducingScript === filename)
+  if (requiredColumns.length === 0 && requiredIndexes.length === 0 && requiredForeignKeys.length === 0) return
 
   const tableNames = [...new Set([
     ...requiredColumns.map((item) => item.tableName),
     ...requiredIndexes.map((item) => item.tableName),
+    ...requiredForeignKeys.map((item) => item.tableName),
   ])]
   const columnNames = [...new Set(requiredColumns.map((item) => item.columnName))]
   const columnRows: MysqlColumnRow[] = requiredColumns.length > 0
     ? await queryRunner.query(
-        `SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS
+        `SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, CHARACTER_MAXIMUM_LENGTH
+         FROM information_schema.COLUMNS
          WHERE TABLE_SCHEMA = DATABASE()
            AND TABLE_NAME IN (${tableNames.map(() => '?').join(', ')})
            AND COLUMN_NAME IN (${columnNames.map(() => '?').join(', ')})`,
@@ -487,6 +535,7 @@ async function assertAutoMigrationResult(queryRunner: QueryRunner, filename: str
   const missingColumns = requiredColumns.filter((item) => (
     !existingColumns.has(schemaObjectKey(item.tableName, item.columnName))
   ))
+  const invalidColumnDefinitions = collectMysqlColumnDefinitionIssues(columnRows, requiredColumns)
 
   const indexNames = [...new Set(requiredIndexes.map((item) => item.indexName))]
   const indexRows: MysqlIndexRow[] = requiredIndexes.length > 0
@@ -515,11 +564,36 @@ async function assertAutoMigrationResult(queryRunner: QueryRunner, filename: str
       || actual.columns.length !== requirement.columns.length
       || requirement.columns.some((column, index) => actual.columns[index] !== column)
   })
-  if (missingColumns.length === 0 && invalidIndexes.length === 0) return
+
+  const foreignKeyRows: MysqlForeignKeyRow[] = requiredForeignKeys.length > 0
+    ? await queryRunner.query(
+        `SELECT kcu.TABLE_NAME, kcu.CONSTRAINT_NAME, kcu.COLUMN_NAME,
+                kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME,
+                kcu.ORDINAL_POSITION, rc.DELETE_RULE
+         FROM information_schema.KEY_COLUMN_USAGE kcu
+         INNER JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
+           ON rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
+          AND rc.TABLE_NAME = kcu.TABLE_NAME
+          AND rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+         WHERE kcu.CONSTRAINT_SCHEMA = DATABASE()
+           AND kcu.TABLE_NAME IN (${tableNames.map(() => '?').join(', ')})
+           AND kcu.REFERENCED_TABLE_NAME IS NOT NULL`,
+        tableNames,
+      )
+    : []
+  const invalidForeignKeys = collectMysqlForeignKeyIssues(foreignKeyRows, requiredForeignKeys)
+  if (
+    missingColumns.length === 0
+    && invalidColumnDefinitions.length === 0
+    && invalidIndexes.length === 0
+    && invalidForeignKeys.length === 0
+  ) return
 
   const missingLabels = [
     ...missingColumns.map((item) => `字段 ${item.tableName}.${item.columnName}`),
+    ...invalidColumnDefinitions.map((item) => item.label),
     ...invalidIndexes.map((item) => `索引 ${item.tableName}.${item.indexName}`),
+    ...invalidForeignKeys.map((item) => item.label),
   ]
   throw new Error(
     `[启动失败] 自动迁移 ${filename} 执行后结构仍不完整，未写入迁移记录：${missingLabels.join('、')}。`
@@ -580,6 +654,9 @@ interface MysqlTableRow {
 
 interface MysqlColumnRow extends MysqlTableRow {
   COLUMN_NAME: string
+  DATA_TYPE: string
+  COLUMN_TYPE: string
+  IS_NULLABLE: string
   CHARACTER_MAXIMUM_LENGTH: number | string | null
 }
 
@@ -590,7 +667,91 @@ interface MysqlIndexRow extends MysqlTableRow {
   NON_UNIQUE: number | string
 }
 
+interface MysqlForeignKeyRow extends MysqlTableRow {
+  CONSTRAINT_NAME: string
+  COLUMN_NAME: string
+  REFERENCED_TABLE_NAME: string
+  REFERENCED_COLUMN_NAME: string
+  ORDINAL_POSITION: number | string
+  DELETE_RULE: string
+}
+
+interface MysqlSchemaShapeIssue<TRequirement> {
+  requirement: TRequirement
+  label: string
+}
+
 const schemaObjectKey = (tableName: string, objectName: string) => `${tableName}.${objectName}`
+
+const normalizeMysqlDefinition = (value: unknown): string => String(value ?? '').trim().toLowerCase().replaceAll(/\s+/g, ' ')
+
+function collectMysqlColumnDefinitionIssues(
+  rows: MysqlColumnRow[],
+  requirements: readonly MysqlRequiredColumn[],
+): Array<MysqlSchemaShapeIssue<MysqlRequiredColumn>> {
+  const rowMap = new Map(rows.map((row) => [schemaObjectKey(row.TABLE_NAME, row.COLUMN_NAME), row]))
+  return requirements.flatMap((requirement) => {
+    const row = rowMap.get(schemaObjectKey(requirement.tableName, requirement.columnName))
+    if (!row) return []
+    const labels: string[] = []
+    const expectedType = requirement.expectedColumnType ?? requirement.expectedDataType
+    if (
+      (requirement.expectedDataType
+        && normalizeMysqlDefinition(row.DATA_TYPE) !== normalizeMysqlDefinition(requirement.expectedDataType))
+      || (requirement.expectedColumnType
+        && normalizeMysqlDefinition(row.COLUMN_TYPE) !== normalizeMysqlDefinition(requirement.expectedColumnType))
+    ) {
+      labels.push(`字段 ${requirement.tableName}.${requirement.columnName} 类型应为 ${expectedType}`)
+    }
+    if (
+      requirement.expectedNullable !== undefined
+      && (normalizeMysqlDefinition(row.IS_NULLABLE) === 'yes') !== requirement.expectedNullable
+    ) {
+      labels.push(
+        requirement.expectedNullable
+          ? `字段 ${requirement.tableName}.${requirement.columnName} 必须允许 NULL`
+          : `字段 ${requirement.tableName}.${requirement.columnName} 必须为 NOT NULL`,
+      )
+    }
+    if (
+      requirement.expectedCharacterMaximumLength !== undefined
+      && Number(row.CHARACTER_MAXIMUM_LENGTH) !== requirement.expectedCharacterMaximumLength
+    ) {
+      labels.push(
+        `字段 ${requirement.tableName}.${requirement.columnName} 长度应为 ${requirement.expectedCharacterMaximumLength}`,
+      )
+    }
+    return labels.map((label) => ({ requirement, label }))
+  })
+}
+
+function collectMysqlForeignKeyIssues(
+  rows: MysqlForeignKeyRow[],
+  requirements: readonly MysqlRequiredForeignKey[],
+): Array<MysqlSchemaShapeIssue<MysqlRequiredForeignKey>> {
+  return requirements.flatMap((requirement) => {
+    const sourceRows = rows.filter((row) => (
+      row.TABLE_NAME === requirement.tableName && row.COLUMN_NAME === requirement.columnName
+    ))
+    if (
+      sourceRows.length !== 1
+      || sourceRows[0]?.REFERENCED_TABLE_NAME !== requirement.referencedTableName
+      || sourceRows[0]?.REFERENCED_COLUMN_NAME !== requirement.referencedColumnName
+    ) {
+      return [{
+        requirement,
+        label: `外键 ${requirement.tableName}.${requirement.columnName} 目标应为 ${requirement.referencedTableName}.${requirement.referencedColumnName}`,
+      }]
+    }
+    if (normalizeMysqlDefinition(sourceRows[0]?.DELETE_RULE) !== normalizeMysqlDefinition(requirement.deleteRule)) {
+      return [{
+        requirement,
+        label: `外键 ${requirement.tableName}.${requirement.columnName} 必须使用 ON DELETE ${requirement.deleteRule}`,
+      }]
+    }
+    return []
+  })
+}
 
 /** 启动期只读自检：确认当前代码会直接依赖的 MySQL 表、字段与索引结构均已落地。 */
 export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): Promise<void> {
@@ -613,7 +774,8 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
   const requiredColumnNames = [...new Set(requiredColumnsOnExistingTables.map((item) => item.columnName))]
   const columnRows: MysqlColumnRow[] = requiredColumnsOnExistingTables.length > 0
     ? await dataSource.query(
-        `SELECT TABLE_NAME, COLUMN_NAME, CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS
+        `SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, CHARACTER_MAXIMUM_LENGTH
+         FROM information_schema.COLUMNS
          WHERE TABLE_SCHEMA = DATABASE()
            AND TABLE_NAME IN (${requiredColumnTables.map(() => '?').join(', ')})
            AND COLUMN_NAME IN (${requiredColumnNames.map(() => '?').join(', ')})`,
@@ -632,6 +794,10 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
     const row = existingColumnMap.get(schemaObjectKey(requirement.tableName, requirement.columnName))
     return Boolean(row) && Number(row?.CHARACTER_MAXIMUM_LENGTH ?? 0) < requirement.minCharacterMaximumLength
   })
+  const invalidColumnDefinitions = collectMysqlColumnDefinitionIssues(
+    columnRows,
+    requiredColumnsOnExistingTables,
+  )
 
   const requiredIndexesOnExistingTables = MYSQL_REQUIRED_INDEXES.filter((requirement) => (
     existingTableSet.has(requirement.tableName)
@@ -665,11 +831,35 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
       || requirement.columns.some((column, index) => actual.columns[index] !== column)
   })
 
+  const requiredForeignKeysOnExistingTables = MYSQL_REQUIRED_FOREIGN_KEYS.filter((requirement) => (
+    existingTableSet.has(requirement.tableName)
+  ))
+  const requiredForeignKeyTables = [...new Set(requiredForeignKeysOnExistingTables.map((item) => item.tableName))]
+  const foreignKeyRows: MysqlForeignKeyRow[] = requiredForeignKeysOnExistingTables.length > 0
+    ? await dataSource.query(
+        `SELECT kcu.TABLE_NAME, kcu.CONSTRAINT_NAME, kcu.COLUMN_NAME,
+                kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME,
+                kcu.ORDINAL_POSITION, rc.DELETE_RULE
+         FROM information_schema.KEY_COLUMN_USAGE kcu
+         INNER JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
+           ON rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
+          AND rc.TABLE_NAME = kcu.TABLE_NAME
+          AND rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+         WHERE kcu.CONSTRAINT_SCHEMA = DATABASE()
+           AND kcu.TABLE_NAME IN (${requiredForeignKeyTables.map(() => '?').join(', ')})
+           AND kcu.REFERENCED_TABLE_NAME IS NOT NULL`,
+        requiredForeignKeyTables,
+      )
+    : []
+  const invalidForeignKeys = collectMysqlForeignKeyIssues(foreignKeyRows, requiredForeignKeysOnExistingTables)
+
   if (
     missingTables.length === 0
     && missingColumns.length === 0
     && undersizedColumns.length === 0
+    && invalidColumnDefinitions.length === 0
     && invalidIndexes.length === 0
+    && invalidForeignKeys.length === 0
   ) {
     return
   }
@@ -695,8 +885,16 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
       label: `字段 ${requirement.tableName}.${requirement.columnName} 字符容量不足（至少 ${requirement.minCharacterMaximumLength}）`,
       script: requirement.introducingScript,
     })),
+    ...invalidColumnDefinitions.map(({ requirement, label }) => ({
+      label,
+      script: requirement.introducingScript,
+    })),
     ...invalidIndexes.map((requirement) => ({
       label: `索引 ${requirement.tableName}.${requirement.indexName}`,
+      script: requirement.introducingScript,
+    })),
+    ...invalidForeignKeys.map(({ requirement, label }) => ({
+      label,
       script: requirement.introducingScript,
     })),
   ]
@@ -711,8 +909,14 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
     undersizedColumns.length > 0
       ? `字符容量不足的必需字段：${undersizedColumns.map((item) => `${item.tableName}.${item.columnName}`).join(', ')}`
       : null,
+    invalidColumnDefinitions.length > 0
+      ? `定义不匹配的必需字段：${[...new Set(invalidColumnDefinitions.map((item) => `${item.requirement.tableName}.${item.requirement.columnName}`))].join(', ')}`
+      : null,
     invalidIndexes.length > 0
       ? `缺少或定义不匹配的必需索引：${invalidIndexes.map((item) => `${item.tableName}.${item.indexName}`).join(', ')}`
+      : null,
+    invalidForeignKeys.length > 0
+      ? `缺少或定义不匹配的必需外键：${invalidForeignKeys.map((item) => `${item.requirement.tableName}.${item.requirement.columnName}`).join(', ')}`
       : null,
   ].filter((item): item is string => Boolean(item)).join('；')
 

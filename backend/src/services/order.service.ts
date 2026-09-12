@@ -163,6 +163,7 @@ interface NormalizedSubmitOrderItem {
 interface ResolvedSubmitOrderItem extends Omit<NormalizedSubmitOrderItem, 'skuId'> {
   skuId: string
   sku: BaseProductSku
+  shouldUpdateProductDefaultPrice: boolean
 }
 
 const normalizeEntityId = (value: string | number): string => String(value).trim()
@@ -775,6 +776,11 @@ export class OrderService {
       .getMany()
     const skuMap = new Map(skus.map((sku) => [String(sku.id), sku]))
     const activeSkusByProduct = new Map<string, BaseProductSku[]>()
+    const currentSkuCountByProduct = new Map<string, number>()
+    skus.filter((sku) => this.isDatabaseFlagEnabled(sku.isCurrent)).forEach((sku) => {
+      const productId = String(sku.productId)
+      currentSkuCountByProduct.set(productId, (currentSkuCountByProduct.get(productId) ?? 0) + 1)
+    })
     skus.filter((sku) => this.isCurrentActiveSku(sku)).forEach((sku) => {
       const productId = String(sku.productId)
       const current = activeSkusByProduct.get(productId) ?? []
@@ -789,6 +795,7 @@ export class OrderService {
         throw new BizError(`第 ${index + 1} 行产品不存在`, 400)
       }
 
+      const candidates = activeSkusByProduct.get(item.productId) ?? []
       let sku: BaseProductSku | undefined
       if (item.skuId) {
         sku = skuMap.get(item.skuId)
@@ -802,7 +809,6 @@ export class OrderService {
           throw new BizError(`第 ${index + 1} 行商品“${product.productName}”的规格已停用或不属于当前版本`, 409)
         }
       } else {
-        const candidates = activeSkusByProduct.get(item.productId) ?? []
         if (candidates.length === 0) {
           throw new BizError(`第 ${index + 1} 行商品“${product.productName}”暂无当前启用规格`, 409)
         }
@@ -818,13 +824,22 @@ export class OrderService {
         throw new BizError(`第 ${index + 1} 行与前面明细为同一规格，请合并数量后再提交`, 400)
       }
       resolvedKeySet.add(resolvedKey)
-      return { ...item, skuId: resolvedSkuId, sku }
+      return {
+        ...item,
+        skuId: resolvedSkuId,
+        sku,
+        // 商品主价只保留单 current SKU 的历史回写；多 SKU 人工价不能因明细顺序污染主价。
+        shouldUpdateProductDefaultPrice: currentSkuCountByProduct.get(item.productId) === 1,
+      }
     })
   }
 
   private isCurrentActiveSku(sku: Pick<BaseProductSku, 'isActive' | 'isCurrent'>): boolean {
-    const isEnabled = (value: unknown) => value !== false && value !== 0 && value !== '0' && value !== 'false'
-    return isEnabled(sku.isActive) && isEnabled(sku.isCurrent)
+    return this.isDatabaseFlagEnabled(sku.isActive) && this.isDatabaseFlagEnabled(sku.isCurrent)
+  }
+
+  private isDatabaseFlagEnabled(value: unknown): boolean {
+    return value !== false && value !== 0 && value !== '0' && value !== 'false'
   }
 
   private buildSubmitOrderContext(input: SubmitOrderInput, actor: AuthUserContext): SubmitOrderContext {
@@ -880,7 +895,9 @@ export class OrderService {
       const lineAmount = Number((item.qty * item.unitPrice).toFixed(2))
       totalQty += item.qty
       totalAmount += lineAmount
-      latestProductPriceMap.set(normalizedProductId, item.unitPrice.toFixed(2))
+      if (item.shouldUpdateProductDefaultPrice) {
+        latestProductPriceMap.set(normalizedProductId, item.unitPrice.toFixed(2))
+      }
 
       itemEntities.push(
         itemRepo.create({

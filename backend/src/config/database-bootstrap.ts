@@ -318,6 +318,34 @@ async function hasSqliteUniqueIndexShape(
     && actualColumns.every((column, index) => column === expectedColumns[index])
 }
 
+/**
+ * SQLite 的 ALTER TABLE ADD COLUMN 不会补外键；因此存量库即使列和索引齐全，仍要按实际 FK 形状触发一次
+ * TypeORM 的临时表复制升级。该同步路径会按同名列复制历史数据，不做 SKU 回填或删除。
+ */
+async function hasSqliteForeignKeyShape(
+  dataSource: DataSource,
+  tableName: string,
+  expected: {
+    from: string
+    referencedTable: string
+    referencedColumn: string
+    onDelete: string
+  },
+): Promise<boolean> {
+  const foreignKeys: Array<{
+    table: string
+    from: string
+    to: string
+    on_delete: string
+  }> = await dataSource.query(`PRAGMA foreign_key_list('${tableName}')`)
+  return foreignKeys.some((foreignKey) => (
+    foreignKey.from === expected.from
+    && foreignKey.table === expected.referencedTable
+    && foreignKey.to === expected.referencedColumn
+    && foreignKey.on_delete.toUpperCase() === expected.onDelete.toUpperCase()
+  ))
+}
+
 async function listSqliteIndexes(dataSource: DataSource, tableName: string): Promise<Set<string>> {
   const indexes: Array<{ name: string }> = await dataSource.query(`PRAGMA index_list('${tableName}')`)
   return new Set(indexes.map((index) => index.name))
@@ -1124,6 +1152,14 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
 
   const orderItemColumnSet = await listSqliteTableColumns(dataSource, 'biz_outbound_order_item')
   if (SQLITE_REQUIRED_ORDER_ITEM_COLUMNS.some((column) => !orderItemColumnSet.has(column))) {
+    return true
+  }
+  if (!await hasSqliteForeignKeyShape(dataSource, 'biz_outbound_order_item', {
+    from: 'sku_id',
+    referencedTable: 'base_product_sku',
+    referencedColumn: 'id',
+    onDelete: 'SET NULL',
+  })) {
     return true
   }
 

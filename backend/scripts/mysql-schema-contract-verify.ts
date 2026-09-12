@@ -1,6 +1,6 @@
 /**
  * 文件说明：MySQL 启动结构契约回归验证。
- * 实现逻辑：使用只读 DataSource 替身模拟完整库、漏执行 035/036/038/039 及同名错误索引，
+ * 实现逻辑：使用只读 DataSource 替身模拟完整库、漏执行 035/036/038/039/041、错误列形状、外键及同名错误索引，
  * 确认服务会在对外启动前阻断，并给出精确的增量脚本指引。
  */
 
@@ -90,11 +90,49 @@ const REQUIRED_COLUMN_LENGTHS = new Map<string, number>([
   ['sms_verification_record.scheme_name', 20],
 ])
 
+interface ColumnFixture {
+  dataType: string
+  columnType: string
+  isNullable: 'YES' | 'NO'
+  characterMaximumLength: number | null
+}
+
+const REQUIRED_MANUAL_OUTBOUND_COLUMN_DEFINITIONS = new Map<string, ColumnFixture>([
+  ['biz_outbound_order_item.sku_id', {
+    dataType: 'bigint',
+    columnType: 'bigint unsigned',
+    isNullable: 'YES',
+    characterMaximumLength: null,
+  }],
+  ['biz_outbound_order_item.sku_code_snapshot', {
+    dataType: 'varchar',
+    columnType: 'varchar(96)',
+    isNullable: 'YES',
+    characterMaximumLength: 96,
+  }],
+  ['biz_outbound_order_item.spec_text_snapshot', {
+    dataType: 'varchar',
+    columnType: 'varchar(255)',
+    isNullable: 'YES',
+    characterMaximumLength: 255,
+  }],
+])
+
 interface IndexFixture {
   tableName: string
   indexName: string
   columns: string[]
   unique: boolean
+}
+
+interface ForeignKeyFixture {
+  tableName: string
+  constraintName: string
+  columnName: string
+  referencedTableName: string
+  referencedColumnName: string
+  ordinalPosition: number
+  deleteRule: string
 }
 
 const REQUIRED_INDEXES: readonly IndexFixture[] = [
@@ -196,11 +234,22 @@ const REQUIRED_INDEXES: readonly IndexFixture[] = [
   },
 ]
 
+const REQUIRED_FOREIGN_KEYS: readonly ForeignKeyFixture[] = [{
+  tableName: 'biz_outbound_order_item',
+  constraintName: 'fk_biz_outbound_item_sku_id',
+  columnName: 'sku_id',
+  referencedTableName: 'base_product_sku',
+  referencedColumnName: 'id',
+  ordinalPosition: 1,
+  deleteRule: 'SET NULL',
+}]
+
 interface SchemaFixture {
   tables: Set<string>
   columns: Set<string>
-  columnLengths: Map<string, number | null>
+  columnDefinitions: Map<string, ColumnFixture>
   indexes: Map<string, IndexFixture>
+  foreignKeys: Map<string, ForeignKeyFixture>
 }
 
 const objectKey = (tableName: string, objectName: string) => `${tableName}.${objectName}`
@@ -209,14 +258,24 @@ function createCompleteFixture(): SchemaFixture {
   return {
     tables: new Set(REQUIRED_TABLES),
     columns: new Set(REQUIRED_COLUMNS.map(([tableName, columnName]) => objectKey(tableName, columnName))),
-    columnLengths: new Map(REQUIRED_COLUMNS.map(([tableName, columnName]) => {
+    columnDefinitions: new Map(REQUIRED_COLUMNS.map(([tableName, columnName]) => {
       const key = objectKey(tableName, columnName)
-      return [key, REQUIRED_COLUMN_LENGTHS.get(key) ?? null]
+      const definition = REQUIRED_MANUAL_OUTBOUND_COLUMN_DEFINITIONS.get(key) ?? {
+        dataType: 'varchar',
+        columnType: `varchar(${REQUIRED_COLUMN_LENGTHS.get(key) ?? 255})`,
+        isNullable: 'YES',
+        characterMaximumLength: REQUIRED_COLUMN_LENGTHS.get(key) ?? null,
+      }
+      return [key, { ...definition }]
     })),
     indexes: new Map(REQUIRED_INDEXES.map((index) => [objectKey(index.tableName, index.indexName), {
       ...index,
       columns: [...index.columns],
     }])),
+    foreignKeys: new Map(REQUIRED_FOREIGN_KEYS.map((foreignKey) => [
+      objectKey(foreignKey.tableName, foreignKey.constraintName),
+      { ...foreignKey },
+    ])),
   }
 }
 
@@ -230,13 +289,30 @@ function createDataSource(fixture: SchemaFixture): DataSource {
         return [...fixture.columns]
           .map((key) => {
             const separatorIndex = key.indexOf('.')
+            const definition = fixture.columnDefinitions.get(key)
             return {
               TABLE_NAME: key.slice(0, separatorIndex),
               COLUMN_NAME: key.slice(separatorIndex + 1),
-              CHARACTER_MAXIMUM_LENGTH: fixture.columnLengths.get(key) ?? null,
+              DATA_TYPE: definition?.dataType ?? 'varchar',
+              COLUMN_TYPE: definition?.columnType ?? 'varchar(255)',
+              IS_NULLABLE: definition?.isNullable ?? 'YES',
+              CHARACTER_MAXIMUM_LENGTH: definition?.characterMaximumLength ?? null,
             }
           })
           .filter((row) => fixture.tables.has(row.TABLE_NAME))
+      }
+      if (sql.includes('information_schema.KEY_COLUMN_USAGE')) {
+        return [...fixture.foreignKeys.values()]
+          .filter((foreignKey) => fixture.tables.has(foreignKey.tableName))
+          .map((foreignKey) => ({
+            TABLE_NAME: foreignKey.tableName,
+            CONSTRAINT_NAME: foreignKey.constraintName,
+            COLUMN_NAME: foreignKey.columnName,
+            REFERENCED_TABLE_NAME: foreignKey.referencedTableName,
+            REFERENCED_COLUMN_NAME: foreignKey.referencedColumnName,
+            ORDINAL_POSITION: foreignKey.ordinalPosition,
+            DELETE_RULE: foreignKey.deleteRule,
+          }))
       }
       if (sql.includes('information_schema.STATISTICS')) {
         return [...fixture.indexes.values()]
@@ -328,6 +404,43 @@ await expectSchemaFailure(missingManualOutboundSkuIndex, [
   '041_manual_outbound_sku.sql',
 ])
 
+const nonNullableManualOutboundSkuId = createCompleteFixture()
+nonNullableManualOutboundSkuId.columnDefinitions.get(objectKey('biz_outbound_order_item', 'sku_id'))!.isNullable = 'NO'
+await expectSchemaFailure(nonNullableManualOutboundSkuId, [
+  '字段 biz_outbound_order_item.sku_id 必须允许 NULL',
+  '041_manual_outbound_sku.sql',
+])
+
+const signedManualOutboundSkuId = createCompleteFixture()
+signedManualOutboundSkuId.columnDefinitions.get(objectKey('biz_outbound_order_item', 'sku_id'))!.columnType = 'bigint'
+await expectSchemaFailure(signedManualOutboundSkuId, [
+  '字段 biz_outbound_order_item.sku_id 类型应为 bigint unsigned',
+  '041_manual_outbound_sku.sql',
+])
+
+const shortManualOutboundSkuCode = createCompleteFixture()
+shortManualOutboundSkuCode.columnDefinitions.get(objectKey('biz_outbound_order_item', 'sku_code_snapshot'))!.characterMaximumLength = 95
+shortManualOutboundSkuCode.columnDefinitions.get(objectKey('biz_outbound_order_item', 'sku_code_snapshot'))!.columnType = 'varchar(95)'
+await expectSchemaFailure(shortManualOutboundSkuCode, [
+  '字段 biz_outbound_order_item.sku_code_snapshot 长度应为 96',
+  '041_manual_outbound_sku.sql',
+])
+
+const wrongManualOutboundSkuForeignTarget = createCompleteFixture()
+wrongManualOutboundSkuForeignTarget.foreignKeys.get(objectKey('biz_outbound_order_item', 'fk_biz_outbound_item_sku_id'))!.referencedTableName = 'base_product'
+await expectSchemaFailure(wrongManualOutboundSkuForeignTarget, [
+  '外键 biz_outbound_order_item.sku_id',
+  '目标应为 base_product_sku.id',
+  '041_manual_outbound_sku.sql',
+])
+
+const wrongManualOutboundSkuDeleteRule = createCompleteFixture()
+wrongManualOutboundSkuDeleteRule.foreignKeys.get(objectKey('biz_outbound_order_item', 'fk_biz_outbound_item_sku_id'))!.deleteRule = 'RESTRICT'
+await expectSchemaFailure(wrongManualOutboundSkuDeleteRule, [
+  '外键 biz_outbound_order_item.sku_id 必须使用 ON DELETE SET NULL',
+  '041_manual_outbound_sku.sql',
+])
+
 const missingOutboxColumn = createCompleteFixture()
 missingOutboxColumn.columns.delete(objectKey('notification_event', 'next_attempt_at'))
 await expectSchemaFailure(missingOutboxColumn, [
@@ -345,7 +458,7 @@ await expectSchemaFailure(missingSmsSchemeColumn, [
 
 for (const [columnKey] of REQUIRED_COLUMN_LENGTHS) {
   const shortRequiredColumn = createCompleteFixture()
-  shortRequiredColumn.columnLengths.set(columnKey, 1)
+  shortRequiredColumn.columnDefinitions.get(columnKey)!.characterMaximumLength = 1
   const introducingScript = columnKey === 'sms_verification_record.scheme_name'
     ? '039_aliyun_pnvs_sms_verification.sql'
     : '038_department_path_capacity.sql'

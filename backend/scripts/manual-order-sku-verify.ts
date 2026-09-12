@@ -3,7 +3,8 @@
  * 文件职责：在隔离 SQLite 中验证手工出库的 SKU 校验、快照、历史兼容和零库存副作用。
  * 实现逻辑：
  * - 创建单规格、多规格商品，覆盖自动选择、强制选择、归属/启停/当前版本校验；
- * - 以人工修改价提交同商品不同 SKU，核对持久化快照、详情与报表输出；
+ * - 以人工修改价提交同商品不同 SKU，核对单 SKU 主价兼容与多 current SKU 主价隔离；
+ * - 模拟存量 SQLite 缺少 SKU 外键，确认安全复制升级不丢明细并补齐 ON DELETE SET NULL；
  * - 将一张隔离单据改造成历史无 SKU 数据，确认仍可读取，并校验打印/PDF 共用聚合逻辑。
  */
 
@@ -50,6 +51,42 @@ function cleanupSqliteFile() {
 
 function readSource(relativePath: string) {
   return fs.readFileSync(path.resolve(repositoryRoot, relativePath), 'utf8')
+}
+
+async function rebuildOutboundItemsWithoutSkuForeignKey(dataSource: {
+  query: (sql: string, params?: unknown[]) => Promise<unknown>
+}) {
+  const [tableDefinition] = await dataSource.query(
+    `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'biz_outbound_order_item'`,
+  ) as Array<{ sql: string }>
+  assert.ok(tableDefinition?.sql, '隔离 SQLite 必须存在出库明细表定义')
+  const legacyTableSql = tableDefinition.sql.replace(
+    /,\s*CONSTRAINT\s+"[^"]+"\s+FOREIGN KEY\s*\("sku_id"\)\s+REFERENCES\s+"base_product_sku"\s*\("id"\)\s+ON DELETE SET NULL\s+ON UPDATE NO ACTION/i,
+    '',
+  )
+  assert.notEqual(legacyTableSql, tableDefinition.sql, '测试夹具必须能移除 SKU 外键以模拟存量 SQLite')
+
+  const indexDefinitions = await dataSource.query(
+    `SELECT sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'biz_outbound_order_item' AND sql IS NOT NULL`,
+  ) as Array<{ sql: string }>
+  const columns = await dataSource.query('PRAGMA table_info("biz_outbound_order_item")') as Array<{ name: string }>
+  const columnList = columns.map((column) => `"${column.name.replaceAll('"', '""')}"`).join(', ')
+  const backupTableName = `biz_outbound_order_item_with_sku_fk_${verifySeed.replaceAll('-', '_')}`
+
+  await dataSource.query('PRAGMA foreign_keys = OFF')
+  try {
+    await dataSource.query(`ALTER TABLE "biz_outbound_order_item" RENAME TO "${backupTableName}"`)
+    await dataSource.query(legacyTableSql)
+    await dataSource.query(
+      `INSERT INTO "biz_outbound_order_item" (${columnList}) SELECT ${columnList} FROM "${backupTableName}"`,
+    )
+    await dataSource.query(`DROP TABLE "${backupTableName}"`)
+    for (const indexDefinition of indexDefinitions) {
+      await dataSource.query(indexDefinition.sql)
+    }
+  } finally {
+    await dataSource.query('PRAGMA foreign_keys = ON')
+  }
 }
 
 async function expectBizError(action: () => Promise<unknown>, expectedMessage: RegExp) {
@@ -156,6 +193,42 @@ async function main() {
     assert.equal(singleDetailItem.skuCodeSnapshot, singleSku.skuCode)
     assert.equal(singleDetailItem.specTextSnapshot, singleSku.specText)
     assert.equal(singleDetailItem.unitPrice, '12.34', 'SKU 默认价只能预填，人工价格必须保存为单价快照')
+    const singleProductAfterSubmit = await AppDataSource.getRepository(BaseProduct).findOneByOrFail({ id: singleProduct.id })
+    assert.equal(
+      Number(singleProductAfterSubmit.defaultPrice).toFixed(2),
+      '12.34',
+      '单一 current SKU 商品必须保留手工单价回写商品主价的既有兼容行为',
+    )
+
+    const outboundItemCountBeforeLegacyUpgrade = await AppDataSource.getRepository(BizOutboundOrderItem).count()
+    await rebuildOutboundItemsWithoutSkuForeignKey(AppDataSource)
+    const foreignKeysBeforeLegacyUpgrade = await AppDataSource.query(
+      'PRAGMA foreign_key_list("biz_outbound_order_item")',
+    ) as Array<{ table: string; from: string; to: string; on_delete: string }>
+    assert.equal(
+      foreignKeysBeforeLegacyUpgrade.some((foreignKey) => foreignKey.from === 'sku_id'),
+      false,
+      '测试夹具必须真实模拟缺少 SKU 外键的存量 SQLite',
+    )
+    await initializeDatabaseSchemaIfNeeded(AppDataSource)
+    const foreignKeysAfterLegacyUpgrade = await AppDataSource.query(
+      'PRAGMA foreign_key_list("biz_outbound_order_item")',
+    ) as Array<{ table: string; from: string; to: string; on_delete: string }>
+    assert.ok(
+      foreignKeysAfterLegacyUpgrade.some((foreignKey) => (
+        foreignKey.table === 'base_product_sku'
+        && foreignKey.from === 'sku_id'
+        && foreignKey.to === 'id'
+        && foreignKey.on_delete.toUpperCase() === 'SET NULL'
+      )),
+      'SQLite 存量升级必须补齐 sku_id -> base_product_sku.id / ON DELETE SET NULL 外键',
+    )
+    assert.equal(
+      await AppDataSource.getRepository(BizOutboundOrderItem).count(),
+      outboundItemCountBeforeLegacyUpgrade,
+      'SQLite 补外键时不得丢失历史出库明细',
+    )
+    assert.deepEqual(await AppDataSource.query('PRAGMA foreign_key_check'), [], 'SQLite 补外键后不得产生约束违规')
 
     await expectBizError(
       () => submit({
@@ -193,6 +266,18 @@ async function main() {
         items: [{ productId: multiProduct.id, skuId: blueSku.id, qty: 1, unitPrice: 15 }],
       }),
       /停用|规格无效|已退役/,
+    )
+    const multiProductBeforeInactiveSiblingSubmit = await AppDataSource.getRepository(BaseProduct).findOneByOrFail({ id: multiProduct.id })
+    await submit({
+      idempotencyKey: `manual-multi-inactive-sibling-${verifySeed}`,
+      orderType: 'walkin',
+      items: [{ productId: multiProduct.id, skuId: redSku.id, qty: 1, unitPrice: 17.77 }],
+    })
+    const multiProductAfterInactiveSiblingSubmit = await AppDataSource.getRepository(BaseProduct).findOneByOrFail({ id: multiProduct.id })
+    assert.equal(
+      Number(multiProductAfterInactiveSiblingSubmit.defaultPrice).toFixed(2),
+      Number(multiProductBeforeInactiveSiblingSubmit.defaultPrice).toFixed(2),
+      '只要存在多个 current SKU，即使仅一个启用，手工价也不得回写商品主价',
     )
     blueSkuEntity.isActive = true
     blueSkuEntity.isCurrent = false
@@ -234,10 +319,30 @@ async function main() {
     assert.deepEqual(storedItems.map((item) => (item as unknown as Record<string, unknown>).specTextSnapshot), [redSku.specText, blueSku.specText])
     assert.deepEqual(storedItems.map((item) => Number(item.unitPrice).toFixed(2)), ['18.80', '20.60'])
 
-    const afterProduct = await AppDataSource.getRepository(BaseProduct).findOneByOrFail({ id: multiProduct.id })
+    const afterForwardProduct = await AppDataSource.getRepository(BaseProduct).findOneByOrFail({ id: multiProduct.id })
+    await submit({
+      idempotencyKey: `manual-multi-reversed-${verifySeed}`,
+      orderType: 'walkin',
+      customerName: '多规格反序验证',
+      items: [
+        { productId: multiProduct.id, skuId: blueSku.id, qty: 3, unitPrice: 20.6, remark: '蓝色人工价' },
+        { productId: multiProduct.id, skuId: redSku.id, qty: 2, unitPrice: 18.8, remark: '红色人工价' },
+      ],
+    })
+    const afterReversedProduct = await AppDataSource.getRepository(BaseProduct).findOneByOrFail({ id: multiProduct.id })
     const afterSkuRows = await skuRepo.find({ where: { productId: multiProduct.id }, order: { id: 'ASC' } })
-    assert.equal(afterProduct.currentStock, beforeProduct.currentStock, '手工出库不得修改商品库存')
-    assert.equal(afterProduct.preOrderedStock, beforeProduct.preOrderedStock, '手工出库不得修改商品预订库存')
+    assert.equal(
+      Number(afterForwardProduct.defaultPrice).toFixed(2),
+      Number(beforeProduct.defaultPrice).toFixed(2),
+      '多 current SKU 商品不得因正序手工明细将最后一行价格回写为商品主价',
+    )
+    assert.equal(
+      Number(afterReversedProduct.defaultPrice).toFixed(2),
+      Number(beforeProduct.defaultPrice).toFixed(2),
+      '多 current SKU 商品不得因反序手工明细将最后一行价格回写为商品主价',
+    )
+    assert.equal(afterReversedProduct.currentStock, beforeProduct.currentStock, '手工出库不得修改商品库存')
+    assert.equal(afterReversedProduct.preOrderedStock, beforeProduct.preOrderedStock, '手工出库不得修改商品预订库存')
     assert.deepEqual(
       afterSkuRows.map((sku) => [sku.id, sku.currentStock, sku.preOrderedStock, sku.defaultPrice]),
       beforeSkuRows.map((sku) => [sku.id, sku.currentStock, sku.preOrderedStock, sku.defaultPrice]),
@@ -304,7 +409,7 @@ async function main() {
       assert.ok(migrationSource.includes(column), `MySQL 幂等迁移缺少 ${column}`)
     }
 
-    console.log('手工出库 SKU 专项验证通过：校验、快照、历史兼容、展示与零库存副作用均符合预期')
+    console.log('手工出库 SKU 专项验证通过：校验、快照、主价隔离、SQLite 外键、历史兼容、展示与零库存副作用均符合预期')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()
