@@ -96,19 +96,148 @@ CREATE TABLE IF NOT EXISTS `order_revision` (
   KEY `idx_order_revision_order_id_snapshot` (`order_id_snapshot`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-INSERT IGNORE INTO `order_business_no_occupancy` (
+-- 用具名 CHECK guard 把历史格式污染转换成明确迁移失败；MySQL 8 会在 invalid_count > 0 时
+-- 报出 ck_042_history_business_no_format，禁止只迁移“看起来合法”的子集。
+DROP TEMPORARY TABLE IF EXISTS `tmp_042_history_business_no_format_guard`;
+CREATE TEMPORARY TABLE `tmp_042_history_business_no_format_guard` (
+  `invalid_count` BIGINT UNSIGNED NOT NULL,
+  CONSTRAINT `ck_042_history_business_no_format` CHECK (`invalid_count` = 0)
+) ENGINE=InnoDB;
+
+INSERT INTO `tmp_042_history_business_no_format_guard` (`invalid_count`)
+SELECT COUNT(*)
+FROM `biz_outbound_order` `order`
+WHERE `order`.`business_no` IS NULL
+   OR `order`.`order_type` NOT IN ('department', 'walkin')
+   OR (
+     `order`.`order_type` = 'department'
+     AND (
+       NOT REGEXP_LIKE(
+         `order`.`business_no`,
+         CONCAT(
+           '^hyyzjd[0-9]{',
+           CAST(COALESCE((
+             SELECT `config_value` FROM `system_configs`
+             WHERE `config_key` = 'order.serial.department.width' LIMIT 1
+           ), '6') AS UNSIGNED),
+           '}$'
+         ),
+         'c'
+       )
+       OR CAST(SUBSTRING(`order`.`business_no`, 7) AS UNSIGNED) < CAST(COALESCE((
+         SELECT `config_value` FROM `system_configs`
+         WHERE `config_key` = 'order.serial.department.start' LIMIT 1
+       ), '1') AS UNSIGNED)
+     )
+   )
+   OR (
+     `order`.`order_type` = 'walkin'
+     AND (
+       NOT REGEXP_LIKE(
+         `order`.`business_no`,
+         CONCAT(
+           '^hyyz[0-9]{',
+           CAST(COALESCE((
+             SELECT `config_value` FROM `system_configs`
+             WHERE `config_key` = 'order.serial.walkin.width' LIMIT 1
+           ), '6') AS UNSIGNED),
+           '}$'
+         ),
+         'c'
+       )
+       OR CAST(SUBSTRING(`order`.`business_no`, 5) AS UNSIGNED) < CAST(COALESCE((
+         SELECT `config_value` FROM `system_configs`
+         WHERE `config_key` = 'order.serial.walkin.start' LIMIT 1
+       ), '1') AS UNSIGNED)
+     )
+   );
+
+DROP TEMPORARY TABLE `tmp_042_history_business_no_format_guard`;
+
+-- 若上一次迁移只写入了部分占号，先同时按 business_no 与“命名空间 + serial”寻找冲突；
+-- 任一现存记录与订单 UUID 或号码结构不一致都明确失败，不能靠 INSERT IGNORE 吞掉。
+DROP TEMPORARY TABLE IF EXISTS `tmp_042_business_no_occupancy_precheck`;
+CREATE TEMPORARY TABLE `tmp_042_business_no_occupancy_precheck` (
+  `invalid_count` BIGINT UNSIGNED NOT NULL,
+  CONSTRAINT `ck_042_business_no_occupancy_precheck` CHECK (`invalid_count` = 0)
+) ENGINE=InnoDB;
+
+INSERT INTO `tmp_042_business_no_occupancy_precheck` (`invalid_count`)
+SELECT COUNT(*)
+FROM `biz_outbound_order` `order`
+INNER JOIN `order_business_no_occupancy` `occupancy`
+  ON BINARY `occupancy`.`business_no` = BINARY `order`.`business_no`
+  OR (
+    BINARY `occupancy`.`business_namespace` = BINARY CASE
+      WHEN `order`.`order_type` = 'department' THEN 'hyyzjd'
+      ELSE 'hyyz'
+    END
+    AND `occupancy`.`serial_value` = CAST(SUBSTRING(
+      `order`.`business_no`,
+      CASE WHEN `order`.`order_type` = 'department' THEN 7 ELSE 5 END
+    ) AS UNSIGNED)
+  )
+WHERE BINARY `occupancy`.`business_no` <> BINARY `order`.`business_no`
+   OR BINARY `occupancy`.`business_namespace` <> BINARY CASE
+        WHEN `order`.`order_type` = 'department' THEN 'hyyzjd'
+        ELSE 'hyyz'
+      END
+   OR `occupancy`.`serial_value` <> CAST(SUBSTRING(
+        `order`.`business_no`,
+        CASE WHEN `order`.`order_type` = 'department' THEN 7 ELSE 5 END
+      ) AS UNSIGNED)
+   OR BINARY `occupancy`.`order_uuid` <> BINARY `order`.`order_uuid`;
+
+DROP TEMPORARY TABLE `tmp_042_business_no_occupancy_precheck`;
+
+INSERT INTO `order_business_no_occupancy` (
   `business_namespace`, `serial_value`, `business_no`, `order_uuid`, `assigned_reason`, `created_at`
 )
 SELECT
-  CASE WHEN `order_type` = 'department' THEN 'hyyzjd' ELSE 'hyyz' END,
-  CAST(SUBSTRING(`business_no`, CASE WHEN `order_type` = 'department' THEN 7 ELSE 5 END) AS UNSIGNED),
-  `business_no`,
-  `order_uuid`,
+  CASE WHEN `order`.`order_type` = 'department' THEN 'hyyzjd' ELSE 'hyyz' END,
+  CAST(SUBSTRING(`order`.`business_no`, CASE WHEN `order`.`order_type` = 'department' THEN 7 ELSE 5 END) AS UNSIGNED),
+  `order`.`business_no`,
+  `order`.`order_uuid`,
   'history_backfill',
-  `created_at`
-FROM `biz_outbound_order`
-WHERE (`order_type` = 'department' AND `business_no` REGEXP '^hyyzjd[0-9]+$')
-   OR (`order_type` = 'walkin' AND `business_no` REGEXP '^hyyz[0-9]+$');
+  `order`.`created_at`
+FROM `biz_outbound_order` `order`
+LEFT JOIN `order_business_no_occupancy` `occupancy`
+  ON BINARY `occupancy`.`business_no` = BINARY `order`.`business_no`
+ AND BINARY `occupancy`.`business_namespace` = BINARY CASE
+      WHEN `order`.`order_type` = 'department' THEN 'hyyzjd'
+      ELSE 'hyyz'
+    END
+ AND `occupancy`.`serial_value` = CAST(SUBSTRING(
+      `order`.`business_no`,
+      CASE WHEN `order`.`order_type` = 'department' THEN 7 ELSE 5 END
+    ) AS UNSIGNED)
+ AND BINARY `occupancy`.`order_uuid` = BINARY `order`.`order_uuid`
+WHERE `occupancy`.`id` IS NULL;
+
+-- 插入后再做一次全量精确映射校验，防止部分执行、并发污染或结构异常留下缺口。
+DROP TEMPORARY TABLE IF EXISTS `tmp_042_business_no_occupancy_postcheck`;
+CREATE TEMPORARY TABLE `tmp_042_business_no_occupancy_postcheck` (
+  `invalid_count` BIGINT UNSIGNED NOT NULL,
+  CONSTRAINT `ck_042_business_no_occupancy_postcheck` CHECK (`invalid_count` = 0)
+) ENGINE=InnoDB;
+
+INSERT INTO `tmp_042_business_no_occupancy_postcheck` (`invalid_count`)
+SELECT COUNT(*)
+FROM `biz_outbound_order` `order`
+LEFT JOIN `order_business_no_occupancy` `occupancy`
+  ON BINARY `occupancy`.`business_no` = BINARY `order`.`business_no`
+ AND BINARY `occupancy`.`business_namespace` = BINARY CASE
+      WHEN `order`.`order_type` = 'department' THEN 'hyyzjd'
+      ELSE 'hyyz'
+    END
+ AND `occupancy`.`serial_value` = CAST(SUBSTRING(
+      `order`.`business_no`,
+      CASE WHEN `order`.`order_type` = 'department' THEN 7 ELSE 5 END
+    ) AS UNSIGNED)
+ AND BINARY `occupancy`.`order_uuid` = BINARY `order`.`order_uuid`
+WHERE `occupancy`.`id` IS NULL;
+
+DROP TEMPORARY TABLE `tmp_042_business_no_occupancy_postcheck`;
 
 INSERT INTO `business_sequence` (`sequence_key`, `current_value`, `created_at`, `updated_at`)
 SELECT 'order.business.department',

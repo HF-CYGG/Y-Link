@@ -99,6 +99,22 @@ async function main() {
   assert.match(mysqlMigrationSource, /business_no/)
   assert.match(mysqlMigrationSource, /order_business_no_occupancy/)
   assert.match(mysqlMigrationSource, /order_revision/)
+  assert.doesNotMatch(
+    mysqlMigrationSource,
+    /INSERT\s+IGNORE\s+INTO\s+`order_business_no_occupancy`/i,
+    '历史业务号占用回填不得用 INSERT IGNORE 静默吞掉部分迁移污染',
+  )
+  for (const explicitGuard of [
+    'ck_042_history_business_no_format',
+    'ck_042_business_no_occupancy_precheck',
+    'ck_042_business_no_occupancy_postcheck',
+  ]) {
+    assert.match(
+      mysqlMigrationSource,
+      new RegExp(explicitGuard),
+      `MySQL 迁移缺少显式失败守卫 ${explicitGuard}`,
+    )
+  }
   assert.match(
     mysqlMigrationSource,
     /GREATEST[\s\S]*order\.serial\.department\.start[\s\S]*GREATEST[\s\S]*order\.serial\.walkin\.start/,
@@ -332,6 +348,28 @@ async function main() {
       'cursor + 1 被占用时必须 409，禁止扫描跳号',
     )
 
+    const deletedTarget = await submitOrder('deleted-amendment-target', 'department')
+    const deletedTargetEntity = await orderRepo.findOneByOrFail({ id: deletedTarget.order.id })
+    await orderService.softDeleteById(deletedTarget.order.id, actor, deletedTargetEntity.showNo)
+    const deletedPreviewInput: AmendmentInput = {
+      orderId: deletedTarget.order.id,
+      editVersion: deletedTargetEntity.editVersion,
+      businessNo: 'hyyzjd000360',
+      reason: '专项验证已删除订单阻断',
+    }
+    const deletedPreview = await amendmentApi.previewAmendments!({ amendments: [deletedPreviewInput] }, actor)
+    assert.equal(deletedPreview.ready, false, '已删除订单预览必须不可提交')
+    assert.match(
+      deletedPreview.items[0]?.blockingReasons.join('；') ?? '',
+      /已删除订单不可修订/,
+      '已删除订单预览必须返回明确 blocker',
+    )
+    await assert.rejects(
+      () => amendmentApi.commitAmendments!({ amendments: [deletedPreviewInput] }, actor),
+      (error: unknown) => error instanceof BizError && error.statusCode === 409,
+      '已删除订单正式提交必须事务内重验并返回 409',
+    )
+
     const complianceTarget = await submitOrder('single-compliance-flag', 'department')
     await orderService.updateComplianceFlags({
       orderId: complianceTarget.order.id,
@@ -372,6 +410,13 @@ async function main() {
       /activity\.businessNo/,
       '工作台近期订单动态必须显示 businessNo，并继续使用 showNo 作为内部跳转键',
     )
+    const orderListViewSource = fs.readFileSync(
+      path.resolve(process.cwd(), '..', 'src', 'views', 'order-list', 'OrderListView.vue'),
+      'utf8',
+    )
+    assert.match(orderListViewSource, /:selectable="isOrderAmendable"/, '桌面端不得选择已删除订单修订')
+    assert.match(orderListViewSource, /const isOrderAmendable[\s\S]*?!order\.isDeleted/, '前端选择规则必须排除已删除订单')
+    assert.match(orderListViewSource, /orders\.some\(\(order\) => order\.isDeleted\)/, '提交入口必须再次拒绝已删除订单')
     console.log('✅ Issue #72 订单业务号与改单治理专项验证通过')
   } finally {
     await AppDataSource.destroy()

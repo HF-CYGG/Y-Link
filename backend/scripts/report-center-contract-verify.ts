@@ -29,6 +29,8 @@ const errorHandlerSource = readSource('backend/src/middleware/error-handler.ts')
 const appSource = readSource('backend/src/app.ts')
 const frontendAuthSource = readSource('src/api/modules/auth.ts')
 const frontendRouteSource = readSource('src/router/routes.ts')
+const frontendReportApiSource = readSource('src/api/modules/report.ts')
+const frontendReportViewSource = readSource('src/views/reports/ReportCenterView.vue')
 
 for (const permission of ['reports:view', 'reports:export']) {
   assert.match(permissionSource, new RegExp(`'${permission}'`), `后端缺少权限点 ${permission}`)
@@ -70,5 +72,31 @@ assert.ok(
 )
 assert.match(routeSource, /\(\) => \{[\s\S]*?Content-Type/, '下载响应头必须延迟到首批查询成功后设置')
 assert.match(errorHandlerSource, /if \(res\.headersSent\)[\s\S]*?next\(err\)/, '流式响应出错后必须交给 Express 关闭连接')
+
+assert.ok(
+  (serviceSource.match(/\{ key: 'businessNo', label: '业务单号'/g) ?? []).length >= 2,
+  '后端销售明细与出库流水必须统一返回 businessNo 字段',
+)
+assert.doesNotMatch(serviceSource, /\{ key: 'showNo', label: '(?:单号|业务单号)'/, '后端报表字段不得继续暴露 showNo')
+assert.match(
+  frontendReportApiSource,
+  /export interface ReportRow[\s\S]*?businessNo\?: string \| number \| null/,
+  '前端报表行类型必须显式声明 businessNo，避免 API/UI 字段漂移',
+)
+assert.ok(
+  (frontendReportViewSource.match(/\{ key: 'businessNo', label: '业务单号'/g) ?? []).length >= 2,
+  '报表页面销售明细与出库流水字段必须统一展示 businessNo',
+)
+assert.doesNotMatch(frontendReportViewSource, /\{ key: 'showNo', label: '(?:单号|业务单号)'/, '报表页面不得继续读取 showNo')
+assert.match(
+  frontendReportViewSource,
+  /mobileCardTitleField[\s\S]*?businessNo/,
+  '移动端报表卡标题候选必须包含 businessNo',
+)
+assert.match(
+  frontendReportViewSource,
+  /mobileCardSubtitleFields[\s\S]*?businessNo/,
+  '移动端报表卡副标题候选必须包含 businessNo',
+)
 
 console.log('报表中心静态契约验证通过')

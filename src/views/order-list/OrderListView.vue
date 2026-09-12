@@ -272,13 +272,16 @@ const handleOpenVoucherDialog = () => {
   voucherDialogVisible.value = true
 }
 
+const isOrderAmendable = (order: OrderRecord) => !order.isDeleted
+
 const handleSelectionChange = (rows: OrderRecord[]) => {
-  selectedOrders.value = rows
+  selectedOrders.value = rows.filter(isOrderAmendable)
 }
 
 const isOrderSelected = (orderId: string) => selectedOrders.value.some((order) => order.id === orderId)
 
 const handleMobileSelectionChange = (row: OrderRecord, selected: boolean) => {
+  if (!isOrderAmendable(row)) return
   selectedOrders.value = selected
     ? [...selectedOrders.value.filter((order) => order.id !== row.id), row]
     : selectedOrders.value.filter((order) => order.id !== row.id)
@@ -288,6 +291,10 @@ const openOrderAmendment = (orders: OrderRecord[]) => {
   if (!ensurePermission('orders:update', '历史出库单修订')) return
   if (!orders.length) {
     showAppWarning('请先选择待修订订单')
+    return
+  }
+  if (orders.some((order) => order.isDeleted)) {
+    showAppWarning('已删除订单不可修订，请重新选择')
     return
   }
   amendmentTargets.value = orders
@@ -462,7 +469,13 @@ const handleSaveComplianceFlags = async () => {
               element-loading-text="正在刷新订单数据，请稍候..."
               @selection-change="handleSelectionChange"
             >
-              <el-table-column v-if="canAmendOrders" type="selection" width="48" reserve-selection />
+              <el-table-column
+                v-if="canAmendOrders"
+                type="selection"
+                width="48"
+                reserve-selection
+                :selectable="isOrderAmendable"
+              />
               <el-table-column label="业务单号" prop="businessNo" min-width="180" show-overflow-tooltip />
               <el-table-column label="领用对象" min-width="200" show-overflow-tooltip>
                 <template #default="{ row }">{{ getOrderDisplayName(row) }}</template>
@@ -515,7 +528,7 @@ const handleSaveComplianceFlags = async () => {
               <el-table-column label="操作" width="310" fixed="right" align="right">
                 <template #default="{ row }">
                   <el-button link type="primary" @click="handleViewDetail(row)">详情</el-button>
-                  <el-button v-if="canAmendOrders" link type="warning" @click="openOrderAmendment([row])">修订</el-button>
+                  <el-button v-if="canAmendOrders && !row.isDeleted" link type="warning" @click="openOrderAmendment([row])">修订</el-button>
                   <el-button
                     v-if="canDeleteOrder && !row.isDeleted"
                     link
@@ -552,7 +565,7 @@ const handleSaveComplianceFlags = async () => {
               :class="getCardClassList(item.id)"
               @click="handleViewDetail(item)"
             >
-              <div v-if="canAmendOrders" class="mb-2" @click.stop>
+              <div v-if="canAmendOrders && !item.isDeleted" class="mb-2" @click.stop>
                 <el-checkbox
                   :model-value="isOrderSelected(item.id)"
                   @change="handleMobileSelectionChange(item, Boolean($event))"
@@ -620,7 +633,7 @@ const handleSaveComplianceFlags = async () => {
 
               <div v-if="canDeleteOrder" class="mobile-order-card__actions">
                 <el-button link type="primary" @click.stop="handleViewDetail(item)">详情</el-button>
-                <el-button v-if="canAmendOrders" link type="warning" @click.stop="openOrderAmendment([item])">修订</el-button>
+                <el-button v-if="canAmendOrders && !item.isDeleted" link type="warning" @click.stop="openOrderAmendment([item])">修订</el-button>
                 <el-button
                   v-if="!item.isDeleted"
                   link
@@ -648,7 +661,7 @@ const handleSaveComplianceFlags = async () => {
               </div>
               <div v-else class="mobile-order-card__actions">
                 <el-button link type="primary" @click.stop="handleViewDetail(item)">详情</el-button>
-                <el-button v-if="canAmendOrders" link type="warning" @click.stop="openOrderAmendment([item])">修订</el-button>
+                <el-button v-if="canAmendOrders && !item.isDeleted" link type="warning" @click.stop="openOrderAmendment([item])">修订</el-button>
               </div>
             </div>
           </template>

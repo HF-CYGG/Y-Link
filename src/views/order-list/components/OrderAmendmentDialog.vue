@@ -115,6 +115,10 @@ const validateDrafts = (): boolean => {
     showAppWarning('请选择至少一张待修订订单')
     return false
   }
+  if (props.orders.some((order) => order.isDeleted)) {
+    showAppWarning('已删除订单不可修订，请关闭窗口后重新选择')
+    return false
+  }
   if (!reason.value.trim()) {
     showAppWarning('请填写修订原因')
     return false

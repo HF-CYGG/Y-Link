@@ -237,6 +237,9 @@ export class OrderAmendmentService {
       const before = this.snapshot(order)
       const after = this.buildAfterSnapshot(before, amendment)
       const blockingReasons: string[] = []
+      if (order.isDeleted) {
+        blockingReasons.push('已删除订单不可修订')
+      }
       if (!Number.isSafeInteger(amendment.editVersion) || amendment.editVersion <= 0) {
         blockingReasons.push('editVersion 必须为正整数')
       } else if (amendment.editVersion !== before.editVersion) {
