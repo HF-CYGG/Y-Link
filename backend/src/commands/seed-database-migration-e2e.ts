@@ -78,6 +78,30 @@ function buildFixtureValue(metadata: EntityMetadata, column: ColumnMetadata): un
   const columnType = resolveColumnType(column)
   const marker = `${metadata.tableName}_${columnName}`
 
+  if (
+    (metadata.tableName === 'biz_outbound_order'
+      || metadata.tableName === 'order_business_no_occupancy'
+      || metadata.tableName === 'order_revision')
+    && columnName === 'order_uuid'
+  ) {
+    return '00000000-0000-4000-8000-000000000072'
+  }
+  if (metadata.tableName === 'biz_outbound_order' && columnName === 'order_type') {
+    return 'department'
+  }
+  if (
+    (metadata.tableName === 'biz_outbound_order' || metadata.tableName === 'order_business_no_occupancy')
+    && columnName === 'business_no'
+  ) {
+    return 'hyyzjd900001'
+  }
+  if (metadata.tableName === 'order_business_no_occupancy' && columnName === 'business_namespace') {
+    return 'hyyzjd'
+  }
+  if (metadata.tableName === 'order_business_no_occupancy' && columnName === 'serial_value') {
+    return 900001
+  }
+
   if (column.enum?.length) {
     return column.enum[0]
   }
@@ -209,7 +233,10 @@ async function seedEmptyTable(
       row[column.databaseName] = null
       continue
     }
-    if (column.default !== undefined) {
+    if (
+      column.default !== undefined
+      && !(metadata.tableName === 'biz_outbound_order' && column.databaseName === 'order_type')
+    ) {
       continue
     }
     row[column.databaseName] = buildFixtureValue(metadata, column)

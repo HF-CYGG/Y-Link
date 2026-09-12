@@ -329,6 +329,8 @@ const voucherOrder = computed<OrderDetailResult | null>(() => {
   return {
     id: order.id,
     showNo: displayShowNo,
+    businessNo: displayShowNo,
+    editVersion: 1,
     orderType: order.clientOrderType,
     hasCustomerOrder: Boolean(order.hasCustomerOrder),
     isSystemApplied: Boolean(order.isSystemApplied),

@@ -66,7 +66,7 @@ const getOrderDisplayName = (order: OrderDetailResult) => {
       </div>
     </div>
     <el-descriptions :column="isPhone ? 1 : 2" border size="small">
-      <el-descriptions-item label="业务单号">{{ order.showNo }}</el-descriptions-item>
+      <el-descriptions-item label="业务单号">{{ order.businessNo }}</el-descriptions-item>
       <el-descriptions-item label="订单类型">{{ formatOrderType(order.orderType) }}</el-descriptions-item>
       <el-descriptions-item label="开单时间">{{ dayjs(order.createdAt).format('YYYY-MM-DD HH:mm:ss') }}</el-descriptions-item>
       <el-descriptions-item label="领用对象">{{ getOrderDisplayName(order) }}</el-descriptions-item>

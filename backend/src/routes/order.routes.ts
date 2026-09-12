@@ -46,12 +46,32 @@ const purgeOrderSchema = deleteOrderSchema.extend({
 
 const updateComplianceFlagsSchema = z
   .object({
+    editVersion: z.number().int().positive(),
     hasCustomerOrder: z.boolean().optional(),
     isSystemApplied: z.boolean().optional(),
   })
   .refine((payload) => payload.hasCustomerOrder !== undefined || payload.isSystemApplied !== undefined, {
     message: '至少传入一个可更新字段',
   })
+
+const orderAmendmentSchema = z.object({
+  orderId: z.union([z.string().trim().min(1), z.number()]).transform(String),
+  editVersion: z.number().int().positive(),
+  // 业务号格式与长度统一交由服务层返回 409，避免 Zod 提前转换成普通 400。
+  businessNo: z.string().trim().optional(),
+  orderType: z.enum(['department', 'walkin']).optional(),
+  customerDepartmentName: z.string().max(271).nullable().optional(),
+  customerName: z.string().max(128).nullable().optional(),
+  issuerName: z.string().max(64).nullable().optional(),
+  hasCustomerOrder: z.boolean().optional(),
+  isSystemApplied: z.boolean().optional(),
+  remark: z.string().max(500).nullable().optional(),
+  reason: z.string().max(500).optional(),
+})
+
+const orderAmendmentBatchSchema = z.object({
+  amendments: z.array(orderAmendmentSchema).min(1).max(100),
+})
 
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export const orderRouter = Router()
@@ -105,6 +125,28 @@ orderRouter.get(
   }),
 )
 
+orderRouter.post(
+  '/amendments/preview',
+  requirePermission('orders:update'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = orderAmendmentBatchSchema.parse(req.body ?? {})
+    const data = await orderService.previewAmendments(payload, authReq.auth)
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+orderRouter.post(
+  '/amendments',
+  requirePermission('orders:update'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = orderAmendmentBatchSchema.parse(req.body ?? {})
+    const data = await orderService.commitAmendments(payload, authReq.auth, extractRequestMeta(req))
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
 orderRouter.get(
   '/:id',
   // 通过主键查询明细也必须满足订单查看权限，避免越权探测订单数据。
@@ -126,7 +168,11 @@ orderRouter.post(
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
     const payloadRaw = req.body as Record<string, unknown> | null | undefined
-    if (payloadRaw && typeof payloadRaw === 'object' && ('showNo' in payloadRaw || 'orderNo' in payloadRaw)) {
+    if (
+      payloadRaw
+      && typeof payloadRaw === 'object'
+      && ('showNo' in payloadRaw || 'orderNo' in payloadRaw || 'businessNo' in payloadRaw || 'editVersion' in payloadRaw)
+    ) {
       throw new BizError('禁止指定业务单号，请由系统自动生成', 400)
     }
     const payload = submitOrderSchema.parse(req.body)
@@ -189,12 +235,14 @@ orderRouter.patch(
   '/:id/compliance-flags',
   requirePermission('orders:update'),
   asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
     const payload = updateComplianceFlagsSchema.parse(req.body ?? {})
     const data = await orderService.updateComplianceFlags({
       orderId: req.params.id,
+      editVersion: payload.editVersion,
       hasCustomerOrder: payload.hasCustomerOrder,
       isSystemApplied: payload.isSystemApplied,
-    })
+    }, authReq.auth, extractRequestMeta(req))
     res.json({
       code: 0,
       message: 'ok',

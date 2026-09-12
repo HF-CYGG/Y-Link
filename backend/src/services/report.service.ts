@@ -74,7 +74,7 @@ interface KeysetQueryOptions {
 interface OrderItemReportRaw {
   rowId?: string | number
   createdAt: Date | string
-  showNo: string | null
+  businessNo: string | null
   orderType: string | null
   productId: string | number
   productName: string | null
@@ -93,7 +93,7 @@ interface OrderItemReportRaw {
 interface OutboundFlowRaw {
   rowId?: string | number
   createdAt: Date | string
-  showNo: string | null
+  businessNo: string | null
   orderType: string | null
   totalAmount: string | number | null
   totalQty: string | number | null
@@ -183,7 +183,7 @@ const REPORT_FIELD_DEFINITIONS: Record<ReportType, ReportFieldDefinition[]> = {
     { key: 'amount', label: '总价', width: 14, numeric: true },
     { key: 'departmentName', label: '部门', width: 22 },
     { key: 'receiverName', label: '领取人', width: 18 },
-    { key: 'showNo', label: '单号', width: 20 },
+    { key: 'businessNo', label: '业务单号', width: 20 },
     { key: 'operatorName', label: '订单操作记录人员', width: 20 },
   ],
   kingdee: [
@@ -211,7 +211,7 @@ const REPORT_FIELD_DEFINITIONS: Record<ReportType, ReportFieldDefinition[]> = {
   ],
   'outbound-flow': [
     { key: 'time', label: '时间', width: 20 },
-    { key: 'showNo', label: '单号', width: 20 },
+    { key: 'businessNo', label: '业务单号', width: 20 },
     { key: 'orderType', label: '购买类型', width: 14 },
     { key: 'totalQty', label: '总数量', width: 12, numeric: true },
     { key: 'totalAmount', label: '金额', width: 14, numeric: true },
@@ -413,7 +413,11 @@ export class ReportService {
       return availableFields
     }
 
-    const uniqueFields = [...new Set(fields.map((field) => field.trim()).filter(Boolean))]
+    // 历史报表收藏可能仍提交 showNo；兼容接收但投影为新的业务展示号，避免旧配置升级后直接 400。
+    const uniqueFields = [...new Set(fields
+      .map((field) => field.trim())
+      .filter(Boolean)
+      .map((field) => field === 'showNo' && availableFieldMap.has('businessNo') ? 'businessNo' : field))]
     const invalidField = uniqueFields.find((field) => !availableFieldMap.has(field))
     if (invalidField) {
       throw new BizError(`导出字段不允许：${invalidField}`, 400)
@@ -513,7 +517,7 @@ export class ReportService {
       .innerJoin(BizOutboundOrder, 'order', 'order.id = item.orderId')
       .select('item.id', 'rowId')
       .addSelect('order.createdAt', 'createdAt')
-      .addSelect('order.showNo', 'showNo')
+      .addSelect('order.businessNo', 'businessNo')
       .addSelect('order.orderType', 'orderType')
       .addSelect('item.productId', 'productId')
       .addSelect('item.productNameSnapshot', 'productName')
@@ -580,7 +584,7 @@ export class ReportService {
       .createQueryBuilder('order')
       .select('order.id', 'rowId')
       .addSelect('order.createdAt', 'createdAt')
-      .addSelect('order.showNo', 'showNo')
+      .addSelect('order.businessNo', 'businessNo')
       .addSelect('order.orderType', 'orderType')
       .addSelect('order.totalAmount', 'totalAmount')
       .addSelect('order.totalQty', 'totalQty')
@@ -614,7 +618,7 @@ export class ReportService {
     const rawRows = await qb.getRawMany<OutboundFlowRaw>()
     const rows = rawRows.map((row) => ({
       time: formatDateTime(row.createdAt),
-      showNo: normalizeText(row.showNo),
+      businessNo: normalizeText(row.businessNo),
       orderType: getOrderTypeLabel(row.orderType),
       totalQty: normalizeNumberText(row.totalQty),
       totalAmount: normalizeAmount(row.totalAmount),
@@ -648,7 +652,7 @@ export class ReportService {
       amount: normalizeAmount(raw.amount),
       departmentName: orderType === 'department' ? normalizeText(raw.departmentName) : '不适用',
       receiverName: normalizeText(raw.receiverName),
-      showNo: normalizeText(raw.showNo),
+      businessNo: normalizeText(raw.businessNo),
       hasCustomerOrder: orderType === 'department' ? getFlagLabel(raw.hasCustomerOrder) : '不适用',
       isSystemApplied: orderType === 'department' ? getFlagLabel(raw.isSystemApplied) : '不适用',
       operatorName: normalizeText(raw.operatorName),

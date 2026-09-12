@@ -27,6 +27,7 @@ export const buildClientOrderSummaryFromDetail = (detail: O2oPreorderDetail): O2
     id: order.id,
     showNo: resolveO2oDisplayShowNo(order),
     customerOrderShowNo: order.customerOrderShowNo ?? null,
+    customerOrderBusinessNo: order.customerOrderBusinessNo ?? null,
     verifyCode: order.verifyCode,
     status: order.status,
     businessStatus: order.businessStatus,
@@ -73,6 +74,7 @@ export const matchesClientOrderKeyword = (order: O2oPreorderSummary, keyword: st
   const normalizedTargets = [
     order.showNo,
     order.customerOrderShowNo || '',
+    order.customerOrderBusinessNo || '',
     order.verifyCode,
     order.departmentNameSnapshot || '',
     order.staffNoSnapshot || '',

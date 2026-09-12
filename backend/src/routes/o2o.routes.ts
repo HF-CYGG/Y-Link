@@ -613,12 +613,13 @@ o2oAdminRouter.patch(
   '/orders/:id/compliance-flags',
   requirePermission('orders:update'),
   asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
     const payload = complianceFlagsSchema.parse(req.body)
     const data = await o2oPreorderService.updateComplianceFlagsByAdmin({
       orderId: req.params.id,
       hasCustomerOrder: payload.hasCustomerOrder,
       isSystemApplied: payload.isSystemApplied,
-    })
+    }, authReq.auth)
     res.json({ code: 0, message: 'ok', data })
   }),
 )

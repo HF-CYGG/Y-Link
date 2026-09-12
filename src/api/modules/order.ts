@@ -45,6 +45,8 @@ export interface SubmitOrderPayload {
 export interface SubmittedOrderRecord {
   id: string
   showNo: string
+  businessNo: string
+  editVersion: number
 }
 
 /**
@@ -74,6 +76,8 @@ export const submitOrder = async (payload: SubmitOrderPayload): Promise<SubmitOr
     order: {
       id: PrimitiveTextValue
       showNo: PrimitiveTextValue
+      businessNo: PrimitiveTextValue
+      editVersion: number
     }
     items: Array<{
       id: PrimitiveTextValue
@@ -95,6 +99,8 @@ export const submitOrder = async (payload: SubmitOrderPayload): Promise<SubmitOr
     order: {
       id: normalizeTextField(result.order.id),
       showNo: normalizeTextField(result.order.showNo),
+      businessNo: normalizeTextField(result.order.businessNo),
+      editVersion: Number(result.order.editVersion),
     },
     items: result.items.map((item) => ({
       id: normalizeTextField(item.id),
@@ -127,6 +133,8 @@ export interface OrderListQuery extends PaginationQueryInput {
 export interface OrderRecord {
   id: string
   showNo: string
+  businessNo: string
+  editVersion: number
   orderType: 'department' | 'walkin'
   hasCustomerOrder: boolean
   isSystemApplied: boolean
@@ -160,6 +168,8 @@ export type OrderListResult = PaginationResult<OrderRecord>
 interface OrderRecordRaw {
   id: PrimitiveTextValue
   showNo: PrimitiveTextValue
+  businessNo: PrimitiveTextValue
+  editVersion: number | PrimitiveTextValue
   orderType?: PrimitiveTextValue
   hasCustomerOrder?: boolean | PrimitiveTextValue
   isSystemApplied?: boolean | PrimitiveTextValue
@@ -231,6 +241,8 @@ const normalizeNullableTextField = (value: PrimitiveTextValue): string | null =>
 const normalizeOrderRecord = (record: OrderRecordRaw): OrderRecord => ({
   id: normalizeTextField(record.id),
   showNo: normalizeTextField(record.showNo),
+  businessNo: normalizeTextField(record.businessNo, normalizeTextField(record.showNo)),
+  editVersion: Number(record.editVersion) || 1,
   orderType: normalizeOrderTypeField(record.orderType),
   hasCustomerOrder: normalizeBooleanField(record.hasCustomerOrder),
   isSystemApplied: normalizeBooleanField(record.isSystemApplied),
@@ -411,8 +423,54 @@ export interface PurgeOrderResult {
 }
 
 export interface UpdateOrderComplianceFlagsPayload {
+  editVersion: number
   hasCustomerOrder?: boolean
   isSystemApplied?: boolean
+}
+
+export interface OrderAmendmentInput {
+  orderId: string
+  editVersion: number
+  businessNo?: string
+  orderType?: 'department' | 'walkin'
+  customerDepartmentName?: string | null
+  customerName?: string | null
+  issuerName?: string | null
+  hasCustomerOrder?: boolean
+  isSystemApplied?: boolean
+  remark?: string | null
+  reason?: string
+}
+
+export interface OrderAmendmentSnapshot {
+  businessNo: string
+  showNo: string
+  orderType: 'department' | 'walkin'
+  customerDepartmentName: string | null
+  customerName: string | null
+  issuerName: string | null
+  hasCustomerOrder: boolean
+  isSystemApplied: boolean
+  remark: string | null
+  editVersion: number
+}
+
+export interface OrderAmendmentPreviewItem {
+  orderId: string
+  blockingReasons: string[]
+  before: OrderAmendmentSnapshot
+  after: OrderAmendmentSnapshot
+}
+
+export interface OrderAmendmentResult {
+  ready: boolean
+  cursorPlans: Array<{
+    namespace: 'hyyzjd' | 'hyyz'
+    beforeCursor: number
+    afterCursor: number
+    nextBusinessNo: string | null
+  }>
+  items: OrderAmendmentPreviewItem[]
 }
 
 /**
@@ -456,3 +514,17 @@ export const updateOrderComplianceFlags = (id: string, payload: UpdateOrderCompl
     url: `/orders/${id}/compliance-flags`,
     data: payload,
   }).then(normalizeOrderDetail)
+
+export const previewOrderAmendments = (amendments: OrderAmendmentInput[]) =>
+  request<OrderAmendmentResult>({
+    method: 'POST',
+    url: '/orders/amendments/preview',
+    data: { amendments },
+  })
+
+export const commitOrderAmendments = (amendments: OrderAmendmentInput[]) =>
+  request<OrderAmendmentResult>({
+    method: 'POST',
+    url: '/orders/amendments',
+    data: { amendments },
+  })

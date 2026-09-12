@@ -65,6 +65,8 @@ const MYSQL_REQUIRED_TABLES = [
   'business_sequence',
   'client_mobile_session',
   'sms_verification_record',
+  'order_business_no_occupancy',
+  'order_revision',
 ]
 
 // 每个必需表由哪个迁移脚本创建，用于在报错时给出精确指引，而不是笼统建议“从头跑一遍”。
@@ -90,6 +92,8 @@ const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
   business_sequence: '035_o2o_idempotency_business_sequence.sql',
   client_mobile_session: '037_mobile_auth_session.sql',
   sms_verification_record: '039_aliyun_pnvs_sms_verification.sql',
+  order_business_no_occupancy: '042_order_business_no_amendment.sql',
+  order_revision: '042_order_business_no_amendment.sql',
 }
 
 interface MysqlRequiredColumn {
@@ -211,6 +215,41 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
   },
   { tableName: 'sms_verification_record', columnName: 'target_digest', introducingScript: '039_aliyun_pnvs_sms_verification.sql' },
   { tableName: 'sms_verification_record', columnName: 'delivery_status', introducingScript: '039_aliyun_pnvs_sms_verification.sql' },
+  {
+    tableName: 'biz_outbound_order',
+    columnName: 'business_no',
+    introducingScript: '042_order_business_no_amendment.sql',
+    expectedCharacterMaximumLength: 32,
+    expectedDataType: 'varchar',
+    expectedColumnType: 'varchar(32)',
+    expectedNullable: false,
+  },
+  {
+    tableName: 'biz_outbound_order',
+    columnName: 'edit_version',
+    introducingScript: '042_order_business_no_amendment.sql',
+    expectedDataType: 'int',
+    expectedColumnType: 'int',
+    expectedNullable: false,
+  },
+  { tableName: 'order_business_no_occupancy', columnName: 'business_namespace', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_business_no_occupancy', columnName: 'serial_value', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_business_no_occupancy', columnName: 'business_no', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_business_no_occupancy', columnName: 'order_uuid', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_business_no_occupancy', columnName: 'assigned_reason', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_business_no_occupancy', columnName: 'created_at', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_revision', columnName: 'order_id_snapshot', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_revision', columnName: 'order_uuid', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_revision', columnName: 'revision_no', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_revision', columnName: 'before_snapshot_json', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_revision', columnName: 'after_snapshot_json', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_revision', columnName: 'reason', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_revision', columnName: 'actor_user_id', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_revision', columnName: 'actor_username', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_revision', columnName: 'actor_display_name', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_revision', columnName: 'ip_address', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_revision', columnName: 'user_agent', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_revision', columnName: 'created_at', introducingScript: '042_order_business_no_amendment.sql' },
 ]
 
 // 不只按索引名判断，还校验列顺序与唯一性，避免旧库中存在同名但错误的索引时误判为可启动。
@@ -327,6 +366,48 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
     unique: false,
     introducingScript: '039_aliyun_pnvs_sms_verification.sql',
   },
+  {
+    tableName: 'biz_outbound_order',
+    indexName: 'uk_biz_outbound_business_no',
+    columns: ['business_no'],
+    unique: true,
+    introducingScript: '042_order_business_no_amendment.sql',
+  },
+  {
+    tableName: 'order_business_no_occupancy',
+    indexName: 'uk_order_business_no_occupancy_business_no',
+    columns: ['business_no'],
+    unique: true,
+    introducingScript: '042_order_business_no_amendment.sql',
+  },
+  {
+    tableName: 'order_business_no_occupancy',
+    indexName: 'uk_order_business_no_occupancy_namespace_serial',
+    columns: ['business_namespace', 'serial_value'],
+    unique: true,
+    introducingScript: '042_order_business_no_amendment.sql',
+  },
+  {
+    tableName: 'order_business_no_occupancy',
+    indexName: 'idx_order_business_no_occupancy_order_uuid',
+    columns: ['order_uuid'],
+    unique: false,
+    introducingScript: '042_order_business_no_amendment.sql',
+  },
+  {
+    tableName: 'order_revision',
+    indexName: 'uk_order_revision_uuid_version',
+    columns: ['order_uuid', 'revision_no'],
+    unique: true,
+    introducingScript: '042_order_business_no_amendment.sql',
+  },
+  {
+    tableName: 'order_revision',
+    indexName: 'idx_order_revision_order_id_snapshot',
+    columns: ['order_id_snapshot'],
+    unique: false,
+    introducingScript: '042_order_business_no_amendment.sql',
+  },
 ]
 
 const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [{
@@ -356,6 +437,7 @@ const AUTO_MIGRATABLE_FILES = [
   '039_aliyun_pnvs_sms_verification.sql',
   '040_o2o_preorder_governance.sql',
   '041_manual_outbound_sku.sql',
+  '042_order_business_no_amendment.sql',
 ]
 
 /**

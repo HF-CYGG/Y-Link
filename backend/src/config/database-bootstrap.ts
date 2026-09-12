@@ -48,6 +48,8 @@ const SQLITE_REQUIRED_TABLES = [
   'auth_risk_state',
   'business_sequence',
   'sms_verification_record',
+  'order_business_no_occupancy',
+  'order_revision',
 ]
 
 /**
@@ -154,6 +156,8 @@ const SQLITE_REQUIRED_ORDER_COLUMNS = [
   'is_system_applied',
   'issuer_name',
   'customer_department_name',
+  'business_no',
+  'edit_version',
 ]
 
 const SQLITE_REQUIRED_ORDER_ITEM_COLUMNS = [
@@ -365,6 +369,108 @@ async function ensureSqliteIndex(
   if (!indexSet.has(indexName)) {
     await dataSource.query(createIndexSql)
   }
+}
+
+/**
+ * TypeORM 无法在含历史行的 SQLite 表上直接添加“非空 + 唯一”的 business_no。
+ * 同步前先以可空列完成 show_no 原值回填，随后 synchronize 只负责收紧列和索引形状。
+ */
+async function prepareSqliteOrderAmendmentColumns(dataSource: DataSource): Promise<void> {
+  const orderColumns = await listSqliteTableColumns(dataSource, 'biz_outbound_order')
+  if (orderColumns.size === 0) return
+  if (!orderColumns.has('business_no')) {
+    await dataSource.query('ALTER TABLE "biz_outbound_order" ADD COLUMN "business_no" varchar(32) NULL')
+  }
+  if (!orderColumns.has('edit_version')) {
+    await dataSource.query('ALTER TABLE "biz_outbound_order" ADD COLUMN "edit_version" integer NOT NULL DEFAULT (1)')
+  }
+  await dataSource.query(`
+    UPDATE "biz_outbound_order"
+    SET "business_no" = "show_no"
+    WHERE "business_no" IS NULL OR LENGTH(TRIM("business_no")) = 0
+  `)
+  await dataSource.query(`
+    UPDATE "biz_outbound_order"
+    SET "edit_version" = 1
+    WHERE "edit_version" IS NULL OR "edit_version" < 1
+  `)
+}
+
+/**
+ * 幂等领养历史订单：businessNo 初始值固定等于 showNo，永久占用和双命名空间游标只在缺失时补齐。
+ * 已存在的游标绝不按历史最大值重写，避免覆盖管理员手工重编后确认的游标位置。
+ */
+export async function backfillSqliteOrderAmendmentData(dataSource: DataSource): Promise<void> {
+  await dataSource.transaction(async (manager) => {
+    const orders = await manager.query(`
+      SELECT "order_uuid" AS "orderUuid", "business_no" AS "businessNo", "order_type" AS "orderType",
+             "created_at" AS "createdAt"
+      FROM "biz_outbound_order"
+    `) as Array<{ orderUuid: string; businessNo: string; orderType: string; createdAt: string }>
+    for (const order of orders) {
+      const namespace = order.orderType === 'department' ? 'hyyzjd' : order.orderType === 'walkin' ? 'hyyz' : null
+      const pattern = namespace === 'hyyzjd' ? /^hyyzjd(\d+)$/ : /^hyyz(\d+)$/
+      const match = namespace ? pattern.exec(String(order.businessNo ?? '').trim().toLowerCase()) : null
+      if (!namespace || !match) {
+        throw new BizError(`历史出库单 ${order.orderUuid} 的订单类型或业务号不符合 #72 命名空间规则`, 409)
+      }
+      const serialValue = Number.parseInt(match[1], 10)
+      if (!Number.isSafeInteger(serialValue) || serialValue <= 0) {
+        throw new BizError(`历史出库单 ${order.orderUuid} 的业务号流水非法`, 409)
+      }
+      await manager.query(
+        `INSERT OR IGNORE INTO "order_business_no_occupancy"
+         ("business_namespace", "serial_value", "business_no", "order_uuid", "assigned_reason", "created_at")
+         VALUES (?, ?, ?, ?, 'history_backfill', ?)`,
+        [namespace, serialValue, order.businessNo, order.orderUuid, order.createdAt],
+      )
+    }
+
+    const unmatchedRows = await manager.query(`
+      SELECT "order"."order_uuid" AS "orderUuid"
+      FROM "biz_outbound_order" "order"
+      LEFT JOIN "order_business_no_occupancy" "occupancy"
+        ON "occupancy"."business_no" = "order"."business_no"
+       AND "occupancy"."order_uuid" = "order"."order_uuid"
+       AND "occupancy"."business_namespace" = CASE
+             WHEN "order"."order_type" = 'department' THEN 'hyyzjd'
+             WHEN "order"."order_type" = 'walkin' THEN 'hyyz'
+           END
+       AND "occupancy"."serial_value" = CAST(SUBSTR(
+             "order"."business_no",
+             CASE WHEN "order"."order_type" = 'department' THEN 7 ELSE 5 END
+           ) AS INTEGER)
+      WHERE "occupancy"."id" IS NULL
+      LIMIT 1
+    `) as Array<{ orderUuid: string }>
+    if (unmatchedRows.length > 0) {
+      throw new BizError(`历史出库单 ${unmatchedRows[0].orderUuid} 的业务号永久占用存在冲突`, 409)
+    }
+
+    for (const [sequenceKey, namespace] of [
+      ['order.business.department', 'hyyzjd'],
+      ['order.business.walkin', 'hyyz'],
+    ] as const) {
+      const orderType = namespace === 'hyyzjd' ? 'department' : 'walkin'
+      const startRows = await manager.query(
+        'SELECT "config_value" AS "configValue" FROM "system_configs" WHERE "config_key" = ? LIMIT 1',
+        [`order.serial.${orderType}.start`],
+      ) as Array<{ configValue: string }>
+      const configuredStart = Number.parseInt(String(startRows[0]?.configValue ?? '1'), 10)
+      const initialCursor = Number.isSafeInteger(configuredStart) && configuredStart > 0 ? configuredStart - 1 : 0
+      const maximumRows = await manager.query(
+        `SELECT COALESCE(MAX("serial_value"), 0) AS "maximum"
+         FROM "order_business_no_occupancy" WHERE "business_namespace" = ?`,
+        [namespace],
+      ) as Array<{ maximum: number | string }>
+      const currentValue = Math.max(initialCursor, Number(maximumRows[0]?.maximum ?? 0))
+      await manager.query(
+        `INSERT OR IGNORE INTO "business_sequence" ("sequence_key", "current_value", "created_at", "updated_at")
+         VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [sequenceKey, currentValue],
+      )
+    }
+  })
 }
 
 async function normalizeSqliteNotificationOutbox(dataSource: DataSource): Promise<void> {
@@ -1274,6 +1380,7 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
 export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): Promise<DatabaseSchemaInitResult> {
   if (env.DB_TYPE === 'sqlite') {
     await ensureSqliteMobileSessionSchema(dataSource)
+    await prepareSqliteOrderAmendmentColumns(dataSource)
     await normalizeSqliteOutboundItemColumns(dataSource)
     await normalizeSqliteO2oDiscountColumns(dataSource)
     await normalizeSqliteInboundSkuColumn(dataSource)
@@ -1289,6 +1396,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
       await normalizeSqliteInboundSkuColumn(dataSource)
       // 索引可能依赖本次 synchronize 才补齐的列，必须在结构升级后创建。
       await ensureSqliteMallCatalogIndexes(dataSource)
+      await backfillSqliteOrderAmendmentData(dataSource)
     }
     await migrateClientUserDepartmentGovernance(dataSource)
     await migrateLegacyFeedbackAttachments(dataSource)
@@ -1319,6 +1427,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   const needSynchronize = await shouldSynchronizeSqliteSchema(dataSource)
   if (!needSynchronize) {
     await ensureSqliteMallCatalogIndexes(dataSource)
+    await backfillSqliteOrderAmendmentData(dataSource)
     await migrateClientUserDepartmentGovernance(dataSource)
     await migrateLegacyFeedbackAttachments(dataSource)
     return {
@@ -1332,6 +1441,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   await normalizeSqliteO2oDiscountColumns(dataSource)
   await normalizeSqliteInboundSkuColumn(dataSource)
   await ensureSqliteMallCatalogIndexes(dataSource)
+  await backfillSqliteOrderAmendmentData(dataSource)
   await migrateClientUserDepartmentGovernance(dataSource)
   await migrateLegacyFeedbackAttachments(dataSource)
   return {

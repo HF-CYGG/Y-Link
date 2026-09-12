@@ -348,6 +348,8 @@ const CRITICAL_VALIDATION_TABLES = new Set([
   'client_user',
   'biz_outbound_order',
   'biz_outbound_order_item',
+  'order_business_no_occupancy',
+  'order_revision',
   'biz_inbound_order',
   'biz_inbound_order_item',
   'o2o_preorder',
@@ -1008,9 +1010,9 @@ export class DatabaseMigrationService {
       {
         tableName: 'biz_outbound_order',
         code: 'source_outbound_order_constraint_dirty',
-        message: (count) => `源 SQLite 中有 ${count} 条出库主单不满足总数、总金额或幂等键约束，请先清理后再迁移到 MySQL。`,
+        message: (count) => `源 SQLite 中有 ${count} 条出库主单不满足总数、总金额、幂等键、业务号或并发版本约束，请先清理后再迁移到 MySQL。`,
         whereClause:
-          "`total_qty` < 0 OR `total_amount` < 0 OR LENGTH(TRIM(COALESCE(`idempotency_key`, ''))) = 0",
+          "`total_qty` < 0 OR `total_amount` < 0 OR LENGTH(TRIM(COALESCE(`idempotency_key`, ''))) = 0 OR LENGTH(TRIM(COALESCE(`business_no`, ''))) = 0 OR `edit_version` IS NULL OR `edit_version` < 1",
       },
       {
         tableName: 'biz_outbound_order_item',

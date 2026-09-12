@@ -19,6 +19,7 @@ import { BizOutboundOrderItem } from './biz-outbound-order-item.entity.js'
 import { entityColumnOptions } from './entity-column-options.js'
 
 @Index('uk_biz_outbound_show_no_is_deleted', ['showNo', 'isDeleted'], { unique: true })
+@Index('uk_biz_outbound_business_no', ['businessNo'], { unique: true })
 @Index('idx_biz_outbound_order_type_created_at', ['orderType', 'createdAt'])
 @Entity({ name: 'biz_outbound_order' })
 @Check('ck_biz_outbound_order_amounts', "`total_qty` >= 0 AND `total_amount` >= 0 AND LENGTH(TRIM(COALESCE(`idempotency_key`, ''))) > 0")
@@ -33,6 +34,12 @@ export class BizOutboundOrder {
 
   @Column({ name: 'show_no', type: 'varchar', length: 32, comment: '业务展示单号' })
   showNo!: string
+
+  @Column({ name: 'business_no', type: 'varchar', length: 32, comment: '独立可修订业务单号' })
+  businessNo!: string
+
+  @Column({ name: 'edit_version', type: 'integer', default: 1, comment: '改单乐观并发版本' })
+  editVersion!: number
 
   @Index('idx_biz_outbound_order_type')
   @Column({ name: 'order_type', type: 'varchar', length: 32, default: 'walkin', comment: '订单类型' })

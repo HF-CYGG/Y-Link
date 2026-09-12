@@ -835,7 +835,7 @@ export const useOrderEntryForm = () => {
         items: submitItems,
       } as SubmitOrderPayload)
 
-      showAppSuccess(`保存成功，单号：${result.order.showNo}`)
+      showAppSuccess(`保存成功，业务单号：${result.order.businessNo}`)
       if (autoCreatedProductNames.value.length) {
         showAppSuccess(`已自动建档商品：${[...new Set(autoCreatedProductNames.value)].join('、')}`)
       }

@@ -50,6 +50,7 @@ export interface DashboardRecentActivity {
   actionType: 'order.create' | 'order.delete' | 'order.restore' | 'order.purge'
   actionLabel: string
   showNo: string
+  businessNo: string
   actorDisplayName: string
   displayName: string
   customerName: string
@@ -94,6 +95,7 @@ export interface DashboardAnalyticsResult {
 export interface DashboardDrilldownOrderRecord {
   orderId: string
   showNo: string
+  businessNo: string
   orderType: 'department' | 'walkin'
   createdAt: string
   customerName: string

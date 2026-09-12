@@ -27,6 +27,12 @@ import { generateOrderUuid } from '../utils/id-generator.js'
 import type { PaginationResult } from '../types/api.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
+import {
+  orderAmendmentService,
+  type OrderAmendmentBatchInput,
+  type OrderAmendmentPreviewResult,
+} from './order-amendment.service.js'
+import { orderBusinessNoService } from './order-business-no.service.js'
 import { orderSerialService, type OrderType } from './order-serial.service.js'
 
 export interface SubmitOrderItemInput {
@@ -63,6 +69,7 @@ export interface OrderListQuery {
 
 export interface UpdateOrderComplianceFlagsInput {
   orderId: string
+  editVersion: number
   hasCustomerOrder?: boolean
   isSystemApplied?: boolean
 }
@@ -95,6 +102,8 @@ export interface OrderDetailItemView {
 export interface OrderSummaryView {
   id: string
   showNo: string
+  businessNo: string
+  editVersion: number
   orderType: string
   hasCustomerOrder: boolean
   isSystemApplied: boolean
@@ -118,6 +127,8 @@ export interface OrderSummaryView {
 export interface SubmittedOrderView {
   id: string
   showNo: string
+  businessNo: string
+  editVersion: number
 }
 
 export interface SubmittedOrderItemView {
@@ -274,7 +285,8 @@ export class OrderService {
       qb.andWhere(
         new Brackets((keywordQb) => {
           keywordQb
-            .where('order.showNo LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
+            .where('order.businessNo LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
+            .orWhere('order.showNo LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
             .orWhere(isLikelyShowNo ? 'order.showNo = :exactShowNo' : '1 = 0', { exactShowNo: normalizedKeyword })
             .orWhere('order.customerName LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
             .orWhere('order.customerDepartmentName LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
@@ -335,26 +347,34 @@ export class OrderService {
     return { order: this.buildOrderSummaryView(order), items }
   }
 
-  async updateComplianceFlags(input: UpdateOrderComplianceFlagsInput): Promise<{ order: OrderSummaryView; items: OrderDetailItemView[] }> {
+  async updateComplianceFlags(
+    input: UpdateOrderComplianceFlagsInput,
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ): Promise<{ order: OrderSummaryView; items: OrderDetailItemView[] }> {
     if (typeof input.hasCustomerOrder !== 'boolean' && typeof input.isSystemApplied !== 'boolean') {
       throw new BizError('请至少传入一个可更新字段', 400)
     }
+    await orderAmendmentService.commit({ amendments: [{
+      orderId: input.orderId,
+      editVersion: input.editVersion,
+      hasCustomerOrder: input.hasCustomerOrder,
+      isSystemApplied: input.isSystemApplied,
+      reason: '合规状态编辑',
+    }] }, actor, requestMeta)
+    return this.detailById(input.orderId)
+  }
 
-    const order = await this.orderRepo.findOne({ where: { id: input.orderId } })
-    if (!order) {
-      throw new BizError('出库单不存在', 404)
-    }
-    if (order.orderType !== 'department') {
-      throw new BizError('散客单不适用该状态编辑', 409)
-    }
-    if (typeof input.hasCustomerOrder === 'boolean') {
-      order.hasCustomerOrder = input.hasCustomerOrder
-    }
-    if (typeof input.isSystemApplied === 'boolean') {
-      order.isSystemApplied = input.isSystemApplied
-    }
-    await this.orderRepo.save(order)
-    return this.detailById(String(order.id))
+  async previewAmendments(input: OrderAmendmentBatchInput, actor: AuthUserContext): Promise<OrderAmendmentPreviewResult> {
+    return orderAmendmentService.preview(input, actor)
+  }
+
+  async commitAmendments(
+    input: OrderAmendmentBatchInput,
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ): Promise<OrderAmendmentPreviewResult> {
+    return orderAmendmentService.commit(input, actor, requestMeta)
   }
 
   /**
@@ -380,7 +400,7 @@ export class OrderService {
         throw new BizError('出库单不存在', 404)
       }
 
-      if (order.showNo !== normalizedConfirmShowNo) {
+      if (order.showNo !== normalizedConfirmShowNo && order.businessNo !== normalizedConfirmShowNo) {
         throw new BizError('二次确认失败：业务单号不匹配', 400)
       }
 
@@ -495,7 +515,7 @@ export class OrderService {
         throw new BizError('出库单不存在', 404)
       }
 
-      if (order.showNo !== normalizedConfirmShowNo) {
+      if (order.showNo !== normalizedConfirmShowNo && order.businessNo !== normalizedConfirmShowNo) {
         throw new BizError('二次确认失败：业务单号不匹配', 400)
       }
 
@@ -603,11 +623,14 @@ export class OrderService {
           const resolvedItems = await this.resolveSubmitItemsWithSku(normalizedItems, productMap, manager)
           const orderUuid = generateOrderUuid()
           const showNo = await orderSerialService.generateOrderNo(submitContext.normalizedOrderType, manager)
+          const businessNo = await orderBusinessNoService.allocate(submitContext.normalizedOrderType, orderUuid, manager)
           const preparedItems = this.prepareSubmitItems(resolvedItems, productMap, itemRepo)
 
           const order = orderRepo.create({
             orderUuid,
             showNo,
+            businessNo,
+            editVersion: 1,
             orderType: submitContext.normalizedOrderType,
             hasCustomerOrder: Boolean(input.hasCustomerOrder),
             isSystemApplied: Boolean(input.isSystemApplied),
@@ -650,6 +673,8 @@ export class OrderService {
                 // 创建时同步写入部门快照，避免首页近期动态只能看到客户名而丢失部门语义。
                 customerDepartmentName: savedOrder.customerDepartmentName,
                 customerName: savedOrder.customerName,
+                businessNo: savedOrder.businessNo,
+                showNo: savedOrder.showNo,
                 totalQty: savedOrder.totalQty,
                 totalAmount: savedOrder.totalAmount,
                 itemCount: savedItems.length,
@@ -1001,6 +1026,7 @@ export class OrderService {
    */
   private buildOrderAuditDetail(order: BizOutboundOrder) {
     return {
+      businessNo: order.businessNo,
       customerDepartmentName: order.customerDepartmentName,
       customerName: order.customerName,
       totalQty: order.totalQty,
@@ -1012,6 +1038,8 @@ export class OrderService {
     return {
       id: normalizeEntityId(order.id),
       showNo: order.showNo,
+      businessNo: order.businessNo,
+      editVersion: Number(order.editVersion),
       orderType: order.orderType,
       hasCustomerOrder: Boolean(order.hasCustomerOrder),
       isSystemApplied: Boolean(order.isSystemApplied),
@@ -1037,6 +1065,8 @@ export class OrderService {
     return {
       id: normalizeEntityId(order.id),
       showNo: order.showNo,
+      businessNo: order.businessNo,
+      editVersion: Number(order.editVersion),
     }
   }
 

@@ -33,6 +33,8 @@ const REQUIRED_TABLES = [
   'business_sequence',
   'client_mobile_session',
   'sms_verification_record',
+  'order_business_no_occupancy',
+  'order_revision',
 ] as const
 
 const REQUIRED_COLUMNS = [
@@ -81,6 +83,26 @@ const REQUIRED_COLUMNS = [
   ['sms_verification_record', 'scheme_name'],
   ['sms_verification_record', 'target_digest'],
   ['sms_verification_record', 'delivery_status'],
+  ['biz_outbound_order', 'business_no'],
+  ['biz_outbound_order', 'edit_version'],
+  ['order_business_no_occupancy', 'business_namespace'],
+  ['order_business_no_occupancy', 'serial_value'],
+  ['order_business_no_occupancy', 'business_no'],
+  ['order_business_no_occupancy', 'order_uuid'],
+  ['order_business_no_occupancy', 'assigned_reason'],
+  ['order_business_no_occupancy', 'created_at'],
+  ['order_revision', 'order_id_snapshot'],
+  ['order_revision', 'order_uuid'],
+  ['order_revision', 'revision_no'],
+  ['order_revision', 'before_snapshot_json'],
+  ['order_revision', 'after_snapshot_json'],
+  ['order_revision', 'reason'],
+  ['order_revision', 'actor_user_id'],
+  ['order_revision', 'actor_username'],
+  ['order_revision', 'actor_display_name'],
+  ['order_revision', 'ip_address'],
+  ['order_revision', 'user_agent'],
+  ['order_revision', 'created_at'],
 ] as const
 
 const REQUIRED_COLUMN_LENGTHS = new Map<string, number>([
@@ -115,6 +137,18 @@ const REQUIRED_MANUAL_OUTBOUND_COLUMN_DEFINITIONS = new Map<string, ColumnFixtur
     columnType: 'varchar(255)',
     isNullable: 'YES',
     characterMaximumLength: 255,
+  }],
+  ['biz_outbound_order.business_no', {
+    dataType: 'varchar',
+    columnType: 'varchar(32)',
+    isNullable: 'NO',
+    characterMaximumLength: 32,
+  }],
+  ['biz_outbound_order.edit_version', {
+    dataType: 'int',
+    columnType: 'int',
+    isNullable: 'NO',
+    characterMaximumLength: null,
   }],
 ])
 
@@ -230,6 +264,42 @@ const REQUIRED_INDEXES: readonly IndexFixture[] = [
     tableName: 'sms_verification_record',
     indexName: 'idx_sms_verification_record_lookup',
     columns: ['channel', 'scene', 'target_digest', 'expires_at'],
+    unique: false,
+  },
+  {
+    tableName: 'biz_outbound_order',
+    indexName: 'uk_biz_outbound_business_no',
+    columns: ['business_no'],
+    unique: true,
+  },
+  {
+    tableName: 'order_business_no_occupancy',
+    indexName: 'uk_order_business_no_occupancy_business_no',
+    columns: ['business_no'],
+    unique: true,
+  },
+  {
+    tableName: 'order_business_no_occupancy',
+    indexName: 'uk_order_business_no_occupancy_namespace_serial',
+    columns: ['business_namespace', 'serial_value'],
+    unique: true,
+  },
+  {
+    tableName: 'order_business_no_occupancy',
+    indexName: 'idx_order_business_no_occupancy_order_uuid',
+    columns: ['order_uuid'],
+    unique: false,
+  },
+  {
+    tableName: 'order_revision',
+    indexName: 'uk_order_revision_uuid_version',
+    columns: ['order_uuid', 'revision_no'],
+    unique: true,
+  },
+  {
+    tableName: 'order_revision',
+    indexName: 'idx_order_revision_order_id_snapshot',
+    columns: ['order_id_snapshot'],
     unique: false,
   },
 ]
@@ -374,6 +444,20 @@ missingSmsVerificationRecord.tables.delete('sms_verification_record')
 await expectSchemaFailure(missingSmsVerificationRecord, [
   '表 sms_verification_record',
   '039_aliyun_pnvs_sms_verification.sql',
+])
+
+const missingOrderBusinessNoOccupancy = createCompleteFixture()
+missingOrderBusinessNoOccupancy.tables.delete('order_business_no_occupancy')
+await expectSchemaFailure(missingOrderBusinessNoOccupancy, [
+  '表 order_business_no_occupancy',
+  '042_order_business_no_amendment.sql',
+])
+
+const missingOrderBusinessNo = createCompleteFixture()
+missingOrderBusinessNo.columns.delete(objectKey('biz_outbound_order', 'business_no'))
+await expectSchemaFailure(missingOrderBusinessNo, [
+  '字段 biz_outbound_order.business_no',
+  '042_order_business_no_amendment.sql',
 ])
 
 const missingIdempotencyColumn = createCompleteFixture()

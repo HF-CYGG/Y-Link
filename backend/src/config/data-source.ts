@@ -41,6 +41,8 @@ import { NotificationDispatch } from '../entities/notification-dispatch.entity.j
 import { AuthRiskState } from '../entities/auth-risk-state.entity.js'
 import { BusinessSequence } from '../entities/business-sequence.entity.js'
 import { SmsVerificationRecord } from '../entities/sms-verification-record.entity.js'
+import { OrderBusinessNoOccupancy } from '../entities/order-business-no-occupancy.entity.js'
+import { OrderRevision } from '../entities/order-revision.entity.js'
 
 export const appEntities = [
   BaseProduct,
@@ -74,6 +76,8 @@ export const appEntities = [
   AuthRiskState,
   BusinessSequence,
   SmsVerificationRecord,
+  OrderBusinessNoOccupancy,
+  OrderRevision,
 ]
 
 function resolveEffectiveDatabaseConfig(
