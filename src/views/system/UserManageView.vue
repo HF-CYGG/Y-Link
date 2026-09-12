@@ -15,18 +15,29 @@ import dayjs from 'dayjs'
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { BizCrudDialogShell, BizResponsiveDataCollectionShell, PageContainer, PagePaginationBar, PageToolbarCard } from '@/components/common'
+import AccountLifecycleDialog from '@/components/account/AccountLifecycleDialog.vue'
+import type {
+  AccountLifecycleAction,
+  AccountLifecyclePreview,
+  AccountLifecycleReasonPayload,
+  AccountPermanentDeletePayload,
+  AccountState,
+} from '@ylink/shared-types'
 import {
   changePassword,
   ROLE_LABEL_MAP,
-  STATUS_LABEL_MAP,
   type UserRole,
   type UserSafeProfile,
   type UserStatus,
 } from '@/api/modules/auth'
 import {
   createUser,
+  deactivateUser,
   getUserList,
+  getUserDeactivationPreview,
+  permanentlyDeleteUser,
   resetUserPassword,
+  restoreUser,
   updateUser,
   updateUserStatus,
   type CreateUserPayload,
@@ -60,7 +71,7 @@ import {
 const searchForm = reactive({
   keyword: '',
   role: '' as '' | UserRole,
-  status: '' as '' | UserStatus,
+  accountState: '' as '' | AccountState,
 })
 
 /**
@@ -93,7 +104,9 @@ const canCreateUser = computed(() => hasPermission('users:create'))
 const canEditUser = computed(() => hasPermission('users:update'))
 const canToggleUser = computed(() => hasPermission('users:status'))
 const canResetUserPassword = computed(() => hasPermission('users:reset_password'))
-const canOperateUsers = computed(() => canEditUser.value || canToggleUser.value || canResetUserPassword.value)
+const canDeactivateUser = computed(() => hasPermission('users:deactivate'))
+const canPermanentDeleteUser = computed(() => hasPermission('users:permanent_delete'))
+const canOperateUsers = computed(() => canEditUser.value || canToggleUser.value || canResetUserPassword.value || canDeactivateUser.value || canPermanentDeleteUser.value)
 
 /**
  * 弹窗状态：
@@ -110,6 +123,11 @@ const resetPasswordFormRef = ref<FormInstance>()
 const ownPasswordVisible = ref(false)
 const ownPasswordSubmitting = ref(false)
 const ownPasswordFormRef = ref<FormInstance>()
+const lifecycleVisible = ref(false)
+const lifecycleLoading = ref(false)
+const lifecycleAction = ref<AccountLifecycleAction>('deactivate')
+const lifecycleTarget = ref<UserSafeProfile | null>(null)
+const lifecyclePreview = ref<AccountLifecyclePreview | null>(null)
 
 /**
  * 用户编辑表单：
@@ -281,7 +299,8 @@ const currentRoleDescription = computed(() => {
  * - 同时保证文案字典仍集中维护。
  */
 const getRoleLabel = (role: UserRole) => ROLE_LABEL_MAP[role]
-const getStatusLabel = (status: UserStatus) => STATUS_LABEL_MAP[status]
+const getAccountStateLabel = (state: AccountState) => ({ enabled: '启用', disabled: '停用', deactivated: '已注销' })[state]
+const getAccountStateTagType = (state: AccountState) => state === 'deactivated' ? 'danger' : getStatusTagType(state)
 
 /**
  * 将搜索条件转换为接口参数：
@@ -300,8 +319,8 @@ const buildQueryParams = (): UserListQuery => {
   if (searchForm.role) {
     params.role = searchForm.role
   }
-  if (searchForm.status) {
-    params.status = searchForm.status
+  if (searchForm.accountState) {
+    params.accountState = searchForm.accountState
   }
 
   return params
@@ -612,6 +631,57 @@ const handleToggleStatus = async (row: UserSafeProfile) => {
   }
 }
 
+const handleOpenLifecycle = async (row: UserSafeProfile, action: AccountLifecycleAction) => {
+  const permission = action === 'permanent_delete' ? 'users:permanent_delete' : 'users:deactivate'
+  if (!ensurePermission(permission, action === 'permanent_delete' ? '永久删除账号' : '账号注销与恢复')) return
+  lifecycleLoading.value = true
+  try {
+    lifecyclePreview.value = await getUserDeactivationPreview(row.id)
+    lifecycleTarget.value = row
+    lifecycleAction.value = action
+    lifecycleVisible.value = true
+  } catch (error) {
+    void showCriticalErrorDialog(error, {
+      title: '账号生命周期预检失败',
+      fallback: '无法获取账号生命周期状态，请稍后重试',
+      operation: '账号生命周期预检',
+    })
+  } finally {
+    lifecycleLoading.value = false
+  }
+}
+
+const handleLifecycleConfirm = async (payload: AccountLifecycleReasonPayload | AccountPermanentDeletePayload) => {
+  const target = lifecycleTarget.value
+  if (!target) return
+  lifecycleLoading.value = true
+  try {
+    if (lifecycleAction.value === 'deactivate') {
+      await deactivateUser(target.id, payload as AccountLifecycleReasonPayload)
+    } else if (lifecycleAction.value === 'restore') {
+      await restoreUser(target.id, payload as AccountLifecycleReasonPayload)
+    } else {
+      await permanentlyDeleteUser(target.id, payload as AccountPermanentDeletePayload)
+    }
+    lifecycleVisible.value = false
+    const actionLabel = lifecycleAction.value === 'deactivate'
+      ? '注销'
+      : lifecycleAction.value === 'restore'
+        ? '恢复'
+        : '永久删除'
+    showAppSuccess(`${actionLabel}系统账号成功`)
+    await loadData()
+  } catch (error) {
+    void showCriticalErrorDialog(error, {
+      title: `${lifecycleAction.value === 'permanent_delete' ? '永久删除' : lifecycleAction.value === 'restore' ? '恢复' : '注销'}账号失败`,
+      fallback: '账号状态可能已并发变化，请刷新后重试',
+      operation: '账号生命周期操作',
+    })
+  } finally {
+    lifecycleLoading.value = false
+  }
+}
+
 /**
  * 搜索与重置：
  * - 搜索前统一回到第一页；
@@ -625,7 +695,7 @@ const handleSearch = () => {
 const handleReset = () => {
   searchForm.keyword = ''
   searchForm.role = ''
-  searchForm.status = ''
+  searchForm.accountState = ''
   handleSearch()
 }
 
@@ -657,9 +727,9 @@ const isSelfRow = (row: UserSafeProfile) => row.id === authStore.currentUser?.id
  * - 与权限点保持一一对应，避免“看到但点不了”的误导；
  * - 仅在确实具备对应权限时才呈现按钮。
  */
-const canShowEditAction = (row: UserSafeProfile) => canEditUser.value && Boolean(row.id)
-const canShowResetPasswordAction = (row: UserSafeProfile) => canResetUserPassword.value && !isSelfRow(row)
-const canShowToggleStatusAction = (row: UserSafeProfile) => canToggleUser.value && !(isSelfRow(row) && row.status === 'enabled')
+const canShowEditAction = (row: UserSafeProfile) => canEditUser.value && row.accountState !== 'deactivated' && Boolean(row.id)
+const canShowResetPasswordAction = (row: UserSafeProfile) => canResetUserPassword.value && row.accountState !== 'deactivated' && !isSelfRow(row)
+const canShowToggleStatusAction = (row: UserSafeProfile) => canToggleUser.value && row.accountState !== 'deactivated' && !(isSelfRow(row) && row.status === 'enabled')
 
 onMounted(() => {
   void loadData()
@@ -695,14 +765,15 @@ onMounted(() => {
               />
             </el-select>
             <el-select
-              v-model="searchForm.status"
-              placeholder="状态"
+              v-model="searchForm.accountState"
+              placeholder="账号状态"
               clearable
               :class="isPhone ? '!w-full' : isTablet ? '!w-[160px]' : '!w-[168px]'"
               @change="handleSearch"
             >
               <el-option label="启用" value="enabled" />
               <el-option label="停用" value="disabled" />
+              <el-option label="已注销" value="deactivated" />
             </el-select>
             <el-button :class="isPhone ? 'w-full' : ''" type="primary" icon="Search" @click="handleSearch">搜索</el-button>
             <el-button :class="isPhone ? 'w-full' : ''" icon="Refresh" @click="handleReset">重置</el-button>
@@ -790,7 +861,16 @@ onMounted(() => {
               </el-table-column>
               <el-table-column label="状态" width="110">
                 <template #default="{ row }">
-                  <el-tag :type="getStatusTagType(row.status)" effect="light">{{ getStatusLabel(row.status) }}</el-tag>
+                  <el-tag :type="getAccountStateTagType(row.accountState)" effect="light">{{ getAccountStateLabel(row.accountState) }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="生命周期" min-width="210" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <span v-if="row.accountState === 'deactivated'">
+                    {{ row.deactivatedAt ? dayjs(row.deactivatedAt).format('YYYY-MM-DD HH:mm') : '已注销' }} · {{ row.deactivationReason || '未提供原因' }}
+                  </span>
+                  <span v-else-if="row.restoredAt">最近恢复 {{ dayjs(row.restoredAt).format('YYYY-MM-DD HH:mm') }}</span>
+                  <span v-else>-</span>
                 </template>
               </el-table-column>
               <el-table-column label="关键权限边界" min-width="360" class-name="user-manage__permission-cell">
@@ -820,7 +900,7 @@ onMounted(() => {
                 v-if="canOperateUsers"
                 label="操作"
                 fixed="right"
-                width="220"
+                width="330"
                 align="right"
                 class-name="user-manage__action-cell"
               >
@@ -836,6 +916,9 @@ onMounted(() => {
                     >
                       {{ row.status === 'enabled' ? '停用' : '启用' }}
                     </el-button>
+                    <el-button v-if="canDeactivateUser && row.accountState !== 'deactivated'" link type="danger" @click="handleOpenLifecycle(row, 'deactivate')">注销</el-button>
+                    <el-button v-if="canDeactivateUser && row.accountState === 'deactivated'" link type="primary" @click="handleOpenLifecycle(row, 'restore')">恢复</el-button>
+                    <el-button v-if="canPermanentDeleteUser && row.accountState === 'deactivated'" link type="danger" @click="handleOpenLifecycle(row, 'permanent_delete')">永久删除</el-button>
                   </div>
                 </template>
               </el-table-column>
@@ -850,7 +933,7 @@ onMounted(() => {
                   <div class="truncate text-sm text-slate-500 dark:text-slate-400">{{ item.username }}</div>
                   <div class="truncate text-xs text-slate-400 dark:text-slate-500">{{ item.email || '未配置邮箱' }}</div>
                 </div>
-                <el-tag :type="getStatusTagType(item.status)" effect="light">{{ getStatusLabel(item.status) }}</el-tag>
+                <el-tag :type="getAccountStateTagType(item.accountState)" effect="light">{{ getAccountStateLabel(item.accountState) }}</el-tag>
               </div>
 
               <div class="grid gap-2 rounded-2xl bg-slate-50 p-3 text-sm text-slate-600 dark:bg-white/5 dark:text-slate-300">
@@ -887,6 +970,10 @@ onMounted(() => {
                   <span class="text-slate-400">创建时间</span>
                   <span>{{ dayjs(item.createdAt).format('YYYY-MM-DD HH:mm') }}</span>
                 </div>
+                <div v-if="item.deactivatedAt" class="flex items-start justify-between gap-3">
+                  <span class="text-slate-400">最近注销</span>
+                  <span class="max-w-[70%] text-right">{{ dayjs(item.deactivatedAt).format('YYYY-MM-DD HH:mm') }} · {{ item.deactivationReason || '-' }}</span>
+                </div>
               </div>
 
               <div v-if="canOperateUsers" class="flex items-center justify-end gap-3 border-t border-slate-100 pt-3 dark:border-white/10">
@@ -900,6 +987,9 @@ onMounted(() => {
                 >
                   {{ item.status === 'enabled' ? '停用' : '启用' }}
                 </el-button>
+                <el-button v-if="canDeactivateUser && item.accountState !== 'deactivated'" link type="danger" @click="handleOpenLifecycle(item, 'deactivate')">注销</el-button>
+                <el-button v-if="canDeactivateUser && item.accountState === 'deactivated'" link type="primary" @click="handleOpenLifecycle(item, 'restore')">恢复</el-button>
+                <el-button v-if="canPermanentDeleteUser && item.accountState === 'deactivated'" link type="danger" @click="handleOpenLifecycle(item, 'permanent_delete')">永久删除</el-button>
               </div>
             </div>
           </template>
@@ -1075,6 +1165,16 @@ onMounted(() => {
         </el-form-item>
       </el-form>
     </BizCrudDialogShell>
+
+    <AccountLifecycleDialog
+      v-model="lifecycleVisible"
+      :action="lifecycleAction"
+      :account-label="lifecycleTarget?.username || ''"
+      :preview="lifecyclePreview"
+      :lifecycle="lifecycleTarget"
+      :loading="lifecycleLoading"
+      @confirm="handleLifecycleConfirm"
+    />
   </PageContainer>
 </template>
 

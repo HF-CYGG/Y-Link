@@ -8,6 +8,14 @@
 
 import { request, type RequestConfig } from '@/api/http'
 import type { PaginationQueryInput, PaginationResult } from '@/types/api'
+import type {
+  AccountLifecycleFields,
+  AccountLifecyclePreview,
+  AccountLifecycleReasonPayload,
+  AccountPermanentDeletePayload,
+  AccountPermanentDeleteResult,
+  AccountState,
+} from '@ylink/shared-types'
 
 /**
  * 客户端用户启停状态：
@@ -22,7 +30,7 @@ export type ClientUserProfileKind = 'personal' | 'teacher' | 'department'
  * 客户端用户管理资料：
  * - 面向管理端展示，包含基本信息与状态。
  */
-export interface ClientUserManageProfile {
+export interface ClientUserManageProfile extends AccountLifecycleFields {
   id: string
   account: string
   // `username` 是治理页应优先展示和编辑的用户名字段；
@@ -51,6 +59,7 @@ export interface ClientUserManageProfile {
 export interface ClientUserListQuery extends PaginationQueryInput {
   keyword?: string
   status?: ClientUserStatus
+  accountState?: AccountState
   accountType?: ClientUserAccountType
   profileKind?: ClientUserProfileKind
   departmentName?: string
@@ -221,3 +230,15 @@ export const resetClientUserPassword = (id: string, payload: ResetClientUserPass
     url: `/client-users/${id}/reset-password`,
     data: payload,
   })
+
+export const getClientUserDeactivationPreview = (id: string) =>
+  request<AccountLifecyclePreview>({ method: 'GET', url: `/client-users/${id}/deactivation-preview` })
+
+export const deactivateClientUser = (id: string, payload: AccountLifecycleReasonPayload) =>
+  request<ClientUserManageProfile>({ method: 'POST', url: `/client-users/${id}/deactivate`, data: payload })
+
+export const restoreClientUser = (id: string, payload: AccountLifecycleReasonPayload) =>
+  request<ClientUserManageProfile>({ method: 'POST', url: `/client-users/${id}/restore`, data: payload })
+
+export const permanentlyDeleteClientUser = (id: string, payload: AccountPermanentDeletePayload) =>
+  request<AccountPermanentDeleteResult>({ method: 'DELETE', url: `/client-users/${id}/permanent`, data: payload })

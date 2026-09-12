@@ -23,8 +23,11 @@ const REQUIRED_TABLES = [
   'sys_user',
   'sys_user_session',
   'client_user',
+  'client_user_session',
   'client_feedback_conversation',
+  'client_feedback_attachment',
   'o2o_preorder',
+  'o2o_return_request',
   'o2o_preorder_item',
   'biz_outbound_order',
   'biz_outbound_order_item',
@@ -40,9 +43,17 @@ const REQUIRED_TABLES = [
   'sms_verification_record',
   'order_business_no_occupancy',
   'order_revision',
+  'account_lifecycle_event',
 ] as const
 
 const REQUIRED_COLUMNS = [
+  ...['deactivated_at', 'deactivation_reason', 'deactivated_by_user_id', 'deactivated_by_username', 'deactivated_by_display_name', 'restored_at', 'restored_by_user_id', 'restored_by_username', 'restored_by_display_name']
+    .flatMap((columnName) => [
+      ['sys_user', columnName] as const,
+      ['client_user', columnName] as const,
+    ]),
+  ...['account_domain', 'account_id_snapshot', 'account_masked_snapshot', 'event_type', 'reason', 'actor_user_id_snapshot', 'actor_username_snapshot', 'actor_display_name_snapshot', 'reference_summary_json', 'event_summary_json', 'created_at']
+    .map((columnName) => ['account_lifecycle_event', columnName] as const),
   ['client_mobile_session', 'client_user_id'],
   ['client_mobile_session', 'device_id'],
   ['client_mobile_session', 'device_name'],
@@ -216,7 +227,25 @@ interface ForeignKeyFixture {
   deleteRule: string
 }
 
+interface TriggerFixture {
+  triggerName: string
+  eventManipulation: 'UPDATE' | 'DELETE'
+  actionTiming: 'BEFORE'
+}
+
 const REQUIRED_INDEXES: readonly IndexFixture[] = [
+  {
+    tableName: 'account_lifecycle_event',
+    indexName: 'idx_account_lifecycle_event_account',
+    columns: ['account_domain', 'account_id_snapshot', 'id'],
+    unique: false,
+  },
+  {
+    tableName: 'account_lifecycle_event',
+    indexName: 'idx_account_lifecycle_event_created_at',
+    columns: ['created_at', 'id'],
+    unique: false,
+  },
   {
     tableName: 'inventory_log',
     indexName: 'idx_inventory_log_sku_id',
@@ -358,6 +387,27 @@ const REQUIRED_INDEXES: readonly IndexFixture[] = [
 ]
 
 const REQUIRED_FOREIGN_KEYS: readonly ForeignKeyFixture[] = [
+  ...[
+    ['sys_user_session', 'fk_sys_user_session_user_id', 'user_id', 'sys_user'],
+    ['client_user_session', 'fk_client_user_session_user_id', 'user_id', 'client_user'],
+    ['client_mobile_session', 'fk_client_mobile_session_user', 'client_user_id', 'client_user'],
+    ['biz_inbound_order', 'fk_biz_inbound_supplier_user', 'supplier_id', 'sys_user'],
+    ['o2o_preorder', 'fk_o2o_preorder_client_user', 'client_user_id', 'client_user'],
+    ['o2o_return_request', 'fk_o2o_return_client_user', 'client_user_id', 'client_user'],
+    ['client_feedback_conversation', 'fk_feedback_conversation_client_user', 'client_user_id', 'client_user'],
+    ['client_feedback_conversation', 'fk_feedback_conversation_assigned_user', 'assigned_user_id', 'sys_user'],
+    ['client_feedback_conversation', 'fk_feedback_conversation_remark_user', 'internal_remark_by_user_id', 'sys_user'],
+    ['client_feedback_attachment', 'fk_feedback_attachment_owner', 'owner_client_user_id', 'client_user'],
+    ['notification_inbox', 'fk_notification_inbox_user_id', 'user_id', 'sys_user'],
+  ].map(([tableName, constraintName, columnName, referencedTableName]) => ({
+    tableName,
+    constraintName,
+    columnName,
+    referencedTableName,
+    referencedColumnName: 'id',
+    ordinalPosition: 1,
+    deleteRule: 'RESTRICT',
+  })),
   {
     tableName: 'biz_outbound_order_item',
     constraintName: 'fk_biz_outbound_item_sku_id',
@@ -378,12 +428,18 @@ const REQUIRED_FOREIGN_KEYS: readonly ForeignKeyFixture[] = [
   },
 ]
 
+const REQUIRED_TRIGGERS: readonly TriggerFixture[] = [
+  { triggerName: 'trg_account_lifecycle_event_no_update', eventManipulation: 'UPDATE', actionTiming: 'BEFORE' },
+  { triggerName: 'trg_account_lifecycle_event_no_delete', eventManipulation: 'DELETE', actionTiming: 'BEFORE' },
+]
+
 interface SchemaFixture {
   tables: Set<string>
   columns: Set<string>
   columnDefinitions: Map<string, ColumnFixture>
   indexes: Map<string, IndexFixture>
   foreignKeys: Map<string, ForeignKeyFixture>
+  triggers: Map<string, TriggerFixture>
 }
 
 const objectKey = (tableName: string, objectName: string) => `${tableName}.${objectName}`
@@ -410,6 +466,7 @@ function createCompleteFixture(): SchemaFixture {
       objectKey(foreignKey.tableName, foreignKey.constraintName),
       { ...foreignKey },
     ])),
+    triggers: new Map(REQUIRED_TRIGGERS.map((trigger) => [trigger.triggerName, { ...trigger }])),
   }
 }
 
@@ -458,6 +515,13 @@ function createDataSource(fixture: SchemaFixture): DataSource {
             SEQ_IN_INDEX: position + 1,
             NON_UNIQUE: index.unique ? 0 : 1,
           })))
+      }
+      if (sql.includes('information_schema.TRIGGERS')) {
+        return [...fixture.triggers.values()].map((trigger) => ({
+          TRIGGER_NAME: trigger.triggerName,
+          EVENT_MANIPULATION: trigger.eventManipulation,
+          ACTION_TIMING: trigger.actionTiming,
+        }))
       }
       throw new Error(`测试替身收到未识别的 SQL：${sql}`)
     },
@@ -695,6 +759,34 @@ malformedSmsOutIdIndex.indexes.set(
 await expectSchemaFailure(malformedSmsOutIdIndex, [
   '索引 sms_verification_record.uk_sms_verification_record_out_id',
   '039_aliyun_pnvs_sms_verification.sql',
+])
+
+const missingLifecycleEventTable = createCompleteFixture()
+missingLifecycleEventTable.tables.delete('account_lifecycle_event')
+await expectSchemaFailure(missingLifecycleEventTable, [
+  '表 account_lifecycle_event',
+  '044_account_lifecycle_governance.sql',
+])
+
+const missingSysDeactivationColumn = createCompleteFixture()
+missingSysDeactivationColumn.columns.delete(objectKey('sys_user', 'deactivated_at'))
+await expectSchemaFailure(missingSysDeactivationColumn, [
+  '字段 sys_user.deactivated_at',
+  '044_account_lifecycle_governance.sql',
+])
+
+const wrongClientSessionDeleteRule = createCompleteFixture()
+wrongClientSessionDeleteRule.foreignKeys.get(objectKey('client_user_session', 'fk_client_user_session_user_id'))!.deleteRule = 'CASCADE'
+await expectSchemaFailure(wrongClientSessionDeleteRule, [
+  '外键 client_user_session.user_id 必须使用 ON DELETE RESTRICT',
+  '044_account_lifecycle_governance.sql',
+])
+
+const missingLifecycleUpdateTrigger = createCompleteFixture()
+missingLifecycleUpdateTrigger.triggers.delete('trg_account_lifecycle_event_no_update')
+await expectSchemaFailure(missingLifecycleUpdateTrigger, [
+  '触发器 trg_account_lifecycle_event_no_update',
+  '044_account_lifecycle_governance.sql',
 ])
 
 console.log('[mysql-schema-contract-verify] MySQL 启动结构契约验证通过')

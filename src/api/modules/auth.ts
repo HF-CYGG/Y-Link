@@ -5,6 +5,7 @@
  */
 
 import { request } from '@/api/http'
+import type { AccountLifecycleFields } from '@ylink/shared-types'
 
 /**
  * 前端用户角色类型：
@@ -42,6 +43,8 @@ export const PERMISSION_CODES = [
   'users:update',
   'users:status',
   'users:reset_password',
+  'users:deactivate',
+  'users:permanent_delete',
   'audit_logs:view',
   'audit_logs:export',
   'reports:view',
@@ -84,6 +87,8 @@ export const ROLE_DEFAULT_PERMISSION_MAP: Record<UserRole, PermissionCode[]> = {
     'users:update',
     'users:status',
     'users:reset_password',
+    'users:deactivate',
+    'users:permanent_delete',
     'audit_logs:view',
     'audit_logs:export',
     'reports:view',
@@ -146,6 +151,8 @@ export const PERMISSION_LABEL_MAP: Record<PermissionCode, string> = {
   'users:update': '编辑用户',
   'users:status': '启停用户',
   'users:reset_password': '重置密码',
+  'users:deactivate': '注销/恢复账号',
+  'users:permanent_delete': '永久删除账号',
   'audit_logs:view': '查看审计日志',
   'audit_logs:export': '导出审计日志',
   'reports:view': '查看报表中心',
@@ -175,6 +182,8 @@ export const GOVERNANCE_PERMISSION_CODES: PermissionCode[] = [
   'users:update',
   'users:status',
   'users:reset_password',
+  'users:deactivate',
+  'users:permanent_delete',
   'audit_logs:view',
   'audit_logs:export',
   'reports:view',
@@ -193,7 +202,7 @@ export type UserStatus = 'enabled' | 'disabled'
  * - 仅包含前端需要展示与鉴权的信息；
  * - permissions 为本期新增字段，用于细粒度权限点校验。
  */
-export interface UserSafeProfile {
+export interface UserSafeProfile extends AccountLifecycleFields {
   id: string
   username: string
   displayName: string
@@ -268,6 +277,14 @@ export const normalizeUserPermissions = (user: Pick<UserSafeProfile, 'role' | 'p
 export const normalizeUserSafeProfile = (user: UserSafeProfile): UserSafeProfile => {
   return {
     ...user,
+    accountState: user.accountState ?? user.status,
+    deactivatedAt: user.deactivatedAt ?? null,
+    deactivationReason: user.deactivationReason ?? null,
+    deactivatedByUsername: user.deactivatedByUsername ?? null,
+    deactivatedByDisplayName: user.deactivatedByDisplayName ?? null,
+    restoredAt: user.restoredAt ?? null,
+    restoredByUsername: user.restoredByUsername ?? null,
+    restoredByDisplayName: user.restoredByDisplayName ?? null,
     permissions: normalizeUserPermissions(user),
   }
 }

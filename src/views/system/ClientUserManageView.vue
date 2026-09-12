@@ -13,12 +13,24 @@ import { computed, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, wat
 import { onBeforeRouteLeave } from 'vue-router'
 import { ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { BizCrudDialogShell, BizResponsiveDataCollectionShell, PageContainer, PagePaginationBar, PageToolbarCard } from '@/components/common'
+import AccountLifecycleDialog from '@/components/account/AccountLifecycleDialog.vue'
+import type {
+  AccountLifecycleAction,
+  AccountLifecyclePreview,
+  AccountLifecycleReasonPayload,
+  AccountPermanentDeletePayload,
+  AccountState,
+} from '@ylink/shared-types'
 import {
   createClientUser,
   createDepartmentAccountBatch,
+  deactivateClientUser,
   getClientUserList,
+  getClientUserDeactivationPreview,
+  permanentlyDeleteClientUser,
   previewDepartmentAccountBatch,
   resetClientUserPassword,
+  restoreClientUser,
   updateClientUser,
   updateClientUserStatus,
   type CreateClientUserPayload,
@@ -70,7 +82,7 @@ const { hasPermission, ensurePermission } = usePermissionAction()
 
 const searchForm = reactive({
   keyword: '',
-  status: '' as '' | ClientUserStatus,
+  accountState: '' as '' | AccountState,
   profileKind: '' as '' | ClientUserProfileKind,
   departmentName: '',
   staffNo: '',
@@ -89,12 +101,19 @@ const canEditUser = computed(() => hasPermission('users:update'))
 const canToggleUser = computed(() => hasPermission('users:status'))
 const canResetUserPassword = computed(() => hasPermission('users:reset_password'))
 const canCreateUser = computed(() => hasPermission('users:create'))
-const canOperateUsers = computed(() => canEditUser.value || canToggleUser.value || canResetUserPassword.value)
+const canDeactivateUser = computed(() => hasPermission('users:deactivate'))
+const canPermanentDeleteUser = computed(() => hasPermission('users:permanent_delete'))
+const canOperateUsers = computed(() => canEditUser.value || canToggleUser.value || canResetUserPassword.value || canDeactivateUser.value || canPermanentDeleteUser.value)
 const departmentOptions = ref<string[]>([])
 const departmentTree = ref<ClientDepartmentTreeNode[]>([])
 const departmentPathLookup = ref<Record<string, string>>({})
 const departmentNodeLookup = ref<Record<string, DepartmentNodeMeta>>({})
 const departmentOptionsLoading = ref(false)
+const lifecycleVisible = ref(false)
+const lifecycleLoading = ref(false)
+const lifecycleAction = ref<AccountLifecycleAction>('deactivate')
+const lifecycleTarget = ref<ClientUserManageProfile | null>(null)
+const lifecyclePreview = ref<AccountLifecyclePreview | null>(null)
 
 const createVisible = ref(false)
 const createSubmitting = ref(false)
@@ -313,6 +332,8 @@ const getStatusTagType = (status: ClientUserStatus) => {
 const getStatusLabel = (status: ClientUserStatus) => {
   return status === 'enabled' ? '启用' : '停用'
 }
+const getAccountStateLabel = (state: AccountState) => state === 'deactivated' ? '已注销' : getStatusLabel(state)
+const getAccountStateTagType = (state: AccountState) => state === 'deactivated' ? 'danger' : getStatusTagType(state)
 
 const getProfileKindLabel = (profileKind: ClientUserProfileKind) => {
   if (profileKind === 'teacher') return '教师账号'
@@ -823,8 +844,8 @@ const buildQueryParams = (): ClientUserListQuery => {
   if (searchForm.keyword.trim()) {
     params.keyword = searchForm.keyword.trim()
   }
-  if (searchForm.status) {
-    params.status = searchForm.status
+  if (searchForm.accountState) {
+    params.accountState = searchForm.accountState
   }
   if (searchForm.profileKind) {
     params.profileKind = searchForm.profileKind
@@ -896,7 +917,7 @@ const handleOpenCreate = () => {
 
 const handleReset = () => {
   searchForm.keyword = ''
-  searchForm.status = ''
+  searchForm.accountState = ''
   searchForm.profileKind = ''
   searchForm.departmentName = ''
   searchForm.staffNo = ''
@@ -1151,6 +1172,53 @@ const handleToggleStatus = async (row: ClientUserManageProfile) => {
   }
 }
 
+const handleOpenLifecycle = async (row: ClientUserManageProfile, action: AccountLifecycleAction) => {
+  const permission = action === 'permanent_delete' ? 'users:permanent_delete' : 'users:deactivate'
+  if (!ensurePermission(permission, action === 'permanent_delete' ? '永久删除客户端账号' : '客户端账号注销与恢复')) return
+  lifecycleLoading.value = true
+  try {
+    lifecyclePreview.value = await getClientUserDeactivationPreview(row.id)
+    lifecycleTarget.value = row
+    lifecycleAction.value = action
+    lifecycleVisible.value = true
+  } catch (error) {
+    void showCriticalErrorDialog(error, {
+      title: '客户端账号生命周期预检失败',
+      fallback: '无法获取客户端账号生命周期状态，请稍后重试',
+      operation: '客户端账号生命周期预检',
+    })
+  } finally {
+    lifecycleLoading.value = false
+  }
+}
+
+const handleLifecycleConfirm = async (payload: AccountLifecycleReasonPayload | AccountPermanentDeletePayload) => {
+  const target = lifecycleTarget.value
+  if (!target) return
+  lifecycleLoading.value = true
+  try {
+    if (lifecycleAction.value === 'deactivate') {
+      await deactivateClientUser(target.id, payload as AccountLifecycleReasonPayload)
+    } else if (lifecycleAction.value === 'restore') {
+      await restoreClientUser(target.id, payload as AccountLifecycleReasonPayload)
+    } else {
+      await permanentlyDeleteClientUser(target.id, payload as AccountPermanentDeletePayload)
+    }
+    const actionLabel = lifecycleAction.value === 'permanent_delete' ? '永久删除' : lifecycleAction.value === 'restore' ? '恢复' : '注销'
+    lifecycleVisible.value = false
+    showAppSuccess(`${actionLabel}客户端账号成功`)
+    await loadData()
+  } catch (error) {
+    void showCriticalErrorDialog(error, {
+      title: `${lifecycleAction.value === 'permanent_delete' ? '永久删除' : lifecycleAction.value === 'restore' ? '恢复' : '注销'}客户端账号失败`,
+      fallback: '账号状态可能已并发变化，请刷新后重试',
+      operation: '客户端账号生命周期操作',
+    })
+  } finally {
+    lifecycleLoading.value = false
+  }
+}
+
 onMounted(() => {
   void loadDepartmentOptions()
   void loadData()
@@ -1233,14 +1301,15 @@ onBeforeUnmount(() => {
               @keyup.enter="handleSearch"
             />
             <el-select
-              v-model="searchForm.status"
-              placeholder="状态"
+              v-model="searchForm.accountState"
+              placeholder="账号状态"
               clearable
               :class="isPhone ? '!w-full' : isTablet ? '!w-[160px]' : '!w-[168px]'"
               @change="handleSearch"
             >
               <el-option label="启用" value="enabled" />
               <el-option label="停用" value="disabled" />
+              <el-option label="已注销" value="deactivated" />
             </el-select>
             <el-select
               v-model="searchForm.profileKind"
@@ -1317,7 +1386,16 @@ onBeforeUnmount(() => {
               </el-table-column>
               <el-table-column label="状态" width="110">
                 <template #default="{ row }">
-                  <el-tag :type="getStatusTagType(row.status)" effect="light">{{ getStatusLabel(row.status) }}</el-tag>
+                  <el-tag :type="getAccountStateTagType(row.accountState)" effect="light">{{ getAccountStateLabel(row.accountState) }}</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="生命周期" min-width="210" show-overflow-tooltip>
+                <template #default="{ row }">
+                  <span v-if="row.accountState === 'deactivated'">
+                    {{ row.deactivatedAt ? dayjs(row.deactivatedAt).format('YYYY-MM-DD HH:mm') : '已注销' }} · {{ row.deactivationReason || '未提供原因' }}
+                  </span>
+                  <span v-else-if="row.restoredAt">最近恢复 {{ dayjs(row.restoredAt).format('YYYY-MM-DD HH:mm') }}</span>
+                  <span v-else>-</span>
                 </template>
               </el-table-column>
               <el-table-column label="最后登录" min-width="176">
@@ -1326,19 +1404,22 @@ onBeforeUnmount(() => {
               <el-table-column label="创建时间" min-width="176">
                 <template #default="{ row }">{{ dayjs(row.createdAt).format('YYYY-MM-DD HH:mm') }}</template>
               </el-table-column>
-              <el-table-column v-if="canOperateUsers" label="操作" fixed="right" width="220" align="right">
+              <el-table-column v-if="canOperateUsers" label="操作" fixed="right" width="330" align="right">
                 <template #default="{ row }">
                   <div class="flex flex-wrap items-center justify-end gap-x-3 gap-y-2 py-1">
-                    <el-button v-if="canEditUser" link type="primary" @click="handleOpenEdit(row)">编辑</el-button>
-                    <el-button v-if="canResetUserPassword" link type="primary" @click="handleOpenResetPassword(row)">修改密码</el-button>
+                    <el-button v-if="canEditUser && row.accountState !== 'deactivated'" link type="primary" @click="handleOpenEdit(row)">编辑</el-button>
+                    <el-button v-if="canResetUserPassword && row.accountState !== 'deactivated'" link type="primary" @click="handleOpenResetPassword(row)">修改密码</el-button>
                     <el-button
-                      v-if="canToggleUser"
+                      v-if="canToggleUser && row.accountState !== 'deactivated'"
                       link
                       :type="row.status === 'enabled' ? 'warning' : 'success'"
                       @click="handleToggleStatus(row)"
                     >
                       {{ row.status === 'enabled' ? '停用' : '启用' }}
                     </el-button>
+                    <el-button v-if="canDeactivateUser && row.accountState !== 'deactivated'" link type="danger" @click="handleOpenLifecycle(row, 'deactivate')">注销</el-button>
+                    <el-button v-if="canDeactivateUser && row.accountState === 'deactivated'" link type="primary" @click="handleOpenLifecycle(row, 'restore')">恢复</el-button>
+                    <el-button v-if="canPermanentDeleteUser && row.accountState === 'deactivated'" link type="danger" @click="handleOpenLifecycle(row, 'permanent_delete')">永久删除</el-button>
                   </div>
                 </template>
               </el-table-column>
@@ -1354,7 +1435,7 @@ onBeforeUnmount(() => {
                     {{ resolveDepartmentPathDisplay(item.departmentName) || '未设置部门' }}
                   </div>
                 </div>
-                <el-tag :type="getStatusTagType(item.status)" effect="light">{{ getStatusLabel(item.status) }}</el-tag>
+                <el-tag :type="getAccountStateTagType(item.accountState)" effect="light">{{ getAccountStateLabel(item.accountState) }}</el-tag>
               </div>
 
               <div class="grid gap-2 rounded-2xl bg-slate-50 p-3 text-sm text-slate-600 dark:bg-white/5 dark:text-slate-300">
@@ -1382,19 +1463,26 @@ onBeforeUnmount(() => {
                   <span class="text-slate-400">创建时间</span>
                   <span>{{ dayjs(item.createdAt).format('YYYY-MM-DD HH:mm') }}</span>
                 </div>
+                <div v-if="item.deactivatedAt" class="flex items-start justify-between gap-3">
+                  <span class="text-slate-400">最近注销</span>
+                  <span class="max-w-[70%] text-right">{{ dayjs(item.deactivatedAt).format('YYYY-MM-DD HH:mm') }} · {{ item.deactivationReason || '-' }}</span>
+                </div>
               </div>
 
               <div v-if="canOperateUsers" class="flex items-center justify-end gap-3 border-t border-slate-100 pt-3 dark:border-white/10">
-                <el-button v-if="canEditUser" link type="primary" @click="handleOpenEdit(item)">编辑</el-button>
-                <el-button v-if="canResetUserPassword" link type="primary" @click="handleOpenResetPassword(item)">修改密码</el-button>
+                <el-button v-if="canEditUser && item.accountState !== 'deactivated'" link type="primary" @click="handleOpenEdit(item)">编辑</el-button>
+                <el-button v-if="canResetUserPassword && item.accountState !== 'deactivated'" link type="primary" @click="handleOpenResetPassword(item)">修改密码</el-button>
                 <el-button
-                  v-if="canToggleUser"
+                  v-if="canToggleUser && item.accountState !== 'deactivated'"
                   link
                   :type="item.status === 'enabled' ? 'warning' : 'success'"
                   @click="handleToggleStatus(item)"
                 >
                   {{ item.status === 'enabled' ? '停用' : '启用' }}
                 </el-button>
+                <el-button v-if="canDeactivateUser && item.accountState !== 'deactivated'" link type="danger" @click="handleOpenLifecycle(item, 'deactivate')">注销</el-button>
+                <el-button v-if="canDeactivateUser && item.accountState === 'deactivated'" link type="primary" @click="handleOpenLifecycle(item, 'restore')">恢复</el-button>
+                <el-button v-if="canPermanentDeleteUser && item.accountState === 'deactivated'" link type="danger" @click="handleOpenLifecycle(item, 'permanent_delete')">永久删除</el-button>
               </div>
             </div>
           </template>
@@ -1776,5 +1864,15 @@ onBeforeUnmount(() => {
         </span>
       </template>
     </BizCrudDialogShell>
+
+    <AccountLifecycleDialog
+      v-model="lifecycleVisible"
+      :action="lifecycleAction"
+      :preview="lifecyclePreview"
+      :account-label="lifecyclePreview?.account || ''"
+      :lifecycle="lifecycleTarget"
+      :loading="lifecycleLoading"
+      @confirm="handleLifecycleConfirm"
+    />
   </PageContainer>
 </template>

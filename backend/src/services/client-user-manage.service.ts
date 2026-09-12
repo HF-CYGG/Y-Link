@@ -18,11 +18,17 @@ import {
 import { ClientStaffDirectory } from '../entities/client-staff-directory.entity.js'
 import { ClientUserSession } from '../entities/client-user-session.entity.js'
 import { ClientMobileSession } from '../entities/client-mobile-session.entity.js'
+import { AccountLifecycleEvent } from '../entities/account-lifecycle-event.entity.js'
+import { ClientFeedbackAttachment } from '../entities/client-feedback-attachment.entity.js'
+import { ClientFeedbackConversation } from '../entities/client-feedback-conversation.entity.js'
+import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
+import { O2oReturnRequest } from '../entities/o2o-return-request.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
 import { isUniqueConstraintError } from '../utils/database-errors.js'
 import { assertClientPasswordPolicy, hashPassword } from '../utils/password.js'
 import type { RequestMeta } from '../utils/request-meta.js'
+import { assertPermanentDeletePassword } from '../utils/permanent-delete-password.js'
 import { auditService } from './audit.service.js'
 import { systemConfigService } from './system-config.service.js'
 import type { EntityManager } from 'typeorm'
@@ -38,6 +44,7 @@ export interface ClientUserListQuery {
   profileKind?: ClientUserProfileKind
   departmentName?: string
   staffNo?: string
+  accountState?: 'enabled' | 'disabled' | 'deactivated'
 }
 
 export interface ResetClientUserPasswordInput {
@@ -82,6 +89,35 @@ export interface ClientUserManageSafeProfile {
   lastLoginAt: Date | null
   createdAt: Date
   updatedAt: Date
+  accountState: 'enabled' | 'disabled' | 'deactivated'
+  deactivatedAt: Date | null
+  deactivationReason: string | null
+  deactivatedByUsername: string | null
+  deactivatedByDisplayName: string | null
+  restoredAt: Date | null
+  restoredByUsername: string | null
+  restoredByDisplayName: string | null
+}
+
+export interface ClientAccountLifecycleReasonInput {
+  reason: string
+}
+
+export interface ClientAccountPermanentDeleteInput extends ClientAccountLifecycleReasonInput {
+  confirmAccount: string
+  permanentDeletePassword?: string
+}
+
+export interface ClientAccountLifecyclePreview {
+  domain: 'client_user'
+  accountId: string
+  account: string
+  accountState: 'enabled' | 'disabled' | 'deactivated'
+  canDeactivate: boolean
+  canRestore: boolean
+  canPermanentDelete: boolean
+  blockers: Array<{ code: string; message: string; count: number }>
+  referenceSummary: Record<string, number>
 }
 
 export interface DepartmentAccountPreviewInput {
@@ -120,7 +156,24 @@ const deriveClientUserProfileKind = (user: Pick<ClientUser, 'accountType' | 'sta
   if (user.accountType === 'department') {
     return 'department'
   }
-  return user.staffVerified && Boolean(user.staffNo?.trim()) ? 'teacher' : 'personal'
+  return user.staffNo?.trim() ? 'teacher' : 'personal'
+}
+
+const isCurrentlyDeactivated = (user: Pick<ClientUser, 'deactivatedAt' | 'restoredAt'>) => (
+  (user.deactivatedAt?.getTime() ?? 0) > (user.restoredAt?.getTime() ?? 0)
+)
+
+const resolveClientAccountState = (user: Pick<ClientUser, 'status' | 'deactivatedAt' | 'restoredAt'>) => (
+  isCurrentlyDeactivated(user) ? 'deactivated' as const : user.status
+)
+
+const maskClientAccount = (value: string): string => {
+  const normalized = value.trim()
+  if (/^1\d{10}$/.test(normalized)) return `${normalized.slice(0, 3)}****${normalized.slice(-4)}`
+  const atIndex = normalized.indexOf('@')
+  if (atIndex > 0) return `${normalized.slice(0, 1)}***${normalized.slice(atIndex)}`
+  if (normalized.length <= 2) return '*'.repeat(Math.max(1, normalized.length))
+  return `${normalized.slice(0, 1)}***${normalized.slice(-1)}`
 }
 
 const sanitizeClientUserProfile = (user: ClientUser): ClientUserManageSafeProfile => {
@@ -147,12 +200,226 @@ const sanitizeClientUserProfile = (user: ClientUser): ClientUserManageSafeProfil
     lastLoginAt: user.lastLoginAt,
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
+    accountState: resolveClientAccountState(user),
+    deactivatedAt: user.deactivatedAt,
+    deactivationReason: user.deactivationReason,
+    deactivatedByUsername: user.deactivatedByUsername,
+    deactivatedByDisplayName: user.deactivatedByDisplayName,
+    restoredAt: user.restoredAt,
+    restoredByUsername: user.restoredByUsername,
+    restoredByDisplayName: user.restoredByDisplayName,
   }
 }
 
 export class ClientUserManageService {
   private readonly userRepo = AppDataSource.getRepository(ClientUser)
   private readonly staffNoPattern = /^[A-Za-z0-9-]{4,32}$/
+
+  private normalizeLifecycleReason(reason: string, label: string): string {
+    const normalized = reason.trim()
+    if (normalized.length < 2) throw new BizError(`请填写${label}原因（至少 2 个字符）`, 400)
+    if (normalized.length > 500) throw new BizError(`${label}原因不能超过 500 个字符`, 400)
+    return normalized
+  }
+
+  private resolveLifecycleAccount(user: ClientUser): string {
+    return user.staffNo?.trim() || user.realName?.trim() || user.email || user.mobile || ''
+  }
+
+  private async buildLifecycleReferenceSummary(manager: EntityManager, userId: string) {
+    const [pendingPreorders, allPreorders, pendingReturns, allReturns, openConversations, allConversations, attachments, webSessions, mobileSessions] = await Promise.all([
+      manager.getRepository(O2oPreorder).count({ where: { clientUserId: userId, status: 'pending' } }),
+      manager.getRepository(O2oPreorder).count({ where: { clientUserId: userId } }),
+      manager.getRepository(O2oReturnRequest).count({ where: { clientUserId: userId, status: 'pending' } }),
+      manager.getRepository(O2oReturnRequest).count({ where: { clientUserId: userId } }),
+      manager.getRepository(ClientFeedbackConversation).createQueryBuilder('conversation')
+        .where('conversation.client_user_id = :userId', { userId })
+        .andWhere('conversation.status <> :closed', { closed: 'closed' })
+        .getCount(),
+      manager.getRepository(ClientFeedbackConversation).count({ where: { clientUserId: userId } }),
+      manager.getRepository(ClientFeedbackAttachment).count({ where: { ownerClientUserId: userId } }),
+      manager.getRepository(ClientUserSession).count({ where: { userId } }),
+      manager.getRepository(ClientMobileSession).count({ where: { clientUserId: userId } }),
+    ])
+    return { pendingPreorders, allPreorders, pendingReturns, allReturns, openConversations, allConversations, attachments, webSessions, mobileSessions }
+  }
+
+  private async buildLifecyclePreview(manager: EntityManager, user: ClientUser): Promise<ClientAccountLifecyclePreview> {
+    const referenceSummary = await this.buildLifecycleReferenceSummary(manager, user.id)
+    const blockers: ClientAccountLifecyclePreview['blockers'] = []
+    if (referenceSummary.pendingPreorders > 0) blockers.push({ code: 'pending_preorder', message: '仍有待处理预订单', count: referenceSummary.pendingPreorders })
+    if (referenceSummary.pendingReturns > 0) blockers.push({ code: 'pending_return', message: '仍有非终态退货申请', count: referenceSummary.pendingReturns })
+    if (referenceSummary.openConversations > 0) blockers.push({ code: 'open_feedback', message: '仍有未关闭客服会话', count: referenceSummary.openConversations })
+    const deactivated = isCurrentlyDeactivated(user)
+    const criticalCount = referenceSummary.allPreorders + referenceSummary.allReturns + referenceSummary.allConversations + referenceSummary.attachments
+    return {
+      domain: 'client_user',
+      accountId: user.id,
+      account: this.resolveLifecycleAccount(user),
+      accountState: resolveClientAccountState(user),
+      canDeactivate: !deactivated && blockers.length === 0,
+      canRestore: deactivated,
+      canPermanentDelete: deactivated && criticalCount === 0,
+      blockers,
+      referenceSummary,
+    }
+  }
+
+  private async recordLifecycleEvent(
+    manager: EntityManager,
+    user: ClientUser,
+    actor: AuthUserContext,
+    eventType: 'deactivated' | 'restored' | 'permanently_deleted',
+    reason: string,
+    referenceSummary: Record<string, number>,
+  ) {
+    const repository = manager.getRepository(AccountLifecycleEvent)
+    await repository.save(repository.create({
+      accountDomain: 'client_user',
+      accountIdSnapshot: user.id,
+      accountMaskedSnapshot: maskClientAccount(this.resolveLifecycleAccount(user)),
+      eventType,
+      reason,
+      actorUserIdSnapshot: actor.userId,
+      actorUsernameSnapshot: actor.username,
+      actorDisplayNameSnapshot: actor.displayName,
+      referenceSummaryJson: JSON.stringify(referenceSummary),
+      eventSummaryJson: JSON.stringify({
+        accountType: user.accountType,
+        profileKind: deriveClientUserProfileKind(user),
+        status: user.status,
+        eventType,
+      }),
+    }))
+  }
+
+  async previewDeactivation(id: string): Promise<ClientAccountLifecyclePreview> {
+    const user = await this.userRepo.findOne({ where: { id } })
+    if (!user) throw new BizError('客户端用户不存在', 404)
+    return this.buildLifecyclePreview(AppDataSource.manager, user)
+  }
+
+  async deactivate(
+    id: string,
+    input: ClientAccountLifecycleReasonInput,
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ): Promise<ClientUserManageSafeProfile> {
+    const reason = this.normalizeLifecycleReason(input.reason, '注销')
+    const result = await runInTransaction(async (manager) => {
+      const user = await this.findClientUserForUpdate(id, manager)
+      if (!user) throw new BizError('客户端用户不存在', 404)
+      if (isCurrentlyDeactivated(user)) return { profile: sanitizeClientUserProfile(user), changed: false }
+      const preview = await this.buildLifecyclePreview(manager, user)
+      if (!preview.canDeactivate) throw new BizError(preview.blockers.map((item) => item.message).join('；'), 409)
+      const now = new Date(Math.max(Date.now(), (user.restoredAt?.getTime() ?? 0) + 1))
+      user.status = 'disabled'
+      user.deactivatedAt = now
+      user.deactivationReason = reason
+      user.deactivatedByUserId = actor.userId
+      user.deactivatedByUsername = actor.username
+      user.deactivatedByDisplayName = actor.displayName
+      const saved = await manager.getRepository(ClientUser).save(user)
+      const revokedWeb = await manager.getRepository(ClientUserSession).delete({ userId: user.id })
+      const revokedMobile = await manager.getRepository(ClientMobileSession).createQueryBuilder()
+        .update(ClientMobileSession)
+        .set({ revokedAt: now, revokeReason: 'account_disabled' })
+        .where('client_user_id = :userId AND revoked_at IS NULL', { userId: user.id })
+        .execute()
+      await this.recordLifecycleEvent(manager, saved, actor, 'deactivated', reason, {
+        ...preview.referenceSummary,
+        revokedWebSessions: revokedWeb.affected ?? 0,
+        revokedMobileSessions: revokedMobile.affected ?? 0,
+      })
+      return { profile: sanitizeClientUserProfile(saved), changed: true }
+    })
+    if (result.changed) {
+      customerServiceRealtimeService.disconnectByOwner('client', id)
+      await auditService.safeRecord({
+        actionType: 'client_user.deactivate', actionLabel: '注销客户端用户', targetType: 'client_user', targetId: id,
+        targetCode: result.profile.account, actor, requestMeta, detail: { reason },
+      })
+    }
+    return result.profile
+  }
+
+  async restore(
+    id: string,
+    input: ClientAccountLifecycleReasonInput,
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ): Promise<ClientUserManageSafeProfile> {
+    const reason = this.normalizeLifecycleReason(input.reason, '恢复')
+    const result = await runInTransaction(async (manager) => {
+      const user = await this.findClientUserForUpdate(id, manager)
+      if (!user) throw new BizError('客户端用户不存在', 404)
+      if (!isCurrentlyDeactivated(user)) {
+        if (user.restoredAt) return { profile: sanitizeClientUserProfile(user), changed: false }
+        throw new BizError('账号当前未处于已注销状态', 409)
+      }
+      const referenceSummary = await this.buildLifecycleReferenceSummary(manager, user.id)
+      user.status = 'disabled'
+      user.restoredAt = new Date(Math.max(Date.now(), (user.deactivatedAt?.getTime() ?? 0) + 1))
+      user.restoredByUserId = actor.userId
+      user.restoredByUsername = actor.username
+      user.restoredByDisplayName = actor.displayName
+      const saved = await manager.getRepository(ClientUser).save(user)
+      await this.recordLifecycleEvent(manager, saved, actor, 'restored', reason, referenceSummary)
+      return { profile: sanitizeClientUserProfile(saved), changed: true }
+    })
+    if (result.changed) {
+      await auditService.safeRecord({
+        actionType: 'client_user.restore', actionLabel: '恢复客户端用户', targetType: 'client_user', targetId: id,
+        targetCode: result.profile.account, actor, requestMeta, detail: { reason, statusAfter: 'disabled' },
+      })
+    }
+    return result.profile
+  }
+
+  async permanentDelete(
+    id: string,
+    input: ClientAccountPermanentDeleteInput,
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ): Promise<{ deleted: true; accountId: string; accountMasked: string }> {
+    const reason = this.normalizeLifecycleReason(input.reason, '永久删除')
+    try {
+      assertPermanentDeletePassword(input.permanentDeletePassword)
+      const result = await runInTransaction(async (manager) => {
+        const user = await this.findClientUserForUpdate(id, manager)
+        if (!user) throw new BizError('客户端用户不存在', 404)
+        if (!isCurrentlyDeactivated(user)) throw new BizError('仅允许永久删除已注销账号', 409)
+        const account = this.resolveLifecycleAccount(user)
+        if (input.confirmAccount !== account) throw new BizError('确认账号与目标账号不一致', 400)
+        const preview = await this.buildLifecyclePreview(manager, user)
+        const references = preview.referenceSummary
+        const criticalCount = references.allPreorders + references.allReturns + references.allConversations + references.attachments
+        if (criticalCount > 0) throw new BizError('账号仍存在关键业务关联，不能永久删除', 409)
+
+        const webSessions = await manager.getRepository(ClientUserSession).delete({ userId: user.id })
+        const mobileSessions = await manager.getRepository(ClientMobileSession).delete({ clientUserId: user.id })
+        await this.recordLifecycleEvent(manager, user, actor, 'permanently_deleted', reason, {
+          ...references,
+          removedWebSessions: webSessions.affected ?? 0,
+          removedMobileSessions: mobileSessions.affected ?? 0,
+        })
+        await manager.getRepository(ClientUser).delete({ id: user.id })
+        return { deleted: true as const, accountId: user.id, accountMasked: maskClientAccount(account) }
+      })
+      customerServiceRealtimeService.disconnectByOwner('client', id)
+      await auditService.safeRecord({
+        actionType: 'client_user.permanent_delete', actionLabel: '永久删除客户端用户', targetType: 'client_user', targetId: id,
+        targetCode: result.accountMasked, actor, requestMeta, detail: { reason },
+      })
+      return result
+    } catch (error) {
+      await auditService.safeRecord({
+        actionType: 'client_user.permanent_delete', actionLabel: '永久删除客户端用户（失败）', targetType: 'client_user', targetId: id,
+        actor, requestMeta, resultStatus: 'failed', detail: { reason: 'request_rejected' },
+      })
+      throw error
+    }
+  }
 
   private async findUserByAnyIdentifier(account: string, manager?: EntityManager) {
     const targetRepo = manager ? manager.getRepository(ClientUser) : this.userRepo
@@ -629,6 +896,15 @@ export class ClientUserManageService {
     if (query.status) {
       qb.andWhere('user.status = :status', { status: query.status })
     }
+    if (query.accountState === 'deactivated') {
+      qb.andWhere('user.deactivatedAt IS NOT NULL AND (user.restoredAt IS NULL OR user.deactivatedAt > user.restoredAt)')
+    } else if (query.accountState === 'enabled') {
+      qb.andWhere('user.status = :enabledAccountState', { enabledAccountState: 'enabled' })
+      qb.andWhere('(user.deactivatedAt IS NULL OR (user.restoredAt IS NOT NULL AND user.deactivatedAt <= user.restoredAt))')
+    } else if (query.accountState === 'disabled') {
+      qb.andWhere('user.status = :disabledAccountState', { disabledAccountState: 'disabled' })
+      qb.andWhere('(user.deactivatedAt IS NULL OR (user.restoredAt IS NOT NULL AND user.deactivatedAt <= user.restoredAt))')
+    }
     if (query.accountType && CLIENT_USER_ACCOUNT_TYPES.includes(query.accountType)) {
       qb.andWhere('user.accountType = :accountType', { accountType: query.accountType })
     }
@@ -637,14 +913,11 @@ export class ClientUserManageService {
     }
     if (query.profileKind === 'teacher') {
       qb.andWhere('user.accountType = :teacherProfileAccountType', { teacherProfileAccountType: 'personal' })
-      qb.andWhere('user.staffVerified = :teacherStaffVerified', { teacherStaffVerified: true })
       qb.andWhere("user.staffNo IS NOT NULL AND user.staffNo <> ''")
     }
     if (query.profileKind === 'personal') {
       qb.andWhere('user.accountType = :personalProfileAccountType', { personalProfileAccountType: 'personal' })
-      qb.andWhere("(user.staffNo IS NULL OR user.staffNo = '' OR user.staffVerified = :personalStaffVerified)", {
-        personalStaffVerified: false,
-      })
+      qb.andWhere("(user.staffNo IS NULL OR user.staffNo = '')")
     }
     if (query.departmentName?.trim()) {
       qb.andWhere('user.departmentName = :departmentName', { departmentName: query.departmentName.trim() })
@@ -690,6 +963,10 @@ export class ClientUserManageService {
 
       if (user.status === status) {
         return { profile: sanitizeClientUserProfile(user), sessionMustBeRevoked: false }
+      }
+
+      if (status === 'enabled' && isCurrentlyDeactivated(user)) {
+        throw new BizError('账号已注销，请先恢复后再启用', 409)
       }
 
       if (status === 'enabled' && user.accountType === 'department') {
@@ -769,6 +1046,9 @@ export class ClientUserManageService {
       if (!user) {
         throw new BizError('客户端用户不存在', 404)
       }
+      if (isCurrentlyDeactivated(user)) {
+        throw new BizError('账号已注销，请先恢复后再编辑资料', 409)
+      }
       if (deriveClientUserProfileKind(user) === 'personal' && !mobile && !email) {
         throw new BizError('手机号和邮箱至少保留一项', 400)
       }
@@ -808,6 +1088,9 @@ export class ClientUserManageService {
         await this.assertDepartmentNodeUnbound(user.departmentNodeId, manager, user.id)
       }
       user.status = input.status
+      if (input.status === 'enabled' && isCurrentlyDeactivated(user)) {
+        throw new BizError('账号已注销，请先恢复后再启用', 409)
+      }
       let savedUser: ClientUser
       try {
         savedUser = await userRepo.save(user)

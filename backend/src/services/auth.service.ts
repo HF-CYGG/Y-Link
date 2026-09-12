@@ -52,6 +52,12 @@ interface AdminLoginSecuritySnapshot {
 
 const LEGACY_DEFAULT_BOOTSTRAP_PASSWORD = ['Admin', '@', '123456'].join('')
 
+export function resolveAccountState(user: Pick<SysUser, 'status' | 'deactivatedAt' | 'restoredAt'>): UserSafeProfile['accountState'] {
+  const deactivatedAt = user.deactivatedAt?.getTime() ?? 0
+  const restoredAt = user.restoredAt?.getTime() ?? 0
+  return deactivatedAt > restoredAt ? 'deactivated' : user.status
+}
+
 function toSafeProfile(user: SysUser): UserSafeProfile {
   return {
     id: user.id,
@@ -61,6 +67,14 @@ function toSafeProfile(user: SysUser): UserSafeProfile {
     role: user.role,
     permissions: resolvePermissionsByRole(user.role),
     status: user.status,
+    accountState: resolveAccountState(user),
+    deactivatedAt: user.deactivatedAt,
+    deactivationReason: user.deactivationReason,
+    deactivatedByUsername: user.deactivatedByUsername,
+    deactivatedByDisplayName: user.deactivatedByDisplayName,
+    restoredAt: user.restoredAt,
+    restoredByUsername: user.restoredByUsername,
+    restoredByDisplayName: user.restoredByDisplayName,
     lastLoginAt: user.lastLoginAt,
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,

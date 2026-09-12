@@ -50,6 +50,7 @@ const SQLITE_REQUIRED_TABLES = [
   'sms_verification_record',
   'order_business_no_occupancy',
   'order_revision',
+  'account_lifecycle_event',
 ]
 
 /**
@@ -79,7 +80,7 @@ async function ensureSqliteMobileSessionSchema(dataSource: DataSource): Promise<
       revoked_at datetime,
       revoke_reason varchar(64),
       CONSTRAINT fk_client_mobile_session_user
-        FOREIGN KEY (client_user_id) REFERENCES client_user (id) ON DELETE CASCADE
+        FOREIGN KEY (client_user_id) REFERENCES client_user (id) ON DELETE RESTRICT
     )
   `)
   await dataSource.query('CREATE UNIQUE INDEX IF NOT EXISTS uk_client_mobile_session_access_hash ON client_mobile_session (access_token_hash)')
@@ -89,6 +90,27 @@ async function ensureSqliteMobileSessionSchema(dataSource: DataSource): Promise<
   await dataSource.query('CREATE INDEX IF NOT EXISTS idx_client_mobile_session_user_device ON client_mobile_session (client_user_id, device_id)')
   await dataSource.query('CREATE INDEX IF NOT EXISTS idx_client_mobile_session_cleanup ON client_mobile_session (revoked_at, absolute_expires_at, id)')
   await dataSource.query('CREATE INDEX IF NOT EXISTS idx_client_mobile_session_refresh_expiry ON client_mobile_session (revoked_at, refresh_expires_at, id)')
+}
+
+/**
+ * 生命周期事件必须只能追加。TypeORM 只能声明字段/索引约束，不能表达“整表禁止
+ * UPDATE/DELETE”，因此在 SQLite 启动自举阶段幂等安装数据库触发器作为最终防线。
+ */
+async function ensureSqliteAccountLifecycleAppendOnly(dataSource: DataSource): Promise<void> {
+  await dataSource.query(`
+    CREATE TRIGGER IF NOT EXISTS trg_account_lifecycle_event_no_update
+    BEFORE UPDATE ON account_lifecycle_event
+    BEGIN
+      SELECT RAISE(ABORT, 'ACCOUNT_LIFECYCLE_EVENT_APPEND_ONLY');
+    END
+  `)
+  await dataSource.query(`
+    CREATE TRIGGER IF NOT EXISTS trg_account_lifecycle_event_no_delete
+    BEFORE DELETE ON account_lifecycle_event
+    BEGIN
+      SELECT RAISE(ABORT, 'ACCOUNT_LIFECYCLE_EVENT_APPEND_ONLY');
+    END
+  `)
 }
 
 async function migrateLegacyFeedbackAttachments(dataSource: DataSource) {
@@ -213,13 +235,33 @@ const SQLITE_REQUIRED_CLIENT_USER_COLUMNS = [
   'last_login_at',
   'mobile_verified_at',
   'email_verified_at',
+  'deactivated_at',
+  'deactivation_reason',
+  'deactivated_by_user_id',
+  'deactivated_by_username',
+  'deactivated_by_display_name',
+  'restored_at',
+  'restored_by_user_id',
+  'restored_by_username',
+  'restored_by_display_name',
 ]
 const SQLITE_REQUIRED_CLIENT_STAFF_DIRECTORY_COLUMNS = [
   'staff_no', 'real_name', 'department_name', 'status',
   'invite_code_digest', 'invite_issued_at', 'invite_expires_at', 'invite_used_at',
   'invite_failed_attempts', 'invite_locked_until',
 ]
-const SQLITE_REQUIRED_SYS_USER_COLUMNS = ['email']
+const SQLITE_REQUIRED_SYS_USER_COLUMNS = [
+  'email',
+  'deactivated_at',
+  'deactivation_reason',
+  'deactivated_by_user_id',
+  'deactivated_by_username',
+  'deactivated_by_display_name',
+  'restored_at',
+  'restored_by_user_id',
+  'restored_by_username',
+  'restored_by_display_name',
+]
 const SQLITE_REQUIRED_CLIENT_FEEDBACK_CONVERSATION_COLUMNS = [
   'client_account_type',
   'staff_no_snapshot',
@@ -1417,6 +1459,29 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
   if (!notificationDispatchUniqueIndexSet.has('uk_notification_dispatch_event_channel_target')) {
     return true
   }
+  const accountForeignKeys = [
+    ['sys_user_session', 'user_id', 'sys_user'],
+    ['client_user_session', 'user_id', 'client_user'],
+    ['client_mobile_session', 'client_user_id', 'client_user'],
+    ['biz_inbound_order', 'supplier_id', 'sys_user'],
+    ['o2o_preorder', 'client_user_id', 'client_user'],
+    ['o2o_return_request', 'client_user_id', 'client_user'],
+    ['client_feedback_conversation', 'client_user_id', 'client_user'],
+    ['client_feedback_conversation', 'assigned_user_id', 'sys_user'],
+    ['client_feedback_conversation', 'internal_remark_by_user_id', 'sys_user'],
+    ['client_feedback_attachment', 'owner_client_user_id', 'client_user'],
+    ['notification_inbox', 'user_id', 'sys_user'],
+  ] as const
+  for (const [tableName, columnName, referencedTable] of accountForeignKeys) {
+    if (!await hasSqliteForeignKeyShape(dataSource, tableName, {
+      from: columnName,
+      referencedTable,
+      referencedColumn: 'id',
+      onDelete: 'RESTRICT',
+    })) {
+      return true
+    }
+  }
   return false
 }
 
@@ -1445,6 +1510,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
     }
     await migrateClientUserDepartmentGovernance(dataSource)
     await migrateLegacyFeedbackAttachments(dataSource)
+    if (env.DB_TYPE === 'sqlite') await ensureSqliteAccountLifecycleAppendOnly(dataSource)
     return {
       action: 'synchronized',
       reason: 'forced_by_db_sync',
@@ -1475,6 +1541,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
     await backfillSqliteOrderAmendmentData(dataSource)
     await prepareSqliteOrderContentInventoryColumns(dataSource)
     await migrateClientUserDepartmentGovernance(dataSource)
+    await ensureSqliteAccountLifecycleAppendOnly(dataSource)
     await migrateLegacyFeedbackAttachments(dataSource)
     return {
       action: 'skipped',
@@ -1490,6 +1557,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   await backfillSqliteOrderAmendmentData(dataSource)
   await prepareSqliteOrderContentInventoryColumns(dataSource)
   await migrateClientUserDepartmentGovernance(dataSource)
+  await ensureSqliteAccountLifecycleAppendOnly(dataSource)
   await migrateLegacyFeedbackAttachments(dataSource)
   return {
     action: 'synchronized',

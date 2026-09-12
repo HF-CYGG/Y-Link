@@ -43,6 +43,7 @@ import { BusinessSequence } from '../entities/business-sequence.entity.js'
 import { SmsVerificationRecord } from '../entities/sms-verification-record.entity.js'
 import { OrderBusinessNoOccupancy } from '../entities/order-business-no-occupancy.entity.js'
 import { OrderRevision } from '../entities/order-revision.entity.js'
+import { AccountLifecycleEvent } from '../entities/account-lifecycle-event.entity.js'
 
 export const appEntities = [
   BaseProduct,
@@ -78,6 +79,7 @@ export const appEntities = [
   SmsVerificationRecord,
   OrderBusinessNoOccupancy,
   OrderRevision,
+  AccountLifecycleEvent,
 ]
 
 function resolveEffectiveDatabaseConfig(

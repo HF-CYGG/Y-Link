@@ -62,6 +62,8 @@
     "client-auth:registration-policy:verify": "tsx scripts/client-registration-policy-verify.ts",
     "client-staff-directory:verify": "tsx scripts/client-staff-directory-verify.ts",
     "client-staff-invite-code:verify": "tsx scripts/client-staff-invite-code-verify.ts",
+    "account-lifecycle:verify": "tsx scripts/account-lifecycle-verify.ts",
+    "account-lifecycle:mysql:verify": "tsx scripts/account-lifecycle-mysql-verify.ts",
     "product:sku-current:verify": "tsx scripts/product-sku-current-verify.ts",
     "inventory:invariants:verify": "tsx scripts/inventory-invariants-verify.ts",
     "inbound:verified-delete:verify": "tsx scripts/inbound-verified-delete-verify.ts",

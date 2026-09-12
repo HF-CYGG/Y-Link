@@ -162,7 +162,7 @@ export class O2oPreorder {
   @Column({ name: 'deleted_by_display_name', type: 'varchar', length: 64, nullable: true, comment: '客户端可见性删除操作人名称' })
   deletedByDisplayName!: string | null
 
-  @ManyToOne(() => ClientUser, { onDelete: 'CASCADE' })
+  @ManyToOne(() => ClientUser, { onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'client_user_id' })
   clientUser?: Relation<ClientUser>
 

@@ -51,8 +51,11 @@ const MYSQL_REQUIRED_TABLES = [
   'sys_user',
   'sys_user_session',
   'client_user',
+  'client_user_session',
   'client_feedback_conversation',
+  'client_feedback_attachment',
   'o2o_preorder',
+  'o2o_return_request',
   'o2o_preorder_item',
   'biz_outbound_order',
   'biz_outbound_order_item',
@@ -68,6 +71,7 @@ const MYSQL_REQUIRED_TABLES = [
   'sms_verification_record',
   'order_business_no_occupancy',
   'order_revision',
+  'account_lifecycle_event',
 ]
 
 // 每个必需表由哪个迁移脚本创建，用于在报错时给出精确指引，而不是笼统建议“从头跑一遍”。
@@ -82,6 +86,9 @@ const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
   o2o_preorder: '006_o2o_preorder_schema.sql',
   o2o_preorder_item: '006_o2o_preorder_schema.sql',
   client_user: '006_o2o_preorder_schema.sql',
+  client_user_session: '006_o2o_preorder_schema.sql',
+  o2o_return_request: '006_o2o_preorder_schema.sql',
+  client_feedback_attachment: '032_security_findings_remediation.sql',
   client_feedback_conversation: '019_client_feedback_and_customer_service.sql',
   biz_outbound_order: '001_init_schema.sql',
   biz_outbound_order_item: '001_init_schema.sql',
@@ -96,6 +103,7 @@ const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
   sms_verification_record: '039_aliyun_pnvs_sms_verification.sql',
   order_business_no_occupancy: '042_order_business_no_amendment.sql',
   order_revision: '042_order_business_no_amendment.sql',
+  account_lifecycle_event: '044_account_lifecycle_governance.sql',
 }
 
 interface MysqlRequiredColumn {
@@ -126,9 +134,23 @@ interface MysqlRequiredForeignKey {
   introducingScript: string
 }
 
+interface MysqlRequiredTrigger {
+  triggerName: string
+  eventManipulation: 'UPDATE' | 'DELETE'
+  actionTiming: 'BEFORE'
+  introducingScript: string
+}
+
 // 只列会被当前业务代码直接读写、缺失后必然导致运行时失败的增量字段。
 // 表不存在时由 MYSQL_REQUIRED_TABLES 先给出建表脚本，避免同一张缺表重复打印多条缺列提示。
 const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
+  ...['deactivated_at', 'deactivation_reason', 'deactivated_by_user_id', 'deactivated_by_username', 'deactivated_by_display_name', 'restored_at', 'restored_by_user_id', 'restored_by_username', 'restored_by_display_name']
+    .flatMap((columnName) => [
+      { tableName: 'sys_user', columnName, introducingScript: '044_account_lifecycle_governance.sql' },
+      { tableName: 'client_user', columnName, introducingScript: '044_account_lifecycle_governance.sql' },
+    ]),
+  ...['account_domain', 'account_id_snapshot', 'account_masked_snapshot', 'event_type', 'reason', 'actor_user_id_snapshot', 'actor_username_snapshot', 'actor_display_name_snapshot', 'reference_summary_json', 'event_summary_json', 'created_at']
+    .map((columnName) => ({ tableName: 'account_lifecycle_event', columnName, introducingScript: '044_account_lifecycle_governance.sql' })),
   { tableName: 'client_mobile_session', columnName: 'client_user_id', introducingScript: '037_mobile_auth_session.sql' },
   { tableName: 'client_mobile_session', columnName: 'device_id', introducingScript: '037_mobile_auth_session.sql' },
   { tableName: 'client_mobile_session', columnName: 'device_name', introducingScript: '037_mobile_auth_session.sql' },
@@ -277,6 +299,20 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
 
 // 不只按索引名判断，还校验列顺序与唯一性，避免旧库中存在同名但错误的索引时误判为可启动。
 const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
+  {
+    tableName: 'account_lifecycle_event',
+    indexName: 'idx_account_lifecycle_event_account',
+    columns: ['account_domain', 'account_id_snapshot', 'id'],
+    unique: false,
+    introducingScript: '044_account_lifecycle_governance.sql',
+  },
+  {
+    tableName: 'account_lifecycle_event',
+    indexName: 'idx_account_lifecycle_event_created_at',
+    columns: ['created_at', 'id'],
+    unique: false,
+    introducingScript: '044_account_lifecycle_governance.sql',
+  },
   {
     tableName: 'inventory_log',
     indexName: 'idx_inventory_log_sku_id',
@@ -441,6 +477,26 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
 ]
 
 const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [
+  ...[
+    ['sys_user_session', 'user_id', 'sys_user'],
+    ['client_user_session', 'user_id', 'client_user'],
+    ['client_mobile_session', 'client_user_id', 'client_user'],
+    ['biz_inbound_order', 'supplier_id', 'sys_user'],
+    ['o2o_preorder', 'client_user_id', 'client_user'],
+    ['o2o_return_request', 'client_user_id', 'client_user'],
+    ['client_feedback_conversation', 'client_user_id', 'client_user'],
+    ['client_feedback_conversation', 'assigned_user_id', 'sys_user'],
+    ['client_feedback_conversation', 'internal_remark_by_user_id', 'sys_user'],
+    ['client_feedback_attachment', 'owner_client_user_id', 'client_user'],
+    ['notification_inbox', 'user_id', 'sys_user'],
+  ].map(([tableName, columnName, referencedTableName]) => ({
+    tableName,
+    columnName,
+    referencedTableName,
+    referencedColumnName: 'id',
+    deleteRule: 'RESTRICT',
+    introducingScript: '044_account_lifecycle_governance.sql',
+  })),
   {
     tableName: 'biz_outbound_order_item',
     columnName: 'sku_id',
@@ -456,6 +512,21 @@ const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [
     referencedColumnName: 'id',
     deleteRule: 'SET NULL',
     introducingScript: '043_order_content_inventory_mode.sql',
+  },
+]
+
+const MYSQL_REQUIRED_TRIGGERS: readonly MysqlRequiredTrigger[] = [
+  {
+    triggerName: 'trg_account_lifecycle_event_no_update',
+    eventManipulation: 'UPDATE',
+    actionTiming: 'BEFORE',
+    introducingScript: '044_account_lifecycle_governance.sql',
+  },
+  {
+    triggerName: 'trg_account_lifecycle_event_no_delete',
+    eventManipulation: 'DELETE',
+    actionTiming: 'BEFORE',
+    introducingScript: '044_account_lifecycle_governance.sql',
   },
 ]
 
@@ -479,14 +550,15 @@ const AUTO_MIGRATABLE_FILES = [
   '041_manual_outbound_sku.sql',
   '042_order_business_no_amendment.sql',
   '043_order_content_inventory_mode.sql',
+  '044_account_lifecycle_governance.sql',
 ]
 
 /**
  * 按 MySQL 语句边界拆分 SQL 文本：
  * - 忽略单引号字符串内部的分号（含 '' 转义引号）；
  * - 忽略 `--` 行注释内部的分号；
- * - 白名单内的文件目前不含存储过程/触发器等需要 DELIMITER 重定义的语句，
- *   因此不处理 DELIMITER，一旦引入需同步升级本函数。
+ * - 044 的触发器使用单条 SIGNAL 作为 trigger body，不需要 DELIMITER；
+ * - 仍不处理含 BEGIN/END 的存储过程或复合触发器，一旦引入需同步升级本函数。
  */
 export function splitSqlStatements(sql: string): string[] {
   const statements: string[] = []
@@ -636,7 +708,8 @@ async function assertAutoMigrationResult(queryRunner: QueryRunner, filename: str
   const requiredColumns = MYSQL_REQUIRED_COLUMNS.filter((item) => item.introducingScript === filename)
   const requiredIndexes = MYSQL_REQUIRED_INDEXES.filter((item) => item.introducingScript === filename)
   const requiredForeignKeys = MYSQL_REQUIRED_FOREIGN_KEYS.filter((item) => item.introducingScript === filename)
-  if (requiredColumns.length === 0 && requiredIndexes.length === 0 && requiredForeignKeys.length === 0) return
+  const requiredTriggers = MYSQL_REQUIRED_TRIGGERS.filter((item) => item.introducingScript === filename)
+  if (requiredColumns.length === 0 && requiredIndexes.length === 0 && requiredForeignKeys.length === 0 && requiredTriggers.length === 0) return
 
   const tableNames = [...new Set([
     ...requiredColumns.map((item) => item.tableName),
@@ -705,11 +778,22 @@ async function assertAutoMigrationResult(queryRunner: QueryRunner, filename: str
       )
     : []
   const invalidForeignKeys = collectMysqlForeignKeyIssues(foreignKeyRows, requiredForeignKeys)
+  const triggerRows: MysqlTriggerRow[] = requiredTriggers.length > 0
+    ? await queryRunner.query(
+        `SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING
+         FROM information_schema.TRIGGERS
+         WHERE TRIGGER_SCHEMA = DATABASE()
+           AND TRIGGER_NAME IN (${requiredTriggers.map(() => '?').join(', ')})`,
+        requiredTriggers.map((item) => item.triggerName),
+      )
+    : []
+  const invalidTriggers = collectMysqlTriggerIssues(triggerRows, requiredTriggers)
   if (
     missingColumns.length === 0
     && invalidColumnDefinitions.length === 0
     && invalidIndexes.length === 0
     && invalidForeignKeys.length === 0
+    && invalidTriggers.length === 0
   ) return
 
   const missingLabels = [
@@ -717,6 +801,7 @@ async function assertAutoMigrationResult(queryRunner: QueryRunner, filename: str
     ...invalidColumnDefinitions.map((item) => item.label),
     ...invalidIndexes.map((item) => `索引 ${item.tableName}.${item.indexName}`),
     ...invalidForeignKeys.map((item) => item.label),
+    ...invalidTriggers.map((item) => item.label),
   ]
   throw new Error(
     `[启动失败] 自动迁移 ${filename} 执行后结构仍不完整，未写入迁移记录：${missingLabels.join('、')}。`
@@ -799,6 +884,12 @@ interface MysqlForeignKeyRow extends MysqlTableRow {
   DELETE_RULE: string
 }
 
+interface MysqlTriggerRow {
+  TRIGGER_NAME: string
+  EVENT_MANIPULATION: string
+  ACTION_TIMING: string
+}
+
 interface MysqlSchemaShapeIssue<TRequirement> {
   requirement: TRequirement
   label: string
@@ -873,6 +964,22 @@ function collectMysqlForeignKeyIssues(
       }]
     }
     return []
+  })
+}
+
+function collectMysqlTriggerIssues(
+  rows: MysqlTriggerRow[],
+  requirements: readonly MysqlRequiredTrigger[],
+): Array<MysqlSchemaShapeIssue<MysqlRequiredTrigger>> {
+  const rowMap = new Map(rows.map((row) => [row.TRIGGER_NAME, row]))
+  return requirements.flatMap((requirement) => {
+    const row = rowMap.get(requirement.triggerName)
+    if (
+      row
+      && normalizeMysqlDefinition(row.EVENT_MANIPULATION) === normalizeMysqlDefinition(requirement.eventManipulation)
+      && normalizeMysqlDefinition(row.ACTION_TIMING) === normalizeMysqlDefinition(requirement.actionTiming)
+    ) return []
+    return [{ requirement, label: `触发器 ${requirement.triggerName} 必须为 ${requirement.actionTiming} ${requirement.eventManipulation}` }]
   })
 }
 
@@ -975,6 +1082,14 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
       )
     : []
   const invalidForeignKeys = collectMysqlForeignKeyIssues(foreignKeyRows, requiredForeignKeysOnExistingTables)
+  const triggerRows: MysqlTriggerRow[] = await dataSource.query(
+    `SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING
+     FROM information_schema.TRIGGERS
+     WHERE TRIGGER_SCHEMA = DATABASE()
+       AND TRIGGER_NAME IN (${MYSQL_REQUIRED_TRIGGERS.map(() => '?').join(', ')})`,
+    MYSQL_REQUIRED_TRIGGERS.map((item) => item.triggerName),
+  )
+  const invalidTriggers = collectMysqlTriggerIssues(triggerRows, MYSQL_REQUIRED_TRIGGERS)
 
   if (
     missingTables.length === 0
@@ -983,6 +1098,7 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
     && invalidColumnDefinitions.length === 0
     && invalidIndexes.length === 0
     && invalidForeignKeys.length === 0
+    && invalidTriggers.length === 0
   ) {
     return
   }
@@ -1020,6 +1136,10 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
       label,
       script: requirement.introducingScript,
     })),
+    ...invalidTriggers.map(({ requirement, label }) => ({
+      label,
+      script: requirement.introducingScript,
+    })),
   ]
     .map(({ label, script }) => `  - ${label} → backend/sql/${script}`)
     .join('\n')
@@ -1040,6 +1160,9 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
       : null,
     invalidForeignKeys.length > 0
       ? `缺少或定义不匹配的必需外键：${invalidForeignKeys.map((item) => `${item.requirement.tableName}.${item.requirement.columnName}`).join(', ')}`
+      : null,
+    invalidTriggers.length > 0
+      ? `缺少或定义不匹配的必需触发器：${invalidTriggers.map((item) => item.requirement.triggerName).join(', ')}`
       : null,
   ].filter((item): item is string => Boolean(item)).join('；')
 
@@ -1067,7 +1190,7 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
     + '缺失或不匹配的结构分别由以下迁移脚本维护：\n'
     + `${missingObjectGuide}\n\n`
     + `${scenarioGuide}\n\n`
-    + '若上面只涉及 033、037_mobile_auth_session、037_department_account_node_binding、038、039、040、041、042 或 043 维护的结构，可以设置环境变量 DB_AUTO_MIGRATE=true 后重启服务，'
+    + '若上面只涉及 033、037_mobile_auth_session、037_department_account_node_binding、038、039、040、041、042、043 或 044 维护的结构，可以设置环境变量 DB_AUTO_MIGRATE=true 后重启服务，'
     + '由服务自动执行白名单内已核实可在启动期运行的脚本。035/036 不会在启动期自动执行：'
     + '036 包含历史通知去重和唯一索引 DDL，必须按“备份 → 停止所有应用与通知 Worker → 执行脚本 → 启动新版本”完成。',
   )

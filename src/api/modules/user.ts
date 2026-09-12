@@ -8,6 +8,13 @@ import { request, type RequestConfig } from '@/api/http'
 import type { PaginationQueryInput, PaginationResult } from '@/types/api'
 import type { UserRole, UserSafeProfile, UserStatus } from '@/api/modules/auth'
 import { normalizeUserSafeProfile } from '@/api/modules/auth'
+import type {
+  AccountLifecyclePreview,
+  AccountLifecycleReasonPayload,
+  AccountPermanentDeletePayload,
+  AccountPermanentDeleteResult,
+  AccountState,
+} from '@ylink/shared-types'
 
 /**
  * 用户列表查询参数：
@@ -18,6 +25,7 @@ export interface UserListQuery extends PaginationQueryInput {
   keyword?: string
   role?: UserRole
   status?: UserStatus
+  accountState?: AccountState
 }
 
 /**
@@ -154,3 +162,19 @@ export const resetUserPassword = async (id: string, payload: ResetUserPasswordPa
 
   return normalizeUserSafeProfile(result)
 }
+
+export const getUserDeactivationPreview = (id: string) =>
+  request<AccountLifecyclePreview>({ method: 'GET', url: `/users/${id}/deactivation-preview` })
+
+export const deactivateUser = async (id: string, payload: AccountLifecycleReasonPayload) => {
+  const result = await request<UserSafeProfile>({ method: 'POST', url: `/users/${id}/deactivate`, data: payload })
+  return normalizeUserSafeProfile(result)
+}
+
+export const restoreUser = async (id: string, payload: AccountLifecycleReasonPayload) => {
+  const result = await request<UserSafeProfile>({ method: 'POST', url: `/users/${id}/restore`, data: payload })
+  return normalizeUserSafeProfile(result)
+}
+
+export const permanentlyDeleteUser = (id: string, payload: AccountPermanentDeletePayload) =>
+  request<AccountPermanentDeleteResult>({ method: 'DELETE', url: `/users/${id}/permanent`, data: payload })

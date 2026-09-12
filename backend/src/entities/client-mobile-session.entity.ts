@@ -95,7 +95,7 @@ export class ClientMobileSession {
   @Column({ name: 'revoke_reason', type: 'varchar', length: 64, nullable: true })
   revokeReason!: MobileSessionRevokeReason | null
 
-  @ManyToOne(() => ClientUser, { onDelete: 'CASCADE' })
+  @ManyToOne(() => ClientUser, { onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'client_user_id' })
   user?: Relation<ClientUser>
 }

@@ -1,5 +1,6 @@
-import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm'
+import { Column, CreateDateColumn, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn, UpdateDateColumn, type Relation } from 'typeorm'
 import { entityColumnOptions } from './entity-column-options.js'
+import { ClientUser } from './client-user.entity.js'
 
 @Entity({ name: 'client_feedback_attachment' })
 export class ClientFeedbackAttachment {
@@ -7,7 +8,7 @@ export class ClientFeedbackAttachment {
   id!: string
 
   @Index('idx_client_feedback_attachment_owner')
-  @Column({ name: 'owner_client_user_id', type: 'varchar', length: 36 })
+  @Column({ name: 'owner_client_user_id', ...entityColumnOptions.foreignId })
   ownerClientUserId!: string
 
   @Index('idx_client_feedback_attachment_conversation')
@@ -38,4 +39,8 @@ export class ClientFeedbackAttachment {
 
   @UpdateDateColumn({ name: 'updated_at', ...entityColumnOptions.timestamp })
   updatedAt!: Date
+
+  @ManyToOne(() => ClientUser, { onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'owner_client_user_id' })
+  owner?: Relation<ClientUser>
 }
