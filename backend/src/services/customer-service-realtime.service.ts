@@ -37,10 +37,21 @@ type ClientSessionKind = 'web' | 'mobile'
 export interface CustomerServiceRealtimeRegistrationTicket {
   scope: RealtimeScope
   ownerKey: string
+  globalEpoch: number
   generation: number
   sessionHash: string
   sessionGeneration: number
+  expiresAtMs: number
 }
+
+interface CustomerServiceRealtimeGenerationRecord {
+  generation: number
+  expiresAtMs: number
+}
+
+const CUSTOMER_SERVICE_REALTIME_REGISTRATION_TICKET_TTL_MS = 5_000
+const CUSTOMER_SERVICE_REALTIME_GENERATION_RECORD_RETENTION_MS = CUSTOMER_SERVICE_REALTIME_REGISTRATION_TICKET_TTL_MS
+const CUSTOMER_SERVICE_REALTIME_GENERATION_RECORD_CAPACITY = 1_024
 
 interface CustomerServiceRealtimeSubscriber {
   subscriberId: string
@@ -77,8 +88,8 @@ interface ConnectRateWindow {
 class CustomerServiceRealtimeService {
   private readonly subscribers = new Map<string, CustomerServiceRealtimeSubscriber>()
   private readonly connectRateWindows = new Map<string, ConnectRateWindow>()
-  private readonly ownerGenerations = new Map<string, number>()
-  private readonly sessionGenerations = new Map<string, number>()
+  private readonly generationRecords = new Map<string, CustomerServiceRealtimeGenerationRecord>()
+  private globalGenerationEpoch = 0
   private subscriberSeed = 0
   private conversationEventSeed = 0
   private deliveryChain: Promise<void> = Promise.resolve()
@@ -91,31 +102,67 @@ class CustomerServiceRealtimeService {
   }
 
   private buildOwnerGenerationKey(scope: RealtimeScope, ownerKey: string) {
-    return `${scope}:${ownerKey}`
+    return `owner:${scope}:${ownerKey}`
   }
 
   private buildSessionGenerationKey(scope: RealtimeScope, sessionHash: string) {
-    return `${scope}:${sessionHash}`
+    return `session:${scope}:${sessionHash}`
+  }
+
+  private pruneExpiredGenerationRecords(nowMs: number) {
+    for (const [key, record] of this.generationRecords) {
+      if (record.expiresAtMs <= nowMs) this.generationRecords.delete(key)
+    }
+  }
+
+  private readGeneration(key: string, retainUntilMs?: number) {
+    const record = this.generationRecords.get(key)
+    if (record && retainUntilMs && record.expiresAtMs < retainUntilMs) record.expiresAtMs = retainUntilMs
+    return record?.generation ?? 0
+  }
+
+  private advanceGeneration(key: string) {
+    const nowMs = Date.now()
+    this.pruneExpiredGenerationRecords(nowMs)
+    if (!this.generationRecords.has(key) && this.generationRecords.size >= CUSTOMER_SERVICE_REALTIME_GENERATION_RECORD_CAPACITY) {
+      // 清表前先推进 epoch，保证容量回收不会把旧 ticket 的 generation 重置成可再次匹配的 0。
+      this.globalGenerationEpoch += 1
+      this.generationRecords.clear()
+    }
+    const currentGeneration = this.generationRecords.get(key)?.generation ?? 0
+    this.generationRecords.set(key, {
+      generation: currentGeneration + 1,
+      expiresAtMs: nowMs + CUSTOMER_SERVICE_REALTIME_GENERATION_RECORD_RETENTION_MS,
+    })
   }
 
   captureOwnerGeneration(scope: RealtimeScope, ownerKey: string, sessionToken: string): CustomerServiceRealtimeRegistrationTicket {
+    const nowMs = Date.now()
+    this.pruneExpiredGenerationRecords(nowMs)
     const sessionHash = hashSessionToken(sessionToken)
+    const expiresAtMs = nowMs + CUSTOMER_SERVICE_REALTIME_REGISTRATION_TICKET_TTL_MS
     return {
       scope,
       ownerKey,
-      generation: this.ownerGenerations.get(this.buildOwnerGenerationKey(scope, ownerKey)) ?? 0,
+      globalEpoch: this.globalGenerationEpoch,
+      generation: this.readGeneration(this.buildOwnerGenerationKey(scope, ownerKey), expiresAtMs),
       sessionHash,
-      sessionGeneration: this.sessionGenerations.get(this.buildSessionGenerationKey(scope, sessionHash)) ?? 0,
+      sessionGeneration: this.readGeneration(this.buildSessionGenerationKey(scope, sessionHash), expiresAtMs),
+      expiresAtMs,
     }
   }
 
   private assertRegistrationTicket(ticket: CustomerServiceRealtimeRegistrationTicket, scope: RealtimeScope, ownerKey: string, sessionToken: string) {
-    const currentGeneration = this.ownerGenerations.get(this.buildOwnerGenerationKey(scope, ownerKey)) ?? 0
+    const nowMs = Date.now()
+    this.pruneExpiredGenerationRecords(nowMs)
+    if (ticket.expiresAtMs <= nowMs) throw new BizError('实时连接注册 ticket 已过期，请重试', 401)
+    const currentGeneration = this.readGeneration(this.buildOwnerGenerationKey(scope, ownerKey))
     const sessionHash = hashSessionToken(sessionToken)
-    const currentSessionGeneration = this.sessionGenerations.get(this.buildSessionGenerationKey(scope, sessionHash)) ?? 0
+    const currentSessionGeneration = this.readGeneration(this.buildSessionGenerationKey(scope, sessionHash))
     if (
       ticket.scope !== scope
       || ticket.ownerKey !== ownerKey
+      || ticket.globalEpoch !== this.globalGenerationEpoch
       || ticket.generation !== currentGeneration
       || ticket.sessionHash !== sessionHash
       || ticket.sessionGeneration !== currentSessionGeneration
@@ -358,15 +405,24 @@ class CustomerServiceRealtimeService {
   }
 
   disconnectBySessionHash(scope: RealtimeScope, tokenHash: string): void {
-    const generationKey = this.buildSessionGenerationKey(scope, tokenHash)
-    this.sessionGenerations.set(generationKey, (this.sessionGenerations.get(generationKey) ?? 0) + 1)
+    this.advanceGeneration(this.buildSessionGenerationKey(scope, tokenHash))
     for (const subscriber of this.subscribers.values()) if (subscriber.scope === scope && subscriber.sessionHash === tokenHash) this.closeSubscriber(subscriber.subscriberId)
   }
 
   disconnectByOwner(scope: RealtimeScope, ownerKey: string): void {
-    const generationKey = this.buildOwnerGenerationKey(scope, ownerKey)
-    this.ownerGenerations.set(generationKey, (this.ownerGenerations.get(generationKey) ?? 0) + 1)
+    this.advanceGeneration(this.buildOwnerGenerationKey(scope, ownerKey))
     for (const subscriber of this.subscribers.values()) if (subscriber.scope === scope && subscriber.ownerKey === ownerKey) this.closeSubscriber(subscriber.subscriberId)
+  }
+
+  buildGenerationBarrierSnapshot() {
+    this.pruneExpiredGenerationRecords(Date.now())
+    return {
+      globalEpoch: this.globalGenerationEpoch,
+      generationRecordCount: this.generationRecords.size,
+      generationRecordCapacity: CUSTOMER_SERVICE_REALTIME_GENERATION_RECORD_CAPACITY,
+      registrationTicketTtlMs: CUSTOMER_SERVICE_REALTIME_REGISTRATION_TICKET_TTL_MS,
+      generationRecordRetentionMs: CUSTOMER_SERVICE_REALTIME_GENERATION_RECORD_RETENTION_MS,
+    }
   }
 
   buildServiceSessionSnapshot(): CustomerServiceRealtimeSessionSnapshot {

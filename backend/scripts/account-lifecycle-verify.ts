@@ -163,9 +163,12 @@ for (const [serviceSource, helper, domain, permanentNext] of [
   }
 }
 assert.match(businessGuardSource, /lockSysAccountsInStableOrder[\s\S]*orderBy\('account\.id', 'ASC'\)/, '生命周期 actor 与 Sys target 必须按稳定 ID 顺序锁定')
-assert.match(realtimeServiceSource, /sessionGenerations/, 'SSE 注册屏障必须包含 session generation')
+assert.match(realtimeServiceSource, /buildSessionGenerationKey/, 'SSE 注册屏障必须包含 session generation')
 assert.match(realtimeServiceSource, /ticket\.sessionGeneration !== currentSessionGeneration/, 'SSE 同步注册必须比较 session generation')
-assert.match(realtimeServiceSource, /disconnectBySessionHash[\s\S]*sessionGenerations\.set[\s\S]*closeSubscriber/, 'session 撤销必须先推进 generation 再关闭订阅')
+assert.match(realtimeServiceSource, /disconnectBySessionHash[\s\S]*advanceGeneration\(this\.buildSessionGenerationKey[\s\S]*closeSubscriber/, 'session 撤销必须先推进 generation 再关闭订阅')
+assert.match(realtimeServiceSource, /globalGenerationEpoch/, 'generation 容量回收必须有全局 epoch 防止 ABA')
+assert.match(realtimeServiceSource, /ticket\.expiresAtMs <= nowMs/, 'SSE 注册 ticket 必须有短有效期')
+assert.match(realtimeServiceSource, /generationRecords\.size >= CUSTOMER_SERVICE_REALTIME_GENERATION_RECORD_CAPACITY[\s\S]*globalGenerationEpoch \+= 1[\s\S]*generationRecords\.clear\(\)/, '容量清表必须先推进全局 epoch')
 assert.match(sliceMethod(authServiceSource, '  async logout(', '  async me('), /disconnectBySessionHash\('service'/, 'Sys Web logout 必须只推进当前 session 屏障')
 assert.match(sliceMethod(clientAuthServiceSource, '  async logout(', '  async preparePasswordChange('), /disconnectBySessionHash\('client'/, 'Client Web logout 必须只推进当前 session 屏障')
 for (const [start, next, label] of [
@@ -565,6 +568,80 @@ try {
     /授权状态已变化/,
     'Mobile Access Token 轮换提交后必须使旧 ticket 失效',
   )
+
+  const realtimeBarrier = realtime as typeof realtime & {
+    buildGenerationBarrierSnapshot: () => {
+      globalEpoch: number
+      generationRecordCount: number
+      generationRecordCapacity: number
+      registrationTicketTtlMs: number
+      generationRecordRetentionMs: number
+    }
+  }
+  assert.equal(typeof realtimeBarrier.buildGenerationBarrierSnapshot, 'function', 'SSE generation 屏障必须提供无敏感值的容量快照')
+
+  const ttlClient = await createClientUser('issue74-generation-ttl-client')
+  const ttlTokens = await addClientSessions(ttlClient.id, 'generation-ttl')
+  const ttlTicket = realtime.captureOwnerGeneration('client', ttlClient.id, ttlTokens.webToken)
+  await realtime.assertOwnerCanRegister(ttlTicket, ttlTokens.webToken)
+  realtime.disconnectBySessionHash('client', sessionTokenModule.hashSessionToken(ttlTokens.webToken))
+  assert.throws(
+    () => realtime.openClientStream(ttlClient.id, ttlTokens.webToken, new TestSseResponse() as never, 60, ttlTicket),
+    /授权状态已变化/,
+    'session 撤销后旧 ticket 必须立即失效',
+  )
+  const ttlSnapshot = realtimeBarrier.buildGenerationBarrierSnapshot()
+  assert.ok(ttlSnapshot.registrationTicketTtlMs > 0, 'ticket TTL 必须为正数')
+  assert.ok(ttlSnapshot.generationRecordRetentionMs >= ttlSnapshot.registrationTicketTtlMs, 'generation 记录保留期不得短于 ticket TTL')
+  await new Promise((resolve) => setTimeout(resolve, ttlSnapshot.generationRecordRetentionMs + 50))
+  const afterTtlCleanup = realtimeBarrier.buildGenerationBarrierSnapshot()
+  assert.ok(afterTtlCleanup.generationRecordCount < ttlSnapshot.generationRecordCount, 'TTL 到期后必须惰性回收 generation 记录')
+  assert.throws(
+    () => realtime.openClientStream(ttlClient.id, ttlTokens.webToken, new TestSseResponse() as never, 60, ttlTicket),
+    /ticket 已过期|授权状态已变化/,
+    'generation 记录 TTL 回收后不得发生旧 ticket ABA 注册',
+  )
+  const renewedTtlTicket = realtime.captureOwnerGeneration('client', ttlClient.id, ttlTokens.webToken)
+  await realtime.assertOwnerCanRegister(renewedTtlTicket, ttlTokens.webToken)
+  const renewedTtlResponse = new TestSseResponse()
+  realtime.openClientStream(ttlClient.id, ttlTokens.webToken, renewedTtlResponse as never, 60, renewedTtlTicket)
+  assert.equal(renewedTtlResponse.writableEnded, false, 'TTL 清理后有效会话的新 ticket 必须可以注册')
+  realtime.disconnectByOwner('client', ttlClient.id)
+
+  const capacityClient = await createClientUser('issue74-generation-capacity-client')
+  const capacityTokens = await addClientSessions(capacityClient.id, 'generation-capacity')
+  const siblingTokens = await addClientSessions(capacityClient.id, 'generation-capacity-sibling')
+  const staleCapacityTicket = realtime.captureOwnerGeneration('client', capacityClient.id, capacityTokens.webToken)
+  await realtime.assertOwnerCanRegister(staleCapacityTicket, capacityTokens.webToken)
+  const siblingTicket = realtime.captureOwnerGeneration('client', capacityClient.id, siblingTokens.webToken)
+  await realtime.assertOwnerCanRegister(siblingTicket, siblingTokens.webToken)
+  const siblingResponse = new TestSseResponse()
+  realtime.openClientStream(capacityClient.id, siblingTokens.webToken, siblingResponse as never, 60, siblingTicket)
+  realtime.disconnectBySessionHash('client', sessionTokenModule.hashSessionToken(capacityTokens.webToken))
+  assert.throws(
+    () => realtime.openClientStream(capacityClient.id, capacityTokens.webToken, new TestSseResponse() as never, 60, staleCapacityTicket),
+    /授权状态已变化/,
+    '容量压力前已撤销 session 的旧 ticket 必须失效',
+  )
+  const beforeCapacityPressure = realtimeBarrier.buildGenerationBarrierSnapshot()
+  for (let index = 0; index <= beforeCapacityPressure.generationRecordCapacity; index += 1) {
+    realtime.disconnectBySessionHash('client', sessionTokenModule.hashSessionToken(`issue74-capacity-${index}`))
+  }
+  const afterCapacityPressure = realtimeBarrier.buildGenerationBarrierSnapshot()
+  assert.ok(afterCapacityPressure.globalEpoch > beforeCapacityPressure.globalEpoch, '容量清表前必须推进 global epoch')
+  assert.ok(afterCapacityPressure.generationRecordCount <= afterCapacityPressure.generationRecordCapacity, 'generation 记录不得超过容量上限')
+  assert.throws(
+    () => realtime.openClientStream(capacityClient.id, capacityTokens.webToken, new TestSseResponse() as never, 60, staleCapacityTicket),
+    /授权状态已变化/,
+    '容量清表后旧 ticket 必须被 global epoch 拒绝',
+  )
+  assert.equal(siblingResponse.writableEnded, false, '容量压力下单 session 撤销不得误关 sibling 活跃 SSE')
+  const renewedCapacityTicket = realtime.captureOwnerGeneration('client', capacityClient.id, capacityTokens.webToken)
+  await realtime.assertOwnerCanRegister(renewedCapacityTicket, capacityTokens.webToken)
+  const renewedCapacityResponse = new TestSseResponse()
+  realtime.openClientStream(capacityClient.id, capacityTokens.webToken, renewedCapacityResponse as never, 60, renewedCapacityTicket)
+  assert.equal(renewedCapacityResponse.writableEnded, false, '容量清理后有效会话的新 ticket 必须可以注册')
+  realtime.disconnectByOwner('client', capacityClient.id)
 
   const lifecycleRaceProduct = await productService.create({
     productName: '生命周期竞态专项商品',
