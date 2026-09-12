@@ -108,6 +108,12 @@ const getOrderDisplayName = (order: OrderDetailResult) => {
       <el-table-column type="index" label="行号" width="68" align="center" />
       <el-table-column prop="productCode" label="产品编码" min-width="130" show-overflow-tooltip />
       <el-table-column prop="productName" label="产品名称" min-width="180" show-overflow-tooltip />
+      <el-table-column prop="specText" label="规格" min-width="140" show-overflow-tooltip>
+        <template #default="{ row }">{{ row.specText || '-' }}</template>
+      </el-table-column>
+      <el-table-column prop="skuCode" label="SKU 编码" min-width="150" show-overflow-tooltip>
+        <template #default="{ row }">{{ row.skuCode || '-' }}</template>
+      </el-table-column>
       <el-table-column prop="qty" label="数量" width="92" align="right" />
       <el-table-column prop="unitPrice" label="单价" width="118" align="right">
         <template #default="{ row }">¥{{ formatAmount(row.unitPrice) }}</template>
@@ -135,6 +141,8 @@ const getOrderDisplayName = (order: OrderDetailResult) => {
         </div>
         <div class="flex flex-wrap justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
           <span>编码：{{ item.productCode }}</span>
+          <span>规格：{{ item.specText || '-' }}</span>
+          <span>SKU：{{ item.skuCode || '-' }}</span>
           <span>{{ item.qty }} × ¥{{ formatAmount(item.unitPrice) }}</span>
         </div>
         <div v-if="item.remark" class="mt-2 rounded bg-slate-100 p-1.5 text-xs text-slate-500 dark:bg-white/5 dark:text-slate-400">

@@ -356,6 +356,11 @@ const voucherOrder = computed<OrderDetailResult | null>(() => {
         id: item.id,
         productId: item.productId,
         productCode: item.productCode,
+        skuId: item.skuId ?? null,
+        skuCode: item.skuCode ?? null,
+        skuCodeSnapshot: item.skuCode ?? null,
+        specText: item.specText ?? null,
+        specTextSnapshot: item.specText ?? null,
         // 正式出库单落库的商品名带下单规格，这里同口径拼接，避免核销前预览与核销后打印对不上。
         productName: buildO2oItemDisplayName(item.productName, item),
         qty: String(item.qty),

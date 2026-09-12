@@ -78,6 +78,7 @@
     "notification:outbox:static:verify": "node scripts/notification-outbox-static-verify.mjs",
     "notification:outbox:verify": "tsx scripts/notification-outbox-verify.ts",
     "sqlite:legacy-upgrade:verify": "tsx scripts/sqlite-legacy-schema-upgrade-verify.ts",
+    "order:manual-sku:verify": "tsx scripts/manual-order-sku-verify.ts",
     "order-query:baseline:verify": "tsx scripts/order-query-baseline-verify.ts",
     "reports:contract:verify": "tsx scripts/report-center-contract-verify.ts",
     "reports:inventory:verify": "tsx scripts/report-inventory-verify.ts",

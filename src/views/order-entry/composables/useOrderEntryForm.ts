@@ -22,7 +22,13 @@ import {
   getBrowserStorage,
   resolveUserScopedStorageKey,
 } from '@/utils/storage-user-scope'
-import type { FocusField, OrderEntryDrawerForm, OrderHeaderForm, OrderItemRow } from '../types'
+import {
+  getSelectableProductSkus,
+  type FocusField,
+  type OrderEntryDrawerForm,
+  type OrderHeaderForm,
+  type OrderItemRow,
+} from '../types'
 
 
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
@@ -122,6 +128,7 @@ export const useOrderEntryForm = () => {
   const editingRowUid = ref('')
   const drawerForm = reactive<OrderEntryDrawerForm>({
     productId: '',
+    skuId: '',
     qty: null,
     unitPrice: null,
     remark: '',
@@ -133,7 +140,7 @@ export const useOrderEntryForm = () => {
    * - 支持 Enter / Tab 在整张录入网格中顺序跳转。
    */
   const fieldRefMap = new Map<string, unknown>()
-  const focusFieldOrder: FocusField[] = ['product', 'qty', 'unitPrice', 'remark']
+  const focusFieldOrder: FocusField[] = ['product', 'sku', 'qty', 'unitPrice', 'remark']
   const draftPersistenceReady = ref(false)
 
   /**
@@ -179,6 +186,18 @@ export const useOrderEntryForm = () => {
     return new Map(products.value.map((item) => [item.id, item]))
   })
 
+  const getSelectableSkus = (productId: string) => {
+    return getSelectableProductSkus(productMap.value.get(productId))
+  }
+
+  const getSkuLabelById = (productId: string, skuId: string): string => {
+    if (!skuId) {
+      return '未选择规格'
+    }
+    const sku = getSelectableSkus(productId).find((item) => item.id === skuId)
+    return sku?.specText || '未选择规格'
+  }
+
   /**
    * 汇总信息：
    * - totalQty 汇总所有明细数量；
@@ -202,6 +221,7 @@ export const useOrderEntryForm = () => {
       .filter((row) => normalizeTextValue(row.productId) && normalizeNumber(row.qty) > 0)
       .map((row) => ({
         productId: normalizeTextValue(row.productId),
+        skuId: normalizeTextValue(row.skuId) || undefined,
         qty: normalizeNumber(row.qty),
         unitPrice: normalizeNumber(row.unitPrice),
         remark: row.remark.trim() || undefined,
@@ -223,6 +243,7 @@ export const useOrderEntryForm = () => {
   const createBlankRow = (): OrderItemRow => ({
     uid: createRowUid(),
     productId: '',
+    skuId: '',
     qty: null,
     unitPrice: null,
     remark: '',
@@ -267,6 +288,7 @@ export const useOrderEntryForm = () => {
     itemRows: itemRows.value.map((row) => ({
       uid: row.uid,
       productId: row.productId,
+      skuId: row.skuId,
       qty: row.qty,
       unitPrice: row.unitPrice,
       remark: row.remark,
@@ -275,6 +297,7 @@ export const useOrderEntryForm = () => {
     editingRowUid: editingRowUid.value,
     drawerForm: {
       productId: drawerForm.productId,
+      skuId: drawerForm.skuId,
       qty: drawerForm.qty,
       unitPrice: drawerForm.unitPrice,
       remark: drawerForm.remark,
@@ -333,6 +356,7 @@ export const useOrderEntryForm = () => {
         ? parsedDraft.itemRows.map((row) => ({
             uid: row.uid || createRowUid(),
             productId: row.productId ?? '',
+            skuId: row.skuId ?? '',
             qty: typeof row.qty === 'number' ? row.qty : null,
             unitPrice: typeof row.unitPrice === 'number' ? row.unitPrice : null,
             remark: row.remark ?? '',
@@ -346,6 +370,7 @@ export const useOrderEntryForm = () => {
         editingRowUid.value = ''
       }
       drawerForm.productId = parsedDraft.drawerForm.productId ?? ''
+      drawerForm.skuId = parsedDraft.drawerForm.skuId ?? ''
       drawerForm.qty = typeof parsedDraft.drawerForm.qty === 'number' ? parsedDraft.drawerForm.qty : null
       drawerForm.unitPrice = typeof parsedDraft.drawerForm.unitPrice === 'number' ? parsedDraft.drawerForm.unitPrice : null
       drawerForm.remark = parsedDraft.drawerForm.remark ?? ''
@@ -420,11 +445,19 @@ export const useOrderEntryForm = () => {
   const handleProductChange = (row: OrderItemRow) => {
     const product = productMap.value.get(row.productId)
     if (!product) {
+      row.skuId = ''
       row.unitPrice = null
       return
     }
+    const candidates = getSelectableProductSkus(product)
+    const sku = candidates.length === 1 ? candidates[0] : undefined
+    row.skuId = sku?.id ?? ''
+    row.unitPrice = sku ? normalizeNumber(sku.defaultPrice) : null
+  }
 
-    row.unitPrice = normalizeNumber(Number(product.defaultPrice))
+  const handleSkuChange = (row: OrderItemRow) => {
+    const sku = getSelectableSkus(row.productId).find((item) => item.id === row.skuId)
+    row.unitPrice = sku ? normalizeNumber(sku.defaultPrice) : null
   }
 
   /**
@@ -496,8 +529,21 @@ export const useOrderEntryForm = () => {
     for (const row of rows) {
       const resolvedProductId = await ensureProductId(row.productId, createdCache, normalizeNumber(row.unitPrice))
       row.productId = resolvedProductId
+      const candidates = getSelectableSkus(resolvedProductId)
+      let selectedSku = candidates.find((sku) => sku.id === row.skuId)
+      if (!selectedSku && candidates.length === 1) {
+        selectedSku = candidates[0]
+        row.skuId = selectedSku?.id ?? ''
+      }
+      if (!selectedSku) {
+        if (candidates.length > 1) {
+          throw new Error(`商品“${getProductLabelById(resolvedProductId)}”为多规格商品，请选择规格`)
+        }
+        throw new Error(`商品“${getProductLabelById(resolvedProductId)}”暂无当前启用规格`)
+      }
       submitItems.push({
         productId: resolvedProductId,
+        skuId: selectedSku.id,
         qty: normalizeNumber(row.qty),
         unitPrice: normalizeNumber(row.unitPrice),
         remark: row.remark.trim() || undefined,
@@ -541,6 +587,7 @@ export const useOrderEntryForm = () => {
   const openDrawerByRow = (row: OrderItemRow) => {
     editingRowUid.value = row.uid
     drawerForm.productId = row.productId
+    drawerForm.skuId = row.skuId
     drawerForm.qty = row.qty
     drawerForm.unitPrice = row.unitPrice
     drawerForm.remark = row.remark
@@ -574,7 +621,14 @@ export const useOrderEntryForm = () => {
       return
     }
 
+    const candidates = getSelectableSkus(drawerForm.productId)
+    if (productMap.value.has(drawerForm.productId) && !candidates.some((sku) => sku.id === drawerForm.skuId)) {
+      showAppWarning(candidates.length > 1 ? '该商品有多个规格，请选择规格' : '该商品暂无当前启用规格')
+      return
+    }
+
     row.productId = drawerForm.productId
+    row.skuId = drawerForm.skuId
     row.qty = drawerForm.qty
     row.unitPrice = drawerForm.unitPrice
     row.remark = drawerForm.remark
@@ -588,7 +642,15 @@ export const useOrderEntryForm = () => {
    */
   const handleDrawerProductChange = () => {
     const product = productMap.value.get(drawerForm.productId)
-    drawerForm.unitPrice = product ? normalizeNumber(Number(product.defaultPrice)) : null
+    const candidates = getSelectableProductSkus(product)
+    const sku = candidates.length === 1 ? candidates[0] : undefined
+    drawerForm.skuId = sku?.id ?? ''
+    drawerForm.unitPrice = sku ? normalizeNumber(sku.defaultPrice) : null
+  }
+
+  const handleDrawerSkuChange = () => {
+    const sku = getSelectableSkus(drawerForm.productId).find((item) => item.id === drawerForm.skuId)
+    drawerForm.unitPrice = sku ? normalizeNumber(sku.defaultPrice) : null
   }
 
   /**
@@ -703,6 +765,7 @@ export const useOrderEntryForm = () => {
     editingRowUid.value = ''
     drawerVisible.value = false
     drawerForm.productId = ''
+    drawerForm.skuId = ''
     drawerForm.qty = null
     drawerForm.unitPrice = null
     drawerForm.remark = ''
@@ -724,6 +787,17 @@ export const useOrderEntryForm = () => {
       return
     }
 
+    const invalidSkuRow = itemRows.value.find((row) => {
+      if (!productMap.value.has(row.productId) || normalizeNumber(row.qty) <= 0) {
+        return false
+      }
+      return !getSelectableSkus(row.productId).some((sku) => sku.id === row.skuId)
+    })
+    if (invalidSkuRow) {
+      const candidates = getSelectableSkus(invalidSkuRow.productId)
+      showAppWarning(candidates.length > 1 ? '存在多规格商品尚未选择规格' : '存在商品暂无当前启用规格')
+      return
+    }
     const hasInvalidPriceRow = itemRows.value.some((row) => {
       const hasProduct = Boolean(normalizeTextValue(row.productId))
       const hasQty = normalizeNumber(row.qty) > 0
@@ -798,6 +872,16 @@ export const useOrderEntryForm = () => {
     }
     const restored = restoreDraft()
     await loadProducts()
+    itemRows.value.forEach((row) => {
+      const candidates = getSelectableSkus(row.productId)
+      if (!candidates.some((sku) => sku.id === row.skuId)) {
+        row.skuId = candidates.length === 1 ? candidates[0]?.id ?? '' : ''
+      }
+    })
+    const drawerCandidates = getSelectableSkus(drawerForm.productId)
+    if (!drawerCandidates.some((sku) => sku.id === drawerForm.skuId)) {
+      drawerForm.skuId = drawerCandidates.length === 1 ? drawerCandidates[0]?.id ?? '' : ''
+    }
     if (!restored) {
       itemRows.value = [createBlankRow()]
     }
@@ -854,6 +938,7 @@ export const useOrderEntryForm = () => {
       drawerVisible,
       editingRowUid,
       () => drawerForm.productId,
+      () => drawerForm.skuId,
       () => drawerForm.qty,
       () => drawerForm.unitPrice,
       () => drawerForm.remark,
@@ -914,6 +999,9 @@ export const useOrderEntryForm = () => {
     totalAmount,
     appendRow,
     handleProductChange,
+    handleSkuChange,
+    getSelectableSkus,
+    getSkuLabelById,
     getProductLabelById,
     calcLineAmount,
     toMoney,
@@ -924,6 +1012,7 @@ export const useOrderEntryForm = () => {
     openDrawerForCreate,
     applyDrawerEdit,
     handleDrawerProductChange,
+    handleDrawerSkuChange,
     setFieldRef,
     handleGridKeydown,
     submitOrder,

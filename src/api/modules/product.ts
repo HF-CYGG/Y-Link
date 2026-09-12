@@ -230,6 +230,32 @@ const normalizeTagIds = (tagIds: PrimitiveValue[] = []): string[] => {
   return [...new Set(tagIds.map((tagId) => normalizeId(tagId)).filter(Boolean))]
 }
 
+const normalizeProductSkuRecord = (record: ProductSkuRecord): ProductSkuRecord => ({
+  id: normalizeId(record.id),
+  productId: normalizeId(record.productId),
+  skuCode: normalizeText(record.skuCode),
+  specValues: record.specValues && typeof record.specValues === 'object' ? { ...record.specValues } : {},
+  specText: normalizeText(record.specText, '默认规格'),
+  defaultPrice: normalizeDecimal(record.defaultPrice),
+  originalPrice: normalizeDecimal(record.originalPrice ?? record.defaultPrice),
+  discountRate: normalizeDiscountRate(record.discountRate),
+  discountedPrice: normalizeDecimal(
+    record.discountedPrice
+      ?? calculateDiscountedPriceText(
+        record.defaultPrice as string | number | null | undefined,
+        record.discountRate as string | number | null | undefined,
+      ),
+  ),
+  currentStock: normalizeInteger(record.currentStock),
+  preOrderedStock: normalizeInteger(record.preOrderedStock),
+  availableStock: normalizeInteger(record.availableStock),
+  isActive: normalizeBoolean(record.isActive),
+  isCurrent: normalizeBoolean(record.isCurrent),
+  o2oRecommended: normalizeBoolean(record.o2oRecommended),
+  thumbnail: normalizeText(record.thumbnail) || null,
+  sortOrder: normalizeInteger(record.sortOrder),
+})
+
 const normalizeProductRecord = (record: ProductRawRecord): ProductRecord => {
   const tags = (record.tags ?? []).map(normalizeTagRecord).filter((tag) => tag.id)
   const tagIds = normalizeTagIds([...(record.tagIds ?? []), ...tags.map((tag) => tag.id)])
@@ -253,7 +279,7 @@ const normalizeProductRecord = (record: ProductRawRecord): ProductRecord => {
     availableStock: normalizeInteger(record.availableStock, 0),
     tagIds,
     tags,
-    skus: Array.isArray(record.skus) ? record.skus : [],
+    skus: Array.isArray(record.skus) ? record.skus.map(normalizeProductSkuRecord).filter((sku) => sku.id) : [],
   }
 }
 

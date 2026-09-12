@@ -78,6 +78,7 @@ interface OrderItemReportRaw {
   orderType: string | null
   productId: string | number
   productName: string | null
+  specText: string | null
   qty: string | number | null
   unitPrice: string | number | null
   amount: string | number | null
@@ -176,6 +177,7 @@ const REPORT_FIELD_DEFINITIONS: Record<ReportType, ReportFieldDefinition[]> = {
     { key: 'time', label: '时间', width: 20 },
     { key: 'tags', label: '标签', width: 20 },
     { key: 'productName', label: '商品名称', width: 28 },
+    { key: 'specText', label: '规格', width: 22 },
     { key: 'qty', label: '数量', width: 12, numeric: true },
     { key: 'unitPrice', label: '单价', width: 12, numeric: true },
     { key: 'amount', label: '总价', width: 14, numeric: true },
@@ -187,6 +189,7 @@ const REPORT_FIELD_DEFINITIONS: Record<ReportType, ReportFieldDefinition[]> = {
   kingdee: [
     { key: 'time', label: '时间', width: 20 },
     { key: 'productName', label: '商品名称', width: 28 },
+    { key: 'specText', label: '规格', width: 22 },
     { key: 'qty', label: '数量', width: 12, numeric: true },
     { key: 'unitPrice', label: '单价', width: 12, numeric: true },
     { key: 'amount', label: '金额', width: 14, numeric: true },
@@ -199,6 +202,7 @@ const REPORT_FIELD_DEFINITIONS: Record<ReportType, ReportFieldDefinition[]> = {
   walkin: [
     { key: 'time', label: '时间', width: 20 },
     { key: 'productName', label: '商品名称', width: 28 },
+    { key: 'specText', label: '规格', width: 22 },
     { key: 'qty', label: '数量', width: 12, numeric: true },
     { key: 'unitPrice', label: '单价', width: 12, numeric: true },
     { key: 'amount', label: '金额', width: 14, numeric: true },
@@ -513,6 +517,7 @@ export class ReportService {
       .addSelect('order.orderType', 'orderType')
       .addSelect('item.productId', 'productId')
       .addSelect('item.productNameSnapshot', 'productName')
+      .addSelect('item.specTextSnapshot', 'specText')
       .addSelect('item.qty', 'qty')
       .addSelect('item.unitPrice', 'unitPrice')
       .addSelect('item.lineAmount', 'amount')
@@ -637,6 +642,7 @@ export class ReportService {
       time: formatDateTime(raw.createdAt),
       tags: (tagMap.get(productId) ?? []).join('、') || '未分类',
       productName: normalizeText(raw.productName),
+      specText: normalizeText(raw.specText),
       qty: normalizeNumberText(raw.qty),
       unitPrice: normalizeAmount(raw.unitPrice),
       amount: normalizeAmount(raw.amount),

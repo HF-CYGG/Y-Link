@@ -156,7 +156,13 @@ const SQLITE_REQUIRED_ORDER_COLUMNS = [
   'customer_department_name',
 ]
 
-const SQLITE_REQUIRED_ORDER_ITEM_COLUMNS = ['unit_price', 'line_amount']
+const SQLITE_REQUIRED_ORDER_ITEM_COLUMNS = [
+  'unit_price',
+  'line_amount',
+  'sku_id',
+  'sku_code_snapshot',
+  'spec_text_snapshot',
+]
 // 历史 SQLite 本地库缺少金额字段时，先用极小正数兜底补齐结构，避免 synchronize 重建临时表时被 NOT NULL / CHECK 约束直接拦截。
 const SQLITE_LEGACY_OUTBOUND_ITEM_FALLBACK_UNIT_PRICE = 0.01
 const SQLITE_LEGACY_OUTBOUND_ITEM_FALLBACK_LINE_AMOUNT = 0
@@ -542,6 +548,23 @@ async function normalizeSqliteOutboundItemColumns(dataSource: DataSource): Promi
     )
     hasCompatMutation = true
   }
+
+  refreshedColumnSet = await listSqliteTableColumns(dataSource, 'biz_outbound_order_item')
+  if (!refreshedColumnSet.has('sku_id')) {
+    await dataSource.query(`ALTER TABLE "biz_outbound_order_item" ADD COLUMN "sku_id" integer NULL`)
+  }
+  if (!refreshedColumnSet.has('sku_code_snapshot')) {
+    await dataSource.query(`ALTER TABLE "biz_outbound_order_item" ADD COLUMN "sku_code_snapshot" varchar(96) NULL`)
+  }
+  if (!refreshedColumnSet.has('spec_text_snapshot')) {
+    await dataSource.query(`ALTER TABLE "biz_outbound_order_item" ADD COLUMN "spec_text_snapshot" varchar(255) NULL`)
+  }
+  await ensureSqliteIndex(
+    dataSource,
+    'biz_outbound_order_item',
+    'idx_biz_outbound_item_sku_id',
+    `CREATE INDEX IF NOT EXISTS "idx_biz_outbound_item_sku_id" ON "biz_outbound_order_item" ("sku_id")`,
+  )
 
   // 兼容历史库中金额列缺失或无效的记录：
   // 1. 优先沿用既有 line_amount / qty 反推单价；

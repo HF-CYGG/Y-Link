@@ -1,7 +1,7 @@
 /**
  * 文件说明：backend/scripts/task2-verify.ts
  * 文件职责：验证单双流水号、订单类型校验、默认出单人逻辑与流水配置异常处理。
- * 维护说明：若调整单号生成规则、出库提交入参或系统配置键名，请同步更新本脚本。
+ * 维护说明：若调整单号生成规则、出库 SKU 提交入参或系统配置键名，请同步更新本脚本。
  */
 
 import assert from 'node:assert/strict'
@@ -53,6 +53,7 @@ async function main() {
   const [
     { AppDataSource },
     { BaseProduct },
+    { BaseProductSku },
     { BizOutboundOrder },
     { ClientUser },
     { O2oPreorder },
@@ -65,6 +66,7 @@ async function main() {
     await Promise.all([
       import('../src/config/data-source.js'),
       import('../src/entities/base-product.entity.js'),
+      import('../src/entities/base-product-sku.entity.js'),
       import('../src/entities/biz-outbound-order.entity.js'),
       import('../src/entities/client-user.entity.js'),
       import('../src/entities/o2o-preorder.entity.js'),
@@ -92,6 +94,21 @@ async function main() {
         isActive: true,
       }),
     )
+    await AppDataSource.getRepository(BaseProductSku).save({
+      productId: createdProduct.id,
+      skuCode: 'TASK2P01-DEFAULT',
+      specValuesJson: '{}',
+      specText: '默认规格',
+      defaultPrice: '12.50',
+      discountRate: '10.0',
+      currentStock: 0,
+      preOrderedStock: 0,
+      isActive: true,
+      isCurrent: true,
+      o2oRecommended: false,
+      thumbnail: null,
+      sortOrder: 0,
+    })
 
     const walkinOrder = await orderService.submit(
       {

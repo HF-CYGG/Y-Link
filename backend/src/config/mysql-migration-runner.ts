@@ -55,6 +55,7 @@ const MYSQL_REQUIRED_TABLES = [
   'o2o_preorder',
   'o2o_preorder_item',
   'biz_outbound_order',
+  'biz_outbound_order_item',
   'biz_inbound_order',
   'biz_inbound_order_item',
   'notification_event',
@@ -80,6 +81,7 @@ const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
   client_user: '006_o2o_preorder_schema.sql',
   client_feedback_conversation: '019_client_feedback_and_customer_service.sql',
   biz_outbound_order: '001_init_schema.sql',
+  biz_outbound_order_item: '001_init_schema.sql',
   base_product_sku: '028_o2o_product_sku_selection.sql',
   notification_event: '020_notification_center_and_user_email.sql',
   notification_inbox: '020_notification_center_and_user_email.sql',
@@ -131,6 +133,9 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
   { tableName: 'o2o_preorder', columnName: 'cancellation_source', introducingScript: '040_o2o_preorder_governance.sql' },
   { tableName: 'o2o_preorder', columnName: 'cancellation_remark', introducingScript: '040_o2o_preorder_governance.sql' },
   { tableName: 'o2o_preorder', columnName: 'cancelled_at', introducingScript: '040_o2o_preorder_governance.sql' },
+  { tableName: 'biz_outbound_order_item', columnName: 'sku_id', introducingScript: '041_manual_outbound_sku.sql' },
+  { tableName: 'biz_outbound_order_item', columnName: 'sku_code_snapshot', introducingScript: '041_manual_outbound_sku.sql' },
+  { tableName: 'biz_outbound_order_item', columnName: 'spec_text_snapshot', introducingScript: '041_manual_outbound_sku.sql' },
   { tableName: 'business_sequence', columnName: 'sequence_key', introducingScript: '035_o2o_idempotency_business_sequence.sql' },
   { tableName: 'business_sequence', columnName: 'current_value', introducingScript: '035_o2o_idempotency_business_sequence.sql' },
   { tableName: 'business_sequence', columnName: 'created_at', introducingScript: '035_o2o_idempotency_business_sequence.sql' },
@@ -174,6 +179,13 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
 
 // 不只按索引名判断，还校验列顺序与唯一性，避免旧库中存在同名但错误的索引时误判为可启动。
 const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
+  {
+    tableName: 'biz_outbound_order_item',
+    indexName: 'idx_biz_outbound_item_sku_id',
+    columns: ['sku_id'],
+    unique: false,
+    introducingScript: '041_manual_outbound_sku.sql',
+  },
   {
     tableName: 'client_mobile_session',
     indexName: 'uk_client_mobile_session_access_hash',
@@ -298,6 +310,7 @@ const AUTO_MIGRATABLE_FILES = [
   '038_department_path_capacity.sql',
   '039_aliyun_pnvs_sms_verification.sql',
   '040_o2o_preorder_governance.sql',
+  '041_manual_outbound_sku.sql',
 ]
 
 /**

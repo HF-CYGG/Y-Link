@@ -14,6 +14,7 @@ import type { PaginationQueryInput, PaginationResult } from '@/types/api'
  */
 export interface SubmitOrderItemPayload {
   productId: string | number
+  skuId?: string | number | null
   qty: number
   unitPrice: number
   remark?: string
@@ -51,9 +52,16 @@ export interface SubmittedOrderRecord {
  * - 返回主单与明细，开单页当前仅使用 order.showNo 做反馈；
  * - 保留 items 结构以便后续扩展提交成功回显。
  */
+export interface SubmittedOrderItemRecord extends SubmitOrderItemPayload {
+  id: string
+  skuId: string | null
+  skuCodeSnapshot: string | null
+  specTextSnapshot: string | null
+}
+
 export interface SubmitOrderResult {
   order: SubmittedOrderRecord
-  items: SubmitOrderItemPayload[]
+  items: SubmittedOrderItemRecord[]
 }
 
 /**
@@ -68,7 +76,11 @@ export const submitOrder = async (payload: SubmitOrderPayload): Promise<SubmitOr
       showNo: PrimitiveTextValue
     }
     items: Array<{
+      id: PrimitiveTextValue
       productId: PrimitiveTextValue
+      skuId?: PrimitiveTextValue
+      skuCodeSnapshot?: PrimitiveTextValue
+      specTextSnapshot?: PrimitiveTextValue
       qty: PrimitiveTextValue
       unitPrice: PrimitiveTextValue
       remark?: PrimitiveTextValue
@@ -85,7 +97,11 @@ export const submitOrder = async (payload: SubmitOrderPayload): Promise<SubmitOr
       showNo: normalizeTextField(result.order.showNo),
     },
     items: result.items.map((item) => ({
+      id: normalizeTextField(item.id),
       productId: normalizeTextField(item.productId),
+      skuId: normalizeNullableTextField(item.skuId),
+      skuCodeSnapshot: normalizeNullableTextField(item.skuCodeSnapshot),
+      specTextSnapshot: normalizeNullableTextField(item.specTextSnapshot),
       qty: Number(normalizeDecimalField(item.qty)),
       unitPrice: Number(normalizeDecimalField(item.unitPrice)),
       remark: normalizeTextField(item.remark) || undefined,
@@ -191,6 +207,11 @@ export interface OrderItemRecord {
   productId: string
   productCode: string
   productName: string
+  skuId: string | null
+  skuCode: string | null
+  skuCodeSnapshot: string | null
+  specText: string | null
+  specTextSnapshot: string | null
   qty: string
   unitPrice: string
   subTotal: string
@@ -243,6 +264,11 @@ interface OrderItemRawRecord {
   productCode?: PrimitiveTextValue
   productName?: PrimitiveTextValue
   productNameSnapshot?: PrimitiveTextValue
+  skuId?: PrimitiveTextValue
+  skuCode?: PrimitiveTextValue
+  skuCodeSnapshot?: PrimitiveTextValue
+  specText?: PrimitiveTextValue
+  specTextSnapshot?: PrimitiveTextValue
   qty: PrimitiveTextValue
   unitPrice: PrimitiveTextValue
   subTotal?: PrimitiveTextValue
@@ -322,6 +348,11 @@ const normalizeOrderItem = (item: OrderItemRawRecord): OrderItemRecord => ({
   productId: normalizeTextField(item.productId),
   productCode: normalizeTextField(item.productCode, normalizeTextField(item.productId)),
   productName: normalizeTextField(item.productName, normalizeTextField(item.productNameSnapshot, '-')),
+  skuId: normalizeNullableTextField(item.skuId),
+  skuCode: normalizeNullableTextField(item.skuCode ?? item.skuCodeSnapshot),
+  skuCodeSnapshot: normalizeNullableTextField(item.skuCodeSnapshot ?? item.skuCode),
+  specText: normalizeNullableTextField(item.specText ?? item.specTextSnapshot),
+  specTextSnapshot: normalizeNullableTextField(item.specTextSnapshot ?? item.specText),
   qty: normalizeDecimalField(item.qty),
   unitPrice: normalizeDecimalField(item.unitPrice),
   subTotal: normalizeDecimalField(item.subTotal, normalizeDecimalField(item.lineAmount)),

@@ -23,6 +23,7 @@ const REQUIRED_TABLES = [
   'o2o_preorder',
   'o2o_preorder_item',
   'biz_outbound_order',
+  'biz_outbound_order_item',
   'biz_inbound_order',
   'biz_inbound_order_item',
   'notification_event',
@@ -58,6 +59,9 @@ const REQUIRED_COLUMNS = [
   ['o2o_preorder', 'cancellation_source'],
   ['o2o_preorder', 'cancellation_remark'],
   ['o2o_preorder', 'cancelled_at'],
+  ['biz_outbound_order_item', 'sku_id'],
+  ['biz_outbound_order_item', 'sku_code_snapshot'],
+  ['biz_outbound_order_item', 'spec_text_snapshot'],
   ['business_sequence', 'sequence_key'],
   ['business_sequence', 'current_value'],
   ['business_sequence', 'created_at'],
@@ -94,6 +98,12 @@ interface IndexFixture {
 }
 
 const REQUIRED_INDEXES: readonly IndexFixture[] = [
+  {
+    tableName: 'biz_outbound_order_item',
+    indexName: 'idx_biz_outbound_item_sku_id',
+    columns: ['sku_id'],
+    unique: false,
+  },
   {
     tableName: 'client_mobile_session',
     indexName: 'uk_client_mobile_session_access_hash',
@@ -302,6 +312,20 @@ missingCancellationSource.columns.delete(objectKey('o2o_preorder', 'cancellation
 await expectSchemaFailure(missingCancellationSource, [
   '字段 o2o_preorder.cancellation_source',
   '040_o2o_preorder_governance.sql',
+])
+
+const missingManualOutboundSkuColumn = createCompleteFixture()
+missingManualOutboundSkuColumn.columns.delete(objectKey('biz_outbound_order_item', 'spec_text_snapshot'))
+await expectSchemaFailure(missingManualOutboundSkuColumn, [
+  '字段 biz_outbound_order_item.spec_text_snapshot',
+  '041_manual_outbound_sku.sql',
+])
+
+const missingManualOutboundSkuIndex = createCompleteFixture()
+missingManualOutboundSkuIndex.indexes.delete(objectKey('biz_outbound_order_item', 'idx_biz_outbound_item_sku_id'))
+await expectSchemaFailure(missingManualOutboundSkuIndex, [
+  '索引 biz_outbound_order_item.idx_biz_outbound_item_sku_id',
+  '041_manual_outbound_sku.sql',
 ])
 
 const missingOutboxColumn = createCompleteFixture()

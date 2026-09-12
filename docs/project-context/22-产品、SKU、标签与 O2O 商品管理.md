@@ -47,6 +47,7 @@
 - `availableStock` 统一按 `max(0, currentStock - preOrderedStock)` 计算；商品服务与库存报表复用同一纯汇总函数，报表查询不回写商品、SKU 或 `InventoryLog`。
 - SKU 关键字段：`skuCode`、`specText`、`specValuesJson`、`defaultPrice`、`discountRate`、`thumbnail`、`o2oRecommended`、`sortOrder`。
 - 若只有一个默认 SKU，产品与 SKU 会做双向同步，避免主记录和默认 SKU 口径分裂。
+- 手工出库只允许选择当前且启用的 SKU；单 SKU 可兼容省略后自动解析，多 SKU 必须显式选择。SKU `defaultPrice` 只预填开单单价，人工覆盖不会修改 SKU 默认价或库存。
 - 标签关系通过中间关联表维护，不是产品表内简单字符串。
 
 ## 权限与安全边界
@@ -67,5 +68,6 @@
 
 - 产品修改后至少回归：产品列表、详情、SKU 展示、标签展示、库存总量、O2O 商品页。
 - 涉及折扣价格时同时回归：管理端商品视图、客户端商城、购物车、订单详情。
+- 涉及手工出库 SKU 时同时回归：桌面表格、移动抽屉、旧草稿、详情、打印/PDF 和报表规格展示，并运行 `npm --prefix backend run order:manual-sku:verify`。
 - 批量更新或导入后回归：SKU 去重、默认规格、缩略图、排序和总库存聚合。
 - 库存展示或汇总口径改动后运行：`npm --prefix backend run reports:inventory:verify`、`npm --prefix backend run product:sku-current:verify`、`npm --prefix backend run inventory:invariants:verify`。

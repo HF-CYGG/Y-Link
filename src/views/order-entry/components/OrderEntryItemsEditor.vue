@@ -1,10 +1,10 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/order-entry/components/OrderEntryItemsEditor.vue
- * 文件职责：负责开单页商品明细编辑区，承接商品选择、数量与单价录入、备注维护以及行级增删操作。
+ * 文件职责：负责开单页商品明细编辑区，承接商品与 SKU 选择、数量与单价录入、备注维护以及行级增删操作。
  * 实现逻辑：
  * - 组件只关注“明细行如何编辑”，不直接处理提交流程，由父层统一汇总主单与明细数据；
- * - 桌面端表格录入与移动端抽屉录入共用同一套字段口径，避免不同端出现校验和默认值不一致。
+ * - 桌面端表格录入与移动端抽屉录入共用同一套 SKU 字段口径，SKU 默认价仅作预填，人工单价仍可覆盖。
  * 维护说明：
  * - 若后续扩展批次、单位或折扣字段，需要同步检查行模型、输入组件和焦点流转是否仍然匹配；
  * - 商品选择结果必须继续复用共享类型，避免本组件和开单主逻辑出现字段口径漂移。
@@ -12,10 +12,10 @@
 
 
 import { computed } from 'vue'
-import type { ProductRecord } from '@/api/modules/product'
+import type { ProductRecord, ProductSkuRecord } from '@/api/modules/product'
 import { BizResponsiveDrawerShell, PassiveNumberInput } from '@/components/common'
 import type { FocusField, OrderEntryDrawerForm, OrderItemRow } from '../types'
-import { getProductOptionLabel } from '../types'
+import { getProductOptionLabel, getProductSkuOptionLabel } from '../types'
 
 type DrawerDirection = 'ltr' | 'rtl' | 'ttb' | 'btt'
 
@@ -42,6 +42,9 @@ const props = defineProps<{
   getRowClassName: (payload: { row: OrderItemRow }) => string
   setFieldRef: (uid: string, field: FocusField, instance: unknown) => void
   handleProductChange: (row: OrderItemRow) => void
+  handleSkuChange: (row: OrderItemRow) => void
+  getSelectableSkus: (productId: string) => ProductSkuRecord[]
+  getSkuLabelById: (productId: string, skuId: string) => string
   handleGridKeydown: (event: KeyboardEvent, rowIndex: number, field: FocusField) => void
   appendRow: (focusProduct?: boolean) => Promise<void>
   openDrawerForCreate: () => Promise<void>
@@ -49,6 +52,7 @@ const props = defineProps<{
   removeRow: (uid: string) => void
   applyDrawerEdit: () => void
   handleDrawerProductChange: () => void
+  handleDrawerSkuChange: () => void
   getProductLabelById: (productId: string) => string
   calcLineAmount: (row: OrderItemRow) => number
   toMoney: (value: number) => string
@@ -83,17 +87,6 @@ const handleAddRow = () => {
   props.openDrawerForCreate().catch(() => undefined)
 }
 
-/**
- * 判断是否为已录入商品：
- * - 只要产品 ID 能在产品列表中找到，即说明是已录入商品；
- * - 用于控制单价是否允许在明细目录内更改。
- */
-const isExistingProduct = (productId: string | undefined | null) => {
-  if (!productId) {
-    return false
-  }
-  return props.products.some(p => p.id === productId)
-}
 </script>
 
 <template>
@@ -158,6 +151,27 @@ const isExistingProduct = (productId: string | undefined | null) => {
               </el-select>
             </template>
           </el-table-column>
+          <el-table-column label="规格" min-width="220">
+            <template #default="{ row, $index }">
+              <el-select
+                :ref="(el: unknown) => setFieldRef(row.uid, 'sku', el)"
+                v-model="row.skuId"
+                clearable
+                :disabled="getSelectableSkus(row.productId).length === 0"
+                :placeholder="getSelectableSkus(row.productId).length > 1 ? '请选择规格' : '请先选择商品'"
+                class="w-full"
+                @change="handleSkuChange(row)"
+                @keydown="handleGridKeydown($event, $index, 'sku')"
+              >
+                <el-option
+                  v-for="sku in getSelectableSkus(row.productId)"
+                  :key="sku.id"
+                  :label="getProductSkuOptionLabel(sku)"
+                  :value="sku.id"
+                />
+              </el-select>
+            </template>
+          </el-table-column>
           <el-table-column label="数量" width="150">
             <template #default="{ row, $index }">
               <PassiveNumberInput
@@ -180,7 +194,6 @@ const isExistingProduct = (productId: string | undefined | null) => {
                 :precision="2"
                 :step="1"
                 class="w-full"
-                :disabled="isExistingProduct(row.productId)"
                 @keydown="handleGridKeydown($event, $index, 'unitPrice')"
               />
             </template>
@@ -226,6 +239,7 @@ const isExistingProduct = (productId: string | undefined | null) => {
             </div>
             <div class="flex flex-wrap justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
               <div>数量：{{ toMoney(normalizeNumber(row.qty)) }}</div>
+              <div>规格：{{ getSkuLabelById(row.productId, row.skuId) }}</div>
               <div>单价：¥{{ toMoney(normalizeNumber(row.unitPrice)) }}</div>
             </div>
             <div v-if="row.remark" class="mt-2 rounded-lg bg-white/70 px-2.5 py-2 text-xs text-slate-500 dark:bg-white/5 dark:text-slate-400">
@@ -276,11 +290,28 @@ const isExistingProduct = (productId: string | undefined | null) => {
               />
             </el-select>
           </el-form-item>
+          <el-form-item label="规格">
+            <el-select
+              v-model="drawerForm.skuId"
+              clearable
+              :disabled="getSelectableSkus(drawerForm.productId).length === 0"
+              :placeholder="getSelectableSkus(drawerForm.productId).length > 1 ? '请选择规格' : '请先选择商品'"
+              class="w-full"
+              @change="handleDrawerSkuChange"
+            >
+              <el-option
+                v-for="sku in getSelectableSkus(drawerForm.productId)"
+                :key="sku.id"
+                :label="getProductSkuOptionLabel(sku)"
+                :value="sku.id"
+              />
+            </el-select>
+          </el-form-item>
           <el-form-item label="数量">
             <PassiveNumberInput v-model="drawerForm.qty" :min="0" :precision="2" class="w-full" />
           </el-form-item>
           <el-form-item label="单价">
-            <PassiveNumberInput v-model="drawerForm.unitPrice" :min="0" :precision="2" class="w-full" :disabled="isExistingProduct(drawerForm.productId)" />
+            <PassiveNumberInput v-model="drawerForm.unitPrice" :min="0" :precision="2" class="w-full" />
           </el-form-item>
           <el-form-item label="备注">
             <el-input v-model="drawerForm.remark" maxlength="255" placeholder="选填" />
