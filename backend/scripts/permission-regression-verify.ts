@@ -2,17 +2,19 @@
  * 文件说明：backend/scripts/permission-regression-verify.ts
  * 文件职责：执行管理端角色权限、写入防护与订单内容编辑路由的真实 HTTP 回归。
  * 实现逻辑：
- * 1) 使用独立 SQLite 数据库启动真实后端应用，避免污染开发数据库；
+ * 1) 跳过 runtime override 与调用者 ENV_FILE，强制使用唯一 SQLite 文件或受控 MySQL 临时库；
  * 2) 管理员登录后创建操作员，先验证管理员可访问关键治理接口（正向）；
  * 3) 使用操作员访问管理员专属接口，验证 403 拦截（反向）；
  * 4) 经过真实 Express 中间件验证 admin/operator/supplier 的订单编辑、修订和乐观版本行为；
- * 5) 读取审计日志，验证越权拦截会写入 `security.access_denied` 记录。
+ * 5) 无论成功失败都清理本轮临时库，并验证越权拦截审计记录。
  */
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
+import type { Server } from 'node:http'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createConnection } from 'mysql2/promise'
 import { installCaptchaServiceForTesting } from '../src/services/captcha.service.js'
 import { requestLocalHttp } from './support/local-http-request.js'
 
@@ -20,6 +22,7 @@ const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
 const repositoryRoot = path.resolve(backendRoot, '..')
 const sqliteRoot = path.resolve(backendRoot, 'data', 'local-dev')
+const MYSQL_DATABASE_PREFIX = 'y_link_permission_regression_'
 
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
 const sqlitePath = path.resolve(sqliteRoot, `permission-regression-${verifySeed}.sqlite`)
@@ -30,15 +33,80 @@ const forbiddenUserPassword = process.env.Y_LINK_VERIFY_FORBIDDEN_PASSWORD?.trim
 const verifyDatabaseType = process.env.Y_LINK_PERMISSION_VERIFY_DB_TYPE?.trim().toLowerCase() === 'mysql'
   ? 'mysql'
   : 'sqlite'
+const mysqlTemporaryDatabaseName = `${MYSQL_DATABASE_PREFIX}${verifySeed.replaceAll(/[^a-z0-9]/gi, '_')}`
+
+interface PermissionVerifyMysqlConfig {
+  host: '127.0.0.1'
+  port: number
+  user: string
+  password: string
+}
+
+const readPermissionVerifyMysqlConfig = (): PermissionVerifyMysqlConfig | null => {
+  if (verifyDatabaseType !== 'mysql') return null
+  assert.equal(
+    process.env.Y_LINK_PERMISSION_MYSQL_CONFIRM_TEST_SERVER,
+    'true',
+    'MySQL 权限回归已阻止：必须显式设置 Y_LINK_PERMISSION_MYSQL_CONFIRM_TEST_SERVER=true',
+  )
+  const host = process.env.Y_LINK_PERMISSION_MYSQL_HOST?.trim()
+  const port = Number(process.env.Y_LINK_PERMISSION_MYSQL_PORT)
+  const user = process.env.Y_LINK_PERMISSION_MYSQL_USER?.trim()
+  assert.equal(host, '127.0.0.1', 'MySQL 权限回归只允许连接显式指定的 127.0.0.1 测试服务器')
+  assert.ok(Number.isInteger(port) && port >= 10_000 && port <= 65_535, 'MySQL 权限回归必须使用 10000-65535 的隔离高位端口')
+  assert.ok(user, 'MySQL 权限回归必须显式提供 Y_LINK_PERMISSION_MYSQL_USER')
+  return {
+    host,
+    port,
+    user,
+    password: process.env.Y_LINK_PERMISSION_MYSQL_PASSWORD ?? '',
+  }
+}
+
+const mysqlConfig = readPermissionVerifyMysqlConfig()
+
+// 在任何数据库配置模块动态导入前锁定本轮隔离环境。
+delete process.env.ENV_FILE
+process.env.Y_LINK_SKIP_DATABASE_RUNTIME_OVERRIDE = 'true'
 
 process.env.APP_PROFILE = `permission-regression-${verifySeed}`
 process.env.DB_TYPE = verifyDatabaseType
 process.env.DB_SYNC = verifyDatabaseType === 'mysql' ? 'true' : 'false'
-if (verifyDatabaseType === 'sqlite') process.env.SQLITE_DB_PATH = sqlitePath
+process.env.DB_AUTO_MIGRATE = 'false'
+if (verifyDatabaseType === 'sqlite') {
+  process.env.SQLITE_DB_PATH = sqlitePath
+  delete process.env.DB_NAME
+} else {
+  assert.ok(mysqlConfig)
+  process.env.DB_HOST = mysqlConfig.host
+  process.env.DB_PORT = String(mysqlConfig.port)
+  process.env.DB_USER = mysqlConfig.user
+  process.env.DB_PASSWORD = mysqlConfig.password
+  process.env.DB_NAME = mysqlTemporaryDatabaseName
+  delete process.env.SQLITE_DB_PATH
+}
 process.env.INIT_ADMIN_PASSWORD = adminPassword
 
 const TEST_CAPTCHA_CODE = 'ABC123'
 installCaptchaServiceForTesting({ createCode: () => TEST_CAPTCHA_CODE })
+
+function assertInitialDatabaseIsolation() {
+  assert.equal(
+    process.env.Y_LINK_SKIP_DATABASE_RUNTIME_OVERRIDE,
+    'true',
+    '权限回归必须在动态导入数据库配置前跳过 runtime override',
+  )
+  assert.equal(process.env.ENV_FILE, undefined, '权限回归不得加载调用者指定的 ENV_FILE')
+  if (verifyDatabaseType === 'sqlite') {
+    assert.equal(path.resolve(process.env.SQLITE_DB_PATH ?? ''), sqlitePath, 'SQLite 必须强制使用本轮唯一临时库')
+  } else {
+    assert.match(process.env.DB_NAME ?? '', /^y_link_permission_regression_[a-z0-9_]+$/, 'MySQL 必须使用受控临时库名')
+    assert.equal(process.env.DB_NAME, mysqlTemporaryDatabaseName, 'MySQL 业务测试不得复用调用者提供的 DB_NAME')
+  }
+}
+
+assertInitialDatabaseIsolation()
+pass('数据库类型、临时目标与 runtime override 跳过策略已在动态导入前锁定')
 
 type JsonPayload = {
   code?: number
@@ -157,12 +225,72 @@ function cleanupSqliteFile() {
   try {
     fs.rmSync(sqlitePath, { force: true })
   } catch (error) {
-    // Windows 上 sqlite 句柄释放偶发滞后，清理失败不能掩盖权限回归断言结果。
-    console.warn(
-      `[permission-regression] 临时 SQLite 清理失败，已忽略：${
+    throw new Error(
+      `权限回归已阻止：临时 SQLite 未能清理：${
         error instanceof Error ? error.message : String(error)
       }`,
     )
+  }
+}
+
+let mysqlTemporaryDatabaseCreated = false
+
+function assertSafeMysqlTemporaryDatabaseName(databaseName: string) {
+  assert.match(
+    databaseName,
+    /^y_link_permission_regression_[a-z0-9_]+$/,
+    'MySQL 权限回归已阻止：临时库名不在受控命名空间',
+  )
+}
+
+assert.throws(
+  () => assertSafeMysqlTemporaryDatabaseName('y_link'),
+  /临时库名不在受控命名空间/,
+  '非测试库名必须在发起 MySQL 连接前被拒绝',
+)
+
+async function createMysqlTemporaryDatabase() {
+  assert.ok(mysqlConfig, 'MySQL 权限回归缺少已验证的测试服务器配置')
+  assertSafeMysqlTemporaryDatabaseName(mysqlTemporaryDatabaseName)
+  const connection = await createConnection({ ...mysqlConfig, multipleStatements: false })
+  try {
+    const [versionRows] = await connection.query('SELECT VERSION() AS version')
+    assert.ok(Array.isArray(versionRows))
+    const version = String((versionRows[0] as { version?: unknown } | undefined)?.version ?? '')
+    assert.match(version, /^8\./, `MySQL 权限回归只允许经确认的 MySQL 8 测试服务器，实际版本：${version || 'unknown'}`)
+    const [existingRows] = await connection.query(
+      'SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?',
+      [mysqlTemporaryDatabaseName],
+    )
+    assert.ok(Array.isArray(existingRows))
+    assert.equal(existingRows.length, 0, '受控 MySQL 临时库名意外已存在，为避免改写既有库已拒绝运行')
+    await connection.query(
+      `CREATE DATABASE \`${mysqlTemporaryDatabaseName}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci`,
+    )
+    mysqlTemporaryDatabaseCreated = true
+    pass(`受控 MySQL 临时库已创建：${mysqlTemporaryDatabaseName}`)
+  } finally {
+    await connection.end()
+  }
+}
+
+async function dropMysqlTemporaryDatabase() {
+  if (!mysqlTemporaryDatabaseCreated) return
+  assert.ok(mysqlConfig, 'MySQL 临时库清理缺少已验证的测试服务器配置')
+  assertSafeMysqlTemporaryDatabaseName(mysqlTemporaryDatabaseName)
+  const connection = await createConnection({ ...mysqlConfig, multipleStatements: false })
+  try {
+    await connection.query(`DROP DATABASE \`${mysqlTemporaryDatabaseName}\``)
+    const [remainingRows] = await connection.query(
+      'SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?',
+      [mysqlTemporaryDatabaseName],
+    )
+    assert.ok(Array.isArray(remainingRows))
+    assert.equal(remainingRows.length, 0, 'MySQL 权限回归临时库未完成清理')
+    mysqlTemporaryDatabaseCreated = false
+    pass(`受控 MySQL 临时库已清理：${mysqlTemporaryDatabaseName}`)
+  } finally {
+    await connection.end()
   }
 }
 
@@ -182,6 +310,7 @@ async function main() {
 
   const { createApp } = await import('../src/app.js')
   const { AppDataSource } = await import('../src/config/data-source.js')
+  const { env, envLoadContext } = await import('../src/config/env.js')
   const { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } = await import('../src/config/database-bootstrap.js')
   const { authService } = await import('../src/services/auth.service.js')
   const { systemConfigService } = await import('../src/services/system-config.service.js')
@@ -190,13 +319,27 @@ async function main() {
   const { BizOutboundOrder } = await import('../src/entities/biz-outbound-order.entity.js')
   const { BizOutboundOrderItem } = await import('../src/entities/biz-outbound-order-item.entity.js')
 
-  prepareDatabaseRuntime()
-  await AppDataSource.initialize()
-
-  const app = createApp()
-  const server = app.listen(0, '127.0.0.1')
-
+  let server: Server | undefined
   try {
+    assert.equal(envLoadContext.runtimeDatabaseOverrideLoaded, false, '数据库 runtime override 必须被跳过')
+    assert.equal(env.DB_TYPE, verifyDatabaseType, '动态环境不得改写回归数据库类型')
+    if (verifyDatabaseType === 'sqlite') {
+      assert.equal(path.resolve(env.SQLITE_DB_PATH), sqlitePath, '动态环境不得劫持 SQLite 临时库路径')
+    } else {
+      assert.equal(env.DB_NAME, mysqlTemporaryDatabaseName, '动态环境不得劫持 MySQL 临时库名')
+    }
+
+    prepareDatabaseRuntime()
+    await AppDataSource.initialize()
+    assert.equal(AppDataSource.options.type, verifyDatabaseType)
+    if (verifyDatabaseType === 'sqlite') {
+      assert.equal(path.resolve(String(AppDataSource.options.database)), sqlitePath, 'DataSource 必须实际连接本轮 SQLite 临时库')
+    } else {
+      assert.equal(AppDataSource.options.database, mysqlTemporaryDatabaseName, 'DataSource 必须实际连接受控 MySQL 临时库')
+    }
+
+    const app = createApp()
+    server = app.listen(0, '127.0.0.1')
     await initializeDatabaseSchemaIfNeeded(AppDataSource)
     await authService.ensureDefaultAdmin()
     await systemConfigService.ensureDefaultConfigs()
@@ -822,27 +965,38 @@ async function main() {
     )
     pass('接口越权拦截会写入审计日志（security.access_denied）')
   } finally {
-    await new Promise<void>((resolve, reject) => {
-      server.close((error) => {
-        if (error) {
-          reject(error)
-          return
-        }
-        resolve()
-      })
-    })
-
-    if (AppDataSource.isInitialized) {
-      await AppDataSource.destroy()
-    }
-    if (fs.existsSync(sqlitePath)) {
-      cleanupSqliteFile()
+    try {
+      if (server) {
+        await new Promise<void>((resolve, reject) => {
+          server?.close((error) => {
+            if (error) {
+              reject(error)
+              return
+            }
+            resolve()
+          })
+        })
+      }
+    } finally {
+      if (AppDataSource.isInitialized) {
+        await AppDataSource.destroy()
+      }
+      if (fs.existsSync(sqlitePath)) {
+        cleanupSqliteFile()
+      }
     }
   }
 }
 
 try {
-  await main()
+  if (verifyDatabaseType === 'sqlite') cleanupSqliteFile()
+  try {
+    if (verifyDatabaseType === 'mysql') await createMysqlTemporaryDatabase()
+    await main()
+  } finally {
+    if (verifyDatabaseType === 'mysql') await dropMysqlTemporaryDatabase()
+    else cleanupSqliteFile()
+  }
   // eslint-disable-next-line no-console
   console.log('\n权限回归验证通过：管理员正向、操作员反向、接口越权拦截均符合预期')
 } catch (error) {
