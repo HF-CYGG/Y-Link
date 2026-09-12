@@ -1012,7 +1012,7 @@ export class DatabaseMigrationService {
         code: 'source_outbound_order_constraint_dirty',
         message: (count) => `源 SQLite 中有 ${count} 条出库主单不满足总数、总金额、幂等键、业务号或并发版本约束，请先清理后再迁移到 MySQL。`,
         whereClause:
-          "`total_qty` < 0 OR `total_amount` < 0 OR LENGTH(TRIM(COALESCE(`idempotency_key`, ''))) = 0 OR LENGTH(TRIM(COALESCE(`business_no`, ''))) = 0 OR `edit_version` IS NULL OR `edit_version` < 1",
+          "`total_qty` < 0 OR `total_amount` < 0 OR LENGTH(TRIM(COALESCE(`idempotency_key`, ''))) = 0 OR LENGTH(TRIM(COALESCE(`business_no`, ''))) = 0 OR `edit_version` IS NULL OR `edit_version` < 1 OR `inventory_mode` NOT IN ('legacy_none', 'manual_applied', 'o2o_preapplied')",
       },
       {
         tableName: 'biz_outbound_order_item',

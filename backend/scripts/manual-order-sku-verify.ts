@@ -1,6 +1,6 @@
 /**
  * 模块说明：手工出库 SKU 接入专项验证。
- * 文件职责：在隔离 SQLite 中验证手工出库的 SKU 校验、快照、历史兼容和零库存副作用。
+ * 文件职责：在隔离 SQLite 中验证手工出库的 SKU 校验、快照、历史兼容与库存扣减流水。
  * 实现逻辑：
  * - 创建单规格、多规格商品，覆盖自动选择、强制选择、归属/启停/当前版本校验；
  * - 以人工修改价提交同商品不同 SKU，核对单 SKU 主价兼容与多 current SKU 主价隔离；
@@ -341,14 +341,19 @@ async function main() {
       Number(beforeProduct.defaultPrice).toFixed(2),
       '多 current SKU 商品不得因反序手工明细将最后一行价格回写为商品主价',
     )
-    assert.equal(afterReversedProduct.currentStock, beforeProduct.currentStock, '手工出库不得修改商品库存')
+    assert.equal(afterReversedProduct.currentStock, beforeProduct.currentStock - 10, '两张手工出库单必须累计扣减商品库存')
     assert.equal(afterReversedProduct.preOrderedStock, beforeProduct.preOrderedStock, '手工出库不得修改商品预订库存')
     assert.deepEqual(
       afterSkuRows.map((sku) => [sku.id, sku.currentStock, sku.preOrderedStock, sku.defaultPrice]),
-      beforeSkuRows.map((sku) => [sku.id, sku.currentStock, sku.preOrderedStock, sku.defaultPrice]),
-      '手工出库不得修改 SKU 库存或 SKU 默认价',
+      beforeSkuRows.map((sku) => [
+        sku.id,
+        sku.currentStock - (String(sku.id) === String(redSku.id) ? 4 : 6),
+        sku.preOrderedStock,
+        sku.defaultPrice,
+      ]),
+      '手工出库必须按 SKU 累计扣库且不得修改 SKU 默认价',
     )
-    assert.equal(await AppDataSource.getRepository(InventoryLog).count(), beforeInventoryLogCount, '手工出库不得新增库存流水')
+    assert.equal(await AppDataSource.getRepository(InventoryLog).count(), beforeInventoryLogCount + 4, '两张双规格手工单必须写入四条可还原库存流水')
 
     await expectBizError(
       () => submit({
@@ -409,7 +414,7 @@ async function main() {
       assert.ok(migrationSource.includes(column), `MySQL 幂等迁移缺少 ${column}`)
     }
 
-    console.log('手工出库 SKU 专项验证通过：校验、快照、主价隔离、SQLite 外键、历史兼容、展示与零库存副作用均符合预期')
+    console.log('手工出库 SKU 专项验证通过：校验、快照、主价隔离、库存扣减流水、SQLite 外键、历史兼容与展示均符合预期')
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()

@@ -167,6 +167,8 @@ async function main() {
       productName: 'Issue72验证商品',
       pinyinAbbr: 'ISSUE',
       defaultPrice: '9.90',
+      currentStock: 100,
+      preOrderedStock: 0,
       isActive: true,
     }))
     await AppDataSource.getRepository(BaseProductSku).save({
@@ -176,7 +178,7 @@ async function main() {
       specText: '默认规格',
       defaultPrice: '9.90',
       discountRate: '10.0',
-      currentStock: 0,
+      currentStock: 100,
       preOrderedStock: 0,
       isActive: true,
       isCurrent: true,

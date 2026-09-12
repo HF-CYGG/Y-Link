@@ -56,6 +56,7 @@ const MYSQL_REQUIRED_TABLES = [
   'o2o_preorder_item',
   'biz_outbound_order',
   'biz_outbound_order_item',
+  'inventory_log',
   'biz_inbound_order',
   'biz_inbound_order_item',
   'notification_event',
@@ -84,6 +85,7 @@ const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
   client_feedback_conversation: '019_client_feedback_and_customer_service.sql',
   biz_outbound_order: '001_init_schema.sql',
   biz_outbound_order_item: '001_init_schema.sql',
+  inventory_log: '001_init_schema.sql',
   base_product_sku: '028_o2o_product_sku_selection.sql',
   notification_event: '020_notification_center_and_user_email.sql',
   notification_inbox: '020_notification_center_and_user_email.sql',
@@ -232,6 +234,27 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
     expectedColumnType: 'int',
     expectedNullable: false,
   },
+  {
+    tableName: 'biz_outbound_order',
+    columnName: 'inventory_mode',
+    introducingScript: '043_order_content_inventory_mode.sql',
+    expectedDataType: 'varchar',
+    expectedColumnType: 'varchar(24)',
+    expectedCharacterMaximumLength: 24,
+    expectedNullable: false,
+  },
+  {
+    tableName: 'inventory_log',
+    columnName: 'sku_id',
+    introducingScript: '043_order_content_inventory_mode.sql',
+    expectedDataType: 'bigint',
+    expectedColumnType: 'bigint unsigned',
+    expectedNullable: true,
+  },
+  { tableName: 'inventory_log', columnName: 'before_sku_current_stock', introducingScript: '043_order_content_inventory_mode.sql', expectedDataType: 'int', expectedColumnType: 'int', expectedNullable: true },
+  { tableName: 'inventory_log', columnName: 'after_sku_current_stock', introducingScript: '043_order_content_inventory_mode.sql', expectedDataType: 'int', expectedColumnType: 'int', expectedNullable: true },
+  { tableName: 'inventory_log', columnName: 'before_sku_preordered_stock', introducingScript: '043_order_content_inventory_mode.sql', expectedDataType: 'int', expectedColumnType: 'int', expectedNullable: true },
+  { tableName: 'inventory_log', columnName: 'after_sku_preordered_stock', introducingScript: '043_order_content_inventory_mode.sql', expectedDataType: 'int', expectedColumnType: 'int', expectedNullable: true },
   { tableName: 'order_business_no_occupancy', columnName: 'business_namespace', introducingScript: '042_order_business_no_amendment.sql' },
   { tableName: 'order_business_no_occupancy', columnName: 'serial_value', introducingScript: '042_order_business_no_amendment.sql' },
   { tableName: 'order_business_no_occupancy', columnName: 'business_no', introducingScript: '042_order_business_no_amendment.sql' },
@@ -254,6 +277,13 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
 
 // 不只按索引名判断，还校验列顺序与唯一性，避免旧库中存在同名但错误的索引时误判为可启动。
 const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
+  {
+    tableName: 'inventory_log',
+    indexName: 'idx_inventory_log_sku_id',
+    columns: ['sku_id'],
+    unique: false,
+    introducingScript: '043_order_content_inventory_mode.sql',
+  },
   {
     tableName: 'biz_outbound_order_item',
     indexName: 'idx_biz_outbound_item_sku_id',
@@ -410,14 +440,24 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
   },
 ]
 
-const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [{
-  tableName: 'biz_outbound_order_item',
-  columnName: 'sku_id',
-  referencedTableName: 'base_product_sku',
-  referencedColumnName: 'id',
-  deleteRule: 'SET NULL',
-  introducingScript: '041_manual_outbound_sku.sql',
-}]
+const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [
+  {
+    tableName: 'biz_outbound_order_item',
+    columnName: 'sku_id',
+    referencedTableName: 'base_product_sku',
+    referencedColumnName: 'id',
+    deleteRule: 'SET NULL',
+    introducingScript: '041_manual_outbound_sku.sql',
+  },
+  {
+    tableName: 'inventory_log',
+    columnName: 'sku_id',
+    referencedTableName: 'base_product_sku',
+    referencedColumnName: 'id',
+    deleteRule: 'SET NULL',
+    introducingScript: '043_order_content_inventory_mode.sql',
+  },
+]
 
 // 不可重复执行的历史脚本。
 // 原先 006/008/014/015/016 因裸 ALTER TABLE ADD COLUMN 也在此列，已改造为
@@ -438,6 +478,7 @@ const AUTO_MIGRATABLE_FILES = [
   '040_o2o_preorder_governance.sql',
   '041_manual_outbound_sku.sql',
   '042_order_business_no_amendment.sql',
+  '043_order_content_inventory_mode.sql',
 ]
 
 /**
@@ -1026,7 +1067,7 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
     + '缺失或不匹配的结构分别由以下迁移脚本维护：\n'
     + `${missingObjectGuide}\n\n`
     + `${scenarioGuide}\n\n`
-    + '若上面只涉及 033、037_mobile_auth_session、037_department_account_node_binding 或 038 维护的结构，可以设置环境变量 DB_AUTO_MIGRATE=true 后重启服务，'
+    + '若上面只涉及 033、037_mobile_auth_session、037_department_account_node_binding、038、039、040、041、042 或 043 维护的结构，可以设置环境变量 DB_AUTO_MIGRATE=true 后重启服务，'
     + '由服务自动执行白名单内已核实可在启动期运行的脚本。035/036 不会在启动期自动执行：'
     + '036 包含历史通知去重和唯一索引 DDL，必须按“备份 → 停止所有应用与通知 Worker → 执行脚本 → 启动新版本”完成。',
   )

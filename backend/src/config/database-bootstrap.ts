@@ -158,6 +158,7 @@ const SQLITE_REQUIRED_ORDER_COLUMNS = [
   'customer_department_name',
   'business_no',
   'edit_version',
+  'inventory_mode',
 ]
 
 const SQLITE_REQUIRED_ORDER_ITEM_COLUMNS = [
@@ -166,6 +167,13 @@ const SQLITE_REQUIRED_ORDER_ITEM_COLUMNS = [
   'sku_id',
   'sku_code_snapshot',
   'spec_text_snapshot',
+]
+const SQLITE_REQUIRED_INVENTORY_LOG_COLUMNS = [
+  'sku_id',
+  'before_sku_current_stock',
+  'after_sku_current_stock',
+  'before_sku_preordered_stock',
+  'after_sku_preordered_stock',
 ]
 // 历史 SQLite 本地库缺少金额字段时，先用极小正数兜底补齐结构，避免 synchronize 重建临时表时被 NOT NULL / CHECK 约束直接拦截。
 const SQLITE_LEGACY_OUTBOUND_ITEM_FALLBACK_UNIT_PRICE = 0.01
@@ -393,6 +401,28 @@ async function prepareSqliteOrderAmendmentColumns(dataSource: DataSource): Promi
     UPDATE "biz_outbound_order"
     SET "edit_version" = 1
     WHERE "edit_version" IS NULL OR "edit_version" < 1
+  `)
+}
+
+/**
+ * #73 历史库存模式推断：旧手工单不追溯库存，O2O 核销正式单沿用预扣库存语义。
+ * 新建手工单由服务层显式写 manual_applied，本函数不会覆盖任何合法的新模式。
+ */
+async function prepareSqliteOrderContentInventoryColumns(dataSource: DataSource): Promise<void> {
+  const orderColumns = await listSqliteTableColumns(dataSource, 'biz_outbound_order')
+  if (orderColumns.size === 0) return
+  if (!orderColumns.has('inventory_mode')) {
+    await dataSource.query('ALTER TABLE "biz_outbound_order" ADD COLUMN "inventory_mode" varchar(24) NULL')
+  }
+  await dataSource.query(`
+    UPDATE "biz_outbound_order"
+    SET "inventory_mode" = CASE
+      WHEN "idempotency_key" LIKE 'o2o-preorder-verify:%' THEN 'o2o_preapplied'
+      ELSE 'legacy_none'
+    END
+    WHERE "inventory_mode" IS NULL
+       OR "inventory_mode" NOT IN ('legacy_none', 'manual_applied', 'o2o_preapplied')
+       OR ("inventory_mode" = 'legacy_none' AND "idempotency_key" LIKE 'o2o-preorder-verify:%')
   `)
 }
 
@@ -1269,6 +1299,19 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
     return true
   }
 
+  const inventoryLogColumnSet = await listSqliteTableColumns(dataSource, 'inventory_log')
+  if (SQLITE_REQUIRED_INVENTORY_LOG_COLUMNS.some((column) => !inventoryLogColumnSet.has(column))) {
+    return true
+  }
+  if (!await hasSqliteForeignKeyShape(dataSource, 'inventory_log', {
+    from: 'sku_id',
+    referencedTable: 'base_product_sku',
+    referencedColumn: 'id',
+    onDelete: 'SET NULL',
+  })) {
+    return true
+  }
+
   const productColumnSet = await listSqliteTableColumns(dataSource, 'base_product')
   if (SQLITE_REQUIRED_PRODUCT_COLUMNS.some((column) => !productColumnSet.has(column))) {
     return true
@@ -1381,6 +1424,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   if (env.DB_TYPE === 'sqlite') {
     await ensureSqliteMobileSessionSchema(dataSource)
     await prepareSqliteOrderAmendmentColumns(dataSource)
+    await prepareSqliteOrderContentInventoryColumns(dataSource)
     await normalizeSqliteOutboundItemColumns(dataSource)
     await normalizeSqliteO2oDiscountColumns(dataSource)
     await normalizeSqliteInboundSkuColumn(dataSource)
@@ -1397,6 +1441,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
       // 索引可能依赖本次 synchronize 才补齐的列，必须在结构升级后创建。
       await ensureSqliteMallCatalogIndexes(dataSource)
       await backfillSqliteOrderAmendmentData(dataSource)
+      await prepareSqliteOrderContentInventoryColumns(dataSource)
     }
     await migrateClientUserDepartmentGovernance(dataSource)
     await migrateLegacyFeedbackAttachments(dataSource)
@@ -1428,6 +1473,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   if (!needSynchronize) {
     await ensureSqliteMallCatalogIndexes(dataSource)
     await backfillSqliteOrderAmendmentData(dataSource)
+    await prepareSqliteOrderContentInventoryColumns(dataSource)
     await migrateClientUserDepartmentGovernance(dataSource)
     await migrateLegacyFeedbackAttachments(dataSource)
     return {
@@ -1442,6 +1488,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   await normalizeSqliteInboundSkuColumn(dataSource)
   await ensureSqliteMallCatalogIndexes(dataSource)
   await backfillSqliteOrderAmendmentData(dataSource)
+  await prepareSqliteOrderContentInventoryColumns(dataSource)
   await migrateClientUserDepartmentGovernance(dataSource)
   await migrateLegacyFeedbackAttachments(dataSource)
   return {

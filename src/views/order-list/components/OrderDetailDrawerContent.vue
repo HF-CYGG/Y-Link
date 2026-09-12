@@ -1,16 +1,19 @@
 <script setup lang="ts">
 /**
  * 模块说明：`src/views/order-list/components/OrderDetailDrawerContent.vue`
- * 文件职责：负责渲染出库单详情抽屉中的主单信息与明细列表。
+ * 文件职责：负责渲染出库单详情抽屉中的主单信息、明细列表与永久修订时间线。
  * 实现逻辑：
  * 1. 主单信息按订单类型做条件化展示，部门单保留部门流程字段，散客单直接显示“不适用”或隐藏冗余项；
- * 2. 详情组件只负责展示，不参与数据请求与状态管理；
- * 3. 金额与订单类型在组件内统一格式化，确保表格端与移动端展示口径一致。
+ * 2. 明细仍由父层提供，组件按订单 ID/版本只读加载永久 revision 时间线；
+ * 3. 金额、库存模式与订单类型在组件内统一格式化，确保表格端与移动端展示口径一致。
+ * 维护说明：revision 请求使用订单 ID 与版本号抑制过期响应，不得用当前商品数据覆盖历史快照。
  */
 
 
 import dayjs from 'dayjs'
-import type { OrderDetailResult } from '@/api/modules/order'
+import { ref, watch } from 'vue'
+import { getOrderRevisions, type OrderDetailResult, type OrderRevisionRecord } from '@/api/modules/order'
+import { showCriticalErrorDialog } from '@/utils/error-dialog'
 
 /**
  * 单据详情展示组件：
@@ -18,12 +21,46 @@ import type { OrderDetailResult } from '@/api/modules/order'
  * - 页面层只需传入详情数据与当前设备信息；
  * - 保持桌面表格、移动端卡片的既有样式与展示逻辑不变。
  */
-defineProps<{
+const props = defineProps<{
   order: OrderDetailResult
   isPhone: boolean
   isDesktop: boolean
   detailGridClass: string
 }>()
+
+const revisions = ref<OrderRevisionRecord[]>([])
+const revisionsLoading = ref(false)
+let revisionRequestVersion = 0
+
+watch(
+  () => [props.order.id, props.order.editVersion] as const,
+  async () => {
+    revisionRequestVersion += 1
+    const requestVersion = revisionRequestVersion
+    revisionsLoading.value = true
+    try {
+      const result = await getOrderRevisions(props.order.id)
+      if (requestVersion === revisionRequestVersion) revisions.value = result
+    } catch (error) {
+      if (requestVersion !== revisionRequestVersion) return
+      revisions.value = []
+      void showCriticalErrorDialog(error, {
+        title: '修订记录加载失败',
+        fallback: '订单详情已加载，但暂时无法读取修订时间线',
+        operation: '加载订单修订记录',
+      })
+    } finally {
+      if (requestVersion === revisionRequestVersion) revisionsLoading.value = false
+    }
+  },
+  { immediate: true },
+)
+
+const formatInventoryMode = (order: OrderDetailResult) => {
+  if (order.inventoryMode === 'manual_applied') return '手工单（联动库存）'
+  if (order.inventoryMode === 'o2o_preapplied') return 'O2O 正式单（库存已预扣）'
+  return '历史单（不追溯库存）'
+}
 
 /**
  * 金额格式化：
@@ -67,6 +104,7 @@ const getOrderDisplayName = (order: OrderDetailResult) => {
     </div>
     <el-descriptions :column="isPhone ? 1 : 2" border size="small">
       <el-descriptions-item label="业务单号">{{ order.businessNo }}</el-descriptions-item>
+      <el-descriptions-item label="库存模式">{{ formatInventoryMode(order) }}</el-descriptions-item>
       <el-descriptions-item label="订单类型">{{ formatOrderType(order.orderType) }}</el-descriptions-item>
       <el-descriptions-item label="开单时间">{{ dayjs(order.createdAt).format('YYYY-MM-DD HH:mm:ss') }}</el-descriptions-item>
       <el-descriptions-item label="领用对象">{{ getOrderDisplayName(order) }}</el-descriptions-item>
@@ -148,6 +186,45 @@ const getOrderDisplayName = (order: OrderDetailResult) => {
         <div v-if="item.remark" class="mt-2 rounded bg-slate-100 p-1.5 text-xs text-slate-500 dark:bg-white/5 dark:text-slate-400">
           备注：{{ item.remark }}
         </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="mt-6 rounded-2xl border border-slate-100 bg-slate-50/70 p-3 sm:p-4 dark:border-white/10 dark:bg-white/5">
+    <h3 class="mb-3 flex items-center gap-2 text-base font-semibold text-slate-800 dark:text-slate-100">
+      <span class="inline-block h-2 w-2 rounded-full bg-brand" />
+      内容修订时间线
+    </h3>
+    <el-alert
+      v-if="order.inventoryMode === 'legacy_none'"
+      class="mb-3"
+      title="历史订单编辑不会追溯扣减或回补库存"
+      type="warning"
+      :closable="false"
+      show-icon
+    />
+    <el-alert
+      v-if="!order.contentEditable && order.contentEditBlockers.length"
+      class="mb-3"
+      :title="`内容已锁定：${order.contentEditBlockers.join('；')}`"
+      type="info"
+      :closable="false"
+      show-icon
+    />
+    <div v-loading="revisionsLoading" class="min-h-12">
+      <p v-if="!revisionsLoading && revisions.length === 0" class="py-4 text-center text-sm text-slate-400">暂无内容修订记录</p>
+      <div v-else class="space-y-3 border-l-2 border-slate-200 pl-4 dark:border-white/10">
+        <article
+          v-for="revision in revisions"
+          :key="revision.id"
+          class="relative rounded-xl bg-white px-3 py-2 text-sm dark:bg-white/5"
+        >
+          <span class="absolute -left-[1.3rem] top-3 h-2 w-2 rounded-full bg-brand" />
+          <div class="font-medium text-slate-800 dark:text-slate-100">版本 {{ revision.revisionNo }} · {{ revision.reason || '未填写原因' }}</div>
+          <div class="mt-1 text-xs text-slate-500">
+            {{ dayjs(revision.createdAt).format('YYYY-MM-DD HH:mm:ss') }} · {{ revision.actorDisplayName || revision.actorUsername }}
+          </div>
+        </article>
       </div>
     </div>
   </section>

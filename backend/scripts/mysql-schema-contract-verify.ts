@@ -28,6 +28,7 @@ const REQUIRED_TABLES = [
   'o2o_preorder_item',
   'biz_outbound_order',
   'biz_outbound_order_item',
+  'inventory_log',
   'biz_inbound_order',
   'biz_inbound_order_item',
   'notification_event',
@@ -89,6 +90,12 @@ const REQUIRED_COLUMNS = [
   ['sms_verification_record', 'delivery_status'],
   ['biz_outbound_order', 'business_no'],
   ['biz_outbound_order', 'edit_version'],
+  ['biz_outbound_order', 'inventory_mode'],
+  ['inventory_log', 'sku_id'],
+  ['inventory_log', 'before_sku_current_stock'],
+  ['inventory_log', 'after_sku_current_stock'],
+  ['inventory_log', 'before_sku_preordered_stock'],
+  ['inventory_log', 'after_sku_preordered_stock'],
   ['order_business_no_occupancy', 'business_namespace'],
   ['order_business_no_occupancy', 'serial_value'],
   ['order_business_no_occupancy', 'business_no'],
@@ -154,6 +161,42 @@ const REQUIRED_MANUAL_OUTBOUND_COLUMN_DEFINITIONS = new Map<string, ColumnFixtur
     isNullable: 'NO',
     characterMaximumLength: null,
   }],
+  ['biz_outbound_order.inventory_mode', {
+    dataType: 'varchar',
+    columnType: 'varchar(24)',
+    isNullable: 'NO',
+    characterMaximumLength: 24,
+  }],
+  ['inventory_log.sku_id', {
+    dataType: 'bigint',
+    columnType: 'bigint unsigned',
+    isNullable: 'YES',
+    characterMaximumLength: null,
+  }],
+  ['inventory_log.before_sku_current_stock', {
+    dataType: 'int',
+    columnType: 'int',
+    isNullable: 'YES',
+    characterMaximumLength: null,
+  }],
+  ['inventory_log.after_sku_current_stock', {
+    dataType: 'int',
+    columnType: 'int',
+    isNullable: 'YES',
+    characterMaximumLength: null,
+  }],
+  ['inventory_log.before_sku_preordered_stock', {
+    dataType: 'int',
+    columnType: 'int',
+    isNullable: 'YES',
+    characterMaximumLength: null,
+  }],
+  ['inventory_log.after_sku_preordered_stock', {
+    dataType: 'int',
+    columnType: 'int',
+    isNullable: 'YES',
+    characterMaximumLength: null,
+  }],
 ])
 
 interface IndexFixture {
@@ -174,6 +217,12 @@ interface ForeignKeyFixture {
 }
 
 const REQUIRED_INDEXES: readonly IndexFixture[] = [
+  {
+    tableName: 'inventory_log',
+    indexName: 'idx_inventory_log_sku_id',
+    columns: ['sku_id'],
+    unique: false,
+  },
   {
     tableName: 'biz_outbound_order_item',
     indexName: 'idx_biz_outbound_item_sku_id',
@@ -308,15 +357,26 @@ const REQUIRED_INDEXES: readonly IndexFixture[] = [
   },
 ]
 
-const REQUIRED_FOREIGN_KEYS: readonly ForeignKeyFixture[] = [{
-  tableName: 'biz_outbound_order_item',
-  constraintName: 'fk_biz_outbound_item_sku_id',
-  columnName: 'sku_id',
-  referencedTableName: 'base_product_sku',
-  referencedColumnName: 'id',
-  ordinalPosition: 1,
-  deleteRule: 'SET NULL',
-}]
+const REQUIRED_FOREIGN_KEYS: readonly ForeignKeyFixture[] = [
+  {
+    tableName: 'biz_outbound_order_item',
+    constraintName: 'fk_biz_outbound_item_sku_id',
+    columnName: 'sku_id',
+    referencedTableName: 'base_product_sku',
+    referencedColumnName: 'id',
+    ordinalPosition: 1,
+    deleteRule: 'SET NULL',
+  },
+  {
+    tableName: 'inventory_log',
+    constraintName: 'fk_inventory_log_sku_id',
+    columnName: 'sku_id',
+    referencedTableName: 'base_product_sku',
+    referencedColumnName: 'id',
+    ordinalPosition: 1,
+    deleteRule: 'SET NULL',
+  },
+]
 
 interface SchemaFixture {
   tables: Set<string>
@@ -462,6 +522,20 @@ missingOrderBusinessNo.columns.delete(objectKey('biz_outbound_order', 'business_
 await expectSchemaFailure(missingOrderBusinessNo, [
   '字段 biz_outbound_order.business_no',
   '042_order_business_no_amendment.sql',
+])
+
+const missingInventoryMode = createCompleteFixture()
+missingInventoryMode.columns.delete(objectKey('biz_outbound_order', 'inventory_mode'))
+await expectSchemaFailure(missingInventoryMode, [
+  '字段 biz_outbound_order.inventory_mode',
+  '043_order_content_inventory_mode.sql',
+])
+
+const missingInventoryLogSku = createCompleteFixture()
+missingInventoryLogSku.columns.delete(objectKey('inventory_log', 'sku_id'))
+await expectSchemaFailure(missingInventoryLogSku, [
+  '字段 inventory_log.sku_id',
+  '043_order_content_inventory_mode.sql',
 ])
 
 const missingIdempotencyColumn = createCompleteFixture()

@@ -549,15 +549,18 @@ async function main() {
     await o2oPreorderService.verifyByCode(returnRequest.verifyCode, adminActor)
     await assertLifecycleStock([13, 0, 13], '退货后')
 
-    const beforeOrdinaryOrder = await readStoredLifecycleState()
     await orderService.submit({
       idempotencyKey: `report-inventory-ordinary-${verifySeed}`,
       orderType: 'walkin',
       customerName: '库存报表普通出库验证',
       items: [{ productId: lifecycleProduct.id, qty: 2, unitPrice: 10 }],
     }, adminActor)
-    assert.deepEqual(await readStoredLifecycleState(), beforeOrdinaryOrder, '普通出库保存单据与价格时不得改变商品/SKU库存或库存流水')
-    await assertLifecycleStock([13, 0, 13], '普通出库后')
+    await assertLifecycleStock([11, 0, 11], '普通出库后')
+    const ordinaryLogs = await inventoryLogRepo.find({
+      where: { productId: lifecycleProduct.id, changeType: 'manual_outbound_create' },
+    })
+    assert.equal(ordinaryLogs.length, 1, '普通手工出库必须写入库存流水')
+    assert.equal(String(ordinaryLogs[0]?.skuId), String(lifecycleSku.id), '普通手工出库流水必须关联 SKU')
 
     console.log('库存报表专项验证通过：固定口径、分页、跨批次、真实 Excel 与库存生命周期均一致')
   } finally {

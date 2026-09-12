@@ -89,6 +89,9 @@ function buildFixtureValue(metadata: EntityMetadata, column: ColumnMetadata): un
   if (metadata.tableName === 'biz_outbound_order' && columnName === 'order_type') {
     return 'department'
   }
+  if (metadata.tableName === 'biz_outbound_order' && columnName === 'inventory_mode') {
+    return 'manual_applied'
+  }
   if (
     (metadata.tableName === 'biz_outbound_order' || metadata.tableName === 'order_business_no_occupancy')
     && columnName === 'business_no'

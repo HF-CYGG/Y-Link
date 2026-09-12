@@ -47,6 +47,7 @@ export interface SubmittedOrderRecord {
   showNo: string
   businessNo: string
   editVersion: number
+  inventoryMode: OrderInventoryMode
 }
 
 /**
@@ -78,6 +79,7 @@ export const submitOrder = async (payload: SubmitOrderPayload): Promise<SubmitOr
       showNo: PrimitiveTextValue
       businessNo: PrimitiveTextValue
       editVersion: number
+      inventoryMode: OrderInventoryMode
     }
     items: Array<{
       id: PrimitiveTextValue
@@ -101,6 +103,7 @@ export const submitOrder = async (payload: SubmitOrderPayload): Promise<SubmitOr
       showNo: normalizeTextField(result.order.showNo),
       businessNo: normalizeTextField(result.order.businessNo),
       editVersion: Number(result.order.editVersion),
+      inventoryMode: normalizeInventoryMode(result.order.inventoryMode),
     },
     items: result.items.map((item) => ({
       id: normalizeTextField(item.id),
@@ -130,11 +133,16 @@ export interface OrderListQuery extends PaginationQueryInput {
  * - 补齐开单账号与开单姓名快照，用于责任追溯；
  * - status 兼容后端原有字段，当前主要用于预留展示。
  */
+export type OrderInventoryMode = 'legacy_none' | 'manual_applied' | 'o2o_preapplied'
+
 export interface OrderRecord {
   id: string
   showNo: string
   businessNo: string
   editVersion: number
+  inventoryMode: OrderInventoryMode
+  contentEditable: boolean
+  contentEditBlockers: string[]
   orderType: 'department' | 'walkin'
   hasCustomerOrder: boolean
   isSystemApplied: boolean
@@ -170,6 +178,9 @@ interface OrderRecordRaw {
   showNo: PrimitiveTextValue
   businessNo: PrimitiveTextValue
   editVersion: number | PrimitiveTextValue
+  inventoryMode?: PrimitiveTextValue
+  contentEditable?: boolean | PrimitiveTextValue
+  contentEditBlockers?: unknown
   orderType?: PrimitiveTextValue
   hasCustomerOrder?: boolean | PrimitiveTextValue
   isSystemApplied?: boolean | PrimitiveTextValue
@@ -243,6 +254,11 @@ const normalizeOrderRecord = (record: OrderRecordRaw): OrderRecord => ({
   showNo: normalizeTextField(record.showNo),
   businessNo: normalizeTextField(record.businessNo, normalizeTextField(record.showNo)),
   editVersion: Number(record.editVersion) || 1,
+  inventoryMode: normalizeInventoryMode(record.inventoryMode),
+  contentEditable: normalizeBooleanField(record.contentEditable),
+  contentEditBlockers: Array.isArray(record.contentEditBlockers)
+    ? record.contentEditBlockers.map((item) => normalizeTextField(item as PrimitiveTextValue)).filter(Boolean)
+    : [],
   orderType: normalizeOrderTypeField(record.orderType),
   hasCustomerOrder: normalizeBooleanField(record.hasCustomerOrder),
   isSystemApplied: normalizeBooleanField(record.isSystemApplied),
@@ -347,6 +363,11 @@ const normalizeBooleanField = (value: unknown): boolean => {
 
 const normalizeOrderTypeField = (value: PrimitiveTextValue): 'department' | 'walkin' => {
   return normalizeTextField(value).toLowerCase() === 'department' ? 'department' : 'walkin'
+}
+
+const normalizeInventoryMode = (value: PrimitiveTextValue): OrderInventoryMode => {
+  const normalized = normalizeTextField(value)
+  return normalized === 'manual_applied' || normalized === 'o2o_preapplied' ? normalized : 'legacy_none'
 }
 
 /**
@@ -514,6 +535,58 @@ export const updateOrderComplianceFlags = (id: string, payload: UpdateOrderCompl
     url: `/orders/${id}/compliance-flags`,
     data: payload,
   }).then(normalizeOrderDetail)
+
+export interface UpdateOrderContentPayload {
+  expectedVersion: number
+  reason: string
+  businessNo?: string
+  items: Array<{
+    productId: string
+    skuId?: string | null
+    qty: number
+    unitPrice: number
+    remark?: string | null
+  }>
+}
+
+export interface OrderRevisionRecord {
+  id: string
+  orderId: string
+  orderUuid: string
+  revisionNo: number
+  reason: string | null
+  actorUsername: string
+  actorDisplayName: string
+  createdAt: string
+  before: Record<string, unknown>
+  after: Record<string, unknown>
+}
+
+export interface UpdateOrderContentResult extends OrderDetailRawResult {
+  revision: OrderRevisionRecord
+  inventoryDeltas: Array<Record<string, unknown>>
+  notice: string | null
+}
+
+export const updateOrderContent = async (id: string, payload: UpdateOrderContentPayload) => {
+  const result = await request<UpdateOrderContentResult>({
+    method: 'PATCH',
+    url: `/orders/${id}/content`,
+    data: payload,
+  })
+  return {
+    ...normalizeOrderDetail(result),
+    revision: result.revision,
+    inventoryDeltas: result.inventoryDeltas,
+    notice: result.notice,
+  }
+}
+
+export const getOrderRevisions = (id: string) =>
+  request<OrderRevisionRecord[]>({
+    method: 'GET',
+    url: `/orders/${id}/revisions`,
+  })
 
 export const previewOrderAmendments = (amendments: OrderAmendmentInput[]) =>
   request<OrderAmendmentResult>({

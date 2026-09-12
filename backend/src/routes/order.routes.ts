@@ -73,6 +73,19 @@ const orderAmendmentBatchSchema = z.object({
   amendments: z.array(orderAmendmentSchema).min(1).max(100),
 })
 
+const updateOrderContentSchema = z.object({
+  expectedVersion: z.number().int().positive(),
+  reason: z.string().trim().min(1, '请填写修改原因').max(500),
+  businessNo: z.string().trim().optional(),
+  items: z.array(z.object({
+    productId: z.union([z.string().trim().min(1), z.number()]).transform(String),
+    skuId: z.union([z.string().trim().min(1), z.number()]).nullable().optional().transform((value) => value == null ? null : String(value)),
+    qty: z.number().positive(),
+    unitPrice: z.number().positive(),
+    remark: z.string().max(200).nullable().optional(),
+  })).min(1).max(200),
+})
+
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export const orderRouter = Router()
 
@@ -132,6 +145,26 @@ orderRouter.post(
     const authReq = req as AuthenticatedRequest
     const payload = orderAmendmentBatchSchema.parse(req.body ?? {})
     const data = await orderService.previewAmendments(payload, authReq.auth)
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+orderRouter.get(
+  '/:id/revisions',
+  requirePermission('orders:view'),
+  asyncHandler(async (req, res) => {
+    const data = await orderService.listRevisions(req.params.id)
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+orderRouter.patch(
+  '/:id/content',
+  requirePermission('orders:edit'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = updateOrderContentSchema.parse(req.body ?? {})
+    const data = await orderService.updateContent(req.params.id, payload, authReq.auth, extractRequestMeta(req))
     res.json({ code: 0, message: 'ok', data })
   }),
 )

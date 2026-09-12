@@ -15,6 +15,7 @@ import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { BaseProductSku } from '../entities/base-product-sku.entity.js'
+import { InventoryLog } from '../entities/inventory-log.entity.js'
 import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import {
@@ -33,6 +34,11 @@ import {
   type OrderAmendmentPreviewResult,
 } from './order-amendment.service.js'
 import { orderBusinessNoService } from './order-business-no.service.js'
+import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
+import {
+  orderContentEditService,
+  type UpdateOrderContentInput,
+} from './order-content-edit.service.js'
 import { orderSerialService, type OrderType } from './order-serial.service.js'
 
 export interface SubmitOrderItemInput {
@@ -104,6 +110,9 @@ export interface OrderSummaryView {
   showNo: string
   businessNo: string
   editVersion: number
+  inventoryMode: BizOutboundOrder['inventoryMode']
+  contentEditable: boolean
+  contentEditBlockers: string[]
   orderType: string
   hasCustomerOrder: boolean
   isSystemApplied: boolean
@@ -129,6 +138,7 @@ export interface SubmittedOrderView {
   showNo: string
   businessNo: string
   editVersion: number
+  inventoryMode: BizOutboundOrder['inventoryMode']
 }
 
 export interface SubmittedOrderItemView {
@@ -377,6 +387,19 @@ export class OrderService {
     return orderAmendmentService.commit(input, actor, requestMeta)
   }
 
+  async updateContent(
+    orderId: string,
+    input: UpdateOrderContentInput,
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ) {
+    return orderContentEditService.updateContent(orderId, input, actor, requestMeta)
+  }
+
+  async listRevisions(orderId: string) {
+    return orderContentEditService.listRevisions(orderId)
+  }
+
   /**
    * 软删除单据：
    * - 仅标记主单删除态，不物理删除明细，保证可恢复；
@@ -589,7 +612,7 @@ export class OrderService {
     let lastError: unknown
     for (let attempt = 1; attempt <= ORDER_SUBMIT_MAX_RETRY; attempt += 1) {
       try {
-        return await runInTransaction(async (manager) => {
+        const result = await runInTransaction(async (manager) => {
           const orderRepo = manager.getRepository(BizOutboundOrder)
           const itemRepo = manager.getRepository(BizOutboundOrderItem)
           const productRepo = manager.getRepository(BaseProduct)
@@ -610,11 +633,14 @@ export class OrderService {
           }
 
           const normalizedProductIds = [...new Set(normalizedItems.map((item) => item.productId))]
-          const products = await productRepo
+            .sort((left, right) => left.localeCompare(right))
+          const productQuery = productRepo
             .createQueryBuilder('product')
             .where('product.id IN (:...productIds)', { productIds: normalizedProductIds })
             .andWhere('product.isActive = :isActive', { isActive: true })
-            .getMany()
+            .orderBy('product.id', 'ASC')
+          if (manager.connection.options.type !== 'sqlite') productQuery.setLock('pessimistic_write')
+          const products = await productQuery.getMany()
 
           const productMap = new Map(products.map((product) => [String(product.id), product]))
           if (productMap.size !== normalizedProductIds.length) {
@@ -631,6 +657,7 @@ export class OrderService {
             showNo,
             businessNo,
             editVersion: 1,
+            inventoryMode: 'manual_applied',
             orderType: submitContext.normalizedOrderType,
             hasCustomerOrder: Boolean(input.hasCustomerOrder),
             isSystemApplied: Boolean(input.isSystemApplied),
@@ -651,6 +678,8 @@ export class OrderService {
             item.orderId = savedOrder.id
           })
           const savedItems = await itemRepo.save(preparedItems.itemEntities)
+
+          await this.applyManualInventoryForCreate(manager, savedOrder, resolvedItems, productMap, actor)
 
           products.forEach((product) => {
             const latestPrice = preparedItems.latestProductPriceMap.get(String(product.id))
@@ -678,6 +707,7 @@ export class OrderService {
                 totalQty: savedOrder.totalQty,
                 totalAmount: savedOrder.totalAmount,
                 itemCount: savedItems.length,
+                inventoryMode: savedOrder.inventoryMode,
               },
             },
             manager,
@@ -688,6 +718,8 @@ export class OrderService {
             items: savedItems.map((item) => this.buildSubmittedOrderItemView(item)),
           }
         })
+        invalidateMallCatalogReadCache()
+        return result
       } catch (error) {
         lastError = error
 
@@ -767,11 +799,20 @@ export class OrderService {
       return {
         productId: normalizedProductId,
         skuId: normalizeNullableEntityId(item.skuId),
-        qty: this.readPositiveDecimal(item.qty, '数量', ORDER_FIELD_LIMITS.maxQty, rowIndex),
+        qty: this.readPositiveInteger(item.qty, '数量', ORDER_FIELD_LIMITS.maxQty, rowIndex),
         unitPrice: this.readPositiveDecimal(item.unitPrice, '单价', ORDER_FIELD_LIMITS.maxUnitPrice, rowIndex),
         remark: this.readLimitedText(item.remark, '明细备注', ORDER_FIELD_LIMITS.itemRemark) ?? undefined,
       }
     })
+  }
+
+  private readPositiveInteger(value: number, label: string, maxValue: number, rowIndex?: number): number {
+    const rowPrefix = rowIndex ? `第 ${rowIndex} 行` : ''
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new BizError(`${rowIndex ? `第 ${rowIndex} 行` : ''}${label}必须为正整数`, 400)
+    }
+    if (value > maxValue) throw new BizError(`${rowPrefix}${label}不能超过 ${maxValue}`, 400)
+    return value
   }
 
   /**
@@ -794,11 +835,11 @@ export class OrderService {
       // 同时读取显式选择的 SKU，才能区分“不存在”和“属于其他商品”两类非法引用。
       skuQuery.orWhere('sku.id IN (:...explicitSkuIds)', { explicitSkuIds })
     }
-    const skus = await skuQuery
+    skuQuery
       .orderBy('sku.productId', 'ASC')
-      .addOrderBy('sku.sortOrder', 'ASC')
       .addOrderBy('sku.id', 'ASC')
-      .getMany()
+    if (manager.connection.options.type !== 'sqlite') skuQuery.setLock('pessimistic_write')
+    const skus = await skuQuery.getMany()
     const skuMap = new Map(skus.map((sku) => [String(sku.id), sku]))
     const activeSkusByProduct = new Map<string, BaseProductSku[]>()
     const currentSkuCountByProduct = new Map<string, number>()
@@ -948,6 +989,63 @@ export class OrderService {
     }
   }
 
+  private async applyManualInventoryForCreate(
+    manager: EntityManager,
+    order: BizOutboundOrder,
+    items: ResolvedSubmitOrderItem[],
+    productMap: Map<string, BaseProduct>,
+    actor: AuthUserContext,
+  ): Promise<void> {
+    const productQtyMap = new Map<string, number>()
+    for (const item of items) {
+      productQtyMap.set(item.productId, (productQtyMap.get(item.productId) ?? 0) + item.qty)
+      if (Number(item.sku.currentStock) - Number(item.sku.preOrderedStock) < item.qty) {
+        throw new BizError(`SKU ${item.sku.skuCode} 可用库存不足`, 409)
+      }
+    }
+    for (const [productId, qty] of productQtyMap) {
+      const product = productMap.get(productId)
+      if (!product || Number(product.currentStock) - Number(product.preOrderedStock) < qty) {
+        throw new BizError(`商品 ${product?.productName ?? productId} 可用库存不足`, 409)
+      }
+    }
+
+    const inventoryLogs: InventoryLog[] = []
+    for (const item of items) {
+      const product = productMap.get(item.productId)
+      if (!product) throw new BizError(`商品 ${item.productId} 不存在`, 409)
+      const beforeCurrentStock = Number(product.currentStock)
+      const beforePreorderedStock = Number(product.preOrderedStock)
+      const beforeSkuCurrentStock = Number(item.sku.currentStock)
+      const beforeSkuPreorderedStock = Number(item.sku.preOrderedStock)
+      product.currentStock = beforeCurrentStock - item.qty
+      item.sku.currentStock = beforeSkuCurrentStock - item.qty
+      inventoryLogs.push(manager.getRepository(InventoryLog).create({
+        productId: item.productId,
+        skuId: item.skuId,
+        changeType: 'manual_outbound_create',
+        changeQty: item.qty,
+        beforeCurrentStock,
+        afterCurrentStock: product.currentStock,
+        beforePreorderedStock,
+        afterPreorderedStock: beforePreorderedStock,
+        beforeSkuCurrentStock,
+        afterSkuCurrentStock: item.sku.currentStock,
+        beforeSkuPreorderedStock,
+        afterSkuPreorderedStock: beforeSkuPreorderedStock,
+        operatorType: 'admin',
+        operatorId: actor.userId,
+        operatorName: actor.displayName,
+        refType: 'biz_outbound_order',
+        refId: String(order.id),
+        remark: `创建手工出库单 ${order.businessNo}，扣减库存 ${item.qty}`,
+      }))
+    }
+    await manager.getRepository(BaseProduct).save([...productMap.values()])
+    await manager.getRepository(BaseProductSku).save(items.map((item) => item.sku))
+    await manager.getRepository(InventoryLog).save(inventoryLogs)
+  }
+
   private shouldRetrySubmitError(error: unknown, attempt: number) {
     return (
       attempt < ORDER_SUBMIT_MAX_RETRY
@@ -1040,6 +1138,8 @@ export class OrderService {
       showNo: order.showNo,
       businessNo: order.businessNo,
       editVersion: Number(order.editVersion),
+      inventoryMode: order.inventoryMode,
+      ...orderContentEditService.describeEditability(order),
       orderType: order.orderType,
       hasCustomerOrder: Boolean(order.hasCustomerOrder),
       isSystemApplied: Boolean(order.isSystemApplied),
@@ -1067,6 +1167,7 @@ export class OrderService {
       showNo: order.showNo,
       businessNo: order.businessNo,
       editVersion: Number(order.editVersion),
+      inventoryMode: order.inventoryMode,
     }
   }
 

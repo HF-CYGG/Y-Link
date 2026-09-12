@@ -1196,6 +1196,7 @@ class O2oPreorderService {
       showNo,
       businessNo,
       editVersion: 1,
+      inventoryMode: 'o2o_preapplied',
       orderType: outboundOrderType,
       hasCustomerOrder: Boolean(input.preorder.hasCustomerOrder),
       isSystemApplied: Boolean(input.preorder.isSystemApplied),
