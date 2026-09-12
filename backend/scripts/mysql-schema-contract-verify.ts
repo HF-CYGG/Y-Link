@@ -5,6 +5,9 @@
  */
 
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import type { DataSource } from 'typeorm'
 
 process.env.Y_LINK_SKIP_DATABASE_RUNTIME_OVERRIDE = 'true'
@@ -12,6 +15,7 @@ process.env.DB_TYPE = 'mysql'
 process.env.DB_AUTO_MIGRATE = 'false'
 
 const { assertMysqlRequiredSchemaExists } = await import('../src/config/mysql-migration-runner.js')
+const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 
 const REQUIRED_TABLES = [
   'base_product',
@@ -524,6 +528,42 @@ await expectSchemaFailure(wrongManualOutboundSkuDeleteRule, [
   '外键 biz_outbound_order_item.sku_id 必须使用 ON DELETE SET NULL',
   '041_manual_outbound_sku.sql',
 ])
+
+const typeormNamedManualOutboundSkuForeignKey = createCompleteFixture()
+const equivalentSkuForeignKey = typeormNamedManualOutboundSkuForeignKey.foreignKeys.get(
+  objectKey('biz_outbound_order_item', 'fk_biz_outbound_item_sku_id'),
+)!
+typeormNamedManualOutboundSkuForeignKey.foreignKeys.delete(
+  objectKey('biz_outbound_order_item', equivalentSkuForeignKey.constraintName),
+)
+equivalentSkuForeignKey.constraintName = 'FK_typeorm_generated'
+typeormNamedManualOutboundSkuForeignKey.foreignKeys.set(
+  objectKey('biz_outbound_order_item', equivalentSkuForeignKey.constraintName),
+  equivalentSkuForeignKey,
+)
+await assert.doesNotReject(
+  () => assertMysqlRequiredSchemaExists(createDataSource(typeormNamedManualOutboundSkuForeignKey)),
+  '等价外键的名称不属于结构语义，schema contract 必须接受 TypeORM 生成的异名约束',
+)
+
+const manualOutboundSkuMigrationSource = fs.readFileSync(
+  path.resolve(backendRoot, 'sql/041_manual_outbound_sku.sql'),
+  'utf8',
+)
+assert.match(
+  manualOutboundSkuMigrationSource,
+  /information_schema\.KEY_COLUMN_USAGE/i,
+  '041 必须按外键源列与引用目标识别等价约束，不能只查询固定约束名',
+)
+assert.match(manualOutboundSkuMigrationSource, /COLUMN_NAME\s*=\s*'sku_id'/i)
+assert.match(manualOutboundSkuMigrationSource, /REFERENCED_TABLE_NAME\s*=\s*'base_product_sku'/i)
+assert.match(manualOutboundSkuMigrationSource, /REFERENCED_COLUMN_NAME\s*=\s*'id'/i)
+assert.match(manualOutboundSkuMigrationSource, /DELETE_RULE\s*=\s*'SET NULL'/i)
+assert.doesNotMatch(
+  manualOutboundSkuMigrationSource,
+  /AND\s+(?:kcu\.)?CONSTRAINT_NAME\s*=\s*'fk_biz_outbound_item_sku_id'/i,
+  '041 不得因等价外键名称不同而重复创建约束',
+)
 
 const missingOutboxColumn = createCompleteFixture()
 missingOutboxColumn.columns.delete(objectKey('notification_event', 'next_attempt_at'))

@@ -57,8 +57,18 @@ SET @ddl = (
     'ALTER TABLE `biz_outbound_order_item` ADD CONSTRAINT `fk_biz_outbound_item_sku_id` FOREIGN KEY (`sku_id`) REFERENCES `base_product_sku` (`id`) ON DELETE SET NULL',
     'SELECT 1'
   )
-  FROM information_schema.REFERENTIAL_CONSTRAINTS
-  WHERE CONSTRAINT_SCHEMA = DATABASE() AND TABLE_NAME = 'biz_outbound_order_item' AND CONSTRAINT_NAME = 'fk_biz_outbound_item_sku_id'
+  FROM information_schema.KEY_COLUMN_USAGE AS kcu
+  INNER JOIN information_schema.REFERENTIAL_CONSTRAINTS AS rc
+    ON rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
+   AND rc.TABLE_NAME = kcu.TABLE_NAME
+   AND rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+  WHERE kcu.CONSTRAINT_SCHEMA = DATABASE()
+    AND kcu.TABLE_NAME = 'biz_outbound_order_item'
+    AND kcu.COLUMN_NAME = 'sku_id'
+    AND kcu.REFERENCED_TABLE_SCHEMA = DATABASE()
+    AND kcu.REFERENCED_TABLE_NAME = 'base_product_sku'
+    AND kcu.REFERENCED_COLUMN_NAME = 'id'
+    AND rc.DELETE_RULE = 'SET NULL'
 );
 PREPARE stmt FROM @ddl;
 EXECUTE stmt;
