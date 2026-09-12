@@ -1040,8 +1040,9 @@ class ClientAuthService {
   }
 
   async logout(auth: ClientAuthContext) {
-    await this.sessionRepo.delete({ sessionToken: hashSessionToken(auth.sessionToken) })
-    customerServiceRealtimeService.disconnectBySessionHash('client', hashSessionToken(auth.sessionToken))
+    const sessionHash = hashSessionToken(auth.sessionToken)
+    await this.sessionRepo.delete({ sessionToken: sessionHash })
+    customerServiceRealtimeService.disconnectBySessionHash('client', sessionHash)
   }
 
   async preparePasswordChange(

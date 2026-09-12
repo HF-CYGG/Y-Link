@@ -20,6 +20,7 @@ import type { RequestMeta } from '../utils/request-meta.js'
 import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
 import { MAX_DATABASE_INT, MAX_INBOUND_ORDER_ITEM_COUNT } from '../constants/web-resource-limits.js'
 import { assertPermanentDeletePassword } from '../utils/permanent-delete-password.js'
+import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 
 export interface SubmitInboundItemInput {
   productId: string
@@ -342,6 +343,7 @@ class InboundService {
     const normalizedItems = this.normalizeSupplierInboundItems(input.items)
 
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const productIds = [...new Set(normalizedItems.map((item) => item.productId))]
       const productMap = await this.loadActiveProductsByIds(productIds, manager)
       const resolvedItems = await this.resolveInboundItemsWithSku(normalizedItems, productMap, manager)

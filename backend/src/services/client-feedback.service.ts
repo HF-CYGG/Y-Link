@@ -56,6 +56,11 @@ import { systemConfigService } from './system-config.service.js'
 import { notificationService } from './notification.service.js'
 import { ClientFeedbackAttachment } from '../entities/client-feedback-attachment.entity.js'
 import { CLIENT_FEEDBACK_ATTACHMENT_POLICY } from './client-feedback-security-policy.js'
+import {
+  lockActiveClientAccountForBusiness,
+  lockActiveSysAccountForBusiness,
+  lockActiveSysAccountsForBusiness,
+} from './account-business-guard.service.js'
 
 const MYSQL_FEEDBACK_ATTACHMENT_COORDINATION_LOCK = 'ylink:feedback:attachment-quota-cleanup'
 const MYSQL_FEEDBACK_ATTACHMENT_LOCK_TIMEOUT_SECONDS = 5
@@ -1199,22 +1204,8 @@ class ClientFeedbackService {
     return conversation
   }
 
-  /**
-   * 负责人合法性校验：
-   * - 只能转派给启用中的后台用户；
-   * - 目标用户必须具备客服工作台查看与回复权限，避免把工单挂给无处理能力的账号。
-   */
-  private async requireAssignableServiceUser(userId: string, manager?: EntityManager) {
-    const normalizedUserId = userId.trim()
-    if (!normalizedUserId) {
-      throw new BizError('负责人不能为空', 400)
-    }
-
-    const repository = (manager ?? AppDataSource.manager).getRepository(SysUser)
-    const user = await repository.findOne({ where: { id: normalizedUserId } })
-    if (!user) {
-      throw new BizError('目标负责人不存在', 404)
-    }
+  /** 锁后复核目标负责人仍具备客服工作台处理能力。 */
+  private assertAssignableServiceUser(user: SysUser) {
     if (user.status !== 'enabled') {
       throw new BizError('目标负责人已停用，暂不能接单', 400)
     }
@@ -1300,6 +1291,10 @@ class ClientFeedbackService {
     if (!clientUser) {
       throw new BizError('客户端用户不存在', 404)
     }
+    return this.buildClientUserSnapshot(clientUser)
+  }
+
+  private buildClientUserSnapshot(clientUser: ClientUser) {
     return {
       clientUsername: clientUser.realName?.trim() || '',
       clientAccount: clientUser.email?.trim() || clientUser.mobile?.trim() || clientUser.realName?.trim() || '',
@@ -1423,25 +1418,30 @@ class ClientFeedbackService {
   }
 
   async openClientRealtimeChannel(clientAuth: ClientAuthContext, res: import('express').Response) {
+    const registrationTicket = customerServiceRealtimeService.captureOwnerGeneration('client', clientAuth.userId, clientAuth.sessionToken)
     const config = await this.getPortalConfigs()
     if (!config.realtimeEnabled) {
       throw new BizError('当前客服实时通道未启用', 403)
     }
-    customerServiceRealtimeService.openClientStream(clientAuth.userId, clientAuth.sessionToken, res, config.sseKeepaliveSeconds, {
+    await customerServiceRealtimeService.assertOwnerCanRegister(registrationTicket, clientAuth.sessionToken)
+    customerServiceRealtimeService.openClientStream(clientAuth.userId, clientAuth.sessionToken, res, config.sseKeepaliveSeconds, registrationTicket, {
       availability: config.availability,
     })
   }
 
   async openServiceRealtimeChannel(actor: AuthUserContext, res: import('express').Response) {
+    const registrationTicket = customerServiceRealtimeService.captureOwnerGeneration('service', actor.userId, actor.sessionToken)
     const config = await this.getPortalConfigs()
     if (!config.realtimeEnabled) {
       throw new BizError('当前客服实时通道未启用', 403)
     }
+    await customerServiceRealtimeService.assertOwnerCanRegister(registrationTicket, actor.sessionToken)
     customerServiceRealtimeService.openServiceStream(
       actor.userId,
       actor.sessionToken,
       res,
       config.sseKeepaliveSeconds,
+      registrationTicket,
       (sessionSnapshot) => ({
         // 连接先注册再回填在线态，确保首个客服进入工作台时也能立即显示在线。
         availability: this.buildAvailability(config, sessionSnapshot),
@@ -1471,8 +1471,6 @@ class ClientFeedbackService {
     const tags = this.normalizeTags(input.tags)
     const sourceLabel = this.normalizeSourceLabel(input.sourceLabel)
     const attachmentIds = this.normalizeAttachmentIds(input.attachmentIds)
-    const clientSnapshot = await this.getClientUserSnapshot(clientAuth.userId)
-
     let result:
       | {
           conversation: ClientFeedbackConversation
@@ -1483,6 +1481,8 @@ class ClientFeedbackService {
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
         result = await runInTransaction(async (manager) => {
+          const activeClient = await lockActiveClientAccountForBusiness(manager, clientAuth.userId)
+          const clientSnapshot = this.buildClientUserSnapshot(activeClient)
           const attachments = await this.resolveOwnedAttachmentReferencesInTransaction(attachmentIds, clientAuth, manager)
           const conversationRepo = manager.getRepository(ClientFeedbackConversation)
           const conversation = await conversationRepo.save(
@@ -1681,9 +1681,10 @@ class ClientFeedbackService {
     }
     const content = this.normalizeMessageContent(input.content)
     const attachmentIds = this.normalizeAttachmentIds(input.attachmentIds)
-    const clientSnapshot = await this.getClientUserSnapshot(clientAuth.userId)
 
     const result = await runInTransaction(async (manager) => {
+      const activeClient = await lockActiveClientAccountForBusiness(manager, clientAuth.userId)
+      const clientSnapshot = this.buildClientUserSnapshot(activeClient)
       const attachments = await this.resolveOwnedAttachmentReferencesInTransaction(attachmentIds, clientAuth, manager)
       const conversation = await this.requireOwnedConversation(id, clientAuth, manager)
       if (conversation.status === 'closed') {
@@ -2071,6 +2072,7 @@ class ClientFeedbackService {
     const attachments = this.normalizeAttachments(input.attachments)
 
     const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const conversation = await this.requireConversationById(id, manager)
       if (conversation.status === 'closed') {
         throw new BizError('当前反馈会话已关闭，请先重新打开后再回复', 400)
@@ -2134,6 +2136,7 @@ class ClientFeedbackService {
     }
 
     const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const conversation = await this.requireConversationById(id, manager)
       this.ensureConversationOwnedByActor(conversation, actor)
       if (conversation.status === input.status) {
@@ -2234,9 +2237,11 @@ class ClientFeedbackService {
     requestMeta?: RequestMeta,
   ) {
     const targetUserId = input.assigneeUserId.trim()
+    if (!targetUserId) throw new BizError('负责人不能为空', 400)
     const result = await runInTransaction(async (manager) => {
+      const lockedUsers = await lockActiveSysAccountsForBusiness(manager, [actor.userId, targetUserId])
       const conversation = await this.requireConversationById(id, manager)
-      const targetUser = await this.requireAssignableServiceUser(targetUserId, manager)
+      const targetUser = this.assertAssignableServiceUser(lockedUsers.get(targetUserId)!)
       const beforeAssignee = {
         userId: conversation.assignedUserId,
         username: conversation.assignedUsername,
@@ -2354,6 +2359,7 @@ class ClientFeedbackService {
     requestMeta?: RequestMeta,
   ) {
     const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const conversation = await this.requireConversationById(id, manager)
       const before = this.buildConversationFields(conversation)
       const subjectBefore = conversation.subject
@@ -2459,6 +2465,7 @@ class ClientFeedbackService {
     )
 
     const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const conversation = await this.requireConversationById(id, manager)
       const before = this.buildInternalRemarkView(conversation)
       const beforeContent = before?.content ?? null

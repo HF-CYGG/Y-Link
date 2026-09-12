@@ -7,6 +7,7 @@
  */
 
 import { AppDataSource } from '../config/data-source.js'
+import { resolvePermissionsByRole, type PermissionCode } from '../constants/auth-permissions.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import {
   CLIENT_USER_ACCOUNT_TYPES,
@@ -34,6 +35,7 @@ import { systemConfigService } from './system-config.service.js'
 import type { EntityManager } from 'typeorm'
 import { randomBytes } from 'node:crypto'
 import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
+import { isAccountCurrentlyDeactivated, lockSysAccountsInStableOrder } from './account-business-guard.service.js'
 
 export interface ClientUserListQuery {
   page: number
@@ -307,8 +309,7 @@ export class ClientUserManageService {
   ): Promise<ClientUserManageSafeProfile> {
     const reason = this.normalizeLifecycleReason(input.reason, '注销')
     const result = await runInTransaction(async (manager) => {
-      const user = await this.findClientUserForUpdate(id, manager)
-      if (!user) throw new BizError('客户端用户不存在', 404)
+      const user = await this.lockLifecycleActorAndClient(manager, id, actor, 'users:deactivate')
       if (isCurrentlyDeactivated(user)) return { profile: sanitizeClientUserProfile(user), changed: false }
       const preview = await this.buildLifecyclePreview(manager, user)
       if (!preview.canDeactivate) throw new BizError(preview.blockers.map((item) => item.message).join('；'), 409)
@@ -351,8 +352,7 @@ export class ClientUserManageService {
   ): Promise<ClientUserManageSafeProfile> {
     const reason = this.normalizeLifecycleReason(input.reason, '恢复')
     const result = await runInTransaction(async (manager) => {
-      const user = await this.findClientUserForUpdate(id, manager)
-      if (!user) throw new BizError('客户端用户不存在', 404)
+      const user = await this.lockLifecycleActorAndClient(manager, id, actor, 'users:deactivate')
       if (!isCurrentlyDeactivated(user)) {
         if (user.restoredAt) return { profile: sanitizeClientUserProfile(user), changed: false }
         throw new BizError('账号当前未处于已注销状态', 409)
@@ -386,8 +386,7 @@ export class ClientUserManageService {
     try {
       assertPermanentDeletePassword(input.permanentDeletePassword)
       const result = await runInTransaction(async (manager) => {
-        const user = await this.findClientUserForUpdate(id, manager)
-        if (!user) throw new BizError('客户端用户不存在', 404)
+        const user = await this.lockLifecycleActorAndClient(manager, id, actor, 'users:permanent_delete')
         if (!isCurrentlyDeactivated(user)) throw new BizError('仅允许永久删除已注销账号', 409)
         const account = this.resolveLifecycleAccount(user)
         if (input.confirmAccount !== account) throw new BizError('确认账号与目标账号不一致', 400)
@@ -493,6 +492,29 @@ export class ClientUserManageService {
       query.setLock('pessimistic_write')
     }
     return query.getOne()
+  }
+
+  private async lockLifecycleActorAndClient(
+    manager: EntityManager,
+    targetId: string,
+    actor: AuthUserContext,
+    requiredPermission: PermissionCode,
+  ): Promise<ClientUser> {
+    // 跨表治理统一先锁 Sys actor，再锁 Client target；同表 Sys actor 内部仍按 ID 升序。
+    const actors = await lockSysAccountsInStableOrder(manager, [actor.userId])
+    const lockedActor = actors.get(String(actor.userId))
+    if (
+      !lockedActor
+      || lockedActor.status !== 'enabled'
+      || isAccountCurrentlyDeactivated(lockedActor)
+      || lockedActor.role !== 'admin'
+      || !resolvePermissionsByRole(lockedActor.role).includes(requiredPermission)
+    ) {
+      throw new BizError('当前管理员账号已失效或权限不足', 403)
+    }
+    const target = await this.findClientUserForUpdate(targetId, manager)
+    if (!target) throw new BizError('客户端用户不存在', 404)
+    return target
   }
 
   /** 批量最多 100 项时按 4 路有界并发预生成密码哈希，避免把昂贵 scrypt 留在数据库事务内。 */

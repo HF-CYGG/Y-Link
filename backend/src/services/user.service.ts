@@ -8,6 +8,7 @@
 
 import type { EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
+import { resolvePermissionsByRole, type PermissionCode } from '../constants/auth-permissions.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { SysUser } from '../entities/sys-user.entity.js'
 import { SysUserSession } from '../entities/sys-user-session.entity.js'
@@ -26,6 +27,7 @@ import { assertPermanentDeletePassword } from '../utils/permanent-delete-passwor
 import { auditService } from './audit.service.js'
 import { sanitizeUserProfile } from './auth.service.js'
 import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
+import { isAccountCurrentlyDeactivated, lockSysAccountsInStableOrder } from './account-business-guard.service.js'
 
 export interface UserListQuery {
   page: number
@@ -157,6 +159,32 @@ export class UserService {
     return query.getOne()
   }
 
+  private assertLifecycleActor(user: SysUser | undefined, requiredPermission: PermissionCode): SysUser {
+    if (
+      !user
+      || user.status !== 'enabled'
+      || isAccountCurrentlyDeactivated(user)
+      || user.role !== 'admin'
+      || !resolvePermissionsByRole(user.role).includes(requiredPermission)
+    ) {
+      throw new BizError('当前管理员账号已失效或权限不足', 403)
+    }
+    return user
+  }
+
+  private async lockLifecycleActorAndTarget(
+    manager: EntityManager,
+    targetId: string,
+    actor: AuthUserContext,
+    requiredPermission: PermissionCode,
+  ): Promise<SysUser> {
+    const accounts = await lockSysAccountsInStableOrder(manager, [actor.userId, targetId])
+    this.assertLifecycleActor(accounts.get(String(actor.userId)), requiredPermission)
+    const target = accounts.get(String(targetId))
+    if (!target) throw new BizError('用户不存在', 404)
+    return target
+  }
+
   private async buildReferenceSummary(manager: EntityManager, userId: string) {
     const [supplierPending, supplierAll, activeAssignments, assignmentHistory, serviceMessages, notificationInbox] = await Promise.all([
       manager.getRepository(BizInboundOrder).count({ where: { supplierId: userId, status: 'pending', isDeleted: false } }),
@@ -263,8 +291,7 @@ export class UserService {
   ): Promise<UserSafeProfile> {
     const reason = this.normalizeLifecycleReason(input.reason, '注销')
     const result = await runInTransaction(async (manager) => {
-      const user = await this.findLifecycleUser(manager, id, true)
-      if (!user) throw new BizError('用户不存在', 404)
+      const user = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:deactivate')
       if (isCurrentlyDeactivated(user)) return { profile: sanitizeUserProfile(user), changed: false }
       const preview = await this.buildLifecyclePreview(manager, user, actor)
       if (!preview.canDeactivate) throw new BizError(preview.blockers.map((item) => item.message).join('；'), 409)
@@ -302,8 +329,7 @@ export class UserService {
   ): Promise<UserSafeProfile> {
     const reason = this.normalizeLifecycleReason(input.reason, '恢复')
     const result = await runInTransaction(async (manager) => {
-      const user = await this.findLifecycleUser(manager, id, true)
-      if (!user) throw new BizError('用户不存在', 404)
+      const user = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:deactivate')
       if (!isCurrentlyDeactivated(user)) {
         if (user.restoredAt) return { profile: sanitizeUserProfile(user), changed: false }
         throw new BizError('账号当前未处于已注销状态', 409)
@@ -337,8 +363,7 @@ export class UserService {
     try {
       assertPermanentDeletePassword(input.permanentDeletePassword)
       const result = await runInTransaction(async (manager) => {
-        const user = await this.findLifecycleUser(manager, id, true)
-        if (!user) throw new BizError('用户不存在', 404)
+        const user = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:permanent_delete')
         if (!isCurrentlyDeactivated(user)) throw new BizError('仅允许永久删除已注销账号', 409)
         if (input.confirmAccount !== user.username) throw new BizError('确认账号与目标账号不一致', 400)
         const preview = await this.buildLifecyclePreview(manager, user, actor)

@@ -28,6 +28,7 @@ import { auditService } from './audit.service.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { systemConfigService } from './system-config.service.js'
 import { safeHttpRequest } from '../utils/safe-http-request.js'
+import { lockActiveSysAccountsForBusiness } from './account-business-guard.service.js'
 
 export const NOTIFICATION_EVENT_TYPES = [
   'o2o_preorder_created',
@@ -569,6 +570,13 @@ export class NotificationService {
     await runInTransaction(async (manager) => {
       const txRuleRepo = manager.getRepository(NotificationRule)
       const txSystemConfigRepo = manager.getRepository(SystemConfig)
+      const responsibilityUserIds = [...normalizedById.values()].flatMap((payload) => [
+        ...payload.recipientUserIds,
+        ...payload.emailRecipientAdminUserIds,
+        ...payload.emailRecipientSupplierUserIds,
+        ...payload.watchedUserIds,
+      ])
+      await lockActiveSysAccountsForBusiness(manager, [actor.userId, ...responsibilityUserIds])
       await this.ensureOnlineWindowConfig(manager)
       for (const row of rows) {
         const payload = normalizedById.get(normalizeId(row.id))

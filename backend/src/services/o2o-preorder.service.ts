@@ -50,6 +50,7 @@ import { systemConfigService } from './system-config.service.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { notificationService } from './notification.service.js'
 import { auditService } from './audit.service.js'
+import { lockActiveClientAccountForBusiness } from './account-business-guard.service.js'
 import {
   invalidateMallCatalogReadCache,
   readMallCatalogRevision,
@@ -2582,12 +2583,7 @@ class O2oPreorderService {
     try {
       transactionResult = await this.runIdempotentSubmitTransaction(async (manager) => {
         const preorderRepo = manager.getRepository(O2oPreorder)
-        const clientUser = await manager.getRepository(ClientUser).findOne({
-          where: { id: auth.userId },
-          select: ['id', 'realName', 'accountType', 'departmentName', 'staffNo'],
-          lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
-        })
-        if (!clientUser) throw new BizError('客户端账号不存在，请重新登录后再试', 401)
+        const clientUser = await lockActiveClientAccountForBusiness(manager, auth.userId)
 
         // 先锁客户端账号再复查请求键，使同一账号的两个并发重试在进入库存锁前完成串行化。
         const existedOrder = await preorderRepo.findOne({
@@ -3292,6 +3288,7 @@ class O2oPreorderService {
       }
     })
     const result = await runInTransaction(async (manager) => {
+      await lockActiveClientAccountForBusiness(manager, auth.userId)
       const orderRepo = manager.getRepository(O2oPreorder)
       const order = await orderRepo.findOne({
         where: { id: orderId, clientUserId: auth.userId, isDeleted: false },
