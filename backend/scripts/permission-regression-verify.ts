@@ -1,20 +1,24 @@
 /**
  * 文件说明：backend/scripts/permission-regression-verify.ts
- * 文件职责：执行“管理员正向、操作员反向、接口越权拦截”三类权限回归，并在失败时给出明确断言信息。
+ * 文件职责：执行管理端角色权限、写入防护与订单内容编辑路由的真实 HTTP 回归。
  * 实现逻辑：
  * 1) 使用独立 SQLite 数据库启动真实后端应用，避免污染开发数据库；
  * 2) 管理员登录后创建操作员，先验证管理员可访问关键治理接口（正向）；
  * 3) 使用操作员访问管理员专属接口，验证 403 拦截（反向）；
- * 4) 读取审计日志，验证越权拦截会写入 `security.access_denied` 记录（越权拦截链路）。
+ * 4) 经过真实 Express 中间件验证 admin/operator/supplier 的订单编辑、修订和乐观版本行为；
+ * 5) 读取审计日志，验证越权拦截会写入 `security.access_denied` 记录。
  */
 import assert from 'node:assert/strict'
+import { randomUUID } from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { installCaptchaServiceForTesting } from '../src/services/captcha.service.js'
+import { requestLocalHttp } from './support/local-http-request.js'
 
 const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
+const repositoryRoot = path.resolve(backendRoot, '..')
 const sqliteRoot = path.resolve(backendRoot, 'data', 'local-dev')
 
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
@@ -23,11 +27,14 @@ const adminPassword = process.env.Y_LINK_VERIFY_ADMIN_PASSWORD?.trim() || `Admin
 const operatorPassword = process.env.Y_LINK_VERIFY_OPERATOR_PASSWORD?.trim() || `Op_${verifySeed}_Aa1!`
 const supplierPassword = process.env.Y_LINK_VERIFY_SUPPLIER_PASSWORD?.trim() || `Supplier_${verifySeed}_Cc3!`
 const forbiddenUserPassword = process.env.Y_LINK_VERIFY_FORBIDDEN_PASSWORD?.trim() || `Forbidden_${verifySeed}_Bb2!`
+const verifyDatabaseType = process.env.Y_LINK_PERMISSION_VERIFY_DB_TYPE?.trim().toLowerCase() === 'mysql'
+  ? 'mysql'
+  : 'sqlite'
 
 process.env.APP_PROFILE = `permission-regression-${verifySeed}`
-process.env.DB_TYPE = 'sqlite'
-process.env.DB_SYNC = 'false'
-process.env.SQLITE_DB_PATH = sqlitePath
+process.env.DB_TYPE = verifyDatabaseType
+process.env.DB_SYNC = verifyDatabaseType === 'mysql' ? 'true' : 'false'
+if (verifyDatabaseType === 'sqlite') process.env.SQLITE_DB_PATH = sqlitePath
 process.env.INIT_ADMIN_PASSWORD = adminPassword
 
 const TEST_CAPTCHA_CODE = 'ABC123'
@@ -85,8 +92,12 @@ async function loginAdminSession(
   baseUrl: string,
   body: Record<string, unknown>,
   scene: string,
-): Promise<{ token: string; user: { username: string; role: string } }> {
-  const response = await fetch(`${baseUrl}/api/auth/login`, {
+): Promise<{
+  token: string
+  csrfToken: string
+  user: { username: string; role: string }
+}> {
+  const response = await requestLocalHttp(`${baseUrl}/api/auth/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -96,9 +107,12 @@ async function loginAdminSession(
     user: { username: string; role: string }
   }>(response, scene)
   const token = loginData.token ?? readCookieValueFromResponse(response, 'y_link_admin_session')
+  const csrfToken = readCookieValueFromResponse(response, 'y_link_admin_csrf')
   assert.ok(token, `${scene} 未返回可用于回归请求的管理端会话`)
+  assert.ok(csrfToken, `${scene} 未返回管理端 CSRF Cookie`)
   return {
     token,
+    csrfToken,
     user: loginData.user,
   }
 }
@@ -155,11 +169,26 @@ function cleanupSqliteFile() {
 async function main() {
   fs.mkdirSync(sqliteRoot, { recursive: true })
 
+  try {
+    await requestLocalHttp('http://127.0.0.1:6000/permission-http-transport-probe')
+  } catch (error) {
+    assert.doesNotMatch(
+      error instanceof Error ? `${error.message} ${String(error.cause ?? '')}` : String(error),
+      /bad port/i,
+      'Node http.request 适配器不得重现 fetch forbidden-port 错误',
+    )
+  }
+  pass('本地 HTTP 请求适配器不受 fetch forbidden-port 限制')
+
   const { createApp } = await import('../src/app.js')
   const { AppDataSource } = await import('../src/config/data-source.js')
   const { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } = await import('../src/config/database-bootstrap.js')
   const { authService } = await import('../src/services/auth.service.js')
   const { systemConfigService } = await import('../src/services/system-config.service.js')
+  const { BaseProduct } = await import('../src/entities/base-product.entity.js')
+  const { BaseProductSku } = await import('../src/entities/base-product-sku.entity.js')
+  const { BizOutboundOrder } = await import('../src/entities/biz-outbound-order.entity.js')
+  const { BizOutboundOrderItem } = await import('../src/entities/biz-outbound-order-item.entity.js')
 
   prepareDatabaseRuntime()
   await AppDataSource.initialize()
@@ -184,7 +213,7 @@ async function main() {
     const baseUrl = `http://127.0.0.1:${address.port}`
 
     await expectJsonStatus(
-      () => fetch(`${baseUrl}/api/users?page=1&pageSize=20`),
+      () => requestLocalHttp(`${baseUrl}/api/users?page=1&pageSize=20`),
       '未登录访问用户列表',
       401,
     )
@@ -192,7 +221,7 @@ async function main() {
 
     await expectJsonStatus(
       () =>
-        fetch(`${baseUrl}/api/auth/login`, {
+        requestLocalHttp(`${baseUrl}/api/auth/login`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -207,7 +236,7 @@ async function main() {
 
     await expectJsonStatus(
       () =>
-        fetch(`${baseUrl}/api/auth/login`, {
+        requestLocalHttp(`${baseUrl}/api/auth/login`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -223,10 +252,10 @@ async function main() {
     const adminCaptcha = await expectJsonOk<{
       captchaId: string
       captchaSvg: string
-    }>(() => fetch(`${baseUrl}/api/auth/captcha`), '获取管理端图形验证码')
+    }>(() => requestLocalHttp(`${baseUrl}/api/auth/captcha`), '获取管理端图形验证码')
     await expectJsonStatus(
       () =>
-        fetch(`${baseUrl}/api/auth/login`, {
+        requestLocalHttp(`${baseUrl}/api/auth/login`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -243,7 +272,7 @@ async function main() {
 
     await expectJsonStatus(
       () =>
-        fetch(`${baseUrl}/api/auth/login`, {
+        requestLocalHttp(`${baseUrl}/api/auth/login`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -261,13 +290,13 @@ async function main() {
     const adminCaptchaForSuccess = await expectJsonOk<{
       captchaId: string
       captchaSvg: string
-    }>(() => fetch(`${baseUrl}/api/auth/captcha`), '重新获取管理端图形验证码')
+    }>(() => requestLocalHttp(`${baseUrl}/api/auth/captcha`), '重新获取管理端图形验证码')
     const adminLogin = await expectJsonOk<{
       token: string
       user: { username: string; role: string }
     }>(
       () =>
-        fetch(`${baseUrl}/api/auth/login`, {
+        requestLocalHttp(`${baseUrl}/api/auth/login`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -281,14 +310,15 @@ async function main() {
     )
     assert.equal(adminLogin.user.username, 'admin')
     assert.equal(adminLogin.user.role, 'admin')
-    const adminToken = adminLogin.token ?? (await loginAdminSession(
+    const adminSession = await loginAdminSession(
       baseUrl,
       {
         username: 'admin',
         password: adminPassword,
       },
       'admin session token fallback login',
-    )).token
+    )
+    const adminToken = adminLogin.token ?? adminSession.token
     pass('管理员登录成功')
 
     const createdOperator = await expectJsonOk<{
@@ -298,7 +328,7 @@ async function main() {
       status: string
     }>(
       () =>
-        fetch(`${baseUrl}/api/users`, {
+        requestLocalHttp(`${baseUrl}/api/users`, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${adminToken}`,
@@ -323,7 +353,7 @@ async function main() {
       role: string
     }>(
       () =>
-        fetch(`${baseUrl}/api/users`, {
+        requestLocalHttp(`${baseUrl}/api/users`, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${adminToken}`,
@@ -346,7 +376,7 @@ async function main() {
       list: Array<{ id: string }>
     }>(
       () =>
-        fetch(`${baseUrl}/api/users?page=1&pageSize=20&keyword=permission_operator_`, {
+        requestLocalHttp(`${baseUrl}/api/users?page=1&pageSize=20&keyword=permission_operator_`, {
           headers: { Authorization: `Bearer ${adminToken}` },
         }),
       '管理员读取用户列表',
@@ -358,7 +388,7 @@ async function main() {
       list: Array<{ id: string }>
     }>(
       () =>
-        fetch(`${baseUrl}/api/audit-logs?page=1&pageSize=10`, {
+        requestLocalHttp(`${baseUrl}/api/audit-logs?page=1&pageSize=10`, {
           headers: { Authorization: `Bearer ${adminToken}` },
         }),
       '管理员读取审计日志',
@@ -370,12 +400,12 @@ async function main() {
       effectiveDatabase: { dbType: string }
     }>(
       () =>
-        fetch(`${baseUrl}/api/data-maintenance/db-migration/runtime-override`, {
+        requestLocalHttp(`${baseUrl}/api/data-maintenance/db-migration/runtime-override`, {
           headers: { Authorization: `Bearer ${adminToken}` },
         }),
       '管理员读取数据库迁移运行时状态',
     )
-    assert.equal(adminMigrationRuntime.effectiveDatabase.dbType, 'sqlite')
+    assert.equal(adminMigrationRuntime.effectiveDatabase.dbType, verifyDatabaseType)
     pass('管理员可读取数据库迁移运行时状态（正向）')
 
     const operatorLogin = await expectJsonOk<{
@@ -383,7 +413,7 @@ async function main() {
       user: { username: string; role: string }
     }>(
       () =>
-        fetch(`${baseUrl}/api/auth/login`, {
+        requestLocalHttp(`${baseUrl}/api/auth/login`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -409,7 +439,7 @@ async function main() {
       user: { username: string; role: string }
     }>(
       () =>
-        fetch(`${baseUrl}/api/auth/login`, {
+        requestLocalHttp(`${baseUrl}/api/auth/login`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -430,9 +460,180 @@ async function main() {
     )).token
     pass('供货方登录成功')
 
+    const productRepo = AppDataSource.getRepository(BaseProduct)
+    const skuRepo = AppDataSource.getRepository(BaseProductSku)
+    const orderRepo = AppDataSource.getRepository(BizOutboundOrder)
+    const orderItemRepo = AppDataSource.getRepository(BizOutboundOrderItem)
+    const legacyProduct = await productRepo.save(productRepo.create({
+      productCode: `PERMISSION-P-${verifySeed}`,
+      productName: '权限回归历史商品',
+      pinyinAbbr: 'QXHG',
+      defaultPrice: '10.00',
+      discountRate: '10.0',
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 20,
+      preOrderedStock: 3,
+    }))
+    const legacySku = await skuRepo.save(skuRepo.create({
+      productId: legacyProduct.id,
+      skuCode: `PERMISSION-SKU-${verifySeed}`,
+      specValuesJson: '{}',
+      specText: '当前规格',
+      defaultPrice: '10.00',
+      discountRate: '10.0',
+      currentStock: 20,
+      preOrderedStock: 3,
+      isActive: true,
+      isCurrent: true,
+      o2oRecommended: false,
+      sortOrder: 0,
+    }))
+    const legacyOrder = await orderRepo.save(orderRepo.create({
+      orderUuid: randomUUID(),
+      showNo: `hyyz${verifySeed.replace(/\D/g, '').slice(-6).padStart(6, '0')}`,
+      businessNo: `hyyz8${verifySeed.replace(/\D/g, '').slice(-5).padStart(5, '0')}`,
+      editVersion: 1,
+      inventoryMode: 'legacy_none',
+      orderType: 'walkin',
+      hasCustomerOrder: false,
+      isSystemApplied: false,
+      issuerName: '权限回归验证员',
+      customerDepartmentName: null,
+      idempotencyKey: `permission-order-${verifySeed}`,
+      customerName: '权限回归客户',
+      remark: null,
+      totalQty: '2.00',
+      totalAmount: '20.00',
+      isDeleted: false,
+      deletedAt: null,
+      deletedByUserId: null,
+      deletedByUsername: null,
+      deletedByDisplayName: null,
+      creatorUserId: createdOperator.id,
+      creatorUsername: createdOperator.username,
+      creatorDisplayName: '权限回归操作员',
+    }))
+    await orderItemRepo.save(orderItemRepo.create({
+      orderId: legacyOrder.id,
+      lineNo: 1,
+      productId: legacyProduct.id,
+      productNameSnapshot: legacyProduct.productName,
+      skuId: null,
+      skuCodeSnapshot: null,
+      specTextSnapshot: '历史无 SKU 规格',
+      qty: '2.00',
+      unitPrice: '10.00',
+      lineAmount: '20.00',
+      remark: null,
+    }))
+
+    const legacyEdit = (expectedVersion: number, qty: number, reason: string) => ({
+      expectedVersion,
+      reason,
+      items: [{
+        productId: legacyProduct.id,
+        skuId: null,
+        qty,
+        unitPrice: 10,
+        remark: null,
+      }],
+    })
+    const adminEdit = await expectJsonOk<{
+      order: { editVersion: number; inventoryMode: string }
+      items: Array<{ skuId: string | null }>
+      inventoryDeltas: unknown[]
+      notice: string | null
+    }>(
+      () => requestLocalHttp(`${baseUrl}/api/orders/${legacyOrder.id}/content`, {
+        method: 'PATCH',
+        headers: {
+          Cookie: `y_link_admin_session=${encodeURIComponent(adminSession.token)}; y_link_admin_csrf=${encodeURIComponent(adminSession.csrfToken)}`,
+          'x-csrf-token': adminSession.csrfToken,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(legacyEdit(1, 3, '管理员修改历史无 SKU 行')),
+      }),
+      '管理员修改 legacy_none 订单',
+    )
+    assert.equal(adminEdit.order.editVersion, 2)
+    assert.equal(adminEdit.order.inventoryMode, 'legacy_none')
+    assert.equal(adminEdit.items[0]?.skuId, null)
+    assert.deepEqual(adminEdit.inventoryDeltas, [])
+    assert.match(adminEdit.notice ?? '', /legacy_none|\u4e0d追溯/)
+    pass('管理员通过真实 PATCH 修改历史无 SKU 行')
+
+    const operatorEdit = await expectJsonOk<{ order: { editVersion: number }; items: Array<{ skuId: string | null }> }>(
+      () => requestLocalHttp(`${baseUrl}/api/orders/${legacyOrder.id}/content`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${operatorToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(legacyEdit(2, 4, '操作员修改历史无 SKU 行')),
+      }),
+      '操作员修改 legacy_none 订单',
+    )
+    assert.equal(operatorEdit.order.editVersion, 3)
+    assert.equal(operatorEdit.items[0]?.skuId, null)
+    pass('操作员通过真实 PATCH 修改历史无 SKU 行')
+
+    await expectJsonForbidden(
+      () => requestLocalHttp(`${baseUrl}/api/orders/${legacyOrder.id}/content`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${supplierToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(legacyEdit(3, 5, '供货方越权修改')),
+      }),
+      '供货方越权修改订单内容',
+    )
+    pass('供货方访问订单内容编辑路由被 403 拦截')
+
+    await expectJsonStatus(
+      () => requestLocalHttp(`${baseUrl}/api/orders/${legacyOrder.id}/content`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify(legacyEdit(2, 5, '过期版本修改')),
+      }),
+      '过期 expectedVersion 修改订单内容',
+      409,
+    )
+    pass('过期 expectedVersion 通过真实 PATCH 返回 409')
+
+    const adminRevisions = await expectJsonOk<Array<{ revisionNo: number }>>(
+      () => requestLocalHttp(`${baseUrl}/api/orders/${legacyOrder.id}/revisions`, {
+        headers: { Authorization: `Bearer ${adminToken}` },
+      }),
+      '管理员读取订单修订',
+    )
+    const operatorRevisions = await expectJsonOk<Array<{ revisionNo: number }>>(
+      () => requestLocalHttp(`${baseUrl}/api/orders/${legacyOrder.id}/revisions`, {
+        headers: { Authorization: `Bearer ${operatorToken}` },
+      }),
+      '操作员读取订单修订',
+    )
+    assert.deepEqual(adminRevisions.map((revision) => revision.revisionNo), [3, 2])
+    assert.deepEqual(operatorRevisions.map((revision) => revision.revisionNo), [3, 2])
+    await expectJsonForbidden(
+      () => requestLocalHttp(`${baseUrl}/api/orders/${legacyOrder.id}/revisions`, {
+        headers: { Authorization: `Bearer ${supplierToken}` },
+      }),
+      '供货方越权读取订单修订',
+    )
+    pass('修订时间线真实 GET 权限与结果正确')
+
+    const productAfterLegacyEdit = await productRepo.findOneByOrFail({ id: legacyProduct.id })
+    const skuAfterLegacyEdit = await skuRepo.findOneByOrFail({ id: legacySku.id })
+    assert.deepEqual(
+      [productAfterLegacyEdit.currentStock, productAfterLegacyEdit.preOrderedStock, skuAfterLegacyEdit.currentStock, skuAfterLegacyEdit.preOrderedStock],
+      [20, 3, 20, 3],
+      'legacy_none 通过真实 HTTP 编辑后不得改动商品或 SKU 库存',
+    )
+    const contentDialogSource = fs.readFileSync(
+      path.resolve(repositoryRoot, 'src/views/order-list/components/OrderContentEditDialog.vue'),
+      'utf8',
+    )
+    assert.match(contentDialogSource, /skuId:\s*row\.skuId\s*\|\|\s*null/, '历史原有无 SKU 行的空字符串必须显式序列化为 null')
+
     await expectJsonForbidden(
       () =>
-        fetch(`${baseUrl}/api/users?page=1&pageSize=20`, {
+        requestLocalHttp(`${baseUrl}/api/users?page=1&pageSize=20`, {
           headers: { Authorization: `Bearer ${operatorToken}` },
         }),
       '操作员反向访问用户列表',
@@ -441,7 +642,7 @@ async function main() {
 
     await expectJsonForbidden(
       () =>
-        fetch(`${baseUrl}/api/users`, {
+        requestLocalHttp(`${baseUrl}/api/users`, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${operatorToken}`,
@@ -461,7 +662,7 @@ async function main() {
 
     await expectJsonForbidden(
       () =>
-        fetch(`${baseUrl}/api/audit-logs?page=1&pageSize=10`, {
+        requestLocalHttp(`${baseUrl}/api/audit-logs?page=1&pageSize=10`, {
           headers: { Authorization: `Bearer ${operatorToken}` },
         }),
       '操作员越权读取审计日志',
@@ -470,7 +671,7 @@ async function main() {
 
     await expectJsonForbidden(
       () =>
-        fetch(`${baseUrl}/api/data-maintenance/db-migration/runtime-override`, {
+        requestLocalHttp(`${baseUrl}/api/data-maintenance/db-migration/runtime-override`, {
           headers: { Authorization: `Bearer ${operatorToken}` },
         }),
       '操作员越权读取数据库迁移运行时状态',
@@ -479,7 +680,7 @@ async function main() {
 
     await expectJsonForbidden(
       () =>
-        fetch(`${baseUrl}/api/data-maintenance/backup/sqlite`, {
+        requestLocalHttp(`${baseUrl}/api/data-maintenance/backup/sqlite`, {
           method: 'POST',
           headers: { Authorization: `Bearer ${operatorToken}` },
         }),
@@ -489,7 +690,7 @@ async function main() {
 
     await expectJsonForbidden(
       () =>
-        fetch(`${baseUrl}/api/system-configs/verification-providers/test-send`, {
+        requestLocalHttp(`${baseUrl}/api/system-configs/verification-providers/test-send`, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${operatorToken}`,
@@ -514,7 +715,7 @@ async function main() {
 
     await expectJsonForbidden(
       () =>
-        fetch(`${baseUrl}/api/inbound/admin/list`, {
+        requestLocalHttp(`${baseUrl}/api/inbound/admin/list`, {
           headers: { Authorization: `Bearer ${supplierToken}` },
         }),
       '供货方越权访问管理端入库列表',
@@ -524,7 +725,7 @@ async function main() {
     const lockedUsername = `locked_admin_${verifySeed}`
     await expectJsonStatus(
       () =>
-        fetch(`${baseUrl}/api/auth/login`, {
+        requestLocalHttp(`${baseUrl}/api/auth/login`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -539,10 +740,10 @@ async function main() {
       const captcha = await expectJsonOk<{
         captchaId: string
         captchaSvg: string
-      }>(() => fetch(`${baseUrl}/api/auth/captcha`), `登录锁定验证码 ${index + 1}`)
+      }>(() => requestLocalHttp(`${baseUrl}/api/auth/captcha`), `登录锁定验证码 ${index + 1}`)
       const lockProbe = await expectJsonOneOfStatuses(
         () =>
-          fetch(`${baseUrl}/api/auth/login`, {
+          requestLocalHttp(`${baseUrl}/api/auth/login`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -561,7 +762,7 @@ async function main() {
     }
     await expectJsonStatus(
       () =>
-        fetch(`${baseUrl}/api/auth/login`, {
+        requestLocalHttp(`${baseUrl}/api/auth/login`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -582,7 +783,7 @@ async function main() {
       }>
     }>(
       () =>
-        fetch(
+        requestLocalHttp(
           `${baseUrl}/api/audit-logs?page=1&pageSize=100&actionType=${encodeURIComponent('security.access_denied')}`,
           {
             headers: { Authorization: `Bearer ${adminToken}` },

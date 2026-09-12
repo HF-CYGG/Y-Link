@@ -152,7 +152,7 @@ const commit = async () => {
       businessNo: businessNo.value.trim(),
       items: rows.value.map((row) => ({
         productId: row.productId,
-        skuId: row.skuId,
+        skuId: row.skuId || null,
         qty: row.qty,
         unitPrice: row.unitPrice,
         remark: row.remark.trim() || null,
