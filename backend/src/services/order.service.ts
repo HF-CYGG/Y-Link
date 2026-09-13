@@ -27,6 +27,18 @@ import type { PaginationResult } from '../types/api.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
 import { orderSerialService, type OrderType } from './order-serial.service.js'
+import { systemConfigService, type ClientDepartmentTreeNode } from './system-config.service.js'
+
+/**
+ * 开单页客户部门选项：
+ * - nodeId 为系统部门配置中的稳定节点标识；
+ * - path 与 `resolveClientDepartmentNode` 的拼接口径一致，也是订单保存的部门快照。
+ */
+export interface OrderDepartmentOptionView {
+  nodeId: string
+  label: string
+  path: string
+}
 
 export interface SubmitOrderItemInput {
   productId: string | number
@@ -42,6 +54,8 @@ export interface SubmitOrderInput {
   isSystemApplied?: boolean
   issuerName?: string
   customerDepartmentName?: string
+  /** 选自系统部门配置时的节点 ID；存在时以服务端解析出的完整路径为准。 */
+  customerDepartmentNodeId?: string
   customerName?: string
   remark?: string
   items: SubmitOrderItemInput[]
@@ -518,6 +532,49 @@ export class OrderService {
   }
 
   /**
+   * 开单页客户部门选项：
+   * - 只读展开系统部门配置树，不做任何写入或自动补建；
+   * - 路径拼接口径与 `systemConfigService.resolveClientDepartmentNode` 保持一致。
+   */
+  async listDepartmentOptions(): Promise<{ options: OrderDepartmentOptionView[] }> {
+    const config = await systemConfigService.getClientDepartmentConfigs()
+    const options: OrderDepartmentOptionView[] = []
+    const walk = (nodes: ClientDepartmentTreeNode[], parentPath = '') => {
+      for (const node of nodes) {
+        const path = parentPath ? `${parentPath}-${node.label}` : node.label
+        options.push({ nodeId: node.id, label: node.label, path })
+        walk(node.children, path)
+      }
+    }
+    walk(config.tree)
+    return { options }
+  }
+
+  /**
+   * 解析提交的客户部门来源：
+   * - 仅部门单携带节点 ID 时才按系统配置只读解析，并用规范完整路径覆盖提交文本；
+   * - 未携带节点 ID 视为手动录入，原样交给后续长度与必填校验，绝不回写系统配置；
+   * - 节点已被删除时明确拒绝，提示用户重新选择或改为手动填写。
+   */
+  private async resolveSubmitCustomerDepartment(
+    input: SubmitOrderInput,
+  ): Promise<{ customerDepartmentName?: string; source: 'config' | 'manual' }> {
+    const nodeId = input.customerDepartmentNodeId?.trim() ?? ''
+    if (!nodeId || this.normalizeOrderType(input.orderType) !== 'department') {
+      return { customerDepartmentName: input.customerDepartmentName, source: 'manual' }
+    }
+    try {
+      const resolved = await systemConfigService.resolveClientDepartmentNode(nodeId)
+      return { customerDepartmentName: resolved.departmentName, source: 'config' }
+    } catch (error) {
+      if (error instanceof BizError) {
+        throw new BizError('所选部门已从系统配置中移除，请重新选择或直接手动填写', 400)
+      }
+      throw error
+    }
+  }
+
+  /**
    * 整单提交逻辑：
    * 1) 幂等键查重（命中直接返回）
    * 2) 生成 order_uuid + show_no
@@ -540,7 +597,12 @@ export class OrderService {
       '订单备注',
       ORDER_FIELD_LIMITS.orderRemark,
     )
-    const submitContext = this.buildSubmitOrderContext(input, actor)
+    // 部门来源须在构建上下文前确定：选自系统配置的节点由服务端解析规范完整路径覆盖提交文本。
+    const resolvedDepartment = await this.resolveSubmitCustomerDepartment(input)
+    const submitContext = this.buildSubmitOrderContext(
+      { ...input, customerDepartmentName: resolvedDepartment.customerDepartmentName },
+      actor,
+    )
 
     let lastError: unknown
     for (let attempt = 1; attempt <= ORDER_SUBMIT_MAX_RETRY; attempt += 1) {
@@ -624,6 +686,8 @@ export class OrderService {
               detail: {
                 // 创建时同步写入部门快照，避免首页近期动态只能看到客户名而丢失部门语义。
                 customerDepartmentName: savedOrder.customerDepartmentName,
+                // 区分部门快照来自系统配置还是手动录入，便于后续整理历史部门名称。
+                customerDepartmentSource: savedOrder.customerDepartmentName ? resolvedDepartment.source : null,
                 customerName: savedOrder.customerName,
                 totalQty: savedOrder.totalQty,
                 totalAmount: savedOrder.totalAmount,

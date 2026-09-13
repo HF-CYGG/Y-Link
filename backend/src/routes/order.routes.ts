@@ -21,6 +21,8 @@ const submitOrderSchema = z.object({
   isSystemApplied: z.boolean().optional(),
   issuerName: z.string().max(64, '出单人长度不能超过64').optional(),
   customerDepartmentName: z.string().max(271, '客户部门名称长度不能超过271').optional(),
+  // 选自系统部门配置时携带节点 ID，服务端只读解析出规范完整路径；手动录入时省略。
+  customerDepartmentNodeId: z.string().trim().min(1).max(128, '客户部门节点ID长度不能超过128').optional(),
   customerName: z.string().optional(),
   remark: z.string().optional(),
   items: z
@@ -82,6 +84,21 @@ orderRouter.get(
       onlyDeleted,
     })
 
+    res.json({
+      code: 0,
+      message: 'ok',
+      data,
+    })
+  }),
+)
+
+orderRouter.get(
+  '/department-options',
+  // 开单页的客户部门下拉只对具备开单权限的账号开放，不依赖系统配置查看权限；
+  // 必须注册在 `/:id` 之前，避免被详情路由吞掉。
+  requirePermission('orders:create'),
+  asyncHandler(async (_req, res) => {
+    const data = await orderService.listDepartmentOptions()
     res.json({
       code: 0,
       message: 'ok',
