@@ -1,6 +1,6 @@
 /**
  * 文件说明：Issue #83 / #84 客户端商城悬浮层遮挡与原图预览回归验证。
- * 文件职责：以纯函数用例覆盖遮挡高度、列表尾部垫块的测量回退与上限，并以静态契约守住旧浏览器降级写法；不访问网络与数据库。
+ * 文件职责：以纯函数用例覆盖遮挡高度的测量回退、分类浏览列表“滚到底恰好越过购物车”的高度推导与原图缩放边界，并以静态契约守住旧浏览器降级写法；不访问网络与数据库。
  * 维护说明：真实设备的视口、缩放与浏览器版本差异无法在脚本中复现，问题设备仍需人工回归；本脚本只防止根因写法回流。
  */
 
@@ -9,7 +9,7 @@ import { readFileSync } from 'node:fs'
 
 import {
   resolveFloatingOcclusion,
-  resolveScrollerTailSpacer,
+  resolveBrowseListHeight,
   resolveViewportHeight,
 } from '../src/views/client/client-mall-viewport.helpers'
 import {
@@ -53,26 +53,33 @@ assert.equal(
   '摘要栏因换行或字号变高时，遮挡高度应随实测增长，而不是停留在固定常量',
 )
 
-// ---------- #83 内部滚动列表尾部垫块 ----------
+// ---------- #83 分类浏览列表高度 ----------
+{
+  const layoutHeight = 900
+  const viewportHeight = 700
+  const listDocumentTop = 300
+  const tailPadding = 24 + 180
+  const height = resolveBrowseListHeight({ layoutHeight, viewportHeight, listDocumentTop, tailPadding, minimum: 256 })
+  assert.equal(height, 396, '列表高度应按文档高度扣除列表顶边与尾部留白推导')
+  // 模拟页面滚到底：文档高度取布局、视口与商城内容底边的最大值，列表底边到视口底部应恰好等于尾部留白。
+  const documentHeight = Math.max(layoutHeight, viewportHeight, listDocumentTop + height + tailPadding)
+  const listBottomInViewport = listDocumentTop - (documentHeight - viewportHeight) + height
+  assert.equal(viewportHeight - listBottomInViewport, tailPadding, '页面滚到底时列表底边应恰好停在购物车上方，不留额外空白')
+}
 assert.equal(
-  resolveScrollerTailSpacer({ clientHeight: 400, viewportHeight: 600, anchorRatio: 0.75, occlusion: 210, minimum: 180 }),
-  300,
-  '桌面端保留 3/4 可视高度的分类定位缓冲',
+  resolveBrowseListHeight({ layoutHeight: 600, viewportHeight: 480, listDocumentTop: 380, tailPadding: 200, minimum: 256 }),
+  256,
+  '极矮视口保留最小可浏览高度，交给页面滚动把列表底边带到购物车上方',
 )
 assert.equal(
-  resolveScrollerTailSpacer({ clientHeight: 200, viewportHeight: 600, anchorRatio: 0.75, occlusion: 260, minimum: 180 }),
-  260,
-  '低高度列表的尾部垫块至少覆盖悬浮购物车遮挡',
+  resolveBrowseListHeight({ layoutHeight: Number.NaN, viewportHeight: 0, listDocumentTop: 120, tailPadding: 200, minimum: 256 }),
+  0,
+  '尺寸不可测时返回 0，沿用样式兜底高度',
 )
 assert.equal(
-  resolveScrollerTailSpacer({ clientHeight: 12_000, viewportHeight: 600, anchorRatio: 0.96, occlusion: 240, minimum: 180 }),
-  576,
-  '旧浏览器列表失去 max-height 时，尾部垫块应以视口高度封顶，不能随整列内容膨胀',
-)
-assert.equal(
-  resolveScrollerTailSpacer({ clientHeight: Number.NaN, viewportHeight: 0, anchorRatio: 0.96, occlusion: 240, minimum: 180 }),
-  240,
-  '尺寸不可测时仍保证覆盖遮挡高度',
+  resolveBrowseListHeight({ layoutHeight: 900, viewportHeight: 700, listDocumentTop: Number.NaN, tailPadding: 200, minimum: 256 }),
+  0,
+  '列表位置不可测时返回 0',
 )
 
 // ---------- #83 静态契约：旧浏览器降级与尾部留白 ----------
@@ -92,7 +99,10 @@ assert.ok(
   '不得回退到读取未解析 calc 字符串的遮挡常量写法',
 )
 assert.ok(mallSource.includes('ref="miniCartSummaryBarRef"'), '悬浮购物车摘要栏必须挂载实测 ref')
-assert.ok(mallSource.includes('.mall-page.is-document-flow-tail'), '搜索结果等文档流路径必须具备页面级尾部避让')
+assert.ok(mallSource.includes('.mall-page.is-floating-occlusion-tail'), '页面尾部留白必须等于购物车实测遮挡高度')
+assert.ok(mallSource.includes('.mall-browse-panel.has-measured-height .mall-browse-list'), '分类浏览列表与分类栏必须共用实测高度')
+assert.ok(!mallSource.includes('listViewportBottomSpacer'), '不得回退到按视口比例撑出大段尾部空白的垫块')
+assert.match(mallSource, /\.mall-browse-list \{[^}]*overflow-x: hidden;/, '卡片悬停放大不得撑出横向滚动条')
 assert.ok(mallSource.includes('var(--mall-floating-occlusion'), '尾部留白必须由实测遮挡变量驱动')
 assert.ok(mallSource.includes('scroll-padding-bottom'), '列表与页面需要 scroll-padding-bottom，保证键盘焦点滚到购物车上方')
 assert.ok(mallSource.includes('class="mall-virtual-bottom-spacer"'), '大数据量虚拟列表必须具备尾部垫块')
