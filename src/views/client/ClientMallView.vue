@@ -4,6 +4,7 @@
  * 文件职责：承载客户端商城的商品浏览、标签联动、分组规格选择、加购与结算入口能力。
  * 实现逻辑：商品详情按 SKU 的真实规格维度逐组展示选项，选择上层规格后只保留下层已配置组合，并由完整 SKU 统一驱动图片、价格与库存摘要。
  * 维护说明：重点维护“左侧标签高亮 <-> 右侧分组定位”一致性；规格选择不得虚构未配置组合，也不能绕过现有 SKU 库存与购物车校验。
+ * 悬浮购物车遮挡：页面尾部留白、列表尾部垫块与 scroll-padding 统一由摘要栏实测遮挡高度 `--mall-floating-occlusion` 驱动，不要改回固定常量估算。
  */
 
 
@@ -25,6 +26,14 @@ import {
   buildClientSkuSelectionModel,
   resolveClientSkuSelection,
 } from './client-sku-selector.helpers'
+import {
+  DESKTOP_FLOATING_OCCLUSION_FALLBACK,
+  MALL_FLOATING_OCCLUSION_GAP,
+  PHONE_FLOATING_OCCLUSION_FALLBACK,
+  resolveFloatingOcclusion,
+  resolveScrollerTailSpacer,
+  resolveViewportHeight,
+} from './client-mall-viewport.helpers'
 
 import ClientCartView from './ClientCartView.vue'
 import ClientCheckoutView from './ClientCheckoutView.vue'
@@ -116,9 +125,14 @@ const categoryScrollSessionId = ref(0)
 const currentLockedSessionId = ref(0)
 const pendingCategoryTargetTop = ref<number | null>(null)
 const DEFAULT_LIST_VIEWPORT_BOTTOM_SPACER = 220
-const PHONE_FLOATING_CLEARANCE_FALLBACK = 196
-const DESKTOP_FLOATING_CLEARANCE_FALLBACK = 124
 const listViewportBottomSpacer = ref(DEFAULT_LIST_VIEWPORT_BOTTOM_SPACER)
+// 悬浮购物车对内容区的实测遮挡高度（含安全距离），驱动文档流尾部留白、列表尾部垫块与焦点滚动留白。
+const floatingOcclusion = ref(PHONE_FLOATING_OCCLUSION_FALLBACK + MALL_FLOATING_OCCLUSION_GAP)
+const miniCartWrapperRef = ref<HTMLElement | null>(null)
+const miniCartCardRef = ref<HTMLElement | null>(null)
+const miniCartSummaryBarRef = ref<HTMLElement | null>(null)
+let floatingOcclusionFrameId: number | null = null
+let floatingLayoutResizeObserver: ResizeObserver | null = null
 
 const CATEGORY_SCROLL_HIT_THRESHOLD = 12
 const CATEGORY_SCROLL_FALLBACK_MS = 420
@@ -414,6 +428,11 @@ const searchMode = computed(() => hasKeyword.value)
 const largeDatasetMode = computed(() => products.value.length > 100)
 const isRecommendedSortMode = computed(() => sortMode.value === 'recommended')
 const useRecommendedAllProductFlow = computed(() => isRecommendedSortMode.value && !largeDatasetMode.value)
+// 只有分类浏览面板使用内部滚动列表（尾部由列表垫块避让购物车）；
+// 搜索结果、空结果、加载与错误态都走页面文档流，必须由页面级尾部留白越过悬浮购物车。
+const usesDocumentFlowTail = computed(() => {
+  return loading.value || !!blockingRequestError.value || !products.value.length || searchMode.value
+})
 const recommendedAllProducts = computed(() => sortProductsForDisplay(products.value))
 
 const searchResults = computed(() => {
@@ -839,31 +858,54 @@ const clearCategoryUnlockTimer = () => {
   }
 }
 
-const resolveMallFloatingBottomClearance = (element: HTMLElement) => {
-  if (globalThis.window === undefined) {
-    return isPhone.value ? PHONE_FLOATING_CLEARANCE_FALLBACK : DESKTOP_FLOATING_CLEARANCE_FALLBACK
+const resolveMallViewportHeight = () => resolveViewportHeight({
+  innerHeight: globalThis.window?.innerHeight,
+  documentClientHeight: globalThis.document?.documentElement?.clientHeight,
+})
+
+const measureMiniCartSummaryTop = (): number | null => {
+  const wrapper = miniCartWrapperRef.value
+  const card = miniCartCardRef.value
+  const summaryBar = miniCartSummaryBarRef.value
+  if (!wrapper || !card || !summaryBar || globalThis.window === undefined) {
+    return null
   }
-  // 读取布局层透出的底部导航安全区变量，让商城内部滚动容器与悬浮购物车共用同一套底部留白基线。
-  const resolvedValue = globalThis.window
-    .getComputedStyle(element)
-    .getPropertyValue('--mall-floating-bottom-clearance')
-    .trim()
-  const parsedValue = Number.parseFloat(resolvedValue.replace('px', ''))
-  if (Number.isFinite(parsedValue) && parsedValue > 0) {
-    return parsedValue
+  const wrapperRect = wrapper.getBoundingClientRect()
+  if (wrapperRect.height <= 0 || summaryBar.offsetHeight <= 0) {
+    // KeepAlive 失活或切页过渡时元素不可见，实测值不可信。
+    return null
   }
-  return isPhone.value ? PHONE_FLOATING_CLEARANCE_FALLBACK : DESKTOP_FLOATING_CLEARANCE_FALLBACK
+  const cardStyle = globalThis.window.getComputedStyle(card)
+  const cardBorders = (Number.parseFloat(cardStyle.borderTopWidth) || 0) + (Number.parseFloat(cardStyle.borderBottomWidth) || 0)
+  // 以“收起态”摘要栏顶边为准：wrapper 底边固定，明细展开只会向上增高且有全屏遮罩，
+  // 用 wrapper 底边减去摘要栏高度可避开展开动画与加购脉冲缩放带来的中间值。
+  return wrapperRect.bottom - summaryBar.offsetHeight - cardBorders
+}
+
+const syncMallFloatingOcclusion = () => {
+  const fallback = isPhone.value ? PHONE_FLOATING_OCCLUSION_FALLBACK : DESKTOP_FLOATING_OCCLUSION_FALLBACK
+  floatingOcclusion.value = resolveFloatingOcclusion({
+    viewportHeight: resolveMallViewportHeight(),
+    summaryTop: measureMiniCartSummaryTop(),
+    fallback,
+    gap: MALL_FLOATING_OCCLUSION_GAP,
+  })
+  // 页面级焦点滚动也要避开购物车：Tab 聚焦搜索结果末项时，浏览器会按 scroll-padding 把它滚到购物车上方。
+  const rootElement = globalThis.document?.documentElement
+  if (rootElement && mallRuntimeActive) {
+    rootElement.style.scrollPaddingBottom = `${floatingOcclusion.value}px`
+  }
 }
 
 const resolveListViewportBottomSpacer = (scroller: HTMLElement) => {
-  const floatingBottomClearance = resolveMallFloatingBottomClearance(scroller)
-  // 手机端底部有“悬浮购物车 + 底部导航”两层固定区，因此尾部缓冲区至少要覆盖整块可视遮挡区。
-  const viewportTailRoom = Math.floor(scroller.clientHeight * (isPhone.value ? 0.96 : 0.75))
-  return Math.max(
-    180,
-    viewportTailRoom,
-    Math.ceil(floatingBottomClearance + CATEGORY_VIEWPORT_ACTIVATE_OFFSET),
-  )
+  // 手机端末尾分组需要顶到定位线，桌面端保留原有 3/4 视口缓冲；同时至少覆盖悬浮购物车实测遮挡。
+  return resolveScrollerTailSpacer({
+    clientHeight: scroller.clientHeight,
+    viewportHeight: resolveMallViewportHeight(),
+    anchorRatio: isPhone.value ? 0.96 : 0.75,
+    occlusion: floatingOcclusion.value + CATEGORY_VIEWPORT_ACTIVATE_OFFSET,
+    minimum: 180,
+  })
 }
 
 const releaseCategoryScrollLock = () => {
@@ -1070,15 +1112,52 @@ const getPendingLockedCategory = (scroller: HTMLElement): string | 'target-hit' 
 }
 
 const handleMallViewportResize = () => {
+  syncMallFloatingOcclusion()
   syncListViewportBottomSpacer()
   handleProductListScroll()
   void updateCompactAnnouncementOverflow()
 }
 
+// 窗口缩放、可视视口变化、摘要栏换行与列表尺寸变化可能在同一帧内连续触发，合并到下一帧只测量一次，避免布局抖动。
+const scheduleMallFloatingLayoutSync = () => {
+  if (floatingOcclusionFrameId !== null || globalThis.window === undefined) {
+    return
+  }
+  floatingOcclusionFrameId = globalThis.window.requestAnimationFrame(() => {
+    floatingOcclusionFrameId = null
+    if (!mallRuntimeActive) {
+      return
+    }
+    handleMallViewportResize()
+  })
+}
+
+const bindFloatingLayoutObserver = () => {
+  const win = globalThis.window
+  floatingLayoutResizeObserver?.disconnect()
+  floatingLayoutResizeObserver = null
+  if (win === undefined || typeof win.ResizeObserver !== 'function') {
+    // 旧浏览器缺少 ResizeObserver 时依赖 resize / orientationchange 事件与渲染后同步兜底。
+    return
+  }
+  floatingLayoutResizeObserver = new win.ResizeObserver(() => scheduleMallFloatingLayoutSync())
+  const observedElements = [miniCartSummaryBarRef.value, listScrollerRef.value]
+  observedElements.forEach((element) => {
+    if (element) {
+      floatingLayoutResizeObserver?.observe(element)
+    }
+  })
+}
+
 const syncMallViewportAfterRender = async () => {
   await nextTick()
+  syncMallFloatingOcclusion()
   syncListViewportBottomSpacer()
   handleProductListScroll()
+  if (mallRuntimeActive) {
+    // 搜索 / 分类 / 大数据量模式切换会替换列表容器，需要重新挂载尺寸观察目标。
+    bindFloatingLayoutObserver()
+  }
   await updateCompactAnnouncementOverflow()
 }
 
@@ -1125,7 +1204,11 @@ const activateMallRuntime = () => {
     return
   }
   mallRuntimeActive = true
-  globalThis.window.addEventListener('resize', handleMallViewportResize, { passive: true })
+  globalThis.window.addEventListener('resize', scheduleMallFloatingLayoutSync, { passive: true })
+  globalThis.window.addEventListener('orientationchange', scheduleMallFloatingLayoutSync)
+  // 移动端地址栏收起/展开只改变可视视口，不一定触发 window resize。
+  globalThis.window.visualViewport?.addEventListener('resize', scheduleMallFloatingLayoutSync)
+  void syncMallViewportAfterRender()
   if (hasActivatedOnce && globalThis.document?.visibilityState !== 'hidden') {
     // KeepAlive 返回时只在 TTL 过期或轻量快照尚未补全时重拉，避免每次切页都请求完整目录。
     void loadProducts().then(syncMallViewportAfterRender)
@@ -1139,8 +1222,29 @@ const deactivateMallRuntime = () => {
   }
   mallRuntimeActive = false
   clearCategoryUnlockTimer()
-  globalThis.window.removeEventListener('resize', handleMallViewportResize)
+  globalThis.window.removeEventListener('resize', scheduleMallFloatingLayoutSync)
+  globalThis.window.removeEventListener('orientationchange', scheduleMallFloatingLayoutSync)
+  globalThis.window.visualViewport?.removeEventListener('resize', scheduleMallFloatingLayoutSync)
+  floatingLayoutResizeObserver?.disconnect()
+  floatingLayoutResizeObserver = null
+  if (floatingOcclusionFrameId !== null) {
+    globalThis.window.cancelAnimationFrame(floatingOcclusionFrameId)
+    floatingOcclusionFrameId = null
+  }
+  // 页面级焦点滚动留白只属于商城页，切走后还原，避免影响订单、个人中心等其他客户端页面。
+  globalThis.document?.documentElement?.style.removeProperty('scroll-padding-bottom')
 }
+
+// 搜索、排序、大数据量与购物车展开状态切换都会改变列表容器或摘要栏尺寸，渲染完成后重新测量遮挡高度。
+watch(
+  [searchMode, largeDatasetMode, isRecommendedSortMode, miniCartVisible, () => products.value.length],
+  () => {
+    if (mallRuntimeActive) {
+      void syncMallViewportAfterRender()
+    }
+  },
+  { flush: 'post' },
+)
 
 onActivated(() => {
   activateMallRuntime()
@@ -1177,7 +1281,11 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="mall-page space-y-4">
+  <section
+    class="mall-page space-y-4"
+    :class="{ 'is-document-flow-tail': usesDocumentFlowTail }"
+    :style="{ '--mall-floating-occlusion': `${floatingOcclusion}px` }"
+  >
     <Teleport v-if="shouldShowMobileSearchEntry" to="body">
       <button
         type="button"
@@ -1510,6 +1618,8 @@ onBeforeUnmount(() => {
             <button type="button" class="client-product-card__add-button" @click="quickAdd(row.data)">+ 加购</button>
           </article>
         </div>
+        <!-- 大数据量虚拟列表同样需要尾部垫块，保证最后几行能滚到悬浮购物车上方。 -->
+        <div class="mall-virtual-bottom-spacer" :style="{ height: `${floatingOcclusion}px` }" aria-hidden="true"></div>
       </div>
 
       <div
@@ -1613,9 +1723,9 @@ onBeforeUnmount(() => {
     </template>
 
     <div class="mini-cart-backdrop" :class="{ 'is-expanded': miniCartVisible }" @click="miniCartVisible = false"></div>
-    <div class="mini-cart-wrapper" :class="{ 'is-expanded': miniCartVisible }">
-      <section class="mini-cart-card" :class="{ 'is-pulse': settlePulsing }">
-        <div class="cart-summary-bar" @click="miniCartVisible = !miniCartVisible">
+    <div ref="miniCartWrapperRef" class="mini-cart-wrapper" :class="{ 'is-expanded': miniCartVisible }">
+      <section ref="miniCartCardRef" class="mini-cart-card" :class="{ 'is-pulse': settlePulsing }">
+        <div ref="miniCartSummaryBarRef" class="cart-summary-bar" @click="miniCartVisible = !miniCartVisible">
           <div class="summary-info">
             <div class="cart-icon-wrapper">
               <el-icon><ShoppingCart /></el-icon>
@@ -1853,6 +1963,16 @@ onBeforeUnmount(() => {
   padding-bottom: calc(var(--client-tab-bar-clearance, 5.5rem) + 0.65rem);
 }
 
+/*
+ * 搜索结果、空结果、加载与错误态走页面文档流：
+ * 页面挂在布局的绝对定位舞台里，布局层 padding 无法延伸到内容尾部，必须由商城页自身让出悬浮购物车的实测遮挡高度。
+ * 第一条是给不支持 max() 的旧内核保留的保守估算值。
+ */
+.mall-page.is-document-flow-tail {
+  padding-bottom: calc(var(--client-tab-bar-clearance, 5.5rem) + var(--mall-mini-cart-height) + 1.5rem);
+  padding-bottom: max(calc(var(--client-tab-bar-clearance, 5.5rem) + var(--mall-mini-cart-height) + 0.75rem), var(--mall-floating-occlusion, 0px));
+}
+
 .mall-search-results,
 .mall-browse-panel {
   position: relative;
@@ -2051,6 +2171,7 @@ onBeforeUnmount(() => {
 
 .mall-browse-categories,
 .mall-browse-list {
+  max-height: clamp(18rem, calc(100vh - var(--mall-floating-bottom-clearance) - 13.5rem), 42rem);
   max-height: clamp(18rem, calc(100dvh - var(--mall-floating-bottom-clearance) - 13.5rem), 42rem);
 }
 
@@ -2064,6 +2185,8 @@ onBeforeUnmount(() => {
   grid-row: 2;
   justify-self: stretch;
   min-width: 0;
+  /* 键盘 Tab 聚焦末项时，浏览器按该留白把焦点卡片滚到悬浮购物车上方；以 40% 封顶避免矮列表可视区被吃光。 */
+  scroll-padding-bottom: min(var(--mall-floating-occlusion, 0px), 40%);
   transition:
     opacity var(--mall-reorder-layout-duration) var(--mall-reorder-layout-easing),
     transform var(--mall-reorder-layout-duration) var(--mall-reorder-layout-easing);
@@ -3085,7 +3208,11 @@ onBeforeUnmount(() => {
 
 .mini-cart-backdrop {
   position: fixed;
-  inset: 0;
+  /* 不使用 inset 简写，兼容旧浏览器。 */
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   z-index: 40;
   background: rgba(15, 23, 42, 0.32);
   backdrop-filter: blur(4px);
@@ -3687,6 +3814,7 @@ onBeforeUnmount(() => {
     grid-column: 1;
     grid-row: 2;
     display: block;
+    max-height: clamp(28rem, calc(100vh - var(--client-tab-bar-clearance, 5.5rem) - 5.1rem), 48rem);
     max-height: clamp(28rem, calc(100dvh - var(--client-tab-bar-clearance, 5.5rem) - 5.1rem), 48rem);
     overflow-x: hidden;
     overflow-y: auto;
@@ -3731,6 +3859,7 @@ onBeforeUnmount(() => {
      * 2. 列表高度仅主要避让底部导航，让购物车亚克力卡片覆盖在上方；
      * 3. 末尾商品是否会被挡住，交给列表内部 spacer 处理，而不是提前牺牲可视高度。
      */
+    max-height: clamp(28rem, calc(100vh - var(--client-tab-bar-clearance, 5.5rem) - 5.1rem), 48rem);
     max-height: clamp(28rem, calc(100dvh - var(--client-tab-bar-clearance, 5.5rem) - 5.1rem), 48rem);
   }
 
@@ -4059,6 +4188,7 @@ onBeforeUnmount(() => {
 .mall-browse-categories { 
   border-right: none !important; /* 移除生硬的物理边界线 */
   /* padding-right: 1.25rem !important; 移除全局 padding-right，避免在移动端挤压标签 */ 
+  max-height: clamp(28rem, calc(100vh - var(--client-tab-bar-clearance, 5.5rem) - 5.1rem), 48rem);
   max-height: clamp(28rem, calc(100dvh - var(--client-tab-bar-clearance, 5.5rem) - 5.1rem), 48rem); 
 } 
 
