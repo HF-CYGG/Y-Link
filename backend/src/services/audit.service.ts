@@ -102,11 +102,13 @@ export class AuditService {
       actionType: input.actionType,
       actionLabel: input.actionLabel,
       actorUserId: input.actor?.userId ?? null,
-      actorUsername: input.actor?.username ?? null,
-      actorDisplayName: input.actor?.displayName ?? null,
+      // 操作者与目标快照按列宽截断：客户端常以邮箱（最长 128 字符）作账号快照，
+      // 超出 varchar(64) 会在 MySQL 严格模式下使同事务内的业务写入整体回滚。
+      actorUsername: truncateAuditTextByCodePoint(input.actor?.username, 64),
+      actorDisplayName: truncateAuditTextByCodePoint(input.actor?.displayName, 64),
       targetType: input.targetType,
       targetId: input.targetId ?? null,
-      targetCode: input.targetCode ?? null,
+      targetCode: truncateAuditTextByCodePoint(input.targetCode, 128),
       resultStatus: input.resultStatus ?? 'success',
       detailJson: input.detail ? JSON.stringify(input.detail) : null,
       ipAddress: truncateAuditTextByCodePoint(input.requestMeta?.ipAddress, 64),

@@ -904,6 +904,318 @@ async function main() {
     assert.equal(duplicateLegacyProfile.email, duplicateLegacyEmail, '历史重复用户名未改名时必须允许更新联系方式')
     pass('历史重复用户名未改名时跳过用户名唯一性检查并允许更新联系方式')
 
+    // Issue #69：已保存联系方式的补认证闭环。
+    const { SysAuditLog } = await import('../src/entities/sys-audit-log.entity.js')
+    const { verificationCodeService: sharedVerificationCodeService } = await import('../src/services/verification-code.service.js')
+    const auditLogRepository = AppDataSource.getRepository(SysAuditLog)
+    const clientUserRepository = AppDataSource.getRepository(ClientUser)
+    const savedContactRequestMeta = { ipAddress: '127.0.0.1', userAgent: 'client-auth-saved-contact-verify' }
+    const latestCapturedCode = (target: string) => [...capturedVerifications].reverse().find((item) => item.target === target)?.code
+    const buildSavedContactAuth = (user: { id: string; mobile: string | null; email: string | null; realName: string; accountType: 'personal' | 'department' }) => ({
+      userId: user.id,
+      mobile: user.mobile ?? '',
+      email: user.email ?? '',
+      account: user.realName,
+      realName: user.realName,
+      accountType: user.accountType,
+      staffNo: null,
+      sessionToken: `client-saved-contact-${user.id}`,
+    })
+
+    const savedContactMobile = '13800001130'
+    const savedContactEmail = 'saved-contact@example.com'
+    const savedContactUser = await clientUserRepository.save(clientUserRepository.create({
+      realName: '补认证用户',
+      mobile: savedContactMobile,
+      email: savedContactEmail,
+      passwordHash: await hashPassword(clientPassword),
+      accountType: 'personal',
+      staffVerified: false,
+      status: 'enabled',
+    }))
+    const savedContactAuth = buildSavedContactAuth(savedContactUser)
+
+    await verificationCodeService.sendCode({ channel: 'email', target: savedContactEmail, scene: 'profile_update' })
+    const exhaustedEmailCode = latestCapturedCode(savedContactEmail)
+    assert.ok(exhaustedEmailCode, '应捕获补认证邮箱验证码')
+    const wrongEmailCode = exhaustedEmailCode === '000000' ? '111111' : '000000'
+    for (let attempt = 1; attempt <= 5; attempt += 1) {
+      await expectBizError(
+        () => clientAuthService.confirmSavedContact(savedContactAuth, { channel: 'email', code: wrongEmailCode }),
+        `补认证第 ${attempt} 次输入错误验证码`,
+        '验证码错误',
+      )
+    }
+    await expectBizError(
+      () => clientAuthService.confirmSavedContact(savedContactAuth, { channel: 'email', code: exhaustedEmailCode }),
+      '连续五次错误后原验证码必须作废',
+      '不存在或已过期',
+    )
+    assert.equal((await clientUserRepository.findOneByOrFail({ id: savedContactUser.id })).emailVerifiedAt, null, '验证失败不得标记已认证')
+
+    await verificationCodeService.sendCode({ channel: 'email', target: savedContactEmail, scene: 'profile_update' })
+    const validEmailCode = latestCapturedCode(savedContactEmail)
+    assert.ok(validEmailCode && validEmailCode !== exhaustedEmailCode, '重新发送后应捕获新的邮箱验证码')
+    const emailVerifiedProfile = await clientAuthService.confirmSavedContact(
+      savedContactAuth,
+      { channel: 'email', code: validEmailCode },
+      savedContactRequestMeta,
+    )
+    assert.ok(emailVerifiedProfile.emailVerifiedAt, '正确验证码必须写入邮箱认证时间')
+    assert.equal(emailVerifiedProfile.mobileVerifiedAt, null, '邮箱与手机号认证相互独立')
+    await expectBizError(
+      () => clientAuthService.confirmSavedContact(savedContactAuth, { channel: 'email', code: validEmailCode }),
+      '验证码不可重复使用且已认证邮箱不可重复认证',
+      '已认证',
+    )
+    await expectBizError(
+      () => clientAuthService.sendSavedContactCode(savedContactAuth, 'email', savedContactRequestMeta),
+      '已认证邮箱不再发送认证验证码',
+      '已认证',
+    )
+
+    await verificationCodeService.sendCode({ channel: 'mobile', target: savedContactMobile, scene: 'profile_update' })
+    const validMobileCode = latestCapturedCode(savedContactMobile)
+    assert.ok(validMobileCode, '应捕获补认证手机号验证码')
+    const mobileVerifiedProfile = await clientAuthService.confirmSavedContact(
+      savedContactAuth,
+      { channel: 'mobile', code: validMobileCode },
+      savedContactRequestMeta,
+    )
+    assert.ok(mobileVerifiedProfile.mobileVerifiedAt, '正确验证码必须写入手机号认证时间')
+
+    const verifyContactAudits = await auditLogRepository.find({
+      where: { actionType: 'client_user.verify_contact', targetId: savedContactUser.id },
+    })
+    assert.equal(verifyContactAudits.length, 2, '邮箱与手机号补认证应各写入一条审计')
+    for (const audit of verifyContactAudits) {
+      const detailText = audit.detailJson ?? ''
+      assert.ok(!detailText.includes(validEmailCode) && !detailText.includes(validMobileCode), '补认证审计不得记录验证码明文')
+      assert.ok(!detailText.includes(savedContactEmail) && !detailText.includes(savedContactMobile), '补认证审计只记录脱敏联系方式')
+    }
+    assert.ok(verifyContactAudits.some((audit) => audit.detailJson?.includes('138****1130')), '手机号补认证审计应记录脱敏目标')
+
+    const changedContactEmail = 'saved-contact-changed@example.com'
+    await verificationCodeService.sendCode({ channel: 'email', target: changedContactEmail, scene: 'profile_update' })
+    const changedEmailCode = latestCapturedCode(changedContactEmail)
+    assert.ok(changedEmailCode, '应捕获改绑邮箱验证码')
+    const changedProfile = await clientAuthService.updateProfile(
+      savedContactAuth,
+      {
+        username: savedContactUser.realName,
+        mobile: savedContactMobile,
+        email: changedContactEmail,
+        currentPassword: clientPassword,
+        emailVerificationCode: changedEmailCode,
+      },
+      undefined,
+      savedContactRequestMeta,
+    )
+    assert.equal(changedProfile.email, changedContactEmail, '改绑后应保存新邮箱')
+    assert.ok(changedProfile.emailVerifiedAt, '改绑新邮箱验证通过后按新值重新标记认证')
+    assert.notEqual(
+      new Date(changedProfile.emailVerifiedAt as unknown as string).getTime(),
+      new Date(emailVerifiedProfile.emailVerifiedAt as unknown as string).getTime(),
+      '改绑后认证时间必须按新邮箱重新写入',
+    )
+    const updateProfileAudit = await auditLogRepository.findOne({
+      where: { actionType: 'client_user.update_profile', targetId: savedContactUser.id },
+    })
+    assert.ok(updateProfileAudit, 'Web 端资料更新应写入审计')
+    assert.ok(updateProfileAudit.detailJson?.includes('"email"'), '资料更新审计应记录变更字段')
+    assert.ok(!updateProfileAudit.detailJson?.includes(changedEmailCode), '资料更新审计不得记录验证码明文')
+
+    const mobileOnlyUser = await clientUserRepository.save(clientUserRepository.create({
+      realName: '补认证仅手机号',
+      mobile: '13800001131',
+      email: null,
+      passwordHash: await hashPassword(clientPassword),
+      accountType: 'personal',
+      staffVerified: false,
+      status: 'enabled',
+    }))
+    await expectBizError(
+      () => clientAuthService.sendSavedContactCode(buildSavedContactAuth(mobileOnlyUser), 'email', savedContactRequestMeta),
+      '未保存邮箱时不能发送补认证验证码',
+      '请先保存邮箱',
+    )
+
+    const departmentContactUser = await clientUserRepository.save(clientUserRepository.create({
+      realName: '补认证部门账号',
+      mobile: null,
+      email: 'saved-contact-department@example.com',
+      passwordHash: await hashPassword(clientPassword),
+      accountType: 'department',
+      departmentName: '资产处',
+      staffVerified: false,
+      status: 'enabled',
+    }))
+    await expectBizError(
+      () => clientAuthService.sendSavedContactCode(buildSavedContactAuth(departmentContactUser), 'email', savedContactRequestMeta),
+      '部门共享账号不开放补认证',
+      '部门账号资料由管理员维护',
+    )
+
+    const raceContactEmail = 'saved-contact-race@example.com'
+    const raceContactUser = await clientUserRepository.save(clientUserRepository.create({
+      realName: '补认证并发改号',
+      mobile: '13800001132',
+      email: raceContactEmail,
+      passwordHash: await hashPassword(clientPassword),
+      accountType: 'personal',
+      staffVerified: false,
+      status: 'enabled',
+    }))
+    await verificationCodeService.sendCode({ channel: 'email', target: raceContactEmail, scene: 'profile_update' })
+    const raceEmailCode = latestCapturedCode(raceContactEmail)
+    assert.ok(raceEmailCode, '应捕获并发场景邮箱验证码')
+    const originalVerifyCode = sharedVerificationCodeService.verifyCode
+    // 在验证码校验通过、认证写入之前模拟另一请求改掉邮箱，覆盖条件更新的并发防护分支。
+    sharedVerificationCodeService.verifyCode = async (input) => {
+      await originalVerifyCode.call(sharedVerificationCodeService, input)
+      await clientUserRepository.update({ id: raceContactUser.id }, { email: 'saved-contact-race-new@example.com' })
+    }
+    try {
+      await expectBizError(
+        () => clientAuthService.confirmSavedContact(buildSavedContactAuth(raceContactUser), { channel: 'email', code: raceEmailCode }),
+        '验证期间联系方式被修改',
+        '已变更',
+      )
+    } finally {
+      sharedVerificationCodeService.verifyCode = originalVerifyCode
+    }
+    const raceContactAfter = await clientUserRepository.findOneByOrFail({ id: raceContactUser.id })
+    assert.equal(raceContactAfter.emailVerifiedAt, null, '联系方式在验证期间被修改时不得标记新邮箱为已认证')
+
+    await clientUserRepository.update({ id: raceContactUser.id }, { email: raceContactEmail })
+    await systemConfigService.updateVerificationProviderConfigs(
+      {
+        mobile: {
+          enabled: true,
+          httpMethod: 'POST',
+          apiUrl: 'https://verification.example.com/mobile',
+          headersTemplate: '{}',
+          bodyTemplate: '{"target":"{{target}}","code":"{{code}}"}',
+          successMatch: 'ok',
+        },
+        email: {
+          enabled: false,
+          httpMethod: 'POST',
+          apiUrl: 'https://verification.example.com/email',
+          headersTemplate: '{}',
+          bodyTemplate: '{"target":"{{target}}","code":"{{code}}"}',
+          successMatch: 'ok',
+        },
+      },
+      adminAuth,
+    )
+    try {
+      await expectBizError(
+        () => clientAuthService.sendSavedContactCode(buildSavedContactAuth(raceContactUser), 'email', savedContactRequestMeta),
+        '邮箱通道未启用时拒绝发送补认证验证码',
+        '通道未启用',
+      )
+      await expectBizError(
+        () => clientAuthService.confirmSavedContact(buildSavedContactAuth(raceContactUser), { channel: 'email', code: '123456' }),
+        '邮箱通道未启用时拒绝确认补认证',
+        '通道未启用',
+      )
+    } finally {
+      await systemConfigService.updateVerificationProviderConfigs(
+        {
+          mobile: {
+            enabled: true,
+            httpMethod: 'POST',
+            apiUrl: 'https://verification.example.com/mobile',
+            headersTemplate: '{}',
+            bodyTemplate: '{"target":"{{target}}","code":"{{code}}"}',
+            successMatch: 'ok',
+          },
+          email: {
+            enabled: true,
+            httpMethod: 'POST',
+            apiUrl: 'https://verification.example.com/email',
+            headersTemplate: '{}',
+            bodyTemplate: '{"target":"{{target}}","code":"{{code}}"}',
+            successMatch: 'ok',
+          },
+        },
+        adminAuth,
+      )
+    }
+
+    const profileViewSource = fs.readFileSync(path.resolve(backendRoot, '..', 'src', 'views', 'client', 'ClientProfileView.vue'), 'utf8')
+    assert.ok(profileViewSource.includes("mobileVerificationMode === 'verify_saved'"), '资料弹窗应提供未认证手机号补认证入口')
+    assert.ok(profileViewSource.includes("emailVerificationMode === 'verify_saved'"), '资料弹窗应提供未认证邮箱补认证入口')
+    assert.ok(profileViewSource.includes('getClientAuthCapabilities'), '资料弹窗应按验证码通道状态控制验证控件展示')
+    assert.ok(!profileViewSource.includes('可仅凭当前密码保存为未验证联系方式'), '资料弹窗不得保留与服务端行为矛盾的旧提示')
+    pass('已保存联系方式补认证覆盖通道、错误次数、重复使用、并发改号、审计脱敏与改绑重新认证')
+
+    // 审计操作者字段按列宽截断：邮箱可达 128 字符，而 actor_username 仅 64 字符。
+    const longContactEmail = `${'long-contact-audit-'.repeat(4)}verify@example.com`
+    assert.ok(longContactEmail.length > 64 && longContactEmail.length <= 128, '验证用邮箱应超过审计账号列宽且仍为合法邮箱长度')
+    const longEmailUser = await clientUserRepository.save(clientUserRepository.create({
+      realName: '长邮箱补认证',
+      mobile: '13800001133',
+      email: longContactEmail,
+      passwordHash: await hashPassword(clientPassword),
+      accountType: 'personal',
+      staffVerified: false,
+      status: 'enabled',
+    }))
+    await verificationCodeService.sendCode({ channel: 'email', target: longContactEmail, scene: 'profile_update' })
+    const longEmailCode = latestCapturedCode(longContactEmail)
+    assert.ok(longEmailCode, '应捕获长邮箱补认证验证码')
+    const longEmailProfile = await clientAuthService.confirmSavedContact(
+      buildSavedContactAuth(longEmailUser),
+      { channel: 'email', code: longEmailCode },
+      savedContactRequestMeta,
+    )
+    assert.ok(longEmailProfile.emailVerifiedAt, '长邮箱补认证应成功写入认证时间')
+    const longEmailAudit = await auditLogRepository.findOneOrFail({
+      where: { actionType: 'client_user.verify_contact', targetId: longEmailUser.id },
+    })
+    assert.ok(longEmailAudit.actorUsername, '审计应保留操作者账号快照')
+    assert.ok([...longEmailAudit.actorUsername].length <= 64, '审计操作者账号快照不得超过 actor_username 列宽')
+    pass('审计操作者字段按列宽截断，超长邮箱补认证不会因审计写入失败回滚')
+
+    // 资料更新与补认证并发：资料更新只写实际变化字段，不得用陈旧实体回写认证时间。
+    const staleProfileUser = await clientUserRepository.save(clientUserRepository.create({
+      realName: '资料并发认证',
+      mobile: '13800001134',
+      email: 'stale-profile@example.com',
+      passwordHash: await hashPassword(clientPassword),
+      accountType: 'personal',
+      staffVerified: false,
+      status: 'enabled',
+    }))
+    const clientAuthServiceInternals = clientAuthService as unknown as {
+      ensureProfileIdentifiersUnique: (...args: unknown[]) => Promise<void>
+    }
+    const originalEnsureProfileIdentifiersUnique = clientAuthServiceInternals.ensureProfileIdentifiersUnique
+    // 在资料更新已读取用户、尚未写回之前模拟补认证成功提交。
+    clientAuthServiceInternals.ensureProfileIdentifiersUnique = async (...args: unknown[]) => {
+      await originalEnsureProfileIdentifiersUnique.apply(clientAuthService, args)
+      await clientUserRepository.update({ id: staleProfileUser.id }, { emailVerifiedAt: new Date() })
+    }
+    try {
+      await clientAuthService.updateProfile(
+        buildSavedContactAuth(staleProfileUser),
+        {
+          username: '资料并发认证改名',
+          mobile: '13800001134',
+          email: 'stale-profile@example.com',
+          currentPassword: clientPassword,
+        },
+      )
+    } finally {
+      clientAuthServiceInternals.ensureProfileIdentifiersUnique = originalEnsureProfileIdentifiersUnique
+    }
+    const staleProfileAfter = await clientUserRepository.findOneByOrFail({ id: staleProfileUser.id })
+    assert.equal(staleProfileAfter.realName, '资料并发认证改名', '资料更新应写入实际变化的姓名')
+    assert.ok(staleProfileAfter.emailVerifiedAt, '资料更新不得用陈旧实体把并发补认证写入的认证时间回写为空')
+    pass('资料更新只写实际变化字段，不会覆盖并发补认证写入的认证时间')
+
     const webAuthSource = fs.readFileSync(path.resolve(backendRoot, '..', 'src', 'views', 'client', 'ClientAuthView.vue'), 'utf8')
     const webProfileSource = fs.readFileSync(path.resolve(backendRoot, '..', 'src', 'views', 'client', 'ClientProfileView.vue'), 'utf8')
     const mobileRegisterSource = readFileWithGitFallback(path.resolve(backendRoot, '..', 'apps', 'mobile', 'app', '(auth)', 'register.tsx'))

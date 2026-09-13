@@ -32,9 +32,34 @@ export interface SubmitOrderPayload {
   isSystemApplied?: boolean
   issuerName?: string
   customerDepartmentName?: string
+  /** 选自系统部门配置时携带；服务端据此解析规范完整路径，手动录入时省略。 */
+  customerDepartmentNodeId?: string
   customerName?: string
   remark?: string
   items: SubmitOrderItemPayload[]
+}
+
+/**
+ * 开单页客户部门选项：
+ * - nodeId 为系统部门配置中的稳定节点标识；
+ * - path 为各级名称用 `-` 拼接的完整路径，也是订单中保存的部门快照。
+ */
+export interface OrderDepartmentOption {
+  nodeId: string
+  label: string
+  path: string
+}
+
+/**
+ * 读取开单页客户部门选项：
+ * - 依赖 orders:create 权限，只返回下拉所需的节点标识、名称与完整路径。
+ */
+export const getOrderDepartmentOptions = async (): Promise<OrderDepartmentOption[]> => {
+  const result = await request<{ options: OrderDepartmentOption[] }>({
+    method: 'GET',
+    url: '/orders/department-options',
+  })
+  return Array.isArray(result?.options) ? result.options : []
 }
 
 /**

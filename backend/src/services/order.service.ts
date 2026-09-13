@@ -41,6 +41,18 @@ import {
 } from './order-content-edit.service.js'
 import { orderSerialService, type OrderType } from './order-serial.service.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
+import { systemConfigService, type ClientDepartmentTreeNode } from './system-config.service.js'
+
+/**
+ * 开单页客户部门选项：
+ * - nodeId 为系统部门配置中的稳定节点标识；
+ * - path 与 `resolveClientDepartmentNode` 的拼接口径一致，也是订单保存的部门快照。
+ */
+export interface OrderDepartmentOptionView {
+  nodeId: string
+  label: string
+  path: string
+}
 
 export interface SubmitOrderItemInput {
   productId: string | number
@@ -57,6 +69,8 @@ export interface SubmitOrderInput {
   isSystemApplied?: boolean
   issuerName?: string
   customerDepartmentName?: string
+  /** 选自系统部门配置时的节点 ID；存在时以服务端解析出的完整路径为准。 */
+  customerDepartmentNodeId?: string
   customerName?: string
   remark?: string
   items: SubmitOrderItemInput[]
@@ -585,6 +599,61 @@ export class OrderService {
   }
 
   /**
+   * 开单页客户部门选项：
+   * - 只读展开系统部门配置树，不做任何写入或自动补建；
+   * - 路径拼接口径与 `systemConfigService.resolveClientDepartmentNode` 保持一致。
+   */
+  async listDepartmentOptions(): Promise<{ options: OrderDepartmentOptionView[] }> {
+    const config = await systemConfigService.getClientDepartmentConfigs()
+    const options: OrderDepartmentOptionView[] = []
+    const walk = (nodes: ClientDepartmentTreeNode[], parentPath = '') => {
+      for (const node of nodes) {
+        const path = parentPath ? `${parentPath}-${node.label}` : node.label
+        options.push({ nodeId: node.id, label: node.label, path })
+        walk(node.children, path)
+      }
+    }
+    walk(config.tree)
+    return { options }
+  }
+
+  /**
+   * 解析提交的客户部门来源：
+   * - 仅部门单携带节点 ID 时才按系统配置只读解析，并用规范完整路径覆盖提交文本；
+   * - 未携带节点 ID 视为手动录入，原样交给后续长度与必填校验，绝不回写系统配置；
+   * - 节点已被删除时明确拒绝，提示用户重新选择或改为手动填写；
+   * - 必须在提交事务内、幂等命中检查之后调用，并复用同一事务管理器读取配置。
+   */
+  private async resolveSubmitCustomerDepartment(
+    input: SubmitOrderInput,
+    context: SubmitOrderContext,
+    manager: EntityManager,
+  ): Promise<{ customerDepartmentName: string | null; source: 'config' | 'manual' }> {
+    const nodeId = input.customerDepartmentNodeId?.trim() ?? ''
+    if (!nodeId || context.normalizedOrderType !== 'department') {
+      return { customerDepartmentName: context.normalizedCustomerDepartmentName, source: 'manual' }
+    }
+    let departmentName: string
+    try {
+      departmentName = (await systemConfigService.resolveClientDepartmentNode(nodeId, manager)).departmentName
+    } catch (error) {
+      if (error instanceof BizError) {
+        throw new BizError('所选部门已从系统配置中移除，请重新选择或直接手动填写', 400)
+      }
+      throw error
+    }
+    return {
+      customerDepartmentName: this.readLimitedText(
+        departmentName,
+        '客户部门名称',
+        ORDER_FIELD_LIMITS.customerDepartmentName,
+        { required: true },
+      ),
+      source: 'config',
+    }
+  }
+
+  /**
    * 整单提交逻辑：
    * 1) 幂等键查重（命中直接返回）
    * 2) 生成 order_uuid + show_no
@@ -633,6 +702,9 @@ export class OrderService {
             }
           }
 
+          // 部门节点须在确认不是幂等重试后再解析：重试命中既有订单时，不应因部门配置此后变更而失败。
+          const resolvedDepartment = await this.resolveSubmitCustomerDepartment(input, submitContext, manager)
+
           const normalizedProductIds = [...new Set(normalizedItems.map((item) => item.productId))]
             .sort((left, right) => left.localeCompare(right))
           const productQuery = productRepo
@@ -663,7 +735,7 @@ export class OrderService {
             hasCustomerOrder: Boolean(input.hasCustomerOrder),
             isSystemApplied: Boolean(input.isSystemApplied),
             issuerName: submitContext.normalizedIssuerName,
-            customerDepartmentName: submitContext.normalizedCustomerDepartmentName,
+            customerDepartmentName: resolvedDepartment.customerDepartmentName,
             idempotencyKey: submitContext.normalizedIdempotencyKey,
             customerName: normalizedCustomerName,
             remark: normalizedRemark,
@@ -701,6 +773,8 @@ export class OrderService {
               requestMeta,
               detail: {
                 ...this.buildOrderAuditDetail(savedOrder),
+                // 区分部门快照来自系统配置还是手动录入，便于后续整理历史部门名称。
+                customerDepartmentSource: savedOrder.customerDepartmentName ? resolvedDepartment.source : null,
                 itemCount: savedItems.length,
                 inventoryMode: savedOrder.inventoryMode,
               },
@@ -929,7 +1003,8 @@ export class OrderService {
       '客户部门名称',
       ORDER_FIELD_LIMITS.customerDepartmentName,
     )
-    if (normalizedOrderType === 'department' && !normalizedCustomerDepartmentName) {
+    // 携带部门节点时名称以事务内解析出的规范路径为准，此处只校验手动录入的部门单。
+    if (normalizedOrderType === 'department' && !normalizedCustomerDepartmentName && !input.customerDepartmentNodeId?.trim()) {
       throw new BizError('部门订单必须填写客户部门名称', 400)
     }
     return {

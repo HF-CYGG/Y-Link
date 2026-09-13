@@ -43,6 +43,8 @@ export interface OrderHeaderForm {
   isSystemApplied: boolean
   issuerName: string
   customerDepartmentName: string
+  /** 选自系统部门配置时的节点 ID；空字符串表示手动录入。 */
+  customerDepartmentNodeId: string
   customerName: string
   remark: string
 }

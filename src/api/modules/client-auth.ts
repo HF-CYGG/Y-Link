@@ -20,6 +20,8 @@ import type {
   ClientRegisterResult,
   ClientResetPasswordInput,
   ClientSafeProfile,
+  ClientSavedContactVerificationConfirmInput,
+  ClientSavedContactVerificationSendInput,
   ClientUpdateProfileInput,
   ClientVerificationCodeSendInput,
   ClientVerificationCodeSendResult,
@@ -192,6 +194,35 @@ export const sendClientProfileVerificationCode = (
 ) => request<ClientProfileVerificationCodeSendResult>({
   method: 'POST',
   url: '/client-auth/profile/verification-code/send',
+  data,
+  ...config,
+})
+
+/**
+ * 向当前已保存的联系方式发送认证验证码：
+ * - 只声明通道，目标由服务端从账号资料读取；
+ * - 通道未就绪、联系方式为空或已认证时由服务端拒绝。
+ */
+export const sendClientSavedContactVerificationCode = (
+  data: ClientSavedContactVerificationSendInput,
+  config?: RequestConfig,
+) => request<ClientVerificationCodeSendResult>({
+  method: 'POST',
+  url: '/client-auth/profile/contact-verification/send',
+  data,
+  ...config,
+})
+
+/**
+ * 确认当前已保存的联系方式：
+ * - 验证码校验通过后返回最新资料，其中对应的 `*VerifiedAt` 已写入。
+ */
+export const confirmClientSavedContactVerification = (
+  data: ClientSavedContactVerificationConfirmInput,
+  config?: RequestConfig,
+) => request<ClientSafeProfile>({
+  method: 'POST',
+  url: '/client-auth/profile/contact-verification/confirm',
   data,
   ...config,
 })

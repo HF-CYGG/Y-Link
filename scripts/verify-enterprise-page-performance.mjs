@@ -48,9 +48,14 @@ const performanceBudget = {
     'image-tools': 80,
     'qr-code': 60,
   },
+  /**
+   * OrderEntryView：#68-#74 引入 SKU 选择、草稿商品对账后接近 30 KB 上限；
+   * #75 客户部门下拉与自由录入另增约 2.0 KB（main@6dc428b 上实测 25.13 → 27.15 KB），
+   * 合并后实测 30.75 KB，按当前值重设为 32 KB，保留约 4% 余量继续约束开单页主包增长。
+   */
   routeChunkMaxKB: {
     DashboardView: 20,
-    OrderEntryView: 30,
+    OrderEntryView: 32,
     OrderListView: 30,
     ProductCenterView: 25,
     UserCenterView: 40,

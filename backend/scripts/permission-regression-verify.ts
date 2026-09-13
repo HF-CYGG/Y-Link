@@ -812,6 +812,23 @@ async function main() {
     )
     pass('操作员越权读取审计日志被拦截')
 
+    const operatorDepartmentOptions = await expectJsonOk<{ options: Array<{ nodeId: string; label: string; path: string }> }>(
+      () =>
+        requestLocalHttp(`${baseUrl}/api/orders/department-options`, {
+          headers: { Authorization: `Bearer ${operatorToken}` },
+        }),
+      '操作员读取开单客户部门选项',
+    )
+    assert.ok(Array.isArray(operatorDepartmentOptions.options), '开单客户部门选项应返回 options 数组')
+    await expectJsonForbidden(
+      () =>
+        requestLocalHttp(`${baseUrl}/api/orders/department-options`, {
+          headers: { Authorization: `Bearer ${supplierToken}` },
+        }),
+      '供货方越权读取开单客户部门选项',
+    )
+    pass('开单客户部门选项仅对具备 orders:create 的账号开放')
+
     await expectJsonForbidden(
       () =>
         requestLocalHttp(`${baseUrl}/api/data-maintenance/db-migration/runtime-override`, {

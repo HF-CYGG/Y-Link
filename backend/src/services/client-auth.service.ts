@@ -6,7 +6,7 @@
  * 3. 关键认证动作会结合审计日志、图形验证码和系统配置，兼顾安全性、可维护性与业务扩展空间。
  */
 
-import { LessThan, type EntityManager } from 'typeorm'
+import { IsNull, LessThan, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { env } from '../config/env.js'
@@ -40,6 +40,7 @@ import { customerServiceRealtimeService } from './customer-service-realtime.serv
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { systemConfigService, type VerificationProviderConfigsResult } from './system-config.service.js'
 import { clientStaffInviteCodeService } from './client-staff-invite-code.service.js'
+import { maskMobileVerificationTarget } from './sms-verification-record.service.js'
 import { verificationCodeService } from './verification-code.service.js'
 import { EphemeralTicketStore } from '../utils/ephemeral-ticket-store.js'
 import {
@@ -1144,7 +1145,127 @@ class ClientAuthService {
     }
   }
 
-  async updateProfile(auth: ClientAuthContext, input: ClientUpdateProfileInput, manager?: EntityManager) {
+  /**
+   * 联系方式脱敏：审计只保留可辨识的片段，不落完整号码或邮箱。
+   */
+  private maskContactTarget(channel: 'mobile' | 'email', target: string) {
+    if (channel === 'mobile') {
+      return maskMobileVerificationTarget(target)
+    }
+    const [localPart = '', domain = ''] = target.split('@')
+    return `${localPart.slice(0, 1)}***@${domain}`
+  }
+
+  /**
+   * 读取当前用户已保存的联系方式，并校验补认证的前置条件：
+   * - 目标只从数据库读取，不接受客户端传入，避免借接口向任意号码或邮箱发码；
+   * - 部门共享账号资料由管理员维护，不开放补认证；
+   * - 联系方式为空、已认证或对应验证码通道未就绪时直接拒绝（verifyCode 本身不检查通道状态）。
+   */
+  private async loadSavedContactForVerification(auth: ClientAuthContext, channel: 'mobile' | 'email') {
+    const user = await this.userRepo.findOne({ where: { id: auth.userId } })
+    if (!user) {
+      throw new BizError('当前用户不存在', 404)
+    }
+    if (user.accountType === 'department') {
+      throw new BizError('部门账号资料由管理员维护', 403)
+    }
+    const channelLabel = channel === 'mobile' ? '手机号' : '邮箱'
+    const storedTarget = channel === 'mobile' ? user.mobile : user.email
+    if (!storedTarget?.trim()) {
+      throw new BizError(`请先保存${channelLabel}后再验证`, 400)
+    }
+    if (channel === 'mobile' ? user.mobileVerifiedAt : user.emailVerifiedAt) {
+      throw new BizError(`当前${channelLabel}已认证，无需重复验证`, 409)
+    }
+    const capabilities = await this.getVerificationCapabilities()
+    if (!capabilities.channels[channel]) {
+      throw new BizError(`当前${channelLabel}验证码通道未启用，暂不能验证`, 400)
+    }
+    return {
+      user,
+      storedTarget,
+      target: normalizeClientVerificationTarget(channel, storedTarget),
+      channelLabel,
+    }
+  }
+
+  /**
+   * 向当前已保存的联系方式发送认证验证码：
+   * - 复用 `profile_update` 场景，沿用既有有效期、错误次数与阿里云模板配置；
+   * - 发送频控按已保存目标计桶，与资料改绑发码共用同一套限流。
+   */
+  async sendSavedContactCode(auth: ClientAuthContext, channel: 'mobile' | 'email', requestMeta: RequestMeta) {
+    const { target } = await this.loadSavedContactForVerification(auth, channel)
+    await authSecurityService.guardVerificationCodeSendRequest(requestMeta, target, channel)
+    return verificationCodeService.sendCode({
+      channel,
+      target,
+      scene: 'profile_update',
+      requestMeta,
+    })
+  }
+
+  /**
+   * 确认当前已保存的联系方式：
+   * 1. 复核前置条件与通道状态后校验验证码；
+   * 2. 在事务内按“号码未变且仍未认证”条件写入认证时间，防止验证期间联系方式被改掉却仍被标记；
+   * 3. 审计仅记录通道与脱敏目标，不记录验证码。
+   */
+  async confirmSavedContact(
+    auth: ClientAuthContext,
+    input: { channel: 'mobile' | 'email'; code: string },
+    requestMeta?: RequestMeta,
+  ) {
+    const { user, storedTarget, target, channelLabel } = await this.loadSavedContactForVerification(auth, input.channel)
+    await verificationCodeService.verifyCode({
+      channel: input.channel,
+      target,
+      scene: 'profile_update',
+      code: input.code,
+    })
+
+    const contactProperty = input.channel === 'mobile' ? 'mobile' : 'email'
+    const verifiedProperty = input.channel === 'mobile' ? 'mobileVerifiedAt' : 'emailVerifiedAt'
+    return runInTransaction(async (manager) => {
+      const repository = manager.getRepository(ClientUser)
+      await repository.createQueryBuilder()
+        .update(ClientUser)
+        .set({ [verifiedProperty]: new Date() } as Partial<ClientUser>)
+        .where({ id: user.id, [contactProperty]: storedTarget, [verifiedProperty]: IsNull() })
+        .execute()
+      const refreshed = await repository.findOne({ where: { id: user.id } })
+      // 不依赖各驱动 affected 行数口径，直接回读确认：号码仍一致且已写入认证时间才算成功。
+      if (!refreshed || refreshed[contactProperty] !== storedTarget || !refreshed[verifiedProperty]) {
+        throw new BizError(`${channelLabel}已变更，请刷新资料后重试`, 409)
+      }
+      await auditService.record({
+        actionType: 'client_user.verify_contact',
+        actionLabel: '客户端认证联系方式',
+        targetType: 'client_user',
+        targetId: refreshed.id,
+        actor: {
+          userId: refreshed.id,
+          username: refreshed.email ?? refreshed.mobile ?? refreshed.realName,
+          displayName: refreshed.realName,
+        },
+        requestMeta,
+        detail: {
+          source: 'web',
+          channel: input.channel,
+          target: this.maskContactTarget(input.channel, target),
+        },
+      }, manager)
+      return this.toClientProfile(refreshed)
+    })
+  }
+
+  async updateProfile(
+    auth: ClientAuthContext,
+    input: ClientUpdateProfileInput,
+    manager?: EntityManager,
+    requestMeta?: RequestMeta,
+  ) {
     const userRepository = manager?.getRepository(ClientUser) ?? this.userRepo
     const userQuery = userRepository.createQueryBuilder('user')
       .addSelect('user.passwordHash')
@@ -1197,17 +1318,26 @@ class ClientAuthService {
       })
     }
 
-    const identityChanged = (!isDirectoryTeacher && !usernameUnchanged && username.value !== user.realName)
-      || mobileChanged
-      || emailChanged
-    if (!isDirectoryTeacher && !usernameUnchanged) user.realName = username.value
-    user.mobile = mobile
-    user.email = email
-    if (mobileChanged) user.mobileVerifiedAt = mobile && capabilities.channels.mobile ? new Date() : null
-    if (emailChanged) user.emailVerifiedAt = email && capabilities.channels.email ? new Date() : null
+    const usernameChanged = !isDirectoryTeacher && !usernameUnchanged && username.value !== user.realName
+    const identityChanged = usernameChanged || mobileChanged || emailChanged
+    // 只写回实际变化的字段：整实体 save 会用本次读取的陈旧认证时间覆盖并发补认证写入的结果。
+    const profilePatch: Partial<ClientUser> = {}
+    if (usernameChanged) profilePatch.realName = username.value
+    if (mobileChanged) {
+      profilePatch.mobile = mobile
+      profilePatch.mobileVerifiedAt = mobile && capabilities.channels.mobile ? new Date() : null
+    }
+    if (emailChanged) {
+      profilePatch.email = email
+      profilePatch.emailVerifiedAt = email && capabilities.channels.email ? new Date() : null
+    }
 
     const persist = async (transactionManager: EntityManager) => {
-      const savedUser = await transactionManager.getRepository(ClientUser).save(user)
+      const repository = transactionManager.getRepository(ClientUser)
+      if (Object.keys(profilePatch).length > 0) {
+        await repository.update({ id: user.id }, profilePatch)
+      }
+      const savedUser = await repository.findOneByOrFail({ id: user.id })
       if (identityChanged) {
         await transactionManager.getRepository(ClientUserSession).delete({ userId: savedUser.id })
         await transactionManager.getRepository(ClientMobileSession).createQueryBuilder()
@@ -1215,6 +1345,29 @@ class ClientAuthService {
           .set({ revokedAt: new Date(), revokeReason: 'user_logout_all' })
           .where('client_user_id = :userId AND revoked_at IS NULL', { userId: savedUser.id })
           .execute()
+      }
+      // Web 端无外层编排事务时在此写审计；Mobile 端由 mobile-auth.service 在外层事务内自行记录，避免重复。
+      if (!manager) {
+        const changedFields = [
+          usernameChanged ? 'username' : null,
+          mobileChanged ? 'mobile' : null,
+          emailChanged ? 'email' : null,
+        ].filter((field): field is 'username' | 'mobile' | 'email' => field !== null)
+        if (changedFields.length > 0) {
+          await auditService.record({
+            actionType: 'client_user.update_profile',
+            actionLabel: '客户端更新个人资料',
+            targetType: 'client_user',
+            targetId: savedUser.id,
+            actor: {
+              userId: savedUser.id,
+              username: savedUser.email ?? savedUser.mobile ?? savedUser.realName,
+              displayName: savedUser.realName,
+            },
+            requestMeta,
+            detail: { source: 'web', changedFields },
+          }, transactionManager)
+        }
       }
       return { ...this.toClientProfile(savedUser), requiresRelogin: identityChanged || undefined }
     }

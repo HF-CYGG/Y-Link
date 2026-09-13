@@ -20,6 +20,7 @@ import {
   clientLogout,
   clientRegister,
   clientUpdateProfile,
+  confirmClientSavedContactVerification,
   getClientMe,
   resetClientPassword,
   sendClientVerificationCode,
@@ -279,6 +280,20 @@ export const useClientAuthStore = defineStore('client-auth', () => {
     return profile
   }
 
+  /**
+   * 确认当前已保存的联系方式：
+   * - 认证不改变身份资料，不会撤销会话，成功后直接刷新本地资料快照中的认证时间。
+   */
+  const confirmSavedContact = async (payload: { channel: 'mobile' | 'email'; code: string }) => {
+    const profile = await confirmClientSavedContactVerification(payload)
+    currentUser.value = profile
+    persistClientAuthState({
+      user: toUserSnapshot(profile),
+      expiresAt: expiresAt.value,
+    })
+    return profile
+  }
+
   return {
     currentUser,
     expiresAt,
@@ -293,6 +308,7 @@ export const useClientAuthStore = defineStore('client-auth', () => {
     requestPasswordResetToken,
     confirmPasswordReset,
     updateProfile,
+    confirmSavedContact,
     clearAuthState,
   }
 })

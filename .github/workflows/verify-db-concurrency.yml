@@ -1,6 +1,9 @@
 # 模块说明：GitHub Pull Request 必要检查
 # 文件职责：只运行 Web/后端构建和秒级关键契约，尽快确认提交具备合入基础。
 # 维护说明：Ruleset 要求的状态名是 `verify`，不得改名；Docker、数据库迁移、并发与依赖审计改在本地按改动范围执行。
+# 提速说明：后端依赖中的 sqlite3 安装时会触发 prebuild-install / node-gyp 编译，冷安装约 85 秒，
+#           因此按「系统 + 架构 + 实际 Node 版本 + 后端 lockfile」缓存 backend/node_modules，命中时跳过安装；
+#           根 Web 依赖冷安装仅约 9 秒且体积大，继续走 npm 下载缓存，避免解包耗时反超安装。
 
 name: PR 必要检查
 
@@ -30,6 +33,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: 安装 Node.js
+        id: setup-node
         uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -39,11 +43,21 @@ jobs:
             package-lock.json
             backend/package-lock.json
 
+      # sqlite3 等原生模块与 Node ABI 绑定，缓存键必须包含 setup-node 实际解析出的完整版本号。
+      # main 分支 push 也会运行本工作流并写入缓存，PR 分支可直接复用 main 的缓存。
+      - name: 恢复后端依赖目录缓存
+        id: backend-deps-cache
+        uses: actions/cache@v4
+        with:
+          path: backend/node_modules
+          key: backend-node-modules-${{ runner.os }}-${{ runner.arch }}-node${{ steps.setup-node.outputs.node-version }}-${{ hashFiles('backend/package-lock.json') }}
+
       - name: 安装根 Web 依赖
-        run: npm ci --workspaces=false
+        run: npm ci --workspaces=false --no-audit --no-fund
 
       - name: 安装后端依赖
-        run: npm --prefix ./backend ci
+        if: steps.backend-deps-cache.outputs.cache-hit != 'true'
+        run: npm --prefix ./backend ci --no-audit --no-fund
 
       - name: 检查文本编码
         run: npm run verify:text-encoding

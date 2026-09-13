@@ -12,6 +12,8 @@ import type {
   ClientRegisterResult,
   ClientResetPasswordInput,
   ClientSafeProfile,
+  ClientSavedContactVerificationConfirmInput,
+  ClientSavedContactVerificationSendInput,
   ClientUpdateProfileInput,
   ClientVerificationCodeSendInput,
   ClientVerificationCodeSendResult,
@@ -76,5 +78,19 @@ export const createClientAuthApi = (http: HttpAdapter) => ({
     options: ApiRequestOptions = {},
   ): Promise<ClientProfileVerificationCodeSendResult> {
     return http.request({ ...options, method: 'POST', url: '/client-auth/profile/verification-code/send', data })
+  },
+
+  sendSavedContactVerificationCode(
+    data: ClientSavedContactVerificationSendInput,
+    options: ApiRequestOptions = {},
+  ): Promise<ClientVerificationCodeSendResult> {
+    return http.request({ ...options, method: 'POST', url: '/client-auth/profile/contact-verification/send', data })
+  },
+
+  confirmSavedContactVerification(
+    data: ClientSavedContactVerificationConfirmInput,
+    options: ApiRequestOptions = {},
+  ): Promise<ClientSafeProfile> {
+    return http.request({ ...options, method: 'POST', url: '/client-auth/profile/contact-verification/confirm', data })
   },
 })

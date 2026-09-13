@@ -11,7 +11,7 @@ import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 
 import { useRouter } from 'vue-router'
 import { orderApi, productApi } from '@/api'
-import type { SubmitOrderPayload } from '@/api/modules/order'
+import type { OrderDepartmentOption, SubmitOrderPayload } from '@/api/modules/order'
 import type { ProductRecord } from '@/api/modules/product'
 import { useAppStore, useAuthStore } from '@/store'
 import pinia from '@/store/pinia'
@@ -96,6 +96,7 @@ export const useOrderEntryForm = () => {
     isSystemApplied: false,
     issuerName: defaultIssuerName.value,
     customerDepartmentName: '',
+    customerDepartmentNodeId: '',
     customerName: '',
     remark: '',
   })
@@ -117,6 +118,14 @@ export const useOrderEntryForm = () => {
    */
   const productsLoading = ref(false)
   const productCandidatesReady = ref(false)
+  /**
+   * 客户部门选项：
+   * - 来自系统部门配置的只读快照，加载失败时不阻断开单，控件退化为纯手动录入；
+   * - customerDepartmentNodeId 始终由“当前部门名 + 选项”推导，不依赖草稿中保存的节点。
+   */
+  const departmentOptions = ref<OrderDepartmentOption[]>([])
+  const departmentOptionsLoading = ref(false)
+  const departmentOptionsLoadFailed = ref(false)
   const isSaving = ref(false)
   const deletingRowUids = ref<string[]>([])
 
@@ -283,6 +292,7 @@ export const useOrderEntryForm = () => {
       isSystemApplied: headerForm.isSystemApplied,
       issuerName: headerForm.issuerName,
       customerDepartmentName: headerForm.customerDepartmentName,
+      customerDepartmentNodeId: headerForm.customerDepartmentNodeId,
       customerName: headerForm.customerName,
       remark: headerForm.remark,
     },
@@ -441,6 +451,36 @@ export const useOrderEntryForm = () => {
     } finally {
       productsLoading.value = false
     }
+  }
+
+  /**
+   * 加载客户部门选项：
+   * - 失败时只记录状态并在控件下方提示，不弹阻断，保证手动录入仍可开单。
+   */
+  const loadDepartmentOptions = async () => {
+    departmentOptionsLoading.value = true
+    try {
+      departmentOptions.value = await orderApi.getOrderDepartmentOptions()
+      departmentOptionsLoadFailed.value = false
+    } catch {
+      departmentOptions.value = []
+      departmentOptionsLoadFailed.value = true
+    } finally {
+      departmentOptionsLoading.value = false
+    }
+  }
+
+  /**
+   * 按当前部门名推导系统部门节点：
+   * - 只有完整路径唯一命中配置选项时才携带节点 ID，由服务端解析规范路径；
+   * - 手动录入、同一路径对应多个节点、选项未加载或部门已删除时一律按手动录入处理。
+   */
+  const syncDepartmentNodeId = () => {
+    const departmentName = headerForm.customerDepartmentName.trim()
+    const matched = departmentName
+      ? departmentOptions.value.filter((option) => option.path === departmentName)
+      : []
+    headerForm.customerDepartmentNodeId = matched.length === 1 ? matched[0].nodeId : ''
   }
 
   /**
@@ -751,6 +791,7 @@ export const useOrderEntryForm = () => {
     headerForm.isSystemApplied = false
     headerForm.issuerName = defaultIssuerName.value
     headerForm.customerDepartmentName = ''
+    headerForm.customerDepartmentNodeId = ''
     headerForm.customerName = ''
     headerForm.remark = ''
     itemRows.value = [createBlankRow()]
@@ -826,7 +867,13 @@ export const useOrderEntryForm = () => {
       showAppWarning('部门单必须填写客户部门')
       return
     }
+    if (headerForm.customerDepartmentName.trim().length > 271) {
+      showAppWarning('客户部门名称不能超过 271 个字符')
+      return
+    }
 
+    // 记录本次是否携带系统部门节点，失败后据此刷新部门选项。
+    const submittedDepartmentNodeId = headerForm.orderType === 'department' ? headerForm.customerDepartmentNodeId : ''
     isSaving.value = true
     try {
       const submitItems = buildSubmitItems()
@@ -841,6 +888,8 @@ export const useOrderEntryForm = () => {
         isSystemApplied: isDepartmentOrder ? headerForm.isSystemApplied : false,
         issuerName: headerForm.issuerName.trim(),
         customerDepartmentName: isDepartmentOrder ? headerForm.customerDepartmentName.trim() || undefined : undefined,
+        // 仅选自系统部门配置时携带节点 ID；手动录入不携带，服务端原样保存且不回写配置。
+        customerDepartmentNodeId: isDepartmentOrder ? headerForm.customerDepartmentNodeId || undefined : undefined,
         customerName: headerForm.customerName.trim() || undefined,
         remark: headerForm.remark.trim() || undefined,
         items: submitItems,
@@ -859,6 +908,11 @@ export const useOrderEntryForm = () => {
         },
       })
     } catch (error) {
+      // 携带部门节点提交失败时刷新选项：节点若已被删除，本地旧选项随之移除，
+      // 重新推导后同一路径按手动录入提交，避免不刷新页面就无法恢复。
+      if (submittedDepartmentNodeId) {
+        void loadDepartmentOptions()
+      }
       void showCriticalErrorDialog(error, {
         title: '出库单保存失败',
         fallback: '保存失败，请稍后重试',
@@ -879,18 +933,33 @@ export const useOrderEntryForm = () => {
       headerForm.issuerName = defaultIssuerName.value
     }
     const restored = restoreDraft()
+    // 部门选项与商品候选并行加载；部门加载内部已兜底失败，只影响下拉提示，不影响商品草稿对账。
+    const departmentOptionsTask = loadDepartmentOptions()
     const productsLoaded = await loadProducts()
     if (productsLoaded) {
       reconcileRestoredDraftProducts()
     }
+    await departmentOptionsTask
     if (!restored) {
       itemRows.value = [createBlankRow()]
     }
+    syncDepartmentNodeId()
     draftPersistenceReady.value = true
     if (productsLoaded) {
       persistDraft()
     }
   })
+
+  /**
+   * 部门名或选项变化时重新推导节点：
+   * - 覆盖下拉选择、手动输入、草稿恢复与选项异步加载完成等全部入口。
+   */
+  watch(
+    [() => headerForm.customerDepartmentName, departmentOptions],
+    () => {
+      syncDepartmentNodeId()
+    },
+  )
 
   /**
    * 订单类型切换时清理依赖状态：
@@ -904,6 +973,7 @@ export const useOrderEntryForm = () => {
         headerForm.hasCustomerOrder = false
         headerForm.isSystemApplied = false
         headerForm.customerDepartmentName = ''
+        headerForm.customerDepartmentNodeId = ''
       }
     },
   )
@@ -990,6 +1060,9 @@ export const useOrderEntryForm = () => {
     itemRows,
     products,
     productsLoading,
+    departmentOptions,
+    departmentOptionsLoading,
+    departmentOptionsLoadFailed,
     isSaving,
     deletingRowUids,
     drawerVisible,

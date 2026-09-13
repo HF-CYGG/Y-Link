@@ -7,9 +7,12 @@
  * - 资料编辑与改密都属于当前登录用户自助操作；
  * - 本次改密口径需与客户端注册、找回密码保持一致，避免用户在不同入口看到不同规则；
  * - 改密成功后会强制清理客户端会话与订单缓存，避免共享设备上继续残留旧账号数据。
+ * - 联系方式验证分两类：未修改且未认证的已保存联系方式可在弹窗内独立“发送 → 验证”补认证；
+ *   修改后的新联系方式随“保存”提交验证码。两类控件都只在对应验证码通道就绪时展示，
+ *   通道状态以打开弹窗时读取的 capabilities 为准，读取失败按不可用处理；服务端会再次校验。
  */
 
-import { computed, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   CLIENT_PERSONAL_USERNAME_RULE_MESSAGE,
@@ -24,7 +27,9 @@ import pinia from '@/store/pinia'
 import { redirectToClientLogin } from '@/utils/client-auth-navigation'
 import {
   clientChangePassword,
+  getClientAuthCapabilities,
   sendClientProfileVerificationCode,
+  sendClientSavedContactVerificationCode,
 } from '@/api/modules/client-auth'
 import { showAppError, showAppInfo, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 import {
@@ -59,6 +64,24 @@ const profileForm = reactive({
 })
 const profileCodeSending = ref<'mobile' | 'email' | ''>('')
 
+type ContactChannel = 'mobile' | 'email'
+/**
+ * 联系方式验证展示模式：
+ * - verify_saved：已保存且未认证、未修改，可独立补认证；
+ * - verify_new：已修改为新值，验证码随保存提交；
+ * - channel_unavailable：已修改但通道未就绪，服务端必然拒绝，仅提示；
+ * - none：无需展示任何验证控件。
+ */
+type ContactVerificationMode = 'verify_saved' | 'verify_new' | 'channel_unavailable' | 'none'
+
+const CODE_RESEND_COOLDOWN_SECONDS = 60
+const verificationChannels = reactive<Record<ContactChannel, boolean>>({ mobile: false, email: false })
+const savedContactCodes = reactive<Record<ContactChannel, string>>({ mobile: '', email: '' })
+const savedContactSending = ref<ContactChannel | ''>('')
+const savedContactConfirming = ref<ContactChannel | ''>('')
+const codeCooldowns = reactive<Record<ContactChannel, number>>({ mobile: 0, email: 0 })
+let codeCooldownTimer: ReturnType<typeof setInterval> | null = null
+
 const isDepartmentAccount = computed(() => clientAuthStore.currentUser?.accountType === 'department')
 const isTeacherAccount = computed(() => (
   clientAuthStore.currentUser?.accountType === 'personal'
@@ -86,6 +109,65 @@ const profileUsernameUnchanged = computed(() => profileForm.username === current
 const profileUsernameRuleHint = computed(() => {
   if (isTeacherAccount.value || profileUsernameUnchanged.value) return ''
   return getPersonalClientUsernameRuleHint(profileForm.username)
+})
+
+const contactLabel = (channel: ContactChannel) => (channel === 'mobile' ? '手机号' : '邮箱')
+const readSavedContact = (channel: ContactChannel) => {
+  const saved = (channel === 'mobile' ? clientAuthStore.currentUser?.mobile : clientAuthStore.currentUser?.email)?.trim() ?? ''
+  return channel === 'email' ? saved.toLowerCase() : saved
+}
+const readFormContact = (channel: ContactChannel) => (
+  channel === 'mobile' ? profileForm.mobile.trim() : profileForm.email.trim().toLowerCase()
+)
+const resolveContactVerificationMode = (channel: ContactChannel): ContactVerificationMode => {
+  const formValue = readFormContact(channel)
+  if (formValue !== readSavedContact(channel)) {
+    // 清空联系方式无需验证码；改为新值时必须通道就绪才能提交。
+    if (!formValue) return 'none'
+    return verificationChannels[channel] ? 'verify_new' : 'channel_unavailable'
+  }
+  const verified = channel === 'mobile'
+    ? clientAuthStore.currentUser?.mobileVerifiedAt
+    : clientAuthStore.currentUser?.emailVerifiedAt
+  if (!formValue || verified || !verificationChannels[channel]) return 'none'
+  return 'verify_saved'
+}
+const mobileVerificationMode = computed(() => resolveContactVerificationMode('mobile'))
+const emailVerificationMode = computed(() => resolveContactVerificationMode('email'))
+
+/**
+ * 读取验证码通道状态：
+ * - 失败时按通道不可用处理（失败关闭），避免展示必然被服务端拒绝的验证码控件。
+ */
+const loadVerificationChannels = async () => {
+  try {
+    const capabilities = await getClientAuthCapabilities()
+    verificationChannels.mobile = Boolean(capabilities.channels?.mobile)
+    verificationChannels.email = Boolean(capabilities.channels?.email)
+  } catch {
+    verificationChannels.mobile = false
+    verificationChannels.email = false
+  }
+}
+
+const startCodeCooldown = (channel: ContactChannel) => {
+  codeCooldowns[channel] = CODE_RESEND_COOLDOWN_SECONDS
+  if (codeCooldownTimer) return
+  codeCooldownTimer = setInterval(() => {
+    codeCooldowns.mobile = Math.max(0, codeCooldowns.mobile - 1)
+    codeCooldowns.email = Math.max(0, codeCooldowns.email - 1)
+    if (!codeCooldowns.mobile && !codeCooldowns.email && codeCooldownTimer) {
+      clearInterval(codeCooldownTimer)
+      codeCooldownTimer = null
+    }
+  }, 1000)
+}
+
+onBeforeUnmount(() => {
+  if (codeCooldownTimer) {
+    clearInterval(codeCooldownTimer)
+    codeCooldownTimer = null
+  }
 })
 
 const rules: FormRules = {
@@ -168,6 +250,12 @@ const openProfileDialog = () => {
   profileForm.currentPassword = ''
   profileForm.mobileVerificationCode = ''
   profileForm.emailVerificationCode = ''
+  savedContactCodes.mobile = ''
+  savedContactCodes.email = ''
+  // 每次打开都重新读取通道状态，管理员调整验证码配置后无需刷新页面。
+  verificationChannels.mobile = false
+  verificationChannels.email = false
+  void loadVerificationChannels()
   profileDialogVisible.value = true
   profileFormRef.value?.clearValidate()
 }
@@ -225,6 +313,12 @@ const submitUpdateProfile = async () => {
   }
   const normalizedMobile = profileForm.mobile.trim()
   const normalizedEmail = profileForm.email.trim().toLowerCase()
+  for (const channel of ['mobile', 'email'] as const) {
+    if (resolveContactVerificationMode(channel) === 'channel_unavailable') {
+      showAppWarning(`${contactLabel(channel)}验证码通道未启用，暂不能修改${contactLabel(channel)}`)
+      return
+    }
+  }
 
   try {
     profileSubmitting.value = true
@@ -233,8 +327,13 @@ const submitUpdateProfile = async () => {
       mobile: normalizedMobile || undefined,
       email: normalizedEmail || undefined,
       currentPassword: profileForm.currentPassword,
-      mobileVerificationCode: profileForm.mobileVerificationCode || undefined,
-      emailVerificationCode: profileForm.emailVerificationCode || undefined,
+      // 只有修改为新值时才提交验证码，避免把补认证输入误当作改绑验证码。
+      mobileVerificationCode: mobileVerificationMode.value === 'verify_new'
+        ? profileForm.mobileVerificationCode || undefined
+        : undefined,
+      emailVerificationCode: emailVerificationMode.value === 'verify_new'
+        ? profileForm.emailVerificationCode || undefined
+        : undefined,
     })
     if (profile.requiresRelogin) {
       showAppSuccess('资料更新成功，请重新登录')
@@ -261,10 +360,48 @@ const sendProfileCode = async (channel: 'mobile' | 'email') => {
     profileCodeSending.value = channel
     await sendClientProfileVerificationCode({ channel, target })
     showAppSuccess('验证码已发送')
+    startCodeCooldown(channel)
   } catch (error: any) {
-    showAppError(error.message || '验证码发送失败；若通道未配置，可仅凭当前密码保存为未验证联系方式')
+    showAppError(error.message || '验证码发送失败，请稍后重试')
   } finally {
     profileCodeSending.value = ''
+  }
+}
+
+/**
+ * 向当前已保存的联系方式发送认证验证码：目标由服务端读取，前端只声明通道。
+ */
+const sendSavedContactCode = async (channel: ContactChannel) => {
+  try {
+    savedContactSending.value = channel
+    await sendClientSavedContactVerificationCode({ channel })
+    showAppSuccess(`验证码已发送至当前${contactLabel(channel)}`)
+    startCodeCooldown(channel)
+  } catch (error: any) {
+    showAppError(error.message || '验证码发送失败，请稍后重试')
+  } finally {
+    savedContactSending.value = ''
+  }
+}
+
+/**
+ * 确认当前已保存的联系方式：独立于“保存”，不需要当前密码，成功后资料卡片标签即时更新。
+ */
+const confirmSavedContactCode = async (channel: ContactChannel) => {
+  const code = savedContactCodes[channel].trim()
+  if (!code) {
+    showAppWarning('请输入验证码')
+    return
+  }
+  try {
+    savedContactConfirming.value = channel
+    await clientAuthStore.confirmSavedContact({ channel, code })
+    savedContactCodes[channel] = ''
+    showAppSuccess(`${contactLabel(channel)}验证成功`)
+  } catch (error: any) {
+    showAppError(error.message || '验证失败，请稍后重试')
+  } finally {
+    savedContactConfirming.value = ''
   }
 }
 
@@ -419,23 +556,83 @@ const sendProfileCode = async (channel: 'mobile' | 'email') => {
         </el-form-item>
         <el-form-item label="手机号" prop="mobile">
           <el-input v-model="profileForm.mobile" placeholder="请输入手机号" />
+          <!-- 已保存且未认证的手机号：独立补认证，不依赖保存资料 -->
+          <div v-if="mobileVerificationMode === 'verify_saved'" class="mt-2 w-full">
+            <p class="mb-1 text-xs text-slate-500">当前手机号未验证，验证后可用于找回密码</p>
+            <div class="flex w-full gap-2">
+              <el-input v-model="savedContactCodes.mobile" maxlength="8" placeholder="手机号验证码" />
+              <el-button
+                :loading="savedContactSending === 'mobile'"
+                :disabled="codeCooldowns.mobile > 0"
+                @click="sendSavedContactCode('mobile')"
+              >
+                {{ codeCooldowns.mobile > 0 ? `${codeCooldowns.mobile}s` : '发送' }}
+              </el-button>
+              <el-button
+                type="primary"
+                :loading="savedContactConfirming === 'mobile'"
+                @click="confirmSavedContactCode('mobile')"
+              >
+                验证
+              </el-button>
+            </div>
+          </div>
+          <p v-else-if="mobileVerificationMode === 'channel_unavailable'" class="mt-1 w-full text-xs text-amber-600">
+            手机号验证码通道未启用，暂不能修改手机号
+          </p>
         </el-form-item>
         <el-form-item label="邮箱" prop="email">
           <el-input v-model="profileForm.email" placeholder="请输入邮箱" />
+          <!-- 已保存且未认证的邮箱：独立补认证，不依赖保存资料 -->
+          <div v-if="emailVerificationMode === 'verify_saved'" class="mt-2 w-full">
+            <p class="mb-1 text-xs text-slate-500">当前邮箱未验证，验证后可用于找回密码</p>
+            <div class="flex w-full gap-2">
+              <el-input v-model="savedContactCodes.email" maxlength="8" placeholder="邮箱验证码" />
+              <el-button
+                :loading="savedContactSending === 'email'"
+                :disabled="codeCooldowns.email > 0"
+                @click="sendSavedContactCode('email')"
+              >
+                {{ codeCooldowns.email > 0 ? `${codeCooldowns.email}s` : '发送' }}
+              </el-button>
+              <el-button
+                type="primary"
+                :loading="savedContactConfirming === 'email'"
+                @click="confirmSavedContactCode('email')"
+              >
+                验证
+              </el-button>
+            </div>
+          </div>
+          <p v-else-if="emailVerificationMode === 'channel_unavailable'" class="mt-1 w-full text-xs text-amber-600">
+            邮箱验证码通道未启用，暂不能修改邮箱
+          </p>
         </el-form-item>
         <el-form-item label="当前密码" prop="currentPassword">
           <el-input v-model="profileForm.currentPassword" type="password" show-password placeholder="修改资料必须验证当前密码" />
         </el-form-item>
-        <el-form-item label="新手机号验证码（通道启用时必填）">
+        <el-form-item v-if="mobileVerificationMode === 'verify_new'" label="新手机号验证码">
           <div class="flex w-full gap-2">
             <el-input v-model="profileForm.mobileVerificationCode" maxlength="8" placeholder="手机号验证码" />
-            <el-button :loading="profileCodeSending === 'mobile'" @click="sendProfileCode('mobile')">发送</el-button>
+            <el-button
+              :loading="profileCodeSending === 'mobile'"
+              :disabled="codeCooldowns.mobile > 0"
+              @click="sendProfileCode('mobile')"
+            >
+              {{ codeCooldowns.mobile > 0 ? `${codeCooldowns.mobile}s` : '发送' }}
+            </el-button>
           </div>
         </el-form-item>
-        <el-form-item label="新邮箱验证码（通道启用时必填）">
+        <el-form-item v-if="emailVerificationMode === 'verify_new'" label="新邮箱验证码">
           <div class="flex w-full gap-2">
             <el-input v-model="profileForm.emailVerificationCode" maxlength="8" placeholder="邮箱验证码" />
-            <el-button :loading="profileCodeSending === 'email'" @click="sendProfileCode('email')">发送</el-button>
+            <el-button
+              :loading="profileCodeSending === 'email'"
+              :disabled="codeCooldowns.email > 0"
+              @click="sendProfileCode('email')"
+            >
+              {{ codeCooldowns.email > 0 ? `${codeCooldowns.email}s` : '发送' }}
+            </el-button>
           </div>
         </el-form-item>
       </el-form>

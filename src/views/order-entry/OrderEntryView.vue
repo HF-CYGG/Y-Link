@@ -29,6 +29,9 @@ const {
   itemRows,
   products,
   productsLoading,
+  departmentOptions,
+  departmentOptionsLoading,
+  departmentOptionsLoadFailed,
   isSaving,
   deletingRowUids,
   drawerVisible,
@@ -78,7 +81,13 @@ const totalAmountText = computed(() => toMoney(totalAmount.value))
     description="支持桌面端键盘流录入，并针对平板与手机提供卡片 + 抽屉式编辑体验。"
   >
     <div class="space-y-4">
-      <OrderEntryHeaderCard :model="headerForm" :is-phone="isPhone" />
+      <OrderEntryHeaderCard
+        :model="headerForm"
+        :is-phone="isPhone"
+        :department-options="departmentOptions"
+        :department-options-loading="departmentOptionsLoading"
+        :department-options-load-failed="departmentOptionsLoadFailed"
+      />
 
       <OrderEntryItemsEditor
         v-model:drawer-visible="drawerVisible"

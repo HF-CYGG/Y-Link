@@ -281,6 +281,195 @@ async function main() {
     assert.equal(savedDepartmentOrder.customerDepartmentName, '后勤保障部')
     pass('issuerName 默认逻辑与自定义覆盖逻辑生效')
 
+    // Issue #75：客户部门支持系统配置下拉与自由录入。
+    // 系统配置写入会锁定并校验真实启用的系统账号，操作者必须先落库。
+    const persistedAdmin = await AppDataSource.getRepository(SysUser).save({
+      username: 'task2admin',
+      passwordHash: 'test-only-password-hash',
+      displayName: 'Task2管理员',
+      email: null,
+      role: 'admin',
+      status: 'enabled',
+    })
+    const adminActor: AuthUserContext = {
+      ...mockActor,
+      userId: persistedAdmin.id,
+      username: persistedAdmin.username,
+      displayName: persistedAdmin.displayName,
+      role: 'admin',
+    }
+    await systemConfigService.updateClientDepartmentConfigs(
+      {
+        tree: [
+          {
+            id: 'task2_dept_logistics',
+            label: '后勤保障部',
+            children: [{ id: 'task2_dept_logistics_repair', label: '维修组', children: [] }],
+          },
+          {
+            id: 'task2_dept_teaching',
+            label: '教学部',
+            children: [{ id: 'task2_dept_teaching_repair', label: '维修组', children: [] }],
+          },
+        ],
+      },
+      adminActor,
+    )
+    const departmentConfigRepo = AppDataSource.getRepository(SystemConfig)
+    const readDepartmentConfigValue = async () => (
+      await departmentConfigRepo.findOneByOrFail({ configKey: 'client.department.options' })
+    ).configValue
+    const departmentConfigBefore = await readDepartmentConfigValue()
+
+    const { options: departmentOptions } = await orderService.listDepartmentOptions()
+    assert.deepEqual(
+      departmentOptions.map((option) => option.path),
+      ['后勤保障部', '后勤保障部-维修组', '教学部', '教学部-维修组'],
+      '部门选项应按完整路径展开系统部门配置',
+    )
+    assert.ok(
+      departmentOptions.every((option) => option.nodeId && option.label && option.path.endsWith(option.label)),
+      '部门选项应同时返回节点 ID、名称与完整路径',
+    )
+
+    const configDepartmentOrder = await orderService.submit(
+      {
+        idempotencyKey: `task2-department-node-${Date.now()}`,
+        orderType: 'department',
+        customerDepartmentName: '被篡改的部门文本',
+        customerDepartmentNodeId: 'task2_dept_teaching_repair',
+        items: [{ productId: String(createdProduct.id), qty: 1, unitPrice: 12.5 }],
+      },
+      mockActor,
+    )
+    const sameLabelDepartmentOrder = await orderService.submit(
+      {
+        idempotencyKey: `task2-department-same-label-${Date.now()}`,
+        orderType: 'department',
+        customerDepartmentName: '维修组',
+        customerDepartmentNodeId: 'task2_dept_logistics_repair',
+        items: [{ productId: String(createdProduct.id), qty: 1, unitPrice: 12.5 }],
+      },
+      mockActor,
+    )
+    assert.equal(
+      (await orderRepo.findOneOrFail({ where: { id: configDepartmentOrder.order.id } })).customerDepartmentName,
+      '教学部-维修组',
+      '选自系统配置的部门应以服务端解析的规范完整路径保存',
+    )
+    assert.equal(
+      (await orderRepo.findOneOrFail({ where: { id: sameLabelDepartmentOrder.order.id } })).customerDepartmentName,
+      '后勤保障部-维修组',
+      '同名不同路径的部门应按各自节点保存正确完整路径',
+    )
+
+    const manualDepartmentOrder = await orderService.submit(
+      {
+        idempotencyKey: `task2-department-manual-${Date.now()}`,
+        orderType: 'department',
+        customerDepartmentName: '临时外借部门',
+        items: [{ productId: String(createdProduct.id), qty: 1, unitPrice: 12.5 }],
+      },
+      mockActor,
+    )
+    assert.equal(
+      (await orderRepo.findOneOrFail({ where: { id: manualDepartmentOrder.order.id } })).customerDepartmentName,
+      '临时外借部门',
+      '手动录入的部门应原样保存为订单快照',
+    )
+    assert.equal(await readDepartmentConfigValue(), departmentConfigBefore, '手动录入部门不得写入或修改系统部门配置')
+
+    const walkinWithNodeOrder = await orderService.submit(
+      {
+        idempotencyKey: `task2-walkin-node-${Date.now()}`,
+        orderType: 'walkin',
+        customerDepartmentNodeId: 'task2_dept_teaching_repair',
+        items: [{ productId: String(createdProduct.id), qty: 1, unitPrice: 12.5 }],
+      },
+      mockActor,
+    )
+    assert.equal(
+      (await orderRepo.findOneOrFail({ where: { id: walkinWithNodeOrder.order.id } })).customerDepartmentName,
+      null,
+      '散客单必须忽略部门节点',
+    )
+
+    await expectBizError(
+      '已删除部门节点校验',
+      () =>
+        orderService.submit(
+          {
+            idempotencyKey: `task2-department-missing-node-${Date.now()}`,
+            orderType: 'department',
+            customerDepartmentName: '已删除部门',
+            customerDepartmentNodeId: 'task2_dept_removed',
+            items: [{ productId: String(createdProduct.id), qty: 1, unitPrice: 12.5 }],
+          },
+          mockActor,
+        ),
+      400,
+      '已从系统配置中移除',
+      BizError,
+    )
+    await expectBizError(
+      '部门单未选择也未填写部门校验',
+      () =>
+        orderService.submit(
+          {
+            idempotencyKey: `task2-department-empty-${Date.now()}`,
+            orderType: 'department',
+            items: [{ productId: String(createdProduct.id), qty: 1, unitPrice: 12.5 }],
+          },
+          mockActor,
+        ),
+      400,
+      '必须填写客户部门',
+      BizError,
+    )
+    assert.equal(await readDepartmentConfigValue(), departmentConfigBefore, '开单链路全程不得修改系统部门配置')
+
+    // 幂等重试：首单落库后部门节点被删除，同一幂等键重试仍须返回既有订单而不是因解析部门失败。
+    const retryDepartmentPayload = {
+      idempotencyKey: `task2-department-retry-${Date.now()}`,
+      orderType: 'department',
+      customerDepartmentName: '教学部-维修组',
+      customerDepartmentNodeId: 'task2_dept_teaching_repair',
+      items: [{ productId: String(createdProduct.id), qty: 1, unitPrice: 12.5 }],
+    }
+    const firstRetrySubmit = await orderService.submit(retryDepartmentPayload, mockActor)
+    await systemConfigService.updateClientDepartmentConfigs(
+      {
+        tree: [
+          {
+            id: 'task2_dept_logistics',
+            label: '后勤保障部',
+            children: [{ id: 'task2_dept_logistics_repair', label: '维修组', children: [] }],
+          },
+        ],
+      },
+      adminActor,
+    )
+    const retriedSubmit = await orderService.submit(retryDepartmentPayload, mockActor)
+    assert.equal(retriedSubmit.order.id, firstRetrySubmit.order.id, '幂等重试命中既有订单时不得因部门节点已删除而失败')
+    await expectBizError(
+      '部门节点删除后新单仍须拦截',
+      () => orderService.submit({ ...retryDepartmentPayload, idempotencyKey: `task2-department-retry-new-${Date.now()}` }, mockActor),
+      400,
+      '已从系统配置中移除',
+      BizError,
+    )
+
+    const orderEntryFormSource = fs.readFileSync(
+      path.resolve(process.cwd(), '..', 'src', 'views', 'order-entry', 'composables', 'useOrderEntryForm.ts'),
+      'utf8',
+    )
+    assert.match(
+      orderEntryFormSource,
+      /catch \(error\) \{[\s\S]*?if \(submittedDepartmentNodeId\) \{[\s\S]*?loadDepartmentOptions\(\)/,
+      '携带部门节点提交失败后必须刷新部门选项，避免已删除节点被重复携带',
+    )
+    pass('客户部门支持系统配置规范路径、同名不同路径、手动录入、散客忽略与已删除节点拦截')
+
     await expectBizError(
       '非法 orderType 校验',
       () =>
