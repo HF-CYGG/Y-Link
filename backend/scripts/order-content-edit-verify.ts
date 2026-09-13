@@ -95,9 +95,11 @@ async function main() {
     { BaseProduct },
     { BaseProductSku },
     { BizOutboundOrder },
+    { BizOutboundOrderItem },
     { InventoryLog },
     { OrderRevision },
     { SysAuditLog },
+    { SysUser },
     { orderService },
     { systemConfigService },
     { auditService },
@@ -106,9 +108,11 @@ async function main() {
     import('../src/entities/base-product.entity.js'),
     import('../src/entities/base-product-sku.entity.js'),
     import('../src/entities/biz-outbound-order.entity.js'),
+    import('../src/entities/biz-outbound-order-item.entity.js'),
     import('../src/entities/inventory-log.entity.js'),
     import('../src/entities/order-revision.entity.js'),
     import('../src/entities/sys-audit-log.entity.js'),
+    import('../src/entities/sys-user.entity.js'),
     import('../src/services/order.service.js'),
     import('../src/services/system-config.service.js'),
     import('../src/services/audit.service.js'),
@@ -133,8 +137,29 @@ async function main() {
     const productRepo = AppDataSource.getRepository(BaseProduct)
     const skuRepo = AppDataSource.getRepository(BaseProductSku)
     const orderRepo = AppDataSource.getRepository(BizOutboundOrder)
+    const itemRepo = AppDataSource.getRepository(BizOutboundOrderItem)
     const inventoryLogRepo = AppDataSource.getRepository(InventoryLog)
     const revisionRepo = AppDataSource.getRepository(OrderRevision)
+
+    const persistedActor = await AppDataSource.getRepository(SysUser).save({
+      username: actor.username,
+      passwordHash: 'test-only-password-hash',
+      displayName: actor.displayName,
+      email: null,
+      role: actor.role,
+      status: actor.status,
+      lastLoginAt: null,
+      deactivatedAt: null,
+      deactivationReason: null,
+      deactivatedByUserId: null,
+      deactivatedByUsername: null,
+      deactivatedByDisplayName: null,
+      restoredAt: null,
+      restoredByUserId: null,
+      restoredByUsername: null,
+      restoredByDisplayName: null,
+    })
+    actor.userId = persistedActor.id
 
     let productSequence = 0
     const createProduct = async (stock = 20, reserved = 3) => {
@@ -363,8 +388,32 @@ async function main() {
     await orderService.restoreById(created.order.id, actor)
     assert.equal((await contentApi.listRevisions(created.order.id)).length, 2, '删除和恢复不得删除修订时间线')
     await orderService.softDeleteById(created.order.id, actor, created.order.businessNo)
-    await orderService.purgeById(created.order.id, actor, created.order.businessNo)
-    assert.equal((await contentApi.listRevisions(created.order.id)).length, 2, '永久删除后修订时间线仍必须可查')
+    const stockBeforeBlockedPurge = (await productRepo.findOneByOrFail({ id: fixture.product.id })).currentStock
+    const skuStockBeforeBlockedPurge = (await skuRepo.findOneByOrFail({ id: fixture.sku.id })).currentStock
+    const itemCountBeforeBlockedPurge = await itemRepo.countBy({ orderId: created.order.id })
+    const logCountBeforeBlockedPurge = await inventoryLogRepo.countBy({ refType: 'biz_outbound_order', refId: created.order.id })
+    await expectFailure(() => orderService.purgeById(created.order.id, actor, created.order.businessNo), /库存影响|永久删除/)
+    assert.ok(await orderRepo.findOneBy({ id: created.order.id }), '被库存影响的手工单永久删除失败后必须完整保留')
+    assert.equal((await productRepo.findOneByOrFail({ id: fixture.product.id })).currentStock, stockBeforeBlockedPurge)
+    assert.equal((await skuRepo.findOneByOrFail({ id: fixture.sku.id })).currentStock, skuStockBeforeBlockedPurge)
+    assert.equal(await itemRepo.countBy({ orderId: created.order.id }), itemCountBeforeBlockedPurge)
+    assert.equal(await inventoryLogRepo.countBy({ refType: 'biz_outbound_order', refId: created.order.id }), logCountBeforeBlockedPurge)
+    assert.equal((await contentApi.listRevisions(created.order.id)).length, 2, '阻止永久删除后修订时间线仍必须可查')
+
+    const staleContentFixture = await createProduct()
+    const staleContentOrder = await submit(staleContentFixture.product.id, staleContentFixture.sku.id, 1)
+    const staleActor = await AppDataSource.getRepository(SysUser).findOneByOrFail({ id: actor.userId })
+    staleActor.status = 'disabled'
+    await AppDataSource.getRepository(SysUser).save(staleActor)
+    await expectFailure(() => contentApi.updateContent(staleContentOrder.order.id, {
+      expectedVersion: 1,
+      reason: '停用账号不应继续编辑',
+      items: [{ productId: staleContentFixture.product.id, skuId: staleContentFixture.sku.id, qty: 2, unitPrice: 10 }],
+    }, actor), /停用|注销/)
+    assert.equal((await productRepo.findOneByOrFail({ id: staleContentFixture.product.id })).currentStock, 19)
+    const staleFixture = await createProduct()
+    await expectFailure(() => submit(staleFixture.product.id, staleFixture.sku.id, 1), /停用|注销/)
+    assert.equal((await productRepo.findOneByOrFail({ id: staleFixture.product.id })).currentStock, 20)
 
     console.log('[order-content-edit-verify] PASS')
   } finally {

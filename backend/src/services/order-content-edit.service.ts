@@ -24,6 +24,7 @@ import { auditService } from './audit.service.js'
 import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
 import { orderBusinessNoService } from './order-business-no.service.js'
 import type { OrderType } from './order-serial.service.js'
+import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 
 export interface OrderContentItemInput {
   productId: string
@@ -163,6 +164,7 @@ export class OrderContentEditService {
     actor: AuthUserContext,
     requestMeta?: RequestMeta,
   ) {
+    await lockActiveSysAccountForBusiness(manager, actor.userId)
     const orderQuery = manager.getRepository(BizOutboundOrder)
       .createQueryBuilder('order')
       .where('order.id = :orderId', { orderId })

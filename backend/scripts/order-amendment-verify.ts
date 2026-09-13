@@ -67,6 +67,7 @@ async function main() {
     { BaseProductSku },
     { BizOutboundOrder },
     { BusinessSequence },
+    { SysUser },
     amendmentOccupancyModule,
     amendmentRevisionModule,
     { orderService },
@@ -78,6 +79,7 @@ async function main() {
     import('../src/entities/base-product-sku.entity.js'),
     import('../src/entities/biz-outbound-order.entity.js'),
     import('../src/entities/business-sequence.entity.js'),
+    import('../src/entities/sys-user.entity.js'),
     import('../src/entities/order-business-no-occupancy.entity.js').catch(() => ({})),
     import('../src/entities/order-revision.entity.js').catch(() => ({})),
     import('../src/services/order.service.js'),
@@ -161,6 +163,26 @@ async function main() {
     await AppDataSource.synchronize()
     await systemConfigService.ensureDefaultConfigs()
 
+    const persistedActor = await AppDataSource.getRepository(SysUser).save({
+      username: actor.username,
+      passwordHash: 'test-only-password-hash',
+      displayName: actor.displayName,
+      email: null,
+      role: actor.role,
+      status: actor.status,
+      lastLoginAt: null,
+      deactivatedAt: null,
+      deactivationReason: null,
+      deactivatedByUserId: null,
+      deactivatedByUsername: null,
+      deactivatedByDisplayName: null,
+      restoredAt: null,
+      restoredByUserId: null,
+      restoredByUsername: null,
+      restoredByDisplayName: null,
+    })
+    actor.userId = persistedActor.id
+
     const productRepo = AppDataSource.getRepository(BaseProduct)
     const product = await productRepo.save(productRepo.create({
       productCode: `ISSUE72-${verifySeed}`,
@@ -217,6 +239,37 @@ async function main() {
     const originalShowNo = originalWalkin.showNo
     assert.equal(await occupancyRepo.count(), 2, '新单业务号必须立即永久占用')
 
+    const cursorExampleTarget = await submitOrder('cursor-example-target', 'walkin')
+    await sequenceRepo.update({ sequenceKey: 'order.business.walkin' }, { currentValue: 3 })
+    await amendmentApi.commitAmendments!({ amendments: [{
+      orderId: cursorExampleTarget.order.id,
+      editVersion: 1,
+      businessNo: 'hyyz000007',
+      reason: '验证 003 下调后重编为 007',
+    }] }, actor)
+    const cursorAfterSeven = await submitOrder('cursor-example-eight', 'walkin')
+    assert.equal((cursorAfterSeven.order as typeof cursorAfterSeven.order & { businessNo: string }).businessNo, 'hyyz000008', '003→007 后下一单必须为 008')
+    await sequenceRepo.update({ sequenceKey: 'order.business.walkin' }, { currentValue: 15 })
+    await amendmentApi.commitAmendments!({ amendments: [{
+      orderId: cursorExampleTarget.order.id,
+      editVersion: 2,
+      businessNo: 'hyyz000009',
+      reason: '验证 015 向下重编为 009',
+    }] }, actor)
+    const cursorAfterNine = await submitOrder('cursor-example-ten', 'walkin')
+    assert.equal((cursorAfterNine.order as typeof cursorAfterNine.order & { businessNo: string }).businessNo, 'hyyz000010', '015→009 后下一单必须为 010')
+
+    await assert.rejects(
+      () => amendmentApi.commitAmendments!({ amendments: [{
+        orderId: walkin.order.id,
+        editVersion: 1,
+        customerName: '空白原因不应生效',
+        reason: '   ',
+      }] }, actor),
+      (error: unknown) => error instanceof BizError && error.statusCode === 400 && /原因/.test(error.message),
+      '服务层必须拒绝空白修订原因',
+    )
+
     const previewInput: AmendmentInput = {
       orderId: walkin.order.id,
       editVersion: 1,
@@ -231,7 +284,7 @@ async function main() {
     assert.deepEqual(preview.items[0]?.blockingReasons, [])
     assert.deepEqual(preview.cursorPlans, [{
       namespace: 'hyyz',
-      beforeCursor: 1,
+      beforeCursor: 10,
       afterCursor: 123,
       nextBusinessNo: 'hyyz000124',
     }])
@@ -395,14 +448,36 @@ async function main() {
       reason: '专项验证永久留痕',
     }] }, actor)
     const purgeOrderUuid = purgeEntity.orderUuid
+    // 本段只验证永久删除后占号与 revision 留存；库存型新单由内容编辑专项断言禁止永久删除。
+    // 因此将隔离夹具标记为升级前 legacy_none，避免把两种删除语义混在同一断言中。
+    purgeEntity.inventoryMode = 'legacy_none'
+    await orderRepo.save(purgeEntity)
     await orderService.softDeleteById(purgeTarget.order.id, actor, purgeEntity.showNo)
     await orderService.purgeById(purgeTarget.order.id, actor, purgeEntity.showNo)
     assert.equal(await occupancyRepo.count({ where: { orderUuid: purgeOrderUuid } }), 2, '永久删除后新旧业务号占用都必须保留')
     assert.equal(await revisionRepo.count({ where: { orderUuid: purgeOrderUuid } }), 1, '永久删除后 revision 必须保留')
 
+    const staleActorTarget = await submitOrder('stale-actor-target', 'department')
+    const staleActorAccount = await AppDataSource.getRepository(SysUser).findOneByOrFail({ id: actor.userId })
+    staleActorAccount.status = 'disabled'
+    await AppDataSource.getRepository(SysUser).save(staleActorAccount)
+    await assert.rejects(
+      () => amendmentApi.commitAmendments!({ amendments: [{
+        orderId: staleActorTarget.order.id,
+        editVersion: 1,
+        remark: '停用账号不应写入',
+        reason: '验证事务内账号复核',
+      }] }, actor),
+      (error: unknown) => error instanceof BizError && error.statusCode === 409 && /停用|注销/.test(error.message),
+      '停用账号的陈旧请求不得提交订单修订',
+    )
+    assert.equal((await orderRepo.findOneByOrFail({ id: staleActorTarget.order.id })).remark, null)
+
     const routeSource = fs.readFileSync(path.resolve(process.cwd(), 'src', 'routes', 'order.routes.ts'), 'utf8')
     assert.match(routeSource, /\/amendments\/preview[\s\S]*requirePermission\('orders:update'\)/)
     assert.match(routeSource, /\/amendments['"][\s\S]*requirePermission\('orders:update'\)/)
+    assert.match(routeSource, /orderAmendmentCommitSchema[\s\S]*reason:\s*z\.string\(\)\.trim\(\)\.min\(1/, '修订提交路由必须强制非空原因')
+    assert.match(routeSource, /\/amendments\/preview[\s\S]*orderAmendmentBatchSchema\.parse/, '修订预览允许沿用可选原因 schema')
     const dashboardViewSource = fs.readFileSync(
       path.resolve(process.cwd(), '..', 'src', 'views', 'dashboard', 'DashboardView.vue'),
       'utf8',

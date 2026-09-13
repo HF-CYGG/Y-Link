@@ -73,6 +73,14 @@ const orderAmendmentBatchSchema = z.object({
   amendments: z.array(orderAmendmentSchema).min(1).max(100),
 })
 
+const orderAmendmentCommitSchema = orderAmendmentSchema.extend({
+  reason: z.string().trim().min(1, '请填写修订原因').max(500),
+})
+
+const orderAmendmentCommitBatchSchema = z.object({
+  amendments: z.array(orderAmendmentCommitSchema).min(1).max(100),
+})
+
 const updateOrderContentSchema = z.object({
   expectedVersion: z.number().int().positive(),
   reason: z.string().trim().min(1, '请填写修改原因').max(500),
@@ -174,7 +182,7 @@ orderRouter.post(
   requirePermission('orders:update'),
   asyncHandler(async (req, res) => {
     const authReq = req as AuthenticatedRequest
-    const payload = orderAmendmentBatchSchema.parse(req.body ?? {})
+    const payload = orderAmendmentCommitBatchSchema.parse(req.body ?? {})
     const data = await orderService.commitAmendments(payload, authReq.auth, extractRequestMeta(req))
     res.json({ code: 0, message: 'ok', data })
   }),

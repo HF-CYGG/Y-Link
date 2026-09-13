@@ -63,6 +63,7 @@ const reportFieldOptions: Record<ReportType, ReportFieldDefinition[]> = {
     { key: 'time', label: '时间', width: 20 },
     { key: 'tags', label: '标签', width: 20 },
     { key: 'productName', label: '商品名称', width: 28 },
+    { key: 'specText', label: '规格', width: 22 },
     { key: 'qty', label: '数量', width: 12, numeric: true },
     { key: 'unitPrice', label: '单价', width: 12, numeric: true },
     { key: 'amount', label: '总价', width: 14, numeric: true },
@@ -74,6 +75,7 @@ const reportFieldOptions: Record<ReportType, ReportFieldDefinition[]> = {
   kingdee: [
     { key: 'time', label: '时间', width: 20 },
     { key: 'productName', label: '商品名称', width: 28 },
+    { key: 'specText', label: '规格', width: 22 },
     { key: 'qty', label: '数量', width: 12, numeric: true },
     { key: 'unitPrice', label: '单价', width: 12, numeric: true },
     { key: 'amount', label: '金额', width: 14, numeric: true },
@@ -86,6 +88,7 @@ const reportFieldOptions: Record<ReportType, ReportFieldDefinition[]> = {
   walkin: [
     { key: 'time', label: '时间', width: 20 },
     { key: 'productName', label: '商品名称', width: 28 },
+    { key: 'specText', label: '规格', width: 22 },
     { key: 'qty', label: '数量', width: 12, numeric: true },
     { key: 'unitPrice', label: '单价', width: 12, numeric: true },
     { key: 'amount', label: '金额', width: 14, numeric: true },

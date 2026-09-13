@@ -489,6 +489,16 @@ async function main() {
       role: 'admin',
       sessionToken: 'report-inventory-admin-session',
     }
+    const persistedAdmin = await supplierRepo.save(supplierRepo.create({
+      username: adminActor.username,
+      passwordHash: 'verify-only',
+      displayName: adminActor.displayName,
+      email: null,
+      role: 'admin',
+      status: 'enabled',
+      lastLoginAt: null,
+    }))
+    adminActor.userId = String(persistedAdmin.id)
     const inbound = await inboundService.submitSupplierDelivery(supplierActor, {
       remark: '库存报表真实入库验证',
       items: [{ productId: lifecycleProduct.id, skuId: lifecycleSku.id, qty: 5 }],

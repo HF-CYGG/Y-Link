@@ -58,6 +58,7 @@ async function main() {
     { ClientUser },
     { O2oPreorder },
     { SystemConfig },
+    { SysUser },
     { orderSerialService },
     { orderService },
     { systemConfigService },
@@ -71,6 +72,7 @@ async function main() {
       import('../src/entities/client-user.entity.js'),
       import('../src/entities/o2o-preorder.entity.js'),
       import('../src/entities/system-config.entity.js'),
+      import('../src/entities/sys-user.entity.js'),
       import('../src/services/order-serial.service.js'),
       import('../src/services/order.service.js'),
       import('../src/services/system-config.service.js'),
@@ -84,6 +86,16 @@ async function main() {
     await AppDataSource.synchronize()
     await systemConfigService.ensureDefaultConfigs()
 
+    const persistedActor = await AppDataSource.getRepository(SysUser).save({
+      username: mockActor.username,
+      passwordHash: 'test-only-password-hash',
+      displayName: mockActor.displayName,
+      email: null,
+      role: mockActor.role,
+      status: mockActor.status,
+    })
+    mockActor.userId = persistedActor.id
+
     const productRepo = AppDataSource.getRepository(BaseProduct)
     const createdProduct = await productRepo.save(
       productRepo.create({
@@ -92,6 +104,8 @@ async function main() {
         pinyinAbbr: 'TASK2',
         defaultPrice: '12.50',
         isActive: true,
+        currentStock: 100,
+        preOrderedStock: 0,
       }),
     )
     await AppDataSource.getRepository(BaseProductSku).save({
@@ -101,7 +115,7 @@ async function main() {
       specText: '默认规格',
       defaultPrice: '12.50',
       discountRate: '10.0',
-      currentStock: 0,
+      currentStock: 100,
       preOrderedStock: 0,
       isActive: true,
       isCurrent: true,

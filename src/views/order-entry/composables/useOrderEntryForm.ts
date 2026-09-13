@@ -526,7 +526,10 @@ export const useOrderEntryForm = () => {
     const rows = itemRows.value.filter((row) => normalizeTextValue(row.productId) && normalizeNumber(row.qty) > 0)
     const submitItems: SubmitOrderPayload['items'] = []
 
-    for (const row of rows) {
+    for (const [rowIndex, row] of rows.entries()) {
+      if (!Number.isSafeInteger(normalizeNumber(row.qty))) {
+        throw new Error(`第 ${rowIndex + 1} 行数量必须为正整数`)
+      }
       const resolvedProductId = await ensureProductId(row.productId, createdCache, normalizeNumber(row.unitPrice))
       row.productId = resolvedProductId
       const candidates = getSelectableSkus(resolvedProductId)
@@ -618,6 +621,11 @@ export const useOrderEntryForm = () => {
     const row = itemRows.value.find((item) => item.uid === editingRowUid.value)
     if (!row) {
       drawerVisible.value = false
+      return
+    }
+
+    if (!Number.isSafeInteger(normalizeNumber(drawerForm.qty)) || normalizeNumber(drawerForm.qty) <= 0) {
+      showAppWarning('数量必须为正整数')
       return
     }
 
@@ -779,6 +787,16 @@ export const useOrderEntryForm = () => {
    */
   const submitOrder = async () => {
     if (isSaving.value) {
+      return
+    }
+
+    const invalidQtyRow = itemRows.value.find((row) => {
+      if (!normalizeTextValue(row.productId)) return false
+      const qty = normalizeNumber(row.qty)
+      return !Number.isSafeInteger(qty) || qty <= 0
+    })
+    if (invalidQtyRow) {
+      showAppWarning('数量必须为正整数')
       return
     }
 

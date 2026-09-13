@@ -40,6 +40,7 @@ import {
   type UpdateOrderContentInput,
 } from './order-content-edit.service.js'
 import { orderSerialService, type OrderType } from './order-serial.service.js'
+import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 
 export interface SubmitOrderItemInput {
   productId: string | number
@@ -417,6 +418,7 @@ export class OrderService {
     }
 
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const orderRepo = manager.getRepository(BizOutboundOrder)
       const order = await orderRepo.findOne({ where: { id } })
       if (!order) {
@@ -471,6 +473,7 @@ export class OrderService {
    */
   async restoreById(id: string, actor: AuthUserContext, requestMeta?: RequestMeta): Promise<OrderSummaryView> {
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const orderRepo = manager.getRepository(BizOutboundOrder)
       const order = await orderRepo.findOne({ where: { id } })
       if (!order) {
@@ -532,6 +535,7 @@ export class OrderService {
     }
 
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const orderRepo = manager.getRepository(BizOutboundOrder)
       const order = await orderRepo.findOne({ where: { id } })
       if (!order) {
@@ -544,6 +548,10 @@ export class OrderService {
 
       if (!order.isDeleted) {
         throw new BizError('仅已删除单据支持永久删除，请先执行删除操作', 409)
+      }
+
+      if (order.inventoryMode === 'manual_applied') {
+        throw new BizError('该手工出库单仍承载库存影响，禁止永久删除', 409)
       }
 
       const linkedO2oPreorderSync = await this.syncLinkedO2oPreorderVisibilityInManager(manager, order, actor, true)
@@ -613,6 +621,7 @@ export class OrderService {
     for (let attempt = 1; attempt <= ORDER_SUBMIT_MAX_RETRY; attempt += 1) {
       try {
         const result = await runInTransaction(async (manager) => {
+          await lockActiveSysAccountForBusiness(manager, actor.userId)
           const orderRepo = manager.getRepository(BizOutboundOrder)
           const itemRepo = manager.getRepository(BizOutboundOrderItem)
           const productRepo = manager.getRepository(BaseProduct)

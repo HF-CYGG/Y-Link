@@ -13,6 +13,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import type { AuthUserContext } from '../src/types/auth.js'
 
 const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
@@ -27,7 +28,7 @@ process.env.DB_SYNC = 'false'
 process.env.SQLITE_DB_PATH = sqlitePath
 process.env.INIT_ADMIN_PASSWORD = `Admin_${verifySeed}_Aa1!`
 
-const actor = {
+const actor: AuthUserContext = {
   userId: `manual-sku-${verifySeed}`,
   username: 'manual-sku-verifier',
   displayName: '手工出库 SKU 验证员',
@@ -36,7 +37,7 @@ const actor = {
   status: 'enabled',
   sessionToken: 'manual-sku-verify-session',
   authSource: 'bearer',
-} as const
+}
 
 function cleanupSqliteFile() {
   if (!fs.existsSync(sqlitePath)) {
@@ -106,6 +107,7 @@ async function main() {
   const { BaseProductSku } = await import('../src/entities/base-product-sku.entity.js')
   const { BizOutboundOrderItem } = await import('../src/entities/biz-outbound-order-item.entity.js')
   const { InventoryLog } = await import('../src/entities/inventory-log.entity.js')
+  const { SysUser } = await import('../src/entities/sys-user.entity.js')
   const { orderService } = await import('../src/services/order.service.js')
   const { productService } = await import('../src/services/product.service.js')
   const { reportService } = await import('../src/services/report.service.js')
@@ -116,6 +118,40 @@ async function main() {
   try {
     await initializeDatabaseSchemaIfNeeded(AppDataSource)
     await systemConfigService.ensureDefaultConfigs()
+
+    const persistedActor = await AppDataSource.getRepository(SysUser).save({
+      username: actor.username,
+      passwordHash: 'test-only-password-hash',
+      displayName: actor.displayName,
+      email: null,
+      role: actor.role,
+      status: actor.status,
+      lastLoginAt: null,
+      deactivatedAt: null,
+      deactivationReason: null,
+      deactivatedByUserId: null,
+      deactivatedByUsername: null,
+      deactivatedByDisplayName: null,
+      restoredAt: null,
+      restoredByUserId: null,
+      restoredByUsername: null,
+      restoredByDisplayName: null,
+    })
+    actor.userId = persistedActor.id
+
+    const initialOrderEntryEditorSource = readSource('src/views/order-entry/components/OrderEntryItemsEditor.vue')
+    assert.match(initialOrderEntryEditorSource, /v-model="row\.qty"[\s\S]*?:min="1"[\s\S]*?:precision="0"/, '桌面手工开单数量控件必须限制为正整数')
+    assert.match(initialOrderEntryEditorSource, /v-model="drawerForm\.qty"[\s\S]*?:min="1"[\s\S]*?:precision="0"/, '移动端手工开单数量控件必须限制为正整数')
+    const initialOrderEntryFormSource = readSource('src/views/order-entry/composables/useOrderEntryForm.ts')
+    assert.match(initialOrderEntryFormSource, /Number\.isSafeInteger\([^)]+\.qty[^)]*\)/, '手工开单提交前必须拒绝非整数数量')
+    const reportCenterSource = readSource('src/views/reports/ReportCenterView.vue')
+    for (const reportType of ["'tag-sales'", 'kingdee', 'walkin']) {
+      const reportStart = reportCenterSource.indexOf(`${reportType}: [`)
+      assert.ok(reportStart >= 0, `未找到 ${reportType} 前端报表字段定义`)
+      const nextReportStart = reportCenterSource.indexOf('\n  ],', reportStart)
+      const reportFields = reportCenterSource.slice(reportStart, nextReportStart)
+      assert.match(reportFields, /key:\s*'specText'/, `${reportType} 前端报表字段必须暴露规格列`)
+    }
 
     const outboundColumns = await AppDataSource.query('PRAGMA table_info("biz_outbound_order_item")') as Array<{ name: string }>
     const outboundColumnSet = new Set(outboundColumns.map((column) => column.name))

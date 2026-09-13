@@ -16,6 +16,7 @@ import { auditService } from './audit.service.js'
 import { orderBusinessNoService } from './order-business-no.service.js'
 import type { BusinessNoCursorPlan, ParsedBusinessNo } from './order-business-no.service.js'
 import type { OrderType } from './order-serial.service.js'
+import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 
 export interface OrderAmendmentInput {
   orderId: string
@@ -103,9 +104,16 @@ export class OrderAmendmentService {
     actor: AuthUserContext,
     requestMeta?: RequestMeta,
   ): Promise<OrderAmendmentPreviewResult> {
+    const normalizedInput: OrderAmendmentBatchInput = {
+      amendments: input.amendments.map((amendment) => ({
+        ...amendment,
+        reason: this.normalizeRequiredReason(amendment.reason),
+      })),
+    }
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       // 预览不是授权凭证：正式提交必须在同一事务中重新锁行、重查占用并计算全部阻断原因。
-      const evaluated = await this.evaluate(input, manager, true)
+      const evaluated = await this.evaluate(normalizedInput, manager, true)
       const preliminaryPlans = await orderBusinessNoService.previewCursorPlans(
         evaluated
           .filter((item) => item.businessNoChanged && item.parsedBusinessNo && item.blockingReasons.length === 0)
@@ -373,6 +381,13 @@ export class OrderAmendmentService {
     if (!normalized) throw new BizError(`${label}不能为空`, 409)
     if (Array.from(normalized).length > maxLength) throw new BizError(`${label}长度不能超过 ${maxLength} 个字符`, 409)
     return normalized.toLowerCase()
+  }
+
+  private normalizeRequiredReason(value: string | null | undefined): string {
+    const normalized = value?.trim() ?? ''
+    if (!normalized) throw new BizError('修订原因不能为空', 400)
+    if (Array.from(normalized).length > FIELD_LIMITS.reason) throw new BizError(`修订原因长度不能超过 ${FIELD_LIMITS.reason} 个字符`, 400)
+    return normalized
   }
 
   private normalizeNullableText(value: string | null | undefined, maxLength: number, label: string): string | null {

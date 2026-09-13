@@ -80,6 +80,8 @@ async function main() {
   const { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } = await import('../src/config/database-bootstrap.js')
   const { clientAuthService } = await import('../src/services/client-auth.service.js')
   const { o2oPreorderService } = await import('../src/services/o2o-preorder.service.js')
+  const { BizOutboundOrder } = await import('../src/entities/biz-outbound-order.entity.js')
+  const { BizOutboundOrderItem } = await import('../src/entities/biz-outbound-order-item.entity.js')
   const { productService } = await import('../src/services/product.service.js')
   const { systemConfigService } = await import('../src/services/system-config.service.js')
   const { verificationCodeService } = await import('../src/services/verification-code.service.js')
@@ -139,7 +141,7 @@ async function main() {
       ],
     } as Parameters<typeof productService.create>[0])
 
-    const createdSkus = (product as unknown as { skus?: Array<{ id: string; specText: string; availableStock: number }> }).skus ?? []
+    const createdSkus = (product as unknown as { skus?: Array<{ id: string; skuCode: string; specText: string; availableStock: number }> }).skus ?? []
     assert.equal(createdSkus.length, 2)
     const targetSku = createdSkus.find((sku) => sku.specText === '天空蓝 / 六寸-五层')
     const otherSku = createdSkus.find((sku) => sku.specText === '冰川白 / 六寸-三层')
@@ -437,6 +439,25 @@ async function main() {
     } satisfies AuthUserContext
 
     await o2oPreorderService.verifyByCode(updatedPreorder.order.verifyCode, adminActor)
+    const outboundOrder = await AppDataSource.getRepository(BizOutboundOrder).findOneByOrFail({
+      idempotencyKey: `o2o-preorder-verify:${updatedPreorder.order.id}`,
+    })
+    const outboundItems = await AppDataSource.getRepository(BizOutboundOrderItem).find({
+      where: { orderId: outboundOrder.id },
+      order: { lineNo: 'ASC' },
+    })
+    assert.deepEqual(
+      outboundItems.map((item) => ({
+        skuId: item.skuId == null ? null : String(item.skuId),
+        skuCodeSnapshot: item.skuCodeSnapshot,
+        specTextSnapshot: item.specTextSnapshot,
+      })).sort((left, right) => String(left.skuId).localeCompare(String(right.skuId))),
+      [
+        { skuId: targetSku.id, skuCodeSnapshot: targetSku.skuCode, specTextSnapshot: targetSku.specText },
+        { skuId: otherSku.id, skuCodeSnapshot: otherSku.skuCode, specTextSnapshot: otherSku.specText },
+      ].sort((left, right) => left.skuId.localeCompare(right.skuId)),
+      'O2O 正式出库明细必须按 SKU 分行并持久化 SKU/规格快照',
+    )
     const mallProductsAfterVerify = await o2oPreorderService.listMallProducts()
     const mallProductAfterVerify = mallProductsAfterVerify.list.find((item) => item.id === product.id) as unknown as {
       skus?: Array<{ id: string; currentStock: number; preOrderedStock: number }>

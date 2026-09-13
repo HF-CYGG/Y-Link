@@ -280,6 +280,16 @@ async function main() {
   try {
     await AppDataSource.synchronize()
     await systemConfigService.ensureDefaultConfigs()
+    const { SysUser } = await import('../src/entities/sys-user.entity.js')
+    const persistedActor = await AppDataSource.getRepository(SysUser).save({
+      username: mockActor.username,
+      passwordHash: 'test-only-password-hash',
+      displayName: mockActor.displayName,
+      email: null,
+      role: mockActor.role,
+      status: mockActor.status,
+    })
+    mockActor.userId = persistedActor.id
     await verifySchemaByRuntime()
     await verifyConcurrentSerialAndDrilldown()
   } finally {

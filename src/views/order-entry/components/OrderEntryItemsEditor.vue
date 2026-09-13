@@ -177,8 +177,8 @@ const handleAddRow = () => {
               <PassiveNumberInput
                 :ref="(el: unknown) => setFieldRef(row.uid, 'qty', el)"
                 v-model="row.qty"
-                :min="0"
-                :precision="2"
+                :min="1"
+                :precision="0"
                 :step="1"
                 class="w-full"
                 @keydown="handleGridKeydown($event, $index, 'qty')"
@@ -308,7 +308,7 @@ const handleAddRow = () => {
             </el-select>
           </el-form-item>
           <el-form-item label="数量">
-            <PassiveNumberInput v-model="drawerForm.qty" :min="0" :precision="2" class="w-full" />
+            <PassiveNumberInput v-model="drawerForm.qty" :min="1" :precision="0" :step="1" class="w-full" />
           </el-form-item>
           <el-form-item label="单价">
             <PassiveNumberInput v-model="drawerForm.unitPrice" :min="0" :precision="2" class="w-full" />
