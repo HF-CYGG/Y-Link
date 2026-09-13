@@ -37,6 +37,7 @@ import {
 
 import ClientCartView from './ClientCartView.vue'
 import ClientCheckoutView from './ClientCheckoutView.vue'
+import ClientImagePreviewer from './components/ClientImagePreviewer.vue'
 
 
 import { showAppSuccess, showAppWarning } from '@/utils/app-alert'
@@ -367,10 +368,6 @@ const openDetailImagePreview = () => {
   }
   previewImageUrl.value = resolveDetailProductThumbnail(detailProduct.value)
   imagePreviewVisible.value = true
-}
-
-const closeProductImagePreview = () => {
-  imagePreviewVisible.value = false
 }
 
 const mallBrowseIndex = computed<MallBrowseIndexSnapshot>(() => {
@@ -1193,6 +1190,7 @@ watch(
   (nextPath) => {
     if (!nextPath.startsWith('/client/mall')) {
       miniCartVisible.value = false
+      imagePreviewVisible.value = false
       mobileSearchVisible.value = false
       searchInputFocused.value = false
     }
@@ -1252,6 +1250,7 @@ onActivated(() => {
 
 onDeactivated(() => {
   deactivateMallRuntime()
+  imagePreviewVisible.value = false
   mobileSearchVisible.value = false
   searchInputFocused.value = false
 })
@@ -1331,16 +1330,8 @@ onBeforeUnmount(() => {
       </Transition>
     </Teleport>
 
-    <Teleport to="body">
-      <Transition name="mall-image-preview">
-        <div v-if="imagePreviewVisible" class="mall-image-preview-overlay" @click.self="closeProductImagePreview">
-          <section class="mall-image-preview-panel">
-            <button type="button" class="mall-image-preview-close" @click="closeProductImagePreview">关闭</button>
-            <img :src="previewImageUrl" alt="商品" class="mall-image-preview-photo" />
-          </section>
-        </div>
-      </Transition>
-    </Teleport>
+    <!-- 商品原图预览：初始完整适配，提供放大 / 缩小 / 适配按钮与键盘操作，放大后用舞台原生滚动平移。 -->
+    <ClientImagePreviewer v-model:visible="imagePreviewVisible" :src="previewImageUrl" alt="商品原图" />
 
     <div
       class="mall-hero-card overflow-hidden rounded-[1.4rem] bg-[var(--ylink-color-surface)] p-4 shadow-[var(--ylink-shadow-soft)]"
@@ -2773,75 +2764,6 @@ onBeforeUnmount(() => {
   font-weight: 600;
   line-height: 1;
   padding: 0.4rem 0.68rem;
-}
-
-.mall-image-preview-overlay {
-  position: fixed;
-  inset: 0;
-  /* 预览层必须高于 Element Plus 抽屉/遮罩层，避免从详情页触发时被右侧抽屉覆盖。 */
-  z-index: 4000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(15, 23, 42, 0.82);
-  padding: 1rem;
-}
-
-.mall-image-preview-panel {
-  position: relative;
-  display: flex;
-  max-height: 100%;
-  max-width: min(1100px, 100%);
-  align-items: center;
-  justify-content: center;
-}
-
-.mall-image-preview-close {
-  position: absolute;
-  top: 0.25rem;
-  right: 0.25rem;
-  z-index: 1;
-  border: none;
-  border-radius: 9999px;
-  background: rgba(255, 255, 255, 0.94);
-  color: #0f172a;
-  font-size: 0.82rem;
-  font-weight: 600;
-  line-height: 1;
-  padding: 0.65rem 0.9rem;
-}
-
-.mall-image-preview-photo {
-  display: block;
-  max-height: min(88vh, 100%);
-  max-width: min(94vw, 1100px);
-  border-radius: 1.25rem;
-  background: #ffffff;
-  object-fit: contain;
-  box-shadow: 0 24px 56px rgba(15, 23, 42, 0.28);
-}
-
-.mall-image-preview-enter-active,
-.mall-image-preview-leave-active {
-  transition: opacity var(--ylink-motion-normal) var(--ylink-motion-ease);
-}
-
-.mall-image-preview-enter-active .mall-image-preview-photo,
-.mall-image-preview-leave-active .mall-image-preview-photo {
-  transition:
-    transform var(--ylink-motion-normal) var(--ylink-motion-ease),
-    opacity var(--ylink-motion-normal) var(--ylink-motion-ease);
-}
-
-.mall-image-preview-enter-from,
-.mall-image-preview-leave-to {
-  opacity: 0;
-}
-
-.mall-image-preview-enter-from .mall-image-preview-photo,
-.mall-image-preview-leave-to .mall-image-preview-photo {
-  opacity: 0;
-  transform: scale(0.97);
 }
 
 .client-product-card__add-button {

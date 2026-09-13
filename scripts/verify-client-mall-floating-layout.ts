@@ -12,8 +12,16 @@ import {
   resolveScrollerTailSpacer,
   resolveViewportHeight,
 } from '../src/views/client/client-mall-viewport.helpers'
+import {
+  canZoomInFurther,
+  clampZoomStepIndex,
+  resolveImageFitScale,
+  resolveImagePreviewScale,
+  resolveZoomAnchoredScroll,
+} from '../src/views/client/client-image-preview.helpers'
 
 const mallSource = readFileSync('src/views/client/ClientMallView.vue', 'utf8')
+const previewerSource = readFileSync('src/views/client/components/ClientImagePreviewer.vue', 'utf8')
 
 // ---------- #83 视口高度回退链 ----------
 assert.equal(resolveViewportHeight({ innerHeight: 700, documentClientHeight: 683 }), 700, '两个来源都有效时取较大值，避免低估遮挡')
@@ -91,4 +99,43 @@ assert.ok(mallSource.includes('class="mall-virtual-bottom-spacer"'), '大数据�
 assert.ok(mallSource.includes("visualViewport?.addEventListener('resize'"), '需要监听可视视口变化以重新计算遮挡')
 assert.match(mallSource, /\.mini-cart-backdrop \{[^}]*top: 0;/, '购物车遮罩需要四向定位回退，兼容不支持 inset 的旧浏览器')
 
-console.log('[verify:client-mall-floating-layout] 商城悬浮购物车遮挡回归验证通过')
+// ---------- #84 原图完整适配比例 ----------
+assert.equal(resolveImageFitScale({ naturalWidth: 4000, naturalHeight: 1000, stageWidth: 800, stageHeight: 600 }), 0.2, '超宽横图应按宽度完整缩入舞台')
+assert.equal(resolveImageFitScale({ naturalWidth: 1000, naturalHeight: 6000, stageWidth: 800, stageHeight: 600 }), 0.1, '超长竖图应按高度完整缩入舞台')
+assert.equal(resolveImageFitScale({ naturalWidth: 300, naturalHeight: 200, stageWidth: 800, stageHeight: 600 }), 1, '小图初始不放大')
+assert.equal(resolveImageFitScale({ naturalWidth: 0, naturalHeight: 200, stageWidth: 800, stageHeight: 0 }), 1, '尺寸不可用时回退 1，避免 NaN 尺寸')
+
+// ---------- #84 缩放档位与上限 ----------
+assert.equal(clampZoomStepIndex(-3), 0, '缩小不能越过完整适配档')
+assert.equal(clampZoomStepIndex(99), 4, '放大不能越过最大档')
+assert.equal(resolveImagePreviewScale(0.2, 0), 0.2, '重置档等于完整适配比例')
+assert.equal(resolveImagePreviewScale(0.2, 4), 0.8, '超大图按适配比例乘以档位放大')
+assert.equal(resolveImagePreviewScale(1, 4), 4, '小图放大受原图 4 倍上限约束')
+assert.equal(canZoomInFurther(0.2, 0), true, '适配状态下可以继续放大')
+assert.equal(canZoomInFurther(1, 4), false, '最大档位时放大按钮应禁用')
+
+// ---------- #84 缩放保持视觉中心且不越界 ----------
+assert.deepEqual(
+  resolveZoomAnchoredScroll({ scrollLeft: 0, scrollTop: 0, stageWidth: 800, stageHeight: 600, previousWidth: 800, previousHeight: 200, nextWidth: 1600, nextHeight: 400 }),
+  { left: 400, top: 0 },
+  '横图放大后水平居中查看，垂直方向未溢出时滚动为 0',
+)
+assert.deepEqual(
+  resolveZoomAnchoredScroll({ scrollLeft: 800, scrollTop: 0, stageWidth: 800, stageHeight: 600, previousWidth: 1600, previousHeight: 400, nextWidth: 800, nextHeight: 200 }),
+  { left: 0, top: 0 },
+  '缩小回完整适配后滚动位置归零，图片不会停留在可视区外',
+)
+const clampedScroll = resolveZoomAnchoredScroll({ scrollLeft: 5000, scrollTop: 5000, stageWidth: 800, stageHeight: 600, previousWidth: 1600, previousHeight: 1200, nextWidth: 3200, nextHeight: 2400 })
+assert.ok(clampedScroll.left <= 3200 - 800 && clampedScroll.top <= 2400 - 600, '放大后的滚动位置必须限制在图片边界内')
+
+// ---------- #84 静态契约：可访问性与旧浏览器降级 ----------
+assert.ok(mallSource.includes('<ClientImagePreviewer'), '商城页必须改用原图预览组件')
+assert.ok(!mallSource.includes('mall-image-preview'), '旧的仅 object-fit 预览层与样式必须移除')
+for (const needle of ['role="dialog"', 'aria-modal="true"', "case 'Escape':", 'aria-label="放大"', 'aria-label="缩小"', 'aria-label="重置为完整显示"', 'aria-label="关闭预览"', 'overflow: auto;']) {
+  assert.ok(previewerSource.includes(needle), `原图预览组件缺少关键能力：${needle}`)
+}
+assert.ok(!/\binset:/.test(previewerSource), '原图预览遮罩不得依赖 inset 简写')
+assert.match(previewerSource, /\.client-image-previewer \{[^}]*top: 0;[^}]*bottom: 0;/, '原图预览遮罩需要四向定位铺满布局视口')
+assert.ok(!/\d+dvh/.test(previewerSource), '原图预览不依赖 dvh 单位，改由固定定位四向铺满')
+
+console.log('[verify:client-mall-floating-layout] 商城悬浮购物车遮挡与原图预览回归验证通过')
