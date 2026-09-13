@@ -27,7 +27,11 @@ import { assertPermanentDeletePassword } from '../utils/permanent-delete-passwor
 import { auditService } from './audit.service.js'
 import { sanitizeUserProfile } from './auth.service.js'
 import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
-import { isAccountCurrentlyDeactivated, lockSysAccountsInStableOrder } from './account-business-guard.service.js'
+import {
+  isAccountCurrentlyDeactivated,
+  lockActiveSysAccountForBusiness,
+  lockSysAccountsInStableOrder,
+} from './account-business-guard.service.js'
 
 export interface UserListQuery {
   page: number
@@ -450,6 +454,7 @@ export class UserService {
     }
     try {
       return await runInTransaction(async (manager) => {
+        await lockActiveSysAccountForBusiness(manager, actor.userId)
         const userRepo = manager.getRepository(SysUser)
         const passwordHash = await hashPassword(password)
         const entity = userRepo.create({
@@ -512,12 +517,9 @@ export class UserService {
     }
     try {
       const result = await runInTransaction(async (manager) => {
+        const user = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:update')
         const userRepo = manager.getRepository(SysUser)
         const sessionRepo = manager.getRepository(SysUserSession)
-        const user = await userRepo.findOne({ where: { id } })
-        if (!user) {
-          throw new BizError('用户不存在', 404)
-        }
         if (isCurrentlyDeactivated(user)) {
           throw new BizError('账号已注销，请先恢复后再编辑资料', 409)
         }
@@ -596,11 +598,8 @@ export class UserService {
     requestMeta?: RequestMeta,
   ): Promise<UserSafeProfile> {
     const result = await runInTransaction(async (manager) => {
+      const user = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:status')
       const userRepo = manager.getRepository(SysUser)
-      const user = await userRepo.findOne({ where: { id } })
-      if (!user) {
-        throw new BizError('用户不存在', 404)
-      }
 
       if (actor.userId === user.id && status !== 'enabled') {
         throw new BizError('不能停用当前登录账号', 400)
@@ -669,12 +668,9 @@ export class UserService {
     }
 
     const profile = await runInTransaction(async (manager) => {
+      const user = await this.lockLifecycleActorAndTarget(manager, id, actor, 'users:reset_password')
       const userRepo = manager.getRepository(SysUser)
       const sessionRepo = manager.getRepository(SysUserSession)
-      const user = await userRepo.findOne({ where: { id } })
-      if (!user) {
-        throw new BizError('用户不存在', 404)
-      }
 
       user.passwordHash = await hashPassword(newPassword)
       const savedUser = await userRepo.save(user)

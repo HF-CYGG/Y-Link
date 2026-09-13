@@ -8,6 +8,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
+import type { AuthUserContext } from '../src/types/auth.js'
 
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'ylink-mall-cache-verify-'))
 process.env.NODE_ENV = 'test'
@@ -21,19 +22,33 @@ process.env.INIT_ADMIN_DISPLAY_NAME = 'Catalog Cache Verify'
 
 const run = async () => {
   const [{ AppDataSource }, { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime }, { createApp },
-    { o2oPreorderService }, { productService }, { systemConfigService }] = await Promise.all([
+    { o2oPreorderService }, { productService }, { systemConfigService }, { authService }, { SysUser }] = await Promise.all([
     import('../src/config/data-source.js'),
     import('../src/config/database-bootstrap.js'),
     import('../src/app.js'),
     import('../src/services/o2o-preorder.service.js'),
     import('../src/services/product.service.js'),
     import('../src/services/system-config.service.js'),
+    import('../src/services/auth.service.js'),
+    import('../src/entities/sys-user.entity.js'),
   ])
 
   prepareDatabaseRuntime()
   await AppDataSource.initialize()
   await initializeDatabaseSchemaIfNeeded(AppDataSource)
   await systemConfigService.ensureDefaultConfigs()
+  const bootstrap = await authService.ensureDefaultAdmin()
+  const admin = await AppDataSource.getRepository(SysUser).findOneByOrFail({ username: bootstrap.username })
+  const actor: AuthUserContext = {
+    userId: String(admin.id),
+    username: admin.username,
+    displayName: admin.displayName,
+    role: 'admin',
+    permissions: [],
+    status: 'enabled',
+    sessionToken: 'catalog-cache-verify',
+    authSource: 'bearer',
+  }
 
   const product = await productService.create({
     productName: `公开目录缓存验收-${Date.now()}`,
@@ -42,7 +57,7 @@ const run = async () => {
     o2oStatus: 'listed',
     currentStock: 20,
     detailContent: '仅用于公开读路径专项验收',
-  })
+  }, actor)
 
   const coldSnapshots = await Promise.all(
     Array.from({ length: 100 }, () => o2oPreorderService.getMallProductsPublicSnapshot()),
@@ -53,7 +68,7 @@ const run = async () => {
   assert.ok(firstSnapshot)
   assert.ok(firstSnapshot.data.list.some((item) => item.id === product.id))
 
-  await productService.update(product.id, { currentStock: 21 })
+  await productService.update(product.id, { currentStock: 21 }, actor)
   const refreshedSnapshots = await Promise.all(
     Array.from({ length: 100 }, () => o2oPreorderService.getMallProductsPublicSnapshot()),
   )

@@ -10,7 +10,7 @@
 import { randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { DataSource } from 'typeorm'
+import { DataSource, type EntityManager } from 'typeorm'
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
 import { runDatabaseExclusive } from '../database/transaction-coordinator.js'
@@ -35,6 +35,7 @@ import {
   type ImportSummary,
   validateExportPayload,
 } from './data-maintenance.shared.js'
+import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 
 class DataMaintenanceService {
   /**
@@ -126,23 +127,23 @@ class DataMaintenanceService {
     }
   }
 
-  private async loadExportRows(tableKey: ExportTableKey): Promise<ExportRow[]> {
+  private async loadExportRows(tableKey: ExportTableKey, manager: EntityManager): Promise<ExportRow[]> {
     switch (tableKey) {
       case 'systemConfigs':
         return cloneForExportRows(
-          await AppDataSource.getRepository(SystemConfig).find({
+          await manager.getRepository(SystemConfig).find({
             order: { id: 'ASC' },
           }),
         )
       case 'products':
         return cloneForExportRows(
-          await AppDataSource.getRepository(BaseProduct).find({
+          await manager.getRepository(BaseProduct).find({
             order: { id: 'ASC' },
           }),
         )
       case 'clientUsers':
         return cloneForExportRows(
-          await AppDataSource.getRepository(ClientUser)
+          await manager.getRepository(ClientUser)
             .createQueryBuilder('user')
             .addSelect('user.passwordHash')
             .orderBy('user.id', 'ASC')
@@ -150,19 +151,19 @@ class DataMaintenanceService {
         )
       case 'preorders':
         return cloneForExportRows(
-          await AppDataSource.getRepository(O2oPreorder).find({
+          await manager.getRepository(O2oPreorder).find({
             order: { id: 'ASC' },
           }),
         )
       case 'preorderItems':
         return cloneForExportRows(
-          await AppDataSource.getRepository(O2oPreorderItem).find({
+          await manager.getRepository(O2oPreorderItem).find({
             order: { id: 'ASC' },
           }),
         )
       case 'inventoryLogs':
         return cloneForExportRows(
-          await AppDataSource.getRepository(InventoryLog).find({
+          await manager.getRepository(InventoryLog).find({
             order: { id: 'ASC' },
           }),
         )
@@ -171,27 +172,30 @@ class DataMaintenanceService {
 
   async exportJson(actor: AuthUserContext, requestMeta?: RequestMeta): Promise<ExportPayload> {
     const adminActor = await this.assertAdminActor(actor, requestMeta, 'data_maintenance.export_json', '导出 JSON 数据')
-    const tables = {} as ExportPayload['tables']
-    for (const tableKey of EXPORT_TABLE_KEYS) {
-      tables[tableKey] = await this.loadExportRows(tableKey)
-    }
-    const payload: ExportPayload = {
-      exportedAt: new Date().toISOString(),
-      version: EXPORT_VERSION,
-      tables,
-    }
-    await auditService.safeRecord({
-      actionType: 'data_maintenance.export_json',
-      actionLabel: '导出 JSON 数据',
-      targetType: 'data_maintenance',
-      targetCode: payload.version,
-      actor: adminActor,
-      requestMeta,
-      detail: {
-        tableCounts: buildImportSummary(payload),
-      },
+    return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const tables = {} as ExportPayload['tables']
+      for (const tableKey of EXPORT_TABLE_KEYS) {
+        tables[tableKey] = await this.loadExportRows(tableKey, manager)
+      }
+      const payload: ExportPayload = {
+        exportedAt: new Date().toISOString(),
+        version: EXPORT_VERSION,
+        tables,
+      }
+      await auditService.record({
+        actionType: 'data_maintenance.export_json',
+        actionLabel: '导出 JSON 数据',
+        targetType: 'data_maintenance',
+        targetCode: payload.version,
+        actor: adminActor,
+        requestMeta,
+        detail: {
+          tableCounts: buildImportSummary(payload),
+        },
+      }, manager)
+      return payload
     })
-    return payload
   }
 
   async importJson(payload: ExportPayload, actor: AuthUserContext, requestMeta?: RequestMeta) {
@@ -199,6 +203,7 @@ class DataMaintenanceService {
     const normalizedPayload = validateExportPayload(payload)
     const importSummary: ImportSummary = buildImportSummary(normalizedPayload)
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       await manager.getRepository(InventoryLog).clear()
       await manager.getRepository(O2oPreorderItem).clear()
       await manager.getRepository(O2oPreorder).clear()

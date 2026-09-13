@@ -82,6 +82,7 @@ async function main() {
   const { o2oPreorderService } = await import('../src/services/o2o-preorder.service.js')
   const { BizOutboundOrder } = await import('../src/entities/biz-outbound-order.entity.js')
   const { BizOutboundOrderItem } = await import('../src/entities/biz-outbound-order-item.entity.js')
+  const { SysUser } = await import('../src/entities/sys-user.entity.js')
   const { productService } = await import('../src/services/product.service.js')
   const { systemConfigService } = await import('../src/services/system-config.service.js')
   const { verificationCodeService } = await import('../src/services/verification-code.service.js')
@@ -96,6 +97,21 @@ async function main() {
   try {
     await initializeDatabaseSchemaIfNeeded(AppDataSource)
     await systemConfigService.ensureDefaultConfigs()
+    const userRepo = AppDataSource.getRepository(SysUser)
+    const admin = await userRepo.save(userRepo.create({
+      username: `o2o-sku-admin-${verifySeed}`,
+      passwordHash: 'verify-only',
+      displayName: 'O2O SKU 验证管理员',
+      email: null,
+      role: 'admin',
+      status: 'enabled',
+      lastLoginAt: null,
+    }))
+    const adminActor: AuthUserContext = {
+      userId: String(admin.id), username: admin.username, displayName: admin.displayName,
+      role: 'admin', permissions: [], status: 'enabled',
+      sessionToken: 'o2o-sku-selection-verify', authSource: 'bearer',
+    }
     // 只替换隔离脚本内的第三方验证码边界；生产注册仍必须通过已启用的验证码通道。
     systemConfigService.getVerificationProviderConfigs = async () => {
       const configs = await originalProviders()
@@ -139,7 +155,7 @@ async function main() {
           sortOrder: 2,
         },
       ],
-    } as Parameters<typeof productService.create>[0])
+    } as Parameters<typeof productService.create>[0], adminActor)
 
     const createdSkus = (product as unknown as { skus?: Array<{ id: string; skuCode: string; specText: string; availableStock: number }> }).skus ?? []
     assert.equal(createdSkus.length, 2)
@@ -194,7 +210,7 @@ async function main() {
           sortOrder: 2,
         },
       ],
-    } as Parameters<typeof productService.create>[0])
+    } as Parameters<typeof productService.create>[0], adminActor)
     const previewMallProducts = await o2oPreorderService.listMallProducts()
     const previewMallProduct = previewMallProducts.list.find((item) => item.id === previewProduct.id) as unknown as {
       defaultPrice: string
@@ -265,7 +281,7 @@ async function main() {
           currentStock: 5,
           isActive: true,
         }],
-      } as Parameters<typeof productService.update>[1]),
+      } as Parameters<typeof productService.update>[1], adminActor),
       /仍有 2 件预订占用/,
     )
     pass('SKU 仍有预订占用时拒绝退役，避免占用库存从商品汇总中消失')
@@ -289,7 +305,7 @@ async function main() {
             isActive: true,
           },
         ],
-      } as Parameters<typeof productService.update>[1]),
+      } as Parameters<typeof productService.update>[1], adminActor),
       /仍有 2 件预订占用/,
     )
     pass('客户端伪造 SKU 占用为零时仍拒绝停用，退役保护以锁定的数据库状态为准')
@@ -311,7 +327,7 @@ async function main() {
           isActive: true,
         },
       ],
-    } as Parameters<typeof productService.update>[1])
+    } as Parameters<typeof productService.update>[1], adminActor)
     const mallProductsAfterProductEdit = await o2oPreorderService.listMallProducts()
     const mallProductAfterProductEdit = mallProductsAfterProductEdit.list.find((item) => item.id === product.id) as unknown as {
       skus?: Array<{ id: string; preOrderedStock: number; availableStock: number }>
@@ -329,14 +345,14 @@ async function main() {
       o2oStatus: 'listed',
       currentStock: 4,
       limitPerUser: 4,
-    } as Parameters<typeof productService.create>[0])
+    } as Parameters<typeof productService.create>[0], adminActor)
     const defaultSkuId = defaultProduct.skus[0]?.id
     assert.ok(defaultSkuId)
     await productService.update(defaultProduct.id, {
       defaultPrice: 9,
       discountRate: 8,
       currentStock: 6,
-    } as Parameters<typeof productService.update>[1])
+    } as Parameters<typeof productService.update>[1], adminActor)
     const defaultProductAfterUpdate = await productService.detail(defaultProduct.id)
     assert.equal(defaultProductAfterUpdate.currentStock, 6)
     assert.equal(defaultProductAfterUpdate.availableStock, 6)
@@ -401,7 +417,7 @@ async function main() {
         currentStock: 3,
         isActive: false,
       }],
-    } as Parameters<typeof productService.create>[0])
+    } as Parameters<typeof productService.create>[0], adminActor)
     const mallProductsWithInactiveSku = await o2oPreorderService.listMallProducts()
     const inactiveMallProduct = mallProductsWithInactiveSku.list.find((item) => item.id === inactiveProduct.id) as unknown as {
       availableStock: number
@@ -426,17 +442,6 @@ async function main() {
     assert.equal(mallProductAfterCancel?.skus?.find((sku) => sku.id === targetSku.id)?.preOrderedStock, 3)
     assert.equal(mallProductAfterCancel?.skus?.find((sku) => sku.id === otherSku.id)?.preOrderedStock, 1)
     pass('撤回后只释放目标 SKU 占用，其他规格占用保持不变')
-
-    const adminActor = {
-      userId: '1',
-      username: 'admin',
-      displayName: '验证管理员',
-      role: 'admin',
-      permissions: ['orders:create'],
-      status: 'enabled',
-      sessionToken: 'sku-verify-admin',
-      authSource: 'bearer',
-    } satisfies AuthUserContext
 
     await o2oPreorderService.verifyByCode(updatedPreorder.order.verifyCode, adminActor)
     const outboundOrder = await AppDataSource.getRepository(BizOutboundOrder).findOneByOrFail({

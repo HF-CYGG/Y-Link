@@ -189,6 +189,7 @@ async function verifyOrderSerialConcurrency() {
     { ClientUser },
     { ClientStaffDirectory },
     { SysAuditLog },
+    { SysUser },
     { O2oPreorder },
     { clientUserManageService },
     { migrateClientUserDepartmentGovernance },
@@ -203,6 +204,7 @@ async function verifyOrderSerialConcurrency() {
     import('../src/entities/client-user.entity.js'),
     import('../src/entities/client-staff-directory.entity.js'),
     import('../src/entities/sys-audit-log.entity.js'),
+    import('../src/entities/sys-user.entity.js'),
     import('../src/entities/o2o-preorder.entity.js'),
     import('../src/services/client-user-manage.service.js'),
     import('../src/config/database-bootstrap.js'),
@@ -285,10 +287,19 @@ async function verifyOrderSerialConcurrency() {
     await assertMysqlRequiredSchemaExists(AppDataSource)
     pass('真实 MySQL 临时库已执行 037/038，恢复部门节点唯一约束与路径快照容量')
 
-    const concurrencyActor = {
-      userId: '1',
-      username: 'verify-admin',
+    const persistedAdmin = await AppDataSource.getRepository(SysUser).save(AppDataSource.getRepository(SysUser).create({
+      username: `verify-admin-${Date.now()}`,
+      passwordHash: 'verify-only',
       displayName: '并发验收管理员',
+      email: null,
+      role: 'admin',
+      status: 'enabled',
+      lastLoginAt: null,
+    }))
+    const concurrencyActor = {
+      userId: String(persistedAdmin.id),
+      username: persistedAdmin.username,
+      displayName: persistedAdmin.displayName,
       role: 'admin',
       permissions: ['system_configs:update'],
       status: 'enabled',
@@ -501,7 +512,7 @@ async function verifyOrderSerialConcurrency() {
       orderId: String(preorder.id),
       hasCustomerOrder: true,
       isSystemApplied: true,
-    })
+    }, concurrencyActor)
     assert.equal(updatedDetail.order.hasCustomerOrder, true)
     assert.equal(updatedDetail.order.isSystemApplied, true)
     pass('事务内详情读取复现通过：返回值使用同一 manager，可见未提交的最新写入')
@@ -515,7 +526,7 @@ async function verifyOrderSerialConcurrency() {
       o2oStatus: 'listed',
       currentStock: 5,
       limitPerUser: 5,
-    } as Parameters<typeof productService.create>[0])
+    } as Parameters<typeof productService.create>[0], concurrencyActor)
     const returnSkuId = returnProduct.skus[0]?.id
     assert.ok(returnSkuId)
     const clientAuth = {
@@ -535,16 +546,7 @@ async function verifyOrderSerialConcurrency() {
       pickupContact: '并发验收',
       isSystemApplied: false,
     })
-    await o2oPreorderService.verifyByCode(returnOrder.order.verifyCode, {
-      userId: '1',
-      username: 'verify-admin',
-      displayName: '并发验收管理员',
-      role: 'admin',
-      permissions: ['orders:create'],
-      status: 'enabled',
-      sessionToken: 'verify-db-concurrency-admin',
-      authSource: 'bearer',
-    })
+    await o2oPreorderService.verifyByCode(returnOrder.order.verifyCode, concurrencyActor)
     const returnRequest = await o2oPreorderService.createReturnRequest(clientAuth, returnOrder.order.id, {
       reason: 'MySQL 事务内退货详情验证',
       items: [{ productId: returnProduct.id, skuId: returnSkuId, qty: 1 }],

@@ -99,7 +99,7 @@ async function registerAndLoginClient(clientAuthService: typeof import('../src/s
 
 async function main() {
   fs.mkdirSync(sqliteRoot, { recursive: true })
-  const [{ createApp }, { AppDataSource }, { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime }, { authService }, { userService }, { systemConfigService }, { clientAuthService }, { verificationCodeService }, { productService }, { o2oPreorderService }] = await Promise.all([
+  const [{ createApp }, { AppDataSource }, { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime }, { authService }, { userService }, { systemConfigService }, { clientAuthService }, { verificationCodeService }, { productService }, { o2oPreorderService }, { SysUser }] = await Promise.all([
     import('../src/app.js'),
     import('../src/config/data-source.js'),
     import('../src/config/database-bootstrap.js'),
@@ -110,12 +110,14 @@ async function main() {
     import('../src/services/verification-code.service.js'),
     import('../src/services/product.service.js'),
     import('../src/services/o2o-preorder.service.js'),
+    import('../src/entities/sys-user.entity.js'),
   ])
 
   prepareDatabaseRuntime()
   await AppDataSource.initialize()
   await initializeDatabaseSchemaIfNeeded(AppDataSource)
-  const bootstrapAdmin = await authService.ensureDefaultAdmin()
+  const bootstrapResult = await authService.ensureDefaultAdmin()
+  const bootstrapAdmin = await AppDataSource.getRepository(SysUser).findOneByOrFail({ username: bootstrapResult.username })
   await systemConfigService.ensureDefaultConfigs()
   // 只替换隔离脚本内的第三方验证码边界；生产注册仍必须通过已启用的验证码通道。
   const originalProviders = systemConfigService.getVerificationProviderConfigs.bind(systemConfigService)
@@ -154,7 +156,7 @@ async function main() {
       loginCookieSession(baseUrl, supplier.username, supplierPassword),
     ])
     const clientAuth = await registerAndLoginClient(clientAuthService)
-    const product = await productService.create({ productName: `路由治理商品-${verifySeed}`, pinyinAbbr: 'LYZL', defaultPrice: 10, isActive: true, o2oStatus: 'listed', currentStock: 100, limitPerUser: 100 })
+    const product = await productService.create({ productName: `路由治理商品-${verifySeed}`, pinyinAbbr: 'LYZL', defaultPrice: 10, isActive: true, o2oStatus: 'listed', currentStock: 100, limitPerUser: 100 }, scriptAdmin)
     const submit = (clientRequestId: string) => o2oPreorderService.submit(clientAuth, {
       clientRequestId, items: [{ productId: product.id, qty: 1 }], remark: '路由隔离验证', isSystemApplied: false, pickupContact: '路由测试提货人',
     })

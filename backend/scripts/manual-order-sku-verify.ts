@@ -261,7 +261,7 @@ async function main() {
         currentStock: 17,
         isActive: true,
       }],
-    } as Parameters<typeof productService.create>[0])
+    } as Parameters<typeof productService.create>[0], actor)
     const singleSku = singleProduct.skus[0]
     assert.ok(singleSku)
 
@@ -290,7 +290,7 @@ async function main() {
           sortOrder: 1,
         },
       ],
-    } as Parameters<typeof productService.create>[0])
+    } as Parameters<typeof productService.create>[0], actor)
     const redSku = multiProduct.skus.find((sku) => sku.specText === '红色')
     const blueSku = multiProduct.skus.find((sku) => sku.specText === '蓝色')
     assert.ok(redSku)

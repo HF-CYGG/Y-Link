@@ -63,6 +63,7 @@ const [
   { BaseProduct },
   { O2oPreorder },
   { SystemConfig },
+  { SysUser },
   { authService },
   { clientAuthService },
   { o2oPreorderService },
@@ -76,6 +77,7 @@ const [
   import('../src/entities/base-product.entity.js'),
   import('../src/entities/o2o-preorder.entity.js'),
   import('../src/entities/system-config.entity.js'),
+  import('../src/entities/sys-user.entity.js'),
   import('../src/services/auth.service.js'),
   import('../src/services/client-auth.service.js'),
   import('../src/services/o2o-preorder.service.js'),
@@ -200,26 +202,25 @@ const readOptionalJson = <T>(filePath: string): T | null => {
   return JSON.parse(fs.readFileSync(filePath, 'utf8')) as T
 }
 
+let scriptAdminActor: AuthUserContext
+
 const ensureReady = async () => {
   prepareDatabaseRuntime()
   if (!AppDataSource.isInitialized) {
     await AppDataSource.initialize()
   }
   await initializeDatabaseSchemaIfNeeded(AppDataSource)
-  await authService.ensureDefaultAdmin()
+  const bootstrap = await authService.ensureDefaultAdmin()
+  const admin = await AppDataSource.getRepository(SysUser).findOneByOrFail({ username: bootstrap.username })
+  scriptAdminActor = {
+    userId: String(admin.id), username: admin.username, displayName: admin.displayName,
+    role: 'admin', permissions: [], status: 'enabled',
+    sessionToken: 'task6-client-core-flow-verify-session', authSource: 'bearer',
+  }
   await systemConfigService.ensureDefaultConfigs()
 }
 
 const configureVerificationProviderForTesting = async () => {
-  const actor: AuthUserContext = {
-    userId: 'task6-client-core-flow-verify-admin',
-    username: 'task6-client-core-flow-verify-admin',
-    displayName: 'Task 6 验证管理员',
-    role: 'admin',
-    permissions: [],
-    status: 'enabled',
-    sessionToken: 'task6-client-core-flow-verify-session',
-  }
   await systemConfigService.updateVerificationProviderConfigs(
     {
       mobile: {
@@ -239,7 +240,7 @@ const configureVerificationProviderForTesting = async () => {
         successMatch: '',
       },
     },
-    actor,
+    scriptAdminActor,
   )
 }
 
@@ -295,7 +296,7 @@ const createListedProduct = async (suffix: string, stock: number, limitPerUser =
     o2oStatus: 'listed',
     currentStock: stock,
     limitPerUser,
-  })
+  }, scriptAdminActor)
 }
 
 const verifyOrderEditStaticRegression = () => {

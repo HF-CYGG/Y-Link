@@ -2,7 +2,7 @@
  * 文件说明：backend/scripts/o2o-preorder-verify.ts
  * 文件职责：验证 O2O 预订的注册、下单、撤回、超时取消、核销与备份导出链路。
  * 实现逻辑：
- * 1. 初始化数据库、默认管理员与系统配置，确保脚本在独立环境中可重复执行；
+ * 1. 初始化数据库、默认管理员与系统配置，确保写事务使用可复核的真实账号；
  * 2. 通过客户端注册登录、商品创建、下单撤回、超时取消与管理端核销，覆盖预订主流程；
  * 3. 最后验证 O2O 默认规则、JSON 导出与 SQLite 物理备份，确认治理能力仍可用。
  * 维护说明：若调整 O2O 预订状态机、库存占用规则或默认业务配置，请同步更新本脚本。
@@ -20,6 +20,7 @@ import { O2oPreorder } from '../src/entities/o2o-preorder.entity.js'
 import { O2oReturnRequest } from '../src/entities/o2o-return-request.entity.js'
 import { OrderRevision } from '../src/entities/order-revision.entity.js'
 import { SysAuditLog } from '../src/entities/sys-audit-log.entity.js'
+import { SysUser } from '../src/entities/sys-user.entity.js'
 import { authService } from '../src/services/auth.service.js'
 import { clientAuthService } from '../src/services/client-auth.service.js'
 import { installCaptchaServiceForTesting } from '../src/services/captcha.service.js'
@@ -43,15 +44,25 @@ const ensureReady = async () => {
     await AppDataSource.initialize()
   }
   await initializeDatabaseSchemaIfNeeded(AppDataSource)
-  return authService.ensureDefaultAdmin()
+  const userRepo = AppDataSource.getRepository(SysUser)
+  const userCountBefore = await userRepo.count()
+  const bootstrapAdmin = await authService.ensureDefaultAdmin()
+  const persistedAdmin = await userRepo.findOneByOrFail({ username: bootstrapAdmin.username })
+  assert.equal(persistedAdmin.status, 'enabled', 'O2O 专项必须使用当前启用的默认管理员')
+  assert.equal(
+    await userRepo.count(),
+    userCountBefore + Number(bootstrapAdmin.initialized),
+    'O2O 专项不得在默认管理员之外额外持久化 SysUser',
+  )
+  return persistedAdmin
 }
 
-const buildScriptAdminActor = (bootstrapAdmin: Awaited<ReturnType<typeof authService.ensureDefaultAdmin>>): AuthUserContext => {
+const buildScriptAdminActor = (bootstrapAdmin: SysUser): AuthUserContext => {
   // 详细注释：数据导出、SQLite 备份与核销服务当前统一收口到 AuthUserContext，
-  // 脚本场景下即使没有走真实登录会话，也需要构造一个稳定的管理员操作者上下文，
-  // 以满足权限校验与审计留痕签名，避免校验脚本再依赖外部手工传密码。
+  // 脚本场景下即使没有走真实登录会话，也必须从已持久化且启用的 SysUser 构造操作者上下文，
+  // 以覆盖事务内账号复核与审计留痕，不能使用仅存在于内存的伪造 ID。
   return {
-    userId: 'o2o-preorder-verify-admin',
+    userId: bootstrapAdmin.id,
     username: bootstrapAdmin.username,
     displayName: bootstrapAdmin.displayName,
     role: 'admin',
@@ -200,7 +211,7 @@ const run = async () => {
     currentStock: 20,
     // 本脚本会构造多条相互独立的撤销、竞态和依赖订单，限购值仅用于避免测试夹具互相干扰。
     limitPerUser: 30,
-  })
+  }, scriptAdminActor)
   assert.equal(product.o2oStatus, 'listed')
   log('商品上下架/库存字段创建通过')
 

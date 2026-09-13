@@ -50,7 +50,10 @@ import { systemConfigService } from './system-config.service.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { notificationService } from './notification.service.js'
 import { auditService } from './audit.service.js'
-import { lockActiveClientAccountForBusiness } from './account-business-guard.service.js'
+import {
+  lockActiveClientAccountForBusiness,
+  lockActiveSysAccountForBusiness,
+} from './account-business-guard.service.js'
 import {
   invalidateMallCatalogReadCache,
   readMallCatalogRevision,
@@ -3101,6 +3104,7 @@ class O2oPreorderService {
     const o2oRules = await systemConfigService.getO2oRuleConfigs()
 
     const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, auth.userId)
       const orderRepo = manager.getRepository(O2oPreorder)
       const orderItemRepo = manager.getRepository(O2oPreorderItem)
       const order = await orderRepo.findOne({
@@ -3466,24 +3470,38 @@ class O2oPreorderService {
     return this.buildOrderDetail(order, manager)
   }
 
-  async updateBusinessStatus(input: UpdateOrderBusinessStatusInput) {
-    const order = await this.preorderRepo.findOne({ where: { id: input.orderId, isDeleted: false } })
-    if (!order) {
-      throw new BizError('预订单不存在', 404)
-    }
-    order.businessStatus = this.normalizeBusinessStatus(input.businessStatus)
-    await this.preorderRepo.save(order)
-    return this.detailById(order.id)
+  async updateBusinessStatus(input: UpdateOrderBusinessStatusInput, actor: AuthUserContext) {
+    return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const orderRepo = manager.getRepository(O2oPreorder)
+      const order = await orderRepo.findOne({
+        where: { id: input.orderId, isDeleted: false },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
+      if (!order) {
+        throw new BizError('预订单不存在', 404)
+      }
+      order.businessStatus = this.normalizeBusinessStatus(input.businessStatus)
+      await orderRepo.save(order)
+      return this.buildOrderDetail(order, manager)
+    })
   }
 
-  async updateMerchantMessage(input: UpdateOrderMerchantMessageInput) {
-    const order = await this.preorderRepo.findOne({ where: { id: input.orderId, isDeleted: false } })
-    if (!order) {
-      throw new BizError('预订单不存在', 404)
-    }
-    order.merchantMessage = this.normalizeMerchantMessage(input.merchantMessage)
-    await this.preorderRepo.save(order)
-    return this.detailById(order.id)
+  async updateMerchantMessage(input: UpdateOrderMerchantMessageInput, actor: AuthUserContext) {
+    return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const orderRepo = manager.getRepository(O2oPreorder)
+      const order = await orderRepo.findOne({
+        where: { id: input.orderId, isDeleted: false },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
+      if (!order) {
+        throw new BizError('预订单不存在', 404)
+      }
+      order.merchantMessage = this.normalizeMerchantMessage(input.merchantMessage)
+      await orderRepo.save(order)
+      return this.buildOrderDetail(order, manager)
+    })
   }
 
   async markCustomerOrderPrintedByClient(auth: ClientAuthContext, orderId: string) {
@@ -3523,11 +3541,12 @@ class O2oPreorderService {
     })
   }
 
-  async updateComplianceFlagsByAdmin(input: UpdateOrderComplianceFlagsInput, actor?: AuthUserContext) {
+  async updateComplianceFlagsByAdmin(input: UpdateOrderComplianceFlagsInput, actor: AuthUserContext) {
     if (typeof input.hasCustomerOrder !== 'boolean' && typeof input.isSystemApplied !== 'boolean') {
       throw new BizError('请至少传入一个可更新字段', 400)
     }
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const orderRepo = manager.getRepository(O2oPreorder)
       const order = await orderRepo.findOne({
         where: { id: input.orderId, isDeleted: false },
@@ -3550,11 +3569,11 @@ class O2oPreorderService {
         hasCustomerOrder: input.hasCustomerOrder,
         isSystemApplied: input.isSystemApplied,
         reason: '管理端 O2O 合规状态联动',
-        actor: actor ? {
+        actor: {
           userId: actor.userId,
           username: actor.username,
           displayName: actor.displayName,
-        } : undefined,
+        },
       })
       return this.buildOrderDetail(order, manager)
     })
@@ -3571,6 +3590,7 @@ class O2oPreorderService {
     }
 
     const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const preorderRepo = manager.getRepository(O2oPreorder)
       const preorderItemRepo = manager.getRepository(O2oPreorderItem)
       const returnRequestRepo = manager.getRepository(O2oReturnRequest)
@@ -3743,6 +3763,7 @@ class O2oPreorderService {
       throw new BizError('取消原因长度应为 2-200 个字符', 400)
     }
     const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, input.actor.userId)
       const order = await manager.getRepository(O2oPreorder).findOne({
         where: { id: input.orderId, isDeleted: false },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
@@ -3807,6 +3828,7 @@ class O2oPreorderService {
     for (const item of orders) {
       try {
         results.push(await runInTransaction(async (manager): Promise<BatchPurgeCancelledPreorderResult> => {
+          await lockActiveSysAccountForBusiness(manager, input.actor.userId)
           const preorderRepo = manager.getRepository(O2oPreorder)
           const order = await preorderRepo.findOne({ where: { id: item.id }, lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' } })
           if (!order) return { id: item.id, outcome: 'failed', code: 'ORDER_NOT_FOUND', message: '订单不存在' }
@@ -4063,6 +4085,7 @@ class O2oPreorderService {
   async rejectReturnRequest(input: RejectReturnRequestInput, actor: AuthUserContext) {
     const normalizedRejectReason = this.normalizeReturnRejectReason(input.rejectReason)
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const returnRequestRepo = manager.getRepository(O2oReturnRequest)
       const orderRepo = manager.getRepository(O2oPreorder)
       const returnRequest = await returnRequestRepo.findOne({
@@ -4197,6 +4220,7 @@ class O2oPreorderService {
   async verifyByCode(verifyCode: string, actor: AuthUserContext) {
     const normalizedVerifyCode = this.normalizeVerifyCode(verifyCode)
     const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const returnRequest = await manager.getRepository(O2oReturnRequest).findOne({
         where: { verifyCode: normalizedVerifyCode },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
@@ -4241,6 +4265,7 @@ class O2oPreorderService {
       throw new BizError('入库数量必须为正整数', 400)
     }
     const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const product = await manager.getRepository(BaseProduct).findOne({
         where: { id: productId },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },

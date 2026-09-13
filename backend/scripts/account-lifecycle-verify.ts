@@ -2,7 +2,7 @@
  * Issue #74 账号生命周期专项验证。
  *
  * 使用本轮唯一临时 SQLite 库验证两域服务事务、并发幂等、会话撤销、业务阻断、
- * RESTRICT 外键与 append-only 事件；同时静态锁定路由权限、频控和双库迁移契约。
+ * RESTRICT 外键与 append-only 事件；同时锁定公开管理端业务写事务的 SysUser guard、路由权限、频控和双库迁移契约。
  */
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
@@ -90,23 +90,37 @@ process.env.SQLITE_DB_PATH = sqlitePath
 process.env.DB_SYNC = 'true'
 process.env.Y_LINK_SKIP_DATABASE_RUNTIME_OVERRIDE = 'true'
 process.env.PERMANENT_DELETE_PASSWORD = permanentDeletePassword
+process.env.INVITE_CODE_PEPPER = 'issue74-account-lifecycle-test-pepper-only'
 
 const readSource = (relativePath: string) => fs.readFileSync(path.join(backendRoot, relativePath), 'utf8')
 const userRoutesSource = readSource('src/routes/user.routes.ts')
 const clientRoutesSource = readSource('src/routes/client-user-manage.routes.ts')
+const productRoutesSource = readSource('src/routes/product.routes.ts')
+const tagRoutesSource = readSource('src/routes/tag.routes.ts')
+const o2oRoutesSource = readSource('src/routes/o2o.routes.ts')
+const systemConfigRoutesSource = readSource('src/routes/system-config.routes.ts')
+const dataMaintenanceRoutesSource = readSource('src/routes/data-maintenance.routes.ts')
+const notificationRoutesSource = readSource('src/routes/notification.routes.ts')
 const passwordSource = readSource('src/utils/permanent-delete-password.ts')
 const mysqlMigrationSource = readSource('sql/044_account_lifecycle_governance.sql')
 const o2oPreorderServiceSource = readSource('src/services/o2o-preorder.service.ts')
 const inboundServiceSource = readSource('src/services/inbound.service.ts')
+const productServiceSource = readSource('src/services/product.service.ts')
 const feedbackServiceSource = readSource('src/services/client-feedback.service.ts')
 const notificationServiceSource = readSource('src/services/notification.service.ts')
 const businessGuardSource = readSource('src/services/account-business-guard.service.ts')
 const userServiceSource = readSource('src/services/user.service.ts')
 const clientUserManageServiceSource = readSource('src/services/client-user-manage.service.ts')
+const clientStaffDirectoryServiceSource = readSource('src/services/client-staff-directory.service.ts')
+const systemConfigServiceSource = readSource('src/services/system-config.service.ts')
+const clientStaffInviteCodeServiceSource = readSource('src/services/client-staff-invite-code.service.ts')
+const dataMaintenanceServiceSource = readSource('src/services/data-maintenance.service.ts')
+const tagServiceSource = readSource('src/services/tag.service.ts')
 const realtimeServiceSource = readSource('src/services/customer-service-realtime.service.ts')
 const authServiceSource = readSource('src/services/auth.service.ts')
 const clientAuthServiceSource = readSource('src/services/client-auth.service.ts')
 const mobileSessionServiceSource = readSource('src/services/mobile-session.service.ts')
+const o2oPreorderVerifyScriptSource = readSource('scripts/o2o-preorder-verify.ts')
 
 const sliceMethod = (source: string, start: string, next: string) => {
   const startIndex = source.indexOf(start)
@@ -118,6 +132,36 @@ const sliceMethod = (source: string, start: string, next: string) => {
 const o2oSubmitSource = sliceMethod(o2oPreorderServiceSource, '  async submit(', '  async listMyOrders(')
 const o2oReturnSource = sliceMethod(o2oPreorderServiceSource, '  async createReturnRequest(', '  async listConsoleOrders(')
 const inboundSubmitSource = sliceMethod(inboundServiceSource, '  async submitSupplierDelivery(', '  async updateSupplierDelivery(')
+const inboundUpdateSource = sliceMethod(inboundServiceSource, '  async updateSupplierDelivery(', '  async cancelSupplierDelivery(')
+const inboundCancelSource = sliceMethod(inboundServiceSource, '  async cancelSupplierDelivery(', '  async softDeleteSupplierDelivery(')
+const inboundSoftDeleteSource = sliceMethod(inboundServiceSource, '  async softDeleteSupplierDelivery(', '  async restoreSupplierDelivery(')
+const inboundRestoreSource = sliceMethod(inboundServiceSource, '  async restoreSupplierDelivery(', '  async purgeSupplierDelivery(')
+const inboundPurgeSource = sliceMethod(inboundServiceSource, '  async purgeSupplierDelivery(', '  async deleteVerifiedSupplierDelivery(')
+const inboundDeleteVerifiedSource = sliceMethod(inboundServiceSource, '  async deleteVerifiedSupplierDelivery(', '  async updateInboundOrderForAdmin(')
+const inboundAdminUpdateSource = sliceMethod(inboundServiceSource, '  async updateInboundOrderForAdmin(', '  private async buildSupplierDeliverySummary(')
+const inboundVerifySource = sliceMethod(inboundServiceSource, '  async verifyInbound(', '  async listAllInboundOrders(')
+const o2oOnsiteUpdateSource = sliceMethod(o2oPreorderServiceSource, '  async updateOrderOnsite(', '  async getMyOrderDetail(')
+const o2oComplianceUpdateSource = sliceMethod(o2oPreorderServiceSource, '  async updateComplianceFlagsByAdmin(', '  async deleteConsoleOrder(')
+const o2oDeleteSource = sliceMethod(o2oPreorderServiceSource, '  async deleteConsoleOrder(', '  async cancelMyOrder(')
+const o2oAdminCancelSource = sliceMethod(o2oPreorderServiceSource, '  async cancelOrderByAdmin(', '  async batchPurgeCancelledOrders(')
+const o2oBatchPurgeSource = sliceMethod(o2oPreorderServiceSource, '  async batchPurgeCancelledOrders(', '  private async markOrderAfterSaleStageInManager(')
+const o2oReturnRejectSource = sliceMethod(o2oPreorderServiceSource, '  async rejectReturnRequest(', '  private async verifyPreorderInManager(')
+const o2oVerifySource = sliceMethod(o2oPreorderServiceSource, '  async verifyByCode(', '  async inboundStock(')
+const o2oInboundStockSource = sliceMethod(o2oPreorderServiceSource, '  async inboundStock(', '  startTimeoutRecycleLoop(')
+const o2oBusinessStatusSource = sliceMethod(o2oPreorderServiceSource, '  async updateBusinessStatus(', '  async updateMerchantMessage(')
+const o2oMerchantMessageSource = sliceMethod(o2oPreorderServiceSource, '  async updateMerchantMessage(', '  async markCustomerOrderPrintedByClient(')
+const productCreateSource = sliceMethod(productServiceSource, '  async create(', '  async batchCreate(')
+const productBatchCreateSource = sliceMethod(productServiceSource, '  async batchCreate(', '  async update(')
+const productUpdateSource = sliceMethod(productServiceSource, '  async update(', '  async batchUpdate(')
+const productBatchUpdateSource = sliceMethod(productServiceSource, '  async batchUpdate(', '  async delete(')
+const productDeleteSource = sliceMethod(productServiceSource, '  async delete(', '  private async replaceProductTags(')
+const productBatchUpdateRouteSource = sliceMethod(productRoutesSource, "productRouter.post(\n  '/batch',", "productRouter.post(\n  '/batch-create',")
+const productBatchCreateRouteSource = sliceMethod(productRoutesSource, "productRouter.post(\n  '/batch-create',", "productRouter.get(\n  '/:id',")
+const productCreateRouteSource = sliceMethod(productRoutesSource, "productRouter.post(\n  '/',", "productRouter.put(\n  '/:id',")
+const productUpdateRouteSource = sliceMethod(productRoutesSource, "productRouter.put(\n  '/:id',", "productRouter.delete(\n  '/:id',")
+const productDeleteRouteSource = sliceMethod(`${productRoutesSource}\n// product routes eof`, "productRouter.delete(\n  '/:id',", '// product routes eof')
+const o2oBusinessStatusRouteSource = sliceMethod(o2oRoutesSource, "  '/orders/:id/business-status',", "  '/orders/:id/onsite-adjust',")
+const o2oMerchantMessageRouteSource = sliceMethod(o2oRoutesSource, "  '/orders/:id/merchant-message',", "  '/orders/:id/compliance-flags',")
 const feedbackCreateSource = sliceMethod(feedbackServiceSource, '  async createConversation(', '  async listMyConversations(')
 const feedbackClientMessageSource = sliceMethod(feedbackServiceSource, '  async appendClientMessage(', '  async appendServiceMessage(')
 const feedbackReplySource = sliceMethod(feedbackServiceSource, '  async appendServiceMessage(', '  async updateConversationStatus(')
@@ -125,9 +169,126 @@ const feedbackStatusSource = sliceMethod(feedbackServiceSource, '  async updateC
 const feedbackAssigneeSource = sliceMethod(feedbackServiceSource, '  async updateConversationAssignee(', '  async updateConversationIssueFields(')
 const feedbackIssueSource = sliceMethod(feedbackServiceSource, '  async updateConversationIssueFields(', '  async updateConversationInternalRemark(')
 const feedbackRemarkSource = sliceMethod(feedbackServiceSource, '  async updateConversationInternalRemark(', '  async getServicePresence(')
+const feedbackServiceDetailSource = sliceMethod(feedbackServiceSource, '  async getServiceConversationDetail(', '  async appendServiceMessage(')
+const feedbackConversationLookupSource = sliceMethod(feedbackServiceSource, '  private async requireConversationById(', '  /** 锁后复核目标负责人仍具备客服工作台处理能力。 */')
+const notificationListRulesSource = sliceMethod(notificationServiceSource, '  async listRules(', '  private validateRuleUserSelections(')
 const notificationRulesSource = sliceMethod(notificationServiceSource, '  async updateRules(', '  async getPresenceSnapshot(')
+const notificationInboxReadSource = sliceMethod(notificationServiceSource, '  async markInboxRead(', '  async getUnreadCount(')
+const authChangeOwnPasswordSource = sliceMethod(authServiceSource, '  async changeOwnPassword(', '  async resolveAuthUserByToken(')
+const orderSerialConfigReadSource = sliceMethod(systemConfigServiceSource, '  async getOrderSerialConfigs(', '  async updateOrderSerialConfigs(')
+const o2oConfigReadSource = sliceMethod(systemConfigServiceSource, '  async getO2oRuleConfigs(', '  private isTransactionalManager(')
+const customerServiceConfigReadSource = sliceMethod(systemConfigServiceSource, '  private async getCustomerServiceBaseConfig(', '  async updateCustomerServiceConfigs(')
+const verificationConfigReadSource = sliceMethod(systemConfigServiceSource, '  private async loadVerificationConfigMap(', '  private resolveSensitiveVerificationFieldValue(')
+const clientDepartmentConfigReadSource = sliceMethod(systemConfigServiceSource, '  async getClientDepartmentConfigs(', '  async updateClientDepartmentConfigs(')
+const dataExportSource = sliceMethod(dataMaintenanceServiceSource, '  async exportJson(', '  async importJson(')
 const clientRealtimeSource = sliceMethod(feedbackServiceSource, '  async openClientRealtimeChannel(', '  async openServiceRealtimeChannel(')
 const serviceRealtimeSource = sliceMethod(feedbackServiceSource, '  async openServiceRealtimeChannel(', '  async createConversation(')
+
+const changePasswordTransactionIndex = authChangeOwnPasswordSource.indexOf('runInTransaction(async (manager) =>')
+const changePasswordGuardIndex = authChangeOwnPasswordSource.indexOf('lockActiveSysAccountForBusiness(manager, auth.userId)')
+const changePasswordHashReadIndex = authChangeOwnPasswordSource.indexOf("addSelect('user.passwordHash')")
+assert.ok(changePasswordTransactionIndex >= 0, '本人改密必须在事务内完成账号读取、校验和写入')
+assert.ok(changePasswordGuardIndex > changePasswordTransactionIndex, '本人改密必须在事务内先锁定并复核当前账号')
+assert.ok(changePasswordHashReadIndex > changePasswordGuardIndex, '本人改密必须在账号 guard 后显式读取密码哈希')
+assert.doesNotMatch(authChangeOwnPasswordSource.slice(0, changePasswordTransactionIndex), /findUserWithPasswordById/, '本人改密不得使用事务外账号密码快照')
+const feedbackDetailGuardIndex = feedbackServiceDetailSource.indexOf('lockActiveSysAccountForBusiness(manager, actor.userId)')
+const feedbackDetailConversationIndex = feedbackServiceDetailSource.indexOf('requireConversationById(id, manager)')
+assert.ok(feedbackDetailGuardIndex >= 0, '客服详情的已读副作用必须复核管理端账号')
+assert.ok(feedbackDetailGuardIndex < feedbackDetailConversationIndex, '客服详情的已读副作用必须先锁账号再锁会话')
+assert.match(feedbackConversationLookupSource, /setLock\('pessimistic_write'\)/, '客服写事务必须在账号锁后获取会话写锁')
+assert.doesNotMatch(notificationListRulesSource, /ensureDefaultRules/, '通知规则 GET 必须保持纯读，不得惰性写入默认数据')
+for (const [source, label] of [
+  [orderSerialConfigReadSource, '订单流水配置 GET'],
+  [o2oConfigReadSource, 'O2O 配置 GET'],
+  [customerServiceConfigReadSource, '客服配置 GET'],
+  [verificationConfigReadSource, '验证码配置 GET'],
+  [clientDepartmentConfigReadSource, '客户端部门配置 GET'],
+] as const) {
+  assert.doesNotMatch(source, /ensureDefaultConfigs/, `${label} 必须保持纯读，不得惰性写入默认配置`)
+}
+assert.ok(
+  notificationRulesSource.indexOf('lockActiveSysAccountsForBusiness(manager,')
+    < notificationRulesSource.indexOf('ensureDefaultRules(manager)'),
+  '通知规则更新必须先锁账号，再在同事务初始化默认规则',
+)
+
+const managementWriteContracts = [
+  [sliceMethod(userServiceSource, '  async create(', '  async update('), 'manager.getRepository(SysUser)', '创建管理端账号'],
+  [sliceMethod(clientUserManageServiceSource, '  async createDepartmentAccountsBatch(', '  async createProfile('), 'manager.getRepository(ClientUser)', '部门客户端批量开户'],
+  [sliceMethod(clientUserManageServiceSource, '  async createProfile(', '  async list('), 'manager.getRepository(ClientUser)', '创建客户端账号'],
+  [sliceMethod(clientUserManageServiceSource, '  async updateStatus(', '  async updateProfile('), 'manager.getRepository(ClientUser)', '启停客户端账号'],
+  [sliceMethod(clientUserManageServiceSource, '  async updateProfile(', '  async resetPassword('), 'manager.getRepository(ClientUser)', '修改客户端账号'],
+  [sliceMethod(clientUserManageServiceSource, '  async resetPassword(', '\n}\n\nexport const clientUserManageService'), 'manager.getRepository(ClientUser)', '重置客户端账号密码'],
+  [sliceMethod(clientStaffDirectoryServiceSource, '  async create(', '  async update('), 'manager.getRepository(ClientStaffDirectory)', '创建教职工目录'],
+  [sliceMethod(clientStaffDirectoryServiceSource, '  async update(', '  async updateStatus('), 'manager.getRepository(ClientStaffDirectory)', '修改教职工目录'],
+  [sliceMethod(clientStaffDirectoryServiceSource, '  async updateStatus(', '  async deleteBatch('), 'manager.getRepository(ClientStaffDirectory)', '启停教职工目录'],
+  [sliceMethod(clientStaffDirectoryServiceSource, '  async deleteBatch(', '  async previewImport('), 'manager.getRepository(ClientStaffDirectory)', '批量删除教职工目录'],
+  [sliceMethod(clientStaffDirectoryServiceSource, '  async importRows(', '\n}\n\nexport const clientStaffDirectoryService'), 'manager.getRepository(ClientStaffDirectory)', '导入教职工目录'],
+  [sliceMethod(systemConfigServiceSource, '  async updateOrderSerialConfigs(', '  async getO2oRuleConfigs('), 'manager.query(', '更新订单流水配置'],
+  [sliceMethod(systemConfigServiceSource, '  async updateO2oRuleConfigs(', '  async getCustomerServiceConfigs('), 'manager.query(', '更新 O2O 规则'],
+  [sliceMethod(systemConfigServiceSource, '  async updateCustomerServiceConfigs(', '  async getClientDepartmentConfigs('), 'manager.query(', '更新客服配置'],
+  [sliceMethod(systemConfigServiceSource, '  async updateClientDepartmentConfigs(', '  async ensureClientDepartmentOptions('), 'manager.query(', '更新客户端部门配置'],
+  [sliceMethod(systemConfigServiceSource, '  async updateVerificationProviderConfigs(', '\n}\n\nexport const systemConfigService'), 'manager.query(', '更新验证码服务配置'],
+  [sliceMethod(clientStaffInviteCodeServiceSource, '  private async updateConfig(', '\n}\n\nexport const clientStaffInviteCodeService'), 'manager.getRepository(SystemConfig)', '更新教职工邀请码'],
+  [sliceMethod(dataMaintenanceServiceSource, '  async importJson(', '\n}\n\nexport const dataMaintenanceService'), 'manager.getRepository(InventoryLog).clear()', '导入 JSON 数据'],
+  [dataExportSource, 'this.loadExportRows(tableKey, manager)', '导出 JSON 数据与审计'],
+  [sliceMethod(tagServiceSource, '  async create(', '  async update('), 'manager.getRepository(BaseTag)', '创建标签'],
+  [sliceMethod(tagServiceSource, '  async update(', '  async delete('), 'manager.getRepository(BaseTag)', '修改标签'],
+  [sliceMethod(tagServiceSource, '  async delete(', '  async findByIds('), 'manager.getRepository(BaseTag)', '删除标签'],
+  [notificationInboxReadSource, 'manager.getRepository(NotificationInbox)', '通知已读'],
+] as const
+
+for (const [source, firstBusinessMarker, label] of managementWriteContracts) {
+  const guardIndex = source.indexOf('lockActiveSysAccountForBusiness(manager, actor.userId)')
+  const businessIndex = source.indexOf(firstBusinessMarker)
+  assert.ok(guardIndex >= 0, `${label}写入口缺少事务账号 guard`)
+  assert.ok(businessIndex >= 0 && guardIndex < businessIndex, `${label}必须先锁账号再锁业务对象`)
+}
+for (const [source, permission, label] of [
+  [sliceMethod(userServiceSource, '  async update(', '  async updateStatus('), 'users:update', '修改管理端账号'],
+  [sliceMethod(userServiceSource, '  async updateStatus(', '  async resetPassword('), 'users:status', '启停管理端账号'],
+  [sliceMethod(userServiceSource, '  async resetPassword(', '\n}\n\nexport const userService'), 'users:reset_password', '重置管理端账号密码'],
+] as const) {
+  const guardIndex = source.indexOf(`lockLifecycleActorAndTarget(manager, id, actor, '${permission}')`)
+  const businessIndex = source.indexOf('manager.getRepository(SysUser)')
+  assert.ok(guardIndex >= 0, `${label}写入口缺少稳定 actor+target 锁后复核`)
+  assert.ok(businessIndex >= 0 && guardIndex < businessIndex, `${label}必须先稳定锁定 actor 与 target 再写账号`)
+}
+for (const [routeMarker, expectedCall, label] of [
+  ['tagRouter.post(', 'tagService.create(payload, authReq.auth)', '标签创建路由'],
+  ['tagRouter.put(', 'tagService.update(req.params.id, payload, authReq.auth)', '标签修改路由'],
+  ['tagRouter.delete(', 'tagService.delete(req.params.id, authReq.auth)', '标签删除路由'],
+] as const) {
+  const routeIndex = tagRoutesSource.indexOf(routeMarker)
+  const nextIndex = tagRoutesSource.indexOf('\n)', routeIndex)
+  const routeSource = tagRoutesSource.slice(routeIndex, nextIndex)
+  assert.match(routeSource, /const authReq = req as AuthenticatedRequest/, `${label}必须读取真实管理端账号上下文`)
+  assert.ok(routeSource.includes(expectedCall), `${label}必须向服务层透传管理端 actor`)
+}
+for (const [source, expectedCall, label] of [
+  [userRoutesSource, 'userService.create(payload, authReq.auth, extractRequestMeta(req))', '管理端账号创建路由'],
+  [userRoutesSource, 'userService.update(req.params.id, payload, authReq.auth, extractRequestMeta(req))', '管理端账号修改路由'],
+  [userRoutesSource, 'userService.updateStatus(req.params.id, payload.status, authReq.auth, extractRequestMeta(req))', '管理端账号启停路由'],
+  [userRoutesSource, 'userService.resetPassword(req.params.id, payload, authReq.auth, extractRequestMeta(req))', '管理端账号重置密码路由'],
+  [clientRoutesSource, 'clientUserManageService.createDepartmentAccountsBatch(payload, authReq.auth, extractRequestMeta(req))', '客户端部门批量开户路由'],
+  [clientRoutesSource, 'clientUserManageService.createProfile(payload, authReq.auth, extractRequestMeta(req))', '客户端账号创建路由'],
+  [clientRoutesSource, 'clientUserManageService.updateProfile(req.params.id, payload, authReq.auth, extractRequestMeta(req))', '客户端账号修改路由'],
+  [clientRoutesSource, 'clientUserManageService.updateStatus(req.params.id, payload.status, authReq.auth, extractRequestMeta(req))', '客户端账号启停路由'],
+  [clientRoutesSource, 'clientUserManageService.resetPassword(req.params.id, payload, authReq.auth, extractRequestMeta(req))', '客户端账号重置密码路由'],
+  [systemConfigRoutesSource, 'systemConfigService.updateOrderSerialConfigs(payload, authReq.auth, extractRequestMeta(req))', '订单流水配置路由'],
+  [systemConfigRoutesSource, 'systemConfigService.updateO2oRuleConfigs(payload, authReq.auth, extractRequestMeta(req))', 'O2O 配置路由'],
+  [systemConfigRoutesSource, 'systemConfigService.updateCustomerServiceConfigs(payload, authReq.auth, extractRequestMeta(req))', '客服配置路由'],
+  [systemConfigRoutesSource, 'systemConfigService.updateClientDepartmentConfigs(normalizedPayload, authReq.auth, extractRequestMeta(req))', '客户端部门配置路由'],
+  [systemConfigRoutesSource, 'systemConfigService.updateVerificationProviderConfigs(payload, authReq.auth, extractRequestMeta(req))', '验证码配置路由'],
+  [systemConfigRoutesSource, 'clientStaffDirectoryService.create(payload, authReq.auth, extractRequestMeta(req))', '教职工目录创建路由'],
+  [systemConfigRoutesSource, 'clientStaffDirectoryService.update(String(req.params.id ?? \'\').trim(), payload, authReq.auth, extractRequestMeta(req))', '教职工目录修改路由'],
+  [systemConfigRoutesSource, 'clientStaffInviteCodeService.setInviteCode(payload.inviteCode, authReq.auth, extractRequestMeta(req))', '教职工邀请码设置路由'],
+  [systemConfigRoutesSource, 'clientStaffInviteCodeService.disableInviteCode(authReq.auth, extractRequestMeta(req))', '教职工邀请码禁用路由'],
+  [dataMaintenanceRoutesSource, 'dataMaintenanceService.importJson(payload as any, authReq.auth, extractRequestMeta(req))', 'JSON 数据导入路由'],
+  [notificationRoutesSource, 'notificationService.markInboxRead(req.params.id, authReq.auth)', '通知已读路由'],
+] as const) {
+  assert.ok(source.includes(expectedCall), `${label}必须向服务层透传真实管理端 actor`)
+}
 
 for (const [source, guard, label] of [
   [o2oSubmitSource, 'lockActiveClientAccountForBusiness', 'O2O pending 预订单'],
@@ -146,7 +307,59 @@ for (const [source, guard, label] of [
 }
 assert.ok(inboundSubmitSource.indexOf('lockActiveSysAccountForBusiness') < inboundSubmitSource.indexOf('loadActiveProductsByIds'), '供应送货单必须先锁账号再锁商品')
 assert.ok(o2oReturnSource.indexOf('lockActiveClientAccountForBusiness') < o2oReturnSource.indexOf('getRepository(O2oPreorder)'), '退货申请必须先锁账号再锁订单')
+for (const [source, firstBusinessMarker, label] of [
+  [inboundUpdateSource, 'findSupplierMutableOrder', '供货方修改送货单'],
+  [inboundCancelSource, 'findSupplierMutableOrder', '供货方撤销送货单'],
+  [inboundSoftDeleteSource, 'findSupplierOwnedOrder', '供货方删除送货单'],
+  [inboundRestoreSource, 'findSupplierOwnedOrder', '供货方恢复送货单'],
+  [inboundPurgeSource, 'findSupplierOwnedOrder', '供货方永久删除送货单'],
+  [inboundDeleteVerifiedSource, 'findSupplierOwnedOrder', '供货方冲销已入库送货单'],
+  [inboundAdminUpdateSource, 'manager.getRepository(BizInboundOrder)', '管理端现场修改送货单'],
+  [inboundVerifySource, 'manager.getRepository(BizInboundOrder)', '管理端核销送货单'],
+  [o2oOnsiteUpdateSource, 'manager.getRepository(O2oPreorder)', '管理端现场修改 O2O 订单'],
+  [o2oComplianceUpdateSource, 'manager.getRepository(O2oPreorder)', '管理端修改 O2O 合规标记'],
+  [o2oDeleteSource, 'manager.getRepository(O2oPreorder)', '管理端删除 O2O 订单'],
+  [o2oAdminCancelSource, 'manager.getRepository(O2oPreorder)', '管理端取消 O2O 订单'],
+  [o2oBatchPurgeSource, 'manager.getRepository(O2oPreorder)', '管理端批量永久删除 O2O 订单'],
+  [o2oReturnRejectSource, 'manager.getRepository(O2oReturnRequest)', '管理端拒绝 O2O 退货'],
+  [o2oVerifySource, 'manager.getRepository(O2oReturnRequest)', '管理端核销 O2O 订单或退货'],
+  [o2oInboundStockSource, 'manager.getRepository(BaseProduct)', '管理端手工 O2O 入库'],
+] as const) {
+  const guardIndex = source.indexOf('lockActiveSysAccountForBusiness(manager,')
+  const businessIndex = source.indexOf(firstBusinessMarker)
+  assert.ok(guardIndex >= 0, `${label}写入口缺少事务账号 guard`)
+  assert.ok(businessIndex >= 0 && guardIndex < businessIndex, `${label}必须先锁账号再锁业务对象`)
+}
+for (const [source, firstBusinessMarker, label] of [
+  [productCreateSource, 'createWithManager', '创建商品'],
+  [productBatchCreateSource, 'createWithManager', '批量创建商品'],
+  [productUpdateSource, 'manager.getRepository(BaseProduct)', '修改商品'],
+  [productBatchUpdateSource, 'manager.getRepository(BaseProduct)', '批量修改商品'],
+  [productDeleteSource, 'manager.getRepository(BaseProduct)', '删除商品'],
+  [o2oBusinessStatusSource, 'manager.getRepository(O2oPreorder)', '修改 O2O 业务状态'],
+  [o2oMerchantMessageSource, 'manager.getRepository(O2oPreorder)', '修改 O2O 商家留言'],
+] as const) {
+  const guardIndex = source.indexOf('lockActiveSysAccountForBusiness(manager,')
+  const businessIndex = source.indexOf(firstBusinessMarker)
+  assert.ok(guardIndex >= 0, `${label}写入口缺少事务账号 guard`)
+  assert.ok(businessIndex >= 0 && guardIndex < businessIndex, `${label}必须先锁账号再锁业务对象`)
+}
+for (const [source, expectedCall, label] of [
+  [productBatchUpdateRouteSource, 'productService.batchUpdate(payload, authReq.auth)', '商品批量更新路由'],
+  [productBatchCreateRouteSource, 'batchCreateProducts(payload.products, authReq.auth)', '商品批量创建路由'],
+  [productCreateRouteSource, 'productService.create(payload, authReq.auth)', '商品创建路由'],
+  [productUpdateRouteSource, 'productService.update(req.params.id, payload, authReq.auth)', '商品修改路由'],
+  [productDeleteRouteSource, 'productService.delete(req.params.id, authReq.auth)', '商品删除路由'],
+  [o2oBusinessStatusRouteSource, '}, authReq.auth)', 'O2O 业务状态路由'],
+  [o2oMerchantMessageRouteSource, '}, authReq.auth)', 'O2O 商家留言路由'],
+] as const) {
+  assert.match(source, /const authReq = req as AuthenticatedRequest/, `${label}必须读取真实管理端账号上下文`)
+  assert.ok(source.includes(expectedCall), `${label}必须向服务层透传管理端 actor`)
+}
 assert.match(businessGuardSource, /orderBy\('account\.id', 'ASC'\)/, '多系统账号必须按 ID 升序锁定')
+assert.match(o2oPreorderVerifyScriptSource, /await authService\.ensureDefaultAdmin\(\)/, 'O2O 专项必须复用默认管理员初始化结果')
+assert.match(o2oPreorderVerifyScriptSource, /findOneByOrFail\(\{ username: bootstrapAdmin\.username \}\)/, 'O2O 专项必须按默认管理员用户名读取真实 SysUser')
+assert.doesNotMatch(o2oPreorderVerifyScriptSource, /userRepo\.save\(userRepo\.create\(/, 'O2O 专项不得额外持久化随机管理员')
 assert.match(businessGuardSource, /options\.type === 'mysql'\) query\.setLock\('pessimistic_write'\)/, 'MySQL 账号 guard 必须获取写锁')
 assert.match(notificationRulesSource, /lockActiveSysAccountsForBusiness\(manager, \[actor\.userId, \.\.\.responsibilityUserIds\]\)/, '通知规则必须同时锁后复核操作者与职责账号')
 for (const [serviceSource, helper, domain, permanentNext] of [
@@ -226,6 +439,11 @@ try {
     inboundServiceModule,
     notificationServiceModule,
     clientFeedbackServiceModule,
+    clientStaffDirectoryServiceModule,
+    systemConfigServiceModule,
+    clientStaffInviteCodeServiceModule,
+    dataMaintenanceServiceModule,
+    tagServiceModule,
     sysUserModule,
     sysSessionModule,
     clientUserModule,
@@ -235,9 +453,17 @@ try {
     preorderModule,
     returnRequestModule,
     feedbackModule,
+    feedbackMessageModule,
+    notificationRuleModule,
     notificationInboxModule,
+    systemConfigModule,
     lifecycleEventModule,
     auditModule,
+    productModule,
+    productSkuModule,
+    inventoryLogModule,
+    outboundOrderModule,
+    clientStaffDirectoryModule,
   ] = await Promise.all([
     import('../src/config/data-source.js'),
     import('../src/config/database-bootstrap.js'),
@@ -254,6 +480,11 @@ try {
     import('../src/services/inbound.service.js'),
     import('../src/services/notification.service.js'),
     import('../src/services/client-feedback.service.js'),
+    import('../src/services/client-staff-directory.service.js'),
+    import('../src/services/system-config.service.js'),
+    import('../src/services/client-staff-invite-code.service.js'),
+    import('../src/services/data-maintenance.service.js'),
+    import('../src/services/tag.service.js'),
     import('../src/entities/sys-user.entity.js'),
     import('../src/entities/sys-user-session.entity.js'),
     import('../src/entities/client-user.entity.js'),
@@ -263,9 +494,17 @@ try {
     import('../src/entities/o2o-preorder.entity.js'),
     import('../src/entities/o2o-return-request.entity.js'),
     import('../src/entities/client-feedback-conversation.entity.js'),
+    import('../src/entities/client-feedback-message.entity.js'),
+    import('../src/entities/notification-rule.entity.js'),
     import('../src/entities/notification-inbox.entity.js'),
+    import('../src/entities/system-config.entity.js'),
     import('../src/entities/account-lifecycle-event.entity.js'),
     import('../src/entities/sys-audit-log.entity.js'),
+    import('../src/entities/base-product.entity.js'),
+    import('../src/entities/base-product-sku.entity.js'),
+    import('../src/entities/inventory-log.entity.js'),
+    import('../src/entities/biz-outbound-order.entity.js'),
+    import('../src/entities/client-staff-directory.entity.js'),
   ])
 
   dataSource = dataSourceModule.AppDataSource
@@ -282,9 +521,17 @@ try {
   const preorderRepo = dataSource.getRepository(preorderModule.O2oPreorder)
   const returnRequestRepo = dataSource.getRepository(returnRequestModule.O2oReturnRequest)
   const feedbackRepo = dataSource.getRepository(feedbackModule.ClientFeedbackConversation)
+  const feedbackMessageRepo = dataSource.getRepository(feedbackMessageModule.ClientFeedbackMessage)
+  const notificationRuleRepo = dataSource.getRepository(notificationRuleModule.NotificationRule)
   const notificationInboxRepo = dataSource.getRepository(notificationInboxModule.NotificationInbox)
+  const systemConfigRepo = dataSource.getRepository(systemConfigModule.SystemConfig)
   const eventRepo = dataSource.getRepository(lifecycleEventModule.AccountLifecycleEvent)
   const auditRepo = dataSource.getRepository(auditModule.SysAuditLog)
+  const productRepo = dataSource.getRepository(productModule.BaseProduct)
+  const productSkuRepo = dataSource.getRepository(productSkuModule.BaseProductSku)
+  const inventoryLogRepo = dataSource.getRepository(inventoryLogModule.InventoryLog)
+  const outboundOrderRepo = dataSource.getRepository(outboundOrderModule.BizOutboundOrder)
+  const clientStaffDirectoryRepo = dataSource.getRepository(clientStaffDirectoryModule.ClientStaffDirectory)
 
   const userService = userServiceModule.userService
   const clientService = clientServiceModule.clientUserManageService
@@ -296,6 +543,11 @@ try {
   const inboundService = inboundServiceModule.inboundService
   const notificationService = notificationServiceModule.notificationService
   const clientFeedbackService = clientFeedbackServiceModule.clientFeedbackService
+  const clientStaffDirectoryService = clientStaffDirectoryServiceModule.clientStaffDirectoryService
+  const systemConfigService = systemConfigServiceModule.systemConfigService
+  const clientStaffInviteCodeService = clientStaffInviteCodeServiceModule.clientStaffInviteCodeService
+  const dataMaintenanceService = dataMaintenanceServiceModule.dataMaintenanceService
+  const tagService = tagServiceModule.tagService
 
   assert.equal(typeof userService.previewDeactivation, 'function', 'SysUser 注销预检尚未实现')
   assert.equal(typeof clientService.previewDeactivation, 'function', 'ClientUser 注销预检尚未实现')
@@ -378,6 +630,55 @@ try {
   assert.ok(currentPreview.blockers.some((item) => item.code === 'current_account'), '当前登录账号必须阻断注销')
   assert.ok(currentPreview.blockers.some((item) => item.code === 'last_enabled_admin'), '唯一启用管理员必须阻断注销')
   await createSysUser('issue74-admin-backup', { role: 'admin' })
+
+  const stalePassword = 'Issue74-Stale-Own-Password!9'
+  const staleOwnPasswordUser = await userService.create({
+    username: 'issue74-stale-own-password',
+    password: stalePassword,
+    displayName: '旧账号本人改密阻断',
+    role: 'operator',
+    status: 'enabled',
+  }, actor)
+  const staleOwnPasswordActor: AuthUserContext = {
+    userId: staleOwnPasswordUser.id,
+    username: staleOwnPasswordUser.username,
+    displayName: staleOwnPasswordUser.displayName,
+    role: staleOwnPasswordUser.role,
+    permissions: [],
+    status: 'enabled',
+    sessionToken: 'issue74-stale-own-password-session',
+  }
+  await userService.updateStatus(staleOwnPasswordUser.id, 'disabled', actor)
+  await addSysSession(staleOwnPasswordUser.id, staleOwnPasswordActor.sessionToken)
+  const staleOwnPasswordHashBefore = (await sysRepo.createQueryBuilder('user')
+    .addSelect('user.passwordHash')
+    .where('user.id = :id', { id: staleOwnPasswordUser.id })
+    .getOneOrFail()).passwordHash
+  await assert.rejects(
+    authService.changeOwnPassword(staleOwnPasswordActor, {
+      currentPassword: stalePassword,
+      newPassword: 'Issue74-Stale-Own-Password-Next!9',
+    }),
+    /账号已停用或已注销/,
+    '停用后的旧管理端请求不得修改本人密码',
+  )
+  const staleOwnPasswordAfter = await sysRepo.createQueryBuilder('user')
+    .addSelect('user.passwordHash')
+    .where('user.id = :id', { id: staleOwnPasswordUser.id })
+    .getOneOrFail()
+  assert.equal(staleOwnPasswordAfter.passwordHash, staleOwnPasswordHashBefore, '停用后的旧请求不得修改密码哈希')
+  assert.equal(await sysSessionRepo.count({ where: { userId: staleOwnPasswordUser.id } }), 1, '停用后的旧请求不得撤销后续会话记录')
+  const staleOwnPasswordAudit = await auditRepo.findOne({
+    where: {
+      actionType: 'auth.change_password',
+      actorUserId: staleOwnPasswordUser.id,
+      resultStatus: 'failed',
+    },
+    order: { id: 'DESC' },
+  })
+  assert.ok(staleOwnPasswordAudit, '停用或注销账号的本人改密失败必须保留脱敏审计')
+  assert.match(staleOwnPasswordAudit.detailJson ?? '', /account_inactive_or_missing/, '失效账号改密审计必须记录非敏感失败原因')
+  assert.doesNotMatch(staleOwnPasswordAudit.detailJson ?? '', /Issue74-Stale-Own-Password/, '改密失败审计不得记录密码')
 
   const staleLifecycleActorEntity = await createSysUser('issue74-stale-lifecycle-admin', { role: 'admin' })
   const staleLifecycleActor: AuthUserContext = {
@@ -652,9 +953,384 @@ try {
     o2oStatus: 'listed',
     currentStock: 20,
     limitPerUser: 20,
-  })
+  }, actor)
   const lifecycleRaceSku = lifecycleRaceProduct.skus[0]
   assert.ok(lifecycleRaceSku, '生命周期竞态专项商品必须生成默认 SKU')
+
+  const staleBusinessWriter = await createSysUser('issue74-stale-business-writer', { role: 'admin' })
+  const staleBusinessWriterActor: AuthUserContext = {
+    userId: staleBusinessWriter.id,
+    username: staleBusinessWriter.username,
+    displayName: staleBusinessWriter.displayName,
+    role: 'admin',
+    permissions: [
+      'users:create',
+      'users:update',
+      'users:status',
+      'users:reset_password',
+      'system_configs:update',
+    ],
+    status: 'enabled',
+    sessionToken: 'issue74-stale-business-writer-session',
+  }
+  const businessGuardClient = await createClientUser('issue74-business-guard-client')
+  const businessGuardClientAuth = {
+    userId: businessGuardClient.id,
+    account: businessGuardClient.email ?? businessGuardClient.realName,
+    mobile: businessGuardClient.mobile ?? '',
+    email: businessGuardClient.email ?? '',
+    realName: businessGuardClient.realName,
+    accountType: businessGuardClient.accountType,
+    staffNo: businessGuardClient.staffNo,
+    sessionToken: 'issue74-business-guard-client-session',
+    authSource: 'bearer' as const,
+  }
+  const staleVerifyPreorder = await o2oPreorderService.submit(businessGuardClientAuth, {
+    clientRequestId: 'issue74-stale-sys-preorder-verify-0001',
+    items: [{ productId: lifecycleRaceProduct.id, skuId: lifecycleRaceSku.id, qty: 1 }],
+    pickupContact: '旧系统账号核销阻断验证',
+    isSystemApplied: false,
+  })
+  const staleReturnPreorder = await o2oPreorderService.submit(businessGuardClientAuth, {
+    clientRequestId: 'issue74-stale-sys-return-verify-0001',
+    items: [{ productId: lifecycleRaceProduct.id, skuId: lifecycleRaceSku.id, qty: 1 }],
+    pickupContact: '旧系统账号退货核销阻断验证',
+    isSystemApplied: false,
+  })
+  await o2oPreorderService.verifyByCode(staleReturnPreorder.order.verifyCode, actor)
+  const staleReturnRequest = await o2oPreorderService.createReturnRequest(
+    businessGuardClientAuth,
+    staleReturnPreorder.order.id,
+    {
+      reason: '旧系统账号退货核销阻断验证',
+      items: [{ productId: lifecycleRaceProduct.id, skuId: lifecycleRaceSku.id, qty: 1 }],
+    },
+  )
+  const businessGuardSupplier = await createSysUser('issue74-business-guard-supplier', { role: 'supplier' })
+  const businessGuardSupplierActor: AuthUserContext = {
+    userId: businessGuardSupplier.id,
+    username: businessGuardSupplier.username,
+    displayName: businessGuardSupplier.displayName,
+    role: 'supplier',
+    permissions: [],
+    status: 'enabled',
+    sessionToken: 'issue74-business-guard-supplier-session',
+  }
+  const staleInboundOrder = await inboundService.submitSupplierDelivery(businessGuardSupplierActor, {
+    remark: '旧系统账号入库核销阻断验证',
+    items: [{ productId: lifecycleRaceProduct.id, skuId: lifecycleRaceSku.id, qty: 1 }],
+  })
+  const staleProductUpdateFixture = await productService.create({
+    productName: '旧系统账号商品修改阻证',
+    pinyinAbbr: 'JXTZHGSPXG',
+    defaultPrice: 8,
+    isActive: true,
+    o2oStatus: 'unlisted',
+    currentStock: 3,
+  }, actor)
+  const staleProductDeleteFixture = await productService.create({
+    productName: '旧系统账号商品删除夹具',
+    pinyinAbbr: 'JXTZHGSC',
+    defaultPrice: 9,
+    isActive: true,
+    o2oStatus: 'unlisted',
+    currentStock: 4,
+  }, actor)
+  const staleSysUpdateTarget = await createSysUser('issue74-stale-sys-update-target')
+  const staleSysStatusTarget = await createSysUser('issue74-stale-sys-status-target')
+  const staleSysPasswordTarget = await createSysUser('issue74-stale-sys-password-target')
+  const staleClientUpdateTarget = await createClientUser('issue74-stale-client-update-target')
+  const staleClientStatusTarget = await createClientUser('issue74-stale-client-status-target')
+  const staleClientPasswordTarget = await createClientUser('issue74-stale-client-password-target')
+  const staleStaffTarget = await clientStaffDirectoryService.create({
+    staffNo: 'STALE-7401',
+    realName: '旧账号目录目标',
+    departmentName: '',
+    status: 'active',
+  }, actor)
+  const systemConfigBeforeStaleWrites = await systemConfigService.getO2oRuleConfigs()
+  const inviteConfigBeforeStaleWrites = await clientStaffInviteCodeService.getConfig()
+  const exportedPayloadBeforeStaleWrites = await dataMaintenanceService.exportJson(actor)
+  const importPayloadBeforeStaleWrites = {
+    exportedAt: exportedPayloadBeforeStaleWrites.exportedAt,
+    version: exportedPayloadBeforeStaleWrites.version,
+    tables: {
+      systemConfigs: [],
+      products: [],
+      clientUsers: [],
+      preorders: [],
+      preorderItems: [],
+      inventoryLogs: [],
+    },
+  }
+  const staleNotificationInbox = await notificationInboxRepo.save(notificationInboxRepo.create({
+    eventId: 'issue74-stale-inbox-event',
+    userId: staleBusinessWriter.id,
+    eventType: 'issue74.stale_writer',
+    title: '旧账号通知已读阻断',
+    content: '旧账号不得把本通知标记为已读',
+    payloadJson: '{}',
+    isRead: 0,
+    readAt: null,
+  }))
+  await userService.deactivate(staleBusinessWriter.id, { reason: '验证旧系统账号业务写请求被拒绝' }, actor)
+
+  const productBeforeStaleWrites = await productRepo.findOneByOrFail({ id: lifecycleRaceProduct.id })
+  const skuBeforeStaleWrites = await productSkuRepo.findOneByOrFail({ id: lifecycleRaceSku.id })
+  const inventoryLogCountBeforeStaleWrites = await inventoryLogRepo.count()
+  const outboundOrderCountBeforeStaleWrites = await outboundOrderRepo.count()
+  const productCountBeforeStaleWrites = await productRepo.count()
+  const sysUserCountBeforeStaleWrites = await sysRepo.count()
+  const clientUserCountBeforeStaleWrites = await clientRepo.count()
+  const staffCountBeforeStaleWrites = await clientStaffDirectoryRepo.count()
+  const tagCountBeforeStaleWrites = (await tagService.listAll()).length
+  await assert.rejects(
+    userService.create({
+      username: 'issue74-stale-create-sys-user',
+      password: 'Issue74-Stale-Sys-Pass!9',
+      displayName: '旧账号不得创建管理端用户',
+      role: 'admin',
+      status: 'enabled',
+    }, staleBusinessWriterActor),
+    /账号已停用或已注销/,
+    '旧 SysUser 请求在账号停用后不得创建管理端账号',
+  )
+  await assert.rejects(
+    userService.update(staleSysUpdateTarget.id, { role: 'admin' }, staleBusinessWriterActor),
+    /管理员账号已失效或权限不足/,
+    '旧 SysUser 请求在账号停用后不得提权管理端账号',
+  )
+  await assert.rejects(
+    userService.updateStatus(staleSysStatusTarget.id, 'disabled', staleBusinessWriterActor),
+    /管理员账号已失效或权限不足/,
+    '旧 SysUser 请求在账号停用后不得启停管理端账号',
+  )
+  await assert.rejects(
+    userService.resetPassword(staleSysPasswordTarget.id, { newPassword: 'Issue74-Stale-Reset-Pass!9' }, staleBusinessWriterActor),
+    /管理员账号已失效或权限不足/,
+    '旧 SysUser 请求在账号停用后不得重置管理端账号密码',
+  )
+  await assert.rejects(
+    clientService.createProfile({
+      profileKind: 'personal',
+      username: '旧账号不得创建客户端用户',
+      email: 'issue74-stale-client-create@example.test',
+      departmentName: '',
+      password: 'Issue74-Stale-Client-Pass!9',
+      status: 'enabled',
+    }, staleBusinessWriterActor),
+    /账号已停用或已注销/,
+    '旧 SysUser 请求在账号停用后不得创建客户端账号',
+  )
+  await assert.rejects(
+    clientService.updateProfile(staleClientUpdateTarget.id, {
+      username: '旧账号不应写入客户端资料',
+      email: staleClientUpdateTarget.email ?? undefined,
+      departmentName: staleClientUpdateTarget.departmentName,
+      status: 'enabled',
+    }, staleBusinessWriterActor),
+    /账号已停用或已注销/,
+    '旧 SysUser 请求在账号停用后不得修改客户端账号',
+  )
+  await assert.rejects(
+    clientService.updateStatus(staleClientStatusTarget.id, 'disabled', staleBusinessWriterActor),
+    /账号已停用或已注销/,
+    '旧 SysUser 请求在账号停用后不得启停客户端账号',
+  )
+  await assert.rejects(
+    clientService.resetPassword(staleClientPasswordTarget.id, { newPassword: 'Issue74-Stale-Client-Reset!9' }, staleBusinessWriterActor),
+    /账号已停用或已注销/,
+    '旧 SysUser 请求在账号停用后不得重置客户端账号密码',
+  )
+  await assert.rejects(
+    clientStaffDirectoryService.update(staleStaffTarget.record.id, {
+      staffNo: staleStaffTarget.record.staffNo,
+      realName: '旧账号不应写入目录',
+      departmentName: staleStaffTarget.record.departmentName,
+    }, staleBusinessWriterActor),
+    /账号已停用或已注销/,
+    '旧 SysUser 请求在账号停用后不得修改教职工目录',
+  )
+  await assert.rejects(
+    systemConfigService.updateO2oRuleConfigs({
+      autoCancelEnabled: systemConfigBeforeStaleWrites.autoCancelEnabled,
+      autoCancelHours: systemConfigBeforeStaleWrites.autoCancelHours,
+      limitEnabled: systemConfigBeforeStaleWrites.limitEnabled,
+      limitQty: systemConfigBeforeStaleWrites.limitQty,
+      clientPreorderUpdateLimit: systemConfigBeforeStaleWrites.clientPreorderUpdateLimit,
+      storeBusinessHoursText: systemConfigBeforeStaleWrites.storeBusinessHoursText,
+      mallAnnouncementText: systemConfigBeforeStaleWrites.mallAnnouncementText,
+    }, staleBusinessWriterActor),
+    /账号已停用或已注销/,
+    '旧 SysUser 请求在账号停用后不得修改系统配置',
+  )
+  await assert.rejects(
+    clientStaffInviteCodeService.setInviteCode('74017401', staleBusinessWriterActor),
+    /账号已停用或已注销/,
+    '旧 SysUser 请求在账号停用后不得修改教职工邀请码',
+  )
+  const staleExportAuditCountBefore = await auditRepo.count({
+    where: { actionType: 'data_maintenance.export_json', actorUserId: staleBusinessWriter.id },
+  })
+  await assert.rejects(
+    dataMaintenanceService.exportJson(staleBusinessWriterActor),
+    /账号已停用或已注销/,
+    '旧 SysUser 请求在账号停用后不得导出业务数据或写导出审计',
+  )
+  assert.equal(
+    await auditRepo.count({ where: { actionType: 'data_maintenance.export_json', actorUserId: staleBusinessWriter.id } }),
+    staleExportAuditCountBefore,
+    '旧账号导出请求不得写审计副作用',
+  )
+  await assert.rejects(
+    dataMaintenanceService.importJson(importPayloadBeforeStaleWrites, staleBusinessWriterActor),
+    /账号已停用或已注销/,
+    '旧 SysUser 请求在账号停用后不得导入 JSON 数据',
+  )
+  await assert.rejects(
+    tagService.create({ tagName: '旧账号不得创建标签', tagCode: 'STALE-TAG-74' }, staleBusinessWriterActor),
+    /账号已停用或已注销/,
+    '旧 SysUser 请求在账号停用后不得创建标签',
+  )
+  await assert.rejects(
+    notificationService.markInboxRead(staleNotificationInbox.id, staleBusinessWriterActor),
+    /账号已停用或已注销/,
+    '旧 SysUser 请求在账号停用后不得标记通知已读',
+  )
+  await assert.rejects(
+    productService.create({
+      productName: '旧系统账号不得创建商品',
+      pinyinAbbr: 'JXTZHBJC',
+      defaultPrice: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 1,
+    }, staleBusinessWriterActor),
+    /账号已停用或已注销/,
+    '旧 SysUser 请求在账号停用后不得创建商品',
+  )
+  await assert.rejects(
+    productService.batchCreate([{
+      productName: '旧系统账号不得批量创建商品',
+      pinyinAbbr: 'JXTZHBPLJC',
+      defaultPrice: 10,
+      isActive: true,
+      o2oStatus: 'unlisted',
+      currentStock: 1,
+    }], staleBusinessWriterActor),
+    /账号已停用或已注销/,
+    '旧 SysUser 请求在账号停用后不得批量创建商品',
+  )
+  await assert.rejects(
+    productService.update(staleProductUpdateFixture.id, { productName: '旧账号不应写入的名称' }, staleBusinessWriterActor),
+    /账号已停用或已注销/,
+    '旧 SysUser 请求在账号停用后不得修改商品',
+  )
+  await assert.rejects(
+    productService.batchUpdate({ ids: [staleProductUpdateFixture.id], isActive: false }, staleBusinessWriterActor),
+    /账号已停用或已注销/,
+    '旧 SysUser 请求在账号停用后不得批量修改商品',
+  )
+  await assert.rejects(
+    productService.delete(staleProductDeleteFixture.id, staleBusinessWriterActor),
+    /账号已停用或已注销/,
+    '旧 SysUser 请求在账号停用后不得删除商品',
+  )
+  await assert.rejects(
+    o2oPreorderService.updateBusinessStatus({
+      orderId: staleVerifyPreorder.order.id,
+      businessStatus: 'completed',
+    }, staleBusinessWriterActor),
+    /账号已停用或已注销/,
+    '旧 SysUser 请求在账号停用后不得修改 O2O 业务状态',
+  )
+  await assert.rejects(
+    o2oPreorderService.updateMerchantMessage({
+      orderId: staleVerifyPreorder.order.id,
+      merchantMessage: '旧账号不应写入的商家留言',
+    }, staleBusinessWriterActor),
+    /账号已停用或已注销/,
+    '旧 SysUser 请求在账号停用后不得修改 O2O 商家留言',
+  )
+  await assert.rejects(
+    o2oPreorderService.verifyByCode(staleVerifyPreorder.order.verifyCode, staleBusinessWriterActor),
+    /账号已停用或已注销/,
+    '旧 SysUser 请求在账号停用后不得核销 O2O 预订单',
+  )
+  await assert.rejects(
+    o2oPreorderService.verifyByCode(staleReturnRequest.verifyCode, staleBusinessWriterActor),
+    /账号已停用或已注销/,
+    '旧 SysUser 请求在账号停用后不得核销 O2O 退货',
+  )
+  await assert.rejects(
+    inboundService.verifyInbound(staleInboundOrder.order.verifyCode, staleBusinessWriterActor),
+    /账号已停用或已注销/,
+    '旧 SysUser 请求在账号停用后不得核销供应方入库单',
+  )
+  await assert.rejects(
+    o2oPreorderService.inboundStock(
+      lifecycleRaceProduct.id,
+      1,
+      staleBusinessWriterActor,
+      '旧系统账号不得手工入库',
+      lifecycleRaceSku.id,
+    ),
+    /账号已停用或已注销/,
+    '旧 SysUser 请求在账号停用后不得手工 O2O 入库',
+  )
+  const productAfterStaleWrites = await productRepo.findOneByOrFail({ id: lifecycleRaceProduct.id })
+  const skuAfterStaleWrites = await productSkuRepo.findOneByOrFail({ id: lifecycleRaceSku.id })
+  assert.deepEqual(
+    [productAfterStaleWrites.currentStock, productAfterStaleWrites.preOrderedStock],
+    [productBeforeStaleWrites.currentStock, productBeforeStaleWrites.preOrderedStock],
+    '旧 SysUser 请求不得改变商品库存',
+  )
+  assert.deepEqual(
+    [skuAfterStaleWrites.currentStock, skuAfterStaleWrites.preOrderedStock],
+    [skuBeforeStaleWrites.currentStock, skuBeforeStaleWrites.preOrderedStock],
+    '旧 SysUser 请求不得改变 SKU 库存',
+  )
+  assert.equal((await preorderRepo.findOneByOrFail({ id: staleVerifyPreorder.order.id })).status, 'pending')
+  assert.equal((await preorderRepo.findOneByOrFail({ id: staleVerifyPreorder.order.id })).businessStatus, null)
+  assert.equal((await preorderRepo.findOneByOrFail({ id: staleVerifyPreorder.order.id })).merchantMessage, null)
+  assert.equal((await returnRequestRepo.findOneByOrFail({ id: staleReturnRequest.id })).status, 'pending')
+  assert.equal((await inboundRepo.findOneByOrFail({ id: staleInboundOrder.order.id })).status, 'pending')
+  assert.equal(await productRepo.count(), productCountBeforeStaleWrites, '旧 SysUser 请求不得创建或删除商品')
+  assert.equal((await productRepo.findOneByOrFail({ id: staleProductUpdateFixture.id })).productName, staleProductUpdateFixture.productName)
+  assert.equal(Boolean((await productRepo.findOneByOrFail({ id: staleProductUpdateFixture.id })).isActive), true)
+  assert.ok(await productRepo.findOneBy({ id: staleProductDeleteFixture.id }), '旧 SysUser 请求不得删除商品')
+  assert.equal(await inventoryLogRepo.count(), inventoryLogCountBeforeStaleWrites, '旧 SysUser 请求不得新增库存流水')
+  assert.equal(await outboundOrderRepo.count(), outboundOrderCountBeforeStaleWrites, '旧 SysUser 请求不得新增正式出库单')
+  assert.equal(await sysRepo.count(), sysUserCountBeforeStaleWrites, '旧 SysUser 请求不得创建或删除管理端账号')
+  assert.equal((await sysRepo.findOneByOrFail({ id: staleSysUpdateTarget.id })).role, 'operator', '旧 SysUser 请求不得提权管理端账号')
+  assert.equal((await sysRepo.findOneByOrFail({ id: staleSysStatusTarget.id })).status, 'enabled', '旧 SysUser 请求不得启停管理端账号')
+  assert.equal(await clientRepo.count(), clientUserCountBeforeStaleWrites, '旧 SysUser 请求不得创建或删除客户端账号')
+  assert.equal((await clientRepo.findOneByOrFail({ id: staleClientUpdateTarget.id })).realName, staleClientUpdateTarget.realName, '旧 SysUser 请求不得修改客户端资料')
+  assert.equal((await clientRepo.findOneByOrFail({ id: staleClientStatusTarget.id })).status, 'enabled', '旧 SysUser 请求不得启停客户端账号')
+  assert.equal(await clientStaffDirectoryRepo.count(), staffCountBeforeStaleWrites, '旧 SysUser 请求不得创建或删除教职工目录')
+  assert.equal((await clientStaffDirectoryRepo.findOneByOrFail({ id: staleStaffTarget.record.id })).realName, staleStaffTarget.record.realName, '旧 SysUser 请求不得修改教职工目录')
+  assert.deepEqual(await systemConfigService.getO2oRuleConfigs(), systemConfigBeforeStaleWrites, '旧 SysUser 请求不得修改系统配置')
+  assert.deepEqual(await clientStaffInviteCodeService.getConfig(), inviteConfigBeforeStaleWrites, '旧 SysUser 请求不得修改教职工邀请码')
+  assert.equal((await tagService.listAll()).length, tagCountBeforeStaleWrites, '旧 SysUser 请求不得创建标签')
+  assert.equal((await notificationInboxRepo.findOneByOrFail({ id: staleNotificationInbox.id })).isRead, 0, '旧 SysUser 请求不得修改通知已读状态')
+  await notificationInboxRepo.delete({ id: staleNotificationInbox.id })
+  await userService.permanentDelete(staleBusinessWriter.id, {
+    reason: '验证账号永久删除后旧业务请求被拒绝',
+    confirmAccount: staleBusinessWriter.username,
+    permanentDeletePassword,
+  }, actor)
+  await assert.rejects(
+    o2oPreorderService.inboundStock(
+      lifecycleRaceProduct.id,
+      1,
+      staleBusinessWriterActor,
+      '已永久删除账号不得手工入库',
+      lifecycleRaceSku.id,
+    ),
+    /系统账号不存在/,
+    '旧 SysUser 请求在账号永久删除后不得手工 O2O 入库',
+  )
+  assert.equal(await inventoryLogRepo.count(), inventoryLogCountBeforeStaleWrites, '永久删除后的旧请求不得新增库存流水')
 
   const staleClientUser = await createClientUser('issue74-stale-client')
   const staleClientAuth = {
@@ -712,12 +1388,57 @@ try {
     status: 'enabled',
     sessionToken: 'issue74-stale-notification-session',
   }
+  await notificationRuleRepo.clear()
+  await systemConfigRepo.delete({ configKey: 'notification.online_window_seconds' })
+  const defaultRuleViews = await notificationService.listRules()
+  assert.equal(defaultRuleViews.length, 3, '缺少通知规则时 GET 应返回内存默认视图')
+  assert.equal(await notificationRuleRepo.count(), 0, '通知规则 GET 不得惰性写入默认规则')
+  assert.equal(
+    await systemConfigRepo.count({ where: { configKey: 'notification.online_window_seconds' } }),
+    0,
+    '通知规则 GET 不得惰性写入在线窗口配置',
+  )
   await userService.deactivate(staleNotificationActor.id, { reason: '验证旧通知规则请求被拒绝' }, actor)
   await assert.rejects(
-    notificationService.updateRules([], 121, staleNotificationActorContext),
+    notificationService.updateRules(defaultRuleViews.map((row) => ({
+      id: row.id,
+      enabled: row.enabled,
+      recipientUserIds: row.recipientUserIds,
+      emailRecipientAdminUserIds: row.emailRecipientAdminUserIds,
+      emailRecipientSupplierUserIds: row.emailRecipientSupplierUserIds,
+      emailEnabled: row.emailEnabled,
+      feishuEnabled: row.feishuEnabled,
+      externalTriggerMode: row.externalTriggerMode,
+      watchedUserIds: row.watchedUserIds,
+      feishuWebhookUrl: row.feishuWebhookUrl,
+      feishuSignSecret: '',
+      emailSubjectPrefix: row.emailSubjectPrefix,
+    })), 121, staleNotificationActorContext),
     /账号已停用或已注销/,
     '旧 SysUser 请求在注销先提交后不得更新通知规则配置',
   )
+  assert.equal(await notificationRuleRepo.count(), 0, '停用账号更新通知规则不得在 guard 前初始化默认规则')
+  assert.equal(
+    await systemConfigRepo.count({ where: { configKey: 'notification.online_window_seconds' } }),
+    0,
+    '停用账号更新通知规则不得在 guard 前初始化在线窗口配置',
+  )
+  await notificationService.ensureDefaultRules()
+  const fallbackRuleUpdate = await notificationService.updateRules(defaultRuleViews.map((row) => ({
+    id: row.id,
+    enabled: row.enabled,
+    recipientUserIds: row.recipientUserIds,
+    emailRecipientAdminUserIds: row.emailRecipientAdminUserIds,
+    emailRecipientSupplierUserIds: row.emailRecipientSupplierUserIds,
+    emailEnabled: row.emailEnabled,
+    feishuEnabled: row.feishuEnabled,
+    externalTriggerMode: row.externalTriggerMode,
+    watchedUserIds: row.watchedUserIds,
+    feishuWebhookUrl: row.feishuWebhookUrl,
+    feishuSignSecret: '',
+    emailSubjectPrefix: row.emailSubjectPrefix,
+  })), 120, actor)
+  assert.equal(fallbackRuleUpdate.list.length, 3, '内存默认规则视图应可在显式写事务中映射到真实规则')
 
   const businessFirstClient = await createClientUser('issue74-business-first-client')
   const businessFirstClientAuth = {
@@ -846,9 +1567,43 @@ try {
     assignedUserId: feedbackGuardService.id,
     assignedUsername: feedbackGuardService.username,
     assignedDisplayName: feedbackGuardService.displayName,
+    unreadForServiceCount: 1,
+    lastMessageSenderType: 'client',
     lastMessageAt: new Date(),
   }))
+  const feedbackGuardUnreadMessage = await feedbackMessageRepo.save(feedbackMessageRepo.create({
+    conversationId: feedbackGuardSysConversation.id,
+    senderType: 'client',
+    senderUserId: feedbackGuardClient.id,
+    senderName: feedbackGuardClient.realName,
+    messageType: 'text',
+    internalOnly: false,
+    content: '旧客服读取请求不得标记本消息已读',
+    attachmentJson: '[]',
+    clientReadAt: new Date(),
+    serviceReadAt: null,
+  }))
   await userService.updateStatus(feedbackGuardService.id, 'disabled', actor)
+  const feedbackEventProbe = clientFeedbackService as unknown as {
+    publishConversationEvent: (...args: unknown[]) => void
+  }
+  const originalPublishConversationEvent = feedbackEventProbe.publishConversationEvent.bind(clientFeedbackService)
+  let staleServiceReadEventCount = 0
+  feedbackEventProbe.publishConversationEvent = (...args: unknown[]) => {
+    if (args[0] === 'conversation_read_by_service') staleServiceReadEventCount += 1
+  }
+  try {
+    await assert.rejects(
+      clientFeedbackService.getServiceConversationDetail(feedbackGuardSysConversation.id, staleFeedbackServiceActor),
+      /系统账号已停用或已注销/,
+      'getServiceConversationDetail 的已读副作用必须在事务锁后拒绝已停用客服',
+    )
+  } finally {
+    feedbackEventProbe.publishConversationEvent = originalPublishConversationEvent
+  }
+  assert.equal((await feedbackRepo.findOneByOrFail({ id: feedbackGuardSysConversation.id })).unreadForServiceCount, 1, '旧客服详情请求不得清零未读数')
+  assert.equal((await feedbackMessageRepo.findOneByOrFail({ id: feedbackGuardUnreadMessage.id })).serviceReadAt, null, '旧客服详情请求不得写入客服已读时间')
+  assert.equal(staleServiceReadEventCount, 0, '旧客服详情请求不得发布已读事件')
   await assert.rejects(
     clientFeedbackService.updateConversationStatus(feedbackGuardSysConversation.id, { status: 'resolved' }, staleFeedbackServiceActor),
     /系统账号已停用或已注销/,
@@ -1159,7 +1914,34 @@ try {
     '生命周期事件禁止删除',
   )
 
-  console.log('account lifecycle verify: passed (dual-domain transactions, blockers, sessions, FK, append-only, concurrency)')
+  for (const configKey of [
+    'order.serial.department.start',
+    'o2o.auto_cancel_hours',
+    'customer_service.enabled',
+    'verification.mobile.enabled',
+    'client.department.options',
+  ]) {
+    await systemConfigRepo.delete({ configKey })
+  }
+  const systemConfigReadProbe = systemConfigService as unknown as {
+    o2oRuleConfigCache: unknown
+    customerServiceBaseConfigCache: unknown
+  }
+  systemConfigReadProbe.o2oRuleConfigCache = null
+  systemConfigReadProbe.customerServiceBaseConfigCache = null
+  const configCountBeforeMissingReads = await systemConfigRepo.count()
+  for (const [readConfig, label] of [
+    [() => systemConfigService.getOrderSerialConfigs(), '订单流水配置'],
+    [() => systemConfigService.getO2oRuleConfigs(), 'O2O 配置'],
+    [() => systemConfigService.getCustomerServiceConfigs(), '客服配置'],
+    [() => systemConfigService.getVerificationProviderConfigs(), '验证码配置'],
+    [() => systemConfigService.getClientDepartmentConfigs(), '客户端部门配置'],
+  ] as const) {
+    await assert.rejects(readConfig(), /配置缺失/, `${label} GET 在配置缺失时必须明确报错`)
+    assert.equal(await systemConfigRepo.count(), configCountBeforeMissingReads, `${label} GET 不得惰性写入默认配置`)
+  }
+
+  console.log('account lifecycle verify: passed (dual-domain lifecycle, management write guards, sessions, FK, append-only, concurrency)')
 } finally {
   if (httpServer) {
     await new Promise<void>((resolve) => httpServer!.close(() => resolve()))

@@ -106,7 +106,7 @@ async function main() {
     const analyticsTag = await tagService.create({
       tagName: 'Task345统计标签',
       tagCode: 'T345-STAT',
-    })
+    }, mockActor)
 
     const firstProduct = await productService.create({
       productName: '自动编码产品一号',
@@ -114,13 +114,13 @@ async function main() {
       currentStock: 20,
       isActive: true,
       tagIds: [analyticsTag.id],
-    })
+    }, mockActor)
     const secondProduct = await productService.create({
       productName: '自动编码产品二号',
       defaultPrice: 12,
       currentStock: 20,
       isActive: true,
-    })
+    }, mockActor)
 
     assert.match(firstProduct.productCode, /^P-\d{6}-0001$/)
     assert.match(secondProduct.productCode, /^P-\d{6}-0002$/)
@@ -130,7 +130,7 @@ async function main() {
     const batchUpdatedProducts = await productService.batchUpdate({
       ids: [firstProduct.id, secondProduct.id],
       isActive: false,
-    })
+    }, mockActor)
     assert.equal(batchUpdatedProducts.length, 2)
     assert.equal(batchUpdatedProducts.every((item) => item.isActive === false), true)
     assert.equal((await productService.detail(firstProduct.id)).isActive, false)
@@ -141,7 +141,7 @@ async function main() {
         productService.update(firstProduct.id, {
           currentStock: 1,
           preOrderedStock: 2,
-        }),
+        }, mockActor),
       /预订库存不能超过物理库存/,
     )
     pass('商品服务会阻断预订库存大于物理库存的非法更新')
@@ -149,11 +149,11 @@ async function main() {
     await productService.update(firstProduct.id, {
       isActive: true,
       defaultPrice: 10,
-    })
+    }, mockActor)
     await productService.update(secondProduct.id, {
       isActive: true,
       defaultPrice: 12,
-    })
+    }, mockActor)
 
     const submitResult = await orderService.submit(
       {

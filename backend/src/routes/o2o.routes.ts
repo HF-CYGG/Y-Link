@@ -485,7 +485,7 @@ o2oAdminRouter.patch(
     const data = await o2oPreorderService.updateBusinessStatus({
       orderId: req.params.id,
       businessStatus: payload.businessStatus,
-    })
+    }, authReq.auth)
 
     const previousStatus = previous.order.businessStatus
     const nextStatus = data.order.businessStatus
@@ -574,7 +574,7 @@ o2oAdminRouter.patch(
     const data = await o2oPreorderService.updateMerchantMessage({
       orderId: req.params.id,
       merchantMessage: payload.merchantMessage,
-    })
+    }, authReq.auth)
 
     const previousMessage = previous.order.merchantMessage ?? null
     const nextMessage = data.order.merchantMessage ?? null

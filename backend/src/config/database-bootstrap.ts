@@ -1229,6 +1229,7 @@ export async function migrateClientUserDepartmentGovernance(
   const { runInTransaction } = await import('./transaction-runner.js')
   return runInTransaction(async (manager) => {
     const usePessimisticLock = manager.connection.options.type === 'mysql'
+    await systemConfigService.ensureDefaultConfigs(manager)
     // 所有输入读取、迁移计划和校验都必须在同一事务快照中完成；校验失败时回调抛错，零写入提交。
     const config = await systemConfigService.getClientDepartmentConfigs(manager, { lockForUpdate: true })
     const nodeIdSet = new Set<string>()

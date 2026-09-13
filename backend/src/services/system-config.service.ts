@@ -24,6 +24,7 @@ import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.
 import type { EntityManager } from 'typeorm'
 import { createHash } from 'node:crypto'
 import { STAFF_INVITE_CONFIG_KEY } from '../utils/staff-invite-code.js'
+import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 
 const CLIENT_DEPARTMENT_NODE_LIMIT = 3000
 
@@ -300,7 +301,7 @@ const DEFAULT_SYSTEM_CONFIGS = [
  * 实现逻辑：
  * 1. 仅对仍然保持旧默认值的配置自动升级，避免覆盖管理员手工调整过的营业时间；
  * 2. 覆盖工作日、开始时间、结束时间和离线 FAQ 中对应的默认描述文案；
- * 3. 该兼容逻辑会在读取系统配置前自动执行，保证已初始化环境也能无感收口到新默认值。
+ * 3. 该兼容逻辑仅在启动初始化或显式写事务中执行，读取接口保持无持久化副作用。
  */
 const CUSTOMER_SERVICE_LEGACY_DEFAULT_UPDATES = [
   {
@@ -838,7 +839,6 @@ class SystemConfigService {
   }
 
   private async loadVerificationConfigMap(manager: EntityManager = AppDataSource.manager) {
-    await this.ensureDefaultConfigs(manager)
     const rows = await manager.getRepository(SystemConfig).find({
       where: this.verificationConfigKeys.map((key) => ({ configKey: key })),
       select: {
@@ -1700,8 +1700,6 @@ class SystemConfigService {
   }
 
   async getOrderSerialConfigs(): Promise<{ list: OrderSerialConfigRecord[] }> {
-    await this.ensureDefaultConfigs()
-
     const keys = this.getOrderSerialAllKeys()
     const rows = await this.configRepo.find({
       where: keys.map((key) => ({ configKey: key })),
@@ -1739,9 +1737,9 @@ class SystemConfigService {
     await this.assertAdminActor(actor, requestMeta, 'system_config.update_order_serial', '更新订单流水配置')
     this.validateInputValue('department', input.department)
     this.validateInputValue('walkin', input.walkin)
-    await this.ensureDefaultConfigs()
-
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      await this.ensureDefaultConfigs(manager)
       const keys = this.getOrderSerialAllKeys()
       const placeholders = keys.map(() => '?').join(', ')
       const useForUpdate = manager.connection.options.type === 'mysql'
@@ -1867,7 +1865,6 @@ class SystemConfigService {
         return cached.value
       }
     }
-    await this.ensureDefaultConfigs(manager)
     const rows = await manager.getRepository(SystemConfig).find({
       where: this.o2oConfigKeys.map((key) => ({ configKey: key })),
       select: {
@@ -1969,8 +1966,9 @@ class SystemConfigService {
       throw new BizError('店铺营业时间长度不能超过 100 个字符', 400)
     }
 
-    await this.ensureDefaultConfigs()
     const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      await this.ensureDefaultConfigs(manager)
       const useForUpdate = manager.connection.options.type === 'mysql'
       const placeholders = this.o2oConfigKeys.map(() => '?').join(', ')
       const lockedRows: Array<{ id: string; configKey: string; configValue: string; updatedAt: string }> = await manager.query(
@@ -2089,7 +2087,6 @@ class SystemConfigService {
         return cached.value
       }
     }
-    await this.ensureDefaultConfigs(manager)
     const rows = await manager.getRepository(SystemConfig).find({
       where: this.customerServiceConfigKeys.map((key) => ({ configKey: key })),
       select: {
@@ -2188,8 +2185,9 @@ class SystemConfigService {
       throw new BizError('SSE 心跳间隔必须为 5 到 300 秒的整数', 400)
     }
 
-    await this.ensureDefaultConfigs()
     const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      await this.ensureDefaultConfigs(manager)
       const useForUpdate = manager.connection.options.type === 'mysql'
       const placeholders = this.customerServiceConfigKeys.map(() => '?').join(', ')
       const lockedRows: Array<{ id: string; configKey: string; configValue: string; updatedAt: string }> = await manager.query(
@@ -2331,7 +2329,6 @@ class SystemConfigService {
     manager?: EntityManager,
     options: { lockForUpdate?: boolean } = {},
   ): Promise<ClientDepartmentConfigRecord> {
-    await this.ensureDefaultConfigs(manager)
     const repository = manager ? manager.getRepository(SystemConfig) : this.configRepo
     const useForUpdate = Boolean(manager && options.lockForUpdate && manager.connection.options.type === 'mysql')
     const lockedRows: Array<{ id: string; configValue: string; updatedAt: Date | string }> = useForUpdate
@@ -2373,8 +2370,9 @@ class SystemConfigService {
     const submittedTree = Array.isArray(input.tree)
       ? this.normalizeClientDepartmentTree(input.tree)
       : null
-    await this.ensureDefaultConfigs()
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      await this.ensureDefaultConfigs(manager)
       const useForUpdate = manager.connection.options.type === 'mysql'
       const lockedRows: Array<{ id: string; configKey: string; configValue: string; updatedAt: string }> = await manager.query(
         `
@@ -2509,8 +2507,9 @@ class SystemConfigService {
       }
     }
 
-    await this.ensureDefaultConfigs()
     const execute = async (transactionManager: EntityManager): Promise<EnsureClientDepartmentOptionsResult> => {
+      await lockActiveSysAccountForBusiness(transactionManager, actor.userId)
+      await this.ensureDefaultConfigs(transactionManager)
       const useForUpdate = transactionManager.connection.options.type === 'mysql'
       const lockedRows: Array<{ id: string; configValue: string; updatedAt: string }> = await transactionManager.query(
         `
@@ -2604,12 +2603,12 @@ class SystemConfigService {
     return manager ? execute(manager) : runInTransaction(execute)
   }
 
-  async assertClientDepartmentOption(departmentName?: string) {
+  async assertClientDepartmentOption(departmentName?: string, manager?: EntityManager) {
     const normalizedDepartment = departmentName?.trim() || ''
     if (!normalizedDepartment) {
       return ''
     }
-    const config = await this.getClientDepartmentConfigs()
+    const config = await this.getClientDepartmentConfigs(manager)
     if (!config.options.includes(normalizedDepartment)) {
       // 兼容历史数据：若用户提交的是旧版“叶子部门名”，且能唯一定位到路径，则自动转换为路径值。
       const matchedPaths = this.findDepartmentPathsByLabel(config.tree, normalizedDepartment)
@@ -2696,6 +2695,8 @@ class SystemConfigService {
   ): Promise<{ config: VerificationProviderConfigsResult; changed: boolean }> {
     await this.assertAdminActor(actor, requestMeta, 'system_config.update_verification_providers', '更新验证码平台配置')
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      await this.ensureDefaultConfigs(manager)
       const useForUpdate = manager.connection.options.type === 'mysql'
       const placeholders = this.verificationConfigKeys.map(() => '?').join(', ')
       const lockedRows: Array<{ id: string; configKey: string; configValue: string; updatedAt: string }> = await manager.query(

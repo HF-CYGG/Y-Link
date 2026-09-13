@@ -12,12 +12,14 @@ import { AppDataSource } from '../src/config/data-source.js'
 import { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } from '../src/config/database-bootstrap.js'
 import { BaseProduct } from '../src/entities/base-product.entity.js'
 import { O2oPreorder } from '../src/entities/o2o-preorder.entity.js'
-import { authService } from '../src/services/auth.service.js'
+import { SysUser } from '../src/entities/sys-user.entity.js'
 import { clientAuthService } from '../src/services/client-auth.service.js'
 import { installCaptchaServiceForTesting } from '../src/services/captcha.service.js'
 import { o2oPreorderService } from '../src/services/o2o-preorder.service.js'
 import { productService } from '../src/services/product.service.js'
 import { systemConfigService } from '../src/services/system-config.service.js'
+import { verificationCodeService } from '../src/services/verification-code.service.js'
+import type { AuthUserContext } from '../src/types/auth.js'
 import type { ClientAuthContext } from '../src/types/client-auth.js'
 
 interface OrderListRow {
@@ -51,34 +53,61 @@ const log = (message: string) => {
   console.log(`[order-baseline] ${message}`)
 }
 
+let scriptAdminActor: AuthUserContext
+
 const ensureReady = async () => {
   prepareDatabaseRuntime()
   if (!AppDataSource.isInitialized) {
     await AppDataSource.initialize()
   }
   await initializeDatabaseSchemaIfNeeded(AppDataSource)
-  await authService.ensureDefaultAdmin()
+  const userRepo = AppDataSource.getRepository(SysUser)
+  const admin = await userRepo.save(userRepo.create({
+    username: `order-query-admin-${Date.now()}`,
+    passwordHash: 'verify-only',
+    displayName: '订单查询基线管理员',
+    email: null,
+    role: 'admin',
+    status: 'enabled',
+    lastLoginAt: null,
+  }))
+  scriptAdminActor = {
+    userId: String(admin.id), username: admin.username, displayName: admin.displayName,
+    role: 'admin', permissions: [], status: 'enabled',
+    sessionToken: 'order-query-baseline-verify', authSource: 'bearer',
+  }
   await systemConfigService.ensureDefaultConfigs()
+  const originalProviders = systemConfigService.getVerificationProviderConfigs.bind(systemConfigService)
+  systemConfigService.getVerificationProviderConfigs = async () => {
+    const configs = await originalProviders()
+    return { ...configs, mobile: { ...configs.mobile, enabled: true, ready: true } }
+  }
+  verificationCodeService.verifyCode = async (input) => {
+    if (input.channel !== 'mobile' || input.scene !== 'register' || input.code !== '123456'
+      || !pendingClientVerificationTargets.delete(input.target)) {
+      throw new Error('注册验证码验证夹具不匹配')
+    }
+  }
 }
 
 const TEST_CAPTCHA_CODE = 'ABC123'
 installCaptchaServiceForTesting({ createCode: () => TEST_CAPTCHA_CODE })
 const readCaptchaCode = (_captchaSvg: string) => TEST_CAPTCHA_CODE
 const toChineseDigits = (value: string) => value.replaceAll(/\d/g, (digit) => '零一二三四五六七八九'[Number(digit)] ?? '')
+const pendingClientVerificationTargets = new Set<string>()
 
 const registerAndLoginClient = async (seed: number): Promise<ClientAuthContext> => {
-  const registerCaptcha = await clientAuthService.createCaptcha()
   const account = `1${String(seed).slice(-10)}`
   const username = `基线用户${toChineseDigits(String(seed).slice(-6))}`
   const password = `Perf@${String(seed).slice(-6)}`
+  pendingClientVerificationTargets.add(account)
 
   const registerResult = await clientAuthService.register({
     accountType: 'personal',
     account,
     username,
     password,
-    captchaId: registerCaptcha.captchaId,
-    captchaCode: readCaptchaCode(registerCaptcha.captchaSvg),
+    verificationCode: '123456',
   })
 
   const loginCaptcha = await clientAuthService.createCaptcha()
@@ -163,7 +192,7 @@ const seedOrdersForBaseline = async (clientAuth: ClientAuthContext) => {
     o2oStatus: 'listed',
     currentStock: 500,
     limitPerUser: 20,
-  })
+  }, scriptAdminActor)
 
   // 生成 60 条订单样本，覆盖 pending/verified/cancelled 三种状态。
   for (let index = 0; index < 60; index += 1) {

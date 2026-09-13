@@ -1161,7 +1161,7 @@ async function main() {
       o2oStatus: 'listed',
       currentStock: 100,
       limitPerUser: 10,
-    })
+    }, adminAuth)
     const teacherAuth = await clientAuthService.resolveClientByToken(teacherFreshLogin.token)
     const teacherPreorder = await o2oPreorderService.submit(teacherAuth, {
       clientRequestId: 'department-govern-teacher-001',

@@ -53,18 +53,18 @@ function normalizeMoney(value: unknown) {
 const TEST_CAPTCHA_CODE = 'ABC123'
 installCaptchaServiceForTesting({ createCode: () => TEST_CAPTCHA_CODE })
 const readCaptchaCode = (_captchaSvg: string) => TEST_CAPTCHA_CODE
+const pendingClientVerificationTargets = new Set<string>()
 
 async function registerAndLoginClient(clientAuthService: typeof import('../src/services/client-auth.service.js').clientAuthService): Promise<ClientAuthContext> {
   const seed = String(Date.now()).slice(-10)
   const password = `Client@${seed.slice(-6)}`
-  const registerCaptcha = await clientAuthService.createCaptcha()
+  pendingClientVerificationTargets.add(`1${seed}`)
   const registerResult = await clientAuthService.register({
     accountType: 'personal',
     account: `1${seed}`,
     username: '折扣验证员',
     password,
-    captchaId: registerCaptcha.captchaId,
-    captchaCode: readCaptchaCode(registerCaptcha.captchaSvg),
+    verificationCode: '123456',
   })
   const loginCaptcha = await clientAuthService.createCaptcha()
   const loginResult = await clientAuthService.login({
@@ -97,16 +97,42 @@ async function main() {
   const { BaseProduct } = await import('../src/entities/base-product.entity.js')
   const { BizOutboundOrder } = await import('../src/entities/biz-outbound-order.entity.js')
   const { BizOutboundOrderItem } = await import('../src/entities/biz-outbound-order-item.entity.js')
+  const { SysUser } = await import('../src/entities/sys-user.entity.js')
   const { clientAuthService } = await import('../src/services/client-auth.service.js')
   const { o2oPreorderService } = await import('../src/services/o2o-preorder.service.js')
   const { productService } = await import('../src/services/product.service.js')
   const { systemConfigService } = await import('../src/services/system-config.service.js')
+  const { verificationCodeService } = await import('../src/services/verification-code.service.js')
 
   prepareDatabaseRuntime()
   await AppDataSource.initialize()
   try {
     await initializeDatabaseSchemaIfNeeded(AppDataSource)
     await systemConfigService.ensureDefaultConfigs()
+    const originalProviders = systemConfigService.getVerificationProviderConfigs.bind(systemConfigService)
+    systemConfigService.getVerificationProviderConfigs = async () => {
+      const configs = await originalProviders()
+      return { ...configs, mobile: { ...configs.mobile, enabled: true, ready: true } }
+    }
+    verificationCodeService.verifyCode = async (input) => {
+      assert.equal(input.channel, 'mobile')
+      assert.equal(input.scene, 'register')
+      assert.equal(input.code, '123456')
+      assert.ok(pendingClientVerificationTargets.delete(input.target), '注册验证码必须绑定本次手机号且只能使用一次')
+    }
+    const userRepo = AppDataSource.getRepository(SysUser)
+    const admin = await userRepo.save(userRepo.create({
+      username: `discount-admin-${verifySeed}`,
+      passwordHash: 'verify-only',
+      displayName: '折扣验证管理员',
+      email: null,
+      role: 'admin',
+      status: 'enabled',
+      lastLoginAt: null,
+    }))
+    adminActor.userId = String(admin.id)
+    adminActor.username = admin.username
+    adminActor.displayName = admin.displayName
 
     const product = await productService.create({
       productName: `折扣验证商品-${verifySeed}`,
@@ -118,7 +144,7 @@ async function main() {
       o2oRecommended: true,
       currentStock: 20,
       limitPerUser: 10,
-    })
+    }, adminActor)
     assert.equal(product.discountRate, '8.8')
     assert.equal(product.discountedPrice, '8.80')
     assert.equal(product.o2oRecommended, true)

@@ -35,7 +35,11 @@ import { systemConfigService } from './system-config.service.js'
 import type { EntityManager } from 'typeorm'
 import { randomBytes } from 'node:crypto'
 import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
-import { isAccountCurrentlyDeactivated, lockSysAccountsInStableOrder } from './account-business-guard.service.js'
+import {
+  isAccountCurrentlyDeactivated,
+  lockActiveSysAccountForBusiness,
+  lockSysAccountsInStableOrder,
+} from './account-business-guard.service.js'
 
 export interface ClientUserListQuery {
   page: number
@@ -603,6 +607,7 @@ export class ClientUserManageService {
 
     try {
       return await runInTransaction(async (manager) => {
+        await lockActiveSysAccountForBusiness(manager, actor.userId)
         const userRepo = manager.getRepository(ClientUser)
         const latestDepartmentConfig = await systemConfigService.getClientDepartmentConfigs(manager, { lockForUpdate: true })
         const normalizedItems = passwordCheckedItems.map((item, index) => {
@@ -767,9 +772,7 @@ export class ClientUserManageService {
     }
     const inputDepartmentName = profileKind === 'personal' ? input.departmentName : undefined
     let username = profileKind === 'department' ? this.normalizeUsername(input.username) : ''
-    let departmentName = profileKind === 'personal'
-      ? await systemConfigService.assertClientDepartmentOption(inputDepartmentName)
-      : ''
+    let departmentName = ''
     let accountType: ClientUserAccountType = 'personal'
     let staffVerified = false
 
@@ -786,20 +789,25 @@ export class ClientUserManageService {
 
     try {
       return await runInTransaction(async (manager) => {
-      const userRepo = manager.getRepository(ClientUser)
+        await lockActiveSysAccountForBusiness(manager, actor.userId)
+        const userRepo = manager.getRepository(ClientUser)
 
-      if (profileKind === 'teacher') {
-        const matchedStaff = await this.findActiveStaffDirectory(staffNo!, manager)
-        if (!matchedStaff) {
-          throw new BizError('教职工号未在学校目录中登记，请联系管理员核验', 409)
+        if (profileKind === 'personal') {
+          departmentName = await systemConfigService.assertClientDepartmentOption(inputDepartmentName, manager)
         }
-        username = matchedStaff.realName.trim()
-        departmentName = await systemConfigService.assertClientDepartmentOption(matchedStaff.departmentName)
-        staffVerified = true
-      }
-      if (profileKind === 'department' && !staffNo) {
-        staffNo = await this.generateUniqueDepartmentAccountNo(manager)
-      }
+
+        if (profileKind === 'teacher') {
+          const matchedStaff = await this.findActiveStaffDirectory(staffNo!, manager)
+          if (!matchedStaff) {
+            throw new BizError('教职工号未在学校目录中登记，请联系管理员核验', 409)
+          }
+          username = matchedStaff.realName.trim()
+          departmentName = await systemConfigService.assertClientDepartmentOption(matchedStaff.departmentName, manager)
+          staffVerified = true
+        }
+        if (profileKind === 'department' && !staffNo) {
+          staffNo = await this.generateUniqueDepartmentAccountNo(manager)
+        }
 
       const latestDepartmentConfig = profileKind === 'department'
         ? await systemConfigService.getClientDepartmentConfigs(manager, { lockForUpdate: true })
@@ -973,6 +981,7 @@ export class ClientUserManageService {
     }
 
     const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const userRepo = manager.getRepository(ClientUser)
       const sessionRepo = manager.getRepository(ClientUserSession)
       const mobileSessionRepo = manager.getRepository(ClientMobileSession)
@@ -1059,6 +1068,7 @@ export class ClientUserManageService {
     const email = this.normalizeEmail(input.email)
 
     const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const userRepo = manager.getRepository(ClientUser)
       const sessionRepo = manager.getRepository(ClientUserSession)
       const mobileSessionRepo = manager.getRepository(ClientMobileSession)
@@ -1104,7 +1114,7 @@ export class ClientUserManageService {
       user.email = email
       user.departmentName = profileKind === 'department'
         ? resolvedDepartment!.departmentName
-        : await systemConfigService.assertClientDepartmentOption(input.departmentName)
+        : await systemConfigService.assertClientDepartmentOption(input.departmentName, manager)
       user.departmentNodeId = resolvedDepartment?.departmentNodeId ?? null
       if (user.departmentNodeId) {
         await this.assertDepartmentNodeUnbound(user.departmentNodeId, manager, user.id)
@@ -1182,14 +1192,16 @@ export class ClientUserManageService {
     }
 
     const profile = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const userRepo = manager.getRepository(ClientUser)
       const sessionRepo = manager.getRepository(ClientUserSession)
       const mobileSessionRepo = manager.getRepository(ClientMobileSession)
-      const user = await userRepo
+      const userQuery = userRepo
         .createQueryBuilder('user')
         .addSelect('user.passwordHash')
         .where('user.id = :id', { id })
-        .getOne()
+      if (manager.connection.options.type === 'mysql') userQuery.setLock('pessimistic_write')
+      const user = await userQuery.getOne()
       if (!user) {
         throw new BizError('客户端用户不存在', 404)
       }

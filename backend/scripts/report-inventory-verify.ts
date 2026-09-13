@@ -394,6 +394,26 @@ async function main() {
       tagName: `库存生命周期-${verifySeed}`,
       tagCode: `LIFECYCLE-${verifySeed}`,
     }))
+    const userRepo = AppDataSource.getRepository(SysUser)
+    const persistedAdmin = await userRepo.save(userRepo.create({
+      username: `report-inventory-admin-${verifySeed}`,
+      passwordHash: 'verify-only',
+      displayName: '库存报表验证管理员',
+      email: null,
+      role: 'admin',
+      status: 'enabled',
+      lastLoginAt: null,
+    }))
+    const adminActor: AuthUserContext = {
+      userId: String(persistedAdmin.id),
+      username: persistedAdmin.username,
+      displayName: persistedAdmin.displayName,
+      role: 'admin',
+      permissions: [],
+      status: 'enabled',
+      sessionToken: 'report-inventory-admin-session',
+      authSource: 'bearer',
+    }
     const lifecycleProduct = await productService.create({
       productCode: `REPORT-LIFECYCLE-${verifySeed}`,
       productName: `库存生命周期商品-${verifySeed}`,
@@ -405,7 +425,7 @@ async function main() {
       currentStock: 10,
       limitPerUser: 20,
       tagIds: [String(lifecycleTag.id)],
-    })
+    }, adminActor)
     const lifecycleSku = lifecycleProduct.skus[0]
     assert.ok(lifecycleSku, '生命周期商品必须生成默认 SKU')
 
@@ -461,8 +481,7 @@ async function main() {
 
     await assertLifecycleStock([10, 0, 10], '初始库存')
 
-    const supplierRepo = AppDataSource.getRepository(SysUser)
-    const supplier = await supplierRepo.save(supplierRepo.create({
+    const supplier = await userRepo.save(userRepo.create({
       username: `report-supplier-${verifySeed}`,
       passwordHash: 'verify-only',
       displayName: '库存报表验证供货方',
@@ -481,24 +500,6 @@ async function main() {
       sessionToken: 'report-inventory-supplier',
       authSource: 'bearer',
     }
-    const adminActor: AuthUserContext = {
-      ...supplierActor,
-      userId: 'report-inventory-admin',
-      username: 'report-inventory-admin',
-      displayName: '库存报表验证管理员',
-      role: 'admin',
-      sessionToken: 'report-inventory-admin-session',
-    }
-    const persistedAdmin = await supplierRepo.save(supplierRepo.create({
-      username: adminActor.username,
-      passwordHash: 'verify-only',
-      displayName: adminActor.displayName,
-      email: null,
-      role: 'admin',
-      status: 'enabled',
-      lastLoginAt: null,
-    }))
-    adminActor.userId = String(persistedAdmin.id)
     const inbound = await inboundService.submitSupplierDelivery(supplierActor, {
       remark: '库存报表真实入库验证',
       items: [{ productId: lifecycleProduct.id, skuId: lifecycleSku.id, qty: 5 }],

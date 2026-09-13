@@ -1197,7 +1197,12 @@ class ClientFeedbackService {
 
   private async requireConversationById(id: string, manager?: EntityManager) {
     const repository = (manager ?? AppDataSource.manager).getRepository(ClientFeedbackConversation)
-    const conversation = await repository.findOne({ where: { id } })
+    const query = repository.createQueryBuilder('conversation')
+      .where('conversation.id = :id', { id })
+    if (manager && manager !== AppDataSource.manager && manager.connection.options.type === 'mysql') {
+      query.setLock('pessimistic_write')
+    }
+    const conversation = await query.getOne()
     if (!conversation) {
       throw new BizError('反馈会话不存在', 404)
     }
@@ -2041,6 +2046,7 @@ class ClientFeedbackService {
     }
 
     const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const conversation = await this.requireConversationById(id, manager)
       const readChanged = await this.markConversationReadForService(manager, conversation)
       const messages = await this.loadConversationMessages(manager, conversation.id)

@@ -405,6 +405,7 @@ class InboundService {
     const normalizedItems = this.normalizeSupplierInboundItems(input.items)
 
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const order = await this.findSupplierMutableOrder(orderId, actor, '改单', manager)
       const productIds = [...new Set(normalizedItems.map((item) => item.productId))]
       const productMap = await this.loadActiveProductsByIds(productIds, manager)
@@ -465,6 +466,7 @@ class InboundService {
     }
 
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const order = await this.findSupplierMutableOrder(orderId, actor, '撤销', manager)
       const items = await manager.getRepository(BizInboundOrderItem).find({ where: { orderId: order.id } })
 
@@ -501,6 +503,7 @@ class InboundService {
 
   async softDeleteSupplierDelivery(actor: AuthUserContext, orderId: string, requestMeta?: RequestMeta) {
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const order = await this.findSupplierOwnedOrder(orderId, actor, manager)
       if (this.isDeleted(order)) {
         throw new BizError(`送货单“${order.showNo}”已删除，请勿重复删除`, 409)
@@ -538,6 +541,7 @@ class InboundService {
 
   async restoreSupplierDelivery(actor: AuthUserContext, orderId: string, requestMeta?: RequestMeta) {
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const order = await this.findSupplierOwnedOrder(orderId, actor, manager)
       if (!this.isDeleted(order)) {
         throw new BizError(`送货单“${order.showNo}”未删除，无需恢复`, 409)
@@ -575,6 +579,7 @@ class InboundService {
 
   async purgeSupplierDelivery(actor: AuthUserContext, orderId: string, confirmShowNo?: string, requestMeta?: RequestMeta) {
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const order = await this.findSupplierOwnedOrder(orderId, actor, manager)
       if (!this.isDeleted(order)) {
         throw new BizError(`送货单“${order.showNo}”未删除，请先删除后再永久删除`, 409)
@@ -638,6 +643,7 @@ class InboundService {
       }
 
       const result = await runInTransaction(async (manager) => {
+        await lockActiveSysAccountForBusiness(manager, actor.userId)
         failureReason = 'order_not_found_or_not_owned'
         const order = await this.findSupplierOwnedOrder(normalizedOrderId, actor, manager)
         auditTargetId = order.id
@@ -884,6 +890,7 @@ class InboundService {
     const normalizedItems = this.normalizeSupplierInboundItems(input.items)
 
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const normalizedOrderId = String(orderId).trim()
       if (!normalizedOrderId) {
         throw new BizError('送货单不存在', 404)
@@ -1104,6 +1111,7 @@ class InboundService {
       throw new BizError('核销码不能为空', 400)
     }
     const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const order = await manager.getRepository(BizInboundOrder).findOne({
         where: { verifyCode: normalizedCode },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },

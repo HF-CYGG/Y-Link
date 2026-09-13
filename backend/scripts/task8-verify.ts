@@ -163,20 +163,20 @@ const verifyConcurrentSerialAndDrilldown = async () => {
   const analyticsTag = await tagService.create({
     tagName: 'Task8统计标签',
     tagCode: 'T8-STAT',
-  })
+  }, mockActor)
   const productA = await productService.create({
     productName: 'Task8并发产品A',
     defaultPrice: 10,
     currentStock: 100,
     isActive: true,
     tagIds: [analyticsTag.id],
-  })
+  }, mockActor)
   const productB = await productService.create({
     productName: 'Task8并发产品B',
     defaultPrice: 20,
     currentStock: 100,
     isActive: true,
-  })
+  }, mockActor)
 
   const createWalkinOrders = Array.from({ length: 8 }, (_, index) =>
     orderService.submit(

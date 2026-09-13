@@ -9,6 +9,7 @@ import { z } from 'zod'
 import { requirePermission } from '../middleware/auth.middleware.js'
 import { batchCreateProducts, productService } from '../services/product.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
+import type { AuthenticatedRequest } from '../types/auth.js'
 
 const productTagIdSchema = z.union([z.string(), z.number()])
 
@@ -203,8 +204,9 @@ productRouter.post(
   // 批量更新商品状态属于管理操作，需要 products:manage。
   requirePermission('products:manage'),
   asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
     const payload = batchUpdateProductSchema.parse(req.body)
-    const data = await productService.batchUpdate(payload)
+    const data = await productService.batchUpdate(payload, authReq.auth)
     res.json({
       code: 0,
       message: 'ok',
@@ -218,8 +220,9 @@ productRouter.post(
   // 批量新增商品属于管理操作，需要 products:manage。
   requirePermission('products:manage'),
   asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
     const payload = batchCreateProductSchema.parse(req.body)
-    const data = await batchCreateProducts(payload.products)
+    const data = await batchCreateProducts(payload.products, authReq.auth)
     res.json({
       code: 0,
       message: 'ok',
@@ -247,8 +250,9 @@ productRouter.post(
   // 新增商品属于管理操作，需要 products:manage。
   requirePermission('products:manage'),
   asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
     const payload = createProductSchema.parse(req.body)
-    const data = await productService.create(payload)
+    const data = await productService.create(payload, authReq.auth)
     res.json({
       code: 0,
       message: 'ok',
@@ -262,8 +266,9 @@ productRouter.put(
   // 编辑商品属于管理操作，需要 products:manage。
   requirePermission('products:manage'),
   asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
     const payload = updateProductSchema.parse(req.body)
-    const data = await productService.update(req.params.id, payload)
+    const data = await productService.update(req.params.id, payload, authReq.auth)
     res.json({
       code: 0,
       message: 'ok',
@@ -277,7 +282,8 @@ productRouter.delete(
   // 删除商品属于高风险管理操作，需要 products:manage。
   requirePermission('products:manage'),
   asyncHandler(async (req, res) => {
-    await productService.delete(req.params.id)
+    const authReq = req as AuthenticatedRequest
+    await productService.delete(req.params.id, authReq.auth)
     res.json({
       code: 0,
       message: 'ok',

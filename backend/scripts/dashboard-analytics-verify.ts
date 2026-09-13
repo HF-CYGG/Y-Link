@@ -18,6 +18,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import type { AuthUserContext } from '../src/types/auth.js'
 
 const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
@@ -153,23 +154,44 @@ async function main() {
   await systemConfigService.ensureDefaultConfigs()
 
   try {
+    const { SysUser } = await import('../src/entities/sys-user.entity.js')
+    const userRepo = AppDataSource.getRepository(SysUser)
+    const admin = await userRepo.save(userRepo.create({
+      username: `dashboard-analytics-admin-${verifySeed}`,
+      passwordHash: 'verify-only',
+      displayName: '区间分析验证管理员',
+      email: null,
+      role: 'admin',
+      status: 'enabled',
+      lastLoginAt: null,
+    }))
+    const actor: AuthUserContext = {
+      userId: String(admin.id),
+      username: admin.username,
+      displayName: admin.displayName,
+      role: 'admin',
+      permissions: [],
+      status: 'enabled',
+      sessionToken: 'dashboard-analytics-verify',
+      authSource: 'bearer',
+    }
     const canvasBag = await productService.create({
       productName: '帆布包',
       defaultPrice: 20,
       isActive: true,
-    })
+    }, actor)
     const mug = await productService.create({
       productName: '马克杯',
       defaultPrice: 30,
       isActive: true,
-    })
+    }, actor)
 
     // ---- 区间边界数据：下界前一天与上界后一天都必须被排除 ----
     await seedOutboundOrder({
       createdAt: new Date(2025, 10, 30, 10, 0, 0),
       orderType: 'walkin',
       items: [{ productId: canvasBag.id, nameSnapshot: '帆布包', qty: 100, unitPrice: 20 }],
-    })
+    }, actor)
     await seedOutboundOrder({
       createdAt: new Date(2026, 8, 1, 10, 0, 0),
       orderType: 'walkin',
@@ -236,7 +258,7 @@ async function main() {
       productName: '旧款笔记本',
       defaultPrice: 15,
       isActive: true,
-    })
+    }, actor)
     await seedOutboundOrder({
       createdAt: new Date(2026, 3, 8, 10, 0, 0),
       orderType: 'walkin',
@@ -245,7 +267,7 @@ async function main() {
         { productId: renamedProduct.id, nameSnapshot: '旧款笔记本', qty: 1, unitPrice: 15 },
       ],
     })
-    await productService.update(renamedProduct.id, { productName: '新款笔记本' })
+    await productService.update(renamedProduct.id, { productName: '新款笔记本' }, actor)
 
     const renamedAnalytics = await dashboardService.getAnalytics({
       ...baseRange,
@@ -271,7 +293,7 @@ async function main() {
         productName: `填充商品${index + 1}`,
         defaultPrice: 5,
         isActive: true,
-      })
+      }, actor)
       await seedOutboundOrder({
         createdAt: new Date(2026, 1, 10, 10, 0, 0),
         orderType: 'walkin',
