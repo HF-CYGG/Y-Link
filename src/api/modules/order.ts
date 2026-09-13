@@ -14,6 +14,7 @@ import type { PaginationQueryInput, PaginationResult } from '@/types/api'
  */
 export interface SubmitOrderItemPayload {
   productId: string | number
+  skuId?: string | number | null
   qty: number
   unitPrice: number
   remark?: string
@@ -69,6 +70,9 @@ export const getOrderDepartmentOptions = async (): Promise<OrderDepartmentOption
 export interface SubmittedOrderRecord {
   id: string
   showNo: string
+  businessNo: string
+  editVersion: number
+  inventoryMode: OrderInventoryMode
 }
 
 /**
@@ -76,9 +80,16 @@ export interface SubmittedOrderRecord {
  * - 返回主单与明细，开单页当前仅使用 order.showNo 做反馈；
  * - 保留 items 结构以便后续扩展提交成功回显。
  */
+export interface SubmittedOrderItemRecord extends SubmitOrderItemPayload {
+  id: string
+  skuId: string | null
+  skuCodeSnapshot: string | null
+  specTextSnapshot: string | null
+}
+
 export interface SubmitOrderResult {
   order: SubmittedOrderRecord
-  items: SubmitOrderItemPayload[]
+  items: SubmittedOrderItemRecord[]
 }
 
 /**
@@ -91,9 +102,16 @@ export const submitOrder = async (payload: SubmitOrderPayload): Promise<SubmitOr
     order: {
       id: PrimitiveTextValue
       showNo: PrimitiveTextValue
+      businessNo: PrimitiveTextValue
+      editVersion: number
+      inventoryMode: OrderInventoryMode
     }
     items: Array<{
+      id: PrimitiveTextValue
       productId: PrimitiveTextValue
+      skuId?: PrimitiveTextValue
+      skuCodeSnapshot?: PrimitiveTextValue
+      specTextSnapshot?: PrimitiveTextValue
       qty: PrimitiveTextValue
       unitPrice: PrimitiveTextValue
       remark?: PrimitiveTextValue
@@ -108,9 +126,16 @@ export const submitOrder = async (payload: SubmitOrderPayload): Promise<SubmitOr
     order: {
       id: normalizeTextField(result.order.id),
       showNo: normalizeTextField(result.order.showNo),
+      businessNo: normalizeTextField(result.order.businessNo),
+      editVersion: Number(result.order.editVersion),
+      inventoryMode: normalizeInventoryMode(result.order.inventoryMode),
     },
     items: result.items.map((item) => ({
+      id: normalizeTextField(item.id),
       productId: normalizeTextField(item.productId),
+      skuId: normalizeNullableTextField(item.skuId),
+      skuCodeSnapshot: normalizeNullableTextField(item.skuCodeSnapshot),
+      specTextSnapshot: normalizeNullableTextField(item.specTextSnapshot),
       qty: Number(normalizeDecimalField(item.qty)),
       unitPrice: Number(normalizeDecimalField(item.unitPrice)),
       remark: normalizeTextField(item.remark) || undefined,
@@ -133,9 +158,16 @@ export interface OrderListQuery extends PaginationQueryInput {
  * - 补齐开单账号与开单姓名快照，用于责任追溯；
  * - status 兼容后端原有字段，当前主要用于预留展示。
  */
+export type OrderInventoryMode = 'legacy_none' | 'manual_applied' | 'o2o_preapplied'
+
 export interface OrderRecord {
   id: string
   showNo: string
+  businessNo: string
+  editVersion: number
+  inventoryMode: OrderInventoryMode
+  contentEditable: boolean
+  contentEditBlockers: string[]
   orderType: 'department' | 'walkin'
   hasCustomerOrder: boolean
   isSystemApplied: boolean
@@ -169,6 +201,11 @@ export type OrderListResult = PaginationResult<OrderRecord>
 interface OrderRecordRaw {
   id: PrimitiveTextValue
   showNo: PrimitiveTextValue
+  businessNo: PrimitiveTextValue
+  editVersion: number | PrimitiveTextValue
+  inventoryMode?: PrimitiveTextValue
+  contentEditable?: boolean | PrimitiveTextValue
+  contentEditBlockers?: unknown
   orderType?: PrimitiveTextValue
   hasCustomerOrder?: boolean | PrimitiveTextValue
   isSystemApplied?: boolean | PrimitiveTextValue
@@ -216,6 +253,11 @@ export interface OrderItemRecord {
   productId: string
   productCode: string
   productName: string
+  skuId: string | null
+  skuCode: string | null
+  skuCodeSnapshot: string | null
+  specText: string | null
+  specTextSnapshot: string | null
   qty: string
   unitPrice: string
   subTotal: string
@@ -235,6 +277,13 @@ const normalizeNullableTextField = (value: PrimitiveTextValue): string | null =>
 const normalizeOrderRecord = (record: OrderRecordRaw): OrderRecord => ({
   id: normalizeTextField(record.id),
   showNo: normalizeTextField(record.showNo),
+  businessNo: normalizeTextField(record.businessNo, normalizeTextField(record.showNo)),
+  editVersion: Number(record.editVersion) || 1,
+  inventoryMode: normalizeInventoryMode(record.inventoryMode),
+  contentEditable: normalizeBooleanField(record.contentEditable),
+  contentEditBlockers: Array.isArray(record.contentEditBlockers)
+    ? record.contentEditBlockers.map((item) => normalizeTextField(item as PrimitiveTextValue)).filter(Boolean)
+    : [],
   orderType: normalizeOrderTypeField(record.orderType),
   hasCustomerOrder: normalizeBooleanField(record.hasCustomerOrder),
   isSystemApplied: normalizeBooleanField(record.isSystemApplied),
@@ -268,6 +317,11 @@ interface OrderItemRawRecord {
   productCode?: PrimitiveTextValue
   productName?: PrimitiveTextValue
   productNameSnapshot?: PrimitiveTextValue
+  skuId?: PrimitiveTextValue
+  skuCode?: PrimitiveTextValue
+  skuCodeSnapshot?: PrimitiveTextValue
+  specText?: PrimitiveTextValue
+  specTextSnapshot?: PrimitiveTextValue
   qty: PrimitiveTextValue
   unitPrice: PrimitiveTextValue
   subTotal?: PrimitiveTextValue
@@ -336,6 +390,11 @@ const normalizeOrderTypeField = (value: PrimitiveTextValue): 'department' | 'wal
   return normalizeTextField(value).toLowerCase() === 'department' ? 'department' : 'walkin'
 }
 
+const normalizeInventoryMode = (value: PrimitiveTextValue): OrderInventoryMode => {
+  const normalized = normalizeTextField(value)
+  return normalized === 'manual_applied' || normalized === 'o2o_preapplied' ? normalized : 'legacy_none'
+}
+
 /**
  * 归一化订单明细：
  * - 优先读取后端已对齐的新字段；
@@ -347,6 +406,11 @@ const normalizeOrderItem = (item: OrderItemRawRecord): OrderItemRecord => ({
   productId: normalizeTextField(item.productId),
   productCode: normalizeTextField(item.productCode, normalizeTextField(item.productId)),
   productName: normalizeTextField(item.productName, normalizeTextField(item.productNameSnapshot, '-')),
+  skuId: normalizeNullableTextField(item.skuId),
+  skuCode: normalizeNullableTextField(item.skuCode ?? item.skuCodeSnapshot),
+  skuCodeSnapshot: normalizeNullableTextField(item.skuCodeSnapshot ?? item.skuCode),
+  specText: normalizeNullableTextField(item.specText ?? item.specTextSnapshot),
+  specTextSnapshot: normalizeNullableTextField(item.specTextSnapshot ?? item.specText),
   qty: normalizeDecimalField(item.qty),
   unitPrice: normalizeDecimalField(item.unitPrice),
   subTotal: normalizeDecimalField(item.subTotal, normalizeDecimalField(item.lineAmount)),
@@ -405,8 +469,54 @@ export interface PurgeOrderResult {
 }
 
 export interface UpdateOrderComplianceFlagsPayload {
+  editVersion: number
   hasCustomerOrder?: boolean
   isSystemApplied?: boolean
+}
+
+export interface OrderAmendmentInput {
+  orderId: string
+  editVersion: number
+  businessNo?: string
+  orderType?: 'department' | 'walkin'
+  customerDepartmentName?: string | null
+  customerName?: string | null
+  issuerName?: string | null
+  hasCustomerOrder?: boolean
+  isSystemApplied?: boolean
+  remark?: string | null
+  reason?: string
+}
+
+export interface OrderAmendmentSnapshot {
+  businessNo: string
+  showNo: string
+  orderType: 'department' | 'walkin'
+  customerDepartmentName: string | null
+  customerName: string | null
+  issuerName: string | null
+  hasCustomerOrder: boolean
+  isSystemApplied: boolean
+  remark: string | null
+  editVersion: number
+}
+
+export interface OrderAmendmentPreviewItem {
+  orderId: string
+  blockingReasons: string[]
+  before: OrderAmendmentSnapshot
+  after: OrderAmendmentSnapshot
+}
+
+export interface OrderAmendmentResult {
+  ready: boolean
+  cursorPlans: Array<{
+    namespace: 'hyyzjd' | 'hyyz'
+    beforeCursor: number
+    afterCursor: number
+    nextBusinessNo: string | null
+  }>
+  items: OrderAmendmentPreviewItem[]
 }
 
 /**
@@ -450,3 +560,69 @@ export const updateOrderComplianceFlags = (id: string, payload: UpdateOrderCompl
     url: `/orders/${id}/compliance-flags`,
     data: payload,
   }).then(normalizeOrderDetail)
+
+export interface UpdateOrderContentPayload {
+  expectedVersion: number
+  reason: string
+  businessNo?: string
+  items: Array<{
+    productId: string
+    skuId?: string | null
+    qty: number
+    unitPrice: number
+    remark?: string | null
+  }>
+}
+
+export interface OrderRevisionRecord {
+  id: string
+  orderId: string
+  orderUuid: string
+  revisionNo: number
+  reason: string | null
+  actorUsername: string
+  actorDisplayName: string
+  createdAt: string
+  before: Record<string, unknown>
+  after: Record<string, unknown>
+}
+
+export interface UpdateOrderContentResult extends OrderDetailRawResult {
+  revision: OrderRevisionRecord
+  inventoryDeltas: Array<Record<string, unknown>>
+  notice: string | null
+}
+
+export const updateOrderContent = async (id: string, payload: UpdateOrderContentPayload) => {
+  const result = await request<UpdateOrderContentResult>({
+    method: 'PATCH',
+    url: `/orders/${id}/content`,
+    data: payload,
+  })
+  return {
+    ...normalizeOrderDetail(result),
+    revision: result.revision,
+    inventoryDeltas: result.inventoryDeltas,
+    notice: result.notice,
+  }
+}
+
+export const getOrderRevisions = (id: string) =>
+  request<OrderRevisionRecord[]>({
+    method: 'GET',
+    url: `/orders/${id}/revisions`,
+  })
+
+export const previewOrderAmendments = (amendments: OrderAmendmentInput[]) =>
+  request<OrderAmendmentResult>({
+    method: 'POST',
+    url: '/orders/amendments/preview',
+    data: { amendments },
+  })
+
+export const commitOrderAmendments = (amendments: OrderAmendmentInput[]) =>
+  request<OrderAmendmentResult>({
+    method: 'POST',
+    url: '/orders/amendments',
+    data: { amendments },
+  })

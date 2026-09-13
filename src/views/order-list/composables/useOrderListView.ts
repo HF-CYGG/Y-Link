@@ -663,7 +663,7 @@ export const useOrderListView = () => {
       return
     }
     await deleteOrderById(row.id, { confirmShowNo })
-    showAppSuccess(`已删除单据：${row.showNo}`)
+    showAppSuccess(`已删除单据：${row.businessNo}`)
     await loadData()
   }
 
@@ -677,7 +677,7 @@ export const useOrderListView = () => {
       return
     }
     const result = await ElMessageBox.prompt(
-      `请输入业务单号 ${row.showNo} 以确认删除。删除后可恢复。`,
+      `请输入业务单号 ${row.businessNo} 以确认删除。删除后可恢复。`,
       '删除二次确认',
       {
         confirmButtonText: '确认删除',
@@ -706,7 +706,7 @@ export const useOrderListView = () => {
       return
     }
     await restoreOrderById(row.id)
-    showAppSuccess(`已恢复单据：${row.showNo}`)
+    showAppSuccess(`已恢复单据：${row.businessNo}`)
     await loadData()
   }
 
@@ -719,7 +719,7 @@ export const useOrderListView = () => {
     if (!ensurePermission('orders:delete', '恢复出库单')) {
       return
     }
-    await ElMessageBox.confirm(`确认恢复出库单 ${row.showNo} 吗？`, '恢复确认', {
+    await ElMessageBox.confirm(`确认恢复出库单 ${row.businessNo} 吗？`, '恢复确认', {
       confirmButtonText: '确认恢复',
       cancelButtonText: '取消',
       type: 'info',
@@ -743,8 +743,8 @@ export const useOrderListView = () => {
     const result = await purgeOrderById(row.id, { confirmShowNo, permanentDeletePassword })
     showAppSuccess(
       result.serialRolledBack
-        ? `已永久删除单据：${row.showNo}，流水已安全回拨`
-        : `已永久删除单据：${row.showNo}`,
+        ? `已永久删除单据：${row.businessNo}，系统兼容流水已安全回拨`
+        : `已永久删除单据：${row.businessNo}`,
     )
     await loadData()
   }
@@ -759,7 +759,7 @@ export const useOrderListView = () => {
       return
     }
     const result = await ElMessageBox.prompt(
-      `请输入业务单号 ${row.showNo} 以确认永久删除。永久删除后不可恢复；仅当它是当前类型最后一张单据时，流水才会安全回拨。`,
+      `请输入业务单号 ${row.businessNo} 以确认永久删除。永久删除后不可恢复；业务号占用和修订历史会永久保留。`,
       '永久删除确认',
       {
         confirmButtonText: '确认永久删除',
@@ -1010,5 +1010,6 @@ export const useOrderListView = () => {
     handleRestoreOrderWithConfirm,
     handlePurgeOrder,
     handlePurgeOrderWithConfirm,
+    refreshOrders: loadData,
   }
 }

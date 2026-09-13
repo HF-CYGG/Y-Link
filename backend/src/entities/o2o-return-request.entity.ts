@@ -78,7 +78,7 @@ export class O2oReturnRequest {
   @JoinColumn({ name: 'order_id' })
   order?: Relation<O2oPreorder>
 
-  @ManyToOne(() => ClientUser, { onDelete: 'CASCADE' })
+  @ManyToOne(() => ClientUser, { onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'client_user_id' })
   clientUser?: Relation<ClientUser>
 

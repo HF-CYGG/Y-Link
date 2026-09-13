@@ -5,13 +5,17 @@
  */
 
 import { Router } from 'express'
+import rateLimit from 'express-rate-limit'
 import { z } from 'zod'
+import { AppDataSource } from '../config/data-source.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 import { requirePermission, requireRole } from '../middleware/auth.middleware.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 import { CLIENT_USER_ACCOUNT_TYPES, CLIENT_USER_STATUSES } from '../entities/client-user.entity.js'
 import { CLIENT_USER_PROFILE_KINDS, clientUserManageService } from '../services/client-user-manage.service.js'
+import { auditService } from '../services/audit.service.js'
+import { DatabaseRateLimitStore } from '../services/persistent-risk-state.service.js'
 
 const updateClientUserStatusSchema = z.object({
   status: z.enum(CLIENT_USER_STATUSES),
@@ -40,6 +44,41 @@ const createClientUserSchema = z.object({
 
 const resetClientUserPasswordSchema = z.object({
   newPassword: z.string().min(8, '新密码至少 8 位').max(50, '新密码长度不能超过 50 位'),
+})
+
+const accountLifecycleReasonSchema = z.object({
+  reason: z.string().trim().min(2, '原因至少 2 个字符').max(500, '原因不能超过 500 个字符'),
+})
+
+const accountPermanentDeleteSchema = accountLifecycleReasonSchema.extend({
+  confirmAccount: z.string().min(1, '请输入目标账号').max(128, '确认账号长度不能超过 128 个字符'),
+  permanentDeletePassword: z.string().min(1, '请输入永久删除密码').max(256, '永久删除密码长度非法'),
+})
+
+const permanentDeleteLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  limit: 5,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  keyGenerator: (req) => `client-user:${(req as AuthenticatedRequest).auth.userId ?? 'unknown'}:${String(req.params.id ?? '')}`,
+  ...(AppDataSource.options.type === 'mysql'
+    ? { store: new DatabaseRateLimitStore('express-client-user-permanent-delete') }
+    : {}),
+  handler: async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const targetId = String(req.params.id ?? '').trim().slice(0, 64)
+    await auditService.safeRecord({
+      actionType: 'client_user.permanent_delete',
+      actionLabel: '永久删除客户端用户（频控拦截）',
+      targetType: 'client_user',
+      targetId: targetId || null,
+      actor: authReq.auth,
+      requestMeta: extractRequestMeta(req),
+      resultStatus: 'failed',
+      detail: { reason: 'rate_limited' },
+    })
+    res.status(429).json({ code: 429, message: '永久删除请求过于频繁，请稍后再试', data: null })
+  },
 })
 
 const departmentNodeIdsSchema = z.object({
@@ -104,6 +143,11 @@ clientUserManageRouter.get(
       && CLIENT_USER_PROFILE_KINDS.includes(req.query.profileKind as (typeof CLIENT_USER_PROFILE_KINDS)[number])
         ? (req.query.profileKind as (typeof CLIENT_USER_PROFILE_KINDS)[number])
         : undefined
+    const accountState =
+      typeof req.query.accountState === 'string'
+      && ['enabled', 'disabled', 'deactivated'].includes(req.query.accountState)
+        ? (req.query.accountState as 'enabled' | 'disabled' | 'deactivated')
+        : undefined
     const data = await clientUserManageService.list({
       page: Number.isFinite(page) && page > 0 ? page : 1,
       pageSize: Number.isFinite(pageSize) && pageSize > 0 ? Math.min(pageSize, 100) : 20,
@@ -111,6 +155,7 @@ clientUserManageRouter.get(
       status,
       accountType,
       profileKind,
+      accountState,
       departmentName: typeof req.query.departmentName === 'string' ? req.query.departmentName : undefined,
       staffNo: typeof req.query.staffNo === 'string' ? req.query.staffNo : undefined,
     })
@@ -119,6 +164,53 @@ clientUserManageRouter.get(
       message: 'ok',
       data,
     })
+  }),
+)
+
+clientUserManageRouter.get(
+  '/:id/deactivation-preview',
+  requirePermission('users:deactivate'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const data = await clientUserManageService.previewDeactivation(req.params.id)
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+clientUserManageRouter.post(
+  '/:id/deactivate',
+  requirePermission('users:deactivate'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = accountLifecycleReasonSchema.parse(req.body)
+    const data = await clientUserManageService.deactivate(req.params.id, payload, authReq.auth, extractRequestMeta(req))
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+clientUserManageRouter.post(
+  '/:id/restore',
+  requirePermission('users:deactivate'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = accountLifecycleReasonSchema.parse(req.body)
+    const data = await clientUserManageService.restore(req.params.id, payload, authReq.auth, extractRequestMeta(req))
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+clientUserManageRouter.delete(
+  '/:id/permanent',
+  requirePermission('users:permanent_delete'),
+  requireRole('admin'),
+  permanentDeleteLimiter,
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = accountPermanentDeleteSchema.parse(req.body)
+    const data = await clientUserManageService.permanentDelete(req.params.id, payload, authReq.auth, extractRequestMeta(req))
+    res.json({ code: 0, message: 'ok', data })
   }),
 )
 

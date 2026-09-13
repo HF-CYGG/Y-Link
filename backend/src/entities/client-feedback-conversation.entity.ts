@@ -4,9 +4,10 @@
  * 维护重点：变更会话状态、指派信息或 SLA 相关字段时，需要同步检查服务层状态机和前端状态映射。
  */
 
-import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm'
+import { Column, CreateDateColumn, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn, UpdateDateColumn, type Relation } from 'typeorm'
 import { entityColumnOptions } from './entity-column-options.js'
-import type { ClientUserAccountType } from './client-user.entity.js'
+import { ClientUser, type ClientUserAccountType } from './client-user.entity.js'
+import { SysUser } from './sys-user.entity.js'
 
 const feedbackJsonArrayDefaultColumnOptions = entityColumnOptions.isSqlite ? { default: '[]' } : {}
 
@@ -189,4 +190,16 @@ export class ClientFeedbackConversation {
 
   @UpdateDateColumn({ name: 'updated_at', ...entityColumnOptions.timestamp })
   updatedAt!: Date
+
+  @ManyToOne(() => ClientUser, { onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'client_user_id' })
+  clientUser?: Relation<ClientUser>
+
+  @ManyToOne(() => SysUser, { onDelete: 'RESTRICT', nullable: true })
+  @JoinColumn({ name: 'assigned_user_id' })
+  assignedUser?: Relation<SysUser> | null
+
+  @ManyToOne(() => SysUser, { onDelete: 'RESTRICT', nullable: true })
+  @JoinColumn({ name: 'internal_remark_by_user_id' })
+  internalRemarkByUser?: Relation<SysUser> | null
 }

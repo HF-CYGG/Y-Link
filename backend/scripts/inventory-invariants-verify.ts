@@ -66,11 +66,20 @@ async function main() {
       sessionToken: 'inventory-invariant-supplier',
       authSource: 'bearer',
     }
+    const admin = await userRepo.save(userRepo.create({
+      username: `inventory-admin-${verifySeed}`,
+      passwordHash: 'verify-only',
+      displayName: '库存不变式库管',
+      email: null,
+      role: 'admin',
+      status: 'enabled',
+      lastLoginAt: null,
+    }))
     const adminActor: AuthUserContext = {
       ...supplierActor,
-      userId: '999999',
-      username: 'inventory-invariant-admin',
-      displayName: '库存不变式库管',
+      userId: String(admin.id),
+      username: admin.username,
+      displayName: admin.displayName,
       role: 'admin',
       sessionToken: 'inventory-invariant-admin',
     }
@@ -88,7 +97,7 @@ async function main() {
         { skuCode: `INV-A-${verifySeed}`, specValues: { 规格: 'A' }, defaultPrice: 10, currentStock: 7, isActive: true },
         { skuCode: `INV-B-${verifySeed}`, specValues: { 规格: 'B' }, defaultPrice: 10, currentStock: 11, isActive: true },
       ],
-    } as Parameters<typeof productService.create>[0])
+    } as Parameters<typeof productService.create>[0], adminActor)
     const skuIds = product.skus.map((sku) => String(sku.id))
     assert.equal(skuIds.length, 2)
 

@@ -1,7 +1,7 @@
 /**
  * 文件说明：backend/scripts/task2-verify.ts
  * 文件职责：验证单双流水号、订单类型校验、默认出单人逻辑与流水配置异常处理。
- * 维护说明：若调整单号生成规则、出库提交入参或系统配置键名，请同步更新本脚本。
+ * 维护说明：若调整单号生成规则、出库 SKU 提交入参或系统配置键名，请同步更新本脚本。
  */
 
 import assert from 'node:assert/strict'
@@ -53,10 +53,12 @@ async function main() {
   const [
     { AppDataSource },
     { BaseProduct },
+    { BaseProductSku },
     { BizOutboundOrder },
     { ClientUser },
     { O2oPreorder },
     { SystemConfig },
+    { SysUser },
     { orderSerialService },
     { orderService },
     { systemConfigService },
@@ -65,10 +67,12 @@ async function main() {
     await Promise.all([
       import('../src/config/data-source.js'),
       import('../src/entities/base-product.entity.js'),
+      import('../src/entities/base-product-sku.entity.js'),
       import('../src/entities/biz-outbound-order.entity.js'),
       import('../src/entities/client-user.entity.js'),
       import('../src/entities/o2o-preorder.entity.js'),
       import('../src/entities/system-config.entity.js'),
+      import('../src/entities/sys-user.entity.js'),
       import('../src/services/order-serial.service.js'),
       import('../src/services/order.service.js'),
       import('../src/services/system-config.service.js'),
@@ -82,6 +86,16 @@ async function main() {
     await AppDataSource.synchronize()
     await systemConfigService.ensureDefaultConfigs()
 
+    const persistedActor = await AppDataSource.getRepository(SysUser).save({
+      username: mockActor.username,
+      passwordHash: 'test-only-password-hash',
+      displayName: mockActor.displayName,
+      email: null,
+      role: mockActor.role,
+      status: mockActor.status,
+    })
+    mockActor.userId = persistedActor.id
+
     const productRepo = AppDataSource.getRepository(BaseProduct)
     const createdProduct = await productRepo.save(
       productRepo.create({
@@ -90,8 +104,25 @@ async function main() {
         pinyinAbbr: 'TASK2',
         defaultPrice: '12.50',
         isActive: true,
+        currentStock: 100,
+        preOrderedStock: 0,
       }),
     )
+    await AppDataSource.getRepository(BaseProductSku).save({
+      productId: createdProduct.id,
+      skuCode: 'TASK2P01-DEFAULT',
+      specValuesJson: '{}',
+      specText: '默认规格',
+      defaultPrice: '12.50',
+      discountRate: '10.0',
+      currentStock: 100,
+      preOrderedStock: 0,
+      isActive: true,
+      isCurrent: true,
+      o2oRecommended: false,
+      thumbnail: null,
+      sortOrder: 0,
+    })
 
     const walkinOrder = await orderService.submit(
       {
@@ -251,7 +282,22 @@ async function main() {
     pass('issuerName 默认逻辑与自定义覆盖逻辑生效')
 
     // Issue #75：客户部门支持系统配置下拉与自由录入。
-    const adminActor: AuthUserContext = { ...mockActor, userId: '10000', username: 'task2admin', role: 'admin' }
+    // 系统配置写入会锁定并校验真实启用的系统账号，操作者必须先落库。
+    const persistedAdmin = await AppDataSource.getRepository(SysUser).save({
+      username: 'task2admin',
+      passwordHash: 'test-only-password-hash',
+      displayName: 'Task2管理员',
+      email: null,
+      role: 'admin',
+      status: 'enabled',
+    })
+    const adminActor: AuthUserContext = {
+      ...mockActor,
+      userId: persistedAdmin.id,
+      username: persistedAdmin.username,
+      displayName: persistedAdmin.displayName,
+      role: 'admin',
+    }
     await systemConfigService.updateClientDepartmentConfigs(
       {
         tree: [

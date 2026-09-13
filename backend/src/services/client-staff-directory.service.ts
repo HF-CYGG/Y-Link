@@ -3,7 +3,7 @@
  * 实现逻辑：
  * 1. 统一校验工号、姓名和部门字段，保证部门账号注册时可按工号库稳定回填实名与所属部门；
  * 2. 批量导入时会先批量匹配现有工号，并将部门名称解析到已有部门树的完整路径，避免导入时隐式修改部门配置；
- * 3. 目录状态变化后会批量同步已绑定的部门账号实名校验状态，保证历史账号数据与目录口径一致。
+ * 3. 管理端写事务先锁定并复核操作账号，再按稳定顺序锁目录记录并同步已绑定账号，保证注销边界与目录口径一致。
  */
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
@@ -18,8 +18,9 @@ import type { AuthUserContext } from '../types/auth.js'
 import { BizError } from '../utils/errors.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
-import { In, type EntityManager, type Repository } from 'typeorm'
+import { type EntityManager, type Repository } from 'typeorm'
 import { systemConfigService } from './system-config.service.js'
+import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 
 export interface ClientStaffDirectoryListQuery {
   page: number
@@ -539,17 +540,27 @@ export class ClientStaffDirectoryService {
     }
   }
 
-  private async loadExistingByStaffNos(manager: EntityManager, staffNos: string[]) {
+  private async loadExistingByStaffNos(manager: EntityManager, staffNos: string[], lockForUpdate = false) {
     const normalizedStaffNos = [...new Set(staffNos.map((item) => item.trim()).filter(Boolean))]
     if (normalizedStaffNos.length === 0) {
       return new Map<string, ClientStaffDirectory>()
     }
-    const list = await manager
+    const query = manager
       .getRepository(ClientStaffDirectory)
       .createQueryBuilder('directory')
       .where('directory.staffNo IN (:...staffNos)', { staffNos: normalizedStaffNos })
-      .getMany()
+      .orderBy('directory.staffNo', 'ASC')
+    if (lockForUpdate && manager.connection.options.type === 'mysql') query.setLock('pessimistic_write')
+    const list = await query.getMany()
     return new Map(list.map((item) => [item.staffNo, item]))
+  }
+
+  private async findForUpdate(manager: EntityManager, id: string) {
+    const query = manager.getRepository(ClientStaffDirectory)
+      .createQueryBuilder('directory')
+      .where('directory.id = :id', { id })
+    if (manager.connection.options.type === 'mysql') query.setLock('pessimistic_write')
+    return query.getOne()
   }
 
   private async syncLinkedUsersForImport(
@@ -648,12 +659,12 @@ export class ClientStaffDirectoryService {
     return paths
   }
 
-  private async resolveImportDepartmentRows(rows: NormalizedImportRow[]): Promise<NormalizedImportRow[]> {
+  private async resolveImportDepartmentRows(rows: NormalizedImportRow[], manager?: EntityManager): Promise<NormalizedImportRow[]> {
     const departmentNames = [...new Set(rows.map((item) => item.departmentName))]
     if (departmentNames.length === 0) {
       return rows
     }
-    const config = await systemConfigService.getClientDepartmentConfigs()
+    const config = await systemConfigService.getClientDepartmentConfigs(manager)
     const flattenedDepartmentPaths = this.flattenDepartmentPaths(config.tree)
     const resolvedDepartmentMap = new Map<string, string>()
     const unmatchedDepartments: string[] = []
@@ -753,9 +764,10 @@ export class ClientStaffDirectoryService {
     const staffNo = this.normalizeStaffNo(input.staffNo)
     const realName = this.normalizeRealName(input.realName)
     const status = this.normalizeStatus(input.status)
-    const departmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName)
 
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const departmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName, manager)
       await this.assertUniqueStaffNo(manager, staffNo)
       const repo = manager.getRepository(ClientStaffDirectory)
       const entity = repo.create({
@@ -796,11 +808,12 @@ export class ClientStaffDirectoryService {
   ): Promise<{ record: ClientStaffDirectoryRecord }> {
     const staffNo = this.normalizeStaffNo(input.staffNo)
     const realName = this.normalizeRealName(input.realName)
-    const departmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName)
 
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const departmentName = await systemConfigService.assertClientDepartmentOption(input.departmentName, manager)
       const repo = manager.getRepository(ClientStaffDirectory)
-      const record = await repo.findOne({ where: { id } })
+      const record = await this.findForUpdate(manager, id)
       if (!record) {
         throw new BizError('教职工目录记录不存在', 404)
       }
@@ -852,8 +865,9 @@ export class ClientStaffDirectoryService {
   ): Promise<{ record: ClientStaffDirectoryRecord }> {
     const status = this.normalizeStatus(input.status)
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const repo = manager.getRepository(ClientStaffDirectory)
-      const record = await repo.findOne({ where: { id } })
+      const record = await this.findForUpdate(manager, id)
       if (!record) {
         throw new BizError('教职工目录记录不存在', 404)
       }
@@ -895,12 +909,13 @@ export class ClientStaffDirectoryService {
     }
 
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const repo = manager.getRepository(ClientStaffDirectory)
-      const records = await repo.find({
-        where: {
-          id: In(normalizedIds),
-        },
-      })
+      const recordsQuery = repo.createQueryBuilder('directory')
+        .where('directory.id IN (:...ids)', { ids: normalizedIds })
+        .orderBy('directory.id', 'ASC')
+      if (manager.connection.options.type === 'mysql') recordsQuery.setLock('pessimistic_write')
+      const records = await recordsQuery.getMany()
       if (records.length !== normalizedIds.length) {
         throw new BizError('部分教职工目录记录不存在，请刷新后重试', 404)
       }
@@ -988,11 +1003,12 @@ export class ClientStaffDirectoryService {
     summary: { created: number; updated: number; skipped: number; autoCreatedDepartments: string[] }
     list: ClientStaffDirectoryRecord[]
   }> {
-    const rows = await this.resolveImportDepartmentRows(this.normalizeImportRows(input))
+    const normalizedRows = this.normalizeImportRows(input)
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const repo = manager.getRepository(ClientStaffDirectory)
-      const resolvedRows = rows
-      const existingMap = await this.loadExistingByStaffNos(manager, resolvedRows.map((item) => item.staffNo))
+      const resolvedRows = await this.resolveImportDepartmentRows(normalizedRows, manager)
+      const existingMap = await this.loadExistingByStaffNos(manager, resolvedRows.map((item) => item.staffNo), true)
       const {
         summary,
         changedStaffNos,

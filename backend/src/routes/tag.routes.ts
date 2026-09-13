@@ -9,6 +9,7 @@ import { z } from 'zod'
 import { requirePermission } from '../middleware/auth.middleware.js'
 import { tagService } from '../services/tag.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
+import type { AuthenticatedRequest } from '../types/auth.js'
 
 const createTagSchema = z.object({
   tagName: z.string().min(1, 'tagName 不能为空'),
@@ -39,8 +40,9 @@ tagRouter.post(
   // 新增标签属于管理操作，需要 tags:manage。
   requirePermission('tags:manage'),
   asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
     const payload = createTagSchema.parse(req.body)
-    const data = await tagService.create(payload)
+    const data = await tagService.create(payload, authReq.auth)
     res.json({
       code: 0,
       message: 'ok',
@@ -54,8 +56,9 @@ tagRouter.put(
   // 编辑标签属于管理操作，需要 tags:manage。
   requirePermission('tags:manage'),
   asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
     const payload = updateTagSchema.parse(req.body)
-    const data = await tagService.update(req.params.id, payload)
+    const data = await tagService.update(req.params.id, payload, authReq.auth)
     res.json({
       code: 0,
       message: 'ok',
@@ -69,7 +72,8 @@ tagRouter.delete(
   // 删除标签属于管理操作，需要 tags:manage。
   requirePermission('tags:manage'),
   asyncHandler(async (req, res) => {
-    await tagService.delete(req.params.id)
+    const authReq = req as AuthenticatedRequest
+    await tagService.delete(req.params.id, authReq.auth)
     res.json({
       code: 0,
       message: 'ok',

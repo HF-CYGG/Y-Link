@@ -14,12 +14,14 @@ import { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } from '../src
 import { BaseProduct } from '../src/entities/base-product.entity.js'
 import { BizOutboundOrder } from '../src/entities/biz-outbound-order.entity.js'
 import { ClientUser } from '../src/entities/client-user.entity.js'
+import { SysUser } from '../src/entities/sys-user.entity.js'
 import { authService } from '../src/services/auth.service.js'
 import { clientAuthService } from '../src/services/client-auth.service.js'
 import { installCaptchaServiceForTesting } from '../src/services/captcha.service.js'
 import { o2oPreorderService, type O2oPreorderDetailView } from '../src/services/o2o-preorder.service.js'
 import { productService } from '../src/services/product.service.js'
 import { systemConfigService } from '../src/services/system-config.service.js'
+import { verificationCodeService } from '../src/services/verification-code.service.js'
 import type { AuthUserContext } from '../src/types/auth.js'
 import type { ClientAuthContext } from '../src/types/client-auth.js'
 
@@ -27,6 +29,7 @@ const TEST_CAPTCHA_CODE = 'ABC123'
 installCaptchaServiceForTesting({ createCode: () => TEST_CAPTCHA_CODE })
 const readCaptchaCode = (_captchaSvg: string) => TEST_CAPTCHA_CODE
 const toChineseDigits = (value: string) => value.replaceAll(/\d/g, (digit) => '零一二三四五六七八九'[Number(digit)] ?? '')
+const pendingClientVerificationTargets = new Set<string>()
 
 const ensureReady = async () => {
   prepareDatabaseRuntime()
@@ -35,12 +38,32 @@ const ensureReady = async () => {
   }
   await initializeDatabaseSchemaIfNeeded(AppDataSource)
   await systemConfigService.ensureDefaultConfigs()
-  return authService.ensureDefaultAdmin()
+  const originalProviders = systemConfigService.getVerificationProviderConfigs.bind(systemConfigService)
+  systemConfigService.getVerificationProviderConfigs = async () => {
+    const configs = await originalProviders()
+    return { ...configs, mobile: { ...configs.mobile, enabled: true, ready: true } }
+  }
+  verificationCodeService.verifyCode = async (input) => {
+    assert.equal(input.channel, 'mobile')
+    assert.equal(input.scene, 'register')
+    assert.equal(input.code, '123456')
+    assert.ok(pendingClientVerificationTargets.delete(input.target), '注册验证码必须绑定本次手机号且只能使用一次')
+  }
+  const userRepo = AppDataSource.getRepository(SysUser)
+  return userRepo.save(userRepo.create({
+    username: `o2o-show-no-admin-${Date.now()}`,
+    passwordHash: 'verify-only',
+    displayName: '正式出库单号验证管理员',
+    email: null,
+    role: 'admin',
+    status: 'enabled',
+    lastLoginAt: null,
+  }))
 }
 
-const buildScriptAdminActor = (bootstrapAdmin: Awaited<ReturnType<typeof authService.ensureDefaultAdmin>>): AuthUserContext => {
+const buildScriptAdminActor = (bootstrapAdmin: SysUser): AuthUserContext => {
   return {
-    userId: 'o2o-show-no-verify-admin',
+    userId: String(bootstrapAdmin.id),
     username: bootstrapAdmin.username,
     displayName: bootstrapAdmin.displayName,
     role: 'admin',
@@ -51,18 +74,17 @@ const buildScriptAdminActor = (bootstrapAdmin: Awaited<ReturnType<typeof authSer
 }
 
 const registerAndLoginClient = async (seed: number): Promise<ClientAuthContext> => {
-  const registerCaptcha = await clientAuthService.createCaptcha()
   const account = `1${String(seed).slice(-10)}`
   const username = `示例用户${toChineseDigits(String(seed).slice(-6))}`
   const password = `Client@${String(seed).slice(-6)}`
+  pendingClientVerificationTargets.add(account)
 
   const registerResult = await clientAuthService.register({
     accountType: 'personal',
     account,
     username,
     password,
-    captchaId: registerCaptcha.captchaId,
-    captchaCode: readCaptchaCode(registerCaptcha.captchaSvg),
+    verificationCode: '123456',
   })
 
   await AppDataSource.getRepository(ClientUser).update(
@@ -110,7 +132,7 @@ const run = async () => {
     o2oStatus: 'listed',
     currentStock: 20,
     limitPerUser: 5,
-  })
+  }, adminAuth)
   const productRepo = AppDataSource.getRepository(BaseProduct)
   const savedProduct = await productRepo.findOneByOrFail({ id: product.id })
   assert.equal(savedProduct.o2oStatus, 'listed')

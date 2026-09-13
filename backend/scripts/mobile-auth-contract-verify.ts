@@ -97,6 +97,7 @@ const [
   { ClientMobileSession },
   { ClientUser },
   { ClientUserSession },
+  { SysUser },
   { SysAuditLog },
   { NotificationEvent },
   { SystemConfig },
@@ -123,6 +124,7 @@ const [
   import('../src/entities/client-mobile-session.entity.js'),
   import('../src/entities/client-user.entity.js'),
   import('../src/entities/client-user-session.entity.js'),
+  import('../src/entities/sys-user.entity.js'),
   import('../src/entities/sys-audit-log.entity.js'),
   import('../src/entities/notification-event.entity.js'),
   import('../src/entities/system-config.entity.js'),
@@ -208,6 +210,24 @@ try {
   pass('Schema', `${VERIFY_MODE} client_mobile_session 表已由正式入口创建`)
 
   await systemConfigService.ensureDefaultConfigs()
+  const adminRepo = AppDataSource.getRepository(SysUser)
+  const contractAdmin = await adminRepo.save(adminRepo.create({
+    username: 'contract-admin',
+    displayName: '契约验收管理员',
+    passwordHash: await hashPassword('ContractAdminPass!9'),
+    role: 'admin',
+    status: 'enabled',
+  }))
+  const contractAdminActor = {
+    userId: contractAdmin.id,
+    username: contractAdmin.username,
+    displayName: contractAdmin.displayName,
+    role: contractAdmin.role,
+    permissions: ['users:manage'],
+    status: contractAdmin.status,
+    sessionToken: 'contract-admin-session',
+    authSource: 'bearer' as const,
+  }
   const loginUser = await createUser()
   const loginResult = await mobileAuthService.login({
     account: loginUser.email ?? '',
@@ -882,16 +902,7 @@ try {
   const disabledUser = await createUser()
   const disabledSession = await mobileSessionService.createForUser(disabledUser, device(5))
   const disabledOtherSession = await mobileSessionService.createForUser(disabledUser, device(16))
-  await clientUserManageService.updateStatus(disabledUser.id, 'disabled', {
-    userId: '1',
-    username: 'contract-admin',
-    displayName: '契约验收管理员',
-    role: 'admin',
-    permissions: ['users:manage'],
-    status: 'enabled',
-    sessionToken: 'contract-admin-session',
-    authSource: 'bearer',
-  })
+  await clientUserManageService.updateStatus(disabledUser.id, 'disabled', contractAdminActor)
   await assert.rejects(
     mobileSessionService.resolveAccess(disabledSession.accessToken, 'disabled-check'),
     expectBizErrorCode(40300),

@@ -186,7 +186,7 @@ const printTimestamp = formatDateTime(new Date())
           </tr>
           <tr class="voucher-meta-row voucher-meta-row--secondary">
             <th scope="row">业务单号</th>
-            <td colspan="2">{{ props.order.showNo }}</td>
+            <td colspan="2">{{ props.order.businessNo }}</td>
             <th scope="row">开单时间</th>
             <td colspan="2">{{ formatDateTime(props.order.createdAt) }}</td>
           </tr>

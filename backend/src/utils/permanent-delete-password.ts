@@ -4,7 +4,7 @@
  * 维护重点：不要在日志、审计或响应中输出配置密码或用户输入密码。
  */
 
-import { timingSafeEqual } from 'node:crypto'
+import { createHash, timingSafeEqual } from 'node:crypto'
 import { env } from '../config/env.js'
 import { BizError } from './errors.js'
 
@@ -19,9 +19,10 @@ export function assertPermanentDeletePassword(inputPassword: string | null | und
     throw new BizError('请输入永久删除密码', 400)
   }
 
-  const expected = Buffer.from(configuredPassword, 'utf8')
-  const actual = Buffer.from(normalizedInput, 'utf8')
-  const matched = expected.length === actual.length && timingSafeEqual(expected, actual)
+  // 固定比较两个 SHA-256 摘要，避免不同长度输入在 timingSafeEqual 前发生短路。
+  const expected = createHash('sha256').update(configuredPassword, 'utf8').digest()
+  const actual = createHash('sha256').update(normalizedInput, 'utf8').digest()
+  const matched = timingSafeEqual(expected, actual)
   if (!matched) {
     throw new BizError('永久删除密码不正确', 403)
   }

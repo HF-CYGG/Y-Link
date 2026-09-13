@@ -25,14 +25,14 @@ const reportPath = path.join(runtimeRoot, 'enterprise-performance-budget-report.
  * - 首屏预算：以 index.html 实际 modulepreload、入口模块和 stylesheet 依赖图为准，
  *   避免把动态路由产物误算进热路径，也避免低频重包意外回到入口而不被发现。
  *
- * 总量基线因恢复 cssCodeSplit/modulePreload 后增加少量分包包装开销，按当前 4144 KB
- * 重设为 4200 KB；不足 1.5% 的余量仍会阻止整体包体无约束增长。
- * main（6dc428b）实测已达 4199.83 KB，余量耗尽；#69 客户端资料补认证与 #75 开单客户部门下拉
- * 新增约 5.8 KB 业务代码（ClientProfileView +3.4 KB、OrderEntryView +2.0 KB，均在各自路由分包预算内），
- * 按当前 4206 KB 重设为 4260 KB，余量仍保持在约 1.3%。
+ * 已批准的 Issues #68-#74 在相同 Node 与依赖环境中的构建总产物为 4251.56 KB；
+ * 相对 main@6dc428b 的 4199.83 KB 真实增加 51.73 KB。该增量来自四项已批准功能，
+ * 而 pdf-export、charting、qr-scanner 三个低频重包与 main 的哈希和体积均未变化。
+ * 首屏、路由、低频重包和运行时细分预算均已通过，因此总量上限设为 4315 KB，
+ * 为当前批准功能基线保留约 1.49% 余量，同时继续阻止整体包体无约束增长。
  */
 const performanceBudget = {
-  totalAssetsMaxKB: 4260,
+  totalAssetsMaxKB: 4315,
   criticalAssetsMaxKB: 1180,
   initialLoadJsMaxKB: 850,
   initialLoadCssMaxKB: 320,
@@ -48,9 +48,14 @@ const performanceBudget = {
     'image-tools': 80,
     'qr-code': 60,
   },
+  /**
+   * OrderEntryView：#68-#74 引入 SKU 选择、草稿商品对账后接近 30 KB 上限；
+   * #75 客户部门下拉与自由录入另增约 2.0 KB（main@6dc428b 上实测 25.13 → 27.15 KB），
+   * 合并后实测 30.75 KB，按当前值重设为 32 KB，保留约 4% 余量继续约束开单页主包增长。
+   */
   routeChunkMaxKB: {
     DashboardView: 20,
-    OrderEntryView: 30,
+    OrderEntryView: 32,
     OrderListView: 30,
     ProductCenterView: 25,
     UserCenterView: 40,

@@ -73,6 +73,7 @@ interface DashboardRecentActivity {
   actionType: 'order.create' | 'order.delete' | 'order.restore' | 'order.purge'
   actionLabel: string
   showNo: string
+  businessNo: string
   actorDisplayName: string
   displayName: string
   customerName: string
@@ -145,6 +146,7 @@ interface DashboardAnalyticsResult {
 interface DashboardDrilldownOrderRecord {
   orderId: string
   showNo: string
+  businessNo: string
   orderType: DashboardOrderType
   createdAt: string
   customerName: string
@@ -553,6 +555,10 @@ export const dashboardService = {
         actionType,
         actionLabel: normalizeText(audit.actionLabel, '出库单变更'),
         showNo: normalizeText(audit.targetCode, '-'),
+        businessNo: normalizeText(
+          typeof detail.businessNo === 'string' ? detail.businessNo : audit.targetCode,
+          '-',
+        ),
         actorDisplayName: normalizeText(audit.actorDisplayName || audit.actorUsername, '系统'),
         displayName: normalizeRecentActivityDisplayName(detail),
         customerName: normalizeText(typeof detail.customerName === 'string' ? detail.customerName : null, '-'),
@@ -726,6 +732,7 @@ export const dashboardService = {
       .innerJoin(BizOutboundOrder, 'order', 'order.id = item.orderId')
       .select('order.id', 'orderId')
       .addSelect('order.showNo', 'showNo')
+      .addSelect('order.businessNo', 'businessNo')
       .addSelect('order.orderType', 'orderType')
       .addSelect('order.createdAt', 'createdAt')
       .addSelect('order.customerName', 'customerName')
@@ -736,6 +743,7 @@ export const dashboardService = {
       .where('item.productId = :productId', { productId })
       .groupBy('order.id')
       .addGroupBy('order.showNo')
+      .addGroupBy('order.businessNo')
       .addGroupBy('order.orderType')
       .addGroupBy('order.createdAt')
       .addGroupBy('order.customerName')
@@ -790,6 +798,7 @@ export const dashboardService = {
       .createQueryBuilder('order')
       .select('order.id', 'orderId')
       .addSelect('order.showNo', 'showNo')
+      .addSelect('order.businessNo', 'businessNo')
       .addSelect('order.orderType', 'orderType')
       .addSelect('order.createdAt', 'createdAt')
       .addSelect('order.customerName', 'customerName')
@@ -1061,6 +1070,7 @@ export const dashboardService = {
   buildDrilldownOrderRecord(row: {
     orderId: string | number
     showNo: string | null
+    businessNo: string | null
     orderType: string | null
     createdAt: Date | string
     customerName: string | null
@@ -1074,6 +1084,7 @@ export const dashboardService = {
     return {
       orderId: String(row.orderId ?? '').trim(),
       showNo: normalizeText(row.showNo, '-'),
+      businessNo: normalizeText(row.businessNo, normalizeText(row.showNo, '-')),
       orderType,
       createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : String(row.createdAt),
       customerName: normalizeCustomerName(row.customerName),

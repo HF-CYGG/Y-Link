@@ -55,6 +55,33 @@ export class ClientUser {
   @Column({ name: 'last_login_at', ...entityColumnOptions.timestamp, nullable: true, comment: '最后登录时间' })
   lastLoginAt!: Date | null
 
+  @Column({ name: 'deactivated_at', ...entityColumnOptions.timestamp, nullable: true, comment: '最近一次注销时间' })
+  deactivatedAt!: Date | null
+
+  @Column({ name: 'deactivation_reason', type: 'varchar', length: 500, nullable: true, comment: '最近一次注销原因' })
+  deactivationReason!: string | null
+
+  @Column({ name: 'deactivated_by_user_id', ...entityColumnOptions.foreignId, nullable: true, comment: '注销操作者 ID 快照' })
+  deactivatedByUserId!: string | null
+
+  @Column({ name: 'deactivated_by_username', type: 'varchar', length: 64, nullable: true, comment: '注销操作者账号快照' })
+  deactivatedByUsername!: string | null
+
+  @Column({ name: 'deactivated_by_display_name', type: 'varchar', length: 64, nullable: true, comment: '注销操作者名称快照' })
+  deactivatedByDisplayName!: string | null
+
+  @Column({ name: 'restored_at', ...entityColumnOptions.timestamp, nullable: true, comment: '最近一次恢复时间' })
+  restoredAt!: Date | null
+
+  @Column({ name: 'restored_by_user_id', ...entityColumnOptions.foreignId, nullable: true, comment: '恢复操作者 ID 快照' })
+  restoredByUserId!: string | null
+
+  @Column({ name: 'restored_by_username', type: 'varchar', length: 64, nullable: true, comment: '恢复操作者账号快照' })
+  restoredByUsername!: string | null
+
+  @Column({ name: 'restored_by_display_name', type: 'varchar', length: 64, nullable: true, comment: '恢复操作者名称快照' })
+  restoredByDisplayName!: string | null
+
   @CreateDateColumn({ name: 'created_at', ...entityColumnOptions.timestamp })
   createdAt!: Date
 

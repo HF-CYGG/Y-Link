@@ -1,9 +1,13 @@
 import { Router } from 'express'
+import rateLimit from 'express-rate-limit'
 import { z } from 'zod'
+import { AppDataSource } from '../config/data-source.js'
 import type { AuthenticatedRequest } from '../types/auth.js'
 import { USER_ROLES, USER_STATUSES } from '../types/auth.js'
 import { requirePermission, requireRole } from '../middleware/auth.middleware.js'
 import { userService } from '../services/user.service.js'
+import { auditService } from '../services/audit.service.js'
+import { DatabaseRateLimitStore } from '../services/persistent-risk-state.service.js'
 import { asyncHandler } from '../utils/async-handler.js'
 import { extractRequestMeta } from '../utils/request-meta.js'
 
@@ -35,6 +39,41 @@ const resetPasswordSchema = z.object({
   newPassword: z.string().min(8, '新密码至少 8 位').max(50, '新密码长度不能超过 50 位'),
 })
 
+const accountLifecycleReasonSchema = z.object({
+  reason: z.string().trim().min(2, '原因至少 2 个字符').max(500, '原因不能超过 500 个字符'),
+})
+
+const accountPermanentDeleteSchema = accountLifecycleReasonSchema.extend({
+  confirmAccount: z.string().min(1, '请输入目标账号').max(128, '确认账号长度不能超过 128 个字符'),
+  permanentDeletePassword: z.string().min(1, '请输入永久删除密码').max(256, '永久删除密码长度非法'),
+})
+
+const permanentDeleteLimiter = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  limit: 5,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  keyGenerator: (req) => `sys-user:${(req as AuthenticatedRequest).auth.userId ?? 'unknown'}:${String(req.params.id ?? '')}`,
+  ...(AppDataSource.options.type === 'mysql'
+    ? { store: new DatabaseRateLimitStore('express-sys-user-permanent-delete') }
+    : {}),
+  handler: async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const targetId = String(req.params.id ?? '').trim().slice(0, 64)
+    await auditService.safeRecord({
+      actionType: 'user.permanent_delete',
+      actionLabel: '永久删除管理端用户（频控拦截）',
+      targetType: 'user',
+      targetId: targetId || null,
+      actor: authReq.auth,
+      requestMeta: extractRequestMeta(req),
+      resultStatus: 'failed',
+      detail: { reason: 'rate_limited' },
+    })
+    res.status(429).json({ code: 429, message: '永久删除请求过于频繁，请稍后再试', data: null })
+  },
+})
+
 export const userRouter = Router()
 
 userRouter.get(
@@ -55,6 +94,11 @@ userRouter.get(
         typeof req.query.status === 'string' && USER_STATUSES.includes(req.query.status as (typeof USER_STATUSES)[number])
           ? (req.query.status as (typeof USER_STATUSES)[number])
           : undefined,
+      accountState:
+        typeof req.query.accountState === 'string'
+        && ['enabled', 'disabled', 'deactivated'].includes(req.query.accountState)
+          ? (req.query.accountState as 'enabled' | 'disabled' | 'deactivated')
+          : undefined,
     })
 
     res.json({
@@ -62,6 +106,54 @@ userRouter.get(
       message: 'ok',
       data,
     })
+  }),
+)
+
+userRouter.get(
+  '/:id/deactivation-preview',
+  requirePermission('users:deactivate'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const data = await userService.previewDeactivation(req.params.id, authReq.auth)
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+userRouter.post(
+  '/:id/deactivate',
+  requirePermission('users:deactivate'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = accountLifecycleReasonSchema.parse(req.body)
+    const data = await userService.deactivate(req.params.id, payload, authReq.auth, extractRequestMeta(req))
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+userRouter.post(
+  '/:id/restore',
+  requirePermission('users:deactivate'),
+  requireRole('admin'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = accountLifecycleReasonSchema.parse(req.body)
+    const data = await userService.restore(req.params.id, payload, authReq.auth, extractRequestMeta(req))
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+userRouter.delete(
+  '/:id/permanent',
+  requirePermission('users:permanent_delete'),
+  requireRole('admin'),
+  permanentDeleteLimiter,
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = accountPermanentDeleteSchema.parse(req.body)
+    const data = await userService.permanentDelete(req.params.id, payload, authReq.auth, extractRequestMeta(req))
+    res.json({ code: 0, message: 'ok', data })
   }),
 )
 

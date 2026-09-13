@@ -63,17 +63,19 @@ const reportFieldOptions: Record<ReportType, ReportFieldDefinition[]> = {
     { key: 'time', label: '时间', width: 20 },
     { key: 'tags', label: '标签', width: 20 },
     { key: 'productName', label: '商品名称', width: 28 },
+    { key: 'specText', label: '规格', width: 22 },
     { key: 'qty', label: '数量', width: 12, numeric: true },
     { key: 'unitPrice', label: '单价', width: 12, numeric: true },
     { key: 'amount', label: '总价', width: 14, numeric: true },
     { key: 'departmentName', label: '部门', width: 22 },
     { key: 'receiverName', label: '领取人', width: 18 },
-    { key: 'showNo', label: '单号', width: 20 },
+    { key: 'businessNo', label: '业务单号', width: 20 },
     { key: 'operatorName', label: '订单操作记录人员', width: 20 },
   ],
   kingdee: [
     { key: 'time', label: '时间', width: 20 },
     { key: 'productName', label: '商品名称', width: 28 },
+    { key: 'specText', label: '规格', width: 22 },
     { key: 'qty', label: '数量', width: 12, numeric: true },
     { key: 'unitPrice', label: '单价', width: 12, numeric: true },
     { key: 'amount', label: '金额', width: 14, numeric: true },
@@ -86,6 +88,7 @@ const reportFieldOptions: Record<ReportType, ReportFieldDefinition[]> = {
   walkin: [
     { key: 'time', label: '时间', width: 20 },
     { key: 'productName', label: '商品名称', width: 28 },
+    { key: 'specText', label: '规格', width: 22 },
     { key: 'qty', label: '数量', width: 12, numeric: true },
     { key: 'unitPrice', label: '单价', width: 12, numeric: true },
     { key: 'amount', label: '金额', width: 14, numeric: true },
@@ -94,7 +97,7 @@ const reportFieldOptions: Record<ReportType, ReportFieldDefinition[]> = {
   ],
   'outbound-flow': [
     { key: 'time', label: '时间', width: 20 },
-    { key: 'showNo', label: '单号', width: 20 },
+    { key: 'businessNo', label: '业务单号', width: 20 },
     { key: 'orderType', label: '购买类型', width: 14 },
     { key: 'totalQty', label: '总数量', width: 12, numeric: true },
     { key: 'totalAmount', label: '金额', width: 14, numeric: true },
@@ -140,12 +143,12 @@ const exportPreviewSummary = computed(() => {
   return `${totalText}；已选 ${displayFields.value.length} 个字段`
 })
 const mobileCardTitleField = computed(() => {
-  return displayFields.value.find((field) => ['productName', 'showNo', 'category', 'time'].includes(field.key)) ?? displayFields.value[0]
+  return displayFields.value.find((field) => ['productName', 'businessNo', 'category', 'time'].includes(field.key)) ?? displayFields.value[0]
 })
 const mobileCardSubtitleFields = computed(() => {
   const titleKey = mobileCardTitleField.value?.key
   return displayFields.value
-    .filter((field) => field.key !== titleKey && ['time', 'showNo', 'tags', 'departmentName', 'receiverName', 'operatorName', 'status', 'recordStatus'].includes(field.key))
+    .filter((field) => field.key !== titleKey && ['time', 'businessNo', 'tags', 'departmentName', 'receiverName', 'operatorName', 'status', 'recordStatus'].includes(field.key))
     .slice(0, 2)
 })
 const mobileCardMetricFields = computed(() => {

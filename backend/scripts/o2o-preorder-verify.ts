@@ -2,7 +2,7 @@
  * 文件说明：backend/scripts/o2o-preorder-verify.ts
  * 文件职责：验证 O2O 预订的注册、下单、撤回、超时取消、核销与备份导出链路。
  * 实现逻辑：
- * 1. 初始化数据库、默认管理员与系统配置，确保脚本在独立环境中可重复执行；
+ * 1. 初始化数据库、默认管理员与系统配置，确保写事务使用可复核的真实账号；
  * 2. 通过客户端注册登录、商品创建、下单撤回、超时取消与管理端核销，覆盖预订主流程；
  * 3. 最后验证 O2O 默认规则、JSON 导出与 SQLite 物理备份，确认治理能力仍可用。
  * 维护说明：若调整 O2O 预订状态机、库存占用规则或默认业务配置，请同步更新本脚本。
@@ -18,12 +18,15 @@ import { ClientUser } from '../src/entities/client-user.entity.js'
 import { InventoryLog } from '../src/entities/inventory-log.entity.js'
 import { O2oPreorder } from '../src/entities/o2o-preorder.entity.js'
 import { O2oReturnRequest } from '../src/entities/o2o-return-request.entity.js'
+import { OrderRevision } from '../src/entities/order-revision.entity.js'
 import { SysAuditLog } from '../src/entities/sys-audit-log.entity.js'
+import { SysUser } from '../src/entities/sys-user.entity.js'
 import { authService } from '../src/services/auth.service.js'
 import { clientAuthService } from '../src/services/client-auth.service.js'
 import { installCaptchaServiceForTesting } from '../src/services/captcha.service.js'
 import { dataMaintenanceService } from '../src/services/data-maintenance.service.js'
 import { o2oPreorderService } from '../src/services/o2o-preorder.service.js'
+import { orderBusinessNoService } from '../src/services/order-business-no.service.js'
 import { auditService } from '../src/services/audit.service.js'
 import { productService } from '../src/services/product.service.js'
 import { systemConfigService } from '../src/services/system-config.service.js'
@@ -41,15 +44,25 @@ const ensureReady = async () => {
     await AppDataSource.initialize()
   }
   await initializeDatabaseSchemaIfNeeded(AppDataSource)
-  return authService.ensureDefaultAdmin()
+  const userRepo = AppDataSource.getRepository(SysUser)
+  const userCountBefore = await userRepo.count()
+  const bootstrapAdmin = await authService.ensureDefaultAdmin()
+  const persistedAdmin = await userRepo.findOneByOrFail({ username: bootstrapAdmin.username })
+  assert.equal(persistedAdmin.status, 'enabled', 'O2O 专项必须使用当前启用的默认管理员')
+  assert.equal(
+    await userRepo.count(),
+    userCountBefore + Number(bootstrapAdmin.initialized),
+    'O2O 专项不得在默认管理员之外额外持久化 SysUser',
+  )
+  return persistedAdmin
 }
 
-const buildScriptAdminActor = (bootstrapAdmin: Awaited<ReturnType<typeof authService.ensureDefaultAdmin>>): AuthUserContext => {
+const buildScriptAdminActor = (bootstrapAdmin: SysUser): AuthUserContext => {
   // 详细注释：数据导出、SQLite 备份与核销服务当前统一收口到 AuthUserContext，
-  // 脚本场景下即使没有走真实登录会话，也需要构造一个稳定的管理员操作者上下文，
-  // 以满足权限校验与审计留痕签名，避免校验脚本再依赖外部手工传密码。
+  // 脚本场景下即使没有走真实登录会话，也必须从已持久化且启用的 SysUser 构造操作者上下文，
+  // 以覆盖事务内账号复核与审计留痕，不能使用仅存在于内存的伪造 ID。
   return {
-    userId: 'o2o-preorder-verify-admin',
+    userId: bootstrapAdmin.id,
     username: bootstrapAdmin.username,
     displayName: bootstrapAdmin.displayName,
     role: 'admin',
@@ -198,7 +211,7 @@ const run = async () => {
     currentStock: 20,
     // 本脚本会构造多条相互独立的撤销、竞态和依赖订单，限购值仅用于避免测试夹具互相干扰。
     limitPerUser: 30,
-  })
+  }, scriptAdminActor)
   assert.equal(product.o2oStatus, 'listed')
   log('商品上下架/库存字段创建通过')
 
@@ -585,14 +598,19 @@ const run = async () => {
   await o2oPreorderService.cancelMyOrder(clientAuth, batchPurgeTwo.order.id)
   await o2oPreorderService.cancelMyOrder(clientAuth, batchPurgeMismatch.order.id)
   await o2oPreorderService.cancelMyOrder(batchDependencyClientAuth, batchPurgeOutboundLinked.order.id)
-  await outboundOrderRepo.save(outboundOrderRepo.create({
-    orderUuid: randomUUID(), showNo: `O2O-LINK-${Date.now()}`, orderType: 'walkin', hasCustomerOrder: false, isSystemApplied: false,
-    issuerName: scriptAdminActor.displayName, customerDepartmentName: null,
-    idempotencyKey: `o2o-preorder-verify:${batchPurgeOutboundLinked.order.id}`,
-    customerName: '批删依赖测试', remark: '仅用于验证已取消订单的关联出库单保护', totalQty: '1.00', totalAmount: '10.00',
-    isDeleted: false, deletedAt: null, deletedByUserId: null, deletedByUsername: null, deletedByDisplayName: null,
-    creatorUserId: scriptAdminActor.userId, creatorUsername: scriptAdminActor.username, creatorDisplayName: scriptAdminActor.displayName,
-  }))
+  await AppDataSource.transaction(async (manager) => {
+    const orderUuid = randomUUID()
+    const businessNo = await orderBusinessNoService.allocate('walkin', orderUuid, manager)
+    await manager.getRepository(BizOutboundOrder).save({
+      orderUuid, showNo: `O2O-LINK-${Date.now()}`, businessNo, editVersion: 1,
+      orderType: 'walkin', hasCustomerOrder: false, isSystemApplied: false,
+      issuerName: scriptAdminActor.displayName, customerDepartmentName: null,
+      idempotencyKey: `o2o-preorder-verify:${batchPurgeOutboundLinked.order.id}`,
+      customerName: '批删依赖测试', remark: '仅用于验证已取消订单的关联出库单保护', totalQty: '1.00', totalAmount: '10.00',
+      isDeleted: false, deletedAt: null, deletedByUserId: null, deletedByUsername: null, deletedByDisplayName: null,
+      creatorUserId: scriptAdminActor.userId, creatorUsername: scriptAdminActor.username, creatorDisplayName: scriptAdminActor.displayName,
+    })
+  })
   const productBeforeBatchPurge = await productRepo.findOneByOrFail({ id: product.id })
   const batchPurge = await o2oPreorderService.batchPurgeCancelledOrders({
     orders: [
@@ -695,6 +713,18 @@ const run = async () => {
   assert.ok(departmentSnapshotOutboundOrder, '部门预订单核销后应生成正式出库单')
   assert.equal(departmentSnapshotOutboundOrder.orderType, 'department')
   assert.equal(departmentSnapshotOutboundOrder.customerDepartmentName, '脚本部门-A')
+  assert.match(departmentSnapshotOutboundOrder.businessNo, /^hyyzjd\d{6}$/)
+  assert.equal(departmentSnapshotOutboundOrder.editVersion, 2, '客户端打印联动必须推进正式单据版本')
+  assert.equal(
+    await AppDataSource.getRepository(OrderRevision).countBy({ orderUuid: departmentSnapshotOutboundOrder.orderUuid }),
+    1,
+    '客户端打印联动必须保留正式单据 revision',
+  )
+  assert.equal(
+    printedDepartmentOrder.detail.order.customerOrderBusinessNo,
+    departmentSnapshotOutboundOrder.businessNo,
+    'O2O 继续以 showNo 关联，但客户端应展示正式单据 businessNo',
+  )
   log('部门订单下单快照会稳定继承到正式出库单通过')
 
   const verifiedPreorder = await o2oPreorderService.submit(clientAuth, {
@@ -719,6 +749,7 @@ const run = async () => {
     verifiedOutboundOrder.showNo,
     '客户端订单详情应返回与管理端一致的正式出库单号',
   )
+  assert.equal(verifiedDetail.order.customerOrderBusinessNo, verifiedOutboundOrder.businessNo)
   await expectBizError(() => o2oPreorderService.cancelMyOrder(clientAuth, verifiedPreorder.order.id), '订单已核销，无法撤回')
   await o2oPreorderService.inboundStock(product.id, 3, verifyActor, '自动化补货')
   log('管理端核销、已核销不可撤回与入库流程通过')

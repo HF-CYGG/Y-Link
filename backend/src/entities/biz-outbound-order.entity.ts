@@ -18,10 +18,15 @@ import {
 import { BizOutboundOrderItem } from './biz-outbound-order-item.entity.js'
 import { entityColumnOptions } from './entity-column-options.js'
 
+export const ORDER_INVENTORY_MODES = ['legacy_none', 'manual_applied', 'o2o_preapplied'] as const
+export type OrderInventoryMode = (typeof ORDER_INVENTORY_MODES)[number]
+
 @Index('uk_biz_outbound_show_no_is_deleted', ['showNo', 'isDeleted'], { unique: true })
+@Index('uk_biz_outbound_business_no', ['businessNo'], { unique: true })
 @Index('idx_biz_outbound_order_type_created_at', ['orderType', 'createdAt'])
 @Entity({ name: 'biz_outbound_order' })
 @Check('ck_biz_outbound_order_amounts', "`total_qty` >= 0 AND `total_amount` >= 0 AND LENGTH(TRIM(COALESCE(`idempotency_key`, ''))) > 0")
+@Check('ck_biz_outbound_inventory_mode', "`inventory_mode` IN ('legacy_none', 'manual_applied', 'o2o_preapplied')")
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export class BizOutboundOrder {
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })
@@ -33,6 +38,15 @@ export class BizOutboundOrder {
 
   @Column({ name: 'show_no', type: 'varchar', length: 32, comment: '业务展示单号' })
   showNo!: string
+
+  @Column({ name: 'business_no', type: 'varchar', length: 32, comment: '独立可修订业务单号' })
+  businessNo!: string
+
+  @Column({ name: 'edit_version', type: 'integer', default: 1, comment: '改单乐观并发版本' })
+  editVersion!: number
+
+  @Column({ name: 'inventory_mode', type: 'varchar', length: 24, default: 'legacy_none', comment: '订单库存处理模式' })
+  inventoryMode!: OrderInventoryMode
 
   @Index('idx_biz_outbound_order_type')
   @Column({ name: 'order_type', type: 'varchar', length: 32, default: 'walkin', comment: '订单类型' })

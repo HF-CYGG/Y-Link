@@ -166,7 +166,7 @@ const handleExportVoucherPdf = async () => {
     return
   }
 
-  const outputFileName = `${props.order.showNo || 'order-voucher'}-正式出库单.pdf`
+  const outputFileName = `${props.order.businessNo || 'order-voucher'}-正式出库单.pdf`
 
   exportPdfLoading.value = true
   try {
@@ -215,7 +215,7 @@ const handleExportVoucherPdf = async () => {
             <p class="voucher-editor-panel__desc">填写后会立即同步到下方正式出库单预览与打印结果。</p>
           </div>
           <div class="voucher-editor-panel__meta">
-            <span>业务单号：{{ props.order.showNo }}</span>
+            <span>业务单号：{{ props.order.businessNo }}</span>
             <span>开单时间：{{ dayjs(props.order.createdAt).format('YYYY-MM-DD HH:mm:ss') }}</span>
           </div>
         </div>

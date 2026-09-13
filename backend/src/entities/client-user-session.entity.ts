@@ -32,7 +32,7 @@ export class ClientUserSession {
   @CreateDateColumn({ name: 'created_at', ...entityColumnOptions.timestamp })
   createdAt!: Date
 
-  @ManyToOne(() => ClientUser, { onDelete: 'CASCADE' })
+  @ManyToOne(() => ClientUser, { onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'user_id' })
   user?: Relation<ClientUser>
 }

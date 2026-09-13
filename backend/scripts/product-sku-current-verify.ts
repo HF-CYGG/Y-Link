@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import type { AuthUserContext } from '../src/types/auth.js'
 
 const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
@@ -89,12 +90,28 @@ async function main() {
   const { productService } = await import('../src/services/product.service.js')
   const { systemConfigService } = await import('../src/services/system-config.service.js')
   const { ClientUser } = await import('../src/entities/client-user.entity.js')
+  const { SysUser } = await import('../src/entities/sys-user.entity.js')
 
   prepareDatabaseRuntime()
   await AppDataSource.initialize()
   try {
     await initializeDatabaseSchemaIfNeeded(AppDataSource)
     await systemConfigService.ensureDefaultConfigs()
+    const userRepo = AppDataSource.getRepository(SysUser)
+    const admin = await userRepo.save(userRepo.create({
+      username: `product-sku-admin-${verifySeed}`,
+      passwordHash: 'verify-only',
+      displayName: 'SKU 当前版本验证管理员',
+      email: null,
+      role: 'admin',
+      status: 'enabled',
+      lastLoginAt: null,
+    }))
+    const actor: AuthUserContext = {
+      userId: String(admin.id), username: admin.username, displayName: admin.displayName,
+      role: 'admin', permissions: [], status: 'enabled',
+      sessionToken: 'product-sku-current-verify', authSource: 'bearer',
+    }
 
     const stockProduct = await productService.create({
       productName: `current-stock-${verifySeed}`,
@@ -126,7 +143,7 @@ async function main() {
           sortOrder: 1,
         },
       ],
-    } as Parameters<typeof productService.create>[0])
+    } as Parameters<typeof productService.create>[0], actor)
 
     const blueSku = findSkuByText(stockProduct.skus, 'Blue')
     const redSku = findSkuByText(stockProduct.skus, 'Red')
@@ -144,7 +161,7 @@ async function main() {
           sortOrder: 0,
         },
       ],
-    } as Parameters<typeof productService.update>[1])
+    } as Parameters<typeof productService.update>[1], actor)
 
     assert.deepEqual(stockProductAfterRemove.skus.map((sku) => sku.specText), ['Blue'])
     assert.equal(stockProductAfterRemove.currentStock, 7)
@@ -215,14 +232,14 @@ async function main() {
         { specValues: { Color: 'Red' }, defaultPrice: 5, currentStock: 11, isActive: true, sortOrder: 0 },
         { specValues: { Color: 'Blue' }, defaultPrice: 6, currentStock: 12, isActive: true, sortOrder: 1 },
       ],
-    } as Parameters<typeof productService.create>[0])
+    } as Parameters<typeof productService.create>[0], actor)
     const originalRedSku = findSkuByText(identityProduct.skus, 'Red')
     const identityProductAfterChange = await productService.update(identityProduct.id, {
       specGroups: [{ name: 'Color', values: ['Green'] }],
       skus: [
         { specValues: { Color: 'Green' }, defaultPrice: 9, currentStock: 6, isActive: true, sortOrder: 0 },
       ],
-    } as Parameters<typeof productService.update>[1])
+    } as Parameters<typeof productService.update>[1], actor)
     assert.deepEqual(identityProductAfterChange.skus.map((sku) => sku.specText), ['Green'])
     assert.notEqual(identityProductAfterChange.skus[0]?.id, originalRedSku.id)
     const identityRows = await readSkuRows(AppDataSource, identityProduct.id)
@@ -260,13 +277,13 @@ async function main() {
           sortOrder: 1,
         },
       ],
-    } as Parameters<typeof productService.create>[0])
+    } as Parameters<typeof productService.create>[0], actor)
     const defaultSwitchAfterUpdate = await productService.update(defaultSwitchProduct.id, {
       defaultPrice: 9,
       discountRate: 10,
       currentStock: 49,
       skus: [],
-    } as Parameters<typeof productService.update>[1])
+    } as Parameters<typeof productService.update>[1], actor)
     assert.equal(defaultSwitchAfterUpdate.skus.length, 1)
     assert.equal(defaultSwitchAfterUpdate.skus[0]?.specText, '默认规格')
     assert.equal(defaultSwitchAfterUpdate.currentStock, 49)

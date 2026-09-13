@@ -18,6 +18,7 @@ import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity
 import { InventoryLog } from '../entities/inventory-log.entity.js'
 import { O2oPreorderItem } from '../entities/o2o-preorder-item.entity.js'
 import type { PaginationResult } from '../types/api.js'
+import type { AuthUserContext } from '../types/auth.js'
 import { isRetryableSqliteLockError, isUniqueConstraintError } from '../utils/database-errors.js'
 import { BizError } from '../utils/errors.js'
 import { generateProductCode } from '../utils/id-generator.js'
@@ -25,6 +26,7 @@ import { isDatabaseFlagEnabled, summarizeProductInventory } from '../utils/produ
 import { normalizeLegacyUploadUrl } from '../utils/upload-storage.js'
 import { assertDiscountRateInRange, calculateDiscountedPrice, normalizeDiscountRate } from '../utils/discount-price.js'
 import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
+import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 
 export interface ProductQuery {
   keyword?: string
@@ -361,13 +363,16 @@ export class ProductService {
     return this.buildProductView(product)
   }
 
-  async create(input: CreateProductInput): Promise<ProductView> {
-    const result = await runInTransaction((manager) => this.createWithManager(input, manager))
+  async create(input: CreateProductInput, actor: AuthUserContext): Promise<ProductView> {
+    const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      return this.createWithManager(input, manager)
+    })
     invalidateMallCatalogReadCache()
     return result
   }
 
-  async batchCreate(inputs: CreateProductInput[]): Promise<ProductView[]> {
+  async batchCreate(inputs: CreateProductInput[], actor: AuthUserContext): Promise<ProductView[]> {
     if (!Array.isArray(inputs) || !inputs.length) {
       throw new BizError('至少新增一个产品')
     }
@@ -378,6 +383,7 @@ export class ProductService {
     this.assertNoDuplicateProductCodesInBatch(inputs)
 
     const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const createdProducts: ProductView[] = []
 
       for (let index = 0; index < inputs.length; index += 1) {
@@ -399,8 +405,9 @@ export class ProductService {
     return result
   }
 
-  async update(id: string, input: UpdateProductInput): Promise<ProductView> {
+  async update(id: string, input: UpdateProductInput, actor: AuthUserContext): Promise<ProductView> {
     const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const repo = manager.getRepository(BaseProduct)
       const product = await repo.findOne({
         where: { id },
@@ -427,8 +434,9 @@ export class ProductService {
     return result
   }
 
-  async batchUpdate(input: BatchUpdateProductInput): Promise<ProductView[]> {
+  async batchUpdate(input: BatchUpdateProductInput, actor: AuthUserContext): Promise<ProductView[]> {
     const productIds = [...new Set(input.ids.map((item) => normalizeEntityId(item)).filter(Boolean))]
+      .sort((left, right) => left.localeCompare(right))
     if (!productIds.length) {
       throw new BizError('至少选择一个产品')
     }
@@ -437,10 +445,14 @@ export class ProductService {
     }
 
     const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const repo = manager.getRepository(BaseProduct)
-      const products = await repo.find({
-        where: { id: In(productIds) },
-      })
+      const productQuery = repo
+        .createQueryBuilder('product')
+        .where('product.id IN (:...productIds)', { productIds })
+        .orderBy('product.id', 'ASC')
+      if (manager.connection.options.type !== 'sqlite') productQuery.setLock('pessimistic_write')
+      const products = await productQuery.getMany()
 
       if (products.length !== productIds.length) {
         throw new BizError('存在无效产品，批量更新失败')
@@ -458,12 +470,14 @@ export class ProductService {
     return result
   }
 
-  async delete(id: string): Promise<void> {
+  async delete(id: string, actor: AuthUserContext): Promise<void> {
     await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const productRepo = manager.getRepository(BaseProduct)
       const product = await productRepo.findOne({
         where: { id },
         select: ['id', 'productName'],
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
       if (!product) {
         throw new BizError('产品不存在', 404)
@@ -1292,4 +1306,4 @@ export const productService = new ProductService()
  * 批量新增产品（函数导出）：
  * - 供路由层按函数形式调用，减少类型服务对类实例成员增量感知不一致导致的误报。
  */
-export const batchCreateProducts = (inputs: CreateProductInput[]) => productService.batchCreate(inputs)
+export const batchCreateProducts = (inputs: CreateProductInput[], actor: AuthUserContext) => productService.batchCreate(inputs, actor)

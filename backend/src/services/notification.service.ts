@@ -28,6 +28,10 @@ import { auditService } from './audit.service.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { systemConfigService } from './system-config.service.js'
 import { safeHttpRequest } from '../utils/safe-http-request.js'
+import {
+  lockActiveSysAccountForBusiness,
+  lockActiveSysAccountsForBusiness,
+} from './account-business-guard.service.js'
 
 export const NOTIFICATION_EVENT_TYPES = [
   'o2o_preorder_created',
@@ -404,9 +408,10 @@ export class NotificationService {
     return this.parseOnlineWindowSeconds(row?.configValue)
   }
 
-  async ensureDefaultRules() {
-    await this.ensureOnlineWindowConfig()
-    const existing = await this.ruleRepo.find({
+  async ensureDefaultRules(manager: EntityManager = AppDataSource.manager) {
+    await this.ensureOnlineWindowConfig(manager)
+    const ruleRepo = manager.getRepository(NotificationRule)
+    const existing = await ruleRepo.find({
       where: DEFAULT_RULES.map((item) => ({ ruleCode: item.ruleCode })),
       select: { id: true, ruleCode: true },
     })
@@ -416,7 +421,7 @@ export class NotificationService {
       return
     }
     const entities = missingRules.map((item) =>
-      this.ruleRepo.create({
+      ruleRepo.create({
         ruleCode: item.ruleCode,
         ruleName: item.ruleName,
         eventType: item.eventType,
@@ -433,16 +438,38 @@ export class NotificationService {
         emailSubjectPrefix: '[Y-Link]',
       }),
     )
-    await this.ruleRepo.save(entities)
+    await ruleRepo.save(entities)
   }
 
   async listRules(): Promise<NotificationRuleRecord[]> {
-    await this.ensureDefaultRules()
     const rows = await this.ruleRepo.find({
       where: DEFAULT_RULES.map((item) => ({ ruleCode: item.ruleCode })),
       order: { id: 'ASC' },
     })
-    return rows.map(toRuleRecord)
+    const rowByCode = new Map(rows.map((row) => [row.ruleCode, row]))
+    return DEFAULT_RULES.map((defaultRule) => {
+      const row = rowByCode.get(defaultRule.ruleCode)
+      if (row) return toRuleRecord(row)
+      return {
+        id: `default:${defaultRule.ruleCode}`,
+        ruleCode: defaultRule.ruleCode,
+        ruleName: defaultRule.ruleName,
+        eventType: defaultRule.eventType,
+        enabled: true,
+        recipientUserIds: [],
+        emailRecipientAdminUserIds: [],
+        emailRecipientSupplierUserIds: [],
+        emailEnabled: false,
+        feishuEnabled: false,
+        externalTriggerMode: 'all_management_offline',
+        watchedUserIds: [],
+        feishuWebhookUrl: '',
+        feishuWebhookConfigured: false,
+        feishuSignSecretMasked: false,
+        emailSubjectPrefix: '[Y-Link]',
+        updatedAt: new Date(0),
+      }
+    })
   }
 
   private validateRuleUserSelections(
@@ -531,45 +558,55 @@ export class NotificationService {
     requestMeta?: RequestMeta,
   ): Promise<{ changed: boolean; list: NotificationRuleRecord[] }> {
     const normalizedOnlineWindowSeconds = this.normalizeOnlineWindowSeconds(offlineWindowSeconds)
-    await this.ensureDefaultRules()
-    const rows = await this.ruleRepo.find()
-    const rowById = new Map(rows.map((item) => [normalizeId(item.id), item]))
-    const normalizedById = new Map<string, UpdateNotificationRuleInput>()
-    for (const row of input) {
-      const persistedRule = rowById.get(normalizeId(row.id))
-      if (!persistedRule) {
-        throw new BizError('通知规则不存在', 404)
-      }
-      const normalized = this.normalizeRuleDraft(row, persistedRule)
-      normalizedById.set(normalizeId(row.id), {
-        id: normalized.id,
-        enabled: normalized.enabled,
-        recipientUserIds: normalized.recipientUserIds,
-        emailRecipientAdminUserIds: normalized.emailRecipientAdminUserIds,
-        emailRecipientSupplierUserIds: normalized.emailRecipientSupplierUserIds,
-        emailEnabled: normalized.emailEnabled,
-        feishuEnabled: normalized.feishuEnabled,
-        externalTriggerMode: normalized.externalTriggerMode,
-        watchedUserIds: normalized.watchedUserIds,
-        feishuWebhookUrl: normalized.feishuWebhookUrl,
-        feishuSignSecret: normalized.feishuSignSecret ?? '',
-        emailSubjectPrefix: normalized.emailSubjectPrefix,
-      })
-    }
-
-    const managementUsers = await this.userRepo.find({
-      where: MANAGEMENT_ROLES.map((role) => ({ role, status: 'enabled' })),
-      select: { id: true, role: true },
-    })
-    for (const payload of normalizedById.values()) {
-      this.validateRuleUserSelections(payload, managementUsers)
-    }
-
     let changed = false
     await runInTransaction(async (manager) => {
+      const responsibilityUserIds = input.flatMap((payload) => [
+        ...payload.recipientUserIds.map(normalizeId),
+        ...payload.emailRecipientAdminUserIds.map(normalizeId),
+        ...payload.emailRecipientSupplierUserIds.map(normalizeId),
+        ...payload.watchedUserIds.map(normalizeId),
+      ])
+      await lockActiveSysAccountsForBusiness(manager, [actor.userId, ...responsibilityUserIds])
+      await this.ensureDefaultRules(manager)
+
       const txRuleRepo = manager.getRepository(NotificationRule)
       const txSystemConfigRepo = manager.getRepository(SystemConfig)
-      await this.ensureOnlineWindowConfig(manager)
+      const rows = await txRuleRepo.find()
+      const rowById = new Map(rows.map((item) => [normalizeId(item.id), item]))
+      const rowByCode = new Map(rows.map((item) => [item.ruleCode, item]))
+      const normalizedById = new Map<string, UpdateNotificationRuleInput>()
+      for (const row of input) {
+        const normalizedId = normalizeId(row.id)
+        const fallbackRuleCode = normalizedId.startsWith('default:') ? normalizedId.slice('default:'.length) : ''
+        const persistedRule = rowById.get(normalizedId) ?? rowByCode.get(fallbackRuleCode)
+        if (!persistedRule) {
+          throw new BizError('通知规则不存在', 404)
+        }
+        const normalized = this.normalizeRuleDraft(row, persistedRule)
+        normalizedById.set(normalizeId(persistedRule.id), {
+          id: normalizeId(persistedRule.id),
+          enabled: normalized.enabled,
+          recipientUserIds: normalized.recipientUserIds,
+          emailRecipientAdminUserIds: normalized.emailRecipientAdminUserIds,
+          emailRecipientSupplierUserIds: normalized.emailRecipientSupplierUserIds,
+          emailEnabled: normalized.emailEnabled,
+          feishuEnabled: normalized.feishuEnabled,
+          externalTriggerMode: normalized.externalTriggerMode,
+          watchedUserIds: normalized.watchedUserIds,
+          feishuWebhookUrl: normalized.feishuWebhookUrl,
+          feishuSignSecret: normalized.feishuSignSecret ?? '',
+          emailSubjectPrefix: normalized.emailSubjectPrefix,
+        })
+      }
+
+      const managementUsers = await manager.getRepository(SysUser).find({
+        where: MANAGEMENT_ROLES.map((role) => ({ role, status: 'enabled' })),
+        select: { id: true, role: true },
+      })
+      for (const payload of normalizedById.values()) {
+        this.validateRuleUserSelections(payload, managementUsers)
+      }
+
       for (const row of rows) {
         const payload = normalizedById.get(normalizeId(row.id))
         if (!payload) {
@@ -984,7 +1021,6 @@ export class NotificationService {
   }
 
   async testSendByRule(input: NotificationRuleTestSendInput): Promise<NotificationRuleTestSendResult> {
-    await this.ensureDefaultRules()
     const ruleId = normalizeId(input.ruleId)
     if (ruleId !== normalizeId(input.draft.id)) {
       throw new BizError('测试参数中的规则标识不一致', 400)
@@ -1785,19 +1821,19 @@ export class NotificationService {
     }
   }
 
-  async markInboxRead(id: string, auth: AuthUserContext): Promise<boolean> {
-    const row = await this.inboxRepo.findOne({
-      where: { id, userId: auth.userId },
-      select: { id: true, isRead: true },
+  async markInboxRead(id: string, actor: AuthUserContext): Promise<boolean> {
+    return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const inboxRepo = manager.getRepository(NotificationInbox)
+      const rowQuery = inboxRepo.createQueryBuilder('inbox')
+        .where('inbox.id = :id AND inbox.userId = :userId', { id, userId: actor.userId })
+      if (manager.connection.options.type === 'mysql') rowQuery.setLock('pessimistic_write')
+      const row = await rowQuery.getOne()
+      if (!row) throw new BizError('通知不存在', 404)
+      if (row.isRead > 0) return false
+      await inboxRepo.update({ id: row.id }, { isRead: 1, readAt: new Date() })
+      return true
     })
-    if (!row) {
-      throw new BizError('通知不存在', 404)
-    }
-    if (row.isRead > 0) {
-      return false
-    }
-    await this.inboxRepo.update({ id: row.id }, { isRead: 1, readAt: new Date() })
-    return true
   }
 
   async getUnreadCount(auth: AuthUserContext): Promise<number> {

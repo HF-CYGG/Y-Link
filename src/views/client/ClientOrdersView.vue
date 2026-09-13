@@ -203,6 +203,7 @@ const normalizeSummaryDisplayShowNo = (order: O2oPreorderSummary): O2oPreorderSu
     ...order,
     showNo: resolveO2oDisplayShowNo(order),
     customerOrderShowNo: order.customerOrderShowNo ?? null,
+    customerOrderBusinessNo: order.customerOrderBusinessNo ?? null,
   }
 }
 

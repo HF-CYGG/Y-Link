@@ -4,8 +4,9 @@
  * 维护重点：调整入库状态或核销相关字段时，需要同步核对初始化脚本、迁移脚本和入库服务读写逻辑。
  */
 
-import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm'
+import { Column, CreateDateColumn, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn, UpdateDateColumn, type Relation } from 'typeorm'
 import { entityColumnOptions } from './entity-column-options.js'
+import { SysUser } from './sys-user.entity.js'
 
 @Entity({ name: 'biz_inbound_order' })
 export class BizInboundOrder {
@@ -202,4 +203,8 @@ export class BizInboundOrder {
 
   @UpdateDateColumn({ name: 'updated_at', ...entityColumnOptions.timestamp, comment: '更新时间' })
   updatedAt!: Date
+
+  @ManyToOne(() => SysUser, { onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'supplier_id' })
+  supplier?: Relation<SysUser>
 }

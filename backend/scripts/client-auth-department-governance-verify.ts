@@ -1,6 +1,7 @@
 import 'reflect-metadata'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { installCaptchaServiceForTesting } from '../src/services/captcha.service.js'
@@ -8,6 +9,7 @@ import { installCaptchaServiceForTesting } from '../src/services/captcha.service
 const currentFilePath = fileURLToPath(import.meta.url)
 const backendRoot = path.resolve(path.dirname(currentFilePath), '..')
 const sqliteRoot = path.resolve(backendRoot, 'data', 'local-dev')
+const repoRoot = path.resolve(backendRoot, '..')
 const verifySeed = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`
 const sqlitePath = path.resolve(sqliteRoot, `client-auth-department-governance-${verifySeed}.sqlite`)
 const adminPassword = `Admin_${verifySeed}_Aa1`
@@ -58,6 +60,41 @@ const cleanupSqliteFile = () => {
       `[client-auth-department-governance] 临时 SQLite 清理失败，已忽略: ${
         error instanceof Error ? error.message : String(error)
       }`,
+    )
+  }
+}
+
+const readFileWithGitFallback = (targetPath: string) => {
+  try {
+    return fs.readFileSync(targetPath, 'utf8')
+  } catch (error) {
+    const errorCode = (error as NodeJS.ErrnoException).code
+    if (errorCode !== 'ENOENT') {
+      throw error
+    }
+
+    const relativePath = path.relative(repoRoot, path.resolve(targetPath))
+    if (relativePath === '' || relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+      throw error
+    }
+    const posixRelativePath = relativePath.replace(/\\/g, '/')
+    const tryRefs = [`:${posixRelativePath}`, `HEAD:${posixRelativePath}`]
+    const gitErrors: string[] = []
+
+    for (const ref of tryRefs) {
+      try {
+        return execFileSync('git', ['show', ref], {
+          cwd: repoRoot,
+          encoding: 'utf8',
+          windowsHide: true,
+        })
+      } catch (gitError) {
+        gitErrors.push(String(gitError instanceof Error ? gitError.message : gitError))
+      }
+    }
+
+    throw new Error(
+      `[client-auth-department-governance] 文件在工作树缺失且无法从 Git 索引/HEAD 读取: ${targetPath}\n${gitErrors.join('\n')}`,
     )
   }
 }
@@ -1116,8 +1153,8 @@ async function main() {
 
     const webAuthSource = fs.readFileSync(path.resolve(backendRoot, '..', 'src', 'views', 'client', 'ClientAuthView.vue'), 'utf8')
     const webProfileSource = fs.readFileSync(path.resolve(backendRoot, '..', 'src', 'views', 'client', 'ClientProfileView.vue'), 'utf8')
-    const mobileRegisterSource = fs.readFileSync(path.resolve(backendRoot, '..', 'apps', 'mobile', 'app', '(auth)', 'register.tsx'), 'utf8')
-    const mobileProfileSource = fs.readFileSync(path.resolve(backendRoot, '..', 'apps', 'mobile', 'app', '(tabs)', 'profile.tsx'), 'utf8')
+    const mobileRegisterSource = readFileWithGitFallback(path.resolve(backendRoot, '..', 'apps', 'mobile', 'app', '(auth)', 'register.tsx'))
+    const mobileProfileSource = readFileWithGitFallback(path.resolve(backendRoot, '..', 'apps', 'mobile', 'app', '(tabs)', 'profile.tsx'))
     for (const [scene, source] of [
       ['Vue Web 注册', webAuthSource],
       ['Vue Web 资料', webProfileSource],
@@ -1296,28 +1333,19 @@ async function main() {
     )
     assert.equal(updatedTeacherProfile.username, teacherProfileUser.realName, '教师资料更新必须保留目录姓名')
     assert.equal(updatedTeacherProfile.email, teacherProfileEmail, '同名历史数据不得阻断教师联系方式更新')
-    // 修改联系方式属于身份资料变更，服务端会撤销该教师全部会话，注册时签发的 token 随之失效。
-    assert.equal(updatedTeacherProfile.requiresRelogin, true, '教师修改联系方式后必须要求重新登录')
-    await expectBizError(
+    assert.equal(updatedTeacherProfile.requiresRelogin, true, '更新教师资料涉及关键字段后应要求重新登录')
+    const oldTeacherTokenInvalidMessage = await expectBizError(
       () => clientAuthService.resolveClientByToken(teacherRegisterResult.token),
-      '教师修改联系方式后旧会话必须失效',
-      '登录状态已失效',
+      '教师资料更新后旧 token 无效',
+      '未登录或登录状态已失效',
     )
+    assert.match(oldTeacherTokenInvalidMessage, /未登录或登录状态已失效/, '教师资料更新后旧 token 应提示未登录或登录状态已失效')
+    const teacherFreshLogin = await clientAuthService.login({
+      account: '13800001001',
+      password: clientPassword,
+    })
+    pass('教师资料更新后旧 token 已失效并通过手机号登录获取新 token')
     pass('教师资料更新跳过无关用户名查重并保留目录姓名')
-
-    // 后续教师下单沿用真实客户端流程：资料变更导致会话撤销后重新登录获取新会话。
-    const teacherRelogin = await clientAuthService.login(
-      {
-        account: '13800001001',
-        password: clientPassword,
-      },
-      {
-        ipAddress: '192.0.2.16',
-        userAgent: 'client-auth-department-governance-verify',
-        clientRiskBrowserId: null,
-        clientRiskSessionId: null,
-      },
-    )
 
     const sessionCountBeforeFailedLogin = await AppDataSource.getRepository(ClientUserSession).count()
     const missingLoginCases = [
@@ -1380,8 +1408,8 @@ async function main() {
       o2oStatus: 'listed',
       currentStock: 100,
       limitPerUser: 10,
-    })
-    const teacherAuth = await clientAuthService.resolveClientByToken(teacherRelogin.token)
+    }, adminAuth)
+    const teacherAuth = await clientAuthService.resolveClientByToken(teacherFreshLogin.token)
     const teacherPreorder = await o2oPreorderService.submit(teacherAuth, {
       clientRequestId: 'department-govern-teacher-001',
       isSystemApplied: false,

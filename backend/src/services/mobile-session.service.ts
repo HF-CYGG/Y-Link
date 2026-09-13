@@ -34,6 +34,7 @@ import { clientAuthService } from './client-auth.service.js'
 import { persistentRiskStateService } from './persistent-risk-state.service.js'
 import { notificationService } from './notification.service.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
+import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
 
 const ACCESS_ACTIVITY_WRITE_INTERVAL_MS = 60 * 1000
 const CLEANUP_INTERVAL_MS = 60 * 60 * 1000
@@ -56,7 +57,13 @@ export interface MobileSessionCredentials {
 
 type RefreshTerminalResult =
   | { kind: 'candidate'; sessionId: string }
-  | { kind: 'error'; error: BizError; replayAlertSessionId?: string }
+  | {
+    kind: 'error'
+    error: BizError
+    replayAlertSessionId?: string
+    realtimeOwnerKey?: string
+    realtimeSessionHashes?: readonly string[]
+  }
 
 class MobileRefreshCasConflictError extends Error {}
 
@@ -109,6 +116,13 @@ export class MobileSessionService {
   private cleanupLoopTimer: ReturnType<typeof globalThis.setInterval> | null = null
   private cleanupLoopDesired = false
   private cleanupCyclePromise: Promise<void> | null = null
+
+  private advanceRealtimeRevocation(result: Pick<Extract<RefreshTerminalResult, { kind: 'error' }>, 'realtimeOwnerKey' | 'realtimeSessionHashes'>) {
+    if (result.realtimeOwnerKey) customerServiceRealtimeService.disconnectByOwner('client', result.realtimeOwnerKey)
+    for (const sessionHash of result.realtimeSessionHashes ?? []) {
+      customerServiceRealtimeService.disconnectBySessionHash('client', sessionHash)
+    }
+  }
 
   constructor() {
     databaseOperationGate.registerWorker({
@@ -224,9 +238,13 @@ export class MobileSessionService {
       }
 
       const repository = manager.getRepository(ClientMobileSession)
-      const sameDeviceSessions = await repository.find({
-        where: { clientUserId: lockedUser.id, deviceId: device.deviceId, revokedAt: IsNull() },
-      })
+      const sameDeviceSessions = await repository.createQueryBuilder('session')
+        .addSelect('session.accessTokenHash')
+        .where('session.client_user_id = :userId AND session.device_id = :deviceId AND session.revoked_at IS NULL', {
+          userId: lockedUser.id,
+          deviceId: device.deviceId,
+        })
+        .getMany()
       if (sameDeviceSessions.length > 0) {
         await repository.createQueryBuilder()
           .update(ClientMobileSession)
@@ -238,14 +256,15 @@ export class MobileSessionService {
           .execute()
       }
 
-      const activeSessions = await repository.find({
-        where: {
-          clientUserId: lockedUser.id,
-          revokedAt: IsNull(),
-          absoluteExpiresAt: MoreThan(now),
-        },
-        order: { lastAccessAt: 'ASC', id: 'ASC' },
-      })
+      const activeSessions = await repository.createQueryBuilder('session')
+        .addSelect('session.accessTokenHash')
+        .where('session.client_user_id = :userId AND session.revoked_at IS NULL AND session.absolute_expires_at > :now', {
+          userId: lockedUser.id,
+          now,
+        })
+        .orderBy('session.last_access_at', 'ASC')
+        .addOrderBy('session.id', 'ASC')
+        .getMany()
       const evictCount = Math.max(0, activeSessions.length - env.MOBILE_MAX_ACTIVE_SESSIONS + 1)
       const evictedSessions = activeSessions.slice(0, evictCount)
       if (evictedSessions.length > 0) {
@@ -294,11 +313,21 @@ export class MobileSessionService {
           },
         }, manager)
       }
-      return { session, user: lockedUser }
+      return {
+        session,
+        user: lockedUser,
+        revokedAccessHashes: [...sameDeviceSessions, ...evictedSessions].map((item) => item.accessTokenHash),
+      }
     }
     const result = transactionManager
       ? await createSession(transactionManager)
       : await runInTransaction(createSession)
+
+    if (!transactionManager) {
+      for (const sessionHash of result.revokedAccessHashes) {
+        customerServiceRealtimeService.disconnectBySessionHash('client', sessionHash)
+      }
+    }
 
     return this.buildCredentials(result.session, result.user, accessToken, refreshToken)
   }
@@ -390,18 +419,30 @@ export class MobileSessionService {
         requestMeta,
         detail: { attemptedEndpoint: 'refresh' },
       }, manager)
-      return { kind: 'error', error: mobileError('当前账号已停用', 403, 40300) }
+      return {
+        kind: 'error',
+        error: mobileError('当前账号已停用', 403, 40300),
+        realtimeOwnerKey: session.clientUserId,
+      }
     }
     if (session.revokedAt) {
       return { kind: 'error', error: mobileError('刷新凭证无效', 401, 40110) }
     }
     if (session.absoluteExpiresAt <= now) {
       await this.revokeExpiredLockedSession(manager, session, now, 'absolute', requestMeta)
-      return { kind: 'error', error: mobileError('会话已达绝对过期时间', 401, 40112) }
+      return {
+        kind: 'error',
+        error: mobileError('会话已达绝对过期时间', 401, 40112),
+        realtimeSessionHashes: [session.accessTokenHash],
+      }
     }
     if (session.refreshExpiresAt <= now) {
       await this.revokeExpiredLockedSession(manager, session, now, 'refresh', requestMeta)
-      return { kind: 'error', error: mobileError('刷新凭证已过期', 401, 40111) }
+      return {
+        kind: 'error',
+        error: mobileError('刷新凭证已过期', 401, 40111),
+        realtimeSessionHashes: [session.accessTokenHash],
+      }
     }
     const matchesPrevious = session.previousRefreshTokenHash === refreshHash
     if (matchesPrevious && (!session.previousRefreshGraceUntil || session.previousRefreshGraceUntil <= now)) {
@@ -430,6 +471,7 @@ export class MobileSessionService {
         kind: 'error',
         error: mobileError('出于安全考虑，您的登录已被重置，请重新登录', 401, 40113),
         replayAlertSessionId: session.id,
+        realtimeSessionHashes: [session.accessTokenHash],
       }
     }
     return { kind: 'candidate', sessionId: session.id }
@@ -487,6 +529,7 @@ export class MobileSessionService {
     ) {
       // 重放/停用/过期必须在限流之前进入加锁事务并提交撤销。
       classified = await this.classifyRefresh(refreshHash, now, requestMeta)
+      if (classified.kind === 'error') this.advanceRealtimeRevocation(classified)
       this.throwTerminalRefresh(classified)
     } else {
       classified = { kind: 'candidate', sessionId: preflight.id }
@@ -515,15 +558,27 @@ export class MobileSessionService {
           requestMeta,
           detail: { attemptedEndpoint: 'refresh' },
         }, manager)
-        return { kind: 'error', error: mobileError('当前账号已停用', 403, 40300) } as const
+        return {
+          kind: 'error',
+          error: mobileError('当前账号已停用', 403, 40300),
+          realtimeOwnerKey: session.clientUserId,
+        } as const
       }
       if (session.absoluteExpiresAt <= rotationNow) {
         await this.revokeExpiredLockedSession(manager, session, rotationNow, 'absolute', requestMeta)
-        return { kind: 'error', error: mobileError('会话已达绝对过期时间', 401, 40112) } as const
+        return {
+          kind: 'error',
+          error: mobileError('会话已达绝对过期时间', 401, 40112),
+          realtimeSessionHashes: [session.accessTokenHash],
+        } as const
       }
       if (session.refreshExpiresAt <= rotationNow) {
         await this.revokeExpiredLockedSession(manager, session, rotationNow, 'refresh', requestMeta)
-        return { kind: 'error', error: mobileError('刷新凭证已过期', 401, 40111) } as const
+        return {
+          kind: 'error',
+          error: mobileError('刷新凭证已过期', 401, 40111),
+          realtimeSessionHashes: [session.accessTokenHash],
+        } as const
       }
       const matchesCurrent = session.refreshTokenHash === refreshHash
       const matchesPrevious = session.previousRefreshTokenHash === refreshHash
@@ -552,6 +607,7 @@ export class MobileSessionService {
         return {
           kind: 'error',
           error: mobileError('出于安全考虑，您的登录已被重置，请重新登录', 401, 40113),
+          realtimeSessionHashes: [session.accessTokenHash],
         } as const
       }
       if (!matchesCurrent && !matchesPrevious) {
@@ -567,6 +623,7 @@ export class MobileSessionService {
         throw error
       }
       const viaGrace = matchesPrevious
+      const invalidatedAccessHash = session.accessTokenHash
       const accessExpiresAt = minimumDate(
         addMilliseconds(rotationNow, env.MOBILE_ACCESS_TTL_MINUTES * 60 * 1000),
         session.absoluteExpiresAt,
@@ -626,10 +683,14 @@ export class MobileSessionService {
           deviceIdMismatch: device.deviceId !== session.deviceId,
         },
       }, manager)
-      return { kind: 'success', session, user: session.user } as const
+      return { kind: 'success', session, user: session.user, invalidatedAccessHash } as const
     }))
 
-    if (rotated.kind === 'error') throw rotated.error
+    if (rotated.kind === 'error') {
+      this.advanceRealtimeRevocation(rotated)
+      throw rotated.error
+    }
+    customerServiceRealtimeService.disconnectBySessionHash('client', rotated.invalidatedAccessHash)
     const rotationObservedAt = new Date()
     const rotationWindow = await persistentRiskStateService.consumeWindow(
       `mobile-refresh-rotation:${classified.sessionId}`,
@@ -638,9 +699,9 @@ export class MobileSessionService {
       env.MOBILE_REFRESH_ROTATION_RATE_LIMIT,
     )
     if (rotationWindow.totalHits > env.MOBILE_REFRESH_ROTATION_RATE_LIMIT) {
-      await runInTransaction(async (manager) => {
+      const revokedAccessHash = await runInTransaction(async (manager) => {
         const session = await this.buildSessionIdLookup(manager, classified.sessionId, true).getOne()
-        if (!session || session.revokedAt) return
+        if (!session || session.revokedAt) return null
         await this.revokeLockedSession(manager, session, 'refresh_replay_detected', rotationObservedAt)
         await auditService.record({
           actionType: 'refresh_replay_detected',
@@ -659,7 +720,9 @@ export class MobileSessionService {
           payload: { generation: session.refreshGeneration, trigger: 'burst' },
           requestMeta,
         }, manager)
+        return session.accessTokenHash
       })
+      if (revokedAccessHash) customerServiceRealtimeService.disconnectBySessionHash('client', revokedAccessHash)
       throw mobileError('出于安全考虑，您的登录已被重置，请重新登录', 401, 40113)
     }
     return this.buildCredentials(rotated.session, rotated.user, accessToken, nextRefreshToken)
@@ -693,6 +756,7 @@ export class MobileSessionService {
           detail: { attemptedEndpoint },
         }, manager)
       })
+      customerServiceRealtimeService.disconnectByOwner('client', session.clientUserId)
       throw mobileError('当前账号已停用', 403, 40300)
     }
     if (session.revokedAt) throw mobileError('Access Token 无效或已撤销', 401, 40101)
@@ -743,6 +807,7 @@ export class MobileSessionService {
         detail: { deviceId: auth.session.deviceId, revoked: (result.affected ?? 0) > 0 },
       }, manager)
     })
+    customerServiceRealtimeService.disconnectBySessionHash('client', hashMobileToken(auth.accessToken))
     return { revoked: true as const }
   }
 
@@ -751,7 +816,7 @@ export class MobileSessionService {
     const token = accessToken?.trim() ?? ''
     if (!isMobileAccessToken(token)) throw mobileError('Access Token 缺失或格式非法', 401, 40100)
     const accessHash = hashMobileToken(token)
-    return runInTransaction(async (manager) => {
+    await runInTransaction(async (manager) => {
       const session = await manager.getRepository(ClientMobileSession).findOne({
         where: { accessTokenHash: accessHash },
         relations: { user: true },
@@ -771,8 +836,9 @@ export class MobileSessionService {
           detail: { deviceId: session.deviceId, revoked: true },
         }, manager)
       }
-      return { revoked: true as const }
     })
+    customerServiceRealtimeService.disconnectBySessionHash('client', accessHash)
+    return { revoked: true as const }
   }
 
   async revokeSessionsForUser(
@@ -792,6 +858,17 @@ export class MobileSessionService {
 
   async logoutAll(auth: MobileAuthContext, scope: 'all' | 'others', requestMeta?: RequestMeta) {
     const result = await runInTransaction(async (manager) => {
+      const revokedSessionHashes = scope === 'others'
+        ? (await manager.getRepository(ClientMobileSession)
+          .createQueryBuilder('session')
+          .addSelect('session.accessTokenHash')
+          .where('session.client_user_id = :userId AND session.revoked_at IS NULL AND session.id <> :sessionId', {
+            userId: auth.userId,
+            sessionId: auth.sessionId,
+          })
+          .getMany())
+          .map((session) => session.accessTokenHash)
+        : []
       const revokedCount = await this.revokeSessionsForUser(
         manager,
         auth.userId,
@@ -807,9 +884,11 @@ export class MobileSessionService {
         requestMeta,
         detail: { scope, revokedCount },
       }, manager)
-      return { revokedCount, currentSessionRevoked: scope === 'all' }
+      return { revokedCount, currentSessionRevoked: scope === 'all', revokedSessionHashes }
     })
-    return result
+    if (scope === 'all') customerServiceRealtimeService.disconnectByOwner('client', auth.userId)
+    else for (const sessionHash of result.revokedSessionHashes) customerServiceRealtimeService.disconnectBySessionHash('client', sessionHash)
+    return { revokedCount: result.revokedCount, currentSessionRevoked: result.currentSessionRevoked }
   }
 
   async listSessions(auth: MobileAuthContext) {
@@ -830,10 +909,15 @@ export class MobileSessionService {
   }
 
   async revokeOwnedSession(auth: MobileAuthContext, targetSessionId: string, requestMeta?: RequestMeta) {
-    await runInTransaction(async (manager) => {
-      const target = await manager.getRepository(ClientMobileSession).findOne({
-        where: { id: targetSessionId, clientUserId: auth.userId },
-      })
+    const sessionHash = await runInTransaction(async (manager) => {
+      const target = await manager.getRepository(ClientMobileSession)
+        .createQueryBuilder('session')
+        .addSelect('session.accessTokenHash')
+        .where('session.id = :targetSessionId AND session.client_user_id = :userId', {
+          targetSessionId,
+          userId: auth.userId,
+        })
+        .getOne()
       if (!target) throw new BizError('会话不存在', 404)
       if (!target.revokedAt) {
         target.revokedAt = new Date()
@@ -849,7 +933,9 @@ export class MobileSessionService {
         requestMeta,
         detail: { revokeReason: 'user_revoke_device', initiatedBy: auth.sessionId },
       }, manager)
+      return target.accessTokenHash
     })
+    customerServiceRealtimeService.disconnectBySessionHash('client', sessionHash)
     return { revoked: true as const }
   }
 

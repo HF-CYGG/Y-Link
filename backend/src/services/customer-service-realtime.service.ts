@@ -18,6 +18,7 @@ import { hashSessionToken } from '../utils/session-token.js'
 import { isMobileAccessToken } from '../utils/mobile-token.js'
 import { BizError } from '../utils/errors.js'
 import { CUSTOMER_SERVICE_REALTIME_POLICY } from './client-feedback-security-policy.js'
+import { isAccountCurrentlyDeactivated } from './account-business-guard.service.js'
 
 export interface CustomerServiceRealtimeEventPayload {
   eventType: string
@@ -30,8 +31,27 @@ export interface CustomerServiceRealtimeEventPayload {
   audience?: 'all' | 'service'
 }
 
-type RealtimeScope = 'client' | 'service'
+export type RealtimeScope = 'client' | 'service'
 type ClientSessionKind = 'web' | 'mobile'
+
+export interface CustomerServiceRealtimeRegistrationTicket {
+  scope: RealtimeScope
+  ownerKey: string
+  globalEpoch: number
+  generation: number
+  sessionHash: string
+  sessionGeneration: number
+  expiresAtMs: number
+}
+
+interface CustomerServiceRealtimeGenerationRecord {
+  generation: number
+  expiresAtMs: number
+}
+
+const CUSTOMER_SERVICE_REALTIME_REGISTRATION_TICKET_TTL_MS = 5_000
+const CUSTOMER_SERVICE_REALTIME_GENERATION_RECORD_RETENTION_MS = CUSTOMER_SERVICE_REALTIME_REGISTRATION_TICKET_TTL_MS
+const CUSTOMER_SERVICE_REALTIME_GENERATION_RECORD_CAPACITY = 1_024
 
 interface CustomerServiceRealtimeSubscriber {
   subscriberId: string
@@ -68,6 +88,8 @@ interface ConnectRateWindow {
 class CustomerServiceRealtimeService {
   private readonly subscribers = new Map<string, CustomerServiceRealtimeSubscriber>()
   private readonly connectRateWindows = new Map<string, ConnectRateWindow>()
+  private readonly generationRecords = new Map<string, CustomerServiceRealtimeGenerationRecord>()
+  private globalGenerationEpoch = 0
   private subscriberSeed = 0
   private conversationEventSeed = 0
   private deliveryChain: Promise<void> = Promise.resolve()
@@ -77,6 +99,119 @@ class CustomerServiceRealtimeService {
   private buildSubscriberId(scope: RealtimeScope) {
     this.subscriberSeed += 1
     return `${scope}_${Date.now()}_${this.subscriberSeed}`
+  }
+
+  private buildOwnerGenerationKey(scope: RealtimeScope, ownerKey: string) {
+    return `owner:${scope}:${ownerKey}`
+  }
+
+  private buildSessionGenerationKey(scope: RealtimeScope, sessionHash: string) {
+    return `session:${scope}:${sessionHash}`
+  }
+
+  private pruneExpiredGenerationRecords(nowMs: number) {
+    for (const [key, record] of this.generationRecords) {
+      if (record.expiresAtMs <= nowMs) this.generationRecords.delete(key)
+    }
+  }
+
+  private readGeneration(key: string, retainUntilMs?: number) {
+    const record = this.generationRecords.get(key)
+    if (record && retainUntilMs && record.expiresAtMs < retainUntilMs) record.expiresAtMs = retainUntilMs
+    return record?.generation ?? 0
+  }
+
+  private advanceGeneration(key: string) {
+    const nowMs = Date.now()
+    this.pruneExpiredGenerationRecords(nowMs)
+    if (!this.generationRecords.has(key) && this.generationRecords.size >= CUSTOMER_SERVICE_REALTIME_GENERATION_RECORD_CAPACITY) {
+      // 清表前先推进 epoch，保证容量回收不会把旧 ticket 的 generation 重置成可再次匹配的 0。
+      this.globalGenerationEpoch += 1
+      this.generationRecords.clear()
+    }
+    const currentGeneration = this.generationRecords.get(key)?.generation ?? 0
+    this.generationRecords.set(key, {
+      generation: currentGeneration + 1,
+      expiresAtMs: nowMs + CUSTOMER_SERVICE_REALTIME_GENERATION_RECORD_RETENTION_MS,
+    })
+  }
+
+  captureOwnerGeneration(scope: RealtimeScope, ownerKey: string, sessionToken: string): CustomerServiceRealtimeRegistrationTicket {
+    const nowMs = Date.now()
+    this.pruneExpiredGenerationRecords(nowMs)
+    const sessionHash = hashSessionToken(sessionToken)
+    const expiresAtMs = nowMs + CUSTOMER_SERVICE_REALTIME_REGISTRATION_TICKET_TTL_MS
+    return {
+      scope,
+      ownerKey,
+      globalEpoch: this.globalGenerationEpoch,
+      generation: this.readGeneration(this.buildOwnerGenerationKey(scope, ownerKey), expiresAtMs),
+      sessionHash,
+      sessionGeneration: this.readGeneration(this.buildSessionGenerationKey(scope, sessionHash), expiresAtMs),
+      expiresAtMs,
+    }
+  }
+
+  private assertRegistrationTicket(ticket: CustomerServiceRealtimeRegistrationTicket, scope: RealtimeScope, ownerKey: string, sessionToken: string) {
+    const nowMs = Date.now()
+    this.pruneExpiredGenerationRecords(nowMs)
+    if (ticket.expiresAtMs <= nowMs) throw new BizError('实时连接注册 ticket 已过期，请重试', 401)
+    const currentGeneration = this.readGeneration(this.buildOwnerGenerationKey(scope, ownerKey))
+    const sessionHash = hashSessionToken(sessionToken)
+    const currentSessionGeneration = this.readGeneration(this.buildSessionGenerationKey(scope, sessionHash))
+    if (
+      ticket.scope !== scope
+      || ticket.ownerKey !== ownerKey
+      || ticket.globalEpoch !== this.globalGenerationEpoch
+      || ticket.generation !== currentGeneration
+      || ticket.sessionHash !== sessionHash
+      || ticket.sessionGeneration !== currentSessionGeneration
+    ) {
+      throw new BizError('实时连接授权状态已变化，请重新登录后重试', 401)
+    }
+  }
+
+  async assertOwnerCanRegister(ticket: CustomerServiceRealtimeRegistrationTicket, sessionToken: string): Promise<void> {
+    this.assertRegistrationTicket(ticket, ticket.scope, ticket.ownerKey, sessionToken)
+    const now = new Date()
+    const sessionHash = hashSessionToken(sessionToken)
+    if (ticket.scope === 'client') {
+      const sessionValid = isMobileAccessToken(sessionToken)
+        ? Boolean(await AppDataSource.getRepository(ClientMobileSession)
+          .createQueryBuilder('session')
+          .where('session.client_user_id = :ownerKey', { ownerKey: ticket.ownerKey })
+          .andWhere('session.access_token_hash = :sessionHash', { sessionHash })
+          .andWhere('session.revoked_at IS NULL')
+          .andWhere('session.access_expires_at > :now', { now })
+          .andWhere('session.absolute_expires_at > :now', { now })
+          .getOne())
+        : Boolean(await AppDataSource.getRepository(ClientUserSession).findOne({
+          where: { userId: ticket.ownerKey, sessionToken: sessionHash, expiresAt: MoreThan(now) },
+        }))
+      const user = sessionValid
+        ? await AppDataSource.getRepository(ClientUser).findOne({ where: { id: ticket.ownerKey } })
+        : null
+      if (!sessionValid || !user || user.status !== 'enabled' || isAccountCurrentlyDeactivated(user)) {
+        throw new BizError('客户端实时连接登录状态已失效', 401)
+      }
+      return
+    }
+
+    const session = await AppDataSource.getRepository(SysUserSession).findOne({
+      where: { userId: ticket.ownerKey, sessionToken: sessionHash, expiresAt: MoreThan(now) },
+    })
+    const user = session
+      ? await AppDataSource.getRepository(SysUser).findOne({ where: { id: ticket.ownerKey } })
+      : null
+    if (
+      !session
+      || !user
+      || user.status !== 'enabled'
+      || isAccountCurrentlyDeactivated(user)
+      || !resolvePermissionsByRole(user.role).includes('customer_service:view')
+    ) {
+      throw new BizError('客服实时连接登录状态已失效', 401)
+    }
   }
 
   private writeSseEvent(subscriber: CustomerServiceRealtimeSubscriber, eventName: string, data: unknown): boolean {
@@ -168,7 +303,7 @@ class CustomerServiceRealtimeService {
             ? await AppDataSource.getRepository(ClientUser).find({ where: { id: In([...new Set(sessions.map((item) => item.userId))]), status: 'enabled' } })
             : []
           const ownerByHash = new Map(sessions.map((item) => [item.sessionToken, item.userId]))
-          const enabledUsers = new Set(users.map((item) => String(item.id)))
+          const enabledUsers = new Set(users.filter((item) => !isAccountCurrentlyDeactivated(item)).map((item) => String(item.id)))
           for (const subscriber of slice) {
             if (String(ownerByHash.get(subscriber.sessionHash) ?? '') === String(subscriber.ownerKey) && enabledUsers.has(String(subscriber.ownerKey))) validIds.add(subscriber.subscriberId)
           }
@@ -187,7 +322,7 @@ class CustomerServiceRealtimeService {
             ? await AppDataSource.getRepository(ClientUser).find({ where: { id: In([...new Set(sessions.map((item) => item.clientUserId))]), status: 'enabled' } })
             : []
           const ownerByHash = new Map(sessions.map((item) => [item.accessTokenHash, item.clientUserId]))
-          const enabledUsers = new Set(users.map((item) => String(item.id)))
+          const enabledUsers = new Set(users.filter((item) => !isAccountCurrentlyDeactivated(item)).map((item) => String(item.id)))
           for (const subscriber of slice) {
             if (String(ownerByHash.get(subscriber.sessionHash) ?? '') === String(subscriber.ownerKey) && enabledUsers.has(String(subscriber.ownerKey))) validIds.add(subscriber.subscriberId)
           }
@@ -198,7 +333,10 @@ class CustomerServiceRealtimeService {
           ? await AppDataSource.getRepository(SysUser).find({ where: { id: In([...new Set(sessions.map((item) => item.userId))]), status: 'enabled' } })
           : []
         const ownerByHash = new Map(sessions.map((item) => [item.sessionToken, item.userId]))
-        const authorizedUsers = new Set(users.filter((item) => resolvePermissionsByRole(item.role).includes('customer_service:view')).map((item) => String(item.id)))
+        const authorizedUsers = new Set(users.filter((item) => (
+          !isAccountCurrentlyDeactivated(item)
+          && resolvePermissionsByRole(item.role).includes('customer_service:view')
+        )).map((item) => String(item.id)))
         for (const subscriber of slice) {
           if (String(ownerByHash.get(subscriber.sessionHash) ?? '') === String(subscriber.ownerKey) && authorizedUsers.has(String(subscriber.ownerKey))) validIds.add(subscriber.subscriberId)
         }
@@ -230,7 +368,8 @@ class CustomerServiceRealtimeService {
     subscriber.revalidateTimer.unref?.()
   }
 
-  private registerSubscriber(scope: RealtimeScope, ownerKey: string, sessionToken: string, res: Response, keepaliveSeconds: number, initPayload?: CustomerServiceRealtimeInitPayloadResolver) {
+  private registerSubscriber(scope: RealtimeScope, ownerKey: string, sessionToken: string, res: Response, keepaliveSeconds: number, ticket: CustomerServiceRealtimeRegistrationTicket, initPayload?: CustomerServiceRealtimeInitPayloadResolver) {
+    this.assertRegistrationTicket(ticket, scope, ownerKey, sessionToken)
     const sessionHash = hashSessionToken(sessionToken)
     const clientSessionKind: ClientSessionKind | null = scope === 'client'
       ? (isMobileAccessToken(sessionToken) ? 'mobile' : 'web')
@@ -257,20 +396,33 @@ class CustomerServiceRealtimeService {
     res.on('error', cleanup)
   }
 
-  openClientStream(clientUserId: string, sessionToken: string, res: Response, keepaliveSeconds: number, initPayload?: CustomerServiceRealtimeInitPayloadResolver) {
-    this.registerSubscriber('client', clientUserId, sessionToken, res, keepaliveSeconds, initPayload)
+  openClientStream(clientUserId: string, sessionToken: string, res: Response, keepaliveSeconds: number, ticket: CustomerServiceRealtimeRegistrationTicket, initPayload?: CustomerServiceRealtimeInitPayloadResolver) {
+    this.registerSubscriber('client', clientUserId, sessionToken, res, keepaliveSeconds, ticket, initPayload)
   }
 
-  openServiceStream(serviceUserId: string, sessionToken: string, res: Response, keepaliveSeconds: number, initPayload?: CustomerServiceRealtimeInitPayloadResolver) {
-    this.registerSubscriber('service', serviceUserId, sessionToken, res, keepaliveSeconds, initPayload)
+  openServiceStream(serviceUserId: string, sessionToken: string, res: Response, keepaliveSeconds: number, ticket: CustomerServiceRealtimeRegistrationTicket, initPayload?: CustomerServiceRealtimeInitPayloadResolver) {
+    this.registerSubscriber('service', serviceUserId, sessionToken, res, keepaliveSeconds, ticket, initPayload)
   }
 
   disconnectBySessionHash(scope: RealtimeScope, tokenHash: string): void {
+    this.advanceGeneration(this.buildSessionGenerationKey(scope, tokenHash))
     for (const subscriber of this.subscribers.values()) if (subscriber.scope === scope && subscriber.sessionHash === tokenHash) this.closeSubscriber(subscriber.subscriberId)
   }
 
   disconnectByOwner(scope: RealtimeScope, ownerKey: string): void {
+    this.advanceGeneration(this.buildOwnerGenerationKey(scope, ownerKey))
     for (const subscriber of this.subscribers.values()) if (subscriber.scope === scope && subscriber.ownerKey === ownerKey) this.closeSubscriber(subscriber.subscriberId)
+  }
+
+  buildGenerationBarrierSnapshot() {
+    this.pruneExpiredGenerationRecords(Date.now())
+    return {
+      globalEpoch: this.globalGenerationEpoch,
+      generationRecordCount: this.generationRecords.size,
+      generationRecordCapacity: CUSTOMER_SERVICE_REALTIME_GENERATION_RECORD_CAPACITY,
+      registrationTicketTtlMs: CUSTOMER_SERVICE_REALTIME_REGISTRATION_TICKET_TTL_MS,
+      generationRecordRetentionMs: CUSTOMER_SERVICE_REALTIME_GENERATION_RECORD_RETENTION_MS,
+    }
   }
 
   buildServiceSessionSnapshot(): CustomerServiceRealtimeSessionSnapshot {

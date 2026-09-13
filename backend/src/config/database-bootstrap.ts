@@ -8,6 +8,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import type { DataSource, EntityManager } from 'typeorm'
 import { env } from './env.js'
+import { initializeDatabaseInfrastructure } from '../database/database-strategy.js'
 import { ClientStaffDirectory } from '../entities/client-staff-directory.entity.js'
 import { ClientUser } from '../entities/client-user.entity.js'
 import { ClientFeedbackAttachment } from '../entities/client-feedback-attachment.entity.js'
@@ -48,6 +49,9 @@ const SQLITE_REQUIRED_TABLES = [
   'auth_risk_state',
   'business_sequence',
   'sms_verification_record',
+  'order_business_no_occupancy',
+  'order_revision',
+  'account_lifecycle_event',
 ]
 
 /**
@@ -77,7 +81,7 @@ async function ensureSqliteMobileSessionSchema(dataSource: DataSource): Promise<
       revoked_at datetime,
       revoke_reason varchar(64),
       CONSTRAINT fk_client_mobile_session_user
-        FOREIGN KEY (client_user_id) REFERENCES client_user (id) ON DELETE CASCADE
+        FOREIGN KEY (client_user_id) REFERENCES client_user (id) ON DELETE RESTRICT
     )
   `)
   await dataSource.query('CREATE UNIQUE INDEX IF NOT EXISTS uk_client_mobile_session_access_hash ON client_mobile_session (access_token_hash)')
@@ -87,6 +91,27 @@ async function ensureSqliteMobileSessionSchema(dataSource: DataSource): Promise<
   await dataSource.query('CREATE INDEX IF NOT EXISTS idx_client_mobile_session_user_device ON client_mobile_session (client_user_id, device_id)')
   await dataSource.query('CREATE INDEX IF NOT EXISTS idx_client_mobile_session_cleanup ON client_mobile_session (revoked_at, absolute_expires_at, id)')
   await dataSource.query('CREATE INDEX IF NOT EXISTS idx_client_mobile_session_refresh_expiry ON client_mobile_session (revoked_at, refresh_expires_at, id)')
+}
+
+/**
+ * 生命周期事件必须只能追加。TypeORM 只能声明字段/索引约束，不能表达“整表禁止
+ * UPDATE/DELETE”，因此在 SQLite 启动自举阶段幂等安装数据库触发器作为最终防线。
+ */
+async function ensureSqliteAccountLifecycleAppendOnly(dataSource: DataSource): Promise<void> {
+  await dataSource.query(`
+    CREATE TRIGGER IF NOT EXISTS trg_account_lifecycle_event_no_update
+    BEFORE UPDATE ON account_lifecycle_event
+    BEGIN
+      SELECT RAISE(ABORT, 'ACCOUNT_LIFECYCLE_EVENT_APPEND_ONLY');
+    END
+  `)
+  await dataSource.query(`
+    CREATE TRIGGER IF NOT EXISTS trg_account_lifecycle_event_no_delete
+    BEFORE DELETE ON account_lifecycle_event
+    BEGIN
+      SELECT RAISE(ABORT, 'ACCOUNT_LIFECYCLE_EVENT_APPEND_ONLY');
+    END
+  `)
 }
 
 async function migrateLegacyFeedbackAttachments(dataSource: DataSource) {
@@ -154,9 +179,25 @@ const SQLITE_REQUIRED_ORDER_COLUMNS = [
   'is_system_applied',
   'issuer_name',
   'customer_department_name',
+  'business_no',
+  'edit_version',
+  'inventory_mode',
 ]
 
-const SQLITE_REQUIRED_ORDER_ITEM_COLUMNS = ['unit_price', 'line_amount']
+const SQLITE_REQUIRED_ORDER_ITEM_COLUMNS = [
+  'unit_price',
+  'line_amount',
+  'sku_id',
+  'sku_code_snapshot',
+  'spec_text_snapshot',
+]
+const SQLITE_REQUIRED_INVENTORY_LOG_COLUMNS = [
+  'sku_id',
+  'before_sku_current_stock',
+  'after_sku_current_stock',
+  'before_sku_preordered_stock',
+  'after_sku_preordered_stock',
+]
 // 历史 SQLite 本地库缺少金额字段时，先用极小正数兜底补齐结构，避免 synchronize 重建临时表时被 NOT NULL / CHECK 约束直接拦截。
 const SQLITE_LEGACY_OUTBOUND_ITEM_FALLBACK_UNIT_PRICE = 0.01
 const SQLITE_LEGACY_OUTBOUND_ITEM_FALLBACK_LINE_AMOUNT = 0
@@ -195,13 +236,33 @@ const SQLITE_REQUIRED_CLIENT_USER_COLUMNS = [
   'last_login_at',
   'mobile_verified_at',
   'email_verified_at',
+  'deactivated_at',
+  'deactivation_reason',
+  'deactivated_by_user_id',
+  'deactivated_by_username',
+  'deactivated_by_display_name',
+  'restored_at',
+  'restored_by_user_id',
+  'restored_by_username',
+  'restored_by_display_name',
 ]
 const SQLITE_REQUIRED_CLIENT_STAFF_DIRECTORY_COLUMNS = [
   'staff_no', 'real_name', 'department_name', 'status',
   'invite_code_digest', 'invite_issued_at', 'invite_expires_at', 'invite_used_at',
   'invite_failed_attempts', 'invite_locked_until',
 ]
-const SQLITE_REQUIRED_SYS_USER_COLUMNS = ['email']
+const SQLITE_REQUIRED_SYS_USER_COLUMNS = [
+  'email',
+  'deactivated_at',
+  'deactivation_reason',
+  'deactivated_by_user_id',
+  'deactivated_by_username',
+  'deactivated_by_display_name',
+  'restored_at',
+  'restored_by_user_id',
+  'restored_by_username',
+  'restored_by_display_name',
+]
 const SQLITE_REQUIRED_CLIENT_FEEDBACK_CONVERSATION_COLUMNS = [
   'client_account_type',
   'staff_no_snapshot',
@@ -312,6 +373,34 @@ async function hasSqliteUniqueIndexShape(
     && actualColumns.every((column, index) => column === expectedColumns[index])
 }
 
+/**
+ * SQLite 的 ALTER TABLE ADD COLUMN 不会补外键；因此存量库即使列和索引齐全，仍要按实际 FK 形状触发一次
+ * TypeORM 的临时表复制升级。该同步路径会按同名列复制历史数据，不做 SKU 回填或删除。
+ */
+async function hasSqliteForeignKeyShape(
+  dataSource: DataSource,
+  tableName: string,
+  expected: {
+    from: string
+    referencedTable: string
+    referencedColumn: string
+    onDelete: string
+  },
+): Promise<boolean> {
+  const foreignKeys: Array<{
+    table: string
+    from: string
+    to: string
+    on_delete: string
+  }> = await dataSource.query(`PRAGMA foreign_key_list('${tableName}')`)
+  return foreignKeys.some((foreignKey) => (
+    foreignKey.from === expected.from
+    && foreignKey.table === expected.referencedTable
+    && foreignKey.to === expected.referencedColumn
+    && foreignKey.on_delete.toUpperCase() === expected.onDelete.toUpperCase()
+  ))
+}
+
 async function listSqliteIndexes(dataSource: DataSource, tableName: string): Promise<Set<string>> {
   const indexes: Array<{ name: string }> = await dataSource.query(`PRAGMA index_list('${tableName}')`)
   return new Set(indexes.map((index) => index.name))
@@ -331,6 +420,133 @@ async function ensureSqliteIndex(
   if (!indexSet.has(indexName)) {
     await dataSource.query(createIndexSql)
   }
+}
+
+/**
+ * TypeORM 无法在含历史行的 SQLite 表上直接添加“非空 + 唯一”的 business_no。
+ * 同步前先以可空列完成 show_no 原值回填，随后 synchronize 只负责收紧列和索引形状。
+ */
+async function prepareSqliteOrderAmendmentColumns(dataSource: DataSource): Promise<void> {
+  const orderColumns = await listSqliteTableColumns(dataSource, 'biz_outbound_order')
+  if (orderColumns.size === 0) return
+  if (!orderColumns.has('business_no')) {
+    await dataSource.query('ALTER TABLE "biz_outbound_order" ADD COLUMN "business_no" varchar(32) NULL')
+  }
+  if (!orderColumns.has('edit_version')) {
+    await dataSource.query('ALTER TABLE "biz_outbound_order" ADD COLUMN "edit_version" integer NOT NULL DEFAULT (1)')
+  }
+  await dataSource.query(`
+    UPDATE "biz_outbound_order"
+    SET "business_no" = "show_no"
+    WHERE "business_no" IS NULL OR LENGTH(TRIM("business_no")) = 0
+  `)
+  await dataSource.query(`
+    UPDATE "biz_outbound_order"
+    SET "edit_version" = 1
+    WHERE "edit_version" IS NULL OR "edit_version" < 1
+  `)
+}
+
+/**
+ * #73 历史库存模式推断：旧手工单不追溯库存，O2O 核销正式单沿用预扣库存语义。
+ * 新建手工单由服务层显式写 manual_applied，本函数不会覆盖任何合法的新模式。
+ */
+async function prepareSqliteOrderContentInventoryColumns(dataSource: DataSource): Promise<void> {
+  const orderColumns = await listSqliteTableColumns(dataSource, 'biz_outbound_order')
+  if (orderColumns.size === 0) return
+  if (!orderColumns.has('inventory_mode')) {
+    await dataSource.query('ALTER TABLE "biz_outbound_order" ADD COLUMN "inventory_mode" varchar(24) NULL')
+  }
+  await dataSource.query(`
+    UPDATE "biz_outbound_order"
+    SET "inventory_mode" = CASE
+      WHEN "idempotency_key" LIKE 'o2o-preorder-verify:%' THEN 'o2o_preapplied'
+      ELSE 'legacy_none'
+    END
+    WHERE "inventory_mode" IS NULL
+       OR "inventory_mode" NOT IN ('legacy_none', 'manual_applied', 'o2o_preapplied')
+       OR ("inventory_mode" = 'legacy_none' AND "idempotency_key" LIKE 'o2o-preorder-verify:%')
+  `)
+}
+
+/**
+ * 幂等领养历史订单：businessNo 初始值固定等于 showNo，永久占用和双命名空间游标只在缺失时补齐。
+ * 已存在的游标绝不按历史最大值重写，避免覆盖管理员手工重编后确认的游标位置。
+ */
+export async function backfillSqliteOrderAmendmentData(dataSource: DataSource): Promise<void> {
+  // 专项升级脚本会把隔离 DataSource 直接传入本函数；先幂等安装协调器，确保随后开启的
+  // SQLite 事务同样受单写者队列保护，而不是依赖主应用已经完成的启动顺序。
+  await initializeDatabaseInfrastructure(dataSource)
+  await dataSource.transaction(async (manager) => {
+    const orders = await manager.query(`
+      SELECT "order_uuid" AS "orderUuid", "business_no" AS "businessNo", "order_type" AS "orderType",
+             "created_at" AS "createdAt"
+      FROM "biz_outbound_order"
+    `) as Array<{ orderUuid: string; businessNo: string; orderType: string; createdAt: string }>
+    for (const order of orders) {
+      const namespace = order.orderType === 'department' ? 'hyyzjd' : order.orderType === 'walkin' ? 'hyyz' : null
+      const pattern = namespace === 'hyyzjd' ? /^hyyzjd(\d+)$/ : /^hyyz(\d+)$/
+      const match = namespace ? pattern.exec(String(order.businessNo ?? '').trim().toLowerCase()) : null
+      if (!namespace || !match) {
+        throw new BizError(`历史出库单 ${order.orderUuid} 的订单类型或业务号不符合 #72 命名空间规则`, 409)
+      }
+      const serialValue = Number.parseInt(match[1], 10)
+      if (!Number.isSafeInteger(serialValue) || serialValue <= 0) {
+        throw new BizError(`历史出库单 ${order.orderUuid} 的业务号流水非法`, 409)
+      }
+      await manager.query(
+        `INSERT OR IGNORE INTO "order_business_no_occupancy"
+         ("business_namespace", "serial_value", "business_no", "order_uuid", "assigned_reason", "created_at")
+         VALUES (?, ?, ?, ?, 'history_backfill', ?)`,
+        [namespace, serialValue, order.businessNo, order.orderUuid, order.createdAt],
+      )
+    }
+
+    const unmatchedRows = await manager.query(`
+      SELECT "order"."order_uuid" AS "orderUuid"
+      FROM "biz_outbound_order" "order"
+      LEFT JOIN "order_business_no_occupancy" "occupancy"
+        ON "occupancy"."business_no" = "order"."business_no"
+       AND "occupancy"."order_uuid" = "order"."order_uuid"
+       AND "occupancy"."business_namespace" = CASE
+             WHEN "order"."order_type" = 'department' THEN 'hyyzjd'
+             WHEN "order"."order_type" = 'walkin' THEN 'hyyz'
+           END
+       AND "occupancy"."serial_value" = CAST(SUBSTR(
+             "order"."business_no",
+             CASE WHEN "order"."order_type" = 'department' THEN 7 ELSE 5 END
+           ) AS INTEGER)
+      WHERE "occupancy"."id" IS NULL
+      LIMIT 1
+    `) as Array<{ orderUuid: string }>
+    if (unmatchedRows.length > 0) {
+      throw new BizError(`历史出库单 ${unmatchedRows[0].orderUuid} 的业务号永久占用存在冲突`, 409)
+    }
+
+    for (const [sequenceKey, namespace] of [
+      ['order.business.department', 'hyyzjd'],
+      ['order.business.walkin', 'hyyz'],
+    ] as const) {
+      const orderType = namespace === 'hyyzjd' ? 'department' : 'walkin'
+      const startRows = await manager.query(
+        'SELECT "config_value" AS "configValue" FROM "system_configs" WHERE "config_key" = ? LIMIT 1',
+        [`order.serial.${orderType}.start`],
+      ) as Array<{ configValue: string }>
+      const configuredStart = Number.parseInt(String(startRows[0]?.configValue ?? '1'), 10)
+      const initialCursor = Number.isSafeInteger(configuredStart) && configuredStart > 0 ? configuredStart - 1 : 0
+      const maximumRows = await manager.query(
+        `SELECT COALESCE(MAX("serial_value"), 0) AS "maximum"
+         FROM "order_business_no_occupancy" WHERE "business_namespace" = ?`,
+        [namespace],
+      ) as Array<{ maximum: number | string }>
+      const currentValue = Math.max(initialCursor, Number(maximumRows[0]?.maximum ?? 0))
+      await manager.query(
+        `INSERT OR IGNORE INTO "business_sequence" ("sequence_key", "current_value", "created_at", "updated_at")
+         VALUES (?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+        [sequenceKey, currentValue],
+      )
+    }
+  })
 }
 
 async function normalizeSqliteNotificationOutbox(dataSource: DataSource): Promise<void> {
@@ -542,6 +758,23 @@ async function normalizeSqliteOutboundItemColumns(dataSource: DataSource): Promi
     )
     hasCompatMutation = true
   }
+
+  refreshedColumnSet = await listSqliteTableColumns(dataSource, 'biz_outbound_order_item')
+  if (!refreshedColumnSet.has('sku_id')) {
+    await dataSource.query(`ALTER TABLE "biz_outbound_order_item" ADD COLUMN "sku_id" integer NULL`)
+  }
+  if (!refreshedColumnSet.has('sku_code_snapshot')) {
+    await dataSource.query(`ALTER TABLE "biz_outbound_order_item" ADD COLUMN "sku_code_snapshot" varchar(96) NULL`)
+  }
+  if (!refreshedColumnSet.has('spec_text_snapshot')) {
+    await dataSource.query(`ALTER TABLE "biz_outbound_order_item" ADD COLUMN "spec_text_snapshot" varchar(255) NULL`)
+  }
+  await ensureSqliteIndex(
+    dataSource,
+    'biz_outbound_order_item',
+    'idx_biz_outbound_item_sku_id',
+    `CREATE INDEX IF NOT EXISTS "idx_biz_outbound_item_sku_id" ON "biz_outbound_order_item" ("sku_id")`,
+  )
 
   // 兼容历史库中金额列缺失或无效的记录：
   // 1. 优先沿用既有 line_amount / qty 反推单价；
@@ -996,6 +1229,7 @@ export async function migrateClientUserDepartmentGovernance(
   const { runInTransaction } = await import('./transaction-runner.js')
   return runInTransaction(async (manager) => {
     const usePessimisticLock = manager.connection.options.type === 'mysql'
+    await systemConfigService.ensureDefaultConfigs(manager)
     // 所有输入读取、迁移计划和校验都必须在同一事务快照中完成；校验失败时回调抛错，零写入提交。
     const config = await systemConfigService.getClientDepartmentConfigs(manager, { lockForUpdate: true })
     const nodeIdSet = new Set<string>()
@@ -1101,6 +1335,27 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
 
   const orderItemColumnSet = await listSqliteTableColumns(dataSource, 'biz_outbound_order_item')
   if (SQLITE_REQUIRED_ORDER_ITEM_COLUMNS.some((column) => !orderItemColumnSet.has(column))) {
+    return true
+  }
+  if (!await hasSqliteForeignKeyShape(dataSource, 'biz_outbound_order_item', {
+    from: 'sku_id',
+    referencedTable: 'base_product_sku',
+    referencedColumn: 'id',
+    onDelete: 'SET NULL',
+  })) {
+    return true
+  }
+
+  const inventoryLogColumnSet = await listSqliteTableColumns(dataSource, 'inventory_log')
+  if (SQLITE_REQUIRED_INVENTORY_LOG_COLUMNS.some((column) => !inventoryLogColumnSet.has(column))) {
+    return true
+  }
+  if (!await hasSqliteForeignKeyShape(dataSource, 'inventory_log', {
+    from: 'sku_id',
+    referencedTable: 'base_product_sku',
+    referencedColumn: 'id',
+    onDelete: 'SET NULL',
+  })) {
     return true
   }
 
@@ -1209,12 +1464,37 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
   if (!notificationDispatchUniqueIndexSet.has('uk_notification_dispatch_event_channel_target')) {
     return true
   }
+  const accountForeignKeys = [
+    ['sys_user_session', 'user_id', 'sys_user'],
+    ['client_user_session', 'user_id', 'client_user'],
+    ['client_mobile_session', 'client_user_id', 'client_user'],
+    ['biz_inbound_order', 'supplier_id', 'sys_user'],
+    ['o2o_preorder', 'client_user_id', 'client_user'],
+    ['o2o_return_request', 'client_user_id', 'client_user'],
+    ['client_feedback_conversation', 'client_user_id', 'client_user'],
+    ['client_feedback_conversation', 'assigned_user_id', 'sys_user'],
+    ['client_feedback_conversation', 'internal_remark_by_user_id', 'sys_user'],
+    ['client_feedback_attachment', 'owner_client_user_id', 'client_user'],
+    ['notification_inbox', 'user_id', 'sys_user'],
+  ] as const
+  for (const [tableName, columnName, referencedTable] of accountForeignKeys) {
+    if (!await hasSqliteForeignKeyShape(dataSource, tableName, {
+      from: columnName,
+      referencedTable,
+      referencedColumn: 'id',
+      onDelete: 'RESTRICT',
+    })) {
+      return true
+    }
+  }
   return false
 }
 
 export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): Promise<DatabaseSchemaInitResult> {
   if (env.DB_TYPE === 'sqlite') {
     await ensureSqliteMobileSessionSchema(dataSource)
+    await prepareSqliteOrderAmendmentColumns(dataSource)
+    await prepareSqliteOrderContentInventoryColumns(dataSource)
     await normalizeSqliteOutboundItemColumns(dataSource)
     await normalizeSqliteO2oDiscountColumns(dataSource)
     await normalizeSqliteInboundSkuColumn(dataSource)
@@ -1230,9 +1510,12 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
       await normalizeSqliteInboundSkuColumn(dataSource)
       // 索引可能依赖本次 synchronize 才补齐的列，必须在结构升级后创建。
       await ensureSqliteMallCatalogIndexes(dataSource)
+      await backfillSqliteOrderAmendmentData(dataSource)
+      await prepareSqliteOrderContentInventoryColumns(dataSource)
     }
     await migrateClientUserDepartmentGovernance(dataSource)
     await migrateLegacyFeedbackAttachments(dataSource)
+    if (env.DB_TYPE === 'sqlite') await ensureSqliteAccountLifecycleAppendOnly(dataSource)
     return {
       action: 'synchronized',
       reason: 'forced_by_db_sync',
@@ -1260,7 +1543,10 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   const needSynchronize = await shouldSynchronizeSqliteSchema(dataSource)
   if (!needSynchronize) {
     await ensureSqliteMallCatalogIndexes(dataSource)
+    await backfillSqliteOrderAmendmentData(dataSource)
+    await prepareSqliteOrderContentInventoryColumns(dataSource)
     await migrateClientUserDepartmentGovernance(dataSource)
+    await ensureSqliteAccountLifecycleAppendOnly(dataSource)
     await migrateLegacyFeedbackAttachments(dataSource)
     return {
       action: 'skipped',
@@ -1273,7 +1559,10 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
   await normalizeSqliteO2oDiscountColumns(dataSource)
   await normalizeSqliteInboundSkuColumn(dataSource)
   await ensureSqliteMallCatalogIndexes(dataSource)
+  await backfillSqliteOrderAmendmentData(dataSource)
+  await prepareSqliteOrderContentInventoryColumns(dataSource)
   await migrateClientUserDepartmentGovernance(dataSource)
+  await ensureSqliteAccountLifecycleAppendOnly(dataSource)
   await migrateLegacyFeedbackAttachments(dataSource)
   return {
     action: 'synchronized',

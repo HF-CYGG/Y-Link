@@ -427,9 +427,9 @@ async function verifyServiceOnlyEventDoesNotReachClient() {
     const { adminLogin, client, clientLogin } = await seedRealtimePrincipals(context)
     const clientResponse = new ControlledSseResponse()
     const serviceResponse = new ControlledSseResponse()
-    context.customerServiceRealtimeService.openClientStream(client.id, clientLogin.token, clientResponse as never, 60)
+    context.customerServiceRealtimeService.openClientStream(client.id, clientLogin.token, clientResponse as never, 60, context.customerServiceRealtimeService.captureOwnerGeneration('client', client.id, clientLogin.token))
     const admin = await context.AppDataSource.getRepository(context.SysUser).findOneByOrFail({ username: 'admin' })
-    context.customerServiceRealtimeService.openServiceStream(admin.id, adminLogin.token, serviceResponse as never, 60)
+    context.customerServiceRealtimeService.openServiceStream(admin.id, adminLogin.token, serviceResponse as never, 60, context.customerServiceRealtimeService.captureOwnerGeneration('service', admin.id, adminLogin.token))
 
     context.customerServiceRealtimeService.publishConversationEvent({
       eventType: 'conversation_internal_remark_updated',
@@ -461,7 +461,7 @@ async function verifyRevokedSessionReceivesNoBusinessEvent() {
   await withDatabase(async (context) => {
     const { client, clientLogin } = await seedRealtimePrincipals(context)
     const clientResponse = new ControlledSseResponse()
-    context.customerServiceRealtimeService.openClientStream(client.id, clientLogin.token, clientResponse as never, 60)
+    context.customerServiceRealtimeService.openClientStream(client.id, clientLogin.token, clientResponse as never, 60, context.customerServiceRealtimeService.captureOwnerGeneration('client', client.id, clientLogin.token))
     await context.runInTransaction(async (manager) => {
       await manager.getRepository(context.ClientUserSession).delete({ userId: client.id })
     })
@@ -486,7 +486,7 @@ async function verifyRevokedSessionReceivesNoBusinessEvent() {
 async function verifyDeliveryQueueHasHardBudget() {
   const { customerServiceRealtimeService } = await import('../src/services/customer-service-realtime.service.js')
   const response = new ControlledSseResponse()
-  customerServiceRealtimeService.openClientStream('queue-client', 'queue-session', response as never, 60)
+  customerServiceRealtimeService.openClientStream('queue-client', 'queue-session', response as never, 60, customerServiceRealtimeService.captureOwnerGeneration('client', 'queue-client', 'queue-session'))
   for (let index = 0; index < 3; index += 1) {
     customerServiceRealtimeService.publishConversationEvent({
       eventType: 'message_created',
@@ -502,7 +502,7 @@ async function verifyDeliveryQueueHasHardBudget() {
 async function verifyDeliveryQueueHasByteBudget() {
   const { customerServiceRealtimeService } = await import('../src/services/customer-service-realtime.service.js')
   const response = new ControlledSseResponse()
-  customerServiceRealtimeService.openClientStream('queue-byte-client', 'queue-byte-session', response as never, 60)
+  customerServiceRealtimeService.openClientStream('queue-byte-client', 'queue-byte-session', response as never, 60, customerServiceRealtimeService.captureOwnerGeneration('client', 'queue-byte-client', 'queue-byte-session'))
   customerServiceRealtimeService.publishConversationEvent({
     eventType: 'message_created',
     conversationId: 'queue-byte-conversation',
@@ -517,8 +517,8 @@ async function verifyConnectRateStoreHasHardCapacity() {
   const { customerServiceRealtimeService } = await import('../src/services/customer-service-realtime.service.js')
   const first = new ControlledSseResponse()
   const second = new ControlledSseResponse()
-  customerServiceRealtimeService.openClientStream('rate-owner-1', 'rate-session-1', first as never, 60)
-  customerServiceRealtimeService.openClientStream('rate-owner-2', 'rate-session-2', second as never, 60)
+  customerServiceRealtimeService.openClientStream('rate-owner-1', 'rate-session-1', first as never, 60, customerServiceRealtimeService.captureOwnerGeneration('client', 'rate-owner-1', 'rate-session-1'))
+  customerServiceRealtimeService.openClientStream('rate-owner-2', 'rate-session-2', second as never, 60, customerServiceRealtimeService.captureOwnerGeneration('client', 'rate-owner-2', 'rate-session-2'))
   first.end()
   second.end()
   const originalNow = Date.now
@@ -526,13 +526,13 @@ async function verifyConnectRateStoreHasHardCapacity() {
   Date.now = () => now
   try {
     assert.throws(
-      () => customerServiceRealtimeService.openClientStream('rate-owner-3', 'rate-session-3', new ControlledSseResponse() as never, 60),
+      () => customerServiceRealtimeService.openClientStream('rate-owner-3', 'rate-session-3', new ControlledSseResponse() as never, 60, customerServiceRealtimeService.captureOwnerGeneration('client', 'rate-owner-3', 'rate-session-3')),
       /连接请求过于频繁|频控容量|稍后再试/,
       '建连频控容器达到两条硬上限后不得继续接纳新会话键',
     )
     now += 10_001
     const admittedAfterExpiry = new ControlledSseResponse()
-    customerServiceRealtimeService.openClientStream('rate-owner-3', 'rate-session-3', admittedAfterExpiry as never, 60)
+    customerServiceRealtimeService.openClientStream('rate-owner-3', 'rate-session-3', admittedAfterExpiry as never, 60, customerServiceRealtimeService.captureOwnerGeneration('client', 'rate-owner-3', 'rate-session-3'))
     assert.equal(admittedAfterExpiry.statusCode, 200, '过期频控窗口必须先清理，再接纳新会话键')
     admittedAfterExpiry.end()
   } finally {

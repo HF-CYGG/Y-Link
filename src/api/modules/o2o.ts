@@ -146,8 +146,12 @@ export interface O2oConsoleOrderListQuery {
  * - 尚未核销或历史数据未关联正式出库单时，再回退显示预订单号。
  */
 export const resolveO2oDisplayShowNo = (
-  orderLike: Pick<O2oPreorderSummary, 'showNo' | 'customerOrderShowNo'>,
+  orderLike: Pick<O2oPreorderSummary, 'showNo' | 'customerOrderShowNo' | 'customerOrderBusinessNo'>,
 ) => {
+  const normalizedCustomerOrderBusinessNo = orderLike.customerOrderBusinessNo?.trim()
+  if (normalizedCustomerOrderBusinessNo) {
+    return normalizedCustomerOrderBusinessNo
+  }
   const normalizedCustomerOrderShowNo = orderLike.customerOrderShowNo?.trim()
   if (normalizedCustomerOrderShowNo) {
     return normalizedCustomerOrderShowNo

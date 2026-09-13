@@ -13,6 +13,7 @@ export type DashboardNumericLike = string | number | null
 export interface DashboardProductDetailRaw {
   orderId: string | number
   showNo: string | null
+  businessNo: string | null
   orderType: string | null
   createdAt: Date | string
   customerName: string | null
@@ -31,6 +32,7 @@ export interface DashboardCustomerSummaryRaw {
 export interface DashboardCustomerDetailRaw {
   orderId: string | number
   showNo: string | null
+  businessNo: string | null
   orderType: string | null
   createdAt: Date | string
   customerName: string | null

@@ -17,11 +17,13 @@ import { env } from '../src/config/env.js'
 import { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime, resolveSqliteDatabasePath } from '../src/config/database-bootstrap.js'
 import { BaseProduct } from '../src/entities/base-product.entity.js'
 import { InventoryLog } from '../src/entities/inventory-log.entity.js'
+import { SysUser } from '../src/entities/sys-user.entity.js'
 import { clientAuthService } from '../src/services/client-auth.service.js'
 import { installCaptchaServiceForTesting } from '../src/services/captcha.service.js'
 import { o2oPreorderService } from '../src/services/o2o-preorder.service.js'
 import { productService } from '../src/services/product.service.js'
 import { systemConfigService } from '../src/services/system-config.service.js'
+import { verificationCodeService } from '../src/services/verification-code.service.js'
 import type { AuthUserContext } from '../src/types/auth.js'
 import type { ClientAuthContext } from '../src/types/client-auth.js'
 import type { O2oPreorderDetailView, O2oVerifyDetailView, O2oVerifyResultView } from '../src/services/o2o-preorder.service.js'
@@ -60,6 +62,7 @@ const TEST_CAPTCHA_CODE = 'ABC123'
 installCaptchaServiceForTesting({ createCode: () => TEST_CAPTCHA_CODE })
 const readCaptchaCode = (_captchaSvg: string) => TEST_CAPTCHA_CODE
 const toChineseDigits = (value: string) => value.replaceAll(/\d/g, (digit) => '零一二三四五六七八九'[Number(digit)] ?? '')
+const pendingClientVerificationTargets = new Set<string>()
 
 async function expectBizError(executor: () => Promise<unknown>, expectedMessage: string) {
   try {
@@ -72,18 +75,17 @@ async function expectBizError(executor: () => Promise<unknown>, expectedMessage:
 }
 
 async function registerAndLoginClient(seed: number): Promise<ClientAuthContext> {
-  const registerCaptcha = await clientAuthService.createCaptcha()
   const account = `1${String(seed).slice(-10)}`
   const username = `增强用户${toChineseDigits(String(seed).slice(-6))}`
   const password = `Client@${String(seed).slice(-6)}`
+  pendingClientVerificationTargets.add(account)
 
   const registerResult = await clientAuthService.register({
     accountType: 'personal',
     account,
     username,
     password,
-    captchaId: registerCaptcha.captchaId,
-    captchaCode: readCaptchaCode(registerCaptcha.captchaSvg),
+    verificationCode: '123456',
   })
   const loginCaptcha = await clientAuthService.createCaptcha()
   const loginResult = await clientAuthService.login({
@@ -116,6 +118,30 @@ async function ensureReady() {
   }
   await initializeDatabaseSchemaIfNeeded(AppDataSource)
   await systemConfigService.ensureDefaultConfigs()
+  const originalProviders = systemConfigService.getVerificationProviderConfigs.bind(systemConfigService)
+  systemConfigService.getVerificationProviderConfigs = async () => {
+    const configs = await originalProviders()
+    return { ...configs, mobile: { ...configs.mobile, enabled: true, ready: true } }
+  }
+  verificationCodeService.verifyCode = async (input) => {
+    assert.equal(input.channel, 'mobile')
+    assert.equal(input.scene, 'register')
+    assert.equal(input.code, '123456')
+    assert.ok(pendingClientVerificationTargets.delete(input.target), '注册验证码必须绑定本次手机号且只能使用一次')
+  }
+  const userRepo = AppDataSource.getRepository(SysUser)
+  const admin = await userRepo.save(userRepo.create({
+    username: `task123-admin-${Date.now()}`,
+    passwordHash: 'verify-only',
+    displayName: 'Task123验证管理员',
+    email: null,
+    role: 'admin',
+    status: 'enabled',
+    lastLoginAt: null,
+  }))
+  adminActor.userId = String(admin.id)
+  adminActor.username = admin.username
+  adminActor.displayName = admin.displayName
 }
 
 async function main() {
@@ -133,7 +159,7 @@ async function main() {
     o2oStatus: 'listed',
     currentStock: 20,
     limitPerUser: 10,
-  })
+  }, adminActor)
   const adjustExtraProduct = await productService.create({
     productName: `现场改单新增商品-${Date.now()}`,
     pinyinAbbr: 'XGXZ',
@@ -142,7 +168,7 @@ async function main() {
     o2oStatus: 'listed',
     currentStock: 20,
     limitPerUser: 10,
-  })
+  }, adminActor)
   const returnProduct = await productService.create({
     productName: `退货拒绝商品-${Date.now()}`,
     pinyinAbbr: 'THJJ',
@@ -151,7 +177,7 @@ async function main() {
     o2oStatus: 'listed',
     currentStock: 20,
     limitPerUser: 10,
-  })
+  }, adminActor)
   pass('验证商品准备完成')
 
   const onsiteOrder = await o2oPreorderService.submit(clientAuth, {
@@ -222,7 +248,7 @@ async function main() {
   assert.equal(verifiedReturnOrderDetail.order.status, 'verified')
   const returnRequest = await o2oPreorderService.createReturnRequest(clientAuth, verifiedReturnOrderDetail.order.id, {
     reason: '尺码不符',
-    items: [{ productId: returnProduct.id, qty: 1 }],
+    items: [{ productId: returnProduct.id, skuId: verifiedReturnOrderDetail.items[0]?.skuId ?? undefined, qty: 1 }],
   })
   await expectBizError(
     () =>
@@ -259,7 +285,7 @@ async function main() {
   const completedOrder = await o2oPreorderService.updateBusinessStatus({
     orderId: verifiedReturnOrderDetail.order.id,
     businessStatus: 'completed',
-  })
+  }, adminActor)
   assert.equal(completedOrder.order.businessStatus, 'completed')
   assert.equal(completedOrder.order.status, 'verified')
   pass('商家已完结状态可独立设置，且不会覆盖订单主状态')

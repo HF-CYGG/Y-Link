@@ -4,8 +4,9 @@
  * 维护重点：调整后台会话策略时，需要同步核对 Cookie/Token 发放逻辑、过期时间刷新规则以及关联删除行为。
  */
 
-import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm'
+import { Column, CreateDateColumn, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn, UpdateDateColumn, type Relation } from 'typeorm'
 import { entityColumnOptions } from './entity-column-options.js'
+import { SysUser } from './sys-user.entity.js'
 
 @Entity({ name: 'sys_user_session' })
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
@@ -33,4 +34,8 @@ export class SysUserSession {
 
   @UpdateDateColumn({ name: 'updated_at', ...entityColumnOptions.timestamp })
   updatedAt!: Date
+
+  @ManyToOne(() => SysUser, { onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'user_id' })
+  user?: Relation<SysUser>
 }

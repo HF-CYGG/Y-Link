@@ -1,26 +1,27 @@
 <!--
   文件用途：承载管理端出库单列表主页面，是出库查询、详情查看与后续单据操作的页面壳层。
-  核心职责：负责装配筛选栏、列表卡片、详情抽屉、自动刷新提示以及正式出库单工作台入口。
+  核心职责：负责装配筛选栏、列表卡片、详情抽屉、手工单内容编辑、自动刷新提示以及正式出库单工作台入口。
   设计原因：把高频使用的列表浏览链路保留在主页面内，把正式出库单这类低频重能力拆到异步子组件，减少主分包体积与首开压力。
   页面边界：当前文件关注“列表与详情”的主交互编排，不直接承载正式出库单的内部打印实现细节。
 -->
 <script setup lang="ts">
 /**
  * 模块说明：`src/views/order-list/OrderListView.vue`
- * 文件职责：装配出库单列表、详情抽屉、合规状态编辑、自动刷新提示、新单高亮动画，以及正式出库单低频入口。
+ * 文件职责：装配出库单列表、详情抽屉、手工单内容编辑、合规状态编辑、自动刷新提示、新单高亮动画，以及正式出库单低频入口。
  * 实现逻辑：
- * 1. 复用列表 composable 提供的详情查询结果，不新增服务端接口；
+ * 1. 复用列表 composable 提供的详情查询结果，内容编辑成功后用服务端完整快照刷新抽屉；
  * 2. 将正式出库单编辑、预览、打印、导出整体拆到异步工作台组件，降低 `OrderListView` 主分包体积；
  * 3. 页面层仅保留低频入口控制，确保高频“列表 -> 详情”路径不被打印模板拖重；
  * 4. 列表与移动端卡片按订单类型收口展示字段，部门单展示部门流程字段，散客单隐藏不适用信息；
  * 5. 管理端自动刷新期间仅展示轻量提示，并为新增单据补充克制的入场高亮，不打断当前筛选、分页、滚动与详情抽屉；
  * 6. 清理早期设备调试文案，避免把“手机卡片 / 平板卡片”等开发态信息暴露给最终用户。
+ * 7. 内容编辑只在服务端判定可编辑且当前用户具有 `orders:edit` 时开放，成功后同步刷新列表与详情。
  */
 
 import dayjs from 'dayjs'
 
 import { computed, defineAsyncComponent, ref, watch, type ComponentPublicInstance } from 'vue'
-import { updateOrderComplianceFlags } from '@/api/modules/order'
+import { updateOrderComplianceFlags, type OrderDetailResult, type OrderRecord } from '@/api/modules/order'
 import {
   BizResponsiveDataCollectionShell,
   BizResponsiveDrawerShell,
@@ -136,16 +137,30 @@ const {
   handleDeleteOrderWithConfirm,
   handlePurgeOrderWithConfirm,
   handleRestoreOrderWithConfirm,
+  refreshOrders,
 } = useOrderListView()
 const { hasPermission, ensurePermission } = usePermissionAction()
 const OrderDetailDrawerContent = defineAsyncComponent(() => import('./components/OrderDetailDrawerContent.vue'))
 const OrderVoucherWorkbenchDialog = defineAsyncComponent(() => import('./components/OrderVoucherWorkbenchDialog.vue'))
+const OrderAmendmentDialog = defineAsyncComponent(() => import('./components/OrderAmendmentDialog.vue'))
+const OrderContentEditDialog = defineAsyncComponent(() => import('./components/OrderContentEditDialog.vue'))
 
 const voucherDialogVisible = ref(false)
 const enableHtml2pdfExport = import.meta.env.VITE_ORDER_VOUCHER_HTML2PDF_ENABLED !== 'false'
 const canUseOrderVoucher = computed(() => currentOrder.value?.orderType === 'department')
 const canEditComplianceFlags = computed(() => hasPermission('orders:update'))
+const canAmendOrders = computed(() => hasPermission('orders:update'))
+const amendmentDialogVisible = ref(false)
+const contentEditDialogVisible = ref(false)
+const amendmentTargets = ref<OrderRecord[]>([])
+const selectedOrders = ref<OrderRecord[]>([])
+const orderTableRef = ref<{ clearSelection: () => void } | null>(null)
 const complianceSaving = ref(false)
+const canEditOrderContent = computed(() => Boolean(
+  currentOrder.value
+  && hasPermission('orders:edit')
+  && currentOrder.value.contentEditable,
+))
 const complianceDraftTrackingSuspended = ref(false)
 const hasUnsavedComplianceDraft = ref(false)
 const complianceForm = ref({
@@ -265,6 +280,60 @@ const handleOpenVoucherDialog = () => {
   voucherDialogVisible.value = true
 }
 
+const isOrderAmendable = (order: OrderRecord) => !order.isDeleted
+
+const handleSelectionChange = (rows: OrderRecord[]) => {
+  selectedOrders.value = rows.filter(isOrderAmendable)
+}
+
+const isOrderSelected = (orderId: string) => selectedOrders.value.some((order) => order.id === orderId)
+
+const handleMobileSelectionChange = (row: OrderRecord, selected: boolean) => {
+  if (!isOrderAmendable(row)) return
+  selectedOrders.value = selected
+    ? [...selectedOrders.value.filter((order) => order.id !== row.id), row]
+    : selectedOrders.value.filter((order) => order.id !== row.id)
+}
+
+const openOrderAmendment = (orders: OrderRecord[]) => {
+  if (!ensurePermission('orders:update', '历史出库单修订')) return
+  if (!orders.length) {
+    showAppWarning('请先选择待修订订单')
+    return
+  }
+  if (orders.some((order) => order.isDeleted)) {
+    showAppWarning('已删除订单不可修订，请重新选择')
+    return
+  }
+  amendmentTargets.value = orders
+  amendmentDialogVisible.value = true
+}
+
+const handleAmendmentCommitted = async () => {
+  const activeOrderId = currentOrder.value?.id
+  selectedOrders.value = []
+  orderTableRef.value?.clearSelection()
+  await refreshOrders()
+  if (activeOrderId && drawerVisible.value) {
+    const activeOrder = listState.records.find((order) => order.id === activeOrderId)
+    if (activeOrder) await handleViewDetail(activeOrder)
+  }
+}
+
+const handleOpenContentEdit = () => {
+  if (!currentOrder.value || !ensurePermission('orders:edit', '订单内容编辑')) return
+  if (!currentOrder.value.contentEditable) {
+    showAppWarning(currentOrder.value.contentEditBlockers.join('；') || '当前订单内容已锁定')
+    return
+  }
+  contentEditDialogVisible.value = true
+}
+
+const handleContentEditCommitted = async (result: OrderDetailResult) => {
+  currentOrder.value = result
+  await refreshOrders()
+}
+
 const handleSaveComplianceFlags = async () => {
   if (!currentOrder.value) {
     return
@@ -282,6 +351,7 @@ const handleSaveComplianceFlags = async () => {
   complianceSaving.value = true
   try {
     const nextDetail = await updateOrderComplianceFlags(currentOrder.value.id, {
+      editVersion: currentOrder.value.editVersion,
       hasCustomerOrder: complianceForm.value.hasCustomerOrder,
       isSystemApplied: complianceForm.value.isSystemApplied,
     })
@@ -294,6 +364,7 @@ const handleSaveComplianceFlags = async () => {
       item.id === nextDetail.id
         ? {
             ...item,
+            editVersion: nextDetail.editVersion,
             hasCustomerOrder: nextDetail.hasCustomerOrder,
             isSystemApplied: nextDetail.isSystemApplied,
           }
@@ -355,6 +426,15 @@ const handleSaveComplianceFlags = async () => {
               <el-button :class="isPhone ? 'flex-1' : ''" type="primary" @click="handleSearch" icon="Search">搜索</el-button>
               <el-button :class="isPhone ? 'flex-1' : ''" @click="handleReset" icon="Refresh">重置</el-button>
             </div>
+            <el-button
+              v-if="canAmendOrders"
+              type="warning"
+              plain
+              :disabled="selectedOrders.length === 0"
+              @click="openOrderAmendment(selectedOrders)"
+            >
+              批量修订（{{ selectedOrders.length }}）
+            </el-button>
           </div>
         </template>
       </PageToolbarCard>
@@ -399,7 +479,7 @@ const handleSaveComplianceFlags = async () => {
           card-container-class="flex-1 content-start pb-4"
         >
           <template #table>
-            <el-table native-scrollbar
+            <el-table ref="orderTableRef" native-scrollbar
               :data="listState.records"
               :row-class-name="getTableRowClassName"
               row-key="id"
@@ -409,8 +489,16 @@ const handleSaveComplianceFlags = async () => {
               table-layout="auto"
               v-loading="listState.loading"
               element-loading-text="正在刷新订单数据，请稍候..."
+              @selection-change="handleSelectionChange"
             >
-              <el-table-column label="业务单号" prop="showNo" min-width="180" show-overflow-tooltip />
+              <el-table-column
+                v-if="canAmendOrders"
+                type="selection"
+                width="48"
+                reserve-selection
+                :selectable="isOrderAmendable"
+              />
+              <el-table-column label="业务单号" prop="businessNo" min-width="180" show-overflow-tooltip />
               <el-table-column label="领用对象" min-width="200" show-overflow-tooltip>
                 <template #default="{ row }">{{ getOrderDisplayName(row) }}</template>
               </el-table-column>
@@ -459,9 +547,10 @@ const handleSaveComplianceFlags = async () => {
                   <el-tag v-else type="success" effect="light">正常</el-tag>
                 </template>
               </el-table-column>
-              <el-table-column label="操作" width="250" fixed="right" align="right">
+              <el-table-column label="操作" width="310" fixed="right" align="right">
                 <template #default="{ row }">
                   <el-button link type="primary" @click="handleViewDetail(row)">详情</el-button>
+                  <el-button v-if="canAmendOrders && !row.isDeleted" link type="warning" @click="openOrderAmendment([row])">修订</el-button>
                   <el-button
                     v-if="canDeleteOrder && !row.isDeleted"
                     link
@@ -498,9 +587,17 @@ const handleSaveComplianceFlags = async () => {
               :class="getCardClassList(item.id)"
               @click="handleViewDetail(item)"
             >
+              <div v-if="canAmendOrders && !item.isDeleted" class="mb-2" @click.stop>
+                <el-checkbox
+                  :model-value="isOrderSelected(item.id)"
+                  @change="handleMobileSelectionChange(item, Boolean($event))"
+                >
+                  选择修订
+                </el-checkbox>
+              </div>
               <div class="mobile-order-card__head">
                 <div class="min-w-0">
-                  <div class="mobile-order-card__show-no">{{ item.showNo }}</div>
+                  <div class="mobile-order-card__show-no">{{ item.businessNo }}</div>
                   <div class="mobile-order-card__time">
                     {{ dayjs(item.createdAt).format('YYYY-MM-DD HH:mm') }}
                   </div>
@@ -558,6 +655,7 @@ const handleSaveComplianceFlags = async () => {
 
               <div v-if="canDeleteOrder" class="mobile-order-card__actions">
                 <el-button link type="primary" @click.stop="handleViewDetail(item)">详情</el-button>
+                <el-button v-if="canAmendOrders && !item.isDeleted" link type="warning" @click.stop="openOrderAmendment([item])">修订</el-button>
                 <el-button
                   v-if="!item.isDeleted"
                   link
@@ -585,6 +683,7 @@ const handleSaveComplianceFlags = async () => {
               </div>
               <div v-else class="mobile-order-card__actions">
                 <el-button link type="primary" @click.stop="handleViewDetail(item)">详情</el-button>
+                <el-button v-if="canAmendOrders && !item.isDeleted" link type="warning" @click.stop="openOrderAmendment([item])">修订</el-button>
               </div>
             </div>
           </template>
@@ -617,6 +716,15 @@ const handleSaveComplianceFlags = async () => {
       <template #header>
         <div class="order-detail-drawer-header">
           <span class="order-detail-drawer-header__title">单据详情</span>
+          <el-button
+            v-if="hasPermission('orders:edit')"
+            plain
+            type="warning"
+            :disabled="!canEditOrderContent"
+            @click="handleOpenContentEdit"
+          >
+            编辑内容
+          </el-button>
           <el-button v-if="canUseOrderVoucher" plain type="primary" @click="handleOpenVoucherDialog">正式出库单</el-button>
         </div>
       </template>
@@ -688,6 +796,20 @@ const handleSaveComplianceFlags = async () => {
       v-model="voucherDialogVisible"
       :order="currentOrder"
       :enable-html2pdf-export="enableHtml2pdfExport"
+    />
+
+    <OrderAmendmentDialog
+      v-if="canAmendOrders"
+      v-model="amendmentDialogVisible"
+      :orders="amendmentTargets"
+      @committed="handleAmendmentCommitted"
+    />
+
+    <OrderContentEditDialog
+      v-if="currentOrder && hasPermission('orders:edit')"
+      v-model="contentEditDialogVisible"
+      :order="currentOrder"
+      @committed="handleContentEditCommitted"
     />
   </PageContainer>
 </template>

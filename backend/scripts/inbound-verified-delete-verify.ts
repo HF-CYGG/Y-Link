@@ -218,7 +218,7 @@ async function main() {
         currentStock: 10,
         isActive: true,
       }],
-    } as Parameters<typeof productService.create>[0])
+    } as Parameters<typeof productService.create>[0], adminActor)
     const sku = product.skus[0]
     assert.ok(sku)
     const delivery = await inboundService.submitSupplierDelivery(actor, {
@@ -245,7 +245,7 @@ async function main() {
         { skuCode: `IN-DELETE-A-${fixtureKey}`, specValues: { 规格: 'A' }, defaultPrice: 10, currentStock: 10, isActive: true },
         { skuCode: `IN-DELETE-B-${fixtureKey}`, specValues: { 规格: 'B' }, defaultPrice: 10, currentStock: 10, isActive: true },
       ],
-    } as Parameters<typeof productService.create>[0])
+    } as Parameters<typeof productService.create>[0], adminActor)
     assert.equal(product.skus.length, 2)
     const quantities = [3, 4]
     const delivery = await inboundService.submitSupplierDelivery(supplierActor, {
@@ -287,7 +287,7 @@ async function main() {
           currentStock: 10,
           isActive: true,
         }],
-      } as Parameters<typeof productService.create>[0]))
+      } as Parameters<typeof productService.create>[0], adminActor))
     }
     const items = products.map((product, index) => ({
       productId: String(product.id),
@@ -387,7 +387,7 @@ async function main() {
       currentStock: 10,
       isActive: true,
     }],
-  } as Parameters<typeof productService.create>[0])
+  } as Parameters<typeof productService.create>[0], adminActor)
   const duplicateSku = duplicateProduct.skus[0]
   assert.ok(duplicateSku)
   const duplicateDelivery = await inboundService.submitSupplierDelivery(supplierActor, {
