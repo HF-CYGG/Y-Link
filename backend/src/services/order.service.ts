@@ -451,11 +451,7 @@ export class OrderService {
           actor,
           requestMeta,
           detail: {
-                // 记录部门与客户双快照，供工作台近期动态按“部门优先、客户兜底”展示。
-                customerDepartmentName: savedOrder.customerDepartmentName,
-            customerName: savedOrder.customerName,
-            totalQty: savedOrder.totalQty,
-            totalAmount: savedOrder.totalAmount,
+            ...this.buildOrderAuditDetail(savedOrder),
             linkedO2oPreorderSync,
           },
         },
@@ -502,11 +498,7 @@ export class OrderService {
           actor,
           requestMeta,
           detail: {
-                // 记录部门与客户双快照，供工作台近期动态按“部门优先、客户兜底”展示。
-                customerDepartmentName: savedOrder.customerDepartmentName,
-            customerName: savedOrder.customerName,
-            totalQty: savedOrder.totalQty,
-            totalAmount: savedOrder.totalAmount,
+            ...this.buildOrderAuditDetail(savedOrder),
             linkedO2oPreorderSync,
           },
         },
@@ -708,13 +700,7 @@ export class OrderService {
               actor,
               requestMeta,
               detail: {
-                // 创建时同步写入部门快照，避免首页近期动态只能看到客户名而丢失部门语义。
-                customerDepartmentName: savedOrder.customerDepartmentName,
-                customerName: savedOrder.customerName,
-                businessNo: savedOrder.businessNo,
-                showNo: savedOrder.showNo,
-                totalQty: savedOrder.totalQty,
-                totalAmount: savedOrder.totalAmount,
+                ...this.buildOrderAuditDetail(savedOrder),
                 itemCount: savedItems.length,
                 inventoryMode: savedOrder.inventoryMode,
               },
@@ -1128,12 +1114,13 @@ export class OrderService {
 
   /**
    * 统一构造订单审计详情：
-   * - 删除、恢复、永久删除都复用同一组业务快照；
+   * - 创建、删除、恢复、永久删除都复用同一组业务快照；
    * - 让工作台近期动态与审计详情保持同一份客户/金额口径。
    */
   private buildOrderAuditDetail(order: BizOutboundOrder) {
     return {
       businessNo: order.businessNo,
+      showNo: order.showNo,
       customerDepartmentName: order.customerDepartmentName,
       customerName: order.customerName,
       totalQty: order.totalQty,

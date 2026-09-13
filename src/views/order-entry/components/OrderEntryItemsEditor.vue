@@ -133,7 +133,6 @@ const handleAddRow = () => {
                 :ref="(el: unknown) => setFieldRef(row.uid, 'product', el)"
                 v-model="row.productId"
                 filterable
-                allow-create
                 default-first-option
                 :reserve-keyword="false"
                 clearable
@@ -274,7 +273,6 @@ const handleAddRow = () => {
             <el-select
               v-model="drawerForm.productId"
               filterable
-              allow-create
               default-first-option
               :reserve-keyword="false"
               clearable

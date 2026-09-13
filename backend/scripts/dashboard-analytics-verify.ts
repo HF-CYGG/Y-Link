@@ -108,6 +108,7 @@ async function seedOutboundOrder(input: {
     orderRepo.create({
       orderUuid: globalThis.crypto.randomUUID(),
       showNo: `DA-VERIFY-${String(orderSequence).padStart(5, '0')}`,
+      businessNo: `${input.orderType === 'department' ? 'hyyzjd' : 'hyyz'}${String(orderSequence).padStart(6, '0')}`,
       orderType: input.orderType,
       issuerName: '区间分析验证',
       customerDepartmentName: input.departmentName ?? null,

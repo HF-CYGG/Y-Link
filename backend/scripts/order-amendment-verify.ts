@@ -67,10 +67,12 @@ async function main() {
     { BaseProductSku },
     { BizOutboundOrder },
     { BusinessSequence },
+    { SysAuditLog },
     { SysUser },
     amendmentOccupancyModule,
     amendmentRevisionModule,
     { orderService },
+    { dashboardService },
     { systemConfigService },
     { BizError },
   ] = await Promise.all([
@@ -79,10 +81,12 @@ async function main() {
     import('../src/entities/base-product-sku.entity.js'),
     import('../src/entities/biz-outbound-order.entity.js'),
     import('../src/entities/business-sequence.entity.js'),
+    import('../src/entities/sys-audit-log.entity.js'),
     import('../src/entities/sys-user.entity.js'),
     import('../src/entities/order-business-no-occupancy.entity.js').catch(() => ({})),
     import('../src/entities/order-revision.entity.js').catch(() => ({})),
     import('../src/services/order.service.js'),
+    import('../src/services/dashboard.service.js'),
     import('../src/services/system-config.service.js'),
     import('../src/utils/errors.js'),
   ])
@@ -237,6 +241,12 @@ async function main() {
       editVersion: number
     }
     const originalShowNo = originalWalkin.showNo
+    const createAudit = await AppDataSource.getRepository(SysAuditLog).findOneByOrFail({
+      actionType: 'order.create',
+      targetId: walkin.order.id,
+    })
+    assert.equal(JSON.parse(createAudit.detailJson ?? '{}').businessNo, originalWalkin.businessNo, '创建审计必须记录创建当时的 businessNo')
+    assert.equal(createAudit.targetCode, originalShowNo, '创建审计 targetCode 必须保留不可变 showNo')
     assert.equal(await occupancyRepo.count(), 2, '新单业务号必须立即永久占用')
 
     const cursorExampleTarget = await submitOrder('cursor-example-target', 'walkin')
@@ -306,6 +316,28 @@ async function main() {
     assert.equal(await revisionRepo.count(), beforePreviewRevision + 1)
     assert.equal(Number((await sequenceRepo.findOneByOrFail({ sequenceKey: 'order.business.walkin' })).currentValue), 123)
     assert.deepEqual(committed.cursorPlans, preview.cursorPlans)
+
+    await orderService.softDeleteById(walkin.order.id, actor, originalShowNo)
+    await orderService.restoreById(walkin.order.id, actor)
+    const lifecycleAudits = await AppDataSource.getRepository(SysAuditLog).find({
+      where: { targetId: walkin.order.id },
+      order: { id: 'DESC' },
+    })
+    for (const actionType of ['order.delete', 'order.restore']) {
+      const audit = lifecycleAudits.find((item) => item.actionType === actionType)
+      assert.ok(audit, `${actionType} 必须写入审计`)
+      assert.equal(JSON.parse(audit.detailJson ?? '{}').businessNo, 'hyyz000123', `${actionType} 必须记录操作当时的 businessNo`)
+      assert.equal(audit.targetCode, originalShowNo, `${actionType} targetCode 必须继续保留不可变 showNo`)
+    }
+    const lifecycleStats = await dashboardService.getStats()
+    for (const actionType of ['order.delete', 'order.restore'] as const) {
+      const activity = lifecycleStats.recentActivities.find((item) => (
+        item.orderId === walkin.order.id && item.actionType === actionType
+      ))
+      assert.ok(activity, `工作台近期动态必须包含 ${actionType}`)
+      assert.equal(activity.businessNo, 'hyyz000123', `工作台 ${actionType} 必须展示修订后的业务号`)
+      assert.equal(activity.showNo, originalShowNo, `工作台 ${actionType} 必须保留 showNo 作为内部键`)
+    }
 
     const lowered = await amendmentApi.commitAmendments!({ amendments: [{
       orderId: walkin.order.id,
@@ -450,10 +482,17 @@ async function main() {
     const purgeOrderUuid = purgeEntity.orderUuid
     // 本段只验证永久删除后占号与 revision 留存；库存型新单由内容编辑专项断言禁止永久删除。
     // 因此将隔离夹具标记为升级前 legacy_none，避免把两种删除语义混在同一断言中。
-    purgeEntity.inventoryMode = 'legacy_none'
-    await orderRepo.save(purgeEntity)
-    await orderService.softDeleteById(purgeTarget.order.id, actor, purgeEntity.showNo)
-    await orderService.purgeById(purgeTarget.order.id, actor, purgeEntity.showNo)
+    const amendedPurgeEntity = await orderRepo.findOneByOrFail({ id: purgeTarget.order.id })
+    amendedPurgeEntity.inventoryMode = 'legacy_none'
+    await orderRepo.save(amendedPurgeEntity)
+    await orderService.softDeleteById(purgeTarget.order.id, actor, amendedPurgeEntity.showNo)
+    await orderService.purgeById(purgeTarget.order.id, actor, amendedPurgeEntity.showNo)
+    const purgeAudit = await AppDataSource.getRepository(SysAuditLog).findOneByOrFail({
+      actionType: 'order.purge',
+      targetId: purgeTarget.order.id,
+    })
+    assert.equal(JSON.parse(purgeAudit.detailJson ?? '{}').businessNo, 'hyyzjd000400', '永久删除审计必须记录删除当时的 businessNo')
+    assert.equal(purgeAudit.targetCode, amendedPurgeEntity.showNo, '永久删除审计 targetCode 必须保留不可变 showNo')
     assert.equal(await occupancyRepo.count({ where: { orderUuid: purgeOrderUuid } }), 2, '永久删除后新旧业务号占用都必须保留')
     assert.equal(await revisionRepo.count({ where: { orderUuid: purgeOrderUuid } }), 1, '永久删除后 revision 必须保留')
 

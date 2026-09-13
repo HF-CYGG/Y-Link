@@ -101,6 +101,43 @@ async function expectBizError(action: () => Promise<unknown>, expectedMessage: R
 async function main() {
   fs.mkdirSync(sqliteRoot, { recursive: true })
 
+  const orderEntryTypesModule = await import('../../src/views/order-entry/types.ts') as {
+    resolveLegacyOrderEntryProductValue?: (
+      value: string,
+      products: Array<{ id: string; productName: string }>,
+    ) => string
+  }
+  const resolveLegacyOrderEntryProductValue = orderEntryTypesModule.resolveLegacyOrderEntryProductValue
+  assert.equal(typeof resolveLegacyOrderEntryProductValue, 'function', '缺少旧开单草稿商品值迁移纯函数')
+  if (!resolveLegacyOrderEntryProductValue) {
+    throw new Error('缺少旧开单草稿商品值迁移纯函数')
+  }
+  const legacyProductCandidates = [
+    { id: 'product-1', productName: '唯一商品' },
+    { id: 'product-2', productName: '重名商品' },
+    { id: 'product-3', productName: '重名商品' },
+  ]
+  assert.equal(
+    resolveLegacyOrderEntryProductValue('product-1', legacyProductCandidates),
+    'product-1',
+    '真实商品 ID 必须原样保留',
+  )
+  assert.equal(
+    resolveLegacyOrderEntryProductValue('唯一商品', legacyProductCandidates),
+    'product-1',
+    '旧草稿中的唯一精确商品名必须迁移为真实 ID',
+  )
+  assert.equal(
+    resolveLegacyOrderEntryProductValue('未知商品', legacyProductCandidates),
+    '未知商品',
+    '未知商品名必须保持未解析状态以便提交前拒绝',
+  )
+  assert.equal(
+    resolveLegacyOrderEntryProductValue('重名商品', legacyProductCandidates),
+    '重名商品',
+    '重名商品不得猜测映射到任一 ID',
+  )
+
   const { AppDataSource } = await import('../src/config/data-source.js')
   const { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } = await import('../src/config/database-bootstrap.js')
   const { BaseProduct } = await import('../src/entities/base-product.entity.js')
@@ -142,8 +179,57 @@ async function main() {
     const initialOrderEntryEditorSource = readSource('src/views/order-entry/components/OrderEntryItemsEditor.vue')
     assert.match(initialOrderEntryEditorSource, /v-model="row\.qty"[\s\S]*?:min="1"[\s\S]*?:precision="0"/, '桌面手工开单数量控件必须限制为正整数')
     assert.match(initialOrderEntryEditorSource, /v-model="drawerForm\.qty"[\s\S]*?:min="1"[\s\S]*?:precision="0"/, '移动端手工开单数量控件必须限制为正整数')
+    assert.doesNotMatch(initialOrderEntryEditorSource, /\ballow-create\b/, '桌面与移动端手工开单只能选择已建档商品')
     const initialOrderEntryFormSource = readSource('src/views/order-entry/composables/useOrderEntryForm.ts')
     assert.match(initialOrderEntryFormSource, /Number\.isSafeInteger\([^)]+\.qty[^)]*\)/, '手工开单提交前必须拒绝非整数数量')
+    assert.doesNotMatch(initialOrderEntryFormSource, /productApi\.createProduct\(/, '手工开单不得在提交过程中独立创建零库存商品')
+    assert.match(
+      initialOrderEntryFormSource,
+      /loadedProducts\.filter\(\(product\) => getSelectableProductSkus\(product\)\.length > 0\)/,
+      '商品候选必须排除没有当前启用 SKU 的记录',
+    )
+    const unknownProductGuardIndex = initialOrderEntryFormSource.indexOf('const invalidProductRow = itemRows.value.find')
+    const savingStartIndex = initialOrderEntryFormSource.indexOf('isSaving.value = true')
+    assert.ok(unknownProductGuardIndex >= 0, '手工开单必须识别旧草稿或未知商品值')
+    assert.ok(
+      unknownProductGuardIndex < savingStartIndex,
+      '未知商品必须在任何提交写请求开始前被业务化拒绝',
+    )
+    assert.match(
+      initialOrderEntryFormSource,
+      /const reconcileRestoredDraftProducts = \(\) =>/,
+      '开单页必须集中协调旧草稿商品值与 SKU/价格对齐',
+    )
+    assert.equal(
+      initialOrderEntryFormSource.match(/reconcileRestoredDraftProducts\(\)/g)?.length,
+      2,
+      '首次挂载和账号切换都必须复用同一草稿迁移协调器',
+    )
+    assert.match(
+      initialOrderEntryFormSource,
+      /const productCandidatesReady = ref\(false\)/,
+      '产品候选加载状态必须与 loading 状态分离记录',
+    )
+    assert.match(
+      initialOrderEntryFormSource,
+      /const loadProducts = async \(\): Promise<boolean> =>/,
+      '产品加载必须向恢复链路明确返回成功标识',
+    )
+    assert.match(
+      initialOrderEntryFormSource,
+      /if \(!draftPersistenceReady\.value \|\| !productCandidatesReady\.value\)[\s\S]*?return/,
+      '候选加载失败时必须阻断监听器覆盖原草稿',
+    )
+    assert.match(
+      initialOrderEntryFormSource,
+      /const productsLoaded = await loadProducts\(\)[\s\S]*?if \(productsLoaded\) \{[\s\S]*?reconcileRestoredDraftProducts\(\)[\s\S]*?\}/,
+      '首次挂载只允许在产品候选加载成功后迁移草稿',
+    )
+    assert.match(
+      initialOrderEntryFormSource,
+      /if \(productCandidatesReady\.value\) \{[\s\S]*?reconcileRestoredDraftProducts\(\)[\s\S]*?persistDraft\(\)[\s\S]*?\}/,
+      '账号切换只允许在产品候选已就绪时迁移并持久化草稿',
+    )
     const reportCenterSource = readSource('src/views/reports/ReportCenterView.vue')
     for (const reportType of ["'tag-sales'", 'kingdee', 'walkin']) {
       const reportStart = reportCenterSource.indexOf(`${reportType}: [`)

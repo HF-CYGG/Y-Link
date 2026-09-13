@@ -21,7 +21,7 @@ export type FocusField = 'product' | 'sku' | 'qty' | 'unitPrice' | 'remark'
 /**
  * 订单明细行模型：
  * - uid 仅用于前端渲染与焦点定位；
- * - productId 在 allow-create 场景下既可能是产品主键，也可能是待自动建档的产品名称。
+ * - productId 只保存已建档且当前可用于出库的产品主键；旧草稿中的失效值会在提交前被拒绝。
  */
 export interface OrderItemRow {
   uid: string
@@ -71,6 +71,24 @@ export const getProductOptionLabel = (product: ProductRecord): string => {
 
 export const getSelectableProductSkus = (product: ProductRecord | undefined): ProductSkuRecord[] => {
   return (product?.skus ?? []).filter((sku) => Boolean(sku.id) && sku.isActive === true && sku.isCurrent === true)
+}
+
+/**
+ * 兼容旧版 allow-create 草稿中的商品名称：
+ * - 已是当前候选商品 ID 时原样保留；
+ * - 只有名称唯一且完全相等时才迁移为真实 ID；
+ * - 未知或重名值保持原样，由提交前校验给出业务提示，不做猜测映射。
+ */
+export const resolveLegacyOrderEntryProductValue = (
+  value: string,
+  products: Array<Pick<ProductRecord, 'id' | 'productName'>>,
+): string => {
+  if (products.some((product) => product.id === value)) {
+    return value
+  }
+
+  const exactMatches = products.filter((product) => product.productName === value)
+  return exactMatches.length === 1 ? exactMatches[0]?.id ?? value : value
 }
 
 export const getProductSkuOptionLabel = (sku: ProductSkuRecord): string => {
