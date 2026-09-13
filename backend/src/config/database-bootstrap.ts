@@ -8,6 +8,7 @@ import fs from 'node:fs'
 import path from 'node:path'
 import type { DataSource, EntityManager } from 'typeorm'
 import { env } from './env.js'
+import { initializeDatabaseInfrastructure } from '../database/database-strategy.js'
 import { ClientStaffDirectory } from '../entities/client-staff-directory.entity.js'
 import { ClientUser } from '../entities/client-user.entity.js'
 import { ClientFeedbackAttachment } from '../entities/client-feedback-attachment.entity.js'
@@ -473,6 +474,9 @@ async function prepareSqliteOrderContentInventoryColumns(dataSource: DataSource)
  * 已存在的游标绝不按历史最大值重写，避免覆盖管理员手工重编后确认的游标位置。
  */
 export async function backfillSqliteOrderAmendmentData(dataSource: DataSource): Promise<void> {
+  // 专项升级脚本会把隔离 DataSource 直接传入本函数；先幂等安装协调器，确保随后开启的
+  // SQLite 事务同样受单写者队列保护，而不是依赖主应用已经完成的启动顺序。
+  await initializeDatabaseInfrastructure(dataSource)
   await dataSource.transaction(async (manager) => {
     const orders = await manager.query(`
       SELECT "order_uuid" AS "orderUuid", "business_no" AS "businessNo", "order_type" AS "orderType",
