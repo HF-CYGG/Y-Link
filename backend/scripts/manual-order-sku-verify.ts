@@ -90,10 +90,13 @@ async function rebuildOutboundItemsWithoutSkuForeignKey(dataSource: {
   }
 }
 
-async function expectBizError(action: () => Promise<unknown>, expectedMessage: RegExp) {
+async function expectBizError(action: () => Promise<unknown>, expectedMessage: RegExp, expectedStatusCode?: number) {
   await assert.rejects(action, (error: unknown) => {
     assert.ok(error instanceof Error)
     assert.match(error.message, expectedMessage)
+    if (expectedStatusCode !== undefined) {
+      assert.equal((error as Error & { statusCode?: number }).statusCode, expectedStatusCode)
+    }
     return true
   })
 }
@@ -142,8 +145,10 @@ async function main() {
   const { initializeDatabaseSchemaIfNeeded, prepareDatabaseRuntime } = await import('../src/config/database-bootstrap.js')
   const { BaseProduct } = await import('../src/entities/base-product.entity.js')
   const { BaseProductSku } = await import('../src/entities/base-product-sku.entity.js')
+  const { BizOutboundOrder } = await import('../src/entities/biz-outbound-order.entity.js')
   const { BizOutboundOrderItem } = await import('../src/entities/biz-outbound-order-item.entity.js')
   const { InventoryLog } = await import('../src/entities/inventory-log.entity.js')
+  const { SysAuditLog } = await import('../src/entities/sys-audit-log.entity.js')
   const { SysUser } = await import('../src/entities/sys-user.entity.js')
   const { orderService } = await import('../src/services/order.service.js')
   const { productService } = await import('../src/services/product.service.js')
@@ -321,6 +326,69 @@ async function main() {
       '12.34',
       '单一 current SKU 商品必须保留手工单价回写商品主价的既有兼容行为',
     )
+
+    const invalidPriceIdempotencyKey = `manual-invalid-price-${verifySeed}`
+    const invalidPriceProductBefore = await AppDataSource.getRepository(BaseProduct).findOneByOrFail({ id: singleProduct.id })
+    const invalidPriceSkuBefore = await AppDataSource.getRepository(BaseProductSku).findOneByOrFail({ id: singleSku.id })
+    const invalidPriceOrderCountBefore = await AppDataSource.getRepository(BizOutboundOrder).count()
+    const invalidPriceItemCountBefore = await AppDataSource.getRepository(BizOutboundOrderItem).count()
+    const invalidPriceLogCountBefore = await AppDataSource.getRepository(InventoryLog).count()
+    const invalidPriceAuditCountBefore = await AppDataSource.getRepository(SysAuditLog).countBy({ actionType: 'order.create' })
+    await expectBizError(
+      () => submit({
+        idempotencyKey: invalidPriceIdempotencyKey,
+        orderType: 'walkin',
+        customerName: '无效单价验证',
+        items: [{ productId: singleProduct.id, skuId: singleSku.id, qty: 1, unitPrice: 0.001 }],
+      }),
+      /单价.*(?:0\.01|舍入)/,
+      400,
+    )
+    const invalidPriceProductAfter = await AppDataSource.getRepository(BaseProduct).findOneByOrFail({ id: singleProduct.id })
+    const invalidPriceSkuAfter = await AppDataSource.getRepository(BaseProductSku).findOneByOrFail({ id: singleSku.id })
+    assert.deepEqual(
+      [invalidPriceProductAfter.currentStock, invalidPriceProductAfter.preOrderedStock, invalidPriceProductAfter.defaultPrice],
+      [invalidPriceProductBefore.currentStock, invalidPriceProductBefore.preOrderedStock, invalidPriceProductBefore.defaultPrice],
+      '无效单价不得修改商品库存或主价',
+    )
+    assert.deepEqual(
+      [invalidPriceSkuAfter.currentStock, invalidPriceSkuAfter.preOrderedStock, invalidPriceSkuAfter.defaultPrice],
+      [invalidPriceSkuBefore.currentStock, invalidPriceSkuBefore.preOrderedStock, invalidPriceSkuBefore.defaultPrice],
+      '无效单价不得修改 SKU 库存或默认价',
+    )
+    assert.equal(await AppDataSource.getRepository(BizOutboundOrder).count(), invalidPriceOrderCountBefore)
+    assert.equal(await AppDataSource.getRepository(BizOutboundOrderItem).count(), invalidPriceItemCountBefore)
+    assert.equal(await AppDataSource.getRepository(InventoryLog).count(), invalidPriceLogCountBefore)
+    assert.equal(await AppDataSource.getRepository(SysAuditLog).countBy({ actionType: 'order.create' }), invalidPriceAuditCountBefore)
+    assert.equal(await AppDataSource.getRepository(BizOutboundOrder).countBy({ idempotencyKey: invalidPriceIdempotencyKey }), 0)
+
+    const roundedPriceProduct = await productService.create({
+      productName: `手工单价舍入-${verifySeed}`,
+      pinyinAbbr: 'DJ',
+      defaultPrice: 1,
+      isActive: true,
+      currentStock: 2,
+      specGroups: [{ name: '包装', values: ['标准'] }],
+      skus: [{
+        skuCode: `MANUAL-ROUND-${verifySeed}`,
+        specValues: { 包装: '标准' },
+        defaultPrice: 1,
+        currentStock: 2,
+        isActive: true,
+      }],
+    } as Parameters<typeof productService.create>[0], actor)
+    const roundedPriceSku = roundedPriceProduct.skus[0]
+    assert.ok(roundedPriceSku)
+    const roundedPriceResult = await submit({
+      idempotencyKey: `manual-rounded-price-${verifySeed}`,
+      orderType: 'walkin',
+      customerName: '单价舍入验证',
+      items: [{ productId: roundedPriceProduct.id, skuId: roundedPriceSku.id, qty: 1, unitPrice: 0.006 }],
+    })
+    const roundedPriceItem = roundedPriceResult.items[0] as Record<string, unknown>
+    assert.equal(roundedPriceItem.unitPrice, '0.01', '能按两位精度舍入至 0.01 的正数单价必须允许开单')
+    assert.equal((await AppDataSource.getRepository(BaseProduct).findOneByOrFail({ id: roundedPriceProduct.id })).currentStock, 1)
+    assert.equal((await AppDataSource.getRepository(BaseProductSku).findOneByOrFail({ id: roundedPriceSku.id })).currentStock, 1)
 
     const outboundItemCountBeforeLegacyUpgrade = await AppDataSource.getRepository(BizOutboundOrderItem).count()
     await rebuildOutboundItemsWithoutSkuForeignKey(AppDataSource)

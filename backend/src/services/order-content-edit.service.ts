@@ -316,11 +316,13 @@ export class OrderContentEditService {
       const unitPrice = Number(item.unitPrice)
       if (!Number.isFinite(qty) || qty <= 0 || qty > FIELD_LIMITS.maxQty) throw new BizError(`第 ${index + 1} 行数量必须大于 0`, 400)
       if (!Number.isFinite(unitPrice) || unitPrice <= 0 || unitPrice > FIELD_LIMITS.maxUnitPrice) throw new BizError(`第 ${index + 1} 行单价必须大于 0`, 400)
+      const normalizedUnitPrice = Number(unitPrice.toFixed(2))
+      if (normalizedUnitPrice < 0.01) throw new BizError(`第 ${index + 1} 行单价按两位小数舍入后必须至少为 0.01`, 400)
       return {
         productId,
         skuId: normalizeId(item.skuId) || null,
         qty,
-        unitPrice: Number(unitPrice.toFixed(2)),
+        unitPrice: normalizedUnitPrice,
         remark: this.normalizeNullableText(item.remark, FIELD_LIMITS.itemRemark, `第 ${index + 1} 行备注`),
       }
     })

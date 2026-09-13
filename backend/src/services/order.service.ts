@@ -774,7 +774,11 @@ export class OrderService {
     if (value > maxValue) {
       throw new BizError(`${rowPrefix}${label}不能超过 ${maxValue}`, 400)
     }
-    return Number(value.toFixed(2))
+    const normalizedValue = Number(value.toFixed(2))
+    if (normalizedValue < 0.01) {
+      throw new BizError(`${rowPrefix}${label}按两位小数舍入后必须至少为 0.01`, 400)
+    }
+    return normalizedValue
   }
 
   private normalizeSubmitItemsInput(inputItems: SubmitOrderItemInput[]): NormalizedSubmitOrderItem[] {

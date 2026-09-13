@@ -235,6 +235,36 @@ async function main() {
       '创建流水必须可还原商品与 SKU 库存',
     )
 
+    const invalidPriceOrderBefore = await orderService.detailById(created.order.id)
+    const invalidPriceProductStockBefore = (await productRepo.findOneByOrFail({ id: fixture.product.id })).currentStock
+    const invalidPriceSkuStockBefore = (await skuRepo.findOneByOrFail({ id: fixture.sku.id })).currentStock
+    const invalidPriceLogCountBefore = await inventoryLogRepo.countBy({ refType: 'biz_outbound_order', refId: created.order.id })
+    const invalidPriceRevisionCountBefore = await revisionRepo.countBy({ orderUuid: String((await orderRepo.findOneByOrFail({ id: created.order.id })).orderUuid) })
+    const invalidPriceAuditCountBefore = await AppDataSource.getRepository(SysAuditLog).countBy({ actionType: 'order.content_edit', targetId: created.order.id })
+    await expectFailure(() => contentApi.updateContent(created.order.id, {
+      expectedVersion: 1,
+      reason: '单价舍入为零应失败',
+      items: [{ productId: fixture.product.id, skuId: fixture.sku.id, qty: 5, unitPrice: 0.001 }],
+    }, actor), /单价.*(?:0\.01|舍入)/, 400)
+    assert.deepEqual(await orderService.detailById(created.order.id), invalidPriceOrderBefore, '无效单价不得改写订单版本或明细')
+    assert.equal((await productRepo.findOneByOrFail({ id: fixture.product.id })).currentStock, invalidPriceProductStockBefore)
+    assert.equal((await skuRepo.findOneByOrFail({ id: fixture.sku.id })).currentStock, invalidPriceSkuStockBefore)
+    assert.equal(await inventoryLogRepo.countBy({ refType: 'biz_outbound_order', refId: created.order.id }), invalidPriceLogCountBefore)
+    assert.equal(await revisionRepo.countBy({ orderUuid: String((await orderRepo.findOneByOrFail({ id: created.order.id })).orderUuid) }), invalidPriceRevisionCountBefore)
+    assert.equal(await AppDataSource.getRepository(SysAuditLog).countBy({ actionType: 'order.content_edit', targetId: created.order.id }), invalidPriceAuditCountBefore)
+
+    const roundedPriceFixture = await createProduct()
+    const roundedPriceCreated = await submit(roundedPriceFixture.product.id, roundedPriceFixture.sku.id, 1)
+    const roundedPriceStockBefore = (await skuRepo.findOneByOrFail({ id: roundedPriceFixture.sku.id })).currentStock
+    const roundedPriceEdited = await contentApi.updateContent(roundedPriceCreated.order.id, {
+      expectedVersion: 1,
+      reason: '验证两位单价舍入',
+      items: [{ productId: roundedPriceFixture.product.id, skuId: roundedPriceFixture.sku.id, qty: 1, unitPrice: 0.006 }],
+    }, actor)
+    assert.equal(roundedPriceEdited.items[0]?.unitPrice, '0.01', '能按两位精度舍入至 0.01 的正数单价必须允许编辑')
+    assert.equal(roundedPriceEdited.order.totalAmount, '0.01')
+    assert.equal((await skuRepo.findOneByOrFail({ id: roundedPriceFixture.sku.id })).currentStock, roundedPriceStockBefore)
+
     await expectFailure(() => contentApi.updateContent(created.order.id, {
       expectedVersion: 1,
       reason: '小数精度绕过应失败',
