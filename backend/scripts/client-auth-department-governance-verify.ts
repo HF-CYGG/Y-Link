@@ -1296,7 +1296,28 @@ async function main() {
     )
     assert.equal(updatedTeacherProfile.username, teacherProfileUser.realName, '教师资料更新必须保留目录姓名')
     assert.equal(updatedTeacherProfile.email, teacherProfileEmail, '同名历史数据不得阻断教师联系方式更新')
+    // 修改联系方式属于身份资料变更，服务端会撤销该教师全部会话，注册时签发的 token 随之失效。
+    assert.equal(updatedTeacherProfile.requiresRelogin, true, '教师修改联系方式后必须要求重新登录')
+    await expectBizError(
+      () => clientAuthService.resolveClientByToken(teacherRegisterResult.token),
+      '教师修改联系方式后旧会话必须失效',
+      '登录状态已失效',
+    )
     pass('教师资料更新跳过无关用户名查重并保留目录姓名')
+
+    // 后续教师下单沿用真实客户端流程：资料变更导致会话撤销后重新登录获取新会话。
+    const teacherRelogin = await clientAuthService.login(
+      {
+        account: '13800001001',
+        password: clientPassword,
+      },
+      {
+        ipAddress: '192.0.2.16',
+        userAgent: 'client-auth-department-governance-verify',
+        clientRiskBrowserId: null,
+        clientRiskSessionId: null,
+      },
+    )
 
     const sessionCountBeforeFailedLogin = await AppDataSource.getRepository(ClientUserSession).count()
     const missingLoginCases = [
@@ -1360,7 +1381,7 @@ async function main() {
       currentStock: 100,
       limitPerUser: 10,
     })
-    const teacherAuth = await clientAuthService.resolveClientByToken(teacherRegisterResult.token)
+    const teacherAuth = await clientAuthService.resolveClientByToken(teacherRelogin.token)
     const teacherPreorder = await o2oPreorderService.submit(teacherAuth, {
       clientRequestId: 'department-govern-teacher-001',
       isSystemApplied: false,
