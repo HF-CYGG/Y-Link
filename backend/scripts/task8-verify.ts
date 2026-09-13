@@ -167,12 +167,14 @@ const verifyConcurrentSerialAndDrilldown = async () => {
   const productA = await productService.create({
     productName: 'Task8并发产品A',
     defaultPrice: 10,
+    currentStock: 100,
     isActive: true,
     tagIds: [analyticsTag.id],
   })
   const productB = await productService.create({
     productName: 'Task8并发产品B',
     defaultPrice: 20,
+    currentStock: 100,
     isActive: true,
   })
 
