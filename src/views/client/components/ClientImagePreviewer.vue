@@ -1,26 +1,27 @@
 <script setup lang="ts">
 /**
  * 模块说明：src/views/client/components/ClientImagePreviewer.vue
- * 文件职责：承载客户端商城的商品原图预览层，保证超宽、超长图在低高度或缩放后的旧浏览器视口里初始完整可见，并可显式放大、缩小、重置查看细节。
+ * 文件职责：承载客户端商城的商品原图预览层，保证超宽、超长图在低高度或缩放后的旧浏览器视口里初始完整可见，并可用滚轮缩放、按住拖动查看细节。
  * 实现逻辑：
- * - 遮罩用 top/right/bottom/left 四向定位铺满布局视口，不依赖 `inset` 与 `dvh`；面板为“工具栏 + 舞台”纵向 flex，工具栏不收缩，低高度时只压缩舞台；
- * - 缩放通过改变图片真实宽高实现，放大后由舞台原生滚动条、触摸滑动或方向键平移，滚动边界即图片边缘，图片不会丢失在可视区外；
- * - 桌面鼠标可额外拖拽平移，双击在完整适配与 2 倍之间切换，但按钮与键盘（Esc / + / - / 0）始终可用；
- * - 打开时记录并转移焦点、Tab 在面板内循环、锁定页面滚动；关闭时全部还原。
+ * - 遮罩用 top/right/bottom/left 四向定位铺满布局视口，不依赖 `inset` 与 `dvh`；右上角只保留一个关闭按钮，舞台占满其余空间；
+ * - 舞台 overflow:hidden 且打开期间锁定页面滚动，因此滚轮缩放只需被动监听（符合 verify:passive-wheel），无需阻止默认行为；
+ * - 缩放改变图片真实宽高并以指针位置为锚点换算滚动位置；按住左键（或触屏按住）拖动改写舞台滚动位置，边界即图片边缘；
+ * - 双击在完整适配与 2 倍之间切换；键盘保留 Esc 关闭、+ / - / 0 缩放与方向键平移；打开时转移焦点并在预览层内循环，关闭时还原。
  * 维护说明：
- * - 比例、档位与缩放锚点计算统一收口在 `client-image-preview.helpers.ts`，不要在模板或样式里另写魔法比例；
+ * - 比例、倍率与缩放锚点计算统一收口在 `client-image-preview.helpers.ts`，不要在模板或样式里另写魔法比例；
+ * - 不要改成非被动 wheel 监听或 ElImageViewer，否则会重新触发滚动性能告警；
  * - 键盘事件在 window 捕获阶段处理并阻止继续传播，避免从商品详情抽屉打开时 Esc 同时关闭底层抽屉。
  */
 
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useZIndex } from 'element-plus'
-import { Close, RefreshLeft, ZoomIn, ZoomOut } from '@element-plus/icons-vue'
+import { Close } from '@element-plus/icons-vue'
 
 import {
-  canZoomInFurther,
-  clampZoomStepIndex,
+  CLIENT_IMAGE_PREVIEW_KEYBOARD_ZOOM_FACTOR,
+  clampImagePreviewScale,
   resolveImageFitScale,
-  resolveImagePreviewScale,
+  resolveWheelZoomScale,
   resolveZoomAnchoredScroll,
 } from '../client-image-preview.helpers'
 
@@ -38,17 +39,21 @@ const emit = defineEmits<{
 
 // 预览层必须高于 Element Plus 抽屉/遮罩、商城移动端搜索层与悬浮购物车。
 const PREVIEW_BASE_Z_INDEX = 4000
-const QUICK_ZOOM_STEP_INDEX = 2
+const QUICK_ZOOM_FACTOR = 2
 const DRAG_MOVE_THRESHOLD = 3
+const KEYBOARD_PAN_STEP = 48
+const ZOOMED_EPSILON = 0.001
 
 const { nextZIndex } = useZIndex()
 
-const panelRef = ref<HTMLElement | null>(null)
+const overlayRef = ref<HTMLElement | null>(null)
 const stageRef = ref<HTMLElement | null>(null)
 const imageRef = ref<HTMLImageElement | null>(null)
 const overlayZIndex = ref(PREVIEW_BASE_Z_INDEX)
 const loadState = ref<'loading' | 'loaded' | 'error'>('loading')
-const zoomStepIndex = ref(0)
+// 缩放倍率相对“完整适配”记录，窗口尺寸变化重新计算适配比例后仍保持用户当前的放大程度。
+const zoomFactor = ref(1)
+const dragging = ref(false)
 const naturalSize = reactive({ width: 0, height: 0 })
 const stageSize = reactive({ width: 0, height: 0 })
 
@@ -56,6 +61,7 @@ let previousActiveElement: HTMLElement | null = null
 let previousBodyOverflow: string | null = null
 let stageResizeObserver: ResizeObserver | null = null
 let measureFrameId: number | null = null
+let pendingScroll: { left: number; top: number } | null = null
 let dragState: { pointerId: number; startX: number; startY: number; scrollLeft: number; scrollTop: number; moved: boolean } | null = null
 let suppressNextStageClick = false
 
@@ -65,21 +71,19 @@ const fitScale = computed(() => resolveImageFitScale({
   stageWidth: stageSize.width,
   stageHeight: stageSize.height,
 }))
-const currentScale = computed(() => resolveImagePreviewScale(fitScale.value, zoomStepIndex.value))
+const currentScale = computed(() => clampImagePreviewScale(fitScale.value * zoomFactor.value, fitScale.value))
 const isImageReady = computed(() => loadState.value === 'loaded' && naturalSize.width > 0 && naturalSize.height > 0)
+const isZoomed = computed(() => isImageReady.value && currentScale.value > fitScale.value * (1 + ZOOMED_EPSILON))
 const imageStyle = computed(() => {
   if (!isImageReady.value) {
     return undefined
   }
-  // 向下取整，避免完整适配时因亚像素进位多出 1px 触发滚动条。
+  // 向下取整，避免完整适配时因亚像素进位多出 1px。
   return {
     width: `${Math.max(1, Math.floor(naturalSize.width * currentScale.value))}px`,
     height: `${Math.max(1, Math.floor(naturalSize.height * currentScale.value))}px`,
   }
 })
-const zoomPercentText = computed(() => (isImageReady.value ? `${Math.round(currentScale.value * 100)}%` : '--'))
-const canZoomOut = computed(() => isImageReady.value && zoomStepIndex.value > 0)
-const canZoomIn = computed(() => isImageReady.value && canZoomInFurther(fitScale.value, zoomStepIndex.value))
 
 const close = () => {
   emit('update:visible', false)
@@ -90,9 +94,8 @@ const measureStage = () => {
   if (!stage) {
     return
   }
-  // 使用 offset 尺寸（含滚动条占位），放大出现滚动条时基准比例保持稳定，不会反复抖动。
-  stageSize.width = stage.offsetWidth
-  stageSize.height = stage.offsetHeight
+  stageSize.width = stage.clientWidth
+  stageSize.height = stage.clientHeight
 }
 
 const scheduleStageMeasure = () => {
@@ -106,10 +109,11 @@ const scheduleStageMeasure = () => {
 }
 
 const resetViewState = () => {
-  zoomStepIndex.value = 0
+  zoomFactor.value = 1
   loadState.value = 'loading'
   naturalSize.width = 0
   naturalSize.height = 0
+  pendingScroll = null
   const stage = stageRef.value
   if (stage) {
     stage.scrollLeft = 0
@@ -133,56 +137,80 @@ const handleImageError = () => {
   loadState.value = 'error'
 }
 
-const applyZoomStep = async (nextIndex: number) => {
-  const targetIndex = clampZoomStepIndex(nextIndex)
+const applyScale = async (nextScale: number, anchor?: { x: number; y: number }) => {
   const stage = stageRef.value
-  if (!isImageReady.value || targetIndex === zoomStepIndex.value || !stage) {
+  if (!isImageReady.value || !stage) {
     return
   }
-  const nextScale = resolveImagePreviewScale(fitScale.value, targetIndex)
-  const anchoredScroll = resolveZoomAnchoredScroll({
-    scrollLeft: stage.scrollLeft,
-    scrollTop: stage.scrollTop,
+  const targetScale = clampImagePreviewScale(nextScale, fitScale.value)
+  if (Math.abs(targetScale - currentScale.value) < 1e-4) {
+    return
+  }
+  // 连续滚轮事件可能早于 DOM 更新到达，优先以尚未写入的目标滚动位置为基准，避免锚点漂移。
+  const scrollBase = pendingScroll ?? { left: stage.scrollLeft, top: stage.scrollTop }
+  pendingScroll = resolveZoomAnchoredScroll({
+    scrollLeft: scrollBase.left,
+    scrollTop: scrollBase.top,
     stageWidth: stage.clientWidth,
     stageHeight: stage.clientHeight,
     previousWidth: naturalSize.width * currentScale.value,
     previousHeight: naturalSize.height * currentScale.value,
-    nextWidth: naturalSize.width * nextScale,
-    nextHeight: naturalSize.height * nextScale,
+    nextWidth: naturalSize.width * targetScale,
+    nextHeight: naturalSize.height * targetScale,
+    anchorX: anchor?.x,
+    anchorY: anchor?.y,
   })
-  zoomStepIndex.value = targetIndex
+  zoomFactor.value = targetScale / fitScale.value
   await nextTick()
-  // 以舞台视觉中心为锚点换算新滚动位置，放大/缩小后用户正在看的区域不跳走。
-  stage.scrollLeft = anchoredScroll.left
-  stage.scrollTop = anchoredScroll.top
-}
-
-const zoomIn = () => {
-  if (canZoomIn.value) {
-    void applyZoomStep(zoomStepIndex.value + 1)
+  if (pendingScroll) {
+    stage.scrollLeft = pendingScroll.left
+    stage.scrollTop = pendingScroll.top
+    pendingScroll = null
   }
 }
 
-const zoomOut = () => {
-  if (canZoomOut.value) {
-    void applyZoomStep(zoomStepIndex.value - 1)
+const resolveStageAnchor = (event: MouseEvent) => {
+  const stage = stageRef.value
+  if (!stage) {
+    return undefined
   }
+  const rect = stage.getBoundingClientRect()
+  return { x: event.clientX - rect.left, y: event.clientY - rect.top }
 }
 
-const resetZoom = () => {
-  void applyZoomStep(0)
+const handleStageWheel = (event: WheelEvent) => {
+  // Ctrl + 滚轮保留给浏览器页面缩放；被动监听无法阻止默认行为，舞台与页面均不可滚动，因此不会产生额外滚动。
+  if (!isImageReady.value || event.ctrlKey) {
+    return
+  }
+  const nextScale = resolveWheelZoomScale({
+    currentScale: currentScale.value,
+    fitScale: fitScale.value,
+    deltaY: event.deltaY,
+    deltaMode: event.deltaMode,
+  })
+  void applyScale(nextScale, resolveStageAnchor(event))
 }
 
-const toggleQuickZoom = () => {
-  void applyZoomStep(zoomStepIndex.value > 0 ? 0 : QUICK_ZOOM_STEP_INDEX)
+const toggleQuickZoom = (event: MouseEvent) => {
+  void applyScale(isZoomed.value ? fitScale.value : fitScale.value * QUICK_ZOOM_FACTOR, resolveStageAnchor(event))
+}
+
+const panStage = (deltaX: number, deltaY: number) => {
+  const stage = stageRef.value
+  if (!stage) {
+    return
+  }
+  stage.scrollLeft += deltaX
+  stage.scrollTop += deltaY
 }
 
 const resolveFocusableElements = () => {
-  const panel = panelRef.value
-  if (!panel) {
+  const overlay = overlayRef.value
+  if (!overlay) {
     return [] as HTMLElement[]
   }
-  return Array.from(panel.querySelectorAll<HTMLElement>('button:not([disabled]), [tabindex]:not([tabindex="-1"])'))
+  return Array.from(overlay.querySelectorAll<HTMLElement>('button:not([disabled]), [tabindex]:not([tabindex="-1"])'))
 }
 
 const trapFocus = (event: KeyboardEvent) => {
@@ -193,7 +221,7 @@ const trapFocus = (event: KeyboardEvent) => {
   const first = focusableElements[0]
   const last = focusableElements[focusableElements.length - 1]
   const activeElement = globalThis.document.activeElement
-  const focusInside = !!activeElement && !!panelRef.value?.contains(activeElement)
+  const focusInside = !!activeElement && !!overlayRef.value?.contains(activeElement)
   if (event.shiftKey && (!focusInside || activeElement === first)) {
     event.preventDefault()
     last.focus()
@@ -221,17 +249,29 @@ const handleWindowKeydown = (event: KeyboardEvent) => {
     case '=':
     case 'Add':
       consume()
-      zoomIn()
+      void applyScale(currentScale.value * CLIENT_IMAGE_PREVIEW_KEYBOARD_ZOOM_FACTOR)
       break
     case '-':
     case '_':
     case 'Subtract':
       consume()
-      zoomOut()
+      void applyScale(currentScale.value / CLIENT_IMAGE_PREVIEW_KEYBOARD_ZOOM_FACTOR)
       break
     case '0':
       consume()
-      resetZoom()
+      void applyScale(fitScale.value)
+      break
+    case 'ArrowLeft':
+    case 'ArrowRight':
+    case 'ArrowUp':
+    case 'ArrowDown':
+      if (isZoomed.value) {
+        consume()
+        panStage(
+          event.key === 'ArrowLeft' ? -KEYBOARD_PAN_STEP : event.key === 'ArrowRight' ? KEYBOARD_PAN_STEP : 0,
+          event.key === 'ArrowUp' ? -KEYBOARD_PAN_STEP : event.key === 'ArrowDown' ? KEYBOARD_PAN_STEP : 0,
+        )
+      }
       break
     case 'Tab':
       trapFocus(event)
@@ -247,8 +287,8 @@ const isStageOverflowing = (stage: HTMLElement) => {
 
 const handleStagePointerDown = (event: PointerEvent) => {
   const stage = stageRef.value
-  // 触屏与触控笔直接交给原生滚动，只为鼠标补充拖拽平移。
-  if (!stage || event.pointerType !== 'mouse' || event.button !== 0 || !isStageOverflowing(stage)) {
+  // 鼠标只响应左键按住；触屏与触控笔按住即可拖动。
+  if (!stage || (event.pointerType === 'mouse' && event.button !== 0) || !isStageOverflowing(stage)) {
     return
   }
   dragState = {
@@ -273,7 +313,7 @@ const handleStagePointerMove = (event: PointerEvent) => {
     return
   }
   dragState.moved = true
-  event.preventDefault()
+  dragging.value = true
   stage.scrollLeft = dragState.scrollLeft - deltaX
   stage.scrollTop = dragState.scrollTop - deltaY
 }
@@ -285,6 +325,7 @@ const handleStagePointerEnd = (event: PointerEvent) => {
   suppressNextStageClick = dragState.moved
   stageRef.value?.releasePointerCapture?.(event.pointerId)
   dragState = null
+  dragging.value = false
 }
 
 const handleStageBlankClick = () => {
@@ -293,7 +334,7 @@ const handleStageBlankClick = () => {
     return
   }
   // 放大查看细节时点到空白处不应误关，只有完整适配状态下才沿用“点空白关闭”。
-  if (zoomStepIndex.value === 0) {
+  if (!isZoomed.value) {
     close()
   }
 }
@@ -341,6 +382,8 @@ const unbindRuntimeListeners = () => {
     measureFrameId = null
   }
   dragState = null
+  dragging.value = false
+  pendingScroll = null
   suppressNextStageClick = false
 }
 
@@ -407,6 +450,7 @@ onBeforeUnmount(() => {
     <Transition name="client-image-previewer">
       <div
         v-if="visible"
+        ref="overlayRef"
         class="client-image-previewer"
         :style="{ zIndex: overlayZIndex }"
         role="dialog"
@@ -414,23 +458,16 @@ onBeforeUnmount(() => {
         :aria-label="`${alt}预览`"
         @click.self="close"
       >
-        <section ref="panelRef" class="client-image-previewer__panel">
-          <header class="client-image-previewer__toolbar">
-            <div class="client-image-previewer__zoom-group" role="group" aria-label="缩放控制">
-              <el-button :icon="ZoomOut" :disabled="!canZoomOut" aria-label="缩小" @click="zoomOut">缩小</el-button>
-              <span class="client-image-previewer__ratio" aria-live="polite">{{ zoomPercentText }}</span>
-              <el-button :icon="ZoomIn" :disabled="!canZoomIn" aria-label="放大" @click="zoomIn">放大</el-button>
-              <el-button :icon="RefreshLeft" :disabled="!canZoomOut" aria-label="重置为完整显示" @click="resetZoom">适配</el-button>
-            </div>
-            <el-button type="primary" :icon="Close" aria-label="关闭预览" @click="close">关闭</el-button>
-          </header>
+        <el-button class="client-image-previewer__close" round :icon="Close" aria-label="关闭预览" @click="close">关闭</el-button>
+        <section class="client-image-previewer__panel">
           <div
             ref="stageRef"
             class="client-image-previewer__stage"
-            :class="{ 'is-zoomed': zoomStepIndex > 0 }"
+            :class="{ 'is-zoomed': isZoomed, 'is-dragging': dragging }"
             tabindex="0"
-            aria-label="图片查看区域，放大后可用方向键滚动"
+            aria-label="图片查看区域：滚轮缩放，按住左键拖动查看"
             @click.self="handleStageBlankClick"
+            @wheel.passive="handleStageWheel"
             @pointerdown="handleStagePointerDown"
             @pointermove="handleStagePointerMove"
             @pointerup="handleStagePointerEnd"
@@ -452,7 +489,7 @@ onBeforeUnmount(() => {
             <p v-if="loadState === 'loading'" class="client-image-previewer__status">图片加载中…</p>
             <p v-else-if="loadState === 'error'" class="client-image-previewer__status">图片加载失败，请关闭后重试</p>
           </div>
-          <p class="client-image-previewer__hint">放大后可滑动、拖动或使用方向键查看其他区域，按 Esc 关闭</p>
+          <p class="client-image-previewer__hint">滚轮缩放，按住左键拖动查看，双击快速放大或还原，按 Esc 关闭</p>
         </section>
       </div>
     </Transition>
@@ -472,12 +509,31 @@ onBeforeUnmount(() => {
   justify-content: center;
   box-sizing: border-box;
   background: rgba(15, 23, 42, 0.86);
-  padding: 0.75rem;
+  padding: 1rem;
   padding:
-    max(0.75rem, env(safe-area-inset-top))
-    max(0.75rem, env(safe-area-inset-right))
-    max(0.75rem, env(safe-area-inset-bottom))
-    max(0.75rem, env(safe-area-inset-left));
+    max(1rem, env(safe-area-inset-top))
+    max(1rem, env(safe-area-inset-right))
+    max(1rem, env(safe-area-inset-bottom))
+    max(1rem, env(safe-area-inset-left));
+}
+
+.client-image-previewer__close {
+  /* 沿用原预览层的单个白色胶囊关闭按钮，固定在视口右上角，始终可见。 */
+  position: absolute;
+  top: max(0.75rem, env(safe-area-inset-top));
+  right: max(0.75rem, env(safe-area-inset-right));
+  z-index: 2;
+  --el-button-bg-color: rgba(255, 255, 255, 0.94);
+  --el-button-border-color: transparent;
+  --el-button-text-color: #0f172a;
+  --el-button-hover-bg-color: #ffffff;
+  --el-button-hover-border-color: transparent;
+  --el-button-hover-text-color: #0f172a;
+  --el-button-active-bg-color: #f1f5f9;
+  --el-button-active-border-color: transparent;
+  --el-button-active-text-color: #0f172a;
+  font-weight: 600;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.24);
 }
 
 .client-image-previewer__panel {
@@ -491,46 +547,17 @@ onBeforeUnmount(() => {
   gap: 0.5rem;
 }
 
-.client-image-previewer__toolbar {
-  display: flex;
-  flex: 0 0 auto;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-}
-
-.client-image-previewer__zoom-group {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.4rem;
-}
-
-.client-image-previewer__zoom-group .el-button + .el-button {
-  margin-left: 0;
-}
-
-.client-image-previewer__ratio {
-  min-width: 3.2rem;
-  color: #f8fafc;
-  font-size: 0.82rem;
-  font-variant-numeric: tabular-nums;
-  font-weight: 600;
-  text-align: center;
-}
-
 .client-image-previewer__stage {
+  /* 舞台不可原生滚动：滚轮只负责缩放，平移由拖动改写 scrollLeft/scrollTop 完成。 */
   position: relative;
   display: flex;
   flex: 1 1 auto;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
   border-radius: 1rem;
-  background: rgba(255, 255, 255, 0.04);
   outline: none;
-  overscroll-behavior: contain;
-  -webkit-overflow-scrolling: touch;
+  touch-action: none;
+  user-select: none;
 }
 
 .client-image-previewer__stage:focus-visible {
@@ -541,12 +568,12 @@ onBeforeUnmount(() => {
   cursor: grab;
 }
 
-.client-image-previewer__stage.is-zoomed:active {
+.client-image-previewer__stage.is-dragging {
   cursor: grabbing;
 }
 
 .client-image-previewer__image {
-  /* margin:auto 居中：内容溢出时仍能滚动到左上角，不会像 justify-content:center 那样裁掉起始边。 */
+  /* margin:auto 居中：内容溢出时仍能拖到左上角，不会像 justify-content:center 那样裁掉起始边。 */
   display: block;
   flex: none;
   margin: auto;
@@ -595,14 +622,7 @@ onBeforeUnmount(() => {
   opacity: 0;
 }
 
-@media (max-width: 640px) {
-  .client-image-previewer__toolbar .el-button {
-    padding: 0.45rem 0.6rem;
-    font-size: 0.78rem;
-  }
-}
-
-/* 低高度视口优先把空间留给舞台，提示文案隐藏，工具栏仍保持可见。 */
+/* 低高度视口优先把空间留给舞台，提示文案隐藏，关闭按钮仍固定可见。 */
 @media (max-height: 26rem) {
   .client-image-previewer__hint {
     display: none;

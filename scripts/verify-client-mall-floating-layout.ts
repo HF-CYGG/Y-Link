@@ -13,10 +13,10 @@ import {
   resolveViewportHeight,
 } from '../src/views/client/client-mall-viewport.helpers'
 import {
-  canZoomInFurther,
-  clampZoomStepIndex,
+  clampImagePreviewScale,
   resolveImageFitScale,
-  resolveImagePreviewScale,
+  resolveImagePreviewMaxScale,
+  resolveWheelZoomScale,
   resolveZoomAnchoredScroll,
 } from '../src/views/client/client-image-preview.helpers'
 
@@ -115,14 +115,25 @@ assert.equal(resolveImageFitScale({ naturalWidth: 1000, naturalHeight: 6000, sta
 assert.equal(resolveImageFitScale({ naturalWidth: 300, naturalHeight: 200, stageWidth: 800, stageHeight: 600 }), 1, '小图初始不放大')
 assert.equal(resolveImageFitScale({ naturalWidth: 0, naturalHeight: 200, stageWidth: 800, stageHeight: 0 }), 1, '尺寸不可用时回退 1，避免 NaN 尺寸')
 
-// ---------- #84 缩放档位与上限 ----------
-assert.equal(clampZoomStepIndex(-3), 0, '缩小不能越过完整适配档')
-assert.equal(clampZoomStepIndex(99), 4, '放大不能越过最大档')
-assert.equal(resolveImagePreviewScale(0.2, 0), 0.2, '重置档等于完整适配比例')
-assert.equal(resolveImagePreviewScale(0.2, 4), 0.8, '超大图按适配比例乘以档位放大')
-assert.equal(resolveImagePreviewScale(1, 4), 4, '小图放大受原图 4 倍上限约束')
-assert.equal(canZoomInFurther(0.2, 0), true, '适配状态下可以继续放大')
-assert.equal(canZoomInFurther(1, 4), false, '最大档位时放大按钮应禁用')
+// ---------- #84 滚轮缩放范围与倍率 ----------
+assert.equal(resolveImagePreviewMaxScale(0.2), 2, '超大图至少可放大到原图 2 倍查看细节')
+assert.equal(resolveImagePreviewMaxScale(1), 4, '小图最多放大到原图 4 倍')
+assert.equal(clampImagePreviewScale(0.05, 0.2), 0.2, '缩小不能低于完整适配比例')
+assert.equal(clampImagePreviewScale(99, 0.2), 2, '放大不能超过上限')
+assert.equal(clampImagePreviewScale(Number.NaN, 0.2), 0.2, '异常比例回退到完整适配')
+assert.ok(resolveWheelZoomScale({ currentScale: 0.2, fitScale: 0.2, deltaY: -100, deltaMode: 0 }) > 0.2, '滚轮向上应放大')
+assert.equal(resolveWheelZoomScale({ currentScale: 0.2, fitScale: 0.2, deltaY: 100, deltaMode: 0 }), 0.2, '已是完整适配时滚轮向下不再缩小')
+assert.equal(
+  resolveWheelZoomScale({ currentScale: 1, fitScale: 0.2, deltaY: -3, deltaMode: 1 }),
+  resolveWheelZoomScale({ currentScale: 1, fitScale: 0.2, deltaY: -48, deltaMode: 0 }),
+  '行模式滚轮增量按像素换算，跨浏览器缩放手感一致',
+)
+assert.ok(resolveWheelZoomScale({ currentScale: 1, fitScale: 0.2, deltaY: -100_000, deltaMode: 0 }) <= 2, '单次极大增量也不能越过放大上限')
+assert.deepEqual(
+  resolveZoomAnchoredScroll({ scrollLeft: 0, scrollTop: 0, stageWidth: 800, stageHeight: 600, previousWidth: 1600, previousHeight: 1200, nextWidth: 3200, nextHeight: 2400, anchorX: 0, anchorY: 0 }),
+  { left: 0, top: 0 },
+  '以指针所在位置为锚点缩放时，该点保持不动',
+)
 
 // ---------- #84 缩放保持视觉中心且不越界 ----------
 assert.deepEqual(
@@ -141,9 +152,11 @@ assert.ok(clampedScroll.left <= 3200 - 800 && clampedScroll.top <= 2400 - 600, '
 // ---------- #84 静态契约：可访问性与旧浏览器降级 ----------
 assert.ok(mallSource.includes('<ClientImagePreviewer'), '商城页必须改用原图预览组件')
 assert.ok(!mallSource.includes('mall-image-preview'), '旧的仅 object-fit 预览层与样式必须移除')
-for (const needle of ['role="dialog"', 'aria-modal="true"', "case 'Escape':", 'aria-label="放大"', 'aria-label="缩小"', 'aria-label="重置为完整显示"', 'aria-label="关闭预览"', 'overflow: auto;']) {
+for (const needle of ['role="dialog"', 'aria-modal="true"', "case 'Escape':", 'aria-label="关闭预览"', '@wheel.passive="handleStageWheel"', 'setPointerCapture', 'touch-action: none;']) {
   assert.ok(previewerSource.includes(needle), `原图预览组件缺少关键能力：${needle}`)
 }
+assert.ok(!previewerSource.includes('client-image-previewer__toolbar'), '原图预览只保留右上角关闭按钮，不再显示缩放工具栏')
+assert.ok(!/addEventListener\(\s*['"]wheel['"]/.test(previewerSource), '滚轮缩放只允许模板被动监听，不得手写非被动 wheel 监听')
 assert.ok(!/\binset:/.test(previewerSource), '原图预览遮罩不得依赖 inset 简写')
 assert.match(previewerSource, /\.client-image-previewer \{[^}]*top: 0;[^}]*bottom: 0;/, '原图预览遮罩需要四向定位铺满布局视口')
 assert.ok(!/\d+dvh/.test(previewerSource), '原图预览不依赖 dvh 单位，改由固定定位四向铺满')
