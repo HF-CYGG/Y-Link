@@ -25,11 +25,14 @@ const reportPath = path.join(runtimeRoot, 'enterprise-performance-budget-report.
  * - 首屏预算：以 index.html 实际 modulepreload、入口模块和 stylesheet 依赖图为准，
  *   避免把动态路由产物误算进热路径，也避免低频重包意外回到入口而不被发现。
  *
- * 总量基线因恢复 cssCodeSplit/modulePreload 后增加少量分包包装开销，按当前 4144 KB
- * 重设为 4200 KB；不足 1.5% 的余量仍会阻止整体包体无约束增长。
+ * 已批准的 Issues #68-#74 在相同 Node 与依赖环境中的构建总产物为 4251.56 KB；
+ * 相对 main@6dc428b 的 4199.83 KB 真实增加 51.73 KB。该增量来自四项已批准功能，
+ * 而 pdf-export、charting、qr-scanner 三个低频重包与 main 的哈希和体积均未变化。
+ * 首屏、路由、低频重包和运行时细分预算均已通过，因此总量上限设为 4315 KB，
+ * 为当前批准功能基线保留约 1.49% 余量，同时继续阻止整体包体无约束增长。
  */
 const performanceBudget = {
-  totalAssetsMaxKB: 4200,
+  totalAssetsMaxKB: 4315,
   criticalAssetsMaxKB: 1180,
   initialLoadJsMaxKB: 850,
   initialLoadCssMaxKB: 320,

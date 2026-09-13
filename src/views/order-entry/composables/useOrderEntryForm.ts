@@ -22,7 +22,14 @@ import {
   getBrowserStorage,
   resolveUserScopedStorageKey,
 } from '@/utils/storage-user-scope'
-import type { FocusField, OrderEntryDrawerForm, OrderHeaderForm, OrderItemRow } from '../types'
+import {
+  getSelectableProductSkus,
+  resolveLegacyOrderEntryProductValue,
+  type FocusField,
+  type OrderEntryDrawerForm,
+  type OrderHeaderForm,
+  type OrderItemRow,
+} from '../types'
 
 
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
@@ -96,7 +103,7 @@ export const useOrderEntryForm = () => {
   /**
    * 明细与产品数据源：
    * - itemRows 保存用户当前录入的所有明细；
-   * - products 保存当前启用产品全集，供选择与自动带价使用。
+   * - products 只保存当前启用且至少有一个可选 SKU 的产品，供选择与自动带价使用。
    */
   const itemRows = ref<OrderItemRow[]>([])
   const products = ref<ProductRecord[]>([])
@@ -104,14 +111,14 @@ export const useOrderEntryForm = () => {
   /**
    * 交互状态：
    * - productsLoading 控制产品骨架；
+   * - productCandidatesReady 标记候选已成功加载，避免加载失败时覆盖恢复草稿；
    * - isSaving 防止重复提交；
-   * - deletingRowUids 用于列表删除过渡动画；
-   * - autoCreatedProductNames 记录本次提交中新建的商品名，供成功提示复用。
+   * - deletingRowUids 用于列表删除过渡动画。
    */
   const productsLoading = ref(false)
+  const productCandidatesReady = ref(false)
   const isSaving = ref(false)
   const deletingRowUids = ref<string[]>([])
-  const autoCreatedProductNames = ref<string[]>([])
 
   /**
    * 移动端抽屉编辑状态：
@@ -122,6 +129,7 @@ export const useOrderEntryForm = () => {
   const editingRowUid = ref('')
   const drawerForm = reactive<OrderEntryDrawerForm>({
     productId: '',
+    skuId: '',
     qty: null,
     unitPrice: null,
     remark: '',
@@ -133,7 +141,7 @@ export const useOrderEntryForm = () => {
    * - 支持 Enter / Tab 在整张录入网格中顺序跳转。
    */
   const fieldRefMap = new Map<string, unknown>()
-  const focusFieldOrder: FocusField[] = ['product', 'qty', 'unitPrice', 'remark']
+  const focusFieldOrder: FocusField[] = ['product', 'sku', 'qty', 'unitPrice', 'remark']
   const draftPersistenceReady = ref(false)
 
   /**
@@ -179,6 +187,18 @@ export const useOrderEntryForm = () => {
     return new Map(products.value.map((item) => [item.id, item]))
   })
 
+  const getSelectableSkus = (productId: string) => {
+    return getSelectableProductSkus(productMap.value.get(productId))
+  }
+
+  const getSkuLabelById = (productId: string, skuId: string): string => {
+    if (!skuId) {
+      return '未选择规格'
+    }
+    const sku = getSelectableSkus(productId).find((item) => item.id === skuId)
+    return sku?.specText || '未选择规格'
+  }
+
   /**
    * 汇总信息：
    * - totalQty 汇总所有明细数量；
@@ -202,6 +222,7 @@ export const useOrderEntryForm = () => {
       .filter((row) => normalizeTextValue(row.productId) && normalizeNumber(row.qty) > 0)
       .map((row) => ({
         productId: normalizeTextValue(row.productId),
+        skuId: normalizeTextValue(row.skuId) || undefined,
         qty: normalizeNumber(row.qty),
         unitPrice: normalizeNumber(row.unitPrice),
         remark: row.remark.trim() || undefined,
@@ -223,6 +244,7 @@ export const useOrderEntryForm = () => {
   const createBlankRow = (): OrderItemRow => ({
     uid: createRowUid(),
     productId: '',
+    skuId: '',
     qty: null,
     unitPrice: null,
     remark: '',
@@ -267,6 +289,7 @@ export const useOrderEntryForm = () => {
     itemRows: itemRows.value.map((row) => ({
       uid: row.uid,
       productId: row.productId,
+      skuId: row.skuId,
       qty: row.qty,
       unitPrice: row.unitPrice,
       remark: row.remark,
@@ -275,6 +298,7 @@ export const useOrderEntryForm = () => {
     editingRowUid: editingRowUid.value,
     drawerForm: {
       productId: drawerForm.productId,
+      skuId: drawerForm.skuId,
       qty: drawerForm.qty,
       unitPrice: drawerForm.unitPrice,
       remark: drawerForm.remark,
@@ -287,7 +311,7 @@ export const useOrderEntryForm = () => {
    * - 仅在浏览器环境且持久化开关就绪后执行，避免初始化阶段把空白态覆盖到草稿。
    */
   const persistDraft = () => {
-    if (!draftPersistenceReady.value) {
+    if (!draftPersistenceReady.value || !productCandidatesReady.value) {
       return
     }
 
@@ -333,6 +357,7 @@ export const useOrderEntryForm = () => {
         ? parsedDraft.itemRows.map((row) => ({
             uid: row.uid || createRowUid(),
             productId: row.productId ?? '',
+            skuId: row.skuId ?? '',
             qty: typeof row.qty === 'number' ? row.qty : null,
             unitPrice: typeof row.unitPrice === 'number' ? row.unitPrice : null,
             remark: row.remark ?? '',
@@ -346,6 +371,7 @@ export const useOrderEntryForm = () => {
         editingRowUid.value = ''
       }
       drawerForm.productId = parsedDraft.drawerForm.productId ?? ''
+      drawerForm.skuId = parsedDraft.drawerForm.skuId ?? ''
       drawerForm.qty = typeof parsedDraft.drawerForm.qty === 'number' ? parsedDraft.drawerForm.qty : null
       drawerForm.unitPrice = typeof parsedDraft.drawerForm.unitPrice === 'number' ? parsedDraft.drawerForm.unitPrice : null
       drawerForm.remark = parsedDraft.drawerForm.remark ?? ''
@@ -368,7 +394,7 @@ export const useOrderEntryForm = () => {
   /**
    * 根据产品主键获取展示名称：
    * - 已存在产品显示产品名；
-   * - allow-create 的临时输入显示“新建商品”；
+   * - 旧草稿中的未知或失效值显示为不可用商品；
    * - 空值场景显示未选择。
    */
   const getProductLabelById = (productId: string): string => {
@@ -376,7 +402,7 @@ export const useOrderEntryForm = () => {
     if (product) {
       return product.productName
     }
-    return productId ? `新建商品：${productId}` : '未选择产品'
+    return productId ? `不可用商品：${productId}` : '未选择产品'
   }
 
   /**
@@ -396,20 +422,52 @@ export const useOrderEntryForm = () => {
 
   /**
    * 加载可选产品：
-   * - 仅请求启用产品；
+   * - 仅请求启用产品，并过滤掉没有当前启用 SKU 的记录；
    * - 失败时给出稳定错误提示，避免页面沉默失败。
    */
-  const loadProducts = async () => {
+  const loadProducts = async (): Promise<boolean> => {
     productsLoading.value = true
+    productCandidatesReady.value = false
     try {
-      products.value = await productApi.getProductList({
+      const loadedProducts = await productApi.getProductList({
         isActive: true,
       })
+      products.value = loadedProducts.filter((product) => getSelectableProductSkus(product).length > 0)
+      productCandidatesReady.value = true
+      return true
     } catch (error) {
       showAppError(extractErrorMessage(error, '产品加载失败，请稍后重试'))
+      return false
     } finally {
       productsLoading.value = false
     }
+  }
+
+  /**
+   * 将恢复草稿中的商品值与当前候选数据对齐：
+   * - 旧版 allow-create 保存的唯一精确商品名会迁移为真实 ID，未知或重名值保持原样；
+   * - 已失效商品清空 SKU/价格，单 SKU 自动补选并带入默认价，多 SKU 继续要求人工选择；
+   * - 首次挂载与账号切换共用本协调器，避免两条恢复路径出现兼容差异。
+   */
+  const reconcileRestoredDraftProducts = () => {
+    const reconcileSelection = (selection: Pick<OrderItemRow, 'productId' | 'skuId' | 'unitPrice'>) => {
+      selection.productId = resolveLegacyOrderEntryProductValue(selection.productId, products.value)
+      const candidates = getSelectableSkus(selection.productId)
+      const selectedSku = candidates.find((sku) => sku.id === selection.skuId)
+      if (selectedSku) {
+        if (selection.unitPrice === null) {
+          selection.unitPrice = normalizeNumber(selectedSku.defaultPrice)
+        }
+        return
+      }
+
+      const fallbackSku = candidates.length === 1 ? candidates[0] : undefined
+      selection.skuId = fallbackSku?.id ?? ''
+      selection.unitPrice = fallbackSku ? normalizeNumber(fallbackSku.defaultPrice) : null
+    }
+
+    itemRows.value.forEach(reconcileSelection)
+    reconcileSelection(drawerForm)
   }
 
   /**
@@ -420,84 +478,54 @@ export const useOrderEntryForm = () => {
   const handleProductChange = (row: OrderItemRow) => {
     const product = productMap.value.get(row.productId)
     if (!product) {
+      row.skuId = ''
       row.unitPrice = null
       return
     }
-
-    row.unitPrice = normalizeNumber(Number(product.defaultPrice))
+    const candidates = getSelectableProductSkus(product)
+    const sku = candidates.length === 1 ? candidates[0] : undefined
+    row.skuId = sku?.id ?? ''
+    row.unitPrice = sku ? normalizeNumber(sku.defaultPrice) : null
   }
 
-  /**
-   * 判断输入值是否是现有产品主键：
-   * - allow-create 场景下，现有产品与“待自动建档名称”需要区分处理；
-   * - 若能直接命中主键则无需再自动建档。
-   */
-  const isExistingProductId = (value: string): boolean => {
-    return productMap.value.has(value)
-  }
-
-  /**
-   * 确保提交使用真实产品主键：
-   * - 允许直接提交现有产品；
-   * - 若用户输入的是新商品名称，则自动建档后回填主键；
-   * - createdCache 避免同一次提交重复创建同名商品。
-   */
-  const ensureProductId = async (
-    rawValue: string,
-    createdCache: Map<string, string>,
-    unitPrice: number,
-  ): Promise<string> => {
-    const normalizedValue = normalizeTextValue(rawValue)
-    if (!normalizedValue) {
-      throw new Error('产品不能为空')
-    }
-
-    if (isExistingProductId(normalizedValue)) {
-      return normalizedValue
-    }
-
-    const cachedId = createdCache.get(normalizedValue)
-    if (cachedId) {
-      return cachedId
-    }
-
-    const existed = products.value.find((item) => item.productName === normalizedValue)
-    if (existed) {
-      createdCache.set(normalizedValue, existed.id)
-      return existed.id
-    }
-
-    const created = await productApi.createProduct({
-      productCode: `Auto-${globalThis.crypto.randomUUID().slice(0, 8)}`,
-      productName: normalizedValue,
-      pinyinAbbr: '',
-      defaultPrice: Math.max(unitPrice, 0),
-      isActive: true,
-    })
-    products.value = [created, ...products.value]
-    createdCache.set(normalizedValue, created.id)
-    autoCreatedProductNames.value.push(normalizedValue)
-    return created.id
+  const handleSkuChange = (row: OrderItemRow) => {
+    const sku = getSelectableSkus(row.productId).find((item) => item.id === row.skuId)
+    row.unitPrice = sku ? normalizeNumber(sku.defaultPrice) : null
   }
 
   /**
    * 构建最终提交明细：
-   * - 顺序解析所有有效行；
-   * - 在需要时自动建档商品并回写真实 productId；
+   * - 顺序解析所有有效行，并再次确认商品仍在当前可选集合；
+   * - 开单链路不创建商品，避免商品创建成功而库存型出库失败后留下半成功数据；
    * - 输出结果直接可用于整单提交接口。
    */
-  const buildSubmitItemsWithAutoProducts = async (): Promise<SubmitOrderPayload['items']> => {
-    const createdCache = new Map<string, string>()
-    autoCreatedProductNames.value = []
-
+  const buildSubmitItems = (): SubmitOrderPayload['items'] => {
     const rows = itemRows.value.filter((row) => normalizeTextValue(row.productId) && normalizeNumber(row.qty) > 0)
     const submitItems: SubmitOrderPayload['items'] = []
 
-    for (const row of rows) {
-      const resolvedProductId = await ensureProductId(row.productId, createdCache, normalizeNumber(row.unitPrice))
-      row.productId = resolvedProductId
+    for (const [rowIndex, row] of rows.entries()) {
+      if (!Number.isSafeInteger(normalizeNumber(row.qty))) {
+        throw new Error(`第 ${rowIndex + 1} 行数量必须为正整数`)
+      }
+      const resolvedProductId = normalizeTextValue(row.productId)
+      if (!productMap.value.has(resolvedProductId)) {
+        throw new Error(`第 ${rowIndex + 1} 行商品未建档、已停用或暂无可用规格，请重新选择`)
+      }
+      const candidates = getSelectableSkus(resolvedProductId)
+      let selectedSku = candidates.find((sku) => sku.id === row.skuId)
+      if (!selectedSku && candidates.length === 1) {
+        selectedSku = candidates[0]
+        row.skuId = selectedSku?.id ?? ''
+      }
+      if (!selectedSku) {
+        if (candidates.length > 1) {
+          throw new Error(`商品“${getProductLabelById(resolvedProductId)}”为多规格商品，请选择规格`)
+        }
+        throw new Error(`商品“${getProductLabelById(resolvedProductId)}”暂无当前启用规格`)
+      }
       submitItems.push({
         productId: resolvedProductId,
+        skuId: selectedSku.id,
         qty: normalizeNumber(row.qty),
         unitPrice: normalizeNumber(row.unitPrice),
         remark: row.remark.trim() || undefined,
@@ -541,6 +569,7 @@ export const useOrderEntryForm = () => {
   const openDrawerByRow = (row: OrderItemRow) => {
     editingRowUid.value = row.uid
     drawerForm.productId = row.productId
+    drawerForm.skuId = row.skuId
     drawerForm.qty = row.qty
     drawerForm.unitPrice = row.unitPrice
     drawerForm.remark = row.remark
@@ -574,7 +603,24 @@ export const useOrderEntryForm = () => {
       return
     }
 
+    if (!Number.isSafeInteger(normalizeNumber(drawerForm.qty)) || normalizeNumber(drawerForm.qty) <= 0) {
+      showAppWarning('数量必须为正整数')
+      return
+    }
+
+    if (!productMap.value.has(drawerForm.productId)) {
+      showAppWarning('所选商品未建档、已停用或暂无可用规格，请重新选择')
+      return
+    }
+
+    const candidates = getSelectableSkus(drawerForm.productId)
+    if (!candidates.some((sku) => sku.id === drawerForm.skuId)) {
+      showAppWarning(candidates.length > 1 ? '该商品有多个规格，请选择规格' : '该商品暂无当前启用规格')
+      return
+    }
+
     row.productId = drawerForm.productId
+    row.skuId = drawerForm.skuId
     row.qty = drawerForm.qty
     row.unitPrice = drawerForm.unitPrice
     row.remark = drawerForm.remark
@@ -588,7 +634,15 @@ export const useOrderEntryForm = () => {
    */
   const handleDrawerProductChange = () => {
     const product = productMap.value.get(drawerForm.productId)
-    drawerForm.unitPrice = product ? normalizeNumber(Number(product.defaultPrice)) : null
+    const candidates = getSelectableProductSkus(product)
+    const sku = candidates.length === 1 ? candidates[0] : undefined
+    drawerForm.skuId = sku?.id ?? ''
+    drawerForm.unitPrice = sku ? normalizeNumber(sku.defaultPrice) : null
+  }
+
+  const handleDrawerSkuChange = () => {
+    const sku = getSelectableSkus(drawerForm.productId).find((item) => item.id === drawerForm.skuId)
+    drawerForm.unitPrice = sku ? normalizeNumber(sku.defaultPrice) : null
   }
 
   /**
@@ -703,6 +757,7 @@ export const useOrderEntryForm = () => {
     editingRowUid.value = ''
     drawerVisible.value = false
     drawerForm.productId = ''
+    drawerForm.skuId = ''
     drawerForm.qty = null
     drawerForm.unitPrice = null
     drawerForm.remark = ''
@@ -719,11 +774,41 @@ export const useOrderEntryForm = () => {
       return
     }
 
+    const invalidQtyRow = itemRows.value.find((row) => {
+      if (!normalizeTextValue(row.productId)) return false
+      const qty = normalizeNumber(row.qty)
+      return !Number.isSafeInteger(qty) || qty <= 0
+    })
+    if (invalidQtyRow) {
+      showAppWarning('数量必须为正整数')
+      return
+    }
+
     if (!validSubmitItems.value.length) {
       showAppWarning('请至少录入一条有效明细（已选择产品且数量大于 0）')
       return
     }
 
+    const invalidProductRow = itemRows.value.find((row) => {
+      const productId = normalizeTextValue(row.productId)
+      return Boolean(productId) && normalizeNumber(row.qty) > 0 && !productMap.value.has(productId)
+    })
+    if (invalidProductRow) {
+      showAppWarning('存在未建档、已停用或暂无可用规格的商品，请重新选择')
+      return
+    }
+
+    const invalidSkuRow = itemRows.value.find((row) => {
+      if (!productMap.value.has(row.productId) || normalizeNumber(row.qty) <= 0) {
+        return false
+      }
+      return !getSelectableSkus(row.productId).some((sku) => sku.id === row.skuId)
+    })
+    if (invalidSkuRow) {
+      const candidates = getSelectableSkus(invalidSkuRow.productId)
+      showAppWarning(candidates.length > 1 ? '存在多规格商品尚未选择规格' : '存在商品暂无当前启用规格')
+      return
+    }
     const hasInvalidPriceRow = itemRows.value.some((row) => {
       const hasProduct = Boolean(normalizeTextValue(row.productId))
       const hasQty = normalizeNumber(row.qty) > 0
@@ -744,7 +829,7 @@ export const useOrderEntryForm = () => {
 
     isSaving.value = true
     try {
-      const submitItems = await buildSubmitItemsWithAutoProducts()
+      const submitItems = buildSubmitItems()
       const idempotencyKey = `web-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
       const isDepartmentOrder = headerForm.orderType === 'department'
       const result = await orderApi.submitOrder({
@@ -761,10 +846,7 @@ export const useOrderEntryForm = () => {
         items: submitItems,
       } as SubmitOrderPayload)
 
-      showAppSuccess(`保存成功，单号：${result.order.showNo}`)
-      if (autoCreatedProductNames.value.length) {
-        showAppSuccess(`已自动建档商品：${[...new Set(autoCreatedProductNames.value)].join('、')}`)
-      }
+      showAppSuccess(`保存成功，业务单号：${result.order.businessNo}`)
 
       resetForm()
       persistDraft()
@@ -789,7 +871,7 @@ export const useOrderEntryForm = () => {
 
   /**
    * 页面初始化：
-   * - 首屏拉取产品；
+   * - 首屏恢复草稿并拉取产品，再统一迁移旧商品名称和对齐 SKU/价格；
    * - 无论请求是否成功，都确保页面至少有一条可编辑的空白明细。
    */
   onMounted(async () => {
@@ -797,12 +879,17 @@ export const useOrderEntryForm = () => {
       headerForm.issuerName = defaultIssuerName.value
     }
     const restored = restoreDraft()
-    await loadProducts()
+    const productsLoaded = await loadProducts()
+    if (productsLoaded) {
+      reconcileRestoredDraftProducts()
+    }
     if (!restored) {
       itemRows.value = [createBlankRow()]
     }
     draftPersistenceReady.value = true
-    persistDraft()
+    if (productsLoaded) {
+      persistDraft()
+    }
   })
 
   /**
@@ -854,6 +941,7 @@ export const useOrderEntryForm = () => {
       drawerVisible,
       editingRowUid,
       () => drawerForm.productId,
+      () => drawerForm.skuId,
       () => drawerForm.qty,
       () => drawerForm.unitPrice,
       () => drawerForm.remark,
@@ -876,6 +964,7 @@ export const useOrderEntryForm = () => {
   /**
    * 账号切换时同步切换草稿作用域：
    * - 新账号优先恢复自己的草稿；
+   * - 恢复后复用首次挂载的商品名称迁移与 SKU/价格对齐逻辑；
    * - 若没有草稿则回退到空白态，避免继续展示上一账号录入中的明细。
    */
   watch(
@@ -889,7 +978,10 @@ export const useOrderEntryForm = () => {
       if (!restored) {
         resetForm()
       }
-      persistDraft()
+      if (productCandidatesReady.value) {
+        reconcileRestoredDraftProducts()
+        persistDraft()
+      }
     },
   )
 
@@ -914,6 +1006,9 @@ export const useOrderEntryForm = () => {
     totalAmount,
     appendRow,
     handleProductChange,
+    handleSkuChange,
+    getSelectableSkus,
+    getSkuLabelById,
     getProductLabelById,
     calcLineAmount,
     toMoney,
@@ -924,6 +1019,7 @@ export const useOrderEntryForm = () => {
     openDrawerForCreate,
     applyDrawerEdit,
     handleDrawerProductChange,
+    handleDrawerSkuChange,
     setFieldRef,
     handleGridKeydown,
     submitOrder,

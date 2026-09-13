@@ -2,8 +2,8 @@
  * 模块说明：src/views/order-list/order-voucher-aggregation.ts
  * 文件职责：为正式出库单生成只读展示聚合行，不改变订单明细、库存、核销、删除恢复或审计的 SKU 粒度。
  * 实现逻辑：
- * - 仅以有效 productId 作为商品合并键；缺失身份的历史行逐条保留，避免同名或空身份数据被错误合并；
- * - 规格仍嵌在历史商品名快照中，因此合并时保留各完整快照，不截断或剥除括号文本；
+ * - 新明细按 productId + skuId 合并，历史无 skuId 明细继续按 productId 合并，缺失商品身份的行逐条保留；
+ * - 展示优先把独立规格快照附加到商品名；已有括号规格的 O2O 历史名称不重复追加；
  * - 数量和小计分别按原始字段的两位小数相加，单价只在全部原始行一致时展示，绝不由数量反推单价。
  */
 
@@ -12,7 +12,9 @@ type VoucherPrimitive = string | number | null | undefined
 export interface OrderVoucherSourceItem {
   id?: VoucherPrimitive
   productId?: VoucherPrimitive
+  skuId?: VoucherPrimitive
   productName?: VoucherPrimitive
+  specText?: VoucherPrimitive
   qty?: VoucherPrimitive
   unitPrice?: VoucherPrimitive
   subTotal?: VoucherPrimitive
@@ -86,6 +88,13 @@ const createMutableItem = (key: string): MutableVoucherDisplayItem => ({
   invalidPrice: false,
 })
 
+const buildProductSpecSnapshotText = (productName: string, specText: string): string => {
+  if (!specText || productName.includes(`（${specText}）`) || productName.includes(`(${specText})`)) {
+    return productName
+  }
+  return productName ? `${productName}（${specText}）` : specText
+}
+
 const appendDistinctText = (items: Set<string>, value: string) => {
   if (value) {
     items.add(value)
@@ -128,11 +137,20 @@ export const aggregateOrderVoucherItems = (items: readonly OrderVoucherSourceIte
 
   items.forEach((sourceItem, index) => {
     const productId = normalizeDisplayText(sourceItem.productId)
+    const skuId = normalizeDisplayText(sourceItem.skuId)
     const sourceId = normalizeDisplayText(sourceItem.id)
-    const key = productId ? `product:${productId}` : `item:${sourceId || 'unknown'}:${index}`
+    const key = productId
+      ? skuId ? `product:${productId}:sku:${skuId}` : `product:${productId}`
+      : `item:${sourceId || 'unknown'}:${index}`
     const targetItem = aggregatedItems.get(key) ?? createMutableItem(key)
 
-    appendDistinctText(targetItem.names, normalizeDisplayText(sourceItem.productName))
+    appendDistinctText(
+      targetItem.names,
+      buildProductSpecSnapshotText(
+        normalizeDisplayText(sourceItem.productName),
+        normalizeDisplayText(sourceItem.specText),
+      ),
+    )
     appendDistinctText(targetItem.remarks, normalizeDisplayText(sourceItem.remark))
     appendSum(targetItem, sourceItem.qty, 'qtyCents', 'invalidQty')
     appendSum(targetItem, sourceItem.subTotal, 'subTotalCents', 'invalidSubTotal')

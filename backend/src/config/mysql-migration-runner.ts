@@ -22,7 +22,7 @@
  *   （CREATE TABLE IF NOT EXISTS / information_schema 判断 + PREPARE-EXECUTE 动态 DDL），
  *   再追加到 AUTO_MIGRATABLE_FILES；不要使用 MariaDB 专有的 ADD COLUMN IF NOT EXISTS；
  * - 新增强依赖的关键结构时，请同步补充 MYSQL_REQUIRED_TABLES / MYSQL_REQUIRED_COLUMNS /
- *   MYSQL_REQUIRED_INDEXES 及其迁移脚本映射，
+ *   MYSQL_REQUIRED_INDEXES / MYSQL_REQUIRED_FOREIGN_KEYS 及其迁移脚本映射，
  *   并保持与 database-bootstrap.ts 的 SQLITE_REQUIRED_TABLES 口径一致；
  * - 若引入新的不可重放脚本，请同步补充 NON_IDEMPOTENT_HISTORICAL_SCRIPTS，
  *   避免报错文案误导运维"可以安全重放"。
@@ -51,10 +51,15 @@ const MYSQL_REQUIRED_TABLES = [
   'sys_user',
   'sys_user_session',
   'client_user',
+  'client_user_session',
   'client_feedback_conversation',
+  'client_feedback_attachment',
   'o2o_preorder',
+  'o2o_return_request',
   'o2o_preorder_item',
   'biz_outbound_order',
+  'biz_outbound_order_item',
+  'inventory_log',
   'biz_inbound_order',
   'biz_inbound_order_item',
   'notification_event',
@@ -64,6 +69,9 @@ const MYSQL_REQUIRED_TABLES = [
   'business_sequence',
   'client_mobile_session',
   'sms_verification_record',
+  'order_business_no_occupancy',
+  'order_revision',
+  'account_lifecycle_event',
 ]
 
 // 每个必需表由哪个迁移脚本创建，用于在报错时给出精确指引，而不是笼统建议“从头跑一遍”。
@@ -78,8 +86,13 @@ const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
   o2o_preorder: '006_o2o_preorder_schema.sql',
   o2o_preorder_item: '006_o2o_preorder_schema.sql',
   client_user: '006_o2o_preorder_schema.sql',
+  client_user_session: '006_o2o_preorder_schema.sql',
+  o2o_return_request: '006_o2o_preorder_schema.sql',
+  client_feedback_attachment: '032_security_findings_remediation.sql',
   client_feedback_conversation: '019_client_feedback_and_customer_service.sql',
   biz_outbound_order: '001_init_schema.sql',
+  biz_outbound_order_item: '001_init_schema.sql',
+  inventory_log: '001_init_schema.sql',
   base_product_sku: '028_o2o_product_sku_selection.sql',
   notification_event: '020_notification_center_and_user_email.sql',
   notification_inbox: '020_notification_center_and_user_email.sql',
@@ -88,6 +101,9 @@ const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
   business_sequence: '035_o2o_idempotency_business_sequence.sql',
   client_mobile_session: '037_mobile_auth_session.sql',
   sms_verification_record: '039_aliyun_pnvs_sms_verification.sql',
+  order_business_no_occupancy: '042_order_business_no_amendment.sql',
+  order_revision: '042_order_business_no_amendment.sql',
+  account_lifecycle_event: '044_account_lifecycle_governance.sql',
 }
 
 interface MysqlRequiredColumn {
@@ -95,6 +111,10 @@ interface MysqlRequiredColumn {
   columnName: string
   introducingScript: string
   minCharacterMaximumLength?: number
+  expectedCharacterMaximumLength?: number
+  expectedDataType?: string
+  expectedColumnType?: string
+  expectedNullable?: boolean
 }
 
 interface MysqlRequiredIndex {
@@ -105,9 +125,32 @@ interface MysqlRequiredIndex {
   introducingScript: string
 }
 
+interface MysqlRequiredForeignKey {
+  tableName: string
+  columnName: string
+  referencedTableName: string
+  referencedColumnName: string
+  deleteRule: string
+  introducingScript: string
+}
+
+interface MysqlRequiredTrigger {
+  triggerName: string
+  eventManipulation: 'UPDATE' | 'DELETE'
+  actionTiming: 'BEFORE'
+  introducingScript: string
+}
+
 // 只列会被当前业务代码直接读写、缺失后必然导致运行时失败的增量字段。
 // 表不存在时由 MYSQL_REQUIRED_TABLES 先给出建表脚本，避免同一张缺表重复打印多条缺列提示。
 const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
+  ...['deactivated_at', 'deactivation_reason', 'deactivated_by_user_id', 'deactivated_by_username', 'deactivated_by_display_name', 'restored_at', 'restored_by_user_id', 'restored_by_username', 'restored_by_display_name']
+    .flatMap((columnName) => [
+      { tableName: 'sys_user', columnName, introducingScript: '044_account_lifecycle_governance.sql' },
+      { tableName: 'client_user', columnName, introducingScript: '044_account_lifecycle_governance.sql' },
+    ]),
+  ...['account_domain', 'account_id_snapshot', 'account_masked_snapshot', 'event_type', 'reason', 'actor_user_id_snapshot', 'actor_username_snapshot', 'actor_display_name_snapshot', 'reference_summary_json', 'event_summary_json', 'created_at']
+    .map((columnName) => ({ tableName: 'account_lifecycle_event', columnName, introducingScript: '044_account_lifecycle_governance.sql' })),
   { tableName: 'client_mobile_session', columnName: 'client_user_id', introducingScript: '037_mobile_auth_session.sql' },
   { tableName: 'client_mobile_session', columnName: 'device_id', introducingScript: '037_mobile_auth_session.sql' },
   { tableName: 'client_mobile_session', columnName: 'device_name', introducingScript: '037_mobile_auth_session.sql' },
@@ -131,6 +174,32 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
   { tableName: 'o2o_preorder', columnName: 'cancellation_source', introducingScript: '040_o2o_preorder_governance.sql' },
   { tableName: 'o2o_preorder', columnName: 'cancellation_remark', introducingScript: '040_o2o_preorder_governance.sql' },
   { tableName: 'o2o_preorder', columnName: 'cancelled_at', introducingScript: '040_o2o_preorder_governance.sql' },
+  {
+    tableName: 'biz_outbound_order_item',
+    columnName: 'sku_id',
+    introducingScript: '041_manual_outbound_sku.sql',
+    expectedDataType: 'bigint',
+    expectedColumnType: 'bigint unsigned',
+    expectedNullable: true,
+  },
+  {
+    tableName: 'biz_outbound_order_item',
+    columnName: 'sku_code_snapshot',
+    introducingScript: '041_manual_outbound_sku.sql',
+    expectedDataType: 'varchar',
+    expectedColumnType: 'varchar(96)',
+    expectedCharacterMaximumLength: 96,
+    expectedNullable: true,
+  },
+  {
+    tableName: 'biz_outbound_order_item',
+    columnName: 'spec_text_snapshot',
+    introducingScript: '041_manual_outbound_sku.sql',
+    expectedDataType: 'varchar',
+    expectedColumnType: 'varchar(255)',
+    expectedCharacterMaximumLength: 255,
+    expectedNullable: true,
+  },
   { tableName: 'business_sequence', columnName: 'sequence_key', introducingScript: '035_o2o_idempotency_business_sequence.sql' },
   { tableName: 'business_sequence', columnName: 'current_value', introducingScript: '035_o2o_idempotency_business_sequence.sql' },
   { tableName: 'business_sequence', columnName: 'created_at', introducingScript: '035_o2o_idempotency_business_sequence.sql' },
@@ -170,10 +239,94 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
   },
   { tableName: 'sms_verification_record', columnName: 'target_digest', introducingScript: '039_aliyun_pnvs_sms_verification.sql' },
   { tableName: 'sms_verification_record', columnName: 'delivery_status', introducingScript: '039_aliyun_pnvs_sms_verification.sql' },
+  {
+    tableName: 'biz_outbound_order',
+    columnName: 'business_no',
+    introducingScript: '042_order_business_no_amendment.sql',
+    expectedCharacterMaximumLength: 32,
+    expectedDataType: 'varchar',
+    expectedColumnType: 'varchar(32)',
+    expectedNullable: false,
+  },
+  {
+    tableName: 'biz_outbound_order',
+    columnName: 'edit_version',
+    introducingScript: '042_order_business_no_amendment.sql',
+    expectedDataType: 'int',
+    expectedColumnType: 'int',
+    expectedNullable: false,
+  },
+  {
+    tableName: 'biz_outbound_order',
+    columnName: 'inventory_mode',
+    introducingScript: '043_order_content_inventory_mode.sql',
+    expectedDataType: 'varchar',
+    expectedColumnType: 'varchar(24)',
+    expectedCharacterMaximumLength: 24,
+    expectedNullable: false,
+  },
+  {
+    tableName: 'inventory_log',
+    columnName: 'sku_id',
+    introducingScript: '043_order_content_inventory_mode.sql',
+    expectedDataType: 'bigint',
+    expectedColumnType: 'bigint unsigned',
+    expectedNullable: true,
+  },
+  { tableName: 'inventory_log', columnName: 'before_sku_current_stock', introducingScript: '043_order_content_inventory_mode.sql', expectedDataType: 'int', expectedColumnType: 'int', expectedNullable: true },
+  { tableName: 'inventory_log', columnName: 'after_sku_current_stock', introducingScript: '043_order_content_inventory_mode.sql', expectedDataType: 'int', expectedColumnType: 'int', expectedNullable: true },
+  { tableName: 'inventory_log', columnName: 'before_sku_preordered_stock', introducingScript: '043_order_content_inventory_mode.sql', expectedDataType: 'int', expectedColumnType: 'int', expectedNullable: true },
+  { tableName: 'inventory_log', columnName: 'after_sku_preordered_stock', introducingScript: '043_order_content_inventory_mode.sql', expectedDataType: 'int', expectedColumnType: 'int', expectedNullable: true },
+  { tableName: 'order_business_no_occupancy', columnName: 'business_namespace', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_business_no_occupancy', columnName: 'serial_value', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_business_no_occupancy', columnName: 'business_no', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_business_no_occupancy', columnName: 'order_uuid', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_business_no_occupancy', columnName: 'assigned_reason', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_business_no_occupancy', columnName: 'created_at', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_revision', columnName: 'order_id_snapshot', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_revision', columnName: 'order_uuid', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_revision', columnName: 'revision_no', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_revision', columnName: 'before_snapshot_json', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_revision', columnName: 'after_snapshot_json', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_revision', columnName: 'reason', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_revision', columnName: 'actor_user_id', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_revision', columnName: 'actor_username', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_revision', columnName: 'actor_display_name', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_revision', columnName: 'ip_address', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_revision', columnName: 'user_agent', introducingScript: '042_order_business_no_amendment.sql' },
+  { tableName: 'order_revision', columnName: 'created_at', introducingScript: '042_order_business_no_amendment.sql' },
 ]
 
 // 不只按索引名判断，还校验列顺序与唯一性，避免旧库中存在同名但错误的索引时误判为可启动。
 const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
+  {
+    tableName: 'account_lifecycle_event',
+    indexName: 'idx_account_lifecycle_event_account',
+    columns: ['account_domain', 'account_id_snapshot', 'id'],
+    unique: false,
+    introducingScript: '044_account_lifecycle_governance.sql',
+  },
+  {
+    tableName: 'account_lifecycle_event',
+    indexName: 'idx_account_lifecycle_event_created_at',
+    columns: ['created_at', 'id'],
+    unique: false,
+    introducingScript: '044_account_lifecycle_governance.sql',
+  },
+  {
+    tableName: 'inventory_log',
+    indexName: 'idx_inventory_log_sku_id',
+    columns: ['sku_id'],
+    unique: false,
+    introducingScript: '043_order_content_inventory_mode.sql',
+  },
+  {
+    tableName: 'biz_outbound_order_item',
+    indexName: 'idx_biz_outbound_item_sku_id',
+    columns: ['sku_id'],
+    unique: false,
+    introducingScript: '041_manual_outbound_sku.sql',
+  },
   {
     tableName: 'client_mobile_session',
     indexName: 'uk_client_mobile_session_access_hash',
@@ -279,6 +432,102 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
     unique: false,
     introducingScript: '039_aliyun_pnvs_sms_verification.sql',
   },
+  {
+    tableName: 'biz_outbound_order',
+    indexName: 'uk_biz_outbound_business_no',
+    columns: ['business_no'],
+    unique: true,
+    introducingScript: '042_order_business_no_amendment.sql',
+  },
+  {
+    tableName: 'order_business_no_occupancy',
+    indexName: 'uk_order_business_no_occupancy_business_no',
+    columns: ['business_no'],
+    unique: true,
+    introducingScript: '042_order_business_no_amendment.sql',
+  },
+  {
+    tableName: 'order_business_no_occupancy',
+    indexName: 'uk_order_business_no_occupancy_namespace_serial',
+    columns: ['business_namespace', 'serial_value'],
+    unique: true,
+    introducingScript: '042_order_business_no_amendment.sql',
+  },
+  {
+    tableName: 'order_business_no_occupancy',
+    indexName: 'idx_order_business_no_occupancy_order_uuid',
+    columns: ['order_uuid'],
+    unique: false,
+    introducingScript: '042_order_business_no_amendment.sql',
+  },
+  {
+    tableName: 'order_revision',
+    indexName: 'uk_order_revision_uuid_version',
+    columns: ['order_uuid', 'revision_no'],
+    unique: true,
+    introducingScript: '042_order_business_no_amendment.sql',
+  },
+  {
+    tableName: 'order_revision',
+    indexName: 'idx_order_revision_order_id_snapshot',
+    columns: ['order_id_snapshot'],
+    unique: false,
+    introducingScript: '042_order_business_no_amendment.sql',
+  },
+]
+
+const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [
+  ...[
+    ['sys_user_session', 'user_id', 'sys_user'],
+    ['client_user_session', 'user_id', 'client_user'],
+    ['client_mobile_session', 'client_user_id', 'client_user'],
+    ['biz_inbound_order', 'supplier_id', 'sys_user'],
+    ['o2o_preorder', 'client_user_id', 'client_user'],
+    ['o2o_return_request', 'client_user_id', 'client_user'],
+    ['client_feedback_conversation', 'client_user_id', 'client_user'],
+    ['client_feedback_conversation', 'assigned_user_id', 'sys_user'],
+    ['client_feedback_conversation', 'internal_remark_by_user_id', 'sys_user'],
+    ['client_feedback_attachment', 'owner_client_user_id', 'client_user'],
+    ['notification_inbox', 'user_id', 'sys_user'],
+  ].map(([tableName, columnName, referencedTableName]) => ({
+    tableName,
+    columnName,
+    referencedTableName,
+    referencedColumnName: 'id',
+    deleteRule: 'RESTRICT',
+    introducingScript: '044_account_lifecycle_governance.sql',
+  })),
+  {
+    tableName: 'biz_outbound_order_item',
+    columnName: 'sku_id',
+    referencedTableName: 'base_product_sku',
+    referencedColumnName: 'id',
+    deleteRule: 'SET NULL',
+    introducingScript: '041_manual_outbound_sku.sql',
+  },
+  {
+    tableName: 'inventory_log',
+    columnName: 'sku_id',
+    referencedTableName: 'base_product_sku',
+    referencedColumnName: 'id',
+    deleteRule: 'SET NULL',
+    introducingScript: '043_order_content_inventory_mode.sql',
+  },
+]
+
+const MYSQL_REQUIRED_TRIGGERS: readonly MysqlRequiredTrigger[] = [
+  {
+    triggerName: 'trg_account_lifecycle_event_no_update',
+    eventManipulation: 'UPDATE',
+    actionTiming: 'BEFORE',
+    introducingScript: '044_account_lifecycle_governance.sql',
+  },
+  {
+    triggerName: 'trg_account_lifecycle_event_no_delete',
+    eventManipulation: 'DELETE',
+    actionTiming: 'BEFORE',
+    introducingScript: '044_account_lifecycle_governance.sql',
+  },
 ]
 
 // 不可重复执行的历史脚本。
@@ -298,14 +547,18 @@ const AUTO_MIGRATABLE_FILES = [
   '038_department_path_capacity.sql',
   '039_aliyun_pnvs_sms_verification.sql',
   '040_o2o_preorder_governance.sql',
+  '041_manual_outbound_sku.sql',
+  '042_order_business_no_amendment.sql',
+  '043_order_content_inventory_mode.sql',
+  '044_account_lifecycle_governance.sql',
 ]
 
 /**
  * 按 MySQL 语句边界拆分 SQL 文本：
  * - 忽略单引号字符串内部的分号（含 '' 转义引号）；
  * - 忽略 `--` 行注释内部的分号；
- * - 白名单内的文件目前不含存储过程/触发器等需要 DELIMITER 重定义的语句，
- *   因此不处理 DELIMITER，一旦引入需同步升级本函数。
+ * - 044 的触发器使用单条 SIGNAL 作为 trigger body，不需要 DELIMITER；
+ * - 仍不处理含 BEGIN/END 的存储过程或复合触发器，一旦引入需同步升级本函数。
  */
 export function splitSqlStatements(sql: string): string[] {
   const statements: string[] = []
@@ -447,23 +700,27 @@ export async function runMysqlSchemaMigrations(dataSource: DataSource): Promise<
 }
 
 /**
- * 自动迁移脚本只有在其负责的关键列/索引真实存在后才允许写 tracking。
+ * 自动迁移脚本只有在其负责的关键列/索引/外键真实存在且形状正确后才允许写 tracking。
  * 这不会猜测性修复人工创建的部分表，而是避免 `CREATE TABLE IF NOT EXISTS`
  * 对异常同名表无操作后仍被误记为“已应用”。
  */
 async function assertAutoMigrationResult(queryRunner: QueryRunner, filename: string): Promise<void> {
   const requiredColumns = MYSQL_REQUIRED_COLUMNS.filter((item) => item.introducingScript === filename)
   const requiredIndexes = MYSQL_REQUIRED_INDEXES.filter((item) => item.introducingScript === filename)
-  if (requiredColumns.length === 0 && requiredIndexes.length === 0) return
+  const requiredForeignKeys = MYSQL_REQUIRED_FOREIGN_KEYS.filter((item) => item.introducingScript === filename)
+  const requiredTriggers = MYSQL_REQUIRED_TRIGGERS.filter((item) => item.introducingScript === filename)
+  if (requiredColumns.length === 0 && requiredIndexes.length === 0 && requiredForeignKeys.length === 0 && requiredTriggers.length === 0) return
 
   const tableNames = [...new Set([
     ...requiredColumns.map((item) => item.tableName),
     ...requiredIndexes.map((item) => item.tableName),
+    ...requiredForeignKeys.map((item) => item.tableName),
   ])]
   const columnNames = [...new Set(requiredColumns.map((item) => item.columnName))]
   const columnRows: MysqlColumnRow[] = requiredColumns.length > 0
     ? await queryRunner.query(
-        `SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS
+        `SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, CHARACTER_MAXIMUM_LENGTH
+         FROM information_schema.COLUMNS
          WHERE TABLE_SCHEMA = DATABASE()
            AND TABLE_NAME IN (${tableNames.map(() => '?').join(', ')})
            AND COLUMN_NAME IN (${columnNames.map(() => '?').join(', ')})`,
@@ -474,6 +731,7 @@ async function assertAutoMigrationResult(queryRunner: QueryRunner, filename: str
   const missingColumns = requiredColumns.filter((item) => (
     !existingColumns.has(schemaObjectKey(item.tableName, item.columnName))
   ))
+  const invalidColumnDefinitions = collectMysqlColumnDefinitionIssues(columnRows, requiredColumns)
 
   const indexNames = [...new Set(requiredIndexes.map((item) => item.indexName))]
   const indexRows: MysqlIndexRow[] = requiredIndexes.length > 0
@@ -502,11 +760,48 @@ async function assertAutoMigrationResult(queryRunner: QueryRunner, filename: str
       || actual.columns.length !== requirement.columns.length
       || requirement.columns.some((column, index) => actual.columns[index] !== column)
   })
-  if (missingColumns.length === 0 && invalidIndexes.length === 0) return
+
+  const foreignKeyRows: MysqlForeignKeyRow[] = requiredForeignKeys.length > 0
+    ? await queryRunner.query(
+        `SELECT kcu.TABLE_NAME, kcu.CONSTRAINT_NAME, kcu.COLUMN_NAME,
+                kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME,
+                kcu.ORDINAL_POSITION, rc.DELETE_RULE
+         FROM information_schema.KEY_COLUMN_USAGE kcu
+         INNER JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
+           ON rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
+          AND rc.TABLE_NAME = kcu.TABLE_NAME
+          AND rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+         WHERE kcu.CONSTRAINT_SCHEMA = DATABASE()
+           AND kcu.TABLE_NAME IN (${tableNames.map(() => '?').join(', ')})
+           AND kcu.REFERENCED_TABLE_NAME IS NOT NULL`,
+        tableNames,
+      )
+    : []
+  const invalidForeignKeys = collectMysqlForeignKeyIssues(foreignKeyRows, requiredForeignKeys)
+  const triggerRows: MysqlTriggerRow[] = requiredTriggers.length > 0
+    ? await queryRunner.query(
+        `SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING
+         FROM information_schema.TRIGGERS
+         WHERE TRIGGER_SCHEMA = DATABASE()
+           AND TRIGGER_NAME IN (${requiredTriggers.map(() => '?').join(', ')})`,
+        requiredTriggers.map((item) => item.triggerName),
+      )
+    : []
+  const invalidTriggers = collectMysqlTriggerIssues(triggerRows, requiredTriggers)
+  if (
+    missingColumns.length === 0
+    && invalidColumnDefinitions.length === 0
+    && invalidIndexes.length === 0
+    && invalidForeignKeys.length === 0
+    && invalidTriggers.length === 0
+  ) return
 
   const missingLabels = [
     ...missingColumns.map((item) => `字段 ${item.tableName}.${item.columnName}`),
+    ...invalidColumnDefinitions.map((item) => item.label),
     ...invalidIndexes.map((item) => `索引 ${item.tableName}.${item.indexName}`),
+    ...invalidForeignKeys.map((item) => item.label),
+    ...invalidTriggers.map((item) => item.label),
   ]
   throw new Error(
     `[启动失败] 自动迁移 ${filename} 执行后结构仍不完整，未写入迁移记录：${missingLabels.join('、')}。`
@@ -567,6 +862,9 @@ interface MysqlTableRow {
 
 interface MysqlColumnRow extends MysqlTableRow {
   COLUMN_NAME: string
+  DATA_TYPE: string
+  COLUMN_TYPE: string
+  IS_NULLABLE: string
   CHARACTER_MAXIMUM_LENGTH: number | string | null
 }
 
@@ -577,7 +875,113 @@ interface MysqlIndexRow extends MysqlTableRow {
   NON_UNIQUE: number | string
 }
 
+interface MysqlForeignKeyRow extends MysqlTableRow {
+  CONSTRAINT_NAME: string
+  COLUMN_NAME: string
+  REFERENCED_TABLE_NAME: string
+  REFERENCED_COLUMN_NAME: string
+  ORDINAL_POSITION: number | string
+  DELETE_RULE: string
+}
+
+interface MysqlTriggerRow {
+  TRIGGER_NAME: string
+  EVENT_MANIPULATION: string
+  ACTION_TIMING: string
+}
+
+interface MysqlSchemaShapeIssue<TRequirement> {
+  requirement: TRequirement
+  label: string
+}
+
 const schemaObjectKey = (tableName: string, objectName: string) => `${tableName}.${objectName}`
+
+const normalizeMysqlDefinition = (value: unknown): string => String(value ?? '').trim().toLowerCase().replaceAll(/\s+/g, ' ')
+
+function collectMysqlColumnDefinitionIssues(
+  rows: MysqlColumnRow[],
+  requirements: readonly MysqlRequiredColumn[],
+): Array<MysqlSchemaShapeIssue<MysqlRequiredColumn>> {
+  const rowMap = new Map(rows.map((row) => [schemaObjectKey(row.TABLE_NAME, row.COLUMN_NAME), row]))
+  return requirements.flatMap((requirement) => {
+    const row = rowMap.get(schemaObjectKey(requirement.tableName, requirement.columnName))
+    if (!row) return []
+    const labels: string[] = []
+    const expectedType = requirement.expectedColumnType ?? requirement.expectedDataType
+    if (
+      (requirement.expectedDataType
+        && normalizeMysqlDefinition(row.DATA_TYPE) !== normalizeMysqlDefinition(requirement.expectedDataType))
+      || (requirement.expectedColumnType
+        && normalizeMysqlDefinition(row.COLUMN_TYPE) !== normalizeMysqlDefinition(requirement.expectedColumnType))
+    ) {
+      labels.push(`字段 ${requirement.tableName}.${requirement.columnName} 类型应为 ${expectedType}`)
+    }
+    if (
+      requirement.expectedNullable !== undefined
+      && (normalizeMysqlDefinition(row.IS_NULLABLE) === 'yes') !== requirement.expectedNullable
+    ) {
+      labels.push(
+        requirement.expectedNullable
+          ? `字段 ${requirement.tableName}.${requirement.columnName} 必须允许 NULL`
+          : `字段 ${requirement.tableName}.${requirement.columnName} 必须为 NOT NULL`,
+      )
+    }
+    if (
+      requirement.expectedCharacterMaximumLength !== undefined
+      && Number(row.CHARACTER_MAXIMUM_LENGTH) !== requirement.expectedCharacterMaximumLength
+    ) {
+      labels.push(
+        `字段 ${requirement.tableName}.${requirement.columnName} 长度应为 ${requirement.expectedCharacterMaximumLength}`,
+      )
+    }
+    return labels.map((label) => ({ requirement, label }))
+  })
+}
+
+function collectMysqlForeignKeyIssues(
+  rows: MysqlForeignKeyRow[],
+  requirements: readonly MysqlRequiredForeignKey[],
+): Array<MysqlSchemaShapeIssue<MysqlRequiredForeignKey>> {
+  return requirements.flatMap((requirement) => {
+    const sourceRows = rows.filter((row) => (
+      row.TABLE_NAME === requirement.tableName && row.COLUMN_NAME === requirement.columnName
+    ))
+    if (
+      sourceRows.length !== 1
+      || sourceRows[0]?.REFERENCED_TABLE_NAME !== requirement.referencedTableName
+      || sourceRows[0]?.REFERENCED_COLUMN_NAME !== requirement.referencedColumnName
+    ) {
+      return [{
+        requirement,
+        label: `外键 ${requirement.tableName}.${requirement.columnName} 目标应为 ${requirement.referencedTableName}.${requirement.referencedColumnName}`,
+      }]
+    }
+    if (normalizeMysqlDefinition(sourceRows[0]?.DELETE_RULE) !== normalizeMysqlDefinition(requirement.deleteRule)) {
+      return [{
+        requirement,
+        label: `外键 ${requirement.tableName}.${requirement.columnName} 必须使用 ON DELETE ${requirement.deleteRule}`,
+      }]
+    }
+    return []
+  })
+}
+
+function collectMysqlTriggerIssues(
+  rows: MysqlTriggerRow[],
+  requirements: readonly MysqlRequiredTrigger[],
+): Array<MysqlSchemaShapeIssue<MysqlRequiredTrigger>> {
+  const rowMap = new Map(rows.map((row) => [row.TRIGGER_NAME, row]))
+  return requirements.flatMap((requirement) => {
+    const row = rowMap.get(requirement.triggerName)
+    if (
+      row
+      && normalizeMysqlDefinition(row.EVENT_MANIPULATION) === normalizeMysqlDefinition(requirement.eventManipulation)
+      && normalizeMysqlDefinition(row.ACTION_TIMING) === normalizeMysqlDefinition(requirement.actionTiming)
+    ) return []
+    return [{ requirement, label: `触发器 ${requirement.triggerName} 必须为 ${requirement.actionTiming} ${requirement.eventManipulation}` }]
+  })
+}
 
 /** 启动期只读自检：确认当前代码会直接依赖的 MySQL 表、字段与索引结构均已落地。 */
 export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): Promise<void> {
@@ -600,7 +1004,8 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
   const requiredColumnNames = [...new Set(requiredColumnsOnExistingTables.map((item) => item.columnName))]
   const columnRows: MysqlColumnRow[] = requiredColumnsOnExistingTables.length > 0
     ? await dataSource.query(
-        `SELECT TABLE_NAME, COLUMN_NAME, CHARACTER_MAXIMUM_LENGTH FROM information_schema.COLUMNS
+        `SELECT TABLE_NAME, COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, CHARACTER_MAXIMUM_LENGTH
+         FROM information_schema.COLUMNS
          WHERE TABLE_SCHEMA = DATABASE()
            AND TABLE_NAME IN (${requiredColumnTables.map(() => '?').join(', ')})
            AND COLUMN_NAME IN (${requiredColumnNames.map(() => '?').join(', ')})`,
@@ -619,6 +1024,10 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
     const row = existingColumnMap.get(schemaObjectKey(requirement.tableName, requirement.columnName))
     return Boolean(row) && Number(row?.CHARACTER_MAXIMUM_LENGTH ?? 0) < requirement.minCharacterMaximumLength
   })
+  const invalidColumnDefinitions = collectMysqlColumnDefinitionIssues(
+    columnRows,
+    requiredColumnsOnExistingTables,
+  )
 
   const requiredIndexesOnExistingTables = MYSQL_REQUIRED_INDEXES.filter((requirement) => (
     existingTableSet.has(requirement.tableName)
@@ -652,11 +1061,44 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
       || requirement.columns.some((column, index) => actual.columns[index] !== column)
   })
 
+  const requiredForeignKeysOnExistingTables = MYSQL_REQUIRED_FOREIGN_KEYS.filter((requirement) => (
+    existingTableSet.has(requirement.tableName)
+  ))
+  const requiredForeignKeyTables = [...new Set(requiredForeignKeysOnExistingTables.map((item) => item.tableName))]
+  const foreignKeyRows: MysqlForeignKeyRow[] = requiredForeignKeysOnExistingTables.length > 0
+    ? await dataSource.query(
+        `SELECT kcu.TABLE_NAME, kcu.CONSTRAINT_NAME, kcu.COLUMN_NAME,
+                kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME,
+                kcu.ORDINAL_POSITION, rc.DELETE_RULE
+         FROM information_schema.KEY_COLUMN_USAGE kcu
+         INNER JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
+           ON rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
+          AND rc.TABLE_NAME = kcu.TABLE_NAME
+          AND rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+         WHERE kcu.CONSTRAINT_SCHEMA = DATABASE()
+           AND kcu.TABLE_NAME IN (${requiredForeignKeyTables.map(() => '?').join(', ')})
+           AND kcu.REFERENCED_TABLE_NAME IS NOT NULL`,
+        requiredForeignKeyTables,
+      )
+    : []
+  const invalidForeignKeys = collectMysqlForeignKeyIssues(foreignKeyRows, requiredForeignKeysOnExistingTables)
+  const triggerRows: MysqlTriggerRow[] = await dataSource.query(
+    `SELECT TRIGGER_NAME, EVENT_MANIPULATION, ACTION_TIMING
+     FROM information_schema.TRIGGERS
+     WHERE TRIGGER_SCHEMA = DATABASE()
+       AND TRIGGER_NAME IN (${MYSQL_REQUIRED_TRIGGERS.map(() => '?').join(', ')})`,
+    MYSQL_REQUIRED_TRIGGERS.map((item) => item.triggerName),
+  )
+  const invalidTriggers = collectMysqlTriggerIssues(triggerRows, MYSQL_REQUIRED_TRIGGERS)
+
   if (
     missingTables.length === 0
     && missingColumns.length === 0
     && undersizedColumns.length === 0
+    && invalidColumnDefinitions.length === 0
     && invalidIndexes.length === 0
+    && invalidForeignKeys.length === 0
+    && invalidTriggers.length === 0
   ) {
     return
   }
@@ -682,8 +1124,20 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
       label: `字段 ${requirement.tableName}.${requirement.columnName} 字符容量不足（至少 ${requirement.minCharacterMaximumLength}）`,
       script: requirement.introducingScript,
     })),
+    ...invalidColumnDefinitions.map(({ requirement, label }) => ({
+      label,
+      script: requirement.introducingScript,
+    })),
     ...invalidIndexes.map((requirement) => ({
       label: `索引 ${requirement.tableName}.${requirement.indexName}`,
+      script: requirement.introducingScript,
+    })),
+    ...invalidForeignKeys.map(({ requirement, label }) => ({
+      label,
+      script: requirement.introducingScript,
+    })),
+    ...invalidTriggers.map(({ requirement, label }) => ({
+      label,
       script: requirement.introducingScript,
     })),
   ]
@@ -698,8 +1152,17 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
     undersizedColumns.length > 0
       ? `字符容量不足的必需字段：${undersizedColumns.map((item) => `${item.tableName}.${item.columnName}`).join(', ')}`
       : null,
+    invalidColumnDefinitions.length > 0
+      ? `定义不匹配的必需字段：${[...new Set(invalidColumnDefinitions.map((item) => `${item.requirement.tableName}.${item.requirement.columnName}`))].join(', ')}`
+      : null,
     invalidIndexes.length > 0
       ? `缺少或定义不匹配的必需索引：${invalidIndexes.map((item) => `${item.tableName}.${item.indexName}`).join(', ')}`
+      : null,
+    invalidForeignKeys.length > 0
+      ? `缺少或定义不匹配的必需外键：${invalidForeignKeys.map((item) => `${item.requirement.tableName}.${item.requirement.columnName}`).join(', ')}`
+      : null,
+    invalidTriggers.length > 0
+      ? `缺少或定义不匹配的必需触发器：${invalidTriggers.map((item) => item.requirement.triggerName).join(', ')}`
       : null,
   ].filter((item): item is string => Boolean(item)).join('；')
 
@@ -727,7 +1190,7 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
     + '缺失或不匹配的结构分别由以下迁移脚本维护：\n'
     + `${missingObjectGuide}\n\n`
     + `${scenarioGuide}\n\n`
-    + '若上面只涉及 033、037_mobile_auth_session、037_department_account_node_binding 或 038 维护的结构，可以设置环境变量 DB_AUTO_MIGRATE=true 后重启服务，'
+    + '若上面只涉及 033、037_mobile_auth_session、037_department_account_node_binding、038、039、040、041、042、043 或 044 维护的结构，可以设置环境变量 DB_AUTO_MIGRATE=true 后重启服务，'
     + '由服务自动执行白名单内已核实可在启动期运行的脚本。035/036 不会在启动期自动执行：'
     + '036 包含历史通知去重和唯一索引 DDL，必须按“备份 → 停止所有应用与通知 Worker → 执行脚本 → 启动新版本”完成。',
   )

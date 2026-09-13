@@ -25,6 +25,7 @@ import {
 import { hashSessionToken } from '../utils/session-token.js'
 import { generateSessionToken } from '../utils/token.js'
 import { auditService } from './audit.service.js'
+import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 import { authSecurityService } from './auth-security.service.js'
 import { customerServiceRealtimeService } from './customer-service-realtime.service.js'
 
@@ -52,6 +53,12 @@ interface AdminLoginSecuritySnapshot {
 
 const LEGACY_DEFAULT_BOOTSTRAP_PASSWORD = ['Admin', '@', '123456'].join('')
 
+export function resolveAccountState(user: Pick<SysUser, 'status' | 'deactivatedAt' | 'restoredAt'>): UserSafeProfile['accountState'] {
+  const deactivatedAt = user.deactivatedAt?.getTime() ?? 0
+  const restoredAt = user.restoredAt?.getTime() ?? 0
+  return deactivatedAt > restoredAt ? 'deactivated' : user.status
+}
+
 function toSafeProfile(user: SysUser): UserSafeProfile {
   return {
     id: user.id,
@@ -61,6 +68,14 @@ function toSafeProfile(user: SysUser): UserSafeProfile {
     role: user.role,
     permissions: resolvePermissionsByRole(user.role),
     status: user.status,
+    accountState: resolveAccountState(user),
+    deactivatedAt: user.deactivatedAt,
+    deactivationReason: user.deactivationReason,
+    deactivatedByUsername: user.deactivatedByUsername,
+    deactivatedByDisplayName: user.deactivatedByDisplayName,
+    restoredAt: user.restoredAt,
+    restoredByUsername: user.restoredByUsername,
+    restoredByDisplayName: user.restoredByDisplayName,
     lastLoginAt: user.lastLoginAt,
     createdAt: user.createdAt,
     updatedAt: user.updatedAt,
@@ -86,19 +101,6 @@ export class AuthService {
       .createQueryBuilder('user')
       .addSelect('user.passwordHash')
       .where('user.username = :username', { username })
-      .getOne()
-  }
-
-  /**
-   * 按用户 ID 加载带密码哈希的用户：
-   * - 供本人改密场景校验旧密码；
-   * - 独立方法可避免各处重复书写查询构造逻辑。
-   */
-  private async findUserWithPasswordById(id: string): Promise<SysUser | null> {
-    return this.userRepo
-      .createQueryBuilder('user')
-      .addSelect('user.passwordHash')
-      .where('user.id = :id', { id })
       .getOne()
   }
 
@@ -324,80 +326,101 @@ export class AuthService {
       throw new BizError('新密码不能与当前密码相同', 400)
     }
 
-    const user = await this.findUserWithPasswordById(auth.userId)
-    if (!user) {
-      await auditService.safeRecord({
-        actionType: 'auth.change_password',
-        actionLabel: '本人修改密码',
-        targetType: 'user',
-        targetId: auth.userId,
-        targetCode: auth.username,
-        actor: {
-          userId: auth.userId,
-          username: auth.username,
-          displayName: auth.displayName,
-        },
-        resultStatus: 'failed',
-        requestMeta,
-        detail: {
-          reason: 'user_not_found',
-        },
+    let result: { changed: boolean; userId: string }
+    try {
+      result = await runInTransaction(async (manager) => {
+        await lockActiveSysAccountForBusiness(manager, auth.userId)
+        const userRepo = manager.getRepository(SysUser)
+        const sessionRepo = manager.getRepository(SysUserSession)
+        const user = await userRepo
+          .createQueryBuilder('user')
+          .addSelect('user.passwordHash')
+          .where('user.id = :id', { id: auth.userId })
+          .getOne()
+
+        if (!user) {
+          throw new BizError('当前用户不存在', 404)
+        }
+
+        const passwordMatched = await verifyPassword(currentPassword, user.passwordHash)
+        if (!passwordMatched) {
+          await auditService.record(
+            {
+              actionType: 'auth.change_password',
+              actionLabel: '本人修改密码',
+              targetType: 'user',
+              targetId: user.id,
+              targetCode: user.username,
+              actor: {
+                userId: user.id,
+                username: user.username,
+                displayName: user.displayName,
+              },
+              resultStatus: 'failed',
+              requestMeta,
+              detail: {
+                reason: 'current_password_mismatch',
+              },
+            },
+            manager,
+          )
+          return { changed: false, userId: user.id }
+        }
+
+        user.passwordHash = await hashPassword(newPassword)
+        await userRepo.save(user)
+
+        const deletedSessions = await sessionRepo.delete({ userId: user.id })
+
+        await auditService.record(
+          {
+            actionType: 'auth.change_password',
+            actionLabel: '本人修改密码',
+            targetType: 'user',
+            targetId: user.id,
+            targetCode: user.username,
+            actor: {
+              userId: user.id,
+              username: user.username,
+              displayName: user.displayName,
+            },
+            requestMeta,
+            detail: {
+              revokedSessionCount: deletedSessions.affected ?? 0,
+            },
+          },
+          manager,
+        )
+        return { changed: true, userId: user.id }
       })
-      throw new BizError('当前用户不存在', 404)
-    }
-
-    const passwordMatched = await verifyPassword(currentPassword, user.passwordHash)
-    if (!passwordMatched) {
-      await auditService.safeRecord({
-        actionType: 'auth.change_password',
-        actionLabel: '本人修改密码',
-        targetType: 'user',
-        targetId: user.id,
-        targetCode: user.username,
-        actor: {
-          userId: user.id,
-          username: user.username,
-          displayName: user.displayName,
-        },
-        resultStatus: 'failed',
-        requestMeta,
-        detail: {
-          reason: 'current_password_mismatch',
-        },
-      })
-      throw new BizError('当前密码错误', 400)
-    }
-
-    await runInTransaction(async (manager) => {
-      const userRepo = manager.getRepository(SysUser)
-      const sessionRepo = manager.getRepository(SysUserSession)
-
-      user.passwordHash = await hashPassword(newPassword)
-      await userRepo.save(user)
-
-      const deletedSessions = await sessionRepo.delete({ userId: user.id })
-
-      await auditService.record(
-        {
+    } catch (error) {
+      if (error instanceof BizError && /(系统账号不存在|账号已停用或已注销|当前用户不存在)/.test(error.message)) {
+        await auditService.safeRecord({
           actionType: 'auth.change_password',
           actionLabel: '本人修改密码',
           targetType: 'user',
-          targetId: user.id,
-          targetCode: user.username,
+          targetId: auth.userId,
+          targetCode: auth.username,
           actor: {
-            userId: user.id,
-            username: user.username,
-            displayName: user.displayName,
+            userId: auth.userId,
+            username: auth.username,
+            displayName: auth.displayName,
           },
+          resultStatus: 'failed',
           requestMeta,
           detail: {
-            revokedSessionCount: deletedSessions.affected ?? 0,
+            reason: 'account_inactive_or_missing',
+            statusCode: error.statusCode,
           },
-        },
-        manager,
-      )
-    })
-    customerServiceRealtimeService.disconnectByOwner('service', user.id)
+        })
+      }
+      throw error
+    }
+
+    if (!result.changed) {
+      throw new BizError('当前密码错误', 400)
+    }
+    customerServiceRealtimeService.disconnectByOwner('service', result.userId)
   }
 
   async resolveAuthUserByToken(sessionToken: string): Promise<AuthUserContext> {

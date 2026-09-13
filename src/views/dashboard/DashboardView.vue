@@ -559,7 +559,7 @@ onActivated(() => {
                     : 'cursor-not-allowed opacity-80',
                 ]"
                 :disabled="!isActivityNavigable(activity)"
-                :aria-label="isActivityNavigable(activity) ? `查看出库单 ${activity.showNo} 的动态详情` : `出库单 ${activity.showNo} 已永久删除，无法跳转`"
+                :aria-label="isActivityNavigable(activity) ? `查看出库单 ${activity.businessNo} 的动态详情` : `出库单 ${activity.businessNo} 已永久删除，无法跳转`"
                 :title="isActivityNavigable(activity) ? '查看单据详情' : '该出库单已永久删除，无法跳转'"
                 @click="navigateToActivityOrder(activity)"
               >
@@ -569,7 +569,7 @@ onActivated(() => {
                       {{ activity.actionLabel }}
                     </el-tag>
                     <span class="min-w-0 truncate text-xs font-medium text-slate-700 dark:text-slate-200 sm:text-sm">
-                      {{ activity.showNo }}
+                      {{ activity.businessNo }}
                     </span>
                   </div>
                   <span class="shrink-0 pt-0.5 text-xs text-slate-500 dark:text-slate-400">

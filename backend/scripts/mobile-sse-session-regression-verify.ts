@@ -163,7 +163,7 @@ try {
   const mobileOwner = await createClientUser()
   const validMobile = await createMobileSession(mobileOwner.id)
   const validMobileResponse = new ControlledSseResponse()
-  customerServiceRealtimeService.openClientStream(mobileOwner.id, validMobile.accessToken, validMobileResponse as never, 60)
+  customerServiceRealtimeService.openClientStream(mobileOwner.id, validMobile.accessToken, validMobileResponse as never, 60, customerServiceRealtimeService.captureOwnerGeneration('client', mobileOwner.id, validMobile.accessToken))
   publishClientEvent(mobileOwner.id)
   await waitFor(
     () => validMobileResponse.writes.some((payload) => payload.includes('event: conversation')),
@@ -181,7 +181,7 @@ try {
   const accessExpiredOwner = await createClientUser()
   const accessExpired = await createMobileSession(accessExpiredOwner.id)
   const accessExpiredResponse = new ControlledSseResponse()
-  customerServiceRealtimeService.openClientStream(accessExpiredOwner.id, accessExpired.accessToken, accessExpiredResponse as never, 60)
+  customerServiceRealtimeService.openClientStream(accessExpiredOwner.id, accessExpired.accessToken, accessExpiredResponse as never, 60, customerServiceRealtimeService.captureOwnerGeneration('client', accessExpiredOwner.id, accessExpired.accessToken))
   await AppDataSource.getRepository(ClientMobileSession).update(accessExpired.session.id, { accessExpiresAt: new Date(Date.now() - 1_000) })
   await triggerIdleValidation()
   assert.equal(accessExpiredResponse.writableEnded, true, 'access 已过期的 Mobile SSE 必须关闭')
@@ -189,7 +189,7 @@ try {
   const absoluteExpiredOwner = await createClientUser()
   const absoluteExpired = await createMobileSession(absoluteExpiredOwner.id)
   const absoluteExpiredResponse = new ControlledSseResponse()
-  customerServiceRealtimeService.openClientStream(absoluteExpiredOwner.id, absoluteExpired.accessToken, absoluteExpiredResponse as never, 60)
+  customerServiceRealtimeService.openClientStream(absoluteExpiredOwner.id, absoluteExpired.accessToken, absoluteExpiredResponse as never, 60, customerServiceRealtimeService.captureOwnerGeneration('client', absoluteExpiredOwner.id, absoluteExpired.accessToken))
   await AppDataSource.getRepository(ClientMobileSession).update(absoluteExpired.session.id, { absoluteExpiresAt: new Date(Date.now() - 1_000) })
   await triggerIdleValidation()
   assert.equal(absoluteExpiredResponse.writableEnded, true, 'absolute 已过期的 Mobile SSE 必须关闭')
@@ -197,7 +197,7 @@ try {
   const disabledOwner = await createClientUser()
   const disabledMobile = await createMobileSession(disabledOwner.id)
   const disabledResponse = new ControlledSseResponse()
-  customerServiceRealtimeService.openClientStream(disabledOwner.id, disabledMobile.accessToken, disabledResponse as never, 60)
+  customerServiceRealtimeService.openClientStream(disabledOwner.id, disabledMobile.accessToken, disabledResponse as never, 60, customerServiceRealtimeService.captureOwnerGeneration('client', disabledOwner.id, disabledMobile.accessToken))
   await AppDataSource.getRepository(ClientUser).update(disabledOwner.id, { status: 'disabled' })
   await triggerIdleValidation()
   assert.equal(disabledResponse.writableEnded, true, '账号停用后的 Mobile SSE 必须关闭')
@@ -211,7 +211,7 @@ try {
     lastAccessAt: new Date(),
   })
   const webResponse = new ControlledSseResponse()
-  customerServiceRealtimeService.openClientStream(webOwner.id, webToken, webResponse as never, 60)
+  customerServiceRealtimeService.openClientStream(webOwner.id, webToken, webResponse as never, 60, customerServiceRealtimeService.captureOwnerGeneration('client', webOwner.id, webToken))
   publishClientEvent(webOwner.id, 'web_message_created')
   await waitFor(
     () => webResponse.writes.some((payload) => payload.includes('event: conversation')),
@@ -228,7 +228,7 @@ try {
     userId: admin.id, sessionToken: hashSessionToken(adminToken), expiresAt: new Date(Date.now() + 60 * 60 * 1000), lastAccessAt: new Date(),
   })
   const adminResponse = new ControlledSseResponse()
-  customerServiceRealtimeService.openServiceStream(admin.id, adminToken, adminResponse as never, 60)
+  customerServiceRealtimeService.openServiceStream(admin.id, adminToken, adminResponse as never, 60, customerServiceRealtimeService.captureOwnerGeneration('service', admin.id, adminToken))
   publishClientEvent(webOwner.id, 'service_message_created')
   await waitFor(
     () => adminResponse.writes.some((payload) => payload.includes('event: conversation')),

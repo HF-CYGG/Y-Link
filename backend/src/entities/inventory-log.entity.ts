@@ -6,6 +6,7 @@
 
 import { Column, CreateDateColumn, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn, type Relation } from 'typeorm'
 import { BaseProduct } from './base-product.entity.js'
+import { BaseProductSku } from './base-product-sku.entity.js'
 import { entityColumnOptions } from './entity-column-options.js'
 
 @Entity({ name: 'inventory_log' })
@@ -19,6 +20,10 @@ export class InventoryLog {
   @Index('idx_inventory_log_product_id')
   @Column({ name: 'product_id', ...entityColumnOptions.foreignId, comment: '商品ID' })
   productId!: string
+
+  @Index('idx_inventory_log_sku_id')
+  @Column({ name: 'sku_id', ...entityColumnOptions.foreignId, nullable: true, comment: 'SKU ID' })
+  skuId!: string | null
 
   @Column({ name: 'change_type', type: 'varchar', length: 32, comment: '变更类型' })
   changeType!: string
@@ -37,6 +42,18 @@ export class InventoryLog {
 
   @Column({ name: 'after_preordered_stock', type: 'int', default: 0, comment: '变更后预订库存' })
   afterPreorderedStock!: number
+
+  @Column({ name: 'before_sku_current_stock', type: 'int', nullable: true, comment: '变更前 SKU 物理库存' })
+  beforeSkuCurrentStock!: number | null
+
+  @Column({ name: 'after_sku_current_stock', type: 'int', nullable: true, comment: '变更后 SKU 物理库存' })
+  afterSkuCurrentStock!: number | null
+
+  @Column({ name: 'before_sku_preordered_stock', type: 'int', nullable: true, comment: '变更前 SKU 预订库存' })
+  beforeSkuPreorderedStock!: number | null
+
+  @Column({ name: 'after_sku_preordered_stock', type: 'int', nullable: true, comment: '变更后 SKU 预订库存' })
+  afterSkuPreorderedStock!: number | null
 
   @Column({ name: 'operator_type', type: 'varchar', length: 32, default: 'system', comment: '操作人类型' })
   operatorType!: string
@@ -62,4 +79,8 @@ export class InventoryLog {
   @ManyToOne(() => BaseProduct, { onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'product_id' })
   product?: Relation<BaseProduct>
+
+  @ManyToOne(() => BaseProductSku, { onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'sku_id' })
+  sku?: Relation<BaseProductSku>
 }

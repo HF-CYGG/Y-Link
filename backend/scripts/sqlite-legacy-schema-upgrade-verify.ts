@@ -66,6 +66,46 @@ const openLegacyDatabase = (): Promise<void> => new Promise((resolve, reject) =>
         ) VALUES (1, 1, 1, 'Legacy Product', 3);
 
         CREATE TABLE o2o_preorder (id INTEGER PRIMARY KEY AUTOINCREMENT);
+
+        CREATE TABLE biz_outbound_order (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          order_uuid varchar(36) NOT NULL,
+          show_no varchar(32) NOT NULL,
+          order_type varchar(32) NOT NULL DEFAULT 'walkin',
+          has_customer_order tinyint NOT NULL DEFAULT 0,
+          is_system_applied tinyint NOT NULL DEFAULT 0,
+          issuer_name varchar(64),
+          customer_department_name varchar(271),
+          idempotency_key varchar(128) NOT NULL,
+          customer_name varchar(128),
+          remark varchar(500),
+          total_qty decimal(12,2) NOT NULL DEFAULT 0,
+          total_amount decimal(14,2) NOT NULL DEFAULT 0,
+          is_deleted tinyint NOT NULL DEFAULT 0,
+          created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO biz_outbound_order (
+          order_uuid, show_no, idempotency_key, customer_name, total_qty, total_amount
+        ) VALUES
+          ('00000000-0000-4000-8000-000000000073', 'hyyz000001', 'legacy-manual-73', 'Legacy Manual', 1, 12.50),
+          ('00000000-0000-4000-8000-000000000074', 'hyyz000002', 'o2o-preorder-verify:legacy-73', 'Legacy O2O', 1, 12.50);
+
+        CREATE TABLE inventory_log (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          product_id INTEGER NOT NULL,
+          change_type varchar(32) NOT NULL,
+          change_qty integer NOT NULL,
+          before_current_stock integer NOT NULL DEFAULT 0,
+          after_current_stock integer NOT NULL DEFAULT 0,
+          before_preordered_stock integer NOT NULL DEFAULT 0,
+          after_preordered_stock integer NOT NULL DEFAULT 0,
+          operator_type varchar(32) NOT NULL DEFAULT 'system',
+          created_at datetime NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO inventory_log (
+          product_id, change_type, change_qty, before_current_stock, after_current_stock
+        ) VALUES (1, 'legacy_adjustment', 1, 6, 7);
       `,
       (sqlError) => {
         database.close()
@@ -101,6 +141,19 @@ try {
     'SELECT sku_id AS skuId FROM biz_inbound_order_item WHERE id = 1',
   ) as Array<{ skuId: string | number | null }>
   const indexes = await AppDataSource.query('PRAGMA index_list(o2o_preorder)') as Array<{ name: string }>
+  const inventoryModes = await AppDataSource.query(
+    'SELECT idempotency_key AS idempotencyKey, inventory_mode AS inventoryMode FROM biz_outbound_order ORDER BY id',
+  ) as Array<{ idempotencyKey: string; inventoryMode: string }>
+  const legacyInventoryLogs = await AppDataSource.query(
+    'SELECT sku_id AS skuId, before_sku_current_stock AS beforeSkuCurrentStock FROM inventory_log WHERE change_type = ?',
+    ['legacy_adjustment'],
+  ) as Array<{ skuId: string | number | null; beforeSkuCurrentStock: number | null }>
+  const inventoryLogForeignKeys = await AppDataSource.query('PRAGMA foreign_key_list(inventory_log)') as Array<{
+    from: string
+    table: string
+    to: string
+    on_delete: string
+  }>
 
   assert.equal(skus.length, 1, '历史商品必须补一条默认 SKU')
   assert.equal(Number(skus[0]?.currentStock), 7, '默认 SKU 必须继承商品库存')
@@ -108,6 +161,24 @@ try {
   assert.ok(
     indexes.some((index) => index.name === 'idx_o2o_preorder_client_deleted_id'),
     '依赖新列的商城索引必须在结构升级后创建',
+  )
+  assert.deepEqual(
+    inventoryModes.map((item) => [item.idempotencyKey, item.inventoryMode]),
+    [
+      ['legacy-manual-73', 'legacy_none'],
+      ['o2o-preorder-verify:legacy-73', 'o2o_preapplied'],
+    ],
+    'SQLite 历史手工单与 O2O 正式单必须按既定库存模式推断',
+  )
+  assert.deepEqual(legacyInventoryLogs, [{ skuId: null, beforeSkuCurrentStock: null }], '历史库存流水新增 SKU 字段必须保持 NULL')
+  assert.ok(
+    inventoryLogForeignKeys.some((foreignKey) => (
+      foreignKey.from === 'sku_id'
+      && foreignKey.table === 'base_product_sku'
+      && foreignKey.to === 'id'
+      && foreignKey.on_delete.toUpperCase() === 'SET NULL'
+    )),
+    'SQLite inventory_log.sku_id 必须安全补齐 SET NULL 外键',
   )
 
   await AppDataSource.query('DROP INDEX uk_client_user_department_node_id')
@@ -126,7 +197,7 @@ try {
     '结构补齐后部门节点唯一索引必须精确绑定 department_node_id，不能只按索引名称误判',
   )
 
-  console.log('OK SQLite 旧库结构、默认 SKU、入库关联与商城索引升级验收通过')
+  console.log('OK SQLite 旧库结构、库存模式、默认 SKU、入库关联与商城索引升级验收通过')
 } finally {
   if (dataSource?.isInitialized) {
     await dataSource.destroy()

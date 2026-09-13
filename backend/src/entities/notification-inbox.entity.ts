@@ -1,5 +1,6 @@
-import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn, UpdateDateColumn } from 'typeorm'
+import { Column, CreateDateColumn, Entity, Index, JoinColumn, ManyToOne, PrimaryGeneratedColumn, UpdateDateColumn, type Relation } from 'typeorm'
 import { entityColumnOptions } from './entity-column-options.js'
+import { SysUser } from './sys-user.entity.js'
 
 @Entity({ name: 'notification_inbox' })
 @Index('idx_notification_inbox_user_unread_id', ['userId', 'isRead', 'id'])
@@ -39,4 +40,8 @@ export class NotificationInbox {
 
   @UpdateDateColumn({ name: 'updated_at', ...entityColumnOptions.timestamp })
   updatedAt!: Date
+
+  @ManyToOne(() => SysUser, { onDelete: 'RESTRICT' })
+  @JoinColumn({ name: 'user_id' })
+  user?: Relation<SysUser>
 }

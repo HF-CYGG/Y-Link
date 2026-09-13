@@ -44,6 +44,9 @@ const {
   totalAmount,
   appendRow,
   handleProductChange,
+  handleSkuChange,
+  getSelectableSkus,
+  getSkuLabelById,
   getProductLabelById,
   calcLineAmount,
   toMoney,
@@ -54,6 +57,7 @@ const {
   openDrawerForCreate,
   applyDrawerEdit,
   handleDrawerProductChange,
+  handleDrawerSkuChange,
   setFieldRef,
   handleGridKeydown,
   submitOrder,
@@ -93,6 +97,9 @@ const totalAmountText = computed(() => toMoney(totalAmount.value))
         :get-row-class-name="getRowClassName"
         :set-field-ref="setFieldRef"
         :handle-product-change="handleProductChange"
+        :handle-sku-change="handleSkuChange"
+        :get-selectable-skus="getSelectableSkus"
+        :get-sku-label-by-id="getSkuLabelById"
         :handle-grid-keydown="handleGridKeydown"
         :append-row="appendRow"
         :open-drawer-for-create="openDrawerForCreate"
@@ -100,6 +107,7 @@ const totalAmountText = computed(() => toMoney(totalAmount.value))
         :remove-row="removeRow"
         :apply-drawer-edit="applyDrawerEdit"
         :handle-drawer-product-change="handleDrawerProductChange"
+        :handle-drawer-sku-change="handleDrawerSkuChange"
         :get-product-label-by-id="getProductLabelById"
         :calc-line-amount="calcLineAmount"
         :to-money="toMoney"

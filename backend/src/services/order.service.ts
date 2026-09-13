@@ -14,6 +14,8 @@ import { Brackets, type EntityManager } from 'typeorm'
 import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
+import { BaseProductSku } from '../entities/base-product-sku.entity.js'
+import { InventoryLog } from '../entities/inventory-log.entity.js'
 import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import {
@@ -26,10 +28,23 @@ import { generateOrderUuid } from '../utils/id-generator.js'
 import type { PaginationResult } from '../types/api.js'
 import type { RequestMeta } from '../utils/request-meta.js'
 import { auditService } from './audit.service.js'
+import {
+  orderAmendmentService,
+  type OrderAmendmentBatchInput,
+  type OrderAmendmentPreviewResult,
+} from './order-amendment.service.js'
+import { orderBusinessNoService } from './order-business-no.service.js'
+import { invalidateMallCatalogReadCache } from './mall-catalog-revision.service.js'
+import {
+  orderContentEditService,
+  type UpdateOrderContentInput,
+} from './order-content-edit.service.js'
 import { orderSerialService, type OrderType } from './order-serial.service.js'
+import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 
 export interface SubmitOrderItemInput {
   productId: string | number
+  skuId?: string | number | null
   qty: number
   unitPrice: number
   remark?: string
@@ -61,6 +76,7 @@ export interface OrderListQuery {
 
 export interface UpdateOrderComplianceFlagsInput {
   orderId: string
+  editVersion: number
   hasCustomerOrder?: boolean
   isSystemApplied?: boolean
 }
@@ -78,6 +94,11 @@ export interface OrderDetailItemView {
   productCode: string
   productName: string
   productNameSnapshot: string
+  skuId: string | null
+  skuCode: string | null
+  skuCodeSnapshot: string | null
+  specText: string | null
+  specTextSnapshot: string | null
   qty: string
   unitPrice: string
   subTotal: string
@@ -88,6 +109,11 @@ export interface OrderDetailItemView {
 export interface OrderSummaryView {
   id: string
   showNo: string
+  businessNo: string
+  editVersion: number
+  inventoryMode: BizOutboundOrder['inventoryMode']
+  contentEditable: boolean
+  contentEditBlockers: string[]
   orderType: string
   hasCustomerOrder: boolean
   isSystemApplied: boolean
@@ -111,11 +137,17 @@ export interface OrderSummaryView {
 export interface SubmittedOrderView {
   id: string
   showNo: string
+  businessNo: string
+  editVersion: number
+  inventoryMode: BizOutboundOrder['inventoryMode']
 }
 
 export interface SubmittedOrderItemView {
   id: string
   productId: string
+  skuId: string | null
+  skuCodeSnapshot: string | null
+  specTextSnapshot: string | null
   qty: string
   unitPrice: string
   remark: string | null
@@ -140,6 +172,20 @@ interface PreparedSubmitItemsResult {
   totalAmount: number
   itemEntities: BizOutboundOrderItem[]
   latestProductPriceMap: Map<string, string>
+}
+
+interface NormalizedSubmitOrderItem {
+  productId: string
+  skuId: string | null
+  qty: number
+  unitPrice: number
+  remark?: string
+}
+
+interface ResolvedSubmitOrderItem extends Omit<NormalizedSubmitOrderItem, 'skuId'> {
+  skuId: string
+  sku: BaseProductSku
+  shouldUpdateProductDefaultPrice: boolean
 }
 
 const normalizeEntityId = (value: string | number): string => String(value).trim()
@@ -250,7 +296,8 @@ export class OrderService {
       qb.andWhere(
         new Brackets((keywordQb) => {
           keywordQb
-            .where('order.showNo LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
+            .where('order.businessNo LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
+            .orWhere('order.showNo LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
             .orWhere(isLikelyShowNo ? 'order.showNo = :exactShowNo' : '1 = 0', { exactShowNo: normalizedKeyword })
             .orWhere('order.customerName LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
             .orWhere('order.customerDepartmentName LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
@@ -311,26 +358,47 @@ export class OrderService {
     return { order: this.buildOrderSummaryView(order), items }
   }
 
-  async updateComplianceFlags(input: UpdateOrderComplianceFlagsInput): Promise<{ order: OrderSummaryView; items: OrderDetailItemView[] }> {
+  async updateComplianceFlags(
+    input: UpdateOrderComplianceFlagsInput,
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ): Promise<{ order: OrderSummaryView; items: OrderDetailItemView[] }> {
     if (typeof input.hasCustomerOrder !== 'boolean' && typeof input.isSystemApplied !== 'boolean') {
       throw new BizError('请至少传入一个可更新字段', 400)
     }
+    await orderAmendmentService.commit({ amendments: [{
+      orderId: input.orderId,
+      editVersion: input.editVersion,
+      hasCustomerOrder: input.hasCustomerOrder,
+      isSystemApplied: input.isSystemApplied,
+      reason: '合规状态编辑',
+    }] }, actor, requestMeta)
+    return this.detailById(input.orderId)
+  }
 
-    const order = await this.orderRepo.findOne({ where: { id: input.orderId } })
-    if (!order) {
-      throw new BizError('出库单不存在', 404)
-    }
-    if (order.orderType !== 'department') {
-      throw new BizError('散客单不适用该状态编辑', 409)
-    }
-    if (typeof input.hasCustomerOrder === 'boolean') {
-      order.hasCustomerOrder = input.hasCustomerOrder
-    }
-    if (typeof input.isSystemApplied === 'boolean') {
-      order.isSystemApplied = input.isSystemApplied
-    }
-    await this.orderRepo.save(order)
-    return this.detailById(String(order.id))
+  async previewAmendments(input: OrderAmendmentBatchInput, actor: AuthUserContext): Promise<OrderAmendmentPreviewResult> {
+    return orderAmendmentService.preview(input, actor)
+  }
+
+  async commitAmendments(
+    input: OrderAmendmentBatchInput,
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ): Promise<OrderAmendmentPreviewResult> {
+    return orderAmendmentService.commit(input, actor, requestMeta)
+  }
+
+  async updateContent(
+    orderId: string,
+    input: UpdateOrderContentInput,
+    actor: AuthUserContext,
+    requestMeta?: RequestMeta,
+  ) {
+    return orderContentEditService.updateContent(orderId, input, actor, requestMeta)
+  }
+
+  async listRevisions(orderId: string) {
+    return orderContentEditService.listRevisions(orderId)
   }
 
   /**
@@ -350,13 +418,14 @@ export class OrderService {
     }
 
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const orderRepo = manager.getRepository(BizOutboundOrder)
       const order = await orderRepo.findOne({ where: { id } })
       if (!order) {
         throw new BizError('出库单不存在', 404)
       }
 
-      if (order.showNo !== normalizedConfirmShowNo) {
+      if (order.showNo !== normalizedConfirmShowNo && order.businessNo !== normalizedConfirmShowNo) {
         throw new BizError('二次确认失败：业务单号不匹配', 400)
       }
 
@@ -382,11 +451,7 @@ export class OrderService {
           actor,
           requestMeta,
           detail: {
-                // 记录部门与客户双快照，供工作台近期动态按“部门优先、客户兜底”展示。
-                customerDepartmentName: savedOrder.customerDepartmentName,
-            customerName: savedOrder.customerName,
-            totalQty: savedOrder.totalQty,
-            totalAmount: savedOrder.totalAmount,
+            ...this.buildOrderAuditDetail(savedOrder),
             linkedO2oPreorderSync,
           },
         },
@@ -404,6 +469,7 @@ export class OrderService {
    */
   async restoreById(id: string, actor: AuthUserContext, requestMeta?: RequestMeta): Promise<OrderSummaryView> {
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const orderRepo = manager.getRepository(BizOutboundOrder)
       const order = await orderRepo.findOne({ where: { id } })
       if (!order) {
@@ -432,11 +498,7 @@ export class OrderService {
           actor,
           requestMeta,
           detail: {
-                // 记录部门与客户双快照，供工作台近期动态按“部门优先、客户兜底”展示。
-                customerDepartmentName: savedOrder.customerDepartmentName,
-            customerName: savedOrder.customerName,
-            totalQty: savedOrder.totalQty,
-            totalAmount: savedOrder.totalAmount,
+            ...this.buildOrderAuditDetail(savedOrder),
             linkedO2oPreorderSync,
           },
         },
@@ -465,18 +527,23 @@ export class OrderService {
     }
 
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const orderRepo = manager.getRepository(BizOutboundOrder)
       const order = await orderRepo.findOne({ where: { id } })
       if (!order) {
         throw new BizError('出库单不存在', 404)
       }
 
-      if (order.showNo !== normalizedConfirmShowNo) {
+      if (order.showNo !== normalizedConfirmShowNo && order.businessNo !== normalizedConfirmShowNo) {
         throw new BizError('二次确认失败：业务单号不匹配', 400)
       }
 
       if (!order.isDeleted) {
         throw new BizError('仅已删除单据支持永久删除，请先执行删除操作', 409)
+      }
+
+      if (order.inventoryMode === 'manual_applied') {
+        throw new BizError('该手工出库单仍承载库存影响，禁止永久删除', 409)
       }
 
       const linkedO2oPreorderSync = await this.syncLinkedO2oPreorderVisibilityInManager(manager, order, actor, true)
@@ -545,7 +612,8 @@ export class OrderService {
     let lastError: unknown
     for (let attempt = 1; attempt <= ORDER_SUBMIT_MAX_RETRY; attempt += 1) {
       try {
-        return await runInTransaction(async (manager) => {
+        const result = await runInTransaction(async (manager) => {
+          await lockActiveSysAccountForBusiness(manager, actor.userId)
           const orderRepo = manager.getRepository(BizOutboundOrder)
           const itemRepo = manager.getRepository(BizOutboundOrderItem)
           const productRepo = manager.getRepository(BaseProduct)
@@ -565,24 +633,32 @@ export class OrderService {
             }
           }
 
-          const normalizedProductIds = normalizedItems.map((item) => String(item.productId).trim())
-          const products = await productRepo
+          const normalizedProductIds = [...new Set(normalizedItems.map((item) => item.productId))]
+            .sort((left, right) => left.localeCompare(right))
+          const productQuery = productRepo
             .createQueryBuilder('product')
             .where('product.id IN (:...productIds)', { productIds: normalizedProductIds })
             .andWhere('product.isActive = :isActive', { isActive: true })
-            .getMany()
+            .orderBy('product.id', 'ASC')
+          if (manager.connection.options.type !== 'sqlite') productQuery.setLock('pessimistic_write')
+          const products = await productQuery.getMany()
 
           const productMap = new Map(products.map((product) => [String(product.id), product]))
           if (productMap.size !== normalizedProductIds.length) {
             throw new BizError('存在无效或停用产品，无法提交')
           }
+          const resolvedItems = await this.resolveSubmitItemsWithSku(normalizedItems, productMap, manager)
           const orderUuid = generateOrderUuid()
           const showNo = await orderSerialService.generateOrderNo(submitContext.normalizedOrderType, manager)
-          const preparedItems = this.prepareSubmitItems(normalizedItems, productMap, itemRepo)
+          const businessNo = await orderBusinessNoService.allocate(submitContext.normalizedOrderType, orderUuid, manager)
+          const preparedItems = this.prepareSubmitItems(resolvedItems, productMap, itemRepo)
 
           const order = orderRepo.create({
             orderUuid,
             showNo,
+            businessNo,
+            editVersion: 1,
+            inventoryMode: 'manual_applied',
             orderType: submitContext.normalizedOrderType,
             hasCustomerOrder: Boolean(input.hasCustomerOrder),
             isSystemApplied: Boolean(input.isSystemApplied),
@@ -604,6 +680,8 @@ export class OrderService {
           })
           const savedItems = await itemRepo.save(preparedItems.itemEntities)
 
+          await this.applyManualInventoryForCreate(manager, savedOrder, resolvedItems, productMap, actor)
+
           products.forEach((product) => {
             const latestPrice = preparedItems.latestProductPriceMap.get(String(product.id))
             if (latestPrice) {
@@ -622,12 +700,9 @@ export class OrderService {
               actor,
               requestMeta,
               detail: {
-                // 创建时同步写入部门快照，避免首页近期动态只能看到客户名而丢失部门语义。
-                customerDepartmentName: savedOrder.customerDepartmentName,
-                customerName: savedOrder.customerName,
-                totalQty: savedOrder.totalQty,
-                totalAmount: savedOrder.totalAmount,
+                ...this.buildOrderAuditDetail(savedOrder),
                 itemCount: savedItems.length,
+                inventoryMode: savedOrder.inventoryMode,
               },
             },
             manager,
@@ -638,6 +713,8 @@ export class OrderService {
             items: savedItems.map((item) => this.buildSubmittedOrderItemView(item)),
           }
         })
+        invalidateMallCatalogReadCache()
+        return result
       } catch (error) {
         lastError = error
 
@@ -697,10 +774,14 @@ export class OrderService {
     if (value > maxValue) {
       throw new BizError(`${rowPrefix}${label}不能超过 ${maxValue}`, 400)
     }
-    return Number(value.toFixed(2))
+    const normalizedValue = Number(value.toFixed(2))
+    if (normalizedValue < 0.01) {
+      throw new BizError(`${rowPrefix}${label}按两位小数舍入后必须至少为 0.01`, 400)
+    }
+    return normalizedValue
   }
 
-  private normalizeSubmitItemsInput(inputItems: SubmitOrderItemInput[]): SubmitOrderItemInput[] {
+  private normalizeSubmitItemsInput(inputItems: SubmitOrderItemInput[]): NormalizedSubmitOrderItem[] {
     if (!inputItems.length) {
       throw new BizError('至少需要一条明细', 400)
     }
@@ -708,25 +789,122 @@ export class OrderService {
       throw new BizError(`单次最多提交 ${ORDER_FIELD_LIMITS.maxItemCount} 条明细`, 400)
     }
 
-    const productIdSet = new Set<string>()
     return inputItems.map((item, index) => {
       const rowIndex = index + 1
       const normalizedProductId = String(item.productId ?? '').trim()
       if (!normalizedProductId) {
         throw new BizError(`第 ${rowIndex} 行产品ID不能为空`, 400)
       }
-      if (productIdSet.has(normalizedProductId)) {
-        throw new BizError(`第 ${rowIndex} 行产品与前面明细重复，请合并数量后再提交`, 400)
-      }
-      productIdSet.add(normalizedProductId)
-
       return {
         productId: normalizedProductId,
-        qty: this.readPositiveDecimal(item.qty, '数量', ORDER_FIELD_LIMITS.maxQty, rowIndex),
+        skuId: normalizeNullableEntityId(item.skuId),
+        qty: this.readPositiveInteger(item.qty, '数量', ORDER_FIELD_LIMITS.maxQty, rowIndex),
         unitPrice: this.readPositiveDecimal(item.unitPrice, '单价', ORDER_FIELD_LIMITS.maxUnitPrice, rowIndex),
         remark: this.readLimitedText(item.remark, '明细备注', ORDER_FIELD_LIMITS.itemRemark) ?? undefined,
       }
     })
+  }
+
+  private readPositiveInteger(value: number, label: string, maxValue: number, rowIndex?: number): number {
+    const rowPrefix = rowIndex ? `第 ${rowIndex} 行` : ''
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new BizError(`${rowIndex ? `第 ${rowIndex} 行` : ''}${label}必须为正整数`, 400)
+    }
+    if (value > maxValue) throw new BizError(`${rowPrefix}${label}不能超过 ${maxValue}`, 400)
+    return value
+  }
+
+  /**
+   * 将手工出库行解析为当前有效 SKU：
+   * - 显式 skuId 必须存在、归属当前商品且仍为当前启用版本；
+   * - 旧调用方省略 skuId 时仅允许单规格商品自动选择，多规格必须显式选择；
+   * - 去重键使用 productId + skuId，因此同商品不同规格可以分行，同规格重复仍被阻断。
+   */
+  private async resolveSubmitItemsWithSku(
+    inputItems: NormalizedSubmitOrderItem[],
+    productMap: Map<string, BaseProduct>,
+    manager: EntityManager,
+  ): Promise<ResolvedSubmitOrderItem[]> {
+    const productIds = [...new Set(inputItems.map((item) => item.productId))]
+    const explicitSkuIds = [...new Set(inputItems.map((item) => item.skuId).filter((skuId): skuId is string => Boolean(skuId)))]
+    const skuQuery = manager.getRepository(BaseProductSku)
+      .createQueryBuilder('sku')
+      .where('sku.productId IN (:...productIds)', { productIds })
+    if (explicitSkuIds.length > 0) {
+      // 同时读取显式选择的 SKU，才能区分“不存在”和“属于其他商品”两类非法引用。
+      skuQuery.orWhere('sku.id IN (:...explicitSkuIds)', { explicitSkuIds })
+    }
+    skuQuery
+      .orderBy('sku.productId', 'ASC')
+      .addOrderBy('sku.id', 'ASC')
+    if (manager.connection.options.type !== 'sqlite') skuQuery.setLock('pessimistic_write')
+    const skus = await skuQuery.getMany()
+    const skuMap = new Map(skus.map((sku) => [String(sku.id), sku]))
+    const activeSkusByProduct = new Map<string, BaseProductSku[]>()
+    const currentSkuCountByProduct = new Map<string, number>()
+    skus.filter((sku) => this.isDatabaseFlagEnabled(sku.isCurrent)).forEach((sku) => {
+      const productId = String(sku.productId)
+      currentSkuCountByProduct.set(productId, (currentSkuCountByProduct.get(productId) ?? 0) + 1)
+    })
+    skus.filter((sku) => this.isCurrentActiveSku(sku)).forEach((sku) => {
+      const productId = String(sku.productId)
+      const current = activeSkusByProduct.get(productId) ?? []
+      current.push(sku)
+      activeSkusByProduct.set(productId, current)
+    })
+
+    const resolvedKeySet = new Set<string>()
+    return inputItems.map((item, index) => {
+      const product = productMap.get(item.productId)
+      if (!product) {
+        throw new BizError(`第 ${index + 1} 行产品不存在`, 400)
+      }
+
+      const candidates = activeSkusByProduct.get(item.productId) ?? []
+      let sku: BaseProductSku | undefined
+      if (item.skuId) {
+        sku = skuMap.get(item.skuId)
+        if (!sku) {
+          throw new BizError(`第 ${index + 1} 行规格不存在或无效，请重新选择`, 400)
+        }
+        if (String(sku.productId) !== item.productId) {
+          throw new BizError(`第 ${index + 1} 行所选规格不属于商品“${product.productName}”`, 400)
+        }
+        if (!this.isCurrentActiveSku(sku)) {
+          throw new BizError(`第 ${index + 1} 行商品“${product.productName}”的规格已停用或不属于当前版本`, 409)
+        }
+      } else {
+        if (candidates.length === 0) {
+          throw new BizError(`第 ${index + 1} 行商品“${product.productName}”暂无当前启用规格`, 409)
+        }
+        if (candidates.length > 1) {
+          throw new BizError(`第 ${index + 1} 行商品“${product.productName}”为多规格商品，请选择规格`, 400)
+        }
+        sku = candidates[0]
+      }
+
+      const resolvedSkuId = String(sku.id)
+      const resolvedKey = `${item.productId}::${resolvedSkuId}`
+      if (resolvedKeySet.has(resolvedKey)) {
+        throw new BizError(`第 ${index + 1} 行与前面明细为同一规格，请合并数量后再提交`, 400)
+      }
+      resolvedKeySet.add(resolvedKey)
+      return {
+        ...item,
+        skuId: resolvedSkuId,
+        sku,
+        // 商品主价只保留单 current SKU 的历史回写；多 SKU 人工价不能因明细顺序污染主价。
+        shouldUpdateProductDefaultPrice: currentSkuCountByProduct.get(item.productId) === 1,
+      }
+    })
+  }
+
+  private isCurrentActiveSku(sku: Pick<BaseProductSku, 'isActive' | 'isCurrent'>): boolean {
+    return this.isDatabaseFlagEnabled(sku.isActive) && this.isDatabaseFlagEnabled(sku.isCurrent)
+  }
+
+  private isDatabaseFlagEnabled(value: unknown): boolean {
+    return value !== false && value !== 0 && value !== '0' && value !== 'false'
   }
 
   private buildSubmitOrderContext(input: SubmitOrderInput, actor: AuthUserContext): SubmitOrderContext {
@@ -763,7 +941,7 @@ export class OrderService {
   }
 
   private prepareSubmitItems(
-    inputItems: SubmitOrderItemInput[],
+    inputItems: ResolvedSubmitOrderItem[],
     productMap: Map<string, BaseProduct>,
     itemRepo: ReturnType<typeof AppDataSource.getRepository<BizOutboundOrderItem>>,
   ): PreparedSubmitItemsResult {
@@ -782,13 +960,18 @@ export class OrderService {
       const lineAmount = Number((item.qty * item.unitPrice).toFixed(2))
       totalQty += item.qty
       totalAmount += lineAmount
-      latestProductPriceMap.set(normalizedProductId, item.unitPrice.toFixed(2))
+      if (item.shouldUpdateProductDefaultPrice) {
+        latestProductPriceMap.set(normalizedProductId, item.unitPrice.toFixed(2))
+      }
 
       itemEntities.push(
         itemRepo.create({
           lineNo: index + 1,
           productId: product.id,
           productNameSnapshot: product.productName,
+          skuId: item.skuId,
+          skuCodeSnapshot: item.sku.skuCode,
+          specTextSnapshot: item.sku.specText,
           qty: item.qty.toFixed(2),
           unitPrice: item.unitPrice.toFixed(2),
           lineAmount: lineAmount.toFixed(2),
@@ -803,6 +986,63 @@ export class OrderService {
       itemEntities,
       latestProductPriceMap,
     }
+  }
+
+  private async applyManualInventoryForCreate(
+    manager: EntityManager,
+    order: BizOutboundOrder,
+    items: ResolvedSubmitOrderItem[],
+    productMap: Map<string, BaseProduct>,
+    actor: AuthUserContext,
+  ): Promise<void> {
+    const productQtyMap = new Map<string, number>()
+    for (const item of items) {
+      productQtyMap.set(item.productId, (productQtyMap.get(item.productId) ?? 0) + item.qty)
+      if (Number(item.sku.currentStock) - Number(item.sku.preOrderedStock) < item.qty) {
+        throw new BizError(`SKU ${item.sku.skuCode} 可用库存不足`, 409)
+      }
+    }
+    for (const [productId, qty] of productQtyMap) {
+      const product = productMap.get(productId)
+      if (!product || Number(product.currentStock) - Number(product.preOrderedStock) < qty) {
+        throw new BizError(`商品 ${product?.productName ?? productId} 可用库存不足`, 409)
+      }
+    }
+
+    const inventoryLogs: InventoryLog[] = []
+    for (const item of items) {
+      const product = productMap.get(item.productId)
+      if (!product) throw new BizError(`商品 ${item.productId} 不存在`, 409)
+      const beforeCurrentStock = Number(product.currentStock)
+      const beforePreorderedStock = Number(product.preOrderedStock)
+      const beforeSkuCurrentStock = Number(item.sku.currentStock)
+      const beforeSkuPreorderedStock = Number(item.sku.preOrderedStock)
+      product.currentStock = beforeCurrentStock - item.qty
+      item.sku.currentStock = beforeSkuCurrentStock - item.qty
+      inventoryLogs.push(manager.getRepository(InventoryLog).create({
+        productId: item.productId,
+        skuId: item.skuId,
+        changeType: 'manual_outbound_create',
+        changeQty: item.qty,
+        beforeCurrentStock,
+        afterCurrentStock: product.currentStock,
+        beforePreorderedStock,
+        afterPreorderedStock: beforePreorderedStock,
+        beforeSkuCurrentStock,
+        afterSkuCurrentStock: item.sku.currentStock,
+        beforeSkuPreorderedStock,
+        afterSkuPreorderedStock: beforeSkuPreorderedStock,
+        operatorType: 'admin',
+        operatorId: actor.userId,
+        operatorName: actor.displayName,
+        refType: 'biz_outbound_order',
+        refId: String(order.id),
+        remark: `创建手工出库单 ${order.businessNo}，扣减库存 ${item.qty}`,
+      }))
+    }
+    await manager.getRepository(BaseProduct).save([...productMap.values()])
+    await manager.getRepository(BaseProductSku).save(items.map((item) => item.sku))
+    await manager.getRepository(InventoryLog).save(inventoryLogs)
   }
 
   private shouldRetrySubmitError(error: unknown, attempt: number) {
@@ -863,6 +1103,11 @@ export class OrderService {
       productCode: item.product?.productCode ?? '',
       productName: item.productNameSnapshot || item.product?.productName || '',
       productNameSnapshot: item.productNameSnapshot,
+      skuId: normalizeNullableEntityId(item.skuId),
+      skuCode: item.skuCodeSnapshot,
+      skuCodeSnapshot: item.skuCodeSnapshot,
+      specText: item.specTextSnapshot,
+      specTextSnapshot: item.specTextSnapshot,
       qty: normalizeDecimalText(item.qty),
       unitPrice: normalizeDecimalText(item.unitPrice),
       subTotal: normalizeDecimalText(item.lineAmount),
@@ -873,11 +1118,13 @@ export class OrderService {
 
   /**
    * 统一构造订单审计详情：
-   * - 删除、恢复、永久删除都复用同一组业务快照；
+   * - 创建、删除、恢复、永久删除都复用同一组业务快照；
    * - 让工作台近期动态与审计详情保持同一份客户/金额口径。
    */
   private buildOrderAuditDetail(order: BizOutboundOrder) {
     return {
+      businessNo: order.businessNo,
+      showNo: order.showNo,
       customerDepartmentName: order.customerDepartmentName,
       customerName: order.customerName,
       totalQty: order.totalQty,
@@ -889,6 +1136,10 @@ export class OrderService {
     return {
       id: normalizeEntityId(order.id),
       showNo: order.showNo,
+      businessNo: order.businessNo,
+      editVersion: Number(order.editVersion),
+      inventoryMode: order.inventoryMode,
+      ...orderContentEditService.describeEditability(order),
       orderType: order.orderType,
       hasCustomerOrder: Boolean(order.hasCustomerOrder),
       isSystemApplied: Boolean(order.isSystemApplied),
@@ -914,6 +1165,9 @@ export class OrderService {
     return {
       id: normalizeEntityId(order.id),
       showNo: order.showNo,
+      businessNo: order.businessNo,
+      editVersion: Number(order.editVersion),
+      inventoryMode: order.inventoryMode,
     }
   }
 
@@ -921,6 +1175,9 @@ export class OrderService {
     return {
       id: normalizeEntityId(item.id),
       productId: normalizeEntityId(item.productId),
+      skuId: normalizeNullableEntityId(item.skuId),
+      skuCodeSnapshot: item.skuCodeSnapshot,
+      specTextSnapshot: item.specTextSnapshot,
       qty: normalizeDecimalText(item.qty),
       unitPrice: normalizeDecimalText(item.unitPrice),
       remark: item.remark,

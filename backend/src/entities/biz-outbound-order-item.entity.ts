@@ -17,6 +17,7 @@ import {
   UpdateDateColumn,
 } from 'typeorm'
 import { BaseProduct } from './base-product.entity.js'
+import { BaseProductSku } from './base-product-sku.entity.js'
 import { BizOutboundOrder } from './biz-outbound-order.entity.js'
 import { entityColumnOptions } from './entity-column-options.js'
 
@@ -39,6 +40,16 @@ export class BizOutboundOrderItem {
 
   @Column({ name: 'product_name_snapshot', type: 'varchar', length: 128 })
   productNameSnapshot!: string
+
+  @Index('idx_biz_outbound_item_sku_id')
+  @Column({ name: 'sku_id', ...entityColumnOptions.foreignId, nullable: true, comment: 'SKU ID' })
+  skuId!: string | null
+
+  @Column({ name: 'sku_code_snapshot', type: 'varchar', length: 96, nullable: true, comment: '出库 SKU 编码快照' })
+  skuCodeSnapshot!: string | null
+
+  @Column({ name: 'spec_text_snapshot', type: 'varchar', length: 255, nullable: true, comment: '出库规格文本快照' })
+  specTextSnapshot!: string | null
 
   @Column({ type: 'decimal', precision: 12, scale: 2 })
   qty!: string
@@ -67,4 +78,9 @@ export class BizOutboundOrderItem {
   @ManyToOne(() => BaseProduct, (product) => product.orderItems, { onDelete: 'RESTRICT' })
   @JoinColumn({ name: 'product_id' })
   product!: Relation<BaseProduct>
+
+  // SKU 仅用于提交校验和历史快照定位；删除 SKU 时保留明细快照并将关联置空。
+  @ManyToOne(() => BaseProductSku, { onDelete: 'SET NULL' })
+  @JoinColumn({ name: 'sku_id' })
+  sku?: Relation<BaseProductSku>
 }

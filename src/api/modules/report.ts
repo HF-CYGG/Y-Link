@@ -22,7 +22,11 @@ export interface ReportFieldDefinition {
   numeric?: boolean
 }
 
-export type ReportRow = Record<string, string | number | null>
+export interface ReportRow {
+  /** 出库类报表统一使用独立业务号；非出库报表可不返回该字段。 */
+  businessNo?: string | number | null
+  [key: string]: string | number | null | undefined
+}
 
 export interface ReportQuery extends PaginationQueryInput {
   startDate?: string

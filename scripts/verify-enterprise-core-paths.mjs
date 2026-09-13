@@ -667,6 +667,8 @@ const verifyBaseDataPath = async () => {
       productName,
       pinyinAbbr,
       defaultPrice: 23.5,
+      currentStock: 100,
+      preOrderedStock: 0,
       isActive: true,
       tagIds: [createdTagId],
     },

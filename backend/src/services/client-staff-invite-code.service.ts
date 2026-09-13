@@ -17,6 +17,7 @@ import {
   verifySharedStaffInviteCode,
 } from '../utils/staff-invite-code.js'
 import { auditService } from './audit.service.js'
+import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 
 interface StaffInviteConfigValue {
   enabled: boolean
@@ -102,6 +103,7 @@ export class ClientStaffInviteCodeService {
 
   private async updateConfig(digest: string | null, actor: AuthUserContext, requestMeta?: RequestMeta) {
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const repo = manager.getRepository(SystemConfig)
       // 默认行由启动流程补齐；直接取写锁，避免 INSERT IGNORE 的重复键共享锁升级死锁。
       const row = await this.readLockedConfig(manager, true)

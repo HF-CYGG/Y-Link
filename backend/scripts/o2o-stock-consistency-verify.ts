@@ -16,6 +16,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import type { AuthUserContext } from '../src/types/auth.js'
 import type { ClientAuthContext } from '../src/types/client-auth.js'
 
 const currentFilePath = fileURLToPath(import.meta.url)
@@ -56,6 +57,7 @@ async function main() {
   const { BaseProductSku } = await import('../src/entities/base-product-sku.entity.js')
   const { O2oPreorder } = await import('../src/entities/o2o-preorder.entity.js')
   const { ClientUser } = await import('../src/entities/client-user.entity.js')
+  const { SysUser } = await import('../src/entities/sys-user.entity.js')
   const { hashPassword } = await import('../src/utils/password.js')
   const { BizError } = await import('../src/utils/errors.js')
   const { clientAuthService } = await import('../src/services/client-auth.service.js')
@@ -90,6 +92,7 @@ async function main() {
     return clientAuthService.resolveClientByToken(loginResult.token)
   }
 
+  let productActor: AuthUserContext
   const createListedProduct = async (name: string, stock: number) => {
     const product = await productService.create({
       productName: `${name}-${verifySeed}`,
@@ -100,7 +103,7 @@ async function main() {
       o2oStatus: 'listed',
       currentStock: stock,
       limitPerUser: 10,
-    })
+    }, productActor)
     const sku = product.skus[0]
     assert.ok(sku, `${name} 应自动创建默认 SKU`)
     return { product, sku }
@@ -141,6 +144,26 @@ async function main() {
   try {
     await initializeDatabaseSchemaIfNeeded(AppDataSource)
     await systemConfigService.ensureDefaultConfigs()
+    const userRepo = AppDataSource.getRepository(SysUser)
+    const admin = await userRepo.save(userRepo.create({
+      username: `stock-admin-${verifySeed}`,
+      passwordHash: 'verify-only',
+      displayName: '库存一致性验证管理员',
+      email: null,
+      role: 'admin',
+      status: 'enabled',
+      lastLoginAt: null,
+    }))
+    productActor = {
+      userId: String(admin.id),
+      username: admin.username,
+      displayName: admin.displayName,
+      role: 'admin',
+      permissions: [],
+      status: 'enabled',
+      sessionToken: 'stock-consistency-verify',
+      authSource: 'bearer',
+    }
 
     const sameAccount = await createAndLoginClient(1)
     const otherAccount = await createAndLoginClient(2)

@@ -169,7 +169,7 @@ async function main() {
       limitPerUser: 100,
       specGroups: [{ name: '规格', values: ['标准'] }],
       skus: [{ skuCode: `ISSUE66-${key}`, specValues: { 规格: '标准' }, defaultPrice: 10, currentStock, isActive: true }],
-    } as Parameters<typeof productService.create>[0])
+    } as Parameters<typeof productService.create>[0], adminActor)
     const sku = product.skus[0]
     assert.ok(sku)
     return { productId: String(product.id), skuId: String(sku.id) }

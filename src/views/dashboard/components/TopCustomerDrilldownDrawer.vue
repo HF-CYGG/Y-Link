@@ -134,7 +134,7 @@ watch(
         <!-- 明细表滚动职责统一交给共享抽屉壳，避免页面内部再次叠加局部滚动区。 -->
         <div v-if="data.records.length">
           <el-table native-scrollbar :data="data.records" stripe table-layout="auto">
-            <el-table-column prop="showNo" label="业务单号" min-width="150" show-overflow-tooltip />
+            <el-table-column prop="businessNo" label="业务单号" min-width="150" show-overflow-tooltip />
             <el-table-column label="订单类型" width="100">
               <template #default="{ row }">{{ formatOrderType(row.orderType) }}</template>
             </el-table-column>

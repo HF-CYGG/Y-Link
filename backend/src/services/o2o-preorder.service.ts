@@ -19,6 +19,7 @@ import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
 import { ClientUser } from '../entities/client-user.entity.js'
 import { InventoryLog } from '../entities/inventory-log.entity.js'
+import { OrderRevision } from '../entities/order-revision.entity.js'
 import {
   O2O_CLIENT_ORDER_TYPES,
   O2O_PREORDER_BUSINESS_STATUSES,
@@ -43,11 +44,16 @@ import {
   isUniqueConstraintError,
 } from '../utils/database-errors.js'
 import { generateOrderUuid } from '../utils/id-generator.js'
+import { orderBusinessNoService } from './order-business-no.service.js'
 import { orderSerialService, type OrderSerialRecalibrationResult } from './order-serial.service.js'
 import { systemConfigService } from './system-config.service.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { notificationService } from './notification.service.js'
 import { auditService } from './audit.service.js'
+import {
+  lockActiveClientAccountForBusiness,
+  lockActiveSysAccountForBusiness,
+} from './account-business-guard.service.js'
 import {
   invalidateMallCatalogReadCache,
   readMallCatalogRevision,
@@ -274,6 +280,7 @@ export interface O2oPreorderSummaryView {
   id: string
   showNo: string
   customerOrderShowNo: string | null
+  customerOrderBusinessNo: string | null
   verifyCode: string
   status: O2oPreorder['status']
   businessStatus: O2oPreorder['businessStatus']
@@ -327,6 +334,7 @@ export interface O2oPreorderDetailView {
     id: string
     showNo: string
     customerOrderShowNo: string | null
+    customerOrderBusinessNo: string | null
     verifyCode: string
     status: O2oPreorder['status']
     businessStatus: O2oPreorder['businessStatus']
@@ -1155,7 +1163,9 @@ class O2oPreorderService {
     const clientUser = await clientUserRepo.findOne({ where: { id: input.preorder.clientUserId } })
     const outboundOrderType = input.preorder.clientOrderType === 'department' ? 'department' : 'walkin'
     const departmentNameSnapshot = this.resolveDepartmentNameSnapshotFromPreorder(input.preorder)
+    const orderUuid = generateOrderUuid()
     const showNo = await orderSerialService.generateOrderNo(outboundOrderType, manager)
+    const businessNo = await orderBusinessNoService.allocate(outboundOrderType, orderUuid, manager)
 
     let totalQty = 0
     let totalAmountCents = 0
@@ -1177,6 +1187,9 @@ class O2oPreorderService {
           lineNo: index + 1,
           productId: product.id,
           productNameSnapshot: row.specTextSnapshot ? `${product.productName}（${row.specTextSnapshot}）` : product.productName,
+          skuId: row.skuId,
+          skuCodeSnapshot: row.skuCodeSnapshot,
+          specTextSnapshot: row.specTextSnapshot,
           qty: qty.toFixed(2),
           unitPrice: formatMoneyFromCents(unitPriceCents),
           lineAmount: formatMoneyFromCents(lineAmountCents),
@@ -1186,8 +1199,11 @@ class O2oPreorderService {
     })
 
     const outboundOrder = orderRepo.create({
-      orderUuid: generateOrderUuid(),
+      orderUuid,
       showNo,
+      businessNo,
+      editVersion: 1,
+      inventoryMode: 'o2o_preapplied',
       orderType: outboundOrderType,
       hasCustomerOrder: Boolean(input.preorder.hasCustomerOrder),
       isSystemApplied: Boolean(input.preorder.isSystemApplied),
@@ -1227,13 +1243,34 @@ class O2oPreorderService {
     payload: {
       hasCustomerOrder?: boolean
       isSystemApplied?: boolean
+      actor?: {
+        userId: string | null
+        username: string
+        displayName: string
+      }
+      reason?: string
     },
   ) {
     const idempotencyKey = `o2o-preorder-verify:${preorderId}`
     const outboundOrderRepo = manager.getRepository(BizOutboundOrder)
-    const outboundOrder = await outboundOrderRepo.findOne({ where: { idempotencyKey } })
+    const outboundOrder = await outboundOrderRepo.findOne({
+      where: { idempotencyKey },
+      lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+    })
     if (!outboundOrder) {
       return
+    }
+    const beforeSnapshot = {
+      businessNo: outboundOrder.businessNo,
+      showNo: outboundOrder.showNo,
+      orderType: outboundOrder.orderType,
+      customerDepartmentName: outboundOrder.customerDepartmentName,
+      customerName: outboundOrder.customerName,
+      issuerName: outboundOrder.issuerName,
+      hasCustomerOrder: Boolean(outboundOrder.hasCustomerOrder),
+      isSystemApplied: Boolean(outboundOrder.isSystemApplied),
+      remark: outboundOrder.remark,
+      editVersion: Number(outboundOrder.editVersion),
     }
     if (typeof payload.hasCustomerOrder === 'boolean') {
       outboundOrder.hasCustomerOrder = payload.hasCustomerOrder
@@ -1241,7 +1278,37 @@ class O2oPreorderService {
     if (typeof payload.isSystemApplied === 'boolean') {
       outboundOrder.isSystemApplied = payload.isSystemApplied
     }
+    if (
+      beforeSnapshot.hasCustomerOrder === Boolean(outboundOrder.hasCustomerOrder)
+      && beforeSnapshot.isSystemApplied === Boolean(outboundOrder.isSystemApplied)
+    ) {
+      return
+    }
+    outboundOrder.editVersion = beforeSnapshot.editVersion + 1
     await outboundOrderRepo.save(outboundOrder)
+    const actor = payload.actor ?? {
+      userId: null,
+      username: 'o2o-system',
+      displayName: 'O2O 系统联动',
+    }
+    await manager.getRepository(OrderRevision).insert({
+      orderIdSnapshot: String(outboundOrder.id),
+      orderUuid: outboundOrder.orderUuid,
+      revisionNo: outboundOrder.editVersion,
+      beforeSnapshotJson: JSON.stringify(beforeSnapshot),
+      afterSnapshotJson: JSON.stringify({
+        ...beforeSnapshot,
+        hasCustomerOrder: Boolean(outboundOrder.hasCustomerOrder),
+        isSystemApplied: Boolean(outboundOrder.isSystemApplied),
+        editVersion: outboundOrder.editVersion,
+      }),
+      reason: payload.reason ?? 'O2O 合规状态联动',
+      actorUserId: actor.userId,
+      actorUsername: actor.username,
+      actorDisplayName: actor.displayName,
+      ipAddress: null,
+      userAgent: null,
+    })
   }
 
   // 详细注释：客户端展示正式出库单号时，不能再直接复用 O2O 预订单号。
@@ -1343,25 +1410,28 @@ class O2oPreorderService {
     manager: EntityManager = AppDataSource.manager,
   ) {
     if (!preorderIds.length) {
-      return new Map<string, string>()
+      return new Map<string, { showNo: string; businessNo: string }>()
     }
     const idempotencyKeyToPreorderIdMap = new Map(
       preorderIds.map((preorderId) => [this.buildVerifiedPreorderOutboundOrderIdempotencyKey(preorderId), preorderId]),
     )
     const outboundOrders = await manager.getRepository(BizOutboundOrder).find({
-      select: ['idempotencyKey', 'showNo'],
+      select: ['idempotencyKey', 'showNo', 'businessNo'],
       where: {
         idempotencyKey: In([...idempotencyKeyToPreorderIdMap.keys()]),
         isDeleted: false,
       },
     })
-    const customerOrderShowNoMap = new Map<string, string>()
+    const customerOrderShowNoMap = new Map<string, { showNo: string; businessNo: string }>()
     outboundOrders.forEach((outboundOrder) => {
       const preorderId = idempotencyKeyToPreorderIdMap.get(outboundOrder.idempotencyKey)
       if (!preorderId || !outboundOrder.showNo?.trim()) {
         return
       }
-      customerOrderShowNoMap.set(preorderId, outboundOrder.showNo.trim())
+      customerOrderShowNoMap.set(preorderId, {
+        showNo: outboundOrder.showNo.trim(),
+        businessNo: outboundOrder.businessNo?.trim() || outboundOrder.showNo.trim(),
+      })
     })
     return customerOrderShowNoMap
   }
@@ -1379,10 +1449,12 @@ class O2oPreorderService {
       .select(['outboundOrder.idempotencyKey AS idempotencyKey'])
       .where('outboundOrder.isDeleted = :isDeleted', { isDeleted: false })
       .andWhere(
-        new Brackets((showNoQb) => {
-          showNoQb
+        new Brackets((numberQb) => {
+          numberQb
             .where('outboundOrder.showNo = :showNoExact', { showNoExact: normalizedKeyword })
             .orWhere(String.raw`outboundOrder.showNo LIKE :showNoPrefix ESCAPE '\'`, { showNoPrefix: `${escapedKeyword}%` })
+            .orWhere('outboundOrder.businessNo = :businessNoExact', { businessNoExact: normalizedKeyword })
+            .orWhere(String.raw`outboundOrder.businessNo LIKE :businessNoPrefix ESCAPE '\'`, { businessNoPrefix: `${escapedKeyword}%` })
         }),
       )
       .getRawMany<{ idempotencyKey: string | null }>()
@@ -1717,7 +1789,9 @@ class O2oPreorderService {
     const id = String(order.id)
     const clientPreorderUpdateLimit = await this.getClientPreorderUpdateLimit(manager)
     const customerOrderShowNoMap = await this.resolveCustomerOrderShowNoMap([id], manager)
-    const customerOrderShowNo = customerOrderShowNoMap.get(id) ?? null
+    const customerOrderNumbers = customerOrderShowNoMap.get(id) ?? null
+    const customerOrderShowNo = customerOrderNumbers?.showNo ?? null
+    const customerOrderBusinessNo = customerOrderNumbers?.businessNo ?? null
     const clientUser = await manager.getRepository(ClientUser).findOne({
       where: { id: String(order.clientUserId) },
       select: ['id', 'realName', 'mobile', 'email', 'departmentName', 'accountType', 'staffNo'],
@@ -1790,6 +1864,7 @@ class O2oPreorderService {
         id,
         showNo: order.showNo,
         customerOrderShowNo,
+        customerOrderBusinessNo,
         verifyCode: order.verifyCode,
         status: order.status,
         businessStatus: order.businessStatus ?? null,
@@ -2095,7 +2170,8 @@ class O2oPreorderService {
       expireInSeconds: this.resolveExpireInSeconds(item, nowMs),
       id: String(item.id),
       showNo: item.showNo,
-      customerOrderShowNo: customerOrderShowNoMap.get(String(item.id)) ?? null,
+      customerOrderShowNo: customerOrderShowNoMap.get(String(item.id))?.showNo ?? null,
+      customerOrderBusinessNo: customerOrderShowNoMap.get(String(item.id))?.businessNo ?? null,
       verifyCode: item.verifyCode,
       status: item.status,
       businessStatus: item.businessStatus ?? null,
@@ -2513,12 +2589,7 @@ class O2oPreorderService {
     try {
       transactionResult = await this.runIdempotentSubmitTransaction(async (manager) => {
         const preorderRepo = manager.getRepository(O2oPreorder)
-        const clientUser = await manager.getRepository(ClientUser).findOne({
-          where: { id: auth.userId },
-          select: ['id', 'realName', 'accountType', 'departmentName', 'staffNo'],
-          lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
-        })
-        if (!clientUser) throw new BizError('客户端账号不存在，请重新登录后再试', 401)
+        const clientUser = await lockActiveClientAccountForBusiness(manager, auth.userId)
 
         // 先锁客户端账号再复查请求键，使同一账号的两个并发重试在进入库存锁前完成串行化。
         const existedOrder = await preorderRepo.findOne({
@@ -3033,6 +3104,7 @@ class O2oPreorderService {
     const o2oRules = await systemConfigService.getO2oRuleConfigs()
 
     const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, auth.userId)
       const orderRepo = manager.getRepository(O2oPreorder)
       const orderItemRepo = manager.getRepository(O2oPreorderItem)
       const order = await orderRepo.findOne({
@@ -3223,6 +3295,7 @@ class O2oPreorderService {
       }
     })
     const result = await runInTransaction(async (manager) => {
+      await lockActiveClientAccountForBusiness(manager, auth.userId)
       const orderRepo = manager.getRepository(O2oPreorder)
       const order = await orderRepo.findOne({
         where: { id: orderId, clientUserId: auth.userId, isDeleted: false },
@@ -3397,24 +3470,38 @@ class O2oPreorderService {
     return this.buildOrderDetail(order, manager)
   }
 
-  async updateBusinessStatus(input: UpdateOrderBusinessStatusInput) {
-    const order = await this.preorderRepo.findOne({ where: { id: input.orderId, isDeleted: false } })
-    if (!order) {
-      throw new BizError('预订单不存在', 404)
-    }
-    order.businessStatus = this.normalizeBusinessStatus(input.businessStatus)
-    await this.preorderRepo.save(order)
-    return this.detailById(order.id)
+  async updateBusinessStatus(input: UpdateOrderBusinessStatusInput, actor: AuthUserContext) {
+    return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const orderRepo = manager.getRepository(O2oPreorder)
+      const order = await orderRepo.findOne({
+        where: { id: input.orderId, isDeleted: false },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
+      if (!order) {
+        throw new BizError('预订单不存在', 404)
+      }
+      order.businessStatus = this.normalizeBusinessStatus(input.businessStatus)
+      await orderRepo.save(order)
+      return this.buildOrderDetail(order, manager)
+    })
   }
 
-  async updateMerchantMessage(input: UpdateOrderMerchantMessageInput) {
-    const order = await this.preorderRepo.findOne({ where: { id: input.orderId, isDeleted: false } })
-    if (!order) {
-      throw new BizError('预订单不存在', 404)
-    }
-    order.merchantMessage = this.normalizeMerchantMessage(input.merchantMessage)
-    await this.preorderRepo.save(order)
-    return this.detailById(order.id)
+  async updateMerchantMessage(input: UpdateOrderMerchantMessageInput, actor: AuthUserContext) {
+    return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const orderRepo = manager.getRepository(O2oPreorder)
+      const order = await orderRepo.findOne({
+        where: { id: input.orderId, isDeleted: false },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
+      if (!order) {
+        throw new BizError('预订单不存在', 404)
+      }
+      order.merchantMessage = this.normalizeMerchantMessage(input.merchantMessage)
+      await orderRepo.save(order)
+      return this.buildOrderDetail(order, manager)
+    })
   }
 
   async markCustomerOrderPrintedByClient(auth: ClientAuthContext, orderId: string) {
@@ -3437,7 +3524,15 @@ class O2oPreorderService {
       if (printedNow) {
         order.hasCustomerOrder = true
         await orderRepo.save(order)
-        await this.syncOutboundOrderComplianceFlags(manager, String(order.id), { hasCustomerOrder: true })
+        await this.syncOutboundOrderComplianceFlags(manager, String(order.id), {
+          hasCustomerOrder: true,
+          reason: '客户端打印正式出库单',
+          actor: {
+            userId: auth.userId,
+            username: auth.account,
+            displayName: auth.realName || auth.account,
+          },
+        })
       }
       return {
         detail: await this.buildOrderDetail(order, manager),
@@ -3446,11 +3541,12 @@ class O2oPreorderService {
     })
   }
 
-  async updateComplianceFlagsByAdmin(input: UpdateOrderComplianceFlagsInput) {
+  async updateComplianceFlagsByAdmin(input: UpdateOrderComplianceFlagsInput, actor: AuthUserContext) {
     if (typeof input.hasCustomerOrder !== 'boolean' && typeof input.isSystemApplied !== 'boolean') {
       throw new BizError('请至少传入一个可更新字段', 400)
     }
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const orderRepo = manager.getRepository(O2oPreorder)
       const order = await orderRepo.findOne({
         where: { id: input.orderId, isDeleted: false },
@@ -3472,6 +3568,12 @@ class O2oPreorderService {
       await this.syncOutboundOrderComplianceFlags(manager, String(order.id), {
         hasCustomerOrder: input.hasCustomerOrder,
         isSystemApplied: input.isSystemApplied,
+        reason: '管理端 O2O 合规状态联动',
+        actor: {
+          userId: actor.userId,
+          username: actor.username,
+          displayName: actor.displayName,
+        },
       })
       return this.buildOrderDetail(order, manager)
     })
@@ -3488,6 +3590,7 @@ class O2oPreorderService {
     }
 
     const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const preorderRepo = manager.getRepository(O2oPreorder)
       const preorderItemRepo = manager.getRepository(O2oPreorderItem)
       const returnRequestRepo = manager.getRepository(O2oReturnRequest)
@@ -3660,6 +3763,7 @@ class O2oPreorderService {
       throw new BizError('取消原因长度应为 2-200 个字符', 400)
     }
     const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, input.actor.userId)
       const order = await manager.getRepository(O2oPreorder).findOne({
         where: { id: input.orderId, isDeleted: false },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
@@ -3724,6 +3828,7 @@ class O2oPreorderService {
     for (const item of orders) {
       try {
         results.push(await runInTransaction(async (manager): Promise<BatchPurgeCancelledPreorderResult> => {
+          await lockActiveSysAccountForBusiness(manager, input.actor.userId)
           const preorderRepo = manager.getRepository(O2oPreorder)
           const order = await preorderRepo.findOne({ where: { id: item.id }, lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' } })
           if (!order) return { id: item.id, outcome: 'failed', code: 'ORDER_NOT_FOUND', message: '订单不存在' }
@@ -3980,6 +4085,7 @@ class O2oPreorderService {
   async rejectReturnRequest(input: RejectReturnRequestInput, actor: AuthUserContext) {
     const normalizedRejectReason = this.normalizeReturnRejectReason(input.rejectReason)
     return runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const returnRequestRepo = manager.getRepository(O2oReturnRequest)
       const orderRepo = manager.getRepository(O2oPreorder)
       const returnRequest = await returnRequestRepo.findOne({
@@ -4114,6 +4220,7 @@ class O2oPreorderService {
   async verifyByCode(verifyCode: string, actor: AuthUserContext) {
     const normalizedVerifyCode = this.normalizeVerifyCode(verifyCode)
     const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const returnRequest = await manager.getRepository(O2oReturnRequest).findOne({
         where: { verifyCode: normalizedVerifyCode },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
@@ -4158,6 +4265,7 @@ class O2oPreorderService {
       throw new BizError('入库数量必须为正整数', 400)
     }
     const result = await runInTransaction(async (manager) => {
+      await lockActiveSysAccountForBusiness(manager, actor.userId)
       const product = await manager.getRepository(BaseProduct).findOne({
         where: { id: productId },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },

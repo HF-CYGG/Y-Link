@@ -329,6 +329,11 @@ const voucherOrder = computed<OrderDetailResult | null>(() => {
   return {
     id: order.id,
     showNo: displayShowNo,
+    businessNo: displayShowNo,
+    editVersion: 1,
+    inventoryMode: 'o2o_preapplied',
+    contentEditable: false,
+    contentEditBlockers: ['O2O 正式出库单已锁定'],
     orderType: order.clientOrderType,
     hasCustomerOrder: Boolean(order.hasCustomerOrder),
     isSystemApplied: Boolean(order.isSystemApplied),
@@ -356,6 +361,11 @@ const voucherOrder = computed<OrderDetailResult | null>(() => {
         id: item.id,
         productId: item.productId,
         productCode: item.productCode,
+        skuId: item.skuId ?? null,
+        skuCode: item.skuCode ?? null,
+        skuCodeSnapshot: item.skuCode ?? null,
+        specText: item.specText ?? null,
+        specTextSnapshot: item.specText ?? null,
         // 正式出库单落库的商品名带下单规格，这里同口径拼接，避免核销前预览与核销后打印对不上。
         productName: buildO2oItemDisplayName(item.productName, item),
         qty: String(item.qty),

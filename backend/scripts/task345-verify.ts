@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url'
 import { initializeDatabaseSchemaIfNeeded } from '../src/config/database-bootstrap.js'
 import { AppDataSource } from '../src/config/data-source.js'
 import { env } from '../src/config/env.js'
+import { SysUser } from '../src/entities/sys-user.entity.js'
 import { dashboardService } from '../src/services/dashboard.service.js'
 import { orderService } from '../src/services/order.service.js'
 import { productService } from '../src/services/product.service.js'
@@ -56,8 +57,8 @@ function verifyFrontendSources() {
   const productManagerSource = fs.readFileSync(productManagerFile, 'utf8')
   const productRouteSource = fs.readFileSync(productRouteFile, 'utf8')
 
-  assert.match(orderEntrySource, /productApi\.createProduct\(\{/)
-  assert.match(orderEntrySource, /productCode:\s*`Auto-\$\{globalThis\.crypto\.randomUUID\(\)\.slice\(0,\s*8\)\}`/)
+  assert.doesNotMatch(orderEntrySource, /productApi\.createProduct\(/, '出库开单不得隐式创建商品')
+  assert.match(orderEntrySource, /const invalidProductRow = itemRows\.value\.find/, '旧草稿中的未知商品必须在提交前被拒绝')
 
   // 编辑弹窗必须走详情接口回填，并且详情请求要透传 useStableRequest 下发的 signal：
   // 少了 signal，连点不同行时旧详情会覆盖新选择（见 src/composables/useStableRequest.ts 的 runLatest）。
@@ -70,7 +71,7 @@ function verifyFrontendSources() {
   assert.match(productManagerSource, /batchUpdateProducts/)
   assert.match(productManagerSource, /留空则自动生成统一编码/)
   assert.match(productRouteSource, /productRouter\.post\(\s*'\/batch'/)
-  pass('前端已接入快捷创建商品、编辑详情回填与批量改状态入口')
+  pass('出库开单仅允许已建档商品，产品中心保留编辑详情回填与批量改状态入口')
 }
 
 async function main() {
@@ -82,22 +83,44 @@ async function main() {
   await systemConfigService.ensureDefaultConfigs()
 
   try {
+    const persistedActor = await AppDataSource.getRepository(SysUser).save({
+      username: mockActor.username,
+      passwordHash: 'test-only-password-hash',
+      displayName: mockActor.displayName,
+      email: null,
+      role: mockActor.role,
+      status: mockActor.status,
+      lastLoginAt: null,
+      deactivatedAt: null,
+      deactivationReason: null,
+      deactivatedByUserId: null,
+      deactivatedByUsername: null,
+      deactivatedByDisplayName: null,
+      restoredAt: null,
+      restoredByUserId: null,
+      restoredByUsername: null,
+      restoredByDisplayName: null,
+    })
+    mockActor.userId = persistedActor.id
+
     const analyticsTag = await tagService.create({
       tagName: 'Task345统计标签',
       tagCode: 'T345-STAT',
-    })
+    }, mockActor)
 
     const firstProduct = await productService.create({
       productName: '自动编码产品一号',
       defaultPrice: 10,
+      currentStock: 20,
       isActive: true,
       tagIds: [analyticsTag.id],
-    })
+    }, mockActor)
     const secondProduct = await productService.create({
       productName: '自动编码产品二号',
       defaultPrice: 12,
+      currentStock: 20,
       isActive: true,
-    })
+    }, mockActor)
 
     assert.match(firstProduct.productCode, /^P-\d{6}-0001$/)
     assert.match(secondProduct.productCode, /^P-\d{6}-0002$/)
@@ -107,7 +130,7 @@ async function main() {
     const batchUpdatedProducts = await productService.batchUpdate({
       ids: [firstProduct.id, secondProduct.id],
       isActive: false,
-    })
+    }, mockActor)
     assert.equal(batchUpdatedProducts.length, 2)
     assert.equal(batchUpdatedProducts.every((item) => item.isActive === false), true)
     assert.equal((await productService.detail(firstProduct.id)).isActive, false)
@@ -118,7 +141,7 @@ async function main() {
         productService.update(firstProduct.id, {
           currentStock: 1,
           preOrderedStock: 2,
-        }),
+        }, mockActor),
       /预订库存不能超过物理库存/,
     )
     pass('商品服务会阻断预订库存大于物理库存的非法更新')
@@ -126,11 +149,11 @@ async function main() {
     await productService.update(firstProduct.id, {
       isActive: true,
       defaultPrice: 10,
-    })
+    }, mockActor)
     await productService.update(secondProduct.id, {
       isActive: true,
       defaultPrice: 12,
-    })
+    }, mockActor)
 
     const submitResult = await orderService.submit(
       {
@@ -191,9 +214,9 @@ async function main() {
           },
           mockActor,
         ),
-      /重复/,
+      /同一规格|重复/,
     )
-    pass('订单服务会阻断同一产品重复出现在多条明细中的脏单据')
+    pass('订单服务会阻断同一规格重复出现在多条明细中的脏单据')
 
     const productAfterSubmit = await productService.detail(firstProduct.id)
     const orderDetail = await orderService.detailById(submitResult.order.id)

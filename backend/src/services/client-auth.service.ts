@@ -325,6 +325,14 @@ class ClientAuthService {
       staffNo: user.staffNo ?? null,
       staffVerified: Boolean(user.staffVerified),
       status: user.status,
+      accountState: (user.deactivatedAt?.getTime() ?? 0) > (user.restoredAt?.getTime() ?? 0) ? 'deactivated' : user.status,
+      deactivatedAt: user.deactivatedAt,
+      deactivationReason: user.deactivationReason,
+      deactivatedByUsername: user.deactivatedByUsername,
+      deactivatedByDisplayName: user.deactivatedByDisplayName,
+      restoredAt: user.restoredAt,
+      restoredByUsername: user.restoredByUsername,
+      restoredByDisplayName: user.restoredByDisplayName,
       lastLoginAt: user.lastLoginAt,
       mobileVerifiedAt: user.mobileVerifiedAt,
       emailVerifiedAt: user.emailVerifiedAt,
@@ -1032,8 +1040,9 @@ class ClientAuthService {
   }
 
   async logout(auth: ClientAuthContext) {
-    await this.sessionRepo.delete({ sessionToken: hashSessionToken(auth.sessionToken) })
-    customerServiceRealtimeService.disconnectBySessionHash('client', hashSessionToken(auth.sessionToken))
+    const sessionHash = hashSessionToken(auth.sessionToken)
+    await this.sessionRepo.delete({ sessionToken: sessionHash })
+    customerServiceRealtimeService.disconnectBySessionHash('client', sessionHash)
   }
 
   async preparePasswordChange(
@@ -1148,7 +1157,7 @@ class ClientAuthService {
     if (user.accountType === 'department') throw new BizError('部门账号资料由管理员维护', 403)
     if (!(await verifyPassword(input.currentPassword, user.passwordHash))) throw new BizError('当前密码错误', 400)
 
-    const isDirectoryTeacher = user.staffVerified && Boolean(user.staffNo?.trim())
+    const isDirectoryTeacher = Boolean(user.staffNo?.trim())
     const storedUsername = normalizeClientUsername(user.realName)
     // 历史不合规用户名允许客户端原样回传；资料接口为兼容展示会裁剪首尾空格，
     // 因此裁剪后的展示值也视为未改名，但始终保留数据库原值。其他变化按新规则校验。

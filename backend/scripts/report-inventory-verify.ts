@@ -394,6 +394,26 @@ async function main() {
       tagName: `库存生命周期-${verifySeed}`,
       tagCode: `LIFECYCLE-${verifySeed}`,
     }))
+    const userRepo = AppDataSource.getRepository(SysUser)
+    const persistedAdmin = await userRepo.save(userRepo.create({
+      username: `report-inventory-admin-${verifySeed}`,
+      passwordHash: 'verify-only',
+      displayName: '库存报表验证管理员',
+      email: null,
+      role: 'admin',
+      status: 'enabled',
+      lastLoginAt: null,
+    }))
+    const adminActor: AuthUserContext = {
+      userId: String(persistedAdmin.id),
+      username: persistedAdmin.username,
+      displayName: persistedAdmin.displayName,
+      role: 'admin',
+      permissions: [],
+      status: 'enabled',
+      sessionToken: 'report-inventory-admin-session',
+      authSource: 'bearer',
+    }
     const lifecycleProduct = await productService.create({
       productCode: `REPORT-LIFECYCLE-${verifySeed}`,
       productName: `库存生命周期商品-${verifySeed}`,
@@ -405,7 +425,7 @@ async function main() {
       currentStock: 10,
       limitPerUser: 20,
       tagIds: [String(lifecycleTag.id)],
-    })
+    }, adminActor)
     const lifecycleSku = lifecycleProduct.skus[0]
     assert.ok(lifecycleSku, '生命周期商品必须生成默认 SKU')
 
@@ -461,8 +481,7 @@ async function main() {
 
     await assertLifecycleStock([10, 0, 10], '初始库存')
 
-    const supplierRepo = AppDataSource.getRepository(SysUser)
-    const supplier = await supplierRepo.save(supplierRepo.create({
+    const supplier = await userRepo.save(userRepo.create({
       username: `report-supplier-${verifySeed}`,
       passwordHash: 'verify-only',
       displayName: '库存报表验证供货方',
@@ -480,14 +499,6 @@ async function main() {
       status: 'enabled',
       sessionToken: 'report-inventory-supplier',
       authSource: 'bearer',
-    }
-    const adminActor: AuthUserContext = {
-      ...supplierActor,
-      userId: 'report-inventory-admin',
-      username: 'report-inventory-admin',
-      displayName: '库存报表验证管理员',
-      role: 'admin',
-      sessionToken: 'report-inventory-admin-session',
     }
     const inbound = await inboundService.submitSupplierDelivery(supplierActor, {
       remark: '库存报表真实入库验证',
@@ -549,15 +560,18 @@ async function main() {
     await o2oPreorderService.verifyByCode(returnRequest.verifyCode, adminActor)
     await assertLifecycleStock([13, 0, 13], '退货后')
 
-    const beforeOrdinaryOrder = await readStoredLifecycleState()
     await orderService.submit({
       idempotencyKey: `report-inventory-ordinary-${verifySeed}`,
       orderType: 'walkin',
       customerName: '库存报表普通出库验证',
       items: [{ productId: lifecycleProduct.id, qty: 2, unitPrice: 10 }],
     }, adminActor)
-    assert.deepEqual(await readStoredLifecycleState(), beforeOrdinaryOrder, '普通出库保存单据与价格时不得改变商品/SKU库存或库存流水')
-    await assertLifecycleStock([13, 0, 13], '普通出库后')
+    await assertLifecycleStock([11, 0, 11], '普通出库后')
+    const ordinaryLogs = await inventoryLogRepo.find({
+      where: { productId: lifecycleProduct.id, changeType: 'manual_outbound_create' },
+    })
+    assert.equal(ordinaryLogs.length, 1, '普通手工出库必须写入库存流水')
+    assert.equal(String(ordinaryLogs[0]?.skuId), String(lifecycleSku.id), '普通手工出库流水必须关联 SKU')
 
     console.log('库存报表专项验证通过：固定口径、分页、跨批次、真实 Excel 与库存生命周期均一致')
   } finally {

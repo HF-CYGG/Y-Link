@@ -25,6 +25,7 @@ export interface O2oPreorderSummary {
   id: string
   showNo: string
   customerOrderShowNo: string | null
+  customerOrderBusinessNo: string | null
   verifyCode: string
   status: O2oOrderStatus
   businessStatus: O2oOrderBusinessStatus | null
@@ -77,6 +78,7 @@ export interface O2oPreorderDetailOrder {
   id: string
   showNo: string
   customerOrderShowNo: string | null
+  customerOrderBusinessNo: string | null
   verifyCode: string
   status: O2oOrderStatus
   businessStatus: O2oOrderBusinessStatus | null

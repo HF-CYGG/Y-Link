@@ -26,6 +26,7 @@ export type UserRole = (typeof USER_ROLES)[number]
  */
 export const USER_STATUSES = ['enabled', 'disabled'] as const
 export type UserStatus = (typeof USER_STATUSES)[number]
+export type AccountState = UserStatus | 'deactivated'
 
 /**
  * 审计结果状态：
@@ -74,6 +75,14 @@ export interface UserSafeProfile {
   role: UserRole
   permissions: PermissionCode[]
   status: UserStatus
+  accountState: AccountState
+  deactivatedAt: Date | null
+  deactivationReason: string | null
+  deactivatedByUsername: string | null
+  deactivatedByDisplayName: string | null
+  restoredAt: Date | null
+  restoredByUsername: string | null
+  restoredByDisplayName: string | null
   lastLoginAt: Date | null
   createdAt: Date
   updatedAt: Date

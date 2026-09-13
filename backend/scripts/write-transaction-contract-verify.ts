@@ -282,6 +282,18 @@ const ALLOWED_DIRECT_TRANSACTION_CALLS: Array<{
     relativePath: 'src/config/database-bootstrap.ts',
     receiver: 'dataSource',
     method: 'transaction',
+    enclosingFunction: 'backfillSqliteOrderAmendmentData',
+    expectedCount: 1,
+    reason:
+      'backfillSqliteOrderAmendmentData 是接受任意 DataSource 的启动期历史订单回填，'
+      + '不能使用只绑定全局 AppDataSource 的 runInTransaction；函数会先幂等调用 '
+      + 'initializeDatabaseInfrastructure(dataSource)，再通过已被协调器接管的 transaction '
+      + '原子写入永久占号与业务流水游标',
+  },
+  {
+    relativePath: 'src/config/database-bootstrap.ts',
+    receiver: 'dataSource',
+    method: 'transaction',
     enclosingFunction: 'migrateLegacyFeedbackAttachments',
     expectedCount: 1,
     reason:
