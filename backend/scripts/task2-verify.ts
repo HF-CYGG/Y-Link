@@ -427,6 +427,47 @@ async function main() {
       BizError,
     )
     assert.equal(await readDepartmentConfigValue(), departmentConfigBefore, '开单链路全程不得修改系统部门配置')
+
+    // 幂等重试：首单落库后部门节点被删除，同一幂等键重试仍须返回既有订单而不是因解析部门失败。
+    const retryDepartmentPayload = {
+      idempotencyKey: `task2-department-retry-${Date.now()}`,
+      orderType: 'department',
+      customerDepartmentName: '教学部-维修组',
+      customerDepartmentNodeId: 'task2_dept_teaching_repair',
+      items: [{ productId: String(createdProduct.id), qty: 1, unitPrice: 12.5 }],
+    }
+    const firstRetrySubmit = await orderService.submit(retryDepartmentPayload, mockActor)
+    await systemConfigService.updateClientDepartmentConfigs(
+      {
+        tree: [
+          {
+            id: 'task2_dept_logistics',
+            label: '后勤保障部',
+            children: [{ id: 'task2_dept_logistics_repair', label: '维修组', children: [] }],
+          },
+        ],
+      },
+      adminActor,
+    )
+    const retriedSubmit = await orderService.submit(retryDepartmentPayload, mockActor)
+    assert.equal(retriedSubmit.order.id, firstRetrySubmit.order.id, '幂等重试命中既有订单时不得因部门节点已删除而失败')
+    await expectBizError(
+      '部门节点删除后新单仍须拦截',
+      () => orderService.submit({ ...retryDepartmentPayload, idempotencyKey: `task2-department-retry-new-${Date.now()}` }, mockActor),
+      400,
+      '已从系统配置中移除',
+      BizError,
+    )
+
+    const orderEntryFormSource = fs.readFileSync(
+      path.resolve(process.cwd(), '..', 'src', 'views', 'order-entry', 'composables', 'useOrderEntryForm.ts'),
+      'utf8',
+    )
+    assert.match(
+      orderEntryFormSource,
+      /catch \(error\) \{[\s\S]*?if \(submittedDepartmentNodeId\) \{[\s\S]*?loadDepartmentOptions\(\)/,
+      '携带部门节点提交失败后必须刷新部门选项，避免已删除节点被重复携带',
+    )
     pass('客户部门支持系统配置规范路径、同名不同路径、手动录入、散客忽略与已删除节点拦截')
 
     await expectBizError(

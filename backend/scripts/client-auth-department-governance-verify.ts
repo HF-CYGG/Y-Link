@@ -1151,6 +1151,71 @@ async function main() {
     assert.ok(!profileViewSource.includes('可仅凭当前密码保存为未验证联系方式'), '资料弹窗不得保留与服务端行为矛盾的旧提示')
     pass('已保存联系方式补认证覆盖通道、错误次数、重复使用、并发改号、审计脱敏与改绑重新认证')
 
+    // 审计操作者字段按列宽截断：邮箱可达 128 字符，而 actor_username 仅 64 字符。
+    const longContactEmail = `${'long-contact-audit-'.repeat(4)}verify@example.com`
+    assert.ok(longContactEmail.length > 64 && longContactEmail.length <= 128, '验证用邮箱应超过审计账号列宽且仍为合法邮箱长度')
+    const longEmailUser = await clientUserRepository.save(clientUserRepository.create({
+      realName: '长邮箱补认证',
+      mobile: '13800001133',
+      email: longContactEmail,
+      passwordHash: await hashPassword(clientPassword),
+      accountType: 'personal',
+      staffVerified: false,
+      status: 'enabled',
+    }))
+    await verificationCodeService.sendCode({ channel: 'email', target: longContactEmail, scene: 'profile_update' })
+    const longEmailCode = latestCapturedCode(longContactEmail)
+    assert.ok(longEmailCode, '应捕获长邮箱补认证验证码')
+    const longEmailProfile = await clientAuthService.confirmSavedContact(
+      buildSavedContactAuth(longEmailUser),
+      { channel: 'email', code: longEmailCode },
+      savedContactRequestMeta,
+    )
+    assert.ok(longEmailProfile.emailVerifiedAt, '长邮箱补认证应成功写入认证时间')
+    const longEmailAudit = await auditLogRepository.findOneOrFail({
+      where: { actionType: 'client_user.verify_contact', targetId: longEmailUser.id },
+    })
+    assert.ok(longEmailAudit.actorUsername, '审计应保留操作者账号快照')
+    assert.ok([...longEmailAudit.actorUsername].length <= 64, '审计操作者账号快照不得超过 actor_username 列宽')
+    pass('审计操作者字段按列宽截断，超长邮箱补认证不会因审计写入失败回滚')
+
+    // 资料更新与补认证并发：资料更新只写实际变化字段，不得用陈旧实体回写认证时间。
+    const staleProfileUser = await clientUserRepository.save(clientUserRepository.create({
+      realName: '资料并发认证',
+      mobile: '13800001134',
+      email: 'stale-profile@example.com',
+      passwordHash: await hashPassword(clientPassword),
+      accountType: 'personal',
+      staffVerified: false,
+      status: 'enabled',
+    }))
+    const clientAuthServiceInternals = clientAuthService as unknown as {
+      ensureProfileIdentifiersUnique: (...args: unknown[]) => Promise<void>
+    }
+    const originalEnsureProfileIdentifiersUnique = clientAuthServiceInternals.ensureProfileIdentifiersUnique
+    // 在资料更新已读取用户、尚未写回之前模拟补认证成功提交。
+    clientAuthServiceInternals.ensureProfileIdentifiersUnique = async (...args: unknown[]) => {
+      await originalEnsureProfileIdentifiersUnique.apply(clientAuthService, args)
+      await clientUserRepository.update({ id: staleProfileUser.id }, { emailVerifiedAt: new Date() })
+    }
+    try {
+      await clientAuthService.updateProfile(
+        buildSavedContactAuth(staleProfileUser),
+        {
+          username: '资料并发认证改名',
+          mobile: '13800001134',
+          email: 'stale-profile@example.com',
+          currentPassword: clientPassword,
+        },
+      )
+    } finally {
+      clientAuthServiceInternals.ensureProfileIdentifiersUnique = originalEnsureProfileIdentifiersUnique
+    }
+    const staleProfileAfter = await clientUserRepository.findOneByOrFail({ id: staleProfileUser.id })
+    assert.equal(staleProfileAfter.realName, '资料并发认证改名', '资料更新应写入实际变化的姓名')
+    assert.ok(staleProfileAfter.emailVerifiedAt, '资料更新不得用陈旧实体把并发补认证写入的认证时间回写为空')
+    pass('资料更新只写实际变化字段，不会覆盖并发补认证写入的认证时间')
+
     const webAuthSource = fs.readFileSync(path.resolve(backendRoot, '..', 'src', 'views', 'client', 'ClientAuthView.vue'), 'utf8')
     const webProfileSource = fs.readFileSync(path.resolve(backendRoot, '..', 'src', 'views', 'client', 'ClientProfileView.vue'), 'utf8')
     const mobileRegisterSource = readFileWithGitFallback(path.resolve(backendRoot, '..', 'apps', 'mobile', 'app', '(auth)', 'register.tsx'))

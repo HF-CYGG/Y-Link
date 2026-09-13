@@ -621,23 +621,35 @@ export class OrderService {
    * 解析提交的客户部门来源：
    * - 仅部门单携带节点 ID 时才按系统配置只读解析，并用规范完整路径覆盖提交文本；
    * - 未携带节点 ID 视为手动录入，原样交给后续长度与必填校验，绝不回写系统配置；
-   * - 节点已被删除时明确拒绝，提示用户重新选择或改为手动填写。
+   * - 节点已被删除时明确拒绝，提示用户重新选择或改为手动填写；
+   * - 必须在提交事务内、幂等命中检查之后调用，并复用同一事务管理器读取配置。
    */
   private async resolveSubmitCustomerDepartment(
     input: SubmitOrderInput,
-  ): Promise<{ customerDepartmentName?: string; source: 'config' | 'manual' }> {
+    context: SubmitOrderContext,
+    manager: EntityManager,
+  ): Promise<{ customerDepartmentName: string | null; source: 'config' | 'manual' }> {
     const nodeId = input.customerDepartmentNodeId?.trim() ?? ''
-    if (!nodeId || this.normalizeOrderType(input.orderType) !== 'department') {
-      return { customerDepartmentName: input.customerDepartmentName, source: 'manual' }
+    if (!nodeId || context.normalizedOrderType !== 'department') {
+      return { customerDepartmentName: context.normalizedCustomerDepartmentName, source: 'manual' }
     }
+    let departmentName: string
     try {
-      const resolved = await systemConfigService.resolveClientDepartmentNode(nodeId)
-      return { customerDepartmentName: resolved.departmentName, source: 'config' }
+      departmentName = (await systemConfigService.resolveClientDepartmentNode(nodeId, manager)).departmentName
     } catch (error) {
       if (error instanceof BizError) {
         throw new BizError('所选部门已从系统配置中移除，请重新选择或直接手动填写', 400)
       }
       throw error
+    }
+    return {
+      customerDepartmentName: this.readLimitedText(
+        departmentName,
+        '客户部门名称',
+        ORDER_FIELD_LIMITS.customerDepartmentName,
+        { required: true },
+      ),
+      source: 'config',
     }
   }
 
@@ -664,12 +676,7 @@ export class OrderService {
       '订单备注',
       ORDER_FIELD_LIMITS.orderRemark,
     )
-    // 部门来源须在构建上下文前确定：选自系统配置的节点由服务端解析规范完整路径覆盖提交文本。
-    const resolvedDepartment = await this.resolveSubmitCustomerDepartment(input)
-    const submitContext = this.buildSubmitOrderContext(
-      { ...input, customerDepartmentName: resolvedDepartment.customerDepartmentName },
-      actor,
-    )
+    const submitContext = this.buildSubmitOrderContext(input, actor)
 
     let lastError: unknown
     for (let attempt = 1; attempt <= ORDER_SUBMIT_MAX_RETRY; attempt += 1) {
@@ -694,6 +701,9 @@ export class OrderService {
               items: existedItems.map((item) => this.buildSubmittedOrderItemView(item)),
             }
           }
+
+          // 部门节点须在确认不是幂等重试后再解析：重试命中既有订单时，不应因部门配置此后变更而失败。
+          const resolvedDepartment = await this.resolveSubmitCustomerDepartment(input, submitContext, manager)
 
           const normalizedProductIds = [...new Set(normalizedItems.map((item) => item.productId))]
             .sort((left, right) => left.localeCompare(right))
@@ -725,7 +735,7 @@ export class OrderService {
             hasCustomerOrder: Boolean(input.hasCustomerOrder),
             isSystemApplied: Boolean(input.isSystemApplied),
             issuerName: submitContext.normalizedIssuerName,
-            customerDepartmentName: submitContext.normalizedCustomerDepartmentName,
+            customerDepartmentName: resolvedDepartment.customerDepartmentName,
             idempotencyKey: submitContext.normalizedIdempotencyKey,
             customerName: normalizedCustomerName,
             remark: normalizedRemark,
@@ -993,7 +1003,8 @@ export class OrderService {
       '客户部门名称',
       ORDER_FIELD_LIMITS.customerDepartmentName,
     )
-    if (normalizedOrderType === 'department' && !normalizedCustomerDepartmentName) {
+    // 携带部门节点时名称以事务内解析出的规范路径为准，此处只校验手动录入的部门单。
+    if (normalizedOrderType === 'department' && !normalizedCustomerDepartmentName && !input.customerDepartmentNodeId?.trim()) {
       throw new BizError('部门订单必须填写客户部门名称', 400)
     }
     return {

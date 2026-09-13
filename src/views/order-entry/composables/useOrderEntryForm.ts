@@ -872,6 +872,8 @@ export const useOrderEntryForm = () => {
       return
     }
 
+    // 记录本次是否携带系统部门节点，失败后据此刷新部门选项。
+    const submittedDepartmentNodeId = headerForm.orderType === 'department' ? headerForm.customerDepartmentNodeId : ''
     isSaving.value = true
     try {
       const submitItems = buildSubmitItems()
@@ -906,6 +908,11 @@ export const useOrderEntryForm = () => {
         },
       })
     } catch (error) {
+      // 携带部门节点提交失败时刷新选项：节点若已被删除，本地旧选项随之移除，
+      // 重新推导后同一路径按手动录入提交，避免不刷新页面就无法恢复。
+      if (submittedDepartmentNodeId) {
+        void loadDepartmentOptions()
+      }
       void showCriticalErrorDialog(error, {
         title: '出库单保存失败',
         fallback: '保存失败，请稍后重试',

@@ -1320,14 +1320,24 @@ class ClientAuthService {
 
     const usernameChanged = !isDirectoryTeacher && !usernameUnchanged && username.value !== user.realName
     const identityChanged = usernameChanged || mobileChanged || emailChanged
-    if (!isDirectoryTeacher && !usernameUnchanged) user.realName = username.value
-    user.mobile = mobile
-    user.email = email
-    if (mobileChanged) user.mobileVerifiedAt = mobile && capabilities.channels.mobile ? new Date() : null
-    if (emailChanged) user.emailVerifiedAt = email && capabilities.channels.email ? new Date() : null
+    // 只写回实际变化的字段：整实体 save 会用本次读取的陈旧认证时间覆盖并发补认证写入的结果。
+    const profilePatch: Partial<ClientUser> = {}
+    if (usernameChanged) profilePatch.realName = username.value
+    if (mobileChanged) {
+      profilePatch.mobile = mobile
+      profilePatch.mobileVerifiedAt = mobile && capabilities.channels.mobile ? new Date() : null
+    }
+    if (emailChanged) {
+      profilePatch.email = email
+      profilePatch.emailVerifiedAt = email && capabilities.channels.email ? new Date() : null
+    }
 
     const persist = async (transactionManager: EntityManager) => {
-      const savedUser = await transactionManager.getRepository(ClientUser).save(user)
+      const repository = transactionManager.getRepository(ClientUser)
+      if (Object.keys(profilePatch).length > 0) {
+        await repository.update({ id: user.id }, profilePatch)
+      }
+      const savedUser = await repository.findOneByOrFail({ id: user.id })
       if (identityChanged) {
         await transactionManager.getRepository(ClientUserSession).delete({ userId: savedUser.id })
         await transactionManager.getRepository(ClientMobileSession).createQueryBuilder()
