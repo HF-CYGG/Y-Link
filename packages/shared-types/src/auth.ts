@@ -132,6 +132,20 @@ export interface ClientProfileVerificationCodeSendInput {
 }
 
 /**
+ * 向当前已保存的联系方式发送认证验证码。
+ * 目标由服务端从账号资料读取，客户端只声明通道，不能指定任意号码或邮箱。
+ */
+export interface ClientSavedContactVerificationSendInput {
+  channel: ClientVerificationTargetChannel
+}
+
+/** 使用验证码确认当前已保存的联系方式，成功后该联系方式标记为已认证。 */
+export interface ClientSavedContactVerificationConfirmInput {
+  channel: ClientVerificationTargetChannel
+  code: string
+}
+
+/**
  * 教职工目录查询的 service 结果。
  * 当前后端尚未暴露对应 HTTP 路由，api-client 不得据此虚构 endpoint。
  */

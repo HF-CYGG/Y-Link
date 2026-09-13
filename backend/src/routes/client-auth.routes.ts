@@ -126,6 +126,16 @@ const profileVerificationCodeSendSchema = z.object({
   target: z.string().trim().min(1).max(128),
 })
 
+// 补认证只声明通道：目标由服务端从当前账号资料读取，客户端无法指定任意号码或邮箱。
+const savedContactVerificationSendSchema = z.object({
+  channel: z.enum(['mobile', 'email']),
+})
+
+const savedContactVerificationConfirmSchema = z.object({
+  channel: z.enum(['mobile', 'email']),
+  code: z.string().trim().min(4).max(8),
+})
+
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export const clientAuthRouter = Router()
 
@@ -325,7 +335,12 @@ clientAuthRouter.patch(
     const authReq = req as ClientAuthenticatedRequest
     const requestMeta = extractRequestMeta(req)
     await authSecurityService.guardClientProfileUpdateRequest(requestMeta, authReq.clientAuth.userId)
-    const data = await clientAuthService.updateProfile(authReq.clientAuth, updateProfileSchema.parse(req.body))
+    const data = await clientAuthService.updateProfile(
+      authReq.clientAuth,
+      updateProfileSchema.parse(req.body),
+      undefined,
+      requestMeta,
+    )
     if (data.requiresRelogin) {
       clearClientAuthCookie(req, res)
     }
@@ -349,5 +364,36 @@ clientAuthRouter.post(
       requestMeta,
     })
     res.json({ code: 0, message: 'ok', data: { ...data, userId: authReq.clientAuth.userId } })
+  }),
+)
+
+clientAuthRouter.post(
+  '/profile/contact-verification/send',
+  requireClientAuth,
+  asyncHandler(async (req, res) => {
+    const authReq = req as ClientAuthenticatedRequest
+    const payload = savedContactVerificationSendSchema.parse(req.body)
+    // 发送频控在服务层按已保存目标计桶，通道状态与已认证状态也在服务层统一复核。
+    const data = await clientAuthService.sendSavedContactCode(
+      authReq.clientAuth,
+      payload.channel,
+      extractRequestMeta(req),
+    )
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+clientAuthRouter.post(
+  '/profile/contact-verification/confirm',
+  requireClientAuth,
+  asyncHandler(async (req, res) => {
+    const authReq = req as ClientAuthenticatedRequest
+    const requestMeta = extractRequestMeta(req)
+    const payload = savedContactVerificationConfirmSchema.parse(req.body)
+    // 验证码确认与资料更新共用同一频控桶，避免借补认证接口绕过资料修改限流。
+    await authSecurityService.guardClientProfileUpdateRequest(requestMeta, authReq.clientAuth.userId)
+    const data = await clientAuthService.confirmSavedContact(authReq.clientAuth, payload, requestMeta)
+    res.setHeader('Cache-Control', 'no-store')
+    res.json({ code: 0, message: 'ok', data })
   }),
 )
