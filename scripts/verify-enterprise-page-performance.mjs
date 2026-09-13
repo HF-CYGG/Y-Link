@@ -27,9 +27,12 @@ const reportPath = path.join(runtimeRoot, 'enterprise-performance-budget-report.
  *
  * 总量基线因恢复 cssCodeSplit/modulePreload 后增加少量分包包装开销，按当前 4144 KB
  * 重设为 4200 KB；不足 1.5% 的余量仍会阻止整体包体无约束增长。
+ * main（6dc428b）实测已达 4199.83 KB，余量耗尽；#69 客户端资料补认证与 #75 开单客户部门下拉
+ * 新增约 5.8 KB 业务代码（ClientProfileView +3.4 KB、OrderEntryView +2.0 KB，均在各自路由分包预算内），
+ * 按当前 4206 KB 重设为 4260 KB，余量仍保持在约 1.3%。
  */
 const performanceBudget = {
-  totalAssetsMaxKB: 4200,
+  totalAssetsMaxKB: 4260,
   criticalAssetsMaxKB: 1180,
   initialLoadJsMaxKB: 850,
   initialLoadCssMaxKB: 320,
