@@ -14,7 +14,7 @@ import type {
   AccountPermanentDeletePayload,
   AccountPermanentDeleteResult,
   AccountState,
-} from '@ylink/shared-types'
+} from '../../../packages/shared-types/src/index'
 
 /**
  * 用户列表查询参数：

@@ -5,7 +5,7 @@
  */
 
 import { request } from '@/api/http'
-import type { AccountLifecycleFields } from '@ylink/shared-types'
+import type { AccountLifecycleFields } from '../../../packages/shared-types/src/index'
 
 /**
  * 前端用户角色类型：

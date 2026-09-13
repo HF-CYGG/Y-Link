@@ -15,7 +15,7 @@ import type {
   AccountLifecyclePreview,
   AccountLifecycleReasonPayload,
   AccountPermanentDeletePayload,
-} from '@ylink/shared-types'
+} from '../../../packages/shared-types/src/index'
 
 const props = defineProps<{
   modelValue: boolean

@@ -22,7 +22,7 @@ import type {
   AccountLifecycleReasonPayload,
   AccountPermanentDeletePayload,
   AccountState,
-} from '@ylink/shared-types'
+} from '../../../packages/shared-types/src/index'
 import {
   changePassword,
   ROLE_LABEL_MAP,
