@@ -16,7 +16,7 @@ import {
   type OrderDetailResult,
   type UpdateOrderContentPayload,
 } from '@/api/modules/order'
-import { BizCrudDialogShell } from '@/components/common'
+import { BizCrudDialogShell, PassiveNumberInput } from '@/components/common'
 import { showAppSuccess, showAppWarning } from '@/utils/app-alert'
 import { showCriticalErrorDialog } from '@/utils/error-dialog'
 
@@ -215,16 +215,16 @@ const commit = async () => {
         </el-table-column>
         <el-table-column label="数量" width="140">
           <template #default="{ row }">
-            <el-input-number
+            <!-- 使用被动滚轮的共享数字输入，避免 ElInputNumber 注册 passive:false 的 wheel 监听。 -->
+            <PassiveNumberInput
               v-model="row.qty"
               :min="order.inventoryMode === 'manual_applied' ? 1 : 0.01"
               :precision="order.inventoryMode === 'manual_applied' ? 0 : 2"
-              controls-position="right"
             />
           </template>
         </el-table-column>
         <el-table-column label="单价" width="150">
-          <template #default="{ row }"><el-input-number v-model="row.unitPrice" :min="0.01" :precision="2" controls-position="right" /></template>
+          <template #default="{ row }"><PassiveNumberInput v-model="row.unitPrice" :min="0.01" :precision="2" /></template>
         </el-table-column>
         <el-table-column label="备注" min-width="160">
           <template #default="{ row }"><el-input v-model="row.remark" maxlength="200" /></template>
