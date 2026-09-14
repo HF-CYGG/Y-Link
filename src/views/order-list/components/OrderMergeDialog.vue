@@ -3,7 +3,7 @@
   文件职责：承载管理端出库单合并工作台，按“目标选择 -> 服务端预检 -> 确认提交”组织不可逆业务操作。
   实现逻辑：
   - 只使用列表已选择的正常主单；已有父单只能作为目标，来源单始终由服务端预检裁决；
-  - 每次参与单或原因变化都废弃旧预检结果，同一预检/提交重试复用一个幂等键；
+  - 每次参与单或原因变化都废弃旧预检结果，同一预检/提交重试复用一个幂等键；新一次打开会话才清空原因；
   - 预检结果完整展示汇总、明细、零库存影响与逐单阻塞原因，未 ready 时不允许提交。
   维护说明：
   - 禁止在这里推断库存或合并资格，新增约束必须由 /orders/merges/preview 返回；
@@ -83,8 +83,10 @@ const selectDefaultTarget = () => {
 
 watch(
   () => [props.modelValue, props.orders.map((order) => `${order.id}:${order.editVersion}:${order.merge.role}`).join('|')] as const,
-  ([visible]) => {
+  ([visible], previousState) => {
     if (!visible) return
+    const previousVisible = previousState?.[0]
+    if (!previousVisible) reason.value = ''
     selectDefaultTarget()
     invalidatePreview()
   },

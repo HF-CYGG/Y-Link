@@ -30,6 +30,7 @@ async function main() {
     { O2oPreorder },
     { O2oPreorderItem },
     { O2oReturnRequest },
+    { OrderRevision },
     { SysUser },
     { orderMergeService },
     { orderService },
@@ -45,6 +46,7 @@ async function main() {
     import('../src/entities/o2o-preorder.entity.js'),
     import('../src/entities/o2o-preorder-item.entity.js'),
     import('../src/entities/o2o-return-request.entity.js'),
+    import('../src/entities/order-revision.entity.js'),
     import('../src/entities/sys-user.entity.js'),
     import('../src/services/order-merge.service.js'),
     import('../src/services/order.service.js'),
@@ -251,6 +253,57 @@ async function main() {
     }, actor)
     assert.equal(merged.targetOrderId, String(target.outbound.id), '同部门跨账号正式出库单应允许合并')
 
+    const sourceComplianceSet = await o2oPreorderService.updateComplianceFlagsByAdmin({
+      orderId: String(source.preorder.id),
+      isSystemApplied: true,
+    }, actor)
+    assert.equal(sourceComplianceSet.order.hasCustomerOrder, false)
+    assert.equal(sourceComplianceSet.order.isSystemApplied, true)
+    assert.equal(Boolean((await outboundRepo.findOneByOrFail({ id: source.outbound.id })).hasCustomerOrder), false)
+    assert.equal(Boolean((await outboundRepo.findOneByOrFail({ id: source.outbound.id })).isSystemApplied), true)
+    assert.equal(Boolean((await outboundRepo.findOneByOrFail({ id: target.outbound.id })).hasCustomerOrder), false)
+    assert.equal(Boolean((await outboundRepo.findOneByOrFail({ id: target.outbound.id })).isSystemApplied), true, '来源成员已系统申请时父单必须保持组级锁定')
+
+    await o2oPreorderService.updateComplianceFlagsByAdmin({
+      orderId: String(source.preorder.id),
+      isSystemApplied: false,
+    }, actor)
+    assert.equal(Boolean((await outboundRepo.findOneByOrFail({ id: source.outbound.id })).hasCustomerOrder), false)
+    assert.equal(Boolean((await outboundRepo.findOneByOrFail({ id: source.outbound.id })).isSystemApplied), false)
+    assert.equal(Boolean((await outboundRepo.findOneByOrFail({ id: target.outbound.id })).hasCustomerOrder), false, '全组均未打印时管理端应可清除父单聚合状态')
+    assert.equal(Boolean((await outboundRepo.findOneByOrFail({ id: target.outbound.id })).isSystemApplied), false, '全组均未申请时管理端应可清除父单聚合状态')
+
+    await o2oPreorderService.updateComplianceFlagsByAdmin({
+      orderId: String(target.preorder.id),
+      isSystemApplied: true,
+    }, actor)
+    assert.equal(Boolean((await preorderRepo.findOneByOrFail({ id: source.preorder.id })).isSystemApplied), false, '父预订单更新不得篡改跨账号来源预订单')
+    assert.equal(Boolean((await outboundRepo.findOneByOrFail({ id: source.outbound.id })).isSystemApplied), false, '来源正式单必须保留自身合规状态')
+    assert.equal(Boolean((await outboundRepo.findOneByOrFail({ id: target.outbound.id })).isSystemApplied), true)
+    await o2oPreorderService.updateComplianceFlagsByAdmin({
+      orderId: String(source.preorder.id),
+      isSystemApplied: true,
+    }, actor)
+    await o2oPreorderService.updateComplianceFlagsByAdmin({
+      orderId: String(source.preorder.id),
+      isSystemApplied: false,
+    }, actor)
+    assert.equal(Boolean((await outboundRepo.findOneByOrFail({ id: target.outbound.id })).isSystemApplied), true, '另一成员仍已系统申请时清除来源单不得清除父单聚合状态')
+    await o2oPreorderService.updateComplianceFlagsByAdmin({
+      orderId: String(target.preorder.id),
+      isSystemApplied: false,
+    }, actor)
+    assert.equal(Boolean((await outboundRepo.findOneByOrFail({ id: target.outbound.id })).isSystemApplied), false)
+
+    const complianceRevisions = await AppDataSource.getRepository(OrderRevision).find({
+      where: [
+        { orderIdSnapshot: String(target.outbound.id), reason: '管理端 O2O 合规状态联动' },
+        { orderIdSnapshot: String(source.outbound.id), reason: '管理端 O2O 合规状态联动' },
+      ],
+    })
+    assert.equal(complianceRevisions.filter((item) => item.orderIdSnapshot === String(source.outbound.id)).length, 4, '来源单设置与清除均应留下 revision')
+    assert.equal(complianceRevisions.filter((item) => item.orderIdSnapshot === String(target.outbound.id)).length, 4, '父单组级聚合状态的每次实际变更均应留下 revision')
+
     const targetPrinted = await o2oPreorderService.markCustomerOrderPrintedByClient(target.client.auth, String(target.preorder.id))
     assert.equal(targetPrinted.printedNow, true, '目标客户端首次打印应标记父单')
     const mergeMetadata = await orderMergeService.getMetadataMap([String(target.outbound.id)])
@@ -282,6 +335,18 @@ async function main() {
     assert.equal(Boolean((await outboundRepo.findOneByOrFail({ id: source.outbound.id })).hasCustomerOrder), true)
     const printedParent = await outboundRepo.findOneByOrFail({ id: target.outbound.id })
     assert.equal(Boolean(printedParent.hasCustomerOrder), true, '来源客户端打印必须同步锁定父单')
+    await o2oPreorderService.updateComplianceFlagsByAdmin({
+      orderId: String(source.preorder.id),
+      hasCustomerOrder: false,
+      isSystemApplied: true,
+    }, actor)
+    assert.equal(Boolean((await preorderRepo.findOneByOrFail({ id: source.preorder.id })).hasCustomerOrder), true, '只更新系统申请时不得清除原预订单打印状态')
+    assert.equal(Boolean((await outboundRepo.findOneByOrFail({ id: source.outbound.id })).hasCustomerOrder), true, '只更新系统申请时不得清除来源正式单打印状态')
+    assert.equal(Boolean((await outboundRepo.findOneByOrFail({ id: target.outbound.id })).hasCustomerOrder), true, '系统申请更新不得解锁已打印父单')
+    await o2oPreorderService.updateComplianceFlagsByAdmin({
+      orderId: String(source.preorder.id),
+      isSystemApplied: false,
+    }, actor)
     const appendAfterPrint = await orderMergeService.preview({
       target: { orderId: String(target.outbound.id), editVersion: Number(printedParent.editVersion) },
       sources: [{ orderId: String(pendingSource.outbound.id), editVersion: 1 }],
@@ -323,6 +388,27 @@ async function main() {
     }, actor)
     assert.equal(pendingReturnPreview.ready, false)
     assert.match(pendingReturnPreview.blockers.map((item) => item.code).join(','), /PENDING_RETURN_EXISTS/)
+
+    const rollbackTarget = await createVerifiedPair(0, 1)
+    const rollbackSource = await createVerifiedPair(1, 1)
+    await orderService.commitMerge({
+      target: { orderId: String(rollbackTarget.outbound.id), editVersion: 1 },
+      sources: [{ orderId: String(rollbackSource.outbound.id), editVersion: 1 }],
+      reason: '合规组同步失败回滚验证',
+      idempotencyKey: `issue71-o2o-compliance-rollback-${seed}`,
+    }, actor)
+    rollbackTarget.outbound.idempotencyKey = `broken-o2o-link:${rollbackTarget.preorder.id}`
+    await outboundRepo.save(rollbackTarget.outbound)
+    await assert.rejects(
+      () => o2oPreorderService.updateComplianceFlagsByAdmin({
+        orderId: String(rollbackSource.preorder.id),
+        isSystemApplied: true,
+      }, actor),
+      (error: unknown) => error instanceof BizError && error.statusCode === 409,
+      '合并组任一正式单失去原预订单追溯时必须整体拒绝',
+    )
+    assert.equal(Boolean((await preorderRepo.findOneByOrFail({ id: rollbackSource.preorder.id })).isSystemApplied), false, '组同步失败必须回滚预订单更新')
+    assert.equal(Boolean((await outboundRepo.findOneByOrFail({ id: rollbackSource.outbound.id })).isSystemApplied), false, '组同步失败必须回滚来源正式单更新')
 
     const deleteTarget = await createVerifiedPair(0, 1)
     const deleteSource = await createVerifiedPair(1, 1)

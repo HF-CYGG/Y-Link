@@ -81,6 +81,9 @@ expectText('src/views/order-list/components/OrderMergeDialog.vue', 'previewOrder
 expectText('src/views/order-list/components/OrderMergeDialog.vue', 'commitOrderMerge', '服务端提交')
 expectText('src/views/order-list/components/OrderMergeDialog.vue', 'idempotencyKey', '幂等键')
 expectText('src/views/order-list/components/OrderMergeDialog.vue', 'resolveOrderMergeConflictState(error', '统一异常冲突状态转换')
+expectText('src/views/order-list/components/OrderMergeDialog.vue', '([visible], previousState) =>', '合并弹窗区分新打开会话与同次会话状态更新')
+expectText('src/views/order-list/components/OrderMergeDialog.vue', 'const previousVisible = previousState?.[0]', '首次立即回调安全读取上一次可见状态')
+expectText('src/views/order-list/components/OrderMergeDialog.vue', "if (!previousVisible) reason.value = ''", '新一次打开合并弹窗时清空上次的合并原因')
 if (source.get('src/views/order-list/components/OrderMergeDialog.vue')?.includes('response?.status')) {
   failures.push('OrderMergeDialog 不得绕过统一错误层读取 error.response.status')
 }

@@ -47,7 +47,7 @@ import {
 import { generateOrderUuid } from '../utils/id-generator.js'
 import { orderBusinessNoService } from './order-business-no.service.js'
 import { orderSerialService, type OrderSerialRecalibrationResult } from './order-serial.service.js'
-import { orderMergeService } from './order-merge.service.js'
+import { orderMergeService, type OrderMergeMetadata } from './order-merge.service.js'
 import { systemConfigService } from './system-config.service.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { notificationService } from './notification.service.js'
@@ -1267,27 +1267,90 @@ class O2oPreorderService {
     if (!outboundOrder) {
       return
     }
-    const relationRepo = manager.getRepository(OrderMergeRelation)
-    const [sourceRelation, childCount] = await Promise.all([
-      relationRepo.findOne({ where: { sourceOrderId: String(outboundOrder.id) } }),
-      relationRepo.count({ where: { parentOrderId: String(outboundOrder.id) } }),
-    ])
-    if (!payload.allowMergeMemberMutation && (sourceRelation || childCount > 0)) {
+    const outboundOrderId = String(outboundOrder.id)
+    const metadata = (await orderMergeService.getMetadataMap([outboundOrderId], manager)).get(outboundOrderId)
+    if (!metadata || metadata.role === 'standalone') {
+      await this.applyOutboundOrderComplianceFlags(manager, outboundOrder, payload)
+      return
+    }
+    if (!payload.allowMergeMemberMutation) {
       throw new BizError('合并成员禁止修改合规状态', 409)
     }
-    const affectedOrders = [outboundOrder]
-    if (sourceRelation) {
-      const parentOrder = await outboundOrderRepo.findOne({
-        where: { id: String(sourceRelation.parentOrderId) },
-        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
-      })
-      if (!parentOrder) {
-        throw new BizError('合并父单不存在，无法同步打印状态', 409)
-      }
-      affectedOrders.push(parentOrder)
+
+    const parentOrderId = metadata.role === 'parent' ? outboundOrderId : metadata.parent?.id
+    if (!parentOrderId) {
+      throw new BizError('合并父单不存在，无法同步合规状态', 409)
     }
-    for (const affectedOrder of affectedOrders) {
-      await this.applyOutboundOrderComplianceFlags(manager, affectedOrder, payload)
+    const parentMetadata = metadata.role === 'parent'
+      ? metadata
+      : (await orderMergeService.getMetadataMap([parentOrderId], manager)).get(parentOrderId)
+    if (!parentMetadata || parentMetadata.role !== 'parent') {
+      throw new BizError('合并父子关系不完整，无法同步合规状态', 409)
+    }
+
+    const groupOrderIds = [parentOrderId, ...parentMetadata.children.map((child) => child.id)]
+      .sort((left, right) => left.localeCompare(right))
+    const groupOrderQuery = outboundOrderRepo.createQueryBuilder('outboundOrder')
+      .where('outboundOrder.id IN (:...groupOrderIds)', { groupOrderIds })
+      .orderBy('outboundOrder.id', 'ASC')
+    if (manager.connection.options.type !== 'sqlite') groupOrderQuery.setLock('pessimistic_write')
+    const groupOrders = await groupOrderQuery.getMany()
+    if (groupOrders.length !== groupOrderIds.length) {
+      throw new BizError('合并组正式出库单不完整，无法同步合规状态', 409)
+    }
+
+    const preorderIdByOrderId = new Map<string, string>()
+    for (const groupOrder of groupOrders) {
+      const linkedPreorderId = groupOrder.idempotencyKey.startsWith('o2o-preorder-verify:')
+        ? groupOrder.idempotencyKey.slice('o2o-preorder-verify:'.length).trim()
+        : ''
+      if (!linkedPreorderId) {
+        throw new BizError('合并组原预订单追溯不完整，无法同步合规状态', 409)
+      }
+      preorderIdByOrderId.set(String(groupOrder.id), linkedPreorderId)
+    }
+    const preorderIds = [...preorderIdByOrderId.values()].sort((left, right) => left.localeCompare(right))
+    const preorderQuery = manager.getRepository(O2oPreorder)
+      .createQueryBuilder('preorder')
+      .where('preorder.id IN (:...preorderIds)', { preorderIds })
+      .orderBy('preorder.id', 'ASC')
+    if (manager.connection.options.type !== 'sqlite') preorderQuery.setLock('pessimistic_write')
+    const preorders = await preorderQuery.getMany()
+    if (preorders.length !== preorderIds.length) {
+      throw new BizError('合并组原预订单不完整，无法同步合规状态', 409)
+    }
+    const preorderMap = new Map(preorders.map((preorder) => [String(preorder.id), preorder]))
+    const linkedPreorder = preorderMap.get(preorderId)
+    const parentOrder = groupOrders.find((order) => String(order.id) === parentOrderId)
+    if (!linkedPreorder || !parentOrder) {
+      throw new BizError('合并组原预订单追溯不完整，无法同步合规状态', 409)
+    }
+
+    const updates = new Map<BizOutboundOrder, { hasCustomerOrder?: boolean; isSystemApplied?: boolean }>()
+    if (metadata.role === 'source') {
+      updates.set(outboundOrder, {
+        hasCustomerOrder: typeof payload.hasCustomerOrder === 'boolean'
+          ? Boolean(linkedPreorder.hasCustomerOrder)
+          : undefined,
+        isSystemApplied: typeof payload.isSystemApplied === 'boolean'
+          ? Boolean(linkedPreorder.isSystemApplied)
+          : undefined,
+      })
+    }
+    updates.set(parentOrder, {
+      hasCustomerOrder: typeof payload.hasCustomerOrder === 'boolean'
+        ? preorders.some((preorder) => Boolean(preorder.hasCustomerOrder))
+        : undefined,
+      isSystemApplied: typeof payload.isSystemApplied === 'boolean'
+        ? preorders.some((preorder) => Boolean(preorder.isSystemApplied))
+        : undefined,
+    })
+    for (const [affectedOrder, complianceFlags] of [...updates.entries()]
+      .sort(([left], [right]) => String(left.id).localeCompare(String(right.id)))) {
+      await this.applyOutboundOrderComplianceFlags(manager, affectedOrder, {
+        ...payload,
+        ...complianceFlags,
+      })
     }
   }
 
@@ -1367,9 +1430,12 @@ class O2oPreorderService {
     })
   }
 
-  private async lockLinkedOutboundOrderGroupInManager(manager: EntityManager, preorderId: string): Promise<void> {
+  private async lockLinkedOutboundOrderGroupInManager(
+    manager: EntityManager,
+    preorderId: string,
+  ): Promise<OrderMergeMetadata | undefined> {
     const linkedOutboundOrder = await this.loadLinkedOutboundOrderInManager(manager, preorderId)
-    if (!linkedOutboundOrder) return
+    if (!linkedOutboundOrder) return undefined
     const linkedOrderId = String(linkedOutboundOrder.id)
     const metadata = (await orderMergeService.getMetadataMap([linkedOrderId], manager)).get(linkedOrderId)
     const orderIds = new Set<string>([linkedOrderId])
@@ -1382,6 +1448,7 @@ class O2oPreorderService {
       .orderBy('outboundOrder.id', 'ASC')
     if (manager.connection.options.type !== 'sqlite') orderQuery.setLock('pessimistic_write')
     await orderQuery.getMany()
+    return metadata
   }
 
   private async releasePendingPreorderStockForDeleteInManager(
@@ -3662,7 +3729,7 @@ class O2oPreorderService {
     }
     return runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
-      await this.lockLinkedOutboundOrderGroupInManager(manager, input.orderId)
+      const mergeMetadata = await this.lockLinkedOutboundOrderGroupInManager(manager, input.orderId)
       const orderRepo = manager.getRepository(O2oPreorder)
       const order = await orderRepo.findOne({
         where: { id: input.orderId, isDeleted: false },
@@ -3674,7 +3741,10 @@ class O2oPreorderService {
       if (order.clientOrderType !== 'department') {
         throw new BizError('散客单不适用该状态编辑', 409)
       }
-      if (typeof input.hasCustomerOrder === 'boolean') {
+      const preserveMergePrintEvidence = Boolean(mergeMetadata && mergeMetadata.role !== 'standalone')
+        && Boolean(order.hasCustomerOrder)
+        && input.hasCustomerOrder === false
+      if (typeof input.hasCustomerOrder === 'boolean' && !preserveMergePrintEvidence) {
         order.hasCustomerOrder = input.hasCustomerOrder
       }
       if (typeof input.isSystemApplied === 'boolean') {
@@ -3682,8 +3752,11 @@ class O2oPreorderService {
       }
       await orderRepo.save(order)
       await this.syncOutboundOrderComplianceFlags(manager, String(order.id), {
-        hasCustomerOrder: input.hasCustomerOrder,
+        hasCustomerOrder: typeof input.hasCustomerOrder === 'boolean'
+          ? Boolean(order.hasCustomerOrder)
+          : undefined,
         isSystemApplied: input.isSystemApplied,
+        allowMergeMemberMutation: true,
         reason: '管理端 O2O 合规状态联动',
         actor: {
           userId: actor.userId,
