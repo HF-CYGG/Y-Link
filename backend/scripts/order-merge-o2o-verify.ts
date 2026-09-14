@@ -241,10 +241,41 @@ async function main() {
       return { client, preorder, preorderItem, outbound }
     }
 
+    const localDateTime = (
+      year: number,
+      month: number,
+      day: number,
+      hour: number,
+      minute: number,
+    ) => new Date(year, month - 1, day, hour, minute, 0, 0)
+
     const target = await createVerifiedPair(0, 1)
     const source = await createVerifiedPair(1, 2)
     const pendingSource = await createVerifiedPair(2, 1)
     const pendingTarget = await createVerifiedPair(3, 1)
+    const o2oSameDateTargetCreatedAt = localDateTime(2020, 3, 1, 9, 0)
+    const o2oSameDateSourceCreatedAt = localDateTime(2020, 3, 1, 18, 0)
+    await Promise.all([
+      outboundRepo.update({ id: target.outbound.id }, { createdAt: o2oSameDateTargetCreatedAt }),
+      outboundRepo.update({ id: source.outbound.id }, { createdAt: o2oSameDateSourceCreatedAt }),
+    ])
+    target.outbound.createdAt = o2oSameDateTargetCreatedAt
+    source.outbound.createdAt = o2oSameDateSourceCreatedAt
+
+    const crossDateTarget = await createVerifiedPair(0, 1)
+    const crossDateSource = await createVerifiedPair(1, 1)
+    await Promise.all([
+      outboundRepo.update({ id: crossDateTarget.outbound.id }, { createdAt: localDateTime(2020, 3, 2, 23, 59) }),
+      outboundRepo.update({ id: crossDateSource.outbound.id }, { createdAt: localDateTime(2020, 3, 3, 0, 0) }),
+    ])
+    const crossDateO2oPreview = await orderMergeService.preview({
+      target: { orderId: String(crossDateTarget.outbound.id), editVersion: 1 },
+      sources: [{ orderId: String(crossDateSource.outbound.id), editVersion: 1 }],
+      reason: 'O2O 跨统计日期合并阻断验证',
+    }, actor)
+    assert.equal(crossDateO2oPreview.ready, false, 'O2O 正式出库单必须服从相同的本地统计日合并门禁')
+    assert.match(crossDateO2oPreview.blockers.map((item) => item.code).join(','), /STATISTICS_DATE_MISMATCH/)
+
     const merged = await orderService.commitMerge({
       target: { orderId: String(target.outbound.id), editVersion: 1 },
       sources: [{ orderId: String(source.outbound.id), editVersion: 1 }],

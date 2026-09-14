@@ -284,6 +284,12 @@ const formatLocalMonthKey = (date: Date): string => {
   return `${year}-${month}`
 }
 
+const resolveNextLocalDayStart = (date: Date): Date => {
+  const nextDay = new Date(date.getTime())
+  nextDay.setDate(nextDay.getDate() + 1)
+  return nextDay
+}
+
 const parseDateOnlyToStart = (value: string, label: string): Date => {
   const normalized = value.trim()
   if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
@@ -413,7 +419,7 @@ const resolveDashboardFilter = (
     const monthStart = new Date(today.getFullYear(), today.getMonth(), 1)
     return {
       startAt: monthStart,
-      endExclusive: new Date(today.getTime() + DATE_MS),
+      endExclusive: resolveNextLocalDayStart(today),
       orderType,
       startDate: formatLocalDateKey(monthStart),
       endDate: formatLocalDateKey(today),
@@ -434,7 +440,7 @@ const resolveDashboardFilter = (
 
   return {
     startAt,
-    endExclusive: new Date(endAt.getTime() + DATE_MS),
+    endExclusive: resolveNextLocalDayStart(endAt),
     orderType,
     startDate: formatLocalDateKey(startAt),
     endDate: formatLocalDateKey(endAt),

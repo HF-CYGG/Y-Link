@@ -11,6 +11,10 @@ import { request as httpRequest, type Server } from 'node:http'
 import path from 'node:path'
 import type { AuthUserContext } from '../src/types/auth.js'
 
+// 本脚本由 order:merge:verify 以独立 Node 子进程运行；显式使用夏令时时区验证本地统计日边界，
+// 不会把 TZ 变更传播到随后启动的 O2O 专项或调用方进程。
+process.env.TZ = 'America/New_York'
+
 const servicePath = path.resolve(process.cwd(), 'src', 'services', 'order-merge.service.ts')
 const migrationPath = path.resolve(process.cwd(), 'sql', '045_order_merge_governance.sql')
 
@@ -247,6 +251,14 @@ async function main() {
       }))
       return { order, item }
     }
+
+    const localDateTime = (
+      year: number,
+      month: number,
+      day: number,
+      hour: number,
+      minute: number,
+    ) => new Date(year, month - 1, day, hour, minute, 0, 0)
 
     const target = await createOrder('target', 10)
     const source = await createOrder('source', 3)
@@ -543,6 +555,263 @@ async function main() {
     assert.equal(outboundFlow.list[0]?.businessNo, target.order.businessNo)
     const walkinReport = await reportService.query('walkin', { page: 1, pageSize: 100 })
     assert.equal(walkinReport.total, 3, '明细报表应统计父单汇总后的三行，不重复统计来源原行')
+
+    const springDstInside = await createOrder('spring-dst-inside', 1)
+    const springDstNextDay = await createOrder('spring-dst-next-day', 2)
+    const autumnDstInside = await createOrder('autumn-dst-inside', 3)
+    const autumnDstNextDay = await createOrder('autumn-dst-next-day', 4)
+    await Promise.all([
+      orderRepo.update({ id: springDstInside.order.id }, { createdAt: localDateTime(2024, 3, 10, 23, 30) }),
+      orderRepo.update({ id: springDstNextDay.order.id }, { createdAt: localDateTime(2024, 3, 11, 0, 30) }),
+      orderRepo.update({ id: autumnDstInside.order.id }, { createdAt: localDateTime(2024, 11, 3, 23, 30) }),
+      orderRepo.update({ id: autumnDstNextDay.order.id }, { createdAt: localDateTime(2024, 11, 4, 0, 30) }),
+    ])
+    const [springDstReport, autumnDstReport, springDstDashboard, autumnDstDashboard] = await Promise.all([
+      reportService.query('outbound-flow', {
+        page: 1,
+        pageSize: 100,
+        startDate: '2024-03-10',
+        endDate: '2024-03-10',
+      }),
+      reportService.query('outbound-flow', {
+        page: 1,
+        pageSize: 100,
+        startDate: '2024-11-03',
+        endDate: '2024-11-03',
+      }),
+      dashboardService.getAnalytics({
+        startDate: '2024-03-10',
+        endDate: '2024-03-10',
+        granularity: 'day',
+      }),
+      dashboardService.getAnalytics({
+        startDate: '2024-11-03',
+        endDate: '2024-11-03',
+        granularity: 'day',
+      }),
+    ])
+    assert.deepEqual({
+      springReportTotal: springDstReport.total,
+      springDashboardQty: springDstDashboard.topProducts[0]?.totalQty ?? '0.00',
+      autumnReportTotal: autumnDstReport.total,
+      autumnDashboardQty: autumnDstDashboard.topProducts[0]?.totalQty ?? '0.00',
+    }, {
+      springReportTotal: 1,
+      springDashboardQty: '1.00',
+      autumnReportTotal: 1,
+      autumnDashboardQty: '3.00',
+    }, '春秋 DST 切换日必须完整覆盖本地 00:00-次日 00:00，且排除次日单据')
+    assert.equal(springDstReport.list[0]?.businessNo, springDstInside.order.businessNo)
+    assert.equal(autumnDstReport.list[0]?.businessNo, autumnDstInside.order.businessNo)
+
+    const dstMergeTarget = await createOrder('dst-merge-target', 5)
+    const dstMergeSource = await createOrder('dst-merge-source', 6)
+    await Promise.all([
+      orderRepo.update({ id: dstMergeTarget.order.id }, { createdAt: localDateTime(2024, 11, 3, 0, 15) }),
+      orderRepo.update({ id: dstMergeSource.order.id }, { createdAt: localDateTime(2024, 11, 3, 23, 45) }),
+    ])
+    const dstMergeInput: MergeInput = {
+      target: { orderId: String(dstMergeTarget.order.id), editVersion: 1 },
+      sources: [{ orderId: String(dstMergeSource.order.id), editVersion: 1 }],
+      reason: 'DST 本地统计日合并边界验证',
+    }
+    assert.equal(
+      (await orderMergeService.preview(dstMergeInput, actor)).ready,
+      true,
+      '秋季 DST 25 小时本地日内的 00:15 与 23:45 必须允许合并',
+    )
+    await orderRepo.update({ id: dstMergeSource.order.id }, { createdAt: localDateTime(2024, 11, 4, 0, 0) })
+    const dstCrossDatePreview = await orderMergeService.preview(dstMergeInput, actor)
+    assert.equal(dstCrossDatePreview.ready, false, 'DST 切换日次日 00:00 必须被识别为不同统计日')
+    assert.match(dstCrossDatePreview.blockers.map((item) => item.code).join(','), /STATISTICS_DATE_MISMATCH/)
+
+    const crossDateTarget = await createOrder('cross-date-target', 4)
+    const crossDateSource = await createOrder('cross-date-source', 2)
+    await orderRepo.update(
+      { id: crossDateTarget.order.id },
+      { createdAt: localDateTime(2020, 2, 2, 23, 30) },
+    )
+    await orderRepo.update(
+      { id: crossDateSource.order.id },
+      { createdAt: localDateTime(2020, 2, 2, 23, 45) },
+    )
+    const crossDateInput: MergeInput = {
+      target: { orderId: String(crossDateTarget.order.id), editVersion: 1 },
+      sources: [{ orderId: String(crossDateSource.order.id), editVersion: 1 }],
+      reason: '跨统计日期合并阻断验证',
+    }
+    assert.equal(
+      (await orderMergeService.preview(crossDateInput, actor)).ready,
+      true,
+      '提交前预检时同一服务器本地统计日应具备合并资格',
+    )
+    await orderRepo.update(
+      { id: crossDateSource.order.id },
+      { createdAt: localDateTime(2020, 2, 3, 0, 30) },
+    )
+    const crossDateCountsBeforePreview = {
+      operations: await AppDataSource.getRepository(OrderMergeOperation).count(),
+      relations: await AppDataSource.getRepository(OrderMergeRelation).count(),
+      items: await itemRepo.count(),
+      revisions: await AppDataSource.getRepository(OrderRevision).count(),
+      audits: await AppDataSource.getRepository(SysAuditLog).count(),
+      inventoryLogs: await AppDataSource.getRepository(InventoryLog).count(),
+    }
+    const crossDatePreview = await orderMergeService.preview(crossDateInput, actor)
+    if (crossDatePreview.ready) {
+      await orderService.commitMerge({
+        ...crossDateInput,
+        idempotencyKey: `issue71-cross-date-drift-${verifySeed}`,
+      }, actor)
+      const sourceDateReport = await reportService.query('outbound-flow', {
+        page: 1,
+        pageSize: 100,
+        startDate: '2020-02-03',
+        endDate: '2020-02-03',
+      })
+      assert.equal(
+        sourceDateReport.total,
+        1,
+        '若跨日合并被放行，来源出库仍应保留在来源统计日期；当前父单口径会导致该断言失败',
+      )
+    }
+    assert.equal(crossDatePreview.ready, false, '目标与来源不在同一服务器本地统计日时必须阻断预览')
+    assert.deepEqual(
+      crossDatePreview.blockers.map((item) => ({ orderId: item.orderId, code: item.code })),
+      [{ orderId: String(crossDateSource.order.id), code: 'STATISTICS_DATE_MISMATCH' }],
+      '跨日阻断必须稳定定位到来源单',
+    )
+    assert.match(crossDatePreview.blockers[0]?.message ?? '', /统计日期.*不一致/)
+    assert.deepEqual({
+      operations: await AppDataSource.getRepository(OrderMergeOperation).count(),
+      relations: await AppDataSource.getRepository(OrderMergeRelation).count(),
+      items: await itemRepo.count(),
+      revisions: await AppDataSource.getRepository(OrderRevision).count(),
+      audits: await AppDataSource.getRepository(SysAuditLog).count(),
+      inventoryLogs: await AppDataSource.getRepository(InventoryLog).count(),
+    }, crossDateCountsBeforePreview, '跨日预览不得产生任何数据库副作用')
+
+    const mergeAuditCountBeforeCrossDateCommit = await AppDataSource.getRepository(SysAuditLog).count({
+      where: { actionType: 'order.merge' },
+    })
+    const failedAuditCountBeforeCrossDateCommit = await AppDataSource.getRepository(SysAuditLog).count({
+      where: { actionType: 'order.merge_failed' },
+    })
+    await assert.rejects(
+      () => orderService.commitMerge({
+        ...crossDateInput,
+        idempotencyKey: `issue71-cross-date-${verifySeed}`,
+      }, actor),
+      (error: unknown) => error instanceof BizError
+        && error.statusCode === 409
+        && /统计日期.*不一致/.test(error.message),
+      '提交必须在事务内重新校验跨统计日资格并返回 409',
+    )
+    assert.deepEqual({
+      operations: await AppDataSource.getRepository(OrderMergeOperation).count(),
+      relations: await AppDataSource.getRepository(OrderMergeRelation).count(),
+      items: await itemRepo.count(),
+      revisions: await AppDataSource.getRepository(OrderRevision).count(),
+      inventoryLogs: await AppDataSource.getRepository(InventoryLog).count(),
+    }, {
+      operations: crossDateCountsBeforePreview.operations,
+      relations: crossDateCountsBeforePreview.relations,
+      items: crossDateCountsBeforePreview.items,
+      revisions: crossDateCountsBeforePreview.revisions,
+      inventoryLogs: crossDateCountsBeforePreview.inventoryLogs,
+    }, '跨日提交失败必须整体回滚操作、关系、明细、revision 与库存流水')
+    assert.equal(
+      await AppDataSource.getRepository(SysAuditLog).count({ where: { actionType: 'order.merge' } }),
+      mergeAuditCountBeforeCrossDateCommit,
+      '跨日提交失败不得写入成功合并审计',
+    )
+    assert.equal(
+      await AppDataSource.getRepository(SysAuditLog).count({ where: { actionType: 'order.merge_failed' } }),
+      failedAuditCountBeforeCrossDateCommit + 1,
+      '跨日提交拒绝仍应按既有治理规则写入一条脱敏失败审计',
+    )
+    assert.equal((await orderRepo.findOneByOrFail({ id: crossDateTarget.order.id })).editVersion, 1)
+    assert.equal(Number((await orderRepo.findOneByOrFail({ id: crossDateTarget.order.id })).totalQty), 4)
+    assert.equal((await orderRepo.findOneByOrFail({ id: crossDateSource.order.id })).status, 'active')
+    const sourceDateReportAfterReject = await reportService.query('outbound-flow', {
+      page: 1,
+      pageSize: 100,
+      startDate: '2020-02-03',
+      endDate: '2020-02-03',
+    })
+    assert.equal(sourceDateReportAfterReject.total, 1, '跨日合并被拒后来源单必须保留在原报表统计日')
+    assert.equal(sourceDateReportAfterReject.list[0]?.businessNo, crossDateSource.order.businessNo)
+    const sourceDateDashboardAfterReject = await dashboardService.getAnalytics({
+      startDate: '2020-02-03',
+      endDate: '2020-02-03',
+      granularity: 'day',
+    })
+    assert.equal(sourceDateDashboardAfterReject.trend[0]?.orderCount, 1, '跨日合并被拒后来源单必须保留在原 Dashboard 统计日')
+    assert.equal(sourceDateDashboardAfterReject.trend[0]?.totalQty, '2.00')
+
+    const sameDateTarget = await createOrder('same-date-target', 5)
+    const sameDateSource = await createOrder('same-date-source', 2)
+    const sameDateAppendSource = await createOrder('same-date-append-source', 3)
+    const crossDateAppendSource = await createOrder('cross-date-append-source', 1)
+    await Promise.all([
+      orderRepo.update({ id: sameDateTarget.order.id }, { createdAt: localDateTime(2020, 2, 4, 0, 1) }),
+      orderRepo.update({ id: sameDateSource.order.id }, { createdAt: localDateTime(2020, 2, 4, 12, 0) }),
+      orderRepo.update({ id: sameDateAppendSource.order.id }, { createdAt: localDateTime(2020, 2, 4, 23, 59) }),
+      orderRepo.update({ id: crossDateAppendSource.order.id }, { createdAt: localDateTime(2020, 2, 5, 0, 0) }),
+    ])
+    const sameDateInput: MergeInput = {
+      target: { orderId: String(sameDateTarget.order.id), editVersion: 1 },
+      sources: [{ orderId: String(sameDateSource.order.id), editVersion: 1 }],
+      reason: '同一统计日不同时刻允许合并验证',
+    }
+    const sameDatePreview = await orderMergeService.preview(sameDateInput, actor)
+    assert.equal(sameDatePreview.ready, true, '同一服务器本地统计日的不同时刻必须允许合并')
+    await orderService.commitMerge({
+      ...sameDateInput,
+      idempotencyKey: `issue71-same-date-${verifySeed}`,
+    }, actor)
+
+    const sameDateAppendInput: MergeInput = {
+      target: { orderId: String(sameDateTarget.order.id), editVersion: 2 },
+      sources: [{ orderId: String(sameDateAppendSource.order.id), editVersion: 1 }],
+      reason: '同一统计日继续追加验证',
+    }
+    assert.equal(
+      (await orderMergeService.preview(sameDateAppendInput, actor)).ready,
+      true,
+      '父单应允许继续追加同一统计日的来源单',
+    )
+    await orderService.commitMerge({
+      ...sameDateAppendInput,
+      idempotencyKey: `issue71-same-date-append-${verifySeed}`,
+    }, actor)
+
+    const crossDateAppendInput: MergeInput = {
+      target: { orderId: String(sameDateTarget.order.id), editVersion: 3 },
+      sources: [{ orderId: String(crossDateAppendSource.order.id), editVersion: 1 }],
+      reason: '父单跨统计日期追加阻断验证',
+    }
+    const appendRelationCountBeforeReject = await AppDataSource.getRepository(OrderMergeRelation).count()
+    const crossDateAppendPreview = await orderMergeService.preview(crossDateAppendInput, actor)
+    assert.equal(crossDateAppendPreview.ready, false, '父单不得追加其他统计日的来源单')
+    assert.match(crossDateAppendPreview.blockers.map((item) => item.code).join(','), /STATISTICS_DATE_MISMATCH/)
+    await assert.rejects(
+      () => orderService.commitMerge({
+        ...crossDateAppendInput,
+        idempotencyKey: `issue71-cross-date-append-${verifySeed}`,
+      }, actor),
+      (error: unknown) => error instanceof BizError && error.statusCode === 409,
+      '父单跨日追加必须在事务内返回 409',
+    )
+    assert.equal(
+      await AppDataSource.getRepository(OrderMergeRelation).count(),
+      appendRelationCountBeforeReject,
+      '跨日追加失败不得增加父子关系',
+    )
+    const sameDateTargetAfterRejectedAppend = await orderRepo.findOneByOrFail({ id: sameDateTarget.order.id })
+    assert.equal(sameDateTargetAfterRejectedAppend.editVersion, 3)
+    assert.equal(Number(sameDateTargetAfterRejectedAppend.totalQty), 10)
+    assert.equal((await orderRepo.findOneByOrFail({ id: crossDateAppendSource.order.id })).status, 'active')
 
     const maxQtyTarget = await createOrder('max-qty-target', 1, 1)
     const maxQtySource = await createOrder('max-qty-source', 1, 1)

@@ -106,7 +106,6 @@ interface OutboundFlowRaw {
   isDeleted: boolean | number | string | null
 }
 
-const DATE_MS = 24 * 60 * 60 * 1000
 const MAX_PAGE_SIZE = 100
 const EXPORT_BATCH_SIZE = 500
 const MAX_REPORT_EXPORTS_PER_ACTOR = 1
@@ -276,6 +275,12 @@ const parseDateOnly = (value: string, label: string): Date => {
   return parsed
 }
 
+const resolveNextLocalDayStart = (date: Date): Date => {
+  const nextDay = new Date(date.getTime())
+  nextDay.setDate(nextDay.getDate() + 1)
+  return nextDay
+}
+
 const getOrderTypeLabel = (value: string | null | undefined): string => {
   return String(value ?? '').trim() === 'department' ? '部门' : '个人'
 }
@@ -393,7 +398,7 @@ export class ReportService {
       if (startAt.getTime() > endAt.getTime()) {
         throw new BizError('开始日期不能晚于结束日期', 400)
       }
-      endExclusive = new Date(endAt.getTime() + DATE_MS)
+      endExclusive = resolveNextLocalDayStart(endAt)
     }
 
     return {

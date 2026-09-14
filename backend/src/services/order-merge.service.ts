@@ -142,6 +142,26 @@ interface EvaluatedMerge {
 
 const normalizeId = (value: unknown): string => String(value ?? '').trim()
 
+/**
+ * 合并统计日必须与报表、Dashboard 的服务器本地日期边界一致。
+ * 不能使用 toISOString 截取 UTC 日期，否则本地 00:00-08:00 会被归到前一天。
+ */
+const resolveLocalStatisticsDate = (value: unknown): string | null => {
+  let date: Date | null = null
+  if (value instanceof Date) {
+    date = value
+  } else if (typeof value === 'string' && value.trim()) {
+    date = new Date(value)
+  } else if (typeof value === 'number' && Number.isFinite(value)) {
+    date = new Date(value)
+  }
+  if (!date || Number.isNaN(date.getTime())) return null
+  const year = date.getFullYear()
+  const month = String(date.getMonth() + 1).padStart(2, '0')
+  const day = String(date.getDate()).padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
 interface Fixed2Decimal {
   units: bigint
   text: string
@@ -432,6 +452,27 @@ export class OrderMergeService {
     sources.forEach((source, index) => {
       if (source) checkCommon(source, normalized.sources[index]!.editVersion, '来源订单')
     })
+
+    const targetStatisticsDate = target ? resolveLocalStatisticsDate(target.createdAt) : null
+    if (target && !targetStatisticsDate) {
+      addBlocker(normalizeId(target.id), 'STATISTICS_DATE_INVALID', '目标订单统计日期无效，不能参与合并')
+    }
+    if (targetStatisticsDate) {
+      sources.forEach((source) => {
+        if (!source) return
+        const sourceId = normalizeId(source.id)
+        const sourceStatisticsDate = resolveLocalStatisticsDate(source.createdAt)
+        if (!sourceStatisticsDate) {
+          addBlocker(sourceId, 'STATISTICS_DATE_INVALID', '来源订单统计日期无效，不能参与合并')
+        } else if (sourceStatisticsDate !== targetStatisticsDate) {
+          addBlocker(
+            sourceId,
+            'STATISTICS_DATE_MISMATCH',
+            `来源订单统计日期 ${sourceStatisticsDate} 与目标订单 ${targetStatisticsDate} 不一致`,
+          )
+        }
+      })
+    }
 
     const targetAsSource = relations.find((relation) => normalizeId(relation.sourceOrderId) === normalized.target.orderId)
     if (targetAsSource) addBlocker(normalized.target.orderId, 'TARGET_IS_SOURCE', '合并来源不能作为新的目标父单')
