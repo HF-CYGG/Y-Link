@@ -10,6 +10,7 @@ import type {
   OrderMergeCommitInput,
   OrderMergeCommitResult,
   OrderMergeMetadata,
+  OrderMergeOrderReference,
   OrderMergePreviewInput,
   OrderMergePreviewResult,
 } from '../../../packages/shared-types/src/orders'
@@ -416,7 +417,7 @@ const normalizeOrderMergeStatus = (value: PrimitiveTextValue): OrderMergeStatus 
   return normalizeTextField(value).toLowerCase() === 'merged' ? 'merged' : 'active'
 }
 
-const normalizeOrderMergeReference = (value: unknown) => {
+const normalizeOrderMergeReference = (value: unknown): OrderMergeOrderReference => {
   const record = value && typeof value === 'object' ? value as Record<string, unknown> : {}
   return {
     id: normalizeTextField(record.id as PrimitiveTextValue),
@@ -424,10 +425,25 @@ const normalizeOrderMergeReference = (value: unknown) => {
     businessNo: normalizeTextField(record.businessNo as PrimitiveTextValue),
     editVersion: Number(record.editVersion) || 1,
     status: normalizeOrderMergeStatus(record.status as PrimitiveTextValue),
-    orderType: normalizeTextField(record.orderType as PrimitiveTextValue),
+    orderType: normalizeOrderTypeField(record.orderType as PrimitiveTextValue),
     inventoryMode: normalizeInventoryMode(record.inventoryMode as PrimitiveTextValue),
+    hasCustomerOrder: normalizeBooleanField(record.hasCustomerOrder as boolean | PrimitiveTextValue),
+    isSystemApplied: normalizeBooleanField(record.isSystemApplied as boolean | PrimitiveTextValue),
+    issuerName: normalizeNullableTextField(record.issuerName as PrimitiveTextValue),
+    customerDepartmentName: normalizeNullableTextField(record.customerDepartmentName as PrimitiveTextValue),
+    customerName: normalizeNullableTextField(record.customerName as PrimitiveTextValue),
     totalQty: normalizeDecimalField(record.totalQty as PrimitiveTextValue),
     totalAmount: normalizeDecimalField(record.totalAmount as PrimitiveTextValue),
+    remark: normalizeNullableTextField(record.remark as PrimitiveTextValue),
+    creatorUserId: normalizeNullableTextField(record.creatorUserId as PrimitiveTextValue),
+    creatorUsername: normalizeNullableTextField(record.creatorUsername as PrimitiveTextValue),
+    creatorDisplayName: normalizeNullableTextField(record.creatorDisplayName as PrimitiveTextValue),
+    isDeleted: normalizeBooleanField(record.isDeleted as boolean | PrimitiveTextValue),
+    deletedAt: normalizeNullableTextField(record.deletedAt as PrimitiveTextValue),
+    deletedByUserId: normalizeNullableTextField(record.deletedByUserId as PrimitiveTextValue),
+    deletedByUsername: normalizeNullableTextField(record.deletedByUsername as PrimitiveTextValue),
+    deletedByDisplayName: normalizeNullableTextField(record.deletedByDisplayName as PrimitiveTextValue),
+    createdAt: normalizeTextField(record.createdAt as PrimitiveTextValue),
   }
 }
 

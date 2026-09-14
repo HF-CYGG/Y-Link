@@ -34,10 +34,25 @@ export interface OrderMergeOrderReference {
   businessNo: string
   editVersion: number
   status: OutboundOrderMergeStatus
-  orderType: string
+  orderType: 'department' | 'walkin'
   inventoryMode: OutboundOrderInventoryMode
+  hasCustomerOrder: boolean
+  isSystemApplied: boolean
+  issuerName: string | null
+  customerDepartmentName: string | null
+  customerName: string | null
   totalQty: string
   totalAmount: string
+  remark: string | null
+  creatorUserId: string | null
+  creatorUsername: string | null
+  creatorDisplayName: string | null
+  isDeleted: boolean
+  deletedAt: string | null
+  deletedByUserId: string | null
+  deletedByUsername: string | null
+  deletedByDisplayName: string | null
+  createdAt: string
 }
 
 export interface OrderMergeMetadata {

@@ -251,6 +251,18 @@ async function main() {
     }, actor)
     assert.equal(merged.targetOrderId, String(target.outbound.id), '同部门跨账号正式出库单应允许合并')
 
+    const targetPrinted = await o2oPreorderService.markCustomerOrderPrintedByClient(target.client.auth, String(target.preorder.id))
+    assert.equal(targetPrinted.printedNow, true, '目标客户端首次打印应标记父单')
+    const mergeMetadata = await orderMergeService.getMetadataMap([String(target.outbound.id)])
+    const sourceReference = mergeMetadata.get(String(target.outbound.id))?.children
+      .find((child) => child.id === String(source.outbound.id))
+    assert.ok(sourceReference, '父单合并摘要应包含来源子单')
+    assert.equal(sourceReference.hasCustomerOrder, false, '父单已打印时不得伪造来源子单已打印')
+    assert.equal(sourceReference.isSystemApplied, false, '来源子单必须保留自身系统申请状态')
+    assert.equal(sourceReference.issuerName, source.outbound.issuerName, '来源子单必须保留自身出单人')
+    assert.equal(sourceReference.creatorDisplayName, source.outbound.creatorDisplayName, '来源子单必须保留自身开单人')
+    assert.equal(sourceReference.createdAt, source.outbound.createdAt.toISOString(), '来源子单必须保留自身开单时间')
+
     const targetDetail = await o2oPreorderService.getMyOrderDetail(target.client.auth, String(target.preorder.id))
     const sourceDetail = await o2oPreorderService.getMyOrderDetail(source.client.auth, String(source.preorder.id))
     assert.equal(targetDetail.order.customerOrderShowNo, target.outbound.showNo)

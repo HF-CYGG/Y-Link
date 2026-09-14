@@ -44,6 +44,7 @@ expectText('src/api/modules/auth.ts', "'orders:merge'", 'orders:merge 权限声�
 expectText('src/views/order-list/OrderListView.vue', 'OrderMergeDialog', '异步合并工作台')
 expectText('src/views/order-list/OrderListView.vue', 'tree-props', '桌面树状列表')
 expectText('src/views/order-list/OrderListView.vue', '已合并至父单', '子单合并状态提示')
+expectText('src/views/order-list/OrderListView.vue', '...child,', '来源子单完整摘要覆盖父单树行字段')
 expectText('src/views/order-list/OrderListView.vue', "import('./components/OrderListMobileCard.vue')", '移动端卡片异步分包')
 expectText('src/views/order-list/OrderListView.vue', 'defineAsyncComponent({', '移动端卡片异步加载配置')
 expectText('src/views/order-list/OrderListView.vue', 'delay: 0', '移动端卡片立即显示加载占位')

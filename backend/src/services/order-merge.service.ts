@@ -56,8 +56,23 @@ export interface OrderMergeOrderReference {
   status: BizOutboundOrder['status']
   orderType: string
   inventoryMode: BizOutboundOrder['inventoryMode']
+  hasCustomerOrder: boolean
+  isSystemApplied: boolean
+  issuerName: string | null
+  customerDepartmentName: string | null
+  customerName: string | null
   totalQty: string
   totalAmount: string
+  remark: string | null
+  creatorUserId: string | null
+  creatorUsername: string | null
+  creatorDisplayName: string | null
+  isDeleted: boolean
+  deletedAt: string | null
+  deletedByUserId: string | null
+  deletedByUsername: string | null
+  deletedByDisplayName: string | null
+  createdAt: string
 }
 
 export interface OrderMergePreviewItem {
@@ -918,8 +933,23 @@ export class OrderMergeService {
       status: order.status,
       orderType: order.orderType,
       inventoryMode: order.inventoryMode,
+      hasCustomerOrder: Boolean(order.hasCustomerOrder),
+      isSystemApplied: Boolean(order.isSystemApplied),
+      issuerName: order.issuerName ?? null,
+      customerDepartmentName: order.customerDepartmentName ?? null,
+      customerName: order.customerName ?? null,
       totalQty: normalizeDecimal(order.totalQty),
       totalAmount: normalizeDecimal(order.totalAmount),
+      remark: order.remark ?? null,
+      creatorUserId: order.creatorUserId == null ? null : normalizeId(order.creatorUserId),
+      creatorUsername: order.creatorUsername ?? null,
+      creatorDisplayName: order.creatorDisplayName ?? null,
+      isDeleted: Boolean(order.isDeleted),
+      deletedAt: order.deletedAt?.toISOString() ?? null,
+      deletedByUserId: order.deletedByUserId == null ? null : normalizeId(order.deletedByUserId),
+      deletedByUsername: order.deletedByUsername ?? null,
+      deletedByDisplayName: order.deletedByDisplayName ?? null,
+      createdAt: order.createdAt.toISOString(),
     }
   }
 }

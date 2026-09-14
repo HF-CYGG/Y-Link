@@ -22,6 +22,7 @@ import dayjs from 'dayjs'
 
 import { computed, defineAsyncComponent, defineComponent, h, ref, watch, type ComponentPublicInstance } from 'vue'
 import { updateOrderComplianceFlags, type OrderDetailResult, type OrderRecord } from '@/api/modules/order'
+import type { OrderMergeOrderReference } from '../../../packages/shared-types/src/orders'
 import { createTimedAsyncLoader } from './order-list-mobile-card-loader'
 import {
   BizResponsiveDataCollectionShell,
@@ -198,21 +199,15 @@ const getMergeLabel = (order: Pick<OrderRecord, 'merge'>) => {
   return isSourceOrder(order) ? '已合并至父单' : ''
 }
 type OrderTreeRecord = OrderRecord & { children?: OrderTreeRecord[] }
+const toMergeReference = (order: OrderRecord): OrderMergeOrderReference => order
 const orderTreeRows = computed<OrderTreeRecord[]>(() => listState.records.map((order) => ({
   ...order,
   children: order.merge.children.map((child) => ({
     ...order,
-    id: child.id,
-    showNo: child.showNo,
-    businessNo: child.businessNo,
-    editVersion: child.editVersion,
-    inventoryMode: child.inventoryMode,
-    orderType: child.orderType === 'department' ? 'department' : 'walkin',
-    totalQty: child.totalQty,
-    totalAmount: child.totalAmount,
+    ...child,
     contentEditable: false,
     contentEditBlockers: ['已合并至父单，内容不可编辑'],
-    merge: { role: 'source', parent: { ...child, id: order.id, showNo: order.showNo, businessNo: order.businessNo, editVersion: order.editVersion, status: order.status, orderType: order.orderType, inventoryMode: order.inventoryMode, totalQty: order.totalQty, totalAmount: order.totalAmount }, children: [] },
+    merge: { role: 'source', parent: toMergeReference(order), children: [] },
     children: [],
   })),
 })))
