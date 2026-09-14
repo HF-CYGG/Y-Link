@@ -283,6 +283,8 @@ async function main() {
       discountRate: 10,
       currentStock: 49,
       skus: [],
+      // 商品编辑改库存必须携带打开编辑时的库存基线（Issue #82 防覆盖）。
+      stockBaseline: { currentStock: defaultSwitchProduct.currentStock },
     } as Parameters<typeof productService.update>[1], actor)
     assert.equal(defaultSwitchAfterUpdate.skus.length, 1)
     assert.equal(defaultSwitchAfterUpdate.skus[0]?.specText, '默认规格')

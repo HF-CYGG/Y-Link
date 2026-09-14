@@ -658,42 +658,52 @@ export const useOrderListView = () => {
    * - 管理员需输入业务单号完成二次确认；
    * - 删除采用软删除，后续可在“已删除”筛选下恢复。
    */
-  const handleDeleteOrder = async (row: OrderRecord, confirmShowNo: string) => {
+  const handleDeleteOrder = async (row: OrderRecord, confirmShowNo: string, releaseInventory = false) => {
     if (!ensurePermission('orders:delete', '删除出库单')) {
       return
     }
-    await deleteOrderById(row.id, { confirmShowNo })
-    showAppSuccess(`已删除单据：${row.businessNo}`)
+    await deleteOrderById(row.id, { confirmShowNo, releaseInventory })
+    showAppSuccess(releaseInventory ? `已删除单据并回补库存：${row.businessNo}` : `已删除单据：${row.businessNo}`)
     await loadData()
   }
 
+  const deleteDialogVisible = ref(false)
+  const deleteDialogOrder = ref<OrderRecord | null>(null)
+  const deleteDialogSubmitting = ref(false)
+
   /**
-   * 删除二次确认：
-   * - 管理员需输入完整业务单号，降低误删风险；
+   * 删除二次确认入口：
+   * - 改由独立弹窗承载业务单号输入、库存回补二选一、3 秒等待与二次确认；
    * - 确认后调用软删除接口，单据可在“已删除”或“全部”筛选下找回。
    */
   const handleDeleteOrderWithConfirm = async (row: OrderRecord) => {
     if (!ensurePermission('orders:delete', '删除出库单')) {
       return
     }
-    const result = await ElMessageBox.prompt(
-      `请输入业务单号 ${row.businessNo} 以确认删除。删除后可恢复。`,
-      '删除二次确认',
-      {
-        confirmButtonText: '确认删除',
-        cancelButtonText: '取消',
-        inputPlaceholder: '请输入完整业务单号',
-        inputValue: '',
-        inputValidator: (value: string) => {
-          if (!String(value || '').trim()) {
-            return '请输入业务单号'
-          }
-          return true
-        },
-        type: 'warning',
-      },
-    )
-    await handleDeleteOrder(row, result.value.trim())
+    deleteDialogOrder.value = row
+    deleteDialogVisible.value = true
+  }
+
+  /**
+   * 删除弹窗确认回调：
+   * - 成功后关闭弹窗并刷新列表；
+   * - 失败时保持弹窗打开，便于修正业务单号或改选回补方式（错误提示由请求层统一弹出）。
+   */
+  const handleDeleteDialogConfirm = async (payload: { confirmShowNo: string; releaseInventory: boolean }) => {
+    const row = deleteDialogOrder.value
+    if (!row || deleteDialogSubmitting.value) {
+      return
+    }
+    deleteDialogSubmitting.value = true
+    try {
+      await handleDeleteOrder(row, payload.confirmShowNo, payload.releaseInventory)
+      deleteDialogVisible.value = false
+    } catch (error) {
+      // 请求层不弹统一提示，这里明确展示失败原因（如业务单号不匹配、非库存单不能回补）。
+      showAppError(extractErrorMessage(error, '删除出库单失败，请稍后重试'))
+    } finally {
+      deleteDialogSubmitting.value = false
+    }
   }
 
   /**
@@ -719,10 +729,14 @@ export const useOrderListView = () => {
     if (!ensurePermission('orders:delete', '恢复出库单')) {
       return
     }
-    await ElMessageBox.confirm(`确认恢复出库单 ${row.businessNo} 吗？`, '恢复确认', {
+    // 删除时已回补库存的手工单，恢复会在服务端重新扣减；库存不足时恢复失败并保持删除态。
+    const message = row.inventoryReleased
+      ? `出库单 ${row.businessNo} 删除时已回补库存，恢复将按明细重新扣减库存；可用库存不足时恢复会失败。确认恢复吗？`
+      : `确认恢复出库单 ${row.businessNo} 吗？`
+    await ElMessageBox.confirm(message, '恢复确认', {
       confirmButtonText: '确认恢复',
       cancelButtonText: '取消',
-      type: 'info',
+      type: row.inventoryReleased ? 'warning' : 'info',
     })
     await handleRestoreOrder(row)
   }
@@ -1006,6 +1020,10 @@ export const useOrderListView = () => {
     handleViewDetail,
     handleDeleteOrder,
     handleDeleteOrderWithConfirm,
+    handleDeleteDialogConfirm,
+    deleteDialogVisible,
+    deleteDialogOrder,
+    deleteDialogSubmitting,
     handleRestoreOrder,
     handleRestoreOrderWithConfirm,
     handlePurgeOrder,

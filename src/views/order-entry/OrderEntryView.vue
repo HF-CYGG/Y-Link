@@ -50,6 +50,7 @@ const {
   handleSkuChange,
   getSelectableSkus,
   getSkuLabelById,
+  getSkuAvailableStockById,
   getProductLabelById,
   calcLineAmount,
   toMoney,
@@ -109,6 +110,7 @@ const totalAmountText = computed(() => toMoney(totalAmount.value))
         :handle-sku-change="handleSkuChange"
         :get-selectable-skus="getSelectableSkus"
         :get-sku-label-by-id="getSkuLabelById"
+        :get-sku-available-stock-by-id="getSkuAvailableStockById"
         :handle-grid-keydown="handleGridKeydown"
         :append-row="appendRow"
         :open-drawer-for-create="openDrawerForCreate"

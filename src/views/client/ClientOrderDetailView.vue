@@ -361,6 +361,8 @@ const voucherOrder = computed<OrderDetailResult | null>(() => {
     deletedByUserId: null,
     deletedByUsername: null,
     deletedByDisplayName: null,
+    // O2O 正式出库单不走手工库存删除回补。
+    inventoryReleased: false,
     createdAt: order.createdAt,
     items: items.map((item) => {
       const unitPrice = toVoucherMoneyText(resolveDiscountedUnitPrice(item))

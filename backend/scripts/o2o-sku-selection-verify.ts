@@ -352,6 +352,8 @@ async function main() {
       defaultPrice: 9,
       discountRate: 8,
       currentStock: 6,
+      // 商品编辑改库存必须携带打开编辑时的库存基线（Issue #82 防覆盖）。
+      stockBaseline: { currentStock: defaultProduct.currentStock },
     } as Parameters<typeof productService.update>[1], adminActor)
     const defaultProductAfterUpdate = await productService.detail(defaultProduct.id)
     assert.equal(defaultProductAfterUpdate.currentStock, 6)

@@ -76,6 +76,8 @@ export interface CreateProductDto {
   tagIds?: Array<string | number>
   specGroups?: ProductSpecGroup[]
   skus?: ProductSkuRecord[]
+  /** 仅编辑复用同一 payload 时携带；新增接口不识别该字段。 */
+  stockBaseline?: ProductStockBaseline
 }
 
 export interface UpdateProductDto {
@@ -95,6 +97,13 @@ export interface UpdateProductDto {
   tagIds?: Array<string | number>
   specGroups?: ProductSpecGroup[]
   skus?: ProductSkuRecord[]
+  /** 编辑弹窗打开时的库存基线：提交库存变动时服务端据此拦截“期间已被出入库改动”的覆盖。 */
+  stockBaseline?: ProductStockBaseline
+}
+
+export interface ProductStockBaseline {
+  currentStock?: number
+  skus?: Array<{ id: string; currentStock: number }>
 }
 
 export interface BatchUpdateProductDto {

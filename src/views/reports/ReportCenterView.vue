@@ -13,7 +13,7 @@
 
 import dayjs from 'dayjs'
 import { Download, List, Refresh, Search, View } from '@element-plus/icons-vue'
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onActivated, onMounted, reactive, ref } from 'vue'
 import {
   BizResponsiveDataCollectionShell,
   PageContainer,
@@ -231,6 +231,9 @@ const loadTags = async () => {
   }
 }
 
+/** 最近一次成功取数的时间：库存为实时快照，展示取数时刻便于核对是否已包含最新出入库。 */
+const lastLoadedAt = ref<Date | null>(null)
+
 const loadData = async () => {
   if (!ensurePermission('reports:view', '报表中心查看')) {
     listState.loading = false
@@ -248,6 +251,7 @@ const loadData = async () => {
     executor: (signal) => getReportData(reportType.value, buildQueryParams(), { signal }),
     onSuccess: (result) => {
       applyPaginatedResult(listState, result)
+      lastLoadedAt.value = new Date()
     },
     onError: (error) => {
       showAppError(extractErrorMessage(error, '获取报表数据失败'))
@@ -347,6 +351,19 @@ onMounted(() => {
   void loadTags()
   void loadData()
 })
+
+/**
+ * 页面启用了 keep-alive：从出库开单、订单删除恢复、商品编辑等页面切回时，
+ * 按当前条件重新查询，避免继续展示切走前的旧库存。首次挂载紧随的激活已由 onMounted 加载，跳过以免重复请求。
+ */
+let hasSkippedInitialActivation = false
+onActivated(() => {
+  if (!hasSkippedInitialActivation) {
+    hasSkippedInitialActivation = true
+    return
+  }
+  void loadData()
+})
 </script>
 
 <template>
@@ -427,6 +444,9 @@ onMounted(() => {
         <p class="font-semibold text-slate-800 dark:text-slate-100">{{ currentReportOption.label }}</p>
         <p class="mt-1">{{ currentReportOption.description }}</p>
         <p class="report-summary-card__condition mt-1 text-xs text-slate-500 dark:text-slate-400">当前条件：{{ currentFilterSummary }}</p>
+        <p v-if="lastLoadedAt" class="mt-1 text-xs text-slate-500 dark:text-slate-400">
+          数据更新于 {{ dayjs(lastLoadedAt).format('YYYY-MM-DD HH:mm:ss') }}（切回本页会自动刷新，也可点击“查询”获取最新库存）
+        </p>
       </div>
 
       <div class="apple-card flex min-h-0 flex-1 flex-col p-3 sm:p-4 xl:p-5">

@@ -4,7 +4,8 @@
  * 文件职责：负责开单页商品明细编辑区，承接商品与 SKU 选择、数量与单价录入、备注维护以及行级增删操作。
  * 实现逻辑：
  * - 组件只关注“明细行如何编辑”，不直接处理提交流程，由父层统一汇总主单与明细数据；
- * - 桌面端表格录入与移动端抽屉录入共用同一套 SKU 字段口径，SKU 默认价仅作预填，人工单价仍可覆盖。
+ * - 桌面端表格录入与移动端抽屉录入共用同一套 SKU 字段口径，SKU 默认价仅作预填，人工单价仍可覆盖；
+ * - 选中规格后展示可用库存（物理库存 - 预订占用），数量超出时即时标红提示，最终仍以服务端扣减校验为准。
  * 维护说明：
  * - 若后续扩展批次、单位或折扣字段，需要同步检查行模型、输入组件和焦点流转是否仍然匹配；
  * - 商品选择结果必须继续复用共享类型，避免本组件和开单主逻辑出现字段口径漂移。
@@ -45,6 +46,8 @@ const props = defineProps<{
   handleSkuChange: (row: OrderItemRow) => void
   getSelectableSkus: (productId: string) => ProductSkuRecord[]
   getSkuLabelById: (productId: string, skuId: string) => string
+  /** 返回所选规格的可用库存；未选规格时返回 null。 */
+  getSkuAvailableStockById: (productId: string, skuId: string) => number | null
   handleGridKeydown: (event: KeyboardEvent, rowIndex: number, field: FocusField) => void
   appendRow: (focusProduct?: boolean) => Promise<void>
   openDrawerForCreate: () => Promise<void>
@@ -85,6 +88,20 @@ const handleAddRow = () => {
   }
 
   props.openDrawerForCreate().catch(() => undefined)
+}
+
+/**
+ * 可用库存提示：
+ * - 未选规格时不展示；
+ * - 数量超出可用库存时标红，提醒保存会被服务端拒绝。
+ */
+const resolveStockHint = (productId: string, skuId: string, qty: number | null) => {
+  const available = props.getSkuAvailableStockById(productId, skuId)
+  if (available === null) return null
+  return {
+    text: `可用库存 ${available}`,
+    exceeded: props.normalizeNumber(qty) > available,
+  }
 }
 
 </script>
@@ -169,6 +186,14 @@ const handleAddRow = () => {
                   :value="sku.id"
                 />
               </el-select>
+              <div
+                v-if="resolveStockHint(row.productId, row.skuId, row.qty)"
+                class="order-stock-hint"
+                :class="{ 'is-exceeded': resolveStockHint(row.productId, row.skuId, row.qty)?.exceeded }"
+              >
+                {{ resolveStockHint(row.productId, row.skuId, row.qty)?.text }}
+                <template v-if="resolveStockHint(row.productId, row.skuId, row.qty)?.exceeded">，数量已超出</template>
+              </div>
             </template>
           </el-table-column>
           <el-table-column label="数量" width="150">
@@ -241,6 +266,14 @@ const handleAddRow = () => {
               <div>规格：{{ getSkuLabelById(row.productId, row.skuId) }}</div>
               <div>单价：¥{{ toMoney(normalizeNumber(row.unitPrice)) }}</div>
             </div>
+            <div
+              v-if="resolveStockHint(row.productId, row.skuId, row.qty)"
+              class="order-stock-hint mt-1"
+              :class="{ 'is-exceeded': resolveStockHint(row.productId, row.skuId, row.qty)?.exceeded }"
+            >
+              {{ resolveStockHint(row.productId, row.skuId, row.qty)?.text }}
+              <template v-if="resolveStockHint(row.productId, row.skuId, row.qty)?.exceeded">，数量已超出</template>
+            </div>
             <div v-if="row.remark" class="mt-2 rounded-lg bg-white/70 px-2.5 py-2 text-xs text-slate-500 dark:bg-white/5 dark:text-slate-400">
               备注：{{ row.remark }}
             </div>
@@ -304,6 +337,14 @@ const handleAddRow = () => {
                 :value="sku.id"
               />
             </el-select>
+            <div
+              v-if="resolveStockHint(drawerForm.productId, drawerForm.skuId, drawerForm.qty)"
+              class="order-stock-hint w-full"
+              :class="{ 'is-exceeded': resolveStockHint(drawerForm.productId, drawerForm.skuId, drawerForm.qty)?.exceeded }"
+            >
+              {{ resolveStockHint(drawerForm.productId, drawerForm.skuId, drawerForm.qty)?.text }}
+              <template v-if="resolveStockHint(drawerForm.productId, drawerForm.skuId, drawerForm.qty)?.exceeded">，数量已超出</template>
+            </div>
           </el-form-item>
           <el-form-item label="数量">
             <PassiveNumberInput v-model="drawerForm.qty" :min="1" :precision="0" :step="1" class="w-full" />
@@ -325,6 +366,17 @@ const handleAddRow = () => {
 </template>
 
 <style scoped>
+.order-stock-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: rgb(100 116 139);
+}
+
+.order-stock-hint.is-exceeded {
+  color: rgb(239 68 68);
+}
+
 .order-grid-table :deep(.order-row-deleting) {
   opacity: 0;
   transform: translateX(10px);

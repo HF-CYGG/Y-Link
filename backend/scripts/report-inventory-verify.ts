@@ -560,7 +560,7 @@ async function main() {
     await o2oPreorderService.verifyByCode(returnRequest.verifyCode, adminActor)
     await assertLifecycleStock([13, 0, 13], '退货后')
 
-    await orderService.submit({
+    const ordinaryOrder = await orderService.submit({
       idempotencyKey: `report-inventory-ordinary-${verifySeed}`,
       orderType: 'walkin',
       customerName: '库存报表普通出库验证',
@@ -572,6 +572,35 @@ async function main() {
     })
     assert.equal(ordinaryLogs.length, 1, '普通手工出库必须写入库存流水')
     assert.equal(String(ordinaryLogs[0]?.skuId), String(lifecycleSku.id), '普通手工出库流水必须关联 SKU')
+
+    // Issue #82：出库单后续的编辑、删除回补、恢复重扣与商品编辑调整，都必须在商品服务、报表预览与 Excel 三个出口同步体现。
+    const ordinaryOrderId = ordinaryOrder.order.id
+    const ordinaryBusinessNo = ordinaryOrder.order.businessNo
+    await orderService.updateContent(ordinaryOrderId, {
+      expectedVersion: 1,
+      reason: '库存报表验证：出库数量 2 改为 4',
+      items: [{ productId: lifecycleProduct.id, skuId: lifecycleSku.id, qty: 4, unitPrice: 10 }],
+    }, adminActor)
+    await assertLifecycleStock([9, 0, 9], '出库单编辑增加数量后')
+
+    await orderService.softDeleteById(ordinaryOrderId, adminActor, ordinaryBusinessNo)
+    await assertLifecycleStock([9, 0, 9], '删除出库单但不回补库存后')
+    await orderService.restoreById(ordinaryOrderId, adminActor)
+    await assertLifecycleStock([9, 0, 9], '恢复未回补的出库单后')
+
+    await orderService.softDeleteById(ordinaryOrderId, adminActor, ordinaryBusinessNo, undefined, { releaseInventory: true })
+    await assertLifecycleStock([13, 0, 13], '删除出库单并回补库存后')
+    await orderService.restoreById(ordinaryOrderId, adminActor)
+    await assertLifecycleStock([9, 0, 9], '恢复已回补的出库单并重新扣减后')
+
+    await assert.rejects(
+      () => productService.update(lifecycleProduct.id, { currentStock: 13, stockBaseline: { currentStock: 13 } }, adminActor),
+      /库存已被出入库变动/,
+      '基线过期的商品编辑必须被拒绝',
+    )
+    await assertLifecycleStock([9, 0, 9], '过期库存基线的商品编辑被拒绝后')
+    await productService.update(lifecycleProduct.id, { currentStock: 20, stockBaseline: { currentStock: 9 } }, adminActor)
+    await assertLifecycleStock([20, 0, 20], '商品编辑按基线调整库存后')
 
     console.log('库存报表专项验证通过：固定口径、分页、跨批次、真实 Excel 与库存生命周期均一致')
   } finally {

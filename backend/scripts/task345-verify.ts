@@ -140,11 +140,12 @@ async function main() {
       () =>
         productService.update(firstProduct.id, {
           currentStock: 1,
-          preOrderedStock: 2,
         }, mockActor),
-      /预订库存不能超过物理库存/,
+      /缺少打开编辑时的库存基线/,
     )
-    pass('商品服务会阻断预订库存大于物理库存的非法更新')
+    await productService.update(firstProduct.id, { preOrderedStock: 2 }, mockActor)
+    assert.equal((await productService.detail(firstProduct.id)).preOrderedStock, 0)
+    pass('商品编辑改库存必须携带基线，且不得改写由 O2O 生命周期记账的预订库存')
 
     await productService.update(firstProduct.id, {
       isActive: true,

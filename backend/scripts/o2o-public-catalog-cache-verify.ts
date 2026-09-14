@@ -68,7 +68,8 @@ const run = async () => {
   assert.ok(firstSnapshot)
   assert.ok(firstSnapshot.data.list.some((item) => item.id === product.id))
 
-  await productService.update(product.id, { currentStock: 21 }, actor)
+  // 商品编辑改库存必须携带打开编辑时的库存基线（Issue #82 防覆盖）。
+  await productService.update(product.id, { currentStock: 21, stockBaseline: { currentStock: product.currentStock } }, actor)
   const refreshedSnapshots = await Promise.all(
     Array.from({ length: 100 }, () => o2oPreorderService.getMallProductsPublicSnapshot()),
   )
