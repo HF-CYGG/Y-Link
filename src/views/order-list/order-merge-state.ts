@@ -11,6 +11,49 @@ export interface OrderMergePreviewState<TPreview extends Pick<OrderMergePreviewR
   idempotencyKey: string
 }
 
+/**
+ * 预检请求所有权：字段变化会废弃正在等待的结果；只有当前持有者完成时才可解除 loading。
+ */
+export interface OrderMergePreviewRequestState {
+  latestRequestVersion: number
+  activeRequestVersion: number | null
+}
+
+export const invalidateOrderMergePreviewRequestState = (
+  currentState: OrderMergePreviewRequestState,
+): OrderMergePreviewRequestState => ({
+  latestRequestVersion: currentState.latestRequestVersion + 1,
+  activeRequestVersion: null,
+})
+
+export const startOrderMergePreviewRequest = (
+  currentState: OrderMergePreviewRequestState,
+): { requestVersion: number; state: OrderMergePreviewRequestState } => {
+  const requestVersion = currentState.latestRequestVersion + 1
+  return {
+    requestVersion,
+    state: {
+      latestRequestVersion: requestVersion,
+      activeRequestVersion: requestVersion,
+    },
+  }
+}
+
+export const settleOrderMergePreviewRequest = (
+  currentState: OrderMergePreviewRequestState,
+  requestVersion: number,
+): OrderMergePreviewRequestState => {
+  if (currentState.activeRequestVersion !== requestVersion) return currentState
+  return {
+    ...currentState,
+    activeRequestVersion: null,
+  }
+}
+
+export const isOrderMergePreviewRequestPending = (state: OrderMergePreviewRequestState) => {
+  return state.activeRequestVersion !== null
+}
+
 export const invalidateOrderMergePreviewState = <TPreview extends Pick<OrderMergePreviewResult, 'ready'>>(
   currentState: OrderMergePreviewState<TPreview>,
 ): OrderMergePreviewState<TPreview> => ({

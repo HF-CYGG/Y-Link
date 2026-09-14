@@ -16,8 +16,12 @@ import { commitOrderMerge, previewOrderMerge, type OrderRecord } from '@/api/mod
 import { showAppError, showAppSuccess, showAppWarning } from '@/utils/app-alert'
 import {
   canCommitOrderMerge,
+  invalidateOrderMergePreviewRequestState,
   invalidateOrderMergePreviewState,
+  isOrderMergePreviewRequestPending,
   resolveOrderMergeConflictState,
+  settleOrderMergePreviewRequest,
+  startOrderMergePreviewRequest,
 } from '../order-merge-state'
 
 const props = defineProps<{
@@ -36,7 +40,10 @@ const preview = ref<OrderMergePreviewResult | null>(null)
 const previewing = ref(false)
 const committing = ref(false)
 const idempotencyKey = ref('')
-let previewRequestVersion = 0
+let previewRequestState = {
+  latestRequestVersion: 0,
+  activeRequestVersion: null as number | null,
+}
 
 const selectedParents = computed(() => props.orders.filter((order) => order.merge.role === 'parent'))
 const selectedStandaloneOrders = computed(() => props.orders.filter((order) => order.merge.role === 'standalone'))
@@ -65,7 +72,8 @@ const createIdempotencyKey = () => {
 }
 
 const invalidatePreview = () => {
-  previewRequestVersion += 1
+  previewRequestState = invalidateOrderMergePreviewRequestState(previewRequestState)
+  previewing.value = isOrderMergePreviewRequestPending(previewRequestState)
   const nextState = invalidateOrderMergePreviewState({ preview: preview.value, idempotencyKey: idempotencyKey.value })
   preview.value = nextState.preview
   idempotencyKey.value = nextState.idempotencyKey
@@ -118,18 +126,21 @@ const handlePreview = async () => {
     showAppWarning(hasMultipleParentTargets.value ? '一次合并只能选择一个已有父单作为目标' : '请至少选择两张单据，并填写合并原因')
     return
   }
-  previewing.value = true
-  const requestVersion = ++previewRequestVersion
+  const nextRequest = startOrderMergePreviewRequest(previewRequestState)
+  previewRequestState = nextRequest.state
+  previewing.value = isOrderMergePreviewRequestPending(previewRequestState)
+  const { requestVersion } = nextRequest
   idempotencyKey.value ||= createIdempotencyKey()
   try {
     const result = await previewOrderMerge(buildRequest())
-    if (requestVersion === previewRequestVersion) preview.value = result
+    if (previewRequestState.activeRequestVersion === requestVersion) preview.value = result
   } catch (error) {
-    if (requestVersion !== previewRequestVersion) return
+    if (previewRequestState.activeRequestVersion !== requestVersion) return
     preview.value = null
     showAppError(error instanceof Error ? error.message : '订单合并预检失败，请稍后重试')
   } finally {
-    if (requestVersion === previewRequestVersion) previewing.value = false
+    previewRequestState = settleOrderMergePreviewRequest(previewRequestState, requestVersion)
+    previewing.value = isOrderMergePreviewRequestPending(previewRequestState)
   }
 }
 
@@ -145,9 +156,7 @@ const handleCommit = async () => {
     const currentState = { preview: preview.value, idempotencyKey: idempotencyKey.value }
     const nextState = resolveOrderMergeConflictState(error, currentState)
     if (nextState !== currentState) {
-      previewRequestVersion += 1
-      preview.value = nextState.preview
-      idempotencyKey.value = nextState.idempotencyKey
+      invalidatePreview()
       showAppWarning('订单版本已变化，请重新预检后再提交')
     } else {
       showAppError(error instanceof Error ? error.message : '订单合并提交失败，请稍后重试')

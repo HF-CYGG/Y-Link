@@ -148,6 +148,12 @@ const voucherDialogVisible = ref(false)
 const enableHtml2pdfExport = import.meta.env.VITE_ORDER_VOUCHER_HTML2PDF_ENABLED !== 'false'
 const canUseOrderVoucher = computed(() => currentOrder.value?.orderType === 'department' && currentOrder.value.merge.role !== 'source')
 const canEditComplianceFlags = computed(() => hasPermission('orders:update'))
+const canEditStandaloneComplianceFlags = computed(() => Boolean(
+  currentOrder.value
+  && canEditComplianceFlags.value
+  && currentOrder.value.orderType === 'department'
+  && currentOrder.value.merge.role === 'standalone',
+))
 const canAmendOrders = computed(() => hasPermission('orders:update'))
 const amendmentDialogVisible = ref(false)
 const contentEditDialogVisible = ref(false)
@@ -711,7 +717,7 @@ const handleSaveComplianceFlags = async () => {
               <p class="mt-1 text-xs text-slate-500">仅部门单可编辑“是否有出库单”和“系统申请”。</p>
             </div>
             <el-button
-              v-if="canEditComplianceFlags && currentOrder.orderType === 'department' && currentOrder.merge.role !== 'source'"
+              v-if="canEditStandaloneComplianceFlags"
               size="small"
               type="primary"
               :loading="complianceSaving"
@@ -725,7 +731,7 @@ const handleSaveComplianceFlags = async () => {
               <p class="text-xs text-slate-500">是否有出库单</p>
               <div class="mt-2">
                 <el-switch
-                  v-if="canEditComplianceFlags && currentOrder.orderType === 'department' && currentOrder.merge.role !== 'source'"
+                  v-if="canEditStandaloneComplianceFlags"
                   v-model="complianceForm.hasCustomerOrder"
                   inline-prompt
                   active-text="是"
@@ -740,7 +746,7 @@ const handleSaveComplianceFlags = async () => {
               <p class="text-xs text-slate-500">系统申请</p>
               <div class="mt-2">
                 <el-switch
-                  v-if="canEditComplianceFlags && currentOrder.orderType === 'department' && currentOrder.merge.role !== 'source'"
+                  v-if="canEditStandaloneComplianceFlags"
                   v-model="complianceForm.isSystemApplied"
                   inline-prompt
                   active-text="已申请"

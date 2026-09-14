@@ -136,6 +136,7 @@ interface EvaluatedMerge {
   sources: Array<BizOutboundOrder | null>
   orderMap: Map<string, BizOutboundOrder>
   itemsByOrderId: Map<string, BizOutboundOrderItem[]>
+  existingSourceOrderIds: string[]
   preview: OrderMergePreviewResult
 }
 
@@ -461,9 +462,10 @@ export class OrderMergeService {
       })
     }
 
-    const existingChildIds = relations
+    const existingChildIds = [...new Set(relations
       .filter((relation) => normalizeId(relation.parentOrderId) === normalized.target.orderId)
-      .map((relation) => normalizeId(relation.sourceOrderId))
+      .map((relation) => normalizeId(relation.sourceOrderId)))]
+      .sort((left, right) => left.localeCompare(right))
     const existingChildren = existingChildIds.length
       ? await manager.getRepository(BizOutboundOrder).find({ where: { id: In(existingChildIds) } })
       : []
@@ -607,7 +609,16 @@ export class OrderMergeService {
       },
       requestHash,
     }
-    return { normalized, requestHash, target, sources, orderMap, itemsByOrderId, preview }
+    return {
+      normalized,
+      requestHash,
+      target,
+      sources,
+      orderMap,
+      itemsByOrderId,
+      existingSourceOrderIds: existingChildIds,
+      preview,
+    }
   }
 
   private async evaluateO2oRules(
@@ -687,11 +698,13 @@ export class OrderMergeService {
     const orderRepo = manager.getRepository(BizOutboundOrder)
     const revisionRepo = manager.getRepository(OrderRevision)
     const sourceIds = sources.map((source) => normalizeId(source.id))
+    const allSourceOrderIds = [...new Set([...evaluated.existingSourceOrderIds, ...sourceIds])]
+      .sort((left, right) => left.localeCompare(right))
 
     const targetBefore = this.buildRevisionSnapshot(
       target,
       evaluated.itemsByOrderId.get(normalizeId(target.id)) ?? [],
-      { role: 'target_before', sourceOrderIds: [] },
+      { role: 'target_before', sourceOrderIds: evaluated.existingSourceOrderIds },
     )
     const sourceBefore = new Map(sources.map((source) => [
       normalizeId(source.id),
@@ -762,7 +775,7 @@ export class OrderMergeService {
     ]
     const targetAfter = this.buildRevisionSnapshot(target, allTargetItems, {
       role: 'parent',
-      sourceOrderIds: sourceIds,
+      sourceOrderIds: allSourceOrderIds,
     })
     await revisionRepo.insert(revisionRepo.create({
       orderIdSnapshot: normalizeId(target.id),

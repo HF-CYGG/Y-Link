@@ -84,9 +84,13 @@ expectText('src/views/order-list/components/OrderMergeDialog.vue', 'resolveOrder
 expectText('src/views/order-list/components/OrderMergeDialog.vue', '([visible], previousState) =>', '合并弹窗区分新打开会话与同次会话状态更新')
 expectText('src/views/order-list/components/OrderMergeDialog.vue', 'const previousVisible = previousState?.[0]', '首次立即回调安全读取上一次可见状态')
 expectText('src/views/order-list/components/OrderMergeDialog.vue', "if (!previousVisible) reason.value = ''", '新一次打开合并弹窗时清空上次的合并原因')
+expectText('src/views/order-list/components/OrderMergeDialog.vue', 'invalidateOrderMergePreviewRequestState', '预检失效时释放旧请求 loading 所有权')
+expectText('src/views/order-list/components/OrderMergeDialog.vue', 'settleOrderMergePreviewRequest', '预检完成时只释放自身 loading 所有权')
 if (source.get('src/views/order-list/components/OrderMergeDialog.vue')?.includes('response?.status')) {
   failures.push('OrderMergeDialog 不得绕过统一错误层读取 error.response.status')
 }
+expectText('src/views/order-list/OrderListView.vue', 'const canEditStandaloneComplianceFlags', '合规状态编辑仅允许未合并普通主单')
+expectText('src/views/order-list/OrderListView.vue', "currentOrder.value.merge.role === 'standalone'", '合并父单与来源单必须隐藏通用合规编辑')
 expectText('src/views/order-list/OrderListView.vue', '(canAmendOrders || canMergeOrders) && !item.isDeleted && !isSourceOrder(item)', '仅合并权限的移动端选择入口与来源单排除')
 expectText('src/views/order-list/components/OrderListMobileCard.vue', '选择单据', '移动端通用选择文案')
 expectText('src/views/order-list/components/OrderListMobileCard.vue', '<style scoped>', '移动端卡片自有作用域样式')

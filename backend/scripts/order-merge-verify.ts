@@ -306,6 +306,19 @@ async function main() {
     assert.equal(await AppDataSource.getRepository(OrderMergeRelation).count(), 1)
     assert.equal(await AppDataSource.getRepository(OrderMergeOperation).count(), 1)
     assert.equal(await AppDataSource.getRepository(OrderRevision).count(), 2, '目标和来源必须分别写 revision')
+    const initialTargetRevision = await AppDataSource.getRepository(OrderRevision).findOneOrFail({
+      where: { orderUuid: target.order.orderUuid, revisionNo: 2 },
+    })
+    assert.deepEqual(
+      (JSON.parse(initialTargetRevision.beforeSnapshotJson) as { merge: { sourceOrderIds: string[] } }).merge.sourceOrderIds,
+      [],
+      '首次合并前父单 revision 不应已有来源单',
+    )
+    assert.deepEqual(
+      (JSON.parse(initialTargetRevision.afterSnapshotJson) as { merge: { sourceOrderIds: string[] } }).merge.sourceOrderIds,
+      [String(source.order.id)],
+      '首次合并后父单 revision 应记录首个直接来源单',
+    )
     assert.equal(await AppDataSource.getRepository(SysAuditLog).count({ where: { actionType: 'order.merge' } }), 1)
     assert.equal(await AppDataSource.getRepository(InventoryLog).count(), beforeCounts.inventoryLogs, '合并不得新增库存流水')
     assert.equal(Number((await productRepo.findOneByOrFail({ id: product.id })).currentStock), productStockBefore)
@@ -375,20 +388,55 @@ async function main() {
       )
       return originalDetailById(orderId, manager)
     }
+    const appendInput = {
+      target: { orderId: String(target.order.id), editVersion: 2 },
+      sources: [{ orderId: String(source2.order.id), editVersion: 1 }],
+      reason: '专项验证继续追加',
+      idempotencyKey: `issue71-append-${verifySeed}`,
+    }
     let appended
     try {
-      appended = await orderService.commitMerge({
-        target: { orderId: String(target.order.id), editVersion: 2 },
-        sources: [{ orderId: String(source2.order.id), editVersion: 1 }],
-        reason: '专项验证继续追加',
-        idempotencyKey: `issue71-append-${verifySeed}`,
-      }, actor)
+      appended = await orderService.commitMerge(appendInput, actor)
     } finally {
       orderService.detailById = originalDetailById
     }
     assert.equal(appended.targetEditVersion, 3)
     assert.equal(await AppDataSource.getRepository(OrderMergeRelation).count(), 2)
     assert.equal(Number((await orderRepo.findOneByOrFail({ id: target.order.id })).totalQty), 15)
+    const appendedTargetRevision = await AppDataSource.getRepository(OrderRevision).findOneOrFail({
+      where: { orderUuid: target.order.orderUuid, revisionNo: 3 },
+    })
+    const expectedSourceOrderIds = [String(source.order.id), String(source2.order.id)]
+      .sort((left, right) => left.localeCompare(right))
+    assert.deepEqual(
+      (JSON.parse(appendedTargetRevision.beforeSnapshotJson) as { merge: { sourceOrderIds: string[] } }).merge.sourceOrderIds,
+      [String(source.order.id)],
+      '追加合并前的父单 revision 必须保留全部已有直接来源单',
+    )
+    assert.deepEqual(
+      (JSON.parse(appendedTargetRevision.afterSnapshotJson) as { merge: { sourceOrderIds: string[] } }).merge.sourceOrderIds,
+      expectedSourceOrderIds,
+      '追加合并后的父单 revision 必须按稳定顺序记录已有与本次来源单',
+    )
+    const appendRevisionCount = await AppDataSource.getRepository(OrderRevision).count()
+    const appendRevisionBeforeReplay = {
+      before: appendedTargetRevision.beforeSnapshotJson,
+      after: appendedTargetRevision.afterSnapshotJson,
+    }
+    const appendReplay = await orderService.commitMerge(appendInput, actor)
+    assert.equal(appendReplay.idempotentReplay, true)
+    const appendedTargetRevisionAfterReplay = await AppDataSource.getRepository(OrderRevision).findOneOrFail({
+      where: { orderUuid: target.order.orderUuid, revisionNo: 3 },
+    })
+    assert.equal(
+      await AppDataSource.getRepository(OrderRevision).count(),
+      appendRevisionCount,
+      '追加合并的幂等重试不得新增 revision',
+    )
+    assert.deepEqual({
+      before: appendedTargetRevisionAfterReplay.beforeSnapshotJson,
+      after: appendedTargetRevisionAfterReplay.afterSnapshotJson,
+    }, appendRevisionBeforeReplay, '追加合并的幂等重试不得改写 revision 快照')
     const replayAfterAppend = await orderService.commitMerge(commitInput, actor)
     assert.equal(replayAfterAppend.idempotentReplay, true)
     assert.deepEqual(
