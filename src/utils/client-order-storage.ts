@@ -224,6 +224,8 @@ const normalizeOrderRow = (item: unknown): PersistedO2oPreorderSummary | null =>
     // 否则刷新或离线恢复后会退回旧预订单号，导致“订单展示口径”前后不一致。
     customerOrderShowNo: normalizeOptionalTrimmedText(row.customerOrderShowNo),
     customerOrderBusinessNo: normalizeOptionalTrimmedText(row.customerOrderBusinessNo),
+    originalCustomerOrderShowNo: normalizeOptionalTrimmedText(row.originalCustomerOrderShowNo),
+    originalCustomerOrderBusinessNo: normalizeOptionalTrimmedText(row.originalCustomerOrderBusinessNo),
     verifyCode,
     status,
     businessStatus: normalizeBusinessStatus(row.businessStatus),

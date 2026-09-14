@@ -178,7 +178,7 @@ async function dropVerifyDatabase(config: VerifyMysqlRuntimeConfig) {
   }
 }
 
-async function verifyOrderSerialConcurrency() {
+async function verifyOrderSerialConcurrency(mysqlConfig: VerifyMysqlRuntimeConfig) {
   const [
     { AppDataSource },
     { initializeDatabaseInfrastructure },
@@ -191,7 +191,9 @@ async function verifyOrderSerialConcurrency() {
     { SysAuditLog },
     { SysUser },
     { O2oPreorder },
+    { BizOutboundOrder },
     { clientUserManageService },
+    { orderService },
     { migrateClientUserDepartmentGovernance },
     { assertMysqlRequiredSchemaExists, runMysqlSchemaMigrations },
   ] = await Promise.all([
@@ -206,7 +208,9 @@ async function verifyOrderSerialConcurrency() {
     import('../src/entities/sys-audit-log.entity.js'),
     import('../src/entities/sys-user.entity.js'),
     import('../src/entities/o2o-preorder.entity.js'),
+    import('../src/entities/biz-outbound-order.entity.js'),
     import('../src/services/client-user-manage.service.js'),
+    import('../src/services/order.service.js'),
     import('../src/config/database-bootstrap.js'),
     import('../src/config/mysql-migration-runner.js'),
   ])
@@ -554,6 +558,144 @@ async function verifyOrderSerialConcurrency() {
     assert.equal(returnRequest.items.length, 1)
     assert.equal(returnRequest.items[0]?.skuId, returnSkuId)
     pass('事务内退货详情读取复现通过：新建明细在提交前即可由同一 manager 返回')
+
+    // TypeORM synchronize 用于本临时库快速建表，但 MySQL 驱动不会保留实体 @Check。
+    // 删除 045 tracking 后按生产迁移路径重放，确保下面的行为断言验证真实部署结构而非同步器近似结构。
+    await AppDataSource.query("DELETE FROM schema_migrations WHERE filename = '045_order_merge_governance.sql'")
+    const replayedOrderMergeMigration = await runMysqlSchemaMigrations(AppDataSource)
+    assert.deepEqual(replayedOrderMergeMigration.appliedFiles, ['045_order_merge_governance.sql'])
+    await assertMysqlRequiredSchemaExists(AppDataSource)
+
+    const createMergeCandidate = async (suffix: string) => {
+      const preorderResult = await o2oPreorderService.submit(clientAuth, {
+        clientRequestId: `db-concurrency-order-merge-${suffix}`,
+        items: [{ productId: returnProduct.id, skuId: returnSkuId, qty: 1 }],
+        remark: `MySQL 合并与退货竞争-${suffix}`,
+        pickupContact: '并发验收',
+        isSystemApplied: false,
+      })
+      await o2oPreorderService.verifyByCode(preorderResult.order.verifyCode, concurrencyActor)
+      const outbound = await AppDataSource.getRepository(BizOutboundOrder).findOneOrFail({
+        where: { idempotencyKey: `o2o-preorder-verify:${preorderResult.order.id}` },
+      })
+      return { preorder: preorderResult.order, outbound }
+    }
+    const mergeTarget = await createMergeCandidate('target')
+    const mergeSource = await createMergeCandidate('source')
+    const mergeInput = {
+      target: { orderId: String(mergeTarget.outbound.id), editVersion: Number(mergeTarget.outbound.editVersion) },
+      sources: [{ orderId: String(mergeSource.outbound.id), editVersion: Number(mergeSource.outbound.editVersion) }],
+      reason: 'MySQL 合并与退货申请锁竞争验证',
+      idempotencyKey: 'db-concurrency-order-merge-lock-v1',
+    }
+    const blockerConnection = await createConnection({
+      host: mysqlConfig.host,
+      port: mysqlConfig.port,
+      user: mysqlConfig.user,
+      password: mysqlConfig.password,
+      database: VERIFY_TEMP_DATABASE_NAME,
+    })
+    try {
+      await blockerConnection.beginTransaction()
+      await blockerConnection.execute(
+        'SELECT id FROM o2o_preorder WHERE id = ? FOR UPDATE',
+        [mergeSource.preorder.id],
+      )
+      let mergeSettled = false
+      const mergePromise = orderService.commitMerge(mergeInput, concurrencyActor)
+        .then((value) => ({ status: 'fulfilled' as const, value }))
+        .catch((reason: unknown) => ({ status: 'rejected' as const, reason }))
+        .finally(() => {
+          mergeSettled = true
+        })
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      assert.equal(
+        mergeSettled,
+        false,
+        '合并事务必须等待来源原预订单行锁，不能在 pending 退货插入窗口中穿透提交',
+      )
+      await blockerConnection.execute(
+        `INSERT INTO o2o_return_request
+          (return_no, order_id, client_user_id, verify_code, status, source_order_status, reason, total_qty)
+         VALUES (?, ?, ?, ?, 'pending', 'verified', ?, 1)`,
+        [
+          `TH-MYSQL-MERGE-${Date.now()}`,
+          mergeSource.preorder.id,
+          clientUser.id,
+          randomUUID(),
+          'MySQL 合并锁等待期间创建退货申请',
+        ],
+      )
+      await blockerConnection.commit()
+      const mergeOutcome = await mergePromise
+      assert.equal(mergeOutcome.status, 'rejected', '锁释放后合并必须重查并拒绝 pending 退货')
+      if (mergeOutcome.status === 'rejected') {
+        assert.equal((mergeOutcome.reason as { statusCode?: number }).statusCode, 409)
+      }
+      assert.equal((await AppDataSource.getRepository(BizOutboundOrder).findOneByOrFail({
+        id: mergeSource.outbound.id,
+      })).status, 'active')
+      await blockerConnection.execute(
+        "DELETE FROM o2o_return_request WHERE order_id = ? AND status = 'pending'",
+        [mergeSource.preorder.id],
+      )
+
+      const mergedResult = await orderService.commitMerge(mergeInput, concurrencyActor)
+      await assert.rejects(
+        () => blockerConnection.execute(
+          `INSERT INTO order_merge_relation
+            (operation_id, parent_order_id, parent_order_uuid, parent_business_no_snapshot,
+             source_order_id, source_order_uuid, source_business_no_snapshot)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            mergedResult.operationId,
+            mergeTarget.outbound.id,
+            mergeTarget.outbound.orderUuid,
+            mergeTarget.outbound.businessNo,
+            mergeTarget.outbound.id,
+            mergeTarget.outbound.orderUuid,
+            mergeTarget.outbound.businessNo,
+          ],
+        ),
+        (error: unknown) => (error as { code?: string }).code === 'ER_CHECK_CONSTRAINT_VIOLATED',
+        'MySQL CHECK 必须拒绝 parent_order_id = source_order_id',
+      )
+      const alternateParent = await AppDataSource.getRepository(BizOutboundOrder).findOneOrFail({
+        where: { idempotencyKey: `o2o-preorder-verify:${returnOrder.order.id}` },
+      })
+      await assert.rejects(
+        () => blockerConnection.execute(
+          `INSERT INTO order_merge_relation
+            (operation_id, parent_order_id, parent_order_uuid, parent_business_no_snapshot,
+             source_order_id, source_order_uuid, source_business_no_snapshot)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          [
+            mergedResult.operationId,
+            alternateParent.id,
+            alternateParent.orderUuid,
+            alternateParent.businessNo,
+            mergeSource.outbound.id,
+            mergeSource.outbound.orderUuid,
+            mergeSource.outbound.businessNo,
+          ],
+        ),
+        (error: unknown) => (error as { code?: string }).code === 'ER_DUP_ENTRY',
+        'MySQL UNIQUE 必须拒绝来源订单重复归并',
+      )
+      await assert.rejects(
+        () => blockerConnection.execute('DELETE FROM biz_outbound_order WHERE id = ?', [mergeSource.outbound.id]),
+        (error: unknown) => (error as { code?: string }).code === 'ER_ROW_IS_REFERENCED_2',
+        'MySQL RESTRICT 必须保护合并来源订单不被物理删除',
+      )
+      pass('真实 MySQL 双连接验证通过：preorder 行锁阻断 pending 退货穿透，CHECK/UNIQUE/RESTRICT 均生效')
+    } finally {
+      try {
+        await blockerConnection.rollback()
+      } catch {
+        // 已提交或连接结束时无需二次处理。
+      }
+      await blockerConnection.end()
+    }
   } finally {
     if (AppDataSource.isInitialized) {
       await AppDataSource.destroy()
@@ -578,7 +720,7 @@ async function main() {
   pass('固定 MySQL 临时库已重建，可开始并发验收')
 
   try {
-    await verifyOrderSerialConcurrency()
+    await verifyOrderSerialConcurrency(mysqlConfig)
   } finally {
     await dropVerifyDatabase(mysqlConfig)
     pass('固定 MySQL 临时库已清理完成')

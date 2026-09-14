@@ -27,6 +27,7 @@ const props = defineProps<{
   isDesktop: boolean
   detailGridClass: string
 }>()
+const emit = defineEmits<{ navigate: [orderId: string] }>()
 
 const revisions = ref<OrderRevisionRecord[]>([])
 const revisionsLoading = ref(false)
@@ -89,6 +90,7 @@ const getOrderDisplayName = (order: OrderDetailResult) => {
   }
   return order.customerName || order.customerDepartmentName || '-'
 }
+const hasItemProvenance = () => props.order.items.some((item) => Boolean(item.sourceOrderId))
 </script>
 
 <template>
@@ -124,6 +126,25 @@ const getOrderDisplayName = (order: OrderDetailResult) => {
       </el-descriptions-item>
       <el-descriptions-item label="单据备注" :span="isPhone ? 1 : 2">{{ order.remark || '-' }}</el-descriptions-item>
     </el-descriptions>
+  </section>
+
+  <section v-if="order.merge.role !== 'standalone'" class="mb-5 rounded-2xl border border-teal-100 bg-teal-50/60 p-3 sm:p-4">
+    <h3 class="text-base font-semibold text-teal-900">合并关系</h3>
+    <p v-if="order.merge.role === 'source'" class="mt-2 text-sm text-teal-800">
+      当前为来源单，已合并至
+      <el-button v-if="order.merge.parent" link type="primary" @click="emit('navigate', order.merge.parent.id)">
+        {{ order.merge.parent.businessNo || order.merge.parent.showNo }}
+      </el-button>
+      <span v-else>父单</span>，仅支持查看。
+    </p>
+    <div v-else class="mt-2">
+      <p class="text-sm text-teal-800">当前为父单，包含 {{ order.merge.children.length }} 张来源单。</p>
+      <div class="mt-2 flex flex-wrap gap-2">
+        <el-button v-for="child in order.merge.children" :key="child.id" link type="primary" @click="emit('navigate', child.id)">
+          {{ child.businessNo || child.showNo }}
+        </el-button>
+      </div>
+    </div>
   </section>
 
   <section class="mb-6 grid gap-2 sm:grid-cols-2">
@@ -162,6 +183,12 @@ const getOrderDisplayName = (order: OrderDetailResult) => {
         </template>
       </el-table-column>
       <el-table-column prop="remark" label="备注" min-width="180" show-overflow-tooltip />
+      <el-table-column v-if="hasItemProvenance()" label="来源单" min-width="150">
+        <template #default="{ row }">
+          <span v-if="row.sourceOrderId" class="text-xs text-slate-500">合并来源明细</span>
+          <span v-else>-</span>
+        </template>
+      </el-table-column>
     </el-table>
 
     <div v-else :class="['grid gap-3', detailGridClass]">
@@ -186,6 +213,7 @@ const getOrderDisplayName = (order: OrderDetailResult) => {
         <div v-if="item.remark" class="mt-2 rounded bg-slate-100 p-1.5 text-xs text-slate-500 dark:bg-white/5 dark:text-slate-400">
           备注：{{ item.remark }}
         </div>
+        <div v-if="item.sourceOrderId" class="mt-2 text-xs text-slate-500">来源：已合并来源单明细</div>
       </div>
     </div>
   </section>

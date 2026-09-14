@@ -9,6 +9,106 @@ import type {
 } from './o2o-status.ts'
 import type { O2oReturnRequestDetail } from './returns.ts'
 
+export type OutboundOrderMergeStatus = 'active' | 'merged'
+export type OutboundOrderInventoryMode = 'legacy_none' | 'manual_applied' | 'o2o_preapplied'
+export type OutboundOrderMergeRole = 'standalone' | 'parent' | 'source'
+
+export interface OrderMergeParticipantInput {
+  orderId: string
+  editVersion: number
+}
+
+export interface OrderMergePreviewInput {
+  target: OrderMergeParticipantInput
+  sources: OrderMergeParticipantInput[]
+  reason: string
+}
+
+export interface OrderMergeCommitInput extends OrderMergePreviewInput {
+  idempotencyKey: string
+}
+
+export interface OrderMergeOrderReference {
+  id: string
+  showNo: string
+  businessNo: string
+  editVersion: number
+  status: OutboundOrderMergeStatus
+  orderType: 'department' | 'walkin'
+  inventoryMode: OutboundOrderInventoryMode
+  hasCustomerOrder: boolean
+  isSystemApplied: boolean
+  issuerName: string | null
+  customerDepartmentName: string | null
+  customerName: string | null
+  totalQty: string
+  totalAmount: string
+  remark: string | null
+  creatorUserId: string | null
+  creatorUsername: string | null
+  creatorDisplayName: string | null
+  isDeleted: boolean
+  deletedAt: string | null
+  deletedByUserId: string | null
+  deletedByUsername: string | null
+  deletedByDisplayName: string | null
+  createdAt: string
+}
+
+export interface OrderMergeMetadata {
+  role: OutboundOrderMergeRole
+  parent: OrderMergeOrderReference | null
+  children: OrderMergeOrderReference[]
+}
+
+export interface OrderMergeBlocker {
+  orderId: string
+  code: string
+  message: string
+}
+
+export interface OrderMergePreviewItem {
+  sourceOrderId: string
+  sourceOrderUuid: string
+  sourceOrderItemId: string
+  prospectiveLineNo: number
+  productId: string
+  productNameSnapshot: string
+  skuId: string | null
+  skuCodeSnapshot: string | null
+  specTextSnapshot: string | null
+  qty: string
+  unitPrice: string
+  lineAmount: string
+  remark: string | null
+}
+
+export interface OrderMergePreviewResult {
+  ready: boolean
+  blockers: OrderMergeBlocker[]
+  target: OrderMergeOrderReference | null
+  sources: Array<OrderMergeOrderReference | { id: string; missing: true }>
+  beforeTotals: { totalQty: string; totalAmount: string; itemCount: number }
+  afterTotals: { totalQty: string; totalAmount: string; itemCount: number }
+  mergedItems: OrderMergePreviewItem[]
+  inventoryImpact: {
+    quantityDelta: 0
+    amountDelta: 0
+    movementDelta: 0
+    message: string
+  }
+  requestHash: string
+}
+
+export interface OrderMergeCommitResult<TDetail = unknown> {
+  operationId: string
+  idempotentReplay: boolean
+  targetOrderId: string
+  targetEditVersion: number
+  mergedSourceOrderIds: string[]
+  detail: TDetail
+}
+
 export interface O2oLatestReturnRequestSummary {
   id: string
   returnNo: string
@@ -26,6 +126,8 @@ export interface O2oPreorderSummary {
   showNo: string
   customerOrderShowNo: string | null
   customerOrderBusinessNo: string | null
+  originalCustomerOrderShowNo?: string | null
+  originalCustomerOrderBusinessNo?: string | null
   verifyCode: string
   status: O2oOrderStatus
   businessStatus: O2oOrderBusinessStatus | null
@@ -79,6 +181,8 @@ export interface O2oPreorderDetailOrder {
   showNo: string
   customerOrderShowNo: string | null
   customerOrderBusinessNo: string | null
+  originalCustomerOrderShowNo?: string | null
+  originalCustomerOrderBusinessNo?: string | null
   verifyCode: string
   status: O2oOrderStatus
   businessStatus: O2oOrderBusinessStatus | null

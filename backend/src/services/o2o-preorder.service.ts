@@ -20,6 +20,7 @@ import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity
 import { ClientUser } from '../entities/client-user.entity.js'
 import { InventoryLog } from '../entities/inventory-log.entity.js'
 import { OrderRevision } from '../entities/order-revision.entity.js'
+import { OrderMergeRelation } from '../entities/order-merge-relation.entity.js'
 import {
   O2O_CLIENT_ORDER_TYPES,
   O2O_PREORDER_BUSINESS_STATUSES,
@@ -46,6 +47,7 @@ import {
 import { generateOrderUuid } from '../utils/id-generator.js'
 import { orderBusinessNoService } from './order-business-no.service.js'
 import { orderSerialService, type OrderSerialRecalibrationResult } from './order-serial.service.js'
+import { orderMergeService, type OrderMergeMetadata } from './order-merge.service.js'
 import { systemConfigService } from './system-config.service.js'
 import { databaseMaintenanceModeService } from './database-maintenance-mode.service.js'
 import { notificationService } from './notification.service.js'
@@ -281,6 +283,8 @@ export interface O2oPreorderSummaryView {
   showNo: string
   customerOrderShowNo: string | null
   customerOrderBusinessNo: string | null
+  originalCustomerOrderShowNo: string | null
+  originalCustomerOrderBusinessNo: string | null
   verifyCode: string
   status: O2oPreorder['status']
   businessStatus: O2oPreorder['businessStatus']
@@ -335,6 +339,8 @@ export interface O2oPreorderDetailView {
     showNo: string
     customerOrderShowNo: string | null
     customerOrderBusinessNo: string | null
+    originalCustomerOrderShowNo: string | null
+    originalCustomerOrderBusinessNo: string | null
     verifyCode: string
     status: O2oPreorder['status']
     businessStatus: O2oPreorder['businessStatus']
@@ -1249,6 +1255,7 @@ class O2oPreorderService {
         displayName: string
       }
       reason?: string
+      allowMergeMemberMutation?: boolean
     },
   ) {
     const idempotencyKey = `o2o-preorder-verify:${preorderId}`
@@ -1260,6 +1267,104 @@ class O2oPreorderService {
     if (!outboundOrder) {
       return
     }
+    const outboundOrderId = String(outboundOrder.id)
+    const metadata = (await orderMergeService.getMetadataMap([outboundOrderId], manager)).get(outboundOrderId)
+    if (!metadata || metadata.role === 'standalone') {
+      await this.applyOutboundOrderComplianceFlags(manager, outboundOrder, payload)
+      return
+    }
+    if (!payload.allowMergeMemberMutation) {
+      throw new BizError('合并成员禁止修改合规状态', 409)
+    }
+
+    const parentOrderId = metadata.role === 'parent' ? outboundOrderId : metadata.parent?.id
+    if (!parentOrderId) {
+      throw new BizError('合并父单不存在，无法同步合规状态', 409)
+    }
+    const parentMetadata = metadata.role === 'parent'
+      ? metadata
+      : (await orderMergeService.getMetadataMap([parentOrderId], manager)).get(parentOrderId)
+    if (!parentMetadata || parentMetadata.role !== 'parent') {
+      throw new BizError('合并父子关系不完整，无法同步合规状态', 409)
+    }
+
+    const groupOrderIds = [parentOrderId, ...parentMetadata.children.map((child) => child.id)]
+      .sort((left, right) => left.localeCompare(right))
+    const groupOrderQuery = outboundOrderRepo.createQueryBuilder('outboundOrder')
+      .where('outboundOrder.id IN (:...groupOrderIds)', { groupOrderIds })
+      .orderBy('outboundOrder.id', 'ASC')
+    if (manager.connection.options.type !== 'sqlite') groupOrderQuery.setLock('pessimistic_write')
+    const groupOrders = await groupOrderQuery.getMany()
+    if (groupOrders.length !== groupOrderIds.length) {
+      throw new BizError('合并组正式出库单不完整，无法同步合规状态', 409)
+    }
+
+    const preorderIdByOrderId = new Map<string, string>()
+    for (const groupOrder of groupOrders) {
+      const linkedPreorderId = groupOrder.idempotencyKey.startsWith('o2o-preorder-verify:')
+        ? groupOrder.idempotencyKey.slice('o2o-preorder-verify:'.length).trim()
+        : ''
+      if (!linkedPreorderId) {
+        throw new BizError('合并组原预订单追溯不完整，无法同步合规状态', 409)
+      }
+      preorderIdByOrderId.set(String(groupOrder.id), linkedPreorderId)
+    }
+    const preorderIds = [...preorderIdByOrderId.values()].sort((left, right) => left.localeCompare(right))
+    const preorderQuery = manager.getRepository(O2oPreorder)
+      .createQueryBuilder('preorder')
+      .where('preorder.id IN (:...preorderIds)', { preorderIds })
+      .orderBy('preorder.id', 'ASC')
+    if (manager.connection.options.type !== 'sqlite') preorderQuery.setLock('pessimistic_write')
+    const preorders = await preorderQuery.getMany()
+    if (preorders.length !== preorderIds.length) {
+      throw new BizError('合并组原预订单不完整，无法同步合规状态', 409)
+    }
+    const preorderMap = new Map(preorders.map((preorder) => [String(preorder.id), preorder]))
+    const linkedPreorder = preorderMap.get(preorderId)
+    const parentOrder = groupOrders.find((order) => String(order.id) === parentOrderId)
+    if (!linkedPreorder || !parentOrder) {
+      throw new BizError('合并组原预订单追溯不完整，无法同步合规状态', 409)
+    }
+
+    const updates = new Map<BizOutboundOrder, { hasCustomerOrder?: boolean; isSystemApplied?: boolean }>()
+    if (metadata.role === 'source') {
+      updates.set(outboundOrder, {
+        hasCustomerOrder: typeof payload.hasCustomerOrder === 'boolean'
+          ? Boolean(linkedPreorder.hasCustomerOrder)
+          : undefined,
+        isSystemApplied: typeof payload.isSystemApplied === 'boolean'
+          ? Boolean(linkedPreorder.isSystemApplied)
+          : undefined,
+      })
+    }
+    updates.set(parentOrder, {
+      hasCustomerOrder: typeof payload.hasCustomerOrder === 'boolean'
+        ? preorders.some((preorder) => Boolean(preorder.hasCustomerOrder))
+        : undefined,
+      isSystemApplied: typeof payload.isSystemApplied === 'boolean'
+        ? preorders.some((preorder) => Boolean(preorder.isSystemApplied))
+        : undefined,
+    })
+    for (const [affectedOrder, complianceFlags] of [...updates.entries()]
+      .sort(([left], [right]) => String(left.id).localeCompare(String(right.id)))) {
+      await this.applyOutboundOrderComplianceFlags(manager, affectedOrder, {
+        ...payload,
+        ...complianceFlags,
+      })
+    }
+  }
+
+  private async applyOutboundOrderComplianceFlags(
+    manager: EntityManager,
+    outboundOrder: BizOutboundOrder,
+    payload: {
+      hasCustomerOrder?: boolean
+      isSystemApplied?: boolean
+      actor?: { userId: string | null; username: string; displayName: string }
+      reason?: string
+    },
+  ) {
+    const outboundOrderRepo = manager.getRepository(BizOutboundOrder)
     const beforeSnapshot = {
       businessNo: outboundOrder.businessNo,
       showNo: outboundOrder.showNo,
@@ -1323,6 +1428,27 @@ class O2oPreorderService {
         idempotencyKey: this.buildVerifiedPreorderOutboundOrderIdempotencyKey(preorderId),
       },
     })
+  }
+
+  private async lockLinkedOutboundOrderGroupInManager(
+    manager: EntityManager,
+    preorderId: string,
+  ): Promise<OrderMergeMetadata | undefined> {
+    const linkedOutboundOrder = await this.loadLinkedOutboundOrderInManager(manager, preorderId)
+    if (!linkedOutboundOrder) return undefined
+    const linkedOrderId = String(linkedOutboundOrder.id)
+    const metadata = (await orderMergeService.getMetadataMap([linkedOrderId], manager)).get(linkedOrderId)
+    const orderIds = new Set<string>([linkedOrderId])
+    if (metadata?.parent) orderIds.add(metadata.parent.id)
+    metadata?.children.forEach((child) => orderIds.add(child.id))
+    const sortedOrderIds = [...orderIds].sort((left, right) => left.localeCompare(right))
+    const orderQuery = manager.getRepository(BizOutboundOrder)
+      .createQueryBuilder('outboundOrder')
+      .where('outboundOrder.id IN (:...sortedOrderIds)', { sortedOrderIds })
+      .orderBy('outboundOrder.id', 'ASC')
+    if (manager.connection.options.type !== 'sqlite') orderQuery.setLock('pessimistic_write')
+    await orderQuery.getMany()
+    return metadata
   }
 
   private async releasePendingPreorderStockForDeleteInManager(
@@ -1410,27 +1536,59 @@ class O2oPreorderService {
     manager: EntityManager = AppDataSource.manager,
   ) {
     if (!preorderIds.length) {
-      return new Map<string, { showNo: string; businessNo: string }>()
+      return new Map<string, {
+        showNo: string
+        businessNo: string
+        originalShowNo: string
+        originalBusinessNo: string
+      }>()
     }
     const idempotencyKeyToPreorderIdMap = new Map(
       preorderIds.map((preorderId) => [this.buildVerifiedPreorderOutboundOrderIdempotencyKey(preorderId), preorderId]),
     )
     const outboundOrders = await manager.getRepository(BizOutboundOrder).find({
-      select: ['idempotencyKey', 'showNo', 'businessNo'],
+      select: ['id', 'idempotencyKey', 'showNo', 'businessNo'],
       where: {
         idempotencyKey: In([...idempotencyKeyToPreorderIdMap.keys()]),
         isDeleted: false,
       },
     })
-    const customerOrderShowNoMap = new Map<string, { showNo: string; businessNo: string }>()
+    const outboundOrderIds = outboundOrders.map((order) => String(order.id).trim())
+    const relations = outboundOrderIds.length
+      ? await manager.getRepository(OrderMergeRelation).find({
+        where: { sourceOrderId: In(outboundOrderIds) },
+      })
+      : []
+    const parentOrderIds = [...new Set(relations.map((relation) => String(relation.parentOrderId).trim()))]
+    const parentOrders = parentOrderIds.length
+      ? await manager.getRepository(BizOutboundOrder).find({
+        where: { id: In(parentOrderIds), isDeleted: false },
+      })
+      : []
+    const parentOrderMap = new Map(parentOrders.map((order) => [String(order.id).trim(), order]))
+    const parentIdBySourceId = new Map(relations.map((relation) => [
+      String(relation.sourceOrderId).trim(),
+      String(relation.parentOrderId).trim(),
+    ]))
+    const customerOrderShowNoMap = new Map<string, {
+      showNo: string
+      businessNo: string
+      originalShowNo: string
+      originalBusinessNo: string
+    }>()
     outboundOrders.forEach((outboundOrder) => {
       const preorderId = idempotencyKeyToPreorderIdMap.get(outboundOrder.idempotencyKey)
       if (!preorderId || !outboundOrder.showNo?.trim()) {
         return
       }
+      const parentOrderId = parentIdBySourceId.get(String(outboundOrder.id).trim())
+      const currentOrder = parentOrderId ? parentOrderMap.get(parentOrderId) : outboundOrder
+      if (!currentOrder) return
       customerOrderShowNoMap.set(preorderId, {
-        showNo: outboundOrder.showNo.trim(),
-        businessNo: outboundOrder.businessNo?.trim() || outboundOrder.showNo.trim(),
+        showNo: currentOrder.showNo.trim(),
+        businessNo: currentOrder.businessNo?.trim() || currentOrder.showNo.trim(),
+        originalShowNo: outboundOrder.showNo.trim(),
+        originalBusinessNo: outboundOrder.businessNo?.trim() || outboundOrder.showNo.trim(),
       })
     })
     return customerOrderShowNoMap
@@ -1446,7 +1604,10 @@ class O2oPreorderService {
     const escapedKeyword = this.escapeLikeKeyword(normalizedKeyword)
     const rows = await AppDataSource.getRepository(BizOutboundOrder)
       .createQueryBuilder('outboundOrder')
-      .select(['outboundOrder.idempotencyKey AS idempotencyKey'])
+      .select([
+        'outboundOrder.id AS orderId',
+        'outboundOrder.idempotencyKey AS idempotencyKey',
+      ])
       .where('outboundOrder.isDeleted = :isDeleted', { isDeleted: false })
       .andWhere(
         new Brackets((numberQb) => {
@@ -1457,10 +1618,23 @@ class O2oPreorderService {
             .orWhere(String.raw`outboundOrder.businessNo LIKE :businessNoPrefix ESCAPE '\'`, { businessNoPrefix: `${escapedKeyword}%` })
         }),
       )
-      .getRawMany<{ idempotencyKey: string | null }>()
+      .getRawMany<{ orderId: string; idempotencyKey: string | null }>()
+    const matchedOrderIds = rows.map((row) => String(row.orderId).trim()).filter(Boolean)
+    const childRelations = matchedOrderIds.length
+      ? await AppDataSource.getRepository(OrderMergeRelation).find({
+        where: { parentOrderId: In(matchedOrderIds) },
+      })
+      : []
+    const childOrderIds = [...new Set(childRelations.map((relation) => String(relation.sourceOrderId).trim()))]
+    const childRows = childOrderIds.length
+      ? await AppDataSource.getRepository(BizOutboundOrder).find({
+        select: ['idempotencyKey'],
+        where: { id: In(childOrderIds) },
+      })
+      : []
     const preorderIdPrefix = this.buildVerifiedPreorderOutboundOrderIdempotencyKey('')
     const preorderIdSet = new Set<string>()
-    rows.forEach((row) => {
+    ;[...rows, ...childRows].forEach((row) => {
       const idempotencyKey = row.idempotencyKey?.trim() ?? ''
       if (!idempotencyKey.startsWith(preorderIdPrefix)) {
         return
@@ -1792,6 +1966,8 @@ class O2oPreorderService {
     const customerOrderNumbers = customerOrderShowNoMap.get(id) ?? null
     const customerOrderShowNo = customerOrderNumbers?.showNo ?? null
     const customerOrderBusinessNo = customerOrderNumbers?.businessNo ?? null
+    const originalCustomerOrderShowNo = customerOrderNumbers?.originalShowNo ?? null
+    const originalCustomerOrderBusinessNo = customerOrderNumbers?.originalBusinessNo ?? null
     const clientUser = await manager.getRepository(ClientUser).findOne({
       where: { id: String(order.clientUserId) },
       select: ['id', 'realName', 'mobile', 'email', 'departmentName', 'accountType', 'staffNo'],
@@ -1865,6 +2041,8 @@ class O2oPreorderService {
         showNo: order.showNo,
         customerOrderShowNo,
         customerOrderBusinessNo,
+        originalCustomerOrderShowNo,
+        originalCustomerOrderBusinessNo,
         verifyCode: order.verifyCode,
         status: order.status,
         businessStatus: order.businessStatus ?? null,
@@ -2172,6 +2350,8 @@ class O2oPreorderService {
       showNo: item.showNo,
       customerOrderShowNo: customerOrderShowNoMap.get(String(item.id))?.showNo ?? null,
       customerOrderBusinessNo: customerOrderShowNoMap.get(String(item.id))?.businessNo ?? null,
+      originalCustomerOrderShowNo: customerOrderShowNoMap.get(String(item.id))?.originalShowNo ?? null,
+      originalCustomerOrderBusinessNo: customerOrderShowNoMap.get(String(item.id))?.originalBusinessNo ?? null,
       verifyCode: item.verifyCode,
       status: item.status,
       businessStatus: item.businessStatus ?? null,
@@ -3506,6 +3686,7 @@ class O2oPreorderService {
 
   async markCustomerOrderPrintedByClient(auth: ClientAuthContext, orderId: string) {
     return runInTransaction(async (manager) => {
+      await this.lockLinkedOutboundOrderGroupInManager(manager, orderId)
       const orderRepo = manager.getRepository(O2oPreorder)
       const order = await orderRepo.findOne({
         where: { id: orderId, clientUserId: auth.userId, isDeleted: false },
@@ -3526,6 +3707,7 @@ class O2oPreorderService {
         await orderRepo.save(order)
         await this.syncOutboundOrderComplianceFlags(manager, String(order.id), {
           hasCustomerOrder: true,
+          allowMergeMemberMutation: true,
           reason: '客户端打印正式出库单',
           actor: {
             userId: auth.userId,
@@ -3547,6 +3729,7 @@ class O2oPreorderService {
     }
     return runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
+      const mergeMetadata = await this.lockLinkedOutboundOrderGroupInManager(manager, input.orderId)
       const orderRepo = manager.getRepository(O2oPreorder)
       const order = await orderRepo.findOne({
         where: { id: input.orderId, isDeleted: false },
@@ -3558,7 +3741,10 @@ class O2oPreorderService {
       if (order.clientOrderType !== 'department') {
         throw new BizError('散客单不适用该状态编辑', 409)
       }
-      if (typeof input.hasCustomerOrder === 'boolean') {
+      const preserveMergePrintEvidence = Boolean(mergeMetadata && mergeMetadata.role !== 'standalone')
+        && Boolean(order.hasCustomerOrder)
+        && input.hasCustomerOrder === false
+      if (typeof input.hasCustomerOrder === 'boolean' && !preserveMergePrintEvidence) {
         order.hasCustomerOrder = input.hasCustomerOrder
       }
       if (typeof input.isSystemApplied === 'boolean') {
@@ -3566,8 +3752,11 @@ class O2oPreorderService {
       }
       await orderRepo.save(order)
       await this.syncOutboundOrderComplianceFlags(manager, String(order.id), {
-        hasCustomerOrder: input.hasCustomerOrder,
+        hasCustomerOrder: typeof input.hasCustomerOrder === 'boolean'
+          ? Boolean(order.hasCustomerOrder)
+          : undefined,
         isSystemApplied: input.isSystemApplied,
+        allowMergeMemberMutation: true,
         reason: '管理端 O2O 合规状态联动',
         actor: {
           userId: actor.userId,
@@ -3591,6 +3780,7 @@ class O2oPreorderService {
 
     const result = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
+      await this.lockLinkedOutboundOrderGroupInManager(manager, input.orderId)
       const preorderRepo = manager.getRepository(O2oPreorder)
       const preorderItemRepo = manager.getRepository(O2oPreorderItem)
       const returnRequestRepo = manager.getRepository(O2oReturnRequest)
@@ -3609,6 +3799,13 @@ class O2oPreorderService {
       }
 
       const linkedOutboundOrder = await this.loadLinkedOutboundOrderInManager(manager, String(order.id))
+      if (linkedOutboundOrder) {
+        await orderMergeService.assertNotMergeMember(
+          manager,
+          String(linkedOutboundOrder.id),
+          '合并成员关联的 O2O 预订单禁止永久删除',
+        )
+      }
       const returnRequests = await returnRequestRepo.find({
         where: { orderId: String(order.id) },
       })
@@ -4018,6 +4215,7 @@ class O2oPreorderService {
   private async verifyReturnRequestInManager(
     manager: typeof AppDataSource.manager,
     returnRequest: O2oReturnRequest,
+    order: O2oPreorder,
     actor: AuthUserContext,
   ): Promise<O2oVerifyResultView | null> {
     if (returnRequest.status !== 'pending') {
@@ -4026,11 +4224,7 @@ class O2oPreorderService {
       }
       throw new BizError('当前退货申请不可重复核销', 409)
     }
-    const order = await manager.getRepository(O2oPreorder).findOne({
-      where: { id: String(returnRequest.orderId), isDeleted: false },
-      lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
-    })
-    if (!order) {
+    if (order.isDeleted) {
       throw new BizError('原预订单不存在，无法核销退货', 404)
     }
     if (
@@ -4088,11 +4282,22 @@ class O2oPreorderService {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
       const returnRequestRepo = manager.getRepository(O2oReturnRequest)
       const orderRepo = manager.getRepository(O2oPreorder)
+      const returnRequestCandidate = await returnRequestRepo.findOne({ where: { id: input.returnRequestId } })
+      if (!returnRequestCandidate) {
+        throw new BizError('退货申请不存在', 404)
+      }
+      const order = await orderRepo.findOne({
+        where: { id: String(returnRequestCandidate.orderId) },
+        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+      })
+      if (!order || order.isDeleted) {
+        throw new BizError('原预订单不存在，无法拒绝退货申请', 404)
+      }
       const returnRequest = await returnRequestRepo.findOne({
         where: { id: input.returnRequestId },
         lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
-      if (!returnRequest) {
+      if (!returnRequest || String(returnRequest.orderId) !== String(order.id)) {
         throw new BizError('退货申请不存在', 404)
       }
       if (returnRequest.status === 'verified') {
@@ -4103,14 +4308,6 @@ class O2oPreorderService {
       }
       if (returnRequest.status !== 'pending') {
         throw new BizError('当前退货申请不可拒绝', 409)
-      }
-
-      const order = await orderRepo.findOne({
-        where: { id: String(returnRequest.orderId), isDeleted: false },
-        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
-      })
-      if (!order) {
-        throw new BizError('原预订单不存在，无法拒绝退货申请', 404)
       }
 
       returnRequest.status = 'rejected'
@@ -4221,12 +4418,25 @@ class O2oPreorderService {
     const normalizedVerifyCode = this.normalizeVerifyCode(verifyCode)
     const result = await runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
-      const returnRequest = await manager.getRepository(O2oReturnRequest).findOne({
+      const returnRequestCandidate = await manager.getRepository(O2oReturnRequest).findOne({
         where: { verifyCode: normalizedVerifyCode },
-        lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
       })
-      if (returnRequest) {
-        const detail = await this.verifyReturnRequestInManager(manager, returnRequest, actor)
+      if (returnRequestCandidate) {
+        const order = await manager.getRepository(O2oPreorder).findOne({
+          where: { id: String(returnRequestCandidate.orderId) },
+          lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+        })
+        if (!order || order.isDeleted) {
+          throw new BizError('原预订单不存在，无法核销退货', 404)
+        }
+        const returnRequest = await manager.getRepository(O2oReturnRequest).findOne({
+          where: { id: String(returnRequestCandidate.id), verifyCode: normalizedVerifyCode },
+          lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
+        })
+        if (!returnRequest || String(returnRequest.orderId) !== String(order.id)) {
+          throw new BizError('退货申请不存在', 404)
+        }
+        const detail = await this.verifyReturnRequestInManager(manager, returnRequest, order, actor)
         return detail
           ? { timedOut: null, detail }
           : { timedOut: 'return_request' as const, detail: null }

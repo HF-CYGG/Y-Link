@@ -6,6 +6,14 @@
 
 import { request, type RequestConfig } from '@/api/http'
 import type { PaginationQueryInput, PaginationResult } from '@/types/api'
+import type {
+  OrderMergeCommitInput,
+  OrderMergeCommitResult,
+  OrderMergeMetadata,
+  OrderMergeOrderReference,
+  OrderMergePreviewInput,
+  OrderMergePreviewResult,
+} from '../../../packages/shared-types/src/orders'
 
 /**
  * 提交明细行：
@@ -159,6 +167,7 @@ export interface OrderListQuery extends PaginationQueryInput {
  * - status 兼容后端原有字段，当前主要用于预留展示。
  */
 export type OrderInventoryMode = 'legacy_none' | 'manual_applied' | 'o2o_preapplied'
+export type OrderMergeStatus = 'active' | 'merged'
 
 export interface OrderRecord {
   id: string
@@ -176,7 +185,8 @@ export interface OrderRecord {
   customerName: string | null
   totalAmount: string
   totalQty: string
-  status?: string | null
+  status: OrderMergeStatus
+  merge: OrderMergeMetadata
   remark: string | null
   creatorUserId: string | null
   creatorUsername: string | null
@@ -215,6 +225,7 @@ interface OrderRecordRaw {
   totalAmount: PrimitiveTextValue
   totalQty: PrimitiveTextValue
   status?: PrimitiveTextValue
+  merge?: unknown
   remark: PrimitiveTextValue
   creatorUserId: PrimitiveTextValue
   creatorUsername: PrimitiveTextValue
@@ -262,6 +273,9 @@ export interface OrderItemRecord {
   unitPrice: string
   subTotal: string
   remark: string | null
+  sourceOrderId: string | null
+  sourceOrderUuid: string | null
+  sourceOrderItemId: string | null
 }
 
 export interface OrderDetailResult extends OrderRecord {
@@ -292,7 +306,8 @@ const normalizeOrderRecord = (record: OrderRecordRaw): OrderRecord => ({
   customerName: normalizeNullableTextField(record.customerName),
   totalAmount: normalizeDecimalField(record.totalAmount),
   totalQty: normalizeDecimalField(record.totalQty),
-  status: normalizeNullableTextField(record.status),
+  status: normalizeOrderMergeStatus(record.status),
+  merge: normalizeOrderMergeMetadata(record.merge),
   remark: normalizeNullableTextField(record.remark),
   creatorUserId: normalizeNullableTextField(record.creatorUserId),
   creatorUsername: normalizeNullableTextField(record.creatorUsername),
@@ -327,6 +342,9 @@ interface OrderItemRawRecord {
   subTotal?: PrimitiveTextValue
   lineAmount?: PrimitiveTextValue
   remark: PrimitiveTextValue
+  sourceOrderId?: PrimitiveTextValue
+  sourceOrderUuid?: PrimitiveTextValue
+  sourceOrderItemId?: PrimitiveTextValue
 }
 
 interface OrderDetailOrderRaw extends Omit<OrderRecord, 'totalAmount' | 'totalQty'> {
@@ -395,6 +413,52 @@ const normalizeInventoryMode = (value: PrimitiveTextValue): OrderInventoryMode =
   return normalized === 'manual_applied' || normalized === 'o2o_preapplied' ? normalized : 'legacy_none'
 }
 
+const normalizeOrderMergeStatus = (value: PrimitiveTextValue): OrderMergeStatus => {
+  return normalizeTextField(value).toLowerCase() === 'merged' ? 'merged' : 'active'
+}
+
+const normalizeOrderMergeReference = (value: unknown): OrderMergeOrderReference => {
+  const record = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+  return {
+    id: normalizeTextField(record.id as PrimitiveTextValue),
+    showNo: normalizeTextField(record.showNo as PrimitiveTextValue),
+    businessNo: normalizeTextField(record.businessNo as PrimitiveTextValue),
+    editVersion: Number(record.editVersion) || 1,
+    status: normalizeOrderMergeStatus(record.status as PrimitiveTextValue),
+    orderType: normalizeOrderTypeField(record.orderType as PrimitiveTextValue),
+    inventoryMode: normalizeInventoryMode(record.inventoryMode as PrimitiveTextValue),
+    hasCustomerOrder: normalizeBooleanField(record.hasCustomerOrder as boolean | PrimitiveTextValue),
+    isSystemApplied: normalizeBooleanField(record.isSystemApplied as boolean | PrimitiveTextValue),
+    issuerName: normalizeNullableTextField(record.issuerName as PrimitiveTextValue),
+    customerDepartmentName: normalizeNullableTextField(record.customerDepartmentName as PrimitiveTextValue),
+    customerName: normalizeNullableTextField(record.customerName as PrimitiveTextValue),
+    totalQty: normalizeDecimalField(record.totalQty as PrimitiveTextValue),
+    totalAmount: normalizeDecimalField(record.totalAmount as PrimitiveTextValue),
+    remark: normalizeNullableTextField(record.remark as PrimitiveTextValue),
+    creatorUserId: normalizeNullableTextField(record.creatorUserId as PrimitiveTextValue),
+    creatorUsername: normalizeNullableTextField(record.creatorUsername as PrimitiveTextValue),
+    creatorDisplayName: normalizeNullableTextField(record.creatorDisplayName as PrimitiveTextValue),
+    isDeleted: normalizeBooleanField(record.isDeleted as boolean | PrimitiveTextValue),
+    deletedAt: normalizeNullableTextField(record.deletedAt as PrimitiveTextValue),
+    deletedByUserId: normalizeNullableTextField(record.deletedByUserId as PrimitiveTextValue),
+    deletedByUsername: normalizeNullableTextField(record.deletedByUsername as PrimitiveTextValue),
+    deletedByDisplayName: normalizeNullableTextField(record.deletedByDisplayName as PrimitiveTextValue),
+    createdAt: normalizeTextField(record.createdAt as PrimitiveTextValue),
+  }
+}
+
+const normalizeOrderMergeMetadata = (value: unknown): OrderMergeMetadata => {
+  const record = value && typeof value === 'object' ? value as Record<string, unknown> : {}
+  const role = normalizeTextField(record.role as PrimitiveTextValue)
+  return {
+    role: role === 'parent' || role === 'source' ? role : 'standalone',
+    parent: record.parent && typeof record.parent === 'object' ? normalizeOrderMergeReference(record.parent) : null,
+    children: Array.isArray(record.children)
+      ? record.children.filter((item) => item && typeof item === 'object').map(normalizeOrderMergeReference)
+      : [],
+  }
+}
+
 /**
  * 归一化订单明细：
  * - 优先读取后端已对齐的新字段；
@@ -415,6 +479,9 @@ const normalizeOrderItem = (item: OrderItemRawRecord): OrderItemRecord => ({
   unitPrice: normalizeDecimalField(item.unitPrice),
   subTotal: normalizeDecimalField(item.subTotal, normalizeDecimalField(item.lineAmount)),
   remark: normalizeTextField(item.remark) || null,
+  sourceOrderId: normalizeNullableTextField(item.sourceOrderId),
+  sourceOrderUuid: normalizeNullableTextField(item.sourceOrderUuid),
+  sourceOrderItemId: normalizeNullableTextField(item.sourceOrderItemId),
 })
 
 /**
@@ -625,4 +692,20 @@ export const commitOrderAmendments = (amendments: OrderAmendmentInput[]) =>
     method: 'POST',
     url: '/orders/amendments',
     data: { amendments },
+  })
+
+/** 订单合并预检：服务端是唯一的库存、版本与业务不变量裁决方。 */
+export const previewOrderMerge = (payload: OrderMergePreviewInput) =>
+  request<OrderMergePreviewResult>({
+    method: 'POST',
+    url: '/orders/merges/preview',
+    data: payload,
+  })
+
+/** 同一预检操作重试必须由调用方复用 idempotencyKey。 */
+export const commitOrderMerge = (payload: OrderMergeCommitInput) =>
+  request<OrderMergeCommitResult<OrderDetailResult>>({
+    method: 'POST',
+    url: '/orders/merges',
+    data: payload,
   })

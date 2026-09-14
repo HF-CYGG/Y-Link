@@ -350,6 +350,8 @@ const CRITICAL_VALIDATION_TABLES = new Set([
   'biz_outbound_order_item',
   'order_business_no_occupancy',
   'order_revision',
+  'order_merge_operation',
+  'order_merge_relation',
   'biz_inbound_order',
   'biz_inbound_order_item',
   'o2o_preorder',

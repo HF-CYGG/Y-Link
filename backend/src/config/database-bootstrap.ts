@@ -52,6 +52,8 @@ const SQLITE_REQUIRED_TABLES = [
   'order_business_no_occupancy',
   'order_revision',
   'account_lifecycle_event',
+  'order_merge_operation',
+  'order_merge_relation',
 ]
 
 /**
@@ -182,6 +184,7 @@ const SQLITE_REQUIRED_ORDER_COLUMNS = [
   'business_no',
   'edit_version',
   'inventory_mode',
+  'status',
 ]
 
 const SQLITE_REQUIRED_ORDER_ITEM_COLUMNS = [
@@ -190,7 +193,11 @@ const SQLITE_REQUIRED_ORDER_ITEM_COLUMNS = [
   'sku_id',
   'sku_code_snapshot',
   'spec_text_snapshot',
+  'source_order_id',
+  'source_order_uuid',
+  'source_order_item_id',
 ]
+const SQLITE_REQUIRED_ORDER_MERGE_OPERATION_COLUMNS = ['result_json']
 const SQLITE_REQUIRED_INVENTORY_LOG_COLUMNS = [
   'sku_id',
   'before_sku_current_stock',
@@ -345,6 +352,18 @@ async function listSqliteTableColumns(dataSource: DataSource, tableName: string)
   return new Set(columns.map((column) => column.name))
 }
 
+async function hasSqliteNotNullColumn(
+  dataSource: DataSource,
+  tableName: string,
+  columnName: string,
+): Promise<boolean> {
+  const columns: Array<{ name: string; notnull: number }> = await dataSource.query(
+    `PRAGMA table_info('${tableName}')`,
+  )
+  const column = columns.find((item) => item.name === columnName)
+  return Boolean(column && Number(column.notnull) === 1)
+}
+
 async function listSqliteUniqueIndexes(dataSource: DataSource, tableName: string): Promise<Set<string>> {
   const indexes: Array<{ name: string; unique: number }> = await dataSource.query(`PRAGMA index_list('${tableName}')`)
   return new Set(indexes.filter((index) => Number(index.unique) === 1).map((index) => index.name))
@@ -466,6 +485,23 @@ async function prepareSqliteOrderContentInventoryColumns(dataSource: DataSource)
     WHERE "inventory_mode" IS NULL
        OR "inventory_mode" NOT IN ('legacy_none', 'manual_applied', 'o2o_preapplied')
        OR ("inventory_mode" = 'legacy_none' AND "idempotency_key" LIKE 'o2o-preorder-verify:%')
+  `)
+}
+
+/**
+ * 合并操作结果快照在实体层为 NOT NULL。存量 SQLite 若已由早期开发版本建过表，
+ * 先以可空列补齐并写入占位 JSON，再交给 synchronize 收紧列定义，避免临时表复制失败。
+ */
+async function prepareSqliteOrderMergeOperationResultSnapshot(dataSource: DataSource): Promise<void> {
+  const columns = await listSqliteTableColumns(dataSource, 'order_merge_operation')
+  if (columns.size === 0) return
+  if (!columns.has('result_json')) {
+    await dataSource.query('ALTER TABLE "order_merge_operation" ADD COLUMN "result_json" text NULL')
+  }
+  await dataSource.query(`
+    UPDATE "order_merge_operation"
+    SET "result_json" = '{}'
+    WHERE "result_json" IS NULL OR LENGTH(TRIM("result_json")) = 0
   `)
 }
 
@@ -1346,6 +1382,14 @@ async function shouldSynchronizeSqliteSchema(dataSource: DataSource): Promise<bo
     return true
   }
 
+  const orderMergeOperationColumnSet = await listSqliteTableColumns(dataSource, 'order_merge_operation')
+  if (SQLITE_REQUIRED_ORDER_MERGE_OPERATION_COLUMNS.some((column) => !orderMergeOperationColumnSet.has(column))) {
+    return true
+  }
+  if (!await hasSqliteNotNullColumn(dataSource, 'order_merge_operation', 'result_json')) {
+    return true
+  }
+
   const inventoryLogColumnSet = await listSqliteTableColumns(dataSource, 'inventory_log')
   if (SQLITE_REQUIRED_INVENTORY_LOG_COLUMNS.some((column) => !inventoryLogColumnSet.has(column))) {
     return true
@@ -1495,6 +1539,7 @@ export async function initializeDatabaseSchemaIfNeeded(dataSource: DataSource): 
     await ensureSqliteMobileSessionSchema(dataSource)
     await prepareSqliteOrderAmendmentColumns(dataSource)
     await prepareSqliteOrderContentInventoryColumns(dataSource)
+    await prepareSqliteOrderMergeOperationResultSnapshot(dataSource)
     await normalizeSqliteOutboundItemColumns(dataSource)
     await normalizeSqliteO2oDiscountColumns(dataSource)
     await normalizeSqliteInboundSkuColumn(dataSource)

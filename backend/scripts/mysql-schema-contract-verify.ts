@@ -1,6 +1,6 @@
 /**
  * 文件说明：MySQL 启动结构契约回归验证。
- * 实现逻辑：使用只读 DataSource 替身模拟完整库、漏执行 035/036/038/039/041、错误列形状、外键及同名错误索引，
+ * 实现逻辑：使用只读 DataSource 替身模拟完整库、漏执行 035/036/038/039/041/045、错误列形状、外键及同名错误索引，
  * 确认服务会在对外启动前阻断，并给出精确的增量脚本指引。
  */
 
@@ -44,6 +44,8 @@ const REQUIRED_TABLES = [
   'order_business_no_occupancy',
   'order_revision',
   'account_lifecycle_event',
+  'order_merge_operation',
+  'order_merge_relation',
 ] as const
 
 const REQUIRED_COLUMNS = [
@@ -102,6 +104,14 @@ const REQUIRED_COLUMNS = [
   ['biz_outbound_order', 'business_no'],
   ['biz_outbound_order', 'edit_version'],
   ['biz_outbound_order', 'inventory_mode'],
+  ['biz_outbound_order', 'status'],
+  ['biz_outbound_order_item', 'source_order_id'],
+  ['biz_outbound_order_item', 'source_order_uuid'],
+  ['biz_outbound_order_item', 'source_order_item_id'],
+  ...['operation_uuid', 'idempotency_key', 'request_hash', 'target_order_id', 'target_order_uuid', 'target_edit_version', 'merged_source_order_ids_json', 'result_json', 'reason', 'actor_user_id', 'actor_username', 'actor_display_name', 'created_at']
+    .map((columnName) => ['order_merge_operation', columnName] as const),
+  ...['operation_id', 'parent_order_id', 'parent_order_uuid', 'parent_business_no_snapshot', 'source_order_id', 'source_order_uuid', 'source_business_no_snapshot', 'created_at']
+    .map((columnName) => ['order_merge_relation', columnName] as const),
   ['inventory_log', 'sku_id'],
   ['inventory_log', 'before_sku_current_stock'],
   ['inventory_log', 'after_sku_current_stock'],
@@ -178,6 +188,30 @@ const REQUIRED_MANUAL_OUTBOUND_COLUMN_DEFINITIONS = new Map<string, ColumnFixtur
     isNullable: 'NO',
     characterMaximumLength: 24,
   }],
+  ['biz_outbound_order.status', {
+    dataType: 'varchar',
+    columnType: 'varchar(16)',
+    isNullable: 'NO',
+    characterMaximumLength: 16,
+  }],
+  ['biz_outbound_order_item.source_order_id', {
+    dataType: 'bigint',
+    columnType: 'bigint unsigned',
+    isNullable: 'YES',
+    characterMaximumLength: null,
+  }],
+  ['biz_outbound_order_item.source_order_uuid', {
+    dataType: 'char',
+    columnType: 'char(36)',
+    isNullable: 'YES',
+    characterMaximumLength: 36,
+  }],
+  ['biz_outbound_order_item.source_order_item_id', {
+    dataType: 'bigint',
+    columnType: 'bigint unsigned',
+    isNullable: 'YES',
+    characterMaximumLength: null,
+  }],
   ['inventory_log.sku_id', {
     dataType: 'bigint',
     columnType: 'bigint unsigned',
@@ -208,6 +242,12 @@ const REQUIRED_MANUAL_OUTBOUND_COLUMN_DEFINITIONS = new Map<string, ColumnFixtur
     isNullable: 'YES',
     characterMaximumLength: null,
   }],
+  ['order_merge_operation.result_json', {
+    dataType: 'longtext',
+    columnType: 'longtext',
+    isNullable: 'NO',
+    characterMaximumLength: 4294967295,
+  }],
 ])
 
 interface IndexFixture {
@@ -231,6 +271,11 @@ interface TriggerFixture {
   triggerName: string
   eventManipulation: 'UPDATE' | 'DELETE'
   actionTiming: 'BEFORE'
+}
+
+interface CheckFixture {
+  tableName: string
+  constraintName: string
 }
 
 const REQUIRED_INDEXES: readonly IndexFixture[] = [
@@ -384,6 +429,16 @@ const REQUIRED_INDEXES: readonly IndexFixture[] = [
     columns: ['order_id_snapshot'],
     unique: false,
   },
+  { tableName: 'biz_outbound_order', indexName: 'idx_biz_outbound_status', columns: ['status'], unique: false },
+  { tableName: 'biz_outbound_order_item', indexName: 'idx_biz_outbound_item_source_order_id', columns: ['source_order_id'], unique: false },
+  { tableName: 'biz_outbound_order_item', indexName: 'idx_biz_outbound_item_source_item_id', columns: ['source_order_item_id'], unique: false },
+  { tableName: 'order_merge_operation', indexName: 'uk_order_merge_operation_uuid', columns: ['operation_uuid'], unique: true },
+  { tableName: 'order_merge_operation', indexName: 'uk_order_merge_operation_idempotency_key', columns: ['idempotency_key'], unique: true },
+  { tableName: 'order_merge_operation', indexName: 'idx_order_merge_operation_target_order_id', columns: ['target_order_id'], unique: false },
+  { tableName: 'order_merge_relation', indexName: 'uk_order_merge_relation_source_order_id', columns: ['source_order_id'], unique: true },
+  { tableName: 'order_merge_relation', indexName: 'uk_order_merge_relation_parent_source', columns: ['parent_order_id', 'source_order_id'], unique: true },
+  { tableName: 'order_merge_relation', indexName: 'idx_order_merge_relation_operation_id', columns: ['operation_id'], unique: false },
+  { tableName: 'order_merge_relation', indexName: 'idx_order_merge_relation_parent_order_id', columns: ['parent_order_id'], unique: false },
 ]
 
 const REQUIRED_FOREIGN_KEYS: readonly ForeignKeyFixture[] = [
@@ -426,11 +481,29 @@ const REQUIRED_FOREIGN_KEYS: readonly ForeignKeyFixture[] = [
     ordinalPosition: 1,
     deleteRule: 'SET NULL',
   },
+  ...[
+    ['order_merge_operation', 'fk_order_merge_operation_target_order', 'target_order_id', 'biz_outbound_order'],
+    ['order_merge_relation', 'fk_order_merge_relation_operation', 'operation_id', 'order_merge_operation'],
+    ['order_merge_relation', 'fk_order_merge_relation_parent_order', 'parent_order_id', 'biz_outbound_order'],
+    ['order_merge_relation', 'fk_order_merge_relation_source_order', 'source_order_id', 'biz_outbound_order'],
+  ].map(([tableName, constraintName, columnName, referencedTableName]) => ({
+    tableName,
+    constraintName,
+    columnName,
+    referencedTableName,
+    referencedColumnName: 'id',
+    ordinalPosition: 1,
+    deleteRule: 'RESTRICT',
+  })),
 ]
 
 const REQUIRED_TRIGGERS: readonly TriggerFixture[] = [
   { triggerName: 'trg_account_lifecycle_event_no_update', eventManipulation: 'UPDATE', actionTiming: 'BEFORE' },
   { triggerName: 'trg_account_lifecycle_event_no_delete', eventManipulation: 'DELETE', actionTiming: 'BEFORE' },
+]
+
+const REQUIRED_CHECKS: readonly CheckFixture[] = [
+  { tableName: 'order_merge_relation', constraintName: 'ck_order_merge_relation_distinct_orders' },
 ]
 
 interface SchemaFixture {
@@ -440,6 +513,7 @@ interface SchemaFixture {
   indexes: Map<string, IndexFixture>
   foreignKeys: Map<string, ForeignKeyFixture>
   triggers: Map<string, TriggerFixture>
+  checks: Map<string, CheckFixture>
 }
 
 const objectKey = (tableName: string, objectName: string) => `${tableName}.${objectName}`
@@ -467,6 +541,7 @@ function createCompleteFixture(): SchemaFixture {
       { ...foreignKey },
     ])),
     triggers: new Map(REQUIRED_TRIGGERS.map((trigger) => [trigger.triggerName, { ...trigger }])),
+    checks: new Map(REQUIRED_CHECKS.map((check) => [objectKey(check.tableName, check.constraintName), { ...check }])),
   }
 }
 
@@ -522,6 +597,14 @@ function createDataSource(fixture: SchemaFixture): DataSource {
           EVENT_MANIPULATION: trigger.eventManipulation,
           ACTION_TIMING: trigger.actionTiming,
         }))
+      }
+      if (sql.includes('information_schema.TABLE_CONSTRAINTS')) {
+        return [...fixture.checks.values()]
+          .filter((check) => fixture.tables.has(check.tableName))
+          .map((check) => ({
+            TABLE_NAME: check.tableName,
+            CONSTRAINT_NAME: check.constraintName,
+          }))
       }
       throw new Error(`测试替身收到未识别的 SQL：${sql}`)
     },
@@ -593,6 +676,43 @@ missingInventoryMode.columns.delete(objectKey('biz_outbound_order', 'inventory_m
 await expectSchemaFailure(missingInventoryMode, [
   '字段 biz_outbound_order.inventory_mode',
   '043_order_content_inventory_mode.sql',
+])
+
+const missingOrderMergeOperation = createCompleteFixture()
+missingOrderMergeOperation.tables.delete('order_merge_operation')
+await expectSchemaFailure(missingOrderMergeOperation, [
+  '表 order_merge_operation',
+  '045_order_merge_governance.sql',
+])
+
+const missingOrderMergeStatus = createCompleteFixture()
+missingOrderMergeStatus.columns.delete(objectKey('biz_outbound_order', 'status'))
+await expectSchemaFailure(missingOrderMergeStatus, [
+  '字段 biz_outbound_order.status',
+  '045_order_merge_governance.sql',
+])
+
+const missingSourceTraceColumn = createCompleteFixture()
+missingSourceTraceColumn.columns.delete(objectKey('biz_outbound_order_item', 'source_order_item_id'))
+await expectSchemaFailure(missingSourceTraceColumn, [
+  '字段 biz_outbound_order_item.source_order_item_id',
+  '045_order_merge_governance.sql',
+])
+
+const nullableOrderMergeResultSnapshot = createCompleteFixture()
+nullableOrderMergeResultSnapshot.columnDefinitions.get(objectKey('order_merge_operation', 'result_json'))!.isNullable = 'YES'
+await expectSchemaFailure(nullableOrderMergeResultSnapshot, [
+  '字段 order_merge_operation.result_json 必须为 NOT NULL',
+  '045_order_merge_governance.sql',
+])
+
+const missingOrderMergeDistinctCheck = createCompleteFixture()
+missingOrderMergeDistinctCheck.checks.delete(
+  objectKey('order_merge_relation', 'ck_order_merge_relation_distinct_orders'),
+)
+await expectSchemaFailure(missingOrderMergeDistinctCheck, [
+  '检查约束 order_merge_relation.ck_order_merge_relation_distinct_orders',
+  '045_order_merge_governance.sql',
 ])
 
 const missingInventoryLogSku = createCompleteFixture()
@@ -760,6 +880,44 @@ await expectSchemaFailure(malformedSmsOutIdIndex, [
   '索引 sms_verification_record.uk_sms_verification_record_out_id',
   '039_aliyun_pnvs_sms_verification.sql',
 ])
+
+const malformedMergeSourceIndex = createCompleteFixture()
+malformedMergeSourceIndex.indexes.set(
+  objectKey('order_merge_relation', 'uk_order_merge_relation_source_order_id'),
+  {
+    tableName: 'order_merge_relation',
+    indexName: 'uk_order_merge_relation_source_order_id',
+    columns: ['parent_order_id'],
+    unique: true,
+  },
+)
+await expectSchemaFailure(malformedMergeSourceIndex, [
+  '索引 order_merge_relation.uk_order_merge_relation_source_order_id',
+  '045_order_merge_governance.sql',
+])
+
+const wrongMergeParentDeleteRule = createCompleteFixture()
+wrongMergeParentDeleteRule.foreignKeys.get(
+  objectKey('order_merge_relation', 'fk_order_merge_relation_parent_order'),
+)!.deleteRule = 'CASCADE'
+await expectSchemaFailure(wrongMergeParentDeleteRule, [
+  '外键 order_merge_relation.parent_order_id 必须使用 ON DELETE RESTRICT',
+  '045_order_merge_governance.sql',
+])
+
+const orderMergeMigrationSource = fs.readFileSync(
+  path.resolve(backendRoot, 'sql/045_order_merge_governance.sql'),
+  'utf8',
+)
+assert.match(orderMergeMigrationSource, /CREATE TABLE IF NOT EXISTS `order_merge_operation`/)
+assert.match(orderMergeMigrationSource, /CREATE TABLE IF NOT EXISTS `order_merge_relation`/)
+assert.match(orderMergeMigrationSource, /uk_order_merge_operation_idempotency_key/)
+assert.match(orderMergeMigrationSource, /uk_order_merge_relation_source_order_id/)
+assert.match(orderMergeMigrationSource, /source_order_item_id/)
+assert.match(orderMergeMigrationSource, /result_json/)
+assert.match(orderMergeMigrationSource, /ck_order_merge_relation_distinct_orders/)
+assert.match(orderMergeMigrationSource, /ON DELETE RESTRICT/i)
+assert.doesNotMatch(orderMergeMigrationSource, /DROP TABLE|DELETE FROM `biz_outbound_order`/i)
 
 const missingLifecycleEventTable = createCompleteFixture()
 missingLifecycleEventTable.tables.delete('account_lifecycle_event')
