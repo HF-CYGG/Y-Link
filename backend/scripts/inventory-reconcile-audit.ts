@@ -68,7 +68,29 @@ function toCsv(rows: Array<Record<string, unknown>>): string {
 
 async function main() {
   const outDir = parseOutDir(process.argv.slice(2))
-  const { AppDataSource } = await import('../src/config/data-source.js')
+  const { DataSource } = await import('typeorm')
+  const { createDataSourceOptions } = await import('../src/config/data-source.js')
+  const baseOptions = createDataSourceOptions()
+  /**
+   * 专用只读数据源（SQLite）：
+   * - 以 OPEN_READONLY 打开且禁用 WAL 初始化，建立连接时不会执行 `PRAGMA journal_mode = WAL`，不会改写非 WAL 副本的日志模式；
+   * - 目标本身已是 WAL 模式时，SQLite 读连接仍需共享内存索引，可能创建 -wal/-shm（不修改数据内容）；
+   * - 传 `--immutable` 时改用 URI `mode=ro&immutable=1`：不读写任何 sidecar、可核查只读挂载，
+   *   但只适用于静止的数据库副本，不得用于仍有写入的运行中数据库（会忽略未检查点的 WAL 内容）。
+   */
+  const immutable = process.argv.includes('--immutable')
+  let readOnlyOptions = baseOptions
+  if (baseOptions.type === 'sqlite') {
+    const sqlite3 = (await import('sqlite3')).default
+    const { pathToFileURL } = await import('node:url')
+    readOnlyOptions = {
+      ...baseOptions,
+      enableWAL: false,
+      flags: sqlite3.OPEN_READONLY | (immutable ? sqlite3.OPEN_URI : 0),
+      database: immutable ? `${pathToFileURL(String(baseOptions.database)).href}?mode=ro&immutable=1` : baseOptions.database,
+    }
+  }
+  const AppDataSource = new DataSource({ ...readOnlyOptions, synchronize: false, migrationsRun: false })
   const { BaseProduct } = await import('../src/entities/base-product.entity.js')
   const { BaseProductSku } = await import('../src/entities/base-product-sku.entity.js')
   const { BizOutboundOrder } = await import('../src/entities/biz-outbound-order.entity.js')

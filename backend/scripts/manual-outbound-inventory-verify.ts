@@ -440,6 +440,82 @@ async function main() {
       assert.equal((await productRepo.findOneByOrFail({ id: fixture.product.id })).preOrderedStock, 3)
     }
 
+    // 14b. 订单引用的规格开单后被停用：删除回补与恢复重扣只改 SKU，商品汇总始终等于启用 SKU 合计。
+    {
+      const specGroups = [{ name: '颜色', values: ['黑', '白'] }]
+      const created = await productService.create({
+        productName: `Issue82停用规格${verifySeed}`,
+        defaultPrice: 10,
+        specGroups,
+        skus: [
+          { specValues: { 颜色: '黑' }, currentStock: 5 },
+          { specValues: { 颜色: '白' }, currentStock: 5 },
+        ],
+      }, actor)
+      const black = created.skus.find((sku) => sku.specValues['颜色'] === '黑')
+      const white = created.skus.find((sku) => sku.specValues['颜色'] === '白')
+      assert.ok(black && white, '停用规格夹具创建失败')
+      const retiredOrder = await submit(nextKey('retired-sku'), [{ productId: created.id, skuId: black.id, qty: 2 }])
+      await productService.update(created.id, {
+        specGroups,
+        skus: [
+          { id: black.id, specValues: { 颜色: '黑' }, isActive: false },
+          { id: white.id, specValues: { 颜色: '白' } },
+        ],
+      }, actor)
+      const readState = async () => {
+        const state = await stockOf(created.id, [black.id, white.id])
+        return [state.product.currentStock, state.skus[0].currentStock, state.skus[1].currentStock]
+      }
+      assert.deepEqual(await readState(), [5, 3, 5], '停用规格后商品汇总只含启用 SKU')
+
+      await orderService.softDeleteById(retiredOrder.order.id, actor, retiredOrder.order.businessNo, undefined, { releaseInventory: true })
+      assert.deepEqual(await readState(), [5, 5, 5], '停用规格的删除回补只能改 SKU，不得改商品汇总')
+      const [releaseLog] = await logRepo.findBy({ refType: 'biz_outbound_order', refId: retiredOrder.order.id, changeType: 'manual_outbound_delete_release' })
+      assert.deepEqual([releaseLog?.beforeCurrentStock, releaseLog?.afterCurrentStock, releaseLog?.beforeSkuCurrentStock, releaseLog?.afterSkuCurrentStock], [5, 5, 3, 5])
+
+      await orderService.restoreById(retiredOrder.order.id, actor)
+      assert.deepEqual(await readState(), [5, 3, 5], '停用规格的恢复重扣只能改 SKU，且不得被商品级校验误拒')
+    }
+
+    // 14c. 商品编辑同时修改库存并停用规格：拆成两条流水，每条 changeQty 与其库存快照差值一致。
+    {
+      const specGroups = [{ name: '尺码', values: ['大', '小'] }]
+      const created = await productService.create({
+        productName: `Issue82流水拆分${verifySeed}`,
+        defaultPrice: 10,
+        specGroups,
+        skus: [
+          { specValues: { 尺码: '大' }, currentStock: 5 },
+          { specValues: { 尺码: '小' }, currentStock: 5 },
+        ],
+      }, actor)
+      const large = created.skus.find((sku) => sku.specValues['尺码'] === '大')
+      const small = created.skus.find((sku) => sku.specValues['尺码'] === '小')
+      assert.ok(large && small, '流水拆分夹具创建失败')
+      await productService.update(created.id, {
+        specGroups,
+        skus: [
+          { id: large.id, specValues: { 尺码: '大' }, currentStock: 8, isActive: false },
+          { id: small.id, specValues: { 尺码: '小' } },
+        ],
+        stockBaseline: { skus: [{ id: large.id, currentStock: 5 }, { id: small.id, currentStock: 5 }] },
+      }, actor)
+      const splitLogs = await logRepo.find({ where: { skuId: large.id, changeType: 'manual_stock_adjust' }, order: { id: 'ASC' } })
+      assert.deepEqual(
+        splitLogs.map((log) => [log.changeQty, log.beforeCurrentStock, log.afterCurrentStock, log.beforeSkuCurrentStock, log.afterSkuCurrentStock]),
+        [[3, 10, 13, 5, 8], [-8, 13, 5, 8, 8]],
+        '改库存与移出汇总必须拆成两条且数量与快照一致',
+      )
+      assert.equal((await productRepo.findOneByOrFail({ id: created.id })).currentStock, 5)
+
+      assert.match(
+        readSource('backend/scripts/inventory-reconcile-audit.ts'),
+        /enableWAL:\s*false,\s*flags:[\s\S]*OPEN_READONLY/,
+        '核查脚本必须以只读标志打开 SQLite 且禁用 WAL 初始化',
+      )
+    }
+
     // 15. 真实 HTTP 回归：经过 Express 路由校验、鉴权与服务层，验证开单扣减、幂等重放、库存不足与删除回补/恢复重扣。
     {
       const { requestLocalHttp } = await import('./support/local-http-request.js')
@@ -557,12 +633,53 @@ async function main() {
       await AppDataSource.destroy()
 
       const tsxCli = path.resolve(backendRoot, 'node_modules', 'tsx', 'dist', 'cli.mjs')
-      const run = spawnSync(process.execPath, [tsxCli, path.resolve(backendRoot, 'scripts', 'inventory-reconcile-audit.ts'), '--out', auditOutDir], {
-        cwd: backendRoot,
-        env: { ...process.env, DB_SYNC: 'false' },
-        encoding: 'utf8',
+      const auditScript = path.resolve(backendRoot, 'scripts', 'inventory-reconcile-audit.ts')
+      const readSidecars = (dbPath: string) => ['-wal', '-shm'].map((suffix) => fs.existsSync(`${dbPath}${suffix}`))
+      // SQLite 文件头第 18/19 字节为读写版本：1 表示回滚日志模式，2 表示 WAL 模式。
+      const readJournalHeader = (dbPath: string) => {
+        const fd = fs.openSync(dbPath, 'r')
+        try {
+          const header = Buffer.alloc(2)
+          fs.readSync(fd, header, 0, 2, 18)
+          return [...header]
+        } finally {
+          fs.closeSync(fd)
+        }
+      }
+      const runAudit = (dbPath: string, outDir: string, extraArgs: string[] = []) => spawnSync(
+        process.execPath,
+        [tsxCli, auditScript, '--out', outDir, ...extraArgs],
+        { cwd: backendRoot, env: { ...process.env, DB_SYNC: 'false', SQLITE_DB_PATH: dbPath }, encoding: 'utf8' },
+      )
+
+      // (a) 非 WAL 数据库副本：只读核查不得把日志模式改为 WAL，也不得创建 sidecar 文件。
+      fs.mkdirSync(auditOutDir, { recursive: true })
+      const rollbackCopyPath = path.resolve(auditOutDir, 'rollback-journal-copy.sqlite')
+      fs.copyFileSync(sqlitePath, rollbackCopyPath)
+      const sqlite3 = (await import('sqlite3')).default
+      await new Promise<void>((resolve, reject) => {
+        const db = new sqlite3.Database(rollbackCopyPath, (openError) => {
+          if (openError) return reject(openError)
+          db.run('PRAGMA journal_mode = DELETE', (runError) => {
+            db.close((closeError) => (runError || closeError ? reject(runError ?? closeError) : resolve()))
+          })
+        })
       })
+      assert.deepEqual(readJournalHeader(rollbackCopyPath), [1, 1], '核查夹具副本必须为回滚日志模式')
+      assert.deepEqual(readSidecars(rollbackCopyPath), [false, false])
+      const run = runAudit(rollbackCopyPath, auditOutDir)
       assert.equal(run.status, 0, `核查脚本执行失败：${run.stderr || run.stdout}`)
+      assert.deepEqual(readJournalHeader(rollbackCopyPath), [1, 1], '只读核查不得把非 WAL 数据库改为 WAL 模式')
+      assert.deepEqual(readSidecars(rollbackCopyPath), [false, false], '只读核查不得为非 WAL 副本创建 -wal/-shm')
+
+      // (b) WAL 模式数据库的静止副本：--immutable 不读写任何 sidecar，也能完成核查。
+      assert.deepEqual(readJournalHeader(sqlitePath), [2, 2], '主验证库应为 WAL 模式')
+      const walSidecarsBefore = readSidecars(sqlitePath)
+      const immutableRun = runAudit(sqlitePath, path.resolve(auditOutDir, 'immutable'), ['--immutable'])
+      assert.equal(immutableRun.status, 0, `--immutable 核查失败：${immutableRun.stderr || immutableRun.stdout}`)
+      assert.deepEqual(readSidecars(sqlitePath), walSidecarsBefore, '--immutable 核查不得创建或删除 -wal/-shm')
+      assert.ok(immutableRun.stdout.includes('REPORT_JSON='), '--immutable 核查必须输出报告')
+
       const reportLine = run.stdout.split(/\r?\n/).find((line) => line.startsWith('REPORT_JSON='))
       assert.ok(reportLine, `核查脚本未输出报告路径：${run.stdout}`)
       const report = JSON.parse(fs.readFileSync(reportLine.slice('REPORT_JSON='.length).trim(), 'utf8')) as {

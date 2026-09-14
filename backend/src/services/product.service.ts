@@ -536,26 +536,53 @@ export class ProductService {
 
     for (const sku of skus) {
       const before = snapshot.skus.get(String(sku.id))
-      const beforeSkuStock = before?.currentStock ?? 0
       const afterSkuStock = Number(sku.currentStock ?? 0)
-      const beforeContribution = before?.contributes ? beforeSkuStock : 0
-      const afterContribution = isDatabaseFlagEnabled(sku.isCurrent) && isDatabaseFlagEnabled(sku.isActive) ? afterSkuStock : 0
-      const contributionDelta = afterContribution - beforeContribution
-      if (beforeSkuStock === afterSkuStock && contributionDelta === 0) continue
-      const beforeProductStock = runningProductStock
-      runningProductStock += contributionDelta
-      logs.push(logRepo.create({
-        ...baseLog,
-        skuId: String(sku.id),
-        changeQty: afterSkuStock - beforeSkuStock !== 0 ? afterSkuStock - beforeSkuStock : contributionDelta,
-        beforeCurrentStock: beforeProductStock,
-        afterCurrentStock: runningProductStock,
-        beforeSkuCurrentStock: beforeSkuStock,
-        afterSkuCurrentStock: afterSkuStock,
-        beforeSkuPreorderedStock: before?.preOrderedStock ?? 0,
-        afterSkuPreorderedStock: Number(sku.preOrderedStock ?? 0),
-        remark: `商品编辑调整 SKU ${sku.skuCode} 库存 ${beforeSkuStock} → ${afterSkuStock}${before?.contributes && afterContribution === 0 ? '（规格停用/退役，移出汇总）' : ''}`,
-      }))
+      const afterContributes = isDatabaseFlagEnabled(sku.isCurrent) && isDatabaseFlagEnabled(sku.isActive)
+      // 本次新建的 SKU 视为一开始就处于最终的汇总状态，只记一条库存流水，不再额外记“计入汇总”。
+      const beforeContributes = before ? before.contributes : afterContributes
+      const beforeSkuStock = before?.currentStock ?? 0
+      const skuPreOrderedStock = Number(sku.preOrderedStock ?? 0)
+
+      // 第一条：SKU 物理库存变化（在变化前的汇总状态下发生），changeQty 与 SKU 快照差值一致；
+      // 仅当该 SKU 变化前参与汇总时商品快照同步变化，否则商品快照前后相同。
+      const stockDelta = afterSkuStock - beforeSkuStock
+      if (stockDelta !== 0) {
+        const beforeProductStock = runningProductStock
+        runningProductStock += beforeContributes ? stockDelta : 0
+        logs.push(logRepo.create({
+          ...baseLog,
+          skuId: String(sku.id),
+          changeQty: stockDelta,
+          beforeCurrentStock: beforeProductStock,
+          afterCurrentStock: runningProductStock,
+          beforeSkuCurrentStock: beforeSkuStock,
+          afterSkuCurrentStock: afterSkuStock,
+          beforeSkuPreorderedStock: before?.preOrderedStock ?? skuPreOrderedStock,
+          afterSkuPreorderedStock: before?.preOrderedStock ?? skuPreOrderedStock,
+          remark: `商品编辑调整 SKU ${sku.skuCode} 库存 ${beforeSkuStock} → ${afterSkuStock}${beforeContributes ? '' : '（该规格不计入商品汇总）'}`,
+        }))
+      }
+
+      // 第二条：规格启停或退役导致移入/移出商品汇总，SKU 物理库存不变，changeQty 与商品快照差值一致。
+      if (beforeContributes !== afterContributes && afterSkuStock !== 0) {
+        const aggregateDelta = afterContributes ? afterSkuStock : -afterSkuStock
+        const beforeProductStock = runningProductStock
+        runningProductStock += aggregateDelta
+        logs.push(logRepo.create({
+          ...baseLog,
+          skuId: String(sku.id),
+          changeQty: aggregateDelta,
+          beforeCurrentStock: beforeProductStock,
+          afterCurrentStock: runningProductStock,
+          beforeSkuCurrentStock: afterSkuStock,
+          afterSkuCurrentStock: afterSkuStock,
+          beforeSkuPreorderedStock: skuPreOrderedStock,
+          afterSkuPreorderedStock: skuPreOrderedStock,
+          remark: afterContributes
+            ? `商品编辑启用 SKU ${sku.skuCode}，库存 ${afterSkuStock} 计入商品汇总`
+            : `商品编辑停用或退役 SKU ${sku.skuCode}，库存 ${afterSkuStock} 移出商品汇总`,
+        }))
+      }
     }
 
     if (runningProductStock !== finalProductStock) {

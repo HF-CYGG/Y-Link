@@ -4,7 +4,10 @@
  * 实现逻辑：
  * - 调用方必须已在同一事务内按商品 ID、SKU ID 稳定顺序锁定商品与 SKU，本模块只做校验、记账与落库；
  * - `deltaQty` 为出库方向数量：正数表示扣减物理库存，负数表示回补物理库存；
- * - 扣减方向同时校验 SKU 与商品汇总两级可用量（`currentStock - preOrderedStock`），任何一级不足整笔拒绝；
+ * - 商品汇总库存只由“当前版本且启用”的 SKU 构成（与商品编辑重算、库存报表同一口径）：
+ *   参与汇总的 SKU 同步改动商品汇总并校验商品级可用量；已停用或退役的 SKU 只改动自身库存，
+ *   避免订单引用的规格在开单后被停用时，回补/重扣把商品汇总改得偏离启用 SKU 合计；
+ * - 扣减方向对 SKU 可用量（`currentStock - preOrderedStock`）逐一校验，任何一级不足整笔拒绝；
  * - 每个 SKU 变动写一条可还原流水，`preOrderedStock` 永不改动（O2O 预占不属于手工出库语义）。
  * 维护重点：新增库存变动场景时复用本模块，不要在服务里再手写扣减与流水，避免口径漂移。
  */
@@ -40,6 +43,8 @@ export interface ManualOutboundInventoryLineView {
   skuId: string
   skuCode: string
   deltaQty: number
+  /** 该 SKU 是否参与商品汇总；为 false 时商品汇总库存前后不变。 */
+  affectsProductAggregate: boolean
   beforeCurrentStock: number
   afterCurrentStock: number
   beforeSkuCurrentStock: number
@@ -56,13 +61,20 @@ export interface ApplyManualOutboundInventoryInput {
 }
 
 const normalizeId = (value: unknown): string => String(value ?? '').trim()
+const isEnabled = (value: unknown) => value !== false && value !== 0 && value !== '0' && value !== 'false'
+
+/** SKU 是否参与商品汇总库存：仅“当前版本且启用”的 SKU 计入商品 currentStock。 */
+export const skuContributesToProductAggregate = (sku: Pick<BaseProductSku, 'isActive' | 'isCurrent'>): boolean => {
+  return isEnabled(sku.isActive) && isEnabled(sku.isCurrent)
+}
 
 /**
  * 在当前事务内应用手工出库库存变动：
- * 1. 按 SKU、商品两级汇总净变动，对净扣减方向校验可用量；
- * 2. 按商品 ID、SKU ID 稳定顺序逐行更新内存实体并生成流水快照；
- * 3. 写后兜底校验被扣减实体未出现负库存或低于预订量，异常直接抛错让事务回滚；
- * 4. 批量保存商品、SKU 与流水。
+ * 1. 按 SKU 汇总净变动；只把参与汇总的 SKU 计入商品净变动；
+ * 2. 对净扣减方向校验 SKU 可用量与（参与汇总部分的）商品可用量；
+ * 3. 按商品 ID、SKU ID 稳定顺序逐行更新内存实体并生成流水快照；
+ * 4. 写后兜底校验被扣减实体未出现负库存或低于预订量，异常直接抛错让事务回滚；
+ * 5. 批量保存商品、SKU 与流水。
  */
 export async function applyManualOutboundInventoryDeltas(
   manager: EntityManager,
@@ -84,9 +96,11 @@ export async function applyManualOutboundInventoryDeltas(
       throw new BizError(`SKU ${delta.sku.skuCode} 不属于商品 ${delta.product.productName}`, 409)
     }
     const skuId = normalizeId(delta.sku.id)
-    const productId = normalizeId(delta.product.id)
     skuNetMap.set(skuId, { sku: delta.sku, qty: (skuNetMap.get(skuId)?.qty ?? 0) + delta.deltaQty })
-    productNetMap.set(productId, { product: delta.product, qty: (productNetMap.get(productId)?.qty ?? 0) + delta.deltaQty })
+    if (skuContributesToProductAggregate(delta.sku)) {
+      const productId = normalizeId(delta.product.id)
+      productNetMap.set(productId, { product: delta.product, qty: (productNetMap.get(productId)?.qty ?? 0) + delta.deltaQty })
+    }
   }
 
   for (const { sku, qty } of skuNetMap.values()) {
@@ -111,22 +125,25 @@ export async function applyManualOutboundInventoryDeltas(
   const lines: ManualOutboundInventoryLineView[] = []
   for (const delta of changed) {
     const { product, sku } = delta
+    const affectsProductAggregate = skuContributesToProductAggregate(sku)
     const beforeCurrentStock = Number(product.currentStock)
     const beforePreorderedStock = Number(product.preOrderedStock)
     const beforeSkuCurrentStock = Number(sku.currentStock)
     const beforeSkuPreorderedStock = Number(sku.preOrderedStock)
-    product.currentStock = beforeCurrentStock - delta.deltaQty
+    product.currentStock = beforeCurrentStock - (affectsProductAggregate ? delta.deltaQty : 0)
     sku.currentStock = beforeSkuCurrentStock - delta.deltaQty
     lines.push({
       productId: normalizeId(product.id),
       skuId: normalizeId(sku.id),
       skuCode: sku.skuCode,
       deltaQty: delta.deltaQty,
+      affectsProductAggregate,
       beforeCurrentStock,
       afterCurrentStock: product.currentStock,
       beforeSkuCurrentStock,
       afterSkuCurrentStock: sku.currentStock,
     })
+    const remark = `${input.buildRemark(delta)}${affectsProductAggregate ? '' : '（规格已停用或退役，不计入商品汇总）'}`
     logs.push(inventoryLogRepo.create({
       productId: normalizeId(product.id),
       skuId: normalizeId(sku.id),
@@ -145,7 +162,7 @@ export async function applyManualOutboundInventoryDeltas(
       operatorName: input.actor.displayName,
       refType: MANUAL_OUTBOUND_REF_TYPE,
       refId: normalizeId(input.order.id),
-      remark: input.buildRemark(delta).slice(0, 255),
+      remark: remark.slice(0, 255),
     }))
   }
 
@@ -161,7 +178,9 @@ export async function applyManualOutboundInventoryDeltas(
     }
   }
 
-  await manager.getRepository(BaseProduct).save([...productNetMap.values()].map((item) => item.product))
+  if (productNetMap.size > 0) {
+    await manager.getRepository(BaseProduct).save([...productNetMap.values()].map((item) => item.product))
+  }
   await manager.getRepository(BaseProductSku).save([...skuNetMap.values()].map((item) => item.sku))
   await inventoryLogRepo.save(logs)
   return lines
