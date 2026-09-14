@@ -11,6 +11,7 @@
  */
 
 import crypto from 'node:crypto'
+import { pathToFileURL } from 'node:url'
 import type { EntityMetadata, QueryRunner } from 'typeorm'
 import type { ColumnMetadata } from 'typeorm/metadata/ColumnMetadata.js'
 import { AppDataSource } from '../config/data-source.js'
@@ -192,7 +193,39 @@ async function readFirstRow(queryRunner: QueryRunner, metadata: EntityMetadata):
   return rows[0]
 }
 
-async function seedEmptyTable(
+async function createDistinctOutboundOrderFixture(
+  queryRunner: QueryRunner,
+  metadata: EntityMetadata,
+  firstRow: QueryRow,
+): Promise<QueryRow> {
+  const row: QueryRow = {}
+  for (const column of metadata.columns) {
+    if (column.isGenerated) continue
+    row[column.databaseName] = firstRow[column.databaseName]
+  }
+  row.order_uuid = crypto.randomUUID()
+  row.show_no = 'hyyzjd900002'
+  row.business_no = 'hyyzjd900002'
+  row.idempotency_key = 'migration-e2e-order-merge-source'
+
+  const columnNames = Object.keys(row)
+  await queryRunner.query(
+    `INSERT INTO ${quoteIdentifier(metadata.tableName)}
+     (${columnNames.map(quoteIdentifier).join(', ')})
+     VALUES (${columnNames.map(() => '?').join(', ')})`,
+    columnNames.map((columnName) => row[columnName]),
+  )
+  const primaryColumn = metadata.primaryColumns[0]
+  if (!primaryColumn) throw new Error('biz_outbound_order 缺少主键，无法生成第二张合并关系夹具订单')
+  const rows = toRows(await queryRunner.query(
+    `SELECT * FROM ${quoteIdentifier(metadata.tableName)}
+     ORDER BY ${quoteIdentifier(primaryColumn.databaseName)} DESC LIMIT 1`,
+  ))
+  if (!rows[0]) throw new Error('未能读取第二张合并关系夹具订单')
+  return rows[0]
+}
+
+export async function seedEmptyTable(
   queryRunner: QueryRunner,
   metadata: EntityMetadata,
   firstRows: Map<string, QueryRow>,
@@ -206,11 +239,31 @@ async function seedEmptyTable(
   }
 
   const foreignKeyValues = new Map<string, unknown>()
+  let distinctOutboundOrderRow: QueryRow | null = null
   for (const foreignKey of metadata.foreignKeys) {
-    const referencedRow = firstRows.get(foreignKey.referencedEntityMetadata.tableName)
+    const referencedTableName = foreignKey.referencedEntityMetadata.tableName
+    const firstReferencedRow = firstRows.get(referencedTableName)
+    if (
+      metadata.tableName === 'order_merge_relation'
+      && referencedTableName === 'biz_outbound_order'
+      && foreignKey.columnNames.some((columnName) => columnName === 'source_order_id' || columnName === 'sourceOrderId')
+      && firstReferencedRow
+    ) {
+      distinctOutboundOrderRow ??= await createDistinctOutboundOrderFixture(
+        queryRunner,
+        foreignKey.referencedEntityMetadata,
+        firstReferencedRow,
+      )
+    }
+    const usesDistinctSourceOrder = foreignKey.columnNames.some(
+      (columnName) => columnName === 'source_order_id' || columnName === 'sourceOrderId',
+    )
+    const referencedRow = distinctOutboundOrderRow && usesDistinctSourceOrder
+      ? distinctOutboundOrderRow
+      : firstReferencedRow
     if (!referencedRow) {
       throw new Error(
-        `实体表 ${metadata.tableName} 缺少外键夹具依赖 ${foreignKey.referencedEntityMetadata.tableName}`,
+        `实体表 ${metadata.tableName} 缺少外键夹具依赖 ${referencedTableName}`,
       )
     }
     foreignKey.columnNames.forEach((columnName, index) => {
@@ -227,6 +280,25 @@ async function seedEmptyTable(
     if (foreignKeyValues.has(column.databaseName)) {
       row[column.databaseName] = foreignKeyValues.get(column.databaseName)
       continue
+    }
+    if (metadata.tableName === 'order_merge_relation' && distinctOutboundOrderRow) {
+      if (column.databaseName === 'source_order_uuid') {
+        row[column.databaseName] = distinctOutboundOrderRow.order_uuid
+        continue
+      }
+      if (column.databaseName === 'source_business_no_snapshot') {
+        row[column.databaseName] = distinctOutboundOrderRow.business_no
+        continue
+      }
+      const parentOrderRow = firstRows.get('biz_outbound_order')
+      if (column.databaseName === 'parent_order_uuid') {
+        row[column.databaseName] = parentOrderRow?.order_uuid
+        continue
+      }
+      if (column.databaseName === 'parent_business_no_snapshot') {
+        row[column.databaseName] = parentOrderRow?.business_no
+        continue
+      }
     }
     if (column.isCreateDate || column.isUpdateDate) {
       row[column.databaseName] = '2026-07-25 12:34:56.789'
@@ -314,4 +386,9 @@ async function main(): Promise<void> {
   }))
 }
 
-await main()
+const invokedAsCommand = Boolean(process.argv[1])
+  && import.meta.url === pathToFileURL(process.argv[1]!).href
+
+if (invokedAsCommand) {
+  await main()
+}

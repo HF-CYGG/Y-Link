@@ -10,13 +10,14 @@
 
 import { AppDataSource } from '../config/data-source.js'
 import { runInTransaction } from '../config/transaction-runner.js'
-import { Brackets, type EntityManager } from 'typeorm'
+import { Brackets, In, type EntityManager } from 'typeorm'
 import { BizOutboundOrder } from '../entities/biz-outbound-order.entity.js'
 import { BizOutboundOrderItem } from '../entities/biz-outbound-order-item.entity.js'
 import { BaseProduct } from '../entities/base-product.entity.js'
 import { BaseProductSku } from '../entities/base-product-sku.entity.js'
 import { InventoryLog } from '../entities/inventory-log.entity.js'
 import { O2oPreorder } from '../entities/o2o-preorder.entity.js'
+import { O2oReturnRequest } from '../entities/o2o-return-request.entity.js'
 import type { AuthUserContext } from '../types/auth.js'
 import {
   isRetryableMysqlTransactionError,
@@ -42,6 +43,12 @@ import {
 import { orderSerialService, type OrderType } from './order-serial.service.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
 import { systemConfigService, type ClientDepartmentTreeNode } from './system-config.service.js'
+import {
+  orderMergeService,
+  type CommitOrderMergeInput,
+  type OrderMergeInput,
+  type OrderMergeMetadata,
+} from './order-merge.service.js'
 
 /**
  * 开单页客户部门选项：
@@ -118,6 +125,9 @@ export interface OrderDetailItemView {
   subTotal: string
   lineAmount: string
   remark: string | null
+  sourceOrderId: string | null
+  sourceOrderUuid: string | null
+  sourceOrderItemId: string | null
 }
 
 export interface OrderSummaryView {
@@ -125,6 +135,8 @@ export interface OrderSummaryView {
   showNo: string
   businessNo: string
   editVersion: number
+  status: BizOutboundOrder['status']
+  merge: OrderMergeMetadata
   inventoryMode: BizOutboundOrder['inventoryMode']
   contentEditable: boolean
   contentEditBlockers: string[]
@@ -265,40 +277,89 @@ export class OrderService {
 
   private async syncLinkedO2oPreorderVisibilityInManager(
     manager: EntityManager,
-    order: Pick<BizOutboundOrder, 'idempotencyKey'>,
+    order: Pick<BizOutboundOrder, 'id' | 'idempotencyKey'>,
     actor: AuthUserContext,
     deleted: boolean,
   ) {
-    const preorderId = this.resolveLinkedO2oPreorderId(order)
-    if (!preorderId) {
+    const relatedOrderIds = [normalizeEntityId(order.id)]
+    const mergeMetadata = (await orderMergeService.getMetadataMap(relatedOrderIds, manager)).get(relatedOrderIds[0]!)
+    if (mergeMetadata?.role === 'parent') {
+      relatedOrderIds.push(...mergeMetadata.children.map((child) => child.id))
+    }
+    const relatedOrders = await manager.getRepository(BizOutboundOrder).find({
+      select: ['id', 'idempotencyKey'],
+      where: { id: In(relatedOrderIds) },
+    })
+    const preorderIds = [...new Set(relatedOrders
+      .map((relatedOrder) => this.resolveLinkedO2oPreorderId(relatedOrder))
+      .filter((preorderId): preorderId is string => Boolean(preorderId)))]
+      .sort((left, right) => left.localeCompare(right))
+    if (!preorderIds.length) {
       return null
     }
     const preorderRepo = manager.getRepository(O2oPreorder)
-    const preorder = await preorderRepo.findOne({
-      where: { id: preorderId },
-      lock: manager.connection.options.type === 'sqlite' ? undefined : { mode: 'pessimistic_write' },
-    })
-    if (!preorder) {
-      return { preorderId, changed: false, reason: 'not_found' }
+    const preorderQuery = preorderRepo.createQueryBuilder('preorder')
+      .where('preorder.id IN (:...preorderIds)', { preorderIds })
+      .orderBy('preorder.id', 'ASC')
+    if (manager.connection.options.type !== 'sqlite') preorderQuery.setLock('pessimistic_write')
+    const preorders = await preorderQuery.getMany()
+    const changedPreorderIds: string[] = []
+    for (const preorder of preorders) {
+      if (Boolean(preorder.isDeleted) === deleted) continue
+      preorder.isDeleted = deleted
+      if (deleted) {
+        preorder.deletedAt = new Date()
+        preorder.deletedByUserId = actor.userId
+        preorder.deletedByUsername = actor.username
+        preorder.deletedByDisplayName = actor.displayName
+      } else {
+        preorder.deletedAt = null
+        preorder.deletedByUserId = null
+        preorder.deletedByUsername = null
+        preorder.deletedByDisplayName = null
+      }
+      await preorderRepo.save(preorder)
+      changedPreorderIds.push(normalizeEntityId(preorder.id))
     }
-    if (preorder.isDeleted === deleted) {
-      return { preorderId, changed: false, reason: 'already_synced' }
-    }
+    return { preorderIds, changedPreorderIds, deleted }
+  }
 
-    preorder.isDeleted = deleted
-    if (deleted) {
-      preorder.deletedAt = new Date()
-      preorder.deletedByUserId = actor.userId
-      preorder.deletedByUsername = actor.username
-      preorder.deletedByDisplayName = actor.displayName
-    } else {
-      preorder.deletedAt = null
-      preorder.deletedByUserId = null
-      preorder.deletedByUsername = null
-      preorder.deletedByDisplayName = null
+  private async assertLinkedO2oMergeGroupHasNoPendingReturns(
+    manager: EntityManager,
+    order: Pick<BizOutboundOrder, 'id' | 'idempotencyKey'>,
+  ): Promise<void> {
+    const relatedOrderIds = [normalizeEntityId(order.id)]
+    const mergeMetadata = (await orderMergeService.getMetadataMap(relatedOrderIds, manager)).get(relatedOrderIds[0]!)
+    if (mergeMetadata?.role === 'parent') {
+      relatedOrderIds.push(...mergeMetadata.children.map((child) => child.id))
     }
-    await preorderRepo.save(preorder)
-    return { preorderId, changed: true, deleted }
+    const relatedOrders = await manager.getRepository(BizOutboundOrder).find({
+      select: ['id', 'idempotencyKey'],
+      where: { id: In(relatedOrderIds) },
+    })
+    const preorderIds = [...new Set(relatedOrders
+      .map((relatedOrder) => this.resolveLinkedO2oPreorderId(relatedOrder))
+      .filter((preorderId): preorderId is string => Boolean(preorderId)))]
+      .sort((left, right) => left.localeCompare(right))
+    if (!preorderIds.length) return
+
+    const preorderQuery = manager.getRepository(O2oPreorder)
+      .createQueryBuilder('preorder')
+      .where('preorder.id IN (:...preorderIds)', { preorderIds })
+      .orderBy('preorder.id', 'ASC')
+    if (manager.connection.options.type !== 'sqlite') preorderQuery.setLock('pessimistic_write')
+    await preorderQuery.getMany()
+
+    const returnQuery = manager.getRepository(O2oReturnRequest)
+      .createQueryBuilder('returnRequest')
+      .where('returnRequest.orderId IN (:...preorderIds)', { preorderIds })
+      .orderBy('returnRequest.orderId', 'ASC')
+      .addOrderBy('returnRequest.id', 'ASC')
+    if (manager.connection.options.type !== 'sqlite') returnQuery.setLock('pessimistic_write')
+    const returnRequests = await returnQuery.getMany()
+    if (returnRequests.some((returnRequest) => returnRequest.status === 'pending')) {
+      throw new BizError('合并成员存在未完成退货申请，完成处理前禁止删除父单', 409)
+    }
   }
 
   async list(query: OrderListQuery): Promise<PaginationResult<OrderSummaryView>> {
@@ -309,36 +370,56 @@ export class OrderService {
       const isLikelyShowNo = /^[A-Za-z0-9-]+$/.test(normalizedKeyword)
       qb.andWhere(
         new Brackets((keywordQb) => {
-          keywordQb
-            .where('order.businessNo LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
-            .orWhere('order.showNo LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
-            .orWhere(isLikelyShowNo ? 'order.showNo = :exactShowNo' : '1 = 0', { exactShowNo: normalizedKeyword })
-            .orWhere('order.customerName LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
-            .orWhere('order.customerDepartmentName LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
-            .orWhere('order.issuerName LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
-            .orWhere('order.creatorDisplayName LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
-            .orWhere('order.creatorUsername LIKE :keyword', { keyword: `%${normalizedKeyword}%` })
+          keywordQb.where(new Brackets((rootQb) => {
+            rootQb
+              .where('order.businessNo LIKE :keyword', { keyword: '%' + normalizedKeyword + '%' })
+              .orWhere('order.showNo LIKE :keyword', { keyword: '%' + normalizedKeyword + '%' })
+              .orWhere(isLikelyShowNo ? 'order.showNo = :exactShowNo' : '1 = 0', { exactShowNo: normalizedKeyword })
+              .orWhere('order.customerName LIKE :keyword', { keyword: '%' + normalizedKeyword + '%' })
+              .orWhere('order.customerDepartmentName LIKE :keyword', { keyword: '%' + normalizedKeyword + '%' })
+              .orWhere('order.issuerName LIKE :keyword', { keyword: '%' + normalizedKeyword + '%' })
+              .orWhere('order.creatorDisplayName LIKE :keyword', { keyword: '%' + normalizedKeyword + '%' })
+              .orWhere('order.creatorUsername LIKE :keyword', { keyword: '%' + normalizedKeyword + '%' })
+          })).orWhere(
+            'EXISTS (SELECT 1 FROM order_merge_relation relation INNER JOIN biz_outbound_order child ON child.id = relation.source_order_id WHERE relation.parent_order_id = order.id AND (child.business_no LIKE :keyword OR child.show_no LIKE :keyword OR child.customer_name LIKE :keyword OR child.customer_department_name LIKE :keyword OR child.issuer_name LIKE :keyword OR child.creator_display_name LIKE :keyword OR child.creator_username LIKE :keyword))',
+            { keyword: '%' + normalizedKeyword + '%' },
+          )
         }),
       )
     }
 
-    if (query.showNo && !query.keyword) {
-      qb.andWhere('order.showNo LIKE :showNo', { showNo: `%${query.showNo.trim()}%` })
-    }
     if (query.orderType && ORDER_TYPE_SET.has(query.orderType as OrderType)) {
       qb.andWhere('order.orderType = :orderType', { orderType: query.orderType })
     }
-    if (query.startDate) {
-      qb.andWhere('order.createdAt >= :startDate', { startDate: query.startDate })
-    }
-    if (query.endDate) {
-      qb.andWhere('order.createdAt <= :endDate', { endDate: query.endDate + ' 23:59:59' })
+    if (query.startDate || query.endDate) {
+      const endDate = query.endDate ? query.endDate + ' 23:59:59' : null
+      const rootDateConditions = [
+        query.startDate ? 'order.createdAt >= :startDate' : null,
+        endDate ? 'order.createdAt <= :endDate' : null,
+      ].filter((condition): condition is string => Boolean(condition))
+      const childDateConditions = [
+        query.startDate ? 'child.created_at >= :startDate' : null,
+        endDate ? 'child.created_at <= :endDate' : null,
+      ].filter((condition): condition is string => Boolean(condition))
+      qb.andWhere(new Brackets((dateQb) => {
+        dateQb.where(`(${rootDateConditions.join(' AND ')})`, {
+          startDate: query.startDate,
+          endDate,
+        }).orWhere(
+          `EXISTS (SELECT 1 FROM order_merge_relation relation INNER JOIN biz_outbound_order child ON child.id = relation.source_order_id WHERE relation.parent_order_id = order.id AND ${childDateConditions.join(' AND ')})`,
+          { startDate: query.startDate, endDate },
+        )
+      }))
     }
     if (query.onlyDeleted) {
       qb.andWhere('order.isDeleted = :onlyDeleted', { onlyDeleted: true })
     } else if (!query.includeDeleted) {
       qb.andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
     }
+    qb.andWhere('order.status = :activeMergeStatus', { activeMergeStatus: 'active' })
+    qb.andWhere(
+      'NOT EXISTS (SELECT 1 FROM order_merge_relation rootRelation WHERE rootRelation.source_order_id = order.id)',
+    )
 
     const [list, total] = await qb
       .orderBy('order.id', 'DESC')
@@ -346,21 +427,29 @@ export class OrderService {
       .take(query.pageSize)
       .getManyAndCount()
 
+    const metadataMap = await orderMergeService.getMetadataMap(list.map((order) => normalizeEntityId(order.id)))
     return {
       page: query.page,
       pageSize: query.pageSize,
       total,
-      list: list.map((order) => this.buildOrderSummaryView(order)),
+      list: list.map((order) => this.buildOrderSummaryView(order, metadataMap.get(normalizeEntityId(order.id)))),
     }
   }
 
-  async detailById(id: string): Promise<{ order: OrderSummaryView; items: OrderDetailItemView[] }> {
-    const order = await this.orderRepo.findOne({ where: { id } })
+  async detailById(
+    id: string,
+    manager: EntityManager = AppDataSource.manager,
+  ): Promise<{ order: OrderSummaryView; items: OrderDetailItemView[] }> {
+    const order = await manager.getRepository(BizOutboundOrder).findOne({ where: { id } })
     if (!order) {
       throw new BizError('出库单不存在', 404)
     }
-    const items = await this.loadDetailItems(id)
-    return { order: this.buildOrderSummaryView(order), items }
+    const items = await this.loadDetailItems(id, manager)
+    const metadata = (await orderMergeService.getMetadataMap(
+      [normalizeEntityId(order.id)],
+      manager,
+    )).get(normalizeEntityId(order.id))
+    return { order: this.buildOrderSummaryView(order, metadata), items }
   }
 
   async detailByShowNo(showNo: string): Promise<{ order: OrderSummaryView; items: OrderDetailItemView[] }> {
@@ -369,7 +458,8 @@ export class OrderService {
       throw new BizError('出库单不存在', 404)
     }
     const items = await this.loadDetailItems(order.id)
-    return { order: this.buildOrderSummaryView(order), items }
+    const metadata = (await orderMergeService.getMetadataMap([normalizeEntityId(order.id)])).get(normalizeEntityId(order.id))
+    return { order: this.buildOrderSummaryView(order, metadata), items }
   }
 
   async updateComplianceFlags(
@@ -415,6 +505,23 @@ export class OrderService {
     return orderContentEditService.listRevisions(orderId)
   }
 
+  describeContentEditability(order: BizOutboundOrder) {
+    return orderContentEditService.describeEditability(order)
+  }
+
+  async previewMerge(input: OrderMergeInput, actor: AuthUserContext) {
+    return orderMergeService.preview(input, actor)
+  }
+
+  async commitMerge(input: CommitOrderMergeInput, actor: AuthUserContext, requestMeta?: RequestMeta) {
+    return orderMergeService.commit(
+      input,
+      actor,
+      (manager, targetOrderId) => this.detailById(targetOrderId, manager),
+      requestMeta,
+    )
+  }
+
   /**
    * 软删除单据：
    * - 仅标记主单删除态，不物理删除明细，保证可恢复；
@@ -434,7 +541,9 @@ export class OrderService {
     return runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
       const orderRepo = manager.getRepository(BizOutboundOrder)
-      const order = await orderRepo.findOne({ where: { id } })
+      const orderQuery = orderRepo.createQueryBuilder('order').where('order.id = :id', { id })
+      if (manager.connection.options.type !== 'sqlite') orderQuery.setLock('pessimistic_write')
+      const order = await orderQuery.getOne()
       if (!order) {
         throw new BizError('出库单不存在', 404)
       }
@@ -446,6 +555,11 @@ export class OrderService {
       if (order.isDeleted) {
         throw new BizError('该出库单已删除', 409)
       }
+      if (order.status === 'merged') {
+        throw new BizError('合并来源单只允许查看，禁止删除', 409)
+      }
+
+      await this.assertLinkedO2oMergeGroupHasNoPendingReturns(manager, order)
 
       order.isDeleted = true
       order.deletedAt = new Date()
@@ -472,7 +586,9 @@ export class OrderService {
         manager,
       )
 
-      return this.buildOrderSummaryView(savedOrder)
+      const orderId = normalizeEntityId(savedOrder.id)
+      const mergeMetadata = (await orderMergeService.getMetadataMap([orderId], manager)).get(orderId)
+      return this.buildOrderSummaryView(savedOrder, mergeMetadata)
     })
   }
 
@@ -485,13 +601,18 @@ export class OrderService {
     return runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
       const orderRepo = manager.getRepository(BizOutboundOrder)
-      const order = await orderRepo.findOne({ where: { id } })
+      const orderQuery = orderRepo.createQueryBuilder('order').where('order.id = :id', { id })
+      if (manager.connection.options.type !== 'sqlite') orderQuery.setLock('pessimistic_write')
+      const order = await orderQuery.getOne()
       if (!order) {
         throw new BizError('出库单不存在', 404)
       }
 
       if (!order.isDeleted) {
         throw new BizError('该出库单未被删除，无需恢复', 409)
+      }
+      if (order.status === 'merged') {
+        throw new BizError('合并来源单只允许查看，禁止恢复', 409)
       }
 
       order.isDeleted = false
@@ -519,7 +640,9 @@ export class OrderService {
         manager,
       )
 
-      return this.buildOrderSummaryView(savedOrder)
+      const orderId = normalizeEntityId(savedOrder.id)
+      const mergeMetadata = (await orderMergeService.getMetadataMap([orderId], manager)).get(orderId)
+      return this.buildOrderSummaryView(savedOrder, mergeMetadata)
     })
   }
 
@@ -543,7 +666,9 @@ export class OrderService {
     return runInTransaction(async (manager) => {
       await lockActiveSysAccountForBusiness(manager, actor.userId)
       const orderRepo = manager.getRepository(BizOutboundOrder)
-      const order = await orderRepo.findOne({ where: { id } })
+      const orderQuery = orderRepo.createQueryBuilder('order').where('order.id = :id', { id })
+      if (manager.connection.options.type !== 'sqlite') orderQuery.setLock('pessimistic_write')
+      const order = await orderQuery.getOne()
       if (!order) {
         throw new BizError('出库单不存在', 404)
       }
@@ -559,6 +684,7 @@ export class OrderService {
       if (order.inventoryMode === 'manual_applied') {
         throw new BizError('该手工出库单仍承载库存影响，禁止永久删除', 409)
       }
+      await orderMergeService.assertNotMergeMember(manager, normalizeEntityId(order.id))
 
       const linkedO2oPreorderSync = await this.syncLinkedO2oPreorderVisibilityInManager(manager, order, actor, true)
       const deleteResult = await orderRepo.delete({ id: order.id })
@@ -1164,8 +1290,11 @@ export class OrderService {
    * - productName 优先使用历史快照，保证产品改名后旧单据仍展示下单时名称；
    * - subTotal 映射 lineAmount，兼容前端既有字段命名，避免金额出现 NaN。
    */
-  private async loadDetailItems(orderId: string): Promise<OrderDetailItemView[]> {
-    const items = await this.itemRepo.find({
+  private async loadDetailItems(
+    orderId: string,
+    manager: EntityManager = AppDataSource.manager,
+  ): Promise<OrderDetailItemView[]> {
+    const items = await manager.getRepository(BizOutboundOrderItem).find({
       where: { orderId },
       relations: { product: true },
       order: { lineNo: 'ASC' },
@@ -1188,6 +1317,9 @@ export class OrderService {
       subTotal: normalizeDecimalText(item.lineAmount),
       lineAmount: normalizeDecimalText(item.lineAmount),
       remark: item.remark,
+      sourceOrderId: normalizeNullableEntityId(item.sourceOrderId),
+      sourceOrderUuid: item.sourceOrderUuid ?? null,
+      sourceOrderItemId: normalizeNullableEntityId(item.sourceOrderItemId),
     }))
   }
 
@@ -1207,14 +1339,22 @@ export class OrderService {
     }
   }
 
-  private buildOrderSummaryView(order: BizOutboundOrder): OrderSummaryView {
+  private buildOrderSummaryView(order: BizOutboundOrder, metadata?: OrderMergeMetadata): OrderSummaryView {
+    const merge = metadata ?? { role: 'standalone' as const, parent: null, children: [] }
+    const editability = orderContentEditService.describeEditability(order)
+    if (merge.role === 'parent' && !editability.contentEditBlockers.includes('合并目标父单禁止编辑内容')) {
+      editability.contentEditBlockers.push('合并目标父单禁止编辑内容')
+      editability.contentEditable = false
+    }
     return {
       id: normalizeEntityId(order.id),
       showNo: order.showNo,
       businessNo: order.businessNo,
       editVersion: Number(order.editVersion),
+      status: order.status,
+      merge,
       inventoryMode: order.inventoryMode,
-      ...orderContentEditService.describeEditability(order),
+      ...editability,
       orderType: order.orderType,
       hasCustomerOrder: Boolean(order.hasCustomerOrder),
       isSystemApplied: Boolean(order.isSystemApplied),

@@ -17,6 +17,7 @@ import { orderBusinessNoService } from './order-business-no.service.js'
 import type { BusinessNoCursorPlan, ParsedBusinessNo } from './order-business-no.service.js'
 import type { OrderType } from './order-serial.service.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
+import { orderMergeService } from './order-merge.service.js'
 
 export interface OrderAmendmentInput {
   orderId: string
@@ -245,8 +246,12 @@ export class OrderAmendmentService {
       const before = this.snapshot(order)
       const after = this.buildAfterSnapshot(before, amendment)
       const blockingReasons: string[] = []
+      const mergeMetadata = (await orderMergeService.getMetadataMap([orderId], manager)).get(orderId)
       if (order.isDeleted) {
         blockingReasons.push('已删除订单不可修订')
+      }
+      if (order.status === 'merged' || mergeMetadata?.role === 'source') {
+        blockingReasons.push('合并来源单只允许查看，禁止任何修订')
       }
       if (!Number.isSafeInteger(amendment.editVersion) || amendment.editVersion <= 0) {
         blockingReasons.push('editVersion 必须为正整数')
@@ -259,6 +264,19 @@ export class OrderAmendmentService {
 
       const orderTypeChanged = after.orderType !== before.orderType
       const businessNoChanged = after.businessNo !== before.businessNo
+      if (
+        mergeMetadata?.role === 'parent'
+        && (
+          orderTypeChanged
+          || businessNoChanged
+          || after.customerDepartmentName !== before.customerDepartmentName
+          || after.customerName !== before.customerName
+          || after.hasCustomerOrder !== before.hasCustomerOrder
+          || after.isSystemApplied !== before.isSystemApplied
+        )
+      ) {
+        blockingReasons.push('合并目标父单禁止结构或合规字段修订')
+      }
       let parsedBusinessNo: ParsedBusinessNo | null = null
       if (orderTypeChanged && !businessNoChanged) {
         blockingReasons.push('切换订单类型时必须确认目标命名空间的新业务号')

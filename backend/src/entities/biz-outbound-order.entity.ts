@@ -20,6 +20,8 @@ import { entityColumnOptions } from './entity-column-options.js'
 
 export const ORDER_INVENTORY_MODES = ['legacy_none', 'manual_applied', 'o2o_preapplied'] as const
 export type OrderInventoryMode = (typeof ORDER_INVENTORY_MODES)[number]
+export const ORDER_STATUSES = ['active', 'merged'] as const
+export type OrderStatus = (typeof ORDER_STATUSES)[number]
 
 @Index('uk_biz_outbound_show_no_is_deleted', ['showNo', 'isDeleted'], { unique: true })
 @Index('uk_biz_outbound_business_no', ['businessNo'], { unique: true })
@@ -27,6 +29,7 @@ export type OrderInventoryMode = (typeof ORDER_INVENTORY_MODES)[number]
 @Entity({ name: 'biz_outbound_order' })
 @Check('ck_biz_outbound_order_amounts', "`total_qty` >= 0 AND `total_amount` >= 0 AND LENGTH(TRIM(COALESCE(`idempotency_key`, ''))) > 0")
 @Check('ck_biz_outbound_inventory_mode', "`inventory_mode` IN ('legacy_none', 'manual_applied', 'o2o_preapplied')")
+@Check('ck_biz_outbound_status', "`status` IN ('active', 'merged')")
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export class BizOutboundOrder {
   @PrimaryGeneratedColumn({ name: 'id', ...entityColumnOptions.primaryId })
@@ -44,6 +47,10 @@ export class BizOutboundOrder {
 
   @Column({ name: 'edit_version', type: 'integer', default: 1, comment: '改单乐观并发版本' })
   editVersion!: number
+
+  @Index('idx_biz_outbound_status')
+  @Column({ name: 'status', type: 'varchar', length: 16, default: 'active', comment: '订单合并治理状态' })
+  status!: OrderStatus
 
   @Column({ name: 'inventory_mode', type: 'varchar', length: 24, default: 'legacy_none', comment: '订单库存处理模式' })
   inventoryMode!: OrderInventoryMode

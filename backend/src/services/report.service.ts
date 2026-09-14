@@ -532,6 +532,7 @@ export class ReportService {
       .addSelect('order.creatorDisplayName', 'operatorName')
       .addSelect('order.isDeleted', 'isDeleted')
       .where('order.isDeleted = :isDeleted', { isDeleted: false })
+      .andWhere('order.status = :activeOrderStatus', { activeOrderStatus: 'active' })
 
     if (type === 'kingdee') {
       baseQb.andWhere('order.orderType = :orderType', { orderType: 'department' })
@@ -596,6 +597,7 @@ export class ReportService {
       .addSelect('order.isSystemApplied', 'isSystemApplied')
       .addSelect('order.isDeleted', 'isDeleted')
       .where('1=1')
+      .andWhere('order.status = :activeOrderStatus', { activeOrderStatus: 'active' })
 
     if (query.startAt) {
       qb.andWhere('order.createdAt >= :startAt', { startAt: query.startAt })

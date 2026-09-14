@@ -63,6 +63,17 @@ export class BizOutboundOrderItem {
   @Column({ type: 'varchar', length: 200, nullable: true })
   remark!: string | null
 
+  @Index('idx_biz_outbound_item_source_order_id')
+  @Column({ name: 'source_order_id', ...entityColumnOptions.foreignId, nullable: true, comment: '合并复制来源订单 ID' })
+  sourceOrderId!: string | null
+
+  @Column({ name: 'source_order_uuid', ...entityColumnOptions.uuid, length: 36, nullable: true, comment: '合并复制来源订单 UUID 快照' })
+  sourceOrderUuid!: string | null
+
+  @Index('idx_biz_outbound_item_source_item_id')
+  @Column({ name: 'source_order_item_id', ...entityColumnOptions.foreignId, nullable: true, comment: '合并复制来源明细 ID' })
+  sourceOrderItemId!: string | null
+
   @CreateDateColumn({ name: 'created_at', ...entityColumnOptions.timestamp })
   createdAt!: Date
 

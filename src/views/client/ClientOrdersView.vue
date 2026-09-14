@@ -204,7 +204,18 @@ const normalizeSummaryDisplayShowNo = (order: O2oPreorderSummary): O2oPreorderSu
     showNo: resolveO2oDisplayShowNo(order),
     customerOrderShowNo: order.customerOrderShowNo ?? null,
     customerOrderBusinessNo: order.customerOrderBusinessNo ?? null,
+    originalCustomerOrderShowNo: order.originalCustomerOrderShowNo ?? null,
+    originalCustomerOrderBusinessNo: order.originalCustomerOrderBusinessNo ?? null,
   }
+}
+
+const getOriginalCustomerOrderShowNo = (order: Pick<O2oPreorderSummary, 'originalCustomerOrderShowNo' | 'originalCustomerOrderBusinessNo'>) => {
+  return order.originalCustomerOrderBusinessNo?.trim() || order.originalCustomerOrderShowNo?.trim() || ''
+}
+
+const isMergedCustomerOrder = (order: PersistedO2oPreorderSummary) => {
+  const originalShowNo = getOriginalCustomerOrderShowNo(order)
+  return Boolean(originalShowNo && originalShowNo !== order.showNo)
 }
 
 const getBusinessStatusMeta = (order: PersistedO2oPreorderSummary) => {
@@ -887,6 +898,9 @@ onBeforeUnmount(() => {
                       </span>
                     </Transition>
                   </div>
+                  <p v-if="isMergedCustomerOrder(card.order)" class="mt-1 text-xs text-teal-700">
+                    当前正式出库单 · 已合并（原始单号：{{ getOriginalCustomerOrderShowNo(card.order) }}）
+                  </p>
                 </div>
                 <div class="flex items-center gap-2 self-start">
                   <button

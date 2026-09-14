@@ -44,6 +44,8 @@ import { SmsVerificationRecord } from '../entities/sms-verification-record.entit
 import { OrderBusinessNoOccupancy } from '../entities/order-business-no-occupancy.entity.js'
 import { OrderRevision } from '../entities/order-revision.entity.js'
 import { AccountLifecycleEvent } from '../entities/account-lifecycle-event.entity.js'
+import { OrderMergeOperation } from '../entities/order-merge-operation.entity.js'
+import { OrderMergeRelation } from '../entities/order-merge-relation.entity.js'
 
 export const appEntities = [
   BaseProduct,
@@ -80,6 +82,8 @@ export const appEntities = [
   OrderBusinessNoOccupancy,
   OrderRevision,
   AccountLifecycleEvent,
+  OrderMergeOperation,
+  OrderMergeRelation,
 ]
 
 function resolveEffectiveDatabaseConfig(

@@ -72,6 +72,8 @@ const MYSQL_REQUIRED_TABLES = [
   'order_business_no_occupancy',
   'order_revision',
   'account_lifecycle_event',
+  'order_merge_operation',
+  'order_merge_relation',
 ]
 
 // 每个必需表由哪个迁移脚本创建，用于在报错时给出精确指引，而不是笼统建议“从头跑一遍”。
@@ -104,6 +106,8 @@ const TABLE_INTRODUCING_SCRIPT: Record<string, string> = {
   order_business_no_occupancy: '042_order_business_no_amendment.sql',
   order_revision: '042_order_business_no_amendment.sql',
   account_lifecycle_event: '044_account_lifecycle_governance.sql',
+  order_merge_operation: '045_order_merge_governance.sql',
+  order_merge_relation: '045_order_merge_governance.sql',
 }
 
 interface MysqlRequiredColumn {
@@ -138,6 +142,12 @@ interface MysqlRequiredTrigger {
   triggerName: string
   eventManipulation: 'UPDATE' | 'DELETE'
   actionTiming: 'BEFORE'
+  introducingScript: string
+}
+
+interface MysqlRequiredCheck {
+  tableName: string
+  constraintName: string
   introducingScript: string
 }
 
@@ -265,6 +275,52 @@ const MYSQL_REQUIRED_COLUMNS: readonly MysqlRequiredColumn[] = [
     expectedCharacterMaximumLength: 24,
     expectedNullable: false,
   },
+  {
+    tableName: 'biz_outbound_order',
+    columnName: 'status',
+    introducingScript: '045_order_merge_governance.sql',
+    expectedDataType: 'varchar',
+    expectedColumnType: 'varchar(16)',
+    expectedCharacterMaximumLength: 16,
+    expectedNullable: false,
+  },
+  {
+    tableName: 'biz_outbound_order_item',
+    columnName: 'source_order_id',
+    introducingScript: '045_order_merge_governance.sql',
+    expectedDataType: 'bigint',
+    expectedColumnType: 'bigint unsigned',
+    expectedNullable: true,
+  },
+  {
+    tableName: 'biz_outbound_order_item',
+    columnName: 'source_order_uuid',
+    introducingScript: '045_order_merge_governance.sql',
+    expectedDataType: 'char',
+    expectedColumnType: 'char(36)',
+    expectedCharacterMaximumLength: 36,
+    expectedNullable: true,
+  },
+  {
+    tableName: 'biz_outbound_order_item',
+    columnName: 'source_order_item_id',
+    introducingScript: '045_order_merge_governance.sql',
+    expectedDataType: 'bigint',
+    expectedColumnType: 'bigint unsigned',
+    expectedNullable: true,
+  },
+  ...['operation_uuid', 'idempotency_key', 'request_hash', 'target_order_id', 'target_order_uuid', 'target_edit_version', 'merged_source_order_ids_json', 'reason', 'actor_user_id', 'actor_username', 'actor_display_name', 'created_at']
+    .map((columnName) => ({ tableName: 'order_merge_operation', columnName, introducingScript: '045_order_merge_governance.sql' })),
+  {
+    tableName: 'order_merge_operation',
+    columnName: 'result_json',
+    introducingScript: '045_order_merge_governance.sql',
+    expectedDataType: 'longtext',
+    expectedColumnType: 'longtext',
+    expectedNullable: false,
+  },
+  ...['operation_id', 'parent_order_id', 'parent_order_uuid', 'parent_business_no_snapshot', 'source_order_id', 'source_order_uuid', 'source_business_no_snapshot', 'created_at']
+    .map((columnName) => ({ tableName: 'order_merge_relation', columnName, introducingScript: '045_order_merge_governance.sql' })),
   {
     tableName: 'inventory_log',
     columnName: 'sku_id',
@@ -474,6 +530,16 @@ const MYSQL_REQUIRED_INDEXES: readonly MysqlRequiredIndex[] = [
     unique: false,
     introducingScript: '042_order_business_no_amendment.sql',
   },
+  { tableName: 'biz_outbound_order', indexName: 'idx_biz_outbound_status', columns: ['status'], unique: false, introducingScript: '045_order_merge_governance.sql' },
+  { tableName: 'biz_outbound_order_item', indexName: 'idx_biz_outbound_item_source_order_id', columns: ['source_order_id'], unique: false, introducingScript: '045_order_merge_governance.sql' },
+  { tableName: 'biz_outbound_order_item', indexName: 'idx_biz_outbound_item_source_item_id', columns: ['source_order_item_id'], unique: false, introducingScript: '045_order_merge_governance.sql' },
+  { tableName: 'order_merge_operation', indexName: 'uk_order_merge_operation_uuid', columns: ['operation_uuid'], unique: true, introducingScript: '045_order_merge_governance.sql' },
+  { tableName: 'order_merge_operation', indexName: 'uk_order_merge_operation_idempotency_key', columns: ['idempotency_key'], unique: true, introducingScript: '045_order_merge_governance.sql' },
+  { tableName: 'order_merge_operation', indexName: 'idx_order_merge_operation_target_order_id', columns: ['target_order_id'], unique: false, introducingScript: '045_order_merge_governance.sql' },
+  { tableName: 'order_merge_relation', indexName: 'uk_order_merge_relation_source_order_id', columns: ['source_order_id'], unique: true, introducingScript: '045_order_merge_governance.sql' },
+  { tableName: 'order_merge_relation', indexName: 'uk_order_merge_relation_parent_source', columns: ['parent_order_id', 'source_order_id'], unique: true, introducingScript: '045_order_merge_governance.sql' },
+  { tableName: 'order_merge_relation', indexName: 'idx_order_merge_relation_operation_id', columns: ['operation_id'], unique: false, introducingScript: '045_order_merge_governance.sql' },
+  { tableName: 'order_merge_relation', indexName: 'idx_order_merge_relation_parent_order_id', columns: ['parent_order_id'], unique: false, introducingScript: '045_order_merge_governance.sql' },
 ]
 
 const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [
@@ -513,6 +579,19 @@ const MYSQL_REQUIRED_FOREIGN_KEYS: readonly MysqlRequiredForeignKey[] = [
     deleteRule: 'SET NULL',
     introducingScript: '043_order_content_inventory_mode.sql',
   },
+  ...[
+    ['order_merge_operation', 'target_order_id', 'biz_outbound_order'],
+    ['order_merge_relation', 'operation_id', 'order_merge_operation'],
+    ['order_merge_relation', 'parent_order_id', 'biz_outbound_order'],
+    ['order_merge_relation', 'source_order_id', 'biz_outbound_order'],
+  ].map(([tableName, columnName, referencedTableName]) => ({
+    tableName,
+    columnName,
+    referencedTableName,
+    referencedColumnName: 'id',
+    deleteRule: 'RESTRICT',
+    introducingScript: '045_order_merge_governance.sql',
+  })),
 ]
 
 const MYSQL_REQUIRED_TRIGGERS: readonly MysqlRequiredTrigger[] = [
@@ -527,6 +606,14 @@ const MYSQL_REQUIRED_TRIGGERS: readonly MysqlRequiredTrigger[] = [
     eventManipulation: 'DELETE',
     actionTiming: 'BEFORE',
     introducingScript: '044_account_lifecycle_governance.sql',
+  },
+]
+
+const MYSQL_REQUIRED_CHECKS: readonly MysqlRequiredCheck[] = [
+  {
+    tableName: 'order_merge_relation',
+    constraintName: 'ck_order_merge_relation_distinct_orders',
+    introducingScript: '045_order_merge_governance.sql',
   },
 ]
 
@@ -551,6 +638,7 @@ const AUTO_MIGRATABLE_FILES = [
   '042_order_business_no_amendment.sql',
   '043_order_content_inventory_mode.sql',
   '044_account_lifecycle_governance.sql',
+  '045_order_merge_governance.sql',
 ]
 
 /**
@@ -709,12 +797,14 @@ async function assertAutoMigrationResult(queryRunner: QueryRunner, filename: str
   const requiredIndexes = MYSQL_REQUIRED_INDEXES.filter((item) => item.introducingScript === filename)
   const requiredForeignKeys = MYSQL_REQUIRED_FOREIGN_KEYS.filter((item) => item.introducingScript === filename)
   const requiredTriggers = MYSQL_REQUIRED_TRIGGERS.filter((item) => item.introducingScript === filename)
-  if (requiredColumns.length === 0 && requiredIndexes.length === 0 && requiredForeignKeys.length === 0 && requiredTriggers.length === 0) return
+  const requiredChecks = MYSQL_REQUIRED_CHECKS.filter((item) => item.introducingScript === filename)
+  if (requiredColumns.length === 0 && requiredIndexes.length === 0 && requiredForeignKeys.length === 0 && requiredTriggers.length === 0 && requiredChecks.length === 0) return
 
   const tableNames = [...new Set([
     ...requiredColumns.map((item) => item.tableName),
     ...requiredIndexes.map((item) => item.tableName),
     ...requiredForeignKeys.map((item) => item.tableName),
+    ...requiredChecks.map((item) => item.tableName),
   ])]
   const columnNames = [...new Set(requiredColumns.map((item) => item.columnName))]
   const columnRows: MysqlColumnRow[] = requiredColumns.length > 0
@@ -788,12 +878,27 @@ async function assertAutoMigrationResult(queryRunner: QueryRunner, filename: str
       )
     : []
   const invalidTriggers = collectMysqlTriggerIssues(triggerRows, requiredTriggers)
+  const checkRows: MysqlCheckRow[] = requiredChecks.length > 0
+    ? await queryRunner.query(
+        `SELECT TABLE_NAME, CONSTRAINT_NAME
+         FROM information_schema.TABLE_CONSTRAINTS
+         WHERE CONSTRAINT_SCHEMA = DATABASE()
+           AND CONSTRAINT_TYPE = 'CHECK'
+           AND TABLE_NAME IN (${tableNames.map(() => '?').join(', ')})`,
+        tableNames,
+      )
+    : []
+  const existingChecks = new Set(checkRows.map((row) => schemaObjectKey(row.TABLE_NAME, row.CONSTRAINT_NAME)))
+  const missingChecks = requiredChecks.filter((item) => (
+    !existingChecks.has(schemaObjectKey(item.tableName, item.constraintName))
+  ))
   if (
     missingColumns.length === 0
     && invalidColumnDefinitions.length === 0
     && invalidIndexes.length === 0
     && invalidForeignKeys.length === 0
     && invalidTriggers.length === 0
+    && missingChecks.length === 0
   ) return
 
   const missingLabels = [
@@ -802,6 +907,7 @@ async function assertAutoMigrationResult(queryRunner: QueryRunner, filename: str
     ...invalidIndexes.map((item) => `索引 ${item.tableName}.${item.indexName}`),
     ...invalidForeignKeys.map((item) => item.label),
     ...invalidTriggers.map((item) => item.label),
+    ...missingChecks.map((item) => `检查约束 ${item.tableName}.${item.constraintName}`),
   ]
   throw new Error(
     `[启动失败] 自动迁移 ${filename} 执行后结构仍不完整，未写入迁移记录：${missingLabels.join('、')}。`
@@ -888,6 +994,10 @@ interface MysqlTriggerRow {
   TRIGGER_NAME: string
   EVENT_MANIPULATION: string
   ACTION_TIMING: string
+}
+
+interface MysqlCheckRow extends MysqlTableRow {
+  CONSTRAINT_NAME: string
 }
 
 interface MysqlSchemaShapeIssue<TRequirement> {
@@ -1090,6 +1200,24 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
     MYSQL_REQUIRED_TRIGGERS.map((item) => item.triggerName),
   )
   const invalidTriggers = collectMysqlTriggerIssues(triggerRows, MYSQL_REQUIRED_TRIGGERS)
+  const requiredChecksOnExistingTables = MYSQL_REQUIRED_CHECKS.filter((requirement) => (
+    existingTableSet.has(requirement.tableName)
+  ))
+  const requiredCheckTables = [...new Set(requiredChecksOnExistingTables.map((item) => item.tableName))]
+  const checkRows: MysqlCheckRow[] = requiredChecksOnExistingTables.length > 0
+    ? await dataSource.query(
+        `SELECT TABLE_NAME, CONSTRAINT_NAME
+         FROM information_schema.TABLE_CONSTRAINTS
+         WHERE CONSTRAINT_SCHEMA = DATABASE()
+           AND CONSTRAINT_TYPE = 'CHECK'
+           AND TABLE_NAME IN (${requiredCheckTables.map(() => '?').join(', ')})`,
+        requiredCheckTables,
+      )
+    : []
+  const existingChecks = new Set(checkRows.map((row) => schemaObjectKey(row.TABLE_NAME, row.CONSTRAINT_NAME)))
+  const missingChecks = requiredChecksOnExistingTables.filter((requirement) => (
+    !existingChecks.has(schemaObjectKey(requirement.tableName, requirement.constraintName))
+  ))
 
   if (
     missingTables.length === 0
@@ -1099,6 +1227,7 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
     && invalidIndexes.length === 0
     && invalidForeignKeys.length === 0
     && invalidTriggers.length === 0
+    && missingChecks.length === 0
   ) {
     return
   }
@@ -1140,6 +1269,10 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
       label,
       script: requirement.introducingScript,
     })),
+    ...missingChecks.map((requirement) => ({
+      label: `检查约束 ${requirement.tableName}.${requirement.constraintName}`,
+      script: requirement.introducingScript,
+    })),
   ]
     .map(({ label, script }) => `  - ${label} → backend/sql/${script}`)
     .join('\n')
@@ -1163,6 +1296,9 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
       : null,
     invalidTriggers.length > 0
       ? `缺少或定义不匹配的必需触发器：${invalidTriggers.map((item) => item.requirement.triggerName).join(', ')}`
+      : null,
+    missingChecks.length > 0
+      ? `缺少必需检查约束：${missingChecks.map((item) => `${item.tableName}.${item.constraintName}`).join(', ')}`
       : null,
   ].filter((item): item is string => Boolean(item)).join('；')
 
@@ -1190,7 +1326,7 @@ export async function assertMysqlRequiredSchemaExists(dataSource: DataSource): P
     + '缺失或不匹配的结构分别由以下迁移脚本维护：\n'
     + `${missingObjectGuide}\n\n`
     + `${scenarioGuide}\n\n`
-    + '若上面只涉及 033、037_mobile_auth_session、037_department_account_node_binding、038、039、040、041、042、043 或 044 维护的结构，可以设置环境变量 DB_AUTO_MIGRATE=true 后重启服务，'
+    + '若上面只涉及 033、037_mobile_auth_session、037_department_account_node_binding、038、039、040、041、042、043、044 或 045 维护的结构，可以设置环境变量 DB_AUTO_MIGRATE=true 后重启服务，'
     + '由服务自动执行白名单内已核实可在启动期运行的脚本。035/036 不会在启动期自动执行：'
     + '036 包含历史通知去重和唯一索引 DDL，必须按“备份 → 停止所有应用与通知 Worker → 执行脚本 → 启动新版本”完成。',
   )
