@@ -5,6 +5,7 @@
  * 实现逻辑：
  * - 打开时重置输入并启动 3 秒倒计时，倒计时结束前“确认删除”不可点击，降低误删；
  * - 手工库存单（manual_applied）必须明确选择“回补库存 / 不回补库存”，不给默认值，并列出将回补的明细；
+ * - 订单合并父单的明细含来源单复制行，其库存扣减记在来源原单上，删除时不支持回补，仅提示并按“不回补”处理；
  * - 点击确认后再弹一次二次确认，总结本次选择；最终由父层调用接口并决定是否关闭弹窗。
  * 维护说明：库存回补以服务端事务为准，本组件只负责收集意图，不在前端推算或修改库存。
  */
@@ -42,13 +43,16 @@ const visibleModel = computed({
 })
 
 const isInventoryOrder = computed(() => props.order?.inventoryMode === 'manual_applied')
+const isMergeParent = computed(() => props.order?.merge?.role === 'parent')
+/** 只有未参与合并父单的手工库存单才需要管理员二选一是否回补。 */
+const requiresInventoryChoice = computed(() => isInventoryOrder.value && !isMergeParent.value)
 const totalReleaseQty = computed(() => items.value.reduce((sum, item) => sum + (Number(item.qty) || 0), 0))
 
 const confirmDisabled = computed(() => {
   if (props.submitting || countdown.value > 0 || !confirmShowNo.value.trim()) return true
-  if (isInventoryOrder.value && !inventoryChoice.value) return true
+  if (requiresInventoryChoice.value && !inventoryChoice.value) return true
   // 选择回补时必须已加载明细，确保管理员看过将回补的数量。
-  return isInventoryOrder.value && inventoryChoice.value === 'release' && (itemsLoading.value || Boolean(itemsLoadError.value))
+  return requiresInventoryChoice.value && inventoryChoice.value === 'release' && (itemsLoading.value || Boolean(itemsLoadError.value))
 })
 
 const confirmButtonText = computed(() => (countdown.value > 0 ? `确认删除（${countdown.value}）` : '确认删除'))
@@ -94,7 +98,7 @@ watch(
     confirmShowNo.value = ''
     inventoryChoice.value = ''
     startCountdown()
-    if (props.order.inventoryMode === 'manual_applied') {
+    if (props.order.inventoryMode === 'manual_applied' && props.order.merge?.role !== 'parent') {
       void loadItems(props.order)
     } else {
       items.value = []
@@ -109,12 +113,14 @@ onBeforeUnmount(stopCountdown)
 const handleConfirm = async () => {
   const order = props.order
   if (!order || confirmDisabled.value) return
-  const releaseInventory = isInventoryOrder.value && inventoryChoice.value === 'release'
+  const releaseInventory = requiresInventoryChoice.value && inventoryChoice.value === 'release'
   const summary = !isInventoryOrder.value
     ? `将删除出库单 ${order.businessNo}，该单不涉及手工库存扣减。`
-    : releaseInventory
-      ? `将删除出库单 ${order.businessNo}，并回补库存共 ${totalReleaseQty.value} 件。恢复该单时会重新扣减库存。`
-      : `将删除出库单 ${order.businessNo}，不回补库存（该单扣减的库存保持不变）。`
+    : isMergeParent.value
+      ? `将删除合并父单 ${order.businessNo}，不回补库存（合并订单组的库存扣减保持不变）。`
+      : releaseInventory
+        ? `将删除出库单 ${order.businessNo}，并回补库存共 ${totalReleaseQty.value} 件。恢复该单时会重新扣减库存。`
+        : `将删除出库单 ${order.businessNo}，不回补库存（该单扣减的库存保持不变）。`
   try {
     await ElMessageBox.confirm(summary, '请再次确认', {
       confirmButtonText: '确定执行',
@@ -150,7 +156,7 @@ const handleConfirm = async () => {
         :disabled="submitting"
       />
 
-      <div v-if="isInventoryOrder" class="space-y-2">
+      <div v-if="requiresInventoryChoice" class="space-y-2">
         <div class="text-sm font-medium text-slate-700 dark:text-slate-200">该单已扣减库存，请选择删除时是否回补库存：</div>
         <el-radio-group v-model="inventoryChoice" :disabled="submitting" class="order-delete-choice">
           <el-radio value="release" border>回补库存</el-radio>
@@ -171,6 +177,13 @@ const handleConfirm = async () => {
           </template>
         </div>
       </div>
+      <el-alert
+        v-else-if="isInventoryOrder && isMergeParent"
+        type="info"
+        :closable="false"
+        show-icon
+        title="该单为合并父单，明细包含来源单复制行，删除时不支持回补库存，将按“不回补库存”处理。"
+      />
       <div v-else class="text-xs text-slate-500 dark:text-slate-400">该单不涉及手工库存扣减，删除不会改动库存。</div>
     </div>
 

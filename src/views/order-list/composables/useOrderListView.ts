@@ -645,7 +645,7 @@ export const useOrderListView = () => {
    * - 先打开抽屉并展示 loading；
    * - 请求失败时关闭抽屉，避免留下空壳视图。
    */
-  const handleViewDetail = async (row: OrderRecord) => {
+  const handleViewDetail = async (row: Pick<OrderRecord, 'id'>) => {
     if (!ensurePermission('orders:view', '出库单查看')) {
       resetVisibleData()
       return

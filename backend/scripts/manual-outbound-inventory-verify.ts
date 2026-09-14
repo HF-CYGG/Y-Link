@@ -516,6 +516,29 @@ async function main() {
       )
     }
 
+    // 14d. 订单合并父单（#87）：父单明细含来源复制行、库存扣减记在来源原单上，删除时必须拒绝回补；不回补删除正常，核查不得误报父单。
+    const mergeFixture = await createFixture([{ stock: 20 }])
+    const mergeTarget = await submit(nextKey('merge-target'), [{ productId: mergeFixture.product.id, skuId: mergeFixture.skus[0].id, qty: 2 }])
+    const mergeSource = await submit(nextKey('merge-source'), [{ productId: mergeFixture.product.id, skuId: mergeFixture.skus[0].id, qty: 3 }])
+    await orderService.commitMerge({
+      target: { orderId: mergeTarget.order.id, editVersion: mergeTarget.order.editVersion },
+      sources: [{ orderId: mergeSource.order.id, editVersion: mergeSource.order.editVersion }],
+      reason: 'Issue82 合并父单删除回补验证',
+      idempotencyKey: nextKey('merge-operation'),
+    }, actor)
+    const mergeStock = async () => (await stockOf(mergeFixture.product.id, [mergeFixture.skus[0].id])).skus[0].currentStock
+    assert.equal(await mergeStock(), 15, '订单合并不得重复扣减库存')
+    await expectFailure(
+      () => orderService.softDeleteById(mergeTarget.order.id, actor, mergeTarget.order.businessNo, undefined, { releaseInventory: true }),
+      /合并父单.*不支持.*回补/,
+    )
+    assert.equal(await mergeStock(), 15, '合并父单回补被拒绝后库存不得变化')
+    assert.equal(Boolean((await orderRepo.findOneByOrFail({ id: mergeTarget.order.id })).isDeleted), false)
+    await orderService.softDeleteById(mergeTarget.order.id, actor, mergeTarget.order.businessNo)
+    assert.equal(await mergeStock(), 15, '合并父单不回补删除不得改动库存')
+    await orderService.restoreById(mergeTarget.order.id, actor)
+    assert.equal(await mergeStock(), 15, '恢复未回补的合并父单不得改动库存')
+
     // 15. 真实 HTTP 回归：经过 Express 路由校验、鉴权与服务层，验证开单扣减、幂等重放、库存不足与删除回补/恢复重扣。
     {
       const { requestLocalHttp } = await import('./support/local-http-request.js')
@@ -688,6 +711,11 @@ async function main() {
       assert.ok(
         report.findings.orderInventoryMismatch.some((item) => String(item.orderId) === String(unlogged.order.id)),
         '必须检出“订单已保存但库存未扣”',
+      )
+      assert.equal(
+        report.findings.orderInventoryMismatch.some((item) => [mergeTarget.order.id, mergeSource.order.id].map(String).includes(String(item.orderId))),
+        false,
+        '合并父单的来源复制行与来源原单均不得被核查误报',
       )
       assert.ok(
         report.findings.skuLogChainBreak.some((item) => String(item.skuId) === String(drifted.skus[0].id)),

@@ -101,6 +101,21 @@ const updateOrderContentSchema = z.object({
   })).min(1).max(200),
 })
 
+const orderMergeParticipantSchema = z.object({
+  orderId: z.union([z.string().trim().min(1), z.number()]).transform(String),
+  editVersion: z.number().int().positive(),
+})
+
+const orderMergePreviewSchema = z.object({
+  target: orderMergeParticipantSchema,
+  sources: z.array(orderMergeParticipantSchema).min(1).max(100),
+  reason: z.string().trim().min(1, '请填写合并原因').max(500),
+})
+
+const orderMergeCommitSchema = orderMergePreviewSchema.extend({
+  idempotencyKey: z.string().trim().min(8).max(128),
+})
+
 // 详细注释：此处承接当前模块的关键状态、流程或结构定义。
 export const orderRouter = Router()
 
@@ -175,6 +190,28 @@ orderRouter.post(
     const authReq = req as AuthenticatedRequest
     const payload = orderAmendmentBatchSchema.parse(req.body ?? {})
     const data = await orderService.previewAmendments(payload, authReq.auth)
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+orderRouter.post(
+  '/merges/preview',
+  requirePermission('orders:merge'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = orderMergePreviewSchema.parse(req.body ?? {})
+    const data = await orderService.previewMerge(payload, authReq.auth)
+    res.json({ code: 0, message: 'ok', data })
+  }),
+)
+
+orderRouter.post(
+  '/merges',
+  requirePermission('orders:merge'),
+  asyncHandler(async (req, res) => {
+    const authReq = req as AuthenticatedRequest
+    const payload = orderMergeCommitSchema.parse(req.body ?? {})
+    const data = await orderService.commitMerge(payload, authReq.auth, extractRequestMeta(req))
     res.json({ code: 0, message: 'ok', data })
   }),
 )

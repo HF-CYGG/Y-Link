@@ -228,6 +228,13 @@ const displayOrderShowNo = computed(() => {
   }
   return resolveO2oDisplayShowNo(detail.value.order)
 })
+const originalCustomerOrderShowNo = computed(() => {
+  const order = detail.value?.order
+  return order?.originalCustomerOrderBusinessNo?.trim() || order?.originalCustomerOrderShowNo?.trim() || ''
+})
+const isMergedCustomerOrder = computed(() => {
+  return Boolean(originalCustomerOrderShowNo.value && originalCustomerOrderShowNo.value !== displayOrderShowNo.value)
+})
 
 const voucherOrientationLabel = computed(() => (voucherOrientation.value === 'landscape' ? '横版' : '竖版'))
 const showDetailRefreshNotice = computed(() => detailRefreshNoticeExpiresAt.value > Date.now())
@@ -343,7 +350,8 @@ const voucherOrder = computed<OrderDetailResult | null>(() => {
     customerName: order.pickupContact || customerDisplayName,
     totalAmount: normalizedTotalAmount,
     totalQty: String(order.totalQty ?? 0),
-    status: order.status,
+    status: 'active',
+    merge: { role: 'standalone', parent: null, children: [] },
     remark: order.remark,
     creatorUserId: customerProfile?.id || null,
     creatorUsername: customerProfile?.username || null,
@@ -373,6 +381,9 @@ const voucherOrder = computed<OrderDetailResult | null>(() => {
         qty: String(item.qty),
         unitPrice,
         subTotal,
+        sourceOrderId: null,
+        sourceOrderUuid: null,
+        sourceOrderItemId: null,
         remark: null,
       }
     }),
@@ -1482,6 +1493,7 @@ onBeforeUnmount(() => {
                 </span>
               </Transition>
             </div>
+            <p v-if="isMergedCustomerOrder" class="mt-2 text-xs text-teal-700">当前正式出库单 · 已合并（原始单号：{{ originalCustomerOrderShowNo }}）</p>
             <p class="mt-1 text-sm text-slate-400">状态：{{ statusLabel }}</p>
             <p class="mt-1 text-xs text-slate-400">{{ detailAutoRefreshStatusText }}</p>
           </div>

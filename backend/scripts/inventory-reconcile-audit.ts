@@ -122,6 +122,8 @@ async function main() {
       .createQueryBuilder('item')
       .innerJoin(BizOutboundOrder, 'o', 'o.id = item.orderId')
       .where('o.inventoryMode = :mode', { mode: 'manual_applied' })
+      // 订单合并复制到父单的来源明细不产生库存影响，其扣减仍记在来源原单上，不能计入父单期望量。
+      .andWhere('item.sourceOrderId IS NULL')
       .select('item.orderId', 'orderId')
       .addSelect('item.skuId', 'skuId')
       .addSelect('SUM(item.qty)', 'qty')

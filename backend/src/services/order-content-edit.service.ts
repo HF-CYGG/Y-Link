@@ -25,6 +25,7 @@ import { applyManualOutboundInventoryDeltas, MANUAL_OUTBOUND_CHANGE_TYPES } from
 import { orderBusinessNoService } from './order-business-no.service.js'
 import type { OrderType } from './order-serial.service.js'
 import { lockActiveSysAccountForBusiness } from './account-business-guard.service.js'
+import { orderMergeService } from './order-merge.service.js'
 
 export interface OrderContentItemInput {
   productId: string
@@ -109,7 +110,7 @@ export class OrderContentEditService {
     if (order.inventoryMode === 'o2o_preapplied' || order.idempotencyKey.startsWith(O2O_ORDER_PREFIX)) {
       blockers.push('O2O 正式出库单已锁定')
     }
-    if ((order as BizOutboundOrder & { status?: string }).status === 'merged') blockers.push('已合并订单')
+    if (order.status === 'merged') blockers.push('合并来源单只允许查看')
     if (!['manual_applied', 'legacy_none', 'o2o_preapplied'].includes(order.inventoryMode)) {
       blockers.push('订单库存模式异常')
     }
@@ -172,6 +173,10 @@ export class OrderContentEditService {
     const order = await orderQuery.getOne()
     if (!order) throw new BizError('出库单不存在', 404)
     this.assertOrderEditable(order, input.expectedVersion)
+    const mergeMetadata = (await orderMergeService.getMetadataMap([orderId], manager)).get(orderId)
+    if (mergeMetadata?.role === 'parent') {
+      throw new BizError('合并目标父单禁止编辑商品明细', 409)
+    }
 
     const itemQuery = manager.getRepository(BizOutboundOrderItem)
       .createQueryBuilder('item')

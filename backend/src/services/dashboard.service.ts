@@ -284,6 +284,12 @@ const formatLocalMonthKey = (date: Date): string => {
   return `${year}-${month}`
 }
 
+const resolveNextLocalDayStart = (date: Date): Date => {
+  const nextDay = new Date(date.getTime())
+  nextDay.setDate(nextDay.getDate() + 1)
+  return nextDay
+}
+
 const parseDateOnlyToStart = (value: string, label: string): Date => {
   const normalized = value.trim()
   if (!/^\d{4}-\d{2}-\d{2}$/.test(normalized)) {
@@ -413,7 +419,7 @@ const resolveDashboardFilter = (
     const monthStart = new Date(today.getFullYear(), today.getMonth(), 1)
     return {
       startAt: monthStart,
-      endExclusive: new Date(today.getTime() + DATE_MS),
+      endExclusive: resolveNextLocalDayStart(today),
       orderType,
       startDate: formatLocalDateKey(monthStart),
       endDate: formatLocalDateKey(today),
@@ -434,7 +440,7 @@ const resolveDashboardFilter = (
 
   return {
     startAt,
-    endExclusive: new Date(endAt.getTime() + DATE_MS),
+    endExclusive: resolveNextLocalDayStart(endAt),
     orderType,
     startDate: formatLocalDateKey(startAt),
     endDate: formatLocalDateKey(endAt),
@@ -503,6 +509,7 @@ export const dashboardService = {
         .createQueryBuilder('order')
         .where('order.createdAt >= :today', { today })
         .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
+        .andWhere('order.status = :activeOrderStatus', { activeOrderStatus: 'active' })
         .getCount(),
       // 今日总金额（软删除单据不计入看板）。
       orderRepo
@@ -510,12 +517,14 @@ export const dashboardService = {
         .select('SUM(order.totalAmount)', 'totalAmount')
         .where('order.createdAt >= :today', { today })
         .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
+        .andWhere('order.status = :activeOrderStatus', { activeOrderStatus: 'active' })
         .getRawOne<DashboardAmountAggregateRaw>(),
       // 本月累计单据数（用于补充周期维度）。
       orderRepo
         .createQueryBuilder('order')
         .where('order.createdAt >= :monthStart', { monthStart })
         .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
+        .andWhere('order.status = :activeOrderStatus', { activeOrderStatus: 'active' })
         .getCount(),
       // 本月累计出库金额（用于核心四宫格）。
       orderRepo
@@ -523,6 +532,7 @@ export const dashboardService = {
         .select('SUM(order.totalAmount)', 'totalAmount')
         .where('order.createdAt >= :monthStart', { monthStart })
         .andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
+        .andWhere('order.status = :activeOrderStatus', { activeOrderStatus: 'active' })
         .getRawOne<DashboardAmountAggregateRaw>(),
       // 产品总数（仅统计启用产品）。
       productRepo
@@ -981,6 +991,7 @@ export const dashboardService = {
 
   applyOrderFilter(queryBuilder: { andWhere: (sql: string, parameters?: Record<string, unknown>) => unknown }, filter: DashboardResolvedFilter): void {
     queryBuilder.andWhere('order.isDeleted = :isDeleted', { isDeleted: false })
+    queryBuilder.andWhere('order.status = :activeOrderStatus', { activeOrderStatus: 'active' })
     if (filter.startAt) {
       queryBuilder.andWhere('order.createdAt >= :startAt', { startAt: filter.startAt })
     }
